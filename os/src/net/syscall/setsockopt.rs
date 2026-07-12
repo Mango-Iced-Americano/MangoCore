@@ -4,9 +4,10 @@ use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::{
-    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
-    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_RAW, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
     ICMP6_FILTER, IPV6_CHECKSUM, IPV6_RECVHOPLIMIT, IPV6_RECVPKTINFO, IPV6_V6ONLY, IP_HDRINCL,
+    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_RAW, SOL_SOCKET,
+    SOL_TCP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR,
+    SO_SNDBUF, SO_SNDTIMEO, TCP_NODELAY,
 };
 
 /// 设置 socket 选项。
@@ -179,7 +180,10 @@ pub fn sys_setsockopt(
             if (optlen as usize) < core::mem::size_of::<TimeVal>() {
                 return -(SyscallErr::EINVAL as isize);
             }
-            if UserPtr::<TimeVal>::from_addr(optval_ptr).read(token).is_err() {
+            if UserPtr::<TimeVal>::from_addr(optval_ptr)
+                .read(token)
+                .is_err()
+            {
                 return -(SyscallErr::EFAULT as isize);
             }
             // 当前 socket 阻塞路径尚未接入 per-socket timeout；先按 Linux ABI

@@ -161,9 +161,26 @@ impl FileSystem for RamFS {
     }
 
     fn super_block(&self) -> SuperBlock {
+        let used_pages = *self.page_count.lock();
+        let (total_pages, free_pages) = if self.max_pages > 0 {
+            (self.max_pages, self.max_pages.saturating_sub(used_pages))
+        } else {
+            (
+                crate::config::MEMORY_SIZE / PAGE_SIZE,
+                crate::mm::unallocated_frames(),
+            )
+        };
+        let blocks_per_page = PAGE_SIZE as u64 / RAMFS_BLOCK_SIZE;
         SuperBlock {
             f_type: RAMFS_MAGIC,
             f_bsize: RAMFS_BLOCK_SIZE,
+            f_blocks: total_pages as u64 * blocks_per_page,
+            f_bfree: free_pages as u64 * blocks_per_page,
+            f_bavail: free_pages as u64 * blocks_per_page,
+            // RamFS has no fixed inode table. Report a conservative dynamic
+            // capacity so statvfs users can distinguish it from an unusable FS.
+            f_files: total_pages as u64,
+            f_ffree: free_pages as u64,
             f_namelen: RAMFS_MAX_NAMELEN as u64,
             ..SuperBlock::default()
         }
@@ -187,8 +204,7 @@ impl RamFS {
     }
 
     fn new_inner(max_pages: usize) -> Arc<Self> {
-        let root: Arc<LockedRamFSInode> =
-            Arc::new(LockedRamFSInode(Mutex::new(RamFSInode::new())));
+        let root: Arc<LockedRamFSInode> = Arc::new(LockedRamFSInode(Mutex::new(RamFSInode::new())));
 
         let result: Arc<RamFS> = Arc::new(RamFS {
             root_inode: root,
@@ -562,9 +578,7 @@ impl IndexNode for LockedRamFSInode {
         // 初始化自引用
         result.0.lock().self_ref = Arc::downgrade(&result);
 
-        inode
-            .children
-            .insert(String::from(name), result.clone());
+        inode.children.insert(String::from(name), result.clone());
         if file_type == FileType::Dir {
             inode.metadata.nlinks += 1;
         }
@@ -602,10 +616,7 @@ impl IndexNode for LockedRamFSInode {
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let child = inode
-            .children
-            .remove(name)
-            .ok_or(SyscallErr::ENOENT)?;
+        let child = inode.children.remove(name).ok_or(SyscallErr::ENOENT)?;
         let child_inode: &LockedRamFSInode = child
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
@@ -613,7 +624,9 @@ impl IndexNode for LockedRamFSInode {
         // unlink 不可用于目录 — 必须返回 EISDIR
         if child_inode.0.lock().metadata.file_type == FileType::Dir {
             // 恢复: 刚才 remove 了 child，但这是非法操作
-            inode.children.insert(alloc::string::String::from(name), child.clone());
+            inode
+                .children
+                .insert(alloc::string::String::from(name), child.clone());
             return Err(SyscallErr::EISDIR);
         }
         let child_pages: usize = {
@@ -844,12 +857,7 @@ impl IndexNode for LockedRamFSInode {
         Ok(len)
     }
 
-    fn setxattr(
-        &self,
-        name: &str,
-        value: &[u8],
-        flags: u32,
-    ) -> Result<usize, SyscallErr> {
+    fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> Result<usize, SyscallErr> {
         const XATTR_CREATE: u32 = 1;
         const XATTR_REPLACE: u32 = 2;
         let mut inode = self.0.lock();

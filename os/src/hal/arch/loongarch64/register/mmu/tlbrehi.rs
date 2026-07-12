@@ -40,7 +40,10 @@ impl TLBREHi {
     pub fn set_page_size(&mut self, page_size: usize) -> &mut Self {
         // 此接口接收字节数，而 STLBPS::set_ps 接收大小以 2 为底的对数。拒绝非 2 的幂，
         // 可以防止 trailing_zeros 静默编码出无关的页面大小。
-        assert!(page_size.is_power_of_two(), "TLBREHI page size must be a power of two");
+        assert!(
+            page_size.is_power_of_two(),
+            "TLBREHI page size must be a power of two"
+        );
         self.bits
             .set_bits(0..=5, page_size.trailing_zeros() as usize);
         self

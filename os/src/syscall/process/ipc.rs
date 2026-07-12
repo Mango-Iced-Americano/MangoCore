@@ -7,8 +7,8 @@ use crate::fs::{
     },
 };
 use crate::mm::{
-    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, translated_str,
-    frames_alloc, FrameTracker, MapFlags, MapPermission,
+    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, frames_alloc,
+    translated_str, FrameTracker, MapFlags, MapPermission,
 };
 use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;
@@ -608,8 +608,8 @@ impl ShmSegment {
     }
 
     fn to_shmid_ds(&self) -> LinuxShmidDs {
-        let status_bits = if self.removed { SHM_DEST } else { 0 }
-            | if self.locked { SHM_LOCKED } else { 0 };
+        let status_bits =
+            if self.removed { SHM_DEST } else { 0 } | if self.locked { SHM_LOCKED } else { 0 };
         LinuxShmidDs {
             shm_perm: LinuxIpcPerm::new(
                 self.key,
@@ -838,11 +838,14 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
     }
 
     let task = current_task_ref().unwrap();
-    let mapped = task
-        .process
-        .vm()
-        .lock()
-        .shm_mmap(attach_addr, size, prot, flags, &frames, shmflg & SHM_RDONLY == 0);
+    let mapped = task.process.vm().lock().shm_mmap(
+        attach_addr,
+        size,
+        prot,
+        flags,
+        &frames,
+        shmflg & SHM_RDONLY == 0,
+    );
     if mapped < 0 {
         return mapped;
     }
@@ -1815,7 +1818,11 @@ fn sem_wait_condition(
     let mut wake_waiters = false;
     let result = {
         let Some(set) = registry.sets.get_mut(&semid) else {
-            return Some(if registry.was_removed(semid) { EIDRM } else { EINVAL });
+            return Some(if registry.was_removed(semid) {
+                EIDRM
+            } else {
+                EINVAL
+            });
         };
         match try_apply_sem_ops(set, ops) {
             Ok(SemApplyResult::Applied) => {
@@ -1957,12 +1964,7 @@ fn read_msg_payload(msgp: usize, msgsz: usize) -> Result<(isize, Vec<u8>), isize
     data.try_reserve_exact(msgsz).map_err(|_| ENOMEM)?;
     data.resize(msgsz, 0);
     if msgsz != 0 {
-        copy_from_user_array(
-            token,
-            payload_addr as *const u8,
-            data.as_mut_ptr(),
-            msgsz,
-        )?;
+        copy_from_user_array(token, payload_addr as *const u8, data.as_mut_ptr(), msgsz)?;
     }
     Ok((mtype, data))
 }
@@ -2004,10 +2006,7 @@ fn msginfo_snapshot(registry: &MsgRegistry, usage: bool) -> LinuxMsgInfo {
 
 fn select_msg_index(queue: &MsgQueue, msgtyp: isize, msgflg: usize) -> Option<usize> {
     if msgflg & MSG_COPY != 0 {
-        return queue
-            .messages
-            .get(msgtyp as usize)
-            .map(|_| msgtyp as usize);
+        return queue.messages.get(msgtyp as usize).map(|_| msgtyp as usize);
     }
 
     if msgtyp == 0 {
@@ -2075,13 +2074,16 @@ fn try_msgsnd_locked(
     let mut wake_waiters = false;
     let result = {
         let Some(queue) = registry.queues.get_mut(&msqid) else {
-            return Some(if registry.was_removed(msqid) { EIDRM } else { EINVAL });
+            return Some(if registry.was_removed(msqid) {
+                EIDRM
+            } else {
+                EINVAL
+            });
         };
         if !has_msg_permission(queue, MSG_W) {
             return Some(EACCES);
         }
-        if queue.cbytes.saturating_add(data.len()) > queue.qbytes
-            || queue.messages.len() >= MSGTQL
+        if queue.cbytes.saturating_add(data.len()) > queue.qbytes || queue.messages.len() >= MSGTQL
         {
             return None;
         }
@@ -2145,7 +2147,11 @@ fn msg_recv_wait_condition(
     msgflg: usize,
 ) -> Option<isize> {
     let Some(queue) = registry.queues.get(&msqid) else {
-        return Some(if registry.was_removed(msqid) { EIDRM } else { EINVAL });
+        return Some(if registry.was_removed(msqid) {
+            EIDRM
+        } else {
+            EINVAL
+        });
     };
     if !has_msg_permission(queue, MSG_R) {
         return Some(EACCES);
@@ -2231,13 +2237,7 @@ fn wait_for_msg_recv(msqid: i32, msgtyp: isize, msgflg: usize) -> isize {
     }
 }
 
-pub fn sys_msgrcv(
-    msqid: i32,
-    msgp: usize,
-    msgsz: usize,
-    msgtyp: isize,
-    msgflg: usize,
-) -> isize {
+pub fn sys_msgrcv(msqid: i32, msgp: usize, msgsz: usize, msgtyp: isize, msgflg: usize) -> isize {
     let allowed_flags = IPC_NOWAIT | MSG_NOERROR | MSG_EXCEPT | MSG_COPY;
     if msgsz > sysv_msgmax() || msgflg & !allowed_flags != 0 {
         return EINVAL;
@@ -2365,7 +2365,10 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
         IPC_INFO | MSG_INFO => {
             let (info, highest) = {
                 let registry = MSG_REGISTRY.lock();
-                (msginfo_snapshot(&registry, cmd == MSG_INFO), registry.highest_index())
+                (
+                    msginfo_snapshot(&registry, cmd == MSG_INFO),
+                    registry.highest_index(),
+                )
             };
             if let Err(errno) = copy_to_user(
                 current_user_token(),
@@ -2524,7 +2527,10 @@ impl IndexNode for MqDescriptor {
         Ok(self.queue.metadata.clone())
     }
 
-    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, crate::utils::error::SyscallErr> {
+    fn poll(
+        &self,
+        _private_data: &FilePrivateData,
+    ) -> Result<usize, crate::utils::error::SyscallErr> {
         let inner = self.queue.inner.lock();
         let mut events = EPollEvent::empty();
         if !inner.messages.is_empty() {
@@ -2854,14 +2860,18 @@ fn mq_wait_send_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
     };
     let wait_queue = queue.write_wait.wait_queue();
     let result = match deadline {
-        Some(deadline) => WaitQueue::wait_event_interruptible_timeout(wait_queue, || {
-            let inner = queue.inner.lock();
-            if inner.messages.len() < inner.attr.mq_maxmsg as usize {
-                Some(SUCCESS)
-            } else {
-                None
-            }
-        }, deadline),
+        Some(deadline) => WaitQueue::wait_event_interruptible_timeout(
+            wait_queue,
+            || {
+                let inner = queue.inner.lock();
+                if inner.messages.len() < inner.attr.mq_maxmsg as usize {
+                    Some(SUCCESS)
+                } else {
+                    None
+                }
+            },
+            deadline,
+        ),
         None => WaitQueue::wait_event_interruptible(wait_queue, || {
             let inner = queue.inner.lock();
             if inner.messages.len() < inner.attr.mq_maxmsg as usize {
@@ -2885,14 +2895,18 @@ fn mq_wait_receive_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
     };
     let wait_queue = queue.read_wait.wait_queue();
     let result = match deadline {
-        Some(deadline) => WaitQueue::wait_event_interruptible_timeout(wait_queue, || {
-            let inner = queue.inner.lock();
-            if !inner.messages.is_empty() {
-                Some(SUCCESS)
-            } else {
-                None
-            }
-        }, deadline),
+        Some(deadline) => WaitQueue::wait_event_interruptible_timeout(
+            wait_queue,
+            || {
+                let inner = queue.inner.lock();
+                if !inner.messages.is_empty() {
+                    Some(SUCCESS)
+                } else {
+                    None
+                }
+            },
+            deadline,
+        ),
         None => WaitQueue::wait_event_interruptible(wait_queue, || {
             let inner = queue.inner.lock();
             if !inner.messages.is_empty() {
@@ -3023,7 +3037,8 @@ pub fn sys_mq_timedsend(
         return ENOMEM;
     }
     data.resize(msg_len, 0);
-    if let Err(errno) = copy_from_user_array(token, msg_ptr as *const u8, data.as_mut_ptr(), msg_len)
+    if let Err(errno) =
+        copy_from_user_array(token, msg_ptr as *const u8, data.as_mut_ptr(), msg_len)
     {
         return errno;
     }
@@ -3047,7 +3062,13 @@ pub fn sys_mq_timedsend(
             .position(|message| message.prio < msg_prio)
             .unwrap_or(inner.messages.len());
         let was_empty = inner.messages.is_empty();
-        inner.messages.insert(pos, MqMessage { prio: msg_prio, data });
+        inner.messages.insert(
+            pos,
+            MqMessage {
+                prio: msg_prio,
+                data,
+            },
+        );
         break if was_empty {
             inner.notification.take()
         } else {
@@ -3100,9 +3121,12 @@ pub fn sys_mq_timedreceive(
     };
 
     let token = current_user_token();
-    if let Err(errno) =
-        copy_to_user_array(token, message.data.as_ptr(), msg_ptr as *mut u8, message.data.len())
-    {
+    if let Err(errno) = copy_to_user_array(
+        token,
+        message.data.as_ptr(),
+        msg_ptr as *mut u8,
+        message.data.len(),
+    ) {
         return errno;
     }
     if !msg_prio.is_null() {

@@ -82,18 +82,18 @@ make -C os la64-2k1000-run-clean
 开发板保持上电、USB_DEBUG 和网线连接后，先执行无副作用检查：
 
 ```bash
-make 2k1000-boot-check
+make 2k1000-boot-check IMAGE=kernel-2k1000-run.ui
 ```
 
 确认通过后执行：
 
 ```bash
-make 2k1000-boot
+make 2k1000-boot IMAGE=kernel-2k1000-run.ui
 ```
 
-脚本 `scripts/boot_2k1000_tftp.py` 会检查或设置 `en8=192.168.9.10/24`，确认 macOS `com.apple.tftpd` 与 `/private/tftpboot/kernel-2k1000-run.ui`，自动识别唯一的 `/dev/cu.wchusbserial*`。若同一串口被 screen 占用，只关闭对应 screen 会话；随后提示按一次 RESET，并持续发送 `c` 截停自动启动。
+脚本 `scripts/boot_2k1000_tftp.py` 要求显式传入镜像，随后检查或设置 `en8=192.168.9.10/24`，确认 macOS `com.apple.tftpd`，将镜像按原文件名复制到 `/private/tftpboot`，并自动识别唯一的 `/dev/cu.wchusbserial*`。若同一串口被 screen 占用，只关闭对应 screen 会话；随后提示按一次 RESET，并持续发送 `c` 截停自动启动。
 
-进入 U-Boot 后，脚本逐条等待 `=>` 再设置网络参数，依次完成 `ping`、`tftpboot` 字节数校验、内存 CRC32、`iminfo` 架构与镜像校验，全部通过才执行 `bootm`。启动后当前终端成为串口监视器；`Ctrl-C` 只退出监视器，不会向开发板发送中断。脚本不执行 `saveenv`，也不包含任何 `scsi write`。
+进入 U-Boot 后，脚本逐条等待 `=>` 再设置网络参数，依次完成 `ping`、`tftpboot` 字节数校验、内存 CRC32、`iminfo` 架构与镜像校验，全部通过才执行 `bootm`。启动后当前终端进入 raw 模式并与串口双向透传，因此可直接操作交互式 Shell；退出时恢复原终端属性。`Ctrl-C` 只退出监视器，不会向开发板发送中断。脚本不执行 `saveenv`，也不包含任何 `scsi write`。
 
 启动前不需要手工执行 `scsi scan`。2K1000 的 HBA reset 会清空多个可写 host register；内核 AHCI Provider 按随板 U-Boot 的顺序恢复 CAP.SMPS/SPM、强制 CAP.SSS，再恢复 `HOST_PORTS_IMPL=0x0f`。只恢复 PI 会让暖复位后的 `PxCMD.SUD` 被硬件清零，最终停在 `PxSSTS.DET=1`。SATA 初始化不能依赖 bootloader 曾经扫描过 SSD。
 
@@ -101,8 +101,8 @@ make 2k1000-boot
 
 ```bash
 make 2k1000-boot \
+  IMAGE=kernel-2k1000-run.ui \
   BOARD_NET_IFACE=en9 \
-  BOARD_KERNEL=kernel-2k1000-run.ui \
   BOARD_SERIAL=/dev/cu.wchusbserial120
 ```
 

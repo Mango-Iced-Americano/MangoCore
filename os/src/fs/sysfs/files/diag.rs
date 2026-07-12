@@ -41,21 +41,81 @@ fn stats_taskq_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
-    let _ = writeln!(s, "ready_len_max={}", read_counter(&crate::task::perf::READY_LEN_MAX));
-    let _ = writeln!(s, "interruptible_len_max={}", read_counter(&crate::task::perf::INTERRUPTIBLE_LEN_MAX));
-    let _ = writeln!(s, "ready_zombie_max={}", read_counter(&crate::task::perf::READY_ZOMBIE_MAX));
-    let _ = writeln!(s, "interruptible_zombie_max={}", read_counter(&crate::task::perf::INTERRUPTIBLE_ZOMBIE_MAX));
-    let _ = writeln!(s, "dup_enqueue_total={}", read_counter(&crate::task::perf::DUPLICATE_READY_ENQUEUE));
-    let _ = writeln!(s, "add_ready_total={}", read_counter(&crate::task::perf::ADD_READY_TOTAL));
-    let _ = writeln!(s, "add_interruptible_total={}", read_counter(&crate::task::perf::ADD_INTERRUPTIBLE_TOTAL));
-    let _ = writeln!(s, "wake_interruptible_total={}", read_counter(&crate::task::perf::WAKE_INTERRUPTIBLE_TOTAL));
-    let _ = writeln!(s, "fair_pick_calls={}", read_counter(&crate::task::perf::FAIR_PICK_CALLS));
-    let _ = writeln!(s, "fast_path_calls={}", read_counter(&crate::task::perf::FAST_PATH_CALLS));
-    let _ = writeln!(s, "fair_scan_max={}", read_counter(&crate::task::perf::FAIR_SCAN_MAX));
-    let _ = writeln!(s, "zombie_drain_scan_total={}", read_counter(&crate::task::perf::ZOMBIE_DRAIN_SCAN_TOTAL));
-    let _ = writeln!(s, "zombie_drain_calls={}", read_counter(&crate::task::perf::ZOMBIE_DRAIN_CALLS));
-    let _ = writeln!(s, "zombie_drain_removed={}", read_counter(&crate::task::perf::ZOMBIE_DRAIN_REMOVED));
-    let _ = writeln!(s, "ready_nonzero_nice_cur={}", read_counter(&crate::task::perf::READY_NONZERO_NICE_CUR));
+    let _ = writeln!(
+        s,
+        "ready_len_max={}",
+        read_counter(&crate::task::perf::READY_LEN_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "interruptible_len_max={}",
+        read_counter(&crate::task::perf::INTERRUPTIBLE_LEN_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "ready_zombie_max={}",
+        read_counter(&crate::task::perf::READY_ZOMBIE_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "interruptible_zombie_max={}",
+        read_counter(&crate::task::perf::INTERRUPTIBLE_ZOMBIE_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "dup_enqueue_total={}",
+        read_counter(&crate::task::perf::DUPLICATE_READY_ENQUEUE)
+    );
+    let _ = writeln!(
+        s,
+        "add_ready_total={}",
+        read_counter(&crate::task::perf::ADD_READY_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "add_interruptible_total={}",
+        read_counter(&crate::task::perf::ADD_INTERRUPTIBLE_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "wake_interruptible_total={}",
+        read_counter(&crate::task::perf::WAKE_INTERRUPTIBLE_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "fair_pick_calls={}",
+        read_counter(&crate::task::perf::FAIR_PICK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "fast_path_calls={}",
+        read_counter(&crate::task::perf::FAST_PATH_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "fair_scan_max={}",
+        read_counter(&crate::task::perf::FAIR_SCAN_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "zombie_drain_scan_total={}",
+        read_counter(&crate::task::perf::ZOMBIE_DRAIN_SCAN_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "zombie_drain_calls={}",
+        read_counter(&crate::task::perf::ZOMBIE_DRAIN_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "zombie_drain_removed={}",
+        read_counter(&crate::task::perf::ZOMBIE_DRAIN_REMOVED)
+    );
+    let _ = writeln!(
+        s,
+        "ready_nonzero_nice_cur={}",
+        read_counter(&crate::task::perf::READY_NONZERO_NICE_CUR)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -70,20 +130,76 @@ fn stats_timer_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
-    let _ = writeln!(s, "ktimer_len_max={}", read_counter(&crate::task::perf::KTIMER_LEN_MAX));
-    let _ = writeln!(s, "ktimer_add_total={}", read_counter(&crate::task::perf::KTIMER_ADD_TOTAL));
-    let _ = writeln!(s, "ktimer_pop_max={}", read_counter(&crate::task::perf::KTIMER_POP_MAX));
-    let _ = writeln!(s, "ktimer_pop_total={}", read_counter(&crate::task::perf::KTIMER_POP_TOTAL));
-    let _ = writeln!(s, "ktimer_stale_waketask={}", read_counter(&crate::task::perf::KTIMER_STALE_WAKETASK));
-    let _ = writeln!(s, "ktimer_real_wake={}", read_counter(&crate::task::perf::KTIMER_REAL_WAKE));
-    let _ = writeln!(s, "ktimer_compact_calls={}", read_counter(&crate::task::perf::KTIMER_COMPACT_CALLS));
-    let _ = writeln!(s, "ktimer_stale_removed={}", read_counter(&crate::task::perf::KTIMER_STALE_REMOVED));
-    let _ = writeln!(s, "wait_with_timeout_total={}", read_counter(&crate::task::perf::WAIT_WITH_TIMEOUT_TOTAL));
-    let _ = writeln!(s, "timer_irq_ticks_total={}", read_counter(&crate::task::perf::TIMER_IRQ_TICKS_TOTAL));
-    let _ = writeln!(s, "timer_irq_ticks_max={}", read_counter(&crate::task::perf::TIMER_IRQ_TICKS_MAX));
-    let _ = writeln!(s, "timer_pop_nodes_total={}", read_counter(&crate::task::perf::TIMER_POP_NODES_TOTAL));
-    let _ = writeln!(s, "timer_pop_ticks_total={}", read_counter(&crate::task::perf::TIMER_POP_TICKS_TOTAL));
-    let _ = writeln!(s, "timer_pop_ticks_max={}", read_counter(&crate::task::perf::TIMER_POP_TICKS_MAX));
+    let _ = writeln!(
+        s,
+        "ktimer_len_max={}",
+        read_counter(&crate::task::perf::KTIMER_LEN_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_add_total={}",
+        read_counter(&crate::task::perf::KTIMER_ADD_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_pop_max={}",
+        read_counter(&crate::task::perf::KTIMER_POP_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_pop_total={}",
+        read_counter(&crate::task::perf::KTIMER_POP_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_stale_waketask={}",
+        read_counter(&crate::task::perf::KTIMER_STALE_WAKETASK)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_real_wake={}",
+        read_counter(&crate::task::perf::KTIMER_REAL_WAKE)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_compact_calls={}",
+        read_counter(&crate::task::perf::KTIMER_COMPACT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ktimer_stale_removed={}",
+        read_counter(&crate::task::perf::KTIMER_STALE_REMOVED)
+    );
+    let _ = writeln!(
+        s,
+        "wait_with_timeout_total={}",
+        read_counter(&crate::task::perf::WAIT_WITH_TIMEOUT_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "timer_irq_ticks_total={}",
+        read_counter(&crate::task::perf::TIMER_IRQ_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "timer_irq_ticks_max={}",
+        read_counter(&crate::task::perf::TIMER_IRQ_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "timer_pop_nodes_total={}",
+        read_counter(&crate::task::perf::TIMER_POP_NODES_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "timer_pop_ticks_total={}",
+        read_counter(&crate::task::perf::TIMER_POP_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "timer_pop_ticks_max={}",
+        read_counter(&crate::task::perf::TIMER_POP_TICKS_MAX)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -98,10 +214,26 @@ fn stats_seccomp_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(256);
-    let _ = writeln!(s, "seccomp_check_calls={}", read_counter(&crate::task::perf::SECCOMP_CHECK_CALLS));
-    let _ = writeln!(s, "seccomp_check_ticks_total={}", read_counter(&crate::task::perf::SECCOMP_CHECK_TICKS_TOTAL));
-    let _ = writeln!(s, "seccomp_check_ticks_max={}", read_counter(&crate::task::perf::SECCOMP_CHECK_TICKS_MAX));
-    let _ = writeln!(s, "seccomp_disabled_bypass={}", read_counter(&crate::task::perf::SECCOMP_DISABLED_BYPASS));
+    let _ = writeln!(
+        s,
+        "seccomp_check_calls={}",
+        read_counter(&crate::task::perf::SECCOMP_CHECK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "seccomp_check_ticks_total={}",
+        read_counter(&crate::task::perf::SECCOMP_CHECK_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "seccomp_check_ticks_max={}",
+        read_counter(&crate::task::perf::SECCOMP_CHECK_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "seccomp_disabled_bypass={}",
+        read_counter(&crate::task::perf::SECCOMP_DISABLED_BYPASS)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -116,62 +248,195 @@ fn stats_syscall_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(384);
-    let _ = writeln!(s, "syscall_total={}", read_counter(&crate::task::perf::SYSCALL_TOTAL));
-    let _ = writeln!(s, "syscall_getppid_total={}", read_counter(&crate::task::perf::SYSCALL_GETPPID_TOTAL));
-    let _ = writeln!(s, "syscall_cost_max_ticks={}", read_counter(&crate::task::perf::SYSCALL_COST_MAX_TICKS));
-    let _ = writeln!(s, "syscall_cost_ticks_total={}", read_counter(&crate::task::perf::SYSCALL_COST_TICKS_TOTAL));
-    let _ = writeln!(s, "getppid_cost_ticks_total={}", read_counter(&crate::task::perf::GETPPID_COST_TICKS_TOTAL));
-    let _ = writeln!(s, "getppid_cost_ticks_max={}", read_counter(&crate::task::perf::GETPPID_COST_TICKS_MAX));
-    let _ = writeln!(s, "ecall_trap_cost_ticks_total={}", read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_TOTAL));
-    let _ = writeln!(s, "ecall_trap_cost_ticks_max={}", read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_MAX));
+    let _ = writeln!(
+        s,
+        "syscall_total={}",
+        read_counter(&crate::task::perf::SYSCALL_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "syscall_getppid_total={}",
+        read_counter(&crate::task::perf::SYSCALL_GETPPID_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "syscall_cost_max_ticks={}",
+        read_counter(&crate::task::perf::SYSCALL_COST_MAX_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "syscall_cost_ticks_total={}",
+        read_counter(&crate::task::perf::SYSCALL_COST_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "getppid_cost_ticks_total={}",
+        read_counter(&crate::task::perf::GETPPID_COST_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "getppid_cost_ticks_max={}",
+        read_counter(&crate::task::perf::GETPPID_COST_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "ecall_trap_cost_ticks_total={}",
+        read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "ecall_trap_cost_ticks_max={}",
+        read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_MAX)
+    );
     write_str(offset, len, buf, &s)
 }
 
-fn stats_ctxsw_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_ctxsw_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(128);
-    let _ = writeln!(s, "context_switch_total={}", read_counter(&crate::task::perf::CONTEXT_SWITCH_TOTAL));
+    let _ = writeln!(
+        s,
+        "context_switch_total={}",
+        read_counter(&crate::task::perf::CONTEXT_SWITCH_TOTAL)
+    );
     write_str(offset, len, buf, &s)
 }
 
-fn stats_reclaim_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_reclaim_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(256);
-    let _ = writeln!(s, "reclaim_runs_total={}", read_counter(&crate::task::perf::RECLAIM_RUNS_TOTAL));
-    let _ = writeln!(s, "reclaim_pages_scanned_total={}", read_counter(&crate::task::perf::RECLAIM_PAGES_SCANNED_TOTAL));
-    let _ = writeln!(s, "reclaim_pages_freed_total={}", read_counter(&crate::task::perf::RECLAIM_PAGES_FREED_TOTAL));
-    let _ = writeln!(s, "clock_scanned={}", read_counter(&crate::task::perf::CLOCK_SCANNED));
-    let _ = writeln!(s, "clock_second_chance={}", read_counter(&crate::task::perf::CLOCK_SECOND_CHANCE));
-    let _ = writeln!(s, "clock_evicted={}", read_counter(&crate::task::perf::CLOCK_EVICTED));
+    let _ = writeln!(
+        s,
+        "reclaim_runs_total={}",
+        read_counter(&crate::task::perf::RECLAIM_RUNS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "reclaim_pages_scanned_total={}",
+        read_counter(&crate::task::perf::RECLAIM_PAGES_SCANNED_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "reclaim_pages_freed_total={}",
+        read_counter(&crate::task::perf::RECLAIM_PAGES_FREED_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "clock_scanned={}",
+        read_counter(&crate::task::perf::CLOCK_SCANNED)
+    );
+    let _ = writeln!(
+        s,
+        "clock_second_chance={}",
+        read_counter(&crate::task::perf::CLOCK_SECOND_CHANCE)
+    );
+    let _ = writeln!(
+        s,
+        "clock_evicted={}",
+        read_counter(&crate::task::perf::CLOCK_EVICTED)
+    );
     write_str(offset, len, buf, &s)
 }
 
-fn stats_tlb_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_tlb_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(192);
-    let _ = writeln!(s, "tlb_flushes={}", read_counter(&crate::task::perf::TLB_FLUSHES));
+    let _ = writeln!(
+        s,
+        "tlb_flushes={}",
+        read_counter(&crate::task::perf::TLB_FLUSHES)
+    );
     let _ = writeln!(s, "tlb_full={}", read_counter(&crate::task::perf::TLB_FULL));
     let _ = writeln!(s, "tlb_page={}", read_counter(&crate::task::perf::TLB_PAGE));
-    let _ = writeln!(s, "tlb_activate={}", read_counter(&crate::task::perf::TLB_ACTIVATE));
-    let _ = writeln!(s, "tlb_global={}", read_counter(&crate::task::perf::TLB_GLOBAL));
+    let _ = writeln!(
+        s,
+        "tlb_activate={}",
+        read_counter(&crate::task::perf::TLB_ACTIVATE)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_global={}",
+        read_counter(&crate::task::perf::TLB_GLOBAL)
+    );
     write_str(offset, len, buf, &s)
 }
 
-fn stats_heap_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_heap_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
     let (free, total, _, _, _) = crate::mm::heap_stats();
-    let _ = writeln!(s, "heap_current_bytes={}", crate::mm::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed));
-    let _ = writeln!(s, "heap_max_bytes={}", crate::mm::KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed));
+    let _ = writeln!(
+        s,
+        "heap_current_bytes={}",
+        crate::mm::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        s,
+        "heap_max_bytes={}",
+        crate::mm::KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed)
+    );
     let _ = writeln!(s, "heap_free_kb={}", free >> 10);
     let _ = writeln!(s, "heap_total_kb={}", total >> 10);
-    let _ = writeln!(s, "heap_alloc_calls={}", read_counter(&crate::task::perf::HEAP_ALLOC_CALLS));
-    let _ = writeln!(s, "heap_alloc_ticks_total={}", read_counter(&crate::task::perf::HEAP_ALLOC_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_alloc_ticks_max={}", read_counter(&crate::task::perf::HEAP_ALLOC_TICKS_MAX));
-    let _ = writeln!(s, "heap_dealloc_calls={}", read_counter(&crate::task::perf::HEAP_DEALLOC_CALLS));
-    let _ = writeln!(s, "heap_dealloc_ticks_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_dealloc_ticks_max={}", read_counter(&crate::task::perf::HEAP_DEALLOC_TICKS_MAX));
-    let _ = writeln!(s, "heap_dealloc_scan_steps_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL));
+    let _ = writeln!(
+        s,
+        "heap_alloc_calls={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_alloc_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_alloc_ticks_max={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "heap_dealloc_calls={}",
+        read_counter(&crate::task::perf::HEAP_DEALLOC_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_dealloc_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_DEALLOC_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_dealloc_ticks_max={}",
+        read_counter(&crate::task::perf::HEAP_DEALLOC_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "heap_dealloc_scan_steps_total={}",
+        read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL)
+    );
     write_str(offset, len, buf, &s)
 }
 
-fn stats_resource_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_resource_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
     let (ready, int_count) = crate::task::task_manager_counts().unwrap_or((0, 0));
     let (tcp, udp, raw, pending) = crate::net::config::NET_INTERFACE.socket_stats();
@@ -183,8 +448,10 @@ fn stats_resource_content(_extra: usize, offset: usize, len: usize, buf: &mut [u
     let mnt_inodes = crate::fs::vfs::mount::counters::mountfsinode_alive();
     let (dc_evict_total, dc_evict_sole, dc_evict_extern, dc_adv_removed) =
         crate::fs::vfs::dentry_cache::dcache_stats::snapshot();
-    let (pc_reg_len, _pc_reg_cap, pc_reg_alive, pc_reg_stale) = crate::fs::page_cache::registry_stats();
-    let (pc_ent_len, _pc_ent_cap, pc_ent_live, pc_ent_holes) = crate::fs::page_cache::entries_global_stats();
+    let (pc_reg_len, _pc_reg_cap, pc_reg_alive, pc_reg_stale) =
+        crate::fs::page_cache::registry_stats();
+    let (pc_ent_len, _pc_ent_cap, pc_ent_live, pc_ent_holes) =
+        crate::fs::page_cache::entries_global_stats();
     let (heap_free, heap_total, _, alloc_actual, waste) = crate::mm::heap_stats();
     let free_frames = crate::mm::unallocated_frames();
 
@@ -218,7 +485,12 @@ fn stats_resource_content(_extra: usize, offset: usize, len: usize, buf: &mut [u
     write_str(offset, len, buf, &s)
 }
 
-fn stats_buddyinfo_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_buddyinfo_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(256);
     let h = crate::mm::heap_free_histogram();
     let _ = writeln!(s, "order free_blocks");
@@ -230,11 +502,18 @@ fn stats_buddyinfo_content(_extra: usize, offset: usize, len: usize, buf: &mut [
     write_str(offset, len, buf, &s)
 }
 
-fn stats_zombies_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_zombies_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(256);
     let mut groups: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
     for pcb in crate::task::ProcessManager::all_processes() {
-        if !pcb.is_zombie() { continue; }
+        if !pcb.is_zombie() {
+            continue;
+        }
         let parent_pid = pcb.parent_pid();
         if let Some((_, count)) = groups.iter_mut().find(|(pid, _)| *pid == parent_pid) {
             *count += 1;
@@ -246,13 +525,19 @@ fn stats_zombies_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8
     let total_zombies: usize = groups.iter().map(|(_, c)| c).sum();
     let _ = writeln!(s, "total_zombies={}", total_zombies);
     for (parent_pid, zombie_count) in groups.into_iter().take(10) {
-        let _ = writeln!(s, "parent_pid={} zombie_children={}", parent_pid, zombie_count);
+        let _ = writeln!(
+            s,
+            "parent_pid={} zombie_children={}",
+            parent_pid, zombie_count
+        );
     }
     write_str(offset, len, buf, &s)
 }
 
 fn tracing_trigger_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
-    if buf.is_empty() { return Err(SyscallErr::EINVAL); }
+    if buf.is_empty() {
+        return Err(SyscallErr::EINVAL);
+    }
     let cmd = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
     match cmd.trim() {
         "buddy" | "zombie" | "heap" => { /* trigger accepted, scan deferred */ }
@@ -367,10 +652,7 @@ fn trace_dropped_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let val = format!(
-        "{}\n",
-        crate::trace::TRACE_DROPPED.load(Ordering::Relaxed)
-    );
+    let val = format!("{}\n", crate::trace::TRACE_DROPPED.load(Ordering::Relaxed));
     write_str(offset, len, buf, &val)
 }
 
@@ -409,26 +691,106 @@ fn stats_pagecache_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
-    let _ = writeln!(s, "pc_read_calls={}", read_counter(&crate::task::perf::PC_READ_CALLS));
-    let _ = writeln!(s, "pc_read_pages={}", read_counter(&crate::task::perf::PC_READ_PAGES));
-    let _ = writeln!(s, "pc_read_miss={}", read_counter(&crate::task::perf::PC_READ_MISS));
-    let _ = writeln!(s, "pc_read_cycles={}", read_counter(&crate::task::perf::PC_READ_CYCLES_TOTAL));
-    let _ = writeln!(s, "pc_read_hit_cycles={}", read_counter(&crate::task::perf::PC_READ_HIT_CYCLES));
-    let _ = writeln!(s, "pc_read_miss_cycles={}", read_counter(&crate::task::perf::PC_READ_MISS_CYCLES));
-    let _ = writeln!(s, "pc_copy_cycles={}", read_counter(&crate::task::perf::PC_COPY_CYCLES));
-    let _ = writeln!(s, "pc_lookup_cycles={}", read_counter(&crate::task::perf::PC_LOOKUP_CYCLES));
-    let _ = writeln!(s, "pc_write_calls={}", read_counter(&crate::task::perf::PC_WRITE_CALLS));
-    let _ = writeln!(s, "pc_write_pages={}", read_counter(&crate::task::perf::PC_WRITE_PAGES));
-    let _ = writeln!(s, "pc_write_overwrite={}", read_counter(&crate::task::perf::PC_WRITE_OVERWRITE));
-    let _ = writeln!(s, "pc_write_eventually_full={}", read_counter(&crate::task::perf::PC_WRITE_EVENTUALLY_FULL));
-    let _ = writeln!(s, "pc_write_cycles={}", read_counter(&crate::task::perf::PC_WRITE_CYCLES_TOTAL));
-    let _ = writeln!(s, "pc_wb_calls={}", read_counter(&crate::task::perf::PC_WRITEBACK_CALLS));
-    let _ = writeln!(s, "pc_wb_pages={}", read_counter(&crate::task::perf::PC_WRITEBACK_PAGES));
-    let _ = writeln!(s, "pc_wb_cycles={}", read_counter(&crate::task::perf::PC_WRITEBACK_CYCLES_TOTAL));
-    let _ = writeln!(s, "pc_falloc_cycles={}", read_counter(&crate::task::perf::PC_FALLOC_CYCLES_TOTAL));
-    let _ = writeln!(s, "wb_bg_calls={}", read_counter(&crate::task::perf::WB_BG_CALLS));
-    let _ = writeln!(s, "wb_throttle_calls={}", read_counter(&crate::task::perf::WB_THROTTLE_CALLS));
-    let _ = writeln!(s, "wb_redirty_pages={}", read_counter(&crate::task::perf::WB_REDIRTY_PAGES));
+    let _ = writeln!(
+        s,
+        "pc_read_calls={}",
+        read_counter(&crate::task::perf::PC_READ_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_pages={}",
+        read_counter(&crate::task::perf::PC_READ_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss={}",
+        read_counter(&crate::task::perf::PC_READ_MISS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_CYCLES_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_hit_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_HIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_MISS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_calls={}",
+        read_counter(&crate::task::perf::PC_WRITE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_pages={}",
+        read_counter(&crate::task::perf::PC_WRITE_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_overwrite={}",
+        read_counter(&crate::task::perf::PC_WRITE_OVERWRITE)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_eventually_full={}",
+        read_counter(&crate::task::perf::PC_WRITE_EVENTUALLY_FULL)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_CYCLES_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "pc_wb_calls={}",
+        read_counter(&crate::task::perf::PC_WRITEBACK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_wb_pages={}",
+        read_counter(&crate::task::perf::PC_WRITEBACK_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_wb_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITEBACK_CYCLES_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "pc_falloc_cycles={}",
+        read_counter(&crate::task::perf::PC_FALLOC_CYCLES_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "wb_bg_calls={}",
+        read_counter(&crate::task::perf::WB_BG_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_throttle_calls={}",
+        read_counter(&crate::task::perf::WB_THROTTLE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_redirty_pages={}",
+        read_counter(&crate::task::perf::WB_REDIRTY_PAGES)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -443,10 +805,26 @@ fn stats_blockio_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(256);
-    let _ = writeln!(s, "blk_vread_reqs={}", read_counter(&crate::task::perf::BLK_VREAD_REQS));
-    let _ = writeln!(s, "blk_vread_secs={}", read_counter(&crate::task::perf::BLK_VREAD_SECS));
-    let _ = writeln!(s, "blk_vwrite_reqs={}", read_counter(&crate::task::perf::BLK_VWRITE_REQS));
-    let _ = writeln!(s, "blk_vwrite_secs={}", read_counter(&crate::task::perf::BLK_VWRITE_SECS));
+    let _ = writeln!(
+        s,
+        "blk_vread_reqs={}",
+        read_counter(&crate::task::perf::BLK_VREAD_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "blk_vread_secs={}",
+        read_counter(&crate::task::perf::BLK_VREAD_SECS)
+    );
+    let _ = writeln!(
+        s,
+        "blk_vwrite_reqs={}",
+        read_counter(&crate::task::perf::BLK_VWRITE_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "blk_vwrite_secs={}",
+        read_counter(&crate::task::perf::BLK_VWRITE_SECS)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -462,13 +840,19 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     let has_perf_diag = cfg!(feature = "perf_diag");
     crate::println!(
         "[kernel] perf_diag features: perf_stats={} perf_diag={}",
-        has_perf_stats, has_perf_diag
+        has_perf_stats,
+        has_perf_diag
     );
 
     // ── /sys/kernel/stats/ ──
     let stats_dir = kernel_dir.add_dir_inner("stats", InodeMode::from_bits_truncate(0o555))?;
     stats_dir.add_file("features", ro_mode, stats_features_content)?;
-    stats_dir.add_writable_file_with_write("stats_on", rw_mode, stats_on_content, stats_on_write)?;
+    stats_dir.add_writable_file_with_write(
+        "stats_on",
+        rw_mode,
+        stats_on_content,
+        stats_on_write,
+    )?;
     stats_dir.add_write_only_file(
         "reset",
         InodeMode::from_bits_truncate(0o200),

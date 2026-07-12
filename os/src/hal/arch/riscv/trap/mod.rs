@@ -135,7 +135,9 @@ pub fn trap_handler() -> ! {
             let _pf_start = crate::task::perf::perf_time_now();
             crate::task::perf::record_page_fault();
             let pf_result = task.process.vm().lock().do_page_fault(addr, access);
-            crate::task::perf::record_pagefault_time_us(crate::task::perf::perf_time_now().saturating_sub(_pf_start));
+            crate::task::perf::record_pagefault_time_us(
+                crate::task::perf::perf_time_now().saturating_sub(_pf_start),
+            );
             if let Err(error) = pf_result {
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
@@ -174,7 +176,9 @@ pub fn trap_handler() -> ! {
             let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
             crate::task::perf::record_timer_interrupt();
             crate::task::processor::record_sched_timer_interrupt();
-            unsafe { TIMER_INTERRUPT += 1; }
+            unsafe {
+                TIMER_INTERRUPT += 1;
+            }
             crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
             crate::task::timer_interrupt_handler();
         }

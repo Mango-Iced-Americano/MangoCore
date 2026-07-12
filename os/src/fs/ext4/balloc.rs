@@ -198,7 +198,7 @@ impl Ext4FileSystem {
     ///
     /// Returns:
     /// `Result<Ext4Fsblk>` - The physical block number allocated.
-    pub     fn balloc_alloc_block_from(
+    pub fn balloc_alloc_block_from(
         &self,
         inode_ref: &mut Ext4InodeRef,
         start_bgid: &mut u32,

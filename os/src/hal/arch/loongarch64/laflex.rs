@@ -9,10 +9,11 @@ use super::{
 };
 use crate::{
     config::{
-        MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK,
-        VPN_SEG_MASK,
+        MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK, VPN_SEG_MASK,
     },
-    mm::{address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess},
+    mm::{
+        address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess,
+    },
 };
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
@@ -113,8 +114,7 @@ impl LAFlexPageTableEntry {
     #[inline(always)]
     pub fn set_ppn(&mut self, ppn: PhysPageNum) {
         assert!(ppn.0 < Self::PPN_LIMIT, "la64 PPN exceeds PALEN");
-        self.bits =
-            (self.bits & !Self::PPN_MASK) | ((ppn.0 << PAGE_SIZE_BITS) & Self::PPN_MASK)
+        self.bits = (self.bits & !Self::PPN_MASK) | ((ppn.0 << PAGE_SIZE_BITS) & Self::PPN_MASK)
     }
     #[inline(always)]
     pub fn flags(&self) -> LAPTEFlagBits {

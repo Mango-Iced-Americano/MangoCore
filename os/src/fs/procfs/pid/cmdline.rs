@@ -1,7 +1,7 @@
 //! /proc/<pid>/cmdline — 进程命令行
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::string::{String, ToString};
 
 pub fn pid_cmdline_content(

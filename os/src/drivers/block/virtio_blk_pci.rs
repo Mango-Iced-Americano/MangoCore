@@ -31,7 +31,8 @@ const VIRT_PCI_SIZE: usize = 0x0002_0000;
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
-    static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> = Mutex::new(BTreeMap::new());
+    static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> =
+        Mutex::new(BTreeMap::new());
     static ref PCI_RANGE_ALLOCATOR: Mutex<PciRangeAllocator> =
         Mutex::new(PciRangeAllocator::new(VIRT_PCI_BASE, VIRT_PCI_SIZE));
 }
@@ -43,8 +44,7 @@ impl BlockDevice for VirtIOBlock {
         let mut dev = self.0.lock();
         for (chunk_idx, chunk) in buf.chunks_mut(MAX_VIRTIO_REQ_BYTES).enumerate() {
             let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
-            dev.read_blocks(first_sector, chunk)
-                .expect("read error");
+            dev.read_blocks(first_sector, chunk).expect("read error");
         }
     }
 
@@ -54,8 +54,7 @@ impl BlockDevice for VirtIOBlock {
         let mut dev = self.0.lock();
         for (chunk_idx, chunk) in buf.chunks(MAX_VIRTIO_REQ_BYTES).enumerate() {
             let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
-            dev.write_blocks(first_sector, chunk)
-                .expect("write error");
+            dev.write_blocks(first_sector, chunk).expect("write error");
         }
     }
 
@@ -97,7 +96,10 @@ const fn align_up(addr: usize, align: usize) -> usize {
 }
 
 pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
-    enumerate_all_virtio_pci(device_type).into_iter().next().map(|(_df, t)| t)
+    enumerate_all_virtio_pci(device_type)
+        .into_iter()
+        .next()
+        .map(|(_df, t)| t)
 }
 
 pub fn enumerate_all_virtio_pci(
@@ -201,9 +203,7 @@ impl VirtIOBlock {
             .expect("No VirtIO block device found")
     }
 
-    fn try_from_iter(
-        iter: impl Iterator<Item = (DeviceFunction, PciTransport)>,
-    ) -> Option<Self> {
+    fn try_from_iter(iter: impl Iterator<Item = (DeviceFunction, PciTransport)>) -> Option<Self> {
         for (_df, transport) in iter {
             match VirtIOBlk::<VirtioHal, PciTransport>::new(transport) {
                 Ok(blk) => return Some(Self(Mutex::new(blk))),
@@ -230,7 +230,8 @@ pub fn probe_la64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
         match VirtIOBlk::<VirtioHal, PciTransport>::new(transport) {
             Ok(blk) => {
                 let label = if i == 0 { "official fs" } else { "tools disk" };
-                result[i] = Some(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
+                result[i] =
+                    Some(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
                 println!("[kernel] block device {}: {} ({:?})", i, label, df);
             }
             Err(_e) => {
@@ -281,12 +282,17 @@ unsafe impl Hal for VirtioHal {
         }
         let pa = frames[0].ppn.start_addr().0;
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
-        assert!(old.is_none(), "[virtio-pci] DMA frame key collision pa=0x{:x}", pa);
+        assert!(
+            old.is_none(),
+            "[virtio-pci] DMA frame key collision pa=0x{:x}",
+            pa
+        );
         pa
     }
 
     unsafe fn unshare(paddr: usize, mut buffer: NonNull<[u8]>, dir: BufferDirection) {
-        let frames = QUEUE_FRAMES.lock()
+        let frames = QUEUE_FRAMES
+            .lock()
             .remove(&paddr)
             .unwrap_or_else(|| panic!("[virtio-pci] unshare unknown paddr=0x{:x}", paddr));
 
@@ -313,13 +319,21 @@ pub fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     }
     let pa = PhysAddr::from(ppn_base).0;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
-    assert!(old.is_none(), "[virtio-pci] dma_alloc key collision pa=0x{:x}", pa);
+    assert!(
+        old.is_none(),
+        "[virtio-pci] dma_alloc key collision pa=0x{:x}",
+        pa
+    );
     ppn_base.into()
 }
 
 pub fn virtio_dma_dealloc(pa: PhysAddr, _pages: usize) -> i32 {
     let frames = QUEUE_FRAMES.lock().remove(&pa.0);
-    assert!(frames.is_some(), "[virtio-pci] dma_dealloc unknown pa=0x{:x}", pa.0);
+    assert!(
+        frames.is_some(),
+        "[virtio-pci] dma_dealloc unknown pa=0x{:x}",
+        pa.0
+    );
     drop(frames);
     0
 }

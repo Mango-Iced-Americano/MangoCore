@@ -11,12 +11,10 @@ use log::{info, warn};
 use num_enum::FromPrimitive;
 use spin::Mutex;
 
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
-};
+use crate::fs::dev::DEV_FS;
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
-use crate::fs::dev::DEV_FS;
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -180,7 +178,11 @@ impl IndexNode for Teletype {
                 if inner.last_char == b'\r' {
                     print!("\n");
                 } else {
-                    log::info!("[tty] echo '{}' (0x{:02x})", inner.last_char as char, inner.last_char);
+                    log::info!(
+                        "[tty] echo '{}' (0x{:02x})",
+                        inner.last_char as char,
+                        inner.last_char
+                    );
                     print!("{}", inner.last_char as char);
                 }
             }
@@ -282,15 +284,13 @@ impl IndexNode for Teletype {
             | TeletypeCommand::TCSETSF
             | TeletypeCommand::TCSETA
             | TeletypeCommand::TCSETAW
-            | TeletypeCommand::TCSETAF => {
-                match UserPtr::from_addr(argp).read(token) {
-                    Ok(termios) => {
-                        inner.termios = termios;
-                        Ok(0)
-                    }
-                    Err(_) => Err(SyscallErr::EFAULT),
+            | TeletypeCommand::TCSETAF => match UserPtr::from_addr(argp).read(token) {
+                Ok(termios) => {
+                    inner.termios = termios;
+                    Ok(0)
                 }
-            }
+                Err(_) => Err(SyscallErr::EFAULT),
+            },
             // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
             TeletypeCommand::TCXONC => Ok(0),
             TeletypeCommand::TIOCGPGRP => {
@@ -324,15 +324,13 @@ impl IndexNode for Teletype {
                     Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
-            TeletypeCommand::TIOCSWINSZ => {
-                match UserPtr::from_addr(argp).read(token) {
-                    Ok(winsize) => {
-                        inner.winsize = winsize;
-                        Ok(0)
-                    }
-                    Err(_) => Err(SyscallErr::EFAULT),
+            TeletypeCommand::TIOCSWINSZ => match UserPtr::from_addr(argp).read(token) {
+                Ok(winsize) => {
+                    inner.winsize = winsize;
+                    Ok(0)
                 }
-            }
+                Err(_) => Err(SyscallErr::EFAULT),
+            },
             _ => {
                 warn!(
                     "[tty_ioctl] unsupported ioctl cmd: {:?} ({:#X})",

@@ -8,11 +8,11 @@
 //! - `read_at` / `write_at` 不带 offset 更新，offset 管理在 `File` 层
 //! - `find` 只在当前目录下查找，跨挂载点的逻辑在 `MountFSInode` 中
 
+use crate::utils::error::SyscallErr;
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 use core::fmt::Debug;
 use spin::MutexGuard;
-use crate::utils::error::SyscallErr;
 
 use super::{
     file::FileFlags, mount::MountFlags, FilePrivateData, FileType, InodeFlags, InodeId, InodeMode,
@@ -293,11 +293,15 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
     /// 创建符号链接
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
-        let inode =
-            self.create_with_data(name, FileType::SymLink, InodeMode::S_IRWXUGO, 0)?;
+        let inode = self.create_with_data(name, FileType::SymLink, InodeMode::S_IRWXUGO, 0)?;
         let bytes = target.as_bytes();
         let len = bytes.len();
-        inode.write_at(0, len, bytes, spin::Mutex::new(FilePrivateData::Unused).lock())?;
+        inode.write_at(
+            0,
+            len,
+            bytes,
+            spin::Mutex::new(FilePrivateData::Unused).lock(),
+        )?;
         Ok(inode)
     }
 
@@ -392,10 +396,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     }
 
     /// 根据 inode 号获取子项的名称和元数据
-    fn get_entry_name_and_metadata(
-        &self,
-        ino: InodeId,
-    ) -> Result<(String, Metadata), SyscallErr> {
+    fn get_entry_name_and_metadata(&self, ino: InodeId) -> Result<(String, Metadata), SyscallErr> {
         let name = self.get_entry_name(ino)?;
         let entry = self.find(&name)?;
         Ok((name, entry.metadata()?))
@@ -565,12 +566,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     }
 
     /// 文件通知 advice
-    fn fadvise(
-        &self,
-        _offset: i64,
-        _len: i64,
-        _advise: i32,
-    ) -> Result<usize, SyscallErr> {
+    fn fadvise(&self, _offset: i64, _len: i64, _advise: i32) -> Result<usize, SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }
 
@@ -592,12 +588,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
     /// 设置扩展属性
     /// flags: XATTR_CREATE(1) / XATTR_REPLACE(2) / 0
-    fn setxattr(
-        &self,
-        _name: &str,
-        _value: &[u8],
-        _flags: u32,
-    ) -> Result<usize, SyscallErr> {
+    fn setxattr(&self, _name: &str, _value: &[u8], _flags: u32) -> Result<usize, SyscallErr> {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
@@ -618,7 +609,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 #[macro_export]
 macro_rules! impl_index_node_as_any {
     ($t:ty) => {
-        fn as_any_ref(&self) -> &dyn ::core::any::Any {
+        fn as_any_ref(&self) -> &dyn::core::any::Any {
             self
         }
     };

@@ -17,14 +17,13 @@
 pub mod address;
 mod address_space;
 mod filemap;
-mod frame_store;
 mod frame_allocator;
+mod frame_store;
 mod heap_allocator;
 #[cfg(feature = "heap_trace")]
 pub mod heap_trace;
 mod kernel_mapper;
 mod kernel_space;
-mod vma;
 mod mapper;
 mod mmap;
 mod page_fault;
@@ -32,6 +31,7 @@ mod page_table;
 mod sysctl;
 mod uaccess;
 mod user_mapper;
+mod vma;
 mod vma_set;
 #[cfg(feature = "zram")]
 mod zram;
@@ -39,22 +39,24 @@ pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
 pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+pub use address_space::{AddressSpace, MemoryError};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reserve, frames_alloc,
     unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;
-pub use heap_allocator::{heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES};
-pub use vma::{MapFlags, MapPermission};
-pub use address_space::{AddressSpace, MemoryError};
+pub use heap_allocator::{
+    heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES,
+};
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
 pub use sysctl::{
-    commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count,
-    min_free_kbytes, overcommit_memory, overcommit_ratio, panic_on_oom, set_max_map_count,
+    commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count, min_free_kbytes,
+    overcommit_allows, overcommit_memory, overcommit_ratio, panic_on_oom, set_max_map_count,
     set_min_free_kbytes, set_overcommit_memory, set_overcommit_ratio, set_panic_on_oom,
-    overcommit_allows, total_memory_kbytes,
+    total_memory_kbytes,
 };
+pub use vma::{MapFlags, MapPermission};
 type MmResult<T> = Result<T, MemoryError>;
 #[allow(unused_imports)]
 pub use uaccess::{
@@ -73,6 +75,7 @@ pub use uaccess::{
     translated_refmut,
     translated_str,
     try_get_from_user,
+    user_accessible_len,
     UserBuffer,
     UserBufferReader,
     UserBufferWriter,
@@ -80,7 +83,6 @@ pub use uaccess::{
     UserIoVec,
     UserPtr,
     UserPtrMut,
-    user_accessible_len,
     UserSlice,
     // UserBufferIterator,
 };

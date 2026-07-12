@@ -27,7 +27,8 @@ const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
 
 lazy_static! {
-    static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> = Mutex::new(BTreeMap::new());
+    static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> =
+        Mutex::new(BTreeMap::new());
 }
 
 impl BlockDevice for VirtIOBlock {
@@ -67,11 +68,7 @@ impl VirtIOBlock {
 
     pub fn try_new(base_addr: usize) -> Option<Self> {
         let transport = unsafe {
-            MmioTransport::new(
-                NonNull::new(base_addr as *mut VirtIOHeader)?,
-                0x1000,
-            )
-            .ok()?
+            MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?
         };
         let blk = VirtIOBlk::<VirtioHal, MmioTransport<'static>>::new(transport).ok()?;
         Some(Self(Mutex::new(blk)))
@@ -80,15 +77,21 @@ impl VirtIOBlock {
 
 pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
     use alloc::sync::Arc;
-    let d0 = VirtIOBlock::try_new(VIRTIO_MMIO_BASE)
-        .map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
+    let d0 =
+        VirtIOBlock::try_new(VIRTIO_MMIO_BASE).map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
     if d0.is_some() {
-        println!("[kernel] block device 0: official fs (MMIO {:#x})", VIRTIO_MMIO_BASE);
+        println!(
+            "[kernel] block device 0: official fs (MMIO {:#x})",
+            VIRTIO_MMIO_BASE
+        );
     }
     let d1 = VirtIOBlock::try_new(VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE)
         .map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
     if d1.is_some() {
-        println!("[kernel] block device 1: tools disk (MMIO {:#x})", VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE);
+        println!(
+            "[kernel] block device 1: tools disk (MMIO {:#x})",
+            VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE
+        );
     }
     [d0, d1]
 }
@@ -133,13 +136,18 @@ unsafe impl Hal for VirtioHal {
 
         let pa = frames[0].ppn.start_addr().0;
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
-        assert!(old.is_none(), "[virtio] DMA frame key collision pa=0x{:x}", pa);
+        assert!(
+            old.is_none(),
+            "[virtio] DMA frame key collision pa=0x{:x}",
+            pa
+        );
         pa
     }
 
     unsafe fn unshare(paddr: usize, mut buffer: NonNull<[u8]>, direction: BufferDirection) {
         // Remove from map first — if paddr is unknown, panic before copying garbage
-        let frames = QUEUE_FRAMES.lock()
+        let frames = QUEUE_FRAMES
+            .lock()
             .remove(&paddr)
             .unwrap_or_else(|| panic!("[virtio] unshare unknown paddr=0x{:x}", paddr));
 
@@ -173,14 +181,22 @@ pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     }
     let pa = PhysAddr::from(ppn_base).0;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
-    assert!(old.is_none(), "[virtio] dma_alloc key collision pa=0x{:x}", pa);
+    assert!(
+        old.is_none(),
+        "[virtio] dma_alloc key collision pa=0x{:x}",
+        pa
+    );
     ppn_base.into()
 }
 
 #[no_mangle]
 pub extern "C" fn virtio_dma_dealloc(pa: PhysAddr, _pages: usize) -> i32 {
     let frames = QUEUE_FRAMES.lock().remove(&pa.0);
-    assert!(frames.is_some(), "[virtio] dma_dealloc unknown pa=0x{:x}", pa.0);
+    assert!(
+        frames.is_some(),
+        "[virtio] dma_dealloc unknown pa=0x{:x}",
+        pa.0
+    );
     drop(frames);
     0
 }

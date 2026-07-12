@@ -110,8 +110,9 @@ impl UnixStreamSocket {
         );
         self.connect_waiters
             .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
-        self.accept_waiters
-            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP);
+        self.accept_waiters.notify_events_all(
+            EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
+        );
     }
 }
 
@@ -206,11 +207,10 @@ impl Socket for UnixStreamSocket {
                     Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
 
                 // 3. 设置对端地址和凭证
-                let peer_creds = crate::task::current_task()
-                    .map(|t| {
-                        let inner = t.acquire_inner_lock();
-                        (t.pid() as u32, inner.uid, inner.gid)
-                    });
+                let peer_creds = crate::task::current_task().map(|t| {
+                    let inner = t.acquire_inner_lock();
+                    (t.pid() as u32, inner.uid, inner.gid)
+                });
                 client_conn.peer_addr = Some(UnixEndpointBound::Abstract(name.clone()));
                 client_conn.peer_creds = peer_creds;
                 server_conn.peer_creds = peer_creds;
@@ -245,11 +245,10 @@ impl Socket for UnixStreamSocket {
 
                 let (mut client_conn, mut server_conn) =
                     Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
-                let peer_creds = crate::task::current_task()
-                    .map(|t| {
-                        let inner = t.acquire_inner_lock();
-                        (t.pid() as u32, inner.uid, inner.gid)
-                    });
+                let peer_creds = crate::task::current_task().map(|t| {
+                    let inner = t.acquire_inner_lock();
+                    (t.pid() as u32, inner.uid, inner.gid)
+                });
                 client_conn.peer_addr = Some(UnixEndpointBound::Path(path.clone()));
                 client_conn.peer_creds = peer_creds;
                 server_conn.peer_creds = peer_creds;
@@ -293,7 +292,9 @@ impl Socket for UnixStreamSocket {
                 let socket_file: Arc<dyn crate::fs::vfs::IndexNode> =
                     Arc::new(crate::net::SocketFile::new(socket));
                 let vf = vfs::File::new_without_open(
-                    socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,
+                    socket_file,
+                    FileFlags::O_RDWR,
+                    vfs::FileType::Socket,
                 );
 
                 let task = crate::task::current_task().ok_or(SyscallErr::ESRCH)?;

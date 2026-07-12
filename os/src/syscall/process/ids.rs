@@ -9,8 +9,8 @@ use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
     current_sgid, current_sid, current_suid, current_task, current_task_ref, current_tid,
-    current_uid, current_user_token, update_ready_nice,
-    ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
+    current_uid, current_user_token, update_ready_nice, ProcessControlBlock, ProcessManager,
+    SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -633,7 +633,9 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
 pub fn sys_setfsuid(fsuid: usize) -> isize {
     let fsuid = match parse_optional_id(fsuid) {
         Ok(Some(fsuid)) => fsuid,
-        Ok(None) | Err(_) => return current_task_ref().unwrap().acquire_inner_lock().fsuid as isize,
+        Ok(None) | Err(_) => {
+            return current_task_ref().unwrap().acquire_inner_lock().fsuid as isize
+        }
     };
     let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -647,7 +649,9 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
 pub fn sys_setfsgid(fsgid: usize) -> isize {
     let fsgid = match parse_optional_id(fsgid) {
         Ok(Some(fsgid)) => fsgid,
-        Ok(None) | Err(_) => return current_task_ref().unwrap().acquire_inner_lock().fsgid as isize,
+        Ok(None) | Err(_) => {
+            return current_task_ref().unwrap().acquire_inner_lock().fsgid as isize
+        }
     };
     let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -696,12 +700,11 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
             Some(len) => len,
             None => return EFAULT,
         };
-        if !task
-            .process
-            .vm()
-            .lock()
-            .contains_valid_buffer(list as usize, byte_len, MapPermission::R)
-        {
+        if !task.process.vm().lock().contains_valid_buffer(
+            list as usize,
+            byte_len,
+            MapPermission::R,
+        ) {
             return EFAULT;
         }
         if size > LEGACY_NGROUPS_MAX {
@@ -842,14 +845,7 @@ pub fn sys_capget(header: *mut CapUserHeader, data: *mut CapUserData) -> isize {
             inner.cap_inheritable,
         )
     };
-    match write_cap_data(
-        token,
-        data,
-        words,
-        effective,
-        permitted,
-        inheritable,
-    ) {
+    match write_cap_data(token, data, words, effective, permitted, inheritable) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
@@ -871,7 +867,10 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
     };
     let current = current_task_ref().unwrap();
     let current_pid = current.pid() as i32;
-    if header_value.pid != 0 && header_value.pid != current.tid.0 as i32 && header_value.pid != current_pid {
+    if header_value.pid != 0
+        && header_value.pid != current.tid.0 as i32
+        && header_value.pid != current_pid
+    {
         return match find_task_for_cap_pid(header_value.pid) {
             Ok(_) => EPERM,
             Err(errno) => errno,
@@ -1153,8 +1152,12 @@ fn sys_process_vm_transfer(
     }
 
     if write_remote {
-        match copy_process_vm_iovecs_to_slice(&current_process, &local_iovecs, copy_len, &mut scratch)
-        {
+        match copy_process_vm_iovecs_to_slice(
+            &current_process,
+            &local_iovecs,
+            copy_len,
+            &mut scratch,
+        ) {
             Ok(()) => {}
             Err(errno) => return errno,
         }
@@ -1163,8 +1166,12 @@ fn sys_process_vm_transfer(
             Err(errno) => return errno,
         }
     } else {
-        match copy_process_vm_iovecs_to_slice(&remote_process, &remote_iovecs, copy_len, &mut scratch)
-        {
+        match copy_process_vm_iovecs_to_slice(
+            &remote_process,
+            &remote_iovecs,
+            copy_len,
+            &mut scratch,
+        ) {
             Ok(()) => {}
             Err(errno) => return errno,
         }
@@ -1286,7 +1293,11 @@ fn read_seccomp_filter(filter: usize) -> Result<Vec<SeccompFilterInsn>, isize> {
     }
     let token = current_user_token();
     let mut prog = SockFprog { len: 0, filter: 0 };
-    copy_from_user(token, filter as *const SockFprog, &mut prog as *mut SockFprog)?;
+    copy_from_user(
+        token,
+        filter as *const SockFprog,
+        &mut prog as *mut SockFprog,
+    )?;
     let len = prog.len as usize;
     if len == 0 || len > SECCOMP_FILTER_MAX_LEN {
         return Err(EINVAL);
@@ -1301,7 +1312,12 @@ fn read_seccomp_filter(filter: usize) -> Result<Vec<SeccompFilterInsn>, isize> {
     unsafe {
         raw.set_len(len);
     }
-    copy_from_user_array(token, prog.filter as *const SockFilter, raw.as_mut_ptr(), len)?;
+    copy_from_user_array(
+        token,
+        prog.filter as *const SockFilter,
+        raw.as_mut_ptr(),
+        len,
+    )?;
     let mut insns = Vec::new();
     if insns.try_reserve(len).is_err() {
         return Err(ENOMEM);
@@ -1850,7 +1866,7 @@ fn current_rlimit_for(task: &TaskControlBlock, resource: Resource) -> Option<RLi
                 rlim_cur: inner.nproc_limit_cur,
                 rlim_max: inner.nproc_limit_max,
             }
-        },
+        }
         Resource::NOFILE => {
             let files_ref = task.process.files();
             let lock = files_ref.lock();
@@ -1913,8 +1929,7 @@ pub fn sys_prlimit(
         let Some(current_limit) = current_rlimit_for(task, resource) else {
             return EINVAL;
         };
-        if rlimit.rlim_max > current_limit.rlim_max
-            && !task_has_capability(task, CAP_SYS_RESOURCE)
+        if rlimit.rlim_max > current_limit.rlim_max && !task_has_capability(task, CAP_SYS_RESOURCE)
         {
             return EPERM;
         }
@@ -2219,8 +2234,7 @@ fn task_sched_state(task: &TaskControlBlock) -> SchedState {
 }
 
 fn process_sched_state(process: &Arc<ProcessControlBlock>) -> SchedState {
-    let (policy, priority, reset_on_fork, nice, runtime, deadline, period) =
-        process.sched_state();
+    let (policy, priority, reset_on_fork, nice, runtime, deadline, period) = process.sched_state();
     SchedState {
         policy,
         priority,
@@ -2364,7 +2378,11 @@ pub fn sys_sched_setparam(pid: usize, param: *const SchedParam) -> isize {
         if !valid_sched_priority(inner.sched_policy, param.sched_priority) {
             return EINVAL;
         }
-        (inner.sched_policy, inner.sched_priority, inner.sched_reset_on_fork)
+        (
+            inner.sched_policy,
+            inner.sched_priority,
+            inner.sched_reset_on_fork,
+        )
     };
     if !can_apply_sched_change(
         &task,
@@ -2416,7 +2434,11 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: *const SchedPara
     let new_reset_on_fork = policy & SCHED_RESET_ON_FORK != 0;
     let (old_policy, old_priority, old_reset_on_fork) = {
         let inner = task.acquire_inner_lock();
-        (inner.sched_policy, inner.sched_priority, inner.sched_reset_on_fork)
+        (
+            inner.sched_policy,
+            inner.sched_priority,
+            inner.sched_reset_on_fork,
+        )
     };
     if !can_apply_sched_change(
         &task,
@@ -2501,15 +2523,11 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> 
     if cpusetsize == 0 {
         return EINVAL;
     }
-    let buffers = match translated_byte_buffer(
-        current_user_token(),
-        mask,
-        cpusetsize,
-        UserAccess::Read,
-    ) {
-        Ok(buffers) => buffers,
-        Err(errno) => return errno,
-    };
+    let buffers =
+        match translated_byte_buffer(current_user_token(), mask, cpusetsize, UserAccess::Read) {
+            Ok(buffers) => buffers,
+            Err(errno) => return errno,
+        };
     let user = UserBuffer::new(buffers);
     let mut first = [0u8; 1];
     user.read(&mut first);
@@ -2590,7 +2608,11 @@ pub fn sys_sched_setattr(pid: usize, attr: *const SchedAttr, flags: usize) -> is
         policy & SCHED_RESET_ON_FORK != 0 || attr.sched_flags & SCHED_FLAG_RESET_ON_FORK != 0;
     let (old_policy, old_priority, old_reset_on_fork) = {
         let inner = task.acquire_inner_lock();
-        (inner.sched_policy, inner.sched_priority, inner.sched_reset_on_fork)
+        (
+            inner.sched_policy,
+            inner.sched_priority,
+            inner.sched_reset_on_fork,
+        )
     };
     if !can_apply_sched_change(
         &task,
@@ -2673,11 +2695,7 @@ pub fn sys_get_mempolicy(
     _flags: usize,
 ) -> isize {
     let token = current_user_token();
-    if !mode.is_null()
-        && UserPtrMut::new(mode)
-            .write(token, &0i32)
-            .is_err()
-    {
+    if !mode.is_null() && UserPtrMut::new(mode).write(token, &0i32).is_err() {
         return EFAULT;
     }
     if !nodemask.is_null() && maxnode > 0 {

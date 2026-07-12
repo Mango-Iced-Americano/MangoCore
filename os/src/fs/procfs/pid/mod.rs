@@ -12,11 +12,6 @@ pub mod stat;
 pub mod status;
 pub mod task;
 
-use alloc::{
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
 use crate::{
     fs::{
         procfs::LockedProcInode,
@@ -24,6 +19,11 @@ use crate::{
     },
     task::ProcessControlBlock,
     utils::error::SyscallErr,
+};
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
 };
 
 /// 设置根目录的动态 PID 钩子
@@ -46,27 +46,33 @@ fn create_dead_ns_dir(parent: &LockedProcInode, pid: usize) -> Option<Arc<dyn In
         let pdata = parent.0.lock();
         (pdata.self_ref.clone(), pdata.fs.clone())
     };
-    let dir = LockedProcInode::new_dir_wired(
-        parent_weak,
-        fs_weak,
-        InodeMode::from_bits_truncate(0o500),
-    );
+    let dir =
+        LockedProcInode::new_dir_wired(parent_weak, fs_weak, InodeMode::from_bits_truncate(0o500));
     let (dir_self_ref, dir_fs) = {
         let guard = dir.0.lock();
         (guard.self_ref.clone(), guard.fs.clone())
     };
-    let ns_dir = LockedProcInode::new_dir_wired(
-        dir_self_ref,
-        dir_fs,
-        InodeMode::from_bits_truncate(0o500),
-    );
+    let ns_dir =
+        LockedProcInode::new_dir_wired(dir_self_ref, dir_fs, InodeMode::from_bits_truncate(0o500));
     let ns_fs = ns_dir.0.lock().fs.clone();
-    ns_dir.0.lock().children.insert(String::from("net"),
-        Arc::new(ns::ProcNsNetInode::new(netns, ns_fs.clone())) as Arc<dyn IndexNode>);
-    ns_dir.0.lock().children.insert(String::from("mnt"),
-        Arc::new(ns::ProcNsMntInode::new(crate::task::INIT_MOUNT_NAMESPACE.clone(), ns_fs.clone())) as Arc<dyn IndexNode>);
-    ns_dir.0.lock().children.insert(String::from("ipc"),
-        Arc::new(ns::ProcNsIpcInode::new(crate::task::INIT_IPC_NAMESPACE.clone(), ns_fs)) as Arc<dyn IndexNode>);
+    ns_dir.0.lock().children.insert(
+        String::from("net"),
+        Arc::new(ns::ProcNsNetInode::new(netns, ns_fs.clone())) as Arc<dyn IndexNode>,
+    );
+    ns_dir.0.lock().children.insert(
+        String::from("mnt"),
+        Arc::new(ns::ProcNsMntInode::new(
+            crate::task::INIT_MOUNT_NAMESPACE.clone(),
+            ns_fs.clone(),
+        )) as Arc<dyn IndexNode>,
+    );
+    ns_dir.0.lock().children.insert(
+        String::from("ipc"),
+        Arc::new(ns::ProcNsIpcInode::new(
+            crate::task::INIT_IPC_NAMESPACE.clone(),
+            ns_fs,
+        )) as Arc<dyn IndexNode>,
+    );
     dir.0.lock().children.insert(String::from("ns"), ns_dir);
     Some(dir)
 }
@@ -88,11 +94,8 @@ fn create_pid_dir(
         (pdata.self_ref.clone(), pdata.fs.clone())
     };
 
-    let dir = LockedProcInode::new_dir_wired(
-        parent_weak,
-        fs_weak,
-        InodeMode::from_bits_truncate(0o555),
-    );
+    let dir =
+        LockedProcInode::new_dir_wired(parent_weak, fs_weak, InodeMode::from_bits_truncate(0o555));
     {
         let mut data = dir.0.lock();
         data.extra_data = pid;
@@ -183,19 +186,28 @@ fn create_pid_dir(
     let fs_weak = ns_dir.0.lock().fs.clone();
 
     let netns = process.net();
-    let ns_inode =
-        Arc::new(ns::ProcNsNetInode::new(netns, fs_weak.clone())) as Arc<dyn IndexNode>;
-    ns_dir.0.lock().children.insert(String::from("net"), ns_inode);
+    let ns_inode = Arc::new(ns::ProcNsNetInode::new(netns, fs_weak.clone())) as Arc<dyn IndexNode>;
+    ns_dir
+        .0
+        .lock()
+        .children
+        .insert(String::from("net"), ns_inode);
 
     let mntns = process.mnt();
-    let mnt_inode =
-        Arc::new(ns::ProcNsMntInode::new(mntns, fs_weak.clone())) as Arc<dyn IndexNode>;
-    ns_dir.0.lock().children.insert(String::from("mnt"), mnt_inode);
+    let mnt_inode = Arc::new(ns::ProcNsMntInode::new(mntns, fs_weak.clone())) as Arc<dyn IndexNode>;
+    ns_dir
+        .0
+        .lock()
+        .children
+        .insert(String::from("mnt"), mnt_inode);
 
     let ipcns = process.ipc();
-    let ipc_inode =
-        Arc::new(ns::ProcNsIpcInode::new(ipcns, fs_weak.clone())) as Arc<dyn IndexNode>;
-    ns_dir.0.lock().children.insert(String::from("ipc"), ipc_inode);
+    let ipc_inode = Arc::new(ns::ProcNsIpcInode::new(ipcns, fs_weak.clone())) as Arc<dyn IndexNode>;
+    ns_dir
+        .0
+        .lock()
+        .children
+        .insert(String::from("ipc"), ipc_inode);
 
     Ok(dir)
 }

@@ -164,14 +164,15 @@ const _: () = {
     assert!(is_canonical_vaddr(MMAP_END));
     assert!(is_canonical_vaddr(KERNEL_STACK_BOTTOM));
     assert!(is_canonical_vaddr(KERNEL_STACK_TOP));
-    assert!(canonicalize_vpn(KERNEL_STACK_TOP >> PAGE_SIZE_BITS)
-        == KERNEL_STACK_TOP >> PAGE_SIZE_BITS);
-    assert!(KERNEL_STACK_TOP - KERNEL_STACK_BOTTOM
-        == KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS);
+    assert!(
+        canonicalize_vpn(KERNEL_STACK_TOP >> PAGE_SIZE_BITS) == KERNEL_STACK_TOP >> PAGE_SIZE_BITS
+    );
+    assert!(
+        KERNEL_STACK_TOP - KERNEL_STACK_BOTTOM == KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS
+    );
     assert!(MMAP_BASE < KERNEL_PROGRAM_END);
     assert!(KERNEL_PROGRAM_END <= MMAP_END);
-    assert!(KERNEL_PROGRAM_END & PAGE_TABLE_VA_MASK
-        == KERNEL_STACK_BOTTOM & PAGE_TABLE_VA_MASK);
+    assert!(KERNEL_PROGRAM_END & PAGE_TABLE_VA_MASK == KERNEL_STACK_BOTTOM & PAGE_TABLE_VA_MASK);
 };
 
 #[cfg(feature = "board_2k1000")]

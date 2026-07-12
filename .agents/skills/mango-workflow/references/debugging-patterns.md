@@ -185,9 +185,9 @@
 ### la64 全量压力触发 kernel stack slot 上限
 
 - **现象**: la64 全量 LTP 跑到 syscalls 尾段的 `futex_cmp_requeue01` 后，大量 waiter 打印 `wasn't woken up: ETIMEDOUT`，随后出现 `[task_quota] SOFT LIMIT reached: used=921/1024`，最终在 `clone` 路径 panic：`la64 kernel stack slot 1024 exceeds max 1024`。
-- **根因**: la64 kernel stack 改为固定 VM slot 后，`KERNEL_STACK_MAX_SLOTS` 是硬容量边界；压力用例留下大量任务时，stack slot 分配可能先于普通 clone 失败路径触发边界 panic。
-- **修复**: 后续应让 kernel stack 分配成为 fallible，并在 clone 中把 slot 耗尽转成 `EAGAIN/ENOMEM`；同时复核 task quota 与 stack slot 容量是否完全一致，以及超时 waiter 是否及时回收。
-- **教训**: 全量回归要区分三类问题：guard 命中的真实栈溢出、BTreeMap/heap 这类随机破坏、slot/quota 这类确定性容量上限。看到 slot panic 时优先检查 quota、allocator 和压力用例残留任务，而不是继续调大单个栈大小。
+- **根因**: wait/reap 会先释放进程 quota，再调用 `remove_zombie_tasks_by_pid()`；退出路径已改用专用 `zombie_queue`，但该清理函数仍只扫描 ready/interruptible。于是 quota 计数下降，TCB 和内核栈却留在专用队列；现场 `921` 个计费任务加约 `103` 个漏清 zombie 栈正好占满 1024 个 slot。
+- **修复**: `remove_zombie_tasks_by_pid()` 同时 retain/收集专用 `zombie_queue`，同步维护原子队列计数，并继续在 TASK_MANAGER 锁外 drop TCB。2K1000 实板双 libc 的 1000-waiter `futex_cmp_requeue01` 复验通过。
+- **教训**: quota 只在“释放时刻与受限资源生命周期一致”时才是可靠容量边界。调度器增加新生命周期队列后，所有按 pid 回收路径必须同步覆盖新队列；不能通过扩大 slot 上限掩盖漏清理。
 - **相关文件**: `os/src/hal/arch/loongarch64/config.rs`, `os/src/hal/arch/loongarch64/kern_stack.rs`, `os/src/task/quota.rs`, `os/src/task/task.rs`
 
 ### rv64 musl LTP retry helper 变成 UINT_MAX timeout
@@ -210,9 +210,17 @@
 
 - **现象**: `futex_wait05` 中 `FUTEX_WAIT` timeout 样本稳定多睡约 0.5ms 到 0.8ms，`tst_timer_test.c` 报 `futex_wait() slept for too long`；基础 `futex_wait01-04` 和 `futex_wake01-03` 仍正常。
 - **根因**: futex timeout 直接阻塞到真实 deadline，任务从 timeout queue 唤醒并返回用户态存在固定尾差；la64 QEMU 的短 timeout 出口尾差更大，10ms/25ms/100ms 档会超过 LTP 约 450us 阈值。
-- **修复**: futex wait 在 deadline 前预留 guard 窗口，尾部仍保持在 futex wait queue 中自旋，期间继续检查 futex word、信号和是否被 `FUTEX_WAKE` 移出队列；la64 对相对 `FUTEX_WAIT` 的中短 timeout 额外补偿固定出口尾差。
+- **修复**: futex wait 在 deadline 前预留 guard 窗口，尾部仍保持在 futex wait queue 中自旋，期间继续检查 futex word、信号和是否被 `FUTEX_WAKE` 移出队列；仅 LA64 QEMU 对相对 `FUTEX_WAIT` 的中短 timeout 补偿固定出口尾差，2K1000LA 不应用该补偿。
 - **教训**: futex timeout 精度不能直接套用 sleep 的“先出队再自旋”，否则可能丢掉 deadline 前的真实 wake；尾部自旋必须保持 wait queue 可观察或显式处理被 wake 移除的状态。
 - **相关文件**: `os/src/task/threads.rs`
+
+### 命名 FIFO 以 O_RDWR 打开后写入 EBADF
+
+- **现象**: LTP `select01` 的匿名 pipe 通过，但命名 FIFO fd 在 `SAFE_WRITE()` 阶段返回 `EBADF`，尚未进入 select。
+- **根因**: FIFO open 把 `O_RDWR` 解码为 `for_read=true, for_write=true` 后先命中只读分支，返回 `readable=true, writable=false` 的 Pipe inode；VFS File mode 虽为 RDWR，底层 inode 仍拒绝写入。
+- **修复**: 在单向分支前处理双向模式，创建同时可读写的 Pipe endpoint，并把 ring 的读写端弱引用都指向该 endpoint。
+- **教训**: 分层访问权限必须同时检查 fd/File mode 和底层对象能力；组合模式不能依赖两个布尔分支的先后顺序隐式表达。
+- **相关文件**: `os/src/syscall/fs.rs`, `os/src/fs/dev/pipe.rs`
 
 ### libcbench pthread 超时但 futex 计数正常
 
@@ -408,3 +416,31 @@
 - **修复**: 由 HAL 按架构生成 HWCAP；读取 CPUCFG/架构寄存器映射硬件能力，再与内核实际启用和上下文保存能力取交集。EUEN/扩展使能与 HWCAP 保持一致。用 loader PC 减加载基址定位 resolver，并分别运行 static/musl 与 dynamic/glibc 做对照。
 - **验收**: 动态程序必须越过 loader 并完成真实多进程/上下文切换工作负载；只看到 `main()` 第一行不足以证明扩展状态切换安全。
 - **相关文件**: `os/src/mm/address_space.rs`, `os/src/hal/arch/mod.rs`, `os/src/hal/arch/loongarch64/mod.rs`, `os/src/hal/arch/riscv/mod.rs`
+
+### 只读系统盘上的聚焦测试配置使用易失启动标记
+
+- **场景**: 实板系统盘和测试源必须保持只读，但需要反复切换测试组、超时和 LTP 白名单；直接改写系统分区既危险，也会让现场状态难以复现。
+- **模式**: 建立默认关闭的诊断 feature，由内核在 ramfs 根目录创建只读语义的空标记。用户态 init 在加载普通磁盘配置后检查标记，只覆盖本次启动的运行计划；诊断镜像使用独立文件名和 Make 目标，正式镜像不带标记。
+- **安全边界**: feature 必须编译期限制到目标板和已验证的 scratch 组合；覆盖只能调整测试调度，不能放宽块设备写权限。验收时扫描最终 uImage 确认标记和计划存在，同时确认系统盘配置未写入。
+- **相关文件**: `os/Cargo.toml`, `os/src/fs/mod.rs`, `os/Makefile`, `user/src/bin/initproc.rs`
+## DWMAC 首包后停止：用 current descriptor 判断布局错误
+
+- **现象**：DWMAC 能收到或发出第一个包，但后续描述符 OWN 不再变化；PHY 和 DMA
+  base 均正常。
+- **定位**：同时打印软件期望的 next descriptor 与 DMA current descriptor。若硬件
+  从 `base` 走到 `base + 0x10`，而软件按 32/64 字节槽位组织 ring，说明 chain 位未被
+  硬件识别，优先检查 normal/alternate/enhanced descriptor 模式是否一致。
+- **根因示例**：2K1000LA 星云板 U-Boot 定义 `CONFIG_DW_ALTDESCRIPTOR`。alternate
+  格式的 RX chain 在 control bit14，TX chain 在 status bit20，TX first/last 也在
+  status；套用 normal 格式会造成首包后硬件线性读取槽位 padding。
+- **修复**：以正在工作的 bootloader/厂商驱动编译配置为真值，不只复制通用 DWMAC
+  寄存器定义；修复后确认 current descriptor 按软件 next 指针跳转并跨 ring 回绕。
+- **相关文件**：`os/src/drivers/net/gmac_2k1000.rs`
+
+### 串口输出正常但交互输入无响应时检查主机透传方向
+
+- **现象**：自动启动后能持续看到内核和 Shell 输出，键盘输入在终端上似乎可见，但按回车后设备没有任何响应；改用 `screen` 等串口终端则正常。
+- **根因**：主机监视器只实现了 `serial -> stdout`，没有实现 `stdin -> serial`。终端 canonical/echo 设置可能在本地显示输入，使单向转发看起来像设备收到了命令。
+- **修复**：使用 `select`/poll 同时监听串口和 stdin；交互期将 TTY 切为 raw 模式，逐字节写入串口，并在 `finally` 中恢复原终端属性。监视器退出键应在主机侧拦截，避免误发给设备。
+- **验收**：用 pipe/PTY 回环同时验证设备输出、普通输入只转发一次、CR 字节保留、退出控制字符不进入串口，以及异常退出后终端属性恢复。
+- **相关文件**：`scripts/boot_2k1000_tftp.py`

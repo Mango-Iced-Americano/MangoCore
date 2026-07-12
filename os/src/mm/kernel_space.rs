@@ -10,8 +10,8 @@
 
 use super::kernel_mapper::KernelMapper;
 use super::{
-    frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr,
-    VirtPageNum, VPNRange,
+    frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum,
+    VPNRange, VirtAddr, VirtPageNum,
 };
 use crate::config::*;
 use crate::hal::MMIO;
@@ -173,7 +173,8 @@ impl<T: PageTable> KernelSpace<T> {
         boot_trace!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
         boot_trace!(
             ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize, ebss as usize
+            sbss_with_stack as usize,
+            ebss as usize
         );
         macro_rules! kernel_identical_map {
             ($begin:expr,$end:expr,$permission:expr) => {
@@ -262,13 +263,8 @@ impl<T: PageTable> KernelSpace<T> {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        self.try_insert_framed_area(
-            start_va,
-            end_va,
-            permission,
-            KernelMappingKind::KernelStack,
-        )
-        .unwrap();
+        self.try_insert_framed_area(start_va, end_va, permission, KernelMappingKind::KernelStack)
+            .unwrap();
     }
 
     fn try_insert_framed_area(
@@ -299,8 +295,7 @@ impl<T: PageTable> KernelSpace<T> {
                 MemoryError::OutOfMemory
             })?;
             let ppn = frame.ppn;
-            if let Err(err) =
-                KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
+            if let Err(err) = KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
             {
                 self.rollback_mapped_pages(&mapped_vpns);
                 return Err(err);
@@ -308,8 +303,11 @@ impl<T: PageTable> KernelSpace<T> {
             mapped_vpns.push(vpn);
             frames.insert(vpn, frame);
         }
-        self.kernel_mappings
-            .insert(KernelMapping::new(VPNRange::new(start_vpn, end_vpn), frames, kind))
+        self.kernel_mappings.insert(KernelMapping::new(
+            VPNRange::new(start_vpn, end_vpn),
+            frames,
+            kind,
+        ))
     }
 
     pub fn insert_program_area(
@@ -360,8 +358,7 @@ impl<T: PageTable> KernelSpace<T> {
         for (idx, frame) in frames.into_iter().enumerate() {
             let vpn = VirtPageNum::from(start_vpn.0 + idx);
             let ppn = frame.ppn;
-            if let Err(err) =
-                KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
+            if let Err(err) = KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
             {
                 self.rollback_mapped_pages(&mapped_vpns);
                 return Err(err);
@@ -369,12 +366,11 @@ impl<T: PageTable> KernelSpace<T> {
             mapped_vpns.push(vpn);
             frame_map.insert(vpn, frame);
         }
-        self.kernel_mappings
-            .insert(KernelMapping::new(
-                VPNRange::new(start_vpn, end_vpn),
-                frame_map,
-                KernelMappingKind::Program,
-            ))
+        self.kernel_mappings.insert(KernelMapping::new(
+            VPNRange::new(start_vpn, end_vpn),
+            frame_map,
+            KernelMappingKind::Program,
+        ))
     }
 
     pub fn remove_area_with_start_vpn(

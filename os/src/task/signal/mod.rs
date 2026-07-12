@@ -27,8 +27,8 @@ use crate::task::{
 };
 use alloc::sync::Arc;
 
-use super::{current_task, current_task_ref, current_user_token};
 use super::task::TaskControlBlock;
+use super::{current_task, current_task_ref, current_user_token};
 use crate::utils::error::SyscallErr;
 
 mod action;

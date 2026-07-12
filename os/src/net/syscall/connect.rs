@@ -81,7 +81,7 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(SyscallErr::EAGAIN) => {} // 需要 wait_io
         Err(e) => {
             log::info!("[sys_connect] connect failed: {:?}", e);
-            return -(e as isize)
+            return -(e as isize);
         }
     }
 

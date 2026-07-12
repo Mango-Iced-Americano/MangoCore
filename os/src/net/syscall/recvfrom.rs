@@ -167,13 +167,7 @@ pub fn sys_recvfrom(
     };
 
     if result > 0 {
-        if copy_to_user_array(
-            token,
-            kernel_buf.as_ptr(),
-            buf as *mut u8,
-            result as usize,
-        )
-        .is_err()
+        if copy_to_user_array(token, kernel_buf.as_ptr(), buf as *mut u8, result as usize).is_err()
         {
             return -(SyscallErr::EFAULT as isize);
         }

@@ -14,7 +14,7 @@ use crate::{
         dev::DEV_FS,
         vfs::{
             event::{EPollEvent, EventListener},
-            EventQueueHandle, File, FileFlags, FileMode, FilePrivateData, FileType, FileSystem,
+            EventQueueHandle, File, FileFlags, FileMode, FilePrivateData, FileSystem, FileType,
             IndexNode, InodeMode, Metadata, PollWaitQueue,
         },
     },
@@ -136,9 +136,9 @@ impl EventPoll {
             event_queues.push(queue);
         }
         if let Some(queue) = file.write_event_queue() {
-            let exists = event_queues.iter().any(|item| {
-                core::ptr::eq(item.queue() as *const _, queue.queue() as *const _)
-            });
+            let exists = event_queues
+                .iter()
+                .any(|item| core::ptr::eq(item.queue() as *const _, queue.queue() as *const _));
             if !exists {
                 event_queues.push(queue);
             }
@@ -347,7 +347,12 @@ impl EventPoll {
         Ok(())
     }
 
-    fn modify(self: &Arc<Self>, fd: usize, events: EPollEvent, data: u64) -> Result<(), SyscallErr> {
+    fn modify(
+        self: &Arc<Self>,
+        fd: usize,
+        events: EPollEvent,
+        data: u64,
+    ) -> Result<(), SyscallErr> {
         if events.intersects(Self::unsupported_mask()) {
             return Err(SyscallErr::EINVAL);
         }
@@ -622,10 +627,7 @@ pub fn sys_epoll_create1(flags: usize) -> isize {
 
     let task = current_task().unwrap();
     let files = task.process.files();
-    let ret = match files
-        .lock()
-        .alloc_fd(file, flags & cloexec_flag != 0)
-    {
+    let ret = match files.lock().alloc_fd(file, flags & cloexec_flag != 0) {
         Ok(fd) => fd as isize,
         Err(err) => -(err as isize),
     };

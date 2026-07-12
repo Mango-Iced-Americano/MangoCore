@@ -67,9 +67,7 @@ fn checked_device_offset(
     let offset = (block_id as u64)
         .checked_mul(block_size as u64)
         .expect("block offset overflow");
-    let end = offset
-        .checked_add(len as u64)
-        .expect("I/O length overflow");
+    let end = offset.checked_add(len as u64).expect("I/O length overflow");
     if let Some(size_bytes) = size_bytes {
         assert!(
             end <= size_bytes,

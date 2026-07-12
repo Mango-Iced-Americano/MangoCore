@@ -6,9 +6,9 @@ use lazy_static::*;
 use log::info;
 use spin::Mutex;
 
+use crate::config::PAGE_SIZE;
 use crate::drivers::block::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
-use crate::config::PAGE_SIZE;
 
 /// 文件系统类型枚举。
 ///

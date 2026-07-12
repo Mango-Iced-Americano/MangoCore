@@ -24,14 +24,16 @@ pub mod time;
 pub mod trap;
 pub type KernelPageTableImpl = laflex::LAFlexPageTable;
 pub type PageTableImpl = laflex::LAFlexPageTable;
-pub use sbi::{console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save, shutdown};
+pub use sbi::{
+    console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save, shutdown,
+};
 pub use switch::__switch;
 pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
 
 use crate::{
     config::{
-        CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH,
-        SUC_DMW_VSEG, VALEN,
+        CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH, SUC_DMW_VSEG,
+        VALEN,
     },
     hal::arch::loongarch64::{
         board::UART_BASE,
@@ -129,10 +131,7 @@ pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
     get_timer_freq_first_time();
-    #[cfg(any(
-        not(feature = "board_2k1000"),
-        feature = "board_bringup_trace"
-    ))]
+    #[cfg(any(not(feature = "board_2k1000"), feature = "board_bringup_trace"))]
     {
         let cfg1 = CPUCfg1::read();
         boot_trace!(
@@ -239,7 +238,15 @@ pub fn bootstrap_init() {
     );
     // 如果镜像按错误的开发板配置构建，应在启用正常内存分配前停止。继续运行会让
     // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
-    assert_eq!(cfg1.get_valen(), VALEN, "kernel VALEN does not match CPUCFG1");
-    assert_eq!(cfg1.get_palen(), PALEN, "kernel PALEN does not match CPUCFG1");
+    assert_eq!(
+        cfg1.get_valen(),
+        VALEN,
+        "kernel VALEN does not match CPUCFG1"
+    );
+    assert_eq!(
+        cfg1.get_palen(),
+        PALEN,
+        "kernel PALEN does not match CPUCFG1"
+    );
     boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
 }

@@ -1,7 +1,7 @@
 //! /proc/stat — 系统统计信息
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::string::String;
 use core::fmt::Write;
 

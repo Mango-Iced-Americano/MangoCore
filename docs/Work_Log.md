@@ -4,6 +4,90 @@
 
 ## 2026-07-12
 
+### board/tooling: 修复一键启动后的 Shell 输入透传
+
+**涉及文件：**
+- `scripts/boot_2k1000_tftp.py` — 将启动后的只读串口监视改为终端/串口双向 `select` 透传；交互期间切换 raw 模式，退出时恢复终端属性，并拦截本地 `Ctrl-C`
+- `docs/01_architecture/boot-and-trap.md` — 补充一键启动后的交互式终端语义
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“可见本地输入但设备无响应”时先检查主机转发方向的排查模式
+
+**验证：**
+- Python 源码编译检查通过 ✅
+- 使用匿名 pipe 模拟串口和 stdin：串口输出回显、`echo ok\r` 仅写入设备一次、`Ctrl-C` 未写入设备且监视器退出，PTY 回环测试通过 ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`，均成功；仅有项目既有 warning ✅
+
+**备注：**
+- 根因不在 Bash、TTY 或内核串口驱动；旧 `boot_and_stream()` 只读取 serial 并写 stdout，从未读取 stdin。终端的本地回显造成了“命令已输入”的错觉。
+- 修复只涉及主机启动工具，现有 `kernel-2k1000-shell.ui` 无需重建即可交互使用；重新执行一键启动命令即可。
+
+### board/tooling: 增加 GMAC Shell 镜像和显式镜像启动参数
+
+**涉及文件：**
+- `os/Cargo.toml`、`os/src/fs/mod.rs`、`user/src/bin/initproc.rs` — 增加 `board_shell` 易失启动标记，在磁盘配置加载后强制本次启动进入 Bash，且不改写 SSD 配置
+- `os/Makefile` — 增加 `la64-2k1000-shell`，构建 initramfs + GMAC0、无测例、无 SSD 依赖的 `kernel-2k1000-shell.ui`
+- `scripts/boot_2k1000_tftp.py`、`Makefile` — 删除隐式固定镜像，要求通过 `--image` / `IMAGE=<uImage>` 显式指定待复制和启动的镜像
+- `docs/01_architecture/boot-and-trap.md`、`docs/03_fs/2k1000-full-test-disk.md`、`docs/07_driver/2k1000-gmac.md` — 同步新启动命令、镜像复制语义和 Shell 镜像边界
+
+**验证：**
+- `python3 scripts/boot_2k1000_tftp.py --help` 显示 `--image IMAGE` 为必填参数；Python 源码编译检查通过 ✅
+- `make -n 2k1000-boot IMAGE=kernel-2k1000-shell.ui` 正确展开 `--image "kernel-2k1000-shell.ui"` ✅
+- Docker 构建 `make -C os la64-2k1000-shell` 成功；uImage 为 LoongArch、load/entry 均为 `0x90000000`，数据长度 `12346504` 字节 ✅
+- 最终文件 `kernel-2k1000-shell.ui` 为 `12346568` 字节，SHA-256 `37782d65f20e6a24826f0540658eff8ccc6f311e8e4fd21444fe340bad566202`；二进制含 `/board_shell` 和进入 Shell 分支字符串 ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`，均成功；仅有项目既有 warning ✅
+
+**备注：**
+- Shell 镜像使用 `block_virt`，不会初始化或写入 SSD；GMAC0 使用纯净 `gmac_2k1000`，不包含逐包 `gmac_diag`。
+- 当前完成的是构建、uImage 和参数链路静态验证；实板进入交互式 Bash 需执行一键启动并在提示时按 RESET。
+
+### board/net: 接入 2K1000LA GMAC0 并打通实板 ARP/ICMP
+
+**涉及文件：**
+- `os/src/drivers/net/gmac_2k1000.rs` — 新增两路 DWMAC/PHY 非破坏性探测，以及 GMAC0 轮询驱动；完成 YT8511H 初始化、alternate descriptor RX/TX ring、低 4 GiB DMA 帧约束、FCS 处理和链路状态轮询
+- `os/src/drivers/net/mod.rs`、`os/src/main.rs` — 在 2K1000 板级路径注册 GMAC0，并保持探测、正式驱动和诊断逻辑可独立裁剪
+- `os/src/net/config.rs` — 为实板 GMAC 固定直连地址 `192.168.9.20/24`，保留其他平台原有网络配置
+- `os/Cargo.toml`、`os/Makefile` — 增加 `gmac_probe`、`gmac_2k1000`、`gmac_diag` feature，以及独立探测/诊断 uImage 目标
+- `docs/07_driver/2k1000-gmac.md`、`docs/06_net/README.md` — 记录厂商 DTS/U-Boot 硬件真值、描述符布局、初始化流程、构建方式、验证结果和后续边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 DWMAC 首包后停止时通过 current descriptor 判断 normal/alternate 布局不一致的方法
+
+**验证：**
+- 对照星云板厂商 Linux DTS/U-Boot：两路 DWMAC version `0x0000d137`，两路 YT8511H PHY ID `0x0000010a`；GMAC0 实测 1000 Mbps/full，GMAC1 未接线 ✅
+- 实板确认 RX/TX alternate descriptor ring 均能跨槽位推进并回绕；RX 描述符长度包含 4 字节 FCS，交给 smoltcp 前减 4 ✅
+- Mac 直连板端 `192.168.9.20`：ARP 学到 `8e:f8:cc:05:ed:1b`，首轮 ping 受首次 ARP 影响为 9/10，重负载诊断环境下第二轮为 19/20；未观察到 TX OWN 卡死或 ring 停转 ✅
+- 生产组合 `board_2k1000 + gmac_2k1000`（不含 `gmac_diag`）使用 `nightly-2024-05-01` 编译成功；诊断目标 `make -C os la64-2k1000-gmac-net` 成功 ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`，均成功；仅有项目既有 warning ✅
+- 诊断 uImage `kernel-2k1000-gmac-net.ui` 为 `12351080` 字节，SHA-256 `9f982b7f9a5e24c64663356e4ff99a38b1102a4472ad4ab2b1b4efc7bff82162` ✅
+
+**备注：**
+- 当前完成的是 GMAC0、轮询、静态 IPv4 的最小实板网络路径；GMAC1、IRQ/NAPI 风格预算轮询、DHCP、错误恢复和持续吞吐尚未适配。
+- 下一阶段将纯净 `gmac_2k1000` 与 SATA/完整测试盘组合，优先运行 inet、UDP/TCP echo、双向大包和网络测试组；诊断镜像继续与正式运行镜像分离。
+
+### board/test: 适配 libctest、cyclictest 与非网络 LTP 聚焦镜像
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 libctest/cyclictest 纳入双 libc scratch 工作区；补齐 runner、entry、顶层及 `lib/` DSO、hackbench 依赖；增加 274 项非网络 LTP 白名单和实板聚焦计划；将 LTP 临时目录固定到 `/tmp` 并清除板上无效的 `LTP_DEV*`
+- `os/Cargo.toml`、`os/src/main.rs`、`os/src/fs/mod.rs`、`os/Makefile` — 增加受限 `board_core_test` feature、ramfs 启动标记和 `la64-2k1000-core-tests` 独立 uImage 目标
+- `os/src/task/manager.rs` — reap 指定 pid 时同时清理专用 `zombie_queue`，避免 quota 已释放但 TCB/内核栈仍滞留并耗尽 1024 个 LA64 栈槽
+- `os/src/task/threads.rs` — 将 180us futex 相对超时出口补偿限制到 LA64 QEMU，2K1000LA 使用真实 deadline
+- `os/src/fs/dev/pipe.rs` — 为命名 FIFO 增加双向 Pipe endpoint，修复 `O_RDWR` 被错误降级为只读端
+- `os/src/fs/ramfs/mod.rs` — `statfs` 按 ramfs 配额或物理页状态报告非零 block/inode 容量
+- `docs/03_fs/{2k1000-full-test-disk,init-and-rootfs}.md` — 记录工作区依赖、聚焦镜像用法、安全边界和待复验状态
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀只读系统盘通过易失标记切换聚焦计划的模式
+
+**验证：**
+- 从 `sdcard-la.img.xz` 只读审计 libctest/cyclictest/LTP 实际脚本、目录和 ELF 依赖；274 个 LTP 名称均对应 LA 测试盘中的真实可执行文件，且无 accept/bind/connect/listen/send/recv/socket 类网络名称 ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only` 和 `make -C os la64-2k1000-core-tests`，均成功；仅有项目既有 warning ✅
+- RV64 QEMU 启动回归已尝试，但在 QEMU 启动前因仓库缺少 `disk.img` 退出；不是内核编译或运行失败，RV64 编译验证仍通过 ⚠️
+- 最终 uImage 为 `12380736` 字节，SHA-256 `7dc2d763568026ff79edc36e91cbab16fcd623362f03c2c6e42f73ba2cd6807e`；TFTP CRC32 `85665dcf`、U-Boot `iminfo`、内核启动和 scratch smoke 均通过 ✅
+- musl libctest 静态/动态套件完整结束，83s、组退出 0；原失败 `statvfs`、`dlopen`、`tls_get_new_dtv` 全部 PASS ✅
+- glibc libctest 完整结束，395s、组退出 0；`statvfs` 和两个顶层 DSO 用例 PASS。其余 19 个静态/动态失败主要为 glibc 与 musl libc-tests 的 locale/stdio/regex 语义差异，其中 `pthread_cancel_points`、`pthread_robust_detach`、`setvbuf_unget` 仍需单项复核 ⚠️
+- cyclictest musl/glibc 均完成 P1/P8、无压力/400-task hackbench 压力，分别 39s/56s、组退出 0；观测最大延迟约 10.2ms，未 panic ✅
+- LTP musl/glibc 各执行 274 个非网络用例，分别 226s/251s，均运行到组尾；`futex_wait05` 七档双 libc 全通过，`select01` 16 pass/3 config skip，第二轮 `futex_cmp_requeue01` 两次 1000 waiter 压力均通过且未再触发栈槽 panic ✅
+- 本轮 LTP 子断言合计 `passed=3569 failed=23 broken=18 skipped=94`。剩余失败集中于 symlink/execveat、getdents、`/proc/self/maps`、pipe 大写入、无可分配测试块设备，以及 glibc 后半程 poll/select 定时长尾，已作为后续定向适配清单 ⚠️
+
+**备注：**
+- 聚焦镜像只在 ramfs 创建标记并覆盖当前启动的调度配置，不改写 P1 `/sdcard/os_test.conf`；P1/P3 和用户块设备节点仍只读，仅 P2 `/scratch` 可写。
+- libctest 组超时 900s，cyclictest 180s，非网络 LTP 每 libc 3600s；外层脚本退出 0 只表示测试调度完整结束，子项状态以上述串口日志为准。
+
 ### board/test: 将 libcbench 迁移到 SSD 工作区并完成实板复验
 
 **涉及文件：**

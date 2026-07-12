@@ -7,22 +7,20 @@
 pub mod loongarch64;
 #[cfg(feature = "loongarch64")]
 pub use loongarch64::{
-    board,
+    time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
+    KernelPageTableImpl, PageTableImpl, __switch, board,
     board::MMIO,
     bootstrap_init, config,
     config::BUFFER_CACHE_NUM,
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
-    console_flush, console_getchar, console_putchar,
-    local_irq_restore, local_irq_save,
-    machine_init, shutdown, user_hwcap,
-    time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
-    KernelPageTableImpl, PageTableImpl, __switch, kstack_alloc, tlb_invalidate,
+    console_flush, console_getchar, console_putchar, kstack_alloc, local_irq_restore,
+    local_irq_save, machine_init, shutdown, tlb_invalidate,
     trap::{
         get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return,
         MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
     },
-    trap_cx_bottom_from_tid, ustack_bottom_from_tid, KernelStack, BLOCK_SZ,
+    trap_cx_bottom_from_tid, user_hwcap, ustack_bottom_from_tid, KernelStack, BLOCK_SZ,
 };
 #[cfg(feature = "riscv")]
 pub mod riscv;
@@ -34,9 +32,12 @@ pub use riscv::{
     kern_stack::trap_cx_bottom_from_tid,
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
-    machine_init, user_hwcap,
+    machine_init,
     rv_board::MMIO,
-    sbi::{console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save, set_timer, shutdown},
+    sbi::{
+        console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save,
+        set_timer, shutdown,
+    },
     sv39::tlb_invalidate,
     switch::__switch,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
@@ -44,5 +45,5 @@ pub use riscv::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,
         trap_return, UserContext, UserSignalMask,
     },
-    KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
+    user_hwcap, KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
 };

@@ -15,7 +15,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::fcntl::{PosixFlock, F_RDLCK, F_WRLCK, F_UNLCK};
+use super::fcntl::{PosixFlock, F_RDLCK, F_UNLCK, F_WRLCK};
 use super::File;
 use crate::task::WaitQueue;
 use crate::task::WaitResult;
@@ -138,8 +138,12 @@ pub fn init_posix_lock_manager() {
 
 fn same_owner(a: LockOwner, b: LockOwner) -> bool {
     match (a, b) {
-        (LockOwner::Posix{owner_id: a_id,..}, LockOwner::Posix{owner_id: b_id,..}) => a_id == b_id,
-        (LockOwner::Ofd{open_file_id: a_id}, LockOwner::Ofd{open_file_id: b_id}) => a_id == b_id,
+        (LockOwner::Posix { owner_id: a_id, .. }, LockOwner::Posix { owner_id: b_id, .. }) => {
+            a_id == b_id
+        }
+        (LockOwner::Ofd { open_file_id: a_id }, LockOwner::Ofd { open_file_id: b_id }) => {
+            a_id == b_id
+        }
         _ => false,
     }
 }
@@ -168,10 +172,7 @@ fn resolve_range(file: &File, flock: &PosixFlock) -> Result<(i64, i64), SyscallE
     let base: i128 = match flock.l_whence {
         SEEK_SET => 0,
         SEEK_CUR => file.offset() as i128,
-        SEEK_END => file
-            .metadata()
-            .map_err(|_| SyscallErr::EINVAL)?
-            .size as i128,
+        SEEK_END => file.metadata().map_err(|_| SyscallErr::EINVAL)?.size as i128,
         _ => return Err(SyscallErr::EINVAL),
     };
     let start = base
@@ -179,10 +180,7 @@ fn resolve_range(file: &File, flock: &PosixFlock) -> Result<(i64, i64), SyscallE
         .ok_or(SyscallErr::EOVERFLOW)?;
     let len = flock.l_len as i128;
     let (s, l) = if len < 0 {
-        (
-            start.checked_add(len).ok_or(SyscallErr::EOVERFLOW)?,
-            -len,
-        )
+        (start.checked_add(len).ok_or(SyscallErr::EOVERFLOW)?, -len)
     } else {
         (start, len)
     };

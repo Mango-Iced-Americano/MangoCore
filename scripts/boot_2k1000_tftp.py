@@ -6,18 +6,20 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
+import termios
 import time
+import tty
 from typing import Optional
 import zlib
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_IMAGE = REPO_ROOT / "kernel-2k1000-run.ui"
 DEFAULT_TFTP_ROOT = Path("/private/tftpboot")
 TFTP_PLIST = Path("/System/Library/LaunchDaemons/tftp.plist")
 TFTP_SERVICE = "system/com.apple.tftpd"
@@ -259,13 +261,43 @@ class UBootConsole:
         self.serial.write(command.encode("ascii") + b"\r")
         self.serial.flush()
         print("[console] booting; Ctrl-C exits this monitor only", flush=True)
-        while True:
-            data = self.serial.read(self.serial.in_waiting or 1)
-            if not data:
-                continue
-            self._record(data)
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
+
+        stdin_fd = sys.stdin.fileno()
+        serial_fd = self.serial.fileno()
+        saved_terminal = None
+        if sys.stdin.isatty():
+            saved_terminal = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+
+        try:
+            while True:
+                readable, _, _ = select.select([serial_fd, stdin_fd], [], [], 0.2)
+                if serial_fd in readable:
+                    data = self.serial.read(self.serial.in_waiting or 1)
+                    if data:
+                        self._record(data)
+                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.flush()
+
+                if stdin_fd in readable:
+                    data = os.read(stdin_fd, 1024)
+                    if not data:
+                        return
+                    # Keep Ctrl-C local to the monitor. Bytes typed before it
+                    # still reach the board, while the board never receives
+                    # an accidental interrupt character.
+                    before_escape, escape, _ = data.partition(b"\x03")
+                    if escape:
+                        if before_escape:
+                            self.serial.write(before_escape)
+                            self.serial.flush()
+                        return
+                    self.serial.write(data)
+                    self.serial.flush()
+        finally:
+            if saved_terminal is not None:
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_terminal)
+            print("\n[console] monitor closed; board continues running")
 
 
 def require(pattern: str, output: str, message: str) -> re.Match[str]:
@@ -335,7 +367,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--interface", default="en8")
     parser.add_argument("--serial")
-    parser.add_argument("--image", type=Path, default=DEFAULT_IMAGE)
+    parser.add_argument(
+        "--image",
+        type=Path,
+        required=True,
+        help="uImage path or filename to copy into the TFTP root and boot",
+    )
     parser.add_argument("--tftp-root", type=Path, default=DEFAULT_TFTP_ROOT)
     parser.add_argument("--host-ip", default="192.168.9.10")
     parser.add_argument("--board-ip", default="192.168.9.20")

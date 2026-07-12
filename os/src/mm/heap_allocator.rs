@@ -109,7 +109,8 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
                 crate::task::perf::record_heap_alloc();
                 crate::task::perf::record_heap_alloc_cost(elapsed);
-                let block_size = layout.size()
+                let block_size = layout
+                    .size()
                     .max(layout.align())
                     .max(core::mem::size_of::<usize>())
                     .next_power_of_two();
@@ -119,7 +120,12 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 let new_total = prev + block_size;
                 let mut cur_max = KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed);
                 while new_total > cur_max {
-                    match KERNEL_HEAP_MAX_BYTES.compare_exchange_weak(cur_max, new_total, Ordering::Relaxed, Ordering::Relaxed) {
+                    match KERNEL_HEAP_MAX_BYTES.compare_exchange_weak(
+                        cur_max,
+                        new_total,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
                         Ok(_) => break,
                         Err(v) => cur_max = v,
                     }
@@ -149,7 +155,8 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
         if let Some(ptr) = core::ptr::NonNull::new(ptr) {
             #[cfg(feature = "heap_trace")]
             crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
-            let block_size = layout.size()
+            let block_size = layout
+                .size()
                 .max(layout.align())
                 .max(core::mem::size_of::<usize>())
                 .next_power_of_two();
@@ -222,7 +229,8 @@ pub fn init_heap() {
     KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
     // Safety: 该全局 hook 仅在启动期写入一次，指向常驻的 perf 统计函数。
     unsafe {
-        buddy_system_allocator::DEALLOC_SCAN_HOOK = crate::task::perf::record_heap_dealloc_scan_steps;
+        buddy_system_allocator::DEALLOC_SCAN_HOOK =
+            crate::task::perf::record_heap_dealloc_scan_steps;
     }
 }
 

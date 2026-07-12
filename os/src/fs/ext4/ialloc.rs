@@ -1,6 +1,4 @@
-use crate::fs::{
-    ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE},
-};
+use crate::fs::ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE};
 use alloc::vec;
 
 use super::{

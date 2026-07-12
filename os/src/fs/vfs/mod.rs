@@ -27,11 +27,11 @@ pub mod dentry_cache;
 pub mod event;
 pub mod fasync;
 pub mod fcntl;
-pub mod posix_lock;
 pub mod file;
 pub mod file_system;
 pub mod index_node;
 pub mod mount;
+pub mod posix_lock;
 pub mod propagation;
 
 use crate::utils::error::SyscallErr;
@@ -39,13 +39,25 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 use core::fmt::Debug;
 
-pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, FileOwner, FileOwnerSnapshot, FileOwnerTarget, PollWaitQueue, SeekFrom, STATUS_MASK};
 pub use fasync::{set_file_fasync, FAsyncItem, FAsyncItems};
-pub use fcntl::{FcntlCommand, PosixFlock, FOwnerEx, F_RDLCK, F_WRLCK, F_UNLCK, FD_CLOEXEC, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_OWNER_TID, F_OWNER_PID, F_OWNER_PGRP};
+pub use fcntl::{
+    FOwnerEx, FcntlCommand, PosixFlock, FD_CLOEXEC, F_OWNER_PGRP, F_OWNER_PID, F_OWNER_TID,
+    F_RDLCK, F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE, F_UNLCK,
+    F_WRLCK,
+};
+pub use file::{
+    EventQueueHandle, FdTable, File, FileFlags, FileMode, FileOwner, FileOwnerSnapshot,
+    FileOwnerTarget, PollWaitQueue, SeekFrom, STATUS_MASK,
+};
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::{CreateAttrs, IndexNode};
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
-pub use propagation::{MountPropagation, PropagationType, configure_propagation_no_register, get_slaves, install_propagation, propagate_mount, propagate_umount, register_current_propagation, register_peer, register_slave, set_propagation_type, unregister_peer_mount, unregister_slave_mount};
+pub use propagation::{
+    configure_propagation_no_register, get_slaves, install_propagation, propagate_mount,
+    propagate_umount, register_current_propagation, register_peer, register_slave,
+    set_propagation_type, unregister_peer_mount, unregister_slave_mount, MountPropagation,
+    PropagationType,
+};
 
 use crate::drivers::block::BlockDevice;
 use crate::timer::TimeSpec;
@@ -256,9 +268,7 @@ pub enum FilePrivateData {
         inner: alloc::sync::Arc<crate::fs::dev::pty::PtyInner>,
     },
     /// Per-open procfs text snapshot.
-    ProcText {
-        content: Arc<String>,
-    },
+    ProcText { content: Arc<String> },
     /// Sequential read-ahead state (per-open-file description).
     /// Used by PageCache to detect sequential reads and batch-prefetch pages.
     Readahead {
@@ -270,14 +280,20 @@ impl Clone for FilePrivateData {
     fn clone(&self) -> Self {
         match self {
             Self::Unused => Self::Unused,
-            Self::Memfd { seals } => Self::Memfd { seals: seals.clone() },
+            Self::Memfd { seals } => Self::Memfd {
+                seals: seals.clone(),
+            },
             Self::Pipe => Self::Pipe,
             Self::SocketCreate => Self::SocketCreate,
-            Self::PtyMaster { inner } => Self::PtyMaster { inner: inner.clone() },
-            Self::ProcText { content } => Self::ProcText { content: content.clone() },
-            Self::Readahead { ra_state } => {
-                Self::Readahead { ra_state: ra_state.clone() }
-            }
+            Self::PtyMaster { inner } => Self::PtyMaster {
+                inner: inner.clone(),
+            },
+            Self::ProcText { content } => Self::ProcText {
+                content: content.clone(),
+            },
+            Self::Readahead { ra_state } => Self::Readahead {
+                ra_state: ra_state.clone(),
+            },
         }
     }
 }

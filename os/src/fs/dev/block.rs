@@ -4,10 +4,8 @@ use core::fmt;
 use spin::{Mutex, MutexGuard};
 
 use crate::drivers::block::BlockDevice;
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, Metadata,
-};
 use crate::fs::vfs::file_system::FileSystem;
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, Metadata};
 use crate::hal::BLOCK_SZ;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;

@@ -18,11 +18,11 @@ use spin::{Mutex, MutexGuard};
 
 use crate::utils::error::SyscallErr;
 
-use super::vfs::{
-    FileFlags, FilePrivateData, FileSystem, FileType, FsInfo, InodeId,
-    InodeMode, Metadata, SuperBlock,
-};
 use super::vfs::IndexNode;
+use super::vfs::{
+    FileFlags, FilePrivateData, FileSystem, FileType, FsInfo, InodeId, InodeMode, Metadata,
+    SuperBlock,
+};
 
 pub mod files;
 
@@ -34,12 +34,8 @@ const SYSFS_MAX_NAMELEN: u64 = 255;
 /// 文件内容生成函数
 ///
 /// `extra_data` 由 inode 携带。返回实际拷贝的字节数。
-pub type SysContentFn = fn(
-    extra_data: usize,
-    offset: usize,
-    len: usize,
-    buf: &mut [u8],
-) -> Result<usize, SyscallErr>;
+pub type SysContentFn =
+    fn(extra_data: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr>;
 
 /// 动态查找钩子：当 children BTreeMap 中找不到时调用
 pub type FindHookFn = fn(inode: &SysInode, name: &str) -> Option<Arc<dyn IndexNode>>;
@@ -86,22 +82,20 @@ impl fmt::Debug for SysInode {
 impl SysInode {
     /// 构造一个完整的 inode，所有字段初始化（包括 owned_content=None）
     fn new_inner(parent: Weak<SysInode>, fs: Weak<SysFS>, metadata: Metadata) -> Arc<Self> {
-        Arc::new_cyclic(|weak| {
-            SysInode {
-                inner: Mutex::new(SysInodeData {
-                    parent,
-                    self_ref: weak.clone(),
-                    fs,
-                    metadata,
-                    children: BTreeMap::new(),
-                    content_fn: None,
-                    owned_content: None,
-                    write_fn: None,
-                    writable: false,
-                    find_hook: None,
-                    list_hook: None,
-                }),
-            }
+        Arc::new_cyclic(|weak| SysInode {
+            inner: Mutex::new(SysInodeData {
+                parent,
+                self_ref: weak.clone(),
+                fs,
+                metadata,
+                children: BTreeMap::new(),
+                content_fn: None,
+                owned_content: None,
+                write_fn: None,
+                writable: false,
+                find_hook: None,
+                list_hook: None,
+            }),
         })
     }
 
@@ -132,22 +126,20 @@ impl SysInode {
     ) -> Arc<Self> {
         let mut metadata = Metadata::new(FileType::Dir, mode);
         metadata.nlinks = 2;
-        Arc::new_cyclic(|weak| {
-            SysInode {
-                inner: Mutex::new(SysInodeData {
-                    parent: parent_weak,
-                    self_ref: weak.clone(),
-                    fs: fs_weak,
-                    metadata,
-                    children: BTreeMap::new(),
-                    content_fn: None,
-                    owned_content: None,
-                    write_fn: None,
-                    writable: false,
-                    find_hook: None,
-                    list_hook: None,
-                }),
-            }
+        Arc::new_cyclic(|weak| SysInode {
+            inner: Mutex::new(SysInodeData {
+                parent: parent_weak,
+                self_ref: weak.clone(),
+                fs: fs_weak,
+                metadata,
+                children: BTreeMap::new(),
+                content_fn: None,
+                owned_content: None,
+                write_fn: None,
+                writable: false,
+                find_hook: None,
+                list_hook: None,
+            }),
         })
     }
 
@@ -243,22 +235,20 @@ impl SysInode {
         metadata.nlinks = 1;
         let parent_weak = this.self_ref.clone();
         let fs_weak = this.fs.clone();
-        let child = Arc::new_cyclic(|weak| {
-            SysInode {
-                inner: Mutex::new(SysInodeData {
-                    parent: parent_weak,
-                    self_ref: weak.clone(),
-                    fs: fs_weak,
-                    metadata,
-                    children: BTreeMap::new(),
-                    content_fn: Some(content_fn),
-                    owned_content: None,
-                    write_fn: Some(write_fn),
-                    writable: true,
-                    find_hook: None,
-                    list_hook: None,
-                }),
-            }
+        let child = Arc::new_cyclic(|weak| SysInode {
+            inner: Mutex::new(SysInodeData {
+                parent: parent_weak,
+                self_ref: weak.clone(),
+                fs: fs_weak,
+                metadata,
+                children: BTreeMap::new(),
+                content_fn: Some(content_fn),
+                owned_content: None,
+                write_fn: Some(write_fn),
+                writable: true,
+                find_hook: None,
+                list_hook: None,
+            }),
         });
         this.children.insert(String::from(name), child);
         Ok(())
@@ -356,7 +346,11 @@ impl IndexNode for SysInode {
         // Extract fields under short-lived lock; release before rendering
         let (content_fn, owned_content, file_type) = {
             let data = self.inner.lock();
-            (data.content_fn, data.owned_content.clone(), data.metadata.file_type)
+            (
+                data.content_fn,
+                data.owned_content.clone(),
+                data.metadata.file_type,
+            )
         };
 
         match file_type {
@@ -392,19 +386,12 @@ impl IndexNode for SysInode {
             if data.metadata.file_type != FileType::Dir {
                 return Err(SyscallErr::ENOTDIR);
             }
-            let self_ref = data
-                .self_ref
-                .upgrade()
-                .map(|n| n as Arc<dyn IndexNode>);
+            let self_ref = data.self_ref.upgrade().map(|n| n as Arc<dyn IndexNode>);
             let parent = data
                 .parent
                 .upgrade()
                 .map(|n| n as Arc<dyn IndexNode>)
-                .or_else(|| {
-                    data.self_ref
-                        .upgrade()
-                        .map(|n| n as Arc<dyn IndexNode>)
-                });
+                .or_else(|| data.self_ref.upgrade().map(|n| n as Arc<dyn IndexNode>));
             let child = data.children.get(name).cloned();
             let hook = data.find_hook;
             (self_ref, parent, child, hook)
@@ -500,18 +487,19 @@ impl IndexNode for SysInode {
         }
 
         // Scan children (lock released, each child locks only itself)
-        let mut matches: Vec<String> = children
-            .into_iter()
-            .filter_map(|(name, child)| {
-                child.metadata().ok().and_then(|m| {
-                    if m.inode_id == ino {
-                        Some(name)
-                    } else {
-                        None
-                    }
+        let mut matches: Vec<String> =
+            children
+                .into_iter()
+                .filter_map(|(name, child)| {
+                    child.metadata().ok().and_then(|m| {
+                        if m.inode_id == ino {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
         match matches.len() {
             0 => Err(SyscallErr::ENOENT),

@@ -1,9 +1,9 @@
 //! /proc/sys/* — LTP 环境探测所需的最小兼容节点。
 
-use alloc::format;
-use alloc::string::{String, ToString};
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use alloc::format;
+use alloc::string::{String, ToString};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -40,11 +40,7 @@ pub fn ns_last_pid_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn ns_last_pid_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn ns_last_pid_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
     let value = text
         .trim()
@@ -64,11 +60,7 @@ pub fn core_pattern_content(
     proc_read_str(offset, len, buf, &pattern)
 }
 
-pub fn core_pattern_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn core_pattern_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
     *CORE_PATTERN.lock() = text.to_string();
     Ok(buf.len())
@@ -102,11 +94,7 @@ pub fn pipe_max_size_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn pipe_max_size_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn pipe_max_size_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let value = parse_usize_sysctl(buf)?;
     if !crate::fs::dev::pipe::set_pipe_max_size(value) {
         return Err(SyscallErr::EINVAL);
@@ -296,11 +284,7 @@ pub fn max_map_count_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn max_map_count_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn max_map_count_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let value = parse_usize_sysctl(buf)?;
     if !crate::mm::set_max_map_count(value) {
         return Err(SyscallErr::EINVAL);
@@ -338,11 +322,7 @@ pub fn panic_on_oom_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn panic_on_oom_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn panic_on_oom_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let value = parse_usize_sysctl(buf)?;
     crate::mm::set_panic_on_oom(value);
     Ok(buf.len())
@@ -397,11 +377,7 @@ pub fn msgmax_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn msgmax_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn msgmax_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let value = parse_usize_sysctl(buf)?;
     if !crate::syscall::set_sysv_msgmax(value) {
         return Err(SyscallErr::EINVAL);
@@ -419,11 +395,7 @@ pub fn msgmnb_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn msgmnb_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn msgmnb_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let value = parse_usize_sysctl(buf)?;
     if !crate::syscall::set_sysv_msgmnb(value) {
         return Err(SyscallErr::EINVAL);
@@ -441,11 +413,7 @@ pub fn msgmni_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn msgmni_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn msgmni_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let value = parse_usize_sysctl(buf)?;
     if !crate::syscall::set_sysv_msgmni(value) {
         return Err(SyscallErr::EINVAL);
@@ -463,16 +431,9 @@ pub fn msg_next_id_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn msg_next_id_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn msg_next_id_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
-    let value = text
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| SyscallErr::EINVAL)?;
+    let value = text.trim().parse::<i32>().map_err(|_| SyscallErr::EINVAL)?;
     if !crate::syscall::set_sysv_msg_next_id(value) {
         return Err(SyscallErr::EINVAL);
     }
@@ -490,11 +451,7 @@ pub fn sem_content(
     proc_read_str(offset, len, buf, &value)
 }
 
-pub fn sem_write(
-    _extra: usize,
-    _offset: usize,
-    buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn sem_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
     let (semmsl, semmns, semopm, semmni) = parse_four_usize_sysctl(buf)?;
     if !crate::syscall::set_sysv_sem_limits(semmsl, semmns, semopm, semmni) {
         return Err(SyscallErr::EINVAL);
@@ -504,9 +461,7 @@ pub fn sem_write(
 
 fn parse_usize_sysctl(buf: &[u8]) -> Result<usize, SyscallErr> {
     let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
-    text.trim()
-        .parse::<usize>()
-        .map_err(|_| SyscallErr::EINVAL)
+    text.trim().parse::<usize>().map_err(|_| SyscallErr::EINVAL)
 }
 
 fn parse_four_usize_sysctl(buf: &[u8]) -> Result<(usize, usize, usize, usize), SyscallErr> {
@@ -553,11 +508,7 @@ pub fn ip_forward_content(
     proc_read_str(offset, len, buf, "0\n")
 }
 
-pub fn ip_forward_write(
-    _extra: usize,
-    _offset: usize,
-    _buf: &[u8],
-) -> Result<usize, SyscallErr> {
+pub fn ip_forward_write(_extra: usize, _offset: usize, _buf: &[u8]) -> Result<usize, SyscallErr> {
     Err(SyscallErr::EPERM)
 }
 

@@ -71,11 +71,11 @@ mod enabled {
     static LAST_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_RET: AtomicUsize = AtomicUsize::new(0);
     // Fine-grained TLB counters
-    pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);    // total
-    pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0);       // full inval (invtlb 0x3 / sfence.vma no-arg)
-    pub static TLB_PAGE: AtomicUsize = AtomicUsize::new(0);       // single-page (invtlb 0x5 / sfence.vma addr)
-    pub static TLB_ACTIVATE: AtomicUsize = AtomicUsize::new(0);   // address-space switch
-    pub static TLB_GLOBAL: AtomicUsize = AtomicUsize::new(0);     // global inval (invtlb 0x0)
+    pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0); // total
+    pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0); // full inval (invtlb 0x3 / sfence.vma no-arg)
+    pub static TLB_PAGE: AtomicUsize = AtomicUsize::new(0); // single-page (invtlb 0x5 / sfence.vma addr)
+    pub static TLB_ACTIVATE: AtomicUsize = AtomicUsize::new(0); // address-space switch
+    pub static TLB_GLOBAL: AtomicUsize = AtomicUsize::new(0); // global inval (invtlb 0x0)
     static FRAME_ALLOC_HITS: AtomicUsize = AtomicUsize::new(0);
     static FRAME_FREE_HITS: AtomicUsize = AtomicUsize::new(0);
     static PAGE_FAULTS: AtomicUsize = AtomicUsize::new(0);
@@ -213,20 +213,42 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_taskq_add_ready() { if !stats_enabled() { return; } ADD_READY_TOTAL.fetch_add(1, Ordering::Relaxed); }
+    pub fn record_taskq_add_ready() {
+        if !stats_enabled() {
+            return;
+        }
+        ADD_READY_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
 
     #[inline(always)]
-    pub fn record_taskq_add_interruptible() { if !stats_enabled() { return; } ADD_INTERRUPTIBLE_TOTAL.fetch_add(1, Ordering::Relaxed); }
+    pub fn record_taskq_add_interruptible() {
+        if !stats_enabled() {
+            return;
+        }
+        ADD_INTERRUPTIBLE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
 
     #[inline(always)]
-    pub fn record_taskq_wake_interruptible() { if !stats_enabled() { return; } WAKE_INTERRUPTIBLE_TOTAL.fetch_add(1, Ordering::Relaxed); }
+    pub fn record_taskq_wake_interruptible() {
+        if !stats_enabled() {
+            return;
+        }
+        WAKE_INTERRUPTIBLE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
 
     #[inline(always)]
-    pub fn record_taskq_dup_enqueue() { if !stats_enabled() { return; } DUPLICATE_READY_ENQUEUE.fetch_add(1, Ordering::Relaxed); }
+    pub fn record_taskq_dup_enqueue() {
+        if !stats_enabled() {
+            return;
+        }
+        DUPLICATE_READY_ENQUEUE.fetch_add(1, Ordering::Relaxed);
+    }
 
     #[inline(always)]
     pub fn record_taskq_fetch(fair_pick: bool, scan_depth: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         if fair_pick {
             FAIR_PICK_CALLS.fetch_add(1, Ordering::Relaxed);
             update_max(&FAIR_SCAN_MAX, scan_depth);
@@ -236,8 +258,16 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_taskq_queue_lens(ready: usize, interruptible: usize, ready_zombie: usize, int_zombie: usize, nonzero_nice: usize) {
-        if !stats_enabled() { return; }
+    pub fn record_taskq_queue_lens(
+        ready: usize,
+        interruptible: usize,
+        ready_zombie: usize,
+        int_zombie: usize,
+        nonzero_nice: usize,
+    ) {
+        if !stats_enabled() {
+            return;
+        }
         update_max(&READY_LEN_MAX, ready);
         update_max(&INTERRUPTIBLE_LEN_MAX, interruptible);
         update_max(&READY_ZOMBIE_MAX, ready_zombie);
@@ -247,44 +277,85 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_zombie_drain_full(scan_total: usize, calls: usize, removed: usize) {
-        if !stats_enabled() { return; }
-        if scan_total != 0 { ZOMBIE_DRAIN_SCAN_TOTAL.fetch_add(scan_total, Ordering::Relaxed); }
-        if calls != 0 { ZOMBIE_DRAIN_CALLS.fetch_add(calls, Ordering::Relaxed); }
-        if removed != 0 { ZOMBIE_DRAIN_REMOVED.fetch_add(removed, Ordering::Relaxed); }
+        if !stats_enabled() {
+            return;
+        }
+        if scan_total != 0 {
+            ZOMBIE_DRAIN_SCAN_TOTAL.fetch_add(scan_total, Ordering::Relaxed);
+        }
+        if calls != 0 {
+            ZOMBIE_DRAIN_CALLS.fetch_add(calls, Ordering::Relaxed);
+        }
+        if removed != 0 {
+            ZOMBIE_DRAIN_REMOVED.fetch_add(removed, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
-    pub fn record_ktimer_add() { if !stats_enabled() { return; } KTIMER_ADD_TOTAL.fetch_add(1, Ordering::Relaxed); }
+    pub fn record_ktimer_add() {
+        if !stats_enabled() {
+            return;
+        }
+        KTIMER_ADD_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
 
     #[inline(always)]
-    pub fn record_ktimer_len(len: usize) { if !stats_enabled() { return; } update_max(&KTIMER_LEN_MAX, len); }
+    pub fn record_ktimer_len(len: usize) {
+        if !stats_enabled() {
+            return;
+        }
+        update_max(&KTIMER_LEN_MAX, len);
+    }
 
     #[inline(always)]
     pub fn record_ktimer_pop(pop_count: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         KTIMER_POP_TOTAL.fetch_add(1, Ordering::Relaxed);
         update_max(&KTIMER_POP_MAX, pop_count);
     }
 
     #[inline(always)]
-    pub fn record_ktimer_stale_waketask() { if !stats_enabled() { return; } KTIMER_STALE_WAKETASK.fetch_add(1, Ordering::Relaxed); }
-
-    #[inline(always)]
-    pub fn record_ktimer_real_wake() { if !stats_enabled() { return; } KTIMER_REAL_WAKE.fetch_add(1, Ordering::Relaxed); }
-
-    #[inline(always)]
-    pub fn record_ktimer_compact(stale_removed: usize) {
-        if !stats_enabled() { return; }
-        KTIMER_COMPACT_CALLS.fetch_add(1, Ordering::Relaxed);
-        if stale_removed != 0 { KTIMER_STALE_REMOVED.fetch_add(stale_removed, Ordering::Relaxed); }
+    pub fn record_ktimer_stale_waketask() {
+        if !stats_enabled() {
+            return;
+        }
+        KTIMER_STALE_WAKETASK.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
-    pub fn record_wait_with_timeout() { if !stats_enabled() { return; } WAIT_WITH_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed); }
+    pub fn record_ktimer_real_wake() {
+        if !stats_enabled() {
+            return;
+        }
+        KTIMER_REAL_WAKE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ktimer_compact(stale_removed: usize) {
+        if !stats_enabled() {
+            return;
+        }
+        KTIMER_COMPACT_CALLS.fetch_add(1, Ordering::Relaxed);
+        if stale_removed != 0 {
+            KTIMER_STALE_REMOVED.fetch_add(stale_removed, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_wait_with_timeout() {
+        if !stats_enabled() {
+            return;
+        }
+        WAIT_WITH_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
 
     #[inline(always)]
     pub fn record_timer_irq_cost(start: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         let elapsed = perf_time_now().wrapping_sub(start);
         TIMER_IRQ_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
         update_max(&TIMER_IRQ_TICKS_MAX, elapsed);
@@ -292,7 +363,9 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_timer_pop_cost(start: usize, nodes_popped: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         let elapsed = perf_time_now().wrapping_sub(start);
         TIMER_POP_NODES_TOTAL.fetch_add(nodes_popped, Ordering::Relaxed);
         TIMER_POP_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
@@ -301,13 +374,17 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_seccomp_check_call() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         SECCOMP_CHECK_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_seccomp_check(start: usize, bypass: bool) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         let elapsed = perf_time_now().wrapping_sub(start);
         SECCOMP_CHECK_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
         update_max(&SECCOMP_CHECK_TICKS_MAX, elapsed);
@@ -318,27 +395,37 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_seccomp_disabled_bypass() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         SECCOMP_DISABLED_BYPASS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_syscall_enter(syscall_id: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         SYSCALL_TOTAL.fetch_add(1, Ordering::Relaxed);
-        if syscall_id == 173 { SYSCALL_GETPPID_TOTAL.fetch_add(1, Ordering::Relaxed); }
+        if syscall_id == 173 {
+            SYSCALL_GETPPID_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
     pub fn record_syscall_cost_ticks(ticks: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         SYSCALL_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&SYSCALL_COST_MAX_TICKS, ticks);
     }
 
     #[inline(always)]
     pub fn record_trap_cost_ticks(ticks: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         ECALL_TRAP_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&ECALL_TRAP_COST_TICKS_MAX, ticks);
         update_max(&TRAP_ENTER_COST_MAX_TICKS, ticks);
@@ -346,87 +433,123 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_getppid_cost(ticks: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         GETPPID_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&GETPPID_COST_TICKS_MAX, ticks);
     }
 
     #[inline(always)]
     pub fn record_context_switch() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         CONTEXT_SWITCH_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_reclaim_run() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         RECLAIM_RUNS_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_reclaim_pages_scanned(n: usize) {
-        if n == 0 { return; }
-        if !stats_enabled() { return; }
+        if n == 0 {
+            return;
+        }
+        if !stats_enabled() {
+            return;
+        }
         RECLAIM_PAGES_SCANNED_TOTAL.fetch_add(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_reclaim_pages_freed(n: usize) {
-        if n == 0 { return; }
-        if !stats_enabled() { return; }
+        if n == 0 {
+            return;
+        }
+        if !stats_enabled() {
+            return;
+        }
         RECLAIM_PAGES_FREED_TOTAL.fetch_add(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_clock_scanned(n: usize) {
-        if n == 0 { return; }
-        if !stats_enabled() { return; }
+        if n == 0 {
+            return;
+        }
+        if !stats_enabled() {
+            return;
+        }
         CLOCK_SCANNED.fetch_add(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_clock_second_chance(n: usize) {
-        if n == 0 { return; }
-        if !stats_enabled() { return; }
+        if n == 0 {
+            return;
+        }
+        if !stats_enabled() {
+            return;
+        }
         CLOCK_SECOND_CHANCE.fetch_add(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_clock_evicted(n: usize) {
-        if n == 0 { return; }
-        if !stats_enabled() { return; }
+        if n == 0 {
+            return;
+        }
+        if !stats_enabled() {
+            return;
+        }
         CLOCK_EVICTED.fetch_add(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_heap_alloc() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         HEAP_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_heap_alloc_cost(ticks: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         HEAP_ALLOC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&HEAP_ALLOC_TICKS_MAX, ticks);
     }
 
     #[inline(always)]
     pub fn record_heap_dealloc() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         HEAP_DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_heap_dealloc_cost(ticks: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         HEAP_DEALLOC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&HEAP_DEALLOC_TICKS_MAX, ticks);
     }
 
     #[inline(always)]
     pub fn record_heap_dealloc_scan_steps(steps: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         HEAP_DEALLOC_SCAN_STEPS_TOTAL.fetch_add(steps, Ordering::Relaxed);
     }
 
@@ -434,7 +557,9 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_pc_read(pages: usize, cycles: usize, hit_cycles: usize, miss_cycles: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_READ_CALLS.fetch_add(1, Ordering::Relaxed);
         PC_READ_PAGES.fetch_add(pages, Ordering::Relaxed);
         PC_READ_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
@@ -444,34 +569,46 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_pc_copy_cycles(cycles: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_COPY_CYCLES.fetch_add(cycles, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_pc_lookup_cycles(cycles: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_LOOKUP_CYCLES.fetch_add(cycles, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_pc_write(pages: usize, full_overwrite: bool, cycles: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
         PC_WRITE_PAGES.fetch_add(pages, Ordering::Relaxed);
-        if full_overwrite { PC_WRITE_OVERWRITE.fetch_add(1, Ordering::Relaxed); }
+        if full_overwrite {
+            PC_WRITE_OVERWRITE.fetch_add(1, Ordering::Relaxed);
+        }
         PC_WRITE_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_pc_write_eventually_full() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_WRITE_EVENTUALLY_FULL.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_pc_writeback(pages: usize, cycles: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_WRITEBACK_CALLS.fetch_add(1, Ordering::Relaxed);
         PC_WRITEBACK_PAGES.fetch_add(pages, Ordering::Relaxed);
         PC_WRITEBACK_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
@@ -479,31 +616,41 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_pc_miss() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_READ_MISS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_pc_falloc_cycles(cycles: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         PC_FALLOC_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_wb_bg_call() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         WB_BG_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_wb_throttle_call() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         WB_THROTTLE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_wb_redirty() {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         WB_REDIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -511,14 +658,18 @@ mod enabled {
 
     #[inline(always)]
     pub fn record_blk_vread(sectors: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         BLK_VREAD_REQS.fetch_add(1, Ordering::Relaxed);
         BLK_VREAD_SECS.fetch_add(sectors, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn record_blk_vwrite(sectors: usize) {
-        if !stats_enabled() { return; }
+        if !stats_enabled() {
+            return;
+        }
         BLK_VWRITE_REQS.fetch_add(1, Ordering::Relaxed);
         BLK_VWRITE_SECS.fetch_add(sectors, Ordering::Relaxed);
     }
@@ -624,7 +775,11 @@ mod enabled {
     pub fn perf_dump_timings(label: &str) {
         let freq = crate::hal::get_clock_freq();
         let to_ms = |ticks: usize| -> usize {
-            if freq > 0 { ticks.saturating_mul(1000) / freq } else { 0 }
+            if freq > 0 {
+                ticks.saturating_mul(1000) / freq
+            } else {
+                0
+            }
         };
         let c_ms = to_ms(CLONE_TIME_TICKS.swap(0, Ordering::Relaxed));
         let c_n = CLONE_TIME_COUNT.swap(0, Ordering::Relaxed);
@@ -675,14 +830,17 @@ mod enabled {
         }
         #[cfg(target_arch = "loongarch64")]
         {
-            let mut lo: usize; let mut hi: usize;
+            let mut lo: usize;
+            let mut hi: usize;
             // Safety: `rdtime.d` 只读取稳定计时器到通用寄存器，不访问内存；
             // 两个输出寄存器均由 asm! 约束分配。
             unsafe { core::arch::asm!("rdtime.d {},{}", out(reg) lo, out(reg) hi) };
             lo
         }
         #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
-        { 0 }
+        {
+            0
+        }
     }
 
     fn load(counter: &AtomicUsize) -> usize {
@@ -750,15 +908,35 @@ mod enabled {
             load(&LAST_SYSCALL_RET),
         );
         // VFS find diagnostics
-        let (f_calls, f_ticks, f_overlay, f_hit, f_miss, f_lock, f_inner, f_insert, f_ov_ticks) = crate::fs::vfs::mount::counters::find_snapshot();
+        let (f_calls, f_ticks, f_overlay, f_hit, f_miss, f_lock, f_inner, f_insert, f_ov_ticks) =
+            crate::fs::vfs::mount::counters::find_snapshot();
         let freq = crate::hal::get_clock_freq();
-        let us = |t: usize| -> usize { if freq > 0 { t.saturating_mul(1000000) / freq } else { 0 } };
-        let f_us = if f_calls > 0 { us(f_ticks) / f_calls } else { 0 };
+        let us = |t: usize| -> usize {
+            if freq > 0 {
+                t.saturating_mul(1000000) / freq
+            } else {
+                0
+            }
+        };
+        let f_us = if f_calls > 0 {
+            us(f_ticks) / f_calls
+        } else {
+            0
+        };
         let lock_us = if f_calls > 0 { us(f_lock) / f_calls } else { 0 };
         let inner_us = if f_miss > 0 { us(f_inner) / f_miss } else { 0 };
         let insert_us = if f_miss > 0 { us(f_insert) / f_miss } else { 0 };
-        crate::println!("[vfs-find] {} calls={} hit={} miss={} avg={}us lock={}us inner={}us insert={}us",
-            reason, f_calls, f_hit, f_miss, f_us, lock_us, inner_us, insert_us);
+        crate::println!(
+            "[vfs-find] {} calls={} hit={} miss={} avg={}us lock={}us inner={}us insert={}us",
+            reason,
+            f_calls,
+            f_hit,
+            f_miss,
+            f_us,
+            lock_us,
+            inner_us,
+            insert_us
+        );
     }
 
     /// Unconditionally print a perf snapshot (for group-boundary instrumentation).
@@ -1118,7 +1296,9 @@ pub fn record_frame_alloc_time_us(_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn perf_time_now() -> usize { 0 }
+pub fn perf_time_now() -> usize {
+    0
+}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -1142,7 +1322,14 @@ pub fn record_taskq_fetch(_fair_pick: bool, _scan_depth: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_taskq_queue_lens(_ready: usize, _interruptible: usize, _ready_zombie: usize, _int_zombie: usize, _nonzero_nice: usize) {}
+pub fn record_taskq_queue_lens(
+    _ready: usize,
+    _interruptible: usize,
+    _ready_zombie: usize,
+    _int_zombie: usize,
+    _nonzero_nice: usize,
+) {
+}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -1313,128 +1500,179 @@ pub fn reset_all_counters() {}
 // ── P0 counter stubs (zero-valued when perf_stats disabled) ──
 
 #[cfg(not(feature = "perf_stats"))]
-pub static FAIR_PICK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FAIR_PICK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FAST_PATH_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FAST_PATH_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static FAIR_SCAN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static DUPLICATE_READY_ENQUEUE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static DUPLICATE_READY_ENQUEUE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ADD_READY_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ADD_READY_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ADD_INTERRUPTIBLE_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ADD_INTERRUPTIBLE_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static WAKE_INTERRUPTIBLE_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static WAKE_INTERRUPTIBLE_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static READY_LEN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static INTERRUPTIBLE_LEN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static INTERRUPTIBLE_LEN_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static READY_ZOMBIE_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static READY_ZOMBIE_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static INTERRUPTIBLE_ZOMBIE_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static INTERRUPTIBLE_ZOMBIE_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ZOMBIE_DRAIN_SCAN_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ZOMBIE_DRAIN_SCAN_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ZOMBIE_DRAIN_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ZOMBIE_DRAIN_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ZOMBIE_DRAIN_REMOVED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ZOMBIE_DRAIN_REMOVED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static READY_NONZERO_NICE_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static READY_NONZERO_NICE_CUR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_LEN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_LEN_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_ADD_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_ADD_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_POP_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_POP_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_POP_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_POP_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_STALE_WAKETASK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_STALE_WAKETASK: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_REAL_WAKE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_REAL_WAKE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_COMPACT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_COMPACT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static KTIMER_STALE_REMOVED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KTIMER_STALE_REMOVED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static WAIT_WITH_TIMEOUT_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static WAIT_WITH_TIMEOUT_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(not(feature = "perf_stats"))]
 pub static SYSCALL_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static SYSCALL_GETPPID_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SYSCALL_GETPPID_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static SYSCALL_COST_MAX_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SYSCALL_COST_MAX_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TRAP_ENTER_COST_MAX_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TRAP_ENTER_COST_MAX_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(not(feature = "perf_stats"))]
-pub static GETPPID_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static GETPPID_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static GETPPID_COST_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static GETPPID_COST_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static SYSCALL_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SYSCALL_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ECALL_TRAP_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ECALL_TRAP_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static ECALL_TRAP_COST_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ECALL_TRAP_COST_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static CONTEXT_SWITCH_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static CONTEXT_SWITCH_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static RECLAIM_RUNS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static RECLAIM_RUNS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static RECLAIM_PAGES_SCANNED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static RECLAIM_PAGES_SCANNED_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static RECLAIM_PAGES_FREED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static RECLAIM_PAGES_FREED_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Clock Eviction stubs ──
 #[cfg(not(feature = "perf_stats"))]
 pub static CLOCK_SCANNED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static CLOCK_SECOND_CHANCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static CLOCK_SECOND_CHANCE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static CLOCK_EVICTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── Timer IRQ / Pop Cost stubs ──
 #[cfg(not(feature = "perf_stats"))]
-pub static TIMER_IRQ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TIMER_IRQ_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TIMER_IRQ_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TIMER_IRQ_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TIMER_POP_NODES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TIMER_POP_NODES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TIMER_POP_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TIMER_POP_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TIMER_POP_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TIMER_POP_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Seccomp stubs ──
 #[cfg(not(feature = "perf_stats"))]
-pub static SECCOMP_CHECK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SECCOMP_CHECK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static SECCOMP_CHECK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SECCOMP_CHECK_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static SECCOMP_CHECK_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SECCOMP_CHECK_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static SECCOMP_DISABLED_BYPASS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static SECCOMP_DISABLED_BYPASS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Heap Allocator Cost stubs ──
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_ALLOC_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_ALLOC_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_ALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_ALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_ALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_ALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_DEALLOC_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_DEALLOC_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_DEALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_DEALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_DEALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_DEALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── PageCache I/O stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -1444,51 +1682,71 @@ pub static PC_READ_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_READ_MISS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_READ_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_READ_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_READ_HIT_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_READ_HIT_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_READ_MISS_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_READ_MISS_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_COPY_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_COPY_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_LOOKUP_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_LOOKUP_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITE_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITE_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITE_PAGES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITE_OVERWRITE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITE_OVERWRITE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITE_EVENTUALLY_FULL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITE_EVENTUALLY_FULL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITE_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITE_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITEBACK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITEBACK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITEBACK_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITEBACK_PAGES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_WRITEBACK_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_WRITEBACK_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static PC_FALLOC_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static PC_FALLOC_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Writeback Throttling stubs ──
 #[cfg(not(feature = "perf_stats"))]
 pub static WB_BG_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static WB_THROTTLE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static WB_THROTTLE_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static WB_REDIRTY_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static WB_REDIRTY_PAGES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Block Device I/O stubs ──
 #[cfg(not(feature = "perf_stats"))]
-pub static BLK_VREAD_REQS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static BLK_VREAD_REQS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static BLK_VREAD_SECS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static BLK_VREAD_SECS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static BLK_VWRITE_REQS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static BLK_VWRITE_REQS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static BLK_VWRITE_SECS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static BLK_VWRITE_SECS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB counter stubs (zero-valued when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]

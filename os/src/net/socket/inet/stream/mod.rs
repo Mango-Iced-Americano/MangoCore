@@ -36,10 +36,10 @@ use crate::{
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
-use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use self::inner::{
     with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::{BoundInner, PortManager};
 use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
@@ -182,8 +182,9 @@ impl TcpSocket {
         );
         self.connect_waiters
             .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
-        self.accept_waiters
-            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP);
+        self.accept_waiters.notify_events_all(
+            EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
+        );
     }
 
     /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
@@ -208,8 +209,7 @@ impl TcpSocket {
         }
 
         // recv 等待者：有数据可读或对端关闭
-        if events
-            & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
+        if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
             != 0
         {
             self.recv_waiters.notify_events_at_most_if_unlocked(
@@ -376,8 +376,7 @@ impl Socket for TcpSocket {
         match new_inner.listen(BACKLOG_SIZE as usize) {
             Ok(listening) => {
                 let listen_addr = listening.listen_addr();
-                let ifindex =
-                    crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
+                let ifindex = crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
                 if let Some(&handle) = listening.handles.first() {
                     self.bound
                         .lock()
@@ -447,11 +446,15 @@ impl Socket for TcpSocket {
         let bound_ifindex_capture = *self.bound_ifindex.lock();
         match new_inner.connect(remote_endpoint, bound_ifindex_capture) {
             Ok(connecting) => {
-                let ifindex = bound_ifindex_capture
-                    .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr)));
-                self.bound
-                    .lock()
-                    .bind(connecting.handle, ifindex, Some(connecting.local.addr), connecting.local.port);
+                let ifindex = bound_ifindex_capture.unwrap_or_else(|| {
+                    crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr))
+                });
+                self.bound.lock().bind(
+                    connecting.handle,
+                    ifindex,
+                    Some(connecting.local.addr),
+                    connecting.local.port,
+                );
                 *inner = Inner::Connecting(connecting);
                 drop(inner);
                 // 做一次非阻塞状态检查
@@ -598,9 +601,9 @@ impl Socket for TcpSocket {
         let mut fast_ifindex: u32 = 0;
 
         let accepted_bound = if let Inner::Established(ref est) = connected_inner {
-            if let Some(binding) = NET_INTERFACE.inner_handler(|inner_ref| {
-                inner_ref.bindings.get(&est.handle).copied()
-            }).flatten()
+            if let Some(binding) = NET_INTERFACE
+                .inner_handler(|inner_ref| inner_ref.bindings.get(&est.handle).copied())
+                .flatten()
             {
                 fast_route = Some(est.handle);
                 fast_ifindex = binding.ifindex;
@@ -645,11 +648,9 @@ impl Socket for TcpSocket {
 
         let task = current_task().unwrap();
         let files_ref = task.process.files();
-    let mut fd_table = files_ref.lock();
+        let mut fd_table = files_ref.lock();
         let old_cloexec = fd_table.get_cloexec(sockfd as usize);
-        let vf = vfs::File::new_without_open(
-            socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,
-        );
+        let vf = vfs::File::new_without_open(socket_file, FileFlags::O_RDWR, vfs::FileType::Socket);
         let new_fd = fd_table
             .alloc_fd(vf, old_cloexec)
             .map_err(|_| SyscallErr::EMFILE)?;
@@ -768,7 +769,11 @@ impl Socket for TcpSocket {
         match iface {
             Some(iface) => {
                 *self.bound_ifindex.lock() = Some(iface.nic_id() as u32);
-                log::info!("[TcpSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                log::info!(
+                    "[TcpSocket] bound to device {} (ifindex={})",
+                    ifname,
+                    iface.nic_id()
+                );
                 Ok(0)
             }
             None => Err(SyscallErr::ENODEV),
@@ -832,37 +837,35 @@ impl Socket for TcpSocket {
         }
 
         if let Some((route, _ifindex)) = fast {
-            if let Some((ret, ready_after)) =
-                NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
-                    let result = if tcp_sock.can_recv() {
-                        tcp_sock
-                            .recv_slice(buf)
-                            .map(|n| n as isize)
-                            .map_err(|_| SyscallErr::ENOTCONN)
-                    } else {
-                        match tcp_sock.state() {
-                            tcp::State::CloseWait
+            if let Some((ret, ready_after)) = NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
+                let result = if tcp_sock.can_recv() {
+                    tcp_sock
+                        .recv_slice(buf)
+                        .map(|n| n as isize)
+                        .map_err(|_| SyscallErr::ENOTCONN)
+                } else {
+                    match tcp_sock.state() {
+                        tcp::State::CloseWait
+                        | tcp::State::Closing
+                        | tcp::State::LastAck
+                        | tcp::State::TimeWait => Ok(0),
+                        tcp::State::Closed => Err(SyscallErr::ECONNRESET),
+                        _ if !tcp_sock.may_recv() => Ok(0),
+                        _ => Err(SyscallErr::EAGAIN),
+                    }
+                };
+                let readable = tcp_sock.can_recv()
+                    || !tcp_sock.may_recv()
+                    || matches!(
+                        tcp_sock.state(),
+                        tcp::State::CloseWait
                             | tcp::State::Closing
                             | tcp::State::LastAck
-                            | tcp::State::TimeWait => Ok(0),
-                            tcp::State::Closed => Err(SyscallErr::ECONNRESET),
-                            _ if !tcp_sock.may_recv() => Ok(0),
-                            _ => Err(SyscallErr::EAGAIN),
-                        }
-                    };
-                    let readable = tcp_sock.can_recv()
-                        || !tcp_sock.may_recv()
-                        || matches!(
-                            tcp_sock.state(),
-                            tcp::State::CloseWait
-                                | tcp::State::Closing
-                                | tcp::State::LastAck
-                                | tcp::State::TimeWait
-                                | tcp::State::Closed
-                        );
-                    (result, readable)
-                })
-            {
+                            | tcp::State::TimeWait
+                            | tcp::State::Closed
+                    );
+                (result, readable)
+            }) {
                 update_ready_bit(&self.pollee, EPollEvent::EPOLLIN.bits(), ready_after);
                 return ret;
             }
@@ -929,33 +932,31 @@ impl Socket for TcpSocket {
         }
 
         if let Some((route, _ifindex)) = fast {
-            if let Some((ret, ready_after)) =
-                NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
-                    let result = if tcp_sock.can_send() {
-                        tcp_sock
-                            .send_slice(buf)
-                            .map(|n| n as isize)
-                            .map_err(|_| SyscallErr::ECONNABORTED)
-                    } else {
-                        match tcp_sock.state() {
-                            tcp::State::Closed => Err(SyscallErr::ECONNRESET),
-                            tcp::State::TimeWait
-                            | tcp::State::Closing
-                            | tcp::State::LastAck => Err(SyscallErr::EPIPE),
-                            _ => Err(SyscallErr::EAGAIN),
+            if let Some((ret, ready_after)) = NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
+                let result = if tcp_sock.can_send() {
+                    tcp_sock
+                        .send_slice(buf)
+                        .map(|n| n as isize)
+                        .map_err(|_| SyscallErr::ECONNABORTED)
+                } else {
+                    match tcp_sock.state() {
+                        tcp::State::Closed => Err(SyscallErr::ECONNRESET),
+                        tcp::State::TimeWait | tcp::State::Closing | tcp::State::LastAck => {
+                            Err(SyscallErr::EPIPE)
                         }
-                    };
-                    let writable = tcp_sock.can_send()
-                        && !matches!(
-                            tcp_sock.state(),
-                            tcp::State::Closed
-                                | tcp::State::TimeWait
-                                | tcp::State::Closing
-                                | tcp::State::LastAck
-                        );
-                    (result, writable)
-                })
-            {
+                        _ => Err(SyscallErr::EAGAIN),
+                    }
+                };
+                let writable = tcp_sock.can_send()
+                    && !matches!(
+                        tcp_sock.state(),
+                        tcp::State::Closed
+                            | tcp::State::TimeWait
+                            | tcp::State::Closing
+                            | tcp::State::LastAck
+                    );
+                (result, writable)
+            }) {
                 update_ready_bit(&self.pollee, EPollEvent::EPOLLOUT.bits(), ready_after);
                 return ret;
             }
@@ -982,9 +983,7 @@ impl Socket for TcpSocket {
         }
         let inner = self.inner.lock();
         let _ = flags;
-        let ret = inner
-            .recv_to_user(buf, 0, buf.len())
-            .map(|n| n as isize);
+        let ret = inner.recv_to_user(buf, 0, buf.len()).map(|n| n as isize);
         drop(inner);
         update_ready_bit(
             &self.pollee,

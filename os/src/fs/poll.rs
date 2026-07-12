@@ -13,7 +13,9 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-use crate::task::{current_task, has_actionable_signal, task_manager_counts, WaitQueue, WaitResult};
+use crate::task::{
+    current_task, has_actionable_signal, task_manager_counts, WaitQueue, WaitResult,
+};
 ///  A scheduling  scheme  whereby  the  local  process  periodically  checks  until  the  pre-specified events (for example, read, write) have occurred.
 /// The PollFd struct in 32-bit style.
 #[repr(C)]
@@ -281,7 +283,11 @@ struct PPollScan {
     wait_queues: Vec<PollWaitQueue>,
 }
 
-fn scan_ppoll(fds: &spin::Mutex<FdTable>, poll_fds: &mut [PollFd], collect_wait: bool) -> PPollScan {
+fn scan_ppoll(
+    fds: &spin::Mutex<FdTable>,
+    poll_fds: &mut [PollFd],
+    collect_wait: bool,
+) -> PPollScan {
     NET_INTERFACE.poll();
     let fd_table = fds.lock();
     let mut ready = 0;
@@ -341,7 +347,10 @@ fn scan_pselect(
 
     for fd in 0..1024 {
         let want_read = read_fds.as_ref().map(|set| set.is_set(fd)).unwrap_or(false);
-        let want_write = write_fds.as_ref().map(|set| set.is_set(fd)).unwrap_or(false);
+        let want_write = write_fds
+            .as_ref()
+            .map(|set| set.is_set(fd))
+            .unwrap_or(false);
         let want_exception = exception_fds
             .as_ref()
             .map(|set| set.is_set(fd))
@@ -542,8 +551,7 @@ pub fn ppoll(
         }
 
         log::trace!("[ppoll] result: {:?}", poll_fd);
-        if let Err(_) = UserSlice::new(fds as *const PollFd, nfds)
-            .write_array_from(token, &poll_fd)
+        if let Err(_) = UserSlice::new(fds as *const PollFd, nfds).write_array_from(token, &poll_fd)
         {
             done = EFAULT;
             interrupted = false;

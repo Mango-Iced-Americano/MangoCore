@@ -139,8 +139,6 @@ pub static TRACE_DROPPED: AtomicUsize = AtomicUsize::new(0);
 /// Resource scan events (buddy histogram, zombie grouping, heap trace)
 pub const HTRACE_RESOURCE_BASE: u64 = 0xD000;
 
-
-
 /// Decode a tag to a human-readable short label.
 pub(crate) fn tag_name(tag: u64) -> &'static str {
     // Syscall IDs — try the syscall name table first (works for any ID range)
@@ -264,7 +262,11 @@ pub(crate) fn dump_to_string(max_entries: usize) -> alloc::string::String {
     let mut s = alloc::string::String::with_capacity(cap);
 
     use core::fmt::Write;
-    let _ = writeln!(s, "# trace buffer: {} entries (ring size {}), showing {}", count, TRACE_SIZE, dump_count);
+    let _ = writeln!(
+        s,
+        "# trace buffer: {} entries (ring size {}), showing {}",
+        count, TRACE_SIZE, dump_count
+    );
     let _ = writeln!(s, "# format: timestamp_us tag=HEX a1..a6");
 
     for i in 0..dump_count {

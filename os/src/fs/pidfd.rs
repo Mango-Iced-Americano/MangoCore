@@ -5,7 +5,9 @@ use spin::MutexGuard;
 use crate::{
     fs::{
         dev::DEV_FS,
-        vfs::{File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata},
+        vfs::{
+            File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata,
+        },
     },
     task::ProcessControlBlock,
     utils::error::SyscallErr,

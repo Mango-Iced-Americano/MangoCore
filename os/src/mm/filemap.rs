@@ -180,8 +180,7 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
         .alloc_in_memory(ctx.vpn, cache_frame)
         .map_err(|_| MemoryError::AlreadyAllocated)?;
 
-    if let Err(err) =
-        UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, area.vm_perm())
+    if let Err(err) = UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, area.vm_perm())
     {
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);

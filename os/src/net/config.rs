@@ -102,7 +102,9 @@ pub struct NetInterfaceInner<'a> {
 
 impl<'a> NetInterfaceInner<'a> {
     pub(crate) fn stack_mut(&mut self, ifindex: u32) -> Option<&mut DeviceStack<'a>> {
-        self.stacks.iter_mut().find(|s| s.nic.nic_id() as u32 == ifindex)
+        self.stacks
+            .iter_mut()
+            .find(|s| s.nic.nic_id() as u32 == ifindex)
     }
 
     fn resolve(&self, rh: RouteSocketHandle) -> Option<SocketHandle> {
@@ -122,7 +124,9 @@ impl<'a> NetInterfaceInner<'a> {
                     crate::net::net_core::DeviceKind::Loopback,
                     [0u8; 6],
                     65536,
-                    crate::net::net_core::IFF_UP | crate::net::net_core::IFF_LOOPBACK | crate::net::net_core::IFF_RUNNING,
+                    crate::net::net_core::IFF_UP
+                        | crate::net::net_core::IFF_LOOPBACK
+                        | crate::net::net_core::IFF_RUNNING,
                     vec![
                         IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
                         IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
@@ -139,8 +143,12 @@ impl<'a> NetInterfaceInner<'a> {
             let mut lo_iface = Interface::new(lo_config, &mut lo_device, now);
             let mut lo_sockets = SocketSet::new(vec![]);
             lo_iface.update_ip_addrs(|addrs| {
-                addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
-                addrs.push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128)).unwrap();
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+                    .unwrap();
+                addrs
+                    .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
+                    .unwrap();
             });
             stacks.push(DeviceStack {
                 nic: lo_nic,
@@ -154,13 +162,21 @@ impl<'a> NetInterfaceInner<'a> {
         let (eth_adapter, hw_addr, has_real_nic) = match NET_DEVICE.lock().take() {
             Some(net_device) => {
                 let mac = net_device.mac_address();
-                (SmoltcpDeviceAdapter::new(net_device), EthernetAddress(mac), true)
+                (
+                    SmoltcpDeviceAdapter::new(net_device),
+                    EthernetAddress(mac),
+                    true,
+                )
             }
             None => {
                 boot_trace!("[kernel] No net device, using null device (loopback only)");
                 let null_dev = Arc::new(NullNetDevice);
                 let null_mac = [0x02u8, 0, 0, 0, 0, 1];
-                (SmoltcpDeviceAdapter::new(null_dev), EthernetAddress(null_mac), false)
+                (
+                    SmoltcpDeviceAdapter::new(null_dev),
+                    EthernetAddress(null_mac),
+                    false,
+                )
             }
         };
 
@@ -187,6 +203,15 @@ impl<'a> NetInterfaceInner<'a> {
             let mut eth_iface = Interface::new(eth_config, &mut eth_device, now);
             let mut eth_sockets = SocketSet::new(vec![]);
 
+            #[cfg(all(feature = "board_2k1000", feature = "gmac_2k1000"))]
+            if has_real_nic {
+                let static_cidr = IpCidr::new(IpAddress::v4(192, 168, 9, 20), 24);
+                net_core::set_eth0_ipv4(static_cidr);
+                net_core::set_default_gateway(None);
+                println!("[net] eth0 static address 192.168.9.20/24");
+            }
+
+            #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
             if has_real_nic {
                 // DHCP probe
                 let mut dhcp_socket = dhcpv4::Socket::new();
@@ -198,12 +223,12 @@ impl<'a> NetInterfaceInner<'a> {
                     ..dhcpv4::RetryConfig::default()
                 });
                 let dhcp_handle = eth_sockets.add(dhcp_socket);
-                let deadline = Instant::from_millis(
-                    current_time_duration().as_millis() as i64 + 5000,
-                );
+                let deadline =
+                    Instant::from_millis(current_time_duration().as_millis() as i64 + 5000);
 
                 loop {
-                    let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+                    let timestamp =
+                        Instant::from_millis(current_time_duration().as_millis() as i64);
                     *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
                     eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
 
@@ -295,7 +320,14 @@ impl<'a> NetInterface<'a> {
     where
         T: AnySocket<'a>,
     {
-        Some(self.inner.lock().as_mut()?.stack_mut(ifindex)?.sockets.add(socket))
+        Some(
+            self.inner
+                .lock()
+                .as_mut()?
+                .stack_mut(ifindex)?
+                .sockets
+                .add(socket),
+        )
     }
 
     /// Add a veth device as a DeviceStack into NET_INTERFACE.
@@ -397,10 +429,8 @@ impl<'a> NetInterface<'a> {
 
     /// Return the ifindex of every currently-registered DeviceStack.
     pub fn stack_ifindexes(&self) -> Vec<u32> {
-        self.inner_handler(|inner| {
-            inner.stacks.iter().map(|s| s.nic.nic_id() as u32).collect()
-        })
-        .unwrap_or_default()
+        self.inner_handler(|inner| inner.stacks.iter().map(|s| s.nic.nic_id() as u32).collect())
+            .unwrap_or_default()
     }
 
     /// 返回 (tcp_count, udp_count, raw_count, pending_remove)
@@ -411,15 +441,21 @@ impl<'a> NetInterface<'a> {
         // UDP: count via inner sockets (only if initialized)
         let udp = match self.inner.lock().as_ref() {
             Some(inner) => {
-                let tcp_count = inner.stacks.iter()
+                let tcp_count = inner
+                    .stacks
+                    .iter()
                     .flat_map(|s| s.sockets.iter())
                     .filter(|(_h, sock)| matches!(sock, smoltcp::socket::Socket::Tcp(_)))
                     .count();
-                let raw_count = inner.stacks.iter()
+                let raw_count = inner
+                    .stacks
+                    .iter()
                     .flat_map(|s| s.sockets.iter())
                     .filter(|(_h, sock)| matches!(sock, smoltcp::socket::Socket::Raw(_)))
                     .count();
-                inner.stacks.iter()
+                inner
+                    .stacks
+                    .iter()
                     .flat_map(|s| s.sockets.iter())
                     .count()
                     .saturating_sub(tcp_count)
@@ -493,21 +529,37 @@ impl<'a> NetInterface<'a> {
             // Pre-collect all removal handles with their ifindex
             let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
             let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
 
             for stack in inner.stacks.iter_mut() {
@@ -530,7 +582,9 @@ impl<'a> NetInterface<'a> {
                     let nic_id = stack.nic.nic_id() as u32;
                     if let IfaceDevice::Veth(ref veth_driver) = stack.device {
                         let rx_queue = veth_driver.inner.rx_queue.lock();
-                        crate::net::socket::packet::deliver_frames_from_veth_queue(nic_id, &rx_queue);
+                        crate::net::socket::packet::deliver_frames_from_veth_queue(
+                            nic_id, &rx_queue,
+                        );
                     }
                 }
 
@@ -542,7 +596,9 @@ impl<'a> NetInterface<'a> {
 
                 // 3. Clean up TCP sockets belonging to this stack
                 for (resolved, ifindex, rh) in &tcp_removes {
-                    if *ifindex as usize != stack.nic.nic_id() { continue; }
+                    if *ifindex as usize != stack.nic.nic_id() {
+                        continue;
+                    }
                     let can_remove = match resolved {
                         Some(h) => {
                             let socket = stack.sockets.get::<tcp::Socket>(*h);
@@ -588,21 +644,37 @@ impl<'a> NetInterface<'a> {
         self.inner_handler(|inner| {
             let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
             let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
 
             for stack in inner.stacks.iter_mut() {
@@ -622,7 +694,9 @@ impl<'a> NetInterface<'a> {
                     let nic_id = stack.nic.nic_id() as u32;
                     if let IfaceDevice::Veth(ref veth_driver) = stack.device {
                         let rx_queue = veth_driver.inner.rx_queue.lock();
-                        crate::net::socket::packet::deliver_frames_from_veth_queue(nic_id, &rx_queue);
+                        crate::net::socket::packet::deliver_frames_from_veth_queue(
+                            nic_id, &rx_queue,
+                        );
                     }
                 }
 
@@ -633,7 +707,9 @@ impl<'a> NetInterface<'a> {
                 );
 
                 for (resolved, ifindex, rh) in &tcp_removes {
-                    if *ifindex as usize != stack.nic.nic_id() { continue; }
+                    if *ifindex as usize != stack.nic.nic_id() {
+                        continue;
+                    }
                     let can_remove = match resolved {
                         Some(h) => {
                             let socket = stack.sockets.get::<tcp::Socket>(*h);
@@ -685,9 +761,7 @@ impl<'a> NetInterface<'a> {
     {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let target_ifindex = net_core::default_iface()
-            .map(|d| d.ifindex)
-            .unwrap_or(1);
+        let target_ifindex = net_core::default_iface().map(|d| d.ifindex).unwrap_or(1);
         let stack = inner_ref.stack_mut(target_ifindex)?;
         let handle = stack.sockets.add(socket);
         let id = inner_ref.next_socket_id;
@@ -843,12 +917,7 @@ impl<'a> NetInterface<'a> {
             vec![raw::PacketMetadata::EMPTY; 128],
             vec![0u8; crate::net::MAX_BUFFER_SIZE],
         );
-        let new_socket = raw::Socket::new(
-            ip_version,
-            ip_protocol,
-            rx_buf,
-            tx_buf,
-        );
+        let new_socket = raw::Socket::new(ip_version, ip_protocol, rx_buf, tx_buf);
         {
             let old_stack = inner_ref.stack_mut(old_binding.ifindex)?;
             old_stack.sockets.remove(old_binding.handle);
@@ -863,7 +932,12 @@ impl<'a> NetInterface<'a> {
                 proto: InetProtocol::Raw,
             },
         );
-        log::info!("[net] rebind_routed_raw {} from if={} to if={}", rh, old_binding.ifindex, new_ifindex);
+        log::info!(
+            "[net] rebind_routed_raw {} from if={} to if={}",
+            rh,
+            old_binding.ifindex,
+            new_ifindex
+        );
         Some(rh)
     }
 

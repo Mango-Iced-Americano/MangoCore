@@ -1,10 +1,10 @@
+use crate::drivers::NET_DEVICE;
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::sync::{Arc, Weak};
 use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use crate::drivers::NET_DEVICE;
 use lazy_static::*;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{DeviceCapabilities, Loopback, Medium};
@@ -12,9 +12,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use spin::{Mutex, RwLock};
 
-pub use crate::net::iface::{
-    DeviceKind, Iface, IfaceCommon, SmoltcpDeviceAccess,
-};
+pub use crate::net::iface::{DeviceKind, Iface, IfaceCommon, SmoltcpDeviceAccess};
 use crate::task::NetNamespace;
 
 // ---------------------------------------------------------------------------
@@ -108,7 +106,7 @@ pub fn current_netns() -> Arc<NetNamespace> {
 pub struct NetDeviceEntry {
     // --- metadata fields (mirror the old DeviceEntry) ---
     nic_id: AtomicUsize,
-    name: Mutex<String>,   // thread-safe name storage
+    name: Mutex<String>, // thread-safe name storage
     flags: AtomicU32,
     mtu: AtomicUsize,
     ip_addrs: Mutex<Vec<IpCidr>>,
@@ -406,9 +404,8 @@ pub fn is_local_addr(addr: Ipv4Address) -> bool {
     let ip = IpAddress::Ipv4(addr);
     let ns = current_netns();
     let list = ns.device_list.lock();
-    list.values().any(|iface| {
-        iface.ip_addrs().iter().any(|c| c.address() == ip)
-    })
+    list.values()
+        .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == ip))
 }
 
 /// Find the ifindex of the device that owns the given local IP address.

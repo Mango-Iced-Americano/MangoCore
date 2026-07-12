@@ -32,8 +32,12 @@ pub fn run_boot_smoke() {
         let inode = root.find("boot_sym0").ok();
         if let Some(ino) = inode {
             let mut buf = [0u8; 64];
-            let _ = ino.read_at(0, buf.len(), &mut buf,
-                spin::Mutex::new(FilePrivateData::Unused).lock());
+            let _ = ino.read_at(
+                0,
+                buf.len(),
+                &mut buf,
+                spin::Mutex::new(FilePrivateData::Unused).lock(),
+            );
         }
     }
     println!("[ext4_smoke] repeated readlink x10");

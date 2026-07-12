@@ -199,6 +199,117 @@ const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
 /// la64 glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 
+/// Focused board regression set. These cases exercise process lifecycle,
+/// virtual memory, signals, timers, synchronization, fd/event primitives and
+/// local VFS semantics without requiring a physical or loopback network path.
+const BOARD_CORE_LTP_CASES: &[&str] = &[
+    "access01", "access02", "brk01", "brk02", "clock_adjtime01",
+    "clock_adjtime02", "clock_getres01", "clock_gettime01", "clock_gettime02",
+    "clock_gettime04", "clock_nanosleep01", "clock_nanosleep02",
+    "clock_nanosleep04", "clone01", "clone02", "clone03", "clone05",
+    "clone06", "clone07", "clone09", "clone301", "clone302", "close01",
+    "close02", "dup01", "dup02", "dup03", "dup04", "dup05", "dup06",
+    "dup07", "dup201", "dup202", "dup203", "dup204", "dup205", "dup206",
+    "dup207", "dup3_01", "dup3_02", "epoll_create01", "epoll_create02",
+    "epoll_create1_01", "epoll_create1_02", "epoll_ctl01", "epoll_ctl02",
+    "epoll_ctl03", "epoll_wait01", "epoll_wait03", "epoll_wait04",
+    "epoll_wait06", "epoll_wait07", "epoll_pwait01", "epoll_pwait02",
+    "epoll_pwait04", "epoll_pwait05", "eventfd01", "eventfd02", "eventfd03",
+    "eventfd04", "eventfd05", "eventfd2_01", "eventfd2_02", "eventfd2_03",
+    "execve01", "execve02", "execve03", "execve04", "execve06", "execveat01",
+    "execveat02", "execveat03", "exit01", "exit02", "exit_group01", "fork01",
+    "fork03", "fork04", "fork05", "fork07", "fork08", "fork09", "fork10",
+    "futex_cmp_requeue01", "futex_cmp_requeue02",
+    "futex_wait01", "futex_wait02", "futex_wait03", "futex_wait04",
+    "futex_wait05", "futex_wait_bitset01", "futex_wake01", "futex_wake02",
+    "futex_wake03", "getcwd01", "getcwd02", "getcwd03", "getcwd04",
+    "getdents01", "getdents02", "getpid01", "getpid02", "getppid01",
+    "getppid02", "getrlimit01", "getrlimit02", "getrlimit03", "getrusage01",
+    "getrusage02", "getrusage03", "gettimeofday01", "gettimeofday02",
+    "kill02", "kill03", "kill05", "kill06", "kill07", "kill08", "kill09",
+    "kill10", "kill11", "kill12", "madvise01", "madvise02", "madvise03",
+    "madvise05", "madvise10", "mmap01", "mmap02", "mmap03", "mmap04",
+    "mmap05", "mmap06", "mmap08", "mmap09", "mmap12", "mmap13", "mmap14",
+    "mmap15", "mmap17", "mmap18", "mmap19", "mmap20", "mprotect01",
+    "mprotect02", "mprotect03", "mprotect04", "mprotect05", "mremap01",
+    "mremap02", "mremap03", "mremap04", "mremap05", "mremap06", "msync01",
+    "msync02", "msync03", "msync04", "munmap01", "munmap02", "munmap03",
+    "nanosleep01", "nanosleep02", "nanosleep04", "pipe01", "pipe02", "pipe03",
+    "pipe04", "pipe08", "pipe09", "pipe12", "pipe13", "pipe15", "pipe2_01",
+    "pipe2_02", "pipe2_04", "poll01", "poll02", "ppoll01", "prctl01",
+    "prctl02", "prctl03", "prctl04", "prctl05", "pselect01", "pselect02",
+    "pselect03", "read01", "read02", "read03", "read04", "readv01", "readv02",
+    "rt_sigaction01", "rt_sigaction02", "rt_sigaction03", "rt_sigprocmask01",
+    "rt_sigprocmask02", "rt_sigqueueinfo01", "rt_sigsuspend01", "sched_getparam01",
+    "sched_getparam03", "sched_getscheduler01", "sched_getscheduler02",
+    "sched_rr_get_interval01", "sched_rr_get_interval02", "sched_rr_get_interval03",
+    "sched_setaffinity01", "sched_getaffinity01", "sched_setparam01",
+    "sched_setparam02", "sched_setparam03", "sched_setparam04", "sched_setparam05",
+    "sched_setscheduler01", "sched_setscheduler02", "sched_setscheduler03",
+    "sched_setscheduler04", "sched_yield01", "select01", "select02", "select03",
+    "select04", "setitimer01", "setitimer02", "sigaction01",
+    "sigaction02", "sigaltstack01", "signal01", "signal02", "signal03", "signal04",
+    "signal05", "signalfd01", "signalfd4_01", "sigpending02", "sigprocmask01",
+    "sigsuspend01", "sigtimedwait01", "sigwaitinfo01", "timer_delete01",
+    "timer_getoverrun01", "timer_gettime01",
+    "timer_settime01", "timer_settime02", "timerfd01", "timerfd_create01",
+    "timerfd_gettime01", "timerfd_settime01", "tkill01", "tkill02", "tgkill01",
+    "uname01", "uname02", "wait01", "wait02", "waitpid01", "waitpid03",
+    "waitpid04", "waitpid06", "waitpid07", "waitpid08",
+    "waitpid09", "waitid01", "waitid02", "waitid03", "waitid04", "waitid05",
+    "waitid06", "waitid08", "waitid09", "write01", "write02", "write03",
+];
+
+fn board_core_test_focus_enabled() -> bool {
+    let marker = open("/board_core_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
+fn apply_board_core_test_focus(cfg: &mut RuntimeConfig) {
+    if !board_core_test_focus_enabled() {
+        return;
+    }
+
+    cfg.mask = (1 << 3) | (1 << 10) | (1 << 11);
+    cfg.order = ["libctest", "cyclictest", "ltp"]
+        .iter()
+        .map(|name| {
+            TEST_GROUPS
+                .iter()
+                .position(|(group, _)| group == name)
+                .expect("board core test group must exist")
+        })
+        .collect();
+    cfg.timeouts[3] = 900;
+    cfg.timeouts[10] = 180;
+    cfg.timeouts[11] = 3600;
+    cfg.ltp_runner = LtpRunner::Inline;
+    cfg.ltp_libc = LtpLibc::Both;
+    cfg.ltp_include = BOARD_CORE_LTP_CASES
+        .iter()
+        .map(|name| String::from(*name))
+        .collect();
+    cfg.ltp_from = None;
+    println!(
+        "[initproc] board core-test focus enabled: libctest, cyclictest, {} non-network LTP cases",
+        cfg.ltp_include.len()
+    );
+}
+
+fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
+    let marker = open("/board_shell\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return;
+    }
+    close(marker as usize);
+    cfg.mode = RunMode::Shell;
+    println!("[initproc] board shell mode enabled");
+}
+
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     run_bash_cmd_timeout(cmd, environ, 0)
 }
@@ -807,7 +918,14 @@ fn display_path(path: &str) -> &str {
 fn group_uses_scratch_workspace(group_name: &str) -> bool {
     matches!(
         group_name,
-        "basic" | "busybox" | "lua" | "lmbench" | "iozone" | "libcbench"
+        "basic"
+            | "busybox"
+            | "lua"
+            | "lmbench"
+            | "iozone"
+            | "libcbench"
+            | "libctest"
+            | "cyclictest"
     )
 }
 
@@ -885,6 +1003,51 @@ fn prepare_group_workdir(
              [ -f {workdir}/libcbench_testcode.sh ] || exit 1; \
              [ -f {workdir}/libc-bench ] || exit 1;"
         ),
+        "libctest" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/libctest_testcode.sh {workdir}/libctest_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/run-static.sh {workdir}/run-static.sh || exit 1; \
+             /bin/busybox cp {source}/run-dynamic.sh {workdir}/run-dynamic.sh || exit 1; \
+             /bin/busybox cp {source}/runtest.exe {workdir}/runtest.exe || exit 1; \
+             /bin/busybox cp {source}/entry-static.exe {workdir}/entry-static.exe || exit 1; \
+             /bin/busybox cp {source}/entry-dynamic.exe {workdir}/entry-dynamic.exe || exit 1; \
+             /bin/busybox cp {source}/dlopen_dso.so {workdir}/dlopen_dso.so || exit 1; \
+             /bin/busybox cp {source}/tls_get_new-dtv_dso.so {workdir}/tls_get_new-dtv_dso.so || exit 1; \
+             /bin/busybox cp -R {source}/lib {workdir}/lib 2>/dev/null || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/libctest_testcode.sh ] || exit 1; \
+             [ -f {workdir}/run-static.sh ] || exit 1; \
+             [ -f {workdir}/run-dynamic.sh ] || exit 1; \
+             [ -f {workdir}/runtest.exe ] || exit 1; \
+             [ -f {workdir}/entry-static.exe ] || exit 1; \
+             [ -f {workdir}/entry-dynamic.exe ] || exit 1; \
+             [ -f {workdir}/dlopen_dso.so ] || exit 1; \
+             [ -f {workdir}/tls_get_new-dtv_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/dlopen_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/tls_align_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/tls_init_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/tls_get_new-dtv_dso.so ] || exit 1;"
+        ),
+        "cyclictest" => {
+            #[cfg(target_arch = "loongarch64")]
+            // The LA musl binary stops in libc stubs before exercising kernel
+            // scheduling. Use the glibc build for both wrappers, matching the
+            // already validated QEMU compatibility path.
+            let cyclictest_source = "/glibc/cyclictest";
+            #[cfg(not(target_arch = "loongarch64"))]
+            let cyclictest_source = format!("{source}/cyclictest");
+
+            format!(
+                "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+                 /bin/busybox cp {source}/cyclictest_testcode.sh {workdir}/cyclictest_testcode.sh || exit 1; \
+                 /bin/busybox cp {cyclictest_source} {workdir}/cyclictest || exit 1; \
+                 /bin/busybox cp {source}/hackbench {workdir}/hackbench || exit 1; \
+                 [ -f {workdir}/busybox ] || exit 1; \
+                 [ -f {workdir}/cyclictest_testcode.sh ] || exit 1; \
+                 [ -f {workdir}/cyclictest ] || exit 1; \
+                 [ -f {workdir}/hackbench ] || exit 1;"
+            )
+        }
         _ => return None,
     };
     let command = format!(
@@ -1563,6 +1726,7 @@ fn run_ltp_binaries(
 ) {
     let log_dir = display_path(dir);
     let ltp_dir = format!("{}/ltp/testcases/bin", log_dir);
+    let board_core_focus = board_core_test_focus_enabled();
 
     // 确定 libc 后缀（与 run_group_in_dir 一致，评测机依赖此格式）
     let libc_suffix = if log_dir.contains("musl") {
@@ -1747,9 +1911,17 @@ fn run_ltp_binaries(
             } else {
                 ""
             };
+            let board_env = if board_core_focus {
+                // P1 and userspace block nodes are intentionally read-only on
+                // the board. Keep all LTP scratch data in tmpfs and prevent a
+                // inherited QEMU device name from selecting /dev/vdb2.
+                "export TMPDIR=/tmp TMPBASE=/tmp HOME=/ && unset LTP_DEV LTP_DEV_FS_TYPE LTP_SINGLE_FS_TYPE && "
+            } else {
+                "export TMPDIR=/tmp TMPBASE=/tmp && "
+            };
             let cmd = format!(
-                "export LTPROOT=\"{}\" && export LTP_IPC_PATH=/tmp && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
-                ltp_root_abs, ltp_root_abs, preload, name
+                "{}export LTPROOT=\"{}\" && export LTP_IPC_PATH=/tmp && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
+                board_env, ltp_root_abs, ltp_root_abs, preload, name
             );
             let ret = run_bash_cmd_timeout(&cmd, environ, 30);
             let exit_code = exit_code_from_waitpid_status(ret);
@@ -3237,7 +3409,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
     // println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
 
-    let cfg = load_runtime_config();
+    let mut cfg = load_runtime_config();
+    apply_board_core_test_focus(&mut cfg);
+    apply_board_shell_mode(&mut cfg);
 
     if cfg.timer_smoke && !run_timerfd_smoke() {
         println!("[initproc] timer_smoke failed");

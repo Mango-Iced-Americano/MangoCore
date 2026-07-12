@@ -1,6 +1,6 @@
-use smoltcp::wire::IpAddress;
 use crate::net::net_core::DeviceEntry;
 use crate::net::routing::RouteSocketHandle;
+use smoltcp::wire::IpAddress;
 
 #[derive(Clone, Debug)]
 pub struct BoundInner {

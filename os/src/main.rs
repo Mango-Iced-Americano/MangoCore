@@ -43,6 +43,10 @@ compile_error!("sata_probe and sata_write_probe are mutually exclusive");
 compile_error!("sata_fs_write_probe cannot be combined with another SATA probe");
 #[cfg(all(feature = "sata_scratch_rw", not(feature = "board_2k1000")))]
 compile_error!("sata_scratch_rw is supported only on board_2k1000");
+#[cfg(all(feature = "board_core_test", not(feature = "board_2k1000")))]
+compile_error!("board_core_test is supported only on board_2k1000");
+#[cfg(all(feature = "board_core_test", not(feature = "sata_scratch_rw")))]
+compile_error!("board_core_test requires the writable SATA scratch workspace");
 #[cfg(all(
     feature = "sata_scratch_rw",
     any(
@@ -102,15 +106,33 @@ core::arch::global_asm!(include_str!("load_img-rv.S"));
 
 // ── Preload test payloads (initproc, bash, busybox, LTP) ──
 // When preload_payloads feature is active AND we're not in block_mem mode
-#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "riscv"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    feature = "preload_payloads",
+    feature = "riscv"
+))]
 core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "loongarch64"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    feature = "preload_payloads",
+    feature = "loongarch64"
+))]
 core::arch::global_asm!(include_str!("preload_app.S"));
 
 // ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
-#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "riscv"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    not(feature = "initramfs"),
+    not(feature = "preload_payloads"),
+    feature = "riscv"
+))]
 core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "loongarch64"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    not(feature = "initramfs"),
+    not(feature = "preload_payloads"),
+    feature = "loongarch64"
+))]
 core::arch::global_asm!(include_str!("preload_app.S"));
 
 fn mem_clear() {
@@ -174,6 +196,11 @@ pub fn rust_main() -> ! {
     machine_init();
     crate::task::timer_subsystem_init();
 
+    // Non-destructive GMAC/PHY handoff inspection. This runs before any block
+    // driver allocation and deliberately leaves U-Boot's MAC/PHY state intact.
+    #[cfg(all(feature = "board_2k1000", feature = "gmac_probe"))]
+    drivers::net::gmac_2k1000::probe_all();
+
     // Explicit opt-in validation for the integrated 2K1000 SATA controller.
     // This performs IDENTIFY and repeated reads of LBA0 only; force_ramfs below
     // remains active, so the SSD is neither mounted nor written.
@@ -192,7 +219,11 @@ pub fn rust_main() -> ! {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
         #[cfg(all(
             feature = "board_2k1000",
-            any(not(feature = "block_sata"), feature = "sata_probe", feature = "sata_write_probe")
+            any(
+                not(feature = "block_sata"),
+                feature = "sata_probe",
+                feature = "sata_write_probe"
+            )
         ))]
         {
             // 救援镜像和 sata_probe 镜像必须保持与文件系统探测解耦；普通的
@@ -210,9 +241,12 @@ pub fn rust_main() -> ! {
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
-        #[cfg(not(feature = "board_2k1000"))]
+        #[cfg(any(
+            not(feature = "board_2k1000"),
+            all(feature = "board_2k1000", feature = "gmac_2k1000")
+        ))]
         drivers::init_net_device();
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(all(feature = "board_2k1000", not(feature = "gmac_2k1000")))]
         {
             // 实板网卡不是 QEMU virtio-net；最小上板阶段保留回环接口和网络核心，
             // 暂不枚举 virtio PCI 网卡，后续再接 GMAC/PHY 驱动。
@@ -237,7 +271,11 @@ pub fn rust_main() -> ! {
         fs::run_board_scratch_write_probe();
         #[cfg(all(
             feature = "board_2k1000",
-            any(not(feature = "block_sata"), feature = "sata_probe", feature = "sata_write_probe")
+            any(
+                not(feature = "block_sata"),
+                feature = "sata_probe",
+                feature = "sata_write_probe"
+            )
         ))]
         boot_trace!("[kernel] 2K1000 board bring-up: block device mount skipped");
 

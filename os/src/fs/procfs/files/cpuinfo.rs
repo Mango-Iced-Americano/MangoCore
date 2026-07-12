@@ -1,7 +1,7 @@
 //! /proc/cpuinfo — CPU 信息
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::format;
 
 pub fn cpuinfo_content(

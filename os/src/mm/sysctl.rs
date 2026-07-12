@@ -120,11 +120,7 @@ pub fn committed_as_kbytes() -> usize {
 pub fn overcommit_allows(current_committed_bytes: usize, additional_bytes: usize) -> bool {
     match overcommit_memory() {
         1 => true,
-        2 => {
-            current_committed_bytes
-                .saturating_add(additional_bytes)
-                <= commit_limit_bytes()
-        }
+        2 => current_committed_bytes.saturating_add(additional_bytes) <= commit_limit_bytes(),
         _ => additional_bytes <= reported_memory_bytes(),
     }
 }
@@ -140,7 +136,5 @@ fn reported_memory_bytes() -> usize {
 
 /// 返回当前帧分配器可见的空闲物理内存，单位 KiB。
 pub fn free_memory_kbytes() -> usize {
-    crate::mm::unallocated_frames()
-        .saturating_mul(PAGE_SIZE)
-        / 1024
+    crate::mm::unallocated_frames().saturating_mul(PAGE_SIZE) / 1024
 }

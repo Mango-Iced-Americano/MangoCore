@@ -32,10 +32,13 @@ use super::manager::{WaitQueue, WaitResult};
 const PRECISE_FUTEX_SPIN_NS: usize = 12_000_000;
 #[cfg(not(target_arch = "loongarch64"))]
 const PRECISE_FUTEX_SPIN_NS: usize = 1_250_000;
-// la64 QEMU has a stable futex timeout return-to-user tail.  Keep a small
-// bias, but leave enough room so LTP does not observe an early timeout.
-#[cfg(target_arch = "loongarch64")]
+// LA64 QEMU has a stable futex timeout return-to-user tail. The 2K1000LA
+// board does not have that tail, so applying this bias there causes an early
+// timeout observable by futex_wait05.
+#[cfg(all(target_arch = "loongarch64", feature = "board_laqemu"))]
 const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 180_000;
+#[cfg(all(target_arch = "loongarch64", not(feature = "board_laqemu")))]
+const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 0;
 
 #[allow(unused)]
 #[derive(Debug, Eq, PartialEq, FromPrimitive)]
@@ -500,9 +503,7 @@ fn do_futex_wait_until(
         |futex| futex.wait_queue_mut(futex_key),
         |_: &mut Futex| match futex_word.read(token) {
             Ok(value) if value == val => None,
-            Ok(value) => {
-                Some(EAGAIN)
-            }
+            Ok(value) => Some(EAGAIN),
             Err(errno) => Some(errno),
         },
         deadline,
@@ -694,9 +695,7 @@ fn do_futex_wait_shared_until(
         |shared| shared_wait_queue_for_key(shared, phys_key),
         |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
             Ok(value) if value == val => None,
-            Ok(value) => {
-                Some(EAGAIN)
-            }
+            Ok(value) => Some(EAGAIN),
             Err(errno) => Some(errno),
         },
         deadline,

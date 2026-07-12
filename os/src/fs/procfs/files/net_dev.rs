@@ -1,9 +1,9 @@
 //! /proc/net/dev — 网络接口统计
 
-use alloc::fmt::Write;
-use alloc::string::String;
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use alloc::fmt::Write;
+use alloc::string::String;
 
 /// 生成 /proc/net/dev 内容
 pub fn net_dev_content(
@@ -30,8 +30,22 @@ pub fn net_dev_content(
             "{:>6}:{:>8}{:>8}{:>5}{:>5}{:>5}{:>6}{:>11}{:>10}\
              {:>8}{:>8}{:>5}{:>5}{:>5}{:>6}{:>8}{:>10}\n",
             iface.iface_name(),
-            0u64, 0u64, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
-            0u64, 0u64, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+            0u64,
+            0u64,
+            0u32,
+            0u32,
+            0u32,
+            0u32,
+            0u32,
+            0u32,
+            0u64,
+            0u64,
+            0u32,
+            0u32,
+            0u32,
+            0u32,
+            0u32,
+            0u32,
         );
     }
 

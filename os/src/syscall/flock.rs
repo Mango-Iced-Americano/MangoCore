@@ -1,9 +1,9 @@
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 
+use super::errno::*;
 use crate::fs::vfs::InodeId;
 use crate::task::current_task;
-use super::errno::*;
 
 const LOCK_SH: u32 = 1;
 const LOCK_EX: u32 = 2;
@@ -13,8 +13,7 @@ const LOCK_UN: u32 = 8;
 /// Global per-inode advisory lock table.
 /// Key = (dev_id, inode_id). Entry present = file is exclusively locked.
 /// TODO: Track lock owner for LOCK_SH and blocking wait support.
-static FLOCK_TABLE: Mutex<BTreeMap<(usize, InodeId), ()>> =
-    Mutex::new(BTreeMap::new());
+static FLOCK_TABLE: Mutex<BTreeMap<(usize, InodeId), ()>> = Mutex::new(BTreeMap::new());
 
 pub fn sys_flock(fd: usize, operation: u32) -> isize {
     let op = operation & 0xf;

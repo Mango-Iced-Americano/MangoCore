@@ -173,7 +173,9 @@ impl FrameAllocator for StackFrameAllocator {
             let ft = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
             Some(ft)
         };
-        crate::task::perf::record_frame_alloc_time_us(crate::task::perf::perf_time_now().saturating_sub(_start));
+        crate::task::perf::record_frame_alloc_time_us(
+            crate::task::perf::perf_time_now().saturating_sub(_start),
+        );
         result
     }
 
@@ -321,8 +323,7 @@ pub fn frame_reserve(num: usize) {
 
 #[cfg(not(feature = "oom_handler"))]
 /// OOM handler 关闭时的空实现。
-pub fn frame_reserve(_num: usize) {
-}
+pub fn frame_reserve(_num: usize) {}
 
 #[cfg(feature = "oom_handler")]
 /// 分配一页物理页，失败时先尝试 OOM 回收。

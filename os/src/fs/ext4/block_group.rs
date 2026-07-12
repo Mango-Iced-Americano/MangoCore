@@ -542,8 +542,7 @@ impl Block {
         if self.disk_offset % block_size != 0 {
             panic!(
                 "sync_blk_to_disk: write_offset {} is not a multiple of BLOCK_SIZE {}",
-                self.disk_offset,
-                block_size
+                self.disk_offset, block_size
             )
         }
         let block_id = self.disk_offset / block_size;

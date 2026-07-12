@@ -1,7 +1,7 @@
 //! /proc/uptime — 系统运行时间
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::format;
 
 pub fn uptime_content(

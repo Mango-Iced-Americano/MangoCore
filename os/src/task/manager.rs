@@ -197,7 +197,9 @@ fn sub_interruptible_count(count: usize) {
 
 /// 无锁读取 ready 队列计数的近似值。
 pub(crate) fn ready_count_fast() -> u16 {
-    READY_TASK_COUNT.load(AtomicOrdering::Relaxed).min(u16::MAX as usize) as u16
+    READY_TASK_COUNT
+        .load(AtomicOrdering::Relaxed)
+        .min(u16::MAX as usize) as u16
 }
 
 /// 无锁读取 interruptible 队列计数的近似值。
@@ -371,7 +373,7 @@ impl TaskManager {
         sub_zombie_queue_count(zombies.len());
         zombies
     }
-    /// 从就绪 + 可中断队列中移除属于指定 pid 的所有 zombie TCB。
+    /// 从所有调度队列中移除属于指定 pid 的所有 zombie TCB。
     /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
     fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
         let mut zombies = alloc::vec::Vec::new();
@@ -397,6 +399,16 @@ impl TaskManager {
             }
         });
         sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
+        let old_zombie_len = self.zombie_queue.len();
+        self.zombie_queue.retain(|task| {
+            if task.process.pid == pid {
+                zombies.push(task.clone());
+                false
+            } else {
+                true
+            }
+        });
+        sub_zombie_queue_count(old_zombie_len - self.zombie_queue.len());
         self.recompute_ready_nice_count();
         zombies
     }
@@ -647,7 +659,7 @@ pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_one_interruptible_zombie()
 }
 
-/// 从调度队列中移除属于指定 pid 的所有 zombie TCB，
+/// 从 ready、interruptible 和专用 zombie 队列中移除指定 pid 的所有 zombie TCB，
 /// 在锁外 drop，避免 TCB::drop() 在持有 TASK_MANAGER 锁时执行析构链。
 pub fn remove_zombie_tasks_by_pid(pid: usize) {
     let zombies = TASK_MANAGER.lock().remove_zombie_tasks_by_pid(pid);
@@ -706,8 +718,7 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
 #[cfg(not(feature = "oom_handler"))]
 #[allow(unused)]
 /// 未启用 OOM handler 时的空实现。
-pub fn do_oom() {
-}
+pub fn do_oom() {}
 
 /// 将任务加入 interruptible 队列。
 ///
@@ -898,7 +909,8 @@ impl WaitQueue {
                             if wake_count < limit {
                                 inner.task_status = super::task::TaskStatus::Ready;
                                 drop(inner);
-                                task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
+                                task.wait_timer_generation
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
                                 wake_count += 1;
                                 tasks_to_wake.push(task);
                             } else {
@@ -910,7 +922,8 @@ impl WaitQueue {
                             if wake_count < limit {
                                 wake_count += 1;
                                 drop(inner);
-                                task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
+                                task.wait_timer_generation
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
                             } else {
                                 drop(inner);
                                 remaining.push_back(Arc::downgrade(&task));
@@ -941,13 +954,15 @@ impl WaitQueue {
                 super::TaskStatus::Interruptible => {
                     inner.task_status = super::task::TaskStatus::Ready;
                     drop(inner);
-                    task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
+                    task.wait_timer_generation
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     let _ = TASK_MANAGER.lock().try_wake_interruptible(task);
                     return 1;
                 }
                 super::TaskStatus::Ready => {
                     drop(inner);
-                    task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
+                    task.wait_timer_generation
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return 1;
                 }
                 _ => drop(inner),
@@ -1513,7 +1528,9 @@ impl PartialEq for KernelTimer {
 impl KernelTimer {
     fn is_live(&self) -> bool {
         match &self.action {
-            TimerAction::WakeTask { task, generation, .. } => match task.upgrade() {
+            TimerAction::WakeTask {
+                task, generation, ..
+            } => match task.upgrade() {
                 Some(task) => {
                     // WakeTask entries are intentionally not deduplicated on insertion.
                     // A newer wait bumps the generation; older entries are stale and can be
@@ -1560,7 +1577,10 @@ impl KernelTimerQueue {
 
     /// 返回最早 deadline 的纳秒值，队列为空时返回 0。
     pub fn earliest_deadline_ns(&self) -> u64 {
-        self.inner.peek().map(|t| t.deadline.to_ns_saturating()).unwrap_or(0)
+        self.inner
+            .peek()
+            .map(|t| t.deadline.to_ns_saturating())
+            .unwrap_or(0)
     }
 
     fn refresh_deadline_state(&self) {
@@ -1660,8 +1680,14 @@ impl KernelTimerQueue {
     /// 调度器锁或重新插入新的 kernel timer。
     pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
-            TimerAction::WakeTask { task, generation, fallback_ms } => {
-                let Some(task) = task.upgrade() else { return false };
+            TimerAction::WakeTask {
+                task,
+                generation,
+                fallback_ms,
+            } => {
+                let Some(task) = task.upgrade() else {
+                    return false;
+                };
                 task.wait_io_timer_pending
                     .store(false, AtomicOrdering::Relaxed);
 
@@ -1676,11 +1702,13 @@ impl KernelTimerQueue {
                     if active != generation {
                         // Stale timer. If task is in a new fallback wait,
                         // re-arm with current generation instead of waking.
-                        let current =
-                            task.wait_timer_generation.load(AtomicOrdering::Relaxed);
+                        let current = task.wait_timer_generation.load(AtomicOrdering::Relaxed);
                         if active == current {
                             // Task waiting with new generation but no timer armed
-                            if !task.wait_io_timer_pending.swap(true, AtomicOrdering::Relaxed) {
+                            if !task
+                                .wait_io_timer_pending
+                                .swap(true, AtomicOrdering::Relaxed)
+                            {
                                 let new_gen = task
                                     .wait_timer_generation
                                     .fetch_add(1, AtomicOrdering::Relaxed)
@@ -1710,8 +1738,14 @@ impl KernelTimerQueue {
                     let inner = task.acquire_inner_lock();
                     if inner.task_status != super::TaskStatus::Interruptible {
                         drop(inner);
-                        if !task.wait_io_timer_pending.swap(true, AtomicOrdering::Relaxed) {
-                            let new_gen = task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                        if !task
+                            .wait_io_timer_pending
+                            .swap(true, AtomicOrdering::Relaxed)
+                        {
+                            let new_gen = task
+                                .wait_timer_generation
+                                .fetch_add(1, AtomicOrdering::Relaxed)
+                                + 1;
                             add_kernel_timer(
                                 TimerAction::WakeTask {
                                     task: Arc::downgrade(&task),
@@ -1720,7 +1754,8 @@ impl KernelTimerQueue {
                                 },
                                 TimeSpec::now() + TimeSpec::from_ms(ms),
                             );
-                            task.wait_io_fallback_active_generation.store(new_gen, AtomicOrdering::Release);
+                            task.wait_io_fallback_active_generation
+                                .store(new_gen, AtomicOrdering::Release);
                         }
                         return false;
                     }
@@ -1755,7 +1790,9 @@ impl KernelTimerQueue {
                 if signal.is_empty() {
                     return false;
                 }
-                let Some(task) = task.upgrade() else { return false };
+                let Some(task) = task.upgrade() else {
+                    return false;
+                };
                 let mut should_wake = false;
                 let mut next_real_timer = None;
                 {
@@ -1773,8 +1810,7 @@ impl KernelTimerQueue {
                             inner.real_timer_deadline = None;
                             inner.timer[0].it_value = TimeVal::new();
                         } else {
-                            let interval =
-                                TimeSpec::from_us(inner.timer[0].it_interval.to_us());
+                            let interval = TimeSpec::from_us(inner.timer[0].it_interval.to_us());
                             let deadline = now + interval;
                             inner.real_timer_generation =
                                 inner.real_timer_generation.wrapping_add(1);
@@ -1812,83 +1848,80 @@ impl KernelTimerQueue {
                 signal,
                 generation,
             } => {
-                let Some(task) = task.upgrade() else { return false };
+                let Some(task) = task.upgrade() else {
+                    return false;
+                };
                 let mut should_wake = false;
                 let mut next_timer = None;
+                {
+                    let mut inner = task.acquire_inner_lock();
+                    let signal_pending = !signal.is_empty() && inner.sigpending.contains(signal);
+                    let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
+                        return false;
+                    };
+                    if timer_state.generation != generation
+                        || timer_state.deadline != Some(timer.deadline)
                     {
-                        let mut inner = task.acquire_inner_lock();
-                        let signal_pending =
-                            !signal.is_empty() && inner.sigpending.contains(signal);
-                        let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
-                            return false;
-                        };
-                        if timer_state.generation != generation
-                            || timer_state.deadline != Some(timer.deadline)
-                        {
-                            return false;
-                        }
-                        if timer_state.interval.is_zero() {
-                            timer_state.value = TimeSpec::new();
-                            timer_state.deadline = None;
-                            timer_state.realtime_abs_deadline = None;
+                        return false;
+                    }
+                    if timer_state.interval.is_zero() {
+                        timer_state.value = TimeSpec::new();
+                        timer_state.deadline = None;
+                        timer_state.realtime_abs_deadline = None;
+                    } else {
+                        let interval_ns = timer_state.interval.to_ns_saturating().max(1) as usize;
+                        let deadline_ns = timer.deadline.to_ns_saturating() as usize;
+                        let elapsed_ns =
+                            (now.to_ns_saturating() as usize).saturating_sub(deadline_ns);
+                        let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
+                        let missed = if signal_pending {
+                            expirations
                         } else {
-                            let interval_ns =
-                                timer_state.interval.to_ns_saturating().max(1) as usize;
-                            let deadline_ns = timer.deadline.to_ns_saturating() as usize;
-                            let elapsed_ns =
-                                (now.to_ns_saturating() as usize).saturating_sub(deadline_ns);
-                            let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
-                            let missed = if signal_pending {
-                                expirations
-                            } else {
-                                expirations.saturating_sub(1)
-                            };
-                            timer_state.add_overrun(missed);
-                            let next_ns =
-                                deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
-                            let deadline = TimeSpec::from_ns(next_ns);
-                            if let Some(abs_deadline) = timer_state.realtime_abs_deadline {
-                                let abs_ns = abs_deadline
-                                    .to_ns_saturating()
-                                    .saturating_add(expirations.saturating_mul(interval_ns) as u64);
-                                timer_state.realtime_abs_deadline =
-                                    Some(TimeSpec::from_ns(abs_ns as usize));
-                            }
-                            timer_state.generation = timer_state.generation.wrapping_add(1);
-                            timer_state.value = timer_state.interval;
-                            timer_state.deadline = Some(deadline);
-                            next_timer = Some((deadline, timer_state.generation));
+                            expirations.saturating_sub(1)
+                        };
+                        timer_state.add_overrun(missed);
+                        let next_ns =
+                            deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
+                        let deadline = TimeSpec::from_ns(next_ns);
+                        if let Some(abs_deadline) = timer_state.realtime_abs_deadline {
+                            let abs_ns = abs_deadline
+                                .to_ns_saturating()
+                                .saturating_add(expirations.saturating_mul(interval_ns) as u64);
+                            timer_state.realtime_abs_deadline =
+                                Some(TimeSpec::from_ns(abs_ns as usize));
                         }
-                        if !signal.is_empty() {
-                            let _ = inner
-                                .sigpending
-                                .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                            if signal.wakes_interruptible(
-                                inner.sigmask,
-                                inner.signal_wait_mask,
-                                true,
-                            ) && inner.task_status == super::TaskStatus::Interruptible
-                            {
-                                inner.task_status = super::TaskStatus::Ready;
-                                should_wake = true;
-                            }
+                        timer_state.generation = timer_state.generation.wrapping_add(1);
+                        timer_state.value = timer_state.interval;
+                        timer_state.deadline = Some(deadline);
+                        next_timer = Some((deadline, timer_state.generation));
+                    }
+                    if !signal.is_empty() {
+                        let _ = inner
+                            .sigpending
+                            .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
+                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+                            && inner.task_status == super::TaskStatus::Interruptible
+                        {
+                            inner.task_status = super::TaskStatus::Ready;
+                            should_wake = true;
                         }
                     }
-                    if should_wake {
-                        wake_interruptible(task.clone());
-                    }
-                    if let Some((deadline, next_generation)) = next_timer {
-                        add_kernel_timer(
-                            TimerAction::PosixTimerSignal {
-                                task: Arc::downgrade(&task),
-                                timer_id,
-                                signal,
-                                generation: next_generation,
-                            },
-                            deadline,
-                        );
-                    }
-                    should_wake
+                }
+                if should_wake {
+                    wake_interruptible(task.clone());
+                }
+                if let Some((deadline, next_generation)) = next_timer {
+                    add_kernel_timer(
+                        TimerAction::PosixTimerSignal {
+                            task: Arc::downgrade(&task),
+                            timer_id,
+                            signal,
+                            generation: next_generation,
+                        },
+                        deadline,
+                    );
+                }
+                should_wake
             }
             TimerAction::TimerFdSweep { generation } => {
                 if !crate::fs::timerfd::timerfd_sweep_is_current(generation) {
@@ -1953,7 +1986,10 @@ impl TimeoutWaitQueue {
     }
 
     fn earliest_deadline_ns(&self) -> u64 {
-        self.inner.peek().map(|waiter| waiter.timeout.to_ns_saturating()).unwrap_or(0)
+        self.inner
+            .peek()
+            .map(|waiter| waiter.timeout.to_ns_saturating())
+            .unwrap_or(0)
     }
 
     fn refresh_deadline_state(&self) {
@@ -2033,7 +2069,11 @@ const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
 fn program_next_event(next_timer_ns: u64) {
     let now_ns = crate::timer::now_ns();
     let next_sched_ns = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
-    let next_timer_ns = if next_timer_ns == 0 { u64::MAX } else { next_timer_ns };
+    let next_timer_ns = if next_timer_ns == 0 {
+        u64::MAX
+    } else {
+        next_timer_ns
+    };
 
     let next_ns = next_timer_ns.min(next_sched_ns.max(now_ns.saturating_add(1)));
     let delta_ns = next_ns.saturating_sub(now_ns).max(1);

@@ -4,7 +4,7 @@ BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
 LA_TOOLCHAIN ?= nightly-2024-05-01
 BOARD_NET_IFACE ?= en8
-BOARD_KERNEL ?= kernel-2k1000-run.ui
+IMAGE ?=
 BOARD_SERIAL_ARG = $(if $(BOARD_SERIAL),--serial $(BOARD_SERIAL),)
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
@@ -105,14 +105,16 @@ docker-test-parallel:
 	bash scripts/run_test_docker_parallel.sh
 
 2k1000-boot:
+	@test -n "$(IMAGE)" || { echo "usage: make 2k1000-boot IMAGE=<uImage>" >&2; exit 2; }
 	python3 scripts/boot_2k1000_tftp.py \
 		--interface $(BOARD_NET_IFACE) \
-		--image $(BOARD_KERNEL) $(BOARD_SERIAL_ARG)
+		--image "$(IMAGE)" $(BOARD_SERIAL_ARG)
 
 2k1000-boot-check:
+	@test -n "$(IMAGE)" || { echo "usage: make 2k1000-boot-check IMAGE=<uImage>" >&2; exit 2; }
 	python3 scripts/boot_2k1000_tftp.py \
 		--interface $(BOARD_NET_IFACE) \
-		--image $(BOARD_KERNEL) $(BOARD_SERIAL_ARG) \
+		--image "$(IMAGE)" $(BOARD_SERIAL_ARG) \
 		--no-host-config --check-only
 
 testsuits-download:

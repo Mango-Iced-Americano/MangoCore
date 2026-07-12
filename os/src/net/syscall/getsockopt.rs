@@ -1,12 +1,15 @@
 use crate::mm::{UserBufferWriter, UserPtrMut};
-use crate::net::{TcpInfo, TCP_MSS, PSOCK};
+use crate::net::{TcpInfo, PSOCK, TCP_MSS};
 use crate::task::current_task;
 use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
+use super::common::{
+    IPV6_RECVPKTINFO, SO_ERROR, SO_PEERCRED, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF,
+    SO_SNDTIMEO,
+};
 use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED, SO_ERROR, IPV6_RECVPKTINFO};
 
 /// 查询 socket 选项值。
 ///
@@ -61,7 +64,8 @@ pub fn sys_getsockopt(
     match (level, optname) {
         (SOL_SOCKET, SO_ERROR) => {
             // 读并清除 socket 待处理错误（非阻塞 connect 失败后 getsockopt(SO_ERROR)）
-            let so_error = socket.take_error()
+            let so_error = socket
+                .take_error()
                 .map(|e| (-(e as isize)) as u32)
                 .unwrap_or(0);
             if optval_ptr.write(token, &so_error).is_err()
@@ -118,7 +122,7 @@ pub fn sys_getsockopt(
                 Ok(len) => len,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
-    if (optlen_val as i32) < 0 || optlen_val < 4 {
+            if (optlen_val as i32) < 0 || optlen_val < 4 {
                 return -(SyscallErr::EINVAL as isize);
             }
             let socket = crate::get_socket!(sockfd);
@@ -199,9 +203,7 @@ pub fn sys_getsockopt(
         }
         (SOL_IPV6, IPV6_RECVPKTINFO) => {
             let val: u32 = 0;
-            if optval_ptr.write(token, &val).is_err()
-                || optlen_ptr.write(token, &4u32).is_err()
-            {
+            if optval_ptr.write(token, &val).is_err() || optlen_ptr.write(token, &4u32).is_err() {
                 return -(SyscallErr::EFAULT as isize);
             }
         }
@@ -210,7 +212,8 @@ pub fn sys_getsockopt(
             // 未知 level 或 level 与 socket 类型不兼容 → EOPNOTSUPP
             // 已知 level 但未知 optname → ENOPROTOOPT
             let s_type = socket.socket_type();
-            let level_compat = level == SOL_SOCKET || level == SOL_IP
+            let level_compat = level == SOL_SOCKET
+                || level == SOL_IP
                 || (level == SOL_TCP && matches!(s_type, PSOCK::Stream))
                 || (level == 17 /* SOL_UDP */ && matches!(s_type, PSOCK::Datagram))
                 || (level == 255 /* SOL_RAW */ && matches!(s_type, PSOCK::Raw));

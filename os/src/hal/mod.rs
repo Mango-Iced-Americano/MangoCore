@@ -13,14 +13,14 @@ pub mod arch;
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
+pub use arch::program_timer_delta;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 pub use arch::{bootstrap_init, machine_init, user_hwcap};
 pub use arch::{console_flush, console_getchar, console_putchar};
-pub use arch::{local_irq_restore, local_irq_save};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
-pub use arch::program_timer_delta;
+pub use arch::{local_irq_restore, local_irq_save};
 pub use arch::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
 pub use arch::{trap_handler, trap_return};
 pub use arch::{

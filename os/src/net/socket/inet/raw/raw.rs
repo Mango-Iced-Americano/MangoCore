@@ -1,9 +1,9 @@
+use crate::fs::vfs::event::EventWaitQueue;
 use crate::net::routing::{InetProtocol, RouteSocketHandle};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{
     config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR,
 };
-use crate::fs::vfs::event::EventWaitQueue;
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::{
@@ -109,7 +109,11 @@ impl Socket for RawSocket {
         match iface {
             Some(iface) => {
                 self.inner.lock().bound_ifindex = Some(iface.nic_id() as u32);
-                log::info!("[RawSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                log::info!(
+                    "[RawSocket] bound to device {} (ifindex={})",
+                    ifname,
+                    iface.nic_id()
+                );
                 Ok(0)
             }
             None => Err(SyscallErr::ENODEV),
@@ -130,9 +134,10 @@ impl Socket for RawSocket {
     }
 
     fn local_endpoint(&self) -> Option<Endpoint> {
-        self.inner.lock().local_endpoint.and_then(|ep| {
-            ep.addr.map(|addr| Endpoint::Ip(IpEndpoint::new(addr, 0)))
-        })
+        self.inner
+            .lock()
+            .local_endpoint
+            .and_then(|ep| ep.addr.map(|addr| Endpoint::Ip(IpEndpoint::new(addr, 0))))
     }
 
     fn remote_endpoint(&self) -> Option<Endpoint> {
@@ -185,7 +190,12 @@ impl Socket for RawSocket {
                 };
 
                 if let Some(ifidx) = target_ifindex {
-                    NET_INTERFACE.rebind_routed_raw(self.socket_handlers[0], ifidx, version, protocol);
+                    NET_INTERFACE.rebind_routed_raw(
+                        self.socket_handlers[0],
+                        ifidx,
+                        version,
+                        protocol,
+                    );
                 }
 
                 // Source IP from the OUTPUT interface, not from destination-based lookup
@@ -203,9 +213,9 @@ impl Socket for RawSocket {
                     })
                     .unwrap_or_else(|| {
                         // Fallback: use route-based source lookup
-                        match crate::net::config::lookup_source_ip(
-                            smoltcp::wire::IpAddress::Ipv4(target_ip),
-                        ) {
+                        match crate::net::config::lookup_source_ip(smoltcp::wire::IpAddress::Ipv4(
+                            target_ip,
+                        )) {
                             smoltcp::wire::IpAddress::Ipv4(addr) => addr,
                             _ => smoltcp::wire::Ipv4Address::UNSPECIFIED,
                         }
@@ -216,7 +226,7 @@ impl Socket for RawSocket {
                 ip_pkg.fill_checksum();
 
                 NET_INTERFACE.poll();
-                let ret =                 NET_INTERFACE
+                let ret = NET_INTERFACE
                     .raw_routed_socket(self.socket_handlers[0], |socket| {
                         log::info!(
                             "[RawSocket] Sending {} bytes to {}",
@@ -256,16 +266,19 @@ impl Socket for RawSocket {
                 let target_ifindex = {
                     let bound = self.inner.lock().bound_ifindex;
                     bound.or_else(|| {
-                        crate::net::routing::route_output(
-                            smoltcp::wire::IpAddress::Ipv6(target_ip),
-                        )
-                        .ok()
-                        .map(|r| r.ifindex)
+                        crate::net::routing::route_output(smoltcp::wire::IpAddress::Ipv6(target_ip))
+                            .ok()
+                            .map(|r| r.ifindex)
                     })
                 };
 
                 if let Some(ifidx) = target_ifindex {
-                    NET_INTERFACE.rebind_routed_raw(self.socket_handlers[0], ifidx, version, protocol);
+                    NET_INTERFACE.rebind_routed_raw(
+                        self.socket_handlers[0],
+                        ifidx,
+                        version,
+                        protocol,
+                    );
                 }
 
                 // Source IP from the OUTPUT interface: pick first non-unspecified IPv6 address
@@ -291,9 +304,9 @@ impl Socket for RawSocket {
                     })
                     .unwrap_or_else(|| {
                         // Fallback: use route-based source lookup
-                        match crate::net::config::lookup_source_ip(
-                            smoltcp::wire::IpAddress::Ipv6(target_ip),
-                        ) {
+                        match crate::net::config::lookup_source_ip(smoltcp::wire::IpAddress::Ipv6(
+                            target_ip,
+                        )) {
                             smoltcp::wire::IpAddress::Ipv6(addr) => addr,
                             _ => smoltcp::wire::Ipv6Address::UNSPECIFIED,
                         }
@@ -378,46 +391,44 @@ impl Socket for RawSocket {
         let icmp6_filter = self.inner.lock().icmp6_filter;
 
         for &handler in &self.socket_handlers {
-            let result = NET_INTERFACE.raw_routed_socket(handler, |socket| {
-                loop {
-                    if !socket.can_recv() {
-                        return Err(SyscallErr::EAGAIN);
-                    }
-                    match socket.recv_slice(buf) {
-                        Ok(nbytes) => {
-                            if ip_version == IpVersion::Ipv6 && nbytes > 40 {
-                                let icmp_type = buf[40] as usize;
-                                if icmp_type < 256 {
-                                    let word_idx = icmp_type / 32;
-                                    let bit_idx = icmp_type % 32;
-                                    if (icmp6_filter[word_idx] & (1u32 << bit_idx)) != 0 {
-                                        continue;
-                                    }
+            let result = NET_INTERFACE.raw_routed_socket(handler, |socket| loop {
+                if !socket.can_recv() {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                match socket.recv_slice(buf) {
+                    Ok(nbytes) => {
+                        if ip_version == IpVersion::Ipv6 && nbytes > 40 {
+                            let icmp_type = buf[40] as usize;
+                            if icmp_type < 256 {
+                                let word_idx = icmp_type / 32;
+                                let bit_idx = icmp_type % 32;
+                                if (icmp6_filter[word_idx] & (1u32 << bit_idx)) != 0 {
+                                    continue;
                                 }
                             }
-                            match ip_version {
-                                IpVersion::Ipv4 => {
-                                    let packet =
-                                        smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
-                                    let src_addr = packet.src_addr();
-                                    self.inner.lock().remote_endpoint =
-                                        Some(IpEndpoint::new(src_addr.into(), 0));
-                                }
-                                IpVersion::Ipv6 => {
-                                    let packet =
-                                        smoltcp::wire::Ipv6Packet::new_unchecked(&buf[..nbytes]);
-                                    let src_addr = packet.src_addr();
-                                    self.inner.lock().remote_endpoint =
-                                        Some(IpEndpoint::new(src_addr.into_address(), 0));
-                                    let payload_len = nbytes - 40;
-                                    buf.copy_within(40..nbytes, 0);
-                                    return Ok(payload_len as isize);
-                                }
-                            }
-                            return Ok(nbytes as isize);
                         }
-                        Err(_) => return Err(SyscallErr::ENOTCONN),
+                        match ip_version {
+                            IpVersion::Ipv4 => {
+                                let packet =
+                                    smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
+                                let src_addr = packet.src_addr();
+                                self.inner.lock().remote_endpoint =
+                                    Some(IpEndpoint::new(src_addr.into(), 0));
+                            }
+                            IpVersion::Ipv6 => {
+                                let packet =
+                                    smoltcp::wire::Ipv6Packet::new_unchecked(&buf[..nbytes]);
+                                let src_addr = packet.src_addr();
+                                self.inner.lock().remote_endpoint =
+                                    Some(IpEndpoint::new(src_addr.into_address(), 0));
+                                let payload_len = nbytes - 40;
+                                buf.copy_within(40..nbytes, 0);
+                                return Ok(payload_len as isize);
+                            }
+                        }
+                        return Ok(nbytes as isize);
                     }
+                    Err(_) => return Err(SyscallErr::ENOTCONN),
                 }
             });
             match result {
@@ -437,9 +448,7 @@ impl Socket for RawSocket {
         flags: MsgFlags,
     ) -> Result<isize, SyscallErr> {
         match dest {
-            Some(Endpoint::Ip(ep)) => self
-                .send_to(buf, Endpoint::Ip(ep))
-                .map(|n| n as isize),
+            Some(Endpoint::Ip(ep)) => self.send_to(buf, Endpoint::Ip(ep)).map(|n| n as isize),
             Some(_) => Err(SyscallErr::EINVAL),
             None => self.try_send(buf, flags),
         }
@@ -669,7 +678,10 @@ fn ipv6_pseudo_header_checksum(
 
 impl Drop for RawSocket {
     fn drop(&mut self) {
-        log::info!("[RawSocket::drop] removing {} handles", self.socket_handlers.len());
+        log::info!(
+            "[RawSocket::drop] removing {} handles",
+            self.socket_handlers.len()
+        );
         for &handler in &self.socket_handlers {
             crate::net::RAW_SOCKETS
                 .lock()

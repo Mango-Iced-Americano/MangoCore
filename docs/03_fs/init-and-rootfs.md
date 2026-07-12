@@ -96,7 +96,9 @@ rust_main()
 4. 默认 QEMU/CI 路径调用 `mount_boot_block_devices()` 探测 virtio 块设备，优先识别整盘裸文件系统，必要时解析 MBR 主分区，将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。
 5. 块设备故障只打印 warning，不 panic。
 
-在 2K1000 `sata_scratch_rw` staged 路径中，用户态初始化还会保留 ramfs `/bin`、`/sbin`、`/lib`、`/usr` 的可写性，不再用只读 `/tools` bind 覆盖这些运行时目录；`/tools` 仍作为只读工具源加入搜索路径。basic 测试源从只读 `/musl`、`/glibc` 复制到 `/scratch/work/basic-{musl,glibc}` 后执行，复制不完整时拒绝回退到只读源。无 `/scratch` 的 QEMU 和普通镜像继续使用原 bind 布局。
+在 2K1000 `sata_scratch_rw` staged 路径中，用户态初始化还会保留 ramfs `/bin`、`/sbin`、`/lib`、`/usr` 的可写性，不再用只读 `/tools` bind 覆盖这些运行时目录；`/tools` 仍作为只读工具源加入搜索路径。需要当前目录写入或完整相对依赖的测试组从只读 `/musl`、`/glibc` 复制到 `/scratch/work/<group>-<libc>` 后执行，复制不完整时拒绝回退到只读源；当前范围包括 basic、busybox、lua、lmbench、iozone、libcbench、libctest 和 cyclictest。无 `/scratch` 的 QEMU 和普通镜像继续使用原 bind 布局。
+
+可选 `board_core_test` feature 会在 preload 阶段创建易失的 `/board_core_test` 标记。initproc 据此只运行 libctest、cyclictest 和非网络 LTP 白名单，用于实板分诊；标记和配置覆盖都位于 ramfs，不修改只读 P1 上的 `os_test.conf`。该 feature 只允许与 `board_2k1000 + sata_scratch_rw` 组合，正式镜像默认关闭。
 
 `board_2k1000` 是 initramfs 模式的实板特例。救援镜像和 `sata_probe` 镜像仍在 `fs::initramfs_init()` 前调用 `force_ramfs()`；普通 `block_sata` 构建不再禁用块设备，而是注册 `/dev/sda*` 和兼容 `/dev/vda*`，再调用 `mount_boot_block_devices_read_only()`。板载 GMAC/PHY 仍未接入。
 

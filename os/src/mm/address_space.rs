@@ -508,7 +508,8 @@ impl<T: PageTable> AddressSpace<T> {
 
         let limit = offset.saturating_add(want);
         let user_vma_count = self.vmas.iter().filter(|vma| vma.vm_is_user()).count();
-        let compact = self.locked_pages.is_empty() && user_vma_count >= PROC_SMAPS_DENSE_VMA_THRESHOLD;
+        let compact =
+            self.locked_pages.is_empty() && user_vma_count >= PROC_SMAPS_DENSE_VMA_THRESHOLD;
         let entry_estimate = if compact {
             PROC_SMAPS_COMPACT_ENTRY_ESTIMATE
         } else {

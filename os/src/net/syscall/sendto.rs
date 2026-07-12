@@ -127,13 +127,8 @@ pub fn sys_sendto(
                     ret
                 } else {
                     let mut kernel_buf = alloc::vec![0u8; len];
-                    if copy_from_user_array(
-                        token,
-                        buf as *const u8,
-                        kernel_buf.as_mut_ptr(),
-                        len,
-                    )
-                    .is_err()
+                    if copy_from_user_array(token, buf as *const u8, kernel_buf.as_mut_ptr(), len)
+                        .is_err()
                     {
                         return -(SyscallErr::EFAULT as isize);
                     }
@@ -150,13 +145,8 @@ pub fn sys_sendto(
                 }
             } else {
                 let mut kernel_buf = alloc::vec![0u8; len];
-                if copy_from_user_array(
-                    token,
-                    buf as *const u8,
-                    kernel_buf.as_mut_ptr(),
-                    len,
-                )
-                .is_err()
+                if copy_from_user_array(token, buf as *const u8, kernel_buf.as_mut_ptr(), len)
+                    .is_err()
                 {
                     return -(SyscallErr::EFAULT as isize);
                 }
@@ -183,13 +173,8 @@ pub fn sys_sendto(
                     ret
                 } else {
                     let mut kernel_buf = alloc::vec![0u8; len];
-                    if copy_from_user_array(
-                        token,
-                        buf as *const u8,
-                        kernel_buf.as_mut_ptr(),
-                        len,
-                    )
-                    .is_err()
+                    if copy_from_user_array(token, buf as *const u8, kernel_buf.as_mut_ptr(), len)
+                        .is_err()
                     {
                         return -(SyscallErr::EFAULT as isize);
                     }
@@ -206,13 +191,8 @@ pub fn sys_sendto(
                 }
             } else {
                 let mut kernel_buf = alloc::vec![0u8; len];
-                if copy_from_user_array(
-                    token,
-                    buf as *const u8,
-                    kernel_buf.as_mut_ptr(),
-                    len,
-                )
-                .is_err()
+                if copy_from_user_array(token, buf as *const u8, kernel_buf.as_mut_ptr(), len)
+                    .is_err()
                 {
                     return -(SyscallErr::EFAULT as isize);
                 }
@@ -231,13 +211,7 @@ pub fn sys_sendto(
                 None
             };
             let mut kernel_buf = alloc::vec![0u8; len];
-            if copy_from_user_array(
-                token,
-                buf as *const u8,
-                kernel_buf.as_mut_ptr(),
-                len,
-            )
-            .is_err()
+            if copy_from_user_array(token, buf as *const u8, kernel_buf.as_mut_ptr(), len).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);
             }

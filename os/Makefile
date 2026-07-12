@@ -17,6 +17,10 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-sata-probe la64-2k1000-sata-write-probe \
 	la64-2k1000-sata-fs-write-probe \
 	la64-2k1000-scratch-rw \
+	la64-2k1000-core-tests \
+	la64-2k1000-shell \
+	la64-2k1000-gmac-probe \
+	la64-2k1000-gmac-net \
 	la64-2k1000-sata-mount-ro \
 	la64-2k1000-run-clean
 
@@ -129,6 +133,58 @@ la64-2k1000-scratch-rw: prepare-cargo-config
 		EXTRA_FEATURES=sata_scratch_rw MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-scratch-rw.ui
+
+# Focused real-board diagnostic image. It keeps the normal SATA/scratch safety
+# boundary but overrides the SSD test config at runtime to run libctest,
+# cyclictest, and a curated non-network LTP syscall set.
+la64-2k1000-core-tests: prepare-cargo-config
+	@grep -Eq '^mode=run$$' ../os_test.conf || { \
+		echo "os_test.conf must contain mode=run" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw board_core_test" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-core-tests.ui
+
+# Interactive bring-up image: initramfs userspace + GMAC0, no test execution
+# and no dependency on the SSD. The shell override is an ephemeral ramfs
+# marker, so the persistent os_test.conf remains untouched.
+la64-2k1000-shell: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt \
+		EXTRA_FEATURES="gmac_2k1000 board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-shell.ui
+
+# Non-destructive handoff probe for both integrated DWMAC 3.70a controllers.
+# It reads MAC/DMA state and PHY registers through MDIO, but does not reset the
+# controller, alter PHY settings, or start descriptor DMA.
+la64-2k1000-gmac-probe: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt \
+		EXTRA_FEATURES=gmac_probe MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-gmac-probe.ui
+
+# Diagnostic GMAC image: polling GMAC0 + YT8511H + smoltcp, with the direct-link
+# address fixed at 192.168.9.20/24. It enables bounded descriptor diagnostics;
+# production configurations should enable gmac_2k1000 without gmac_diag. Keep
+# storage out so MAC descriptor DMA can be validated independently from AHCI.
+la64-2k1000-gmac-net: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt \
+		EXTRA_FEATURES="gmac_2k1000 gmac_diag" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-gmac-net.ui
 
 # 首次文件系统验收镜像：识别裸盘/MBR 中的 ext4 或 FAT32，并以只读方式挂载。
 la64-2k1000-sata-mount-ro: prepare-cargo-config

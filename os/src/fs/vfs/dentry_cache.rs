@@ -88,8 +88,10 @@ impl DentryCache {
         let entry = self.map.get_mut(key)?;
         entry.referenced = true;
         if crate::fs::ext4::counters::counters_enabled() {
-            crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            crate::fs::ext4::counters::DENTRY_CACHE_HIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DENTRY_CACHE_HIT
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         Some(entry.node.clone())
     }
@@ -193,7 +195,8 @@ impl DentryCache {
                 // entry unconditionally to bound the loop.
                 if let Some(key) = self.order.pop_front() {
                     if let Some(entry) = self.map.remove(&key) {
-                        dcache_stats::EVICT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        dcache_stats::EVICT_TOTAL
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         evicted.push(entry.node);
                     }
                 }
@@ -219,9 +222,11 @@ impl DentryCache {
                 let sc = Arc::strong_count(&entry.node);
                 dcache_stats::EVICT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if sc <= 1 {
-                    dcache_stats::EVICT_SOLE_OWNER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    dcache_stats::EVICT_SOLE_OWNER
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 } else {
-                    dcache_stats::EVICT_EXTERN_HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    dcache_stats::EVICT_EXTERN_HELD
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
                 evicted.push(entry.node);
             }
@@ -232,7 +237,9 @@ impl DentryCache {
     /// Called from get() when cache is at limit, so cold entries get evicted
     /// even on cache-hit-heavy workloads where insert_or_get rarely fires.
     fn advance_clock_one(&mut self) {
-        let Some(key) = self.order.pop_front() else { return };
+        let Some(key) = self.order.pop_front() else {
+            return;
+        };
         let Some(entry) = self.map.get_mut(&key) else {
             // Entry missing from map — skip
             return;

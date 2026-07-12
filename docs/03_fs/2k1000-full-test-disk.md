@@ -12,6 +12,10 @@ code_paths:
   - "os/src/fs/fat32/bitmap.rs"
   - "os/src/fs/fat32/efs.rs"
   - "os/src/fs/fat32/fat_inode.rs"
+  - "os/src/fs/ramfs/mod.rs"
+  - "os/src/fs/dev/pipe.rs"
+  - "os/src/task/manager.rs"
+  - "os/src/task/threads.rs"
   - "os/src/syscall/fs.rs"
   - "os/src/drivers/block/partition.rs"
   - "user/src/bin/init.rs"
@@ -113,8 +117,8 @@ ext4ls scsi 0:3 /
 macOS 上推荐直接使用一键入口：
 
 ```bash
-make 2k1000-boot-check
-make 2k1000-boot
+make 2k1000-boot-check IMAGE=kernel-2k1000-run.ui
+make 2k1000-boot IMAGE=kernel-2k1000-run.ui
 ```
 
 手工等价命令为：
@@ -139,7 +143,7 @@ bootm 0x9000000098000000
 
 ```bash
 make -C os la64-2k1000-sata-write-probe
-make 2k1000-boot BOARD_KERNEL=kernel-2k1000-sata-write-probe.ui
+make 2k1000-boot IMAGE=kernel-2k1000-sata-write-probe.ui
 ```
 
 探针硬匹配 SSD 型号 `TS32GMTS400`、MBR 签名和 disk id `0x4d414e47`，解析四个主分区后，在最后一个分区末端之外保留 2048 个 sector，再测试连续 8 个 sector。当前镜像对应测试范围为 `12587008..12587015`，不属于 P1/P2/P3。
@@ -150,7 +154,7 @@ make 2k1000-boot BOARD_KERNEL=kernel-2k1000-sata-write-probe.ui
 
 ```bash
 make -C os la64-2k1000-sata-fs-write-probe
-make 2k1000-boot BOARD_KERNEL=kernel-2k1000-sata-fs-write-probe.ui
+make 2k1000-boot IMAGE=kernel-2k1000-sata-fs-write-probe.ui
 ```
 
 该镜像仍按正式路径只读挂载 P1/P3，并保持 `/dev/vda2` 只读；内核仅为探针构造一个不暴露给用户态的 P2 可写视图，创建 `MANGO_RW_PROBE/PAYLOAD.BIN`，写入 6KiB 后强制 page cache 写回，重新打开 FAT32 验证目录、文件和内容，再删除并第三次打开确认清理持久化。只有该阶段通过后，才允许把 P2 作为用户态 scratch 分区开放。
@@ -203,7 +207,7 @@ stage-1 会创建 `/scratch/MANGO_USR_PROBE/PAYLOAD.BIN`，写入 6144 字节确
 
 检测到可写 `/scratch` 后，stage-1 不再把只读 `/tools/bin`、`/tools/lib`、`/tools/usr` 覆盖到根目录对应路径，而是保留 initramfs 中的 `/bin`、`/sbin`、`/lib`、`/usr` 作为可写运行时。工具仍可通过扩展后的 `PATH` 和 `LD_LIBRARY_PATH` 从 `/tools` 读取；动态库链接和内嵌 `libgcc_s.so.1` 则写入 ramfs `/lib`。这部分运行时重启后丢失，不属于 SSD 持久数据。
 
-P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua、lmbench 时，initproc 会按 libc 删除并重建独立工作区：
+P1 上的 `/musl`、`/glibc` 继续只读。执行需要当前目录写入的分组时，initproc 会按 libc 删除并重建独立工作区：
 
 ```text
 /scratch/work/basic-musl
@@ -218,9 +222,13 @@ P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua、lmben
 /scratch/work/iozone-glibc
 /scratch/work/libcbench-musl
 /scratch/work/libcbench-glibc
+/scratch/work/libctest-musl
+/scratch/work/libctest-glibc
+/scratch/work/cyclictest-musl
+/scratch/work/cyclictest-glibc
 ```
 
-各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本；lmbench 包含 busybox、入口、统一二进制、`hello` 和 `lat_sig`；iozone 包含 busybox、入口脚本和 iozone 二进制；libcbench 包含 busybox、入口脚本和静态 `libc-bench`。lmbench 的 `hello` wrapper 会通过绝对路径 `/code/lmbench_src/bin/build/lmbench_all` 回调，因此每次准备工作区后都要把该链接切到当前 libc 的 `lmbench_all`。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
+各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本；lmbench 包含 busybox、入口、统一二进制、`hello` 和 `lat_sig`；iozone 包含 busybox、入口脚本和 iozone 二进制；libcbench 包含 busybox、入口脚本和静态 `libc-bench`；libctest 包含两个入口脚本、`runtest.exe`、静态/动态 entry、顶层 `dlopen_dso.so`/`tls_get_new-dtv_dso.so` 以及完整 DSO `lib/`；cyclictest 包含入口、cyclictest 和 hackbench。LoongArch musl cyclictest 会在 libc 的 scheduler stub 中提前失败，因此两套 wrapper 都使用已在 QEMU 验证的 glibc cyclictest，但 hackbench 仍保留当前 libc 版本。lmbench 的 `hello` wrapper 会通过绝对路径 `/code/lmbench_src/bin/build/lmbench_all` 回调，因此每次准备工作区后都要把该链接切到当前 libc 的 `lmbench_all`。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
 
 2026-07-12 实板复验中，启动脚本只执行 `ping`、`tftpboot`、`iminfo` 和 `bootm`，未执行 U-Boot `scsi reset/scan`；内核独立完成 AHCI 初始化并通过 `/scratch` 写入探针。musl/glibc 的 basic、busybox、lua 均从上述 SSD 路径运行：basic 全部子项到 END；busybox 的 touch/write/cp/mkdir/mv/rmdir/unlink 等命令全部 success；Lua 两套共 18 个子项全部 success。
 
@@ -233,5 +241,24 @@ iozone 原先直接在只读源目录创建 `iozone.tmp` 和 `iozone.DUMMY.*`，
 首轮 glibc iozone 会立即在动态加载器 `_dl_runtime_resolve_lasx` 的 `xvst` 指令触发 `InstructionNonDefined`。根因不是文件系统，而是内核对两种架构统一写死 `AT_HWCAP=0x112d`：该值是 RISC-V IMAFDC 字母位图，在 LoongArch ABI 中却包含 LASX 和 LBT_MIPS。修复后 RISC-V 保留原值，LoongArch 根据 CPUCFG1/2 与内核上下文保存能力生成 HWCAP；当前内核未保存 LSX/LASX/LBT 扩展状态，因此不向用户态宣称或启用这些扩展。修复后的 glibc 完整 iozone 已通过。
 
 libcbench 两套入口都只调用静态 `libc-bench`，二进制唯一外部路径是 `/proc/self/smaps`，没有隐藏的数据文件或当前目录写入依赖。迁移到独立工作区后，musl/glibc 均完整输出 27 个 malloc、string、pthread、UTF-8、stdio 和 regex benchmark；musl 用时 37s、glibc 用时 61s，均到 GROUP END 且退出码为 0。此前为 smaps 实现的 per-open 快照缓存也在实板上通过 pthread create 压力验证，没有复现 120s 超时。
+
+### 7.2 核心测试聚焦镜像
+
+`board_core_test` 是默认关闭的实板诊断 feature，只能与 `board_2k1000 + sata_scratch_rw` 组合。构建命令为：
+
+```bash
+make -C os la64-2k1000-core-tests
+python3 scripts/boot_2k1000_tftp.py \
+  --interface en8 \
+  --image kernel-2k1000-core-tests.ui
+```
+
+该镜像在 ramfs 根目录创建 `/board_core_test` 标记。initproc 看到标记后，将运行计划覆盖为 `libctest -> cyclictest -> ltp`，并强制 LTP 使用 inline runner 和双 libc 的 274 个非网络白名单。白名单覆盖进程生命周期、虚拟内存、信号、时钟/定时器、调度、futex、pipe、epoll/eventfd 和本地 VFS，不包含 accept/bind/connect/listen/send/recv/socket 等网络用例。覆盖仅存在于本次启动的 ramfs，不写 P1 `/sdcard/os_test.conf`，也不改变正式 scratch 镜像的默认全量配置。
+
+libctest 和 cyclictest 从上述独立 FAT32 工作区运行；LTP 二进制继续从只读 P1 执行，但显式设置 `TMPDIR=/tmp`、`TMPBASE=/tmp`、`HOME=/`，并清除继承自 QEMU 的 `LTP_DEV*=/dev/vdb2`，避免临时文件或设备测试误碰只读源/块节点。聚焦组超时分别为 900s、180s 和每 libc 3600s。
+
+2026-07-12 最终实板镜像为 `12380736` 字节，SHA-256 `7dc2d763568026ff79edc36e91cbab16fcd623362f03c2c6e42f73ba2cd6807e`。musl libctest 静态/动态全通过；glibc 完整结束且修复目标 `statvfs`、`dlopen`、`tls_get_new_dtv` 通过，剩余为 libc 差异和待复核同步/stdio 项。cyclictest 两套均完成 400-task hackbench 压力。LTP 两套各执行 274 项并到达组尾；`futex_wait05`、`select01` 和两轮 1000-waiter `futex_cmp_requeue01` 均通过，未再出现 `kernel stack slot 1024` panic。
+
+聚焦 LTP 仍暴露 symlink/execveat、getdents、`/proc/self/maps`、pipe 大写入、无测试块设备及 glibc 后半程 poll/select 时序长尾。外层 runner 返回 0 只代表调度完整结束，不能视为 548 次调用全部通过。
 
 按正式顺序下一阶段是 netperf/iperf。当前 2K1000 路径仍跳过外部网卡探测并使用 loopback-only 网络栈，因此必须先完成板载 GMAC/PHY 驱动与 smoltcp 接入，再迁移网络组的运行目录；不能把 U-Boot TFTP 网卡可用误认为 MangoCore 已具备运行期网络设备。

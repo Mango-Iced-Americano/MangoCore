@@ -1,10 +1,4 @@
-use alloc::{
-    boxed::Box,
-    string::String,
-    sync::Arc,
-    vec,
-    vec::Vec,
-};
+use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use spin::Mutex;
 
 use crate::fs::vfs::FilePrivateData;
@@ -89,10 +83,7 @@ fn create_test_env() -> (Arc<FakeBlockDevice>, Arc<Ext4FileSystem>) {
 }
 
 /// Create a regular file in the root directory, return IndexNode and the filesystem.
-fn create_file(
-    fs: &Arc<Ext4FileSystem>,
-    name: &str,
-) -> Result<Arc<dyn IndexNode>, String> {
+fn create_file(fs: &Arc<Ext4FileSystem>, name: &str) -> Result<Arc<dyn IndexNode>, String> {
     let mode = InodeFileType::S_IFREG.bits() | 0x1FF;
     let child_ref = fs
         .create(super::ROOT_INODE, name, mode, 0, 0)
@@ -103,8 +94,9 @@ fn create_file(
 
 fn private_data() -> spin::MutexGuard<'static, FilePrivateData> {
     // Leak a Box<Mutex> to get 'static lifetime (fine for single-threaded tests)
-    let m: &'static spin::Mutex<FilePrivateData> =
-        Box::leak(alloc::boxed::Box::new(spin::Mutex::new(FilePrivateData::Unused)));
+    let m: &'static spin::Mutex<FilePrivateData> = Box::leak(alloc::boxed::Box::new(
+        spin::Mutex::new(FilePrivateData::Unused),
+    ));
     m.lock()
 }
 
@@ -249,11 +241,7 @@ pub fn test_extend_write() -> Result<(), String> {
         "hole before write should be zero"
     );
     // Bytes 16..16+data.len() should match written data
-    assert_eq_test!(
-        &buf[16..16 + data.len()],
-        data,
-        "extend content"
-    );
+    assert_eq_test!(&buf[16..16 + data.len()], data, "extend content");
     Ok(())
 }
 
@@ -285,7 +273,8 @@ pub fn test_write_page_refuses_unmapped() -> Result<(), String> {
     file.write_at(0, data.len(), data, pd)
         .map_err(|e| alloc::format!("write_at large file: {e:?}"))?;
     // sync will call writeback_all which must not hit unmapped blocks
-    file.sync().map_err(|e| alloc::format!("sync large file: {e:?}"))?;
+    file.sync()
+        .map_err(|e| alloc::format!("sync large file: {e:?}"))?;
     Ok(())
 }
 
@@ -297,7 +286,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ("write_sync_reread", test_write_sync_reread),
     ("cross_page_write", test_cross_page_write),
     ("extend_write", test_extend_write),
-    ("write_page_refuses_unmapped", test_write_page_refuses_unmapped),
+    (
+        "write_page_refuses_unmapped",
+        test_write_page_refuses_unmapped,
+    ),
 ];
 
 pub fn run_all_tests() {

@@ -87,8 +87,8 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
         return 0;
     }
     let seg_start = page_offset >> VALID_SEG_SHIFT;
-    let seg_end = ((page_offset + len + (1 << VALID_SEG_SHIFT) - 1) >> VALID_SEG_SHIFT)
-        .min(VALID_SEG_COUNT);
+    let seg_end =
+        ((page_offset + len + (1 << VALID_SEG_SHIFT) - 1) >> VALID_SEG_SHIFT).min(VALID_SEG_COUNT);
     if seg_start >= VALID_SEG_COUNT {
         return 0;
     }
@@ -139,12 +139,18 @@ pub fn registry_stats() -> (usize, usize, usize, usize) {
 
 /// 聚合所有 alive PageCache 的 entries 统计: (total_len, total_cap, total_live, total_holes)
 pub fn entries_global_stats() -> (usize, usize, usize, usize) {
-    let mut tlen = 0; let mut tcap = 0; let mut tlive = 0; let mut tholes = 0;
+    let mut tlen = 0;
+    let mut tcap = 0;
+    let mut tlive = 0;
+    let mut tholes = 0;
     let reg = PAGE_CACHE_REGISTRY.lock();
     for weak in reg.iter() {
         if let Some(pc) = weak.upgrade() {
             let (len, cap, live, holes) = pc.entries_stats();
-            tlen += len; tcap += cap; tlive += live; tholes += holes;
+            tlen += len;
+            tcap += cap;
+            tlive += live;
+            tholes += holes;
         }
     }
     (tlen, tcap, tlive, tholes)
@@ -226,11 +232,7 @@ pub trait PageCacheBackend: Send + Sync {
     /// 批量读取连续页面：start_index..start_index+pages.len()
     /// pages 为可变切片（每个元素长度 = PAGE_SIZE），从后端批量读取填充。
     /// 默认回退为逐页调用 read_page；支持合并读取的后端（如 EXT4）应覆盖此方法
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         for (i, page) in pages.iter_mut().enumerate() {
             self.read_page(start_index + i, *page)?;
         }
@@ -912,7 +914,8 @@ impl PageCache {
             let _t_lookup = perf::perf_time_now();
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
-            let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+            let had_miss =
+                perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
             let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
             let _t_copy = perf::perf_time_now();
@@ -993,7 +996,12 @@ impl PageCache {
     /// 从指定偏移量写入数据
     /// 两阶段写入：持锁收集目标页 → 解锁写入数据
     /// `old_file_size`: 旧文件大小，用于判断页面是否超出 EOF 以跳过不必要的后端读取
-    pub fn write(&self, offset: usize, buf: &[u8], old_file_size: Option<usize>) -> Result<usize, SyscallErr> {
+    pub fn write(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
         let _t0 = perf::perf_time_now();
         if buf.is_empty() {
             perf::record_pc_write(0, false, perf::perf_time_now().wrapping_sub(_t0));
@@ -1009,14 +1017,19 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
+            let entry =
+                self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
             let dst = entry.as_slice_mut();
             dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
             let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
-            perf::record_pc_write(1, full_page_overwrite, perf::perf_time_now().wrapping_sub(_t0));
+            perf::record_pc_write(
+                1,
+                full_page_overwrite,
+                perf::perf_time_now().wrapping_sub(_t0),
+            );
             balance_dirty_pages();
             return Ok(sub_len);
         }
@@ -1047,8 +1060,11 @@ impl PageCache {
             pages += 1;
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            if full_page_overwrite { any_full_overwrite = true; }
-            let entry = self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            if full_page_overwrite {
+                any_full_overwrite = true;
+            }
+            let entry =
+                self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
             copies.push(CopyItem {
                 entry,
                 page_offset,
@@ -1065,14 +1081,20 @@ impl PageCache {
             let dst_start = item.page_offset;
             dst[dst_start..dst_start + item.sub_len]
                 .copy_from_slice(&buf[src_offset..src_offset + item.sub_len]);
-            let became_full = item.entry.mark_valid_and_check_full(item.page_offset, item.sub_len);
+            let became_full = item
+                .entry
+                .mark_valid_and_check_full(item.page_offset, item.sub_len);
             if became_full && !item.full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
             src_offset += item.sub_len;
         }
 
-        perf::record_pc_write(pages, any_full_overwrite, perf::perf_time_now().wrapping_sub(_t0));
+        perf::record_pc_write(
+            pages,
+            any_full_overwrite,
+            perf::perf_time_now().wrapping_sub(_t0),
+        );
         balance_dirty_pages();
         Ok(total_written)
     }
@@ -1173,7 +1195,8 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = len.min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
+            let entry =
+                self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
             let dst = entry.as_slice_mut();
             src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
             let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
@@ -1207,7 +1230,8 @@ impl PageCache {
 
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            let entry =
+                self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
             copies.push(CopyItem {
                 entry,
                 page_offset: write_start - page_start,
@@ -1223,7 +1247,9 @@ impl PageCache {
             let dst = item.entry.as_slice_mut();
             let dst_start = item.page_offset;
             src.read_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]);
-            let became_full = item.entry.mark_valid_and_check_full(item.page_offset, item.sub_len);
+            let became_full = item
+                .entry
+                .mark_valid_and_check_full(item.page_offset, item.sub_len);
             if became_full && !item.full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
@@ -1261,7 +1287,7 @@ impl PageCache {
 
         // Phase 1: 收集需要新建的页面，已缓存的跳过
         struct PendingPage {
-            index: usize,       // absolute page index
+            index: usize, // absolute page index
             entry: Arc<PageEntry>,
         }
         let mut pending: Vec<PendingPage> = Vec::new();
@@ -1349,14 +1375,8 @@ impl PageCache {
     /// - 非顺序访问时重置窗口：ra_size = MIN_RA_PAGES
     /// - 更新 prev_page 记录
     /// - 批量预取 ahead pages
-    pub fn maybe_readahead(
-        &self,
-        page_index: usize,
-        ra: &mut RaState,
-        req_pages: usize,
-    ) {
-        let sequential =
-            page_index == ra.prev_page + 1 || page_index == ra.prev_page;
+    pub fn maybe_readahead(&self, page_index: usize, ra: &mut RaState, req_pages: usize) {
+        let sequential = page_index == ra.prev_page + 1 || page_index == ra.prev_page;
 
         if !sequential {
             ra.ra_size = MIN_RA_PAGES;
@@ -1412,10 +1432,7 @@ impl PageCache {
         };
 
         // CAS Dirty → Writeback
-        match entry.compare_exchange_state(
-            PageState::Dirty as u8,
-            PageState::Writeback as u8,
-        ) {
+        match entry.compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8) {
             Ok(_) => {
                 GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -1487,10 +1504,9 @@ impl PageCache {
             let end = (start + count).min(entries.len());
             for i in start..end {
                 if let Some(entry) = &entries[i] {
-                    match entry.compare_exchange_state(
-                        PageState::Dirty as u8,
-                        PageState::Writeback as u8,
-                    ) {
+                    match entry
+                        .compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8)
+                    {
                         Ok(_) => {
                             GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                             GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -2049,7 +2065,9 @@ impl Ext4PageCacheBackend {
         ext4fs: alloc::sync::Weak<crate::fs::ext4::ext4fs::Ext4FileSystem>,
         inode_num: u32,
     ) -> Self {
-        let fs = ext4fs.upgrade().expect("Ext4PageCacheBackend: ext4fs dropped");
+        let fs = ext4fs
+            .upgrade()
+            .expect("Ext4PageCacheBackend: ext4fs dropped");
         let block_size = fs.block_size;
         let blocks_per_page = crate::config::PAGE_SIZE / block_size;
         Ext4PageCacheBackend {
@@ -2084,8 +2102,12 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 Some(block_id) => {
                     fs.block_device
                         .read_block(block_id, &mut buf[start..start + self.block_size]);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_READ);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::BLOCK_READ_TOTAL);
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_READ
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_READ_TOTAL
+                    );
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -2107,8 +2129,12 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 Some(block_id) => {
                     fs.block_device
                         .write_block(block_id, &buf[start..start + self.block_size]);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_WRITE);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::BLOCK_WRITE_TOTAL);
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_WRITE
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
+                    );
                 }
                 None => {
                     // Unmapped block — cannot write; keep page dirty for retry
@@ -2198,11 +2224,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         // 只有 block_size == PAGE_SIZE 时才能做物理块级的批量合并
         if self.blocks_per_page != 1 {
             let mut total = 0;
@@ -2270,9 +2292,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
 
             // 更新计数器
             for _ in 0..run_len {
-                crate::fs::ext4::counters::inc_counter!(
-                    crate::fs::ext4::counters::DATA_BLOCK_READ
-                );
+                crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_READ);
                 crate::fs::ext4::counters::inc_counter!(
                     crate::fs::ext4::counters::BLOCK_READ_TOTAL
                 );

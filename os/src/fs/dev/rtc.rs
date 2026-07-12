@@ -3,9 +3,7 @@ use core::any::Any;
 
 use crate::fs::dev::DEV_FS;
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
-};
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::mm::UserPtrMut;
 use crate::timer::{current_time_safe, TimeSpec};
 use crate::utils::error::SyscallErr;
@@ -35,14 +33,22 @@ fn is_leap_year(year: u32) -> bool {
 }
 
 fn days_in_year(year: u32) -> u32 {
-    if is_leap_year(year) { 366 } else { 365 }
+    if is_leap_year(year) {
+        366
+    } else {
+        365
+    }
 }
 
 fn days_in_month(year: u32, month: u32) -> u32 {
     match month {
         0 => 31,
         1 => {
-            if is_leap_year(year) { 29 } else { 28 }
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
         }
         2 => 31,
         3 => 30,

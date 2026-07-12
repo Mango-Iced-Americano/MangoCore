@@ -483,27 +483,47 @@ pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: u
                 }
             };
 
-            if Arc::ptr_eq(&inode1, &inode2) { 0 } else { 1 }
+            if Arc::ptr_eq(&inode1, &inode2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_VM => {
             let vm1 = process1.vm();
             let vm2 = process2.vm();
-            if Arc::ptr_eq(&vm1, &vm2) { 0 } else { 1 }
+            if Arc::ptr_eq(&vm1, &vm2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_FILES => {
             let files1 = process1.files();
             let files2 = process2.files();
-            if Arc::ptr_eq(&files1, &files2) { 0 } else { 1 }
+            if Arc::ptr_eq(&files1, &files2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_FS => {
             let fs1 = process1.fs();
             let fs2 = process2.fs();
-            if Arc::ptr_eq(&fs1, &fs2) { 0 } else { 1 }
+            if Arc::ptr_eq(&fs1, &fs2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_SIGHAND => {
             let sighand1 = process1.sighand();
             let sighand2 = process2.sighand();
-            if Arc::ptr_eq(&sighand1, &sighand2) { 0 } else { 1 }
+            if Arc::ptr_eq(&sighand1, &sighand2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_IO | KCMP_SYSVSEM => 0,
         _ => EINVAL,
@@ -624,7 +644,11 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
             if target_pid != task.pid() && siginfo.is_kernel_generated() {
                 return EPERM;
             }
-            send_process_signal_info(&process, signal, siginfo.with_signal_sender(sig, task.pid()));
+            send_process_signal_info(
+                &process,
+                signal,
+                siginfo.with_signal_sender(sig, task.pid()),
+            );
             SUCCESS
         }
         None => ProcessManager::send_signal_to_process(target_pid, signal),
