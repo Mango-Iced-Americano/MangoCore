@@ -53,6 +53,78 @@ pub mod tlb;
 extern "C" {
     pub fn srfill();
 }
+
+const CPUCFG1_UAL: usize = 1 << 20;
+const CPUCFG1_CRC32: usize = 1 << 25;
+
+const CPUCFG2_FP: usize = 1 << 0;
+const CPUCFG2_COMPLEX: usize = 1 << 8;
+const CPUCFG2_CRYPTO: usize = 1 << 9;
+const CPUCFG2_LVZ: usize = 1 << 10;
+const CPUCFG2_LSPW: usize = 1 << 21;
+const CPUCFG2_LAM: usize = 1 << 22;
+const CPUCFG2_PTW: usize = 1 << 24;
+
+fn read_cpucfg(index: usize) -> usize {
+    let value: usize;
+    // Safety: `cpucfg` only reads the CPU configuration word selected by
+    // `index` into the output register.
+    unsafe { core::arch::asm!("cpucfg {0},{1}", out(reg) value, in(reg) index) };
+    value
+}
+
+/// Return the LoongArch ELF `AT_HWCAP` bits that userspace may safely use.
+///
+/// LSX, LASX and LBT are intentionally omitted even when CPUCFG reports the
+/// hardware extension. The current trap context does not preserve their
+/// extended register state across task switches.
+pub fn user_hwcap() -> usize {
+    const HWCAP_CPUCFG: usize = 1 << 0;
+    const HWCAP_LAM: usize = 1 << 1;
+    const HWCAP_UAL: usize = 1 << 2;
+    const HWCAP_FPU: usize = 1 << 3;
+    const HWCAP_CRC32: usize = 1 << 6;
+    const HWCAP_COMPLEX: usize = 1 << 7;
+    const HWCAP_CRYPTO: usize = 1 << 8;
+    const HWCAP_LVZ: usize = 1 << 9;
+    const HWCAP_PTW: usize = 1 << 13;
+    const HWCAP_LSPW: usize = 1 << 14;
+
+    let cfg1 = read_cpucfg(1);
+    let cfg2 = read_cpucfg(2);
+    let mut hwcap = HWCAP_CPUCFG;
+
+    if cfg1 & CPUCFG1_UAL != 0 {
+        hwcap |= HWCAP_UAL;
+    }
+    if cfg1 & CPUCFG1_CRC32 != 0 {
+        hwcap |= HWCAP_CRC32;
+    }
+    if cfg2 & CPUCFG2_LAM != 0 {
+        hwcap |= HWCAP_LAM;
+    }
+    if cfg2 & CPUCFG2_FP != 0 {
+        hwcap |= HWCAP_FPU;
+    }
+    if cfg2 & CPUCFG2_COMPLEX != 0 {
+        hwcap |= HWCAP_COMPLEX;
+    }
+    if cfg2 & CPUCFG2_CRYPTO != 0 {
+        hwcap |= HWCAP_CRYPTO;
+    }
+    if cfg2 & CPUCFG2_LVZ != 0 {
+        hwcap |= HWCAP_LVZ;
+    }
+    if cfg2 & CPUCFG2_PTW != 0 {
+        hwcap |= HWCAP_PTW;
+    }
+    if cfg2 & CPUCFG2_LSPW != 0 {
+        hwcap |= HWCAP_LSPW;
+    }
+
+    hwcap
+}
+
 pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
@@ -100,10 +172,12 @@ pub fn bootstrap_init() {
     ECfg::empty()
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
+    let cfg2 = read_cpucfg(2);
     EUEn::read()
-        .set_float_point_stat(true)
-        .set_simd_extension_enabled(true)
-        .set_advanced_simd_extension_enabled(true)
+        .set_float_point_stat(cfg2 & CPUCFG2_FP != 0)
+        // The trap context currently saves scalar FPU state only.
+        .set_simd_extension_enabled(false)
+        .set_advanced_simd_extension_enabled(false)
         .write();
     // Timer & other Interrupts
     TIClr::read().clear_timer().write();

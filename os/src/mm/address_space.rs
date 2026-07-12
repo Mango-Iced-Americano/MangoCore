@@ -1402,8 +1402,7 @@ impl<T: PageTable> AddressSpace<T> {
             // AuxvEntry::new(AuxvType::L1D_CACHEGEOMETRY, 0);
             // AuxvEntry::new(AuxvType::L2_CACHESIZE, 0);
             // AuxvEntry::new(AuxvType::L2_CACHEGEOMETRY, 0);
-            // `0x112d` means IMADZifenciC, aka gc
-            AuxvEntry::new(AuxvType::HWCAP, 0x112d),
+            AuxvEntry::new(AuxvType::HWCAP, crate::hal::user_hwcap()),
             AuxvEntry::new(AuxvType::PAGESZ, PAGE_SIZE),
             AuxvEntry::new(AuxvType::CLKTCK, TICKS_PER_SEC),
             AuxvEntry::new(AuxvType::PHDR, elf_info.phdr),

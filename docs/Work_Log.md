@@ -4,6 +4,28 @@
 
 ## 2026-07-12
 
+### board/test: 迁移 iozone 并修复 LoongArch ELF HWCAP 误报
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 iozone 纳入每 libc 独立的 SSD scratch 工作区，复制并校验 busybox、入口脚本和 iozone 二进制；按实板耗时将超时提高到 1800s
+- `os/src/mm/address_space.rs`、`os/src/hal/{mod.rs,arch/mod.rs}` — 由 HAL 提供架构相关 `AT_HWCAP`，移除地址空间中的跨架构硬编码
+- `os/src/hal/arch/riscv/mod.rs` — 保留 RISC-V IMAFDC 字母位图 `0x112d`
+- `os/src/hal/arch/loongarch64/mod.rs` — 按 CPUCFG1/2 生成 LoongArch 用户能力位；在扩展上下文保存完成前不发布或启用 LSX/LASX/LBT
+- `docs/03_fs/2k1000-full-test-disk.md`、`docs/01_architecture/hal-and-platform.md`、`docs/04_mm/address-space-and-vma.md` — 记录 iozone 实板结果、最终镜像和 HWCAP/EUEN 契约
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀动态 loader 固定地址非法指令的 HWCAP 排查模式
+
+**验证：**
+- 聚焦镜像经 TFTP 传输 `12364416` 字节、U-Boot CRC32 `12b50319`、`iminfo` 和 scratch smoke 全部通过 ✅
+- musl iozone 从 `/scratch/work/iozone-musl` 完整运行，耗时 1331s，到 GROUP END，退出码 0 ✅
+- glibc 修复前固定在 `_dl_runtime_resolve_lasx` 的 `0xf60010dfc` 触发 `InstructionNonDefined`；修复后完整运行 1229s，到 GROUP END，退出码 0 ✅
+- 两套均完成自动、4 进程顺序/随机/反向/跨步、fwrite/fread、pwrite/pread；无 panic、EROFS、非法指令或 timeout ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`、`make -C os la64-2k1000-scratch-rw`，三目标均成功；仅有项目既有 warning ✅
+- 最终非聚焦 uImage 为 `12364416` 字节，SHA-256 `04f85c95cf8d0c2294c45d6d66ccd63c5a26c89c34c759cd76e4ef7ac56f899c` ✅
+
+**备注：**
+- 当前 iozone 二进制本身不提供 `pwritev/preadv` 选择项，打印 `Selected test not available on the version.` 后按既有行为正常结束。
+- 下一组迁移 libcbench；继续保持 P1/P3 和块设备节点只读，只开放 P2 `/scratch`。
+
 ### board/test: 将 lmbench 迁移到 SSD 工作区并完成双 libc 实板复验
 
 **涉及文件：**

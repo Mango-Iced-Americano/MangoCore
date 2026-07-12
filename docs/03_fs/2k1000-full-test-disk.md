@@ -42,7 +42,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
 | `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
 | `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
-| `kernel-2k1000-scratch-rw.ui` | 12,360,256 B | `b7a9439f80d05418f84951731b6dedb1e8bac3f4cdfbf7d4845e7c2ac4971179` |
+| `kernel-2k1000-scratch-rw.ui` | 12,364,416 B | `04f85c95cf8d0c2294c45d6d66ccd63c5a26c89c34c759cd76e4ef7ac56f899c` |
 
 ## 2. MBR 布局
 
@@ -214,9 +214,11 @@ P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua、lmben
 /scratch/work/lua-glibc
 /scratch/work/lmbench-musl
 /scratch/work/lmbench-glibc
+/scratch/work/iozone-musl
+/scratch/work/iozone-glibc
 ```
 
-各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本；lmbench 包含 busybox、入口、统一二进制、`hello` 和 `lat_sig`。lmbench 的 `hello` wrapper 会通过绝对路径 `/code/lmbench_src/bin/build/lmbench_all` 回调，因此每次准备工作区后都要把该链接切到当前 libc 的 `lmbench_all`。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
+各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本；lmbench 包含 busybox、入口、统一二进制、`hello` 和 `lat_sig`；iozone 包含 busybox、入口脚本和 iozone 二进制。lmbench 的 `hello` wrapper 会通过绝对路径 `/code/lmbench_src/bin/build/lmbench_all` 回调，因此每次准备工作区后都要把该链接切到当前 libc 的 `lmbench_all`。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
 
 2026-07-12 实板复验中，启动脚本只执行 `ping`、`tftpboot`、`iminfo` 和 `bootm`，未执行 U-Boot `scsi reset/scan`；内核独立完成 AHCI 初始化并通过 `/scratch` 写入探针。musl/glibc 的 basic、busybox、lua 均从上述 SSD 路径运行：basic 全部子项到 END；busybox 的 touch/write/cp/mkdir/mv/rmdir/unlink 等命令全部 success；Lua 两套共 18 个子项全部 success。
 
@@ -224,4 +226,8 @@ busybox 首轮暴露 FAT 未实现原生 rename，默认 `link + unlink` 因 FAT
 
 lmbench 迁移前，`lat_select` 在只读源目录创建临时文件会报 `EROFS`。首版工作区只复制入口、统一二进制、busybox 和 `hello`，两套组虽然退出 0，`lat_sig -P 1 prot lat_sig` 仍因缺少作为映射对象的 `lat_sig` 文件打印 `mmap: Bad file descriptor`。补齐并校验该文件后，2026-07-12 最终实板复验中 musl/glibc 均输出 `Protection fault`，并完整运行 `lat_select`、fork/exec/shell、`/var/tmp/XXX` 写入、pagefault、mmap、`lat_fs`、文件/管道带宽和 context switch；两组分别用时 108s 和 216s，退出码均为 0。
 
-下一组 iozone 仍从只读源运行，实板已稳定观察到 `iozone.tmp` 和 `iozone.DUMMY.*` 创建时报 `Read-only file system`，应迁移到独立 SSD 工作区。
+iozone 原先直接在只读源目录创建 `iozone.tmp` 和 `iozone.DUMMY.*`，会稳定返回 `Read-only file system`。迁移后每套 libc 都在独立 scratch 工作区中执行自动模式，以及 4 进程顺序、随机、反向、跨步、stdio、pread/pwrite 测试。真实 2K1000 SATA/FAT32 上 1KiB record 工作负载明显慢于 QEMU，因此组超时从 480s 调整为 1800s；最终实板 musl 用时 1331s、glibc 用时 1229s，均到 GROUP END 且退出码为 0。两份 iozone 二进制都提示当前版本不提供 `pwritev/preadv` 选择项，随后按其既有行为正常结束，不属于内核失败。
+
+首轮 glibc iozone 会立即在动态加载器 `_dl_runtime_resolve_lasx` 的 `xvst` 指令触发 `InstructionNonDefined`。根因不是文件系统，而是内核对两种架构统一写死 `AT_HWCAP=0x112d`：该值是 RISC-V IMAFDC 字母位图，在 LoongArch ABI 中却包含 LASX 和 LBT_MIPS。修复后 RISC-V 保留原值，LoongArch 根据 CPUCFG1/2 与内核上下文保存能力生成 HWCAP；当前内核未保存 LSX/LASX/LBT 扩展状态，因此不向用户态宣称或启用这些扩展。修复后的 glibc 完整 iozone 已通过。
+
+下一组应迁移并验证 libcbench，继续沿用“只读测试源 + 每 libc 独立 scratch 工作区 + 最小 payload 校验”的模式。

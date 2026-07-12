@@ -15,7 +15,7 @@ pub use loongarch64::{
     config::MEMORY_END,
     console_flush, console_getchar, console_putchar,
     local_irq_restore, local_irq_save,
-    machine_init, shutdown,
+    machine_init, shutdown, user_hwcap,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     KernelPageTableImpl, PageTableImpl, __switch, kstack_alloc, tlb_invalidate,
     trap::{
@@ -34,7 +34,7 @@ pub use riscv::{
     kern_stack::trap_cx_bottom_from_tid,
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
-    machine_init,
+    machine_init, user_hwcap,
     rv_board::MMIO,
     sbi::{console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save, set_timer, shutdown},
     sv39::tlb_invalidate,

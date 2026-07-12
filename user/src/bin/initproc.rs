@@ -73,7 +73,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     120,   // [1]  busybox
     60,   // [2]  lua
     120,  // [3]  libctest
-    480,  // [4]  iozone
+    1800, // [4]  iozone (real SATA/FAT32 1 KiB record workload needs ~20 min/libc)
     90,   // [5]  unixbench
     40,   // [6]  iperf
     120,  // [7]  libcbench
@@ -805,7 +805,10 @@ fn display_path(path: &str) -> &str {
 }
 
 fn group_uses_scratch_workspace(group_name: &str) -> bool {
-    matches!(group_name, "basic" | "busybox" | "lua" | "lmbench")
+    matches!(
+        group_name,
+        "basic" | "busybox" | "lua" | "lmbench" | "iozone"
+    )
 }
 
 fn prepare_group_workdir(
@@ -865,6 +868,14 @@ fn prepare_group_workdir(
              /bin/busybox mkdir -p /code/lmbench_src/bin/build || exit 1; \
              /bin/busybox rm -f /code/lmbench_src/bin/build/lmbench_all || exit 1; \
              /bin/busybox ln -s {workdir}/lmbench_all /code/lmbench_src/bin/build/lmbench_all || exit 1;"
+        ),
+        "iozone" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/iozone_testcode.sh {workdir}/iozone_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/iozone {workdir}/iozone || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/iozone_testcode.sh ] || exit 1; \
+             [ -f {workdir}/iozone ] || exit 1;"
         ),
         _ => return None,
     };

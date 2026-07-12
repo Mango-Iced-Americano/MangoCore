@@ -400,3 +400,11 @@
 - **修复**: 同时审计入口脚本参数、wrapper 文本和统一二进制 strings；把数据文件、exec wrapper 与绝对回调链接纳入最小 payload，并在每个 libc 工作区准备后重建指向当前二进制的链接。复制后逐项校验文件存在，不能只校验主程序。
 - **验收**: 不仅检查组退出码，还要比对关键指标行和 stderr；本例要求 `Protection fault` 出现且 `mmap: Bad file descriptor` 消失，同时 fork+exec、文件带宽和 context switch 跑到 END。
 - **相关文件**: `user/src/bin/initproc.rs`, `docs/03_fs/2k1000-full-test-disk.md`
+
+### 动态程序在 loader 固定地址非法指令时审计跨架构 HWCAP
+
+- **现象**: musl/static 版本正常，glibc 动态程序在进入 `main()` 前稳定触发非法指令；PC 落在 `ld.so` 的 LSX/LASX 等 ISA 优化 resolver，同一测试每次地址一致。
+- **根因**: 架构无关 ELF 栈代码写死了另一架构的 `AT_HWCAP` 数值。HWCAP 位号由各架构 ABI 独立定义；RISC-V 的 ISA 字母位图在 LoongArch 下可能被解释为 LASX/LBT。即使硬件实现扩展，内核没有保存对应扩展寄存器状态时也不能向用户态发布该能力。
+- **修复**: 由 HAL 按架构生成 HWCAP；读取 CPUCFG/架构寄存器映射硬件能力，再与内核实际启用和上下文保存能力取交集。EUEN/扩展使能与 HWCAP 保持一致。用 loader PC 减加载基址定位 resolver，并分别运行 static/musl 与 dynamic/glibc 做对照。
+- **验收**: 动态程序必须越过 loader 并完成真实多进程/上下文切换工作负载；只看到 `main()` 第一行不足以证明扩展状态切换安全。
+- **相关文件**: `os/src/mm/address_space.rs`, `os/src/hal/arch/mod.rs`, `os/src/hal/arch/loongarch64/mod.rs`, `os/src/hal/arch/riscv/mod.rs`
