@@ -4,6 +4,24 @@
 
 ## 2026-07-12
 
+### 修复 ext4_lwext4 零字节文件 bug（write-ordering + rename flush 错误传播）
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — 两处修复：
+  **Fix 1 (write-ordering):** `write_at()` 中，将 `note_logical_size(new_end)` 移到 `pc.write()` **之前**调用。原实现先写 PageCache（`pc.write()`），后更新 logical_size；但 `pc.write()` 内部会触发 `balance_dirty_pages()` 唤醒 writeback，writeback 通过 `write_pages()` 以 `logical_size` 为 EOF 夹钳 — 对于新文件 EOF=0，writeback 返回 `Ok(0)` 并标记脏页为 clean，导致数据永久丢失。
+  **Fix 3 (rename flush 错误传播):** `flush_one` 闭包中 `let _ = pc.writeback_all()` 改为 `pc.writeback_all().map_err(|_| SyscallErr::EIO)?`，将 writeback 失败从静默吞掉改为向上传播 `EIO`。闭包签名从返回 `usize` 改为返回 `Result<usize, SyscallErr>`。
+
+- `os/src/fs/ext4_lwext4/page_cache.rs` — **Fix 2 (安全网):** `write_pages()` 中，当 `total_bytes == 0` 但 `raw_total > 0`（有脏页数据但被 EOF 夹钳归零）时，新增 `log::warn!` 日志记录路径、EOF、脏字节数等诊断信息，便于事后排查。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 根因：`write_at()` 中 `note_logical_size()` 调用晚于 `pc.write()` 触发 `balance_dirty_pages()` → writeback 时机。对于 0 字节新文件，writeback 在 logical_size 更新前运行，EOF=0 导致 writeback 空操作，脏页被标记为 clean 但数据未落盘
+- Fix 1 的核心思路：在 `pc.write()` 触发 writeback 前，预发布预期 EOF（`expected_new_end = (offset + actual).max(old_size)`），确保 writeback 看到的 EOF 包含本次写入的数据。若写入部分成功则二次 `note_logical_size(actual_new_end)`，因 `fetch_max` 语义这一般是空操作
+- 症状：`apk add` 安装的包文件（.so 库等）大小为 0；`dd` + `chmod` + `mv` 序列后文件数据损坏
+
 ### 修复三：L7 ext4 rename 回归、L9 真实 URL 替换、两个 L8 标签
 
 **涉及文件：**

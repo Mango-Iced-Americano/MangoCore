@@ -219,6 +219,19 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 raw_total.min(eof.saturating_sub(start_offset))
             };
             if total_bytes == 0 {
+                if raw_total > 0 {
+                    // Safety net: dirty pages exist but EOF clamps them to 0.
+                    // This should not happen after the write-ordering fix
+                    // (note_logical_size is now called before pc.write()).
+                    // If triggered, it indicates a different caller forgot to
+                    // update logical_size before triggering writeback.
+                    log::warn!(
+                        "[lwext4-wb] skipping dirty writeback for {}: \
+                         EOF={} but {} dirty bytes at offset {} ({} pages)",
+                        self.lw_path, eof, raw_total, start_offset,
+                        pages.len()
+                    );
+                }
                 return Ok(0);
             }
 

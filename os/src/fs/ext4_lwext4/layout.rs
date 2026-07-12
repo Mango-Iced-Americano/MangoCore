@@ -701,6 +701,12 @@ impl IndexNode for Ext4OSInode {
     }
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
+        // Flush dirty PageCache pages to disk before the inode is dropped.
+        // Without this, dentry cache pressure can evict dentries, dropping
+        // the last strong reference to the inode, and dirty pages are lost.
+        if let Some(pc) = self.page_cache.lock().clone() {
+            let _ = pc.writeback_all();
+        }
         Ok(())
     }
 
@@ -844,10 +850,20 @@ impl IndexNode for Ext4OSInode {
         if self.file_type == FileType::File {
             let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
             let old_size = self.logical_size_or_refresh().unwrap_or(0);
+            // Pre-publish expected EOF so writeback inside balance_dirty_pages()
+            // (triggered by pc.write()) sees the new file size instead of
+            // clamping writes to the old EOF (e.g. 0 for a new file).
+            // Without this, a balance_dirty_pages() → write_pages() call
+            // during pc.write() would see the stale EOF, return Ok(0), and
+            // permanently clean dirty pages without writing them.
+            let expected_new_end = (offset + actual).max(old_size);
+            self.note_logical_size(expected_new_end);
             let n = pc.write(offset, &buf[..actual], Some(old_size))
                 .map_err(|_| SyscallErr::EIO)?;
-            let new_end = offset + n;
-            self.note_logical_size(new_end);
+            // If the write was partial, note_logical_size is a fetch_max —
+            // this is a no-op when the full write succeeded.
+            let actual_new_end = offset + n;
+            self.note_logical_size(actual_new_end);
             return Ok(n);
         }
 
@@ -1082,7 +1098,7 @@ impl IndexNode for Ext4OSInode {
         // backend still stores the old lw_path.  Flush to disk first, then
         // invalidate the cache so a fresh one with the new path is created
         // on next access.
-        let flush_one = |fs: &Arc<super::ext4fs::Ext4FileSystem>, path: &str| {
+        let flush_one = |fs: &Arc<super::ext4fs::Ext4FileSystem>, path: &str| -> Result<usize, SyscallErr> {
             // Get the inode_id: try real inode first, fall back to hash_path
             // (for files created before Fix 1).
             let inode_id = fs
@@ -1092,13 +1108,13 @@ impl IndexNode for Ext4OSInode {
             let registry = fs.page_caches.lock();
             if let Some(pc) = registry.get(&inode_id).and_then(|w| w.upgrade()) {
                 drop(registry);
-                let _ = pc.writeback_all();
+                pc.writeback_all().map_err(|_| SyscallErr::EIO)?;
             }
-            inode_id
+            Ok(inode_id)
         };
 
-        let old_inode_id = flush_one(&self.fs, &old_path);
-        let new_inode_id = flush_one(&self.fs, &new_path);
+        let old_inode_id = flush_one(&self.fs, &old_path)?;
+        let new_inode_id = flush_one(&self.fs, &new_path)?;
 
         // ── Actual rename ──
         let _lock = self.fs.lw.lock();
@@ -1559,5 +1575,15 @@ impl IndexNode for Ext4OSInode {
             return Err(from_lwext4(r.abs()));
         }
         Ok(0)
+    }
+}
+
+// Safety net: flush dirty PageCache pages when the inode is dropped
+// without an explicit close() call (e.g., dentry cache pressure eviction).
+impl Drop for Ext4OSInode {
+    fn drop(&mut self) {
+        if let Some(pc) = self.page_cache.lock().clone() {
+            let _ = pc.writeback_all();
+        }
     }
 }

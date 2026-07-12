@@ -705,3 +705,19 @@ diag=1
   3. 当后端 I/O 有 per-call 事务开销（如 journal commit）时，仅 batch open/seek/close 不够 — 必须也 batch write 调用本身（write coalescing），否则事务次数 = 页面数而非批次数
 
 - **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`read_at`、`write_at`、`ensure_page_cache`、`logical_size_or_refresh`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`LwExt4PageCacheBackend`、`LWEXT4_SIZE_UNKNOWN`、`ensure_size_known`）
+
+## PageCache: logical_size 必须在触发 writeback 前更新（write-ordering）
+
+- **根因**: `write_at()` 路径中 `note_logical_size()` 在 `pc.write()` **之后**调用，但 `pc.write()` 内部会调用 `balance_dirty_pages()` 唤醒 writeback。writeback 后端 `write_pages()` 以 `logical_size` 作为 EOF 夹钳 — 对于新文件 EOF=0，`total_bytes` 被夹钳为 0 → 返回 `Ok(0)` → PageCache 将脏页标记为 clean 但数据未落盘。之后再次写同一文件时 writeback 发现页面已是 clean 不再写，数据永久丢失。
+
+- **症状**: `apk add` 安装的包文件（.so 库等）为 0 字节；`dd` + `chmod` + `mv` 序列后文件数据损坏。文件创建后第一次写入数据被静默吞掉。
+
+- **修复**: 将 `note_logical_size(expected_new_end)` 移到 `pc.write()` **之前**。预发布预期 EOF（`expected_new_end = (offset + actual).max(old_size)`），确保 writeback 看到的 EOF 包含本次写入的数据。若写入部分成功，二次 `note_logical_size(actual_new_end)` 修正（fetch_max 语义下正常为 no-op）。
+
+- **教训**:
+  1. **状态更新必须在触发 side-effect 之前**：任何会触发 writeback/reclaim 的操作（`balance_dirty_pages`、`writeback_all`、`evict`）之前，被 writeback 回调依赖的状态（logical_size、inode 元数据等）必须已经反映最新的意图
+  2. **fetch_max 语义是双刃剑**：`logical_size` 的 `fetch_max` 在顺序正确时是安全的（单调递增），但无法撤销，因此必须先发布预期值再执行可能有副作用的操作
+  3. **writeback 的 Ok(0) 语义陷阱**：`write_pages` 返回 `Ok(0)` 被 PageCache 框架解释为"无数据需写入"并清理脏页标志；当 `logical_size` 为过时值导致夹钳归零时，这是错误的 — 应至少在 dirty pages > 0 但 total_bytes == 0 时记录警告（Safety Net Fix 2）
+  4. **rename flush 是独立问题**：rename 前通过 `flush_one` 调用 `writeback_all()` 强制刷页，原实现用 `let _ =` 吞掉所有错误 — 如果 writeback 因 `logical_size=0` 而静默失败，rename 后数据就丢了。修复：错误传播到调用方返回 `EIO`
+
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`write_at`、`rename`、`note_logical_size`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`write_pages`）
