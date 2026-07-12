@@ -12,6 +12,7 @@
 //! so status flags (O_NONBLOCK, O_APPEND) are shared correctly per POSIX.
 
 use crate::utils::error::SyscallErr;
+use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -639,8 +640,10 @@ impl Drop for FdTable {
 pub struct File {
     /// 对应的 inode
     pub inode: Arc<dyn IndexNode>,
-    /// 文件偏移量（AtomicUsize 直接内嵌，Arc<File> 共享跨 dup fd）
+    /// 文件偏移量（目录时作为 getdents64 的快照索引）
     offset: AtomicUsize,
+    /// getdents64 目录项快照：offset==0 时重建，保证偏移在条目删除后仍稳定
+    dirent_snapshot: Mutex<Option<Vec<String>>>,
     /// 打开标志（AtomicU32：fcntl F_SETFL 只改 O_NONBLOCK/O_APPEND 等状态 flags）
     flags: AtomicU32,
     /// 文件访问模式（open 后不变，直接存值去锁）
@@ -780,6 +783,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -838,6 +842,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -895,6 +900,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -950,6 +956,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -1774,34 +1781,59 @@ impl File {
 
     /// 将目录项打包为变长 linux_dirent64 记录写入 `buf`。
     ///
-    /// 布局：d_ino(u64) + d_off(i64) + d_reclen(u16) + d_name(NUL 结尾)，
-    /// d_type 按 Linux 语义写在记录最后一个字节，整体 8 字节对齐。
+    /// DragonOS-style stable snapshot for directory iteration.
+    /// d_off = entry index (0, 1, 2…) rather than computed byte offset,
+    /// so deleting entries between getdents64 calls does not skip survivors.
     pub fn get_dirent64(&self, buf: &mut [u8]) -> Result<usize, isize> {
         if !self.is_dir() {
             return Err(crate::syscall::errno::ENOTDIR);
         }
 
-        let dirents = self
-            .inode
-            .list_dirents()
-            .map_err(|e| -(e as isize))?;
-        let current_offset = self.offset.load(Ordering::SeqCst) as u64;
-        let mut source_offset = 0u64;
-        let mut new_offset = current_offset;
-        let mut written = 0usize;
+        let mut snapshot = self.dirent_snapshot.lock();
+        let mut idx = self.offset.load(Ordering::SeqCst);
 
-        for (name, ino, ft) in dirents {
-            log::info!("[get_dirent64] entry name={:?}, d_ino={}, type={:?}", name, ino, ft);
+        // Rebuild the name snapshot when starting from the beginning or
+        // when no snapshot exists yet.
+        if idx == 0 || snapshot.is_none() {
+            *snapshot = Some(
+                self.inode
+                    .list_dirents()
+                    .map_err(|e| -(e as isize))?
+                    .into_iter()
+                    .map(|(name, _, _)| name)
+                    .collect(),
+            );
+        }
+        let names = snapshot.as_ref().unwrap();
+
+        let mut written = 0usize;
+        while idx < names.len() {
+            let name = &names[idx];
+
+            // Look up the real inode — may have been deleted since the snapshot
+            let child = match self.inode.find(name) {
+                Ok(i) => i,
+                Err(e) => {
+                    if -(e as isize) == crate::syscall::errno::ENOENT {
+                        idx += 1; // deleted, skip
+                        continue;
+                    }
+                    return Err(-(e as isize));
+                }
+            };
+            let meta = match child.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    idx += 1;
+                    continue;
+                }
+            };
+
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let raw_size = 8 + 8 + 2 + 1 + name_len + 1;
             let reclen = (raw_size + 7) & !7;
-            let next_offset = source_offset + reclen as u64;
 
-            if next_offset <= current_offset {
-                source_offset = next_offset;
-                continue;
-            }
             if written + reclen > buf.len() {
                 if written == 0 {
                     return Err(crate::syscall::errno::EINVAL);
@@ -1814,7 +1846,7 @@ impl File {
                 *b = 0;
             }
 
-            let d_type = match ft {
+            let d_type = match meta.file_type {
                 FileType::Dir => 4u8,
                 FileType::File => 8u8,
                 FileType::SymLink => 10u8,
@@ -1825,29 +1857,19 @@ impl File {
                 _ => 0u8,
             };
 
-            buf[pos..pos + 8].copy_from_slice(&(ino as u64).to_le_bytes());
-            buf[pos + 8..pos + 16].copy_from_slice(&(next_offset as i64).to_le_bytes());
+            let d_off = (idx + 1) as i64; // stable cookie = next index
+            buf[pos..pos + 8].copy_from_slice(&(meta.inode_id as u64).to_le_bytes());
+            buf[pos + 8..pos + 16].copy_from_slice(&d_off.to_le_bytes());
             buf[pos + 16..pos + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
             buf[pos + 18] = d_type;
             buf[pos + 19..pos + 19 + name_len].copy_from_slice(&name_bytes[..name_len]);
             buf[pos + 19 + name_len] = 0;
 
             written += reclen;
-            new_offset = next_offset;
-            source_offset = next_offset;
+            idx += 1;
         }
 
-        self.offset.store(new_offset as usize, Ordering::SeqCst);
-
-        // When no entries were written but offset was non-zero, the
-        // directory changed between calls (e.g. rm -rf deleted entries
-        // that shifted positions).  Reset and retry once to avoid
-        // silently returning empty while entries still exist.
-        if written == 0 && current_offset > 0 {
-            self.offset.store(0, Ordering::SeqCst);
-            return self.get_dirent64(buf);
-        }
-
+        self.offset.store(idx, Ordering::SeqCst);
         Ok(written)
     }
 
