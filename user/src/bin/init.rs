@@ -16,7 +16,7 @@ const NTP_POLL_MS: usize = 50;
 const ENOENT: isize = -2;
 const AT_REMOVEDIR: u32 = 0x200;
 
-fn run_scratch_rw_smoke() -> bool {
+fn run_scratch_rw_smoke() -> Result<bool, ()> {
     const DIR: &str = "/scratch/MANGO_USR_PROBE\0";
     const FILE: &str = "/scratch/MANGO_USR_PROBE/PAYLOAD.BIN\0";
     const PAYLOAD_LEN: usize = 6144;
@@ -25,11 +25,11 @@ fn run_scratch_rw_smoke() -> bool {
     let mkdir_ret = sys_mkdirat(AT_FDCWD, DIR, 0o755);
     if mkdir_ret == ENOENT {
         println!("[scratch-smoke] /scratch absent, skipping");
-        return true;
+        return Ok(false);
     }
     if mkdir_ret != 0 {
         println!("[scratch-smoke] mkdir failed: {}", mkdir_ret);
-        return false;
+        return Err(());
     }
 
     let mut expected = alloc::vec![0u8; PAYLOAD_LEN];
@@ -40,33 +40,33 @@ fn run_scratch_rw_smoke() -> bool {
     let fd = open(FILE, OpenFlags::CREATE | OpenFlags::RDWR | OpenFlags::TRUNC);
     if fd < 0 {
         println!("[scratch-smoke] open for write failed: {}", fd);
-        return false;
+        return Err(());
     }
     let written = write(fd as usize, &expected);
     if written != PAYLOAD_LEN as isize {
         println!("[scratch-smoke] write failed: {}", written);
         close(fd as usize);
-        return false;
+        return Err(());
     }
     if sys_fsync(fd as usize) != 0 {
         println!("[scratch-smoke] fsync failed");
         close(fd as usize);
-        return false;
+        return Err(());
     }
     if sys_ftruncate(fd as usize, TRUNCATED_LEN as isize) != 0 {
         println!("[scratch-smoke] ftruncate failed");
         close(fd as usize);
-        return false;
+        return Err(());
     }
     if sys_fsync(fd as usize) != 0 || close(fd as usize) != 0 {
         println!("[scratch-smoke] final sync/close failed");
-        return false;
+        return Err(());
     }
 
     let fd = open(FILE, OpenFlags::RDONLY);
     if fd < 0 {
         println!("[scratch-smoke] reopen failed: {}", fd);
-        return false;
+        return Err(());
     }
     let mut actual = alloc::vec![0u8; TRUNCATED_LEN];
     let read_len = read(fd as usize, &mut actual);
@@ -81,21 +81,21 @@ fn run_scratch_rw_smoke() -> bool {
             "[scratch-smoke] persisted data mismatch: read={} eof={}",
             read_len, eof_len
         );
-        return false;
+        return Err(());
     }
 
     let unlink_ret = sys_unlinkat(AT_FDCWD, FILE, 0);
     if unlink_ret != 0 {
         println!("[scratch-smoke] unlink failed: {}", unlink_ret);
-        return false;
+        return Err(());
     }
     let rmdir_ret = sys_unlinkat(AT_FDCWD, DIR, AT_REMOVEDIR);
     if rmdir_ret != 0 {
         println!("[scratch-smoke] rmdir failed: {}", rmdir_ret);
-        return false;
+        return Err(());
     }
     println!("[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir");
-    true
+    Ok(true)
 }
 
 fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
@@ -221,25 +221,33 @@ fn set_system_time(secs: usize, nsecs: usize) {
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] MangoCore stage-1 boot (initramfs mode)");
 
-    if !run_scratch_rw_smoke() {
-        println!("[init] FATAL: writable scratch smoke test failed");
-        loop {}
-    }
+    let scratch_rw = match run_scratch_rw_smoke() {
+        Ok(available) => available,
+        Err(()) => {
+            println!("[init] FATAL: writable scratch smoke test failed");
+            loop {}
+        }
+    };
 
     try_ntp_sync();
 
     println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
 
-    // 内核已将 x0→/sdcard, x1→/tools 挂载好，直接 bind
-    // mkdir 保底：确保 target 目录存在（initramfs cpio 可能不含这些目录）
+    // Keep initramfs runtime directories writable when the staged P2 scratch
+    // mount is active. Tools and test payloads remain available at their
+    // read-only source paths.
     let _ = sys_mkdirat(AT_FDCWD, "/bin\0", 0o755);
-    try_bind("/tools/bin", "/bin");
     let _ = sys_mkdirat(AT_FDCWD, "/sbin\0", 0o755);
-    try_bind("/tools/sbin", "/sbin");
     let _ = sys_mkdirat(AT_FDCWD, "/lib\0", 0o755);
-    try_bind("/tools/lib", "/lib");
     let _ = sys_mkdirat(AT_FDCWD, "/usr\0", 0o755);
-    try_bind("/tools/usr", "/usr");
+    if scratch_rw {
+        println!("[init] staged runtime: keeping /bin /sbin /lib /usr writable");
+    } else {
+        try_bind("/tools/bin", "/bin");
+        try_bind("/tools/sbin", "/sbin");
+        try_bind("/tools/lib", "/lib");
+        try_bind("/tools/usr", "/usr");
+    }
     let _ = sys_mkdirat(AT_FDCWD, "/tests\0", 0o755);
     try_bind("/tools/tests", "/tests");
     // 不 bind /tools/etc — initramfs 已有完整 /etc，bind 会覆盖
@@ -248,7 +256,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let _ = sys_mkdirat(AT_FDCWD, "/glibc\0", 0o755);
     try_bind("/sdcard/glibc", "/glibc");
 
-    // /lib 已 bind 到 /tools/lib (ext4)，创建 apk db 目录使其持久化
+    // These directories live in initramfs during staged board runs and in the
+    // legacy tools mount on existing QEMU paths.
     for dir in ["/lib/apk\0", "/lib/apk/db\0", "/var/cache/apk\0"] {
         let _ = sys_mkdirat(AT_FDCWD, dir, 0o755);
     }
@@ -257,7 +266,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "SHELL=/bin/sh\0".as_ptr(),
         "PWD=/\0".as_ptr(),
         "HOME=/root\0".as_ptr(),
-        "PATH=/:/bin:/sbin:/usr/bin:/tools/bin\0".as_ptr(),
+        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin:/tools/bin:/tools/sbin:/tools/usr/bin:/tools/usr/sbin\0".as_ptr(),
         "USER=root\0".as_ptr(),
         core::ptr::null(),
     ];

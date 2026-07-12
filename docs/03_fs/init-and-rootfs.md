@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-11
+last_updated: 2026-07-12
 code_paths:
   - "os/src/main.rs"
   - "os/src/fs/mod.rs"
@@ -14,6 +14,8 @@ code_paths:
   - "os/src/syscall/fs.rs"
   - "os/src/drivers/block/partition.rs"
   - "os/src/fs/initramfs.rs"
+  - "user/src/bin/init.rs"
+  - "user/src/bin/initproc.rs"
 entry_points:
   - "VFS_ROOT"
   - "fs::initramfs_init"
@@ -93,6 +95,8 @@ rust_main()
 3. 挂载 devfs、procfs、sysfs、tmpfs 等伪文件系统。
 4. 默认 QEMU/CI 路径调用 `mount_boot_block_devices()` 探测 virtio 块设备，优先识别整盘裸文件系统，必要时解析 MBR 主分区，将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。
 5. 块设备故障只打印 warning，不 panic。
+
+在 2K1000 `sata_scratch_rw` staged 路径中，用户态初始化还会保留 ramfs `/bin`、`/sbin`、`/lib`、`/usr` 的可写性，不再用只读 `/tools` bind 覆盖这些运行时目录；`/tools` 仍作为只读工具源加入搜索路径。basic 测试源从只读 `/musl`、`/glibc` 复制到 `/scratch/work/basic-{musl,glibc}` 后执行，复制不完整时拒绝回退到只读源。无 `/scratch` 的 QEMU 和普通镜像继续使用原 bind 布局。
 
 `board_2k1000` 是 initramfs 模式的实板特例。救援镜像和 `sata_probe` 镜像仍在 `fs::initramfs_init()` 前调用 `force_ramfs()`；普通 `block_sata` 构建不再禁用块设备，而是注册 `/dev/sda*` 和兼容 `/dev/vda*`，再调用 `mount_boot_block_devices_read_only()`。板载 GMAC/PHY 仍未接入。
 

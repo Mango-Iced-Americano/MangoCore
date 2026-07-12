@@ -258,6 +258,15 @@ fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> 
     -1
 }
 
+fn scratch_runtime_enabled() -> bool {
+    let fd = open("/scratch\0", OpenFlags::RDONLY);
+    if fd < 0 {
+        return false;
+    }
+    close(fd as usize);
+    true
+}
+
 /// 提取 waitpid 返回的 status 中的退出码（与 bash $? 行为一致）
 fn exit_code_from_waitpid_status(status: i32) -> i32 {
     if status & 0x7F == 0 {
@@ -795,6 +804,44 @@ fn display_path(path: &str) -> &str {
     path.trim_end_matches('\0')
 }
 
+fn prepare_group_workdir(
+    environ: &[*const u8],
+    source_dir: &str,
+    group_name: &str,
+    libc_suffix: &str,
+) -> Option<String> {
+    if group_name != "basic" || !scratch_runtime_enabled() {
+        return None;
+    }
+
+    let source = display_path(source_dir);
+    let workdir = format!("/scratch/work/basic-{}", libc_suffix);
+    let command = format!(
+        "/bin/busybox rm -rf {workdir} || exit 1; \
+         /bin/busybox mkdir -p {workdir} || exit 1; \
+         /bin/busybox cp -R {source}/basic {workdir}/basic 2>/dev/null || exit 1; \
+         /bin/busybox cp {source}/basic_testcode.sh {workdir}/basic_testcode.sh || exit 1; \
+         /bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+         [ -f {workdir}/basic/run-all.sh ] || exit 1; \
+         [ -f {workdir}/basic_testcode.sh ] || exit 1; \
+         [ -f {workdir}/busybox ] || exit 1; \
+         /bin/busybox sync || exit 1\0"
+    );
+    let ret = run_bash_cmd(&command, environ);
+    if ret != 0 {
+        println!(
+            "[scratch-work] prepare {} from {} failed: {}",
+            workdir, source, ret
+        );
+        return None;
+    }
+
+    println!("[scratch-work] prepared {} from {}", workdir, source);
+    let mut path = workdir;
+    path.push('\0');
+    Some(path)
+}
+
 const MAX_GROUP_RETRIES: usize = 3;
 
 /// 运行测试脚本，失败时自动重试（最多 max_retries 次）。
@@ -852,20 +899,30 @@ fn run_group_in_dir(
     cfg: &RuntimeConfig,
 ) {
     let group_start_ms = get_time() as u64;
-    let log_dir = display_path(dir);
+    let source_log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
-    let libc_suffix = if log_dir.contains("musl") {
+    let libc_suffix = if source_log_dir.contains("musl") {
         "musl"
     } else {
         "glibc"
     };
+    let prepared_dir = prepare_group_workdir(environ, dir, group_name, libc_suffix);
+    if group_name == "basic" && scratch_runtime_enabled() && prepared_dir.is_none() {
+        println!(
+            "[scratch-work] FATAL: refuse read-only fallback for basic-{}",
+            libc_suffix
+        );
+        return;
+    }
+    let run_dir = prepared_dir.as_deref().unwrap_or(dir);
+    let log_dir = display_path(run_dir);
 
     let mut last_exit_code: i32 = 0;
     profile_before(group_name, libc_suffix, cfg);
     for attempt in 1..=max_retries {
         last_exit_code = run_group_once(
             environ,
-            dir,
+            run_dir,
             group_name,
             script,
             timeout_secs,
@@ -2810,7 +2867,7 @@ pub extern "C" fn _start() -> ! {
 /// 1. busybox --install -s /bin — 把 busybox applet 装为 /bin 下的 symlink
 /// 2. musl/glibc 动态库链接到 /lib
 fn install_embedded_libgcc_s() {
-    let path = "/glibc/lib/libgcc_s.so.1\0";
+    let path = "/lib/libgcc_s.so.1\0";
     // Check if already installed (from tools disk or previous run)
     let check_fd = open(path, OpenFlags::RDONLY);
     if check_fd >= 0 {
@@ -2881,9 +2938,14 @@ fn prepare_symlink(environ: &[*const u8]) {
     \0";
     run_bash_cmd(dirs_cmd, environ);
 
-    // Phase 2: Try bind mount /tools/bin -> /bin (conservative — only /bin for now)
-    println!("[initproc] attempting bind mount /tools/bin -> /bin...");
-    try_bind("tools/bin", "bin");
+    // Keep the initramfs runtime writable in staged board mode. Existing QEMU
+    // and non-staged paths retain the legacy tools bind.
+    if scratch_runtime_enabled() {
+        println!("[initproc] staged runtime: skip /tools/bin bind");
+    } else {
+        println!("[initproc] attempting bind mount /tools/bin -> /bin...");
+        try_bind("tools/bin", "bin");
+    }
 
     // Phase 3: After bind, ensure /bin/busybox exists, then install applets
     // If bind succeeded, this writes to /tools/bin (persists on ext4 disk)
@@ -2959,12 +3021,11 @@ fn prepare_symlink(environ: &[*const u8]) {
         ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
         ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
         ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
-        ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1; \
         ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
         ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
         for f in /musl/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
         for f in /glibc/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
-        [ -e /glibc/lib/libgcc_s.so.1 ] || ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1 \
+        true \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
@@ -2986,9 +3047,9 @@ fn prepare_symlink(environ: &[*const u8]) {
     // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
     let cyclictest_cmd = "\
-        if [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
+        if [ ! -d /scratch ] && [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
             ln -s /glibc/cyclictest /musl/cyclictest; \
-        fi \
+        fi; true \
     \0";
     let ret = run_bash_cmd(cyclictest_cmd, environ);
     println!(
@@ -3000,9 +3061,11 @@ fn prepare_symlink(environ: &[*const u8]) {
     // ext4 镜像可能来自宿主机，文件不带有 +x 位。basic/lua/busybox 等测试
     // 脚本通过 ./run-all.sh 直接执行（不经过 bash），必须设 +x。
     // LTP inline runner 不受影响（使用 bash -c "./binary" 绕过权限检查）。
-    println!("[initproc] fixing +x permissions on test scripts ...");
-    let chmod_cmd =
-        "chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; true\0";
+    println!("[initproc] fixing +x permissions on writable test sources ...");
+    let chmod_cmd = "\
+        if [ ! -d /scratch ]; then \
+            chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; \
+        fi; true\0";
     let ret = run_bash_cmd(chmod_cmd, environ);
     println!("[initproc] chmod test scripts done, exit={}", ret);
 
@@ -3052,9 +3115,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "OLDPWD=/root\0".as_ptr(),
         "PS1=\x1b[1m\x1b[33mMangoCore\x1b[0m:\x1b[1m\x1b[34m\\w\x1b[0m\\$ \0".as_ptr(),
         "_=/bin/bash\0".as_ptr(),
-        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin\0".as_ptr(),
+        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin:/tools/bin:/tools/sbin:/tools/usr/bin:/tools/usr/sbin\0".as_ptr(),
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        "LD_LIBRARY_PATH=/\0".as_ptr(),
+        "LD_LIBRARY_PATH=/lib:/tools/lib:/tools/usr/lib\0".as_ptr(),
         "LTP_DEV=/dev/vdb2\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext4\0".as_ptr(),
         "LTP_SINGLE_FS_TYPE=ext4\0".as_ptr(),

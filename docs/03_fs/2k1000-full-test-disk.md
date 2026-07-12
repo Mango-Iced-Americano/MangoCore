@@ -4,7 +4,7 @@ module: "fs/board-image"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-11
+last_updated: 2026-07-12
 code_paths:
   - "scripts/make_2k1000_full_test_disk.py"
   - "scripts/restore_2k1000_p2.py"
@@ -14,6 +14,8 @@ code_paths:
   - "os/src/fs/fat32/fat_inode.rs"
   - "os/src/syscall/fs.rs"
   - "os/src/drivers/block/partition.rs"
+  - "user/src/bin/init.rs"
+  - "user/src/bin/initproc.rs"
 entry_points:
   - "discover_mount_devices"
   - "mount_boot_block_devices_read_only"
@@ -40,7 +42,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
 | `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
 | `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
-| `kernel-2k1000-scratch-rw.ui` | 12,343,864 B | `8d152e9ba61f996c7c76778560a1f2d717509c075364835f2815bafc9f57ec98` |
+| `kernel-2k1000-scratch-rw.ui` | 12,352,056 B | `0a1ad5e459e7c3ee49030addf2fd15d4d238b9ea64c39bed0fbd935979f38371` |
 
 ## 2. MBR 布局
 
@@ -194,3 +196,18 @@ stage-1 会创建 `/scratch/MANGO_USR_PROBE/PAYLOAD.BIN`，写入 6144 字节确
 ```
 
 首轮用户态测试曾出现 `unlink=0`、随后 `rmdir=-ENOENT`。U-Boot 复位后 `fatls scsi 0:2 /` 显示空根目录，证明创建目录项只存在于某个 FAT 根 PageCache。根因是 `EasyFileSystem::root_inode()` 产生独立 inode/PageCache，而 create 没有在返回前提交父目录页。修复后 create 显式写回父目录和新目录内容，stale inode `Drop` 不再隐式覆盖父目录项；实板已通过上述完整标志并继续进入测例。
+
+### 7.1 可写运行时与 basic 工作区
+
+检测到可写 `/scratch` 后，stage-1 不再把只读 `/tools/bin`、`/tools/lib`、`/tools/usr` 覆盖到根目录对应路径，而是保留 initramfs 中的 `/bin`、`/sbin`、`/lib`、`/usr` 作为可写运行时。工具仍可通过扩展后的 `PATH` 和 `LD_LIBRARY_PATH` 从 `/tools` 读取；动态库链接和内嵌 `libgcc_s.so.1` 则写入 ramfs `/lib`。这部分运行时重启后丢失，不属于 SSD 持久数据。
+
+P1 上的 `/musl`、`/glibc` 继续只读。执行 basic 组前，initproc 会删除并重建以下工作区：
+
+```text
+/scratch/work/basic-musl
+/scratch/work/basic-glibc
+```
+
+每个工作区包含源 `basic/`、`basic_testcode.sh` 和对应 busybox。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后必须确认 `basic/run-all.sh`、入口脚本和 busybox 都是普通文件。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
+
+2026-07-12 实板复验中，启动脚本只执行 `ping`、`tftpboot`、`iminfo` 和 `bootm`，未执行 U-Boot `scsi reset/scan`；内核独立完成 AHCI 初始化并通过 `/scratch` 写入探针。musl 与 glibc basic 均从上述 SSD 路径运行，`getcwd` 分别返回 `/scratch/work/basic-musl/basic` 和 `/scratch/work/basic-glibc/basic`，所有子项运行到 END，组退出码均为 0。当前仅 basic 组使用可写工作区，其余完整测试组仍按原只读源路径执行，后续应按实际写目录需求逐组迁移。

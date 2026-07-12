@@ -376,3 +376,11 @@
 - **修复**: FAT 内部只使用 BPB 声明的扇区单位，检查簇号 `2..cluster_count+2`、FAT 容量、双 FAT 镜像和 ExtFlags；write/resize 显式更新短目录项，inode `sync()` 依次写回数据页、父目录项和父目录页，create/unlink/rmdir 在成功返回前持久化目录页；stale inode `Drop` 不再修改父目录元数据。
 - **验收**: 探针必须跨新文件系统实例完成 create/write/flush/reopen/read/content-compare/unlink/rmdir/final-reopen，不能只在同一 inode/page cache 内回读。失败后用受限分区恢复工具重建 scratch 分区，避免在已损坏 FAT 上反复试写。
 - **相关文件**: `os/src/fs/fat32/bitmap.rs`, `os/src/fs/fat32/efs.rs`, `os/src/fs/fat32/fat_inode.rs`, `os/src/fs/mod.rs`, `scripts/restore_2k1000_p2.py`
+
+### 只读测试源与可写运行目录应显式分层
+
+- **现象**: 测试二进制和脚本位于只读 ext4，初始化阶段安装 busybox applet、动态库链接或测例创建临时文件时大量返回 `EROFS`；直接把整个测试分区改成可写会扩大介质损坏范围。
+- **修复**: 保持工具和测试源只读，保留 initramfs 的 `/bin`、`/lib`、`/usr` 作为易失可写运行时；只把即将执行的测试组复制到隔离的 FAT32 scratch 工作区。工作区复制后校验入口脚本、runner 和工具文件，准备失败时拒绝回退只读源，避免脚本缺失却返回 0 的假通过。
+- **FAT32 注意项**: BusyBox `cp -R` 可能在数据复制成功后尝试恢复目录 mode，而 FAT32 `set_metadata` 返回 `ENOSYS`。可屏蔽这类已知诊断，但必须保留 `cp` 退出码并执行文件完整性校验。不要用未声明局部变量的递归 shell 函数替代复制：BusyBox shell 函数变量默认可污染父递归层的源/目标路径。
+- **验收**: 测例日志必须打印工作区准备成功，`getcwd` 应指向 scratch，且每个实际子项有 START/END；仅检查外层脚本退出码不足以证明测试执行。复位启动时还应确认 bootloader 没有运行会改变控制器状态的存储命令。
+- **相关文件**: `user/src/bin/init.rs`, `user/src/bin/initproc.rs`, `docs/03_fs/2k1000-full-test-disk.md`

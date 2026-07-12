@@ -2,6 +2,28 @@
 
 ---
 
+## 2026-07-12
+
+### fs/board: 在 P2 SSD 工作区运行 musl/glibc basic 测例
+
+**涉及文件：**
+- `user/src/bin/init.rs` — 区分 `/scratch` 缺失与写探针失败；staged 模式保留 ramfs `/bin`、`/sbin`、`/lib`、`/usr` 可写，并扩展只读 `/tools` 搜索路径
+- `user/src/bin/initproc.rs` — staged 模式把动态库和 applet 安装到可写运行时；将 musl/glibc basic 复制到 `/scratch/work`，校验关键文件并拒绝失败后回退只读源
+- `docs/03_fs/2k1000-full-test-disk.md`, `docs/03_fs/init-and-rootfs.md` — 记录可写运行时、basic 工作区、安全边界和实板结果
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀只读测试源与可写工作区分离、FAT32 复制权限告警和 fail-closed 验收模式
+
+**验证：**
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`、`make -C os la64-2k1000-scratch-rw`，均成功；只有项目既有 warning ✅
+- LA64 QEMU 集成启动因本机缺少 `disk-la.img` 未执行，失败发生在 QEMU 启动前；LA64 编译目标已通过 ⚠️
+- 最终 uImage 为 `12352056` 字节，SHA-256 `0a1ad5e459e7c3ee49030addf2fd15d4d238b9ea64c39bed0fbd935979f38371`；TFTP CRC32 `4ce12fd1` 和 U-Boot `iminfo` 通过 ✅
+- 复位后启动脚本未执行任何 U-Boot SCSI 命令，内核独立完成 AHCI 初始化并输出 `[scratch-smoke] PASS`，消除对 U-Boot `scsi reset/scan` 前置状态的依赖 ✅
+- musl/glibc basic 的 `getcwd` 分别位于 `/scratch/work/basic-musl/basic`、`/scratch/work/basic-glibc/basic`；全部子项运行到 END，组退出码均为 0 ✅
+- 实板复验同时覆盖旧工作区递归删除、重新复制、FAT32 写入/sync、从 SSD exec、测试内创建/删除文件和下一测试组继续运行 ✅
+
+**备注：**
+- 首版自定义递归 shell 复制因函数变量在 BusyBox shell 中为全局变量，递归进入子目录后覆盖父层路径，导致 `run-all.sh` 缺失；最终恢复 BusyBox `cp -R`，屏蔽已知权限元数据告警并增加复制后完整性校验。
+- 当前只迁移 basic；busybox、lua、lmbench、iozone、libcbench、网络组、libctest、cyclictest、LTP 仍需按写入需求逐组评估。正式 `kernel-2k1000-run.ui` 保持全盘只读。
+
 ## 2026-07-11
 
 ### fs/board: 开放隔离的 P2 `/scratch` 并通过用户态持久写入验收
