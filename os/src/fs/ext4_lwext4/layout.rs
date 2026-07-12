@@ -906,11 +906,18 @@ impl IndexNode for Ext4OSInode {
                 }
                 let _ = f.file_mode_set(mode.bits());
                 drop(_lock);
-                let h = hash_path(&child_path);
+                // Use real ext4 inode number so the PageCache stays findable
+                // after rename (the real inode number is stable across renames;
+                // hash_path changes when the path changes).
+                let real_inode = self
+                    .fs
+                    .probe_inode_meta(&child_path)
+                    .map(|e| e.inode_id)
+                    .unwrap_or_else(|_| hash_path(&child_path));
                 let inode = Ext4OSInode::new_child_seeded(
                     self.fs.clone(),
                     child_path,
-                    h,
+                    real_inode,
                     FileType::File,
                     mode,
                     0,
@@ -975,11 +982,15 @@ impl IndexNode for Ext4OSInode {
         // Set mode on the newly created directory
         let _ = d.file_mode_set(mode.bits());
         drop(_lock);
-        let h = hash_path(&child_path);
+        let real_inode = self
+            .fs
+            .probe_inode_meta(&child_path)
+            .map(|e| e.inode_id)
+            .unwrap_or_else(|_| hash_path(&child_path));
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
             child_path,
-            h,
+            real_inode,
             FileType::Dir,
             mode,
             0,
@@ -1044,8 +1055,10 @@ impl IndexNode for Ext4OSInode {
         old_name: &str,
         new_parent: &Arc<dyn IndexNode>,
         new_name: &str,
-        _flags: u32,
+        flags: u32,
     ) -> Result<(), SyscallErr> {
+        use crate::fs::vfs::RENAME_NOREPLACE;
+
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -1059,9 +1072,67 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::EXDEV);
         }
         let new_path = join_path(&new_parent_node.path, new_name);
+
+        // ── PageCache coherence: flush dirty pages before rename ──
+        // The PageCache may hold dirty write data for the source (or target)
+        // file.  If we rename without flushing, those dirty pages will later
+        // be written back using the old path, potentially recreating the file.
+        // After Fix 1, the inode_id is the real ext4 inode (stable across
+        // renames), so the PageCache is findable by inode_id — but the
+        // backend still stores the old lw_path.  Flush to disk first, then
+        // invalidate the cache so a fresh one with the new path is created
+        // on next access.
+        let flush_one = |fs: &Arc<super::ext4fs::Ext4FileSystem>, path: &str| {
+            // Get the inode_id: try real inode first, fall back to hash_path
+            // (for files created before Fix 1).
+            let inode_id = fs
+                .probe_inode_meta(path)
+                .map(|e| e.inode_id)
+                .unwrap_or_else(|_| hash_path(path));
+            let registry = fs.page_caches.lock();
+            if let Some(pc) = registry.get(&inode_id).and_then(|w| w.upgrade()) {
+                drop(registry);
+                let _ = pc.writeback_all();
+            }
+            inode_id
+        };
+
+        let old_inode_id = flush_one(&self.fs, &old_path);
+        let new_inode_id = flush_one(&self.fs, &new_path);
+
+        // ── Actual rename ──
         let _lock = self.fs.lw.lock();
         let lw_old = self.fs.lw_path(&old_path);
         let lw_new = self.fs.lw_path(&new_path);
+
+        // Handle target-exists before rename.
+        // Use a short-lived probe to check existence, then drop it before
+        // any mutation so that fresh Ext4File objects are used for removal.
+        let target_exists = {
+            let mut probe = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_UNKNOWN);
+            probe.check_inode_exist(&lw_new, InodeTypes::EXT4_DE_UNKNOWN)
+        };
+        if target_exists {
+            if flags & RENAME_NOREPLACE != 0 {
+                return Err(SyscallErr::EEXIST);
+            }
+            // Normal rename (no RENAME_NOREPLACE): remove target with
+            // a fresh Ext4File — never reuse the probe object.
+            let target_is_dir = {
+                let mut p = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_DIR);
+                p.check_inode_exist(&lw_new, InodeTypes::EXT4_DE_DIR)
+            };
+            if target_is_dir {
+                let mut d = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_DIR);
+                d.dir_rm(&lw_new)
+                    .map_err(|e| from_lwext4(e.abs()))?;
+            } else {
+                let mut f = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_UNKNOWN);
+                f.file_remove(&lw_new)
+                    .map_err(|e| from_lwext4(e.abs()))?;
+            }
+        }
+
         // Try file_rename first; if it fails (likely because source is a
         // directory), fall back to dir_mv.
         let mut f = Ext4File::new(&lw_old, InodeTypes::EXT4_DE_UNKNOWN);
@@ -1071,6 +1142,17 @@ impl IndexNode for Ext4OSInode {
             d.dir_mv(&lw_old, &lw_new)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
+        drop(_lock);
+
+        // ── PageCache coherence: invalidate stale entries after rename ──
+        // The source file's PageCache backend still references the old
+        // lw_path.  Remove it from the registry; the next access to the
+        // file under its new name will create a fresh PageCache with the
+        // correct path.
+        self.fs.page_caches.lock().remove(&old_inode_id);
+        // Also remove the overwritten target's cache (its inode is gone).
+        self.fs.page_caches.lock().remove(&new_inode_id);
+
         Ok(())
     }
 
@@ -1124,11 +1206,15 @@ impl IndexNode for Ext4OSInode {
             return Err(from_lwext4(r.abs()));
         }
         drop(_lock);
-        let h = hash_path(&child_path);
+        let real_inode = self
+            .fs
+            .probe_inode_meta(&child_path)
+            .map(|e| e.inode_id)
+            .unwrap_or_else(|_| hash_path(&child_path));
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
             child_path,
-            h,
+            real_inode,
             FileType::SymLink,
             InodeMode::S_IFLNK | InodeMode::from_bits_truncate(0o777),
             target.len(),

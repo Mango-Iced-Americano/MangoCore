@@ -63,7 +63,7 @@ run_py L7_filesystem.py L7
 run_py L8_thread.py L8
 
 # L8: Subprocess
-run_py L8_subprocess.py L8
+run_py L8_subprocess.py L8-SUBPROC
 
 # L9: Networking (DNS/TCP/HTTPS may SKIP without network)
 run_py L9_socket.py L9

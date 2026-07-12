@@ -65,7 +65,7 @@ done
 [ "$libpy_found" -eq 1 ] || { echo "[CPYTHON L3] FAIL: libpython3.*.so not found"; fail=1; }
 
 libc_found=0
-for f in "$CPYTHON_ROOT/lib/libc.so"*; do
+for f in "$CPYTHON_ROOT/lib/libc.so"* "$CPYTHON_ROOT/lib/libc.musl-"*".so"* "$CPYTHON_ROOT/lib/ld-musl-"*".so.1"; do
     if [ -f "$f" ] && [ -s "$f" ]; then
         echo "[CPYTHON L3] check: lib $(basename "$f") OK"
         libc_found=1
@@ -74,7 +74,7 @@ for f in "$CPYTHON_ROOT/lib/libc.so"*; do
         fail=1
     fi
 done
-[ "$libc_found" -eq 1 ] || { echo "[CPYTHON L3] FAIL: libc.so not found"; fail=1; }
+[ "$libc_found" -eq 1 ] || { echo "[CPYTHON L3] FAIL: musl libc/loader not found"; fail=1; }
 
 for soname in libcrypto.so libssl.so; do
     found=0

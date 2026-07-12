@@ -4,6 +4,60 @@
 
 ## 2026-07-12
 
+### 修复三：L7 ext4 rename 回归、L9 真实 URL 替换、两个 L8 标签
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — rename 方法重构：改用短生命周期 probe 只检查存在性（`drop` 后不影响后续操作），使用**全新 `Ext4File` 对象**执行删除（`dir_rm`/`file_remove`），再使用全新对象执行 rename（`file_rename`/`dir_mv`）。修复原实现中 probe 对象复用导致的 rename 后内容转移失败问题
+- `user/tools/cpython/L9_socket.py` — 将 `example.com` 替换为真实端点：DNS 解析目标改为 `cloudflare.com:80`；TCP HTTP 层直接用 `1.1.1.1:80` 请求 `/cdn-cgi/trace`；HTTPS 层改为 `cloudflare.com/cdn-cgi/trace`；SSL 协议错误（含 "protocol" 的 SSLError）改为 SKIP 处理
+- `user/tools/cpython/L8_subprocess.py` — PREFIX 从 `[CPYTHON L8]` 改为 `[CPYTHON L8-SUBPROC]`，与 L8_thread 区分
+- `user/tools/cpython/cpython_testcode.sh` — L8_subprocess 的 run_py 标签从 `L8` 改为 `L8-SUBPROC`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- Fix 1 根因：之前的 rename 修复使用同一个 `probe` Ext4File 对象既做存在性探测又做目标删除，probe 对象内部状态可能在删除后干扰后续 rename 操作。解决方案：探测和删除使用独立对象，探测完立即 `drop`
+- Fix 2：`example.com` 返回的 HTTP 头在不同网络环境下不稳定（可能出现 302 重定向），改为 Cloudflare CDN trace 端点（总是返回短文本 HTTP 200）
+- Fix 3：纯视觉区分，方便日志识别
+
+### 修复 ext4_lwext4 PageCache/rename 缓存一致性问题
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — 三处修复：
+
+  **Fix 1 (真实 inode 号):** `create()`、`mkdir()`、`symlink()` 三个方法中，文件/目录/符号链接创建后调用 `probe_inode_meta()` 获取真实 ext4 inode 号，替代原 `hash_path()` 的伪 inode ID。这样 PageCache 注册表按真实 inode 号查找，rename 后 inode 号不变→脏页仍可定位。
+
+  **Fix 2 (rename 前刷新脏页):** `rename()` 方法中，在执行 lwext4 rename 前新增 `flush_one` 闭包：通过 `probe_inode_meta()` 获取源和目标路径的 inode_id（回退到 `hash_path` 以兼容旧创建的文件），查找全局 `page_caches` 注册表，找到则调用 `writeback_all()` 将脏页刷新到磁盘。防止 rename 后 PageCache 用旧 `lw_path` 写回到错误位置。
+
+  **Fix 3 (rename 后失效缓存):** rename 成功后从 `page_caches` 注册表移除源和目标 inode_id 的条目。下次访问文件时 `ensure_page_cache()` 会创建全新的 PageCache（含正确的新 `lw_path`）。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 根因分析（Oracle）：(1) `create()` 使用 `hash_path()` 生成伪 inode ID，rename 后路径变化导致 hash 不同，PageCache 注册表查不到脏页；(2) PageCache 后端存储不可变的 `lw_path`，writeback 使用旧路径会重建旧文件；(3) rename 前未刷新脏页，数据可能丢失
+- Fix 1 使用了 `probe_inode_meta()`（底层 `ext4_raw_inode_fill`），该调用获取 lw mutex，与 rename 的 lw mutex 存在 TOCTOU 窗口。由于内核为单核且 rename 在多步操作中是最外层调用，实际风险极低（flush 为 best-effort）
+- Fix 1 在 `probe_inode_meta` 失败时回退到 `hash_path`，确保创建后尚未刷盘的文件（仅存在于 PageCache）首次 rename 时仍能定位到缓存
+- 三个修复相互配合：Fix 1 保证 inode ID 跨 rename 一致以支持查找，Fix 2 在 rename 前确保数据安全落盘，Fix 3 在 rename 后清理过时缓存以让新路径创建正确的 PageCache
+
+### Bug 修复：CPython Oracle 分析发现的三个 bug
+
+**涉及文件：**
+- `user/tools/cpython/L3_check_files.sh` — 扩展 libc glob：增加 `libc.musl-*.so.*` 和 `ld-musl-*.so.1` 模式，使 Alpine musl libc/loader 能被正确检测
+- `os/src/fs/ext4_lwext4/layout.rs` — rename 方法：添加目标存在处理。RENAME_NOREPLACE 标志时返回 EEXIST；普通 rename（flags==0）时先删除目标再重命名。使用 `check_inode_exist` 检测目标是否存在及类型（EXT4_DE_UNKNOWN / EXT4_DE_DIR），用 `file_remove`/`dir_rm` 删除目标
+- `os/src/syscall/fs.rs` — sys_ioctl：新增 FIONBIO (0x5421) ioctl 支持，读取用户空间 int 值并调用 `File::set_nonblock()` 设置 O_NONBLOCK 标志
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- Fix 1: Alpine musl 的 libc 命名为 `libc.musl-riscv64.so.1`，ld 为 `ld-musl-riscv64.so.1`，原 glob 只匹配 `libc.so*` 无法发现
+- Fix 2: ext4_lwext4 rename 的 `_flags` 参数原被忽略，改为 `flags` 并导入 `RENAME_NOREPLACE`；目标类型检测通过 `check_inode_exist` 分别尝试任意类型和目录类型；非 RENAME_NOREPLACE 时先删目标再重命名，符合 Linux rename 原子替换语义
+- Fix 3: CPython 的 `socket.settimeout()` 依赖 `FIONBIO` ioctl 设置非阻塞模式；`File::set_nonblock()` 方法已存在（AtomicU32 flags 上的 fetch_or/fetch_and），仅需在 `sys_ioctl` 中添加命令分发；预期解决 socketpair + TCP connect 因 ENOTTY 失败的问题
+
 ### 新增 CPython L7-L9 测试脚本
 
 **涉及文件：**

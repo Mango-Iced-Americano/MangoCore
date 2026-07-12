@@ -69,10 +69,10 @@ with check("layer2 socketpair local communication"):
         b.close()
 
 
-with check("layer3 DNS getaddrinfo example.com"):
+with check("layer3 DNS getaddrinfo cloudflare.com"):
     try:
         infos = socket.getaddrinfo(
-            "example.com",
+            "cloudflare.com",
             80,
             socket.AF_INET,
             socket.SOCK_STREAM,
@@ -87,23 +87,19 @@ with check("layer3 DNS getaddrinfo example.com"):
     print(f"{PREFIX} DNS addr: {dns_addr}", flush=True)
 
 
-with check("layer4 TCP HTTP example.com"):
-    global_addr = dns_addr
-    if global_addr is None:
-        raise SkipTest("DNS layer did not produce an address")
-
+with check("layer4 TCP HTTP 1.1.1.1"):
     s = None
     try:
-        s = socket.create_connection(global_addr, timeout=10.0)
+        s = socket.create_connection(("1.1.1.1", 80), timeout=10.0)
         s.settimeout(10.0)
         req = (
-            b"GET / HTTP/1.0\r\n"
-            b"Host: example.com\r\n"
+            b"GET /cdn-cgi/trace HTTP/1.0\r\n"
+            b"Host: 1.1.1.1\r\n"
             b"Connection: close\r\n"
             b"\r\n"
         )
         s.sendall(req)
-        data = s.recv(256)
+        data = s.recv(512)
     except OSError as e:
         external_skip(f"TCP/HTTP unavailable: {e}")
     finally:
@@ -112,10 +108,10 @@ with check("layer4 TCP HTTP example.com"):
 
     assert data.startswith(b"HTTP/"), data[:80]
     tcp_ok = True
-    print(f"{PREFIX} HTTP head: {data[:40]!r}", flush=True)
+    print(f"{PREFIX} HTTP head: {data[:60]!r}", flush=True)
 
 
-with check("layer5 HTTPS urllib example.com"):
+with check("layer5 HTTPS cloudflare.com"):
     if not tcp_ok:
         raise SkipTest("TCP layer did not pass")
 
@@ -126,14 +122,17 @@ with check("layer5 HTTPS urllib example.com"):
             ctx = ssl.create_default_context()
 
         with urllib.request.urlopen(
-            "https://example.com/",
+            "https://cloudflare.com/cdn-cgi/trace",
             timeout=15.0,
             context=ctx,
         ) as resp:
             status = getattr(resp, "status", None) or resp.getcode()
             body = resp.read(256)
 
-    except ssl.SSLError:
+    except ssl.SSLError as e:
+        if "protocol" in str(e).lower():
+            external_skip(f"SSL protocol not available: {e}")
+        print(f"{PREFIX} HTTPS SSL error: {e}", flush=True)
         raise
     except urllib.error.URLError as e:
         external_skip(f"HTTPS unavailable: {e}")

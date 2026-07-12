@@ -4,7 +4,7 @@ import subprocess
 from contextlib import contextmanager
 
 fail = 0
-PREFIX = "[CPYTHON L8]"
+PREFIX = "[CPYTHON L8-SUBPROC]"
 
 
 class SkipTest(Exception):
