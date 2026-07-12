@@ -4,6 +4,24 @@
 
 ## 2026-07-12
 
+### board/test: 将 libcbench 迁移到 SSD 工作区并完成实板复验
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 libcbench 纳入每 libc 独立的 scratch 工作区，复制并校验 busybox、入口脚本和静态 `libc-bench`
+- `docs/03_fs/2k1000-full-test-disk.md` — 更新工作区清单、最终镜像、双 libc 验收结果和下一阶段网络适配边界
+
+**验证：**
+- 聚焦镜像为 `12364416` 字节、SHA-256 `173cea3a39d87e02266fa974033a52e3b3e1b2543c924795cc7a4f8f15da2402`；TFTP CRC32 `d419ee45`、U-Boot `iminfo`、内核启动和 scratch smoke 全部通过 ✅
+- musl 从 `/scratch/work/libcbench-musl` 完整运行 27 个 benchmark，耗时 37s，到 GROUP END，退出码 0 ✅
+- glibc 从 `/scratch/work/libcbench-glibc` 完整运行同一 27 项，耗时 61s，到 GROUP END，退出码 0 ✅
+- 两套均覆盖 malloc、string、pthread、UTF-8、stdio 和 regex；未出现 smaps 读取超时、panic 或缺项 ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`、`make -C os la64-2k1000-scratch-rw`，三目标均成功；仅有项目既有 warning ✅
+- 最终非聚焦 uImage 为 `12364416` 字节，SHA-256 `e379aea367d27e51354cfd8cee620b76357f7278baa9e8e3b160240e189104aa`，且不含临时 focused override 字符串 ✅
+
+**备注：**
+- libcbench 二进制为静态 ELF，唯一外部路径是 `/proc/self/smaps`；本轮不需要额外动态库或数据文件。
+- 正式顺序下一组为 netperf/iperf，但 2K1000 内核尚未接入板载 GMAC/PHY；下一阶段是运行期网卡驱动适配，不是单纯工作区复制。
+
 ### board/test: 迁移 iozone 并修复 LoongArch ELF HWCAP 误报
 
 **涉及文件：**

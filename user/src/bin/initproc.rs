@@ -807,7 +807,7 @@ fn display_path(path: &str) -> &str {
 fn group_uses_scratch_workspace(group_name: &str) -> bool {
     matches!(
         group_name,
-        "basic" | "busybox" | "lua" | "lmbench" | "iozone"
+        "basic" | "busybox" | "lua" | "lmbench" | "iozone" | "libcbench"
     )
 }
 
@@ -876,6 +876,14 @@ fn prepare_group_workdir(
              [ -f {workdir}/busybox ] || exit 1; \
              [ -f {workdir}/iozone_testcode.sh ] || exit 1; \
              [ -f {workdir}/iozone ] || exit 1;"
+        ),
+        "libcbench" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/libcbench_testcode.sh {workdir}/libcbench_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/libc-bench {workdir}/libc-bench || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/libcbench_testcode.sh ] || exit 1; \
+             [ -f {workdir}/libc-bench ] || exit 1;"
         ),
         _ => return None,
     };
