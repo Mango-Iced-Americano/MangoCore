@@ -42,7 +42,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
 | `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
 | `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
-| `kernel-2k1000-scratch-rw.ui` | 12,352,056 B | `0a1ad5e459e7c3ee49030addf2fd15d4d238b9ea64c39bed0fbd935979f38371` |
+| `kernel-2k1000-scratch-rw.ui` | 12,360,256 B | `c45d0260d47296665f9e71f779705caf70af40cac68c9cc5cb8aa39525b53dfd` |
 
 ## 2. MBR 布局
 
@@ -176,6 +176,8 @@ python3 scripts/restore_2k1000_p2.py \
 
 暖复位时若看到 `PxSSTS=1`，表示设备已检测但 PHY 通信尚未建立。驱动会先按稳定计数器等待 200ms；仍未上线时通过 `PxSCTL.DET` 发出至少 1ms 的 COMRESET，释放后按 AHCI 上限继续等待 10s。不得用固定次数空转替代这段真实时间，也不应要求操作者通过冷断电规避。
 
+HBA reset 后还必须恢复平台可写的 CAP/PI。2K1000 按随板 U-Boot 保存 CAP bit28/bit17、强制 bit27 `SSS`，再写 `PI=0x0f`。只恢复 PI 时，暖复位实测 `PxCMD.SUD` 无法保持置位，最终报 `LinkTimeout { sata_status: 1, command: 4 }`；补齐 CAP 后同一复位路径可独立初始化 SSD。
+
 ## 7. Staged 用户态 `/scratch`
 
 内核文件探针通过后，可构建只开放 P2 的 staged 镜像：
@@ -197,17 +199,23 @@ stage-1 会创建 `/scratch/MANGO_USR_PROBE/PAYLOAD.BIN`，写入 6144 字节确
 
 首轮用户态测试曾出现 `unlink=0`、随后 `rmdir=-ENOENT`。U-Boot 复位后 `fatls scsi 0:2 /` 显示空根目录，证明创建目录项只存在于某个 FAT 根 PageCache。根因是 `EasyFileSystem::root_inode()` 产生独立 inode/PageCache，而 create 没有在返回前提交父目录页。修复后 create 显式写回父目录和新目录内容，stale inode `Drop` 不再隐式覆盖父目录项；实板已通过上述完整标志并继续进入测例。
 
-### 7.1 可写运行时与 basic 工作区
+### 7.1 可写运行时与分组工作区
 
 检测到可写 `/scratch` 后，stage-1 不再把只读 `/tools/bin`、`/tools/lib`、`/tools/usr` 覆盖到根目录对应路径，而是保留 initramfs 中的 `/bin`、`/sbin`、`/lib`、`/usr` 作为可写运行时。工具仍可通过扩展后的 `PATH` 和 `LD_LIBRARY_PATH` 从 `/tools` 读取；动态库链接和内嵌 `libgcc_s.so.1` 则写入 ramfs `/lib`。这部分运行时重启后丢失，不属于 SSD 持久数据。
 
-P1 上的 `/musl`、`/glibc` 继续只读。执行 basic 组前，initproc 会删除并重建以下工作区：
+P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua 时，initproc 会按 libc 删除并重建独立工作区：
 
 ```text
 /scratch/work/basic-musl
 /scratch/work/basic-glibc
+/scratch/work/busybox-musl
+/scratch/work/busybox-glibc
+/scratch/work/lua-musl
+/scratch/work/lua-glibc
 ```
 
-每个工作区包含源 `basic/`、`basic_testcode.sh` 和对应 busybox。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后必须确认 `basic/run-all.sh`、入口脚本和 busybox 都是普通文件。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
+各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
 
-2026-07-12 实板复验中，启动脚本只执行 `ping`、`tftpboot`、`iminfo` 和 `bootm`，未执行 U-Boot `scsi reset/scan`；内核独立完成 AHCI 初始化并通过 `/scratch` 写入探针。musl 与 glibc basic 均从上述 SSD 路径运行，`getcwd` 分别返回 `/scratch/work/basic-musl/basic` 和 `/scratch/work/basic-glibc/basic`，所有子项运行到 END，组退出码均为 0。当前仅 basic 组使用可写工作区，其余完整测试组仍按原只读源路径执行，后续应按实际写目录需求逐组迁移。
+2026-07-12 实板复验中，启动脚本只执行 `ping`、`tftpboot`、`iminfo` 和 `bootm`，未执行 U-Boot `scsi reset/scan`；内核独立完成 AHCI 初始化并通过 `/scratch` 写入探针。musl/glibc 的 basic、busybox、lua 均从上述 SSD 路径运行：basic 全部子项到 END；busybox 的 touch/write/cp/mkdir/mv/rmdir/unlink 等命令全部 success；Lua 两套共 18 个子项全部 success。
+
+busybox 首轮暴露 FAT 未实现原生 rename，默认 `link + unlink` 因 FAT 不支持硬链接而失败。当前实现对同一目录、目标不存在的 rename 创建保留原簇号/大小/属性/时间的新目录项，再删除旧项并同步，失败时回滚新项；跨目录和覆盖目标仍显式不支持。后续 lmbench 仍从只读源运行，实板已观察到 `lat_select` 创建临时文件时报 `EROFS`，应作为下一组迁移目标。

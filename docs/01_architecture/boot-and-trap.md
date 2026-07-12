@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-11
+last_update: 2026-07-12
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -95,7 +95,7 @@ make 2k1000-boot
 
 进入 U-Boot 后，脚本逐条等待 `=>` 再设置网络参数，依次完成 `ping`、`tftpboot` 字节数校验、内存 CRC32、`iminfo` 架构与镜像校验，全部通过才执行 `bootm`。启动后当前终端成为串口监视器；`Ctrl-C` 只退出监视器，不会向开发板发送中断。脚本不执行 `saveenv`，也不包含任何 `scsi write`。
 
-启动前不需要手工执行 `scsi scan`。2K1000 的 HBA reset 会清空 `HOST_PORTS_IMPL`；内核 AHCI Provider 会按随板 U-Boot 的板级配置恢复 `0x0f`，因此 SATA 初始化不能依赖 bootloader 曾经扫描过 SSD。
+启动前不需要手工执行 `scsi scan`。2K1000 的 HBA reset 会清空多个可写 host register；内核 AHCI Provider 按随板 U-Boot 的顺序恢复 CAP.SMPS/SPM、强制 CAP.SSS，再恢复 `HOST_PORTS_IMPL=0x0f`。只恢复 PI 会让暖复位后的 `PxCMD.SUD` 被硬件清零，最终停在 `PxSSTS.DET=1`。SATA 初始化不能依赖 bootloader 曾经扫描过 SSD。
 
 网卡、镜像或串口设备名变化时可覆盖 Make 变量：
 

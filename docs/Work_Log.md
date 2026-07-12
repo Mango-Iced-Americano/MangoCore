@@ -4,6 +4,26 @@
 
 ## 2026-07-12
 
+### board/fs: 将 busybox、lua 迁移到 SSD 工作区并补齐暖复位与 FAT rename
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 scratch 工作区机制扩展到 busybox/lua，按组复制最小依赖、校验完整性并拒绝只读回退
+- `dependency/dep_iso/src/provider.rs`, `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs` — 增加平台 CAP 保存/强制位，按 2K1000 厂商 U-Boot 在 HBA reset 后恢复 CAP.SSS/SMPS/SPM 和 PI
+- `os/src/fs/fat32/fat_inode.rs` — 实现同目录、目标不存在的 FAT 原生 rename，保留源目录项元数据并在失败时回滚新项
+- `docs/01_architecture/boot-and-trap.md`, `docs/03_fs/{2k1000-full-test-disk,fat32}.md` — 更新恢复顺序、工作区范围、实板结果和已知限制
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 HBA reset 后 CAP/PI 联合恢复和 FAT 禁止使用 link+unlink rename 的模式
+
+**验证：**
+- 每轮代码修改后均在 Docker 串行执行 RV64、LA64 和 `la64-2k1000-scratch-rw` 构建，最终三目标全部成功；仅有项目既有 warning ✅
+- 首轮实板镜像在连续暖复位后复现 `LinkTimeout { sata_status: 1, sata_control: 768, sata_error: 67108864, command: 4 }`；对照随板 U-Boot 补齐 CAP 恢复后，同一无 U-Boot SCSI 前置命令路径成功进入 init 并通过 scratch 写探针 ✅
+- 首轮 busybox musl/glibc 在 `/scratch/work` 中仅 `mv test_dir test` 和连带 `rmdir test` 失败；实现 FAT rename 后两套命令均显示 success，且组内没有其他 fail ✅
+- Lua musl/glibc 均从 `/scratch/work/lua-*` 执行，`date/file_io/max_min/random/remove/round_num/sin30/sort/strings` 共 18 个子项全部 success ✅
+- 最终 uImage 为 `12360256` 字节，SHA-256 `c45d0260d47296665f9e71f779705caf70af40cac68c9cc5cb8aa39525b53dfd`；TFTP CRC32 `36675b20`、U-Boot `iminfo` 和内核启动均通过 ✅
+
+**备注：**
+- FAT rename 暂不支持跨目录移动和覆盖已有目标；这两个场景需要额外的双目录锁顺序、`..` 更新及目标回滚协议。
+- 下一组应迁移 lmbench；当前实板已在只读源路径观察到 `lat_select: Could not create temp file ...: Read-only file system`。
+
 ### fs/board: 在 P2 SSD 工作区运行 musl/glibc basic 测例
 
 **涉及文件：**

@@ -9,6 +9,14 @@ pub trait Provider {
     /// whose reset clears PI can provide the firmware-defined bitmap here.
     const AHCI_PORTS_IMPLEMENTED: Option<u32> = None;
 
+    /// Writable AHCI capability bits that must survive a controller reset.
+    ///
+    /// Generic controllers expose CAP as read-only and leave both values at
+    /// zero. Platform integrations with writable CAP bits can preserve a
+    /// masked subset and force board-required capabilities after reset.
+    const AHCI_CAPABILITY_SAVE_MASK: u32 = 0;
+    const AHCI_CAPABILITY_FORCE_BITS: u32 = 0;
+
     /// Busy-wait for at least `micros` microseconds.
     ///
     /// Platform providers should override this with an architectural stable

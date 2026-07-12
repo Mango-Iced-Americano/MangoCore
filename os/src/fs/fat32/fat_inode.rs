@@ -1319,6 +1319,97 @@ impl IndexNode for FatInode {
             .map_err(|_| SyscallErr::EIO)
     }
 
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn IndexNode>,
+        new_name: &str,
+        _flags: u32,
+    ) -> Result<(), SyscallErr> {
+        if old_name.is_empty()
+            || new_name.is_empty()
+            || old_name == "."
+            || old_name == ".."
+            || new_name == "."
+            || new_name == ".."
+            || new_name.len() >= 256
+        {
+            return Err(SyscallErr::EINVAL);
+        }
+
+        let self_arc = self
+            .self_weak
+            .lock()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(SyscallErr::EIO)?;
+        let new_parent_fat = new_parent
+            .as_any_ref()
+            .downcast_ref::<FatInode>()
+            .ok_or(SyscallErr::EXDEV)?;
+        if !Arc::ptr_eq(&self.fs, &new_parent_fat.fs) {
+            return Err(SyscallErr::EXDEV);
+        }
+        let new_parent_ino = new_parent_fat
+            .get_inode_num_lock(&new_parent_fat.file_content.read())
+            .unwrap_or(0);
+        let self_ino = self
+            .get_inode_num_lock(&self.file_content.read())
+            .unwrap_or(0);
+        if self_ino != new_parent_ino {
+            // Cross-directory FAT rename additionally requires updating '..'
+            // and a two-directory rollback protocol. Keep it explicit until
+            // that transaction is implemented.
+            return Err(SyscallErr::ENOSYS);
+        }
+        if old_name.eq_ignore_ascii_case(new_name) {
+            return Ok(());
+        }
+
+        let parent_lock = self_arc.write();
+        let (_, mut source_short, old_offset) = self_arc
+            .find_local_lock(&parent_lock, old_name.to_string())
+            .map_err(|_| SyscallErr::EIO)?
+            .ok_or(SyscallErr::ENOENT)?;
+        if self_arc
+            .find_local_lock(&parent_lock, new_name.to_string())
+            .map_err(|_| SyscallErr::EIO)?
+            .is_some()
+        {
+            return Err(SyscallErr::EEXIST);
+        }
+
+        let (short_name, long_name_slices) =
+            Self::gen_name_slice(&self_arc, &parent_lock, &new_name.to_string());
+        source_short.name.copy_from_slice(&short_name);
+        let long_count = long_name_slices.len();
+        let long_entries = long_name_slices
+            .iter()
+            .enumerate()
+            .map(|(index, slice)| {
+                FATLongDirEnt::from_name_slice(
+                    index + 1 == long_count,
+                    index + 1,
+                    *slice,
+                )
+            })
+            .collect();
+
+        let new_offset = self_arc
+            .create_dir_ent(&parent_lock, source_short, long_entries)
+            .map_err(|_| SyscallErr::ENOSPC)?;
+        if self_arc.delete_dir_ent(&parent_lock, old_offset).is_err() {
+            let _ = self_arc.delete_dir_ent(&parent_lock, new_offset);
+            drop(parent_lock);
+            let _ = self_arc.writeback_page_cache();
+            return Err(SyscallErr::EIO);
+        }
+        drop(parent_lock);
+        self_arc
+            .writeback_page_cache()
+            .map_err(|_| SyscallErr::EIO)
+    }
+
     fn unlink(&self, name: &str) -> Result<(), SyscallErr> {
         let child = self.find(name)?;
         let child_fat = child

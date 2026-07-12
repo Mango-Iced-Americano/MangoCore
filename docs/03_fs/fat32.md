@@ -4,7 +4,7 @@ module: fs/fat32
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-07-11"
+last_updated: "2026-07-12"
 code_paths:
   - "os/src/fs/fat32/"
 entry_points:
@@ -194,6 +194,10 @@ FAT32 卷的磁盘布局如下：
 
 `unlink_lock(delete)` 从父目录中删除目录项并可选释放数据簇。删除操作将目录项首字节标记为 `0xE5`，同时更新父目录的 `hint` 指针。若 `delete=true`，`Drop` 时实际调用 `dealloc_clus` 回收到 FAT 表。
 
+### 重命名
+
+FAT 不支持硬链接，因此不能使用 VFS 默认的 `link + unlink` rename。当前同目录 rename 读取源短目录项，保留首簇、文件大小、属性和时间字段，只替换短名并生成新的 VFAT 长名项；新目录项创建成功后删除旧项并显式写回父目录，删除失败则回滚新项。该路径不复制数据，也不分配或释放源文件的数据簇。
+
 ### 目录事务与 inode 别名
 
 当前 `EasyFileSystem::root_inode()` 和 `FatInode::find()` 可能为同一个磁盘对象构造独立 inode/PageCache。目录创建若只把父目录项留在某个 PageCache 中，后续通过另一份根 inode 执行 `rmdir` 会直接从磁盘读到 `ENOENT`。因此 `fat_do_create()` 在返回前显式写回父目录；创建目录时还要先写回 `.`、`..` 和结束标记。unlink/rmdir 同样在成功返回前提交所属目录页。
@@ -212,6 +216,7 @@ FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端将文�
 - **无权限管理**：文件属性仅保留 FAT 标准的只读/隐藏/系统/归档标记，不支持 Unix rwx 权限；`chmod` 和 `chown` 返回空成功。
 - **时间戳精度**：FAT 时间戳精度为 2 秒，目录项 Drop 时自动写回修改时间。
 - **最大文件大小**：受 FAT32 4 GiB 单文件上限约束（`file_size` 字段为 u32）。
+- **rename 范围**：当前仅支持同目录且目标不存在的文件/目录 rename；跨目录移动和覆盖已有目标返回显式错误，尚未实现双目录与目标回滚事务。
 
 ## 测试映射
 
@@ -221,7 +226,7 @@ FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端将文�
 | 目录遍历 | ls / getdents64 syscall | OSComp basic, busybox | pass |
 | 文件读写 | dd / cat / echo | OSComp basic, busybox | pass |
 | 长文件名创建 | lua 文件 I/O 测试 | OSComp lua | pass |
-| 文件重命名 | mv / rename syscall | OSComp busybox | pass |
+| 同目录文件/目录重命名 | mv / rename syscall | OSComp busybox | pass（实板 FAT32 scratch） |
 | FAT 表空间耗尽 | 大文件写入达容量上限 | 手动测试 | pass |
 | 目录树层级 | mkdir -p 嵌套路径 | OSComp busybox | pass |
 

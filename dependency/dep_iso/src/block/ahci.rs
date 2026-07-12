@@ -533,7 +533,20 @@ impl<P: Provider> AHCI<P> {
         }
         let ghc = unsafe { &mut *(header as *mut AHCIGenericHostControl) };
 
+        let capability_before_reset = ghc.capability.read().bits();
         ghc.enable()?;
+
+        // The 2K1000 integration exposes a writable CAP register and clears
+        // it during HBA reset. Restore only bits selected by the platform;
+        // generic AHCI controllers keep the default zero masks and are never
+        // written here.
+        let capability_restore = (capability_before_reset & P::AHCI_CAPABILITY_SAVE_MASK)
+            | P::AHCI_CAPABILITY_FORCE_BITS;
+        if P::AHCI_CAPABILITY_SAVE_MASK != 0 || P::AHCI_CAPABILITY_FORCE_BITS != 0 {
+            ghc.capability
+                .write(AHCICap::from_bits_truncate(capability_restore));
+            ghc.capability.read(); // Flush the posted MMIO write.
+        }
 
         // Some integrated controllers clear the writable PI register during
         // HBA reset. Restore only a bitmap supplied by the platform provider;

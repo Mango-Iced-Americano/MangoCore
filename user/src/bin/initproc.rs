@@ -804,27 +804,59 @@ fn display_path(path: &str) -> &str {
     path.trim_end_matches('\0')
 }
 
+fn group_uses_scratch_workspace(group_name: &str) -> bool {
+    matches!(group_name, "basic" | "busybox" | "lua")
+}
+
 fn prepare_group_workdir(
     environ: &[*const u8],
     source_dir: &str,
     group_name: &str,
     libc_suffix: &str,
 ) -> Option<String> {
-    if group_name != "basic" || !scratch_runtime_enabled() {
+    if !group_uses_scratch_workspace(group_name) || !scratch_runtime_enabled() {
         return None;
     }
 
     let source = display_path(source_dir);
-    let workdir = format!("/scratch/work/basic-{}", libc_suffix);
+    let workdir = format!("/scratch/work/{}-{}", group_name, libc_suffix);
+    let payload = match group_name {
+        "basic" => format!(
+            "/bin/busybox cp -R {source}/basic {workdir}/basic 2>/dev/null || exit 1; \
+             /bin/busybox cp {source}/basic_testcode.sh {workdir}/basic_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             [ -f {workdir}/basic/run-all.sh ] || exit 1; \
+             [ -f {workdir}/basic_testcode.sh ] || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1;"
+        ),
+        "busybox" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/busybox_testcode.sh {workdir}/busybox_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/busybox_cmd.txt {workdir}/busybox_cmd.txt || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/busybox_testcode.sh ] || exit 1; \
+             [ -f {workdir}/busybox_cmd.txt ] || exit 1;"
+        ),
+        "lua" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/lua {workdir}/lua || exit 1; \
+             /bin/busybox cp {source}/lua_testcode.sh {workdir}/lua_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/test.sh {workdir}/test.sh || exit 1; \
+             /bin/busybox cp {source}/*.lua {workdir}/ || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/lua ] || exit 1; \
+             [ -f {workdir}/lua_testcode.sh ] || exit 1; \
+             [ -f {workdir}/test.sh ] || exit 1; \
+             for script in date file_io max_min random remove round_num sin30 sort strings; do \
+                 [ -f {workdir}/\x24script.lua ] || exit 1; \
+             done;"
+        ),
+        _ => return None,
+    };
     let command = format!(
         "/bin/busybox rm -rf {workdir} || exit 1; \
          /bin/busybox mkdir -p {workdir} || exit 1; \
-         /bin/busybox cp -R {source}/basic {workdir}/basic 2>/dev/null || exit 1; \
-         /bin/busybox cp {source}/basic_testcode.sh {workdir}/basic_testcode.sh || exit 1; \
-         /bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
-         [ -f {workdir}/basic/run-all.sh ] || exit 1; \
-         [ -f {workdir}/basic_testcode.sh ] || exit 1; \
-         [ -f {workdir}/busybox ] || exit 1; \
+         {payload} \
          /bin/busybox sync || exit 1\0"
     );
     let ret = run_bash_cmd(&command, environ);
@@ -906,11 +938,12 @@ fn run_group_in_dir(
     } else {
         "glibc"
     };
+    let requires_scratch = group_uses_scratch_workspace(group_name) && scratch_runtime_enabled();
     let prepared_dir = prepare_group_workdir(environ, dir, group_name, libc_suffix);
-    if group_name == "basic" && scratch_runtime_enabled() && prepared_dir.is_none() {
+    if requires_scratch && prepared_dir.is_none() {
         println!(
-            "[scratch-work] FATAL: refuse read-only fallback for basic-{}",
-            libc_suffix
+            "[scratch-work] FATAL: refuse read-only fallback for {}-{}",
+            group_name, libc_suffix
         );
         return;
     }

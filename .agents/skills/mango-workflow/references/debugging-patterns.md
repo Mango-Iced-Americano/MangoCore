@@ -343,13 +343,21 @@
 - **安全边界**: 网络参数只用 `setenv`，禁止自动 `saveenv`；普通启动脚本禁止包含块设备写命令。自动接管串口时只关闭能明确匹配同一设备路径的 screen，未知占用者必须报错停止。
 - **相关文件**: `scripts/boot_2k1000_tftp.py`, `Makefile`
 
-### AHCI HBA reset 后不能假定 PI 保持不变
+### AHCI HBA reset 后不能假定 CAP/PI 保持不变
 
 - **现象**: 同一控制器和 SSD 在 U-Boot 执行过 `scsi scan` 后可用，但直接 TFTP/`bootm` 时内核报 `NoUsablePort { implemented: 0, ... }`；PCI ID、class 和 ABAR 都已验证正确。
-- **根因**: 部分片上 AHCI 控制器的 HBA reset 会清空可写的 `HOST_PORTS_IMPL`。若 bootloader 先扫描磁盘，它可能已经回写 PI，从而掩盖内核初始化缺失并形成隐式启动顺序依赖。
-- **修复**: 对照厂商 U-Boot/Linux：reset 前保存实现寄存器，或由板级 Provider 提供固件定义的端口图；reset 后回写 PI 并读回刷新 posted MMIO write，再做端口和链路探测。未知平台不能使用无条件固定掩码。
+- **根因**: 部分片上 AHCI 控制器的 HBA reset 会清空可写的 CAP 和 `HOST_PORTS_IMPL`。只恢复 PI 时端口虽然可枚举，但 CAP.SSS 丢失会导致 `PxCMD.SUD` 被硬件清零，暖复位链路停在 `DET=1`。若 bootloader 先扫描磁盘，它可能已经回写这些寄存器，从而掩盖内核初始化缺失。
+- **修复**: 对照厂商 U-Boot/Linux保存掩码和强制位：reset 前保存平台声明的 CAP 子集，reset 后先恢复 CAP、读回刷新，再恢复 PI；2K1000 保存 CAP bit28/17、强制 bit27 SSS，并写 `PI=0x0f`。未知平台默认不写只读 CAP，不能套用固定值。
 - **教训**: “同一镜像偶尔能识别 SSD”要检查 bootloader 前置命令是否改变了控制器状态。内核驱动必须从其声明的硬件初始条件独立建立完整状态，不能依赖人工调试命令的副作用。
 - **相关文件**: `dependency/dep_iso/src/provider.rs`, `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs`
+
+### FAT rename 不能复用 link + unlink
+
+- **现象**: FAT32 上文件创建、写入和删除均正常，但 `mv old new` 返回失败；目录 rename 后的 `rmdir new` 随之报目标不存在。
+- **根因**: VFS 默认 rename 通过 `link(new) + unlink(old)` 实现，而 FAT 标准没有硬链接，`link()` 必然返回不支持。外层测试脚本还可能无条件返回 0，所以只看组退出码会形成假通过。
+- **修复**: 文件系统实现原生目录项 rename：保留源短目录项的首簇、大小、属性和时间，只生成新短名/长名；创建新项后删除旧项并同步父目录，删除失败则回滚新项。跨目录还需更新目录 `..`，覆盖目标还需保存和回滚目标，未实现前必须显式拒绝。
+- **验收**: 同时检查测试脚本逐命令输出、旧路径消失、新路径可访问及后续删除成功；至少覆盖普通文件和空目录，不能只检查外层脚本 exit 0。
+- **相关文件**: `os/src/fs/fat32/fat_inode.rs`, `user/src/bin/initproc.rs`
 
 ### 块设备写路径开放前使用分区外自恢复探针
 

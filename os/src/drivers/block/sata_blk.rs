@@ -83,9 +83,12 @@ pub struct Provider;
 impl provider::Provider for Provider {
     const PAGE_SIZE: usize = PAGE_SIZE;
     #[cfg(feature = "board_2k1000")]
-    // The 2K1000 HBA reset clears PI. The vendor U-Boot restores 0x0f before
-    // probing, so the kernel must do the same instead of depending on whether
-    // U-Boot happened to execute `scsi scan` before bootm.
+    // The 2K1000 HBA reset clears writable host registers. Match the vendor
+    // U-Boot sequence: preserve CAP.SMPS/SPM, force CAP.SSS, then restore PI.
+    const AHCI_CAPABILITY_SAVE_MASK: u32 = (1 << 28) | (1 << 17);
+    #[cfg(feature = "board_2k1000")]
+    const AHCI_CAPABILITY_FORCE_BITS: u32 = 1 << 27;
+    #[cfg(feature = "board_2k1000")]
     const AHCI_PORTS_IMPLEMENTED: Option<u32> = Some(0x0f);
 
     fn delay_us(micros: usize) {
