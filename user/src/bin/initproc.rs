@@ -2967,6 +2967,12 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
+    // Symlink apk -> apk.static for convenience
+    run_bash_cmd(
+        "[ -e /bin/apk ] || ln -sf /bin/apk.static /bin/apk; true\0",
+        environ,
+    );
+
     // Phase 4: Ensure /bin/bash exists, force /bin/sh -> /bin/bash
     // (busybox --install -s /bin may have set /bin/sh -> busybox/ash, which
     //  breaks LTP shell tests that need bash-compatible local/arithmetic)
