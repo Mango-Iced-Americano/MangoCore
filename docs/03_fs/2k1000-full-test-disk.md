@@ -42,7 +42,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
 | `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
 | `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
-| `kernel-2k1000-scratch-rw.ui` | 12,360,256 B | `c45d0260d47296665f9e71f779705caf70af40cac68c9cc5cb8aa39525b53dfd` |
+| `kernel-2k1000-scratch-rw.ui` | 12,360,256 B | `b7a9439f80d05418f84951731b6dedb1e8bac3f4cdfbf7d4845e7c2ac4971179` |
 
 ## 2. MBR 布局
 
@@ -203,7 +203,7 @@ stage-1 会创建 `/scratch/MANGO_USR_PROBE/PAYLOAD.BIN`，写入 6144 字节确
 
 检测到可写 `/scratch` 后，stage-1 不再把只读 `/tools/bin`、`/tools/lib`、`/tools/usr` 覆盖到根目录对应路径，而是保留 initramfs 中的 `/bin`、`/sbin`、`/lib`、`/usr` 作为可写运行时。工具仍可通过扩展后的 `PATH` 和 `LD_LIBRARY_PATH` 从 `/tools` 读取；动态库链接和内嵌 `libgcc_s.so.1` 则写入 ramfs `/lib`。这部分运行时重启后丢失，不属于 SSD 持久数据。
 
-P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua 时，initproc 会按 libc 删除并重建独立工作区：
+P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua、lmbench 时，initproc 会按 libc 删除并重建独立工作区：
 
 ```text
 /scratch/work/basic-musl
@@ -212,10 +212,16 @@ P1 上的 `/musl`、`/glibc` 继续只读。执行 basic、busybox、lua 时，i
 /scratch/work/busybox-glibc
 /scratch/work/lua-musl
 /scratch/work/lua-glibc
+/scratch/work/lmbench-musl
+/scratch/work/lmbench-glibc
 ```
 
-各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
+各组只复制最小依赖：basic 包含 `basic/`、入口和 busybox；busybox 包含二进制、入口和命令清单；lua 包含 busybox、解释器、runner、入口及 9 个 Lua 脚本；lmbench 包含 busybox、入口、统一二进制、`hello` 和 `lat_sig`。lmbench 的 `hello` wrapper 会通过绝对路径 `/code/lmbench_src/bin/build/lmbench_all` 回调，因此每次准备工作区后都要把该链接切到当前 libc 的 `lmbench_all`。递归复制只忽略 FAT32 不支持 chmod/权限元数据产生的诊断，但保留复制退出码；随后逐项确认关键文件存在。准备失败时明确拒绝回退到只读源，避免空脚本或缺文件仍以退出码 0 伪装成通过。
 
 2026-07-12 实板复验中，启动脚本只执行 `ping`、`tftpboot`、`iminfo` 和 `bootm`，未执行 U-Boot `scsi reset/scan`；内核独立完成 AHCI 初始化并通过 `/scratch` 写入探针。musl/glibc 的 basic、busybox、lua 均从上述 SSD 路径运行：basic 全部子项到 END；busybox 的 touch/write/cp/mkdir/mv/rmdir/unlink 等命令全部 success；Lua 两套共 18 个子项全部 success。
 
-busybox 首轮暴露 FAT 未实现原生 rename，默认 `link + unlink` 因 FAT 不支持硬链接而失败。当前实现对同一目录、目标不存在的 rename 创建保留原簇号/大小/属性/时间的新目录项，再删除旧项并同步，失败时回滚新项；跨目录和覆盖目标仍显式不支持。后续 lmbench 仍从只读源运行，实板已观察到 `lat_select` 创建临时文件时报 `EROFS`，应作为下一组迁移目标。
+busybox 首轮暴露 FAT 未实现原生 rename，默认 `link + unlink` 因 FAT 不支持硬链接而失败。当前实现对同一目录、目标不存在的 rename 创建保留原簇号/大小/属性/时间的新目录项，再删除旧项并同步，失败时回滚新项；跨目录和覆盖目标仍显式不支持。
+
+lmbench 迁移前，`lat_select` 在只读源目录创建临时文件会报 `EROFS`。首版工作区只复制入口、统一二进制、busybox 和 `hello`，两套组虽然退出 0，`lat_sig -P 1 prot lat_sig` 仍因缺少作为映射对象的 `lat_sig` 文件打印 `mmap: Bad file descriptor`。补齐并校验该文件后，2026-07-12 最终实板复验中 musl/glibc 均输出 `Protection fault`，并完整运行 `lat_select`、fork/exec/shell、`/var/tmp/XXX` 写入、pagefault、mmap、`lat_fs`、文件/管道带宽和 context switch；两组分别用时 108s 和 216s，退出码均为 0。
+
+下一组 iozone 仍从只读源运行，实板已稳定观察到 `iozone.tmp` 和 `iozone.DUMMY.*` 创建时报 `Read-only file system`，应迁移到独立 SSD 工作区。

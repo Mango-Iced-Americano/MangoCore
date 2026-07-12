@@ -392,3 +392,11 @@
 - **FAT32 注意项**: BusyBox `cp -R` 可能在数据复制成功后尝试恢复目录 mode，而 FAT32 `set_metadata` 返回 `ENOSYS`。可屏蔽这类已知诊断，但必须保留 `cp` 退出码并执行文件完整性校验。不要用未声明局部变量的递归 shell 函数替代复制：BusyBox shell 函数变量默认可污染父递归层的源/目标路径。
 - **验收**: 测例日志必须打印工作区准备成功，`getcwd` 应指向 scratch，且每个实际子项有 START/END；仅检查外层脚本退出码不足以证明测试执行。复位启动时还应确认 bootloader 没有运行会改变控制器状态的存储命令。
 - **相关文件**: `user/src/bin/init.rs`, `user/src/bin/initproc.rs`, `docs/03_fs/2k1000-full-test-disk.md`
+
+### 多调用 benchmark 的最小 payload 要审计隐藏文件依赖
+
+- **现象**: benchmark 已复制到可写工作区，外层脚本运行到 END 且退出 0，但某个子项仍打印 `ENOENT`、`EBADF` 或性能项缺失；只复制入口脚本和统一多调用二进制看似足够。
+- **根因**: 多调用二进制仍可能把普通文件名当作 mmap/pagefault 输入，或由极小 wrapper 使用编译期绝对路径回调统一二进制。例如 lmbench 的 `lat_sig ... prot lat_sig` 需要当前目录中的 `lat_sig` 文件，`hello` wrapper 则调用 `/code/lmbench_src/bin/build/lmbench_all`。
+- **修复**: 同时审计入口脚本参数、wrapper 文本和统一二进制 strings；把数据文件、exec wrapper 与绝对回调链接纳入最小 payload，并在每个 libc 工作区准备后重建指向当前二进制的链接。复制后逐项校验文件存在，不能只校验主程序。
+- **验收**: 不仅检查组退出码，还要比对关键指标行和 stderr；本例要求 `Protection fault` 出现且 `mmap: Bad file descriptor` 消失，同时 fork+exec、文件带宽和 context switch 跑到 END。
+- **相关文件**: `user/src/bin/initproc.rs`, `docs/03_fs/2k1000-full-test-disk.md`

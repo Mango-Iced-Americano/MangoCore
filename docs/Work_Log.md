@@ -4,6 +4,24 @@
 
 ## 2026-07-12
 
+### board/test: 将 lmbench 迁移到 SSD 工作区并完成双 libc 实板复验
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 lmbench 纳入 scratch 工作区，复制并校验最小依赖，按 libc 更新 `/code/lmbench_src/bin/build/lmbench_all` 回调链接；drift_window 同步使用工作区并拒绝只读回退
+- `docs/03_fs/2k1000-full-test-disk.md` — 更新工作区范围、最终镜像、lmbench 验收结果和下一组 iozone 只读问题
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀统一多调用二进制的隐藏相对文件/绝对 wrapper 依赖审计模式
+
+**验证：**
+- 修改和补齐 `lat_sig` 后均在 Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`、`make -C os la64-2k1000-scratch-rw`，最终三目标全部成功；仅有项目既有 warning ✅
+- 最终 uImage 为 `12360256` 字节，SHA-256 `b7a9439f80d05418f84951731b6dedb1e8bac3f4cdfbf7d4845e7c2ac4971179`；TFTP CRC32 `bc3bb372`、U-Boot `iminfo`、内核启动和 scratch smoke 全部通过 ✅
+- musl/glibc 分别从 `/scratch/work/lmbench-musl`、`/scratch/work/lmbench-glibc` 执行；`lat_select` 不再报 EROFS，fork+exec 成功通过当前 libc 的 `/code` 回调链接 ✅
+- 首轮最小 payload 漏掉 `lat_sig` 时，两组虽退出 0 但均打印 `mmap: Bad file descriptor`；补齐后最终复验均输出 `Protection fault`，不再出现 Bad FD ✅
+- 两套均完整输出文件写入、pagefault、mmap、lat_fs、管道/文件带宽和 context switch，并运行到 GROUP END；musl 108s、glibc 216s，退出码均为 0 ✅
+
+**备注：**
+- benchmark 外层脚本退出 0 不代表每条子命令成功；最小 payload 验收必须逐行检查 stderr 和关键指标。
+- 下一组为 iozone；当前实板已复现 `iozone.tmp`、`iozone.DUMMY.*` 创建时报只读错误。
+
 ### board/fs: 将 busybox、lua 迁移到 SSD 工作区并补齐暖复位与 FAT rename
 
 **涉及文件：**

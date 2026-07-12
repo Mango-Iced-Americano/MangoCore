@@ -805,7 +805,7 @@ fn display_path(path: &str) -> &str {
 }
 
 fn group_uses_scratch_workspace(group_name: &str) -> bool {
-    matches!(group_name, "basic" | "busybox" | "lua")
+    matches!(group_name, "basic" | "busybox" | "lua" | "lmbench")
 }
 
 fn prepare_group_workdir(
@@ -850,6 +850,21 @@ fn prepare_group_workdir(
              for script in date file_io max_min random remove round_num sin30 sort strings; do \
                  [ -f {workdir}/\x24script.lua ] || exit 1; \
              done;"
+        ),
+        "lmbench" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/lmbench_testcode.sh {workdir}/lmbench_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/lmbench_all {workdir}/lmbench_all || exit 1; \
+             /bin/busybox cp {source}/hello {workdir}/hello || exit 1; \
+             /bin/busybox cp {source}/lat_sig {workdir}/lat_sig || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/lmbench_testcode.sh ] || exit 1; \
+             [ -f {workdir}/lmbench_all ] || exit 1; \
+             [ -f {workdir}/hello ] || exit 1; \
+             [ -f {workdir}/lat_sig ] || exit 1; \
+             /bin/busybox mkdir -p /code/lmbench_src/bin/build || exit 1; \
+             /bin/busybox rm -f /code/lmbench_src/bin/build/lmbench_all || exit 1; \
+             /bin/busybox ln -s {workdir}/lmbench_all /code/lmbench_src/bin/build/lmbench_all || exit 1;"
         ),
         _ => return None,
     };
@@ -1926,6 +1941,24 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
 
     let total_windows = cfg.drift_windows;
     for libc in libc_list {
+        let source_dir = alloc::format!("/{}\0", libc);
+        let prepared_lmbench_dir = prepare_group_workdir(
+            environ,
+            &source_dir,
+            "lmbench",
+            libc,
+        );
+        if scratch_runtime_enabled() && prepared_lmbench_dir.is_none() {
+            println!(
+                "[scratch-work] FATAL: refuse read-only fallback for lmbench-{} drift windows",
+                libc
+            );
+            continue;
+        }
+        let measurement_dir = prepared_lmbench_dir
+            .as_deref()
+            .map(display_path)
+            .unwrap_or_else(|| display_path(&source_dir));
         println!(
             "[initproc] drift_window: start libc={} windows={}",
             libc, total_windows
@@ -1957,9 +1990,12 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
 
             // Measurement command: null (lat_syscall null) or full (all lmbench)
             let cmd = if cfg.drift_measure == "full" {
-                alloc::format!("cd /{} && sh lmbench_testcode.sh\0", libc)
+                alloc::format!("cd {} && sh lmbench_testcode.sh\0", measurement_dir)
             } else {
-                alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc)
+                alloc::format!(
+                    "cd {} && ./lmbench_all lat_syscall -P 1 null\0",
+                    measurement_dir
+                )
             };
             let _ = run_bash_cmd(&cmd, environ);
 
@@ -3065,8 +3101,12 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     println!("prepare lmbench compatibility ...");
     let lmbench_cmd = "\
-        mkdir -p /code/lmbench_src/bin/build; \
-        ln -s /musl/lmbench_all /code/lmbench_src/bin/build/lmbench_all \
+        if [ ! -d /scratch ]; then \
+            mkdir -p /code/lmbench_src/bin/build; \
+            rm -f /code/lmbench_src/bin/build/lmbench_all; \
+            ln -s /musl/lmbench_all /code/lmbench_src/bin/build/lmbench_all; \
+        fi; \
+        true \
     \0";
     let ret = run_bash_cmd(lmbench_cmd, environ);
     println!("[initproc] lmbench compatibility done, exit={}", ret);
