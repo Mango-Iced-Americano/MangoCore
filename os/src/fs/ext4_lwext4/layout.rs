@@ -701,12 +701,8 @@ impl IndexNode for Ext4OSInode {
     }
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
-        // Flush dirty PageCache pages to disk before the inode is dropped.
-        // Without this, dentry cache pressure can evict dentries, dropping
-        // the last strong reference to the inode, and dirty pages are lost.
-        if let Some(pc) = self.page_cache.lock().clone() {
-            let _ = pc.writeback_all();
-        }
+        // Dirty pages are kept alive by the strong page_caches registry;
+        // writeback happens via balance_dirty_pages / fsync / sync, not here.
         Ok(())
     }
 
@@ -803,11 +799,9 @@ impl IndexNode for Ext4OSInode {
             // Check global registry for existing PageCache (shared across inode instances)
             {
                 let registry = self.fs.page_caches.lock();
-                if let Some(weak) = registry.get(&self.inode_id) {
-                    if let Some(pc) = weak.upgrade() {
-                        *cache = Some(pc.clone());
-                        return cache.clone();
-                    }
+                if let Some(pc) = registry.get(&self.inode_id) {
+                    *cache = Some(pc.clone());
+                    return cache.clone();
                 }
             }
             // No existing PageCache — create new one and register
@@ -819,8 +813,8 @@ impl IndexNode for Ext4OSInode {
             ));
             let pc = PageCache::new();
             pc.set_backend(backend);
-            // Register in global registry for sharing
-            self.fs.page_caches.lock().insert(self.inode_id, Arc::downgrade(&pc));
+            // Register in global strong registry — dirty pages survive dentry eviction
+            self.fs.page_caches.lock().insert(self.inode_id, pc.clone());
             *cache = Some(pc);
             counters::LWEXT4_ENSURE_PC_CREATES.fetch_add(1, Ordering::Relaxed);
         }
@@ -1106,7 +1100,7 @@ impl IndexNode for Ext4OSInode {
                 .map(|e| e.inode_id)
                 .unwrap_or_else(|_| hash_path(path));
             let registry = fs.page_caches.lock();
-            if let Some(pc) = registry.get(&inode_id).and_then(|w| w.upgrade()) {
+            if let Some(pc) = registry.get(&inode_id).cloned() {
                 drop(registry);
                 pc.writeback_all().map_err(|_| SyscallErr::EIO)?;
             }
@@ -1578,12 +1572,5 @@ impl IndexNode for Ext4OSInode {
     }
 }
 
-// Safety net: flush dirty PageCache pages when the inode is dropped
-// without an explicit close() call (e.g., dentry cache pressure eviction).
-impl Drop for Ext4OSInode {
-    fn drop(&mut self) {
-        if let Some(pc) = self.page_cache.lock().clone() {
-            let _ = pc.writeback_all();
-        }
-    }
-}
+// Strong page_caches registry keeps dirty PageCache alive after drop;
+// no synchronous I/O in destructor.

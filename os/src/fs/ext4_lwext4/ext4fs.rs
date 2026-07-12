@@ -71,8 +71,10 @@ pub struct Ext4FileSystem {
     lw_mount_point: String,
     /// PageCache registry keyed by inode_id — shares PageCache across
     /// different Ext4OSInode instances pointing to the same file.
-    /// Mimics legacy ext4's `page_caches: Mutex<BTreeMap<usize, Weak<NewPageCache>>>`.
-    pub(crate) page_caches: Mutex<BTreeMap<usize, Weak<crate::fs::page_cache::PageCache>>>,
+    /// Strong Arc registry — keeps dirty PageCache alive after last
+    /// inode reference is dropped (dentry eviction).  Without this,
+    /// dirty pages are lost when dentry cache pressure evicts inodes.
+    pub(crate) page_caches: Mutex<BTreeMap<usize, Arc<crate::fs::page_cache::PageCache>>>,
 }
 
 // Safety: MangoCore is single-core; lwext4 C global state is only accessed
