@@ -1,3 +1,4 @@
+use core::fmt::Write;
 use crate::hal::shutdown;
 use core::panic::PanicInfo;
 
@@ -7,13 +8,13 @@ fn panic(info: &PanicInfo) -> ! {
         Some(location) => {
             println!(
                 "[kernel] panicked at '{}', {}:{}:{}",
-                info.message().unwrap(),
+                info.message(),
                 location.file(),
                 location.line(),
                 location.column()
             );
         }
-        None => println!("[kernel] panicked at '{}'", info.message().unwrap()),
+        None => println!("[kernel] panicked at '{}'", info.message()),
     }
     crate::panic_diag::dump_panic_context();
     shutdown()

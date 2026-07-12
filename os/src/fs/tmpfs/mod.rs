@@ -374,6 +374,41 @@ impl IndexNode for LockedTmpFSInode {
         pc.read(offset, read_buf)
     }
 
+    fn write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &[u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut inode = self.0.lock();
+        if inode.metadata.file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
+        }
+        let pc = inode.page_cache.as_ref().ok_or(SyscallErr::EIO)?.clone();
+        let new_size = offset.checked_add(len).ok_or(SyscallErr::EINVAL)?;
+        if new_size > inode.file_size {
+            let delta = (new_size - inode.file_size) as u64;
+            let fs = inode.fs.upgrade().ok_or(SyscallErr::EIO)?;
+            fs.check_space(delta)?;
+        }
+        // Hold lock through write+size update to match write_at_user semantics
+        let n = pc.write(offset, buf, None).map_err(|_| SyscallErr::EIO)?;
+        if new_size > inode.file_size {
+            let delta = (new_size - inode.file_size) as u64;
+            let fs_lock = inode.fs.upgrade();
+            inode.file_size = new_size;
+            if let Some(ref fs) = fs_lock {
+                fs.add_size(delta as i64);
+            }
+        }
+        drop(inode);
+        Ok(n)
+    }
+
     fn read_at_user(
         &self,
         offset: usize,
