@@ -148,3 +148,115 @@ impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
 - [ ] lwext4_rust 的 `file.rs` 中 `flags_to_cstring()` 仅映射了部分 open flags（0, 2, 0x241, 0x242, 0x442），缺少 `O_APPEND` 单独映射等
 - [ ] `Ext4File` 的 path-based API 无法表达 "open by inode" 语义，导致硬链接、open-unlink 场景有正确性风险
 - [ ] bindings.rs 缺少 `ext4_chown`、`ext4_utime` 的传递性（需检查 C 库是否支持）
+
+---
+
+## 修复 9：多实例挂载 — 路径前缀翻译方案（替代撤回的修复 4）
+
+**文件**：`os/src/fs/ext4_lwext4/ext4fs.rs`、`layout.rs`、`page_cache.rs`
+
+**背景**：修复 4 尝试用唯一 mount point（`/ext4_{id}`）但因子模块调用点多、路径翻译复杂而回退（`bcd27725`），改回了「唯一 dev_name + 统一 `"/"` mount point」的简单方案。然而该方案在根目录 `/sdcard` 和 `/tools` 均为 ext4 时失效：lwext4 C 库发现 `"/"` 已被占用，第二次 `ext4_mount()` 直接返回 EOK 而不初始化第二个块设备。所有后续路径操作经 `ext4_get_mount(path)` 都落在第一个 ext4 实例上，导致 `/tools` 显示 `/sdcard` 的内容。
+
+**根因分析**（`dependency/lwext4_rust/c/lwext4/src/ext4.c`）：
+
+```c
+// ext4_mount(): 重复 mount point → 直接返回 EOK
+if (mp->name exists) return EOK;   // 第 392 行
+
+// ext4_get_mount(): 按 mount point 前缀匹配，返回第一个
+// 两个实例的 mount point 都是 "/"，所以永远返回第一个
+```
+
+**方案**：Approach A — 唯一内部 lwext4 mount point + Rust 适配层路径前缀翻译。
+
+### 设计
+
+给每个 `Ext4FileSystem` 实例分配唯一内部 mount point：
+
+```rust
+static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
+
+struct Ext4FileSystem {
+    // ... 现有字段 ...
+    lw_dev_name: String,      // "e1"
+    lw_mount_point: String,   // "/e1/"
+}
+```
+
+`open_ext4rs()` 中使用 `new_with_names(dev, "e1", "/e1/")`，**不再传 `"/"`**。
+
+### 路径翻译层
+
+所有传给 lwext4 C API 的路径必须加前缀：
+
+```rust
+impl Ext4FileSystem {
+    /// VFS 路径 → lwext4 内部路径
+    fn lw_path(&self, vfs_path: &str) -> Result<String, SyscallErr> {
+        if vfs_path == "/" {
+            return Ok(self.lw_mount_point.clone());  // → "/e1/"
+        }
+        // "/bin/sh" → "/e1/bin/sh"
+        Ok(format!("{}{}", self.lw_mount_point, &vfs_path[1..]))
+    }
+
+    fn lw_c_path(&self, vfs_path: &str) -> Result<CString, SyscallErr> {
+        CString::new(self.lw_path(vfs_path)?).map_err(|_| SyscallErr::EINVAL)
+    }
+}
+```
+
+### 涉及修改的调用点
+
+| 文件 | 方法 | 改动 |
+|------|------|------|
+| `ext4fs.rs` | `open_ext4rs()` | mount point 从 `"/"` → `"/e{N}/"` |
+| `ext4fs.rs` | `super_block()` | `ext4_mount_point_stats()` 传入 `self.lw_mount_point` |
+| `layout.rs` | `probe_inode_meta()` | `ext4_raw_inode_fill()` 路径加前缀 |
+| `layout.rs` | `probe_type()` | `file_mode_get()` 路径加前缀 |
+| `layout.rs` | `create()` / `mkdir()` / `unlink()` / `rmdir()` | 子路径加前缀 |
+| `layout.rs` | `rename()` | 新旧路径均加前缀；跨 ext4 实例返回 `EXDEV` |
+| `layout.rs` | `symlink()` | link 路径加前缀，target **不加**（target 是 VFS 语义） |
+| `layout.rs` | `link()` / `mknod()` / `truncate()` | 路径加前缀 |
+| `layout.rs` | `set_metadata()` / getxattr/setxattr 等 | 路径加前缀 |
+| `layout.rs` | `logical_size_or_refresh()` / `read_at` (symlink) | 路径加前缀 |
+| `layout.rs` | `list()` / `list_dirents()` | 目录路径加前缀；`lwext4_dir_entries()` 返回 basename，无需去前缀 |
+| `page_cache.rs` | `LwExt4PageCacheBackend` | 存储 `lw_path` 字段，构造时翻译一次，I/O 使用翻译后路径 |
+
+### 关键边界处理
+
+1. **根目录**：`lw_path("/")` → `"/e1/"`，必须保留末尾 `/`，lwext4 按前缀匹配
+2. **符号链接**：只给 symlink inode 路径加前缀，target 内容不加（target 是用户数据的 VFS 路径）
+3. **跨 ext4 rename/link**：检查 `Arc::ptr_eq(&self.fs, &other.fs)`，不匹配返回 `EXDEV`
+4. **readdir 去前缀**：不需要！lwext4 的 `ext4_generic_open2()` 内部已做 `path += strlen(mp->name)`，返回的是 basename
+5. **文件句柄**：`file_open()` 用翻译后路径打开后，后续 read/write/seek/close 无需再翻译（file_desc 内已记录 mount point）
+
+### 为何不用其他方案
+
+| 方案 | 问题 |
+|------|------|
+| B: dev_name 路由 | 需改 C API 签名，破坏上游兼容性 |
+| C: 同 mount point 按设备区分 | `ext4_mount_point_stats` / `ext4_umount` 等 API 只接受 mount_point，需大改 C 侧 |
+| D: 传 block device 指针 | FFI 改动最大，与 lwext4 基于路径的设计冲突 |
+
+Approach A 是 lwext4 的设计意图：内部唯一 mount point + 适配层路径前缀。
+
+### 工作量
+
+Medium，1-2 天。每个调用点改动量小，但涉及约 20 个方法需逐一适配。`page_cache.rs` 改动最简单（构造时翻译一次）。
+
+### 验证
+
+- [x] `make rv64-kernel-build-only` + `make la64-kernel-build-only`
+- [x] QEMU 启动后 `ls /sdcard` 与 `ls /tools` 显示**不同**内容
+- [x] `/tools` 中可正常读写文件
+- [x] 基本文件操作 (open/read/write/unlink/rename) 在两个 ext4 实例上均正常
+
+### 实现完成 (2026-07-12)
+
+Implemented in commit implementing multi-ext4-instance mount isolation:
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — Added `lw_mount_point` field, `lw_path()` helper, unique mount points in `open_ext4rs()`, fixed `super_block()`, `get_inode_id()`, `probe_type()`, `probe_inode_meta()` to use translated paths
+- `os/src/fs/ext4_lwext4/layout.rs` — All ~20 methods adapted: every `Ext4File::new()`, `file_open()`, `file_mode_get()`, `check_inode_exist()`, `dir_mk()`, `dir_rm()`, `file_rename()`, `dir_mv()`, `file_truncate()`, `ext4_readlink()`, `ext4_fsymlink()`, `ext4_flink()`, `ext4_mknod()`, `ext4_*xattr()`, and `ext4_owner_set()` call site now passes paths through `lw_path()` translation. Added cross-fs checks (`Arc::ptr_eq`) for `rename()` and `link()`. Symlink targets NOT translated (user-data, VFS-semantic).
+- `os/src/fs/ext4_lwext4/page_cache.rs` — Added `lw_path` field, pre-computed at construction time; all `Ext4File` operations use translated path
+- rv64 compile: zero errors from ext4_lwext4 files ✅
+- la64: toolchain corrupted (pre-existing env issue, not code-related)

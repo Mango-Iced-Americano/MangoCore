@@ -35,6 +35,9 @@ pub struct LwExt4PageCacheBackend {
     fs: Weak<super::ext4fs::Ext4FileSystem>,
     /// Full path from mount root, e.g. "/bin/busybox"
     path: String,
+    /// lwext4-internal path with mount point prefix, e.g. "/e1/bin/busybox".
+    /// Pre-computed at construction time from `fs.lw_path(&path)`.
+    lw_path: String,
     /// Shared logical file size — writeback clamps to this to prevent
     /// 1-byte writes from producing 4KB files. Lazily refreshed on first I/O.
     logical_size: Arc<AtomicUsize>,
@@ -49,10 +52,12 @@ impl LwExt4PageCacheBackend {
         fs: Weak<super::ext4fs::Ext4FileSystem>,
         path: String,
         logical_size: Arc<AtomicUsize>,
+        lw_path: String,
     ) -> Self {
         Self {
             fs,
             path,
+            lw_path,
             logical_size,
         }
     }
@@ -64,8 +69,8 @@ impl LwExt4PageCacheBackend {
             return Ok(cached);
         }
         let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-        let size = if f.file_open(&self.path, 0x0).is_ok() {
+        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
+        let size = if f.file_open(&self.lw_path, 0x0).is_ok() {
             let s = f.file_size() as usize;
             f.file_close().ok();
             s
@@ -111,8 +116,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
             return Ok(PAGE_SIZE);
         }
         let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-        f.file_open(&self.path, 0x0)
+        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
+        f.file_open(&self.lw_path, 0x0)
             .map_err(|e| from_lwext4(e.abs()))?;
         // Use closure to ensure file_close() on all error paths
         let result = (|| -> Result<usize, SyscallErr> {
@@ -138,10 +143,10 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         let offset = index * PAGE_SIZE;
         let write_len = PAGE_SIZE.min(buf.len());
         let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
         // Try O_RDWR ("r+") first, fall back to O_RDWR|O_CREAT|O_TRUNC ("w+")
-        if f.file_open(&self.path, 0x2).is_err() {
-            f.file_open(&self.path, 0x242)
+        if f.file_open(&self.lw_path, 0x2).is_err() {
+            f.file_open(&self.lw_path, 0x242)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
         // Use closure to ensure file_close() on all error paths
@@ -166,8 +171,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         crate::task::perf::record_pc_miss();
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-        f.file_open(&self.path, 0x0)
+        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
+        f.file_open(&self.lw_path, 0x0)
             .map_err(|e| from_lwext4(e.abs()))?;
         let start_offset = start_index * PAGE_SIZE;
         let result = (|| -> Result<usize, SyscallErr> {
@@ -197,9 +202,9 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
     ) -> Result<usize, SyscallErr> {
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-        if f.file_open(&self.path, 0x2).is_err() {
-            f.file_open(&self.path, 0x242)
+        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
+        if f.file_open(&self.lw_path, 0x2).is_err() {
+            f.file_open(&self.lw_path, 0x242)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
         let start_offset = start_index * PAGE_SIZE;
@@ -249,8 +254,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         if self.logical_size.load(Ordering::Relaxed) == LWEXT4_SIZE_UNKNOWN {
             if let Some(fs) = self.fs.upgrade() {
                 let _lock = fs.lw.lock();
-                let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-                if f.file_open(&self.path, 0x0).is_ok() {
+                let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
+                if f.file_open(&self.lw_path, 0x0).is_ok() {
                     let s = f.file_size() as usize;
                     self.logical_size.store(s, Ordering::Relaxed);
                     f.file_close().ok();

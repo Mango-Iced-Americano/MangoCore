@@ -234,8 +234,9 @@ impl Ext4OSInode {
         // One-time probe: open + file_size + close
         let size = {
             let _lock = self.fs.lw.lock();
-            let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-            if f.file_open(&self.path, 0x0).is_err() {
+            let lw_path = self.fs.lw_path(&self.path);
+            let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
+            if f.file_open(&lw_path, 0x0).is_err() {
                 // File doesn't exist yet — store 0 to avoid re-probing on
                 // every write_at call. The file will be created on first
                 // writeback (via O_RDWR|O_CREAT|O_TRUNC in write_page).
@@ -327,7 +328,8 @@ impl IndexNode for Ext4OSInode {
         counters::LWEXT4_METADATA_COLD.fetch_add(1, Ordering::Relaxed);
         let (file_type, inode_mode, size, blocks) = {
             let _lock = self.fs.lw.lock();
-            let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
+            let lw_path = self.fs.lw_path(&self.path);
+            let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
             let mode_raw = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
             let mapped = map_lwext4_mode(mode_raw);
 
@@ -336,7 +338,7 @@ impl IndexNode for Ext4OSInode {
                 FileType::SymLink => {
                     let mut rbuf = [0u8; 256];
                     let mut rcnt: usize = 0;
-                    let c_path = CString::new(self.path.as_str())
+                    let c_path = CString::new(lw_path.as_str())
                         .map_err(|_| SyscallErr::EINVAL)?;
                     let c_path = c_path.into_raw();
                     let r = unsafe {
@@ -356,8 +358,8 @@ impl IndexNode for Ext4OSInode {
                 }
                 _ => {
                     let _fo_start = crate::task::perf::perf_time_now();
-                    let mut ff = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-                    let open_ok = ff.file_open(&self.path, 0x0).is_ok();
+                    let mut ff = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
+                    let open_ok = ff.file_open(&lw_path, 0x0).is_ok();
                     counters::LWEXT4_FILE_OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
                     counters::LWEXT4_FILE_OPEN_CYCLES.fetch_add(
                         crate::task::perf::perf_time_now().wrapping_sub(_fo_start),
@@ -440,9 +442,10 @@ impl IndexNode for Ext4OSInode {
             FileType::SymLink => {
                 // Use ext4_readlink to get the symlink target content
                 let _lock = self.fs.lw.lock();
+                let lw_path = self.fs.lw_path(&self.path);
                 let mut rbuf = [0u8; 256];
                 let mut rcnt: usize = 0;
-                let c_path = CString::new(self.path.as_str())
+                let c_path = CString::new(lw_path.as_str())
                     .map_err(|_| SyscallErr::EINVAL)?;
                 let c_path = c_path.into_raw();
                 let r = unsafe {
@@ -601,7 +604,8 @@ impl IndexNode for Ext4OSInode {
         }
 
         let _lock = self.fs.lw.lock();
-        let dir = Ext4File::new(&self.path, InodeTypes::EXT4_DE_DIR);
+        let lw_path = self.fs.lw_path(&self.path);
+        let dir = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_DIR);
 
         let _de_start = crate::task::perf::perf_time_now();
         let (names, _types) = dir
@@ -637,7 +641,8 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::ENOTDIR);
         }
         let _lock = self.fs.lw.lock();
-        let dir = Ext4File::new(&self.path, InodeTypes::EXT4_DE_DIR);
+        let lw_path = self.fs.lw_path(&self.path);
+        let dir = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_DIR);
         let _de_start = crate::task::perf::perf_time_now();
         let (names, types) = dir.lwext4_dir_entries()
             .map_err(|e| from_lwext4(e.abs()))?;
@@ -708,7 +713,8 @@ impl IndexNode for Ext4OSInode {
         }
         // Then flush lwext4 internal caches
         let _lock = self.fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
+        let lw_path = self.fs.lw_path(&self.path);
+        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
         f.file_cache_flush().map_err(|e| from_lwext4(e.abs()))?;
         Ok(())
     }
@@ -803,6 +809,7 @@ impl IndexNode for Ext4OSInode {
                 Arc::downgrade(&self.fs),
                 self.path.clone(),
                 self.logical_size.clone(),
+                self.fs.lw_path(&self.path),
             ));
             let pc = PageCache::new();
             pc.set_backend(backend);
@@ -852,12 +859,13 @@ impl IndexNode for Ext4OSInode {
 
         // Direct I/O fallback
         let _lock = self.fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+        let lw_path = self.fs.lw_path(&self.path);
+        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
         // O_RDWR ("r+"): does not truncate. Fall back to O_RDWR|O_CREAT|O_TRUNC
         // ("w+") only if the file doesn't exist yet.
-        let open_result = f.file_open(&self.path, 0x2);
+        let open_result = f.file_open(&lw_path, 0x2);
         if open_result.is_err() {
-            f.file_open(&self.path, 0x242)
+            f.file_open(&lw_path, 0x242)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
         let guard = FileGuard::new(&mut f);
@@ -885,11 +893,12 @@ impl IndexNode for Ext4OSInode {
         match file_type {
             FileType::File => {
                 let _lock = self.fs.lw.lock();
-                let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_REG_FILE);
-                if f.check_inode_exist(&child_path, InodeTypes::EXT4_DE_REG_FILE) {
+                let lw_child = self.fs.lw_path(&child_path);
+                let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_REG_FILE);
+                if f.check_inode_exist(&lw_child, InodeTypes::EXT4_DE_REG_FILE) {
                     return Err(SyscallErr::EEXIST);
                 }
-                f.file_open(&child_path, 0x242)
+                f.file_open(&lw_child, 0x242)
                     .map_err(|e| from_lwext4(e.abs()))?;
                 {
                     let mut guard = FileGuard::new(&mut f);
@@ -959,8 +968,9 @@ impl IndexNode for Ext4OSInode {
         }
         let child_path = join_path(&self.path, name);
         let _lock = self.fs.lw.lock();
-        let mut d = Ext4File::new(&child_path, InodeTypes::EXT4_DE_DIR);
-        d.dir_mk(&child_path)
+        let lw_child = self.fs.lw_path(&child_path);
+        let mut d = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
+        d.dir_mk(&lw_child)
             .map_err(|e| from_lwext4(e.abs()))?;
         // Set mode on the newly created directory
         let _ = d.file_mode_set(mode.bits());
@@ -982,14 +992,15 @@ impl IndexNode for Ext4OSInode {
         }
         let child_path = join_path(&self.path, name);
         let _lock = self.fs.lw.lock();
+        let lw_child = self.fs.lw_path(&child_path);
         // Verify the file exists (file_remove tolerates ENOENT in lwext4)
         // Use EXT4_DE_UNKNOWN to accept any non-directory type (files, symlinks, FIFOs, etc.)
-        let mut probe = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
-        if !probe.check_inode_exist(&child_path, InodeTypes::EXT4_DE_UNKNOWN) {
+        let mut probe = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_UNKNOWN);
+        if !probe.check_inode_exist(&lw_child, InodeTypes::EXT4_DE_UNKNOWN) {
             return Err(SyscallErr::ENOENT);
         }
-        let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
-        let r = f.file_remove(&child_path);
+        let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_UNKNOWN);
+        let r = f.file_remove(&lw_child);
         if r.is_err() {
             return Err(from_lwext4(r.unwrap_err().abs()));
         }
@@ -1002,8 +1013,9 @@ impl IndexNode for Ext4OSInode {
         }
         let child_path = join_path(&self.path, name);
         let _lock = self.fs.lw.lock();
+        let lw_child = self.fs.lw_path(&child_path);
         // Check directory is empty (lwext4 dir_rm is recursive)
-        let dir = Ext4File::new(&child_path, InodeTypes::EXT4_DE_DIR);
+        let dir = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
         let _de_start = crate::task::perf::perf_time_now();
         let (entries, _) = dir
             .lwext4_dir_entries()
@@ -1021,8 +1033,8 @@ impl IndexNode for Ext4OSInode {
         if has_children {
             return Err(SyscallErr::ENOTEMPTY);
         }
-        let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_DIR);
-        f.dir_rm(&child_path)
+        let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
+        f.dir_rm(&lw_child)
             .map_err(|e| from_lwext4(e.abs()))?;
         Ok(())
     }
@@ -1042,15 +1054,21 @@ impl IndexNode for Ext4OSInode {
             .as_any_ref()
             .downcast_ref::<Ext4OSInode>()
             .ok_or(SyscallErr::EXDEV)?;
+        // Cross-filesystem rename not supported by lwext4
+        if !Arc::ptr_eq(&self.fs, &new_parent_node.fs) {
+            return Err(SyscallErr::EXDEV);
+        }
         let new_path = join_path(&new_parent_node.path, new_name);
         let _lock = self.fs.lw.lock();
+        let lw_old = self.fs.lw_path(&old_path);
+        let lw_new = self.fs.lw_path(&new_path);
         // Try file_rename first; if it fails (likely because source is a
         // directory), fall back to dir_mv.
-        let mut f = Ext4File::new(&old_path, InodeTypes::EXT4_DE_UNKNOWN);
-        let r = f.file_rename(&old_path, &new_path);
+        let mut f = Ext4File::new(&lw_old, InodeTypes::EXT4_DE_UNKNOWN);
+        let r = f.file_rename(&lw_old, &lw_new);
         if r.is_err() {
-            let mut d = Ext4File::new(&old_path, InodeTypes::EXT4_DE_DIR);
-            d.dir_mv(&old_path, &new_path)
+            let mut d = Ext4File::new(&lw_old, InodeTypes::EXT4_DE_DIR);
+            d.dir_mv(&lw_old, &lw_new)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
         Ok(())
@@ -1061,8 +1079,9 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::EISDIR);
         }
         let _lock = self.fs.lw.lock();
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-        f.file_open(&self.path, 0x2)
+        let lw_path = self.fs.lw_path(&self.path);
+        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
+        f.file_open(&lw_path, 0x2)
             .map_err(|e| from_lwext4(e.abs()))?;
         let guard = FileGuard::new(&mut f);
         guard.f.file_truncate(len as u64)
@@ -1089,9 +1108,11 @@ impl IndexNode for Ext4OSInode {
         }
         let child_path = join_path(&self.path, name);
         let _lock = self.fs.lw.lock();
+        let lw_child = self.fs.lw_path(&child_path);
         // ext4_fsymlink(target, path): target = destination, path = new symlink
+        // NOTE: target is NOT translated — it is user-data, VFS-semantic.
         let c_target = CString::new(target).map_err(|_| SyscallErr::EINVAL)?;
-        let c_path = CString::new(child_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = CString::new(lw_child.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_target_raw = c_target.into_raw();
         let c_path_raw = c_path.into_raw();
         let r = unsafe { lwext4_rust::bindings::ext4_fsymlink(c_target_raw, c_path_raw) };
@@ -1110,7 +1131,7 @@ impl IndexNode for Ext4OSInode {
             h,
             FileType::SymLink,
             InodeMode::S_IFLNK | InodeMode::from_bits_truncate(0o777),
-            0,
+            target.len(),
         ))
     }
 
@@ -1123,10 +1144,16 @@ impl IndexNode for Ext4OSInode {
             .as_any_ref()
             .downcast_ref::<Ext4OSInode>()
             .ok_or(SyscallErr::EXDEV)?;
+        // Cross-filesystem hard link not supported by lwext4
+        if !Arc::ptr_eq(&self.fs, &other_node.fs) {
+            return Err(SyscallErr::EXDEV);
+        }
         let _lock = self.fs.lw.lock();
+        let lw_src = self.fs.lw_path(&other_node.path);
+        let lw_new = self.fs.lw_path(&new_path);
         // ext4_flink(path, hardlink_path): path = source, hardlink_path = new link
-        let c_src = CString::new(other_node.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
-        let c_new = CString::new(new_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_src = CString::new(lw_src.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_new = CString::new(lw_new.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_src_raw = c_src.into_raw();
         let c_new_raw = c_new.into_raw();
         let r = unsafe { lwext4_rust::bindings::ext4_flink(c_src_raw, c_new_raw) };
@@ -1168,13 +1195,14 @@ impl IndexNode for Ext4OSInode {
 
         // Mode/owner changed: do full lwext4 write-through
         let _lock = self.fs.lw.lock();
+        let lw_path = self.fs.lw_path(&self.path);
 
         // 1. chmod — fmode_set is a standalone operation (path-based, no open needed)
-        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
+        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
         f.file_mode_set(metadata.mode.bits())
             .map_err(|e| from_lwext4(e.abs()))?;
 
-        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let raw = c_path.into_raw();
 
         // 2. chown — ext4_owner_set(path, uid: u32, gid: u32) -> c_int
@@ -1243,8 +1271,9 @@ impl IndexNode for Ext4OSInode {
         };
 
         let _lock = self.fs.lw.lock();
+        let lw_child = self.fs.lw_path(&child_path);
 
-        let c_path = CString::new(child_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = CString::new(lw_child.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
         let r = unsafe {
             lwext4_rust::bindings::ext4_mknod(c_path, lw_type, dev_t as u32)
@@ -1255,7 +1284,7 @@ impl IndexNode for Ext4OSInode {
         }
 
         // Set permission bits on the new special file
-        let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
+        let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_UNKNOWN);
         let _ = f.file_mode_set(mode.bits());
 
         let h = hash_path(&child_path);
@@ -1281,7 +1310,8 @@ impl IndexNode for Ext4OSInode {
     fn getxattr(&self, name: &str, buf: &mut [u8]) -> Result<usize, SyscallErr> {
         let _lock = self.fs.lw.lock();
 
-        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let lw_path = self.fs.lw_path(&self.path);
+        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
         let mut data_size: usize = 0;
@@ -1323,7 +1353,8 @@ impl IndexNode for Ext4OSInode {
     ) -> Result<usize, SyscallErr> {
         let _lock = self.fs.lw.lock();
 
-        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let lw_path = self.fs.lw_path(&self.path);
+        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
         // Handle XATTR_CREATE / XATTR_REPLACE semantics
@@ -1390,7 +1421,8 @@ impl IndexNode for Ext4OSInode {
     fn listxattr(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
         let _lock = self.fs.lw.lock();
 
-        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let lw_path = self.fs.lw_path(&self.path);
+        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
         let mut ret_size: usize = 0;
@@ -1424,7 +1456,8 @@ impl IndexNode for Ext4OSInode {
     fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
         let _lock = self.fs.lw.lock();
 
-        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let lw_path = self.fs.lw_path(&self.path);
+        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
         let r = unsafe {

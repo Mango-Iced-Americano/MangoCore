@@ -79,7 +79,7 @@ L2: 属性测试 / 模型测试 (规划中)
 
 L3: 内核态 self-test
     mango.mode=ktest  |  QEMU 内运行  |  TAP 输出
-    → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm (11 个用例)
+    → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm / ext4 (16 个用例)
 
 L4: 用户态 regression test
     user/src/bin/regression_*.rs  |  make regression
@@ -216,7 +216,8 @@ os/src/kernel_tests/
 ├── waitqueue.rs      # wake_before_wait_should_not_sleep 等
 ├── timer.rs          # tick_advances, time_spec_ops
 ├── sched.rs          # current_task_exists, ready_queue_has_init
-└── mm.rs             # alloc_free_one_page, alloc_contiguous_pages
+├── mm.rs             # alloc_free_one_page, alloc_contiguous_pages
+└── ext4.rs           # TestMemBlock + ext4 多实例挂载隔离
 ```
 
 ### 测试项结构
@@ -266,7 +267,7 @@ not ok 5 sched::ready_queue_has_init
 
 TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elapsed_ms`。
 
-### 当前测试清单 (11 个)
+### 当前测试清单 (15 个)
 
 | 测试 | 文件 | 说明 |
 |------|------|------|
@@ -282,14 +283,17 @@ TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elap
 | `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回正确值 |
 | `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale → is_empty |
 | `waitqueue::wake_all_on_empty` | `waitqueue.rs` | 空队列 `wake_all()` 返回 0 |
+| `ext4::memblk_read_write` | `ext4.rs` | `TestMemBlock` BlockDevice 读写正确性 |
+| `ext4::memblk_isolation` | `ext4.rs` | 两个独立 `TestMemBlock` 实例的数据不互泄露 |
+| `ext4::open_unformatted_returns_err` | `ext4.rs` | 未格式化设备上 `open_ext4rs` 返回错误（不 panic） |
+| `ext4::lw_path_isolation` | `ext4.rs` | lwext4 `lw_path()` 路径翻译的实例隔离语义 |
 
-**规划中**（需要内核线程 spawn API）：
+**规划中**（需要内核线程 spawn API 或格式化块设备）：
 - `waitqueue::wake_once`, `wake_all` — 多任务唤醒
 - `sched::spawn_and_yield` — 创建线程 → yield → 验证运行
 - `timer::sleep_returns` — 真正阻塞等待 deadline
 - `fs::tmpfs_create_write_read_unlink` — VFS 基础路径
 - `pagecache::basic_insert_lookup_evict` — 页缓存操作
-- `block::read_first_block` — 块设备读取
 
 ### 执行
 

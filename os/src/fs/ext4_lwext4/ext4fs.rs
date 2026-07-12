@@ -65,6 +65,10 @@ pub struct Ext4FileSystem {
     fs_id: usize,
     /// Whether the filesystem is currently mounted (for idempotent umount).
     mounted: AtomicBool,
+    /// Unique lwext4-internal mount point, e.g. "/e1/", "/e2/".
+    /// Generated from the atomic counter at mount time.  All VFS paths
+    /// passed to lwext4 C API are prefixed with this via `lw_path()`.
+    lw_mount_point: String,
     /// PageCache registry keyed by inode_id — shares PageCache across
     /// different Ext4OSInode instances pointing to the same file.
     /// Mimics legacy ext4's `page_caches: Mutex<BTreeMap<usize, Weak<NewPageCache>>>`.
@@ -102,27 +106,24 @@ impl Ext4FileSystem {
 
         // 2. Mount: this calls ext4_device_register, ext4_mount, ext4_recover,
         //    ext4_journal_start internally.
-        //    Use unique device name to avoid ext4_device_register() EEXIST
-        //    and unique mount point to avoid ext4_mount() duplicate collision
-        //    when mounting multiple ext4 filesystems.
+        //    Use unique device name AND unique mount point so that multiple ext4
+        //    filesystems can coexist without path collisions in lwext4's internal
+        //    mount table.  VFS paths are prefixed with the mount point via
+        //    `lw_path()` before being passed to any lwext4 C API.
         let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
-        let dev_name = alloc::format!("ext4_{}", fs_id);
-        // NOTE: Always use "/" as lwext4 mount point.  Using unique mount points
-        // (e.g. "/ext4_N") requires prefix-aware path translation across the
-        // entire VFS adapter, which is fragile.  The side effect is that only
-        // the first ext4 mount actually registers with lwext4; subsequent
-        // ext4_device_register calls avoid EEXIST via unique dev_name, but
-        // ext4_mount("ext4_N", "/") is a no-op when "/" is already mounted.
-        // This is a known limitation documented in lwext4-upstream-fixes.md.
-        let lw = Ext4BlockWrapper::<MangoKernelDevOp>::new_with_names(mbd, &dev_name, "/")
-            .map_err(|e| {
-                log::error!(
-                    "[lwext4] failed to mount ext4 filesystem (id={}): errno={}",
-                    fs_id,
-                    e
-                );
-                SyscallErr::EIO
-            })?;
+        let dev_name = alloc::format!("e{}", fs_id);
+        let mount_point = alloc::format!("/e{}/", fs_id);
+        let lw = Ext4BlockWrapper::<MangoKernelDevOp>::new_with_names(
+            mbd, &dev_name, &mount_point,
+        )
+        .map_err(|e| {
+            log::error!(
+                "[lwext4] failed to mount ext4 filesystem (id={}): errno={}",
+                fs_id,
+                e
+            );
+            SyscallErr::EIO
+        })?;
 
         log::info!("[lwext4] Ext4BlockWrapper created, block_size={}", crate::hal::BLOCK_SZ);
 
@@ -141,6 +142,7 @@ impl Ext4FileSystem {
             block_size: crate::hal::BLOCK_SZ,
             fs_id,
             mounted: AtomicBool::new(true),
+            lw_mount_point: mount_point,
             page_caches: Mutex::new(BTreeMap::new()),
         });
 
@@ -150,6 +152,18 @@ impl Ext4FileSystem {
 
         log::info!("[lwext4] filesystem ready (id={}), root inode created", fs_id);
         Ok(fs)
+    }
+
+    /// Translate a VFS path (e.g. "/bin/sh") into the lwext4-internal path
+    /// using this instance's unique mount point (e.g. "/e1/bin/sh").
+    ///
+    /// The root VFS path "/" maps to the mount point with trailing slash
+    /// (e.g. "/e1/"), which is what lwext4 expects for directory operations.
+    pub(crate) fn lw_path(&self, vfs_path: &str) -> String {
+        if vfs_path == "/" {
+            return self.lw_mount_point.clone();
+        }
+        alloc::format!("{}{}", self.lw_mount_point, &vfs_path[1..])
     }
 
     /// Unique per-instance device ID.
@@ -170,7 +184,8 @@ impl Ext4FileSystem {
     pub(crate) fn get_inode_id(&self, full_path: &str) -> Result<usize, SyscallErr> {
         let _start = crate::task::perf::perf_time_now();
         let _lock = self.lw.lock();
-        let c_path = CString::new(full_path).map_err(|_| SyscallErr::EINVAL)?;
+        let lw_path = self.lw_path(full_path);
+        let c_path = CString::new(lw_path).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut ino: u32 = 0;
         let mut raw_inode: lwext4_rust::bindings::ext4_inode = unsafe { core::mem::zeroed() };
@@ -211,7 +226,8 @@ impl Ext4FileSystem {
     pub(crate) fn probe_type(&self, full_path: &str) -> Result<super::layout::MappedType, SyscallErr> {
         let _start = crate::task::perf::perf_time_now();
         let _lock = self.lw.lock();
-        let mut f = lwext4_rust::Ext4File::new(full_path, InodeTypes::EXT4_DE_UNKNOWN);
+        let lw_path = self.lw_path(full_path);
+        let mut f = lwext4_rust::Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
         let mode = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
         super::counters::LWEXT4_PROBE_TYPE_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -226,8 +242,9 @@ impl Ext4FileSystem {
         path: &str,
     ) -> Result<LookupCacheEntry, SyscallErr> {
         let _lock = self.lw.lock();
+        let lw_path = self.lw_path(path);
         let c_path =
-            CString::new(path).map_err(|_| SyscallErr::EINVAL)?;
+            CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut ret_ino: u32 = 0;
         let mut raw_inode: lwext4_rust::bindings::ext4_inode =
@@ -285,7 +302,7 @@ impl FileSystem for Ext4FileSystem {
         let _lock = self.lw.lock();
         let mut stats: lwext4_rust::bindings::ext4_mount_stats =
             unsafe { core::mem::zeroed() };
-        let c_mp = CString::new("/").unwrap();
+        let c_mp = CString::new(self.lw_mount_point.as_str()).unwrap();
         let c_mp = c_mp.into_raw();
         unsafe {
             lwext4_rust::bindings::ext4_mount_point_stats(c_mp, &mut stats);

@@ -270,7 +270,7 @@ fn exit_code_from_waitpid_status(status: i32) -> i32 {
 }
 
 // 非阻塞收割所有僵尸孤儿（WNOHANG = 1）
-fn reap _orphans() {
+fn reap_orphans() {
     const MAX_REAP_PER_PASS: usize = 256;
     let mut reaped = 0usize;
     loop {

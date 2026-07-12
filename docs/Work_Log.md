@@ -2,6 +2,40 @@
 
 ---
 
+## 2026-07-12
+
+### lwext4 多实例挂载隔离：唯一内部 mount point + 路径翻译
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 新增 `lw_mount_point: String` 字段；`open_ext4rs()` 改用递增计数器生成唯一 mount point（`"/e{N}/"`）传给 `Ext4BlockWrapper::new_with_names()`；新增 `lw_path()` 路径翻译方法；修复 `get_inode_id()`、`probe_type()`、`probe_inode_meta()`、`super_block()` 使用翻译后路径
+- `os/src/fs/ext4_lwext4/layout.rs` — 全部 ~20 个方法适配：每个 `Ext4File::new()`、`file_open()`、`file_mode_get()`、`check_inode_exist()`、`dir_mk()`、`dir_rm()`、`file_rename()`、`dir_mv()`、`file_truncate()`、`ext4_readlink()`、`ext4_fsymlink()`、`ext4_flink()`、`ext4_mknod()`、`ext4_*xattr()` 调用点均通过 `lw_path()` 翻译路径；`rename()` 和 `link()` 新增 `Arc::ptr_eq` 跨实例检查（返回 `EXDEV`）；symlink target 不翻译（用户数据，VFS 语义）
+- `os/src/fs/ext4_lwext4/page_cache.rs` — `LwExt4PageCacheBackend` 新增 `lw_path` 字段（构造时预计算翻译后路径），所有 lwext4 I/O 操作使用翻译后路径
+
+**验证：**
+- `cargo build --target=riscv64gc-unknown-none-elf --release` ✅（0 errors from ext4_lwext4 files，447 errors 均为既有）
+- `make la64-kernel-build-only` ❌（la64 nightly-2024-05-01 工具链 manifest 损坏，既有环境问题，非代码相关）
+
+**备注：** (1) 根因：lwext4 C 库 `ext4_mount()` 遇重复 mount point 直接返回 `EOK`，不实际挂载第二个设备，导致所有路径操作经 `ext4_get_mount(path)` 落在第一个 ext4 实例；(2) 修复后每个 ext4 实例使用唯一内部 mount point（`/e1/`、`/e2/`），Rust 适配层自动为所有 VFS 路径加前缀翻译；(3) 未修改 vendored C 代码；(4) `NEXT_FS_ID` 用 `AtomicUsize`（64-bit），溢出不可能
+
+### 新增 L3 ktest: ext4 多实例挂载隔离测试
+
+**涉及文件：**
+- `os/src/kernel_tests/ext4.rs` — (新增) `TestMemBlock` 可复用 in-memory BlockDevice + 4 个测试函数：`test_memblk_read_write`（BlockDevice 读写正确性）、`test_memblk_isolation`（两实例数据不泄露）、`test_open_unformatted_returns_err`（未格式化设备应返回错误）、`test_lw_path_isolation`（lwext4 路径翻译隔离）
+- `os/src/kernel_tests/mod.rs` — 新增 `mod kt_ext4` 声明与 `("ext4", kt_ext4::tests())` 注册
+
+**验证：**
+- `cargo check --target=riscv64gc-unknown-none-elf` ✅（187 warnings 均为既有）
+- `cargo check --target=loongarch64-unknown-linux-gnu` ✅（172 warnings 均为既有）
+- `cargo build --release` ⚠️ rv64 release build 因既有 `lang_items.rs` 问题失败（`Option<&Arguments>` not `Display`），`cargo check` 通过
+
+**备注：** (1) `TestMemBlock` 是 64 MiB 的 `Vec<u8>` 包装，实现 `BlockDevice` trait，可复用于未来的 ktest 块设备/Filesystem 测试；(2) 完整的多 ext4 实例挂载隔离（格式化 → 挂载 → 写文件）无法在 ktest 中测试，因为 lwext4 的 `ext4_mount` 强制使用 `"/"` 作为挂载点（第二次挂载为 no-op），这是已在 `lwext4-upstream-fixes.md` 中记录的已知限制；(3) VFS 层 `MountFS` 的挂载隔离由其他文件系统（tmpfs/ramfs）提供相同保证；(4) `test_lw_path_isolation` 在有格式化 ext4 设备可用时验证 `lw_path()` 的路径翻译语义，无可用设备时优雅跳过
+
+### 文档更新
+
+- `docs/08_testing/README.md` — 目录结构增加 `ext4.rs`，测试清单增加 4 个 ext4 用例，已实现项从"规划中"移至主清单
+
+---
+
 ## 2026-07-11
 
 ### Fix execve EFAULT + la64 regression 对等

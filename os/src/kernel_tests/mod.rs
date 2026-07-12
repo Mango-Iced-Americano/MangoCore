@@ -28,6 +28,8 @@ mod kt_timer;
 mod kt_sched;
 #[path = "mm.rs"]
 mod kt_mm;
+#[path = "ext4.rs"]
+mod kt_ext4;
 
 use runner::KernelTest;
 use alloc::vec;
@@ -49,6 +51,7 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("timer", kt_timer::tests()),
         ("sched", kt_sched::tests()),
         ("mm", kt_mm::tests()),
+        ("ext4", kt_ext4::tests()),
     ]
 }
 
