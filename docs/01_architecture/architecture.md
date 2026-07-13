@@ -3,8 +3,8 @@ title: "系统架构详解 (System Architecture)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [architecture, boot, hal, trap, runtime]
+last_update: 2026-07-13
+tags: [architecture, boot, hal, trap, runtime, random]
 ---
 
 # 系统架构详解
@@ -45,7 +45,7 @@ MangoCore 是 `#![no_std]` 裸机 Rust 内核。内核主入口位于 `os/src/ma
 | MemorySet/VMA/PageTable | VFS/MountFS/PageCache | smoltcp net     |
 +-------------------------------------------------------------------+
 |                              drivers                              |
-| block | net | serial | virtio frontends                           |
+| block | net | rng | serial | virtio frontends                     |
 +-------------------------------------------------------------------+
 |                                HAL                                |
 | trap | timer | TLB | page table backend | switch | console        |
@@ -69,6 +69,7 @@ MangoCore 是 `#![no_std]` 裸机 Rust 内核。内核主入口位于 `os/src/ma
 | `mm` | 堆、物理页、内核地址空间、用户地址空间、VMA、mmap、缺页、uaccess |
 | `net` | Socket trait、smoltcp、协议实现、网络 syscall |
 | `panic_diag` | panic 诊断输出 |
+| `random` | 平台可信熵调理、ChaCha20 CSPRNG、就绪状态和敏感临时材料清理 |
 | `syscall` | syscall 编号、名称映射、seccomp、分发、errno、公共辅助 |
 | `task` | TCB/PCB、调度器、signal、futex、IPC、timer、进程生命周期 |
 | `timer` | 时间结构、换算、TimeSpec |
@@ -104,8 +105,9 @@ MangoCore 是 `#![no_std]` 裸机 Rust 内核。内核主入口位于 `os/src/ma
 | `mm -> hal` | 使用 `PageTableImpl`、TLB invalidate、地址布局和 trap fault 信息 |
 | `task -> hal` | 使用 `TrapContext`、`TaskContext`、`KernelStack`、timer interrupt 和 `__switch` |
 | `syscall -> task/mm/fs/net` | 分发层不实现业务语义，只把 id 和参数送入领域模块 |
-| `fs -> drivers` | rootfs、PageCache 后端和 devfs 依赖块设备/字符设备 |
+| `fs -> drivers` | rootfs、PageCache 后端和 devfs 依赖块设备/字符设备；随机设备从统一随机池取数 |
 | `net -> drivers` | 网络协议栈依赖网卡设备初始化和 poll |
+| `random -> drivers/hal` | 平台驱动采集 VirtIO/片上熵，时间和地址只用于显式不安全的 bootstrap 状态 |
 | `task -> mm/fs` | 进程持有地址空间、fd table、cwd/root、procfs 可见状态 |
 
 ### 3.4 编译特性影响

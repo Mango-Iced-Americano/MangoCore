@@ -3,15 +3,15 @@ title: "内核模块地图 (Kernel Module Map)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [architecture, modules, kernel]
+last_update: 2026-07-13
+tags: [architecture, modules, kernel, random]
 ---
 
 # 内核模块地图
 
 ## 1. 概述
 
-`os/src/main.rs` 是 MangoCore 的架构无关入口，也是根模块边界的来源。该文件声明 `console`、`drivers`、`fs`、`hal`、`mm`、`net`、`syscall`、`task`、`timer`、`trace`、`utils` 等模块，并在 `rust_main()` 中串联启动阶段。模块地图以这组根模块为准，不把目录名、历史文档或计划中的组件当作已经接入的运行路径。
+`os/src/main.rs` 是 MangoCore 的架构无关入口，也是根模块边界的来源。该文件声明 `console`、`drivers`、`fs`、`hal`、`mm`、`net`、`random`、`syscall`、`task`、`timer`、`trace`、`utils` 等模块，并在 `rust_main()` 中串联启动阶段。模块地图以这组根模块为准，不把目录名、历史文档或计划中的组件当作已经接入的运行路径。
 
 核心依赖关系可以概括为：
 
@@ -21,6 +21,7 @@ main.rs::rust_main()
   ├── console::log_init()
   ├── trace::init()
   ├── mm::init()
+  ├── random::init()
   ├── drivers::init_net_device()
   ├── net::config::init()
   ├── fs::{initramfs_init, flush_preload, mount_*}
@@ -42,6 +43,7 @@ MangoCore 的组织方式接近“硬件后端集中、内核服务分层、sysc
 | `mm` | `os/src/mm/mod.rs` | 堆、物理页、内核地址空间、用户地址空间、VMA、mmap、缺页、uaccess |
 | `net` | `os/src/net/mod.rs` | Socket trait、TCP/UDP/RAW/Unix/Netlink/Packet、smoltcp 接入、网络 syscall |
 | `panic_diag` | `os/src/panic_diag.rs` | panic 时的诊断输出 |
+| `random` | `os/src/random.rs` | 平台熵调理、ChaCha20 CSPRNG、ready 状态和统一随机输出 |
 | `syscall` | `os/src/syscall/mod.rs` | syscall id/name、seccomp 检查、分发、errno、用户内存辅助 |
 | `task` | `os/src/task/mod.rs` | TCB/PCB、调度器、信号、futex、IPC、timer、进程生命周期 |
 | `timer` | `os/src/timer.rs` | `TimeSpec`/`TimeVal` 等时间结构和换算辅助 |
@@ -64,6 +66,7 @@ MangoCore 的组织方式接近“硬件后端集中、内核服务分层、sysc
 | 内存 | `mm::init()` | `mm` | 初始化 heap、frame allocator，并激活内核地址空间 |
 | 机器运行期 | `machine_init()` | `hal` | 安装 trap，启用 timer interrupt；la64 还初始化 timer frequency |
 | timer | `task::timer_subsystem_init()` | `task` | 初始化任务层 timer/wakeup 结构 |
+| 随机数 | `random::init()` | `random` / `drivers::rng` | 在进入 FS 和用户态前由平台可信熵播种 CSPRNG；失败时安全读取 fail closed |
 | 根文件系统 | `fs::initramfs_init()` 或 `fs::flush_preload()`/`fs::mount_tools_disk()` | `fs` | 根据 `initramfs` feature 选择启动路径 |
 | 网络设备 | `drivers::init_net_device()` | `drivers` | 初始化网络设备 |
 | 网络配置 | `net::config::init()` | `net` | 初始化网络接口和协议栈配置 |

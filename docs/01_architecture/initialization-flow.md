@@ -3,8 +3,8 @@ title: "初始化流程 (Initialization Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-10
-tags: [architecture, boot, init]
+last_update: 2026-07-13
+tags: [architecture, boot, init, random]
 ---
 
 # 初始化流程
@@ -16,7 +16,7 @@ tags: [architecture, boot, init]
 | 类别 | 代表入口 | 作用 |
 |------|----------|------|
 | 机器状态 | `bootstrap_init()`、`machine_init()` | 配置异常入口、timer interrupt、架构寄存器和页表后端 |
-| 内核服务 | `console::log_init()`、`trace::init()`、`mm::init()` | 输出、trace、堆、物理页、内核地址空间 |
+| 内核服务 | `console::log_init()`、`trace::init()`、`mm::init()`、`random::init()` | 输出、trace、堆、物理页、内核地址空间、安全随机流 |
 | 用户态运行环境 | `fs::*`、`drivers::init_net_device()`、`net::config::init()`、`task::add_initproc()` | 根文件系统、设备、网络、init 任务 |
 
 初始化路径不创建独立内核线程。所有启动阶段工作都在 `rust_main()` 所在执行流中完成，直到 `task::run_tasks()` 进入单核调度循环。
@@ -34,6 +34,7 @@ trace::init()
 mm::init()
 machine_init()
 task::timer_subsystem_init()
+random::init()
 
 if initramfs:
   fs::vfs::posix_lock::init_posix_lock_manager()
@@ -81,6 +82,13 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
+
+    if let Err(error) = random::init() {
+        println!(
+            "[kernel] random: secure source unavailable ({:?}); secure reads will fail",
+            error
+        );
+    }
 
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
@@ -143,7 +151,7 @@ pub fn rust_main() -> ! {
 }
 ```
 
-函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。`block_mem` 路径会先把链接进内核的镜像移动到高地址；默认 `initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备。`board_2k1000` 救援/探测构建保持 ramfs-only，普通 SATA 构建跳过外部网卡但只读挂载 SSD。非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
+函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。随机池在这些分支之前初始化，确保首个用户任务和 TLS/库初始化不会先观察到未播种状态；平台熵源失败时保留启动能力，但安全读取统一返回 `EAGAIN`。`block_mem` 路径会先把链接进内核的镜像移动到高地址；默认 `initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备。`board_2k1000` 救援/探测构建保持 ramfs-only，普通 SATA 构建跳过外部网卡但只读挂载 SSD。非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
 
 ## 3. 早期阶段
 
@@ -217,6 +225,14 @@ KERNEL_SPACE.lock().activate()
 |------|----------------------|
 | rv64 | `trap::init()` 安装 kernel trap entry；`trap::enable_timer_interrupt()` 打开 supervisor timer interrupt |
 | la64 | `trap::init()`；`get_timer_freq_first_time()`；打印 CPUCFG/Misc/RVACfg/MMAP_BASE；启用 timer interrupt |
+
+### 5.1 随机池初始化
+
+`random::init()` 位于 `machine_init()` 和 timer 子系统之后、所有文件系统和用户任务
+之前。QEMU 从 VirtIO entropy device 采样，2K1000LA 从 APB RNG 采样；64 字节
+启动样本通过健康检查后用于播种 ChaCha20 CSPRNG。初始化失败不会阻止救援 shell
+启动，但 `getrandom`、`/dev/random` 和 `/dev/urandom` 的安全读取会 fail closed。
+完整设计见 `docs/07_driver/random.md`。
 
 随后调用 `task::timer_subsystem_init()`。项目注释明确说明第一次 timer deadline 由任务 timer 子系统在启动后设置，而不是 rv64 `machine_init()` 立即设置。
 

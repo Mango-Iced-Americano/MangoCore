@@ -354,8 +354,9 @@
 - `os/src/syscall/fs.rs:758` 的 `readlinkat` 只处理 `/proc/self/exe`，且 `bufsiz == 0` 时 `bufsiz - 1` 有下溢风险。
 - `os/src/syscall/fs.rs:978` 的 `fchmodat/fchownat` 返回成功但不修改状态。
 - `os/src/syscall/fs.rs:1458` 的 `fcntl(F_GETFL)` 硬编码 `O_RDWR`。
-- `os/src/syscall/mod.rs:476` 的 `getrandom` 返回 0 且不填 buffer。
-- `os/src/fs/dev/urandom.rs:25` 的 `/dev/urandom` 读路径基本是零填充/空读。
+- `getrandom` 和 `/dev/{u,}random` 的全零/弱时间种子问题已于 2026-07-13
+  由统一 ChaCha20 CSPRNG 与平台硬件熵源修复，后续随机数回归应使用
+  `/bin/rng_test` 和 LTP `getrandom*`，不再按 stub 处理。
 
 具体判断：
 

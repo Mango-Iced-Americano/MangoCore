@@ -79,6 +79,7 @@ const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
+const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
 // Not standard POSIX sys_call
 const SYSCALL_LS: usize = 500;
@@ -197,6 +198,17 @@ pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
     syscall(
         SYSCALL_READ,
         [fd, buffer.as_mut_ptr() as usize, buffer.len()],
+    )
+}
+
+pub fn sys_getrandom(buffer: &mut [u8], flags: u32) -> isize {
+    syscall(
+        SYSCALL_GETRANDOM,
+        [
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+            flags as usize,
+        ],
     )
 }
 

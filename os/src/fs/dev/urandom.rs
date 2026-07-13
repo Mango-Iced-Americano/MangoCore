@@ -18,10 +18,7 @@ impl IndexNode for Urandom {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        // TODO(rng): 实现真正的随机数生成（硬件 RNG 或 ChaCha20 软件 PRNG）。
-        // 当前返回全零，依赖 urandom 的代码（如 OpenSSL、libc random）会收到弱熵。
-        // Exit condition: read_at 返回密码学安全的随机字节流。
-        buf.fill(0);
+        crate::random::fill_bytes(buf).map_err(|_| SyscallErr::EAGAIN)?;
         Ok(buf.len())
     }
 
@@ -32,6 +29,9 @@ impl IndexNode for Urandom {
         buf: &[u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        // Linux accepts writes as supplemental pool input but does not credit
+        // caller-controlled bytes as entropy.
+        crate::random::mix_untrusted(buf);
         Ok(buf.len())
     }
 

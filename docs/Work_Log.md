@@ -4,6 +4,31 @@
 
 ## 2026-07-13
 
+### random: 接入平台可信熵源和统一 ChaCha20 CSPRNG，并完成实板验收
+
+**涉及文件：**
+- `os/src/drivers/rng/mod.rs`、`os/src/hal/platform/{riscv/qemu.rs,loongarch64/2k1000.rs}` — 增加 RV/LA QEMU VirtIO RNG 和 2K1000LA APB RNG 熵源；实板使用 DMW2 地址 `0x800000001fe2b000`，RV QEMU 补齐 bus.2 的 `0x10003000` MMIO 页映射
+- `os/src/random.rs`、`os/Cargo.{toml,lock}`、`os/vendor/{rand_chacha,ppv-lite86}` — 建立全局 ChaCha20 CSPRNG；以 64 字节可信启动样本完成健康检查和调理，每次输出后用隐藏流重键，并对临时敏感材料执行 volatile wipe；加入校验过 checksum 的 no_std 依赖快照
+- `os/src/syscall/mod.rs`、`os/src/fs/dev/urandom.rs`、`user/src/syscall.rs` — `getrandom(2)`、`/dev/random` 和 `/dev/urandom` 统一使用安全随机流；实现 `GRND_NONBLOCK/GRND_RANDOM/GRND_INSECURE` 校验，未就绪 fail closed 为 `EAGAIN`，设备写入只混入状态而不计为可信熵
+- `os/src/main.rs`、`os/src/drivers/mod.rs`、`os/src/utils/mod.rs`、`os/src/utils/random.rs` — 在进入用户态前初始化随机池，删除时间播种的旧弱全局 RNG
+- `os/build_initramfs.sh`、`os/make/{rv64,la64}.mk`、`scripts/run_full_test.py` — QEMU 运行入口统一挂载 VirtIO RNG，增加可选 `RNG_TEST_RUNTIME=1` 自包含回归注入
+- `user/src/bin/rng_test.rs` — 覆盖连续输出活性/差异性、非法与互斥 flag errno，以及随机设备读取
+- `AGENTS.md`、`docs/{01_architecture/{architecture,initialization-flow,module-map}.md,02_syscall/syscall-layer.md,03_fs/devfs.md,07_driver/{random,2k1000-gmac}.md,ltp/LTP_BOTTOM_UP_GUIDE.md}` — 同步随机数架构、启动顺序、ABI、安全边界、测试入口和 HTTPS 后续规划
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“随机接口可返回数据不等于具备安全熵”的通用验收模式
+
+**验证：**
+- Docker 串行执行 `make -C os rv64-kernel-build-only MODE=release` 与 `make -C os la64-kernel-build-only MODE=release`，最终源码状态均成功，仅有项目既有 warning ✅
+- RV64 QEMU 识别 `virtio-rng`；首次运行暴露 `0x10003000` 未映射导致的 `LoadPageFault`，将 bus.2 纳入平台 MMIO 表后启动成功，`/bin/rng_test` 连续两次通过 ✅
+- LA64 QEMU 通过 PCI 识别 VirtIO entropy device，最终源码输出 `random: initialized from virtio-rng`，`/bin/rng_test` 通过；刻意移除 RNG 设备时报告 `DeviceUnavailable`，`rng_test` 返回 1，`dd /dev/urandom` 返回 `EAGAIN` 且输出 0 字节，正反门禁均通过 ✅
+- `BOARD=2k1000 BLK_MODE=sata` 最终配置成功生成 uImage；总长 12446736 字节、SHA-256 `3d51bd16a36dc6b6a2e129c2efa798982e2fe23b12cc1fe609819ec0fab0fb0f`、TFTP/板端 CRC32 `d0a5f179`、`iminfo` checksum 均通过 ✅
+- 2K1000LA 最终镜像实际启动输出 `random: initialized from 2k1000-rng`，同时保持 SATA scratch、GMAC 和 DHCP 正常；`/bin/rng_test` 连续 5 次全部通过，无 panic ✅
+- `git diff --check` 和依赖 checksum/来源审计通过 ✅
+
+**备注：**
+- 启动健康检查用于拒绝明显常量或重复硬件输出，不是熵率认证；硬件随机数不会直接交付用户，而只负责播种 CSPRNG。
+- 当前只在启动时采集可信熵，尚未实现按时间或输出量周期重播种；`/dev/random` 也尚未维护独立阻塞熵计数模型。
+- 普通安全请求在平台熵源失败时返回 `EAGAIN`，不回退到全零、时间戳或地址种子；`GRND_INSECURE` 的未认证状态与 secure-ready 明确隔离。
+
 ### build/board: 移除已被集成目标取代的一次性上板 Make 入口
 
 **涉及文件：**

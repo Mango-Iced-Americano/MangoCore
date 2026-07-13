@@ -10,6 +10,7 @@ ROOTFS_IMG_NAME = rootfs-rv.img
 ROOTFS_IMG_DIR := ../fs-img-dir
 CORE_NUM := 1
 LOG ?= off
+VIRTIO_RNG_DEVICE := -device virtio-rng-device,bus=virtio-mmio-bus.2
 KERNEL_RV := ../kernel-rv
 KERNEL_LA := ../kernel-la
 SDCARD_RV := ../sdcard-rv.img
@@ -94,12 +95,14 @@ fs-img: user
 
 # Initramfs cpio generation (always needed when feature is in Cargo defaults)
 INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
+RNG_TEST_RUNTIME ?= 0
 
 kernel: $(INITRAMFS_CPIO_RV)
 
 $(INITRAMFS_CPIO_RV): user
 	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
+	RNG_TEST_RUNTIME=$(RNG_TEST_RUNTIME) \
+		./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
 	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
@@ -127,6 +130,7 @@ ifeq ($(BOARD), rvqemu)
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
   		-drive if=none,file=../disk.img,format=raw,id=x1 \
         -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(VIRTIO_RNG_DEVICE) \
   		-m 1024 \
   		-smp threads=$(CORE_NUM)
 endif
@@ -144,6 +148,7 @@ gdb:
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-drive file=../disk.img,if=none,format=raw,id=x1 \
 	-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+	$(VIRTIO_RNG_DEVICE) \
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
@@ -158,6 +163,7 @@ runsimple:
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
         -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(VIRTIO_RNG_DEVICE) \
 		-smp threads=$(CORE_NUM)
 
 comp:
@@ -172,6 +178,7 @@ comp:
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(VIRTIO_RNG_DEVICE) \
 		-no-reboot \
 		-rtc base=utc \
 		-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
@@ -189,6 +196,7 @@ comp-gdb:
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
         -drive file=../disk.img,if=none,format=raw,id=x1 \
         -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+	$(VIRTIO_RNG_DEVICE) \
         -no-reboot \
         -rtc base=utc \
 	-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \

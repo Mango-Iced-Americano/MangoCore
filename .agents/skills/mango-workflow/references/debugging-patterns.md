@@ -288,6 +288,14 @@
 - **教训**: 对早期启动、NTP、nanosleep、futex timeout、timerfd 这类等待路径，正确性兜底往往比性能优化更早暴露风险。优化顺序应是“让兜底便宜”，不是先删除兜底。
 - **相关文件**: `os/src/task/manager.rs`, `os/src/task/processor.rs`
 
+### 随机接口“能返回数据”不等于具备安全熵
+
+- **现象**: `getrandom()`、`/dev/urandom` 或 TLS 应用可以运行，但输出可能来自全零、时间戳或每次调用重新初始化的弱 PRNG；功能测试通过仍无法安全生成密钥、nonce 或 API 凭据。
+- **根因**: 把硬件熵源、随机池就绪状态、CSPRNG 输出和用户 ABI 混成一个临时函数，没有区分“不可预测的可信播种”和“确定性的安全扩展”。
+- **修复**: 平台层只负责采集可信熵；统一随机子系统执行启动健康检查、调理和 CSPRNG 状态管理；`getrandom` 与随机设备共用该状态并在未就绪时 fail closed。调用方写入只能混入状态，不能提高熵计数；QEMU 必须显式挂载 VirtIO RNG，实板按芯片手册使用片上来源。
+- **教训**: 随机数验收至少同时覆盖来源识别、非全零、连续输出差异、非法 flag errno 和“缺少可信来源时不回退弱随机”。统计活性测试只能发现明显故障，不能证明熵率或替代硬件安全评估。
+- **相关文件**: `os/src/drivers/rng/mod.rs`, `os/src/random.rs`, `os/src/syscall/mod.rs`, `os/src/fs/dev/urandom.rs`
+
 ### LoongArch AddressError 先查地址规范性，不要先查页表
 
 - **现象**: 软件页表查询能找到 PPN，PGDH 也已设置，但对某个高虚拟地址首次 load/store 立即触发 `Exception(AddressError)`，没有进入预期的 TLB refill 或 page fault 路径。

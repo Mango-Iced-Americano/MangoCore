@@ -1,5 +1,6 @@
 pub mod block;
 pub mod net;
+pub mod rng;
 pub mod serial;
 
 pub use block::BLOCK_DEVICE;

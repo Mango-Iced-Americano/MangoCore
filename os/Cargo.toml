@@ -23,6 +23,7 @@ bit_field = "0.10.1"
 rlibc = "1.0.0"
 volatile = "0.3.0"
 rand_core = "0.6.4"
+rand_chacha = { version = "0.3.1", default-features = false }
 managed = { version = "0.8", default-features = false, features = ["map"] }
 virtio-drivers = { path = "../dependency/virtio-drivers", default-features = false, features = ["alloc"] }
 

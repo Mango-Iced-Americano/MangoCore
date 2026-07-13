@@ -10,6 +10,7 @@ ROOTFS_IMG_NAME = rootfs-la.img
 ROOTFS_IMG_DIR := ../fs-img-dir
 CORE_NUM := 1
 LOG ?= off
+VIRTIO_RNG_DEVICE := -device virtio-rng-pci
 KERNEL_LA := ../kernel-la
 SDCARD_LA := ../sdcard-la.img
 DISK_LA := ../disk-la.img
@@ -91,12 +92,14 @@ fs-img: user
 INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
 CURL_RUNTIME ?= 0
 INET_TEST_RUNTIME ?= 0
+RNG_TEST_RUNTIME ?= 0
 
 kernel: $(INITRAMFS_CPIO_LA)
 
 $(INITRAMFS_CPIO_LA): user
 	@mkdir -p ../fs-img-dir
 	CURL_RUNTIME=$(CURL_RUNTIME) INET_TEST_RUNTIME=$(INET_TEST_RUNTIME) \
+		RNG_TEST_RUNTIME=$(RNG_TEST_RUNTIME) \
 		./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 	@touch src/initramfs-la.S
 
@@ -135,6 +138,7 @@ ifeq ($(BOARD), laqemu)
 		-device virtio-blk-pci,drive=x0 \
 		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
+		$(VIRTIO_RNG_DEVICE) \
 		-m 1024 \
 		-smp threads=$(CORE_NUM)
 endif
@@ -148,6 +152,7 @@ runsimple:
 		-device virtio-blk-pci,drive=x0 \
 		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
+		$(VIRTIO_RNG_DEVICE) \
 		-m 1024 \
 		-smp threads=$(CORE_NUM)
 
@@ -162,6 +167,7 @@ comp:
 		-device virtio-blk-pci,drive=x0 \
 		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
+		$(VIRTIO_RNG_DEVICE) \
 		-no-reboot \
 		-device virtio-net-pci,netdev=net0 \
 		-netdev user,id=net0 \
@@ -179,6 +185,7 @@ qemu-curl-shell:
 		-smp 1 \
 		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0,snapshot=on \
 		-device virtio-blk-pci,drive=x0 \
+		$(VIRTIO_RNG_DEVICE) \
 		-no-reboot \
 		-device virtio-net-pci,netdev=net0 \
 		-netdev user,id=net0 \
@@ -195,6 +202,7 @@ comp-gdb:
 		-device virtio-blk-pci,drive=x0 \
 		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
+		$(VIRTIO_RNG_DEVICE) \
 		-no-reboot \
 		-rtc base=utc \
 		-S \

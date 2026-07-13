@@ -994,6 +994,9 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
     if flags & !GRND_ALLOWED != 0 {
         return errno::EINVAL;
     }
+    if flags & GRND_RANDOM != 0 && flags & GRND_INSECURE != 0 {
+        return errno::EINVAL;
+    }
     if buflen == 0 {
         return 0;
     }
@@ -1008,19 +1011,22 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
         Err(errno) => return errno,
     };
     let mut user = UserBuffer::new(buffers);
-    let mut seed = crate::hal::get_time() as u64 ^ ((buf as u64) << 17) ^ buflen as u64;
     let mut offset = 0usize;
-    let mut chunk = [0u8; 64];
+    let mut chunk = [0u8; 256];
     while offset < buflen {
-        for byte in chunk.iter_mut() {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            *byte = seed as u8;
-        }
         let copy_len = core::cmp::min(chunk.len(), buflen - offset);
+        let result = if flags & GRND_INSECURE != 0 {
+            crate::random::fill_insecure_bytes(&mut chunk[..copy_len])
+        } else {
+            crate::random::fill_bytes(&mut chunk[..copy_len])
+        };
+        if result.is_err() {
+            crate::random::wipe_sensitive(&mut chunk);
+            return errno::EAGAIN;
+        }
         user.write_at(offset, &chunk[..copy_len]);
         offset += copy_len;
     }
+    crate::random::wipe_sensitive(&mut chunk);
     buflen as isize
 }

@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-11"
+last_updated: "2026-07-13"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -120,7 +120,7 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 ### /dev/urandom 和 /dev/random
 
-当前用 0 填充缓冲区（暂未实现真随机数生成器）。返回 `buf.len()` 而非 0（避免调用方误判为 EOF）。写完全丢弃。`/dev/random` 是 urandom 的别名，共享同一个 `Urandom` 类型实例。主次设备号 makedev!(1, 9)。
+两者共享内核 ChaCha20 CSPRNG。QEMU 由 VirtIO RNG 播种，2K1000LA 由片上 APB RNG 播种；启动样本通过基本重复/卡死健康检查后，随机池才进入 ready 状态。读操作返回请求长度的安全随机字节，可信熵源初始化失败时返回 `EAGAIN`，不会回退到全零或时间种子。写入数据会混入私有状态，但不会提高 ready 状态或被计为可信熵。`/dev/random` 当前仍是 `/dev/urandom` 的同实现别名，主次设备号为 makedev!(1, 9)。
 
 ### /dev/full
 
@@ -233,9 +233,9 @@ ext4/FAT32 的设备解析 MBR 主分区。QEMU 使用：
 
 Null 类型的别名。写入丢弃，读返回 EOF。用于需要打开 `/dev/cpu_dma_latency` 的测试程序。
 
-### PTMX 的随机数提升
+### 随机设备安全边界
 
-`/dev/random` 和 `/dev/urandom` 当前用零填充的实现是一个已知的暂时性限制。部分 LTP 和 libc 测试依赖随机数设备存在且可用，零填充保证它们不会因 EOF 假阳性而崩溃，但不提供真随机性。
+随机设备不直接输出硬件寄存器内容。硬件样本只负责启动播种，用户可见字节统一来自 ChaCha20 流，并在每次请求后用隐藏输出重键。该设计已经消除全零实现，但当前尚未实现运行期按字节数或时间阈值重新采集硬件熵；详见 `docs/07_driver/random.md`。
 
 ## 初始化流程
 
@@ -265,7 +265,7 @@ rust_main
 | null 读写 | /dev/null | busybox dd, LTP open05 | pass |
 | zero 填零读 | /dev/zero | busybox dd, mmap 测试 | pass |
 | full 写返回 ENOSPC | /dev/full | LTP fcntl01 | pass |
-| urandom 读取 | /dev/urandom | openssl, LTP getdents01 | partial |
+| urandom 读取 | /dev/urandom | rng_test（getrandom/设备活性、差异性） | pass/QEMU+2K1000LA |
 | tty 字符 IO | /dev/tty | login, shell 交互 | pass |
 | pipe 环形缓冲 | pipe() syscall | LTP pipe*, libc 测试 | pass |
 | pty pair 创建 | /dev/ptmx | busybox, telnetd | pass |
@@ -276,11 +276,11 @@ rust_main
 
 ## Known Issues
 
-1. **urandom 随机数质量**
-   - 现象：`/dev/urandom` 和 `/dev/random` 返回全零数据
-   - 根因：尚未集成硬件随机数生成器或软件 CSPRNG
-   - 影响：依赖真随机数的加密应用（openssl、ssh）行为不可预测
-   - 修复方向：集成 riscv64 Zkr 扩展或 loongarch64 的硬件随机指令；fallback 到软件 ChaCha20
+1. **随机池只在启动时采集硬件熵**
+   - 现状：VirtIO RNG 或 2K1000LA APB RNG 提供 64 字节启动样本，之后由 ChaCha20 CSPRNG 输出并逐请求重键
+   - 边界：尚未按输出量或运行时间周期性重新读取硬件熵
+   - 影响：已具备启动后安全随机流和前向重键，但长期运行时不能宣称持续硬件重播种
+   - 修复方向：持久化平台熵设备句柄，在不持有随机池锁时采样，并按阈值混入且执行连续健康检查
 
 2. **pty 缓冲区大小固定**
    - 现象：master 到 slave 和 slave 到 master 各只有 4KB 环形缓冲区

@@ -73,6 +73,7 @@ mod math;
 mod mm;
 mod net;
 mod panic_diag;
+mod random;
 mod syscall;
 mod task;
 mod timer;
@@ -195,6 +196,13 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
+
+    if let Err(error) = random::init() {
+        println!(
+            "[kernel] random: secure source unavailable ({:?}); secure reads will fail",
+            error
+        );
+    }
 
     // Non-destructive GMAC/PHY handoff inspection. This runs before any block
     // driver allocation and deliberately leaves U-Boot's MAC/PHY state intact.
