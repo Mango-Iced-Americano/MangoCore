@@ -29,6 +29,19 @@ cp -a "$SCRIPT_DIR/initramfs/common/." "$STAGE/"
 DNS_SERVER="${DNS_SERVER:-10.0.2.3}"
 printf 'nameserver %s\n' "$DNS_SERVER" > "$STAGE/etc/resolv.conf"
 
+# NTP can be unavailable during early bring-up. Record a reproducible lower
+# bound for the wall clock so TLS certificate validation never falls back to a
+# stale hard-coded date. SOURCE_DATE_EPOCH keeps release builds reproducible.
+BUILD_EPOCH="${SOURCE_DATE_EPOCH:-$(date -u +%s)}"
+case "$BUILD_EPOCH" in
+  ''|*[!0-9]*)
+    echo "[initramfs] ERROR: invalid SOURCE_DATE_EPOCH: $BUILD_EPOCH"
+    rm -rf "$STAGE"
+    exit 1
+    ;;
+esac
+printf '%s\n' "$BUILD_EPOCH" > "$STAGE/etc/build-epoch"
+
 # 2. 确定架构相关的路径
 case "$ARCH" in
   rv64)
@@ -48,7 +61,7 @@ case "$ARCH" in
     ;;
 esac
 
-# Optional self-contained curl runtime for the 2K1000 DHCP shell image.
+# Optional self-contained HTTPS curl runtime for QEMU and 2K1000 shell images.
 if [ "${CURL_RUNTIME:-0}" = "1" ]; then
     if [ "$ARCH" != "la64" ]; then
         echo "[initramfs] ERROR: curl runtime is currently available only for la64"

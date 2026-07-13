@@ -24,6 +24,8 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-dhcp-shell \
 	la64-2k1000-curl-shell \
 	la64-2k1000-net-tests \
+	la64-qemu-curl-shell \
+	la64-qemu-curl-shell-run \
 	la64-2k1000-gmac-probe \
 	la64-2k1000-gmac-net \
 	la64-2k1000-sata-mount-ro \
@@ -201,9 +203,9 @@ la64-2k1000-dhcp-shell: prepare-cargo-config
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-dhcp-shell.ui
 
-# Self-contained curl integration image. A baseline LoongArch64 glibc runtime
-# is embedded in initramfs so this target does not require rewriting the SSD
-# tools partition during kernel bring-up.
+# Self-contained HTTPS curl integration image. The LoongArch64 glibc runtime,
+# static Mbed TLS backend and CA bundle are embedded in initramfs, so this
+# target does not require rewriting the SSD tools partition.
 la64-2k1000-curl-shell: prepare-cargo-config tools-curl-la
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
@@ -213,6 +215,21 @@ la64-2k1000-curl-shell: prepare-cargo-config tools-curl-la
 		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-curl-shell.ui
+
+# QEMU-first HTTPS gate. Build the same curl runtime used by the real board,
+# force initproc into an interactive shell, and keep a separate kernel artifact
+# so normal la64-run workflows are not overwritten accidentally.
+la64-qemu-curl-shell: prepare-cargo-config tools-curl-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		CURL_RUNTIME=1 EXTRA_FEATURES="board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
+		../kernel-la-curl-shell
+
+la64-qemu-curl-shell-run: la64-qemu-curl-shell
+	$(MAKE) -f make/la64.mk qemu-curl-shell MODE=$(MODE)
 
 # Real-board network regression image. Keep the current inet_test in
 # initramfs so an older /tools partition cannot silently change test coverage.

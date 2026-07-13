@@ -189,15 +189,15 @@ class UBootConsole:
 
     def _write_console_input(self, data: bytes) -> None:
         # Interactive typing usually arrives one byte at a time, while paste
-        # and automated validation can arrive as a large burst. The board TTY
-        # loses or interleaves characters under that burst, so pace small
-        # chunks after the kernel takes over the UART.
-        chunk_size = 4
+        # and automated validation can arrive as a large burst. The 2K1000
+        # kernel TTY can still drop bytes from four-byte bursts while network
+        # polling is active, so reproduce real typing at a bounded rate.
+        chunk_size = 1
         for offset in range(0, len(data), chunk_size):
             self.serial.write(data[offset : offset + chunk_size])
             self.serial.flush()
             if offset + chunk_size < len(data):
-                time.sleep(0.001)
+                time.sleep(0.004)
 
     def _record(self, data: bytes) -> None:
         self.log.write(data)

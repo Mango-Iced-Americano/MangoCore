@@ -4,6 +4,29 @@
 
 ## 2026-07-13
 
+### board/net: QEMU-first 打通带证书校验的 HTTPS curl 并完成实板验收
+
+**涉及文件：**
+- `scripts/build_curl_runtime_la64.sh` — 固定 curl 8.19.0 与 Mbed TLS 3.6.7 官方源码及 SHA-256，静态链接 TLS 后端并内嵌 CA bundle，保留 glibc/NSS DNS 运行时
+- `os/build_initramfs.sh`、`user/src/bin/init.rs` — 生成并校验 `/etc/build-epoch`；NTP 全部失败时以镜像构建时间设置实时时钟，不再退回到过时的硬编码日期
+- `os/Makefile`、`os/make/la64.mk` — 增加 `la64-qemu-curl-shell{,-run}` QEMU-first 门禁，QEMU 与 `la64-2k1000-curl-shell` 共用 HTTPS 运行时
+- `scripts/boot_2k1000_tftp.py` — 内核控制台长输入改为逐字节、4ms 间隔发送，修复网络轮询期间自动验收命令丢字
+- `docs/01_architecture/boot-and-trap.md`、`docs/03_fs/init-and-rootfs.md`、`docs/06_net/test-map.md`、`docs/07_driver/2k1000-gmac.md` — 同步构建、时钟回退、证书正反验收和已知安全边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 HTTPS 可信时间下界和实板串口长输入完整性排查方法
+
+**验证：**
+- Docker 串行执行 `make -C os rv64-kernel-build-only MODE=release` 与 `make -C os la64-kernel-build-only MODE=release`，均成功，仅有项目既有 warning ✅
+- Docker 构建并启动 `make -C os la64-qemu-curl-shell-run MODE=release`；QEMU DHCP/NAT 正常，curl 报告 `mbedTLS/3.6.7`、`https` 和 `SSL`，系统时间为 2026-07-13 ✅
+- QEMU 不带 `-k` 访问 `https://www.baidu.com/` 得到 HTTP 200、2443 字节、返回 0；访问 `https://wrong.host.badssl.com/` 因 CN 不匹配返回 curl 60 ✅
+- Docker 构建 `make -C os la64-2k1000-curl-shell MODE=release` 成功；uImage 总长 16173912 字节、数据段 16173848 字节，load/entry 均为 `0x90000000` ✅
+- 实板镜像 SHA-256 `0e8b288ba6956015ca3ac3bef4bbbc2d3f8dd8762ea7b12a86abbd6e5afdc5aa`、CRC32 `26e477c0`；U-Boot TFTP 传输长度、板端 CRC 和 `iminfo` checksum 均通过 ✅
+- 2K1000LA 识别 DWMAC `0xd137`、YT8511 PHY `0x10a`、1000M/full；macOS 互联网共享 DHCP 获得 `192.168.2.2/24`。NTP 不可达后使用 build epoch，随后 HTTPS 正向返回 0/2443 字节，错误主机名返回 60 ✅
+- 以超过 120 字符 marker 实测脚本逐字节发送，板端回显和结果完全一致；Python 源码语法检查、Shell 语法检查及 `git diff --check` 均通过 ✅
+
+**备注：**
+- `inet_test tls` 使用 NoVerify，仅作握手诊断；本轮完成标准是 curl 默认 CA 校验成功，并能拒绝错误主机名证书。
+- 当前 `/dev/urandom` 仍返回零，`getrandom` 也只是时间/地址播种的 xorshift。HTTPS 功能链已经打通，但在接入可审计 CSPRNG 或硬件熵源前，不应在板端放置真实 LLM API 密钥。
+
 ### board/net: 增加自包含实板网络回归镜像并完成 38 项验收
 
 **涉及文件：**

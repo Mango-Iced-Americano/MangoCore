@@ -13,6 +13,7 @@ const AT_FDCWD: isize = -100;
 const NTP_ATTEMPTS: usize = 2;
 const NTP_TIMEOUT_MS: usize = 3_000;
 const NTP_POLL_MS: usize = 50;
+const MIN_VALID_BUILD_EPOCH: usize = 1_704_067_200; // 2024-01-01 UTC
 const ENOENT: isize = -2;
 const AT_REMOVEDIR: u32 = 0x200;
 
@@ -136,7 +137,48 @@ fn wait_child_bounded(pid: isize, timeout_ms: usize) -> Option<i32> {
     None
 }
 
-/// 用 busybox ntpd 通过 NTP 同步时间；失败则回退到硬编码时间以防 TLS 失败。
+fn read_build_epoch() -> Option<usize> {
+    let fd = open("/etc/build-epoch\0", OpenFlags::RDONLY);
+    if fd < 0 {
+        return None;
+    }
+
+    let mut buf = [0u8; 32];
+    let read_len = read(fd as usize, &mut buf);
+    close(fd as usize);
+    if read_len <= 0 {
+        return None;
+    }
+
+    let mut value = 0usize;
+    let mut saw_digit = false;
+    for &byte in &buf[..read_len as usize] {
+        if byte.is_ascii_digit() {
+            saw_digit = true;
+            value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
+        } else if saw_digit && byte.is_ascii_whitespace() {
+            break;
+        } else {
+            return None;
+        }
+    }
+    (saw_digit && value >= MIN_VALID_BUILD_EPOCH).then_some(value)
+}
+
+fn set_build_time_fallback(reason: &str) {
+    match read_build_epoch() {
+        Some(epoch) => {
+            println!("[init] {}: fallback to image build epoch {}", reason, epoch);
+            set_system_time(epoch, 0);
+        }
+        None => {
+            println!("[init] {}: no valid /etc/build-epoch; keeping kernel clock", reason);
+        }
+    }
+}
+
+/// Use BusyBox ntpd for the authoritative time and the image build timestamp
+/// as a lower-bound fallback when early networking or DNS is unavailable.
 /// NTP is best-effort: early boot must continue even when guest networking or DNS stalls.
 fn try_ntp_sync() {
     for attempt in 0..NTP_ATTEMPTS {
@@ -146,8 +188,7 @@ fn try_ntp_sync() {
 
         let pid = fork();
         if pid < 0 {
-            // fork 失败，回退到硬编码时间
-            set_system_time(1749049200, 0);
+            set_build_time_fallback("ntpd fork failed");
             return;
         }
         if pid == 0 {
@@ -184,8 +225,7 @@ fn try_ntp_sync() {
             }
         }
     }
-    println!("[init] ntpd all attempts failed, fallback to hardcoded time");
-    set_system_time(1749049200, 0);
+    set_build_time_fallback("ntpd all attempts failed");
 }
 
 fn try_bind(source: &str, target: &str) {

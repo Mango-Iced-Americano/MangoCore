@@ -167,6 +167,23 @@ comp:
 		-netdev user,id=net0 \
 		-rtc base=utc
 
+# Focused HTTPS shell runner. The official disk is exposed through a QEMU
+# snapshot so interactive TLS testing cannot modify the checked-in test image;
+# all curl and CA files come from initramfs.
+qemu-curl-shell:
+	@qemu-system-loongarch64 \
+		-machine virt \
+		-kernel ../kernel-la-curl-shell \
+		-m 1G \
+		-nographic \
+		-smp 1 \
+		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0,snapshot=on \
+		-device virtio-blk-pci,drive=x0 \
+		-no-reboot \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
+		-rtc base=utc
+
 comp-gdb:
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -183,4 +200,4 @@ comp-gdb:
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb
+.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell comp-gdb
