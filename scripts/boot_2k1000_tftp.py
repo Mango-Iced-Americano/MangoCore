@@ -187,6 +187,18 @@ class UBootConsole:
         self.serial.close()
         self.log.close()
 
+    def _write_console_input(self, data: bytes) -> None:
+        # Interactive typing usually arrives one byte at a time, while paste
+        # and automated validation can arrive as a large burst. The board TTY
+        # loses or interleaves characters under that burst, so pace small
+        # chunks after the kernel takes over the UART.
+        chunk_size = 4
+        for offset in range(0, len(data), chunk_size):
+            self.serial.write(data[offset : offset + chunk_size])
+            self.serial.flush()
+            if offset + chunk_size < len(data):
+                time.sleep(0.001)
+
     def _record(self, data: bytes) -> None:
         self.log.write(data)
 
@@ -289,11 +301,9 @@ class UBootConsole:
                     before_escape, escape, _ = data.partition(b"\x03")
                     if escape:
                         if before_escape:
-                            self.serial.write(before_escape)
-                            self.serial.flush()
+                            self._write_console_input(before_escape)
                         return
-                    self.serial.write(data)
-                    self.serial.flush()
+                    self._write_console_input(data)
         finally:
             if saved_terminal is not None:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_terminal)

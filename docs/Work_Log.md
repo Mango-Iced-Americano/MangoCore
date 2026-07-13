@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-07-13
+
+### board/integration: 联合验证 SATA、挂载文件系统、GMAC 与交互式 Shell
+
+**涉及文件：**
+- `os/Makefile` — 增加独立 `la64-2k1000-sata-shell` 和联合 `la64-2k1000-full-shell` 目标，分别隔离验证 SATA，以及组合 `sata_scratch_rw + gmac_2k1000 + board_shell`
+- `os/src/fs/procfs/files/mounts.rs` — `/proc/mounts` 与 `/proc/self/mountinfo` 根据真实 `MountFlags::RDONLY` 输出 `ro/rw`，移除所有挂载硬编码为 `rw` 的误报
+- `scripts/boot_2k1000_tftp.py` — 内核接管 UART 后将批量终端输入按 4 字节节流，避免长命令粘贴触发板端 TTY 丢字或回显交错
+- `docs/01_architecture/boot-and-trap.md`、`docs/03_fs/2k1000-full-test-disk.md`、`docs/07_driver/2k1000-gmac.md` — 记录 Shell 镜像分层、联合目标、挂载策略和串口输入语义
+
+**验证：**
+- 已先提交此前累计上板基线：`1ace76e5 feat(board): advance 2K1000 full-system bring-up` ✅
+- SATA Shell `kernel-2k1000-sata-shell.ui` 为 `12380736` 字节，SHA-256 `0aef2841930bdd67384a4175725e9792024b29291d2363ad77bc9bee076e4e03`；TFTP CRC32 `989cfc30`、U-Boot `iminfo`、scratch 持久化冒烟测试和 Bash 启动均通过 ✅
+- SATA Shell 实板中 `/sdcard` 可见 glibc/musl/`os_test.conf`，`/tools` 可见 bin/lib/tests 等工具树，`/scratch` 可见工作区；此前空目录确认是无 SATA 的安全 Shell 镜像行为 ✅
+- 联合镜像 `kernel-2k1000-full-shell.ui` 为 `12381352` 字节，SHA-256 `6c8ac24f5f0e95d5f233ad4bb7d60cab7289b47d3daa683964d9d3ba1ebca743`；TFTP CRC32 `9adefeda` 和 `iminfo` 通过 ✅
+- 联合启动中 GMAC0 为 1000 Mbps/full，scratch 冒烟测试通过，P1 `/sdcard`、P3 `/tools` 及其 bind 均显示 `ro`，P2 `/scratch` 显示 `rw`；`touch /sdcard/MANGO_RO_GUARD` 返回 `EROFS`，scratch 短文件创建/删除成功 ✅
+- Mac 首轮 ping 因 ARP 建邻为 9/10；第二轮 10/10、0% 丢包、平均 RTT 0.409 ms，证明 AHCI 与 GMAC DMA 同时启用后局域网收发稳定 ✅
+- 串口 pipe 回环验证普通输入按块拼接后字节完全一致、CR 保留、Ctrl-C 不下发；实板短命令交互正常 ✅
+- Docker 串行执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`，均成功；仅有项目既有 warning ✅
+
+**备注：**
+- 当前联合镜像仍使用静态 `192.168.9.20/24` 和轮询 GMAC0。下一阶段进入 DHCP/默认路由/DNS，先在普通路由器 LAN 口完成公共 IP 出网闭环，再运行 UDP/TCP 和网络测试组。
+- init 阶段 NTP 因尚无默认路由连续两次超时后回退硬编码时间，属于当前网络阶段的已知边界，不影响 SATA/GMAC 联合验收。
+
 ## 2026-07-12
 
 ### board/tooling: 修复一键启动后的 Shell 输入透传

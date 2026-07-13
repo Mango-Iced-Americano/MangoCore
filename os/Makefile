@@ -19,6 +19,8 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-scratch-rw \
 	la64-2k1000-core-tests \
 	la64-2k1000-shell \
+	la64-2k1000-sata-shell \
+	la64-2k1000-full-shell \
 	la64-2k1000-gmac-probe \
 	la64-2k1000-gmac-net \
 	la64-2k1000-sata-mount-ro \
@@ -160,6 +162,29 @@ la64-2k1000-shell: prepare-cargo-config
 		EXTRA_FEATURES="gmac_2k1000 board_shell" MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-shell.ui
+
+# Interactive storage image: mount P1/P3 read-only and the isolated P2 FAT32
+# scratch partition read-write, then enter Bash without running test groups.
+# GMAC stays disabled so AHCI/filesystem behavior can be validated in isolation.
+la64-2k1000-sata-shell: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-sata-shell.ui
+
+# Storage/network integration gate: keep the validated SATA mount policy and
+# enable the production GMAC0 polling driver, then enter an interactive shell.
+la64-2k1000-full-shell: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw gmac_2k1000 board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-full-shell.ui
 
 # Non-destructive handoff probe for both integrated DWMAC 3.70a controllers.
 # It reads MAC/DMA state and PHY registers through MDIO, but does not reset the

@@ -184,6 +184,29 @@ HBA reset 后还必须恢复平台可写的 CAP/PI。2K1000 按随板 U-Boot 保
 
 ## 7. Staged 用户态 `/scratch`
 
+需要在不运行测例的情况下交互检查三个 SSD 分区时，使用独立 SATA Shell 镜像：
+
+```bash
+make -C os la64-2k1000-sata-shell
+make 2k1000-boot IMAGE=kernel-2k1000-sata-shell.ui
+```
+
+该镜像将 P1 只读挂载到 `/sdcard`、P2 FAT32 可写挂载到 `/scratch`、P3 只读
+挂载到 `/tools`，随后通过易失 `/board_shell` 标记进入 Bash。它不启用 GMAC，
+用于把 AHCI/分区/文件系统问题与网卡 DMA 问题隔离开；磁盘上的
+`/sdcard/os_test.conf` 不会被改写。
+
+SATA Shell 验收后，可用完整 Shell 集成镜像同时启用纯净 GMAC0 驱动：
+
+```bash
+make -C os la64-2k1000-full-shell
+make 2k1000-boot IMAGE=kernel-2k1000-full-shell.ui
+```
+
+该目标保持相同分区写保护，并增加 `gmac_2k1000`，用于在交互式 Shell 中同时
+验证 `/sdcard`、`/scratch`、`/tools` 和 `192.168.9.20/24`。逐包
+`gmac_diag` 仍保持关闭。
+
 内核文件探针通过后，可构建只开放 P2 的 staged 镜像：
 
 ```bash
