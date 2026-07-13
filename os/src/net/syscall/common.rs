@@ -36,6 +36,7 @@ pub const TCP_INFO: u32 = 11;
 pub const TCP_CONGESTION: u32 = 13;
 
 /// option name (IP)
+pub const IP_RECVERR: u32 = 11;
 pub const MCAST_JOIN_GROUP: u32 = 42;
 pub const MCAST_LEAVE_GROUP: u32 = 45;
 

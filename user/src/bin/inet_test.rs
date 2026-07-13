@@ -13,6 +13,9 @@ const AF_INET: usize = 2;
 const SOCK_STREAM: usize = 1;
 const SOCK_DGRAM: usize = 2;
 const IPPROTO_TCP: usize = 6;
+const IPPROTO_IP: usize = 0;
+const IP_RECVERR: usize = 11;
+const MSG_ERRQUEUE: usize = 0x2000;
 
 // QEMU SLIRP 内置 DNS 代理地址
 const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
@@ -52,6 +55,35 @@ impl sockaddr_in {
     fn len() -> usize {
         core::mem::size_of::<Self>()
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TestIoVec {
+    iov_base: *const u8,
+    iov_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TestMsgHdr {
+    msg_name: *mut u8,
+    msg_namelen: u32,
+    _pad0: u32,
+    msg_iov: *mut TestIoVec,
+    msg_iovlen: usize,
+    msg_control: *mut u8,
+    msg_controllen: usize,
+    msg_flags: i32,
+    _pad1: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TestMMsgHdr {
+    msg_hdr: TestMsgHdr,
+    msg_len: u32,
+    _pad: u32,
 }
 
 // ============================================================
@@ -1023,6 +1055,145 @@ fn net_core02_loopback_and_default_iface() -> i32 {
     0
 }
 
+fn net_core_ip_recverr() -> i32 {
+    const GROUP: &str = "NET_CORE";
+    const NAME: &str = "net_core_ip_recverr";
+
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    if fd < 0 {
+        tbrok!(GROUP, NAME, "UDP socket failed: {}", fd);
+        return 1;
+    }
+    let fd = fd as usize;
+
+    let mut value = u32::MAX;
+    let mut len = core::mem::size_of::<u32>();
+    let mut ret = sys_getsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &mut value as *mut u32 as *mut u8, &mut len);
+    if ret < 0 || value != 0 || len != core::mem::size_of::<u32>() {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "default state mismatch: ret={} value={} len={}", ret, value, len);
+        return 1;
+    }
+
+    value = 1;
+    ret = sys_setsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &value as *const u32 as *const u8, core::mem::size_of::<u32>());
+    if ret < 0 {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "enable failed with errno {}", errno_from_ret(ret));
+        return 1;
+    }
+
+    value = 0;
+    len = core::mem::size_of::<u32>();
+    ret = sys_getsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &mut value as *mut u32 as *mut u8, &mut len);
+    if ret < 0 || value != 1 {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "enabled state mismatch: ret={} value={}", ret, value);
+        return 1;
+    }
+
+    let mut byte = 0u8;
+    ret = sys_recvfrom(fd, &mut byte, 1, MSG_ERRQUEUE,
+        core::ptr::null_mut(), core::ptr::null_mut());
+    if errno_from_ret(ret) != 11 {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "empty error queue returned {}, expected EAGAIN", ret);
+        return 1;
+    }
+
+    value = 0;
+    ret = sys_setsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &value as *const u32 as *const u8, core::mem::size_of::<u32>());
+    sys_close(fd);
+    if ret < 0 {
+        tfail!(GROUP, NAME, "disable failed with errno {}", errno_from_ret(ret));
+        return 1;
+    }
+
+    tpass!(GROUP, NAME, "IP_RECVERR state and empty error queue verified");
+    0
+}
+
+fn net_core_sendmmsg() -> i32 {
+    const GROUP: &str = "NET_CORE";
+    const NAME: &str = "net_core_sendmmsg";
+
+    let receiver = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    let sender = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    if receiver < 0 || sender < 0 {
+        if receiver >= 0 { sys_close(receiver as usize); }
+        if sender >= 0 { sys_close(sender as usize); }
+        tbrok!(GROUP, NAME, "socket creation failed: receiver={} sender={}", receiver, sender);
+        return 1;
+    }
+    let receiver = receiver as usize;
+    let sender = sender as usize;
+    let destination = sockaddr_in::new([127, 0, 0, 1], 23457);
+    let bind_ret = sys_bind(receiver, destination.as_ptr(), sockaddr_in::len());
+    if bind_ret < 0 {
+        sys_close(sender);
+        sys_close(receiver);
+        tbrok!(GROUP, NAME, "receiver bind failed with errno {}", errno_from_ret(bind_ret));
+        return 1;
+    }
+
+    let first = b"sendmmsg-first";
+    let second = b"sendmmsg-second";
+    let mut iov = [
+        TestIoVec { iov_base: first.as_ptr(), iov_len: first.len() },
+        TestIoVec { iov_base: second.as_ptr(), iov_len: second.len() },
+    ];
+    let iov_ptr = iov.as_mut_ptr();
+    let base_hdr = TestMsgHdr {
+        msg_name: &destination as *const sockaddr_in as *mut u8,
+        msg_namelen: sockaddr_in::len() as u32,
+        _pad0: 0,
+        msg_iov: core::ptr::null_mut(),
+        msg_iovlen: 1,
+        msg_control: core::ptr::null_mut(),
+        msg_controllen: 0,
+        msg_flags: 0,
+        _pad1: 0,
+    };
+    let mut messages = [
+        TestMMsgHdr { msg_hdr: TestMsgHdr { msg_iov: iov_ptr, ..base_hdr }, msg_len: 0, _pad: 0 },
+        TestMMsgHdr { msg_hdr: TestMsgHdr { msg_iov: iov_ptr.wrapping_add(1), ..base_hdr }, msg_len: 0, _pad: 0 },
+    ];
+
+    let zero_ret = sys_sendmmsg(sender, messages.as_mut_ptr() as *mut u8, 0, 0);
+    let send_ret = sys_sendmmsg(sender, messages.as_mut_ptr() as *mut u8, messages.len(), 0);
+    if zero_ret != 0 || send_ret != 2
+        || messages[0].msg_len as usize != first.len()
+        || messages[1].msg_len as usize != second.len() {
+        sys_close(sender);
+        sys_close(receiver);
+        tfail!(GROUP, NAME, "batch mismatch: zero={} sent={} lengths=[{}, {}]",
+            zero_ret, send_ret, messages[0].msg_len, messages[1].msg_len);
+        return 1;
+    }
+
+    let expected: [&[u8]; 2] = [first, second];
+    let mut recv_buf = [0u8; 32];
+    for packet in expected {
+        let recv_ret = sys_recvfrom(receiver, recv_buf.as_mut_ptr(), recv_buf.len(), 0,
+            core::ptr::null_mut(), core::ptr::null_mut());
+        if recv_ret != packet.len() as isize || &recv_buf[..packet.len()] != packet {
+            sys_close(sender);
+            sys_close(receiver);
+            tfail!(GROUP, NAME, "received datagram mismatch: ret={}", recv_ret);
+            return 1;
+        }
+    }
+
+    sys_close(sender);
+    sys_close(receiver);
+    tpass!(GROUP, NAME, "two datagrams sent with lengths reported");
+    0
+}
+
 fn net_core03_route_lookup() -> i32 {
     const GROUP: &str = "NET_CORE";
     const NAME: &str = "net_core03_route_lookup";
@@ -1949,13 +2120,15 @@ const WATCHDOG_SECS: usize = 60;
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("{}", C_RESET);
     println!("{}============================================", C_CYAN);
-    println!("  INET Connectivity Test Suite (48 tests)");
+    println!("  INET Connectivity Test Suite (51 tests)");
     println!("============================================{}", C_RESET);
 
-    let tests: [(&str, fn() -> i32); 49] = [
+    let tests: [(&str, fn() -> i32); 51] = [
         // ── Step 1: unit / self-contained tests — no external dependencies ──
         ("[NET_CORE] net_core01_interface_basic", net_core01_interface_basic),
         ("[NET_CORE] net_core02_loopback_and_default_iface", net_core02_loopback_and_default_iface),
+        ("[NET_CORE] net_core_ip_recverr", net_core_ip_recverr),
+        ("[NET_CORE] net_core_sendmmsg", net_core_sendmmsg),
         ("[NET_CORE] net_core03_route_lookup", net_core03_route_lookup),
         ("[NET_CORE] net_core04_ephemeral_port_range", net_core04_ephemeral_port_range),
         ("[NET_CORE] net_core05_port_bind_conflict", net_core05_port_bind_conflict),
@@ -2017,7 +2190,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         // ── Step 5: TLS (requires crypto + external connectivity) ──
         ("https_tls", test_https_tls),
         ("https_tls_download", test_https_download),
-    ]; // 48 total tests
+    ]; // 51 total tests
 
     let total = tests.len();
     let mut passed = 0;

@@ -4,6 +4,30 @@
 
 ## 2026-07-13
 
+### board/net: 自包含 curl 与 glibc DNS resolver ABI 实板打通
+
+**涉及文件：**
+- `scripts/build_curl_runtime_la64.sh`、`.gitignore` — 固定 curl 8.19.0 源码和 SHA-256，以通用 LoongArch64 LP64D 指令集静态链接 libcurl，并封装动态 glibc/NSS/resolver 运行时；生成目录不纳入版本库
+- `os/Makefile`、`os/make/la64.mk`、`os/build_initramfs.sh` — 增加 `la64-2k1000-curl-shell` 目标和可选 curl initramfs 注入，不改写 SSD 工具分区
+- `os/src/net/socket/mod.rs`、`os/src/net/socket/inet/datagram/udp.rs`、`os/src/net/syscall/{common,setsockopt,getsockopt}.rs` — 增加 UDP `IP_RECVERR` 状态 ABI；空 `MSG_ERRQUEUE` 沿既有路径返回 `EAGAIN`
+- `os/src/net/posix.rs`、`os/src/net/syscall/sendmmsg.rs`、`os/src/net/syscall/mod.rs`、`os/src/syscall/{mod,syscall_id}.rs` — 按 Linux 64-bit `mmsghdr` 实现 syscall 269 `sendmmsg`，复用 `sendmsg` 语义、写回逐消息长度并支持部分成功返回
+- `user/src/syscall.rs`、`user/src/bin/inet_test.rs` — 增加 sendmmsg 用户态封装，以及 `IP_RECVERR` 状态/空错误队列和双 UDP datagram 批量发送回归
+- `AGENTS.md`、`docs/02_syscall/network-syscalls.md`、`docs/06_net/dhcp.md`、`docs/07_driver/2k1000-gmac.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 同步 syscall 计数、ABI 边界、构建/验收流程和 glibc resolver 排障模式
+
+**验证：**
+- Docker 串行执行 `make -C os rv64-kernel-build-only` 与 `make -C os la64-kernel-build-only`，均成功，仅有项目既有 warning ✅
+- Docker 构建 `make -C os la64-2k1000-curl-shell` 成功；uImage 总长 15317848 字节、数据段 15317784 字节，load/entry 均为 `0x90000000` ✅
+- 主机与 `/private/tftpboot` 镜像逐字节一致；SHA-256 `028e4b0e4c55e526d32754af46f5800e51a83a593ff74d0e0e27ff60a026874a`，CRC32 `76a6f4c4` ✅
+- U-Boot TFTP 传输 15317848 字节，板端 CRC32 `76a6f4c4`，`iminfo` 数据校验和通过；内核启动、SATA scratch 写入探针和 Shell 均通过，无 panic ✅
+- 墙口链路协商 100 Mbps/full，DHCP 获得 `192.168.1.3/24`，网关/DNS 为 `192.168.1.1`；网关 ping 2/2、0% 丢包，BusyBox `nslookup` 返回 A/AAAA ✅
+- `curl -v -m 15 http://www.baidu.com` 经 glibc 成功解析域名；IPv6 无路由后回退 IPv4 `183.2.172.177`，收到 HTTP 200，curl 返回 0，输出文件 2381 字节 ✅
+- 独立复测 `curl http://example.com` 同样返回 HTTP 200 和 curl 0，输出文件 559 字节，域名解析及 HTTP 路径可重复 ✅
+- QEMU 集成仍因工作区缺少 `disk-la.img` 无法启动；本轮以 rv64/la64 双架构编译和 2K1000LA 实板端到端请求覆盖，保留该环境缺口 ⚠️
+
+**备注：**
+- 根因链分两步：glibc resolver 先要求 UDP `IP_RECVERR`，随后用 `sendmmsg(269)` 批量发送 A/AAAA；BusyBox `nslookup` 成功不能覆盖这两项 glibc ABI。
+- 当前 `IP_RECVERR` 只覆盖 resolver 所需状态和空错误队列，尚未实现 ICMP `sock_extended_err` 交付；curl 构建关闭 TLS，HTTPS 是下一阶段。
+
 ### board/net: 增加 2K1000LA 常驻 DHCP、动态路由和 DNS 交付
 
 **涉及文件：**

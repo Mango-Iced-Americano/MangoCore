@@ -22,6 +22,7 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-sata-shell \
 	la64-2k1000-full-shell \
 	la64-2k1000-dhcp-shell \
+	la64-2k1000-curl-shell \
 	la64-2k1000-gmac-probe \
 	la64-2k1000-gmac-net \
 	la64-2k1000-sata-mount-ro \
@@ -198,6 +199,19 @@ la64-2k1000-dhcp-shell: prepare-cargo-config
 		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-dhcp-shell.ui
+
+# Self-contained curl integration image. A baseline LoongArch64 glibc runtime
+# is embedded in initramfs so this target does not require rewriting the SSD
+# tools partition during kernel bring-up.
+la64-2k1000-curl-shell: prepare-cargo-config tools-curl-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		CURL_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-curl-shell.ui
 
 # Non-destructive handoff probe for both integrated DWMAC 3.70a controllers.
 # It reads MAC/DMA state and PHY registers through MDIO, but does not reset the
@@ -513,6 +527,15 @@ tools-alpine-la:
 	@echo "[alpine] loongarch64 done."
 
 tools-alpine: tools-alpine-rv tools-alpine-la
+
+CURL_RUNTIME_LA_MANIFEST := ../user/tools/loongarch64/curl-runtime/manifest.txt
+
+tools-curl-la: $(CURL_RUNTIME_LA_MANIFEST)
+
+$(CURL_RUNTIME_LA_MANIFEST): ../scripts/build_curl_runtime_la64.sh \
+		initramfs/common/etc/ssl/certs/ca-certificates.crt
+	cd .. && sh scripts/build_curl_runtime_la64.sh \
+		user/tools/loongarch64/curl-runtime
 
 # ============================================================
 # apk 包管理器下载 + 本地 repo 配置

@@ -223,6 +223,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETPEERNAME => "getpeername",
         SYSCALL_SENDTO => "sendto",
         SYSCALL_RECVFROM => "recvfrom",
+        SYSCALL_SENDMSG => "sendmsg",
+        SYSCALL_RECVMSG => "recvmsg",
+        SYSCALL_SENDMMSG => "sendmmsg",
         SYSCALL_SETSOCKOPT => "setsockopt",
         SYSCALL_GETSOCKOPT => "getsockopt",
         SYSCALL_SBRK => "sbrk",
@@ -883,6 +886,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         SYSCALL_SOCK_SHUTDOWN => sys_sock_shutdown(args[0] as u32, args[1] as u32),
         SYSCALL_SENDMSG => sys_sendmsg(args[0] as u32, args[1], args[2] as u32),
+        SYSCALL_SENDMMSG => {
+            sys_sendmmsg(args[0] as u32, args[1], args[2] as u32, args[3] as u32)
+        }
         SYSCALL_RECVMSG => sys_recvmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),

@@ -433,6 +433,12 @@ pub trait Socket: Send + Sync {
     fn set_bind_to_device(&self, _ifname: &str) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    fn ip_recv_err(&self) -> Result<bool, SyscallErr> {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
+    fn set_ip_recv_err(&self, _enabled: bool) -> SyscallRet {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
     fn set_ipv6_v6only(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::ENOPROTOOPT)
     }

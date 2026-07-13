@@ -78,6 +78,12 @@ initproc 将 /etc/resolv.conf 链接到该 procfs 文件，所以续租后 libc/
 解析器能直接读取新配置。租约尚未到达时暂时保留 QEMU SLIRP 的
 nameserver 10.0.2.3 作为回退。
 
+glibc 的同步 resolver 还依赖两项 socket ABI：在 UDP 查询 socket 上启用
+`IP_RECVERR`，并用 `sendmmsg(269)` 批量发送 A/AAAA 查询。MangoCore 为 UDP
+保存 `IP_RECVERR` 开关，空 `MSG_ERRQUEUE` 返回 `EAGAIN`；`sendmmsg` 复用
+`sendmsg` 逐项发送并回写 `mmsghdr.msg_len`。这两项缺失时 BusyBox
+`nslookup` 可能正常，但 glibc `getaddrinfo()` 仍会失败。
+
 ## QEMU 兼容路径
 
 非 2K1000 GMAC 配置仍保留原有启动期 5 秒 DHCP 探测，以维持现有 QEMU 启动和
@@ -90,6 +96,16 @@ nameserver 10.0.2.3 作为回退。
 make -C os la64-2k1000-dhcp-shell
 make 2k1000-boot IMAGE=kernel-2k1000-dhcp-shell.ui
 ~~~
+
+需要同时验证 glibc resolver 和 HTTP 客户端时使用自包含 curl 镜像：
+
+~~~bash
+make -C os la64-2k1000-curl-shell
+make 2k1000-boot IMAGE=kernel-2k1000-curl-shell.ui
+~~~
+
+该目标把固定版本的 LoongArch64 glibc curl 运行时放入 initramfs，不改写 SSD。
+当前构建只启用 HTTP，TLS/HTTPS 尚未启用。
 
 启动日志应先出现：
 
@@ -106,9 +122,15 @@ cat /etc/resolv.conf
 ping -c 4 <default-gateway>
 ping -c 4 1.1.1.1
 ping -c 4 www.baidu.com
+nslookup www.baidu.com
+curl -v -m 15 http://www.baidu.com -o /tmp/baidu.html
 ~~~
 
 断开并重新接入 LAN 后，还需确认地址、默认路由和 DNS 能重新出现。
+
+2026-07-13 实板验证中，GMAC0 从墙口 DHCP 获得 `192.168.1.3/24`，网关和
+DNS 均为 `192.168.1.1`。glibc curl 同时解析出 A/AAAA，在 IPv6 无路由后回退
+IPv4 `183.2.172.177`，收到 `HTTP/1.1 200 OK`，返回 0 并写入 2381 字节。
 
 ## 已知边界
 
@@ -116,3 +138,5 @@ ping -c 4 www.baidu.com
 - 用户态 inet_test 中部分 DNS 子测例仍直接使用 QEMU DNS 常量，需在网络测例
   适配阶段改为读取 /etc/resolv.conf。
 - 当前只支持 DHCPv4，不支持 IPv6 SLAAC/DHCPv6。
+- `IP_RECVERR` 当前只覆盖 resolver 所需的状态 ABI，尚未交付完整 ICMP 扩展错误队列。
+- curl 运行时当前关闭 TLS，仅支持 HTTP 验证。

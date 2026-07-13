@@ -89,12 +89,13 @@ fs-img: user
 
 # Initramfs cpio generation (always needed when feature is in Cargo defaults)
 INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
+CURL_RUNTIME ?= 0
 
 kernel: $(INITRAMFS_CPIO_LA)
 
 $(INITRAMFS_CPIO_LA): user
 	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
+	CURL_RUNTIME=$(CURL_RUNTIME) ./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 	@touch src/initramfs-la.S
 
 kernel:

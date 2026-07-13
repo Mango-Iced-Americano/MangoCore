@@ -8,7 +8,7 @@
 |------|-----|
 | 语言 | Rust nightly（双工具链：`nightly-2025-01-18` / `nightly-2024-05-01`） |
 | 架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-linux-gnu` |
-| syscall | 约 218 个（新增时同步更新本节） |
+| syscall | 约 219 个（新增时同步更新本节） |
 | 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
 | 设计参考 | [DragonOS](https://github.com/DragonOS-Community/DragonOS)（VFS/MountFS 架构）+ Linux 6.6 语义 |
 | 约束 | **无 `cargo test`/`cargo clippy`** — 裸机内核，唯一验证 = 编译 + QEMU 集成测试 |

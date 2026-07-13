@@ -6,8 +6,8 @@ use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
 use super::common::{
-    IPV6_RECVPKTINFO, SO_ERROR, SO_PEERCRED, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF,
-    SO_SNDTIMEO,
+    IPV6_RECVPKTINFO, IP_RECVERR, SO_ERROR, SO_PEERCRED, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR,
+    SO_SNDBUF, SO_SNDTIMEO,
 };
 use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
 
@@ -22,6 +22,7 @@ use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_I
 ///   `SO_RCVTIMEO`/`SO_SNDTIMEO`（返回零值 `TimeVal`）。
 /// - `SOL_TCP`：`TCP_MAXSEG`（返回 `TCP_MSS`）、`TCP_INFO`（返回 `TcpInfo` 结构体）、
 ///   `TCP_CONGESTION`（返回 `"reno"`）。
+/// - `SOL_IP`：UDP `IP_RECVERR`。
 /// - `SOL_IPV6`：`IPV6_RECVPKTINFO`（返回 0）。
 ///
 /// # Errors
@@ -69,6 +70,17 @@ pub fn sys_getsockopt(
                 .map(|e| (-(e as isize)) as u32)
                 .unwrap_or(0);
             if optval_ptr.write(token, &so_error).is_err()
+                || optlen_ptr.write(token, &4u32).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
+            }
+        }
+        (SOL_IP, IP_RECVERR) => {
+            let enabled = match socket.ip_recv_err() {
+                Ok(enabled) => enabled,
+                Err(e) => return -(e as isize),
+            };
+            if optval_ptr.write(token, &(enabled as u32)).is_err()
                 || optlen_ptr.write(token, &4u32).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);

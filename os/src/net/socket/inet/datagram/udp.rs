@@ -53,6 +53,7 @@ struct UdpSocketInner {
     recvbuf_size: usize,
     sendbuf_size: usize,
     reuse_addr: bool,
+    ip_recv_err: bool,
     multicast_group_joined: bool,
     ipv6_checksum_offset: Option<u32>,
 }
@@ -285,6 +286,15 @@ impl Socket for UdpSocket {
 
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
         self.inner.lock().reuse_addr = enabled;
+        Ok(0)
+    }
+
+    fn ip_recv_err(&self) -> Result<bool, SyscallErr> {
+        Ok(self.inner.lock().ip_recv_err)
+    }
+
+    fn set_ip_recv_err(&self, enabled: bool) -> SyscallRet {
+        self.inner.lock().ip_recv_err = enabled;
         Ok(0)
     }
 
@@ -620,6 +630,7 @@ impl UdpSocket {
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
+                ip_recv_err: false,
                 multicast_group_joined: false,
                 ipv6_checksum_offset: None,
             }),

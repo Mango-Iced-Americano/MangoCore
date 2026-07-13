@@ -56,6 +56,22 @@
 ### 非阻塞 socket 测试失败
 - 检查 `try_xxx` 前是否调了 `NET_INTERFACE.try_poll()`
 
+### BusyBox DNS 正常但 glibc getaddrinfo 失败
+
+- **现象**：`nslookup` 和按数字 IP 发起的 HTTP 请求成功，但 glibc 程序通过域名
+  访问时返回 `getaddrinfo` 失败。
+- **定位**：先用 syscall trace 观察 resolver UDP socket。glibc 会先设置
+  `IP_RECVERR`，再用 `sendmmsg(269)` 同时发送 A/AAAA 查询；任一调用返回
+  `ENOPROTOOPT` 或 `ENOSYS` 都会让 resolver 在 DNS 报文发出前失败。
+- **修复**：为 UDP socket 保存 `IP_RECVERR` 状态，空 `MSG_ERRQUEUE` 返回
+  `EAGAIN`；按 Linux 64-bit `mmsghdr` ABI 实现 `sendmmsg`，复用已有
+  `sendmsg` 校验并逐项写回 `msg_len`。
+- **教训**：不能用 BusyBox resolver 的成功推断 glibc NSS/resolver 已兼容；应以
+  动态 glibc 客户端的域名请求作为端到端验收，并逐个补齐实际出现的 ABI，避免
+  猜测式实现。
+- **相关文件**：`os/src/net/syscall/setsockopt.rs`,
+  `os/src/net/syscall/sendmmsg.rs`, `os/src/net/socket/inet/datagram/udp.rs`
+
 ## 信号问题
 
 ### 信号处理不生效

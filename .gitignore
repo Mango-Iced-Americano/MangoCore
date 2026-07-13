@@ -47,3 +47,6 @@ sdcard-rv-noconf.img
 /tools/
 .omo/
 .env
+
+# Reproducible LoongArch curl build output.
+/user/tools/loongarch64/curl-runtime/

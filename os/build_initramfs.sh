@@ -46,6 +46,31 @@ case "$ARCH" in
     ;;
 esac
 
+# Optional self-contained curl runtime for the 2K1000 DHCP shell image.
+if [ "${CURL_RUNTIME:-0}" = "1" ]; then
+    if [ "$ARCH" != "la64" ]; then
+        echo "[initramfs] ERROR: curl runtime is currently available only for la64"
+        rm -rf "$STAGE"
+        exit 1
+    fi
+    CURL_SRC="../user/tools/loongarch64/curl-runtime"
+    if [ ! -x "$CURL_SRC/bin/curl" ]; then
+        echo "[initramfs] ERROR: missing curl runtime; run make tools-curl-la"
+        rm -rf "$STAGE"
+        exit 1
+    fi
+    cp -a "$CURL_SRC/bin/." "$STAGE/bin/"
+    if [ -d "$CURL_SRC/lib" ]; then
+        cp -a "$CURL_SRC/lib/." "$STAGE/lib/"
+    fi
+    if [ -d "$CURL_SRC/lib64" ]; then
+        mkdir -p "$STAGE/lib64"
+        cp -a "$CURL_SRC/lib64/." "$STAGE/lib64/"
+    fi
+    cp -a "$CURL_SRC/etc/." "$STAGE/etc/"
+    echo "[initramfs] installed self-contained LoongArch64 curl runtime"
+fi
+
 # 3. 安装 /init（从 initproc 构建产物）— stage-1 引导入口
 if [ -f "$INIT_SRC" ]; then
     install -m 0755 "$INIT_SRC" "$STAGE/init"

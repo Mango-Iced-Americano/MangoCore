@@ -3,7 +3,7 @@ title: "网络 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-13
 tags: [syscall, net, socket]
 ---
 
@@ -42,6 +42,7 @@ trap handler
 | 211 | `sendmsg` | `sys_sendmsg(sockfd, msg, flags)` | `net/syscall/sendmsg.rs` |
 | 212 | `recvmsg` | `sys_recvmsg(sockfd, msg, flags)` | `net/syscall/recvmsg.rs` |
 | 242 | `accept4` | `sys_accept4(sockfd, addr, addrlen, flags)` | `net/syscall/accept.rs` |
+| 269 | `sendmmsg` | `sys_sendmmsg(sockfd, msgvec, vlen, flags)` | `net/syscall/sendmmsg.rs` |
 
 `SYSCALL_SOCK_SHUTDOWN = 210` 是 socket 半关闭。`SYSCALL_SHUTDOWN = 501` 是系统关机 syscall，分发到 `sys_shutdown()`，不读取 socket fd。
 
@@ -255,6 +256,17 @@ socket.try_recvmsg()/try_recv()
 
 `sendmsg`/`recvmsg` 读取用户 `msghdr` 和 iovec，支持向量 I/O、可选 name 地址和控制信息字段。具体控制消息覆盖范围以 `net/syscall/sendmsg.rs`、`recvmsg.rs` 的分支为准。
 
+### 6.4 sendmmsg
+
+`sendmmsg` 按 Linux 64-bit `mmsghdr` 布局遍历消息数组，并复用 `sendmsg` 的
+sockaddr、iovec、阻塞和 flags 校验。每条消息成功后写回 `msg_len`；首条失败直接
+返回负 errno，已有消息成功后的失败返回已发送条数。`vlen` 上限为
+`UIO_MAXIOV=1024`。当前只实现批量发送，`recvmmsg` 尚未实现。
+
+该 syscall 也是 glibc 同步 DNS resolver 的实际依赖：resolver 会用一次
+`sendmmsg` 同时发出 A 和 AAAA 查询。仅有 `sendmsg` 并不足以支持 glibc
+`getaddrinfo()`。
+
 ## 7. setsockopt/getsockopt
 
 socket 选项分层处理：
@@ -267,6 +279,10 @@ socket 选项分层处理：
 | packet/unix/netlink 特有 | 按 socket 类型实现 |
 
 未知 level/optname 按 Linux 语义返回 `ENOPROTOOPT(92)`，而不是 `EOPNOTSUPP(95)`。这一点对 LTP socket option 用例很敏感。
+
+UDP 支持 `IP_RECVERR` 的启用状态查询和设置，以兼容 glibc resolver。当前
+`MSG_ERRQUEUE` 在无错误时返回 `EAGAIN`，尚未实现 ICMP 错误到
+`sock_extended_err` 队列的完整交付。
 
 ## 8. getsockname/getpeername
 
@@ -350,6 +366,7 @@ socket readiness 由 `SocketFile::poll()` 和 socket 类型的 `socket_r_ready/s
 | `os/src/net/syscall/sendto.rs` | sendto/send |
 | `os/src/net/syscall/recvfrom.rs` | recvfrom/recv |
 | `os/src/net/syscall/sendmsg.rs` | sendmsg |
+| `os/src/net/syscall/sendmmsg.rs` | sendmmsg 批量发送 |
 | `os/src/net/syscall/recvmsg.rs` | recvmsg |
 | `os/src/net/syscall/setsockopt.rs` | setsockopt |
 | `os/src/net/syscall/getsockopt.rs` | getsockopt |

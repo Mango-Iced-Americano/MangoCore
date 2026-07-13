@@ -293,6 +293,7 @@ pub const SYSCALL_GETSOCKOPT: usize = 209;
 pub const SYSCALL_SOCK_SHUTDOWN: usize = 210;
 pub const SYSCALL_SENDMSG: usize = 211;
 pub const SYSCALL_RECVMSG: usize = 212;
+pub const SYSCALL_SENDMMSG: usize = 269;
 pub const SYSCALL_ACCEPT4: usize = 242;
 
 pub fn sys_socket(domain: usize, type_: usize, protocol: usize) -> isize {
@@ -372,6 +373,13 @@ pub fn sys_recvfrom(
             src_addr as usize,
             addrlen as usize,
         ],
+    )
+}
+
+pub fn sys_sendmmsg(sockfd: usize, msgvec: *mut u8, vlen: usize, flags: usize) -> isize {
+    syscall4(
+        SYSCALL_SENDMMSG,
+        [sockfd, msgvec as usize, vlen, flags],
     )
 }
 
