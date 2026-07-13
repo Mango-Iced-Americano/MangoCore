@@ -4,7 +4,7 @@ module: "fs/board-image"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-12
+last_updated: 2026-07-13
 code_paths:
   - "scripts/make_2k1000_full_test_disk.py"
   - "scripts/restore_2k1000_p2.py"
@@ -44,9 +44,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img` | 6,443,499,520 B（6145MiB） | `416f84060bca79ab06ef5596d8cfd1801b8ae3e56ae3d2e65e99a66b612ef19f` |
 | `mango-2k1000la-full-test-mbr.img.xz` | 400MiB | `80e1e2addac136da2b9ccffbcad349d915b3b4fec20ef25e11a86193162bc584` |
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
-| `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
 | `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
-| `kernel-2k1000-scratch-rw.ui` | 12,364,416 B | `e379aea367d27e51354cfd8cee620b76357f7278baa9e8e3b160240e189104aa` |
 
 ## 2. MBR 布局
 
@@ -131,7 +129,7 @@ tftpboot 0x9000000098000000 kernel-2k1000-run.ui
 bootm 0x9000000098000000
 ```
 
-`kernel-2k1000-run.ui` 是默认关闭上板诊断、`LOG=off` 且嵌入 `mode=run`/`mask=0xFFF` fallback 配置的正式镜像。旧的 `kernel-2k1000-sata-mount-ro.ui` 仅保留为前期验收基线。
+`kernel-2k1000-run.ui` 是默认关闭上板诊断、`LOG=off` 且嵌入 `mode=run`/`mask=0xFFF` fallback 配置的正式镜像。早期只读挂载及写入探针镜像已完成验收，不再作为公共 Make 目标保留。
 
 预期日志应包含 `/dev/sda1` Ext4、`/dev/sda2` Fat32、`/dev/sda3` Ext4，随后 P1 以 `RDONLY` 挂到 `/sdcard`、P3 以 `RDONLY` 挂到 `/tools`。
 
@@ -139,25 +137,15 @@ bootm 0x9000000098000000
 
 ## 6. 内核 AHCI 写入探针
 
-正式解除只读前，使用独立 feature 构建自恢复探针：
-
-```bash
-make -C os la64-2k1000-sata-write-probe
-make 2k1000-boot IMAGE=kernel-2k1000-sata-write-probe.ui
-```
+正式解除只读前曾使用独立 feature 构建自恢复探针。该一次性 Make 目标已在
+原始写入、flush、恢复和 FAT32 持久化验收全部完成后移除，以下内容保留为安全
+设计与历史验收记录，不是日常构建入口。
 
 探针硬匹配 SSD 型号 `TS32GMTS400`、MBR 签名和 disk id `0x4d414e47`，解析四个主分区后，在最后一个分区末端之外保留 2048 个 sector，再测试连续 8 个 sector。当前镜像对应测试范围为 `12587008..12587015`，不属于 P1/P2/P3。
 
 测试顺序固定为：备份原 4KiB → 写入确定性模式 → `FLUSH CACHE EXT` → 读回逐扇区比较 → 写回备份 → 再次 flush → 读回确认恢复。第一次写命令发出后，无论中间步骤成功或失败都必须执行恢复；恢复不能完成或不能验证时内核立即 panic，不再继续文件系统路径。该 feature 保持 ramfs-only，不注册可写设备节点，也不改变正式 run 镜像的三层只读保护。
 
-原始扇区探针通过后，使用第二个独立镜像验证 P2 FAT32：
-
-```bash
-make -C os la64-2k1000-sata-fs-write-probe
-make 2k1000-boot IMAGE=kernel-2k1000-sata-fs-write-probe.ui
-```
-
-该镜像仍按正式路径只读挂载 P1/P3，并保持 `/dev/vda2` 只读；内核仅为探针构造一个不暴露给用户态的 P2 可写视图，创建 `MANGO_RW_PROBE/PAYLOAD.BIN`，写入 6KiB 后强制 page cache 写回，重新打开 FAT32 验证目录、文件和内容，再删除并第三次打开确认清理持久化。只有该阶段通过后，才允许把 P2 作为用户态 scratch 分区开放。
+第二阶段探针仍按正式路径只读挂载 P1/P3，并保持 `/dev/vda2` 只读；内核仅为探针构造一个不暴露给用户态的 P2 可写视图，创建 `MANGO_RW_PROBE/PAYLOAD.BIN`，写入 6KiB 后强制 page cache 写回，重新打开 FAT32 验证目录、文件和内容，再删除并第三次打开确认清理持久化。只有该阶段通过后，才允许把 P2 作为用户态 scratch 分区开放。
 
 实板最终通过镜像 SHA-256 为 `8f3a6abef28b4a15fd6930da259ba0c9c1d112f393a26bd7c82c1ce4f4ee6fdb`，串口结果为：
 
@@ -184,39 +172,22 @@ HBA reset 后还必须恢复平台可写的 CAP/PI。2K1000 按随板 U-Boot 保
 
 ## 7. Staged 用户态 `/scratch`
 
-需要在不运行测例的情况下交互检查三个 SSD 分区时，使用独立 SATA Shell 镜像：
+需要交互检查三个 SSD 分区、DHCP 和外网时，统一使用 HTTPS curl Shell：
 
 ```bash
-make -C os la64-2k1000-sata-shell
-make 2k1000-boot IMAGE=kernel-2k1000-sata-shell.ui
+make -C os la64-2k1000-curl-shell
+make 2k1000-boot IMAGE=kernel-2k1000-curl-shell.ui
 ```
 
 该镜像将 P1 只读挂载到 `/sdcard`、P2 FAT32 可写挂载到 `/scratch`、P3 只读
-挂载到 `/tools`，随后通过易失 `/board_shell` 标记进入 Bash。它不启用 GMAC，
-用于把 AHCI/分区/文件系统问题与网卡 DMA 问题隔离开；磁盘上的
-`/sdcard/os_test.conf` 不会被改写。
+挂载到 `/tools`，启用 GMAC0/DHCP，随后通过易失 `/board_shell` 标记进入 Bash；
+磁盘上的 `/sdcard/os_test.conf` 不会被改写。该综合目标取代早期 SATA-only、
+静态网络联合和 scratch 中间镜像。
 
-SATA Shell 验收后，可用完整 Shell 集成镜像同时启用纯净 GMAC0 驱动：
-
-```bash
-make -C os la64-2k1000-full-shell
-make 2k1000-boot IMAGE=kernel-2k1000-full-shell.ui
-```
-
-该目标保持相同分区写保护，并增加 `gmac_2k1000`，用于在交互式 Shell 中同时
-验证 `/sdcard`、`/scratch`、`/tools` 和 `192.168.9.20/24`。逐包
-`gmac_diag` 仍保持关闭。
-
-内核文件探针通过后，可构建只开放 P2 的 staged 镜像：
-
-```bash
-make -C os la64-2k1000-scratch-rw
-python3 scripts/boot_2k1000_tftp.py \
-  --interface en8 \
-  --image kernel-2k1000-scratch-rw.ui
-```
-
-该目标强制 `os_test.conf` 为 `mode=run`，并要求 P2 同时满足 partno 2、MBR type `0x0c` 和 FAT32 三个条件才挂载到 `/scratch`。P1 `/sdcard`、P3 `/tools` 以及 `/dev/sda*`、`/dev/vda*` 块设备节点仍为只读，避免用户态绕过挂载策略直接覆盖磁盘。
+所有保留的 `sata_scratch_rw` 诊断/回归目标都要求 P2 同时满足 partno 2、MBR
+type `0x0c` 和 FAT32 三个条件才挂载到 `/scratch`。P1 `/sdcard`、P3 `/tools`
+以及 `/dev/sda*`、`/dev/vda*` 块设备节点仍为只读，避免用户态绕过挂载策略直接
+覆盖磁盘。
 
 stage-1 会创建 `/scratch/MANGO_USR_PROBE/PAYLOAD.BIN`，写入 6144 字节确定性数据，执行 fsync、截断到 2048 字节、关闭重开、内容和 EOF 比对，最后 unlink/rmdir。任一步失败都会停止进入测例；成功标志为：
 
@@ -284,4 +255,6 @@ libctest 和 cyclictest 从上述独立 FAT32 工作区运行；LTP 二进制继
 
 聚焦 LTP 仍暴露 symlink/execveat、getdents、`/proc/self/maps`、pipe 大写入、无测试块设备及 glibc 后半程 poll/select 时序长尾。外层 runner 返回 0 只代表调度完整结束，不能视为 548 次调用全部通过。
 
-按正式顺序下一阶段是 netperf/iperf。当前 2K1000 路径仍跳过外部网卡探测并使用 loopback-only 网络栈，因此必须先完成板载 GMAC/PHY 驱动与 smoltcp 接入，再迁移网络组的运行目录；不能把 U-Boot TFTP 网卡可用误认为 MangoCore 已具备运行期网络设备。
+板载 GMAC0/PHY、DHCP、默认路由、DNS、HTTP 和带证书校验的 HTTPS 已在实板
+通过。后续网络测试阶段使用保留的 `la64-2k1000-net-tests` 目标推进
+netperf/iperf 与网络 LTP，不再重建早期单子系统探针镜像。

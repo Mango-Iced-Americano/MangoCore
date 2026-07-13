@@ -4,6 +4,24 @@
 
 ## 2026-07-13
 
+### build/board: 移除已被集成目标取代的一次性上板 Make 入口
+
+**涉及文件：**
+- `os/Makefile` — 删除 10 个已完成验收的 SATA/GMAC 探针、分阶段 Shell 和中间 scratch 构建目标；保留救援 Shell、核心/网络回归、QEMU/实板 HTTPS 及正式 run 镜像共 7 个长期入口
+- `docs/03_fs/2k1000-full-test-disk.md` — 移除失效探针命令和中间镜像清单，保留写入安全设计及历史验收结果，并将交互检查统一到 HTTPS curl Shell
+- `docs/06_net/dhcp.md`、`docs/07_driver/2k1000-gmac.md` — 将单独 DHCP、GMAC 探针和联合 Shell 流程收敛到当前 HTTPS/网络回归目标
+
+**验证：**
+- Docker 独立执行 `make -C os rv64-kernel-build-only MODE=release` 成功，仅有项目既有 warning ✅
+- 前一命令结束后独立执行 `make -C os la64-kernel-build-only MODE=release` 成功，仅有项目既有 warning ✅
+- 对 7 个保留目标逐项执行 `make -C os -n <target> MODE=release`，依赖和命令均可正常展开 ✅
+- 对 10 个删除目标逐项执行 `make -C os -n <target>`，均按预期返回 `No rule to make target` ✅
+- 仓库中除历史工作日志外，不再存在已删除 Make 目标或对应中间镜像名称的有效操作指引；`git diff --check` 通过 ✅
+
+**备注：**
+- 本轮只清理公共 Make 入口，没有删除底层诊断 feature 和已经验证过的安全探针代码；现场若出现硬件回归，仍可基于 Git 历史和 feature 定向恢复，而不会污染日常命令面。
+- 保留目标为 `la64-2k1000-shell`、`la64-2k1000-core-tests`、`la64-2k1000-net-tests`、`la64-qemu-curl-shell{,-run}`、`la64-2k1000-curl-shell` 和 `la64-2k1000-run-clean`。
+
 ### board/net: QEMU-first 打通带证书校验的 HTTPS curl 并完成实板验收
 
 **涉及文件：**

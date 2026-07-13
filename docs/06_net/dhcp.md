@@ -92,20 +92,16 @@ glibc 的同步 resolver 还依赖两项 socket ABI：在 UDP 查询 socket 上�
 
 ## 构建与实板验证
 
-~~~bash
-make -C os la64-2k1000-dhcp-shell
-make 2k1000-boot IMAGE=kernel-2k1000-dhcp-shell.ui
-~~~
-
-需要同时验证 glibc resolver 和 HTTP 客户端时使用自包含 curl 镜像：
+统一使用自包含 HTTPS curl Shell 验证 DHCP、glibc resolver 和外网客户端：
 
 ~~~bash
 make -C os la64-2k1000-curl-shell
 make 2k1000-boot IMAGE=kernel-2k1000-curl-shell.ui
 ~~~
 
-该目标把固定版本的 LoongArch64 glibc curl 运行时放入 initramfs，不改写 SSD。
-当前构建只启用 HTTP，TLS/HTTPS 尚未启用。
+该目标把固定版本的 LoongArch64 glibc curl、静态 Mbed TLS 和 CA bundle 放入
+initramfs，不改写 SSD。早期单独 DHCP Shell 已被该综合目标取代并从 Makefile
+移除。
 
 启动日志应先出现：
 
