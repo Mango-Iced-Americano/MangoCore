@@ -1033,36 +1033,64 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::ENOTDIR);
         }
         let child_path = join_path(&self.path, name);
-        let _lock = self.fs.lw.lock();
-        let lw_child = self.fs.lw_path(&child_path);
-        // Check directory is empty (lwext4 dir_rm is recursive)
-        let dir = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
-        let _de_start = crate::task::perf::perf_time_now();
-        let (entries, types) = dir
-            .lwext4_dir_entries()
-            .map_err(|e| from_lwext4(e.abs()))?;
-        counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
-        counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
-            crate::task::perf::perf_time_now().wrapping_sub(_de_start),
-            Ordering::Relaxed,
-        );
-        let has_children = entries.iter().zip(types.iter()).any(|(b, t)| {
-            // EXT4_DE_UNKNOWN means the inode was deleted but the
-            // directory entry survived (e.g. PageCache lost the write).
-            // Treat these as non-existent so rmdir can succeed.
-            if *t == InodeTypes::EXT4_DE_UNKNOWN {
-                return false;
+        let lw_child;
+        let mut candidates;
+
+        // ── Phase 1: list directory entries under lock ──
+        {
+            let _lock = self.fs.lw.lock();
+            lw_child = self.fs.lw_path(&child_path);
+            let dir = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
+            let _de_start = crate::task::perf::perf_time_now();
+            let (entries, types) = dir
+                .lwext4_dir_entries()
+                .map_err(|e| from_lwext4(e.abs()))?;
+            counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
+                crate::task::perf::perf_time_now().wrapping_sub(_de_start),
+                Ordering::Relaxed,
+            );
+
+            // Collect non-trivial child names, skipping EXT4_DE_UNKNOWN
+            // (inode freed but directory entry survived).
+            candidates = Vec::new();
+            for (b, t) in entries.iter().zip(types.iter()) {
+                if *t == InodeTypes::EXT4_DE_UNKNOWN {
+                    continue;
+                }
+                let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
+                let s = core::str::from_utf8(&b[..len]).unwrap_or("");
+                if s == "." || s == ".." || s.is_empty() {
+                    continue;
+                }
+                candidates.push(alloc::string::String::from(s));
             }
-            let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
-            let s = core::str::from_utf8(&b[..len]).unwrap_or("");
-            s != "." && s != ".." && !s.is_empty()
+        } // _lock dropped here
+
+        // ── Phase 2: verify each candidate's inode still exists ──
+        // A directory entry may have a valid file_type byte but a
+        // freed inode (inode == 0 on disk).  The EXT4_DE_UNKNOWN
+        // check above catches type==0, but the type byte is set at
+        // file creation and never cleared when the inode is freed.
+        // We must probe the inode directly to distinguish orphans.
+        let has_real = candidates.iter().any(|s| {
+            let entry_path = alloc::format!("{}/{}", lw_child, s);
+            let path = self.fs.lw_path(&entry_path);
+            let mut probe = Ext4File::new(&path, InodeTypes::EXT4_DE_UNKNOWN);
+            probe.check_inode_exist(&path, InodeTypes::EXT4_DE_UNKNOWN)
         });
-        if has_children {
+        if has_real {
             return Err(SyscallErr::ENOTEMPTY);
         }
-        let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
-        f.dir_rm(&lw_child)
-            .map_err(|e| from_lwext4(e.abs()))?;
+
+        // ── Phase 3: all children are orphans — remove the dir ──
+        {
+            let _lock = self.fs.lw.lock();
+            let lw_child = self.fs.lw_path(&child_path);
+            let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
+            f.dir_rm(&lw_child)
+                .map_err(|e| from_lwext4(e.abs()))?;
+        }
         Ok(())
     }
 
