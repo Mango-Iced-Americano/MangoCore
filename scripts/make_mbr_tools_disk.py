@@ -22,7 +22,7 @@ SECTOR = 512
 MIB = 1024 * 1024
 
 P1_START = 2048               # 1 MiB alignment
-P1_MIB = 768
+P1_MIB = 2048
 P2_MIB = 1280
 
 P1_SECTORS = P1_MIB * MIB // SECTOR
