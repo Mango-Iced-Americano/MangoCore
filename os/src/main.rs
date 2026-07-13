@@ -40,6 +40,7 @@ mod math;
 mod mm;
 mod net;
 mod panic_diag;
+mod random;
 mod syscall;
 mod task;
 mod timer;
@@ -144,6 +145,8 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
+    random::init();
+    println!("[kernel] PRNG initialized.");
 
     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
     let boot_config = crate::bootargs::load();

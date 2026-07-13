@@ -969,17 +969,11 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
         Err(errno) => return errno,
     };
     let mut user = UserBuffer::new(buffers);
-    let mut seed = crate::hal::get_time() as u64 ^ ((buf as u64) << 17) ^ buflen as u64;
     let mut offset = 0usize;
     let mut chunk = [0u8; 64];
     while offset < buflen {
-        for byte in chunk.iter_mut() {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            *byte = seed as u8;
-        }
         let copy_len = core::cmp::min(chunk.len(), buflen - offset);
+        crate::random::fill_random(&mut chunk[..copy_len]);
         user.write_at(offset, &chunk[..copy_len]);
         offset += copy_len;
     }
