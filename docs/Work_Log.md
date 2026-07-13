@@ -2,6 +2,25 @@
 
 ---
 
+## 2026-07-13
+
+### 修复 initproc.rs 的幂等性问题，支持 apk 包在重启后持久化
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 4 处修改：
+  **Fix 1 (条件性 /usr/lib 软链接):** 将 `rm -rf /usr/lib; ln -sf /lib /usr/lib` 替换为条件判断：仅当 `/usr/lib` 不存在或已是软链接时才重建，保留 apk 安装的真实目录内容。
+  **Fix 2 (幂等 ln -sf):** 将 lib_cmd 中的所有 `ln -sf` 替换为 `[ -e link ] || ln -sf`（包括 modprobe、loader symlinks、musl/glibc 库的 for 循环）。Phase 4 的 `/bin/sh → /bin/bash` 同理。
+  **Fix 3 (busybox --install 跳过):** 在已有 `test -x /bin/head && test -x /bin/tail && test -x /bin/wc` 条件中增加 `test -e /bin/apk` 作为提前退出条件 — 如果 apk 已存在（工具盘已挂载），彻底跳过 --install。
+  **Fix 4 (modules.dep/.builtin 不截断):** 将 `: > path` 和 `printf ... > path` 改为 `[ -f path ] || : > path` / `[ -f path ] || printf ... > path`，避免重启覆盖已有文件。
+
+**验证：**
+- `cargo check --target riscv64gc-unknown-none-elf`（user 目录）✅
+
+**备注：**
+- 这些修改确保第二次启动时（工具盘 bind-mount 已就绪），不会用 ramfs 的快照内容覆盖 /bin/、/lib/、/usr/ 下的持久化 apk 包文件
+- 原 `rm -rf /usr/lib` 注释明确指出 "install_apk_packages must run after this step" — 条件性 symlink 消除了这个时序依赖
+- for 循环中的 `ln -sf "$f" /lib/` 改为了先计算 basename，再 `[ -e "/lib/$bn" ] || ln -sf "$f" /lib/`，避免逐个检查文件时重复创建
+
 ## 2026-07-12
 
 ### 修复 ext4_lwext4 零字节文件 bug（write-ordering + rename flush 错误传播）

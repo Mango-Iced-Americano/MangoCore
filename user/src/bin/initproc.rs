@@ -2972,7 +2972,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
         test -e /bin/busybox || ln -s /busybox /bin/busybox; \
-        if test -x /bin/head && test -x /bin/tail && test -x /bin/wc; then \
+        if test -e /bin/apk || (test -x /bin/head && test -x /bin/tail && test -x /bin/wc); then \
             echo 'busybox applets already installed, skipping --install'; \
         else \
             /bin/busybox --install -s /bin; \
@@ -2997,7 +2997,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
-        ln -sf /bin/bash /bin/sh;
+        [ -e /bin/sh ] || ln -sf /bin/bash /bin/sh;
     ",
         environ,
     );
@@ -3021,36 +3021,35 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.7: /lib/modules/ — merged into Step 2 (after /lib exists)
 
     // Step 2: musl/glibc 动态库 + /lib/modules/ — 单次 shell 调用
-    // WARNING: Step 2 does `rm -rf /usr/lib; ln -sf /lib /usr/lib`, so any
-    // apk-installed libs in /usr/lib (e.g. libeconf.so.0 from e2fsprogs)
-    // would be destroyed. install_apk_packages must run AFTER this step.
+    // NOTE: /usr/lib is now conditionally symlinked — if it's a real dir
+    // with content (apk-installed packages), it's left alone.
+    // install_apk_packages can run at any time relative to this step.
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
         mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
         rm -rf /lib64; ln -sf /lib /lib64; \
-        rm -rf /usr/lib; ln -sf /lib /usr/lib; \
+        if [ ! -d /usr/lib ] || [ -L /usr/lib ]; then rm -rf /usr/lib 2>/dev/null || true; ln -sf /lib /usr/lib; fi; \
         rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
         mkdir -p /lib/modules/5.10.0-1-rv64 /lib/modules/5.10.0-1-la64; \
-        : > /lib/modules/5.10.0-1-rv64/modules.dep; \
-        : > /lib/modules/5.10.0-1-la64/modules.dep; \
-        printf '/veth.ko\n' > /lib/modules/5.10.0-1-rv64/modules.builtin; \
-        printf '/veth.ko\n' > /lib/modules/5.10.0-1-la64/modules.builtin; \
-        ln -sf /bin/true /sbin/modprobe; \
-        ln -sf /bin/true /bin/modprobe; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
-        ln -sf /musl/lib/libc.so /lib/libc.so; \
-        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
-        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
-        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
-        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
-        ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1; \
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
-        for f in /musl/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
-        for f in /glibc/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
-        [ -e /glibc/lib/libgcc_s.so.1 ] || ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1 \
+        [ -f /lib/modules/5.10.0-1-rv64/modules.dep ] || : > /lib/modules/5.10.0-1-rv64/modules.dep; \
+        [ -f /lib/modules/5.10.0-1-la64/modules.dep ] || : > /lib/modules/5.10.0-1-la64/modules.dep; \
+        [ -f /lib/modules/5.10.0-1-rv64/modules.builtin ] || printf '/veth.ko\n' > /lib/modules/5.10.0-1-rv64/modules.builtin; \
+        [ -f /lib/modules/5.10.0-1-la64/modules.builtin ] || printf '/veth.ko\n' > /lib/modules/5.10.0-1-la64/modules.builtin; \
+        [ -e /sbin/modprobe ] || ln -sf /bin/true /sbin/modprobe; \
+        [ -e /bin/modprobe ] || ln -sf /bin/true /bin/modprobe; \
+        [ -e /lib/ld-musl-riscv64-sf.so.1 ] || ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
+        [ -e /lib/ld-musl-riscv64.so.1 ] || ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
+        [ -e /lib/libc.so ] || ln -sf /musl/lib/libc.so /lib/libc.so; \
+        [ -e /lib/ld-linux-riscv64-lp64d.so.1 ] || ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
+        [ -e /lib/ld-linux-loongarch-lp64d.so.1 ] || ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
+        [ -e /lib/ld-musl-loongarch-lp64d.so.1 ] || ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
+        [ -e /lib/libc.so.6 ] || ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
+        [ -e /lib/libm.so.6 ] || ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        [ -e /glibc/lib/libgcc_s.so.1 ] || ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1; \
+        [ -e /lib/tls_get_new-dtv_dso.so ] || ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
+        [ -e ./libtls_get_new-dtv_dso.so ] || ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
+        for f in /musl/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
@@ -3095,7 +3094,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
-        ln -sf /bin/bash /bin/sh;
+        [ -e /bin/sh ] || ln -sf /bin/bash /bin/sh;
     ",
         environ,
     );

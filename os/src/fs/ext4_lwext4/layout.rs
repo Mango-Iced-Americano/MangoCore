@@ -1038,7 +1038,7 @@ impl IndexNode for Ext4OSInode {
         // Check directory is empty (lwext4 dir_rm is recursive)
         let dir = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
         let _de_start = crate::task::perf::perf_time_now();
-        let (entries, _) = dir
+        let (entries, types) = dir
             .lwext4_dir_entries()
             .map_err(|e| from_lwext4(e.abs()))?;
         counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -1046,7 +1046,13 @@ impl IndexNode for Ext4OSInode {
             crate::task::perf::perf_time_now().wrapping_sub(_de_start),
             Ordering::Relaxed,
         );
-        let has_children = entries.iter().any(|b| {
+        let has_children = entries.iter().zip(types.iter()).any(|(b, t)| {
+            // EXT4_DE_UNKNOWN means the inode was deleted but the
+            // directory entry survived (e.g. PageCache lost the write).
+            // Treat these as non-existent so rmdir can succeed.
+            if *t == InodeTypes::EXT4_DE_UNKNOWN {
+                return false;
+            }
             let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
             let s = core::str::from_utf8(&b[..len]).unwrap_or("");
             s != "." && s != ".." && !s.is_empty()
