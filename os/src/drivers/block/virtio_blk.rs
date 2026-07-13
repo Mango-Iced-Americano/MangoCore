@@ -1,7 +1,6 @@
 use super::BlockDevice;
 use crate::mm::{
-    frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
-    PhysAddr, PhysPageNum, StepByOne, VirtAddr,
+    frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl, PhysAddr, VirtAddr,
 };
 use alloc::collections::BTreeMap;
 use alloc::{sync::Arc, vec::Vec};
@@ -169,16 +168,11 @@ unsafe impl Hal for VirtioHal {
 
 #[no_mangle]
 pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr {
-    let mut ppn_base = PhysPageNum(0);
-    let mut frames = Vec::with_capacity(pages);
-    for i in 0..pages {
-        let frame = frame_alloc().unwrap();
-        if i == 0 {
-            ppn_base = frame.ppn;
-        }
-        assert_eq!(frame.ppn.0, ppn_base.0 + i);
-        frames.push(frame);
-    }
+    let frames = frames_alloc(pages).expect("virtio DMA contiguous allocation failed");
+    let ppn_base = frames
+        .first()
+        .expect("virtio DMA cannot allocate an empty extent")
+        .ppn;
     let pa = PhysAddr::from(ppn_base).0;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
     assert!(

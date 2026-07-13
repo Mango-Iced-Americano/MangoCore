@@ -105,7 +105,7 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
 
 ### 内存管理
 
-- **物理内存**：栈式帧分配器，4KB/帧；`frame_store.rs` 跟踪帧状态用于 swap/zram
+- **物理内存**：多 region 栈式帧分配器，4KB/帧；平台以 `MEMORY_REGIONS` 描述 DRAM bank、以 `FIRMWARE_RESERVED_REGIONS` 描述未交接 carveout；`frame_store.rs` 跟踪帧状态用于 swap/zram
 - **虚拟内存**：SV39 页表，每进程独立 `MemorySet`；`VmaSet` 管理 VMA；`filemap.rs` 处理 mmap 文件缺页
 - **用户内存访问**：`translated_ref/refmut/byte_buffer`、`copy_from_user`、`translated_str`
 - **关键约束**：MAP_SHARED 页面不参与 CoW；修改 PTE 后必须 TLB 刷新；`execve`/`clone` 路径用 `try_reserve` 防 OOM
@@ -214,6 +214,8 @@ VirtIO RNG / 2K1000LA APB RNG -> drivers/rng -> random::ChaCha20Rng
 - **TLB 刷新**：所有 PTE 修改操作（`unmap`/`block_and_ret_mut`/`set_pte_flags`）后必须 `sfence.vma`/`invtlb`
 - **MAP_SHARED**：不参与 CoW，fork 时恢复 W 权限，缺页只恢复 W
 - **OOM**：`execve`/`clone` 路径 Vec 扩容必须 `try_reserve` 返回 `ENOMEM`
+- **非连续 DRAM**：`MEMORY_SIZE` 是容量、`MEMORY_END` 是地址上界，都不能代替 region 表；DMA 连续页必须用 `frames_alloc()`，普通页集合用 `frames_alloc_any()`
+- **固件所有权**：启动后仍被 framebuffer、其他 CPU 或 boot firmware 使用的 DRAM 必须 carveout，只有完成停 DMA/重停放/复制后才能回收
 
 ### 网络
 

@@ -221,7 +221,7 @@ frame_allocator::init_frame_allocator()
 KERNEL_SPACE.lock().activate()
 ```
 
-`KERNEL_SPACE` 建立 trampoline、`.text`、`.rodata`、`.data`、`.bss`、`ekernel..MEMORY_END` 和 `MMIO` 表中区间的映射。内核空间激活后，后续驱动、FS 和 task 初始化运行在内核页表上。
+`KERNEL_SPACE` 建立 trampoline、`.text`、`.rodata`、`.data`、`.bss`、各 usable DRAM region 和 `MMIO` 表中区间的映射。DRAM region 表显式保留地址空洞和固件 carveout；内核空间激活后，后续驱动、FS 和 task 初始化运行在内核页表上。
 
 ### 5.3 initramfs 路径
 

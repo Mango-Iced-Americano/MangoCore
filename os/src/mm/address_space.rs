@@ -698,9 +698,9 @@ impl<T: PageTable> AddressSpace<T> {
         addr: VirtAddr,
         pa: PhysAddr,
     ) -> Result<PhysAddr, MemoryError> {
-        if pa.0 < MEMORY_START || pa.0 >= MEMORY_END {
+        if !super::is_allocatable_ram_phys_addr(pa.0) {
             warn!(
-                "[fault_in] translated user va {:#x} to invalid pa {:#x}",
+                "[fault_in] translated user va {:#x} to unusable/non-DRAM pa {:#x}",
                 addr.0, pa.0
             );
             return Err(MemoryError::BadAddress);

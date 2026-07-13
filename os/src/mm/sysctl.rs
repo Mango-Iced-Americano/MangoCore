@@ -9,9 +9,12 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::config::{MEMORY_SIZE, PAGE_SIZE};
+use crate::config::{PAGE_SIZE, USABLE_MEMORY_SIZE};
 
+#[cfg(not(feature = "board_2k1000"))]
 const REPORTED_MEMORY_CAP_KB: usize = 512 * 1024;
+#[cfg(feature = "board_2k1000")]
+const REPORTED_MEMORY_CAP_KB: usize = USABLE_MEMORY_SIZE / 1024;
 // Keep the ABI-visible commit window conservative. The QEMU kernels have less
 // useful user mmap space and lower OOM recovery headroom than the raw RAM size
 // suggests, and LTP tunable tests size their stress loops from CommitLimit.
@@ -127,7 +130,7 @@ pub fn overcommit_allows(current_committed_bytes: usize, additional_bytes: usize
 
 /// 返回 ABI 可见的总内存，单位 KiB。
 pub fn total_memory_kbytes() -> usize {
-    (MEMORY_SIZE / 1024).min(REPORTED_MEMORY_CAP_KB)
+    (USABLE_MEMORY_SIZE / 1024).min(REPORTED_MEMORY_CAP_KB)
 }
 
 fn reported_memory_bytes() -> usize {

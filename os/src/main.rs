@@ -138,16 +138,43 @@ core::arch::global_asm!(include_str!("preload_app.S"));
 
 fn mem_clear() {
     extern "C" {
+        fn skernel();
         fn sbss();
         fn ebss();
+        fn ekernel();
     }
     #[cfg(feature = "zero_init")]
     unsafe {
-        core::slice::from_raw_parts_mut(
-            sbss as usize as *mut u8,
-            crate::config::MEMORY_END - sbss as usize,
-        )
-        .fill(0);
+        // `zero_init` pre-clears fresh frames so allocation can skip per-page
+        // zeroing. Iterate real DRAM banks: a single sbss..MEMORY_END range
+        // would touch the 2K1000LA MMIO hole between its two banks.
+        for &(region_start, region_end) in crate::config::MEMORY_REGIONS {
+            let mut clear_start = region_start.max(crate::config::PAGE_SIZE);
+            if region_start < ekernel as usize && (skernel as usize) < region_end {
+                // Keep text/rodata/data and the live boot stack; clear BSS and
+                // all fresh memory after it, matching the old contiguous path.
+                clear_start = clear_start.max(sbss as usize);
+            }
+            if clear_start < region_end {
+                // Keep firmware/device-owned carveouts intact. They can contain
+                // an active display buffer or another CPU's park loop even
+                // though the addresses are backed by DRAM.
+                let mut cursor = clear_start;
+                for &(reserved_start, reserved_end) in crate::config::FIRMWARE_RESERVED_REGIONS {
+                    if reserved_end <= cursor || reserved_start >= region_end {
+                        continue;
+                    }
+                    let clear_end = reserved_start.min(region_end);
+                    if cursor < clear_end {
+                        core::ptr::write_bytes(cursor as *mut u8, 0, clear_end - cursor);
+                    }
+                    cursor = cursor.max(reserved_end).min(region_end);
+                }
+                if cursor < region_end {
+                    core::ptr::write_bytes(cursor as *mut u8, 0, region_end - cursor);
+                }
+            }
+        }
     }
     #[cfg(not(feature = "zero_init"))]
     unsafe {

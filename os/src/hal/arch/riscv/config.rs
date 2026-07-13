@@ -37,6 +37,16 @@ pub const MEMORY_END: usize = MEMORY_START + MEMORY_SIZE;
 pub const MEMORY_END: usize = 0x9000_0000;
 #[cfg(feature = "board_cv1811h")]
 pub const MEMORY_END: usize = 0x9000_0000; //256M
+/// Physical DRAM banks as half-open byte ranges.
+pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
+/// RISC-V platforms currently have no post-firmware DRAM carveouts.
+pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[];
+/// RAM currently exposed by the selected RISC-V board configuration.
+///
+/// `MEMORY_SIZE` is a historical common capacity constant, while fu740 and
+/// cv1811h select a smaller `MEMORY_END`; use the actual region length for ABI
+/// statistics so those boards retain their previous `sysinfo(2)` semantics.
+pub const USABLE_MEMORY_SIZE: usize = MEMORY_END - MEMORY_START;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 0xc;
 

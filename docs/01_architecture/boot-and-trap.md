@@ -146,9 +146,9 @@ fs::mount_boot_block_devices_read_only()
 fs::install_preload_payloads()       [preload_payloads]
 ```
 
-默认分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。`main.rs` 注释说明块设备探测需要连续物理页 DMA，因此放在 payload 安装之前。
+默认分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。块设备 DMA 通过 `frames_alloc()` 获取单一 DRAM region 内的连续 extent；探测仍放在 payload 安装之前，以降低早期碎片并尽快验证启动盘。
 
-`board_2k1000` 始终跳过 QEMU virtio 网卡枚举。救援镜像和 `sata_probe` 镜像在建立 initramfs 根前调用 `fs::force_ramfs()`；普通 `block_sata` 镜像则探测 SATA SSD，并通过 `mount_boot_block_devices_read_only()` 只读挂载裸 ext4/FAT32 或 MBR 主分区。板载 GMAC/PHY 仍未接入。
+`board_2k1000` 始终跳过 QEMU virtio 网卡枚举；启用 `gmac_2k1000` 的构建改由板载 DWMAC/PHY 注册 `eth0`。救援镜像和 `sata_probe` 镜像在建立 initramfs 根前调用 `fs::force_ramfs()`；普通 `block_sata` 镜像则探测 SATA SSD，并通过 `mount_boot_block_devices_read_only()` 只读挂载裸 ext4/FAT32 或 MBR 主分区。
 
 ### 3.3 legacy 分支
 

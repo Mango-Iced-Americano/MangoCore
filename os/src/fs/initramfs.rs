@@ -61,32 +61,43 @@ pub struct InitramfsStats {
 
 // ── 嵌入归档访问 ────────────────────────────────────────────────────────
 
-/// 返回嵌入内核的 initramfs cpio 归档切片
-pub fn embedded_archive() -> &'static [u8] {
+/// Return the linker-owned initramfs byte range.
+fn embedded_archive_bounds() -> (usize, usize) {
     extern "C" {
         static sinitramfs: u8;
         static einitramfs: u8;
     }
-    // SAFETY: sinitramfs/einitramfs 是链接器定义的符号，
-    // 指向 .data 段中由 .incbin 嵌入的 cpio 归档数据。
-    unsafe {
-        let start = &sinitramfs as *const u8 as usize;
-        let end = &einitramfs as *const u8 as usize;
-        if end <= start {
-            return &[];
-        }
-        core::slice::from_raw_parts(start as *const u8, end - start)
-    }
+    let start = unsafe { &sinitramfs as *const u8 as usize };
+    let end = unsafe { &einitramfs as *const u8 as usize };
+    (start, end)
 }
 
 /// 解包嵌入的 initramfs 到指定 MountFS 根
 pub fn unpack_embedded(root: &Arc<MountFS>) -> Result<InitramfsStats, InitramfsError> {
-    let archive = embedded_archive();
-    if archive.is_empty() {
+    let (start, end) = embedded_archive_bounds();
+    if end <= start {
         println!("[initramfs] embedded archive is empty, skipping unpack");
         return Ok(InitramfsStats::default());
     }
-    unpack_newc(root, archive)
+    // Safety: the linker symbols delimit the initialized bytes emitted by
+    // initramfs-{rv,la}.S. `unpack_newc` copies all retained file contents into
+    // VFS-owned storage and does not keep references into this slice.
+    let result = unpack_newc(root, unsafe {
+        core::slice::from_raw_parts(start as *const u8, end - start)
+    });
+
+    assert_eq!(
+        start % crate::config::PAGE_SIZE,
+        0,
+        "embedded initramfs start is not page-aligned"
+    );
+    let start_ppn = crate::mm::PhysAddr::from(start).floor();
+    let end_ppn = crate::mm::PhysAddr::from(end).floor();
+    // Safety: unpack_newc has returned, no archive-derived reference escapes,
+    // and the partial final linker page is excluded by rounding end down.
+    unsafe { crate::mm::frame_reclaim_linker_range(start_ppn, end_ppn) }
+        .unwrap_or_else(|reason| panic!("failed to reclaim embedded initramfs pages: {}", reason));
+    result
 }
 
 // ── newc header 解析 ────────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 //! PTE 修改通过 `KernelMapper` 进入页表实现。新增直接页表操作时必须保持架构层
 //! 的 TLB 刷新契约。
 
+use super::frame_allocator::for_each_usable_frame_region;
 use super::kernel_mapper::KernelMapper;
 use super::{
     frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum,
@@ -210,12 +211,14 @@ impl<T: PageTable> KernelSpace<T> {
             ebss,
             MapPermission::R | MapPermission::W | MapPermission::G
         );
-        kernel_identical_map!(
-            "physical memory",
-            ekernel,
-            MEMORY_END,
-            MapPermission::R | MapPermission::W | MapPermission::G
-        );
+        for_each_usable_frame_region(|start, end| {
+            kernel_identical_map!(
+                "physical memory region",
+                start.start_addr().0,
+                end.start_addr().0,
+                MapPermission::R | MapPermission::W | MapPermission::G
+            );
+        });
 
         boot_trace!("mapping memory-mapped registers");
         for pair in MMIO {

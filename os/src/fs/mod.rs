@@ -1306,6 +1306,31 @@ raw 255 RAW\n";
     }
 }
 
+/// Return fully copied embedded payload pages to the physical-frame allocator.
+///
+/// The end symbol may point into a partial final page. Matching the historical
+/// behavior, that page remains part of the kernel image and only the complete
+/// pages in `[start, end)` are released.
+///
+/// # Safety
+///
+/// `start` and `end` must delimit one linker-owned payload. The caller must
+/// have completed every read through those symbols before calling this helper.
+unsafe fn reclaim_preload_payload_pages(start: usize, end: usize) {
+    assert!(start <= end, "preload payload symbols are reversed");
+    assert_eq!(
+        start % crate::config::PAGE_SIZE,
+        0,
+        "preload payload start is not page-aligned"
+    );
+    let start_ppn = crate::mm::PhysAddr::from(start).floor();
+    let end_ppn = crate::mm::PhysAddr::from(end).floor();
+    // Safety: upheld by this helper's caller; the partial trailing page is not
+    // included because `end` is rounded down.
+    unsafe { crate::mm::frame_reclaim_linker_range(start_ppn, end_ppn) }
+        .unwrap_or_else(|reason| panic!("failed to reclaim preload payload pages: {}", reason));
+}
+
 #[allow(unused)]
 pub fn flush_preload() {
     macro_rules! preload_trace {
@@ -1321,7 +1346,7 @@ pub fn flush_preload() {
     // embedded ELF payload, fully initialised at link time.  `from_raw_parts`
     // creates a `&[u8]` over this range; the slice is used immediately inside
     // the `f.write()` call and never retained.  The physical frames are
-    // released via `frame_dealloc` after writing.
+    // explicitly registered with the frame allocator after the final write.
     extern "C" {
         fn sinitproc();
         fn einitproc();
@@ -1360,12 +1385,8 @@ pub fn flush_preload() {
         written,
         file_size("initproc").unwrap_or(0)
     );
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sinitproc as usize).floor(),
-        crate::mm::PhysAddr::from(einitproc as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
+    // Safety: `/initproc` now owns a copy and this is the final linker-symbol read.
+    unsafe { reclaim_preload_payload_pages(sinitproc as usize, einitproc as usize) };
     preload_trace!("04 /initproc embedded frames released");
     // bash/busybox/os_test.conf/fs_test: 失败不阻塞启动
     preload_trace!("05 install /bash");
@@ -1374,12 +1395,8 @@ pub fn flush_preload() {
             core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize)
         });
     });
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sbash as usize).floor(),
-        crate::mm::PhysAddr::from(ebash as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
+    // Safety: `/bash` now owns a copy and this is the final linker-symbol read.
+    unsafe { reclaim_preload_payload_pages(sbash as usize, ebash as usize) };
     preload_trace!("06 /bash installed and embedded frames released");
     preload_trace!("07 install /busybox and /bin/busybox");
     let _ = create_or_open_file("busybox").map(|f| {
@@ -1390,7 +1407,7 @@ pub fn flush_preload() {
             )
         });
     });
-    // /bin/busybox: 必须在 frame_dealloc 之前写入，否则嵌入数据已被释放
+    // /bin/busybox must be written before the embedded pages are reclaimed.
     {
         let _ = vfs_lookup_parent("/bin/busybox")
             .or_else(|_| {
@@ -1420,12 +1437,8 @@ pub fn flush_preload() {
             });
         });
     }
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sbusybox as usize).floor(),
-        crate::mm::PhysAddr::from(ebusybox as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
+    // Safety: both busybox copies are complete and this is the final symbol read.
+    unsafe { reclaim_preload_payload_pages(sbusybox as usize, ebusybox as usize) };
     preload_trace!("08 busybox copies installed and embedded frames released");
     preload_trace!("09 install /os_test.conf");
     match file_size("os_test.conf") {
@@ -1446,12 +1459,8 @@ pub fn flush_preload() {
             });
         }
     }
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sosconfig as usize).floor(),
-        crate::mm::PhysAddr::from(eosconfig as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
+    // Safety: the runtime config is already present or copied; no later symbol read exists.
+    unsafe { reclaim_preload_payload_pages(sosconfig as usize, eosconfig as usize) };
     preload_trace!("10 /os_test.conf ready and embedded frames released");
     #[cfg(feature = "board_core_test")]
     {
@@ -1475,12 +1484,8 @@ pub fn flush_preload() {
                 )
             });
         });
-        for ppn in crate::mm::PPNRange::new(
-            crate::mm::PhysAddr::from(sfstest as usize).floor(),
-            crate::mm::PhysAddr::from(efstest as usize).floor(),
-        ) {
-            crate::mm::frame_dealloc(ppn);
-        }
+        // Safety: `/fs_test` now owns a copy and this is the final symbol read.
+        unsafe { reclaim_preload_payload_pages(sfstest as usize, efstest as usize) };
         preload_trace!("12 /fs_test installed and embedded frames released");
     }
     {
@@ -1495,12 +1500,8 @@ pub fn flush_preload() {
                 )
             });
         });
-        for ppn in crate::mm::PPNRange::new(
-            crate::mm::PhysAddr::from(sltpcompat as usize).floor(),
-            crate::mm::PhysAddr::from(eltpcompat as usize).floor(),
-        ) {
-            crate::mm::frame_dealloc(ppn);
-        }
+        // Safety: the compatibility library was copied and is no longer read in place.
+        unsafe { reclaim_preload_payload_pages(sltpcompat as usize, eltpcompat as usize) };
         preload_trace!("14 /ltp_proto_compat.so installed and embedded frames released");
     }
     {
@@ -1515,12 +1516,8 @@ pub fn flush_preload() {
                 )
             });
         });
-        for ppn in crate::mm::PPNRange::new(
-            crate::mm::PhysAddr::from(sltprunner as usize).floor(),
-            crate::mm::PhysAddr::from(eltprunner as usize).floor(),
-        ) {
-            crate::mm::frame_dealloc(ppn);
-        }
+        // Safety: `/ltprunner` now owns a copy and this is the final symbol read.
+        unsafe { reclaim_preload_payload_pages(sltprunner as usize, eltprunner as usize) };
         preload_trace!("16 /ltprunner installed and embedded frames released");
     }
     preload_trace!("17 install compatibility files under /etc");

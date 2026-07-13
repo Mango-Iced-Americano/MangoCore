@@ -4,6 +4,30 @@
 
 ## 2026-07-13
 
+### board/mm: 安全启用 2K1000LA 双 DRAM bank 并完成 2 GiB 拓扑验收
+
+**涉及文件：**
+- `os/src/hal/arch/{loongarch64,riscv}/config.rs`、`os/src/hal/arch/loongarch64/laflex.rs` — 将容量、最高物理地址、DRAM region、固件 carveout 和 ABI 可用容量分开建模；2K1000LA 声明低 256 MiB 与高 1792 MiB bank，dirty bitmap 覆盖到 4 GiB 物理上界
+- `os/src/mm/{frame_allocator,kernel_space,address_space,mod,sysctl}.rs` — 改为多 region 页帧分配与直接映射，拒绝地址空洞/保留区；连续 DMA extent 不跨 bank 且可复用 recycled 页，普通页集合使用独立接口；显式登记链接器 payload 页的所有权移交
+- `os/src/fs/{initramfs,mod,ramfs/mod}.rs` — initramfs 与预装载 payload 在最后一次复制后回收完整页，RamFS 和内存 ABI 使用当前安全可用容量
+- `os/src/drivers/block/virtio_blk{,_pci}.rs`、`os/src/syscall/process/{ipc,ids}.rs` — VirtIO DMA 改用单 region 连续分配，SysV SHM 改用不连续页集合，`sysinfo(2)` 报告可用容量
+- `os/src/main.rs` — `zero_init` 按真实 DRAM bank 清零，并跳过固件/设备仍持有的 carveout
+- `AGENTS.md`、`docs/{01_architecture,04_mm}/`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 同步非连续 RAM、连续 DMA、固件所有权和验收方法
+
+**验证：**
+- Docker 串行执行 `make rv64-kernel-build-only MODE=release` 和 `make la64-kernel-build-only MODE=release`，均成功，仅有项目既有 warning ✅
+- 正式执行 `make la64-2k1000-run-clean MODE=release` 成功；最终 `kernel-2k1000-run.ui` 数据段 12,392,696 字节，load/entry 均为 `0x90000000`，SHA-256 `82824bb4d2de71ae5168534b92c27af0906721b7870661e59bde6772cf91139a` ✅
+- LA64 QEMU 使用 4 GiB 测试盘 snapshot 启动 60 秒；VirtIO block/entropy/net 枚举成功，裸 Ext4 `/dev/vda` 挂载到 `/sdcard`，initproc 与 LTP 运行到第 38 个 case，无 panic ✅
+- 2K1000LA 启动探针识别 `VALEN=PALEN=40`，低区 `[0x1000,0x0cbf4000)`、高区 `[ekernel,0x100000000)`，MMIO 空洞和 `[0x0cbf4000,0x10000000)` carveout 均未进入分配器 ✅
+- RamFS 写入 320 MiB 时确认 fresh 分配从 region0 切换到 region1；长度 `335544320`、校验和 `2699711059`，删除成功且 `MemFree` 恢复到测试前仅差 4 KiB ✅
+- SATA 只读探针识别 32 GB `TS32GMTS400`，重复读取 LBA0 一致、MBR 签名 `55aa`；证明低 bank AHCI DMA 可用且未写 SSD ✅
+- `/proc/meminfo` 与 BusyBox `free` 均报告 `MemTotal=2043852 kB`；uImage TFTP 长度、CRC32 `4ba816ed` 和 `iminfo` checksum 通过 ✅
+- `git diff --check` 通过 ✅
+
+**备注：**
+- 审计推翻了“`bdinfo` 报告 DRAM 即可立即分配”的前提。U-Boot 栈/堆、活动 DVO framebuffer、CPU1 的 U-Boot park loop 及 BPI/SMBIOS 仍占用低 bank 顶部，因此当前只安全使用约 1.95 GiB。
+- 后续若要回收剩余 53,296 KiB，必须先关闭 DVO 并等待在途 DMA 结束，把 CPU1 重停放到 MangoCore 自有代码，复制或明确丢弃启动参数，并确认 U-Boot 设备 DMA 已停止；不能仅删除 carveout 常量。
+
 ### random: 接入平台可信熵源和统一 ChaCha20 CSPRNG，并完成实板验收
 
 **涉及文件：**

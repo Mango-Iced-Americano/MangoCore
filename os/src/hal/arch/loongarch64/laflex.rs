@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     config::{
-        MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK, VPN_SEG_MASK,
+        MEMORY_END, MEMORY_HIGH_BASE_VPN, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK, VPN_SEG_MASK,
     },
     mm::{
         address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess,
@@ -18,9 +18,11 @@ use crate::{
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
-// todo: 因之前默认vpn从0开始，所以DIRTY数组相当于vpn从零到size，但是移到高地址启动后，DIRTY位有偏移
-// todo: 相当于低位无效，这里粗暴的增大整个数组长度
-const DIRTY_LEN: usize = MEMORY_SIZE * 10 / PAGE_SIZE;
+// Identity-mapped kernel pages use their physical VPN as the software dirty
+// index. Size the table by the highest DRAM end, not by the sum of disjoint
+// banks; this covers 2K1000LA's 4 GiB physical ceiling without treating its
+// MMIO hole as allocatable memory.
+const DIRTY_LEN: usize = MEMORY_END / PAGE_SIZE;
 static mut DIRTY: [bool; DIRTY_LEN] = [false; DIRTY_LEN];
 use super::register::MemoryAccessType;
 

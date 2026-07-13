@@ -230,7 +230,10 @@ la64：
 | `min_free_kbytes` | `1024` | 导出/配置值 |
 | `panic_on_oom` | `0` | 导出/配置值 |
 
-`reported_memory_bytes()` 使用 `MEMORY_SIZE`，但对外报告被 `512 MiB` 上限截断。`commit_limit_bytes()` 还会被 `64 MiB` 上限截断。
+`reported_memory_bytes()` 使用 `USABLE_MEMORY_SIZE`；QEMU 构建对外报告仍截断到
+`512 MiB`，2K1000LA 当前报告 `2043852 KiB`，不把第 0 页和临时固件 carveout
+计入可用内存。`MEMORY_SIZE` 仍表示板载 2 GiB 总容量。`commit_limit_bytes()` 继续
+被 `64 MiB` 上限截断，避免测试按总内存放大提交压力。
 
 ## 10. overcommit_allows()
 

@@ -4,9 +4,11 @@
 
 // Sizes
 /// QEMU la64 exposes high memory as memory@80000000 with size 0x30000000.
-/// 2K1000LA 开发板在物理地址 0x90000000 报告第二段 DRAM；早期上板阶段仅使用
-/// 其中保守的 768MiB 范围。
+#[cfg(feature = "board_laqemu")]
 pub const MEMORY_SIZE: usize = 0x3000_0000;
+/// 2K1000LA exposes two DRAM banks whose combined capacity is 2 GiB.
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_SIZE: usize = 0x8000_0000;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x100;
 pub const USER_STACK_INIT_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
@@ -113,11 +115,47 @@ pub const MEMORY_HIGH_BASE_VPN: usize = MEMORY_HIGH_BASE >> PAGE_SIZE_BITS;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE | LA_START;
 #[cfg(feature = "board_laqemu")]
 pub const MEMORY_START: usize = 0x0000_0000_8000_0000;
-// U-Boot 通过 0x9000... DMW 别名报告开发板第二段可用 DRAM；entry.asm 切换到
-// 低地址窗口后，其物理基址为 0x90000000。上板阶段仅管理保守的 768MiB 子区间。
+// `MEMORY_START` remains the kernel load bank base. It is not the lowest DRAM
+// address on 2K1000LA; callers that need all RAM must iterate MEMORY_REGIONS.
 #[cfg(feature = "board_2k1000")]
 pub const MEMORY_START: usize = 0x0000_0000_9000_0000;
+#[cfg(feature = "board_laqemu")]
 pub const MEMORY_END: usize = MEMORY_SIZE + MEMORY_START;
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_END: usize = 0x0000_0001_0000_0000;
+
+/// Physical DRAM banks as half-open byte ranges.
+///
+/// The 2K1000LA hole at 0x10000000..0x90000000 contains MMIO/non-RAM and must
+/// never be converted into allocatable frames. U-Boot enters MangoCore through
+/// a DMW alias, but these are the raw physical addresses used in PTEs and DMA.
+#[cfg(feature = "board_laqemu")]
+pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_REGIONS: &[(usize, usize)] =
+    &[(0x0000_0000, 0x1000_0000), (0x9000_0000, MEMORY_END)];
+
+/// DRAM ranges still owned by firmware or active devices after `bootm`.
+#[cfg(feature = "board_laqemu")]
+pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[];
+#[cfg(feature = "board_2k1000")]
+pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[
+    // U-Boot LMB/stack, the active DVO framebuffer, CPU1's U-Boot park loop,
+    // and BPI/SMBIOS data. This can be split and reclaimed only after those
+    // owners have been explicitly quiesced or copied.
+    (0x0cbf_4000, 0x1000_0000),
+];
+
+/// RAM currently available to MangoCore after static firmware reservations.
+///
+/// `MEMORY_SIZE` is the installed DRAM capacity. Linux-compatible memory
+/// statistics use this smaller value until the board handoff code explicitly
+/// quiesces the firmware owners and releases their carveouts.
+#[cfg(feature = "board_laqemu")]
+pub const USABLE_MEMORY_SIZE: usize = MEMORY_SIZE;
+#[cfg(feature = "board_2k1000")]
+pub const USABLE_MEMORY_SIZE: usize =
+    MEMORY_SIZE - (FIRMWARE_RESERVED_REGIONS[0].1 - FIRMWARE_RESERVED_REGIONS[0].0) - PAGE_SIZE;
 
 pub const SV39_SPACE: usize = 1 << 39;
 pub const USR_SPACE_LEN: usize = SV39_SPACE >> 2;
@@ -177,6 +215,14 @@ const _: () = {
 
 #[cfg(feature = "board_2k1000")]
 const _: () = {
+    assert!(MEMORY_SIZE == 0x1000_0000 + 0x7000_0000);
+    assert!(MEMORY_END == 0x1_0000_0000);
+    assert!(MEMORY_REGIONS[0].1 <= MEMORY_REGIONS[1].0);
+    assert!(FIRMWARE_RESERVED_REGIONS[0].0 % PAGE_SIZE == 0);
+    assert!(FIRMWARE_RESERVED_REGIONS[0].1 % PAGE_SIZE == 0);
+    assert!(MEMORY_REGIONS[0].0 <= FIRMWARE_RESERVED_REGIONS[0].0);
+    assert!(FIRMWARE_RESERVED_REGIONS[0].1 <= MEMORY_REGIONS[0].1);
+    assert!(USABLE_MEMORY_SIZE == 0x7cbf_3000);
     assert!(KERNEL_STACK_TOP == 0xFFFF_FFFF_FFFE_F000);
     assert!(KERNEL_STACK_BOTTOM == 0xFFFF_FFFF_F7BE_F000);
     assert!(KERNEL_PROGRAM_END == KERNEL_STACK_BOTTOM);

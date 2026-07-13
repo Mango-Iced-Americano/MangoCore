@@ -508,3 +508,19 @@
 - **修复**：交互监视器对内核阶段输入逐字节发送并加入固定间隔；用超过 100 字符的唯一 marker 检查设备实际回显和执行结果，再继续测试目标子系统。
 - **教训**：串口能输出且短输入可用，不代表批量输入链路可靠。自动化测试前应先验证传输层完整性，避免把命令损坏误判为内核或应用故障。
 - **相关文件**：`scripts/boot_2k1000_tftp.py`
+
+### 非连续 DRAM 上多次单页分配不构成连续 DMA
+
+- **现象**：扩展第二段 DRAM 后普通页压力正常，但 VirtIO/AHCI/网卡在 bank 边界附近可能访问 MMIO 空洞；或改成只从 fresh 区取连续页后，长期 I/O 在仍有大量 recycled 页时失败。
+- **根因**：连续的分配调用顺序不等于连续物理地址，region 切换会跨越空洞；只搜索 fresh extent 又会让释放后的 DMA 页无法复用，形成假性耗尽。
+- **修复**：平台显式声明 DRAM region；连续分配在单一 region 内原子取 extent，优先搜索同一 region 的连续 recycled 页，再使用 fresh 尾部。不要求连续的 SysV SHM/VMA 页集合使用独立接口。
+- **验收**：跨 bank 的 RamFS 压力必须打印 region 切换并完成内容校验/释放恢复；块设备快照持续读测确认 `share/unshare` 不产生分配 panic。
+- **相关文件**：`os/src/mm/frame_allocator.rs`, `os/src/drivers/block/virtio_blk.rs`, `os/src/drivers/block/virtio_blk_pci.rs`
+
+### 固件报告为 DRAM 不代表内核入口即可分配
+
+- **现象**：`bdinfo` 报告完整内存，首尾写探针和短时压力也能通过，但显示控制器、次核或 bootloader 后台状态仍可能引用其中一段，问题表现为屏幕泄露、次核乱跑或非确定性复位。
+- **根因**：DRAM 拓扑只回答地址是否有存储介质，不回答所有权是否已经交接。Framebuffer DMA、其他 CPU 的 park loop、BPI/FDT 和 U-Boot 栈/堆都可能位于普通 DRAM。
+- **修复**：把容量、地址上界、DRAM region 和固件 carveout 分开建模；入口仅分配已交接区间。关闭设备 DMA、把次核重停放到内核自有代码并复制启动参数后，再分阶段显式回收 carveout。
+- **验收**：结合 U-Boot LMB、链接地址、设备寄存器和次核启动代码审计；压力测试必须确认 allocator 的 region 末端停在 carveout 前，而不是只看 `MemTotal`。
+- **相关文件**：`os/src/hal/arch/loongarch64/config.rs`, `os/src/mm/frame_allocator.rs`, `os/src/main.rs`

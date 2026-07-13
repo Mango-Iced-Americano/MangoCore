@@ -3,8 +3,12 @@ title: "物理页分配器与 FrameTracker"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-13
 tags: [mm, frame, allocator, oom]
+code_paths:
+  - "os/src/mm/frame_allocator.rs"
+  - "os/src/hal/arch/loongarch64/config.rs"
+  - "os/src/hal/arch/riscv/config.rs"
 ---
 
 # 物理页分配器与 FrameTracker
@@ -18,7 +22,9 @@ tags: [mm, frame, allocator, oom]
 | `init_frame_allocator()` | 初始化全局页帧分配器 |
 | `frame_alloc()` | 分配一个清零页帧，返回 `Arc<FrameTracker>` |
 | `frame_alloc_uninit()` | 分配一个未清零页帧，调用者必须立即完整写入 |
-| `frames_alloc(count)` | 批量分配页帧 |
+| `frames_alloc(count)` | 在单一 DRAM region 内分配物理连续页，供 DMA 使用 |
+| `frames_alloc_any(count)` | 批量分配不要求物理连续的页，供页表映射使用 |
+| `frame_reclaim_linker_range()` | 在最后一次读取后显式回收链接器内嵌载荷的完整页 |
 | `frame_dealloc(ppn)` | 释放指定物理页号 |
 | `unallocated_frames()` | 返回当前未分配页帧数量 |
 | `frag_diagnostic()` | 输出碎片化诊断数据 |
@@ -28,15 +34,21 @@ tags: [mm, frame, allocator, oom]
 
 ## 2. 分配器模型
 
-实现中的分配器是栈式页帧分配器：
+实现中的分配器为“每个 DRAM region 一个 fresh 游标，共享一个回收栈”：
 
 ```rust
-pub struct StackFrameAllocator {
+struct FrameRegion {
     start: usize,
     current: usize,
     end: usize,
-    recycled: Vec<usize>,
     recycled_flags: Vec<bool>,
+}
+
+pub struct StackFrameAllocator {
+    regions: Vec<FrameRegion>,
+    reclaimed_regions: Vec<ReclaimedRegion>,
+    fresh_region: usize,
+    recycled: Vec<usize>,
 }
 ```
 
@@ -44,42 +56,40 @@ pub struct StackFrameAllocator {
 
 | 字段 | 含义 |
 |------|------|
-| `start` | 可分配物理页号起点，用于把 PPN 映射到 `recycled_flags` 下标 |
-| `current` | 尚未线性分配的下一个 PPN |
-| `end` | 可分配 PPN 的结束边界 |
+| `regions` | 从平台 DRAM 表扣除第 0 页、内核镜像和固件 carveout 后的可分配区间 |
+| `fresh_region` | 第一个尚未耗尽的 fresh region 索引 |
 | `recycled` | 已释放、可复用的 PPN 栈 |
-| `recycled_flags` | O(1) 重复释放检测标记 |
+| `recycled_flags` | 各 region 内 O(1) 重复释放检测标记 |
+| `reclaimed_regions` | 已完成复制、由链接器所有权转交给分配器的 payload 页 |
 
 分配策略为：
 
 1. 优先从 `recycled` 弹出之前释放的页帧。
-2. 如果没有 recycled 页，则从 `current` 线性递增分配。
-3. `current == end` 时无页可分配。
+2. 如果没有 recycled 页，则按 region 顺序从 `current` 线性递增分配。
+3. region 耗尽后切到下一个 region，绝不跨越地址空洞。
+4. 多页连续分配先寻找同一 region 内的连续 recycled extent，再使用单一 fresh extent。
 
 ## 3. 初始化范围
 
-初始化入口：
+平台用 `MEMORY_REGIONS` 描述真实 DRAM bank，用
+`FIRMWARE_RESERVED_REGIONS` 描述启动后仍由固件、其他 CPU 或设备持有的 DRAM。
+2K1000LA 当前布局为：
 
-```rust
-pub fn init_frame_allocator() {
-    extern "C" {
-        fn ekernel();
-    }
-    FRAME_ALLOCATOR.exclusive_access().init(
-        PhysAddr::from(ekernel as usize).ceil(),
-        PhysAddr::from(MEMORY_END).floor(),
-    );
-}
-```
+| 类型 | 物理范围 | 处理 |
+|------|----------|------|
+| DRAM bank 0 | `[0x00000000, 0x10000000)` | 第 0 页和固件 carveout 不分配 |
+| MMIO/空洞 | `[0x10000000, 0x90000000)` | 不进入 frame allocator |
+| DRAM bank 1 | `[0x90000000, 0x100000000)` | 从 `ekernel` 后开始分配 |
+| 临时 carveout | `[0x0cbf4000, 0x10000000)` | U-Boot、DVO framebuffer、CPU1 park loop、BPI/SMBIOS；完成所有权交接前保留 |
 
-范围含义：
+`MEMORY_SIZE=2 GiB` 表示板载 DRAM 总量，`MEMORY_END=4 GiB` 是最高物理地址上界，
+二者都不能代替 region 表。当前 `USABLE_MEMORY_SIZE=0x7cbf3000`，即
+`2043852 KiB`；`/proc/meminfo`、`sysinfo(2)` 和 RamFS `statfs` 使用该值，避免把
+尚未完成所有权交接的 carveout 报告为可用内存。初始化会对 DRAM region 逐一减去：
 
-| 边界 | 来源 | 说明 |
-|------|------|------|
-| start | `ekernel` 向上取整 | 内核镜像结束后的第一页 |
-| end | `MEMORY_END` 向下取整 | 平台配置的物理内存结束 |
-
-这保证物理页分配器不会把内核代码、数据、BSS、启动栈所在内存重新分配给用户页或页表页。
+1. 物理第 0 页，避免空指针与 LA64 页表 token 语义冲突。
+2. `[skernel, ekernel)` 内核镜像。
+3. `FIRMWARE_RESERVED_REGIONS` 中仍有外部所有者的区间。
 
 ## 4. FrameTracker 生命周期
 
@@ -139,7 +149,7 @@ frame_alloc()
   ├── lock FRAME_ALLOCATOR
   ├── alloc()
   │     ├── recycled.pop()
-  │     └── current += 1
+  │     └── regions[fresh_region].current += 1
   ├── FrameTracker::new(ppn)
   └── Arc::new(FrameTracker)
 ```
@@ -150,7 +160,7 @@ frame_alloc()
 
 `frame_dealloc(ppn)` 会检查：
 
-1. `ppn` 是否在可分配范围内。
+1. `ppn` 是否属于某个已推进到该页的 fresh region，或显式登记的 reclaimed region。
 2. `ppn` 是否已经在 recycled 集合中。
 3. 若合法，则压入 `recycled` 并设置 `recycled_flags`。
 
@@ -185,9 +195,13 @@ pub enum Frame {
 
 ## 9. 批量分配
 
-`frames_alloc(count)` 返回 `Vec<Arc<FrameTracker>>`。它通过多次 `frame_alloc()` 构建结果，一旦中途失败，已经放入 `Vec` 的 `FrameTracker` 会随 `Vec` drop 释放。
+`frames_alloc(count)` 返回一个物理连续 extent，且保证全部页面位于同一个 DRAM region。
+它优先复用连续 recycled 页；找不到时才从某个 region 的 fresh 尾部一次性取出。
+这使 VirtIO 把首个 PA 当成线性 DMA 缓冲时不会跨入 2K1000LA 的 MMIO 空洞，也不会因只消耗 fresh 页而在长期 I/O 后假性耗尽。
 
-该接口适用于需要一次性准备连续数量页对象但不要求物理连续的场景。当前 MM 代码没有把它作为连续物理内存分配器使用。
+`frames_alloc_any(count)` 通过多次 `frame_alloc()` 构建不连续页集合，适用于 SysV SHM 等由页表建立逻辑连续性的场景。两者不能互换。
+
+链接器嵌入的 initramfs、initproc、bash、busybox 等位于 `ekernel` 之前，不能伪装成普通 `frame_dealloc()`。复制完成后，调用方以 unsafe 契约调用 `frame_reclaim_linker_range()`；分配器检查其位于单一 DRAM bank、不与 fresh region、既有 reclaimed region 或固件 carveout 重叠，再登记生命周期。尾部不完整页保持归内核所有。
 
 ## 10. OOM handler 配合
 
@@ -228,8 +242,23 @@ frame_alloc()
 4. fork COW 中的 `Arc::strong_count()` 判断依赖 `VmPageStore` 对页帧引用的准确性。
 5. shared anonymous 预分配会持有 `Arc<FrameTracker>`，即使 PTE 暂时未安装。
 6. OOM recovery 只能改善页帧可用性，不保证内核堆元数据分配一定成功。
+7. DRAM 总量、物理地址上界与可分配区间是三个不同概念；有地址空洞的平台必须遍历 `MEMORY_REGIONS`。
+8. DMA 连续页必须由 `frames_alloc()` 分配，不能假设多次单页分配所得 PPN 连续。
+9. 固件 carveout 只有在设备 DMA 停止、其他 CPU 重停放、启动参数复制完成后才能显式释放。
 
-## 13. 调试核对点
+## 13. 2K1000LA 实板验收
+
+2026-07-13 的实板门禁覆盖了以下路径：
+
+1. 启动探针确认低 bank 可用区为 `[0x1000, 0x0cbf4000)`，高 bank 从
+   `ekernel` 延伸到 `0x100000000`，两者之间的 MMIO 空洞和顶部 carveout 均未进入分配器。
+2. 在 RamFS 写入并校验 320 MiB 零文件，日志出现 `region0 -> region1`；文件长度为
+   `335544320`，校验和为 `2699711059`，删除后 `MemFree` 恢复到测试前仅差一页。
+3. SATA 只读探针从低 bank 取得 AHCI DMA 页，重复读取 LBA0 一致并验证 MBR
+   `55aa`；QEMU VirtIO PCI 快照启动可挂载 `/dev/vda` Ext4 并持续运行 LTP，无 panic。
+4. ABI 统计报告 `MemTotal: 2043852 kB`，同时 `MEMORY_SIZE` 仍保留已安装容量 2 GiB。
+
+## 14. 调试核对点
 
 | 现象 | 核对路径 |
 |------|----------|

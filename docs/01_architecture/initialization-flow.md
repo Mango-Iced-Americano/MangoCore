@@ -112,7 +112,7 @@ pub fn rust_main() -> ! {
         }
         net::config::init();
 
-        // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
+        // 块设备 DMA 使用单一 DRAM region 内的连续 extent；先探测以减少早期碎片
         #[cfg(not(feature = "board_2k1000"))]
         fs::mount_boot_block_devices();
         #[cfg(all(
@@ -212,10 +212,10 @@ KERNEL_SPACE.lock().activate()
 |------|------|------|
 | 初始化内核堆 | 链接脚本和静态 heap 区 | `alloc` 容器可用 |
 | 初始化 heap trace | `heap_trace` feature | 记录堆分配追踪 |
-| 初始化物理页分配器 | `ekernel..MEMORY_END` | `FrameTracker` 分配可用 |
+| 初始化物理页分配器 | DRAM region 表减去内核/固件保留区 | `FrameTracker` 分配可用 |
 | 激活内核地址空间 | `KERNEL_SPACE` lazy 构造 | 后续驱动、FS、task 在内核页表下运行 |
 
-`KERNEL_SPACE` 映射 trampoline、内核代码/只读/数据/BSS 段、`ekernel..MEMORY_END` 物理内存和 `MMIO` 表中的设备区间。具体映射策略在 `docs/04_mm/initialization-and-kernel-space.md` 展开。
+`KERNEL_SPACE` 映射 trampoline、内核代码/只读/数据/BSS 段、各 usable DRAM region 和 `MMIO` 表中的设备区间。具体映射策略在 `docs/04_mm/initialization-and-kernel-space.md` 展开。
 
 ## 5. 平台运行期初始化
 
@@ -264,7 +264,7 @@ fs::install_preload_payloads()          [preload_payloads]
 
 ### 6.3 块设备挂载和 payload
 
-默认 initramfs 路径中，`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。`main.rs` 注释给出的理由是块设备探测需要连续物理页 DMA，先于 preload 分配页可以降低页碎片影响。
+默认 initramfs 路径中，`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。块设备 DMA 使用单一 DRAM region 内的连续 extent；保持当前顺序还能减少早期碎片并尽快验证启动盘。
 
 `board_2k1000` 的救援和 `sata_probe` 构建调用 `fs::force_ramfs()` 并跳过挂载；普通 `block_sata` 构建调用 `mount_boot_block_devices_read_only()`，在 payload 安装前完成 AHCI 探测、MBR/文件系统识别和根目录读取。三种构建均跳过 QEMU virtio 网卡枚举。
 

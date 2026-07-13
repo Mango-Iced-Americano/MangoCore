@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-11
+> Coverage: 2026-04-01 to 2026-07-13
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -27,7 +27,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | Oracle | 高推理能力代码审查与架构咨询 agent；当前会话模型标识为 GPT-5.5 | OhMyOpenCode agent | 2026-04 至 2026-06 | 根因分析、架构评审、代码正确性验证、性能优化策略、文档事实核查 | `docs/Work_Log.md` 多处记录 `Oracle reviewed`、`Oracle analysis confirmed`、`Root cause analysis by Oracle` |
 | Explore | Codebase search / pattern discovery agent | OhMyOpenCode sub-agent | 2026-05 至 2026-06 | 跨模块代码搜索、调用关系梳理、实现模式对比 | Work log 和 Sisyphus task records |
 | librarian / plan / deep 等 sub-agents | 专用辅助 agents | OhMyOpenCode sub-agents | 2026-06 | 文档整理、资料检索、复杂任务拆分、局部实现检查 | Sisyphus 编排记录、文档生成 commit、Work_Log 记录 |
-| OpenAI Codex multi-agent | 当前主会话基于 GPT-5；并行 subagent 的具体后端版本未单独暴露 | Codex desktop | 2026-07 | 2K1000LA 实板 bring-up、LoongArch VALEN/TLB/PTE/DMW 并行审计、代码修复、构建和 QEMU 验证 | `docs/Work_Log.md` 2026-07-10 记录、目标文件反汇编和 uImage 哈希 |
+| OpenAI Codex multi-agent | 主会话为 GPT-5 系列；2026-07-13 使用 max reasoning mode，平台未单独披露精确后端版本 | Codex desktop | 2026-07 | 2K1000LA 实板 bring-up、LoongArch VALEN/TLB/PTE/DMW、非连续 DRAM 与固件所有权并行审计、代码修复、构建和 QEMU/实板验证 | `docs/Work_Log.md` 2026-07-10/13 记录、目标文件反汇编、uImage 哈希和串口验收日志 |
 
 说明：部分 AI 平台不会在 commit metadata 中公开精确模型版本。本报告对可确认的工具名称、平台、agent 名称、commit marker 和工作日志证据进行披露；对无法从现有记录恢复的底层模型版本标注为"未完整记录"，不以猜测替代事实。
 
@@ -43,6 +43,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
 | 2K1000LA 实板地址/TLB 审计 | 2026-07-10 | OpenAI Codex multi-agent | 将 QEMU 内核迁移到 VALEN=40 实板；并行审计 canonical VA、VPN/VPPN、PTE PPN、TLB refill、ASID、DMW 和栈窗口 | 修复 TLB PS、PPN/VPPN、ASID、映射边界和 MMIO 别名；完成双架构编译、LA64 QEMU 用户态启动和实板 uImage 构建 |
 | 2K1000LA SATA/FAT32 分阶段写入 | 2026-07-11 | OpenAI Codex | AHCI 暖复位、P2 定向恢复、FAT32 元数据持久化、用户态 `/scratch` 隔离写入与实板串口验证 | 完成 raw write/flush、内核文件探针和用户态 write/fsync/truncate/reopen/unlink/rmdir 闭环；P1/P3 保持只读 |
+| 2K1000LA 2 GiB 内存拓扑审计 | 2026-07-13 | OpenAI Codex multi-agent, max reasoning mode | 复核早期扩容方案；并行审计 VA/PA 掩码、DMW cache 属性、U-Boot LMB、DVO DMA、CPU1 park loop 和连续 DMA 分配 | 推翻“DRAM 即已交接”的错误前提；建立双 bank allocator 与临时 carveout，完成跨 bank 320 MiB 压力、QEMU VirtIO/Ext4/LTP 和实板 AHCI 只读验收 |
 
 ## 4. 详细使用场景
 
@@ -217,6 +218,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human verification: 对照本地 LoongArch 官方手册字段定义；检查每处 diff；执行 rv64/la64 编译、LA64 QEMU 到 init 用户态、2K1000 uImage 构建和 `__rfill/__restore` 反汇编。
 - Result: 生成 `Load/Entry=0x90000000` 的实板镜像，SHA-256 `e8cf6b87ebd4800f3909fc9aad25d5b7d96957743f5c98fbfd7f7ba4eb8cca78`；实板运行验证仍待完成。
 
+### Case 7: 2K1000LA 2 GiB DRAM 拓扑与固件所有权审计
+
+- Evidence: `docs/Work_Log.md` 2026-07-13、`docs/04_mm/frame-allocator.md`
+- AI tools: OpenAI Codex multi-agent, max reasoning mode
+- Problem: 初版方案把 U-Boot 报告的两段 DRAM 全部交给页帧分配器，虽然跨 bank 压力短时通过，却可能覆盖仍由显示 DMA、CPU1 和启动固件使用的低端内存。
+- AI contribution: 独立 subagents 分别审计 LoongArch VA/PA/DMW 语义和 U-Boot 源码/内存所有权；发现 DMW CC/SUC 探针混用，以及 `[0x0cbf4000,0x10000000)` 内仍包含活动 framebuffer、CPU1 park loop、U-Boot 状态和 BPI/SMBIOS。主流程进一步发现连续 DMA 不能由跨 region 单页分配拼接，且链接器 payload 页需要显式所有权移交。
+- Human verification: 对照 U-Boot `bdinfo`、板级 U-Boot 源码和串口输出；串行双架构构建；LA64 QEMU VirtIO/Ext4/LTP 运行；实板 320 MiB 跨 bank 内容校验、AHCI LBA0 重复读和 ABI 内存统计检查。
+- Result: 内核识别完整 2 GiB 安装容量，当前安全报告并使用 `2043852 KiB`；保留 53,296 KiB 临时 carveout，待关闭 DVO、重停放 CPU1 并处理启动参数后再分阶段释放。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -265,6 +275,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:1455-1658` | Timer subsystem | 记录 timer deadline / one-shot / timekeeping 修复与测试 |
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
 | `docs/Work_Log.md` 2026-07-10 | 2K1000LA VALEN/TLB 审计 | 记录 Codex 五路并行审计、官方手册交叉核对、代码修复、反汇编与构建/QEMU 证据 |
+| `docs/Work_Log.md` 2026-07-13 | 2K1000LA 2 GiB 内存审计 | 记录 Codex max reasoning 与 subagent 对 DMW、非连续 DMA、U-Boot/DVO/CPU1 所有权的复核，以及 QEMU/实板验证证据 |
 
 ## 9. 交互记录与留痕方式
 

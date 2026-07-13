@@ -111,17 +111,14 @@ KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
 
 ## 5. 物理页分配器初始化
 
-物理页分配器位于 `os/src/mm/frame_allocator.rs`。初始化时使用链接符号 `ekernel` 和平台配置 `MEMORY_END` 建立可分配物理页范围：
+物理页分配器位于 `os/src/mm/frame_allocator.rs`。初始化时遍历平台
+`MEMORY_REGIONS`，并扣除第 0 页、`[skernel, ekernel)` 与
+`FIRMWARE_RESERVED_REGIONS`：
 
 ```rust
-extern "C" {
-    fn ekernel();
-}
-
-FRAME_ALLOCATOR.exclusive_access().init(
-    PhysAddr::from(ekernel as usize).ceil(),
-    PhysAddr::from(MEMORY_END).floor(),
-);
+for_each_usable_frame_region(|start, end| {
+    regions.push(FrameRegion::new(start.0, end.0));
+});
 ```
 
 页帧粒度为 `PAGE_SIZE`。`FrameTracker::new(ppn)` 会将整页按 `u64` 清零，保证新分配的普通页不会泄露旧内容。`frame_alloc_uninit()` 只在明确需要未初始化页的路径使用，例如 COW 中先分配再整页复制。
@@ -157,10 +154,10 @@ lazy_static! {
 | `.rodata` | `R` | `srodata..erodata` |
 | `.data` | `R | W | G` | `sdata..edata` |
 | `.bss` | `R | W | G` | `sbss_with_stack..ebss` |
-| free memory | `R | W | G` | `ekernel..MEMORY_END` |
+| usable DRAM regions | `R | W | G` | `MEMORY_REGIONS` 扣除内核和固件 carveout 后的各区间 |
 | MMIO | `R | W | G` | `config::MMIO` 表 |
 
-映射通过 `kernel_identical_map!` 宏建立。这里的“identical”指虚拟页号和物理页号一致，即内核直接映射物理内存和 MMIO 区间。
+映射通过 `kernel_identical_map!` 宏建立。这里的“identical”指虚拟页号和物理页号一致。2K1000LA 的两个 DRAM bank 分别处理，中间 MMIO 空洞不会作为普通内存映射或分配。
 
 ## 8. 动态内核映射
 
@@ -241,7 +238,7 @@ MM 文档不把寄存器细节放在本页展开；架构相关页表实现和 T
 | 现象 | 优先检查 |
 |------|----------|
 | `mm::init()` 前后 panic | 堆初始化是否早于 `Vec/Arc/BTreeMap` 创建 |
-| 早期页故障 | 内核段、`ekernel..MEMORY_END` 或 MMIO 映射是否缺失 |
+| 早期页故障 | 内核段、usable DRAM region 或 MMIO 映射是否缺失；是否误把地址空洞当 RAM |
 | 驱动初始化访问 MMIO 失败 | `config::MMIO` 是否被 `KernelSpace::new()` 映射 |
 | fork/exec 后用户态异常 | 用户地址空间映射，不应从 `KERNEL_SPACE` 查找 |
 | 删除内核映射后悬空访问 | `remove_area_with_start_vpn()` 是否提前释放了仍在使用的映射 |
