@@ -21,6 +21,7 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-shell \
 	la64-2k1000-sata-shell \
 	la64-2k1000-full-shell \
+	la64-2k1000-dhcp-shell \
 	la64-2k1000-gmac-probe \
 	la64-2k1000-gmac-net \
 	la64-2k1000-sata-mount-ro \
@@ -185,6 +186,18 @@ la64-2k1000-full-shell: prepare-cargo-config
 		EXTRA_FEATURES="sata_scratch_rw gmac_2k1000 board_shell" MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-full-shell.ui
+
+# Router-LAN integration image: keep SATA and GMAC enabled, but replace the
+# direct-link static address with a persistent DHCP client. The DHCP socket
+# remains in the poll loop for renew, rebind and cable-reconnect recovery.
+la64-2k1000-dhcp-shell: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-dhcp-shell.ui
 
 # Non-destructive handoff probe for both integrated DWMAC 3.70a controllers.
 # It reads MAC/DMA state and PHY registers through MDIO, but does not reset the

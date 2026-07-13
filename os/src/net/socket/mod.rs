@@ -1040,11 +1040,11 @@ pub fn wake_raw_waiters() {
             }
         }
     }
-    for (handler, socket) in &live_sockets {
-        let can_recv = crate::net::config::NET_INTERFACE
-            .raw_routed_socket(*handler, |s| s.can_recv())
-            .unwrap_or(false);
-        if can_recv {
+    for (_, socket) in &live_sockets {
+        // A raw socket owns one smoltcp handler per interface. The registry
+        // keeps only its primary handle for identity/cleanup, so readiness must
+        // query the socket and cover every handler rather than only lo.
+        if socket.recv_ready() {
             if let Some(wq) = socket.recv_event_queue() {
                 wq.notify_events_at_most_if_unlocked(
                     EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,

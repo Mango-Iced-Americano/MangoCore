@@ -28,8 +28,8 @@ use smoltcp::{
 /// # Locking
 ///
 /// 内部使用 `Mutex<Option<NetInterfaceInner>>` 保护。`init()` 完成后 `inner` 始终为
-/// `Some(…)`。`try_poll()` / `try_poll_stack()` 通过 `try_lock()` 实现无 spin 的快速
-/// 路径，适合中断上下文调用。
+/// `Some(…)`。`try_poll_irq()` 通过 `try_lock()` 实现无 spin 的中断路径，
+/// 并把需要其他子系统锁的 DHCP 租约提交延迟到任务上下文。
 ///
 /// # Ownership
 ///
@@ -60,9 +60,8 @@ pub fn init() {
 ///
 /// # Locking
 ///
-/// 所有公开方法获取 `self.inner` 锁。`try_poll()` / `try_poll_stack()` 使用
-/// `try_lock()` 避免在中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，
-/// 不能从持锁路径中重入。
+/// 所有公开方法获取 `self.inner` 锁。`try_poll_irq()` 使用 `try_lock()` 避免在
+/// 中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，不能从持锁路径中重入。
 ///
 /// # Ownership
 ///
@@ -85,6 +84,105 @@ pub struct DeviceStack<'a> {
     pub device: IfaceDevice,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
+    /// Persistent DHCP socket for interfaces that require lease renewal.
+    pub dhcp_handle: Option<SocketHandle>,
+    /// Latest lease event awaiting commit outside interrupt context.
+    pending_dhcp_event: Option<DhcpLeaseEvent>,
+}
+
+enum DhcpLeaseEvent {
+    Configured {
+        address: smoltcp::wire::Ipv4Cidr,
+        router: Option<smoltcp::wire::Ipv4Address>,
+        dns_servers: Vec<smoltcp::wire::Ipv4Address>,
+    },
+    Deconfigured,
+}
+
+fn take_dhcp_event(stack: &mut DeviceStack<'_>) -> Option<DhcpLeaseEvent> {
+    let handle = stack.dhcp_handle?;
+    let event = match stack.sockets.get_mut::<dhcpv4::Socket>(handle).poll()? {
+        dhcpv4::Event::Configured(config) => DhcpLeaseEvent::Configured {
+            address: config.address,
+            router: config.router,
+            dns_servers: config.dns_servers.iter().copied().collect(),
+        },
+        dhcpv4::Event::Deconfigured => DhcpLeaseEvent::Deconfigured,
+    };
+
+    match &event {
+        DhcpLeaseEvent::Configured {
+            address, router, ..
+        } => {
+            stack.iface.update_ip_addrs(|addrs| {
+                addrs.retain(|cidr| !matches!(cidr, IpCidr::Ipv4(_)));
+                let _ = addrs.push(IpCidr::Ipv4(*address));
+            });
+            stack.iface.routes_mut().remove_default_ipv4_route();
+            if let Some(router) = router {
+                if stack
+                    .iface
+                    .routes_mut()
+                    .add_default_ipv4_route(*router)
+                    .is_err()
+                {
+                    log::error!("[net::dhcp] smoltcp route table is full");
+                }
+            }
+        }
+        DhcpLeaseEvent::Deconfigured => {
+            stack.iface.update_ip_addrs(|addrs| {
+                addrs.retain(|cidr| !matches!(cidr, IpCidr::Ipv4(_)));
+            });
+            stack.iface.routes_mut().remove_default_ipv4_route();
+        }
+    }
+    Some(event)
+}
+
+fn capture_dhcp_event(stack: &mut DeviceStack<'_>) -> bool {
+    match take_dhcp_event(stack) {
+        Some(event) => {
+            // Only the newest state matters: Configured followed by
+            // Deconfigured must not briefly publish the stale lease.
+            stack.pending_dhcp_event = Some(event);
+            true
+        }
+        None => false,
+    }
+}
+
+fn commit_dhcp_event(ifindex: u32, event: DhcpLeaseEvent) {
+    match event {
+        DhcpLeaseEvent::Configured {
+            address,
+            router,
+            dns_servers,
+        } => {
+            let cidr = IpCidr::Ipv4(address);
+            net_core::set_eth0_ipv4(cidr);
+            net_core::set_default_gateway(router);
+            net_core::set_dns_servers(&dns_servers);
+            net_core::current_netns()
+                .router
+                .lock()
+                .replace_dhcp_ipv4(ifindex, Some(cidr), router);
+            println!(
+                "[net] DHCP configured eth0={:?} gateway={:?} dns={:?}",
+                address, router, dns_servers
+            );
+        }
+        DhcpLeaseEvent::Deconfigured => {
+            net_core::clear_eth0_ipv4();
+            net_core::set_default_gateway(None);
+            net_core::set_dns_servers(&[]);
+            net_core::current_netns()
+                .router
+                .lock()
+                .replace_dhcp_ipv4(ifindex, None, None);
+            println!("[net] DHCP lease lost on eth0; discovery restarted");
+        }
+    }
 }
 
 /// `NetInterfaceInner` 持有所有 `DeviceStack`、socket 路由绑定表和 socket ID 计数器。
@@ -155,6 +253,8 @@ impl<'a> NetInterfaceInner<'a> {
                 device: lo_device,
                 iface: lo_iface,
                 sockets: lo_sockets,
+                dhcp_handle: None,
+                pending_dhcp_event: None,
             });
         }
 
@@ -202,13 +302,32 @@ impl<'a> NetInterfaceInner<'a> {
             let eth_config = Config::new(HardwareAddress::Ethernet(hw_addr));
             let mut eth_iface = Interface::new(eth_config, &mut eth_device, now);
             let mut eth_sockets = SocketSet::new(vec![]);
+            let mut runtime_dhcp_handle = None;
 
-            #[cfg(all(feature = "board_2k1000", feature = "gmac_2k1000"))]
+            #[cfg(all(
+                feature = "board_2k1000",
+                feature = "gmac_2k1000",
+                not(feature = "gmac_dhcp")
+            ))]
             if has_real_nic {
                 let static_cidr = IpCidr::new(IpAddress::v4(192, 168, 9, 20), 24);
                 net_core::set_eth0_ipv4(static_cidr);
                 net_core::set_default_gateway(None);
                 println!("[net] eth0 static address 192.168.9.20/24");
+            }
+
+            #[cfg(all(feature = "board_2k1000", feature = "gmac_dhcp"))]
+            if has_real_nic {
+                let mut dhcp_socket = dhcpv4::Socket::new();
+                dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
+                    discover_timeout: Duration::from_secs(2),
+                    initial_request_timeout: Duration::from_secs(1),
+                    request_retries: 3,
+                    min_renew_timeout: Duration::from_secs(60),
+                    ..dhcpv4::RetryConfig::default()
+                });
+                runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+                println!("[net] eth0 DHCP client started");
             }
 
             #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
@@ -237,10 +356,13 @@ impl<'a> NetInterfaceInner<'a> {
                         Some(dhcpv4::Event::Configured(cfg)) => {
                             net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
                             net_core::set_default_gateway(cfg.router);
+                            let dns_servers: Vec<_> = cfg.dns_servers.iter().copied().collect();
+                            net_core::set_dns_servers(&dns_servers);
                             log::info!(
-                                "[net::config] DHCP: got IP {:?} gateway {:?}",
+                                "[net::config] DHCP: got IP {:?} gateway {:?} DNS {:?}",
                                 cfg.address,
-                                cfg.router
+                                cfg.router,
+                                dns_servers
                             );
                             break;
                         }
@@ -283,6 +405,8 @@ impl<'a> NetInterfaceInner<'a> {
                 device: eth_device,
                 iface: eth_iface,
                 sockets: eth_sockets,
+                dhcp_handle: runtime_dhcp_handle,
+                pending_dhcp_event: None,
             });
         }
 
@@ -347,6 +471,8 @@ impl<'a> NetInterface<'a> {
                 device: veth_device,
                 iface: veth_iface,
                 sockets: veth_sockets,
+                dhcp_handle: None,
+                pending_dhcp_event: None,
             });
         }
     }
@@ -470,21 +596,37 @@ impl<'a> NetInterface<'a> {
         if self.inner.lock().is_none() {
             return;
         }
-        self.poll_once();
+        self.poll_once(true);
     }
 
-    /// Non-blocking poll: skip if the inner lock is already held
-    /// (e.g., a syscall handler is already polling).
-    /// Safe for use in interrupt contexts — never spins.
+    /// Non-blocking task-context poll: skip if the inner lock is already held.
+    /// Lease events are committed after the interface lock is released.
     pub fn try_poll(&self) -> bool {
         let guard = self.inner.try_lock();
         match guard {
             Some(inner) if inner.is_some() => {
                 drop(inner);
-                self.poll_once();
+                self.poll_once(true);
                 true
             }
             _ => false, // lock held by another context, or NetInterface not yet initialized
+        }
+    }
+
+    /// Interrupt-safe non-blocking poll.
+    ///
+    /// smoltcp may consume a DHCP event here, but publishing that lease needs
+    /// device-list and router locks. The event is retained in DeviceStack and
+    /// committed by the next task-context poll.
+    pub fn try_poll_irq(&self) -> bool {
+        let guard = self.inner.try_lock();
+        match guard {
+            Some(inner) if inner.is_some() => {
+                drop(inner);
+                self.poll_once(false);
+                true
+            }
+            _ => false,
         }
     }
     /// Non-blocking poll ONLY the specified stack (by ifindex).
@@ -511,9 +653,18 @@ impl<'a> NetInterface<'a> {
         *CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
+        let mut progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
+        progressed |= capture_dhcp_event(stack);
+        let dhcp_event = stack
+            .pending_dhcp_event
+            .take()
+            .map(|event| (ifindex, event));
         dispatch_udp_packets(&mut stack.sockets);
         drop(guard);
+
+        if let Some((ifindex, event)) = dhcp_event {
+            commit_dhcp_event(ifindex, event);
+        }
 
         if progressed {
             crate::net::wake_tcp_waiters();
@@ -523,8 +674,9 @@ impl<'a> NetInterface<'a> {
         progressed
     }
 
-    fn poll_once(&self) -> bool {
+    fn poll_once(&self, commit_dhcp: bool) -> bool {
         let mut progressed = false;
+        let mut dhcp_events = Vec::new();
         self.inner_handler(|inner| {
             // Pre-collect all removal handles with their ifindex
             let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
@@ -593,6 +745,14 @@ impl<'a> NetInterface<'a> {
                 progressed |= stack
                     .iface
                     .poll(timestamp, &mut stack.device, &mut stack.sockets);
+                if capture_dhcp_event(stack) {
+                    progressed = true;
+                }
+                if commit_dhcp {
+                    if let Some(event) = stack.pending_dhcp_event.take() {
+                        dhcp_events.push((stack.nic.nic_id() as u32, event));
+                    }
+                }
 
                 // 3. Clean up TCP sockets belonging to this stack
                 for (resolved, ifindex, rh) in &tcp_removes {
@@ -620,6 +780,9 @@ impl<'a> NetInterface<'a> {
                 dispatch_udp_packets(&mut stack.sockets);
             }
         });
+        for (ifindex, event) in dhcp_events {
+            commit_dhcp_event(ifindex, event);
+        }
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
         if progressed {
             crate::net::wake_tcp_waiters();
@@ -891,52 +1054,6 @@ impl<'a> NetInterface<'a> {
                 handle: new_handle,
                 proto: InetProtocol::Udp,
             },
-        );
-        Some(rh)
-    }
-
-    pub fn rebind_routed_raw(
-        &self,
-        rh: RouteSocketHandle,
-        new_ifindex: u32,
-        ip_version: smoltcp::wire::IpVersion,
-        ip_protocol: smoltcp::wire::IpProtocol,
-    ) -> Option<RouteSocketHandle> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let old_binding = inner_ref.bindings.remove(&rh)?;
-        if old_binding.ifindex == new_ifindex {
-            inner_ref.bindings.insert(rh, old_binding);
-            return Some(rh);
-        }
-        let rx_buf = raw::PacketBuffer::new(
-            vec![raw::PacketMetadata::EMPTY; 128],
-            vec![0u8; crate::net::MAX_BUFFER_SIZE],
-        );
-        let tx_buf = raw::PacketBuffer::new(
-            vec![raw::PacketMetadata::EMPTY; 128],
-            vec![0u8; crate::net::MAX_BUFFER_SIZE],
-        );
-        let new_socket = raw::Socket::new(ip_version, ip_protocol, rx_buf, tx_buf);
-        {
-            let old_stack = inner_ref.stack_mut(old_binding.ifindex)?;
-            old_stack.sockets.remove(old_binding.handle);
-        }
-        let new_stack = inner_ref.stack_mut(new_ifindex)?;
-        let new_handle = new_stack.sockets.add(new_socket);
-        inner_ref.bindings.insert(
-            rh,
-            SocketBinding {
-                ifindex: new_ifindex,
-                handle: new_handle,
-                proto: InetProtocol::Raw,
-            },
-        );
-        log::info!(
-            "[net] rebind_routed_raw {} from if={} to if={}",
-            rh,
-            old_binding.ifindex,
-            new_ifindex
         );
         Some(rh)
     }

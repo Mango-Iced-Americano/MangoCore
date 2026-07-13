@@ -64,10 +64,12 @@ impl fmt::Debug for DeviceEntry {
 // ---------------------------------------------------------------------------
 
 lazy_static! {
-    /// DHCP-assigned IPv4 CIDR for eth0 (set after DHCP probe completes)
+    /// Active IPv4 CIDR for eth0 (static direct-link address or DHCP lease).
     pub static ref ETH0_CIDR: Mutex<Option<IpCidr>> = Mutex::new(None);
-    /// Default gateway (set after DHCP probe completes)
+    /// Default IPv4 gateway from the active configuration.
     pub static ref DEFAULT_GW: Mutex<Option<Ipv4Address>> = Mutex::new(None);
+    /// DNS servers supplied by the active DHCP lease.
+    pub static ref DNS_SERVERS: Mutex<Vec<Ipv4Address>> = Mutex::new(Vec::new());
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +391,20 @@ pub fn set_eth0_ipv4(cidr: IpCidr) {
     }
 }
 
+/// Clear the active IPv4 address from eth0 after a DHCP deconfiguration event.
+pub fn clear_eth0_ipv4() {
+    *ETH0_CIDR.lock() = None;
+    let ns = current_netns();
+    let list = ns.device_list.lock();
+    if let Some(eth0) = list.values().find(|iface| iface.iface_name() == "eth0") {
+        for old in eth0.ip_addrs() {
+            if matches!(old, IpCidr::Ipv4(_)) {
+                eth0.del_ip_addr(old);
+            }
+        }
+    }
+}
+
 /// Return the DHCP-assigned eth0 IPv4 CIDR, if any.
 pub fn eth0_ipv4_cidr() -> Option<IpCidr> {
     *ETH0_CIDR.lock()
@@ -397,6 +413,18 @@ pub fn eth0_ipv4_cidr() -> Option<IpCidr> {
 /// Set the default gateway address (from DHCP).
 pub fn set_default_gateway(gw: Option<Ipv4Address>) {
     *DEFAULT_GW.lock() = gw;
+}
+
+/// Replace DNS servers with those carried by the current DHCP lease.
+pub fn set_dns_servers(servers: &[Ipv4Address]) {
+    let mut current = DNS_SERVERS.lock();
+    current.clear();
+    current.extend_from_slice(servers);
+}
+
+/// Return a snapshot of DNS servers from the current DHCP lease.
+pub fn dns_servers() -> Vec<Ipv4Address> {
+    DNS_SERVERS.lock().clone()
 }
 
 /// Check if the given address belongs to any local interface.

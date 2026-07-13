@@ -3246,7 +3246,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -f /etc/group ] || printf 'root:x:0:\\ndaemon:x:1:\\nnogroup:x:65534:\\n' > /etc/group; \
         grep -q '^daemon:x:1:' /etc/group || printf 'daemon:x:1:\\n' >> /etc/group; \
         [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
-        [ -f /etc/resolv.conf ] || printf 'nameserver 10.0.2.3\\n' > /etc/resolv.conf; \
+        rm -f /etc/resolv.conf; ln -s /proc/net/resolv.conf /etc/resolv.conf; \
         [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);

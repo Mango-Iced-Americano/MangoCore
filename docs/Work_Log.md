@@ -4,6 +4,34 @@
 
 ## 2026-07-13
 
+### board/net: 增加 2K1000LA 常驻 DHCP、动态路由和 DNS 交付
+
+**涉及文件：**
+- os/src/net/config.rs、os/src/net/net_core.rs、os/src/net/routing.rs — 为 DeviceStack 增加常驻 DHCP handle，在运行时 poll 中处理续租/失租，并在释放网络轮询锁后同步 smoltcp、设备地址、默认路由及 DNS
+- os/src/task/manager.rs — 定时器改用 try_poll_irq，只推进协议栈并暂存租约事件，由下一次任务上下文轮询提交，避免单核中断反向获取 device_list/router 锁
+- .agents/skills/mango-workflow/references/debugging-patterns.md — 沉淀中断轮询消费状态事件后延迟跨子系统提交的通用模式
+- os/src/fs/procfs/files/net_resolv.rs、user/src/bin/initproc.rs — 动态生成 /proc/net/resolv.conf，将 /etc/resolv.conf 链接到租约 DNS
+- os/src/net/socket/inet/raw/raw.rs、os/src/net/socket/mod.rs、os/src/net/config.rs — RAW socket 按路由 ifindex 选择预创建 handler，等待唤醒扫描全部接口 handler，移除会在同一栈制造重复接收者的 RAW rebind API
+- os/src/net/routing.rs — DHCP connected 路由按前缀归一化为网络号，接口自身仍保留租约主机地址
+- os/Cargo.toml、os/Makefile — 增加 gmac_dhcp feature 和 la64-2k1000-dhcp-shell 实板目标，同时保留原静态直连镜像
+- docs/06_net/dhcp.md、docs/06_net/device-stack-and-poll.md、docs/06_net/routing.md、docs/06_net/raw.md、docs/07_driver/2k1000-gmac.md — 同步生命周期、锁顺序、多接口 RAW 约束、构建和验收步骤
+
+**验证：**
+- Docker 串行执行 make -C os rv64-kernel-build-only、make -C os la64-kernel-build-only；在加入 procfs DNS 和 initproc 链接后完整重跑，前后两轮均成功，仅有项目既有 warning ✅
+- Docker 最终构建 make -C os la64-2k1000-dhcp-shell 成功；uImage 文件 12385000 字节、数据段 12384936 字节，load/entry 均为 0x90000000 ✅
+- kernel-2k1000-dhcp-shell.ui 最终 SHA-256 为 026131d2484c00911ea131edf0722e3cd795ae2164093dfcfeb2996cfa1274e8，file 识别为合法 LoongArch U-Boot legacy uImage ✅
+- QEMU 集成启动因工作区缺少 disk-la.img，在进入固件前由 QEMU 拒绝启动；未伪造测试盘，保留为环境验证缺口 ⚠️
+- 最终镜像经 en8 TFTP 传输 12385000 字节，CRC32 553c6f86；U-Boot iminfo、镜像校验和、load/entry 均通过 ✅
+- 实板启动识别 GMAC0 DWMAC 0xd137、YT8511 PHY 0x10a、1000M/full；SATA scratch 冒烟测试通过，并正常进入 board Shell，持续监听期间无 panic ✅
+- Mac 直连环境没有 DHCP server，运行时按预期输出 Deconfigured 并继续发现；换至 LAN 后链路协商为 100M/full，取得 192.168.1.3/24，默认网关和 DNS 均为 192.168.1.1 ✅
+- /proc/net/route 的 connected 项为 192.168.1.0/24，默认路由下一跳为 192.168.1.1；/etc/resolv.conf 动态输出 nameserver 192.168.1.1 ✅
+- 修复前网关与公网 ping 均每序号重复一次，而 127.0.0.1 正常；修复后网关、183.2.172.177 和 www.baidu.com 均为 4/4、0% 丢包、无 DUP，nslookup 同时返回 A/AAAA 记录 ✅
+
+**备注：**
+- kernel-2k1000-full-shell.ui 继续使用 192.168.9.20/24，不影响 Mac 直连 TFTP；只有显式使用 kernel-2k1000-dhcp-shell.ui 才启用动态地址。
+- 用户态 inet_test 仍有若干硬编码 QEMU DNS 的子测例，后续网络测试阶段改为读取 /etc/resolv.conf。
+- 一键脚本本轮在 RESET 后把连续中断字符回显为单条 cccc 命令，未识别已经到达的 U-Boot prompt；手工接管后 TFTP 和启动成功，脚本提示符识别鲁棒性列入后续工具修复。
+
 ### board/integration: 联合验证 SATA、挂载文件系统、GMAC 与交互式 Shell
 
 **涉及文件：**

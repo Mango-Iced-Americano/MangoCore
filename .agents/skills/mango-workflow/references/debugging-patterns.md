@@ -444,3 +444,19 @@
 - **修复**：使用 `select`/poll 同时监听串口和 stdin；交互期将 TTY 切为 raw 模式，逐字节写入串口，并在 `finally` 中恢复原终端属性。监视器退出键应在主机侧拦截，避免误发给设备。
 - **验收**：用 pipe/PTY 回环同时验证设备输出、普通输入只转发一次、CR 字节保留、退出控制字符不进入串口，以及异常退出后终端属性恢复。
 - **相关文件**：`scripts/boot_2k1000_tftp.py`
+
+### 中断轮询消费状态事件后延迟跨子系统提交
+
+- **现象**：协议栈的 try_poll 使用 try_lock，看似中断安全；加入 DHCP、热插拔等状态事件后，单核系统可能在事件到达时随机卡死。
+- **根因**：中断轮询虽然没有等待协议栈锁，却在事件回调中获取 device_list、路由表或文件系统等阻塞锁。若中断打断了持有这些锁的任务，CPU 会在中断上下文永久自旋。
+- **修复**：中断路径只推进硬件/协议状态机，并把最新事件保存在所属对象；任务上下文轮询在释放协议栈锁后再提交跨子系统状态。状态型事件可采用 latest-wins，避免先发布已被后继 Deconfigured 覆盖的旧租约。
+- **验收**：分别编译正常任务轮询和 IRQ 轮询调用点；审计 IRQ 路径不再调用会获取其他子系统锁或打印阻塞日志的提交函数。
+- **相关文件**：`os/src/net/config.rs`, `os/src/task/manager.rs`
+
+### 多接口 RAW socket 仅外网 ping 出现稳定 DUP
+
+- **现象**：loopback ping 严格一发一收，但网关和公网每个序号都稳定出现第二个 reply；UDP/DNS 正常，GMAC TX/RX ring 也没有重复提交证据。
+- **根因**：RAW socket 创建时已在 `lo`、`eth0` 各放置一个 smoltcp handler，发送外网前又把主 `lo` handler rebind 到 `eth0`，导致同一 ICMP reply 被同一 DeviceStack 内两个 RAW handler 各入队一次。重复发生在接收交付层，不是线上真的发送两次。
+- **修复**：RAW handler 必须与 ifindex 一起保存；发送时按路由选择目标接口已有的 handler，不执行跨栈迁移。全局等待注册仍按逻辑 socket 计数，但 readiness 必须扫描该 socket 的全部接口 handler。
+- **教训**：遇到 ICMP DUP 先用 `127.0.0.1` 与网关做接口对照，再区分 TX 重复、线上回包重复和协议栈多 handler 重复交付；多接口协议对象不能同时采用“每栈预创建”和“发送时迁移主对象”两套策略。
+- **相关文件**：`os/src/net/socket/inet/raw/raw.rs`, `os/src/net/socket/mod.rs`, `os/src/net/config.rs`

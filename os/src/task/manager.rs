@@ -2198,7 +2198,7 @@ pub fn timer_interrupt_handler() {
         NEXT_SCHED_TICK_NS.store(next_tick, AtomicOrdering::Relaxed);
 
         // Periodic housekeeping — only once per sched tick
-        crate::net::config::NET_INTERFACE.try_poll();
+        crate::net::config::NET_INTERFACE.try_poll_irq();
         need_resched = true;
     }
 

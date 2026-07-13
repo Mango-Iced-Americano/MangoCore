@@ -4,7 +4,7 @@ module: "config.rs"
 category: net
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-13"
 code_paths:
   - "os/src/net/config.rs"
 entry_points:
@@ -84,10 +84,12 @@ pub struct DeviceStack<'a> {
     pub device: IfaceDevice,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
+    pub dhcp_handle: Option<SocketHandle>,
 }
 ```
 
-每个 `DeviceStack` 代表一个完整的网络设备协议栈：
+每个 `DeviceStack` 代表一个完整的网络设备协议栈。dhcp_handle 保存需要
+续租的常驻 DHCP socket；静态地址、loopback 和 veth 栈均为 None。
 
 | 字段 | 类型 | 职责 |
 |------|------|------|
@@ -157,7 +159,10 @@ pub fn try_poll(&self) -> bool {
 
 在单核环境下，场景如下：一个 syscall 处理函数（如 `sys_sendto`）持有 `NET_INTERFACE.inner` 锁并调用 `poll_once()`。如果在 `poll_once()` 执行期间触发了定时器中断，中断处理函数若调用 `poll()` 会尝试获取同一把锁，导致死锁。
 
-`try_poll()` 在锁已被持有时不等待不重试，直接返回 `false`。调用方根据返回值决定是否重试或跳过。此变体安全用于中断上下文。
+`try_poll()` 在锁已被持有时不等待不重试，直接返回 `false`，用于普通任务
+上下文。定时器中断使用 `try_poll_irq()`：它可以推进 smoltcp，但只把 DHCP
+事件保存在 DeviceStack，下一次任务上下文轮询才提交设备地址、路由和 DNS，
+避免中断代码自旋等待 device_list/router 锁。
 
 ### `try_poll_stack()` — 单栈非阻塞轮询
 
@@ -187,12 +192,14 @@ poll_once()
   │       e) 清除本栈的 TCP socket（仅当状态为 Closed 时移除，否则放回 TO_REMOVE）
   │       f) dispatch_udp_packets() 分发 UDP 数据报
   │
-  ├── [阶段 3] 全局唤醒 TCP/RAW 等待者
+  ├── [阶段 3] 提取 DHCP 租约事件，释放 NET_INTERFACE 锁后提交地址/路由/DNS
+  │
+  ├── [阶段 4] 全局唤醒 TCP/RAW 等待者
   │     if progressed:
   │       ├─ wake_tcp_waiters()
   │       └─ wake_raw_waiters()
   │
-  └── [阶段 4] 无条件唤醒 accept 等待者
+  └── [阶段 5] 无条件唤醒 accept 等待者
         └─ wake_tcp_accept_waiters()
 ```
 
@@ -289,9 +296,8 @@ inner_ref.bindings.insert(
 | `remove(handler, ifindex)` | 从指定 DeviceStack 直接移除 socket |
 | `remove_routed(rh)` | 移除路由式 socket（从 sockets 和 bindings 同时移除） |
 | `rebind_routed_udp(rh, new_ifindex)` | 将 UDP socket 迁移到另一设备栈。创建新 socket 并从旧栈移除。 |
-| `rebind_routed_raw(rh, new_ifindex, ip_version, ip_protocol)` | 将 RAW socket 迁移到另一设备栈。逻辑同 UDP rebind。 |
 
-`rebind_routed_udp` 和 `rebind_routed_raw` 在目标 ifindex 与当前相同时返回原句柄不变；不同时创建新 socket，销毁旧 socket，更新 bindings。
+`rebind_routed_udp` 在目标 ifindex 与当前相同时返回原句柄不变；不同时创建新 socket，销毁旧 socket并更新 bindings。RAW socket 创建时已为每个 DeviceStack 分配独立 handler，发送路径按 ifindex 选择既有 handler，不能把一个 handler 迁移到已经存在同协议 handler 的栈，否则接收包会被重复交付。
 
 ### 设备栈管理
 
@@ -331,7 +337,7 @@ pub fn route_check(dest: IpAddress) -> Result<(), SyscallErr>
 | `try_poll()` 非阻塞路径 | 隐式覆盖（syscall 路径调用） | pass |
 | `add_routed_socket` / `remove_routed` | TCP/UDP socket 生命周期测试 | pass |
 | `rebind_routed_udp` | UDP 跨接口迁移 | not_run |
-| `rebind_routed_raw` | RAW 跨接口迁移 | not_run |
+| RAW 按 ifindex 选择 handler | 2K1000LA loopback/网关/公网/domain ping | pass，无 DUP |
 | `add_ip_to_stack` / `remove_ip_from_stack` | ifconfig 类操作 | not_run |
 | `stack_ifindexes` | 多接口枚举 | not_run |
 | `socket_stats` | 统计信息准确性 | not_run |

@@ -141,6 +141,36 @@ impl Router {
         self.table.remove(dest);
     }
 
+    /// Atomically replace routes owned by the eth0 DHCP lease.
+    pub fn replace_dhcp_ipv4(
+        &mut self,
+        ifindex: u32,
+        cidr: Option<IpCidr>,
+        gateway: Option<Ipv4Address>,
+    ) {
+        self.table.entries.retain(|entry| {
+            entry.ifindex != ifindex
+                || !matches!(entry.route_type, RouteType::Connected | RouteType::Default)
+        });
+
+        if let Some(cidr) = cidr {
+            let network = match cidr {
+                IpCidr::Ipv4(cidr) => IpCidr::Ipv4(cidr.network()),
+                IpCidr::Ipv6(cidr) => IpCidr::Ipv6(cidr),
+            };
+            self.add_route(network, None, ifindex, 0, RouteType::Connected);
+            if let Some(gateway) = gateway {
+                self.add_route(
+                    IpCidr::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), 0),
+                    Some(IpAddress::Ipv4(gateway)),
+                    ifindex,
+                    100,
+                    RouteType::Default,
+                );
+            }
+        }
+    }
+
     /// Look up the best matching route for the given destination IP.
     ///
     /// Uses longest prefix match: among all routes whose CIDR contains `dest_ip`,
@@ -196,8 +226,12 @@ impl Router {
 
         if let Some(cidr) = crate::net::net_core::eth0_ipv4_cidr() {
             // Connected route from DHCP CIDR
+            let network = match cidr {
+                IpCidr::Ipv4(cidr) => IpCidr::Ipv4(cidr.network()),
+                IpCidr::Ipv6(cidr) => IpCidr::Ipv6(cidr),
+            };
             self.add_route(
-                IpCidr::new(cidr.address(), cidr.prefix_len()),
+                network,
                 None,
                 eth0_ifindex,
                 0,
