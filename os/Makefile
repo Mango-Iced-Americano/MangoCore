@@ -234,12 +234,8 @@ define build_tools_disk
 	@mkfs.ext4 -F /tmp/tools-pl-$(4).img -b 4096 2>/dev/null
 	@mkdir -p /tmp/tools-mnt
 	@mount -o loop /tmp/tools-pl-$(4).img /tmp/tools-mnt
-	@mkdir -p /tmp/tools-mnt/bin /tmp/tools-mnt/lib /tmp/tools-mnt/usr/bin /tmp/tools-mnt/usr/sbin /tmp/tools-mnt/etc /tmp/tools-mnt/tests
-	@echo "  copying files..."
-	@cp -a $(3)/bin/* /tmp/tools-mnt/bin/ 2>/dev/null || true
-	@cp -a $(3)/lib/* /tmp/tools-mnt/lib/ 2>/dev/null || true
-	@cp -a $(3)/sbin/* /tmp/tools-mnt/sbin/ 2>/dev/null || true
-	@cp -a $(3)/etc/* /tmp/tools-mnt/etc/ 2>/dev/null || true
+	@echo "  copying files from $(3)..."
+	@cp -a $(3)/. /tmp/tools-mnt/ 2>/dev/null || true
 	@echo "  copying test binaries..."
 	@case "$(4)" in rv) target=riscv64gc-unknown-none-elf ;; la) target=loongarch64-unknown-linux-gnu ;; esac; \
 	for t in inet_test fs_test unix_test; do \
