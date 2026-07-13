@@ -4,6 +4,28 @@
 
 ## 2026-07-13
 
+### board/net: 增加自包含实板网络回归镜像并完成 38 项验收
+
+**涉及文件：**
+- `os/Makefile`、`os/make/la64.mk`、`os/build_initramfs.sh` — 增加 `la64-2k1000-net-tests` 目标及可选 `INET_TEST_RUNTIME` 注入，将当前 `inet_test` 固定安装到 initramfs `/bin`，避免 SSD 旧测试副本覆盖
+- `user/src/bin/inet_test.rs` — 增加 `core/veth/external/board/tls` profile；接口地址改由 `SIOCGIFADDR` 获取，DNS 改读 `/etc/resolv.conf`，路由表测试接受真实 `eth0` connected/default 项；外网 TCP/HTTP 改为运行时解析 `www.baidu.com`，移除 QEMU 地址和 `1.1.1.1:80` 假设
+- `docs/06_net/test-map.md`、`docs/07_driver/2k1000-gmac.md` — 记录实板镜像、测试分组、macOS 互联网共享配置和最终结果
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀实板网络测试先分离本地协议栈、宿主 NAT、TUN/Fake-IP 和公共目标可达性的排查方法
+
+**验证：**
+- Docker 串行执行 `make -C os rv64-kernel-build-only` 与 `make -C os la64-kernel-build-only`，均成功，仅有项目既有 warning ✅
+- Docker 构建 `make -C os la64-2k1000-net-tests` 成功；uImage 总长 15670104 字节、数据段 15670040 字节，load/entry 均为 `0x90000000` ✅
+- 最终镜像 SHA-256 `724f9d3ea73dca4dc6ff1db284a275c63f5e9c8a78e4616d716fd8b814f06e30`，CRC32 `f81702af`；U-Boot TFTP 传输 15670104 字节，板端 CRC 和 `iminfo` checksum 均通过 ✅
+- 实板启动识别 DWMAC `0xd137`、YT8511 PHY `0x10a`、1000M/full；SATA scratch 写入探针通过，macOS 互联网共享 DHCP 获得 `192.168.2.2/24`，网关/DNS 均为 `192.168.2.1` ✅
+- Mac 本地 `192.168.2.1:8080` HTTP 服务由开发板 curl 成功访问并返回 200；随后开发板经共享 NAT 解析 `www.baidu.com` 为真实 IPv4、建立 TCP 并收到 HTTP 200 ✅
+- `/bin/inet_test core` 为 29/29 PASS、返回码 0；`/bin/inet_test external` 为 9/9 PASS、返回码 0，覆盖 DNS、TCP connect/send/recv、HTTP、UDP DNS 和路由 ✅
+- QEMU 集成仍因工作区缺少 `disk-la.img` 无法启动；本轮以双架构编译和 2K1000LA 实板 38 项回归覆盖，保留该环境缺口 ⚠️
+
+**备注：**
+- 首轮 28/29 的唯一失败来自测试错误地要求 `/proc/net/route` 必须出现 `lo`；真实主路由表只有 `eth0` connected/default 项，修正后通过。
+- ClashX Pro TUN 返回 `198.18.0.0/16` Fake-IP，导致互联网共享下 TCP 超时；关闭 TUN 后出网正常。`1.1.1.1:80` 在宿主 Wi-Fi 本身也不可达，不能作为内核固定验收目标。
+- 板载 RESET 本轮出现接触粘连并导致 U-Boot 连续冷复位；断电重新上电后稳定完成传输和测试，后续现场优先使用可靠电源重启。
+
 ### board/net: 自包含 curl 与 glibc DNS resolver ABI 实板打通
 
 **涉及文件：**

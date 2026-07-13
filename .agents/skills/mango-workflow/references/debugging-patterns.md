@@ -476,3 +476,11 @@
 - **修复**：RAW handler 必须与 ifindex 一起保存；发送时按路由选择目标接口已有的 handler，不执行跨栈迁移。全局等待注册仍按逻辑 socket 计数，但 readiness 必须扫描该 socket 的全部接口 handler。
 - **教训**：遇到 ICMP DUP 先用 `127.0.0.1` 与网关做接口对照，再区分 TX 重复、线上回包重复和协议栈多 handler 重复交付；多接口协议对象不能同时采用“每栈预创建”和“发送时迁移主对象”两套策略。
 - **相关文件**：`os/src/net/socket/inet/raw/raw.rs`, `os/src/net/socket/mod.rs`, `os/src/net/config.rs`
+
+### 实板外网测试先消除 QEMU 常量和宿主网络假设
+
+- **现象**：局域网 ARP/TCP 正常，但实板外网测试超时；测试硬编码 QEMU 地址、QEMU DNS 或某个公共 IP 时，换到 DHCP、互联网共享、校园网或代理环境后形成批量假失败。
+- **根因**：接口地址和 DNS 属于运行时配置，公共 IP/端口也可能被上游网络阻断。宿主机 TUN 代理还可能返回 `198.18.0.0/16` Fake-IP，而互联网共享转发流量并不经过宿主进程的代理接管路径。
+- **排查**：先让实板连接宿主网关上的本地 TCP/HTTP 服务，验证驱动、ARP、IP、TCP 和校验和；再让宿主机禁用代理后直连同一公网目标。只有两者都通过后，公网失败才应归因到内核。
+- **修复**：通过 `SIOCGIFADDR` 和 `/etc/resolv.conf` 获取运行时参数；公网 HTTP 目标先做 DNS 解析并发送正确 Host，避免把单个裸 IP 当成网络真值。代理 TUN 与 macOS 互联网共享并用时，测试前关闭 TUN/增强模式。
+- **相关文件**：`user/src/bin/inet_test.rs`, `os/build_initramfs.sh`, `docs/06_net/test-map.md`

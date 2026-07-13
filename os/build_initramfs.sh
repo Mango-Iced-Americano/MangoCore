@@ -34,10 +34,12 @@ case "$ARCH" in
   rv64)
     INIT_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/init"
     BUSYBOX_SRC="../user/tools/riscv64/bin/busybox"
+    INET_TEST_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/inet_test"
     ;;
   la64)
     INIT_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/init"
     BUSYBOX_SRC="../user/tools/loongarch64/bin/busybox"
+    INET_TEST_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/inet_test"
     ;;
   *)
     echo "[initramfs] ERROR: unknown arch: $ARCH"
@@ -69,6 +71,19 @@ if [ "${CURL_RUNTIME:-0}" = "1" ]; then
     fi
     cp -a "$CURL_SRC/etc/." "$STAGE/etc/"
     echo "[initramfs] installed self-contained LoongArch64 curl runtime"
+fi
+
+# Optional test binary pinned to the same source revision as the kernel.
+# Install outside /tests because board startup bind-mounts the SSD tools tree
+# there, which may contain an older inet_test.
+if [ "${INET_TEST_RUNTIME:-0}" = "1" ]; then
+    if [ ! -x "$INET_TEST_SRC" ]; then
+        echo "[initramfs] ERROR: missing inet_test build: $INET_TEST_SRC"
+        rm -rf "$STAGE"
+        exit 1
+    fi
+    install -m 0755 "$INET_TEST_SRC" "$STAGE/bin/inet_test"
+    echo "[initramfs] installed current inet_test at /bin/inet_test"
 fi
 
 # 3. 安装 /init（从 initproc 构建产物）— stage-1 引导入口
