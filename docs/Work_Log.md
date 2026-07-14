@@ -1,5 +1,18 @@
 ## 2026-07-15
 
+### Fix MS_REMOUNT to validate mount root and add writer tracking for EBUSY on r/o remount
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_mount.rs` — MS_REMOUNT 路径修复：移除 `unwrap_or_else(vfs_root())` 错误回退，改为显式检查 `is_mountpoint_root()` 并在非挂载根时返回 EINVAL；新增从 r/w 切换到 r/o 时检查 MountFS `has_writers()`，若有 writer 则返回 EBUSY
+- `os/src/fs/vfs/mount.rs` — `MountFS` 新增 `writers: AtomicU32` 计数器 + `has_writers()`/`inc_writers()`/`dec_writers()` 方法，用于追踪当前打开的可写文件数
+- `os/src/fs/vfs/file.rs` — 在 `File::new()`/`new_with_metadata()`/`new_without_open()`/`new_created()` 和 `Drop` 中钩入 `track_mount_writer()` 辅助函数，通过 `downcast_ref::<MountFSInode>()` 递增/递减 MountFS 级别的 writers 计数
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 参考 DragonOS `kernel/src/filesystem/vfs/syscall/sys_mount.rs` lines 336-380。正常挂载路径的 covered mountpoint EBUSY 检查已于之前实现，本次不改动。writer 计数器与已有的 `register_writable_inode`/`unregister_writable_inode` 独立，后者用于 per-inode 写回追踪，前者用于 mount 级别的 remount r/o 阻塞。
+
 ### Fix sys_fgetxattr errno ordering: fd_to_inode must precede xattr name validation
 
 **涉及文件：**

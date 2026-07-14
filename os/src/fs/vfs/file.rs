@@ -806,6 +806,7 @@ impl File {
         file.inode.open(file.private_data.lock(), &flags)?;
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
 
         Ok(file)
@@ -865,6 +866,7 @@ impl File {
         file.inode.open(file.private_data.lock(), &flags)?;
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
 
         Ok(file)
@@ -924,6 +926,7 @@ impl File {
         });
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
         file
     }
@@ -980,6 +983,7 @@ impl File {
         });
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
         file
     }
@@ -1913,7 +1917,20 @@ impl Drop for File {
         crate::fs::vfs::posix_lock::release_ofd_for_file(self);
         if self.tracks_write_busy() {
             unregister_writable_inode(&self.inode);
+            track_mount_writer(&self.inode, false);
         }
         let _ = self.inode.close(self.private_data.lock());
+    }
+}
+
+/// Track mount-level writer count for MS_REMOUNT EBUSY check.
+/// `add`: true for open, false for close.
+fn track_mount_writer(inode: &Arc<dyn IndexNode>, add: bool) {
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<super::mount::MountFSInode>() {
+        if add {
+            mnt.mount_fs.inc_writers();
+        } else {
+            mnt.mount_fs.dec_writers();
+        }
     }
 }

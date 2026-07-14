@@ -1211,6 +1211,9 @@ pub struct MountFS {
     pub no_dentry_cache: AtomicBool,
     /// umount EBUSY 重试计数，连续 3 次 EBUSY 后第 4 次自动 force-detach
     umount_retry_count: AtomicU32,
+    /// Count of files currently opened for write on this mount.
+    /// Used to reject MS_REMOUNT to read-only while writers exist (EBUSY).
+    pub writers: AtomicU32,
 }
 
 impl MountFS {
@@ -1232,6 +1235,7 @@ impl MountFS {
             dentry_gen: AtomicU64::new(0),
             no_dentry_cache: AtomicBool::new(false),
             umount_retry_count: AtomicU32::new(0),
+            writers: AtomicU32::new(0),
         })
     }
 
@@ -1257,6 +1261,7 @@ impl MountFS {
             dentry_gen: AtomicU64::new(0),
             no_dentry_cache: AtomicBool::new(false),
             umount_retry_count: AtomicU32::new(0),
+            writers: AtomicU32::new(0),
         })
     }
 
@@ -1621,6 +1626,18 @@ impl MountFS {
 
     pub fn set_mount_flags(&self, flags: MountFlags) {
         *self.mount_flags.lock() = flags;
+    }
+
+    pub fn has_writers(&self) -> bool {
+        self.writers.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn inc_writers(&self) {
+        self.writers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_writers(&self) {
+        self.writers.fetch_sub(1, Ordering::Relaxed);
     }
 
     pub fn self_mountpoint(&self) -> Option<Arc<MountFSInode>> {

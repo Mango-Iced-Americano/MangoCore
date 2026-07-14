@@ -356,15 +356,31 @@ pub fn sys_mount(
     }
 
     if mountflags.intersects(MountFlags::MS_REMOUNT) {
-        let mnt_fs = target_inode
+        // Must target a mount root — reject silently falling back to vfs_root()
+        let Some(mnt_inode) = target_inode
             .as_any_ref()
             .downcast_ref::<vfs::MountFSInode>()
-            .map(|m| m.mount_fs.clone())
-            .unwrap_or_else(|| crate::fs::vfs_root().clone());
+        else {
+            return EINVAL;
+        };
+        if !mnt_inode.is_mountpoint_root() {
+            return EINVAL;
+        }
+
         let remount_flags = vfs::MountFlags::from_bits_truncate(
             (mountflags.bits() & !MountFlags::MS_REMOUNT.bits()) as u32,
         );
-        mnt_fs.set_mount_flags(remount_flags);
+
+        // If switching to read-only while writers exist → EBUSY
+        let old_flags = mnt_inode.mount_fs.mount_flags();
+        if remount_flags.contains(vfs::MountFlags::RDONLY)
+            && !old_flags.contains(vfs::MountFlags::RDONLY)
+            && mnt_inode.mount_fs.has_writers()
+        {
+            return EBUSY;
+        }
+
+        mnt_inode.mount_fs.set_mount_flags(remount_flags);
         return SUCCESS;
     }
 
