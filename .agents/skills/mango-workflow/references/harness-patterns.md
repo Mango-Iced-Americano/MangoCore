@@ -798,10 +798,52 @@ diag=1
 
 7. **FileMode::FMODE_PATH 的静默缺失**：`new_without_open()` 不设置 FMODE_PATH 导致 O_PATH fd 不被识别。这类"创建路径不一致"的 bug 很难从失败日志直接定位——需要追踪数据流。
 
+### 基础设施利用
+
+**os_test.conf — 测试控制中心**：mask 控制测试组（`0x800`=LTP only），`ltp_suites` 选子套件，`ltp_include/exclude` 精细控制用例。注入到镜像：
+
+```bash
+make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.conf
+```
+
+注入后镜像持久化，QEMU 重启后配置仍在；如需换配置再 inject 一次即可。
+
+**编译与运行分离**：`make rv64-run` 只跑 QEMU 不重新编译——必须先 `rv64-kernel-build-only` 再跑。Docker 内：
+
+```bash
+docker exec <container> make -C /app/os rv64-kernel-build-only
+docker exec <container> sh -c "cd /app/os && make -f make/rv64.mk comp 2>&1 | tee qemu.log"
+```
+
+**perf_diag / syscall tracing**：`/sys/kernel/tracing/tracing_on` 默认开启，每个 syscall 入口写入 ring buffer（2048 entries）。调试单个 case 时：
+
+```bash
+echo 0 > /sys/kernel/tracing/tracing_on   # 先停
+echo 1 > /sys/kernel/tracing/clear         # 清空
+echo 1 > /sys/kernel/tracing/tracing_on    # 开启
+./ltp_case                                  # 跑测试
+cat /sys/kernel/tracing/trace              # 看追踪
+```
+
+Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret 事件带返回值和 err 标记。适合定位"哪个 syscall 在返回哪个 errno"这类问题。
+
+**sysfs 统计计数器**：`/sys/kernel/stats/syscall` 提供 syscall 总数和耗时分布，`/sys/kernel/stats/resource` 提供内存/进程/网络/socket/pipe 等全局资源快照。
+
+### Oracle 调用规范
+
+每次 Oracle 调用必须明确要求：
+1. **参考 DragonOS**："参考 DragonOS 实现 + Linux 6.6 语义"
+2. **给出伪代码**："为每个 bug 提供可委托 subagent 的伪代码"
+3. **提供证据**：附带 qemu.log 中的 TFAIL 行和对应文件当前代码
+
+反例（低质量 Oracle 输出）：长篇源码分析、反复推敲同一个 bug 的假设、没有具体代码修改建议。
+正例：每个 bug 一段诊断 + 一段带文件路径和行号的伪代码。
+
 ### 相关文件
 
-- `os/src/syscall/fs.rs`（主要修改文件）
-- `os/src/syscall/flock.rs`（errno 双取反模式）
-- `os/src/fs/dev/pipe.rs`（FIFO 语义）
-- `os/src/fs/vfs/file.rs`（new_without_open FMODE_PATH）
-- `os_test.conf`（mask/ltp_include 配置范式）
+- `os/src/syscall/fs/common.rs`（DAC 辅助、路径校验、fd_to_inode）
+- `os/src/syscall/fs/sys_*.rs`（76 个按 syscall 拆分文件）
+- `os/src/fs/vfs/file.rs`（new_without_open、get_dirent64）
+- `os_test.conf`（mask/ltp_include/exclude/suites 配置范式）
+- `os/src/fs/sysfs/files/diag.rs`（perf_diag 统计文件注册）
+- `os/src/trace.rs`（syscall tracing ring buffer）
