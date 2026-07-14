@@ -1468,6 +1468,12 @@ pub fn flush_preload() {
         // of the SSD config lets a diagnostic kernel boot without rewriting P1.
         let _ = create_or_open_file("board_core_test");
     }
+    #[cfg(feature = "cpython_test")]
+    {
+        // Select the isolated CPython group without changing the persistent
+        // os_test.conf carried by the official test image.
+        let _ = create_or_open_file("cpython_test");
+    }
     #[cfg(feature = "board_shell")]
     {
         // Keep the shell selection ephemeral so booting this image never

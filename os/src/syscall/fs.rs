@@ -4106,6 +4106,7 @@ pub fn sys_renameat2(
 }
 
 const FIONREAD: u32 = 0x541B;
+const FIONBIO: u32 = 0x5421;
 
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
     let task = current_task().unwrap();
@@ -4134,6 +4135,18 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
             Ok(r) => *r = val,
             Err(_) => return EFAULT,
         }
+        return 0;
+    }
+
+    if cmd == FIONBIO {
+        if arg == 0 {
+            return EFAULT;
+        }
+        let enabled = match crate::mm::translated_ref(token, arg as *const i32) {
+            Ok(value) => *value != 0,
+            Err(_) => return EFAULT,
+        };
+        file.set_nonblock(enabled);
         return 0;
     }
 

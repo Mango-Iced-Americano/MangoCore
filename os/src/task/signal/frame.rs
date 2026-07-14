@@ -3,7 +3,7 @@
 //! 信号投递前在目标用户栈上预留 `UserContext` 和 `SigInfo`，本模块只做地址
 //! 和边界计算，实际 copy_to_user 由 `signal::do_signal` 完成。
 
-use core::mem::size_of;
+use core::mem::{align_of, size_of};
 
 use crate::hal::UserContext;
 
@@ -13,7 +13,8 @@ use super::SigInfo;
 ///
 /// # Semantics
 ///
-/// 返回 `(ucontext_addr, siginfo_addr, sig_sp, sig_size)`。地址按 8 字节对齐，
+/// 返回 `(ucontext_addr, siginfo_addr, sig_sp, sig_size)`。`ucontext_addr` 按
+/// 架构上下文的自然对齐要求对齐，其余地址至少按 8 字节对齐，
 /// 且 `siginfo_addr` 不得低于调用方给出的 `stack_bottom`。
 ///
 /// # Errors
@@ -23,7 +24,10 @@ pub(super) fn signal_frame_layout(
     base_sp: usize,
     stack_bottom: usize,
 ) -> Option<(usize, usize, usize, usize)> {
-    let ucontext_addr = base_sp.checked_sub(size_of::<UserContext>())? & !0x7;
+    let context_align = align_of::<UserContext>();
+    debug_assert!(context_align.is_power_of_two());
+    let ucontext_addr =
+        base_sp.checked_sub(size_of::<UserContext>())? & !(context_align - 1);
     let siginfo_addr = ucontext_addr.checked_sub(size_of::<SigInfo>())? & !0x7;
     if siginfo_addr < stack_bottom {
         return None;

@@ -91,6 +91,8 @@ pub struct StackFrameAllocator {
 2. `[skernel, ekernel)` 内核镜像。
 3. `FIRMWARE_RESERVED_REGIONS` 中仍有外部所有者的区间。
 
+RISC-V OpenSBI 平台另外固定保留 `[0x80000000, 0x80200000)`。内核链接与入口位于 `0x80200000`；低端 2 MiB 既不进入 frame allocator，也不参与启动期批量清零。否则首次 SATP 切换可能覆盖仍在执行的固件页，表现为 OpenSBI 与内核入口反复重启。`USABLE_MEMORY_SIZE` 同步扣除该区间。
+
 ## 4. FrameTracker 生命周期
 
 `FrameTracker` 是物理页的 RAII 句柄：

@@ -29,6 +29,8 @@ pub use arch::{
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};
+#[cfg(feature = "loongarch64")]
+pub use arch::LsxRegs;
 
 /// Per-chunk bounce buffer size for I/O operations.
 /// Computed as KERNEL_HEAP_SIZE / 128, bounded to [64KiB, 256KiB].

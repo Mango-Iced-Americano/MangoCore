@@ -802,10 +802,7 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let mcontext_addr = match sigmask_addr
-        .checked_add(size_of::<UserSignalMask>())
-        .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
-    {
+    let mcontext_addr = match ucontext_addr.checked_add(crate::hal::UserContext::MCONTEXT_OFFSET) {
         Some(addr) => addr,
         None => {
             error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
@@ -821,6 +818,18 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
+    #[cfg(feature = "loongarch64")]
+    let restored_lsx = match ucontext_addr
+        .checked_add(crate::hal::UserContext::LSX_OFFSET)
+        .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
+    {
+        Some(lsx) => lsx,
+        None => {
+            error!("[sys_sigreturn] bad LSX context in signal frame, send SIGSEGV");
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
     let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
     if copy_from_user(
         token,
@@ -832,6 +841,18 @@ pub fn sys_sigreturn() -> isize {
         error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
         drop(inner);
         exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    }
+    #[cfg(feature = "loongarch64")]
+    {
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.lsx = restored_lsx;
+        // LoongArch FPRs alias the low 64 bits of LSX registers. The signal
+        // ABI exposes both snapshots, and the existing scalar mcontext has
+        // precedence when a handler edits it. Merge that low lane before the
+        // trap return path restores the complete LSX register file.
+        for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
+            vector[0] = *scalar as u64;
+        }
     }
     inner.sigmask = restored_sigmask;
     inner.get_trap_cx().gp.a0 as isize // return a0: not modify any of trap_cx

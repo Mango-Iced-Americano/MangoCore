@@ -2,7 +2,81 @@
 
 ---
 
+## 2026-07-14
+
+### board/cpython: 提供可直接使用的全局 Python 命令
+
+**涉及文件：**
+- `user/tools/cpython/python3-wrapper.sh`、`user/tools/cpython/L4_startup.sh` — 新增 rv64/la64 自适应启动包装器，显式选择私有 musl loader、库、`PYTHONHOME` 和 CA；临时目录与用户包目录优先落到 `/scratch/python`，L4 直接验证 `/usr/bin/python3` 和 `/usr/bin/python`
+- `user/src/bin/initproc.rs` — `/tools` 挂载并准备基础运行时后，在可写根文件系统安装全局命令链接；运行时缺失时输出明确诊断，不修改全局库环境
+- `scripts/make_2k1000_full_test_disk.py`、`os/Makefile` — P3 与 QEMU tools 镜像内预置全局命令链接，使只读 `/tools/usr -> /usr` 模式也无需启动期写盘
+- `docs/03_fs/2k1000-full-test-disk.md`、`docs/08_testing/cpython-isolated.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 记录隔离运行时、全局包装器、只读 P3 和可写 scratch 的职责边界
+
+**验证：**
+- Docker 串行执行 `make rv64-kernel-build-only`、`make la64-kernel-build-only`，均成功，仅有项目既有 warning ✅
+- Docker 串行执行 `make rv64-cpython-run`、`make la64-cpython-run`；两架构均输出 `CPython launchers installed`，`/usr/bin/python3 --version` 为 Python 3.14.5，`/usr/bin/python -S -c` 输出 `global-python-command-ok`，完整 L3-L9、HTTP/HTTPS 继续全部 PASS，组退出码 0 ✅
+- `make la64-2k1000-cpython-tools` 成功，P3 经 `e2fsck -f -n`；大小 805,306,368 字节、边界 `0xA80800..0xC00800`、SHA-256 `4a0f8a1bf6fad6ed89a9d0479438df8843f2d95d1482ddcdecc57276d364972c`，三个宿主分块 CRC32 为 `e2118d3d`、`2d7315b8`、`638ff43b` ✅
+- `debugfs` 确认 P3 `/usr/bin/python3 -> /tools/tests/cpython/python3-wrapper.sh`，包装器为普通文件、模式 `0755`；`make la64-2k1000-curl-shell` 成功，uImage 总长 16,211,616 字节、数据段 16,211,552 字节、SHA-256 `4e757311cd573109f842ab184b7c70dcf0f01bf3eb3defdfd27d4132e69a03de` ✅
+
+**备注：**
+- 仅修改 `PATH` 无法解决目标 ELF 的绝对 interpreter 和私有动态库问题。包装器只影响 Python 子进程，避免 CPython/OpenSSL 库污染其他测试程序。
+- 新 P3 尚未覆盖到 SSD；板端仍使用上一版 payload 时不会出现包装器，需执行受限 P3 写入并启动本轮 Shell uImage 后完成最终实板复核。
+
+### testing/cpython: 修复 2K1000LA LSX 上下文、FAT 覆盖 rename 与 TmpFS symlink
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/trap/trap.S`、`os/src/syscall/process/signal.rs` — trap 返回按 `EUEN.SXE` 在完整 LSX 与标量 FPR 两条恢复路径中二选一，并在恢复分支后再还原通用寄存器；`sigreturn` 将标量 FPR 低 lane 合并进 LSX 快照后统一恢复，避免实机 FPR/LSX 物理别名破坏向量高 64 位
+- `os/src/fs/fat32/efs.rs`、`os/src/fs/fat32/fat_inode.rs`、`os/src/fs/page_cache.rs` — 支持同目录普通文件 rename 覆盖已有目标及 `RENAME_NOREPLACE`；以首簇或空文件父目录项建立弱引用 canonical inode 表，rename/unlink/首次分簇时重键；PageCache 后端直接共享 `FileContent`，保证最后一个 inode 引用进入 `Drop` 后仍可完成脏页写回；被覆盖目标保留到旧 fd 最后关闭再回收簇
+- `os/src/fs/tmpfs/mod.rs` — 补齐 PageCache-backed `write_at` 内核缓冲区路径、空间配额和文件长度更新，使 VFS 默认 `symlink()` 能在 TmpFS 写入链接目标
+- `user/tools/cpython/L7_filesystem.py`、`user/tools/cpython/L9_socket.py` — 普通文件操作继续使用实板 FAT32 scratch；L7 增加空文件覆盖和 20 轮无 `fsync`、同名复用的 rename 回归，POSIX symlink/stat-lstat 改在 `/tmp` 验证；HTTP 连接使用 DNS 返回的 `cloudflare.com` 地址及正确 Host，不再硬编码 `1.1.1.1:80`
+- `scripts/write_2k1000_p3.py`、`Makefile` — 增加受限 P3 更新入口；写盘前校验 payload 清单/SHA、SSD 型号、MBR CRC 和三分区布局，固定三块 LBA，逐块 TFTP/写入/读回 CRC，最后从 P3 加载 L7 与宿主比对
+- `docs/03_fs/{fat32,2k1000-full-test-disk}.md`、`docs/08_testing/cpython-isolated.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 同步 FAT inode 身份/writeback 生命周期、P3 安全更新、实板存储边界、LSX 恢复约束和内核/用户缓冲区双 I/O 路径经验
+
+**验证：**
+- Docker 串行执行 `make rv64-kernel-build-only` 与 `make la64-kernel-build-only`，均成功，仅有项目既有 warning ✅
+- Docker 串行执行 `make rv64-cpython-run` 与 `make la64-cpython-run`；两架构 L3-L9、signal round-trip、线程、子进程、文件系统、DNS、HTTP 和默认 CA HTTPS 全部 PASS，judge 均为 `72/72`、组退出码均为 0；rv64 35 秒、la64 58 秒 ✅
+- 两架构 QEMU 的 L7 明确通过空文件覆盖和 20 轮无 `fsync` rename 复用，以及 symlink/readlink、透过链接读取、stat/lstat、truncate、fsync 与 open-unlink；L9 HTTP/HTTPS 均返回 200 ✅
+- 2K1000LA 上修复前可稳定复现 CPython 首次动态启动损坏；修复后最小命令输出 `123`，连续 20 次 `import sys,encodings` 均输出 `123`，随后 L3-L6、signal、线程和子进程通过，无非法指令或上下文损坏 ✅
+- 修复前实板诊断输出 `RENAME_FAIL 0 b'S00' b'D00' b'tar' 104464 104456 104464`：目录项/首簇已切到源 inode，但新路径读到旧缓存/簇残留；据此定位到重复 inode/PageCache，以及 `Weak<FatInode>` 在 owner `Drop` 中无法 upgrade 导致最终写回丢失 ✅
+- 最终 `kernel-2k1000-curl-shell.ui` 总长 16,211,616 字节、数据段 16,211,552 字节，load/entry 均为 `0x90000000`，SHA-256 `e4eb2f4125d2a5a252d8b2936725f1647c985dc47f6b688e650087fdd1a12309`；U-Boot TFTP 长度、CRC32 `b50fe301` 和 `iminfo` checksum 全部通过 ✅
+- 2K1000LA 启动后识别 2K1000 RNG、GMAC 1000M/full、DHCP `192.168.2.2/24`，`/scratch` 写入冒烟通过；真实 FAT32 上专项脚本输出 `RENAME_NOSYNC_PASS 50`、`RENAME_EMPTY_PASS`、`RENAME_OPEN_TARGET_PASS` 和最终 `FAT_RENAME_DIAG_PASS` ✅
+- 专项目录清理后执行板端 `sync`，输出 `FAT_DIAG_CLEAN` 与 `BOARD_FINAL_SYNC_OK`；L7 Python 语法检查和 `git diff --check` 均通过，生成态 `lang_items.rs` 已恢复为 RV 变体 ✅
+- 最新 P3 payload 经 `e2fsck -f -n`、JSON 清单和内嵌 L7 SHA 比对通过；大小 805,306,368 字节、边界 `0xA80800..0xC00800`、SHA-256 `3ae7084a32a891bca5d4d5cde935c45401c65127a99530189e6bdc4af4960f26`。错误确认值 `0x0` 被 Make 入口在接触硬件前拒绝 ✅
+- 受限工具匹配 `TS32GMTS400` 和 MBR CRC32 `f469e65a` 后，仅写 P3 三块；`0xA80800`、`0xB00800`、`0xB80800` 的 TFTP/SSD 读回 CRC32 分别为 `77c8cec3`、`cce36f28`、`821f8eab`。写后从 P3 加载 L7，7696 字节、CRC32 `719b390c` 与宿主一致 ✅
+- 最终 `kernel-2k1000-cpython-tests.ui` 总长 12,426,912 字节、数据段 12,426,848 字节、SHA-256 `941d2986d3a4e4b750545efc23717ca864016437ec4260dd41ecdfbf0a356e7a`；U-Boot TFTP CRC32 `2bc8bbbc`、`iminfo` checksum 和 load/entry 均通过 ✅
+- 2K1000LA 自动执行最新 L3-L9：语言/stdlib/signal、真实 FAT32 L7、线程/futex、子进程/pipe、DNS、HTTP 200 和默认 CA HTTPS 200 全部 PASS；组退出码 0、耗时 125 秒，`judge_cpython-isolated.py` 为 `72/72`，日志无 FAIL/SKIP/panic ✅
+
+**备注：**
+- QEMU 不会可靠暴露 LoongArch FPR 与 LSX 低 lane 的硬件别名，扩展寄存器上下文必须以实机高频 trap/定时器和 signal 往返作为最终门禁。
+- SSD P3 已刷新为本轮最新共享脚本，完整实板自动化门禁已关闭；原始日志中的历史启动记录会追加在同一串口文件中，机器判定使用从最后一个 `cpython-isolated` START 标记提取的 `logs/cpython-la64-board.log`，避免把早期 panic 混入本轮结果。
+
 ## 2026-07-13
+
+### testing/cpython: 选择性移植 develop 隔离 CPython 链路并完成双架构 QEMU 验收
+
+**涉及文件：**
+- `scripts/fetch_cpython_runtime.py`、`user/tools/cpython/`、`.gitignore` — 从 Alpine APKINDEX 解析 rv64/la64 的 CPython、musl、OpenSSL、sqlite 和 CA 依赖闭包；运行时缓存不纳入 Git，共享 L3-L9 脚本覆盖启动、语言、stdlib、signal、VFS、线程、子进程和 HTTPS，实板 scratch 环境强制 L9 外网门禁
+- `os/Makefile`、`os/Cargo.toml`、`os/src/fs/mod.rs`、`user/src/bin/initproc.rs` — 新增 `cpython_test` 易失聚焦标记、bit12 测试组、rv64/la64 QEMU 目标、2K1000LA 专用 uImage 和 P3 tools 分区目标
+- `os/src/fs/vfs/file.rs`、`os/src/syscall/fs.rs`、`os/src/net/syscall/getsockopt.rs` — `getdents64` 改用每 open file description 稳定名称快照/cookie，实现 `ioctl(FIONBIO)` 和 `getsockopt(SO_TYPE)`
+- `os/src/hal/arch/loongarch64/{mod.rs,trap/{context.rs,mod.rs,trap.S}}`、`os/src/hal/{arch/mod.rs,mod.rs}`、`os/src/{task/signal,syscall/process/signal.rs}` — 按 CPUCFG2 启用并发布 LSX，trap 保存/恢复 32 个 128-bit 向量寄存器，signal frame 使用编译期 offset 并保留 LSX 状态；LASX/LBT 继续关闭
+- `os/src/hal/arch/riscv/{config.rs,trap/context.rs}` — 将 OpenSBI `[0x80000000,0x80200000)` 列为固件保留区，防止页表页/启动清零覆盖固件，并从 `USABLE_MEMORY_SIZE` 扣除该 2 MiB
+- `scripts/make_2k1000_full_test_disk.py`、`scripts/make_2k1000_tools_partition.py` — 向 tools payload 叠加共享 CPython 脚本，生成只能匹配现有 P3 边界的 768 MiB ext4 payload 与 SHA-256/LBA 清单
+- `judge/judge_cpython-isolated.py`、`AGENTS.md`、`docs/{README.md,01_architecture/hal-and-platform.md,02_syscall/{fs-fd-event,network-syscalls}.md,03_fs/2k1000-full-test-disk.md,04_mm/frame-allocator.md,05_process/signal.md,08_testing/cpython-isolated.md}`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 增加可同时读取完整日志或分组片段的 judge，同步 13-bit mask、ABI、LSX、OpenSBI 和实板 P3 安全流程
+
+**验证：**
+- 审计 `origin/develop` 上 `a807bc1a`、`3b9da7ec`、`ccbc91a7`、`dc686dac` 的 CPython/runtime/VFS 改动；未整体 cherry-pick，而是按当前 classic ext4、MountFS 和实板只读分区架构选择性移植 ✅
+- Alpine 依赖 dry-run 解析两架构各 18 个包；实际运行时均解包 901 个文件系统条目，启动版本为 CPython 3.14.5 ✅
+- Docker 串行执行 `make rv64-kernel-build-only` 和 `make la64-kernel-build-only`，最终源码状态均成功，仅有项目既有 warning ✅
+- Docker 分别执行 `make rv64-cpython-run` 与 `make la64-cpython-run`；两份完整日志均由 judge 计数为 `72/72`，signal handler round-trip、pthread/futex、subprocess/pipe/wait、DNS、TCP/HTTP 和 CA 校验 HTTPS 全部 PASS，无 panic/非法指令 ✅
+- 首次 rv64 QEMU 暴露 frame allocator 把 OpenSBI 低端 2 MiB 当作 512 个可用页，首次 SATP 切换后反复进入 bootstrap；加入固件保留区后只枚举一个内核后可用 region，完整 CPython 通过 ✅
+- 首次 la64 QEMU 在 Alpine musl `memset` 的 `vreplgr2vr.w` 触发 `InstructionNonDefined`；反汇编定位后补齐 `EUEN.SXE`/HWCAP/trap/signal LSX 上下文，线程、子进程和显式 signal 往返均通过 ✅
+- `kernel-2k1000-cpython-tests.ui` 构建成功，总长 `12426296` 字节、load/entry 均为 `0x90000000`、SHA-256 `37013aec45b5c6c2a89f6b58fbf12abeb4b99ea94029815b1244bc9233271a86` ✅
+- `mango-2k1000la-cpython-tools-p3.img` 经 `e2fsck -f -n`、只读 loop mount、LoongArch ELF/加载器/脚本校验通过；大小 `805306368` 字节，边界 `0xA80800..0xC00800`，SHA-256 `782462669d1663f285fde650a9d35012814b175afea55fc86d35ebbbdbfab30f` ✅
+
+**备注：**
+- 当前完成的是双架构 QEMU 门禁、2K1000LA uImage 和 P3 payload 制作/内容校验；尚未将新 P3 写入 SSD 并在实板执行 CPython 分组，不记为实板 PASS。
+- `edge/main` 是可变软件源，生成运行时不入库；长期归档应同时保留包版本和镜像哈希。RISC-V 上 syscall 258 `riscv_hwprobe` 仍返回 `ENOSYS`，CPython/musl 正常 fallback，不影响本轮通过。
+- 实板 P3 替换只允许三个 256 MiB 块，起始 LBA 依次为 `0xA80800`、`0xB00800`、`0xB80800`；每块必须做 SSD 读回 CRC，不得把 P3 payload 从 LBA0 写入。
 
 ### board/mm: 安全启用 2K1000LA 双 DRAM bank 并完成 2 GiB 拓扑验收
 

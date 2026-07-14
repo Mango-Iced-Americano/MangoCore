@@ -7,7 +7,7 @@ use crate::utils::error::SyscallErr;
 use super::common::is_known_sockopt_level;
 use super::common::{
     IPV6_RECVPKTINFO, IP_RECVERR, SO_ERROR, SO_PEERCRED, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR,
-    SO_SNDBUF, SO_SNDTIMEO,
+    SO_SNDBUF, SO_SNDTIMEO, SO_TYPE,
 };
 use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
 
@@ -17,7 +17,7 @@ use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_I
 ///
 /// 按 `(level, optname)` 分发到对应读取逻辑。
 /// 支持的选项：
-/// - `SOL_SOCKET`：`SO_ERROR`（读并清除 pending error）、`SO_SNDBUF`/`SO_RCVBUF`、
+/// - `SOL_SOCKET`：`SO_ERROR`（读并清除 pending error）、`SO_TYPE`、`SO_SNDBUF`/`SO_RCVBUF`、
 ///   `SO_REUSEADDR`、`SO_PEERCRED`（`pid,uid,gid` = 12 bytes）、
 ///   `SO_RCVTIMEO`/`SO_SNDTIMEO`（返回零值 `TimeVal`）。
 /// - `SOL_TCP`：`TCP_MAXSEG`（返回 `TCP_MSS`）、`TCP_INFO`（返回 `TcpInfo` 结构体）、
@@ -70,6 +70,14 @@ pub fn sys_getsockopt(
                 .map(|e| (-(e as isize)) as u32)
                 .unwrap_or(0);
             if optval_ptr.write(token, &so_error).is_err()
+                || optlen_ptr.write(token, &4u32).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
+            }
+        }
+        (SOL_SOCKET, SO_TYPE) => {
+            let socket_type = socket.socket_type() as u32;
+            if optval_ptr.write(token, &socket_type).is_err()
                 || optlen_ptr.write(token, &4u32).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);

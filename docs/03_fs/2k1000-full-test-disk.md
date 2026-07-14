@@ -4,10 +4,12 @@ module: "fs/board-image"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-13
+last_updated: 2026-07-14
 code_paths:
   - "scripts/make_2k1000_full_test_disk.py"
+  - "scripts/make_2k1000_tools_partition.py"
   - "scripts/restore_2k1000_p2.py"
+  - "scripts/write_2k1000_p3.py"
   - "os/src/fs/mod.rs"
   - "os/src/fs/fat32/bitmap.rs"
   - "os/src/fs/fat32/efs.rs"
@@ -24,6 +26,7 @@ entry_points:
   - "discover_mount_devices"
   - "mount_boot_block_devices_read_only"
   - "mount_boot_block_devices_with_writable_scratch"
+  - "2k1000-cpython-p3-write"
 arch:
   rv64: supported
   la64: supported
@@ -31,6 +34,7 @@ related_docs:
   - "docs/03_fs/init-and-rootfs.md"
   - "docs/03_fs/devfs.md"
   - "docs/01_architecture/boot-and-trap.md"
+  - "docs/08_testing/cpython-isolated.md"
 ---
 
 # 2K1000LA 单 SSD 完整测试镜像
@@ -232,7 +236,7 @@ lmbench 迁移前，`lat_select` 在只读源目录创建临时文件会报 `ERO
 
 iozone 原先直接在只读源目录创建 `iozone.tmp` 和 `iozone.DUMMY.*`，会稳定返回 `Read-only file system`。迁移后每套 libc 都在独立 scratch 工作区中执行自动模式，以及 4 进程顺序、随机、反向、跨步、stdio、pread/pwrite 测试。真实 2K1000 SATA/FAT32 上 1KiB record 工作负载明显慢于 QEMU，因此组超时从 480s 调整为 1800s；最终实板 musl 用时 1331s、glibc 用时 1229s，均到 GROUP END 且退出码为 0。两份 iozone 二进制都提示当前版本不提供 `pwritev/preadv` 选择项，随后按其既有行为正常结束，不属于内核失败。
 
-首轮 glibc iozone 会立即在动态加载器 `_dl_runtime_resolve_lasx` 的 `xvst` 指令触发 `InstructionNonDefined`。根因不是文件系统，而是内核对两种架构统一写死 `AT_HWCAP=0x112d`：该值是 RISC-V IMAFDC 字母位图，在 LoongArch ABI 中却包含 LASX 和 LBT_MIPS。修复后 RISC-V 保留原值，LoongArch 根据 CPUCFG1/2 与内核上下文保存能力生成 HWCAP；当前内核未保存 LSX/LASX/LBT 扩展状态，因此不向用户态宣称或启用这些扩展。修复后的 glibc 完整 iozone 已通过。
+首轮 glibc iozone 会立即在动态加载器 `_dl_runtime_resolve_lasx` 的 `xvst` 指令触发 `InstructionNonDefined`。根因不是文件系统，而是内核对两种架构统一写死 `AT_HWCAP=0x112d`：该值是 RISC-V IMAFDC 字母位图，在 LoongArch ABI 中却包含 LASX 和 LBT_MIPS。修复后 RISC-V 保留原值，LoongArch 根据 CPUCFG1/2 与内核上下文保存能力生成 HWCAP。当前 trap 与 signal context 已保存 LSX，因此可向硬件支持的用户态发布 `HWCAP_LSX`；LASX/LBT 仍未保存，对应 EUEN/HWCAP 保持关闭。
 
 libcbench 两套入口都只调用静态 `libc-bench`，二进制唯一外部路径是 `/proc/self/smaps`，没有隐藏的数据文件或当前目录写入依赖。迁移到独立工作区后，musl/glibc 均完整输出 27 个 malloc、string、pthread、UTF-8、stdio 和 regex benchmark；musl 用时 37s、glibc 用时 61s，均到 GROUP END 且退出码为 0。此前为 smaps 实现的 per-open 快照缓存也在实板上通过 pthread create 压力验证，没有复现 120s 超时。
 
@@ -258,3 +262,32 @@ libctest 和 cyclictest 从上述独立 FAT32 工作区运行；LTP 二进制继
 板载 GMAC0/PHY、DHCP、默认路由、DNS、HTTP 和带证书校验的 HTTPS 已在实板
 通过。后续网络测试阶段使用保留的 `la64-2k1000-net-tests` 目标推进
 netperf/iperf 与网络 LTP，不再重建早期单子系统探针镜像。
+
+### 7.3 CPython 隔离运行时与 P3 替换镜像
+
+CPython 使用 Alpine 目标架构预编译运行时，不依赖根文件系统中的 Python。运行时与 L3-L9 脚本被打包到只读 P3 的 `/tools/tests/cpython`，测试产生的临时文件统一写入 P2 `/scratch/cpython`。P3 同时预置 `/tools/usr/bin/python3` 和 `python` 启动链接；staged 启动还会在可写 `/usr/bin` 安装兜底链接，因此 Shell 可直接使用全局命令，私有 musl loader、动态库、`PYTHONHOME`、CA 和 scratch 路径由包装器设置。构建命令为：
+
+```bash
+make -C os la64-2k1000-cpython-tests
+make -C os la64-2k1000-cpython-tools
+```
+
+产物分别为 `kernel-2k1000-cpython-tests.ui` 和 `mango-2k1000la-cpython-tools-p3.img`。后者是严格固定为 768 MiB 的裸 ext4 分区 payload，只能写入已验证 MBR 布局的 P3 `0xA80800..0xC00800`，不包含 MBR/P1/P2。生成器会输出 `.img.json`，其 `image_bytes` 必须为 `805306368`、`target_sectors` 必须为 `1572864`；任一数值不符都不得写盘。
+
+网线替换 P3 使用受限目标，显式确认固定起点：
+
+```bash
+make 2k1000-cpython-p3-write CONFIRM_P3_START=0xA80800
+```
+
+`scripts/write_2k1000_p3.py` 在写盘前硬校验 payload JSON 清单及 SHA-256、`TS32GMTS400` 型号、完整 MBR CRC、disk id 和三个分区的起点/长度。它把镜像切成三个 256 MiB 块，每块 `0x80000` 个 sector，起始 LBA 固定为 `0xA80800`、`0xB00800`、`0xB80800`；每块依次验证 TFTP 字节数/CRC、SCSI 写入 sector 数和 SSD 读回 CRC。完成后重置 SCSI，并从 P3 `ext4load` 最新 `L7_filesystem.py` 与宿主文件做长度/CRC 比对。不得从 LBA0 写入该文件，也不得修改工具中的固定边界来复用为通用写盘器。
+
+替换后先在 U-Boot 执行 `ext4ls scsi 0:3 /tests/cpython`，再启动专用内核：
+
+```bash
+make 2k1000-boot IMAGE=kernel-2k1000-cpython-tests.ui
+```
+
+2026-07-14 含全局启动器的新 payload SHA-256 为 `4a0f8a1bf6fad6ed89a9d0479438df8843f2d95d1482ddcdecc57276d364972c`。镜像内 `/usr/bin/python3` 已确认是指向 `/tools/tests/cpython/python3-wrapper.sh` 的符号链接，包装器模式为 `0755`；三个 256 MiB 块的宿主期望 CRC32 依次为 `e2118d3d`、`2d7315b8`、`638ff43b`，写入器的板端读回应逐项相同。专用 uImage 在实板完成 CPython L3-L9，judge 为 `72/72`、组退出码 0；全局启动器当前已完成 rv64/la64 QEMU 验收，等待新 P3 写入后的实板 Shell 复核。
+
+详细测试层级、QEMU 门禁和已知边界见 `docs/08_testing/cpython-isolated.md`。

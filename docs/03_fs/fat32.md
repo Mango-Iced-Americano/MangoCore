@@ -4,7 +4,7 @@ module: fs/fat32
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-07-12"
+last_updated: "2026-07-14"
 code_paths:
   - "os/src/fs/fat32/"
 entry_points:
@@ -198,15 +198,23 @@ FAT32 卷的磁盘布局如下：
 
 FAT 不支持硬链接，因此不能使用 VFS 默认的 `link + unlink` rename。当前同目录 rename 读取源短目录项，保留首簇、文件大小、属性和时间字段，只替换短名并生成新的 VFAT 长名项；新目录项创建成功后删除旧项并显式写回父目录，删除失败则回滚新项。该路径不复制数据，也不分配或释放源文件的数据簇。
 
+同目录普通文件覆盖已有目标时，目标目录项保留自身 8.3 短名，使既有 LFN 校验和继续有效，但其首簇、大小、属性和时间字段原子替换为源文件元数据。源目录项删除失败时恢复原目标目录项。`RENAME_NOREPLACE` 在目标存在时返回 `EEXIST`；目录覆盖仍返回 `ENOSYS`。
+
+覆盖成功后，源 inode/PageCache 迁移到目标目录项位置。旧目标 inode 立即与命名空间分离，但若仍有打开的 fd，其数据簇和 PageCache 会保留到最后一个引用关闭；旧 fd 的读写不会影响新目标，随后才回收旧目标簇。这与 Linux rename-over-existing 的打开文件语义一致。
+
 ### 目录事务与 inode 别名
 
-当前 `EasyFileSystem::root_inode()` 和 `FatInode::find()` 可能为同一个磁盘对象构造独立 inode/PageCache。目录创建若只把父目录项留在某个 PageCache 中，后续通过另一份根 inode 执行 `rmdir` 会直接从磁盘读到 `ENOENT`。因此 `fat_do_create()` 在返回前显式写回父目录；创建目录时还要先写回 `.`、`..` 和结束标记。unlink/rmdir 同样在成功返回前提交所属目录页。
+`EasyFileSystem::inode_objects` 为同一磁盘对象维护弱引用规范表，使重复的 `root_inode()`/`find()` 返回同一个 `FatInode` 和 PageCache。已分配文件和目录使用首簇 `Cluster(first_cluster)` 作为稳定键；尚未分配簇的空文件使用 `EmptyDirEntry { parent_cluster, offset }` 作为临时键。
 
-stale inode 的 `Drop` 只允许写回自身脏数据和回收已删除 inode 的簇，不再更新父目录元数据。否则旧对象可能覆盖复用后的目录项，甚至复活已删除文件。长期方案仍是为 FAT inode/page cache 建立规范化缓存；在此之前，所有元数据修改必须以显式提交点为边界。
+文件首次写入分配簇、截断到零、rename 改变目录项位置或 unlink 脱离命名空间时，inode 会同步移除旧键并注册新键。空源文件覆盖空目标前先 detach 旧目标，再把源 inode 迁移到目标目录项，避免两个临时目录项键瞬间碰撞。规范表只保存 `Weak`，不会延长 inode 或已删除文件的生命周期。
+
+目录元数据仍使用显式事务边界：`fat_do_create()` 返回前写回父目录；创建目录时先提交 `.`、`..` 和结束标记；unlink/rmdir/rename 成功前提交所属目录页。stale inode 的 `Drop` 只允许写回自身脏数据和回收已经 detach 的簇，不再更新父目录元数据，避免覆盖复用后的目录项或复活已删除文件。
 
 ## PageCache 集成
 
-FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端将文件偏移映射到物理扇区的逻辑为：先通过 `inode.file_content.clus_list` 获取簇号数组，再计算簇内偏移，最终得到块设备扇区号。读时若缓存缺失则回源读取整页（4096 字节），写操作通过 PageCache 的脏页回写机制持久化。
+FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端持有与 inode 共享的 `Arc<RwLock<FileContent>>`，从 `clus_list` 将文件偏移映射到物理扇区。它不再通过 `Weak<FatInode>` 间接访问簇链：最后一个强引用进入 `FatInode::drop()` 后，弱引用已经无法 upgrade，会使最终脏页写回静默失去映射。共享最小后端状态既不形成 inode/PageCache 强引用环，又保证 Drop 阶段仍能完成数据写回。
+
+读时若缓存缺失则回源读取整页（4096 字节），写操作通过 PageCache 的脏页回写机制持久化。inode 规范表进一步保证同一簇链只有一份活动 PageCache，避免 rename 后从另一个缓存读到旧目标或未落盘的簇残留。
 
 ## 限制与差异
 
@@ -216,7 +224,7 @@ FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端将文�
 - **无权限管理**：文件属性仅保留 FAT 标准的只读/隐藏/系统/归档标记，不支持 Unix rwx 权限；`chmod` 和 `chown` 返回空成功。
 - **时间戳精度**：FAT 时间戳精度为 2 秒，目录项 Drop 时自动写回修改时间。
 - **最大文件大小**：受 FAT32 4 GiB 单文件上限约束（`file_size` 字段为 u32）。
-- **rename 范围**：当前仅支持同目录且目标不存在的文件/目录 rename；跨目录移动和覆盖已有目标返回显式错误，尚未实现双目录与目标回滚事务。
+- **rename 范围**：支持同目录文件/目录改名，以及普通文件覆盖普通文件；`RENAME_NOREPLACE` 可拒绝覆盖。跨目录移动和目录覆盖仍返回显式错误，尚未实现双目录与目标目录回收事务。
 
 ## 测试映射
 
@@ -227,6 +235,7 @@ FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端将文�
 | 文件读写 | dd / cat / echo | OSComp basic, busybox | pass |
 | 长文件名创建 | lua 文件 I/O 测试 | OSComp lua | pass |
 | 同目录文件/目录重命名 | mv / rename syscall | OSComp busybox | pass（实板 FAT32 scratch） |
+| 普通文件覆盖 rename | 空文件、20 轮 CPython L7 无 fsync 复用、50 轮实板压力及旧目标 open-fd 语义 | CPython L7 + 2K1000LA 专项 | pass |
 | FAT 表空间耗尽 | 大文件写入达容量上限 | 手动测试 | pass |
 | 目录树层级 | mkdir -p 嵌套路径 | OSComp busybox | pass |
 

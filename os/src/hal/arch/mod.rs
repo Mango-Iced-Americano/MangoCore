@@ -18,7 +18,7 @@ pub use loongarch64::{
     local_irq_save, machine_init, shutdown, tlb_invalidate,
     trap::{
         get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return,
-        MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
+        LsxRegs, MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
     },
     trap_cx_bottom_from_tid, user_hwcap, ustack_bottom_from_tid, KernelStack, BLOCK_SZ,
 };

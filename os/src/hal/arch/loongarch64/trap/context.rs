@@ -121,6 +121,18 @@ pub struct FloatRegs {
     pub fcc: u8,
 }
 
+/// LoongArch 128-bit SIMD register state.
+///
+/// LSX vector registers alias the scalar floating-point register file in their
+/// low 64 bits. The trap entry still keeps the scalar snapshot above for the
+/// existing signal ABI and stores the complete vectors here so the upper lanes
+/// survive syscalls, preemption and task switches.
+#[repr(C, align(16))]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LsxRegs {
+    pub v: [[u64; 2]; 32],
+}
+
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy)]
 pub struct MachineContext {
@@ -157,10 +169,13 @@ pub struct UserContext {
     pub sigmask: UserSignalMask,
     pub __pad: [u8; USER_CONTEXT_SIGMASK_PADDING],
     pub mcontext: MachineContext,
+    pub lsx: LsxRegs,
 }
 
 impl UserContext {
     pub const PADDING_SIZE: usize = USER_CONTEXT_SIGMASK_PADDING;
+    pub const MCONTEXT_OFFSET: usize = core::mem::offset_of!(Self, mcontext);
+    pub const LSX_OFFSET: usize = core::mem::offset_of!(Self, lsx);
 
     pub fn new(
         flags: usize,
@@ -168,6 +183,7 @@ impl UserContext {
         stack: SignalStack,
         sigmask: Signals,
         mcontext: MachineContext,
+        lsx: LsxRegs,
     ) -> Self {
         Self {
             flags,
@@ -176,6 +192,7 @@ impl UserContext {
             sigmask: UserSignalMask::from_signals(sigmask),
             __pad: [0; Self::PADDING_SIZE],
             mcontext,
+            lsx,
         }
     }
 
@@ -201,7 +218,14 @@ pub struct TrapContext {
     pub trap_handler: usize,
     /// The current sp to be recovered on next entry into kernel space.
     pub kernel_sp: usize,
+    /// Complete LSX state. Kept after the fixed trap assembly fields so the
+    /// established general/FPU offsets remain unchanged.
+    pub lsx: LsxRegs,
 }
+
+// Keep this synchronized with `LSX_START` in `trap.S`.
+const _: () = assert!(core::mem::offset_of!(TrapContext, lsx) == 70 * 8);
+
 impl Debug for TrapContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TrapContext")
@@ -212,6 +236,7 @@ impl Debug for TrapContext {
             .field("kernel_satp", &format_args!("{:#x}", self.kernel_satp))
             .field("trap_handler", &format_args!("{:#x}", self.trap_handler))
             .field("kernel_sp", &format_args!("{:#x}", self.kernel_sp))
+            .field("lsx", &self.lsx)
             .finish()
     }
 }
@@ -235,6 +260,7 @@ impl TrapContext {
             kernel_satp,
             trap_handler,
             kernel_sp,
+            lsx: LsxRegs::default(),
         };
         cx.gp.pc = entry;
         cx.set_sp(sp);

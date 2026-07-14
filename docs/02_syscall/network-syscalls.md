@@ -284,6 +284,8 @@ UDP 支持 `IP_RECVERR` 的启用状态查询和设置，以兼容 glibc resolve
 `MSG_ERRQUEUE` 在无错误时返回 `EAGAIN`，尚未实现 ICMP 错误到
 `sock_extended_err` 队列的完整交付。
 
+`SO_TYPE` 返回创建 socket 时保留的 Linux `SOCK_*` 类型值，并将 `*optlen` 写回为 4。该路径用于 CPython 和 libc 在包装 fd 时确认 stream/datagram/raw 类型。
+
 ## 8. getsockname/getpeername
 
 两类 syscall 都要写回用户 sockaddr 和 addrlen：

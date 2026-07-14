@@ -407,6 +407,50 @@ impl IndexNode for LockedTmpFSInode {
         pc.read_user(offset, read_len, dst)
     }
 
+    fn write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &[u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if buf.len() < len {
+            return Err(SyscallErr::EINVAL);
+        }
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let mut inode: MutexGuard<TmpFSInode> = self.0.lock();
+        if inode.metadata.file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
+        }
+
+        let pc = inode.page_cache.as_ref().ok_or(SyscallErr::EIO)?.clone();
+        let new_size = offset.checked_add(len).ok_or(SyscallErr::EINVAL)?;
+
+        if new_size > inode.file_size {
+            let delta = (new_size - inode.file_size) as u64;
+            let fs = inode.fs.upgrade().ok_or(SyscallErr::EIO)?;
+            fs.check_space(delta)?;
+        }
+
+        // Keep the inode locked across data and size updates, matching the
+        // direct UserBuffer path and serialization with truncate/resize.
+        let n = pc.write(offset, &buf[..len], Some(inode.file_size))?;
+
+        if new_size > inode.file_size {
+            let delta = (new_size - inode.file_size) as u64;
+            let fs = inode.fs.upgrade();
+            inode.file_size = new_size;
+            if let Some(ref fs) = fs {
+                fs.add_size(delta as i64);
+            }
+        }
+
+        Ok(n)
+    }
+
     fn write_at_user(
         &self,
         offset: usize,

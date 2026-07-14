@@ -18,8 +18,12 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-shell \
 	la64-2k1000-curl-shell \
 	la64-2k1000-net-tests \
+	la64-2k1000-cpython-tests \
+	la64-2k1000-cpython-tools \
 	la64-qemu-curl-shell \
 	la64-qemu-curl-shell-run \
+	rv64-cpython-tests rv64-cpython-run \
+	la64-cpython-tests la64-cpython-run \
 	la64-2k1000-run-clean
 
 all: prepare-cargo-config rv64_all la64_all
@@ -85,6 +89,30 @@ la64-kernel-build-only: prepare-cargo-config
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
+
+# Isolated Alpine CPython QEMU gates. The feature marker overrides the test
+# selection in ramfs, so the official sdcard os_test.conf is left untouched.
+rv64-cpython-tests: prepare-cargo-config tools-disk-cpython-rv
+	@rustup override set $(RV_TOOLCHAIN)
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+	$(MAKE) -B -f make/rv64.mk build BLK_MODE=virt MODE=$(MODE) LOG=off \
+		EXTRA_FEATURES="cpython_test"
+	cp -f target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-cpython
+
+rv64-cpython-run: rv64-cpython-tests
+	$(MAKE) -f make/rv64.mk comp MODE=$(MODE) KERNEL_RV=../kernel-rv-cpython
+
+la64-cpython-tests: prepare-cargo-config tools-disk-cpython-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		MODE=$(MODE) LOG=off EXTRA_FEATURES="cpython_test"
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os ../kernel-la-cpython
+
+la64-cpython-run: la64-cpython-tests
+	$(MAKE) -f make/la64.mk comp MODE=$(MODE) KERNEL_LA=../kernel-la-cpython
 
 # Focused real-board diagnostic image. It keeps the normal SATA/scratch safety
 # boundary but overrides the SSD test config at runtime to run libctest,
@@ -152,6 +180,31 @@ la64-2k1000-net-tests: prepare-cargo-config tools-curl-la
 		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-net-tests.ui
+
+# CPython board gate: use writable P2 scratch for filesystem tests and GMAC
+# DHCP for the required DNS/HTTP/HTTPS layer. The runtime itself lives on P3
+# and is built separately by la64-2k1000-cpython-tools.
+la64-2k1000-cpython-tests: prepare-cargo-config tools-cpython-la
+	@test -x ../user/tools/loongarch64/tests/cpython/usr/bin/python3 || { \
+		echo "missing LoongArch CPython runtime cache" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp cpython_test" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-cpython-tests.ui
+
+la64-2k1000-cpython-tools: prepare-cargo-config tools-cpython-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -f make/la64.mk user BOARD=2k1000 MODE=$(MODE)
+	python3 ../scripts/make_2k1000_tools_partition.py \
+		--tools-root ../user/tools/loongarch64 \
+		--user-bin-dir ../user/target/loongarch64-unknown-linux-gnu/$(MODE) \
+		--output ../mango-2k1000la-cpython-tools-p3.img --force
 
 # Competition run image: no board bring-up trace, log level off, and the
 # embedded fallback configuration must be the normal full-suite run mode.
@@ -292,6 +345,13 @@ TOOLS_SIZE_LA := 768
 TOOLS_SRC_RV := ../user/tools/riscv64
 TOOLS_SRC_LA := ../user/tools/loongarch64
 
+# Isolated CPython runtime. Downloads are explicit by default so routine
+# kernel builds remain reproducible and do not silently depend on the network.
+CPYTHON_COMMON := ../user/tools/cpython
+CPYTHON_SRC_RV := ../user/tools/riscv64/tests/cpython
+CPYTHON_SRC_LA := ../user/tools/loongarch64/tests/cpython
+CPYTHON_AUTO ?= 0
+
 # MBR 脚本路径
 MBR_SCRIPT := ../scripts/make_mbr_tools_disk.py
 
@@ -316,6 +376,27 @@ define build_tools_disk
 		if [ -f "$$src" ]; then cp -a "$$src" /tmp/tools-mnt/tests/; echo "    $$t"; \
 		else echo "    [skip] $$t (not built)"; fi; \
 	done
+	@echo "  copying CPython runtime/tests..."
+	@if [ -d $(CPYTHON_COMMON) ]; then \
+		mkdir -p /tmp/tools-mnt/tests/cpython; \
+		cp -a $(CPYTHON_COMMON)/. /tmp/tools-mnt/tests/cpython/; \
+		echo "    [cpython] common scripts included"; \
+	fi
+	@if [ -d $(3)/tests/cpython ]; then \
+		mkdir -p /tmp/tools-mnt/tests/cpython; \
+		cp -a $(3)/tests/cpython/. /tmp/tools-mnt/tests/cpython/; \
+		test -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 && \
+			echo "    [cpython] runtime included" || \
+			echo "    [cpython] runtime cache incomplete"; \
+	else \
+		echo "    [cpython] runtime cache absent"; \
+	fi
+	@if [ -x /tmp/tools-mnt/tests/cpython/python3-wrapper.sh ] && \
+	    [ -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 ]; then \
+		ln -sf /tools/tests/cpython/python3-wrapper.sh /tmp/tools-mnt/usr/bin/python3; \
+		ln -sf /tools/tests/cpython/python3-wrapper.sh /tmp/tools-mnt/usr/bin/python; \
+		echo "    [cpython] global launchers included"; \
+	fi
 	@if [ -d $(3)/apk ]; then \
 		cp -a $(3)/apk /tmp/tools-mnt/ 2>/dev/null; \
 		echo "  [apk] local repo included"; \
@@ -358,13 +439,19 @@ define build_tools_disk
 	@echo "[tools-disk] $(1) ready."
 endef
 
-tools-disk-rv:
+tools-disk-rv: maybe-tools-cpython-rv
 	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
 
-tools-disk-la:
+tools-disk-la: maybe-tools-cpython-la
 	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
 
 tools-disk: tools-disk-rv tools-disk-la
+
+tools-disk-cpython-rv: tools-cpython-rv
+	$(MAKE) --no-print-directory CPYTHON_AUTO=0 tools-disk-rv
+
+tools-disk-cpython-la: tools-cpython-la
+	$(MAKE) --no-print-directory CPYTHON_AUTO=0 tools-disk-la
 
 # ============================================================
 # Alpine 预编译工具下载（本地缓存，避免每次下载）
@@ -432,6 +519,34 @@ tools-alpine-la:
 	@echo "[alpine] loongarch64 done."
 
 tools-alpine: tools-alpine-rv tools-alpine-la
+
+# ============================================================
+# Alpine CPython runtime downloader
+# ============================================================
+
+tools-cpython-rv:
+	@python3 ../scripts/fetch_cpython_runtime.py \
+		--arch riscv64 --mirror $(ALPINE_MIRROR) --dest $(CPYTHON_SRC_RV)
+
+tools-cpython-la:
+	@python3 ../scripts/fetch_cpython_runtime.py \
+		--arch loongarch64 --mirror $(ALPINE_MIRROR) --dest $(CPYTHON_SRC_LA)
+
+tools-cpython: tools-cpython-rv tools-cpython-la
+
+maybe-tools-cpython-rv:
+	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
+		$(MAKE) --no-print-directory tools-cpython-rv; \
+	fi
+
+maybe-tools-cpython-la:
+	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
+		$(MAKE) --no-print-directory tools-cpython-la; \
+	fi
+
+tools-cpython-clean:
+	@rm -rf $(CPYTHON_SRC_RV) $(CPYTHON_SRC_LA)
+	@echo "[cpython] runtime caches removed"
 
 CURL_RUNTIME_LA_MANIFEST := ../user/tools/loongarch64/curl-runtime/manifest.txt
 

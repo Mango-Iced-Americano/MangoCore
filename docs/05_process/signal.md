@@ -3,7 +3,7 @@ title: "信号、pidfd 与 signalfd"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-14
 tags: [process, signal, pidfd, signalfd]
 ---
 
@@ -367,13 +367,14 @@ fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
 
 `sys_sigreturn()` 从用户 signal frame 恢复：
 
-1. 根据当前 `sp` 计算 ucontext、sigmask、machine context 地址。
+1. 根据当前 `sp` 计算 ucontext 和 sigmask 地址，再通过架构 `UserContext` 的编译期 offset 定位 machine context。
 2. 从用户 frame 读取 `UserSignalMask`。
 3. 拷贝 `MachineContext` 回 trap context。
-4. 恢复 sigmask。
-5. 返回 trap context 中保存的 `a0`。
+4. LoongArch 额外从 `UserContext::LSX_OFFSET` 读取 32 个 128-bit LSX 寄存器，再把 machine context 中标量 FPR 的低 64-bit lane 合并进去。FPR 与 LSX 物理别名，用户 handler 对标量上下文的修改具有优先级。
+5. 恢复 sigmask。
+6. 返回 trap context 中保存的 `a0`。
 
-frame 地址溢出、sigmask 或 machine context 读取失败时，当前任务以 `SIGSEGV` 退出。
+frame 地址溢出、sigmask、machine context 或 LSX context 读取失败时，当前任务以 `SIGSEGV` 退出。`signal_frame_layout()` 按 `align_of::<UserContext>()` 对齐 frame，避免 LoongArch LSX 状态落在非 16-byte 边界。
 
 `sys_sigreturn()` 不重新解释用户 handler 的返回值，而是恢复 machine context 后返回 trap context 中的 `a0`：
 
@@ -406,9 +407,8 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let mcontext_addr = match sigmask_addr
-        .checked_add(size_of::<UserSignalMask>())
-        .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
+    let mcontext_addr = match ucontext_addr
+        .checked_add(crate::hal::UserContext::MCONTEXT_OFFSET)
     {
         Some(addr) => addr,
         None => {
@@ -425,6 +425,17 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
+    #[cfg(feature = "loongarch64")]
+    let restored_lsx = match ucontext_addr
+        .checked_add(crate::hal::UserContext::LSX_OFFSET)
+        .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
+    {
+        Some(lsx) => lsx,
+        None => {
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
     let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
     if copy_from_user(
         token,
@@ -437,12 +448,20 @@ pub fn sys_sigreturn() -> isize {
         drop(inner);
         exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
     }
+    #[cfg(feature = "loongarch64")]
+    {
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.lsx = restored_lsx;
+        for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
+            vector[0] = *scalar as u64;
+        }
+    }
     inner.sigmask = restored_sigmask;
     inner.get_trap_cx().gp.a0 as isize
 }
 ```
 
-该函数直接操作当前 TCB 的 trap context，因此必须持有 `task.inner`。所有用户地址计算都使用 `checked_add()`，任一溢出都会走 `SIGSEGV` 退出。
+该函数直接操作当前 TCB 的 trap context，因此必须持有 `task.inner`。所有用户地址计算都使用 `checked_add()`，任一溢出都会走 `SIGSEGV` 退出。trap 返回汇编在 LSX 已启用时只恢复完整向量快照，不会随后再用 `FLD.D` 覆盖其低 lane；未启用 LSX 时才走纯标量 FPR 恢复路径。
 
 ## 13. stopped/continued 与 wait
 

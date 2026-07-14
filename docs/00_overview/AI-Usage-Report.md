@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-13
+> Coverage: 2026-04-01 to 2026-07-14
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -44,6 +44,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | 2K1000LA 实板地址/TLB 审计 | 2026-07-10 | OpenAI Codex multi-agent | 将 QEMU 内核迁移到 VALEN=40 实板；并行审计 canonical VA、VPN/VPPN、PTE PPN、TLB refill、ASID、DMW 和栈窗口 | 修复 TLB PS、PPN/VPPN、ASID、映射边界和 MMIO 别名；完成双架构编译、LA64 QEMU 用户态启动和实板 uImage 构建 |
 | 2K1000LA SATA/FAT32 分阶段写入 | 2026-07-11 | OpenAI Codex | AHCI 暖复位、P2 定向恢复、FAT32 元数据持久化、用户态 `/scratch` 隔离写入与实板串口验证 | 完成 raw write/flush、内核文件探针和用户态 write/fsync/truncate/reopen/unlink/rmdir 闭环；P1/P3 保持只读 |
 | 2K1000LA 2 GiB 内存拓扑审计 | 2026-07-13 | OpenAI Codex multi-agent, max reasoning mode | 复核早期扩容方案；并行审计 VA/PA 掩码、DMW cache 属性、U-Boot LMB、DVO DMA、CPU1 park loop 和连续 DMA 分配 | 推翻“DRAM 即已交接”的错误前提；建立双 bank allocator 与临时 carveout，完成跨 bank 320 MiB 压力、QEMU VirtIO/Ext4/LTP 和实板 AHCI 只读验收 |
+| 2K1000LA CPython 实机适配 | 2026-07-13 至 2026-07-14 | OpenAI Codex, max reasoning mode | 选择性审计 develop 分支 CPython 链路；对照 QEMU 与实机定位 LSX/FPR 上下文差异，补齐 FAT/TmpFS、外网测试语义和受限 P3 更新工具 | 修复实机 trap 后向量损坏、FAT rename 覆盖和 TmpFS symlink；rv64/la64 QEMU 与 2K1000LA 实板 CPython L3-L9 均 72/72 |
 
 ## 4. 详细使用场景
 
@@ -227,6 +228,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human verification: 对照 U-Boot `bdinfo`、板级 U-Boot 源码和串口输出；串行双架构构建；LA64 QEMU VirtIO/Ext4/LTP 运行；实板 320 MiB 跨 bank 内容校验、AHCI LBA0 重复读和 ABI 内存统计检查。
 - Result: 内核识别完整 2 GiB 安装容量，当前安全报告并使用 `2043852 KiB`；保留 53,296 KiB 临时 carveout，待关闭 DVO、重停放 CPU1 并处理启动参数后再分阶段释放。
 
+### Case 8: 2K1000LA CPython 的实机 LSX/FPR 上下文损坏
+
+- Evidence: `docs/Work_Log.md` 2026-07-14、`os/src/hal/arch/loongarch64/trap/trap.S`、`os/src/syscall/process/signal.rs`、`os/src/fs/fat32/{efs.rs,fat_inode.rs}`、`os/src/fs/page_cache.rs`、`scripts/write_2k1000_p3.py`
+- AI tools: OpenAI Codex, max reasoning mode
+- Problem: Alpine LoongArch CPython 在 QEMU 可运行，实板却在 syscall、定时器或调度后出现动态运行时数据损坏；单次启动位置不固定，容易误判为 ELF、内存或 CPython 本身问题。
+- AI contribution: 对比 QEMU 与实机 CPU 扩展行为，审计 trap/save-restore 和 signal frame 后识别到标量 FPR 与 LSX 向量低 64-bit lane 的物理别名。旧汇编先恢复完整 LSX、随后执行标量 `FLD.D`，会在实机重新覆盖向量状态，而 QEMU 未可靠暴露该行为；随后根据 FAT 旧 payload 证据定位 inode/PageCache 生命周期，并生成固定边界、逐块读回的 P3 更新工具。
+- Human verification: 审阅汇编、signal ABI、FAT inode/PageCache 生命周期和写盘边界；Docker 串行双架构构建；rv64/la64 CPython L3-L9 QEMU judge 各 72/72；2K1000LA 通过 50 轮无 `fsync` rename 专项，P3 三块写入/读回 CRC 和安装文件校验，最终完整 L3-L9 同样为 72/72、退出码 0。
+- Result: trap 返回在完整 LSX 与纯标量 FPR 恢复路径中二选一，`sigreturn` 先合并标量低 lane；FAT 以首簇/空目录项双键 canonicalize inode，并让 PageCache 共享最小簇链状态，从根因修复 Drop 写回丢失；TmpFS、DNS/HTTP/HTTPS 和实板 CPython 完整组合门禁均已关闭。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -276,6 +286,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
 | `docs/Work_Log.md` 2026-07-10 | 2K1000LA VALEN/TLB 审计 | 记录 Codex 五路并行审计、官方手册交叉核对、代码修复、反汇编与构建/QEMU 证据 |
 | `docs/Work_Log.md` 2026-07-13 | 2K1000LA 2 GiB 内存审计 | 记录 Codex max reasoning 与 subagent 对 DMW、非连续 DMA、U-Boot/DVO/CPU1 所有权的复核，以及 QEMU/实板验证证据 |
+| `docs/Work_Log.md` 2026-07-14 | 2K1000LA CPython 实机适配 | 记录 Codex 对 LSX/FPR 别名、FAT rename、TmpFS symlink 和 DNS/HTTPS 测试语义的根因分析，以及双架构 72/72 与实机压力证据 |
 
 ## 9. 交互记录与留痕方式
 

@@ -52,14 +52,15 @@ xz -dkc fs-img-dir/sdcard-la.img.xz > sdcard-la.img
 
 ### 测试配置
 
-`os_test.conf` 的 `mask` 字段用 12-bit 控制测试组（**不要日常跑全量**）：
+`os_test.conf` 的 `mask` 字段用 13-bit 控制测试组（**不要日常跑全量**）：
 
 ```
 bit0=basic  bit1=busybox  bit2=lua  bit3=libctest  bit4=iozone  bit5=unixbench
 bit6=iperf  bit7=libcbench bit8=lmbench bit9=netperf bit10=cyclictest bit11=ltp
+bit12=cpython（仅隔离 CPython 运行时镜像）
 ```
 
-常用 mask：`0x001`（basic）、`0x003`（basic+busybox）、`0xFFF`（全量，仅提交评测用）
+常用 mask：`0x001`（basic）、`0x003`（basic+busybox）、`0xFFF`（竞赛 12 组全量，仅提交评测用）、`0x1000`（仅 CPython，必须使用带运行时的 tools 镜像）
 
 配置注入镜像：
 ```bash

@@ -1953,11 +1953,14 @@ impl PageCacheBackend for BlockPageCacheBackend {
 
 /// FAT32 文件系统专用的 PageCache 后端
 ///
-/// 通过弱引用访问 FatInode，将页面偏移动态映射为扇区号。
-/// 读/写时临时持有读锁，自动适应 cluster list 变化。
+/// Shares the inode's cluster-list storage directly, so dirty pages can still
+/// be written while `FatInode::drop` is running. A `Weak<FatInode>` cannot be
+/// upgraded once the strong count reaches zero, which used to lose final
+/// writeback data during rename/unlink cache eviction.
 pub struct FatPageCacheBackend {
     fs: alloc::sync::Arc<crate::fs::fat32::EasyFileSystem>,
-    inode: alloc::sync::Weak<crate::fs::fat32::FatInode>,
+    file_content:
+        alloc::sync::Arc<spin::RwLock<crate::fs::fat32::fat_inode::FileContent>>,
     block_size: usize,
     blocks_per_page: usize,
     sec_per_clus: usize,
@@ -1966,14 +1969,16 @@ pub struct FatPageCacheBackend {
 impl FatPageCacheBackend {
     pub fn new(
         fs: alloc::sync::Arc<crate::fs::fat32::EasyFileSystem>,
-        inode: &alloc::sync::Weak<crate::fs::fat32::FatInode>,
+        file_content: alloc::sync::Arc<
+            spin::RwLock<crate::fs::fat32::fat_inode::FileContent>,
+        >,
     ) -> Self {
         let block_size = fs.byts_per_sec as usize;
         let blocks_per_page = crate::config::PAGE_SIZE / block_size;
         let sec_per_clus = fs.sec_per_clus as usize;
         FatPageCacheBackend {
             fs,
-            inode: inode.clone(),
+            file_content,
             block_size,
             blocks_per_page,
             sec_per_clus,
@@ -1981,8 +1986,7 @@ impl FatPageCacheBackend {
     }
 
     fn block_id_for_offset(&self, page_index: usize, block_off: usize) -> Option<usize> {
-        let inode = self.inode.upgrade()?;
-        let lock = inode.file_content.read();
+        let lock = self.file_content.read();
         let clus_list = &lock.clus_list;
         let block_index = page_index * self.blocks_per_page + block_off;
         let cluster_id = block_index / self.sec_per_clus;
@@ -2036,11 +2040,7 @@ impl PageCacheBackend for FatPageCacheBackend {
     }
 
     fn npages(&self) -> usize {
-        let inode = match self.inode.upgrade() {
-            Some(i) => i,
-            None => return 0,
-        };
-        let lock = inode.file_content.read();
+        let lock = self.file_content.read();
         let total_blocks = lock.clus_list.len() * self.sec_per_clus;
         drop(lock);
         (total_blocks + self.blocks_per_page - 1) / self.blocks_per_page

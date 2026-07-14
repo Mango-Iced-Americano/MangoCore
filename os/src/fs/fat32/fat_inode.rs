@@ -1,6 +1,7 @@
 #![allow(unused)]
 use super::DiskInodeType;
 use crate::fs::fat32::dir_iter::*;
+use crate::fs::fat32::efs::FatInodeKey;
 use crate::fs::fat32::layout::{FATDirEnt, FATDiskInodeType, FATLongDirEnt, FATShortDirEnt};
 use crate::fs::fat32::EasyFileSystem;
 use crate::fs::inode::InodeLock;
@@ -58,7 +59,7 @@ pub struct FatInode {
     /// inode 锁: for normal operation
     inode_lock: RwLock<InodeLock>,
     /// 文件内容
-    pub(crate) file_content: RwLock<FileContent>,
+    pub(crate) file_content: Arc<RwLock<FileContent>>,
     /// 新页面缓存（替代旧 file_cache_mgr，逐步迁移）
     /// 用 Option 做懒初始化，首次使用前需要调用 init_new_page_cache
     new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
@@ -74,6 +75,8 @@ pub struct FatInode {
     time: Mutex<InodeTime>,
     /// Info Inode to delete file content
     deleted: Mutex<bool>,
+    /// Current key in `EasyFileSystem::inode_objects`.
+    cache_key: Mutex<Option<FatInodeKey>>,
 }
 
 impl core::fmt::Debug for FatInode {
@@ -141,10 +144,7 @@ impl FatInode {
         }
         let backend = Arc::new(FatPageCacheBackend::new(
             self.fs.clone(),
-            self.self_weak
-                .lock()
-                .as_ref()
-                .expect("FatInode::init_self_weak must be called before get_new_page_cache"),
+            self.file_content.clone(),
         ));
         let pc = NewPageCache::new();
         pc.set_backend(backend);
@@ -162,6 +162,9 @@ impl Drop for FatInode {
     /// destructor must never overwrite a newer entry or resurrect an unlinked
     /// file.
     fn drop(&mut self) {
+        if let Some(key) = *self.cache_key.lock() {
+            self.fs.remove_inode(key, self);
+        }
         if let Some(ref pc) = *self.new_page_cache.lock() {
             let _ = pc.writeback_all();
         }
@@ -181,6 +184,65 @@ impl Drop for FatInode {
 /// 等），调用 `init_self_weak()` 建立内部弱引用链，对目录类型自动设置
 /// `set_hint()`。`fst_clus: 0` 表示尚未分配数据簇（写入时按需分配）。
 impl FatInode {
+    fn cache_key_for(
+        fst_clus: u32,
+        parent_dir: &Option<(Arc<Self>, u32)>,
+    ) -> Option<FatInodeKey> {
+        if fst_clus >= 2 {
+            return Some(FatInodeKey::Cluster(fst_clus));
+        }
+        let (parent, offset) = parent_dir.as_ref()?;
+        let parent_cluster = parent
+            .get_first_clus_lock(&parent.file_content.read())
+            .expect("FAT directory inode must own a cluster");
+        Some(FatInodeKey::EmptyDirEntry {
+            parent_cluster,
+            offset: *offset,
+        })
+    }
+
+    fn refresh_cache_key(&self) {
+        let first_cluster = self
+            .get_first_clus_lock(&self.file_content.read())
+            .unwrap_or(0);
+        let parent = self.parent_dir.lock().clone();
+        let new_key = if *self.deleted.lock() {
+            None
+        } else {
+            Self::cache_key_for(first_cluster, &parent)
+        };
+        let mut current = self.cache_key.lock();
+        if *current == new_key {
+            return;
+        }
+        if let Some(old_key) = *current {
+            self.fs.remove_inode(old_key, self);
+        }
+        if let Some(new_key) = new_key {
+            let inode = self
+                .self_weak
+                .lock()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .expect("live FAT inode must upgrade its self reference");
+            self.fs.register_inode(new_key, &inode);
+        }
+        *current = new_key;
+    }
+
+    fn relocate_parent(&self, parent: Arc<Self>, offset: u32) {
+        *self.parent_dir.lock() = Some((parent, offset));
+        self.refresh_cache_key();
+    }
+
+    fn detach_deleted(&self) {
+        if let Some(key) = self.cache_key.lock().take() {
+            self.fs.remove_inode(key, self);
+        }
+        *self.parent_dir.lock() = None;
+        *self.deleted.lock() = true;
+    }
+
     /// Synchronize the inode fields stored in its FAT short directory entry.
     ///
     /// This must run when size or the first cluster changes. Deferring it only
@@ -230,14 +292,16 @@ impl FatInode {
         let size = size.unwrap_or_else(|| clus_list.len() as u32 * fs.clus_size());
         let hint = 0;
 
-        let file_content = RwLock::new(FileContent {
+        let cache_key = Self::cache_key_for(fst_clus, &parent_dir);
+        let parent_hint = parent_dir.clone();
+        let file_content = Arc::new(RwLock::new(FileContent {
             size,
             clus_list,
             hint,
-        });
+        }));
         let parent_dir = Mutex::new(parent_dir);
         let time = InodeTime::new();
-        let inode = Arc::new(FatInode {
+        let candidate = Arc::new(FatInode {
             inode_lock: RwLock::new(InodeLock {}),
             file_content,
             new_page_cache: Mutex::new(None),
@@ -247,12 +311,26 @@ impl FatInode {
             fs,
             time: Mutex::new(time),
             deleted: Mutex::new(false),
+            cache_key: Mutex::new(cache_key),
         });
         // Arc 构造完成后，初始化 self_weak
-        inode.init_self_weak();
+        candidate.init_self_weak();
+
+        let inode = match cache_key {
+            Some(key) => candidate.fs.canonicalize_inode(key, candidate.clone()),
+            None => candidate.clone(),
+        };
+        let is_new = Arc::ptr_eq(&inode, &candidate);
+        drop(candidate);
+
+        if !is_new {
+            if let Some(parent) = parent_hint {
+                *inode.parent_dir.lock() = Some(parent);
+            }
+        }
 
         // 初始化 hint
-        if file_type == DiskInodeType::Directory {
+        if is_new && file_type == DiskInodeType::Directory {
             inode.set_hint();
         }
         inode
@@ -997,9 +1075,13 @@ impl FatInode {
             panic!()
         }
         if delete {
-            *self.deleted.lock() = true;
+            self.detach_deleted();
+        } else {
+            if let Some(key) = self.cache_key.lock().take() {
+                self.fs.remove_inode(key, self);
+            }
+            *self.parent_dir.lock() = None;
         }
-        *self.parent_dir.lock() = None;
         Ok(())
     }
 
@@ -1031,6 +1113,8 @@ impl FatInode {
         }
 
         lock.size = new_size;
+        drop(lock);
+        self.refresh_cache_key();
     }
 
     pub fn is_empty_dir_lock(&self, inode_lock: &RwLockWriteGuard<InodeLock>) -> bool {
@@ -1328,8 +1412,10 @@ impl IndexNode for FatInode {
         old_name: &str,
         new_parent: &Arc<dyn IndexNode>,
         new_name: &str,
-        _flags: u32,
+        flags: u32,
     ) -> Result<(), SyscallErr> {
+        use crate::fs::vfs::RENAME_NOREPLACE;
+
         if old_name.is_empty()
             || new_name.is_empty()
             || old_name == "."
@@ -1375,12 +1461,66 @@ impl IndexNode for FatInode {
             .find_local_lock(&parent_lock, old_name.to_string())
             .map_err(|_| SyscallErr::EIO)?
             .ok_or(SyscallErr::ENOENT)?;
-        if self_arc
+        let source_inode = FatInode::from_fat_ent(&self_arc, &source_short, old_offset);
+        let target = self_arc
             .find_local_lock(&parent_lock, new_name.to_string())
-            .map_err(|_| SyscallErr::EIO)?
-            .is_some()
-        {
-            return Err(SyscallErr::EEXIST);
+            .map_err(|_| SyscallErr::EIO)?;
+        if let Some((_, target_short, target_offset)) = target {
+            if flags & RENAME_NOREPLACE != 0 {
+                return Err(SyscallErr::EEXIST);
+            }
+            if source_short.is_dir() != target_short.is_dir() {
+                return if source_short.is_dir() {
+                    Err(SyscallErr::ENOTDIR)
+                } else {
+                    Err(SyscallErr::EISDIR)
+                };
+            }
+            if source_short.is_dir() {
+                // Replacing a directory also requires checking that the target
+                // is empty and releasing its directory cluster transactionally.
+                return Err(SyscallErr::ENOSYS);
+            }
+            let target_inode = FatInode::from_fat_ent(&self_arc, &target_short, target_offset);
+
+            // Keep the target's short alias so its existing LFN checksum stays
+            // valid, but replace all file metadata with the source entry. This
+            // avoids a duplicate-name window and lets us restore the target if
+            // deleting the old source entry fails.
+            source_short.name = target_short.name;
+            source_short.nt_res = target_short.nt_res;
+            self_arc
+                .set_dir_ent(
+                    &parent_lock,
+                    target_offset,
+                    FATDirEnt {
+                        short_entry: source_short,
+                    },
+                )
+                .map_err(|_| SyscallErr::EIO)?;
+            if self_arc.delete_dir_ent(&parent_lock, old_offset).is_err() {
+                let _ = self_arc.set_dir_ent(
+                    &parent_lock,
+                    target_offset,
+                    FATDirEnt {
+                        short_entry: target_short,
+                    },
+                );
+                drop(parent_lock);
+                let _ = self_arc.writeback_page_cache();
+                return Err(SyscallErr::EIO);
+            }
+            drop(parent_lock);
+            self_arc.writeback_page_cache().map_err(|_| SyscallErr::EIO)?;
+
+            // The source keeps its inode/page cache identity at the target
+            // name. The replaced inode is detached from the directory now,
+            // but its clusters remain valid until the final open reference is
+            // dropped, matching POSIX rename-over-existing semantics.
+            target_inode.detach_deleted();
+            source_inode.relocate_parent(self_arc.clone(), target_offset);
+            drop(target_inode);
+            return Ok(());
         }
 
         let (short_name, long_name_slices) =
@@ -1405,7 +1545,9 @@ impl IndexNode for FatInode {
             return Err(SyscallErr::EIO);
         }
         drop(parent_lock);
-        self_arc.writeback_page_cache().map_err(|_| SyscallErr::EIO)
+        self_arc.writeback_page_cache().map_err(|_| SyscallErr::EIO)?;
+        source_inode.relocate_parent(self_arc.clone(), new_offset);
+        Ok(())
     }
 
     fn unlink(&self, name: &str) -> Result<(), SyscallErr> {

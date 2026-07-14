@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-12
+last_update: 2026-07-13
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -197,7 +197,7 @@ la64 的早期初始化较重：
 |--------|----------|
 | CPU 核 | 非 0 号核进入死循环 |
 | interrupt vector | `ECfg` 设置 timer line-based interrupt |
-| FPU/SIMD | 按 CPUCFG2 打开 scalar FPU；LSX/LASX 在扩展上下文保存完成前保持关闭 |
+| FPU/SIMD | 按 CPUCFG2 打开 scalar FPU 和 LSX；LASX 在扩展上下文保存完成前保持关闭 |
 | timer | `TIClr` 清 timer，`TCfg` 关闭早期 timer |
 | paging | `CrMd` 打开 paging，关闭中断 |
 | trap entry | `set_kernel_trap_entry()`、`set_machine_err_trap_ent()` |
@@ -209,9 +209,9 @@ la64 的早期初始化较重：
 
 #### 6.2.1 ELF `AT_HWCAP`
 
-`AddressSpace` 构造用户栈时通过 HAL 的 `user_hwcap()` 填写 `AT_HWCAP`，不能在架构无关代码中写死同一个数字。RISC-V 返回 Linux ISA 字母位图 `0x112d`（IMAFDC）；LoongArch 按 CPUCFG1/2 映射 CPUCFG、LAM、UAL、FPU、CRC32、COMPLEX、CRYPTO、LVZ、PTW 和 LSPW。
+`AddressSpace` 构造用户栈时通过 HAL 的 `user_hwcap()` 填写 `AT_HWCAP`，不能在架构无关代码中写死同一个数字。RISC-V 返回 Linux ISA 字母位图 `0x112d`（IMAFDC）；LoongArch 按 CPUCFG1/2 映射 CPUCFG、LAM、UAL、FPU、LSX、CRC32、COMPLEX、CRYPTO、LVZ、PTW 和 LSPW。
 
-HWCAP 表示“用户态可安全使用”的能力，不只是裸硬件能力。当前 LoongArch trap context 只保存标量 FPU 状态，因此即使 CPUCFG 报告 LSX/LASX/LBT，内核也不会在 HWCAP 中发布这些位，并保持 EUEN 的对应单元关闭。否则 glibc 动态链接器可能选择向量化 resolver，而任务切换又不能保存完整扩展状态。
+HWCAP 表示“用户态可安全使用”的能力，不只是裸硬件能力。LoongArch trap context 现在保存标量 FPU 与 32 个 128-bit LSX 寄存器；trap 恢复时先写入完整向量，再恢复与其低 64-bit 别名的标量 FPU 状态。信号帧同时保存和恢复 LSX，因此 CPUCFG2 报告 LSX 时可以同步打开 `EUEN.SXE` 并发布 `HWCAP_LSX`。LASX 和 LBT 仍未进入上下文，对应 EUEN/HWCAP 继续关闭。
 
 ### 6.3 `machine_init()`
 

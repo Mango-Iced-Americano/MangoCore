@@ -60,6 +60,7 @@ const CPUCFG1_UAL: usize = 1 << 20;
 const CPUCFG1_CRC32: usize = 1 << 25;
 
 const CPUCFG2_FP: usize = 1 << 0;
+const CPUCFG2_LSX: usize = 1 << 6;
 const CPUCFG2_COMPLEX: usize = 1 << 8;
 const CPUCFG2_CRYPTO: usize = 1 << 9;
 const CPUCFG2_LVZ: usize = 1 << 10;
@@ -77,14 +78,15 @@ fn read_cpucfg(index: usize) -> usize {
 
 /// Return the LoongArch ELF `AT_HWCAP` bits that userspace may safely use.
 ///
-/// LSX, LASX and LBT are intentionally omitted even when CPUCFG reports the
-/// hardware extension. The current trap context does not preserve their
-/// extended register state across task switches.
+/// LASX and LBT are intentionally omitted even when CPUCFG reports the
+/// hardware extension. The trap context currently preserves scalar FPU and
+/// LSX state only.
 pub fn user_hwcap() -> usize {
     const HWCAP_CPUCFG: usize = 1 << 0;
     const HWCAP_LAM: usize = 1 << 1;
     const HWCAP_UAL: usize = 1 << 2;
     const HWCAP_FPU: usize = 1 << 3;
+    const HWCAP_LSX: usize = 1 << 4;
     const HWCAP_CRC32: usize = 1 << 6;
     const HWCAP_COMPLEX: usize = 1 << 7;
     const HWCAP_CRYPTO: usize = 1 << 8;
@@ -107,6 +109,9 @@ pub fn user_hwcap() -> usize {
     }
     if cfg2 & CPUCFG2_FP != 0 {
         hwcap |= HWCAP_FPU;
+    }
+    if cfg2 & CPUCFG2_LSX != 0 {
+        hwcap |= HWCAP_LSX;
     }
     if cfg2 & CPUCFG2_COMPLEX != 0 {
         hwcap |= HWCAP_COMPLEX;
@@ -174,8 +179,8 @@ pub fn bootstrap_init() {
     let cfg2 = read_cpucfg(2);
     EUEn::read()
         .set_float_point_stat(cfg2 & CPUCFG2_FP != 0)
-        // The trap context currently saves scalar FPU state only.
-        .set_simd_extension_enabled(false)
+        .set_simd_extension_enabled(cfg2 & CPUCFG2_LSX != 0)
+        // LASX state is not part of the trap context yet.
         .set_advanced_simd_extension_enabled(false)
         .write();
     // Timer & other Interrupts

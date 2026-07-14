@@ -42,6 +42,26 @@ EXPERIENCE.md
 __pycache__/
 *.pyc
 *.pyo
+
+# Generated Alpine CPython runtimes for the target tools disks.
+/user/tools/*/tests/cpython/.apk-cache/
+/user/tools/*/tests/cpython/bin/
+/user/tools/*/tests/cpython/lib/
+/user/tools/*/tests/cpython/usr/
+/user/tools/*/tests/cpython/etc/
+/user/tools/*/tests/cpython/var/
+/user/tools/*/tests/cpython/tmp/
+/user/tools/*/tests/cpython/*.apk
+/user/tools/*/tests/cpython/*.tar.gz
+/user/tools/*/tests/cpython/.cpython-*.stamp
+/user/tools/*/tests/cpython/manifest*.txt
+/user/tools/*/tests/cpython/**/*.so
+/user/tools/*/tests/cpython/**/*.so.*
+/kernel-rv-cpython
+/kernel-la-cpython
+/kernel-2k1000-cpython-tests.ui
+/mango-2k1000la-cpython-tools-p3.img
+/mango-2k1000la-cpython-tools-p3.img.json
 .sisyphus/
 sdcard-rv-noconf.img
 /tools/

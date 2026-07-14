@@ -39,14 +39,19 @@ pub const MEMORY_END: usize = 0x9000_0000;
 pub const MEMORY_END: usize = 0x9000_0000; //256M
 /// Physical DRAM banks as half-open byte ranges.
 pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
-/// RISC-V platforms currently have no post-firmware DRAM carveouts.
-pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[];
+/// OpenSBI occupies the low 2 MiB of DRAM and transfers control to the kernel
+/// at this address.
+pub const FIRMWARE_END: usize = 0x8020_0000;
+/// This range must never enter the frame allocator or the optional bulk-zero
+/// path: overwriting it makes an early SATP switch re-enter the
+/// firmware/kernel bootstrap loop.
+pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[(MEMORY_START, FIRMWARE_END)];
 /// RAM currently exposed by the selected RISC-V board configuration.
 ///
 /// `MEMORY_SIZE` is a historical common capacity constant, while fu740 and
 /// cv1811h select a smaller `MEMORY_END`; use the actual region length for ABI
 /// statistics so those boards retain their previous `sysinfo(2)` semantics.
-pub const USABLE_MEMORY_SIZE: usize = MEMORY_END - MEMORY_START;
+pub const USABLE_MEMORY_SIZE: usize = MEMORY_END - FIRMWARE_END;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 0xc;
 

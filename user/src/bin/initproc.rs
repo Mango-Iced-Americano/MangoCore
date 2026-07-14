@@ -21,10 +21,10 @@ const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/riscv64/libgcc_
 const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/loongarch64/libgcc_s.so.1");
 // ============================================================
 // TEST_GROUPS — 组名与脚本文件名的映射
-// 索引 0..11 与 mask 的 bit0..bit11 一一对应
+// 索引 0..12 与 mask 的 bit0..bit12 一一对应
 // ⚠️ DEFAULT_TIMEOUTS 的索引与此数组一致
 // ============================================================
-const TEST_GROUPS: [(&str, &str); 12] = [
+const TEST_GROUPS: [(&str, &str); 13] = [
     ("basic", "basic_testcode.sh"),
     ("busybox", "busybox_testcode.sh"),
     ("lua", "lua_testcode.sh"),
@@ -37,6 +37,7 @@ const TEST_GROUPS: [(&str, &str); 12] = [
     ("netperf", "netperf_testcode.sh"),
     ("cyclictest", "cyclictest_testcode.sh"),
     ("ltp", "ltp_testcode.sh"),
+    ("cpython", "cpython_testcode.sh"),
 ];
 
 // ============================================================
@@ -44,7 +45,7 @@ const TEST_GROUPS: [(&str, &str); 12] = [
 // 如需调整执行顺序、超时时间或 LTP 排除测例，直接修改此处即可，
 // 无需依赖 os_test.conf 注入。os_test.conf 可指定同名项覆盖。
 //
-// ⚠️ 注意：DEFAULT_TIMEOUTS 的索引与 TEST_GROUPS 数组位置（索引 0..11）
+// ⚠️ 注意：DEFAULT_TIMEOUTS 的索引与 TEST_GROUPS 数组位置（索引 0..12）
 // 一一绑定，与 DEFAULT_ORDER 中各组出现的先后顺序无关！
 // 例如 DEFAULT_TIMEOUTS[6] 永远是 iperf 的超时时间，无论 iperf
 // 在 DEFAULT_ORDER 中排在第几位。
@@ -63,12 +64,13 @@ const DEFAULT_ORDER: &[&str] = &[
     "libctest",
     "cyclictest",
     "ltp",
+    "cpython",
     // "unixbench",
 ];
 
-/// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
+/// 每组默认超时（秒），索引 0..12 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
-const DEFAULT_TIMEOUTS: [u64; 12] = [
+const DEFAULT_TIMEOUTS: [u64; 13] = [
     60,   // [0]  basic
     120,   // [1]  busybox
     60,   // [2]  lua
@@ -81,6 +83,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     90,   // [9]  netperf
     60,   // [10] cyclictest
     2400, // [11] ltp
+    900,  // [12] cpython
 ];
 
 /// LTP 默认排除测例名列表
@@ -300,6 +303,24 @@ fn apply_board_core_test_focus(cfg: &mut RuntimeConfig) {
     );
 }
 
+fn apply_cpython_test_focus(cfg: &mut RuntimeConfig) {
+    let marker = open("/cpython_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return;
+    }
+    close(marker as usize);
+
+    let cpython_index = TEST_GROUPS
+        .iter()
+        .position(|(group, _)| *group == "cpython")
+        .expect("cpython test group must exist");
+    cfg.mode = RunMode::Run;
+    cfg.mask = 1u16 << cpython_index;
+    cfg.order = alloc::vec![cpython_index];
+    cfg.timeouts[cpython_index] = 900;
+    println!("[initproc] isolated CPython focus enabled");
+}
+
 fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
     let marker = open("/board_shell\0", OpenFlags::RDONLY);
     if marker < 0 {
@@ -447,7 +468,7 @@ struct RuntimeConfig {
     /// 执行顺序：TEST_GROUPS 的索引数组，按此顺序依次执行每组
     order: Vec<usize>,
     /// 每测例超时（秒），索引与 TEST_GROUPS 一一绑定，不与 order 位置绑定
-    timeouts: [u64; 12],
+    timeouts: [u64; 13],
     /// LTP 排除测例名列表（musl 和 glibc 共用）
     ltp_exclude: Vec<String>,
     /// LTP musl 专属排除测例
@@ -1130,7 +1151,9 @@ fn run_group_in_dir(
     let group_start_ms = get_time() as u64;
     let source_log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
-    let libc_suffix = if source_log_dir.contains("musl") {
+    let libc_suffix = if group_name == "cpython" {
+        "isolated"
+    } else if source_log_dir.contains("musl") {
         "musl"
     } else {
         "glibc"
@@ -2335,6 +2358,17 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
                 }
             }
+        } else if group_name == "cpython" {
+            run_group_in_dir(
+                environ,
+                "/tools/tests/cpython\0",
+                group_name,
+                script,
+                timeout_secs,
+                1,
+                cfg,
+            );
+            snapshot_diag(cfg.diag, n, group_name, "isolated", environ);
         } else {
             let retries = if group_name == "lmbench" { 1 } else { MAX_GROUP_RETRIES };
             run_group_in_dir(
@@ -3333,6 +3367,23 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(chmod_cmd, environ);
     println!("[initproc] chmod test scripts done, exit={}", ret);
 
+    // Keep CPython isolated on the read-only tools partition. The global
+    // commands point at a wrapper which supplies its private loader, libraries,
+    // stdlib and writable scratch paths without polluting every process.
+    let cpython_launcher_cmd = "\
+        if [ -x /tools/tests/cpython/python3-wrapper.sh ] && \
+           [ -x /tools/tests/cpython/usr/bin/python3 ]; then \
+            mkdir -p /usr/bin; \
+            ln -sf /tools/tests/cpython/python3-wrapper.sh /usr/bin/python3; \
+            ln -sf /tools/tests/cpython/python3-wrapper.sh /usr/bin/python; \
+            echo 'CPython launchers installed: /usr/bin/python3, /usr/bin/python'; \
+        else \
+            echo 'CPython launchers unavailable: /tools/tests/cpython is incomplete'; \
+        fi; \
+        true\0";
+    let ret = run_bash_cmd(cpython_launcher_cmd, environ);
+    println!("[initproc] CPython launcher setup done, exit={}", ret);
+
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
@@ -3411,6 +3462,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     let mut cfg = load_runtime_config();
     apply_board_core_test_focus(&mut cfg);
+    apply_cpython_test_focus(&mut cfg);
     apply_board_shell_mode(&mut cfg);
 
     if cfg.timer_smoke && !run_timerfd_smoke() {

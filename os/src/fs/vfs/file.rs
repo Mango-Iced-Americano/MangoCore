@@ -12,7 +12,7 @@
 //! so status flags (O_NONBLOCK, O_APPEND) are shared correctly per POSIX.
 
 use crate::utils::error::SyscallErr;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -659,6 +659,8 @@ pub struct File {
     pub inode: Arc<dyn IndexNode>,
     /// 文件偏移量（AtomicUsize 直接内嵌，Arc<File> 共享跨 dup fd）
     offset: AtomicUsize,
+    /// Per-open directory-name snapshot used by getdents64 stable cookies.
+    dirent_snapshot: Mutex<Option<Vec<String>>>,
     /// 打开标志（AtomicU32：fcntl F_SETFL 只改 O_NONBLOCK/O_APPEND 等状态 flags）
     flags: AtomicU32,
     /// 文件访问模式（open 后不变，直接存值去锁）
@@ -798,6 +800,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -856,6 +859,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -913,6 +917,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -968,6 +973,7 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
+            dirent_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
@@ -1823,36 +1829,44 @@ impl File {
 
     /// 将目录项打包为变长 linux_dirent64 记录写入 `buf`。
     ///
-    /// 布局：d_ino(u64) + d_off(i64) + d_reclen(u16) + d_name(NUL 结尾)，
-    /// d_type 按 Linux 语义写在记录最后一个字节，整体 8 字节对齐。
+    /// `d_off` is a stable index into a per-open name snapshot. Entries
+    /// deleted after the snapshot are skipped without shifting later cookies.
     pub fn get_dirent64(&self, buf: &mut [u8]) -> Result<usize, isize> {
         if !self.is_dir() {
             return Err(crate::syscall::errno::ENOTDIR);
         }
 
-        let dirents = self.inode.list_dirents().map_err(|e| -(e as isize))?;
-        let current_offset = self.offset.load(Ordering::SeqCst) as u64;
-        let mut source_offset = 0u64;
-        let mut new_offset = current_offset;
+        let mut snapshot = self.dirent_snapshot.lock();
+        let mut index = self.offset.load(Ordering::SeqCst);
+        if index == 0 || snapshot.is_none() {
+            *snapshot = Some(
+                self.inode
+                    .list_dirents()
+                    .map_err(|e| -(e as isize))?
+                    .into_iter()
+                    .map(|(name, _, _)| name)
+                    .collect(),
+            );
+        }
+        let names = snapshot.as_ref().expect("directory snapshot initialized");
         let mut written = 0usize;
 
-        for (name, ino, ft) in dirents {
-            log::info!(
-                "[get_dirent64] entry name={:?}, d_ino={}, type={:?}",
-                name,
-                ino,
-                ft
-            );
+        while index < names.len() {
+            let name = &names[index];
+            let child = match self.inode.find(name) {
+                Ok(child) => child,
+                Err(SyscallErr::ENOENT) => {
+                    index += 1;
+                    continue;
+                }
+                Err(error) => return Err(-(error as isize)),
+            };
+            let metadata = child.metadata().map_err(|error| -(error as isize))?;
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let raw_size = 8 + 8 + 2 + 1 + name_len + 1;
             let reclen = (raw_size + 7) & !7;
-            let next_offset = source_offset + reclen as u64;
 
-            if next_offset <= current_offset {
-                source_offset = next_offset;
-                continue;
-            }
             if written + reclen > buf.len() {
                 if written == 0 {
                     return Err(crate::syscall::errno::EINVAL);
@@ -1865,7 +1879,7 @@ impl File {
                 *b = 0;
             }
 
-            let d_type = match ft {
+            let d_type = match metadata.file_type {
                 FileType::Dir => 4u8,
                 FileType::File => 8u8,
                 FileType::SymLink => 10u8,
@@ -1876,19 +1890,19 @@ impl File {
                 _ => 0u8,
             };
 
-            buf[pos..pos + 8].copy_from_slice(&(ino as u64).to_le_bytes());
-            buf[pos + 8..pos + 16].copy_from_slice(&(next_offset as i64).to_le_bytes());
+            let next_cookie = (index + 1) as i64;
+            buf[pos..pos + 8].copy_from_slice(&(metadata.inode_id as u64).to_le_bytes());
+            buf[pos + 8..pos + 16].copy_from_slice(&next_cookie.to_le_bytes());
             buf[pos + 16..pos + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
             buf[pos + 18] = d_type;
             buf[pos + 19..pos + 19 + name_len].copy_from_slice(&name_bytes[..name_len]);
             buf[pos + 19 + name_len] = 0;
 
             written += reclen;
-            new_offset = next_offset;
-            source_offset = next_offset;
+            index += 1;
         }
 
-        self.offset.store(new_offset as usize, Ordering::SeqCst);
+        self.offset.store(index, Ordering::SeqCst);
         Ok(written)
     }
 

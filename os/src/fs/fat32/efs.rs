@@ -9,8 +9,23 @@ use super::layout::BPB;
 use super::{BlockDevice, DiskInodeType, Fat};
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::fs::vfs::IndexNode;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::any::Any;
+
+/// Stable identity used to canonicalize FAT inode objects.
+///
+/// Allocated files and directories are identified by their first cluster.
+/// Empty files do not have a cluster yet, so they temporarily use their
+/// parent directory cluster and short-entry offset until the first write.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum FatInodeKey {
+    Cluster(u32),
+    EmptyDirEntry { parent_cluster: u32, offset: u32 },
+}
 
 pub struct EasyFileSystem {
     /// 块设备，实际上是一个指向硬件设备的指针
@@ -28,6 +43,9 @@ pub struct EasyFileSystem {
     pub byts_per_sec: u16,
     /// 自身弱引用，用于 FileSystem trait 的 root_inode 方法
     __self_ref: spin::Mutex<Option<alloc::sync::Weak<EasyFileSystem>>>,
+    /// Canonical VFS inode objects. Weak references preserve open/unlinked
+    /// lifetime semantics without keeping every inode alive indefinitely.
+    inode_objects: spin::Mutex<BTreeMap<FatInodeKey, Weak<FatInode>>>,
 }
 
 impl EasyFileSystem {
@@ -37,6 +55,43 @@ impl EasyFileSystem {
     #[inline(always)]
     pub fn clus_size(&self) -> u32 {
         self.byts_per_sec as u32 * self.sec_per_clus as u32
+    }
+
+    pub(crate) fn canonicalize_inode(
+        &self,
+        key: FatInodeKey,
+        candidate: Arc<FatInode>,
+    ) -> Arc<FatInode> {
+        let mut objects = self.inode_objects.lock();
+        if let Some(existing) = objects.get(&key).and_then(Weak::upgrade) {
+            return existing;
+        }
+        objects.insert(key, Arc::downgrade(&candidate));
+        candidate
+    }
+
+    pub(crate) fn register_inode(&self, key: FatInodeKey, inode: &Arc<FatInode>) {
+        let mut objects = self.inode_objects.lock();
+        if let Some(existing) = objects.get(&key).and_then(Weak::upgrade) {
+            assert!(
+                Arc::ptr_eq(&existing, inode),
+                "FAT inode identity collision for {:?}",
+                key
+            );
+            return;
+        }
+        objects.insert(key, Arc::downgrade(inode));
+    }
+
+    pub(crate) fn remove_inode(&self, key: FatInodeKey, inode: &FatInode) {
+        let mut objects = self.inode_objects.lock();
+        let remove = match objects.get(&key).and_then(Weak::upgrade) {
+            Some(existing) => core::ptr::eq(existing.as_ref(), inode),
+            None => objects.contains_key(&key),
+        };
+        if remove {
+            objects.remove(&key);
+        }
     }
 }
 
@@ -101,6 +156,7 @@ impl EasyFileSystem {
             byts_per_sec,
             data_area_start_block,
             __self_ref: spin::Mutex::new(Some(weak.clone())),
+            inode_objects: spin::Mutex::new(BTreeMap::new()),
         })
     }
     pub fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {

@@ -11,7 +11,7 @@
 
 use crate::hal::{
     get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, TrapContext,
-    UserContext, UserSignalMask,
+    UserContext,
 };
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
@@ -739,6 +739,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
                     let mcontext = unsafe {
                         *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>()
                     };
+                    #[cfg(feature = "loongarch64")]
+                    let lsx = inner.get_trap_cx().lsx;
                     let mut frame_stack = if use_alt_stack {
                         alt_stack.with_runtime_flags(sig_sp)
                     } else {
@@ -749,6 +751,10 @@ pub fn do_signal() -> &'static TaskControlBlock {
                     }
                     // In this case, signal hander have three parameters
                     if act.flags.contains(SigActionFlags::SA_SIGINFO) {
+                        #[cfg(feature = "loongarch64")]
+                        let user_context =
+                            UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext, lsx);
+                        #[cfg(feature = "riscv")]
                         let user_context =
                             UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext);
                         if UserPtrMut::from_addr(ucontext_addr)
@@ -796,11 +802,7 @@ pub fn do_signal() -> &'static TaskControlBlock {
                         }
 
                         if UserPtrMut::from_addr(
-                            ucontext_addr
-                                + 2 * size_of::<usize>()
-                                + size_of::<SignalStack>()
-                                + size_of::<UserSignalMask>()
-                                + UserContext::PADDING_SIZE,
+                            ucontext_addr + UserContext::MCONTEXT_OFFSET,
                         )
                         .write(token, &mcontext) // push MachineContext into user stack
                         .is_err()
@@ -808,6 +810,16 @@ pub fn do_signal() -> &'static TaskControlBlock {
                             error!(
                             "[do_signal] Failed to write MachineContext to user stack. Send SIGSEGV."
                         );
+                            drop(inner);
+                            drop(sighand);
+                            exit_current_with_sigsegv();
+                        }
+                        #[cfg(feature = "loongarch64")]
+                        if UserPtrMut::from_addr(ucontext_addr + UserContext::LSX_OFFSET)
+                            .write(token, &lsx)
+                            .is_err()
+                        {
+                            error!("[do_signal] Failed to write LSX context to user stack. Send SIGSEGV.");
                             drop(inner);
                             drop(sighand);
                             exit_current_with_sigsegv();

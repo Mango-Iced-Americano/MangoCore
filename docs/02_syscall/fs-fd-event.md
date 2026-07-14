@@ -3,7 +3,7 @@ title: "文件、fd 与事件 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-13
 tags: [syscall, fs, fd, epoll, eventfd]
 ---
 
@@ -445,11 +445,15 @@ release_closed_flock_descriptions()
 
 `sys_pipe2()` 只接受 `O_CLOEXEC | O_DIRECT | O_NONBLOCK`。创建 read/write 两端后写回用户数组 `[read_fd, write_fd]`；写回失败时关闭已分配 fd 并返回 `EFAULT`。
 
+### 5.5 ioctl FIONBIO
+
+`sys_ioctl(fd, FIONBIO, arg)` 从用户指针读取 `int`，非零时设置该 open file description 的 `O_NONBLOCK`，零时清除。`arg == NULL` 或用户内存不可读返回 `EFAULT`。该状态与 `fcntl(F_SETFL)` 共用 `File::set_nonblock()`，因此 `dup` 出的 fd 会观察到同一状态。
+
 ## 6. 目录、stat 与元数据
 
 | syscall | 入口 | 要点 |
 |---------|------|------|
-| `getdents64` | `sys_getdents64` | 单次 count 截断到 128 KiB；用内核 buffer 接收目录项后写回用户 |
+| `getdents64` | `sys_getdents64` | 单次 count 截断到 128 KiB；每个 open file description 保留名称快照，`d_off` 使用稳定索引 cookie，已删除名称跳过但不移动后续 cookie |
 | `fstatat`/`fstat` | `sys_fstatat`, `sys_fstat` | inode metadata 转 `Stat` |
 | `statx` | `sys_statx` | `metadata_to_statx()` 填充 statx 字段 |
 | `statfs`/`fstatfs` | `sys_statfs`, `sys_fstatfs` | 文件系统统计 |

@@ -5,6 +5,9 @@ DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
 LA_TOOLCHAIN ?= nightly-2024-05-01
 BOARD_NET_IFACE ?= en8
 IMAGE ?=
+P3_IMAGE ?= mango-2k1000la-cpython-tools-p3.img
+P3_MANIFEST ?= $(P3_IMAGE).json
+P3_VERIFY_FILE ?= user/tools/cpython/L7_filesystem.py
 BOARD_SERIAL_ARG = $(if $(BOARD_SERIAL),--serial $(BOARD_SERIAL),)
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
@@ -52,7 +55,7 @@ print-logo:
 	@echo "                                                                            "
 	@echo "                                                                            "
 .PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
-	2k1000-boot 2k1000-boot-check
+	2k1000-boot 2k1000-boot-check 2k1000-cpython-p3-write
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -116,6 +119,17 @@ docker-test-parallel:
 		--interface $(BOARD_NET_IFACE) \
 		--image "$(IMAGE)" $(BOARD_SERIAL_ARG) \
 		--no-host-config --check-only
+
+2k1000-cpython-p3-write:
+	@test "$(CONFIRM_P3_START)" = "0xA80800" || { \
+		echo "refusing P3 write: set CONFIRM_P3_START=0xA80800" >&2; exit 2; \
+	}
+	python3 scripts/write_2k1000_p3.py \
+		--interface $(BOARD_NET_IFACE) \
+		--image "$(P3_IMAGE)" \
+		--manifest "$(P3_MANIFEST)" \
+		--verify-file "$(P3_VERIFY_FILE)" \
+		--confirm-p3-start "$(CONFIRM_P3_START)" $(BOARD_SERIAL_ARG)
 
 testsuits-download:
 	cd fs-img-dir && \

@@ -126,6 +126,28 @@ def build_tools_payload(
     for relative in ("bin", "sbin", "lib", "usr/bin", "usr/sbin", "etc", "tests"):
         (staging / relative).mkdir(parents=True, exist_ok=True)
 
+    runtime_dir = staging / "tests" / "cpython"
+    source_runtime_dir = tools_root / "tests" / "cpython"
+    if source_runtime_dir.is_dir():
+        cpython_common = tools_root.parent / "cpython"
+        if not cpython_common.is_dir():
+            fail(f"CPython runtime is present but common scripts are missing: {cpython_common}")
+        shutil.copytree(cpython_common, runtime_dir, dirs_exist_ok=True, symlinks=True)
+        if not (runtime_dir / "usr" / "bin" / "python3").is_file():
+            fail(f"incomplete CPython runtime: {source_runtime_dir}")
+        launcher = runtime_dir / "python3-wrapper.sh"
+        if not launcher.is_file():
+            fail(f"missing CPython launcher: {launcher}")
+        launcher.chmod(0o755)
+        replace_symlink(
+            staging / "usr" / "bin" / "python3",
+            "/tools/tests/cpython/python3-wrapper.sh",
+        )
+        replace_symlink(
+            staging / "usr" / "bin" / "python",
+            "/tools/tests/cpython/python3-wrapper.sh",
+        )
+
     for test_name in TOOLS_TESTS:
         source = user_bin_dir / test_name
         if not source.is_file():

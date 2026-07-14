@@ -354,10 +354,10 @@
 ### U-Boot 内存小于整盘镜像时通过网络分块写盘
 
 - **现象**: raw disk image 大于开发板 DRAM，单次 `tftpboot` 无法加载，但 SSD 留在板上且只能通过网线和串口操作。
-- **方法**: 按固定的 512B sector 整数倍切块，块大小必须落在已验证的空闲 DRAM 区间；逐块执行 TFTP、内存 CRC、`scsi write`、同 LBA `scsi read` 和读回 CRC，后一块起始 LBA 累加前一块 sector 数。写盘前硬匹配 `scsi info` 的型号与容量，镜像 sector 总数还必须小于设备容量。
-- **验收**: 所有块读回 CRC 一致后重新 `scsi reset`，检查 DOS/MBR 分区长度，再分别用 `ext4ls`/`fatls` 读取每个分区；最后启动目标内核验证设备节点、文件系统类型和实际挂载点。任何短传、短写、CRC 不一致或目标型号变化都立即停止。
+- **方法**: 按固定的 512B sector 整数倍切块，块大小必须落在已验证的空闲 DRAM 区间；逐块执行 TFTP、内存 CRC、`scsi write`、同 LBA `scsi read` 和读回 CRC，后一块起始 LBA 累加前一块 sector 数。写盘前硬匹配 `scsi info` 的型号与容量，镜像 sector 总数还必须小于设备容量。若只替换一个分区，使用带 role、SHA-256、目标起止 LBA 和 sector 数的清单，并要求命令行再次显式确认固定起点；不要让操作者传任意写入 LBA。
+- **验收**: 所有块读回 CRC 一致后重新 `scsi reset`，检查 DOS/MBR 分区长度，再分别用 `ext4ls`/`fatls` 读取每个分区；分区 payload 还应从设备端加载一个本轮变化的哨兵文件，与宿主做长度/CRC 比对，证明写入的不是同布局旧镜像。最后启动目标内核验证设备节点、文件系统类型和实际挂载点。任何短传、短写、CRC 不一致或目标型号变化都立即停止。
 - **实测参数**: 2K1000LA 的 6,443,499,520B 镜像使用 24 个 256MiB 块加 1 个 1MiB 块；256MiB 对应 `0x80000` sectors，加载地址 `0x9000000098000000`，目标为 `TS32GMTS400`。
-- **相关文档**: `docs/03_fs/2k1000-full-test-disk.md`
+- **相关文件**: `scripts/write_2k1000_p3.py`, `scripts/restore_2k1000_p2.py`, `docs/03_fs/2k1000-full-test-disk.md`
 
 ### 板型 feature 不能兼任 bring-up 日志开关
 
@@ -437,8 +437,8 @@
 
 - **现象**: musl/static 版本正常，glibc 动态程序在进入 `main()` 前稳定触发非法指令；PC 落在 `ld.so` 的 LSX/LASX 等 ISA 优化 resolver，同一测试每次地址一致。
 - **根因**: 架构无关 ELF 栈代码写死了另一架构的 `AT_HWCAP` 数值。HWCAP 位号由各架构 ABI 独立定义；RISC-V 的 ISA 字母位图在 LoongArch 下可能被解释为 LASX/LBT。即使硬件实现扩展，内核没有保存对应扩展寄存器状态时也不能向用户态发布该能力。
-- **修复**: 由 HAL 按架构生成 HWCAP；读取 CPUCFG/架构寄存器映射硬件能力，再与内核实际启用和上下文保存能力取交集。EUEN/扩展使能与 HWCAP 保持一致。用 loader PC 减加载基址定位 resolver，并分别运行 static/musl 与 dynamic/glibc 做对照。
-- **验收**: 动态程序必须越过 loader 并完成真实多进程/上下文切换工作负载；只看到 `main()` 第一行不足以证明扩展状态切换安全。
+- **修复**: 由 HAL 按架构生成 HWCAP；读取 CPUCFG/架构寄存器映射硬件能力，再与内核实际启用和上下文保存能力取交集。EUEN/扩展使能与 HWCAP 保持一致。若目标 libc 基线本身已生成 LSX 等指令，仅隐藏 HWCAP 无法解决；必须选择真正的通用 ISA 运行时，或同时实现 trap 与 signal frame 中的完整扩展保存/恢复后再启用。用 loader PC 减加载基址定位具体指令。
+- **验收**: 动态程序必须越过 loader，完成真实多线程/多进程上下文切换，并执行一次用户信号 handler 往返；只看到 `main()` 第一行不足以证明扩展状态切换安全。
 - **相关文件**: `os/src/mm/address_space.rs`, `os/src/hal/arch/mod.rs`, `os/src/hal/arch/loongarch64/mod.rs`, `os/src/hal/arch/riscv/mod.rs`
 
 ### 只读系统盘上的聚焦测试配置使用易失启动标记
@@ -523,4 +523,39 @@
 - **根因**：DRAM 拓扑只回答地址是否有存储介质，不回答所有权是否已经交接。Framebuffer DMA、其他 CPU 的 park loop、BPI/FDT 和 U-Boot 栈/堆都可能位于普通 DRAM。
 - **修复**：把容量、地址上界、DRAM region 和固件 carveout 分开建模；入口仅分配已交接区间。关闭设备 DMA、把次核重停放到内核自有代码并复制启动参数后，再分阶段显式回收 carveout。
 - **验收**：结合 U-Boot LMB、链接地址、设备寄存器和次核启动代码审计；压力测试必须确认 allocator 的 region 末端停在 carveout 前，而不是只看 `MemTotal`。
-- **相关文件**：`os/src/hal/arch/loongarch64/config.rs`, `os/src/mm/frame_allocator.rs`, `os/src/main.rs`
+- **相关文件**：`os/src/hal/arch/loongarch64/config.rs`, `os/src/hal/arch/riscv/config.rs`, `os/src/mm/frame_allocator.rs`, `os/src/main.rs`
+
+RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 列为可用，且首次 SATP 切换后回到固件 banner 或内核入口，应优先检查 OpenSBI 区间是否被页表页或批量清零覆盖。QEMU 常见布局为固件 `[0x80000000, 0x80200000)`、S-mode 内核从 `0x80200000` 开始；两者的所有权边界必须显式进入 `FIRMWARE_RESERVED_REGIONS`。
+
+### LoongArch FPR 与 LSX 恢复必须按物理别名二选一
+
+- **现象**：动态运行时在 QEMU 可长期通过，实板却在任意 syscall、定时器中断或调度后随机损坏字符串/向量数据；重复启动和 signal 往返会快速放大问题，但 PC 不一定落在 trap 返回处。
+- **根因**：LoongArch 标量 FPR 是 LSX 向量寄存器的低 64-bit lane。若 trap 返回先用 `VLD` 恢复完整 128-bit 向量，再对同一寄存器执行 `FLD.D`，硬件会覆盖低 lane；反向顺序则会让向量快照成为权威状态。QEMU 可能未完整建模该别名，因而形成模拟器假通过。
+- **修复**：保存 LSX 时记录完整向量；恢复依据 `EUEN.SXE` 在完整 LSX 与纯标量 FPR 路径中二选一，绝不顺序执行两套恢复。signal frame 同时含标量和向量视图时，先把标量低 lane 合并到向量快照，再执行一次完整 LSX 恢复。
+- **验收**：实机连续启动动态运行时至少数十次，同时覆盖定时器抢占、线程切换和用户 signal handler 往返；只跑 QEMU 或只进入一次 `main()` 不足以证明正确。
+- **相关文件**：`os/src/hal/arch/loongarch64/trap/trap.S`, `os/src/hal/arch/loongarch64/trap/context.rs`, `os/src/syscall/process/signal.rs`
+
+### PageCache 文件系统要同时实现内核缓冲区与 UserBuffer I/O
+
+- **现象**：普通用户态 `write(2)` 正常，VFS 默认 `symlink()`、内核预装文件或其他内核发起的写入却返回 `ENOSYS`；上层容易把失败误判为文件系统不支持该 inode 类型。
+- **根因**：`write_at_user` 只覆盖直接 UserBuffer 快速路径。VFS 内部操作调用的是 `IndexNode::write_at`，其默认实现仍返回 `ENOSYS`；共享 PageCache 并不会自动桥接这两个 trait 入口。
+- **修复**：PageCache-backed inode 同时实现 `write_at` 和 `write_at_user`，两者统一校验溢出、配额、目录类型、文件长度与 truncate 的锁序；内核缓冲区路径把旧文件大小传给 PageCache，以正确处理 EOF 外部分页写入。
+- **验收**：除普通 read/write 外，至少执行 `symlink + readlink + 透过链接读取 + stat/lstat`，并在两架构 QEMU 中验证，防止只覆盖 syscall 快速路径。
+- **相关文件**：`os/src/fs/tmpfs/mod.rs`, `os/src/fs/vfs/index_node.rs`, `os/src/fs/page_cache.rs`
+
+### FAT rename 元数据已切换但新路径读到旧内容
+
+- **现象**：覆盖 rename 后源路径消失，目标目录项首簇、文件大小和 inode 标识都已切到源文件，但重新打开目标仍读到旧目标 payload，或读到该簇上更早的残留内容。一次性测试可能通过，重复复用相同名称和簇后稳定失败。
+- **定位**：先同时记录源/目标 payload 前缀、rename 前后首簇、文件大小和旧目标 fd。若命名空间与目录项已经正确而内容恰好等于另一份完整旧 payload，优先审计 inode/PageCache 身份和最终 writeback，不要继续改目录项事务。
+- **根因**：同一 FAT 磁盘对象可被构造成多份 inode/PageCache，导致路径切换后命中不同缓存；同时 PageCache 后端若只持有 `Weak<Inode>`，最后一个强引用进入 owner `Drop` 时 `upgrade()` 必然失败，所谓 Drop 内最终写回会失去簇映射并静默丢弃脏页。
+- **修复**：文件系统级弱引用表把已分配对象按首簇 canonicalize；无首簇的空文件暂按父目录簇和目录项偏移标识，并在首次分簇、truncate、rename、unlink 时原子重键。PageCache 后端只强持有完成 I/O 所需的最小共享状态（如 `Arc<RwLock<FileContent>>`），不要强持 owner 形成环。覆盖目标从规范表 detach，但其簇延迟到旧 fd 最后关闭后回收。
+- **验收**：至少覆盖空源/空目标、同名重复无 `fsync` 压力、源和目标不同长度、目标仍被旧 fd 打开、旧 fd 写入不影响新目标。QEMU 虚拟磁盘通过后，必须在真实介质上重复验证簇复用路径。
+- **相关文件**：`os/src/fs/fat32/efs.rs`, `os/src/fs/fat32/fat_inode.rs`, `os/src/fs/page_cache.rs`, `user/tools/cpython/L7_filesystem.py`
+
+### 隔离动态运行时加入 PATH 后仍无法直接执行
+
+- **现象**：运行时文件已经写入并挂载，测试通过显式 loader 可以运行，但 Shell 输入命令仍报告 unknown command；把二进制目录加入 `PATH` 后又可能得到 `ENOENT` 或缺少动态库。
+- **根因**：`PATH` 只负责定位文件，不会重写 ELF 的绝对 interpreter，也不会自动设置私有 library path、语言运行时根目录和 CA。只读 tools 分区还可能被绑定到 `/usr`，使启动期临时创建链接失败。
+- **修复**：保留运行时隔离布局，提供位于全局 `PATH` 的轻量包装器，由它显式执行私有 loader 并传入库、运行时和证书环境；链接既预置进只读 tools 镜像，也在可写 staged 根文件系统启动时兜底安装。缓存、临时文件和用户包指向独立可写分区。
+- **验收**：集成测试必须从普通 Shell 路径直接调用 `/usr/bin/<command>`，不能只验证内部脚本的显式 loader 路径；同时覆盖 tools 绑定到 `/usr` 和保留可写 `/usr` 两种启动模式。
+- **相关文件**：`user/tools/cpython/python3-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/make_2k1000_full_test_disk.py`, `os/Makefile`

@@ -31,7 +31,7 @@ use core::ptr::{addr_of, addr_of_mut};
 static BOARD_FIRST_TRAP_RETURN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-pub use context::{MachineContext, TrapContext, UserContext, UserSignalMask};
+pub use context::{LsxRegs, MachineContext, TrapContext, UserContext, UserSignalMask};
 use register::{
     BadV, EStat, TLBRBadV, TLBREHi, TLBRELo0, TLBRELo1, TLBRPrMd, PGD, PGDH, PGDL, PWCH, PWCL,
     TLBRERA,
