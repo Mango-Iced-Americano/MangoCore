@@ -330,7 +330,13 @@ pub(crate) fn open_file_at(
     }
 
     let (uid, fsgid, groups) = caller_ids_and_groups();
-    let is_root = uid == 0;
+    // uid==0 (root) bypasses DAC — skip the redundant path walk
+    if uid != 0 {
+        let parent_result = check_parent_search_access(&start, path, uid, fsgid, &groups);
+        if parent_result != SUCCESS {
+            return Err(parent_result);
+        }
+    }
 
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
     match vfs_lookup(&start, path, follow_final) {
@@ -460,17 +466,7 @@ pub(crate) fn open_file_at(
                 .map_err(|e| -(e as isize))?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
-        Err(errno) => {
-            // Lazy DAC: check parent search permission only on lookup failure.
-            // Avoids redundant full path walk on every successful open().
-            if !is_root {
-                let perm = check_parent_search_access(&start, path, uid, fsgid, &groups);
-                if perm != SUCCESS {
-                    return Err(perm);
-                }
-            }
-            Err(errno)
-        },
+        Err(errno) => Err(errno),
     }
 }
 
