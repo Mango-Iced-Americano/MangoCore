@@ -5,8 +5,8 @@ use crate::fs::vfs::fcntl::{FcntlCommand, PosixFlock, F_UNLCK};
 use crate::fs::vfs::posix_lock::{init_posix_lock_manager, mgr, posix_lock_get, posix_lock_set, release_posix_for_owner, LockKey, LockOwner};
 use crate::fs::*;
 use crate::mm::{
-    MapPermission, UserBufferReader, UserBufferWriter, UserCString, UserIoVec, UserPtr,
-    UserPtrMut, UserSlice, VirtAddr,
+    check_user_range, MapPermission, UserBufferReader, UserBufferWriter, UserCString,
+    UserIoVec, UserPtr, UserPtrMut, UserSlice, VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{
@@ -2547,27 +2547,25 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
 /// + 成功：返回获取的目录项数量
 /// + 失败：返回错误码
 pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
+    if count == 0 {
+        return EINVAL;
+    }
     // 防御性限制：单次 getdents64 最多返回 128KB 的目录项，防止超大 Vec 分配导致内核堆 OOM
     let count = count.min(128 * 1024);
     let task = current_task().unwrap();
     let token = task.get_user_token();
 
-    // Pre-validate user buffer: create the writer before any FS work.
-    // If the user buffer has an unmapped guard page, UserBufferWriter::new
-    // will fail immediately and we return EFAULT before doing get_dirent64.
-    // This matches Linux 6.6 behavior where filldir64 writes to user memory
-    // one entry at a time and faults if the very first write hits an unmapped page.
-    let mut writer = match UserBufferWriter::new(token, dirp, count) {
-        Ok(w) => w,
-        Err(_) => return EFAULT,
-    };
+    // Cheap addr range check — does NOT fault in pages (unlike UserBufferWriter::new)
+    if check_user_range(dirp as usize, count).is_err() {
+        return EFAULT;
+    }
 
     // 获取文件描述符
     let file = match fd {
         AT_FDCWD => task.process.fs().lock().working_inode.clone(),
         fd => {
             let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
+            let fd_table = files_ref.lock();
             match fd_table.get_file(fd) {
                 Ok(file) => file,
                 Err(e) => return -(e as isize),
@@ -2580,6 +2578,9 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         return EBADF;
     }
 
+    // Save old offset for rollback on copy failure
+    let old_offset = file.offset();
+
     let mut kernel_buf = alloc::vec![0u8; count];
     let written = match file.get_dirent64(&mut kernel_buf) {
         Ok(n) => n,
@@ -2590,9 +2591,20 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         return 0;
     }
 
+    // Writer created with WRITTEN (actual bytes), not COUNT
+    let mut writer = match UserBufferWriter::new(token, dirp, written) {
+        Ok(w) => w,
+        Err(_) => {
+            file.set_offset(old_offset); // rollback
+            return EFAULT;
+        }
+    };
     let copied = match writer.write_from(&kernel_buf[..written]) {
         Ok(c) => c,
-        Err(_) => return EFAULT,
+        Err(_) => {
+            file.set_offset(old_offset); // rollback
+            return EFAULT;
+        }
     };
     if copied != written {
         log::error!(
@@ -2601,6 +2613,7 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
             copied,
             written
         );
+        file.set_offset(old_offset); // rollback
         return EFAULT;
     }
     info!("[sys_getdents64] fd: {}, count: {}", fd, count);

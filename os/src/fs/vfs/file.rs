@@ -1821,6 +1821,7 @@ impl File {
                         idx += 1; // deleted, skip
                         continue;
                     }
+                    self.offset.store(idx, Ordering::SeqCst); // save progress before error
                     return Err(-(e as isize));
                 }
             };
@@ -1839,6 +1840,7 @@ impl File {
 
             if written + reclen > buf.len() {
                 if written == 0 {
+                    self.offset.store(idx, Ordering::SeqCst); // save progress before error
                     return Err(crate::syscall::errno::EINVAL);
                 }
                 break;

@@ -4,6 +4,17 @@
 
 ## 2026-07-14
 
+### 修复 getdents64 无限循环 regression：offset 未前移导致重复 EFAULT
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_getdents64()`：移除提前的 `UserBufferWriter::new(token, dirp, count)` 调用（该调用会在调用 `get_dirent64` 前 fault-in 全部用户页面）。替换为 `check_user_range()` 的廉价地址范围检查（不 fault 页面）。保存 `old_offset`，在任意 copy 失败时 `file.set_offset(old_offset)` 回滚。
+- `os/src/fs/vfs/file.rs` — `get_dirent64()`：在返回 EINVAL（written==0 且 buf 空间不足）和非 ENOENT 错误前，先保存 offset 进度（`self.offset.store(idx, Ordering::SeqCst)`），防止下次重试重复遍历已处理条目。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** 根因：`UserBufferWriter::new(token, dirp, count)` 在调用 `get_dirent64` 前 fault-in 全部 [dirp, dirp+count) 页面。若任何页面不可访问则返回 EFAULT，但此时 offset 尚未前移 → 调用者用相同 offset 重试 → 相同 EFAULT → 无限循环。修复措施：(1) 用 `check_user_range` 替代 fault-in 验证；(2) 用 `written`（实际字节数）而非 `count` 创建 Writer；(3) 所有拷贝失败路径回滚 offset。
+
 ### 修复 syscall tracing：运行时 TRACING_ON 编译开关 → 运行时 AtomicBool 控制
 
 **涉及文件：**
