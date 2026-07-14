@@ -304,6 +304,31 @@ pub(crate) fn open_file_at(
         return Ok(vfs::File::new_without_open(start, _open_flags_to_vfs_flags(flags), md.file_type));
     }
 
+    // Paths like ".", "./", ".//" resolve to the start inode itself
+    if path == "." || path.trim_end_matches('/') == "." {
+        let md = start.metadata().map_err(|e| -(e as isize))?;
+        if flags.contains(OpenFlags::O_CREAT | OpenFlags::O_EXCL) {
+            return Err(EEXIST);
+        }
+        if flags.contains(OpenFlags::O_PATH) {
+            return Ok(vfs::File::new_without_open(
+                start,
+                vfs::FileFlags::from_bits_truncate(
+                    vfs::FileFlags::O_DIRECTORY.bits()
+                        | vfs::FileFlags::O_NOFOLLOW.bits()
+                        | vfs::FileFlags::O_PATH.bits()
+                        | vfs::FileFlags::O_CLOEXEC.bits(),
+                ) & _open_flags_to_vfs_flags(flags),
+                md.file_type,
+            ));
+        }
+        if flags.contains(OpenFlags::O_DIRECTORY) && md.file_type != FileType::Dir {
+            return Err(ENOTDIR);
+        }
+        return vfs::File::new_with_metadata(start, _open_flags_to_vfs_flags(flags), md)
+            .map_err(|e| -(e as isize));
+    }
+
     let (uid, fsgid, groups) = caller_ids_and_groups();
     // uid==0 (root) bypasses DAC — skip the redundant path walk
     if uid != 0 {

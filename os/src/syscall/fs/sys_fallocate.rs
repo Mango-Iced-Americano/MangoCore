@@ -9,10 +9,13 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
         return EINVAL;
     }
 
-    let end = match offset.checked_add(len) {
-        Some(end) => end,
-        None => return EINVAL,
-    };
+    // Linux: offset+len overflow or exceeding max file size → EFBIG (not EINVAL)
+    let end128 = (offset as i128) + (len as i128);
+    let max_file_size = isize::MAX as i128;
+    if end128 > max_file_size {
+        return EFBIG;
+    }
+    let end = end128 as usize;
 
     let task = current_task().unwrap();
     let files_ref = task.process.files();
@@ -51,9 +54,10 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
     if mode == FALLOC_PUNCH_HOLE_KEEP_SIZE {
         let seals = file.memfd_seal_bits().unwrap_or(0);
         if (seals & vfs::F_SEAL_WRITE) != 0 {
-            return EOPNOTSUPP;
+            return EPERM;
         }
-        return SUCCESS;
+        // Punch-hole is not implemented — return EOPNOTSUPP so LTP marks it unsupported
+        return EOPNOTSUPP;
     }
     if mode != 0 && mode != FALLOC_FL_KEEP_SIZE {
         warn!("[sys_fallocate] unsupported mode: {:#x}", mode);

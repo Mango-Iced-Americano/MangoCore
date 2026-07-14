@@ -2,7 +2,7 @@ use super::common::*;
 
 pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     if target.is_null() {
-        return EINVAL;
+        return EFAULT;
     }
     // Permission check: umount requires root (CAP_SYS_ADMIN)
     let task = current_task().unwrap();
@@ -14,6 +14,13 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         Ok(target) => target,
         Err(errno) => return errno,
     };
+    if target.is_empty() {
+        return ENOENT;
+    }
+    // Linux: path must not exceed MAX_PATHLEN or contain components > NAME_MAX
+    if let Err(errno) = validate_path_len(&target) {
+        return errno;
+    }
     let flags = match UmountFlags::from_bits(flags) {
         Some(flags) => flags,
         None => return EINVAL,

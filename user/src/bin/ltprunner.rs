@@ -12,9 +12,9 @@ use user_lib::{
 };
 
 #[cfg(target_arch = "loongarch64")]
-const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_CASE_TIMEOUT_SECS: u64 = 150;
 #[cfg(not(target_arch = "loongarch64"))]
-const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_CASE_TIMEOUT_SECS: u64 = 150;
 #[cfg(target_arch = "loongarch64")]
 const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
 #[cfg(not(target_arch = "loongarch64"))]

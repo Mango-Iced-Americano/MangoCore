@@ -4,6 +4,12 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
     if count == 0 {
         return EINVAL;
     }
+    // Linux: if buffer cannot hold even the first dirent record, return EINVAL
+    // Minimum linux_dirent64 record is 24 bytes (d_ino + d_off + d_reclen + d_type + "." = 24)
+    const MIN_DIRENT64_RECLEN: usize = 24;
+    if count < MIN_DIRENT64_RECLEN {
+        return EINVAL;
+    }
     // 防御性限制：单次 getdents64 最多返回 128KB 的目录项，防止超大 Vec 分配导致内核堆 OOM
     let count = count.min(128 * 1024);
     let task = current_task().unwrap();

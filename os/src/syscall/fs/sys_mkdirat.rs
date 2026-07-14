@@ -25,6 +25,10 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
     if path == "/" || path == "." {
         return EEXIST;
     }
+    // Linux: path components must not exceed NAME_MAX (255) — ENAMETOOLONG before any other check
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let (uid, fsgid, groups) = caller_ids_and_groups();
     let parent_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
     if parent_result != SUCCESS {

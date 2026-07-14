@@ -10,6 +10,10 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
     if path_str.is_empty() {
         return ENOENT;
     }
+    // Linux: path components must not exceed NAME_MAX (255) — ENAMETOOLONG before any other check
+    if let Err(errno) = validate_path_len(&path_str) {
+        return errno;
+    }
     let start = if path_str.starts_with('/') {
         crate::fs::current_root_inode()
     } else {
