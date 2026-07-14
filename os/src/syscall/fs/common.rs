@@ -1290,20 +1290,20 @@ pub(crate) fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<()
         return Err(EPERM);
     }
 
+    let old_gid = meta.gid;
     let perms = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    let mut new_mode = (meta.mode & !vfs::InodeMode::S_IALLUGO) | perms;
 
-    // Linux chmod_common: (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO)
-    // User's mode provides ALL permission+special bits. Only file type bits
-    // preserved from old mode.
-    meta.mode = (meta.mode & !vfs::InodeMode::S_IALLUGO) | perms;
-    // Linux notify_change: chmod on non-directory clears S_ISGID only if
-    // caller is not privileged (root/CAP_FSETID) and not in the file's group.
-    if meta.file_type != vfs::FileType::Dir {
-        let in_group = fsgid == meta.gid || groups.iter().any(|g| *g == meta.gid);
+    // Linux: clear SGID if caller is not root and not in file's group
+    // (applies to all file types, including directories)
+    if new_mode.contains(vfs::InodeMode::S_ISGID) {
+        let in_group = fsgid == old_gid || groups.iter().any(|g| *g == old_gid);
         if uid != 0 && !in_group {
-            meta.mode.remove(vfs::InodeMode::S_ISGID);
+            new_mode.remove(vfs::InodeMode::S_ISGID);
         }
     }
+
+    meta.mode = new_mode;
 
     inode.set_metadata(&meta).map_err(|e| -(e as isize))
 }
@@ -2251,9 +2251,10 @@ pub(crate) fn fd_to_inode(fd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
     let inode = file.inode.clone();
     drop(fd_table);
 
-    // xattrs are only valid on regular files and directories
+    // xattrs are only valid on regular files and directories;
+    // Linux fgetxattr on pipes/sockets returns EBADF
     if file.file_type() != FileType::File && file.file_type() != FileType::Dir {
-        return Err(EOPNOTSUPP);
+        return Err(EBADF);
     }
 
     Ok(inode)

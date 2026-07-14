@@ -10,13 +10,13 @@ pub fn sys_utimensat(
     flags: u32,
 ) -> isize {
     let token = current_user_token();
-    let path = if !pathname.is_null() {
-        match user_cstring(token, pathname) {
-            Ok(path) => path,
-            Err(errno) => return errno,
-        }
-    } else {
-        String::new()
+    // NULL pathname → EFAULT (Linux: null user pointer before any other check)
+    if pathname.is_null() {
+        return EFAULT;
+    }
+    let path = match user_cstring(token, pathname) {
+        Ok(path) => path,
+        Err(errno) => return errno,
     };
     let flags = match UtimensatFlags::from_bits(flags) {
         Some(flags) => flags,

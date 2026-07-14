@@ -376,17 +376,50 @@ pub fn sys_mount(
         return EINVAL;
     }
 
+    // Reject mounting over an already-mounted target (Linux: EBUSY)
+    // Must be checked after all special-case routing (MS_BIND/MS_MOVE/MS_REMOUNT/propagation)
+    // so that those paths are unaffected.
+    if let Some(mnt_inode) = target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        // If the target inode is itself a mount root (vfs_lookup followed an overlay),
+        // this path is already a mountpoint.
+        if mnt_inode.is_mountpoint_root() {
+            if !mountflags.contains(MountFlags::MS_REMOUNT) {
+                return EBUSY;
+            }
+        }
+        // Also check if something is already mounted AT this inode (child mount)
+        let inode_id = match mnt_inode.inner_inode.metadata() {
+            Ok(md) => md.inode_id,
+            Err(e) => return -(e as isize),
+        };
+        let mountpoints = mnt_inode.mount_fs.mountpoints.lock();
+        if mountpoints.contains_key(&inode_id) {
+            if !mountflags.contains(MountFlags::MS_REMOUNT) {
+                return EBUSY;
+            }
+        }
+    }
+
+    let filesystemtype = match user_cstring(token, filesystemtype) {
+        Ok(filesystemtype) => filesystemtype,
+        Err(errno) => return errno,
+    };
+
+    // For block-backed filesystems, NULL source → EINVAL (not ENOENT via empty string lookup)
+    let is_block_based = matches!(
+        filesystemtype.as_str(),
+        "ext2" | "ext3" | "ext4" | "vfat" | "fat32" | "exfat" | "btrfs" | "xfs" | "ntfs"
+    );
     let source = if source.is_null() {
+        if is_block_based {
+            return EINVAL;
+        }
         String::new()
     } else {
         match user_cstring(token, source) {
             Ok(source) => source,
             Err(errno) => return errno,
         }
-    };
-    let filesystemtype = match user_cstring(token, filesystemtype) {
-        Ok(filesystemtype) => filesystemtype,
-        Err(errno) => return errno,
     };
 
     info!(

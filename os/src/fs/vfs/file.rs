@@ -1799,6 +1799,16 @@ impl File {
             return Err(crate::syscall::errno::ENOTDIR);
         }
 
+        // Deleted-but-open directory: Linux returns ENOENT for getdents64.
+        // When a directory is unlinked but a fd remains open, nlinks drops to 0.
+        let meta = self.inode.metadata().map_err(|e| -(e as isize))?;
+        if meta.file_type != FileType::Dir {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
+        if meta.nlinks == 0 {
+            return Err(crate::syscall::errno::ENOENT);
+        }
+
         let mut snapshot = self.dirent_snapshot.lock();
         let mut idx = self.offset.load(Ordering::SeqCst);
 

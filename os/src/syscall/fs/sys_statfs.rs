@@ -15,6 +15,15 @@ pub fn sys_statfs(pathname: *const u8, buf: *mut Statfs) -> isize {
     let start = current_task()
         .map(|t| t.process.fs().lock().working_inode.inode.clone())
         .unwrap_or_else(|| crate::fs::vfs_root().mountpoint_root_inode());
+
+    // DAC search permission check: search (x) on every path component
+    // Linux requires this for path-based statfs, same as path-based stat
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let perm_err = check_parent_search_access(&start, &path, uid, fsgid, &groups);
+    if perm_err != SUCCESS {
+        return perm_err;
+    }
+
     let inode = match crate::fs::vfs_lookup(&start, &path, true) {
         Ok(inode) => inode,
         Err(e) => return e,

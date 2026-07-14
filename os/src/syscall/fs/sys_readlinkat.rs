@@ -14,10 +14,53 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         return EINVAL;
     }
 
-    // Linux: readlinkat(fd, "", buf, size) => ENOENT always
-    // No AT_EMPTY_PATH support — empty path must not resolve
+    // Linux: readlinkat(fd, "", buf, size) with non-AT_FDCWD dirfd reads
+    // the symlink referred to by dirfd (AT_EMPTY_PATH semantics)
     if path.is_empty() {
-        return ENOENT;
+        if dirfd == AT_FDCWD {
+            return ENOENT;
+        }
+        // Read the symlink target from dirfd's inode
+        let files_ref = current_task().unwrap().process.files();
+        let fd_table = files_ref.lock();
+        let file = match fd_table.get_file(dirfd) {
+            Ok(f) => f,
+            Err(e) => return -(e as isize),
+        };
+        let inode = file.inode.clone();
+        drop(fd_table);
+        let md = match inode.metadata() {
+            Ok(m) => m,
+            Err(e) => return -(e as isize),
+        };
+        if md.file_type != FileType::SymLink {
+            return EINVAL;
+        }
+        let link_len = (md.size.max(0) as usize).min(4096);
+        let mut link_buf = alloc::vec![0u8; link_len];
+        let n = match inode.read_at(
+            0,
+            link_buf.len(),
+            &mut link_buf,
+            spin::Mutex::new(vfs::FilePrivateData::Unused).lock(),
+        ) {
+            Ok(n) => n,
+            Err(_) => return EINVAL,
+        };
+        unsafe { link_buf.set_len(n) };
+        let target = match String::from_utf8(link_buf) {
+            Ok(s) => alloc::string::String::from(s.trim_end_matches('\0')),
+            Err(_) => return EINVAL,
+        };
+        let len = target.len().min(bufsiz);
+        let mut writer = match UserBufferWriter::new(token, buf, len) {
+            Ok(w) => w,
+            Err(_) => return EFAULT,
+        };
+        if writer.write_from(target.as_bytes()).is_err() {
+            return EFAULT;
+        }
+        return len as isize;
     }
 
     let real_path = if path.as_str() == "/proc/self/exe" {
