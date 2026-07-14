@@ -131,7 +131,7 @@ static TRACE: Mutex<RingInner> = Mutex::new(RingInner {
 
 /// Runtime trace on/off switch. Writable via /sys/kernel/tracing/tracing_on.
 /// When false, trace events are silently dropped.
-pub static TRACING_ON: AtomicBool = AtomicBool::new(true);
+pub static TRACING_ON: AtomicBool = AtomicBool::new(false);
 
 /// Count of events dropped because TRACING_ON was false or ring was full.
 pub static TRACE_DROPPED: AtomicUsize = AtomicUsize::new(0);
