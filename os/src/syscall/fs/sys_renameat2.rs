@@ -80,7 +80,6 @@ pub fn sys_renameat2(
         Err(e) => return -(e as isize),
     };
     if old_parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) {
-        let (uid, _) = open_subject_ids();
         if uid != 0 && uid != old_parent_meta.uid {
             if let Ok(file_inode) = old_parent.find(&old_leaf) {
                 if let Ok(file_meta) = file_inode.metadata() {
