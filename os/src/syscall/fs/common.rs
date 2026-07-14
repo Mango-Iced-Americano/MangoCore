@@ -330,13 +330,7 @@ pub(crate) fn open_file_at(
     }
 
     let (uid, fsgid, groups) = caller_ids_and_groups();
-    // uid==0 (root) bypasses DAC — skip the redundant path walk
-    if uid != 0 {
-        let parent_result = check_parent_search_access(&start, path, uid, fsgid, &groups);
-        if parent_result != SUCCESS {
-            return Err(parent_result);
-        }
-    }
+    let is_root = uid == 0;
 
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
     match vfs_lookup(&start, path, follow_final) {
@@ -466,7 +460,17 @@ pub(crate) fn open_file_at(
                 .map_err(|e| -(e as isize))?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
-        Err(errno) => Err(errno),
+        Err(errno) => {
+            // Lazy DAC: check parent search permission only on lookup failure.
+            // Avoids redundant full path walk on every successful open().
+            if !is_root {
+                let perm = check_parent_search_access(&start, path, uid, fsgid, &groups);
+                if perm != SUCCESS {
+                    return Err(perm);
+                }
+            }
+            Err(errno)
+        },
     }
 }
 
@@ -2149,6 +2153,30 @@ pub(crate) fn check_parent_search_access(
         }
     }
     SUCCESS
+}
+
+/// Lazy DAC: vfs_lookup first, check parent search permission only on failure.
+/// Avoids the double path walk (check_parent_search_access + vfs_lookup) on every call.
+/// Semantics preserved: EACCES before ENOENT because if vfs_lookup fails and a parent
+/// lacked search permission, we promote the error to EACCES.
+pub(crate) fn vfs_lookup_with_dac(
+    start: &Arc<dyn vfs::IndexNode>,
+    path: &str,
+    follow_final: bool,
+    uid: u32,
+    fsgid: u32,
+    groups: &[u32],
+) -> Result<Arc<dyn vfs::IndexNode>, isize> {
+    match vfs_lookup(start, path, follow_final) {
+        Ok(inode) => Ok(inode),
+        Err(errno) => {
+            let perm = check_parent_search_access(start, path, uid, fsgid, groups);
+            if perm != SUCCESS {
+                return Err(perm);
+            }
+            Err(errno)
+        }
+    }
 }
 
 pub(crate) fn check_parent_write_search_access(

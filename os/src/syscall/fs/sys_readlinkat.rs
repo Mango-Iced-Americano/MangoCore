@@ -77,13 +77,9 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         };
 
         let (uid, fsgid, groups) = caller_ids_and_groups();
-        let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
-        if perm_result != SUCCESS {
-            return perm_result;
-        }
-
         // 使用新 VFS 路径解析 (不跟随最终符号链接)
-        let inode = match vfs_lookup(&start, &path, false) {
+        // Lazy DAC: single vfs_lookup, check permission only on failure
+        let inode = match vfs_lookup_with_dac(&start, &path, false, uid, fsgid, &groups) {
             Ok(inode) => inode,
             Err(errno) => return errno,
         };
