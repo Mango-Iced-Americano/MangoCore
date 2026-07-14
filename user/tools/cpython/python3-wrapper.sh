@@ -18,12 +18,21 @@ if [ ! -x "$CPYTHON_PY" ]; then
     exit 127
 fi
 
-if [ -d /scratch ] && /bin/busybox mkdir -p /scratch/python/tmp /scratch/python/user 2>/dev/null; then
+if [ -d /var/cache/mango-python ] && \
+    /bin/busybox mkdir -p /var/cache/mango-python/tmp /var/cache/mango-python/user 2>/dev/null; then
+    export TMPDIR=/var/cache/mango-python/tmp
+    export PYTHONUSERBASE=/var/cache/mango-python/user
+elif [ -d /persist/python ] && \
+    /bin/busybox mkdir -p /persist/python/tmp /persist/python/user 2>/dev/null; then
+    export TMPDIR=/persist/python/tmp
+    export PYTHONUSERBASE=/persist/python/user
+elif [ -d /scratch ] && /bin/busybox mkdir -p /scratch/python/tmp /scratch/python/user 2>/dev/null; then
     export TMPDIR=/scratch/python/tmp
     export PYTHONUSERBASE=/scratch/python/user
 else
-    /bin/busybox mkdir -p /tmp/python 2>/dev/null || true
-    export TMPDIR=/tmp/python
+    /bin/busybox mkdir -p /tmp/python/tmp /tmp/python/user 2>/dev/null || true
+    export TMPDIR=/tmp/python/tmp
+    export PYTHONUSERBASE=/tmp/python/user
 fi
 
 # The runtime lives on the read-only tools partition. Keep bytecode outside that
@@ -51,4 +60,8 @@ export LC_ALL="${LC_ALL:-C.UTF-8}"
 export SSL_CERT_FILE="${SSL_CERT_FILE:-$CPYTHON_ROOT/etc/ssl/certs/ca-certificates.crt}"
 
 CPYTHON_LIBRARY_PATH="$CPYTHON_ROOT/usr/lib:$CPYTHON_ROOT/lib"
+# CPython helpers such as ensurepip restart sys.executable directly instead of
+# going through this wrapper. Keep the private search path in the Python
+# process tree so those children can resolve libpython and extension DSOs.
+export LD_LIBRARY_PATH="$CPYTHON_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$CPYTHON_LD" --library-path "$CPYTHON_LIBRARY_PATH" "$CPYTHON_PY" "$@"

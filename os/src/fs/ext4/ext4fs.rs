@@ -1606,45 +1606,77 @@ impl IndexNode for layout::Ext4OSInode {
             .ext4fs
             .dir_find_entry(new_parent_num, new_name, &mut check)
             .is_ok();
-        if target_exists {
+        let overwritten_target = if target_exists {
             if flags & RENAME_NOREPLACE != 0 {
                 return Err(SyscallErr::EEXIST);
             }
-            // Overwrite: remove existing new_name dirent before adding the new one.
-            // This prevents dir_add_entry from creating duplicate dirents when
-            // the target name already exists (e.g. apk rename(tmpl, final)).
-            let old_target_num = check.dentry.inode;
-            {
-                let mut parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
-                self.ext4fs
-                    .dir_remove_entry(&mut parent_ref, new_name)
-                    .map_err(|_| SyscallErr::EIO)?;
+            // POSIX rename is a no-op when both names already resolve to the
+            // same inode (for example, two hard links to one file).
+            if check.dentry.inode == child_inode_num {
+                return Ok(());
             }
-            // Decrement old target's link count (minimal cleanup; full inode
-            // truncate/free handled lazily if links reach 0 via Drop).
-            let mut old_target = self.ext4fs.get_inode_ref(old_target_num);
-            let links = old_target.inode.links_count();
-            if links > 0 {
-                old_target.inode.set_links_count(links - 1);
-                self.ext4fs.write_back_inode(&mut old_target);
+            Some(self.ext4fs.get_inode_ref(check.dentry.inode))
+        } else {
+            None
+        };
+
+        let finalize_overwrite = || {
+            if let Some(target) = overwritten_target.as_ref() {
+                let mut target = target.clone();
+                let links = target.inode.links_count();
+                if links > 0 {
+                    target.inode.set_links_count(links - 1);
+                    self.ext4fs.write_back_inode(&mut target);
+                }
+                if target.inode.is_dir() {
+                    self.ext4fs
+                        .dir_lookup_cache
+                        .remove_dir_cache(target.inode_num);
+                }
             }
-            // FIX3: if overwriting a directory, remove its dir lookup cache
-            if old_target.inode.is_dir() {
-                self.ext4fs
-                    .dir_lookup_cache
-                    .remove_dir_cache(old_target_num);
-            }
-        }
+        };
 
         if old_parent_num == new_parent_num {
+            // Removing an entry merges its record length into the preceding
+            // dirent. A separately-created temporary source may already live
+            // in the target's slack, so removing the target first can hide the
+            // source too. Always remove the source first, then the overwritten
+            // target, and only then publish the replacement name.
             let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
-            self.ext4fs
+            if self
+                .ext4fs
+                .dir_remove_entry(&mut parent_ref, old_name)
+                .is_err()
+            {
+                return Err(SyscallErr::EIO);
+            }
+            if overwritten_target.is_some() {
+                let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
+                if self
+                    .ext4fs
+                    .dir_remove_entry(&mut parent_ref, new_name)
+                    .is_err()
+                {
+                    let mut rollback = self.ext4fs.get_inode_ref(old_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, &child_ref, old_name);
+                    return Err(SyscallErr::EIO);
+                }
+            }
+            let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
+            if self
+                .ext4fs
                 .dir_add_entry(&mut parent_ref, &child_ref, new_name)
-                .map_err(|_| SyscallErr::ENOSPC)?;
-            let mut parent_ref2 = self.ext4fs.get_inode_ref(old_parent_num);
-            self.ext4fs
-                .dir_remove_entry(&mut parent_ref2, old_name)
-                .map_err(|_| SyscallErr::EIO)?;
+                .is_err()
+            {
+                let mut rollback = self.ext4fs.get_inode_ref(old_parent_num);
+                let _ = self.ext4fs.dir_add_entry(&mut rollback, &child_ref, old_name);
+                if let Some(target) = overwritten_target.as_ref() {
+                    let mut rollback = self.ext4fs.get_inode_ref(old_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, target, new_name);
+                }
+                return Err(SyscallErr::ENOSPC);
+            }
+            finalize_overwrite();
             let v = self.bump_dir_version();
             // Invalidate dir cache for old_name and new_name
             self.ext4fs
@@ -1670,14 +1702,39 @@ impl IndexNode for layout::Ext4OSInode {
             }
             Ok(())
         } else {
+            if overwritten_target.is_some() {
+                let mut new_parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
+                self.ext4fs
+                    .dir_remove_entry(&mut new_parent_ref, new_name)
+                    .map_err(|_| SyscallErr::EIO)?;
+            }
             let mut new_parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
-            self.ext4fs
+            if self
+                .ext4fs
                 .dir_add_entry(&mut new_parent_ref, &child_ref, new_name)
-                .map_err(|_| SyscallErr::ENOSPC)?;
+                .is_err()
+            {
+                if let Some(target) = overwritten_target.as_ref() {
+                    let mut rollback = self.ext4fs.get_inode_ref(new_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, target, new_name);
+                }
+                return Err(SyscallErr::ENOSPC);
+            }
             let mut old_parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
-            self.ext4fs
+            if self
+                .ext4fs
                 .dir_remove_entry(&mut old_parent_ref, old_name)
-                .map_err(|_| SyscallErr::EIO)?;
+                .is_err()
+            {
+                let mut rollback = self.ext4fs.get_inode_ref(new_parent_num);
+                let _ = self.ext4fs.dir_remove_entry(&mut rollback, new_name);
+                if let Some(target) = overwritten_target.as_ref() {
+                    let mut rollback = self.ext4fs.get_inode_ref(new_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, target, new_name);
+                }
+                return Err(SyscallErr::EIO);
+            }
+            finalize_overwrite();
             if is_dir {
                 let mut old_p_ref = self.ext4fs.get_inode_ref(old_parent_num);
                 let links = old_p_ref.inode.links_count();

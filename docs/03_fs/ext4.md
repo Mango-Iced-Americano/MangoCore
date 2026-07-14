@@ -105,8 +105,16 @@ extent 是 ext4 的默认数据块映射方式（`EXT4_INODE_FLAG_EXTENTS`）。
 | 创建 | `create()` | 分配 inode → 初始化 inode → 写入目录项 |
 | 链接 | `link()` | 增加 links_count → 添加目录项 |
 | 解除链接 | `unlink()` | 删除目录项 → 减少 links_count → links_count=0 时释放数据块和 inode |
-| 重命名 | `rename()` | 跨目录重命名，处理旧目录项删除和新目录项写入 |
+| 重命名 | `rename()` | 处理同目录/跨目录及覆盖目标，失败时回滚已发布的目录项 |
 | 符号链接 | `symlink()` | 短链接（≤60B）存储在 inode block[0..14]；长链接写入数据块 |
+
+同目录重命名有一个 ext4 不定长目录项特有的顺序约束：不能先添加新名称再删除旧名称。
+`dir_add_entry()` 可能把新目录项放入旧目录项尾部的 slack，而
+`dir_remove_entry()` 会把被删除项的 `entry_len` 合并进前一项；此时后删旧名称会把刚添加的
+新名称一起隐藏。覆盖 rename 的临时源还可能已位于现有目标的 slack，因此必须先移除源名称、
+再移除覆盖目标，最后发布目标名称；如果发布失败，则恢复源
+名称及原覆盖目标。覆盖目标的链接计数和目录缓存只在 rename 成功后更新。由于尚无 journal，
+这些回滚改善运行期失败语义，但不能提供掉电原子性。
 
 ## 文件 I/O
 
@@ -201,3 +209,5 @@ ext4 通过 LTP 文件系统测试用例验证。关键覆盖领域：
 - 稀疏文件的 `seek` 操作需要调用者注意 `get_pblock_idx` 返回 `Err` 时按 hole 处理
 - 使用 `meta_batch_active` 时如果系统崩溃，批量更新可能部分生效
 - ext4 `rename` 的跨目录原子性无法保证（缺少日志支持）
+- rename 回归除 LTP 外覆盖同目录空目标、覆盖已有目标、源/目标同 inode no-op，以及
+  APK/Python 包装器的 `temporary file -> final file` 安装模式

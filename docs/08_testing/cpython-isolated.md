@@ -34,12 +34,17 @@ arch:
   rv64: supported
   la64: supported
 related_docs:
+  - "docs/08_testing/mangocore-python-guide.md"
   - "docs/03_fs/2k1000-full-test-disk.md"
   - "docs/01_architecture/hal-and-platform.md"
   - "docs/05_process/signal.md"
 ---
 
 # 隔离 CPython 运行时测试
+
+面向开发板用户的启动、pip 初始化和日常包管理命令见
+[`mangocore-python-guide.md`](mangocore-python-guide.md)。本文继续聚焦运行时设计和
+自动化验收。
 
 ## 1. Overview
 
@@ -140,8 +145,20 @@ python3 /scratch/example.py
 全局链接优先指向 uImage 随带的 `/rescue/python3-wrapper`，P3 中的同名脚本只作
 兼容回退。这样更新启动和缓存策略不需要重新写入 768 MiB P3。包装器按架构选择
 P3 内的 musl loader，显式传入私有 library path、`PYTHONHOME` 与 CA bundle，并把
-`TMPDIR`、`PYTHONUSERBASE` 优先设置到 `/scratch/python`；不会依赖目标 ELF 中不
-存在于根文件系统的绝对解释器，也不会用全局 `LD_LIBRARY_PATH` 污染其他程序。
+`TMPDIR`、`PYTHONUSERBASE` 在 P4 应用根中优先设置到
+`/var/cache/mango-python/{tmp,user}`，宿主环境对应 `/persist/python/{tmp,user}`；没有
+P4 时才回退到 `/scratch/python` 或 tmpfs。这样 `ensurepip` 的临时复制和用户包安装都落在
+支持时间戳元数据的 ext4 上，不会因 P2 FAT32 缺少 `set_metadata` 而在 `copy2()` 返回
+`ENOSYS`。包装器不会依赖目标 ELF 中不存在于根文件系统的绝对解释器；P3 私有
+`LD_LIBRARY_PATH` 只导出到 Python 进程树，使 `ensurepip`/pip 通过 `sys.executable`
+重启的子 Python 能解析 `libpython` 和扩展 DSO，不会写入 shell 的全局环境或污染 APK
+及其他竞赛程序。
+
+P3 来自 Alpine，保留 PEP 668 `EXTERNALLY-MANAGED` 标记。P4 `persist-shell` 不修改该
+只读运行时，而是设置 `PIP_BREAK_SYSTEM_PACKAGES=1`，仅将 `--user` 包安装到
+`/var/cache/mango-python/user`。`ensurepip` 会主动移除 `PIP_*` 环境变量，因此首次引导
+直接以 P3 的 bundled pip wheel 运行 pip；后续使用 `python3 -m pip`，不能依赖 wheel
+生成的 `pip3` shebang 直接执行 P3 ELF。
 
 标准库仍在只读 P3，但包装器默认允许写 pyc，并按 `/persist/python/pycache`、
 `/scratch/python/pycache`、`/tmp/python/pycache` 的顺序选择外置

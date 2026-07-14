@@ -1,5 +1,8 @@
 export HOME=/root
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH=/var/cache/mango-python/user/bin:/bin:/sbin:/usr/bin:/usr/sbin
 export SHELL=/bin/sh
+export PYTHONPYCACHEPREFIX=/var/cache/mango-python/pycache
+export PIP_BREAK_SYSTEM_PACKAGES=1
+export PIP_ROOT_USER_ACTION=ignore
 export PS1='MangoPersist:\w# '
 umask 022

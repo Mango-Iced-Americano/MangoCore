@@ -3554,6 +3554,11 @@ fn bind_apk_persist_runtime() -> bool {
         ("/tmp", "/persist/apk-root/tmp"),
         ("/run", "/persist/apk-root/run"),
         ("/scratch", "/persist/apk-root/scratch"),
+        ("/tools", "/persist/apk-root/tools"),
+        (
+            "/persist/python",
+            "/persist/apk-root/var/cache/mango-python",
+        ),
     ] {
         let source = format!("{}\0", source);
         let target = format!("{}\0", target);
@@ -3594,7 +3599,8 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         cache=/scratch/apk-cache
         repos=/run/apk-persist.repositories
         [ -f /persist/MANGO_STATE.txt ]
-        mkdir -p "$state" "$cache"
+        mkdir -p "$state" "$cache" \
+            /persist/python/pycache /persist/python/tmp /persist/python/user
         printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
 
         apk_cmd() {
@@ -3629,7 +3635,8 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
 
         mkdir -p \
             "$root/dev" "$root/proc" "$root/tmp" "$root/run" \
-            "$root/scratch" "$root/root" "$root/sbin" "$root/usr/bin" \
+            "$root/scratch" "$root/tools" "$root/root" "$root/sbin" \
+            "$root/usr/bin" "$root/var/cache/mango-python" \
             "$root/etc/apk/keys" "$root/etc/ssl/certs"
         chmod 1777 "$root/tmp"
         [ -e "$root/bin/sh" ] || ln -s busybox "$root/bin/sh"
@@ -3648,6 +3655,7 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         install_changed "$apk" "$root/sbin/apk.static" 0755
         install_changed /usr/libexec/mango/apk-chroot "$root/sbin/apk" 0755
         install_changed /usr/libexec/mango/persist-profile "$root/etc/profile" 0644
+        install_changed /rescue/python3-wrapper "$root/usr/bin/python3" 0755
         install_changed /etc/apk/repositories "$root/etc/apk/repositories" 0644
         install_changed /etc/passwd "$root/etc/passwd" 0644
         install_changed /etc/group "$root/etc/group" 0644
@@ -3659,6 +3667,7 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             install_changed "$key" "$root/etc/apk/keys/$(basename "$key")" 0644
         done
         ln -sf /sbin/apk "$root/usr/bin/apk"
+        ln -sf python3 "$root/usr/bin/python"
         ln -sf certs/ca-certificates.crt "$root/etc/ssl/cert.pem"
         ln -sf /proc/net/resolv.conf "$root/etc/resolv.conf"
 
@@ -3688,6 +3697,14 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             /sbin/apk info -e zlib >/dev/null
             [ -r /etc/ssl/cert.pem ]
             [ -r /proc/net/resolv.conf ]
+            if [ -x /tools/tests/cpython/lib/ld-musl-loongarch64.so.1 ]; then
+                [ -x /usr/bin/python3 ]
+                python_result=$(PYTHONPYCACHEPREFIX=/var/cache/mango-python/pycache \
+                    /usr/bin/python3 -S -c "print(\"PERSIST_PYTHON_OK\")")
+                [ "$python_result" = PERSIST_PYTHON_OK ]
+            else
+                echo "[apk-persist-shell] optional CPython runtime absent; probe skipped" >&2
+            fi
             probe=/tmp/mango-persist-shell-probe
             echo ok > "$probe"
             [ "$(cat "$probe")" = ok ]

@@ -3,7 +3,7 @@ title: "MangoCore 文档索引"
 category: overview
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-07-14
 tags: [docs, index, overview]
 ---
 
@@ -83,6 +83,14 @@ tags: [docs, index, overview]
 | `04_mm/` | [README.md](04_mm/README.md) | 稳定 | 内存管理文档含 14 篇文档，覆盖 frame allocator、页表/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、CoW、filemap 和 OOM |
 | `05_process/` | [README.md](05_process/README.md) | 稳定 | 进程文档含 17 篇文档，覆盖 TCB/PCB、调度、WaitQueue、clone/namespace、exec、exit/wait、signal、futex、IPC 和 rlimit |
 | `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
+
+### 测试与实板使用
+
+| 文档 | 说明 |
+|---|---|
+| [mangocore-python-guide.md](08_testing/mangocore-python-guide.md) | 2K1000LA 上使用 MangoCore 特制 CPython、首次引导 pip、持久安装和故障排查 |
+| [cpython-isolated.md](08_testing/cpython-isolated.md) | CPython L3-L9 隔离测试设计、ABI 覆盖和 QEMU/实板门禁 |
+| [apk-isolated.md](08_testing/apk-isolated.md) | APK 隔离环境、P4 持久应用根和 `persist-shell` 设计 |
 
 ## 模板与规范
 

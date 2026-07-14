@@ -4,6 +4,32 @@
 
 ## 2026-07-14
 
+### fs/board: 修复 persist-shell CPython 不可见与 ext4 rename 丢目录项
+
+**涉及文件：**
+- `user/src/bin/initproc.rs`、`os/initramfs/apk/usr/libexec/mango/persist-profile` — 将只读 P3 `/tools` 和 P4 `/persist/python` 绑定进应用根，安装当前 initramfs Python 包装器及 `python` 链接，并让宿主/chroot 共享持久 pyc；完整运行时存在时启动门禁必须实际执行 Python
+- `user/tools/cpython/python3-wrapper.sh` — 在 P4/chroot 中把 `TMPDIR` 和 `PYTHONUSERBASE` 放到共享 ext4 状态目录，避免 `ensurepip copy2()` 在 P2 FAT32 上因时间戳元数据不支持返回 `ENOSYS`；将 P3 私有库路径限制在 Python 进程树内，使 `ensurepip`/pip 直接重启 `sys.executable` 时仍可解析 `libpython`；无 P4 时保留 scratch/tmpfs 回退
+- `os/src/fs/ext4/ext4fs.rs` — 同目录 rename 改为先移除源、再移除覆盖目标并发布新目录项；该顺序同时处理新项落入旧项 slack，以及临时源已由 create 插入覆盖目标 slack 两种邻接布局；跨目录及覆盖路径补充失败回滚，覆盖目标的链接计数延迟到成功后更新；源/目标已指向同一 inode 时保持 POSIX no-op
+- `docs/03_fs/ext4.md`、`docs/08_testing/{apk-isolated,cpython-isolated,mangocore-python-guide}.md`、`docs/README.md` — 记录目录项顺序约束、CPython bind 布局和完整/最小 P3 门禁，并新增面向实板用户的 Python/pip 启动、持久化、兼容性与排障指南
+- `.agents/skills/mango-workflow/references/harness-patterns.md`、`docs/00_overview/AI-Usage-Report.md` — 沉淀不定长目录项 rename 模式和 AI 辅助根因定位证据
+
+**验证：**
+- Docker 串行 `make rv64-kernel-build-only`、`make la64-kernel-build-only` 均通过，仅有项目既有 warning；生成态文件已恢复 ✅
+- LA64 QEMU 最小 P3 路径完成七个 bind mount，明确跳过不存在的可选 CPython 运行时并输出 `[apk-persist-shell] RESULT=PASS` ✅
+- 将完整 768 MiB CPython P3 注入临时四分区 QEMU 盘后，P4 复用、`/tools` 与持久 pyc bind、真实 `python3 -S` 门禁均通过，输出 `PERSIST_PYTHON_OK` ✅
+- `persist-shell` 内同目录 rename 空目标和覆盖目标专项分别输出 `EXT4_RENAME_ABSENT_PASS`、`EXT4_RENAME_OVERWRITE_PASS`；代码复核补齐源/目标同 inode 的 POSIX no-op 后，再次串行完成 rv64/la64 编译；`PYTHONPYCACHEPREFIX` 为 `/var/cache/mango-python/pycache`，验证后清理并 `sync` ✅
+- 完整 CPython P3 的 LA64 QEMU 中，P4 ext4 `TMPDIR/PYTHONUSERBASE` 越过原 FAT `utime ENOSYS`；P3 bundled wheel 成功安装 pip 26.1.1，在线 `python3 -m pip install --user six` 后导入输出 `PIP_INSTALL_OK 1.17.0` ✅
+- 重启同一非 snapshot P4 后无包装器 `mv EIO`，pip 26.1.1 与 six 均持久存在；不附加 PEP 668 参数执行 `python3 -m pip install --user idna` 成功，导入输出 `PIP_SIMPLE_OK 3.18` ✅
+- 新增 Python/pip 使用指南后，frontmatter 中的源码路径、三篇关联文档和 `docs/README.md` 索引入口均检查存在，`git diff --check` 通过 ✅
+- rv64 QEMU 启动、ext4/tools 挂载、用户态初始化和连续 LTP 执行 45 秒无 panic；退出码 124 来自外层预设 timeout ✅
+- 最终 `kernel-2k1000-persist-shell.ui` 为 16,745,096 字节，数据段 16,745,032 字节，SHA-256 `1dc478dc4774ec260b373da2afa5b31341140f9e36ac70d4740c9bca1113830c`；构建输出确认为 MangoCore/LoongArch、load/entry 均为 `0x90000000` ✅
+
+**备注：**
+- 旧应用根不是单纯缺少 `PATH`：chroot 既看不到 P3 loader，旧 ext4 rename 又可能让原子安装返回 0 后源/目标同时消失。此前 APK 最后提交 `wcurl` 偶发 `ENOENT` 与该目录项错误一致。
+- pip 不通过 APK 另装一套 Alpine Python；现有 P3 CPython 使用 bundled pip wheel，用户包和 console scripts 持久化到 P4 `/persist/python/user`，应用根视图为 `/var/cache/mango-python/user`。
+- Alpine PEP 668 标记仍保留；应用根只对隔离的 P4 `--user` 树启用 override。首次从 P3 bundled wheel 引导，后续规范入口为 `python3 -m pip`，避免生成的 `pip3` shebang 绕过私有 loader。
+- 新实板 uImage 已生成但尚未执行本轮 TFTP 实板验收；板上必须重新启动该镜像后，`persist-shell` 才会获得本次修复。
+
 ### board/perf: 合并 2K1000LA AHCI DMA 命令并为只读 CPython 增加持久 pyc
 
 **涉及文件：**

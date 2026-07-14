@@ -686,6 +686,7 @@ diag=1
 - **症状**: musl `getcwd()` 报 "cannot access parent directories: Invalid argument"（`EINVAL`）；`fstatat("/")` 与 `fstatat("..")` 从根子目录返回不同 inode。
 - **修复**: 在 `do_find()` 开头 special-case `name == ".."`，调用 `lookup_dotdot()`：挂载点根时先拿到 `self_mountpoint`（在父 FS 中的 backref），再对该 backref 的 `inner_inode.find("..")` 求值 → 结果在父 FS 的 MountFS 上下文中。全局根返回自身。普通目录走原路径。
 - **教训**: VFS mount-boundary 穿越需要区分两个方向 — (1) 正向：`overlaid_inode()` 覆盖子挂载；(2) 反向 ".."：需通过 `self_mountpoint` backref 回到挂载点所在父 FS。不能用同一个 `inner_inode.find("..")` 处理这两种语义；`do_parent()`（服务于 `absolute_path()`）有不同需求，不应混用。
+- **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
 
 ---
 
@@ -703,4 +704,18 @@ diag=1
   3. 双架构测试不能替代架构针对性测试 — la64 和 rv64 的 eviction 模式不同，rv64 正常不代表 la64 也正常
 
 - **相关文件**: `os/src/fs/page_cache.rs`（`sync_batch_read_pages`、`evict_clean_pages_clock`）
-- **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
+
+## ext4 同目录 rename 的新目录项被旧目录项删除吞掉
+
+- **根因**: ext4 目录项是不定长记录。`dir_add_entry(new_name)` 可能把新记录插入
+  `old_name` 记录尾部的 slack；随后 `dir_remove_entry(old_name)` 通过扩大前一条记录的
+  `entry_len` 删除旧项时，会跨过并隐藏刚插入的新项。用户态看到 `rename()`/`mv` 返回 0，
+  但源名称和目标名称都不存在。
+- **修复**: 同目录 rename 必须先移除源目录项、再移除覆盖目标，最后添加目标目录项。临时源
+  可能已被普通 create 插入目标目录项的 slack，反过来先删目标仍会吞掉源；添加失败时恢复
+  源项和原覆盖目标。覆盖 inode 的链接计数、目录缓存失效等不可逆状态延迟到新目录项成功发布
+  后执行。跨目录 rename 同样要对“目标已发布、源删除失败”等中间状态实施反向回滚。
+- **教训**: 对不定长 on-disk 记录执行“先插入、后删除”时，不能假定两次操作的存储区间独立。
+  测试必须同时覆盖空目标和覆盖已有目标，并在成功返回后断言源不存在、目标内容正确；仅检查
+  syscall 返回值无法发现目录项被吞。
+- **相关文件**: `os/src/fs/ext4/ext4fs.rs`

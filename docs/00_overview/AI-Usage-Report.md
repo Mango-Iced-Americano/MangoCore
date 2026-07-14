@@ -246,6 +246,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human verification: 在同一 2K1000LA/SSD 上记录 512 B、64 KiB、256 KiB 三版数据；执行双架构编译和 QEMU LTP 冒烟；实板完成 TFTP/uImage 校验、随机大块写入、哈希/`cmp`、P4 pyc 首次填充/稳定命中和显式同步后的复位门禁。
 - Result: 首次顺序读由 13.5 MB/s 升到 18.6 MB/s；Python 无 site 热启动由约 1.925 s 降到 1.714 s。外置持久 pyc 后进一步降到约 1.159 s，重模块导入由 18.322 s 降到约 4.495 s；256 KiB 槽无额外收益，最终保留 64 KiB。
 
+### Case 10: persist-shell CPython 可见性与 ext4 rename 目录项丢失
+
+- Evidence: `docs/Work_Log.md` 2026-07-14、`user/src/bin/initproc.rs`、`os/src/fs/ext4/ext4fs.rs`、`docs/08_testing/apk-isolated.md`
+- AI tools: OpenAI Codex, max reasoning mode
+- Problem: P3 CPython 在宿主 shell 可用，但进入 P4 `persist-shell` 后报告缺少 `/tools/tests/cpython/lib` 下的 musl loader；同时原子更新 Python 包装器或 APK 文件可能返回成功后目标文件消失。
+- AI contribution: 沿宿主 mount、bind mount、chroot 和包装器四层逐项追踪，先确认 `/tools` 未绑定进应用根；随后在 QEMU 手工复现 `cp tmp && mv -f tmp final` 返回 0 但两个名称同时消失，继续审计 ext4 不定长目录项布局，定位到“先添加新项、再删除旧项”会让新项落入旧项 slack 并被删除范围吞掉。
+- Human verification: 审阅 bind/chroot 边界和 rename 回滚；Docker 串行双架构构建；最小与完整 CPython P3 两类 LA64 QEMU 门禁；同目录空目标/覆盖目标专项；rv64 QEMU 挂载与 LTP 冒烟。
+- Result: 应用根绑定只读 `/tools` 与 P4 pyc 目录并真实执行 Python 门禁；ext4 rename 改为先移除后发布并对失败路径回滚，两个目录项专项均通过，也解释了此前 APK `wcurl` 的一次性提交异常。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -297,6 +306,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md` 2026-07-13 | 2K1000LA 2 GiB 内存审计 | 记录 Codex max reasoning 与 subagent 对 DMW、非连续 DMA、U-Boot/DVO/CPU1 所有权的复核，以及 QEMU/实板验证证据 |
 | `docs/Work_Log.md` 2026-07-14 | 2K1000LA CPython 实机适配 | 记录 Codex 对 LSX/FPR 别名、FAT rename、TmpFS symlink 和 DNS/HTTPS 测试语义的根因分析，以及双架构 72/72 与实机压力证据 |
 | `docs/Work_Log.md` 2026-07-14 | 2K1000LA AHCI/Python 性能 | 记录 Codex 对 develop DMA 池化方案的并发模型审计、512 B 命令放大根因、64/256 KiB 实板 A/B，以及 pyc 用户态瓶颈分层证据 |
+| `docs/Work_Log.md` 2026-07-14 | persist-shell CPython/ext4 rename | 记录 Codex 对 chroot bind 边界、ext4 不定长目录项邻接覆盖的根因定位，以及双架构、两类 P3 和 rename 专项证据 |
 
 ## 9. 交互记录与留痕方式
 
