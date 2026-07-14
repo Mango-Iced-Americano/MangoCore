@@ -4,6 +4,38 @@
 
 ## 2026-07-14
 
+### 重构 syscall/fs.rs：提取共享代码到 fs/common.rs（Step 1）
+
+**涉及文件：**
+- `os/src/syscall/fs/common.rs` — **新增**：提取 ~2190 行共享代码，包含所有 imports（`pub(crate) use`）、常量、类型、67 个 helper 函数
+- `os/src/syscall/fs/mod.rs` — **新增**：原 fs.rs 改名并移至目录，仅保留 76 个 `pub fn sys_xxx` 函数（~4800 行），顶部添加 `mod common; pub(crate) use common::*;`
+- `os/src/syscall/fs.rs` — **删除**：改名移动为 `fs/mod.rs`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（191 warnings，0 errors）
+- `make la64-kernel-build-only` ✅（177 warnings，0 errors）
+
+**备注：** 这是将 6985 行单体 fs.rs 重构为 DragonOS 风格目录（每个 syscall 一个文件）的第 1 步。提取后的 `common.rs` 包含所有非 `pub fn sys_xxx` 的模块级项，全部标记为 `pub(crate)` 以便后续拆分出的独立 syscall 文件通过 `use super::common::*;` 引用。关键注意事项：(1) `use` 语句需改为 `pub(crate) use` 才能被 re-export；(2) `super::errno` 路径需改为 `crate::syscall::errno`（因为 common.rs 嵌套了一层目录）；(3) 目录模块（`fs/mod.rs`）替代原文件模块（`fs.rs`），Rust 2018 会自动解析。
+
+### 将 RISC-V 专用 syscall ID 从通用模块迁移至 HAL 层
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/syscall_id.rs` — **新增**：RISC-V 专用 syscall ID 常量（`SYSCALL_RISCV_HWPROBE = 258`, `SYSCALL_RISCV_FLUSH_ICACHE = 259`）
+- `os/src/hal/arch/loongarch64/syscall_id.rs` — **新增**：LoongArch 占位文件（空模块，`#![allow(unused)]`）
+- `os/src/hal/arch/riscv/mod.rs` — 添加 `pub mod syscall_id;`
+- `os/src/hal/arch/loongarch64/mod.rs` — 添加 `pub mod syscall_id;`
+- `os/src/hal/arch/mod.rs` — 添加条件 re-export：`#[cfg(feature = "riscv")] pub use riscv::syscall_id;`（la64 同理）
+- `os/src/syscall/syscall_id.rs` — **删除** 258/259 常量定义（已迁移至 HAL）
+- `os/src/syscall/mod.rs` — 3 处修改：(1) 添加 `#[cfg(feature = "riscv")] use crate::hal::arch::syscall_id::*`；(2) `syscall_name()` 和 `syscall()` dispatch 中的两处 match 分支加 `#[cfg(feature = "riscv")]`；(3) `sys_riscv_hwprobe()` stub 加 `#[cfg(feature = "riscv")]`
+- `os/src/syscall/process/mm.rs` — `sys_riscv_flush_icache()` 定义加 `#[cfg(feature = "riscv")]`
+- `os/src/syscall/process/mod.rs` — `sys_riscv_flush_icache` re-export 拆分为独立的 `#[cfg(feature = "riscv")]` 块
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（191 warnings，0 errors）
+- `make la64-kernel-build-only` ❌（87 errors，全部为 `syscall/fs.rs` → `syscall/fs/` 目录拆分导致的预存问题，与本次修改无关。stash 复现确认相同 87 errors）
+
+**备注：** 之前 `syscall_id.rs` 中的 RISC-V 专用常量无条件暴露给双架构编译，导致 LoongArch 构建感知到了不相关的 syscall 号。迁移后各架构的 syscall ID 仅通过 `#[cfg(feature)]` 在对应平台生效，LoongArch 构建不再看到 RISC-V syscall 号。
+
 ### Fix dup3-hang: lwext4 close dirty flush NOT actually removed + old file dropped under lock
 
 **涉及文件：**

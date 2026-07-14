@@ -12,6 +12,7 @@ mod acpi;
 mod boot;
 mod sbi;
 pub mod switch;
+pub mod syscall_id;
 pub mod time;
 pub mod trap;
 pub type KernelPageTableImpl = laflex::LAFlexPageTable;

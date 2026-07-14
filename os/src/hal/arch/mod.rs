@@ -16,6 +16,7 @@ pub use loongarch64::{
     console_flush, console_getchar, console_putchar,
     local_irq_restore, local_irq_save,
     machine_init, shutdown,
+    syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     KernelPageTableImpl, PageTableImpl, __switch, kstack_alloc, tlb_invalidate,
     trap::{
@@ -39,6 +40,7 @@ pub use riscv::{
     sbi::{console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save, set_timer, shutdown},
     sv39::tlb_invalidate,
     switch::__switch,
+    syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     trap::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,

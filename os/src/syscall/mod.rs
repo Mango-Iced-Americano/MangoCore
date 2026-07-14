@@ -33,6 +33,9 @@ pub use process::{
 };
 use process::*;
 use syscall_id::*;
+
+#[cfg(feature = "riscv")]
+use crate::hal::arch::syscall_id::{SYSCALL_RISCV_FLUSH_ICACHE, SYSCALL_RISCV_HWPROBE};
 pub fn syscall_name(id: usize) -> &'static str {
     match id {
         SYSCALL_SETXATTR => "setxattr",
@@ -249,7 +252,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MLOCKALL => "mlockall",
         SYSCALL_MUNLOCKALL => "munlockall",
         SYSCALL_MINCORE => "mincore",
+        #[cfg(feature = "riscv")]
         SYSCALL_RISCV_HWPROBE => "riscv_hwprobe",
+        #[cfg(feature = "riscv")]
         SYSCALL_RISCV_FLUSH_ICACHE => "riscv_flush_icache",
         SYSCALL_FADVISE64 => "fadvise64",
         SYSCALL_MLOCK2 => "mlock2",
@@ -810,7 +815,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MLOCKALL => sys_mlockall(args[0]),
         SYSCALL_MUNLOCKALL => sys_munlockall(),
         SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2]),
+        #[cfg(feature = "riscv")]
         SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *const u8, args[1], args[2], args[3], args[4]),
+        #[cfg(feature = "riscv")]
         SYSCALL_RISCV_FLUSH_ICACHE => sys_riscv_flush_icache(args[0], args[1], args[2]),
         SYSCALL_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
@@ -1012,6 +1019,7 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
     buflen as isize
 }
 
+#[cfg(feature = "riscv")]
 pub fn sys_riscv_hwprobe(_pairs: *const u8, _count: usize, _cpusetsize: usize, _cpuset: usize, _flags: usize) -> isize {
     errno::ENOSYS
 }

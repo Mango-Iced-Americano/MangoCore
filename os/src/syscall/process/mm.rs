@@ -21,6 +21,7 @@ const PKEY_WRITE_KEY: isize = 3;
 const CAP_IPC_LOCK: usize = 14;
 const SYS_RISCV_FLUSH_ICACHE_LOCAL: usize = 1;
 
+#[cfg(feature = "riscv")]
 pub fn sys_riscv_flush_icache(_start: usize, _end: usize, flags: usize) -> isize {
     if flags & !SYS_RISCV_FLUSH_ICACHE_LOCAL != 0 {
         return EINVAL;

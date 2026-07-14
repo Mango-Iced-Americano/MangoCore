@@ -7,6 +7,7 @@ pub mod kern_stack;
 pub mod sbi;
 pub mod sv39;
 pub mod switch;
+pub mod syscall_id;
 pub mod time;
 pub mod trap;
 
