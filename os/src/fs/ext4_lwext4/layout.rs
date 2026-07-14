@@ -701,14 +701,7 @@ impl IndexNode for Ext4OSInode {
     }
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
-        // Flush dirty pages on close so subsequent opens see the data.
-        // Without this, file-descriptor drop (File::Drop → inode.close()) skips
-        // writeback, and a later re-open reads stale on-disk data.
-        if let Some(pc) = self.page_cache.lock().clone() {
-            if pc.dirty_count() > 0 {
-                self.sync()?;
-            }
-        }
+        // No-op: explicit sync/fsync is the durability boundary, not close.
         Ok(())
     }
 

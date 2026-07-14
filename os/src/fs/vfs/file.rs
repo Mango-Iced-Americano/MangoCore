@@ -425,12 +425,17 @@ impl FdTable {
     }
 
     /// 在指定位置分配 fd（dup2 用）
+    /// Allocate a file at a specific fd number (used by dup2/dup3).
+    /// Returns the new fd and the **old file** that was replaced (if any).
+    /// The caller MUST drop the old file after releasing any locks on self
+    /// to avoid deadlock when `File::Drop` → `inode.close()` tries to acquire
+    /// locks that conflict with this `FdTable` lock.
     pub fn alloc_fd_at(
         &mut self,
         fd: usize,
         file: Arc<File>,
         cloexec: bool,
-    ) -> Result<usize, SyscallErr> {
+    ) -> Result<(usize, Option<Arc<File>>), SyscallErr> {
         if fd >= self.effective_soft_limit() {
             return Err(SyscallErr::EBADF);
         }
@@ -442,9 +447,9 @@ impl FdTable {
             }
             self.resize_to_capacity(new_cap)?;
         }
-        self.fds[fd] = Some(file);
+        let old = core::mem::replace(&mut self.fds[fd], Some(file));
         self.cloexec[fd] = cloexec;
-        Ok(fd)
+        Ok((fd, old))
     }
 
     /// 释放一个 fd，返回被移除的 Arc<File>
@@ -586,7 +591,8 @@ impl FdTable {
     }
 
     pub fn insert_at(&mut self, file: Arc<File>, pos: usize) -> Result<usize, isize> {
-        self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))
+        let (fd, _old) = self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))?;
+        Ok(fd)
     }
 
     pub fn try_insert_at(&mut self, file: Arc<File>, hint: usize) -> Result<usize, isize> {

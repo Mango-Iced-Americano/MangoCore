@@ -4,6 +4,18 @@
 
 ## 2026-07-14
 
+### Fix dup3-hang: lwext4 close dirty flush NOT actually removed + old file dropped under lock
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — 前次提交（03459d76）声称已将 close() 改为 no-op，但代码中仍残留 dirty flush 逻辑（`pc.dirty_count() > 0` → `self.sync()`）。本次真正移除，改为纯 no-op。
+- `os/src/fs/vfs/file.rs` — `alloc_fd_at()` 修改：使用 `core::mem::replace` 提取旧文件并通过返回值（`Option<Arc<File>>`）传出，不再在锁内隐式 drop。
+- `os/src/syscall/fs.rs` — `sys_dup2()` 和 `sys_dup3()` 中，在 `drop(fd_table)` 释放锁后，调用 `drop(old_file)` 释放被替换的旧文件，避免 `File::Drop` → `inode.close()` 在持锁时发生死锁。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** 两个 bug 协同导致 dup3(oldfd=3, newfd=1) 替换 fd 1 时挂死：(1) lwext4 close() 本应 no-op 但执行了 sync → writeback_all；(2) alloc_fd_at 在 `self.fds[N] = Some(file)` 时隐式 drop 旧文件，而此时 fd_table lock 仍被持有。修复后旧文件在被替换后于锁外释放，close 的 no-op 也彻底消除阻塞可能。
+
 ### 修复 getdents64 无限循环 regression：offset 未前移导致重复 EFAULT
 
 **涉及文件：**

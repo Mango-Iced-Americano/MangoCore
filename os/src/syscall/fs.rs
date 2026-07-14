@@ -2659,11 +2659,14 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
             )
         });
 
-        let ret = match fd_table.alloc_fd_at(newfd, file, false) {
-            Ok(fd) => fd as isize,
-            Err(e) => -(e as isize),
+        let (ret, old_file) = match fd_table.alloc_fd_at(newfd, file, false) {
+            Ok((fd, old)) => (fd as isize, old),
+            Err(e) => (-(e as isize), None),
         };
         drop(fd_table);
+        // Drop the replaced file OUTSIDE the fd_table lock so File::Drop → inode.close()
+        // won't deadlock on page-cache or other locks that the lock holder may block on.
+        drop(old_file);
         if ret >= 0 {
             if let Some((description, refs)) = replaced_flock {
                 if refs <= 1 {
@@ -2709,11 +2712,14 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
             Arc::strong_count(&file),
         )
     });
-    let ret = match fd_table.alloc_fd_at(newfd, file, is_cloexec) {
-        Ok(fd) => fd as isize,
-        Err(e) => -(e as isize),
+    let (ret, old_file) = match fd_table.alloc_fd_at(newfd, file, is_cloexec) {
+        Ok((fd, old)) => (fd as isize, old),
+        Err(e) => (-(e as isize), None),
     };
     drop(fd_table);
+    // Drop the replaced file OUTSIDE the fd_table lock so File::Drop → inode.close()
+    // won't deadlock on page-cache or other locks that the lock holder may block on.
+    drop(old_file);
     if ret >= 0 {
         if let Some((description, refs)) = replaced_flock {
             if refs <= 1 {
