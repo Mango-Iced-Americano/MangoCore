@@ -53,19 +53,11 @@ pub fn sys_linkat(
     }
 
     // 查找已存在的 inode
-    let existing = match crate::fs::vfs_lookup(&old_start, &oldpath_str, true) {
+    let follow = (flags & AT_SYMLINK_FOLLOW) != 0;
+    let existing = match crate::fs::vfs_lookup(&old_start, &oldpath_str, follow) {
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
-
-    // 禁止创建目录的硬链接（POSIX 不允许，除 root 外）
-    let meta = match existing.metadata() {
-        Ok(m) => m,
-        Err(e) => return -(e as isize),
-    };
-    if meta.file_type == crate::fs::vfs::FileType::Dir {
-        return EPERM;
-    }
 
     // 解析新路径：获取父目录 + 叶子名
     // Linux: when path is absolute, dirfd is ignored — skip fd resolution
@@ -128,6 +120,17 @@ pub fn sys_linkat(
     let (uid, fsgid, groups) = caller_ids_and_groups();
     if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, fsgid, &groups) {
         return errno;
+    }
+
+    // 禁止创建目录的硬链接（POSIX 不允许，除 root 外）
+    // NOTE: This check must happen AFTER new path resolution (per Linux vfs_link ordering),
+    // so that a bad newdirfd gets EBADF, not EPERM.
+    let meta = match existing.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    if meta.file_type == crate::fs::vfs::FileType::Dir {
+        return EPERM;
     }
 
     match parent_dir.link(&leaf, &existing) {

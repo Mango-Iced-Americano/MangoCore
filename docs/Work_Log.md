@@ -4,6 +4,18 @@
 
 ## 2026-07-14
 
+### Fix statx stx_mask — 报告实际填充字段而非用户请求掩码
+
+**涉及文件：**
+- `os/src/fs/layout.rs` — 新增 `STATX_TYPE/MODE/NLINK/UID/GID/ATIME/MTIME/CTIME/INO/SIZE/BLOCKS/BTIME/MNT_ID/BASIC_STATS` 常量
+- `os/src/syscall/fs/common.rs` — `metadata_to_statx()` 计算 `supported` 掩码（`STATX_BASIC_STATS` 即 `0x07ff`）替代用户传入的 `mask`，`stx_mask` 现在报告实际填充了的字段
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（0 errors）
+- `make la64-kernel-build-only` ❌（未执行）
+
+**备注：** Linux 语义：`stx_mask` 表示实际返回的字段，而非用户请求的 mask。用户请求 `STATX_MODE|STATX_SIZE` 时，内核返回 `STATX_BASIC_STATS|STATX_MNT_ID`（superset）。当前实现不包含 `STATX_BTIME` 和 `STATX_MNT_ID`（元数据中尚无 btime/mnt_id 字段）。
+
 ### DAC 权限检查三连修：辅助组支持、O_PATH 跳过、读权限检查
 
 **涉及文件：**
@@ -322,7 +334,21 @@
 
 ---
 
+### 修复 linkat 两个 LTP bug：目录 EPERM 顺序 + AT_SYMLINK_FOLLOW 标志忽略
 
+**涉及文件：**
+- `os/src/syscall/fs/sys_linkat.rs` — 两个修复：
+
+  1. **目录检查后移（Bug 1）**：将 oldpath 是目录时的 EPERM 检查从 new_start 解析前移到 parent_dir.link() 之前，确保坏 newdirfd 优先返回 EBADF 而非 EPERM（Linux v6.6 do_linkat 语义）
+
+  2. **AT_SYMLINK_FOLLOW 支持（Bug 2）**：将 vfs_lookup 的 follow 参数从硬编码 `true` 改为 `(flags & AT_SYMLINK_FOLLOW) != 0`。linkat 默认不跟踪符号链接（类似 link()），仅当 AT_SYMLINK_FOLLOW 标志设置时跟踪
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（零 error，无新增 warning）
+
+**备注：** Linux errno 优先级顺序：flags > old_lookup > new_lookup > EXDEV > EPERM(old_is_dir) > EACCES。目录 EPERM 必须在 new_path 解析之后，否则坏 fd 会得到错误错误码。
+
+---
 
 ## 2026-07-13
 

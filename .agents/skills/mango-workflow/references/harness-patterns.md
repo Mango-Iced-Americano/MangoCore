@@ -375,6 +375,13 @@ diag=1
 - mmap 非匿名映射的坏 fd → EBADF 优先于其他校验
 - RISC-V 未对齐 addrlen → 需显式检查 `addrlen % 4 != 0`，硬件不报错
 - 跨进程 VM 访问 → 先做权限检查返回 EPERM，再访问远程地址返回 EFAULT
+- linkat/link syscall errno 优先级（Linux v6.6 do_linkat + vfs_link）：
+  ```
+  flags(EINVAL) > old_lookup(EBADF/ENOTDIR/ENOENT) > new_lookup(EBADF/ENOTDIR/ENOENT)
+  > EXDEV > EPERM(old_is_dir) > EEXIST > EACCES(parent_perm)
+  ```
+  **关键：old-is-dir EPERM 必须在 new_path 解析完成之后检查**，否则坏 newdirfd 会得到 EPERM 而不是正确的 EBADF/ENOENT。
+  **适用：** renameat、linkat、symlinkat 等所有同时接收 old/new 路径的 syscall。
 
 ## 调度/性能
 

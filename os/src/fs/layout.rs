@@ -93,6 +93,22 @@ bitflags! {
     }
 }
 
+// statx request/return mask constants (Linux include/uapi/linux/stat.h)
+pub const STATX_TYPE: u32 = 0x0001;
+pub const STATX_MODE: u32 = 0x0002;
+pub const STATX_NLINK: u32 = 0x0004;
+pub const STATX_UID: u32 = 0x0008;
+pub const STATX_GID: u32 = 0x0010;
+pub const STATX_ATIME: u32 = 0x0020;
+pub const STATX_MTIME: u32 = 0x0040;
+pub const STATX_CTIME: u32 = 0x0080;
+pub const STATX_INO: u32 = 0x0100;
+pub const STATX_SIZE: u32 = 0x0200;
+pub const STATX_BLOCKS: u32 = 0x0400;
+pub const STATX_BTIME: u32 = 0x0800;
+pub const STATX_MNT_ID: u32 = 0x1000;
+pub const STATX_BASIC_STATS: u32 = 0x07ff;
+
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 /// Store the file attributes from a supported file.
