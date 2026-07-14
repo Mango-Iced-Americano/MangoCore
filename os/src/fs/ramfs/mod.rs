@@ -654,6 +654,10 @@ impl IndexNode for LockedRamFSInode {
                 if old_is_dir && !core::ptr::eq(self, new_parent_inode) {
                     // Walk up from new_parent to root, checking if any ancestor is the child
                     let child_ptr = Arc::as_ptr(child_arc) as *const LockedRamFSInode;
+                    // Check if new_parent itself is the child being moved
+                    if new_parent_inode as *const LockedRamFSInode == child_ptr {
+                        return Err(SyscallErr::EINVAL);
+                    }
                     let mut cur = new_parent_inode.0.lock().parent.upgrade();
                     while let Some(parent_arc) = cur {
                         if Arc::as_ptr(&parent_arc) as *const LockedRamFSInode == child_ptr {
@@ -730,7 +734,12 @@ impl IndexNode for LockedRamFSInode {
             if is_dir {
                 new_locked.metadata.nlinks += 1;
             }
-            new_locked.children.insert(String::from(new_name), child);
+            new_locked.children.insert(String::from(new_name), child.clone());
+            if is_dir {
+                let parent_weak = new_locked.self_ref.clone();
+                drop(new_locked);
+                child.0.lock().parent = parent_weak;
+            }
         }
         Ok(())
     }

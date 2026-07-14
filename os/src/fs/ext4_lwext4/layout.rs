@@ -1150,6 +1150,78 @@ impl IndexNode for Ext4OSInode {
         }
         let new_path = join_path(&new_parent_node.path, new_name);
 
+        // ── Pre-rename safety checks (Linux rename semantics) ──
+        // These MUST run BEFORE any destructive operations (target removal,
+        // PageCache flush, lwext4 rename).  Without them the lwext4 C call
+        // may succeed in cases that Linux would reject.
+
+        // 0. Same source and destination → no-op
+        if old_path == new_path {
+            return Ok(());
+        }
+
+        // 1. Probe source inode — fail fast if source doesn't exist
+        let src_entry = self.fs.probe_inode_meta(&old_path)
+            .map_err(|_| SyscallErr::ENOENT)?;
+        let src_is_dir = src_entry.file_type == FileType::Dir;
+
+        // 2. Probe target inode (may not exist — `ok()` swallows ENOENT)
+        if let Ok(tgt) = self.fs.probe_inode_meta(&new_path) {
+            let target_is_dir = tgt.file_type == FileType::Dir;
+
+            // 2a. RENAME_NOREPLACE — target exists but caller forbids overwrite
+            if flags & RENAME_NOREPLACE != 0 {
+                return Err(SyscallErr::EEXIST);
+            }
+
+            // 2b. Type-mismatch checks (Linux rename(2) semantics)
+            //     source=dir  && target=non-dir  → ENOTDIR
+            //     source=file && target=dir      → EISDIR
+            if src_is_dir && !target_is_dir {
+                return Err(SyscallErr::ENOTDIR);
+            }
+            if !src_is_dir && target_is_dir {
+                return Err(SyscallErr::EISDIR);
+            }
+
+            // 2c. Non-empty target directory → ENOTEMPTY
+            //     Only directories can be overwritten when empty; non-empty
+            //     dirs are rejected before any destructive work.
+            if target_is_dir {
+                let non_empty = {
+                    let _lock = self.fs.lw.lock();
+                    let lw_new = self.fs.lw_path(&new_path);
+                    let dir = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_DIR);
+                    let (names, types) = dir
+                        .lwext4_dir_entries()
+                        .map_err(|e| from_lwext4(e.abs()))?;
+                    names.iter().zip(types.iter()).any(|(b, t)| {
+                        if *t == InodeTypes::EXT4_DE_UNKNOWN {
+                            return false;
+                        }
+                        let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
+                        let s = core::str::from_utf8(&b[..len]).unwrap_or("");
+                        s != "." && s != ".." && !s.is_empty()
+                    })
+                };
+                if non_empty {
+                    return Err(SyscallErr::ENOTEMPTY);
+                }
+            }
+        }
+
+        // 3. Subtree check: a directory cannot be moved into its own
+        //    descendant (e.g. moving /a into /a/b → EINVAL).
+        //    Path-based check: if new_parent's path lies inside old_path.
+        if src_is_dir {
+            let prefix = alloc::format!("{}/", old_path);
+            if new_parent_node.path == old_path
+                || new_parent_node.path.starts_with(&prefix)
+            {
+                return Err(SyscallErr::EINVAL);
+            }
+        }
+
         // ── PageCache coherence: flush dirty pages before rename ──
         // The PageCache may hold dirty write data for the source (or target)
         // file.  If we rename without flushing, those dirty pages will later

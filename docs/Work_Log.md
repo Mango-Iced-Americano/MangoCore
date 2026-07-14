@@ -1,4 +1,24 @@
-# 工作日志
+## 2026-07-15
+
+### Fix lwext4 rename safety: add Linux rename pre-checks before FFI call
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — `Ext4OSInode::rename()`: 在 lwext4 C FFI 调用前添加 6 项 Linux 语义预检查
+
+**修改内容：**
+1. **same-path no-op**：`old_path == new_path` → 直接返回 `Ok(())`
+2. **source probe**：`probe_inode_meta(&old_path)` 提前探测源文件是否存在，不存在 → `ENOENT`
+3. **target type probe**：`probe_inode_meta(&new_path)` 探测目标是否存在及其类型
+4. **RENAME_NOREPLACE**：目标存在且 flags 有 `RENAME_NOREPLACE` → `EEXIST`（提前到破坏性操作前）
+5. **type-mismatch**：源是 dir + 目标是 non-dir → `ENOTDIR`；源是 non-dir + 目标是 dir → `EISDIR`
+6. **non-empty target dir**：目标存在且是目录 → 用 `lwext4_dir_entries()` 枚举子项（排除 `.`/`..`/`EXT4_DE_UNKNOWN`），非空 → `ENOTEMPTY`
+7. **subtree check**：源是目录时，检查 `new_parent` 的路径不在 `old_path` 子树内 → `EINVAL`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 此前 rename 直接调用 lwext4 C 的 `ext4_frename`/`ext4_dir_mv`，无任何 Linux 语义预检查。类型不匹配、非空目录覆盖、子树循环移动等场景下 lwext4 C 代码可能静默成功或行为不可预期。本次修复将所有安全检查前移到破坏性操作（target removal、PageCache flush、lwext4 rename）之前。已对齐 ext4 native rename 和 tmpfs/ramfs rename 的检查语义。为防止竞态，所有检查在单核无抢占的系统上安全，且与后续 lwext4 lock 内的操作之间不存在并发的文件系统修改。
 
 ---
 
@@ -14,6 +34,16 @@
 - `make rv64-kernel-build-only` ✅
 
 **备注：** Bug1: 此前 F_GETLK 在 l_type 非法时若文件无 lock entry 会错误返回 F_UNLCK 而非 EINVAL；Bug2: F_SETFL 对 O_PATH fd 未按 Linux 语义返回 EBADF；Bug3: F_GETOWN_EX 的 `UserPtrMut::write` 返回值被 `let _ =` 静默丢弃，write 失败时本应返回 EFAULT。
+
+### Fix two ramfs rename bugs: subtree walk misses new_parent==child, directory parent not updated
+
+**涉及文件：**
+- `os/src/fs/ramfs/mod.rs` — Bug1: 祖先遍历从 `new_parent.parent` 开始而非 `new_parent` 本身，导致将目录移到自身时漏检；Bug2: 目录移动后未更新子目录的 `parent` weak 指针
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** Bug1: 此前 `rename("dir", "dir/subdir")`（移到自身）不会返回 EINVAL。Bug2: 目录移动后 `child.parent` 仍指向旧父目录，影响后续祖先遍历和路径解析的正确性。
 
 ### Fix four renameat2 bugs: parent search access, target sticky bit, ext4 subtree outside target_exists, ramfs EXDEV
 
