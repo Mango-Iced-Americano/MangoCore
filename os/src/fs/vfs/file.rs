@@ -876,6 +876,9 @@ impl File {
         if flags.is_writable() {
             mode |= FileMode::FMODE_WRITE;
         }
+        if flags.contains(FileFlags::O_PATH) {
+            mode |= FileMode::FMODE_PATH;
+        }
         if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
             mode |= FileMode::FMODE_STREAM;
         }

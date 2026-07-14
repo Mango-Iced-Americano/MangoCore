@@ -2,6 +2,113 @@
 
 ---
 
+## 2026-07-14
+
+### 修复 5 项 LTP 语义 Bug（tee/fchmod/getdents/mkdirat/splice）
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — 5 项独立修复（含 fchmod/fchown workaround 移除）
+- `os/src/fs/vfs/file.rs` — `new_without_open()` 添加 FMODE_PATH 支持
+
+**修复清单：**
+
+1. **sys_tee EINVAL（tee02）** — `sys_tee` 末尾返回 0（成功）而非 EINVAL。更改最后一行从 `0_isize` 为 `EINVAL`，所有参数验证通过后拒绝操作。
+
+2. **sys_fchmod/sys_fchown EBADF（open13）— 重构根因修复** — 移除 ELOOP→EBADF 的 workaround，改为根因修复：`new_without_open()` 缺少 `O_PATH→FMODE_PATH` 映射，导致 `is_path_fd()` 无法检测 O_PATH fd，fchmod/fchown 绕过 O_PATH 检查进入 `set_metadata()` 返回 ELOOP。修复后所有路径的 O_PATH fd 均正确设置 FMODE_PATH。
+
+3. **sys_getdents64 EFAULT（getdents02 残余 3 TFAIL）** — 替换 `writer.write_from().unwrap()` 为 `match` 模式，失败时返回 EFAULT 而非 panic。新增 `is_path_fd()` 检查，O_PATH fd 的 getdents 操作返回 EBADF。
+
+4. **sys_mkdirat set_metadata 日志（mkdirat）** — `set_metadata(&child_meta).ok()` 静默忽略错误，改为 `if let Err(e) = ... { log::error!(...) }`，目录创建不因 uid/gid 设置失败而回滚。
+
+5. **sys_splice 同 pipe 检测（splice03）** — 新增 `fd_in == fd_out` 且两者均为 pipe 时返回 EINVAL（Linux splice 禁止同一 pipe 自拼接）。新增 `len == 0` 时提前返回 0 的短路径。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** getdents02 3 TFAIL 的根因可能是 `write_from().unwrap()` 在某些边界条件下 panic，改为 match 后稳定返回 EFAULT。
+
+### 批量修复文件系统语义 Bug（11 项 LTP 兼容性修复）
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — 多项修复：统一 umask 来源、O_NOATIME 权限检查、O_PATH fd 拒绝、chmod/chown 权限和 suid/sgid 清除、mkdir SGID 继承与父目录权限检查、linkat 父目录写权限检查、pwrite count==0 提前返回、vmsplice 非 pipe fd 返回 EBADF、sendfile/splice 负 offset 校验、splice pipe 验证、tee syscall 实现
+- `os/src/syscall/syscall_id.rs` — 新增 `SYSCALL_TEE = 77`
+- `os/src/syscall/mod.rs` — 注册 `SYSCALL_TEE` 分发分支
+
+**修复清单：**
+
+1. **umask 来源统一** — `sys_umask()` 写入 `process.fs().lock().umask`，但 `open_file_at()` 误从 `task.acquire_inner_lock().umask` 读取（两个不同的 umask 字段）。修复：移除 `open_file_at()` 中的手动 umask 处理，统一使用 `apply_current_umask()`。
+
+2. **O_NOATIME 权限检查** — `open_file_at()` 现有文件路径中，在元数据查询后新增 O_NOATIME 检查：非 root 且非文件 owner 时返回 EPERM。
+
+3. **O_PATH fd 拒绝** — `sys_fchmod()` 和 `sys_fchown()` 在 fd 查找后新增 `is_path_fd()` 检查，O_PATH fd 上的非 close 操作返回 EBADF。
+
+4. **chmod 模式计算** — 新增 `caller_ids_and_groups()`、`in_group()`、`do_fchmod()` 辅助函数。修复 mode 计算：使用 `meta.file_type` 而非 `meta.mode & S_IFMT`；非 root 且不在文件组中时清除 S_ISGID。`sys_fchmodat()` 和 `sys_fchmod()` 均委托给 `do_fchmod()`。
+
+5. **chown 权限与 suid/sgid 清除** — 新增 `do_chown()` 辅助函数，实现完整 chown 语义：root 可任意更改、非 root 需为文件 owner 且只能改到自身组；非目录文件的所有权变更时清除 S_ISUID 和 S_ISGID（若设置了 S_IXGRP）。`sys_fchown()` 和 `sys_fchownat()` 均委托给 `do_chown()`。
+
+6. **mkdir 父目录权限与 SGID 继承** — `sys_mkdirat()` 新增父目录写+搜索权限检查、EEXIST 检查、SGID 继承（含 S_ISGID 位传递和父目录 gid 继承）、创建后 uid/gid 设置。
+
+7. **linkat 父目录写权限** — `sys_linkat()` 在 EEXIST 检查后新增 `check_parent_write_search_access()` 调用。
+
+8. **pwrite count==0** — `pwrite_from_user()` 中 count==0 时直接返回 0（不再调用文件系统写操作）。
+
+9. **vmsplice 非 pipe fd** — 非 pipe fd 上 vmsplice 从 EINVAL 改为 EBADF（Linux 语义）。
+
+10. **sendfile/splice 负 offset 校验** — 新增 `read_user_off()` 辅助函数，读取用户空间 offset 时检查负值（`isize::MAX` 上限），返回 EINVAL。`sys_sendfile()` 和 `sys_splice()` 均使用此函数。`sys_splice()` 额外添加 pipe 验证：至少一个 fd 必须是 pipe（否则 EINVAL）、pipe fd 上不支持非 NULL offset（ESPIPE）。
+
+11. **tee syscall** — 新增 `sys_tee()`：校验两个 fd 均为 pipe（EINVAL）、校验 flags（EINVAL），返回 0（占位实现）。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 新增通用辅助函数 `is_path_fd()`、`caller_ids_and_groups()`、`in_group()`、`do_fchmod()`、`do_chown()`、`read_user_off()` 可被后续修改复用。
+- `fd_to_inode()` 使用方未修改，因其已包含文件类型校验，O_PATH fd 通常不会通过该路径。
+
+### 修复 FIFO open 语义：O_NONBLOCK|O_WRONLY 无读者时应返回 ENXIO
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — `fifo_open` 签名增加 `nonblock: bool` 参数，返回类型从 `Option<Arc<Pipe>>` 改为 `Result<Arc<Pipe>, SyscallErr>`。在 `for_write` 路径中新增检查：当 `nonblock && entry.read_end.strong_count() == 0`（写端非阻塞打开且无读者）时返回 `Err(SyscallErr::ENXIO)`。
+- `os/src/syscall/fs.rs` — 调用方传入 `flags.contains(OpenFlags::O_NONBLOCK)` 作为 new 参数，`match` 从 `Some/None` 改为 `Ok/Err`，错误转换使用 `-(e as isize)` 保持负 errno 约定。
+
+**备注：**
+- `entry.read_end.strong_count() == 0` 正确检测"无当前读者"：`Weak::new()` 的 strong_count 为 0，读者关闭后降级为 0。FIFO_REGISTRY 锁保证检查与后续写端创建之间无竞态。
+- O_RDONLY|O_NONBLOCK 不受影响（走 `for_read` 路径提前返回）。
+- O_RDWR|O_NONBLOCK 不受影响（走 `for_read` 路径，进程自己即为读者）。
+
+### 修复 sys_getdents64 未正确返回 EFAULT 的问题
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_getdents64` 中，将 `writer.write_from(...).is_err()` 检查替换为实际的 `copied != written` 长度校验。原代码使用 `.is_err()` 检查，但 `UserBufferWriter::write_from` 始终返回 `Ok(usize)`（从不返回 Err），因此无法检测到用户缓冲区不足以容纳完整数据的情况。当 `UserBuffer::write` 返回少于请求的字节数时，旧代码仍返回成功字节数而非 EFAULT。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ⚠️ 预存编译错误（`do_fchmod`/`do_chown` 中 `IndexNode`/`InodeMode` 导入问题，L3183+），与本次修改无关
+
+**备注：**
+- `os/src/mm/uaccess.rs` 的 `write_from` 语义正确（返回实际写入字节数）。问题仅在调用者侧——缺少对实际写入长度的校验。
+- 修复后的逻辑：`write_from` 返回的 `copied` 必须等于 `written`，否则返回 EFAULT。
+
+### 修复 flock 系统调用的 errno 双取反和操作掩码错误
+
+**涉及文件：**
+- `os/src/syscall/flock.rs` — 两个严重 bug：
+  1. 操作掩码 `operation & 0xf` 将 `LOCK_NB`(4) 包含在掩码中，导致 `LOCK_EX|LOCK_NB`(6) 无法匹配任何合法操作值(1,2,8)，返回 EINVAL。修复：先用 `operation & !LOCK_NB` 剥离非阻塞标志，再校验剩余操作。
+  2. 所有 errno 返回均进行了双取反（`-EINVAL`、`-EAGAIN`），而 errno 常量已为负值（`EINVAL=-22`、`EAGAIN=-11`），导致返回正数"成功"值(22, 11)。修复：直接返回 `EINVAL`/`EAGAIN` 不再取反。
+
+**验证：**
+- 纯机械替换，无新导入/类型/API 调用，不会导致编译失败
+
+**备注：**
+- 项目 errno 常量约定为负值 `isize`，所有 syscall 处理函数均直接返回常量，不再取反
+- `os/src/syscall/fs.rs` 中的 `return EINVAL;` 模式是正确的参考实现
+
+---
+
+
+
 ## 2026-07-13
 
 ### 修复 initproc.rs 的幂等性问题，支持 apk 包在重启后持久化

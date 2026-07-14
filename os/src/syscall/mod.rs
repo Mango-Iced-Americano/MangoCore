@@ -479,6 +479,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4],
             args[5] as u32,
         ),
+        SYSCALL_TEE => sys_tee(
+            args[0],
+            args[1],
+            args[2],
+            args[3] as u32,
+        ),
         SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_READLINKAT => {
             sys_readlinkat(args[0], args[1] as *const u8, args[2] as *mut u8, args[3])

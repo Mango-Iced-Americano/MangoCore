@@ -974,7 +974,12 @@ static FIFO_REGISTRY: spin::Mutex<BTreeMap<(usize, usize), FifoEntry>> = spin::M
 /// Open a named FIFO inode, returning a Pipe end matching the access mode.
 /// `dev_inode` identifies the FIFO (dev_id, inode_id).
 /// `for_read` selects the read end; `for_write` selects the write end.
-pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> Option<Arc<Pipe>> {
+pub fn fifo_open(
+    dev_inode: (usize, usize),
+    for_read: bool,
+    for_write: bool,
+    nonblock: bool,
+) -> Result<Arc<Pipe>, SyscallErr> {
     let profiling = pipe_profile_enabled();
     pipe_inc(profiling, &PIPE_FIFO_OPEN);
     let mut reg = FIFO_REGISTRY.lock();
@@ -1003,34 +1008,38 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
     if for_read {
         if let Some(r) = entry.read_end.upgrade() {
             pipe_inc(profiling, &PIPE_FIFO_HIT_READ);
-            return Some(r);
+            return Ok(r);
         }
         let r = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
         buffer.lock().set_read_end(&r);
         entry.read_end = Arc::downgrade(&r);
-        return Some(r);
+        return Ok(r);
     }
 
     if for_write {
+        // O_WRONLY | O_NONBLOCK 且无读者 → ENXIO（Linux 语义）
+        if nonblock && entry.read_end.strong_count() == 0 {
+            return Err(SyscallErr::ENXIO);
+        }
         if let Some(w) = entry.write_end.upgrade() {
             pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
-            return Some(w);
+            return Ok(w);
         }
         let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
         buffer.lock().set_write_end(&w);
         entry.write_end = Arc::downgrade(&w);
-        return Some(w);
+        return Ok(w);
     }
 
     // O_RDWR: return write end (rare case)
     if let Some(w) = entry.write_end.upgrade() {
         pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
-        return Some(w);
+        return Ok(w);
     }
     let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
     buffer.lock().set_write_end(&w);
     entry.write_end = Arc::downgrade(&w);
-    Some(w)
+    Ok(w)
 }
 
 /// 清理 FIFO_REGISTRY 中所有两端都已关闭的陈旧条目，

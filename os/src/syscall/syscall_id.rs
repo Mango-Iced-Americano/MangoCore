@@ -62,6 +62,7 @@ pub const SYSCALL_PPOLL: usize = 73;
 pub const SYSCALL_SIGNALFD4: usize = 74;
 pub const SYSCALL_VMSPLICE: usize = 75;
 pub const SYSCALL_SPLICE: usize = 76;
+pub const SYSCALL_TEE: usize = 77;
 pub const SYSCALL_READLINKAT: usize = 78;
 pub const SYSCALL_FSTATAT: usize = 79;
 pub const SYSCALL_FSTAT: usize = 80;

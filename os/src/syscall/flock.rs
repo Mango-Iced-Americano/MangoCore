@@ -17,12 +17,12 @@ static FLOCK_TABLE: Mutex<BTreeMap<(usize, InodeId), ()>> =
     Mutex::new(BTreeMap::new());
 
 pub fn sys_flock(fd: usize, operation: u32) -> isize {
-    let op = operation & 0xf;
-    let nb = operation & LOCK_NB;
+    let nonblock = (operation & LOCK_NB) != 0;
+    let op = operation & !LOCK_NB;
 
     match op {
         LOCK_SH | LOCK_EX | LOCK_UN => {}
-        _ => return -EINVAL,
+        _ => return EINVAL,
     }
 
     let task = current_task().unwrap();
@@ -51,18 +51,18 @@ pub fn sys_flock(fd: usize, operation: u32) -> isize {
         }
         LOCK_SH | LOCK_EX => {
             if table.contains_key(&key) {
-                if nb != 0 {
-                    -EAGAIN
+                if nonblock {
+                    EAGAIN
                 } else {
                     // Blocking lock: apk uses LOCK_EX|LOCK_NB so this is rare.
                     // Full WaitQueue-based blocking left as future work.
-                    -EAGAIN
+                    EAGAIN
                 }
             } else {
                 table.insert(key, ());
                 0
             }
         }
-        _ => -EINVAL,
+        _ => EINVAL,
     }
 }

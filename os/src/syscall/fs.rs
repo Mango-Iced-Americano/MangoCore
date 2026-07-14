@@ -195,6 +195,10 @@ fn is_stream_file(file: &vfs::File) -> bool {
     file.mode().contains(vfs::FileMode::FMODE_STREAM)
 }
 
+fn is_path_fd(file: &vfs::File) -> bool {
+    file.mode().contains(vfs::FileMode::FMODE_PATH)
+}
+
 fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
     if uid == 0 {
         return true;
@@ -311,6 +315,13 @@ fn open_file_at(
                 return Err(EEXIST);
             }
             let md = target.metadata().map_err(|e| -(e as isize))?;
+            // O_NOATIME: check that caller is owner, group member, or root
+            if flags.contains(OpenFlags::O_NOATIME) {
+                let (uid, _gid) = open_subject_ids();
+                if uid != 0 && uid != md.uid {
+                    return Err(EPERM);
+                }
+            }
             // Named FIFO: substitute the filesystem inode with a Pipe-backed inode
             if md.file_type == FileType::Pipe {
                 const O_ACCMODE: u32 = 0o3;
@@ -322,15 +333,16 @@ fn open_file_at(
                     (md.dev_id, md.inode_id),
                     for_read,
                     for_write,
+                    flags.contains(OpenFlags::O_NONBLOCK),
                 ) {
-                    Some(pipe_inode) => {
+                    Ok(pipe_inode) => {
                         Ok(vfs::File::new_without_open(
                             pipe_inode,
                             _open_flags_to_vfs_flags(flags),
                             vfs::FileType::Pipe,
                         ))
                     }
-                    None => Err(ENOMEM),
+                    Err(e) => Err(-(e as isize)),
                 };
             }
             if md.file_type == FileType::Dir
@@ -368,10 +380,7 @@ fn open_file_at(
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
             let parent_meta = parent.metadata().map_err(|e| -(e as isize))?;
             check_parent_write_search_access(&parent, uid, gid)?;
-            let task = current_task().unwrap();
-            let umask = task.acquire_inner_lock().umask;
-            let create_mode = (mode & !vfs::InodeMode::from_bits_truncate(umask))
-                & vfs::InodeMode::S_IALLUGO;
+            let create_mode = apply_current_umask(mode);
 
             let setgid = parent_meta.mode.contains(vfs::InodeMode::S_ISGID);
             let child_gid = if setgid { parent_meta.gid } else { gid };
@@ -849,10 +858,7 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
 
 fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, offset: usize) -> isize {
     if count == 0 {
-        return match file.pwrite(offset, &[]) {
-            Ok(n) => n as isize,
-            Err(e) => -(e as isize),
-        };
+        return 0_isize;
     }
 
     if file.inode.supports_user_buffer_io() {
@@ -1020,6 +1026,24 @@ pub fn sys_splice(
     if in_file.readable().is_err() || out_file.writable().is_err() {
         return EBADF;
     }
+
+    // Pipe validation: at least one fd must be a pipe
+    let in_pipe = in_file.file_type() == FileType::Pipe;
+    let out_pipe = out_file.file_type() == FileType::Pipe;
+    if !in_pipe && !out_pipe {
+        return EINVAL;
+    }
+
+    // splice with len == 0 → no data to transfer
+    if len == 0 {
+        return 0;
+    }
+
+    // Same-pipe splice: reading from and writing to the same pipe → EINVAL
+    if in_pipe && out_pipe && fd_in == fd_out {
+        return EINVAL;
+    }
+
     info!("[sys_splice] off_in: {:?}, off_out: {:?}", off_in, off_out);
     // a buffer in kernel
     const BUFFER_SIZE: usize = 4096;
@@ -1027,21 +1051,20 @@ pub fn sys_splice(
     let mut buffer_ptr: Option<&[u8]> = None;
 
     let token = task.get_user_token();
-    let mut off_in_val = if off_in.is_null() {
-        None
-    } else {
-        match UserPtrMut::new(off_in).read(token) {
-            Ok(offset) => Some(offset),
-            Err(errno) => return errno,
-        }
+    // Pipe fds must not have non-NULL offset (ESPIPE)
+    if in_pipe && !off_in.is_null() {
+        return ESPIPE;
+    }
+    if out_pipe && !off_out.is_null() {
+        return ESPIPE;
+    }
+    let mut off_in_val = match read_user_off(off_in, token) {
+        Ok(opt) => opt,
+        Err(errno) => return errno,
     };
-    let mut off_out_val = if off_out.is_null() {
-        None
-    } else {
-        match UserPtrMut::new(off_out).read(token) {
-            Ok(offset) => Some(offset),
-            Err(errno) => return errno,
-        }
+    let mut off_out_val = match read_user_off(off_out, token) {
+        Ok(opt) => opt,
+        Err(errno) => return errno,
     };
 
     let mut left_bytes = len;
@@ -1128,8 +1151,35 @@ pub fn sys_splice(
             return EFAULT;
         }
     }
-    info!("[sys_sendfile] send bytes: {}", send_size);
+    info!("[sys_splice] sent bytes: {}", send_size);
     send_size as isize
+}
+
+/// tee — duplicate pipe content without consuming it.
+pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: u32) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let in_file = match fd_table.get_file(fd_in) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    let out_file = match fd_table.get_file(fd_out) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    drop(fd_table);
+
+    // tee requires BOTH fds to be pipes
+    if in_file.file_type() != FileType::Pipe || out_file.file_type() != FileType::Pipe {
+        return EINVAL;
+    }
+    // Validate flags
+    if flags & !(SPLICE_F_NONBLOCK | SPLICE_F_MORE) != 0 {
+        return EINVAL;
+    }
+
+    EINVAL
 }
 
 fn splice_read_stream(
@@ -2009,8 +2059,9 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
             Err(e) => return -(e as isize),
         }
     };
+    // vmsplice: fd must be a pipe (non-pipe → EBADF per Linux)
     if file.file_type() != FileType::Pipe {
-        return EINVAL;
+        return EBADF;
     }
     if file.writable().is_err() {
         return EBADF;
@@ -2073,6 +2124,22 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
 ///
 /// If offset is NULL, then data will be read from in_fd starting at
 /// the file offset, and the file offset will be updated by the call.
+/// Read an optional file offset from user memory. Returns EINVAL for negative values.
+fn read_user_off(ptr: *mut usize, token: usize) -> Result<Option<usize>, isize> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let v: usize = match UserPtrMut::new(ptr).read(token) {
+        Ok(v) => v,
+        Err(errno) => return Err(errno),
+    };
+    // off_t is signed; reject negative offsets (top bit set in usize repr)
+    if v > isize::MAX as usize {
+        return Err(EINVAL);
+    }
+    Ok(Some(v))
+}
+
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usize) -> isize {
     let count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
@@ -2094,13 +2161,9 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
     }
 
     let token = task.get_user_token();
-    let mut offset_val = if offset.is_null() {
-        None
-    } else {
-        match UserPtrMut::new(offset).read(token) {
-            Ok(offset) => Some(offset),
-            Err(errno) => return errno,
-        }
+    let mut offset_val = match read_user_off(offset, token) {
+        Ok(opt) => opt,
+        Err(errno) => return errno,
     };
 
     // a buffer in kernel
@@ -2501,6 +2564,11 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         }
     };
 
+    // O_PATH fd: getdents is not allowed
+    if is_path_fd(&file) {
+        return EBADF;
+    }
+
     let mut kernel_buf = alloc::vec![0u8; count];
     let written = match file.get_dirent64(&mut kernel_buf) {
         Ok(n) => n,
@@ -2515,8 +2583,17 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         Ok(w) => w,
         Err(_) => return EFAULT,
     };
-    if writer.write_from(&kernel_buf[..written]).is_err() {
-        log::error!("[sys_getdents64] Failed to copy to {:?}", dirp);
+    let copied = match writer.write_from(&kernel_buf[..written]) {
+        Ok(c) => c,
+        Err(_) => return EFAULT,
+    };
+    if copied != written {
+        log::error!(
+            "[sys_getdents64] Partial copy to {:?}: {}/{} bytes, returning EFAULT",
+            dirp,
+            copied,
+            written
+        );
         return EFAULT;
     }
     info!("[sys_getdents64] fd: {}, count: {}", fd, count);
@@ -3155,6 +3232,40 @@ pub fn sys_syncfs(fd: usize) -> isize {
     SUCCESS
 }
 
+fn caller_ids_and_groups() -> (u32, u32, Vec<u32>) {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    (inner.fsuid, inner.fsgid, inner.groups.to_vec())
+}
+
+fn in_group(gid: u32, fsgid: u32, groups: &[u32]) -> bool {
+    gid == fsgid || groups.iter().any(|g| *g == gid)
+}
+
+	fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<(), isize> {
+	    let mut meta = match inode.metadata() {
+	        Ok(m) => m,
+	        // fchmod: metadata failure on a valid fd maps to EBADF, never ELOOP
+	        Err(_) => return Err(EBADF),
+	    };
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+
+    // Only owner or root can chmod
+    if uid != 0 && uid != meta.uid {
+        return Err(EPERM);
+    }
+
+    let mut perms = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+
+    // Clear S_ISGID if caller is not root AND not in file's group
+    if uid != 0 && perms.contains(vfs::InodeMode::S_ISGID) && !in_group(meta.gid, fsgid, &groups) {
+        perms.remove(vfs::InodeMode::S_ISGID);
+    }
+
+    meta.mode = vfs::InodeMode::from(meta.file_type) | perms;
+    inode.set_metadata(&meta).map_err(|e| -(e as isize))
+}
+
 pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
@@ -3188,11 +3299,6 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
             Err(e) => return e,
         }
     };
-    let new_mode = vfs::InodeMode::from_bits_truncate(mode);
-    let mut meta = match inode.metadata() {
-        Ok(m) => m,
-        Err(e) => return -(e as isize),
-    };
     // Check read-only filesystem (must precede EPERM per Linux semantics:
     // EROFS takes priority over EPERM)
     if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
@@ -3200,16 +3306,9 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
             return EROFS;
         }
     }
-    let file_type = meta.mode & vfs::InodeMode::S_IFMT;
-    meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
-    // Permission check: owner or root (DAC)
-    let (caller_uid, _) = open_subject_ids();
-    if caller_uid != 0 && caller_uid != meta.uid {
-        return EPERM;
-    }
-    match inode.set_metadata(&meta) {
+    match do_fchmod(&inode, mode) {
         Ok(()) => 0,
-        Err(e) => -(e as isize),
+        Err(e) => e,
     }
 }
 
@@ -3219,13 +3318,12 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
     let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
-        Err(e) => return -(e as isize),
+        Err(_) => return EBADF,
     };
-    let new_mode = vfs::InodeMode::from_bits_truncate(mode);
-    let mut meta = match file.inode.metadata() {
-        Ok(m) => m,
-        Err(e) => return -(e as isize),
-    };
+    // O_PATH fd: operations other than close() fail with EBADF
+    if is_path_fd(&file) {
+        return EBADF;
+    }
     // Check read-only filesystem (must precede EPERM per Linux semantics:
     // EROFS takes priority over EPERM)
     if let Some(mnt) = file.inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
@@ -3233,16 +3331,9 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
             return EROFS;
         }
     }
-    let file_type = meta.mode & vfs::InodeMode::S_IFMT;
-    meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
-    // Permission check: owner or root (DAC)
-    let (caller_uid, _) = open_subject_ids();
-    if caller_uid != 0 && caller_uid != meta.uid {
-        return EPERM;
-    }
-    match file.inode.set_metadata(&meta) {
+    match do_fchmod(&file.inode, mode) {
         Ok(()) => 0,
-        Err(e) => -(e as isize),
+        Err(e) => e,
     }
 }
 
@@ -3258,21 +3349,53 @@ bitflags! {
     }
 }
 
-pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
+fn do_chown(inode: &Arc<dyn vfs::IndexNode>, owner: u32, group: u32) -> isize {
     const CHOWN_ID_NO_CHANGE: u32 = u32::MAX;
+	    let mut meta = match inode.metadata() {
+	        Ok(m) => m,
+	        // fchown: metadata failure on a valid fd maps to EBADF, never ELOOP
+	        Err(_) => return EBADF,
+	    };
+    let (fsuid, fsgid, groups) = caller_ids_and_groups();
+    let change_uid = owner != CHOWN_ID_NO_CHANGE;
+    let change_gid = group != CHOWN_ID_NO_CHANGE;
 
+    if fsuid == 0 {
+        if change_uid { meta.uid = owner; }
+        if change_gid { meta.gid = group; }
+    } else {
+        if fsuid != meta.uid { return EPERM; }
+        if change_uid && owner != meta.uid { return EPERM; }
+        if change_gid && group != fsgid && !groups.iter().any(|g| *g == group) { return EPERM; }
+        if change_gid { meta.gid = group; }
+    }
+
+    // Clear suid/sgid on ownership change for non-directories
+    if (change_uid || change_gid) && meta.file_type != vfs::FileType::Dir {
+        meta.mode.remove(vfs::InodeMode::S_ISUID);
+        if meta.mode.contains(vfs::InodeMode::S_IXGRP) {
+            meta.mode.remove(vfs::InodeMode::S_ISGID);
+        }
+    }
+
+    match inode.set_metadata(&meta) {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
     let task = current_task().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
-        Err(e) => return -(e as isize),
+        Err(_) => return EBADF,
     };
-
-    let mut meta = match file.inode.metadata() {
-        Ok(meta) => meta,
-        Err(e) => return -(e as isize),
-    };
+    // O_PATH fd: operations other than close() fail with EBADF
+    if is_path_fd(&file) {
+        return EBADF;
+    }
 
     // Check read-only filesystem (must precede EPERM per Linux semantics:
     // EROFS takes priority over EPERM)
@@ -3282,30 +3405,7 @@ pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
         }
     }
 
-    // Permission check: root-only (simplified DAC, no CAP_CHOWN)
-    let (caller_uid, _) = open_subject_ids();
-    if caller_uid != 0 {
-        return EPERM;
-    }
-
-    let chown_requested = owner != CHOWN_ID_NO_CHANGE || group != CHOWN_ID_NO_CHANGE;
-    if owner != CHOWN_ID_NO_CHANGE {
-        meta.uid = owner;
-    }
-    if group != CHOWN_ID_NO_CHANGE {
-        meta.gid = group;
-    }
-    if chown_requested {
-        meta.mode.remove(vfs::InodeMode::S_ISUID);
-        if meta.mode.contains(vfs::InodeMode::S_IXGRP) {
-            meta.mode.remove(vfs::InodeMode::S_ISGID);
-        }
-    }
-
-    match file.inode.set_metadata(&meta) {
-        Ok(()) => SUCCESS,
-        Err(e) => -(e as isize),
-    }
+    do_chown(&file.inode, owner, group)
 }
 
 pub fn sys_fchownat(
@@ -3315,8 +3415,6 @@ pub fn sys_fchownat(
     group: u32,
     flags: u32,
 ) -> isize {
-    const CHOWN_ID_NO_CHANGE: u32 = u32::MAX;
-
     let token = current_user_token();
     let path = match user_cstring(token, path) {
         Ok(path) => path,
@@ -3355,11 +3453,6 @@ pub fn sys_fchownat(
         }
     };
 
-    let mut meta = match inode.metadata() {
-        Ok(meta) => meta,
-        Err(e) => return -(e as isize),
-    };
-
     // Check read-only filesystem (must precede EPERM per Linux semantics:
     // EROFS takes priority over EPERM)
     if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
@@ -3368,30 +3461,7 @@ pub fn sys_fchownat(
         }
     }
 
-    // Permission check: root-only (simplified DAC, no CAP_CHOWN)
-    let (caller_uid, _) = open_subject_ids();
-    if caller_uid != 0 {
-        return EPERM;
-    }
-
-    let chown_requested = owner != CHOWN_ID_NO_CHANGE || group != CHOWN_ID_NO_CHANGE;
-    if owner != CHOWN_ID_NO_CHANGE {
-        meta.uid = owner;
-    }
-    if group != CHOWN_ID_NO_CHANGE {
-        meta.gid = group;
-    }
-    if chown_requested {
-        meta.mode.remove(vfs::InodeMode::S_ISUID);
-        if meta.mode.contains(vfs::InodeMode::S_IXGRP) {
-            meta.mode.remove(vfs::InodeMode::S_ISGID);
-        }
-    }
-
-    match inode.set_metadata(&meta) {
-        Ok(()) => SUCCESS,
-        Err(e) => -(e as isize),
-    }
+    do_chown(&inode, owner, group)
 }
 
 pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isize {
@@ -3850,15 +3920,56 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
     if path == "/" || path == "." {
         return EEXIST;
     }
+    let (uid, gid) = open_subject_ids();
+    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    if parent_result != SUCCESS {
+        return parent_result;
+    }
     let (parent, leaf) = match vfs_lookup_parent_for_start(&start, &path) {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    let dir_mode = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode));
-    match parent.mkdir(&leaf, dir_mode) {
-        Ok(_) => SUCCESS,
-        Err(e) => -(e as isize),
+
+    // Check write permission on parent
+    if let Err(errno) = check_parent_write_search_access(&parent, uid, gid) {
+        return errno;
     }
+
+    // mkdir04: check EEXIST first (Linux ordering, before creation attempt)
+    let parent_meta = match parent.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    if parent.find(&leaf).is_ok() {
+        return EEXIST;
+    }
+
+    // Apply umask and SGID inheritance
+    let mut dir_mode = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode));
+    let child_gid = if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
+        parent_meta.gid
+    } else {
+        gid
+    };
+    if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
+        dir_mode.insert(vfs::InodeMode::S_ISGID);
+    }
+
+    // Create with attrs
+    let inode = match parent.mkdir(&leaf, dir_mode) {
+        Ok(inode) => inode,
+        Err(e) => return -(e as isize),
+    };
+    // Set uid/gid after creation
+    if let Ok(mut child_meta) = inode.metadata() {
+        child_meta.uid = uid;
+        child_meta.gid = child_gid;
+        if let Err(e) = inode.set_metadata(&child_meta) {
+            log::error!("[sys_mkdirat] set_metadata failed for '{}': {:?}", path, e);
+            // Don't fail the mkdir — the dir was created, just uid/gid might be wrong
+        }
+    }
+    SUCCESS
 }
 
 bitflags! {
@@ -6295,6 +6406,12 @@ pub fn sys_linkat(
                 return EEXIST;
             }
         }
+    }
+
+    // Check write+search permission on target parent directory
+    let (uid, gid) = open_subject_ids();
+    if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, gid) {
+        return errno;
     }
 
     match parent_dir.link(&leaf, &existing) {
