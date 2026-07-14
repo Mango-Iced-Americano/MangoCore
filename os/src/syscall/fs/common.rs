@@ -1249,30 +1249,37 @@ pub(crate) fn caller_ids_and_groups() -> (u32, u32, Vec<u32>) {
     (inner.fsuid, inner.fsgid, inner.groups.to_vec())
 }
 
-pub(crate) fn in_group(gid: u32, fsgid: u32, groups: &[u32]) -> bool {
-    gid == fsgid || groups.iter().any(|g| *g == gid)
-}
-
 pub(crate) fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<(), isize> {
     let mut meta = match inode.metadata() {
         Ok(m) => m,
         Err(e) => return Err(-(e as isize)),
     };
-    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let (uid, _fsgid, _groups) = caller_ids_and_groups();
 
     // Only owner or root can chmod
     if uid != 0 && uid != meta.uid {
         return Err(EPERM);
     }
 
-    let mut perms = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    let perms = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
 
-    // Clear S_ISGID if caller is not root AND not in file's group
-    if uid != 0 && perms.contains(vfs::InodeMode::S_ISGID) && !in_group(meta.gid, fsgid, &groups) {
-        perms.remove(vfs::InodeMode::S_ISGID);
+    // Preserve S_ISVTX from old mode; preserve S_ISGID for directories only.
+    // S_ISUID is also preserved from old mode.
+    let old_special = meta.mode
+        & (vfs::InodeMode::S_ISVTX | vfs::InodeMode::S_ISGID | vfs::InodeMode::S_ISUID);
+    let preserved_special = if meta.file_type == vfs::FileType::Dir {
+        old_special // directories keep S_ISGID/S_ISVTX from old mode
+    } else {
+        // regular files: always clear S_ISGID, preserve S_ISVTX/S_ISUID if set
+        old_special & !vfs::InodeMode::S_ISGID
+    };
+
+    meta.mode = vfs::InodeMode::from(meta.file_type) | preserved_special | perms;
+    // Linux notify_change: chmod on non-directory always clears S_ISGID
+    if meta.file_type != vfs::FileType::Dir {
+        meta.mode.remove(vfs::InodeMode::S_ISGID);
     }
 
-    meta.mode = vfs::InodeMode::from(meta.file_type) | perms;
     inode.set_metadata(&meta).map_err(|e| -(e as isize))
 }
 

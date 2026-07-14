@@ -56,7 +56,7 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         if let Ok(file_inode) = parent.find(&leaf) {
             if let Ok(file_meta) = file_inode.metadata() {
                 if uid != file_meta.uid {
-                    return EACCES;
+                    return EPERM;
                 }
             }
         }

@@ -4,6 +4,28 @@
 
 ## 2026-07-14
 
+### Fix sticky bit violation errno — EACCES → EPERM (unlinkat/renameat2)
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_unlinkat.rs` — 粘滞位检查改为返回 `EPERM`（原 `EACCES`）
+- `os/src/syscall/fs/sys_renameat2.rs` — 同上
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Linux 语义：sticky bit 下非文件/目录所有者执行删除/重命名 → `EPERM`（而非 `EACCES`）。`EACCES` 是父目录缺少写权限时的错误码，两者区分很重要。LTP 和健全性测试依赖正确的 errno 值。
+
+### Fix do_fchmod — S_ISGID/S_ISVTX 从旧 mode 丢失
+
+**涉及文件：**
+- `os/src/syscall/fs/common.rs` — `do_fchmod()` 删除死 SGID 权限检查（`in_group`）；改为从旧 `meta.mode` 保留特殊位：S_ISVTX（所有类型）、S_ISGID（仅目录）、S_ISUID（所有类型）；非目录始终清除 S_ISGID（Linux `notify_change` 语义）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** `chmod` 前目录的 SGID/sticky 位现在能正确存活。`S_IALLUGO = 0o7777` 已包含 S_ISGID/S_ISVTX，但旧代码仅用 `InodeMode::from(file_type) | perms` 重建 mode，丢弃了旧特殊位。新代码：`old_special` 捕获旧 S_ISVTX|S_ISGID|S_ISUID，目录保留全部，非目录清除 S_ISGID，最终再补一道 `meta.mode.remove(S_ISGID)` 防止 `perms` 透传。
+
 ### Fix statx stx_mask — 报告实际填充字段而非用户请求掩码
 
 **涉及文件：**

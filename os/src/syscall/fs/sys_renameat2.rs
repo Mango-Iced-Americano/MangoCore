@@ -85,7 +85,7 @@ pub fn sys_renameat2(
             if let Ok(file_inode) = old_parent.find(&old_leaf) {
                 if let Ok(file_meta) = file_inode.metadata() {
                     if uid != file_meta.uid {
-                        return -(SyscallErr::EACCES as isize);
+                        return -(SyscallErr::EPERM as isize);
                     }
                 }
             }
