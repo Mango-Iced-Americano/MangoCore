@@ -4,6 +4,34 @@
 
 ## 2026-07-14
 
+### 修复 syscall tracing：运行时 TRACING_ON 编译开关 → 运行时 AtomicBool 控制
+
+**涉及文件：**
+- `os/src/syscall/mod.rs` — 3 处修改：
+  - 替换 `trace_event!(syscall_id, ...)` 宏（编译时 `TRACE=1` 门控）为直接 `trace::event()` 调用 + 运行时 `TRACING_ON` 检查
+  - 替换 `_ =>` 分支中 `trace_event!(0xB042, ...)` 同样改为运行时门控
+  - 新增返回前 `trace::event(TRACE_RET_MASK | syscall_id, ret, is_err, ...)` 记录 syscall 返回值
+- `os/src/trace.rs` — 修复 `dump_to_string()` 对返回事件的解码（之前返回事件 tag 含 `TRACE_RET_MASK`，`tag_name()` 查不到名称，显示为 `"unknown"`）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** `TRACE_RET_MASK` 常量（`0x8000_0000_0000_0000`）已存在于 `trace.rs`，无需新增。`trace_event!` 宏保留不动（兼容其他模块的自定义事件），仅在 syscall 分发路径换用运行时门控以保证 `TRACE=1` 未设时也能记录。
+
+### Fix lwext4 filesystem sync: global sync + remove close-time flush
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — `Ext4OSInode::close()` 改为 no-op（close-time dirty flush 太慢且非 Linux 语义）
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 新增 `LWE4FS_REGISTRY` 全局注册表、`sync_all_lwext4()` 公共函数、`Ext4FileSystem::flush_all_file_caches()` 方法
+- `os/src/syscall/fs.rs` — `sys_sync()` 和 `sys_syncfs()` 中调用 `sync_all_lwext4()`（lwext4 PageCache writeback + lwext4 内部缓存刷新）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** 脏页写入由显式 fsync/fdatasync/sync/syncfs 或 PageCache reclaim 负责，不再在 close() 时刷写。
+
+## 2026-07-14
+
 ### 修复 Ext4OSInode: close() 不刷脏页 + file_mode_set 错误被静默吞掉
 
 **涉及文件：**

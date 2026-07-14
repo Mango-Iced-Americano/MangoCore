@@ -303,7 +303,17 @@ use crate::{
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
     let _syscall_start = crate::task::perf::perf_time_now();
-    crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
+    if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::trace::event(
+            syscall_id as u64,
+            args[0] as u64,
+            args[1] as u64,
+            args[2] as u64,
+            args[3] as u64,
+            args[4] as u64,
+            args[5] as u64,
+        );
+    }
     // 记录当前系统调用 ID，供 OOM 诊断使用
     crate::task::set_current_syscall_id(Some(syscall_id));
     let syscall_info_log_enabled = matches!(option_env!("LOG"), Some("info" | "debug" | "trace"));
@@ -894,15 +904,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
             if syscall_id == 242 {
-                crate::trace_event!(
-                    0xB042,
-                    args[0] as u64,
-                    args[1] as u64,
-                    args[2] as u64,
-                    args[3] as u64,
-                    0,
-                    0
-                );
+                if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::trace::event(
+                        0xB042,
+                        args[0] as u64,
+                        args[1] as u64,
+                        args[2] as u64,
+                        args[3] as u64,
+                        0,
+                        0,
+                    );
+                }
             }
             println!(
                 "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
@@ -951,6 +963,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
     crate::task::perf::record_syscall(syscall_id, ret);
     crate::task::perf::record_syscall_time(syscall_id, _syscall_ticks);
+    // Trace syscall return
+    if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::trace::event(
+            crate::trace::TRACE_RET_MASK | syscall_id as u64,
+            ret as u64,
+            (ret < 0) as u64,
+            0,
+            0,
+            0,
+            0,
+        );
+    }
     ret
 }
 

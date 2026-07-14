@@ -271,15 +271,28 @@ pub(crate) fn dump_to_string(max_entries: usize) -> alloc::string::String {
         let e = &ring.buf[(start + offset + i) % TRACE_SIZE];
         let sec = e.timestamp / 1_000_000;
         let us = e.timestamp % 1_000_000;
-        let name = tag_name(e.tag);
-        let _ = writeln!(
-            s,
-            "[{}.{:06}] {:16} tag=0x{:04X} a1=0x{:X} a2=0x{:X} a3=0x{:X} a4=0x{:X} a5=0x{:X} a6=0x{:X}",
-            sec, us,
-            name,
-            e.tag,
-            e.arg1, e.arg2, e.arg3, e.arg4, e.arg5, e.arg6,
-        );
+        if e.tag & TRACE_RET_MASK != 0 {
+            // Syscall return trace
+            let sys_id = (e.tag & !TRACE_RET_MASK) as usize;
+            let name = crate::syscall::syscall_name(sys_id);
+            let ret = e.arg1 as isize;
+            let is_err = e.arg2 != 0;
+            if is_err {
+                let _ = writeln!(s, "[{}.{:06}] {:16}:ret -> {} (err)", sec, us, name, ret);
+            } else {
+                let _ = writeln!(s, "[{}.{:06}] {:16}:ret -> 0x{:X}", sec, us, name, e.arg1);
+            }
+        } else {
+            let name = tag_name(e.tag);
+            let _ = writeln!(
+                s,
+                "[{}.{:06}] {:16} tag=0x{:04X} a1=0x{:X} a2=0x{:X} a3=0x{:X} a4=0x{:X} a5=0x{:X} a6=0x{:X}",
+                sec, us,
+                name,
+                e.tag,
+                e.arg1, e.arg2, e.arg3, e.arg4, e.arg5, e.arg6,
+            );
+        }
     }
 
     s
