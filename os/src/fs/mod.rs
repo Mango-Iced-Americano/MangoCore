@@ -1474,6 +1474,12 @@ pub fn flush_preload() {
         // os_test.conf carried by the official test image.
         let _ = create_or_open_file("cpython_test");
     }
+    #[cfg(feature = "apk_test")]
+    {
+        // Run the package-manager gate entirely from the writable initramfs;
+        // the marker never changes the SSD-backed test configuration.
+        let _ = create_or_open_file("apk_test");
+    }
     #[cfg(feature = "board_shell")]
     {
         // Keep the shell selection ephemeral so booting this image never

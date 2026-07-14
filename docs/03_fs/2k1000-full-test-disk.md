@@ -35,6 +35,7 @@ related_docs:
   - "docs/03_fs/devfs.md"
   - "docs/01_architecture/boot-and-trap.md"
   - "docs/08_testing/cpython-isolated.md"
+  - "docs/08_testing/apk-isolated.md"
 ---
 
 # 2K1000LA 单 SSD 完整测试镜像
@@ -291,3 +292,24 @@ make 2k1000-boot IMAGE=kernel-2k1000-cpython-tests.ui
 2026-07-14 含全局启动器的新 payload SHA-256 为 `4a0f8a1bf6fad6ed89a9d0479438df8843f2d95d1482ddcdecc57276d364972c`。镜像内 `/usr/bin/python3` 已确认是指向 `/tools/tests/cpython/python3-wrapper.sh` 的符号链接，包装器模式为 `0755`；三个 256 MiB 块的宿主期望 CRC32 依次为 `e2118d3d`、`2d7315b8`、`638ff43b`，写入器的板端读回应逐项相同。专用 uImage 在实板完成 CPython L3-L9，judge 为 `72/72`、组退出码 0；全局启动器当前已完成 rv64/la64 QEMU 验收，等待新 P3 写入后的实板 Shell 复核。
 
 详细测试层级、QEMU 门禁和已知边界见 `docs/08_testing/cpython-isolated.md`。
+
+### 7.4 APK 易失安装根与 P2 缓存
+
+当前 APK 阶段不放宽 P1/P3 的只读策略。`apk.static`、仓库列表和签名公钥嵌入
+initramfs；软件包数据库、安装树和私有 musl 运行时写入 RAMFS
+`/run/apk-root`，只有可删除的 `.apk` 下载缓存写入 P2
+`/scratch/apk-cache`。FAT32 不能完整表达 APK 安装所需的 Unix mode 和符号链接，
+因此不得把 `/scratch` 直接用作 `--root`。
+
+构建与启动入口为：
+
+```bash
+make -C os la64-2k1000-apk-tests MODE=release
+make 2k1000-boot IMAGE=kernel-2k1000-apk-tests.ui
+```
+
+该镜像依次验证 HTTPS 索引、签名、依赖下载、`busybox + zlib` 安装、维护脚本和
+trigger，再通过安装根自己的 musl loader 执行 BusyBox。成功标志为
+`[apk-test] RESULT=PASS`。该安装树随复位消失；长期持久安装必须新增独立可写 ext4
+分区或 overlay，不得直接改写竞赛测试集 P1 或工具 P3。详细流程见
+`docs/08_testing/apk-isolated.md`。

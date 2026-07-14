@@ -321,6 +321,15 @@ fn apply_cpython_test_focus(cfg: &mut RuntimeConfig) {
     println!("[initproc] isolated CPython focus enabled");
 }
 
+fn apk_test_enabled() -> bool {
+    let marker = open("/apk_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
 fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
     let marker = open("/board_shell\0", OpenFlags::RDONLY);
     if marker < 0 {
@@ -3292,8 +3301,7 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     // Step 2: musl/glibc 动态库 + /lib/modules/ — 单次 shell 调用
     // WARNING: Step 2 does `rm -rf /usr/lib; ln -sf /lib /usr/lib`, so any
-    // apk-installed libs in /usr/lib (e.g. libeconf.so.0 from e2fsprogs)
-    // would be destroyed. install_apk_packages must run AFTER this step.
+    // package-manager test must run only after prepare_symlink() completes.
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
         mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
@@ -3335,12 +3343,6 @@ fn prepare_symlink(environ: &[*const u8]) {
     \0";
     let ret = run_bash_cmd(lmbench_cmd, environ);
     println!("[initproc] lmbench compatibility done, exit={}", ret);
-
-    // Phase 5.5: Install Alpine packages via apk (mkfs.ext4 etc.)
-    // Must run AFTER lib linking (Step 2), because Step 2 does
-    // `rm -rf /usr/lib; ln -sf /lib /usr/lib` which would destroy
-    // any apk-installed libraries in /usr/lib/.
-    // install_apk_packages(environ);
 
     // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
@@ -3393,25 +3395,63 @@ fn prepare_symlink(environ: &[*const u8]) {
     );
 }
 
-fn install_apk_packages(environ: &[*const u8]) {
-    let apk = "/tools/bin/apk.static\0";
-    let pkgs = "e2fsprogs\0";
-    let cmd = alloc::format!(
-        "{} update && {} add {} && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
-        apk.trim_end_matches('\0'),
-        apk.trim_end_matches('\0'),
-        pkgs.trim_end_matches('\0'),
-    );
-    println!("[initproc] apk add {} ...", pkgs.trim_end_matches('\0'));
-    let ret = run_bash_cmd(&cmd, environ);
-    if ret != 0 {
-        println!(
-            "[initproc] apk add failed (ret={}), keeping busybox mkfs fallback",
-            ret
-        );
-    } else {
-        println!("[initproc] apk add -> exit=0");
-    }
+fn run_apk_ramfs_gate(environ: &[*const u8]) -> i32 {
+    // Keep package payloads and the APK database away from immutable P1/P3.
+    // On the board only the download cache uses the validated FAT32 scratch;
+    // the install root remains ramfs because APK needs Unix modes and links.
+    let cmd = r#"
+        set -eu
+        apk=/bin/apk.static
+        [ -x "$apk" ] || apk=/tools/bin/apk.static
+        [ -x "$apk" ]
+
+        root=/run/apk-root
+        repos=/run/apk-test.repositories
+        cache=/tmp/apk-cache
+        if [ -d /scratch ]; then
+            cache=/scratch/apk-cache
+        fi
+        rm -rf "$root"
+        mkdir -p "$root/lib/apk/db" "$root/etc/apk" "$root/var/cache/apk" "$cache"
+        : > "$root/etc/apk/world"
+        printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
+        rm -f "$cache"/zlib-*.apk
+
+        apk_cmd() {
+            "$apk" \
+                --root "$root" \
+                --cache-dir "$cache" \
+                --keys-dir /etc/apk/keys \
+                --repositories-file "$repos" \
+                "$@"
+        }
+
+        echo '[apk-test] stage=version'
+        "$apk" --version
+        echo '[apk-test] stage=update'
+        apk_cmd update
+        echo '[apk-test] stage=fetch'
+        (cd "$cache" && apk_cmd fetch zlib)
+        set -- "$cache"/zlib-*.apk
+        [ -s "$1" ]
+        echo '[apk-test] stage=add'
+        apk_cmd add busybox zlib
+        echo '[apk-test] stage=verify'
+        apk_cmd info -e busybox >/dev/null
+        [ -x "$root/bin/busybox" ]
+
+        loader="$root/lib/ld-musl-loongarch64.so.1"
+        [ -x "$loader" ]
+        echo '[apk-test] stage=exec'
+        result=$("$loader" --library-path "$root/lib" \
+            "$root/bin/busybox" echo APK_EXEC_OK)
+        [ "$result" = APK_EXEC_OK ]
+        echo "[apk-test] PASS root=$root cache=$cache"
+    "#;
+    // The board's shared-network HTTPS path can spend several minutes fetching
+    // three repository indexes. Keep a finite guard without treating that as a
+    // functional APK failure.
+    run_bash_cmd_timeout(cmd, environ, 900)
 }
 
 #[no_mangle]
@@ -3449,6 +3489,24 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}",
         bash_ret, has_bin_bash
     );
+
+    if apk_test_enabled() {
+        println!("[apk-test] START isolated ramfs package-manager gate");
+        let ret = run_apk_ramfs_gate(&environ);
+        if ret == 0 {
+            println!("[apk-test] RESULT=PASS");
+        } else {
+            println!(
+                "[apk-test] RESULT=FAIL wait_status={} exit={}",
+                ret,
+                exit_code_from_waitpid_status(ret)
+            );
+        }
+        println!("[apk-test] entering diagnostic shell");
+        enter_shell(path, &environ);
+        shutdown();
+        return if ret == 0 { 0 } else { 1 };
+    }
 
     // println!("[initproc] running fs_test...");
     // let fs_test_cmd = "cd / && ./fs_test\0";

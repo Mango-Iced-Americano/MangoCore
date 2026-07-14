@@ -4,6 +4,29 @@
 
 ## 2026-07-14
 
+### board/apk: 建立只读系统盘上的隔离可写包管理器门禁
+
+**涉及文件：**
+- `os/Cargo.toml`、`os/src/fs/mod.rs` — 新增默认关闭的 `apk_test` feature，并在 ramfs 根目录创建易失聚焦标记，不改写 SSD 配置
+- `os/build_initramfs.sh`、`os/Makefile`、`os/make/la64.mk` — 可选嵌入目标架构 `apk.static`，增加 LA64 QEMU 与 2K1000LA 专用构建/运行入口；QEMU 使用官方盘 snapshot，实板保留 P1/P3 及块设备节点只读
+- `user/src/bin/initproc.rs` — 将 APK 数据库和安装树放到 `/run/apk-root` RAMFS，QEMU 缓存使用 `/tmp/apk-cache`，实板只把可删除下载缓存写入 P2 `/scratch/apk-cache`；自动验证 HTTPS 索引、fetch、带 post-install/trigger 的 add、数据库和私有 musl loader 执行
+- `docs/08_testing/apk-isolated.md`、`docs/03_fs/2k1000-full-test-disk.md`、`docs/README.md` — 记录包管理器存储分层、安全边界、命令和持久化 P4/overlay 后续阶段
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“下载缓存与安装根不能因都可写而混用 FAT32”的复用模式，以及 wait status/外层超时判定要求
+
+**验证：**
+- Docker 串行执行 `make rv64-kernel-build-only MODE=release LOG=off` 与 `make la64-kernel-build-only MODE=release LOG=off`，两架构用户态和内核均编译成功，仅有项目既有 warning ✅
+- Docker 执行 `make la64-qemu-apk-run MODE=release`；不挂 tools 磁盘，仅靠 initramfs 中 `apk-tools 3.0.6-r0` 完成 edge/main HTTPS 签名索引、zlib fetch、musl/busybox/zlib 安装、post-install、trigger、数据库验证和私有 loader 执行，输出 `[apk-test] RESULT=PASS` ✅
+- 2K1000LA 首轮识别 2K1000 RNG、GMAC 1000M/full、DHCP `192.168.2.2/24` 并通过 scratch 冒烟；在线索引共识别 33729 个包，zlib 缓存写入真实 P2，musl/busybox/zlib 三包安装及脚本/trigger 成功 ✅
+- 首轮自动结果为原始 wait status 9。诊断确认是 300 秒外层保护在安装刚结束时发送 `SIGKILL`，不是 APK 返回 9；安装后的 BusyBox、LoongArch musl loader 均存在，手工 loader 命令输出 `APK_BOARD_EXEC_OK`，P2 上两个 zlib 缓存文件均为 54.3 KiB ✅
+- 将保护调整为 900 秒并增加 `verify/exec` 阶段及 wait status 解码后，重新通过双架构编译和 LA64 QEMU 全门禁；最终 `kernel-2k1000-apk-tests.ui` 总长 16,719,520 字节、数据段 16,719,456 字节、SHA-256 `459d6a011c0a4b51cf5bc938d881075d950be541c6fee190dc332b11bdb8f1ac` ✅
+- 最终 uImage 经 U-Boot TFTP 传输 16,719,520 字节、CRC32 `ecca3739`，`iminfo` checksum 与 load/entry 均通过；2K1000LA 获取 `192.168.2.2/24`，edge/main 索引识别 5920 个包，自动输出 `stage=verify`、`stage=exec`、`PASS root=/run/apk-root cache=/scratch/apk-cache` 和 `[apk-test] RESULT=PASS` ✅
+- 实板 Shell `mount` 确认 `/sdcard`、`/tools`、`/tests`、`/musl`、`/glibc` 均为 ext4 `ro`，仅根 RAMFS、TmpFS 与 P2 `/scratch` 为 `rw`；P2 上两个 zlib 缓存文件均为 54.3 KiB，主机监视器退出后开发板继续运行 ✅
+- `bash -n os/build_initramfs.sh` 与 `git diff --check` 通过 ✅
+
+**备注：**
+- 当前不是持久可写根文件系统：APK 安装树随复位消失，P2 只缓存下载包。长期 `apk add` 应新增带身份和恢复门禁的 P4 ext4 或 overlay 上层，不能直接把竞赛 P1/P3 改成可写。
+- 交互配置保留 main/community/testing；自动 smoke 只使用包含被测包及依赖的 `edge/main`。实板第二轮曾在额外 testing 索引上持续无进展，收敛仓库集合是消除无关 CDN 依赖，不是跳过签名、HTTPS、依赖安装或动态执行验证。
+
 ### board/cpython: 提供可直接使用的全局 Python 命令
 
 **涉及文件：**

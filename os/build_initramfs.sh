@@ -47,12 +47,14 @@ case "$ARCH" in
   rv64)
     INIT_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/init"
     BUSYBOX_SRC="../user/tools/riscv64/bin/busybox"
+    APK_SRC="../user/tools/riscv64/bin/apk.static"
     INET_TEST_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/inet_test"
     RNG_TEST_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/rng_test"
     ;;
   la64)
     INIT_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/init"
     BUSYBOX_SRC="../user/tools/loongarch64/bin/busybox"
+    APK_SRC="../user/tools/loongarch64/bin/apk.static"
     INET_TEST_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/inet_test"
     RNG_TEST_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/rng_test"
     ;;
@@ -62,6 +64,19 @@ case "$ARCH" in
     exit 1
     ;;
 esac
+
+# Optional package-manager runtime used by the isolated APK gate. Repositories
+# and signing keys already live in the common initramfs skeleton; only the
+# architecture-specific static executable needs to be added here.
+if [ "${APK_RUNTIME:-0}" = "1" ]; then
+    if [ ! -x "$APK_SRC" ]; then
+        echo "[initramfs] ERROR: missing apk runtime; run make tools-apk"
+        rm -rf "$STAGE"
+        exit 1
+    fi
+    install -m 0755 "$APK_SRC" "$STAGE/bin/apk.static"
+    echo "[initramfs] installed self-contained $ARCH apk.static"
+fi
 
 # Optional self-contained HTTPS curl runtime for QEMU and 2K1000 shell images.
 if [ "${CURL_RUNTIME:-0}" = "1" ]; then

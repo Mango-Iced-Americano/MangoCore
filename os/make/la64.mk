@@ -91,6 +91,7 @@ fs-img: user
 # Initramfs cpio generation (always needed when feature is in Cargo defaults)
 INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
 CURL_RUNTIME ?= 0
+APK_RUNTIME ?= 0
 INET_TEST_RUNTIME ?= 0
 RNG_TEST_RUNTIME ?= 0
 
@@ -98,7 +99,8 @@ kernel: $(INITRAMFS_CPIO_LA)
 
 $(INITRAMFS_CPIO_LA): user
 	@mkdir -p ../fs-img-dir
-	CURL_RUNTIME=$(CURL_RUNTIME) INET_TEST_RUNTIME=$(INET_TEST_RUNTIME) \
+	CURL_RUNTIME=$(CURL_RUNTIME) APK_RUNTIME=$(APK_RUNTIME) \
+		INET_TEST_RUNTIME=$(INET_TEST_RUNTIME) \
 		RNG_TEST_RUNTIME=$(RNG_TEST_RUNTIME) \
 		./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 	@touch src/initramfs-la.S
@@ -191,6 +193,23 @@ qemu-curl-shell:
 		-netdev user,id=net0 \
 		-rtc base=utc
 
+# Automated APK gate. The package manager itself is embedded in initramfs and
+# all disk writes stay in QEMU snapshot/RAM state.
+qemu-apk-tests:
+	@qemu-system-loongarch64 \
+		-machine virt \
+		-kernel ../kernel-la-apk-tests \
+		-m 1G \
+		-nographic \
+		-smp 1 \
+		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0,snapshot=on \
+		-device virtio-blk-pci,drive=x0 \
+		$(VIRTIO_RNG_DEVICE) \
+		-no-reboot \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
+		-rtc base=utc
+
 comp-gdb:
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -208,4 +227,4 @@ comp-gdb:
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell comp-gdb
+.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell qemu-apk-tests comp-gdb

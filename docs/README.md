@@ -39,7 +39,7 @@ tags: [docs, index, overview]
 | `06_net/` | 网络 | smoltcp 集成、TCP/UDP/RAW/Unix 套接字、设备适配器 |
 | `07_driver/` | 驱动 | Virtio 块/网卡、设备 trait、HAL 后端 |
 | `diagrams/` | 架构图 | 子系统架构图、流程图、关系图等图片资源 |
-| `08_testing/` | 测试 | 隔离 CPython 运行时、QEMU 与实板测试门禁 |
+| `08_testing/` | 测试 | 隔离 CPython/APK 运行时、QEMU 与实板测试门禁 |
 | `09_debug/` | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（多篇） |
 | `_templates/` | 模板 | 新模块文档的标准文档模板 |
 | `kernel/` | 遗留子系统文档 | 旧版模块文档（待迁移到 00-09 布局） |

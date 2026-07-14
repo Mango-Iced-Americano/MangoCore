@@ -559,3 +559,11 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **修复**：保留运行时隔离布局，提供位于全局 `PATH` 的轻量包装器，由它显式执行私有 loader 并传入库、运行时和证书环境；链接既预置进只读 tools 镜像，也在可写 staged 根文件系统启动时兜底安装。缓存、临时文件和用户包指向独立可写分区。
 - **验收**：集成测试必须从普通 Shell 路径直接调用 `/usr/bin/<command>`，不能只验证内部脚本的显式 loader 路径；同时覆盖 tools 绑定到 `/usr` 和保留可写 `/usr` 两种启动模式。
 - **相关文件**：`user/tools/cpython/python3-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/make_2k1000_full_test_disk.py`, `os/Makefile`
+
+### 包管理器的下载缓存与安装根必须分层
+
+- **现象**：HTTPS 下载和原始包缓存正常，但把包管理器根目录放在 FAT32 后出现 chmod、符号链接、维护脚本或动态加载器异常；直接把系统/工具分区改成可写又会扩大损坏范围。
+- **根因**：下载缓存只保存不透明的归档文件，安装根却需要 Unix mode、符号链接、包数据库和事务中间状态。两者的文件系统语义不同，不能因“都需要写入”而放在同一 FAT32 路径。
+- **修复**：首先把静态包管理器、仓库配置和公钥嵌入只读 initramfs；安装根放在 RAMFS/TmpFS，已验证的 FAT32 scratch 只承载可删除缓存。用在线 update、fetch、带脚本/trigger 的 add，以及安装根私有 loader 执行动态程序形成闭环；持久化安装另行设计 ext4/overlay 上层。
+- **验收**：日志分别确认索引签名、缓存文件、包数据库、安装文件和动态执行；外层超时要按实板网络速度设置并解码 wait status，避免把测试框架的 `SIGKILL` 当成包管理器失败。
+- **相关文件**：`os/build_initramfs.sh`, `os/src/fs/mod.rs`, `user/src/bin/initproc.rs`, `docs/08_testing/apk-isolated.md`
