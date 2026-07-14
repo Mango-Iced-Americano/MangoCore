@@ -415,3 +415,11 @@
 - **修复**: `fd_to_inode()` 中将 `EOPNOTSUPP` 改为 `EBADF`，仅改 fd-based 路径。
 - **教训**: 修改 errno 时，查 Linux 源码确认 syscall 的具体语义，不要仅凭直觉推断。fd-based 和 path-based 变体可能使用不同的 errno。
 - **相关文件**: `os/src/syscall/fs/common.rs`
+
+### fd-based xattr syscall 的 errno 优先级：fd 验证必须在参数验证之前
+
+- **现象**: fgetxattr/fsetxattr 对 O_PATH fd 或 pipe/socket fd 返回 EOPNOTSUPP，但 Linux 期望 EBADF。根因是 `validate_xattr_name()`（检查非 user.* 前缀 √ 返回 EOPNOTSUPP）比 `fd_to_inode()` 先调用，EOPNOTSUPP 抢在 EBADF 之前返回。
+- **根因**: Linux syscall 的 errno 优先级规则：fd 有效性检查（EBADF）比参数语义检查（EOPNOTSUPP/EINVAL）优先级更高。当调用顺序为 `validate_xattr_name → fd_to_inode` 时，参数检查先于 fd 检查执行，导致错误的 errno 被返回。
+- **修复**: 将 `fd_to_inode()` 移到 `user_cstring()`/`validate_xattr_name()` 之前，确保 fd 相关的错误先被返回。
+- **教训**: 实现 fd-based syscall 时，始终将 fd 有效性检查排在最前面，再执行参数/缓冲区校验。这是 Linux 全局惯例，不仅限于 xattr 类 syscall。同样问题也存在于 `sys_fsetxattr.rs` 和 `sys_fremovexattr.rs`。
+- **相关文件**: `os/src/syscall/fs/sys_fgetxattr.rs`

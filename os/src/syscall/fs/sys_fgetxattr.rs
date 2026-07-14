@@ -1,6 +1,13 @@
 use super::common::*;
 
 pub fn sys_fgetxattr(fd: usize, name: *const u8, value: *mut u8, size: usize) -> isize {
+    // fd_to_inode first: O_PATH fd returns EBADF before xattr name validation
+    // (Linux ordering: EBADF takes priority over EOPNOTSUPP/ENOTSUP)
+    let inode = match fd_to_inode(fd) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
     let token = current_user_token();
     let name_str = match user_cstring(token, name) {
         Ok(s) => s,
@@ -8,11 +15,6 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, value: *mut u8, size: usize) ->
     };
     let validated = match validate_xattr_name(&name_str) {
         Ok(n) => n,
-        Err(e) => return e,
-    };
-
-    let inode = match fd_to_inode(fd) {
-        Ok(i) => i,
         Err(e) => return e,
     };
 

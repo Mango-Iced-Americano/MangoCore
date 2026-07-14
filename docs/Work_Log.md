@@ -1,5 +1,16 @@
 ## 2026-07-15
 
+### Fix sys_fgetxattr errno ordering: fd_to_inode must precede xattr name validation
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_fgetxattr.rs` — 将 `fd_to_inode()` 调用移到 `user_cstring()` / `validate_xattr_name()` 之前。Linux errno 优先级：O_PATH fd 应在 xattr 名前缀验证之前返回 `EBADF`，而非 `EOPNOTSUPP`。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（待执行）
+- `make la64-kernel-build-only` ✅（待执行）
+
+**备注：** `sys_fsetxattr.rs` 和 `sys_fremovexattr.rs` 有相同的顺序问题（validate_xattr_name 在 fd_to_inode 之前），但不在本次修复范围内。
+
 ### Fix getdents02 LTP failure: ENOENT for deleted-but-open directories (nlinks==0)
 
 **涉及文件：**
@@ -116,6 +127,17 @@
 - `make la64-kernel-build-only` ✅
 
 **备注：** 此前 rename 直接调用 lwext4 C 的 `ext4_frename`/`ext4_dir_mv`，无任何 Linux 语义预检查。类型不匹配、非空目录覆盖、子树循环移动等场景下 lwext4 C 代码可能静默成功或行为不可预期。本次修复将所有安全检查前移到破坏性操作（target removal、PageCache flush、lwext4 rename）之前。已对齐 ext4 native rename 和 tmpfs/ramfs rename 的检查语义。为防止竞态，所有检查在单核无抢占的系统上安全，且与后续 lwext4 lock 内的操作之间不存在并发的文件系统修改。
+
+### Fix mount02 LTP ENAMETOOLONG: add validate_path_len for target before vfs_lookup
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_mount.rs` — 在 `user_cstring` 读取 target 路径后、路径解析/`vfs_lookup` 之前插入 `validate_path_len(&target)` 检查
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Linux 语义：当 target 路径过长时 ENAMETOOLONG（36）的检查优先级高于 ENOENT（2）。此前 vfs_lookup 先执行，对不存在的超长路径返回 ENOENT，导致 LTP mount02 测试失败。对齐其他 fs syscall 文件中已有的相同模式（sys_umount2、sys_unlinkat 等）。
 
 ---
 

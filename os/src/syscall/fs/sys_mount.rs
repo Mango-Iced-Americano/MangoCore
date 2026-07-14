@@ -22,6 +22,11 @@ pub fn sys_mount(
         Err(errno) => return errno,
     };
 
+    // Validate path length before lookup (Linux: ENAMETOOLONG before ENOENT)
+    if let Err(errno) = validate_path_len(&target) {
+        return errno;
+    }
+
     // Parse mountflags early — needed for flag routing
     let mountflags = match MountFlags::from_bits(mountflags_raw) {
         Some(f) => f,
