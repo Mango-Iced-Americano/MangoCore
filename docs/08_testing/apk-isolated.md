@@ -161,5 +161,7 @@ make 2k1000-boot IMAGE=kernel-2k1000-apk-persist-tests.ui
 
 P4 payload、受限写盘命令和 MBR 发布顺序见
 `docs/03_fs/2k1000-full-test-disk.md`。该功能仍是聚焦门禁，不代表正式 run 镜像已经
-切换为通用可写根或实现了 overlay、配额和掉电一致性。真实 SSD P4 写入及两次实板
-启动尚未完成。
+切换为通用可写根或实现了 overlay、配额和掉电一致性。真实 SSD 已完成 P4 写入；
+首次实板启动完成 HTTPS update/fetch/add 并输出 `PASS mode=install`，第二次完整复位
+后未重装，直接验证 P4 数据库和已安装 BusyBox，并输出 `PASS mode=reuse`。两轮均通过
+GMAC DHCP、P2 scratch 冒烟和 `[apk-persist] RESULT=PASS`。

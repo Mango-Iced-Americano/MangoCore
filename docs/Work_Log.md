@@ -20,11 +20,13 @@
 - 同一非 snapshot QEMU 磁盘连续启动两次：首轮完成 HTTPS update/fetch/add 并输出 `[apk-persist] PASS mode=install`，次轮不重装并输出 `PASS mode=reuse`；两轮均为 `RESULT=PASS` ✅
 - `make la64-2k1000-apk-persist-tests MODE=release` 成功；`kernel-2k1000-apk-persist-tests.ui` 为 16,732,616 字节，SHA-256 `4371acb47ffa275fcb0846025748931745cae87102fd8c7921e51f5142fa9365` ✅
 - 三个 Python 工具通过 `py_compile`，`git diff --check` 通过；旧 MBR 首 sector 复核为 disk id `0x4d414e47`、仅 P1-P3、CRC32 `f469e65a` ✅
-- 真实板 `make 2k1000-p4-preflight` 已启动，但 120 秒内未观察到 RESET/U-Boot，脚本安全超时退出；未执行任何 SCSI 写入，P4 尚未写入 SSD ⏸
+- 真实板只读预检通过后，受限写入器从 `0xC00800` 到 `0x1400800` 完成 16 个 `0x80000`-sector 分块写入和逐块读回；随后只写一次 LBA0 MBR sector，新 MBR CRC32 `6538e5cb`，重新扫描得到 P4 `12584960 + 8388608`，P1-P3 边界不变 ✅
+- U-Boot 从 P4 读取 `MANGO_STATE.txt` 为 97 字节、CRC32 `c8f1b4ff`；实板专用 uImage 两次 TFTP CRC32 均为 `ba9d7c23` 且 `iminfo` checksum 通过，首次启动输出 `PASS mode=install`，再次复位启动输出 `PASS mode=reuse`，两轮均为 `RESULT=PASS` ✅
+- 两轮内核均识别 2K1000 RNG、GMAC 1000M/full、DHCP `192.168.2.2/24` 并通过 P2 scratch 冒烟；第二轮直接使用 P4 安装树，没有重新执行 update/fetch/add，也没有 panic/FAIL ✅
 
 **备注：**
 - P4 固定范围为 `0xC00800..0x1400800`，只占用 SSD 尾部首个 4GiB，其后继续留空。当前是聚焦持久化门禁，不是通用 overlay 根、配额或完整掉电恢复方案。
-- 实板下一等待点是重新执行只读预检并按提示 RESET；预检通过后才运行带三项固定确认值的 `2k1000-p4-write`，随后用同一专用内核启动两次验证 `install -> reuse`。
+- P4 staged 阶段已经完成 QEMU 与实板闭环。下一阶段应把“聚焦测试 feature”收敛为可交互的持久环境入口，再决定采用独立 chroot/应用根还是实现 overlay；在方案确定前仍不放宽 P1/P3。
 
 ### board/apk: 建立只读系统盘上的隔离可写包管理器门禁
 

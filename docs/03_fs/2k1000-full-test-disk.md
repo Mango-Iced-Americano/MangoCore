@@ -365,6 +365,8 @@ make -C os la64-2k1000-apk-persist-tests MODE=release
 make 2k1000-boot IMAGE=kernel-2k1000-apk-persist-tests.ui
 ```
 
-实板也要完整启动两次并分别得到 `mode=install`、`mode=reuse`。截至 2026-07-14，
-QEMU 双启动和实板目标编译已经通过；真实板只读预检因未观察到 RESET 而超时退出，
-P4 尚未写入 SSD。
+实板也要完整启动两次并分别得到 `mode=install`、`mode=reuse`。2026-07-14 已完成：
+16 个 payload 分块覆盖 `0xC00800..0x1400800` 并全部读回一致，新 MBR CRC32 为
+`6538e5cb`，P4 哨兵为 97 字节、CRC32 `c8f1b4ff`。同一专用 uImage 首次启动输出
+`PASS mode=install`，再次复位后输出 `PASS mode=reuse`，两轮均为 `RESULT=PASS`；
+P1-P3 边界及只读策略保持不变。
