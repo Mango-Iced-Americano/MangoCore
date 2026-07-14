@@ -4,6 +4,28 @@
 
 ## 2026-07-14
 
+### board/storage: 建立 P4 ext4 持久状态分区和双启动 APK 门禁
+
+**涉及文件：**
+- `scripts/make_2k1000_p4_ext4.py`、`scripts/make_2k1000_p4_qemu_disk.py` — 生成固定 4GiB、无 journal、带 UUID/卷标和状态目录的 P4 payload，以及保持真实 MBR 四分区边界的稀疏 QEMU 验证盘
+- `scripts/write_2k1000_p4.py`、`Makefile` — 新增只读预检和受限网线写入入口；硬校验 SSD 型号/容量、旧 MBR CRC、P1-P3 边界、manifest/SHA 和三项人工确认，16 块 payload 全部读回后才发布 P4 MBR 项，失败或中断时尝试回滚旧 MBR
+- `os/src/fs/filesystem.rs`、`os/src/fs/mod.rs`、`os/src/main.rs`、`os/Cargo.toml` — 读取 ext4 UUID/卷标/feature 位；新增 `p4_persist_rw` staged 路径，只把固定 P4 读写挂载到 `/persist`，继续保持 P1/P3 和用户态块设备节点只读
+- `user/src/bin/initproc.rs`、`os/Makefile`、`os/make/la64.mk` — 新增 P4 持久 APK 聚焦门禁和 QEMU/2K1000LA 构建入口；首次启动完成安装与三阶段同步后提交标记，第二次启动必须直接复用并执行已安装 BusyBox
+- `docs/03_fs/{2k1000-full-test-disk,init-and-rootfs,ext4}.md`、`docs/08_testing/apk-isolated.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 记录 P4 布局、身份门禁、payload-first/MBR-last 写入协议、双启动验收和当前实板边界
+
+**验证：**
+- Docker 串行执行默认 `make rv64-kernel-build-only` 与 `make la64-kernel-build-only`，均成功，仅有项目既有 warning；生成态 `lang_items.rs` 和 LoongArch linker 已恢复 ✅
+- `make 2k1000-p4-image` 生成逻辑大小 4,294,967,296 字节的稀疏 ext4 payload，`e2fsck -f -n` 通过；UUID `4d414e47-5354-4154-4500-000000000004`、卷标 `MANGO_STATE`、无 journal/recovery，SHA-256 `ff8bceeb48efa3968bd8df2e30284a773f971872dc7d3116226e4361dc2c298e` ✅
+- QEMU 稀疏盘经 `fdisk` 确认 P1 `0x800+0x800000`、P2 `0x800800+0x280000`、P3 `0xA80800+0x180000`、P4 `0xC00800+0x800000`；内核按预期挂载 `/sdcard ro`、`/scratch rw`、`/tools ro`、`/persist rw` ✅
+- 同一非 snapshot QEMU 磁盘连续启动两次：首轮完成 HTTPS update/fetch/add 并输出 `[apk-persist] PASS mode=install`，次轮不重装并输出 `PASS mode=reuse`；两轮均为 `RESULT=PASS` ✅
+- `make la64-2k1000-apk-persist-tests MODE=release` 成功；`kernel-2k1000-apk-persist-tests.ui` 为 16,732,616 字节，SHA-256 `4371acb47ffa275fcb0846025748931745cae87102fd8c7921e51f5142fa9365` ✅
+- 三个 Python 工具通过 `py_compile`，`git diff --check` 通过；旧 MBR 首 sector 复核为 disk id `0x4d414e47`、仅 P1-P3、CRC32 `f469e65a` ✅
+- 真实板 `make 2k1000-p4-preflight` 已启动，但 120 秒内未观察到 RESET/U-Boot，脚本安全超时退出；未执行任何 SCSI 写入，P4 尚未写入 SSD ⏸
+
+**备注：**
+- P4 固定范围为 `0xC00800..0x1400800`，只占用 SSD 尾部首个 4GiB，其后继续留空。当前是聚焦持久化门禁，不是通用 overlay 根、配额或完整掉电恢复方案。
+- 实板下一等待点是重新执行只读预检并按提示 RESET；预检通过后才运行带三项固定确认值的 `2k1000-p4-write`，随后用同一专用内核启动两次验证 `install -> reuse`。
+
 ### board/apk: 建立只读系统盘上的隔离可写包管理器门禁
 
 **涉及文件：**

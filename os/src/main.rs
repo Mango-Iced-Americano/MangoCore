@@ -43,6 +43,14 @@ compile_error!("sata_probe and sata_write_probe are mutually exclusive");
 compile_error!("sata_fs_write_probe cannot be combined with another SATA probe");
 #[cfg(all(feature = "sata_scratch_rw", not(feature = "board_2k1000")))]
 compile_error!("sata_scratch_rw is supported only on board_2k1000");
+#[cfg(all(feature = "p4_persist_rw", not(feature = "initramfs")))]
+compile_error!("p4_persist_rw requires the initramfs mount topology");
+#[cfg(all(
+    feature = "board_2k1000",
+    feature = "p4_persist_rw",
+    not(feature = "sata_scratch_rw")
+))]
+compile_error!("2K1000 p4_persist_rw requires the writable P2 scratch cache");
 #[cfg(all(feature = "board_core_test", not(feature = "board_2k1000")))]
 compile_error!("board_core_test is supported only on board_2k1000");
 #[cfg(all(feature = "board_core_test", not(feature = "sata_scratch_rw")))]
@@ -56,6 +64,15 @@ compile_error!("board_core_test requires the writable SATA scratch workspace");
     )
 ))]
 compile_error!("sata_scratch_rw cannot be combined with a SATA probe");
+#[cfg(all(
+    feature = "p4_persist_rw",
+    any(
+        feature = "sata_probe",
+        feature = "sata_write_probe",
+        feature = "sata_fs_write_probe"
+    )
+))]
+compile_error!("p4_persist_rw cannot be combined with a SATA probe");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -291,17 +308,24 @@ pub fn rust_main() -> ! {
 
         // 在安装 preload payload 前探测，保证 AHCI/virtio DMA 页仍可从低碎片
         // 物理内存中分配。
-        #[cfg(not(feature = "board_2k1000"))]
+        #[cfg(all(not(feature = "board_2k1000"), not(feature = "p4_persist_rw")))]
         fs::mount_boot_block_devices();
+        #[cfg(all(not(feature = "board_2k1000"), feature = "p4_persist_rw"))]
+        fs::mount_boot_block_devices_with_writable_persist();
         #[cfg(all(
             feature = "board_2k1000",
             feature = "block_sata",
             not(any(feature = "sata_probe", feature = "sata_write_probe"))
         ))]
-        #[cfg(not(feature = "sata_scratch_rw"))]
+        #[cfg(all(
+            not(feature = "sata_scratch_rw"),
+            not(feature = "p4_persist_rw")
+        ))]
         fs::mount_boot_block_devices_read_only();
-        #[cfg(feature = "sata_scratch_rw")]
+        #[cfg(all(feature = "sata_scratch_rw", not(feature = "p4_persist_rw")))]
         fs::mount_boot_block_devices_with_writable_scratch();
+        #[cfg(all(feature = "board_2k1000", feature = "p4_persist_rw"))]
+        fs::mount_boot_block_devices_with_writable_persist();
         #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
         fs::run_board_scratch_write_probe();
         #[cfg(all(

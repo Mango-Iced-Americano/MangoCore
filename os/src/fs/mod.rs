@@ -600,6 +600,8 @@ struct MountCandidate {
     source: String,
     partno: Option<u8>,
     partition_type: Option<u8>,
+    start_lba: Option<u64>,
+    sectors: Option<u64>,
     fs_type: self::filesystem::FS_Type,
 }
 
@@ -626,6 +628,8 @@ fn discover_mount_devices(
             source: alloc::format!("/dev/{}", base_name),
             partno: None,
             partition_type: None,
+            start_lba: None,
+            sectors: None,
             fs_type: raw_fs,
         }];
     }
@@ -670,6 +674,8 @@ fn discover_mount_devices(
                         source: alloc::format!("/dev/{}", name),
                         partno: Some(partition.partno),
                         partition_type: Some(partition.type_code),
+                        start_lba: Some(partition.start_lba),
+                        sectors: Some(partition.sectors),
                         fs_type,
                     });
                 }
@@ -693,12 +699,52 @@ fn discover_mount_devices(
     }
 }
 
-fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags, writable_scratch: bool) {
+const P4_PERSIST_START_LBA: u64 = 0x00c0_0800;
+const P4_PERSIST_SECTORS: u64 = 0x0080_0000;
+const P4_PERSIST_UUID: [u8; 16] = [
+    0x4d, 0x41, 0x4e, 0x47, 0x53, 0x54, 0x41, 0x54, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x04,
+];
+const P4_PERSIST_LABEL: [u8; 16] = [
+    b'M', b'A', b'N', b'G', b'O', b'_', b'S', b'T', b'A', b'T', b'E', 0, 0, 0, 0, 0,
+];
+const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
+const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+
+fn validate_p4_persist(candidate: &MountCandidate) -> Result<(), &'static str> {
+    if candidate.partno != Some(4)
+        || candidate.partition_type != Some(0x83)
+        || candidate.start_lba != Some(P4_PERSIST_START_LBA)
+        || candidate.sectors != Some(P4_PERSIST_SECTORS)
+        || candidate.fs_type != self::filesystem::FS_Type::Ext4
+    {
+        return Err("P4 partition number, type, bounds, or filesystem is unexpected");
+    }
+    let identity = self::filesystem::ext4_identity(&candidate.device)
+        .ok_or("P4 ext4 superblock identity is unreadable")?;
+    if identity.uuid != P4_PERSIST_UUID || identity.volume_name != P4_PERSIST_LABEL {
+        return Err("P4 ext4 UUID or volume label is unexpected");
+    }
+    if identity.compatible_features & EXT4_FEATURE_COMPAT_HAS_JOURNAL != 0 {
+        return Err("P4 ext4 journal is enabled but journal replay is unsupported");
+    }
+    if identity.incompatible_features & EXT4_FEATURE_INCOMPAT_RECOVER != 0 {
+        return Err("P4 ext4 requires recovery");
+    }
+    Ok(())
+}
+
+fn mount_boot_block_devices_with_flags(
+    mount_flags: self::vfs::MountFlags,
+    writable_scratch: bool,
+    writable_persist: bool,
+) {
     let root = vfs_root();
     let devices = crate::drivers::block::block_devices();
     let read_only = mount_flags.contains(self::vfs::MountFlags::RDONLY);
     let mut same_disk_tools = None;
     let mut same_disk_scratch = None;
+    let mut same_disk_persist = None;
 
     match devices[0].as_ref() {
         Some(raw) => {
@@ -723,6 +769,12 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags, writa
                             && candidate.partition_type == Some(0x0c)
                             && candidate.fs_type == self::filesystem::FS_Type::Fat32
                     })
+                    .cloned();
+            }
+            if writable_persist {
+                same_disk_persist = candidates
+                    .iter()
+                    .find(|candidate| candidate.partno == Some(4))
                     .cloned();
             }
 
@@ -765,6 +817,28 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags, writa
         }
     }
 
+    if writable_persist {
+        match same_disk_persist {
+            Some(candidate) => {
+                if let Err(error) = validate_p4_persist(&candidate) {
+                    panic!("2K1000 writable P4 identity check failed: {}", error);
+                }
+                if mount_block_fs_with_flags(
+                    &root,
+                    &candidate.device,
+                    "persist",
+                    &alloc::format!("persistent state ({})", candidate.source),
+                    self::vfs::MountFlags::empty(),
+                )
+                .is_none()
+                {
+                    panic!("2K1000 writable P4 ext4 mount failed");
+                }
+            }
+            None => panic!("2K1000 writable P4 ext4 partition not found"),
+        }
+    }
+
     let separate_tools = devices[1].as_ref().and_then(|raw| {
         discover_mount_devices(raw, "vdb", 1, None, Some("vda"), read_only)
             .into_iter()
@@ -801,19 +875,27 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags, writa
 
 /// 探测启动块设备并以读写方式挂载识别出的文件系统。
 pub fn mount_boot_block_devices() {
-    mount_boot_block_devices_with_flags(self::vfs::MountFlags::empty(), false);
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::empty(), false, false);
 }
 
 /// 实板首次文件系统验收路径：注册设备，但只读挂载文件系统。
 pub fn mount_boot_block_devices_read_only() {
-    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, false);
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, false, false);
 }
 
 /// Staged 2K1000 migration policy: keep P1/P3 and all block device nodes
 /// read-only, while mounting the validated P2 FAT32 partition at `/scratch`.
 #[cfg(all(feature = "board_2k1000", feature = "sata_scratch_rw"))]
 pub fn mount_boot_block_devices_with_writable_scratch() {
-    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, true);
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, true, false);
+}
+
+/// Keep P1/P3 and all userspace block nodes read-only, mount P2 as the
+/// disposable cache, and expose only the identity-checked P4 ext4 filesystem
+/// as persistent writable state.
+#[cfg(feature = "p4_persist_rw")]
+pub fn mount_boot_block_devices_with_writable_persist() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, true, true);
 }
 
 #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
@@ -1479,6 +1561,12 @@ pub fn flush_preload() {
         // Run the package-manager gate entirely from the writable initramfs;
         // the marker never changes the SSD-backed test configuration.
         let _ = create_or_open_file("apk_test");
+    }
+    #[cfg(feature = "apk_persist_test")]
+    {
+        // Select the two-boot persistent APK gate without changing P1/P3 or
+        // the test configuration carried by the official image.
+        let _ = create_or_open_file("apk_persist_test");
     }
     #[cfg(feature = "board_shell")]
     {

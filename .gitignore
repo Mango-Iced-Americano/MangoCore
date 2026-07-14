@@ -62,6 +62,11 @@ __pycache__/
 /kernel-2k1000-cpython-tests.ui
 /mango-2k1000la-cpython-tools-p3.img
 /mango-2k1000la-cpython-tools-p3.img.json
+/kernel-2k1000-apk-persist-tests.ui
+/kernel-la-apk-persist-tests
+/mango-2k1000la-state-p4.img
+/mango-2k1000la-state-p4.img.json
+/mango-2k1000la-p4-qemu.img
 .sisyphus/
 sdcard-rv-noconf.img
 /tools/

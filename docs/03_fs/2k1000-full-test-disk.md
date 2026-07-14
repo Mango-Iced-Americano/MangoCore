@@ -8,9 +8,14 @@ last_updated: 2026-07-14
 code_paths:
   - "scripts/make_2k1000_full_test_disk.py"
   - "scripts/make_2k1000_tools_partition.py"
+  - "scripts/make_2k1000_p4_ext4.py"
+  - "scripts/make_2k1000_p4_qemu_disk.py"
   - "scripts/restore_2k1000_p2.py"
   - "scripts/write_2k1000_p3.py"
+  - "scripts/write_2k1000_p4.py"
+  - "os/src/fs/filesystem.rs"
   - "os/src/fs/mod.rs"
+  - "os/src/main.rs"
   - "os/src/fs/fat32/bitmap.rs"
   - "os/src/fs/fat32/efs.rs"
   - "os/src/fs/fat32/fat_inode.rs"
@@ -26,7 +31,9 @@ entry_points:
   - "discover_mount_devices"
   - "mount_boot_block_devices_read_only"
   - "mount_boot_block_devices_with_writable_scratch"
+  - "mount_boot_block_devices_with_writable_persist"
   - "2k1000-cpython-p3-write"
+  - "2k1000-p4-write"
 arch:
   rv64: supported
   la64: supported
@@ -60,8 +67,9 @@ related_docs:
 | P1 | `2048..8390655` | 4GiB | `0x83` ext4 | 官方 LA64 完整测试集，自动挂载 `/sdcard` |
 | P2 | `8390656..11012095` | 1280MiB | `0x0c` FAT32 | 保持 `/dev/vda2` 兼容；staged 镜像额外挂载为 `/scratch` |
 | P3 | `11012096..12584959` | 768MiB | `0x83` ext4 | MangoCore 工具，单盘时自动挂载 `/tools` |
+| P4 | `12584960..20973567` | 4GiB | `0x83` ext4 | staged 持久状态，身份校验后读写挂载 `/persist` |
 
-P1 来自干净的 `fs-img-dir/sdcard-la.img.xz`，注入当前 `os_test.conf`（`mode=run`、`mask=0xFFF`）。不要使用被 QEMU 写过的仓库根目录 `sdcard-la.img` 作为母盘，除非它重新通过只读 `e2fsck -f -n`。
+P1 来自干净的 `fs-img-dir/sdcard-la.img.xz`，注入当前 `os_test.conf`（`mode=run`、`mask=0xFFF`）。不要使用被 QEMU 写过的仓库根目录 `sdcard-la.img` 作为母盘，除非它重新通过只读 `e2fsck -f -n`。原始 6GiB 完整镜像的 MBR 仍只有 P1-P3；P4 由独立 staged 工具在验证真实 SSD 后创建，不要求重写已有三个分区。4GiB P4 结束后到 32GB SSD 末端继续保留未分配空间。
 
 ## 3. 生成
 
@@ -313,3 +321,50 @@ trigger，再通过安装根自己的 musl loader 执行 BusyBox。成功标志�
 `[apk-test] RESULT=PASS`。该安装树随复位消失；长期持久安装必须新增独立可写 ext4
 分区或 overlay，不得直接改写竞赛测试集 P1 或工具 P3。详细流程见
 `docs/08_testing/apk-isolated.md`。
+
+### 7.5 P4 ext4 持久状态
+
+P4 是默认关闭的 staged 能力，不改变正式 run 镜像。固定范围为
+`0xC00800..0x1400800`（末端不含），共 `0x800000` 个 512B sector、4GiB；卷标为
+`MANGO_STATE`，UUID 为 `4d414e47-5354-4154-4500-000000000004`。当前内核没有 ext4
+journal replay，因此 P4 必须以 `^has_journal` 创建，挂载前同时拒绝
+`HAS_JOURNAL` 与 `RECOVER` 位。只凭“第四分区是 ext4”不能获得写权限。
+
+生成 P4 payload 和同布局 QEMU 稀疏盘：
+
+```bash
+make 2k1000-p4-image
+make 2k1000-p4-qemu-disk
+make -C os la64-qemu-apk-persist-tests MODE=release
+```
+
+`mango-2k1000la-state-p4.img` 是裸分区 payload，不含 MBR。QEMU fixture 保持
+P1/P3 只读、P2 为缓存、P4 为安装根；同一 fixture 连续启动两次时，第一次必须输出
+`PASS mode=install`，第二次必须输出 `PASS mode=reuse`。提交标记只在 APK 数据库、
+安装树和临时标记均完成 `sync` 后原子改名；无标记表示上次安装未完成，下一次启动
+必须删除残留并重建，不能把半成品当作可复用状态。
+
+真实 SSD 先执行只读预检，再显式确认三个危险边界写入：
+
+```bash
+make 2k1000-p4-preflight
+make 2k1000-p4-write \
+  CONFIRM_P4_START=0xC00800 \
+  CONFIRM_P4_END=0x1400800 \
+  CONFIRM_DISK_SECTORS=62533296
+```
+
+写入器硬匹配 `TS32GMTS400`、`62533296` sectors、disk id `0x4d414e47`、现有
+P1-P3 的精确边界和旧 MBR CRC32 `f469e65a`。4GiB payload 按 16 个 256MiB 块
+逐块完成 TFTP CRC、SSD 写入和读回 CRC，全部成功后才把 P4 分区项发布到 MBR；
+MBR 提交或后续验证失败时尝试恢复旧 MBR。最后必须由 U-Boot 从 `scsi 0:4` 读取
+`MANGO_STATE.txt` 并比对长度/CRC，随后才允许启动：
+
+```bash
+make -C os la64-2k1000-apk-persist-tests MODE=release
+make 2k1000-boot IMAGE=kernel-2k1000-apk-persist-tests.ui
+```
+
+实板也要完整启动两次并分别得到 `mode=install`、`mode=reuse`。截至 2026-07-14，
+QEMU 双启动和实板目标编译已经通过；真实板只读预检因未观察到 RESET 而超时退出，
+P4 尚未写入 SSD。

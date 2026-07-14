@@ -28,6 +28,15 @@ pub struct DetectedFs {
     pub block_size: usize,
 }
 
+/// Identity and recovery-relevant fields from an ext4 primary superblock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ext4Identity {
+    pub uuid: [u8; 16],
+    pub volume_name: [u8; 16],
+    pub compatible_features: u32,
+    pub incompatible_features: u32,
+}
+
 /// 检测到的文件系统描述符。
 ///
 /// `fs_id` 由全局自增计数器 `FS_ID_COUNTER` 分配，在当前启动周期内唯一。
@@ -133,6 +142,30 @@ pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
     detect_fs_layout(block_device)
         .map(|detected| detected.fs_type)
         .unwrap_or(FS_Type::Null)
+}
+
+/// Read the identity needed by a policy-controlled writable ext4 mount.
+///
+/// Filesystem type detection alone is insufficient for a writable board
+/// partition: an unrelated ext4 filesystem at the same partition number must
+/// not silently become the persistent state directory.
+pub fn ext4_identity(block_device: &Arc<dyn BlockDevice>) -> Option<Ext4Identity> {
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    block_device.read_block(0, &mut buf);
+    let base = 1024usize;
+    if read_u16_le(&buf, base + 0x38)? != 0xef53 {
+        return None;
+    }
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(buf.get(base + 0x68..base + 0x78)?);
+    let mut volume_name = [0u8; 16];
+    volume_name.copy_from_slice(buf.get(base + 0x78..base + 0x88)?);
+    Some(Ext4Identity {
+        uuid,
+        volume_name,
+        compatible_features: read_u32_le(&buf, base + 0x5c)?,
+        incompatible_features: read_u32_le(&buf, base + 0x60)?,
+    })
 }
 
 /// 挂载前的文件系统检测入口。

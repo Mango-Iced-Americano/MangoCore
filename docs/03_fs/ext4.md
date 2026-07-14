@@ -4,9 +4,10 @@ module: "fs/ext4"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-14"
 code_paths:
   - "os/src/fs/ext4/"
+  - "os/src/fs/filesystem.rs"
 entry_points:
   - "Ext4FileSystem"
   - "Ext4Inode"
@@ -63,7 +64,10 @@ ext4 是项目中最复杂的文件系统模块。代码位于 `os/src/fs/ext4/`
 
 `Ext4Superblock` 是对应 ext4 on-disk superblock 的 `#[repr(C)]` 结构体。`rust_main()` 初始化阶段在块偏移 1024 处读取超级块，验证魔数 `0xEF53`，提取块大小、每组块数、每组 inode 数等关键参数。支持 `rev_level` 为 0（经典）和 1（动态）两种格式，兼容 `EXT4_FEATURE_INCOMPAT_64BIT`、`EXT4_FEATURE_INCOMPAT_FLEX_BG`、`EXT4_FEATURE_INCOMPAT_EXTENTS` 等特性标志。
 
-当前挂载路径仅检测 ext4 魔数 `0xEF53`，不强制执行特性兼容性检查。`rev_level` 支持 0（经典）和 1（动态）两种格式。
+通用文件系统发现路径只检测 ext4 魔数 `0xEF53`，不把卷标或 UUID 当作类型判断条件。
+但策略控制的 2K1000 P4 可写挂载会额外读取主超级块的 UUID、16 字节卷标、compat 和
+incompat feature 字段；只有固定 `MANGO_STATE` 身份且没有 `HAS_JOURNAL`/`RECOVER`
+位的文件系统才允许挂载为 `/persist`。这是写权限策略，不改变通用 ext4 类型探测。
 
 ### 目录查找缓存
 

@@ -14,6 +14,7 @@ VIRTIO_RNG_DEVICE := -device virtio-rng-pci
 KERNEL_LA := ../kernel-la
 SDCARD_LA := ../sdcard-la.img
 DISK_LA := ../disk-la.img
+P4_QEMU_DISK := ../mango-2k1000la-p4-qemu.img
 
 # BOARD
 BOARD ?= laqemu
@@ -210,6 +211,24 @@ qemu-apk-tests:
 		-netdev user,id=net0 \
 		-rtc base=utc
 
+# Persistent P4 runner deliberately avoids snapshot=on. Re-running this target
+# against the same fixture validates that the committed APK tree survives a
+# complete kernel reboot.
+qemu-apk-persist-tests:
+	@qemu-system-loongarch64 \
+		-machine virt \
+		-kernel ../kernel-la-apk-persist-tests \
+		-m 1G \
+		-nographic \
+		-smp 1 \
+		-drive file=$(P4_QEMU_DISK),if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
+		$(VIRTIO_RNG_DEVICE) \
+		-no-reboot \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
+		-rtc base=utc
+
 comp-gdb:
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -227,4 +246,4 @@ comp-gdb:
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell qemu-apk-tests comp-gdb
+.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell qemu-apk-tests qemu-apk-persist-tests comp-gdb

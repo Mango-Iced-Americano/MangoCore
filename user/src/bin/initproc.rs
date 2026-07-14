@@ -330,6 +330,15 @@ fn apk_test_enabled() -> bool {
     true
 }
 
+fn apk_persist_test_enabled() -> bool {
+    let marker = open("/apk_persist_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
 fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
     let marker = open("/board_shell\0", OpenFlags::RDONLY);
     if marker < 0 {
@@ -3454,6 +3463,76 @@ fn run_apk_ramfs_gate(environ: &[*const u8]) -> i32 {
     run_bash_cmd_timeout(cmd, environ, 900)
 }
 
+fn run_apk_persist_gate(environ: &[*const u8]) -> i32 {
+    // A commit marker is created only after the package tree and metadata have
+    // been flushed. If the first boot is interrupted, the next run discards
+    // the incomplete tree and installs again; a committed tree must verify as
+    // is, which makes the second boot a real persistence check.
+    let cmd = r#"
+        set -eu
+        apk=/bin/apk.static
+        [ -x "$apk" ] || apk=/tools/bin/apk.static
+        [ -x "$apk" ]
+
+        root=/persist/apk-root
+        state=/persist/apk-state
+        committed=$state/committed-v1
+        repos=/run/apk-persist.repositories
+        cache=/scratch/apk-cache
+        [ -f /persist/MANGO_STATE.txt ]
+        mkdir -p "$state" "$cache"
+        printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
+
+        apk_cmd() {
+            "$apk" \
+                --root "$root" \
+                --cache-dir "$cache" \
+                --keys-dir /etc/apk/keys \
+                --repositories-file "$repos" \
+                "$@"
+        }
+
+        mode=reuse
+        if [ ! -f "$committed" ]; then
+            mode=install
+            echo '[apk-persist] stage=prepare'
+            rm -rf "$root"
+            mkdir -p "$root/lib/apk/db" "$root/etc/apk" "$root/var/cache/apk"
+            : > "$root/etc/apk/world"
+            rm -f "$cache"/zlib-*.apk
+            echo '[apk-persist] stage=update'
+            apk_cmd update
+            echo '[apk-persist] stage=fetch'
+            (cd "$cache" && apk_cmd fetch zlib)
+            set -- "$cache"/zlib-*.apk
+            [ -s "$1" ]
+            echo '[apk-persist] stage=add'
+            apk_cmd add busybox zlib
+            sync
+            printf '%s\n' 'schema=1' 'packages=busybox,zlib' > "$state/.committed-v1.tmp"
+            sync
+            mv -f "$state/.committed-v1.tmp" "$committed"
+            sync
+        else
+            echo '[apk-persist] stage=reuse'
+        fi
+
+        echo '[apk-persist] stage=verify'
+        apk_cmd info -e busybox >/dev/null
+        apk_cmd info -e zlib >/dev/null
+        [ -x "$root/bin/busybox" ]
+        loader="$root/lib/ld-musl-loongarch64.so.1"
+        [ -x "$loader" ]
+        result=$("$loader" --library-path "$root/lib" \
+            "$root/bin/busybox" echo APK_PERSIST_EXEC_OK)
+        [ "$result" = APK_PERSIST_EXEC_OK ]
+        printf 'boot-ok mode=%s\n' "$mode" >> "$state/boot-history"
+        sync
+        echo "[apk-persist] PASS mode=$mode root=$root cache=$cache"
+    "#;
+    run_bash_cmd_timeout(cmd, environ, 900)
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let path = "/bin/bash\0";
@@ -3489,6 +3568,24 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}",
         bash_ret, has_bin_bash
     );
+
+    if apk_persist_test_enabled() {
+        println!("[apk-persist] START persistent ext4 package-manager gate");
+        let ret = run_apk_persist_gate(&environ);
+        if ret == 0 {
+            println!("[apk-persist] RESULT=PASS");
+        } else {
+            println!(
+                "[apk-persist] RESULT=FAIL wait_status={} exit={}",
+                ret,
+                exit_code_from_waitpid_status(ret)
+            );
+        }
+        println!("[apk-persist] entering diagnostic shell");
+        enter_shell(path, &environ);
+        shutdown();
+        return if ret == 0 { 0 } else { 1 };
+    }
 
     if apk_test_enabled() {
         println!("[apk-test] START isolated ramfs package-manager gate");

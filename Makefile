@@ -8,6 +8,11 @@ IMAGE ?=
 P3_IMAGE ?= mango-2k1000la-cpython-tools-p3.img
 P3_MANIFEST ?= $(P3_IMAGE).json
 P3_VERIFY_FILE ?= user/tools/cpython/L7_filesystem.py
+P4_IMAGE ?= mango-2k1000la-state-p4.img
+P4_MANIFEST ?= $(P4_IMAGE).json
+P4_QEMU_DISK ?= mango-2k1000la-p4-qemu.img
+P4_MBR_SOURCE ?= /private/tftpboot/mango-2k1000la-full-test-mbr.img
+P4_DOCKER_IMAGE ?= zhouzhouyi/os-contest:20260104
 BOARD_SERIAL_ARG = $(if $(BOARD_SERIAL),--serial $(BOARD_SERIAL),)
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
@@ -55,7 +60,8 @@ print-logo:
 	@echo "                                                                            "
 	@echo "                                                                            "
 .PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
-	2k1000-boot 2k1000-boot-check 2k1000-cpython-p3-write
+	2k1000-boot 2k1000-boot-check 2k1000-cpython-p3-write \
+	2k1000-p4-image 2k1000-p4-qemu-disk 2k1000-p4-preflight 2k1000-p4-write
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -130,6 +136,51 @@ docker-test-parallel:
 		--manifest "$(P3_MANIFEST)" \
 		--verify-file "$(P3_VERIFY_FILE)" \
 		--confirm-p3-start "$(CONFIRM_P3_START)" $(BOARD_SERIAL_ARG)
+
+2k1000-p4-image:
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
+		python3 scripts/make_2k1000_p4_ext4.py \
+		--output "$(P4_IMAGE)" --force
+
+2k1000-p4-qemu-disk:
+	@test -f "$(P4_IMAGE)" -a -f "$(P4_MANIFEST)" || $(MAKE) 2k1000-p4-image
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
+		python3 scripts/make_2k1000_p4_qemu_disk.py \
+		--p4-image "$(P4_IMAGE)" --output "$(P4_QEMU_DISK)" --force
+
+2k1000-p4-preflight:
+	@test -f "$(P4_IMAGE)" -a -f "$(P4_MANIFEST)" || { \
+		echo "missing P4 image or manifest; run make 2k1000-p4-image" >&2; exit 2; \
+	}
+	python3 scripts/write_2k1000_p4.py \
+		--interface $(BOARD_NET_IFACE) \
+		--image "$(P4_IMAGE)" --manifest "$(P4_MANIFEST)" \
+		--mbr-source "$(P4_MBR_SOURCE)" \
+		--confirm-p4-start 0xC00800 --confirm-p4-end 0x1400800 \
+		--confirm-disk-sectors 62533296 --preflight-only $(BOARD_SERIAL_ARG)
+
+2k1000-p4-write:
+	@test -f "$(P4_IMAGE)" -a -f "$(P4_MANIFEST)" || { \
+		echo "missing P4 image or manifest; run make 2k1000-p4-image" >&2; exit 2; \
+	}
+	@test "$(CONFIRM_P4_START)" = "0xC00800" || { \
+		echo "refusing P4 write: set CONFIRM_P4_START=0xC00800" >&2; exit 2; \
+	}
+	@test "$(CONFIRM_P4_END)" = "0x1400800" || { \
+		echo "refusing P4 write: set CONFIRM_P4_END=0x1400800" >&2; exit 2; \
+	}
+	@test "$(CONFIRM_DISK_SECTORS)" = "62533296" || { \
+		echo "refusing P4 write: set CONFIRM_DISK_SECTORS=62533296" >&2; exit 2; \
+	}
+	python3 scripts/write_2k1000_p4.py \
+		--interface $(BOARD_NET_IFACE) \
+		--image "$(P4_IMAGE)" --manifest "$(P4_MANIFEST)" \
+		--mbr-source "$(P4_MBR_SOURCE)" \
+		--confirm-p4-start "$(CONFIRM_P4_START)" \
+		--confirm-p4-end "$(CONFIRM_P4_END)" \
+		--confirm-disk-sectors "$(CONFIRM_DISK_SECTORS)" $(BOARD_SERIAL_ARG)
 
 testsuits-download:
 	cd fs-img-dir && \

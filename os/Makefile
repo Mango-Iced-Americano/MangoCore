@@ -19,12 +19,15 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-curl-shell \
 	la64-2k1000-net-tests \
 	la64-2k1000-apk-tests \
+	la64-2k1000-apk-persist-tests \
 	la64-2k1000-cpython-tests \
 	la64-2k1000-cpython-tools \
 	la64-qemu-curl-shell \
 	la64-qemu-curl-shell-run \
 	la64-qemu-apk-tests \
 	la64-qemu-apk-run \
+	la64-qemu-apk-persist-tests \
+	la64-qemu-apk-persist-run \
 	rv64-cpython-tests rv64-cpython-run \
 	la64-cpython-tests la64-cpython-run \
 	la64-2k1000-run-clean
@@ -190,6 +193,28 @@ la64-qemu-apk-tests: prepare-cargo-config
 la64-qemu-apk-run: la64-qemu-apk-tests
 	$(MAKE) -f make/la64.mk qemu-apk-tests MODE=$(MODE)
 
+# Persistent APK gate against the same fixed MBR layout used on the board.
+# Run the resulting QEMU fixture twice without rebuilding it: the first run
+# installs, while the second must reuse the committed ext4 package tree.
+la64-qemu-apk-persist-tests: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@test -f ../mango-2k1000la-p4-qemu.img || { \
+		echo "missing P4 QEMU disk; run make 2k1000-p4-qemu-disk from the repo root" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		APK_RUNTIME=1 EXTRA_FEATURES="p4_persist_rw apk_persist_test" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
+		../kernel-la-apk-persist-tests
+
+la64-qemu-apk-persist-run: la64-qemu-apk-persist-tests
+	$(MAKE) -f make/la64.mk qemu-apk-persist-tests MODE=$(MODE)
+
 # Real-board counterpart of the QEMU gate. P1/P3 and block-device nodes keep
 # their read-only policy; only the already validated P2 scratch cache is used.
 la64-2k1000-apk-tests: prepare-cargo-config
@@ -204,6 +229,22 @@ la64-2k1000-apk-tests: prepare-cargo-config
 		MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-apk-tests.ui
+
+# Board P4 gate. P1/P3 and every userspace block node remain read-only; P2 is
+# only a download cache and the identity-checked P4 is mounted at /persist.
+la64-2k1000-apk-persist-tests: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_test" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-apk-persist-tests.ui
 
 # Real-board network regression image. Keep the current inet_test in
 # initramfs so an older /tools partition cannot silently change test coverage.

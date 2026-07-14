@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-12
+last_updated: 2026-07-14
 code_paths:
   - "os/src/main.rs"
   - "os/src/fs/mod.rs"
@@ -44,7 +44,7 @@ related_docs:
 
 根文件系统初始化是内核启动的关键阶段。它在内存管理初始化之后执行，负责探测块设备、识别文件系统类型、创建 VFS 根并挂载默认伪文件系统。无论底层是 ext4、FAT32 还是 ramfs，最终的根文件系统都被包装为统一的 `MountFS` 实例，供上层系统和用户进程通过 VFS 接口访问。
 
-整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `os/src/main.rs::rust_main()` 在合适的时机触发。`board_2k1000` 的救援镜像和 `sata_probe` 镜像继续调用 `force_ramfs()`；普通 `board_2k1000 + block_sata` 镜像会探测 SATA SSD，并以只读方式挂载识别出的裸文件系统或 MBR 主分区。opt-in `sata_scratch_rw` staged 镜像只把 P2 FAT32 以读写方式挂载到 `/scratch`。
+整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `os/src/main.rs::rust_main()` 在合适的时机触发。`board_2k1000` 的救援镜像和 `sata_probe` 镜像继续调用 `force_ramfs()`；普通 `board_2k1000 + block_sata` 镜像会探测 SATA SSD，并以只读方式挂载识别出的裸文件系统或 MBR 主分区。opt-in `sata_scratch_rw` staged 镜像只把 P2 FAT32 以读写方式挂载到 `/scratch`；进一步启用 `p4_persist_rw` 时，只有通过固定边界和 ext4 身份校验的 P4 会额外读写挂载到 `/persist`。
 
 ## 2. 启动流程
 
@@ -72,6 +72,7 @@ rust_main()
   |     |-- [not board_2k1000] fs::mount_boot_block_devices()  读写挂载
   |     |-- [board_2k1000 + block_sata] mount_boot_block_devices_read_only()
   |     |-- [board_2k1000 + sata_scratch_rw] P2 FAT32 -> /scratch (rw)，P1/P3 保持 ro
+  |     |-- [+ p4_persist_rw] P4 ext4 -> /persist (rw)，先校验边界/UUID/卷标/恢复位
   |     |-- [board_2k1000 rescue/sata_probe] 跳过块设备挂载
   |
   |-- [initramfs 特性未启用: legacy 路径]
@@ -188,7 +189,7 @@ lazy_static! {
 2. 裸盘未识别时调用 `probe_mbr()`，解析最多四个主分区。
 3. 为每个有效分区注册设备节点并调用 `detect_fs()`。
 4. 第一个可识别文件系统挂到 `/sdcard`；第二块设备 `x1` 的第一个文件系统优先挂到 `/tools`。
-5. 没有 `x1` 时，单盘完整镜像固定选择 P3 工具分区挂到 `/tools`，P2 FAT32 留给官方测试通过 `/dev/vda2` 临时挂载。
+5. 没有 `x1` 时，单盘完整镜像固定选择 P3 工具分区挂到 `/tools`；staged 路径可把 P2 挂到 `/scratch`，并把身份匹配的 P4 挂到 `/persist`。
 
 MBR 的偏移和长度单位固定为 512 字节 LBA，与平台 `BLOCK_SZ` 无关。分区起点未按平台块对齐时，`PartitionBlockDevice` 使用 bounce buffer 跨父设备块读取。当前明确不支持扩展分区和 GPT；遇到 protective MBR 时只打印诊断并继续从 initramfs 启动。
 
@@ -207,7 +208,10 @@ MBR 的偏移和长度单位固定为 512 字节 LBA，与平台 `BLOCK_SZ` 无�
 `REMOUNT/BIND/REC` 这类操作控制位；因此 `/sdcard/musl`、`/sdcard/glibc`
 被 bind 后仍保持 `RDONLY`，创建、写入、链接、重命名和删除会在 `MountFSInode`
 入口返回 `EROFS`，不会进入 ext4 元数据分配路径。
-这不等同于 AHCI 驱动已经完成写路径验收；本阶段仍只允许读取 SSD。
+`p4_persist_rw` 是显式例外：它仍以 `RDONLY` 策略处理 P1/P3 和设备节点，仅对精确
+匹配 partno/type/LBA 范围、UUID `4d414e47-5354-4154-4500-000000000004`、卷标
+`MANGO_STATE` 且不含 journal/recovery 位的 P4 创建可写挂载。身份不符时立即 panic，
+不会降级为“任意第四个 ext4 可写”。
 
 ## 4. 默认挂载点
 
