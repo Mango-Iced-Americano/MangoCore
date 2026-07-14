@@ -701,8 +701,14 @@ impl IndexNode for Ext4OSInode {
     }
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
-        // Dirty pages are kept alive by the strong page_caches registry;
-        // writeback happens via balance_dirty_pages / fsync / sync, not here.
+        // Flush dirty pages on close so subsequent opens see the data.
+        // Without this, file-descriptor drop (File::Drop → inode.close()) skips
+        // writeback, and a later re-open reads stale on-disk data.
+        if let Some(pc) = self.page_cache.lock().clone() {
+            if pc.dirty_count() > 0 {
+                self.sync()?;
+            }
+        }
         Ok(())
     }
 
@@ -914,7 +920,8 @@ impl IndexNode for Ext4OSInode {
                     let mut guard = FileGuard::new(&mut f);
                     drop(guard);
                 }
-                let _ = f.file_mode_set(mode.bits());
+                f.file_mode_set(mode.bits())
+                    .map_err(|e| from_lwext4(e.abs()))?;
                 drop(_lock);
                 // Use real ext4 inode number so the PageCache stays findable
                 // after rename (the real inode number is stable across renames;
@@ -964,11 +971,13 @@ impl IndexNode for Ext4OSInode {
         file_type: FileType,
         attrs: CreateAttrs,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
-        let inode = self.create(name, file_type, attrs.mode)?;
+        let full_mode = InodeMode::from(file_type) | (attrs.mode & InodeMode::S_IALLUGO);
+        let inode = self.create(name, file_type, full_mode)?;
         let mut meta = inode.metadata()?;
         meta.uid = attrs.uid;
         meta.gid = attrs.gid;
-        inode.set_metadata(&meta).ok();
+        meta.mode = full_mode;
+        inode.set_metadata(&meta)?;
         Ok(inode)
     }
 
@@ -990,7 +999,8 @@ impl IndexNode for Ext4OSInode {
         d.dir_mk(&lw_child)
             .map_err(|e| from_lwext4(e.abs()))?;
         // Set mode on the newly created directory
-        let _ = d.file_mode_set(mode.bits());
+        d.file_mode_set(mode.bits())
+            .map_err(|e| from_lwext4(e.abs()))?;
         drop(_lock);
         let real_inode = self
             .fs
@@ -1415,7 +1425,8 @@ impl IndexNode for Ext4OSInode {
 
         // Set permission bits on the new special file
         let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_UNKNOWN);
-        let _ = f.file_mode_set(mode.bits());
+        f.file_mode_set(mode.bits())
+            .map_err(|e| from_lwext4(e.abs()))?;
 
         let h = hash_path(&child_path);
         Ok(Ext4OSInode::new_child_seeded(

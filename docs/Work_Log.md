@@ -4,6 +4,32 @@
 
 ## 2026-07-14
 
+### 修复 Ext4OSInode: close() 不刷脏页 + file_mode_set 错误被静默吞掉
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — 5 处修改：
+  - `close()` — 新增脏页检测：PageCache 有脏页时调 `sync()` 刷写
+  - `create()` — `let _ = f.file_mode_set()` → 传播错误
+  - `create_with_attrs()` — 补全 `full_mode` 计算（`InodeMode::from(file_type) | (attrs.mode & S_IALLUGO)`）+ 传播 `set_metadata` 错误
+  - `mkdir()` — `let _ = d.file_mode_set()` → 传播错误
+  - `mknod()` — `let _ = f.file_mode_set()` → 传播错误
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（零 error）
+
+**备注：** `dirty_count()` 是 PageCache 公共 API；`file_mode_set` 模式统一使用 `from_lwext4(e.abs())` 转换。
+
+### 添加 riscv_hwprobe syscall (258) 桩函数
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 新增 `SYSCALL_RISCV_HWPROBE = 258`
+- `os/src/syscall/mod.rs` — 添加 name 表项、dispatch 分支和返回 `ENOSYS` 的桩函数 `sys_riscv_hwprobe`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（无新增 warning，编译通过）
+
+**备注：** 桩函数返回 ENOSYS，后续可按需实现 HWPROBE 功能。
+
 ### 修复 flock04：实现基于文件描述的 flock 锁所有权模型
 
 **涉及文件：**
