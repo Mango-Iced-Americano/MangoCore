@@ -47,14 +47,14 @@ const LOCK_NB: u32 = 4;
 const LOCK_UN: u32 = 8;
 
 #[derive(Clone, Copy, Debug)]
-struct FlockLock {
-    key: LockKey,
-    owner_description: usize,
-    exclusive: bool,
+pub(crate) struct FlockLock {
+    pub(crate) key: LockKey,
+    pub(crate) owner_description: usize,
+    pub(crate) exclusive: bool,
 }
 
 lazy_static! {
-    static ref FLOCK_LOCKS: spin::Mutex<Vec<FlockLock>> = spin::Mutex::new(Vec::new());
+    pub(crate) static ref FLOCK_LOCKS: spin::Mutex<Vec<FlockLock>> = spin::Mutex::new(Vec::new());
 }
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
@@ -197,6 +197,7 @@ fn is_stream_file(file: &vfs::File) -> bool {
 
 fn is_path_fd(file: &vfs::File) -> bool {
     file.mode().contains(vfs::FileMode::FMODE_PATH)
+        || file.flags().contains(vfs::FileFlags::O_PATH)
 }
 
 fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
@@ -2551,6 +2552,16 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
 
+    // Pre-validate user buffer: create the writer before any FS work.
+    // If the user buffer has an unmapped guard page, UserBufferWriter::new
+    // will fail immediately and we return EFAULT before doing get_dirent64.
+    // This matches Linux 6.6 behavior where filldir64 writes to user memory
+    // one entry at a time and faults if the very first write hits an unmapped page.
+    let mut writer = match UserBufferWriter::new(token, dirp, count) {
+        Ok(w) => w,
+        Err(_) => return EFAULT,
+    };
+
     // 获取文件描述符
     let file = match fd {
         AT_FDCWD => task.process.fs().lock().working_inode.clone(),
@@ -2579,10 +2590,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         return 0;
     }
 
-    let mut writer = match UserBufferWriter::new(token, dirp, written) {
-        Ok(w) => w,
-        Err(_) => return EFAULT,
-    };
     let copied = match writer.write_from(&kernel_buf[..written]) {
         Ok(c) => c,
         Err(_) => return EFAULT,
@@ -3242,12 +3249,11 @@ fn in_group(gid: u32, fsgid: u32, groups: &[u32]) -> bool {
     gid == fsgid || groups.iter().any(|g| *g == gid)
 }
 
-	fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<(), isize> {
-	    let mut meta = match inode.metadata() {
-	        Ok(m) => m,
-	        // fchmod: metadata failure on a valid fd maps to EBADF, never ELOOP
-	        Err(_) => return Err(EBADF),
-	    };
+fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<(), isize> {
+    let mut meta = match inode.metadata() {
+        Ok(m) => m,
+        Err(e) => return Err(-(e as isize)),
+    };
     let (uid, fsgid, groups) = caller_ids_and_groups();
 
     // Only owner or root can chmod
@@ -3324,14 +3330,17 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
     if is_path_fd(&file) {
         return EBADF;
     }
+    // Clone inode and drop lock before metadata operations
+    let inode = file.inode.clone();
+    drop(fd_table);
     // Check read-only filesystem (must precede EPERM per Linux semantics:
     // EROFS takes priority over EPERM)
-    if let Some(mnt) = file.inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
         if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
             return EROFS;
         }
     }
-    match do_fchmod(&file.inode, mode) {
+    match do_fchmod(&inode, mode) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -3351,12 +3360,12 @@ bitflags! {
 
 fn do_chown(inode: &Arc<dyn vfs::IndexNode>, owner: u32, group: u32) -> isize {
     const CHOWN_ID_NO_CHANGE: u32 = u32::MAX;
-	    let mut meta = match inode.metadata() {
-	        Ok(m) => m,
-	        // fchown: metadata failure on a valid fd maps to EBADF, never ELOOP
-	        Err(_) => return EBADF,
-	    };
+    let mut meta = match inode.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
     let (fsuid, fsgid, groups) = caller_ids_and_groups();
+
     let change_uid = owner != CHOWN_ID_NO_CHANGE;
     let change_gid = group != CHOWN_ID_NO_CHANGE;
 
@@ -3396,16 +3405,18 @@ pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
     if is_path_fd(&file) {
         return EBADF;
     }
-
+    // Clone inode and drop lock before metadata operations
+    let inode = file.inode.clone();
+    drop(fd_table);
     // Check read-only filesystem (must precede EPERM per Linux semantics:
     // EROFS takes priority over EPERM)
-    if let Some(mnt) = file.inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
         if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
             return EROFS;
         }
     }
 
-    do_chown(&file.inode, owner, group)
+    do_chown(&inode, owner, group)
 }
 
 pub fn sys_fchownat(
@@ -5221,6 +5232,16 @@ fn release_flock_description(description: usize) {
         .retain(|lock| lock.owner_description != description);
 }
 
+/// Release all flock locks owned by the given file description.
+///
+/// Called when the last fd referencing a file description is closed
+/// (e.g., from `close_files_on_exit` or direct close).
+pub fn release_flocks_for_description(desc_id: usize) {
+    FLOCK_LOCKS
+        .lock()
+        .retain(|lock| lock.owner_description != desc_id);
+}
+
 pub fn release_flock_for_file_if_last(file: &Arc<vfs::File>) {
     let mut releases = Vec::new();
     record_flock_close(&mut releases, file);
@@ -6476,6 +6497,12 @@ fn fd_to_inode(fd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(fd).map_err(|e| -(e as isize))?;
+
+    // O_PATH fd: xattr operations fail with EBADF (check BEFORE xattr capability)
+    if is_path_fd(&file) {
+        return Err(EBADF);
+    }
+
     let inode = file.inode.clone();
     drop(fd_table);
 

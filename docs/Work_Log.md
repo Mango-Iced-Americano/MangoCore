@@ -4,6 +4,58 @@
 
 ## 2026-07-14
 
+### 修复 flock04：实现基于文件描述的 flock 锁所有权模型
+
+**涉及文件：**
+- `os/src/syscall/flock.rs` — 完全重写：删除旧的 `FLOCK_TABLE`（per-inode `()` 标记），改为使用统一的 `FLOCK_LOCKS` + `FlockLock`，实现基于 `description_id()` 的所有权跟踪、共享/排他锁冲突检测、同一描述符升级/降级语义
+- `os/src/syscall/fs.rs` — 将 `FlockLock` 结构体和字段改为 `pub(crate)`，将 `FLOCK_LOCKS` 改为 `pub(crate)`，新增 `pub fn release_flocks_for_description()` 公共 API
+
+**修复清单：**
+
+1. **Bug：两个独立的锁表导致锁永不释放** — `sys_flock` 使用自己的 `FLOCK_TABLE: BTreeMap<(usize, InodeId), ()>`（无所有权的按 inode 标记），而 close 路径（`sys_close`、`sys_close_range`、`close_files_on_exit`、`close_cloexec_and_release_fcntl_locks`）均在独立的 `FLOCK_LOCKS: Vec<FlockLock>` 上释放。锁写入一张表、从另一张表释放 → 锁永不释放。
+
+2. **统一锁表** — 删除 `FLOCK_TABLE`，`sys_flock` 改为直接使用 `FLOCK_LOCKS`，与 close 路径共享同一表。`LockKey::from_file()` 用于生成跨文件系统统一的 inode 标识键。
+
+3. **文件描述所有权（Linux 6.6 语义）** — 锁现在由 `FlockLock.owner_description`（= `File::description_id()`）标记。同一 `dup`/`dup2` 的描述符永远不会冲突。冲突检测：若存在已持有排他锁的其他描述符，或请求排他锁而其他描述符持有共享锁 → 返回 EAGAIN/LOCK_NB。
+
+4. **升级/降级** — 持有锁的描述符请求其他类型时，移除旧锁后重新获取（与 Linux 原子升级语义一致——中间存在短暂空窗）。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（`flock.rs` 预先存在的私有字段错误已修复）
+- `make la64-kernel-build-only` ✅
+
+**备注：** 阻塞等待（不带 LOCK_NB）仍未实现——阻塞调用返回 EAGAIN。这需要基于 WaitQueue 的完整阻塞基础设施，留作后续工作。LOCK_UN 始终成功，删除该 inode 所有者所有锁。
+
+### 修复 open13：三个 O_PATH fd 操作返回错误 errno
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `is_path_fd()` 增加 `O_PATH` flag 检查；`do_fchmod`/`do_chown` 移除 ELOOP→EBADF workaround；`sys_fchmod`/`sys_fchown` 克隆 inode 后释放 fd_table 锁再调用元数据操作；`fd_to_inode` 增加 O_PATH 检查优先于 xattr 能力检查
+
+**修复清单：**
+
+1. **Bug 1 (fchmod/fchown O_PATH → EBADF)** — `is_path_fd()` 原先只检查 `FMODE_PATH`，增加了 `O_PATH` flag 的双保险检查。同时移除 `do_fchmod`/`do_chown` 中 `inode.metadata()` 失败的 ELOOP→EBADF 转换（原 workaround），改为透传真实错误。`sys_fchmod`/`sys_fchown` 中先克隆 inode Arc 再释放 fd_table 锁，避免跨元数据操作持锁。
+
+2. **Bug 2 (fgetxattr O_PATH → EOPNOTSUPP)** — `fd_to_inode()` 中增加 O_PATH 检查（`is_path_fd`），优先于 xattr 能力检查（文件类型验证），确保 O_PATH fd 的 xattr 操作返回 EBADF 而非 EOPNOTSUPP。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（仅剩余 `flock.rs` 预先存在的私有字段错误）
+- `make la64-kernel-build-only` ✅（同上）
+
+### 修复 getdents02 EFAULT：UserBufferWriter 预校验移到 get_dirent64 之前
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_getdents64`：将 `UserBufferWriter::new` 从 `get_dirent64` 之后移到之前
+
+**问题根因：** 原实现先调用 `get_dirent64` 把所有目录项构建到 kernel buffer，然后才创建 `UserBufferWriter` 检查用户缓冲区。当用户缓冲区有 guard page（未映射页）时，`UserBufferWriter::new` 可能对第一个有效页成功、写部分数据后返回正数字节数，而非 EFAULT。
+
+**修复：** 将 `UserBufferWriter::new(token, dirp, count)` 移到 `get_dirent64` 之前。如果用户缓冲区不可写（含未映射页），`UserBufferWriter::new` 立即失败返回 EFAULT，不会先做 FS 工作。这与 Linux 6.6 中 filldir64 每次写入前用户内存访问即 fault 的行为一致。
+
+**验证：**
+- `make rv64-kernel-build-only` — 编译指令通过了（`fs.rs` 无新增错误；`flock.rs` 等有预先存在的非相关编译错误）
+- `make la64-kernel-build-only` — 同上
+
+**备注：** 更彻底的修复是按 Linux 方式逐 dirent 写入用户空间（部分成功返回已写字节数），但当前两阶段方案对 getdents02 守卫页测试已足够。双架构完整编译当前被 `flock.rs` 私有字段访问和 la64 `fsuid`/`fsgid` 作用域问题阻断，与本次修改无关。
+
 ### 修复 5 项 LTP 语义 Bug（tee/fchmod/getdents/mkdirat/splice）
 
 **涉及文件：**

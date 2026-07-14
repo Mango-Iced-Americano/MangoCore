@@ -721,3 +721,80 @@ diag=1
   4. **rename flush 是独立问题**：rename 前通过 `flush_one` 调用 `writeback_all()` 强制刷页，原实现用 `let _ =` 吞掉所有错误 — 如果 writeback 因 `logical_size=0` 而静默失败，rename 后数据就丢了。修复：错误传播到调用方返回 `EIO`
 
 - **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`write_at`、`rename`、`note_logical_size`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`write_pages`）
+
+## LTP 驱动的批量语义修复工作流
+
+### 问题特征
+
+面对大量 LTP 失败（1300+ FAIL CASE），逐个修效率极低。需要一套系统化的"定位→分类→批量修复→验证"工作流。
+
+### 工作流范式
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ① 跑基线：mask=0x800, ltp_suites=syscalls           │
+│    输出 output-rv64.txt 作为当前状态快照               │
+├─────────────────────────────────────────────────────┤
+│ ② Oracle 分析：输入基线 log + 失败聚类                 │
+│    参考 DragonOS + Linux 6.6 → 伪代码方案              │
+│    按修复收益排序（解除最多下游 case 的优先）            │
+├─────────────────────────────────────────────────────┤
+│ ③ Subagent 分发：                                    │
+│    quick: 单文件、纯 errno/常量修正、无新逻辑           │
+│    deep:  跨文件、需新增数据结构/重构语义模型            │
+│    关键：必须用 subagent，避免主会话上下文膨胀          │
+├─────────────────────────────────────────────────────┤
+│ ④ 聚焦验证：                                          │
+│    ltp_include=case1,case2,... + ltp_runner=inline    │
+│    35 秒跑完 → 立即看到修复效果                         │
+├─────────────────────────────────────────────────────┤
+│ ⑤ Oracle blocker 审核：                               │
+│    检查 placeholder/hack、违规文件编辑、配置残留         │
+│    多轮迭代直到 VERIFIED                               │
+└─────────────────────────────────────────────────────┘
+```
+
+### 批量修复成功案例（2026-07-14）
+
+三轮修复消除 50%+ 的 FS 核心失败：
+
+| 优先级 | 修复类别 | 涉及 LTP case | Agent |
+|--------|---------|--------------|-------|
+| P0 | umask 来源统一 | umask01 (384 TFAIL→0) | deep |
+| P0 | chmod/fchmod 模式位 | chmod03/05, fchmod05 | deep |
+| P0 | chown/fchown 权限+清除 | chown03, fchown03 | deep |
+| P0 | mkdir SGID/权限 | mkdir02/04/05 | deep |
+| P1 | FIFO ENXIO | open06 | quick |
+| P1 | flock errno 双取反 | flock02 | quick |
+| P1 | O_NOATIME + O_PATH | open02, open13 | deep |
+| P1 | link 权限检查 | link04 | deep |
+| P2 | pwrite count=0 | pwrite03 | quick |
+| P2 | sendfile offset 验证 | sendfile02/05 | deep |
+| P2 | vmsplice EBADF | vmsplice02 | quick |
+| P2 | splice pipe 验证 | splice03 | deep |
+| P2 | tee syscall 接线 | tee01/02 | quick |
+| P2 | getdents EFAULT | getdents02 (部分) | quick |
+
+### 教训
+
+1. **基线先跑，不要猜**：7/9 log 里的 symlink ENOSYS 在 7/13 就修了——跑基线后才能确认当前真实状态，避免在已修复问题上浪费精力。
+
+2. **umask 这类"全线错误"优先修**：一个错误的 umask 来源导致 384 个 TFAIL——修一处解百处。识别这类"单一根因→大量失败"的模式比逐个修收益高得多。
+
+3. **score=0 ≠ 全部失败**：很多 case 被标记 FAIL 但 LTP 子测试大量 TPASS。例如 chmod01, fchmod01-04 等功能已正确，是 test setup 夹具（权限/路径）问题导致整个 case FAIL。读 TFAIL/TBROK 而非只看 FAIL LTP CASE。
+
+4. **ltp_include 是迭代利器**：`ltp_runner=inline + ltp_include=case1,case2` 可以在 35 秒内验证修复，而不必每次等全量跑几小时。
+
+5. **Oracle 的 blocker 审核不可跳过**：placeholder 代码（"ENOSYS placeholder" / "Not yet a real"）、lang_items.rs 直接编辑、os_test.conf 残留——这些流程问题 Oracle 每次都会抓到。先自查再提交。
+
+6. **subagent 是强制要求**：主会话上下文膨胀后修复质量急剧下降。简单到 errno 常量修正、复杂到 11 项 fs.rs 批量修改，一律走 task()。
+
+7. **FileMode::FMODE_PATH 的静默缺失**：`new_without_open()` 不设置 FMODE_PATH 导致 O_PATH fd 不被识别。这类"创建路径不一致"的 bug 很难从失败日志直接定位——需要追踪数据流。
+
+### 相关文件
+
+- `os/src/syscall/fs.rs`（主要修改文件）
+- `os/src/syscall/flock.rs`（errno 双取反模式）
+- `os/src/fs/dev/pipe.rs`（FIFO 语义）
+- `os/src/fs/vfs/file.rs`（new_without_open FMODE_PATH）
+- `os_test.conf`（mask/ltp_include 配置范式）

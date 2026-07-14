@@ -95,15 +95,49 @@ fcntl(fd, F_SETLK, &fl);    // 释放锁
 
 ## BSD flock
 
-`os/src/syscall/flock.rs` 提供 BSD 风格 `flock()` 系统调用，使用全局 `FLOCK_TABLE: BTreeMap<(dev_id, inode_id), ()>` 记录锁状态。
+`os/src/syscall/flock.rs` 提供 BSD 风格 `flock()` 系统调用。
+
+### 锁所有权模型（Linux 6.6 语义）
+
+锁由**打开的文件描述**（`struct file *`，即 MangoCore 中的 `File`）所有，而非进程。`dup`/`dup2` 复制的 fd 共享同一文件描述，因此彼此不会冲突。锁所有权通过 `File::description_id()` 标识。
+
+全局锁表 `FLOCK_LOCKS: Mutex<Vec<FlockLock>>` 记录每个锁的：
+- `key: LockKey` — `(dev_id, inode_id)` 唯一标识文件
+- `owner_description: usize` — 锁所有者的文件描述 ID
+- `exclusive: bool` — 是否排他锁
+
+### 冲突检测
+
+| 请求 / 现有 | 无锁 | 同一描述符持有 | 另一描述符持有共享 | 另一描述符持有排他 |
+|-------------|------|---------------|-------------------|-------------------|
+| LOCK_SH | ✅ | ✅ 无操作 | ✅ 允许 | ❌ EAGAIN |
+| LOCK_EX | ✅ | 若类型不同则升级 | ❌ EAGAIN | ❌ EAGAIN |
+| LOCK_UN | 始终成功（幂等） | 释放该 inode 所有者的所有锁 | — | — |
+
+### 锁升级/降级
+
+当已持锁的描述符请求另一类型时，移除旧锁后重新获取（与 Linux 原子升级语义一致，中间存在短暂竞争窗口）。
 
 | 操作 | 行为 |
 |------|------|
-| LOCK_SH / LOCK_EX | 文件未被锁定时获取独占锁，已被锁时返回 EAGAIN |
-| LOCK_UN | 无条件释放锁 |
+| LOCK_SH / LOCK_EX | 基于文件描述所有权的排他/共享锁，冲突时返回 EAGAIN |
+| LOCK_UN | 释放该描述符在该文件上的所有锁 |
 | LOCK_NB | 非阻塞标记，与 LOCK_SH/LOCK_EX 配合使用 |
 
-当前实现为简化版本：共享锁（LOCK_SH）和排他锁（LOCK_EX）都使用同一个全局标记，不支持多个 LOCK_SH 同时持有。阻塞模式（不带 LOCK_NB）暂退化为 EAGAIN。未来需引入 WaitQueue 和读锁引用计数。
+### 释放路径
+
+锁在以下时机释放：
+1. **sys_close / sys_close_range** — 通过 `record_flock_close` + `release_closed_flock_descriptions` 释放所有引用计数归零的描述符锁
+2. **close_files_on_exit** — 进程退出时通过 `release_flock_for_file_if_last` 逐个释放
+3. **close_cloexec_and_release_fcntl_locks** — exec 时释放 CLOEXEC fd 的锁
+4. **dup2/dup3** — 替换已有 fd 时释放被替换文件描述的锁
+
+### 已知限制
+
+1. **阻塞等待** — 不带 LOCK_NB 的调用退化为 EAGAIN，未实现 WaitQueue 休眠
+2. **进程退出** — FdTable::drop 直接 clear，不触发释放路径（通过 close_files_on_exit 显式处理）
+
+
 
 ## fasync 异步 I/O 通知
 
@@ -177,7 +211,6 @@ pipe 驱动等流式文件在数据可读时调用 `fasync_items.send_sigio(None
 ## 已知问题
 
 1. **BSD flock 阻塞模式** — 不带 LOCK_NB 时未实现 WaitQueue 等待，返回 EAGAIN
-2. **BSD flock 共享锁** — LOCK_SH 和 LOCK_EX 使用相同全局标记，不支持多个读锁并发持有
-3. **写租约** — F_SETLEASE(F_WRLCK) 未实现，返回 EAGAIN
-4. **死锁检测** — OFD 锁所有者 ID 通过位标记（bit 62）避免冲突，理论上在极端情况下可能误判
-5. **shard 锁粒度** — 单个 shard 的锁粒度为 Mutex，高竞争场景下可能成为瓶颈
+2. **写租约** — F_SETLEASE(F_WRLCK) 未实现，返回 EAGAIN
+3. **死锁检测** — OFD 锁所有者 ID 通过位标记（bit 62）避免冲突，理论上在极端情况下可能误判
+4. **shard 锁粒度** — 单个 shard 的锁粒度为 Mutex，高竞争场景下可能成为瓶颈
