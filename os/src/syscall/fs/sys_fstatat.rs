@@ -51,25 +51,22 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         }
     };
 
-    // uid==0 (root) bypasses DAC — skip permission checks entirely
-    let task = current_task().unwrap();
-    let is_root = task.acquire_inner_lock().euid == 0;
+    // Check search permission on all parent directories (EACCES).
+    // uid==0 (root) bypasses DAC — skip the full path walk to avoid
+    // duplicate work with vfs_lookup() below.
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if uid != 0 {
+        let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
+        if perm_result != SUCCESS {
+            return perm_result;
+        }
+    }
 
     if no_follow {
         // AT_SYMLINK_NOFOLLOW: 使用新 VFS 路径解析
         let inode = match vfs_lookup(&start, &path, false) {
             Ok(inode) => inode,
-            Err(errno) => {
-                // On lookup failure, check if parent search permission was the cause
-                if !is_root {
-                    let (uid, fsgid, groups) = caller_ids_and_groups();
-                    let perm = check_parent_search_access(&start, &path, uid, fsgid, &groups);
-                    if perm != SUCCESS {
-                        return perm;
-                    }
-                }
-                return errno;
-            }
+            Err(errno) => return errno,
         };
         let stat = match inode.metadata() {
             Ok(meta) => metadata_to_stat(&meta),
@@ -86,16 +83,7 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
     } else {
         let inode = match vfs_lookup(&start, &path, true) {
             Ok(inode) => inode,
-            Err(errno) => {
-                if !is_root {
-                    let (uid, fsgid, groups) = caller_ids_and_groups();
-                    let perm = check_parent_search_access(&start, &path, uid, fsgid, &groups);
-                    if perm != SUCCESS {
-                        return perm;
-                    }
-                }
-                return errno;
-            }
+            Err(errno) => return errno,
         };
         let stat = match inode.metadata() {
             Ok(meta) => metadata_to_stat(&meta),
