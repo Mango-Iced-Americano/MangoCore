@@ -8,6 +8,9 @@ pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if is_path_fd(&file) {
+        return EBADF;
+    }
 
     if offset_is_negative(offset) || offset_is_negative(len) {
         return EINVAL;

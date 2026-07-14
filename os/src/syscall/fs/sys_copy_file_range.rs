@@ -23,6 +23,9 @@ pub fn sys_copy_file_range(
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if is_path_fd(&in_file) || is_path_fd(&out_file) {
+        return EBADF;
+    }
     drop(fd_table);
 
     if in_file.readable().is_err() || out_file.writable().is_err() {

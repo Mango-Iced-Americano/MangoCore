@@ -13,6 +13,9 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if is_path_fd(&in_file) || is_path_fd(&out_file) {
+        return EBADF;
+    }
     drop(fd_table);
 
     info!("[sys_sendfile] outfd: {}, in_fd: {}", out_fd, in_fd);

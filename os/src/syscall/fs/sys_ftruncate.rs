@@ -12,6 +12,9 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
             Ok(file) => file,
             Err(e) => return -(e as isize),
         };
+        if is_path_fd(&file) {
+            return EBADF;
+        }
         if file.is_dir() {
             return EISDIR;
         }

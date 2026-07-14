@@ -22,6 +22,9 @@ pub fn sys_splice(
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if is_path_fd(&in_file) || is_path_fd(&out_file) {
+        return EBADF;
+    }
     drop(fd_table);
 
     info!("[sys_splice] outfd: {}, in_fd: {}", fd_out, fd_in);

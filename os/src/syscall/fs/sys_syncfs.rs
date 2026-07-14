@@ -8,6 +8,9 @@ pub fn sys_syncfs(fd: usize) -> isize {
         Ok(file) => file,
         Err(_e) => return EBADF,
     };
+    if is_path_fd(&file) {
+        return EBADF;
+    }
     drop(fd_table);
 
     // Flush all page caches (global, but correct for single-fs system)

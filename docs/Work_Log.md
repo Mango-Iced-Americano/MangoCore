@@ -4,6 +4,21 @@
 
 ## 2026-07-14
 
+### Add O_PATH → EBADF checks to 6 remaining syscall files
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_ftruncate.rs` — 在 `is_dir()` 检查前添加 `is_path_fd(&file)` → `EBADF`
+- `os/src/syscall/fs/sys_syncfs.rs` — 在 `drop(fd_table)` 前添加 `is_path_fd(&file)` → `EBADF`
+- `os/src/syscall/fs/sys_fadvise64.rs` — 在 offset/advice 校验前添加 `is_path_fd(&file)` → `EBADF`
+- `os/src/syscall/fs/sys_copy_file_range.rs` — 在 `drop(fd_table)` 前添加 `is_path_fd(&in_file) || is_path_fd(&out_file)` → `EBADF`
+- `os/src/syscall/fs/sys_sendfile.rs` — 在 `drop(fd_table)` 前添加 `is_path_fd(&in_file) || is_path_fd(&out_file)` → `EBADF`
+- `os/src/syscall/fs/sys_splice.rs` — 在 `drop(fd_table)` 前添加 `is_path_fd(&in_file) || is_path_fd(&out_file)` → `EBADF`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** Linux 语义：对 O_PATH fd 执行任何 I/O/truncate/fadvise/sync/sendfile/splice/copy_file_range 操作应返回 `EBADF`。这 6 个 syscall 直接从 fd_table 获取 file 后调用 inode 方法，绕过 `File::read/File::write` 中已有的 FMODE_PATH 检查。遵循已有 sys_fsync/sys_fchmod/sys_fallocate 等同目录下的检查模式。多 fd syscall 同时检查两个 fd。
+
 ### Fix sys_utimensat — 缺失权限检查与 AT_SYMLINK_NOFOLLOW 忽略
 
 **涉及文件：**
