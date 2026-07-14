@@ -339,6 +339,15 @@ fn apk_persist_test_enabled() -> bool {
     true
 }
 
+fn apk_persist_shell_enabled() -> bool {
+    let marker = open("/apk_persist_shell\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
 fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
     let marker = open("/board_shell\0", OpenFlags::RDONLY);
     if marker < 0 {
@@ -3533,6 +3542,163 @@ fn run_apk_persist_gate(environ: &[*const u8]) -> i32 {
     run_bash_cmd_timeout(cmd, environ, 900)
 }
 
+fn bind_apk_persist_runtime() -> bool {
+    const MS_BIND: usize = 4096;
+    let mut ok = true;
+    for (source, target) in [
+        ("/dev", "/persist/apk-root/dev"),
+        ("/proc", "/persist/apk-root/proc"),
+        ("/tmp", "/persist/apk-root/tmp"),
+        ("/run", "/persist/apk-root/run"),
+        ("/scratch", "/persist/apk-root/scratch"),
+    ] {
+        let source = format!("{}\0", source);
+        let target = format!("{}\0", target);
+        let ret = mount(source.as_ptr(), target.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
+        if ret == 0 {
+            println!(
+                "[apk-persist-shell] bind {} -> {}",
+                source.trim_end_matches('\0'),
+                target.trim_end_matches('\0')
+            );
+        } else {
+            println!(
+                "[apk-persist-shell] bind {} -> {} failed errno={}",
+                source.trim_end_matches('\0'),
+                target.trim_end_matches('\0'),
+                -ret
+            );
+            ok = false;
+        }
+    }
+    ok
+}
+
+fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
+    // P4 stays an application root rather than replacing `/`. An interrupted
+    // first install has no commit marker and is rebuilt on the next boot; an
+    // already committed root is only verified and upgraded with launch files.
+    let prepare_cmd = r#"
+        set -eu
+        apk=/bin/apk.static
+        [ -x "$apk" ] || apk=/tools/bin/apk.static
+        [ -x "$apk" ]
+
+        root=/persist/apk-root
+        state=/persist/apk-state
+        committed=$state/committed-v1
+        ready=$state/shell-ready-v1
+        cache=/scratch/apk-cache
+        repos=/run/apk-persist.repositories
+        [ -f /persist/MANGO_STATE.txt ]
+        mkdir -p "$state" "$cache"
+        printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
+
+        apk_cmd() {
+            "$apk" \
+                --root "$root" \
+                --cache-dir "$cache" \
+                --keys-dir /etc/apk/keys \
+                --repositories-file "$repos" \
+                "$@"
+        }
+
+        if [ ! -f "$committed" ]; then
+            echo '[apk-persist-shell] stage=bootstrap'
+            rm -rf "$root"
+            mkdir -p "$root/lib/apk/db" "$root/etc/apk" "$root/var/cache/apk"
+            : > "$root/etc/apk/world"
+            apk_cmd update
+            apk_cmd add busybox zlib
+            sync
+            printf '%s\n' 'schema=1' 'packages=busybox,zlib' > "$state/.committed-v1.tmp"
+            sync
+            mv -f "$state/.committed-v1.tmp" "$committed"
+            sync
+        else
+            echo '[apk-persist-shell] stage=reuse'
+        fi
+
+        apk_cmd info -e busybox >/dev/null
+        apk_cmd info -e zlib >/dev/null
+        [ -x "$root/bin/busybox" ]
+        [ -x "$root/lib/ld-musl-loongarch64.so.1" ]
+
+        mkdir -p \
+            "$root/dev" "$root/proc" "$root/tmp" "$root/run" \
+            "$root/scratch" "$root/root" "$root/sbin" "$root/usr/bin" \
+            "$root/etc/apk/keys" "$root/etc/ssl/certs"
+        chmod 1777 "$root/tmp"
+        [ -e "$root/bin/sh" ] || ln -s busybox "$root/bin/sh"
+
+        install_changed() {
+            src=$1
+            dst=$2
+            mode=$3
+            if [ ! -f "$dst" ] || ! /bin/busybox cmp -s "$src" "$dst"; then
+                /bin/busybox cp "$src" "$dst.tmp"
+                chmod "$mode" "$dst.tmp"
+                mv -f "$dst.tmp" "$dst"
+            fi
+        }
+
+        install_changed "$apk" "$root/sbin/apk.static" 0755
+        install_changed /usr/libexec/mango/apk-chroot "$root/sbin/apk" 0755
+        install_changed /usr/libexec/mango/persist-profile "$root/etc/profile" 0644
+        install_changed /etc/apk/repositories "$root/etc/apk/repositories" 0644
+        install_changed /etc/passwd "$root/etc/passwd" 0644
+        install_changed /etc/group "$root/etc/group" 0644
+        install_changed /etc/hosts "$root/etc/hosts" 0644
+        install_changed /etc/nsswitch.conf "$root/etc/nsswitch.conf" 0644
+        install_changed /etc/ssl/certs/ca-certificates.crt \
+            "$root/etc/ssl/certs/ca-certificates.crt" 0644
+        for key in /etc/apk/keys/*.pub; do
+            install_changed "$key" "$root/etc/apk/keys/$(basename "$key")" 0644
+        done
+        ln -sf /sbin/apk "$root/usr/bin/apk"
+        ln -sf certs/ca-certificates.crt "$root/etc/ssl/cert.pem"
+        ln -sf /proc/net/resolv.conf "$root/etc/resolv.conf"
+
+        if [ ! -f "$ready" ]; then
+            printf '%s\n' 'schema=1' 'root=/persist/apk-root' > "$state/.shell-ready-v1.tmp"
+            sync
+            mv -f "$state/.shell-ready-v1.tmp" "$ready"
+            sync
+        fi
+        echo '[apk-persist-shell] stage=prepared'
+    "#;
+    let ret = run_bash_cmd_timeout(prepare_cmd, environ, 900);
+    if ret != 0 {
+        return ret;
+    }
+    if !bind_apk_persist_runtime() {
+        return 1 << 8;
+    }
+
+    let verify_cmd = r#"
+        set -eu
+        root=/persist/apk-root
+        [ -f /persist/apk-state/shell-ready-v1 ]
+        result=$(/bin/busybox chroot "$root" /bin/sh -c '
+            set -eu
+            /sbin/apk info -e busybox >/dev/null
+            /sbin/apk info -e zlib >/dev/null
+            [ -r /etc/ssl/cert.pem ]
+            [ -r /proc/net/resolv.conf ]
+            probe=/tmp/mango-persist-shell-probe
+            echo ok > "$probe"
+            [ "$(cat "$probe")" = ok ]
+            rm -f "$probe"
+            /bin/busybox echo PERSIST_SHELL_OK
+        ')
+        [ "$result" = PERSIST_SHELL_OK ]
+        printf '%s\n' 'shell-ok' >> /persist/apk-state/boot-history
+        sync
+        echo '[apk-persist-shell] RESULT=PASS'
+    "#;
+    run_bash_cmd_timeout(verify_cmd, environ, 120)
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let path = "/bin/bash\0";
@@ -3582,6 +3748,24 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             );
         }
         println!("[apk-persist] entering diagnostic shell");
+        enter_shell(path, &environ);
+        shutdown();
+        return if ret == 0 { 0 } else { 1 };
+    }
+
+    if apk_persist_shell_enabled() {
+        println!("[apk-persist-shell] START interactive P4 application root");
+        let ret = prepare_apk_persist_shell(&environ);
+        if ret != 0 {
+            println!(
+                "[apk-persist-shell] RESULT=FAIL wait_status={} exit={}",
+                ret,
+                exit_code_from_waitpid_status(ret)
+            );
+            println!("[apk-persist-shell] entering host diagnostic shell");
+        } else {
+            println!("[apk-persist-shell] ready: run persist-shell, then apk add <package>");
+        }
         enter_shell(path, &environ);
         shutdown();
         return if ret == 0 { 0 } else { 1 };

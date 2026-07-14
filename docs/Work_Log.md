@@ -4,6 +4,33 @@
 
 ## 2026-07-14
 
+### board/apk: 将 P4 收敛为可交互的持久应用根
+
+**涉及文件：**
+- `os/Cargo.toml`、`os/src/main.rs`、`os/src/fs/mod.rs` — 新增默认关闭的 `apk_persist_shell` staged feature，编译期要求 P4 身份门禁，并通过易失标记选择交互启动路径
+- `os/initramfs/apk/`、`os/build_initramfs.sh` — APK runtime 镜像加入宿主 `apk`、`persist-shell`、chroot 内部 APK 包装器和持久 shell profile；宿主 BusyBox 不支持 `set -u`，包装器收敛为兼容的 `set -e`
+- `user/src/bin/initproc.rs` — 无提交标记时按同步/原子改名协议初始化 P4 基础根，已有提交树只校验和补齐启动文件；每次启动 bind `/dev`、`/proc`、`/tmp`、`/run`、`/scratch`，随后从 chroot 内验证 APK 数据库、DNS 和临时写入
+- `os/Makefile`、`os/make/la64.mk` — 新增 LA64 QEMU 与 2K1000LA 交互镜像构建/运行入口，继续复用固定四分区验证盘
+- `docs/08_testing/apk-isolated.md`、`docs/03_fs/2k1000-full-test-disk.md` — 记录 P4 应用根职责、日常命令、首次初始化、bind mount 和非 overlay 边界
+
+**验证：**
+- Docker 串行执行 `make rv64-kernel-build-only MODE=release LOG=off` 与 `make la64-kernel-build-only MODE=release LOG=off`，修改前后两轮均成功，仅有项目既有 warning；生成态 `lang_items.rs` 和 LoongArch linker 已恢复 ✅
+- 已有提交树的 LA64 QEMU 启动输出 `stage=reuse`、五个 bind mount 和 `[apk-persist-shell] RESULT=PASS`；宿主 `apk info -e busybox` 成功，`persist-shell` 内 `apk-tools 3.0.6-r0`、BusyBox/zlib 数据库、`/proc/net/resolv.conf` 和 `/tmp` 均正常 ✅
+- 在 chroot `/root` 写入标记、`sync` 并完整终止/重启同一非 snapshot QEMU 盘，第二次启动仍读到 `p5-qemu-ok`；验证后已删除临时标记并同步 ✅
+- 从原始空 P4 payload 生成独立临时稀疏盘，首次启动输出 `stage=bootstrap`，在线识别 edge/main 5920 个包，安装 musl/busybox/zlib、发布提交和 shell-ready 标记后进入 chroot；内部 `apk info -e zlib` 成功 ✅
+- CA 修复前首版 `make la64-2k1000-apk-persist-shell MODE=release` 成功；`kernel-2k1000-persist-shell.ui` 为 16,740,808 字节，SHA-256 `4d804a4b183947fcbd31a5c779b6c9b47fcc6e856404f064f224ef69b52c8370` ✅
+- `bash -n`、Make dry-run 与 `git diff --check` 通过 ✅
+- 首次实板启动经 TFTP 长度、CRC32 `280d1596` 和 `iminfo` 校验后，识别 2K1000 RNG、GMAC 1000M/full、DHCP `192.168.2.2/24`，P4 输出 `stage=reuse`、五个 bind mount 和 `[apk-persist-shell] RESULT=PASS` ✅
+- 实板发现应用根只有 CA bundle、缺少 libfetch 默认 `/etc/ssl/cert.pem`，导致 `apk update` 报证书不信任；补齐相对链接后三个 edge 索引和 13 个 curl 包均通过 HTTPS 下载，源码已自动补链并在 chroot 自检可读性 ✅
+- 首次 `apk add curl` 在提交最后一个普通文件 `usr/bin/wcurl` 时一次性返回 `ENOENT`，curl 数据库和二进制已可用；`apk fix curl` 随后返回 0，curl/wcurl 均完整落盘。该现象未稳定复现，但在复位门禁前保留为 ext4/APK 提交可靠性观察项 ⚠️
+- 实板 `curl --resolve` 完成带域名、SNI 和 CA 校验的 HTTPS 请求，返回 0/559 字节；Alpine c-ares 使用 macOS 共享 DNS `192.168.2.1` 超时，显式公共 DNS 后普通域名 HTTPS 返回 0/559 字节，说明是宿主 DNS 代理兼容边界而非内核 UDP/TLS 主链路失败 ✅
+- 修复后的实板 uImage 仍为 16,740,808 字节，SHA-256 `8fb8d44a44ba3281a05c9876103efe2ad9dd00fac8a988e27799d0ba4fe27c30`；已向 P4 写入 curl 和 `p5-board-curl-ok` 并 `sync`。第二次启动等待 120 秒未观察到物理 RESET，因此尚未完成最新镜像的复位复用门禁 ⚠️
+- 修复后重新构建并启动 LA64 QEMU 交互镜像，P4 复用、五个 bind mount 和 `RESULT=PASS` 再次通过；chroot 内 `readlink /etc/ssl/cert.pem` 为 `certs/ca-certificates.crt`，可读性检查返回 0，BusyBox 数据库正常，随后 QEMU 正常退出 ✅
+
+**备注：**
+- 这里的交互阶段不新增 P5 分区：SSD 仍只有 P1-P4，软件根位于 `/persist/apk-root`。宿主 `/` 仍是易失 RAMFS，P1/P3 和用户态块设备节点继续只读。
+- 实板首次安装和 HTTPS 已完成；下一门禁只剩用最新 uImage 完整复位，确认启动代码自动补齐 CA 链接并直接读到 curl、wcurl 和 `/root/p5-marker`。通过前不进入 overlay root 阶段。
+
 ### board/storage: 建立 P4 ext4 持久状态分区和双启动 APK 门禁
 
 **涉及文件：**

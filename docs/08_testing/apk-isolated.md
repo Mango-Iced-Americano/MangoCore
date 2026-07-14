@@ -22,6 +22,8 @@ entry_points:
   - "la64-2k1000-apk-tests"
   - "la64-qemu-apk-persist-tests"
   - "la64-2k1000-apk-persist-tests"
+  - "la64-qemu-apk-persist-shell"
+  - "la64-2k1000-apk-persist-shell"
   - "2k1000-p4-write"
 arch:
   rv64: build-only
@@ -39,7 +41,8 @@ related_docs:
 该门禁验证 MangoCore 能运行未经内核特制的 Alpine `apk-tools` 静态程序，并完成
 DNS、HTTPS、签名索引、依赖解析、包下载、解包、维护脚本、trigger 和动态程序执行。
 它不把系统根目录直接改成可写：第一阶段使用易失 RAMFS，第二阶段只在身份校验后的
-P4 中验证跨重启保留，不代表正式系统已经切换为通用持久根。
+P4 中验证跨重启保留，第三阶段把同一 P4 收敛为可交互的独立应用根。三者都不代表
+正式系统已经切换为通用持久根。
 
 实板存储职责固定如下：
 
@@ -63,7 +66,8 @@ FAT32 只适合缓存原始 `.apk` 文件，不能作为安装根：APK 安装�
 - 目标架构的 `/bin/apk.static`；
 - `/etc/apk/repositories` 中的 Alpine edge main/community/testing；
 - Alpine 仓库签名公钥；
-- 由 `apk_test` 或 `apk_persist_test` feature 创建的易失聚焦标记。
+- 由 `apk_test`、`apk_persist_test` 或 `apk_persist_shell` feature 创建的易失标记；
+- 仅在 APK runtime 镜像中加入的宿主 `apk`、`persist-shell` 和 chroot 内部包装器。
 
 APK 3.x 不使用旧教程中的 `--initdb`。入口在运行前显式创建
 `lib/apk/db`、`etc/apk`、`var/cache/apk` 和空的 `etc/apk/world`，再把仓库与公钥路径
@@ -165,3 +169,72 @@ P4 payload、受限写盘命令和 MBR 发布顺序见
 首次实板启动完成 HTTPS update/fetch/add 并输出 `PASS mode=install`，第二次完整复位
 后未重装，直接验证 P4 数据库和已安装 BusyBox，并输出 `PASS mode=reuse`。两轮均通过
 GMAC DHCP、P2 scratch 冒烟和 `[apk-persist] RESULT=PASS`。
+
+## 6. P4 交互应用根
+
+`apk_persist_shell` 继续复用 P4，不创建第五个分区，也不把 P4 覆盖到 `/`。启动时先
+验证内核已经按固定边界、UUID、卷标和 ext4 feature 位挂载 P4；若
+`/persist/apk-state/committed-v1` 不存在，则以与门禁相同的三阶段同步协议初始化
+`musl + busybox + zlib`。已有提交树只做数据库和动态 loader 校验，不会被删除重建。
+
+准备完成后，initproc 把以下易失运行时挂入应用根：
+
+| 应用根路径 | 来源 | 作用 |
+|------------|------|------|
+| `/dev` | 宿主 devfs bind mount | TTY、随机设备和其他设备节点 |
+| `/proc` | 宿主 procfs bind mount | DNS 配置、进程与网络状态 |
+| `/tmp`、`/run` | 宿主 RAMFS/TmpFS bind mount | 不持久化临时文件 |
+| `/scratch` | P2 FAT32 bind mount | 可删除的 APK 下载缓存 |
+
+APK 数据库、已安装程序、动态库、账户配置和 shell profile 保存在
+`/persist/apk-root`；配置完成后原子发布 `shell-ready-v1`。initramfs 中的宿主 `apk`
+包装器自动补齐 `--root`、cache、keys 和 repositories 参数，`persist-shell` 则使用
+静态 BusyBox 的 `chroot` applet 进入应用根。准备阶段同时创建
+`/etc/ssl/cert.pem -> certs/ca-certificates.crt`；只复制 CA bundle 而缺少该默认路径时，
+APK 的 libfetch 会报 `TLS: server certificate not trusted`。日常使用为：
+
+```bash
+# 宿主 shell 中可直接管理 P4，但运行动态程序应进入应用根
+apk info -e busybox
+persist-shell
+
+# 以下位于 P4 应用根内
+apk update
+apk add curl
+curl https://example.com/
+exit
+sync
+```
+
+QEMU 构建和运行：
+
+```bash
+make -C os la64-qemu-apk-persist-shell MODE=release
+make -C os la64-qemu-apk-persist-shell-run MODE=release
+```
+
+实板构建和启动：
+
+```bash
+make -C os la64-2k1000-apk-persist-shell MODE=release
+make 2k1000-boot IMAGE=kernel-2k1000-persist-shell.ui
+```
+
+2026-07-14 已在 LA64 QEMU 完成两类路径：已有提交树启动后宿主 `apk`、chroot、内部
+`apk-tools 3.0.6-r0`、procfs DNS 和临时目录均可用；在应用根写入标记并完整重启后
+内容仍存在。另从原始空 P4 payload 创建临时稀疏盘，首次启动自动完成在线 bootstrap
+并输出 `[apk-persist-shell] RESULT=PASS`。
+
+同日实板首次启动已完成 P4 `stage=reuse`、五个 bind mount 和
+`[apk-persist-shell] RESULT=PASS`。补齐 CA 默认链接后，三个 Alpine edge 索引均通过
+HTTPS 更新，`curl` 及其 12 个依赖成功下载；首次提交在最后一个普通文件 `wcurl` 上
+返回一次 `ENOENT`，随后 `apk fix curl` 完整成功，`curl`/`wcurl` 均保存在 P4。
+`curl --resolve` 的证书校验请求以及 c-ares 指向公共 DNS 的普通域名请求均返回 0。
+macOS Internet Sharing 下 DHCP DNS `192.168.2.1` 不响应该版本 c-ares 的查询，但 APK
+和 BusyBox resolver 可用；这是当前宿主 DNS 代理边界，不应改成内核硬编码 DNS。
+已写入持久标记并 `sync`，包含 CA 自动修复的新 uImage 也已生成；由于本轮第二次
+`RESET` 未发生，真实 SSD 上的完整复位复用仍是下一门禁。
+
+该阶段仍不是 overlay root：宿主 `/` 继续是 RAMFS，P1/P3 及用户态块设备节点继续
+只读。动态链接程序应在 `persist-shell` 中运行，因为其绝对 ELF interpreter 和库路径
+需要从 P4 应用根解析。

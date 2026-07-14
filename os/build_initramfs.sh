@@ -75,6 +75,7 @@ if [ "${APK_RUNTIME:-0}" = "1" ]; then
         exit 1
     fi
     install -m 0755 "$APK_SRC" "$STAGE/bin/apk.static"
+    cp -a "$SCRIPT_DIR/initramfs/apk/." "$STAGE/"
     echo "[initramfs] installed self-contained $ARCH apk.static"
 fi
 

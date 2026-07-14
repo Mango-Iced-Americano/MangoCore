@@ -370,3 +370,33 @@ make 2k1000-boot IMAGE=kernel-2k1000-apk-persist-tests.ui
 `6538e5cb`，P4 哨兵为 97 字节、CRC32 `c8f1b4ff`。同一专用 uImage 首次启动输出
 `PASS mode=install`，再次复位后输出 `PASS mode=reuse`，两轮均为 `RESULT=PASS`；
 P1-P3 边界及只读策略保持不变。
+
+### 7.6 P4 交互应用根
+
+交互阶段仍使用 P4，不新增分区。`apk_persist_shell` 在已验证的 `/persist` 上维护
+`apk-root` 和 `apk-state`，缺少 `committed-v1` 时安全初始化基础 Alpine 用户态，已有
+提交标记时只校验和补齐启动文件。`shell-ready-v1` 仅在 APK 数据库、静态管理器、
+仓库、公钥、CA、账户文件和 profile 均同步完成后发布。应用根固定补齐
+`/etc/ssl/cert.pem -> certs/ca-certificates.crt`，以满足 APK/libfetch 的默认 CA 路径。
+
+启动时把宿主 `/dev`、`/proc`、`/tmp`、`/run` 和 P2 `/scratch` bind mount 到
+`/persist/apk-root`。因此程序和软件包保存在 P4，下载缓存仍在 P2，临时文件不占用
+P4；P1、P3 和用户态块设备节点的只读策略不变。构建和启动命令为：
+
+```bash
+make -C os la64-2k1000-apk-persist-shell MODE=release
+make 2k1000-boot IMAGE=kernel-2k1000-persist-shell.ui
+```
+
+进入宿主 shell 后执行 `persist-shell`，随后可直接运行 `apk update`、
+`apk add <package>` 和已安装的动态程序。宿主也提供简化后的 `apk` 命令用于管理 P4，
+但动态程序必须在应用根内运行，不能假设宿主 RAMFS 提供 P4 的绝对 loader 路径。
+
+实板已完成 P4 复用启动、在线索引更新、`curl` 依赖下载、`apk fix curl` 和带证书校验
+的 HTTPS 请求。macOS Internet Sharing 的 DNS 代理不响应 Alpine curl 所用 c-ares，
+而公共 DNS、APK resolver 和既有 glibc resolver 路径正常；在该临时拓扑下可用 curl
+的 `--dns-servers` 显式选择可达 DNS，正式部署仍应消费现场 DHCP DNS，不能写死到内核。
+已同步写入 P4 的 curl 和标记尚待用最新 uImage 完成一次物理复位复核。
+
+该阶段不把 P4 挂载到 `/`，也没有引入 overlayfs。任何后续通用可写根方案仍需单独
+处理白化、rename、掉电一致性、空间回收和恢复门禁，不能通过放宽 P1/P3 写权限替代。

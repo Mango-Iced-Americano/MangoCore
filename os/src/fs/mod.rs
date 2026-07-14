@@ -1568,6 +1568,12 @@ pub fn flush_preload() {
         // the test configuration carried by the official image.
         let _ = create_or_open_file("apk_persist_test");
     }
+    #[cfg(feature = "apk_persist_shell")]
+    {
+        // Select the interactive P4 application root without changing the
+        // persistent test configuration or making the system root writable.
+        let _ = create_or_open_file("apk_persist_shell");
+    }
     #[cfg(feature = "board_shell")]
     {
         // Keep the shell selection ephemeral so booting this image never

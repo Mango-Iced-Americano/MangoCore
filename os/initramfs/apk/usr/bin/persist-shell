@@ -1,0 +1,16 @@
+#!/rescue/sh
+set -e
+
+root="${MANGO_APK_ROOT:-/persist/apk-root}"
+if [ ! -f /persist/apk-state/shell-ready-v1 ] || [ ! -x "$root/bin/sh" ]; then
+    echo "persist-shell: persistent environment is not ready" >&2
+    exit 1
+fi
+
+unset LD_LIBRARY_PATH
+export HOME=/root
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export SHELL=/bin/sh
+export PS1='MangoPersist:\w# '
+
+exec /bin/busybox chroot "$root" /bin/sh -l

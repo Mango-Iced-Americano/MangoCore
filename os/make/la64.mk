@@ -229,6 +229,21 @@ qemu-apk-persist-tests:
 		-netdev user,id=net0 \
 		-rtc base=utc
 
+qemu-apk-persist-shell:
+	@qemu-system-loongarch64 \
+			-machine virt \
+			-kernel ../kernel-la-apk-persist-shell \
+			-m 1G \
+			-nographic \
+			-smp 1 \
+			-drive file=$(P4_QEMU_DISK),if=none,format=raw,id=x0 \
+			-device virtio-blk-pci,drive=x0 \
+			$(VIRTIO_RNG_DEVICE) \
+			-no-reboot \
+			-device virtio-net-pci,netdev=net0 \
+			-netdev user,id=net0 \
+			-rtc base=utc
+
 comp-gdb:
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -246,4 +261,4 @@ comp-gdb:
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell qemu-apk-tests qemu-apk-persist-tests comp-gdb
+.PHONY: all build kernel fs-img user clean run runsimple comp qemu-curl-shell qemu-apk-tests qemu-apk-persist-tests qemu-apk-persist-shell comp-gdb

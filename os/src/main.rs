@@ -45,6 +45,8 @@ compile_error!("sata_fs_write_probe cannot be combined with another SATA probe")
 compile_error!("sata_scratch_rw is supported only on board_2k1000");
 #[cfg(all(feature = "p4_persist_rw", not(feature = "initramfs")))]
 compile_error!("p4_persist_rw requires the initramfs mount topology");
+#[cfg(all(feature = "apk_persist_shell", not(feature = "p4_persist_rw")))]
+compile_error!("apk_persist_shell requires the validated writable P4 mount");
 #[cfg(all(
     feature = "board_2k1000",
     feature = "p4_persist_rw",
