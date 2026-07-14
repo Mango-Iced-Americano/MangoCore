@@ -203,11 +203,11 @@ pub(crate) fn is_path_fd(file: &vfs::File) -> bool {
         || file.flags().contains(vfs::FileFlags::O_PATH)
 }
 
-pub(crate) fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
+pub(crate) fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32, groups: &[u32]) -> bool {
     if uid == 0 {
         return true;
     }
-    (permission_class_bits(meta, uid, gid) & 0o3) == 0o3
+    (permission_class_bits(meta, uid, gid, groups) & 0o3) == 0o3
 }
 
 pub(crate) fn apply_created_inode_metadata(
@@ -295,10 +295,10 @@ pub(crate) fn open_file_at(
         return Ok(vfs::File::new_without_open(start, _open_flags_to_vfs_flags(flags), md.file_type));
     }
 
-    let (uid, gid) = open_subject_ids();
+    let (uid, fsgid, groups) = caller_ids_and_groups();
     // uid==0 (root) bypasses DAC — skip the redundant path walk
     if uid != 0 {
-        let parent_result = check_parent_search_access(&start, path, uid, gid);
+        let parent_result = check_parent_search_access(&start, path, uid, fsgid, &groups);
         if parent_result != SUCCESS {
             return Err(parent_result);
         }
@@ -319,6 +319,35 @@ pub(crate) fn open_file_at(
                 return Err(EEXIST);
             }
             let md = target.metadata().map_err(|e| -(e as isize))?;
+
+            // O_PATH: skip all permission checks and side effects — just build a path-only fd.
+            // Linux v6.6: O_PATH masks flags to O_DIRECTORY|O_NOFOLLOW|O_PATH|O_CLOEXEC,
+            // dispatches to do_o_path() bypassing may_open() entirely.
+            if flags.contains(OpenFlags::O_PATH) {
+                return Ok(vfs::File::new_without_open(
+                    target,
+                    vfs::FileFlags::from_bits_truncate(
+                        vfs::FileFlags::O_DIRECTORY.bits()
+                            | vfs::FileFlags::O_NOFOLLOW.bits()
+                            | vfs::FileFlags::O_PATH.bits()
+                            | vfs::FileFlags::O_CLOEXEC.bits(),
+                    ) & _open_flags_to_vfs_flags(flags),
+                    md.file_type,
+                ));
+            }
+
+            // Read permission check (Linux: O_RDONLY→MAY_READ, O_RDWR→MAY_READ|MAY_WRITE)
+            // Applies to ALL file types (regular, FIFO, device, socket) — not just regular files.
+            // O_RDONLY is the default (flags & 3 == 0) — must still check MAY_READ.
+            // Skip for O_PATH (already returned early above).
+            let access_mode = flags.bits() & 0o3;
+            if access_mode == 0 || access_mode == 2 {
+                // O_RDONLY (0) or O_RDWR (2) — both need MAY_READ
+                if !has_final_access(&md, FaccessatMode::R_OK, uid, fsgid, &groups) {
+                    return Err(EACCES);
+                }
+            }
+
             // O_NOATIME: check that caller is owner, group member, or root
             if flags.contains(OpenFlags::O_NOATIME) {
                 let (uid, _gid) = open_subject_ids();
@@ -367,7 +396,7 @@ pub(crate) fn open_file_at(
                 if is_executable_inode_busy(&target) {
                     return Err(ETXTBSY);
                 }
-                if !has_final_access(&md, FaccessatMode::W_OK, uid, gid) {
+                if !has_final_access(&md, FaccessatMode::W_OK, uid, fsgid, &groups) {
                     return Err(EACCES);
                 }
             }
@@ -383,14 +412,14 @@ pub(crate) fn open_file_at(
             }
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
             let parent_meta = parent.metadata().map_err(|e| -(e as isize))?;
-            check_parent_write_search_access(&parent, uid, gid)?;
+            check_parent_write_search_access(&parent, uid, fsgid, &groups)?;
             let create_mode = apply_current_umask(mode);
 
             let setgid = parent_meta.mode.contains(vfs::InodeMode::S_ISGID);
-            let child_gid = if setgid { parent_meta.gid } else { gid };
+            let child_gid = if setgid { parent_meta.gid } else { fsgid };
 
             let mut effective_mode = create_mode;
-            if effective_mode.contains(vfs::InodeMode::S_ISGID) && uid != 0 && gid != child_gid {
+            if effective_mode.contains(vfs::InodeMode::S_ISGID) && uid != 0 && fsgid != child_gid {
                 effective_mode.remove(vfs::InodeMode::S_ISGID);
             }
 
@@ -1983,18 +2012,29 @@ pub(crate) fn access_subject_ids(use_effective: bool) -> (u32, u32) {
     }
 }
 
-pub(crate) fn permission_class_bits(meta: &vfs::Metadata, uid: u32, gid: u32) -> u32 {
+pub(crate) fn access_subject_ids_and_groups(use_effective: bool) -> (u32, u32, Vec<u32>) {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    let groups = inner.groups.to_vec();
+    if use_effective {
+        (inner.euid, inner.egid, groups)
+    } else {
+        (inner.uid, inner.gid, groups)
+    }
+}
+
+pub(crate) fn permission_class_bits(meta: &vfs::Metadata, uid: u32, gid: u32, groups: &[u32]) -> u32 {
     let mode = meta.mode.bits() & 0o777;
     if uid == meta.uid {
         (mode >> 6) & 0o7
-    } else if gid == meta.gid {
+    } else if gid == meta.gid || groups.iter().any(|g| *g == meta.gid) {
         (mode >> 3) & 0o7
     } else {
         mode & 0o7
     }
 }
 
-pub(crate) fn has_final_access(meta: &vfs::Metadata, mode: FaccessatMode, uid: u32, gid: u32) -> bool {
+pub(crate) fn has_final_access(meta: &vfs::Metadata, mode: FaccessatMode, uid: u32, gid: u32, groups: &[u32]) -> bool {
     if mode.bits() == 0 {
         return true;
     }
@@ -2002,7 +2042,7 @@ pub(crate) fn has_final_access(meta: &vfs::Metadata, mode: FaccessatMode, uid: u
         return !mode.contains(FaccessatMode::X_OK) || (meta.mode.bits() & 0o111) != 0;
     }
 
-    let allowed = permission_class_bits(meta, uid, gid);
+    let allowed = permission_class_bits(meta, uid, gid, groups);
     if mode.contains(FaccessatMode::R_OK) && (allowed & 0o4) == 0 {
         return false;
     }
@@ -2015,8 +2055,8 @@ pub(crate) fn has_final_access(meta: &vfs::Metadata, mode: FaccessatMode, uid: u
     true
 }
 
-pub(crate) fn has_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
-    uid == 0 || (permission_class_bits(meta, uid, gid) & 0o1) != 0
+pub(crate) fn has_search_access(meta: &vfs::Metadata, uid: u32, gid: u32, groups: &[u32]) -> bool {
+    uid == 0 || (permission_class_bits(meta, uid, gid, groups) & 0o1) != 0
 }
 
 pub(crate) fn check_parent_search_access(
@@ -2024,6 +2064,7 @@ pub(crate) fn check_parent_search_access(
     path: &str,
     uid: u32,
     gid: u32,
+    groups: &[u32],
 ) -> isize {
     let components = parse_path(path);
     let base = if path.starts_with('/') {
@@ -2040,7 +2081,7 @@ pub(crate) fn check_parent_search_access(
         if meta.file_type != FileType::Dir {
             return ENOTDIR;
         }
-        if !has_search_access(&meta, uid, gid) {
+        if !has_search_access(&meta, uid, gid, groups) {
             return EACCES;
         }
         SUCCESS
@@ -2077,6 +2118,7 @@ pub(crate) fn check_parent_write_search_access(
     parent: &Arc<dyn vfs::IndexNode>,
     uid: u32,
     gid: u32,
+    groups: &[u32],
 ) -> Result<(), isize> {
     let meta = match parent.metadata() {
         Ok(meta) => meta,
@@ -2085,7 +2127,7 @@ pub(crate) fn check_parent_write_search_access(
     if meta.file_type != FileType::Dir {
         return Err(ENOTDIR);
     }
-    if !has_directory_write_search_access(&meta, uid, gid) {
+    if !has_directory_write_search_access(&meta, uid, gid, groups) {
         return Err(EACCES);
     }
     Ok(())
@@ -2141,8 +2183,8 @@ pub(crate) fn resolve_path_inode(path: &str, follow_final: bool) -> Result<Arc<d
         Ok(inode) => inode,
         Err(errno) => return Err(errno),
     };
-    let (uid, gid) = open_subject_ids();
-    let perm_err = check_parent_search_access(&start, path, uid, gid);
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let perm_err = check_parent_search_access(&start, path, uid, fsgid, &groups);
     if perm_err != SUCCESS {
         return Err(perm_err);
     }

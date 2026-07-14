@@ -21,8 +21,8 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
     if path == "/" || path == "." {
         return EEXIST;
     }
-    let (uid, gid) = open_subject_ids();
-    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let parent_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
     if parent_result != SUCCESS {
         return parent_result;
     }
@@ -32,7 +32,7 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
     };
 
     // Check write permission on parent
-    if let Err(errno) = check_parent_write_search_access(&parent, uid, gid) {
+    if let Err(errno) = check_parent_write_search_access(&parent, uid, fsgid, &groups) {
         return errno;
     }
 
@@ -50,7 +50,7 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
     let child_gid = if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
         parent_meta.gid
     } else {
-        gid
+        fsgid
     };
     if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
         dir_mode.insert(vfs::InodeMode::S_ISGID);

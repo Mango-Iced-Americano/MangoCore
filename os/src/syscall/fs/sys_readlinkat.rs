@@ -64,8 +64,8 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     } else {
         let start = match resolve_start_inode(dirfd) { Ok(s) => s, Err(e) => return e, };
 
-        let (uid, gid) = open_subject_ids();
-        let perm_result = check_parent_search_access(&start, &path, uid, gid);
+        let (uid, fsgid, groups) = caller_ids_and_groups();
+        let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
         if perm_result != SUCCESS {
             return perm_result;
         }

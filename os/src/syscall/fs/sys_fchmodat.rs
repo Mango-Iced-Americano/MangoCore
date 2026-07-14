@@ -23,8 +23,8 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
             Ok(inode) => inode,
             Err(errno) => return errno,
         };
-        let (uid, gid) = open_subject_ids();
-        let perm_err = check_parent_search_access(&start, &path_str, uid, gid);
+        let (uid, fsgid, groups) = caller_ids_and_groups();
+        let perm_err = check_parent_search_access(&start, &path_str, uid, fsgid, &groups);
         if perm_err != SUCCESS {
             return perm_err;
         }

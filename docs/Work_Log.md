@@ -4,6 +4,60 @@
 
 ## 2026-07-14
 
+### DAC 权限检查三连修：辅助组支持、O_PATH 跳过、读权限检查
+
+**涉及文件：**
+- `os/src/syscall/fs/common.rs` — T4: 所有 DAC helper（`permission_class_bits`、`has_directory_write_search_access`、`has_search_access`、`has_final_access`、`check_parent_search_access`、`check_parent_write_search_access`）新增 `groups: &[u32]` 参数，辅助组成员可匹配文件组权限；新增 `access_subject_ids_and_groups()` 辅助函数用于 faccessat2；T3: `open_file_at()` 在解析 metadata 后插入 O_PATH 提前返回，绕过所有权限检查和副作用；T2: `open_file_at()` 新增 O_RDONLY/O_RDWR 读权限检查
+- `os/src/syscall/fs/sys_linkat.rs` — `open_subject_ids()` → `caller_ids_and_groups()`；`check_parent_write_search_access` 传入 `&groups`
+- `os/src/syscall/fs/sys_mkdirat.rs` — 同上；`gid` 变量重命名为 `fsgid`
+- `os/src/syscall/fs/sys_symlinkat.rs` — 同上
+- `os/src/syscall/fs/sys_unlinkat.rs` — 同上
+- `os/src/syscall/fs/sys_faccessat2.rs` — `access_subject_ids()` → `access_subject_ids_and_groups()`；`check_parent_search_access` 和 `has_final_access` 传入 `&groups`
+- `os/src/syscall/fs/sys_fstatat.rs` — `open_subject_ids()` → `caller_ids_and_groups()`；`check_parent_search_access` 传入 `&groups`
+- `os/src/syscall/fs/sys_fchdir.rs` — 同上；`has_search_access` 传入 `&groups`
+- `os/src/syscall/fs/sys_truncate.rs` — 同上；`permission_class_bits` 传入 `&groups`
+- `os/src/syscall/fs/sys_mknodat.rs` — `_groups` → `groups`；`check_parent_write_search_access` 传入 `&groups`
+- `os/src/syscall/fs/sys_fchmodat.rs` — `open_subject_ids()` → `caller_ids_and_groups()`；`check_parent_search_access` 传入 `&groups`
+- `os/src/syscall/fs/sys_readlinkat.rs` — 同上
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（196 warnings, 0 errors，均为预存警告）
+
+**备注：** O_PATH 处于 metadata 解析后，O_NOATIME/FIFO/dir 检查/ETXTBSY/write 权限/truncate 之前返回。O_NOFOLLOW + O_PATH 不会对符号链接返回 ELOOP（原有检查已包含 `!flags.contains(OpenFlags::O_PATH)`）。O_RDONLY 读权限检查覆盖所有文件类型（常规文件、FIFO、设备、socket）。O_RDWR 同时通过读检查（新代码）和写检查（原有 `open_requests_write` 块）。
+
+### 修复 lwext4 uid/gid 硬编码为 0：从磁盘 inode 读取真实值
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — `LookupCacheEntry` 新增 `uid: u32` 和 `gid: u32` 字段；`probe_inode_meta()` 从 `raw_inode` 提取 32-bit uid/gid（低 16 位 + `osd2.linux2.uid_high/gid_high` 高 16 位）
+- `os/src/fs/ext4_lwext4/layout.rs` — `new_child_seeded()` 新增 `uid: u32` 和 `gid: u32` 参数，传入 `CachedMeta`；`metadata()` 冷路径通过 `ext4_owner_get()` C FFI 获取真实 uid/gid，替代硬编码 0；更新所有 6 个调用点（`find` ".."、`find` 子路径、`create`、`mkdir`、`symlink`、`mknod`）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（196 warnings, 0 errors，均为预存警告）
+
+**备注：** 之前 `lookup`/`probe_inode_meta` 始终返回 uid=0/gid=0，导致 `stat()`、`getattr`、`chown` 等 syscall 返回错误的所有者信息。修复后 `find()` 路径从 `probe_inode_meta` 获取真实 uid/gid 并缓存在 `CachedMeta` 中；新建 inode 路径（create/mkdir/symlink/mknod）传 0/0，由后续 `set_metadata()`/`chown` 设置。冷路径使用 `ext4_owner_get(path, &mut uid, &mut gid)` 一次 FFI 获取双值。热路径已在 `set_metadata()` 修复时正确处理 `cached.uid`/`cached.gid`。
+
+### sys_chdir: 添加 parent search + target exec 权限检查
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_chdir.rs` — `vfs_lookup` 前调用 `check_parent_search_access()`（非 root），ENOTDIR 后调用 `has_search_access()` 对目标目录（root 豁免）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（仅 8 pre-existing ext4_lwext4 errors，0 new）
+
+**备注：** 遵循 Linux chdir(2) 语义：需对所有父目录有 x 权限，且目标目录本身有 x 权限。`caller_ids_and_groups()` 返回的 `groups` 未被使用（`_groups`），因为两个 helper 均不检查辅助组。
+
+### sys_renameat2: 添加源/目标父目录 write+search 权限检查
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_renameat2.rs` — 解析 old_parent 后和 new_parent 后分别调用 `check_parent_write_search_access()`（root 豁免）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（7 pre-existing ext4_lwext4 errors, 0 new）
+
+**备注：** 遵循 Linux rename(2) 语义：需要对两个父目录都有写+执行权限。沿用 `sys_unlinkat.rs` 同模式（`open_subject_ids()` + `check_parent_write_search_access()`）。
+
+## 2026-07-14
+
 ### 重构 syscall/fs.rs：提取共享代码到 fs/common.rs（Step 1）
 
 **涉及文件：**

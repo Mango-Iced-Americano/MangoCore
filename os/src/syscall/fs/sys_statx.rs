@@ -46,6 +46,15 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
         Err(errno) => return errno,
     };
 
+    // Check search permission on parent directories (mirrors sys_fstatat)
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if uid != 0 {
+        let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
+        if perm_result != SUCCESS {
+            return perm_result;
+        }
+    }
+
     let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
     if no_follow {
         // AT_SYMLINK_NOFOLLOW: 使用新 VFS 路径解析

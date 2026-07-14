@@ -18,6 +18,13 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Check write+search permission on parent directory (non-root only)
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if uid != 0 {
+        if let Err(errno) = check_parent_write_search_access(&parent, uid, fsgid, &groups) {
+            return errno;
+        }
+    }
     let file_type = match vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IFMT {
         m if m == vfs::InodeMode::S_IFIFO => FileType::Pipe,
         m if m == vfs::InodeMode::S_IFBLK => FileType::BlockDevice,
@@ -27,6 +34,10 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         m if m == vfs::InodeMode::S_IFDIR => return EINVAL,
         _ => return EINVAL,
     };
+    // CAP_MKNOD proxy: block/char devices require root (MangoCore has no capability system)
+    if (file_type == FileType::BlockDevice || file_type == FileType::CharDevice) && uid != 0 {
+        return EPERM;
+    }
     let perm = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode));
     // Only pass device number for CHR/BLK; FIFO/socket use 0
     let rdev = if file_type == FileType::CharDevice || file_type == FileType::BlockDevice {

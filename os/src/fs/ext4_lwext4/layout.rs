@@ -200,6 +200,8 @@ impl Ext4OSInode {
         file_type: FileType,
         inode_mode: InodeMode,
         size: usize,
+        uid: u32,
+        gid: u32,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak| {
             Self {
@@ -212,8 +214,8 @@ impl Ext4OSInode {
                 logical_size: Arc::new(AtomicUsize::new(size)),
                 cached_meta: Mutex::new(Some(CachedMeta {
                     mode: inode_mode,
-                    uid: 0,
-                    gid: 0,
+                    uid,
+                    gid,
                 })),
             }
         })
@@ -326,12 +328,23 @@ impl IndexNode for Ext4OSInode {
         // and cause a spin::Mutex deadlock (spin::Mutex is not reentrant).
         let _cold_start = crate::task::perf::perf_time_now();
         counters::LWEXT4_METADATA_COLD.fetch_add(1, Ordering::Relaxed);
-        let (file_type, inode_mode, size, blocks) = {
+        let (file_type, inode_mode, size, blocks, uid, gid) = {
             let _lock = self.fs.lw.lock();
             let lw_path = self.fs.lw_path(&self.path);
             let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
             let mode_raw = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
             let mapped = map_lwext4_mode(mode_raw);
+
+            // Fetch real uid/gid from on-disk inode via ext4_owner_get
+            let mut lu: u32 = 0;
+            let mut lg: u32 = 0;
+            let c_path = CString::new(lw_path.as_str())
+                .map_err(|_| SyscallErr::EINVAL)?;
+            let c_path = c_path.into_raw();
+            unsafe {
+                lwext4_rust::bindings::ext4_owner_get(c_path, &mut lu, &mut lg);
+            }
+            unsafe { let _ = CString::from_raw(c_path); }
 
             let (size, blocks) = match mapped.file_type {
                 FileType::Dir => (0i64, 0usize),
@@ -388,14 +401,14 @@ impl IndexNode for Ext4OSInode {
                     }
                 }
             };
-            (mapped.file_type, mapped.inode_mode, size, blocks)
+            (mapped.file_type, mapped.inode_mode, size, blocks, lu, lg)
         };
 
         // Cache mode for hot path
         *self.cached_meta.lock() = Some(CachedMeta {
             mode: inode_mode,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
         });
 
         counters::LWEXT4_METADATA_COLD_CYCLES.fetch_add(
@@ -417,8 +430,8 @@ impl IndexNode for Ext4OSInode {
             mode: inode_mode,
             flags: InodeFlags::empty(),
             nlinks: if file_type == FileType::Dir { 2 } else { 1 },
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             raw_dev: 0,
         })
     }
@@ -555,18 +568,29 @@ impl IndexNode for Ext4OSInode {
                 };
                 let parent_path = String::from(parent_path);
                 // Use probe_inode_meta (cached) instead of get_inode_id
-                let inode_id = self
+                let entry = self
                     .fs
                     .probe_inode_meta(&parent_path)
-                    .map(|e| e.inode_id)
-                    .unwrap_or(0);
+                    .unwrap_or_else(|_| {
+                        super::ext4fs::LookupCacheEntry {
+                            inode_id: 0,
+                            file_type: FileType::Dir,
+                            inode_mode: InodeMode::S_IFDIR
+                                | InodeMode::from_bits_truncate(0o755),
+                            size: 0,
+                            uid: 0,
+                            gid: 0,
+                        }
+                    });
                 Ok(Ext4OSInode::new_child_seeded(
                     self.fs.clone(),
                     parent_path,
-                    inode_id,
+                    entry.inode_id,
                     FileType::Dir,
-                    InodeMode::S_IFDIR | InodeMode::from_bits_truncate(0o755),
-                    0,
+                    entry.inode_mode,
+                    entry.size,
+                    entry.uid,
+                    entry.gid,
                 ) as Arc<dyn IndexNode>)
             };
             let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
@@ -588,6 +612,8 @@ impl IndexNode for Ext4OSInode {
             entry.file_type,
             entry.inode_mode,
             entry.size,
+            entry.uid,
+            entry.gid,
         ) as Arc<dyn IndexNode>);
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
         counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -931,6 +957,8 @@ impl IndexNode for Ext4OSInode {
                     FileType::File,
                     mode,
                     0,
+                    0,
+                    0,
                 );
                 Ok(inode)
             }
@@ -1006,6 +1034,8 @@ impl IndexNode for Ext4OSInode {
             real_inode,
             FileType::Dir,
             mode,
+            0,
+            0,
             0,
         ))
     }
@@ -1265,6 +1295,8 @@ impl IndexNode for Ext4OSInode {
             FileType::SymLink,
             InodeMode::S_IFLNK | InodeMode::from_bits_truncate(0o777),
             target.len(),
+            0,
+            0,
         ))
     }
 
@@ -1428,6 +1460,8 @@ impl IndexNode for Ext4OSInode {
             h,
             file_type,
             mode,
+            0,
+            0,
             0,
         ))
     }

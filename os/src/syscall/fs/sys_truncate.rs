@@ -22,13 +22,13 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
         lock.working_inode.inode.clone()
     };
     // Check parent directory search permission before lookup (correct errno order)
-    let (uid, gid) = open_subject_ids();
+    let (uid, gid, groups) = caller_ids_and_groups();
     let start = if path.starts_with('/') {
         crate::fs::current_root_inode()
     } else {
         cwd_inode.clone()
     };
-    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    let parent_result = check_parent_search_access(&start, &path, uid, gid, &groups);
     if parent_result != SUCCESS {
         return parent_result;
     }
@@ -59,7 +59,7 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
         return EFBIG;
     }
     // Check write permission on the file itself
-    if uid != 0 && (permission_class_bits(&md, uid, gid) & 0o2) == 0 {
+    if uid != 0 && (permission_class_bits(&md, uid, gid, &groups) & 0o2) == 0 {
         return EACCES;
     }
     match inode.resize(length as usize) {

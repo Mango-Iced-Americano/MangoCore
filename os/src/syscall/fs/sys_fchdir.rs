@@ -17,8 +17,8 @@ pub fn sys_fchdir(fd: usize) -> isize {
         Ok(meta) => meta,
         Err(e) => return -(e as isize),
     };
-    let (uid, gid) = open_subject_ids();
-    if !has_search_access(&meta, uid, gid) {
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if !has_search_access(&meta, uid, fsgid, &groups) {
         return EACCES;
     }
     let working_path = inode.absolute_path().ok();

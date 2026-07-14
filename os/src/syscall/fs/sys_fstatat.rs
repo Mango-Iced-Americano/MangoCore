@@ -50,9 +50,9 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
     // Check search permission on all parent directories (EACCES).
     // uid==0 (root) bypasses DAC — skip the full path walk to avoid
     // duplicate work with vfs_lookup() below.
-    let (uid, gid) = open_subject_ids();
+    let (uid, fsgid, groups) = caller_ids_and_groups();
     if uid != 0 {
-        let perm_result = check_parent_search_access(&start, &path, uid, gid);
+        let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
         if perm_result != SUCCESS {
             return perm_result;
         }

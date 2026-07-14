@@ -22,6 +22,15 @@ pub fn sys_chdir(path: *const u8) -> isize {
         (lock.working_inode.clone(), lock.working_path.clone())
     };
 
+    // Check search permission on each parent directory component
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if uid != 0 {
+        let perm_result = check_parent_search_access(&cwd_inode.inode, &path, uid, fsgid, &groups);
+        if perm_result != SUCCESS {
+            return perm_result;
+        }
+    }
+
     let target = match vfs_lookup(&cwd_inode.inode, &path, true) {
         Ok(inode) => {
             // ENOTDIR: chdir target must be a directory
@@ -32,6 +41,10 @@ pub fn sys_chdir(path: *const u8) -> isize {
             if md.file_type != vfs::FileType::Dir {
                 warn!("[sys_chdir] not a directory: {:?}", md.file_type);
                 return ENOTDIR;
+            }
+            // Target directory must be searchable (exec permission)
+            if uid != 0 && !has_search_access(&md, uid, fsgid, &groups) {
+                return EACCES;
             }
             match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
                 Ok(f) => f,

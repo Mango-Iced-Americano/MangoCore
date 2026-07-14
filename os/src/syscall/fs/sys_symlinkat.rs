@@ -33,8 +33,8 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         Err(errno) => return errno,
     };
 
-    let (uid, gid) = open_subject_ids();
-    let search_result = check_parent_search_access(&start, &linkpath_str, uid, gid);
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let search_result = check_parent_search_access(&start, &linkpath_str, uid, fsgid, &groups);
     if search_result != SUCCESS {
         return search_result;
     }
@@ -68,7 +68,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         }
     };
 
-    if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, gid) {
+    if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, fsgid, &groups) {
         return errno;
     }
 

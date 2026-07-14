@@ -41,6 +41,8 @@ pub(crate) struct LookupCacheEntry {
     pub file_type: FileType,
     pub inode_mode: InodeMode,
     pub size: usize,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// lwext4-based ext4 filesystem.
@@ -268,11 +270,17 @@ impl Ext4FileSystem {
         let mapped = super::layout::map_lwext4_mode(mode_raw);
         let size = (raw_inode.size_lo as usize)
             | ((raw_inode.size_hi as usize) << 32);
+        let uid = raw_inode.uid as u32
+            | unsafe { ((raw_inode.osd2.linux2.uid_high as u32) << 16) };
+        let gid = raw_inode.gid as u32
+            | unsafe { ((raw_inode.osd2.linux2.gid_high as u32) << 16) };
         let entry = LookupCacheEntry {
             inode_id: ret_ino as usize,
             file_type: mapped.file_type,
             inode_mode: mapped.inode_mode,
             size,
+            uid,
+            gid,
         };
         Ok(entry)
     }

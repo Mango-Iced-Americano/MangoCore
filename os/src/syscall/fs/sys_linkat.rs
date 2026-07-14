@@ -125,8 +125,8 @@ pub fn sys_linkat(
     }
 
     // Check write+search permission on target parent directory
-    let (uid, gid) = open_subject_ids();
-    if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, gid) {
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, fsgid, &groups) {
         return errno;
     }
 

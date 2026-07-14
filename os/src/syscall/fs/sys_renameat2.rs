@@ -52,6 +52,19 @@ pub fn sys_renameat2(
         Err(errno) => return errno,
     };
 
+    // Check write+search permission on both parent directories
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    if uid != 0 {
+        if let Err(errno) = check_parent_write_search_access(&old_parent, uid, fsgid, &groups) {
+            return errno;
+        }
+    }
+    if uid != 0 {
+        if let Err(errno) = check_parent_write_search_access(&new_parent, uid, fsgid, &groups) {
+            return errno;
+        }
+    }
+
     // VFS 层 RENAME_NOREPLACE 预检（目标存在即返回 EEXIST）
     if flags & RENAME_NOREPLACE != 0 {
         match new_parent.find(&new_leaf) {

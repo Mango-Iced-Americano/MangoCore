@@ -34,8 +34,8 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
-    let (uid, gid) = open_subject_ids();
-    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let parent_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
     if parent_result != SUCCESS {
         return parent_result;
     }
@@ -43,7 +43,7 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    if let Err(errno) = check_parent_write_search_access(&parent, uid, gid) {
+    if let Err(errno) = check_parent_write_search_access(&parent, uid, fsgid, &groups) {
         return errno;
     }
     // sticky bit: only file owner, dir owner, or root may delete from sticky dir
