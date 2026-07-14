@@ -9,6 +9,9 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if is_path_fd(&file) {
+        return EBADF;
+    }
 
     if cmd == FIONREAD {
         // Let inode try first (PTY uses internal buffer size)

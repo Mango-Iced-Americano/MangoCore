@@ -9,6 +9,9 @@ pub fn sys_fdatasync(fd: usize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if is_path_fd(&file) {
+        return EBADF;
+    }
     drop(fd_table);
 
     if !matches!(file.file_type(), FileType::File | FileType::Dir | FileType::BlockDevice) {

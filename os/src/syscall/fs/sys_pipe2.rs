@@ -2,11 +2,11 @@ use super::common::*;
 
 pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
     const VALID_FLAGS: OpenFlags = OpenFlags::from_bits_truncate(
-        0o2000000 /* O_CLOEXEC */ | 0o40000 /* O_DIRECT */ | 0o4000, /* O_NONBLOCK */
+        0o2000000 /* O_CLOEXEC */ | 0o4000, /* O_NONBLOCK */
     );
     let flags = match OpenFlags::from_bits(flags) {
         Some(flags) => {
-            // only O_CLOEXEC | O_DIRECT | O_NONBLOCK are valid in pipe2()
+            // only O_CLOEXEC | O_NONBLOCK are valid in pipe2()
             if flags.difference(VALID_FLAGS).is_empty() {
                 flags
             } else {

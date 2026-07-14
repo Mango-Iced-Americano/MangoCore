@@ -35,7 +35,7 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
             Err(e) => -(e as isize),
         };
     }
-    let create_mode = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode_bits));
+    let create_mode = vfs::InodeMode::from_bits_truncate(mode_bits);
     let new_file = match open_file_at(dirfd, &path, flags, create_mode) {
         Ok(file) => file,
         Err(errno) => return errno,

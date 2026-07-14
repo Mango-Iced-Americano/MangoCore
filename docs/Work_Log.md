@@ -4,6 +4,37 @@
 
 ## 2026-07-14
 
+### Fix sys_utimensat — 缺失权限检查与 AT_SYMLINK_NOFOLLOW 忽略
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_utimensat.rs` — 完全重写，修复两个关键 bug
+
+**Bug 1: 缺失权限检查。** 任何用户可设置任意文件时间戳。添加 Linux 语义权限检查：
+- `times == NULL` 或 `UTIME_NOW`：需写权限（`W_OK`）或文件所有权 → `EACCES`
+- 具体时间值：需所有权（`uid==0 || uid==md.uid`）→ `EPERM`
+- `UTIME_OMIT`：无需权限
+- 所有权检查优先于写权限检查（`EPERM` 优先于 `EACCES`）
+
+**Bug 2: `AT_SYMLINK_NOFOLLOW` 标志完全忽略。** `flags` 被解析但从未使用，`__openat` 永远跟随符号链接。改为 `vfs_lookup` + `follow_final = !flags.contains(AT_SYMLINK_NOFOLLOW)`。
+
+**架构变更：** 用 `vfs_lookup` 路径解析取代 `__openat`（参考 `sys_fchownat` 模式），直接在目标 inode 上调用 `set_metadata` 而非通过 `File` 对象。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 权限检查使用 `caller_ids_and_groups()` + `has_final_access(&md, FaccessatMode::W_OK, ...)` 进行 DAC 检查。空路径返回 `ENOENT`（`UtimensatFlags` 不支持 `AT_EMPTY_PATH`）。
+
+### Fix sys_fallocate — 缺失 O_PATH 与 writable 权限检查
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_fallocate.rs` — 在文件类型检查之后、mode 标志检查之前，添加 `is_path_fd()` 和 `file.writable()` 两项检查，确保 O_PATH fd 和只读 fd 上调用 fallocate 返回 `EBADF`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** Linux 语义：fallocate 需要可写 fd，O_PATH fd 和只读 fd 都应返回 `EBADF`。之前完全是缺失的 — O_PATH fd 可以成功修改文件内容（mode=0 时调用 truncate_size），这是个安全漏洞。保持一致的同目录模式：`sys_write.rs`、`sys_pwrite.rs`、`sys_read.rs` 等都有类似的 `is_path_fd()` / `writable()` 检查。
+
 ### Fix sticky bit violation errno — EACCES → EPERM (unlinkat/renameat2)
 
 **涉及文件：**
@@ -15,6 +46,17 @@
 - `make la64-kernel-build-only` ✅
 
 **备注：** Linux 语义：sticky bit 下非文件/目录所有者执行删除/重命名 → `EPERM`（而非 `EACCES`）。`EACCES` 是父目录缺少写权限时的错误码，两者区分很重要。LTP 和健全性测试依赖正确的 errno 值。
+
+### Fix sys_pipe2 VALID_FLAGS — 移除非法 O_DIRECT
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_pipe2.rs` — `VALID_FLAGS` 移除 `O_DIRECT`（`0o40000`），Linux 6.6 pipe2() 仅接受 `O_CLOEXEC | O_NONBLOCK`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- 同步更新了注释
+
+**备注：** `O_DIRECT` 是 open() 专用的文件打开标志，pipe2() 不接受。若传入会意外被视作合法标志，导致 `EINVAL` 检查漏过 `O_DIRECT`，虽然当前逻辑上无害（pipe 创建后不启用 direct I/O），但违反 Linux ABI 语义。
 
 ### Fix do_fchmod — S_ISGID/S_ISVTX 从旧 mode 丢失
 
@@ -89,6 +131,19 @@
 - `make rv64-kernel-build-only` ✅（7 pre-existing ext4_lwext4 errors, 0 new）
 
 **备注：** 遵循 Linux rename(2) 语义：需要对两个父目录都有写+执行权限。沿用 `sys_unlinkat.rs` 同模式（`open_subject_ids()` + `check_parent_write_search_access()`）。
+
+### Fix three small bugs: double umask in sys_openat + O_PATH checks for ioctl/fsync/fdatasync
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_openat.rs` — 移除 `apply_current_umask` 调用，由 `open_file_at()` 统一处理 umask（之前双重应用）
+- `os/src/syscall/fs/sys_ioctl.rs` — 添加 `is_path_fd()` 检查，O_PATH fd 返回 `EBADF`
+- `os/src/syscall/fs/sys_fsync.rs` — 同上
+- `os/src/syscall/fs/sys_fdatasync.rs` — 同上
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** Bug 1: `sys_openat()` 和 `open_file_at()` 都调用了 `apply_current_umask()`，导致用户传入的 mode 被应用了两次 umask，创建的文件权限比预期更严格。Bug 2/3: Linux 语义规定对 O_PATH fd 调用 ioctl/fsync/fdatasync 应返回 `EBADF`。
 
 ## 2026-07-14
 

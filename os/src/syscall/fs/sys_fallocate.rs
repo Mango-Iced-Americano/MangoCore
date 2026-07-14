@@ -32,6 +32,15 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
         return ENODEV;
     }
 
+    // O_PATH fd: fallocate must fail with EBADF
+    if is_path_fd(&file) {
+        return EBADF;
+    }
+    // fallocate requires a writable fd
+    if file.writable().is_err() {
+        return EBADF;
+    }
+
     info!(
         "[sys_fallocate] fd: {}, mode: {:#x}, offset: {}, len: {}, end: {}",
         fd, mode, offset, len, end
