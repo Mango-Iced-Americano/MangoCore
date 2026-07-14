@@ -643,7 +643,7 @@ impl IndexNode for LockedRamFSInode {
         let new_parent_inode: &LockedRamFSInode = new_parent
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
-            .ok_or(SyscallErr::EINVAL)?;
+            .ok_or(SyscallErr::EXDEV)?;
 
         // Pre-check: subtree validation (before modifying anything)
         // If old is a directory and new_parent is a descendant of old → EINVAL

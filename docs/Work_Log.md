@@ -4,6 +4,29 @@
 
 ## 2026-07-14
 
+### Fix three fcntl bugs: F_GETLK l_type order, F_SETFL O_PATH check, F_GETOWN_EX writeback
+
+**涉及文件：**
+- `os/src/fs/vfs/posix_lock.rs` — `posix_lock_get()`: 将 l_type 校验（EINVAL）前移到 `map.get()` 之前，确保无效 l_type 始终返回 EINVAL（Linux 语义）
+- `os/src/syscall/fs/sys_fcntl.rs` — `FcntlCommand::SetFlags`: 添加 O_PATH fd 检查，返回 EBADF；`FcntlCommand::GetOwnEx`: 修复用户空间 writeback 错误被忽略的 bug，write 失败时返回 EFAULT
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** Bug1: 此前 F_GETLK 在 l_type 非法时若文件无 lock entry 会错误返回 F_UNLCK 而非 EINVAL；Bug2: F_SETFL 对 O_PATH fd 未按 Linux 语义返回 EBADF；Bug3: F_GETOWN_EX 的 `UserPtrMut::write` 返回值被 `let _ =` 静默丢弃，write 失败时本应返回 EFAULT。
+
+### Fix four renameat2 bugs: parent search access, target sticky bit, ext4 subtree outside target_exists, ramfs EXDEV
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_renameat2.rs` — 在 `vfs_lookup_parent_for_start` 前添加 `check_parent_search_access` 检查 oldpath 和 newpath 路径上的每级目录的 search 权限（搜索权限）；在 old_parent sticky bit 检查后添加 target parent（new_parent）同样的 sticky bit 检查
+- `os/src/fs/ext4/ext4fs.rs` — 将子树检测（旧目录不能是其新父目录的祖先，EINVAL）从 `if target_exists { }` 块内移出到块外，使得即使目标不存在也能正确拦截循环重命名
+- `os/src/fs/ramfs/mod.rs` — `rename()` 中 downcast_ref 失败时返回 `EXDEV`（跨设备重命名）而非 `EINVAL`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** Bug1: 此前 renameat2 完全没做路径搜索权限验证，即使无搜索权限也能成功；Bug2: source parent 有 sticky bit 检查但 target parent 遗漏；Bug3: ext4 子树检测仅当目标已存在时执行，目标不存在时循环目录无法拦截（用户态创建完整路径后 rename）；Bug4: ramfs rename 的 downcast 失败实为跨文件系统调用，应为 EXDEV。
+
 ### Fix rename directory safety (ext4 + ramfs), ramfs EXDEV, symlinkat/mknodat uid/gid + SGID
 
 **涉及文件：**

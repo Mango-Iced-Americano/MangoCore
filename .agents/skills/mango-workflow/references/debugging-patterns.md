@@ -379,3 +379,29 @@
 - **修复**: 在每个 `resolve_start_inode(dirfd)` 调用前添加 `if path.starts_with('/') { crate::fs::current_root_inode() } else { resolve_start_inode(dirfd) }`。`check_parent_search_access` 内部已有绝对路径处理（common.rs:2082-2086），但此前从未被执行到。
 - **教训**: 实现 `*at` 系列 syscall 时，**dirfd 解析必须是条件性的**——只有相对路径才需要 dirfd。绝对路径场景 dirfd 被 Linux 语义忽略。新增 `*at` syscall 时应在第一步就加这个检查，避免后期批量修复。
 - **相关文件**: `os/src/syscall/fs/common.rs`, `os/src/syscall/fs/sys_*.rs`
+
+## 文件系统多路径操作（renameat2）中的验证镜像缺失
+
+### 路径搜索权限检查遗漏（renameat2）
+
+- **现象**: `renameat2` 对 oldpath 做了路径遍历搜索权限检查，但对 newpath 同样路径却没有做，导致非特权进程能通过 newpath 遍历非本用户目录。
+- **根因**: `renameat2` 需要操作两条路径（oldpath 和 newpath），但代码只对 oldpath 做了 `check_parent_search_access`，newpath 路径完全未验证。双向路径操作必须在两条路径上都执行权限验证。
+- **修复**: 在 `vfs_lookup_parent_for_start` 调用前，对 old_start 和 new_start 分别调用 `check_parent_search_access`。
+- **教训**: 任何涉及**两条路径**的系统调用（renameat2、linkat、symlinkat 等），必须在两条路径的**遍历之前**分别做搜索权限检查。不要假设一条路径通过后另一条就自动安全。
+- **相关文件**: `os/src/syscall/fs/sys_renameat2.rs`
+
+### sticky bit 检查遗漏 target parent
+
+- **现象**: 当 target parent 目录设置 sticky bit 时，非文件所有者仍可通过 renameat2 将文件移入/移出该目录。
+- **根因**: renameat2 仅对 old parent（源父目录）做了 sticky bit 检查，完全遗漏了 new parent（目标父目录）的检查。Linux 语义要求 renameat2 对**两个父目录**都做 sticky bit 验证。
+- **修复**: 在 old parent sticky bit 检查后，对 new parent 执行相同逻辑的 sticky bit 检查。
+- **教训**: 多路径操作的权限检查必须在每条路径上**镜像**。实现时先列出需要检查的完整清单（两条路径 × 三种检查：search、write、sticky），逐项实现，避免遗漏。
+- **相关文件**: `os/src/syscall/fs/sys_renameat2.rs`
+
+### 不变式检查被存在性检查条件门控（ext4 rename）
+
+- **现象**: ext4 的 `rename()` 中，子树检测（防止重命名目录为其子目录）仅当 `target_exists` 为 true 时才执行。若目标不存在，循环目录可以成功创建。
+- **根因**: 子树检测是一种**全局不变式**（目录不能成为自己的后代），不应与目标是否存在相关。将不变式检查放在 `if target_exists { }` 块内意味着当目标不存在时该检查完全跳过。
+- **修复**: 将子树检测代码从 `if target_exists { }` 块内移出到块外，使其**无条件执行**。
+- **教训**: 检视文件系统 `rename()` 时，区分三类检查：(1) 只能在目标存在时做的（类型冲突、ENOTEMPTY）；(2) 与目标无关的全局不变式（子树检测、循环检测）；(3) 权限检查。只有第 (1) 类可以放在 target_exists 块内。第 (2)(3) 类必须无条件执行，**绝不**被存在性检查条件门控。
+- **相关文件**: `os/src/fs/ext4/ext4fs.rs`

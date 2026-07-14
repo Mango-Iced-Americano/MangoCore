@@ -48,6 +48,12 @@ pub fn sys_renameat2(
         }
     };
 
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let old_perm = check_parent_search_access(&old_start, &oldpath_str, uid, fsgid, &groups);
+    if old_perm != SUCCESS { return old_perm; }
+    let new_perm = check_parent_search_access(&new_start, &newpath_str, uid, fsgid, &groups);
+    if new_perm != SUCCESS { return new_perm; }
+
     // 解析 oldpath: 获取父目录 + 叶子名
     let (old_parent, old_leaf) = match vfs_lookup_parent_for_start(&old_start, &oldpath_str) {
         Ok(pair) => pair,
@@ -61,7 +67,6 @@ pub fn sys_renameat2(
     };
 
     // Check write+search permission on both parent directories
-    let (uid, fsgid, groups) = caller_ids_and_groups();
     if uid != 0 {
         if let Err(errno) = check_parent_write_search_access(&old_parent, uid, fsgid, &groups) {
             return errno;
@@ -90,6 +95,23 @@ pub fn sys_renameat2(
     if old_parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) {
         if uid != 0 && uid != old_parent_meta.uid {
             if let Ok(file_inode) = old_parent.find(&old_leaf) {
+                if let Ok(file_meta) = file_inode.metadata() {
+                    if uid != file_meta.uid {
+                        return -(SyscallErr::EPERM as isize);
+                    }
+                }
+            }
+        }
+    }
+
+    // sticky bit check on target directory
+    let new_parent_meta = match new_parent.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    if new_parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) {
+        if uid != 0 && uid != new_parent_meta.uid {
+            if let Ok(file_inode) = new_parent.find(&new_leaf) {
                 if let Ok(file_meta) = file_inode.metadata() {
                     if uid != file_meta.uid {
                         return -(SyscallErr::EPERM as isize);

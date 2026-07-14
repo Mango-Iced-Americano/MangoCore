@@ -44,6 +44,11 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Err(e) => return -(e as isize),
             };
 
+            // O_PATH fds do not support F_SETFL (Linux semantics: EBADF).
+            if is_path_fd(&file) {
+                return EBADF;
+            }
+
             // Preserve old access mode, only update SETFL-allowed status bits
             let old_flags = file.flags();
             let old_async = old_flags.contains(vfs::FileFlags::O_ASYNC);
@@ -252,8 +257,12 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 vfs::FileOwnerTarget::Tid(_) => vfs::F_OWNER_TID,
             };
             let pid = file.owner_raw();
-            let _ = UserPtrMut::<vfs::FOwnerEx>::from_addr(arg)
-                .write(token, &vfs::FOwnerEx { type_: t, pid });
+            if UserPtrMut::<vfs::FOwnerEx>::from_addr(arg)
+                .write(token, &vfs::FOwnerEx { type_: t, pid })
+                .is_err()
+            {
+                return EFAULT;
+            }
             SUCCESS
         }
         FcntlCommand::GetOwnerUids => ENOSYS,

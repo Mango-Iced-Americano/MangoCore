@@ -1573,25 +1573,6 @@ impl IndexNode for layout::Ext4OSInode {
                     return Err(SyscallErr::ENOTEMPTY);
                 }
             }
-            // Safety: old is directory and new_parent is descendant of old → EINVAL
-            if is_dir && old_parent_num != new_parent_num {
-                let mut cur = new_parent_num;
-                loop {
-                    if cur == child_inode_num {
-                        return Err(SyscallErr::EINVAL);
-                    }
-                    let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-                    if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
-                        break;
-                    }
-                    let parent_ino = dotdot_result.dentry.inode;
-                    if parent_ino == cur {
-                        break; // reached root (".." points to self)
-                    }
-                    cur = parent_ino;
-                }
-            }
-
             if flags & RENAME_NOREPLACE != 0 {
                 return Err(SyscallErr::EEXIST);
             }
@@ -1614,6 +1595,25 @@ impl IndexNode for layout::Ext4OSInode {
             // FIX3: if overwriting a directory, remove its dir lookup cache
             if old_target.inode.is_dir() {
                 self.ext4fs.dir_lookup_cache.remove_dir_cache(old_target_num);
+            }
+        }
+
+        // Safety: old is directory and new_parent is descendant of old → EINVAL
+        if is_dir && old_parent_num != new_parent_num {
+            let mut cur = new_parent_num;
+            loop {
+                if cur == child_inode_num {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+                if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
+                    break;
+                }
+                let parent_ino = dotdot_result.dentry.inode;
+                if parent_ino == cur {
+                    break; // reached root (".." points to self)
+                }
+                cur = parent_ino;
             }
         }
 

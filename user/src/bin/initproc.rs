@@ -3174,6 +3174,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     prepare_symlink(&environ);
 
+    install_apk_packages(&environ);
+    
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
     let bash_ret = run_bash_cmd(bash_check, &environ);
     let has_bin_bash = bash_ret == 0;

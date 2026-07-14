@@ -1258,7 +1258,7 @@ pub(crate) fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<()
         Ok(m) => m,
         Err(e) => return Err(-(e as isize)),
     };
-    let (uid, _fsgid, _groups) = caller_ids_and_groups();
+    let (uid, fsgid, groups) = caller_ids_and_groups();
 
     // Only owner or root can chmod
     if uid != 0 && uid != meta.uid {
@@ -1271,9 +1271,13 @@ pub(crate) fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<()
     // User's mode provides ALL permission+special bits. Only file type bits
     // preserved from old mode.
     meta.mode = (meta.mode & !vfs::InodeMode::S_IALLUGO) | perms;
-    // Linux notify_change: chmod on non-directory always clears S_ISGID
+    // Linux notify_change: chmod on non-directory clears S_ISGID only if
+    // caller is not privileged (root/CAP_FSETID) and not in the file's group.
     if meta.file_type != vfs::FileType::Dir {
-        meta.mode.remove(vfs::InodeMode::S_ISGID);
+        let in_group = fsgid == meta.gid || groups.iter().any(|g| *g == meta.gid);
+        if uid != 0 && !in_group {
+            meta.mode.remove(vfs::InodeMode::S_ISGID);
+        }
     }
 
     inode.set_metadata(&meta).map_err(|e| -(e as isize))
