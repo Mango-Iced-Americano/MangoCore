@@ -41,9 +41,13 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
         return SUCCESS;
     }
 
-    let start = match resolve_start_inode(dirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let start = if path.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
 
     // Check search permission on parent directories (mirrors sys_fstatat)

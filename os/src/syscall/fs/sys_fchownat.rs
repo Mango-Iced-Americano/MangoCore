@@ -39,6 +39,14 @@ pub fn sys_fchownat(
                 Err(errno) => return errno,
             }
         };
+        // Permission: search access on parent directories
+        let (uid, fsgid, groups) = caller_ids_and_groups();
+        if uid != 0 {
+            let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);
+            if perm_result != SUCCESS {
+                return perm_result;
+            }
+        }
         match vfs_lookup(&start, &path, follow_final) {
             Ok(inode) => inode,
             Err(errno) => return errno,

@@ -1549,13 +1549,55 @@ impl IndexNode for layout::Ext4OSInode {
         let mut check = Ext4DirSearchResult::new(Ext4DirEntry::default());
         let target_exists = self.ext4fs.dir_find_entry(new_parent_num, new_name, &mut check).is_ok();
         if target_exists {
+            let old_target_num = check.dentry.inode;
+            let old_target_ref = self.ext4fs.get_inode_ref(old_target_num);
+            let target_is_dir = old_target_ref.inode.is_dir();
+
+            // Safety: rename directory over non-directory → ENOTDIR
+            if is_dir && !target_is_dir {
+                return Err(SyscallErr::ENOTDIR);
+            }
+            // Safety: rename non-directory over directory → EISDIR
+            if !is_dir && target_is_dir {
+                return Err(SyscallErr::EISDIR);
+            }
+            // Safety: target is a non-empty directory → ENOTEMPTY
+            if target_is_dir {
+                let entries = self.ext4fs.dir_get_entries(old_target_num)
+                    .map_err(|_| SyscallErr::EIO)?;
+                let non_dot = entries.iter().filter(|e| {
+                    let n = e.get_name();
+                    n != "." && n != ".."
+                }).count();
+                if non_dot > 0 {
+                    return Err(SyscallErr::ENOTEMPTY);
+                }
+            }
+            // Safety: old is directory and new_parent is descendant of old → EINVAL
+            if is_dir && old_parent_num != new_parent_num {
+                let mut cur = new_parent_num;
+                loop {
+                    if cur == child_inode_num {
+                        return Err(SyscallErr::EINVAL);
+                    }
+                    let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+                    if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
+                        break;
+                    }
+                    let parent_ino = dotdot_result.dentry.inode;
+                    if parent_ino == cur {
+                        break; // reached root (".." points to self)
+                    }
+                    cur = parent_ino;
+                }
+            }
+
             if flags & RENAME_NOREPLACE != 0 {
                 return Err(SyscallErr::EEXIST);
             }
             // Overwrite: remove existing new_name dirent before adding the new one.
             // This prevents dir_add_entry from creating duplicate dirents when
             // the target name already exists (e.g. apk rename(tmpl, final)).
-            let old_target_num = check.dentry.inode;
             {
                 let mut parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
                 self.ext4fs.dir_remove_entry(&mut parent_ref, new_name)

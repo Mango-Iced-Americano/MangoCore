@@ -27,7 +27,11 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         }
         exe_path
     } else {
-        let start = match resolve_start_inode(dirfd) { Ok(s) => s, Err(e) => return e, };
+        let start = if path.starts_with('/') {
+            crate::fs::current_root_inode()
+        } else {
+            match resolve_start_inode(dirfd) { Ok(s) => s, Err(e) => return e, }
+        };
 
         let (uid, fsgid, groups) = caller_ids_and_groups();
         let perm_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);

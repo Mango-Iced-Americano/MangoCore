@@ -13,9 +13,13 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         path,
         StatMode::from_bits(mode)
     );
-    let start = match resolve_start_inode(dirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let start = if path.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
     // Root directory "/" already exists
     if path == "/" || path == "." {

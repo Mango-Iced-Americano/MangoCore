@@ -329,7 +329,12 @@ pub fn posix_lock_get(
     let query_type = match flock.l_type {
         F_RDLCK => LockType::Read,
         F_WRLCK => LockType::Write,
-        _ => LockType::Read,
+        F_UNLCK => {
+            // No conflict possible when querying for F_UNLCK.
+            flock.l_type = F_UNLCK;
+            return Ok(());
+        }
+        _ => return Err(SyscallErr::EINVAL),
     };
     let conflict = state.records.iter().find(|r| {
         !same_owner(r.owner, owner) && conflict(r.lock_type, r.start, r.end, query_type, s, e)

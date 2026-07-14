@@ -52,6 +52,13 @@ pub fn sys_linkat(
         return ENOENT;
     }
 
+    // Permission: search access on old path parent directories
+    let (uid, fsgid, groups) = caller_ids_and_groups();
+    let old_perm = check_parent_search_access(&old_start, &oldpath_str, uid, fsgid, &groups);
+    if old_perm != SUCCESS {
+        return old_perm;
+    }
+
     // 查找已存在的 inode
     let follow = (flags & AT_SYMLINK_FOLLOW) != 0;
     let existing = match crate::fs::vfs_lookup(&old_start, &oldpath_str, follow) {
@@ -69,6 +76,12 @@ pub fn sys_linkat(
             Err(errno) => return errno,
         }
     };
+
+    // Permission: search access on new path parent directories
+    let new_perm = check_parent_search_access(&new_start, &newpath_str, uid, fsgid, &groups);
+    if new_perm != SUCCESS {
+        return new_perm;
+    }
 
     // Resolve target parent directory and leaf name
     let components = crate::fs::parse_path(&newpath_str);
@@ -117,7 +130,6 @@ pub fn sys_linkat(
     }
 
     // Check write+search permission on target parent directory
-    let (uid, fsgid, groups) = caller_ids_and_groups();
     if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, fsgid, &groups) {
         return errno;
     }

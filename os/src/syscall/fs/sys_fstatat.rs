@@ -42,9 +42,13 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
     }
 
     let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
-    let start = match resolve_start_inode(dirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let start = if path.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
 
     // Check search permission on all parent directories (EACCES).

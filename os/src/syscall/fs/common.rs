@@ -294,7 +294,11 @@ pub(crate) fn open_file_at(
     flags: OpenFlags,
     mode: vfs::InodeMode,
 ) -> Result<Arc<vfs::File>, isize> {
-    let start = resolve_start_inode(dirfd)?;
+    let start = if path.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        resolve_start_inode(dirfd)?
+    };
     if path.is_empty() {
         let md = start.metadata().map_err(|e| -(e as isize))?;
         return Ok(vfs::File::new_without_open(start, _open_flags_to_vfs_flags(flags), md.file_type));
@@ -1263,18 +1267,10 @@ pub(crate) fn do_fchmod(inode: &Arc<dyn vfs::IndexNode>, mode: u32) -> Result<()
 
     let perms = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
 
-    // Preserve S_ISVTX from old mode; preserve S_ISGID for directories only.
-    // S_ISUID is also preserved from old mode.
-    let old_special = meta.mode
-        & (vfs::InodeMode::S_ISVTX | vfs::InodeMode::S_ISGID | vfs::InodeMode::S_ISUID);
-    let preserved_special = if meta.file_type == vfs::FileType::Dir {
-        old_special // directories keep S_ISGID/S_ISVTX from old mode
-    } else {
-        // regular files: always clear S_ISGID, preserve S_ISVTX/S_ISUID if set
-        old_special & !vfs::InodeMode::S_ISGID
-    };
-
-    meta.mode = vfs::InodeMode::from(meta.file_type) | preserved_special | perms;
+    // Linux chmod_common: (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO)
+    // User's mode provides ALL permission+special bits. Only file type bits
+    // preserved from old mode.
+    meta.mode = (meta.mode & !vfs::InodeMode::S_IALLUGO) | perms;
     // Linux notify_change: chmod on non-directory always clears S_ISGID
     if meta.file_type != vfs::FileType::Dir {
         meta.mode.remove(vfs::InodeMode::S_ISGID);
@@ -1915,10 +1911,10 @@ pub(crate) fn fcntl_getlk(file: &vfs::File, arg: usize, _owner_pid: usize) -> is
     drop(ft);
     let owner = LockOwner::Posix { owner_id, owner_pid };
     match posix_lock_get(file, owner, &mut flock) {
-        Ok(()) => {
-            let _ = UserPtrMut::<PosixFlock>::from_addr(arg).write(token, &flock);
-            SUCCESS
-        }
+        Ok(()) => match UserPtrMut::<PosixFlock>::from_addr(arg).write(token, &flock) {
+            Ok(()) => SUCCESS,
+            Err(_) => EFAULT,
+        },
         Err(e) => -(e as isize),
     }
 }
@@ -1931,10 +1927,10 @@ pub(crate) fn fcntl_getlk_ofd(file: &vfs::File, arg: usize) -> isize {
     };
     let owner = LockOwner::Ofd { open_file_id: file.open_file_id() };
     match posix_lock_get(file, owner, &mut flock) {
-        Ok(()) => {
-            let _ = UserPtrMut::<PosixFlock>::from_addr(arg).write(token, &flock);
-            SUCCESS
-        }
+        Ok(()) => match UserPtrMut::<PosixFlock>::from_addr(arg).write(token, &flock) {
+            Ok(()) => SUCCESS,
+            Err(_) => EFAULT,
+        },
         Err(e) => -(e as isize),
     }
 }

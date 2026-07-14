@@ -31,13 +31,21 @@ pub fn sys_renameat2(
         olddirfd as isize, oldpath_str, newdirfd as isize, newpath_str, flags
     );
 
-    let old_start = match resolve_start_inode(olddirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let old_start = if oldpath_str.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(olddirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
-    let new_start = match resolve_start_inode(newdirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let new_start = if newpath_str.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(newdirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
 
     // 解析 oldpath: 获取父目录 + 叶子名

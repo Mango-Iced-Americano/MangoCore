@@ -10,9 +10,13 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
     if path_str.is_empty() {
         return ENOENT;
     }
-    let start = match resolve_start_inode(dirfd) {
-        Ok(inode) => inode,
-        Err(e) => return e,
+    let start = if path_str.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(e) => return e,
+        }
     };
     let (parent, leaf) = match vfs_lookup_parent_for_start(&start, &path_str) {
         Ok(p) => p,
@@ -45,8 +49,24 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
     } else {
         0
     };
+    let child_gid = if let Ok(parent_meta) = parent.metadata() {
+        if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
+            parent_meta.gid
+        } else {
+            fsgid
+        }
+    } else {
+        fsgid
+    };
     match parent.create_with_data(&leaf, file_type, perm, rdev) {
-        Ok(_) => SUCCESS,
+        Ok(inode) => {
+            if let Ok(mut child_meta) = inode.metadata() {
+                child_meta.uid = uid;
+                child_meta.gid = child_gid;
+                let _ = inode.set_metadata(&child_meta);
+            }
+            SUCCESS
+        }
         Err(e) => -(e as isize),
     }
 }

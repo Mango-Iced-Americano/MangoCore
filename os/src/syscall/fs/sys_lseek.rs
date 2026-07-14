@@ -13,6 +13,11 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
         Err(e) => return -(e as isize),
     };
 
+    // O_PATH fds do not support lseek
+    if is_path_fd(&file) {
+        return EBADF;
+    }
+
     // Explicit numeric match — SeekWhence bitflags lets 5,6,7 slip through
     match whence {
         0 => { /* SEEK_SET */ }

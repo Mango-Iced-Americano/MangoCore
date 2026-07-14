@@ -4,6 +4,39 @@
 
 ## 2026-07-14
 
+### Fix rename directory safety (ext4 + ramfs), ramfs EXDEV, symlinkat/mknodat uid/gid + SGID
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `rename()`: 在覆盖目标前添加安全检查：目录/非目录类型冲突（ENOTDIR/EISDIR）、非空目录覆盖（ENOTEMPTY）、子树重命名检测（EINVAL，通过向上遍历 ".." 条目实现）
+- `os/src/fs/ramfs/mod.rs` — `link()`: downcast 失败返回 `EXDEV` 而非 `EINVAL`；`rename()`: 添加子树检测（遍历 parent Weak 引用）和 ENOTEMPTY 覆盖检查（含完整回滚）
+- `os/src/syscall/fs/sys_symlinkat.rs` — symlink 创建后设置 uid/gid，继承父目录 S_ISGID 的 GID（与 mkdirat 一致）
+- `os/src/syscall/fs/sys_mknodat.rs` — mknod 创建后设置 uid/gid，继承父目录 S_ISGID 的 GID
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** ext4 的子树检测通过 `dir_find_entry(cur, "..")` 向上遍历，根目录处 ".." 指向自身作为终止条件。ramfs 的子树检测通过 `RamFSInode.parent` Weak 引用链向上查找，使用 `Arc::as_ptr` 比较指针值判断同一节点。ramfs overwrite 回滚路径在 ENOTEMPTY 失败时需同时恢复 new_locked 中的 existing 条目和 old_locked 中的 child 条目。
+
+### Fix `*at` syscalls: skip dirfd resolution for absolute paths
+
+**涉及文件：**
+- `os/src/syscall/fs/common.rs` — `open_file_at()`: 在 `resolve_start_inode(dirfd)` 前检查 `path.starts_with('/')`，绝对路径直接用 `current_root_inode()`
+- `os/src/syscall/fs/sys_unlinkat.rs` — `sys_unlinkat()`: 同上
+- `os/src/syscall/fs/sys_mkdirat.rs` — `sys_mkdirat()`: 同上
+- `os/src/syscall/fs/sys_mknodat.rs` — `sys_mknodat()`: 同上
+- `os/src/syscall/fs/sys_renameat2.rs` — `sys_renameat2()`: old_start 和 new_start 均独立检查 `starts_with('/')`
+- `os/src/syscall/fs/sys_symlinkat.rs` — `sys_symlinkat()`: 同上（用 linkpath_str 判断）
+- `os/src/syscall/fs/sys_readlinkat.rs` — `sys_readlinkat()`: 同上
+- `os/src/syscall/fs/sys_fstatat.rs` — `sys_fstatat()`: 同上（AT_EMPTY_PATH 分支不变，该分支 path 为空不触发 starts_with）
+- `os/src/syscall/fs/sys_statx.rs` — `sys_statx()`: 同上
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Linux 语义：对 `*at` 系统调用，若 path 为绝对路径（以 `/` 开头），dirfd 参数被忽略，即使 dirfd 无效（如 EBADF）也应成功。此前代码在所有路径上无条件调用 `resolve_start_inode(dirfd)`，导致绝对路径 + 坏 dirfd 时提前返回 EBADF。`check_parent_search_access`（common.rs:2082-2086）内部已有绝对路径处理逻辑，但从未被执行到。本次修复确保坏 dirfd 在绝对路径场景下不被检查。
+
 ### Add O_PATH → EBADF checks to 6 remaining syscall files
 
 **涉及文件：**
@@ -18,6 +51,16 @@
 - `make rv64-kernel-build-only` ✅
 
 **备注：** Linux 语义：对 O_PATH fd 执行任何 I/O/truncate/fadvise/sync/sendfile/splice/copy_file_range 操作应返回 `EBADF`。这 6 个 syscall 直接从 fd_table 获取 file 后调用 inode 方法，绕过 `File::read/File::write` 中已有的 FMODE_PATH 检查。遵循已有 sys_fsync/sys_fchmod/sys_fallocate 等同目录下的检查模式。多 fd syscall 同时检查两个 fd。
+
+### Fix three fcntl bugs (F_GETLK, F_GETFL, writeback error)
+
+**涉及文件：**
+- `os/src/fs/vfs/posix_lock.rs` — F_GETLK handler: 验证 `l_type` 须为 F_RDLCK/F_WRLCK/F_UNLCK，非法值返回 EINVAL；F_UNLCK 直接返回不冲突
+- `os/src/fs/vfs/file.rs` — STATUS_MASK 添加 O_PATH，使 F_GETFL 正确显示 O_PATH 标志
+- `os/src/syscall/fs/common.rs` — F_GETLK/F_OFD_GETLK 用户写回失败时传播 EFAULT 而非静默忽略
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
 
 ### Fix sys_utimensat — 缺失权限检查与 AT_SYMLINK_NOFOLLOW 忽略
 
@@ -439,6 +482,20 @@
 - `make rv64-kernel-build-only` ✅（零 error，无新增 warning）
 
 **备注：** Linux errno 优先级顺序：flags > old_lookup > new_lookup > EXDEV > EPERM(old_is_dir) > EACCES。目录 EPERM 必须在 new_path 解析之后，否则坏 fd 会得到错误错误码。
+
+### Fix `do_fchmod` special bits, `linkat`/`fchownat` parent search, `lseek` O_PATH check
+
+**涉及文件：**
+- `os/src/syscall/fs/common.rs` — `do_fchmod()`: 修复特殊位语义，从"无条件保留旧 S_ISUID/S_ISGID/S_ISVTX"改为 Linux `chmod_common` 语义：`(mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO)`。用户请求的 `mode` 提供全部权限+特殊位，仅文件类型位从旧模式保留。非目录始终清除 S_ISGID。
+- `os/src/syscall/fs/sys_linkat.rs` — `sys_linkat()`: 在 oldpath 和 newpath 解析前分别添加 `check_parent_search_access()` 权限检查，防止 bypass 父目录搜索权限
+- `os/src/syscall/fs/sys_fchownat.rs` — `sys_fchownat()`: 在 `vfs_lookup` 前添加 `check_parent_search_access()`（含 uid!=0 优化），对齐 `sys_fstatat.rs` 模式
+- `os/src/syscall/fs/sys_lseek.rs` — `sys_lseek()`: 获取 fd 后添加 `is_path_fd()` 检查，O_PATH fd 返回 EBADF
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Bug 1 根因：旧代码将 `preserved_special` 无条件 OR 入新 `mode`，导致 `chmod 0755 sticky_dir` 无法清除粘滞位。Linux 行为是用户请求的 `mode` 位完全取代旧的特殊位。Bug 2/3 属权限检查遗漏：`linkat`/`fchownat` 缺少对路径各组件 `x` 权限的验证，可能允许无搜索权限的用户操作目录内文件。Bug 4 为 O_PATH fd 语义对齐：O_PATH fd 仅用于路径操作，`lseek` 等 I/O 操作应返回 EBADF。
 
 ---
 

@@ -168,7 +168,8 @@ impl FileFlags {
 /// Mask of all status (non-access-mode) flags returned by fcntl(F_GETFL).
 pub const STATUS_MASK: u32 = FileFlags::O_APPEND.bits() | FileFlags::O_NONBLOCK.bits()
     | FileFlags::O_DSYNC.bits() | FileFlags::O_SYNC.bits() | FileFlags::O_ASYNC.bits()
-    | FileFlags::O_DIRECT.bits() | FileFlags::O_LARGEFILE.bits() | FileFlags::O_NOATIME.bits();
+    | FileFlags::O_DIRECT.bits() | FileFlags::O_LARGEFILE.bits()
+    | FileFlags::O_NOATIME.bits() | FileFlags::O_PATH.bits();
 
 // ── FileMode ────────────────────────────────────────────────────────────
 

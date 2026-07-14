@@ -30,9 +30,13 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         }
     }
 
-    let start = match resolve_start_inode(dirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let start = if path.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
     let (uid, fsgid, groups) = caller_ids_and_groups();
     let parent_result = check_parent_search_access(&start, &path, uid, fsgid, &groups);

@@ -28,9 +28,13 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         linkpath_str
     );
 
-    let start = match resolve_start_inode(newdirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    let start = if linkpath_str.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(newdirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
 
     let (uid, fsgid, groups) = caller_ids_and_groups();
@@ -73,7 +77,24 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
     }
 
     match parent_dir.symlink(&leaf, &target_str) {
-        Ok(_) => SUCCESS,
+        Ok(child) => {
+            // Inherit GID if parent has S_ISGID (like mkdirat)
+            let child_gid = if let Ok(parent_meta) = parent_dir.metadata() {
+                if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
+                    parent_meta.gid
+                } else {
+                    fsgid
+                }
+            } else {
+                fsgid
+            };
+            if let Ok(mut child_meta) = child.metadata() {
+                child_meta.uid = uid;
+                child_meta.gid = child_gid;
+                let _ = child.set_metadata(&child_meta);
+            }
+            SUCCESS
+        }
         Err(e) => -(e as isize),
     }
 }
