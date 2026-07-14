@@ -144,6 +144,16 @@ else
     echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /rescue/sh will be missing"
 fi
 
+# Keep the CPython launcher in initramfs so launcher/cache policy updates do not
+# require rewriting the large read-only tools partition. The target interpreter
+# and standard library remain isolated under /tools/tests/cpython.
+CPYTHON_WRAPPER_SRC="../user/tools/cpython/python3-wrapper.sh"
+if [ -x "$CPYTHON_WRAPPER_SRC" ]; then
+    mkdir -p "$STAGE/rescue"
+    install -m 0755 "$CPYTHON_WRAPPER_SRC" "$STAGE/rescue/python3-wrapper"
+    echo "[initramfs] installed current CPython wrapper at /rescue/python3-wrapper"
+fi
+
 # 5. 生成 newc cpio 归档
 (
     cd "$STAGE"

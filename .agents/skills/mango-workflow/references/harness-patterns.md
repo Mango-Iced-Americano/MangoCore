@@ -325,6 +325,20 @@ diag=1
 - **教训**: 底层驱动库的 API 能力可能与上层包装不一致；先确认库支持什么粒度的 I/O，再决定是否拆分。VirtIO 安全上限 = BLOCK_SZ（单页物理连续），跨页批量需先保证 DMA 缓冲区物理连续性
 - **相关文件**: `os/src/drivers/block/virtio_blk.rs`, `os/src/drivers/block/virtio_blk_pci.rs`
 
+### 轮询 AHCI 的扇区级拆分掩盖上层批量 I/O
+
+- **根因**: PageCache/ext4 已把连续页合并为最多 256 KiB 的块请求，但 2K1000LA SATA 包装层再次按 512 B 调用轮询式 `READ/WRITE DMA EXT`。每个扇区都重复 command FIS/PRDT 设置、PxCI doorbell 和完成轮询；一个 256 KiB 请求被放大为 512 条 ATA 命令。
+- **修复**: 在控制器初始化阶段分配并永久持有一个 64 KiB 连续低端 DMA 槽，AHCI API 按缓冲区真实长度设置 PRDT byte count 和 ATA sector count，包装层只按槽位上限切分。控制器已有互斥串行化时只需一槽，不要机械移植多槽状态机。
+- **教训**: “DMA 池化”必须结合设备并发模型理解。若驱动只有一个在途命令，收益来自常驻连续缓冲和命令合并，不来自槽位数量。优化后还要分离 PageCache 命中、设备冷读和用户态 CPU 时间；本次 64 KiB 到 256 KiB 无可测收益，而 CPython 无 pyc 的解析/编译才是后续最大瓶颈。
+- **相关文件**: `dependency/dep_iso/src/block/ahci.rs`, `dependency/dep_iso/src/provider.rs`, `os/src/drivers/block/sata_blk.rs`
+
+### 只读语言运行时禁用字节码会把 CPU 瓶颈误判为磁盘慢
+
+- **根因**: 解释器和标准库放在只读分区后，启动包装器用 `PYTHONDONTWRITEBYTECODE=1` 避免写盘；每个新进程因此重复读取、解析并编译所有导入的 `.py`。把运行时复制到 tmpfs 只能减少系统态 I/O，无法消除主要的用户态编译时间。
+- **修复**: 保持源码/解释器分区只读，通过 `PYTHONPYCACHEPREFIX` 把 pyc 放到独立可写层，优先选择已验证的持久 ext4，再回退 scratch/tmpfs；继续使用解释器原生 invalidation，不复制或修改系统源码树。
+- **教训**: 性能 A/B 必须同时记录 real/user/sys。若换成 tmpfs 后 user time 几乎不变，继续扩大 DMA 很可能无效；检查 JIT、字节码、动态链接和重复解析等用户态工作。缓存首次填充与稳定命中要分别报告。
+- **相关文件**: `user/tools/cpython/python3-wrapper.sh`, `os/build_initramfs.sh`, `user/src/bin/initproc.rs`
+
 ### 性能计数器均值误导 — 必须拆 hit/miss
 
 - **根因**: `pc_read_cycles / pc_read_calls = 91K cycles/次` 看似 cache-hit 开销很大，但拆分 `PC_READ_HIT_CYCLES` / `PC_READ_MISS_CYCLES` 后发现：hit 仅 13K cycles，但 4.5% 的 miss 每次 1.8M cycles 拉高均值。iozone 场景 80% miss rate 更是完全改变了瓶颈判断

@@ -3,6 +3,12 @@ pub trait Provider {
     /// Page size (usually 4K)
     const PAGE_SIZE: usize;
 
+    /// Maximum number of 512-byte sectors transferred by one AHCI command.
+    ///
+    /// The default preserves the original single-sector behavior. Platforms
+    /// that provide a larger physically contiguous DMA buffer may override it.
+    const AHCI_MAX_TRANSFER_SECTORS: usize = 1;
+
     /// Port bitmap to restore after a host-controller reset.
     ///
     /// Most AHCI controllers preserve PI across reset. Platform integrations

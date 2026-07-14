@@ -3,7 +3,7 @@ use crate::config::HIGH_BASE_EIGHT;
 use crate::config::PAGE_SIZE;
 use crate::drivers::block::BlockDevice;
 use crate::hal::BLOCK_SZ;
-use crate::mm::{frame_alloc, frame_dealloc, PhysAddr};
+use crate::mm::{frame_dealloc, frames_alloc, PhysAddr};
 use alloc::sync::Arc;
 use core::convert::TryInto;
 use isomorphic_drivers::{
@@ -13,6 +13,15 @@ use isomorphic_drivers::{
 use log::info;
 use pci::*;
 use spin::Mutex;
+
+/// One reusable AHCI DMA slot. The controller is serialized by `SataBlock`'s
+/// mutex, so one slot covers every in-flight request without the per-request
+/// allocation and fragmentation risks that the VirtIO DMA pool was designed to
+/// remove. 64 KiB matches the proven VirtIO pool slot size while keeping the
+/// permanently reserved low-memory extent modest; larger slots showed no
+/// measurable gain on the 2K1000LA board.
+const SATA_DMA_BYTES: usize = 64 * 1024;
+const SATA_DMA_SECTORS: usize = SATA_DMA_BYTES / BLOCK_SIZE;
 
 #[inline(always)]
 fn cpu_mmio_addr(physical: usize) -> usize {
@@ -46,11 +55,11 @@ impl BlockDevice for SataBlock {
         // 内核BLOCK_SZ为2048，SATA驱动中BLOCK_SIZE为512，四倍转化关系
         block_id = block_id * (BLOCK_SZ / BLOCK_SIZE);
         let mut controller = self.0.lock();
-        for buf in buf.chunks_mut(BLOCK_SIZE) {
+        for chunk in buf.chunks_mut(SATA_DMA_BYTES) {
             controller
-                .read_block(block_id, buf)
+                .read_blocks(block_id, chunk)
                 .unwrap_or_else(|err| panic!("SATA read LBA {} failed: {:?}", block_id, err));
-            block_id += 1;
+            block_id += chunk.len() / BLOCK_SIZE;
         }
     }
 
@@ -62,11 +71,11 @@ impl BlockDevice for SataBlock {
         );
         block_id = block_id * (BLOCK_SZ / BLOCK_SIZE);
         let mut controller = self.0.lock();
-        for buf in buf.chunks(BLOCK_SIZE) {
+        for chunk in buf.chunks(SATA_DMA_BYTES) {
             controller
-                .write_block(block_id, buf)
+                .write_blocks(block_id, chunk)
                 .unwrap_or_else(|err| panic!("SATA write LBA {} failed: {:?}", block_id, err));
-            block_id += 1;
+            block_id += chunk.len() / BLOCK_SIZE;
         }
         controller
             .flush()
@@ -82,6 +91,7 @@ pub struct Provider;
 
 impl provider::Provider for Provider {
     const PAGE_SIZE: usize = PAGE_SIZE;
+    const AHCI_MAX_TRANSFER_SECTORS: usize = SATA_DMA_SECTORS;
     #[cfg(feature = "board_2k1000")]
     // The 2K1000 HBA reset clears writable host registers. Match the vendor
     // U-Boot sequence: preserve CAP.SMPS/SPM, force CAP.SSS, then restore PI.
@@ -102,22 +112,25 @@ impl provider::Provider for Provider {
 
     fn alloc_dma(size: usize) -> (usize, usize) {
         assert!(
-            size > 0 && size <= PAGE_SIZE,
-            "AHCI DMA allocation exceeds one page"
+            size > 0 && size <= SATA_DMA_BYTES,
+            "AHCI DMA allocation exceeds the reusable slot"
         );
-        let frame = frame_alloc().expect("AHCI DMA frame allocation failed");
-        let frame = Arc::try_unwrap(frame).expect("AHCI DMA frame has unexpected aliases");
-        let frame_pa: PhysAddr = frame.ppn.into();
+        let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let frames = frames_alloc(pages).expect("AHCI contiguous DMA allocation failed");
+        let frame_pa: PhysAddr = frames[0].ppn.into();
         let base: usize = frame_pa.into();
         assert!(
-            base.checked_add(PAGE_SIZE)
+            base.checked_add(pages * PAGE_SIZE)
                 .map_or(false, |end| end <= 0x1_0000_0000),
             "2K1000 AHCI requires DMA memory below 4 GiB: {:#x}",
             base
         );
-        // frame_alloc() returns a zeroed page. Keep it allocated until AHCI::drop().
-        core::mem::forget(frame);
-        info!("ahci_dma_alloc: pa={:#x} pages=1", base);
+        // AHCI owns this physically contiguous extent until AHCI::drop().
+        for frame in frames {
+            let frame = Arc::try_unwrap(frame).expect("AHCI DMA frame has unexpected aliases");
+            core::mem::forget(frame);
+        }
+        info!("ahci_dma_alloc: pa={:#x} pages={}", base, pages);
         (base, base)
     }
 

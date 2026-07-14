@@ -584,7 +584,16 @@ impl<P: Provider> AHCI<P> {
         let (rfis_va, rfis_pa) = P::alloc_dma(P::PAGE_SIZE);
         let (cmd_list_va, cmd_list_pa) = P::alloc_dma(P::PAGE_SIZE);
         let (cmd_table_va, cmd_table_pa) = P::alloc_dma(P::PAGE_SIZE);
-        let (data_va, data_pa) = P::alloc_dma(P::PAGE_SIZE);
+        let max_transfer_bytes = P::AHCI_MAX_TRANSFER_SECTORS
+            .checked_mul(BLOCK_SIZE)
+            .expect("AHCI maximum transfer size overflow");
+        assert!(
+            P::AHCI_MAX_TRANSFER_SECTORS > 0
+                && P::AHCI_MAX_TRANSFER_SECTORS <= u16::MAX as usize
+                && max_transfer_bytes <= 4 * 1024 * 1024,
+            "AHCI transfer must fit one PRDT entry and ATA sector count"
+        );
+        let (data_va, data_pa) = P::alloc_dma(max_transfer_bytes);
 
         let received_fis = unsafe { &mut *(rfis_va as *mut AHCIReceivedFIS) };
         let cmd_list = unsafe {
@@ -594,7 +603,9 @@ impl<P: Provider> AHCI<P> {
             )
         };
         let cmd_table = unsafe { &mut *(cmd_table_va as *mut AHCICommandTable) };
-        let data = unsafe { slice::from_raw_parts_mut(data_va as *mut u8, BLOCK_SIZE) };
+        let data = unsafe {
+            slice::from_raw_parts_mut(data_va as *mut u8, max_transfer_bytes)
+        };
 
         cmd_table.prdt[0].data_base_address = data_pa as u64;
         cmd_table.prdt[0].reserved = 0;
@@ -646,7 +657,7 @@ impl<P: Provider> AHCI<P> {
         // the authoritative, read-only test that an ATA disk is present.
         ahci.port.start(port_num)?;
 
-        ahci.prepare_command(false, 1, CMD_IDENTIFY_DEVICE);
+        ahci.prepare_command(false, BLOCK_SIZE, CMD_IDENTIFY_DEVICE);
         ahci.cmd_table.cfis.sector_count = 1;
         ahci.execute_command("IDENTIFY DEVICE")?;
 
@@ -676,7 +687,11 @@ impl<P: Provider> AHCI<P> {
         Ok(ahci)
     }
 
-    fn prepare_command(&mut self, write: bool, prdt_length: u16, command: u8) {
+    fn prepare_command(&mut self, write: bool, transfer_bytes: usize, command: u8) {
+        assert!(
+            transfer_bytes <= self.data.len(),
+            "AHCI command exceeds reusable DMA buffer"
+        );
         unsafe {
             core::ptr::write_bytes(&mut self.cmd_table.cfis as *mut SATAFISRegH2D, 0, 1);
         }
@@ -685,9 +700,11 @@ impl<P: Provider> AHCI<P> {
         } else {
             0
         };
-        self.cmd_list[0].prdt_length = prdt_length;
+        self.cmd_list[0].prdt_length = if transfer_bytes == 0 { 0 } else { 1 };
         self.cmd_list[0].prd_byte_count = 0;
-        self.cmd_table.prdt[0].byte_count_i = (BLOCK_SIZE - 1) as u32;
+        if transfer_bytes != 0 {
+            self.cmd_table.prdt[0].byte_count_i = (transfer_bytes - 1) as u32;
+        }
         let fis = &mut self.cmd_table.cfis;
         fis.fis_type = FIS_REG_H2D;
         fis.cflags = 1 << 7;
@@ -706,47 +723,61 @@ impl<P: Provider> AHCI<P> {
         self.port.spin_on_slot(0, operation)
     }
 
-    fn check_io(&self, lba: u64, actual: usize) -> Result<(), AhciError> {
-        if actual != BLOCK_SIZE {
+    fn check_io(&self, lba: u64, actual: usize) -> Result<usize, AhciError> {
+        if actual == 0 || actual % BLOCK_SIZE != 0 || actual > self.data.len() {
             return Err(AhciError::InvalidBufferLength {
-                expected: BLOCK_SIZE,
+                expected: self.data.len(),
                 actual,
             });
         }
-        if lba >= self.sectors {
+        let sector_count = actual / BLOCK_SIZE;
+        if lba
+            .checked_add(sector_count as u64)
+            .map_or(true, |end| end > self.sectors)
+        {
             return Err(AhciError::LbaOutOfRange {
                 lba,
                 sectors: self.sectors,
             });
         }
-        Ok(())
+        Ok(sector_count)
     }
 
     pub fn read_block(&mut self, block_id: usize, buf: &mut [u8]) -> Result<usize, AhciError> {
+        self.read_blocks(block_id, buf)
+    }
+
+    /// Read one physically contiguous run with one ATA DMA command.
+    pub fn read_blocks(&mut self, block_id: usize, buf: &mut [u8]) -> Result<usize, AhciError> {
         let lba = block_id as u64;
-        self.check_io(lba, buf.len())?;
-        self.prepare_command(false, 1, CMD_READ_DMA_EXT);
+        let sector_count = self.check_io(lba, buf.len())?;
+        self.prepare_command(false, buf.len(), CMD_READ_DMA_EXT);
         let fis = &mut self.cmd_table.cfis;
-        fis.sector_count = 1;
+        fis.sector_count = sector_count as u16;
         fis.dev_head = 0x40;
         fis.set_lba(lba);
         self.execute_command("READ DMA EXT")?;
         fence(Ordering::SeqCst);
-        buf.copy_from_slice(self.data);
-        Ok(BLOCK_SIZE)
+        buf.copy_from_slice(&self.data[..buf.len()]);
+        Ok(buf.len())
     }
 
     pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> Result<usize, AhciError> {
+        self.write_blocks(block_id, buf)
+    }
+
+    /// Write one physically contiguous run with one ATA DMA command.
+    pub fn write_blocks(&mut self, block_id: usize, buf: &[u8]) -> Result<usize, AhciError> {
         let lba = block_id as u64;
-        self.check_io(lba, buf.len())?;
-        self.data.copy_from_slice(buf);
-        self.prepare_command(true, 1, CMD_WRITE_DMA_EXT);
+        let sector_count = self.check_io(lba, buf.len())?;
+        self.data[..buf.len()].copy_from_slice(buf);
+        self.prepare_command(true, buf.len(), CMD_WRITE_DMA_EXT);
         let fis = &mut self.cmd_table.cfis;
-        fis.sector_count = 1;
+        fis.sector_count = sector_count as u16;
         fis.dev_head = 0x40;
         fis.set_lba(lba);
         self.execute_command("WRITE DMA EXT")?;
-        Ok(BLOCK_SIZE)
+        Ok(buf.len())
     }
 
     pub fn flush(&mut self) -> Result<(), AhciError> {
@@ -778,7 +809,8 @@ impl<P: Provider> AHCI<P> {
 impl<P: Provider> Drop for AHCI<P> {
     fn drop(&mut self) {
         // Never return DMA pages while the HBA may still own them. If stopping
-        // the engine times out, leaking four pages is safer than a DMA use-after-free.
+        // the engine times out, retaining every control/data page is safer than
+        // a DMA use-after-free.
         if self.port.stop(self.port_num).is_err() {
             warn!(
                 "AHCI port {} did not stop; retaining DMA pages",
@@ -789,7 +821,7 @@ impl<P: Provider> Drop for AHCI<P> {
         P::dealloc_dma(self.received_fis as *mut _ as usize, P::PAGE_SIZE);
         P::dealloc_dma(self.cmd_list.as_ptr() as usize, P::PAGE_SIZE);
         P::dealloc_dma(self.cmd_table as *mut _ as usize, P::PAGE_SIZE);
-        P::dealloc_dma(self.data.as_ptr() as usize, P::PAGE_SIZE);
+        P::dealloc_dma(self.data.as_ptr() as usize, self.data.len());
     }
 }
 

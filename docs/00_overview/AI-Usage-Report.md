@@ -237,6 +237,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human verification: 审阅汇编、signal ABI、FAT inode/PageCache 生命周期和写盘边界；Docker 串行双架构构建；rv64/la64 CPython L3-L9 QEMU judge 各 72/72；2K1000LA 通过 50 轮无 `fsync` rename 专项，P3 三块写入/读回 CRC 和安装文件校验，最终完整 L3-L9 同样为 72/72、退出码 0。
 - Result: trap 返回在完整 LSX 与纯标量 FPR 恢复路径中二选一，`sigreturn` 先合并标量低 lane；FAT 以首簇/空目录项双键 canonicalize inode，并让 PageCache 共享最小簇链状态，从根因修复 Drop 写回丢失；TmpFS、DNS/HTTP/HTTPS 和实板 CPython 完整组合门禁均已关闭。
 
+### Case 9: 2K1000LA Python 性能的 DMA 与字节码分层定位
+
+- Evidence: `docs/Work_Log.md` 2026-07-14、`docs/07_driver/2k1000-ahci.md`
+- AI tools: OpenAI Codex, max reasoning mode
+- Problem: Python 和其他 SSD 程序明显偏慢，初始假设是 AHCI 以过小 DMA 块搬运；需要先保存实板基线，再判断队友 VirtIO DMA 池化方案应如何迁移。
+- AI contribution: 对照 develop 的四槽 VirtIO 池、当前 PageCache 批量请求和 AHCI 单命令路径，发现 256 KiB 上层请求被重新拆成最多 512 条轮询 ATA 命令。根据 AHCI 已由互斥串行化这一事实，将方案收敛为单个常驻 64 KiB 连续低端槽和多扇区命令，而非机械移植多槽状态机。随后用 tmpfs 和 real/user/sys 拆分证明重导入的最大剩余成本是只读标准库禁用 pyc 后的用户态重复解析/编译。
+- Human verification: 在同一 2K1000LA/SSD 上记录 512 B、64 KiB、256 KiB 三版数据；执行双架构编译和 QEMU LTP 冒烟；实板完成 TFTP/uImage 校验、随机大块写入、哈希/`cmp`、P4 pyc 首次填充/稳定命中和显式同步后的复位门禁。
+- Result: 首次顺序读由 13.5 MB/s 升到 18.6 MB/s；Python 无 site 热启动由约 1.925 s 降到 1.714 s。外置持久 pyc 后进一步降到约 1.159 s，重模块导入由 18.322 s 降到约 4.495 s；256 KiB 槽无额外收益，最终保留 64 KiB。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -287,6 +296,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md` 2026-07-10 | 2K1000LA VALEN/TLB 审计 | 记录 Codex 五路并行审计、官方手册交叉核对、代码修复、反汇编与构建/QEMU 证据 |
 | `docs/Work_Log.md` 2026-07-13 | 2K1000LA 2 GiB 内存审计 | 记录 Codex max reasoning 与 subagent 对 DMW、非连续 DMA、U-Boot/DVO/CPU1 所有权的复核，以及 QEMU/实板验证证据 |
 | `docs/Work_Log.md` 2026-07-14 | 2K1000LA CPython 实机适配 | 记录 Codex 对 LSX/FPR 别名、FAT rename、TmpFS symlink 和 DNS/HTTPS 测试语义的根因分析，以及双架构 72/72 与实机压力证据 |
+| `docs/Work_Log.md` 2026-07-14 | 2K1000LA AHCI/Python 性能 | 记录 Codex 对 develop DMA 池化方案的并发模型审计、512 B 命令放大根因、64/256 KiB 实板 A/B，以及 pyc 用户态瓶颈分层证据 |
 
 ## 9. 交互记录与留痕方式
 

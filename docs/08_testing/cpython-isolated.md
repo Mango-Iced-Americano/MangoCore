@@ -7,10 +7,12 @@ last_update: 2026-07-14
 tags: [testing, cpython, qemu, loongarch64, riscv64, 2k1000]
 code_paths:
   - "scripts/fetch_cpython_runtime.py"
+  - "os/build_initramfs.sh"
   - "scripts/make_2k1000_tools_partition.py"
   - "scripts/write_2k1000_p3.py"
   - "user/tools/cpython/cpython_testcode.sh"
   - "user/tools/cpython/run_cpython.sh"
+  - "user/tools/cpython/python3-wrapper.sh"
   - "user/src/bin/initproc.rs"
   - "os/src/fs/vfs/file.rs"
   - "os/src/syscall/fs.rs"
@@ -135,7 +137,21 @@ python3 -c 'print("hello MangoCore")'
 python3 /scratch/example.py
 ```
 
-链接指向 `python3-wrapper.sh`，包装器按架构选择 P3 内的 musl loader，显式传入私有 library path、`PYTHONHOME` 与 CA bundle，并把 `TMPDIR`、`PYTHONUSERBASE` 优先设置到 `/scratch/python`。这样不会依赖目标 ELF 中不存在于根文件系统的绝对解释器，也不会用全局 `LD_LIBRARY_PATH` 污染其他程序。L4 同时执行 `/usr/bin/python3` 和 `/usr/bin/python`，全局入口失效会直接使 CPython 分组失败。
+全局链接优先指向 uImage 随带的 `/rescue/python3-wrapper`，P3 中的同名脚本只作
+兼容回退。这样更新启动和缓存策略不需要重新写入 768 MiB P3。包装器按架构选择
+P3 内的 musl loader，显式传入私有 library path、`PYTHONHOME` 与 CA bundle，并把
+`TMPDIR`、`PYTHONUSERBASE` 优先设置到 `/scratch/python`；不会依赖目标 ELF 中不
+存在于根文件系统的绝对解释器，也不会用全局 `LD_LIBRARY_PATH` 污染其他程序。
+
+标准库仍在只读 P3，但包装器默认允许写 pyc，并按 `/persist/python/pycache`、
+`/scratch/python/pycache`、`/tmp/python/pycache` 的顺序选择外置
+`PYTHONPYCACHEPREFIX`。CPython 自身按源文件时间和大小验证缓存，P3 更新后不会
+盲用旧字节码；调用者也可显式设置 `PYTHONDONTWRITEBYTECODE=1` 禁用。实板首次
+导入 `json,ssl,hashlib,pathlib` 会创建 33 个 pyc，约 19.1 s；后续稳定约
+4.495 s，而原始无缓存中位数为 18.322 s，下降约 75.5%。`python3 -S -c pass`
+从约 1.925 s 降到 1.159 s，`python3 -c pass` 从约 2.385 s 降到 1.607 s。
+L4 同时执行 `/usr/bin/python3` 和 `/usr/bin/python`，全局入口失效会直接使
+CPython 分组失败。
 
 ## 6. Interfaces & APIs
 

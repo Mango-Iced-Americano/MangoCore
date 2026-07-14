@@ -3387,15 +3387,18 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(chmod_cmd, environ);
     println!("[initproc] chmod test scripts done, exit={}", ret);
 
-    // Keep CPython isolated on the read-only tools partition. The global
-    // commands point at a wrapper which supplies its private loader, libraries,
-    // stdlib and writable scratch paths without polluting every process.
+    // Keep CPython isolated on the read-only tools partition. Prefer the
+    // current wrapper carried by initramfs, so launcher/cache policy updates do
+    // not require rewriting P3; retain the P3 wrapper as a compatibility fallback.
     let cpython_launcher_cmd = "\
-        if [ -x /tools/tests/cpython/python3-wrapper.sh ] && \
-           [ -x /tools/tests/cpython/usr/bin/python3 ]; then \
+        launcher=/tools/tests/cpython/python3-wrapper.sh; \
+        if [ -x /rescue/python3-wrapper ]; then \
+            launcher=/rescue/python3-wrapper; \
+        fi; \
+        if [ -x \"$launcher\" ] && [ -x /tools/tests/cpython/usr/bin/python3 ]; then \
             mkdir -p /usr/bin; \
-            ln -sf /tools/tests/cpython/python3-wrapper.sh /usr/bin/python3; \
-            ln -sf /tools/tests/cpython/python3-wrapper.sh /usr/bin/python; \
+            ln -sf \"$launcher\" /usr/bin/python3; \
+            ln -sf \"$launcher\" /usr/bin/python; \
             echo 'CPython launchers installed: /usr/bin/python3, /usr/bin/python'; \
         else \
             echo 'CPython launchers unavailable: /tools/tests/cpython is incomplete'; \

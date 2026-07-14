@@ -26,9 +26,25 @@ else
     export TMPDIR=/tmp/python
 fi
 
+# The runtime lives on the read-only tools partition. Keep bytecode outside that
+# tree so repeated imports do not reparse and recompile every stdlib source file.
+# Prefer the ext4 persistent partition, then the validated scratch partition,
+# and finally tmpfs. CPython's normal pyc validation handles runtime updates.
+if [ -z "${PYTHONPYCACHEPREFIX:-}" ]; then
+    if [ -d /persist ] && /bin/busybox mkdir -p /persist/python/pycache 2>/dev/null; then
+        PYTHONPYCACHEPREFIX=/persist/python/pycache
+    elif [ -d /scratch ] && /bin/busybox mkdir -p /scratch/python/pycache 2>/dev/null; then
+        PYTHONPYCACHEPREFIX=/scratch/python/pycache
+    else
+        /bin/busybox mkdir -p /tmp/python/pycache 2>/dev/null || true
+        PYTHONPYCACHEPREFIX=/tmp/python/pycache
+    fi
+fi
+
 export CPYTHON_ROOT
 export PYTHONHOME="$CPYTHON_ROOT/usr"
-export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
+export PYTHONPYCACHEPREFIX
+export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-0}"
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"

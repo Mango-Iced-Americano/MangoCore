@@ -4,6 +4,28 @@
 
 ## 2026-07-14
 
+### board/perf: 合并 2K1000LA AHCI DMA 命令并为只读 CPython 增加持久 pyc
+
+**涉及文件：**
+- `dependency/dep_iso/src/{provider.rs,block/ahci.rs}` — Provider 声明平台 AHCI 最大扇区数；一个 PRDT 项按真实长度执行多扇区 read/write，校验 512 B 对齐、完整 LBA 范围、ATA/PRDT 上限并按真实数据槽长度释放
+- `os/src/drivers/block/sata_blk.rs` — 启动期取得并永久复用一个 64 KiB 连续低端 DMA 槽，将原先每 512 B 一条轮询 ATA 命令收敛为每 64 KiB 一条；沿用控制器互斥，不引入无并发收益的多槽状态机
+- `user/tools/cpython/python3-wrapper.sh`、`os/build_initramfs.sh`、`user/src/bin/initproc.rs` — 运行时继续留在只读 P3，pyc 外置到 P4/P2/tmpfs；uImage 携带最新 `/rescue/python3-wrapper`，避免仅更新策略就重写 768 MiB P3
+- `docs/07_driver/2k1000-ahci.md`、`docs/08_testing/cpython-isolated.md`、`.agents/skills/mango-workflow/references/harness-patterns.md` — 记录 DMA 所有权/粒度、同口径性能数据、只读语言运行时缓存模式和 64/256 KiB 取舍
+
+**验证：**
+- 修改前实板基线：`python3 -S -c pass` 热启动约 1.925 s，普通启动约 2.385 s；`import json,ssl,hashlib,pathlib` 中位数 18.322 s；首次顺序读 5.48 MiB `libpython` 为 13.5 MB/s，PageCache 命中约 108 MB/s；BusyBox `true` 约 0.034 s ✅
+- 将同一 CPython 树复制到 tmpfs 后，启动仅降到约 1.520 s、重导入约 17.45 s；证明磁盘路径只占部分时间，约 11.6 s 用户态解析/编译才是重导入主瓶颈 ✅
+- 64 KiB DMA 槽实板结果：首次顺序读升到 18.6 MB/s，热 `-S` 启动约 1.714 s，普通启动约 2.175 s；1 MiB 随机数据 64 KiB 分块写入 P4，`sync` 后双 SHA-256 一致且 `cmp=0` ✅
+- 256 KiB 槽位对照仍为 18.6 MB/s，Python 无缓存启动/导入也与 64 KiB 版相同；最终回收为 64 KiB，避免永久多占 192 KiB 连续低端物理内存 ✅
+- P4 pyc A/B：首次创建 33 个缓存约 19.095 s；后续重导入中位数约 4.495 s，相对基线降低 75.5%；`python3 -S -c pass` 约 1.159 s，普通启动约 1.607 s ✅
+- Docker 串行 `make rv64-kernel-build-only`、`make la64-kernel-build-only` 通过；la64 一次 `rust-src` TLS EOF 在编译前失败，原命令重试通过。最终 rv64/la64 QEMU 均启动到用户态、挂载文件系统并连续执行多批 LTP，无 panic ✅
+- 最终 `kernel-2k1000-persist-shell.ui` 为 16,745,096 字节，SHA-256 `60ba9b201b045d1f4ab45c086394cab07aea47c886e69ded46d442020e6cfe74`；TFTP 长度、CRC32 `d17846de`、`iminfo`、uImage checksum、P2 scratch 和 P4 reuse 均通过 ✅
+- 最终 64 KiB 镜像完成缓存重新填充、33 文件检查、随机写入/哈希/`cmp` 与两次 `sync`；物理 RESET 后、执行任何 Python 命令前仍读到 33 个 pyc，`/usr/bin/python3 -> /rescue/python3-wrapper`，首次 `python3 -S -c pass` 为 1.433 s，跨复位持久命中门禁通过 ✅
+
+**备注：**
+- develop 的 VirtIO 四槽 DMA 池不能机械搬到 AHCI：VirtIO 可能有多个在途请求，当前 AHCI 被 `Mutex` 串行化。这里复用的是“启动早期取得常驻连续缓冲、热路径不再分配”的原则，实际收益来自多扇区命令合并。
+- pyc 首次填充成本必须与稳定命中分开报告。物理复位前需要 `sync` 才能要求立即持久；未同步脏页在突然复位后丢失符合当前文件系统语义，不是缓存校验失败。
+
 ### board/apk: 将 P4 收敛为可交互的持久应用根
 
 **涉及文件：**
