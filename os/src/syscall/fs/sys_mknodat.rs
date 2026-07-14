@@ -26,6 +26,12 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         Ok(p) => p,
         Err(e) => return e,
     };
+    // EROFS takes priority over EACCES: check read-only mount before DAC
+    if let Some(mnt) = parent.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+            return EROFS;
+        }
+    }
     // Check write+search permission on parent directory (non-root only)
     let (uid, fsgid, groups) = caller_ids_and_groups();
     if uid != 0 {

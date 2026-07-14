@@ -1,5 +1,16 @@
 ## 2026-07-15
 
+### Add EROFS check to mknodat before DAC permission check
+
+**涉及文件：**
+- `os/src/syscall/fs/sys_mknodat.rs` — 在 `vfs_lookup_parent_for_start` 成功后、DAC 权限检查前插入 `MountFSInode::RDONLY` 检查，EROFS(30) 优先于 EACCES(13)
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 参考 `sys_fchmod.rs` 中已有的 EROFS 检查模式（第 20-24 行）。所有类型通过 `use super::common::*` 已在作用域内，无需新增 import。
+
 ### Fix lwext4 rename safety: add Linux rename pre-checks before FFI call
 
 **涉及文件：**

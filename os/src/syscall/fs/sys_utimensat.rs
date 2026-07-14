@@ -46,19 +46,9 @@ pub fn sys_utimensat(
             Err(errno) => return errno,
         }
     };
-    let inode = match vfs_lookup(&start, &path, follow_final) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
-    };
 
-    let md = match inode.metadata() {
-        Ok(md) => md,
-        Err(e) => return -(e as isize),
-    };
-
-    let (uid, fsgid, groups) = caller_ids_and_groups();
+    // Read times pointer before path lookup so EFAULT takes priority over ENOENT
     let now = current_timespec();
-
     let timespec = if !times.is_null() {
         match UserPtr::new(times).read(token) {
             Ok(timespec) => timespec,
@@ -70,6 +60,25 @@ pub fn sys_utimensat(
     } else {
         [now; 2]
     };
+
+    let inode = match vfs_lookup(&start, &path, follow_final) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+
+    // EROFS takes priority over EACCES/EPERM: check read-only mount before DAC
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+            return EROFS;
+        }
+    }
+
+    let md = match inode.metadata() {
+        Ok(md) => md,
+        Err(e) => return -(e as isize),
+    };
+
+    let (uid, fsgid, groups) = caller_ids_and_groups();
 
     // Permission checking (Linux semantics):
     //   - Specific time (tv_nsec is a real value): need ownership → EPERM
