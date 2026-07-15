@@ -847,3 +847,61 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 - `os_test.conf`（mask/ltp_include/exclude/suites 配置范式）
 - `os/src/fs/sysfs/files/diag.rs`（perf_diag 统计文件注册）
 - `os/src/trace.rs`（syscall tracing ring buffer）
+
+## 性能优化失败模式（2026-07-15 经验）
+
+> 本轮尝试了 3 种性能优化方案，全部失败或回退。记录失败原因以防重复踩坑。
+
+### 1. lazy DAC（延迟权限检查）— ❌ 破坏正确性
+
+**思路**：`check_parent_search_access()` 与 `vfs_lookup()` 做双路径遍历。把权限检查移到 vfs_lookup 失败的错误分支中，成功路径只走一次 vfs_lookup。
+
+**失败原因**：对于 `open()` 等操作，vfs_lookup 成功 ≠ DAC 权限检查通过。调用者可能在父目录有读权限但无搜索权限，vfs_lookup 仍能查找到目标 inode（通过 dentry cache 或 ext4 内部遍历），但 Linux 要求此时返回 EACCES。
+
+**教训**：lazy DAC 仅对纯只读元数据操作（stat/fstat）理论安全，但实践中因 vfs_lookup 不区分"可读"与"可搜索"，仍可能漏检。**不推荐用于任何路径**。
+
+### 2. O(n²)→O(n) path walk — ❌ 破坏 mount 穿越
+
+**思路**：`check_parent_search_access()` 每次组件都重建全路径调用 `vfs_lookup`（O(n²)），用 `current.find(name)` 逐级下降（O(n)）。
+
+**失败原因**：`find()` 不处理 mount point 穿越。当路径穿过挂载点时，`find()` 返回原始 inode 而非挂载后文件系统的 root inode，导致权限检查目标错误。
+
+**教训**：所有路径遍历必须走 `vfs_lookup` 或等效的 mount-aware 路径。`IndexNode::find()` 不能替代 VFS 层路径解析。
+
+### 3. fused DAC vfs_lookup — ❌ 无性能收益
+
+**思路**：把 DAC 检查融入 `vfs_lookup` 内部（pre-lookup hook），单次遍历同时完成权限检查和路径解析。
+
+**失败原因**：hook 每次调用 `inode.metadata()` 检查权限，但 vfs_lookup 内部已有 `current.metadata()` 检查目录类型。双重 `metadata()` 调用的开销抵消了消除双遍历的收益。
+
+**教训**：融合方案要成功，必须共用 metadata() 结果——在 vfs_lookup 内部获取 metadata 后同时传给 hook，不能各自独立调用。
+
+### 4. fork+shell 退化诊断 — 需 ring buffer trace
+
+**问题**：fork+exit（+0.8%）和 fork+execve（+2.2%）正常，但 fork+/bin/sh -c 慢 84%（51ms vs 28ms 基线）。
+
+**初步发现**（drift_window + STATS_ON）：shell 启动产生 55 次 write() = 总耗时 73%。但无法确定这 55 次 write 在基线中是否也存在、以及每次 write 的 fd 目标和阻塞来源。
+
+**Oracle 诊断计划**：需要内核级 ring buffer trace，记录 shell 启动期间每个 write 的 fd、长度、内容 hash、耗时、阻塞次数。配合 `env -i /bin/sh -c true` 和 `>/dev/null 2>&1` 等受控变体定位。
+
+**当前状态**：ring buffer 基础设施未实现，遗留为已知问题。
+
+### 5. 构建/测试基础设施陷阱
+
+| 陷阱 | 教训 |
+|------|------|
+| `make rv64-run` 不编译内核 | 只跑 QEMU——必须先 `rv64-kernel-build-only` |
+| `lang_items.rs` 被 subagent 修改 | 只能编辑 `.rv`/`.la` 变体；`git checkout` 恢复 |
+| `os_test.conf` 被 lmbench 配置覆盖 | 每次测试后立即 `git show HEAD:os_test.conf > os_test.conf` |
+| QEMU 串口超时截断 tee | 用 `docker exec -d ... > /tmp/qemu_out.log` + `sleep` + `docker cp` |
+| `perf_diag` feature 需显式开启 | `EXTRA_FEATURES=perf_diag` 传给 kernel build；`make rv64-run` 不认 |
+| drift_window 输出被自身 write() 污染 | `drift_snapshot()` 的 `write(1, ...)` 被计入 post-snapshot 计数器 |
+
+### 6. Oracle 验证循环格式要求
+
+超工作循环（ultrawork loop）的 Oracle 验证要求 Oracle 输出精确的 XML 标签 `<promise>VERIFIED</promise>` 才算通过。普通文本 "VERIFIED" 不被识别。需要用以下 prompt 调用 Oracle：
+
+```
+CRITICAL: output exactly this line and nothing else if complete:
+<promise>VERIFIED</promise>
+```
