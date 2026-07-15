@@ -2112,7 +2112,9 @@ pub(crate) fn dac_parent_search_ticks() -> usize {
     DAC_PARENT_SEARCH_TICKS.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "perf_diag")]
 struct DacTicksGuard(usize);
+#[cfg(feature = "perf_diag")]
 impl Drop for DacTicksGuard {
     fn drop(&mut self) {
         DAC_PARENT_SEARCH_TICKS.fetch_add(
@@ -2129,8 +2131,12 @@ pub(crate) fn check_parent_search_access(
     gid: u32,
     groups: &[u32],
 ) -> isize {
-    let _guard = DacTicksGuard(crate::timer::get_time());
-    DAC_PARENT_SEARCH_CALLS.fetch_add(1, Ordering::Relaxed);
+    // perf_diag: count calls and measure ticks
+    #[cfg(feature = "perf_diag")] {
+        DAC_PARENT_SEARCH_CALLS.fetch_add(1, Ordering::Relaxed);
+        let _t0 = crate::timer::get_time();
+        let _guard = DacTicksGuard(_t0);
+    }
     let components = parse_path(path);
     let base = if path.starts_with('/') {
         crate::fs::current_root_inode()

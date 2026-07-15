@@ -579,7 +579,9 @@ pub fn reset_vfs_lookup_counters() {
 pub fn vfs_lookup_calls() -> usize { VFS_LOOKUP_CALLS.load(Ordering::Relaxed) }
 pub fn vfs_lookup_ticks() -> usize { VFS_LOOKUP_TICKS.load(Ordering::Relaxed) }
 
+#[cfg(feature = "perf_diag")]
 struct VfsLookupGuard(usize);
+#[cfg(feature = "perf_diag")]
 impl Drop for VfsLookupGuard {
     fn drop(&mut self) {
         VFS_LOOKUP_TICKS.fetch_add(
@@ -594,8 +596,10 @@ pub fn vfs_lookup(
     path: &str,
     follow_final: bool,
 ) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
-    VFS_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
-    let _guard = VfsLookupGuard(crate::timer::get_time());
+    #[cfg(feature = "perf_diag")] {
+        VFS_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
+        let _guard = VfsLookupGuard(crate::timer::get_time());
+    }
     use self::vfs::{FileType, FilePrivateData, IndexNode as _};
     let root_inode: Arc<dyn self::vfs::IndexNode> = current_root_inode();
 
