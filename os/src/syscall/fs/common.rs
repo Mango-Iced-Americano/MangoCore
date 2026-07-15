@@ -354,6 +354,13 @@ pub(crate) fn open_file_at(
             }
             let md = target.metadata().map_err(|e| -(e as isize))?;
 
+            // O_DIRECTORY must fail ENOTDIR before any special-case handling.
+            // Previously this check was after the FIFO branch, making it unreachable
+            // for named FIFOs — open(fifo, O_DIRECTORY) would succeed instead of ENOTDIR.
+            if flags.contains(OpenFlags::O_DIRECTORY) && md.file_type != FileType::Dir {
+                return Err(ENOTDIR);
+            }
+
             // O_PATH: skip all permission checks and side effects — just build a path-only fd.
             // Linux v6.6: O_PATH masks flags to O_DIRECTORY|O_NOFOLLOW|O_PATH|O_CLOEXEC,
             // dispatches to do_o_path() bypassing may_open() entirely.
@@ -422,9 +429,6 @@ pub(crate) fn open_file_at(
                     return Err(EINVAL);
                 }
                 return Err(EISDIR);
-            }
-            if md.file_type != FileType::Dir && flags.contains(OpenFlags::O_DIRECTORY) {
-                return Err(ENOTDIR);
             }
             if open_requests_write(flags) {
                 if is_executable_inode_busy(&target) {
