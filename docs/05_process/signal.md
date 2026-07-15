@@ -3,7 +3,7 @@ title: "信号、pidfd 与 signalfd"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-14
+last_update: 2026-07-15
 tags: [process, signal, pidfd, signalfd]
 ---
 
@@ -374,7 +374,7 @@ fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
 5. 恢复 sigmask。
 6. 返回 trap context 中保存的 `a0`。
 
-frame 地址溢出、sigmask、machine context 或 LSX context 读取失败时，当前任务以 `SIGSEGV` 退出。`signal_frame_layout()` 按 `align_of::<UserContext>()` 对齐 frame，避免 LoongArch LSX 状态落在非 16-byte 边界。
+frame 地址溢出、sigmask、machine context 或 LSX context 读取失败时，当前任务以 `SIGSEGV` 退出。`signal_frame_layout()` 使用 `max(align_of::<UserContext>(), USER_STACK_ABI_ALIGN)` 对齐 ucontext，并将传给用户 handler 的 `sp` 按 16 字节对齐；这样既满足 LoongArch LSX context 的自然对齐，也保持 rv64/la64 用户函数入口 ABI。
 
 `sys_sigreturn()` 不重新解释用户 handler 的返回值，而是恢复 machine context 后返回 trap context 中的 `a0`：
 

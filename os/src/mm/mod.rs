@@ -59,6 +59,13 @@ pub use sysctl::{
 };
 pub use vma::{MapFlags, MapPermission};
 type MmResult<T> = Result<T, MemoryError>;
+
+/// Stack alignment required whenever the kernel enters userspace.
+///
+/// Both the RISC-V ELF psABI and the LoongArch ELF ABI require a 16-byte
+/// aligned stack pointer at function entry. LLVM relies on this invariant
+/// when folding address additions into alignment-sensitive instructions.
+pub const USER_STACK_ABI_ALIGN: usize = 16;
 #[allow(unused_imports)]
 pub use uaccess::{
     check_user_range,

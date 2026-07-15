@@ -136,7 +136,7 @@ impl Ext4BlockGroup {
     pub fn get_itable_unused(&mut self, s: &Ext4Superblock) -> u32 {
         let mut v = self.itable_unused_lo as u32;
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            v |= ((self.itable_unused_hi as u64) << 32) as u32;
+            v |= (self.itable_unused_hi as u32) << 16;
         }
         v
     }
@@ -145,16 +145,16 @@ impl Ext4BlockGroup {
     pub fn get_used_dirs_count(&self, s: &Ext4Superblock) -> u32 {
         let mut v = self.used_dirs_count_lo as u32;
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            v |= ((self.used_dirs_count_hi as u64) << 32) as u32;
+            v |= (self.used_dirs_count_hi as u32) << 16;
         }
         v
     }
 
     /// 设置块组中使用的目录数
     pub fn set_used_dirs_count(&mut self, s: &Ext4Superblock, cnt: u32) {
-        self.itable_unused_lo = (cnt & 0xffff) as u16;
+        self.used_dirs_count_lo = (cnt & 0xffff) as u16;
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            self.itable_unused_hi = (cnt >> 16) as u16;
+            self.used_dirs_count_hi = (cnt >> 16) as u16;
         }
     }
 
@@ -176,12 +176,20 @@ impl Ext4BlockGroup {
 
     /// 获取块组中空闲的Inode节点数
     pub fn get_free_inodes_count(&self) -> u32 {
-        ((self.free_inodes_count_hi as u64) << 32) as u32 | self.free_inodes_count_lo as u32
+        ((self.free_inodes_count_hi as u32) << 16) | self.free_inodes_count_lo as u32
     }
 
     /// 获取块组的Inode节点表块号
-    pub fn get_inode_table_blk_num(&self) -> u32 {
-        ((self.inode_table_first_block_hi as u64) << 32) as u32 | self.inode_table_first_block_lo
+    pub fn get_inode_table_blk_num(&self) -> u64 {
+        ((self.inode_table_first_block_hi as u64) << 32) | self.inode_table_first_block_lo as u64
+    }
+
+    pub fn has_flag(&self, flag: u16) -> bool {
+        self.flags & flag != 0
+    }
+
+    pub fn clear_flag(&mut self, flag: u16) {
+        self.flags &= !flag;
     }
 }
 

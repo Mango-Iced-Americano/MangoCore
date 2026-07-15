@@ -6,6 +6,7 @@
 use core::mem::{align_of, size_of};
 
 use crate::hal::UserContext;
+use crate::mm::USER_STACK_ABI_ALIGN;
 
 use super::SigInfo;
 
@@ -14,7 +15,7 @@ use super::SigInfo;
 /// # Semantics
 ///
 /// 返回 `(ucontext_addr, siginfo_addr, sig_sp, sig_size)`。`ucontext_addr` 按
-/// 架构上下文的自然对齐要求对齐，其余地址至少按 8 字节对齐，
+/// 架构上下文的自然对齐要求对齐，且传给用户处理函数的栈指针满足 ABI 对齐，
 /// 且 `siginfo_addr` 不得低于调用方给出的 `stack_bottom`。
 ///
 /// # Errors
@@ -24,11 +25,11 @@ pub(super) fn signal_frame_layout(
     base_sp: usize,
     stack_bottom: usize,
 ) -> Option<(usize, usize, usize, usize)> {
-    let context_align = align_of::<UserContext>();
+    let context_align = align_of::<UserContext>().max(USER_STACK_ABI_ALIGN);
     debug_assert!(context_align.is_power_of_two());
-    let ucontext_addr =
-        base_sp.checked_sub(size_of::<UserContext>())? & !(context_align - 1);
-    let siginfo_addr = ucontext_addr.checked_sub(size_of::<SigInfo>())? & !0x7;
+    let ucontext_addr = base_sp.checked_sub(size_of::<UserContext>())? & !(context_align - 1);
+    let siginfo_addr =
+        ucontext_addr.checked_sub(size_of::<SigInfo>())? & !(USER_STACK_ABI_ALIGN - 1);
     if siginfo_addr < stack_bottom {
         return None;
     }

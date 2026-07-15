@@ -4,11 +4,12 @@ module: "fs/vfs"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-15"
 code_paths:
   - "os/src/fs/vfs/file.rs"
   - "os/src/fs/vfs/index_node.rs"
   - "os/src/fs/vfs/file_system.rs"
+  - "os/src/fs/vfs/mount.rs"
 entry_points:
   - "File"
   - "IndexNode trait"
@@ -213,6 +214,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
 ```rust
 pub trait FileSystem: Any + Send + Sync + Debug {
+    fn identity_key(&self) -> usize;
     fn root_inode(&self) -> Arc<dyn IndexNode>;
     fn info(&self) -> FsInfo;
     fn name(&self) -> &str;
@@ -226,6 +228,12 @@ pub trait FileSystem: Any + Send + Sync + Debug {
 ```
 
 `root_inode` 是路径解析的起点。`info` 返回 FsInfo（块设备 ID / 最大文件名长度 / 特性列表）。`super_block` 和 `statfs` 提供 statfs 系统调用所需信息。
+
+`identity_key()` 是仅在本次启动期有效的文件系统实例身份，不是用户态 `st_dev`。
+默认实现使用具体文件系统对象地址；`MountFS` 必须转发到底层文件系统，使同一 inode
+经普通挂载或 bind mount 访问时仍使用同一身份。全局 inode 注册表必须以
+`(identity_key, inode_id)` 为键，不能直接使用尚未为所有文件系统实现的 `Metadata.dev_id`，
+否则 ramfs、tmpfs 和 ext4 都报告占位值 0 时，相同 inode 号会互相触发 `ETXTBSY` 等状态。
 
 `SuperBlock` 结构体直接对标 Linux `struct statfs`：
 - f_type（文件系统魔数）、f_bsize（块大小）、f_blocks / f_bfree / f_bavail（块计数）、f_files / f_ffree（inode 计数）、f_namelen（最大文件名长度）、f_fsid（文件系统 ID）、f_frsize（片段大小）、flags（挂载标志）。

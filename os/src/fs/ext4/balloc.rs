@@ -1,18 +1,101 @@
 use core::cmp::min;
 
-use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::fs::ext4::bitmap::{ext4_bmap_bit_find_clr, ext4_bmap_bit_set, ext4_bmap_is_bit_clr};
+use crate::fs::ext4::bitmap::{
+    ext4_bmap_bit_clr, ext4_bmap_bit_find_clr, ext4_bmap_bit_set, ext4_bmap_is_bit_clr,
+    ext4_bmap_is_bit_set,
+};
 use crate::fs::ext4::block_group::{Block, Ext4BlockGroup};
 use crate::fs::ext4::error::Errno;
-
-use super::bitmap::ext4_bmap_bits_free;
 
 use super::ext4fs::Ext4FileSystem;
 use super::*;
 
 impl Ext4FileSystem {
+    pub(super) fn load_block_bitmap_for_allocation(
+        &self,
+        bgid: u32,
+        block_group: &mut Ext4BlockGroup,
+    ) -> Result<Block, isize> {
+        let super_block = &self.superblock;
+        let bitmap_block = block_group.get_block_bitmap_block(super_block) as usize;
+        let mut bitmap = self.load_metadata_block(bitmap_block);
+        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
+
+        if !block_group.has_flag(EXT4_BG_BLOCK_UNINIT) {
+            return Ok(bitmap);
+        }
+        if bgid == 0 || super_block.has_bigalloc() {
+            log::error!(
+                "cannot initialize ext4 block bitmap: bgid={} bigalloc={}",
+                bgid,
+                super_block.has_bigalloc()
+            );
+            return Err(Errno::EIO as isize);
+        }
+
+        bitmap.data.fill(0);
+        let valid_blocks = super_block.blocks_in_group(bgid);
+        let bitmap_bits = (bitmap.data.len() * 8) as u32;
+        if valid_blocks > bitmap_bits {
+            return Err(Errno::EIO as isize);
+        }
+
+        let group_start = self.get_block_of_bgid(bgid);
+        let group_end = group_start + valid_blocks as u64;
+        let base_metadata = super_block
+            .base_metadata_blocks_in_group(bgid)
+            .min(valid_blocks);
+        for bit in 0..base_metadata {
+            ext4_bmap_bit_set(&mut bitmap.data, bit);
+        }
+        let mut mark_block = |block: u64| {
+            if block >= group_start && block < group_end {
+                ext4_bmap_bit_set(&mut bitmap.data, (block - group_start) as u32);
+            }
+        };
+        mark_block(block_group.get_block_bitmap_block(super_block));
+        mark_block(block_group.get_inode_bitmap_block(super_block));
+        let inode_table = block_group.get_inode_table_blk_num();
+        for block in inode_table..inode_table + super_block.inode_table_blocks_per_group() as u64 {
+            mark_block(block);
+        }
+        drop(mark_block);
+        for bit in valid_blocks..bitmap_bits {
+            ext4_bmap_bit_set(&mut bitmap.data, bit);
+        }
+
+        let used_blocks = (0..valid_blocks)
+            .filter(|bit| super::bitmap::ext4_bmap_is_bit_set(&bitmap.data, *bit))
+            .count() as u32;
+        let initialized_free = valid_blocks - used_blocks;
+        let old_free = block_group.get_free_blocks_count();
+        block_group.set_free_blocks_count(initialized_free);
+        block_group.clear_flag(EXT4_BG_BLOCK_UNINIT);
+        block_group.set_block_group_balloc_bitmap_csum(super_block, &bitmap.data);
+        self.store_metadata_block_dirty(bitmap_block, &bitmap.data);
+        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
+
+        let mut current_superblock = self.current_superblock();
+        if old_free != initialized_free as u64 {
+            let corrected = current_superblock
+                .free_blocks_count()
+                .saturating_sub(old_free)
+                .saturating_add(initialized_free as u64);
+            current_superblock.set_free_blocks_count(corrected);
+            self.defer_superblock_write(&current_superblock);
+            log::warn!(
+                "corrected ext4 bg {} free blocks during bitmap init: {} -> {}",
+                bgid,
+                old_free,
+                initialized_free
+            );
+        }
+        self.defer_bg_write(block_group, bgid, &current_superblock);
+        Ok(bitmap)
+    }
+
     /// Compute number of block group from block address.
     ///
     /// Params:
@@ -134,8 +217,7 @@ impl Ext4FileSystem {
 
             // Load block with bitmap
             let bmp_blk_adr = block_group.get_block_bitmap_block(super_block);
-            let mut bitmap_block = self.load_metadata_block(bmp_blk_adr as usize);
-            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
+            let mut bitmap_block = self.load_block_bitmap_for_allocation(bgid, &mut block_group)?;
 
             // Check if goal is free
             if ext4_bmap_is_bit_clr(&bitmap_block.data, idx_in_bg) {
@@ -240,8 +322,7 @@ impl Ext4FileSystem {
 
             // Load block with bitmap
             let bmp_blk_adr = block_group.get_block_bitmap_block(super_block);
-            let mut bitmap_block = self.load_metadata_block(bmp_blk_adr as usize);
-            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
+            let mut bitmap_block = self.load_block_bitmap_for_allocation(bgid, &mut block_group)?;
 
             // Check if goal is free
             if ext4_bmap_is_bit_clr(&bitmap_block.data, idx_in_bg) {
@@ -333,14 +414,16 @@ impl Ext4FileSystem {
         for bg_offset in 0..block_group_count {
             let bgid = (goal_bgid + bg_offset) % block_group_count;
             let mut block_group = self.load_block_group_cached(super_block, bgid as usize);
+            let bmp_blk = block_group.get_block_bitmap_block(super_block) as usize;
+            let bmp = match self.load_block_bitmap_for_allocation(bgid, &mut block_group) {
+                Ok(bitmap) => bitmap,
+                Err(_) => continue,
+            };
             let free_blocks = block_group.get_free_blocks_count();
             if free_blocks < count as u64 {
                 continue;
             }
 
-            let bmp_blk = block_group.get_block_bitmap_block(super_block) as usize;
-            let bmp = self.load_metadata_block(bmp_blk);
-            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
             let bit_cnt = blocks_per_group.min(bmp.data.len() as u32 * 8);
 
             // Start search near the goal's position in this group
@@ -372,7 +455,7 @@ impl Ext4FileSystem {
 
                         // Update block group free count
                         block_group.set_free_blocks_count((free_blocks - count as u64) as u32);
-                        let mut sb = *super_block;
+                        let mut sb = self.current_superblock();
                         let sb_free = sb.free_blocks_count();
                         sb.set_free_blocks_count(sb_free - count as u64);
                         self.defer_superblock_write(&sb);
@@ -414,7 +497,7 @@ impl Ext4FileSystem {
         block_group: &mut Ext4BlockGroup,
         bgid: usize,
     ) -> Result<(), isize> {
-        let mut super_block = self.superblock;
+        let mut super_block = self.current_superblock();
 
         // 更新超级块的空闲块数
         let mut super_blk_free_blocks = super_block.free_blocks_count();
@@ -439,73 +522,103 @@ impl Ext4FileSystem {
 
     #[allow(unused)]
     pub fn balloc_free_blocks(&self, inode_ref: &mut Ext4InodeRef, start: Ext4Fsblk, count: u32) {
-        // log::trace!("balloc_free_blocks start {:x?} count {:x?}", start, count);
-        let mut count = count as usize;
-        let mut start = start;
+        if count == 0 {
+            return;
+        }
 
-        let mut super_block = self.superblock;
+        let mut remaining = count as usize;
+        let mut current_block = start;
+        let mut freed_total = 0usize;
+        let mut super_block = self.current_superblock();
 
-        let blocks_per_group = super_block.blocks_per_group();
+        while remaining > 0 {
+            if current_block >= super_block.blocks_count() {
+                log::error!(
+                    "invalid ext4 free range: block={} blocks_count={}",
+                    current_block,
+                    super_block.blocks_count()
+                );
+                break;
+            }
 
-        let mut bgid = start / blocks_per_group as u64;
+            let bgid = self.get_bgid_of_block(current_block);
+            let idx_in_bg = self.addr_to_idx_bg(current_block) as usize;
+            let group_blocks = super_block.blocks_in_group(bgid) as usize;
+            if idx_in_bg >= group_blocks {
+                log::error!(
+                    "invalid ext4 free range: block={} bg={} index={} group_blocks={}",
+                    current_block,
+                    bgid,
+                    idx_in_bg,
+                    group_blocks
+                );
+                break;
+            }
 
-        let mut bg_first = start / blocks_per_group as u64;
-        let mut bg_last = (start + count as u64 - 1) / blocks_per_group as u64;
+            let mut bg = self.load_block_group_cached(&self.superblock, bgid as usize);
+            if bg.has_flag(EXT4_BG_BLOCK_UNINIT) {
+                log::error!(
+                    "refusing to free blocks from an uninitialized ext4 bitmap: bg={} block={}",
+                    bgid,
+                    current_block
+                );
+                break;
+            }
 
-        while bg_first <= bg_last {
-            let idx_in_bg = start % blocks_per_group as u64;
-
-            let mut bg = self.load_block_group_cached(&super_block, bgid as usize);
-            let block_bitmap_block = bg.get_block_bitmap_block(&super_block);
-            let mut raw_data = self.read_metadata_block(block_bitmap_block as usize);
+            let span = remaining.min(group_blocks - idx_in_bg);
+            let block_bitmap_block = bg.get_block_bitmap_block(&self.superblock) as usize;
+            let mut bitmap = self.load_metadata_block(block_bitmap_block);
             super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
-            let mut data: &mut Vec<u8> = &mut raw_data.to_vec();
-
-            let mut free_cnt = self.block_size * 8 - idx_in_bg as usize;
-
-            if count > free_cnt {
-            } else {
-                free_cnt = count;
+            let mut free_cnt = 0usize;
+            for bit in idx_in_bg as u32..(idx_in_bg + span) as u32 {
+                if ext4_bmap_is_bit_set(&bitmap.data, bit) {
+                    ext4_bmap_bit_clr(&mut bitmap.data, bit);
+                    free_cnt += 1;
+                }
             }
 
             if free_cnt > 0 {
-                ext4_bmap_bits_free(data, idx_in_bg as u32, free_cnt as u32 - 1);
+                // Directory and extent-tree blocks share this cache with
+                // persistent metadata. Once a block is freed, retaining even
+                // a clean entry is unsafe, and retaining a dirty entry can
+                // overwrite the block after it has been reallocated.
+                self.meta_block_cache
+                    .invalidate_range(current_block as usize, span);
+                bg.set_block_group_balloc_bitmap_csum(&self.superblock, &bitmap.data);
+                self.store_metadata_block_dirty(block_bitmap_block, &bitmap.data);
+                super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
+
+                super_block.set_free_blocks_count(
+                    super_block
+                        .free_blocks_count()
+                        .saturating_add(free_cnt as u64),
+                );
+                self.defer_superblock_write(&super_block);
+                bg.set_free_blocks_count(
+                    bg.get_free_blocks_count().saturating_add(free_cnt as u64) as u32,
+                );
+                self.defer_bg_write(&bg, bgid, &super_block);
+                freed_total += free_cnt;
+            } else {
+                log::warn!(
+                    "ignoring duplicate ext4 block free: start={} count={}",
+                    current_block,
+                    span
+                );
             }
-            count -= free_cnt;
-            start += free_cnt as u64;
 
-            bg.set_block_group_balloc_bitmap_csum(&super_block, data);
-            // 此处不需要考虑对齐
-            // log::warn!(
-            //     "[WRITE_CALLER] balloc_free_blocks: write block_bitmap block={}",
-            //     block_bitmap_block
-            // );
-            self.store_metadata_block_dirty(block_bitmap_block as usize, data);
-            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
+            remaining -= span;
+            current_block += span as u64;
+        }
 
-            /* Update superblock free blocks count */
-            let mut super_blk_free_blocks = super_block.free_blocks_count();
-
-            super_blk_free_blocks += free_cnt as u64;
-            super_block.set_free_blocks_count(super_blk_free_blocks);
-            self.defer_superblock_write(&super_block);
-
-            /* Update inode blocks (different block size!) count */
-            let mut inode_blocks = inode_ref.inode.blocks_count();
-            // let ext4_inode_block_size = self.superblock.inode_size() as usize;
-            // inode_blocks -= (free_cnt * (self.block_size / EXT4_INODE_BLOCK_SIZE)) as u64;
-            inode_blocks = inode_blocks.saturating_sub((free_cnt * (self.block_size / 512)) as u64);
+        if freed_total > 0 {
+            let sectors_per_block = self.block_size / 512;
+            let inode_blocks = inode_ref
+                .inode
+                .blocks_count()
+                .saturating_sub((freed_total * sectors_per_block) as u64);
             inode_ref.inode.set_blocks_count(inode_blocks);
             self.write_back_inode(inode_ref);
-
-            /* Update block group free blocks count */
-            let mut fb_cnt = bg.get_free_blocks_count();
-            fb_cnt += free_cnt as u64;
-            bg.set_free_blocks_count(fb_cnt as u32);
-            self.defer_bg_write(&bg, bgid as u32, &super_block);
-
-            bg_first += 1;
-            bgid = bg_first;
         }
     }
 }

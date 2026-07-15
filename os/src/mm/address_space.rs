@@ -18,7 +18,10 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{FrameTracker, PhysAddr, PhysPageNum, VPNRange, VirtAddr, VirtPageNum, KERNEL_SPACE};
+use super::{
+    FrameTracker, PhysAddr, PhysPageNum, VPNRange, VirtAddr, VirtPageNum, KERNEL_SPACE,
+    USER_STACK_ABI_ALIGN,
+};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
 use crate::hal::TrapContext;
@@ -1297,7 +1300,8 @@ impl<T: PageTable> AddressSpace<T> {
         }
 
         fn align_stack(sp: &mut usize, stack_bottom: usize) -> Result<(), isize> {
-            *sp &= !(core::mem::size_of::<usize>() - 1);
+            debug_assert!(USER_STACK_ABI_ALIGN.is_power_of_two());
+            *sp &= !(USER_STACK_ABI_ALIGN - 1);
             if *sp < stack_bottom {
                 return Err(E2BIG);
             }
@@ -1380,7 +1384,8 @@ impl<T: PageTable> AddressSpace<T> {
             write_user_bytes(&self.page_table, dst + arg.len(), b"\0")?;
         }
         argv_user.push(core::ptr::null());
-        // align downward to usize (64bit)
+        // The process entry stack must satisfy the architecture ABI, not just
+        // pointer alignment. LLVM may use this stronger invariant in codegen.
         align_stack(&mut user_sp, stack_bottom)?;
 
         // 16 random bytes
@@ -1391,10 +1396,6 @@ impl<T: PageTable> AddressSpace<T> {
             random_bits.len() * core::mem::size_of::<usize>(),
         )?;
         write_user_slice(&self.page_table, random_bits_ptr, &random_bits)?;
-        // padding
-        let zero = 0usize;
-        let padding_ptr = push_stack(&mut user_sp, stack_bottom, core::mem::size_of::<usize>())?;
-        write_user_slice(&self.page_table, padding_ptr, core::slice::from_ref(&zero))?;
         let auxv = [
             // AuxvEntry::new(AuxvType::SYSINFO_EHDR, vDSO_mapping);
             // AuxvEntry::new(AuxvType::L1I_CACHESIZE, 0);
@@ -1424,6 +1425,26 @@ impl<T: PageTable> AddressSpace<T> {
             ),
             AuxvEntry::new(AuxvType::NULL, 0),
         ];
+        let pointer_words = envp_user
+            .len()
+            .checked_add(argv_user.len())
+            .and_then(|words| words.checked_add(1)) // argc
+            .ok_or(E2BIG)?;
+        let pointer_bytes = pointer_words
+            .checked_mul(core::mem::size_of::<usize>())
+            .ok_or(E2BIG)?;
+        let table_bytes = auxv
+            .len()
+            .checked_mul(core::mem::size_of::<AuxvEntry>())
+            .and_then(|bytes| bytes.checked_add(pointer_bytes))
+            .ok_or(E2BIG)?;
+        let final_sp_without_padding = user_sp.checked_sub(table_bytes).ok_or(E2BIG)?;
+        let padding_len = final_sp_without_padding & (USER_STACK_ABI_ALIGN - 1);
+        if padding_len != 0 {
+            let padding_ptr = push_stack(&mut user_sp, stack_bottom, padding_len)?;
+            let zero_padding = [0u8; USER_STACK_ABI_ALIGN];
+            write_user_bytes(&self.page_table, padding_ptr, &zero_padding[..padding_len])?;
+        }
         let auxv_ptr = push_stack(
             &mut user_sp,
             stack_bottom,
@@ -1445,6 +1466,8 @@ impl<T: PageTable> AddressSpace<T> {
         let argc_ptr = push_stack(&mut user_sp, stack_bottom, core::mem::size_of::<usize>())?;
         let argc = argv_vec.len();
         write_user_slice(&self.page_table, argc_ptr, core::slice::from_ref(&argc))?;
+
+        debug_assert_eq!(user_sp & (USER_STACK_ABI_ALIGN - 1), 0);
 
         // print user stack
         // let mut phys_addr = phys_user_sp & !0xf;

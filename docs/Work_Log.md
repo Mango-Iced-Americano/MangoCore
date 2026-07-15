@@ -4,6 +4,56 @@
 
 ## 2026-07-15
 
+### fs/ext4: 修复 APK 大规模提交损坏并完成双架构、QEMU 与实板回归
+
+**涉及文件：**
+- `os/src/fs/ext4/{balloc,block_group,ialloc,superblock}.rs` — 支持 BLOCK/INODE_UNINIT lazy bitmap，修正 16/32/64 位块组字段、inode table 块号、当前快照累计计数、跨组释放、重复释放和新 inode slot 清零
+- `os/src/fs/ext4/{direntry,ext4_inode,ext4fs,meta_cache}.rs` — 修正首目录记录删除 framing、目录 checksum 的 inode 身份、精确 file type、重复名称、rmdir 链接数/延迟回收、父 inode 快照同步和释放块缓存失效
+- `os/src/fs/ext4/test.rs`、`user/src/bin/fs_test.rs` — 增加目录项删除、symlink 类型/重复创建、rmdir 回收、metadata block 复用覆盖；让 ftruncate 测例显式报告 setup/reopen/write 错误
+- `os/src/fs/vfs/{file_system,mount}.rs`、`os/src/task/process.rs` — 为内核内部全局 inode 状态表增加文件系统实例身份；MountFS 转发底层 identity，避免不同文件系统同 inode 号误触发 `ETXTBSY`
+- `os/src/mm/{mod,address_space}.rs`、`os/src/syscall/process/exec.rs`、`os/src/task/signal/frame.rs` — 统一 rv64/la64 用户入口 16 字节栈对齐，并让 exec 容量预检与 signal frame 使用同一 ABI 约束
+- `docs/03_fs/{ext4,vfs-core}.md`、`docs/04_mm/address-space-and-vma.md`、`docs/05_process/{process-control-block,signal}.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 同步实现边界、验证口径及可复用排障模式
+
+**验证：**
+- 代码与本条 `mango-workflow` 记录已以 `fix(fs): stabilize ext4 persistent writes` 提交到 `la64-on-board`；本提交精确包含 18 个内核/用户态文件和 7 个对应模块文档/知识库文件，不包含 `docs/09_debug/`、串口脚本或构建生成态文件 ✅
+- 在 Docker 中严格串行强制执行 `make -B la64-kernel-build-only LA64_BLK_MODE=virt_pci MODE=release LOG=off` 与 `make -B rv64-kernel-build-only BLK_MODE=virt MODE=release LOG=off`，均成功，仅有项目既有 warning ✅
+- 使用全新 256 MiB ext4 fixture 并 chroot 真实被测根：la64/rv64 `fs_test` 均 63/63；日志为 `logs/ext4-fs-test-la64-fixed-20260715.log`、`logs/ext4-fs-test-rv64-fixed-20260715.log` ✅
+- 两个测试镜像关机后分别执行 `e2fsck -fn`，均完成五阶段检查且退出 0；日志为 `logs/fsck-ext4-fs-test-la64-fixed-20260715.log`、`logs/fsck-ext4-fs-test-rv64-fixed-20260715.log` ✅
+- 原始 Python APK 小文件压力对应的修复后 P4 fixture 离线 fsck clean：2427/262144 inodes、39033/1048576 blocks；日志为 `logs/ext4-apk-fsck-fixed-20260715.log` ✅
+- QEMU 最终 mask `0x019`：rv64/loongarch64 的 basic、iozone、libctest 均在 musl/glibc 下退出 0，无 panic/I/O error；iozone 分别约 93/95 s 与 102/101 s，日志为 `logs/fs-regression-rv64-final-20260715.log`、`logs/fs-regression-la64-final-20260715.log` ✅
+- `make la64-2k1000-apk-persist-tests MODE=release` 生成 `kernel-2k1000-apk-persist-tests.ui`：总长 16,757,160 B、payload 16,757,096 B、SHA-256 `aef77c5cc6d929b8e1cad27a3ebc030abc97f85f1f0eff9160f613ce88490065`；U-Boot TFTP 长度、CRC32 `689ae2b6`、`iminfo` checksum 均通过 ✅
+- 提交后在 `zhouzhouyi/os-contest:20260104` Docker 中重新执行 `make -C os la64-2k1000-apk-persist-shell MODE=release`；最新 `kernel-2k1000-persist-shell.ui` 总长 16,757,160 B、payload 16,757,096 B、SHA-256 `22eff3993dbedb24a8743b020fc5a8e21f68d84979822c7da48e761406d2bda4`，并确认包含 `[apk-persist-shell] RESULT=PASS` 交互入口标记 ✅
+- 2K1000LA 启动识别 2 GiB、AHCI/P2/P4、GMAC 48/16；`scratch-smoke PASS`，P4 `/persist` 为 ext4 rw，APK 持久门禁输出 `PASS mode=reuse` 与 `RESULT=PASS` ✅
+- 实板 P4 16 MiB 写入、`sync`、复制/`cmp`、截断、重开、删除探针通过，顺序写约 7.5 MB/s；`/musl/iozone -i 0 -i 1 -i 2 -s 16m -r 64k` 返回 0，write/rewrite/read/reread/random-read/random-write 为 15315/17872/112673/112374/110157/14920 KiB/s；完整串口日志为 `logs/ext4-apk-board-final-20260715.log` ✅
+- `git diff --check` 在文档更新前通过；文档更新后再次执行最终检查 ✅
+
+**备注：**
+- 最初 APK 的连锁 `failed to commit ... No such file or directory` 不是单一 mkdir 缺失，而是 lazy bitmap、目录项 framing/checksum、元数据 cache 所有权、计数快照和 inode 快照一致性叠加造成的真实磁盘元数据损坏；修复以 clean fixture + 离线 fsck 为硬门禁。
+- la64 曾出现“内核复制 16 字节、用户比较只认 10 字节”的假文件系统故障，根因是用户初始栈违反 16 字节 ABI；另一个 ftruncate `-ETXTBSY` 是 ramfs/ext4 的占位 `dev_id=0` 与相同 inode 号碰撞。两者均按独立根因修复，没有在 ext4 路径加 workaround。
+- 本轮实板没有重复执行会改动现有 P4 软件集的 `apk add py3-pillow`；该原始小文件压力由修复后的 QEMU P4 fixture + 离线 fsck 覆盖，实板使用独立 16 MiB 探针、iozone 和已有 APK reuse 树验证平台差异。
+- Skill 生成的 Work_Log、对应模块文档和经验库已并入本提交；其他既有文档改动继续留在工作树中。
+
+### docs/board: 建立 la64_on_board 全量开发日志与组会专题
+
+**涉及文件：**
+- `docs/09_debug/la64_on_board/README.md` — 新增组会速览、阅读入口、里程碑、证据状态词和六页汇报主线
+- `docs/09_debug/la64_on_board/development-log.md` — 以 2026-07-09 至 07-15 正序梳理 33 个提交，记录启动/VALEN/TLB、AHCI/P1-P4、GMAC/DHCP/HTTPS、2 GiB、CSPRNG、CPython/APK、性能 A/B 的现象、根因、修改与验收边界
+- `docs/09_debug/la64_on_board/bug-hole-read-mismatch.md` — 将现有 LA64 用户栈 ABI/LLVM 反汇编复盘移入专题目录，并保留工作树中的完整内容
+- `docs/09_debug/README.md`、`docs/README.md` — 更新调试索引、专题入口、文件计数和迁移后的链接
+- `docs/01_architecture/boot-and-trap.md` — 同步当前串口工具控制键语义：`Ctrl-C` 发送板端 SIGINT，`Ctrl-] q` 关闭本地监听
+- `docs/Work_Log.md` — 记录本次专题整理、证据边界和验证结果
+
+**验证：**
+- `git rev-list --count dfc2da05..2031fd59` 为 33；逐项核对提交日期、主题、阶段闭环和明确的未验收边界 ✅
+- 交叉核对 `docs/Work_Log.md` 2026-07-09 至 07-15、当前源码/Make 目标、`logs/cpython-la64-board.log` 与四份 2026-07-15 GMAC 性能实板日志 ✅
+- 检查专题内 Markdown 相对链接、仓库根路径引用和旧 `bug-hole-read-mismatch.md` 引用；迁移后无重复事实源 ✅
+- `git diff --check` ✅
+- 本轮仅整理和同步文档，未修改内核/用户态代码，未运行双架构编译或 QEMU/实板测试；文档中的 PASS 均引用既有可核验证据 ⚪
+
+**备注：**
+- 当前已提交能力以 HEAD `2031fd59` 为边界；工作树中的 ext4、用户栈 ABI、`fs_test` 和串口控制键修改均显式标记为未提交/WIP，不计入 33 个已提交成果。
+- `bug-la64-kernel-stack-overflow.md` 保留在 `docs/09_debug/`，作为 40 位 VALEN/高栈前史由专题链接，不复制进子目录，避免形成多个事实源。
+
 ### board/net: 确认 RX ring 饥饿根因并固化 2K1000LA 生产配置
 
 **涉及文件：**
@@ -33,6 +83,21 @@
 - 48/16 下仍偶见新鲜 `TU=1`，但未出现软件 TX busy/reject 且 RX 吞吐已恢复；后续单独分析 TX underflow。高频空 poll、IRQ/NAPI 风格调度和 Mac 公网代理节点偏慢同样是相互独立的后续问题。
 
 ## 2026-07-14
+
+### board/tooling: 允许一键串口终端用 Ctrl-C 中断板端进程
+
+**涉及文件：**
+- `scripts/boot_2k1000_tftp.py` — 不再把 `Ctrl-C` 解释为本地退出；将其原样发送给开发板，并增加可跨 read 保持状态的 `Ctrl-]` 命令前缀，使用 `Ctrl-] q` 关闭监听、`Ctrl-] ?` 显示帮助
+- `docs/08_testing/mangocore-python-guide.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 记录板端中断、本地退出和字面量转义的操作方式及通用串口设计约束
+
+**验证：**
+- `python3 -m py_compile scripts/boot_2k1000_tftp.py` 通过；控制字节探针确认普通输入、CR 和 `Ctrl-C` 原样透传，`Ctrl-] q` 不进入串口，前缀跨两次 read 仍可识别，字面量及未知转义不会被静默丢弃 ✅
+- 仓库 Docker Compose 因宿主不存在固定映射的 `/dev/sdb` 无法启动；改用同一 `zhouzhouyi/os-contest:20260104` 镜像的一次性容器，严格串行执行 `make rv64-kernel-build-only`、`make la64-kernel-build-only`，均通过且只有项目既有 warning；生成态文件恢复为构建前版本 ✅
+- 内核 TTY 代码复核确认默认 `VINTR=0x03` 且 `ISIG` 开启，调度器会把该字节转换为前台进程组 `SIGINT`；本次不修改内核，无需新增 QEMU 行为测试 ✅
+- `git diff --check` 通过 ✅
+
+**备注：**
+- 已经在运行的旧 Python 进程不会加载脚本修改；需要关闭旧监听并重新执行一键启动命令。关闭监听不会使开发板复位。
 
 ### fs/board: 修复 persist-shell CPython 不可见与 ext4 rename 丢目录项
 

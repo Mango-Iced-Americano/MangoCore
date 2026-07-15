@@ -93,6 +93,15 @@ pub enum FsPermissionPolicy {
 /// - 异步 I/O 和 `O_DIRECT` 标志穿透 —— 当前所有 I/O 均经 `PageCache`，
 ///   不直接操作块设备。
 pub trait FileSystem: Any + Send + Sync + Debug {
+    /// Return a boot-lifetime identity for this filesystem instance.
+    ///
+    /// This is an internal key, not a userspace device number.  Wrappers such
+    /// as `MountFS` must delegate to their backing filesystem so bind mounts
+    /// of the same inode retain one identity.
+    fn identity_key(&self) -> usize {
+        self as *const Self as *const () as usize
+    }
+
     /// 返回文件系统的根 `IndexNode`。
     ///
     /// 该 inode 的生命周期与文件系统挂载一致，多次调用返回同一个 `Arc`。

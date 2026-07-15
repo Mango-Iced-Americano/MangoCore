@@ -43,6 +43,9 @@ pub const EXT4_GOOD_OLD_INODE_SIZE: u16 = 128;
 /// Inode扩展标志
 pub const EXT4_INODE_FLAG_EXTENTS: usize = 0x00080000; /* Inode uses extents */
 /// BLock group descriptor flags.
+pub const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
+pub const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
+pub const EXT4_BG_INODE_ZEROED: u16 = 0x0004;
 /// 最小块组描述符大小
 pub const EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE: u16 = 32;
 /// 最大块组描述符大小

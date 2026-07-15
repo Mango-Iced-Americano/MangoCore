@@ -1740,6 +1740,10 @@ impl Drop for MountFS {
 }
 
 impl FileSystem for MountFS {
+    fn identity_key(&self) -> usize {
+        self.inner_filesystem.identity_key()
+    }
+
     fn root_inode(&self) -> Arc<dyn IndexNode> {
         self.mountpoint_root_inode()
     }

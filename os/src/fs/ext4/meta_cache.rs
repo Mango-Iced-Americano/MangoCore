@@ -115,6 +115,19 @@ impl MetaBlockCache {
         }
     }
 
+    /// Discard cached contents for physical blocks that have returned to the
+    /// free-space allocator. Dirty data must not survive ownership transfer:
+    /// a later flush could otherwise overwrite a newly allocated file.
+    pub fn invalidate_range(&self, start_block: usize, block_count: usize) {
+        if block_count == 0 {
+            return;
+        }
+        let end_block = start_block.saturating_add(block_count);
+        self.blocks
+            .lock()
+            .retain(|block_id, _| *block_id < start_block || *block_id >= end_block);
+    }
+
     pub fn flush_block(&self, block_id: usize, write_to_device: impl FnOnce(usize, &[u8])) {
         let mut blocks = self.blocks.lock();
         if let Some(cached) = blocks.get_mut(&block_id) {

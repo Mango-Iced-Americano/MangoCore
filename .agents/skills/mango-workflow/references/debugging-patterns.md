@@ -378,7 +378,7 @@
 
 - **现象**: 把多条 `setenv/tftpboot/bootm` 用固定 sleep 或一次性串口注入时，U-Boot 可能仍在网卡协商、TFTP 或 CRC，后续字符被丢弃；最终表现为偶发找不到镜像、命令截断或在未校验镜像时直接启动。
 - **根因**: U-Boot 各命令耗时不固定，串口发送成功不代表命令执行完成；只检查 TFTP 返回也无法发现短传、错误文件或内存内容损坏。
-- **修复**: 每条控制命令都读取到完整 `=>` prompt 后再发送下一条；TFTP 后同时校验 `Bytes transferred`、本地与 U-Boot CRC32，再用 `iminfo` 确认架构和镜像 checksum。`bootm` 之后切换为纯串口透传，主机侧 Ctrl-C 只关闭监视器。
+- **修复**: 每条控制命令都读取到完整 `=>` prompt 后再发送下一条；TFTP 后同时校验 `Bytes transferred`、本地与 U-Boot CRC32，再用 `iminfo` 确认架构和镜像 checksum。`bootm` 之后切换为双向串口透传，`Ctrl-C` 发往目标，本地使用 `Ctrl-] q` 退出监视器。
 - **安全边界**: 网络参数只用 `setenv`，禁止自动 `saveenv`；普通启动脚本禁止包含块设备写命令。自动接管串口时只关闭能明确匹配同一设备路径的 screen，未知占用者必须报错停止。
 - **相关文件**: `scripts/boot_2k1000_tftp.py`, `Makefile`
 
@@ -472,8 +472,8 @@
 
 - **现象**：自动启动后能持续看到内核和 Shell 输出，键盘输入在终端上似乎可见，但按回车后设备没有任何响应；改用 `screen` 等串口终端则正常。
 - **根因**：主机监视器只实现了 `serial -> stdout`，没有实现 `stdin -> serial`。终端 canonical/echo 设置可能在本地显示输入，使单向转发看起来像设备收到了命令。
-- **修复**：使用 `select`/poll 同时监听串口和 stdin；交互期将 TTY 切为 raw 模式，逐字节写入串口，并在 `finally` 中恢复原终端属性。监视器退出键应在主机侧拦截，避免误发给设备。
-- **验收**：用 pipe/PTY 回环同时验证设备输出、普通输入只转发一次、CR 字节保留、退出控制字符不进入串口，以及异常退出后终端属性恢复。
+- **修复**：使用 `select`/poll 同时监听串口和 stdin；交互期将 TTY 切为 raw 模式，逐字节写入串口，并在 `finally` 中恢复原终端属性。板端常用的 `Ctrl-C` 必须原样透传；本地退出使用带前缀的独立序列（当前为 `Ctrl-] q`），不能占用目标程序的中断字符。
+- **验收**：用 pipe/PTY 回环同时验证设备输出、普通输入只转发一次、CR 和 `Ctrl-C` 字节保留、本地退出序列不进入串口、分两次读取的转义序列仍可识别，以及异常退出后终端属性恢复。
 - **相关文件**：`scripts/boot_2k1000_tftp.py`
 
 ### 中断轮询消费状态事件后延迟跨子系统提交
@@ -597,3 +597,36 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **教训**：端到端下载速度不是单一指标。先用本地服务去除公网变量，再用 QEMU 去除
   物理网卡变量；所有调优都应有默认关闭的诊断 feature 和可复现实验矩阵。
 - **相关文件**：`os/src/drivers/net/gmac_2k1000.rs`, `os/src/net/config.rs`, `os/src/net/socket/inet/stream/mod.rs`, `docs/06_net/debugging.md`
+
+### ext4 压力安装后出现连锁 ENOENT 时从磁盘一致性反推第一处破坏
+
+- **现象**：APK 等事务先成功创建大量文件，随后连续报告“failed to commit ... No such file or directory”；单个 read/write 探针和同一启动中的路径查找可能仍正常。
+- **定位**：每轮都从全新 ext4 fixture 开始，把测试 chroot 到真实被测文件系统，关机后立即执行宿主 `e2fsck -fn`。比较第一条 fsck 诊断和最早变化的 bitmap/group counter，不在已经损坏的镜像上反复试错。测试程序使用绝对 `/tmpN` 路径时，只有 chroot 或明确的 mount namespace 才能保证它没有误跑在 ramfs。
+- **根因模式**：现代 mkfs 可给后续块组设置 `BLOCK_UNINIT/INODE_UNINIT`；把未初始化位图直接当作磁盘真值会分配元数据块或旧 inode。批处理若每次从挂载时 superblock 副本更新计数，还会覆盖本轮前序变化。
+- **修复**：首次分配时按实际 group 边界重建 lazy bitmap，保留 super/GDT、两类 bitmap、inode table 和尾部无效位，清 UNINIT 并重算 checksum；superblock/group descriptor 更新从当前 cache/batch 快照累计。新 inode slot 在发布前清零，重复 free 不重复增加计数。
+- **验收**：双架构在 clean fixture 上通过目标 fs test，再运行 basic/libctest/iozone，最后每个镜像都必须离线 fsck clean。只看用户态 exit 0 或内核未 panic 不足以证明 ext4 元数据正确。
+- **相关文件**：`os/src/fs/ext4/balloc.rs`, `os/src/fs/ext4/ialloc.rs`, `os/src/fs/ext4/superblock.rs`, `os/src/fs/ext4/ext4fs.rs`
+
+### ext4 目录项删除正确但延迟 flush 仍可覆盖新文件
+
+- **现象**：删除或 rename 后目录短期可读，后续 inode/block 复用或 APK 原子提交时路径成批消失；fsck 可能同时报告目录项类型、checksum、引用计数或块重复占用。
+- **根因模式**：块内第一条可变长目录记录没有前驱，错误地把其 `rec_len` 合并给自身会破坏后续扫描；目录 checksum 错用第一条目录项 inode 而非目录 inode；释放的目录/extent 块仍留在 metadata cache 中，旧 dirty entry 会在物理块转交新文件后延迟写回。低层写父 inode 后，VFS 对象中的旧快照也可能在下一次操作覆盖新 size/extent。
+- **修复**：第一条记录只清内容并保留 framing，其他记录才并入直接前驱；checksum 显式传入目录 inode/generation；释放块立即 invalidate metadata cache；所有低层目录修改完成后刷新父 inode 快照，并在分配前从真实目录拒绝重复名称。
+- **验收**：覆盖首条/非首条删除、重复 symlink、rmdir link count、live inode 延迟回收、释放块复用和同目录 rename；压力结束后离线 fsck。
+- **相关文件**：`os/src/fs/ext4/direntry.rs`, `os/src/fs/ext4/ext4fs.rs`, `os/src/fs/ext4/meta_cache.rs`, `os/src/fs/ext4/test.rs`
+
+### 全局 inode 状态表不能用未实现的 st_dev 占位值作身份
+
+- **现象**：ext4 普通文件首次创建和写入成功，关闭后以可写方式 reopen 却返回 `ETXTBSY`；被测文件从未执行，inode 号却恰好等于 initramfs/tmpfs 中的可执行文件。
+- **根因**：多个文件系统的 `Metadata.dev_id` 都是占位值 0，全局 busy 表以 `(dev_id, inode_id)` 为键，导致不同文件系统的同号 inode 碰撞。
+- **修复**：为 `FileSystem` 提供启动期实例身份，内部状态表使用 `(fs.identity_key(), inode_id)`；MountFS/bind wrapper 必须转发到底层身份。该 key 只解决内核内部对象隔离，不能冒充已经实现了用户态稳定 `st_dev`。
+- **验收**：同时保持一个 ramfs 可执行文件 busy，并在 ext4 创建相同 inode 号的文件，验证 writable reopen 不报错；再通过 bind mount 验证同一底层 inode 仍共享 busy 状态。
+- **相关文件**：`os/src/fs/vfs/file_system.rs`, `os/src/fs/vfs/mount.rs`, `os/src/task/process.rs`
+
+### 用户栈只按指针宽度对齐会被误判为文件系统数据损坏
+
+- **现象**：同一 ext4 镜像离线内容正确，rv64 比较通过，la64 用户态却稳定把 16 字节文件误报为只读到前 10 字节；内核 read 返回长度和 copy_to_user 内容均正确。
+- **根因**：初始 `sp` 只按 8 字节对齐，违反 rv64/la64 的 16 字节入口 ABI。LLVM 基于 ABI 假设折叠地址运算后，生成的指令会利用本应恒为零的低位；错误表现落在普通 libc/Rust 比较代码中，与 VFS 无关。signal handler 入口若只按 context 自然对齐也会重现同类问题。
+- **修复**：统一定义 16 字节用户入口对齐；按完整 argc/argv/envp/auxv 表长度动态计算 padding，并让 exec 容量预检复用同一公式；signal frame 同时满足 ABI 和架构 context 的最大对齐。
+- **验收**：两架构分别运行真实用户态比较和信号往返，必要时对用户 ELF 反汇编并核对发生误判的地址计算；仅检查内核 copy 日志不能闭环。
+- **相关文件**：`os/src/mm/address_space.rs`, `os/src/mm/mod.rs`, `os/src/syscall/process/exec.rs`, `os/src/task/signal/frame.rs`
