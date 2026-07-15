@@ -1239,7 +1239,7 @@ fn test_stress_unlink_loop() -> bool {
         if r < 0 { println!("  FAIL: unlink file {} returned {}", i, r); return false; }
     }
     // verify empty via getdents64
-    let fd = sys_open("/tmp35\0", 0x200000 | 0);
+    let fd = sys_open("/tmp35\0", 0o200000 | 0);
     let mut buf = [0u8; 512];
     let n = sys_getdents64(fd as usize, &mut buf);
     sys_close(fd as usize);
@@ -1336,7 +1336,7 @@ fn test_stress_getdents() -> bool {
         sys_write(fd as usize, b".");
         sys_close(fd as usize);
     }
-    let fd = sys_open("/tmp38\0", 0x200000 | 0);
+    let fd = sys_open("/tmp38\0", 0o200000 | 0);
     let mut buf = [0u8; 512]; // small buffer — forces multiple getdents64 calls
     let mut entries = 0usize;
     loop {
@@ -1392,7 +1392,7 @@ fn test_perf_getdents_1000() -> bool {
     const O_RDONLY: u32 = 0;
     const O_WRONLY: u32 = 0o1;
     const O_CREAT: u32 = 0o100;
-    const O_DIRECTORY: u32 = 0x200000;
+    const O_DIRECTORY: u32 = 0o200000;
     const AT_REMOVEDIR: u32 = 0x200;
     const PREFIX: &str = "/tmp_perf_getdents";
 
