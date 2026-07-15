@@ -13,25 +13,12 @@
 
 ## 启动/Panic 排查
 
-### QEMU 启动无显示
-- 检查 `console::init()` 是否第一个被调用（在 `rust_main()` 中）
-- 检查串口设备初始化顺序
-
 ### 内核 panic 定位
 - 启动时加 `LOG=debug make rv64-run` 查看详细日志
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`
 - panic 输出包含 syscall 上下文、内存状态、任务信息（`panic_diag.rs`）
 
-### 编译问题
-- `cargo check` 在根目录一定失败 → 始终在 `os/` 目录用 Makefile 目标
-- `Vec` 重复定义 → 检查是否同时 `use alloc::vec;` 和 `use alloc::vec::Vec;`
-- lang_items 不匹配 → 编辑 `.rv` / `.la` 变体，不编辑 `lang_items.rs`
-
 ## 内存问题
-
-### unmap 后读到旧数据
-- 典型 TLB 刷新遗漏 → 检查 PTE 修改后是否有 `sfence.vma`/`invtlb`
-- 用 GDB `info tlb` 查看 TLB 条目
 
 ### 物理地址异常（如 0xb0000000）
 - la64: 检查 `MEMORY_SIZE` 是否匹配 DTB 中 RAM 范围
@@ -62,15 +49,6 @@
 - **修复**: (1) 用 `core::mem::replace` 提取旧值而非隐式 drop，通过返回值传出；(2) 调用者先释放 `fd_table` 锁，再 `drop(old_file)`。
 - **教训**: Rust 隐式 drop 让你看不见资源释放点。修改 `Vec<Option<Arc<T>>>` 等容器持有重型资源时，`=` 赋值的隐式 drop 可能在持锁路径下触发 `Drop`，导致死锁。安全模式：`let old = core::mem::replace(&mut slot, new_value); ... unlock(); drop(old);`
 - **相关文件**: `os/src/fs/vfs/file.rs` — `alloc_fd_at()`, `os/src/syscall/fs.rs` — `sys_dup2()`, `sys_dup3()`
-
-## 网络问题
-
-### Socket 操作阻塞不返回
-- `connect` 不返回 → 检查是否使用 `try_connect` + `wait_io` 模式
-- `accept`/`recvfrom` 不返回 → 检查 `wait_io` 中是否调用了 `NET_INTERFACE.poll()`
-
-### 非阻塞 socket 测试失败
-- 检查 `try_xxx` 前是否调了 `NET_INTERFACE.try_poll()`
 
 ## 信号问题
 
@@ -155,9 +133,6 @@
 - **修复**: 先用 `docker compose config` 确认实际 image，再用国内 registry 前缀或可用 daemon mirror 拉取；项目入口应支持 `DOCKER_IMAGE=...` 覆盖。
 - **相关文件**: `docker-compose.yml`, `Makefile`, `scripts/run_test_docker_parallel.sh`
 
-### `os_test.conf` 修改不生效
-- 使用 `conf-inject` 重新注入镜像（不能直接改镜像中的文件）
-
 ### 对照实验必须同时确认 kernel 和 sdcard 用户态产物
 
 - **现象**: 在旧 commit 上应用用户态 probe 后直接跑 `make rv64-run`，日志可能仍显示候选版本行为；或者重新跑了 `*-kernel-build-only` 后，QEMU 日志仍没有新增 probe 输出。
@@ -181,9 +156,6 @@
 - **修复**: handler 本体计时必须在可能 context switch 前完成记录；trap 入口成本和 handler 成本分开记录。若需要观察“被调度走多久”，另加独立的 off-CPU/latency counter，不要混入 trap cycles。
 - **相关文件**: `os/src/hal/arch/riscv/trap/mod.rs`, `os/src/hal/arch/loongarch64/trap/mod.rs`, `os/src/task/manager.rs`
 
-### QEMU 进程残留
-- `pkill qemu-system` 或 `pkill qemu`
-
 ### Docker Compose 进入了别人的容器
 
 - **现象**: 在自己的工作区执行 `docker compose exec os-dev ...`，但容器内 `/app` 实际挂载到队友目录，后续 `docker cp` 或容器内写入会改到别人的源码。
@@ -204,10 +176,6 @@
   或通过 `make -f make/la64o.mk build EXTRA_FEATURES="initramfs preload_payloads"`
 - **注意**: 根 Makefile 没有 `la64-kernel-build-only` 目标；`rv64_all`/`la64_all` 通过不同的 Makefile 目标处理特性
 - **相关文件**: `os/make/la64o.mk`, `os/Makefile`
-
-### LTP 特定用例调试
-- 使用 `ltp_runner=inline` + `ltp_include=testname1,testname2` 窄范围测试
-- 提交前恢复为 `ltp_runner=suite` 或 `ltp_runner=script`
 
 ### la64 clone09 停在 CLONE_NEWNET 后无 timeout
 

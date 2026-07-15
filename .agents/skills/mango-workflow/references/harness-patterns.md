@@ -78,20 +78,7 @@ Round 3: 加 heap allocator 计数器（alloc/dealloc ticks + dealloc scan_steps
 - 哪个计数器和 lmbench 分数的变化趋势最吻合？
 - 如果数据不够区分，下一轮加什么计数器？
 
-### 第四步：Oracle 多轮咨询时机
-
-Oracle 很贵，不要一开始就问。正确节奏：
-
-| 时机 | 问什么 |
-|------|--------|
-| 有足够数据但不知道下一步方向时 | "基于这些数据，最可能根因是什么？下一步加什么计数器？" |
-| 数据强烈指向某个方向后 | "这个模式说明什么？最优修复方案是什么？" |
-| 实现修复后 | "审查这个改动，有没有安全/边界问题？" |
-| 修复加安全加固都做完后 | "最终验证：是否可以判定 DONE？" |
-
-本案例中 Oracle 用了 4 轮，每一轮都在关键分叉点。第 3 轮 Oracle 指出的 4 个安全缺口（对齐、边界、下溢、null 指针）直接阻止了线上 crash。
-
-### 第五步：bitmap guard 模式（可复用修复技术）
+### 第四步：bitmap guard 模式（可复用修复技术）
 
 当退化根因是**有状态数据结构的 O(n) 操作**时，bitmap guard 是通用修复：
 
@@ -115,7 +102,7 @@ before:                       after:
 
 ```
 [问题信号] → [建测量框架] → [隔离退化层] → [加计数器] → [跑实验] → 
-[看数据决策] → {数据够了? → [问 Oracle] → [修根因] → [补安全] → [跑全量] → 完成
+[看数据决策] → {数据够了? → [诊断根因] → [修根因] → [补安全] → [跑全量] → 完成
               数据不够? → [加计数器] → [跑实验] → ...}
 ```
 
@@ -142,9 +129,6 @@ diag=1
 3. **渐进退化根因不在最明显的地方**：所有人都以为在 null syscall，实际在 heap dealloc。
 4. **不要依赖单一指标**：lmbench composite score + 每个子项 + 内核 P0/P1 计数器一起看。
 5. **计数器增减要与 lmbench 分数变化吻合**：如果 scan_steps 涨了但 lmbench 没变，说明不是根因。
-6. **Oracle 在关键分叉点问，不要每步问**：用数据排除大部分可能性后，让 Oracle 做最难的一跳。
-
-## 网络绩效
 
 ## 网络绩效
 
@@ -250,11 +234,6 @@ diag=1
 - **教训**: 微秒级计时 LTP 用例要区分“有 fd/事件等待”的阻塞语义和“纯 timeout sleep”的精度语义；短忙等必须有时长上限和 ready task 逃逸条件，避免拖慢并发场景。
 - **相关文件**: `os/src/fs/poll.rs`
 
-### nanosleep 唤醒后死锁
-- **根因**: 持有 `task.inner` 锁时调用 `has_actionable_signal(&task)`，后者尝试获取同一锁
-- **修复**: 任何阻塞操作唤醒后检查信号时，必须先释放锁再调用 `has_actionable_signal`
-- **相关文件**: `os/src/syscall/fs.rs`（nanosleep）、`os/src/fs/poll.rs`（pselect）
-
 ### 被屏蔽信号导致错误的 EINTR
 - **根因**: 信号检查用了 `is_empty()` 而非 `sigpending.difference(sigmask)`，忽略了信号掩码
 - **修复**: 必须用 `difference(sigmask)` 过滤被屏蔽信号
@@ -265,17 +244,6 @@ diag=1
 - **修复**: `SA_RESETHAND` 只重置 handler 为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询
 
 ## 内存管理
-
-### TLB 刷新遗漏
-- **根因**: 修改 PTE 后未执行 `sfence.vma`（riscv）/ `invtlb`（la64），CPU TLB 缓存旧 PTE
-- **症状**: CoW 绕过（父子写入同一物理页）、unmap 后读到残留数据
-- **修复**: `unmap`、`block_and_ret_mut`、`set_pte_flags`、`revoke_write` 等所有 PTE 修改操作后必须 TLB 刷新
-- **相关文件**: `os/src/mm/page_table.rs`
-
-### MAP_SHARED 参与 CoW
-- **根因**: fork 时 MAP_SHARED 页面被标记 CoW，破坏共享语义
-- **修复**: MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限，缺页时只恢复 W 不做 CoW
-- **相关文件**: `os/src/mm/memory_set.rs`
 
 ### SysV SHM 每次 shmat 分配独立匿名页
 - **根因**: `shmat()` 若直接复用匿名 `MAP_SHARED` 并让每个 VMA 自行分配物理页，同一 `shmid` 的多次 attach 会得到不同 backing，写入内容无法互通；fork 继承只能共享已有 VMA，不能修复独立 attach 的共享语义。
@@ -305,11 +273,6 @@ diag=1
 - **注意**: 上限值需权衡内存和丢包率；4096 × MTU(1500) ≈ 6MB 通常安全
 - **相关文件**: `os/src/drivers/net/veth.rs`
 
-### execve/clone 路径堆耗尽
-- **根因**: Vec 扩容在裸机环境下可能 panic
-- **修复**: 使用 `try_reserve` 并返回 `ENOMEM`
-- **相关文件**: `os/src/syscall/process/exec.rs`
-
 ### kernel stack 溢出静默破坏 heap
 - **根因**: 架构把每线程 kernel stack 直接放在 kernel heap 的 `Vec<u8>` 中时，向下增长的栈一旦越界会先写坏相邻 heap 对象，后续常表现为随机 `BTreeMap`/allocator panic，而不是在真实溢出点 fault。
 - **修复**: 将 kernel stack 放到页表映射的固定 kernel VA 窗口，每个 slot 只映射实际栈页，并在增长方向保留未映射 guard page；栈映射需标记为 kernel-stack 类别，避免干扰 ELF/interpreter 临时 program 映射的 `highest_addr()`。
@@ -332,30 +295,7 @@ diag=1
 - **教训**: 带 miss 的 I/O 路径不能只看均值；必须同时有 miss_rate 和 hit/miss 各自耗时才能判断瓶颈是"快路径太慢"还是"慢路径太多"
 - **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
 
-### ext4 sparse file hole 处理
-- **根因**: `get_pblock_idx` 对 hole 返回垃圾物理地址
-- **修复**: hole 返回 `Err`，`read_at` 填零，`write_at` 分配新块
-- **相关文件**: `os/src/fs/ext4/`
-
-### ext4 extent 搜索不验证覆盖范围
-- **根因**: `binsearch_extent` 返回最近 extent 但不保证 `lblock` 在其范围内
-- **修复**: 调用者必须检查 `lblock >= extent.first_block && lblock < extent.first_block + extent.len()`
-
-### ext4 write_at 锁重入
-- **根因**: 持有 `self.inode` 时调用 `get_new_page_cache()`，后者再次锁 `self.inode`，`TicketMutex` 不可重入
-- **修复**: 缩短 inode 锁作用域，只 clone 已存在的 PageCache 做 invalidate
-
 ## 网络栈
-
-### connect 永不返回 / pselect 永远挂起
-- **根因**: Socket 就绪检查前缺少 `NET_INTERFACE.poll()`
-- **修复**: `socket_r_ready()`/`socket_w_ready()` 中先 poll 再检查
-- **相关文件**: `os/src/net/syscall/`
-
-### 非阻塞 socket livelock
-- **根因**: 紧循环 EAGAIN 阻止定时器中断
-- **修复**: 非阻塞路径 `try_xxx` 前先调用 `NET_INTERFACE.try_poll()`
-- **相关文件**: `os/src/net/syscall/`
 
 ### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
 - **根因**: `WaitQueue::wait_until_interruptible()` 的 condition 闭包在队列锁持有时执行；如果在闭包内调用 `NET_INTERFACE.poll()`，轮询路径中 `notify_events_all_if_unlocked` 会因为队列锁已持有而静默丢弃唤醒，导致阻塞的 waiter 永久睡眠。TCP accept() 在闭包内 poll 会错过首个 SYN 连接。
@@ -368,27 +308,18 @@ diag=1
 
 ## 错误码对齐（Linux 语义）
 
-- setsockopt 未知 level → **ENOPROTOOPT(92)**，不是 EOPNOTSUPP(95)
-- socketpair 非 AF_UNIX → **EPROTONOSUPPORT(93)**，不是 EAFNOSUPPORT(97)
-- `Socket::alloc` 未知 domain → **EAFNOSUPPORT(97)**，不是 EINVAL(22)
-- getpeername NULL addr → 必须先验证参数再检查连接状态，EFAULT 优先于 ENOTCONN
-- mmap 非匿名映射的坏 fd → EBADF 优先于其他校验
-- RISC-V 未对齐 addrlen → 需显式检查 `addrlen % 4 != 0`，硬件不报错
-- 跨进程 VM 访问 → 先做权限检查返回 EPERM，再访问远程地址返回 EFAULT
-- linkat/link syscall errno 优先级（Linux v6.6 do_linkat + vfs_link）：
+### linkat/link/renameat 多路径 syscall errno 优先级
+
+- **根因**: Linux v6.6 `do_linkat` + `vfs_link` 中 errno 有严格优先级：
   ```
   flags(EINVAL) > old_lookup(EBADF/ENOTDIR/ENOENT) > new_lookup(EBADF/ENOTDIR/ENOENT)
   > EXDEV > EPERM(old_is_dir) > EEXIST > EACCES(parent_perm)
   ```
   **关键：old-is-dir EPERM 必须在 new_path 解析完成之后检查**，否则坏 newdirfd 会得到 EPERM 而不是正确的 EBADF/ENOENT。
-  **适用：** renameat、linkat、symlinkat 等所有同时接收 old/new 路径的 syscall。
+- **适用**: renameat、linkat、symlinkat 等所有同时接收 old/new 路径的 syscall。
+- **教训**: 实现双路径 syscall 时，errno 测试必须按此优先级顺序，每条路径分别构造测试用例。
 
 ## 调度/性能
-
-### futex waiter 大规模场景 O(n²)
-- **根因**: nice-aware scheduler 每次 `fetch_task()` 全队列扫描
-- **修复**: ready 队列记录非默认 nice 数量；全 nice=0 走 FIFO fast path
-- **相关文件**: `os/src/task/manager.rs`
 
 ### WaitQueue wake-all 路径性能
 - **根因**: 每唤醒一个任务都扫描全局队列
@@ -742,7 +673,7 @@ diag=1
 │ ① 跑基线：mask=0x800, ltp_suites=syscalls           │
 │    输出 output-rv64.txt 作为当前状态快照               │
 ├─────────────────────────────────────────────────────┤
-│ ② Oracle 分析：输入基线 log + 失败聚类                 │
+│ ② 分析：输入基线 log + 失败聚类                        │
 │    参考 DragonOS + Linux 6.6 → 伪代码方案              │
 │    按修复收益排序（解除最多下游 case 的优先）            │
 ├─────────────────────────────────────────────────────┤
@@ -755,32 +686,10 @@ diag=1
 │    ltp_include=case1,case2,... + ltp_runner=inline    │
 │    35 秒跑完 → 立即看到修复效果                         │
 ├─────────────────────────────────────────────────────┤
-│ ⑤ Oracle blocker 审核：                               │
+│ ⑤ 审核：                                              │
 │    检查 placeholder/hack、违规文件编辑、配置残留         │
-│    多轮迭代直到 VERIFIED                               │
 └─────────────────────────────────────────────────────┘
 ```
-
-### 批量修复成功案例（2026-07-14）
-
-三轮修复消除 50%+ 的 FS 核心失败：
-
-| 优先级 | 修复类别 | 涉及 LTP case | Agent |
-|--------|---------|--------------|-------|
-| P0 | umask 来源统一 | umask01 (384 TFAIL→0) | deep |
-| P0 | chmod/fchmod 模式位 | chmod03/05, fchmod05 | deep |
-| P0 | chown/fchown 权限+清除 | chown03, fchown03 | deep |
-| P0 | mkdir SGID/权限 | mkdir02/04/05 | deep |
-| P1 | FIFO ENXIO | open06 | quick |
-| P1 | flock errno 双取反 | flock02 | quick |
-| P1 | O_NOATIME + O_PATH | open02, open13 | deep |
-| P1 | link 权限检查 | link04 | deep |
-| P2 | pwrite count=0 | pwrite03 | quick |
-| P2 | sendfile offset 验证 | sendfile02/05 | deep |
-| P2 | vmsplice EBADF | vmsplice02 | quick |
-| P2 | splice pipe 验证 | splice03 | deep |
-| P2 | tee syscall 接线 | tee01/02 | quick |
-| P2 | getdents EFAULT | getdents02 (部分) | quick |
 
 ### 教训
 
@@ -792,11 +701,9 @@ diag=1
 
 4. **ltp_include 是迭代利器**：`ltp_runner=inline + ltp_include=case1,case2` 可以在 35 秒内验证修复，而不必每次等全量跑几小时。
 
-5. **Oracle 的 blocker 审核不可跳过**：placeholder 代码（"ENOSYS placeholder" / "Not yet a real"）、lang_items.rs 直接编辑、os_test.conf 残留——这些流程问题 Oracle 每次都会抓到。先自查再提交。
+5. **subagent 是强制要求**：主会话上下文膨胀后修复质量急剧下降。简单到 errno 常量修正、复杂到 11 项 fs.rs 批量修改，一律走 task()。
 
-6. **subagent 是强制要求**：主会话上下文膨胀后修复质量急剧下降。简单到 errno 常量修正、复杂到 11 项 fs.rs 批量修改，一律走 task()。
-
-7. **FileMode::FMODE_PATH 的静默缺失**：`new_without_open()` 不设置 FMODE_PATH 导致 O_PATH fd 不被识别。这类"创建路径不一致"的 bug 很难从失败日志直接定位——需要追踪数据流。
+6. **FileMode::FMODE_PATH 的静默缺失**：`new_without_open()` 不设置 FMODE_PATH 导致 O_PATH fd 不被识别。这类"创建路径不一致"的 bug 很难从失败日志直接定位——需要追踪数据流。
 
 ### 基础设施利用
 
@@ -828,16 +735,6 @@ cat /sys/kernel/tracing/trace              # 看追踪
 Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret 事件带返回值和 err 标记。适合定位"哪个 syscall 在返回哪个 errno"这类问题。
 
 **sysfs 统计计数器**：`/sys/kernel/stats/syscall` 提供 syscall 总数和耗时分布，`/sys/kernel/stats/resource` 提供内存/进程/网络/socket/pipe 等全局资源快照。
-
-### Oracle 调用规范
-
-每次 Oracle 调用必须明确要求：
-1. **参考 DragonOS**："参考 DragonOS 实现 + Linux 6.6 语义"
-2. **给出伪代码**："为每个 bug 提供可委托 subagent 的伪代码"
-3. **提供证据**：附带 qemu.log 中的 TFAIL 行和对应文件当前代码
-
-反例（低质量 Oracle 输出）：长篇源码分析、反复推敲同一个 bug 的假设、没有具体代码修改建议。
-正例：每个 bug 一段诊断 + 一段带文件路径和行号的伪代码。
 
 ### 相关文件
 
@@ -882,7 +779,7 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 
 **初步发现**（drift_window + STATS_ON）：shell 启动产生 55 次 write() = 总耗时 73%。但无法确定这 55 次 write 在基线中是否也存在、以及每次 write 的 fd 目标和阻塞来源。
 
-**Oracle 诊断计划**：需要内核级 ring buffer trace，记录 shell 启动期间每个 write 的 fd、长度、内容 hash、耗时、阻塞次数。配合 `env -i /bin/sh -c true` 和 `>/dev/null 2>&1` 等受控变体定位。
+**诊断计划**：需要内核级 ring buffer trace，记录 shell 启动期间每个 write 的 fd、长度、内容 hash、耗时、阻塞次数。配合 `env -i /bin/sh -c true` 和 `>/dev/null 2>&1` 等受控变体定位。
 
 **当前状态**：ring buffer 基础设施未实现，遗留为已知问题。
 
@@ -896,12 +793,3 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 | QEMU 串口超时截断 tee | 用 `docker exec -d ... > /tmp/qemu_out.log` + `sleep` + `docker cp` |
 | `perf_diag` feature 需显式开启 | `EXTRA_FEATURES=perf_diag` 传给 kernel build；`make rv64-run` 不认 |
 | drift_window 输出被自身 write() 污染 | `drift_snapshot()` 的 `write(1, ...)` 被计入 post-snapshot 计数器 |
-
-### 6. Oracle 验证循环格式要求
-
-超工作循环（ultrawork loop）的 Oracle 验证要求 Oracle 输出精确的 XML 标签 `<promise>VERIFIED</promise>` 才算通过。普通文本 "VERIFIED" 不被识别。需要用以下 prompt 调用 Oracle：
-
-```
-CRITICAL: output exactly this line and nothing else if complete:
-<promise>VERIFIED</promise>
-```

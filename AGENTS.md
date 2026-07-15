@@ -241,6 +241,12 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 - mmap 非匿名映射坏 fd → `EBADF` 优先于其他校验
 - 跨进程 VM 访问 → 先做权限检查（`EPERM`），再访问远程地址（`EFAULT`）
 - RISC-V 未对齐 addrlen → 需显式检查 `addrlen % 4 != 0`，硬件不报错
+- **errno 常量双取反** → 项目 errno 常量已定义为负 `isize`（如 `EINVAL = -22`），返回时不能再取反（`-EINVAL` 会变成正数被当作成功）。直接返回 `EINVAL`/`EAGAIN`。`return -ENOERR` 在本项目始终可疑。
+
+### 信号
+
+- **被屏蔽信号导致错误的 EINTR** — 信号检查必须用 `sigpending.difference(sigmask)` 过滤被屏蔽信号，不能用 `is_empty()`。忽略掩码会导致阻塞操作被不应唤醒的信号提前打断。
+- **信号检查持锁** — 必须在释放 `task.inner` 锁后调用 `has_actionable_signal()`，否则死锁。
 
 ### 编译
 
