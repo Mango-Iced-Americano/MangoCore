@@ -16,7 +16,7 @@ pub use arch::kstack_alloc;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 pub use arch::{bootstrap_init, machine_init};
-pub use arch::{console_flush, console_getchar, console_putchar};
+pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
 pub use arch::{local_irq_restore, local_irq_save};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};

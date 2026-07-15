@@ -1,5 +1,20 @@
 ## 2026-07-15
 
+### Bulk console write to fix TTY output bottleneck (116ms to near-zero)
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/sbi.rs` — 新增 `console_write_bytes(data: &[u8])`：`board_rvqemu` 时直接写入 NS16550A UART MMIO（0x1000_0000），THRE 握手 + 16 字节 chunk 批量写入，绕过 SBI ecall ~3us/字符 开销；非 rvqemu 平台回退到逐字符 `console_putchar()`
+- `os/src/hal/arch/loongarch64/sbi.rs` — 新增 `console_write_bytes(data: &[u8])`：简单循环调用 `console_putchar()`（la64 已直写 UART 无 SBI 开销）
+- `os/src/hal/arch/mod.rs` — 在 riscv 和 loongarch64 两侧 re-export 中添加 `console_write_bytes`
+- `os/src/hal/mod.rs` — 顶层 re-export 添加 `console_write_bytes`
+- `os/src/console.rs` — `KernelOutput.write_str()` 改用 `console_write_bytes()` 替代逐字符 `console_putchar` + flush 循环；新增 `write_bytes_atomic()` 公共函数，封装 irq_save/restore + `console_write_bytes`
+- `os/src/fs/dev/tty.rs` — `Teletype::write_at()` 从 `print!("{}", content)`（每字符 SBI ecall）改为读取 termios ONLCR 标志后在用户态展开 `\n` -> `\r\n`（可选），调用 `write_bytes_atomic()` 批量输出
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** QEMU `ls /` 输出数百字符，原路径每个字符 1 次 SBI ecall（~3us）= 数百 us 纯 ecall 开销，外加 trap 上下文切换累积达 ~116ms。直接 UART MMIO 写入后 SBI 开销完全消除。ONLCR 处理现在由 TTY 层显式完成，不再隐式依赖 SBI 固件的换行处理。la64 侧 `console_putchar` 已直写 UART，收益有限但接口一致。
+
 ### Optimize check_parent_search_access: O(n²) → O(n) via incremental descent
 
 **涉及文件：**

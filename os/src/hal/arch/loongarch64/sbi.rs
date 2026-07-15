@@ -58,6 +58,17 @@ pub fn local_irq_restore(was_enabled: bool) {
     }
 }
 
+/// Write a byte slice to the console.
+///
+/// LoongArch64 already writes directly to UART MMIO (no SBI ecall overhead),
+/// so the benefit is marginal compared to rv64.  Same per-character loop as
+/// [`console_putchar`], but inlined to avoid the static-method call overhead.
+pub fn console_write_bytes(data: &[u8]) {
+    for &b in data {
+        console_putchar(b as usize);
+    }
+}
+
 pub fn shutdown() -> ! {
     let mut pm1_cnt: Pm1Cnt = Pm1Cnt::empty();
     // pm1_cnt.set_s5().write();
