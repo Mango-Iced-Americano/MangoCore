@@ -1,6 +1,6 @@
 ---
 name: mango-workflow
-description: 自动维护 oskernel2026-mango 项目的工作日志、可复用经验模式，以及性能调试知识库。每次代码修改后触发：更新 Doc/Work_Log.md；调试/性能任务前加载 references/ 作为前置参考；发现可复用模式时沉淀到 references/。
+description: 自动维护 oskernel2026-mango 项目的工作日志、可复用经验模式，以及性能调试知识库。每次代码修改后触发：更新 docs/Work_Log/YYYY-MM-DD.md；调试/性能任务前加载 references/ 作为前置参考；发现可复用模式时沉淀到 references/。
 version: 1.1.0
 allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 ---
@@ -39,7 +39,7 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 
 ### A. 更新 Work_Log（每次修改后）
 
-在 `Doc/Work_Log.md` 顶部追加日期戳条目（如果当天已有条目则追加到该条目下）：
+在 `docs/Work_Log/YYYY-MM-DD.md` 顶部追加日期戳条目（如果当天已有条目则追加到该条目下）：
 
 ```markdown
 ## YYYY-MM-DD
@@ -60,7 +60,7 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 
 ### B. 沉淀经验（发现可复用模式时）
 
-如果本次修改揭示了**可能跨对话复用**的经验，追加到对应 reference 文件：
+如果本次修改揭示了**可能跨对话复用**的经验，追加到对应 reference 文件；同时检查 reference 中是否有**过时或已被 AGENTS.md 完整覆盖**的内容，如有则删除。
 
 | 经验类型 | 目标文件 |
 |---------|---------|
