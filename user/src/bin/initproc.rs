@@ -3104,8 +3104,8 @@ fn install_apk_packages(environ: &[*const u8]) {
     let apk = "/tools/bin/apk.static\0";
     let pkgs = "e2fsprogs\0";
     let cmd = alloc::format!(
-        "{} update && {} add {} && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
-        apk.trim_end_matches('\0'),
+        "{} add {} && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
+    //        apk.trim_end_matches('\0'),
         apk.trim_end_matches('\0'),
         pkgs.trim_end_matches('\0'),
     );
