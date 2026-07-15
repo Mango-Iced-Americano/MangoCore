@@ -15,6 +15,29 @@
 
 **备注：** QEMU `ls /` 输出数百字符，原路径每个字符 1 次 SBI ecall（~3us）= 数百 us 纯 ecall 开销，外加 trap 上下文切换累积达 ~116ms。直接 UART MMIO 写入后 SBI 开销完全消除。ONLCR 处理现在由 TTY 层显式完成，不再隐式依赖 SBI 固件的换行处理。la64 侧 `console_putchar` 已直写 UART，收益有限但接口一致。
 
+### 28→50ms fork+shell 性能回归定位（未解决）
+
+**现象：** lmbench `fork+/bin/sh -c` 从 July 9 baseline 28ms 退化到 51ms（+82%）。`fork+exec /bin/true` 正常（~20ms），说明 fork 和 exec 路径本身无退化。退化集中在 shell 启动阶段（busybox sh 读取 /etc/profile 等）。
+
+**排除项：**
+| 路径 | 每次 shell 开销 | 结论 |
+|------|----------------|------|
+| TTY write（逐字符 SBI ecall） | ~116ms（已修复） | 只影响 `ls` 输出，不影响 lmbench 零输出场景 |
+| DAC (`check_parent_search_access`) | ~190μs | root 绕过，可以忽略 |
+| VFS lookup (`vfs_lookup`) | ~780μs | ~4 ticks/call @ 12.5MHz，可以忽略 |
+
+**仪表化方法：**
+- DAC/VFS 调用计数器 + 滴答计时通过 `sys_ext4_counters(cmd=20-24)` 暴露给用户态
+- 所有计数器包裹在 `#[cfg(feature = "perf_diag")]` 中，正常编译零开销
+- 涉及文件：`os/src/syscall/fs/common.rs`、`os/src/fs/mod.rs`、`os/src/fs/ext4/counters.rs`、`user/src/bin/initproc.rs`
+
+**剩余怀疑方向：**
+1. exec ELF 加载路径（lwext4 PageCache / readahead 可能失效）
+2. Slab 分配器碎片化
+3. Shell 启动时 `/etc/profile` 小文件读取 — 逐页 `ensure_page_cache` + lwext4 FFI
+
+**备注：** 计数器基础设施保留（`perf_diag` feature 可选），生产编译无影响。fs_test 新增 `perf_fork_exec_shell[_quiet|_min]` 三个 benchmark 可复用。详细分析见 Oracle 会话 `ses_09ad45652ffeROmk3OO74ONP1v`。
+
 ### Optimize check_parent_search_access: O(n²) → O(n) via incremental descent
 
 **涉及文件：**

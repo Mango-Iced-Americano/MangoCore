@@ -3185,11 +3185,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         bash_ret, has_bin_bash
     );
 
-    // === fs_test fork+shell perf diagnostic (per-test DAC measurement) ===
+    // === fs_test fork+shell perf diagnostic (uncomment to run) ===
+ /* // Enable with EXTRA_FEATURES=perf_diag
+    println!("[initproc] running fs_test fork+shell bench...");
     let tests = ["perf_fork_exec_shell", "perf_fork_exec_shell_quiet", "perf_fork_exec_shell_min", "perf_fork_exec", "perf_fork_only"];
     for t in &tests {
-        let _ = user_lib::syscall::sys_ext4_counters(20, 0, 0); // reset DAC counter
-        let t0 = user_lib::syscall::sys_ext4_counters(21, 0, 0); // verify reset
+        let _ = user_lib::syscall::sys_ext4_counters(20, 0, 0);
         let bench_cmd = alloc::format!("cd / && ./fs_test {}\0", t);
         let _ = run_bash_cmd(&bench_cmd, &environ);
         let calls = user_lib::syscall::sys_ext4_counters(21, 0, 0);
@@ -3200,7 +3201,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         let vfs_avg = if vfs_calls > 0 { vfs_ticks as usize / vfs_calls as usize } else { 0 };
         println!("[perf] {} dac(c={} t={} avg={}) vfs_lookup(c={} t={} avg={})",
             t, calls, ticks, dac_avg, vfs_calls, vfs_ticks, vfs_avg);
-    }
+    } */
 
     // println!("[initproc] running inet_test...");
     // let inet_test_cmd = "cd / && ./tests/inet_test\0";
