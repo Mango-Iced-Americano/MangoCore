@@ -104,6 +104,10 @@ mod enabled {
     pub static EXECVE_STACK_TABLES_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static EXECVE_TEARDOWN_TICKS: AtomicUsize = AtomicUsize::new(0);
 
+    // DAC (Discretionary Access Control) — filesystem permission checks
+    pub static DAC_SEARCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static DAC_VFS_LOOKUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
     // Fine-grained TLB counters
     pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);    // total
     pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0);       // full inval (invtlb 0x3 / sfence.vma no-arg)

@@ -566,11 +566,36 @@ pub fn current_root_inode() -> Arc<dyn self::vfs::IndexNode> {
 /// - `start`: 查找起点（对于绝对路径传入 `vfs_root().root_inode()`）
 /// - `path`: 待解析的路径（可为绝对路径或相对路径）
 /// - `follow_final`: 是否跟随最后一个路径组件的符号链接
+use core::sync::atomic::AtomicUsize;
+
+static VFS_LOOKUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+static VFS_LOOKUP_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn reset_vfs_lookup_counters() {
+    VFS_LOOKUP_CALLS.store(0, Ordering::Relaxed);
+    VFS_LOOKUP_TICKS.store(0, Ordering::Relaxed);
+}
+
+pub fn vfs_lookup_calls() -> usize { VFS_LOOKUP_CALLS.load(Ordering::Relaxed) }
+pub fn vfs_lookup_ticks() -> usize { VFS_LOOKUP_TICKS.load(Ordering::Relaxed) }
+
+struct VfsLookupGuard(usize);
+impl Drop for VfsLookupGuard {
+    fn drop(&mut self) {
+        VFS_LOOKUP_TICKS.fetch_add(
+            crate::timer::get_time().wrapping_sub(self.0) as usize,
+            Ordering::Relaxed,
+        );
+    }
+}
+
 pub fn vfs_lookup(
     start: &Arc<dyn self::vfs::IndexNode>,
     path: &str,
     follow_final: bool,
 ) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
+    VFS_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
+    let _guard = VfsLookupGuard(crate::timer::get_time());
     use self::vfs::{FileType, FilePrivateData, IndexNode as _};
     let root_inode: Arc<dyn self::vfs::IndexNode> = current_root_inode();
 

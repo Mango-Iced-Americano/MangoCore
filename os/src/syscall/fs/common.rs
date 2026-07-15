@@ -2096,6 +2096,32 @@ pub(crate) fn has_search_access(meta: &vfs::Metadata, uid: u32, gid: u32, groups
     uid == 0 || (permission_class_bits(meta, uid, gid, groups) & 0o1) != 0
 }
 
+static DAC_PARENT_SEARCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+static DAC_PARENT_SEARCH_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn reset_dac_parent_search_calls() {
+    DAC_PARENT_SEARCH_CALLS.store(0, Ordering::Relaxed);
+    DAC_PARENT_SEARCH_TICKS.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn dac_parent_search_calls() -> usize {
+    DAC_PARENT_SEARCH_CALLS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn dac_parent_search_ticks() -> usize {
+    DAC_PARENT_SEARCH_TICKS.load(Ordering::Relaxed)
+}
+
+struct DacTicksGuard(usize);
+impl Drop for DacTicksGuard {
+    fn drop(&mut self) {
+        DAC_PARENT_SEARCH_TICKS.fetch_add(
+            crate::timer::get_time().wrapping_sub(self.0) as usize,
+            Ordering::Relaxed,
+        );
+    }
+}
+
 pub(crate) fn check_parent_search_access(
     start: &Arc<dyn vfs::IndexNode>,
     path: &str,
@@ -2103,6 +2129,8 @@ pub(crate) fn check_parent_search_access(
     gid: u32,
     groups: &[u32],
 ) -> isize {
+    let _guard = DacTicksGuard(crate::timer::get_time());
+    DAC_PARENT_SEARCH_CALLS.fetch_add(1, Ordering::Relaxed);
     let components = parse_path(path);
     let base = if path.starts_with('/') {
         crate::fs::current_root_inode()
