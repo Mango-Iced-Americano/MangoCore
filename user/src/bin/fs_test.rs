@@ -2505,6 +2505,100 @@ fn test_perf_fork_exec_small() -> bool {
     true
 }
 
+fn test_perf_fork_exec_shell() -> bool {
+    // fork+exec /bin/sh -c "ls /" — full shell startup (libc load, script parse, config read)
+    const N: usize = 10;
+    let cmd = "ls /\0";
+    let sh = "/bin/sh\0";
+    let sh_c = "-c\0";
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 4] = [sh.as_ptr(), sh_c.as_ptr(), cmd.as_ptr(), core::ptr::null()];
+            let envp: [*const u8; 0] = [];
+            sys_exec(sh, &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/sh -c 'ls' x{}: avg={}ns ({:.1}us)", N, avg_ns, avg_ns as f64 / 1000.0);
+    true
+}
+
+fn test_perf_fork_exec_shell_quiet() -> bool {
+    // Same as above but redirect to /dev/null — suppresses stdout/stderr writes
+    const N: usize = 10;
+    let cmd = "ls / >/dev/null 2>&1\0";
+    let sh = "/bin/sh\0";
+    let sh_c = "-c\0";
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 4] = [sh.as_ptr(), sh_c.as_ptr(), cmd.as_ptr(), core::ptr::null()];
+            let envp: [*const u8; 0] = [];
+            sys_exec(sh, &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/sh -c 'ls >/dev/null' x{}: avg={}ns ({:.1}us)", N, avg_ns, avg_ns as f64 / 1000.0);
+    true
+}
+
+fn test_perf_fork_exec_shell_min() -> bool {
+    // Minimal: env -i clears environment, reduce shell startup work
+    // Runs `/bin/sh -c true` (no ls, no output at all)
+    const N: usize = 10;
+    let cmd = "env -i /bin/sh -c true\0";
+    let sh = "/bin/sh\0";
+    let sh_c = "-c\0";
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 4] = [sh.as_ptr(), sh_c.as_ptr(), cmd.as_ptr(), core::ptr::null()];
+            let envp: [*const u8; 0] = [];
+            sys_exec(sh, &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/sh -c 'env -i /bin/sh -c true' x{}: avg={}ns ({:.1}us)", N, avg_ns, avg_ns as f64 / 1000.0);
+    true
+}
+
 fn test_perf_read_bb() -> bool {
     const CHUNK: usize = 4096;
     const N: usize = 50;
@@ -2709,6 +2803,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         TestCase { name: "perf_fork_exec", desc: "perf: fork+exec /bin/true x50", func: test_perf_fork_exec },
         TestCase { name: "perf_fork_only", desc: "perf: fork-only x50", func: test_perf_fork_only },
         TestCase { name: "perf_fork_exec_tmp", desc: "perf: fork+exec /tmp/bb (ramfs) x50", func: test_perf_fork_exec_tmp },
+        TestCase { name: "perf_fork_exec_shell", desc: "perf: fork+exec /bin/sh -c ls x10", func: test_perf_fork_exec_shell },
+        TestCase { name: "perf_fork_exec_shell_quiet", desc: "perf: fork+exec sh -c ls >/dev/null x10", func: test_perf_fork_exec_shell_quiet },
+        TestCase { name: "perf_fork_exec_shell_min", desc: "perf: fork+exec sh -c env -i sh -c true x10", func: test_perf_fork_exec_shell_min },
         TestCase { name: "perf_read_bb", desc: "perf: read bin/tmp busybox 4KB x50", func: test_perf_read_bb },
         TestCase { name: "perf_read_full", desc: "perf: read full 800KB busybox x5", func: test_perf_read_full },
         TestCase { name: "perf_exec_twice", desc: "perf: exec cold vs warm", func: test_perf_exec_twice },
