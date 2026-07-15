@@ -1,5 +1,16 @@
 ## 2026-07-15
 
+### Optimize check_parent_search_access: O(n²) → O(n) via incremental descent
+
+**涉及文件：**
+- `os/src/syscall/fs/common.rs` — 将 `check_parent_search_access` 中重建完整前缀路径再调 `vfs_lookup(&base, &prefix, true)` 的 O(n²) 循环，替换为使用 `current.find(name)` 逐级下探的 O(n) 增量遍历。每个中间目录组件只查找一次，避免 re-traversal。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** `parse_path` 已折叠 `..` 组件，故无需处理 `..`。`find()` 间接触发 `MountFSInode::do_find`（含挂载点穿越），语义与 `vfs_lookup` 在非符号链接路径上一致。符号链接中间组件的 DAC 检查在此 error-only 路径中是极边缘场景，不影响功能正确性。
+
 ### Fix MS_REMOUNT to validate mount root and add writer tracking for EBUSY on r/o remount
 
 **涉及文件：**
