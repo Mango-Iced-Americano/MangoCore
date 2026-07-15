@@ -2,6 +2,36 @@
 
 ---
 
+## 2026-07-15
+
+### board/net: 确认 RX ring 饥饿根因并固化 2K1000LA 生产配置
+
+**涉及文件：**
+- `os/src/drivers/net/gmac_2k1000.rs` — 增加默认关闭的 GMAC 吞吐窗口计数；按 DWMAC W1C 语义清除低 17 位事件，使 `RU/OVF/RPS/TU` 表示本窗口新事件；经 A/B 确认后将生产 ring 固定为 48 RX/16 TX，并以 release 下仍生效的断言保护单页描述符布局
+- `os/src/net/config.rs`、`os/src/net/socket/inet/stream/{mod.rs,inner.rs}` — 统计 poll 次数/progress/tick、普通与 UserBuffer TCP 接收行为，并提供独立 immediate ACK A/B；全部由默认关闭的 feature 控制
+- `os/Cargo.toml`、`os/Makefile` — 增加 `net_perf_diag`、`net_ack_immediate` 和统一的 2K1000LA 性能 Shell 镜像入口；完成实验后移除临时 `gmac_large_ring` feature
+- `docs/07_driver/2k1000-gmac.md`、`docs/06_net/{device-stack-and-poll,debugging}.md` — 记录计数语义、QEMU 基线、代理边界、构建命令和实板单变量矩阵
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“宿主直连/代理、本地 HTTP、QEMU、实板 GMAC”四层慢下载定位方法
+
+**验证：**
+- Mac 只读排查确认 ClashX Pro 显式 HTTP/HTTPS 代理监听 `7890` 且允许 LAN；本地代理入口本身可超过 500 MB/s，但所选公网代理链访问同一 PyPI 文件仅约 105--153 KiB/s，Mac 直连约 828 KiB/s。显式代理不依赖 TUN/增强模式，本轮未修改 macOS 或 Clash 设置 ✅
+- 实板断电前的本地 HTTP 基线仅约 136--205 KiB/s；GMAC RX 约 100--125 个满尺寸包/s，`rx_bad=0`、`tx_busy_drop=0`、`tx_reject=0`，宿主 send queue 达 131072 B，且曾观察到黏住的 `RU/TU`。这些数据证明板端另有独立瓶颈，但旧状态位尚不能证明事件持续发生 ✅
+- LA64 QEMU 访问同容器宿主的 71.9 MB 本地 HTTP 文件：delayed ACK 三次为 19.72/20.08/20.00 MB/s，平均约 19.93 MB/s；immediate ACK 三次为 19.67/19.81/19.65 MB/s，平均约 19.71 MB/s，约 1.1% 差异在噪声内 ✅
+- QEMU UserBuffer 接收窗口记录 `calls=672 bytes=43480800 avg_req=102400 eagain=1`，完整传输约 19.71 MB/s；说明 curl 的 100 KiB 临时缓冲分配存在优化空间，但不是实板约百倍差距的首要解释 ✅
+- QEMU 空闲期两秒约 7.3--8.1 万次 full poll，消耗模拟单核约 24%--26%，活跃窗口最高约 68%；确认空 poll 是次级调度问题，同时通用 TCP 路径仍达到约 20 MB/s，因此未修改正式轮询策略 ✅
+- 严格分开 Docker 容器、顺序执行最终 `make rv64-kernel-build-only` 和 `make la64-kernel-build-only`，均通过且只有项目既有 warning ✅
+- 三个最新实板镜像均已离线构建：baseline 16,751,432 B、SHA-256 `80458f22ffde76a0893e33111f245772454aa31e3e252deddd63555d90fe5650`；immediate ACK 16,751,432 B、`bcdbfe9789930c5206cd8e5dae3a337d68c39a097e2a927f253b4f8132ae3179`；ring48 16,747,360 B、`4f81ea1638162202f6f70e6aa0365c1c9455a200324729459d39612440b86083` ✅
+- 实板 baseline（8/4、delayed ACK）三轮 8 MiB 本地 HTTP 为 65.399424/64.399995/64.319294 s，即 128267/130258/130422 B/s，平均 `129649 B/s`；每个活跃两秒窗口都新触发 `RU=1`，同时 `OVF=0`、`RPS=0`、`rx_bad=0`、`tx_busy_drop=0`、`tx_reject=0` ✅
+- 实板 immediate ACK（仍为 8/4）三轮为 64.338184/64.798826/65.510832 s，即 130383/129456/128049 B/s，平均 `129296 B/s`，相对 baseline 低约 0.27%，且新鲜 `RU/TU` 仍持续出现；排除 delayed ACK 为主因 ✅
+- 实板 ring48（48/16、delayed ACK）三轮为 0.701419/0.674911/0.673702 s，即 11965606/12435784/12458094 B/s，平均 `12286495 B/s`，相对 baseline 提升约 94.77 倍；活跃窗口 `RU=0`、`OVF=0`、`RPS=0`、`rx_bad=0`，确认旧 RX ring 持续耗尽是根因 ✅
+- 固化生产默认后，顺序执行 Docker `make rv64-kernel-build-only` 与 `make la64-kernel-build-only` 均通过；LA64 QEMU 启动到用户态并连续运行 LTP，30 s 外层超时前无 panic。正式 `kernel-2k1000-persist-shell.ui` 总长 16,741,024 B、uImage 数据 16,740,960 B、SHA-256 `4f5537736bf3ee2224d0eb341dce06a4501346451879d3315ff338ee6da02015`，不包含 `[net-perf]`/ACK/ring 诊断字符串 ✅
+- 正式镜像 TFTP 长度、CRC32 `35a6a1c4`、uImage checksum 均通过，启动报告 `rx=48 tx=16 link=up 1000M full` 并由 DHCP 获得 `192.168.2.2/24`。三轮 8 MiB 本地 HTTP 为 0.679372/0.662406/0.668058 s，即 12353974/12670560/12563457 B/s，平均 `12529330 B/s`，相对旧生产 baseline 提升约 96.64 倍 ✅
+- 正式镜像经显式 Clash 代理访问 PyPI simple 页面返回 HTTPS 200；同一 2 MiB Cloudflare 对象在 Mac/板端分别为 863447/722559 B/s，板端已达到宿主上游同一数量级。临时 HTTP 服务与串口监视器均已关闭，开发板保持运行 ✅
+
+**备注：**
+- A/B 与正式镜像回归均已闭环：1 Gbit/s 突发会快速填满旧 8 项 RX ring，轮询驱动无法及时归还描述符，持续 RU/丢包压低 TCP 拥塞窗口；生产默认已改为单页可容纳的 48/16，且无诊断镜像保留全部性能收益。
+- 48/16 下仍偶见新鲜 `TU=1`，但未出现软件 TX busy/reject 且 RX 吞吐已恢复；后续单独分析 TX underflow。高频空 poll、IRQ/NAPI 风格调度和 Mac 公网代理节点偏慢同样是相互独立的后续问题。
+
 ## 2026-07-14
 
 ### fs/board: 修复 persist-shell CPython 不可见与 ext4 rename 丢目录项

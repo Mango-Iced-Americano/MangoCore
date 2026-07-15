@@ -15,6 +15,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "net_perf_diag")]
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
@@ -37,6 +39,111 @@ use smoltcp::{
 /// / `remove_veth_stack()` 管理 veth 设备的全局注册，调用者负责传入正确的 `Arc<dyn Iface>`。
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
+#[cfg(feature = "net_perf_diag")]
+const NET_PERF_REPORT_INTERVAL_SECS: usize = 2;
+#[cfg(feature = "net_perf_diag")]
+const NET_PERF_TIME_CHECK_MASK: usize = 0xff;
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_POLL_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_LAST_REPORT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_FULL_POLLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_FULL_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_STACK_POLLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_STACK_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_LOCK_BUSY: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_POLL_TICKS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_POLL_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "net_perf_diag")]
+fn record_poll_perf(
+    stack_only: bool,
+    progressed: bool,
+    lock_busy: bool,
+    elapsed_ticks: usize,
+) {
+    if stack_only {
+        NET_PERF_STACK_POLLS.fetch_add(1, AtomicOrdering::Relaxed);
+        if progressed {
+            NET_PERF_STACK_PROGRESS.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    } else {
+        NET_PERF_FULL_POLLS.fetch_add(1, AtomicOrdering::Relaxed);
+        if progressed {
+            NET_PERF_FULL_PROGRESS.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+    if lock_busy {
+        NET_PERF_LOCK_BUSY.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    NET_PERF_POLL_TICKS.fetch_add(elapsed_ticks, AtomicOrdering::Relaxed);
+    NET_PERF_POLL_TICKS_MAX.fetch_max(elapsed_ticks, AtomicOrdering::Relaxed);
+
+    let samples = NET_PERF_POLL_SAMPLES.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    if samples & NET_PERF_TIME_CHECK_MASK != 0 {
+        return;
+    }
+
+    let now = crate::hal::get_time();
+    let frequency = crate::hal::get_clock_freq().max(1);
+    let previous = NET_PERF_LAST_REPORT.load(AtomicOrdering::Relaxed);
+    if previous == 0 {
+        let _ = NET_PERF_LAST_REPORT.compare_exchange(
+            0,
+            now,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        );
+        return;
+    }
+    let elapsed_ticks = now.wrapping_sub(previous);
+    if elapsed_ticks < frequency.saturating_mul(NET_PERF_REPORT_INTERVAL_SECS) {
+        return;
+    }
+    if NET_PERF_LAST_REPORT
+        .compare_exchange(
+            previous,
+            now,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let elapsed_ms = elapsed_ticks.saturating_mul(1000) / frequency;
+    let full_polls = NET_PERF_FULL_POLLS.swap(0, AtomicOrdering::Relaxed);
+    let full_progress = NET_PERF_FULL_PROGRESS.swap(0, AtomicOrdering::Relaxed);
+    let stack_polls = NET_PERF_STACK_POLLS.swap(0, AtomicOrdering::Relaxed);
+    let stack_progress = NET_PERF_STACK_PROGRESS.swap(0, AtomicOrdering::Relaxed);
+    let lock_busy = NET_PERF_LOCK_BUSY.swap(0, AtomicOrdering::Relaxed);
+    let poll_ticks = NET_PERF_POLL_TICKS.swap(0, AtomicOrdering::Relaxed);
+    let poll_ticks_max = NET_PERF_POLL_TICKS_MAX.swap(0, AtomicOrdering::Relaxed);
+    let poll_permille = poll_ticks.saturating_mul(1000) / elapsed_ticks.max(1);
+    let poll_count = full_polls.saturating_add(stack_polls);
+    let poll_ticks_avg = poll_ticks / poll_count.max(1);
+    println!(
+        "[net-perf][poll] dt_ms={} full={}/{} stack={}/{} lock_busy={} cpu_permille={} ticks_avg={} ticks_max={}",
+        elapsed_ms,
+        full_progress,
+        full_polls,
+        stack_progress,
+        stack_polls,
+        lock_busy,
+        poll_permille,
+        poll_ticks_avg,
+        poll_ticks_max
+    );
+}
+
 /// 初始化网络子系统。必须先调用 `net_core::init()` 注册 lo/eth0 设备，
 /// 再调用本函数创建对应的 `smoltcp::Interface` 并启动 DHCP 探测。
 ///
@@ -48,6 +155,13 @@ pub fn init() {
     let has_nic = NET_DEVICE.lock().is_some();
     net_core::init();
     NET_INTERFACE.init();
+    #[cfg(feature = "net_perf_diag")]
+    println!(
+        "[net-perf] tcp_buffer rx={} tx={} listen={} bytes",
+        crate::net::socket::inet::stream::inner::DEFAULT_RX_BUF_SIZE,
+        crate::net::socket::inet::stream::inner::DEFAULT_TX_BUF_SIZE,
+        crate::net::socket::inet::stream::inner::LISTEN_BUFFER_SIZE
+    );
     if has_nic {
         boot_trace!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
     } else {
@@ -594,9 +708,20 @@ impl<'a> NetInterface<'a> {
 
     pub fn poll(&self) {
         if self.inner.lock().is_none() {
+            #[cfg(feature = "net_perf_diag")]
+            record_poll_perf(false, false, false, 0);
             return;
         }
-        self.poll_once(true);
+        #[cfg(feature = "net_perf_diag")]
+        let poll_start = crate::hal::get_time();
+        let progressed = self.poll_once(true);
+        #[cfg(feature = "net_perf_diag")]
+        record_poll_perf(
+            false,
+            progressed,
+            false,
+            crate::hal::get_time().wrapping_sub(poll_start),
+        );
     }
 
     /// Non-blocking task-context poll: skip if the inner lock is already held.
@@ -606,10 +731,23 @@ impl<'a> NetInterface<'a> {
         match guard {
             Some(inner) if inner.is_some() => {
                 drop(inner);
-                self.poll_once(true);
+                #[cfg(feature = "net_perf_diag")]
+                let poll_start = crate::hal::get_time();
+                let progressed = self.poll_once(true);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(
+                    false,
+                    progressed,
+                    false,
+                    crate::hal::get_time().wrapping_sub(poll_start),
+                );
                 true
             }
-            _ => false, // lock held by another context, or NetInterface not yet initialized
+            _ => {
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, true, 0);
+                false // lock held by another context, or NetInterface not yet initialized
+            }
         }
     }
 
@@ -623,10 +761,23 @@ impl<'a> NetInterface<'a> {
         match guard {
             Some(inner) if inner.is_some() => {
                 drop(inner);
-                self.poll_once(false);
+                #[cfg(feature = "net_perf_diag")]
+                let poll_start = crate::hal::get_time();
+                let progressed = self.poll_once(false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(
+                    false,
+                    progressed,
+                    false,
+                    crate::hal::get_time().wrapping_sub(poll_start),
+                );
                 true
             }
-            _ => false,
+            _ => {
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, true, 0);
+                false
+            }
         }
     }
     /// Non-blocking poll ONLY the specified stack (by ifindex).
@@ -635,15 +786,27 @@ impl<'a> NetInterface<'a> {
     pub fn try_poll_stack(&self, ifindex: u32) -> bool {
         let mut guard = match self.inner.try_lock() {
             Some(g) => g,
-            None => return false,
+            None => {
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, true, 0);
+                return false;
+            }
         };
         let inner = match guard.as_mut() {
             Some(i) => i,
-            None => return false,
+            None => {
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, false, 0);
+                return false;
+            }
         };
         let stack = match inner.stack_mut(ifindex) {
             Some(s) => s,
-            None => return false,
+            None => {
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, false, 0);
+                return false;
+            }
         };
 
         use crate::net::neighbour::CURRENT_POLL_IFINDEX;
@@ -653,6 +816,8 @@ impl<'a> NetInterface<'a> {
         *CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+        #[cfg(feature = "net_perf_diag")]
+        let poll_start = crate::hal::get_time();
         let mut progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
         progressed |= capture_dhcp_event(stack);
         let dhcp_event = stack
@@ -671,6 +836,13 @@ impl<'a> NetInterface<'a> {
             crate::net::wake_raw_waiters();
         }
         crate::net::wake_tcp_accept_waiters();
+        #[cfg(feature = "net_perf_diag")]
+        record_poll_perf(
+            true,
+            progressed,
+            false,
+            crate::hal::get_time().wrapping_sub(poll_start),
+        );
         progressed
     }
 

@@ -86,7 +86,11 @@ impl Closed {
 fn new_smoltcp_socket_with_size(rx_size: usize, tx_size: usize) -> tcp::Socket<'static> {
     let rx_buffer = SocketBuffer::new(vec![0; rx_size]);
     let tx_buffer = SocketBuffer::new(vec![0; tx_size]);
-    tcp::Socket::new(rx_buffer, tx_buffer)
+    #[allow(unused_mut)]
+    let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
+    #[cfg(feature = "net_ack_immediate")]
+    socket.set_ack_delay(None);
+    socket
 }
 
 fn new_smoltcp_socket() -> tcp::Socket<'static> {

@@ -5,6 +5,8 @@ TOP_BLK_MODE_ORIGIN := $(origin BLK_MODE)
 BLK_MODE ?= virt
 LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_MODE))
 MODE ?= release
+NET_PERF_EXTRA_FEATURES ?=
+NET_PERF_IMAGE ?= kernel-2k1000-net-perf-shell.ui
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
 CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
@@ -21,6 +23,7 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-apk-tests \
 	la64-2k1000-apk-persist-tests \
 	la64-2k1000-apk-persist-shell \
+	la64-2k1000-net-perf-shell \
 	la64-2k1000-cpython-tests \
 	la64-2k1000-cpython-tools \
 	la64-qemu-curl-shell \
@@ -283,6 +286,22 @@ la64-2k1000-apk-persist-shell: prepare-cargo-config
 		MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-persist-shell.ui
+
+# Feature-gated performance probe image. It keeps the production GMAC ring and
+# TCP parameters unless NET_PERF_EXTRA_FEATURES selects one explicit A/B knob.
+la64-2k1000-net-perf-shell: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell net_perf_diag $(NET_PERF_EXTRA_FEATURES)" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../$(NET_PERF_IMAGE)
 
 # Real-board network regression image. Keep the current inet_test in
 # initramfs so an older /tools partition cannot silently change test coverage.

@@ -43,6 +43,85 @@ use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::{BoundInner, PortManager};
 use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
+
+#[cfg(feature = "net_perf_diag")]
+const TCP_RECV_PERF_REPORT_INTERVAL_SECS: usize = 2;
+#[cfg(feature = "net_perf_diag")]
+const TCP_RECV_PERF_TIME_CHECK_MASK: usize = 0x1f;
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_EAGAIN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_ZERO: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_REQUESTED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_LAST_REPORT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "net_perf_diag")]
+fn record_tcp_recv_perf(requested: usize, result: &Result<isize, SyscallErr>) {
+    TCP_RECV_PERF_CALLS.fetch_add(1, Ordering::Relaxed);
+    TCP_RECV_PERF_REQUESTED.fetch_add(requested, Ordering::Relaxed);
+    match result {
+        Ok(bytes) if *bytes > 0 => {
+            TCP_RECV_PERF_BYTES.fetch_add(*bytes as usize, Ordering::Relaxed);
+        }
+        Ok(_) => {
+            TCP_RECV_PERF_ZERO.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(SyscallErr::EAGAIN) => {
+            TCP_RECV_PERF_EAGAIN.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {}
+    }
+
+    let calls = TCP_RECV_PERF_CALLS.load(Ordering::Relaxed);
+    if calls & TCP_RECV_PERF_TIME_CHECK_MASK != 0 {
+        return;
+    }
+    let now = crate::hal::get_time();
+    let frequency = crate::hal::get_clock_freq().max(1);
+    let previous = TCP_RECV_PERF_LAST_REPORT.load(Ordering::Relaxed);
+    if previous == 0 {
+        let _ = TCP_RECV_PERF_LAST_REPORT.compare_exchange(
+            0,
+            now,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        return;
+    }
+    let elapsed_ticks = now.wrapping_sub(previous);
+    if elapsed_ticks < frequency.saturating_mul(TCP_RECV_PERF_REPORT_INTERVAL_SECS) {
+        return;
+    }
+    if TCP_RECV_PERF_LAST_REPORT
+        .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let elapsed_ms = elapsed_ticks.saturating_mul(1000) / frequency;
+    let calls = TCP_RECV_PERF_CALLS.swap(0, Ordering::Relaxed);
+    let bytes = TCP_RECV_PERF_BYTES.swap(0, Ordering::Relaxed);
+    let eagain = TCP_RECV_PERF_EAGAIN.swap(0, Ordering::Relaxed);
+    let zero = TCP_RECV_PERF_ZERO.swap(0, Ordering::Relaxed);
+    let requested = TCP_RECV_PERF_REQUESTED.swap(0, Ordering::Relaxed);
+    println!(
+        "[net-perf][tcp-rx] dt_ms={} calls={} bytes={} kib_s={} avg_req={} eagain={} zero={}",
+        elapsed_ms,
+        calls,
+        bytes,
+        bytes.saturating_mul(1000) / elapsed_ms.max(1) / 1024,
+        requested / calls.max(1),
+        eagain,
+        zero
+    );
+}
+
 /// TCP Socket —— 对外表现为 Socket trait
 pub struct TcpSocket {
     pub inner: Mutex<Inner>,
@@ -833,7 +912,10 @@ impl Socket for TcpSocket {
             }
         }
         if self.read_shutdown.load(Ordering::Acquire) {
-            return Ok(0);
+            let ret = Ok(0);
+            #[cfg(feature = "net_perf_diag")]
+            record_tcp_recv_perf(buf.len(), &ret);
+            return ret;
         }
 
         if let Some((route, _ifindex)) = fast {
@@ -867,6 +949,8 @@ impl Socket for TcpSocket {
                 (result, readable)
             }) {
                 update_ready_bit(&self.pollee, EPollEvent::EPOLLIN.bits(), ready_after);
+                #[cfg(feature = "net_perf_diag")]
+                record_tcp_recv_perf(buf.len(), &ret);
                 return ret;
             }
             self.invalidate_fast();
@@ -880,6 +964,8 @@ impl Socket for TcpSocket {
             EPollEvent::EPOLLIN.bits(),
             !matches!(ret, Err(SyscallErr::EAGAIN)),
         );
+        #[cfg(feature = "net_perf_diag")]
+        record_tcp_recv_perf(buf.len(), &ret);
         ret
     }
 
@@ -979,7 +1065,10 @@ impl Socket for TcpSocket {
             NET_INTERFACE.try_poll();
         }
         if self.read_shutdown.load(Ordering::Acquire) {
-            return Ok(0);
+            let ret = Ok(0);
+            #[cfg(feature = "net_perf_diag")]
+            record_tcp_recv_perf(buf.len(), &ret);
+            return ret;
         }
         let inner = self.inner.lock();
         let _ = flags;
@@ -990,6 +1079,8 @@ impl Socket for TcpSocket {
             EPollEvent::EPOLLIN.bits(),
             !matches!(ret, Err(SyscallErr::EAGAIN)),
         );
+        #[cfg(feature = "net_perf_diag")]
+        record_tcp_recv_perf(buf.len(), &ret);
         ret
     }
 

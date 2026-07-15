@@ -4,9 +4,11 @@ module: "config.rs"
 category: net
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-13"
+last_updated: "2026-07-15"
 code_paths:
   - "os/src/net/config.rs"
+  - "os/src/net/socket/inet/stream/mod.rs"
+  - "os/src/net/socket/inet/stream/inner.rs"
 entry_points:
   - "NET_INTERFACE"
   - "NetInterface::init"
@@ -133,7 +135,7 @@ pub fn poll(&self) {
     if self.inner.lock().is_none() {
         return;
     }
-    self.poll_once();
+    self.poll_once(true);
 }
 ```
 
@@ -147,7 +149,7 @@ pub fn try_poll(&self) -> bool {
     match guard {
         Some(inner) if inner.is_some() => {
             drop(inner);
-            self.poll_once();
+            self.poll_once(true);
             true
         }
         _ => false,
@@ -244,6 +246,37 @@ pub fn poll_until_quiescent(&self) {
 反复调用 `try_poll()` 直到锁竞争停止。当前实现中 `try_poll()` 成功获取锁时始终返回 `true`（无论 `poll_once()` 是否推进了协议栈），因此循环条件实际是"锁可用且 `poll_once` 已执行"。每次迭代插入 `try_yield()` 防止独占 CPU。适用于设备初始化后的快速 flush 和批量数据接收场景。
 
 > **注意**：当前 `try_poll()` 不返回 `poll_once()` 的 `progressed` 状态，因此循环不能判断"是否有数据可处理"。如需要精确的空闲检测，需先修改 `try_poll()` 的返回值语义。
+
+### 默认关闭的性能诊断
+
+构建时加入 `net_perf_diag` 会启用两秒滑动窗口，不改变正式镜像的轮询策略：
+
+```text
+[net-perf][poll] dt_ms=... full=<progress>/<count> stack=<progress>/<count> \
+  lock_busy=... cpu_permille=... ticks_avg=... ticks_max=...
+[net-perf][tcp-rx] dt_ms=... calls=... bytes=... kib_s=... \
+  avg_req=... eagain=... zero=...
+```
+
+`full`/`stack` 的分子是 smoltcp 实际报告 progress 的次数，分母是调用次数；
+`cpu_permille` 是窗口内所有网络 poll 消耗 tick 占墙钟 tick 的千分比。TCP 行同时
+覆盖普通内核缓冲区和 curl 使用的 `UserBuffer` 接收路径，避免只插桩
+`try_recv()` 后误以为应用没有读取。
+
+LA64 QEMU 使用宿主本地 HTTP 服务传输 71.9 MB 时，通用路径稳定约 20 MB/s；一次
+窗口记录 `calls=672`、`bytes=43480800`、`avg_req=102400`、`eagain=1`，说明 curl
+每次请求 100 KiB，传输期间并未被持续 `EAGAIN` 限制。空闲期则每两秒出现约
+7.3--8.1 万次 full poll，消耗模拟单核约 24%--26%，活跃窗口最高约 68%。
+
+这两组结果的含义不同：高频空 poll 是明确的次级调度开销，但通用 TCP 路径仍能
+达到约 20 MB/s。随后实板单变量 A/B 进一步确认，旧 8/4 GMAC ring 平均只有
+`129649 B/s` 且每个活跃窗口都新触发 `RU`，生产 48/16 ring 达到
+`12286495 B/s`、提升约 94.77 倍且 `RU` 消失。因此物理网卡退化由 RX ring 耗尽
+造成。无性能诊断的正式 48/16 persist-shell 镜像三轮平均进一步达到
+`12529330 B/s`，相对旧生产基线提升约 96.64 倍；空 poll 仍是独立的 CPU 效率问题。
+
+在优化空闲轮询前必须先修正 `try_poll()` 的返回值语义：当前布尔值表示“拿到锁并
+执行过 poll”，不是“协议栈有 progress”，直接拿它作退避信号会得到错误判断。
 
 ---
 

@@ -574,3 +574,26 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **修复**：首先把静态包管理器、仓库配置和公钥嵌入只读 initramfs；安装根放在 RAMFS/TmpFS，已验证的 FAT32 scratch 只承载可删除缓存。用在线 update、fetch、带脚本/trigger 的 add，以及安装根私有 loader 执行动态程序形成闭环；持久化安装另行设计 ext4/overlay 上层。
 - **验收**：日志分别确认索引签名、缓存文件、包数据库、安装文件和动态执行；外层超时要按实板网络速度设置并解码 wait status，避免把测试框架的 `SIGKILL` 当成包管理器失败。
 - **相关文件**：`os/build_initramfs.sh`, `os/src/fs/mod.rs`, `user/src/bin/initproc.rs`, `docs/08_testing/apk-isolated.md`
+
+### 慢下载先分解代理、通用协议栈与物理网卡
+
+- **现象**：板端 pip/curl 下载很慢，即使显式指向宿主代理也只有数百 KiB/s；只看公网
+  请求无法判断是代理节点、DNS/TLS、TCP 实现还是物理网卡。
+- **定位**：对同一大文件依次测宿主直连、宿主显式代理、板端到宿主本地 HTTP、QEMU
+  到宿主本地 HTTP。下载统一落到 `/dev/null`，局域网加入 `NO_PROXY`，再同步采集宿主
+  send queue/重传和内核 poll、TCP RX、网卡 ring/DMA 计数。QEMU 快而实板慢时，通用
+  用户态/TCP 路径不是首要嫌疑，应转向板级驱动。
+- **代理边界**：HTTP(S) 显式代理通过代理地址和 CONNECT 工作，不要求 TUN/增强模式；
+  TUN 影响透明接管、Fake-IP DNS 和宿主转发路径。代理节点慢与板端局域网慢可以同时
+  存在，必须分别处理。
+- **硬件计数**：DWMAC `DMA_STATUS` 事件位是 W1C 且会黏住。统计窗口结束后只清事件
+  位、保留 process state，下一窗口的 RU/TU/overflow 才能证明事件持续发生。小 RX
+  ring 的突发容纳时间可按 `descriptors * frame_bits / link_bps` 估算；用默认 ring 与
+  扩大 ring 的单变量 A/B 验证，不能同时切换 ACK、poll 策略和代理。
+- **已验证实例**：2K1000LA 的 8 RX/4 TX ring 下载 8 MiB 本地文件平均
+  `129649 B/s`，每个活跃窗口都有新 `RU`；48 RX/16 TX 平均 `12286495 B/s`，
+  提升约 94.77 倍且 `RU` 消失。仅关闭 delayed ACK 的平均值为 `129296 B/s`，可排除
+  ACK 策略。放大 ring 后仍有 `TU` 时应作为独立 TX 问题，不得否定已闭环的 RX 根因。
+- **教训**：端到端下载速度不是单一指标。先用本地服务去除公网变量，再用 QEMU 去除
+  物理网卡变量；所有调优都应有默认关闭的诊断 feature 和可复现实验矩阵。
+- **相关文件**：`os/src/drivers/net/gmac_2k1000.rs`, `os/src/net/config.rs`, `os/src/net/socket/inet/stream/mod.rs`, `docs/06_net/debugging.md`

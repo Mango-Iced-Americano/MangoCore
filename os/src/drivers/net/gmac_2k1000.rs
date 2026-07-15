@@ -70,13 +70,28 @@ const RX_FRAME_LEN_MASK: u32 = 0x3fff << RX_FRAME_LEN_SHIFT;
 const RX_CHAIN: u32 = 1 << 14;
 const DESC_BUFFER_SIZE_MASK: u32 = 0x1fff;
 
-const RX_DESC_COUNT: usize = 8;
-const TX_DESC_COUNT: usize = 4;
+const RX_DESC_COUNT: usize = 48;
+const TX_DESC_COUNT: usize = 16;
 const DMA_BUFFER_SIZE: usize = 2048;
 const ETHERNET_FCS_SIZE: usize = 4;
 const DESC_ALIGN: usize = 64;
 const RX_DESC_OFFSET: usize = 0;
 const TX_DESC_OFFSET: usize = RX_DESC_COUNT * DESC_ALIGN;
+
+#[cfg(feature = "net_perf_diag")]
+const NET_PERF_REPORT_INTERVAL_SECS: usize = 2;
+#[cfg(feature = "net_perf_diag")]
+const NET_PERF_TIME_CHECK_MASK: usize = 0xff;
+#[cfg(feature = "net_perf_diag")]
+const DMA_STATUS_EVENT_MASK: u32 = 0x1ffff;
+#[cfg(feature = "net_perf_diag")]
+const DMA_STATUS_TX_UNAVAILABLE: u32 = 1 << 2;
+#[cfg(feature = "net_perf_diag")]
+const DMA_STATUS_RX_OVERFLOW: u32 = 1 << 4;
+#[cfg(feature = "net_perf_diag")]
+const DMA_STATUS_RX_UNAVAILABLE: u32 = 1 << 7;
+#[cfg(feature = "net_perf_diag")]
+const DMA_STATUS_RX_STOPPED: u32 = 1 << 8;
 
 const MII_BUSY: u32 = 1 << 0;
 const MII_CLOCK_MASK: u32 = 0x3c;
@@ -161,6 +176,54 @@ struct LinkState {
     full_duplex: bool,
 }
 
+#[cfg(feature = "net_perf_diag")]
+struct GmacPerfDiag {
+    last_report: usize,
+    receive_calls: usize,
+    rx_packets: usize,
+    rx_bytes: usize,
+    rx_invalid: usize,
+    rx_empty: usize,
+    tx_packets: usize,
+    tx_bytes: usize,
+    tx_busy_drop: usize,
+    tx_rejected: usize,
+    previous_rx_packets: usize,
+    previous_rx_bytes: usize,
+    previous_rx_invalid: usize,
+    previous_rx_empty: usize,
+    previous_tx_packets: usize,
+    previous_tx_bytes: usize,
+    previous_tx_busy_drop: usize,
+    previous_tx_rejected: usize,
+}
+
+#[cfg(feature = "net_perf_diag")]
+impl GmacPerfDiag {
+    fn new(now: usize) -> Self {
+        Self {
+            last_report: now,
+            receive_calls: 0,
+            rx_packets: 0,
+            rx_bytes: 0,
+            rx_invalid: 0,
+            rx_empty: 0,
+            tx_packets: 0,
+            tx_bytes: 0,
+            tx_busy_drop: 0,
+            tx_rejected: 0,
+            previous_rx_packets: 0,
+            previous_rx_bytes: 0,
+            previous_rx_invalid: 0,
+            previous_rx_empty: 0,
+            previous_tx_packets: 0,
+            previous_tx_bytes: 0,
+            previous_tx_busy_drop: 0,
+            previous_tx_rejected: 0,
+        }
+    }
+}
+
 struct GmacInner {
     base: usize,
     mac: [u8; 6],
@@ -181,6 +244,8 @@ struct GmacInner {
     tx_packets: usize,
     #[cfg(feature = "gmac_diag")]
     tx_busy: usize,
+    #[cfg(feature = "net_perf_diag")]
+    perf_diag: GmacPerfDiag,
 }
 
 pub struct Gmac2k1000(Mutex<GmacInner>);
@@ -438,6 +503,94 @@ impl GmacInner {
         }
     }
 
+    #[cfg(feature = "net_perf_diag")]
+    fn maybe_report_perf(&mut self) {
+        self.perf_diag.receive_calls = self.perf_diag.receive_calls.wrapping_add(1);
+        if self.perf_diag.receive_calls & NET_PERF_TIME_CHECK_MASK != 0 {
+            return;
+        }
+
+        let now = crate::hal::get_time();
+        let frequency = crate::hal::get_clock_freq().max(1);
+        let elapsed_ticks = now.wrapping_sub(self.perf_diag.last_report);
+        if elapsed_ticks < frequency.saturating_mul(NET_PERF_REPORT_INTERVAL_SECS) {
+            return;
+        }
+
+        let elapsed_ms = elapsed_ticks.saturating_mul(1000) / frequency;
+        let rx_packets = self
+            .perf_diag
+            .rx_packets
+            .wrapping_sub(self.perf_diag.previous_rx_packets);
+        let rx_bytes = self
+            .perf_diag
+            .rx_bytes
+            .wrapping_sub(self.perf_diag.previous_rx_bytes);
+        let rx_invalid = self
+            .perf_diag
+            .rx_invalid
+            .wrapping_sub(self.perf_diag.previous_rx_invalid);
+        let rx_empty = self
+            .perf_diag
+            .rx_empty
+            .wrapping_sub(self.perf_diag.previous_rx_empty);
+        let tx_packets = self
+            .perf_diag
+            .tx_packets
+            .wrapping_sub(self.perf_diag.previous_tx_packets);
+        let tx_bytes = self
+            .perf_diag
+            .tx_bytes
+            .wrapping_sub(self.perf_diag.previous_tx_bytes);
+        let tx_busy_drop = self
+            .perf_diag
+            .tx_busy_drop
+            .wrapping_sub(self.perf_diag.previous_tx_busy_drop);
+        let tx_rejected = self
+            .perf_diag
+            .tx_rejected
+            .wrapping_sub(self.perf_diag.previous_tx_rejected);
+        let rx_kib_s = rx_bytes.saturating_mul(1000) / elapsed_ms.max(1) / 1024;
+        let tx_kib_s = tx_bytes.saturating_mul(1000) / elapsed_ms.max(1) / 1024;
+
+        let dma_status = read_reg(self.base + DMA_OFFSET, DMA_STATUS);
+        // DMA_STATUS event bits are write-one-to-clear. Interrupts are disabled
+        // in this polling driver, so clearing only the latched event range lets
+        // the next report distinguish a fresh starvation event from old state.
+        write_reg(
+            self.base + DMA_OFFSET,
+            DMA_STATUS,
+            dma_status & DMA_STATUS_EVENT_MASK,
+        );
+        println!(
+            "[net-perf][gmac] dt_ms={} rx_pkt={} rx_kib_s={} rx_bad={} rx_empty={} tx_pkt={} tx_kib_s={} tx_busy_drop={} tx_reject={} dma={:#010x} ru={} ovf={} rps={} tu={}",
+            elapsed_ms,
+            rx_packets,
+            rx_kib_s,
+            rx_invalid,
+            rx_empty,
+            tx_packets,
+            tx_kib_s,
+            tx_busy_drop,
+            tx_rejected,
+            dma_status,
+            usize::from(dma_status & DMA_STATUS_RX_UNAVAILABLE != 0),
+            usize::from(dma_status & DMA_STATUS_RX_OVERFLOW != 0),
+            usize::from(dma_status & DMA_STATUS_RX_STOPPED != 0),
+            usize::from(dma_status & DMA_STATUS_TX_UNAVAILABLE != 0)
+        );
+
+        self.perf_diag.last_report = now;
+        self.perf_diag.previous_rx_packets = self.perf_diag.rx_packets;
+        self.perf_diag.previous_rx_bytes = self.perf_diag.rx_bytes;
+        self.perf_diag.previous_rx_invalid = self.perf_diag.rx_invalid;
+        self.perf_diag.previous_rx_empty = self.perf_diag.rx_empty;
+        self.perf_diag.previous_tx_packets = self.perf_diag.tx_packets;
+        self.perf_diag.previous_tx_bytes = self.perf_diag.tx_bytes;
+        self.perf_diag.previous_tx_busy_drop = self.perf_diag.tx_busy_drop;
+        self.perf_diag.previous_tx_rejected = self.perf_diag.tx_rejected;
+    }
+
     #[cfg(feature = "gmac_diag")]
     fn poll_diag(&mut self) {
         if self.diag_polls >= 8 {
@@ -473,6 +626,8 @@ impl GmacInner {
 
     fn receive(&mut self, output: &mut [u8]) -> Option<usize> {
         self.poll_link();
+        #[cfg(feature = "net_perf_diag")]
+        self.maybe_report_perf();
         #[cfg(feature = "gmac_diag")]
         self.poll_diag();
         for _ in 0..RX_DESC_COUNT {
@@ -482,6 +637,10 @@ impl GmacInner {
             // descriptor is CPU-owned whenever OWN is clear.
             let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
             if status & DESC_OWN != 0 {
+                #[cfg(feature = "net_perf_diag")]
+                {
+                    self.perf_diag.rx_empty = self.perf_diag.rx_empty.wrapping_add(1);
+                }
                 return None;
             }
 
@@ -509,6 +668,16 @@ impl GmacInner {
                 unsafe {
                     core::ptr::copy_nonoverlapping(buffer as *const u8, output.as_mut_ptr(), len)
                 };
+                #[cfg(feature = "net_perf_diag")]
+                {
+                    self.perf_diag.rx_packets = self.perf_diag.rx_packets.wrapping_add(1);
+                    self.perf_diag.rx_bytes = self.perf_diag.rx_bytes.wrapping_add(len);
+                }
+            } else {
+                #[cfg(feature = "net_perf_diag")]
+                {
+                    self.perf_diag.rx_invalid = self.perf_diag.rx_invalid.wrapping_add(1);
+                }
             }
 
             dma_barrier();
@@ -549,6 +718,10 @@ impl GmacInner {
     fn transmit(&mut self, input: &[u8]) {
         self.poll_link();
         if !self.link.up || input.is_empty() || input.len() > DMA_BUFFER_SIZE {
+            #[cfg(feature = "net_perf_diag")]
+            {
+                self.perf_diag.tx_rejected = self.perf_diag.tx_rejected.wrapping_add(1);
+            }
             return;
         }
         let desc = self.tx_desc(self.tx_index);
@@ -556,6 +729,10 @@ impl GmacInner {
         // Safety: descriptor_frame remains allocated for the driver's lifetime.
         let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
         if status & DESC_OWN != 0 {
+            #[cfg(feature = "net_perf_diag")]
+            {
+                self.perf_diag.tx_busy_drop = self.perf_diag.tx_busy_drop.wrapping_add(1);
+            }
             #[cfg(feature = "gmac_diag")]
             {
                 self.tx_busy += 1;
@@ -565,7 +742,13 @@ impl GmacInner {
 
         let buffer = match frame_address(&self.tx_frames[self.tx_index]) {
             Ok(address) => address,
-            Err(_) => return,
+            Err(_) => {
+                #[cfg(feature = "net_perf_diag")]
+                {
+                    self.perf_diag.tx_rejected = self.perf_diag.tx_rejected.wrapping_add(1);
+                }
+                return;
+            }
         };
         let tx_len = input.len().max(60);
         // Safety: the TX frame is a private 4 KiB allocation, tx_len <= 2047,
@@ -591,6 +774,11 @@ impl GmacInner {
         dma_barrier();
         self.tx_index = (self.tx_index + 1) % TX_DESC_COUNT;
         write_reg(self.base + DMA_OFFSET, DMA_TX_POLL_DEMAND, u32::MAX);
+        #[cfg(feature = "net_perf_diag")]
+        {
+            self.perf_diag.tx_packets = self.perf_diag.tx_packets.wrapping_add(1);
+            self.perf_diag.tx_bytes = self.perf_diag.tx_bytes.wrapping_add(input.len());
+        }
         #[cfg(feature = "gmac_diag")]
         if self.tx_packets < 8 {
             let start = crate::hal::get_time();
@@ -636,7 +824,10 @@ impl Gmac2k1000 {
 
         let descriptor_frame = frame_alloc().ok_or(GmacError::OutOfMemory)?;
         let descriptor_base = frame_address(&descriptor_frame)?;
-        debug_assert!(TX_DESC_OFFSET + TX_DESC_COUNT * DESC_ALIGN <= PAGE_SIZE);
+        assert!(
+            TX_DESC_OFFSET + TX_DESC_COUNT * DESC_ALIGN <= PAGE_SIZE,
+            "GMAC descriptor rings exceed one page"
+        );
         let mut rx_frames = Vec::with_capacity(RX_DESC_COUNT);
         let mut tx_frames = Vec::with_capacity(TX_DESC_COUNT);
         for _ in 0..RX_DESC_COUNT {
@@ -769,6 +960,8 @@ impl Gmac2k1000 {
             tx_packets: 0,
             #[cfg(feature = "gmac_diag")]
             tx_busy: 0,
+            #[cfg(feature = "net_perf_diag")]
+            perf_diag: GmacPerfDiag::new(crate::hal::get_time()),
         })))
     }
 }

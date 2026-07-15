@@ -3,8 +3,12 @@ title: "网络子系统调试指南"
 category: debugging
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-07-15
 tags: [net, debugging, qemu, gdb, troubleshooting]
+code_paths:
+  - "os/src/net/config.rs"
+  - "os/src/net/socket/inet/stream/mod.rs"
+  - "os/src/drivers/net/gmac_2k1000.rs"
 ---
 
 # 网络子系统调试指南
@@ -217,6 +221,34 @@ break src/net/socket/inet/stream/inner.rs:272
 ```makefile
 -netdev user,id=net,hostfwd=tcp::5555-:5555
 ```
+
+### 慢下载必须拆分四条路径
+
+“pip/curl 很慢”同时经过应用、内核 TCP、物理网卡和宿主代理，不能只测公网 URL。
+应保持文件、服务端和下载落点一致，按以下顺序建立基线：
+
+1. Mac 直接访问公网文件，再显式指定 Clash HTTP 代理访问同一文件，区分上游链路
+   与代理节点/规则性能。
+2. Mac 启动本地 HTTP 大文件服务，实板使用局域网地址下载到 `/dev/null`，同时把
+   该网段放入 `NO_PROXY`；这一层不经过 DNS、TLS、CDN 或 Clash。
+3. QEMU 使用同一 MangoCore 用户态和 TCP 路径访问宿主本地服务；若 QEMU 快而实板
+   慢，优先转向网卡 DMA/ring、IRQ/poll 和链路协商，而不是继续修改 pip。
+4. 本地链路恢复后再叠加 Clash、公网 DNS 和 HTTPS，每次只引入一个变量。
+
+显式设置 `http_proxy=http://<mac-lan-ip>:7890` 的 HTTP CONNECT 路径不依赖 Clash
+TUN/增强模式；TUN 主要负责透明接管未显式使用代理的流量，并可能引入 Fake-IP DNS
+和 macOS 互联网共享的转发边界。因此“增强模式关闭”不能解释显式代理本身很慢，
+而“增强模式开启”也不能修复板端本地 HTTP 吞吐低。
+
+诊断时还应同步观察宿主 TCP send queue/重传、板端 poll progress、TCP 接收字节和
+GMAC `RU/OVF/RPS/TU`。DWMAC 状态事件会黏住；每个统计窗口后必须按 W1C 语义清除
+事件位，下一窗口才表示新发生的饥饿或 underflow。
+
+2K1000LA 的已验证案例中，旧 8 项 RX ring 每个活跃窗口均出现新 `RU`，8 MiB 本地
+HTTP 平均仅 `129649 B/s`；只把 ring 改为 48 RX/16 TX 后达到 `12286495 B/s`，
+提升约 94.77 倍且 `RU` 消失。保持小 ring 只关闭 delayed ACK 没有收益。遇到相似
+现象时，应优先用新鲜 DMA 事件和单变量 ring A/B 证明饥饿，不要先改应用缓冲区、
+代理或 ACK 策略。
 
 ---
 
