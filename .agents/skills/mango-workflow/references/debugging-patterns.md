@@ -2,6 +2,14 @@
 
 > 跨对话可复用的调试技巧和排查方法。
 
+## Codex 后台快照重复打包未忽略的大文件
+
+- **现象**: 没有可见 Git 操作时，ChatGPT/Codex 主进程仍反复拉起多个 `git add --pathspec-from-file=- --pathspec-file-nul`，持续占满 CPU、磁盘并触发风扇；旧进程结束后新 PID 很快重生。
+- **定位方法**: 用 `ps -ww -o pid,ppid,%cpu,command` 确认父进程，再用 `lsof -p <pid>` 查找 `/tmp/codex-index-*`、`/tmp/codex-review-objects-*` 和正在读取的大文件。临时 index/objects 表明这是 Codex 审查快照，不是仓库真实 `.git/index` 暂存。
+- **根因**: Git 工作树内存在未被 `.gitignore` 命中的多 GiB 构建产物；Codex 为任务建立回滚/审查快照时会将其加入临时索引，多个任务还可能并发重复压缩。
+- **修复**: 为对应生成物添加尽可能精确的根目录忽略规则（例如 `/tmp/*.img`），或把大文件移出工作树；用 `git check-ignore -v <path>` 验证规则。仅杀 Git 子进程只能暂时降载，下一次快照仍可能重启。
+- **相关文件**: `.gitignore`
+
 ## 堆分配器性能退化
 
 ### buddy allocator free-list 线性扫描导致渐进退化

@@ -174,6 +174,8 @@ PageCache 在 ext4 中的状态机：`Loading -> UpToDate -> Dirty -> Writeback`
 释放跨块组范围时按每个块组实际边界拆分，只对原来置位的 bit 增加空闲计数，从而避免
 重复释放造成 summary counter 漂移。超级块更新总是从当前 metadata cache/batch 快照
 继续累加，不能从挂载时的只读副本重新计算，否则一次批量操作中的前序更新会被覆盖。
+完整故障算术、八类代码缺陷和验证边界见
+[`18-ext4-lazy-init-and-block-group-accounting.md`](../09_debug/la64_on_board/18-ext4-lazy-init-and-block-group-accounting.md)。
 
 ### Inode 分配器
 
@@ -195,6 +197,8 @@ PageCache 在 ext4 中的状态机：`Loading -> UpToDate -> Dirty -> Writeback`
 数据块或 extent/目录元数据块被释放后，`MetaBlockCache::invalidate_range()` 会立即丢弃
 对应物理块。释放后的脏缓存不能跨越块所有权转移继续存在，否则延迟 flush 可能覆盖
 同一物理块的新文件内容。
+父 inode 快照、延迟回收与 cache owner 的完整证据链见
+[`18a-ext4-metadata-cache-and-inode-snapshot.md`](../09_debug/la64_on_board/18a-ext4-metadata-cache-and-inode-snapshot.md)。
 
 ## 已知缺失
 

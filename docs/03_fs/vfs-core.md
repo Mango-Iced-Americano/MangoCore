@@ -234,6 +234,8 @@ pub trait FileSystem: Any + Send + Sync + Debug {
 经普通挂载或 bind mount 访问时仍使用同一身份。全局 inode 注册表必须以
 `(identity_key, inode_id)` 为键，不能直接使用尚未为所有文件系统实现的 `Metadata.dev_id`，
 否则 ramfs、tmpfs 和 ext4 都报告占位值 0 时，相同 inode 号会互相触发 `ETXTBSY` 等状态。
+`ftruncate -9` 如何由 reopen 的 `ETXTBSY` 二次遮蔽而来，见
+[`18b-cross-filesystem-executable-inode-identity.md`](../09_debug/la64_on_board/18b-cross-filesystem-executable-inode-identity.md)。
 
 `SuperBlock` 结构体直接对标 Linux `struct statfs`：
 - f_type（文件系统魔数）、f_bsize（块大小）、f_blocks / f_bfree / f_bavail（块计数）、f_files / f_ffree（inode 计数）、f_namelen（最大文件名长度）、f_fsid（文件系统 ID）、f_frsize（片段大小）、flags（挂载标志）。

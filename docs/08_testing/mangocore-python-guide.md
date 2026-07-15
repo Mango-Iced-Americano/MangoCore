@@ -10,6 +10,7 @@ code_paths:
   - "user/src/bin/initproc.rs"
   - "os/initramfs/apk/usr/bin/persist-shell"
   - "os/initramfs/apk/usr/libexec/mango/persist-profile"
+  - "scripts/boot_2k1000_tftp.py"
 entry_points:
   - "python3"
   - "persist-shell"
@@ -60,6 +61,15 @@ P2 FAT32 不适合作为 pip 工作根，因为它不能完整表达 POSIX 元�
 ```bash
 make 2k1000-boot IMAGE=kernel-2k1000-persist-shell.ui
 ```
+
+一键启动脚本接管串口后，控制键含义如下：
+
+- `Ctrl-C`：原样发送给开发板，用于中断板端 `pip`、测试程序或 Shell 前台进程；
+- `Ctrl-]` 后按 `q`：只关闭 macOS 本机的串口监听，开发板继续运行；
+- `Ctrl-]` 后按 `?`：显示控制键帮助；
+- `Ctrl-]` 后再按 `Ctrl-]`：向开发板发送一个字面量 `Ctrl-]`。
+
+这里的 `Ctrl-] q` 是依次按键，不是同时按下三个键。
 
 2026-07-14 验证镜像信息：
 

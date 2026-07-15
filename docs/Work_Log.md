@@ -4,6 +4,43 @@
 
 ## 2026-07-15
 
+### tooling: 排除临时测试盘，避免 Codex 快照重复打包大文件
+
+**涉及文件：**
+- `.gitignore` — 忽略仓库根目录 `tmp/` 下生成的 `.img` 测试盘，避免 Git/Codex 临时索引扫描多 GiB 构建产物
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 记录 Codex 后台快照表现为并发 `git add` 高占用时的定位与修复方法
+
+**验证：**
+- `git check-ignore -v tmp/fs-regression-la-final.img` 命中新规则，现有 4.0 GiB 镜像不再进入后续 Git/Codex 快照 ✅
+- 本轮仅修改忽略规则和文档，未修改内核/用户态代码，无需双架构编译或 QEMU 测试 ⚪
+
+**备注：**
+- 现场两个由 ChatGPT 主进程拉起的 `git add --pathspec-from-file=-` 各占约 85% CPU；`lsof` 显示其使用 `/tmp/codex-index-*` 临时索引、读取 `tmp/fs-regression-la-final.img` 并写入 `/tmp/codex-review-objects-*`，属于 Codex 审查快照而非仓库真实暂存。
+
+### docs/board: 建立 29 篇编号专题并纳入 hole-read ABI 深挖
+
+**涉及文件：**
+- `docs/09_debug/la64_on_board/README.md`、`development-log.md` — 将长日志收敛为组会入口与 34 提交可审计总账，新增按启动/存储/网络/ABI 分类的逐问题导航和统一证据状态词
+- `docs/09_debug/la64_on_board/{01..21}*.md` — 新增 29 篇独立复盘；按问题大小展开底层原理、调试时间线、排除项、代码/提交/日志证据、根因证明、修复设计、验证矩阵和剩余边界，其中补齐 ext4 allocator/cache/跨 FS identity、zombie 栈槽、APK wait status 和持久应用根
+- `docs/09_debug/la64_on_board/bug-hole-read-mismatch.md` — 将既有 LA64 hole-read/用户栈 ABI 反汇编复盘迁入专题目录，并同步 `b6c5c973` 已提交状态与专用 SP 遥测边界
+- `docs/09_debug/README.md`、`docs/README.md` — 更新专题入口、文档数量和 ABI 修复状态；当前 `09_debug` 共 43 篇 Markdown，其中专题目录 32 篇
+- `docs/03_fs/{ext4,vfs-core}.md`、`docs/01_architecture/hal-and-platform.md` — 纠正 ext4 目录项 framing/checksum、跨 FS identity 与 LoongArch LSX/FPR 二选一恢复语义，并回链对应深度复盘
+- `.agents/skills/mango-workflow/references/harness-patterns.md` — 将“rename 顺序改动后通过”改写为可复用的 `rec_len` 算术审计模式，明确行为干预不等于唯一根因证明
+
+**验证：**
+- 专题目录实际包含 32 篇 Markdown、13,498 行：29 篇编号专题 + README + 34 提交总账 + hole-read ABI 深挖；README 的每个问题入口均有对应文件 ✅
+- `git rev-list --count dfc2da05..b6c5c973` 为 34，`git diff --shortstat` 为 326 files、`+30,302/-5,317`；脚本逐行比较总账 34 个 hash 与 Git 正序历史，完全一致 ✅
+- 对全部专题执行 YAML/frontmatter、`code_paths`、`related_docs`、本地 Markdown 链接、代码围栏、重复行和尾随空白检查，均通过；迁移前根目录路径无残留内容链接 ✅
+- 逐项校验专题内 8 位提交锚点：所有作为 commit 使用的 hash 均可由 `git cat-file` 解析；CRC、sector count 等非 commit 数值已与提交字段区分 ✅
+- 独立证据反审计纠正了 ext4 普通非首记录 slack 的错误因果推断，并收紧 P4 回滚、整盘刷写归档、DHCP 锁序、build epoch、`sendmmsg` 上限、测试 payload 和串口节流的证据边界 ✅
+- 最终静态审计确认 ext4 当前只安全支持并验证 64-byte group descriptor；32-byte 布局可能跨读写相邻 descriptor，已从“缺少交叉实测”收紧为明确的未支持格式 ✅
+- 本轮仅修改文档与调试知识库，未修改内核/用户态代码，未重复运行编译、QEMU 或实板；文中 PASS 均链接到既有 commit、Work Log、源码或原始日志，不把文档整理冒充新运行结果 ⚪
+
+**备注：**
+- 当前已提交基线为 `b6c5c973 fix(fs): stabilize ext4 persistent writes`；`2031fd59` 只作为 framing/checksum 修复前历史基线。串口 `Ctrl-C`/`Ctrl-]` 控制面仍是工作树 WIP，不计入 HEAD。
+- 对 ext4 的历史结论做了明确认知修正：非首记录 split 为 `S + (R-S)` 后，删除旧项只让前驱终点到达新项起点，不能证明“跨过并吞掉新项”；当前提交可直接证明的缺陷是块首 `offset=prev_offset=0` 导致 `R -> 2R`，以及 checksum 错把 child inode 当目录 owner。
+- P4 正常 payload-first/MBR-last 发布路径已有 QEMU/实板双启动证据；异常回滚尚无 fault injection/真实成功日志，preflight 也未强制解析 LBA0 read-status，因此不写成“任意中断均可恢复”。
+
 ### fs/ext4: 修复 APK 大规模提交损坏并完成双架构、QEMU 与实板回归
 
 **涉及文件：**
@@ -20,15 +57,15 @@
 - 使用全新 256 MiB ext4 fixture 并 chroot 真实被测根：la64/rv64 `fs_test` 均 63/63；日志为 `logs/ext4-fs-test-la64-fixed-20260715.log`、`logs/ext4-fs-test-rv64-fixed-20260715.log` ✅
 - 两个测试镜像关机后分别执行 `e2fsck -fn`，均完成五阶段检查且退出 0；日志为 `logs/fsck-ext4-fs-test-la64-fixed-20260715.log`、`logs/fsck-ext4-fs-test-rv64-fixed-20260715.log` ✅
 - 原始 Python APK 小文件压力对应的修复后 P4 fixture 离线 fsck clean：2427/262144 inodes、39033/1048576 blocks；日志为 `logs/ext4-apk-fsck-fixed-20260715.log` ✅
-- QEMU 最终 mask `0x019`：rv64/loongarch64 的 basic、iozone、libctest 均在 musl/glibc 下退出 0，无 panic/I/O error；iozone 分别约 93/95 s 与 102/101 s，日志为 `logs/fs-regression-rv64-final-20260715.log`、`logs/fs-regression-la64-final-20260715.log` ✅
+- QEMU 最终 mask `0x019`：rv64/loongarch64 的 basic、iozone 与 libctest 外层 group/wrapper 均在 musl/glibc 下退出 0，无内核 panic/I/O error；libctest 内部仍有已知 FAIL/timeout/segfault，不能解读为 suite 全通过。iozone 分别约 93/95 s 与 102/101 s，日志为 `logs/fs-regression-rv64-final-20260715.log`、`logs/fs-regression-la64-final-20260715.log` ✅
 - `make la64-2k1000-apk-persist-tests MODE=release` 生成 `kernel-2k1000-apk-persist-tests.ui`：总长 16,757,160 B、payload 16,757,096 B、SHA-256 `aef77c5cc6d929b8e1cad27a3ebc030abc97f85f1f0eff9160f613ce88490065`；U-Boot TFTP 长度、CRC32 `689ae2b6`、`iminfo` checksum 均通过 ✅
-- 提交后在 `zhouzhouyi/os-contest:20260104` Docker 中重新执行 `make -C os la64-2k1000-apk-persist-shell MODE=release`；最新 `kernel-2k1000-persist-shell.ui` 总长 16,757,160 B、payload 16,757,096 B、SHA-256 `22eff3993dbedb24a8743b020fc5a8e21f68d84979822c7da48e761406d2bda4`，并确认包含 `[apk-persist-shell] RESULT=PASS` 交互入口标记 ✅
+- 形成最终提交候选源码后、创建 Git commit 前，在 `zhouzhouyi/os-contest:20260104` Docker 中重新执行 `make -C os la64-2k1000-apk-persist-shell MODE=release`；`kernel-2k1000-persist-shell.ui` 总长 16,757,160 B、payload 16,757,096 B、SHA-256 `22eff3993dbedb24a8743b020fc5a8e21f68d84979822c7da48e761406d2bda4`，并确认包含 `[apk-persist-shell] RESULT=PASS` 交互入口标记。该产物时间早于 commit，不写成 post-commit rebuild ✅
 - 2K1000LA 启动识别 2 GiB、AHCI/P2/P4、GMAC 48/16；`scratch-smoke PASS`，P4 `/persist` 为 ext4 rw，APK 持久门禁输出 `PASS mode=reuse` 与 `RESULT=PASS` ✅
 - 实板 P4 16 MiB 写入、`sync`、复制/`cmp`、截断、重开、删除探针通过，顺序写约 7.5 MB/s；`/musl/iozone -i 0 -i 1 -i 2 -s 16m -r 64k` 返回 0，write/rewrite/read/reread/random-read/random-write 为 15315/17872/112673/112374/110157/14920 KiB/s；完整串口日志为 `logs/ext4-apk-board-final-20260715.log` ✅
 - `git diff --check` 在文档更新前通过；文档更新后再次执行最终检查 ✅
 
 **备注：**
-- 最初 APK 的连锁 `failed to commit ... No such file or directory` 不是单一 mkdir 缺失，而是 lazy bitmap、目录项 framing/checksum、元数据 cache 所有权、计数快照和 inode 快照一致性叠加造成的真实磁盘元数据损坏；修复以 clean fixture + 离线 fsck 为硬门禁。
+- 本轮从 APK 连锁 `failed to commit ... No such file or directory` 继续下钻，发现并修复 lazy bitmap、目录项 framing/checksum、元数据 cache 所有权、计数快照和 inode 快照一致性等可独立证明的缺陷；整批修复以 clean fixture + 离线 fsck 闭环。由于原失败未保存完整目录块/bitmap 快照，不能唯一分摊这些缺陷对历史单次故障的贡献。
 - la64 曾出现“内核复制 16 字节、用户比较只认 10 字节”的假文件系统故障，根因是用户初始栈违反 16 字节 ABI；另一个 ftruncate `-ETXTBSY` 是 ramfs/ext4 的占位 `dev_id=0` 与相同 inode 号碰撞。两者均按独立根因修复，没有在 ext4 路径加 workaround。
 - 本轮实板没有重复执行会改动现有 P4 软件集的 `apk add py3-pillow`；该原始小文件压力由修复后的 QEMU P4 fixture + 离线 fsck 覆盖，实板使用独立 16 MiB 探针、iozone 和已有 APK reuse 树验证平台差异。
 - Skill 生成的 Work_Log、对应模块文档和经验库已并入本提交；其他既有文档改动继续留在工作树中。
@@ -51,7 +88,7 @@
 - 本轮仅整理和同步文档，未修改内核/用户态代码，未运行双架构编译或 QEMU/实板测试；文档中的 PASS 均引用既有可核验证据 ⚪
 
 **备注：**
-- 当前已提交能力以 HEAD `2031fd59` 为边界；工作树中的 ext4、用户栈 ABI、`fs_test` 和串口控制键修改均显式标记为未提交/WIP，不计入 33 个已提交成果。
+- 这是 `b6c5c973` 形成前的第一轮整理时点：当时已提交能力以 `2031fd59` 为边界，ext4、用户栈 ABI 和 `fs_test` 尚属 WIP。该状态已由本日顶部“29 篇逐问题深度复盘”和 `b6c5c973` 条目取代；串口控制键修改仍是 WIP。
 - `bug-la64-kernel-stack-overflow.md` 保留在 `docs/09_debug/`，作为 40 位 VALEN/高栈前史由专题链接，不复制进子目录，避免形成多个事实源。
 
 ### board/net: 确认 RX ring 饥饿根因并固化 2K1000LA 生产配置

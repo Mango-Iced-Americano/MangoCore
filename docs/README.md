@@ -3,7 +3,7 @@ title: "MangoCore 文档索引"
 category: overview
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-14
+last_updated: 2026-07-15
 tags: [docs, index, overview]
 ---
 
@@ -40,7 +40,7 @@ tags: [docs, index, overview]
 | `07_driver/` | 驱动 | Virtio 块/网卡、设备 trait、HAL 后端 |
 | `diagrams/` | 架构图 | 子系统架构图、流程图、关系图等图片资源 |
 | `08_testing/` | 测试 | 隔离 CPython/APK 运行时、QEMU 与实板测试门禁 |
-| `09_debug/` | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（多篇） |
+| [`09_debug/`](09_debug/README.md) | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（多篇） |
 | `_templates/` | 模板 | 新模块文档的标准文档模板 |
 | `kernel/` | 遗留子系统文档 | 旧版模块文档（待迁移到 00-09 布局） |
 | `ltp/` | LTP 测试计划 | LTP 测试策略、各子系统状态、工作流 |
@@ -71,7 +71,7 @@ tags: [docs, index, overview]
 
 从 `09_debug` 开始，了解 GDB 设置、日志配置和常见调试工作流。
 
-**顺序：** `09_debug`
+**顺序：** [09_debug/README.md](09_debug/README.md)
 
 ## 模块文档
 
@@ -83,11 +83,13 @@ tags: [docs, index, overview]
 | `04_mm/` | [README.md](04_mm/README.md) | 稳定 | 内存管理文档含 14 篇文档，覆盖 frame allocator、页表/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、CoW、filemap 和 OOM |
 | `05_process/` | [README.md](05_process/README.md) | 稳定 | 进程文档含 17 篇文档，覆盖 TCB/PCB、调度、WaitQueue、clone/namespace、exec、exit/wait、signal、futex、IPC 和 rlimit |
 | `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
+| `09_debug/` | [README.md](09_debug/README.md) | 持续更新 | 共 43 篇 Markdown（含子目录索引）；`la64_on_board/` 含 29 篇编号专题 + 1 篇 hole-read ABI 深挖、总账和组会入口 |
 
 ### 测试与实板使用
 
 | 文档 | 说明 |
 |---|---|
+| [la64_on_board/](09_debug/la64_on_board/README.md) | 2K1000LA 从首次上板到当前状态的组会速览、完整开发时间线和故障深挖入口 |
 | [mangocore-python-guide.md](08_testing/mangocore-python-guide.md) | 2K1000LA 上使用 MangoCore 特制 CPython、首次引导 pip、持久安装和故障排查 |
 | [cpython-isolated.md](08_testing/cpython-isolated.md) | CPython L3-L9 隔离测试设计、ABI 覆盖和 QEMU/实板门禁 |
 | [apk-isolated.md](08_testing/apk-isolated.md) | APK 隔离环境、P4 持久应用根和 `persist-shell` 设计 |
@@ -108,6 +110,6 @@ tags: [docs, index, overview]
 | `docs/kernel/net/` | `README.md`、`architecture.md`（迁移前版本）、`device-layer.md`、`multi-iface-routing.md`、`roadmap.md`、`socket-subsystem.md`、`syscalls.md`、`tcp-state-machine.md` |
 | `docs/kernel/` | `futex.md`、`Nanosleep.md`、`tgkill.md`、`信号.md` — 子系统深入分析 |
 | `docs/ltp/` | LTP 测试策略（`LTP_BOTTOM_UP_GUIDE.md`）、各子系统计划和状态（`ltp_fs_plan.md`、`ltp_fs_status.md`、`ltp_mount_plan.md`、`ltp_mount_status.md`、`ltp_net_plan.md`、`ltp_net_status.md`）、工作流（`ltp_workflow.md`）、完整堆追踪报告及 MM 重构指南 |
-| `docs/09_debug/` | 多个已修复 Bug 的事后分析，包括 ext4 rename、mount bind 泄露、virtio 块对齐和内核栈溢出 |
+| `docs/09_debug/` | 多个 Bug 的事后分析及 `la64_on_board/` 实板专题，包括 LA64 用户栈 ABI、ext4 rename、mount bind 泄露、virtio 块对齐和内核栈溢出 |
 | `docs/plan/` | 架构提案：NET_PLAN、UDP 改进计划、VFS 迁移计划、I/O 分块计划 |
 | `docs/Work_Log.md` | 每日开发日志，涵盖所有重要内核变更及编译和 QEMU 验证结果 |
