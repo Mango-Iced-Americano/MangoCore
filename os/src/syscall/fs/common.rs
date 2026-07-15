@@ -306,6 +306,13 @@ pub(crate) fn open_file_at(
 
     // Paths like ".", "./", ".//" resolve to the start inode itself
     if path == "." || path.trim_end_matches('/') == "." {
+        // O_TMPFILE is not supported. apk uses openat(cache_fd, ".", O_TMPFILE|...)
+        // to create unnamed temp files. If we open the directory as writable,
+        // the subsequent write() returns EISDIR and apk sees "Is a directory".
+        // Return EOPNOTSUPP so userspace falls back to named temp files.
+        if flags.contains(OpenFlags::O_TMPFILE) {
+            return Err(crate::syscall::errno::EOPNOTSUPP);
+        }
         let md = start.metadata().map_err(|e| -(e as isize))?;
         if flags.contains(OpenFlags::O_CREAT | OpenFlags::O_EXCL) {
             return Err(EEXIST);
