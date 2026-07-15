@@ -1575,6 +1575,11 @@ impl IndexNode for Ext4OSInode {
         if r != 0 {
             return Err(from_lwext4(r.abs()));
         }
+        // lwext4 copies min(buf_len, value_len) but sets data_size = value_len.
+        // When the value is larger than the buffer, return ERANGE per Linux semantics.
+        if !buf.is_empty() && data_size > buf.len() {
+            return Err(SyscallErr::ERANGE);
+        }
         Ok(data_size)
     }
 

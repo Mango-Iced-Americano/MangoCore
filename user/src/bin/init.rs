@@ -143,6 +143,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     // 内核已将 x0→/sdcard, x1→/tools 挂载好，直接 bind
     // mkdir 保底：确保 target 目录存在（initramfs cpio 可能不含这些目录）
+    let _ = sys_mkdirat(AT_FDCWD, "/tmp\0", 0o755);
+    try_bind("/tools/tmp", "/tmp");
     let _ = sys_mkdirat(AT_FDCWD, "/bin\0", 0o755);
     try_bind("/tools/bin", "/bin");
     let _ = sys_mkdirat(AT_FDCWD, "/sbin\0", 0o755);
