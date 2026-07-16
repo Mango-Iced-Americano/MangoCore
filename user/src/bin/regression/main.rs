@@ -12,6 +12,7 @@ mod regression_usercopy_pipe;
 mod regression_mmap_edge_cases;
 mod regression_timer_realtime_jump;
 mod regression_rename_long_name;
+mod regression_lwext4_truncate_hole;
 
 use user_lib::println;
 
@@ -19,7 +20,7 @@ use user_lib::println;
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0u32;
     let mut failed = 0u32;
-    let total = 4u32;
+    let total = 5u32;
 
     println!("TAP version 13");
     println!("1..{}", total);
@@ -43,6 +44,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let r = regression_rename_long_name::run();
     if r == 0 { passed += 1; println!("ok 4 rename_long_name"); }
     else { failed += 1; println!("not ok 4 rename_long_name"); }
+
+    // Test 5: lwext4 truncate hole cold reopen
+    let r = regression_lwext4_truncate_hole::run();
+    if r == 0 { passed += 1; println!("ok 5 lwext4_truncate_hole"); }
+    else { failed += 1; println!("not ok 5 lwext4_truncate_hole"); }
 
     println!("# results: {} passed, {} failed, {} total", passed, failed, total);
 
