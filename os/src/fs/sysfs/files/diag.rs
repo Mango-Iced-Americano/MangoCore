@@ -560,7 +560,11 @@ fn stats_mount_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
-    let mut s = String::with_capacity(256);
+    let lc = crate::fs::vfs::mount::counters::lifecycle_snapshot();
+    let diag_on = crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG
+        .load(core::sync::atomic::Ordering::Relaxed);
+    let mut s = String::with_capacity(512);
+    let _ = writeln!(s, "mount_diag_on={}", if diag_on { 1 } else { 0 });
     let _ = writeln!(s, "mount_propagate_calls={}", mnt.0);
     let _ = writeln!(s, "mount_propagate_cycles={}", mnt.1);
     let _ = writeln!(s, "mount_remove_fs_calls={}", mnt.2);
@@ -570,7 +574,50 @@ fn stats_mount_content(
     let _ = writeln!(s, "mount_rbind_entries={}", mnt.6);
     let _ = writeln!(s, "mount_rbind_dirent_calls={}", mnt.7);
     let _ = writeln!(s, "mount_rbind_seen_scan={}", mnt.8);
+    let _ = writeln!(s, "mount_lifecycle_create={}", lc.0);
+    let _ = writeln!(s, "mount_lifecycle_umount={}", lc.1);
+    let _ = writeln!(s, "mount_lifecycle_detach={}", lc.2);
+    let _ = writeln!(s, "mount_lifecycle_drop={}", lc.3);
+    // BackendLifecycle counters
+    let _ = writeln!(s, "lc_new={}",
+        crate::fs::vfs::mount::LC_NEW.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(s, "lc_acquire={}",
+        crate::fs::vfs::mount::LC_ACQUIRE.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(s, "lc_release_dying={}",
+        crate::fs::vfs::mount::LC_RELEASE_DYING.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(s, "lc_drain={}",
+        crate::fs::vfs::mount::LC_DRAIN.load(core::sync::atomic::Ordering::Relaxed));
     write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Mount lifecycle diag on/off (rw)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn mount_diag_on_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let val = if crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG
+        .load(Ordering::Relaxed)
+    {
+        "1\n"
+    } else {
+        "0\n"
+    };
+    write_str(offset, len, buf, val)
+}
+
+fn mount_diag_on_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+    let val = match buf.first() {
+        Some(b'1') => true,
+        Some(b'0') => false,
+        _ => return Err(SyscallErr::EINVAL),
+    };
+    crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG.store(val, Ordering::Relaxed);
+    Ok(buf.len())
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -689,6 +736,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     let stats_dir = kernel_dir.add_dir_inner("stats", InodeMode::from_bits_truncate(0o555))?;
     stats_dir.add_file("features", ro_mode, stats_features_content)?;
     stats_dir.add_writable_file_with_write("stats_on", rw_mode, stats_on_content, stats_on_write)?;
+    stats_dir.add_writable_file_with_write("mount_diag_on", rw_mode, mount_diag_on_content, mount_diag_on_write)?;
     stats_dir.add_write_only_file(
         "reset",
         InodeMode::from_bits_truncate(0o200),
