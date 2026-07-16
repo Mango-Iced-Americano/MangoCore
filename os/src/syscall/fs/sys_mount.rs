@@ -367,20 +367,61 @@ pub fn sys_mount(
             return EINVAL;
         }
 
-        let remount_flags = vfs::MountFlags::from_bits_truncate(
+        // User-specified flags with MS_REMOUNT stripped
+        let user_flags = vfs::MountFlags::from_bits_truncate(
             (mountflags.bits() & !MountFlags::MS_REMOUNT.bits()) as u32,
         );
 
-        // If switching to read-only while writers exist → EBUSY
+        // ── Linux remount flag merge semantics ──
+        //
+        // Most modifiable flags (non-atime) are replaced by the user-supplied
+        // value.  Atime-policy flags (NOATIME, NODIRATIME, RELATIME) are
+        // preserved unless the user explicitly provides an atime policy in
+        // the remount request.  STRICTATIME is accepted as a remount signal
+        // that explicitly clears all atime-policy bits (it is not stored as
+        // a persistent flag itself).
         let old_flags = mnt_inode.mount_fs.mount_flags();
-        if remount_flags.contains(vfs::MountFlags::RDONLY)
+
+        // If switching to read-only while writers exist → EBUSY
+        if user_flags.contains(vfs::MountFlags::RDONLY)
             && !old_flags.contains(vfs::MountFlags::RDONLY)
             && mnt_inode.mount_fs.has_writers()
         {
             return EBUSY;
         }
 
-        mnt_inode.mount_fs.set_mount_flags(remount_flags);
+        let non_atime_mod = vfs::MountFlags::RDONLY
+            | vfs::MountFlags::NOSUID
+            | vfs::MountFlags::NODEV
+            | vfs::MountFlags::NOEXEC
+            | vfs::MountFlags::SYNCHRONOUS
+            | vfs::MountFlags::MANDLOCK
+            | vfs::MountFlags::DIRSYNC
+            | vfs::MountFlags::NOSYMFOLLOW;
+
+        // Atime mask for detecting whether the user provided any atime policy.
+        let atime_all = vfs::MountFlags::NOATIME
+            | vfs::MountFlags::NODIRATIME
+            | vfs::MountFlags::RELATIME
+            | vfs::MountFlags::STRICTATIME;
+
+        // Replace non-atime modifiable flags with user's request
+        let mut new_flags = (old_flags & !non_atime_mod) | (user_flags & non_atime_mod);
+
+        // Atime: preserve old unless user explicitly specified any atime policy.
+        // `normalize_request` handles STRICTATIME (clear all), NOATIME→NODIRATIME
+        // implication, NODIRATIME-alone default, and no-flag default (RELATIME).
+        if user_flags.intersects(atime_all) {
+            new_flags = (new_flags & !atime_all) | vfs::normalize_request(user_flags);
+        } else {
+            // No atime policy requested: only old canonical atime bits are
+            // preserved; non-atime bits (e.g. NOSYMFOLLOW) come from user's
+            // explicit request or are cleared — matching Linux remount semantics.
+            new_flags = (new_flags & !atime_all)
+                | (vfs::canonicalize_state(old_flags) & atime_all);
+        }
+
+        mnt_inode.mount_fs.set_mount_flags(new_flags);
         return SUCCESS;
     }
 
@@ -522,9 +563,12 @@ pub fn sys_mount(
 
                     // 5. Insert into mount tree
                     let root_inode = new_fs.root_inode();
-                    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+                    let mnt_flags = vfs::normalize_request(
+                        vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32),
+                    );
+                    let lifecycle = vfs::BackendLifecycle::new(new_fs);
                     let mnt = match target_mfs_inode.mount_subtree_inner(
-                        new_fs, root_inode, mnt_flags, Some(lookup_path.clone()), true,
+                        lifecycle, root_inode, mnt_flags, Some(lookup_path.clone()), true,
                     ) {
                         Ok(m) => m,
                         Err(e) => return -(e as isize),
@@ -540,10 +584,13 @@ pub fn sys_mount(
         }
     };
     let root_inode = new_fs.root_inode();
-    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+    let mnt_flags = vfs::normalize_request(
+        vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32),
+    );
 
+    let lifecycle = vfs::BackendLifecycle::new(new_fs);
     let mnt = match target_mfs_inode.mount_subtree_inner(
-        new_fs, root_inode, mnt_flags, Some(lookup_path.clone()), true,
+        lifecycle, root_inode, mnt_flags, Some(lookup_path.clone()), true,
     ) {
         Ok(m) => m,
         Err(e) => return -(e as isize),

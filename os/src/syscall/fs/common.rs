@@ -1428,6 +1428,7 @@ bitflags! {
         const MS_REMOUNT        =   32;
         const MS_MANDLOCK       =   64;
         const MS_DIRSYNC        =   128;
+        const MS_NOSYMFOLLOW    =   0x100;
         const MS_NOATIME        =   1024;
         const MS_NODIRATIME     =   2048;
         const MS_BIND           =   4096;
@@ -1508,12 +1509,37 @@ pub(crate) fn do_bind_mount(
         None => return Err(EINVAL),
     };
 
-    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+    let mnt_flags = {
+        // Linux: bind mount inherits source mount's persistent state flags
+        // (RDONLY, NOSYMFOLLOW, etc.).  Operation-only flags (BIND, REC,
+        // REMOUNT) are not mount state and must not leak into VFS MountFlags.
+        let mut flags = source_mount_fs.mount_flags();
+        let user_override = (mountflags.bits() as u32)
+            & !(MountFlags::MS_BIND.bits() as u32
+                | MountFlags::MS_REC.bits() as u32
+                | MountFlags::MS_REMOUNT.bits() as u32);
+        if user_override != 0 {
+            let user_vfs = vfs::MountFlags::from_bits_truncate(user_override);
+            let atime_all = vfs::MountFlags::NOATIME
+                | vfs::MountFlags::NODIRATIME
+                | vfs::MountFlags::RELATIME
+                | vfs::MountFlags::STRICTATIME;
+            // Separate atime overrides (new request → normalize_request)
+            // from non-atime overrides (OR directly into flags).
+            if user_vfs.intersects(atime_all) {
+                flags = (flags & !atime_all) | vfs::normalize_request(user_vfs);
+            }
+            flags |= user_vfs & !atime_all;
+        }
+        // Defensive canonicalize: source should already be canonical, but
+        // strip any stale bits just in case (idempotent = safe).
+        vfs::canonicalize_state(flags)
+    };
     // Use mount_subtree_inner(false) to skip automatic propagation.
     // We'll set up the final propagation group and propagate manually,
     // ensuring peers get the correct group membership.
     let mnt_fs = match target_mfs_inode.mount_subtree_inner(
-        source_mount_fs.inner_filesystem(),
+        source_mount_fs.lifecycle.clone(),
         source_inner,
         mnt_flags,
         Some(alloc::string::String::from(lookup_path)),
@@ -1805,9 +1831,11 @@ pub(crate) fn apply_rbind_snapshot(
         };
 
         match target_mfs_inode.mount_subtree_inner(
-            entry.child_mfs.inner_filesystem(),
+            entry.child_mfs.lifecycle.clone(),
             entry.child_mfs.root_inner_inode(),
-            vfs::MountFlags::empty(),
+            // Canonicalize: stored flags should already be clean, but strip
+            // any stale STRICTATIME just in case (idempotent = safe).
+            vfs::canonicalize_state(entry.child_mfs.mount_flags()),
             Some(mount_path),
             false,
         ) {
