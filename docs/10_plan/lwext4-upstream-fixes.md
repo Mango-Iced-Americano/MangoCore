@@ -1,6 +1,6 @@
 # lwext4 + lwext4_rust 上游修复记录
 
-**状态：进行中** | **分支：refactor/ext4** | **日期：2026-07-06**
+**状态：进行中** | **分支：refactor/ext4** | **最新更新：2026-07-16**（创建于 2026-07-06）
 
 本文档记录在 MangoCore 集成 lwext4 + lwext4_rust 过程中发现的 vendored 代码缺陷，用于后续向上游提 PR。
 
@@ -140,6 +140,122 @@ impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
 **问题**：rv64 和 la64 共用 `build_musl-generic` cmake 构建目录。rv64 编译后 cmake 缓存了 `riscv64-linux-gnu-gcc`，la64 编译时复用缓存导致生成 RISC-V 机器码的 loongarch64 .a 文件。
 
 **修复**：分离构建目录 `build_lwext4-rv64` / `build_lwext4-la64`。
+
+---
+
+## 修复 10：稀疏文件 ftruncate 扩展 + ext4_fread 空洞读取
+
+**文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`
+
+**问题**：
+对 lwext4 的 C 库而言，`ext4_ftruncate()` 和 `ext4_fread()` 在稀疏文件语义上有两个独立但相关的缺陷：
+
+1. **ftruncate 扩展不更新 inode 大小**（`ext4_ftruncate_no_lock` 第 1617-1621 行）：
+   当 `file->fsize <= size`（文件扩展，未发生实际截断）时，原代码直接 `r = EOK; goto Finish;`，既不更新 `file->fsize`，也不通过 `ext4_inode_set_size()` 写回 inode 元数据。结果：
+   - `ext4_fseek(file, 12288, SEEK_SET)` 检查 `offset > file->fsize` 失败，返回 `EINVAL`
+   - 即使通过其他方式写入 page3（block 3 = 12 KB），`fsync` 后 inode 的 `i_size` 仍停留在 4096
+
+2. **ext4_fread 空洞读取缺陷**：
+   lwext4 通过 `ext4_fs_get_inode_dblk_idx(ref, iblock, &fblock, true)` 支持 "unwritten block" 语义（参数 `support_unwritten=true` 使 `fblock == 0` 时函数返回 `EOK` 而非报错）。然而在 `ext4_fread` 中，只有**首块非对齐分支**（第 1751-1760 行）检查了 `fblock != 0` 并填入零。其余两条数据路径均未处理空洞：
+   - **对齐整块批量读取**（第 1774-1806 行）：当内层 while 循环收集的批次起始块 `fblock_start == 0` 时，仍调用 `ext4_blocks_get_direct(bdev, buf, 0, count)`，企图从物理块 0 读取数据
+   - **末尾非完整块**（第 1808-1823 行）：未检查 `fblock` 是否为 0，直接计算 `off = 0 * block_size = 0` 调用 `ext4_block_readbytes`
+
+**症状**（在 MangoCore 上观察）：
+- 真实 QEMU 场景：cold reopen 后读空洞区域**偶然**正确（块设备缓存旧零值），但 `fsync` 后写 page3 返回 `EIO` — 根因是 ftruncate 扩展未更新 inode 大小，`ext4_fseek(12288)` 拒绝跳转到空洞区域
+- `ext4_fread` 在遇到 `fblock == 0` 的批次时，行为未定义（取决于 block 0 的内容）
+
+**修复**：
+
+### fix 10a：`ext4_ftruncate_no_lock` — 稀疏扩展更新元数据
+
+```c
+/* 原代码 */
+if (file->fsize <= size) {
+    r = EOK;
+    goto Finish;
+}
+
+/* 修复后 */
+if (file->fsize <= size) {
+    /* 稀疏扩展：仅更新 inode 大小元数据，不分配块 */
+    file->fsize = size;
+    ext4_inode_set_size(ref.inode, size);
+    ref.dirty = true;
+    /* ftruncate 扩展时保持 fpos 不变（截断时需 clamp） */
+    r = EOK;
+    goto Finish;
+}
+```
+
+关键设计决策：
+- **不预分配 block**：ftruncate 扩展不应强制分配数据块（POSIX 不要求、ext4 extent 语义允许 hole）。块分配由后续 `ext4_fwrite()` 按需触发
+- **标记 inode 脏**：`ref.dirty = true` 确保 `ext4_fs_put_inode_ref()` 将更新后 `i_size` 写回磁盘
+- **保持 fpos**：扩展时 `file->fpos` 不变；截断时（原有逻辑）若 `fpos > size` 则 clamp 到 `size`
+
+### fix 10b：`ext4_fread` 对齐整块循环 — 空洞填零
+
+```c
+/* 原代码 */
+r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf,
+                           fblock_start, fblock_count);
+
+/* 修复后 */
+if (fblock_start == 0) {
+    /* 空洞：未映射块 → 填零 */
+    memset(u8_buf, 0, block_size * fblock_count);
+} else {
+    r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf,
+                               fblock_start, fblock_count);
+    if (r != EOK)
+        goto Finish;
+}
+```
+
+`fblock_start == 0` 条件同时覆盖两种场景：
+- 批次首个块即为空洞（`fblock_start` 被设为 0）
+- 连续空洞块被收集为一批（`fblock_count > 1`）
+
+### fix 10c：`ext4_fread` 末尾非完整块 — 空洞填零
+
+```c
+/* 原代码 */
+off = fblock * block_size;
+r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf, size);
+
+/* 修复后 */
+if (fblock != 0) {
+    uint64_t off = fblock * block_size;
+    r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf, size);
+    if (r != EOK)
+        goto Finish;
+} else {
+    /* 空洞：填零 */
+    memset(u8_buf, 0, size);
+}
+```
+
+**兼容性**：
+- 三个修复均仅修改扩展路径或错误路径，不影响正常（已分配块）读写路径
+- fix 10a 不触发块分配，不会改变磁盘布局或导致空间耗尽
+- fix 10b/10c 的 memset 路径仅在 `ext4_fs_get_inode_dblk_idx` 返回 `fblock == 0` 时触发，与上游 lwext4 的 `support_unwritten` 语义一致
+- 已确认与修复 1-9 中的路径前缀翻译方案（Approach A）无冲突：本修复在 C 库内部，不受 mount point 命名影响
+
+**上游位置**：
+- 上游仓库：[gkostka/lwext4](https://github.com/gkostka/lwext4)
+- 目标文件：`src/ext4.c`
+- 函数：`ext4_ftruncate_no_lock()`（第 1604 行）、`ext4_fread()`（第 1672 行）
+
+**上游提交建议**：3 个独立 commit：
+1. `ext4_ftruncate_no_lock: update inode size on sparse extension` — 最小化变更，不涉及读路径
+2. `ext4_fread: fill holes with zeros in aligned full-block path` — 读路径空洞修复
+3. `ext4_fread: fill holes with zeros in trailing partial-block path` — 读路径空洞修复（第二个分支）
+
+**待验证**：
+- [ ] `make rv64-kernel-build-only` + `make la64-kernel-build-only`
+- [ ] QEMU 下 cold reopen 后 `pread(fd, buf, 4096, 12288)` 返回零而非 EIO/EINVAL
+- [ ] `ftruncate(fd, 16384)` 后 `fstat` 确认 `st_size == 16384`（无块分配）
+- [ ] 非空洞（正常写入区域）读写不受影响
+- [ ] lwext4 自带测试套件 `make test` 不新增 FAIL
 
 ---
 
