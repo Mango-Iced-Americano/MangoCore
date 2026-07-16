@@ -66,3 +66,4 @@ sdcard-rv-noconf.img
 .env
 os/rootfs-rv.img
 os.bin
+.env
