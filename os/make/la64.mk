@@ -20,10 +20,17 @@ DISK_LA := ../disk-la.img
 LWEXT4_LA_DIR := ../dependency/lwext4_rust/c/lwext4
 LWEXT4_LA_LIB := $(LWEXT4_LA_DIR)/liblwext4-loongarch64.a
 LWEXT4_LA_TOOLCHAIN_PATH := /opt/gcc-13.2.0-loongarch64-linux-gnu/bin
+# Prerequisites for archive rebuild invalidation
+LWEXT4_LA_SRCS := $(wildcard $(LWEXT4_LA_DIR)/src/*.c)
+LWEXT4_LA_HDRS := $(wildcard $(LWEXT4_LA_DIR)/include/*.h) $(wildcard $(LWEXT4_LA_DIR)/include/misc/*.h)
+LWEXT4_LA_CMAKE_INPUTS := $(LWEXT4_LA_DIR)/CMakeLists.txt \
+                          $(LWEXT4_LA_DIR)/src/CMakeLists.txt \
+                          ../dependency/lwext4_rust/c/elf-linux-gnu.cmake \
+                          ../dependency/lwext4_rust/c/ulibc.c
 
 lwext4-la64: $(LWEXT4_LA_LIB)
 
-$(LWEXT4_LA_LIB):
+$(LWEXT4_LA_LIB): $(LWEXT4_LA_SRCS) $(LWEXT4_LA_HDRS) $(LWEXT4_LA_CMAKE_INPUTS)
 	@echo "=== Building lwext4 C library for loongarch64 ==="
 	@cp -f ../dependency/lwext4_rust/c/elf-linux-gnu.cmake $(LWEXT4_LA_DIR)/toolchain/musl-generic.cmake
 	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_DIR)/src/ulibc.c

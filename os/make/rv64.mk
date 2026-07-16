@@ -32,10 +32,17 @@ LWEXT4_DIR := ../dependency/lwext4_rust/c/lwext4
 LWEXT4_RV_LIB := $(LWEXT4_DIR)/liblwext4-riscv64.a
 LWEXT4_CMAKE := ../dependency/lwext4_rust/c/elf-linux-gnu.cmake
 LWEXT4_PATCH := ../dependency/lwext4_rust/c/lwext4-make.patch
+# Prerequisites for archive rebuild invalidation
+LWEXT4_RV_SRCS := $(wildcard $(LWEXT4_DIR)/src/*.c)
+LWEXT4_RV_HDRS := $(wildcard $(LWEXT4_DIR)/include/*.h) $(wildcard $(LWEXT4_DIR)/include/misc/*.h)
+LWEXT4_RV_CMAKE_INPUTS := $(LWEXT4_DIR)/CMakeLists.txt \
+                          $(LWEXT4_DIR)/src/CMakeLists.txt \
+                          $(LWEXT4_CMAKE) \
+                          ../dependency/lwext4_rust/c/ulibc.c
 
 lwext4-rv64: $(LWEXT4_RV_LIB)
 
-$(LWEXT4_RV_LIB):
+$(LWEXT4_RV_LIB): $(LWEXT4_RV_SRCS) $(LWEXT4_RV_HDRS) $(LWEXT4_RV_CMAKE_INPUTS)
 	@echo "=== Building lwext4 C library for riscv64 ==="
 	@# Copy our cmake toolchain (linux-gnu) over the musl-generic one
 	@cp -f $(LWEXT4_CMAKE) $(LWEXT4_DIR)/toolchain/musl-generic.cmake
