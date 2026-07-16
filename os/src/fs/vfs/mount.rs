@@ -53,6 +53,8 @@ bitflags! {
         const MANDLOCK = 0x40;
         /// 目录修改同步
         const DIRSYNC = 0x80;
+        /// 不跟随符号链接
+        const NOSYMFOLLOW = 0x100;
         /// 不更新访问时间
         const NOATIME = 0x400;
         /// 不更新目录访问时间
@@ -61,7 +63,162 @@ bitflags! {
         const BIND = 0x1000;
         /// 重新递归 bind mount
         const REC = 0x4000;
+        /// 相对 atime 更新 (mount.h: MS_RELATIME = 1<<21)
+        const RELATIME = 0x200000;
+        /// 显式 strict atime（清空所有 atime 策略位；不持久存储）
+        const STRICTATIME = 0x1000000;
     }
+}
+
+/// statfs f_flags ST_* constants (Linux <uapi/linux/statfs.h>).
+///
+/// Most MS_* → ST_* values are identical; only the exceptions are documented.
+/// - `NOSYMFOLLOW`: MS_NOSYMFOLLOW = 0x100 → ST_NOSYMFOLLOW = 0x2000
+pub const ST_RDONLY: u64      = 0x0001;
+pub const ST_NOSUID: u64      = 0x0002;
+pub const ST_NODEV: u64       = 0x0004;
+pub const ST_NOEXEC: u64      = 0x0008;
+pub const ST_SYNCHRONOUS: u64 = 0x0010;
+pub const ST_MANDLOCK: u64    = 0x0040;
+pub const ST_NOATIME: u64     = 0x0400;
+pub const ST_NODIRATIME: u64  = 0x0800;
+pub const ST_RELATIME: u64    = 0x1000;
+pub const ST_NOSYMFOLLOW: u64 = 0x2000;
+
+/// Convert VFS internal `MountFlags` (MS_* bit assignments) to `statfs`
+/// `f_flags` (ST_* constants).
+///
+/// Most flags use the same numeric value; the notable exception is
+/// `NOSYMFOLLOW` (0x100 → 0x2000).
+pub fn mount_flags_to_st_flags(mf: MountFlags) -> u64 {
+    let mut st = 0u64;
+    if mf.contains(MountFlags::RDONLY)      { st |= ST_RDONLY; }
+    if mf.contains(MountFlags::NOSUID)      { st |= ST_NOSUID; }
+    if mf.contains(MountFlags::NODEV)       { st |= ST_NODEV; }
+    if mf.contains(MountFlags::NOEXEC)      { st |= ST_NOEXEC; }
+    if mf.contains(MountFlags::SYNCHRONOUS) { st |= ST_SYNCHRONOUS; }
+    if mf.contains(MountFlags::MANDLOCK)    { st |= ST_MANDLOCK; }
+    if mf.contains(MountFlags::DIRSYNC)     { st |= 0x0080; }  // same bit
+    if mf.contains(MountFlags::NOSYMFOLLOW) { st |= ST_NOSYMFOLLOW; }
+    if mf.contains(MountFlags::NOATIME)     { st |= ST_NOATIME; }
+    if mf.contains(MountFlags::NODIRATIME)  { st |= ST_NODIRATIME; }
+    if mf.contains(MountFlags::RELATIME)    { st |= ST_RELATIME; }
+    st
+}
+
+/// Canonicalize already-persisted atime state.
+///
+/// Strips `STRICTATIME` (must never be stored), ensures `NOATIME` implies
+/// `NODIRATIME`, and resolves any other contradictory combination.
+///
+/// Unlike [`normalize_request`], this function NEVER applies a default —
+/// a previously normalized "strictatime" (empty) state is returned as-is.
+///
+/// **Idempotent** — calling on already-canonical state is a no-op.
+pub fn canonicalize_state(flags: MountFlags) -> MountFlags {
+    let has_strictatime = flags.contains(MountFlags::STRICTATIME);
+    let has_noatime = flags.contains(MountFlags::NOATIME);
+    let has_nodiratime = flags.contains(MountFlags::NODIRATIME);
+    let has_relatime = flags.contains(MountFlags::RELATIME);
+
+    let atime_mask = MountFlags::NOATIME
+        | MountFlags::NODIRATIME
+        | MountFlags::RELATIME
+        | MountFlags::STRICTATIME;
+
+    let mut f = flags & !atime_mask;
+
+    if has_strictatime {
+        // STRICTATIME must never be stored.  If NODIRATIME was also given,
+        // keep it as an orthogonal constraint; discard all other atime bits.
+        if has_nodiratime {
+            f |= MountFlags::NODIRATIME;
+        }
+        return f;
+    }
+
+    if has_noatime {
+        f |= MountFlags::NOATIME;
+        f |= MountFlags::NODIRATIME;
+        return f;
+    }
+
+    if has_relatime {
+        f |= MountFlags::RELATIME;
+        if has_nodiratime {
+            f |= MountFlags::NODIRATIME;
+        }
+        return f;
+    }
+
+    // NODIRATIME alone: preserve without adding a default atime policy.
+    if has_nodiratime {
+        f |= MountFlags::NODIRATIME;
+        return f;
+    }
+
+    // No atime flags → strictatime (empty).  Return as-is.
+    f
+}
+
+/// Normalize a new atime-policy **request** from a user syscall.
+///
+/// Applies Linux defaults and conflict resolution:
+///
+/// | Input | Normalized | Rationale |
+/// |-------|-----------|-----------|
+/// | `STRICTATIME` present | clear all atime bits | not a stored flag |
+/// | `NOATIME` present | `NOATIME \| NODIRATIME` | NOATIME implies NODIRATIME |
+/// | `RELATIME` present | `RELATIME` (+ `NODIRATIME` if given) | explicit relatime |
+/// | `NODIRATIME` alone | `RELATIME \| NODIRATIME` | default atime is RELATIME |
+/// | No atime flags | `RELATIME` | Linux default since 2.6.30 |
+///
+/// **Not idempotent** — intended for raw user input only.  Use
+/// [`canonicalize_state`] for already-persisted state.
+pub fn normalize_request(flags: MountFlags) -> MountFlags {
+    let has_strictatime = flags.contains(MountFlags::STRICTATIME);
+    let has_noatime = flags.contains(MountFlags::NOATIME);
+    let has_relatime = flags.contains(MountFlags::RELATIME);
+    let has_nodiratime = flags.contains(MountFlags::NODIRATIME);
+
+    let atime_mask = MountFlags::NOATIME
+        | MountFlags::NODIRATIME
+        | MountFlags::RELATIME
+        | MountFlags::STRICTATIME;
+
+    let mut f = flags & !atime_mask;
+
+    if has_strictatime {
+        if has_nodiratime {
+            f |= MountFlags::NODIRATIME;
+        }
+        return f;
+    }
+
+    if has_noatime {
+        f |= MountFlags::NOATIME;
+        f |= MountFlags::NODIRATIME;
+        return f;
+    }
+
+    if has_relatime {
+        f |= MountFlags::RELATIME;
+        if has_nodiratime {
+            f |= MountFlags::NODIRATIME;
+        }
+        return f;
+    }
+
+    // No explicit atime-policy flag at all.
+    if has_nodiratime {
+        f |= MountFlags::RELATIME;
+        f |= MountFlags::NODIRATIME;
+        return f;
+    }
+
+    // No atime flags → Linux default: RELATIME
+    f |= MountFlags::RELATIME;
+    f
 }
 
 // ── MountPath ────────────────────────────────────────────────────────────
@@ -99,6 +256,13 @@ impl PartialOrd for MountPath {
         Some(self.cmp(other))
     }
 }
+
+/// Runtime gate for mount lifecycle diagnostics.
+/// When true, key mount events (create/bind/umount/detach/drop) are
+/// logged with stable identity pointers to prove/counter-prove
+/// shared-backend premature teardown.
+/// Controlled via `/sys/kernel/stats/mount_diag_on` (writable).
+pub static MOUNT_LIFECYCLE_DIAG: AtomicBool = AtomicBool::new(false);
 
 // ── MountFSInode ────────────────────────────────────────────────────────
 
@@ -178,6 +342,280 @@ pub mod counters {
             RBIND_SEEN_SCAN.load(core::sync::atomic::Ordering::Relaxed),
         )
     }
+
+    // Mount lifecycle observability counters.
+    pub static MOUNT_LIFECYCLE_CREATE: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNT_LIFECYCLE_UMOUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNT_LIFECYCLE_DETACH: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNT_LIFECYCLE_DROP: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn lifecycle_snapshot() -> (usize, usize, usize, usize) {
+        (
+            MOUNT_LIFECYCLE_CREATE.load(core::sync::atomic::Ordering::Relaxed),
+            MOUNT_LIFECYCLE_UMOUNT.load(core::sync::atomic::Ordering::Relaxed),
+            MOUNT_LIFECYCLE_DETACH.load(core::sync::atomic::Ordering::Relaxed),
+            MOUNT_LIFECYCLE_DROP.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+
+/// Emit a mount lifecycle diagnostic event.
+///
+/// Logs stable identity information when `MOUNT_LIFECYCLE_DIAG` is enabled.
+/// Uses pointer identity (`Arc::as_ptr`) — never path strings — for stable
+/// object identification.  Backend identity is the `lifecycle` pointer
+/// (`Arc::as_ptr`); shared backends show the same value.
+///
+/// **Gate**: `cfg!(feature = "perf_diag")` + runtime `MOUNT_LIFECYCLE_DIAG`.
+/// This function is a no-op unless both conditions hold.
+fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
+    // Double-gate: compile-time feature OFF → no codegen impact.
+    #[cfg(feature = "perf_diag")]
+    {
+        if !MOUNT_LIFECYCLE_DIAG.load(core::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let self_ptr = Arc::as_ptr(mfs) as usize;
+        let lc_count = mfs.lifecycle.packed.load(core::sync::atomic::Ordering::Relaxed) & ((1u64 << 30) - 1);
+        let lc_state = mfs.lifecycle.packed.load(core::sync::atomic::Ordering::Relaxed) >> 62;
+        let parent_info = mfs.self_mountpoint().map(|mp| {
+            let parent_ptr = Arc::as_ptr(&mp.mount_fs) as usize;
+            let ino = mp.inner_inode.metadata().map(|m| {
+                alloc::format!("{:?}", m.inode_id)
+            }).unwrap_or_else(|_| alloc::string::String::from("?"));
+            (parent_ptr, ino)
+        });
+        let flags = mfs.mount_flags();
+        let prop = mfs.propagation();
+        let path = mfs.mount_path().unwrap_or_else(|| alloc::string::String::from("(nopath)"));
+
+        log::warn!(
+            "[mount_diag] {} mfs=0x{:x} lc_count={} lc_state={} path={} flags={:?} prop={:?} peer_gid={} master_gid={} parent_mfs={} parent_ino={}",
+            label, self_ptr, lc_count, lc_state, path, flags,
+            prop.prop_type(),
+            prop.peer_group_id(), prop.master_group_id(),
+            parent_info.as_ref().map(|(p,_)| alloc::format!("0x{:x}", p)).unwrap_or_else(|| alloc::string::String::from("none")),
+            parent_info.as_ref().map(|(_,i)| i.as_str()).unwrap_or("none"),
+        );
+    }
+    #[cfg(not(feature = "perf_diag"))]
+    {
+        let _ = (label, mfs);
+    }
+}
+
+// ── Backend lifecycle ────────────────────────────────────────────────────
+
+/// Lifecycle state machine for a shared filesystem backend.
+///
+/// Packed into an `AtomicU64`: `[state:2][refcount:30][_reserved:32]`.
+///
+/// * `Active`   — at least one `MountFS` holds a reference; `acquire()` succeeds.
+/// * `Dying`    — last `MountFS` reference released; blocked for new acquisitions.
+/// * `Dead`     — `on_umount()` has been called; terminal.
+///
+/// Transition rules:
+/// 1. `BackendLifecycle::new()`  → Active (count=0); NOT yet registered.
+/// 2. `.acquire()`               → count+1; on first 0→1 transition, registered
+///    into global list in an allocation-safe caller context.
+/// 3. `.release()` (from Drop)   → count-1; CAS Active→Dying when count→0.
+/// 4. `drain_one_dying()` (sched) → finds Dying entry, removes from registry,
+///    calls `on_umount()` outside ANY lock, then marks Dead.
+///
+/// Count-0 lifecycles never enter the registry: if no MountFS ever acquires,
+/// the lifecycle is dropped without leaking registry entries.
+///
+/// **No** `Arc::strong_count` is used for semantic decisions.
+const LC_STATE_SHIFT: u64 = 62;
+const LC_COUNT_MASK: u64 = (1u64 << 30) - 1;
+const LC_STATE_ACTIVE: u64 = 0;
+const LC_STATE_DYING: u64  = 1;
+const LC_STATE_DEAD: u64   = 2;
+
+/// Persistent linear registry of every **acquired** `BackendLifecycle`.
+///
+/// Entries are added lazily on the first `acquire()` (0→1), so count-0
+/// lifecycles are never present.  Scanned by the scheduler to drain entries
+/// that have reached Dying.  The registry holds one strong `Arc` per entry.
+static LIFECYCLE_REGISTRY: Mutex<alloc::vec::Vec<Arc<BackendLifecycle>>> =
+    Mutex::new(alloc::vec::Vec::new());
+
+/// Lifecycle counter for diagnostic parity with the old `MOUNT_LIFECYCLE_*`
+/// counters.  Incremented on `new`, `acquire`, `release→Dying`, and `drain`.
+pub static LC_NEW: AtomicU64 = AtomicU64::new(0);
+pub static LC_ACQUIRE: AtomicU64 = AtomicU64::new(0);
+pub static LC_RELEASE_DYING: AtomicU64 = AtomicU64::new(0);
+pub static LC_DRAIN: AtomicU64 = AtomicU64::new(0);
+pub static LC_STALE_REGISTRY: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+pub struct BackendLifecycle {
+    /// The concrete filesystem backend.
+    fs: Arc<dyn FileSystem>,
+    /// `[state:2][refcount:30][...]`
+    packed: AtomicU64,
+    /// True once this lifecycle has been pushed into LIFECYCLE_REGISTRY.
+    /// Set atomically on the first 0→1 acquire transition so that count-0
+    /// lifecycles (never acquired by any MountFS) are never registered.
+    registered: AtomicBool,
+}
+
+impl BackendLifecycle {
+    /// Create a new **Active** lifecycle with count=0.
+    ///
+    /// The lifecycle is NOT yet registered in the global list — registration
+    /// is deferred until the first successful `0→1` `acquire()` call, which
+    /// always happens in an allocation-safe MountFS constructor context.
+    /// Count-0 lifecycles that are never acquired simply drop without leaking
+    /// registry entries.
+    pub fn new(fs: Arc<dyn FileSystem>) -> Arc<Self> {
+        LC_NEW.fetch_add(1, Ordering::Relaxed);
+        Arc::new(Self {
+            fs,
+            packed: AtomicU64::new(0), // Active(0), count=0
+            registered: AtomicBool::new(false),
+        })
+    }
+
+    /// Borrow the filesystem backend.
+    #[inline]
+    pub fn fs(&self) -> &Arc<dyn FileSystem> {
+        &self.fs
+    }
+
+    /// Try to acquire a new MountFS reference.
+    ///
+    /// Returns `None` if the lifecycle is already Dying or Dead.
+    /// On success the internal refcount is incremented atomically and
+    /// the lifecycle `Arc` is cloned.
+    ///
+    /// On the first `0→1` transition, the lifecycle is registered in
+    /// the global registry so the scheduler drain can find it later.
+    /// This registration always happens in an allocation-safe MountFS
+    /// constructor context.
+    pub fn acquire(self: &Arc<Self>) -> Option<Arc<Self>> {
+        loop {
+            let old = self.packed.load(Ordering::Acquire);
+            let state = old >> LC_STATE_SHIFT;
+            if state != LC_STATE_ACTIVE {
+                return None;
+            }
+            let count = old & LC_COUNT_MASK;
+            // Overflow guard: 30 bits is ~1B refs.
+            if count >= LC_COUNT_MASK {
+                return None;
+            }
+            let new = old + 1; // state stays Active, count++
+            match self.packed.compare_exchange_weak(
+                old, new, Ordering::AcqRel, Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    LC_ACQUIRE.fetch_add(1, Ordering::Relaxed);
+                    // Lazily register on first acquire (0→1).
+                    // This guarantee: no count-0 lifecycle ever enters the registry.
+                    if count == 0
+                        && !self.registered.swap(true, Ordering::AcqRel)
+                    {
+                        LIFECYCLE_REGISTRY.lock().push(self.clone());
+                    }
+                    return Some(self.clone());
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Release a MountFS reference.  Called from `Drop for MountFS`.
+    ///
+    /// Returns `true` when the internal count reaches zero **and**
+    /// the state transitions Active → Dying.
+    pub fn release(&self) -> bool {
+        loop {
+            let old = self.packed.load(Ordering::Acquire);
+            let state = old >> LC_STATE_SHIFT;
+            let count = old & LC_COUNT_MASK;
+            if count == 0 {
+                // Underflow — already released too many times.
+                return false;
+            }
+            if count == 1 {
+                // Last reference: transition to Dying.
+                let new = LC_STATE_DYING << LC_STATE_SHIFT;
+                match self.packed.compare_exchange_weak(
+                    old, new, Ordering::AcqRel, Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        LC_RELEASE_DYING.fetch_add(1, Ordering::Relaxed);
+                        return true;
+                    }
+                    Err(_) => continue,
+                }
+            } else {
+                let new = (state << LC_STATE_SHIFT) | (count - 1);
+                match self.packed.compare_exchange_weak(
+                    old, new, Ordering::AcqRel, Ordering::Acquire,
+                ) {
+                    Ok(_) => return false,
+                    Err(_) => continue,
+                }
+            }
+        }
+    }
+
+    /// Query the lifecycle state (Active=0, Dying=1, Dead=2).
+    #[inline]
+    fn state(&self) -> u64 {
+        self.packed.load(Ordering::Acquire) >> LC_STATE_SHIFT
+    }
+
+    #[inline]
+    fn is_dying(&self) -> bool { self.state() == LC_STATE_DYING }
+}
+
+/// Drain **one** Dying lifecycle from the global registry.
+///
+/// Called from the scheduler loop (`run_tasks()`).
+///
+/// # Locking
+///
+/// The registry lock is held only long enough to remove the entry.
+/// `on_umount()` is called **outside** any lock, after which the entry
+/// is marked Dead and dropped (which drops `Arc<dyn FileSystem>`).
+///
+/// Returns `true` if work was done.
+pub fn drain_one_dying_lifecycle() -> bool {
+    let entry = {
+        let mut reg = LIFECYCLE_REGISTRY.lock();
+        if let Some(pos) = reg.iter().position(|lc| lc.is_dying()) {
+            Some(reg.remove(pos))
+        } else {
+            None
+        }
+    };
+    if let Some(lc) = entry {
+        lc.fs.on_umount();
+        // Mark Dead so stale diagnostics can distinguish it.
+        lc.packed.store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
+        LC_DRAIN.fetch_add(1, Ordering::Relaxed);
+        // `lc` drops here → Arc<BackendLifecycle> → Arc<dyn FileSystem> released.
+        true
+    } else {
+        false
+    }
+}
+
+/// Return the number of stale (Dying + Dead) entries still in the registry.
+/// Pure diagnostic; not used for any control-flow decision.
+pub fn lc_stale_registry_count() -> u64 {
+    let reg = LIFECYCLE_REGISTRY.lock();
+    let mut n: u64 = 0;
+    for lc in reg.iter() {
+        if !lc.is_dying() && lc.state() != LC_STATE_DEAD {
+            continue;
+        }
+        n += 1;
+    }
+    n
 }
 
 #[derive(Debug, Clone)]
@@ -304,7 +742,7 @@ impl MountFSInode {
                     let root_inner = sub
                         .root_inner_inode
                         .clone()
-                        .unwrap_or_else(|| sub.inner_filesystem.root_inode());
+                        .unwrap_or_else(|| sub.lifecycle.fs().root_inode());
                     let sub_arc = sub.self_ref.lock().upgrade().unwrap();
                     current = MountFSInode::new(root_inner, sub_arc);
                     counters::MFSI_FROM_OVERLAY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -462,7 +900,7 @@ impl MountFSInode {
     /// 调用者不得持有任何 MountFS 的 `mountpoints` 锁或 `self_mountpoint` 锁。
     pub(crate) fn mount_subtree_inner(
         &self,
-        inner_fs: Arc<dyn FileSystem>,
+        lifecycle: Arc<BackendLifecycle>,
         root_inner_inode: Arc<dyn IndexNode>,
         mount_flags: MountFlags,
         mount_path: Option<String>,
@@ -474,7 +912,7 @@ impl MountFSInode {
         }
         let inode_id = metadata.inode_id;
 
-        let new_mount_fs = MountFS::new_with_root(inner_fs, root_inner_inode, mount_flags);
+        let new_mount_fs = MountFS::new_with_root(lifecycle, root_inner_inode, mount_flags);
 
         // If parent is shared, allocate a fresh child peer group for the
         // new mount. Linux semantics: mount events under shared parents
@@ -524,12 +962,12 @@ impl MountFSInode {
     /// child of this MountFSInode's parent MountFS at this inode's position.
     pub fn mount_subtree(
         &self,
-        inner_fs: Arc<dyn FileSystem>,
+        lifecycle: Arc<BackendLifecycle>,
         root_inner_inode: Arc<dyn IndexNode>,
         mount_flags: MountFlags,
         mount_path: Option<String>,
     ) -> Result<Arc<MountFS>, SyscallErr> {
-        self.mount_subtree_inner(inner_fs, root_inner_inode, mount_flags, mount_path, true)
+        self.mount_subtree_inner(lifecycle, root_inner_inode, mount_flags, mount_path, true)
     }
 }
 
@@ -653,7 +1091,7 @@ impl IndexNode for MountFSInode {
                 let root_inner = child_mfs
                     .root_inner_inode
                     .clone()
-                    .unwrap_or_else(|| child_mfs.inner_filesystem.root_inode());
+                    .unwrap_or_else(|| child_mfs.lifecycle.fs().root_inode());
                 if let Ok(md) = root_inner.metadata() {
                     *ino = md.inode_id;
                 }
@@ -1181,8 +1619,8 @@ impl Drop for MountFSInode {
 /// 对标 DragonOS `kernel/src/filesystem/vfs/mount.rs` 的 `MountFS`。
 #[derive(Debug)]
 pub struct MountFS {
-    /// 内层文件系统
-    inner_filesystem: Arc<dyn FileSystem>,
+    /// Shared backend lifecycle (owns `Arc<dyn FileSystem>`).
+    pub lifecycle: Arc<BackendLifecycle>,
     /// 根 inode
     root_inner_inode: Option<Arc<dyn IndexNode>>,
     /// 子挂载点表: parent_inode_id → mounted fs
@@ -1217,12 +1655,17 @@ pub struct MountFS {
 }
 
 impl MountFS {
-    /// 创建新的 MountFS
-    pub fn new(inner_filesystem: Arc<dyn FileSystem>, mount_flags: MountFlags) -> Arc<Self> {
+    /// Create a new MountFS wrapping a fresh BackendLifecycle.
+    ///
+    /// The lifecycle is **acquired** in this constructor so the returned
+    /// `MountFS` holds one reference.  The caller must have pre-registered
+    /// the lifecycle via `BackendLifecycle::new()`.
+    pub fn new(lifecycle: Arc<BackendLifecycle>, mount_flags: MountFlags) -> Arc<Self> {
+        let _ = lifecycle.acquire().expect("BackendLifecycle::acquire failed on fresh lifecycle");
         counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Arc::new_cyclic(|self_ref| MountFS {
+        let mfs = Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: None,
-            inner_filesystem,
+            lifecycle,
             mountpoints: Mutex::new(BTreeMap::new()),
             path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
@@ -1236,19 +1679,23 @@ impl MountFS {
             no_dentry_cache: AtomicBool::new(false),
             umount_retry_count: AtomicU32::new(0),
             writers: AtomicU32::new(0),
-        })
+        });
+        counters::MOUNT_LIFECYCLE_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        diag_mount_event("create", &mfs);
+        mfs
     }
 
     /// 创建以指定 inode 为根的 MountFS（用于 bind mount）
     pub fn new_with_root(
-        inner_filesystem: Arc<dyn FileSystem>,
+        lifecycle: Arc<BackendLifecycle>,
         root_inner_inode: Arc<dyn IndexNode>,
         mount_flags: MountFlags,
     ) -> Arc<Self> {
+        let _ = lifecycle.acquire().expect("BackendLifecycle::acquire failed on fresh lifecycle");
         counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Arc::new_cyclic(|self_ref| MountFS {
+        let mfs = Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: Some(root_inner_inode),
-            inner_filesystem,
+            lifecycle,
             mountpoints: Mutex::new(BTreeMap::new()),
             path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
@@ -1262,7 +1709,10 @@ impl MountFS {
             no_dentry_cache: AtomicBool::new(false),
             umount_retry_count: AtomicU32::new(0),
             writers: AtomicU32::new(0),
-        })
+        });
+        counters::MOUNT_LIFECYCLE_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        diag_mount_event("create-with-root", &mfs);
+        mfs
     }
 
     fn remember_inode_path_hint(&self, child_ino: InodeId, hint: PathHint) {
@@ -1288,7 +1738,7 @@ impl MountFS {
         let root_inner = self
             .root_inner_inode
             .clone()
-            .unwrap_or_else(|| self.inner_filesystem.root_inode());
+            .unwrap_or_else(|| self.lifecycle.fs().root_inode());
 
         let self_arc = self.self_ref.lock().upgrade().unwrap();
         let root_mount_inode = MountFSInode::new(root_inner, self_arc);
@@ -1302,7 +1752,7 @@ impl MountFS {
         let root_inner = self
             .root_inner_inode
             .clone()
-            .unwrap_or_else(|| self.inner_filesystem.root_inode());
+            .unwrap_or_else(|| self.lifecycle.fs().root_inode());
         let self_arc = self.self_ref.lock().upgrade().unwrap();
         let inode = MountFSInode::new(root_inner, self_arc);
         counters::MFSI_FROM_ROOT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1488,6 +1938,8 @@ impl MountFS {
         }
 
         // Phase 4: cleanup self
+        counters::MOUNT_LIFECYCLE_UMOUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        diag_mount_event("pre-umount", self);
         self.finish_umount_cleanup();
         Ok(())
     }
@@ -1514,12 +1966,15 @@ impl MountFS {
             cache.clear_all()
         };
         drop(evicted);
-        self.inner_filesystem.on_umount();
+        // on_umount() is now driven by the BackendLifecycle drain in
+        // the scheduler — see drain_one_dying_lifecycle().
+        // Removing it here ensures sibling bind MountFS instances
+        // sharing the same backend are not prematurely torn down.
     }
 
     /// DragonOS-style narrow cleanup for propagation. Removes self from
     /// parent mountpoints, recursively cleans subtree without on_umount
-    /// (clones share inner_filesystem — only the source calls on_umount).
+    /// (clones share BackendLifecycle — only the last Drop triggers drain).
     pub(crate) fn umount_at_peer(self: &Arc<Self>) {
         if let Some(mp) = self.self_mountpoint() {
             if let Ok(md) = mp.inner_inode.metadata() {
@@ -1531,8 +1986,8 @@ impl MountFS {
 
     /// Recursive cleanup for propagation clones: unwind child mounts,
     /// unregister from peer/slave groups, clear backrefs and caches.
-    /// Does NOT call inner_filesystem.on_umount() — only the initiating
-    /// umount should trigger fs-level teardown.
+    /// Does NOT call on_umount() — only the scheduler drain triggers
+    /// fs-level teardown when the last MountFS reference drops.
     fn finish_propagated_cleanup(self: &Arc<Self>) {
         // Recurse into children first
         let children: Vec<Arc<MountFS>> = {
@@ -1604,6 +2059,8 @@ impl MountFS {
             propagate_umount(parent_mfs, inode_id, self);
         }
 
+        counters::MOUNT_LIFECYCLE_DETACH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        diag_mount_event("pre-detach", self);
         self.finish_umount_cleanup();
         Ok(())
     }
@@ -1611,13 +2068,13 @@ impl MountFS {
     // ── 属性访问 ───────────────────────────────────────────────────
 
     pub fn inner_filesystem(&self) -> Arc<dyn FileSystem> {
-        self.inner_filesystem.clone()
+        self.lifecycle.fs().clone()
     }
 
     pub fn root_inner_inode(&self) -> Arc<dyn IndexNode> {
         self.root_inner_inode
             .clone()
-            .unwrap_or_else(|| self.inner_filesystem.root_inode())
+            .unwrap_or_else(|| self.lifecycle.fs().root_inode())
     }
 
     pub fn mount_flags(&self) -> MountFlags {
@@ -1671,13 +2128,15 @@ impl MountFS {
 
 impl Drop for MountFS {
     fn drop(&mut self) {
-        // 防御性清理：断开 self_mountpoint 引用，确保即使 Weak 升级路径异常，
-        // MountFS ↔ MountFSInode 循环也能被打破。
-        self.self_mountpoint.lock().take();
-        // 清空 dentry_cache：cache 存储 Arc<MountFSInode>，后者持有
-        // Arc<MountFS>（本对象）。若不走 detach_from_parent_and_cleanup
-        // 的显式清理路径，此循环会阻止 MountFS 释放。
-        drop(self.dentry_cache.lock().clear_all());
+        counters::MOUNT_LIFECYCLE_DROP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // Release one MountFS reference from the shared backend lifecycle.
+        // If this was the last reference, CAS the state Active→Dying.
+        // The scheduler drain will then call on_umount() outside any lock.
+        //
+        // No logging, no locking, no allocation, no cache/callback cleanup:
+        // all of that is handled in the explicit normal/lazy/propagated
+        // cleanup paths (finish_umount_cleanup, finish_propagated_cleanup).
+        self.lifecycle.release();
         counters::MOUNTFS_ALIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -1688,30 +2147,35 @@ impl FileSystem for MountFS {
     }
 
     fn info(&self) -> super::file_system::FsInfo {
-        self.inner_filesystem.info()
+        self.lifecycle.fs().info()
     }
 
     fn name(&self) -> &str {
-        self.inner_filesystem.name()
+        self.lifecycle.fs().name()
     }
 
     fn super_block(&self) -> super::file_system::SuperBlock {
-        let mut sb = self.inner_filesystem.super_block();
-        sb.flags = self.mount_flags().bits() as u64;
+        let mut sb = self.lifecycle.fs().super_block();
+        sb.flags = mount_flags_to_st_flags(self.mount_flags());
         sb
     }
 
     fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<super::file_system::SuperBlock, SyscallErr> {
-        // Unwrap MountFSInode to reach the inner filesystem's statfs
-        if let Some(mfsi) = inode.as_any_ref().downcast_ref::<MountFSInode>() {
-            self.inner_filesystem.statfs(&mfsi.inner_inode)
+        // Unwrap MountFSInode to reach the inner filesystem's statfs,
+        // then OR in the mount-level flags (converted to ST_* ABI) so
+        // that statfs(2) reports ST_RDONLY / ST_NOSYMFOLLOW etc.
+        let fs = self.lifecycle.fs();
+        let mut sb = if let Some(mfsi) = inode.as_any_ref().downcast_ref::<MountFSInode>() {
+            fs.statfs(&mfsi.inner_inode)?
         } else {
-            self.inner_filesystem.statfs(inode)
-        }
+            fs.statfs(inode)?
+        };
+        sb.flags |= mount_flags_to_st_flags(self.mount_flags());
+        Ok(sb)
     }
 
     fn support_readahead(&self) -> bool {
-        self.inner_filesystem.support_readahead()
+        self.lifecycle.fs().support_readahead()
     }
 
     fn as_any_ref(&self) -> &dyn core::any::Any {
