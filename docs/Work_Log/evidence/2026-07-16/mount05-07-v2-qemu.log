@@ -1,0 +1,271 @@
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk comp
+make[1]: Entering directory '/app/os'
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART Debug Triggers  : 2 triggers
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+last 194044 Physical Frames.
+.text [0x80200000, 0x803f2000)
+.rodata [0x803f2000, 0x80425000)
+.data [0x80425000, 0x809a1000)
+.bss [0x809a1000, 0x90a04000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] PRNG initialized.
+[initramfs] unpacked: files=31 dirs=21 symlinks=1 bytes=1776086
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[kernel] official fs (x0) mounted at sdcard
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[kernel] tools disk (vdb1) mounted at tools
+sinitproc: 805D9000, einitproc: 80666978, sbash: 80667000, ebash: 8077F378, sbusybox: 80780000, ebusybox: 808D2C28, sosconfig: 808D3000, eosconfig: 808D3168
+[init] MangoCore stage-1 boot (initramfs mode)
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+ntpd: setting time to 2026-07-15 22:31:23.209359 (offset -14606925.883362s)
+[init] ntpd time sync ok
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/tmp -> /tmp
+[init] bind /tools/bin -> /bin
+[init] bind /tools/sbin -> /sbin
+[init] bind /tools/lib -> /lib
+[init] bind /tools/usr -> /usr
+[init] bind /tools/root -> /root
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0x800 ltp_runner=suite timer_smoke=false ext4_profile=false reclaim_profile=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02"]
+[initproc] LTP include list: ["mount05", "mount06", "mount07"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["epoll_create02", "atof01", "fptest01", "fptest02"], glibc: ["nice05"]
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin
+[initproc] installing busybox applets to /bin ...
+busybox applets already installed, skipping --install
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: No such file or directory
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on test scripts ...
+[initproc] chmod test scripts done, exit=0
+[initproc] apk add e2fsprogs ...
+7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/main/riscv64/APKINDEX.ta...]8[0K7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/community/riscv64/APKIND...]8[0K7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/testing/riscv64/APKINDEX...]8[0KOK: 1681 KiB in 7 packages
+[initproc] apk add -> exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] run_selected_groups start mask=0x800 order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] skip iozone (mask bit4 not set)
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] select group=ltp timeout=2400s
+#### OS COMP TEST GROUP START ltp-glibc ####
+[ltprunner] suite 'syscalls': parsed 1411 cases
+[ltprunner] libc=glibc
+[ltprunner] ltproot=/glibc/ltp
+[ltprunner] suites=syscalls
+[ltprunner] raw cases=1411
+[ltprunner] include=mount05,mount06,mount07
+[ltprunner] exclude=rt_sigtimedwait01,timerfd04,timerfd_settime02,acct01,acct02,acct02_helper,cacheflush01,clock_gettime03,clock_nanosleep03,clone303,eventfd06,fork13,fork14,futex_waitv01,futex_waitv02,futex_waitv03,futex_wake04,get_mempolicy01,get_mempolicy02,kill13,madvise06,madvise07,madvise08,madvise09,madvise11,memfd_create03,memfd_create04,msgctl05,msgstress01,process_madvise01,prctl06,prctl06_execve,prctl07,prctl10,rt_tgsigqueueinfo01,semctl08,set_thread_area01,sgetmask01,signal06,ssetmask01,sysinfo03,timer_create01,timer_create02,userfaultfd01,ustat01,ustat02,nice05
+[ltprunner] filtered=3 start_idx=655
+[ltprunner] group_timeout_secs=2350
+[ltprunner] case_timeout_secs=150
+=== LTP SUITE syscalls ===
+[ltprunner] #655 suite=syscalls case=mount05
+RUN LTP CASE mount05
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_supported_fs_types.c:161: [1;34mTINFO: [0mWARNING: testing only ext4
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+mount05.c:27: [1;34mTINFO: [0mMounting /dev/vdb2 to /tmp/ltp-glibc/LTP_moursznWq/mntpoint1 fstyp=ext4 flags=0
+mount05.c:29: [1;34mTINFO: [0mCreating file in 'mntpoint1/testfile'
+mount05.c:47: [1;34mTINFO: [0mMounting mntpoint1 to /tmp/ltp-glibc/LTP_moursznWq/mntpoint2 fstyp=ext4 flags=1000
+mount05.c:49: [1;32mTPASS: [0mAccessing to 'mntpoint2/testfile' passed
+mount05.c:50: [1;32mTPASS: [0mAccessing to 'mntpoint2/testdir' passed
+mount05.c:53: [1;34mTINFO: [0mUmounting /tmp/ltp-glibc/LTP_moursznWq/mntpoint2
+mount05.c:38: [1;34mTINFO: [0mUmounting /tmp/ltp-glibc/LTP_moursznWq/mntpoint1
+tst_device.c:442: [1;34mTINFO: [0mNo device is mounted at mntpoint2
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mount05 : 0
+[ltprunner] #656 suite=syscalls case=mount06
+RUN LTP CASE mount06
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_supported_fs_types.c:161: [1;34mTINFO: [0mWARNING: testing only ext4
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+mount06.c:43: [1;34mTINFO: [0mMounting /tmp/ltp-glibc/LTP_mouxnFGc6 to /tmp/ltp-glibc/LTP_mouxnFGc6 fstyp=none flags=1000
+mount06.c:44: [1;34mTINFO: [0mMounting none to /tmp/ltp-glibc/LTP_mouxnFGc6 fstyp=none flags=40000
+mount06.c:71: [1;34mTINFO: [0mMounting /dev/vdb2 to /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint1 fstyp=ext4 flags=0
+mount06.c:74: [1;34mTINFO: [0mMounting /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint1 to /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint2 fstyp=ext4 flags=2000
+mount06.c:76: [1;32mTPASS: [0mFile /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint1/testfile doesn't exist : ENOENT (2)
+mount06.c:82: [1;32mTPASS: [0mFile /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint2/testfile exists : passed
+tst_device.c:442: [1;34mTINFO: [0mNo device is mounted at /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint1
+mount06.c:91: [1;34mTINFO: [0mUmounting /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint2
+tst_device.c:442: [1;34mTINFO: [0mNo device is mounted at /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint1
+tst_device.c:442: [1;34mTINFO: [0mNo device is mounted at /tmp/ltp-glibc/LTP_mouxnFGc6/mntpoint2
+mount06.c:64: [1;34mTINFO: [0mUmounting /tmp/ltp-glibc/LTP_mouxnFGc6
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mount06 : 0
+[ltprunner] #657 suite=syscalls case=mount07
+RUN LTP CASE mount07
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_supported_fs_types.c:161: [1;34mTINFO: [0mWARNING: testing only ext4
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+mount07.c:145: [1;34mTINFO: [0mTesting behaviour when not setting MS_NOSYMFOLLOW
+mount07.c:55: [1;32mTPASS: [0mopen(link_file, 0, O_RDWR) returned fd 3
+mount07.c:67: [1;32mTPASS: [0mreadlink(/tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/link_file, buf, 4096) returned 47
+mount07.c:73: [1;32mTPASS: [0mreadlink strcmp succeeded
+mount07.c:90: [1;32mTPASS: [0mrealpath strcmp succeeded
+mount07.c:96: [1;32mTPASS: [0msymlink(/tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/test_file, /tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/temp_link_file) passed
+mount07.c:98: [1;32mTPASS: [0munlink(temp_link_file) passed
+mount07.c:110: [1;32mTPASS: [0mST_NOSYMFOLLOW not set on mntpoint
+mount07.c:153: [1;34mTINFO: [0mTesting behaviour when setting MS_NOSYMFOLLOW
+mount07.c:154: [1;31mTFAIL: [0mmount(tst_device->dev, MNTPOINT, tst_device->fs_type, MS_REMOUNT | MS_NOSYMFOLLOW, NULL) failed: EINVAL (22)
+mount07.c:52: [1;31mTFAIL: [0mopen(/tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/link_file, 0, O_RDWR) succeeded
+mount07.c:67: [1;32mTPASS: [0mreadlink(/tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/link_file, buf, 4096) returned 47
+mount07.c:73: [1;32mTPASS: [0mreadlink strcmp succeeded
+mount07.c:90: [1;32mTPASS: [0mrealpath strcmp succeeded
+mount07.c:96: [1;32mTPASS: [0msymlink(/tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/test_file, /tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint/temp_link_file) passed
+mount07.c:98: [1;32mTPASS: [0munlink(temp_link_file) passed
+mount07.c:110: [1;31mTFAIL: [0mST_NOSYMFOLLOW not set on mntpoint
+mount07.c:158: [1;34mTINFO: [0mUmounting /tmp/ltp-glibc/LTP_mouVP1P8K/mntpoint
+tst_device.c:442: [1;34mTINFO: [0mNo device is mounted at mntpoint
+
+Summary:
+passed   12
+failed   3
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mount07 : 1
+[ltprunner] done. executed=3 passed=2 failed=1 skipped=0 total_ms=8418 rate=21 cases/min
+#### OS COMP TEST GROUP END ltp-glibc ####
+[initproc] done ltprunner (libc=glibc) exit_code=0
+[timer] group ltprunner (libc=glibc) took 8s
+[initproc] sleep 1s before next group
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+make[1]: Leaving directory '/app/os'
