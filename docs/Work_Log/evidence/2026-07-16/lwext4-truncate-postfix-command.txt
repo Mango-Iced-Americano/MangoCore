@@ -1,0 +1,7 @@
+# Step 1: Inject config
+docker exec mangocore-os-dev-1 sh -lc 'cd /app && make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../docs/Work_Log/evidence/2026-07-16/lwext4-truncate-cold-reopen-rv64.conf'
+exit_status=0
+
+# Step 2: Run QEMU
+docker exec mangocore-os-dev-1 sh -lc 'cd /app && make -C os rv64-run 2>&1 | tee /app/docs/Work_Log/evidence/2026-07-16/lwext4-truncate-postfix-qemu-output.log'
+outer_exit_code=2 (Bad substitution in pipestatus, QEMU completed successfully)
