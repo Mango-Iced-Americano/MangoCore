@@ -70,7 +70,7 @@ lazy_static! {
                 let efs = self::fat32::EasyFileSystem::open(
                     crate::drivers::BLOCK_DEVICE.clone(),
                 );
-                self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
+                self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(efs), self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Ext4 => {
                 let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(
@@ -80,15 +80,15 @@ lazy_static! {
                     Err(e) => {
                         println!("[kernel] lwext4 mount failed: {:?}, falling back to ramfs", e);
                         let ramfs = self::ramfs::RamFS::new();
-                        return self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty());
+                        return self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ramfs), self::vfs::MountFlags::empty());
                     }
                 };
-                self::vfs::MountFS::new(ext4, self::vfs::MountFlags::empty())
+                self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ext4), self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Null => {
                 println!("[kernel] No filesystem found, falling back to ramfs");
                 let ramfs = self::ramfs::RamFS::new();
-                self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty())
+                self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ramfs), self::vfs::MountFlags::empty())
             }
         };
         mount_common_filesystems(&mfs);
@@ -102,7 +102,7 @@ lazy_static! {
 lazy_static! {
     pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
         let ramfs = self::ramfs::RamFS::new();
-        let mfs = self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty());
+        let mfs = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ramfs), self::vfs::MountFlags::empty());
 
         // 解包 initramfs cpio
         match self::initramfs::unpack_embedded(&mfs) {
@@ -177,7 +177,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("devfs: failed to read /dev/shm metadata")
             .inode_id;
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
-        let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
+        let devfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(devfs), self::vfs::MountFlags::empty());
         devfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev")));
         if let Some(dev_mfsi) = dev_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
             let backref = self::vfs::MountFSInode::new(
@@ -188,7 +188,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         }
         // Mount shmfs as a sub-mount of devfs, so MountFS owns the Arc<TmpFS>
         // and TmpFSInode.fs.upgrade() stays valid.
-        let shmfs_mnt = self::vfs::MountFS::new(shmfs, self::vfs::MountFlags::empty());
+        let shmfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(shmfs), self::vfs::MountFlags::empty());
         shmfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev/shm")));
         let shm_backref = self::vfs::MountFSInode::new(
             shm_dir.clone() as Arc<dyn self::vfs::IndexNode>,
@@ -212,7 +212,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         let procfs = crate::fs::procfs::ProcFS::new();
         crate::fs::procfs::files::register_all(procfs.root())
             .expect("procfs: failed to register root entries");
-        let procfs_mnt = self::vfs::MountFS::new(procfs, self::vfs::MountFlags::empty());
+        let procfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(procfs), self::vfs::MountFlags::empty());
         procfs_mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed);
         procfs_mnt.set_mount_path(Some(alloc::string::String::from("/proc")));
         if let Some(proc_mfsi) = proc_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
@@ -236,7 +236,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         let sysfs = crate::fs::sysfs::SysFS::new();
         crate::fs::sysfs::files::register_all(sysfs.root())
             .expect("sysfs: failed to register root entries");
-        let sysfs_mnt = self::vfs::MountFS::new(sysfs, self::vfs::MountFlags::empty());
+        let sysfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(sysfs), self::vfs::MountFlags::empty());
         sysfs_mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed);
         sysfs_mnt.set_mount_path(Some(alloc::string::String::from("/sys")));
         if let Some(sys_mfsi) = sys_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
@@ -263,7 +263,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
             tmpfs.root_inode().set_metadata(&meta).ok();
         }
-        let tmpfs_mnt = self::vfs::MountFS::new(tmpfs, self::vfs::MountFlags::empty());
+        let tmpfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(tmpfs), self::vfs::MountFlags::empty());
         tmpfs_mnt.set_mount_path(Some(alloc::string::String::from("/tmp")));
         if let Some(tmp_mfsi) = tmp_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
             let backref = self::vfs::MountFSInode::new(
@@ -328,11 +328,11 @@ pub fn mount_block_fs(
                     return None;
                 }
             };
-            self::vfs::MountFS::new(ext4, MountFlags::empty())
+            self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ext4), MountFlags::empty())
         }
         self::filesystem::FS_Type::Fat32 => {
             let efs = self::fat32::EasyFileSystem::open(block_device.clone());
-            self::vfs::MountFS::new(efs, MountFlags::empty())
+            self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(efs), MountFlags::empty())
         }
         self::filesystem::FS_Type::Null => {
             println!("[kernel] mount_block_fs: {} — no filesystem detected on block device", label);
@@ -658,11 +658,20 @@ pub fn vfs_lookup(
             return Err(crate::syscall::errno::ENOTDIR);
         }
 
-        if is_last && !follow_final && file_type == FileType::SymLink {
+        if is_last && !follow_final && file_type == FileType::SymLink && !has_trailing_slash {
             return Ok(next);
         }
 
         if file_type == FileType::SymLink {
+            // MS_NOSYMFOLLOW — if the mount containing this symlink has the
+            // flag set, do NOT follow; return ELOOP (Linux mount(2) semantics).
+            // Check the symlink's MountFS (next), not the parent's (current).
+            if let Some(next_mfsi) = next.as_any_ref().downcast_ref::<crate::fs::vfs::MountFSInode>() {
+                if next_mfsi.mount_fs.mount_flags().contains(crate::fs::vfs::MountFlags::NOSYMFOLLOW) {
+                    return Err(crate::syscall::errno::ELOOP);
+                }
+            }
+
             if symlink_count >= MAX_SYMLINK_FOLLOW {
                 return Err(crate::syscall::errno::ELOOP);
             }
