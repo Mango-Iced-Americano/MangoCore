@@ -24,6 +24,7 @@ use crate::fs::vfs::{
 };
 use crate::fs::vfs::file::FileFlags;
 use crate::fs::vfs::file_system::FileSystem;
+use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::page_cache::PageCache;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -821,13 +822,25 @@ impl IndexNode for Ext4OSInode {
         counters::LWEXT4_ENSURE_PC_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut cache = self.page_cache.lock();
         if cache.is_none() {
-            // Check global registry for existing PageCache (shared across inode instances)
-            {
-                let registry = self.fs.page_caches.lock();
-                if let Some(pc) = registry.get(&self.inode_id) {
-                    *cache = Some(pc.clone());
-                    return cache.clone();
-                }
+            // Check global registry for existing PageCache (shared across inode instances).
+            // The lock guard is ephemeral — released after .cloned() so no lock is held
+            // during set_backend() below.
+            let cached_pc = self.fs.page_caches.lock().get(&self.inode_id).cloned();
+            if let Some(pc) = cached_pc {
+                // Registry hit: cached pages survive dentry eviction, but the old
+                // backend still references a stale logical_size atom (Arc<AtomicUsize>)
+                // from the prior inode instance. Replace it with a fresh backend
+                // pointing at this inode's current atom so writeback clamps to the
+                // correct EOF.
+                let backend = Arc::new(LwExt4PageCacheBackend::new(
+                    Arc::downgrade(&self.fs),
+                    self.path.clone(),
+                    self.logical_size.clone(),
+                    self.fs.lw_path(&self.path),
+                ));
+                pc.set_backend(backend);
+                *cache = Some(pc);
+                return cache.clone();
             }
             // No existing PageCache — create new one and register
             let backend = Arc::new(LwExt4PageCacheBackend::new(
@@ -1309,15 +1322,38 @@ impl IndexNode for Ext4OSInode {
         if self.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
-        let _lock = self.fs.lw.lock();
-        let lw_path = self.fs.lw_path(&self.path);
-        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        f.file_open(&lw_path, 0x2)
-            .map_err(|e| from_lwext4(e.abs()))?;
-        let guard = FileGuard::new(&mut f);
-        guard.f.file_truncate(len as u64)
-            .map_err(|e| from_lwext4(e.abs()))?;
-        drop(guard);
+        // lwext4 truncate: must hold fs.lw
+        {
+            let _lock = self.fs.lw.lock();
+            let lw_path = self.fs.lw_path(&self.path);
+            let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
+            f.file_open(&lw_path, 0x2)
+                .map_err(|e| from_lwext4(e.abs()))?;
+            let guard = FileGuard::new(&mut f);
+
+            // VFS logical_size may exceed lwext4 on-disk size after extension;
+            // the gap is a sparse tail that LwExt4PageCacheBackend::read_page
+            // zero-fills on eviction/remount.  Shrinking does NOT need to
+            // pre-write zeros over [len, old_size) — file_truncate is enough.
+            guard.f.file_truncate(len as u64)
+                .map_err(|e| from_lwext4(e.abs()))?;
+            drop(guard);
+            // _lock released here
+        }
+
+        // Ensure PageCache coherence after on-disk truncation:
+        // remove pages above new EOF and zero the tail of the retained page.
+        if let Some(pc) = self.page_cache() {
+            pc.truncate(len)?;
+            let offset_in_page = len & (PAGE_SIZE - 1);
+            if offset_in_page > 0 {
+                let tail_page = len >> PAGE_SIZE_BITS;
+                if pc.contains_page(tail_page) {
+                    let frame = pc.frame_for_read(tail_page)?;
+                    frame.ppn.get_bytes_array()[offset_in_page..].fill(0);
+                }
+            }
+        }
         self.logical_size.store(len, Ordering::Relaxed);
         Ok(())
     }

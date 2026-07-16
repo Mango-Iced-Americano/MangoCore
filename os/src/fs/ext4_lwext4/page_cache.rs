@@ -62,25 +62,6 @@ impl LwExt4PageCacheBackend {
         }
     }
 
-    /// Ensure `logical_size` is known, probing from lwext4 on first call.
-    fn ensure_size_known(&self, fs: &Arc<super::ext4fs::Ext4FileSystem>) -> Result<usize, SyscallErr> {
-        let cached = self.logical_size.load(Ordering::Relaxed);
-        if cached != LWEXT4_SIZE_UNKNOWN {
-            return Ok(cached);
-        }
-        let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        let size = if f.file_open(&self.lw_path, 0x0).is_ok() {
-            let s = f.file_size() as usize;
-            f.file_close().ok();
-            s
-        } else {
-            0
-        };
-        self.logical_size.store(size, Ordering::Relaxed);
-        Ok(size)
-    }
-
     /// Atomic fetch_max update for `logical_size`, treating UNKNOWN as 0.
     fn note_logical_size_atomic(logical_size: &AtomicUsize, new_size: usize) {
         let mut prev = logical_size.load(Ordering::Relaxed);
@@ -106,26 +87,26 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         }
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let offset = index * PAGE_SIZE;
-
-        // Lazy refresh: probe file size from lwext4 on first call
-        let file_size = self.ensure_size_known(&fs).unwrap_or(0);
-        let read_len = PAGE_SIZE.min(file_size.saturating_sub(offset));
-        if read_len == 0 {
-            // Past EOF — fill with zeros
-            buf[..PAGE_SIZE].fill(0);
-            return Ok(PAGE_SIZE);
-        }
         let _lock = fs.lw.lock();
         let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
         f.file_open(&self.lw_path, 0x0)
             .map_err(|e| from_lwext4(e.abs()))?;
+        // Snapshot physical EOF from lwext4 — NOT the shared logical_size which
+        // may reflect VFS-level extensions that lwext4 hasn't materialized.
+        let physical_eof = f.file_size() as usize;
         // Use closure to ensure file_close() on all error paths
         let result = (|| -> Result<usize, SyscallErr> {
+            if offset >= physical_eof {
+                // Page wholly beyond physical EOF — pure hole, zero-fill
+                buf[..PAGE_SIZE].fill(0);
+                return Ok(PAGE_SIZE);
+            }
+            let physical_len = PAGE_SIZE.min(physical_eof - offset);
             f.file_seek(offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            let n = f.file_read(&mut buf[..read_len])
+            let n = f.file_read(&mut buf[..physical_len])
                 .map_err(|e| from_lwext4(e.abs()))?;
-            // Zero-fill the remainder of the page (last partial page or sparse)
+            // Zero-fill the remainder of the page (tail of last partial page)
             if n < PAGE_SIZE {
                 buf[n..PAGE_SIZE].fill(0);
             }
@@ -174,22 +155,30 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
         f.file_open(&self.lw_path, 0x0)
             .map_err(|e| from_lwext4(e.abs()))?;
-        let start_offset = start_index * PAGE_SIZE;
+        // Snapshot physical EOF from lwext4 once — avoid seeking/reading past
+        // it for pages that map to holes beyond lwext4's actual inode size.
+        let physical_eof = f.file_size() as usize;
+        // Use closure to ensure file_close() on all error paths
         let result = (|| -> Result<usize, SyscallErr> {
-            f.file_seek(start_offset as i64, 0)
-                .map_err(|e| from_lwext4(e.abs()))?;
-            let mut total = 0;
-            for page in pages.iter_mut() {
-                let read_len = PAGE_SIZE.min(page.len());
-                let n = f.file_read(&mut page[..read_len])
-                    .map_err(|e| from_lwext4(e.abs()))?;
-                if n < PAGE_SIZE {
+            for (i, page) in pages.iter_mut().enumerate() {
+                let page_offset = (start_index + i) * PAGE_SIZE;
+                if page_offset >= physical_eof {
+                    // Page wholly beyond physical EOF — zero-fill
                     let page_len = page.len();
-                    page[n..PAGE_SIZE.min(page_len)].fill(0);
+                    page[..PAGE_SIZE.min(page_len)].fill(0);
+                } else {
+                    let physical_len = PAGE_SIZE.min(physical_eof - page_offset);
+                    f.file_seek(page_offset as i64, 0)
+                        .map_err(|e| from_lwext4(e.abs()))?;
+                    let n = f.file_read(&mut page[..physical_len])
+                        .map_err(|e| from_lwext4(e.abs()))?;
+                    if n < PAGE_SIZE {
+                        let page_len = page.len();
+                        page[n..PAGE_SIZE.min(page_len)].fill(0);
+                    }
                 }
-                total += n;
             }
-            Ok(total)
+            Ok(pages.len() * PAGE_SIZE)
         })();
         f.file_close().ok();
         result

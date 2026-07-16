@@ -660,6 +660,13 @@ diag=1
 
 - **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`write_at`、`rename`、`note_logical_size`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`write_pages`）
 
+## PageCache: registry 复用未刷新 backend 的 logical_size 引用（stale EOF 夹钳）
+
+- **根因**: `ensure_page_cache()` 从全局 `fs.page_caches` registry 命中旧 PageCache 时，backend 内部的 `Arc<AtomicUsize>`（`logical_size`）仍指向先前的 `Ext4OSInode` 实例。新 inode 有自己独立的 `logical_size` atom。`write_at` 更新新 atom，writeback 仍读旧 atom → EOF 夹钳在旧大小上，扩展写入数据静默丢失。
+- **修复**: registry 命中路径先克隆 `Arc<PageCache>`，释放 registry 锁，然后用当前 inode 的 `fs`/`path`/`logical_size`/`lw_path` 构造新 `LwExt4PageCacheBackend`，调用 `pc.set_backend(backend)` 替换。保留新 inode 的 creation path 不变。
+- **教训**: 任何全局 registry 复用带 per-instance 内部引用的对象（`Arc<AtomicUsize>`、`Weak<>`、裸指针等）时，必须检查这些内部引用是否指向当前实例的数据。注册时不只保存对象本身，还要明确哪些字段是 per-instance 的、需要在复用点刷新。解决模式是：从 registry 克隆后先释放锁，再更新需要刷新的内部状态。
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`ensure_page_cache`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`LwExt4PageCacheBackend`、`logical_size`）
+
 ## LTP 驱动的批量语义修复工作流
 
 ### 问题特征
