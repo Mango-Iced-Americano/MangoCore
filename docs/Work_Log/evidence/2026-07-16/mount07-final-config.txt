@@ -1,0 +1,6 @@
+config:
+mode=run
+mask=0x800
+ltp_runner=inline
+ltp_libc=glibc
+ltp_include=mount07
