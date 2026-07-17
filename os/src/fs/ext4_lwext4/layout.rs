@@ -962,11 +962,10 @@ impl IndexNode for Ext4OSInode {
                 // Use real ext4 inode number so the PageCache stays findable
                 // after rename (the real inode number is stable across renames;
                 // hash_path changes when the path changes).
-                let real_inode = self
-                    .fs
-                    .probe_inode_meta(&child_path)
-                    .map(|e| e.inode_id)
-                    .unwrap_or_else(|_| hash_path(&child_path));
+                let real_inode = self.fs.probe_inode_meta(&child_path)?.inode_id;
+                // inode numbers can be reused after unlink. A new file must not
+                // inherit fully-valid pages from a prior inode incarnation.
+                self.fs.page_caches.lock().remove(&real_inode);
                 let inode = Ext4OSInode::new_child_seeded(
                     self.fs.clone(),
                     child_path,
