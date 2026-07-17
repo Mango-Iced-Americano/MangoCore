@@ -2,7 +2,174 @@
 
 ---
 
+## 2026-07-17
+
+### docs/board: 按 260710/260717 重组实板报告并完整归档 Python 性能证据
+
+**涉及文件：**
+- `docs/09_debug/la64_on_board/260710/` — 将原 `la64_on_board/` 下 32 个 Markdown 文件整体迁入日期批次，保留 29 篇编号专题、`README.md`、`development-log.md`、hole-read 复盘及既有工作区差异；同步修正 48 处写死的仓库路径
+- `docs/09_debug/la64_on_board/{README.md,260717/README.md}` — 新增父级时间线入口和 2026-07-17 Python 性能批次导航，明确 production、perf_diag、QEMU、已确认/证据不足等状态词
+- `docs/09_debug/la64_on_board/260717/{01..06}-*.md` — 按旧实板专题的粒度重写 production 基线、非对齐 trap、匿名页显式释放 O(N²)、ext4 小文件、strict-aligned 第一次优化实验和原始数据复核索引；保留 18 项完整数据、源码执行链、失败假设、证据等级和未覆盖边界
+- `docs/09_debug/la64_on_board/260717/raw-data/` — 从被忽略的 `target/` 复制 manifest、records JSONL、220 个实验文本文件、10 个 strict build/runtime 文件、串口 raw、CSV/Markdown reports、PGO/LTO/runtime manifest 和双架构构建日志；大型 uImage/ELF/runtime 只记录大小与 SHA-256
+- `docs/README.md`、`docs/03_fs/{ext4,vfs-core}.md`、`docs/09_debug/{README,perf_diag}.md` — 更新父级导航、ext4 专题和历史直达链接到日期目录
+
+**验证：**
+- 迁移前后审计确认旧批次均为 32 个顶层文档；父级只保留新时间线 `README.md`，`260710/` 的 102 个同目录相对链接继续有效 ✅
+- `260717/raw-data/` 归档 production 37 records/39 raw/13 reports、deepdiag 56/58/11、结构 A/B 18/22/1、strict 42/44/14，并追加 strict build/runtime manifest/双架构验证日志；未复制 16–81 MiB 二进制 ✅
+- 对四个 run 的 manifest/records/raw/reports、结构构建 verification、strict build/manifest/verify 日志逐目录执行 `diff -rq`/`cmp`，归档副本与 `target/` 来源逐字节一致 ✅
+- 本轮为文档路径重组和既有数据归档，没有修改内核/用户态逻辑；不重复构建或上板，沿用各原始 run 已记录的双架构编译、QEMU smoke、实板 72/72 和 18/18 结果
+- `la64_on_board/**` 本地 Markdown 链接检查 0 broken；父级及 39 篇批次文档共 40 份 YAML frontmatter 解析通过；`git diff --check` 无错误。全仓检查只剩 `docs/CONTRIBUTING.md` 既有模板占位链接 `./assets/{module}/xxx.png`，与本次迁移无关 ✅
+
+**备注：**
+- 原 `docs/09_debug/python-performance-checkpoint-20260716.md` 已迁入并扩写为 `260717/01-python-performance-baseline.md`；strict 后测拆到独立 `05-strict-align-first-experiment.md`，防止基线与后测混写。
+- 原始日志不改写；`records.jsonl` 中当时的 `target/` 绝对路径和 dirty status 原样保留。`regex/dict` reconstructed 字段、四条 benchmark 前部署失败、PGO 13 个失败文件和 ext4 未做 offline e2fsck 等边界均未省略。
+
+### perf/python: 完成 CPython 全依赖 strict-aligned 重编译与 2K1000LA ext4 实板对照
+
+**涉及文件：**
+- `scripts/build_cpython_runtime_la64_strict.sh` — 用 GCC 15.2.0 musl 工具链将 musl、zlib、bzip2、xz、libffi、expat、mpdecimal、OpenSSL、ncurses、readline、SQLite 和 CPython 3.14.5 全部按 `-march=loongarch64 -mabi=lp64d -mstrict-align` 构建；保留 PGO/LTO，生成逐 ELF 依赖/哈希 manifest；确定性打包时省略合成根成员 `./`
+- `scripts/deploy_cpython_runtime.py` — 增加 artifact 成员安全检查、P4/ext4/容量门禁和板端 SHA；避免依赖待替换的旧 Python 解包，改用 BusyBox 原生 tar/xz，在 staging smoke 后原子发布 canonical runtime
+- `scripts/run_cpython_bench_matrix.py`、`scripts/kernel_perf.py` — 支持 strict runtime 的逐项实板采集、workload body 前后 stats reset/snapshot、目标端 JSONL 和 CSV/Markdown 留档
+- `user/tools/cpython/{strict_runtime_smoke.sh,run_strict_functional.sh,run_strict_benchmark.sh,cpython_benchmark.sh,cpython_testcode.sh}`、`L3_check_files.sh`、`L4_startup.sh`、`L7_filesystem.py`、`L8_subprocess.py`、`L9_socket.py` — 将 runtime/suite/tmp/pycache/结果约束到 P4 `/persist` ext4，适配私有 musl loader，保持 L3-L9 72 项功能门禁并按“一次预热 + 一次正式”运行 18 项 benchmark
+- `target/perf-runs/20260717T042020Z-cpython-strict-align/` — 保存 manifest、原始串口、结构化记录、18 项正式表、trap 对照和时间趋势；完整结论见 `reports/strict_align_comparison.md`
+- `docs/09_debug/la64_on_board/260717/01-python-performance-baseline.md`、`.agents/skills/mango-workflow/references/{harness-patterns,debugging-patterns}.md` — 追加 strict-aligned 后续证据、部署归档约束和串口超时判读经验
+
+**验证：**
+- strict runtime manifest 审计 94 个 ELF，strict flags 覆盖完整原生闭包；artifact 为 81,627,728 B，SHA-256 `abbc714ce59f105fe1ebaab00cc053cea3d09161a6e51c2431112b6beeaff56a`，manifest SHA-256 `2be976aabcf2a3f964447a3cbaca818f588683e6d3540bb40b6c5ad3eabe447c` ✅
+- CPython PGO 训练运行 43/43 个文件、9,846 个测试，生成 309 个 `.gcda`、2,318,060 B；训练命令有 13 个文件失败和 1 个 env_changed，部分可选/测试扩展出现 `-Wmissing-profile`，只声明 profile 数据已采集/使用，不冒充上游 test 全绿或全 ELF 覆盖 ⚠️
+- 离线 LoongArch runtime import/thread/sysconfig smoke 通过；Docker 内严格串行 `rv64-kernel-build-only`、`la64-kernel-build-only` 均退出 0 ✅
+- 实板 P4 canonical runtime `/persist/pyperf/r/s-abbc714ce59f` smoke 通过；项目 judge 对 L3-L9 原始串口判定 `72/72`、组退出码 0，含 ext4 文件、signal、线程、subprocess、DNS、HTTP 和 HTTPS ✅
+- 18/18 benchmark 均在 P4 `/persist` ext4 完成一次预热 + 一次正式样本；每项正式 body 的非对齐 trap、handler ticks、2/4/8-byte load/store 和浮点分类全部为 0，无 benchmark panic/hang/校验失败 ✅
+- 最强匹配 `bm_float` 使用同归档诊断内核、同 suite、同 runner 和同 ext4，非对齐 trap `3,000,039 -> 0`、handler ticks `4,767,941,219 -> 0`、sys `50.070 -> 0.027 s`；`bm_string` 同 workload/runner 为 `373,371 -> 0`，均下降 100% ✅
+- 18 项 strict body 累计 303.470 秒；旧 production 为 1,928.806 秒，表面 6.36 倍只作为辅助趋势，不作隔离的 production strict-align 加速结论。strict `bm_fileio` 仍为 43.127 秒、sys 34.418 秒，5,000 小文件 metadata 41.170 秒，确认 ext4 固定税仍独立存在 ⚠️
+- 末尾确认 `/persist` 为 ext4 rw、P4 4 GiB、18 份板端 JSONL 与 runtime manifest 哈希一致，`sync` 退出 0；P3 `/tools` 未写 ✅
+- `os/src/hal/arch/loongarch64/trap/mod.rs` 源码 SHA-256 在实验前后均为 `1c513e5df2499097354e46932ff70b0101061b8c5219cc35a84f617c9e3b5471`，未采集 PC Top-N、未修改内核模拟器或实施内核优化 ✅
+
+**备注：**
+- 旧控制数据按用户要求直接复用。float 是强匹配 trap 对照；string 为同 workload/runner 近匹配；nbody 旧侧在 FAT32 且仅 39 次；fileio 旧侧为 100 文件/256 KiB 的 `diag-short`，后两者不用于正式耗时归因。其余 14 项没有旧侧匹配 body trap 计数，只记录 strict post-only=0。
+- 首次使用 P3 旧 Python `tarfile` 解压 runtime 900 秒超时；首版 BusyBox tar 又因显式根成员 `./` 被当前 VFS 拒绝。最终规范化包只省略该合成根成员，其余 8,809 个成员 metadata/content 与原包归一化清单一致。失败均发生在 benchmark 前，保留在 `failures.csv`。
+- P4 仍有失败部署的隐藏 `.s-dbdb27d10477.staging`；为避免慢递归删除再次占用串口，本轮未清理，它不在 canonical runtime 路径且未参与测试。
+
+### tooling: 忽略根目录性能产物，避免 Codex 临时 Git 快照处理大镜像
+
+**涉及文件：**
+- `.gitignore` — 增加根锚定的 `/target/`，排除性能原始数据、磁盘镜像及其他生成产物
+
+**验证：**
+- `git check-ignore` 确认 `target/perf-runs/.../sdcard-la-diag-basic.img` 命中 `/target/` ✅
+- 本次仅修改 Git 忽略规则和工作日志，不涉及内核源码，无需双架构构建或 QEMU 测试
+
+**备注：**
+- 忽略规则不会删除现有 `target/` 内容；已经写入 `.git/objects` 的大对象需另行清理。
+
+## 2026-07-16
+
+### perf/python: 接入 18 项 CPython benchmark，并改为不覆盖 P3 的实板采集流程
+
+**涉及文件：**
+- `user/tools/cpython/bench/` — 引入 `Mango-Iced-Americano/cpython-tests` 的 18 项 workload；统一固定随机输入、每样本结果校验和独立状态，拆分 file I/O、fork/exec、thread 的阶段指标；修复原 `pidigits` 生成约 139 万位错误数字及 `richards` 首轮断链后空转的问题，并以固定提交的 `python/pyperformance` 实现替换
+- `user/tools/cpython/{cpython_benchmark.sh,run_cpython.sh,cpython_testcode.sh}` — 增加一预热五采样、逐项超时、START/END、P2 scratch 强制门禁和私有 musl loader 继承；runtime root 与 benchmark root 解耦，默认 72 项功能门禁保持不变，仅显式设置 `CPYTHON_RUN_BENCHMARKS=1` 时联跑
+- `scripts/{kernel_perf.py,run_cpython_bench_matrix.py}` — 串口原始日志中解析 `CPYTHON_BENCH_JSON`，输出逐样本、汇总和阶段 CSV；18 项逐一走独立 CPython 进程，并按 production/diag 模式和 profile 记录；源码指纹同时纳入未跟踪 source-like 输入的逐文件 SHA-256，避免 `git diff` 漏掉新 runner
+- `scripts/{package_cpython_bench.py,deploy_cpython_bench.py}` — 生成确定性 benchmark-only ZIP，通过本地 HTTP、板端 SHA-256 和三段串口 ACK 部署到 P2 `/scratch`；继续使用只读 P3 `/tools` 中现有 CPython runtime，不覆盖 SSD P3
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀第三方 benchmark 在纳入基线前必须验证有效工作量、确定性、原始样本与隔离状态的模式
+
+**验证：**
+- 宿主完成 18/18 workload 的一次冒烟及完整 `1 warmup + 5 measured` 矩阵：18/18 汇总通过、90/90 正式样本成功，本轮各项 CV 均低于 3.3%；修复后的 `nbody` host 中位数约 0.188 s，不再低于调度噪声尺度 ✅
+- 构造真实 `kernel_perf.py run -> analyze` 样本，确认 `cpython_bench_samples.csv`、`cpython_bench_summary.csv` 和 `cpython_bench_phases.csv` 分别保留逐样本、统计量及 file/fork 阶段值；两项冒烟生成 2 个 summary、2 个 sample 和 12 个 phase row ✅
+- benchmark-only ZIP 连续生成两次逐字节一致：65,499 B、23 个文件、SHA-256 `8deb08fb507f4ae28da996a02b46f811194f79ccb9a569f52e287e12bbbf205d`；部署命令拆成 272/224/139 B，含 marker 的最长串口行低于 512 B ✅
+- 2K1000LA production persist Shell 实板部署到 P2 `/scratch/mangocore-cpython-bench-suite` 成功；HTTP 下载/解压、板端 ZIP SHA-256 和 runner `--list` 三阶段均退出 0，18 项 benchmark 全部可见；P3/P4 未写入 ✅
+- 实板 production 快速矩阵改为 `1 warmup + 3 samples`：`bytesio/chaos/decimal/dict` 均通过，中位数分别为 69.54/200.80/37.84/62.03 秒，CV 分别为 0.38%/0.23%/0.24%/0.11%；多项纯对象 workload 的 sys 占比仍达约 25%–51%，属于稳定可复现的系统态异常 ⚠️
+- `bm_fileio` 首样本约 347.09 秒、sys 332.50 秒；阶段中 5,000 文件元数据操作约 273.60 秒、顺序写+fsync 约 48.18 秒、direct write+fsync 约 12.67 秒，而热读仅约 0.09–0.27 秒。宿主 1000 秒 capture budget 到期后板端仍无控制面响应，直接串口 Ctrl-C/换行/echo 均无输出，必须物理 RESET 后从该项续跑 ⚠️
+- 物理 RESET 后 `bm_fileio` 以 0 预热 + 3 正式样本复测通过：中位数 348.214 秒、CV 0.657%、sys 约 95.9%；随后按用户要求将剩余项目改为 1 预热 + 1 正式样本，最终 18/18 benchmark 均取得有效实板结果 ✅
+- 单样本耗时最高的 `regex/fileio/json_loads/thread/chaos` 分别为 425.878/348.214/255.674/237.595/200.801 秒；`regex` 的 sys 约 71.3%，`thread` 的 queue/无竞争锁/event-condition 阶段分别约 137.02/64.31/32.06 秒，形成后续诊断窗口优先级 ⚠️
+- `bm_fork` 初跑因板上旧 P3 `run_cpython.sh` 未向 Python 子进程导出 `CPYTHON_LD` 而返回 `-127`；保持 P3 只读，在 scratch benchmark wrapper source 后显式导出 loader，重新打包 65,666 B、SHA-256 `acf7f7731e287e0592f69b2e0ea8340b7a1d4852cfeea04b094a9ee3f8729534` 并部署到 P2，最终 1+1 通过：65 个子进程 124.869 秒 ✅
+- `python3 scripts/kernel_perf.py analyze` 生成 raw JSONL/串口日志、逐样本/汇总/阶段 CSV 和 `reports/cpython_board_analysis.md`；报告明确区分三样本高置信基线与单样本方向性结果，并保留早期失败作为审计证据 ✅
+- 按实板前三项重复性均低于 0.4% 的结果和用户时间约束，将 `bench_runner.py`、板端 wrapper 与主机 matrix 的默认值统一为 1 次预热 + 1 次正式样本；仍可对入选热点显式传 `--runs 3` 补强置信度 ✅
+- 最终默认策略包为 65,664 B、SHA-256 `53e68df696d5394e738bbac620de46ddb0a60a1299f19454e32f0bda0dfc2568`，重新部署到 P2 后 ZIP 哈希和 18 项清单通过；不传任何采样变量运行 `bm_pidigits` 时环境事件明确报告 `warmups=1,runs=1`，正式样本 6.033 秒并通过 ✅
+- Docker `zhouzhouyi/os-contest:20260104` 中严格串行执行 `make rv64-kernel-build-only` 与 `make la64-kernel-build-only`，均成功；随后构建 production `kernel-2k1000-persist-shell.ui`（16,757,160 B，SHA-256 `c34943e7178d7fcf5f870c58ce62ac3c814477a3022d530da7c9cc8e80d3c166`）和 `perf_diag` `kernel-2k1000-perf-diag-shell.ui`（16,549,536 B，SHA-256 `b81b6152885730bff0dae15890021b032acd36d3ace438123e42b5469e7cac86`）✅
+- shell/Python 语法、matrix/deploy dry-run、确定性 bundle 比较、CSV analyzer smoke 与 `git diff --check` 通过 ✅
+
+**备注：**
+- 本轮只改造测试和采集，不做内核性能优化。正式性能数字仍必须来自 2K1000LA production 镜像；诊断镜像只用于解释 production 现象。
+- 本轮最终瓶颈顺序为：文件元数据/ext4/块设备 > regex 的高频 syscall 分布 > thread/futex/调度 > 通用对象负载的内存/时间 syscall > fork/exec/CoW；这是诊断优先级，不是优化结论。
+- 曾离线生成完整 P3 镜像并执行 e2fsck/内容哈希校验，但确认它会整体替换原 `/tools` 后没有写入 SSD；最终流程改为只部署 65 KiB 源码包到 P2 scratch。P1/P3/P4 均不写。
+- 按用户要求不追加大规模 QEMU 跑分；双架构编译与宿主 harness 验证完成后直接进入实板 production 矩阵，QEMU 仅在实板发现需要架构筛查的异常时补充。
+
+### perf/python: 完成 production ext4 实板矩阵并归档三类性能问题证据
+
+**涉及文件：**
+- `os/src/task/perf.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — 在 `core` profile 增加用户非对齐异常总数、handler ticks、load/store 宽度和浮点分类；修正零起点计时门禁，并为 page fault/frame alloc/free 补充定向耗时计数
+- `user/tools/cpython/bench/{bench_runner.py,bm_fileio.py,diag_mmap_release.py,diag_math_unaligned.py}` — target stats 只包住 workload body；增加缩放 ext4 fileio、居民匿名映射释放和 libm/数值非对齐归因探针，正式 workload 默认不变
+- `scripts/{kernel_perf.py,run_cpython_bench_matrix.py,boot_2k1000_tftp.py}` — 支持 ext4 work base、目标端 JSONL、prompt-prefix 解析，并修正 U-Boot prompt 后竞态字节导致的一键启动误判
+- `target/perf-runs/20260716T102350Z-cpython-ext4-production/` — production manifest、33 条结构化记录、原始串口日志、18 项正式 CSV 和综合内核分析报告
+- `target/perf-runs/20260716T-cpython-deepdiag/` — 非对齐、mmap 释放、ext4/SATA/PageCache 和探针税的定向诊断原始记录
+- `target/perf-runs/20260716T-perf-diag-structural-ab{,-run}/` — 相邻 production/diag 镜像、ELF/initramfs 身份与实板结构 A/B 原始记录
+- `docs/09_debug/perf_diag.md`、`docs/09_debug/la64_on_board/260717/01-python-performance-baseline.md`、`.agents/skills/mango-workflow/references/{debugging-patterns,harness-patterns}.md` — 同步 counter 解释、实板/QEMU capability 边界、平方增长定位法、诊断构建结构偏差和停止点归档
+
+**验证：**
+- 使用 production uImage SHA-256 `bf1668b9bdbd1068914ac1a683ef58c821c6b03af1016f69771a9a2c25ba63c0`、suite ZIP SHA-256 `5059b61e4b241f35ef2f46a859df1848dd056e3a08d2127f7b2bd340a9abdb4e`；全部 suite/tmp/pycache/fileio payload 位于 `/persist` ext4，解释器位于 `/tools` ext4 ro ✅
+- production 18/18 benchmark 均通过，正式 body 累计 1,928.806 秒；最慢 `regex/json_loads/thread/chaos/float` 分别 421.447/255.947/249.020/199.541/150.033 秒。`regex/fileio/string` 的 sys 占比分别为 70.79%/70.26%/54.17% ⚠️
+- `bm_string` 定向 body 的 373,371 次非对齐异常在 Rust handler 内耗时 7.830 秒，解释 91.0% sys；`bm_float` 3,000,039 次异常耗时 46.806 秒，解释 95.2% sys。`bm_nbody` 仅 39 次，为同环境负对照 ✅
+- string 非对齐 store 按宽度展开为 1,743,914 byte writes，同窗口 `tlb_page=1,761,177`，匹配 99.02%；源码链为逐字节 uaccess → private store COW 权限恢复 → 单页 TLB invalidate ✅
+- 居民匿名映射 1/4/16/32/64 MiB 关闭耗时 2.494/18.798/239.029/961.312/3,893.434 ms；16 MiB 以上约 14.3–14.5 ns/page²。源码确认 `Vma::unmap` 逐页调用 `remove_in_memory`，后者每次 `active.retain`，形成 O(N²) ✅
+- 上述 O(N²) 只在显式 `Vma::unmap` 定向 workload 中闭环；正常 exec/exit 主要走 `clear_no_hole()`，尚未量化它对 18 项 Python 总耗时的实际贡献，不能把复杂度缺陷直接写成 Python 退出主因 ⚠️
+- 缩小 ext4 fileio 为 100 小文件和 256 KiB 数据后，元数据阶段 0.892/1.036 秒；100 与 5000 文件单位成本为 8.924/9.290 ms，只差 4.10%，确认当前是高固定税的线性累积而非 O(N²)。241 个脏页、105 次 PageCache writeback 和 23 个 metadata blocks 精确闭合为 128 次 SATA flush；SATA 总计约 0.188 秒，只占 0.815 秒 sys 的 23.1% ✅
+- 相邻 production/diag-off 实板 A/B：nbody 8.652/8.547 秒（-1.21%），string 15.834/11.306 秒（-28.60%），float 149.893/72.492 秒（-51.64%）；string/float 的 sys 基本不变、差值来自 user，确认诊断构建存在选择性结构/代码布局敏感性，不能用其绝对耗时替代 production ⚠️
+- 同一诊断构建内部 `stats_on=1` 相对 off 的定向开销：string core +1.14%，fileio core +0.57%，fileio memory_io +1.29%，相邻 float core -0.57%，均低于 5% 门限；这只证明运行时计数税低，不证明结构等价 ✅
+- 矩阵后 `/persist` 仍为 ext4 rw，bundle 哈希不变，workdir 清空，末尾 `sync` 0.062 秒；经历重启后哈希再次一致，测试中无 panic/hang/ext4 error ✅
+- production `python -S`/site/import 热样本分别 1.159/1.630/6.769 秒。`import smolagents` 冷/热为 49.347/8.296 秒，但均因现有 P4 环境缺 `PIL` 退出；未安装包、未调用真实 API，不作为成功端到端结果 ⚠️
+- Docker 内严格串行重建最终 `perf_diag` rv64/la64 内核，SHA-256 分别为 `a0ad8aad617400aa3112f0365b35304e7ea85a17a40c33b15862dae6dca2d416`、`7bd0dc97eb27144344477a18173ed8f69fecc0d1ce6096f3a966060b403ecb22`；两架构 QEMU `diag_smoke_test.sh` 均验证 profile/reset、`stats_on=0` 冻结及 `runtime_exec_calls=3` 后到达 DONE，无 FAIL/panic ✅
+
+**备注：**
+- 本轮只做测试、插桩和根因分析，没有性能优化。正式排名只使用 production；perf_diag 只用于解释事件机制，并受相邻结构 A/B 门禁约束。
+- 用户要求在当前停止采样并先归档，不开始优化。后续顺序为：先处理实板 UAL 不匹配及逐字节模拟/COW/TLB 放大；再处理 resident mapping 显式释放 O(N²)，但修改前补真实 Python 影响量化；ext4 等 develop 分支新驱动完成后用相同 ext4 workload 复测，当前不继续。
+- `bm_thread` 的 244.8 秒主要来自主线程串行 queue、无竞争 lock 和 event/condition，实际线程创建/工作仅约 4.19 秒；不能先归因于调度/futex。`bm_fork` 是 65 个完整 Python child，约 1.91 秒/child，正常启动 1.630 秒已构成约 85% 下限。
+- `bm_regex`、`bm_dict` 各有一行串口 JSON 丢字符，但完整 summary、elapsed/user/sys、PASS 和 rc=0 均在原始日志中；派生正式 CSV 标记 reconstructed，原始日志未改。
+- P4 正在挂载使用，本轮没有 offline e2fsck 或断电恢复测试；ext4 结论限于在线 workload、sync 和重启后哈希持久化，不能外推为 journal/断电安全。
+- 停止时未完成 CPUCFG cache geometry/PMU、Python 显式 munmap 实际占比、ext4 四阶段隔离、30 分钟混合稳定性和成功 SmolAgent/真实 API；均已在 `la64_on_board/260717/01-python-performance-baseline.md` 标为未完成，不用推断补齐。
+
+### board/storage: 增加 P3 覆盖前的 P4 分块备份门禁并完成中止审计
+
+**涉及文件：**
+- `scripts/board/backup_2k1000_p3.sh`、`scripts/backup_2k1000_p3.py` — 新增一键备份入口；固定识别 768 MiB P3 与 4 GiB `MANGO_STATE` P4，校验 mount、块节点 mode、ext4 UUID/卷标和超级块空闲计数，按 12 个 64 MiB 文件复制并逐块重读源数据做 SHA-256 比对，全部成功后才原子发布 `COMPLETE`
+- `scripts/write_2k1000_p3.py`、`Makefile` — P3 写入强制要求备份 ID，并在首个 SCSI write 前从 P4 逐块加载全部备份；新增 `make 2k1000-p3-backup` 单命令入口
+- `docs/03_fs/2k1000-full-test-disk.md`、`docs/09_debug/la64_on_board/260710/development-log.md` — 同步备份、恢复和写入门禁
+
+**验证：**
+- Python/板端 Shell 语法、mount 正则和 `git diff --check` 通过；脚本部署与板端 SHA-256 验证通过 ✅
+- 实板确认 P3=805,306,368 B、节点 mode `0440`；P4=4,294,967,296 B、magic `ef53`、UUID `4d414e47535441544500000000000004`、卷标 `MANGO_STATE`、空闲约 3.83 GiB ✅
+- 第 1 个 64 MiB 块完成复制和源端复读校验，SHA-256 `89d5090d8c8ad8bd824f7eb91016d9a329a144f2e97f92123802c09d1c1d1f8e`；单块耗时约 3.5 分钟，推算完整备份约 40–50 分钟 ⚠️
+- 用户因时间安排要求暂停后，先终止宿主采集，再直接向串口发送 Ctrl-C，确认板端回到 Shell；审计残留目录只有 `MANIFEST.txt.tmp`、`p3-00.bin`、`p3-01.bin` 和 dd 日志，`COMPLETE` 不存在，不能通过后续写盘门禁 ✅
+
+**备注：**
+- 本次停止后未删除残留目录；约占 P4 128 MiB。P3 全程只读且未覆盖。
+- MangoCore 当前 `/proc/mounts` 将块挂载源显示为 `/tools`、`/persist` 自身，`df /persist` 还会错误返回根文件系统统计；安全工具因此改为从已验证的 P4 原始超级块读取 UUID、卷标和空闲块，而不是信任 `df`。
+- 本次仅修改主机/板端工具和文档，不改内核二进制，未重复执行双架构构建或 QEMU。
+
 ## 2026-07-15
+
+### perf: 建立双架构与 2K1000LA 分层性能诊断基线工具
+
+**涉及文件：**
+- `os/src/task/perf.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/main.rs` — 增加 `core/memory_io/network_runtime` 有界运行时 profile，补齐 stats 关闭门禁与 reset，新增启动阶段、SATA、网络和 Python/exec 归因计数；`/sys/kernel/stats/{boot,profile,blockio,net}` 暴露结构化快照
+- `os/src/drivers/block/sata_blk.rs`、`os/src/drivers/net/gmac_2k1000.rs`、`os/src/net/{adapter,config}.rs`、`os/src/syscall/mod.rs` — 在诊断 feature 下记录 SATA 请求/字节/耗时、网络 poll/RX/TX/drop 和 exec/openat/read/mmap；生产 feature 关闭时调用点为 no-op
+- `os/src/fs/page_cache.rs`、`os/src/mm/{frame_allocator,heap_allocator}.rs`、`os/src/hal/arch/{riscv,loongarch64}/trap/mod.rs` — 将内存/I/O 热路径计时改为 profile-aware，`stats_on=0` 不读取硬件时钟
+- `os/Makefile` — 修正通用 wrapper 丢失 `EXTRA_FEATURES` 的问题，新增与生产存储/网络/用户态配置一致的 `la64-2k1000-perf-diag-shell`
+- `scripts/{kernel_perf.py,qemu_diag_smoke.py,diag_smoke_test.sh}` — 新增源码/镜像指纹、QEMU/串口采集、密钥脱敏、逐阶段串口 ACK、前后计数快照、探针税/失败/gate/启动 CSV 和双架构诊断自检
+- `docs/09_debug/perf_diag.md`、`docs/01_architecture/initialization-flow.md`、`docs/07_driver/2k1000-ahci.md`、`docs/06_net/device-stack-and-poll.md`、`docs/03_fs/page-cache.md` — 同步 profile、启动里程碑、SATA/网络/runtime/PageCache 指标和正式采样顺序
+- `.agents/skills/mango-workflow/references/{harness-patterns,debugging-patterns}.md` — 沉淀 Make feature 传递的三段验证链，以及串口节流之外还需要执行流控与去回显 ACK 的模式
+
+**验证：**
+- Docker 内严格串行执行生产版与 `EXTRA_FEATURES=perf_diag` 的 rv64/la64 构建，启动里程碑补齐和清除无关格式化后均重新验证；当前逐字节源码的最终实板生产/诊断 uImage SHA-256 分别为 `29ffc40729fdba1d48c42d73563cce1ba5ab6fd7a9ad2e4d96b76ff7d239cd50`、`f4b781300a68700fcf7b340b29151b5b78ef7182fbb72bcf171e74f90990ff64` ✅
+- rv64/la64 QEMU 的 basic+busybox 生产版与 `stats_on=0` 诊断版均退出 0；单样本方向性差异分别为 `+4.21%`、`-0.80%`，只用于筛查，不作为正式探针税结论 ✅
+- 双架构 `diag_smoke_test.sh` 验证 profile 可切换、reset 有效、`stats_on=0` syscall 计数严格冻结、runtime exec 计数非零；启动里程碑 rv64/loongarch64 到 scheduler 分别为 8,542,203/129,370,062 ticks ✅
+- 当前 HEAD 的 CPython L3-L9 QEMU 门禁均为 `72/72`，含 signal、线程、subprocess、DNS、HTTP 和默认 CA HTTPS；含启动 wall time 为 rv64 53.74 s、la64 71.95 s ✅
+- 2K1000LA 首轮生产镜像从 `bootm` 到 P4 shell-ready 为 18.591643 s；资产采集确认约 2 GiB、P1/P3 只读、P2 `/scratch` FAT32 rw、P4 `/persist` ext4 rw。随后对 `/tools` 全树 `find` 超过 60 s 且 Ctrl-C 无响应，保留为待诊断实板异常 ⚠️
+- `python3 -m py_compile scripts/kernel_perf.py scripts/qemu_diag_smoke.py`、`bash -n scripts/diag_smoke_test.sh`、`git diff --check` 通过 ✅
+
+**备注：**
+- 本轮只增加诊断和测试工具，没有提交性能优化。正式数据目录为 `target/perf-runs/20260715T-mangocore-perf-baseline/`，当前包含 manifest、42 条 JSONL、原始串口/QEMU 日志和分表 CSV。
+- 实板在递归目录遍历中不可中断，内核 reboot syscall 当前只校验参数并返回成功，无法软件复位；第二次冷启动、生产主矩阵、最终 uImage 探针税与 30 分钟稳定性测试等待物理 RESET。首轮板端数据来自最终启动里程碑加入前的生产 uImage，只作预检证据，不冒充最终基线。
 
 ### tooling: 排除临时测试盘，避免 Codex 快照重复打包大文件
 
@@ -20,9 +187,9 @@
 ### docs/board: 建立 29 篇编号专题并纳入 hole-read ABI 深挖
 
 **涉及文件：**
-- `docs/09_debug/la64_on_board/README.md`、`development-log.md` — 将长日志收敛为组会入口与 34 提交可审计总账，新增按启动/存储/网络/ABI 分类的逐问题导航和统一证据状态词
-- `docs/09_debug/la64_on_board/{01..21}*.md` — 新增 29 篇独立复盘；按问题大小展开底层原理、调试时间线、排除项、代码/提交/日志证据、根因证明、修复设计、验证矩阵和剩余边界，其中补齐 ext4 allocator/cache/跨 FS identity、zombie 栈槽、APK wait status 和持久应用根
-- `docs/09_debug/la64_on_board/bug-hole-read-mismatch.md` — 将既有 LA64 hole-read/用户栈 ABI 反汇编复盘迁入专题目录，并同步 `b6c5c973` 已提交状态与专用 SP 遥测边界
+- `docs/09_debug/la64_on_board/260710/README.md`、`development-log.md` — 将长日志收敛为组会入口与 34 提交可审计总账，新增按启动/存储/网络/ABI 分类的逐问题导航和统一证据状态词
+- `docs/09_debug/la64_on_board/260710/{01..21}*.md` — 新增 29 篇独立复盘；按问题大小展开底层原理、调试时间线、排除项、代码/提交/日志证据、根因证明、修复设计、验证矩阵和剩余边界，其中补齐 ext4 allocator/cache/跨 FS identity、zombie 栈槽、APK wait status 和持久应用根
+- `docs/09_debug/la64_on_board/260710/bug-hole-read-mismatch.md` — 将既有 LA64 hole-read/用户栈 ABI 反汇编复盘迁入专题目录，并同步 `b6c5c973` 已提交状态与专用 SP 遥测边界
 - `docs/09_debug/README.md`、`docs/README.md` — 更新专题入口、文档数量和 ABI 修复状态；当前 `09_debug` 共 43 篇 Markdown，其中专题目录 32 篇
 - `docs/03_fs/{ext4,vfs-core}.md`、`docs/01_architecture/hal-and-platform.md` — 纠正 ext4 目录项 framing/checksum、跨 FS identity 与 LoongArch LSX/FPR 二选一恢复语义，并回链对应深度复盘
 - `.agents/skills/mango-workflow/references/harness-patterns.md` — 将“rename 顺序改动后通过”改写为可复用的 `rec_len` 算术审计模式，明确行为干预不等于唯一根因证明
@@ -73,9 +240,9 @@
 ### docs/board: 建立 la64_on_board 全量开发日志与组会专题
 
 **涉及文件：**
-- `docs/09_debug/la64_on_board/README.md` — 新增组会速览、阅读入口、里程碑、证据状态词和六页汇报主线
-- `docs/09_debug/la64_on_board/development-log.md` — 以 2026-07-09 至 07-15 正序梳理 33 个提交，记录启动/VALEN/TLB、AHCI/P1-P4、GMAC/DHCP/HTTPS、2 GiB、CSPRNG、CPython/APK、性能 A/B 的现象、根因、修改与验收边界
-- `docs/09_debug/la64_on_board/bug-hole-read-mismatch.md` — 将现有 LA64 用户栈 ABI/LLVM 反汇编复盘移入专题目录，并保留工作树中的完整内容
+- `docs/09_debug/la64_on_board/260710/README.md` — 新增组会速览、阅读入口、里程碑、证据状态词和六页汇报主线
+- `docs/09_debug/la64_on_board/260710/development-log.md` — 以 2026-07-09 至 07-15 正序梳理 33 个提交，记录启动/VALEN/TLB、AHCI/P1-P4、GMAC/DHCP/HTTPS、2 GiB、CSPRNG、CPython/APK、性能 A/B 的现象、根因、修改与验收边界
+- `docs/09_debug/la64_on_board/260710/bug-hole-read-mismatch.md` — 将现有 LA64 用户栈 ABI/LLVM 反汇编复盘移入专题目录，并保留工作树中的完整内容
 - `docs/09_debug/README.md`、`docs/README.md` — 更新调试索引、专题入口、文件计数和迁移后的链接
 - `docs/01_architecture/boot-and-trap.md` — 同步当前串口工具控制键语义：`Ctrl-C` 发送板端 SIGINT，`Ctrl-] q` 关闭本地监听
 - `docs/Work_Log.md` — 记录本次专题整理、证据边界和验证结果

@@ -22,10 +22,12 @@ def check(name):
 
 
 def make_base_dir():
+    configured = os.environ.get("CPYTHON_TEST_TMPDIR")
     candidates = [
-        os.environ.get("CPYTHON_TEST_TMPDIR"),
+        configured,
+    ] if configured else [
         os.getcwd(),
-        "/tools/tests/cpython",
+        os.environ.get("CPYTHON_TEST_ROOT", "/tools/tests/cpython"),
         "/tmp",
     ]
     last_err = None
@@ -53,14 +55,14 @@ try:
     print(f"{PREFIX} base: {base}", flush=True)
     os.chdir(base)
 
-    # FAT32 is the real-board persistent scratch filesystem and intentionally
-    # remains the target for ordinary file I/O below. It cannot encode a POSIX
-    # symlink type, so symlink-specific ABI checks use the kernel's ramfs.
-    posix_base = os.path.join("/tmp", f"cpython_l7_posix_{os.getpid()}")
+    # Keep the symlink-specific checks on the same configured filesystem as
+    # every other writable path.  The strict board run points this tree at P4
+    # ext4, so falling back to /tmp would invalidate the ext4-only gate.
+    posix_base = os.path.join(base, f"cpython_l7_posix_{os.getpid()}")
     if os.path.exists(posix_base):
         shutil.rmtree(posix_base)
     os.mkdir(posix_base)
-    print(f"{PREFIX} posix base: {posix_base} (ramfs)", flush=True)
+    print(f"{PREFIX} posix base: {posix_base}", flush=True)
 
     with check("open write read close"):
         with open("basic.txt", "w", encoding="utf-8") as f:

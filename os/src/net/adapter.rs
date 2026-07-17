@@ -366,6 +366,7 @@ impl Device for SmoltcpDeviceAdapter {
         let mut buf = [0u8; 2048];
 
         if let Some(len) = self.inner.receive(&mut buf) {
+            crate::task::perf::record_net_rx(len);
             let packet = buf[..len].to_vec();
             let rx = NetRxToken { buf: packet };
             let tx = NetTxToken {
@@ -430,6 +431,7 @@ impl TxToken for NetTxToken {
 
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
+        crate::task::perf::record_net_tx_submit(len);
         self.inner.transmit(&buf);
         result
     }

@@ -283,13 +283,31 @@ make -C os la64-2k1000-cpython-tools
 
 产物分别为 `kernel-2k1000-cpython-tests.ui` 和 `mango-2k1000la-cpython-tools-p3.img`。后者是严格固定为 768 MiB 的裸 ext4 分区 payload，只能写入已验证 MBR 布局的 P3 `0xA80800..0xC00800`，不包含 MBR/P1/P2。生成器会输出 `.img.json`，其 `image_bytes` 必须为 `805306368`、`target_sectors` 必须为 `1572864`；任一数值不符都不得写盘。
 
-网线替换 P3 使用受限目标，显式确认固定起点：
+网线替换 P3 前，必须先在启用 P4 `/persist` 的 Shell 镜像中建立分块原始备份。备份器要求
+P3 以 `/tools` 只读挂载、P4 以 `/persist` 读写挂载、P3 设备节点不可写，并要求 P4
+至少有 900 MiB 可用空间。它把 P3 拆为 12 个 64 MiB 文件；每块从 P3 再读一次并与
+落盘文件的 SHA-256 比较，最后才原子发布 `COMPLETE`。中断后留下的目录没有
+`COMPLETE`，不能用于写盘门禁：
 
 ```bash
-make 2k1000-cpython-p3-write CONFIRM_P3_START=0xA80800
+make 2k1000-p3-backup \
+  PERF_RUN_DIR=target/perf-runs/<run-id> \
+  P3_BACKUP_ID=<UTC-id> \
+  CONFIRM_P3_START=0xA80800
 ```
 
-`scripts/write_2k1000_p3.py` 在写盘前硬校验 payload JSON 清单及 SHA-256、`TS32GMTS400` 型号、完整 MBR CRC、disk id 和三个分区的起点/长度。它把镜像切成三个 256 MiB 块，每块 `0x80000` 个 sector，起始 LBA 固定为 `0xA80800`、`0xB00800`、`0xB80800`；每块依次验证 TFTP 字节数/CRC、SCSI 写入 sector 数和 SSD 读回 CRC。完成后重置 SCSI，并从 P3 `ext4load` 最新 `L7_filesystem.py` 与宿主文件做长度/CRC 比对。不得从 LBA0 写入该文件，也不得修改工具中的固定边界来复用为通用写盘器。
+备份只保护 P3 定向替换和回滚，不保护同一块 SSD 的整体故障。恢复时不能在 `/tools`
+正在使用 P3 的系统内写回，必须从 U-Boot 或 P3 未挂载的救援环境执行。
+
+备份完成后，网线替换 P3 使用受限目标，同时传入备份 ID 并显式确认固定起点：
+
+```bash
+make 2k1000-cpython-p3-write \
+  P3_BACKUP_ID=<UTC-id> \
+  CONFIRM_P3_START=0xA80800
+```
+
+`scripts/write_2k1000_p3.py` 在写盘前硬校验 payload JSON 清单及 SHA-256、`TS32GMTS400` 型号、完整 MBR CRC、disk id 和三个分区的起点/长度；随后从 P4 逐个 `ext4load` 备份的 12 个 64 MiB 文件，确认 `COMPLETE` 和全部 768 MiB 数据在 U-Boot 中可读，才允许进入首个 SCSI write。它把新镜像切成三个 256 MiB 块，每块 `0x80000` 个 sector，起始 LBA 固定为 `0xA80800`、`0xB00800`、`0xB80800`；每块依次验证 TFTP 字节数/CRC、SCSI 写入 sector 数和 SSD 读回 CRC。完成后重置 SCSI，并从 P3 `ext4load` 最新 `L7_filesystem.py` 与宿主文件做长度/CRC 比对。不得从 LBA0 写入该文件，也不得修改工具中的固定边界来复用为通用写盘器。
 
 替换后先在 U-Boot 执行 `ext4ls scsi 0:3 /tests/cpython`，再启动专用内核：
 

@@ -302,6 +302,11 @@ use crate::{
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
     let _syscall_start = crate::task::perf::perf_time_now();
+    let _runtime_exec_start = if matches!(syscall_id, SYSCALL_EXECVE | SYSCALL_EXECVEAT) {
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME)
+    } else {
+        0
+    };
     crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
     // 记录当前系统调用 ID，供 OOM 诊断使用
     crate::task::set_current_syscall_id(Some(syscall_id));
@@ -886,9 +891,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         SYSCALL_SOCK_SHUTDOWN => sys_sock_shutdown(args[0] as u32, args[1] as u32),
         SYSCALL_SENDMSG => sys_sendmsg(args[0] as u32, args[1], args[2] as u32),
-        SYSCALL_SENDMMSG => {
-            sys_sendmmsg(args[0] as u32, args[1], args[2] as u32, args[3] as u32)
-        }
+        SYSCALL_SENDMMSG => sys_sendmmsg(args[0] as u32, args[1], args[2] as u32, args[3] as u32),
         SYSCALL_RECVMSG => sys_recvmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
@@ -976,9 +979,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             ),
         }
     }
-    let _syscall_ticks = crate::task::perf::perf_time_now() - _syscall_start;
-    crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
-    if syscall_id == 173 {
+    let _syscall_ticks = crate::task::perf::perf_time_now().wrapping_sub(_syscall_start);
+    if _syscall_start != 0 {
+        crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
+    }
+    if _runtime_exec_start != 0 && matches!(syscall_id, SYSCALL_EXECVE | SYSCALL_EXECVEAT) {
+        let runtime_ticks =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME)
+                .wrapping_sub(_runtime_exec_start);
+        crate::task::perf::record_runtime_exec_cost(syscall_id, runtime_ticks);
+    }
+    if _syscall_start != 0 && syscall_id == 173 {
         crate::task::perf::record_getppid_cost(_syscall_ticks);
     }
     crate::task::perf::record_syscall(syscall_id, ret);

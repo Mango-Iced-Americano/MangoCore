@@ -249,6 +249,11 @@ pub fn poll_until_quiescent(&self) {
 
 ### 默认关闭的性能诊断
 
+通用 `perf_diag` 构建可在运行时选择 `network_runtime` profile，通过
+`/sys/kernel/stats/net` 获取 poll/progress/lock-busy、RX/TX 字节与 drop，以及
+Python 启动归因所需的 exec/openat/read/mmap 计数。该窗口使用前后快照，不输出
+逐事件日志；下述 `net_perf_diag` 两秒滑动窗口只在异常稳定复现后短时启用。
+
 构建时加入 `net_perf_diag` 会启用两秒滑动窗口，不改变正式镜像的轮询策略：
 
 ```text

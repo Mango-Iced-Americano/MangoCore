@@ -226,6 +226,7 @@ fn move_to_high_address() {
 
 #[no_mangle]
 pub fn rust_main() -> ! {
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_ENTRY);
     bootstrap_init();
     mem_clear();
     // 这一行可能有误，需要后续处理
@@ -233,8 +234,10 @@ pub fn rust_main() -> ! {
     move_to_high_address();
     console::log_init();
     trace::init();
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_CONSOLE);
     boot_trace!("[kernel] Console initialized.");
     mm::init();
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_MM);
     boot_trace!("[kernel] Hello, world!");
     // note that remap_test is currently NOT supported by LA64, for the whole kernel space is RW!
     // #[cfg(feature = "riscv")]
@@ -249,6 +252,7 @@ pub fn rust_main() -> ! {
             error
         );
     }
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_DRIVERS);
 
     // Non-destructive GMAC/PHY handoff inspection. This runs before any block
     // driver allocation and deliberately leaves U-Boot's MAC/PHY state intact.
@@ -307,6 +311,7 @@ pub fn rust_main() -> ! {
             boot_trace!("[kernel] 2K1000 board bring-up: external net probe skipped");
         }
         net::config::init();
+        task::perf::record_boot_stage(task::perf::BOOT_STAGE_NET);
 
         // 在安装 preload payload 前探测，保证 AHCI/virtio DMA 页仍可从低碎片
         // 物理内存中分配。
@@ -319,10 +324,7 @@ pub fn rust_main() -> ! {
             feature = "block_sata",
             not(any(feature = "sata_probe", feature = "sata_write_probe"))
         ))]
-        #[cfg(all(
-            not(feature = "sata_scratch_rw"),
-            not(feature = "p4_persist_rw")
-        ))]
+        #[cfg(all(not(feature = "sata_scratch_rw"), not(feature = "p4_persist_rw")))]
         fs::mount_boot_block_devices_read_only();
         #[cfg(all(feature = "sata_scratch_rw", not(feature = "p4_persist_rw")))]
         fs::mount_boot_block_devices_with_writable_scratch();
@@ -357,6 +359,7 @@ pub fn rust_main() -> ! {
     {
         drivers::init_net_device();
         net::config::init();
+        task::perf::record_boot_stage(task::perf::BOOT_STAGE_NET);
         #[cfg(feature = "block_virt")]
         println!("[kernel] block in virt mode!");
         #[cfg(feature = "oom_handler")]
@@ -367,14 +370,18 @@ pub fn rust_main() -> ! {
         fs::mount_tools_disk();
     }
 
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_FS);
+
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
     #[cfg(feature = "board_2k1000")]
     boot_trace!("[bringup][main:03] init task construction begin");
     task::add_initproc();
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_INITPROC);
     #[cfg(feature = "board_2k1000")]
     boot_trace!("[bringup][main:04] init task queued; entering scheduler");
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
+    task::perf::record_boot_stage(task::perf::BOOT_STAGE_SCHEDULER);
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }

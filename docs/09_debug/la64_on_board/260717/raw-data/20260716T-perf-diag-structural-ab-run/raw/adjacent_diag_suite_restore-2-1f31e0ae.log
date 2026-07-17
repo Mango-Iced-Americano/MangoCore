@@ -1,0 +1,7 @@
+2026-07-16T14:19:42.940777Z __PERF_BEGIN_adjacent_diag_suite_restore-2-1f31e0ae__
+2026-07-16T14:19:43.916906Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_adjacent_diag_suite_restore-2-1f31e0ae_TRACE_OFF__
+2026-07-16T14:19:46.122147Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_adjacent_diag_suite_restore-2-1f31e0ae__
+2026-07-16T14:19:46.404001Z EXT4_ALIAS_READY
+2026-07-16T14:19:46.409546Z __PERF_WORK_END_adjacent_diag_suite_restore-2-1f31e0ae__
+2026-07-16T14:19:46.414157Z __PERF_ACK_adjacent_diag_suite_restore-2-1f31e0ae_WORK__
+2026-07-16T14:19:46.927822Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_adjacent_diag_suite_restore-2-1f31e0ae__ rc=0

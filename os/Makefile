@@ -7,6 +7,7 @@ LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_
 MODE ?= release
 NET_PERF_EXTRA_FEATURES ?=
 NET_PERF_IMAGE ?= kernel-2k1000-net-perf-shell.ui
+PERF_DIAG_EXTRA_FEATURES ?=
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
 CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
@@ -23,6 +24,7 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-2k1000-apk-tests \
 	la64-2k1000-apk-persist-tests \
 	la64-2k1000-apk-persist-shell \
+	la64-2k1000-perf-diag-shell \
 	la64-2k1000-net-perf-shell \
 	la64-2k1000-cpython-tests \
 	la64-2k1000-cpython-tools \
@@ -64,7 +66,8 @@ rv64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG}
+	make -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG} \
+		EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 rv64-debug:
 	@rustup override set $(RV_TOOLCHAIN)
@@ -76,7 +79,7 @@ rv64-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk all BLK_MODE=${BLK_MODE}
+	make -f make/rv64.mk all BLK_MODE=${BLK_MODE} EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 rv64-run-only:
 	@rustup override set $(RV_TOOLCHAIN)
@@ -94,13 +97,14 @@ la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk all MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk all MODE=${MODE} LOG=${LOG} EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 la64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG} \
+		EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 # Isolated Alpine CPython QEMU gates. The feature marker overrides the test
 # selection in ramfs, so the official sdcard os_test.conf is left untouched.
@@ -286,6 +290,23 @@ la64-2k1000-apk-persist-shell: prepare-cargo-config
 		MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-persist-shell.ui
+
+# Same userspace, storage and network policy as the production persistent
+# shell, with only bounded perf_diag counters compiled in. Event tracing such
+# as net_perf_diag must be requested explicitly after a stable anomaly exists.
+la64-2k1000-perf-diag-shell: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell perf_diag $(PERF_DIAG_EXTRA_FEATURES)" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-perf-diag-shell.ui
 
 # Feature-gated performance probe image. It keeps the production GMAC ring and
 # TCP parameters unless NET_PERF_EXTRA_FEATURES selects one explicit A/B knob.

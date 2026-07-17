@@ -1,0 +1,5 @@
+sample_id,test,arch,platform,build_mode,exit_status,wall_seconds,log
+strict_runtime_extract-1-9cab8cf9,strict_runtime_extract,la64,2k1000la,diag_on,124,904.907036291,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T042020Z-cpython-strict-align/raw/strict_runtime_extract-1-9cab8cf9.log
+strict_extract_timeout_audit-1-23fbd9cc,strict_extract_timeout_audit,la64,2k1000la,diag_on,124,11.221250957999999,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T042020Z-cpython-strict-align/raw/strict_extract_timeout_audit-1-23fbd9cc.log
+strict_serial_recover-1-bdb3d6f1,strict_serial_recover,la64,2k1000la,diag_on,124,11.179142875,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T042020Z-cpython-strict-align/raw/strict_serial_recover-1-bdb3d6f1.log
+snx-1-c1fcfbad,snx,la64,2k1000la,diag_on,1,0.15618083300000007,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T042020Z-cpython-strict-align/raw/snx-1-c1fcfbad.log

@@ -56,9 +56,16 @@ impl BlockDevice for SataBlock {
         block_id = block_id * (BLOCK_SZ / BLOCK_SIZE);
         let mut controller = self.0.lock();
         for chunk in buf.chunks_mut(SATA_DMA_BYTES) {
+            let started =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             controller
                 .read_blocks(block_id, chunk)
                 .unwrap_or_else(|err| panic!("SATA read LBA {} failed: {:?}", block_id, err));
+            crate::task::perf::record_sata_read(
+                chunk.len(),
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(started),
+            );
             block_id += chunk.len() / BLOCK_SIZE;
         }
     }
@@ -72,14 +79,27 @@ impl BlockDevice for SataBlock {
         block_id = block_id * (BLOCK_SZ / BLOCK_SIZE);
         let mut controller = self.0.lock();
         for chunk in buf.chunks(SATA_DMA_BYTES) {
+            let started =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             controller
                 .write_blocks(block_id, chunk)
                 .unwrap_or_else(|err| panic!("SATA write LBA {} failed: {:?}", block_id, err));
+            crate::task::perf::record_sata_write(
+                chunk.len(),
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(started),
+            );
             block_id += chunk.len() / BLOCK_SIZE;
         }
+        let flush_started =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         controller
             .flush()
             .unwrap_or_else(|err| panic!("SATA cache flush failed: {:?}", err));
+        crate::task::perf::record_sata_flush(
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .wrapping_sub(flush_started),
+        );
     }
 
     fn size_bytes(&self) -> Option<u64> {

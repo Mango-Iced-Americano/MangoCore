@@ -42,6 +42,9 @@ EXPECTED_PARTITIONS = (
     (2, 0x800800, 0x280000, "0c"),
     (3, P3_START_LBA, P3_SECTORS, "83"),
 )
+BACKUP_CHUNK_BYTES = 64 * 1024 * 1024
+BACKUP_CHUNK_COUNT = (P3_SECTORS * SECTOR_SIZE) // BACKUP_CHUNK_BYTES
+SAFE_BACKUP_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def uboot_crc(console: UBootConsole, length: int) -> int:
@@ -199,6 +202,43 @@ def verify_installed_file(console: UBootConsole, source: Path) -> None:
     )
 
 
+def verify_persist_backup(console: UBootConsole, backup_id: str) -> None:
+    """Prove that a completed P3 backup is readable from P4 before any write."""
+    prefix = f"/backups/{backup_id}"
+    marker = console.command(
+        f"ext4load scsi 0:4 {LOADADDR} {prefix}/COMPLETE", timeout=30
+    )
+    marker_bytes = int(
+        require(r"(\d+)\s+bytes read", marker, "P3 backup COMPLETE marker missing").group(1)
+    )
+    if marker_bytes <= 0 or marker_bytes > 4096:
+        raise BootError(f"unsafe P3 backup COMPLETE marker size: {marker_bytes}")
+
+    for index in range(BACKUP_CHUNK_COUNT):
+        path = f"{prefix}/p3-{index:02d}.bin"
+        output = console.command(
+            f"ext4load scsi 0:4 {LOADADDR} {path}", timeout=180
+        )
+        loaded = int(
+            require(r"(\d+)\s+bytes read", output, f"P3 backup chunk missing: {path}").group(1)
+        )
+        if loaded != BACKUP_CHUNK_BYTES:
+            raise BootError(
+                f"P3 backup chunk size mismatch for {path}: "
+                f"{loaded} != {BACKUP_CHUNK_BYTES}"
+            )
+        checksum = uboot_crc(console, loaded)
+        print(
+            f"[p3] backup readable: file={path} bytes={loaded} "
+            f"crc32={checksum:08x}",
+            flush=True,
+        )
+    print(
+        f"[p3] backup gate PASS: id={backup_id} bytes={P3_SECTORS * SECTOR_SIZE}",
+        flush=True,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interface", default="en8")
@@ -226,6 +266,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log", type=Path, default=Path("/private/tmp/mango-p3-update.log"))
     parser.add_argument("--no-host-config", dest="configure_host", action="store_false")
     parser.add_argument("--confirm-p3-start", required=True)
+    parser.add_argument(
+        "--backup-id",
+        required=True,
+        help="completed /persist/backups/<id> created by backup_2k1000_p3.py",
+    )
     parser.set_defaults(configure_host=True)
     return parser.parse_args()
 
@@ -240,6 +285,8 @@ def main() -> None:
         raise BootError(
             f"confirmation mismatch: {confirmed_start:#x} != expected {P3_START_LBA:#x}"
         )
+    if not SAFE_BACKUP_ID.fullmatch(args.backup_id):
+        raise BootError("--backup-id contains unsafe characters")
 
     image = args.image.expanduser().resolve()
     manifest = (
@@ -294,6 +341,7 @@ def main() -> None:
             f"[p3] SSD/MBR verified: model={EXPECTED_MODEL} crc32={actual_mbr_crc:08x}",
             flush=True,
         )
+        verify_persist_backup(console, args.backup_id)
 
         with tempfile.TemporaryDirectory(prefix="mango-p3-chunks-") as tmp_name:
             for index in range(CHUNK_COUNT):

@@ -63,12 +63,7 @@ static NET_PERF_POLL_TICKS: AtomicUsize = AtomicUsize::new(0);
 static NET_PERF_POLL_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "net_perf_diag")]
-fn record_poll_perf(
-    stack_only: bool,
-    progressed: bool,
-    lock_busy: bool,
-    elapsed_ticks: usize,
-) {
+fn record_poll_perf(stack_only: bool, progressed: bool, lock_busy: bool, elapsed_ticks: usize) {
     if stack_only {
         NET_PERF_STACK_POLLS.fetch_add(1, AtomicOrdering::Relaxed);
         if progressed {
@@ -708,6 +703,7 @@ impl<'a> NetInterface<'a> {
 
     pub fn poll(&self) {
         if self.inner.lock().is_none() {
+            crate::task::perf::record_net_poll(false, false);
             #[cfg(feature = "net_perf_diag")]
             record_poll_perf(false, false, false, 0);
             return;
@@ -715,6 +711,7 @@ impl<'a> NetInterface<'a> {
         #[cfg(feature = "net_perf_diag")]
         let poll_start = crate::hal::get_time();
         let progressed = self.poll_once(true);
+        crate::task::perf::record_net_poll(progressed, false);
         #[cfg(feature = "net_perf_diag")]
         record_poll_perf(
             false,
@@ -734,6 +731,7 @@ impl<'a> NetInterface<'a> {
                 #[cfg(feature = "net_perf_diag")]
                 let poll_start = crate::hal::get_time();
                 let progressed = self.poll_once(true);
+                crate::task::perf::record_net_poll(progressed, false);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(
                     false,
@@ -743,10 +741,17 @@ impl<'a> NetInterface<'a> {
                 );
                 true
             }
-            _ => {
+            Some(_) => {
+                crate::task::perf::record_net_poll(false, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, false, 0);
+                false
+            }
+            None => {
+                crate::task::perf::record_net_poll(false, true);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(false, false, true, 0);
-                false // lock held by another context, or NetInterface not yet initialized
+                false
             }
         }
     }
@@ -764,6 +769,7 @@ impl<'a> NetInterface<'a> {
                 #[cfg(feature = "net_perf_diag")]
                 let poll_start = crate::hal::get_time();
                 let progressed = self.poll_once(false);
+                crate::task::perf::record_net_poll(progressed, false);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(
                     false,
@@ -773,7 +779,14 @@ impl<'a> NetInterface<'a> {
                 );
                 true
             }
-            _ => {
+            Some(_) => {
+                crate::task::perf::record_net_poll(false, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, false, 0);
+                false
+            }
+            None => {
+                crate::task::perf::record_net_poll(false, true);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(false, false, true, 0);
                 false
@@ -787,6 +800,7 @@ impl<'a> NetInterface<'a> {
         let mut guard = match self.inner.try_lock() {
             Some(g) => g,
             None => {
+                crate::task::perf::record_net_poll(false, true);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(true, false, true, 0);
                 return false;
@@ -795,6 +809,7 @@ impl<'a> NetInterface<'a> {
         let inner = match guard.as_mut() {
             Some(i) => i,
             None => {
+                crate::task::perf::record_net_poll(false, false);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(true, false, false, 0);
                 return false;
@@ -803,6 +818,7 @@ impl<'a> NetInterface<'a> {
         let stack = match inner.stack_mut(ifindex) {
             Some(s) => s,
             None => {
+                crate::task::perf::record_net_poll(false, false);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(true, false, false, 0);
                 return false;
@@ -835,6 +851,7 @@ impl<'a> NetInterface<'a> {
             crate::net::wake_tcp_waiters();
             crate::net::wake_raw_waiters();
         }
+        crate::task::perf::record_net_poll(progressed, false);
         crate::net::wake_tcp_accept_waiters();
         #[cfg(feature = "net_perf_diag")]
         record_poll_perf(

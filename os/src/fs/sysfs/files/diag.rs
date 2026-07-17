@@ -31,6 +31,37 @@ fn read_counter(c: &core::sync::atomic::AtomicUsize) -> usize {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  STATS: one-shot boot milestones (elapsed raw ticks from Rust entry)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_boot_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(320);
+    let _ = writeln!(s, "clock_freq_hz={}", crate::hal::get_clock_freq());
+    macro_rules! counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    counter!("boot_console_ticks", BOOT_CONSOLE_TICKS);
+    counter!("boot_mm_ticks", BOOT_MM_TICKS);
+    counter!("boot_drivers_ticks", BOOT_DRIVERS_TICKS);
+    counter!("boot_net_ticks", BOOT_NET_TICKS);
+    counter!("boot_fs_ticks", BOOT_FS_TICKS);
+    counter!("boot_initproc_ticks", BOOT_INITPROC_TICKS);
+    counter!("boot_scheduler_ticks", BOOT_SCHEDULER_TICKS);
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  STATS: Task Queue
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -247,7 +278,7 @@ fn stats_syscall_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(384);
+    let mut s = String::with_capacity(512);
     let _ = writeln!(
         s,
         "syscall_total={}",
@@ -288,6 +319,38 @@ fn stats_syscall_content(
         "ecall_trap_cost_ticks_max={}",
         read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_MAX)
     );
+    let _ = writeln!(
+        s,
+        "user_unaligned_traps={}",
+        read_counter(&crate::task::perf::USER_UNALIGNED_TRAPS)
+    );
+    let _ = writeln!(
+        s,
+        "user_unaligned_ticks_total={}",
+        read_counter(&crate::task::perf::USER_UNALIGNED_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "user_unaligned_ticks_max={}",
+        read_counter(&crate::task::perf::USER_UNALIGNED_TICKS_MAX)
+    );
+    macro_rules! unaligned_counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    unaligned_counter!("user_unaligned_load_2", USER_UNALIGNED_LOAD_2);
+    unaligned_counter!("user_unaligned_load_4", USER_UNALIGNED_LOAD_4);
+    unaligned_counter!("user_unaligned_load_8", USER_UNALIGNED_LOAD_8);
+    unaligned_counter!("user_unaligned_store_2", USER_UNALIGNED_STORE_2);
+    unaligned_counter!("user_unaligned_store_4", USER_UNALIGNED_STORE_4);
+    unaligned_counter!("user_unaligned_store_8", USER_UNALIGNED_STORE_8);
+    unaligned_counter!("user_unaligned_float_loads", USER_UNALIGNED_FLOAT_LOADS);
+    unaligned_counter!("user_unaligned_float_stores", USER_UNALIGNED_FLOAT_STORES);
     write_str(offset, len, buf, &s)
 }
 
@@ -379,7 +442,7 @@ fn stats_heap_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1024);
     let (free, total, _, _, _) = crate::mm::heap_stats();
     let _ = writeln!(
         s,
@@ -427,6 +490,41 @@ fn stats_heap_content(
         s,
         "heap_dealloc_scan_steps_total={}",
         read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "page_faults={}",
+        read_counter(&crate::task::perf::PAGE_FAULTS)
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_ticks_total={}",
+        read_counter(&crate::task::perf::PAGEFAULT_TIME_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_time_count={}",
+        read_counter(&crate::task::perf::PAGEFAULT_TIME_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_hits={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_free_hits={}",
+        read_counter(&crate::task::perf::FRAME_FREE_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_TIME_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_time_count={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_TIME_COUNT)
     );
     write_str(offset, len, buf, &s)
 }
@@ -560,6 +658,11 @@ fn stats_features_content(
     let _ = writeln!(s, "perf_stats={}", cfg!(feature = "perf_stats"));
     let _ = writeln!(s, "perf_diag={}", cfg!(feature = "perf_diag"));
     let _ = writeln!(s, "heap_trace={}", cfg!(feature = "heap_trace"));
+    let _ = writeln!(
+        s,
+        "stats_profile={}",
+        crate::task::perf::STATS_PROFILE.load(Ordering::Relaxed)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -588,6 +691,43 @@ fn stats_on_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, Sy
         _ => return Err(SyscallErr::EINVAL),
     };
     crate::task::perf::STATS_ON.store(val, Ordering::Relaxed);
+    Ok(buf.len())
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: profile (rw) — select one bounded diagnostic counter group
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_profile_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let profile = crate::task::perf::STATS_PROFILE.load(Ordering::Relaxed);
+    let name = match profile {
+        crate::task::perf::STATS_PROFILE_CORE => "core",
+        crate::task::perf::STATS_PROFILE_MEMORY_IO => "memory_io",
+        crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME => "network_runtime",
+        crate::task::perf::STATS_PROFILE_ALL => "all",
+        _ => "unknown",
+    };
+    let value = format!("{} {}\n", name, profile);
+    write_str(offset, len, buf, &value)
+}
+
+fn stats_profile_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+    let command = core::str::from_utf8(buf)
+        .map_err(|_| SyscallErr::EINVAL)?
+        .trim();
+    let profile = match command {
+        "core" | "1" => crate::task::perf::STATS_PROFILE_CORE,
+        "memory_io" | "2" => crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        "network_runtime" | "4" => crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME,
+        "all" | "7" => crate::task::perf::STATS_PROFILE_ALL,
+        _ => return Err(SyscallErr::EINVAL),
+    };
+    crate::task::perf::STATS_PROFILE.store(profile, Ordering::Relaxed);
     Ok(buf.len())
 }
 
@@ -804,7 +944,7 @@ fn stats_blockio_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(256);
+    let mut s = String::with_capacity(768);
     let _ = writeln!(
         s,
         "blk_vread_reqs={}",
@@ -825,6 +965,93 @@ fn stats_blockio_content(
         "blk_vwrite_secs={}",
         read_counter(&crate::task::perf::BLK_VWRITE_SECS)
     );
+    let _ = writeln!(
+        s,
+        "sata_read_reqs={}",
+        read_counter(&crate::task::perf::SATA_READ_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "sata_read_bytes={}",
+        read_counter(&crate::task::perf::SATA_READ_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "sata_read_ticks_total={}",
+        read_counter(&crate::task::perf::SATA_READ_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "sata_read_ticks_max={}",
+        read_counter(&crate::task::perf::SATA_READ_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_reqs={}",
+        read_counter(&crate::task::perf::SATA_WRITE_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_bytes={}",
+        read_counter(&crate::task::perf::SATA_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_ticks_total={}",
+        read_counter(&crate::task::perf::SATA_WRITE_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_ticks_max={}",
+        read_counter(&crate::task::perf::SATA_WRITE_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "sata_flush_reqs={}",
+        read_counter(&crate::task::perf::SATA_FLUSH_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "sata_flush_ticks_total={}",
+        read_counter(&crate::task::perf::SATA_FLUSH_TICKS_TOTAL)
+    );
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: Network and Python/runtime attribution
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_net_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(768);
+    macro_rules! counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    counter!("net_poll_calls", NET_POLL_CALLS);
+    counter!("net_poll_progress", NET_POLL_PROGRESS);
+    counter!("net_poll_lock_busy", NET_POLL_LOCK_BUSY);
+    counter!("net_rx_packets", NET_RX_PACKETS);
+    counter!("net_rx_bytes", NET_RX_BYTES);
+    counter!("net_rx_drops", NET_RX_DROPS);
+    counter!("net_tx_submit_packets", NET_TX_SUBMIT_PACKETS);
+    counter!("net_tx_submit_bytes", NET_TX_SUBMIT_BYTES);
+    counter!("net_tx_drops", NET_TX_DROPS);
+    counter!("runtime_exec_calls", RUNTIME_EXEC_CALLS);
+    counter!("runtime_exec_ticks_total", RUNTIME_EXEC_TICKS_TOTAL);
+    counter!("runtime_openat_calls", RUNTIME_OPENAT_CALLS);
+    counter!("runtime_read_calls", RUNTIME_READ_CALLS);
+    counter!("runtime_mmap_calls", RUNTIME_MMAP_CALLS);
     write_str(offset, len, buf, &s)
 }
 
@@ -853,11 +1080,18 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
         stats_on_content,
         stats_on_write,
     )?;
+    stats_dir.add_writable_file_with_write(
+        "profile",
+        rw_mode,
+        stats_profile_content,
+        stats_profile_write,
+    )?;
     stats_dir.add_write_only_file(
         "reset",
         InodeMode::from_bits_truncate(0o200),
         stats_reset_write,
     )?;
+    stats_dir.add_file("boot", ro_mode, stats_boot_content)?;
     stats_dir.add_file("taskq", ro_mode, stats_taskq_content)?;
     stats_dir.add_file("timer", ro_mode, stats_timer_content)?;
     stats_dir.add_file("seccomp", ro_mode, stats_seccomp_content)?;
@@ -868,6 +1102,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("heap", ro_mode, stats_heap_content)?;
     stats_dir.add_file("pagecache", ro_mode, stats_pagecache_content)?;
     stats_dir.add_file("blockio", ro_mode, stats_blockio_content)?;
+    stats_dir.add_file("net", ro_mode, stats_net_content)?;
     stats_dir.add_file("resource", ro_mode, stats_resource_content)?;
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;
     stats_dir.add_file("zombies", ro_mode, stats_zombies_content)?;

@@ -3,7 +3,7 @@ title: "初始化流程 (Initialization Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-13
+last_update: 2026-07-15
 tags: [architecture, boot, init, random]
 ---
 
@@ -58,6 +58,8 @@ task::run_tasks()
 ```
 
 `task::run_tasks()` 不返回。`rust_main()` 末尾的 `panic!("Unreachable in rust_main!")` 是不可达路径诊断。
+
+诊断构建还会在入口、console、MM、driver、net、FS、initproc 和进入 scheduler 前各写入一次启动里程碑。`/sys/kernel/stats/boot` 暴露从 Rust 入口起算的累计 raw ticks 与时钟频率；这些一次性值不受 `stats_on` 控制，也不会被运行期 `reset` 清除。生产构建中的同名调用编译为 no-op，正式启动性能仍以串口外部时间戳为准。
 
 ### 2.1 主入口源码
 

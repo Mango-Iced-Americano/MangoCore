@@ -1,0 +1,9 @@
+# size_bytes sha256 original_path
+16756992 bf1668b9bdbd1068914ac1a683ef58c821c6b03af1016f69771a9a2c25ba63c0 target/perf-runs/20260716T102350Z-cpython-ext4-production/artifacts/kernel-2k1000-persist-shell-formal-bf1668b9.ui
+62020224 7bd0dc97eb27144344477a18173ed8f69fecc0d1ce6096f3a966060b403ecb22 target/perf-runs/20260716T-cpython-deepdiag/artifacts/kernel-la-perf-diag-current
+77111808 a0ad8aad617400aa3112f0365b35304e7ea85a17a40c33b15862dae6dca2d416 target/perf-runs/20260716T-cpython-deepdiag/artifacts/kernel-rv-perf-diag-current
+16756992 728b2187bf7e5d7d1aa1683b7c11cc6da8240c394c73281671da8bb04caba802 target/perf-runs/20260716T-perf-diag-structural-ab/artifacts/kernel-production.ui
+71555720 1df241b2e71c272e5e748afb82d6dda423786e60fced060afad2468324831afe target/perf-runs/20260716T-perf-diag-structural-ab/artifacts/kernel-production.elf
+16546136 53e43b0430d07df8c307e7d9bd61524b538e07f132133f11c4c5b4637c288e68 target/perf-runs/20260716T-perf-diag-structural-ab/artifacts/kernel-diag.ui
+65855664 4e96eb6fc1eff8ab62db06bbc5c7c521d10a528c32194db2df3d31ef2900da29 target/perf-runs/20260716T-perf-diag-structural-ab/artifacts/kernel-diag.elf
+81627728 abbc714ce59f105fe1ebaab00cc053cea3d09161a6e51c2431112b6beeaff56a target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-abbc714ce59f.tar.xz

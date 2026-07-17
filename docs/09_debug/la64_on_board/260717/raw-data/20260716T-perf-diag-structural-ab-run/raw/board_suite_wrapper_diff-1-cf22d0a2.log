@@ -1,0 +1,20 @@
+2026-07-16T13:15:57.850434Z __PERF_BEGIN_board_suite_wrapper_diff-1-cf22d0a2__
+2026-07-16T13:15:58.808728Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_board_suite_wrapper_diff-1-cf22d0a2_TRACE_OFF__
+2026-07-16T13:16:00.893487Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_board_suite_wrapper_diff-1-cf22d0a2__
+2026-07-16T13:16:00.946008Z --- /scratch/mangocore-cpython-bench-suite/cpython_benchmark.sh
+2026-07-16T13:16:00.948766Z +++ /persist/pyperf/s/cpython_benchmark.sh
+2026-07-16T13:16:00.951617Z @@ -44,7 +44,10 @@
+2026-07-16T13:16:00.951635Z  fi
+2026-07-16T13:16:00.951646Z  
+2026-07-16T13:16:00.957166Z  require_scratch="${CPYTHON_BENCH_REQUIRE_SCRATCH:-0}"
+2026-07-16T13:16:00.962729Z -if [ -d /scratch ] && /bin/busybox mkdir -p /scratch/cpython-bench 2>/dev/null; then
+2026-07-16T13:16:00.968294Z +configured_work_base="${CPYTHON_BENCH_WORK_BASE:-}"
+2026-07-16T13:16:00.976674Z +if [ -n "$configured_work_base" ] && /bin/busybox mkdir -p "$configured_work_base" 2>/dev/null; then
+2026-07-16T13:16:00.979435Z +    work_base="$configured_work_base"
+2026-07-16T13:16:00.987810Z +elif [ -d /scratch ] && /bin/busybox mkdir -p /scratch/cpython-bench 2>/dev/null; then
+2026-07-16T13:16:00.990611Z      work_base=/scratch/cpython-bench
+2026-07-16T13:16:00.996153Z  elif [ "$require_scratch" = "1" ]; then
+2026-07-16T13:16:01.001096Z      echo "[CPYTHON BENCH FAIL] real-board run requires writable P2 /scratch"
+2026-07-16T13:16:01.008068Z __PERF_WORK_END_board_suite_wrapper_diff-1-cf22d0a2__
+2026-07-16T13:16:01.013067Z __PERF_ACK_board_suite_wrapper_diff-1-cf22d0a2_WORK__
+2026-07-16T13:16:01.507907Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_board_suite_wrapper_diff-1-cf22d0a2__ rc=0

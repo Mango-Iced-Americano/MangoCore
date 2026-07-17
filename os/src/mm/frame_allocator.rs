@@ -447,11 +447,16 @@ impl StackFrameAllocator {
 
         if let Some(start) = self.take_recycled_extent(num) {
             for ppn in start..start + num {
-                let started = crate::task::perf::perf_time_now();
+                let started = crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                );
                 crate::task::perf::record_frame_alloc();
                 frames.push(Arc::new(FrameTracker::new(ppn.into())));
                 crate::task::perf::record_frame_alloc_time_us(
-                    crate::task::perf::perf_time_now().saturating_sub(started),
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .saturating_sub(started),
                 );
             }
             return Some(frames);
@@ -468,7 +473,8 @@ impl StackFrameAllocator {
         self.regions[region_index].current += num;
 
         for ppn in start..start + num {
-            let started = crate::task::perf::perf_time_now();
+            let started =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             crate::task::perf::record_frame_alloc();
             #[cfg(not(feature = "zero_init"))]
             let frame = FrameTracker::new(ppn.into());
@@ -478,7 +484,8 @@ impl StackFrameAllocator {
             let frame = unsafe { FrameTracker::new_uninit(ppn.into()) };
             frames.push(Arc::new(frame));
             crate::task::perf::record_frame_alloc_time_us(
-                crate::task::perf::perf_time_now().saturating_sub(started),
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .saturating_sub(started),
             );
         }
         Some(frames)
@@ -623,7 +630,8 @@ impl FrameAllocator for StackFrameAllocator {
 
     /// 分配一个已清零物理页。
     fn alloc(&mut self) -> Option<FrameTracker> {
-        let _start = crate::task::perf::perf_time_now();
+        let _start =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         crate::task::perf::record_frame_alloc();
         // 优先使用回收的帧
         let result = if let Some(ppn) = self.take_recycled_ppn() {
@@ -640,7 +648,8 @@ impl FrameAllocator for StackFrameAllocator {
             None
         };
         crate::task::perf::record_frame_alloc_time_us(
-            crate::task::perf::perf_time_now().saturating_sub(_start),
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .saturating_sub(_start),
         );
         result
     }

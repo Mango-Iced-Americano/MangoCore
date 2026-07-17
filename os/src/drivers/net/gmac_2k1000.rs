@@ -674,6 +674,7 @@ impl GmacInner {
                     self.perf_diag.rx_bytes = self.perf_diag.rx_bytes.wrapping_add(len);
                 }
             } else {
+                crate::task::perf::record_net_rx_drop();
                 #[cfg(feature = "net_perf_diag")]
                 {
                     self.perf_diag.rx_invalid = self.perf_diag.rx_invalid.wrapping_add(1);
@@ -718,6 +719,7 @@ impl GmacInner {
     fn transmit(&mut self, input: &[u8]) {
         self.poll_link();
         if !self.link.up || input.is_empty() || input.len() > DMA_BUFFER_SIZE {
+            crate::task::perf::record_net_tx_drop();
             #[cfg(feature = "net_perf_diag")]
             {
                 self.perf_diag.tx_rejected = self.perf_diag.tx_rejected.wrapping_add(1);
@@ -729,6 +731,7 @@ impl GmacInner {
         // Safety: descriptor_frame remains allocated for the driver's lifetime.
         let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
         if status & DESC_OWN != 0 {
+            crate::task::perf::record_net_tx_drop();
             #[cfg(feature = "net_perf_diag")]
             {
                 self.perf_diag.tx_busy_drop = self.perf_diag.tx_busy_drop.wrapping_add(1);
@@ -743,6 +746,7 @@ impl GmacInner {
         let buffer = match frame_address(&self.tx_frames[self.tx_index]) {
             Ok(address) => address,
             Err(_) => {
+                crate::task::perf::record_net_tx_drop();
                 #[cfg(feature = "net_perf_diag")]
                 {
                     self.perf_diag.tx_rejected = self.perf_diag.tx_rejected.wrapping_add(1);

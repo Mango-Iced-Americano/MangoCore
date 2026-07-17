@@ -2,6 +2,9 @@
 
 docker-compose.override.yml
 
+# Root-level generated performance artifacts and disk images.
+/target/
+
 os/target/
 
 os/qemu.log
@@ -27,6 +30,9 @@ sdcard-rv.img
 disk.img
 
 disk-la.img
+
+# Generated regression disk images; keep them out of Git/Codex snapshots.
+/tmp/*.img
 
 cc-codex/*.clean.img
 

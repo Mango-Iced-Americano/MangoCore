@@ -3,7 +3,7 @@ title: "MangoCore 文档索引"
 category: overview
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-15
+last_updated: 2026-07-17
 tags: [docs, index, overview]
 ---
 
@@ -83,13 +83,13 @@ tags: [docs, index, overview]
 | `04_mm/` | [README.md](04_mm/README.md) | 稳定 | 内存管理文档含 14 篇文档，覆盖 frame allocator、页表/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、CoW、filemap 和 OOM |
 | `05_process/` | [README.md](05_process/README.md) | 稳定 | 进程文档含 17 篇文档，覆盖 TCB/PCB、调度、WaitQueue、clone/namespace、exec、exit/wait、signal、futex、IPC 和 rlimit |
 | `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
-| `09_debug/` | [README.md](09_debug/README.md) | 持续更新 | 共 43 篇 Markdown（含子目录索引）；`la64_on_board/` 含 29 篇编号专题 + 1 篇 hole-read ABI 深挖、总账和组会入口 |
+| `09_debug/` | [README.md](09_debug/README.md) | 持续更新 | `la64_on_board/` 按工作批次归档：`260710/` 保存 32 篇 bring-up 总账/专题，`260717/` 保存 Python 性能报告与原始数据 |
 
 ### 测试与实板使用
 
 | 文档 | 说明 |
 |---|---|
-| [la64_on_board/](09_debug/la64_on_board/README.md) | 2K1000LA 从首次上板到当前状态的组会速览、完整开发时间线和故障深挖入口 |
+| [la64_on_board/](09_debug/la64_on_board/README.md) | 2K1000LA 按日期组织的工作报告时间线；包含首次 bring-up 总账、故障深挖和 Python 性能专项 |
 | [mangocore-python-guide.md](08_testing/mangocore-python-guide.md) | 2K1000LA 上使用 MangoCore 特制 CPython、首次引导 pip、持久安装和故障排查 |
 | [cpython-isolated.md](08_testing/cpython-isolated.md) | CPython L3-L9 隔离测试设计、ABI 覆盖和 QEMU/实板门禁 |
 | [apk-isolated.md](08_testing/apk-isolated.md) | APK 隔离环境、P4 持久应用根和 `persist-shell` 设计 |

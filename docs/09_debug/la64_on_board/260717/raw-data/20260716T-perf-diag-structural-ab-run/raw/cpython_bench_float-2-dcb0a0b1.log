@@ -1,0 +1,13 @@
+2026-07-16T13:32:59.940311Z __PERF_BEGIN_cpython_bench_float-2-dcb0a0b1__
+2026-07-16T13:33:00.892773Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_cpython_bench_float-2-dcb0a0b1_TRACE_OFF__
+2026-07-16T13:33:03.262864Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_cpython_bench_float-2-dcb0a0b1__
+2026-07-16T13:33:03.572149Z [CPYTHON BENCH START] bm_float tmp=/persist/pyperf/w/run-146
+2026-07-16T13:33:38.223906Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1","target_stats":false,"tmpdir":"/persist/pyperf/w/run-146/tmp","type":"environment","warmups":0}
+2026-07-16T13:33:38.232000Z CPYTHON_BENCH_JSON {"benchmark":"bm_float","schema":1,"type":"start"}
+2026-07-16T13:36:08.267655Z CPYTHON_BENCH_JSON {"benchmark":"bm_float","elapsed_ns":149893381930,"elapsed_seconds":149.89338193,"max_rss":16700,"result":"9559531.70473361","sample":1,"schema":1,"sys_seconds":50.116276,"type":"sample","user_seconds":99.553428}
+2026-07-16T13:36:08.286985Z CPYTHON_BENCH_JSON {"benchmark":"bm_float","cv_percent":0.0,"max_ns":149893381930,"mean_ns":149893381930,"median_ns":149893381930,"min_ns":149893381930,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":0}
+2026-07-16T13:36:08.298041Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T13:36:08.625060Z [CPYTHON BENCH END] bm_float PASS rc=0
+2026-07-16T13:36:08.680165Z __PERF_WORK_END_cpython_bench_float-2-dcb0a0b1__
+2026-07-16T13:36:08.689726Z __PERF_ACK_cpython_bench_float-2-dcb0a0b1_WORK__
+2026-07-16T13:36:09.153260Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_cpython_bench_float-2-dcb0a0b1__ rc=0

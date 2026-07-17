@@ -129,7 +129,7 @@ checksum 时，目录块 CRC 使用目录自身的 inode 号和 generation，不
 把记录跨度从 `R` 错写为 `2R`，使扫描跳过下一项。删除非块首记录才可把长度并入紧邻前驱。
 启用 metadata checksum 时，CRC 的身份输入必须是目录自身 inode 和 generation，不能取块首
 目录项的 inode。完整追溯与历史证据边界见
-[`09_debug/la64_on_board/09-ext4-variable-dirent-rename.md`](../09_debug/la64_on_board/09-ext4-variable-dirent-rename.md)。
+[`09_debug/la64_on_board/260710/09-ext4-variable-dirent-rename.md`](../09_debug/la64_on_board/260710/09-ext4-variable-dirent-rename.md)。
 
 ## 文件 I/O
 
@@ -175,7 +175,7 @@ PageCache 在 ext4 中的状态机：`Loading -> UpToDate -> Dirty -> Writeback`
 重复释放造成 summary counter 漂移。超级块更新总是从当前 metadata cache/batch 快照
 继续累加，不能从挂载时的只读副本重新计算，否则一次批量操作中的前序更新会被覆盖。
 完整故障算术、八类代码缺陷和验证边界见
-[`18-ext4-lazy-init-and-block-group-accounting.md`](../09_debug/la64_on_board/18-ext4-lazy-init-and-block-group-accounting.md)。
+[`18-ext4-lazy-init-and-block-group-accounting.md`](../09_debug/la64_on_board/260710/18-ext4-lazy-init-and-block-group-accounting.md)。
 
 ### Inode 分配器
 
@@ -198,7 +198,7 @@ PageCache 在 ext4 中的状态机：`Loading -> UpToDate -> Dirty -> Writeback`
 对应物理块。释放后的脏缓存不能跨越块所有权转移继续存在，否则延迟 flush 可能覆盖
 同一物理块的新文件内容。
 父 inode 快照、延迟回收与 cache owner 的完整证据链见
-[`18a-ext4-metadata-cache-and-inode-snapshot.md`](../09_debug/la64_on_board/18a-ext4-metadata-cache-and-inode-snapshot.md)。
+[`18a-ext4-metadata-cache-and-inode-snapshot.md`](../09_debug/la64_on_board/260710/18a-ext4-metadata-cache-and-inode-snapshot.md)。
 
 ## 已知缺失
 

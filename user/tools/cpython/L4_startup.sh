@@ -18,7 +18,8 @@ run_py_test() {
 }
 
 # Source the environment
-. /tools/tests/cpython/run_cpython.sh
+CPYTHON_TEST_ROOT=${CPYTHON_TEST_ROOT:-/tools/tests/cpython}
+. "$CPYTHON_TEST_ROOT/run_cpython.sh"
 
 # Test 0: The boot-time global launchers must provide an ordinary shell UX.
 echo "[CPYTHON GLOBAL] test: python3/python commands"

@@ -1,0 +1,4 @@
+benchmark,production_elapsed_s,production_user_s,production_sys_s,diag_off_elapsed_s,diag_off_user_s,diag_off_sys_s,elapsed_delta_percent
+bm_nbody,8.65165486,8.613002,0.024703,8.54713707,8.510613,0.023732,-1.2081
+bm_string,15.83443743,7.243995,8.561714,11.30569996,2.813423,8.469384,-28.6006
+bm_float,149.89338193,99.553428,50.116276,72.49240693,22.191048,50.186949,-51.6374

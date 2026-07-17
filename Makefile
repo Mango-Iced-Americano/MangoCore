@@ -8,6 +8,7 @@ IMAGE ?=
 P3_IMAGE ?= mango-2k1000la-cpython-tools-p3.img
 P3_MANIFEST ?= $(P3_IMAGE).json
 P3_VERIFY_FILE ?= user/tools/cpython/L7_filesystem.py
+P3_BACKUP_ID ?=
 P4_IMAGE ?= mango-2k1000la-state-p4.img
 P4_MANIFEST ?= $(P4_IMAGE).json
 P4_QEMU_DISK ?= mango-2k1000la-p4-qemu.img
@@ -60,7 +61,7 @@ print-logo:
 	@echo "                                                                            "
 	@echo "                                                                            "
 .PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
-	2k1000-boot 2k1000-boot-check 2k1000-cpython-p3-write \
+	2k1000-boot 2k1000-boot-check 2k1000-p3-backup 2k1000-cpython-p3-write \
 	2k1000-p4-image 2k1000-p4-qemu-disk 2k1000-p4-preflight 2k1000-p4-write
 
 qemu-download: $(QEMU_DIR)/.extracted
@@ -126,7 +127,21 @@ docker-test-parallel:
 		--image "$(IMAGE)" $(BOARD_SERIAL_ARG) \
 		--no-host-config --check-only
 
+2k1000-p3-backup:
+	@test -n "$(PERF_RUN_DIR)" || { echo "usage: make 2k1000-p3-backup PERF_RUN_DIR=<run-dir> P3_BACKUP_ID=<id> CONFIRM_P3_START=0xA80800" >&2; exit 2; }
+	@test -n "$(P3_BACKUP_ID)" || { echo "refusing P3 backup without P3_BACKUP_ID" >&2; exit 2; }
+	@test "$(CONFIRM_P3_START)" = "0xA80800" || { \
+		echo "refusing P3 backup: set CONFIRM_P3_START=0xA80800" >&2; exit 2; \
+	}
+	python3 scripts/backup_2k1000_p3.py \
+		--run-dir "$(PERF_RUN_DIR)" \
+		--backup-id "$(P3_BACKUP_ID)" \
+		--confirm-p3-start "$(CONFIRM_P3_START)" $(BOARD_SERIAL_ARG)
+
 2k1000-cpython-p3-write:
+	@test -n "$(P3_BACKUP_ID)" || { \
+		echo "refusing P3 write: first create a verified /persist backup and set P3_BACKUP_ID" >&2; exit 2; \
+	}
 	@test "$(CONFIRM_P3_START)" = "0xA80800" || { \
 		echo "refusing P3 write: set CONFIRM_P3_START=0xA80800" >&2; exit 2; \
 	}
@@ -135,6 +150,7 @@ docker-test-parallel:
 		--image "$(P3_IMAGE)" \
 		--manifest "$(P3_MANIFEST)" \
 		--verify-file "$(P3_VERIFY_FILE)" \
+		--backup-id "$(P3_BACKUP_ID)" \
 		--confirm-p3-start "$(CONFIRM_P3_START)" $(BOARD_SERIAL_ARG)
 
 2k1000-p4-image:

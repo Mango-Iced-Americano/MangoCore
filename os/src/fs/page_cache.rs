@@ -647,9 +647,11 @@ impl PageCache {
         }
 
         // 分配新帧（frame_alloc 返回零填充页）
-        let _t_falloc = perf::perf_time_now();
+        let _t_falloc = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
-        perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
+        perf::record_pc_falloc_cycles(
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_falloc),
+        );
 
         let entry = if populate && !beyond_eof {
             // 正常路径：从后端读取数据
@@ -895,10 +897,10 @@ impl PageCache {
     /// 从指定偏移量读取数据
     /// 两阶段读取：持锁收集拷贝项 → 解锁拷贝数据
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        let _t0 = perf::perf_time_now();
+        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let miss_before = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed);
         if buf.is_empty() {
-            let elapsed = perf::perf_time_now().wrapping_sub(_t0);
+            let elapsed = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
             perf::record_pc_read(0, elapsed, elapsed, 0);
             return Ok(0);
         }
@@ -911,19 +913,22 @@ impl PageCache {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
-            let _t_lookup = perf::perf_time_now();
+            let _t_lookup = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
             let had_miss =
                 perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-            let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
+            let lookup_cycles =
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
-            let _t_copy = perf::perf_time_now();
+            let _t_copy = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let src = entry.as_slice();
             buf[..sub_len].copy_from_slice(&src[page_offset..page_offset + sub_len]);
-            let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+            let copy_cycles =
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_copy);
             perf::record_pc_copy_cycles(copy_cycles);
-            let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
+            let total_cycles =
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
             if had_miss {
                 perf::record_pc_read(1, total_cycles, 0, total_cycles);
             } else {
@@ -943,7 +948,7 @@ impl PageCache {
         let mut total_read = 0usize;
         let mut pages = 0usize;
 
-        let _t_lookup = perf::perf_time_now();
+        let _t_lookup = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         for page_index in start_page..=end_page {
             let page_start = page_index << PAGE_SIZE_BITS;
             let page_end = page_start + PAGE_SIZE;
@@ -966,11 +971,12 @@ impl PageCache {
             total_read += sub_len;
         }
         let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-        let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
+        let lookup_cycles =
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_lookup);
         perf::record_pc_lookup_cycles(lookup_cycles);
 
         // Phase 2: 拷贝数据（无锁）
-        let _t_copy = perf::perf_time_now();
+        let _t_copy = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let mut dst_offset = 0;
         for item in &copies {
             let src = item.entry.as_slice();
@@ -979,10 +985,11 @@ impl PageCache {
                 .copy_from_slice(&src[src_start..src_start + item.sub_len]);
             dst_offset += item.sub_len;
         }
-        let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+        let copy_cycles =
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_copy);
         perf::record_pc_copy_cycles(copy_cycles);
 
-        let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
+        let total_cycles = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
         if had_miss {
             perf::record_pc_read(pages, total_cycles, 0, total_cycles);
         } else {
@@ -1002,9 +1009,13 @@ impl PageCache {
         buf: &[u8],
         old_file_size: Option<usize>,
     ) -> Result<usize, SyscallErr> {
-        let _t0 = perf::perf_time_now();
+        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         if buf.is_empty() {
-            perf::record_pc_write(0, false, perf::perf_time_now().wrapping_sub(_t0));
+            perf::record_pc_write(
+                0,
+                false,
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+            );
             return Ok(0);
         }
 
@@ -1028,7 +1039,7 @@ impl PageCache {
             perf::record_pc_write(
                 1,
                 full_page_overwrite,
-                perf::perf_time_now().wrapping_sub(_t0),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
             );
             balance_dirty_pages();
             return Ok(sub_len);
@@ -1093,7 +1104,7 @@ impl PageCache {
         perf::record_pc_write(
             pages,
             any_full_overwrite,
-            perf::perf_time_now().wrapping_sub(_t0),
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
         );
         balance_dirty_pages();
         Ok(total_written)
@@ -1415,17 +1426,23 @@ impl PageCache {
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
-        let _t0 = perf::perf_time_now();
+        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let entry = {
             let entries = self.entries.lock();
             if page_index >= entries.len() {
-                perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
+                perf::record_pc_writeback(
+                    0,
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+                );
                 return Ok(());
             }
             match &entries[page_index] {
                 Some(e) => e.clone(),
                 None => {
-                    perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
+                    perf::record_pc_writeback(
+                        0,
+                        perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+                    );
                     return Ok(());
                 }
             }
@@ -1439,7 +1456,10 @@ impl PageCache {
                 self.inner.lock().clear_dirty(page_index);
             }
             Err(_) => {
-                perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
+                perf::record_pc_writeback(
+                    0,
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+                );
                 return Ok(());
             }
         }
@@ -1485,7 +1505,10 @@ impl PageCache {
             Ok(())
         };
 
-        perf::record_pc_writeback(1, perf::perf_time_now().wrapping_sub(_t0));
+        perf::record_pc_writeback(
+            1,
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+        );
         result
     }
 
@@ -1495,7 +1518,7 @@ impl PageCache {
     /// 非 Dirty 的页面被跳过。批次中至少一个页面被写入时，调用
     /// `backend.write_pages()` 批量提交；否则直接返回 Ok。
     fn writeback_pages_run(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
-        let _t0 = perf::perf_time_now();
+        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
 
         // 第一阶段：持有 entries 锁，收集 Dirty 页面，CAS 为 Writeback
         let mut page_slices: Vec<(usize, Arc<PageEntry>)> = Vec::new();
@@ -1585,7 +1608,10 @@ impl PageCache {
             Ok(())
         };
 
-        perf::record_pc_writeback(slices.len(), perf::perf_time_now().wrapping_sub(_t0));
+        perf::record_pc_writeback(
+            slices.len(),
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+        );
         result
     }
 
@@ -1959,8 +1985,7 @@ impl PageCacheBackend for BlockPageCacheBackend {
 /// writeback data during rename/unlink cache eviction.
 pub struct FatPageCacheBackend {
     fs: alloc::sync::Arc<crate::fs::fat32::EasyFileSystem>,
-    file_content:
-        alloc::sync::Arc<spin::RwLock<crate::fs::fat32::fat_inode::FileContent>>,
+    file_content: alloc::sync::Arc<spin::RwLock<crate::fs::fat32::fat_inode::FileContent>>,
     block_size: usize,
     blocks_per_page: usize,
     sec_per_clus: usize,
@@ -1969,9 +1994,7 @@ pub struct FatPageCacheBackend {
 impl FatPageCacheBackend {
     pub fn new(
         fs: alloc::sync::Arc<crate::fs::fat32::EasyFileSystem>,
-        file_content: alloc::sync::Arc<
-            spin::RwLock<crate::fs::fat32::fat_inode::FileContent>,
-        >,
+        file_content: alloc::sync::Arc<spin::RwLock<crate::fs::fat32::fat_inode::FileContent>>,
     ) -> Self {
         let block_size = fs.byts_per_sec as usize;
         let blocks_per_page = crate::config::PAGE_SIZE / block_size;

@@ -1,0 +1,12 @@
+2026-07-17T04:22:06.313332Z __PERF_BEGIN_strict_ext4_preflight-1-b079314a__
+2026-07-17T04:22:07.250487Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_strict_ext4_preflight-1-b079314a_TRACE_OFF__
+2026-07-17T04:22:10.185229Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_strict_ext4_preflight-1-b079314a__
+2026-07-17T04:22:10.223666Z /persist /persist ext4 rw,relatime 0 0
+2026-07-17T04:22:10.305137Z Filesystem           1K-blocks      Used Available Use% Mounted on
+2026-07-17T04:22:10.311477Z none                  16350816   2426464  13924352  15% /
+2026-07-17T04:22:10.405328Z [0;0mblockio[m    [0;0mctxsw[m      [0;0mnet[m        [0;0mreclaim[m    [0;0mseccomp[m    [0;0mtaskq[m      [0;0mzombies[m
+2026-07-17T04:22:10.414213Z [0;0mboot[m       [0;0mfeatures[m   [0;0mpagecache[m  [0;0mreset[m      [0;0mstats_on[m   [0;0mtimer[m
+2026-07-17T04:22:10.423877Z [0;0mbuddyinfo[m  [0;0mheap[m       [0;0mprofile[m    [0;0mresource[m   [0;0msyscall[m    [0;0mtlb[m
+2026-07-17T04:22:10.430149Z __PERF_WORK_END_strict_ext4_preflight-1-b079314a__
+2026-07-17T04:22:10.434919Z __PERF_ACK_strict_ext4_preflight-1-b079314a_WORK__
+2026-07-17T04:22:10.908562Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_strict_ext4_preflight-1-b079314a__ rc=0

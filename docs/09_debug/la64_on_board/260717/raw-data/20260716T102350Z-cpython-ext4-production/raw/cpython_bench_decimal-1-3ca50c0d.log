@@ -1,0 +1,14 @@
+2026-07-16T10:54:20.163911Z __PERF_BEGIN_cpython_bench_decimal-1-3ca50c0d__
+2026-07-16T10:54:21.103442Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_cpython_bench_decimal-1-3ca50c0d_TRACE_OFF__
+2026-07-16T10:54:23.504618Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_cpython_bench_decimal-1-3ca50c0d__
+2026-07-16T10:54:23.815006Z [CPYTHON BENCH START] bm_decimal tmp=/persist/pyperf/w/run-158
+2026-07-16T10:54:58.519570Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1","target_stats":false,"tmpdir":"/persist/pyperf/w/run-158/tmp","type":"environment","warmups":1}
+2026-07-16T10:54:58.523630Z CPYTHON_BENCH_JSON {"benchmark":"bm_decimal","schema":1,"type":"start"}
+2026-07-16T10:55:37.824167Z CPYTHON_BENCH_JSON {"benchmark":"bm_decimal","schema":1,"type":"warmup","warmup":1}
+2026-07-16T10:56:17.053031Z CPYTHON_BENCH_JSON {"benchmark":"bm_decimal","elapsed_ns":39153151910,"elapsed_seconds":39.15315191,"max_rss":17956,"result":"339998","sample":1,"schema":1,"sys_seconds":10.341033999999997,"type":"sample","user_seconds":28.732116000000005}
+2026-07-16T10:56:17.076053Z CPYTHON_BENCH_JSON {"benchmark":"bm_decimal","cv_percent":0.0,"max_ns":39153151910,"mean_ns":39153151910,"median_ns":39153151910,"min_ns":39153151910,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":1}
+2026-07-16T10:56:17.087309Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T10:56:17.428957Z [CPYTHON BENCH END] bm_decimal PASS rc=0
+2026-07-16T10:56:17.483216Z __PERF_WORK_END_cpython_bench_decimal-1-3ca50c0d__
+2026-07-16T10:56:17.488288Z __PERF_ACK_cpython_bench_decimal-1-3ca50c0d_WORK__
+2026-07-16T10:56:17.964298Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_cpython_bench_decimal-1-3ca50c0d__ rc=0

@@ -2,6 +2,13 @@
 
 > 跨对话可复用的调试技巧和排查方法。
 
+## 同盘分区覆盖前的备份必须分块校验并延迟发布完成标记
+
+- **场景**: 定向覆盖只读工具分区前，需要把原内容暂存到同盘的独立持久分区以支持回滚。
+- **方法**: 强校验源/目标分区边界、挂载属性、设备 mode、文件系统 UUID/卷标和空间；按 bootloader 可加载的小块复制，每块重新读取源并与落盘文件做强哈希比较。仅在所有块完成并同步后原子发布 `COMPLETE`，中断残留不得进入写盘流程。
+- **边界**: 同盘备份只防分区定向覆盖，不防整盘故障；源分区被挂载或运行时使用时不得原地恢复。覆盖器还应在首个写操作前从 bootloader 逐块读取备份，证明恢复材料脱离当前内核后仍可访问。
+- **相关文件**: `scripts/board/backup_2k1000_p3.sh`, `scripts/backup_2k1000_p3.py`, `scripts/write_2k1000_p3.py`
+
 ## Codex 后台快照重复打包未忽略的大文件
 
 - **现象**: 没有可见 Git 操作时，ChatGPT/Codex 主进程仍反复拉起多个 `git add --pathspec-from-file=- --pathspec-file-nul`，持续占满 CPU、磁盘并触发风扇；旧进程结束后新 PID 很快重生。
@@ -448,6 +455,14 @@
 - **验收**: 不仅检查组退出码，还要比对关键指标行和 stderr；本例要求 `Protection fault` 出现且 `mmap: Bad file descriptor` 消失，同时 fork+exec、文件带宽和 context switch 跑到 END。
 - **相关文件**: `user/src/bin/initproc.rs`, `docs/03_fs/2k1000-full-test-disk.md`
 
+### 第三方 benchmark 纳入基线前先证明它真的在做目标工作
+
+- **反例**: 只看到脚本退出 0 并不代表 workload 有效。曾有 pidigits 把多位整数逐项拼接，要求 2000 位却生成约 139 万字符；另一个 scheduler 在第一轮把任务链截断，随后几十万轮只检查一个 suspended 节点。两者都能产生稳定耗时，但测到的不是声明的算法。
+- **准入检查**: 每个样本返回可重复的结果 token，算法类负载验证已知值或计数器，I/O/并发类负载验证字节数、子进程状态和线程完成；固定随机种子，避免把输入生成或熵源波动混入目标路径。低于宿主调度/时钟噪声尺度的负载应增加等价迭代，而不是用最小值掩盖波动。
+- **采样约束**: import、GC 和临时目录准备放在计时区外；每个 module 使用独立解释器进程，保留全部原始样本并报告 median/min/max/CV。不同 workload 的工作单位不同，不计算无物理意义的绝对耗时几何平均数。
+- **介质边界**: 解释器和库可留在只读 tools 分区，benchmark 源码单独按内容哈希部署到 scratch；不要为了几十 KiB 测试脚本整体重写数百 MiB 的工具分区。
+- **相关文件**: `user/tools/cpython/bench/bench_runner.py`, `user/tools/cpython/cpython_benchmark.sh`, `scripts/package_cpython_bench.py`, `scripts/deploy_cpython_bench.py`
+
 ### 动态程序在 loader 固定地址非法指令时审计跨架构 HWCAP
 
 - **现象**: musl/static 版本正常，glibc 动态程序在进入 `main()` 前稳定触发非法指令；PC 落在 `ld.so` 的 LSX/LASX 等 ISA 优化 resolver，同一测试每次地址一致。
@@ -575,6 +590,14 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **验收**：集成测试必须从普通 Shell 路径直接调用 `/usr/bin/<command>`，不能只验证内部脚本的显式 loader 路径；同时覆盖 tools 绑定到 `/usr` 和保留可写 `/usr` 两种启动模式。
 - **相关文件**：`user/tools/cpython/python3-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/make_2k1000_full_test_disk.py`, `os/Makefile`
 
+### Shell 变量可用不代表子进程环境可见
+
+- **现象**：外层 Shell 能通过私有动态 loader 正常启动解释器，但解释器内部的 `subprocess` 直接执行同一运行时失败；实板返回 `-127`，容易误判为 fork/exec 内核缺陷。
+- **根因**：环境初始化脚本只给 Shell 变量赋值，或板上持久 runtime 仍是未导出变量的旧版本。Shell 展开 `$VAR` 不需要 `export`，但 Python `os.environ` 和其后代进程只能看到已导出的变量。
+- **修复**：先用 Shell 直接 loader 启动与 Python 内单子进程探针分层排除；需要保持只读 runtime 时，在部署到 scratch 的 benchmark wrapper source 后显式 `export` 必需变量，不覆盖持久分区。
+- **教训**：动态运行时的 fork/exec benchmark 必须验证 loader、library path 和 runtime root 穿过 Shell → Python → child 三层环境边界；功能失败样本修正前不能进入性能排名。
+- **相关文件**：`user/tools/cpython/cpython_benchmark.sh`, `user/tools/cpython/run_cpython.sh`, `user/tools/cpython/bench/bm_fork.py`
+
 ### 包管理器的下载缓存与安装根必须分层
 
 - **现象**：HTTPS 下载和原始包缓存正常，但把包管理器根目录放在 FAT32 后出现 chmod、符号链接、维护脚本或动态加载器异常；直接把系统/工具分区改成可写又会扩大损坏范围。
@@ -638,3 +661,34 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **修复**：统一定义 16 字节用户入口对齐；按完整 argc/argv/envp/auxv 表长度动态计算 padding，并让 exec 容量预检复用同一公式；signal frame 同时满足 ABI 和架构 context 的最大对齐。
 - **验收**：两架构分别运行真实用户态比较和信号往返，必要时对用户 ELF 反汇编并核对发生误判的地址计算；仅检查内核 copy 日志不能闭环。
 - **相关文件**：`os/src/mm/address_space.rs`, `os/src/mm/mod.rs`, `os/src/syscall/process/exec.rs`, `os/src/task/signal/frame.rs`
+
+### 串口逐字节发送仍不足以保证多阶段测试脚本可靠
+
+- **现象**：命令已按单字节和固定间隔发送，但宿主在工作负载尚未结束时继续排队后续 marker/快照命令；板端繁忙输出期间仍会丢字符，结束 marker 变成不存在的命令，计时边界随之失真。
+- **根因**：发送节流只控制瞬时字节率，没有提供执行阶段的流控。TTY 回显又包含 marker 字面量，宿主若只搜索字符串，会把“命令已回显”误判成“命令已执行完成”。
+- **修复**：测试开始先关闭终端回显；每个控制阶段输出唯一 ACK，宿主读到实际 ACK 后才发送下一阶段；工作负载在同一 shell 行内包住 begin/end/rc，完成后再关闭计数和读取后快照，最后恢复回显。
+- **教训**：串口性能 harness 需要同时解决传输完整性、执行流控和 marker 真伪三件事。出现 marker 缺失的样本必须判无效，不能用宿主总 wall time 补成正式结果。
+- **相关文件**：`scripts/kernel_perf.py`, `scripts/boot_2k1000_tftp.py`
+
+### 用户态 workload 的高 sys 先检查“被内核模拟的用户指令”
+
+- **现象**：纯字符串、浮点对象或容器操作没有显式 I/O，却有 40%–70% system time；同一程序在 QEMU 正常、在实板极慢。
+- **定位**：先用稳定用户态计算作负对照，再只包住 workload body 统计架构异常的次数、访问宽度和 handler ticks；读取实板 CPU capability，不能用 QEMU 的 UAL/扩展能力替代。handler ticks 与 rusage sys 对齐时，异常模拟比 syscall 分布更接近根因。
+- **放大链证明**：对非对齐 store 计算 `sum(width * count)`，再与单页 TLB invalidate 比较。两者近似一一对应时，检查逐字节 uaccess 是否对每个 byte 重走 fault-in、private COW 权限恢复和 TLB flush，而不是只优化统计或 syscall dispatch。
+- **边界**：Rust handler 计时不含 trap 汇编保存/恢复，因此是下界；启动/import 和 workload body 必须分窗，否则会把 loader/runtime 代码的异常归给算法本身。
+- **相关文件**：`os/src/hal/arch/loongarch64/trap/{mod.rs,trap.S}`, `os/src/mm/{uaccess,page_fault,vma}.rs`, `os/src/hal/arch/loongarch64/laflex.rs`
+
+### 释放耗时随页数平方增长时审计逐项删除的数据结构
+
+- **现象**：匿名映射关闭在 1/4/16/32/64 MiB 下从毫秒增长到数秒，而 frame free 与 TLB invalidate 都只随页数线性增长。
+- **定位**：让映射中的每页实际 resident，只计时 close/munmap；同时报告 `elapsed/page²`、frame free 和 TLB page。大尺寸 `elapsed/page²` 稳定时，优先查找“外层逐页遍历 + 内层 retain/remove 全表扫描”。
+- **已验证模式**：`Vma::unmap` 对每个 resident VPN 调用 `remove_in_memory`，后者对 active vector 执行 `retain`，总工作量为 N+(N-1)+...+1。该模式会放大 Python arena、大 buffer 和进程退出，但在没有完整 workload 分窗前不能声称其占据每项 benchmark 的具体比例。
+- **相关文件**：`os/src/mm/vma.rs`, `os/src/mm/frame_store.rs`, `user/tools/cpython/bench/diag_mmap_release.py`
+
+### 宿主串口超时不等于板端 workload 已终止
+
+- **现象**：宿主 capture 超时并返回 124，但板端前台解压、递归遍历或 I/O 仍在继续；立即发送审计命令会被当成前台程序输入，后续“恢复超时”只是同一现场的连锁结果。
+- **判定**：超时后先把样本标为控制面未知，不把宿主 wall time当作 workload 失败耗时。只有读到原命令的工作结束 marker/rc、明确的 shell prompt，或完成物理复位后，才允许发送下一条测试命令。
+- **恢复**：短时尝试 Ctrl-C/换行和唯一 echo marker；若目标内核/驱动路径不可中断且没有 prompt，停止注入更多命令，保留原始串口并请求物理复位。复位后先审计 staging/canonical 路径和目标分区哈希，再决定清理或继续。
+- **报告**：把下载、解包、串口恢复等 pre-benchmark 失败与 benchmark failure 分表；前者可以暴露部署/VFS 性能问题，但不能降低已成功正式矩阵的 pass 数。
+- **相关文件**：`scripts/kernel_perf.py`, `scripts/deploy_cpython_runtime.py`

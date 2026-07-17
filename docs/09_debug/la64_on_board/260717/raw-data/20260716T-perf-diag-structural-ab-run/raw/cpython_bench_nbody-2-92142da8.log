@@ -1,0 +1,13 @@
+2026-07-16T13:31:13.546712Z __PERF_BEGIN_cpython_bench_nbody-2-92142da8__
+2026-07-16T13:31:14.479639Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_nbody-2-92142da8_TRACE_OFF__
+2026-07-16T13:31:16.866055Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_cpython_bench_nbody-2-92142da8__
+2026-07-16T13:31:17.178194Z [CPYTHON BENCH START] bm_nbody tmp=/persist/pyperf/w/run-118
+2026-07-16T13:31:51.929092Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1","target_stats":false,"tmpdir":"/persist/pyperf/w/run-118/tmp","type":"environment","warmups":0}
+2026-07-16T13:31:51.937658Z CPYTHON_BENCH_JSON {"benchmark":"bm_nbody","schema":1,"type":"start"}
+2026-07-16T13:32:00.806858Z CPYTHON_BENCH_JSON {"benchmark":"bm_nbody","elapsed_ns":8651654860,"elapsed_seconds":8.65165486,"max_rss":16692,"result":"-0.169078070659","sample":1,"schema":1,"sys_seconds":0.024703000000000586,"type":"sample","user_seconds":8.613002000000002}
+2026-07-16T13:32:00.828314Z CPYTHON_BENCH_JSON {"benchmark":"bm_nbody","cv_percent":0.0,"max_ns":8651654860,"mean_ns":8651654860,"median_ns":8651654860,"min_ns":8651654860,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":0}
+2026-07-16T13:32:00.839548Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T13:32:01.153633Z [CPYTHON BENCH END] bm_nbody PASS rc=0
+2026-07-16T13:32:01.203015Z __PERF_WORK_END_cpython_bench_nbody-2-92142da8__
+2026-07-16T13:32:01.207589Z __PERF_ACK_cpython_bench_nbody-2-92142da8_WORK__
+2026-07-16T13:32:01.671072Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_cpython_bench_nbody-2-92142da8__ rc=0

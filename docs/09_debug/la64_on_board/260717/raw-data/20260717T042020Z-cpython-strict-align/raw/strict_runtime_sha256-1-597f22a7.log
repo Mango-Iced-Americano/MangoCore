@@ -1,0 +1,7 @@
+2026-07-17T04:24:06.500297Z __PERF_BEGIN_strict_runtime_sha256-1-597f22a7__
+2026-07-17T04:24:07.438739Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_strict_runtime_sha256-1-597f22a7_TRACE_OFF__
+2026-07-17T04:24:09.860318Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_strict_runtime_sha256-1-597f22a7__
+2026-07-17T04:25:32.810699Z /persist/pyperf/r/.cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz.part: OK
+2026-07-17T04:25:32.818112Z __PERF_WORK_END_strict_runtime_sha256-1-597f22a7__
+2026-07-17T04:25:32.821787Z __PERF_ACK_strict_runtime_sha256-1-597f22a7_WORK__
+2026-07-17T04:25:33.295880Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_strict_runtime_sha256-1-597f22a7__ rc=0

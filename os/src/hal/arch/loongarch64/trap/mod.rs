@@ -206,8 +206,10 @@ pub fn trap_handler() -> ! {
             }
             inner.update_process_times_leave_trap(cause);
         }
-        let _trap_ticks = crate::task::perf::perf_time_now() - _trap_start;
-        crate::task::perf::record_trap_cost_ticks(_trap_ticks);
+        if _trap_start != 0 {
+            let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
+            crate::task::perf::record_trap_cost_ticks(_trap_ticks);
+        }
         trap_return();
     }
 
@@ -239,8 +241,15 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::PageNonExecutableFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
+            let _pf_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             crate::task::perf::record_page_fault();
-            match mset_lock.do_page_fault(addr, access) {
+            let pf_result = mset_lock.do_page_fault(addr, access);
+            crate::task::perf::record_pagefault_time_us(
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .saturating_sub(_pf_start),
+            );
+            match pf_result {
                 Err(error) => match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
@@ -310,6 +319,7 @@ pub fn trap_handler() -> ! {
             read_bp();
         }
         Trap::Exception(Exception::AddressNotAligned) => {
+            let unaligned_start = crate::task::perf::perf_time_now();
             let cx = current_trap_cx();
             let token = current_user_token();
             let pc = cx.gp.pc;
@@ -324,11 +334,13 @@ pub fn trap_handler() -> ! {
             let addr = BadV::read().get_vaddr();
             //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
             let sz = op.get_size();
+            let is_store = op.is_store();
+            let is_float = op.is_float_op();
             let is_aligned: bool = addr % sz == 0;
             if !is_aligned {
                 assert!([2, 4, 8].contains(&sz));
-                if op.is_store() {
-                    let mut rd = if !op.is_float_op() {
+                if is_store {
+                    let mut rd = if !is_float {
                         cx.gp[ins.get_rd_num()]
                     } else {
                         cx.fp.f[ins.get_rd_num()]
@@ -355,7 +367,7 @@ pub fn trap_handler() -> ! {
                             _ => unreachable!(),
                         }
                     }
-                    if !op.is_float_op() {
+                    if !is_float {
                         cx.gp[ins.get_rd_num()] = rd;
                     } else {
                         cx.fp.f[ins.get_rd_num()] = rd;
@@ -370,6 +382,12 @@ pub fn trap_handler() -> ! {
                     pc
                 );
             }
+            crate::task::perf::record_user_unaligned_trap(
+                unaligned_start,
+                is_store,
+                sz,
+                is_float,
+            );
         }
         Trap::Interrupt(Interrupt::IPI)
         | Trap::MachineError(_)

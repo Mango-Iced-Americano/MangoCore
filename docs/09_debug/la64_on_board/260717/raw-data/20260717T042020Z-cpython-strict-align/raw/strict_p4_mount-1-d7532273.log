@@ -1,0 +1,6 @@
+2026-07-17T05:03:02.992763Z __PERF_BEGIN_strict_p4_mount-1-d7532273__
+2026-07-17T05:03:03.892690Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_strict_p4_mount-1-d7532273_TRACE_OFF__
+2026-07-17T05:03:06.342072Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_strict_p4_mount-1-d7532273__
+2026-07-17T05:03:06.420821Z __PERF_WORK_END_strict_p4_mount-1-d7532273__
+2026-07-17T05:03:06.424927Z __PERF_ACK_strict_p4_mount-1-d7532273_WORK__
+2026-07-17T05:03:06.860897Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_strict_p4_mount-1-d7532273__ rc=0

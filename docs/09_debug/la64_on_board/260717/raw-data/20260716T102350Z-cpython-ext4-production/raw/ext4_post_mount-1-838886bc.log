@@ -1,0 +1,26 @@
+2026-07-16T12:01:36.299318Z __PERF_BEGIN_ext4_post_mount-1-838886bc__
+2026-07-16T12:01:37.207266Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_ext4_post_mount-1-838886bc_TRACE_OFF__
+2026-07-16T12:01:38.443030Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_ext4_post_mount-1-838886bc__
+2026-07-16T12:01:38.482568Z none on / type rootfs (rw,relatime)
+2026-07-16T12:01:38.485410Z /tools/tests on /tests type ext4 (ro,relatime)
+2026-07-16T12:01:38.488675Z /persist on /persist type ext4 (rw,relatime)
+2026-07-16T12:01:38.497185Z /persist/python on /persist/apk-root/var/cache/mango-python type ext4 (rw,relatime)
+2026-07-16T12:01:38.502910Z /tools on /persist/apk-root/tools type ext4 (ro,relatime)
+2026-07-16T12:01:38.507249Z /scratch on /persist/apk-root/scratch type fat32 (rw,relatime)
+2026-07-16T12:01:38.512367Z /run on /persist/apk-root/run type ramfs (rw,relatime)
+2026-07-16T12:01:38.517492Z /tmp on /persist/apk-root/tmp type tmpfs (rw,relatime)
+2026-07-16T12:01:38.523134Z /dev on /persist/apk-root/dev type devfs (rw,relatime)
+2026-07-16T12:01:38.528799Z /proc on /persist/apk-root/proc type proc (rw,relatime)
+2026-07-16T12:01:38.531574Z /scratch on /scratch type fat32 (rw,relatime)
+2026-07-16T12:01:38.537374Z none on /sys type sysfs (rw,relatime)
+2026-07-16T12:01:38.539080Z /tools on /tools type ext4 (ro,relatime)
+2026-07-16T12:01:38.542649Z none on /tmp type tmpfs (rw,relatime)
+2026-07-16T12:01:38.548369Z /sdcard on /sdcard type ext4 (ro,relatime)
+2026-07-16T12:01:38.551227Z none on /proc type proc (rw,relatime)
+2026-07-16T12:01:38.556923Z /sdcard/musl on /musl type ext4 (ro,relatime)
+2026-07-16T12:01:38.559775Z /sdcard/glibc on /glibc type ext4 (ro,relatime)
+2026-07-16T12:01:38.562609Z none on /dev type devfs (rw,relatime)
+2026-07-16T12:01:38.565990Z none on /dev/shm type tmpfs (rw,relatime)
+2026-07-16T12:01:38.572119Z __PERF_WORK_END_ext4_post_mount-1-838886bc__
+2026-07-16T12:01:38.576376Z __PERF_ACK_ext4_post_mount-1-838886bc_WORK__
+2026-07-16T12:01:39.013154Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_ext4_post_mount-1-838886bc__ rc=0

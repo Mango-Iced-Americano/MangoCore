@@ -1,0 +1,10 @@
+2026-07-17T04:57:45.579435Z __PERF_BEGIN_snx-1-c1fcfbad__
+2026-07-17T04:57:46.408160Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_snx-1-c1fcfbad_TRACE_OFF__
+2026-07-17T04:57:48.219220Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_snx-1-c1fcfbad__
+2026-07-17T04:57:48.338010Z tar: can't create directory './': No such file or directory
+2026-07-17T04:57:48.342363Z tar: can't make dir ./: No such file or directory
+2026-07-17T04:57:48.356966Z tar: can't create directory './': No such file or directory
+2026-07-17T04:57:48.365318Z tar: can't create symlink './' to 'certs/ca-certificates.crt': No such file or directory
+2026-07-17T04:57:48.375491Z __PERF_WORK_END_snx-1-c1fcfbad__
+2026-07-17T04:57:48.378701Z __PERF_ACK_snx-1-c1fcfbad_WORK__
+2026-07-17T04:57:48.742623Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_snx-1-c1fcfbad__ rc=1

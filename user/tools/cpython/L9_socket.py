@@ -10,7 +10,8 @@ fail = 0
 PREFIX = "[CPYTHON L9]"
 REQUIRE_NET = os.environ.get("CPYTHON_L9_REQUIRE_NET") == "1"
 
-CA_FILE = "/tools/tests/cpython/etc/ssl/certs/ca-certificates.crt"
+RUNTIME_ROOT = os.environ.get("CPYTHON_ROOT", "/tools/tests/cpython")
+CA_FILE = os.path.join(RUNTIME_ROOT, "etc", "ssl", "certs", "ca-certificates.crt")
 if "SSL_CERT_FILE" not in os.environ and os.path.exists(CA_FILE):
     os.environ["SSL_CERT_FILE"] = CA_FILE
 

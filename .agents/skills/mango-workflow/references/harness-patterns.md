@@ -722,3 +722,35 @@ diag=1
 - **测试要求**: 同时覆盖块首/非块首删除、空目标/覆盖目标、成功后的 namespace/content、
   重挂载与 checksum；源码里存在回归函数不等于日志已证明它被单独执行。
 - **相关文件**: `os/src/fs/ext4/direntry.rs`、`os/src/fs/ext4/ext4fs.rs`、`os/src/fs/ext4/test.rs`
+
+## Make 包装目标必须验证 feature 已传到最终 cargo 命令
+
+- **现象**: `make ... EXTRA_FEATURES=perf_diag` 成功退出，生成的内核却没有诊断节点；生产版与诊断版运行行为近似，容易被误当成“探针零开销”。
+- **根因**: 顶层 Make 目标接收了变量，但调用架构子 Make 时没有显式转发；参数在 wrapper 层被静默丢弃，编译成功只能证明生产配置可构建。
+- **修复**: 所有通用 build/all 包装目标显式传递 `EXTRA_FEATURES="$(EXTRA_FEATURES)"`；诊断构建完成后读取 `/sys/kernel/stats/features`，并用计数器非零自检确认 feature 真正生效。
+- **教训**: A/B 构建不能只比较命令行和退出码。应把“构建变量 → 最终 cargo feature → 目标运行时接口”串成三段证据链，否则探针税结论没有意义。
+- **相关文件**: `os/Makefile`, `scripts/diag_smoke_test.sh`
+
+## 诊断开关税低不等于诊断构建与生产构建结构等价
+
+- **现象**: 同一诊断二进制内 `stats_on=0/1` 差异低于 1%--2%，但相邻 production/diag-off 在高频陷阱 workload 上仍可能相差数十个百分点；普通用户态负对照却保持稳定。
+- **根因类型**: 增加 feature 会改变 `.text` 大小、函数地址、trap/uaccess/page-fault 布局和链接结果。数百万次用户/内核往返可把代码/缓存布局差异放大到用户时间，即使计数器分支本身几乎没有运行时税。
+- **门禁**: 探针报告必须分开两项：一是同一诊断构建内的 `stats_on=0/1` 运行时税；二是相邻 production/diag-off 的结构税。后者至少包含一个事件密集 workload 和一个事件稀少负对照，并固定 image、feature、initramfs、suite/runtime 哈希和文件系统路径。
+- **证据边界**: 没有 PMU cache-miss 或 PC histogram 时，只能写“代码/缓存布局敏感为高概率”，不能指定具体 L1/L2 conflict。若结构门禁失败，诊断事件数和 handler 时间仍可用于机制归因，但诊断绝对 wall/user 时间不得替代 production。
+- **相关文件**: `scripts/kernel_perf.py`, `docs/09_debug/python-performance-checkpoint-20260716.md`
+
+## 串口 benchmark 事件必须有目标端副本和可恢复字段
+
+- **现象**: workload 已 PASS，串口上的单行 JSON 却因繁忙输出丢失少数字符，宿主 analyzer 缺一条 sample；只依赖串口文本会把有效的数小时矩阵降级为不可用。
+- **设计**: runner 在目标文件系统同步写 JSONL，再向串口输出同一事件；事件至少同时保存 benchmark、sample、elapsed_ns、user/sys、result token，末尾 summary 另存 median/min/max/sample count。宿主保留原始串口，不原地修复；只有完整 summary、关键 sample 字段和 rc/PASS 同时存在时，才允许生成带 `reconstructed` 标记的派生行。
+- **介质约束**: target JSONL 应放在本次明确允许写入且已校验的测试目录；正式 ext4 结论中 suite、pycache、tmp、I/O payload 和事件副本都必须位于 ext4，不能只把脚本放在 ext4、数据仍落到 tmpfs/FAT32。
+- **教训**: analyzer 的外层 wall 包含解释器启动、import、预热和串口控制，不得替代 workload 自报 elapsed。原始日志、target JSONL、派生 CSV 的证据等级必须在报告中显式区分。
+- **相关文件**: `user/tools/cpython/bench/bench_runner.py`, `scripts/kernel_perf.py`, `scripts/run_cpython_bench_matrix.py`
+
+## 自举运行时部署不要用待替换运行时解包自身
+
+- **现象**: 在慢内核/VFS 上用旧 Python `tarfile` 解压新的完整 Python runtime，宿主超时后板端仍卡在不可中断的前台任务；改用原生 tar 后，又可能因 archive 显式包含根成员 `./` 而在最小 VFS 上失败。
+- **设计**: 宿主先验证 archive 成员不含绝对路径、`..` 或链接逃逸，再传输并让板端校验 SHA-256；板端使用已有 BusyBox/native tar+xz 解包到同一文件系统的隐藏 staging，执行 runtime smoke，`sync` 后原子 rename 发布。确定性打包使用排序文件清单并省略合成根成员，只包含根下真实成员。
+- **证据要求**: 规范化前后不能只比 archive 总哈希；应对路径归一化后的逐成员 type/mode/uid/gid/size/link/content 做无序比较，并保存 runtime 内部 manifest 哈希。部署 manifest 必须记录实际发布的 archive，而不是首次失败的构建包。
+- **介质边界**: staging、canonical runtime、work、pycache 和结果必须全部落在本轮允许写入的目标分区；旧只读 runtime 只提供下载/解包工具时，也不得因此把目标分区误写成它所在的分区。
+- **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`, `user/tools/cpython/strict_runtime_smoke.sh`

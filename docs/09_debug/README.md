@@ -3,7 +3,7 @@ title: "调试与故障复盘索引"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-07-17
 tags: [debugging, postmortem, performance, qemu, loongarch64, riscv64]
 ---
 
@@ -19,8 +19,8 @@ tags: [debugging, postmortem, performance, qemu, loongarch64, riscv64]
 
 | 文档 | 状态 | 主题 |
 |------|------|------|
-| [`la64_on_board/`](la64_on_board/README.md) | 持续更新 | 2K1000LA 组会入口、34 提交总账、29 篇编号专题与 1 篇 hole-read ABI 深挖 |
-| [`la64_on_board/bug-hole-read-mismatch.md`](la64_on_board/bug-hole-read-mismatch.md) | 已修复，保留专用遥测边界 | LA64 数据正确但切片比较失败；用户栈 16 字节 ABI 对齐、LLVM `ori` 地址折叠和完整 exec/signal 链路 |
+| [`la64_on_board/`](la64_on_board/README.md) | 持续更新 | 按 `260710/`、`260717/` 分批归档的 2K1000LA bring-up、故障复盘、Python 性能报告与原始数据 |
+| [`la64_on_board/260710/bug-hole-read-mismatch.md`](la64_on_board/260710/bug-hole-read-mismatch.md) | 已修复，保留专用遥测边界 | LA64 数据正确但切片比较失败；用户栈 16 字节 ABI 对齐、LLVM `ori` 地址折叠和完整 exec/signal 链路 |
 | `bug-la64-kernel-stack-overflow.md` | 已修复 | LA64 内核栈溢出、guard page 与静默堆损坏 |
 | `bug-fallback-timer-lmbench-hang.md` | 已分析 | fallback timer 与 lmbench hang |
 | `ext4-rename-name-panic.md` | 已分析 | ext4 rename/name 处理 panic |
@@ -36,6 +36,7 @@ tags: [debugging, postmortem, performance, qemu, loongarch64, riscv64]
 | `buddy-allocator-scan-drift.md` | buddy allocator 扫描漂移和性能定位 |
 | `timer-timekeeping-contrast-experiment-20260618.md` | timer/timekeeping 对照实验 |
 | `perf_diag.md` | 通用性能诊断记录与指标 |
+| [`la64_on_board/260717/`](la64_on_board/260717/README.md) | 2K1000LA Python/ext4 production 基线、三项性能问题、strict-align 首轮实板结果与完整原始数据 |
 
 ## 阅读方法
 

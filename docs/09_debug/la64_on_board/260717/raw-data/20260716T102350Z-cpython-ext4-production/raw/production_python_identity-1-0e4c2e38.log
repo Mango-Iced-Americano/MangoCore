@@ -1,0 +1,11 @@
+2026-07-16T13:01:12.624642Z __PERF_BEGIN_production_python_identity-1-0e4c2e38__
+2026-07-16T13:01:13.591668Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_production_python_identity-1-0e4c2e38_TRACE_OFF__
+2026-07-16T13:01:16.194171Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_production_python_identity-1-0e4c2e38__
+2026-07-16T13:01:16.241803Z lrwxrwxrwx    1 root     root            10 Jul 13 14:32 [1;36m/tools/tests/cpython/usr/bin/python3[m -> [1;32mpython3.14[m
+2026-07-16T13:01:16.253300Z lrwxrwxrwx    1 root     root            23 Jan  1  1970 [1;36m/usr/bin/python3[m -> [1;32m/rescue/python3-wrapper[m
+2026-07-16T13:01:17.814221Z /tools/tests/cpython/usr/bin/python3 3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]
+2026-07-16T13:01:17.946029Z 43158cfe17ab36881d408e490663c40809d88881081b979b1049254e8b145241  /usr/bin/python3
+2026-07-16T13:01:18.023491Z 997e8c27a90c8bc110fe38fba418e2d82a037581f71b389c48654f53714f3895  /tools/tests/cpython/usr/bin/python3
+2026-07-16T13:01:18.030671Z __PERF_WORK_END_production_python_identity-1-0e4c2e38__
+2026-07-16T13:01:18.035934Z __PERF_ACK_production_python_identity-1-0e4c2e38_WORK__
+2026-07-16T13:01:18.534596Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_production_python_identity-1-0e4c2e38__ rc=0

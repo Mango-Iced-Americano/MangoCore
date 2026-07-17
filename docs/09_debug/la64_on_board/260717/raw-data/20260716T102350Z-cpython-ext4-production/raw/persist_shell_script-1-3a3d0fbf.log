@@ -1,0 +1,22 @@
+2026-07-16T12:06:06.139847Z __PERF_BEGIN_persist_shell_script-1-3a3d0fbf__
+2026-07-16T12:06:07.075994Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_persist_shell_script-1-3a3d0fbf_TRACE_OFF__
+2026-07-16T12:06:08.611887Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_persist_shell_script-1-3a3d0fbf__
+2026-07-16T12:06:08.649457Z #!/rescue/sh
+2026-07-16T12:06:08.649474Z set -e
+2026-07-16T12:06:08.649481Z 
+2026-07-16T12:06:08.654936Z root="${MANGO_APK_ROOT:-/persist/apk-root}"
+2026-07-16T12:06:08.660554Z if [ ! -f /persist/apk-state/shell-ready-v1 ] || [ ! -x "$root/bin/sh" ]; then
+2026-07-16T12:06:08.666122Z     echo "persist-shell: persistent environment is not ready" >&2
+2026-07-16T12:06:08.668903Z     exit 1
+2026-07-16T12:06:08.668914Z fi
+2026-07-16T12:06:08.668922Z 
+2026-07-16T12:06:08.671688Z unset LD_LIBRARY_PATH
+2026-07-16T12:06:08.671701Z export HOME=/root
+2026-07-16T12:06:08.674514Z export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+2026-07-16T12:06:08.677262Z export SHELL=/bin/sh
+2026-07-16T12:06:08.680081Z export PS1='MangoPersist:\w# '
+2026-07-16T12:06:08.680090Z 
+2026-07-16T12:06:08.683493Z exec /bin/busybox chroot "$root" /bin/sh -l
+2026-07-16T12:06:08.690160Z __PERF_WORK_END_persist_shell_script-1-3a3d0fbf__
+2026-07-16T12:06:08.695088Z __PERF_ACK_persist_shell_script-1-3a3d0fbf_WORK__
+2026-07-16T12:06:09.166995Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_persist_shell_script-1-3a3d0fbf__ rc=0

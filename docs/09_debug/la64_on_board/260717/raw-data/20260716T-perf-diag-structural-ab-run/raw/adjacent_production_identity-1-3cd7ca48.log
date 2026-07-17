@@ -1,0 +1,18 @@
+2026-07-16T13:30:59.089956Z __PERF_BEGIN_adjacent_production_identity-1-3cd7ca48__
+2026-07-16T13:31:00.075711Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_adjacent_production_identity-1-3cd7ca48_TRACE_OFF__
+2026-07-16T13:31:02.388375Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_adjacent_production_identity-1-3cd7ca48__
+2026-07-16T13:31:02.469890Z /tools/tests on /tests type ext4 (ro,relatime)
+2026-07-16T13:31:02.472747Z /persist on /persist type ext4 (rw,relatime)
+2026-07-16T13:31:02.481264Z /persist/python on /persist/apk-root/var/cache/mango-python type ext4 (rw,relatime)
+2026-07-16T13:31:02.486883Z /tools on /persist/apk-root/tools type ext4 (ro,relatime)
+2026-07-16T13:31:02.492597Z /scratch on /persist/apk-root/scratch type fat32 (rw,relatime)
+2026-07-16T13:31:02.498252Z /run on /persist/apk-root/run type ramfs (rw,relatime)
+2026-07-16T13:31:02.501150Z /tmp on /persist/apk-root/tmp type tmpfs (rw,relatime)
+2026-07-16T13:31:02.506810Z /dev on /persist/apk-root/dev type devfs (rw,relatime)
+2026-07-16T13:31:02.512448Z /proc on /persist/apk-root/proc type proc (rw,relatime)
+2026-07-16T13:31:02.515244Z /scratch on /scratch type fat32 (rw,relatime)
+2026-07-16T13:31:02.519220Z /tools on /tools type ext4 (ro,relatime)
+2026-07-16T13:31:02.523810Z PERF_DIAG_ABSENT
+2026-07-16T13:31:02.529272Z __PERF_WORK_END_adjacent_production_identity-1-3cd7ca48__
+2026-07-16T13:31:02.534662Z __PERF_ACK_adjacent_production_identity-1-3cd7ca48_WORK__
+2026-07-16T13:31:03.054148Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_adjacent_production_identity-1-3cd7ca48__ rc=0

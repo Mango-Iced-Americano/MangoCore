@@ -34,7 +34,8 @@ check_dir() {
 }
 
 # Source the environment
-. /tools/tests/cpython/run_cpython.sh
+CPYTHON_TEST_ROOT=${CPYTHON_TEST_ROOT:-/tools/tests/cpython}
+. "$CPYTHON_TEST_ROOT/run_cpython.sh"
 
 check_exec "python3 binary" "$CPYTHON_PY"
 check_exec "musl loader" "$CPYTHON_LD"

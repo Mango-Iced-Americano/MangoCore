@@ -104,9 +104,13 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
             let mut inner = self.inner.lock();
-            let _alloc_start = crate::task::perf::perf_time_now();
+            let _alloc_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             if let Ok(ptr) = inner.alloc(layout) {
-                let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+                let elapsed = crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                )
+                .wrapping_sub(_alloc_start);
                 crate::task::perf::record_heap_alloc();
                 crate::task::perf::record_heap_alloc_cost(elapsed);
                 let block_size = layout
@@ -134,7 +138,9 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
                 return ptr.as_ptr();
             }
-            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+            let elapsed =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(_alloc_start);
             crate::task::perf::record_heap_alloc();
             crate::task::perf::record_heap_alloc_cost(elapsed);
             drop(inner);
@@ -161,9 +167,12 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 .max(core::mem::size_of::<usize>())
                 .next_power_of_two();
             crate::task::perf::record_heap_dealloc();
-            let _dealloc_start = crate::task::perf::perf_time_now();
+            let _dealloc_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             self.inner.lock().dealloc(ptr, layout);
-            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_dealloc_start);
+            let elapsed =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(_dealloc_start);
             crate::task::perf::record_heap_dealloc_cost(elapsed);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(block_size, Ordering::Relaxed);
         }

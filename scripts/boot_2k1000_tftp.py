@@ -23,6 +23,7 @@ import zlib
 DEFAULT_TFTP_ROOT = Path("/private/tftpboot")
 TFTP_PLIST = Path("/System/Library/LaunchDaemons/tftp.plist")
 TFTP_SERVICE = "system/com.apple.tftpd"
+MONITOR_ESCAPE = 0x1D  # Ctrl-]
 
 
 class BootError(RuntimeError):
@@ -199,6 +200,43 @@ class UBootConsole:
             if offset + chunk_size < len(data):
                 time.sleep(0.004)
 
+    def _handle_console_input(
+        self, data: bytes, escape_pending: bool
+    ) -> tuple[bool, bool]:
+        """Forward terminal bytes and reserve Ctrl-] commands for the monitor."""
+        forward = bytearray()
+        for byte in data:
+            if escape_pending:
+                escape_pending = False
+                if byte == ord("q"):
+                    if forward:
+                        self._write_console_input(bytes(forward))
+                    return True, False
+                if byte == ord("c"):
+                    forward.append(0x03)
+                elif byte == MONITOR_ESCAPE:
+                    forward.append(MONITOR_ESCAPE)
+                elif byte == ord("?"):
+                    print(
+                        "\r\n[console] Ctrl-C sends SIGINT to the board; "
+                        "Ctrl-] q closes this monitor; Ctrl-] Ctrl-] sends Ctrl-]",
+                        flush=True,
+                    )
+                else:
+                    # Unknown escape commands are passed through literally so
+                    # the monitor does not silently discard terminal input.
+                    forward.extend((MONITOR_ESCAPE, byte))
+                continue
+
+            if byte == MONITOR_ESCAPE:
+                escape_pending = True
+            else:
+                forward.append(byte)
+
+        if forward:
+            self._write_console_input(bytes(forward))
+        return False, escape_pending
+
     def _record(self, data: bytes) -> None:
         self.log.write(data)
 
@@ -246,7 +284,11 @@ class UBootConsole:
                 continue
             output.extend(data)
             self._record(data)
-            if output.endswith(b"=> "):
+            # The interrupt writer can race with the prompt and append one or
+            # more `c` bytes immediately after "=> ".  Requiring the prompt
+            # to be the exact buffer suffix then misses a prompt we already
+            # reached and keeps flooding the command line until timeout.
+            if b"=> " in output:
                 # Clear any extra 'c' that raced with the prompt before the
                 # first real command is sent.
                 self.serial.write(b"\x03\r")
@@ -272,7 +314,11 @@ class UBootConsole:
         self.log.write(f"\n>>> {command}\n".encode("ascii"))
         self.serial.write(command.encode("ascii") + b"\r")
         self.serial.flush()
-        print("[console] booting; Ctrl-C exits this monitor only", flush=True)
+        print(
+            "[console] booting; Ctrl-C -> board, Ctrl-] q -> close monitor, "
+            "Ctrl-] ? -> help",
+            flush=True,
+        )
 
         stdin_fd = sys.stdin.fileno()
         serial_fd = self.serial.fileno()
@@ -281,6 +327,7 @@ class UBootConsole:
             saved_terminal = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
 
+        escape_pending = False
         try:
             while True:
                 readable, _, _ = select.select([serial_fd, stdin_fd], [], [], 0.2)
@@ -295,15 +342,11 @@ class UBootConsole:
                     data = os.read(stdin_fd, 1024)
                     if not data:
                         return
-                    # Keep Ctrl-C local to the monitor. Bytes typed before it
-                    # still reach the board, while the board never receives
-                    # an accidental interrupt character.
-                    before_escape, escape, _ = data.partition(b"\x03")
-                    if escape:
-                        if before_escape:
-                            self._write_console_input(before_escape)
+                    should_close, escape_pending = self._handle_console_input(
+                        data, escape_pending
+                    )
+                    if should_close:
                         return
-                    self._write_console_input(data)
         finally:
             if saved_terminal is not None:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_terminal)
