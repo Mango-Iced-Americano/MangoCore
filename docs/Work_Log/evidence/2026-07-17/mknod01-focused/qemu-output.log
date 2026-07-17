@@ -1,0 +1,674 @@
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk comp
+make[1]: Entering directory '/app/os'
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART Debug Triggers  : 2 triggers
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+last 193974 Physical Frames.
+.text [0x80200000, 0x803f3000)
+.rodata [0x803f3000, 0x80426000)
+.data [0x80426000, 0x809e7000)
+.bss [0x809e7000, 0x90a4a000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] PRNG initialized.
+[initramfs] unpacked: files=32 dirs=21 symlinks=1 bytes=2051014
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[kernel] official fs (x0) mounted at sdcard
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[kernel] tools disk (vdb1) mounted at tools
+sinitproc: 8061D000, einitproc: 806ABAB8, sbash: 806AC000, ebash: 807C4378, sbusybox: 807C5000, ebusybox: 80917C28, sosconfig: 80918000, eosconfig: 80919014
+[init] MangoCore stage-1 boot (initramfs mode)
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+ntpd: setting time to 2026-07-17 04:37:08.856141 (offset -14498580.533039s)
+[init] ntpd time sync ok
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/tmp -> /tmp
+[init] bind /tools/bin -> /bin
+[init] bind /tools/sbin -> /sbin
+[init] bind /tools/lib -> /lib
+[init] bind /tools/usr -> /usr
+[init] bind /tools/root -> /root
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0x800 ltp_runner=inline timer_smoke=false ext4_profile=false reclaim_profile=false skip_apk=true
+[initproc] LTP exclude list: []
+[initproc] LTP include list: ["mknod01", "mknod02", "mknod03", "mknod04", "mknod05", "mknod06", "mknod07", "mknod08", "mknodat01", "mknodat02", "gf14", "gf18", "gf27", "gf28", "tee01", "tee02", "splice01", "splice02", "splice03", "splice04", "splice05", "splice06", "splice07", "splice08", "splice09", "splice10", "statx01", "statx02", "statx03", "readahead01", "readahead02"]
+[initproc] LTP exclude musl: [], glibc: []
+[initproc] LTP exclude arch musl: [], glibc: []
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin
+[initproc] installing busybox applets to /bin ...
+busybox applets already installed, skipping --install
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: No such file or directory
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on test scripts ...
+[initproc] chmod test scripts done, exit=0
+[initproc] skip_apk=true: skipping install_apk_packages
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] run_selected_groups start mask=0x800 order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] skip iozone (mask bit4 not set)
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] select group=ltp timeout=24000s
+#### OS COMP TEST GROUP START ltp-glibc ####
+[initproc] ltp_from=(none, start from beginning)
+RUN LTP CASE mknod01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 100777, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 10777, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 20777, 259) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 60777, 259) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 104700, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 102700, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 106700, 0) passed
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE mknod01 : 0
+RUN LTP CASE mknod02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+mknod02.c:43: [1;32mTPASS: [0mmknod(testnode, 10777, 0) passed
+mknod02.c:46: [1;32mTPASS: [0mbuf.st_gid == 0 (0)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE mknod02 : 0
+RUN LTP CASE mknod03
+mknod03     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_50, 012777, 0) successful
+DONE LTP CASE mknod03 : 0
+RUN LTP CASE mknod04
+mknod04     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_51, 010777, 0) successful
+DONE LTP CASE mknod04 : 0
+RUN LTP CASE mknod05
+mknod05     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_52, 012777, 0) successful
+DONE LTP CASE mknod05 : 0
+RUN LTP CASE mknod06
+mknod06     1  [1;31mTFAIL[0m  :  mknod06.c:150: mknod() returned 0, expected -1, errno:17
+mknod06     2  [1;32mTPASS[0m  :  mknod() fails, Invalid address, errno:14
+mknod06     3  [1;32mTPASS[0m  :  mknod() fails, Non-existent file, errno:2
+mknod06     4  [1;32mTPASS[0m  :  mknod() fails, Pathname is empty, errno:2
+mknod06     5  [1;32mTPASS[0m  :  mknod() fails, Pathname too long, errno:36
+mknod06     6  [1;32mTPASS[0m  :  mknod() fails, Path contains regular file, errno:20
+DONE LTP CASE mknod06 : 0
+RUN LTP CASE mknod07
+mknod07     0  [1;34mTINFO[0m  :  Using test device LTP_DEV='/dev/vdb2'
+mknod07     0  [1;34mTINFO[0m  :  Formatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+mknod07     0  [1;34mTINFO[0m  :  Mounting /dev/vdb2 to /tmp/LTP_mkngtS39j/mntpoint fstyp=ext4 flags=1
+mknod07     1  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EACCES(13): Permission denied
+mknod07     2  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EACCES(13): Permission denied
+mknod07     3  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EPERM(1): Operation not permitted
+mknod07     4  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EPERM(1): Operation not permitted
+mknod07     5  [1;31mTFAIL[0m  :  mknod07.c:165: mknod failed unexpectedly; expected: 30 - Read-only file system: TEST_ERRNO=EACCES(13): Permission denied
+mknod07     6  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+DONE LTP CASE mknod07 : 0
+RUN LTP CASE mknod08
+mknod08     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_56, 010777, 0) successful
+DONE LTP CASE mknod08 : 0
+RUN LTP CASE mknodat01
+mknodat01    1  [1;32mTPASS[0m  :  mknodat() returned 0: TEST_ERRNO=SUCCESS(0): Success
+mknodat01    2  [1;32mTPASS[0m  :  mknodat() returned 0: TEST_ERRNO=SUCCESS(0): Success
+mknodat01    3  [1;32mTPASS[0m  :  mknodat() returned -1: TEST_ERRNO=ENOTDIR(20): Not a directory
+mknodat01    4  [1;32mTPASS[0m  :  mknodat() returned -1: TEST_ERRNO=EBADF(9): Bad file descriptor
+mknodat01    5  [1;32mTPASS[0m  :  mknodat() returned 0: TEST_ERRNO=SUCCESS(0): Success
+DONE LTP CASE mknodat01 : 0
+RUN LTP CASE mknodat02
+mknodat     0  [1;34mTINFO[0m  :  Using test device LTP_DEV='/dev/vdb2'
+mknodat     0  [1;34mTINFO[0m  :  Formatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+mknodat     0  [1;34mTINFO[0m  :  Mounting /dev/vdb2 to /tmp/LTP_mknsbQqeI/mntpoint fstyp=ext4 flags=1
+mknodat     1  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=SUCCESS(0): Success
+mknodat     2  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=SUCCESS(0): Success
+mknodat     3  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=SUCCESS(0): Success
+mknodat     4  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=EROFS(30): Read-only file system
+mknodat     5  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=EROFS(30): Read-only file system
+mknodat     6  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=EROFS(30): Read-only file system
+mknodat     7  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+mknodat     8  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+mknodat     9  [1;32mTPASS[0m  :  mknodat() returned the expected value: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+DONE LTP CASE mknodat02 : 0
+RUN LTP CASE readahead01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+readahead01.c:36: [1;31mTFAIL: [0mreadahead() with fd = -1 invalid retval 4628479: SUCCESS (0)
+readahead01.c:43: [1;31mTFAIL: [0mreadahead() with invalid fd invalid retval 4628478: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on O_PATH file invalid retval 4628481: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on directory invalid retval 4628484: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on /dev/zero invalid retval 4628487: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on pipe read end invalid retval 4628490: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on pipe write end invalid retval 4628494: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on unix socket invalid retval 4628497: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on inet socket invalid retval 4628500: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on epoll invalid retval 4628503: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on eventfd invalid retval 4628506: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on signalfd invalid retval 4628509: SUCCESS (0)
+readahead01.c:64: [1;31mTFAIL: [0mreadahead() on timerfd invalid retval 4628512: SUCCESS (0)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 18446744073709551615, 14, 4247438, 172]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 3220165496, 63, 4337388, 15, 4247550]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 4337388, 16, 4247650, 0]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [3220166552, 0, 18446744073709551615, 18446744073709551615, 0, 97]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 3220166560, 4337388, 18, 0, 0]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4334288, 0, 4337388, 20, 4248308, 0]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4354304, 0, 21, 4248426, 0]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4354304, 0, 22, 4248548, 0]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (18446744073709551615), calling over arguments: [0, 0, 18446744073709551615, 24, 4248788, 64]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+
+Summary:
+passed   0
+failed   13
+broken   0
+skipped  10
+warnings 0
+DONE LTP CASE readahead01 : 0
+RUN LTP CASE readahead02
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/vdb2 to /tmp/LTP_reaHTPHqk/mntpoint fstyp=ext4 flags=0
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+readahead02.c:91: [1;33mTCONF: [0m/proc/sys/vm/drop_caches not available
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+DONE LTP CASE readahead02 : 0
+RUN LTP CASE splice01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+splice01.c:48: [1;32mTPASS: [0mWritten data has been read back correctly
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE splice01 : 0
+RUN LTP CASE splice02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+splice02.c:135: [1;34mTINFO: [0mwritting 1048576 bytes
+splice02.c:87: [1;34mTINFO: [0mchecking file content
+splice02.c:111: [1;32mTPASS: [0msplice() system call passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE splice02 : 0
+RUN LTP CASE splice03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+splice03.c:99: [1;32mTPASS: [0msplice() failed as expected: EBADF (9)
+splice03.c:99: [1;32mTPASS: [0msplice() failed as expected: EBADF (9)
+splice03.c:99: [1;32mTPASS: [0msplice() failed as expected: EBADF (9)
+splice03.c:87: [1;31mTFAIL: [0msplice() returned 10 expected EINVAL
+splice03.c:99: [1;32mTPASS: [0msplice() failed as expected: EINVAL (22)
+splice03.c:99: [1;32mTPASS: [0msplice() failed as expected: ESPIPE (29)
+splice03.c:99: [1;32mTPASS: [0msplice() failed as expected: ESPIPE (29)
+
+Summary:
+passed   6
+failed   1
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE splice03 : 0
+RUN LTP CASE splice04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+splice04.c:33: [1;34mTINFO: [0msplice size = 65536
+splice04.c:69: [1;32mTPASS: [0msplice(2) from pipe to pipe run pass.
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE splice04 : 0
+RUN LTP CASE splice05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+splice05.c:43: [1;34mTINFO: [0msplice size = 65536
+splice05.c:94: [1;32mTPASS: [0msplice(2): pipe <-> socket run pass.
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE splice05 : 0
+RUN LTP CASE splice06
+tst_test.c:913: [1;33mTCONF: [0mThe test requires kernel 5.11 or newer
+DONE LTP CASE splice06 : 0
+RUN LTP CASE splice07
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+splice07.c:64: [1;34mTINFO: [0mfile -> ...
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> file : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> O_PATH file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> directory : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> /dev/zero : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> /proc/self/maps : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> pipe read end : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> unix socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> inet socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> epoll : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> eventfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> signalfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> timerfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> pidfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 18446744073709551615, 14, 4224718, 0]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 3220165560, 63, 4325920, 15, 4224830]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 4325920, 16, 4224930, 0]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [3220166616, 0, 18446744073709551615, 18446744073709551615, 0, 97]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 3220166624, 4325920, 18, 0, 0]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4325608, 0, 4325920, 20, 4225588, 0]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4350800, 0, 21, 4225706, 0]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4350800, 0, 22, 4225828, 0]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+splice07.c:56: [1;32mTPASS: [0msplice() on file -> memfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (18446744073709551615), calling over arguments: [0, 0, 18446744073709551615, 24, 4226068, 0]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+splice07.c:64: [1;34mTINFO: [0mO_PATH file -> ...
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> O_PATH file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> directory : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> /dev/zero : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> /proc/self/maps : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> pipe read end : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> pipe write end : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> unix socket : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> inet socket : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> epoll : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> eventfd : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> signalfd : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> timerfd : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> pidfd : EBADF (9)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 18446744073709551615, 14, 4224718, 0]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 3220165560, 63, 4325920, 15, 4224830]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 4325920, 16, 4224930, 0]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [3220166616, 0, 18446744073709551615, 18446744073709551615, 0, 97]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 3220166624, 4325920, 18, 0, 0]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4325608, 0, 4325920, 20, 4225588, 0]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4350800, 0, 21, 4225706, 0]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4350800, 0, 22, 4225828, 0]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+splice07.c:56: [1;32mTPASS: [0msplice() on O_PATH file -> memfd : EBADF (9)
+[syscall] Unsupported syscall: unknown (18446744073709551615), calling over arguments: [0, 0, 18446744073709551615, 24, 4226068, 0]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+splice07.c:64: [1;34mTINFO: [0mdirectory -> ...
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> file : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> O_PATH file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> directory : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> /dev/zero : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> /proc/self/maps : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> pipe read end : EBADF (9)
+splice07.c:56: [1;31mTFAIL: [0msplice() on directory -> pipe write end expected EBADF, EINVAL: EISDIR (21)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> unix socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> inet socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> epoll : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> eventfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> signalfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> timerfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> pidfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 18446744073709551615, 14, 4224718, 0]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 3220165560, 63, 4325920, 15, 4224830]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 4325920, 16, 4224930, 0]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [3220166616, 0, 18446744073709551615, 18446744073709551615, 0, 97]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 3220166624, 4325920, 18, 0, 0]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4325608, 0, 4325920, 20, 4225588, 0]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4350800, 0, 21, 4225706, 0]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4350800, 0, 22, 4225828, 0]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+splice07.c:56: [1;32mTPASS: [0msplice() on directory -> memfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (18446744073709551615), calling over arguments: [0, 0, 18446744073709551615, 24, 4226068, 0]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+splice07.c:64: [1;34mTINFO: [0m/dev/zero -> ...
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> file : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> O_PATH file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> directory : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> /dev/zero : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> /proc/self/maps : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> pipe read end : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> unix socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> inet socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> epoll : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> eventfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> signalfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> timerfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> pidfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 18446744073709551615, 14, 4224718, 0]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 3220165560, 63, 4325920, 15, 4224830]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 4325920, 16, 4224930, 0]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [3220166616, 0, 18446744073709551615, 18446744073709551615, 0, 97]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 3220166624, 4325920, 18, 0, 0]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4325608, 0, 4325920, 20, 4225588, 0]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4350800, 0, 21, 4225706, 0]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4350800, 0, 22, 4225828, 0]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+splice07.c:56: [1;32mTPASS: [0msplice() on /dev/zero -> memfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (18446744073709551615), calling over arguments: [0, 0, 18446744073709551615, 24, 4226068, 0]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+splice07.c:64: [1;34mTINFO: [0m/proc/self/maps -> ...
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> file : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> O_PATH file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> directory : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> /dev/zero : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> /proc/self/maps : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> pipe read end : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> unix socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> inet socket : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> epoll : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> eventfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> signalfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> timerfd : EINVAL (22)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> pidfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 18446744073709551615, 14, 4224718, 0]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 3220165560, 63, 4325920, 15, 4224830]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 4325920, 16, 4224930, 0]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [3220166616, 0, 18446744073709551615, 18446744073709551615, 0, 97]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 3220166624, 4325920, 18, 0, 0]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4325608, 0, 4325920, 20, 4225588, 0]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4350800, 0, 21, 4225706, 0]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4350800, 0, 22, 4225828, 0]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+splice07.c:56: [1;32mTPASS: [0msplice() on /proc/self/maps -> memfd : EINVAL (22)
+[syscall] Unsupported syscall: unknown (18446744073709551615), calling over arguments: [0, 0, 18446744073709551615, 24, 4226068, 0]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+splice07.c:64: [1;34mTINFO: [0mpipe read end -> ...
+splice07.c:56: [1;32mTPASS: [0msplice() on pipe read end -> O_PATH file : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on pipe read end -> directory : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on pipe read end -> /dev/zero : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on pipe read end -> /proc/self/maps : EBADF (9)
+splice07.c:56: [1;32mTPASS: [0msplice() on pipe read end -> pipe read end : EBADF (9)
+FAIL LTP CASE splice07 : 137
+RUN LTP CASE splice08
+tst_test.c:913: [1;33mTCONF: [0mThe test requires kernel 6.7 or newer
+DONE LTP CASE splice08 : 0
+RUN LTP CASE splice09
+tst_test.c:913: [1;33mTCONF: [0mThe test requires kernel 6.7 or newer
+FAIL LTP CASE splice09 : 32
+RUN LTP CASE statx01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+statx01.c:105: [1;32mTPASS: [0mstatx(AT_FDCWD, test_file, 0, 0, &buff)
+statx01.c:112: [1;32mTPASS: [0mstx_uid(0) is correct
+statx01.c:118: [1;32mTPASS: [0mstx_gid(0) is correct
+statx01.c:124: [1;32mTPASS: [0mstx_size(256) is correct
+statx01.c:132: [1;32mTPASS: [0mstx_mode(33188) is correct
+statx01.c:138: [1;32mTPASS: [0mstx_blocks(1) is valid
+statx01.c:145: [1;32mTPASS: [0mstx_nlink(1) is correct
+statx01.c:62: [1;33mTCONF: [0mstx_mnt_id is not supported until linux 5.8
+statx01.c:163: [1;32mTPASS: [0mstatx(AT_FDCWD, mntpoint/blk_dev, 0, 0, &buff)
+statx01.c:173: [1;31mTFAIL: [0mstx_rdev_major(0) is different from expected(8)
+statx01.c:181: [1;31mTFAIL: [0mstx_rdev_minor(0) is different from expected(1)
+
+Summary:
+passed   8
+failed   2
+broken   0
+skipped  1
+warnings 0
+DONE LTP CASE statx01 : 0
+RUN LTP CASE statx02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+statx02.c:46: [1;32mTPASS: [0mstatx(file_fd, "", AT_EMPTY_PATH, 0, &buf)
+statx02.c:53: [1;32mTPASS: [0mstx_size(14) is correct
+statx02.c:70: [1;32mTPASS: [0mstatx(AT_FDCWD, test_temp, 0, 0, &fbuf)
+statx02.c:79: [1;32mTPASS: [0mstatx(AT_FDCWD, test_temp_ln, AT_SYMLINK_NOFOLLOW, 0,&lbuf)
+statx02.c:88: [1;32mTPASS: [0mStatx symlink flag worked as expected
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE statx02 : 0
+RUN LTP CASE statx03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: EBADF (9)
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: EFAULT (14)
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: EINVAL (22)
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: EINVAL (22)
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: ENOENT (2)
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: ENOTDIR (20)
+statx03.c:82: [1;32mTPASS: [0mstatx() failed with: ENAMETOOLONG (36)
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE statx03 : 0
+RUN LTP CASE tee01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tee01.c:44: [1;32mTPASS: [0mWritten data has been read back correctly
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE tee01 : 0
+RUN LTP CASE tee02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tee02.c:72: [1;32mTPASS: [0mtee() failed as expected: EINVAL (22)
+tee02.c:72: [1;32mTPASS: [0mtee() failed as expected: EINVAL (22)
+tee02.c:72: [1;32mTPASS: [0mtee() failed as expected: EINVAL (22)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE tee02 : 0
+#### OS COMP TEST GROUP END ltp-glibc ####
+[initproc] done ltp_testcode.sh in /glibc exit_code=0
+[timer] group ltp in /glibc took 43s
+[initproc] sleep 1s before next group
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+make[1]: Leaving directory '/app/os'
