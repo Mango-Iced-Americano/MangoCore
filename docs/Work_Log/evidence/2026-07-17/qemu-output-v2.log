@@ -1,0 +1,4 @@
+info: override toolchain for '/app/os' set to 'nightly-2024-05-01-x86_64-unknown-linux-gnu'
+qemu-system-loongarch64: -device virtio-blk-pci,drive=x0: Failed to get "write" lock
+Is another process using the image [../sdcard-la.img]?
+make: *** [make/la64.mk:200: comp] Error 1

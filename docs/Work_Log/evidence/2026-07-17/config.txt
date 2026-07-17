@@ -1,0 +1,9 @@
+mode=run
+mask=0x800
+ltp_runner=inline
+ltp_libc=glibc
+ltp_suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
+ltp_exclude_reset=1
+ltp_include=gf14,gf18,gf27,gf28
+skip_apk=1
+ltp_case_timeout_secs=120

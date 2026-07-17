@@ -1,0 +1,3717 @@
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+last 127436 Physical Frames.
+.text [0x80000000, 0x802a7000)
+.rodata [0x802a7000, 0x802da000)
+.data [0x8030c000, 0x80bf1000)
+.bss [0x80bf1000, 0x90e34000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[get_timer_freq_first_time] clk freq: 100000000(from CPUCFG)
+[CPUCFG 0x0] 1359888
+[CPUCFG 0x1] 66253566
+[CPUCFG 0x2] 6340815
+[CPUCFG 0x3] 0
+[CPUCFG 0x4] 100000000
+[CPUCFG 0x5] 65537
+[CPUCFG 0x6] 0
+[CPUCFG 0x10] 11325
+[CPUCFG 0x11] 101187587
+[CPUCFG 0x12] 101187587
+[CPUCFG 0x13] 101187599
+[CPUCFG 0x14] 101580815
+Misc { 32-bit addr plv(1,2,3):: false,false,false, rdtime allowed for plv(1,2,3):: false,false,false, Disable dirty bit check for plv(0,1,2):: false,false,false, Misalignment check for plv(0,1,2,4):: false,false,false,false }
+RVACfg { rbits: 0 }
+[machine_init] MMAP_BASE: 0xffffff8000000000
+[kernel] PRNG initialized.
+[initramfs] unpacked: files=32 dirs=21 symlinks=1 bytes=2411974
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Device DeviceFunction { bus: 0, device: 3, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[PCI] Device DeviceFunction { bus: 0, device: 3, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[kernel] block device 0: official fs (DeviceFunction { bus: 0, device: 1, function: 0 })
+[kernel] block device 1: tools disk (DeviceFunction { bus: 0, device: 2, function: 0 })
+[kernel] official fs (x0) mounted at sdcard
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[kernel] tools disk (vdb1) mounted at tools
+sinitproc: 8055B000, einitproc: 80839568, sbash: 8083A000, ebash: 8098B878, sbusybox: 8098C000, ebusybox: 80B845F8, sosconfig: 80B85000, eosconfig: 80B85F09
+[init] MangoCore stage-1 boot (initramfs mode)
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+ntpd: setting time to 2026-07-16 19:41:40.897543 (offset -14530705.028660s)
+[init] ntpd time sync ok
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/tmp -> /tmp
+[init] bind /tools/bin -> /bin
+[init] bind /tools/sbin -> /sbin
+[init] bind /tools/lib -> /lib
+[init] bind /tools/usr -> /usr
+[init] bind /tools/root -> /root
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0x800 ltp_runner=suite timer_smoke=false ext4_profile=false reclaim_profile=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02", "execve05", "fallocate06", "mmap16", "rename10", "shmctl01", "copy_file_range02", "pipe13", "splice02", "splice07", "timer_settime03", "statx11", "prot_hsymlinks", "send02", "futex_cmp_requeue01"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["clone08"], glibc: []
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin
+[initproc] installing busybox applets to /bin ...
+busybox applets already installed, skipping --install
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: No such file or directory
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on test scripts ...
+[initproc] chmod test scripts done, exit=0
+[initproc] apk add e2fsprogs ...
+7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/main/loongarch64/APKINDE...]8[0K7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/community/loongarch64/AP...]8[0K7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/testing/loongarch64/APKI...]8[0KOK: 2285 KiB in 7 packages
+[initproc] apk add -> exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] run_selected_groups start mask=0x800 order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] skip iozone (mask bit4 not set)
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] select group=ltp timeout=24000s
+#### OS COMP TEST GROUP START ltp-glibc ####
+[ltprunner] suite 'syscalls': parsed 1411 cases
+[ltprunner] suite 'fs': parsed 68 cases
+[ltprunner] suite 'fs_perms_simple': parsed 18 cases
+[ltprunner] suite 'fs_readonly': parsed 55 cases
+[ltprunner] suite 'fcntl-locktests': parsed 1 cases
+[ltprunner] skip excluded case acct01 in suite syscalls
+[ltprunner] skip excluded case acct02 in suite syscalls
+[ltprunner] skip excluded case cacheflush01 in suite syscalls
+[ltprunner] skip excluded case clock_nanosleep03 in suite syscalls
+[ltprunner] skip excluded case clock_gettime03 in suite syscalls
+[ltprunner] skip excluded case clone303 in suite syscalls
+[ltprunner] skip excluded case eventfd06 in suite syscalls
+[ltprunner] skip excluded case execve05 in suite syscalls
+[ltprunner] skip excluded case fallocate06 in suite syscalls
+[ltprunner] skip excluded case fork13 in suite syscalls
+[ltprunner] skip excluded case fork14 in suite syscalls
+[ltprunner] skip excluded case get_mempolicy01 in suite syscalls
+[ltprunner] skip excluded case get_mempolicy02 in suite syscalls
+[ltprunner] skip excluded case kill13 in suite syscalls
+[ltprunner] skip excluded case mmap16 in suite syscalls
+[ltprunner] skip excluded case msgctl05 in suite syscalls
+[ltprunner] skip excluded case msgstress01 in suite syscalls
+[ltprunner] skip excluded case madvise06 in suite syscalls
+[ltprunner] skip excluded case madvise07 in suite syscalls
+[ltprunner] skip excluded case madvise08 in suite syscalls
+[ltprunner] skip excluded case madvise09 in suite syscalls
+[ltprunner] skip excluded case madvise11 in suite syscalls
+[ltprunner] skip excluded case pipe13 in suite syscalls
+[ltprunner] skip excluded case prctl06 in suite syscalls
+[ltprunner] skip excluded case prctl07 in suite syscalls
+[ltprunner] skip excluded case prctl10 in suite syscalls
+[ltprunner] skip excluded case process_madvise01 in suite syscalls
+[ltprunner] skip excluded case prot_hsymlinks in suite syscalls
+[ltprunner] skip excluded case rename10 in suite syscalls
+[ltprunner] skip excluded case rt_sigtimedwait01 in suite syscalls
+[ltprunner] skip excluded case rt_tgsigqueueinfo01 in suite syscalls
+[ltprunner] skip excluded case semctl08 in suite syscalls
+[ltprunner] skip excluded case send02 in suite syscalls
+[ltprunner] skip excluded case set_thread_area01 in suite syscalls
+[ltprunner] skip excluded case sgetmask01 in suite syscalls
+[ltprunner] skip excluded case shmctl01 in suite syscalls
+[ltprunner] skip excluded case signal06 in suite syscalls
+[ltprunner] skip excluded case splice02 in suite syscalls
+[ltprunner] skip excluded case splice07 in suite syscalls
+[ltprunner] skip excluded case ssetmask01 in suite syscalls
+[ltprunner] skip excluded case sysinfo03 in suite syscalls
+[ltprunner] skip excluded case timerfd04 in suite syscalls
+[ltprunner] skip excluded case timerfd_settime02 in suite syscalls
+[ltprunner] skip excluded case timer_create01 in suite syscalls
+[ltprunner] skip excluded case timer_create02 in suite syscalls
+[ltprunner] skip excluded case timer_settime03 in suite syscalls
+[ltprunner] skip excluded case userfaultfd01 in suite syscalls
+[ltprunner] skip excluded case ustat01 in suite syscalls
+[ltprunner] skip excluded case ustat02 in suite syscalls
+[ltprunner] skip excluded case futex_cmp_requeue01 in suite syscalls
+[ltprunner] skip excluded case futex_waitv01 in suite syscalls
+[ltprunner] skip excluded case futex_waitv02 in suite syscalls
+[ltprunner] skip excluded case futex_waitv03 in suite syscalls
+[ltprunner] skip excluded case futex_wake04 in suite syscalls
+[ltprunner] skip excluded case memfd_create03 in suite syscalls
+[ltprunner] skip excluded case memfd_create04 in suite syscalls
+[ltprunner] skip excluded case copy_file_range02 in suite syscalls
+[ltprunner] skip excluded case statx11 in suite syscalls
+[ltprunner] libc=glibc
+[ltprunner] ltproot=/glibc/ltp
+[ltprunner] suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
+[ltprunner] raw cases=1553
+[ltprunner] include=none
+[ltprunner] exclude=rt_sigtimedwait01,timerfd04,timerfd_settime02,acct01,acct02,acct02_helper,cacheflush01,clock_gettime03,clock_nanosleep03,clone303,eventfd06,fork13,fork14,futex_waitv01,futex_waitv02,futex_waitv03,futex_wake04,get_mempolicy01,get_mempolicy02,kill13,madvise06,madvise07,madvise08,madvise09,madvise11,memfd_create03,memfd_create04,msgctl05,msgstress01,process_madvise01,prctl06,prctl06_execve,prctl07,prctl10,rt_tgsigqueueinfo01,semctl08,set_thread_area01,sgetmask01,signal06,ssetmask01,sysinfo03,timer_create01,timer_create02,userfaultfd01,ustat01,ustat02,execve05,fallocate06,mmap16,rename10,shmctl01,copy_file_range02,pipe13,splice02,splice07,timer_settime03,statx11,prot_hsymlinks,send02,futex_cmp_requeue01
+[ltprunner] filtered=1495 start_idx=0
+[ltprunner] group_timeout_secs=23950
+[ltprunner] case_timeout_secs=150
+=== LTP SUITE syscalls ===
+[ltprunner] #0 suite=syscalls case=abort01
+RUN LTP CASE abort01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+abort01.c:62: [1;32mTPASS: [0mabort() dumped core
+abort01.c:65: [1;32mTPASS: [0mabort() raised SIGIOT
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE abort01 : 0
+LTP CASE RESULT abort01 : PASS (0)
+[ltprunner] #1 suite=syscalls case=accept01
+RUN LTP CASE accept01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+accept01.c:92: [1;32mTPASS: [0mbad file descriptor : EBADF (9)
+accept01.c:92: [1;32mTPASS: [0minvalid socket buffer : EINVAL (22)
+accept01.c:92: [1;32mTPASS: [0minvalid salen : EINVAL (22)
+accept01.c:92: [1;32mTPASS: [0mno queued connections : EINVAL (22)
+accept01.c:92: [1;32mTPASS: [0mUDP accept : EOPNOTSUPP (95)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE accept01 : 0
+LTP CASE RESULT accept01 : PASS (0)
+[ltprunner] #2 suite=syscalls case=accept02
+RUN LTP CASE accept02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+accept02.c:131: [1;34mTINFO: [0mStarting listener on port: 49172
+accept02.c:75: [1;32mTPASS: [0mMulticast group was not copied: EADDRNOTAVAIL (99)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE accept02 : 0
+LTP CASE RESULT accept02 : PASS (0)
+[ltprunner] #3 suite=syscalls case=accept03
+RUN LTP CASE accept03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+accept03.c:48: [1;32mTPASS: [0maccept() on file : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on O_PATH file : EBADF (9)
+accept03.c:48: [1;32mTPASS: [0maccept() on directory : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on /dev/zero : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on /proc/self/maps : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on pipe read end : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on pipe write end : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on epoll : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on eventfd : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on signalfd : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on timerfd : ENOTSOCK (88)
+accept03.c:48: [1;32mTPASS: [0maccept() on pidfd : ENOTSOCK (88)
+[syscall] Unsupported syscall: unknown (262), calling over arguments: [0, 0, 3, 0, 4836225224, 88]
+tst_fd.c:151: [1;33mTCONF: [0mSkipping fanotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (26), calling over arguments: [0, 103077102752, 63, 0, 0, 4836224776]
+tst_fd.c:160: [1;33mTCONF: [0mSkipping inotify: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (282), calling over arguments: [0, 62, 0, 0, 4836224776, 38]
+tst_fd.c:170: [1;33mTCONF: [0mSkipping userfaultfd: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (241), calling over arguments: [103077103784, 0, 18446744073709551615, 18446744073709551615, 0, 38]
+tst_fd.c:188: [1;33mTCONF: [0mSkipping perf event: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (425), calling over arguments: [1, 103077103800, 0, 0, 4836224776, 38]
+tst_fd.c:199: [1;33mTCONF: [0mSkipping io uring: ENOSYS (38)
+tst_fd.c:215: [1;33mTCONF: [0mSkipping bpf map: EPERM (1)
+[syscall] Unsupported syscall: unknown (430), calling over arguments: [4836196384, 0, 0, 0, 4836224456, 1]
+tst_fd.c:224: [1;33mTCONF: [0mSkipping fsopen: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (433), calling over arguments: [18446744073709551516, 4836220296, 0, 0, 4836224776, 38]
+tst_fd.c:233: [1;33mTCONF: [0mSkipping fspick: ENOSYS (38)
+[syscall] Unsupported syscall: unknown (428), calling over arguments: [18446744073709551516, 4836220296, 0, 0, 4836224776, 38]
+tst_fd.c:242: [1;33mTCONF: [0mSkipping open_tree: ENOSYS (38)
+accept03.c:48: [1;32mTPASS: [0maccept() on memfd : ENOTSOCK (88)
+[syscall] Unsupported syscall: unknown (447), calling over arguments: [0, 0, 3, 0, 4836225224, 88]
+tst_fd.c:260: [1;33mTCONF: [0mSkipping memfd secret: ENOSYS (38)
+
+Summary:
+passed   13
+failed   0
+broken   0
+skipped  10
+warnings 0
+FAIL LTP CASE accept03 : 0
+LTP CASE RESULT accept03 : PASS (0)
+[ltprunner] #4 suite=syscalls case=accept4_01
+RUN LTP CASE accept4_01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+accept4_01.c:71: [1;34mTINFO: [0mTesting variant: libc accept4()
+accept4_01.c:78: [1;34mTINFO: [0mserver listening on: 49174
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 0, nonblock 0
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 1, nonblock 0
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 0, nonblock 1
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 1, nonblock 1
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+accept4_01.c:71: [1;34mTINFO: [0mTesting variant: __NR_accept4 syscall
+accept4_01.c:78: [1;34mTINFO: [0mserver listening on: 49179
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 0, nonblock 0
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 1, nonblock 0
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 0, nonblock 1
+accept4_01.c:151: [1;32mTPASS: [0mClose-on-exec 1, nonblock 1
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+accept4_01.c:71: [1;34mTINFO: [0mTesting variant: __NR_socketcall SYS_ACCEPT4 syscall
+accept4_01.c:78: [1;34mTINFO: [0mserver listening on: 49184
+accept4_01.c:43: [1;33mTCONF: [0msyscall(-1) __NR_socketcall not supported on your arch
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE accept4_01 : 0
+LTP CASE RESULT accept4_01 : PASS (0)
+[ltprunner] #5 suite=syscalls case=access01
+RUN LTP CASE access01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, W_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK|W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK|W_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK|X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK|X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, W_OK|X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, W_OK|X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK|W_OK|X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_rwx, R_OK|W_OK|X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_x, X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_w, W_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_r, R_OK) as nobody passed
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_x, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, W_OK|X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, W_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, R_OK|X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, R_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, R_OK|W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, R_OK|W_OK|X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_r, R_OK|W_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, W_OK|X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, W_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, R_OK|X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, R_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, R_OK|W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, R_OK|W_OK|X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_w, R_OK|W_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_x, W_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_x, R_OK|X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_x, R_OK|W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessfile_x, R_OK|W_OK|X_OK) as nobody : EACCES (13)
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_r, R_OK|W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_w, R_OK|W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessfile_x, R_OK|W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, R_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, W_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, R_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, W_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, X_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, R_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, W_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, F_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, F_OK) as nobody passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, R_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, W_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, X_OK) as root passed
+access01.c:245: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, X_OK) as nobody passed
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_r/accessfile_x, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_w/accessfile_x, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_x/accessfile_x, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, F_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rw/accessfile_x, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_rx/accessfile_x, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, W_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_r, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, X_OK) as root : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_w, X_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, R_OK) as nobody : EACCES (13)
+access01.c:242: [1;32mTPASS: [0maccess(accessdir_wx/accessfile_x, W_OK) as nobody : EACCES (13)
+
+Summary:
+passed   199
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE access01 : 0
+LTP CASE RESULT access01 : PASS (0)
+[ltprunner] #6 suite=syscalls case=access02
+RUN LTP CASE access02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+access02.c:139: [1;32mTPASS: [0maccess(file_f, F_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_f, F_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_r, R_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_r, R_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_w, W_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_w, W_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_x, X_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(file_x, X_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_f, F_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_f, F_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_r, R_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_r, R_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_w, W_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_w, W_OK) as nobody behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_x, X_OK) as root behaviour is correct.
+access02.c:139: [1;32mTPASS: [0maccess(symlink_x, X_OK) as nobody behaviour is correct.
+
+Summary:
+passed   16
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE access02 : 0
+LTP CASE RESULT access02 : PASS (0)
+[ltprunner] #7 suite=syscalls case=access03
+RUN LTP CASE access03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+access03.c:37: [1;32mTPASS: [0minvalid address as root : EFAULT (14)
+access03.c:46: [1;32mTPASS: [0minvalid address as nobody : EFAULT (14)
+access03.c:37: [1;32mTPASS: [0minvalid address as root : EFAULT (14)
+access03.c:46: [1;32mTPASS: [0minvalid address as nobody : EFAULT (14)
+access03.c:37: [1;32mTPASS: [0minvalid address as root : EFAULT (14)
+access03.c:46: [1;32mTPASS: [0minvalid address as nobody : EFAULT (14)
+access03.c:37: [1;32mTPASS: [0minvalid address as root : EFAULT (14)
+access03.c:46: [1;32mTPASS: [0minvalid address as nobody : EFAULT (14)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE access03 : 0
+LTP CASE RESULT access03 : PASS (0)
+[ltprunner] #8 suite=syscalls case=access04
+RUN LTP CASE access04
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1017: [1;34mTINFO: [0mMounting (null) to /tmp/ltp-glibc/LTP_accFqsasn/mntpoint fstyp=tmpfs flags=21
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+access04.c:68: [1;32mTPASS: [0maccess as root : EINVAL (22)
+access04.c:68: [1;32mTPASS: [0maccess as nobody : EINVAL (22)
+access04.c:68: [1;32mTPASS: [0maccess as root : ENOENT (2)
+access04.c:68: [1;32mTPASS: [0maccess as nobody : ENOENT (2)
+access04.c:68: [1;32mTPASS: [0maccess as root : ENAMETOOLONG (36)
+access04.c:68: [1;32mTPASS: [0maccess as nobody : ENAMETOOLONG (36)
+access04.c:68: [1;32mTPASS: [0maccess as root : ENOTDIR (20)
+access04.c:68: [1;32mTPASS: [0maccess as nobody : ENOTDIR (20)
+access04.c:68: [1;32mTPASS: [0maccess as root : ELOOP (40)
+access04.c:68: [1;32mTPASS: [0maccess as nobody : ELOOP (40)
+access04.c:68: [1;32mTPASS: [0maccess as root : EROFS (30)
+access04.c:68: [1;32mTPASS: [0maccess as nobody : EROFS (30)
+
+Summary:
+passed   12
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE access04 : 0
+LTP CASE RESULT access04 : PASS (0)
+[ltprunner] #11 suite=syscalls case=add_key01
+RUN LTP CASE add_key01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+add_key01.c:63: [1;34mTINFO: [0mThe key type is keyrings and plen is 0
+add_key01.c:79: [1;32mTPASS: [0madd_key call succeeded as expected
+add_key01.c:63: [1;34mTINFO: [0mthe key type is keyrings and plen is 1
+add_key01.c:83: [1;32mTPASS: [0madd_key call failed as expected: EINVAL (22)
+add_key01.c:63: [1;34mTINFO: [0mThe key type is user and plen is 32767
+add_key01.c:79: [1;32mTPASS: [0madd_key call succeeded as expected
+add_key01.c:63: [1;34mTINFO: [0mThe key type is user and plen is 32768
+add_key01.c:83: [1;32mTPASS: [0madd_key call failed as expected: EINVAL (22)
+add_key01.c:63: [1;34mTINFO: [0mThe key type is logon and plen is 32767
+add_key01.c:79: [1;32mTPASS: [0madd_key call succeeded as expected
+add_key01.c:63: [1;34mTINFO: [0mThe key type is logon and plen is 32768
+add_key01.c:83: [1;32mTPASS: [0madd_key call failed as expected: EINVAL (22)
+add_key01.c:63: [1;34mTINFO: [0mThe key type is big_key and plen is 1048575
+add_key01.c:79: [1;32mTPASS: [0madd_key call succeeded as expected
+add_key01.c:63: [1;34mTINFO: [0mThe key type is big_key and plen is 1048576
+add_key01.c:83: [1;32mTPASS: [0madd_key call failed as expected: EINVAL (22)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE add_key01 : 0
+LTP CASE RESULT add_key01 : PASS (0)
+[ltprunner] #12 suite=syscalls case=add_key02
+RUN LTP CASE add_key02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+add_key02.c:65: [1;33mTCONF: [0mkernel doesn't support key type 'asymmetric'
+add_key02.c:65: [1;33mTCONF: [0mkernel doesn't support key type 'cifs.idmap'
+add_key02.c:65: [1;33mTCONF: [0mkernel doesn't support key type 'cifs.spnego'
+add_key02.c:65: [1;33mTCONF: [0mkernel doesn't support key type 'pkcs7_test'
+add_key02.c:65: [1;33mTCONF: [0mkernel doesn't support key type 'rxrpc'
+add_key02.c:65: [1;33mTCONF: [0mkernel doesn't support key type 'rxrpc_s'
+add_key02.c:59: [1;32mTPASS: [0mreceived expected EFAULT with key type 'user'
+add_key02.c:59: [1;32mTPASS: [0mreceived expected EFAULT with key type 'logon'
+add_key02.c:59: [1;32mTPASS: [0mreceived expected EFAULT with key type 'big_key'
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  6
+warnings 0
+FAIL LTP CASE add_key02 : 0
+LTP CASE RESULT add_key02 : PASS (0)
+[ltprunner] #13 suite=syscalls case=add_key03
+RUN LTP CASE add_key03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+add_key03.c:80: [1;32mTPASS: [0mexpectedly could not create another user's keyrings
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE add_key03 : 0
+LTP CASE RESULT add_key03 : PASS (0)
+[ltprunner] #14 suite=syscalls case=add_key04
+RUN LTP CASE add_key04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+add_key04.c:71: [1;32mTPASS: [0mdidn't crash while filling keyring
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE add_key04 : 0
+LTP CASE RESULT add_key04 : PASS (0)
+[ltprunner] #15 suite=syscalls case=add_key05
+RUN LTP CASE add_key05
+tst_cmd.c:257: [1;33mTCONF: [0mCouldn't find 'useradd' in $PATH
+FAIL LTP CASE add_key05 : 32
+LTP CASE RESULT add_key05 : SKIP (32)
+[ltprunner] #16 suite=syscalls case=adjtimex01
+RUN LTP CASE adjtimex01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+adjtimex01.c:24: [1;32mTPASS: [0madjtimex() with mode 0x403f 
+adjtimex01.c:33: [1;32mTPASS: [0madjtimex() with mode 0x8001 
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE adjtimex01 : 0
+LTP CASE RESULT adjtimex01 : PASS (0)
+[ltprunner] #17 suite=syscalls case=adjtimex02
+RUN LTP CASE adjtimex02
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+adjtimex02.c:111: [1;34mTINFO: [0mTesting variant: libc adjtimex()
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EPERM (1)
+adjtimex02.c:95: [1;33mTCONF: [0mEFAULT is skipped for libc variant
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EINVAL (22)
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EINVAL (22)
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+adjtimex02.c:111: [1;34mTINFO: [0mTesting variant: __NR_adjtimex syscall
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EPERM (1)
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EFAULT (14)
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EINVAL (22)
+adjtimex02.c:100: [1;32mTPASS: [0madjtimex() error : EINVAL (22)
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE adjtimex02 : 0
+LTP CASE RESULT adjtimex02 : PASS (0)
+[ltprunner] #18 suite=syscalls case=adjtimex03
+RUN LTP CASE adjtimex03
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:53: [1;34mTINFO: [0mexpecting adjtimex() to fail with EINVAL with mode 0x8000
+adjtimex03.c:62: [1;34mTINFO: [0mtai : 0x00000000
+adjtimex03.c:73: [1;32mTPASS: [0mData leak not observed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE adjtimex03 : 0
+LTP CASE RESULT adjtimex03 : PASS (0)
+[ltprunner] #19 suite=syscalls case=alarm02
+RUN LTP CASE alarm02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+alarm02.c:36: [1;32mTPASS: [0malarm(2147483647) passed
+alarm02.c:38: [1;32mTPASS: [0malarm(0) passed
+alarm02.c:36: [1;32mTPASS: [0malarm(2147483647) passed
+alarm02.c:38: [1;32mTPASS: [0malarm(0) passed
+alarm02.c:36: [1;32mTPASS: [0malarm(1073741823) passed
+alarm02.c:38: [1;32mTPASS: [0malarm(0) passed
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE alarm02 : 0
+LTP CASE RESULT alarm02 : PASS (0)
+[ltprunner] #20 suite=syscalls case=alarm03
+RUN LTP CASE alarm03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+alarm03.c:26: [1;32mTPASS: [0malarm(0) in child process passed
+alarm03.c:30: [1;32mTPASS: [0malarm(0) in parent process passed
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE alarm03 : 0
+LTP CASE RESULT alarm03 : PASS (0)
+[ltprunner] #21 suite=syscalls case=alarm05
+RUN LTP CASE alarm05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+alarm05.c:28: [1;32mTPASS: [0malarm(10) passed
+alarm05.c:30: [1;32mTPASS: [0malarm(1) passed
+alarm05.c:32: [1;32mTPASS: [0malarms_fired == 1 (1)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE alarm05 : 0
+LTP CASE RESULT alarm05 : PASS (0)
+[ltprunner] #22 suite=syscalls case=alarm06
+RUN LTP CASE alarm06
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+alarm06.c:35: [1;32mTPASS: [0malarm(0) passed
+alarm06.c:40: [1;32mTPASS: [0malarms_received == 0 (0)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE alarm06 : 0
+LTP CASE RESULT alarm06 : PASS (0)
+[ltprunner] #23 suite=syscalls case=alarm07
+RUN LTP CASE alarm07
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+alarm07.c:36: [1;32mTPASS: [0malarm_cnt == 1 (1)
+alarm07.c:32: [1;32mTPASS: [0malarm_cnt == 0 (0)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE alarm07 : 0
+LTP CASE RESULT alarm07 : PASS (0)
+[ltprunner] #24 suite=syscalls case=arch_prctl01
+RUN LTP CASE arch_prctl01
+tst_test.c:1201: [1;33mTCONF: [0mThis arch 'unknown' is not supported for test!
+FAIL LTP CASE arch_prctl01 : 32
+LTP CASE RESULT arch_prctl01 : SKIP (32)
+[ltprunner] #25 suite=syscalls case=bind01
+RUN LTP CASE bind01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bind01.c:60: [1;32mTPASS: [0minvalid salen : EINVAL (22)
+bind01.c:60: [1;32mTPASS: [0minvalid socket : ENOTSOCK (88)
+bind01.c:63: [1;32mTPASS: [0mINADDR_ANYPORT passed
+bind01.c:60: [1;32mTPASS: [0mUNIX-domain of current directory : EAFNOSUPPORT (97)
+bind01.c:60: [1;32mTPASS: [0mnon-local address : EADDRNOTAVAIL (99)
+bind01.c:60: [1;32mTPASS: [0msockfd is not a valid file descriptor : EBADF (9)
+bind01.c:60: [1;32mTPASS: [0ma component of addr prefix is not a directory : ENOTDIR (20)
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE bind01 : 0
+LTP CASE RESULT bind01 : PASS (0)
+[ltprunner] #26 suite=syscalls case=bind02
+RUN LTP CASE bind02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bind02.c:52: [1;34mTINFO: [0mSwitching credentials to user: nobody, group: nogroup
+bind02.c:39: [1;32mTPASS: [0mbind() : EACCES (13)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE bind02 : 0
+LTP CASE RESULT bind02 : PASS (0)
+[ltprunner] #27 suite=syscalls case=bind03
+RUN LTP CASE bind03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bind03.c:72: [1;31mTBROK: [0mbind(3, socket.1, 110) failed: EINVAL (22)
+
+Summary:
+passed   0
+failed   0
+broken   1
+skipped  0
+warnings 0
+FAIL LTP CASE bind03 : 2
+LTP CASE RESULT bind03 : FAIL (2)
+[ltprunner] #28 suite=syscalls case=bind04
+RUN LTP CASE bind04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bind04.c:117: [1;34mTINFO: [0mTesting AF_UNIX pathname stream
+bind04.c:121: [1;31mTFAIL: [0mbind() failed: EINVAL (22)
+bind04.c:117: [1;34mTINFO: [0mTesting AF_UNIX pathname seqpacket
+bind04.c:118: [1;33mTCONF: [0msocket(1, 5, 0) failed: EAFNOSUPPORT (97)
+
+Summary:
+passed   0
+failed   1
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE bind04 : 33
+LTP CASE RESULT bind04 : FAIL (33)
+[ltprunner] #29 suite=syscalls case=bind05
+RUN LTP CASE bind05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bind05.c:131: [1;34mTINFO: [0mTesting AF_UNIX pathname datagram
+bind05.c:134: [1;31mTFAIL: [0mbind() failed: EINVAL (22)
+bind05.c:131: [1;34mTINFO: [0mTesting AF_UNIX abstract datagram
+bind05.c:98: [1;31mTBROK: [0mbind(4, peer.sock, 110) failed: EINVAL (22)
+
+Summary:
+passed   0
+failed   1
+broken   1
+skipped  0
+warnings 0
+FAIL LTP CASE bind05 : 3
+LTP CASE RESULT bind05 : FAIL (3)
+[ltprunner] #30 suite=syscalls case=bind06
+RUN LTP CASE bind06
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 06m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_net.c:238: [1;33mTCONF: [0mUser namespaces are disabled
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE bind06 : 32
+LTP CASE RESULT bind06 : SKIP (32)
+[ltprunner] #31 suite=syscalls case=bpf_map01
+RUN LTP CASE bpf_map01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+bpf_map01.c:53: [1;32mTPASS: [0mCreated hash map
+bpf_map01.c:70: [1;32mTPASS: [0mEmpty hash map lookup: ENOENT (2)
+bpf_map01.c:102: [1;32mTPASS: [0mUpdate hash map element
+bpf_map01.c:122: [1;32mTPASS: [0mhash map lookup
+bpf_map01.c:53: [1;32mTPASS: [0mCreated array map
+bpf_map01.c:102: [1;32mTPASS: [0mUpdate array map element
+bpf_map01.c:122: [1;32mTPASS: [0marray map lookup
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE bpf_map01 : 0
+LTP CASE RESULT bpf_map01 : PASS (0)
+[ltprunner] #32 suite=syscalls case=bpf_prog01
+RUN LTP CASE bpf_prog01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog01 : 32
+LTP CASE RESULT bpf_prog01 : SKIP (32)
+[ltprunner] #33 suite=syscalls case=bpf_prog02
+RUN LTP CASE bpf_prog02
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog02 : 32
+LTP CASE RESULT bpf_prog02 : SKIP (32)
+[ltprunner] #34 suite=syscalls case=bpf_prog03
+RUN LTP CASE bpf_prog03
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog03 : 32
+LTP CASE RESULT bpf_prog03 : SKIP (32)
+[ltprunner] #35 suite=syscalls case=bpf_prog04
+RUN LTP CASE bpf_prog04
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog04 : 32
+LTP CASE RESULT bpf_prog04 : SKIP (32)
+[ltprunner] #36 suite=syscalls case=bpf_prog05
+RUN LTP CASE bpf_prog05
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_BPF(39)
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog05 : 32
+LTP CASE RESULT bpf_prog05 : SKIP (32)
+[ltprunner] #37 suite=syscalls case=bpf_prog06
+RUN LTP CASE bpf_prog06
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_BPF(39)
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog06 : 32
+LTP CASE RESULT bpf_prog06 : SKIP (32)
+[ltprunner] #38 suite=syscalls case=bpf_prog07
+RUN LTP CASE bpf_prog07
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+bpf_common.c:16: [1;34mTINFO: [0mRaising RLIMIT_MEMLOCK to 2097151
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_BPF(39)
+bpf_common.c:39: [1;33mTCONF: [0mHint: check also /proc/sys/kernel/unprivileged_bpf_disabled
+bpf_common.c:40: [1;33mTCONF: [0mbpf() requires CAP_SYS_ADMIN or CAP_BPF on this system: EPERM (1)
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE bpf_prog07 : 32
+LTP CASE RESULT bpf_prog07 : SKIP (32)
+[ltprunner] #39 suite=syscalls case=brk01
+RUN LTP CASE brk01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+brk01.c:24: [1;34mTINFO: [0mTesting libc variant
+brk01.c:70: [1;32mTPASS: [0mbrk() works fine
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+brk01.c:21: [1;34mTINFO: [0mTesting syscall variant
+brk01.c:70: [1;32mTPASS: [0mbrk() works fine
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE brk01 : 0
+LTP CASE RESULT brk01 : PASS (0)
+[ltprunner] #40 suite=syscalls case=brk02
+RUN LTP CASE brk02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+brk02.c:42: [1;34mTINFO: [0mTesting libc variant
+brk02.c:86: [1;32mTPASS: [0mmunmap at least two VMAs of brk() passed
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+brk02.c:39: [1;34mTINFO: [0mTesting syscall variant
+brk02.c:86: [1;32mTPASS: [0mmunmap at least two VMAs of brk() passed
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE brk02 : 0
+LTP CASE RESULT brk02 : PASS (0)
+[ltprunner] #41 suite=syscalls case=capget01
+RUN LTP CASE capget01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_NET_RAW(13)
+capget01.c:35: [1;32mTPASS: [0mcapget() with LINUX_CAPABILITY_VERSION_1 passed
+capget01.c:41: [1;32mTPASS: [0mcapget() doesn't get CAP_NET_RAW as expected in PE
+capget01.c:35: [1;32mTPASS: [0mcapget() with LINUX_CAPABILITY_VERSION_2 passed
+capget01.c:41: [1;32mTPASS: [0mcapget() doesn't get CAP_NET_RAW as expected in PE
+capget01.c:35: [1;32mTPASS: [0mcapget() with LINUX_CAPABILITY_VERSION_3 passed
+capget01.c:41: [1;32mTPASS: [0mcapget() doesn't get CAP_NET_RAW as expected in PE
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE capget01 : 0
+LTP CASE RESULT capget01 : PASS (0)
+[ltprunner] #42 suite=syscalls case=capget02
+RUN LTP CASE capget02
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+capget02.c:57: [1;32mTPASS: [0mcapget() with bad address header : EFAULT (14)
+capget02.c:57: [1;32mTPASS: [0mcapget() with bad address data : EFAULT (14)
+capget02.c:57: [1;32mTPASS: [0mcapget() with bad version : EINVAL (22)
+capget02.c:57: [1;32mTPASS: [0mcapget() with bad pid : EINVAL (22)
+capget02.c:57: [1;32mTPASS: [0mcapget() with unused pid : ESRCH (3)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE capget02 : 0
+LTP CASE RESULT capget02 : PASS (0)
+[ltprunner] #43 suite=syscalls case=capset01
+RUN LTP CASE capset01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+capset01.c:47: [1;32mTPASS: [0mcapset() with LINUX_CAPABILITY_VERSION_1 passed
+capset01.c:47: [1;32mTPASS: [0mcapset() with LINUX_CAPABILITY_VERSION_2 passed
+capset01.c:47: [1;32mTPASS: [0mcapset() with LINUX_CAPABILITY_VERSION_3 passed
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE capset01 : 0
+LTP CASE RESULT capset01 : PASS (0)
+[ltprunner] #44 suite=syscalls case=capset02
+RUN LTP CASE capset02
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+capset02.c:71: [1;32mTPASS: [0mcapset() with bad address header : EFAULT (14)
+capset02.c:71: [1;32mTPASS: [0mcapset() with bad address data : EFAULT (14)
+capset02.c:71: [1;32mTPASS: [0mcapset() with bad version : EINVAL (22)
+capset02.c:71: [1;32mTPASS: [0mcapset() with bad value data(when pE is not in pP) : EPERM (1)
+capset02.c:71: [1;32mTPASS: [0mcapset() with bad value data(when pP is not in old pP) : EPERM (1)
+capset02.c:71: [1;32mTPASS: [0mcapset() with bad value data(when pI is not in bounding set or old pI) : EPERM (1)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE capset02 : 0
+LTP CASE RESULT capset02 : PASS (0)
+[ltprunner] #45 suite=syscalls case=capset03
+RUN LTP CASE capset03
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+capset03.c:30: [1;34mTINFO: [0mTest bad value data(when pI is not old pP or old pI without CAP_SETPCAP)
+capset03.c:32: [1;32mTPASS: [0mcapset() : EPERM (1)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE capset03 : 0
+LTP CASE RESULT capset03 : PASS (0)
+[ltprunner] #46 suite=syscalls case=capset04
+RUN LTP CASE capset04
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+capset04.c:33: [1;34mTINFO: [0mTest capset() for a different process
+capset04.c:37: [1;32mTPASS: [0mcapset() : EPERM (1)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE capset04 : 0
+LTP CASE RESULT capset04 : PASS (0)
+[ltprunner] #48 suite=syscalls case=chdir01
+RUN LTP CASE chdir01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_supported_fs_types.c:161: [1;34mTINFO: [0mWARNING: testing only ext4
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/vdb2 to /tmp/ltp-glibc/LTP_chdpWV2uZ/mntpoint fstyp=ext4 flags=0
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+
+Summary:
+passed   16
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chdir01 : 0
+LTP CASE RESULT chdir01 : PASS (0)
+[ltprunner] #49 suite=syscalls case=chdir01A
+RUN LTP CASE chdir01A
+chdir01     1  [1;32mTPASS[0m  :  chdir(2) to object file location through symbolic link file is ok
+chdir01     2  [1;32mTPASS[0m  :  chdir(2) to non-existent object file location through symbolic link file failed as expected
+chdir01     3  [1;32mTPASS[0m  :  Nested symbolic link access condition caught.  ELOOP is returned
+FAIL LTP CASE chdir01A : 0
+LTP CASE RESULT chdir01A : PASS (0)
+[ltprunner] #50 suite=syscalls case=chdir04
+RUN LTP CASE chdir04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chdir04.c:29: [1;32mTPASS: [0mchdir() : ENAMETOOLONG (36)
+chdir04.c:29: [1;32mTPASS: [0mchdir() : ENOENT (2)
+chdir04.c:29: [1;32mTPASS: [0mchdir() : EFAULT (14)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chdir04 : 0
+LTP CASE RESULT chdir04 : PASS (0)
+[ltprunner] #51 suite=syscalls case=chmod01
+RUN LTP CASE chmod01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chmod01.c:60: [1;34mTINFO: [0mTesting variant: verify permissions of file
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 0000) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=0000
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 0007) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=0007
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 0070) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=0070
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 0700) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=0700
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 0777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=0777
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 2777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=2777
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 4777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=4777
+chmod01.c:40: [1;32mTPASS: [0mchmod(testfile, 6777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testfile) mode=6777
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chmod01.c:60: [1;34mTINFO: [0mTesting variant: verify permissions of directory
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 0000) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=0000
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 0007) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=0007
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 0070) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=0070
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 0700) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=0700
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 0777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=0777
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 2777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=2777
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 4777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=4777
+chmod01.c:40: [1;32mTPASS: [0mchmod(testdir_1, 6777) passed
+chmod01.c:50: [1;32mTPASS: [0mstat(testdir_1) mode=6777
+
+Summary:
+passed   32
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chmod01 : 0
+LTP CASE RESULT chmod01 : PASS (0)
+[ltprunner] #52 suite=syscalls case=chmod01A
+RUN LTP CASE chmod01A
+chmod01     1  [1;32mTPASS[0m  :  chmod(2) of object file permissions through symbolic link file is ok
+chmod01     2  [1;32mTPASS[0m  :  chmod(2) error when accessing non-existent object through symbolic link is caught
+chmod01     3  [1;32mTPASS[0m  :  Nested symbolic link access condition caught.  ELOOP is returned
+FAIL LTP CASE chmod01A : 0
+LTP CASE RESULT chmod01A : PASS (0)
+[ltprunner] #53 suite=syscalls case=chmod03
+RUN LTP CASE chmod03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chmod03.c:42: [1;32mTPASS: [0mchmod(testfile, 1777) passed
+chmod03.c:54: [1;32mTPASS: [0mstat(testfile) mode=101777
+chmod03.c:42: [1;32mTPASS: [0mchmod(testdir_3, 1777) passed
+chmod03.c:54: [1;32mTPASS: [0mstat(testdir_3) mode=41777
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chmod03 : 0
+LTP CASE RESULT chmod03 : PASS (0)
+[ltprunner] #54 suite=syscalls case=chmod05
+RUN LTP CASE chmod05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chmod05.c:76: [1;34mTINFO: [0mFound unused GID 2: SUCCESS (0)
+chmod05.c:65: [1;32mTPASS: [0mFunctionality of chmod(testdir, 043777) successful
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chmod05 : 0
+LTP CASE RESULT chmod05 : PASS (0)
+[ltprunner] #55 suite=syscalls case=chmod06
+RUN LTP CASE chmod06
+tst_test.c:1017: [1;34mTINFO: [0mMounting (null) to /tmp/ltp-glibc/LTP_chmZwfALy/mntpoint fstyp=tmpfs flags=21
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: EPERM (1)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: EACCES (13)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: EFAULT (14)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: EFAULT (14)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: ENAMETOOLONG (36)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: ENOENT (2)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: ENOTDIR (20)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: EROFS (30)
+chmod06.c:86: [1;32mTPASS: [0mchmod failed as expected: ELOOP (40)
+
+Summary:
+passed   9
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chmod06 : 0
+LTP CASE RESULT chmod06 : PASS (0)
+[ltprunner] #56 suite=syscalls case=chmod07
+RUN LTP CASE chmod07
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chmod07.c:77: [1;34mTINFO: [0mgetgrnam(users) failed - try fallback daemon
+chmod07.c:58: [1;32mTPASS: [0mFunctionality of chmod(testfile, 01777) successful
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chmod07 : 0
+LTP CASE RESULT chmod07 : PASS (0)
+[ltprunner] #57 suite=syscalls case=chown01
+RUN LTP CASE chown01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chown01.c:24: [1;32mTPASS: [0mchown(chown01_testfile,0,0) passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chown01 : 0
+LTP CASE RESULT chown01 : PASS (0)
+[ltprunner] #58 suite=syscalls case=chown01_16
+RUN LTP CASE chown01_16
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+/code/ltp-full-20240524/testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: [1;33mTCONF: [0m16-bit version of chown() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE chown01_16 : 32
+LTP CASE RESULT chown01_16 : SKIP (32)
+[ltprunner] #59 suite=syscalls case=chown02
+RUN LTP CASE chown02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chown02.c:46: [1;32mTPASS: [0mchown(testfile1, 0, 0) passed
+chown02.c:46: [1;32mTPASS: [0mchown(testfile2, 0, 0) passed
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chown02 : 0
+LTP CASE RESULT chown02 : PASS (0)
+[ltprunner] #60 suite=syscalls case=chown02_16
+RUN LTP CASE chown02_16
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+/code/ltp-full-20240524/testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: [1;33mTCONF: [0m16-bit version of chown() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE chown02_16 : 32
+LTP CASE RESULT chown02_16 : SKIP (32)
+[ltprunner] #61 suite=syscalls case=chown03
+RUN LTP CASE chown03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chown03.c:63: [1;32mTPASS: [0mchown(chown03_testfile, -1, 65534) passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chown03 : 0
+LTP CASE RESULT chown03 : PASS (0)
+[ltprunner] #62 suite=syscalls case=chown03_16
+RUN LTP CASE chown03_16
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+/code/ltp-full-20240524/testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: [1;33mTCONF: [0m16-bit version of chown() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE chown03_16 : 32
+LTP CASE RESULT chown03_16 : SKIP (32)
+[ltprunner] #63 suite=syscalls case=chown04
+RUN LTP CASE chown04
+tst_test.c:1017: [1;34mTINFO: [0mMounting (null) to /tmp/ltp-glibc/LTP_cho5p3GQQ/mntpoint fstyp=tmpfs flags=21
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chown04.c:77: [1;32mTPASS: [0mchown() without permissions : EPERM (1)
+chown04.c:77: [1;32mTPASS: [0mchown() without full permissions of the path prefix : EACCES (13)
+chown04.c:77: [1;32mTPASS: [0mchown() with unaccessible pathname points : EFAULT (14)
+chown04.c:77: [1;32mTPASS: [0mchown() when pathname is too long : ENAMETOOLONG (36)
+chown04.c:77: [1;32mTPASS: [0mchown() when file does not exist : ENOENT (2)
+chown04.c:77: [1;32mTPASS: [0mchown() when the path prefix is not a directory : ENOTDIR (20)
+chown04.c:77: [1;32mTPASS: [0mchown() with too many symbolic links : ELOOP (40)
+chown04.c:77: [1;32mTPASS: [0mchown() when the named file resides on a read-only filesystem : EROFS (30)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chown04 : 0
+LTP CASE RESULT chown04 : PASS (0)
+[ltprunner] #64 suite=syscalls case=chown04_16
+RUN LTP CASE chown04_16
+tst_test.c:1017: [1;34mTINFO: [0mMounting (null) to /tmp/ltp-glibc/LTP_cho9M1j0c/mntpoint fstyp=tmpfs flags=21
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+/code/ltp-full-20240524/testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: [1;33mTCONF: [0m16-bit version of chown() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE chown04_16 : 32
+LTP CASE RESULT chown04_16 : SKIP (32)
+[ltprunner] #65 suite=syscalls case=chown05
+RUN LTP CASE chown05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chown05.c:42: [1;32mTPASS: [0mchown(testfile, 700, 701), change owner/group ids passed
+chown05.c:42: [1;32mTPASS: [0mchown(testfile, 702, -1), change owner id only passed
+chown05.c:42: [1;32mTPASS: [0mchown(testfile, 703, 701), change owner id only passed
+chown05.c:42: [1;32mTPASS: [0mchown(testfile, -1, 704), change group id only passed
+chown05.c:42: [1;32mTPASS: [0mchown(testfile, 703, 705), change group id only passed
+chown05.c:42: [1;32mTPASS: [0mchown(testfile, -1, -1), no change passed
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chown05 : 0
+LTP CASE RESULT chown05 : PASS (0)
+[ltprunner] #66 suite=syscalls case=chown05_16
+RUN LTP CASE chown05_16
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+/code/ltp-full-20240524/testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: [1;33mTCONF: [0m16-bit version of chown() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE chown05_16 : 32
+LTP CASE RESULT chown05_16 : SKIP (32)
+[ltprunner] #67 suite=syscalls case=chroot01
+RUN LTP CASE chroot01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chroot01.c:23: [1;32mTPASS: [0munprivileged chroot() : EPERM (1)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chroot01 : 0
+LTP CASE RESULT chroot01 : PASS (0)
+[ltprunner] #68 suite=syscalls case=chroot02
+RUN LTP CASE chroot02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chroot02.c:30: [1;32mTPASS: [0mchroot(/tmp/ltp-glibc/LTP_chrP6qMUB) passed
+chroot02.c:34: [1;32mTPASS: [0mstat(/chroot02_testfile) passed
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chroot02 : 0
+LTP CASE RESULT chroot02 : PASS (0)
+[ltprunner] #69 suite=syscalls case=chroot03
+RUN LTP CASE chroot03
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chroot03.c:54: [1;32mTPASS: [0mchroot(longer than VFS_MAXNAMELEN) : ENAMETOOLONG (36)
+chroot03.c:54: [1;32mTPASS: [0mchroot(not a directory) : ENOTDIR (20)
+chroot03.c:54: [1;32mTPASS: [0mchroot(does not exists) : ENOENT (2)
+chroot03.c:54: [1;32mTPASS: [0mchroot(an invalid address) : EFAULT (14)
+chroot03.c:54: [1;32mTPASS: [0mchroot(symlink loop) : ELOOP (40)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chroot03 : 0
+LTP CASE RESULT chroot03 : PASS (0)
+[ltprunner] #70 suite=syscalls case=chroot04
+RUN LTP CASE chroot04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+chroot04.c:27: [1;32mTPASS: [0mno search permission chroot() : EACCES (13)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chroot04 : 0
+LTP CASE RESULT chroot04 : PASS (0)
+[ltprunner] #71 suite=syscalls case=clock_adjtime01
+RUN LTP CASE clock_adjtime01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_adjtime01.c:186: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 181841(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 32769
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 183707(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 185511(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=8001)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 197896(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 40961
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 201466(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 204482(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=a001)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 209112(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 16447
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 211043(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 213071(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=403f)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 215592(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 1
+           offset: 10000
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 218370(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 10000
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 220351(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=1)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 10000
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 222887(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 2
+           offset: 10000
+        frequency: 100
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 224844(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 227341(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=2)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 229973(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 4
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 231889(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 233769(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=4)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 236995(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 8
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 239002(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 240925(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=8)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 243441(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 32
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 1
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 245376(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 1
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 247957(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=20)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 1
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 250630(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mSET
+             mode: 16384
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 1
+        precision: 1
+        tolerance: 32768000
+             tick: 11000
+         raw time: 1784230963(s) 252584(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mVERIFY
+             mode: 0
+           offset: 10000
+        frequency: 100
+         maxerror: 100
+         esterror: 100
+           status: 0 (0x0)
+    time_constant: 1
+        precision: 1
+        tolerance: 32768000
+             tick: 11000
+         raw time: 1784230963(s) 254506(us)
+clock_adjtime01.c:177: [1;32mTPASS: [0mclock_adjtime(): success (mode=4000)
+
+Summary:
+passed   9
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_adjtime01 : 0
+LTP CASE RESULT clock_adjtime01 : PASS (0)
+[ltprunner] #72 suite=syscalls case=clock_adjtime02
+RUN LTP CASE clock_adjtime02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_adjtime02.c:197: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 411980(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mTEST
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 411980(us)
+clock_adjtime02.c:184: [1;32mTPASS: [0mclock_adjtime(): failed as expected (mode=0x0, uid=0)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 418533(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mTEST
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 418533(us)
+clock_adjtime02.c:184: [1;32mTPASS: [0mclock_adjtime(): failed as expected (mode=0x0, uid=0)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 422864(us)
+clock_adjtime02.c:184: [1;32mTPASS: [0mclock_adjtime(): failed as expected (mode=0x403f, uid=0)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 425477(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mTEST
+             mode: 16384
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 8999
+         raw time: 1784230963(s) 425477(us)
+clock_adjtime02.c:184: [1;32mTPASS: [0mclock_adjtime(): failed as expected (mode=0x4000, uid=0)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 430941(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mTEST
+             mode: 16384
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 11001
+         raw time: 1784230963(s) 430941(us)
+clock_adjtime02.c:184: [1;32mTPASS: [0mclock_adjtime(): failed as expected (mode=0x4000, uid=0)
+clock_adjtime.h:163: [1;34mTINFO: [0mGET
+             mode: 0
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 435334(us)
+clock_adjtime.h:163: [1;34mTINFO: [0mTEST
+             mode: 16447
+           offset: 0
+        frequency: 0
+         maxerror: 0
+         esterror: 0
+           status: 0 (0x0)
+    time_constant: 0
+        precision: 1
+        tolerance: 32768000
+             tick: 10000
+         raw time: 1784230963(s) 435334(us)
+clock_adjtime02.c:184: [1;32mTPASS: [0mclock_adjtime(): failed as expected (mode=0x403f, uid=65534)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_adjtime02 : 0
+LTP CASE RESULT clock_adjtime02 : PASS (0)
+[ltprunner] #73 suite=syscalls case=clock_getres01
+RUN LTP CASE clock_getres01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_getres01.c:62: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(REALTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(MONOTONIC, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(PROCESS_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(THREAD_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_RAW, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(-1, ...) succeeded
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_getres01.c:62: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec with NULL res
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(REALTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(MONOTONIC, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(PROCESS_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(THREAD_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_RAW, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(-1, ...) succeeded
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_getres01.c:62: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(REALTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(MONOTONIC, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(PROCESS_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(THREAD_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_RAW, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(-1, ...) succeeded
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_getres01.c:62: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec with NULL res
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(REALTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(MONOTONIC, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(PROCESS_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(THREAD_CPUTIME_ID, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_RAW, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_MONOTONIC_COARSE, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_REALTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(CLOCK_BOOTTIME_ALARM, ...) succeeded
+clock_getres01.c:88: [1;32mTPASS: [0mclock_getres(-1, ...) succeeded
+
+Summary:
+passed   44
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_getres01 : 0
+LTP CASE RESULT clock_getres01 : PASS (0)
+[ltprunner] #74 suite=syscalls case=clock_nanosleep01
+RUN LTP CASE clock_nanosleep01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_nanosleep01.c:124: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase NORMAL
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINVAL (22)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase NORMAL
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINVAL (22)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase NORMAL
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINVAL (22)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase SEND_SIGINT
+clock_nanosleep01.c:208: [1;32mTPASS: [0mTimespec updated correctly
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINTR (4)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase BAD_TS_ADDR_REQ
+clock_nanosleep01.c:143: [1;33mTCONF: [0mThe libc wrapper may dereference req or rem
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase BAD_TS_ADDR_REM
+clock_nanosleep01.c:143: [1;33mTCONF: [0mThe libc wrapper may dereference req or rem
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_nanosleep01.c:124: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase NORMAL
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINVAL (22)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase NORMAL
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINVAL (22)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase NORMAL
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EOPNOTSUPP (95)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase SEND_SIGINT
+clock_nanosleep01.c:208: [1;32mTPASS: [0mTimespec updated correctly
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EINTR (4)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase BAD_TS_ADDR_REQ
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EFAULT (14)
+clock_nanosleep01.c:139: [1;34mTINFO: [0mcase BAD_TS_ADDR_REM
+clock_nanosleep01.c:218: [1;32mTPASS: [0mclock_nanosleep() failed with: EFAULT (14)
+
+Summary:
+passed   12
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE clock_nanosleep01 : 0
+LTP CASE RESULT clock_nanosleep01 : PASS (0)
+[ltprunner] #75 suite=syscalls case=clock_nanosleep02
+RUN LTP CASE clock_nanosleep02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+sh: can't execute 'systemd-detect-virt': No such file or directory
+tst_timer_test.c:357: [1;34mTINFO: [0mCLOCK_MONOTONIC resolution 10ns
+tst_timer_test.c:369: [1;34mTINFO: [0mprctl(PR_GET_TIMERSLACK) = 50us
+tst_test.c:1625: [1;34mTINFO: [0mUpdating max runtime to 0h 00m 09s
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 09s
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 1000us 500 iterations, threshold 450.01us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 1139us, max 1444us, median 1183us, trunc mean 1181.65us (discarded 25)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 2000us 500 iterations, threshold 450.01us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 2139us, max 2457us, median 2183us, trunc mean 2176.65us (discarded 25)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 5000us 300 iterations, threshold 450.04us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 5140us, max 5450us, median 5190us, trunc mean 5191.48us (discarded 15)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 10000us 100 iterations, threshold 450.33us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 10142us, max 10710us, median 10200us, trunc mean 10200.63us (discarded 5)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 25000us 50 iterations, threshold 451.29us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 25142us, max 25452us, median 25189us, trunc mean 25205.79us (discarded 2)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 100000us 10 iterations, threshold 537.00us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 100144us, max 100192us, median 100186us, trunc mean 100169.00us (discarded 1)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mclock_nanosleep() sleeping for 1000000us 2 iterations, threshold 4400.00us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 1000193us, max 1000194us, median 1000193us, trunc mean 1000193.00us (discarded 1)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_nanosleep02 : 0
+LTP CASE RESULT clock_nanosleep02 : PASS (0)
+[ltprunner] #77 suite=syscalls case=clock_nanosleep04
+RUN LTP CASE clock_nanosleep04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_nanosleep04.c:33: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec
+clock_nanosleep04.c:57: [1;32mTPASS: [0mclock_nanosleep(2) passed for clock CLOCK_MONOTONIC
+clock_nanosleep04.c:57: [1;32mTPASS: [0mclock_nanosleep(2) passed for clock CLOCK_REALTIME
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_nanosleep04.c:33: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_nanosleep04.c:57: [1;32mTPASS: [0mclock_nanosleep(2) passed for clock CLOCK_MONOTONIC
+clock_nanosleep04.c:57: [1;32mTPASS: [0mclock_nanosleep(2) passed for clock CLOCK_REALTIME
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_nanosleep04 : 0
+LTP CASE RESULT clock_nanosleep04 : PASS (0)
+[ltprunner] #78 suite=syscalls case=clock_gettime01
+RUN LTP CASE clock_gettime01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_gettime01.c:78: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_REALTIME passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_PROCESS_CPUTIME_ID passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_THREAD_CPUTIME_ID passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_REALTIME_COARSE passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC_COARSE passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC_RAW passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_BOOTTIME passed
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_gettime01.c:78: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_REALTIME passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_PROCESS_CPUTIME_ID passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_THREAD_CPUTIME_ID passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_REALTIME_COARSE passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC_COARSE passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC_RAW passed
+clock_gettime01.c:111: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_BOOTTIME passed
+
+Summary:
+passed   16
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_gettime01 : 0
+LTP CASE RESULT clock_gettime01 : PASS (0)
+[ltprunner] #79 suite=syscalls case=clock_gettime02
+RUN LTP CASE clock_gettime02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_gettime02.c:102: [1;34mTINFO: [0mTesting variant: 0: syscall with old kernel spec
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock INVALID/UNKNOWN CLOCK failed as expected: EINVAL (22)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock INVALID/UNKNOWN CLOCK failed as expected: EINVAL (22)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_REALTIME failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_PROCESS_CPUTIME_ID failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_THREAD_CPUTIME_ID failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_REALTIME_COARSE failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC_COARSE failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_MONOTONIC_RAW failed as expected: EFAULT (14)
+clock_gettime02.c:130: [1;32mTPASS: [0mclock_gettime(2): clock CLOCK_BOOTTIME failed as expected: EFAULT (14)
+
+Summary:
+passed   10
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_gettime02 : 0
+LTP CASE RESULT clock_gettime02 : PASS (0)
+[ltprunner] #81 suite=syscalls case=clock_gettime04
+RUN LTP CASE clock_gettime04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+sh: can't execute 'systemd-detect-virt': No such file or directory
+vdso_helpers.c:27: [1;34mTINFO: [0mCouldn't find AT_SYSINFO_EHDR
+vdso_helpers.c:72: [1;34mTINFO: [0mCouldn't find vdso_gettime()
+vdso_helpers.c:76: [1;34mTINFO: [0mCouldn't find vdso_gettime64()
+clock_gettime04.c:183: [1;32mTPASS: [0mCLOCK_REALTIME: Difference between successive readings is reasonable for following variants:
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO or syscall with libc spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- syscall with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- gettimeofday
+clock_gettime04.c:183: [1;32mTPASS: [0mCLOCK_REALTIME_COARSE: Difference between successive readings is reasonable for following variants:
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO or syscall with libc spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- syscall with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO with old kernel spec
+clock_gettime04.c:183: [1;32mTPASS: [0mCLOCK_MONOTONIC: Difference between successive readings is reasonable for following variants:
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO or syscall with libc spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- syscall with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO with old kernel spec
+clock_gettime04.c:183: [1;32mTPASS: [0mCLOCK_MONOTONIC_COARSE: Difference between successive readings is reasonable for following variants:
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO or syscall with libc spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- syscall with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO with old kernel spec
+clock_gettime04.c:183: [1;32mTPASS: [0mCLOCK_MONOTONIC_RAW: Difference between successive readings is reasonable for following variants:
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO or syscall with libc spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- syscall with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO with old kernel spec
+clock_gettime04.c:183: [1;32mTPASS: [0mCLOCK_BOOTTIME: Difference between successive readings is reasonable for following variants:
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO or syscall with libc spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- syscall with old kernel spec
+clock_gettime04.c:188: [1;34mTINFO: [0m	- vDSO with old kernel spec
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_gettime04 : 0
+LTP CASE RESULT clock_gettime04 : PASS (0)
+[ltprunner] #82 suite=syscalls case=leapsec01
+RUN LTP CASE leapsec01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+leapsec01.c:130: [1;34mTINFO: [0mtest start at 19:43:01.661119510
+leapsec01.c:100: [1;34mTINFO: [0mnow is     19:43:01.670636390
+leapsec01.c:104: [1;34mTINFO: [0msleep until 19:43:02.670636390
+leapsec01.c:112: [1;34mTINFO: [0mnow is     19:43:02.670904470
+leapsec01.c:115: [1;34mTINFO: [0mhrtimer early expiration is not detected.
+leapsec01.c:138: [1;34mTINFO: [0mscheduling leap second 00:00:00.000000000
+leapsec01.c:144: [1;34mTINFO: [0msetting time to        23:59:58.000000000
+leapsec01.c:88: [1;34mTINFO: [0m23:59:58.000792000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m23:59:58.001566000 adjtimex: clock synchronized
+leapsec01.c:88: [1;34mTINFO: [0m23:59:58.002179000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m23:59:58.002836000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m23:59:58.503773000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m23:59:59.005224000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m23:59:59.506241000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m00:00:00.007235000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m00:00:00.508308000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m00:00:01.009283000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m00:00:01.510283000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m00:00:02.011277000 adjtimex: insert leap second
+leapsec01.c:100: [1;34mTINFO: [0mnow is     00:00:02.512394800
+leapsec01.c:104: [1;34mTINFO: [0msleep until 00:00:03.512394800
+leapsec01.c:112: [1;34mTINFO: [0mnow is     00:00:03.512584530
+leapsec01.c:115: [1;34mTINFO: [0mhrtimer early expiration is not detected.
+leapsec01.c:88: [1;34mTINFO: [0m00:00:03.513800000 adjtimex: insert leap second
+leapsec01.c:88: [1;34mTINFO: [0m00:00:03.514797000 adjtimex: clock synchronized
+leapsec01.c:170: [1;34mTINFO: [0mrestoring time to 19:43:07.176709040
+leapsec01.c:100: [1;34mTINFO: [0mnow is     19:43:07.176781800
+leapsec01.c:104: [1;34mTINFO: [0msleep until 19:43:08.176781800
+leapsec01.c:112: [1;34mTINFO: [0mnow is     19:43:08.176965640
+leapsec01.c:115: [1;34mTINFO: [0mhrtimer early expiration is not detected.
+leapsec01.c:177: [1;32mTPASS: [0mNo errors were reported during this test!
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE leapsec01 : 0
+LTP CASE RESULT leapsec01 : PASS (0)
+[ltprunner] #83 suite=syscalls case=clock_settime01
+RUN LTP CASE clock_settime01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_settime01.c:42: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec
+clock_settime01.c:76: [1;32mTPASS: [0mclock_settime(2): was able to advance time
+clock_settime01.c:97: [1;32mTPASS: [0mclock_settime(2): was able to recede time
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_settime01.c:42: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_settime01.c:76: [1;32mTPASS: [0mclock_settime(2): was able to advance time
+clock_settime01.c:97: [1;32mTPASS: [0mclock_settime(2): was able to recede time
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_settime01 : 0
+LTP CASE RESULT clock_settime01 : PASS (0)
+[ltprunner] #84 suite=syscalls case=clock_settime02
+RUN LTP CASE clock_settime02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_settime02.c:106: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_REALTIME): failed as expected: EFAULT (14)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_REALTIME): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_REALTIME): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_REALTIME): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_MONOTONIC): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(INVALID/UNKNOWN CLOCK): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(INVALID/UNKNOWN CLOCK): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_MONOTONIC_COARSE): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_MONOTONIC_RAW): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_BOOTTIME): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_PROCESS_CPUTIME_ID): failed as expected: EINVAL (22)
+clock_settime02.c:150: [1;32mTPASS: [0mclock_settime(CLOCK_THREAD_CPUTIME_ID): failed as expected: EINVAL (22)
+
+Summary:
+passed   12
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_settime02 : 0
+LTP CASE RESULT clock_settime02 : PASS (0)
+[ltprunner] #85 suite=syscalls case=clock_settime03
+RUN LTP CASE clock_settime03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clock_settime03.c:35: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+clock_settime03.c:103: [1;32mTPASS: [0mclock_settime(): Y2038 test passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clock_settime03 : 0
+LTP CASE RESULT clock_settime03 : PASS (0)
+[ltprunner] #86 suite=syscalls case=clone01
+RUN LTP CASE clone01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone01.c:37: [1;32mTPASS: [0mclone returned 365
+clone01.c:43: [1;32mTPASS: [0mChild exited with 0
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone01 : 0
+LTP CASE RESULT clone01 : PASS (0)
+[ltprunner] #87 suite=syscalls case=clone02
+RUN LTP CASE clone02
+FAIL LTP CASE clone02 : 0
+LTP CASE RESULT clone02 : PASS (0)
+[ltprunner] #88 suite=syscalls case=clone03
+RUN LTP CASE clone03
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone03.c:38: [1;32mTPASS: [0mpid(371) passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone03 : 0
+LTP CASE RESULT clone03 : PASS (0)
+[ltprunner] #89 suite=syscalls case=clone04
+RUN LTP CASE clone04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone04.c:40: [1;32mTPASS: [0mNULL stack : EINVAL (22)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone04 : 0
+LTP CASE RESULT clone04 : PASS (0)
+[ltprunner] #90 suite=syscalls case=clone05
+RUN LTP CASE clone05
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone05.c:48: [1;32mTPASS: [0mchild_exited passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone05 : 0
+LTP CASE RESULT clone05 : PASS (0)
+[ltprunner] #91 suite=syscalls case=clone06
+RUN LTP CASE clone06
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone06.c:38: [1;32mTPASS: [0mThe environment variables of the child and the parent are the same 
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone06 : 0
+LTP CASE RESULT clone06 : PASS (0)
+[ltprunner] #92 suite=syscalls case=clone07
+RUN LTP CASE clone07
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone07.c:42: [1;32mTPASS: [0mUsing return in child will not cause abnormal exit
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone07 : 0
+LTP CASE RESULT clone07 : PASS (0)
+[ltprunner] #93 suite=syscalls case=clone08
+RUN LTP CASE clone08
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone08.c:62: [1;34mTINFO: [0mrunning CLONE_PARENT
+clone08.c:106: [1;32mTPASS: [0mclone and forked child has the same parent
+clone08.c:62: [1;34mTINFO: [0mrunning CLONE_CHILD_SETTID
+clone08.c:124: [1;32mTPASS: [0mclone() correctly set ctid
+clone08.c:62: [1;34mTINFO: [0mrunning CLONE_PARENT_SETTID
+clone08.c:134: [1;32mTPASS: [0mclone() correctly set ptid
+clone08.c:62: [1;34mTINFO: [0mrunning CLONE_THREAD
+clone08.c:179: [1;32mTPASS: [0mclone has the same thread id
+clone08.c:169: [1;32mTPASS: [0mfutex exit on ctid change, ctid: 0
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone08 : 0
+LTP CASE RESULT clone08 : PASS (0)
+[ltprunner] #94 suite=syscalls case=clone09
+RUN LTP CASE clone09
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone09.c:59: [1;34mTINFO: [0mcreate clone in a new netns with 'CLONE_NEWNET' flag
+clone09.c:82: [1;32mTPASS: [0msysctl params differ in new netns
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone09 : 0
+LTP CASE RESULT clone09 : PASS (0)
+[ltprunner] #95 suite=syscalls case=clone301
+RUN LTP CASE clone301
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone301.c:163: [1;32mTPASS: [0mParent got correct signal SIGCHLD
+clone301.c:163: [1;32mTPASS: [0mParent got correct signal SIGUSR2
+clone301.c:163: [1;32mTPASS: [0mParent got correct signal SIGCHLD
+clone301.c:163: [1;32mTPASS: [0mParent got correct signal SIGCHLD
+clone301.c:96: [1;32mTPASS: [0mChild got correct signal SIGUSR1
+clone301.c:103: [1;32mTPASS: [0mChild got correct si_value
+clone301.c:163: [1;32mTPASS: [0mParent got correct signal SIGCHLD
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone301 : 0
+LTP CASE RESULT clone301 : PASS (0)
+[ltprunner] #96 suite=syscalls case=clone302
+RUN LTP CASE clone302
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+clone302.c:63: [1;32mTPASS: [0msizeof(struct clone_args_minimal) == 64 (64)
+clone302.c:104: [1;32mTPASS: [0minvalid args: clone3() failed as expected: EFAULT (14)
+clone302.c:104: [1;32mTPASS: [0mzero size: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0mshort size: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0mextra size: clone3() failed as expected: EFAULT (14)
+clone302.c:104: [1;32mTPASS: [0msighand-no-VM: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0mthread-no-sighand: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0mfs-newns: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0minvalid pidfd: clone3() failed as expected: EFAULT (14)
+clone302.c:104: [1;32mTPASS: [0minvalid signal: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0mzero-stack-size: clone3() failed as expected: EINVAL (22)
+clone302.c:104: [1;32mTPASS: [0minvalid-stack: clone3() failed as expected: EINVAL (22)
+
+Summary:
+passed   12
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE clone302 : 0
+LTP CASE RESULT clone302 : PASS (0)
+[ltprunner] #98 suite=syscalls case=close01
+RUN LTP CASE close01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+close01.c:50: [1;32mTPASS: [0mclose a file fd passed
+close01.c:50: [1;32mTPASS: [0mclose a pipe fd passed
+close01.c:50: [1;32mTPASS: [0mclose a socket fd passed
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE close01 : 0
+LTP CASE RESULT close01 : PASS (0)
+[ltprunner] #99 suite=syscalls case=close02
+RUN LTP CASE close02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+close02.c:20: [1;32mTPASS: [0mclose(-1) : EBADF (9)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE close02 : 0
+LTP CASE RESULT close02 : PASS (0)
+[ltprunner] #100 suite=syscalls case=close_range01
+RUN LTP CASE close_range01
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_supported_fs_types.c:161: [1;34mTINFO: [0mWARNING: testing only ext4
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/vdb2 to /tmp/ltp-glibc/LTP_cloIXQYKu/mnt fstyp=ext4 flags=0
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_ADMIN(21)
+close_range01.c:136: [1;34mTINFO: [0mPlain close range
+
+[1;33mHINT: [0mYou _MAY_ be missing kernel fixes:
+
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=fec8a6a69103
+
+[1;33mHINT: [0mYou _MAY_ be missing kernel fixes:
+
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=fec8a6a69103
+
+Summary:
+passed   2
+failed   3
+broken   1
+skipped  0
+warnings 0
+FAIL LTP CASE close_range01 : 3
+LTP CASE RESULT close_range01 : FAIL (3)
+[ltprunner] #101 suite=syscalls case=close_range02
+RUN LTP CASE close_range02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+close_range02.c:52: [1;32mTPASS: [0mclose_range(3, 100, 0) passed
+close_range02.c:54: [1;32mTPASS: [0mfcntl(3, F_GETFD) : EBADF (9)
+close_range02.c:56: [1;32mTPASS: [0mfcntl(100, F_GETFD) : EBADF (9)
+close_range02.c:59: [1;32mTPASS: [0mclose_range(4, 3, 0) : EINVAL (22)
+close_range02.c:62: [1;32mTPASS: [0mclose_range(3, ~0U, ~0U) : EINVAL (22)
+close_range02.c:65: [1;32mTPASS: [0mclose_range(~0U, ~0U, 0) passed
+close_range02.c:71: [1;32mTPASS: [0mclose_range(3, 3, CLOSE_RANGE_CLOEXEC): SUCCESS (0)
+close_range02.c:79: [1;32mTPASS: [0mFD_CLOEXEC was set on 3
+close_range02.c:88: [1;32mTPASS: [0mclose_range(3, 3, CLOSE_RANGE_UNSHARE): SUCCESS (0)
+close_range02.c:95: [1;32mTPASS: [0mfcntl(3, F_GETFD) : EBADF (9)
+close_range02.c:102: [1;32mTPASS: [0m3 is open passed
+
+Summary:
+passed   11
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE close_range02 : 0
+LTP CASE RESULT close_range02 : PASS (0)
+[ltprunner] #102 suite=syscalls case=confstr01
+RUN LTP CASE confstr01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 14
+confstr01.c:75: [1;32mTPASS: [0mconfstr PATH = '/bin:/usr/bin'
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 11
+confstr01.c:75: [1;32mTPASS: [0mconfstr GNU_LIBC_VERSION = 'glibc 2.38'
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 10
+confstr01.c:75: [1;32mTPASS: [0mconfstr GNU_LIBPTHREAD_VERSION = 'NPTL 2.38'
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_ILP32_OFF32_CFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_ILP32_OFF32_LDFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_ILP32_OFF32_LIBS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_ILP32_OFFBIG_CFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_ILP32_OFFBIG_LDFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_ILP32_OFFBIG_LIBS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_LP64_OFF64_CFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_LP64_OFF64_LDFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_LP64_OFF64_LIBS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_LPBIG_OFFBIG_CFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_LPBIG_OFFBIG_LDFLAGS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 1
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_LPBIG_OFFBIG_LIBS = ''
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 20
+confstr01.c:75: [1;32mTPASS: [0mconfstr POSIX_V7_WIDTH_RESTRICTED_ENVS = 'POSIX_V7_LP64_OFF64'
+confstr01.c:61: [1;32mTPASS: [0mconfstr(test_cases[i].value, NULL, (size_t)0) returned 18
+confstr01.c:75: [1;32mTPASS: [0mconfstr V7_ENV = 'POSIXLY_CORRECT=1'
+
+Summary:
+passed   34
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE confstr01 : 0
+LTP CASE RESULT confstr01 : PASS (0)
+[ltprunner] #103 suite=syscalls case=connect01
+RUN LTP CASE connect01
+connect01    1  [1;32mTPASS[0m  :  bad file descriptor successful
+connect01    2  [1;32mTPASS[0m  :  invalid socket buffer successful
+connect01    3  [1;32mTPASS[0m  :  invalid salen successful
+connect01    4  [1;32mTPASS[0m  :  invalid socket successful
+connect01    5  [1;32mTPASS[0m  :  already connected successful
+connect01    6  [1;32mTPASS[0m  :  connection refused successful
+connect01    7  [1;32mTPASS[0m  :  invalid address family successful
+FAIL LTP CASE connect01 : 0
+LTP CASE RESULT connect01 : PASS (0)
+[ltprunner] #104 suite=syscalls case=connect02
+RUN LTP CASE connect02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+connect02.c:94: [1;31mTFAIL: [0msetsockopt(IPV6_ADDRFORM) failed: ENOPROTOOPT (92)
+
+[1;33mHINT: [0mYou _MAY_ be missing kernel fixes:
+
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=9d538fa60bad
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=82c9ae440857
+
+[1;33mHINT: [0mYou _MAY_ be vulnerable to CVE(s):
+
+https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-9568
+
+Summary:
+passed   0
+failed   1
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE connect02 : 1
+LTP CASE RESULT connect02 : FAIL (1)
+[ltprunner] #105 suite=syscalls case=creat01
+RUN LTP CASE creat01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat01.c:50: [1;32mTPASS: [0mcreat() truncated file to 0 bytes
+creat01.c:55: [1;32mTPASS: [0mfile was created and written to successfully
+creat01.c:60: [1;32mTPASS: [0mread failed expectedly: EBADF (9)
+creat01.c:50: [1;32mTPASS: [0mcreat() truncated file to 0 bytes
+creat01.c:55: [1;32mTPASS: [0mfile was created and written to successfully
+creat01.c:60: [1;32mTPASS: [0mread failed expectedly: EBADF (9)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat01 : 0
+LTP CASE RESULT creat01 : PASS (0)
+[ltprunner] #106 suite=syscalls case=creat03
+RUN LTP CASE creat03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat03.c:36: [1;34mTINFO: [0mCreated file has mode = 0100674
+creat03.c:41: [1;32mTPASS: [0msave text bit cleared
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat03 : 0
+LTP CASE RESULT creat03 : PASS (0)
+[ltprunner] #107 suite=syscalls case=creat04
+RUN LTP CASE creat04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat04.c:49: [1;32mTPASS: [0mcall failed with EACCES as expected
+creat04.c:49: [1;32mTPASS: [0mcall failed with EACCES as expected
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat04 : 0
+LTP CASE RESULT creat04 : PASS (0)
+[ltprunner] #108 suite=syscalls case=creat05
+RUN LTP CASE creat05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat05.c:49: [1;34mTINFO: [0mgetdtablesize() = 4096
+creat05.c:59: [1;34mTINFO: [0mOpened additional #4093 fds
+creat05.c:36: [1;32mTPASS: [0mcreat() failed with EMFILE
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat05 : 0
+LTP CASE RESULT creat05 : PASS (0)
+[ltprunner] #109 suite=syscalls case=creat06
+RUN LTP CASE creat06
+tst_test.c:1017: [1;34mTINFO: [0mMounting (null) to /tmp/ltp-glibc/LTP_crel6JnEU/mntpoint fstyp=tmpfs flags=21
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: EISDIR (21)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: ENAMETOOLONG (36)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: ENOENT (2)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: ENOTDIR (20)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: EFAULT (14)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: EACCES (13)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: ELOOP (40)
+creat06.c:101: [1;32mTPASS: [0mgot expected failure: EROFS (30)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat06 : 0
+LTP CASE RESULT creat06 : PASS (0)
+[ltprunner] #110 suite=syscalls case=creat07
+RUN LTP CASE creat07
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat07.c:42: [1;32mTPASS: [0mcreat() received EXTBSY
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat07 : 0
+LTP CASE RESULT creat07 : PASS (0)
+[ltprunner] #111 suite=syscalls case=creat08
+RUN LTP CASE creat08
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat08.c:44: [1;34mTINFO: [0mUser nobody: uid = 65534, gid = 65534
+creat08.c:46: [1;34mTINFO: [0mFound unused GID 2: SUCCESS (0)
+creat08.c:62: [1;32mTPASS: [0mdir_a/nosetgid: Owned by correct group
+creat08.c:73: [1;32mTPASS: [0mdir_a/nosetgid: Setgid bit not set
+creat08.c:62: [1;32mTPASS: [0mdir_a/setgid: Owned by correct group
+creat08.c:71: [1;32mTPASS: [0mdir_a/setgid: Setgid bit is set
+creat08.c:62: [1;32mTPASS: [0mdir_b/nosetgid: Owned by correct group
+creat08.c:73: [1;32mTPASS: [0mdir_b/nosetgid: Setgid bit not set
+creat08.c:62: [1;32mTPASS: [0mdir_b/setgid: Owned by correct group
+creat08.c:66: [1;34mTINFO: [0mdir_b/setgid: Skipping setgid bit check
+creat08.c:62: [1;32mTPASS: [0mdir_b/root_setgid: Owned by correct group
+creat08.c:71: [1;32mTPASS: [0mdir_b/root_setgid: Setgid bit is set
+
+Summary:
+passed   9
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat08 : 0
+LTP CASE RESULT creat08 : PASS (0)
+[ltprunner] #112 suite=syscalls case=creat09
+RUN LTP CASE creat09
+tst_device.c:317: [1;34mTINFO: [0mUsing test device LTP_DEV='/dev/vdb2'
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_supported_fs_types.c:161: [1;34mTINFO: [0mWARNING: testing only ext4
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/vdb2 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+warning: Unable to get device geometry for /dev/vdb2
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/vdb2 to /tmp/ltp-glibc/LTP_creVtMnra/mntpoint fstyp=ext4 flags=0
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+creat09.c:73: [1;34mTINFO: [0mUser nobody: uid = 65534, gid = 65534
+creat09.c:75: [1;34mTINFO: [0mFound unused GID 2: SUCCESS (0)
+creat09.c:120: [1;34mTINFO: [0mFile created with umask(0)
+creat09.c:106: [1;32mTPASS: [0mmntpoint/testdir/creat.tmp: Owned by correct group
+creat09.c:112: [1;32mTPASS: [0mmntpoint/testdir/creat.tmp: Setgid bit not set
+creat09.c:106: [1;32mTPASS: [0mmntpoint/testdir/open.tmp: Owned by correct group
+creat09.c:112: [1;32mTPASS: [0mmntpoint/testdir/open.tmp: Setgid bit not set
+creat09.c:120: [1;34mTINFO: [0mFile created with umask(S_IXGRP)
+creat09.c:106: [1;32mTPASS: [0mmntpoint/testdir/creat.tmp: Owned by correct group
+creat09.c:112: [1;32mTPASS: [0mmntpoint/testdir/creat.tmp: Setgid bit not set
+creat09.c:106: [1;32mTPASS: [0mmntpoint/testdir/open.tmp: Owned by correct group
+creat09.c:112: [1;32mTPASS: [0mmntpoint/testdir/open.tmp: Setgid bit not set
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE creat09 : 0
+LTP CASE RESULT creat09 : PASS (0)
+[ltprunner] #113 suite=syscalls case=delete_module01
+RUN LTP CASE delete_module01
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config'
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config'
+tst_security.c:64: [1;34mTINFO: [0mUnable to determine system lockdown state
+tst_security.c:85: [1;34mTINFO: [0mSecureBoot sysfs file not available
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_kconfig.c:629: [1;34mTINFO: [0mmodule.sig_enforce is not found in /proc/cmdline
+tst_module.c:69: [1;33mTCONF: [0mFailed to find module 'dummy_del_mod.ko'
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE delete_module01 : 32
+LTP CASE RESULT delete_module01 : SKIP (32)
+[ltprunner] #114 suite=syscalls case=delete_module02
+RUN LTP CASE delete_module02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+delete_module02.c:65: [1;34mTINFO: [0mtest nonexistent module
+delete_module02.c:70: [1;32mTPASS: [0mdelete_module() failed as expected: ENOENT (2)
+delete_module02.c:65: [1;34mTINFO: [0mtest null terminated module name
+delete_module02.c:70: [1;32mTPASS: [0mdelete_module() failed as expected: ENOENT (2)
+delete_module02.c:65: [1;34mTINFO: [0mtest module name outside program's accessible address space
+delete_module02.c:70: [1;32mTPASS: [0mdelete_module() failed as expected: EFAULT (14)
+delete_module02.c:65: [1;34mTINFO: [0mtest long module name
+delete_module02.c:70: [1;32mTPASS: [0mdelete_module() failed as expected: ENOENT (2)
+delete_module02.c:65: [1;34mTINFO: [0mtest non-superuser
+delete_module02.c:70: [1;32mTPASS: [0mdelete_module() failed as expected: EPERM (1)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE delete_module02 : 0
+LTP CASE RESULT delete_module02 : PASS (0)
+[ltprunner] #115 suite=syscalls case=delete_module03
+RUN LTP CASE delete_module03
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config'
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config'
+tst_security.c:64: [1;34mTINFO: [0mUnable to determine system lockdown state
+tst_security.c:85: [1;34mTINFO: [0mSecureBoot sysfs file not available
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_kconfig.c:629: [1;34mTINFO: [0mmodule.sig_enforce is not found in /proc/cmdline
+tst_module.c:69: [1;33mTCONF: [0mFailed to find module 'dummy_del_mod.ko'
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE delete_module03 : 32
+LTP CASE RESULT delete_module03 : SKIP (32)
+[ltprunner] #116 suite=syscalls case=dup01
+RUN LTP CASE dup01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup01.c:24: [1;32mTPASS: [0mdup(fd) returned fd 4
+dup01.c:27: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (8235)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup01 : 0
+LTP CASE RESULT dup01 : PASS (0)
+[ltprunner] #117 suite=syscalls case=dup02
+RUN LTP CASE dup02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup02.c:29: [1;32mTPASS: [0mdup(-1) : EBADF (9)
+dup02.c:29: [1;32mTPASS: [0mdup(1500) : EBADF (9)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup02 : 0
+LTP CASE RESULT dup02 : PASS (0)
+[ltprunner] #118 suite=syscalls case=dup03
+RUN LTP CASE dup03
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup03.c:22: [1;32mTPASS: [0mdup(3) : EMFILE (24)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup03 : 0
+LTP CASE RESULT dup03 : PASS (0)
+[ltprunner] #119 suite=syscalls case=dup04
+RUN LTP CASE dup04
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup04.c:24: [1;32mTPASS: [0mdup(3) read end of the pipe returned fd 5
+dup04.c:27: [1;32mTPASS: [0mdup(4) write end of the pipe returned fd 5
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup04 : 0
+LTP CASE RESULT dup04 : PASS (0)
+[ltprunner] #120 suite=syscalls case=dup05
+RUN LTP CASE dup05
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup05.c:28: [1;31mTBROK: [0mmkfifo(dupfile, 0777) failed: EINVAL (22)
+
+Summary:
+passed   0
+failed   0
+broken   1
+skipped  0
+warnings 0
+FAIL LTP CASE dup05 : 2
+LTP CASE RESULT dup05 : FAIL (2)
+[ltprunner] #121 suite=syscalls case=dup06
+RUN LTP CASE dup06
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup06.c:64: [1;32mTPASS: [0mTest passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup06 : 0
+LTP CASE RESULT dup06 : PASS (0)
+[ltprunner] #122 suite=syscalls case=dup07
+RUN LTP CASE dup07
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup07.c:44: [1;32mTPASS: [0mPassed in read only mode
+dup07.c:44: [1;32mTPASS: [0mPassed in write only mode
+dup07.c:44: [1;32mTPASS: [0mPassed in read/write mode
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup07 : 0
+LTP CASE RESULT dup07 : PASS (0)
+[ltprunner] #123 suite=syscalls case=dup201
+RUN LTP CASE dup201
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup201.c:47: [1;32mTPASS: [0mdup2(-1, 5) : EBADF (9)
+dup201.c:47: [1;32mTPASS: [0mdup2(4096, 5) : EBADF (9)
+dup201.c:47: [1;32mTPASS: [0mdup2(0, -1) : EBADF (9)
+dup201.c:47: [1;32mTPASS: [0mdup2(0, 4096) : EBADF (9)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup201 : 0
+LTP CASE RESULT dup201 : PASS (0)
+[ltprunner] #124 suite=syscalls case=dup202
+RUN LTP CASE dup202
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup202.c:104: [1;32mTPASS: [0moriginal(100444) and duped(100444) are the same mode
+dup202.c:104: [1;32mTPASS: [0moriginal(100222) and duped(100222) are the same mode
+dup202.c:104: [1;32mTPASS: [0moriginal(100666) and duped(100666) are the same mode
+dup202.c:93: [1;34mTINFO: [0moriginal mode 0777, new mode 0444 after chmod
+dup202.c:104: [1;32mTPASS: [0moriginal(100444) and duped(100444) are the same mode
+dup202.c:93: [1;34mTINFO: [0moriginal mode 0777, new mode 0222 after chmod
+dup202.c:104: [1;32mTPASS: [0moriginal(100222) and duped(100222) are the same mode
+dup202.c:93: [1;34mTINFO: [0moriginal mode 0777, new mode 0666 after chmod
+dup202.c:104: [1;32mTPASS: [0moriginal(100666) and duped(100666) are the same mode
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup202 : 0
+LTP CASE RESULT dup202 : PASS (0)
+[ltprunner] #125 suite=syscalls case=dup203
+RUN LTP CASE dup203
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup203.c:40: [1;34mTINFO: [0mTest duping over an open fd
+dup203.c:74: [1;32mTPASS: [0mtest the content of file is correct
+dup203.c:81: [1;32mTPASS: [0mtest the FD_CLOEXEC flag is correct
+dup203.c:40: [1;34mTINFO: [0mTest duping over a close fd
+dup203.c:74: [1;32mTPASS: [0mtest the content of file is correct
+dup203.c:81: [1;32mTPASS: [0mtest the FD_CLOEXEC flag is correct
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup203 : 0
+LTP CASE RESULT dup203 : PASS (0)
+[ltprunner] #126 suite=syscalls case=dup204
+RUN LTP CASE dup204
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup204.c:38: [1;32mTPASS: [0mdup2(fd[i], nfd[i]) passed
+dup204.c:45: [1;32mTPASS: [0moldbuf.st_ino == newbuf.st_ino (0)
+dup204.c:38: [1;32mTPASS: [0mdup2(fd[i], nfd[i]) passed
+dup204.c:45: [1;32mTPASS: [0moldbuf.st_ino == newbuf.st_ino (0)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup204 : 0
+LTP CASE RESULT dup204 : PASS (0)
+[ltprunner] #127 suite=syscalls case=dup205
+RUN LTP CASE dup205
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup205.c:69: [1;32mTPASS: [0mTest passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup205 : 0
+LTP CASE RESULT dup205 : PASS (0)
+[ltprunner] #128 suite=syscalls case=dup206
+RUN LTP CASE dup206
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup206.c:29: [1;32mTPASS: [0mdup2(3, 3) returns newfd(3)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup206 : 0
+LTP CASE RESULT dup206 : PASS (0)
+[ltprunner] #129 suite=syscalls case=dup207
+RUN LTP CASE dup207
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup207.c:55: [1;34mTINFO: [0mTest offset with lseek before dup2
+dup207.c:71: [1;32mTPASS: [0mGet expected buf bcdefg
+dup207.c:55: [1;34mTINFO: [0mTest offset with lseek after dup2
+dup207.c:71: [1;32mTPASS: [0mGet expected buf cdefg
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup207 : 0
+LTP CASE RESULT dup207 : PASS (0)
+[ltprunner] #130 suite=syscalls case=dup3_01
+RUN LTP CASE dup3_01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup3_01.c:56: [1;32mTPASS: [0mdup3(1, 4, 0) set close-on-exec flag
+dup3_01.c:49: [1;32mTPASS: [0mdup3(1, 4, O_CLOEXEC) set close-on-exec flag
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup3_01 : 0
+LTP CASE RESULT dup3_01 : PASS (0)
+[ltprunner] #131 suite=syscalls case=dup3_02
+RUN LTP CASE dup3_02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+dup3_02.c:41: [1;32mTPASS: [0mdup3(3, 3, 524288) : EINVAL (22)
+dup3_02.c:41: [1;32mTPASS: [0mdup3(3, 3, 0) : EINVAL (22)
+dup3_02.c:41: [1;32mTPASS: [0mdup3(3, 5, -1) : EINVAL (22)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup3_02 : 0
+LTP CASE RESULT dup3_02 : PASS (0)
+[ltprunner] #132 suite=syscalls case=epoll_create01
+RUN LTP CASE epoll_create01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+epoll_create.h:29: [1;34mTINFO: [0mTesting variant: syscall __NR_epoll_create
+epoll_create.h:15: [1;33mTCONF: [0msyscall(-1) __NR_epoll_create not supported on your arch
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+epoll_create.h:32: [1;34mTINFO: [0mTesting variant: libc epoll_create()
+epoll_create01.c:27: [1;32mTPASS: [0mepoll_create(1) returned fd 3
+epoll_create01.c:27: [1;32mTPASS: [0mepoll_create(2147483647) returned fd 3
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE epoll_create01 : 0
+LTP CASE RESULT epoll_create01 : PASS (0)
+[ltprunner] #133 suite=syscalls case=epoll_create02
+RUN LTP CASE epoll_create02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+epoll_create.h:29: [1;34mTINFO: [0mTesting variant: syscall __NR_epoll_create
+epoll_create.h:15: [1;33mTCONF: [0msyscall(-1) __NR_epoll_create not supported on your arch
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+epoll_create.h:32: [1;34mTINFO: [0mTesting variant: libc epoll_create()
+epoll_create02.c:32: [1;32mTPASS: [0mepoll_create(0) : EINVAL (22)
+epoll_create02.c:32: [1;32mTPASS: [0mepoll_create(-1) : EINVAL (22)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE epoll_create02 : 0
+LTP CASE RESULT epoll_create02 : PASS (0)
+[ltprunner] #134 suite=syscalls case=epoll_create1_01
+RUN LTP CASE epoll_create1_01
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+epoll_create1_01.c:41: [1;32mTPASS: [0mepoll_create1(...) without EPOLL_CLOEXEC
+epoll_create1_01.c:41: [1;32mTPASS: [0mepoll_create1(...) with EPOLL_CLOEXEC
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE epoll_create1_01 : 0
+LTP CASE RESULT epoll_create1_01 : PASS (0)
+[ltprunner] #135 suite=syscalls case=epoll_create1_02
+RUN LTP CASE epoll_create1_02
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_memutils.c:152: [1;34mTINFO: [0moom_score_adj does not exist, skipping the adjustment
+epoll_create1_02.c:31: [1;32mTPASS: [0mepoll_create1(-1) : EINVAL (22)
+epoll_create1_02.c:31: [1;32mTPASS: [0mepoll_create1(EPOLL_CLOEXEC+1) : EINVAL (22)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE epoll_create1_02 : 0
+LTP CASE RESULT epoll_create1_02 : PASS (0)
+[ltprunner] #136 suite=syscalls case=epoll01
+RUN LTP CASE epoll01
+epoll01     0  [1;34mTINFO[0m  :  testing if epoll() system call works
+epoll01     0  [1;34mTINFO[0m  :  gettimeofday() works
+epoll01     0  [1;34mTINFO[0m  :  random number seeded with gettimeofday() [seed = 922808] works
+epoll01     0  [1;34mTINFO[0m  :  Testing epoll_create
+epoll01     1  [1;32mTPASS[0m  :  epoll_create with negative set size
+epoll01     2  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483647)
+epoll01     3  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483646)
+epoll01     4  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483645)
+epoll01     5  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483644)
+epoll01     6  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483643)
+epoll01     7  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483642)
+epoll01     8  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483641)
+epoll01     9  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483640)
+epoll01    10  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483639)
+epoll01    11  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483638)
+epoll01    12  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483637)
+epoll01    13  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483636)
+epoll01    14  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483635)
+epoll01    15  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483634)
+epoll01    16  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483633)
+epoll01    17  [1;32mTPASS[0m  :  epoll_create with large set size (size = 2147483632)
+epoll01    18  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 318783270)
+epoll01    19  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 137023547)
+epoll01    20  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 877304178)
+epoll01    21  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 1793321370)
+epoll01    22  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 547813028)
+epoll01    23  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 1587936184)
+epoll01    24  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 975199676)
+epoll01    25  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 1843963237)
+epoll01    26  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 2017249095)
+epoll01    27  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 400797978)
+epoll01    28  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 129689406)
+epoll01    29  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 1858479957)
+epoll01    30  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 1155611796)
+epoll01    31  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 699130823)
+epoll01    32  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 616052191)
+epoll01    33  [1;32mTPASS[0m  :  epoll_create with random large set size (size = 33125391)
+epoll01     0  [1;34mTINFO[0m  :  Summary: Of 33 tests, epoll_create failed 0 (100% passed).
+epoll01     0  [1;34mTINFO[0m  :  Testing epoll_ctl
+qemu-system-loongarch64: terminating on signal 15 from pid 344281 (make)
