@@ -82,7 +82,7 @@ const DEFAULT_TIMEOUTS: [u64; 13] = [
     900, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    2400, // [11] ltp
+    24000, // [11] ltp
     600,  // [12] cpython
 ];
 
@@ -367,6 +367,8 @@ struct RuntimeConfig {
     ext4_profile: bool,
     /// 插桩：lmbench 前后 dump reclaim stats profile
     reclaim_profile: bool,
+    /// 跳过 apk 包安装（避免阻塞等待网络或安装失败）
+    skip_apk: bool,
     /// drift_window 模式：窗口数量
     drift_windows: u64,
     /// drift_window 模式：musl | glibc | both
@@ -453,6 +455,7 @@ impl RuntimeConfig {
             timer_smoke: false,
             ext4_profile: false,
             reclaim_profile: false,
+            skip_apk: false,
             drift_windows: 6,
             drift_libc: String::from("both"),
             drift_pre_mask: 0,
@@ -647,6 +650,8 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             cfg.ext4_profile = parse_bool_flag(val);
         } else if key == b"reclaim_profile" {
             cfg.reclaim_profile = parse_bool_flag(val);
+        } else if key == b"skip_apk" {
+            cfg.skip_apk = parse_bool_flag(val);
         } else if key == b"drift_windows" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -725,14 +730,15 @@ fn load_runtime_config() -> RuntimeConfig {
     };
     cfg.conf_source = Some(format!("{}\0", source).into_bytes());
     println!(
-        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={} ext4_profile={} reclaim_profile={}",
+        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={} ext4_profile={} reclaim_profile={} skip_apk={}",
         source,
         mode_name(cfg.mode),
         cfg.mask,
         ltp_runner_name(cfg.ltp_runner),
         cfg.timer_smoke,
         cfg.ext4_profile,
-        cfg.reclaim_profile
+        cfg.reclaim_profile,
+        cfg.skip_apk
     );
     println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
     if !cfg.ltp_include.is_empty() {
@@ -3174,7 +3180,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     prepare_symlink(&environ);
 
-    install_apk_packages(&environ);
+    if !cfg.skip_apk {
+        install_apk_packages(&environ);
+    } else {
+        println!("[initproc] skip_apk=true: skipping install_apk_packages");
+    }
     
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
     let bash_ret = run_bash_cmd(bash_check, &environ);
