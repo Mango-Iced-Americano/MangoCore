@@ -1,0 +1,3 @@
+docker compose exec -T os-dev bash -lc "make -C /app/os rv64-only EXTRA_FEATURES=perf_diag; make -C /app/os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.lwext4_perf.focus.conf"
+docker compose exec -T os-dev bash -lc "make -C /app/os rv64-run"
+docker compose exec -T os-dev bash -lc "make -C /app/os la64-kernel-build-only EXTRA_FEATURES=perf_diag"
