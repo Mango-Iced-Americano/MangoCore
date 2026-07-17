@@ -1775,45 +1775,83 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 		iblock_idx++;
 	}
 
-	fblock_start = 0;
-	fblock_count = 0;
-	while (size >= block_size) {
-		while (iblock_idx < iblock_last) {
-			r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
-						       &fblock, true);
-			if (r != EOK)
-				goto Finish;
+		fblock_start = 0;
+		fblock_count = 0;
+		while (size >= block_size) {
+			while (iblock_idx < iblock_last) {
+				r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
+							       &fblock, true);
+				if (r != EOK)
+					goto Finish;
 
-			iblock_idx++;
+				iblock_idx++;
 
-			if (!fblock_start)
-				fblock_start = fblock;
+				if (fblock_count == 0) {
+					/* First block in batch: classify as
+					 * hole (fblock == 0) or allocated.
+					 * This replaces the ambiguous
+					 * !fblock_start test so that a
+					 * carry-over from a hole run does
+					 * not shadow-reinitialize. */
+					fblock_start = fblock;
+					fblock_count = 1;
+				} else if (fblock_start == 0) {
+					/* Hole run: next block must also be
+					 * unmapped.  Holes now accumulate
+					 * naturally — the old contiguity
+					 * check  (start + count) != fblock
+					 * always broke after one hole
+					 * because (0+N) != 0 for N>0. */
+					if (fblock != 0)
+						break;
+					fblock_count++;
+				} else {
+					/* Allocated run: next block must be
+					 * physically contiguous. */
+					if ((fblock_start + fblock_count)
+					    != fblock)
+						break;
+					fblock_count++;
+				}
+			}
 
-			if ((fblock_start + fblock_count) != fblock)
+			/* Safety: nothing accumulated (iblock_idx already
+			 * exhausted the range on entry). */
+			if (fblock_count == 0)
 				break;
 
-			fblock_count++;
+			if (fblock_start == 0) {
+				/* Hole: unmapped blocks → fill with zeros */
+				memset(u8_buf, 0, block_size * fblock_count);
+			} else {
+				r = ext4_blocks_get_direct(file->mp->fs.bdev,
+							   u8_buf,
+							   fblock_start,
+							   fblock_count);
+				if (r != EOK)
+					goto Finish;
+			}
+
+			size -= block_size * fblock_count;
+			u8_buf += block_size * fblock_count;
+			file->fpos += block_size * fblock_count;
+
+			if (rcnt)
+				*rcnt += block_size * fblock_count;
+
+			/* Carry forward the block that caused the inner
+			 * loop to break.  iblock_idx was already advanced
+			 * past it (the inner loop does iblock_idx++
+			 * before checking contiguity).  fblock_count = 1
+			 * encodes "one block carried forward for the next
+			 * outer iteration".  When the range was exhausted
+			 * normally (iblock_idx reached iblock_last), the
+			 * next outer check size >= block_size will be
+			 * false after the reduction above, so the stale
+			 * carry-over is harmless. */
+			fblock_start = fblock;
+			fblock_count = 1;
 		}
-		if (fblock_start == 0) {
-			/* Hole: unmapped blocks → fill with zeros */
-			memset(u8_buf, 0, block_size * fblock_count);
-		} else {
-			r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf,
-						   fblock_start, fblock_count);
-			if (r != EOK)
-				goto Finish;
-		}
-
-		size -= block_size * fblock_count;
-		u8_buf += block_size * fblock_count;
-		file->fpos += block_size * fblock_count;
-
-		if (rcnt)
-			*rcnt += block_size * fblock_count;
-
-		fblock_start = fblock;
-		fblock_count = 1;
-	}
 
 	if (size) {
 		r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
