@@ -167,6 +167,16 @@ diag=1
 
 ## 测试 Harness / LTP
 
+### 只读累计 sysfs 计数器的逐用例 wrapping 差分
+
+- **场景**：内核只暴露累计只读计数器，外部既没有安全 reset 接口，也不能为了诊断改变测试全局状态。
+- **模式**：用户态 runner 先以 feature 文件 gate 诊断；每个实际执行 case 紧邻执行前后各读取一次同一 stats 文件，严格解析已知字段，计算 `post.wrapping_sub(pre)`。
+- **降级**：配置缺失或为 false 时完全不 probe、不输出；feature、读取或严格解析失败只输出一次稳定的 unavailable 原因，绝不影响 case 顺序、执行、计分或退出码。
+- **ABI**：`user_lib::open()` 直接把 Rust `&str` 指针交给路径 syscall，固定诊断 sysfs 常量必须恰有一个尾随 NUL。
+- **输出**：每个成功执行且有完整 pre/post snapshot 的 case 后，在现有 LTP/QEMU log 输出一条有界的数值序号、退出码和 24 个 counter delta；用既有 `#<index> ... case=<name>` 行关联 case 名，诊断不保存名称、不创建 report 或其他文件。
+- **调试层级**：先用这类可开关、有界的现有 QEMU log 验证单一核心假设；只有需要跨运行留存、自动聚合或对外审计时，才增加 report 落盘、镜像提取和元数据归档。不要先为一次性根因定位构建持久化证据管线。
+- **相关文件**：`user/src/bin/ltprunner/lwext4_perf/`、`docs/ltp/lwext4_perf_diagnostic.md`
+
 ### 长测第二轮 PID 超过 `/proc/sys/kernel/pid_max`
 - **根因**: 用户可见 PID/TID 只线性增长，释放时只为 `ns_last_pid` 打标记而不进入可复用池。全量 LTP/bench 多轮创建进程后，`getpid01` 会观察到 PID 超过内核暴露的 `/proc/sys/kernel/pid_max=32768`。
 - **修复**: 参考 Linux `idr_alloc_cyclic/free_pid` 和 DragonOS PID namespace 分配/释放模型：释放后记录可复用 ID，普通路径仍保持线性分配；接近 `pid_max` 高水位后再复用已释放 ID，并跳过低位保留 PID。
@@ -891,6 +901,14 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   2. **双轨参考不可省略**：本地实现可能已偏离 DragonOS 或 Linux 语义，单靠阅读当前代码无法发现差异。两条轨道独立产出后在 orchestrator 层交叉验证。
   3. **Oracle 拒绝是节约时间的设计信号**：将拒绝视为"又失败了"会跳过差异清单修正步骤，直接重写 patch 往往重复同一错误。拒绝后必须更新差异清单再进入实现。
   4. **父 orchestrator 不转发子任务结论**：子任务交付的"测试通过"必须经过父级的证据检查、交叉验证和合成才能成为最终结论。转发未经验证的子任务结论等同于放弃质量控制。
-  5. **一轮只修一个问题域**：P0 全局状态污染修复后暴露的语义级缺陷应分离为后续任务。混在一起会导致编排焦点丧失和上下文膨胀。
-  6. **扩散验证有先后**：最小序列 GREEN 后先跑相邻 suite（如同属 mount 组但测试不同 flag 的用例），再跑跨子系统 suite。跳跃式扩散（如直接从 mount 跳到 mm）会增加归因难度。
+   5. **一轮只修一个问题域**：P0 全局状态污染修复后暴露的语义级缺陷应分离为后续任务。混在一起会导致编排焦点丧失和上下文膨胀。
+   6. **扩散验证有先后**：最小序列 GREEN 后先跑相邻 suite（如同属 mount 组但测试不同 flag 的用例），再跑跨子系统 suite。跳跃式扩散（如直接从 mount 跳到 mm）会增加归因难度。
 - **相关文件**: 通用编排模式，适用于 `os/src/fs/vfs/`、`os/src/fs/ext4/`、`os/src/mm/` 等高爆炸半径模块的回归调试。
+
+## lwext4 inode 复用必须隔离 PageCache
+
+- **现象**：顺序运行 sparse-file LTP 时，首用例通过，后续新建文件在空洞中读到稳定旧值；单独运行后续用例可通过。
+- **根因**：`Ext4FileSystem::page_caches` 以 inode number 强引用缓存。unlink 后旧缓存仍保留，lwext4 复用 inode number 创建新文件时，新 inode 命中旧的 fully-valid 页面，绕过正确的 backend hole zero-fill。
+- **修复**：regular file 创建成功并取得真实 inode number 后，仅移除该 key 的 registry entry；旧 inode 持有的 `Arc<PageCache>` 继续有效，新 inode 则创建独立 cache。不能在普通 lookup 或 rename 中全局清缓存。
+- **教训**：缓存 key 若采用可复用的底层 ID，必须在对象 incarnation 边界解除旧 key→cache 映射；“后续 case 不创建 cache + 单跑通过”比偏移周期更能区分身份污染与底层读取算法错误。
+- **相关文件**：`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/ltprunner/lwext4_perf/`
