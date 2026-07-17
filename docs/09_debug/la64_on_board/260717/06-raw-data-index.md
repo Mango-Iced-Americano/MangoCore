@@ -16,9 +16,9 @@ related_docs:
 
 性能数据最初位于被 `.gitignore` 排除的 `target/`。为避免清理构建目录后只剩结论而
 失去证据，本批次把文本层完整复制到 [raw-data/](raw-data/README.md)：manifest、
-`records.jsonl`、串口 raw、CSV/Markdown reports 和构建验证日志。五个实验目录共
-220 个文本文件，另有 10 个 strict runtime build 文件和 2 个归档说明/哈希文件，
-总计 232 个文件、约 7.9 MiB。
+`records.jsonl`、串口 raw、CSV/Markdown reports 和构建验证日志。前五个实验目录共
+220 个文本文件，另有 10 个 strict runtime build 文件和 2 个归档说明/哈希文件；
+本轮再增加 44 个 anonymous-unmap/runtime 文本文件（约 756 KiB）。
 
 没有复制 uImage、ELF 和 81.6 MiB runtime archive；这些二进制仍可由原路径或构建
 脚本恢复，其文件名、大小、SHA-256 记录于
@@ -52,6 +52,7 @@ hash；阅读时把同名尾部映射到本目录对应 `raw/` 即可。
 | `20260716T-cpython-deepdiag` | 56 | 58 | 11 | trap、mmap release、fileio/PageCache/SATA、探针税 |
 | `20260716T-perf-diag-structural-ab-run` | 18 | 22 | 1 | production/diag-off 实板结构 A/B |
 | `20260717T042020Z-cpython-strict-align` | 42 | 44 | 14 | strict 部署、72/72、18 项和 trap 对照 |
+| `20260717T-anon-unmap-quant` | 22 | 24 | 14 | strict 入口复核、精确 unmap 扫描、六项真实 Python 占比 |
 | `20260716T-perf-diag-structural-ab` | — | — | build logs | 相邻镜像构建身份，不含大二进制 |
 | `strict-runtime-build` | — | — | build logs/manifest | 完整依赖闭包、PGO/LTO、双架构编译 |
 
@@ -150,7 +151,29 @@ trap 对照 CSV SHA-256 为 `4dc028b2...ff29`，时间趋势 CSV 为
 | `verify-la64-kernel.log` | la64 串行内核编译 |
 | `*.tar.xz.sha256` | 原始包和规范化最终包的 SHA 文件 |
 
-## 9. 二进制制品身份
+## 9. 匿名释放量化目录
+
+路径：[`raw-data/20260717T-anon-unmap-quant/`](raw-data/20260717T-anon-unmap-quant/)
+
+| 文件 | 用途 |
+|------|------|
+| `manifest.json` | HEAD/dirty/build-input、QEMU 与实板 image 身份 |
+| `records.jsonl` | P4 前检、10 个合成样本、6 个 Python workload、runtime/QEMU smoke |
+| `reports/anon_unmap_synthetic.csv` | 五档预热/正式 close、ticks 和精确扫描不变量 |
+| `reports/anon_unmap_python.csv` | 六项 body 的 calls/pages/scans/ticks/占比/最大时延 |
+| `reports/anon_unmap_quantification.md` | 可由 analyzer 重生成的聚合表 |
+| `raw/qemu_*_anon_diag_smoke-*.log` | 双架构计数节点和 reset/freeze 门禁 |
+| `raw/anon_mmap_release_*.log` | 合成探针原始串口 |
+| `raw/cpython_bench_*.log` | strict Python 目标端事件和 counter snapshot |
+| `verification-final/qemu-*-final.log` | 最终错误路径计数修正后的双架构 QEMU smoke |
+| `runtime-current.json`、`runtime-installed.stamp.json` | strict artifact 选择结果与标准 tools 缓存安装身份 |
+
+最初两条过长前检命令在宿主 512-byte 门禁处被拒绝，raw 保留但没有 workload record；
+后续短前检通过。`board_strict_runtime_smoke` 未设置 `CPYTHON_ROOT`，启动的是兼容默认
+runtime，不作为 P4 strict 身份证据；以 `board_strict_runtime_manifest_smoke` 和六项
+benchmark environment 为准。
+
+## 10. 二进制制品身份
 
 | 制品 | 大小 | SHA-256 |
 |------|-----:|---------|
@@ -162,16 +185,24 @@ trap 对照 CSV SHA-256 为 `4dc028b2...ff29`，时间趋势 CSV 为
 | adjacent diagnostic uImage | 16,546,136 B | `53e43b04...e68` |
 | adjacent diagnostic ELF | 65,855,664 B | `4e96eb6f...29` |
 | strict runtime tar.xz | 81,627,728 B | `abbc714c...56a` |
+| anonymous-unmap diagnostic uImage | 16,539,304 B | `5e3f6cd4...24e5` |
 
 完整 64 位哈希见 `ARTIFACTS.sha256`，缩写只用于表格可读性。
 
-## 10. 重分析方法
+## 11. 重分析方法
 
 若原始 `target/perf-runs/<run>` 仍存在，可重新运行：
 
 ```text
 python3 scripts/kernel_perf.py analyze \
   --run-dir target/perf-runs/<run-id>
+```
+
+匿名释放专项表：
+
+```text
+python3 scripts/analyze_anon_unmap.py \
+  --run-dir target/perf-runs/20260717T-anon-unmap-quant
 ```
 
 复核 CPython L3-L9：
@@ -190,7 +221,7 @@ python3 judge/judge_cpython-isolated.py \
 5. 跨 run 比较前检查 workload、warmup、storage、suite 和内核哈希；
 6. 任一身份不同则降低比较等级，不补造下降百分比。
 
-## 11. 未归档为“原始数据”的内容
+## 12. 未归档为“原始数据”的内容
 
 - 81.6 MiB runtime、uImage 和 ELF：体积大，已记录 hash；
 - P4 失败 staging 目录：只在实板保留，不属于 canonical runtime；

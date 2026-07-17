@@ -310,3 +310,22 @@ strict build 固化为生产 runtime，必须要求所有本地 C/C++ extension 
 - [恢复构建日志](raw-data/strict-runtime-build/build-full-gcc15-resume.log)
 - [rv64 内核构建日志](raw-data/strict-runtime-build/verify-rv64-kernel.log)
 - [la64 内核构建日志](raw-data/strict-runtime-build/verify-la64-kernel.log)
+
+## 12. 2026-07-17 标准运行时入口固化
+
+第一次实验最初只证明 `/persist/pyperf/r/s-abbc714ce59f` 可用，标准 tools 镜像仍可能
+通过 `fetch_cpython_runtime.py` 取得未保证 strict-align 的通用 runtime。后续已将该
+风险关闭：
+
+- `os/Makefile tools-cpython-la` 固定调用 strict builder 和 verified installer；
+- 根目录增加 `cpython-la64-runtime-build/verify/install` 一键 Docker 目标；
+- builder 从通过完整校验的 artifact 生成 `current.json`，不以旧 TFTP manifest 或目录
+  是否存在作为 runtime 身份；
+- installer 校验 archive/sidecar/manifest/94 ELF，拒绝路径逃逸和特殊成员，在同目录
+  staging 写 stamp 后原子替换；
+- 标准缓存 `user/tools/loongarch64/tests/cpython` 已实际安装，stamp 中 artifact SHA、
+  manifest SHA 和 policy 与本文件第 4 节一致。
+
+实板仍使用 P4 canonical，未写 P3。P4 `strict_runtime_smoke.sh` 再次完成 manifest、
+原生扩展和线程门禁。完整固化过程和匿名释放后续量化见
+[07-strict-runtime-and-anon-unmap-quantification.md](07-strict-runtime-and-anon-unmap-quantification.md)。

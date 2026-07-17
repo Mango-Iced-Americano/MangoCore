@@ -307,6 +307,26 @@ mod enabled {
     pub static HEAP_DEALLOC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: Anonymous private VMA release ──
+    // Keep this window bounded to 15 counters.  The scan-step total is the
+    // exact number of VecDeque entries visited by the current retain-based
+    // release path and is therefore the primary O(N^2) attribution signal.
+    pub static ANON_UNMAP_CALLS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_RANGE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_AREA_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_REQUESTED_PAGES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_RESIDENT_PAGES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_ACTIVE_BEFORE_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_ACTIVE_BEFORE_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_ERRORS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_PAGES_LE_16: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_PAGES_LE_256: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_PAGES_LE_4096: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_UNMAP_PAGES_GT_4096: AtomicUsize = AtomicUsize::new(0);
+
     #[inline(always)]
     fn update_max(counter: &AtomicUsize, val: usize) {
         let mut cur = counter.load(Ordering::Relaxed);
@@ -713,6 +733,48 @@ mod enabled {
         HEAP_DEALLOC_SCAN_STEPS_TOTAL.fetch_add(steps, Ordering::Relaxed);
     }
 
+    #[inline(always)]
+    pub fn record_anon_unmap(
+        range_release: bool,
+        requested_pages: usize,
+        resident_pages: usize,
+        active_before: usize,
+        retain_scan_steps: usize,
+        start_ticks: usize,
+        failed: bool,
+    ) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        let elapsed = perf_time_now_for(super::STATS_PROFILE_MEMORY_IO).wrapping_sub(start_ticks);
+        ANON_UNMAP_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if range_release {
+            ANON_UNMAP_RANGE_CALLS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ANON_UNMAP_AREA_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        ANON_UNMAP_REQUESTED_PAGES_TOTAL.fetch_add(requested_pages, Ordering::Relaxed);
+        ANON_UNMAP_RESIDENT_PAGES_TOTAL.fetch_add(resident_pages, Ordering::Relaxed);
+        ANON_UNMAP_ACTIVE_BEFORE_TOTAL.fetch_add(active_before, Ordering::Relaxed);
+        update_max(&ANON_UNMAP_ACTIVE_BEFORE_MAX, active_before);
+        ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL.fetch_add(retain_scan_steps, Ordering::Relaxed);
+        ANON_UNMAP_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&ANON_UNMAP_TICKS_MAX, elapsed);
+        if failed {
+            ANON_UNMAP_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        let bucket = if resident_pages <= 16 {
+            &ANON_UNMAP_PAGES_LE_16
+        } else if resident_pages <= 256 {
+            &ANON_UNMAP_PAGES_LE_256
+        } else if resident_pages <= 4096 {
+            &ANON_UNMAP_PAGES_LE_4096
+        } else {
+            &ANON_UNMAP_PAGES_GT_4096
+        };
+        bucket.fetch_add(1, Ordering::Relaxed);
+    }
+
     // ── PageCache recorders ──
 
     #[inline(always)]
@@ -1049,6 +1111,22 @@ mod enabled {
         HEAP_DEALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
         HEAP_DEALLOC_TICKS_MAX.store(0, Ordering::Relaxed);
         HEAP_DEALLOC_SCAN_STEPS_TOTAL.store(0, Ordering::Relaxed);
+        // Anonymous private VMA release (15-counter memory window)
+        ANON_UNMAP_CALLS_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_RANGE_CALLS.store(0, Ordering::Relaxed);
+        ANON_UNMAP_AREA_CALLS.store(0, Ordering::Relaxed);
+        ANON_UNMAP_REQUESTED_PAGES_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_RESIDENT_PAGES_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_ACTIVE_BEFORE_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_ACTIVE_BEFORE_MAX.store(0, Ordering::Relaxed);
+        ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_TICKS_MAX.store(0, Ordering::Relaxed);
+        ANON_UNMAP_ERRORS_TOTAL.store(0, Ordering::Relaxed);
+        ANON_UNMAP_PAGES_LE_16.store(0, Ordering::Relaxed);
+        ANON_UNMAP_PAGES_LE_256.store(0, Ordering::Relaxed);
+        ANON_UNMAP_PAGES_LE_4096.store(0, Ordering::Relaxed);
+        ANON_UNMAP_PAGES_GT_4096.store(0, Ordering::Relaxed);
         // PageCache I/O (P0)
         PC_READ_CALLS.store(0, Ordering::Relaxed);
         PC_READ_PAGES.store(0, Ordering::Relaxed);
@@ -1880,6 +1958,19 @@ pub fn record_heap_dealloc_cost(_ticks: usize) {}
 #[inline(always)]
 pub fn record_heap_dealloc_scan_steps(_steps: usize) {}
 
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_unmap(
+    _range_release: bool,
+    _requested_pages: usize,
+    _resident_pages: usize,
+    _active_before: usize,
+    _retain_scan_steps: usize,
+    _start_ticks: usize,
+    _failed: bool,
+) {
+}
+
 // ── PageCache recorders (no-op when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2183,6 +2274,52 @@ pub static HEAP_DEALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_CALLS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_RANGE_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_AREA_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_REQUESTED_PAGES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_RESIDENT_PAGES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_ACTIVE_BEFORE_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_ACTIVE_BEFORE_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_TICKS_MAX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_ERRORS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_PAGES_LE_16: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_PAGES_LE_256: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_PAGES_LE_4096: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ANON_UNMAP_PAGES_GT_4096: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 // ── PageCache I/O stubs ──

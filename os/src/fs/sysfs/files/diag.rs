@@ -529,6 +529,40 @@ fn stats_heap_content(
     write_str(offset, len, buf, &s)
 }
 
+fn stats_anon_unmap_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(768);
+    macro_rules! counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    counter!("anon_unmap_calls_total", ANON_UNMAP_CALLS_TOTAL);
+    counter!("anon_unmap_range_calls", ANON_UNMAP_RANGE_CALLS);
+    counter!("anon_unmap_area_calls", ANON_UNMAP_AREA_CALLS);
+    counter!("anon_unmap_requested_pages_total", ANON_UNMAP_REQUESTED_PAGES_TOTAL);
+    counter!("anon_unmap_resident_pages_total", ANON_UNMAP_RESIDENT_PAGES_TOTAL);
+    counter!("anon_unmap_active_before_total", ANON_UNMAP_ACTIVE_BEFORE_TOTAL);
+    counter!("anon_unmap_active_before_max", ANON_UNMAP_ACTIVE_BEFORE_MAX);
+    counter!("anon_unmap_retain_scan_steps_total", ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL);
+    counter!("anon_unmap_ticks_total", ANON_UNMAP_TICKS_TOTAL);
+    counter!("anon_unmap_ticks_max", ANON_UNMAP_TICKS_MAX);
+    counter!("anon_unmap_errors_total", ANON_UNMAP_ERRORS_TOTAL);
+    counter!("anon_unmap_pages_le_16", ANON_UNMAP_PAGES_LE_16);
+    counter!("anon_unmap_pages_le_256", ANON_UNMAP_PAGES_LE_256);
+    counter!("anon_unmap_pages_le_4096", ANON_UNMAP_PAGES_LE_4096);
+    counter!("anon_unmap_pages_gt_4096", ANON_UNMAP_PAGES_GT_4096);
+    write_str(offset, len, buf, &s)
+}
+
 fn stats_resource_content(
     _extra: usize,
     offset: usize,
@@ -1100,6 +1134,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("reclaim", ro_mode, stats_reclaim_content)?;
     stats_dir.add_file("tlb", ro_mode, stats_tlb_content)?;
     stats_dir.add_file("heap", ro_mode, stats_heap_content)?;
+    stats_dir.add_file("anon_unmap", ro_mode, stats_anon_unmap_content)?;
     stats_dir.add_file("pagecache", ro_mode, stats_pagecache_content)?;
     stats_dir.add_file("blockio", ro_mode, stats_blockio_content)?;
     stats_dir.add_file("net", ro_mode, stats_net_content)?;

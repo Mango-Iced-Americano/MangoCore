@@ -754,3 +754,12 @@ diag=1
 - **证据要求**: 规范化前后不能只比 archive 总哈希；应对路径归一化后的逐成员 type/mode/uid/gid/size/link/content 做无序比较，并保存 runtime 内部 manifest 哈希。部署 manifest 必须记录实际发布的 archive，而不是首次失败的构建包。
 - **介质边界**: staging、canonical runtime、work、pycache 和结果必须全部落在本轮允许写入的目标分区；旧只读 runtime 只提供下载/解包工具时，也不得因此把目标分区误写成它所在的分区。
 - **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`, `user/tools/cpython/strict_runtime_smoke.sh`
+
+## 复杂度缺陷用“实际遍历步数”闭环，不只拟合 wall 曲线
+
+- **场景**: 源码显示外层逐项删除、内层对剩余容器做全表扫描，wall time 看起来呈平方增长，但固定开销、cache、frame free 和 TLB 也会影响时间曲线。
+- **设计**: 在现有内层扫描前累加当时容器长度，得到实际 visit/retain steps；同时记录调用数、requested/resident 数、容器初始/最大规模、累计/最大 ticks、错误和有界 size buckets。只在目标 profile + stats_on 窗口启用，不逐事件打印。
+- **不变量**: 单个 N 项容器被逐项删除时，理论主扫描量是 `N(N+1)/2`。若 observed 与理论只差一个可解释的小辅助映射，复杂度证据比 `ns/page²` 拟合更强；修复后应先检查扫描步数降为近线性，再解释 wall time。
+- **真实影响**: 目标端 runner 必须预热后 reset/on，只包 workload body。比较时同时看累计占比与最大单次时延；calls 很多但每次很小，可能弱于 calls 很少却包含一个大容器的 workload。
+- **证据边界**: diagnostic ticks/body 只能作为路径归因，不能直接等同未来优化收益；production/diagnostic 结构差异和探针税仍需独立门禁。
+- **相关文件**: `os/src/mm/vma.rs`, `os/src/task/perf.rs`, `scripts/analyze_anon_unmap.py`

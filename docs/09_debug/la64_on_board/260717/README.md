@@ -21,6 +21,7 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/04-ext4-small-file-path.md"
   - "docs/09_debug/la64_on_board/260717/05-strict-align-first-experiment.md"
   - "docs/09_debug/la64_on_board/260717/06-raw-data-index.md"
+  - "docs/09_debug/la64_on_board/260717/07-strict-runtime-and-anon-unmap-quantification.md"
 ---
 
 # 2K1000LA Python 性能专项（2026-07-17 批次）
@@ -41,6 +42,7 @@ related_docs:
 - CPython L3-L9 实板 `72/72` 和 strict 18/18 benchmark；
 - strict 正式 body 的所有非对齐计数为 0；`bm_float`、`bm_string` 有旧侧匹配证据；
 - 五个实验目录的可审计文本数据复制到本目录 `raw-data/`。
+- strict runtime 标准 Make/安装入口固化，匿名页释放 15 项计数器和实板影响量化完成。
 
 当前没有修改内核非对齐模拟器，没有修复匿名页释放 O(N²)，也没有优化 ext4。ext4
 等待队友 develop 分支的新实现后复测。
@@ -51,7 +53,7 @@ related_docs:
 |------|------|----------|
 | production Python 基线 | 18/18 通过，累计 1,928.806 s；最慢为 regex 421.447 s | production 实板 |
 | 问题 1：非对齐访问 | `bm_float` 3,000,039 次 trap，handler 解释 95.2% sys；逐字节 uaccess 又放大 COW/TLB | 已确认 |
-| 问题 2：匿名页释放 | 64 MiB resident mapping 关闭 3.893 s；16 MiB 以上 `ns/page²` 稳定 | 复杂度已确认，真实 Python 占比未量化 |
+| 问题 2：匿名页释放 | 64 MiB resident mapping 关闭 3.890 s、扫描 134,225,920 步；list/dict body 占比 11.29%/9.69% | 复杂度与真实影响已确认 |
 | 问题 3：ext4 小文件 | 5,000 个文件生命周期 46.449 s；高线性固定税，非 O(N²) | 已确认，当前分支暂停 |
 | 第一次实验 | strict-aligned runtime 的 18 个 benchmark body 非对齐计数全部为 0 | 实板已确认 |
 | 功能门禁 | L3-L9 `72/72`，18/18 benchmark 通过 | 实板已确认 |
@@ -67,6 +69,7 @@ related_docs:
 | [04-ext4-small-file-path.md](04-ext4-small-file-path.md) | 5,000/100 文件缩放、PageCache/SATA flush 闭合、在线 ext4 检查边界 | 解释问题 3 |
 | [05-strict-align-first-experiment.md](05-strict-align-first-experiment.md) | 构建闭包、PGO/LTO、部署失败、72/72、18 项结果、trap 对照和时间口径 | 第一次优化留档 |
 | [06-raw-data-index.md](06-raw-data-index.md) | 原始目录、文件 schema、二进制哈希、重分析命令和数据质量说明 | 审计与复现 |
+| [07-strict-runtime-and-anon-unmap-quantification.md](07-strict-runtime-and-anon-unmap-quantification.md) | 标准 strict runtime 入口、安全安装器、15 个 VMA 计数器、实板精确扫描与六项 Python 占比 | 第二阶段量化留档 |
 
 ## 4. 证据分层
 
@@ -103,8 +106,8 @@ strict userspace + 归档 perf_diag 内核
   内核上的正式耗时 A/B。
 - strict 的 0 只覆盖这 18 个 workload body，不能外推到启动、import、任意第三方
   wheel 或含手写汇编的扩展。
-- O(N²) 路径尚未修改；下一次动代码前，应先在真实 Python workload 中累计显式
-  `munmap` 次数、VMA 大小、resident pages 和总耗时。
+- O(N²) 路径尚未修改；真实 Python 的 calls/requested/resident/active/scans/ticks 已补齐，
+  下一步可以直接实施并验收批量删除/索引结构方案。
 - ext4 仅完成在线 rw、sync、重启后哈希和 workload 正确性检查；没有 offline e2fsck、
   断电恢复或 fault injection，不宣称 journal/断电安全。
 - 30 分钟混合稳定性、PMU cache miss、成功 SmolAgent 本地端点和真实 API 仍未完成。

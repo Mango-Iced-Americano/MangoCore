@@ -14,6 +14,7 @@ ls /sys/kernel/stats/ || { echo "FAIL: /sys/kernel/stats/ not found"; exit 1; }
 cat /sys/kernel/stats/stats_on  # should be 0
 cat /sys/kernel/stats/profile   # should be core 1
 cat /sys/kernel/stats/boot      # one-shot boot milestones must be readable
+cat /sys/kernel/stats/anon_unmap # bounded anonymous-release window must exist
 
 echo "[3/7] Enable core profile and run workload..."
 echo core > /sys/kernel/stats/profile

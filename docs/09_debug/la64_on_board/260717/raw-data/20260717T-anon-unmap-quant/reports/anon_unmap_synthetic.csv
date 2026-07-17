@@ -1,0 +1,11 @@
+test,sample_role,size_mib,pages,elapsed_ms,unmap_ticks_ms,largest_unmap_ms,calls,resident_pages,expected_primary_scan_steps,observed_scan_steps,auxiliary_scan_steps,errors
+anon_mmap_release_1m_warm,warmup,1,256,2.41274,1.8432,1.83275,2,258,32896,32899,3,0
+anon_mmap_release_1m,formal,1,256,2.44613,1.86033,1.84871,2,258,32896,32899,3,0
+anon_mmap_release_4m_warm,warmup,4,1024,18.33666,17.6503,17.63955,2,1026,524800,524803,3,0
+anon_mmap_release_4m,formal,4,1024,18.33645,17.65746,17.64628,2,1026,524800,524803,3,0
+anon_mmap_release_16m_warm,warmup,16,4096,237.86508,237.05761,237.04556,2,4098,8390656,8390659,3,0
+anon_mmap_release_16m,formal,16,4096,238.41964,237.28105,237.26929,2,4098,8390656,8390659,3,0
+anon_mmap_release_32m_warm,warmup,32,8192,959.49609,958.37861,958.36201,2,8194,33558528,33558531,3,0
+anon_mmap_release_32m,formal,32,8192,959.4974,958.38295,958.36752,2,8194,33558528,33558531,3,0
+anon_mmap_release_64m_warm,warmup,64,16384,3889.68259,3888.32535,3888.30555,2,16386,134225920,134225923,3,0
+anon_mmap_release_64m,formal,64,16384,3889.67927,3888.32509,3888.30583,2,16386,134225920,134225923,3,0

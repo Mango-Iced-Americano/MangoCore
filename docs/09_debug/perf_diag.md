@@ -75,6 +75,7 @@ cat /sys/kernel/stats/features
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
 | `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时 |
+| `anon_unmap` | ro | private anonymous VMA 释放次数、页数、精确 retain 扫描步数和耗时 |
 | `net` | ro | poll、RX/TX/drop 与 exec/openat/read/mmap 运行时归因 |
 | `resource` | ro | 资源 gauge（内存/Task/Socket/Pipe/PageCache/Dentry 等） |
 | `buddyinfo` | ro | Buddy 空闲块直方图（order → free_blocks） |
@@ -202,6 +203,29 @@ echo 1 > /sys/kernel/tracing/clear
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
 | `sata_flush_{reqs,ticks_total}` | counter | SATA cache flush 次数与累计耗时 |
+
+#### anonymous private VMA release
+
+`anon_unmap` 只在 `memory_io` profile 下记录 anonymous + private VMA；file/shared mapping
+不进入该组。计时覆盖 `Vma::unmap` 内部，`retain_scan_steps_total` 在每次现有
+`VecDeque::retain` 之前累加当时 `active.len()`，因此是实际扫描量而不是按页数推算。
+
+| 计数器 | 类型 | 含义 |
+|--------|------|------|
+| `anon_unmap_calls_total` | counter | 满足记录条件的 VMA unmap 调用数 |
+| `anon_unmap_{range,area}_calls` | counter | range unmap 与 remove-area 来源分类 |
+| `anon_unmap_requested_pages_total` | counter | 调用请求范围页数，含未 resident 页 |
+| `anon_unmap_resident_pages_total` | counter | 实际删除的 resident 页数 |
+| `anon_unmap_active_before_total/max` | counter/max | 调用开始时 frame store active 规模 |
+| `anon_unmap_retain_scan_steps_total` | counter | 当前实现所有 retain 的实际遍历元素数 |
+| `anon_unmap_ticks_total/max` | counter/max | unmap 累计与最大 rdtime ticks |
+| `anon_unmap_errors_total` | counter | 释放过程错误数 |
+| `anon_unmap_pages_le_16/le_256/le_4096/gt_4096` | counter | resident pages 分桶 |
+
+合成居民映射的正确性不变量为：单个 N 页 VMA 全部逐页删除时，主项扫描数应为
+`N(N+1)/2`。真实 workload 归因必须在目标进程内完成“预热 → reset/on → body → off”，
+否则 shell/启动/退出会引入额外 VMA。2026-07-17 的实板量化见
+[strict runtime 与匿名释放量化](la64_on_board/260717/07-strict-runtime-and-anon-unmap-quantification.md)。
 
 块设备 ticks 统计的是驱动同步调用窗口，不等于 workload 的完整 I/O wait。用 `(read + write + flush) ticks / sys time` 估算设备直接占比后，剩余时间仍可能位于 VFS/ext4、PageCache、锁、分配和用户复制。若 write 与 flush 近似一一对应，应回到块设备调用点确认 flush 粒度，不能把全部 sys 直接归因于磁盘介质。
 

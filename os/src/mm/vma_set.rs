@@ -9,7 +9,7 @@
 //! `user_area_count`/`user_page_count` 必须只统计用户 VMA。
 
 use super::user_mapper::UserMapper;
-use super::vma::{MapFlags, MapPermission, Vma};
+use super::vma::{MapFlags, MapPermission, Vma, VmaUnmapReason};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
@@ -321,7 +321,7 @@ impl VmaSet {
             let start = area.vm_start();
             let end = area.vm_end();
             self.untrack_area(&area);
-            let result = area.unmap(page_table);
+            let result = area.unmap(page_table, VmaUnmapReason::RemoveArea);
             let _ = self.release_mmap_range(start, end);
             self.debug_assert_invariants();
             result
@@ -439,7 +439,7 @@ impl VmaSet {
             let released_start = target.vm_start();
             let released_end = target.vm_end();
             self.untrack_area(&target);
-            if target.unmap(page_table).is_err() {
+            if target.unmap(page_table, VmaUnmapReason::Range).is_err() {
                 warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
             }
             self.release_mmap_range(released_start, released_end)?;

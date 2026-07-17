@@ -75,7 +75,7 @@ def build_command(args: argparse.Namespace, benchmark: str) -> list[str]:
             environment.append("CPYTHON_BENCH_WORK_BASE=%s" % shlex.quote(args.work_base))
         else:
             environment.append("CPYTHON_BENCH_REQUIRE_SCRATCH=1")
-        if args.trap_only:
+        if args.trap_only or args.stats_profile:
             environment.append("CPYTHON_BENCH_TARGET_STATS=1")
         if args.target_results_root:
             target_jsonl = "%s/%s.jsonl" % (args.target_results_root.rstrip("/"), benchmark)
@@ -121,7 +121,12 @@ def build_command(args: argparse.Namespace, benchmark: str) -> list[str]:
         board_workload,
     ]
     if args.build_mode == "diag_on":
-        command.extend(("--profile", "core" if args.trap_only else profile_for(benchmark)))
+        command.extend(
+            (
+                "--profile",
+                "core" if args.trap_only else args.stats_profile or profile_for(benchmark),
+            )
+        )
     if args.quiet:
         command.append("--quiet")
     return command
@@ -178,6 +183,11 @@ def main() -> int:
             "force the perf_diag core profile"
         ),
     )
+    parser.add_argument(
+        "--stats-profile",
+        choices=("core", "memory_io", "network_runtime"),
+        help="measure only the benchmark body with the selected perf_diag profile",
+    )
     parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet", action="store_true")
@@ -189,12 +199,16 @@ def main() -> int:
         parser.error("capture timeout must exceed the board-side module timeout")
     if args.trap_only and args.build_mode != "diag_on":
         parser.error("--trap-only requires --build-mode diag_on")
-    if args.trap_only and (args.warmups, args.runs) != (1, 1):
-        parser.error("--trap-only requires exactly one warmup plus one measured run")
+    if args.stats_profile and args.build_mode != "diag_on":
+        parser.error("--stats-profile requires --build-mode diag_on")
+    if args.trap_only and args.stats_profile:
+        parser.error("--trap-only and --stats-profile are mutually exclusive")
+    if (args.trap_only or args.stats_profile) and (args.warmups, args.runs) != (1, 1):
+        parser.error("diagnostic profiles require exactly one warmup plus one measured run")
     if bool(args.target_script) != bool(args.target_run_tag):
         parser.error("--target-script and --target-run-tag must be provided together")
-    if args.target_script and not args.trap_only:
-        parser.error("the strict target script is only valid with --trap-only")
+    if args.target_script and not (args.trap_only or args.stats_profile):
+        parser.error("the strict target script requires --trap-only or --stats-profile")
     if args.target_script and args.capture_timeout <= TARGET_SCRIPT_TIMEOUT:
         parser.error(
             "target-script mode requires --capture-timeout greater than %d seconds"

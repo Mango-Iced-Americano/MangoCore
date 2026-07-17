@@ -505,6 +505,7 @@ TOOLS_SRC_LA := ../user/tools/loongarch64
 CPYTHON_COMMON := ../user/tools/cpython
 CPYTHON_SRC_RV := ../user/tools/riscv64/tests/cpython
 CPYTHON_SRC_LA := ../user/tools/loongarch64/tests/cpython
+CPYTHON_STRICT_INDEX_LA := ../target/cpython-strict/artifacts/current.json
 CPYTHON_AUTO ?= 0
 
 # MBR 脚本路径
@@ -676,7 +677,7 @@ tools-alpine-la:
 tools-alpine: tools-alpine-rv tools-alpine-la
 
 # ============================================================
-# Alpine CPython runtime downloader
+# CPython runtime provisioning
 # ============================================================
 
 tools-cpython-rv:
@@ -684,8 +685,9 @@ tools-cpython-rv:
 		--arch riscv64 --mirror $(ALPINE_MIRROR) --dest $(CPYTHON_SRC_RV)
 
 tools-cpython-la:
-	@python3 ../scripts/fetch_cpython_runtime.py \
-		--arch loongarch64 --mirror $(ALPINE_MIRROR) --dest $(CPYTHON_SRC_LA)
+	@cd .. && ./scripts/build_cpython_runtime_la64_strict.sh
+	@python3 ../scripts/install_cpython_runtime_la64_strict.py \
+		--artifact-index $(CPYTHON_STRICT_INDEX_LA) --dest $(CPYTHON_SRC_LA)
 
 tools-cpython: tools-cpython-rv tools-cpython-la
 

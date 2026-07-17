@@ -1,0 +1,159 @@
+2026-07-17T08:49:43.898490Z __PERF_BEGIN_board_strict_runtime_canonical-1-97b7f572__
+2026-07-17T08:49:44.870885Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_TRACE_OFF__
+2026-07-17T08:49:45.561632Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_STATS_OFF__
+2026-07-17T08:49:46.240247Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_PROFILE__
+2026-07-17T08:49:46.895230Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_RESET__
+2026-07-17T08:49:47.555949Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_BOOT__
+2026-07-17T08:49:47.590585Z clock_freq_hz=100000000
+2026-07-17T08:49:47.593362Z boot_console_ticks=874194548767
+2026-07-17T08:49:47.595884Z boot_mm_ticks=874221680087
+2026-07-17T08:49:47.598937Z boot_drivers_ticks=874222086399
+2026-07-17T08:49:47.601428Z boot_net_ticks=874232640554
+2026-07-17T08:49:47.604215Z boot_fs_ticks=874244731468
+2026-07-17T08:49:47.606997Z boot_initproc_ticks=874246929554
+2026-07-17T08:49:47.608989Z boot_scheduler_ticks=874246929585
+2026-07-17T08:49:47.613601Z __PERF_STATS_BEFORE_BOOT_END__
+2026-07-17T08:49:48.308451Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_TASKQ__
+2026-07-17T08:49:48.343070Z ready_len_max=0
+2026-07-17T08:49:48.345317Z interruptible_len_max=0
+2026-07-17T08:49:48.345422Z ready_zombie_max=0
+2026-07-17T08:49:48.347758Z interruptible_zombie_max=0
+2026-07-17T08:49:48.350520Z dup_enqueue_total=0
+2026-07-17T08:49:48.353424Z add_ready_total=0
+2026-07-17T08:49:48.353516Z add_interruptible_total=0
+2026-07-17T08:49:48.356253Z wake_interruptible_total=0
+2026-07-17T08:49:48.358895Z fair_pick_calls=0
+2026-07-17T08:49:48.358960Z fast_path_calls=0
+2026-07-17T08:49:48.361679Z fair_scan_max=0
+2026-07-17T08:49:48.364552Z zombie_drain_scan_total=0
+2026-07-17T08:49:48.367399Z zombie_drain_calls=0
+2026-07-17T08:49:48.367560Z zombie_drain_removed=0
+2026-07-17T08:49:48.369237Z ready_nonzero_nice_cur=0
+2026-07-17T08:49:48.374045Z __PERF_STATS_BEFORE_TASKQ_END__
+2026-07-17T08:49:49.045317Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_TIMER__
+2026-07-17T08:49:49.079247Z ktimer_len_max=0
+2026-07-17T08:49:49.081636Z ktimer_add_total=0
+2026-07-17T08:49:49.081690Z ktimer_pop_max=0
+2026-07-17T08:49:49.084536Z ktimer_pop_total=0
+2026-07-17T08:49:49.087261Z ktimer_stale_waketask=0
+2026-07-17T08:49:49.087348Z ktimer_real_wake=0
+2026-07-17T08:49:49.090188Z ktimer_compact_calls=0
+2026-07-17T08:49:49.092730Z ktimer_stale_removed=0
+2026-07-17T08:49:49.095525Z wait_with_timeout_total=0
+2026-07-17T08:49:49.095558Z timer_irq_ticks_total=0
+2026-07-17T08:49:49.098335Z timer_irq_ticks_max=0
+2026-07-17T08:49:49.101217Z timer_pop_nodes_total=0
+2026-07-17T08:49:49.103971Z timer_pop_ticks_total=0
+2026-07-17T08:49:49.104029Z timer_pop_ticks_max=0
+2026-07-17T08:49:49.108683Z __PERF_STATS_BEFORE_TIMER_END__
+2026-07-17T08:49:49.823326Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_SECCOMP__
+2026-07-17T08:49:49.858233Z seccomp_check_calls=0
+2026-07-17T08:49:49.861098Z seccomp_check_ticks_total=0
+2026-07-17T08:49:49.863597Z seccomp_check_ticks_max=0
+2026-07-17T08:49:49.864721Z seccomp_disabled_bypass=0
+2026-07-17T08:49:49.869674Z __PERF_STATS_BEFORE_SECCOMP_END__
+2026-07-17T08:49:50.612557Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_SYSCALL__
+2026-07-17T08:49:50.646909Z syscall_total=0
+2026-07-17T08:49:50.649287Z syscall_getppid_total=0
+2026-07-17T08:49:50.651999Z syscall_cost_max_ticks=0
+2026-07-17T08:49:50.652051Z syscall_cost_ticks_total=0
+2026-07-17T08:49:50.654824Z getppid_cost_ticks_total=0
+2026-07-17T08:49:50.657585Z getppid_cost_ticks_max=0
+2026-07-17T08:49:50.660400Z ecall_trap_cost_ticks_total=0
+2026-07-17T08:49:50.663155Z ecall_trap_cost_ticks_max=0
+2026-07-17T08:49:50.665936Z user_unaligned_traps=0
+2026-07-17T08:49:50.668751Z user_unaligned_ticks_total=0
+2026-07-17T08:49:50.671564Z user_unaligned_ticks_max=0
+2026-07-17T08:49:50.671630Z user_unaligned_load_2=0
+2026-07-17T08:49:50.674291Z user_unaligned_load_4=0
+2026-07-17T08:49:50.677068Z user_unaligned_load_8=0
+2026-07-17T08:49:50.680450Z user_unaligned_store_2=0
+2026-07-17T08:49:50.682711Z user_unaligned_store_4=0
+2026-07-17T08:49:50.682773Z user_unaligned_store_8=0
+2026-07-17T08:49:50.685483Z user_unaligned_float_loads=0
+2026-07-17T08:49:50.688006Z user_unaligned_float_stores=0
+2026-07-17T08:49:50.692820Z __PERF_STATS_BEFORE_SYSCALL_END__
+2026-07-17T08:49:51.361312Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_CTXSW__
+2026-07-17T08:49:51.394463Z context_switch_total=0
+2026-07-17T08:49:51.399009Z __PERF_STATS_BEFORE_CTXSW_END__
+2026-07-17T08:49:52.090769Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_STATS_ON__
+2026-07-17T08:49:54.508073Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_board_strict_runtime_canonical-1-97b7f572__
+2026-07-17T08:49:55.062686Z 3.14.5 (main, Jul 17 2026, 04:01:01) [GCC 15.2.0]
+2026-07-17T08:49:55.065354Z /persist/pyperf/r/s-abbc714ce59f/usr/bin/python3
+2026-07-17T08:49:55.155134Z __PERF_WORK_END_board_strict_runtime_canonical-1-97b7f572__
+2026-07-17T08:49:55.160296Z __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_WORK__
+2026-07-17T08:49:55.857555Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_board_strict_runtime_canonical-1-97b7f572_STATS_DONE__
+2026-07-17T08:49:56.522870Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_BOOT__
+2026-07-17T08:49:56.557551Z clock_freq_hz=100000000
+2026-07-17T08:49:56.560167Z boot_console_ticks=874194548767
+2026-07-17T08:49:56.562883Z boot_mm_ticks=874221680087
+2026-07-17T08:49:56.565725Z boot_drivers_ticks=874222086399
+2026-07-17T08:49:56.568937Z boot_net_ticks=874232640554
+2026-07-17T08:49:56.571249Z boot_fs_ticks=874244731468
+2026-07-17T08:49:56.574017Z boot_initproc_ticks=874246929554
+2026-07-17T08:49:56.576008Z boot_scheduler_ticks=874246929585
+2026-07-17T08:49:56.580902Z __PERF_STATS_AFTER_BOOT_END__
+2026-07-17T08:49:57.251965Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_TASKQ__
+2026-07-17T08:49:57.285838Z ready_len_max=2
+2026-07-17T08:49:57.288427Z interruptible_len_max=4
+2026-07-17T08:49:57.288507Z ready_zombie_max=0
+2026-07-17T08:49:57.291173Z interruptible_zombie_max=0
+2026-07-17T08:49:57.293900Z dup_enqueue_total=0
+2026-07-17T08:49:57.296623Z add_ready_total=1383
+2026-07-17T08:49:57.299529Z add_interruptible_total=1017
+2026-07-17T08:49:57.299599Z wake_interruptible_total=0
+2026-07-17T08:49:57.302231Z fair_pick_calls=0
+2026-07-17T08:49:57.305288Z fast_path_calls=794575
+2026-07-17T08:49:57.305446Z fair_scan_max=0
+2026-07-17T08:49:57.307805Z zombie_drain_scan_total=0
+2026-07-17T08:49:57.310642Z zombie_drain_calls=3
+2026-07-17T08:49:57.313512Z zombie_drain_removed=3
+2026-07-17T08:49:57.313574Z ready_nonzero_nice_cur=0
+2026-07-17T08:49:57.318078Z __PERF_STATS_AFTER_TASKQ_END__
+2026-07-17T08:49:57.975009Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_TIMER__
+2026-07-17T08:49:58.009408Z ktimer_len_max=0
+2026-07-17T08:49:58.011851Z ktimer_add_total=0
+2026-07-17T08:49:58.011962Z ktimer_pop_max=0
+2026-07-17T08:49:58.014676Z ktimer_pop_total=363
+2026-07-17T08:49:58.017348Z ktimer_stale_waketask=0
+2026-07-17T08:49:58.017409Z ktimer_real_wake=0
+2026-07-17T08:49:58.020200Z ktimer_compact_calls=0
+2026-07-17T08:49:58.022989Z ktimer_stale_removed=0
+2026-07-17T08:49:58.025679Z wait_with_timeout_total=0
+2026-07-17T08:49:58.028556Z timer_irq_ticks_total=925958
+2026-07-17T08:49:58.028687Z timer_irq_ticks_max=20553
+2026-07-17T08:49:58.031347Z timer_pop_nodes_total=0
+2026-07-17T08:49:58.033983Z timer_pop_ticks_total=18523
+2026-07-17T08:49:58.035387Z timer_pop_ticks_max=201
+2026-07-17T08:49:58.040335Z __PERF_STATS_AFTER_TIMER_END__
+2026-07-17T08:49:58.757320Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_SECCOMP__
+2026-07-17T08:49:58.791750Z seccomp_check_calls=0
+2026-07-17T08:49:58.794509Z seccomp_check_ticks_total=0
+2026-07-17T08:49:58.797435Z seccomp_check_ticks_max=0
+2026-07-17T08:49:58.798375Z seccomp_disabled_bypass=0
+2026-07-17T08:49:58.803398Z __PERF_STATS_AFTER_SECCOMP_END__
+2026-07-17T08:49:59.504416Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_SYSCALL__
+2026-07-17T08:49:59.538732Z syscall_total=2352
+2026-07-17T08:49:59.541346Z syscall_getppid_total=3
+2026-07-17T08:49:59.544237Z syscall_cost_max_ticks=63708611
+2026-07-17T08:49:59.546904Z syscall_cost_ticks_total=403188739
+2026-07-17T08:49:59.549845Z getppid_cost_ticks_total=97
+2026-07-17T08:49:59.552363Z getppid_cost_ticks_max=79
+2026-07-17T08:49:59.556837Z ecall_trap_cost_ticks_total=403743550
+2026-07-17T08:49:59.558054Z ecall_trap_cost_ticks_max=63709084
+2026-07-17T08:49:59.560923Z user_unaligned_traps=381
+2026-07-17T08:49:59.563506Z user_unaligned_ticks_total=708189
+2026-07-17T08:49:59.566485Z user_unaligned_ticks_max=3290
+2026-07-17T08:49:59.569085Z user_unaligned_load_2=15
+2026-07-17T08:49:59.571841Z user_unaligned_load_4=11
+2026-07-17T08:49:59.571880Z user_unaligned_load_8=65
+2026-07-17T08:49:59.574747Z user_unaligned_store_2=67
+2026-07-17T08:49:59.577439Z user_unaligned_store_4=30
+2026-07-17T08:49:59.580325Z user_unaligned_store_8=193
+2026-07-17T08:49:59.582975Z user_unaligned_float_loads=0
+2026-07-17T08:49:59.584405Z user_unaligned_float_stores=0
+2026-07-17T08:49:59.589313Z __PERF_STATS_AFTER_SYSCALL_END__
+2026-07-17T08:50:00.266035Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_CTXSW__
+2026-07-17T08:50:00.299736Z context_switch_total=2766
+2026-07-17T08:50:00.304069Z __PERF_STATS_AFTER_CTXSW_END__
+2026-07-17T08:50:00.822285Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_board_strict_runtime_canonical-1-97b7f572__ rc=0

@@ -38,7 +38,7 @@ SUSPICIOUS_COMMAND = re.compile(
 )
 STATS_FILES = {
     "core": ("boot", "taskq", "timer", "seccomp", "syscall", "ctxsw"),
-    "memory_io": ("reclaim", "tlb", "heap", "pagecache", "blockio"),
+    "memory_io": ("reclaim", "tlb", "heap", "anon_unmap", "pagecache", "blockio"),
     "network_runtime": ("net", "resource"),
 }
 CPYTHON_BENCH_PREFIX = "CPYTHON_BENCH_JSON "

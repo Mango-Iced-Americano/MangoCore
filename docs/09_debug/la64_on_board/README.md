@@ -28,7 +28,7 @@ related_docs:
 | 批次 | 覆盖范围 | 主要产物 | 状态 |
 |------|----------|----------|------|
 | [260710](260710/README.md) | 2026-07-10 起的首次实板 bring-up 总账 | uImage/VALEN/TLB、2 GiB DRAM、AHCI/P1-P4、GMAC/DHCP/HTTPS、CSPRNG、CPython/APK、ext4/ABI；32 篇原始文档 | 历史基线，持续可审计 |
-| [260717](260717/README.md) | 2026-07-17 起的 Python 性能专项 | production 18 项基线、非对齐 trap、匿名页释放 O(N²)、ext4 小文件、strict-align 首轮实板实验和文本原始数据 | 当前批次 |
+| [260717](260717/README.md) | 2026-07-17 起的 Python 性能专项 | production 18 项基线、非对齐 trap、匿名页释放 O(N²) 及真实 Python 占比、ext4 小文件、strict runtime 固化和文本原始数据 | 当前批次 |
 
 ## 3. 阅读顺序
 

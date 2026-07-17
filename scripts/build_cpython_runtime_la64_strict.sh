@@ -204,7 +204,21 @@ setup_toolchain() {
     RANLIB=$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-gcc-ranlib
     STRIP=$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-strip
     READELF=$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-readelf
-    QEMU=$(command -v qemu-loongarch64-static || command -v qemu-loongarch64)
+    QEMU=${CPYTHON_STRICT_QEMU:-}
+    if [[ -z "$QEMU" ]]; then
+        QEMU=$(command -v qemu-loongarch64-static || command -v qemu-loongarch64 || true)
+    fi
+    if [[ -z "$QEMU" ]]; then
+        if is_done python-target && is_done runtime-package; then
+            # A completed cache only needs its archive/index verified; none of
+            # the stamped build stages below execute a target binary.
+            QEMU=/bin/false
+            log "qemu-user unavailable; using completed target/runtime cache"
+        else
+            echo "missing qemu-loongarch64-static; install qemu-user-static in the project Docker image" >&2
+            exit 1
+        fi
+    fi
     "$GCC" -Werror $STRICT_FLAGS -x c -c /dev/null -o "$OUT/strict-flag-probe.o"
     # CPython's --enable-optimizations needs the complete libgcov profiler
     # runtime.  Minimal nolibc toolchains compile the sources but fail only at
@@ -706,7 +720,9 @@ if not profile_files:
 handler_source = root / "os" / "src" / "hal" / "arch" / "loongarch64" / "trap" / "mod.rs"
 
 manifest = {
-    "schema": 1,
+    "schema": 2,
+    "runtime_policy": "mangocore-la64-strict-align-v1",
+    "native_closure_policy": "CPython, musl loader/libc and every packaged native dependency use -mstrict-align",
     "target": "loongarch64-linux-musl",
     "python_version": "3.14.5",
     "compiler": subprocess.check_output([gcc, "--version"], text=True).splitlines()[0],
@@ -718,6 +734,7 @@ manifest = {
     "lto": True,
     "kernel_handler_modified": False,
     "kernel_handler_source_sha256": sha256(handler_source),
+    "build_script_sha256": sha256(root / "scripts" / "build_cpython_runtime_la64_strict.sh"),
     "elf_count": len(elfs),
     "elfs": elfs,
     "virtual_dso_providers": {"libc.so": "lib/ld-musl-loongarch64.so.1"},
@@ -765,6 +782,75 @@ PY
     mark_done runtime-package
 }
 
+write_current_artifact_index() {
+    python3 - "$ARTIFACTS" <<'PY'
+import hashlib
+import json
+import pathlib
+import tarfile
+import sys
+
+artifacts = pathlib.Path(sys.argv[1])
+required_flags = {"-march=loongarch64", "-mabi=lp64d", "-mstrict-align"}
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+valid = []
+for archive in artifacts.glob("cpython-la64-strict-*.tar.xz"):
+    sidecar = pathlib.Path(str(archive) + ".sha256")
+    if not sidecar.is_file():
+        continue
+    expected = sidecar.read_text(encoding="utf-8").split()[0]
+    actual = sha256(archive)
+    if expected != actual:
+        continue
+    try:
+        with tarfile.open(archive, "r:xz") as tar:
+            member = tar.extractfile("strict-runtime-manifest.json")
+            if member is None:
+                continue
+            manifest_bytes = member.read()
+            manifest = json.loads(manifest_bytes)
+    except (KeyError, OSError, tarfile.TarError, json.JSONDecodeError):
+        continue
+    flags = set(str(manifest.get("strict_flags", "")).split())
+    if (
+        manifest.get("target") != "loongarch64-linux-musl"
+        or not required_flags.issubset(flags)
+        or manifest.get("pgo") is not True
+        or manifest.get("lto") is not True
+        or not manifest.get("elfs")
+    ):
+        continue
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    valid.append((archive.stat().st_mtime_ns, archive, actual, manifest_digest, manifest))
+
+if not valid:
+    raise SystemExit("no verified strict-aligned LoongArch runtime artifact")
+_, archive, digest, manifest_digest, manifest = max(
+    valid, key=lambda item: (item[0], item[1].name)
+)
+index = {
+    "schema": 1,
+    "runtime_policy": "mangocore-la64-strict-align-v1",
+    "artifact": archive.name,
+    "sha256": digest,
+    "manifest_sha256": manifest_digest,
+    "manifest_schema": manifest.get("schema", 1),
+}
+temporary = artifacts / ".current.json.tmp"
+temporary.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+temporary.replace(artifacts / "current.json")
+print("current_artifact=" + archive.name)
+print("current_sha256=" + digest)
+PY
+}
+
 main() {
     fetch_sources
     setup_toolchain
@@ -785,6 +871,7 @@ main() {
     build_host_python
     build_target_python
     package_runtime
+    write_current_artifact_index
 }
 
 main "$@"

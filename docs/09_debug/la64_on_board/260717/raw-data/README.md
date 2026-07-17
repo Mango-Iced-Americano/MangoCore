@@ -13,6 +13,7 @@
 | `20260716T-perf-diag-structural-ab/` | 相邻 production/diag 的构建验证日志；大 ELF/uImage 未复制 |
 | `20260716T-perf-diag-structural-ab-run/` | 相邻实板 A/B 的 manifest、records、串口日志和 `structural_ab.csv` |
 | `20260717T042020Z-cpython-strict-align/` | strict 部署、功能、18 项 benchmark、counter delta、失败记录和对照报告 |
+| `20260717T-anon-unmap-quant/` | strict 标准入口复核、匿名 VMA 精确扫描、五档合成和六项 Python 实板占比 |
 | `strict-runtime-build/` | 完整 runtime 构建日志、runtime manifest、双架构内核编译日志和包 SHA 文件 |
 
 ## 数据保真规则

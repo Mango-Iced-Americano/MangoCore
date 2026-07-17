@@ -4,6 +4,31 @@
 
 ## 2026-07-17
 
+### perf/python: 固化 LA64 strict runtime 并完成匿名页释放的真实 Python 实板量化
+
+**涉及文件：**
+- `scripts/build_cpython_runtime_la64_strict.sh`、`scripts/install_cpython_runtime_la64_strict.py`、根 `Makefile`、`os/Makefile` — 为最新通过校验的 strict artifact 生成 `current.json`；新增 archive 路径/链接安全、sidecar/manifest/94 ELF hash、target/strict flags/PGO/LTO 门禁和 staging 原子安装；将标准 `tools-cpython-la` 与一键 build/verify/install 入口固定到 strict policy
+- `os/src/task/perf.rs`、`os/src/mm/{vma,vma_set}.rs`、`os/src/fs/sysfs/files/diag.rs` — 在 `memory_io` profile 下增加 anonymous private VMA 的 15 个聚合计数器；区分 range/remove-area，记录 requested/resident/active、每次现有 retain 的精确扫描步数、累计/最大 ticks、错误和 size buckets；没有改变释放算法、页表和 TLB 语义
+- `scripts/{kernel_perf.py,diag_smoke_test.sh,run_cpython_bench_matrix.py,analyze_anon_unmap.py}` — 接入 `/sys/kernel/stats/anon_unmap` 的双架构 smoke、目标端 profile 选择、一预热一正式矩阵和可重生成的合成/Python CSV/Markdown 专项报告
+- `docs/09_debug/la64_on_board/260717/{03,05,06,07,README}.md`、`docs/09_debug/perf_diag.md`、`.agents/skills/mango-workflow/references/harness-patterns.md` — 更新问题 2 的证据等级、标准 runtime 固化过程、计数接口、实板影响、数据边界和原始数据索引
+- `docs/09_debug/la64_on_board/260717/raw-data/20260717T-anon-unmap-quant/` — 归档 manifest、22 条 records、24 份原始串口/QEMU日志、14 份派生报告、2 份最终 QEMU 验证日志和 strict current/install 身份，共 44 个文本文件；不复制 QEMU 磁盘、kernel ELF/uImage 等大二进制
+
+**验证：**
+- strict artifact `cpython-la64-strict-3.14.5-abbc714ce59f.tar.xz` SHA-256 `abbc714ce59f105fe1ebaab00cc053cea3d09161a6e51c2431112b6beeaff56a`、manifest SHA-256 `2be976aabcf2a3f964447a3cbaca818f588683e6d3540bb40b6c5ad3eabe447c`；target、完整 strict flags、PGO/LTO、94 ELF 逐项 hash 复核通过，标准 LA64 tools 缓存原子安装 stamp 一致；构造目标缺失/backup 存在/新 archive 打开失败场景，旧 runtime 自动恢复门禁通过 ✅
+- Docker 内严格串行完成 rv64/la64 production、`perf_diag` 和 board-shell 构建；错误路径计数位置收紧后再次重建 production/perf_diag，最终 QEMU kernel SHA-256 为 rv64 `cc68000c...60cb4`、la64 `e54dfd32...a4ae4`；两架构均确认 `anon_unmap` 15 键、profile/reset、`stats_on=0` 冻结及 runtime smoke 到达 DONE，无 FAIL/panic ✅
+- 实板 uImage 16,539,304 B，SHA-256 `5e3f6cd464be0d0dc0f72a45f49f95d6d286334779908d6671252708c21624e5`；TFTP 字节数/CRC32/iminfo 校验、SATA scratch smoke 和 P4 application root 准备通过 ✅
+- 实板确认 `/dev/sda4 /persist ext4 rw`、P4 精确 4 GiB、非 symlink；runtime `/persist/pyperf/r/s-abbc714ce59f`、suite、work、tmp、pycache 和 result 全在 P4 ext4；`strict_runtime_smoke.sh` 输出 `strict-runtime-board-smoke-ok`，P3 未写 ✅
+- 1/4/16/32/64 MiB resident anonymous mapping 的正式 close 为 2.446/18.336/238.420/959.497/3,889.679 ms；主映射 retain 扫描精确为 32,896/524,800/8,390,656/33,558,528/134,225,920，即每档 `N(N+1)/2`；额外 2 页辅助映射稳定贡献 3 步，errors=0 ✅
+- 五档预热/正式差异均低于 1.4%；当前结果相对旧无精确计数器曲线没有观察到变慢，但两侧不是专门同镜像 probe-tax A/B，因此只用作“未见侵入”旁证，不报告正式探针税 ✅
+- strict Python `list/dict/bytesio/fork/thread/json_loads` 全部 1 次预热 + 1 次正式通过；`Vma::unmap` 累计占 body 分别 11.290%/9.693%/4.298%/0.769%/0.030%/约 0，最大单次分别 327/370/24/1.6/1.9/0.01 ms，证明真实影响取决于 VMA 规模而非单纯调用次数 ✅
+- `python3 -m py_compile`、Shell 语法、`kernel_perf analyze`、专项 analyzer、归档来源 `diff/cmp` 和 `git diff --check` 通过；正式文档链接/双架构最终 production rebuild 在本条末尾复核 ✅
+
+**备注：**
+- 本轮只固化用户态 runtime 供应链并增加诊断/测试，没有优化 O(N²) 释放算法。production feature 关闭时 record 函数为 no-op；diagnostic 绝对时间仍不替代 production 正式数字。
+- `board_strict_runtime_smoke` 首次直接调用 wrapper 未设置 `CPYTHON_ROOT`，按兼容默认值启动了 P3 runtime；该样本不作为 P4 strict 身份证据。后续 `strict_runtime_smoke.sh` 自定位 P4 并验证完整 manifest/原生扩展。
+- 外层 `core` smoke 的 381/577 次非对齐 trap 包含未 strict 重编的 BusyBox shell/grep/dirname/ACK，不能归因 CPython。strict 的 trap=0 结论仍来自 runner 在 Python 内部预热后 reset/on/off 的 18 项 body 窗口。
+- 下一步优化验收应要求：合成扫描曲线从 `N(N+1)/2` 降为近线性；list/dict/bytesio 的 scan/ticks/最大调用同时下降；mmap/munmap/mremap/fork/exec/exit、CoW/frame store/TLB 双架构功能不回归。
+
 ### docs/board: 按 260710/260717 重组实板报告并完整归档 Python 性能证据
 
 **涉及文件：**

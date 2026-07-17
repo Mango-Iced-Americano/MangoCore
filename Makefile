@@ -62,7 +62,8 @@ print-logo:
 	@echo "                                                                            "
 .PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
 	2k1000-boot 2k1000-boot-check 2k1000-p3-backup 2k1000-cpython-p3-write \
-	2k1000-p4-image 2k1000-p4-qemu-disk 2k1000-p4-preflight 2k1000-p4-write
+	2k1000-p4-image 2k1000-p4-qemu-disk 2k1000-p4-preflight 2k1000-p4-write \
+	cpython-la64-runtime-build cpython-la64-runtime-verify cpython-la64-runtime-install
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -113,6 +114,27 @@ docker:
 
 docker-test-parallel:
 	bash scripts/run_test_docker_parallel.sh
+
+# Canonical LoongArch runtime.  The os/Makefile tools-cpython-la target uses
+# the same verified installer, so QEMU, board tools images and explicit host
+# provisioning cannot silently fall back to an unaligned Alpine runtime.
+cpython-la64-runtime-build:
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
+		./scripts/build_cpython_runtime_la64_strict.sh
+
+cpython-la64-runtime-verify: cpython-la64-runtime-build
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
+		python3 scripts/install_cpython_runtime_la64_strict.py \
+		--artifact-index target/cpython-strict/artifacts/current.json --verify-only
+
+cpython-la64-runtime-install: cpython-la64-runtime-build
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
+		python3 scripts/install_cpython_runtime_la64_strict.py \
+		--artifact-index target/cpython-strict/artifacts/current.json \
+		--dest user/tools/loongarch64/tests/cpython
 
 2k1000-boot:
 	@test -n "$(IMAGE)" || { echo "usage: make 2k1000-boot IMAGE=<uImage>" >&2; exit 2; }
