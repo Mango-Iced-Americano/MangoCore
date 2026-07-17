@@ -1,0 +1,25 @@
+2026-07-17T15:21:32+08:00
+host_cwd=/home/pxy/projects/MangoCore
+1. docker compose exec -T os-dev bash -lc make -C /app/os rv64_all LOG=warn
+2. docker compose exec -T os-dev bash -lc make -C /app/os la64-kernel-build-only LOG=warn
+3. docker compose exec -T os-dev bash -lc cp archive config to /tmp; copy sdcard to /tmp; make conf-inject; timeout make rv64-run SDCARD_RV=/tmp/... LOG=warn
+2026-07-17T07:21:32+00:00
+STEP=rv64-full-image-build COMMAND=make -C /app/os rv64_all LOG=warn 
+STEP=rv64-full-image-build EXIT_STATUS=0
+2026-07-17T07:25:49+00:00
+STEP=la64-kernel-build COMMAND=make -C /app/os la64-kernel-build-only LOG=warn 
+STEP=la64-kernel-build EXIT_STATUS=0
+2026-07-17T07:29:37+00:00
+STEP=create-runtime-config COMMAND=cp /app/docs/Work_Log/evidence/2026-07-17/gf27-backend-discriminator-config.txt /tmp/gf27-backend-discriminator-os_test.conf 
+STEP=create-runtime-config EXIT_STATUS=0
+2026-07-17T07:29:37+00:00
+STEP=copy-rv64-test-sdcard COMMAND=cp --reflink=auto /app/sdcard-rv.img /tmp/gf27-backend-discriminator-sdcard-rv.img 
+STEP=copy-rv64-test-sdcard EXIT_STATUS=0
+2026-07-17T07:29:40+00:00
+STEP=inject-temporary-config COMMAND=make -C /app/os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=/tmp/gf27-backend-discriminator-os_test.conf CONF_IMAGE=/tmp/gf27-backend-discriminator-sdcard-rv.img AUTO_REBUILD_MEM=0 LOG=warn 
+STEP=inject-temporary-config EXIT_STATUS=0
+2026-07-17T07:30:58+00:00
+STEP=rv64-qemu-gf27 COMMAND=timeout --foreground 900 make -C /app/os rv64-run SDCARD_RV=/tmp/gf27-backend-discriminator-sdcard-rv.img LOG=warn 
+STEP=rv64-qemu-gf27 EXIT_STATUS=0
+2026-07-17T15:32:53+08:00
+STEP=evidence-freshness-check EXIT_STATUS=0 marker_count=0 gf27_run_count=1 gf27_pass_result_count=1
