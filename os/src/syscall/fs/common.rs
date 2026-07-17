@@ -1176,6 +1176,31 @@ pub(crate) const SPLICE_F_GIFT: u32 = 0x08;
 pub(crate) const SPLICE_VALID_FLAGS: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
 pub(crate) const VMSPLICE_VALID_FLAGS: u32 = SPLICE_VALID_FLAGS;
 
+/// Check if two File objects refer to the same underlying pipe.
+///
+/// Compares the shared `PipeRingBuffer` Arc (the backing storage) rather than
+/// the inode Arc, because paired pipefd[0] (read end) and pipefd[1] (write end)
+/// have different inode Arcs but share the same buffer.  splice/tee must reject
+/// same-pipe operations where source and destination are the same pipe.
+pub(crate) fn is_same_pipe(f1: &vfs::File, f2: &vfs::File) -> bool {
+    if f1.file_type() != FileType::Pipe || f2.file_type() != FileType::Pipe {
+        return false;
+    }
+    // Compare the shared pipe ring buffer — the definitive same-pipe identity.
+    // pipefd[0] and pipefd[1] share one PipeRingBuffer even though each endpoint
+    // has its own Pipe (inode) struct.
+    use crate::fs::dev::pipe::Pipe;
+    let p1 = match f1.inode.as_any_ref().downcast_ref::<Pipe>() {
+        Some(p) => p,
+        None => return false,
+    };
+    let p2 = match f2.inode.as_any_ref().downcast_ref::<Pipe>() {
+        Some(p) => p,
+        None => return false,
+    };
+    Arc::ptr_eq(p1.buffer_arc(), p2.buffer_arc())
+}
+
 
 /// If offset is not NULL, then it points to a variable holding the
 /// file offset from which sendfile() will start reading data from

@@ -222,7 +222,7 @@ const FIONREAD: u32 = 0x541B;
 const CAP_SYS_RESOURCE: usize = 24;
 const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
 
-fn send_sigpipe_to_current() {
+pub(crate) fn send_sigpipe_to_current() {
     if let Some(task) = current_task() {
         task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
     }
@@ -235,8 +235,8 @@ pub struct Pipe {
     // Locking: writes notify `read_wait` via `notify_events_at_most(EPOLLIN)`,
     // waking blocked readers.  Reads notify `write_wait` via
     // `notify_events_at_most(EPOLLOUT)`, waking blocked writers.
-    read_wait: EventWaitQueue,
-    write_wait: EventWaitQueue,
+    pub(crate) read_wait: EventWaitQueue,
+    pub(crate) write_wait: EventWaitQueue,
     fasync: crate::fs::vfs::fasync::FAsyncItems,
 }
 
@@ -675,7 +675,19 @@ impl Pipe {
         self.buffer.lock().set_capacity_compat(requested)
     }
 
-    fn peer_read_end(&self) -> Option<Arc<Pipe>> {
+    /// Return a reference to the shared ring buffer `Arc`.
+    /// Used by splice/tee to detect same-pipe identity via `Arc::ptr_eq`.
+    pub fn buffer_arc(&self) -> &Arc<Mutex<PipeRingBuffer>> {
+        &self.buffer
+    }
+
+    /// Peek data from the pipe without consuming it (head not advanced).
+    /// Returns the number of bytes copied into `buf`.
+    pub fn peek_at(&self, buf: &mut [u8]) -> usize {
+        self.buffer.lock().peek_data(buf)
+    }
+
+    pub(crate) fn peer_read_end(&self) -> Option<Arc<Pipe>> {
         self.buffer
             .lock()
             .read_end
@@ -683,7 +695,7 @@ impl Pipe {
             .and_then(Weak::upgrade)
     }
 
-    fn peer_write_end(&self) -> Option<Arc<Pipe>> {
+    pub(crate) fn peer_write_end(&self) -> Option<Arc<Pipe>> {
         self.buffer
             .lock()
             .write_end
@@ -774,7 +786,7 @@ impl PipeRingBuffer {
         }
     }
     #[allow(unused)]
-    fn get_used_size(&self) -> usize {
+    pub(crate) fn get_used_size(&self) -> usize {
         if self.status == RingBufferStatus::FULL {
             self.capacity
         } else if self.status == RingBufferStatus::EMPTY {
@@ -903,16 +915,129 @@ impl PipeRingBuffer {
         }
         total
     }
+    /// Peek data from the ring buffer without advancing head.
+    /// Used by tee() to duplicate pipe data without consuming it.
+    /// Returns the number of bytes actually copied (≤ `buf.len()` and available data).
+    pub fn peek_data(&self, buf: &mut [u8]) -> usize {
+        if self.status == RingBufferStatus::EMPTY {
+            return 0;
+        }
+        let available = self.get_used_size();
+        let n = buf.len().min(available);
+        let mut total = 0;
+        let mut pos = self.head;
+        while total < n {
+            let end = if self.tail <= pos { self.capacity } else { self.tail };
+            let chunk = (n - total).min(end - pos);
+            if chunk == 0 {
+                break;
+            }
+            // Safety: pos..pos+chunk is within arr bounds (guaranteed by ring invariants),
+            // and total..total+chunk is within buf bounds.
+            unsafe {
+                copy_nonoverlapping(
+                    self.arr.as_ptr().add(pos),
+                    buf.as_mut_ptr().add(total),
+                    chunk,
+                );
+            }
+            total += chunk;
+            pos = if pos + chunk == self.capacity { 0 } else { pos + chunk };
+        }
+        total
+    }
+
+    /// Atomically move up to `max_bytes` bytes from `src` into `dst`.
+    /// Both ring buffers MUST already be locked by the caller.
+    /// Returns the number of bytes actually moved (0 if no progress could
+    /// be made — src empty, dst full, or both).
+    pub fn splice_move(src: &mut Self, dst: &mut Self, max_bytes: usize) -> usize {
+        let avail = src.get_used_size();
+        let space = dst.get_free_size();
+        let want = max_bytes.min(avail).min(space);
+        if want == 0 {
+            return 0;
+        }
+
+        let mut remaining = want;
+        while remaining > 0 {
+            // --- readable segment in `src` (ring-buffer invariant) -------
+            // Valid data spans [src.head, src.tail) wrapping at capacity.
+            let src_seg_end = if src.tail <= src.head {
+                src.capacity
+            } else {
+                src.tail
+            };
+            let src_seg_len = (src_seg_end - src.head).min(remaining);
+            if src_seg_len == 0 {
+                break;
+            }
+
+            // --- writable segment in `dst` (ring-buffer invariant) ------
+            // Free region spans [dst.tail, dst.head) wrapping at capacity.
+            let dst_seg_end = if dst.tail < dst.head {
+                dst.head
+            } else {
+                dst.capacity
+            };
+            let dst_seg_len = (dst_seg_end - dst.tail).min(src_seg_len);
+            if dst_seg_len == 0 {
+                break;
+            }
+
+            let chunk = src_seg_len.min(dst_seg_len);
+            // Safety: `src.arr` and `dst.arr` are two distinct heap
+            // allocations (each in its own `Box`).  The [head, head+chunk)
+            // and [tail, tail+chunk) ranges are within their respective
+            // capacities because the segment calculations above are bounded
+            // by `remaining <= want <= space` and the ring invariants.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.arr.as_ptr().add(src.head),
+                    dst.arr.as_mut_ptr().add(dst.tail),
+                    chunk,
+                );
+            }
+
+            src.head = if src.head + chunk == src.capacity {
+                0
+            } else {
+                src.head + chunk
+            };
+            dst.tail = if dst.tail + chunk == dst.capacity {
+                0
+            } else {
+                dst.tail + chunk
+            };
+            remaining -= chunk;
+        }
+
+        let moved = want - remaining;
+        if moved > 0 {
+            src.status = if src.head == src.tail {
+                RingBufferStatus::EMPTY
+            } else {
+                RingBufferStatus::NORMAL
+            };
+            dst.status = if dst.head == dst.tail {
+                RingBufferStatus::FULL
+            } else {
+                RingBufferStatus::NORMAL
+            };
+        }
+        moved
+    }
+
     fn set_write_end(&mut self, write_end: &Arc<Pipe>) {
         self.write_end = Some(Arc::downgrade(write_end));
     }
     fn set_read_end(&mut self, read_end: &Arc<Pipe>) {
         self.read_end = Some(Arc::downgrade(read_end));
     }
-    fn all_write_ends_closed(&self) -> bool {
+    pub(crate) fn all_write_ends_closed(&self) -> bool {
         self.write_end.as_ref().unwrap().upgrade().is_none()
     }
-    fn all_read_ends_closed(&self) -> bool {
+    pub(crate) fn all_read_ends_closed(&self) -> bool {
         self.read_end.as_ref().unwrap().upgrade().is_none()
     }
 }
