@@ -994,6 +994,12 @@ impl IndexNode for Ext4OSInode {
             let target_bytes = unsafe { CStr::from_ptr(data as *const core::ffi::c_char) };
             let target = target_bytes.to_str().map_err(|_| SyscallErr::EINVAL)?;
             self.symlink(name, target)
+        } else if file_type == FileType::Pipe
+            || file_type == FileType::CharDevice
+            || file_type == FileType::BlockDevice
+            || file_type == FileType::Socket
+        {
+            self.mknod(name, mode, data as u64)
         } else {
             self.create(name, file_type, mode)
         }

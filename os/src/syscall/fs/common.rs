@@ -238,7 +238,11 @@ pub(crate) fn apply_current_umask(mode: vfs::InodeMode) -> vfs::InodeMode {
     let task = current_task().unwrap();
     let fs_ref = task.process.fs();
     let mask = fs_ref.lock().umask & 0o777;
-    mode & vfs::InodeMode::S_IALLUGO & !vfs::InodeMode::from_bits_truncate(mask)
+    // Only apply umask to permission bits (S_IALLUGO).
+    // Callers that need S_IFMT type bits (mknodat) must re-pack them
+    // from the extracted FileType after calling this function.
+    let perm_bits = mode & vfs::InodeMode::S_IALLUGO;
+    perm_bits & !vfs::InodeMode::from_bits_truncate(mask)
 }
 
 pub(crate) fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
