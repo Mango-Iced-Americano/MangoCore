@@ -1,5 +1,11 @@
 use super::common::*;
 
+// AT_STATX sync type flags (Linux 6.6 uapi/linux/fcntl.h).
+// NOT added to FstatatFlags — fstatat must reject them.
+const AT_STATX_SYNC_TYPE: u32 = 0x6000;
+const AT_STATX_FORCE_SYNC: u32 = 0x2000;
+const AT_STATX_DONT_SYNC: u32 = 0x4000;
+
 pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut u8) -> isize {
     let token = current_user_token();
     let path = match user_cstring(token, path) {
@@ -9,13 +15,24 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
     if let Err(errno) = validate_path_len(&path) {
         return errno;
     }
-    let flags = match FstatatFlags::from_bits(flags) {
+    // Validate statx-only sync type flags before FstatatFlags parsing.
+    // This prevents fstatat from accidentally accepting them.
+    let sync_type = flags & AT_STATX_SYNC_TYPE;
+    if sync_type != 0 && sync_type != AT_STATX_FORCE_SYNC && sync_type != AT_STATX_DONT_SYNC {
+        return EINVAL;
+    }
+    // Strip sync bits, parse remainder as shared fstatat flags.
+    let flags = match FstatatFlags::from_bits(flags & !AT_STATX_SYNC_TYPE) {
         Some(flags) => flags,
         None => {
             warn!("[sys_statx] unknown flags");
             return EINVAL;
         }
     };
+    // Linux 6.6: reject requests with reserved-bit set (future struct statx expansion)
+    if mask & STATX__RESERVED != 0 {
+        return EINVAL;
+    }
 
     info!(
         "[sys_statx] dirfd: {}, path: {:?}, flags: {:?}",

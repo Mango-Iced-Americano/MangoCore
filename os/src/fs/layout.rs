@@ -1,4 +1,4 @@
-use crate::{hal::BLOCK_SZ, timer::TimeSpec};
+use crate::timer::TimeSpec;
 
 bitflags! {
     pub struct OpenFlags: u32 {
@@ -108,6 +108,7 @@ pub const STATX_BLOCKS: u32 = 0x0400;
 pub const STATX_BTIME: u32 = 0x0800;
 pub const STATX_MNT_ID: u32 = 0x1000;
 pub const STATX_BASIC_STATS: u32 = 0x07ff;
+pub const STATX__RESERVED: u32 = 0x80000000;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -202,10 +203,9 @@ impl Statx {
         stx_dev_major: u32,
         stx_dev_minor: u32,
     ) -> Self {
-        const BLK_SIZE: u32 = BLOCK_SZ as u32;
         Self {
             stx_mask: stx_mask,
-            stx_blksize: BLK_SIZE as u32,
+            stx_blksize: 0, // caller fills from Metadata.blk_size
             stx_attributes: 0,
             stx_nlink,
             stx_uid: 0,
@@ -214,7 +214,9 @@ impl Statx {
             __statx_pad1: [0 as u16; 1],
             stx_ino,
             stx_size,
-            stx_blocks: (stx_size as u64 + BLK_SIZE as u64 - 1) / BLK_SIZE as u64,
+            // stx_blocks is filled by metadata_to_statx from Metadata.blocks
+            // (already in 512-byte units per POSIX).  No size-derived default.
+            stx_blocks: 0,
             stx_attributes_mask: 0,
             stx_atime: StatxTimestamp {
                 tv_sec: stx_atime_sec,
@@ -288,7 +290,6 @@ impl Stat {
         st_mtime_sec: i64,
         st_ctime_sec: i64,
     ) -> Self {
-        const BLK_SIZE: u32 = BLOCK_SZ as u32;
         Self {
             st_dev,
             st_ino,
@@ -299,9 +300,9 @@ impl Stat {
             st_rdev,
             __pad: 0,
             st_size,
-            st_blksize: BLK_SIZE as u32,
+            st_blksize: 0, // caller fills from Metadata.blk_size
             __pad2: 0,
-            st_blocks: (st_size as u64 + BLK_SIZE as u64 - 1) / BLK_SIZE as u64,
+            st_blocks: 0, // caller fills from Metadata.blocks
             st_atime: TimeSpec {
                 tv_sec: st_atime_sec as usize,
                 tv_nsec: 0,

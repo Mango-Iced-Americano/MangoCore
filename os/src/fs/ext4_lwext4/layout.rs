@@ -302,7 +302,10 @@ impl IndexNode for Ext4OSInode {
                 size_raw as i64
             };
             let blocks = if self.file_type == FileType::File && size > 0 {
-                (size as usize + self.fs.block_size() - 1) / self.fs.block_size()
+                // Convert to 512-byte units (POSIX stat.st_blocks semantics).
+                // lwext4 does not expose ext4 i_blocks directly, so we
+                // conservatively ceil-divide the file size by 512.
+                (size as usize + 511) / 512
             } else { 0 };
             return Ok(Metadata {
                 dev_id: self.fs.dev_id(),
@@ -391,8 +394,9 @@ impl IndexNode for Ext4OSInode {
                         );
                         let size_i64 = s as i64;
                         let blks = if s > 0 {
-                            ((s as usize + self.fs.block_size() - 1)
-                                / self.fs.block_size())
+                            // Convert to 512-byte units (POSIX stat.st_blocks semantics).
+                            // lwext4 does not expose ext4 i_blocks directly.
+                            (s as usize + 511) / 512
                         } else {
                             0
                         };

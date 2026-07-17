@@ -268,11 +268,9 @@ pub(crate) fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
 
 pub(crate) fn metadata_to_statx(meta: &vfs::Metadata, _mask: u32) -> Statx {
     let stat = metadata_to_stat(meta);
-    // Compute actual filled-in mask (Linux: reports what WAS filled, not what was requested)
-    let supported = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID | STATX_GID
-        | STATX_ATIME | STATX_MTIME | STATX_CTIME | STATX_INO | STATX_SIZE | STATX_BLOCKS;
-    // Always report all supported fields (Linux fills BASIC_STATS unconditionally)
-    let actual_mask = supported;
+    // Linux 6.6: stx_mask reports STATX_BASIC_STATS — the fields this
+    // implementation always fills, regardless of what was requested.
+    let actual_mask = STATX_BASIC_STATS;
     let mut statx = Statx::new(
         actual_mask,
         stat.get_nlink(),
@@ -289,6 +287,10 @@ pub(crate) fn metadata_to_statx(meta: &vfs::Metadata, _mask: u32) -> Statx {
     );
     statx.stx_uid = stat.st_uid;
     statx.stx_gid = stat.st_gid;
+    // Use metadata-backed block size (filesystem preferred I/O size).
+    statx.stx_blksize = meta.blk_size as u32;
+    // Use metadata-backed block count in 512-byte units.
+    statx.stx_blocks = meta.blocks as u64;
     statx
 }
 
