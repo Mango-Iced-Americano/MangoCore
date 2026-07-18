@@ -1,4 +1,4 @@
-use core::{convert::TryFrom, fmt::Debug, intrinsics::size_of};
+use core::{convert::TryFrom, fmt::Debug, mem::size_of};
 
 use crate::syscall::errno::ENOMEM;
 

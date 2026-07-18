@@ -23,7 +23,7 @@ use crate::task::{
     current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
-use core::arch::{asm, global_asm};
+use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
 pub use context::{MachineContext, TrapContext, UserContext, UserSignalMask};
@@ -44,14 +44,16 @@ extern "C" {
 
 #[allow(unused)]
 #[link_section = ".text.__rfill"]
-#[naked]
+// SAFETY: [Category 13 — library/unsafe contract] Hardware enters this TLB
+// refill stream with the LoongArch-defined register/CSR state. The assembly
+// preserves that ABI and loops internally rather than falling through to Rust.
+#[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn __rfill() {
     //crmd = 0b0_01_01_10_0_00;
     //         w_dm_df_pd_i_lv;
     // let i = 0xA8;
-    unsafe {
-        asm!(
+    naked_asm!(
             // PGD: 0x1b CRMD:0x0 PWCL:0x1c TLBRBADV:0x89 TLBERA:0x8a TLBRSAVE:0x8b SAVE:0x30
             // TLBREHi: 0x8e STLBPS: 0x1e MERRsave:0x95
             "
@@ -107,9 +109,7 @@ pub extern "C" fn __rfill() {
     csrwr  $t0, 0x8d
     b      2b
 ",
-            options(noreturn)
-        )
-    }
+    )
 }
 
 pub fn init() {

@@ -2,19 +2,18 @@
 //!
 //! `_start` 设置启动栈并跳转到 Rust 侧 `rust_main`。
 
-use core::arch::asm;
+use core::arch::naked_asm;
 
 use crate::config::BOOT_STACK_SIZE;
 
-#[naked]
+// SAFETY: [Category 13 — library/unsafe contract] Firmware enters this as the
+// first LoongArch instruction stream, before a Rust stack or references exist.
+// The assembly initializes DMW and `$sp`, then tail-jumps to `rust_main`.
+#[unsafe(naked)]
 #[no_mangle]
 #[link_section = ".text.entry"]
 unsafe extern "C" fn _start() -> ! {
-    // Safety: this is the first instruction stream after firmware jumps to the
-    // kernel. No Rust stack or references exist yet; the assembly only programs
-    // DMW registers, initializes `$sp`, and tail-jumps to `rust_main`.
-    unsafe {
-        asm!(
+    naked_asm!(
             // 以下内容看不懂的话
             // 可以去看龙架构手册卷一 v1.11
             r"
@@ -40,9 +39,7 @@ unsafe extern "C" fn _start() -> ! {
             boot_stack_size = const BOOT_STACK_SIZE,
             boot_stack = sym BOOT_STACK,
             entry = sym crate::rust_main,
-            options(noreturn)
-        )
-    }
+    )
 }
 
 #[link_section = ".bss.stack"]
