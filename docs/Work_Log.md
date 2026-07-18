@@ -4,6 +4,27 @@
 
 ## 2026-07-18
 
+### tty/smolagent: 修复交互首字符触发的 WaitQueue 同锁自锁
+
+**涉及文件：**
+- `os/src/fs/dev/tty.rs` — 将串口输入改为固定容量 line discipline；输入通知移到 UART/stash 生产侧，read consumer 只消费、`poll()` 只查询；补齐 `ICRNL`、最小 `ICANON`、`VMIN/VTIME`、编辑控制字符和解锁后的 VINTR 投递
+- `os/src/task/{processor,manager}.rs`、`os/src/trace.rs` — UART 与 trace stash 统一进入 TTY 生产路径；明确 WaitQueue 持锁复查条件闭包不得通知/重取同一队列
+- `user/tools/cpython/python3-wrapper-persist.sh` — 在旧 ext4 完成一致性闭环前强制禁止新 pyc 写入，避免已观察到的 pyc/source 交叉覆盖再次破坏 P4 Python 源码
+- `docs/03_fs/devfs.md`、`docs/09_debug/la64_on_board/260717/{README,10-tty-smolagent-interactive-fix.md}` — 记录锁链、line discipline 语义、实板证据、RESET 后源码损坏现场和未完成边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 WaitQueue consumer 自通知自锁和 Python 源文件出现 pyc magic 的取证/恢复模式
+
+**验证：**
+- 项目 Docker 镜像内严格串行执行 `make rv64-kernel-build-only`、`make la64-kernel-build-only`，最终源码均退出 0；`make la64-qemu-apk-persist-shell` 完成并生成对应 LA64 QEMU 镜像 ✅
+- LA64 QEMU：canonical 整行读取、raw `VMIN=1`、`VMIN=0/VTIME=1`、`VMIN=3/VTIME=1` 四组输入语义通过 ✅
+- 2K1000LA：CPython `input()` 仅输入首字符 `c` 后等待 3 秒仍可继续输入，补全 `ode` 并按 Enter 返回 `code`；raw 首字符返回 `63`；真实 SmolAgent 交互菜单不再整核自旋，完整 `code` 可推进，Ctrl-C 可返回 shell ✅
+- 无网络 monkeypatch 验证用户选择的 `tool_calling` 不再被覆盖；SmolAgents 1.26.0 精确补丁的官方态、旧 action-only 态、损坏/缺失 active 源恢复、缓存清理和 `--check` 幂等门禁通过 ✅
+- `python3 -m py_compile scripts/board/patch_smolagents_action_type.py`、相关 Shell `sh -n`、Rust `rustfmt` 和 `git diff --check` 通过 ✅
+
+**备注：**
+- 首字符卡死不是 Rich `input()` 等待 Enter：`wait_event` 为闭合 lost-wakeup 会持等待队列锁复查 read 条件，旧 TTY consumer 消费字符后又通知同一 EventWaitQueue，单核在非重入 spin mutex 上永久自旋。修复原则是 producer 发布可读状态并通知，consumer/poll 不产生通知。
+- 人工 RESET 后，P4 `smolagents/cli.py` 的活动文件开头出现 CPython 3.14 pyc magic，9709 字节文件含 2966 个 NUL，而 9658 字节 exact `.orig` 仍存在。现有证据确认 pyc 数据覆盖源码，但不能在 PageCache identity、allocator、writeback 与复位顺序之间确定具体子根因；因此只加入原子恢复和临时 `-B` 门禁，不把猜测写成 ext4 已确认根因。
+- 当前实现是最小 line discipline：1024 字节队列、UTF-8 按 byte erase、`VMIN/VTIME` 状态非 per-open/per-read、`TCFLSH`/完整 N_TTY/output processing 尚未实现；UART 每 scheduler iteration 只读一字节，高速粘贴丢字符属于独立问题。
+
 ### board/python: 修复 SmolAgents 1.26.0 交互模型名与加载器分发不一致
 
 **涉及文件：**

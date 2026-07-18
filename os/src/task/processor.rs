@@ -26,7 +26,6 @@ use core::hint::spin_loop;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use lazy_static::*;
-use log;
 use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
@@ -134,11 +133,12 @@ pub fn run_tasks() {
         schedule_tick = schedule_tick.wrapping_add(1);
         // Read one character from UART per iteration. Handle in priority order:
         // 1. Magic key (Ctrl+T) → trace dump + shutdown
-        // 2. VINTR (Ctrl+C) → SIGINT to foreground/blocked task
-        // 3. Normal character → stash for TTY
+        // 2. Other input → stash, then feed the TTY line discipline.  The
+        //    production path owns both task and epoll readiness notification.
         //
         // On rv64 this is an SBI ecall, so do not pay it on every context
-        // switch. TTY read paths still poll the console directly.
+        // switch. Blocked readers are covered by the scheduler's periodic
+        // console poll and the existing wait-IO fallback timer.
         #[cfg(target_arch = "riscv64")]
         let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
         #[cfg(not(target_arch = "riscv64"))]
@@ -149,11 +149,9 @@ pub fn run_tasks() {
             if ch != 0xFF {
                 if crate::trace::check_magic_key(ch, "schedule") {
                     // check_magic_key → dump_from → shutdown, never returns.
-                } else if crate::fs::dev::tty::Teletype::handle_vintr(ch) {
-                    log::info!("[vintr-poll] SIGINT sent! ch={:#x}", ch);
                 } else {
                     crate::trace::stash_char(ch);
-                    crate::fs::dev::tty::Teletype::wake_readers();
+                    crate::fs::dev::tty::Teletype::receive_stashed();
                 }
             }
             sched_record_stage(

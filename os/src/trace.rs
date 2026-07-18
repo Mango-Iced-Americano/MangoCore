@@ -390,6 +390,7 @@ pub fn try_dump_from(source: &str) -> bool {
     }
     // Not magic — stash it so TTY can pick it up later.
     stash_char(ch);
+    crate::fs::dev::tty::Teletype::receive_stashed();
     false
 }
 

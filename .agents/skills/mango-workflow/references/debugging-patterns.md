@@ -728,3 +728,54 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
   同盘 staging 解包、功能验证后 rename 发布；缺失的 FS syscall 仍需作为独立根因记录。
 - **相关文件**：`scripts/board/verify_persist_python.sh`,
   `docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md`
+
+### WaitQueue 持锁复查条件时，consumer 不能通知同一队列
+
+- **现象**：交互程序阻塞读 TTY 时，输入第一个字符立刻整核卡死，甚至还没按 Enter；
+  单命令模式正常，普通 shell/readline 又可能因先 poll 或预缓冲而偶尔绕开。
+- **根因**：为闭合 lost-wakeup，`wait_event` 会在 waiter 入队后持 queue lock 再执行一次
+  条件闭包。若闭包中的 read consumer 成功消费后调用同一 `EventWaitQueue::notify_*`，会
+  再取同一个非重入 `spin::Mutex`，单核永久自旋。看起来像“首字符触发”，实际与字符值
+  和 Python 性能无关。
+- **修复**：producer 在数据真正进入可读状态后通知普通 waiter 和 epoll；consumer 只
+  消费，`poll()` 只查询。WaitQueue 条件闭包契约显式写明禁止通知/重取同队列。通知必须
+  在释放底层对象锁后执行；VINTR 等需要扫描 task/process 的外部操作也先做状态快照再
+  解锁执行。
+- **验收**：canonical 模式输入单字符后内核仍活，Enter 后整行返回；raw `VMIN=1`
+  首字符立即返回；select/epoll 在行结束或 raw 数据到达时唤醒；Ctrl-C 返回 shell。
+- **相关文件**：`os/src/task/manager.rs`, `os/src/fs/dev/tty.rs`,
+  `os/src/task/processor.rs`, `os/src/fs/vfs/event.rs`
+
+### Python 源文件出现 pyc magic 时按 cross-file 数据破坏取证
+
+- **现象**：源码 import 报 `source code string cannot contain null bytes`；文件大小仍像
+  正常 `.py`，但开头是 CPython magic、flags、timestamp、source-size 和 marshal code。
+- **判定**：同时记录源大小、NUL 数、前 32 字节、同版本官方源 SHA-256、备份 SHA-256
+  和 `PYTHONPYCACHEPREFIX` 实际路径。若 pyc header 中的 source-size 等于源 inode size，
+  说明不是普通文本截断；优先审计 PageCache/inode identity、块复用和 writeback，不要
+  归因 aligned ABI 或包依赖。
+- **安全门禁**：修补 active 源时禁止原地 truncate；使用同目录唯一 temp、完整写入、
+  file fsync、哈希复核、replace 和 sync。保留 exact-version 原始备份，active 缺失/损坏
+  只从该备份重建；同时清理 adjacent/prefix pyc。在文件系统一致性闭环前用 `-B` 禁止
+  新 bytecode 写入，并把冷启动性能影响与原基线分开报告。
+- **边界**：一次 reset 现场可确认“pyc 数据覆盖源码”，但不能仅凭在线字节判定是
+  allocator、PageCache、writeback 还是 rename/recovery；需要 fault injection、离线 fsck
+  和新旧文件系统隔离 A/B。
+- **相关文件**：`scripts/board/patch_smolagents_action_type.py`,
+  `user/tools/cpython/python3-wrapper-persist.sh`,
+  `docs/09_debug/la64_on_board/260717/10-tty-smolagent-interactive-fix.md`
+
+### 交互菜单与加载器分发的名称必须成对核对
+
+- **现象**：交互菜单接受并返回一个看似合法的模型/后端名称，配置全部结束后却由加载器报
+  `Unsupported ...`；尝试输入加载器源码中的类名时，又被菜单的 choices 当场拒绝。
+- **定位**：不要先怀疑 API key、provider 或网络。沿配置返回值检查“菜单枚举 → 配置 tuple
+  → loader/工厂分支”三处名称是否一致，并同时核对非交互入口是否使用另一名称。菜单能显示
+  某项只证明前端枚举存在，不证明下游分发器能处理它。
+- **修复**：若两个名称代表同一实现且需要兼容现有脚本，在加载器边界接受显式别名，再统一
+  构造同一个实现；不要要求用户输入 choices 之外的隐藏名称，也不要只改菜单而破坏既有
+  非交互调用。对落盘第三方源码应固定发行版、原始/补丁整文件哈希和唯一锚点，未知版本
+  fail closed。
+- **验收**：分别覆盖菜单返回名、旧的非交互类名、未知名称拒绝、已有旧补丁迁移、重复执行
+  幂等和配置参数透传；网络后端可用 dummy client/factory 验证分发，不必先发真实公网请求。
+- **相关文件**：`scripts/board/patch_smolagents_action_type.py`

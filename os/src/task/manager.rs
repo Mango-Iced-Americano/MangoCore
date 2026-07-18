@@ -1311,7 +1311,9 @@ impl WaitQueue {
     ///
     /// # Locking
     ///
-    /// `cond` 在不持有等待队列锁时执行；调用方负责在闭包内轮询底层对象状态。
+    /// `cond` 会先在无锁快速路径执行一次，并在 `prepare_to_wait` 后持有该
+    /// 等待队列锁再检查一次以闭合 lost-wakeup 窗口。因此条件闭包只能查询或
+    /// 消费底层状态，禁止通知或再次获取同一个等待队列锁。
     pub fn wait_until<F>(wq: &Mutex<Self>, mut cond: F) -> isize
     where
         F: FnMut() -> Option<isize>,

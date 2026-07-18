@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-13"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -40,6 +40,7 @@ related_docs:
   - "docs/03_fs/architecture.md"
   - "docs/03_fs/vfs-core.md"
   - "docs/03_fs/init-and-rootfs.md"
+  - "docs/09_debug/la64_on_board/260717/10-tty-smolagent-interactive-fix.md"
 ---
 
 ## 概述
@@ -130,11 +131,30 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 控制台终端。`/dev/console` 是 TTY 的别名。
 
-**读**：从物理串口（`console_getchar`）或 stashed 输入区取一个字符，写入用户缓冲区。如果字符匹配 VINTR（默认 Ctrl-C）且 ISIG 标志置位，向前台进程组发送 SIGINT 并返回 `EAGAIN`。ECHO 模式下回显字符（`\r` 转 `\n`）。
+**输入生产与通知**：调度器从物理 UART 取字符，先经过 magic-key 识别，再放入 trace
+stash；`Teletype::receive_stashed()` 将字符送入 line discipline。只有生产侧在字符真正使
+TTY 可读后才通知普通 read waiter 和 epoll listener；`read_at()` 只消费数据，`poll()` 只
+查询状态，两者都不会反向通知自己的读等待队列。这个约束避免 `WaitQueue` 在持锁重查
+read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形成单核自锁。
+
+**输入变换与规范模式**：输入先应用 `IGNCR` / `ICRNL` / `INLCR`。默认 `ICRNL` 因而会
+把串口 Enter 的 `CR` 转为用户态 `NL`。`ICANON` 下使用固定 1024 字节环形队列保存完整
+记录和当前可编辑行，支持换行、`VEOL` / `VEOL2`、`VEOF`、`VERASE`、`VKILL`，并按
+`ECHO` / `ECHOE` / `ECHOK` / `ECHONL` / `ECHOKE` 做最小回显。规范 read 最多返回一条
+记录；在 Enter 前输入普通字符只进入当前行，不会提前返回给 Python `input()`。
+
+**非规范模式**：清除 `ICANON` 后支持 `VMIN` / `VTIME` 四种基本组合。每个有效字节
+都会在生产侧唤醒 waiter，`VTIME` 由现有 wait-I/O 兜底定时复查。当前计时状态仍属于
+整个 `Teletype`，而不是每个 open/read；多个并发 reader 的完整 Linux N_TTY 语义尚未
+实现。
+
+**控制字符**：`ISIG` 下的 VINTR（默认 Ctrl-C）会按 `NOFLSH` 决定是否清空输入，并在
+释放 TTY 内部锁后向前台进程组投递 SIGINT，避免持 TTY 锁扫描全局 task/process 表。
+没有可用 foreground pgid 时仍保留调度器场景的 interruptible-task fallback。
 
 **写**：将 UTF-8 字符串直接输出到串口（`print!`）。
 
-**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。
+**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
 
 ### Pipe（匿名管道）
 

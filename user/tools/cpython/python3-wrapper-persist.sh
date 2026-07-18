@@ -83,7 +83,11 @@ export PYTHONHOME="$CPYTHON_ROOT/usr"
 export PYTHONUSERBASE="$PYTHON_STATE/user"
 export PYTHONPYCACHEPREFIX="$PYTHON_STATE/pycache"
 export TMPDIR="$PYTHON_STATE/tmp"
-export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-0}"
+# Current MangoCore ext4 has produced a real-board cross-file writeback failure
+# where cli.py contained the bytes of its generated .pyc after reset.  Existing
+# valid bytecode remains readable with -B; disable only new cache writes until
+# the replacement ext4 implementation closes that integrity issue.
+export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
