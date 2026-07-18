@@ -71,6 +71,30 @@ else
     overall=1
 fi
 
+echo "SCENARIO missing RUSTUP_HOME rejects HOME fallback"
+fallback_home="$work_dir/fallback-home"
+mkdir -p "$fallback_home/.rustup"
+make_fake_rustup_home "$fallback_home/.rustup"
+snapshot_inputs
+set +e
+(
+    cd "$work_dir"
+    HOME="$fallback_home"
+    unset RUSTUP_HOME
+    sh scripts/rustup-preflight.sh
+) >"$work_dir/missing-rustup-home.out" 2>&1
+status=$?
+set -e
+check_unchanged "missing RUSTUP_HOME rejects HOME fallback"
+if [ "$status" -ne 0 ] \
+    && grep -Fq "RUSTUP_HOME must be set and non-empty" "$work_dir/missing-rustup-home.out"; then
+    echo "PASS: missing RUSTUP_HOME rejects HOME fallback"
+else
+    echo "FAIL: missing RUSTUP_HOME rejects HOME fallback (expected explicit Rustup-home failure)"
+    cat "$work_dir/missing-rustup-home.out" >&2
+    overall=1
+fi
+
 echo "SCENARIO missing toolchain"
 fake_home="$work_dir/missing-toolchain-rustup"
 mkdir "$fake_home"

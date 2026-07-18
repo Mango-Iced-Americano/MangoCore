@@ -3,7 +3,13 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 manifest="$script_dir/../rust-toolchain.toml"
-rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+
+if [ -z "${RUSTUP_HOME:-}" ]; then
+    echo "RUSTUP_HOME must be set and non-empty; this read-only command does not provision; run 'make toolchain-setup' inside the Docker development container to provision the pinned toolchain" >&2
+    exit 1
+fi
+
+rustup_home=$RUSTUP_HOME
 missing=0
 
 if [ ! -r "$manifest" ]; then
