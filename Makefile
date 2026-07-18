@@ -20,6 +20,9 @@ prepare-cargo-config:
 	test -f os/.cargo/config.toml || cp -f cargo-config/os/config.toml os/.cargo/config.toml
 	test -f user/.cargo/config.toml || cp -f cargo-config/user/config.toml user/.cargo/config.toml
 
+toolchain-preflight:
+	@sh scripts/rustup-preflight.sh
+
 env:
 	rustup default $(LA_TOOLCHAIN)
 
@@ -48,7 +51,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config
+.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-preflight
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
