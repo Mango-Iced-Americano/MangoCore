@@ -87,16 +87,26 @@ native_user=$(/bin/busybox find /persist/python/user -type f \
 test -z "$native_user" \
     || fail "unmanifested native extension exists in the P4 user site: $native_user"
 
-if python3 -c 'import smolagents; print("[persist-python-verify] smolagents=" + smolagents.__file__)'; then
-    echo "[persist-python-verify] smolagents_import=pass"
-    if [ "$require_smolagents" = 1 ]; then
-        smolagent --help >/dev/null
-        echo "[persist-python-verify] smolagent_command=pass"
+smolagents_package=/persist/python/user/lib/python3.14/site-packages/smolagents
+if [ -d "$smolagents_package" ]; then
+    python3 -S /rescue/patch-smolagents-action-type --check \
+        || fail "smolagents source/cache integrity gate failed"
+    echo "[persist-python-verify] smolagents_action_type=pass"
+    if python3 -c 'import smolagents; print("[persist-python-verify] smolagents=" + smolagents.__file__)'; then
+        echo "[persist-python-verify] smolagents_import=pass"
+        if [ "$require_smolagents" = 1 ]; then
+            smolagent --help >/dev/null
+            echo "[persist-python-verify] smolagent_command=pass"
+        fi
+    elif [ "$require_smolagents" = 1 ]; then
+        fail "smolagents import failed under the strict runtime"
+    else
+        echo "[persist-python-verify] smolagents_import=failed-exposed" >&2
     fi
 elif [ "$require_smolagents" = 1 ]; then
-    fail "smolagents import failed under the strict runtime"
+    fail "smolagents is missing under the strict runtime"
 else
-    echo "[persist-python-verify] smolagents_import=failed-exposed" >&2
+    echo "[persist-python-verify] smolagents_import=missing"
 fi
 
 echo "[persist-python-verify] PASS policy=p4-strict-align-v1 release=$release"

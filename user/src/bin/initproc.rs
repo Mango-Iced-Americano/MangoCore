@@ -3402,17 +3402,35 @@ fn prepare_symlink(environ: &[*const u8]) {
             mkdir -p /usr/bin; \
             ln -sf \"$launcher\" /usr/bin/python3; \
             ln -sf \"$launcher\" /usr/bin/python; \
-            for name in pip pip3 smolagent smolagents; do \
+            for name in pip pip3; do \
                 ln -sf \"$entry\" \"/usr/bin/$name\"; \
             done; \
             for script in /persist/python/user/bin/*; do \
                 [ -f \"$script\" ] || continue; \
                 name=${script##*/}; \
-                case \"$name\" in python|python3|pip|pip3) continue;; esac; \
+                case \"$name\" in python|python3|pip|pip3|smolagent|smolagents) continue;; esac; \
                 ln -sf \"$entry\" \"/usr/bin/$name\"; \
             done; \
             if /usr/bin/python3 -S -c 'import os,sys; assert os.environ[\"CPYTHON_ROOT\"].startswith(\"/persist/python-runtime/releases/\"); assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix'; then \
                 echo 'P4 strict-aligned Python launchers installed'; \
+                if smolagents_status=$(/usr/bin/python3 -S /rescue/patch-smolagents-action-type --allow-missing); then \
+                    echo \"$smolagents_status\"; \
+                    case \"$smolagents_status\" in \
+                        *'status=missing '*) \
+                            rm -f /usr/bin/smolagent /usr/bin/smolagents; \
+                            echo 'P4 smolagents is not installed; entries remain absent';; \
+                        *) \
+                            echo 'P4 smolagents interactive action type verified'; \
+                            for name in smolagent smolagents; do \
+                                if [ -f \"/persist/python/user/bin/$name\" ]; then \
+                                    ln -sf \"$entry\" \"/usr/bin/$name\"; \
+                                fi; \
+                            done;; \
+                    esac; \
+                else \
+                    echo 'P4 smolagents interactive action-type patch failed closed' >&2; \
+                    rm -f /usr/bin/smolagent /usr/bin/smolagents; \
+                fi; \
             else \
                 echo 'P4 strict-aligned Python validation failed; launchers remain fail-closed' >&2; \
             fi; \
@@ -3696,14 +3714,26 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         install_changed /rescue/python3-wrapper "$root/usr/bin/python3" 0755
         install_changed /rescue/python-entry "$root/usr/bin/pip" 0755
         install_changed /rescue/python-entry "$root/usr/bin/pip3" 0755
-        install_changed /rescue/python-entry "$root/usr/bin/smolagent" 0755
-        install_changed /rescue/python-entry "$root/usr/bin/smolagents" 0755
+        smolagents_ready=0
+        if [ -x /usr/bin/smolagent ] && \
+           /usr/bin/python3 -S /rescue/patch-smolagents-action-type --check >/dev/null; then
+            smolagents_ready=1
+        fi
         for script in /persist/python/user/bin/*; do
             [ -f "$script" ] || continue
             name=${script##*/}
-            case "$name" in python|python3|pip|pip3) continue;; esac
+            case "$name" in python|python3|pip|pip3|smolagent|smolagents) continue;; esac
             install_changed /rescue/python-entry "$root/usr/bin/$name" 0755
         done
+        if [ "$smolagents_ready" = 1 ]; then
+            for name in smolagent smolagents; do
+                if [ -f "/persist/python/user/bin/$name" ]; then
+                    install_changed /rescue/python-entry "$root/usr/bin/$name" 0755
+                fi
+            done
+        else
+            rm -f "$root/usr/bin/smolagent" "$root/usr/bin/smolagents"
+        fi
         install_changed /etc/apk/repositories "$root/etc/apk/repositories" 0644
         install_changed /etc/passwd "$root/etc/passwd" 0644
         install_changed /etc/group "$root/etc/group" 0644
@@ -3746,7 +3776,6 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             [ -r /etc/ssl/cert.pem ]
             [ -r /proc/net/resolv.conf ]
             [ -x /usr/bin/python3 ]
-            [ -x /usr/bin/smolagent ]
             python_result=$(/usr/bin/python3 -S -c "import os,sys; root=os.environ.get(\"CPYTHON_ROOT\",\"\"); assert root.startswith(\"/persist/python-runtime/releases/\"),root; assert os.environ.get(\"MANGO_PYTHON_POLICY\")==\"p4-strict-align-v1\"; assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix; assert os.environ.get(\"PYTHONUSERBASE\")==\"/persist/python/user\"; print(\"PERSIST_STRICT_PYTHON_OK\")")
             [ "$python_result" = PERSIST_STRICT_PYTHON_OK ]
             probe=/tmp/mango-persist-shell-probe

@@ -4,6 +4,24 @@
 
 ## 2026-07-18
 
+### board/python: 修复 SmolAgents 1.26.0 交互模型名与加载器分发不一致
+
+**涉及文件：**
+- `scripts/board/patch_smolagents_action_type.py` — 将既有 P4 精确版本补丁扩展为完整交互 CLI 兼容补丁：继续保留用户选择的 `action_type`，并让加载器同时接受交互菜单名 `OpenAIServerModel` 与类名 `OpenAIModel`；保留官方原文件备份、整文件 SHA-256、原子发布、缓存清理和版本 fail-closed 门禁
+
+**验证：**
+- 从官方 `smolagents==1.26.0` universal wheel 提取 `cli.py`，确认原始 SHA-256 `c7cd04f6...e2b5d62`，双修复文件 SHA-256 `e4052f70...de7eba`；补丁首次安装、`--check` 和重复安装均通过 ✅
+- 构造已部署的旧 action-only 状态 `9c3735c6...563a57` 及精确官方备份，确认 `--check` 能识别缺失模型别名，随后原地升级为双修复状态并再次通过门禁 ✅
+- 独立执行提取后的 `load_model()`，确认 `OpenAIServerModel + deepseek-v4-pro + https://api.deepseek.com` 分发到 `OpenAIModel`，且 `api_key/api_base/model_id` 原样保留 ✅
+- `python3 -m py_compile scripts/board/patch_smolagents_action_type.py`、目标文件 `git diff --check` 通过；项目 Docker 中严格串行完成 RV64 全量构建和 LA64 QEMU 全量构建，`kernel-rv` SHA-256 `2d2705cd...51d914d`、`kernel-la` SHA-256 `68570c32...2437c0` ✅
+- 一键实板目标 `la64-2k1000-apk-persist-shell` 构建通过；`kernel-2k1000-persist-shell.ui` 为 16,780,080 B、SHA-256 `2ed18191...922d0d`，uImage load/entry 均为 `0x90000000`；从最终 initramfs 解包的 `/rescue/patch-smolagents-action-type` 与源码 SHA-256 均为 `ed1cf67f...7c738b`，逐字节一致 ✅
+- 本轮没有启动 QEMU 或复位实板；编译门禁和镜像内容门禁通过不替代后续 2K1000LA 启动及交互式 DeepSeek 配置验证 ⚠️
+
+**备注：**
+- 根因是 1.26.0 的 Rich 交互菜单只允许 `OpenAIServerModel`，而 `load_model()` 只识别 `OpenAIModel`：输入前者会在配置结束时报 `Unsupported model type`，输入后者则会被菜单当场拒绝。兼容别名修复两条入口，不要求用户输入菜单之外的名称。
+- 本地源码修复不会改变当前已启动实板的 `/rescue` 内容；需要由主流程重新生成/启动包含新脚本的镜像，启动时再将 P4 上的 action-only 状态升级。补丁仍只接受精确 1.26.0 源码与哈希，不静默修改其他版本。
+- 首次 LA64 构建与并发 RV64 构建争用自动生成的 `lang_items.rs`，命中了项目已知的双工具链竞态；等待对方构建结束后从 `.la` 变体重跑成功，没有直接编辑生成文件。Docker Compose 因宿主不存在配置中的 `/dev/sdb` 无法启动，改用同一项目镜像直接构建；ext4 rootfs 阶段按原 Compose 权限模型使用 privileged 容器。
+
 ### board/python: 补齐 SmolAgent OpenAI 可选后端的 Pydantic 闭包
 
 **涉及文件：**
