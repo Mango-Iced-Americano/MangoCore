@@ -779,3 +779,26 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **验收**：分别覆盖菜单返回名、旧的非交互类名、未知名称拒绝、已有旧补丁迁移、重复执行
   幂等和配置参数透传；网络后端可用 dummy client/factory 验证分发，不必先发真实公网请求。
 - **相关文件**：`scripts/board/patch_smolagents_action_type.py`
+
+### strict Python 依赖闭包必须跨 C、C++、Rust 和用户 site 分层验收
+
+- **现象**：主 CPython 与已有扩展都按 `-mstrict-align` 构建，但启用某个延迟工具后才下载
+  到新的 LoongArch wheel；或者 release 自测精确通过，默认运行时却被 user-site 同名包遮蔽，
+  单纯比版本会误报，完全接受遮蔽又失去 native 闭包证明。
+- **定位**：从真实工厂/`TOOL_MAPPING[name]()` 执行路径和固定发行包 `Requires-Dist` 同时
+  展开闭包；逐包分类 pure Python、C/C++、Rust/PyO3 和手写汇编。CFLAGS 只能证明
+  C/C++，Rust 必须审计 `rustc` target feature，汇编必须明确禁用或逐文件证明；最终再以
+  ELF `DT_NEEDED` 查找遗漏的 libgcc/libstdc++ 等运行时库。
+- **修复模式**：固定源码、锁文件、工具链、URL、SHA 和 wheel tag；C/C++ 逐编译单元要求
+  `-mstrict-align`，LoongArch Rust 使用 `-C target-feature=-ual`，未经审计的架构汇编使用
+  generic/no-asm 路径。将所有 ELF、SONAME、NEEDED 和 hash 写入 manifest，安装器拒绝
+  schema 过旧或包版本缺失的制品。
+- **双层验收**：先用 `python -S` 直接加载 immutable release，要求所有锁定版本精确匹配；
+  再用默认 wrapper/normal site 验收实际用户环境，native 包仍必须精确来自 release，pure
+  Python 只允许明确的兼容范围，并禁止 user-site 出现未入 manifest 的 `.so`。最后必须从
+  应用真实工厂构造对象，不能只做 import 或 `--help`。
+- **教训**：release 精确性和默认环境可用性是两个独立命题。把它们混成一个断言会使安全
+  发布器错误回滚兼容环境，或反过来让用户目录中的未审计 native wheel绕过 strict 策略。
+- **相关文件**：`scripts/build_cpython_runtime_la64_strict.sh`,
+  `scripts/install_cpython_runtime_la64_strict.py`, `scripts/board/verify_persist_python.sh`,
+  `user/tools/cpython/smolagents_toolkit_smoke.py`

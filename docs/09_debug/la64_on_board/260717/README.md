@@ -25,6 +25,7 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
   - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
   - "docs/09_debug/la64_on_board/260717/10-tty-smolagent-interactive-fix.md"
+  - "docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md"
 ---
 
 # 2K1000LA Python 性能专项（2026-07-17 批次）
@@ -54,6 +55,9 @@ related_docs:
 - SmolAgent 交互首字符触发的 TTY/WaitQueue 同锁再入已定位并修复；输入通知移到 UART
   生产侧，补齐 ICRNL、最小 canonical/VMIN/VTIME；SmolAgents 1.26.0 CLI 双补丁、P4
   哈希恢复和 pyc 写入安全门禁已加入。一次人工 RESET 暴露的 pyc 覆盖源码现场单独留档。
+- SmolAgents 三项内置工具的延迟依赖闭包已完成：strict-aligned lxml/primp、libxml2/
+  libxslt/BoringSSL 和六个 pure Python 包进入 schema 4、113 ELF runtime；QEMU-user、双架构
+  编译与 2K1000LA P4 ext4 实板门禁通过，current 已切换到 `28f61fb764f3`。
 
 当前没有修改内核非对齐模拟器，没有修复匿名页释放 O(N²)，也没有优化 ext4。ext4
 等待队友 develop 分支的新实现后复测。
@@ -69,6 +73,7 @@ related_docs:
 | 第一次实验 | strict-aligned runtime 的 18 个 benchmark body 非对齐计数全部为 0 | 实板已确认 |
 | 功能门禁 | L3-L9 `72/72`，18/18 benchmark 通过 | 实板已确认 |
 | SmolAgent/Pillow 闭包 | 100 ELF manifest；默认 SmolAgent、PNG/JPEG P4 ext4 I/O、AgentImage 通过 | 实板已确认 |
+| SmolAgent 三项内置工具 | 113 ELF schema 4；`python_interpreter`、`web_search`、`visit_webpage` 默认构造通过 | 实板已确认 |
 | SmolAgent 交互 TTY | 首字符不再触发 WaitQueue 自锁；canonical/raw/ICRNL 与 CLI 选择修补 | QEMU + 实板已确认 |
 | 时间收益口径 | 1,928.806 → 303.470 s 只作辅助趋势，不是 production-to-production 隔离 A/B | 不作为正式收益 |
 
@@ -86,6 +91,7 @@ related_docs:
 | [08-persist-strict-python-default.md](08-persist-strict-python-default.md) | P4 唯一运行时、fail-closed wrapper、pip/SmolAgent 路由、chroot、部署供应链和实板门禁 | 默认运行时切换留档 |
 | [09-aligned-pillow-and-smolagent-closure.md](09-aligned-pillow-and-smolagent-closure.md) | Pillow/libjpeg/MarkupSafe/PyYAML 闭包、100 ELF manifest、P4 发布异常和最终 SmolAgent 实板验收 | 应用闭包最终留档 |
 | [10-tty-smolagent-interactive-fix.md](10-tty-smolagent-interactive-fix.md) | 首字符 WaitQueue 自锁、TTY line discipline、SmolAgents CLI 补丁及 RESET 后 P4 pyc/source 损坏恢复 | 交互输入与完整性留档 |
+| [11-smolagents-toolkit-dependency-closure.md](11-smolagents-toolkit-dependency-closure.md) | ddgs/markdownify 传递依赖、lxml/primp strict 构建、双层 smoke、P4 原子发布与实板三工具构造 | 内置工具依赖闭包留档 |
 
 ## 4. 证据分层
 
@@ -108,7 +114,7 @@ strict userspace + 归档 perf_diag 内核
 
 ## 5. 原始数据入口
 
-所有可审计文本数据位于 [raw-data/](raw-data/README.md)，包括五组 run 的 manifest、
+所有可审计文本数据位于 [raw-data/](raw-data/README.md)，包括各组 run 的 manifest、
 `records.jsonl`、原始串口日志、CSV/Markdown 派生报告和构建验证日志。二进制产物没有
 重复提交，身份集中记录在 `raw-data/ARTIFACTS.sha256`。
 
@@ -127,4 +133,5 @@ strict userspace + 归档 perf_diag 内核
 - ext4 仅完成在线 rw、sync、重启后哈希和 workload 正确性检查；没有 offline e2fsck、
   断电恢复或 fault injection，不宣称 journal/断电安全。
 - 30 分钟混合稳定性、PMU cache miss、SmolAgent 本地固定响应端点和真实 API 仍未完成；
-  默认命令、import、AgentImage 和 aligned Pillow 已完成，但不能替代真实 LLM 往返测试。
+  默认命令、import、AgentImage、aligned Pillow 和三项内置工具离线构造已完成，但不能
+  替代真实搜索、网页下载或 LLM 往返测试。

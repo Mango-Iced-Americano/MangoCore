@@ -1,0 +1,15 @@
+docker run --rm --user "$(id -u):$(id -g)" \
+		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+		./scripts/build_cpython_runtime_la64_strict.sh
+[strict-cpython] fetching and verifying pinned sources
+current_artifact=cpython-la64-strict-3.14.5-6117ec08760f.tar.xz
+current_sha256=6117ec08760ff7ad7d19e28beab8c66b10e4b6dad4e8f5f8d8e498b480af56fe
+docker run --rm --user "$(id -u):$(id -g)" \
+		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+		python3 scripts/install_cpython_runtime_la64_strict.py \
+		--artifact-index target/cpython-strict/artifacts/current.json --verify-only
+runtime_policy=mangocore-la64-strict-align-v1
+artifact=/app/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-6117ec08760f.tar.xz
+artifact_sha256=6117ec08760ff7ad7d19e28beab8c66b10e4b6dad4e8f5f8d8e498b480af56fe
+manifest_schema=4
+elf_count=113

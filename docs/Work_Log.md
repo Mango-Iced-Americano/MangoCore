@@ -4,6 +4,31 @@
 
 ## 2026-07-18
 
+### board/python: 闭合 SmolAgents 三项内置工具并发布 113 ELF strict runtime
+
+**涉及文件：**
+- `scripts/build_cpython_runtime_la64_strict.sh` — 固定 libxml2 2.14.6、libxslt 1.1.43、lxml 6.1.1、primp 0.15.0、ddgs 9.0.0、markdownify 0.14.1、BeautifulSoup 4.12.3、soupsieve 2.6、six 1.17.0、click 8.1.8 及下载 SHA；lxml/libxml/libxslt 全编译单元要求 `-mstrict-align`，primp Rust 要求 `-C target-feature=-ual`，BoringSSL generic C 的 278 个编译单元同时要求 strict flag 和 `OPENSSL_NO_ASM`；打包精确 libgcc_s/libstdc++，manifest 升至 schema 4、113 ELF
+- `user/tools/cpython/patches/boringssl-loongarch64-generic.patch` — 为 boring-sys2 固定 BoringSSL 增加 64 位 generic LoongArch 分类、禁用汇编、导出 compile database，并适配其 archive 输出路径；未知 CPU/位宽继续 fail closed
+- `user/tools/cpython/smolagents_toolkit_smoke.py`、`user/tools/cpython/strict_runtime_smoke.sh` — 新增 lxml 解析、BeautifulSoup/markdownify/soupsieve 转换、six/click 及 `primp.Client`/`DDGS` 离线构造；拆分 immutable release 精确版本门禁和 normal-site 有效环境兼容门禁
+- `scripts/install_cpython_runtime_la64_strict.py`、`scripts/board/verify_persist_python.sh` — 安装器要求 schema 4 和 11 包固定版本；默认门禁禁止 user-site native ELF，并从 SmolAgents 真实 `TOOL_MAPPING` 构造 `python_interpreter`、`web_search`、`visit_webpage`
+- `docs/09_debug/la64_on_board/260717/{README,06-raw-data-index,09-aligned-pillow-and-smolagent-closure,11-smolagents-toolkit-dependency-closure}.md`、`raw-data/` — 记录源码/metadata 依赖矩阵、strict 构建链、失败与回滚、QEMU/双架构/实板证据；归档 48 个文件约 4.8 MiB，并登记最终大制品 hash
+- `docs/08_testing/{mangocore-python-guide,cpython-isolated}.md` — 将用户与供应链文档的 canonical release、manifest 数量、smoke 和 SmolAgents 三工具门禁同步到 28f/schema 4/113 ELF
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀多语言原生依赖 strict 闭包和 immutable/effective 双层 Python 门禁模式
+
+**验证：**
+- 最终 artifact `cpython-la64-strict-3.14.5-28f61fb764f3.tar.xz` 为 87,057,368 B，SHA-256 `28f61fb764f3c25ba2f5b032259b47a491334f382ed243475cfcbaaad1d1e75e`；manifest SHA-256 `79b62ebc...70c`，schema 4、113 ELF、PGO/LTO、P4 PT_INTERP 和逐 ELF hash 通过安装器复核 ✅
+- libxml2 121、libxslt 88、lxml 7、BoringSSL 278 个 C/C++ 编译单元通过 strict flags 审计；primp 构建日志证明 Rust `-ual`，精确输出 cp314 lxml 和 cp38-abi3 primp LoongArch wheel；pure wheel tag/版本/SHA 全部通过 ✅
+- QEMU-user `python -S --exact` smoke 输出锁定的八包版本，lxml/HTML/Markdown 和 primp/DDGS 离线构造通过；原子安装到独立目录后重复 smoke 通过 ✅
+- 项目 Docker 内严格串行执行 `make rv64-kernel-build-only` 与 `make la64-kernel-build-only`，最终均退出 0；首次非 root RV64 rustup 权限失败后按容器权限模型重跑成功 ✅
+- 2K1000LA `/persist` rw ext4 上最终部署 wall 440.199 s，113 ELF integrity 和 exact/effective smoke 通过后，`current -> /persist/python-runtime/releases/28f61fb764f3`；P3 `/tools` 未参与 ✅
+- 默认环境 toolkit smoke 37.502 s、路径审计 20.386 s、`smolagent --help` 60.258 s、真实文件形式三项 `TOOL_MAPPING` 构造 62.117 s、user-site native 审计 28.390 s，全部退出 0 ✅
+- 原 run 15 records/18 raw/11 reports；归档加入构建/manifest/双架构证据共 48 文件，raw/reports 与 `target/perf-runs` 执行 `diff -rq` 一致；Python/Shell 语法与最终 `git diff --check` 复核 ✅
+
+**备注：**
+- 首候选部署因 user-site click 8.4.2 遮蔽 release click 8.1.8，被旧单层精确断言安全拒绝，current 未切换且 staging 已清理。最终将“不可变 release 精确闭包”和“默认 normal-site 有效环境”分层：native lxml/primp 始终精确，pure 包允许已审计兼容 major。
+- 当前启动板仍是修改前镜像，没有新 `/rescue/verify-persist-python`，故该单条命令返回 127；等价子门禁已逐项实板执行，新构建 initramfs 已包含 verifier，本轮没有为此复位板卡。`python -c` 探针还暴露 python-dotenv 对 `<string>` 的文件路径假设，改用真实 `/tmp/t` 脚本后工具构造通过；真实 console entry 是磁盘脚本。
+- 本轮只做无网络工具构造，没有真实 DDGS 搜索、网页下载或 LLM 请求。OpenAI/Pydantic 保持 1.35.15/1.10.26，未无关升级到需要 pydantic-core/jiter 的 v2 闭包。
+
 ### tty/smolagent: 修复交互首字符触发的 WaitQueue 同锁自锁
 
 **涉及文件：**

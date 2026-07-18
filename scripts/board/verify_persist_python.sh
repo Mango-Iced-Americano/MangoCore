@@ -81,6 +81,7 @@ print("[persist-python-verify] self_exec=" + child.stdout.strip())
 '
 python3 -m pip --version
 python3 "$release/pillow_strict_smoke.py"
+python3 "$release/smolagents_toolkit_smoke.py"
 
 native_user=$(/bin/busybox find /persist/python/user -type f \
     \( -name '*.so' -o -name '*.so.*' \) -print -quit 2>/dev/null || true)
@@ -97,6 +98,14 @@ if [ -d "$smolagents_package" ]; then
         if [ "$require_smolagents" = 1 ]; then
             smolagent --help >/dev/null
             echo "[persist-python-verify] smolagent_command=pass"
+            python3 -c '
+from smolagents.cli import TOOL_MAPPING
+expected = {"python_interpreter", "web_search", "visit_webpage"}
+assert expected <= TOOL_MAPPING.keys(), TOOL_MAPPING.keys()
+instances = {name: TOOL_MAPPING[name]() for name in sorted(expected)}
+assert all(instances.values())
+print("[persist-python-verify] smolagents_builtin_tools=pass " + ",".join(instances))
+'
         fi
     elif [ "$require_smolagents" = 1 ]; then
         fail "smolagents import failed under the strict runtime"

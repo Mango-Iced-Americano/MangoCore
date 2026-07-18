@@ -34,6 +34,7 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/05-strict-align-first-experiment.md"
   - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
   - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
+  - "docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md"
   - "docs/03_fs/2k1000-full-test-disk.md"
 ---
 
@@ -61,7 +62,9 @@ benchmark 工作区的最终结论均落在 P4 ext4 上。
 2026-07-17 又将 musl、CPython 3.14.5 和全部 92 个其他 ELF 依赖按 strict-align 重建，
 在 2K1000LA P4 ext4 完成 `72/72`、18/18 benchmark，并使所测 benchmark body 的
 非对齐 trap 归零。随后把 Pillow、libjpeg 和 MarkupSafe 的原生代码纳入同一供应链，
-PyYAML 固定为纯 Python，最终 manifest 含 100 个 ELF。新默认运行时不再复用旧 P3 ELF。
+PyYAML 固定为纯 Python，形成 100 ELF 阶段；2026-07-18 又按 SmolAgents 内置工具实际
+工厂闭合 lxml/libxml2/libxslt、primp/BoringSSL 和 ddgs/markdownify 传递依赖，当前
+manifest 为 schema 4、113 个 ELF。新默认运行时不再复用旧 P3 ELF。
 
 ## 2. 设计目标
 
@@ -87,7 +90,10 @@ pinned upstream source + pinned patches + GCC 15.2 musl cross toolchain
   -> CPython 3.14.5 PGO/LTO
   -> libjpeg-turbo 3.1.4.1, Pillow 12.3.0, MarkupSafe 3.0.3
   -> pure-Python PyYAML 6.0.3
-  -> 100 ELF dependency/hash manifest
+  -> libxml2 2.14.6, libxslt 1.1.43, lxml 6.1.1
+  -> primp 0.15.0 + generic/no-asm BoringSSL, Rust target-feature=-ual
+  -> pure-Python ddgs/markdownify/BeautifulSoup/soupsieve/six/click
+  -> 113 ELF dependency/hash manifest
   -> deterministic tar.xz + current.json
   -> host archive validation
   -> board P4 staging + BusyBox SHA/extract
@@ -114,6 +120,7 @@ make cpython-la64-runtime-verify
 - `usr/bin/python3`；
 - `strict-runtime-manifest.json`；
 - `strict_runtime_smoke.sh`；
+- `smolagents_toolkit_smoke.py`；
 - `pillow_strict_smoke.py`；
 - P4-only `python3-wrapper.sh`；
 - L3-L9、benchmark 和 strict runner。
@@ -139,9 +146,10 @@ make 2k1000-python-runtime-deploy \
 6. 下载 archive 的 SHA 必须在板端复核。
 
 新版本先解到隐藏 staging。解包完成后写入与 artifact/manifest hash 绑定的激活标记，运行
-`strict_runtime_smoke.sh`；该 smoke 会逐个重算 100 个 ELF，并执行 CPython、Pillow、
-MarkupSafe 和 PyYAML 检查。只有 smoke 通过才创建 release，并以临时链接 + 原子 rename
-发布 `current`。中断不会把半成品暴露给默认 `python`。P3 在整个流程中不写、不读、不执行。
+`strict_runtime_smoke.sh`；该 smoke 会逐个重算 113 个 ELF，并执行 CPython、Pillow、
+MarkupSafe、PyYAML 和 SmolAgents toolkit exact 检查。只有 smoke 通过才创建 release，
+并以临时链接 + 原子 rename 发布 `current`。中断不会把半成品暴露给默认 `python`。P3
+在整个流程中不写、不读、不执行。
 
 ## 5. 默认入口与环境隔离
 
@@ -221,7 +229,7 @@ SmolAgent import 与完整 L3-L9 必须重新留档，不能直接沿用旧 cano
 - userbase 与 pycache 固定在 P4；
 - Pillow PNG/JPEG 原生扩展能加载；
 - SmolAgent import 失败时默认记录 `failed-exposed`，`--require-smolagents` 模式则失败；
-  当前 43d release 的 require 模式和 `smolagent --help` 均已通过。
+  当前 28f release 的 require 模式、`smolagent --help` 和三个内置工具构造均已通过。
 
 L3-L9 日志继续用：
 
@@ -237,7 +245,8 @@ manifest、默认命令路由和 P3 零依赖验证。
 - strict 的 trap=0 只覆盖已运行 workload，不代表任意第三方 wheel 都已 strict 构建；
   新增 native wheel 必须单独审计 ELF 和实板 trap。
 - SmolAgent 的纯路由验证与依赖完整性验证分开。当前已补齐 Pillow `_imaging.so`、JPEG、
-  MarkupSafe 和 PyYAML，并在实板验证 AgentImage；但 Pillow 只启用 `jpeg/zlib`。未来开启
+  MarkupSafe、PyYAML、lxml/primp 和 ddgs/markdownify 传递闭包，并在实板验证 AgentImage
+  与三项工具离线构造；但 Pillow 只启用 `jpeg/zlib`，真实搜索/下载尚未执行。未来开启
   freetype/lcms/webp/tiff 等功能时，仍必须把新增 native 依赖按 strict flags 自行构建并
   加入 manifest，不能安装普通二进制 wheel。
 - PyYAML 当前强制为 `py3-none-any`，没有 libyaml accelerator；这是可审计的性能取舍。
@@ -257,4 +266,6 @@ manifest、默认命令路由和 P3 零依赖验证。
   runtime 供应链和匿名页量化。
 - `docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md`：
   100 ELF 应用闭包、P4 发布异常与最终 SmolAgent/Pillow 实板验收。
+- `docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md`：
+  113 ELF 内置工具闭包、多语言 strict 构建和最终 2K1000LA 门禁。
 - `docs/03_fs/2k1000-full-test-disk.md`：P1-P4 边界与实板写入安全策略。

@@ -28,6 +28,7 @@ related_docs:
   - "docs/08_testing/cpython-isolated.md"
   - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
   - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
+  - "docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md"
   - "docs/03_fs/2k1000-full-test-disk.md"
 ---
 
@@ -63,7 +64,7 @@ strict-aligned，或 P4 状态目录不可写时，`python` 会明确失败。�
 |---|---|---|
 | 不可变运行时版本 | `/persist/python-runtime/releases/<12-hex>` | P4 ext4；发布后只读使用 |
 | 当前版本入口 | `/persist/python-runtime/current` | 指向单个 release 的原子符号链接 |
-| strict manifest | `<release>/strict-runtime-manifest.json` | target、flags、PGO/LTO、100 个 ELF hash |
+| strict manifest | `<release>/strict-runtime-manifest.json` | target、flags、PGO/LTO、113 个 ELF hash |
 | 激活标记 | `<release>/.mango-strict-runtime` | artifact/manifest hash 与 policy |
 | 用户包与 console script | `/persist/python/user` | P4 ext4，持久可写 |
 | pyc | `/persist/python/pycache` | P4 ext4，持久可写 |
@@ -102,24 +103,25 @@ make 2k1000-python-runtime-deploy \
 部署器先在主机检查 archive 成员安全、strict flags、PGO/LTO、P4 `PT_INTERP` 和所有
 ELF hash；板端只用 initramfs BusyBox 下载、验 SHA、解包到 staging。压缩 archive 的
 传输临时对象使用 `/tmp`，避免在 P4 同时占用 archive 与解压树；解压后的 release 和全部
-Python 状态仍在 P4。staging 通过 runtime smoke 后才改名为 release；板端再次计算 100 个
+Python 状态仍在 P4。staging 通过 runtime smoke 后才改名为 release；板端再次计算 113 个
 native ELF hash，通过后原子更新 `current`。部署引导不执行 P3 Python，因此旧解释器即使
 损坏也不会影响升级。
 
 当前 2026-07-18 host `current.json` 产物身份：
 
 ```text
-artifact: cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz
-artifact SHA-256: 43d7bb2ecf21d662c427959c0b07612d05379d26a8b05bbc3bde84aa6cb4579e
-manifest SHA-256: 862aec2368a1eb3480934b6f746732f8bbf23b85ab6104080944edac219870b5
+artifact: cpython-la64-strict-3.14.5-28f61fb764f3.tar.xz
+artifact SHA-256: 28f61fb764f3c25ba2f5b032259b47a491334f382ed243475cfcbaaad1d1e75e
+manifest SHA-256: 79b62ebc16e710347dba720969036dda8ebaf73c453c1ce84febbe263ddec70c
 runtime interpreter: /persist/python-runtime/current/lib/ld-musl-loongarch64.so.1
 ```
 
-当前实板 canonical release 为 `/persist/python-runtime/releases/43d7bb2ecf21`。它在原有
+当前实板 canonical release 为 `/persist/python-runtime/releases/28f61fb764f3`。它在原有
 CPython 闭包上新增 strict-aligned Pillow 12.3.0、libjpeg-turbo 3.1.4.1、MarkupSafe 3.0.3，
-并以无 ELF 的纯 Python PyYAML 6.0.3 补齐 SmolAgent 当前直接依赖。100 个 ELF 的板端
-integrity、四组 runtime smoke、默认入口、SmolAgent command/AgentImage 和 L3-L9 `72/72`
-均通过。`e14f2fd9cc6d` 暂留作上一个已发布版本的回退点。
+以无 ELF 的纯 Python PyYAML 6.0.3 补齐原有应用依赖，并继续加入 strict-aligned lxml
+6.1.1、primp 0.15.0、libxml2/libxslt/BoringSSL 及 ddgs/markdownify 等纯 Python 闭包。
+113 个 ELF 的板端 integrity、release/default 双层 runtime smoke、默认入口和 SmolAgents
+三项内置工具构造均通过；较早的 43d release 是 Pillow 阶段的历史验收制品。
 
 部署完成后必须重新启动包含新 wrapper 的实板镜像，让 initproc 重建 `/usr/bin` 路由：
 
@@ -142,9 +144,9 @@ smolagent --help
 smolagents --help
 ```
 
-当前 43d 实板上全部命令通过；`smolagent` 进入 P4 `.real` 入口，import 的 Pillow、
-MarkupSafe 和 PyYAML 都来自当前 aligned release。真实 LLM API 仍需作为独立端到端测试，
-命令可用不表示公网与模型服务延迟已经验收。
+当前 28f 实板上全部命令通过；`smolagent` 进入 P4 `.real` 入口，native Pillow、
+MarkupSafe、lxml 和 primp 都来自当前 aligned release。真实搜索、网页下载和 LLM API
+仍需作为独立端到端测试，命令或工具构造可用不表示公网与服务端延迟已经验收。
 
 路由分两类：
 
@@ -200,8 +202,9 @@ release 的 Python ELF，后续切换 `current` 也不会绕过策略。
 
 ## 6. SmolAgent
 
-SmolAgent 包和依赖必须安装在 `/persist/python/user`。默认命令与 Python 一样走 aligned
-runtime：
+SmolAgent 应用包和其可更新的 pure Python 用户依赖安装在 `/persist/python/user`；lxml、
+primp 等 native 依赖必须由 immutable aligned release 提供，禁止向 user site 安装普通
+LoongArch `.so`。默认命令与 Python 一样走 aligned runtime：
 
 ```sh
 command -v smolagent
@@ -212,12 +215,13 @@ smolagent --help
 
 前两条应分别显示 `/usr/bin/smolagent` 和 `/rescue/python-entry`；模块文件必须位于 P4
 用户树或当前 P4 runtime，不能包含 `/tools`。Pillow `_imaging`、libjpeg 和 MarkupSafe
-`_speedups` 已进入 100 ELF manifest，PyYAML 被固定为 pure Python。可用以下命令复核
-图像闭包：
+`_speedups`、lxml 和 primp 已进入 113 ELF manifest；PyYAML、ddgs 和 markdownify 的
+非原生部分被固定为 pure Python。可用以下命令复核图像和内置工具闭包：
 
 ```sh
 python3 /persist/python-runtime/current/pillow_strict_smoke.py \
   --output-dir /persist/python/tmp/pillow-smoke-manual
+python3 /persist/python-runtime/current/smolagents_toolkit_smoke.py
 ```
 
 如果新 CPython 暴露缺失扩展、第三方包或 ABI 问题，命令应
@@ -235,7 +239,8 @@ python3 /persist/python-runtime/current/pillow_strict_smoke.py \
 
 第一条验证 P4 ext4 rw、release identity、六个默认入口、Python 环境、`sys.path`、PATH
 和动态库路径。默认情况下，SmolAgent import 失败会记录为 `failed-exposed`，以证明路由
-正确且没有回退；第二条把 SmolAgent import 失败升级为整项失败。
+正确且没有回退；第二条把 SmolAgent import 失败升级为整项失败，并从真实
+`TOOL_MAPPING` 构造 `python_interpreter`、`web_search`、`visit_webpage`。
 
 手工最小核对：
 

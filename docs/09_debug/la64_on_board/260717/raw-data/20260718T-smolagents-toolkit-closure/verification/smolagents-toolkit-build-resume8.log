@@ -1,0 +1,12 @@
+docker run --rm --user "$(id -u):$(id -g)" \
+		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+		./scripts/build_cpython_runtime_la64_strict.sh
+[strict-cpython] fetching and verifying pinned sources
+native_elfs=111
+stripped_elfs=30
+p4_interp_elfs=usr/bin/python3.14
+p4_interp_rewritten=none
+strict-runtime-smoke-ok
+strict-markupsafe-smoke-ok /app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/markupsafe/_speedups.cpython-314.so
+strict-pyyaml-pure-smoke-ok /app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/yaml/__init__.py
+aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}

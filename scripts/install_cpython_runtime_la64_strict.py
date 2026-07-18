@@ -24,6 +24,20 @@ REQUIRED_PATHS = {
     "python3-wrapper.sh",
     "strict_runtime_smoke.sh",
     "verify_runtime_integrity.py",
+    "smolagents_toolkit_smoke.py",
+}
+REQUIRED_PYTHON_PACKAGES = {
+    "Pillow": "12.3.0",
+    "MarkupSafe": "3.0.3",
+    "PyYAML": "6.0.3",
+    "lxml": "6.1.1",
+    "primp": "0.15.0",
+    "ddgs": "9.0.0",
+    "markdownify": "0.14.1",
+    "beautifulsoup4": "4.12.3",
+    "soupsieve": "2.6",
+    "six": "1.17.0",
+    "click": "8.1.8",
 }
 
 
@@ -91,6 +105,8 @@ def read_json_member(
 
 
 def validate_manifest(manifest: dict[str, object]) -> list[dict[str, object]]:
+    if not isinstance(manifest.get("schema"), int) or manifest["schema"] < 4:
+        raise SystemExit("runtime manifest predates the complete SmolAgents toolkit closure")
     flags = set(str(manifest.get("strict_flags", "")).split())
     if manifest.get("target") != TARGET:
         raise SystemExit(f"unexpected runtime target: {manifest.get('target')!r}")
@@ -100,6 +116,13 @@ def validate_manifest(manifest: dict[str, object]) -> list[dict[str, object]]:
         raise SystemExit("runtime must have both PGO and LTO enabled")
     if manifest.get("runtime_interpreter") != RUNTIME_INTERP:
         raise SystemExit("runtime PT_INTERP is not bound to the P4 current loader")
+    packages = manifest.get("python_packages")
+    if not isinstance(packages, dict):
+        raise SystemExit("runtime manifest has no Python package closure")
+    for name, version in REQUIRED_PYTHON_PACKAGES.items():
+        package = packages.get(name)
+        if not isinstance(package, dict) or package.get("version") != version:
+            raise SystemExit(f"runtime manifest has no pinned {name}=={version}")
     elfs = manifest.get("elfs")
     if not isinstance(elfs, list) or not elfs:
         raise SystemExit("runtime manifest has no ELF closure")

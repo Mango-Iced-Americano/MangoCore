@@ -10,6 +10,7 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/05-strict-align-first-experiment.md"
   - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
   - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
+  - "docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md"
 ---
 
 # Python 性能原始数据与复核索引
@@ -27,8 +28,10 @@ Aligned Pillow/SmolAgent 闭包另归档 64 个文件、约 5.7 MiB：48 条 rec
 11 份 analyzer 报告及 manifest/records；大 runtime archive 仍只登记 hash。
 OpenAI 可选后端补充归档 8 个文件：4 条 record、6 份 raw 以及 manifest/records；其中
 raw 数包含两份因 512-byte 主机门禁未形成 record 的长命令失败日志。
+SmolAgents 内置工具闭包另归档 48 个文件、约 4.8 MiB：15 条实板 record、18 份 raw、
+11 份 analyzer 报告，以及 17 份 manifest/current/构建/双架构验证文件。
 
-没有复制 uImage、ELF 和 81.6 MiB runtime archive；这些二进制仍可由原路径或构建
+没有复制 uImage、ELF 和 81,627,728–87,057,368 B runtime archives；这些二进制仍可由原路径或构建
 脚本恢复，其文件名、大小、SHA-256 记录于
 [`ARTIFACTS.sha256`](raw-data/ARTIFACTS.sha256)。
 
@@ -64,6 +67,7 @@ hash；阅读时把同名尾部映射到本目录对应 `raw/` 即可。
 | `20260717T-p4-strict-python-default` | 26 | 30 | 3 | P4 发布、默认入口、chroot、72/72、SmolAgent fail-exposed |
 | `20260717T-aligned-pillow` | 48 | 51 | 11 | aligned Pillow/MarkupSafe/PyYAML、P4 原子发布、默认 SmolAgent、72/72 |
 | `20260718T-openai-dependency-audit` | 4 | 6 | 0 | OpenAI/Pydantic 版本闭包、P4 pure wheel、默认 OpenAIModel 构造、pip tag 残留 |
+| `20260718T-smolagents-toolkit-closure` | 15 | 18 | 11 | ddgs/markdownify 传递闭包、P4 发布、默认三工具构造和 native 来源门禁 |
 | `20260716T-perf-diag-structural-ab` | — | — | build logs | 相邻镜像构建身份，不含大二进制 |
 | `strict-runtime-build` | — | — | build logs/manifest | 完整依赖闭包、PGO/LTO、双架构编译 |
 
@@ -243,7 +247,30 @@ benchmark environment 为准。
 但不作为板端功能失败。成功构造样本 wall 37.074 s，只含本地 import/client setup，不含
 真实 API 网络时间。
 
-## 13. 二进制制品身份
+## 13. SmolAgents 内置工具依赖闭包目录
+
+路径：[`raw-data/20260718T-smolagents-toolkit-closure/`](raw-data/20260718T-smolagents-toolkit-closure/)
+
+| 文件 | 用途 |
+|------|------|
+| `manifest.json` | 本次 2K1000LA production run 的源码、dirty/build-input 与平台身份 |
+| `records.jsonl` | 15 条部署/默认环境/工具构造/路径审计记录，保留 4 条预期非零诊断样本 |
+| `raw/pyctl_run-1-c0855d82.log` | 首候选因 user-site click 版本遮蔽被单层 smoke 拒绝并回滚 |
+| `raw/pyctl_run-1-2d7a0db5.log` | 最终 28f artifact 的 113 ELF、exact/effective smoke 与 current 发布 |
+| `raw/smolagents_toolkit_effective-1-c759e58a.log` | 默认 normal-site 下的版本和离线构造门禁 |
+| `raw/t-1-b2e57f5c.log` | 以真实脚本文件执行三项 `TOOL_MAPPING` 构造的成功记录 |
+| `raw/native-1-950def0f.log` | user site 无 native `.so`，primp 从 current aligned release 加载 |
+| `verification/strict-runtime-manifest.json` | schema 4、113 ELF、包版本/wheel hash/strict flags 的完整 manifest |
+| `verification/smolagents-toolkit-build-resume*.log` | libxml/lxml/primp/BoringSSL 交叉构建的失败与渐进闭环过程 |
+| `verification/*kernel-build-smolagents-closure.log` | RV64、LA64 严格串行最终内核构建输出 |
+
+四条非零 record 不能简单读成“最终 11/15 通过”：首候选部署由发布门禁安全拒绝，旧
+启动镜像没有新 `/rescue/verify-persist-python`，`python -c` 触发 python-dotenv 的
+`<string>` 路径假设，另一次 `cwd` 检查确认 prompt 中的 `/persist/apk-root` 已不存在。
+后续相同目的的真实文件探针和默认命令均通过。两条超过 512 字节的命令被宿主 harness
+发送前拒绝，没有 record；raw 保留但不作板端证据。
+
+## 14. 二进制制品身份
 
 | 制品 | 大小 | SHA-256 |
 |------|-----:|---------|
@@ -261,10 +288,11 @@ benchmark environment 为准。
 | post-board reproducible host package | 81,630,652 B | `b7f36138...244c` |
 | aligned Pillow/SmolAgent final runtime | 82,412,900 B | `43d7bb2e...579e` |
 | Pydantic 1.10.26 pure wheel | 166,975 B | `c43ad70d...d917` |
+| SmolAgents toolkit final runtime | 87,057,368 B | `28f61fb...e75e` |
 
 完整 64 位哈希见 `ARTIFACTS.sha256`，缩写只用于表格可读性。
 
-## 14. 重分析方法
+## 15. 重分析方法
 
 若原始 `target/perf-runs/<run>` 仍存在，可重新运行：
 
@@ -297,6 +325,13 @@ python3 judge/judge_cpython-isolated.py \
   < docs/09_debug/la64_on_board/260717/raw-data/20260717T-aligned-pillow/raw/cpython_l3_l9_final-1-f58ddacf.log
 ```
 
+复核 SmolAgents 三项内置工具闭包：
+
+```text
+python3 scripts/kernel_perf.py analyze \
+  --run-dir target/perf-runs/20260718T050500Z-smolagents-toolkit-closure
+```
+
 报告复核顺序应为：
 
 1. `manifest.json` 确认 build/platform/storage/suite；
@@ -306,10 +341,11 @@ python3 judge/judge_cpython-isolated.py \
 5. 跨 run 比较前检查 workload、warmup、storage、suite 和内核哈希；
 6. 任一身份不同则降低比较等级，不补造下降百分比。
 
-## 15. 未归档为“原始数据”的内容
+## 16. 未归档为“原始数据”的内容
 
-- 81.6 MiB runtime、uImage 和 ELF：体积大，已记录 hash；
+- 81,627,728–87,057,368 B runtime archives、uImage 和 ELF：体积大，已记录 hash；
 - P4 失败 staging 目录：只在实板保留，不属于 canonical runtime；
 - 尚未执行的 PMU、30 分钟稳定性、SmolAgent 固定本地端点/真实 API：没有数据，不能在
-  报告中补全；默认 SmolAgent 和 AgentImage 已通过，但不等价于真实模型请求；
+  报告中补全；默认 SmolAgent、AgentImage 和三项工具离线构造已通过，但不等价于真实
+  搜索、网页下载或模型请求；
 - develop 分支新 ext4 结果：尚未产生，未来必须新建独立 run，不能覆盖本批次。

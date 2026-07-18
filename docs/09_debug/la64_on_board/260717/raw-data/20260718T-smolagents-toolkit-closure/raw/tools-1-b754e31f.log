@@ -1,0 +1,26 @@
+2026-07-18T05:23:24.869128Z __PERF_BEGIN_tools-1-b754e31f__
+2026-07-18T05:23:25.810709Z MangoPersist:/persist/apk-root# __PERF_ACK_tools-1-b754e31f_TRACE_OFF__
+2026-07-18T05:23:28.163192Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_tools-1-b754e31f__
+2026-07-18T05:24:24.792962Z Traceback (most recent call last):
+2026-07-18T05:24:24.836306Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-18T05:24:24.850149Z     [1;31mfrom smolagents.cli import TOOL_MAPPING as m[0m;n=("python_interpreter","web_search","visit_webpage");assert all(m[x]() for x in n);print("builtin-tools-ok")
+2026-07-18T05:24:24.854093Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-18T05:24:24.868103Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py"[0m, line [35m20[0m, in [35m<module>[0m
+2026-07-18T05:24:24.876505Z     [1;31mfrom .agents import *[0m  # Above noqa avoids a circular dependency due to cli.py
+2026-07-18T05:24:24.877368Z     [1;31m^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-18T05:24:24.891493Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/agents.py"[0m, line [35m80[0m, in [35m<module>[0m
+2026-07-18T05:24:24.897144Z     from .remote_executors import BlaxelExecutor, DockerExecutor, E2BExecutor, ModalExecutor
+2026-07-18T05:24:24.911441Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/remote_executors.py"[0m, line [35m48[0m, in [35m<module>[0m
+2026-07-18T05:24:24.914220Z     [31mload_dotenv[0m[1;31m()[0m
+2026-07-18T05:24:24.916605Z     [31m~~~~~~~~~~~[0m[1;31m^^[0m
+2026-07-18T05:24:24.927858Z   File [35m"/persist/python/user/lib/python3.14/site-packages/dotenv/main.py"[0m, line [35m419[0m, in [35mload_dotenv[0m
+2026-07-18T05:24:24.930904Z     dotenv_path = find_dotenv()
+2026-07-18T05:24:24.942028Z   File [35m"/persist/python/user/lib/python3.14/site-packages/dotenv/main.py"[0m, line [35m372[0m, in [35mfind_dotenv[0m
+2026-07-18T05:24:24.947617Z     for dirname in [31m_walk_to_root[0m[1;31m(path)[0m:
+2026-07-18T05:24:24.952907Z                    [31m~~~~~~~~~~~~~[0m[1;31m^^^^^^[0m
+2026-07-18T05:24:24.966763Z   File [35m"/persist/python/user/lib/python3.14/site-packages/dotenv/main.py"[0m, line [35m319[0m, in [35m_walk_to_root[0m
+2026-07-18T05:24:24.968443Z     raise IOError("Starting path not found")
+2026-07-18T05:24:24.973717Z [1;35mOSError[0m: [35mStarting path not found[0m
+2026-07-18T05:24:27.323452Z __PERF_WORK_END_tools-1-b754e31f__
+2026-07-18T05:24:27.324333Z __PERF_ACK_tools-1-b754e31f_WORK__
+2026-07-18T05:24:27.743370Z MangoPersist:/persist/apk-root# __PERF_END_tools-1-b754e31f__ rc=1

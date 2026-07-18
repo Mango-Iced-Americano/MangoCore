@@ -1,0 +1,7 @@
+2026-07-18T05:19:50.463527Z __PERF_BEGIN_smolagents_toolkit_effective-1-c759e58a__
+2026-07-18T05:19:51.584217Z MangoPersist:/persist/apk-root# __PERF_ACK_smolagents_toolkit_effective-1-c759e58a_TRACE_OFF__
+2026-07-18T05:19:53.722311Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_smolagents_toolkit_effective-1-c759e58a__
+2026-07-18T05:20:30.213838Z smolagents-toolkit-offline-smoke-ok mode=effective beautifulsoup4=4.12.3 click=8.4.2 ddgs=9.0.0 lxml=6.1.1 markdownify=0.14.1 primp=0.15.0 six=1.17.0 soupsieve=2.6
+2026-07-18T05:20:31.224136Z __PERF_WORK_END_smolagents_toolkit_effective-1-c759e58a__
+2026-07-18T05:20:31.228883Z __PERF_ACK_smolagents_toolkit_effective-1-c759e58a_WORK__
+2026-07-18T05:20:31.820869Z MangoPersist:/persist/apk-root# __PERF_END_smolagents_toolkit_effective-1-c759e58a__ rc=0

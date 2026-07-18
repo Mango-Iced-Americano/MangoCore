@@ -1,0 +1,1458 @@
+{
+  "aports_commits": {
+    "bzip2": "33283848034c9885d984c8e8697c645c57324938",
+    "expat": "acbd3e4e0d1525f98da93aa9f7cf733aff995736",
+    "libffi": "2c2a7bb4a8b16066834e90402567b2c19403a790",
+    "mpdecimal": "c0519b85456e9b838e3142e1d233aab0b433b476",
+    "musl": "b0c8ea10e8f29cabe336b2e5d864124940e126ab",
+    "ncurses": "2cee8a7328d061418336ad327b512d96bcd7bc5e",
+    "openssl": "35c0d1f2b314f647008595f681786813760da191",
+    "python3": "0266eb2db4c93e7ee1d51e9e50f5baacbc15303c",
+    "readline": "a854c03acdac188901fb012f7acbee70a36e8041",
+    "sqlite": "e716785aa8fead790466477c2e00cad115a5383b",
+    "xz": "ce9944f1daadb681dd6f0f81a06e9cce97127377",
+    "zlib": "f248b33b5943c7dc69bf691031d7612ab2e8ed93"
+  },
+  "build_script_sha256": "e64e8286dbd251caf99146964188a5b4284427de53a1c5ef563b21922a741a1f",
+  "compiler": "loongarch64-unknown-linux-musl-gcc (crosstool-NG 1.28.0) 15.2.0",
+  "elf_count": 113,
+  "elfs": [
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "lib/ld-musl-loongarch64.so.1",
+      "sha256": "85c5404a3e5da8d2ee72182faca2eeaa8a973e47e565ee8e8c56c4800e1428c4",
+      "soname": null
+    },
+    {
+      "interpreter": "/persist/python-runtime/current/lib/ld-musl-loongarch64.so.1",
+      "needed": [
+        "libpython3.14.so.1.0",
+        "libc.so"
+      ],
+      "path": "usr/bin/python3.14",
+      "sha256": "f1f896b06b8e0b2b19c044f2ca7cf68a0e3ba1e8ce542710eb49246ee1313958",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libbz2.so.1.0.8",
+      "sha256": "1f987d3dba80bb8fdf9d45f7b3e6cc79592e2d1f726d54484b1acf70b00b77a1",
+      "soname": "libbz2.so.1"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libcrypto.so.3",
+      "sha256": "0d5373fd4d1492b4a5054b98df6de3971a871f8d28e9567cc7e42732df4d9edb",
+      "soname": "libcrypto.so.3"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libexpat.so.1.12.2",
+      "sha256": "f505b8a45a5fa7c77bda793ed6201696101967e4ed7866d453855ccecc48ddf8",
+      "soname": "libexpat.so.1"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libxslt.so.1",
+        "libxml2.so.16",
+        "libz.so.1",
+        "liblzma.so.5",
+        "libc.so"
+      ],
+      "path": "usr/lib/libexslt.so.0.8.24",
+      "sha256": "47a4e0965c6ab3ecf38f6adbaa49b9e3c45d4ac2f76d1d0e7c9cc0407cf39c59",
+      "soname": "libexslt.so.0"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libffi.so.8.2.0",
+      "sha256": "5cdfc5adbb791c989b2c181787023bdb82f819239cc2fecddc8b0a9fb0df1b8a",
+      "soname": "libffi.so.8"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libgcc_s.so.1",
+      "sha256": "f8307ac7ab0afc7fec89eabc0312c71cb5a263bc3794163f6b57ef3476a48746",
+      "soname": "libgcc_s.so.1"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libhistory.so.8.3",
+      "sha256": "2f6cd011e0010e37706284949848f18334288b42f0bd9208b459d8b75b6f25b9",
+      "soname": "libhistory.so.8"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libhistory.so.8.3.old",
+      "sha256": "2f6cd011e0010e37706284949848f18334288b42f0bd9208b459d8b75b6f25b9",
+      "soname": "libhistory.so.8"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libjpeg.so.62.4.0",
+      "sha256": "b9d0e62e4adf2204b53d573ffd975fb67afd9d3932250d1d33060bd2c96b7834",
+      "soname": "libjpeg.so.62"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/liblzma.so.5.8.3",
+      "sha256": "9412e2e18e4b548a5c0302c2049253b7a366833fd288235cef68fae497500438",
+      "soname": "liblzma.so.5"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libmpdec.so.4.0.1",
+      "sha256": "9b5cb34ad5df07572b207ddd5a6ea7df7b4df24aa84aca3baab58e1e3d0e68b5",
+      "soname": "libmpdec.so.4"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libtinfow.so.6",
+        "libc.so"
+      ],
+      "path": "usr/lib/libncursesw.so.6.6",
+      "sha256": "e2cc4712bc00a5d8fa96d4980d043c05102ea5d2f476f60893f012aaaf2ceb51",
+      "soname": "libncursesw.so.6"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libncursesw.so.6",
+        "libtinfow.so.6",
+        "libc.so"
+      ],
+      "path": "usr/lib/libpanelw.so.6.6",
+      "sha256": "70903a5b401cfd3884aad4a37090b7ae7d8b37cfb1039e43830b783d31907e93",
+      "soname": "libpanelw.so.6"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libpython3.14.so.1.0",
+      "sha256": "688eec5a1649fa8a8f439cf74ed7d90e038bb1f1e1a2ff4ccaa28c9d9d8356c9",
+      "soname": "libpython3.14.so.1.0"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libpython3.14.so.1.0",
+        "libc.so"
+      ],
+      "path": "usr/lib/libpython3.so",
+      "sha256": "1b183192a6d38d689f2768c6b747756adf6c14f7e67f7fcb0b29db0d299d46d9",
+      "soname": "libpython3.so"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libtinfow.so.6",
+        "libc.so"
+      ],
+      "path": "usr/lib/libreadline.so.8.3",
+      "sha256": "29794a9416d7dc8897b8ef8fd03f212dcf7e4a1a4d79915655a0db573d27e400",
+      "soname": "libreadline.so.8"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libreadline.so.8.3.old",
+      "sha256": "5e1d47c5be9319152b1fe2021f2d52bbf9b9eb4d494824f83c9c3b7746216376",
+      "soname": "libreadline.so.8"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libz.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/libsqlite3.so.3.53.3",
+      "sha256": "4baa6382e425971bc2b2cf82ba2a8d79fbef271259d7c0ac451d1cd114d9b57b",
+      "soname": "libsqlite3.so.0"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libcrypto.so.3",
+        "libc.so"
+      ],
+      "path": "usr/lib/libssl.so.3",
+      "sha256": "466a6e56694b2d9bbfad4f8541aa2471612ccfaaaa0176db73679ab5e31e108c",
+      "soname": "libssl.so.3"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so",
+        "libgcc_s.so.1"
+      ],
+      "path": "usr/lib/libstdc++.so.6.0.34",
+      "sha256": "a05a7a9eaeb255c89cb40701a7129b0ca8d9cb240a37d0bc17aee610a89ee388",
+      "soname": "libstdc++.so.6"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libtinfow.so.6.6",
+      "sha256": "a3d3a71eac44b6ce3e82aa21bdddb3886560b1c8d2c4d1d785f88a7ed1e316e5",
+      "soname": "libtinfow.so.6"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libz.so.1",
+        "liblzma.so.5",
+        "libc.so"
+      ],
+      "path": "usr/lib/libxml2.so.16.0.6",
+      "sha256": "8a3d872dda921114e78ebc0b9944a3ea915636b04f760e1fe3faabd36de4f0e5",
+      "soname": "libxml2.so.16"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libxml2.so.16",
+        "libz.so.1",
+        "liblzma.so.5",
+        "libc.so"
+      ],
+      "path": "usr/lib/libxslt.so.1.1.43",
+      "sha256": "56dfca064f282a3ad6dd85c1a77af2d725026ad530510c6615219864f3c3ce6a",
+      "soname": "libxslt.so.1"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/libz.so.1.3.2",
+      "sha256": "220a37de5f7463d1012b72471043e291419a11483b3ae127150b778f624fc404",
+      "soname": "libz.so.1"
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libcrypto.so.3",
+        "libc.so"
+      ],
+      "path": "usr/lib/ossl-modules/legacy.so",
+      "sha256": "26c1004f7cd2218d92aadf1d3b372622e9a584667b3581331ce589a8fd234979",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/config-3.14/python.o",
+      "sha256": "ed54fc089b3f6bfeba94dc858d0560ef56501a6e8a675d14e83e21ec7b655637",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_asyncio.cpython-314.so",
+      "sha256": "25d1d376fc6c801778b477dadd8c890c0f0e5a4a287fa54c48cb6559cd5bccde",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_bisect.cpython-314.so",
+      "sha256": "774c756438c4bc2e8fc3a61eb6adbc8f7d7b8497fc0af0a1edf6a9d4c44dd363",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_blake2.cpython-314.so",
+      "sha256": "51a5c3e90df65c1bfffdb2a048c637ec44f16df31cb8b2531a12e365d477a255",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libbz2.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_bz2.cpython-314.so",
+      "sha256": "f9f7be2d4ac75458b60d8ac12350e54d167bd8a5f59eac8e1088f9691dd7214f",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_codecs_cn.cpython-314.so",
+      "sha256": "1f836de3cec6f3137d9a2a74bc2af3c17eb81f6da0e154b54f0d32dc2b69261f",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_codecs_hk.cpython-314.so",
+      "sha256": "52d18fd2017ed3325845d703cf0651cac20ad019073536e29b2c1fa64dbf1de3",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_codecs_iso2022.cpython-314.so",
+      "sha256": "6225151badeb8f34e31efd42ed04e15d6c24b38345e9615a20c679515836bdcb",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_codecs_jp.cpython-314.so",
+      "sha256": "1ddd44d33e82f191718fcea5b26e89d6dda68d18edb5cd17dab743d862a0bb1d",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_codecs_kr.cpython-314.so",
+      "sha256": "c486373ee48eeda8c86645434a4c7ccd3ddb25c630c32e0bc0d571edd11e5c29",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_codecs_tw.cpython-314.so",
+      "sha256": "bdecec94102171bae89ae6ca9818618fdb7b696372d1bc9fc9f57cebe60f9b92",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_csv.cpython-314.so",
+      "sha256": "7e3de4e775bb5931c643b7f9b467742012ee8b0afbae07ef4c648a7dc2e76773",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libffi.so.8",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_ctypes.cpython-314.so",
+      "sha256": "23a0e92d5852eb4647af196199a95f924bf3e1047bce2988bb896816b08f21b0",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_ctypes_test.cpython-314.so",
+      "sha256": "017e868a49efd61296bab026ce131dd6d15ace6f48803f0242dd99d117046b7d",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libncursesw.so.6",
+        "libtinfow.so.6",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_curses.cpython-314.so",
+      "sha256": "d5de84f0588cde20fc13e66527b7c92acb9bf34182441d3f8661ac37616af8aa",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libpanelw.so.6"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_curses_panel.cpython-314.so",
+      "sha256": "73361dccd11587095914db2b6f9d1763e01c12abc033be7efdd0ce589b61e55f",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libmpdec.so.4",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_decimal.cpython-314.so",
+      "sha256": "6dbd03de25d04c8d626a01cc08b647075a3287b2998a240898a35246e45e9c7e",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_elementtree.cpython-314.so",
+      "sha256": "5db4797254edf9b257476d4a40cc75c01ecb52d35a8c49500d474f612e1c0ea2",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libcrypto.so.3",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_hashlib.cpython-314.so",
+      "sha256": "5d065fd3f3f11f4a88535dc29e0fbcc492dc7ad306e67cb540e58be2ff710733",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_heapq.cpython-314.so",
+      "sha256": "d697bea7256f925f607e62d0d92e9e5574ea2ff1fdac472f6298fe2a88180877",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_hmac.cpython-314.so",
+      "sha256": "cd5942c8f6cb0b14d1380d42a2c0f8b25a52b3a92aeda1fc46865e00b4003f35",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_interpchannels.cpython-314.so",
+      "sha256": "2f9d1d3d6717c2e466ac0bcf875a4c523f2114dd5761b8409353d14462821e2c",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_interpqueues.cpython-314.so",
+      "sha256": "bbdff764f26142146d8174454adbc0493fcd6fe9698065334b21ae212070b452",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_interpreters.cpython-314.so",
+      "sha256": "2f4cb9df25db4e35108b9cc9668fcc2a548c5382818cae04502d1b08eac01b07",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_json.cpython-314.so",
+      "sha256": "29a47216475fe4448db49d8e27528229f2aa76c50bfa72f2d9ed3a2c7cdc106d",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_lsprof.cpython-314.so",
+      "sha256": "d60a286549399b7493783eedaf96e6c3210b630236b76479973b5ff301145457",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "liblzma.so.5",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_lzma.cpython-314.so",
+      "sha256": "d57ff8d89bb29efa48c313fa8a344fe0835f45f967707e9a233ff8fd136ee2b9",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_md5.cpython-314.so",
+      "sha256": "ff01d96a2348b0e019618ee20ebc3fc6316705b54aa12e3b097a9012608b9e91",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_multibytecodec.cpython-314.so",
+      "sha256": "975f14887415de0376a2cab1f8d85d4b2a8b03feb2c72893a7e3546d3ba71546",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_multiprocessing.cpython-314.so",
+      "sha256": "5ffdfcdad2cd37eadee29156bc73a7c7d9dd60d4ba1690fc928bcab506d567b1",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_pickle.cpython-314.so",
+      "sha256": "02c076a2edbc0aa0f7bbf9c96ebb0845336f974db5743c7c50d2198435b38612",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_posixshmem.cpython-314.so",
+      "sha256": "4de7a0afe70a0b26f340c1b6f851c75b903be901aeb688f891b1a789bf084d13",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_posixsubprocess.cpython-314.so",
+      "sha256": "ba7d9fcc5070d004c034e621749b8f06f1b9253685e7312a629c0fa93cb816db",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_queue.cpython-314.so",
+      "sha256": "931ba57fd8d682744dc6855545f6e308310ea65e47f4eebe1b13c1cbed7dba73",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_random.cpython-314.so",
+      "sha256": "e19407eb604c19c20291ced72d1d2101e93560e68b05f52c0b1c859d63b91713",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_remote_debugging.cpython-314.so",
+      "sha256": "77f7c5e34f2e4e4b17c51ebec7ac139f7b63e68bceb985f08452d574e7418073",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_sha1.cpython-314.so",
+      "sha256": "572ca8e7e85e9355ffd3909ee7705085cee61182fc65805b9cde36b4225608d0",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_sha2.cpython-314.so",
+      "sha256": "d305b61d5e349aa43e89e559685f99798a15b825fbf661d30331edb4a94c1ade",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_sha3.cpython-314.so",
+      "sha256": "973b8292fa32c4d8c78537289cc179077151a7fa76584ec3c76a80a7d680f311",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_socket.cpython-314.so",
+      "sha256": "b38d9d2ea93b651b8cafc5a76e684bd40bfa0f8a8dc44b3c584e7b9708d4a904",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libsqlite3.so.0",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_sqlite3.cpython-314.so",
+      "sha256": "75f84316a45a32eaf4b3b8200857f1ba2b9df6e84eec77a33a6c770d44f58e7f",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libssl.so.3",
+        "libcrypto.so.3",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_ssl.cpython-314.so",
+      "sha256": "683a474e697ed4e090456d353c70ebd3ba8d7627eec5266a46bb95f3cbaf3a83",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_statistics.cpython-314.so",
+      "sha256": "6b8e0b9f9dac08b3290db8951dcfd4bc4e3e764248a9abcca525e70adf7e580a",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_struct.cpython-314.so",
+      "sha256": "40a90c0057fec841e7fac88991afd317f5d9a386de886de90d6c566b5fc3a0b7",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_testbuffer.cpython-314.so",
+      "sha256": "07209d2d90edc701b274ced4d0c3fbf6ad7fb34d939926263c29c0cdae41c180",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_testcapi.cpython-314.so",
+      "sha256": "9c7ab9bb70c0bb6d7d09b9bd3dd9133f1244344ff12c4e1ffd9e470546605dea",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_testclinic.cpython-314.so",
+      "sha256": "90e20b88826f6d3c3244fd68d6883e8e25b1f73820499c4b787f54543296cd99",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_testclinic_limited.cpython-314.so",
+      "sha256": "189876136b568e198625e8881c5fb2ba2971bf69b8155b9ea2b3c69ec15ea8b5",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_testimportmultiple.cpython-314.so",
+      "sha256": "e1506adc5c6f3323c35a4b74110fd5d4b25277edfdeccce6c1aa50d41d0c3a0b",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_testinternalcapi.cpython-314.so",
+      "sha256": "8298b47a1de260d8463481b5aa1ede85cab3e78a4911cb8758a4c879167e59bc",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_testlimitedcapi.cpython-314.so",
+      "sha256": "4c51cdbb465b87a6f169f69af7b762b4fde13c98b3cb0a04559bd791097983ce",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_testmultiphase.cpython-314.so",
+      "sha256": "d664bfc1d4acf2f18d27c7aaba6c286e75714ed654a117cb669e089b79d698eb",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/_testsinglephase.cpython-314.so",
+      "sha256": "47d8442e41e90f0e1b3d36e846f2a4ff0717b935aad0aedf3adce478340511bb",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_xxtestfuzz.cpython-314.so",
+      "sha256": "1f91c46470a5bef9ff330d55bedb3035a14ded2ca587aa4df0450df96b7e72e8",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/_zoneinfo.cpython-314.so",
+      "sha256": "53e3e1bcfe119d021f9dc88ae3873d4e691896b998e6883389121a317cc72fbf",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/array.cpython-314.so",
+      "sha256": "c493bcf165fb0f90ea2aab6c605e08ff872d34a364b9f8e2cb41b50f1d39f80c",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libz.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/binascii.cpython-314.so",
+      "sha256": "aecd5c20c0b0baebd496da643eeed15de9a37d3703e075ad747780c3dc717480",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/cmath.cpython-314.so",
+      "sha256": "4dd88f1963129bf359d1d06c6ada2936b80780b62e11dfdf3eff571fb6770695",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/fcntl.cpython-314.so",
+      "sha256": "e5db454cc04b5ee40b35cf0f444d7ef1486570488949b05854305482669da172",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/grp.cpython-314.so",
+      "sha256": "bd6f64391a2b3101477521e37323b37ee0133d6fdea20a786a777a6709797082",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/math.cpython-314.so",
+      "sha256": "052b5998e72931c45ece994dd384eb36d41a6afae2fa539a769865e979060c66",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/mmap.cpython-314.so",
+      "sha256": "75a60e28d774ee33a6fcaf913691c509d6763b773dd196973230e6a222f160e2",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libexpat.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/pyexpat.cpython-314.so",
+      "sha256": "637dda9a461c12bdb01f124418b4c8028eb871d1d0b6ba4394d3db95015bc50b",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libreadline.so.8",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/readline.cpython-314.so",
+      "sha256": "9eedab35b3029424abe72c3eb444d34f55db8055e91377382b2142405d329828",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/resource.cpython-314.so",
+      "sha256": "2368bc1531badbe9c90678a17f50c5373b1ca91b78cac45a870d0fa8b9b31e36",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/select.cpython-314.so",
+      "sha256": "9139b2aa5f9716917c16be8b174a1edd270f5078ff610efcd3296cce1bb40751",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/syslog.cpython-314.so",
+      "sha256": "fc839c0116f45ebbed44234dcc0ff2459df24cc1fed18355694587e5bbe09d78",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/termios.cpython-314.so",
+      "sha256": "0024d50c3ce48123f0bcc936603b2459e2e14361e997fbaf2d3ecd920d7641cc",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/unicodedata.cpython-314.so",
+      "sha256": "395779db5f5afa5b3bd7c3def8f5a69dd1902c58886f20a9562532a8c554b012",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/xxlimited.cpython-314.so",
+      "sha256": "2adef75bbb4e85e24a59fbd3a102d53ce96539810986e7662a0de39ff8960e0a",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/lib-dynload/xxlimited_35.cpython-314.so",
+      "sha256": "b8941925637b67d94d3d17d8484f375039f9923539138bf95b0e5dc465cdf656",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/xxsubtype.cpython-314.so",
+      "sha256": "7f4fd6a9a42f36ea2325df4dd035f5db658ebe14fa8bcf8d749fee919e3badae",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libz.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/lib-dynload/zlib.cpython-314.so",
+      "sha256": "5ea6cea83effe891cab9508ed8e01fcae69dc80025426cd0645e115506b3bc65",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libjpeg.so.62",
+        "libz.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so",
+      "sha256": "846cf710965180ab17891df07169a4491f6b05db0c18e7c5e5c8ccb28500cce8",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/PIL/_imagingmath.cpython-314.so",
+      "sha256": "df305fe9ef859d568f1daabae91a2e208ddd7eba12b03240b937c3f8d4f97d74",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [],
+      "path": "usr/lib/python3.14/site-packages/PIL/_imagingmorph.cpython-314.so",
+      "sha256": "6aef15cd3f8804f17e7aedbbbb4feaded1b7bf47989c3644a56ff18dff81c425",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/PIL/_imagingtk.cpython-314.so",
+      "sha256": "92affff29b5c41018db7dac84197b3893b06c8098e17c255e455d9e144d95f9e",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/_elementpath.cpython-314.so",
+      "sha256": "54bcc1e68de30b8f84e0b1b80785a7441cde1da177b65db56864618e087c6a0b",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/builder.cpython-314.so",
+      "sha256": "24a31de4a696cb409a4e036dbbba9392496cc30947c3a627a067b01cca98827e",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libxslt.so.1",
+        "libexslt.so.0",
+        "libxml2.so.16",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/etree.cpython-314.so",
+      "sha256": "8b4f7bf1ce00a4f54cb2d15d05830ec4fdd1d7961fa9c70b22b1c6d39ed1b4b8",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/html/_difflib.cpython-314.so",
+      "sha256": "0ef8de09b964d1d9f452bb2cf60cf7ffc266182db1119bfc8de0393ec27a0fb3",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/html/diff.cpython-314.so",
+      "sha256": "e90b1da6b0d851a501f217770573f4e1c073b48101fca8c8c70314f877414ee8",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libxml2.so.16",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/objectify.cpython-314.so",
+      "sha256": "b857b013a4f1dbd5e36189ee0abbd82f513ad739723857e04112360bef873301",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/lxml/sax.cpython-314.so",
+      "sha256": "075cda5f18a01eaa63a4a959282aff7c80293e467a8acefd7a66880b2ca55b30",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/markupsafe/_speedups.cpython-314.so",
+      "sha256": "428e7f38a461f8fe1cf45876423d888a97ab5701970cfdb5a6079689b288a391",
+      "soname": null
+    },
+    {
+      "interpreter": null,
+      "needed": [
+        "libgcc_s.so.1",
+        "libc.so"
+      ],
+      "path": "usr/lib/python3.14/site-packages/primp/primp.abi3.so",
+      "sha256": "577b984084ff35edeb7305f0627127352e5197382cc49ad4c62394dce9ad3823",
+      "soname": null
+    }
+  ],
+  "kernel_handler_modified": false,
+  "kernel_handler_source_sha256": "1c513e5df2499097354e46932ff70b0101061b8c5219cc35a84f617c9e3b5471",
+  "lto": true,
+  "native_closure_policy": "CPython, Pillow, MarkupSafe, lxml, primp, musl loader/libc and every packaged native dependency are strict-aligned; GCC/C extensions use -mstrict-align, Rust uses -C target-feature=-ual, and PyYAML plus the remaining SmolAgents toolkit is pure Python",
+  "native_dependencies": {
+    "libjpeg-turbo": {
+      "shared_soname": "libjpeg.so.62",
+      "simd": false,
+      "strict_align_compile_database_verified": true,
+      "version": "3.1.4.1"
+    },
+    "libxml2": {
+      "shared_soname": "libxml2.so.16",
+      "strict_align_build_log_verified": true,
+      "version": "2.14.6"
+    },
+    "libxslt": {
+      "exslt_soname": "libexslt.so.0",
+      "shared_soname": "libxslt.so.1",
+      "strict_align_build_log_verified": true,
+      "version": "1.1.43"
+    }
+  },
+  "pgo": true,
+  "pgo_profile_file_count": 309,
+  "pgo_training_policy": "upstream --pgo under QEMU; nonzero is accepted only when GCC profile data exists",
+  "python_packages": {
+    "MarkupSafe": {
+      "source_build": true,
+      "speedups": true,
+      "version": "3.0.3",
+      "wheel": "markupsafe-3.0.3-cp314-cp314-linux_loongarch64.whl",
+      "wheel_sha256": "d1ddab68d5066f3d09fab9afbf09d39f37a8171bf8758acb5bbc65bb01f5679e",
+      "wheel_tag": "cp314-cp314-linux_loongarch64"
+    },
+    "Pillow": {
+      "features_disabled": [
+        "avif",
+        "freetype",
+        "imagequant",
+        "jpeg2000",
+        "lcms",
+        "raqm",
+        "tiff",
+        "webp",
+        "xcb"
+      ],
+      "features_enabled": [
+        "jpeg",
+        "zlib"
+      ],
+      "source_build": true,
+      "version": "12.3.0",
+      "wheel": "pillow-12.3.0-cp314-cp314-linux_loongarch64.whl",
+      "wheel_sha256": "ceaac4e98c48c665bd432879805cca2eb22ffc7571368eb9267763e12df24467",
+      "wheel_tag": "cp314-cp314-linux_loongarch64"
+    },
+    "PyYAML": {
+      "libyaml_accelerator": false,
+      "pure_python": true,
+      "source_build": true,
+      "version": "6.0.3",
+      "wheel": "pyyaml-6.0.3-py3-none-any.whl",
+      "wheel_sha256": "1832af5057bfe2ffb6187aa29464f52b3a9c3cb1d05fdda527861b3bc0e4bf66",
+      "wheel_tag": "py3-none-any"
+    },
+    "beautifulsoup4": {
+      "pure_python": true,
+      "source_build": false,
+      "version": "4.12.3",
+      "wheel": "beautifulsoup4-4.12.3-py3-none-any.whl",
+      "wheel_sha256": "b80878c9f40111313e55da8ba20bdba06d8fa3969fc68304167741bbf9e082ed",
+      "wheel_tag": "py3-none-any"
+    },
+    "click": {
+      "pure_python": true,
+      "source_build": false,
+      "version": "8.1.8",
+      "wheel": "click-8.1.8-py3-none-any.whl",
+      "wheel_sha256": "63c132bbbed01578a06712a2d1f497bb62d9c1c0d329b7903a866228027263b2",
+      "wheel_tag": "py3-none-any"
+    },
+    "ddgs": {
+      "pure_python": true,
+      "source_build": false,
+      "version": "9.0.0",
+      "wheel": "ddgs-9.0.0-py3-none-any.whl",
+      "wheel_sha256": "5dd11d666d6caf1cfdbd341579637bb670c4b2f41df5413b76705519d8e7a22c",
+      "wheel_tag": "py3-none-any"
+    },
+    "lxml": {
+      "dynamic_dependencies": [
+        "libxml2.so.16",
+        "libxslt.so.1",
+        "libexslt.so.0"
+      ],
+      "source_build": true,
+      "version": "6.1.1",
+      "wheel": "lxml-6.1.1-cp314-cp314-linux_loongarch64.whl",
+      "wheel_sha256": "04b2ded7932568851f4fc59196751b4b355fc627db0cdd9f77b7d1ce47761a2d",
+      "wheel_tag": "cp314-cp314-linux_loongarch64",
+      "without_cython": true
+    },
+    "markdownify": {
+      "pure_python": true,
+      "source_build": false,
+      "version": "0.14.1",
+      "wheel": "markdownify-0.14.1-py3-none-any.whl",
+      "wheel_sha256": "4c46a6c0c12c6005ddcd49b45a5a890398b002ef51380cd319db62df5e09bc2a",
+      "wheel_tag": "py3-none-any"
+    },
+    "primp": {
+      "cargo_locked": true,
+      "rust_target_feature": "-ual",
+      "rust_toolchain": "nightly-2025-01-18",
+      "source_build": true,
+      "version": "0.15.0",
+      "wheel": "primp-0.15.0-cp38-abi3-linux_loongarch64.whl",
+      "wheel_sha256": "2f9719589c5a13ba8f191989c4743c9c49e170d134133b5f287bf1f03b11a1b8",
+      "wheel_tag": "cp38-abi3-linux_loongarch64"
+    },
+    "six": {
+      "pure_python": true,
+      "source_build": false,
+      "version": "1.17.0",
+      "wheel": "six-1.17.0-py2.py3-none-any.whl",
+      "wheel_sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+      "wheel_tag": "py3-none-any"
+    },
+    "soupsieve": {
+      "pure_python": true,
+      "source_build": false,
+      "version": "2.6",
+      "wheel": "soupsieve-2.6-py3-none-any.whl",
+      "wheel_sha256": "e72c4ff06e4fb6e4b5a9f0f55fe6e81514581fca1515028625d0f299c602ccc9",
+      "wheel_tag": "py3-none-any"
+    }
+  },
+  "python_version": "3.14.5",
+  "runtime_interpreter": "/persist/python-runtime/current/lib/ld-musl-loongarch64.so.1",
+  "runtime_policy": "mangocore-la64-strict-align-v1",
+  "schema": 4,
+  "sources": [
+    {
+      "name": "Python-3.14.5.tar.xz",
+      "sha256": "7e32597b99e5d9a39abed35de4693fa169df3e5850d4c334337ffd6a19a36db6",
+      "size": 23903332
+    },
+    {
+      "name": "beautifulsoup4-4.12.3-py3-none-any.whl",
+      "sha256": "b80878c9f40111313e55da8ba20bdba06d8fa3969fc68304167741bbf9e082ed",
+      "size": 147925
+    },
+    {
+      "name": "bzip2-1.0.8.tar.gz",
+      "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+      "size": 810029
+    },
+    {
+      "name": "bzip2-bzip2-1.0.2-progress.patch",
+      "sha256": "a76f6d082a1a1fef2eff111177d7c7568e1d457fb2b98cde71bbbe6ea1c7c787",
+      "size": 6141
+    },
+    {
+      "name": "bzip2-bzip2-1.0.3-no-test.patch",
+      "sha256": "3478e797662d85996c03d3b7612d548d2d377fe7efc3dc190332741a11082ef6",
+      "size": 165
+    },
+    {
+      "name": "bzip2-bzip2-1.0.4-makefile-CFLAGS.patch",
+      "sha256": "f8cc63dcebef734154cc36c3ef963158ff2be6fc2d183cff49b627d570336628",
+      "size": 585
+    },
+    {
+      "name": "bzip2-bzip2-1.0.4-man-links.patch",
+      "sha256": "1fc9d91f3f7bd3eecd86149b9c95b3162d9d7956f7de543aa8bc41cbcd04f88b",
+      "size": 413
+    },
+    {
+      "name": "bzip2-saneso.patch",
+      "sha256": "0d6e3221c3db90ccbaec2c3c44afdfdd055093f4650a4e2f1a9b97cf48b69671",
+      "size": 728
+    },
+    {
+      "name": "click-8.1.8-py3-none-any.whl",
+      "sha256": "63c132bbbed01578a06712a2d1f497bb62d9c1c0d329b7903a866228027263b2",
+      "size": 98188
+    },
+    {
+      "name": "ddgs-9.0.0-py3-none-any.whl",
+      "sha256": "5dd11d666d6caf1cfdbd341579637bb670c4b2f41df5413b76705519d8e7a22c",
+      "size": 17944
+    },
+    {
+      "name": "expat-2.8.2.tar.xz",
+      "sha256": "3ad89b8588e6644bd4e49981480d48b21289eebbcd4f0a1a4afb1c29f99b6ab4",
+      "size": 515504
+    },
+    {
+      "name": "libffi-3.5.2.tar.gz",
+      "sha256": "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc",
+      "size": 1423124
+    },
+    {
+      "name": "libjpeg-turbo-3.1.4.1.tar.gz",
+      "sha256": "ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022",
+      "size": 2528617
+    },
+    {
+      "name": "libxml2-2.14.6.tar.xz",
+      "sha256": "7ce458a0affeb83f0b55f1f4f9e0e55735dbfc1a9de124ee86fb4a66b597203a",
+      "size": 2327580
+    },
+    {
+      "name": "libxslt-1.1.43.tar.xz",
+      "sha256": "5a3d6b383ca5afc235b171118e90f5ff6aa27e9fea3303065231a6d403f0183a",
+      "size": 1518364
+    },
+    {
+      "name": "linux-headers-7.1.3-r0.apk",
+      "sha256": "7bdf8aa74d42130ecc422b921425877f31b0afa754b6265507c3d1682ec03ec3",
+      "size": 1961951
+    },
+    {
+      "name": "lxml-6.1.1.tar.gz",
+      "sha256": "ba96ae44888e0185281e937633a743ea90d5a196c6000f82565ebb0580012d40",
+      "size": 4197430
+    },
+    {
+      "name": "markdownify-0.14.1-py3-none-any.whl",
+      "sha256": "4c46a6c0c12c6005ddcd49b45a5a890398b002ef51380cd319db62df5e09bc2a",
+      "size": 11530
+    },
+    {
+      "name": "markupsafe-3.0.3.tar.gz",
+      "sha256": "722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698",
+      "size": 80313
+    },
+    {
+      "name": "maturin-1.8.3-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl",
+      "sha256": "11564fac7486313b7baf3aa4e82c20e1b20364aad3fde2ccbc4c07693c0b7e16",
+      "size": 8282824
+    },
+    {
+      "name": "mpdecimal-4.0.1.tar.gz",
+      "sha256": "96d33abb4bb0070c7be0fed4246cd38416188325f820468214471938545b1ac8",
+      "size": 316268
+    },
+    {
+      "name": "musl-0001-add-stub-for-pthread_mutexattr_setprioceiling.patch",
+      "sha256": "b2067680c66af9eb9f4fdc1fa5d9337a9fd62bdab2c437b416aa97d79eb884ee",
+      "size": 896
+    },
+    {
+      "name": "musl-1.2.6.tar.gz",
+      "sha256": "d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a",
+      "size": 1082499
+    },
+    {
+      "name": "musl-CVE-2026-40200.patch",
+      "sha256": "1ee29f64f9ca8e8ad7c349779d661ff6b52126a27575d3586981357a52c406fb",
+      "size": 5594
+    },
+    {
+      "name": "musl-fix-loongarch64-zero-len-extcontext.patch",
+      "sha256": "92c8e965798ed516c15cb2a4e7c4ac45ec1eb68b6abff16c73adff2a3bae1b14",
+      "size": 738
+    },
+    {
+      "name": "musl-handle-aux-at_base.patch",
+      "sha256": "2a65e03b94217063d72fe998e5fb2e25cd01716078a3ba1b0ab574ab205111e6",
+      "size": 1214
+    },
+    {
+      "name": "musl-iconv-gb18030-fix.patch",
+      "sha256": "1d0be2e72b9d5bd16546b923aa8af861d271322f01644716a81823bec4065c99",
+      "size": 7506
+    },
+    {
+      "name": "ncurses-6.6-20260516.tgz",
+      "sha256": "933438009f594f54656c53c7bc347a7e0ff21881700fc3db811086f7a3fd3b60",
+      "size": 3803559
+    },
+    {
+      "name": "ncurses-cleanup-pkgconfig-ldflags.patch",
+      "sha256": "c19b803b176a950935893aaa78e6330044ad4e953c2061ecc884857a0cd8b8a8",
+      "size": 1025
+    },
+    {
+      "name": "openssl-3.5.7.tar.gz",
+      "sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
+      "size": 53153930
+    },
+    {
+      "name": "openssl-auxv.patch",
+      "sha256": "0b3a36c0f1b3d8e0adcf02c251374ce4d2578b0c9f4b88207bf85c5c1b58c7d8",
+      "size": 2013
+    },
+    {
+      "name": "pillow-12.3.0.tar.gz",
+      "sha256": "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce",
+      "size": 47025035
+    },
+    {
+      "name": "primp-0.15.0.tar.gz",
+      "sha256": "1af8ea4b15f57571ff7fc5e282a82c5eb69bc695e19b8ddeeda324397965b30a",
+      "size": 113022
+    },
+    {
+      "name": "pybind11-3.0.1-py3-none-any.whl",
+      "sha256": "aa8f0aa6e0a94d3b64adfc38f560f33f15e589be2175e103c0a33c6bce55ee89",
+      "size": 293611
+    },
+    {
+      "name": "python3-musl-find_library.patch",
+      "sha256": "83fd071bc556d4e88373a35fde74cb9c464ee4b8e95e5583b55f2e36d4f33cf2",
+      "size": 1817
+    },
+    {
+      "name": "pyyaml-6.0.3.tar.gz",
+      "sha256": "d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f",
+      "size": 130960
+    },
+    {
+      "name": "qemu-user-static_8.2.2+ds-0ubuntu1.17_amd64.deb",
+      "sha256": "4558164baf4250d4dcc0dcbcf114b44b4b77b5fed773267187e72cedae883fdc",
+      "size": 14722908
+    },
+    {
+      "name": "readline-8.3.tar.gz",
+      "sha256": "fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc",
+      "size": 3419642
+    },
+    {
+      "name": "readline-fix-ncurses-underlinking.patch",
+      "sha256": "4f004abcc9193aea80b4415918120e9dd830c2de99c91bc6a8fd829213df1af0",
+      "size": 300
+    },
+    {
+      "name": "readline83-001.patch",
+      "sha256": "21f0a03106dbe697337cd25c70eb0edbaa2bdb6d595b45f83285cdd35bac84de",
+      "size": 1846
+    },
+    {
+      "name": "readline83-002.patch",
+      "sha256": "e27364396ba9f6debf7cbaaf1a669e2b2854241ae07f7eca74ca8a8ba0c97472",
+      "size": 1613
+    },
+    {
+      "name": "readline83-003.patch",
+      "sha256": "72dee13601ce38f6746eb15239999a7c56f8e1ff5eb1ec8153a1f213e4acdb29",
+      "size": 2284
+    },
+    {
+      "name": "rustup-init-1.28.2-x86_64-unknown-linux-gnu",
+      "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c",
+      "size": 20889000
+    },
+    {
+      "name": "setuptools-80.9.0-py3-none-any.whl",
+      "sha256": "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922",
+      "size": 1201486
+    },
+    {
+      "name": "six-1.17.0-py2.py3-none-any.whl",
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+      "size": 11050
+    },
+    {
+      "name": "soupsieve-2.6-py3-none-any.whl",
+      "sha256": "e72c4ff06e4fb6e4b5a9f0f55fe6e81514581fca1515028625d0f299c602ccc9",
+      "size": 36186
+    },
+    {
+      "name": "sqlite-autoconf-3530300.tar.gz",
+      "sha256": "c917d7db16648ec95f714974ace5e5dcf46b7dc70e26600a0a102a3141125db0",
+      "size": 3282443
+    },
+    {
+      "name": "wheel-0.45.1-py3-none-any.whl",
+      "sha256": "708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248",
+      "size": 72494
+    },
+    {
+      "name": "x86_64-cross-tools-loongarch64-unknown-linux-musl-latest-20250911.tar.xz",
+      "sha256": "2d56d07146ed712ac44f5063f54a19656fce851492c3f1c10e31e6b6633db6d7",
+      "size": 66936540
+    },
+    {
+      "name": "x86_64-gcc-15.2.0-nolibc-loongarch64-linux.tar.xz",
+      "sha256": "1f00c5ca79ed1fc75a6ee84964dcf8ae00f487e7d6a084d91e46a70910ca41a0",
+      "size": 33711660
+    },
+    {
+      "name": "xz-5.8.3.tar.gz",
+      "sha256": "8ec1767fa517642ecb4cf08b891ce667ba6f143551e382b07c7ef437bda335e2",
+      "size": 1664359
+    },
+    {
+      "name": "zlib-1.3.2.tar.gz",
+      "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "size": 1502830
+    }
+  ],
+  "strict_flags": "-march=loongarch64 -mabi=lp64d -mstrict-align",
+  "target": "loongarch64-linux-musl",
+  "toolchain_release": "loong64/cross-tools 20250911",
+  "virtual_dso_providers": {
+    "libc.so": "lib/ld-musl-loongarch64.so.1"
+  }
+}

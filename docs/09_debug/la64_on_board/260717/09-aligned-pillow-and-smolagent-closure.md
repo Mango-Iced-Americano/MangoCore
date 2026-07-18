@@ -16,6 +16,7 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/05-strict-align-first-experiment.md"
   - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
   - "docs/09_debug/la64_on_board/260717/06-raw-data-index.md"
+  - "docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md"
   - "docs/08_testing/mangocore-python-guide.md"
 ---
 
@@ -60,6 +61,11 @@ Pillow 在 P4 ext4 上完成 PNG/JPEG 写入、`fsync`、重开和解码，SmolA
 实板补装并验证纯 Python `pydantic 1.10.26` 后，默认 `OpenAIModel` 无网络构造通过；
 具体版本、安装方法、失败样本和剩余边界见第 12 节。该补充没有改变 100 ELF runtime
 artifact，也没有向 user-site 引入新的 `.so`。
+
+同日继续从 `TOOL_MAPPING` 构造路径扫描三个内置工具，补齐 ddgs/markdownify 的传递依赖
+后，current 已由本节的 100 ELF `43d` runtime 更新为 schema 4、113 ELF 的 `28f` release。
+本节仍是 Pillow/OpenAI 阶段的历史制品记录，内置工具的源码矩阵、lxml/primp 构建和
+最终实板证据见 [11-smolagents-toolkit-dependency-closure.md](11-smolagents-toolkit-dependency-closure.md)。
 
 ## 2. 为什么不能直接安装普通 Pillow wheel
 

@@ -17,6 +17,7 @@
 | `20260717T-p4-strict-python-default/` | P4 唯一默认入口、PT_INTERP、chroot、P3 隔离、b7 发布与 PIL fail-exposed 历史证据 |
 | `20260717T-aligned-pillow/` | Pillow/libjpeg/MarkupSafe/PyYAML 闭包、100 ELF 发布、默认 SmolAgent、AgentImage 和最终 72/72 |
 | `20260718T-openai-dependency-audit/` | OpenAI/Pydantic 精确版本审计、纯 Python wheel 实板闭包、默认 `OpenAIModel` 无网络构造及 pip tag 剩余问题 |
+| `20260718T-smolagents-toolkit-closure/` | ddgs/markdownify 传递闭包、lxml/primp strict 构建日志、113 ELF P4 发布、默认三项工具构造与失败/回滚证据 |
 | `strict-runtime-build/` | 完整 runtime 构建日志、runtime manifest、双架构内核编译日志和包 SHA 文件 |
 
 ## 数据保真规则

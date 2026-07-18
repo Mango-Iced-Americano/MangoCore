@@ -24,6 +24,8 @@ ARTIFACTS=$OUT/artifacts
 WRAP=$OUT/cross
 HOST_TOOLS=$OUT/host-tools
 PILLOW_BUILD_DEPS=$OUT/pillow-build-deps
+RUSTUP_HOME=$HOST_TOOLS/rustup
+CARGO_HOME=$HOST_TOOLS/cargo
 
 mkdir -p \
     "$CACHE" "$SOURCES" "$BUILD" "$STAMPS" "$SYSROOT" "$ARTIFACTS" \
@@ -54,6 +56,42 @@ MARKUPSAFE_SHA256=722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe16
 PYYAML_ARCHIVE=pyyaml-6.0.3.tar.gz
 PYYAML_URL=https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-6.0.3.tar.gz
 PYYAML_SHA256=d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f
+LIBXML2_ARCHIVE=libxml2-2.14.6.tar.xz
+LIBXML2_URL=https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.6.tar.xz
+LIBXML2_SHA256=7ce458a0affeb83f0b55f1f4f9e0e55735dbfc1a9de124ee86fb4a66b597203a
+LIBXSLT_ARCHIVE=libxslt-1.1.43.tar.xz
+LIBXSLT_URL=https://download.gnome.org/sources/libxslt/1.1/libxslt-1.1.43.tar.xz
+LIBXSLT_SHA256=5a3d6b383ca5afc235b171118e90f5ff6aa27e9fea3303065231a6d403f0183a
+LXML_ARCHIVE=lxml-6.1.1.tar.gz
+LXML_URL=https://files.pythonhosted.org/packages/05/3b/aab6728cae887456f409b4d75e8a01856e4f04bd510de38052a47768b680/lxml-6.1.1.tar.gz
+LXML_SHA256=ba96ae44888e0185281e937633a743ea90d5a196c6000f82565ebb0580012d40
+PRIMP_ARCHIVE=primp-0.15.0.tar.gz
+PRIMP_URL=https://files.pythonhosted.org/packages/56/0b/a87556189da4de1fc6360ca1aa05e8335509633f836cdd06dd17f0743300/primp-0.15.0.tar.gz
+PRIMP_SHA256=1af8ea4b15f57571ff7fc5e282a82c5eb69bc695e19b8ddeeda324397965b30a
+RUSTUP_INIT=rustup-init-1.28.2-x86_64-unknown-linux-gnu
+RUSTUP_INIT_URL=https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init
+RUSTUP_INIT_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+MATURIN_WHEEL=maturin-1.8.3-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl
+MATURIN_URL=https://files.pythonhosted.org/packages/2e/6d/bf1b8bb9a8b1d9adad242b4089794be318446142975762d04f04ffabae40/maturin-1.8.3-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl
+MATURIN_SHA256=11564fac7486313b7baf3aa4e82c20e1b20364aad3fde2ccbc4c07693c0b7e16
+DDGS_WHEEL=ddgs-9.0.0-py3-none-any.whl
+DDGS_URL=https://files.pythonhosted.org/packages/e5/05/bd3ed9a28212b313f5678533152c4d79fbc386e44245ca5eed426d75f019/ddgs-9.0.0-py3-none-any.whl
+DDGS_SHA256=5dd11d666d6caf1cfdbd341579637bb670c4b2f41df5413b76705519d8e7a22c
+MARKDOWNIFY_WHEEL=markdownify-0.14.1-py3-none-any.whl
+MARKDOWNIFY_URL=https://files.pythonhosted.org/packages/65/0b/74cec93a7b05edf4fc3ea1c899fe8a37f041d7b9d303c75abf7a162924e0/markdownify-0.14.1-py3-none-any.whl
+MARKDOWNIFY_SHA256=4c46a6c0c12c6005ddcd49b45a5a890398b002ef51380cd319db62df5e09bc2a
+BEAUTIFULSOUP4_WHEEL=beautifulsoup4-4.12.3-py3-none-any.whl
+BEAUTIFULSOUP4_URL=https://files.pythonhosted.org/packages/b1/fe/e8c672695b37eecc5cbf43e1d0638d88d66ba3a44c4d321c796f4e59167f/beautifulsoup4-4.12.3-py3-none-any.whl
+BEAUTIFULSOUP4_SHA256=b80878c9f40111313e55da8ba20bdba06d8fa3969fc68304167741bbf9e082ed
+SOUPSIEVE_WHEEL=soupsieve-2.6-py3-none-any.whl
+SOUPSIEVE_URL=https://files.pythonhosted.org/packages/d1/c2/fe97d779f3ef3b15f05c94a2f1e3d21732574ed441687474db9d342a7315/soupsieve-2.6-py3-none-any.whl
+SOUPSIEVE_SHA256=e72c4ff06e4fb6e4b5a9f0f55fe6e81514581fca1515028625d0f299c602ccc9
+SIX_WHEEL=six-1.17.0-py2.py3-none-any.whl
+SIX_URL=https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
+SIX_SHA256=4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+CLICK_WHEEL=click-8.1.8-py3-none-any.whl
+CLICK_URL=https://files.pythonhosted.org/packages/7e/d4/7ebdbd03970677812aac39c869717059dbb71a4cfc033ca6e5221787892c/click-8.1.8-py3-none-any.whl
+CLICK_SHA256=63c132bbbed01578a06712a2d1f497bb62d9c1c0d329b7903a866228027263b2
 SETUPTOOLS_WHEEL=setuptools-80.9.0-py3-none-any.whl
 SETUPTOOLS_URL=https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl
 SETUPTOOLS_SHA256=062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
@@ -172,6 +210,18 @@ fetch_sources() {
     fetch_sha256 "$PILLOW_URL" "$PILLOW_ARCHIVE" "$PILLOW_SHA256"
     fetch_sha256 "$MARKUPSAFE_URL" "$MARKUPSAFE_ARCHIVE" "$MARKUPSAFE_SHA256"
     fetch_sha256 "$PYYAML_URL" "$PYYAML_ARCHIVE" "$PYYAML_SHA256"
+    fetch_sha256 "$LIBXML2_URL" "$LIBXML2_ARCHIVE" "$LIBXML2_SHA256"
+    fetch_sha256 "$LIBXSLT_URL" "$LIBXSLT_ARCHIVE" "$LIBXSLT_SHA256"
+    fetch_sha256 "$LXML_URL" "$LXML_ARCHIVE" "$LXML_SHA256"
+    fetch_sha256 "$PRIMP_URL" "$PRIMP_ARCHIVE" "$PRIMP_SHA256"
+    fetch_sha256 "$RUSTUP_INIT_URL" "$RUSTUP_INIT" "$RUSTUP_INIT_SHA256"
+    fetch_sha256 "$MATURIN_URL" "$MATURIN_WHEEL" "$MATURIN_SHA256"
+    fetch_sha256 "$DDGS_URL" "$DDGS_WHEEL" "$DDGS_SHA256"
+    fetch_sha256 "$MARKDOWNIFY_URL" "$MARKDOWNIFY_WHEEL" "$MARKDOWNIFY_SHA256"
+    fetch_sha256 "$BEAUTIFULSOUP4_URL" "$BEAUTIFULSOUP4_WHEEL" "$BEAUTIFULSOUP4_SHA256"
+    fetch_sha256 "$SOUPSIEVE_URL" "$SOUPSIEVE_WHEEL" "$SOUPSIEVE_SHA256"
+    fetch_sha256 "$SIX_URL" "$SIX_WHEEL" "$SIX_SHA256"
+    fetch_sha256 "$CLICK_URL" "$CLICK_WHEEL" "$CLICK_SHA256"
     fetch_sha256 "$SETUPTOOLS_URL" "$SETUPTOOLS_WHEEL" "$SETUPTOOLS_SHA256"
     fetch_sha256 "$PYBIND11_URL" "$PYBIND11_WHEEL" "$PYBIND11_SHA256"
     fetch_sha256 "$WHEEL_URL" "$WHEEL_WHEEL" "$WHEEL_SHA256"
@@ -481,6 +531,90 @@ build_xz() {
         make DESTDIR="$SYSROOT" install
     )
     mark_done xz
+}
+
+verify_strict_c_build_log() {
+    local component=$1 build_log=$2 minimum_units=$3
+    python3 - "$component" "$build_log" "$CC" "$minimum_units" <<'PY'
+import pathlib
+import sys
+
+component, log_path, compiler, minimum = sys.argv[1:]
+lines = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+compile_lines = [
+    line for line in lines
+    if compiler + " " in line and " -c " in line
+]
+if len(compile_lines) < int(minimum):
+    raise SystemExit(
+        f"unexpectedly small {component} native build: {len(compile_lines)} compile units"
+    )
+missing = [line for line in compile_lines if "-mstrict-align" not in line.split()]
+if missing:
+    raise SystemExit(f"{component} compile unit missing -mstrict-align: {missing[0]}")
+print(f"{component}_strict_compile_units={len(compile_lines)}")
+PY
+}
+
+build_libxml2() {
+    local stamp=libxml2-2.14.6-strict
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/libxml2-2.14.6
+    local build_log=$BUILD/libxml2-2.14.6-build.log
+    unpack_tar "$CACHE/$LIBXML2_ARCHIVE" "$src"
+    (
+        cd "$src"
+        configure_env ./configure \
+            --build="$BUILD_TRIPLE" --host="$TARGET" --prefix=/usr \
+            --enable-shared --enable-static \
+            --without-python --without-icu --without-readline --without-history \
+            --without-http --without-modules --with-threads --with-zlib --with-lzma
+        make V=1 -j"$JOBS" 2>&1 | tee "$build_log"
+        make DESTDIR="$SYSROOT" install
+    )
+    verify_strict_c_build_log libxml2 "$build_log" 20
+    [[ -f "$SYSROOT/usr/lib/libxml2.so.16" ]] || {
+        echo "strict libxml2 shared library was not installed" >&2
+        exit 1
+    }
+    mark_done "$stamp"
+}
+
+build_libxslt() {
+    local stamp=libxslt-1.1.43-strict
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/libxslt-1.1.43
+    local build_log=$BUILD/libxslt-1.1.43-build.log
+    # Installed libtool archives retain target prefix paths such as
+    # /usr/lib/liblzma.la.  When consumed from the cross sysroot, libtool
+    # incorrectly resolves those paths against the Docker host.  The shared
+    # objects and pkg-config metadata are canonical for this dynamic build.
+    rm -f "$SYSROOT/usr/lib/libxml2.la" "$SYSROOT/usr/lib/liblzma.la"
+    unpack_tar "$CACHE/$LIBXSLT_ARCHIVE" "$src"
+    (
+        cd "$src"
+        env \
+            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
+            CFLAGS="$COMMON_CFLAGS" CXXFLAGS="$COMMON_CFLAGS" \
+            CPPFLAGS="$COMMON_CPPFLAGS -I$SYSROOT/usr/include/libxml2" \
+            LDFLAGS="$COMMON_LDFLAGS" \
+            PKG_CONFIG_SYSROOT_DIR="$SYSROOT" \
+            PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" \
+            XML2_CONFIG="$SYSROOT/usr/bin/xml2-config" \
+            ./configure \
+            --build="$BUILD_TRIPLE" --host="$TARGET" --prefix=/usr \
+            --enable-shared --enable-static \
+            --without-python --without-crypto --without-plugins \
+            --with-libxml-prefix="$SYSROOT/usr"
+        make V=1 -j"$JOBS" 2>&1 | tee "$build_log"
+        make DESTDIR="$SYSROOT" install
+    )
+    verify_strict_c_build_log libxslt "$build_log" 10
+    [[ -f "$SYSROOT/usr/lib/libxslt.so.1" && -f "$SYSROOT/usr/lib/libexslt.so.0" ]] || {
+        echo "strict libxslt/libexslt shared libraries were not installed" >&2
+        exit 1
+    }
+    mark_done "$stamp"
 }
 
 build_openssl() {
@@ -987,6 +1121,260 @@ PY
     mark_done "$stamp"
 }
 
+install_wheel_safely() {
+    local wheel=$1 expected_name=$2 expected_version=$3 expected_tag=$4
+    local site_packages=$RUNTIME/usr/lib/python3.14/site-packages
+    mkdir -p "$site_packages"
+    python3 - "$wheel" "$site_packages" "$expected_name" "$expected_version" "$expected_tag" <<'PY'
+import csv
+import email.parser
+import pathlib
+import shutil
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+site = pathlib.Path(sys.argv[2])
+expected_name, expected_version, expected_tag = sys.argv[3:]
+
+def normalized(value):
+    return value.lower().replace("-", "_").replace(".", "_")
+
+with zipfile.ZipFile(wheel) as archive:
+    names = archive.namelist()
+    for name in names:
+        member = pathlib.PurePosixPath(name)
+        if member.is_absolute() or ".." in member.parts:
+            raise SystemExit(f"unsafe wheel member: {name}")
+    metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
+    wheel_names = [name for name in names if name.endswith(".dist-info/WHEEL")]
+    if len(metadata_names) != 1 or len(wheel_names) != 1:
+        raise SystemExit(f"invalid wheel metadata layout: {wheel}")
+    metadata = email.parser.BytesParser().parsebytes(archive.read(metadata_names[0]))
+    if normalized(metadata["Name"]) != normalized(expected_name):
+        raise SystemExit(f"wheel name mismatch: {metadata['Name']} != {expected_name}")
+    if metadata["Version"] != expected_version:
+        raise SystemExit(f"wheel version mismatch: {metadata['Version']} != {expected_version}")
+    wheel_text = archive.read(wheel_names[0]).decode("utf-8")
+    if f"Tag: {expected_tag}" not in wheel_text:
+        raise SystemExit(f"wheel tag mismatch: expected {expected_tag}")
+    if expected_tag.endswith("none-any") and "Root-Is-Purelib: true" not in wheel_text:
+        raise SystemExit(f"pure wheel is not marked purelib: {wheel}")
+    for name in names:
+        if name.endswith("/"):
+            continue
+        payload = archive.read(name)
+        if name.endswith(".so") or ".so." in name or payload.startswith(b"\x7fELF"):
+            if expected_tag.endswith("none-any"):
+                raise SystemExit(f"pure wheel contains native payload: {name}")
+
+    # Remove previous versions of this distribution using their RECORD files,
+    # but never follow paths outside the target site-packages directory.
+    for dist_info in sorted(site.glob("*.dist-info")):
+        old_metadata = dist_info / "METADATA"
+        if not old_metadata.is_file():
+            continue
+        old = email.parser.BytesParser().parse(old_metadata.open("rb"))
+        if normalized(old.get("Name", "")) != normalized(expected_name):
+            continue
+        record = dist_info / "RECORD"
+        if record.is_file():
+            with record.open(newline="", encoding="utf-8") as stream:
+                for row in csv.reader(stream):
+                    if not row:
+                        continue
+                    relative = pathlib.PurePosixPath(row[0])
+                    if relative.is_absolute() or ".." in relative.parts:
+                        raise SystemExit(f"unsafe installed RECORD path: {row[0]}")
+                    candidate = site.joinpath(*relative.parts)
+                    if candidate.is_file() or candidate.is_symlink():
+                        candidate.unlink()
+        if dist_info.exists():
+            shutil.rmtree(dist_info)
+    archive.extractall(site)
+PY
+}
+
+build_lxml() {
+    local stamp=lxml-6.1.1-strict
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/lxml-6.1.1
+    local wheels=$BUILD/lxml-6.1.1-wheels
+    local build_log=$BUILD/lxml-6.1.1-build.log
+    local site_packages=$RUNTIME/usr/lib/python3.14/site-packages
+    local target_include=$RUNTIME/usr/include/python3.14
+    local target_sysconfig sysconfig_name wheel
+
+    target_sysconfig=$(find "$RUNTIME/usr/lib/python3.14" -maxdepth 1 \
+        -name '_sysconfigdata_*.py' -print -quit)
+    [[ -f "$target_include/Python.h" && -n "$target_sysconfig" ]] || {
+        echo "target Python build metadata is missing for lxml" >&2
+        exit 1
+    }
+    sysconfig_name=$(basename "$target_sysconfig" .py)
+    unpack_tar "$CACHE/$LXML_ARCHIVE" "$src"
+    rm -rf -- "$wheels"
+    mkdir -p "$wheels" "$site_packages"
+
+    (
+        cd "$src"
+        SOURCE_DATE_EPOCH=0 \
+        PYTHONPATH="$PILLOW_BUILD_DEPS:$RUNTIME/usr/lib/python3.14" \
+        _PYTHON_SYSCONFIGDATA_NAME="$sysconfig_name" \
+        _PYTHON_HOST_PLATFORM=linux-loongarch64 \
+        CC="$CC" CXX="$CXX" LDSHARED="$CC -shared" \
+        CFLAGS="$COMMON_CFLAGS" CXXFLAGS="$COMMON_CFLAGS" \
+        CPPFLAGS="-I$target_include $COMMON_CPPFLAGS" \
+        LDFLAGS="$COMMON_LDFLAGS" \
+        PKG_CONFIG=pkg-config \
+        PKG_CONFIG_SYSROOT_DIR="$SYSROOT" \
+        PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" \
+        "$HOSTPY/bin/python3.14" setup.py --without-cython bdist_wheel \
+            --dist-dir "$wheels" 2>&1 | tee "$build_log"
+    )
+    verify_strict_c_build_log lxml "$build_log" 2
+    wheel=$(find "$wheels" -maxdepth 1 -type f \
+        -name 'lxml-6.1.1-cp314-cp314-linux_loongarch64.whl' -print -quit)
+    [[ -n "$wheel" ]] || {
+        echo "strict lxml LoongArch wheel was not produced" >&2
+        exit 1
+    }
+    install_wheel_safely "$wheel" lxml 6.1.1 cp314-cp314-linux_loongarch64
+    [[ $(find "$site_packages/lxml" -maxdepth 1 -type f -name '*.so' | wc -l) -ge 2 ]] || {
+        echo "installed lxml native extensions are missing" >&2
+        exit 1
+    }
+    mark_done "$stamp"
+}
+
+setup_rust_toolchain() {
+    mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" "$HOST_TOOLS/bin" "$HOST_TOOLS/home"
+    install -m 0755 "$CACHE/$RUSTUP_INIT" "$HOST_TOOLS/bin/rustup-init"
+    export RUSTUP_HOME CARGO_HOME HOME=$HOST_TOOLS/home
+    export PATH="$CARGO_HOME/bin:$HOST_TOOLS/bin:$PATH"
+    if [[ ! -x "$CARGO_HOME/bin/rustc" ]]; then
+        "$HOST_TOOLS/bin/rustup-init" -y --no-modify-path --profile minimal \
+            --default-toolchain nightly-2025-01-18 \
+            --target loongarch64-unknown-linux-musl
+    else
+        rustup target add --toolchain nightly-2025-01-18 \
+            loongarch64-unknown-linux-musl
+    fi
+    rustup default nightly-2025-01-18
+    rustc --version | grep -Fq '1.86.0-nightly' || {
+        echo "unexpected Rust compiler for primp: $(rustc --version)" >&2
+        exit 1
+    }
+}
+
+build_primp() {
+    local stamp=primp-0.15.0-strict
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/primp-0.15.0
+    local wheels=$BUILD/primp-0.15.0-wheels
+    local build_log=$BUILD/primp-0.15.0-build.log
+    local maturin_root=$HOST_TOOLS/maturin-1.8.3
+    local boringssl_crate boringssl_src wheel
+
+    setup_rust_toolchain
+    unpack_tar "$CACHE/$PRIMP_ARCHIVE" "$src"
+    [[ -f "$src/Cargo.lock" ]] || {
+        echo "pinned primp sdist is missing Cargo.lock" >&2
+        exit 1
+    }
+    (
+        cd "$src"
+        cargo metadata --locked --format-version 1 \
+            > "$BUILD/primp-0.15.0-cargo-metadata.json"
+    )
+    boringssl_crate=$(find "$CARGO_HOME/registry/src" -maxdepth 2 -type d \
+        -name 'boring-sys2-4.15.11' -print -quit)
+    [[ -n "$boringssl_crate" && -f "$boringssl_crate/deps/boringssl/CMakeLists.txt" ]] || {
+        echo "Cargo.lock did not resolve the expected boring-sys2 4.15.11 source" >&2
+        exit 1
+    }
+    boringssl_src=$BUILD/boringssl-primp-0.15.0
+    rm -rf -- "$boringssl_src"
+    mkdir -p "$boringssl_src"
+    cp -a "$boringssl_crate/deps/boringssl/." "$boringssl_src/"
+    git -C "$boringssl_src" init --quiet
+    git -C "$boringssl_src" apply --whitespace=fix \
+        "$boringssl_crate/patches/boringssl-44b3df6f03d85c901767250329c571db405122d5.patch"
+    git -C "$boringssl_src" apply --whitespace=error \
+        "$ROOT/user/tools/cpython/patches/boringssl-loongarch64-generic.patch"
+    rm -rf -- "$wheels" "$maturin_root"
+    mkdir -p "$wheels" "$maturin_root" "$HOST_TOOLS/bin"
+    python3 -m zipfile -e "$CACHE/$MATURIN_WHEEL" "$maturin_root"
+    install -m 0755 "$maturin_root/maturin-1.8.3.data/scripts/maturin" \
+        "$HOST_TOOLS/bin/maturin"
+
+    (
+        cd "$src"
+        SOURCE_DATE_EPOCH=0 \
+        PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.14 \
+        PYO3_CROSS_LIB_DIR="$RUNTIME/usr/lib" \
+        CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_MUSL_LINKER="$CC" \
+        CC_loongarch64_unknown_linux_musl="$CC" \
+        CXX_loongarch64_unknown_linux_musl="$CXX" \
+        AR_loongarch64_unknown_linux_musl="$AR" \
+        CFLAGS_loongarch64_unknown_linux_musl="$COMMON_CFLAGS" \
+        CXXFLAGS_loongarch64_unknown_linux_musl="$COMMON_CFLAGS" \
+        BORING_BSSL_SOURCE_PATH="$boringssl_src" \
+        BORING_BSSL_ASSUME_PATCHED=1 \
+        BORING_BSSL_SYSROOT="$SYSROOT" \
+        RUSTFLAGS='-C target-feature=-ual' \
+        "$HOST_TOOLS/bin/maturin" -vv build --release --locked \
+            --target loongarch64-unknown-linux-musl \
+            --compatibility linux --out "$wheels" 2>&1 | tee "$build_log"
+    )
+    grep -Fq 'target-feature=-ual' "$build_log" || {
+        echo "primp Rust build log does not prove -ual" >&2
+        exit 1
+    }
+    local boringssl_commands
+    boringssl_commands=$(find "$src/target/loongarch64-unknown-linux-musl/release/build" \
+        -path '*boring-sys2-*/out/build/compile_commands.json' -print -quit)
+    [[ -n "$boringssl_commands" ]] || {
+        echo "primp BoringSSL compile database is missing" >&2
+        exit 1
+    }
+    python3 - "$boringssl_commands" <<'PY'
+import json
+import pathlib
+import sys
+
+commands = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if len(commands) < 100:
+    raise SystemExit(f"unexpectedly small BoringSSL build: {len(commands)} compile units")
+missing = [entry["file"] for entry in commands if "-mstrict-align" not in entry["command"].split()]
+if missing:
+    raise SystemExit("BoringSSL compile unit missing -mstrict-align: " + missing[0])
+if not all("-DOPENSSL_NO_ASM" in entry["command"] for entry in commands):
+    raise SystemExit("BoringSSL LoongArch generic build is missing OPENSSL_NO_ASM")
+print(f"boringssl_strict_compile_units={len(commands)}")
+PY
+    wheel=$(find "$wheels" -maxdepth 1 -type f \
+        -name 'primp-0.15.0-cp38-abi3-linux_loongarch64.whl' -print -quit)
+    [[ -n "$wheel" ]] || {
+        echo "strict primp LoongArch abi3 wheel was not produced" >&2
+        exit 1
+    }
+    install_wheel_safely "$wheel" primp 0.15.0 cp38-abi3-linux_loongarch64
+    mark_done "$stamp"
+}
+
+install_smolagents_toolkit_pure() {
+    local stamp=smolagents-toolkit-pure-v1
+    if is_done "$stamp"; then return; fi
+    install_wheel_safely "$CACHE/$CLICK_WHEEL" click 8.1.8 py3-none-any
+    install_wheel_safely "$CACHE/$SIX_WHEEL" six 1.17.0 py3-none-any
+    install_wheel_safely "$CACHE/$SOUPSIEVE_WHEEL" soupsieve 2.6 py3-none-any
+    install_wheel_safely "$CACHE/$BEAUTIFULSOUP4_WHEEL" beautifulsoup4 4.12.3 py3-none-any
+    install_wheel_safely "$CACHE/$MARKDOWNIFY_WHEEL" markdownify 0.14.1 py3-none-any
+    install_wheel_safely "$CACHE/$DDGS_WHEEL" ddgs 9.0.0 py3-none-any
+    mark_done "$stamp"
+}
+
 copy_runtime_library() {
     local pattern=$1 matched=0 directory file
     shopt -s nullglob
@@ -1004,7 +1392,7 @@ copy_runtime_library() {
 }
 
 package_runtime() {
-    local package_digest
+    local package_digest toolchain_syslib
     package_digest=$(package_input_digest)
     if package_cache_current; then return; fi
     rm -f "$STAMPS/runtime-package.done"
@@ -1015,9 +1403,20 @@ package_runtime() {
         'libz.so*' 'libbz2.so*' 'liblzma.so*' 'libffi.so*' 'libexpat.so*' \
         'libmpdec.so*' 'libcrypto.so*' 'libssl.so*' 'libncursesw.so*' \
         'libtinfow.so*' 'libpanelw.so*' 'libreadline.so*' 'libhistory.so*' \
-        'libsqlite3.so*' 'libjpeg.so*'; do
+        'libsqlite3.so*' 'libjpeg.so*' 'libxml2.so*' 'libxslt.so*' \
+        'libexslt.so*'; do
         copy_runtime_library "$pattern"
     done
+    # Rust's LoongArch musl target and BoringSSL's C++ glue link the pinned
+    # cross-toolchain unwind/C++ runtimes dynamically.  These libraries do not
+    # belong to the separately built musl sysroot, so include the exact files
+    # from the same pinned toolchain that linked primp.
+    toolchain_syslib=$TOOLCHAIN_ROOT/$TOOLCHAIN_PREFIX/sysroot/lib
+    install -m 0755 "$toolchain_syslib/libgcc_s.so.1" \
+        "$RUNTIME/usr/lib/libgcc_s.so.1"
+    install -m 0755 "$toolchain_syslib/libstdc++.so.6.0.34" \
+        "$RUNTIME/usr/lib/libstdc++.so.6.0.34"
+    ln -sfn libstdc++.so.6.0.34 "$RUNTIME/usr/lib/libstdc++.so.6"
     if [[ -d "$SYSROOT/usr/lib/ossl-modules" ]]; then
         cp -a "$SYSROOT/usr/lib/ossl-modules" "$RUNTIME/usr/lib/"
     fi
@@ -1038,6 +1437,8 @@ package_runtime() {
     install -m 0755 "$ROOT/user/tools/cpython/strict_runtime_smoke.sh" "$RUNTIME/strict_runtime_smoke.sh"
     install -m 0644 "$ROOT/user/tools/cpython/verify_runtime_integrity.py" "$RUNTIME/verify_runtime_integrity.py"
     install -m 0644 "$ROOT/user/tools/cpython/pillow_strict_smoke.py" "$RUNTIME/pillow_strict_smoke.py"
+    install -m 0644 "$ROOT/user/tools/cpython/smolagents_toolkit_smoke.py" \
+        "$RUNTIME/smolagents_toolkit_smoke.py"
     install -m 0755 "$ROOT/user/tools/cpython/L3_check_files.sh" "$RUNTIME/L3_check_files.sh"
     install -m 0755 "$ROOT/user/tools/cpython/L4_startup.sh" "$RUNTIME/L4_startup.sh"
     install -m 0644 "$ROOT/user/tools/cpython/L5_language.py" "$RUNTIME/L5_language.py"
@@ -1179,6 +1580,15 @@ PY
         --library-path "$RUNTIME/usr/lib:$RUNTIME/lib" \
         "$RUNTIME/usr/bin/python3" "$RUNTIME/pillow_strict_smoke.py"
 
+    "$QEMU" -L "$RUNTIME" \
+        -E "LD_LIBRARY_PATH=$RUNTIME/usr/lib:$RUNTIME/lib" \
+        -E "PYTHONHOME=$RUNTIME/usr" \
+        -E "PYTHONNOUSERSITE=1" \
+        -E "CPYTHON_ROOT=$RUNTIME" \
+        "$RUNTIME/lib/ld-musl-loongarch64.so.1" \
+        --library-path "$RUNTIME/usr/lib:$RUNTIME/lib" \
+        "$RUNTIME/usr/bin/python3" -S "$RUNTIME/smolagents_toolkit_smoke.py" --exact
+
     python3 - "$RUNTIME" "$OUT" "$GCC" "$READELF" "$STRICT_FLAGS" "$ROOT" <<'PY'
 import hashlib
 import json
@@ -1290,10 +1700,53 @@ pyyaml_wheel_text = pyyaml_metadata.read_text(encoding="utf-8")
 if f"Tag: {pyyaml_wheel_tag}" not in pyyaml_wheel_text or "Root-Is-Purelib: true" not in pyyaml_wheel_text:
     raise SystemExit("installed PyYAML wheel is not the expected pure-Python build")
 
+lxml_wheels = sorted((out / "build" / "lxml-6.1.1-wheels").glob("*.whl"))
+if len(lxml_wheels) != 1:
+    raise SystemExit(f"expected one strict lxml wheel, found {len(lxml_wheels)}")
+lxml_wheel = lxml_wheels[0]
+lxml_wheel_tag = "cp314-cp314-linux_loongarch64"
+lxml_metadata = runtime / "usr/lib/python3.14/site-packages/lxml-6.1.1.dist-info/WHEEL"
+if f"Tag: {lxml_wheel_tag}" not in lxml_metadata.read_text(encoding="utf-8"):
+    raise SystemExit("installed lxml wheel does not carry the target ABI tag")
+
+primp_wheels = sorted((out / "build" / "primp-0.15.0-wheels").glob("*.whl"))
+if len(primp_wheels) != 1:
+    raise SystemExit(f"expected one strict primp wheel, found {len(primp_wheels)}")
+primp_wheel = primp_wheels[0]
+primp_wheel_tag = "cp38-abi3-linux_loongarch64"
+primp_metadata = runtime / "usr/lib/python3.14/site-packages/primp-0.15.0.dist-info/WHEEL"
+if f"Tag: {primp_wheel_tag}" not in primp_metadata.read_text(encoding="utf-8"):
+    raise SystemExit("installed primp wheel does not carry the target ABI tag")
+
+pure_toolkit_specs = {
+    "click": ("8.1.8", "click-8.1.8-py3-none-any.whl", "py3-none-any"),
+    "six": ("1.17.0", "six-1.17.0-py2.py3-none-any.whl", "py3-none-any"),
+    "soupsieve": ("2.6", "soupsieve-2.6-py3-none-any.whl", "py3-none-any"),
+    "beautifulsoup4": ("4.12.3", "beautifulsoup4-4.12.3-py3-none-any.whl", "py3-none-any"),
+    "markdownify": ("0.14.1", "markdownify-0.14.1-py3-none-any.whl", "py3-none-any"),
+    "ddgs": ("9.0.0", "ddgs-9.0.0-py3-none-any.whl", "py3-none-any"),
+}
+pure_toolkit_manifest = {}
+for distribution, (version, wheel_name, wheel_tag) in pure_toolkit_specs.items():
+    dist_info = distribution.replace("-", "_") + f"-{version}.dist-info"
+    wheel_metadata = runtime / "usr/lib/python3.14/site-packages" / dist_info / "WHEEL"
+    wheel_text = wheel_metadata.read_text(encoding="utf-8")
+    if f"Tag: {wheel_tag}" not in wheel_text or "Root-Is-Purelib: true" not in wheel_text:
+        raise SystemExit(f"installed {distribution} wheel is not the expected pure-Python build")
+    source_wheel = out / "cache" / wheel_name
+    pure_toolkit_manifest[distribution] = {
+        "version": version,
+        "source_build": False,
+        "wheel": wheel_name,
+        "wheel_sha256": sha256(source_wheel),
+        "wheel_tag": wheel_tag,
+        "pure_python": True,
+    }
+
 manifest = {
-    "schema": 3,
+    "schema": 4,
     "runtime_policy": "mangocore-la64-strict-align-v1",
-    "native_closure_policy": "CPython, Pillow, MarkupSafe, musl loader/libc and every packaged native dependency use -mstrict-align; PyYAML is pure Python",
+    "native_closure_policy": "CPython, Pillow, MarkupSafe, lxml, primp, musl loader/libc and every packaged native dependency are strict-aligned; GCC/C extensions use -mstrict-align, Rust uses -C target-feature=-ual, and PyYAML plus the remaining SmolAgents toolkit is pure Python",
     "runtime_interpreter": expected_interp,
     "target": "loongarch64-linux-musl",
     "python_version": "3.14.5",
@@ -1336,7 +1789,27 @@ manifest = {
             "wheel_tag": pyyaml_wheel_tag,
             "pure_python": True,
             "libyaml_accelerator": False,
-        }
+        },
+        "lxml": {
+            "version": "6.1.1",
+            "source_build": True,
+            "wheel": lxml_wheel.name,
+            "wheel_sha256": sha256(lxml_wheel),
+            "wheel_tag": lxml_wheel_tag,
+            "without_cython": True,
+            "dynamic_dependencies": ["libxml2.so.16", "libxslt.so.1", "libexslt.so.0"],
+        },
+        "primp": {
+            "version": "0.15.0",
+            "source_build": True,
+            "wheel": primp_wheel.name,
+            "wheel_sha256": sha256(primp_wheel),
+            "wheel_tag": primp_wheel_tag,
+            "rust_toolchain": "nightly-2025-01-18",
+            "rust_target_feature": "-ual",
+            "cargo_locked": True,
+        },
+        **pure_toolkit_manifest,
     },
     "native_dependencies": {
         "libjpeg-turbo": {
@@ -1344,6 +1817,17 @@ manifest = {
             "shared_soname": "libjpeg.so.62",
             "simd": False,
             "strict_align_compile_database_verified": True,
+        },
+        "libxml2": {
+            "version": "2.14.6",
+            "shared_soname": "libxml2.so.16",
+            "strict_align_build_log_verified": True,
+        },
+        "libxslt": {
+            "version": "1.1.43",
+            "shared_soname": "libxslt.so.1",
+            "exslt_soname": "libexslt.so.0",
+            "strict_align_build_log_verified": True,
         }
     },
     "elf_count": len(elfs),
@@ -1433,14 +1917,24 @@ for archive in artifacts.glob("cpython-la64-strict-*.tar.xz"):
     except (KeyError, OSError, tarfile.TarError, json.JSONDecodeError):
         continue
     flags = set(str(manifest.get("strict_flags", "")).split())
+    packages = manifest.get("python_packages", {})
     if (
-        manifest.get("target") != "loongarch64-linux-musl"
+        manifest.get("schema", 0) < 4
+        or manifest.get("target") != "loongarch64-linux-musl"
         or not required_flags.issubset(flags)
         or manifest.get("pgo") is not True
         or manifest.get("lto") is not True
         or manifest.get("runtime_interpreter") != required_interp
-        or manifest.get("python_packages", {}).get("Pillow", {}).get("version") != "12.3.0"
-        or manifest.get("python_packages", {}).get("MarkupSafe", {}).get("version") != "3.0.3"
+        or packages.get("Pillow", {}).get("version") != "12.3.0"
+        or packages.get("MarkupSafe", {}).get("version") != "3.0.3"
+        or packages.get("lxml", {}).get("version") != "6.1.1"
+        or packages.get("primp", {}).get("version") != "0.15.0"
+        or packages.get("ddgs", {}).get("version") != "9.0.0"
+        or packages.get("markdownify", {}).get("version") != "0.14.1"
+        or packages.get("beautifulsoup4", {}).get("version") != "4.12.3"
+        or packages.get("soupsieve", {}).get("version") != "2.6"
+        or packages.get("six", {}).get("version") != "1.17.0"
+        or packages.get("click", {}).get("version") != "8.1.8"
         or not manifest.get("elfs")
     ):
         continue
@@ -1484,6 +1978,8 @@ main() {
     build_libjpeg_turbo
     build_bzip2
     build_xz
+    build_libxml2
+    build_libxslt
     build_autoconf_package libffi libffi-3.5.2.tar.gz \
         --enable-pax_emutramp --enable-portable-binary --disable-exec-static-tramp
     build_autoconf_package expat expat-2.8.2.tar.xz --enable-static
@@ -1497,6 +1993,9 @@ main() {
     build_pillow
     build_markupsafe
     build_pyyaml_pure
+    build_lxml
+    build_primp
+    install_smolagents_toolkit_pure
     package_runtime
     write_current_artifact_index
 }
