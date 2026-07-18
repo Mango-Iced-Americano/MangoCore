@@ -2,14 +2,16 @@ MODE ?= release
 FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
-LA_TOOLCHAIN ?= nightly-2024-05-01
+
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
 QEMU_DIR := util/qemu-2k1000/tmp
 QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
-all:
+all: toolchain-preflight
 	$(MAKE) prepare-cargo-config
 	$(MAKE) clean
 	$(MAKE) -C os all
@@ -26,19 +28,18 @@ toolchain-setup:
 toolchain-preflight:
 	@sh scripts/rustup-preflight.sh
 
-env:
-	rustup default $(LA_TOOLCHAIN)
+env: toolchain-preflight
 
-kernel:
+kernel: toolchain-preflight
 	cd os && make kernel
 
-run: print-logo
+run: print-logo toolchain-preflight
 	cd os && make run
 
-runsimple:
+runsimple: toolchain-preflight
 	cd os && make runsimple
 
-change-kernel-only:
+change-kernel-only: toolchain-preflight
 	cd os && make build && make runsimple
 
 print-logo:
@@ -54,7 +55,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight
+.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -96,16 +97,16 @@ clean:
 rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
 
-regression:
+regression: toolchain-preflight
 	$(MAKE) -C os regression-all
 
 # ── Testing shortcuts (run inside Docker container) ──
-check-fast:
+check-fast: toolchain-preflight
 	cargo check -p mango-kernel-core
 	cargo fmt --check -p mango-kernel-core
 	cargo clippy -p mango-kernel-core 2>/dev/null || true
 
-unittest:
+unittest: toolchain-preflight
 	cargo test -p mango-kernel-core
 
 bugscan: unittest

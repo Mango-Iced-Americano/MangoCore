@@ -14,6 +14,9 @@ KERNEL_LA := ../kernel-la
 SDCARD_LA := ../sdcard-la.img
 DISK_LA := ../disk-la.img
 
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+
 # ============================================================
 # lwext4 C library (la64: uses pre-installed cross-compiler)
 # ============================================================
@@ -87,7 +90,7 @@ endif
 # Targets (symmetric with rv64.mk)
 # ============================================================
 
-all: fs-img build
+all: toolchain-preflight fs-img build
 
 debug: build mv-debug
 
@@ -99,12 +102,13 @@ mv-debug:
 
 build: env $(KERNEL_BIN) mv
 
-env:
-	(rustup target list | grep "$(TARGET) (installed)") || rustup target add $(TARGET)
-	rustup component add rust-src
+toolchain-preflight:
+	@sh ../scripts/rustup-preflight.sh
+
+env: toolchain-preflight
 
 # Build all user programs
-user:
+user: toolchain-preflight
 	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE)
 
 $(KERNEL_BIN): kernel
@@ -112,7 +116,7 @@ $(KERNEL_BIN): kernel
 
 $(APPS):
 
-fs-img: user
+fs-img: toolchain-preflight user
 	./buildfs.sh "$(ROOTFS_IMG)" "$(BOARD)" $(MODE) $(FS_MODE)
 
 # Initramfs cpio generation — parameterized for normal / regression profiles
@@ -130,7 +134,7 @@ endif
 
 KERNEL_CMDLINE ?= mango.mode=normal
 
-kernel: $(KERNEL_INITRAMFS_CPIO_LA)
+kernel: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 
 $(INITRAMFS_CPIO_LA): user
 	@mkdir -p ../fs-img-dir
@@ -170,7 +174,7 @@ clean:
 # QEMU run targets
 # ============================================================
 
-run: build
+run: toolchain-preflight build
 ifeq ($(BOARD), laqemu)
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -184,7 +188,7 @@ ifeq ($(BOARD), laqemu)
 		-smp threads=$(CORE_NUM)
 endif
 
-runsimple:
+runsimple: toolchain-preflight
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
@@ -196,7 +200,7 @@ runsimple:
 		-m 1024 \
 		-smp threads=$(CORE_NUM)
 
-comp:
+comp: toolchain-preflight
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-kernel $(KERNEL_LA) \
@@ -212,7 +216,7 @@ comp:
 		-netdev user,id=net0 \
 		-rtc base=utc
 
-comp-gdb:
+comp-gdb: toolchain-preflight
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-kernel $(KERNEL_LA) \
@@ -228,13 +232,13 @@ comp-gdb:
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb
+.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight
 
 # ─────────────────────────────────────────────────────────
 #  L3 Kernel self-test (mango.mode=ktest)
 # ─────────────────────────────────────────────────────────
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
-ktest-run: user $(LWEXT4_LA_PREREQ)
+ktest-run: toolchain-preflight user $(LWEXT4_LA_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
 	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
@@ -257,7 +261,7 @@ ktest-run: user $(LWEXT4_LA_PREREQ)
 # console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
 REGRESSION_CMDLINE := mango.mode=regression
 
-regression-run:
+regression-run: toolchain-preflight
 	@echo "[regression] Building la64 kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}

@@ -25,6 +25,9 @@ KERNEL_LA := ../kernel-la
 SDCARD_RV := ../sdcard-rv.img
 SDCARD_LA := ../sdcard-la.img
 
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+
 # ============================================================
 # lwext4 C library
 # ============================================================
@@ -109,15 +112,15 @@ endif
 
 # Binutils from rustup's llvm-tools-preview component. This avoids depending on
 # the cargo-binutils wrapper being preinstalled or downloaded during grading.
-HOST_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
-LLVM_TOOLS_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin
+HOST_TRIPLE := $(shell env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustc -vV | sed -n 's/^host: //p')
+LLVM_TOOLS_DIR := $(shell env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin
 OBJDUMP := $(LLVM_TOOLS_DIR)/rust-objdump --arch-name=riscv64
 OBJCOPY := $(LLVM_TOOLS_DIR)/rust-objcopy --binary-architecture=riscv64
 
 # Disassembly
 DISASM ?= -x
 
-all: fs-img build
+all: toolchain-preflight fs-img build
 
 debug: build mv-debug
 
@@ -129,14 +132,13 @@ mv-debug:
 
 build: env $(KERNEL_BIN) mv
 
-env:
-	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	rustup target add $(TARGET)
-	rustup component add rust-src
-	rustup component add llvm-tools-preview
+toolchain-preflight:
+	@sh ../scripts/rustup-preflight.sh
+
+env: toolchain-preflight
 
 # build all user programs
-user:
+user: toolchain-preflight
 	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE)
 
 $(KERNEL_BIN): kernel
@@ -144,7 +146,7 @@ $(KERNEL_BIN): kernel
 
 $(APPS):
 
-fs-img: user
+fs-img: toolchain-preflight user
 	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
 # Initramfs cpio generation — parameterized for normal / regression profiles
@@ -164,7 +166,7 @@ endif
 
 KERNEL_CMDLINE ?= mango.mode=normal
 
-kernel: $(KERNEL_INITRAMFS_CPIO_RV)
+kernel: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_RV)
 
 $(INITRAMFS_CPIO_RV): user
 	@mkdir -p ../fs-img-dir
@@ -195,7 +197,7 @@ clean:
 	@rm -rf $(KERNEL_RV)
 	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
 
-run: build
+run: toolchain-preflight build
 ifeq ($(BOARD), rvqemu)
 	@qemu-system-riscv64 \
   		-machine virt \
@@ -226,7 +228,7 @@ gdb:
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
-runsimple:
+runsimple: toolchain-preflight
 	@qemu-system-riscv64 \
 		-machine virt \
 		-nographic \
@@ -239,7 +241,7 @@ runsimple:
         $(BLK_DEV_x1) \
 		-smp threads=$(CORE_NUM)
 
-comp:
+comp: toolchain-preflight
 	@qemu-system-riscv64 \
 		-machine virt \
 		-kernel $(KERNEL_RV) \
@@ -256,7 +258,7 @@ comp:
 		$(NET_DEV) \
 		-object filter-dump,id=f1,netdev=net,file=packets.pcap
 
-comp-gdb:
+comp-gdb: toolchain-preflight
 	@qemu-system-riscv64 \
         -machine virt \
         -kernel $(KERNEL_RV) \
@@ -275,7 +277,7 @@ comp-gdb:
         -S \
         -s
 
-.PHONY: user
+.PHONY: user env toolchain-preflight
 
 # ─────────────────────────────────────────────────────────
 #  L3 Kernel self-test (mango.mode=ktest)
@@ -283,7 +285,7 @@ comp-gdb:
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
 # The kernel needs initramfs cpio (embedded via .S), so user
 # programs must be built first.
-ktest-run: user $(LWEXT4_PREREQ)
+ktest-run: toolchain-preflight user $(LWEXT4_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
 	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
@@ -303,7 +305,7 @@ ktest-run: user $(LWEXT4_PREREQ)
 # ─────────────────────────────────────────────────────────
 REGRESSION_CMDLINE := mango.mode=regression
 
-regression-run:
+regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}

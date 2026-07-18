@@ -10,14 +10,21 @@ CONF_ARCH ?= $(CURR_ARCH)
 CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
 CONF_IMAGE ?=
 AUTO_REBUILD_MEM ?= 1
-RV_TOOLCHAIN ?= nightly-2025-01-18
-LA_TOOLCHAIN ?= nightly-2024-05-01
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env
+.NOTPARALLEL:
 
 all: prepare-cargo-config rv64_all la64_all
 
-prepare-cargo-config:
+toolchain-preflight:
+	@sh ../scripts/rustup-preflight.sh
+
+env: toolchain-preflight
+
+prepare-cargo-config: toolchain-preflight
 	@sh ../scripts/restore-cargo-vendor-checksums.sh restore ..
 	@mkdir -p .cargo ../user/.cargo
 	@test -f .cargo/config.toml || cp -f ../cargo-config/os/config.toml .cargo/config.toml
@@ -25,92 +32,78 @@ prepare-cargo-config:
 
 rv64_all: prepare-cargo-config tools-disk-rv
 	@echo "Building rv64"
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make ARCH=rv64 -f make/rv64.mk all MODE=${MODE}
 
 la64_all: prepare-cargo-config tools-disk-la
 	@echo "Building la64"
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make ARCH=la64 -f make/la64.mk all MODE=${MODE} LOG=${LOG}
 
 rv64-kernel-build-only: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG}
 
-rv64-debug:
-	@rustup override set $(RV_TOOLCHAIN)
+rv64-debug: toolchain-preflight
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk debug BLK_MODE=${BLK_MODE} MODE=debug
 
 rv64-only: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk all BLK_MODE=${BLK_MODE}
 
-rv64-run-only:
-	@rustup override set $(RV_TOOLCHAIN)
+rv64-run-only: toolchain-preflight
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk runsimple
 
 rv64-run: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp
 
 # Regression test: self-contained initramfs — NO external disks
 rv64-regression: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk regression-run MODE=${MODE} LOG=${LOG}
 
 la64-only: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk all MODE=${MODE} LOG=${LOG}
 
 la64-kernel-build-only: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
 
-la64-debug:
-	@rustup override set $(LA_TOOLCHAIN)
+la64-debug: toolchain-preflight
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk all MODE=debug	
 
-la64-run-only:
-	@rustup override set $(LA_TOOLCHAIN)
+la64-run-only: toolchain-preflight
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk runsimple MODE=${MODE} LOG=${LOG}
 
 la64-run: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk comp MODE=${MODE} LOG=${LOG}
 
 la64-regression: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk regression-run MODE=${MODE} LOG=${LOG}
 
-comp:
+comp: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk comp
 
 clean:
@@ -122,23 +115,21 @@ clean:
 laclean:
 	make -f make/la64.mk clean
 
-fs-img:
+fs-img: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk fs-img FS_MODE=$(FS_MODE)
 
-run:
+run: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk run
 
-gdb:
+gdb: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk gdb
 
 rv64-gdb: rv64-debug
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp-gdb
 
 la64-gdb: la64-debug
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk comp-gdb	
@@ -160,12 +151,10 @@ conf-inject: prepare-cargo-config
 	for arch in $$arch_list; do \
 		case "$$arch" in \
 			la|la64) \
-				rustup override set $(LA_TOOLCHAIN); \
 				cp ./src/lang_items.rs.la ./src/lang_items.rs; \
 				cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs; \
 				;; \
 			rv|rv64) \
-				rustup override set $(RV_TOOLCHAIN); \
 				cp ./src/lang_items.rs.rv ./src/lang_items.rs; \
 				cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs; \
 				;; \
@@ -173,8 +162,7 @@ conf-inject: prepare-cargo-config
 		ARCH=$$arch BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh; \
 	done
 
-la64-inject-runtime:
-	@rustup override set $(LA_TOOLCHAIN)
+la64-inject-runtime: toolchain-preflight
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	@cd ../user && make rust-user BOARD=laqemu MODE=$(MODE)
@@ -193,8 +181,7 @@ la64-inject-runtime:
 	rm -f $$cmd_file
 
 # 将所有用户态测试程序（user/src/bin/*.rs）注入到 sdcard-rv.img
-inject-test:
-	@rustup override set $(RV_TOOLCHAIN)
+inject-test: toolchain-preflight
 	@cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	@cd ../user && make rust-user MODE=release BOARD=rvqemu 2>&1 | tail -5
 	@echo "[inject] Updating test binaries in ../sdcard-rv.img..."
@@ -602,13 +589,11 @@ endif
 export KTEST_CMDLINE
 
 rv64-ktest: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk ktest-run MODE=${MODE} LOG=${LOG}
 
 la64-ktest: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk ktest-run MODE=${MODE} LOG=${LOG}
@@ -620,15 +605,14 @@ bugscan: check-fast rv64-ktest
 
 # Fast static checks (no QEMU needed)
 .PHONY: check-fast
-check-fast:
+check-fast: toolchain-preflight
 	@echo "[check-fast] Running cargo check..."
-	@rustup override set $(RV_TOOLCHAIN) 2>/dev/null
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs 2>/dev/null
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs 2>/dev/null
 	cargo check --features "board_rvqemu block_virt" 2>&1 | tail -1
 
 # ─────────────────────────────────────────────────────────
-#  Aggregate targets — serial execution (toolchain conflict)
+#  Aggregate targets — serial execution (architecture-specific source state)
 # ─────────────────────────────────────────────────────────
 
 regression-all:

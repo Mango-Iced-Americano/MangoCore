@@ -1,8 +1,9 @@
 TARGET := riscv64gc-unknown-none-elf
 MODE := debug
 COMP ?= yes
-RV_TOOLCHAIN ?= nightly-2025-01-18
-LA_TOOLCHAIN ?= nightly-2024-05-01
+
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
 
 ifeq ($(BOARD), 2k1000)
 	TARGET := loongarch64-unknown-linux-gnu
@@ -26,17 +27,15 @@ prepare-cargo-config:
 	@mkdir -p .cargo
 	@test -f .cargo/config.toml || cp -f ../cargo-config/user/config.toml .cargo/config.toml
 
-env:
+toolchain-preflight:
+	@sh ../scripts/rustup-preflight.sh
+
+env: toolchain-preflight
 ifeq ($(TARGET), riscv64gc-unknown-none-elf)
-	@rustup override set $(RV_TOOLCHAIN)
 	@cp ./src/lang_items.rs.rv ./src/lang_items.rs
 else ifeq ($(TARGET), loongarch64-unknown-linux-gnu)
-	@rustup override set $(LA_TOOLCHAIN)
 	@cp ./src/lang_items.rs.la ./src/lang_items.rs
 endif
-	-(rustup target list | grep "$(TARGET) (installed)") || rustup target add $(TARGET)
-	-rustup component add rust-src
-	-rustup component add llvm-tools-preview
 
 rust-user: prepare-cargo-config env $(APPS)
 ifeq ($(MODE),release)
@@ -48,4 +47,4 @@ endif
 clean:
 	@cargo clean
 
-.PHONY: build rust-user clean prepare-cargo-config
+.PHONY: build rust-user clean prepare-cargo-config env toolchain-preflight
