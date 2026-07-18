@@ -20,8 +20,7 @@ case "$run_tag" in
     ""|*[!A-Za-z0-9._-]*) echo "invalid run tag: $run_tag" >&2; exit 2 ;;
 esac
 
-runtime_root=$(/bin/busybox dirname "$0")
-runtime_root=$(cd "$runtime_root" && pwd)
+runtime_root=$(/bin/busybox readlink -f "$(/bin/busybox dirname "$0")")
 suite_root=${CPYTHON_BENCH_SUITE:-/persist/pyperf/s}
 result_root=/persist/pyperf/o/$run_tag
 result_file=$result_root/$benchmark.jsonl
@@ -47,7 +46,7 @@ test "$(/bin/busybox readlink -f "$work_root")" = "$work_root"
 
 runtime_tag=$(/bin/busybox basename "$runtime_root")
 case "$runtime_tag" in
-    s-????????????) ;;
+    ????????????) ;;
     *) echo "unexpected strict runtime identity: $runtime_tag" >&2; exit 3 ;;
 esac
 set -- $(/bin/busybox sha256sum "$runtime_root/strict-runtime-manifest.json")
@@ -62,7 +61,7 @@ export CPYTHON_BENCH_RUNS=1
 export CPYTHON_BENCH_TIMEOUT=1800
 export CPYTHON_BENCH_TARGET_STATS=1
 export CPYTHON_STRICT_RUN_TAG="$run_tag"
-export CPYTHON_RUNTIME_ARTIFACT_SHA12="${runtime_tag#s-}"
+export CPYTHON_RUNTIME_ARTIFACT_SHA12="$runtime_tag"
 export CPYTHON_RUNTIME_MANIFEST_SHA256="$manifest_sha"
 
 exec /bin/sh "$suite_root/cpython_benchmark.sh" "$benchmark"

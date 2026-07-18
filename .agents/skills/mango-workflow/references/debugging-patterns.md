@@ -692,3 +692,39 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **恢复**：短时尝试 Ctrl-C/换行和唯一 echo marker；若目标内核/驱动路径不可中断且没有 prompt，停止注入更多命令，保留原始串口并请求物理复位。复位后先审计 staging/canonical 路径和目标分区哈希，再决定清理或继续。
 - **报告**：把下载、解包、串口恢复等 pre-benchmark 失败与 benchmark failure 分表；前者可以暴露部署/VFS 性能问题，但不能降低已成功正式矩阵的 pass 数。
 - **相关文件**：`scripts/kernel_perf.py`, `scripts/deploy_cpython_runtime.py`
+
+### ext4 `statfs` 空间值不随分配变化时不要继续相信 `df`
+
+- **现象**：创建或删除数百 MiB 文件/目录后，`statvfs` 的 `f_bfree/f_bavail` 完全不变，
+  但分配器已经报告 ENOSPC；清理旧对象后同一部署又能成功。
+- **定位**：先做已知大小分配前后的 statfs 对照，再审计文件系统 `super_block()` 是否读取
+  挂载时结构副本，而分配/释放路径是否更新了另一个 metadata cache/current superblock。
+  “返回值稳定”不是容量稳定，尤其不能用它决定删除 canonical release。
+- **处理**：在 statfs 修复前，把 free block 视为低可信诊断；发布器采用 staging、失败清理、
+  current 保护和按 hash 审计旧 release，先删已确认非 current 的历史版本。压缩传输对象可
+  放 tmpfs 减少目标 ext4 峰值，但解压树、状态和最终测试仍必须落在目标文件系统。
+- **验收**：修复后需在实际 ext4 上做分配、sync、statfs、删除、sync、statfs 的单变量测试，
+  并核对 current superblock/bitmap；仅让部署成功不能证明统计接口正确。
+- **相关文件**：`os/src/fs/ext4/ext4fs.rs`, `scripts/deploy_cpython_runtime.py`
+
+### CLI help 通过不代表可选后端依赖闭包完整
+
+- **现象**：Python 应用的 console command、`--help`、基础 import 都通过，只有创建某个
+  LLM/数据库/图像等可选后端时才报“请安装 extra”；用户明明已经能在 traceback 中看到
+  extra 的顶层包，最外层错误仍声称它未安装。
+- **根因**：`--help` 不执行后端工厂；后端又常用 `try: import top_level` 包住整个导入
+  链，任何传递依赖失败都会被统一改写成安装 extra 的提示。只读最外层异常会把
+  `top_level -> transitive_dependency` 的失败误判成顶层包缺失。
+- **定位**：从 traceback 最内层 `ModuleNotFoundError` 开始；在目标环境执行
+  `importlib.metadata.distribution(...).requires`、`pip show` 和 `pip check`，按现场精确版本
+  解依赖，不用最新版文档替代旧版 metadata。原生/纯 Python 边界以 wheel tag、
+  `Root-Is-Purelib`、安装树 `.so` 和实板 `module.__file__` 四项共同确认。
+- **验收**：使用 dummy key 和不可达的本地 base URL实际创建后端 client，确保完整 import
+  和构造路径已执行但不发送公网请求；再用本地固定响应端点覆盖序列化/反序列化。真实
+  API 只作最后的端到端体验测试，并与本地结果分开计时。
+- **安装边界**：若 `pip --target` 从 tmpfs 跨设备搬到 ext4 时先 `EXDEV`、后在
+  `shutil.copytree` 的 metadata 操作收到 `ENOSYS`，即使日志先打印 `Successfully
+  installed` 也要判失败，不能复用部分目标树。已校验 universal wheel可在目标 ext4
+  同盘 staging 解包、功能验证后 rename 发布；缺失的 FS syscall 仍需作为独立根因记录。
+- **相关文件**：`scripts/board/verify_persist_python.sh`,
+  `docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md`

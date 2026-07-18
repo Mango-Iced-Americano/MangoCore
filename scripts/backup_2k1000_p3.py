@@ -4,15 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import hashlib
-import http.server
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
-import threading
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +20,17 @@ EXPECTED_P3_START = 0xA80800
 BACKUP_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-class QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:
-        return
+def http_server_command(directory: Path, host: str, port: int) -> list[str]:
+    ruby = Path("/usr/bin/ruby")
+    if sys.platform == "darwin" and ruby.is_file():
+        return [
+            str(ruby), "-run", "-e", "httpd", str(directory),
+            "-p", str(port), "-b", host,
+        ]
+    return [
+        sys.executable, "-m", "http.server", str(port),
+        "--bind", host, "--directory", str(directory),
+    ]
 
 
 def run_board(args: argparse.Namespace, test: str, command: str, timeout: int) -> None:
@@ -92,25 +98,22 @@ def main() -> int:
     script_sha = hashlib.sha256(BOARD_SCRIPT.read_bytes()).hexdigest()
     url = f"http://{args.host_ip}:{args.port}/{BOARD_SCRIPT.name}"
     target = f"/scratch/{BOARD_SCRIPT.name}"
-    download_code = (
-        "import urllib.request as u;"
-        f"u.urlretrieve({url!r},{target!r})"
+    download = "/bin/busybox wget -O %s %s" % tuple(
+        map(shlex.quote, (target, url))
     )
-    verify_code = (
-        "import hashlib as h;"
-        f"assert h.sha256(open({target!r},'rb').read()).hexdigest()=={script_sha!r}"
+    verify = "printf '%s  %s\\n'|/bin/busybox sha256sum -c -" % (
+        script_sha,
+        shlex.quote(target),
     )
     phases = (
         (
             "p3_backup_deploy",
-            "/tools/tests/cpython/python3-wrapper.sh -c "
-            + shlex.quote(download_code),
+            download,
             120,
         ),
         (
             "p3_backup_script_sha256",
-            "/tools/tests/cpython/python3-wrapper.sh -c "
-            + shlex.quote(verify_code),
+            verify,
             120,
         ),
         (
@@ -133,19 +136,26 @@ def main() -> int:
             print(command)
         return 0
 
-    handler = functools.partial(QuietHandler, directory=str(BOARD_SCRIPT.parent))
-    server = http.server.ThreadingHTTPServer((args.host_ip, args.port), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server = subprocess.Popen(
+        http_server_command(BOARD_SCRIPT.parent, args.host_ip, args.port),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.3)
+    if server.poll() is not None:
+        raise SystemExit("backup HTTP server failed to start")
     try:
         for name, command, timeout in phases:
             run_board(args, name, command, timeout)
     except subprocess.CalledProcessError as exc:
         return exc.returncode
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+        server.terminate()
+        try:
+            server.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=2)
     return 0
 
 

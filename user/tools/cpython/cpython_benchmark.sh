@@ -1,18 +1,6 @@
 #!/bin/sh
 set -u
 
-CPYTHON_BENCH_ROOT="${CPYTHON_BENCH_ROOT:-$(/bin/busybox dirname "$0")}"
-cd "$CPYTHON_BENCH_ROOT" || {
-    echo "[CPYTHON BENCH FAIL] missing benchmark suite $CPYTHON_BENCH_ROOT"
-    exit 127
-}
-CPYTHON_BENCH_ROOT=$(pwd)
-CPYTHON_ROOT="${CPYTHON_ROOT:-/tools/tests/cpython}"
-. "$CPYTHON_ROOT/run_cpython.sh"
-# Older board runtime images compute CPYTHON_LD without exporting it.  The
-# fork benchmark needs the loader path in child Python processes as well.
-export CPYTHON_LD
-
 BENCHMARKS="
 bm_bytesio
 bm_chaos
@@ -39,6 +27,18 @@ if [ "${1:-}" = "--list" ]; then
     exit 0
 fi
 
+CPYTHON_BENCH_ROOT="${CPYTHON_BENCH_ROOT:-$(/bin/busybox dirname "$0")}"
+cd "$CPYTHON_BENCH_ROOT" || {
+    echo "[CPYTHON BENCH FAIL] missing benchmark suite $CPYTHON_BENCH_ROOT"
+    exit 127
+}
+CPYTHON_BENCH_ROOT=$(pwd)
+CPYTHON_ROOT="${CPYTHON_ROOT:-/persist/python-runtime/current}"
+. "$CPYTHON_ROOT/run_cpython.sh"
+# Older board runtime images compute CPYTHON_LD without exporting it.  The
+# fork benchmark needs the loader path in child Python processes as well.
+export CPYTHON_LD
+
 if [ "$#" -eq 0 ]; then
     set -- $BENCHMARKS
 fi
@@ -52,6 +52,12 @@ if [ -n "$configured_work_base" ]; then
         echo "[CPYTHON BENCH FAIL] cannot create configured work base $configured_work_base"
         exit 2
     fi
+elif [ "${MANGO_PYTHON_POLICY:-}" = p4-strict-align-v1 ]; then
+    work_base=/persist/python/bench
+    /bin/busybox mkdir -p "$work_base" 2>/dev/null || {
+        echo "[CPYTHON BENCH FAIL] P4 benchmark work base is unavailable"
+        exit 2
+    }
 elif [ -d /scratch ] && /bin/busybox mkdir -p /scratch/cpython-bench 2>/dev/null; then
     work_base=/scratch/cpython-bench
 elif [ "$require_scratch" = "1" ]; then

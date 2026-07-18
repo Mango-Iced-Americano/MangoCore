@@ -1,13 +1,15 @@
 ---
 title: "Python 性能原始数据与复核索引"
 category: debug
-status: archived
+status: current
 author: MangoCore Team
-last_update: 2026-07-17
+last_update: 2026-07-18
 tags: [performance, raw-data, jsonl, serial, csv, manifest, reproducibility]
 related_docs:
   - "docs/09_debug/la64_on_board/260717/01-python-performance-baseline.md"
   - "docs/09_debug/la64_on_board/260717/05-strict-align-first-experiment.md"
+  - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
+  - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
 ---
 
 # Python 性能原始数据与复核索引
@@ -19,6 +21,12 @@ related_docs:
 `records.jsonl`、串口 raw、CSV/Markdown reports 和构建验证日志。前五个实验目录共
 220 个文本文件，另有 10 个 strict runtime build 文件和 2 个归档说明/哈希文件；
 本轮再增加 44 个 anonymous-unmap/runtime 文本文件（约 756 KiB）。
+P4 默认运行时固化另归档 44 个文件：`records.jsonl` 含 34 条 record，另有 38 份 raw、
+4 份报告以及 manifest/records 两个索引文件。
+Aligned Pillow/SmolAgent 闭包另归档 64 个文件、约 5.7 MiB：48 条 record、51 份 raw、
+11 份 analyzer 报告及 manifest/records；大 runtime archive 仍只登记 hash。
+OpenAI 可选后端补充归档 8 个文件：4 条 record、6 份 raw 以及 manifest/records；其中
+raw 数包含两份因 512-byte 主机门禁未形成 record 的长命令失败日志。
 
 没有复制 uImage、ELF 和 81.6 MiB runtime archive；这些二进制仍可由原路径或构建
 脚本恢复，其文件名、大小、SHA-256 记录于
@@ -53,6 +61,9 @@ hash；阅读时把同名尾部映射到本目录对应 `raw/` 即可。
 | `20260716T-perf-diag-structural-ab-run` | 18 | 22 | 1 | production/diag-off 实板结构 A/B |
 | `20260717T042020Z-cpython-strict-align` | 42 | 44 | 14 | strict 部署、72/72、18 项和 trap 对照 |
 | `20260717T-anon-unmap-quant` | 22 | 24 | 14 | strict 入口复核、精确 unmap 扫描、六项真实 Python 占比 |
+| `20260717T-p4-strict-python-default` | 26 | 30 | 3 | P4 发布、默认入口、chroot、72/72、SmolAgent fail-exposed |
+| `20260717T-aligned-pillow` | 48 | 51 | 11 | aligned Pillow/MarkupSafe/PyYAML、P4 原子发布、默认 SmolAgent、72/72 |
+| `20260718T-openai-dependency-audit` | 4 | 6 | 0 | OpenAI/Pydantic 版本闭包、P4 pure wheel、默认 OpenAIModel 构造、pip tag 残留 |
 | `20260716T-perf-diag-structural-ab` | — | — | build logs | 相邻镜像构建身份，不含大二进制 |
 | `strict-runtime-build` | — | — | build logs/manifest | 完整依赖闭包、PGO/LTO、双架构编译 |
 
@@ -173,7 +184,66 @@ trap 对照 CSV SHA-256 为 `4dc028b2...ff29`，时间趋势 CSV 为
 runtime，不作为 P4 strict 身份证据；以 `board_strict_runtime_manifest_smoke` 和六项
 benchmark environment 为准。
 
-## 10. 二进制制品身份
+## 10. P4 默认运行时目录
+
+路径：[`raw-data/20260717T-p4-strict-python-default/`](raw-data/20260717T-p4-strict-python-default/)
+
+| 文件 | 用途 |
+|------|------|
+| `manifest.json` | 最终 b7/a420 artifact、a5e uImage、启动串口、初始/分阶段源码指纹 |
+| `records.jsonl` | 34 条部署、默认入口、隔离、chroot、功能和失败暴露记录 |
+| `raw/pyctl_run-1-7b19d952.log` | b7 77.8 MiB 解包、94 ELF integrity、smoke 和最终 current 发布 |
+| `raw/board_boot_history-through-a5e60c0d.log` | U-Boot bytes/CRC/iminfo、冷启动、launcher、chroot PASS |
+| `raw/p4_python_default_verify_a5e_final-1-b4dc9ddd.log` | 最终镜像默认解释器/site/pip/self-exec 门禁 |
+| `raw/p4_strict_functional_72_final-1-9479d11e.log` | P4 ext4 上 L3-L9，judge 输入为 72/72 |
+| `raw/p4_python_default_verify_b7_final-1-89f02744.log` | b7 最终解释器/site/pip/self-exec 门禁 |
+| `raw/p4_strict_functional_72_b7_final-1-016cffe7.log` | b7 P4 ext4 L3-L9，项目 judge 72/72 |
+| `raw/p4_smolagent_command_a5e_final-1-9cf47dfe.log` | strict `.real` 入口后的唯一 PIL 缺口 |
+| `reports/repackage-idempotence.txt` | a420/b7 逐成员比较、重复打包 hash 与最终 b7 上板边界 |
+
+中间 `p4_tools_isolation_final-1-bbd14a27.log` 因宿主 512-byte 门禁被拒，不是有效板端
+样本；`p4_shell_probe-1-3612740b.log` 为 0 字节/rc124，也不作证据。失败样本继续保留以说明
+为何增加 PT_INTERP、环境清理、`.real` console 选择和 direct-copy 发布。
+
+## 11. Aligned Pillow 与 SmolAgent 闭包目录
+
+路径：[`raw-data/20260717T-aligned-pillow/`](raw-data/20260717T-aligned-pillow/)
+
+| 文件 | 用途 |
+|------|------|
+| `manifest.json` | 初始源码指纹和 071/e14/43d 三个递进制品身份 |
+| `records.jsonl` | 48 条构建、部署、失败清理、门禁、实板功能和双架构 build 记录 |
+| `raw/aligned_python_pyyaml_build-1-d59a52ab.log` | 首次 PyYAML 构建因 native attempt/宿主 wheel tag 被拒绝 |
+| `raw/aligned_python_pyyaml_build-2-5fb08f54.log` | 强制 pure Python 后的完整 build、QEMU smoke 和 43d 打包 |
+| `raw/pyctl_run-1-2e2cdd96.log` | `/tmp` 接收 archive、P4 解包、100 ELF integrity、四组 smoke 和 current 发布 |
+| `raw/persist_default_gate-2-c3c0b0a4.log` | 默认 interpreter/site/self-exec/pip/Pillow/SmolAgent 最终 PASS |
+| `raw/pillow_ext4_smoke-2-4eed2fcb.log` | P4 ext4 PNG/JPEG 写入、fsync、重开、hash 和模块路径 |
+| `raw/smolagent_agentimage-1-a4ef3edf.log` | SmolAgent `AgentImage` 实际调用 Pillow 的 PASS |
+| `raw/cpython_l3_l9_final-1-f58ddacf.log` | 最终 43d runtime 的 L3-L9，项目 judge `72/72` |
+| `reports/summary.csv` | 所有成功测试的 wall 汇总 |
+| `reports/failures.csv` | 缺依赖、ENOSPC、构建门禁和首次容器权限等失败样本 |
+
+该目录保留依赖闭包的递进发现过程：071 首先补 Pillow，e14 再补 MarkupSafe，最终 43d
+加入纯 Python PyYAML。只有 43d 的最终门禁可作为“默认 SmolAgent 已通过”的证据。
+
+## 12. OpenAI 可选后端补充目录
+
+路径：[`raw-data/20260718T-openai-dependency-audit/`](raw-data/20260718T-openai-dependency-audit/)
+
+| 文件 | 用途 |
+|------|------|
+| `manifest.json` | HEAD、dirty/build-input 指纹、2K1000LA production 身份 |
+| `records.jsonl` | 启动前超时、版本闭包、默认 OpenAIModel 构造和 pip check 共 4 条记录 |
+| `raw/dependency_versions-1-b19f2483.log` | OpenAI/Pydantic/HTTPX/typing-extensions/SmolAgent 精确版本与安装位置 |
+| `raw/default_openai_smolagent_smoke-1-0d1314b0.log` | 默认入口无网络构造 `OpenAIModel`，`pydantic.compiled=False`，退出 0 |
+| `raw/pip_check_after_pydantic-1-40ea49fa.log` | 缺 Pydantic 已消失；仅剩 Pillow/MarkupSafe 平台 tag，退出 1 |
+
+`openai_metadata` 的 rc124 发生在板卡尚未进入 Shell 时；两份更长的 OpenAI smoke raw
+在宿主 512-byte 串口命令门禁处被拒绝，没有形成 record。它们保留用于解释执行过程，
+但不作为板端功能失败。成功构造样本 wall 37.074 s，只含本地 import/client setup，不含
+真实 API 网络时间。
+
+## 13. 二进制制品身份
 
 | 制品 | 大小 | SHA-256 |
 |------|-----:|---------|
@@ -186,10 +256,15 @@ benchmark environment 为准。
 | adjacent diagnostic ELF | 65,855,664 B | `4e96eb6f...29` |
 | strict runtime tar.xz | 81,627,728 B | `abbc714c...56a` |
 | anonymous-unmap diagnostic uImage | 16,539,304 B | `5e3f6cd4...24e5` |
+| P4 default strict runtime | 81,628,064 B | `a420d79d...61a9` |
+| P4 default final uImage | 16,769,280 B | `a5e60c0d...5da1` |
+| post-board reproducible host package | 81,630,652 B | `b7f36138...244c` |
+| aligned Pillow/SmolAgent final runtime | 82,412,900 B | `43d7bb2e...579e` |
+| Pydantic 1.10.26 pure wheel | 166,975 B | `c43ad70d...d917` |
 
 完整 64 位哈希见 `ARTIFACTS.sha256`，缩写只用于表格可读性。
 
-## 11. 重分析方法
+## 14. 重分析方法
 
 若原始 `target/perf-runs/<run>` 仍存在，可重新运行：
 
@@ -212,6 +287,16 @@ python3 judge/judge_cpython-isolated.py \
   < docs/09_debug/la64_on_board/260717/raw-data/20260717T042020Z-cpython-strict-align/raw/strict_functional_l3_l9-1-bec4b123.log
 ```
 
+复核最终 aligned Pillow/SmolAgent runtime：
+
+```text
+python3 scripts/kernel_perf.py analyze \
+  --run-dir target/perf-runs/20260717T-aligned-pillow
+
+python3 judge/judge_cpython-isolated.py \
+  < docs/09_debug/la64_on_board/260717/raw-data/20260717T-aligned-pillow/raw/cpython_l3_l9_final-1-f58ddacf.log
+```
+
 报告复核顺序应为：
 
 1. `manifest.json` 确认 build/platform/storage/suite；
@@ -221,9 +306,10 @@ python3 judge/judge_cpython-isolated.py \
 5. 跨 run 比较前检查 workload、warmup、storage、suite 和内核哈希；
 6. 任一身份不同则降低比较等级，不补造下降百分比。
 
-## 12. 未归档为“原始数据”的内容
+## 15. 未归档为“原始数据”的内容
 
 - 81.6 MiB runtime、uImage 和 ELF：体积大，已记录 hash；
 - P4 失败 staging 目录：只在实板保留，不属于 canonical runtime；
-- 尚未执行的 PMU、30 分钟稳定性、成功 SmolAgent/API：没有数据，不能在报告中补全；
+- 尚未执行的 PMU、30 分钟稳定性、SmolAgent 固定本地端点/真实 API：没有数据，不能在
+  报告中补全；默认 SmolAgent 和 AgentImage 已通过，但不等价于真实模型请求；
 - develop 分支新 ext4 结果：尚未产生，未来必须新建独立 run，不能覆盖本批次。

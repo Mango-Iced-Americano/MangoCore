@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 fail = 0
 PREFIX = "[CPYTHON L8-SUBPROC]"
-RUNTIME_ROOT = os.environ.get("CPYTHON_ROOT", "/tools/tests/cpython")
+RUNTIME_ROOT = os.environ["CPYTHON_ROOT"]
 
 
 class SkipTest(Exception):

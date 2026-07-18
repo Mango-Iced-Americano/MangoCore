@@ -27,7 +27,7 @@ def make_base_dir():
         configured,
     ] if configured else [
         os.getcwd(),
-        os.environ.get("CPYTHON_TEST_ROOT", "/tools/tests/cpython"),
+        os.environ.get("CPYTHON_TEST_ROOT"),
         "/tmp",
     ]
     last_err = None

@@ -1,0 +1,12 @@
+2026-07-17T15:45:49.369583Z __PERF_BEGIN_p4_post_prune_audit-1-765ddae4__
+2026-07-17T15:45:50.398445Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_post_prune_audit-1-765ddae4_TRACE_OFF__
+2026-07-17T15:45:53.135062Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_post_prune_audit-1-765ddae4__
+2026-07-17T15:45:53.173518Z total 3
+2026-07-17T15:45:53.180545Z drwxrwxrwx    3 root     root          4096 Jan  1  1970 [1;34m.[m
+2026-07-17T15:45:53.186957Z drwxrwxrwx    3 root     root          4096 Jan  1  1970 [1;34m..[m
+2026-07-17T15:45:53.194222Z drwxrwxrwx    5 root     root          4096 Jan  1  1970 [1;34m071e4e258421[m
+2026-07-17T15:45:53.235245Z /persist/python-runtime/releases/071e4e258421
+2026-07-17T15:45:54.693432Z 1048576 264285 264285 4096
+2026-07-17T15:45:54.784923Z __PERF_WORK_END_p4_post_prune_audit-1-765ddae4__
+2026-07-17T15:45:54.789642Z __PERF_ACK_p4_post_prune_audit-1-765ddae4_WORK__
+2026-07-17T15:45:55.313764Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_post_prune_audit-1-765ddae4__ rc=0

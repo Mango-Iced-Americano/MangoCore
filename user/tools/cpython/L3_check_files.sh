@@ -34,7 +34,9 @@ check_dir() {
 }
 
 # Source the environment
-CPYTHON_TEST_ROOT=${CPYTHON_TEST_ROOT:-/tools/tests/cpython}
+if [ -z "${CPYTHON_TEST_ROOT:-}" ]; then
+    CPYTHON_TEST_ROOT=$(CDPATH= cd "$(/bin/busybox dirname "$0")" && pwd)
+fi
 . "$CPYTHON_TEST_ROOT/run_cpython.sh"
 
 check_exec "python3 binary" "$CPYTHON_PY"

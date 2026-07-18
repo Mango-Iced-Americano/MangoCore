@@ -2386,9 +2386,13 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 }
             }
         } else if group_name == "cpython" {
+            #[cfg(target_arch = "loongarch64")]
+            let cpython_dir = "/persist/python-runtime/current\0";
+            #[cfg(target_arch = "riscv64")]
+            let cpython_dir = "/tools/tests/cpython\0";
             run_group_in_dir(
                 environ,
-                "/tools/tests/cpython\0",
+                cpython_dir,
                 group_name,
                 script,
                 timeout_secs,
@@ -3387,21 +3391,45 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(chmod_cmd, environ);
     println!("[initproc] chmod test scripts done, exit={}", ret);
 
-    // Keep CPython isolated on the read-only tools partition. Prefer the
-    // current wrapper carried by initramfs, so launcher/cache policy updates do
-    // not require rewriting P3; retain the P3 wrapper as a compatibility fallback.
+    // LA64 Python is fail-closed on the strict-aligned P4 runtime.  Never use
+    // the P3 /tools Python as a fallback: a missing or invalid P4 release must
+    // stay visible instead of silently changing the interpreter under a test.
+    #[cfg(target_arch = "loongarch64")]
+    let cpython_launcher_cmd = "\
+        launcher=/rescue/python3-wrapper; \
+        entry=/rescue/python-entry; \
+        if [ -x \"$launcher\" ] && [ -x \"$entry\" ]; then \
+            mkdir -p /usr/bin; \
+            ln -sf \"$launcher\" /usr/bin/python3; \
+            ln -sf \"$launcher\" /usr/bin/python; \
+            for name in pip pip3 smolagent smolagents; do \
+                ln -sf \"$entry\" \"/usr/bin/$name\"; \
+            done; \
+            for script in /persist/python/user/bin/*; do \
+                [ -f \"$script\" ] || continue; \
+                name=${script##*/}; \
+                case \"$name\" in python|python3|pip|pip3) continue;; esac; \
+                ln -sf \"$entry\" \"/usr/bin/$name\"; \
+            done; \
+            if /usr/bin/python3 -S -c 'import os,sys; assert os.environ[\"CPYTHON_ROOT\"].startswith(\"/persist/python-runtime/releases/\"); assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix'; then \
+                echo 'P4 strict-aligned Python launchers installed'; \
+            else \
+                echo 'P4 strict-aligned Python validation failed; launchers remain fail-closed' >&2; \
+            fi; \
+        else \
+            echo 'P4 strict-aligned Python policy launchers are missing' >&2; \
+        fi; \
+        true\0";
+    // RV64 has no corresponding strict-aligned P4 runtime yet. Preserve its
+    // existing isolated tools runtime instead of applying LA64 policy there.
+    #[cfg(target_arch = "riscv64")]
     let cpython_launcher_cmd = "\
         launcher=/tools/tests/cpython/python3-wrapper.sh; \
-        if [ -x /rescue/python3-wrapper ]; then \
-            launcher=/rescue/python3-wrapper; \
-        fi; \
+        if [ -x /rescue/python3-wrapper ]; then launcher=/rescue/python3-wrapper; fi; \
         if [ -x \"$launcher\" ] && [ -x /tools/tests/cpython/usr/bin/python3 ]; then \
             mkdir -p /usr/bin; \
             ln -sf \"$launcher\" /usr/bin/python3; \
             ln -sf \"$launcher\" /usr/bin/python; \
-            echo 'CPython launchers installed: /usr/bin/python3, /usr/bin/python'; \
-        else \
-            echo 'CPython launchers unavailable: /tools/tests/cpython is incomplete'; \
         fi; \
         true\0";
     let ret = run_bash_cmd(cpython_launcher_cmd, environ);
@@ -3554,7 +3582,11 @@ fn bind_apk_persist_runtime() -> bool {
         ("/tmp", "/persist/apk-root/tmp"),
         ("/run", "/persist/apk-root/run"),
         ("/scratch", "/persist/apk-root/scratch"),
-        ("/tools", "/persist/apk-root/tools"),
+        (
+            "/persist/python-runtime",
+            "/persist/apk-root/persist/python-runtime",
+        ),
+        ("/persist/python", "/persist/apk-root/persist/python"),
         (
             "/persist/python",
             "/persist/apk-root/var/cache/mango-python",
@@ -3589,7 +3621,6 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
     let prepare_cmd = r#"
         set -eu
         apk=/bin/apk.static
-        [ -x "$apk" ] || apk=/tools/bin/apk.static
         [ -x "$apk" ]
 
         root=/persist/apk-root
@@ -3601,6 +3632,8 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         [ -f /persist/MANGO_STATE.txt ]
         mkdir -p "$state" "$cache" \
             /persist/python/pycache /persist/python/tmp /persist/python/user
+        [ -x /persist/python-runtime/current/usr/bin/python3 ]
+        [ -r /persist/python-runtime/current/strict-runtime-manifest.json ]
         printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
 
         apk_cmd() {
@@ -3635,7 +3668,8 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
 
         mkdir -p \
             "$root/dev" "$root/proc" "$root/tmp" "$root/run" \
-            "$root/scratch" "$root/tools" "$root/root" "$root/sbin" \
+            "$root/scratch" "$root/persist/python-runtime" \
+            "$root/persist/python" "$root/root" "$root/sbin" \
             "$root/usr/bin" "$root/var/cache/mango-python" \
             "$root/etc/apk/keys" "$root/etc/ssl/certs"
         chmod 1777 "$root/tmp"
@@ -3646,9 +3680,13 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             dst=$2
             mode=$3
             if [ ! -f "$dst" ] || ! /bin/busybox cmp -s "$src" "$dst"; then
-                /bin/busybox cp "$src" "$dst.tmp"
-                chmod "$mode" "$dst.tmp"
-                mv -f "$dst.tmp" "$dst"
+                [ ! -L "$dst" ] || rm -f "$dst"
+                # The current ext4 driver can leave an unremovable stale
+                # `<dst>.tmp` inode after an interrupted rename.  A direct,
+                # idempotent copy avoids reusing that directory entry; a
+                # partial copy is detected and replaced on the next boot.
+                /bin/busybox cp "$src" "$dst"
+                chmod "$mode" "$dst"
             fi
         }
 
@@ -3656,6 +3694,16 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         install_changed /usr/libexec/mango/apk-chroot "$root/sbin/apk" 0755
         install_changed /usr/libexec/mango/persist-profile "$root/etc/profile" 0644
         install_changed /rescue/python3-wrapper "$root/usr/bin/python3" 0755
+        install_changed /rescue/python-entry "$root/usr/bin/pip" 0755
+        install_changed /rescue/python-entry "$root/usr/bin/pip3" 0755
+        install_changed /rescue/python-entry "$root/usr/bin/smolagent" 0755
+        install_changed /rescue/python-entry "$root/usr/bin/smolagents" 0755
+        for script in /persist/python/user/bin/*; do
+            [ -f "$script" ] || continue
+            name=${script##*/}
+            case "$name" in python|python3|pip|pip3) continue;; esac
+            install_changed /rescue/python-entry "$root/usr/bin/$name" 0755
+        done
         install_changed /etc/apk/repositories "$root/etc/apk/repositories" 0644
         install_changed /etc/passwd "$root/etc/passwd" 0644
         install_changed /etc/group "$root/etc/group" 0644
@@ -3697,14 +3745,10 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             /sbin/apk info -e zlib >/dev/null
             [ -r /etc/ssl/cert.pem ]
             [ -r /proc/net/resolv.conf ]
-            if [ -x /tools/tests/cpython/lib/ld-musl-loongarch64.so.1 ]; then
-                [ -x /usr/bin/python3 ]
-                python_result=$(PYTHONPYCACHEPREFIX=/var/cache/mango-python/pycache \
-                    /usr/bin/python3 -S -c "print(\"PERSIST_PYTHON_OK\")")
-                [ "$python_result" = PERSIST_PYTHON_OK ]
-            else
-                echo "[apk-persist-shell] optional CPython runtime absent; probe skipped" >&2
-            fi
+            [ -x /usr/bin/python3 ]
+            [ -x /usr/bin/smolagent ]
+            python_result=$(/usr/bin/python3 -S -c "import os,sys; root=os.environ.get(\"CPYTHON_ROOT\",\"\"); assert root.startswith(\"/persist/python-runtime/releases/\"),root; assert os.environ.get(\"MANGO_PYTHON_POLICY\")==\"p4-strict-align-v1\"; assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix; assert os.environ.get(\"PYTHONUSERBASE\")==\"/persist/python/user\"; print(\"PERSIST_STRICT_PYTHON_OK\")")
+            [ "$python_result" = PERSIST_STRICT_PYTHON_OK ]
             probe=/tmp/mango-persist-shell-probe
             echo ok > "$probe"
             [ "$(cat "$probe")" = ok ]

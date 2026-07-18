@@ -17,11 +17,13 @@ from typing import BinaryIO
 POLICY = "mangocore-la64-strict-align-v1"
 TARGET = "loongarch64-linux-musl"
 REQUIRED_FLAGS = {"-march=loongarch64", "-mabi=lp64d", "-mstrict-align"}
+RUNTIME_INTERP = "/persist/python-runtime/current/lib/ld-musl-loongarch64.so.1"
 REQUIRED_PATHS = {
     "lib/ld-musl-loongarch64.so.1",
     "usr/bin/python3",
     "python3-wrapper.sh",
     "strict_runtime_smoke.sh",
+    "verify_runtime_integrity.py",
 }
 
 
@@ -96,6 +98,8 @@ def validate_manifest(manifest: dict[str, object]) -> list[dict[str, object]]:
         raise SystemExit("runtime manifest does not contain the complete strict-align flags")
     if manifest.get("pgo") is not True or manifest.get("lto") is not True:
         raise SystemExit("runtime must have both PGO and LTO enabled")
+    if manifest.get("runtime_interpreter") != RUNTIME_INTERP:
+        raise SystemExit("runtime PT_INTERP is not bound to the P4 current loader")
     elfs = manifest.get("elfs")
     if not isinstance(elfs, list) or not elfs:
         raise SystemExit("runtime manifest has no ELF closure")
@@ -145,6 +149,9 @@ def verify_archive(artifact: Path, expected_sha: str, expected_manifest_sha: str
             stream = archive.extractfile(member)
             if stream is None or sha256_stream(stream) != expected:
                 raise SystemExit(f"ELF sha256 mismatch: {name}")
+            interpreter = entry.get("interpreter")
+            if interpreter not in (None, RUNTIME_INTERP):
+                raise SystemExit(f"non-P4 ELF interpreter: {name}: {interpreter!r}")
     return manifest
 
 

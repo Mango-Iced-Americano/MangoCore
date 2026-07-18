@@ -7,3 +7,8 @@
 16546136 53e43b0430d07df8c307e7d9bd61524b538e07f132133f11c4c5b4637c288e68 target/perf-runs/20260716T-perf-diag-structural-ab/artifacts/kernel-diag.ui
 65855664 4e96eb6fc1eff8ab62db06bbc5c7c521d10a528c32194db2df3d31ef2900da29 target/perf-runs/20260716T-perf-diag-structural-ab/artifacts/kernel-diag.elf
 81627728 abbc714ce59f105fe1ebaab00cc053cea3d09161a6e51c2431112b6beeaff56a target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-abbc714ce59f.tar.xz
+81628064 a420d79ddb07c561066dfec1b4af4c46ce4413e5d79807b4610adef9aa8261a9 target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-a420d79ddb07.tar.xz
+16769280 a5e60c0d52b46c0cd36a472e08f2050f1e4f26ac612ceee0748f53851bc95da1 kernel-2k1000-persist-shell.ui
+81630652 b7f361382399bb592afb65bf0b8598cb0a8a96c3afcc66cc24e7a680e23c244c target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-b7f361382399.tar.xz
+82412900 43d7bb2ecf21d662c427959c0b07612d05379d26a8b05bbc3bde84aa6cb4579e target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz
+166975 c43ad70dc3ce7787543d563792426a16fd7895e14be4b194b5665e36459dd917 /private/tftpboot/pydantic-1.10.26-py3-none-any.whl

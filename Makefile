@@ -15,6 +15,7 @@ P4_QEMU_DISK ?= mango-2k1000la-p4-qemu.img
 P4_MBR_SOURCE ?= /private/tftpboot/mango-2k1000la-full-test-mbr.img
 P4_DOCKER_IMAGE ?= zhouzhouyi/os-contest:20260104
 BOARD_SERIAL_ARG = $(if $(BOARD_SERIAL),--serial $(BOARD_SERIAL),)
+PYTHON_RUNTIME_BUILD_MODE ?= production
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
@@ -63,7 +64,8 @@ print-logo:
 .PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
 	2k1000-boot 2k1000-boot-check 2k1000-p3-backup 2k1000-cpython-p3-write \
 	2k1000-p4-image 2k1000-p4-qemu-disk 2k1000-p4-preflight 2k1000-p4-write \
-	cpython-la64-runtime-build cpython-la64-runtime-verify cpython-la64-runtime-install
+	cpython-la64-runtime-build cpython-la64-runtime-verify cpython-la64-runtime-install \
+	2k1000-python-runtime-deploy
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -135,6 +137,14 @@ cpython-la64-runtime-install: cpython-la64-runtime-build
 		python3 scripts/install_cpython_runtime_la64_strict.py \
 		--artifact-index target/cpython-strict/artifacts/current.json \
 		--dest user/tools/loongarch64/tests/cpython
+
+# Publish only to P4 ext4. P3 /tools is never read or written by this flow.
+2k1000-python-runtime-deploy: cpython-la64-runtime-verify
+	@test -n "$(PERF_RUN_DIR)" || { echo "usage: make 2k1000-python-runtime-deploy PERF_RUN_DIR=<run-dir>" >&2; exit 2; }
+	python3 scripts/deploy_cpython_runtime.py \
+		--run-dir "$(PERF_RUN_DIR)" \
+		--artifact-index target/cpython-strict/artifacts/current.json \
+		--build-mode "$(PYTHON_RUNTIME_BUILD_MODE)" $(BOARD_SERIAL_ARG)
 
 2k1000-boot:
 	@test -n "$(IMAGE)" || { echo "usage: make 2k1000-boot IMAGE=<uImage>" >&2; exit 2; }

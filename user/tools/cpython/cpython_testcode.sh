@@ -2,8 +2,12 @@
 set -u
 
 echo "#### OS COMP TEST GROUP START cpython-isolated ####"
-CPYTHON_TEST_ROOT=${CPYTHON_TEST_ROOT:-/tools/tests/cpython}
+if [ -z "${CPYTHON_TEST_ROOT:-}" ]; then
+    CPYTHON_TEST_ROOT=$(CDPATH= cd "$(/bin/busybox dirname "$0")" && pwd)
+fi
+CPYTHON_ROOT=${CPYTHON_ROOT:-$CPYTHON_TEST_ROOT}
 export CPYTHON_TEST_ROOT
+export CPYTHON_ROOT
 cd "$CPYTHON_TEST_ROOT" || {
     echo "[CPYTHON L0 FAIL] missing $CPYTHON_TEST_ROOT"
     echo "#### OS COMP TEST GROUP END cpython-isolated ####"
@@ -23,6 +27,12 @@ if [ -n "$configured_test_tmpdir" ]; then
         echo "[CPYTHON ENV FAIL] cannot create configured tmpdir=$configured_test_tmpdir"
         exit 2
     fi
+elif [ "${MANGO_PYTHON_POLICY:-}" = p4-strict-align-v1 ]; then
+    CPYTHON_TEST_TMPDIR=/persist/python/test-tmp
+    /bin/busybox mkdir -p "$CPYTHON_TEST_TMPDIR" || {
+        echo "[CPYTHON ENV FAIL] P4 test tmpdir is unavailable"
+        exit 2
+    }
 elif [ -d /scratch ] && /bin/busybox mkdir -p /scratch/cpython; then
     CPYTHON_TEST_TMPDIR=/scratch/cpython
     # The staged 2K1000LA target enables GMAC/DHCP and must not turn a broken

@@ -1,0 +1,72 @@
+2026-07-17T15:10:09.154957Z __PERF_BEGIN_smolagent_direct_dependency_inventory-2-a0f5262b__
+2026-07-17T15:10:10.187569Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_smolagent_direct_dependency_inventory-2-a0f5262b_TRACE_OFF__
+2026-07-17T15:10:12.346767Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_smolagent_direct_dependency_inventory-2-a0f5262b__
+2026-07-17T15:10:23.987494Z [33mWARNING: Package(s) not found: MarkupSafe[0m[33m
+2026-07-17T15:10:26.687326Z [0mName: huggingface_hub
+2026-07-17T15:10:26.695715Z Version: 1.23.0
+2026-07-17T15:10:26.712194Z Summary: Client library to download and publish models, datasets and other repos on the huggingface.co hub
+2026-07-17T15:10:26.724517Z Home-page: https://github.com/huggingface/huggingface_hub
+2026-07-17T15:10:26.733603Z Author: Hugging Face, Inc.
+2026-07-17T15:10:26.743312Z Author-email: julien@huggingface.co
+2026-07-17T15:10:26.752044Z License: Apache-2.0
+2026-07-17T15:10:26.764103Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-17T15:10:26.778479Z Requires: click, filelock, fsspec, httpx, packaging, pyyaml, tqdm, typing-extensions
+2026-07-17T15:10:26.787321Z Required-by: smolagents
+2026-07-17T15:10:27.086208Z ---
+2026-07-17T15:10:27.094542Z Name: requests
+2026-07-17T15:10:27.102778Z Version: 2.34.2
+2026-07-17T15:10:27.112601Z Summary: Python HTTP for Humans.
+2026-07-17T15:10:27.120490Z Home-page: 
+2026-07-17T15:10:27.127823Z Author: 
+2026-07-17T15:10:27.138908Z Author-email: Kenneth Reitz <me@kennethreitz.org>
+2026-07-17T15:10:27.147355Z License: Apache-2.0
+2026-07-17T15:10:27.159404Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-17T15:10:27.170773Z Requires: certifi, charset_normalizer, idna, urllib3
+2026-07-17T15:10:27.180347Z Required-by: smolagents
+2026-07-17T15:10:27.581693Z ---
+2026-07-17T15:10:27.589345Z Name: rich
+2026-07-17T15:10:27.597413Z Version: 15.0.0
+2026-07-17T15:10:27.613357Z Summary: Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal
+2026-07-17T15:10:27.624531Z Home-page: https://github.com/Textualize/rich
+2026-07-17T15:10:27.633087Z Author: Will McGugan
+2026-07-17T15:10:27.643078Z Author-email: willmcgugan@gmail.com
+2026-07-17T15:10:27.651159Z License: MIT
+2026-07-17T15:10:27.663027Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-17T15:10:27.673049Z Requires: markdown-it-py, pygments
+2026-07-17T15:10:27.681943Z Required-by: smolagents
+2026-07-17T15:10:27.987594Z ---
+2026-07-17T15:10:27.995481Z Name: Jinja2
+2026-07-17T15:10:28.003488Z Version: 3.1.6
+2026-07-17T15:10:28.015032Z Summary: A very fast and expressive template engine.
+2026-07-17T15:10:28.022605Z Home-page: 
+2026-07-17T15:10:28.030122Z Author: 
+2026-07-17T15:10:28.038020Z Author-email: 
+2026-07-17T15:10:28.045560Z License: 
+2026-07-17T15:10:28.058248Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-17T15:10:28.066204Z Requires: MarkupSafe
+2026-07-17T15:10:28.075258Z Required-by: smolagents
+2026-07-17T15:10:28.429810Z ---
+2026-07-17T15:10:28.437814Z Name: pillow
+2026-07-17T15:10:28.446223Z Version: 12.3.0
+2026-07-17T15:10:28.457016Z Summary: Python Imaging Library (fork)
+2026-07-17T15:10:28.467473Z Home-page: https://python-pillow.github.io
+2026-07-17T15:10:28.474951Z Author: 
+2026-07-17T15:10:28.486660Z Author-email: Jeffrey 'Alex' Clark <aclark@aclark.net>
+2026-07-17T15:10:28.495935Z License-Expression: MIT-CMU
+2026-07-17T15:10:28.510510Z Location: /persist/python-runtime/releases/071e4e258421/usr/lib/python3.14/site-packages
+2026-07-17T15:10:28.518388Z Requires: 
+2026-07-17T15:10:28.527265Z Required-by: smolagents
+2026-07-17T15:10:28.845410Z ---
+2026-07-17T15:10:28.853941Z Name: python-dotenv
+2026-07-17T15:10:28.862740Z Version: 1.2.2
+2026-07-17T15:10:28.877031Z Summary: Read key-value pairs from a .env file and set them as environment variables
+2026-07-17T15:10:28.884688Z Home-page: 
+2026-07-17T15:10:28.892216Z Author: 
+2026-07-17T15:10:28.903951Z Author-email: Saurabh Kumar <me+github@saurabh-kumar.com>
+2026-07-17T15:10:28.912681Z License: BSD-3-Clause
+2026-07-17T15:10:28.924779Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-17T15:10:28.932419Z Requires: 
+2026-07-17T15:10:28.941330Z Required-by: smolagents
+2026-07-17T15:10:29.981082Z __PERF_WORK_END_smolagent_direct_dependency_inventory-2-a0f5262b__
+2026-07-17T15:10:29.987215Z __PERF_ACK_smolagent_direct_dependency_inventory-2-a0f5262b_WORK__
+2026-07-17T15:10:30.561572Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_smolagent_direct_dependency_inventory-2-a0f5262b__ rc=0

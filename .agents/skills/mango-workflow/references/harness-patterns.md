@@ -755,6 +755,38 @@ diag=1
 - **介质边界**: staging、canonical runtime、work、pycache 和结果必须全部落在本轮允许写入的目标分区；旧只读 runtime 只提供下载/解包工具时，也不得因此把目标分区误写成它所在的分区。
 - **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`, `user/tools/cpython/strict_runtime_smoke.sh`
 
+## 动态语言运行时替换必须关闭全部间接回退路径
+
+- **场景**: 新解释器已经部署到持久分区，直接执行 `python3` 也命中新版本，但 pip、console
+  script、chroot、`subprocess` 或启动期功能测试仍可能通过旧 shebang、继承的 `PATH`/
+  `LD_LIBRARY_PATH`、旧用户目录别名或部署 bootstrap 间接执行退役运行时。只替换一个
+  `/usr/bin/python3` 符号链接不能证明运行时已经完成切换。
+- **设计**: 同时关闭五个面：①解释器入口固定指向验证 wrapper；②pip 和全部 console entry
+  忽略 shebang，通过同一 wrapper 执行；③wrapper 覆盖子进程的 PATH/动态库路径，不继承退役
+  分区；④chroot 只 bind 新 runtime 与新状态树，并复制相同 wrapper/profile；⑤部署只用基础
+  BusyBox 解包和验 SHA，smoke 只执行刚部署的新 runtime。任何一环缺失都保留了隐式 fallback。
+- **发布协议**: runtime 按 artifact hash 放入不可变 `releases/<id>`，manifest 与激活标记绑定
+  artifact/ELF hash，staging smoke 通过后原子更新 `current`。代码、用户包、pyc、tmp 和测试
+  输出放在同一目标文件系统；旧分区只作只读数据备份。
+- **门禁**: 缺失或无效的 `current` 必须让默认命令 fail-closed，不能让 shell 继续搜索旧路径。
+  验证应从默认命令启动，检查 `sys.executable/sys.prefix/sys.path/PATH/LD_LIBRARY_PATH`，并单独
+  验证 pip、典型 console entry、chroot 和 subprocess。包依赖失败可以记录为“新问题已暴露”，
+  但不能改回旧解释器把门禁做绿。
+- **教训**: “新运行时能执行”与“系统只会执行新运行时”是两种不同结论。后者需要从命令解析、
+  shebang、环境继承、文件系统视图和部署供应链给出闭包证据。
+- **动态链接器闭包**: wrapper 显式启动 P4 loader 仍不够，`sys.executable`、multiprocessing 和
+  pip build isolation 会直接 `execve` Python ELF。动态可执行文件的 `PT_INTERP` 必须固化到
+  稳定的 P4 `current` loader，并由 artifact manifest、安装器和板端激活前全 ELF 复核共同门禁。
+  `patchelf --set-interpreter` 对已绑定 ELF 未必字节幂等；打包脚本必须先读现值、仅在不同时
+  改写，否则仅重复打包就可能改变 ELF 布局和 artifact hash。
+- **环境与 console 闭包**: 除 PATH/库路径外还应清除 `PYTHONPATH/PYTHONHOME/PYTHONSTARTUP`、
+  `LD_PRELOAD/LD_AUDIT` 等继承注入。console entry 要解析最终路径并限制在新状态树内；若历史
+  安装产生 shell shim + `.real`，应由统一 wrapper 直接解释 `.real`，不可重新信任旧 shebang。
+- **完整性成本分层**: 每次启动只检查 manifest/activation/artifact 身份，发布新 release 前用
+  新 runtime 对 manifest 中全部 native ELF 做一次实物重哈希。这样可写 P4 release 既不会在
+  每个 Python 进程上支付 94 ELF 哈希成本，也不能把被替换的 ELF 原子激活为 canonical runtime。
+- **相关文件**: `user/tools/cpython/python3-wrapper-persist.sh`, `user/tools/cpython/python-entry-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/deploy_cpython_runtime.py`, `scripts/board/verify_persist_python.sh`
+
 ## 复杂度缺陷用“实际遍历步数”闭环，不只拟合 wall 曲线
 
 - **场景**: 源码显示外层逐项删除、内层对剩余容器做全表扫描，wall time 看起来呈平方增长，但固定开销、cache、frame free 和 TLB 也会影响时间曲线。
@@ -763,3 +795,24 @@ diag=1
 - **真实影响**: 目标端 runner 必须预热后 reset/on，只包 workload body。比较时同时看累计占比与最大单次时延；calls 很多但每次很小，可能弱于 calls 很少却包含一个大容器的 workload。
 - **证据边界**: diagnostic ticks/body 只能作为路径归因，不能直接等同未来优化收益；production/diagnostic 结构差异和探针税仍需独立门禁。
 - **相关文件**: `os/src/mm/vma.rs`, `os/src/task/perf.rs`, `scripts/analyze_anon_unmap.py`
+
+## 交叉构建 Python 原生扩展必须同时验证编译命令、wheel tag 和最终 ELF
+
+- **场景**: 目标 CPython 已交叉编译，继续为它构建 Pillow、MarkupSafe 等第三方扩展。
+  `setup.py`/setuptools 在宿主 Python 中运行，容易读取宿主 `sysconfig`、头文件、平台名和
+  wheel tag；仅设置 `CC=<cross-gcc>` 不能证明产物属于目标环境。
+- **构建门禁**: 让目标 CPython header、目标库和目标 sysconfig 先于宿主路径；编译器
+  wrapper 在调用参数末尾追加目标 flags，防止包构建系统后写的 CFLAGS 覆盖。保存完整
+  compile log/database，逐条要求 target triple/ABI/strict flags，并禁止宿主编译器。
+- **产物门禁**: wheel 文件名和内部 `WHEEL` tag 都必须精确匹配目标 ABI（例如
+  `cp314-cp314-linux_loongarch64`）；解包后扫描所有 ELF，验证 machine、hash、NEEDED 和
+  PT_INTERP，再并入运行时总 manifest。主机 QEMU-user import 只作预检，最终仍需实板
+  执行真实功能和目标文件系统 I/O。
+- **纯 Python 例外**: 如果选择纯 Python 降低 native 闭包，必须在构建前显式关闭扩展，
+  要求 `py3-none-any`，并拒绝编译日志中的任何 C 编译命令和 wheel/安装树中的 ELF。不能
+  接受“扩展编译失败后回退成功”，因为它可能留下宿主架构 tag 或不稳定的可选行为。
+- **依赖闭包发现**: 从系统默认 console command 一直执行到成功。每次新增包后重新跑默认
+  门禁；缺下一个依赖是闭包证据，不应通过旧运行时 fallback 掩盖。最终至少覆盖默认命令、
+  包核心 API、运行时全 ELF hash 和既有语言功能矩阵。
+- **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`,
+  `user/tools/cpython/pillow_strict_smoke.py`, `user/tools/cpython/strict_runtime_smoke.sh`

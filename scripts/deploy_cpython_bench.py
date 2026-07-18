@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import hashlib
-import http.server
 import shlex
 import subprocess
 import sys
-import threading
+import time
 from pathlib import Path
 
 
@@ -20,9 +18,17 @@ HARNESS = ROOT / "scripts" / "kernel_perf.py"
 DEFAULT_BUNDLE = ROOT / "target" / "cpython-bench" / "cpython-bench-suite.zip"
 
 
-class QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:
-        return
+def http_server_command(directory: Path, host: str, port: int) -> list[str]:
+    ruby = Path("/usr/bin/ruby")
+    if sys.platform == "darwin" and ruby.is_file():
+        return [
+            str(ruby), "-run", "-e", "httpd", str(directory),
+            "-p", str(port), "-b", host,
+        ]
+    return [
+        sys.executable, "-m", "http.server", str(port),
+        "--bind", host, "--directory", str(directory),
+    ]
 
 
 def main() -> int:
@@ -58,26 +64,24 @@ def main() -> int:
 
     bundle_hash = hashlib.sha256(args.bundle.read_bytes()).hexdigest()
     url = "http://%s:%d/%s" % (args.host_ip, args.port, args.bundle.name)
-    download_code = (
-        "import urllib.request as u,zipfile as z;"
-        "u.urlretrieve(%r,'b.zip');z.ZipFile('b.zip').extractall()" % url
-    )
-    verify_code = (
-        "import hashlib as h;"
-        "assert h.sha256(open('b.zip','rb').read()).hexdigest()==%r" % bundle_hash
-    )
+    download = "/bin/busybox wget -O b.zip %s" % shlex.quote(url)
+    extract_code = "import zipfile as z;z.ZipFile('b.zip').extractall()"
+    verify = "printf '%s  b.zip\\n'|/bin/busybox sha256sum -c -" % bundle_hash
     phases = (
         (
-            "cpybench_deploy",
+            "cpybench_download",
             "mkdir -p %s&&cd %s&&rm -rf mangocore-cpython-bench-suite b.zip&&"
             % (shlex.quote(target_dir), shlex.quote(target_dir))
-            +
-            "/tools/tests/cpython/python3-wrapper.sh -c %s&&sync" % shlex.quote(download_code),
+            + download,
         ),
         (
             "cpybench_sha256",
-            "cd %s&&/tools/tests/cpython/python3-wrapper.sh -c %s"
-            % (shlex.quote(target_dir), shlex.quote(verify_code)),
+            "cd %s&&%s" % (shlex.quote(target_dir), verify),
+        ),
+        (
+            "cpybench_extract",
+            "cd %s&&/usr/bin/python3 -c %s&&sync"
+            % (shlex.quote(target_dir), shlex.quote(extract_code)),
         ),
         (
             "cpybench_verify",
@@ -93,10 +97,14 @@ def main() -> int:
             print(board_command)
         return 0
 
-    handler = functools.partial(QuietHandler, directory=str(args.bundle.resolve().parent))
-    server = http.server.ThreadingHTTPServer((args.host_ip, args.port), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server = subprocess.Popen(
+        http_server_command(args.bundle.resolve().parent, args.host_ip, args.port),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.3)
+    if server.poll() is not None:
+        raise SystemExit("benchmark HTTP server failed to start")
     try:
         for test_name, board_command in phases:
             command = [
@@ -127,9 +135,12 @@ def main() -> int:
                 return result.returncode
         return 0
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+        server.terminate()
+        try:
+            server.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=2)
 
 
 if __name__ == "__main__":

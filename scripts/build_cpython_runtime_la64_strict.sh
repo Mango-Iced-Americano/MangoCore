@@ -22,8 +22,12 @@ HOSTPY=$OUT/host-python
 RUNTIME=$OUT/runtime
 ARTIFACTS=$OUT/artifacts
 WRAP=$OUT/cross
+HOST_TOOLS=$OUT/host-tools
+PILLOW_BUILD_DEPS=$OUT/pillow-build-deps
 
-mkdir -p "$CACHE" "$SOURCES" "$BUILD" "$STAMPS" "$SYSROOT" "$ARTIFACTS" "$WRAP"
+mkdir -p \
+    "$CACHE" "$SOURCES" "$BUILD" "$STAMPS" "$SYSROOT" "$ARTIFACTS" \
+    "$WRAP" "$HOST_TOOLS" "$PILLOW_BUILD_DEPS"
 
 TOOLCHAIN_ARCHIVE=x86_64-cross-tools-loongarch64-unknown-linux-musl-latest-20250911.tar.xz
 TOOLCHAIN_URL=https://github.com/loong64/cross-tools/releases/download/20250911/x86_64-cross-tools-loongarch64-unknown-linux-musl-latest.tar.xz
@@ -31,12 +35,42 @@ TOOLCHAIN_SHA256=2d56d07146ed712ac44f5063f54a19656fce851492c3f1c10e31e6b6633db6d
 TOOLCHAIN_ROOT=$OUT/toolchain/full-gcc-15.2.0-musl-20250911/loongarch64-unknown-linux-musl
 TOOLCHAIN_PREFIX=loongarch64-unknown-linux-musl
 
+QEMU_USER_ARCHIVE=qemu-user-static_8.2.2+ds-0ubuntu1.17_amd64.deb
+QEMU_USER_URL=https://archive.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-user-static_8.2.2%2bds-0ubuntu1.17_amd64.deb
+QEMU_USER_SHA256=4558164baf4250d4dcc0dcbcf114b44b4b77b5fed773267187e72cedae883fdc
+QEMU_USER_ROOT=$HOST_TOOLS/qemu-user-static-8.2.2-u17
+QEMU_USER_BIN=$QEMU_USER_ROOT/usr/bin/qemu-loongarch64-static
+
+LIBJPEG_ARCHIVE=libjpeg-turbo-3.1.4.1.tar.gz
+LIBJPEG_URL=https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.4.1/libjpeg-turbo-3.1.4.1.tar.gz
+LIBJPEG_SHA256=ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022
+
+PILLOW_ARCHIVE=pillow-12.3.0.tar.gz
+PILLOW_URL=https://files.pythonhosted.org/packages/source/p/pillow/pillow-12.3.0.tar.gz
+PILLOW_SHA256=3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce
+MARKUPSAFE_ARCHIVE=markupsafe-3.0.3.tar.gz
+MARKUPSAFE_URL=https://files.pythonhosted.org/packages/source/m/markupsafe/markupsafe-3.0.3.tar.gz
+MARKUPSAFE_SHA256=722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698
+PYYAML_ARCHIVE=pyyaml-6.0.3.tar.gz
+PYYAML_URL=https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-6.0.3.tar.gz
+PYYAML_SHA256=d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f
+SETUPTOOLS_WHEEL=setuptools-80.9.0-py3-none-any.whl
+SETUPTOOLS_URL=https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl
+SETUPTOOLS_SHA256=062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
+PYBIND11_WHEEL=pybind11-3.0.1-py3-none-any.whl
+PYBIND11_URL=https://files.pythonhosted.org/packages/cd/8a/37362fc2b949d5f733a8b0f2ff51ba423914cabefe69f1d1b6aab710f5fe/pybind11-3.0.1-py3-none-any.whl
+PYBIND11_SHA256=aa8f0aa6e0a94d3b64adfc38f560f33f15e589be2175e103c0a33c6bce55ee89
+WHEEL_WHEEL=wheel-0.45.1-py3-none-any.whl
+WHEEL_URL=https://files.pythonhosted.org/packages/0b/2c/87f3254fd8ffd29e4c02732eee68a83a1d3c346ae39bc6822dcbcb697f2b/wheel-0.45.1-py3-none-any.whl
+WHEEL_SHA256=708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248
+
 TARGET=loongarch64-linux-musl
 BUILD_TRIPLE=x86_64-pc-linux-gnu
 STRICT_FLAGS="-march=loongarch64 -mabi=lp64d -mstrict-align"
 COMMON_CFLAGS="-Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt $STRICT_FLAGS"
 COMMON_CPPFLAGS="-I$SYSROOT/usr/include"
 COMMON_LDFLAGS="-L$SYSROOT/usr/lib -L$SYSROOT/lib -Wl,-rpath-link,$SYSROOT/usr/lib -Wl,-rpath-link,$SYSROOT/lib -Wl,--as-needed -Wl,-O1 -Wl,--sort-common"
+RUNTIME_INTERP=/persist/python-runtime/current/lib/ld-musl-loongarch64.so.1
 
 declare -A APORTS_COMMIT=(
     [musl]=b0c8ea10e8f29cabe336b2e5d864124940e126ab
@@ -116,9 +150,31 @@ is_done() {
     [[ -f "$STAMPS/$1.done" ]]
 }
 
+package_input_digest() {
+    {
+        sha256sum "$ROOT/scripts/build_cpython_runtime_la64_strict.sh"
+        find "$ROOT/user/tools/cpython" -type f -print0 | \
+            LC_ALL=C sort -z | xargs -0 sha256sum
+    } | sha256sum | awk '{print $1}'
+}
+
+package_cache_current() {
+    local stamp=$STAMPS/runtime-package.inputs.sha256
+    is_done runtime-package && [[ -f "$stamp" ]] && \
+        [[ $(cat "$stamp") == $(package_input_digest) ]]
+}
+
 fetch_sources() {
     log "fetching and verifying pinned sources"
     fetch_sha256 "$TOOLCHAIN_URL" "$TOOLCHAIN_ARCHIVE" "$TOOLCHAIN_SHA256"
+    fetch_sha256 "$QEMU_USER_URL" "$QEMU_USER_ARCHIVE" "$QEMU_USER_SHA256"
+    fetch_sha256 "$LIBJPEG_URL" "$LIBJPEG_ARCHIVE" "$LIBJPEG_SHA256"
+    fetch_sha256 "$PILLOW_URL" "$PILLOW_ARCHIVE" "$PILLOW_SHA256"
+    fetch_sha256 "$MARKUPSAFE_URL" "$MARKUPSAFE_ARCHIVE" "$MARKUPSAFE_SHA256"
+    fetch_sha256 "$PYYAML_URL" "$PYYAML_ARCHIVE" "$PYYAML_SHA256"
+    fetch_sha256 "$SETUPTOOLS_URL" "$SETUPTOOLS_WHEEL" "$SETUPTOOLS_SHA256"
+    fetch_sha256 "$PYBIND11_URL" "$PYBIND11_WHEEL" "$PYBIND11_SHA256"
+    fetch_sha256 "$WHEEL_URL" "$WHEEL_WHEEL" "$WHEEL_SHA256"
     fetch_sha256 \
         https://dl-cdn.alpinelinux.org/alpine/edge/main/loongarch64/linux-headers-7.1.3-r0.apk \
         linux-headers-7.1.3-r0.apk \
@@ -189,6 +245,17 @@ fetch_sources() {
         ab8eaa2858d5109049b1f9f553198d40e0ef8d78211ad6455f7b491af525bffb16738fed60fc84e960c4889568d25753b9e4a1494834fea48291b33f07000ec2
 }
 
+setup_qemu_user() {
+    if [[ -x "$QEMU_USER_BIN" ]]; then return; fi
+    rm -rf -- "$QEMU_USER_ROOT"
+    mkdir -p "$QEMU_USER_ROOT"
+    dpkg-deb -x "$CACHE/$QEMU_USER_ARCHIVE" "$QEMU_USER_ROOT"
+    [[ -x "$QEMU_USER_BIN" ]] || {
+        echo "bundled qemu-loongarch64-static is missing after extraction" >&2
+        exit 1
+    }
+}
+
 setup_toolchain() {
     if [[ ! -x "$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-gcc" ]]; then
         local toolchain_parent=${TOOLCHAIN_ROOT%/loongarch64-unknown-linux-musl}
@@ -204,21 +271,22 @@ setup_toolchain() {
     RANLIB=$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-gcc-ranlib
     STRIP=$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-strip
     READELF=$TOOLCHAIN_ROOT/bin/$TOOLCHAIN_PREFIX-readelf
+    PATCHELF=$(command -v patchelf || true)
+    if [[ -z "$PATCHELF" ]]; then
+        echo "missing patchelf; required to bind Python self-exec to the P4 loader" >&2
+        exit 1
+    fi
     QEMU=${CPYTHON_STRICT_QEMU:-}
     if [[ -z "$QEMU" ]]; then
         QEMU=$(command -v qemu-loongarch64-static || command -v qemu-loongarch64 || true)
     fi
     if [[ -z "$QEMU" ]]; then
-        if is_done python-target && is_done runtime-package; then
-            # A completed cache only needs its archive/index verified; none of
-            # the stamped build stages below execute a target binary.
-            QEMU=/bin/false
-            log "qemu-user unavailable; using completed target/runtime cache"
-        else
-            echo "missing qemu-loongarch64-static; install qemu-user-static in the project Docker image" >&2
-            exit 1
-        fi
+        QEMU=$QEMU_USER_BIN
     fi
+    [[ -x "$QEMU" ]] || {
+        echo "missing qemu-loongarch64-static: $QEMU" >&2
+        exit 1
+    }
     "$GCC" -Werror $STRICT_FLAGS -x c -c /dev/null -o "$OUT/strict-flag-probe.o"
     # CPython's --enable-optimizations needs the complete libgcov profiler
     # runtime.  Minimal nolibc toolchains compile the sources but fail only at
@@ -269,11 +337,11 @@ build_musl() {
 setup_musl_wrapper() {
     cat > "$WRAP/$TARGET-gcc" <<EOF
 #!/usr/bin/env bash
-exec "$GCC" --sysroot="$SYSROOT" "\$@"
+exec "$GCC" --sysroot="$SYSROOT" "\$@" $STRICT_FLAGS
 EOF
     cat > "$WRAP/$TARGET-g++" <<EOF
 #!/usr/bin/env bash
-exec "$GXX" --sysroot="$SYSROOT" "\$@"
+exec "$GXX" --sysroot="$SYSROOT" "\$@" $STRICT_FLAGS
 EOF
     chmod 0755 "$WRAP/$TARGET-gcc" "$WRAP/$TARGET-g++"
     CC=$WRAP/$TARGET-gcc
@@ -306,6 +374,56 @@ build_zlib() {
         make DESTDIR="$SYSROOT" install
     )
     mark_done zlib
+}
+
+build_libjpeg_turbo() {
+    local stamp=libjpeg-turbo-3.1.4.1
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/libjpeg-turbo-3.1.4.1
+    local build_dir=$BUILD/libjpeg-turbo-3.1.4.1-build
+    unpack_tar "$CACHE/$LIBJPEG_ARCHIVE" "$src"
+    rm -rf -- "$build_dir"
+    mkdir -p "$build_dir"
+    SOURCE_DATE_EPOCH=0 cmake -S "$src" -B "$build_dir" \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=loongarch64 \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="$COMMON_CFLAGS" \
+        -DCMAKE_SHARED_LINKER_FLAGS="$COMMON_LDFLAGS" \
+        -DCMAKE_SKIP_RPATH=TRUE \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DENABLE_SHARED=TRUE \
+        -DENABLE_STATIC=FALSE \
+        -DWITH_SIMD=FALSE \
+        -DWITH_TURBOJPEG=FALSE \
+        -DWITH_TOOLS=FALSE \
+        -DWITH_JAVA=FALSE \
+        -DWITH_TESTS=FALSE
+    SOURCE_DATE_EPOCH=0 cmake --build "$build_dir" --parallel "$JOBS"
+    SOURCE_DATE_EPOCH=0 DESTDIR="$SYSROOT" cmake --install "$build_dir"
+    python3 - "$build_dir/compile_commands.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+commands = json.loads(path.read_text(encoding="utf-8"))
+if not commands:
+    raise SystemExit("libjpeg-turbo compile database is empty")
+missing = [entry["file"] for entry in commands if "-mstrict-align" not in entry["command"].split()]
+if missing:
+    raise SystemExit("libjpeg-turbo objects missing -mstrict-align: " + ", ".join(missing[:8]))
+print(f"libjpeg_strict_compile_units={len(commands)}")
+PY
+    [[ -f "$SYSROOT/usr/lib/libjpeg.so.62.4.0" ]] || {
+        echo "strict libjpeg shared library was not installed" >&2
+        exit 1
+    }
+    mark_done "$stamp"
 }
 
 build_bzip2() {
@@ -559,6 +677,316 @@ PY
     mark_done python-target
 }
 
+build_pillow() {
+    local stamp=pillow-12.3.0
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/pillow-12.3.0
+    local wheels=$BUILD/pillow-12.3.0-wheels
+    local build_log=$BUILD/pillow-12.3.0-build.log
+    local site_packages=$RUNTIME/usr/lib/python3.14/site-packages
+    local target_include=$RUNTIME/usr/include/python3.14
+    local target_sysconfig sysconfig_name wheel
+
+    [[ -f "$target_include/Python.h" ]] || {
+        echo "target Python headers are missing under $target_include" >&2
+        exit 1
+    }
+    target_sysconfig=$(find "$RUNTIME/usr/lib/python3.14" -maxdepth 1 \
+        -name '_sysconfigdata_*.py' -print -quit)
+    [[ -n "$target_sysconfig" ]] || {
+        echo "target Python sysconfig is missing" >&2
+        exit 1
+    }
+    sysconfig_name=$(basename "$target_sysconfig" .py)
+
+    unpack_tar "$CACHE/$PILLOW_ARCHIVE" "$src"
+    rm -rf -- "$PILLOW_BUILD_DEPS" "$wheels"
+    mkdir -p "$PILLOW_BUILD_DEPS" "$wheels" "$site_packages"
+    for dependency_wheel in "$SETUPTOOLS_WHEEL" "$PYBIND11_WHEEL" "$WHEEL_WHEEL"; do
+        python3 -m zipfile -e "$CACHE/$dependency_wheel" "$PILLOW_BUILD_DEPS"
+    done
+
+    # Run the native build backend with the matching host Python, while
+    # forcing setuptools to consume the target CPython sysconfig.  The target
+    # include directory is intentionally first; the host headers that
+    # setuptools appends are only a fallback and must never win pyconfig.h.
+    (
+        cd "$src"
+        SOURCE_DATE_EPOCH=0 \
+        PYTHONPATH="$PILLOW_BUILD_DEPS:$RUNTIME/usr/lib/python3.14" \
+        _PYTHON_SYSCONFIGDATA_NAME="$sysconfig_name" \
+        _PYTHON_HOST_PLATFORM=linux-loongarch64 \
+        CC="$CC" CXX="$CXX" LDSHARED="$CC -shared" \
+        CFLAGS="$COMMON_CFLAGS" CXXFLAGS="$COMMON_CFLAGS" \
+        CPPFLAGS="-I$target_include $COMMON_CPPFLAGS" \
+        LDFLAGS="$COMMON_LDFLAGS" \
+        PKG_CONFIG_SYSROOT_DIR="$SYSROOT" \
+        PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" \
+        MAX_CONCURRENCY=1 \
+        "$HOSTPY/bin/python3.14" setup.py bdist_wheel --dist-dir "$wheels" \
+            --pillow-configuration=platform-guessing=disable \
+            --pillow-configuration=zlib=enable \
+            --pillow-configuration=jpeg=enable \
+            --pillow-configuration=tiff=disable \
+            --pillow-configuration=freetype=disable \
+            --pillow-configuration=raqm=disable \
+            --pillow-configuration=lcms=disable \
+            --pillow-configuration=webp=disable \
+            --pillow-configuration=jpeg2000=disable \
+            --pillow-configuration=imagequant=disable \
+            --pillow-configuration=xcb=disable \
+            --pillow-configuration=avif=disable \
+            --pillow-configuration=parallel=1 \
+            2>&1 | tee "$build_log"
+    )
+
+    python3 - "$build_log" "$CC" "$target_include" "$HOSTPY/include" <<'PY'
+import pathlib
+import sys
+
+log = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+compiler = sys.argv[2]
+target_include = "-I" + sys.argv[3]
+host_include = "-I" + sys.argv[4]
+compile_lines = [line for line in log if line.startswith(compiler + " ") and " -c " in line]
+if len(compile_lines) < 20:
+    raise SystemExit(f"unexpectedly small Pillow native build: {len(compile_lines)} compile units")
+missing = [line for line in compile_lines if "-mstrict-align" not in line.split()]
+if missing:
+    raise SystemExit("Pillow compile unit missing -mstrict-align: " + missing[0])
+core = next((line for line in compile_lines if " src/_imaging.c " in line), None)
+if core is None:
+    raise SystemExit("Pillow core extension compile command is missing")
+if target_include not in core:
+    raise SystemExit("Pillow core extension did not use target Python headers")
+if host_include in core and core.index(target_include) > core.index(host_include):
+    raise SystemExit("host Python headers precede target headers in Pillow build")
+print(f"pillow_strict_compile_units={len(compile_lines)}")
+PY
+
+    wheel=$(find "$wheels" -maxdepth 1 -type f \
+        -name 'pillow-12.3.0-cp314-cp314-linux_loongarch64.whl' -print -quit)
+    [[ -n "$wheel" ]] || {
+        echo "strict Pillow LoongArch wheel was not produced" >&2
+        exit 1
+    }
+    python3 - "$wheel" "$site_packages" <<'PY'
+import pathlib
+import shutil
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+site = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(wheel) as archive:
+    for name in archive.namelist():
+        member = pathlib.PurePosixPath(name)
+        if member.is_absolute() or ".." in member.parts:
+            raise SystemExit(f"unsafe Pillow wheel member: {name}")
+    for stale in (site / "PIL", site / "pillow-12.3.0.dist-info"):
+        if stale.exists():
+            shutil.rmtree(stale)
+    archive.extractall(site)
+PY
+    grep -Fq 'Tag: cp314-cp314-linux_loongarch64' \
+        "$site_packages/pillow-12.3.0.dist-info/WHEEL" || {
+        echo "installed Pillow metadata has the wrong target tag" >&2
+        exit 1
+    }
+    [[ -f "$site_packages/PIL/_imaging.cpython-314.so" ]] || {
+        echo "installed Pillow core extension is missing" >&2
+        exit 1
+    }
+    mark_done "$stamp"
+}
+
+build_markupsafe() {
+    local stamp=markupsafe-3.0.3
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/markupsafe-3.0.3
+    local wheels=$BUILD/markupsafe-3.0.3-wheels
+    local build_log=$BUILD/markupsafe-3.0.3-build.log
+    local site_packages=$RUNTIME/usr/lib/python3.14/site-packages
+    local target_include=$RUNTIME/usr/include/python3.14
+    local target_sysconfig sysconfig_name wheel
+
+    target_sysconfig=$(find "$RUNTIME/usr/lib/python3.14" -maxdepth 1 \
+        -name '_sysconfigdata_*.py' -print -quit)
+    [[ -f "$target_include/Python.h" && -n "$target_sysconfig" ]] || {
+        echo "target Python build metadata is missing for MarkupSafe" >&2
+        exit 1
+    }
+    sysconfig_name=$(basename "$target_sysconfig" .py)
+
+    unpack_tar "$CACHE/$MARKUPSAFE_ARCHIVE" "$src"
+    rm -rf -- "$wheels"
+    mkdir -p "$wheels" "$site_packages"
+    if [[ ! -f "$PILLOW_BUILD_DEPS/setuptools/__init__.py" ]]; then
+        rm -rf -- "$PILLOW_BUILD_DEPS"
+        mkdir -p "$PILLOW_BUILD_DEPS"
+        for dependency_wheel in "$SETUPTOOLS_WHEEL" "$WHEEL_WHEEL"; do
+            python3 -m zipfile -e "$CACHE/$dependency_wheel" "$PILLOW_BUILD_DEPS"
+        done
+    fi
+
+    (
+        cd "$src"
+        SOURCE_DATE_EPOCH=0 \
+        PYTHONPATH="$PILLOW_BUILD_DEPS:$RUNTIME/usr/lib/python3.14" \
+        _PYTHON_SYSCONFIGDATA_NAME="$sysconfig_name" \
+        _PYTHON_HOST_PLATFORM=linux-loongarch64 \
+        CC="$CC" CXX="$CXX" LDSHARED="$CC -shared" \
+        CFLAGS="$COMMON_CFLAGS" CXXFLAGS="$COMMON_CFLAGS" \
+        CPPFLAGS="-I$target_include $COMMON_CPPFLAGS" \
+        LDFLAGS="$COMMON_LDFLAGS" \
+        MAX_CONCURRENCY=1 \
+        "$HOSTPY/bin/python3.14" setup.py bdist_wheel --dist-dir "$wheels" \
+            2>&1 | tee "$build_log"
+    )
+
+    python3 - "$build_log" "$CC" "$target_include" "$HOSTPY/include" <<'PY'
+import pathlib
+import sys
+
+log = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+compiler = sys.argv[2]
+target_include = "-I" + sys.argv[3]
+host_include = "-I" + sys.argv[4]
+compile_lines = [line for line in log if line.startswith(compiler + " ") and " -c " in line]
+if len(compile_lines) != 1:
+    raise SystemExit(f"expected one MarkupSafe native compile unit, found {len(compile_lines)}")
+command = compile_lines[0]
+if "-mstrict-align" not in command.split():
+    raise SystemExit("MarkupSafe speedups compile unit is missing -mstrict-align")
+if target_include not in command:
+    raise SystemExit("MarkupSafe speedups did not use target Python headers")
+if host_include in command and command.index(target_include) > command.index(host_include):
+    raise SystemExit("host Python headers precede target headers in MarkupSafe build")
+print("markupsafe_strict_compile_units=1")
+PY
+
+    wheel=$(find "$wheels" -maxdepth 1 -type f \
+        -name 'markupsafe-3.0.3-cp314-cp314-linux_loongarch64.whl' -print -quit)
+    [[ -n "$wheel" ]] || {
+        echo "strict MarkupSafe LoongArch wheel was not produced" >&2
+        exit 1
+    }
+    python3 - "$wheel" "$site_packages" <<'PY'
+import pathlib
+import shutil
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+site = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(wheel) as archive:
+    for name in archive.namelist():
+        member = pathlib.PurePosixPath(name)
+        if member.is_absolute() or ".." in member.parts:
+            raise SystemExit(f"unsafe MarkupSafe wheel member: {name}")
+    for stale in (site / "markupsafe", site / "markupsafe-3.0.3.dist-info"):
+        if stale.exists():
+            shutil.rmtree(stale)
+    archive.extractall(site)
+PY
+    grep -Fq 'Tag: cp314-cp314-linux_loongarch64' \
+        "$site_packages/markupsafe-3.0.3.dist-info/WHEEL" || {
+        echo "installed MarkupSafe metadata has the wrong target tag" >&2
+        exit 1
+    }
+    [[ -f "$site_packages/markupsafe/_speedups.cpython-314.so" ]] || {
+        echo "installed MarkupSafe speedups extension is missing" >&2
+        exit 1
+    }
+    mark_done "$stamp"
+}
+
+build_pyyaml_pure() {
+    local stamp=pyyaml-6.0.3-pure
+    if is_done "$stamp"; then return; fi
+    local src=$BUILD/pyyaml-6.0.3
+    local wheels=$BUILD/pyyaml-6.0.3-wheels
+    local build_log=$BUILD/pyyaml-6.0.3-build.log
+    local site_packages=$RUNTIME/usr/lib/python3.14/site-packages
+    local wheel
+
+    unpack_tar "$CACHE/$PYYAML_ARCHIVE" "$src"
+    rm -rf -- "$wheels"
+    mkdir -p "$wheels" "$site_packages"
+    if [[ ! -f "$PILLOW_BUILD_DEPS/setuptools/__init__.py" ]]; then
+        rm -rf -- "$PILLOW_BUILD_DEPS"
+        mkdir -p "$PILLOW_BUILD_DEPS"
+        for dependency_wheel in "$SETUPTOOLS_WHEEL" "$WHEEL_WHEEL"; do
+            python3 -m zipfile -e "$CACHE/$dependency_wheel" "$PILLOW_BUILD_DEPS"
+        done
+    fi
+
+    # PyYAML's libyaml accelerator is optional.  Keep this runtime dependency
+    # deliberately pure Python: that closes SmolAgent's import graph without
+    # introducing an unverified native libyaml/Cython extension.  Every ELF in
+    # the packaged runtime therefore remains covered by the strict manifest.
+    (
+        cd "$src"
+        SOURCE_DATE_EPOCH=0 \
+        PYYAML_FORCE_LIBYAML=0 \
+        PYTHONPATH="$PILLOW_BUILD_DEPS" \
+        "$HOSTPY/bin/python3.14" setup.py --without-libyaml \
+            bdist_wheel --dist-dir "$wheels" 2>&1 | tee "$build_log"
+    )
+    if grep -Fq ' -c ' "$build_log"; then
+        echo "pure PyYAML build unexpectedly compiled native code" >&2
+        exit 1
+    fi
+
+    wheel=$(find "$wheels" -maxdepth 1 -type f \
+        -name 'pyyaml-6.0.3-py3-none-any.whl' -print -quit)
+    [[ -n "$wheel" ]] || {
+        echo "pure PyYAML wheel was not produced" >&2
+        exit 1
+    }
+    python3 - "$wheel" "$site_packages" <<'PY'
+import pathlib
+import shutil
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+site = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(wheel) as archive:
+    for name in archive.namelist():
+        member = pathlib.PurePosixPath(name)
+        if member.is_absolute() or ".." in member.parts:
+            raise SystemExit(f"unsafe PyYAML wheel member: {name}")
+    for stale in (site / "yaml", site / "_yaml"):
+        if stale.exists():
+            shutil.rmtree(stale)
+    for stale in site.glob("*yaml-*.dist-info"):
+        shutil.rmtree(stale)
+    archive.extractall(site)
+
+for path in [site / "yaml", site / "_yaml"]:
+    for member in path.rglob("*"):
+        if not member.is_file():
+            continue
+        if member.suffix == ".so" or ".so." in member.name:
+            raise SystemExit(f"pure PyYAML wheel contains native extension: {member}")
+        with member.open("rb") as stream:
+            if stream.read(4) == b"\x7fELF":
+                raise SystemExit(f"pure PyYAML wheel contains ELF: {member}")
+PY
+    grep -Fq 'Root-Is-Purelib: true' \
+        "$site_packages/pyyaml-6.0.3.dist-info/WHEEL" || {
+        echo "installed PyYAML metadata is not pure Python" >&2
+        exit 1
+    }
+    grep -Fq 'Tag: py3-none-any' \
+        "$site_packages/pyyaml-6.0.3.dist-info/WHEEL" || {
+        echo "installed PyYAML metadata has the wrong wheel tag" >&2
+        exit 1
+    }
+    mark_done "$stamp"
+}
+
 copy_runtime_library() {
     local pattern=$1 matched=0 directory file
     shopt -s nullglob
@@ -576,7 +1004,10 @@ copy_runtime_library() {
 }
 
 package_runtime() {
-    if is_done runtime-package; then return; fi
+    local package_digest
+    package_digest=$(package_input_digest)
+    if package_cache_current; then return; fi
+    rm -f "$STAMPS/runtime-package.done"
     mkdir -p "$RUNTIME/lib" "$RUNTIME/usr/lib" "$RUNTIME/etc"
     cp -a "$SYSROOT/lib/ld-musl-loongarch64.so.1" "$RUNTIME/lib/"
     ln -sfn ld-musl-loongarch64.so.1 "$RUNTIME/lib/libc.musl-loongarch64.so.1"
@@ -584,7 +1015,7 @@ package_runtime() {
         'libz.so*' 'libbz2.so*' 'liblzma.so*' 'libffi.so*' 'libexpat.so*' \
         'libmpdec.so*' 'libcrypto.so*' 'libssl.so*' 'libncursesw.so*' \
         'libtinfow.so*' 'libpanelw.so*' 'libreadline.so*' 'libhistory.so*' \
-        'libsqlite3.so*'; do
+        'libsqlite3.so*' 'libjpeg.so*'; do
         copy_runtime_library "$pattern"
     done
     if [[ -d "$SYSROOT/usr/lib/ossl-modules" ]]; then
@@ -600,11 +1031,13 @@ package_runtime() {
         cp -a "$ROOT/user/tools/loongarch64/tests/cpython/etc/terminfo" "$RUNTIME/etc/"
     fi
     install -m 0755 "$ROOT/user/tools/cpython/run_cpython.sh" "$RUNTIME/run_cpython.sh"
-    install -m 0755 "$ROOT/user/tools/cpython/python3-wrapper.sh" "$RUNTIME/python3-wrapper.sh"
+    install -m 0755 "$ROOT/user/tools/cpython/python3-wrapper-persist.sh" "$RUNTIME/python3-wrapper.sh"
     install -m 0755 "$ROOT/user/tools/cpython/cpython_testcode.sh" "$RUNTIME/cpython_testcode.sh"
     install -m 0755 "$ROOT/user/tools/cpython/run_strict_benchmark.sh" "$RUNTIME/run_strict_benchmark.sh"
     install -m 0755 "$ROOT/user/tools/cpython/run_strict_functional.sh" "$RUNTIME/run_strict_functional.sh"
     install -m 0755 "$ROOT/user/tools/cpython/strict_runtime_smoke.sh" "$RUNTIME/strict_runtime_smoke.sh"
+    install -m 0644 "$ROOT/user/tools/cpython/verify_runtime_integrity.py" "$RUNTIME/verify_runtime_integrity.py"
+    install -m 0644 "$ROOT/user/tools/cpython/pillow_strict_smoke.py" "$RUNTIME/pillow_strict_smoke.py"
     install -m 0755 "$ROOT/user/tools/cpython/L3_check_files.sh" "$RUNTIME/L3_check_files.sh"
     install -m 0755 "$ROOT/user/tools/cpython/L4_startup.sh" "$RUNTIME/L4_startup.sh"
     install -m 0644 "$ROOT/user/tools/cpython/L5_language.py" "$RUNTIME/L5_language.py"
@@ -614,23 +1047,92 @@ package_runtime() {
     install -m 0644 "$ROOT/user/tools/cpython/L8_subprocess.py" "$RUNTIME/L8_subprocess.py"
     install -m 0644 "$ROOT/user/tools/cpython/L9_socket.py" "$RUNTIME/L9_socket.py"
 
-    python3 - "$RUNTIME" "$STRIP" <<'PY'
+    python3 - "$RUNTIME" "$STRIP" "$READELF" <<'PY'
 import pathlib
 import subprocess
 import sys
 
 runtime = pathlib.Path(sys.argv[1])
 strip = sys.argv[2]
+readelf = sys.argv[3]
 elfs = []
+strip_elfs = []
 for path in sorted(runtime.rglob("*")):
     if not path.is_file() or path.is_symlink():
         continue
     with path.open("rb") as stream:
         if stream.read(4) == b"\x7fELF":
             elfs.append(str(path))
-for offset in range(0, len(elfs), 64):
-    subprocess.run([strip, "--strip-unneeded", *elfs[offset:offset + 64]], check=True)
-print(f"stripped_elfs={len(elfs)}")
+            sections = subprocess.run(
+                [readelf, "-S", str(path)],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            # Re-running GNU strip on an already stripped, patchelf-adjusted
+            # ELF is not guaranteed to be byte-idempotent.  Only files that
+            # still contain symbols or debug sections need this operation.
+            if ".symtab" in sections or ".debug_" in sections:
+                strip_elfs.append(str(path))
+for offset in range(0, len(strip_elfs), 64):
+    subprocess.run(
+        [strip, "--strip-unneeded", *strip_elfs[offset:offset + 64]],
+        check=True,
+    )
+print(f"native_elfs={len(elfs)}")
+print(f"stripped_elfs={len(strip_elfs)}")
+PY
+
+    # The wrapper starts Python through the P4 loader explicitly, but Python
+    # subprocesses commonly exec sys.executable directly.  Bind every runtime
+    # executable with PT_INTERP to the stable P4 `current` loader so self-exec,
+    # pip build isolation, and multiprocessing cannot fall back to /lib.
+    python3 - "$RUNTIME" "$READELF" "$PATCHELF" "$RUNTIME_INTERP" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+runtime = pathlib.Path(sys.argv[1])
+readelf = sys.argv[2]
+patchelf = sys.argv[3]
+expected = sys.argv[4]
+bound = []
+patched = []
+for path in sorted(runtime.rglob("*")):
+    if not path.is_file() or path.is_symlink():
+        continue
+    with path.open("rb") as stream:
+        if stream.read(4) != b"\x7fELF":
+            continue
+    program_headers = subprocess.run(
+        [readelf, "-l", str(path)], text=True, capture_output=True, check=True
+    ).stdout
+    interpreter = None
+    for line in program_headers.splitlines():
+        if "Requesting program interpreter:" in line:
+            interpreter = line.split(
+                "Requesting program interpreter:", 1
+            )[1].rstrip("]").strip()
+            break
+    if interpreter is None:
+        continue
+    # patchelf --set-interpreter is not byte-idempotent for an already-bound
+    # executable: repeated packaging can grow the program-header layout and
+    # change the artifact hash.  Rewrite only when the current PT_INTERP is
+    # different, then always verify the final value.
+    if interpreter != expected:
+        subprocess.run([patchelf, "--set-interpreter", expected, str(path)], check=True)
+        patched.append(str(path.relative_to(runtime)))
+    verified = subprocess.run(
+        [readelf, "-l", str(path)], text=True, capture_output=True, check=True
+    ).stdout
+    if f"Requesting program interpreter: {expected}" not in verified:
+        raise SystemExit(f"failed to bind PT_INTERP for {path}")
+    bound.append(str(path.relative_to(runtime)))
+if not bound:
+    raise SystemExit("runtime contains no PT_INTERP executable to bind")
+print("p4_interp_elfs=" + ",".join(bound))
+print("p4_interp_rewritten=" + (",".join(patched) if patched else "none"))
 PY
 
     local sysconfig
@@ -643,8 +1145,39 @@ PY
 
     "$QEMU" -L "$RUNTIME" \
         -E "LD_LIBRARY_PATH=$RUNTIME/usr/lib:$RUNTIME/lib" \
+        "$RUNTIME/lib/ld-musl-loongarch64.so.1" \
+        --library-path "$RUNTIME/usr/lib:$RUNTIME/lib" \
         "$RUNTIME/usr/bin/python3" -S -c \
         'import _bz2,_ctypes,_decimal,_hashlib,_lzma,_sqlite3,readline,ssl,sysconfig,threading,zlib; flags=" ".join(str(sysconfig.get_config_var(k) or "") for k in ("CFLAGS","CONFIGURE_CFLAGS","CONFIGURE_CFLAGS_NODIST","PY_CFLAGS","PGO_PROF_USE_FLAG")); assert "-mstrict-align" in flags; assert "-fprofile-use" in flags; args=sysconfig.get_config_var("CONFIG_ARGS") or ""; assert "--enable-optimizations" in args and "--with-lto" in args; t=threading.Thread(target=lambda:None); t.start(); t.join(); print("strict-runtime-smoke-ok")'
+
+    "$QEMU" -L "$RUNTIME" \
+        -E "LD_LIBRARY_PATH=$RUNTIME/usr/lib:$RUNTIME/lib" \
+        -E "PYTHONHOME=$RUNTIME/usr" \
+        -E "PYTHONNOUSERSITE=1" \
+        -E "CPYTHON_ROOT=$RUNTIME" \
+        "$RUNTIME/lib/ld-musl-loongarch64.so.1" \
+        --library-path "$RUNTIME/usr/lib:$RUNTIME/lib" \
+        "$RUNTIME/usr/bin/python3" -c \
+        'from markupsafe import Markup, _speedups, escape; assert escape("<x>") == Markup("&lt;x&gt;"); print("strict-markupsafe-smoke-ok", _speedups.__file__)'
+
+    "$QEMU" -L "$RUNTIME" \
+        -E "LD_LIBRARY_PATH=$RUNTIME/usr/lib:$RUNTIME/lib" \
+        -E "PYTHONHOME=$RUNTIME/usr" \
+        -E "PYTHONNOUSERSITE=1" \
+        -E "CPYTHON_ROOT=$RUNTIME" \
+        "$RUNTIME/lib/ld-musl-loongarch64.so.1" \
+        --library-path "$RUNTIME/usr/lib:$RUNTIME/lib" \
+        "$RUNTIME/usr/bin/python3" -c \
+        'import yaml; assert yaml.__version__ == "6.0.3" and yaml.__with_libyaml__ is False; assert yaml.safe_load("answer: 42") == {"answer": 42}; print("strict-pyyaml-pure-smoke-ok", yaml.__file__)'
+
+    "$QEMU" -L "$RUNTIME" \
+        -E "LD_LIBRARY_PATH=$RUNTIME/usr/lib:$RUNTIME/lib" \
+        -E "PYTHONHOME=$RUNTIME/usr" \
+        -E "PYTHONNOUSERSITE=1" \
+        -E "CPYTHON_ROOT=$RUNTIME" \
+        "$RUNTIME/lib/ld-musl-loongarch64.so.1" \
+        --library-path "$RUNTIME/usr/lib:$RUNTIME/lib" \
+        "$RUNTIME/usr/bin/python3" "$RUNTIME/pillow_strict_smoke.py"
 
     python3 - "$RUNTIME" "$OUT" "$GCC" "$READELF" "$STRICT_FLAGS" "$ROOT" <<'PY'
 import hashlib
@@ -660,6 +1193,7 @@ gcc = sys.argv[3]
 readelf = sys.argv[4]
 strict_flags = sys.argv[5]
 root = pathlib.Path(sys.argv[6])
+expected_interp = "/persist/python-runtime/current/lib/ld-musl-loongarch64.so.1"
 
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -688,6 +1222,17 @@ for path in sorted(runtime.rglob("*")):
     dynamic = subprocess.run(
         [readelf, "-d", str(path)], text=True, capture_output=True, check=False
     ).stdout
+    program_headers = subprocess.run(
+        [readelf, "-l", str(path)], text=True, capture_output=True, check=False
+    ).stdout
+    interpreter = None
+    for line in program_headers.splitlines():
+        if "Requesting program interpreter:" in line:
+            interpreter = line.split("Requesting program interpreter:", 1)[1].rstrip("]").strip()
+            if interpreter != expected_interp:
+                raise SystemExit(
+                    f"non-P4 PT_INTERP in runtime: {path}: {interpreter}"
+                )
     needed = []
     soname = None
     for line in dynamic.splitlines():
@@ -703,6 +1248,7 @@ for path in sorted(runtime.rglob("*")):
         "sha256": sha256(path),
         "needed": needed,
         "soname": soname,
+        "interpreter": interpreter,
     })
 
 missing = sorted({name for elf in elfs for name in elf["needed"] if name not in provided})
@@ -718,11 +1264,37 @@ profile_files = sorted((out / "build" / "python-target").rglob("*.gcda"))
 if not profile_files:
     raise SystemExit("PGO manifest validation found no GCC profile data")
 handler_source = root / "os" / "src" / "hal" / "arch" / "loongarch64" / "trap" / "mod.rs"
+pillow_wheels = sorted((out / "build" / "pillow-12.3.0-wheels").glob("*.whl"))
+if len(pillow_wheels) != 1:
+    raise SystemExit(f"expected one strict Pillow wheel, found {len(pillow_wheels)}")
+pillow_wheel = pillow_wheels[0]
+pillow_wheel_tag = "cp314-cp314-linux_loongarch64"
+pillow_metadata = runtime / "usr/lib/python3.14/site-packages/pillow-12.3.0.dist-info/WHEEL"
+if f"Tag: {pillow_wheel_tag}" not in pillow_metadata.read_text(encoding="utf-8"):
+    raise SystemExit("installed Pillow wheel does not carry the target ABI tag")
+markupsafe_wheels = sorted((out / "build" / "markupsafe-3.0.3-wheels").glob("*.whl"))
+if len(markupsafe_wheels) != 1:
+    raise SystemExit(f"expected one strict MarkupSafe wheel, found {len(markupsafe_wheels)}")
+markupsafe_wheel = markupsafe_wheels[0]
+markupsafe_wheel_tag = "cp314-cp314-linux_loongarch64"
+markupsafe_metadata = runtime / "usr/lib/python3.14/site-packages/markupsafe-3.0.3.dist-info/WHEEL"
+if f"Tag: {markupsafe_wheel_tag}" not in markupsafe_metadata.read_text(encoding="utf-8"):
+    raise SystemExit("installed MarkupSafe wheel does not carry the target ABI tag")
+pyyaml_wheels = sorted((out / "build" / "pyyaml-6.0.3-wheels").glob("*.whl"))
+if len(pyyaml_wheels) != 1:
+    raise SystemExit(f"expected one pure PyYAML wheel, found {len(pyyaml_wheels)}")
+pyyaml_wheel = pyyaml_wheels[0]
+pyyaml_wheel_tag = "py3-none-any"
+pyyaml_metadata = runtime / "usr/lib/python3.14/site-packages/pyyaml-6.0.3.dist-info/WHEEL"
+pyyaml_wheel_text = pyyaml_metadata.read_text(encoding="utf-8")
+if f"Tag: {pyyaml_wheel_tag}" not in pyyaml_wheel_text or "Root-Is-Purelib: true" not in pyyaml_wheel_text:
+    raise SystemExit("installed PyYAML wheel is not the expected pure-Python build")
 
 manifest = {
-    "schema": 2,
+    "schema": 3,
     "runtime_policy": "mangocore-la64-strict-align-v1",
-    "native_closure_policy": "CPython, musl loader/libc and every packaged native dependency use -mstrict-align",
+    "native_closure_policy": "CPython, Pillow, MarkupSafe, musl loader/libc and every packaged native dependency use -mstrict-align; PyYAML is pure Python",
+    "runtime_interpreter": expected_interp,
     "target": "loongarch64-linux-musl",
     "python_version": "3.14.5",
     "compiler": subprocess.check_output([gcc, "--version"], text=True).splitlines()[0],
@@ -735,6 +1307,45 @@ manifest = {
     "kernel_handler_modified": False,
     "kernel_handler_source_sha256": sha256(handler_source),
     "build_script_sha256": sha256(root / "scripts" / "build_cpython_runtime_la64_strict.sh"),
+    "python_packages": {
+        "Pillow": {
+            "version": "12.3.0",
+            "source_build": True,
+            "wheel": pillow_wheel.name,
+            "wheel_sha256": sha256(pillow_wheel),
+            "wheel_tag": pillow_wheel_tag,
+            "features_enabled": ["jpeg", "zlib"],
+            "features_disabled": [
+                "avif", "freetype", "imagequant", "jpeg2000", "lcms",
+                "raqm", "tiff", "webp", "xcb",
+            ],
+        },
+        "MarkupSafe": {
+            "version": "3.0.3",
+            "source_build": True,
+            "wheel": markupsafe_wheel.name,
+            "wheel_sha256": sha256(markupsafe_wheel),
+            "wheel_tag": markupsafe_wheel_tag,
+            "speedups": True,
+        },
+        "PyYAML": {
+            "version": "6.0.3",
+            "source_build": True,
+            "wheel": pyyaml_wheel.name,
+            "wheel_sha256": sha256(pyyaml_wheel),
+            "wheel_tag": pyyaml_wheel_tag,
+            "pure_python": True,
+            "libyaml_accelerator": False,
+        }
+    },
+    "native_dependencies": {
+        "libjpeg-turbo": {
+            "version": "3.1.4.1",
+            "shared_soname": "libjpeg.so.62",
+            "simd": False,
+            "strict_align_compile_database_verified": True,
+        }
+    },
     "elf_count": len(elfs),
     "elfs": elfs,
     "virtual_dso_providers": {"libc.so": "lib/ld-musl-loongarch64.so.1"},
@@ -779,6 +1390,8 @@ PY
     printf '%s  %s\n' "$archive_sha" "$(basename "$final_archive")" > "$final_archive.sha256"
     log "artifact: $final_archive"
     log "sha256: $archive_sha"
+    printf '%s\n' "$package_digest" > "$STAMPS/runtime-package.inputs.sha256.tmp"
+    mv "$STAMPS/runtime-package.inputs.sha256.tmp" "$STAMPS/runtime-package.inputs.sha256"
     mark_done runtime-package
 }
 
@@ -792,6 +1405,7 @@ import sys
 
 artifacts = pathlib.Path(sys.argv[1])
 required_flags = {"-march=loongarch64", "-mabi=lp64d", "-mstrict-align"}
+required_interp = "/persist/python-runtime/current/lib/ld-musl-loongarch64.so.1"
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -824,7 +1438,15 @@ for archive in artifacts.glob("cpython-la64-strict-*.tar.xz"):
         or not required_flags.issubset(flags)
         or manifest.get("pgo") is not True
         or manifest.get("lto") is not True
+        or manifest.get("runtime_interpreter") != required_interp
+        or manifest.get("python_packages", {}).get("Pillow", {}).get("version") != "12.3.0"
+        or manifest.get("python_packages", {}).get("MarkupSafe", {}).get("version") != "3.0.3"
         or not manifest.get("elfs")
+    ):
+        continue
+    if any(
+        elf.get("interpreter") not in (None, required_interp)
+        for elf in manifest["elfs"]
     ):
         continue
     manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
@@ -853,11 +1475,13 @@ PY
 
 main() {
     fetch_sources
+    setup_qemu_user
     setup_toolchain
     install_kernel_headers
     build_musl
     setup_musl_wrapper
     build_zlib
+    build_libjpeg_turbo
     build_bzip2
     build_xz
     build_autoconf_package libffi libffi-3.5.2.tar.gz \
@@ -870,6 +1494,9 @@ main() {
     build_sqlite
     build_host_python
     build_target_python
+    build_pillow
+    build_markupsafe
+    build_pyyaml_pure
     package_runtime
     write_current_artifact_index
 }

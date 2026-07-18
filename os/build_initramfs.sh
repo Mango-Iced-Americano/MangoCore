@@ -144,14 +144,36 @@ else
     echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /rescue/sh will be missing"
 fi
 
-# Keep the CPython launcher in initramfs so launcher/cache policy updates do not
-# require rewriting the large read-only tools partition. The target interpreter
-# and standard library remain isolated under /tools/tests/cpython.
-CPYTHON_WRAPPER_SRC="../user/tools/cpython/python3-wrapper.sh"
+# Keep the launcher policy in initramfs.  LA64 deliberately uses the P4-only
+# strict wrapper; RV64 retains its existing isolated-runtime launcher until an
+# equivalent strict RV64 runtime is available.
+case "$ARCH" in
+  la64) CPYTHON_WRAPPER_SRC="../user/tools/cpython/python3-wrapper-persist.sh" ;;
+  rv64) CPYTHON_WRAPPER_SRC="../user/tools/cpython/python3-wrapper.sh" ;;
+esac
+CPYTHON_ENTRY_SRC="../user/tools/cpython/python-entry-wrapper.sh"
+CPYTHON_VERIFY_SRC="../scripts/board/verify_persist_python.sh"
 if [ -x "$CPYTHON_WRAPPER_SRC" ]; then
     mkdir -p "$STAGE/rescue"
     install -m 0755 "$CPYTHON_WRAPPER_SRC" "$STAGE/rescue/python3-wrapper"
     echo "[initramfs] installed current CPython wrapper at /rescue/python3-wrapper"
+elif [ "$ARCH" = la64 ]; then
+    echo "[initramfs] ERROR: missing required P4 Python wrapper: $CPYTHON_WRAPPER_SRC" >&2
+    exit 1
+fi
+if [ "$ARCH" = la64 ] && [ -x "$CPYTHON_ENTRY_SRC" ]; then
+    install -m 0755 "$CPYTHON_ENTRY_SRC" "$STAGE/rescue/python-entry"
+    echo "[initramfs] installed P4 Python console-entry wrapper at /rescue/python-entry"
+elif [ "$ARCH" = la64 ]; then
+    echo "[initramfs] ERROR: missing required P4 Python entry wrapper: $CPYTHON_ENTRY_SRC" >&2
+    exit 1
+fi
+if [ "$ARCH" = la64 ] && [ -x "$CPYTHON_VERIFY_SRC" ]; then
+    install -m 0755 "$CPYTHON_VERIFY_SRC" "$STAGE/rescue/verify-persist-python"
+    echo "[initramfs] installed P4 Python verification gate"
+elif [ "$ARCH" = la64 ]; then
+    echo "[initramfs] ERROR: missing required P4 Python verification gate: $CPYTHON_VERIFY_SRC" >&2
+    exit 1
 fi
 
 # 5. 生成 newc cpio 归档

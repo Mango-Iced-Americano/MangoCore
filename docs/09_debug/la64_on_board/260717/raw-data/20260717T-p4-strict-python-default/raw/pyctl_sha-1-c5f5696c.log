@@ -1,0 +1,7 @@
+2026-07-17T11:52:24.643240Z __PERF_BEGIN_pyctl_sha-1-c5f5696c__
+2026-07-17T11:52:25.492129Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pyctl_sha-1-c5f5696c_TRACE_OFF__
+2026-07-17T11:52:27.250012Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pyctl_sha-1-c5f5696c__
+2026-07-17T11:52:27.291533Z /tmp/pyd: OK
+2026-07-17T11:52:27.297107Z __PERF_WORK_END_pyctl_sha-1-c5f5696c__
+2026-07-17T11:52:27.300957Z __PERF_ACK_pyctl_sha-1-c5f5696c_WORK__
+2026-07-17T11:52:27.693041Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pyctl_sha-1-c5f5696c__ rc=0

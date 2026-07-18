@@ -2,7 +2,82 @@
 
 ---
 
+## 2026-07-18
+
+### board/python: 补齐 SmolAgent OpenAI 可选后端的 Pydantic 闭包
+
+**涉及文件：**
+- `docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md` — 补充真实 `OpenAIModel` traceback 的分层解释、精确版本约束、Pydantic v1/v2 原生边界、P4 staging 发布过程、实板验证和剩余 pip tag 问题
+- `docs/09_debug/la64_on_board/260717/{06-raw-data-index.md,raw-data/README.md}`、`raw-data/20260718T-openai-dependency-audit/` — 归档本次 manifest、4 条 record、6 份 raw；保留启动前超时和两次 512-byte 主机门禁失败
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“CLI help 不覆盖可选后端依赖”和包装异常必须沿 traceback 查找最内层失败的诊断模式
+
+**验证：**
+- 2K1000LA 当前 artifact 仍为 strict-aligned `43d7bb2ecf21`；P4 `/persist` 为 rw ext4，P3 `/tools` 未参与下载、安装、导入或回退 ✅
+- 板上精确版本为 `smolagents 1.26.0`、`openai 1.35.15`、`httpx 0.27.2`、`typing_extensions 4.16.0`；初始 `pip check` 唯一缺失的声明依赖为 Pydantic ✅
+- 固定 `pydantic-1.10.26-py3-none-any.whl`，主机与板端 SHA-256 均为 `c43ad70d...d917`；隔离目录和正式 P4 staging 都是 59 文件、0 `.so`，实板报告 `pydantic.compiled=False` ✅
+- 默认 `python3` 不注入测试 `PYTHONPATH` 时，Pydantic 模型校验、`openai.OpenAI` 和 `smolagents.OpenAIModel` dummy/no-network 构造全部通过；结构化正式样本退出 0，warm wall 37.074 s ✅
+- 安装后 `pip check` 不再报告 `openai requires pydantic`；仍因自建 aligned Pillow/MarkupSafe wheel 平台标签退出 1，该问题独立记录，未误报为依赖闭包全绿 ⚠️
+- P4 发布后执行 `sync`，串口 monitor 正常关闭；宿主临时串口日志中的旧 API key 已脱敏，未在归档中发现凭据模式 ✅
+- 归档副本与 `target/perf-runs/20260718T-openai-dependency-audit` 执行 `diff -rq` 一致；文档与 raw 后续执行链接/JSON/格式复核 ✅
+
+**备注：**
+- `openai 1.35.15` 只要求 `pydantic>=1.9,<3`，不依赖 `jiter`。Pydantic 1.10.26 已提供 Python 3.14 universal pure wheel；当前无需交叉构建 `pydantic-core/jiter`。若未来升级 OpenAI/Pydantic v2，必须把 Rust 原生扩展作为新的 strict-aligned runtime 闭包独立构建和上板。
+- 第一次 `pip --target /scratch` 在 `/tmp -> ext4` 跨设备 fallback 的 `shutil.copytree` 中收到 ENOSYS，只形成部分目标树；正式安装没有复用该目录，而是在 P4 同盘 staging 校验后 rename 发布。该现象是 ext4/VFS 元数据 syscall 兼容问题，不归因 Pydantic。
+- 真实 API 未重跑。旧 key 已出现在历史串口输入中，必须由用户在服务端轮换后再做最小公网请求，并与本地固定响应端点分开计时。
+
+### board/python: 完成 aligned Pillow 与 SmolAgent 100 ELF 原生闭包实板验收
+
+**涉及文件：**
+- `scripts/build_cpython_runtime_la64_strict.sh` — 固定 Pillow 12.3.0、libjpeg-turbo 3.1.4.1、MarkupSafe 3.0.3、PyYAML 6.0.3 及 setuptools/pybind11/wheel 的版本和 SHA；严格交叉构建 libjpeg、Pillow `_imaging` 和 MarkupSafe `_speedups`，逐编译单元检查 `-march=loongarch64 -mabi=lp64d -mstrict-align`，要求精确 cp314/LoongArch wheel tag；PyYAML 强制 `py3-none-any` 且禁止任何 native compile/ELF；QEMU-user smoke 覆盖四类运行时包，manifest schema 升到 3、ELF 闭包从 94 增至 100
+- `user/tools/cpython/pillow_strict_smoke.py`、`user/tools/cpython/strict_runtime_smoke.sh`、`scripts/board/verify_persist_python.sh` — 新增内存 PNG/JPEG roundtrip、可选 P4 ext4 写入/fsync/重开/hash、模块来源检查；发布 smoke 增加 Pillow、MarkupSafe、PyYAML；默认门禁在 `--require-smolagents` 下同时要求 Pillow 和 `smolagent --help`
+- `scripts/deploy_cpython_runtime.py` — 部署失败时清理 staging/archive 临时文件并保护 current；压缩传输对象移到 `/tmp`，避免 P4 同时保存 78.5 MiB archive 和完整解压树，也避免 P2 `/scratch` 的极慢传输，canonical release/用户状态/测试仍全部位于 P4 ext4
+- `docs/09_debug/la64_on_board/260717/{README,06-raw-data-index,08-persist-strict-python-default,09-aligned-pillow-and-smolagent-closure}.md`、`raw-data/20260717T-aligned-pillow/`、`docs/08_testing/{mangocore-python-guide,cpython-isolated}.md` — 记录源码锁定、交叉 wheel 门禁、三阶段依赖闭包、P4 ENOSPC/恢复、stale statfs、最终实板结果和 64 个原始/派生文件
+- `.agents/skills/mango-workflow/references/{harness-patterns,debugging-patterns}.md` — 沉淀 Python 原生扩展交叉构建三层门禁，以及 ext4 statfs 挂载快照不可作为容量真值的诊断模式
+
+**验证：**
+- 最终 artifact `cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz` 为 82,412,900 B，SHA-256 `43d7bb2ecf21d662c427959c0b07612d05379d26a8b05bbc3bde84aa6cb4579e`；manifest SHA-256 `862aec2368a1eb3480934b6f746732f8bbf23b85ab6104080944edac219870b5`，schema 3、100 ELF、PGO/LTO、P4 PT_INTERP、strict flags 和逐 ELF hash 均通过主机/安装器/板端三层复核 ✅
+- Pillow wheel `pillow-12.3.0-cp314-cp314-linux_loongarch64.whl`、MarkupSafe wheel `markupsafe-3.0.3-cp314-cp314-linux_loongarch64.whl` 和 PyYAML `pyyaml-6.0.3-py3-none-any.whl` 通过精确 tag；libjpeg 101、Pillow 80、MarkupSafe 1 个原生编译单元的 strict flags 均通过，PyYAML 无编译单元/ELF；首轮 PyYAML 宿主 tag/native attempt 被 fail-closed 门禁拒绝并保留日志 ✅
+- QEMU-user 的 CPython、Pillow PNG/JPEG、MarkupSafe speedups、PyYAML safe-load smoke 全通过；最终项目 Docker 严格串行 production build 为 rv64 83.361 s、la64 91.543 s，均退出 0 ✅
+- 2K1000LA P4 发布 `43d7bb2ecf21`：archive SHA、100 ELF integrity、四组 runtime smoke 通过后才原子更新 current，部署 wall 715.134 s；最终只保留 current 43d 和 rollback e14，P3 `/tools` 未读写执行 ✅
+- 默认 `/rescue/verify-persist-python --require-smolagents` 退出 0，wall 137.599 s；解释器/normal site/self-exec/pip/Pillow/SmolAgent import/`smolagent --help` 全部通过，且无 user-site native `.so` ✅
+- P4 ext4 Pillow smoke 6.230 s：PNG 82 B、SHA `bc89fe6b...5285`，JPEG 638 B、SHA `6b837514...6f2`，写入、fsync、重开和像素验证通过；SmolAgent `AgentImage(...).to_raw()` 27.202 s 返回 PIL `Image (3, 2)` ✅
+- 最终 CPython L3-L9 实板 workload 49.046 s，项目 judge 重算 `{"all":72,"pass":72}`；L7 工作区位于 P4 ext4，含文件、symlink、fsync、线程、subprocess、DNS、HTTP、HTTPS ✅
+- `kernel_perf analyze` 生成 11 份报告；原 run 48 records/51 raw/11 reports 共 64 文件，复制到文档 raw-data 后 `diff -rq` 逐字节一致；Shell/JSON/Python smoke、`git diff --check` 和双架构最终构建完成 ✅
+
+**备注：**
+- 071 runtime 先暴露缺 MarkupSafe，e14 再暴露缺 PyYAML，最终 43d 才是 SmolAgent PASS 制品。两次 e14 解包触发 ext4 `No free blocks`，均未切换 current；失败清理和旧 release 审计后恢复。
+- P4 在多个约 131 MiB release 创建/删除前后始终报告 `statvfs 1048576 264285 264285 4096`。源码 `Ext4FileSystem::super_block()` 读取挂载时 `self.superblock`，与 allocator 的 `current_superblock()` 不同，因此该 free-space 数据标为 stale，不作容量结论；本轮按约束未修改 ext4。
+- PyYAML 使用 pure Python、没有 libyaml accelerator；Pillow 当前只启用 jpeg/zlib。没有重跑真实 LLM API、PMU 或 30 分钟稳定性，不能从默认命令/AgentImage PASS 外推公网端到端性能。
+- `/tools` 是只读备份而非内核级 noexec；默认 Python、console、chroot、部署和本轮测试链不使用 P3，但不宣称内核禁止用户显式执行任意 `/tools/...` 文件。
+
 ## 2026-07-17
+
+### board/python: 将 2K1000LA 默认 Python 收敛到 P4 strict-aligned 唯一运行时
+
+**涉及文件：**
+- `user/tools/cpython/{python3-wrapper-persist.sh,python-entry-wrapper.sh,verify_runtime_integrity.py}`、`os/build_initramfs.sh`、`user/src/bin/initproc.rs`、`os/initramfs/apk/usr/libexec/mango/persist-profile` — LA64 initramfs 强制嵌入 P4-only wrapper；`python/python3/pip/pip3/smolagent/smolagents` 与 P4 user bin 的 console entry 统一经过 strict wrapper；wrapper 清除 Python/loader 注入环境，pip 默认写 P4；旧 shell shim 优先选择 P4 `.real` Python 源文件并忽略 `/tools` shebang；chroot 不 bind `/tools` Python，身份不成立时 fail-closed
+- `scripts/build_cpython_runtime_la64_strict.sh`、`scripts/install_cpython_runtime_la64_strict.py`、`user/tools/cpython/{run_cpython,cpython_testcode,cpython_benchmark,run_strict_functional,run_strict_benchmark,L3_check_files,L4_startup,L7_filesystem,L8_subprocess,L9_socket}.{sh,py}` — 将 Python ELF `PT_INTERP` 固定为 P4 `current` loader；manifest/安装器验证 interpreter 和 94 个 native ELF；suite 自定位 P4 release，runtime、work、tmp、pycache 与结果不再选择 P3/P2/tmpfs；benchmark 默认 runtime 改为 P4 current；strip/patchelf 先检查现状再执行，避免重复打包改变 ELF
+- `scripts/deploy_cpython_runtime.py`、`scripts/deploy_cpython_bench.py` — 主机验证 archive 安全、target/flags/PGO/LTO、PT_INTERP 和逐 ELF hash；板端 BusyBox 下载/验 SHA/解包后，由新 strict Python 对 94 个现场 ELF 重算 hash、执行 smoke，再按 artifact hash 发布 release 并原子更新 `current`，bootstrap 不执行 P3 Python
+- `scripts/backup_2k1000_p3.py`、`scripts/board/backup_2k1000_p3.sh` — P3 备份链的板端下载/hash 与 metadata 采集移除 tools Python 依赖；P3 仍只读，备份目标只允许 P4 `/persist`
+- `scripts/board/verify_persist_python.sh`、根 `Makefile` — 默认门禁覆盖 P4 ext4/current、六个全局入口、normal site、pip、OpenSSL、self-exec、未登记 user-site native `.so`、环境清理和 SmolAgent 分层状态；新增一键 P4 runtime deploy
+- `docs/08_testing/{mangocore-python-guide,cpython-isolated}.md`、`docs/09_debug/la64_on_board/260717/{06,08,README}.md`、`raw-data/20260717T-p4-strict-python-default/`、`.agents/skills/mango-workflow/references/harness-patterns.md` — 记录完整运行时闭包、失败演进、最终实板证据、Pillow 构建边界及 44 个原始/报告文本文件
+
+**验证：**
+- 实板验收 artifact `cpython-la64-strict-3.14.5-a420d79ddb07.tar.xz` 为 81,628,064 B，SHA-256 `a420d79ddb07c561066dfec1b4af4c46ce4413e5d79807b4610adef9aa8261a9`，manifest SHA-256 `196c4fbe8705ba523eca556c309aa792ba82b8d3ad38f9c2eaeaa96a11d4955f`；PGO/LTO、strict flags、P4 PT_INTERP 和 94 ELF host verify 通过 ✅
+- 实板 P4 部署下载 77.8 MiB，SHA、identity、`strict-runtime-integrity-ok elfs=94`、`strict-runtime-board-smoke-ok` 全通过；workload 697.011 s（extract 约 576.687 s），原子发布 `/persist/python-runtime/releases/a420d79ddb07` ✅
+- 最终 uImage 16,769,280 B，SHA-256 `a5e60c0d52b46c0cd36a472e08f2050f1e4f26ac612ceee0748f53851bc95da1`；实板 TFTP 字节数、CRC32 `0ccd9d5d`、`iminfo`、payload checksum、P4 launcher、chroot `stage=prepared/RESULT=PASS` 通过，启动无 `.tmp`/EIO ✅
+- 最终 `/rescue/verify-persist-python` 退出 0：解释器和 self-exec 均为 b7，normal site、pip 26.1.1、P4 state、OpenSSL 和环境隔离通过；`/tools` 为 ext4 ro，Python tree 无 `/tools`，人工 `PYTHONPATH=/tools/forbidden` 被清除；宿主与 chroot 使用同一 b7 runtime ✅
+- P4 ext4 上 L3-L9 workload 45.283 s，项目 judge 重算 `{"all":72,"pass":72}`；文件、signal、线程、subprocess、DNS、HTTP、HTTPS 全通过 ✅
+- direct `smolagent --help` 已进入 `/persist/python/user/bin/smolagent.real`，旧 `/tools` shebang 未执行；当前按预期只在 `ModuleNotFoundError: PIL` 失败。`--require-smolagents` 同样退出 1，未调用真实 LLM API ⚠️
+- 旧 chroot `.tmp + rename` 暴露 ext4 stale inode EIO；板上 direct overwrite/chmod/cmp 探针 0.132 s 通过，最终 initproc 改为幂等 direct copy，冷启动无该错误 ✅
+- Shell 语法、Python `py_compile`、JSON、archive 成员安全、`git diff --check` 通过；使用项目 Docker image 严格串行完成最终 rv64/la64 release build，均退出 0 ✅
+- 实板后强制刷新打包两次，均得到 `b7f361382399...244c`（81,630,652 B，manifest `3617070c...1dd0`）；a420/b7 的 8,810 个 archive 成员中仅 manifest 不同，94 ELF 和所有运行文件逐字节相同；b7 installer verify 通过。随后仍按最终实板标准完整发布 b7，板端 SHA/identity/94 ELF/smoke 通过，workload 705.708 s，`current=b7f361382399`；默认入口、chroot 与项目 judge `72/72` 再次通过 ✅
+- rv64 QEMU basic 通过、退出码 0；la64 QEMU 启动到 initproc 后 tools BusyBox 在用户地址 `0x11368` 重复 `InstructionNonDefined`（bad instruction `0x29c9a061`），因此明确记为筛查失败而不是 PASS ⚠️
+
+**备注：**
+- 2K1000LA 的 P3 `/tools` 只保留历史数据备份。默认 Python 进程树不读取它；P4 身份、完整性或依赖失败时不会搜索 P3。该结论不扩大为“内核禁止用户显式执行任意 `/tools/...` 文件”。
+- 默认 Python/P4 路由已经完成；SmolAgent 应用门禁未完成。Pillow 含 `_imaging.so`，必须连同启用的 jpeg/freetype/lcms/webp 等 native 依赖 strict-aligned 构建并加入 manifest，不能装普通 wheel 或复用 P3 PIL。
+- 原始证据位于 `target/perf-runs/20260717T-p4-strict-python-default/`，并复制到 `docs/09_debug/la64_on_board/260717/raw-data/`：34 条 records、38 份 raw、4 份 report；无效/中间失败样本保留但不用于 PASS。
 
 ### perf/python: 固化 LA64 strict runtime 并完成匿名页释放的真实 Python 实板量化
 

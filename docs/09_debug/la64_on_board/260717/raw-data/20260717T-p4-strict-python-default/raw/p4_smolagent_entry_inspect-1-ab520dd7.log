@@ -1,0 +1,14 @@
+2026-07-17T12:58:30.002422Z __PERF_BEGIN_p4_smolagent_entry_inspect-1-ab520dd7__
+2026-07-17T12:58:30.968164Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_smolagent_entry_inspect-1-ab520dd7_TRACE_OFF__
+2026-07-17T12:58:33.282915Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_smolagent_entry_inspect-1-ab520dd7__
+2026-07-17T12:58:33.329703Z -rwxr-xr-x    1 root     root            76 Jan  1  1970 [1;32m/persist/python/user/bin/smolagent[m
+2026-07-17T12:58:33.339162Z -rwxr-xr-x    1 root     root           181 Jan  1  1970 [1;32m/persist/python/user/bin/smolagent.real[m
+2026-07-17T12:58:33.379508Z #!/bin/sh
+2026-07-17T12:58:33.383510Z exec python3 /var/cache/mango-python/user/bin/smolagent.real "$@"
+2026-07-17T12:58:33.424735Z #!/tools/tests/cpython/usr/bin/python3
+2026-07-17T12:58:33.424838Z import sys
+2026-07-17T12:58:33.427470Z from smolagents.cli import main
+2026-07-17T12:58:33.429380Z if __name__ == '__main__':
+2026-07-17T12:58:33.436770Z __PERF_WORK_END_p4_smolagent_entry_inspect-1-ab520dd7__
+2026-07-17T12:58:33.441354Z __PERF_ACK_p4_smolagent_entry_inspect-1-ab520dd7_WORK__
+2026-07-17T12:58:33.941521Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_smolagent_entry_inspect-1-ab520dd7__ rc=0

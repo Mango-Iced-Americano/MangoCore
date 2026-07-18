@@ -1,0 +1,21 @@
+2026-07-17T14:53:09.706491Z __PERF_BEGIN_pyctl_run-1-865a9251__
+2026-07-17T14:53:10.562188Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pyctl_run-1-865a9251_TRACE_OFF__
+2026-07-17T14:53:11.737303Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pyctl_run-1-865a9251__
+2026-07-17T14:53:11.772566Z [python-deploy] stage=p4-preflight
+2026-07-17T14:53:11.926635Z [python-deploy] stage=download
+2026-07-17T14:53:12.072667Z Connecting to 192.168.9.10:8009 (192.168.9.10:8009)
+2026-07-17T14:53:12.093353Z saving to '/persist/python-runtime/releases/.cpython-la64-strict-3.14.5-071e4e258421.tar.xz.part'
+2026-07-17T14:53:32.971930Z .cpython-la64-strict   2% |                                | 1844k  0:00:42 ETA.cpython-la64-strict   8% |**                              | 6796k  0:00:21 ETA.cpython-la64-strict  13% |****                            | 10.6M  0:00:19 ETA.cpython-la64-strict  18% |*****                           | 14.3M  0:00:17 ETA.cpython-la64-strict  23% |*******                         | 18.1M  0:00:16 ETA.cpython-la64-strict  27% |********                        | 21.8M  0:00:15 ETA.cpython-la64-strict  32% |**********                      | 25.6M  0:00:14 ETA.cpython-la64-strict  37% |***********                     | 29.2M  0:00:13 ETA.cpython-la64-strict  42% |*************                   | 32.9M  0:00:12 ETA.cpython-la64-strict  46% |**************                  | 36.7M  0:00:11 ETA.cpython-la64-strict  51% |****************                | 40.3M  0:00:10 ETA.cpython-la64-strict  56% |*****************               | 44.0M  0:00:09 ETA.cpython-la64-strict  60% |*******************             | 47.7M  0:00:08 ETA.cpython-la64-strict  65% |********************            | 51.3M  0:00:07 ETA.cpython-la64-strict  70% |**********************          | 55.1M  0:00:06 ETA.cpython-la64-strict  75% |************************        | 58.9M  0:00:05 ETA.cpython-la64-strict  79% |*************************       | 62.7M  0:00:04 ETA.cpython-la64-strict  84% |***************************     | 66.4M  0:00:03 ETA.cpython-la64-strict  89% |****************************    | 70.1M  0:00:02 ETA.cpython-la64-strict  94% |******************************  | 73.9M  0:00:01 ETA.cpython-la64-strict  98% |******************************* | 76.9M  0:00:00 ETA.cpython-la64-strict 100% |********************************| 78.4M  0:00:00 ETA
+2026-07-17T14:53:32.978599Z '/persist/python-runtime/releases/.cpython-la64-strict-3.14.5-071e4e258421.tar.xz.part' saved
+2026-07-17T14:54:58.002724Z /persist/python-runtime/releases/.cpython-la64-strict-3.14.5-071e4e258421.tar.xz.part: OK
+2026-07-17T14:54:58.007094Z [python-deploy] stage=extract
+2026-07-17T15:04:52.773895Z [python-deploy] stage=identity
+2026-07-17T15:04:52.950106Z [python-deploy] stage=smoke
+2026-07-17T15:05:03.397755Z strict-runtime-integrity-ok elfs=99
+2026-07-17T15:05:07.805916Z strict-runtime-board-smoke-ok
+2026-07-17T15:05:28.112234Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/persist/python-runtime/releases/071e4e258421/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/persist/python-runtime/releases/071e4e258421/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-17T15:05:28.684201Z [python-deploy] stage=publish-current
+2026-07-17T15:05:30.371744Z [python-deploy] PASS current=/persist/python-runtime/releases/071e4e258421
+2026-07-17T15:05:30.383993Z __PERF_WORK_END_pyctl_run-1-865a9251__
+2026-07-17T15:05:30.385417Z __PERF_ACK_pyctl_run-1-865a9251_WORK__
+2026-07-17T15:05:30.786885Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pyctl_run-1-865a9251__ rc=0

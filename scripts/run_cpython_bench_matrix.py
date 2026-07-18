@@ -144,6 +144,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--runtime-root",
+        default="/persist/python-runtime/current",
         help="side-loaded CPython runtime root on P4 ext4, exported as CPYTHON_ROOT",
     )
     parser.add_argument(

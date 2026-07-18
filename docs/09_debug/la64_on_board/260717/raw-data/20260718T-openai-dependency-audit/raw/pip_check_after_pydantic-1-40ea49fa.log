@@ -1,0 +1,30 @@
+2026-07-18T01:16:05.519365Z __PERF_BEGIN_pip_check_after_pydantic-1-40ea49fa__
+2026-07-18T01:16:06.474613Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_TRACE_OFF__
+2026-07-18T01:16:07.144670Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:16:07.150415Z __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_STATS_OFF__
+2026-07-18T01:16:07.875941Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/profile: No such file or directory
+2026-07-18T01:16:07.880943Z __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_PROFILE__
+2026-07-18T01:16:08.507207Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/reset: No such file or directory
+2026-07-18T01:16:08.511762Z __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_RESET__
+2026-07-18T01:16:09.166614Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_NET__
+2026-07-18T01:16:09.204343Z cat: can't open '/sys/kernel/stats/net': No such file or directory
+2026-07-18T01:16:09.208942Z __PERF_STATS_BEFORE_NET_END__
+2026-07-18T01:16:09.957682Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_RESOURCE__
+2026-07-18T01:16:09.995810Z cat: can't open '/sys/kernel/stats/resource': No such file or directory
+2026-07-18T01:16:10.000677Z __PERF_STATS_BEFORE_RESOURCE_END__
+2026-07-18T01:16:10.662683Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:16:10.668023Z __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_STATS_ON__
+2026-07-18T01:16:12.157006Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pip_check_after_pydantic-1-40ea49fa__
+2026-07-18T01:16:27.248257Z MarkupSafe 3.0.3 is not supported on this platform
+2026-07-18T01:16:27.289065Z pillow 12.3.0 is not supported on this platform
+2026-07-18T01:16:28.592008Z __PERF_WORK_END_pip_check_after_pydantic-1-40ea49fa__
+2026-07-18T01:16:28.597195Z __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_WORK__
+2026-07-18T01:16:29.270784Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:16:29.275615Z __PERF_ACK_pip_check_after_pydantic-1-40ea49fa_STATS_DONE__
+2026-07-18T01:16:29.921773Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_NET__
+2026-07-18T01:16:29.958850Z cat: can't open '/sys/kernel/stats/net': No such file or directory
+2026-07-18T01:16:29.963440Z __PERF_STATS_AFTER_NET_END__
+2026-07-18T01:16:30.704388Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_RESOURCE__
+2026-07-18T01:16:30.743475Z cat: can't open '/sys/kernel/stats/resource': No such file or directory
+2026-07-18T01:16:30.748157Z __PERF_STATS_AFTER_RESOURCE_END__
+2026-07-18T01:16:31.240027Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pip_check_after_pydantic-1-40ea49fa__ rc=1

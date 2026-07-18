@@ -3,7 +3,7 @@ title: "2K1000LA Python 性能专项（2026-07-17 批次）"
 category: debug
 status: current
 author: MangoCore Team
-last_update: 2026-07-17
+last_update: 2026-07-18
 tags: [loongarch64, 2k1000la, python, cpython, performance, ext4, strict-align]
 code_paths:
   - "user/tools/cpython/bench/"
@@ -22,6 +22,8 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/05-strict-align-first-experiment.md"
   - "docs/09_debug/la64_on_board/260717/06-raw-data-index.md"
   - "docs/09_debug/la64_on_board/260717/07-strict-runtime-and-anon-unmap-quantification.md"
+  - "docs/09_debug/la64_on_board/260717/08-persist-strict-python-default.md"
+  - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
 ---
 
 # 2K1000LA Python 性能专项（2026-07-17 批次）
@@ -43,6 +45,11 @@ related_docs:
 - strict 正式 body 的所有非对齐计数为 0；`bm_float`、`bm_string` 有旧侧匹配证据；
 - 五个实验目录的可审计文本数据复制到本目录 `raw-data/`。
 - strict runtime 标准 Make/安装入口固化，匿名页释放 15 项计数器和实板影响量化完成。
+- P4-only 默认运行时闭包、console entry、chroot 和无旧 Python 自举部署已完成实板门禁：
+  默认 Python/pip、自执行、`/tools` 隔离、chroot 和 L3-L9 `72/72` 均通过；
+- Pillow 12.3.0、libjpeg-turbo 3.1.4.1、MarkupSafe 3.0.3 已完成 strict-aligned
+  原生构建，PyYAML 6.0.3 固定为无 ELF 的纯 Python 包；最终 100 ELF runtime 已发布到
+  P4 release `43d7bb2ecf21`，默认 SmolAgent、Pillow ext4 编解码和 AgentImage 实板门禁通过。
 
 当前没有修改内核非对齐模拟器，没有修复匿名页释放 O(N²)，也没有优化 ext4。ext4
 等待队友 develop 分支的新实现后复测。
@@ -57,6 +64,7 @@ related_docs:
 | 问题 3：ext4 小文件 | 5,000 个文件生命周期 46.449 s；高线性固定税，非 O(N²) | 已确认，当前分支暂停 |
 | 第一次实验 | strict-aligned runtime 的 18 个 benchmark body 非对齐计数全部为 0 | 实板已确认 |
 | 功能门禁 | L3-L9 `72/72`，18/18 benchmark 通过 | 实板已确认 |
+| SmolAgent/Pillow 闭包 | 100 ELF manifest；默认 SmolAgent、PNG/JPEG P4 ext4 I/O、AgentImage 通过 | 实板已确认 |
 | 时间收益口径 | 1,928.806 → 303.470 s 只作辅助趋势，不是 production-to-production 隔离 A/B | 不作为正式收益 |
 
 ## 3. 文档导航
@@ -70,6 +78,8 @@ related_docs:
 | [05-strict-align-first-experiment.md](05-strict-align-first-experiment.md) | 构建闭包、PGO/LTO、部署失败、72/72、18 项结果、trap 对照和时间口径 | 第一次优化留档 |
 | [06-raw-data-index.md](06-raw-data-index.md) | 原始目录、文件 schema、二进制哈希、重分析命令和数据质量说明 | 审计与复现 |
 | [07-strict-runtime-and-anon-unmap-quantification.md](07-strict-runtime-and-anon-unmap-quantification.md) | 标准 strict runtime 入口、安全安装器、15 个 VMA 计数器、实板精确扫描与六项 Python 占比 | 第二阶段量化留档 |
+| [08-persist-strict-python-default.md](08-persist-strict-python-default.md) | P4 唯一运行时、fail-closed wrapper、pip/SmolAgent 路由、chroot、部署供应链和实板门禁 | 默认运行时切换留档 |
+| [09-aligned-pillow-and-smolagent-closure.md](09-aligned-pillow-and-smolagent-closure.md) | Pillow/libjpeg/MarkupSafe/PyYAML 闭包、100 ELF manifest、P4 发布异常和最终 SmolAgent 实板验收 | 应用闭包最终留档 |
 
 ## 4. 证据分层
 
@@ -110,4 +120,5 @@ strict userspace + 归档 perf_diag 内核
   下一步可以直接实施并验收批量删除/索引结构方案。
 - ext4 仅完成在线 rw、sync、重启后哈希和 workload 正确性检查；没有 offline e2fsck、
   断电恢复或 fault injection，不宣称 journal/断电安全。
-- 30 分钟混合稳定性、PMU cache miss、成功 SmolAgent 本地端点和真实 API 仍未完成。
+- 30 分钟混合稳定性、PMU cache miss、SmolAgent 本地固定响应端点和真实 API 仍未完成；
+  默认命令、import、AgentImage 和 aligned Pillow 已完成，但不能替代真实 LLM 往返测试。

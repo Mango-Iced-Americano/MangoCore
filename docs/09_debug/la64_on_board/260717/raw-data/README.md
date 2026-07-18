@@ -14,6 +14,9 @@
 | `20260716T-perf-diag-structural-ab-run/` | 相邻实板 A/B 的 manifest、records、串口日志和 `structural_ab.csv` |
 | `20260717T042020Z-cpython-strict-align/` | strict 部署、功能、18 项 benchmark、counter delta、失败记录和对照报告 |
 | `20260717T-anon-unmap-quant/` | strict 标准入口复核、匿名 VMA 精确扫描、五档合成和六项 Python 实板占比 |
+| `20260717T-p4-strict-python-default/` | P4 唯一默认入口、PT_INTERP、chroot、P3 隔离、b7 发布与 PIL fail-exposed 历史证据 |
+| `20260717T-aligned-pillow/` | Pillow/libjpeg/MarkupSafe/PyYAML 闭包、100 ELF 发布、默认 SmolAgent、AgentImage 和最终 72/72 |
+| `20260718T-openai-dependency-audit/` | OpenAI/Pydantic 精确版本审计、纯 Python wheel 实板闭包、默认 `OpenAIModel` 无网络构造及 pip tag 剩余问题 |
 | `strict-runtime-build/` | 完整 runtime 构建日志、runtime manifest、双架构内核编译日志和包 SHA 文件 |
 
 ## 数据保真规则

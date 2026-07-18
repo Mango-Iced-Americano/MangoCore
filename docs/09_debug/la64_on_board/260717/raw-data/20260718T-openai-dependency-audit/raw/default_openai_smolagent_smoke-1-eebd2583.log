@@ -1,0 +1,16 @@
+2026-07-18T01:14:19.437213Z __PERF_BEGIN_default_openai_smolagent_smoke-1-eebd2583__
+2026-07-18T01:14:20.421529Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_default_openai_smolagent_smoke-1-eebd2583_TRACE_OFF__
+2026-07-18T01:14:21.128718Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:14:21.134586Z __PERF_ACK_default_openai_smolagent_smoke-1-eebd2583_STATS_OFF__
+2026-07-18T01:14:21.910660Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/profile: No such file or directory
+2026-07-18T01:14:21.916227Z __PERF_ACK_default_openai_smolagent_smoke-1-eebd2583_PROFILE__
+2026-07-18T01:14:22.575397Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/reset: No such file or directory
+2026-07-18T01:14:22.581271Z __PERF_ACK_default_openai_smolagent_smoke-1-eebd2583_RESET__
+2026-07-18T01:14:23.244693Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_NET__
+2026-07-18T01:14:23.281694Z cat: can't open '/sys/kernel/stats/net': No such file or directory
+2026-07-18T01:14:23.286479Z __PERF_STATS_BEFORE_NET_END__
+2026-07-18T01:14:24.038523Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_RESOURCE__
+2026-07-18T01:14:24.076367Z cat: can't open '/sys/kernel/stats/resource': No such file or directory
+2026-07-18T01:14:24.081263Z __PERF_STATS_BEFORE_RESOURCE_END__
+2026-07-18T01:14:24.779345Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:14:24.785177Z __PERF_ACK_default_openai_smolagent_smoke-1-eebd2583_STATS_ON__

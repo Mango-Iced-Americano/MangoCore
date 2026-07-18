@@ -8,8 +8,7 @@ case "$run_tag" in
     ""|*[!A-Za-z0-9._-]*) echo "invalid run tag: $run_tag" >&2; exit 2 ;;
 esac
 
-runtime_root=$(/bin/busybox dirname "$0")
-runtime_root=$(cd "$runtime_root" && pwd)
+runtime_root=$(/bin/busybox readlink -f "$(/bin/busybox dirname "$0")")
 work_root=/persist/pyperf/f-$run_tag
 
 /bin/busybox grep -Eq \

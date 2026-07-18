@@ -34,6 +34,7 @@ esac
 command -v blockdev >/dev/null 2>&1 || fail "blockdev is unavailable"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is unavailable"
 command -v dd >/dev/null 2>&1 || fail "dd is unavailable"
+command -v blkid >/dev/null 2>&1 || fail "blkid is unavailable"
 
 grep -Eq '^/tools[[:space:]]+/tools[[:space:]]+ext4[[:space:]]+ro([,[:space:]])' /proc/mounts \
     || fail "/tools is not the read-only P3 mount"
@@ -53,13 +54,11 @@ p4_bytes=$(blockdev --getsize64 "$P4_DEVICE")
 [ "$p4_bytes" = "$P4_BYTES" ] \
     || fail "unexpected P4 size: $p4_bytes (expected $P4_BYTES)"
 
-p4_info=$(/tools/tests/cpython/python3-wrapper.sh -c \
-    "import struct as u;f=open('$P4_DEVICE','rb');f.seek(1024);s=f.read(136);v=lambda x:u.unpack_from('<I',s,x)[0];print(s[56:58].hex(),v(12)*(1024<<v(24))//1024,s[104:120].hex(),s[120:136].rstrip(bytes([0])).decode())")
-set -- $p4_info
-[ "${1:-}" = "53ef" ] || fail "P4 ext4 magic mismatch: ${1:-missing}"
-free_kib=${2:-}
-[ "${3:-}" = "$P4_UUID" ] || fail "P4 UUID mismatch: ${3:-missing}"
-[ "${4:-}" = "$P4_LABEL" ] || fail "P4 label mismatch: ${4:-missing}"
+p4_blkid=$(blkid "$P4_DEVICE")
+case "$p4_blkid" in *' TYPE="ext4"'*) ;; *) fail "P4 ext4 type is missing" ;; esac
+case "$p4_blkid" in *" UUID=\"$P4_UUID\""*) ;; *) fail "P4 UUID mismatch" ;; esac
+case "$p4_blkid" in *" LABEL=\"$P4_LABEL\""*) ;; *) fail "P4 label mismatch" ;; esac
+free_kib=$(df -Pk /persist | awk 'NR == 2 { print $4 }')
 case "$free_kib" in ""|*[!0-9]*) fail "cannot determine P4 free space" ;; esac
 [ "$free_kib" -ge "$MIN_FREE_KIB" ] \
     || fail "insufficient P4 space: ${free_kib} KiB free, need ${MIN_FREE_KIB} KiB"

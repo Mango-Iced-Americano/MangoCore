@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-CPYTHON_ROOT="${CPYTHON_ROOT:-/tools/tests/cpython}"
+: "${CPYTHON_ROOT:?CPYTHON_ROOT must identify the selected isolated runtime}"
 
 # Detect the musl loader for the current architecture
 if [ -x "$CPYTHON_ROOT/lib/ld-musl-riscv64.so.1" ]; then

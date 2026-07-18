@@ -1,0 +1,717 @@
+2026-07-17T14:36:30.621811Z docker run --rm --user "$(id -u):$(id -g)" \
+2026-07-17T14:36:30.621899Z 		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+2026-07-17T14:36:30.621914Z 		./scripts/build_cpython_runtime_la64_strict.sh
+2026-07-17T14:36:30.709460Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-17T14:36:30.987593Z [strict-cpython] fetching and verifying pinned sources
+2026-07-17T14:36:33.416001Z -- The C compiler identification is GNU 15.2.0
+2026-07-17T14:36:33.586148Z -- Detecting C compiler ABI info
+2026-07-17T14:36:34.474210Z -- Detecting C compiler ABI info - done
+2026-07-17T14:36:34.484910Z -- Check for working C compiler: /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc - skipped
+2026-07-17T14:36:34.485292Z -- Detecting C compile features
+2026-07-17T14:36:34.486024Z -- Detecting C compile features - done
+2026-07-17T14:36:34.498107Z -- CMAKE_BUILD_TYPE = Release
+2026-07-17T14:36:34.498199Z -- VERSION = 3.1.4.1, BUILD = 19700101
+2026-07-17T14:36:34.499993Z -- 64-bit build (loongarch64)
+2026-07-17T14:36:34.500033Z -- CMAKE_INSTALL_PREFIX = /usr
+2026-07-17T14:36:34.502508Z -- CMAKE_INSTALL_BINDIR = bin (/usr/bin)
+2026-07-17T14:36:34.502585Z -- CMAKE_INSTALL_DATAROOTDIR = share (/usr/share)
+2026-07-17T14:36:34.502615Z -- CMAKE_INSTALL_DOCDIR = share/doc/libjpeg-turbo (/usr/share/doc/libjpeg-turbo)
+2026-07-17T14:36:34.502636Z -- CMAKE_INSTALL_INCLUDEDIR = include (/usr/include)
+2026-07-17T14:36:34.502655Z -- CMAKE_INSTALL_LIBDIR = lib (/usr/lib)
+2026-07-17T14:36:34.502675Z -- CMAKE_INSTALL_MANDIR = share/man (/usr/share/man)
+2026-07-17T14:36:34.502798Z -- Shared libraries enabled (ENABLE_SHARED = 1)
+2026-07-17T14:36:34.502825Z -- Static libraries disabled (ENABLE_STATIC = 0)
+2026-07-17T14:36:34.502837Z -- Arithmetic decoding support enabled (WITH_ARITH_DEC = 1)
+2026-07-17T14:36:34.502847Z -- Arithmetic encoding support enabled (WITH_ARITH_ENC = 1)
+2026-07-17T14:36:34.502856Z -- TurboJPEG API library disabled (WITH_TURBOJPEG = 0)
+2026-07-17T14:36:34.502864Z -- TurboJPEG Java API disabled (WITH_JAVA = 0)
+2026-07-17T14:36:34.502921Z -- Command-line tools disabled (WITH_TOOLS = 0)
+2026-07-17T14:36:34.502956Z -- Regression tests disabled (WITH_TESTS = 0)
+2026-07-17T14:36:34.503400Z -- Emulating libjpeg API/ABI v6.2 (WITH_JPEG7 = 0, WITH_JPEG8 = 0)
+2026-07-17T14:36:34.508832Z -- libjpeg API shared library version = 62.4.0
+2026-07-17T14:36:34.508862Z -- Compiler flags = -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -O3 -DNDEBUG
+2026-07-17T14:36:34.508873Z -- Linker flags =  
+2026-07-17T14:36:34.508896Z -- Looking for sys/types.h
+2026-07-17T14:36:35.266654Z -- Looking for sys/types.h - found
+2026-07-17T14:36:35.266714Z -- Looking for stdint.h
+2026-07-17T14:36:36.044384Z -- Looking for stdint.h - found
+2026-07-17T14:36:36.044444Z -- Looking for stddef.h
+2026-07-17T14:36:36.927088Z -- Looking for stddef.h - found
+2026-07-17T14:36:36.927177Z -- Check size of size_t
+2026-07-17T14:36:37.667796Z -- Check size of size_t - done
+2026-07-17T14:36:37.668112Z -- Check size of unsigned long
+2026-07-17T14:36:38.419774Z -- Check size of unsigned long - done
+2026-07-17T14:36:38.420284Z -- Performing Test HAVE_BUILTIN_CTZL
+2026-07-17T14:36:39.118780Z -- Performing Test HAVE_BUILTIN_CTZL - Success
+2026-07-17T14:36:39.118832Z -- Performing Test HIDDEN_WORKS
+2026-07-17T14:36:39.817080Z -- Performing Test HIDDEN_WORKS - Success
+2026-07-17T14:36:39.817198Z -- HIDDEN = __attribute__((visibility("hidden")))
+2026-07-17T14:36:39.817900Z -- Performing Test INLINE_WORKS
+2026-07-17T14:36:40.510686Z -- Performing Test INLINE_WORKS - Success
+2026-07-17T14:36:40.510731Z -- INLINE = __inline__ __attribute__((always_inline)) (FORCE_INLINE = 1)
+2026-07-17T14:36:40.510858Z -- Performing Test HAVE_THREAD_LOCAL
+2026-07-17T14:36:41.181480Z -- Performing Test HAVE_THREAD_LOCAL - Success
+2026-07-17T14:36:41.181541Z -- THREAD_LOCAL = __thread
+2026-07-17T14:36:41.182481Z -- Performing Test HAVE_VERSION_SCRIPT
+2026-07-17T14:36:41.834100Z -- Performing Test HAVE_VERSION_SCRIPT - Success
+2026-07-17T14:36:41.834273Z -- Linker supports GNU-style version scripts
+2026-07-17T14:36:41.839565Z -- CMAKE_EXECUTABLE_SUFFIX = 
+2026-07-17T14:36:41.841264Z -- SIMD extensions: None (WITH_SIMD = 0)
+2026-07-17T14:36:41.856571Z -- RPM architecture = loongarch64, DEB architecture = loongarch64
+2026-07-17T14:36:41.879216Z -- Configuring done (9.1s)
+2026-07-17T14:36:41.965515Z -- Generating done (0.1s)
+2026-07-17T14:36:41.976910Z -- Build files have been written to: /app/target/cpython-strict/build/libjpeg-turbo-3.1.4.1-build
+2026-07-17T14:36:42.427622Z [  0%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcapimin.c.o
+2026-07-17T14:36:42.435324Z [  1%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcapistd-16.c.o
+2026-07-17T14:36:42.442118Z [  3%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcapistd-8.c.o
+2026-07-17T14:36:42.445285Z [  3%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcapistd-12.c.o
+2026-07-17T14:36:43.123262Z [  5%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jccoefct-8.c.o
+2026-07-17T14:36:43.126326Z [  5%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jccoefct-12.c.o
+2026-07-17T14:36:43.140323Z [  6%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jccolor-8.c.o
+2026-07-17T14:36:43.253541Z [  7%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jccolor-12.c.o
+2026-07-17T14:36:44.037821Z [  8%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jccolor-16.c.o
+2026-07-17T14:36:44.048583Z [  9%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcdctmgr-8.c.o
+2026-07-17T14:36:44.326447Z [ 10%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcdctmgr-12.c.o
+2026-07-17T14:36:44.333854Z [ 11%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcdiffct-8.c.o
+2026-07-17T14:36:44.970794Z [ 12%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcdiffct-12.c.o
+2026-07-17T14:36:44.982060Z [ 13%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcdiffct-16.c.o
+2026-07-17T14:36:45.158704Z [ 14%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jchuff.c.o
+2026-07-17T14:36:45.279384Z [ 15%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcicc.c.o
+2026-07-17T14:36:45.855572Z [ 16%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcinit.c.o
+2026-07-17T14:36:45.864626Z [ 17%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jclhuff.c.o
+2026-07-17T14:36:45.980240Z [ 18%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jclossls-8.c.o
+2026-07-17T14:36:46.505646Z [ 19%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jclossls-12.c.o
+2026-07-17T14:36:46.873992Z [ 20%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jclossls-16.c.o
+2026-07-17T14:36:46.897552Z [ 21%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcmainct-8.c.o
+2026-07-17T14:36:47.402292Z [ 22%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcmainct-12.c.o
+2026-07-17T14:36:47.675733Z [ 23%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcmainct-16.c.o
+2026-07-17T14:36:47.824960Z [ 24%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcmarker.c.o
+2026-07-17T14:36:48.153023Z [ 25%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcmaster.c.o
+2026-07-17T14:36:48.431612Z [ 26%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcomapi.c.o
+2026-07-17T14:36:49.010261Z [ 27%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcparam.c.o
+2026-07-17T14:36:49.036592Z [ 28%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcphuff.c.o
+2026-07-17T14:36:49.278193Z [ 29%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcprepct-8.c.o
+2026-07-17T14:36:50.087215Z [ 30%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcprepct-12.c.o
+2026-07-17T14:36:50.162774Z [ 31%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcprepct-16.c.o
+2026-07-17T14:36:50.257110Z [ 32%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcsample-8.c.o
+2026-07-17T14:36:50.860480Z [ 33%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcsample-12.c.o
+2026-07-17T14:36:50.998232Z [ 34%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jcsample-16.c.o
+2026-07-17T14:36:51.033385Z [ 35%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jctrans.c.o
+2026-07-17T14:36:51.265336Z [ 36%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdapimin.c.o
+2026-07-17T14:36:51.915610Z [ 37%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdapistd-8.c.o
+2026-07-17T14:36:51.975363Z [ 38%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdapistd-12.c.o
+2026-07-17T14:36:52.079454Z [ 39%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdapistd-16.c.o
+2026-07-17T14:36:52.103872Z [ 40%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdatadst.c.o
+2026-07-17T14:36:52.720295Z [ 41%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdatasrc.c.o
+2026-07-17T14:36:52.794271Z [ 42%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdcoefct-8.c.o
+2026-07-17T14:36:52.920797Z [ 43%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdcoefct-12.c.o
+2026-07-17T14:36:52.973091Z [ 44%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdcolor-8.c.o
+2026-07-17T14:36:53.472034Z [ 45%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdcolor-12.c.o
+2026-07-17T14:36:54.059687Z [ 46%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdcolor-16.c.o
+2026-07-17T14:36:54.216150Z [ 47%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jddctmgr-8.c.o
+2026-07-17T14:36:54.327400Z [ 48%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jddctmgr-12.c.o
+2026-07-17T14:36:54.820513Z [ 49%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jddiffct-8.c.o
+2026-07-17T14:36:54.998577Z [ 50%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jddiffct-12.c.o
+2026-07-17T14:36:55.119035Z [ 50%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jddiffct-16.c.o
+2026-07-17T14:36:55.233163Z [ 51%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdhuff.c.o
+2026-07-17T14:36:55.711941Z [ 52%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdicc.c.o
+2026-07-17T14:36:55.894464Z [ 53%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdinput.c.o
+2026-07-17T14:36:56.003465Z [ 54%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdlhuff.c.o
+2026-07-17T14:36:56.547141Z [ 55%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdlossls-8.c.o
+2026-07-17T14:36:56.565564Z [ 56%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdlossls-12.c.o
+2026-07-17T14:36:56.786151Z [ 57%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdlossls-16.c.o
+2026-07-17T14:36:56.852858Z [ 58%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdmainct-8.c.o
+2026-07-17T14:36:57.439684Z [ 60%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdmainct-16.c.o
+2026-07-17T14:36:57.440806Z [ 60%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdmainct-12.c.o
+2026-07-17T14:36:57.635276Z [ 61%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdmarker.c.o
+2026-07-17T14:36:57.744040Z [ 62%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdmaster.c.o
+2026-07-17T14:36:58.360689Z [ 63%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdmerge-8.c.o
+2026-07-17T14:36:58.366801Z [ 64%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdmerge-12.c.o
+2026-07-17T14:36:58.766805Z [ 65%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdphuff.c.o
+2026-07-17T14:36:58.930011Z [ 66%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdpostct-8.c.o
+2026-07-17T14:36:59.673923Z [ 68%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdpostct-16.c.o
+2026-07-17T14:36:59.674227Z [ 68%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdpostct-12.c.o
+2026-07-17T14:36:59.714006Z [ 69%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdsample-8.c.o
+2026-07-17T14:36:59.879806Z [ 70%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdsample-12.c.o
+2026-07-17T14:37:00.354593Z [ 71%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jdsample-16.c.o
+2026-07-17T14:37:00.415090Z [ 72%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdtrans.c.o
+2026-07-17T14:37:00.784572Z [ 73%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jerror.c.o
+2026-07-17T14:37:00.978206Z [ 74%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jfdctflt.c.o
+2026-07-17T14:37:01.251500Z [ 75%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jfdctfst-8.c.o
+2026-07-17T14:37:01.494970Z [ 76%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jfdctfst-12.c.o
+2026-07-17T14:37:01.544444Z [ 77%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jfdctint-8.c.o
+2026-07-17T14:37:01.616680Z [ 78%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jfdctint-12.c.o
+2026-07-17T14:37:01.930822Z [ 79%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctflt-8.c.o
+2026-07-17T14:37:02.182479Z [ 80%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctflt-12.c.o
+2026-07-17T14:37:02.243129Z [ 81%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctfst-8.c.o
+2026-07-17T14:37:02.250989Z [ 82%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctfst-12.c.o
+2026-07-17T14:37:02.647571Z [ 83%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctint-8.c.o
+2026-07-17T14:37:02.946494Z [ 84%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctint-12.c.o
+2026-07-17T14:37:03.015153Z [ 85%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctred-8.c.o
+2026-07-17T14:37:03.020154Z [ 86%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jidctred-12.c.o
+2026-07-17T14:37:03.815889Z [ 87%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jmemnobs.c.o
+2026-07-17T14:37:03.821957Z [ 88%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jmemmgr.c.o
+2026-07-17T14:37:03.989795Z [ 89%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jpeg_nbits.c.o
+2026-07-17T14:37:04.298150Z [ 90%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jquant1-8.c.o
+2026-07-17T14:37:04.358934Z [ 91%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jquant1-12.c.o
+2026-07-17T14:37:04.470643Z [ 92%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jquant2-8.c.o
+2026-07-17T14:37:04.980352Z [ 93%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jquant2-12.c.o
+2026-07-17T14:37:05.419395Z [ 94%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jutils-8.c.o
+2026-07-17T14:37:05.492004Z [ 95%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jutils-12.c.o
+2026-07-17T14:37:05.739904Z [ 96%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/wrapper/jutils-16.c.o
+2026-07-17T14:37:06.127825Z [ 97%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jaricom.c.o
+2026-07-17T14:37:06.150146Z [ 98%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jcarith.c.o
+2026-07-17T14:37:06.258901Z [ 99%] Building C object sharedlib/CMakeFiles/jpeg.dir/__/src/jdarith.c.o
+2026-07-17T14:37:07.194626Z [100%] Linking C shared library ../libjpeg.so
+2026-07-17T14:37:07.629340Z [100%] Built target jpeg
+2026-07-17T14:37:07.772746Z -- Install configuration: "Release"
+2026-07-17T14:37:07.777237Z -- Installing: /app/target/cpython-strict/sysroot/usr/lib/libjpeg.so.62.4.0
+2026-07-17T14:37:07.784880Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/lib/libjpeg.so.62
+2026-07-17T14:37:07.786031Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/lib/libjpeg.so
+2026-07-17T14:37:07.787052Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/README.ijg
+2026-07-17T14:37:07.787529Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/README.md
+2026-07-17T14:37:07.787907Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/example.c
+2026-07-17T14:37:07.788492Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/libjpeg.txt
+2026-07-17T14:37:07.789024Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/structure.txt
+2026-07-17T14:37:07.789871Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/usage.txt
+2026-07-17T14:37:07.790122Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/wizard.txt
+2026-07-17T14:37:07.790609Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/share/doc/libjpeg-turbo/LICENSE.md
+2026-07-17T14:37:07.791418Z -- Installing: /app/target/cpython-strict/sysroot/usr/lib/pkgconfig/libjpeg.pc
+2026-07-17T14:37:07.794294Z -- Installing: /app/target/cpython-strict/sysroot/usr/lib/cmake/libjpeg-turbo/libjpeg-turboConfig.cmake
+2026-07-17T14:37:07.797050Z -- Installing: /app/target/cpython-strict/sysroot/usr/lib/cmake/libjpeg-turbo/libjpeg-turboConfigVersion.cmake
+2026-07-17T14:37:07.803418Z -- Old export file "/app/target/cpython-strict/sysroot/usr/lib/cmake/libjpeg-turbo/libjpeg-turboTargets.cmake" will be replaced.  Removing files [/app/target/cpython-strict/sysroot/usr/lib/cmake/libjpeg-turbo/libjpeg-turboTargets-release.cmake].
+2026-07-17T14:37:07.803789Z -- Installing: /app/target/cpython-strict/sysroot/usr/lib/cmake/libjpeg-turbo/libjpeg-turboTargets.cmake
+2026-07-17T14:37:07.805847Z -- Installing: /app/target/cpython-strict/sysroot/usr/lib/cmake/libjpeg-turbo/libjpeg-turboTargets-release.cmake
+2026-07-17T14:37:07.808122Z -- Installing: /app/target/cpython-strict/sysroot/usr/include/jconfig.h
+2026-07-17T14:37:07.810438Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/include/jerror.h
+2026-07-17T14:37:07.811000Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/include/jmorecfg.h
+2026-07-17T14:37:07.811589Z -- Up-to-date: /app/target/cpython-strict/sysroot/usr/include/jpeglib.h
+2026-07-17T14:37:07.954234Z libjpeg_strict_compile_units=101
+2026-07-17T14:37:11.111282Z running bdist_wheel
+2026-07-17T14:37:11.124088Z running build
+2026-07-17T14:37:11.124172Z running build_py
+2026-07-17T14:37:11.129819Z creating build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.131149Z copying src/PIL/MpoImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.133319Z copying src/PIL/ImageMode.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.134703Z copying src/PIL/PngImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.135660Z copying src/PIL/AvifImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.136903Z copying src/PIL/XbmImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.138257Z copying src/PIL/PcxImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.140589Z copying src/PIL/SunImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.141588Z copying src/PIL/ImageFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.142945Z copying src/PIL/SpiderImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.144197Z copying src/PIL/TarIO.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.145271Z copying src/PIL/MpegImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.146571Z copying src/PIL/BdfFontFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.147347Z copying src/PIL/GribStubImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.148858Z copying src/PIL/ImageStat.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.150008Z copying src/PIL/PixarImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.150824Z copying src/PIL/GimpPaletteFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.152533Z copying src/PIL/ImageColor.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.153691Z copying src/PIL/ImageText.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.154661Z copying src/PIL/QoiImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.155660Z copying src/PIL/ContainerIO.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.156657Z copying src/PIL/_typing.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.157729Z copying src/PIL/MspImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.159344Z copying src/PIL/MicImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.160480Z copying src/PIL/_version.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.161449Z copying src/PIL/ImtImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.162502Z copying src/PIL/GifImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.163723Z copying src/PIL/PalmImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.165611Z copying src/PIL/ImageQt.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.166681Z copying src/PIL/ImageMath.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.167905Z copying src/PIL/PaletteFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.168991Z copying src/PIL/FontFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.170662Z copying src/PIL/PdfParser.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.172142Z copying src/PIL/ExifTags.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.173390Z copying src/PIL/ImageCms.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.174625Z copying src/PIL/FpxImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.176250Z copying src/PIL/ImageChops.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.178032Z copying src/PIL/_deprecate.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.179270Z copying src/PIL/BufrStubImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.180530Z copying src/PIL/PSDraw.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.182126Z copying src/PIL/PcdImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.183835Z copying src/PIL/ImageFilter.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.185271Z copying src/PIL/ImageDraw2.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.186494Z copying src/PIL/ImagePath.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.187731Z copying src/PIL/DcxImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.188859Z copying src/PIL/__init__.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.190907Z copying src/PIL/JpegPresets.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.192126Z copying src/PIL/Hdf5StubImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.199398Z copying src/PIL/features.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.206833Z copying src/PIL/ImageDraw.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.216523Z copying src/PIL/GimpGradientFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.231832Z copying src/PIL/ImageWin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.233772Z copying src/PIL/IcoImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.235791Z copying src/PIL/_tkinter_finder.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.237124Z copying src/PIL/EpsImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.238080Z copying src/PIL/TgaImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.249566Z copying src/PIL/ImageMorph.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.252780Z copying src/PIL/Jpeg2KImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.253911Z copying src/PIL/WalImageFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.255241Z copying src/PIL/PcfFontFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.256645Z copying src/PIL/BlpImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.258124Z copying src/PIL/ImageTk.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.259774Z copying src/PIL/GbrImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.261612Z copying src/PIL/ImageOps.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.263342Z copying src/PIL/PdfImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.265108Z copying src/PIL/ImageShow.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.266343Z copying src/PIL/ImageEnhance.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.267489Z copying src/PIL/WmfImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.268927Z copying src/PIL/ImageGrab.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.270949Z copying src/PIL/WebPImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.272537Z copying src/PIL/FliImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.273913Z copying src/PIL/TiffTags.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.275321Z copying src/PIL/CurImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.276592Z copying src/PIL/_util.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.278203Z copying src/PIL/GdImageFile.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.279217Z copying src/PIL/TiffImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.280554Z copying src/PIL/IptcImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.281466Z copying src/PIL/ImagePalette.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.282877Z copying src/PIL/BmpImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.284493Z copying src/PIL/ImageTransform.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.285912Z copying src/PIL/IcnsImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.286943Z copying src/PIL/McIdasImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.287862Z copying src/PIL/FitsImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.289611Z copying src/PIL/XpmImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.292763Z copying src/PIL/DdsImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.294360Z copying src/PIL/ImageSequence.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.296243Z copying src/PIL/_binary.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.297271Z copying src/PIL/Image.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.298309Z copying src/PIL/__main__.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.299482Z copying src/PIL/XVThumbImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.300331Z copying src/PIL/SgiImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.301910Z copying src/PIL/report.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.302966Z copying src/PIL/ImImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.303889Z copying src/PIL/PsdImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.305497Z copying src/PIL/JpegImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.306619Z copying src/PIL/ImageFont.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.307742Z copying src/PIL/PpmImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.309000Z copying src/PIL/FtexImagePlugin.py -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.309614Z running egg_info
+2026-07-17T14:37:11.312896Z writing src/pillow.egg-info/PKG-INFO
+2026-07-17T14:37:11.317825Z writing dependency_links to src/pillow.egg-info/dependency_links.txt
+2026-07-17T14:37:11.321048Z writing requirements to src/pillow.egg-info/requires.txt
+2026-07-17T14:37:11.321651Z writing top-level names to src/pillow.egg-info/top_level.txt
+2026-07-17T14:37:11.348142Z reading manifest file 'src/pillow.egg-info/SOURCES.txt'
+2026-07-17T14:37:11.525806Z reading manifest template 'MANIFEST.in'
+2026-07-17T14:37:11.526907Z warning: no files found matching '*.c'
+2026-07-17T14:37:11.528162Z warning: no files found matching '*.h'
+2026-07-17T14:37:11.530211Z warning: no files found matching '*.sh'
+2026-07-17T14:37:11.531580Z warning: no files found matching '*.txt'
+2026-07-17T14:37:11.532589Z warning: no files found matching '.flake8'
+2026-07-17T14:37:11.579831Z warning: no previously-included files found matching '.clang-format'
+2026-07-17T14:37:11.580398Z warning: no previously-included files found matching '.coveragerc'
+2026-07-17T14:37:11.581401Z warning: no previously-included files found matching '.editorconfig'
+2026-07-17T14:37:11.582437Z warning: no previously-included files found matching '.readthedocs.yml'
+2026-07-17T14:37:11.583700Z warning: no previously-included files found matching 'codecov.yml'
+2026-07-17T14:37:11.585336Z warning: no previously-included files found matching 'renovate.json'
+2026-07-17T14:37:11.586128Z warning: no previously-included files found matching 'Tests/images/README.md'
+2026-07-17T14:37:11.587122Z warning: no previously-included files found matching 'Tests/images/crash*.tif'
+2026-07-17T14:37:11.588648Z warning: no previously-included files found matching 'Tests/images/string_dimension.tiff'
+2026-07-17T14:37:11.591270Z warning: no previously-included files matching '.git*' found anywhere in distribution
+2026-07-17T14:37:11.595070Z warning: no previously-included files matching '*.so' found anywhere in distribution
+2026-07-17T14:37:11.596306Z no previously-included directories found matching '.ci'
+2026-07-17T14:37:11.597581Z no previously-included directories found matching 'wheels'
+2026-07-17T14:37:11.598332Z no previously-included directories found matching 'winbuild/build'
+2026-07-17T14:37:11.599480Z no previously-included directories found matching 'winbuild/depends'
+2026-07-17T14:37:11.600612Z no previously-included directories found matching 'Tests/errors'
+2026-07-17T14:37:11.602092Z no previously-included directories found matching 'Tests/images/jpeg2000'
+2026-07-17T14:37:11.603458Z no previously-included directories found matching 'Tests/images/msp'
+2026-07-17T14:37:11.604313Z no previously-included directories found matching 'Tests/images/picins'
+2026-07-17T14:37:11.606096Z no previously-included directories found matching 'Tests/images/sunraster'
+2026-07-17T14:37:11.606879Z no previously-included directories found matching 'Tests/test-images'
+2026-07-17T14:37:11.606903Z adding license file 'LICENSE'
+2026-07-17T14:37:11.626733Z writing manifest file 'src/pillow.egg-info/SOURCES.txt'
+2026-07-17T14:37:11.632084Z copying src/PIL/_avif.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.633708Z copying src/PIL/_imaging.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.636840Z copying src/PIL/_imagingcms.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.638640Z copying src/PIL/_imagingft.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.640935Z copying src/PIL/_imagingmath.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.642938Z copying src/PIL/_imagingmorph.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.644294Z copying src/PIL/_imagingtk.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.647364Z copying src/PIL/_webp.pyi -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.648579Z copying src/PIL/py.typed -> build/lib.linux-loongarch64-cpython-314/PIL
+2026-07-17T14:37:11.650377Z running build_clib
+2026-07-17T14:37:11.659550Z building 'pil_imaging_mode' library
+2026-07-17T14:37:11.659994Z creating build/temp.linux-loongarch64-cpython-314/src/libImaging
+2026-07-17T14:37:11.693601Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -c src/libImaging/Mode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Mode.o
+2026-07-17T14:37:12.188445Z /app/target/cpython-strict/toolchain/full-gcc-15.2.0-musl-20250911/loongarch64-unknown-linux-musl/bin/loongarch64-unknown-linux-musl-gcc-ar rcs build/temp.linux-loongarch64-cpython-314/libpil_imaging_mode.a build/temp.linux-loongarch64-cpython-314/src/libImaging/Mode.o
+2026-07-17T14:37:12.218001Z running build_ext
+2026-07-17T14:37:12.801986Z building 'PIL._imaging' extension
+2026-07-17T14:37:12.806050Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/_imaging.c -o build/temp.linux-loongarch64-cpython-314/src/_imaging.o
+2026-07-17T14:37:14.385052Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/decode.c -o build/temp.linux-loongarch64-cpython-314/src/decode.o
+2026-07-17T14:37:15.117934Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/display.c -o build/temp.linux-loongarch64-cpython-314/src/display.o
+2026-07-17T14:37:15.394074Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/encode.c -o build/temp.linux-loongarch64-cpython-314/src/encode.o
+2026-07-17T14:37:16.193785Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Access.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Access.o
+2026-07-17T14:37:16.752168Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/AlphaComposite.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/AlphaComposite.o
+2026-07-17T14:37:17.282003Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Arrow.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Arrow.o
+2026-07-17T14:37:17.923427Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Bands.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Bands.o
+2026-07-17T14:37:18.595352Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/BcnDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/BcnDecode.o
+2026-07-17T14:37:19.465700Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/BcnEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/BcnEncode.o
+2026-07-17T14:37:20.194606Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/BitDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/BitDecode.o
+2026-07-17T14:37:20.745221Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Blend.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Blend.o
+2026-07-17T14:37:21.281390Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/BoxBlur.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/BoxBlur.o
+2026-07-17T14:37:22.003860Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Chops.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Chops.o
+2026-07-17T14:37:22.659956Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/ColorLUT.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/ColorLUT.o
+2026-07-17T14:37:23.233457Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Convert.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Convert.o
+2026-07-17T14:37:24.333995Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/ConvertYCbCr.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/ConvertYCbCr.o
+2026-07-17T14:37:24.797049Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Copy.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Copy.o
+2026-07-17T14:37:25.284621Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Crop.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Crop.o
+2026-07-17T14:37:25.739084Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Dib.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Dib.o
+2026-07-17T14:37:26.024193Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Draw.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Draw.o
+2026-07-17T14:37:27.269228Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Effects.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Effects.o
+2026-07-17T14:37:27.865172Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/EpsEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/EpsEncode.o
+2026-07-17T14:37:28.345653Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Fill.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Fill.o
+2026-07-17T14:37:28.969960Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Filter.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Filter.o
+2026-07-17T14:37:29.856336Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/FliDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/FliDecode.o
+2026-07-17T14:37:30.449877Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Geometry.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Geometry.o
+2026-07-17T14:37:31.642629Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/GetBBox.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/GetBBox.o
+2026-07-17T14:37:32.343874Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/GifDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/GifDecode.o
+2026-07-17T14:37:32.905366Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/GifEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/GifEncode.o
+2026-07-17T14:37:33.593277Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/HexDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/HexDecode.o
+2026-07-17T14:37:34.078846Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Histo.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Histo.o
+2026-07-17T14:37:34.670584Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Jpeg2KDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Jpeg2KDecode.o
+2026-07-17T14:37:34.925648Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Jpeg2KEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Jpeg2KEncode.o
+2026-07-17T14:37:35.175419Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/JpegDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/JpegDecode.o
+2026-07-17T14:37:35.751603Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/JpegEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/JpegEncode.o
+2026-07-17T14:37:36.335009Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Matrix.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Matrix.o
+2026-07-17T14:37:36.883236Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/ModeFilter.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/ModeFilter.o
+2026-07-17T14:37:37.620382Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Negative.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Negative.o
+2026-07-17T14:37:38.144993Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Offset.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Offset.o
+2026-07-17T14:37:38.664868Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Pack.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Pack.o
+2026-07-17T14:37:39.490573Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/PackDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/PackDecode.o
+2026-07-17T14:37:40.054167Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Palette.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Palette.o
+2026-07-17T14:37:40.682976Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Paste.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Paste.o
+2026-07-17T14:37:41.407341Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/PcdDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/PcdDecode.o
+2026-07-17T14:37:41.841631Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/PcxDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/PcxDecode.o
+2026-07-17T14:37:42.317581Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/PcxEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/PcxEncode.o
+2026-07-17T14:37:42.789572Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Point.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Point.o
+2026-07-17T14:37:43.368612Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Quant.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Quant.o
+2026-07-17T14:37:44.355381Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/QuantHash.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantHash.o
+2026-07-17T14:37:44.871271Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/QuantHeap.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantHeap.o
+2026-07-17T14:37:45.322321Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/QuantOctree.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantOctree.o
+2026-07-17T14:37:45.881580Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/QuantPngQuant.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantPngQuant.o
+2026-07-17T14:37:46.034851Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/RankFilter.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/RankFilter.o
+2026-07-17T14:37:46.612855Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/RawDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/RawDecode.o
+2026-07-17T14:37:47.049009Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/RawEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/RawEncode.o
+2026-07-17T14:37:47.487471Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Reduce.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Reduce.o
+2026-07-17T14:37:48.660793Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Resample.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Resample.o
+2026-07-17T14:37:49.415169Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/SgiRleDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/SgiRleDecode.o
+2026-07-17T14:37:49.938378Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Storage.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Storage.o
+2026-07-17T14:37:50.587272Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/SunRleDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/SunRleDecode.o
+2026-07-17T14:37:51.058343Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/TgaRleDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/TgaRleDecode.o
+2026-07-17T14:37:51.519710Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/TgaRleEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/TgaRleEncode.o
+2026-07-17T14:37:52.054222Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/TiffDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/TiffDecode.o
+2026-07-17T14:37:52.273082Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/Unpack.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/Unpack.o
+2026-07-17T14:37:53.328469Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/UnpackYCC.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/UnpackYCC.o
+2026-07-17T14:37:53.765031Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/UnsharpMask.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/UnsharpMask.o
+2026-07-17T14:37:54.220790Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/XbmDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/XbmDecode.o
+2026-07-17T14:37:54.652473Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/XbmEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/XbmEncode.o
+2026-07-17T14:37:55.090923Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/ZipDecode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/ZipDecode.o
+2026-07-17T14:37:55.656951Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/ZipEncode.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/ZipEncode.o
+2026-07-17T14:37:56.193178Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/libImaging/codec_fd.c -o build/temp.linux-loongarch64-cpython-314/src/libImaging/codec_fd.o
+2026-07-17T14:37:56.642701Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/map.c -o build/temp.linux-loongarch64-cpython-314/src/map.o
+2026-07-17T14:37:57.132568Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/outline.c -o build/temp.linux-loongarch64-cpython-314/src/outline.o
+2026-07-17T14:37:57.552057Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -DHAVE_LIBJPEG -DHAVE_LIBZ -DPILLOW_VERSION=\"12.3.0\" -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/path.c -o build/temp.linux-loongarch64-cpython-314/src/path.o
+2026-07-17T14:37:58.227603Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -shared -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/usr/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/lib -Wl,--as-needed -Wl,-O1 -Wl,--sort-common -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include build/temp.linux-loongarch64-cpython-314/src/_imaging.o build/temp.linux-loongarch64-cpython-314/src/decode.o build/temp.linux-loongarch64-cpython-314/src/display.o build/temp.linux-loongarch64-cpython-314/src/encode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Access.o build/temp.linux-loongarch64-cpython-314/src/libImaging/AlphaComposite.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Arrow.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Bands.o build/temp.linux-loongarch64-cpython-314/src/libImaging/BcnDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/BcnEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/BitDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Blend.o build/temp.linux-loongarch64-cpython-314/src/libImaging/BoxBlur.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Chops.o build/temp.linux-loongarch64-cpython-314/src/libImaging/ColorLUT.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Convert.o build/temp.linux-loongarch64-cpython-314/src/libImaging/ConvertYCbCr.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Copy.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Crop.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Dib.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Draw.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Effects.o build/temp.linux-loongarch64-cpython-314/src/libImaging/EpsEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Fill.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Filter.o build/temp.linux-loongarch64-cpython-314/src/libImaging/FliDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Geometry.o build/temp.linux-loongarch64-cpython-314/src/libImaging/GetBBox.o build/temp.linux-loongarch64-cpython-314/src/libImaging/GifDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/GifEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/HexDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Histo.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Jpeg2KDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Jpeg2KEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/JpegDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/JpegEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Matrix.o build/temp.linux-loongarch64-cpython-314/src/libImaging/ModeFilter.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Negative.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Offset.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Pack.o build/temp.linux-loongarch64-cpython-314/src/libImaging/PackDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Palette.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Paste.o build/temp.linux-loongarch64-cpython-314/src/libImaging/PcdDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/PcxDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/PcxEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Point.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Quant.o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantHash.o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantHeap.o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantOctree.o build/temp.linux-loongarch64-cpython-314/src/libImaging/QuantPngQuant.o build/temp.linux-loongarch64-cpython-314/src/libImaging/RankFilter.o build/temp.linux-loongarch64-cpython-314/src/libImaging/RawDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/RawEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Reduce.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Resample.o build/temp.linux-loongarch64-cpython-314/src/libImaging/SgiRleDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Storage.o build/temp.linux-loongarch64-cpython-314/src/libImaging/SunRleDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/TgaRleDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/TgaRleEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/TiffDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/Unpack.o build/temp.linux-loongarch64-cpython-314/src/libImaging/UnpackYCC.o build/temp.linux-loongarch64-cpython-314/src/libImaging/UnsharpMask.o build/temp.linux-loongarch64-cpython-314/src/libImaging/XbmDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/XbmEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/ZipDecode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/ZipEncode.o build/temp.linux-loongarch64-cpython-314/src/libImaging/codec_fd.o build/temp.linux-loongarch64-cpython-314/src/map.o build/temp.linux-loongarch64-cpython-314/src/outline.o build/temp.linux-loongarch64-cpython-314/src/path.o -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -L/app/target/cpython-strict/host-python/lib -L/usr/lib -Lbuild/temp.linux-loongarch64-cpython-314 -ljpeg -lz -lpil_imaging_mode -o build/lib.linux-loongarch64-cpython-314/PIL/_imaging.cpython-314.so
+2026-07-17T14:37:58.402176Z building 'PIL._imagingtk' extension
+2026-07-17T14:37:58.402901Z creating build/temp.linux-loongarch64-cpython-314/src/Tk
+2026-07-17T14:37:58.404530Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/Tk/tkImaging.c -o build/temp.linux-loongarch64-cpython-314/src/Tk/tkImaging.o
+2026-07-17T14:37:58.926313Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/_imagingtk.c -o build/temp.linux-loongarch64-cpython-314/src/_imagingtk.o
+2026-07-17T14:37:59.520102Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -shared -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/usr/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/lib -Wl,--as-needed -Wl,-O1 -Wl,--sort-common -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include build/temp.linux-loongarch64-cpython-314/src/Tk/tkImaging.o build/temp.linux-loongarch64-cpython-314/src/_imagingtk.o -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -L/app/target/cpython-strict/host-python/lib -L/usr/lib -Lbuild/temp.linux-loongarch64-cpython-314 -lpil_imaging_mode -o build/lib.linux-loongarch64-cpython-314/PIL/_imagingtk.cpython-314.so
+2026-07-17T14:37:59.721139Z building 'PIL._imagingmath' extension
+2026-07-17T14:37:59.721798Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/_imagingmath.c -o build/temp.linux-loongarch64-cpython-314/src/_imagingmath.o
+2026-07-17T14:38:00.505454Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -shared -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/usr/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/lib -Wl,--as-needed -Wl,-O1 -Wl,--sort-common -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include build/temp.linux-loongarch64-cpython-314/src/_imagingmath.o -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -L/app/target/cpython-strict/host-python/lib -L/usr/lib -Lbuild/temp.linux-loongarch64-cpython-314 -lm -lpil_imaging_mode -o build/lib.linux-loongarch64-cpython-314/PIL/_imagingmath.cpython-314.so
+2026-07-17T14:38:00.622131Z building 'PIL._imagingmorph' extension
+2026-07-17T14:38:00.622754Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -I/app/target/cpython-strict/sysroot/usr/include -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/host-python/include -I/app/target/cpython-strict/host-python/include/python3.14 -c src/_imagingmorph.c -o build/temp.linux-loongarch64-cpython-314/src/_imagingmorph.o
+2026-07-17T14:38:01.187914Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -shared -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/usr/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/lib -Wl,--as-needed -Wl,-O1 -Wl,--sort-common -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include build/temp.linux-loongarch64-cpython-314/src/_imagingmorph.o -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -L/app/target/cpython-strict/host-python/lib -L/usr/lib -Lbuild/temp.linux-loongarch64-cpython-314 -lpil_imaging_mode -o build/lib.linux-loongarch64-cpython-314/PIL/_imagingmorph.cpython-314.so
+2026-07-17T14:38:01.293521Z /app/target/cpython-strict/pillow-build-deps/setuptools/_distutils/cmd.py:90: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+2026-07-17T14:38:01.293558Z !!
+2026-07-17T14:38:01.293567Z 
+2026-07-17T14:38:01.293579Z         ********************************************************************************
+2026-07-17T14:38:01.293596Z         Please avoid running ``setup.py`` directly.
+2026-07-17T14:38:01.293605Z         Instead, use pypa/build, pypa/installer or other
+2026-07-17T14:38:01.293614Z         standards-based tools.
+2026-07-17T14:38:01.293621Z 
+2026-07-17T14:38:01.293629Z         This deprecation is overdue, please update your project and remove deprecated
+2026-07-17T14:38:01.293638Z         calls to avoid build errors in the future.
+2026-07-17T14:38:01.293647Z 
+2026-07-17T14:38:01.293656Z         See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+2026-07-17T14:38:01.293666Z         ********************************************************************************
+2026-07-17T14:38:01.293672Z 
+2026-07-17T14:38:01.293677Z !!
+2026-07-17T14:38:01.293683Z   self.initialize_options()
+2026-07-17T14:38:01.296029Z --------------------------------------------------------------------
+2026-07-17T14:38:01.296062Z PIL SETUP SUMMARY
+2026-07-17T14:38:01.296076Z --------------------------------------------------------------------
+2026-07-17T14:38:01.296086Z version      Pillow 12.3.0
+2026-07-17T14:38:01.296095Z platform     linux 3.14.5 (main, Jul 17 2026, 02:35:09)
+2026-07-17T14:38:01.296105Z              [GCC 13.3.0]
+2026-07-17T14:38:01.296114Z --------------------------------------------------------------------
+2026-07-17T14:38:01.296122Z --- JPEG support available
+2026-07-17T14:38:01.296130Z *** OPENJPEG (JPEG2000) support not available
+2026-07-17T14:38:01.296139Z --- ZLIB (PNG/ZIP) support available
+2026-07-17T14:38:01.296146Z *** LIBIMAGEQUANT support not available
+2026-07-17T14:38:01.296154Z *** LIBTIFF support not available
+2026-07-17T14:38:01.296163Z *** FREETYPE2 support not available
+2026-07-17T14:38:01.296169Z *** RAQM (Text shaping) support not available
+2026-07-17T14:38:01.296178Z *** LITTLECMS2 support not available
+2026-07-17T14:38:01.296184Z *** WEBP support not available
+2026-07-17T14:38:01.296194Z *** XCB (X protocol) support not available
+2026-07-17T14:38:01.296201Z *** LIBAVIF support not available
+2026-07-17T14:38:01.296209Z --------------------------------------------------------------------
+2026-07-17T14:38:01.296219Z To add a missing option, make sure you have the required
+2026-07-17T14:38:01.296225Z library and headers.
+2026-07-17T14:38:01.296233Z See https://pillow.readthedocs.io/en/latest/installation.html#building-from-source
+2026-07-17T14:38:01.296240Z 
+2026-07-17T14:38:01.296247Z To check the build, run the selftest.py script.
+2026-07-17T14:38:01.296255Z 
+2026-07-17T14:38:01.296263Z installing to build/bdist.linux-loongarch64/wheel
+2026-07-17T14:38:01.296269Z running install
+2026-07-17T14:38:01.301080Z running install_lib
+2026-07-17T14:38:01.304370Z creating build/bdist.linux-loongarch64/wheel
+2026-07-17T14:38:01.305207Z creating build/bdist.linux-loongarch64/wheel/PIL
+2026-07-17T14:38:01.305578Z copying build/lib.linux-loongarch64-cpython-314/PIL/MpoImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.306685Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageMode.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.307706Z copying build/lib.linux-loongarch64-cpython-314/PIL/PngImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.308657Z copying build/lib.linux-loongarch64-cpython-314/PIL/AvifImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.310247Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingmath.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.311131Z copying build/lib.linux-loongarch64-cpython-314/PIL/XbmImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.312013Z copying build/lib.linux-loongarch64-cpython-314/PIL/PcxImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.313129Z copying build/lib.linux-loongarch64-cpython-314/PIL/SunImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.314073Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.315059Z copying build/lib.linux-loongarch64-cpython-314/PIL/SpiderImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.316338Z copying build/lib.linux-loongarch64-cpython-314/PIL/TarIO.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.317292Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingmorph.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.318185Z copying build/lib.linux-loongarch64-cpython-314/PIL/MpegImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.319142Z copying build/lib.linux-loongarch64-cpython-314/PIL/BdfFontFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.320183Z copying build/lib.linux-loongarch64-cpython-314/PIL/GribStubImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.321084Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageStat.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.322194Z copying build/lib.linux-loongarch64-cpython-314/PIL/PixarImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.323594Z copying build/lib.linux-loongarch64-cpython-314/PIL/GimpPaletteFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.324462Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageColor.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.325374Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageText.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.326410Z copying build/lib.linux-loongarch64-cpython-314/PIL/QoiImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.327555Z copying build/lib.linux-loongarch64-cpython-314/PIL/ContainerIO.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.328790Z copying build/lib.linux-loongarch64-cpython-314/PIL/_typing.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.329764Z copying build/lib.linux-loongarch64-cpython-314/PIL/MspImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.330780Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingtk.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.331723Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imaging.cpython-314.so -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.333203Z copying build/lib.linux-loongarch64-cpython-314/PIL/MicImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.334433Z copying build/lib.linux-loongarch64-cpython-314/PIL/_version.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.335854Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImtImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.336940Z copying build/lib.linux-loongarch64-cpython-314/PIL/GifImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.337958Z copying build/lib.linux-loongarch64-cpython-314/PIL/PalmImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.339148Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageQt.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.341251Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageMath.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.342505Z copying build/lib.linux-loongarch64-cpython-314/PIL/PaletteFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.343394Z copying build/lib.linux-loongarch64-cpython-314/PIL/FontFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.344430Z copying build/lib.linux-loongarch64-cpython-314/PIL/PdfParser.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.345758Z copying build/lib.linux-loongarch64-cpython-314/PIL/ExifTags.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.347054Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageCms.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.349263Z copying build/lib.linux-loongarch64-cpython-314/PIL/FpxImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.350223Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageChops.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.351535Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingcms.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.352699Z copying build/lib.linux-loongarch64-cpython-314/PIL/_webp.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.354564Z copying build/lib.linux-loongarch64-cpython-314/PIL/_deprecate.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.355508Z copying build/lib.linux-loongarch64-cpython-314/PIL/BufrStubImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.356471Z copying build/lib.linux-loongarch64-cpython-314/PIL/PSDraw.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.357653Z copying build/lib.linux-loongarch64-cpython-314/PIL/PcdImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.359138Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingmorph.cpython-314.so -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.360897Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageFilter.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.361975Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageDraw2.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.363168Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImagePath.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.365141Z copying build/lib.linux-loongarch64-cpython-314/PIL/DcxImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.366487Z copying build/lib.linux-loongarch64-cpython-314/PIL/__init__.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.367584Z copying build/lib.linux-loongarch64-cpython-314/PIL/JpegPresets.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.368631Z copying build/lib.linux-loongarch64-cpython-314/PIL/Hdf5StubImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.370047Z copying build/lib.linux-loongarch64-cpython-314/PIL/features.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.371050Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageDraw.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.372240Z copying build/lib.linux-loongarch64-cpython-314/PIL/GimpGradientFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.373565Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageWin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.374979Z copying build/lib.linux-loongarch64-cpython-314/PIL/IcoImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.376864Z copying build/lib.linux-loongarch64-cpython-314/PIL/_tkinter_finder.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.378276Z copying build/lib.linux-loongarch64-cpython-314/PIL/EpsImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.379991Z copying build/lib.linux-loongarch64-cpython-314/PIL/TgaImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.381076Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageMorph.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.382215Z copying build/lib.linux-loongarch64-cpython-314/PIL/Jpeg2KImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.383384Z copying build/lib.linux-loongarch64-cpython-314/PIL/WalImageFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.384471Z copying build/lib.linux-loongarch64-cpython-314/PIL/PcfFontFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.386105Z copying build/lib.linux-loongarch64-cpython-314/PIL/BlpImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.387020Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageTk.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.387956Z copying build/lib.linux-loongarch64-cpython-314/PIL/GbrImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.389111Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageOps.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.390264Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imaging.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.391863Z copying build/lib.linux-loongarch64-cpython-314/PIL/PdfImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.393435Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageShow.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.394374Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageEnhance.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.395417Z copying build/lib.linux-loongarch64-cpython-314/PIL/WmfImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.396702Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageGrab.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.398046Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingft.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.399003Z copying build/lib.linux-loongarch64-cpython-314/PIL/WebPImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.400007Z copying build/lib.linux-loongarch64-cpython-314/PIL/FliImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.401051Z copying build/lib.linux-loongarch64-cpython-314/PIL/TiffTags.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.402068Z copying build/lib.linux-loongarch64-cpython-314/PIL/CurImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.403214Z copying build/lib.linux-loongarch64-cpython-314/PIL/_util.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.404344Z copying build/lib.linux-loongarch64-cpython-314/PIL/GdImageFile.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.405164Z copying build/lib.linux-loongarch64-cpython-314/PIL/TiffImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.406008Z copying build/lib.linux-loongarch64-cpython-314/PIL/py.typed -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.406892Z copying build/lib.linux-loongarch64-cpython-314/PIL/IptcImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.408355Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImagePalette.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.409176Z copying build/lib.linux-loongarch64-cpython-314/PIL/BmpImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.410394Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageTransform.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.411157Z copying build/lib.linux-loongarch64-cpython-314/PIL/IcnsImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.411963Z copying build/lib.linux-loongarch64-cpython-314/PIL/McIdasImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.412808Z copying build/lib.linux-loongarch64-cpython-314/PIL/FitsImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.413823Z copying build/lib.linux-loongarch64-cpython-314/PIL/_avif.pyi -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.414624Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingmath.cpython-314.so -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.415528Z copying build/lib.linux-loongarch64-cpython-314/PIL/XpmImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.416495Z copying build/lib.linux-loongarch64-cpython-314/PIL/DdsImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.417413Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageSequence.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.418163Z copying build/lib.linux-loongarch64-cpython-314/PIL/_imagingtk.cpython-314.so -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.419046Z copying build/lib.linux-loongarch64-cpython-314/PIL/_binary.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.419834Z copying build/lib.linux-loongarch64-cpython-314/PIL/Image.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.421149Z copying build/lib.linux-loongarch64-cpython-314/PIL/__main__.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.421925Z copying build/lib.linux-loongarch64-cpython-314/PIL/XVThumbImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.423106Z copying build/lib.linux-loongarch64-cpython-314/PIL/SgiImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.424129Z copying build/lib.linux-loongarch64-cpython-314/PIL/report.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.425004Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.426318Z copying build/lib.linux-loongarch64-cpython-314/PIL/PsdImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.427702Z copying build/lib.linux-loongarch64-cpython-314/PIL/JpegImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.429024Z copying build/lib.linux-loongarch64-cpython-314/PIL/ImageFont.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.429919Z copying build/lib.linux-loongarch64-cpython-314/PIL/PpmImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.430709Z copying build/lib.linux-loongarch64-cpython-314/PIL/FtexImagePlugin.py -> build/bdist.linux-loongarch64/wheel/./PIL
+2026-07-17T14:38:01.431648Z running install_egg_info
+2026-07-17T14:38:01.435458Z Copying src/pillow.egg-info to build/bdist.linux-loongarch64/wheel/./pillow-12.3.0-py3.14.egg-info
+2026-07-17T14:38:01.442718Z running install_scripts
+2026-07-17T14:38:01.460665Z creating build/bdist.linux-loongarch64/wheel/pillow-12.3.0.dist-info/WHEEL
+2026-07-17T14:38:01.464444Z creating '/app/target/cpython-strict/build/pillow-12.3.0-wheels/pillow-12.3.0-cp314-cp314-linux_loongarch64.whl' and adding 'build/bdist.linux-loongarch64/wheel' to it
+2026-07-17T14:38:01.469260Z adding 'PIL/AvifImagePlugin.py'
+2026-07-17T14:38:01.471077Z adding 'PIL/BdfFontFile.py'
+2026-07-17T14:38:01.471978Z adding 'PIL/BlpImagePlugin.py'
+2026-07-17T14:38:01.472833Z adding 'PIL/BmpImagePlugin.py'
+2026-07-17T14:38:01.473416Z adding 'PIL/BufrStubImagePlugin.py'
+2026-07-17T14:38:01.473842Z adding 'PIL/ContainerIO.py'
+2026-07-17T14:38:01.474340Z adding 'PIL/CurImagePlugin.py'
+2026-07-17T14:38:01.474735Z adding 'PIL/DcxImagePlugin.py'
+2026-07-17T14:38:01.475475Z adding 'PIL/DdsImagePlugin.py'
+2026-07-17T14:38:01.476244Z adding 'PIL/EpsImagePlugin.py'
+2026-07-17T14:38:01.476985Z adding 'PIL/ExifTags.py'
+2026-07-17T14:38:01.477613Z adding 'PIL/FitsImagePlugin.py'
+2026-07-17T14:38:01.478167Z adding 'PIL/FliImagePlugin.py'
+2026-07-17T14:38:01.479109Z adding 'PIL/FontFile.py'
+2026-07-17T14:38:01.479718Z adding 'PIL/FpxImagePlugin.py'
+2026-07-17T14:38:01.480199Z adding 'PIL/FtexImagePlugin.py'
+2026-07-17T14:38:01.480660Z adding 'PIL/GbrImagePlugin.py'
+2026-07-17T14:38:01.481149Z adding 'PIL/GdImageFile.py'
+2026-07-17T14:38:01.482266Z adding 'PIL/GifImagePlugin.py'
+2026-07-17T14:38:01.482803Z adding 'PIL/GimpGradientFile.py'
+2026-07-17T14:38:01.483258Z adding 'PIL/GimpPaletteFile.py'
+2026-07-17T14:38:01.483669Z adding 'PIL/GribStubImagePlugin.py'
+2026-07-17T14:38:01.484163Z adding 'PIL/Hdf5StubImagePlugin.py'
+2026-07-17T14:38:01.485299Z adding 'PIL/IcnsImagePlugin.py'
+2026-07-17T14:38:01.485941Z adding 'PIL/IcoImagePlugin.py'
+2026-07-17T14:38:01.486604Z adding 'PIL/ImImagePlugin.py'
+2026-07-17T14:38:01.489678Z adding 'PIL/Image.py'
+2026-07-17T14:38:01.490698Z adding 'PIL/ImageChops.py'
+2026-07-17T14:38:01.492202Z adding 'PIL/ImageCms.py'
+2026-07-17T14:38:01.492775Z adding 'PIL/ImageColor.py'
+2026-07-17T14:38:01.493742Z adding 'PIL/ImageDraw.py'
+2026-07-17T14:38:01.494370Z adding 'PIL/ImageDraw2.py'
+2026-07-17T14:38:01.494832Z adding 'PIL/ImageEnhance.py'
+2026-07-17T14:38:01.495717Z adding 'PIL/ImageFile.py'
+2026-07-17T14:38:01.496551Z adding 'PIL/ImageFilter.py'
+2026-07-17T14:38:01.498981Z adding 'PIL/ImageFont.py'
+2026-07-17T14:38:01.499639Z adding 'PIL/ImageGrab.py'
+2026-07-17T14:38:01.500242Z adding 'PIL/ImageMath.py'
+2026-07-17T14:38:01.500717Z adding 'PIL/ImageMode.py'
+2026-07-17T14:38:01.501409Z adding 'PIL/ImageMorph.py'
+2026-07-17T14:38:01.502422Z adding 'PIL/ImageOps.py'
+2026-07-17T14:38:01.503295Z adding 'PIL/ImagePalette.py'
+2026-07-17T14:38:01.504483Z adding 'PIL/ImagePath.py'
+2026-07-17T14:38:01.504995Z adding 'PIL/ImageQt.py'
+2026-07-17T14:38:01.505532Z adding 'PIL/ImageSequence.py'
+2026-07-17T14:38:01.506199Z adding 'PIL/ImageShow.py'
+2026-07-17T14:38:01.507003Z adding 'PIL/ImageStat.py'
+2026-07-17T14:38:01.507860Z adding 'PIL/ImageText.py'
+2026-07-17T14:38:01.508723Z adding 'PIL/ImageTk.py'
+2026-07-17T14:38:01.509347Z adding 'PIL/ImageTransform.py'
+2026-07-17T14:38:01.510633Z adding 'PIL/ImageWin.py'
+2026-07-17T14:38:01.511153Z adding 'PIL/ImtImagePlugin.py'
+2026-07-17T14:38:01.511781Z adding 'PIL/IptcImagePlugin.py'
+2026-07-17T14:38:01.512511Z adding 'PIL/Jpeg2KImagePlugin.py'
+2026-07-17T14:38:01.513705Z adding 'PIL/JpegImagePlugin.py'
+2026-07-17T14:38:01.514362Z adding 'PIL/JpegPresets.py'
+2026-07-17T14:38:01.514952Z adding 'PIL/McIdasImagePlugin.py'
+2026-07-17T14:38:01.515432Z adding 'PIL/MicImagePlugin.py'
+2026-07-17T14:38:01.515966Z adding 'PIL/MpegImagePlugin.py'
+2026-07-17T14:38:01.517247Z adding 'PIL/MpoImagePlugin.py'
+2026-07-17T14:38:01.517791Z adding 'PIL/MspImagePlugin.py'
+2026-07-17T14:38:01.518374Z adding 'PIL/PSDraw.py'
+2026-07-17T14:38:01.518777Z adding 'PIL/PaletteFile.py'
+2026-07-17T14:38:01.519515Z adding 'PIL/PalmImagePlugin.py'
+2026-07-17T14:38:01.520104Z adding 'PIL/PcdImagePlugin.py'
+2026-07-17T14:38:01.520625Z adding 'PIL/PcfFontFile.py'
+2026-07-17T14:38:01.521338Z adding 'PIL/PcxImagePlugin.py'
+2026-07-17T14:38:01.521953Z adding 'PIL/PdfImagePlugin.py'
+2026-07-17T14:38:01.523723Z adding 'PIL/PdfParser.py'
+2026-07-17T14:38:01.524254Z adding 'PIL/PixarImagePlugin.py'
+2026-07-17T14:38:01.525522Z adding 'PIL/PngImagePlugin.py'
+2026-07-17T14:38:01.526408Z adding 'PIL/PpmImagePlugin.py'
+2026-07-17T14:38:01.528168Z adding 'PIL/PsdImagePlugin.py'
+2026-07-17T14:38:01.530420Z adding 'PIL/QoiImagePlugin.py'
+2026-07-17T14:38:01.531017Z adding 'PIL/SgiImagePlugin.py'
+2026-07-17T14:38:01.531662Z adding 'PIL/SpiderImagePlugin.py'
+2026-07-17T14:38:01.532191Z adding 'PIL/SunImagePlugin.py'
+2026-07-17T14:38:01.532644Z adding 'PIL/TarIO.py'
+2026-07-17T14:38:01.533273Z adding 'PIL/TgaImagePlugin.py'
+2026-07-17T14:38:01.535848Z adding 'PIL/TiffImagePlugin.py'
+2026-07-17T14:38:01.536805Z adding 'PIL/TiffTags.py'
+2026-07-17T14:38:01.537453Z adding 'PIL/WalImageFile.py'
+2026-07-17T14:38:01.538156Z adding 'PIL/WebPImagePlugin.py'
+2026-07-17T14:38:01.538634Z adding 'PIL/WmfImagePlugin.py'
+2026-07-17T14:38:01.539115Z adding 'PIL/XVThumbImagePlugin.py'
+2026-07-17T14:38:01.539489Z adding 'PIL/XbmImagePlugin.py'
+2026-07-17T14:38:01.539978Z adding 'PIL/XpmImagePlugin.py'
+2026-07-17T14:38:01.540515Z adding 'PIL/__init__.py'
+2026-07-17T14:38:01.541248Z adding 'PIL/__main__.py'
+2026-07-17T14:38:01.541859Z adding 'PIL/_avif.pyi'
+2026-07-17T14:38:01.542357Z adding 'PIL/_binary.py'
+2026-07-17T14:38:01.542813Z adding 'PIL/_deprecate.py'
+2026-07-17T14:38:01.555902Z adding 'PIL/_imaging.cpython-314.so'
+2026-07-17T14:38:01.557678Z adding 'PIL/_imaging.pyi'
+2026-07-17T14:38:01.558252Z adding 'PIL/_imagingcms.pyi'
+2026-07-17T14:38:01.558722Z adding 'PIL/_imagingft.pyi'
+2026-07-17T14:38:01.559782Z adding 'PIL/_imagingmath.cpython-314.so'
+2026-07-17T14:38:01.560737Z adding 'PIL/_imagingmath.pyi'
+2026-07-17T14:38:01.561582Z adding 'PIL/_imagingmorph.cpython-314.so'
+2026-07-17T14:38:01.562120Z adding 'PIL/_imagingmorph.pyi'
+2026-07-17T14:38:01.563079Z adding 'PIL/_imagingtk.cpython-314.so'
+2026-07-17T14:38:01.563752Z adding 'PIL/_imagingtk.pyi'
+2026-07-17T14:38:01.564235Z adding 'PIL/_tkinter_finder.py'
+2026-07-17T14:38:01.564709Z adding 'PIL/_typing.py'
+2026-07-17T14:38:01.565192Z adding 'PIL/_util.py'
+2026-07-17T14:38:01.565645Z adding 'PIL/_version.py'
+2026-07-17T14:38:01.566614Z adding 'PIL/_webp.pyi'
+2026-07-17T14:38:01.567288Z adding 'PIL/features.py'
+2026-07-17T14:38:01.567741Z adding 'PIL/py.typed'
+2026-07-17T14:38:01.568174Z adding 'PIL/report.py'
+2026-07-17T14:38:01.569445Z adding 'pillow-12.3.0.dist-info/licenses/LICENSE'
+2026-07-17T14:38:01.569894Z adding 'pillow-12.3.0.dist-info/METADATA'
+2026-07-17T14:38:01.570220Z adding 'pillow-12.3.0.dist-info/WHEEL'
+2026-07-17T14:38:01.570496Z adding 'pillow-12.3.0.dist-info/top_level.txt'
+2026-07-17T14:38:01.570971Z adding 'pillow-12.3.0.dist-info/zip-safe'
+2026-07-17T14:38:01.573029Z adding 'pillow-12.3.0.dist-info/RECORD'
+2026-07-17T14:38:01.573456Z removing build/bdist.linux-loongarch64/wheel
+2026-07-17T14:38:01.745145Z pillow_strict_compile_units=80
+2026-07-17T14:38:06.656745Z native_elfs=99
+2026-07-17T14:38:06.656932Z stripped_elfs=24
+2026-07-17T14:38:08.570116Z p4_interp_elfs=usr/bin/python3.14
+2026-07-17T14:38:08.572283Z p4_interp_rewritten=none
+2026-07-17T14:38:10.113415Z strict-runtime-smoke-ok
+2026-07-17T14:38:13.271945Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-17T14:40:11.693748Z [strict-cpython] artifact: /app/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-071e4e258421.tar.xz
+2026-07-17T14:40:11.694109Z [strict-cpython] sha256: 071e4e2584214b5174a6cee507de23c6d35f6f7fb026083832b453c6075600ea
+2026-07-17T14:40:41.965740Z current_artifact=cpython-la64-strict-3.14.5-071e4e258421.tar.xz
+2026-07-17T14:40:41.966424Z current_sha256=071e4e2584214b5174a6cee507de23c6d35f6f7fb026083832b453c6075600ea

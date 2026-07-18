@@ -1,0 +1,51 @@
+Post-board strict runtime repackage idempotence audit
+Date: 2026-07-17
+Scope: host packaging audit followed by final 2K1000LA board deployment
+
+First board-validated artifact:
+  cpython-la64-strict-3.14.5-a420d79ddb07.tar.xz
+  size=81628064
+  sha256=a420d79ddb07c561066dfec1b4af4c46ce4413e5d79807b4610adef9aa8261a9
+  manifest_sha256=196c4fbe8705ba523eca556c309aa792ba82b8d3ad38f9c2eaeaa96a11d4955f
+
+Final reproducible and board-validated artifact:
+  cpython-la64-strict-3.14.5-b7f361382399.tar.xz
+  size=81630652
+  sha256=b7f361382399bb592afb65bf0b8598cb0a8a96c3afcc66cc24e7a680e23c244c
+  manifest_sha256=3617070c7b187543bd23945ba60b451d653af89ba557199c1e1e9e6f224a1dd0
+
+Trigger and root cause:
+  package_input_digest changed after wrapper/benchmark edits.
+  The previous packaging step unconditionally re-ran GNU strip and patchelf.
+  patchelf --set-interpreter on an already-bound Python ELF was not byte-idempotent.
+  Repeating it grew usr/bin/python3.14 from 69856 to 73792 bytes and changed the artifact hash.
+
+Fix and gate:
+  strip runs only for ELF files still containing .symtab or .debug_* sections.
+  patchelf runs only when PT_INTERP differs from the expected P4 current loader.
+  The final PT_INTERP is always re-read and verified.
+  After removing the package stamp, two consecutive full packaging runs both produced:
+    b7f361382399bb592afb65bf0b8598cb0a8a96c3afcc66cc24e7a680e23c244c
+  make cpython-la64-runtime-verify exited 0:
+    runtime_policy=mangocore-la64-strict-align-v1
+    manifest_schema=2
+    elf_count=94
+
+Archive member comparison:
+  total members in each archive=8810
+  changed members=1
+  changed path=strict-runtime-manifest.json
+  unchanged members=8809
+  All 94 native ELF files and all runtime scripts, wrappers, certificates and data files are byte-identical.
+  The manifest difference records the corrected builder source hash.
+
+Evidence boundary:
+  b7 was downloaded and extracted only on P4 ext4; P3 /tools was not used.
+  Board SHA, identity, all 94 native ELF hashes and strict runtime smoke passed.
+  Deployment workload wall=705.708 s.
+  current=/persist/python-runtime/releases/b7f361382399.
+  The default gate passed normal site, pip 26.1.1 and sys.executable self-exec on b7.
+  The persist chroot used the same b7 runtime/state and contained no /tools Python path.
+  The project judge reported {"all":72,"pass":72} for the b7 L3-L9 run (wall=49.005 s).
+  The direct SmolAgent entry reached /persist/python/user/bin/smolagent.real and remained fail-exposed only
+  because aligned Pillow/PIL is absent. No real LLM API was run.
