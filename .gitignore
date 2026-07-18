@@ -69,3 +69,5 @@ sdcard-rv-noconf.img
 os/rootfs-rv.img
 os.bin
 .env
+/.opencode/*.bak
+/.codex-*.conf
