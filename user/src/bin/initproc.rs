@@ -3303,7 +3303,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         environ,
     );
 
-    // Phase 5: Account/network files, lib symlinks, chmod (existing, unchanged)
+    // Phase 5: Account/network files, resolver snapshot, lib symlinks, chmod
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
         mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /sys /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; \
@@ -3311,7 +3311,12 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -f /etc/group ] || printf 'root:x:0:\\ndaemon:x:1:\\nnogroup:x:65534:\\n' > /etc/group; \
         grep -q '^daemon:x:1:' /etc/group || printf 'daemon:x:1:\\n' >> /etc/group; \
         [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
-        rm -f /etc/resolv.conf; ln -s /proc/net/resolv.conf /etc/resolv.conf; \
+        rm -f /etc/.resolv.conf.mango.tmp; \
+        if ! cat /proc/net/resolv.conf > /etc/.resolv.conf.mango.tmp || [ ! -s /etc/.resolv.conf.mango.tmp ]; then \
+            printf 'nameserver 10.0.2.3\\n' > /etc/.resolv.conf.mango.tmp; \
+        fi; \
+        chmod 0644 /etc/.resolv.conf.mango.tmp; \
+        rm -f /etc/resolv.conf; mv -f /etc/.resolv.conf.mango.tmp /etc/resolv.conf; \
         [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
@@ -3413,6 +3418,11 @@ fn prepare_symlink(environ: &[*const u8]) {
             done; \
             if /usr/bin/python3 -S -c 'import os,sys; assert os.environ[\"CPYTHON_ROOT\"].startswith(\"/persist/python-runtime/releases/\"); assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix'; then \
                 echo 'P4 strict-aligned Python launchers installed'; \
+                if ddgs_status=$(/usr/bin/python3 -S /rescue/patch-ddgs-redirect); then \
+                    echo \"$ddgs_status\"; \
+                else \
+                    echo 'P4 DDGS redirect compatibility patch failed; web_search remains unavailable' >&2; \
+                fi; \
                 if smolagents_status=$(/usr/bin/python3 -S /rescue/patch-smolagents-action-type --allow-missing); then \
                     echo \"$smolagents_status\"; \
                     case \"$smolagents_status\" in \
@@ -3697,7 +3707,7 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             src=$1
             dst=$2
             mode=$3
-            if [ ! -f "$dst" ] || ! /bin/busybox cmp -s "$src" "$dst"; then
+            if [ -L "$dst" ] || [ ! -f "$dst" ] || ! /bin/busybox cmp -s "$src" "$dst"; then
                 [ ! -L "$dst" ] || rm -f "$dst"
                 # The current ext4 driver can leave an unremovable stale
                 # `<dst>.tmp` inode after an interrupted rename.  A direct,
@@ -3739,6 +3749,7 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         install_changed /etc/group "$root/etc/group" 0644
         install_changed /etc/hosts "$root/etc/hosts" 0644
         install_changed /etc/nsswitch.conf "$root/etc/nsswitch.conf" 0644
+        install_changed /proc/net/resolv.conf "$root/etc/resolv.conf" 0644
         install_changed /etc/ssl/certs/ca-certificates.crt \
             "$root/etc/ssl/certs/ca-certificates.crt" 0644
         for key in /etc/apk/keys/*.pub; do
@@ -3747,7 +3758,6 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
         ln -sf /sbin/apk "$root/usr/bin/apk"
         ln -sf python3 "$root/usr/bin/python"
         ln -sf certs/ca-certificates.crt "$root/etc/ssl/cert.pem"
-        ln -sf /proc/net/resolv.conf "$root/etc/resolv.conf"
 
         if [ ! -f "$ready" ]; then
             printf '%s\n' 'schema=1' 'root=/persist/apk-root' > "$state/.shell-ready-v1.tmp"
@@ -3775,6 +3785,10 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             /sbin/apk info -e zlib >/dev/null
             [ -r /etc/ssl/cert.pem ]
             [ -r /proc/net/resolv.conf ]
+            [ -f /etc/resolv.conf ]
+            [ ! -L /etc/resolv.conf ]
+            [ -s /etc/resolv.conf ]
+            /bin/busybox cmp -s /proc/net/resolv.conf /etc/resolv.conf
             [ -x /usr/bin/python3 ]
             python_result=$(/usr/bin/python3 -S -c "import os,sys; root=os.environ.get(\"CPYTHON_ROOT\",\"\"); assert root.startswith(\"/persist/python-runtime/releases/\"),root; assert os.environ.get(\"MANGO_PYTHON_POLICY\")==\"p4-strict-align-v1\"; assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix; assert os.environ.get(\"PYTHONUSERBASE\")==\"/persist/python/user\"; print(\"PERSIST_STRICT_PYTHON_OK\")")
             [ "$python_result" = PERSIST_STRICT_PYTHON_OK ]

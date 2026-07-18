@@ -26,6 +26,7 @@ related_docs:
   - "docs/09_debug/la64_on_board/260717/09-aligned-pillow-and-smolagent-closure.md"
   - "docs/09_debug/la64_on_board/260717/10-tty-smolagent-interactive-fix.md"
   - "docs/09_debug/la64_on_board/260717/11-smolagents-toolkit-dependency-closure.md"
+  - "docs/09_debug/la64_on_board/260717/12-smolagents-web-search-epollet-fix.md"
 ---
 
 # 2K1000LA Python 性能专项（2026-07-17 批次）
@@ -58,6 +59,9 @@ related_docs:
 - SmolAgents 三项内置工具的延迟依赖闭包已完成：strict-aligned lxml/primp、libxml2/
   libxslt/BoringSSL 和六个 pure Python 包进入 schema 4、113 ELF runtime；QEMU-user、双架构
   编译与 2K1000LA P4 ext4 实板门禁通过，current 已切换到 `28f61fb764f3`。
+- SmolAgents 真实网页搜索已完成分层实板闭环：修复 TCP producer 伪造 `EPOLLRDHUP`、
+  epoll ET callback 边沿抑制、DDGS 9.0.0 不跟随 Bing 302，以及 chroot `getcwd` 泄漏全局
+  路径；最终 WebSearchTool 2.774 秒返回 1420 字符。
 
 当前没有修改内核非对齐模拟器，没有修复匿名页释放 O(N²)，也没有优化 ext4。ext4
 等待队友 develop 分支的新实现后复测。
@@ -75,6 +79,7 @@ related_docs:
 | SmolAgent/Pillow 闭包 | 100 ELF manifest；默认 SmolAgent、PNG/JPEG P4 ext4 I/O、AgentImage 通过 | 实板已确认 |
 | SmolAgent 三项内置工具 | 113 ELF schema 4；`python_interpreter`、`web_search`、`visit_webpage` 默认构造通过 | 实板已确认 |
 | SmolAgent 交互 TTY | 首字符不再触发 WaitQueue 自锁；canonical/raw/ICRNL 与 CLI 选择修补 | QEMU + 实板已确认 |
+| SmolAgent 真实网页搜索 | primp TLS、DDGS Bing 和 WebSearchTool 全链路通过；2.774 s 返回 1420 字符 | production 实板已确认 |
 | 时间收益口径 | 1,928.806 → 303.470 s 只作辅助趋势，不是 production-to-production 隔离 A/B | 不作为正式收益 |
 
 ## 3. 文档导航
@@ -92,6 +97,7 @@ related_docs:
 | [09-aligned-pillow-and-smolagent-closure.md](09-aligned-pillow-and-smolagent-closure.md) | Pillow/libjpeg/MarkupSafe/PyYAML 闭包、100 ELF manifest、P4 发布异常和最终 SmolAgent 实板验收 | 应用闭包最终留档 |
 | [10-tty-smolagent-interactive-fix.md](10-tty-smolagent-interactive-fix.md) | 首字符 WaitQueue 自锁、TTY line discipline、SmolAgents CLI 补丁及 RESET 后 P4 pyc/source 损坏恢复 | 交互输入与完整性留档 |
 | [11-smolagents-toolkit-dependency-closure.md](11-smolagents-toolkit-dependency-closure.md) | ddgs/markdownify 传递依赖、lxml/primp strict 构建、双层 smoke、P4 原子发布与实板三工具构造 | 内置工具依赖闭包留档 |
+| [12-smolagents-web-search-epollet-fix.md](12-smolagents-web-search-epollet-fix.md) | primp/Tokio TLS 超时、伪造 RDHUP、epoll ET、DDGS 302、chroot getcwd 与最终 WebSearchTool 实板结果 | 真实网页搜索闭环留档 |
 
 ## 4. 证据分层
 
@@ -132,6 +138,6 @@ strict userspace + 归档 perf_diag 内核
   下一步可以直接实施并验收批量删除/索引结构方案。
 - ext4 仅完成在线 rw、sync、重启后哈希和 workload 正确性检查；没有 offline e2fsck、
   断电恢复或 fault injection，不宣称 journal/断电安全。
-- 30 分钟混合稳定性、PMU cache miss、SmolAgent 本地固定响应端点和真实 API 仍未完成；
-  默认命令、import、AgentImage、aligned Pillow 和三项内置工具离线构造已完成，但不能
-  替代真实搜索、网页下载或 LLM 往返测试。
+- 30 分钟混合稳定性、PMU cache miss、SmolAgent 本地固定 LLM 响应端点和真实 LLM API
+  仍未完成；默认命令、import、AgentImage、aligned Pillow、内置工具构造和真实 Bing
+  WebSearchTool 已完成，但网页搜索成功不能替代模型服务往返测试。

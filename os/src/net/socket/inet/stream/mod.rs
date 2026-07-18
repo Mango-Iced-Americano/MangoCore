@@ -245,10 +245,12 @@ impl TcpSocket {
     }
 
     /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
-    pub fn update_io_events(&self) {
-        // NET_INTERFACE.try_poll();
+    pub fn update_io_events(&self) -> (usize, usize) {
+        let previous = self.pollee.load(Ordering::Acquire);
         let inner = self.inner.lock();
         inner.update_io_events(&self.pollee);
+        let current = self.pollee.load(Ordering::Acquire);
+        (previous, current)
     }
 
     /// 唤醒所有等待队列（无差别，仅在 shutdown/close 时使用）
@@ -269,42 +271,61 @@ impl TcpSocket {
     /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
     /// 用于 poll 后的批量唤醒，避免无差别唤醒造成的活锁（connect 在 SynSent 被反复唤醒）。
     pub fn wake_if_ready(&self) {
-        // 先同步 pollee 缓存的 IO 事件
-        self.update_io_events();
-        let events = self.pollee.load(Ordering::Acquire);
+        // EventWaitQueue callbacks are edge notifications.  Publish only bits
+        // that became ready in this refresh; repeatedly notifying every socket
+        // that remains writable would turn EPOLLET back into level-triggered
+        // polling and can keep Tokio's reactor permanently runnable.
+        let (previous, events) = self.update_io_events();
+        let became_ready = events & !previous;
 
         // accept 等待者：Listening 收到了新连接
-        if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits() != 0 {
+        let accept_events = EPollEvent::from_bits_truncate(
+            became_ready & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
+        );
+        if !accept_events.is_empty() {
             self.accept_waiters
-                .notify_events_all_if_unlocked(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+                .notify_events_all_if_unlocked(accept_events);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
-        if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits() != 0
-        {
-            self.connect_waiters.notify_events_all_if_unlocked(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP,
-            );
+        let connect_events = EPollEvent::from_bits_truncate(
+            became_ready
+                & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits(),
+        );
+        if !connect_events.is_empty() {
+            self.connect_waiters
+                .notify_events_all_if_unlocked(connect_events);
         }
 
-        // recv 等待者：有数据可读或对端关闭
-        if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
-            != 0
-        {
-            self.recv_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP,
-                1,
-            );
+        // recv 等待者：有数据可读、对端关闭或 socket 出错。通知载荷只能
+        // 包含本次真实边沿；把整个候选掩码传下去会在普通 EPOLLIN 上伪造
+        // EPOLLRDHUP，使 Tokio 将连接永久标记为 read-closed。
+        let recv_events = EPollEvent::from_bits_truncate(
+            became_ready
+                & (EPollEvent::EPOLLIN
+                    | EPollEvent::EPOLLRDNORM
+                    | EPollEvent::EPOLLRDHUP
+                    | EPollEvent::EPOLLHUP
+                    | EPollEvent::EPOLLERR)
+                    .bits(),
+        );
+        if !recv_events.is_empty() {
+            self.recv_waiters
+                .notify_events_at_most_if_unlocked(recv_events, 1);
         }
 
-        // send 等待者：可发送或写端已 shutdown（shutdown 时 send 会返回 EPIPE）
-        if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits() != 0
-            || self.write_shutdown.load(Ordering::Acquire)
-        {
-            self.send_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
-                1,
-            );
+        // send 等待者：发送缓冲从不可写转为可写，或 socket 关闭/出错。
+        let send_events = EPollEvent::from_bits_truncate(
+            became_ready
+                & (EPollEvent::EPOLLOUT
+                    | EPollEvent::EPOLLWRNORM
+                    | EPollEvent::EPOLLHUP
+                    | EPollEvent::EPOLLERR)
+                    .bits(),
+        );
+        if !send_events.is_empty() {
+            self.send_waiters
+                .notify_events_at_most_if_unlocked(send_events, 1);
         }
     }
 
@@ -804,6 +825,7 @@ impl Socket for TcpSocket {
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
         let inner = self.inner.lock();
         let result = inner.shutdown(how);
+        drop(inner);
         if result.is_ok() {
             match how {
                 0 => self.read_shutdown.store(true, Ordering::Release), // SHUT_RD
@@ -813,6 +835,10 @@ impl Socket for TcpSocket {
                     self.write_shutdown.store(true, Ordering::Release); // SHUT_RDWR
                 }
             }
+            // shutdown is itself the state transition.  Do not rely on a later
+            // network poll to repeat a level-like notification: EPOLLET users
+            // and blocked send/recv calls must be woken immediately.
+            self.wake_wait_queues();
         }
         result
     }
@@ -959,11 +985,11 @@ impl Socket for TcpSocket {
         let inner = self.inner.lock();
         let ret = inner.try_recv(buf);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLIN.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // A successful short read may have drained the receive queue.  Derive
+        // readiness from the socket after I/O instead of treating every
+        // successful return as still readable; otherwise EPOLLET users never
+        // observe the next empty -> readable transition.
+        self.update_io_events();
         #[cfg(feature = "net_perf_diag")]
         record_tcp_recv_perf(buf.len(), &ret);
         ret
@@ -1052,11 +1078,9 @@ impl Socket for TcpSocket {
         let inner = self.inner.lock();
         let ret = inner.try_send(buf);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLOUT.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // A partial write can fill the send queue even though it succeeded.
+        // Refresh from smoltcp so a later writable transition produces an edge.
+        self.update_io_events();
         ret
     }
 
@@ -1074,11 +1098,11 @@ impl Socket for TcpSocket {
         let _ = flags;
         let ret = inner.recv_to_user(buf, 0, buf.len()).map(|n| n as isize);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLIN.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // sys_read/readv use this direct UserBuffer path.  In particular,
+        // Tokio's TcpStream reads land here, and Tokio clears its userspace
+        // readiness after a short read.  Mirror the actual post-read socket
+        // state so the next packet can generate a fresh EPOLLET notification.
+        self.update_io_events();
         #[cfg(feature = "net_perf_diag")]
         record_tcp_recv_perf(buf.len(), &ret);
         ret
@@ -1103,11 +1127,7 @@ impl Socket for TcpSocket {
             let inner = self.inner.lock();
             let ret = inner.try_send(&[]);
             drop(inner);
-            update_ready_bit(
-                &self.pollee,
-                EPollEvent::EPOLLOUT.bits(),
-                !matches!(ret, Err(SyscallErr::EAGAIN)),
-            );
+            self.update_io_events();
             return ret;
         }
         let mut tmp = alloc::vec![0u8; total];
@@ -1115,11 +1135,9 @@ impl Socket for TcpSocket {
         let inner = self.inner.lock();
         let ret = inner.try_send(&tmp[..n]);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLOUT.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // Keep the producer-side readiness cache aligned with the real send
+        // queue; syscall success alone does not imply that it remains writable.
+        self.update_io_events();
         ret
     }
 

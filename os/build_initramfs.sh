@@ -154,6 +154,7 @@ esac
 CPYTHON_ENTRY_SRC="../user/tools/cpython/python-entry-wrapper.sh"
 CPYTHON_VERIFY_SRC="../scripts/board/verify_persist_python.sh"
 SMOLAGENTS_PATCH_SRC="../scripts/board/patch_smolagents_action_type.py"
+DDGS_PATCH_SRC="../scripts/board/patch_ddgs_redirect.py"
 if [ -x "$CPYTHON_WRAPPER_SRC" ]; then
     mkdir -p "$STAGE/rescue"
     install -m 0755 "$CPYTHON_WRAPPER_SRC" "$STAGE/rescue/python3-wrapper"
@@ -181,6 +182,13 @@ if [ "$ARCH" = la64 ] && [ -f "$SMOLAGENTS_PATCH_SRC" ]; then
     echo "[initramfs] installed reviewed smolagents 1.26.0 action-type patch"
 elif [ "$ARCH" = la64 ]; then
     echo "[initramfs] ERROR: missing smolagents action-type patch" >&2
+    exit 1
+fi
+if [ "$ARCH" = la64 ] && [ -f "$DDGS_PATCH_SRC" ]; then
+    install -m 0755 "$DDGS_PATCH_SRC" "$STAGE/rescue/patch-ddgs-redirect"
+    echo "[initramfs] installed reviewed DDGS 9.0.0 redirect patch"
+elif [ "$ARCH" = la64 ]; then
+    echo "[initramfs] ERROR: missing DDGS redirect patch" >&2
     exit 1
 fi
 

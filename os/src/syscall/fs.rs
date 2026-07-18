@@ -1402,19 +1402,54 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     info!("[sys_getcwd] buf={:#x}, size={}", buf, size);
     let task = current_task().unwrap();
     let fs_ref = task.process.fs();
-    let (cwd_inode, cached_path) = {
+    let (cwd_inode, cached_path, root_inode) = {
         let fs_lock = fs_ref.lock();
         (
             fs_lock.working_inode.inode.clone(),
             fs_lock.working_path.clone(),
+            fs_lock.root_inode.clone(),
         )
     };
     let working_dir = match cwd_inode.absolute_path() {
-        Ok(path) => {
-            if path != cached_path {
-                fs_ref.lock().working_path = path.clone();
+        Ok(global_path) => {
+            // absolute_path() reconstructs a path from the global VFS root.
+            // After chroot(2), getcwd(2) must instead expose the path relative
+            // to the calling process's root.  Leaking the global prefix also
+            // produces a path that cannot be opened from inside the chroot
+            // (for example `/persist/apk-root`), which breaks Python's
+            // os.getcwd()/python-dotenv path validation.
+            let visible_path = if let Some(root_inode) = root_inode.as_ref() {
+                if Arc::ptr_eq(&cwd_inode, root_inode) {
+                    String::from("/")
+                } else {
+                    let root_path = match root_inode.absolute_path() {
+                        Ok(path) => path,
+                        Err(_) => return ENOENT,
+                    };
+                    let root_prefix = root_path.trim_end_matches('/');
+                    if root_prefix.is_empty() {
+                        global_path
+                    } else if let Some(suffix) = global_path.strip_prefix(root_prefix) {
+                        if suffix.is_empty() {
+                            String::from("/")
+                        } else if suffix.starts_with('/') {
+                            String::from(suffix)
+                        } else {
+                            // A textual prefix without a component boundary is
+                            // not a descendant of the process root.
+                            return ENOENT;
+                        }
+                    } else {
+                        return ENOENT;
+                    }
+                }
+            } else {
+                global_path
+            };
+            if visible_path != cached_path {
+                fs_ref.lock().working_path = visible_path.clone();
             }
-            path
+            visible_path
         }
         Err(_) => cached_path,
     };

@@ -1364,7 +1364,7 @@ PY
 }
 
 install_smolagents_toolkit_pure() {
-    local stamp=smolagents-toolkit-pure-v1
+    local stamp=smolagents-toolkit-pure-v2
     if is_done "$stamp"; then return; fi
     install_wheel_safely "$CACHE/$CLICK_WHEEL" click 8.1.8 py3-none-any
     install_wheel_safely "$CACHE/$SIX_WHEEL" six 1.17.0 py3-none-any
@@ -1372,6 +1372,24 @@ install_smolagents_toolkit_pure() {
     install_wheel_safely "$CACHE/$BEAUTIFULSOUP4_WHEEL" beautifulsoup4 4.12.3 py3-none-any
     install_wheel_safely "$CACHE/$MARKDOWNIFY_WHEEL" markdownify 0.14.1 py3-none-any
     install_wheel_safely "$CACHE/$DDGS_WHEEL" ddgs 9.0.0 py3-none-any
+    python3 - "$RUNTIME/usr/lib/python3.14/site-packages/ddgs/ddgs.py" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+original = source.read_bytes()
+old = b"            follow_redirects=False,\n"
+new = b"            follow_redirects=True,\n"
+original_sha = "eb9a3cc9bcd06f2d711d2a736e7758bd68ebcb46458883d6c183eeb62c383db2"
+patched_sha = "3c321b9445ec57db0bd1d06899c6a10eeeea2817fa7ecbc1b2e08f37878bed24"
+if hashlib.sha256(original).hexdigest() != original_sha or original.count(old) != 1:
+    raise SystemExit("refusing to patch unreviewed DDGS 9.0.0 redirect policy")
+patched = original.replace(old, new, 1)
+if hashlib.sha256(patched).hexdigest() != patched_sha:
+    raise SystemExit("DDGS 9.0.0 redirect patch digest mismatch")
+source.write_bytes(patched)
+PY
     mark_done "$stamp"
 }
 

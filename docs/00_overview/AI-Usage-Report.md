@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-14
+> Coverage: 2026-04-01 to 2026-07-18
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -45,6 +45,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | 2K1000LA SATA/FAT32 分阶段写入 | 2026-07-11 | OpenAI Codex | AHCI 暖复位、P2 定向恢复、FAT32 元数据持久化、用户态 `/scratch` 隔离写入与实板串口验证 | 完成 raw write/flush、内核文件探针和用户态 write/fsync/truncate/reopen/unlink/rmdir 闭环；P1/P3 保持只读 |
 | 2K1000LA 2 GiB 内存拓扑审计 | 2026-07-13 | OpenAI Codex multi-agent, max reasoning mode | 复核早期扩容方案；并行审计 VA/PA 掩码、DMW cache 属性、U-Boot LMB、DVO DMA、CPU1 park loop 和连续 DMA 分配 | 推翻“DRAM 即已交接”的错误前提；建立双 bank allocator 与临时 carveout，完成跨 bank 320 MiB 压力、QEMU VirtIO/Ext4/LTP 和实板 AHCI 只读验收 |
 | 2K1000LA CPython 实机适配 | 2026-07-13 至 2026-07-14 | OpenAI Codex, max reasoning mode | 选择性审计 develop 分支 CPython 链路；对照 QEMU 与实机定位 LSX/FPR 上下文差异，补齐 FAT/TmpFS、外网测试语义和受限 P3 更新工具 | 修复实机 trap 后向量损坏、FAT rename 覆盖和 TmpFS symlink；rv64/la64 QEMU 与 2K1000LA 实板 CPython L3-L9 均 72/72 |
+| 2K1000LA c-ares 默认 DNS 闭环 | 2026-07-18 | OpenAI Codex | 对照默认/显式 DNS、procfs inode 元数据和 c-ares 文件加载源码，区分 macOS 网络共享、内核数据面和配置发布问题 | 将 `/etc/resolv.conf` 改为可刷新的普通快照；双架构、LA64 QEMU 和实板 P4 ext4 验证默认 curl/Python DNS |
 
 ## 4. 详细使用场景
 
@@ -255,6 +256,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human verification: 审阅 bind/chroot 边界和 rename 回滚；Docker 串行双架构构建；最小与完整 CPython P3 两类 LA64 QEMU 门禁；同目录空目标/覆盖目标专项；rv64 QEMU 挂载与 LTP 冒烟。
 - Result: 应用根绑定只读 `/tools` 与 P4 pyc 目录并真实执行 Python 门禁；ext4 rename 改为先移除后发布并对失败路径回滚，两个目录项专项均通过，也解释了此前 APK `wcurl` 的一次性提交异常。
 
+### Case 11: c-ares 将非空 procfs resolver 配置误判为空
+
+- Evidence: `docs/Work_Log.md` 2026-07-18、`user/src/bin/initproc.rs`、`os/initramfs/apk/usr/bin/persist-shell`、`docs/06_net/dhcp.md`
+- AI tools: OpenAI Codex
+- Problem: macOS Internet Sharing 下 BusyBox/APK 和显式 `curl --dns-servers 192.168.2.1` 正常，默认 curl 却超时，初看像宿主 DNS 代理与 c-ares 不兼容。
+- AI contribution: 用默认/显式服务器 A/B 排除 DNS 服务和数据面，继续核对 `/etc/resolv.conf -> /proc/net/resolv.conf` 的内容与 inode 元数据，发现文件可读 23 字节但 `st_size=0`；再对照 c-ares 1.34.8 的 `fseek(SEEK_END)`/`ftell()` 加载路径，确认它把配置当成空文件并回退到 loopback。
+- Human verification: 审阅两处发布逻辑和旧 P4 迁移边界；项目 Docker 镜像内顺序完成 rv64/la64 构建；LA64 QEMU 验证链接迁移与重复入口刷新；2K1000LA 通过 TFTP CRC/uImage 校验、P4 `stage=reuse`、rw ext4 文件元数据、默认 curl 两次 HTTP 200 和 aligned Python `getaddrinfo()`。
+- Result: 保留 procfs 动态状态接口，同时把宿主/P4 标准 resolver 路径发布成有真实长度的普通文件；P4 在启动和每次 `persist-shell` 入口刷新，不再需要硬编码公共 DNS或命令行 `--dns-servers`。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -307,6 +317,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md` 2026-07-14 | 2K1000LA CPython 实机适配 | 记录 Codex 对 LSX/FPR 别名、FAT rename、TmpFS symlink 和 DNS/HTTPS 测试语义的根因分析，以及双架构 72/72 与实机压力证据 |
 | `docs/Work_Log.md` 2026-07-14 | 2K1000LA AHCI/Python 性能 | 记录 Codex 对 develop DMA 池化方案的并发模型审计、512 B 命令放大根因、64/256 KiB 实板 A/B，以及 pyc 用户态瓶颈分层证据 |
 | `docs/Work_Log.md` 2026-07-14 | persist-shell CPython/ext4 rename | 记录 Codex 对 chroot bind 边界、ext4 不定长目录项邻接覆盖的根因定位，以及双架构、两类 P3 和 rename 专项证据 |
+| `docs/Work_Log.md` 2026-07-18 | c-ares/procfs resolver 默认 DNS | 记录 Codex 通过默认/显式 DNS A/B、inode 元数据和 c-ares 源码闭环根因，以及双架构、QEMU 和 P4 ext4 实板验证 |
 
 ## 9. 交互记录与留痕方式
 

@@ -71,6 +71,34 @@
 ### 非阻塞 socket 测试失败
 - 检查 `try_xxx` 前是否调了 `NET_INTERFACE.try_poll()`
 
+### curl 正常但 Tokio/Mio HTTPS 超时
+
+- **先分层**：用同一受控主机依次测 raw HTTP、Python `ssl + epoll(EPOLLET)`、目标 Rust
+  client 和公网 HTTPS。curl 成功只能证明 curl 所走路径可用，不能证明另一个 reactor 的
+  edge-triggered 事件语义正确。
+- **事件载荷必须精确**：wait queue 的候选 mask 只能用于筛选，不得在“组内任一 bit
+  ready”后把整个候选组作为通知载荷。普通 `EPOLLIN` 若被扩大为
+  `EPOLLIN | EPOLLRDHUP`，Tokio 可能永久把连接标为 read-closed，随后在 socket 已返回
+  `EAGAIN` 时循环到 timeout。
+- **区分 scan 与 producer callback**：状态 scan 可用 `last_ready` 抑制重复 level
+  observation；producer callback 本身代表新边沿，不能因 scan 缓存仍有同一 bit 而丢弃。
+  producer 只发布 `current & !previous` 的真实 0→1 位，read/write 后再从底层 socket
+  刷新 readiness，不能用“syscall 成功”推断仍 ready。
+- **一个 timeout 后继续检查上层**：内核修复后若错误从 timeout 变为 HTTP 302/None，说明
+  数据面已经前进，应检查 client 的 redirect/status 策略，不要把新错误继续归为内核网络。
+- **相关文件**：`os/src/net/socket/inet/stream/mod.rs`、`os/src/fs/eventpoll.rs`。
+
+### chroot 内 Python 报 Starting path not found
+
+- **现象**：chroot shell prompt 显示 `/`，但 `os.getcwd()` 返回 chroot 外的全局路径；
+  python-dotenv 等会验证起始路径存在，随后报 `OSError: Starting path not found`。
+- **根因**：VFS inode 的 `absolute_path()` 从全局 root 重建路径，而 `getcwd(2)` 没有转换为
+  当前进程 `root_inode` 下的可见路径。
+- **修复模式**：按目录组件边界把全局 cwd 转成 root-relative path；cwd 与 root inode
+  相同时返回 `/`，无法证明位于 root 内时 fail closed。不要通过禁用 dotenv 或伪造
+  `PWD` 绕过内核 chroot 语义。
+- **相关文件**：`os/src/syscall/fs.rs`、`os/src/task/task.rs`。
+
 ### BusyBox DNS 正常但 glibc getaddrinfo 失败
 
 - **现象**：`nslookup` 和按数字 IP 发起的 HTTP 请求成功，但 glibc 程序通过域名
@@ -802,3 +830,23 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **相关文件**：`scripts/build_cpython_runtime_la64_strict.sh`,
   `scripts/install_cpython_runtime_la64_strict.py`, `scripts/board/verify_persist_python.sh`,
   `user/tools/cpython/smolagents_toolkit_smoke.py`
+
+### 动态伪文件可读但 `st_size=0` 时不能直接充当 seek-based 配置文件
+
+- **现象**：`cat`、BusyBox resolver 或显式指定服务器的客户端正常，默认客户端却回退
+  到 loopback、报告 DNS timeout；`read()` 能从配置路径取得完整内容，因此容易把问题
+  错归因于上游 DNS 代理或网络栈。
+- **根因**：配置路径是指向 procfs/sysfs 等动态节点的符号链接，目标 inode 按伪文件
+  约定报告 `st_size=0`。若用户库先 `fseek(SEEK_END)`/`ftell()` 再按长度读取，就会把
+  非空流误判为空；不同 resolver 使用不同加载策略，因此同机 A/B 结果会分裂。
+- **定位**：同时记录 `readlink`、`stat -L`、原始字节数、默认客户端实际目的 DNS 和
+  “显式服务器”A/B。若内容非空、size 为 0、显式服务器成功且默认路径转向 loopback，
+  应先审计库的文件加载源码，不要继续调 UDP 重试或硬编码公共 DNS。
+- **修复**：保留动态伪文件作为状态接口，把标准配置路径发布为有真实 inode 长度的普通
+  快照；启动、租约事件或环境入口负责刷新，并在迁移时显式删除旧链接。发布后校验目标
+  非链接、非空且与动态源一致。当前 ext4 若不可靠支持临时 inode/rename，应使用可重入
+  的直接复制并在下次入口复核；成熟文件系统优先同目录 temp + fsync + rename。
+- **验收**：必须在最终文件系统上同时验证文件类型/size/内容、默认客户端、运行时语言
+  resolver 和刷新路径；显式 DNS 成功只能证明服务器健康，不能替代默认路径验收。
+- **相关文件**：`user/src/bin/initproc.rs`,
+  `os/initramfs/apk/usr/bin/persist-shell`, `os/src/fs/procfs/files/net_resolv.rs`

@@ -4,7 +4,7 @@ module: "os/src/net/config.rs"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: "2026-07-13"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/net/config.rs"
   - "os/src/net/net_core.rs"
@@ -74,9 +74,17 @@ DHCP DNS 服务器保存在 net_core::DNS_SERVERS。/proc/net/resolv.conf 每次
 nameserver 192.168.1.1
 ~~~
 
-initproc 将 /etc/resolv.conf 链接到该 procfs 文件，所以续租后 libc/BusyBox
-解析器能直接读取新配置。租约尚未到达时暂时保留 QEMU SLIRP 的
-nameserver 10.0.2.3 作为回退。
+`/proc/net/resolv.conf` 保持动态查询接口，但 procfs inode 的 `st_size` 为 0。
+BusyBox/libc 这类顺序读取者可以得到内容，c-ares 1.34.8 的配置加载器却先执行
+`fseek(SEEK_END)`/`ftell()`，若把 `/etc/resolv.conf` 链接到该节点就会把非空配置
+误判为空并回退到 loopback DNS。initproc 因此在 DHCP 初始化后把当前内容发布为具有
+真实长度的普通 `/etc/resolv.conf`；P4 应用根在每次启动和每次 `persist-shell` 入口
+同步同一快照，并迁移旧符号链接。租约尚未到达或动态文件读取失败时仍以 QEMU SLIRP
+的 `nameserver 10.0.2.3` 作为启动回退。
+
+该实现没有后台 DNS 配置守护进程：procfs 内容会随续租更新，宿主普通文件在下一次
+启动刷新，P4 普通文件在下一次进入 `persist-shell` 时刷新。若以后需要长会话内无缝
+切换 DNS，应由 DHCP 事件侧通知专门的用户态发布器，而不是恢复到零长度 procfs 链接。
 
 glibc 的同步 resolver 还依赖两项 socket ABI：在 UDP 查询 socket 上启用
 `IP_RECVERR`，并用 `sendmmsg(269)` 批量发送 A/AAAA 查询。MangoCore 为 UDP

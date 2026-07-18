@@ -82,6 +82,9 @@ print("[persist-python-verify] self_exec=" + child.stdout.strip())
 python3 -m pip --version
 python3 "$release/pillow_strict_smoke.py"
 python3 "$release/smolagents_toolkit_smoke.py"
+python3 -S /rescue/patch-ddgs-redirect --check \
+    || fail "DDGS redirect compatibility gate failed"
+echo "[persist-python-verify] ddgs_redirect=pass"
 
 native_user=$(/bin/busybox find /persist/python/user -type f \
     \( -name '*.so' -o -name '*.so.*' \) -print -quit 2>/dev/null || true)

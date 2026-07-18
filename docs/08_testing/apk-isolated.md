@@ -3,7 +3,7 @@ title: "APK 隔离与 P4 持久化测试"
 category: testing
 status: draft
 author: MangoCore Team
-last_update: 2026-07-14
+last_update: 2026-07-18
 tags: [testing, apk, qemu, loongarch64, 2k1000, https, filesystem]
 code_paths:
   - "os/Cargo.toml"
@@ -14,6 +14,7 @@ code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/main.rs"
   - "user/src/bin/initproc.rs"
+  - "os/initramfs/apk/usr/bin/persist-shell"
   - "scripts/make_2k1000_p4_ext4.py"
   - "scripts/make_2k1000_p4_qemu_disk.py"
   - "scripts/write_2k1000_p4.py"
@@ -183,11 +184,11 @@ GMAC DHCP、P2 scratch 冒烟和 `[apk-persist] RESULT=PASS`。
 | 应用根路径 | 来源 | 作用 |
 |------------|------|------|
 | `/dev` | 宿主 devfs bind mount | TTY、随机设备和其他设备节点 |
-| `/proc` | 宿主 procfs bind mount | DNS 配置、进程与网络状态 |
+| `/proc` | 宿主 procfs bind mount | 动态 DNS 来源、进程与网络状态 |
 | `/tmp`、`/run` | 宿主 RAMFS/TmpFS bind mount | 不持久化临时文件 |
 | `/scratch` | P2 FAT32 bind mount | 可删除的 APK 下载缓存 |
-| `/tools` | P3 ext4 bind mount | 只读 CPython 运行时与竞赛工具 |
-| `/var/cache/mango-python` | P4 `/persist/python` bind mount | 跨宿主/chroot 复用 pyc |
+| `/persist/python-runtime` | P4 strict runtime bind mount | 唯一 CPython release 与私有 loader |
+| `/persist/python`、`/var/cache/mango-python` | P4 用户状态 bind mount | user site、pyc 与 pip 状态 |
 
 APK 数据库、已安装程序、动态库、账户配置和 shell profile 保存在
 `/persist/apk-root`；配置完成后原子发布 `shell-ready-v1`。initramfs 中的宿主 `apk`
@@ -195,14 +196,20 @@ APK 数据库、已安装程序、动态库、账户配置和 shell profile 保�
 静态 BusyBox 的 `chroot` applet 进入应用根。准备阶段同时创建
 `/etc/ssl/cert.pem -> certs/ca-certificates.crt`；只复制 CA bundle 而缺少该默认路径时，
 APK 的 libfetch 会报 `TLS: server certificate not trusted`。每次启动还会把当前
-`/rescue/python3-wrapper` 安装为应用根的 `python3`/`python`，并将只读 `/tools` 和
-P4 pyc 目录绑定进 chroot；因此宿主与 `persist-shell` 使用同一套 P3 CPython 运行时和
-字节码缓存。该 P4 目录还保存 `ensurepip` 临时文件和 `pip --user` 安装树，profile 已将
+`/proc/net/resolv.conf` 复制为 P4 ext4 上有真实长度的普通 `/etc/resolv.conf`，并在
+每次进入 `persist-shell` 前刷新；这是因为 c-ares 会用 seek/`ftell()` 读取 resolver
+配置，不能直接使用 `st_size=0` 的 procfs 链接。准备门禁要求目标非链接、非空且与
+当前 procfs 内容一致，旧 P4 的链接会在 `stage=reuse` 时自动迁移。每次启动还会把当前
+此外，每次启动会把 `/rescue/python3-wrapper` 安装为应用根的 `python3`/`python`，并将
+P4 strict runtime 与用户状态目录绑定进 chroot；因此宿主与 `persist-shell` 使用同一套
+P4 CPython release 和字节码缓存，P3 `/tools` 仅作备份而不参与默认执行。P4 用户目录还
+保存 `ensurepip` 临时文件和 `pip --user` 安装树，profile 已将
 `/var/cache/mango-python/user/bin` 加入 `PATH`，并只对该隔离用户树启用 PEP 668 override。
-由于 CPython `ensurepip` 会清除 `PIP_*` 环境变量，首次引导直接从 P3 自带 wheel 安装；
-之后统一使用 `python3 -m pip`，避免生成脚本的 shebang 绕过私有 loader 包装器。未携带
-CPython 的最小 QEMU P3 仍允许进入 APK shell，只跳过 Python
-子门禁；检测到完整运行时的镜像和实板则必须实际执行 `python3 -S`。日常使用为：
+由于 CPython `ensurepip` 会清除 `PIP_*` 环境变量，首次引导使用 P4 release 自带的
+bundled wheel；之后统一使用 `python3 -m pip`，避免生成脚本的 shebang 绕过私有 loader
+包装器。未携带
+有效 P4 strict runtime 的旧 QEMU fixture 现在会 fail closed，不再通过 P3 或最小环境
+跳过 Python 子门禁；完整镜像和实板必须实际执行 `python3 -S`。日常使用为：
 
 ```bash
 # 宿主 shell 中可直接管理 P4，但运行动态程序应进入应用根
@@ -213,8 +220,7 @@ persist-shell
 apk update
 apk add curl
 python3 --version
-wheel=$(echo /tools/tests/cpython/usr/lib/python3.14/ensurepip/_bundled/pip-*.whl)
-PYTHONPATH="$wheel" python3 -m pip install --no-index --no-cache-dir --user "$wheel"
+python3 -m ensurepip --user
 python3 -m pip install --user requests
 curl https://example.com/
 exit
@@ -248,15 +254,19 @@ QEMU 最小复现确认 ext4 同目录 rename 会在新目录项落入旧目录�
 名称；修复目录项操作顺序与回滚后，空目标/覆盖目标 rename 专项均通过。该现象不再作为
 未解释的 APK 偶发故障。
 `curl --resolve` 的证书校验请求以及 c-ares 指向公共 DNS 的普通域名请求均返回 0。
-macOS Internet Sharing 下 DHCP DNS `192.168.2.1` 不响应该版本 c-ares 的查询，但 APK
-和 BusyBox resolver 可用；这是当前宿主 DNS 代理边界，不应改成内核硬编码 DNS。
+随后取证推翻了“macOS Internet Sharing 的 DHCP DNS 不响应 c-ares”这一判断：显式
+`curl --dns-servers 192.168.2.1` 始终成功，实际是旧 `/etc/resolv.conf` 链到
+`st_size=0` 的 procfs，c-ares 因 seek/`ftell()` 得到空配置后查询 `127.0.0.1`。
+2026-07-18 的普通文件修复上板后，P4 `stage=reuse` 自动迁移为 23 字节文件，默认
+`curl` 连续两次返回 HTTP 200（一次 DNS lookup 约 13 ms），aligned Python
+`socket.getaddrinfo()` 也成功；无需硬编码公共 DNS或传 `--dns-servers`。
 已写入持久标记并 `sync`，包含 CA 自动修复的新 uImage 也已生成；由于本轮第二次
 `RESET` 未发生，真实 SSD 上的完整复位复用仍是下一门禁。
 
-完整 CPython P3 的 LA64 QEMU 盘还验证了 `/tools` 和 `/persist/python` 两个新增 bind：
-应用根内 `python3 -S` 输出 `PERSIST_PYTHON_OK`，pyc 路径为
-`/var/cache/mango-python/pycache`。不含 CPython 的最小 P3 只跳过这一可选子门禁，APK shell
-本身仍必须通过；因此最小镜像不会制造伪失败，完整镜像也不会用“文件存在”替代真实执行。
+当前门禁验证 `/persist/python-runtime` 与 `/persist/python` 两个 P4 bind：应用根内
+`python3 -S` 必须确认 `CPYTHON_ROOT` 指向 `/persist/python-runtime/releases/...`、策略为
+`p4-strict-align-v1`，且解释器和 prefix 均不含 `/tools`。缺少 P4 release 的旧 QEMU
+fixture 会在绑定/执行门禁失败，不能再以“最小镜像”跳过真实 Python 执行。
 
 该阶段仍不是 overlay root：宿主 `/` 继续是 RAMFS，P1/P3 及用户态块设备节点继续
 只读。动态链接程序应在 `persist-shell` 中运行，因为其绝对 ELF interpreter 和库路径

@@ -4,6 +4,53 @@
 
 ## 2026-07-18
 
+### net/python: 修复 SmolAgents WebSearch 的 Tokio epoll/TLS 超时与 DDGS 302
+
+**涉及文件：**
+- `os/src/net/socket/inet/stream/mod.rs` — producer 只发布真实 0→1 readiness 位和精确事件载荷，禁止普通 `EPOLLIN` 伪造 `EPOLLRDHUP/HUP/ERR`；read/write 后从 smoltcp 刷新状态，shutdown 作为显式边沿在锁外唤醒
+- `os/src/fs/eventpoll.rs` — 区分状态扫描与 producer callback；callback 本身作为新 ET 边沿入 ready queue，不再被 scan 的 `last_ready` 错误抑制
+- `os/src/syscall/fs.rs` — `getcwd(2)` 在 chroot 后按进程 `root_inode` 返回 root-relative 路径，组件边界或可达性不成立时 fail closed，避免向 Python 泄漏不可访问的全局 VFS 路径
+- `scripts/board/patch_ddgs_redirect.py`、`scripts/build_cpython_runtime_la64_strict.sh` — 对精确 DDGS 9.0.0 源码和整文件 SHA 门禁 `follow_redirects=True`；当前 immutable release 用 P4 pure-Python overlay，未来 runtime 在打包期固化
+- `os/build_initramfs.sh`、`user/src/bin/initproc.rs`、`scripts/board/verify_persist_python.sh` — 将 DDGS 补丁纳入 initramfs、启动期安装/复核及 strict runtime fail-closed 验证
+- `docs/09_debug/la64_on_board/260717/{README,12-smolagents-web-search-epollet-fix}.md` — 记录 curl/primp/SSL/epoll/DDGS/SmolAgents 分层 A/B、事件 trace、最终镜像身份与实板结果
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“curl 成功但 Tokio 超时”的精确事件载荷诊断模式，以及 chroot getcwd 泄漏全局路径模式
+
+**验证：**
+- 项目 Docker 镜像内严格串行执行 `make rv64-kernel-build-only`、`make la64-kernel-build-only`，均退出 0；canonical `make la64-2k1000-apk-persist-shell` 构建退出 0 ✅
+- 最终 uImage 16,788,240 B、SHA-256 `28c2d836d63171af361a09a00f05fad2f6d6872160a19190e37785b0c3624391`；TFTP 传输字节一致，U-Boot CRC-32 `ab660503`、LoongArch `iminfo` 和 checksum 均通过 ✅
+- 2K1000LA 启动得到 DHCP `192.168.2.2/24`，P4 rw ext4 `stage=reuse`、strict launcher、DDGS overlay、SmolAgents CLI patch 与 `[apk-persist-shell] RESULT=PASS` ✅
+- chroot 内 `os.getcwd()` 从错误的 `/persist/apk-root` 修正为 `/`；正常 site 环境导入 SmolAgents/python-dotenv 后不再报 `Starting path not found` ✅
+- 最终实板 primp 本地 TLS 为 HTTP 200/3675 B/0.107 s，公网 example.com 为 HTTP 200/559 B/2.007 s；DDGS `--check` 为 `overlay-verified` ✅
+- SmolAgents 真实 `TOOL_MAPPING["web_search"]().forward("Luogu P1003 problem")` 在 2.774 s 返回 1420 字符，原 Bing `operation timed out` 消失 ✅
+- LA64 QEMU P4 shell kernel 完成构建并启动到 initproc；旧 QEMU P4 fixture 缺当前 strict runtime，按门禁 fail closed，不记应用 PASS ⚠️
+- `python3 -m py_compile scripts/board/patch_ddgs_redirect.py`、相关 shell `sh -n`、`git diff --check` 通过 ✅
+
+**备注：**
+- 诊断 trace 显示 socket 当前位为 `0x145`，旧 producer 却通知 `0x2001`（`EPOLLRDHUP|EPOLLIN`）；读空后已是 `EAGAIN/0x104`，Tokio/BoringSSL 仍因伪造 RDHUP 重试到 timeout。修复后本地和公网 primp TLS 均恢复，确认内核根因。
+- 内核修复后 DDGS 错误前进为 Bing `302 -> cn.bing.com` 后返回 `None`；启用标准 redirect 后默认 DDGS 1.348 s 返回 3 条。该上层兼容问题与内核 timeout 分开修复、分开取证。
+- 搜索结果中文在串口捕获中仍有乱码/控制字符，属于高速串口字节完整性的独立问题；本轮不把它归因于 DDGS/TLS，也没有发送真实 LLM API 请求。
+
+### net/runtime: 修复 procfs resolv.conf 使 c-ares 默认 DNS 超时
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 不再把宿主和 P4 应用根的 `/etc/resolv.conf` 链接到 `st_size=0` 的 procfs 文件；宿主启动时原子发布普通文件，P4 在每次启动（含 `stage=reuse`）迁移旧链接并复制当前 DHCP DNS；准备门禁要求普通、非空且逐字节匹配
+- `os/initramfs/apk/usr/bin/persist-shell` — 每次进入 chroot 前刷新 P4 ext4 上的 resolver 快照；旧符号链接强制删除后重建，源不可读、目标仍为链接或空文件时 fail closed
+- `docs/06_net/dhcp.md`、`docs/08_testing/apk-isolated.md` — 修正 DNS 交付语义和此前对 macOS Internet Sharing 的错误归因，补充 c-ares seek/`st_size` 根因与实板验收
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀“动态伪文件可读但 `st_size=0`”与 seek-based 配置解析器不兼容的通用定位模式
+- `docs/00_overview/AI-Usage-Report.md` — 将本次源码/实板闭环加入 Codex 代表性案例和 Work_Log 证据
+
+**验证：**
+- `sh -n os/initramfs/apk/usr/bin/persist-shell` 与 `git diff --check` 通过；项目 Docker Compose 因宿主没有其固定限速设备 `/dev/sdb` 无法启动，随后使用同一 `zhouzhouyi/os-contest:20260104` 镜像、同一 `/app` 挂载严格串行执行 `make rv64-kernel-build-only`、`make la64-kernel-build-only`，均退出 0 ✅
+- LA64 QEMU P4：已有 `/etc/resolv.conf -> /proc/net/resolv.conf` 在执行新 `persist-shell` 时迁移为 20 字节普通文件；人为写成 `nameserver 127.0.0.1` 后退出并重新进入，内容恢复为 `10.0.2.3`、`cmp` 退出 0。该旧 QEMU fixture 缺 P4 strict Python release，故完整 `prepare_apk_persist_shell` 在 Python bind 门禁失败；resolver 专项通过但不记整镜像 PASS ⚠️
+- 2K1000LA uImage 为 16,780,080 B、SHA-256 `5413fd05dc6eb97753b3bce02310b038c0c5dd9466a321d0506b295494c9d90e`，TFTP CRC-32 `d198d096`，`iminfo` 架构/校验和通过；DHCP 得到 `192.168.2.2/24`、gateway/DNS `192.168.2.1`，P4 `stage=reuse` 与 `[apk-persist-shell] RESULT=PASS` ✅
+- 2K1000LA 宿主和 P4 chroot 的 `/etc/resolv.conf` 均为 23 字节普通文件，内容 `nameserver 192.168.2.1`；P4 位于 rw ext4，且与 `/proc/net/resolv.conf` 执行 `cmp` 退出 0 ✅
+- 不带 `--dns-servers` 的 `curl -4 -I -m 12 https://example.com` 返回 HTTP/2 200、退出 0；第二次默认请求 `time_namelookup=0.013436 s`、`time_total=1.640849 s`、HTTP 200；aligned Python `socket.getaddrinfo(AF_INET)` 返回 `104.20.23.154`、退出 0 ✅
+- 实板原始串口日志保存于 `target/perf-runs/20260718T0718Z-cares-resolv-fix/raw/board-boot.log`；修复前取证保存在 `target/perf-runs/20260718T0628Z-macos-sharing-dns/` ✅
+
+**备注：**
+- 修复前 `/proc/net/resolv.conf` 可读出 23 字节 DHCP DNS，但 `stat` 为 0；c-ares 1.34.8 的文件加载路径先 `fseek(SEEK_END)`/`ftell()`，因此把该符号链接判为空并回退到 `127.0.0.1`。显式 `curl --dns-servers 192.168.2.1` 已证明网关 DNS 健康，故问题既不是 macOS Internet Sharing DNS 不响应，也不是内核 UDP/TCP 数据面。
+- 保持 `/proc/net/resolv.conf` 动态接口不变；只将标准配置路径发布成有真实 inode 长度的普通快照。这符合 resolver 对 `/etc/resolv.conf` 的文件假设，也避免为某个用户库伪造 procfs size。宿主在启动时刷新，P4 在启动和每次 `persist-shell` 入口刷新；当前没有后台 DNS 配置守护进程，因此已进入的长会话不会在租约中途自动重写文件。
+
 ### board/python: 闭合 SmolAgents 三项内置工具并发布 113 ELF strict runtime
 
 **涉及文件：**
