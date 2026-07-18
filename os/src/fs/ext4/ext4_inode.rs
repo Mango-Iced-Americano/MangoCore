@@ -851,7 +851,13 @@ impl Ext4FileSystem {
             log::warn!("[ext4] Inode {} does not use extents!", inode_ref.inode_num);
             return Err(Errno::ENOTSUP as isize);
         }
+        let _t = crate::task::perf::perf_time_now();
+        let mut meta_reads_before = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT.load(core::sync::atomic::Ordering::Relaxed);
         let search_path = self.find_extent(inode_ref, lblock);
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t);
+        let meta_reads = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT.load(core::sync::atomic::Ordering::Relaxed).saturating_sub(meta_reads_before);
+        let depth = search_path.as_ref().map(|sp| sp.depth as usize).unwrap_or(0) as usize;
+        crate::task::perf::record_ext4_find_extent_cost(elapsed, depth, meta_reads as usize);
         if let Ok(path) = search_path {
             if let Some(node) = path.path.last() {
                 if let Some(extent) = node.extent {
@@ -875,6 +881,40 @@ impl Ext4FileSystem {
                         inode_ref.inode_num,
                         lblock,
                     );
+                }
+            }
+        }
+        Err(Errno::ENOENT as isize)
+    }
+
+    /// 获取逻辑块号对应的物理块号和所在 extent 的范围信息，用于 cache 全 extent
+    /// # 返回值
+    /// + `Result<(pblock, extent_lblock_start, extent_lblock_count), isize>`
+    pub fn get_pblock_with_extent(
+        &self,
+        inode_ref: &Ext4InodeRef,
+        lblock: Ext4Lblk,
+    ) -> Result<(u32, u32, u32), isize> {
+        let flags = inode_ref.inode.flags();
+        if (flags & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) == 0 {
+            let is_link = inode_ref.inode.get_file_type() == DiskInodeType::Link;
+            if is_link && inode_ref.inode.size() <= 60 {
+                return Err(Errno::ENOENT as isize);
+            }
+            log::warn!("[ext4] Inode {} does not use extents!", inode_ref.inode_num);
+            return Err(Errno::ENOTSUP as isize);
+        }
+        let search_path = self.find_extent(inode_ref, lblock);
+        if let Ok(path) = search_path {
+            if let Some(node) = path.path.last() {
+                if let Some(extent) = node.extent {
+                    let ext_first = extent.get_first_block();
+                    let ext_len = extent.get_actual_len() as u32;
+                    if lblock >= ext_first && lblock < ext_first + ext_len {
+                        let offset_in_ext = lblock - ext_first;
+                        let pblock = (extent.get_pblock() + offset_in_ext as u64) as u32;
+                        return Ok((pblock, ext_first, ext_len));
+                    }
                 }
             }
         }

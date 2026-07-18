@@ -72,8 +72,12 @@ pub const EXT_UNWRITTEN_MAX_LEN: u16 = 65535;
 pub const EXT_MAX_BLOCKS: Ext4Lblk = u32::MAX;
 
 /// Maximum blocks to allocate in a single mballoc batch.
-/// Matches IO_CHUNK_SIZE / BLOCK_SIZE (256KB / 4KB = 64).
-pub const MAX_MBALLOC_BLOCKS: u32 = 64;
+/// Byte-based target (256KB) divided by block size, minimum 8 blocks.
+/// With 4KB blocks → 64 blocks; with 512B blocks → 512 blocks.
+pub fn mballoc_block_limit(block_size: u32) -> u32 {
+    const TARGET_ALLOC_BYTES: u32 = 256 * 1024; // 256KB target
+    (TARGET_ALLOC_BYTES / block_size).max(8)
+}
 /// 表示extent结构体的魔数
 pub const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
 /// 操作成功

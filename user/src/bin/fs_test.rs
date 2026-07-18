@@ -1256,7 +1256,7 @@ fn test_stress_unlink_loop() -> bool {
         if r < 0 { println!("  FAIL: unlink file {} returned {}", i, r); return false; }
     }
     // verify empty via getdents64
-    let fd = sys_open("/tmp35\0", 0x200000 | 0);
+    let fd = sys_open("/tmp35\0", 0o200000 | 0);
     let mut buf = [0u8; 512];
     let n = sys_getdents64(fd as usize, &mut buf);
     sys_close(fd as usize);
@@ -1353,7 +1353,7 @@ fn test_stress_getdents() -> bool {
         sys_write(fd as usize, b".");
         sys_close(fd as usize);
     }
-    let fd = sys_open("/tmp38\0", 0x200000 | 0);
+    let fd = sys_open("/tmp38\0", 0o200000 | 0);
     let mut buf = [0u8; 512]; // small buffer — forces multiple getdents64 calls
     let mut entries = 0usize;
     loop {
@@ -1409,7 +1409,7 @@ fn test_perf_getdents_1000() -> bool {
     const O_RDONLY: u32 = 0;
     const O_WRONLY: u32 = 0o1;
     const O_CREAT: u32 = 0o100;
-    const O_DIRECTORY: u32 = 0x200000;
+    const O_DIRECTORY: u32 = 0o200000;
     const AT_REMOVEDIR: u32 = 0x200;
     const PREFIX: &str = "/tmp_perf_getdents";
 
@@ -2067,6 +2067,660 @@ fn test_truncate_invalidates_pagecache() -> bool {
     true
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Mount bench tests
+// ═══════════════════════════════════════════════════════════════════════
+
+const MS_BIND: usize = 4096;
+const MS_REC: usize = 16384;
+
+fn ts_diff_ns(start: &TimeSpec, end: &TimeSpec) -> u64 {
+    let s = (end.tv_sec as u64).saturating_sub(start.tv_sec as u64);
+    let ns = (end.tv_nsec as u64).wrapping_sub(start.tv_nsec as u64);
+    s * 1_000_000_000 + if end.tv_nsec < start.tv_nsec { ns.wrapping_add(1_000_000_000) } else { ns }
+}
+
+fn create_dir_tree(base: &str, depth: usize) -> bool {
+    let mut path = String::new();
+    path.push_str(base);
+    for i in 0..depth {
+        path.push_str("/dir_");
+        path.push_str(&format!("{:04}", i));
+        path.push('\0');
+        let ret = sys_mkdirat(AT_FDCWD, &path, 0o777);
+        if ret < 0 {
+            println!("  FAIL: mkdirat {} returned {}", &path, ret);
+            return false;
+        }
+        // Restore path without null for next iteration
+        path.pop();
+        // remove null terminator to continue building
+        // path already has the full directory name without \0
+        // it's: base/dir_0000/dir_0001/.../dir_XXXX
+        // But we need to restore it so the next push adds correctly.
+        // Since we pushed "/dir_XXXX\0" (10 + null), we popped the null, leaving the dir name.
+        // The next iteration will push "/dir_XXXX\0" on top, which is correct for chaining.
+    }
+    true
+}
+
+fn read_sysfs(path: &str) {
+    let fd = sys_open(path, 0); // O_RDONLY
+    if fd < 0 {
+        println!("  [sysfs] open {} returned {}", path, fd);
+        return;
+    }
+    let mut buf = [0u8; 4096];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if n > 0 {
+        let len = (n as usize).min(buf.len());
+        // Find first newline or use whole string
+        let end = buf[..len].iter().position(|&b| b == b'\n').unwrap_or(len);
+        let s = core::str::from_utf8(&buf[..end]).unwrap_or("");
+        println!("  [sysfs] {} = {}", path, s);
+    }
+}
+
+fn test_mount_bench_bind() -> bool {
+    const DEPTH: usize = 8;
+    const BASE: &str = "/tmp/mntbench\0";
+    const BASE_SRC: &str = "/tmp/mntbench/src\0";
+    const BASE_DST: &str = "/tmp/mntbench/dst\0";
+
+    // 1. Create top-level directories
+    let ret = sys_mkdirat(AT_FDCWD, BASE, 0o777);
+    if ret < 0 {
+        println!("  FAIL: mkdirat BASE returned {}", ret);
+        return false;
+    }
+    let ret = sys_mkdirat(AT_FDCWD, BASE_SRC, 0o777);
+    if ret < 0 {
+        println!("  FAIL: mkdirat BASE_SRC returned {}", ret);
+        return false;
+    }
+    let ret = sys_mkdirat(AT_FDCWD, BASE_DST, 0o777);
+    if ret < 0 {
+        println!("  FAIL: mkdirat BASE_DST returned {}", ret);
+        return false;
+    }
+
+    // Create dir_0000 through dir_0007 in src and dst
+    for i in 0..DEPTH {
+        let src_path = format!("/tmp/mntbench/src/dir_{:04}\0", i);
+        let ret = sys_mkdirat(AT_FDCWD, &src_path, 0o777);
+        if ret < 0 {
+            println!("  FAIL: mkdirat src dir_{} returned {}", i, ret);
+            return false;
+        }
+        let dst_path = format!("/tmp/mntbench/dst/dir_{:04}\0", i);
+        let ret = sys_mkdirat(AT_FDCWD, &dst_path, 0o777);
+        if ret < 0 {
+            println!("  FAIL: mkdirat dst dir_{} returned {}", i, ret);
+            return false;
+        }
+    }
+
+    // 2. Print pre-stats
+    println!("  [stats before bind]");
+    read_sysfs("/sys/kernel/stats/lwext4\0");
+    read_sysfs("/sys/kernel/stats/mount\0");
+
+    // 3. Bind mount each level, timing each
+    for i in 0..DEPTH {
+        let src = format!("/tmp/mntbench/src/dir_{:04}\0", i);
+        let dst = format!("/tmp/mntbench/dst/dir_{:04}\0", i);
+        let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+        sys_clock_gettime(1, &mut t0);
+        let ret = sys_mount(src.as_ptr(), dst.as_ptr(), core::ptr::null(), MS_BIND, 0);
+        let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+        sys_clock_gettime(1, &mut t1);
+        let ns = ts_diff_ns(&t0, &t1);
+        println!("  bind depth={} elapsed={}ns ret={}", i, ns, ret);
+        if ret < 0 {
+            println!("  FAIL: bind at depth {} ret {}", i, ret);
+            return false;
+        }
+    }
+
+    // 4. Print post-stats
+    println!("  [stats after bind]");
+    read_sysfs("/sys/kernel/stats/lwext4\0");
+    read_sysfs("/sys/kernel/stats/mount\0");
+
+    // 5. Cleanup: umount in reverse order
+    for i in (0..DEPTH).rev() {
+        let dst = format!("/tmp/mntbench/dst/dir_{:04}\0", i);
+        sys_umount2(dst.as_ptr(), 0);
+    }
+    // Cleanup directories
+    for i in 0..DEPTH {
+        let dst_path = format!("/tmp/mntbench/dst/dir_{:04}\0", i);
+        sys_unlinkat(AT_FDCWD, &dst_path, 0x200);
+        let src_path = format!("/tmp/mntbench/src/dir_{:04}\0", i);
+        sys_unlinkat(AT_FDCWD, &src_path, 0x200);
+    }
+    sys_unlinkat(AT_FDCWD, BASE_DST, 0x200);
+    sys_unlinkat(AT_FDCWD, BASE_SRC, 0x200);
+    sys_unlinkat(AT_FDCWD, BASE, 0x200);
+
+    println!("  PASS: mount bench bind");
+    true
+}
+
+fn test_mount_bench_rbind() -> bool {
+    const DEPTH: usize = 8;
+    const RBASE: &str = "/tmp/mntbench\0";
+    const RB_SRC: &str = "/tmp/mntbench/rbind_src\0";
+    const RB_DST: &str = "/tmp/mntbench/rbind_dst\0";
+
+    // 1. Create directories
+    sys_mkdirat(AT_FDCWD, RBASE, 0o777);
+    sys_mkdirat(AT_FDCWD, RB_SRC, 0o777);
+    sys_mkdirat(AT_FDCWD, RB_DST, 0o777);
+
+    // Create chain: rbind_src/dir_0000/dir_0001/.../dir_0007
+    {
+        let mut current = String::new();
+        current.push_str("/tmp/mntbench/rbind_src");
+        for i in 0..DEPTH {
+            current.push_str("/dir_");
+            current.push_str(&format!("{:04}", i));
+            current.push('\0');
+            let ret = sys_mkdirat(AT_FDCWD, &current, 0o777);
+            if ret < 0 {
+                println!("  FAIL: mkdirat chain {} returned {}", &current, ret);
+                return false;
+            }
+            current.pop(); // pop null
+        }
+    }
+
+    // Create submounts within the tree: for each level i,
+    // bind dir_XXXX as a separate mount onto itself via a temp mount point
+    for i in 0..DEPTH {
+        let mut sub = String::from("/tmp/mntbench/rbind_src");
+        for j in 0..=i {
+            sub.push_str("/dir_");
+            sub.push_str(&format!("{:04}", j));
+        }
+        sub.push('\0');
+        let tmp = format!("/tmp/mntbench/rbind_tmp_{:04}\0", i);
+        sys_mkdirat(AT_FDCWD, &tmp, 0o777);
+        let ret = sys_mount(sub.as_ptr(), tmp.as_ptr(), core::ptr::null(), MS_BIND, 0);
+        if ret < 0 {
+            println!("  FAIL: submount bind {} returned {}", i, ret);
+            return false;
+        }
+        sys_umount2(sub.as_ptr(), 0);
+        let ret = sys_mount(tmp.as_ptr(), sub.as_ptr(), core::ptr::null(), MS_BIND, 0);
+        if ret < 0 {
+            println!("  FAIL: remount submount {} returned {}", i, ret);
+            return false;
+        }
+        sys_unlinkat(AT_FDCWD, &tmp, 0x200);
+    }
+
+    // 2. Print pre-stats
+    println!("  [stats before rbind]");
+    read_sysfs("/sys/kernel/stats/lwext4\0");
+    read_sysfs("/sys/kernel/stats/mount\0");
+
+    // 3. Single rbind call
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    let ret = sys_mount(
+        "/tmp/mntbench/rbind_src\0".as_ptr(),
+        "/tmp/mntbench/rbind_dst\0".as_ptr(),
+        core::ptr::null(),
+        MS_BIND | MS_REC,
+        0,
+    );
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let ns = ts_diff_ns(&t0, &t1);
+    println!("  rbind depth={} elapsed={}ns ret={}", DEPTH, ns, ret);
+    if ret < 0 {
+        println!("  FAIL: rbind returned {}", ret);
+        return false;
+    }
+
+    // 4. Print post-stats
+    println!("  [stats after rbind]");
+    read_sysfs("/sys/kernel/stats/lwext4\0");
+    read_sysfs("/sys/kernel/stats/mount\0");
+
+    // 5. Cleanup
+    sys_umount2("/tmp/mntbench/rbind_dst\0".as_ptr(), 0);
+    for i in (0..DEPTH).rev() {
+        let mut sub = String::from("/tmp/mntbench/rbind_src");
+        for j in 0..=i {
+            sub.push_str("/dir_");
+            sub.push_str(&format!("{:04}", j));
+        }
+        sub.push('\0');
+        sys_umount2(sub.as_ptr(), 0);
+    }
+    for i in (0..DEPTH).rev() {
+        let mut sub = String::from("/tmp/mntbench/rbind_src");
+        for j in 0..=i {
+            sub.push_str("/dir_");
+            sub.push_str(&format!("{:04}", j));
+        }
+        sub.push('\0');
+        sys_unlinkat(AT_FDCWD, &sub, 0x200);
+    }
+    sys_unlinkat(AT_FDCWD, RB_DST, 0x200);
+    sys_unlinkat(AT_FDCWD, RB_SRC, 0x200);
+    sys_unlinkat(AT_FDCWD, RBASE, 0x200);
+
+    println!("  PASS: mount bench rbind");
+    true
+}
+
+fn test_mount_bench_rbind_scale() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp/mntbench\0", 0o777);
+
+    for depth in &[1usize, 2, 4, 8] {
+        let d = *depth;
+        // Create tree of depth d with submounts at each level
+        let scale_src = format!("/tmp/mntbench/scale_src_{}\0", d);
+        let scale_dst = format!("/tmp/mntbench/scale_dst_{}\0", d);
+        sys_mkdirat(AT_FDCWD, &scale_src, 0o777);
+        sys_mkdirat(AT_FDCWD, &scale_dst, 0o777);
+
+        // Build chain: scale_src_X/dir_0000/dir_0001/.../dir_XXXX
+        {
+            let mut current = format!("/tmp/mntbench/scale_src_{}", d);
+            for i in 0..d {
+                current.push_str("/dir_");
+                current.push_str(&format!("{:04}", i));
+                current.push('\0');
+                let ret = sys_mkdirat(AT_FDCWD, &current, 0o777);
+                current.pop();
+                if ret < 0 {
+                    println!("  FAIL: scale mkdir {} depth={} ret={}", &current, d, ret);
+                    return false;
+                }
+            }
+        }
+
+        // Create submounts at each level by bind-then-remount trick
+        for i in 0..d {
+            let mut sub = format!("/tmp/mntbench/scale_src_{}", d);
+            for j in 0..=i {
+                sub.push_str("/dir_");
+                sub.push_str(&format!("{:04}", j));
+            }
+            sub.push('\0');
+            let tmp = format!("/tmp/mntbench/scale_tmp_{}_{}\0", d, i);
+            sys_mkdirat(AT_FDCWD, &tmp, 0o777);
+            let ret = sys_mount(sub.as_ptr(), tmp.as_ptr(), core::ptr::null(), MS_BIND, 0);
+            if ret < 0 {
+                println!("  FAIL: scale submount bind d={} i={} ret={}", d, i, ret);
+                return false;
+            }
+            sys_umount2(sub.as_ptr(), 0);
+            let ret = sys_mount(tmp.as_ptr(), sub.as_ptr(), core::ptr::null(), MS_BIND, 0);
+            if ret < 0 {
+                println!("  FAIL: scale remount d={} i={} ret={}", d, i, ret);
+                return false;
+            }
+            sys_unlinkat(AT_FDCWD, &tmp, 0x200);
+        }
+
+        // Time the rbind call
+        let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+        sys_clock_gettime(1, &mut t0);
+        let ret = sys_mount(
+            scale_src.as_ptr(),
+            scale_dst.as_ptr(),
+            core::ptr::null(),
+            MS_BIND | MS_REC,
+            0,
+        );
+        let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+        sys_clock_gettime(1, &mut t1);
+        let ns = ts_diff_ns(&t0, &t1);
+        println!("  rbind_scale depth={} elapsed={}ns ret={}", d, ns, ret);
+        if ret < 0 {
+            println!("  FAIL: rbind scale depth {} ret {}", d, ret);
+            return false;
+        }
+
+        // Cleanup
+        sys_umount2(scale_dst.as_ptr(), 0);
+        for i in (0..d).rev() {
+            let mut sub = format!("/tmp/mntbench/scale_src_{}", d);
+            for j in 0..=i {
+                sub.push_str("/dir_");
+                sub.push_str(&format!("{:04}", j));
+            }
+            sub.push('\0');
+            sys_umount2(sub.as_ptr(), 0);
+        }
+        for i in (0..d).rev() {
+            let mut sub = format!("/tmp/mntbench/scale_src_{}", d);
+            for j in 0..=i {
+                sub.push_str("/dir_");
+                sub.push_str(&format!("{:04}", j));
+            }
+            sub.push('\0');
+            sys_unlinkat(AT_FDCWD, &sub, 0x200);
+        }
+        sys_unlinkat(AT_FDCWD, &scale_dst, 0x200);
+        sys_unlinkat(AT_FDCWD, &scale_src, 0x200);
+    }
+
+    sys_unlinkat(AT_FDCWD, "/tmp/mntbench\0", 0x200);
+    println!("  PASS: mount bench rbind scale");
+    true
+}
+
+fn test_perf_fork_exec() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 2] = ["/bin/busybox\0".as_ptr(), "true\0".as_ptr()];
+            let envp: [*const u8; 0] = [];
+            sys_exec("/bin/busybox\0", &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/true x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_fork_only() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            sys_exit(0);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork-only x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_fork_exec_tmp() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 2] = ["/tmp/bb\0".as_ptr(), "true\0".as_ptr()];
+            let envp: [*const u8; 0] = [];
+            sys_exec("/tmp/bb\0", &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /tmp/bb (ramfs) x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_fork_exec_small() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 1] = ["/fs_test\0".as_ptr()];
+            let envp: [*const u8; 0] = [];
+            sys_exec("/fs_test\0", &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /fs_test (ramfs,small) x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_fork_exec_shell() -> bool {
+    // fork+exec /bin/sh -c "ls /" — full shell startup (libc load, script parse, config read)
+    const N: usize = 10;
+    let cmd = "ls /\0";
+    let sh = "/bin/sh\0";
+    let sh_c = "-c\0";
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 4] = [sh.as_ptr(), sh_c.as_ptr(), cmd.as_ptr(), core::ptr::null()];
+            let envp: [*const u8; 0] = [];
+            sys_exec(sh, &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/sh -c 'ls' x{}: avg={}ns ({:.1}us)", N, avg_ns, avg_ns as f64 / 1000.0);
+    true
+}
+
+fn test_perf_fork_exec_shell_quiet() -> bool {
+    // Same as above but redirect to /dev/null — suppresses stdout/stderr writes
+    const N: usize = 10;
+    let cmd = "ls / >/dev/null 2>&1\0";
+    let sh = "/bin/sh\0";
+    let sh_c = "-c\0";
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 4] = [sh.as_ptr(), sh_c.as_ptr(), cmd.as_ptr(), core::ptr::null()];
+            let envp: [*const u8; 0] = [];
+            sys_exec(sh, &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/sh -c 'ls >/dev/null' x{}: avg={}ns ({:.1}us)", N, avg_ns, avg_ns as f64 / 1000.0);
+    true
+}
+
+fn test_perf_fork_exec_shell_min() -> bool {
+    // Minimal: env -i clears environment, reduce shell startup work
+    // Runs `/bin/sh -c true` (no ls, no output at all)
+    const N: usize = 10;
+    let cmd = "env -i /bin/sh -c true\0";
+    let sh = "/bin/sh\0";
+    let sh_c = "-c\0";
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 4] = [sh.as_ptr(), sh_c.as_ptr(), cmd.as_ptr(), core::ptr::null()];
+            let envp: [*const u8; 0] = [];
+            sys_exec(sh, &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/sh -c 'env -i /bin/sh -c true' x{}: avg={}ns ({:.1}us)", N, avg_ns, avg_ns as f64 / 1000.0);
+    true
+}
+
+fn test_perf_read_bb() -> bool {
+    const CHUNK: usize = 4096;
+    const N: usize = 50;
+    // Read /bin/busybox (possibly lwext4) vs /tmp/bb (ramfs)
+    let paths = [("/bin/busybox\0", "bin"), ("/tmp/bb\0", "tmp")];
+    for (path, label) in &paths {
+        let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t0);
+        for _ in 0..N {
+            let fd = sys_open(path, 0);
+            if fd < 0 { println!("  FAIL: open {} returned {}", label, fd); return false; }
+            let mut buf = [0u8; CHUNK];
+            let _n = sys_read(fd as usize, &mut buf);
+            sys_close(fd as usize);
+        }
+        let mut t1: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t1);
+        let total_ns = ts_diff_ns(&t0, &t1);
+        let avg_ns = total_ns / N as u64;
+        println!("  read {}/{}B x{}: total={}ns avg={}ns", label, CHUNK, N, total_ns, avg_ns);
+    }
+    true
+}
+
+fn test_perf_read_full() -> bool {
+    const N: usize = 5;
+    // Read ENTIRE 800KB busybox in 4KB chunks (sequential — exercises readahead)
+    let paths = [("/bin/busybox\0", "bin"), ("/tmp/bb\0", "tmp")];
+    for (path, label) in &paths {
+        let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t0);
+        for _ in 0..N {
+            let fd = sys_open(path, 0);
+            if fd < 0 { println!("  FAIL: open {} returned {}", label, fd); return false; }
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = sys_read(fd as usize, &mut buf);
+                if n <= 0 { break; }
+            }
+            sys_close(fd as usize);
+        }
+        let mut t1: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t1);
+        let total_ns = ts_diff_ns(&t0, &t1);
+        let avg_ns = total_ns / N as u64;
+        println!("  read full {} (800KB) x{}: total={}ns avg={}ns", label, N, total_ns, avg_ns);
+    }
+    true
+}
+
+fn test_perf_proc_mounts() -> bool {
+    const N: usize = 10;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let fd = sys_open("/proc/mounts\0", 0);
+        if fd < 0 {
+            println!("  FAIL: open /proc/mounts returned {}", fd);
+            return false;
+        }
+        let mut buf = [0u8; 4096];
+        let _n = sys_read(fd as usize, &mut buf);
+        sys_close(fd as usize);
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  read /proc/mounts x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_exec_twice() -> bool {
+    // First run: cold (PageCache miss on lwext4)
+    let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t0);
+    let args: [*const u8; 2] = ["/bin/busybox\0".as_ptr(), "true\0".as_ptr()];
+    let envp: [*const u8; 0] = [];
+    let pid = sys_fork();
+    if pid == 0 {
+        sys_exec("/bin/busybox\0", &args, &envp);
+        sys_exit(1);
+    }
+    let mut s: i32 = 0;
+    sys_waitpid(pid, &mut s);
+    let mut t1: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t1);
+    let cold_ns = ts_diff_ns(&t0, &t1);
+
+    // Second run: warm (PageCache should be hot)
+    let mut t0_2: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t0_2);
+    let pid2 = sys_fork();
+    if pid2 == 0 {
+        sys_exec("/bin/busybox\0", &args, &envp);
+        sys_exit(1);
+    }
+    sys_waitpid(pid2, &mut s);
+    let mut t1_2: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t1_2);
+    let warm_ns = ts_diff_ns(&t0_2, &t1_2);
+    println!("  exec cold={}ns warm={}ns ratio={:.1}x", cold_ns, warm_ns, cold_ns as f64 / warm_ns.max(1) as f64);
+    true
+}
+
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub extern "C" fn _start() -> ! {
@@ -2092,6 +2746,9 @@ struct TestCase {
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("=== FS Test Suite ===");
+    // Filter: if arguments given, only run tests whose name matches any arg
+    let filter: &[&str] = if _argc > 0 { _argv } else { &[] };
+    let has_filter = !filter.is_empty();
 
     let tests: &[TestCase] = &[
         TestCase { name: "mkdir", desc: "mkdir", func: test_mkdir },
@@ -2157,6 +2814,19 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         TestCase { name: "rc_clean_shrink", desc: "reclaim: clean page cache shrink", func: test_page_cache_reclaim_clean_pages },
         TestCase { name: "rc_dirty_noloss", desc: "reclaim: dirty page no-loss", func: test_dirty_page_no_loss_under_reclaim },
         TestCase { name: "tc_trunc_cache", desc: "truncate: invalidates pagecache", func: test_truncate_invalidates_pagecache },
+        TestCase { name: "mount_bench_bind", desc: "mount bench: bind 8 levels", func: test_mount_bench_bind },
+        TestCase { name: "mount_bench_rbind", desc: "mount bench: rbind 8 levels", func: test_mount_bench_rbind },
+        TestCase { name: "mount_bench_rbind_scale", desc: "mount bench: rbind scale 1,2,4,8", func: test_mount_bench_rbind_scale },
+        TestCase { name: "perf_fork_exec", desc: "perf: fork+exec /bin/true x50", func: test_perf_fork_exec },
+        TestCase { name: "perf_fork_only", desc: "perf: fork-only x50", func: test_perf_fork_only },
+        TestCase { name: "perf_fork_exec_tmp", desc: "perf: fork+exec /tmp/bb (ramfs) x50", func: test_perf_fork_exec_tmp },
+        TestCase { name: "perf_fork_exec_shell", desc: "perf: fork+exec /bin/sh -c ls x10", func: test_perf_fork_exec_shell },
+        TestCase { name: "perf_fork_exec_shell_quiet", desc: "perf: fork+exec sh -c ls >/dev/null x10", func: test_perf_fork_exec_shell_quiet },
+        TestCase { name: "perf_fork_exec_shell_min", desc: "perf: fork+exec sh -c env -i sh -c true x10", func: test_perf_fork_exec_shell_min },
+        TestCase { name: "perf_read_bb", desc: "perf: read bin/tmp busybox 4KB x50", func: test_perf_read_bb },
+        TestCase { name: "perf_read_full", desc: "perf: read full 800KB busybox x5", func: test_perf_read_full },
+        TestCase { name: "perf_exec_twice", desc: "perf: exec cold vs warm", func: test_perf_exec_twice },
+        TestCase { name: "perf_proc_mounts", desc: "perf: read /proc/mounts x10", func: test_perf_proc_mounts },
     ];
 
     let total = tests.len();
@@ -2164,6 +2834,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut failed = 0;
 
     for (i, tc) in tests.iter().enumerate() {
+        // Skip if filter is active and this test doesn't match any filter item
+        if has_filter && !filter.iter().any(|f| *f == tc.name) {
+            continue;
+        }
         println!("[{}/{}] {}", i + 1, total, tc.desc);
         if run_test(tc.name, tc.func) {
             passed += 1;

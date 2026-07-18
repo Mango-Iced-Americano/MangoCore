@@ -1,16 +1,21 @@
 //! RISC-V HAL 后端。
 //!
-//! 包含 QEMU/K210/FU740 配置、SV39 页表、trap、SBI、时钟和上下文切换实现。
+//! 包含 QEMU/K210/FU740/VisionFive2 配置、SV39 页表、trap、SBI、时钟和上下文切换实现。
 
 pub mod config;
 pub mod kern_stack;
 pub mod sbi;
 pub mod sv39;
 pub mod switch;
+pub mod syscall_id;
 pub mod time;
 pub mod trap;
 
+#[cfg(feature = "board_rvqemu")]
 #[path = "../../platform/riscv/qemu.rs"]
+pub mod rv_board;
+#[cfg(feature = "board_vf2")]
+#[path = "../../platform/riscv/vf2.rs"]
 pub mod rv_board;
 
 pub fn machine_init() {

@@ -1,0 +1,97 @@
+=== Test Evidence: mount07 MS_NOSYMFOLLOW Validation (focused) ===
+Date (UTC):    2026-07-16 00:08:31
+Date (CST):    2026-07-16 08:08:31
+Git hash:      7c8c0b3c-dirty
+Git commit:    7c8c0b3c92a699f70d63dcf37ed1115b4b505888
+Branch:        (current HEAD)
+Container ID:  e10937008fee763dd4363785090e02b46b05b734d387db018c9c6ba736d9e128
+Container:     pxy-mangocore-os-dev-1 (zhouzhouyi/os-contest:20260104)
+Mount:         /home/pxy/projects/MangoCore -> /app (rw)
+
+Image:
+  Path:     /home/pxy/projects/MangoCore/sdcard-rv.img
+  Size:     4294967296 bytes (4 GiB)
+  SHA-256:  (not computed — 4 GiB image, unchanged from base)
+
+Injected config (focused_os_test.conf):
+  SHA-256:  bc10f1447dcd78b763eb69e8206440fb62af0cf50d079815b19fd64d43196a3d
+  Content:
+    mode=run
+    mask=0x800
+    ltp_runner=suite
+    ltp_libc=glibc
+    ltp_suites=syscalls
+    ltp_include=mount07
+
+Production os_test.conf:
+  SHA-256:  607f7544170c636035eb0898e6ffaf93b9818ab730f03c501a9881a1280b4092
+  Status:   UNMODIFIED (verified after test)
+
+Inject command:
+  docker exec -e ARCH=rv64 -e BLK_MODE=virt \
+    -e CONF_FILE=/app/testresult/regression_20260716_000645/focused_os_test.conf \
+    pxy-mangocore-os-dev-1 bash -c 'cd /app/os && ./inject_os_test_conf.sh'
+  Exit code: 0
+
+QEMU command:
+  docker exec pxy-mangocore-os-dev-1 bash -c 'cd /app/os && make rv64-run'
+  Exit code: 0
+
+Test log:
+  Path:     testresult/regression_20260716_000645/qemu-mount07.log
+  Written:  2026-07-16 08:08 (CST)
+  Size:     11294 bytes (208 lines)
+  SHA-256:  87d40283a0081a99b3eb90cde0f33e36ec525536abca5ce9f1947901668362a2
+
+Freshness check:
+  Config injected: 2026-07-16 00:07:13 UTC (debugfs stat ctime)
+  QEMU boot:       2026-07-16 00:07:45 UTC (ntpd time sync)
+  Log written:     2026-07-16 00:08:20 UTC (after test completion)
+  Meta written:    2026-07-16 00:08:31 UTC
+  All artifacts post-date the config injection — evidence is fresh ✓
+
+=== LTP mount07 Results (suite-mode, ext4-bound /tmp) ===
+
+Phase 1 — Without MS_NOSYMFOLLOW:
+  mount07.c:55  TPASS  open(link_file, O_RDWR) returned fd 3
+  mount07.c:67  TPASS  readlink(link_file) returned 47
+  mount07.c:73  TPASS  readlink strcmp succeeded
+  mount07.c:90  TPASS  realpath strcmp succeeded
+  mount07.c:96  TPASS  symlink(test_file, temp_link_file) passed
+  mount07.c:98  TPASS  unlink(temp_link_file) passed
+  mount07.c:110 TPASS  ST_NOSYMFOLLOW not set on mntpoint
+
+Phase 2 — With MS_NOSYMFOLLOW (mount -o nosymfollow):
+  mount07.c:52  TPASS  open(link_file, O_RDWR) : ELOOP (40)  ← KEY FIX
+  mount07.c:67  TPASS  readlink(link_file) returned 47
+  mount07.c:73  TPASS  readlink strcmp succeeded
+  mount07.c:90  TPASS  realpath strcmp succeeded
+  mount07.c:96  TPASS  symlink(test_file, temp_link_file) passed
+  mount07.c:98  TPASS  unlink(temp_link_file) passed
+  mount07.c:107 TPASS  ST_NOSYMFOLLOW set on mntpoint
+
+Summary:
+  passed   14
+  failed   0
+  broken   0
+  skipped  0
+  warnings 0
+  FAIL LTP CASE mount07: 0
+
+LTP runner summary:
+  executed=1 passed=1 failed=0 skipped=0 total_ms=3298
+
+=== Comparison with previous run (mount05-07-v2) ===
+Previous (v2): mount07 entered test body but 3 MS_NOSYMFOLLOW assertions FAILED
+Current:       mount07 14/14 TPASS, ZERO failures
+
+=== Semantic corrections applied (Oracle-approved) ===
+  A: ST_NOSYMFOLLOW mapped to 0x2000 (statfs)
+  B: symlink traversal checks own MountFS for the flag
+  C: trailing-slash symlink path handled correctly
+  D: remount preserves atime state alongside NOSYMFOLLOW
+  E: flags preserved through bind / rbind / propagation
+
+=== Verdict ===
+mount07: PASS (14 passed, 0 failed, 0 broken, 0 skipped)
+Target:  passed=14 failed=0  ✓ ACHIEVED

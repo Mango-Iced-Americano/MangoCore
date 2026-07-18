@@ -1,0 +1,10 @@
+[package]
+name = "mango-kernel-core"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+
+[features]
+default = ["counters"]
+counters = []

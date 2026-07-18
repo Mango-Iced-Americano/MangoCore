@@ -1,7 +1,8 @@
 //! 内核全局堆分配器。
 //!
-//! 本模块在 `buddy_system_allocator::Heap` 外包一层 OOM-aware `GlobalAlloc`，
-//! 普通分配失败时会先尝试内存回收，再交给 `alloc_error_handler` 做最终诊断和 shutdown。
+//! 本模块在 `buddy_system_allocator::MetadataHeap` 外包一层 OOM-aware `GlobalAlloc`，
+//! 配合 slab allocator 处理小对象，大对象直接走 buddy heap。分配失败时会先尝试内存回收，
+//! 再交给 `alloc_error_handler` 做最终诊断和 shutdown。
 //!
 //! # Locking
 //!
@@ -14,18 +15,39 @@
 //! `handle_alloc_error`。
 
 use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
-use buddy_system_allocator::Heap;
+use buddy_system_allocator::{AllocError as PageAllocError, MetadataHeap, PageOrder, PageRun};
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
-/// 全局堆分配器。
-///
-/// 这里不用 `LockedHeap`，而是包一层 `GlobalAlloc`，这样普通内核堆分配失败时
-/// 还能先尝试释放 cache / user page tracker 等可回收对象，再决定是否交给
-/// `alloc_error_handler` 处理。
-pub struct OomAwareAllocator {
-    inner: Mutex<Heap<32>>,
+use crate::mm::slab::{direct_charge, slab_class_for, PageAllocator, SlabAllocator};
+
+#[inline]
+fn memory_perf_time_now() -> usize {
+    crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+}
+
+/// Thin adapter that implements our PageAllocator trait on MetadataHeap<32, 12>.
+struct HeapPageAlloc<'a>(&'a mut MetadataHeap<32, 12>);
+
+impl PageAllocator for HeapPageAlloc<'_> {
+    fn alloc_pages(&mut self, order: PageOrder) -> Result<PageRun, PageAllocError> {
+        self.0.alloc_pages(order)
+    }
+    unsafe fn dealloc_pages(&mut self, run: PageRun) {
+        self.0.dealloc_pages(run)
+    }
+}
+
+/// Inner state protected by the per-allocator mutex.
+struct KernelHeapInner {
+    heap: MetadataHeap<32, 12>,
+    slab: SlabAllocator,
+}
+
+/// Kernel global allocator — slab for small objects, buddy for everything else.
+pub struct KernelAllocator {
+    inner: Mutex<KernelHeapInner>,
 }
 
 static OOM_RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -33,26 +55,33 @@ static OOM_RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 pub static KERNEL_HEAP_CURRENT_BYTES: AtomicUsize = AtomicUsize::new(0);
 pub static KERNEL_HEAP_MAX_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-impl OomAwareAllocator {
-    /// 创建一个尚未初始化的分配器。
+impl KernelAllocator {
+    /// Create an uninitialised allocator.
     pub const fn empty() -> Self {
         Self {
-            inner: Mutex::new(Heap::empty()),
+            inner: Mutex::new(KernelHeapInner {
+                heap: MetadataHeap::empty(),
+                slab: SlabAllocator::empty(),
+            }),
         }
     }
 
-    /// 初始化底层 buddy heap。
+    /// Initialise the underlying buddy heap.
     ///
     /// # Safety
     ///
-    /// `start..start + size` 必须是一段唯一归本分配器管理的可写内存，并且在内核运行期间
-    /// 不会被其他分配器或静态对象再次占用。
+    /// `start..start + size` must be a unique, writable memory region that is never
+    /// used by any other allocator or static object for the kernel's lifetime.
     pub unsafe fn init(&self, start: usize, size: usize) {
-        self.inner.lock().init(start, size);
+        let mut inner = self.inner.lock();
+        inner
+            .heap
+            .try_init(start, size)
+            .expect("kernel heap init failed");
+        inner.slab.init();
     }
 
     fn recover_for(&self, layout: Layout) -> bool {
-        // 确保回收原子化，防止多次或递归回收
         if OOM_RECOVERY_IN_PROGRESS
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
@@ -91,97 +120,116 @@ impl OomAwareAllocator {
         }
         false
     }
+
+    fn record_charge(&self, charge: usize) {
+        let prev = KERNEL_HEAP_CURRENT_BYTES.fetch_add(charge, Ordering::Relaxed);
+        let new_total = prev + charge;
+        let mut cur_max = KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed);
+        while new_total > cur_max {
+            match KERNEL_HEAP_MAX_BYTES.compare_exchange_weak(
+                cur_max,
+                new_total,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur_max = v,
+            }
+        }
+    }
 }
 
-// Safety: `OomAwareAllocator` 使用内部 `Mutex` 序列化 buddy heap 访问，返回的指针
-// 来自初始化时唯一交给它的 `HEAP_SPACE` 区间。
-unsafe impl GlobalAlloc for OomAwareAllocator {
-    /// 分配一块满足 `layout` 的内核堆内存。
-    ///
-    /// # Safety
-    ///
-    /// 遵循 `GlobalAlloc::alloc` 契约：调用者必须用同一分配器和相同 layout 释放返回指针。
+// Safety: `KernelAllocator` uses an internal `Mutex` to serialise heap access;
+// returned pointers come from the `HEAP_SPACE` region given exclusively to it.
+unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
-            let mut inner = self.inner.lock();
-            let _alloc_start =
-                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
-            if let Ok(ptr) = inner.alloc(layout) {
-                let elapsed = crate::task::perf::perf_time_now_for(
-                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
-                )
-                .wrapping_sub(_alloc_start);
+            let mut guard = self.inner.lock();
+            let inner = &mut *guard;
+            let alloc_start = memory_perf_time_now();
+
+            // Try the slab first for small objects.
+            if let Some(result) = {
+                let mut heap_alloc = HeapPageAlloc(&mut inner.heap);
+                inner.slab.alloc(&mut heap_alloc, layout)
+            } {
+                let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                 crate::task::perf::record_heap_alloc();
                 crate::task::perf::record_heap_alloc_cost(elapsed);
-                let block_size = layout
-                    .size()
-                    .max(layout.align())
-                    .max(core::mem::size_of::<usize>())
-                    .next_power_of_two();
-                drop(inner);
-                // Perf gauge 使用 buddy 实际 block 大小统计当前占用和峰值。
-                let prev = KERNEL_HEAP_CURRENT_BYTES.fetch_add(block_size, Ordering::Relaxed);
-                let new_total = prev + block_size;
-                let mut cur_max = KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed);
-                while new_total > cur_max {
-                    match KERNEL_HEAP_MAX_BYTES.compare_exchange_weak(
-                        cur_max,
-                        new_total,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(v) => cur_max = v,
-                    }
-                }
+                let charge = result.charge;
+                let ptr = result.ptr;
+                drop(guard);
+                self.record_charge(charge);
                 #[cfg(feature = "heap_trace")]
-                crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
+                crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, charge);
                 return ptr.as_ptr();
             }
-            let elapsed =
-                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(_alloc_start);
-            crate::task::perf::record_heap_alloc();
-            crate::task::perf::record_heap_alloc_cost(elapsed);
-            drop(inner);
-            if !self.recover_for(layout) {
-                break;
+
+            // Direct buddy allocation for objects too large for slab.
+            match inner.heap.alloc(layout) {
+                Ok(ptr) => {
+                    let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
+                    crate::task::perf::record_heap_alloc();
+                    crate::task::perf::record_heap_alloc_cost(elapsed);
+                    let charge = direct_charge(layout);
+                    drop(guard);
+                    self.record_charge(charge);
+                    #[cfg(feature = "heap_trace")]
+                    crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, charge);
+                    return ptr.as_ptr();
+                }
+                Err(_) => {
+                    let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
+                    crate::task::perf::record_heap_alloc();
+                    crate::task::perf::record_heap_alloc_cost(elapsed);
+                    drop(guard);
+                    if !self.recover_for(layout) {
+                        break;
+                    }
+                }
             }
         }
         core::ptr::null_mut()
     }
 
-    /// 释放一块内核堆内存。
-    ///
-    /// # Safety
-    ///
-    /// `ptr` 和 `layout` 必须来自先前成功的 `alloc` 调用；重复释放或 layout 不匹配会破坏
-    /// buddy heap 元数据。
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
-            #[cfg(feature = "heap_trace")]
-            crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
-            let block_size = layout
-                .size()
-                .max(layout.align())
-                .max(core::mem::size_of::<usize>())
-                .next_power_of_two();
-            crate::task::perf::record_heap_dealloc();
-            let _dealloc_start =
-                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
-            self.inner.lock().dealloc(ptr, layout);
-            let elapsed =
-                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(_dealloc_start);
+        let ptr = match core::ptr::NonNull::new(ptr) {
+            Some(p) => p,
+            None => return,
+        };
+
+        #[cfg(feature = "heap_trace")]
+        crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
+
+        crate::task::perf::record_heap_dealloc();
+        let dealloc_start = memory_perf_time_now();
+
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+
+        // Route to slab if layout fits a slab class.
+        if slab_class_for(layout).is_some() {
+            let mut heap_alloc = HeapPageAlloc(&mut inner.heap);
+            unsafe { inner.slab.dealloc(&mut heap_alloc, ptr, layout) };
+            let charge = slab_class_for(layout).unwrap().1;
+            let elapsed = memory_perf_time_now().wrapping_sub(dealloc_start);
             crate::task::perf::record_heap_dealloc_cost(elapsed);
-            KERNEL_HEAP_CURRENT_BYTES.fetch_sub(block_size, Ordering::Relaxed);
+            drop(guard);
+            KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);
+        } else {
+            unsafe { inner.heap.dealloc(ptr, layout) };
+            let charge = direct_charge(layout);
+            let elapsed = memory_perf_time_now().wrapping_sub(dealloc_start);
+            crate::task::perf::record_heap_dealloc_cost(elapsed);
+            drop(guard);
+            KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);
         }
     }
 }
 
 #[global_allocator]
 /// 全局堆分配器。
-static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
+static HEAP_ALLOCATOR: KernelAllocator = KernelAllocator::empty();
 
 #[alloc_error_handler]
 /// 分配错误处理（带诊断信息和安全 shutdown）。
@@ -210,19 +258,22 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 /// 返回 `(free_bytes, total_bytes, allocated_user, allocated_actual, internal_waste)`。
 ///
 /// `internal_waste = allocated_actual - allocated_user`，表示 buddy block 对齐造成的内部碎片。
+/// `allocated_user` 包含 slab 用户字节 + MetadataHeap 直接分配的用户字节。
 pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
-    let heap = HEAP_ALLOCATOR.inner.lock();
-    let total = heap.stats_total_bytes();
-    let alloc_actual = heap.stats_alloc_actual();
-    let alloc_user = heap.stats_alloc_user();
+    let inner = HEAP_ALLOCATOR.inner.lock();
+    let total = inner.heap.stats_total_bytes();
+    let alloc_actual = inner.heap.stats_alloc_actual();
+    let buddy_user = inner.heap.stats_alloc_user();
+    let slab_user = inner.slab.slab_user_bytes();
+    let alloc_user = buddy_user + slab_user;
     let free = total.saturating_sub(alloc_actual);
     let waste = alloc_actual.saturating_sub(alloc_user);
     (free, total, alloc_user, alloc_actual, waste)
 }
 
-/// 返回每个 order 的空闲块数（order 0 = 1B，order 16 = 64 KiB）。
+/// 返回每个 order 的空闲块数（order 12+ = 4 KiB+ 页面）。
 pub fn heap_free_histogram() -> [usize; 32] {
-    HEAP_ALLOCATOR.inner.lock().free_block_counts()
+    HEAP_ALLOCATOR.inner.lock().heap.free_block_counts()
 }
 
 /// 全局堆内存空间。
@@ -236,11 +287,6 @@ pub fn init_heap() {
     }
     KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
     KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
-    // Safety: 该全局 hook 仅在启动期写入一次，指向常驻的 perf 统计函数。
-    unsafe {
-        buddy_system_allocator::DEALLOC_SCAN_HOOK =
-            crate::task::perf::record_heap_dealloc_scan_steps;
-    }
 }
 
 #[allow(unused)]

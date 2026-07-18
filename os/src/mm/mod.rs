@@ -28,6 +28,7 @@ mod mapper;
 mod mmap;
 mod page_fault;
 mod page_table;
+mod slab;
 mod sysctl;
 mod uaccess;
 mod user_mapper;
@@ -42,8 +43,8 @@ pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use address_space::{AddressSpace, MemoryError};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
-    frame_reserve, frames_alloc, frames_alloc_any, is_allocatable_ram_phys_addr, is_ram_phys_addr,
-    unallocated_frames, FrameTracker,
+    frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
+    is_allocatable_ram_phys_addr, is_ram_phys_addr, unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;
 pub use heap_allocator::{

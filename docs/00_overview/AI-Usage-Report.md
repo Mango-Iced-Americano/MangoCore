@@ -24,6 +24,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 |---|---|---|---|---|---|
 | GitHub Copilot | GitHub Copilot；后端具体模型未在 commit metadata 中公开，按 GitHub Copilot 统一披露 | GitHub Copilot | 2026-04 至 2026-05 | Inline code completion、网络栈代码辅助、重构辅助 | 多个 commit 含 `Co-authored-by: Copilot <copilot@github.com>` |
 | Sisyphus | Orchestrator AI；commit metadata 标识为 `Sisyphus <clio-agent@sisyphuslabs.ai>` | OhMyOpenAgent / OhMyOpenCode | 2026-05 至 2026-06 | 多步骤任务规划、并行探索、文档重构、代码修改编排、工作日志维护 | 多个 commit 含 `Ultraworked with Sisyphus` 和 `Co-authored-by: Sisyphus` |
+| GPT-5.6-terra | `openai/gpt-5.6-terra` | OhMyOpenCode | 2026-07 | no_std LTP runner 诊断实现、模块拆分、构建验证与工作日志维护 | `docs/Work_Log/2026-07-17.md` |
 | Oracle | 高推理能力代码审查与架构咨询 agent；当前会话模型标识为 GPT-5.5 | OhMyOpenCode agent | 2026-04 至 2026-06 | 根因分析、架构评审、代码正确性验证、性能优化策略、文档事实核查 | `docs/Work_Log.md` 多处记录 `Oracle reviewed`、`Oracle analysis confirmed`、`Root cause analysis by Oracle` |
 | Explore | Codebase search / pattern discovery agent | OhMyOpenCode sub-agent | 2026-05 至 2026-06 | 跨模块代码搜索、调用关系梳理、实现模式对比 | Work log 和 Sisyphus task records |
 | librarian / plan / deep 等 sub-agents | 专用辅助 agents | OhMyOpenCode sub-agents | 2026-06 | 文档整理、资料检索、复杂任务拆分、局部实现检查 | Sisyphus 编排记录、文档生成 commit、Work_Log 记录 |
@@ -265,6 +266,14 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human verification: 审阅两处发布逻辑和旧 P4 迁移边界；项目 Docker 镜像内顺序完成 rv64/la64 构建；LA64 QEMU 验证链接迁移与重复入口刷新；2K1000LA 通过 TFTP CRC/uImage 校验、P4 `stage=reuse`、rw ext4 文件元数据、默认 curl 两次 HTTP 200 和 aligned Python `getaddrinfo()`。
 - Result: 保留 procfs 动态状态接口，同时把宿主/P4 标准 resolver 路径发布成有真实长度的普通文件；P4 在启动和每次 `persist-shell` 入口刷新，不再需要硬编码公共 DNS或命令行 `--dns-servers`。
 
+### Case 12: lwext4 稀疏空洞的 inode-incarnation 诊断
+
+- Evidence: `docs/Work_Log/2026-07-17.md`
+- AI tools: Oracle, GPT-5.6-terra
+- Problem: 顺序运行 `gf14→gf18→gf27→gf28` 时，后续 sparse-file 用例从空洞读到稳定旧值 `0x0167`，单独运行却可通过。
+- AI contribution: Oracle 结合 opt-in 逐用例 counter delta 与 PageCache registry 生命周期，定位 inode number 复用导致新文件继承旧 fully-valid 页面；随后将诊断收敛为有界 QEMU log，而非无关的 report 落盘链路。
+- Verification: Docker 串行 RV64/LA64 build 通过；RV64 focused QEMU 从 1 PASS/3 FAIL 变为 4 PASS/0 FAIL。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -318,6 +327,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md` 2026-07-14 | 2K1000LA AHCI/Python 性能 | 记录 Codex 对 develop DMA 池化方案的并发模型审计、512 B 命令放大根因、64/256 KiB 实板 A/B，以及 pyc 用户态瓶颈分层证据 |
 | `docs/Work_Log.md` 2026-07-14 | persist-shell CPython/ext4 rename | 记录 Codex 对 chroot bind 边界、ext4 不定长目录项邻接覆盖的根因定位，以及双架构、两类 P3 和 rename 专项证据 |
 | `docs/Work_Log.md` 2026-07-18 | c-ares/procfs resolver 默认 DNS | 记录 Codex 通过默认/显式 DNS A/B、inode 元数据和 c-ares 源码闭环根因，以及双架构、QEMU 和 P4 ext4 实板验证 |
+| `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
 
 ## 9. 交互记录与留痕方式
 

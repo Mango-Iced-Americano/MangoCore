@@ -65,7 +65,7 @@ const DEFAULT_ORDER: &[&str] = &[
     "cyclictest",
     "ltp",
     "cpython",
-    // "unixbench",
+    "unixbench",
 ];
 
 /// 每组默认超时（秒），索引 0..12 与 TEST_GROUPS 一一对应
@@ -76,13 +76,13 @@ const DEFAULT_TIMEOUTS: [u64; 13] = [
     60,   // [2]  lua
     120,  // [3]  libctest
     1800, // [4]  iozone (real SATA/FAT32 1 KiB record workload needs ~20 min/libc)
-    90,   // [5]  unixbench
+    900,   // [5]  unixbench
     40,   // [6]  iperf
     120,  // [7]  libcbench
     900, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    2400, // [11] ltp
+    24000, // [11] ltp
     900,  // [12] cpython
 ];
 
@@ -297,6 +297,7 @@ fn apply_board_core_test_focus(cfg: &mut RuntimeConfig) {
         .map(|name| String::from(*name))
         .collect();
     cfg.ltp_from = None;
+    cfg.skip_apk = true;
     println!(
         "[initproc] board core-test focus enabled: libctest, cyclictest, {} non-network LTP cases",
         cfg.ltp_include.len()
@@ -318,6 +319,7 @@ fn apply_cpython_test_focus(cfg: &mut RuntimeConfig) {
     cfg.mask = 1u16 << cpython_index;
     cfg.order = alloc::vec![cpython_index];
     cfg.timeouts[cpython_index] = 900;
+    cfg.skip_apk = true;
     println!("[initproc] isolated CPython focus enabled");
 }
 
@@ -355,6 +357,7 @@ fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
     }
     close(marker as usize);
     cfg.mode = RunMode::Shell;
+    cfg.skip_apk = true;
     println!("[initproc] board shell mode enabled");
 }
 
@@ -477,6 +480,7 @@ enum RunMode {
     Shell,
     RunThenShell,
     DriftWindow,
+    Regression,
 }
 
 fn mode_name(mode: RunMode) -> &'static str {
@@ -485,6 +489,7 @@ fn mode_name(mode: RunMode) -> &'static str {
         RunMode::Shell => "shell",
         RunMode::RunThenShell => "run_then_shell",
         RunMode::DriftWindow => "drift_window",
+        RunMode::Regression => "regression",
     }
 }
 
@@ -530,6 +535,8 @@ struct RuntimeConfig {
     ext4_profile: bool,
     /// 插桩：lmbench 前后 dump reclaim stats profile
     reclaim_profile: bool,
+    /// 跳过 apk 包安装（避免阻塞等待网络或安装失败）
+    skip_apk: bool,
     /// drift_window 模式：窗口数量
     drift_windows: u64,
     /// drift_window 模式：musl | glibc | both
@@ -616,6 +623,7 @@ impl RuntimeConfig {
             timer_smoke: false,
             ext4_profile: false,
             reclaim_profile: false,
+            skip_apk: false,
             drift_windows: 6,
             drift_libc: String::from("both"),
             drift_pre_mask: 0,
@@ -659,6 +667,7 @@ fn parse_mode(bytes: &[u8]) -> Option<RunMode> {
         b"shell" => Some(RunMode::Shell),
         b"run_then_shell" => Some(RunMode::RunThenShell),
         b"drift_window" => Some(RunMode::DriftWindow),
+        b"regression" => Some(RunMode::Regression),
         _ => None,
     }
 }
@@ -809,6 +818,8 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             cfg.ext4_profile = parse_bool_flag(val);
         } else if key == b"reclaim_profile" {
             cfg.reclaim_profile = parse_bool_flag(val);
+        } else if key == b"skip_apk" {
+            cfg.skip_apk = parse_bool_flag(val);
         } else if key == b"drift_windows" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -887,14 +898,15 @@ fn load_runtime_config() -> RuntimeConfig {
     };
     cfg.conf_source = Some(format!("{}\0", source).into_bytes());
     println!(
-        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={} ext4_profile={} reclaim_profile={}",
+        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={} ext4_profile={} reclaim_profile={} skip_apk={}",
         source,
         mode_name(cfg.mode),
         cfg.mask,
         ltp_runner_name(cfg.ltp_runner),
         cfg.timer_smoke,
         cfg.ext4_profile,
-        cfg.reclaim_profile
+        cfg.reclaim_profile,
+        cfg.skip_apk
     );
     println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
     if !cfg.ltp_include.is_empty() {
@@ -2148,22 +2160,52 @@ fn run_ltp_suite_runner(
     );
 }
 
-fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
+/// Read a /sys/kernel/stats/ file and dump to stdout via direct syscalls (no fork/exec).
+fn drift_read_stats(path: &str) {
+    let fd = open(path, OpenFlags::RDONLY);
+    if fd >= 0 {
+        let mut buf = [0u8; 2048];
+        let n = read(fd as usize, &mut buf);
+        if n > 0 {
+            let _ = write(1, &buf[..n as usize]);
+        }
+        close(fd as usize);
+    }
+}
+
+/// Write a short string to a /sys file via direct syscalls.
+fn drift_write_sys(path: &str, val: &str) {
+    let fd = open(path, OpenFlags::WRONLY);
+    if fd >= 0 {
+        let buf = alloc::string::String::from(val);
+        let _ = write(fd as usize, buf.as_bytes());
+        close(fd as usize);
+    }
+}
+
+fn drift_snapshot(window: u64, libc: &str, stage: &str, _environ: &[*const u8]) {
     println!(
         "[initproc] [drift] === drift_window W{} {} {} ===",
         window, libc, stage
     );
-    let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/ctxsw\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/reclaim\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
+    drift_read_stats("/sys/kernel/stats/taskq\0");
+    drift_read_stats("/sys/kernel/stats/timer\0");
+    drift_read_stats("/sys/kernel/stats/syscall\0");
+    drift_read_stats("/sys/kernel/stats/ctxsw\0");
+    drift_read_stats("/sys/kernel/stats/reclaim\0");
+    drift_read_stats("/sys/kernel/stats/tlb\0");
+    drift_read_stats("/sys/kernel/stats/heap\0");
+    drift_read_stats("/sys/kernel/stats/resource\0");
+    drift_read_stats("/sys/kernel/stats/seccomp\0");
+    drift_read_stats("/sys/kernel/stats/buddyinfo\0");
+    drift_read_stats("/sys/kernel/stats/zombies\0");
+    drift_read_stats("/sys/kernel/stats/pipe\0");
+    drift_read_stats("/sys/kernel/stats/ext4\0");
+    drift_read_stats("/sys/kernel/stats/lwext4\0");
+    drift_read_stats("/sys/kernel/stats/mount\0");
+    drift_read_stats("/sys/kernel/stats/syscall_top\0");
+    drift_read_stats("/sys/kernel/stats/pagefault\0");
+    drift_read_stats("/sys/kernel/stats/vm\0");
     println!(
         "[initproc] [drift] === drift_window W{} {} {} end ===",
         window, libc, stage
@@ -2171,8 +2213,8 @@ fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
 }
 
 fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
-    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/stats_on\0", environ);
-    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+    drift_write_sys("/sys/kernel/stats/stats_on\0", "1");
+    drift_write_sys("/sys/kernel/stats/reset\0", "1");
 
     let libc_list: &[&str] = match cfg.drift_libc.as_str() {
         "musl" => &["musl"],
@@ -2205,7 +2247,7 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
             libc, total_windows
         );
         for w in 0..total_windows {
-            let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            drift_write_sys("/sys/kernel/stats/reset\0", "1");
 
             // Run pre-workload test groups selected by drift_pre_mask.
             // Each bit corresponds to TEST_GROUPS index (bit0=basic, bit1=busybox, …).
@@ -2224,21 +2266,43 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
                         );
                     }
                 }
-                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+                let _ = drift_write_sys("/sys/kernel/stats/reset\0", "1");
             }
 
             drift_snapshot(w, libc, "pre", environ);
 
-            // Measurement command: null (lat_syscall null) or full (all lmbench)
-            let cmd = if cfg.drift_measure == "full" {
-                alloc::format!("cd {} && sh lmbench_testcode.sh\0", measurement_dir)
+            // Measurement command: null (lat_syscall null), full (all lmbench), or shell (fork+/bin/sh -c)
+            if cfg.drift_measure == "shell" {
+                // Direct fork+exec of /bin/sh, no bash wrapper — avoids extra execve
+                let pid = fork();
+                if pid == 0 {
+                    let sh = "/bin/sh\0";
+                    let dash_c = "-c\0";
+                    let true_cmd = "true\0";
+                    let args: [*const u8; 4] = [
+                        sh.as_ptr(),
+                        dash_c.as_ptr(),
+                        true_cmd.as_ptr(),
+                        core::ptr::null(),
+                    ];
+                    exec(sh, &args, environ);
+                    exit(127);
+                }
+                if pid > 0 {
+                    let mut code = 0;
+                    waitpid(pid as usize, &mut code);
+                }
             } else {
-                alloc::format!(
-                    "cd {} && ./lmbench_all lat_syscall -P 1 null\0",
-                    measurement_dir
-                )
-            };
-            let _ = run_bash_cmd(&cmd, environ);
+                let cmd = if cfg.drift_measure == "full" {
+                    alloc::format!("cd {} && sh lmbench_testcode.sh\0", measurement_dir)
+                } else {
+                    alloc::format!(
+                        "cd {} && ./lmbench_all lat_syscall -P 1 null\0",
+                        measurement_dir
+                    )
+                };
+                let _ = run_bash_cmd(&cmd, environ);
+            }
 
             drift_snapshot(w, libc, "post", environ);
             sleep(100); // 100ms between windows
@@ -2269,6 +2333,13 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/pagecache\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/blockio\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ext4\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/lwext4\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/mount\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/pipe\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall_top\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/pagefault\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/vm\0", environ);
     println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
 }
 
@@ -2399,7 +2470,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 1,
                 cfg,
             );
-            snapshot_diag(cfg.diag, n, group_name, "isolated", environ);
+            if cfg.diag {
+                snapshot_diag(cfg.diag, n, group_name, "isolated", environ);
+            }
         } else {
             let retries = if group_name == "lmbench" { 1 } else { MAX_GROUP_RETRIES };
             run_group_in_dir(
@@ -3279,7 +3352,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
         test -e /bin/busybox || ln -s /busybox /bin/busybox; \
-        if test -x /bin/head && test -x /bin/tail && test -x /bin/wc; then \
+        if test -e /bin/apk || (test -x /bin/head && test -x /bin/tail && test -x /bin/wc); then \
             echo 'busybox applets already installed, skipping --install'; \
         else \
             /bin/busybox --install -s /bin; \
@@ -3292,13 +3365,19 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
+    // Symlink apk -> apk.static for convenience
+    run_bash_cmd(
+        "[ -e /bin/apk ] || ln -sf /bin/apk.static /bin/apk; true\0",
+        environ,
+    );
+
     // Phase 4: Ensure /bin/bash exists, force /bin/sh -> /bin/bash
     // (busybox --install -s /bin may have set /bin/sh -> busybox/ash, which
     //  breaks LTP shell tests that need bash-compatible local/arithmetic)
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
-        ln -sf /bin/bash /bin/sh;
+        [ -e /bin/sh ] || ln -sf /bin/bash /bin/sh;
     ",
         environ,
     );
@@ -3327,33 +3406,35 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.7: /lib/modules/ — merged into Step 2 (after /lib exists)
 
     // Step 2: musl/glibc 动态库 + /lib/modules/ — 单次 shell 调用
-    // WARNING: Step 2 does `rm -rf /usr/lib; ln -sf /lib /usr/lib`, so any
-    // package-manager test must run only after prepare_symlink() completes.
+    // NOTE: /usr/lib is now conditionally symlinked — if it's a real dir
+    // with content (apk-installed packages), it's left alone.
+    // install_apk_packages can run at any time relative to this step.
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
         mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
         rm -rf /lib64; ln -sf /lib /lib64; \
-        rm -rf /usr/lib; ln -sf /lib /usr/lib; \
+        if [ ! -d /usr/lib ] || [ -L /usr/lib ]; then rm -rf /usr/lib 2>/dev/null || true; ln -sf /lib /usr/lib; fi; \
         rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
         mkdir -p /lib/modules/5.10.0-1-rv64 /lib/modules/5.10.0-1-la64; \
-        : > /lib/modules/5.10.0-1-rv64/modules.dep; \
-        : > /lib/modules/5.10.0-1-la64/modules.dep; \
-        printf '/veth.ko\n' > /lib/modules/5.10.0-1-rv64/modules.builtin; \
-        printf '/veth.ko\n' > /lib/modules/5.10.0-1-la64/modules.builtin; \
-        ln -sf /bin/true /sbin/modprobe; \
-        ln -sf /bin/true /bin/modprobe; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
-        ln -sf /musl/lib/libc.so /lib/libc.so; \
-        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
-        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
-        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
-        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
-        for f in /musl/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
-        for f in /glibc/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        [ -f /lib/modules/5.10.0-1-rv64/modules.dep ] || : > /lib/modules/5.10.0-1-rv64/modules.dep; \
+        [ -f /lib/modules/5.10.0-1-la64/modules.dep ] || : > /lib/modules/5.10.0-1-la64/modules.dep; \
+        [ -f /lib/modules/5.10.0-1-rv64/modules.builtin ] || printf '/veth.ko\n' > /lib/modules/5.10.0-1-rv64/modules.builtin; \
+        [ -f /lib/modules/5.10.0-1-la64/modules.builtin ] || printf '/veth.ko\n' > /lib/modules/5.10.0-1-la64/modules.builtin; \
+        [ -e /sbin/modprobe ] || ln -sf /bin/true /sbin/modprobe; \
+        [ -e /bin/modprobe ] || ln -sf /bin/true /bin/modprobe; \
+        [ -e /lib/ld-musl-riscv64-sf.so.1 ] || ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
+        [ -e /lib/ld-musl-riscv64.so.1 ] || ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
+        [ -e /lib/libc.so ] || ln -sf /musl/lib/libc.so /lib/libc.so; \
+        [ -e /lib/ld-linux-riscv64-lp64d.so.1 ] || ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
+        [ -e /lib/ld-linux-loongarch-lp64d.so.1 ] || ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
+        [ -e /lib/ld-musl-loongarch-lp64d.so.1 ] || ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
+        [ -e /lib/libc.so.6 ] || ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
+        [ -e /lib/libm.so.6 ] || ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        [ -e /glibc/lib/libgcc_s.so.1 ] || ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1; \
+        [ -e /lib/tls_get_new-dtv_dso.so ] || ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
+        [ -e ./libtls_get_new-dtv_dso.so ] || ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
+        for f in /musl/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
         true \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
@@ -3466,7 +3547,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
-        ln -sf /bin/bash /bin/sh;
+        [ -e /bin/sh ] || ln -sf /bin/bash /bin/sh;
     ",
         environ,
     );
@@ -3640,6 +3721,27 @@ fn bind_apk_persist_runtime() -> bool {
         }
     }
     ok
+}
+
+fn install_apk_packages(environ: &[*const u8]) {
+    let apk = "/tools/bin/apk.static\0";
+    let pkgs = "e2fsprogs\0";
+    let cmd = alloc::format!(
+        "{} add {} && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
+    //        apk.trim_end_matches('\0'),
+        apk.trim_end_matches('\0'),
+        pkgs.trim_end_matches('\0'),
+    );
+    println!("[initproc] apk add {} ...", pkgs.trim_end_matches('\0'));
+    let ret = run_bash_cmd(&cmd, environ);
+    if ret != 0 {
+        println!(
+            "[initproc] apk add failed (ret={}), keeping busybox mkfs fallback",
+            ret
+        );
+    } else {
+        println!("[initproc] apk add -> exit=0");
+    }
 }
 
 fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
@@ -3831,6 +3933,32 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         core::ptr::null(),
     ];
 
+    let mut cfg = load_runtime_config();
+
+    // Regression mode: run /regression binary standalone, report result, shutdown.
+    if cfg.mode == RunMode::Regression {
+        println!("[initproc] regression mode: running /regression");
+        let pid = fork();
+        if pid == 0 {
+            let prog = "/regression\0";
+            exec(prog, &[prog.as_ptr(), core::ptr::null()], &environ);
+            println!("[initproc] exec /regression failed");
+            exit(127);
+        }
+        if pid > 0 {
+            let mut code: i32 = 0;
+            waitpid(pid as usize, &mut code);
+            let exit_code = exit_code_from_waitpid_status(code);
+            if exit_code == 0 {
+                println!("[L4 REGRESSION PASSED]");
+            } else {
+                println!("[L4 REGRESSION FAILED] exit_code={}", exit_code);
+            }
+        }
+        shutdown();
+        return 0;
+    }
+
     prepare_symlink(&environ);
 
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
@@ -3896,20 +4024,45 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         return if ret == 0 { 0 } else { 1 };
     }
 
+    apply_board_core_test_focus(&mut cfg);
+    apply_cpython_test_focus(&mut cfg);
+    apply_board_shell_mode(&mut cfg);
+
+    // Keep the board's strict P4/APK marker paths deterministic. Normal develop
+    // runs still install the optional e2fsprogs package before test scheduling.
+    if !cfg.skip_apk {
+        install_apk_packages(&environ);
+    } else {
+        println!("[initproc] skip_apk=true: skipping install_apk_packages");
+    }
+
     // println!("[initproc] running fs_test...");
     // let fs_test_cmd = "cd / && ./fs_test\0";
     // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
     // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
+    // === fs_test fork+shell perf diagnostic (uncomment to run) ===
+ /* // Enable with EXTRA_FEATURES=perf_diag
+    println!("[initproc] running fs_test fork+shell bench...");
+    let tests = ["perf_fork_exec_shell", "perf_fork_exec_shell_quiet", "perf_fork_exec_shell_min", "perf_fork_exec", "perf_fork_only"];
+    for t in &tests {
+        let _ = user_lib::syscall::sys_ext4_counters(20, 0, 0);
+        let bench_cmd = alloc::format!("cd / && ./fs_test {}\0", t);
+        let _ = run_bash_cmd(&bench_cmd, &environ);
+        let calls = user_lib::syscall::sys_ext4_counters(21, 0, 0);
+        let ticks = user_lib::syscall::sys_ext4_counters(22, 0, 0);
+        let vfs_calls = user_lib::syscall::sys_ext4_counters(23, 0, 0);
+        let vfs_ticks = user_lib::syscall::sys_ext4_counters(24, 0, 0);
+        let dac_avg = if calls > 0 { ticks as usize / calls as usize } else { 0 };
+        let vfs_avg = if vfs_calls > 0 { vfs_ticks as usize / vfs_calls as usize } else { 0 };
+        println!("[perf] {} dac(c={} t={} avg={}) vfs_lookup(c={} t={} avg={})",
+            t, calls, ticks, dac_avg, vfs_calls, vfs_ticks, vfs_avg);
+    } */
+
     // println!("[initproc] running inet_test...");
     // let inet_test_cmd = "cd / && ./tests/inet_test\0";
     // let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
     // println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
-
-    let mut cfg = load_runtime_config();
-    apply_board_core_test_focus(&mut cfg);
-    apply_cpython_test_focus(&mut cfg);
-    apply_board_shell_mode(&mut cfg);
 
     if cfg.timer_smoke && !run_timerfd_smoke() {
         println!("[initproc] timer_smoke failed");

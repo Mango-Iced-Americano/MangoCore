@@ -48,10 +48,13 @@ pub use lifecycle::{
 };
 pub use misc::{sys_delete_module, sys_reboot, sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
-    sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2, sys_mlockall,
-    sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_pkey_alloc,
-    sys_pkey_free, sys_pkey_mprotect, sys_remap_file_pages, sys_riscv_flush_icache, sys_sbrk,
+    sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2,
+    sys_mlockall, sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall,
+    sys_munmap, sys_pkey_alloc, sys_pkey_free, sys_pkey_mprotect, sys_remap_file_pages,
+    sys_sbrk,
 };
+#[cfg(feature = "riscv")]
+pub use mm::sys_riscv_flush_icache;
 pub use signal::{
     sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
     sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_signalfd4,

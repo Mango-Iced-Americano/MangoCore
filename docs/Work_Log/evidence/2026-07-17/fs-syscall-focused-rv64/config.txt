@@ -1,0 +1,8 @@
+mode=run
+mask=0x800
+ltp_runner=inline
+ltp_libc=glibc
+ltp_suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
+ltp_exclude_reset=1
+ltp_include=mknod01,mknod02,mknod03,mknod04,mknod05,mknod06,mknod07,mknod08,mknodat01,mknodat02,gf14,gf18,gf27,gf28,tee01,tee02,splice01,splice02,splice03,splice04,splice05,splice06,splice07,splice08,splice09,splice10,statx01,statx02,statx03,readahead01,readahead02
+ltp_case_timeout_secs=120

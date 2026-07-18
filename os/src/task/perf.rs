@@ -89,6 +89,44 @@ mod enabled {
     static SYSCALL_YIELD: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_RET: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Per-syscall profiling ──
+    pub const PERF_SYSCOUNT: usize = 512;
+    static SYSCALL_COUNT: [AtomicUsize; PERF_SYSCOUNT] = [const { AtomicUsize::new(0) }; PERF_SYSCOUNT];
+    static SYSCALL_TICKS: [AtomicUsize; PERF_SYSCOUNT] = [const { AtomicUsize::new(0) }; PERF_SYSCOUNT];
+
+    // ── Page fault per-action profile ──
+    // action 0=LazyAlloc 1=FileBackedRead 2=FileBackedSharedWrite
+    //        3=FileBackedWrite 4=SharedWrite 5=Cow 6=Other
+    pub const PF_ACTION_NAMES: [&str; 7] = [
+        "LazyAlloc", "FileBackedRead", "FileBackedSharedWrite",
+        "FileBackedWrite", "SharedWrite", "Cow", "Other",
+    ];
+    static PF_ACTION_COUNT: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
+    static PF_ACTION_TICKS: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
+
+    // ── Filemap fault phase counters ──
+    pub static FILEMAP_FAULT_FRAMES: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PRIVATE_COPY_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_MAP_USER_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── TLB flush cycle counters ──
+    pub static TLB_PAGE_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static TLB_FULL_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static TLB_ACTIVATE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Execve phase cycle counters ──
+    pub static EXECVE_MAP_ELF_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_KERNEL_MAP_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_INTERP_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_STACK_TABLES_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_TEARDOWN_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    // DAC (Discretionary Access Control) — filesystem permission checks
+    pub static DAC_SEARCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static DAC_VFS_LOOKUP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
     // Fine-grained TLB counters
     pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0); // total
     pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0); // full inval (invtlb 0x3 / sfence.vma no-arg)
@@ -297,6 +335,40 @@ mod enabled {
     pub static RUNTIME_OPENAT_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static RUNTIME_READ_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static RUNTIME_MMAP_CALLS: AtomicUsize = AtomicUsize::new(0);
+    // ── P0: Ext4 Block Mapping ──
+    pub static EXT4_MAP_LBLOCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_MAP_LBLOCK_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_MAP_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_MAP_HOLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 Extent Tree Search ──
+    pub static EXT4_FIND_EXTENT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FIND_EXTENT_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FIND_EXTENT_DEPTH_SUM: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FIND_EXTENT_META_READS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 PageCache Backend Batch ──
+    pub static EXT4_PC_READPAGES_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_READPAGES_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_READPAGES_RUNS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_WRITEPAGES_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_WRITEPAGES_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_WRITEPAGES_RUNS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_512B_FALLBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 Allocation ──
+    pub static EXT4_ALLOC_ENSURE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_ALLOC_LBLOCKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_ALLOC_NEW_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_ALLOC_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: PageCache Lock Contention ──
+    pub static PC_LOCK_HOLD_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_LOCK_HOLD_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_LOCK_IO_MISS_READS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 direct write_at ──
+    pub static EXT4_DIRECT_WRITE_AT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: Heap Allocator Cost ──
     pub static HEAP_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -973,6 +1045,128 @@ mod enabled {
         }
     }
 
+    // ── Ext4 Block Mapping recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_map_lblock() {
+        if !stats_enabled() { return; }
+        EXT4_MAP_LBLOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_map_lblock_cost(cycles: usize) {
+        if !stats_enabled() { return; }
+        EXT4_MAP_LBLOCK_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_map_cache_hit() {
+        if !stats_enabled() { return; }
+        EXT4_MAP_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_map_hole() {
+        if !stats_enabled() { return; }
+        EXT4_MAP_HOLES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── Ext4 Extent Tree Search recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_find_extent_call() {
+        if !stats_enabled() { return; }
+        EXT4_FIND_EXTENT_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_find_extent_cost(cycles: usize, depth: usize, meta_reads: usize) {
+        if !stats_enabled() { return; }
+        EXT4_FIND_EXTENT_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_DEPTH_SUM.fetch_add(depth, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_META_READS.fetch_add(meta_reads, Ordering::Relaxed);
+    }
+
+    // ── Ext4 PageCache Backend Batch recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_pc_readpages_calls() {
+        if !stats_enabled() { return; }
+        EXT4_PC_READPAGES_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_readpages_pages(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_READPAGES_PAGES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_readpages_runs(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_READPAGES_RUNS.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_writepages_calls() {
+        if !stats_enabled() { return; }
+        EXT4_PC_WRITEPAGES_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_writepages_pages(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_WRITEPAGES_PAGES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_writepages_runs(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_WRITEPAGES_RUNS.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_512b_fallback(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_512B_FALLBACK_PAGES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    // ── Ext4 Allocation recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_alloc_ensure_calls() {
+        if !stats_enabled() { return; }
+        EXT4_ALLOC_ENSURE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_alloc_ensure(lblocks: usize, new_blocks: usize, cycles: usize) {
+        if !stats_enabled() { return; }
+        EXT4_ALLOC_LBLOCKS.fetch_add(lblocks, Ordering::Relaxed);
+        EXT4_ALLOC_NEW_BLOCKS.fetch_add(new_blocks, Ordering::Relaxed);
+        EXT4_ALLOC_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    // ── PageCache Lock Contention recorders ──
+
+    #[inline(always)]
+    pub fn record_pc_lock_hold(cycles: usize, io_miss: bool) {
+        if !stats_enabled() { return; }
+        PC_LOCK_HOLD_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        update_max(&PC_LOCK_HOLD_MAX, cycles);
+        if io_miss {
+            PC_LOCK_IO_MISS_READS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // ── Ext4 direct write_at recorder ──
+
+    #[inline(always)]
+    pub fn record_ext4_direct_write_at() {
+        if !stats_enabled() { return; }
+        EXT4_DIRECT_WRITE_AT_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Reset all P0+P1 performance counters (writable via /sys/kernel/stats/reset).
     pub fn reset_all_counters() {
         // Legacy lifecycle counters used by the existing snapshot formatter.
@@ -1178,6 +1372,65 @@ mod enabled {
         RUNTIME_OPENAT_CALLS.store(0, Ordering::Relaxed);
         RUNTIME_READ_CALLS.store(0, Ordering::Relaxed);
         RUNTIME_MMAP_CALLS.store(0, Ordering::Relaxed);
+        // Ext4 Block Mapping (P0)
+        EXT4_MAP_LBLOCK_CALLS.store(0, Ordering::Relaxed);
+        EXT4_MAP_LBLOCK_CYCLES.store(0, Ordering::Relaxed);
+        EXT4_MAP_CACHE_HITS.store(0, Ordering::Relaxed);
+        EXT4_MAP_HOLES.store(0, Ordering::Relaxed);
+        // Ext4 Extent Tree Search (P0)
+        EXT4_FIND_EXTENT_CALLS.store(0, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_CYCLES.store(0, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_DEPTH_SUM.store(0, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_META_READS.store(0, Ordering::Relaxed);
+        // Ext4 PageCache Backend Batch (P0)
+        EXT4_PC_READPAGES_CALLS.store(0, Ordering::Relaxed);
+        EXT4_PC_READPAGES_PAGES.store(0, Ordering::Relaxed);
+        EXT4_PC_READPAGES_RUNS.store(0, Ordering::Relaxed);
+        EXT4_PC_WRITEPAGES_CALLS.store(0, Ordering::Relaxed);
+        EXT4_PC_WRITEPAGES_PAGES.store(0, Ordering::Relaxed);
+        EXT4_PC_WRITEPAGES_RUNS.store(0, Ordering::Relaxed);
+        EXT4_PC_512B_FALLBACK_PAGES.store(0, Ordering::Relaxed);
+        // Ext4 Allocation (P0)
+        EXT4_ALLOC_ENSURE_CALLS.store(0, Ordering::Relaxed);
+        EXT4_ALLOC_LBLOCKS.store(0, Ordering::Relaxed);
+        EXT4_ALLOC_NEW_BLOCKS.store(0, Ordering::Relaxed);
+        EXT4_ALLOC_CYCLES.store(0, Ordering::Relaxed);
+        // PageCache Lock Contention (P0)
+        PC_LOCK_HOLD_CYCLES.store(0, Ordering::Relaxed);
+        PC_LOCK_HOLD_MAX.store(0, Ordering::Relaxed);
+        PC_LOCK_IO_MISS_READS.store(0, Ordering::Relaxed);
+        // Ext4 direct write_at (P0)
+        EXT4_DIRECT_WRITE_AT_CALLS.store(0, Ordering::Relaxed);
+
+        // ── Per-syscall profiling ──
+        for i in 0..PERF_SYSCOUNT {
+            SYSCALL_COUNT[i].store(0, Ordering::Relaxed);
+            SYSCALL_TICKS[i].store(0, Ordering::Relaxed);
+        }
+
+        // ── Page fault per-action ──
+        for i in 0..7 {
+            PF_ACTION_COUNT[i].store(0, Ordering::Relaxed);
+            PF_ACTION_TICKS[i].store(0, Ordering::Relaxed);
+        }
+
+        // ── Filemap fault phase ──
+        FILEMAP_FAULT_FRAMES.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_TICKS.store(0, Ordering::Relaxed);
+        FILEMAP_PRIVATE_COPY_TICKS.store(0, Ordering::Relaxed);
+        FILEMAP_MAP_USER_TICKS.store(0, Ordering::Relaxed);
+
+        // ── TLB flush cycles ──
+        TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
+        TLB_FULL_FLUSH_CYCLES.store(0, Ordering::Relaxed);
+        TLB_ACTIVATE_CYCLES.store(0, Ordering::Relaxed);
+
+        // ── Execve phase cycles ──
+        EXECVE_MAP_ELF_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_KERNEL_MAP_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_INTERP_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_STACK_TABLES_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_TEARDOWN_TICKS.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -1353,17 +1606,20 @@ mod enabled {
         let lock_us = if f_calls > 0 { us(f_lock) / f_calls } else { 0 };
         let inner_us = if f_miss > 0 { us(f_inner) / f_miss } else { 0 };
         let insert_us = if f_miss > 0 { us(f_insert) / f_miss } else { 0 };
-        crate::println!(
-            "[vfs-find] {} calls={} hit={} miss={} avg={}us lock={}us inner={}us insert={}us",
-            reason,
-            f_calls,
-            f_hit,
-            f_miss,
-            f_us,
-            lock_us,
-            inner_us,
-            insert_us
-        );
+        crate::println!("[vfs-find] {} calls={} hit={} miss={} avg={}us lock={}us inner={}us insert={}us",
+            reason, f_calls, f_hit, f_miss, f_us, lock_us, inner_us, insert_us);
+
+        // lwext4 metadata diagnostics
+        let lw = crate::fs::ext4_lwext4::counters::snapshot();
+        crate::println!("[lwext4] find={} find_cycles={} probe_type={} pt_cycles={} get_inode_id={} gii_enoent={} gii_cycles={} meta_cold={} meta_hot={} meta_cold_cycles={} file_open={} fo_cycles={} file_size={} file_close={} fc_cycles={} dirent={} de_cycles={} create_pre={} logical_size={} ls_cycles={} ensure_pc={} cache_hit={} cache_miss={} pc_creates={}",
+            lw.0, lw.1, lw.2, lw.3, lw.4, lw.5, lw.6, lw.7, lw.8, lw.9,
+            lw.10, lw.11, lw.12, lw.13, lw.14, lw.15, lw.16, lw.17, lw.18, lw.19, lw.20,
+            lw.21, lw.22, lw.23);
+
+        // mount/bind diagnostics
+        let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
+        crate::println!("[mount_perf] propagate={} prop_cycles={} remove_fs={} rf_scan={} rbind={} rbind_cycles={} rbind_entries={} dirent_calls={} seen_scan={}",
+            mnt.0, mnt.1, mnt.2, mnt.3, mnt.4, mnt.5, mnt.6, mnt.7, mnt.8);
     }
 
     /// Unconditionally print a perf snapshot (for group-boundary instrumentation).
@@ -1628,6 +1884,63 @@ mod enabled {
         }
     }
 
+    // ── Per-syscall time recorder ──
+    #[inline(always)]
+    pub fn record_syscall_time(syscall_id: usize, elapsed: usize) {
+        if !stats_enabled() { return; }
+        if syscall_id < PERF_SYSCOUNT {
+            SYSCALL_COUNT[syscall_id].fetch_add(1, Ordering::Relaxed);
+            SYSCALL_TICKS[syscall_id].fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    /// Read syscall count by ID (0 if out of range).
+    pub fn syscall_count(id: usize) -> usize {
+        if id < PERF_SYSCOUNT { SYSCALL_COUNT[id].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    /// Read syscall total ticks by ID (0 if out of range).
+    pub fn syscall_ticks(id: usize) -> usize {
+        if id < PERF_SYSCOUNT { SYSCALL_TICKS[id].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    // ── Page fault per-action recorders ──
+    #[inline(always)]
+    pub fn record_pagefault_action(action_tag: usize, elapsed: usize) {
+        if !stats_enabled() { return; }
+        if action_tag < 7 {
+            PF_ACTION_COUNT[action_tag].fetch_add(1, Ordering::Relaxed);
+            PF_ACTION_TICKS[action_tag].fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    pub fn pf_action_count(action_tag: usize) -> usize {
+        if action_tag < 7 { PF_ACTION_COUNT[action_tag].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    pub fn pf_action_ticks(action_tag: usize) -> usize {
+        if action_tag < 7 { PF_ACTION_TICKS[action_tag].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    // ── TLB flush cycle recorders ──
+    #[inline(always)]
+    pub fn record_tlb_page_flush_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        TLB_PAGE_FLUSH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_full_flush_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        TLB_FULL_FLUSH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_activate_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        TLB_ACTIVATE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
     #[inline(always)]
     pub fn record_syscall(syscall_id: usize, ret: isize) {
         if !stats_enabled() {
@@ -1734,6 +2047,38 @@ pub fn record_syscall(_syscall_id: usize, _ret: isize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_runtime_exec_cost(_syscall_id: usize, _ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_syscall_time(_syscall_id: usize, _elapsed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn syscall_count(_id: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn syscall_ticks(_id: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_action(_action_tag: usize, _elapsed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pf_action_count(_action_tag: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pf_action_ticks(_action_tag: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_page_flush_cycles(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_full_flush_cycles(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_activate_cycles(_cycles: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2041,6 +2386,59 @@ pub fn record_net_tx_submit(_bytes: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_net_tx_drop() {}
+
+// ── Ext4/P0 recorders (no-op when perf_stats disabled) ──
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_lblock() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_lblock_cost(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_cache_hit() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_hole() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_find_extent_call() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_find_extent_cost(_cycles: usize, _depth: usize, _meta_reads: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_readpages_calls() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_readpages_pages(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_readpages_runs(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_writepages_calls() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_writepages_pages(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_writepages_runs(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_512b_fallback(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_alloc_ensure_calls() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_alloc_ensure(_lblocks: usize, _new_blocks: usize, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_lock_hold(_cycles: usize, _io_miss: bool) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_direct_write_at() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2467,6 +2865,64 @@ pub static RUNTIME_READ_CALLS: core::sync::atomic::AtomicUsize =
 pub static RUNTIME_MMAP_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
+// ── Ext4 Block Mapping stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_LBLOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_LBLOCK_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_CACHE_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_HOLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 Extent Tree Search stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_DEPTH_SUM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_META_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 PageCache Backend Batch stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_READPAGES_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_READPAGES_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_READPAGES_RUNS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_WRITEPAGES_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_WRITEPAGES_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_WRITEPAGES_RUNS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_512B_FALLBACK_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 Allocation stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_ENSURE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_LBLOCKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_NEW_BLOCKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── PageCache Lock Contention stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOCK_HOLD_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOCK_HOLD_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOCK_IO_MISS_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 direct write_at stub ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_DIRECT_WRITE_AT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 // ── TLB counter stubs (zero-valued when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
 pub static TLB_FLUSHES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -2500,3 +2956,43 @@ pub static FRAME_ALLOC_TIME_TICKS: core::sync::atomic::AtomicUsize =
 #[cfg(not(feature = "perf_stats"))]
 pub static FRAME_ALLOC_TIME_COUNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+// ── Per-syscall profiling stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub const PERF_SYSCOUNT: usize = 512;
+
+// ── Filemap fault phase stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_FAULT_FRAMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_FAULT_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_PRIVATE_COPY_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── TLB flush cycle stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_PAGE_FLUSH_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_FULL_FLUSH_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_ACTIVATE_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Execve phase cycle stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_MAP_ELF_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_KERNEL_MAP_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_INTERP_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_STACK_TABLES_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── PF action names stub ──
+#[cfg(not(feature = "perf_stats"))]
+pub const PF_ACTION_NAMES: [&str; 7] = [
+    "LazyAlloc", "FileBackedRead", "FileBackedSharedWrite",
+    "FileBackedWrite", "SharedWrite", "Cow", "Other",
+];

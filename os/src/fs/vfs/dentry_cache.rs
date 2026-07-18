@@ -233,23 +233,7 @@ impl DentryCache {
         }
     }
 
-    /// Advance CLOCK hand by one step: if the front entry is cold, evict it.
-    /// Called from get() when cache is at limit, so cold entries get evicted
-    /// even on cache-hit-heavy workloads where insert_or_get rarely fires.
-    fn advance_clock_one(&mut self) {
-        let Some(key) = self.order.pop_front() else {
-            return;
-        };
-        let Some(entry) = self.map.get_mut(&key) else {
-            // Entry missing from map — skip
-            return;
-        };
-        if entry.referenced {
-            entry.referenced = false;
-            self.order.push_back(key);
-        } else {
-            self.map.remove(&key);
-            dcache_stats::ADVANCE_REMOVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        }
-    }
+    // NOTE: advance_clock_one removed — it was documented as "called from
+    // get()", but get() explicitly does insertion-only eviction (see its
+    // doc comment).  There is no caller, so the function is dead code.
 }

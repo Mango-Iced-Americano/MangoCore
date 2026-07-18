@@ -1,4 +1,4 @@
-use crate::hal::{console_flush, console_putchar, local_irq_restore, local_irq_save};
+use crate::hal::{console_write_bytes, local_irq_restore, local_irq_save};
 use crate::task::current_task;
 use crate::timer::get_time_ms;
 use core::fmt::{self, Write};
@@ -11,20 +11,20 @@ struct KernelOutput;
 
 impl Write for KernelOutput {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let mut i = 0;
-        for c in s.chars() {
-            console_putchar(c as usize);
-            i += 1;
-            if i >= 4 {
-                console_flush();
-                i = 0;
-            }
-        }
-        if i != 0 {
-            console_flush();
-        }
+        console_write_bytes(s.as_bytes());
         Ok(())
     }
+}
+
+/// Write raw bytes to console atomically (interrupts disabled).
+///
+/// Unlike [`print!`]/[`println!`], this takes raw bytes (not a format string)
+/// and handles its own interrupt save/restore.  Used by [`Teletype::write_at`]
+/// to bypass the per-character SBI ecall bottleneck.
+pub fn write_bytes_atomic(data: &[u8]) {
+    let irq_state = local_irq_save();
+    console_write_bytes(data);
+    local_irq_restore(irq_state);
 }
 
 pub fn print(args: fmt::Arguments) {

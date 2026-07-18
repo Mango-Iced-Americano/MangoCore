@@ -35,11 +35,9 @@ impl Read<u8> for Ns16550a {
 
 impl Write<u8> for Ns16550a {
     fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        if word == b'\n' {
-            // 换行符前先写回车符，产生标准 \r\n 序列
-            // （旧代码先写 \n 再写 \r 产生 \n\r，会触发 Python universal newline 拆分 bug）
-            unsafe { write_volatile((self.base + offsets::THR) as *mut u8, b'\r') };
-        }
+        // 原样输出字节，不做 \n→\r\n 展开。
+        // CR 处理由更上层的 println!/TTY ONLCR 路径负责（la64 调用方已提供 \r\n），
+        // 此处若再次插入 \r 会导致 \r\r\n 重复。
         unsafe { write_volatile((self.base + offsets::THR) as *mut u8, word) };
         Ok(())
     }

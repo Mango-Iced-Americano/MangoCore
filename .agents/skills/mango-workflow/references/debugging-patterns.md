@@ -28,25 +28,12 @@
 
 ## 启动/Panic 排查
 
-### QEMU 启动无显示
-- 检查 `console::init()` 是否第一个被调用（在 `rust_main()` 中）
-- 检查串口设备初始化顺序
-
 ### 内核 panic 定位
 - 启动时加 `LOG=debug make rv64-run` 查看详细日志
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`
 - panic 输出包含 syscall 上下文、内存状态、任务信息（`panic_diag.rs`）
 
-### 编译问题
-- `cargo check` 在根目录一定失败 → 始终在 `os/` 目录用 Makefile 目标
-- `Vec` 重复定义 → 检查是否同时 `use alloc::vec;` 和 `use alloc::vec::Vec;`
-- lang_items 不匹配 → 编辑 `.rv` / `.la` 变体，不编辑 `lang_items.rs`
-
 ## 内存问题
-
-### unmap 后读到旧数据
-- 典型 TLB 刷新遗漏 → 检查 PTE 修改后是否有 `sfence.vma`/`invtlb`
-- 用 GDB `info tlb` 查看 TLB 条目
 
 ### 物理地址异常（如 0xb0000000）
 - la64: 检查 `MEMORY_SIZE` 是否匹配 DTB 中 RAM 范围
@@ -56,20 +43,27 @@
 - 检查是否有 `try_reserve` 防御
 - 查看 `heap_trace.rs` 的分配记录（需启用 feature）
 
+### getdents 等 syscall 对 guarded 用户缓冲区返回 EFAULT 而非部分数据
+
+- **根因**: `UserBufferWriter::new` 在 FS 工作之后调用。guard page（未映射页）场景下，`UserBufferWriter` 可能对第一个有效页成功，写入部分数据后返回正数字节数而非 EFAULT。
+- **修复**: 将 `UserBufferWriter::new(token, ptr, len)` 移到任何内核工作（FS 操作、内存分配）之前。如果用户缓冲区不可写，`new()` 立即失败返回 EFAULT，避免先做了内核工作再报错。
+- **教训**: 所有接受用户缓冲区指针的 syscall，都应尽早创建 `UserBufferWriter`/`UserBuffer` 进行预校验。Linux 内核在 `copy_to_user` 每次写入时都会 fault，所以天然不存在此问题；我们的批量拷贝模型需要显式预校验。
+- **相关文件**: `os/src/syscall/fs.rs` — `sys_getdents64`
+
 ### bind/umount 后 `/proc/mounts` 仍有 sandbox 残留
 - 症状：LTP `fs_bind*` 清理阶段反复提示 `There are still mounts in the sandbox`，`umount` 看似成功但同一路径仍出现在 `/proc/mounts`
 - 优先检查：子 `MountFS` 是否还能通过 `self_mountpoint` 找到父 `MountFSInode`，以及父 `mountpoints` 表是否真正删除了该 inode id
 - 典型根因：挂载点 backref 只保存弱引用或 overmount 旧挂载未走统一 detach，导致 `detach_from_parent_and_cleanup()` 无法摘除父表项
 - 修复模式：保留稳定 parent backref，在 detach 时 `take()` 断开引用；覆盖挂载旧节点也走完整 cleanup，避免 dentry/child mount 缓存继续持有 covered subtree
 
-## 网络问题
+## Drop 与锁顺序
 
-### Socket 操作阻塞不返回
-- `connect` 不返回 → 检查是否使用 `try_connect` + `wait_io` 模式
-- `accept`/`recvfrom` 不返回 → 检查 `wait_io` 中是否调用了 `NET_INTERFACE.poll()`
+### 持锁时替换 fd 条目标隐式 drop 旧文件 → 死锁
 
-### 非阻塞 socket 测试失败
-- 检查 `try_xxx` 前是否调了 `NET_INTERFACE.try_poll()`
+- **根因**: `FdTable::alloc_fd_at()` 中 `self.fds[fd] = Some(new_file)` 会替换旧值，若旧 `Arc<File>` 引用计数降为 0，其 `Drop` 触发 `File::drop` → `inode.close()`，在 close 非 no-op 时尝试获取其他锁（page cache lock、FS 内部锁），而调用者仍持有 `fd_table` 锁 → 死锁。
+- **修复**: (1) 用 `core::mem::replace` 提取旧值而非隐式 drop，通过返回值传出；(2) 调用者先释放 `fd_table` 锁，再 `drop(old_file)`。
+- **教训**: Rust 隐式 drop 让你看不见资源释放点。修改 `Vec<Option<Arc<T>>>` 等容器持有重型资源时，`=` 赋值的隐式 drop 可能在持锁路径下触发 `Drop`，导致死锁。安全模式：`let old = core::mem::replace(&mut slot, new_value); ... unlock(); drop(old);`
+- **相关文件**: `os/src/fs/vfs/file.rs` — `alloc_fd_at()`, `os/src/syscall/fs.rs` — `sys_dup2()`, `sys_dup3()`
 
 ### curl 正常但 Tokio/Mio HTTPS 超时
 
@@ -125,6 +119,18 @@
 - 检查 `SIGSTOP`/`SIGCONT` 是否正确更新进程状态
 - 检查父进程 wait 是否正确消费 stopped/continued 事件
 
+## Errno 返回值问题
+
+### errno 常量双取反导致正"成功"返回值
+
+- **根因**: 项目 errno 常量定义为负 `isize`（`EINVAL = -22`, `EAGAIN = -11`），但 `flock.rs` 返回时又取反：`return -EINVAL` → 实际返回 `22`（正数，syscall 入口视作成功）。`-EAGAIN` 同理返回 `11`。
+- **修复**: 直接返回常量 `EINVAL`/`EAGAIN`（已为负值），不再额外取反。
+- **教训**:
+  - 定义 errno 常量前先确定符号约定 — 代码库中使用负值 vs Linux 正值。本项目使用负值直接返回即可。
+  - 新增 syscall 时检查返回模式：`os/src/syscall/fs.rs` 中 `return EINVAL;` 是正确的参考模式。
+  - `return -ENOERR` 模式在该项目中都是可疑的 — 如果 errno 常量已经是负值，取反就变成正数。
+- **相关文件**: `os/src/syscall/flock.rs`, `os/src/syscall/errno.rs`
+
 ## 性能问题
 
 ### la64 大量 page fault 慢
@@ -167,8 +173,15 @@
 
 ### 用户 buffer 大小与实际 copy 长度不一致
 - 症状：同一 syscall 在 glibc/musl 或不同架构下偶发 `EFAULT`，但实际输出内容很短，例如 `getcwd()` 只复制当前路径却按用户传入的 `PATH_MAX` 校验整段 buffer。
-- 优先检查：syscall 是否用“用户声明容量”做 VMA 可访问性校验，而真实 `copy_to_user` 只会访问更短的 `write_len`。
+- 优先检查：syscall 是否用"用户声明容量"做 VMA 可访问性校验，而真实 `copy_to_user` 只会访问更短的 `write_len`。
 - 修复模式：保留 Linux 语义需要的容量判断（如 `ERANGE`），但地址可访问性和 `UserBufferWriter` 长度按实际读写字节数校验。
+
+### UserBufferWriter::write_from 总是返回 Ok — 调用者必须检查实际写入长度
+- **症状**：`write_from().is_err()` 永远为 `false`（因为 `write_from` 实现为 `Ok(self.buffer.write(src))`），所以当 `UserBuffer::write` 返回少于 `src.len()` 的字节数时，调用者误以为复制完全成功，返回部分字节数而非 `EFAULT`。
+- **根因**：`UserBufferWriter::write_from` 的 `Result<usize, isize>` 签名暗示可能返回 Err，但其内部 `UserBuffer::write` 永远不返回错误——它只返回实际写入字节数，可能少于请求长度。包装层丢失了部分写入的信号。
+- **修复**：不要依赖 `.is_err()` 检查 `write_from`。必须检查返回值 `copied != src.len()`，或者用 `unwrap()` 获取实际写入数后再比较。
+- **检查清单**：所有调用 `write_from` 的地方都必须检查返回值（当前约 12 处调用，包括 `os/src/syscall/fs.rs`、`os/src/net/syscall/getsockopt.rs` 等）。
+- **相关文件**：`os/src/mm/uaccess.rs:363`, `os/src/syscall/fs.rs`（`sys_getdents64` 等），`os/src/net/syscall/getsockopt.rs`
 
 ## QEMU / 测试
 
@@ -178,9 +191,6 @@
 - **根因**: Docker CE APT 源只影响 Docker 软件包安装；`docker compose up` 拉取镜像走容器 registry（Docker Hub 或显式 registry 前缀），由 `/etc/docker/daemon.json` 的 `registry-mirrors` 或 compose 中的镜像地址决定。
 - **修复**: 先用 `docker compose config` 确认实际 image，再用国内 registry 前缀或可用 daemon mirror 拉取；项目入口应支持 `DOCKER_IMAGE=...` 覆盖。
 - **相关文件**: `docker-compose.yml`, `Makefile`, `scripts/run_test_docker_parallel.sh`
-
-### `os_test.conf` 修改不生效
-- 使用 `conf-inject` 重新注入镜像（不能直接改镜像中的文件）
 
 ### 对照实验必须同时确认 kernel 和 sdcard 用户态产物
 
@@ -205,9 +215,6 @@
 - **修复**: handler 本体计时必须在可能 context switch 前完成记录；trap 入口成本和 handler 成本分开记录。若需要观察“被调度走多久”，另加独立的 off-CPU/latency counter，不要混入 trap cycles。
 - **相关文件**: `os/src/hal/arch/riscv/trap/mod.rs`, `os/src/hal/arch/loongarch64/trap/mod.rs`, `os/src/task/manager.rs`
 
-### QEMU 进程残留
-- `pkill qemu-system` 或 `pkill qemu`
-
 ### Docker Compose 进入了别人的容器
 
 - **现象**: 在自己的工作区执行 `docker compose exec os-dev ...`，但容器内 `/app` 实际挂载到队友目录，后续 `docker cp` 或容器内写入会改到别人的源码。
@@ -228,10 +235,6 @@
   或通过 `make -f make/la64o.mk build EXTRA_FEATURES="initramfs preload_payloads"`
 - **注意**: 根 Makefile 没有 `la64-kernel-build-only` 目标；`rv64_all`/`la64_all` 通过不同的 Makefile 目标处理特性
 - **相关文件**: `os/make/la64o.mk`, `os/Makefile`
-
-### LTP 特定用例调试
-- 使用 `ltp_runner=inline` + `ltp_include=testname1,testname2` 窄范围测试
-- 提交前恢复为 `ltp_runner=suite` 或 `ltp_runner=script`
 
 ### la64 clone09 停在 CLONE_NEWNET 后无 timeout
 
@@ -850,3 +853,167 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
   resolver 和刷新路径；显式 DNS 成功只能证明服务器健康，不能替代默认路径验收。
 - **相关文件**：`user/src/bin/initproc.rs`,
   `os/initramfs/apk/usr/bin/persist-shell`, `os/src/fs/procfs/files/net_resolv.rs`
+
+## lwext4 VFS 适配器常见陷阱
+
+### spin::Mutex 不可重入 — 持有外层锁时调用内层加锁函数会死锁
+
+- **现象**: `metadata()` 调用 `probe_type()`，两者都尝试获取 `self.fs.lw.lock()`（`spin::Mutex`）→ 死锁。同理 `list_dirents()` 调用 `get_inode_id()`。
+- **根因**: `spin::Mutex` 不是可重入锁（不同于 Linux 内核的 `mutex_lock`），同一上下文不能重复加锁。
+- **修复**: 将内层函数的逻辑内联到外层锁作用域内，或在进入外层锁前释放锁并通过其他方式获取信息（如 `hash_path()` 伪 inode ID）。
+- **教训**: 审计所有方法中"持有锁 → 调用另一方法"的链式调用，特别是在同一个 struct 的方法之间。`probe_type()`、`get_inode_id()` 这类帮助函数内部都持有 `fs.lw.lock()`。
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`, `os/src/fs/ext4_lwext4/ext4fs.rs`
+
+### 文件句柄泄漏 — `?` 提前返回时 file_close 未调用
+
+- **现象**: PageCache 后端的 `read_page`/`write_page`/`read_pages`/`write_pages` 在 `file_seek`/`file_read`/`file_write` 失败时，`?` 提前返回但 `file_open` 已打开的句柄未被关闭。
+- **根因**: lwext4 的 `Ext4File` 使用 `file_open`/`file_close` 手动管理（无 RAII），`?` 运算符绕过了底部的 `file_close().ok()`。
+- **修复**: 用闭包包裹所有 I/O 操作，闭包返回 `Result`，然后在外层调用 `file_close().ok()` 并返回闭包结果：
+  ```rust
+  f.file_open(path, flags)?;
+  let result = (|| -> Result<usize, SyscallErr> {
+      // ... I/O operations that may fail with ?
+  })();
+  f.file_close().ok();
+  result
+  ```
+- **教训**: 在 C 风格 API（手动 open/close）上使用 Rust 的 `?` 运算符时，必须确保 close 在所有路径上执行。闭包 + 外层 close 是一种轻量级 RAII 模拟。
+- **相关文件**: `os/src/fs/ext4_lwext4/page_cache.rs`
+
+### file_seek EOF clamp 破坏 POSIX 语义
+
+- **现象**: `file_seek()` 在 `offset > file_size` 时将 offset clamp 到文件大小。这导致 `pwrite(fd, data, 4096, offset=8192)` 实际写入 offset=4096。
+- **根因**: 看似防御性的 EOF 检查，但 POSIX 明确允许 seek 超出 EOF（创建稀疏文件/空洞）。
+- **修复**: 移除 clamp，直接将原始 offset 传递给 `ext4_fseek`。
+- **教训**: 不要对 POSIX 行为做"防御性"修正，尤其当底层 C 库（lwext4 ext4_fseek）已经实现了 POSIX 语义时。mmap 脏页回写、pwrite 等场景依赖 seek-beyond-EOF。
+- **相关文件**: `dependency/lwext4_rust/src/file.rs`
+
+## 纯逻辑 Bug
+
+### TimeSpec::AddAssign 不归一化导致时间计算错误
+
+- **现象**: 链式 `+=` 操作后，`TimeSpec.tv_nsec >= NSEC_PER_SEC (1_000_000_000)`，导致 `to_ns()` 溢出和比较运算符产生错误结果。
+- **根因**: `AddAssign` 仅做分量加法 `self.tv_sec += rhs.tv_sec; self.tv_nsec += rhs.tv_nsec;`，未做进位处理。而 `Add` trait 实现中正确进行了归一化，两个 trait 实现不一致。
+- **修复**: `AddAssign` 末尾添加 `self.tv_sec += self.tv_nsec / NSEC_PER_SEC; self.tv_nsec %= NSEC_PER_SEC;`
+- **教训**:
+  - 实现 `AddAssign` 时必须保证与 `Add` 等价：`a += b` 应等于 `a = a + b`。
+  - 需要单元测试覆盖链式 `+=` 场景（至少 3 次累加带进位）。
+  - 任何含有多个分量且分量之间存在进位关系的类型（钟表 / 日历 / 坐标加法），`AddAssign` 必须做归一化。
+- **相关文件**: `os/src/timer.rs:138`, `libs/mango-kernel-core/src/time.rs`
+
+### `1u8 << N` 在 N == 8 时 debug panic
+
+- **现象**: 当 `VALID_SEG_COUNT == 8` 且 `(seg_end - seg_start) == 8` 时，`(1u8 << 8) - 1` 在 debug 模式下 panic（shift-width-equal-to-bit-width）。
+- **根因**: Rust 规定 `1u8 << 8` 是未定义行为，debug 模式会 panic。当所有 8 个 512B segment 都要标记为 valid 时，计算 `(1 << 8) - 1` 即触发此 panic。
+- **修复**: 安全写法 `if count == 8 { u8::MAX } else { (1u8 << count) - 1 }` 或 `u8::MAX >> (8 - count)`。
+- **教训**:
+  - 任何 `1uN << M` 表达式都必须保证 `M < N`（移位宽度严格小于位数）。
+  - 边界条件 `M == N` 发生在 bitmap full-set 场景（全掩码），需要用 `MAX` 常量代替。
+  - 此模式在 bitmask 计算中极常见，编写时主动加断言或安全分支。
+- **相关文件**: `os/src/fs/page_cache.rs:95`, `libs/mango-kernel-core/src/page_cache.rs`
+
+## UserBufferWriter::new 提前 fault-in 导致 stateful 操作无限循环
+
+- **现象**: `getdents64` 在用户缓冲区访问越界时陷入无限循环，日志中持续出现相同偏移量的 EFAULT。
+- **根因**: `sys_getdents64` 在调用 `get_dirent64()` 前先用 `UserBufferWriter::new(token, dirp, count)` fault-in 全部 [dirp, dirp+count) 页面。若某个页面不可访问 → 返回 EFAULT，但 `get_dirent64` 从未被调用 → 文件 offset 未前移 → 用户态重试相同 offset → 相同 EFAULT → 死循环。
+- **修复**:
+  1. 用 `check_user_range(ptr, len)`（纯地址范围检查，不 fault 页面）替代 `UserBufferWriter::new` 做前置验证。
+  2. 在调用 stateful 操作前保存状态（`old_offset = file.offset()`），在任意后续失败路径回滚（`file.set_offset(old_offset)`）。
+  3. 用实际写入字节数（`written`）而非缓冲区大小（`count`）创建 Writer，避免 fault-in 未使用的页面。
+- **教训**:
+  - `UserBufferWriter::new` 会 fault-in 整个 [ptr, ptr+len) 区间，不可用于前置验证。
+  - 所有 stateful 操作（offset 前移、inode 修改等）必须在故障路径中回滚，否则调用者重试时状态不一致。
+  - `check_user_range` 是纯地址范围检查（无页表访问），安全用于前置验证。
+  - 此模式适用于所有类似场景：`readdir`、`seek` + `read`、批量 `write` 等。
+- **相关文件**: `os/src/syscall/fs.rs`, `os/src/fs/vfs/file.rs`
+
+## `*at` syscall 对绝对路径无条件解析 dirfd → EBADF
+
+- **现象**: LTP `openat02` 等测试用例失败：对绝对路径（如 `/etc/passwd`）传入无效 dirfd（如 -1），预期成功但实际返回 `EBADF`。
+- **根因**: 所有 `*at` syscall（`openat`, `unlinkat`, `mkdirat`, `mknodat`, `renameat2`, `symlinkat`, `readlinkat`, `fstatat`, `statx`）在检查路径是否绝对之前就调用 `resolve_start_inode(dirfd)`，无效 dirfd 在此处立即返回 `EBADF`，后续代码根本无法执行到路径判断。
+- **修复**: 在每个 `resolve_start_inode(dirfd)` 调用前添加 `if path.starts_with('/') { crate::fs::current_root_inode() } else { resolve_start_inode(dirfd) }`。`check_parent_search_access` 内部已有绝对路径处理（common.rs:2082-2086），但此前从未被执行到。
+- **教训**: 实现 `*at` 系列 syscall 时，**dirfd 解析必须是条件性的**——只有相对路径才需要 dirfd。绝对路径场景 dirfd 被 Linux 语义忽略。新增 `*at` syscall 时应在第一步就加这个检查，避免后期批量修复。
+- **相关文件**: `os/src/syscall/fs/common.rs`, `os/src/syscall/fs/sys_*.rs`
+
+## 文件系统多路径操作（renameat2）中的验证镜像缺失
+
+### 路径搜索权限检查遗漏（renameat2）
+
+- **现象**: `renameat2` 对 oldpath 做了路径遍历搜索权限检查，但对 newpath 同样路径却没有做，导致非特权进程能通过 newpath 遍历非本用户目录。
+- **根因**: `renameat2` 需要操作两条路径（oldpath 和 newpath），但代码只对 oldpath 做了 `check_parent_search_access`，newpath 路径完全未验证。双向路径操作必须在两条路径上都执行权限验证。
+- **修复**: 在 `vfs_lookup_parent_for_start` 调用前，对 old_start 和 new_start 分别调用 `check_parent_search_access`。
+- **教训**: 任何涉及**两条路径**的系统调用（renameat2、linkat、symlinkat 等），必须在两条路径的**遍历之前**分别做搜索权限检查。不要假设一条路径通过后另一条就自动安全。
+- **相关文件**: `os/src/syscall/fs/sys_renameat2.rs`
+
+### sticky bit 检查遗漏 target parent
+
+- **现象**: 当 target parent 目录设置 sticky bit 时，非文件所有者仍可通过 renameat2 将文件移入/移出该目录。
+- **根因**: renameat2 仅对 old parent（源父目录）做了 sticky bit 检查，完全遗漏了 new parent（目标父目录）的检查。Linux 语义要求 renameat2 对**两个父目录**都做 sticky bit 验证。
+- **修复**: 在 old parent sticky bit 检查后，对 new parent 执行相同逻辑的 sticky bit 检查。
+- **教训**: 多路径操作的权限检查必须在每条路径上**镜像**。实现时先列出需要检查的完整清单（两条路径 × 三种检查：search、write、sticky），逐项实现，避免遗漏。
+- **相关文件**: `os/src/syscall/fs/sys_renameat2.rs`
+
+### 不变式检查被存在性检查条件门控（ext4 rename）
+
+- **现象**: ext4 的 `rename()` 中，子树检测（防止重命名目录为其子目录）仅当 `target_exists` 为 true 时才执行。若目标不存在，循环目录可以成功创建。
+- **根因**: 子树检测是一种**全局不变式**（目录不能成为自己的后代），不应与目标是否存在相关。将不变式检查放在 `if target_exists { }` 块内意味着当目标不存在时该检查完全跳过。
+- **修复**: 将子树检测代码从 `if target_exists { }` 块内移出到块外，使其**无条件执行**。
+- **教训**: 检视文件系统 `rename()` 时，区分三类检查：(1) 只能在目标存在时做的（类型冲突、ENOTEMPTY）；(2) 与目标无关的全局不变式（子树检测、循环检测）；(3) 权限检查。只有第 (1) 类可以放在 target_exists 块内。第 (2)(3) 类必须无条件执行，**绝不**被存在性检查条件门控。
+- **相关文件**: `os/src/fs/ext4/ext4fs.rs`
+
+## Errno 对齐
+
+### fd-based vs path-based xattr 使用不同的 errno
+
+- **现象**: fgetxattr 对 pipe/socket fd 返回 EOPNOTSUPP，但 LTP open13 期望 EBADF。
+- **根因**: Linux 语义不同：(1) fd-based xattr（fgetxattr/fsetxattr/fremovexattr）对错误 fd 类型（pipe、socket）返回 **EBADF**；(2) path-based xattr（getxattr/lgetxattr/setxattr/lsetxattr）对非 file/dir 目标返回 **EOPNOTSUPP**。项目代码在 fd_to_inode() 中使用了 EOPNOTSUPP，与 fd-based 语义不匹配。
+- **修复**: `fd_to_inode()` 中将 `EOPNOTSUPP` 改为 `EBADF`，仅改 fd-based 路径。
+- **教训**: 修改 errno 时，查 Linux 源码确认 syscall 的具体语义，不要仅凭直觉推断。fd-based 和 path-based 变体可能使用不同的 errno。
+- **相关文件**: `os/src/syscall/fs/common.rs`
+
+### fd-based xattr syscall 的 errno 优先级：fd 验证必须在参数验证之前
+
+- **现象**: fgetxattr/fsetxattr 对 O_PATH fd 或 pipe/socket fd 返回 EOPNOTSUPP，但 Linux 期望 EBADF。根因是 `validate_xattr_name()`（检查非 user.* 前缀 √ 返回 EOPNOTSUPP）比 `fd_to_inode()` 先调用，EOPNOTSUPP 抢在 EBADF 之前返回。
+- **根因**: Linux syscall 的 errno 优先级规则：fd 有效性检查（EBADF）比参数语义检查（EOPNOTSUPP/EINVAL）优先级更高。当调用顺序为 `validate_xattr_name → fd_to_inode` 时，参数检查先于 fd 检查执行，导致错误的 errno 被返回。
+- **修复**: 将 `fd_to_inode()` 移到 `user_cstring()`/`validate_xattr_name()` 之前，确保 fd 相关的错误先被返回。
+- **教训**: 实现 fd-based syscall 时，始终将 fd 有效性检查排在最前面，再执行参数/缓冲区校验。这是 Linux 全局惯例，不仅限于 xattr 类 syscall。同样问题也存在于 `sys_fsetxattr.rs` 和 `sys_fremovexattr.rs`。
+- **相关文件**: `os/src/syscall/fs/sys_fgetxattr.rs`
+
+## I/O 转发 syscall 的数据保全
+
+### 文件源显式 offset 在目标写入确认前被推进 → 数据丢失
+
+- **现象**: splice(file→pipe) 中，若目标管道写入失败（EAGAIN, EPIPE），文件偏移量 `*off_in` 已被推进，下一次 splice 调用会跳过已读但未传输的数据，导致静默数据丢失。
+- **根因**: 传输循环中 `*off_val += n` 在读取阶段执行（`inode.read_at()` 之后立即推进），但写入阶段（write to pipe）可能在推进 offset 之后失败。offset 反映的是"读取量"而非"实际传输量"。
+- **修复**: 将 offset 推进推迟到写入成功后执行。读取阶段仅使用 offset 定位，不修改它；写入阶段成功后 `*off += wrote`（其中 `wrote ≤ n`），确保 offset 精确反映已确认写入目标的字节数。
+- **教训**: 任何跨越两个独立 I/O 对象的 syscall（splice、sendfile、copy_file_range）都必须遵循"状态推进在输出确认之后"的原则。对于文件源的显式 offset 参数，推进发生在写入成功之后而非读取成功之后。管道源是破坏性读取（无可回滚机制），需通过容量探测或最小化读取窗口来限制损失。
+- **相关文件**: `os/src/syscall/fs/sys_splice.rs`
+
+## FFI 挂载与测试门禁的交易性
+
+### C 全局注册表的失败路径必须逆序回滚
+
+- **现象**: Rust wrapper 在“设备注册成功、mount/journal/writeback 后续步骤失败”时直接
+  `Drop`，C 层全局表仍保留指针；后续重试可报重名/无 slot，更严重时访问已释放内存。
+- **根因**: 挂载是多步跨语言交易，但 wrapper 只有一个笼统的 mounted bool，C 内部函数也没有
+  在每个 error label 撤销 block cache、block device 和 mountpoint slot。
+- **修复**: 显式记录 `device_registered → fs_mounted → journal_started →
+  writeback_enabled`，每次成功后才推进状态，失败时逆序撤销；只有全部从 C 表
+  脱钩后才释放 Rust/C 共享内存。若卸载失败，宁可有界泄漏并报错，也不制造 UAF。
+- **教训**: 任何“注册→初始化→启动子系统”的 FFI API 都应当作交易审计；不能仅检查
+  happy path 或依赖 Rust `Drop` 自动修复 C 全局状态。
+- **相关文件**: `dependency/lwext4_rust/src/blockdev.rs`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4.c`
+
+### 回归进程全过不等于门禁完成
+
+- **现象**: TAP 已打印 `N passed, 0 failed`，但 QEMU 一直不退出，Makefile 最终只看到 timeout；
+  或测试使用了违反 syscall 前置条件的输入，把正确 errno 误报为内核回归。
+- **根因**: PID1 直接 `exec` 测试程序后不再有 supervisor 可以 wait、输出机器可读最终标记并
+  关机；同时用例注释的“partial range”没有区分“起点对齐”与“长度可非对齐”。
+- **修复**: 保留 PID1 supervisor，fork/exec 子进程、wait 下载状态、打印唯一 PASS/FAIL 标记后
+  shutdown；Makefile 同时检查程序退出与标记。syscall 用例先对照 ABI 前置条件，再选边界值。
+- **教训**: 门禁必须验证“用例运行→结果聚合→可机器识别的终态→可观测退出”整条链；
+  不能将某段日志看似全绿当成门禁通过。
+- **相关文件**: `user/src/bin/regression_init.rs`、
+  `user/src/bin/regression/regression_mmap_edge_cases.rs`

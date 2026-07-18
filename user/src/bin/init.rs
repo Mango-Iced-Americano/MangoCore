@@ -276,17 +276,21 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // Keep initramfs runtime directories writable when the staged P2 scratch
     // mount is active. Tools and test payloads remain available at their
     // read-only source paths.
+    let _ = sys_mkdirat(AT_FDCWD, "/tmp\0", 0o755);
     let _ = sys_mkdirat(AT_FDCWD, "/bin\0", 0o755);
     let _ = sys_mkdirat(AT_FDCWD, "/sbin\0", 0o755);
     let _ = sys_mkdirat(AT_FDCWD, "/lib\0", 0o755);
     let _ = sys_mkdirat(AT_FDCWD, "/usr\0", 0o755);
+    let _ = sys_mkdirat(AT_FDCWD, "/root\0", 0o755);
     if scratch_rw {
-        println!("[init] staged runtime: keeping /bin /sbin /lib /usr writable");
+        println!("[init] staged runtime: keeping /tmp /bin /sbin /lib /usr /root writable");
     } else {
+        try_bind("/tools/tmp", "/tmp");
         try_bind("/tools/bin", "/bin");
         try_bind("/tools/sbin", "/sbin");
         try_bind("/tools/lib", "/lib");
         try_bind("/tools/usr", "/usr");
+        try_bind("/tools/root", "/root");
     }
     let _ = sys_mkdirat(AT_FDCWD, "/tests\0", 0o755);
     try_bind("/tools/tests", "/tests");

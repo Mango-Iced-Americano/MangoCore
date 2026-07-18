@@ -57,6 +57,17 @@ pub fn local_irq_restore(was_enabled: bool) {
     }
 }
 
+/// Write a byte slice to the console.
+///
+/// LoongArch64 already writes directly to UART MMIO (no SBI ecall overhead),
+/// so the benefit is marginal compared to rv64.  Same per-character loop as
+/// [`console_putchar`], but inlined to avoid the static-method call overhead.
+pub fn console_write_bytes(data: &[u8]) {
+    for &b in data {
+        console_putchar(b as usize);
+    }
+}
+
 /// 通过 QEMU 平台关机寄存器关闭 LoongArch 虚拟机。
 #[cfg(feature = "board_laqemu")]
 pub fn shutdown() -> ! {

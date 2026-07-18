@@ -589,7 +589,7 @@ impl IndexNode for LockedRamFSInode {
         let other_inode: &LockedRamFSInode = other
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
-            .ok_or(SyscallErr::EINVAL)?;
+            .ok_or(SyscallErr::EXDEV)?;
         let mut inode = self.0.lock();
         let mut other_locked = other_inode.0.lock();
 
@@ -656,7 +656,31 @@ impl IndexNode for LockedRamFSInode {
         let new_parent_inode: &LockedRamFSInode = new_parent
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
-            .ok_or(SyscallErr::EINVAL)?;
+            .ok_or(SyscallErr::EXDEV)?;
+
+        // Pre-check: subtree validation (before modifying anything)
+        // If old is a directory and new_parent is a descendant of old → EINVAL
+        {
+            let old_locked = self.0.lock();
+            if let Some(child_arc) = old_locked.children.get(old_name) {
+                let old_is_dir = child_arc.0.lock().metadata.file_type == FileType::Dir;
+                if old_is_dir && !core::ptr::eq(self, new_parent_inode) {
+                    // Walk up from new_parent to root, checking if any ancestor is the child
+                    let child_ptr = Arc::as_ptr(child_arc) as *const LockedRamFSInode;
+                    // Check if new_parent itself is the child being moved
+                    if new_parent_inode as *const LockedRamFSInode == child_ptr {
+                        return Err(SyscallErr::EINVAL);
+                    }
+                    let mut cur = new_parent_inode.0.lock().parent.upgrade();
+                    while let Some(parent_arc) = cur {
+                        if Arc::as_ptr(&parent_arc) as *const LockedRamFSInode == child_ptr {
+                            return Err(SyscallErr::EINVAL);
+                        }
+                        cur = parent_arc.0.lock().parent.upgrade();
+                    }
+                }
+            }
+        }
 
         // Phase 1: remove child from old parent (under old lock)
         let (child, is_dir) = {
@@ -703,6 +727,18 @@ impl IndexNode for LockedRamFSInode {
                             Err(SyscallErr::EISDIR)
                         };
                     }
+                    // Non-empty directory target → ENOTEMPTY
+                    if existing_is_dir && !existing.0.lock().children.is_empty() {
+                        // Roll back: restore existing to new_locked, restore child to old parent
+                        new_locked.children.insert(String::from(new_name), existing);
+                        drop(new_locked);
+                        let mut old_locked = self.0.lock();
+                        old_locked.children.insert(String::from(old_name), child);
+                        if is_dir {
+                            old_locked.metadata.nlinks += 1;
+                        }
+                        return Err(SyscallErr::ENOTEMPTY);
+                    }
                     if existing_is_dir {
                         new_locked.metadata.nlinks -= 1;
                     }
@@ -711,7 +747,12 @@ impl IndexNode for LockedRamFSInode {
             if is_dir {
                 new_locked.metadata.nlinks += 1;
             }
-            new_locked.children.insert(String::from(new_name), child);
+            new_locked.children.insert(String::from(new_name), child.clone());
+            if is_dir {
+                let parent_weak = new_locked.self_ref.clone();
+                drop(new_locked);
+                child.0.lock().parent = parent_weak;
+            }
         }
         Ok(())
     }

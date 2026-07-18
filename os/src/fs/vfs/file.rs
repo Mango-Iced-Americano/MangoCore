@@ -172,7 +172,8 @@ pub const STATUS_MASK: u32 = FileFlags::O_APPEND.bits()
     | FileFlags::O_ASYNC.bits()
     | FileFlags::O_DIRECT.bits()
     | FileFlags::O_LARGEFILE.bits()
-    | FileFlags::O_NOATIME.bits();
+    | FileFlags::O_NOATIME.bits()
+    | FileFlags::O_PATH.bits();
 
 // ── FileMode ────────────────────────────────────────────────────────────
 
@@ -430,12 +431,17 @@ impl FdTable {
     }
 
     /// 在指定位置分配 fd（dup2 用）
+    /// Allocate a file at a specific fd number (used by dup2/dup3).
+    /// Returns the new fd and the **old file** that was replaced (if any).
+    /// The caller MUST drop the old file after releasing any locks on self
+    /// to avoid deadlock when `File::Drop` → `inode.close()` tries to acquire
+    /// locks that conflict with this `FdTable` lock.
     pub fn alloc_fd_at(
         &mut self,
         fd: usize,
         file: Arc<File>,
         cloexec: bool,
-    ) -> Result<usize, SyscallErr> {
+    ) -> Result<(usize, Option<Arc<File>>), SyscallErr> {
         if fd >= self.effective_soft_limit() {
             return Err(SyscallErr::EBADF);
         }
@@ -447,9 +453,9 @@ impl FdTable {
             }
             self.resize_to_capacity(new_cap)?;
         }
-        self.fds[fd] = Some(file);
+        let old = core::mem::replace(&mut self.fds[fd], Some(file));
         self.cloexec[fd] = cloexec;
-        Ok(fd)
+        Ok((fd, old))
     }
 
     /// 释放一个 fd，返回被移除的 Arc<File>
@@ -594,8 +600,8 @@ impl FdTable {
     }
 
     pub fn insert_at(&mut self, file: Arc<File>, pos: usize) -> Result<usize, isize> {
-        self.alloc_fd_at(pos, file, false)
-            .map_err(|e| -(e as isize))
+        let (fd, _old) = self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))?;
+        Ok(fd)
     }
 
     pub fn try_insert_at(&mut self, file: Arc<File>, hint: usize) -> Result<usize, isize> {
@@ -657,9 +663,9 @@ impl Drop for FdTable {
 pub struct File {
     /// 对应的 inode
     pub inode: Arc<dyn IndexNode>,
-    /// 文件偏移量（AtomicUsize 直接内嵌，Arc<File> 共享跨 dup fd）
+    /// 文件偏移量（目录时作为 getdents64 的快照索引）
     offset: AtomicUsize,
-    /// Per-open directory-name snapshot used by getdents64 stable cookies.
+    /// getdents64 目录项快照：offset==0 时重建，保证偏移在条目删除后仍稳定
     dirent_snapshot: Mutex<Option<Vec<String>>>,
     /// 打开标志（AtomicU32：fcntl F_SETFL 只改 O_NONBLOCK/O_APPEND 等状态 flags）
     flags: AtomicU32,
@@ -816,6 +822,7 @@ impl File {
         file.inode.open(file.private_data.lock(), &flags)?;
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
 
         Ok(file)
@@ -875,6 +882,7 @@ impl File {
         file.inode.open(file.private_data.lock(), &flags)?;
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
 
         Ok(file)
@@ -892,6 +900,9 @@ impl File {
         }
         if flags.is_writable() {
             mode |= FileMode::FMODE_WRITE;
+        }
+        if flags.contains(FileFlags::O_PATH) {
+            mode |= FileMode::FMODE_PATH;
         }
         if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
             mode |= FileMode::FMODE_STREAM;
@@ -931,6 +942,7 @@ impl File {
         });
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
         file
     }
@@ -987,6 +999,7 @@ impl File {
         });
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
+            track_mount_writer(&file.inode, true);
         }
         file
     }
@@ -1829,15 +1842,29 @@ impl File {
 
     /// 将目录项打包为变长 linux_dirent64 记录写入 `buf`。
     ///
-    /// `d_off` is a stable index into a per-open name snapshot. Entries
-    /// deleted after the snapshot are skipped without shifting later cookies.
+    /// DragonOS-style stable snapshot for directory iteration.
+    /// d_off = entry index (0, 1, 2…) rather than computed byte offset,
+    /// so deleting entries between getdents64 calls does not skip survivors.
     pub fn get_dirent64(&self, buf: &mut [u8]) -> Result<usize, isize> {
         if !self.is_dir() {
             return Err(crate::syscall::errno::ENOTDIR);
         }
 
+        // Deleted-but-open directory: Linux returns ENOENT for getdents64.
+        // When a directory is unlinked but a fd remains open, nlinks drops to 0.
+        let meta = self.inode.metadata().map_err(|e| -(e as isize))?;
+        if meta.file_type != FileType::Dir {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
+        if meta.nlinks == 0 {
+            return Err(crate::syscall::errno::ENOENT);
+        }
+
         let mut snapshot = self.dirent_snapshot.lock();
         let mut index = self.offset.load(Ordering::SeqCst);
+
+        // Rebuild the name snapshot when starting from the beginning or
+        // when no snapshot exists yet.
         if index == 0 || snapshot.is_none() {
             *snapshot = Some(
                 self.inode
@@ -1859,9 +1886,18 @@ impl File {
                     index += 1;
                     continue;
                 }
-                Err(error) => return Err(-(error as isize)),
+                Err(error) => {
+                    self.offset.store(index, Ordering::SeqCst);
+                    return Err(-(error as isize));
+                }
             };
-            let metadata = child.metadata().map_err(|error| -(error as isize))?;
+            let metadata = match child.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    self.offset.store(index, Ordering::SeqCst);
+                    return Err(-(error as isize));
+                }
+            };
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let raw_size = 8 + 8 + 2 + 1 + name_len + 1;
@@ -1869,6 +1905,7 @@ impl File {
 
             if written + reclen > buf.len() {
                 if written == 0 {
+                    self.offset.store(index, Ordering::SeqCst); // save progress before error
                     return Err(crate::syscall::errno::EINVAL);
                 }
                 break;
@@ -1924,7 +1961,20 @@ impl Drop for File {
         crate::fs::vfs::posix_lock::release_ofd_for_file(self);
         if self.tracks_write_busy() {
             unregister_writable_inode(&self.inode);
+            track_mount_writer(&self.inode, false);
         }
         let _ = self.inode.close(self.private_data.lock());
+    }
+}
+
+/// Track mount-level writer count for MS_REMOUNT EBUSY check.
+/// `add`: true for open, false for close.
+fn track_mount_writer(inode: &Arc<dyn IndexNode>, add: bool) {
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<super::mount::MountFSInode>() {
+        if add {
+            mnt.mount_fs.inc_writers();
+        } else {
+            mnt.mount_fs.dec_writers();
+        }
     }
 }

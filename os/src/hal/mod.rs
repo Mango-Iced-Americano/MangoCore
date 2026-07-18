@@ -16,8 +16,10 @@ pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
+#[cfg(feature = "loongarch64")]
+pub use arch::LsxRegs;
 pub use arch::{bootstrap_init, machine_init, user_hwcap};
-pub use arch::{console_flush, console_getchar, console_putchar};
+pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
 pub use arch::{local_irq_restore, local_irq_save};
@@ -29,8 +31,6 @@ pub use arch::{
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};
-#[cfg(feature = "loongarch64")]
-pub use arch::LsxRegs;
 
 /// Per-chunk bounce buffer size for I/O operations.
 /// Computed as KERNEL_HEAP_SIZE / 128, bounded to [64KiB, 256KiB].

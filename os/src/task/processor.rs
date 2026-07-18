@@ -199,6 +199,11 @@ pub fn run_tasks() {
             SCHED_RECLAIM_CALL_CYCLES_TOTAL.fetch_add(rec_dt, SchedOrdering::Relaxed);
             sched_atomic_max(&SCHED_RECLAIM_CALL_CYCLES_MAX, rec_dt);
         }
+        // Drain one Dying MountFS backend lifecycle per tick when available.
+        // Backend teardown (on_umount) runs outside any lock.
+        if schedule_tick % 128 == 0 {
+            crate::fs::vfs::drain_one_dying_lifecycle();
+        }
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
         // 这样避免把不可运行的 TCB 塞进 ready_queue 再扫描剔除。
         let stage_t0 = sched_profile_start(sched_profile);

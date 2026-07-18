@@ -4,7 +4,17 @@ MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
-BLK_MODE := virt
+BLK_MODE ?= virt
+# QEMU device types based on transport
+ifeq ($(BLK_MODE),virt_pci)
+  BLK_DEV_x0 = -device virtio-blk-pci,drive=x0
+  BLK_DEV_x1 = -device virtio-blk-pci,drive=x1
+  NET_DEV     = -device virtio-net-pci,netdev=net -netdev user,id=net
+else
+  BLK_DEV_x0 = -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+  BLK_DEV_x1 = -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+  NET_DEV     = -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net
+endif
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-rv.img
 ROOTFS_IMG_DIR := ../fs-img-dir
@@ -16,10 +26,58 @@ KERNEL_LA := ../kernel-la
 SDCARD_RV := ../sdcard-rv.img
 SDCARD_LA := ../sdcard-la.img
 
+# Avoid rustup/toolchain and generated-file races when a caller supplies -j.
+.NOTPARALLEL:
+
+# ============================================================
+# lwext4 C library
+# ============================================================
+LWEXT4_DIR := ../dependency/lwext4_rust/c/lwext4
+LWEXT4_RV_LIB := $(LWEXT4_DIR)/liblwext4-riscv64.a
+LWEXT4_CMAKE := ../dependency/lwext4_rust/c/elf-linux-gnu.cmake
+LWEXT4_PATCH := ../dependency/lwext4_rust/c/lwext4-make.patch
+# Prerequisites for archive rebuild invalidation
+LWEXT4_RV_SRCS := $(wildcard $(LWEXT4_DIR)/src/*.c)
+LWEXT4_RV_HDRS := $(wildcard $(LWEXT4_DIR)/include/*.h) $(wildcard $(LWEXT4_DIR)/include/misc/*.h)
+LWEXT4_RV_CMAKE_INPUTS := $(LWEXT4_DIR)/CMakeLists.txt \
+                          $(LWEXT4_DIR)/src/CMakeLists.txt \
+                          $(LWEXT4_CMAKE) \
+                          ../dependency/lwext4_rust/c/ulibc.c
+
+lwext4-rv64: $(LWEXT4_RV_LIB)
+
+$(LWEXT4_RV_LIB): $(LWEXT4_RV_SRCS) $(LWEXT4_RV_HDRS) $(LWEXT4_RV_CMAKE_INPUTS)
+	@echo "=== Building lwext4 C library for riscv64 ==="
+	@# Copy our cmake toolchain (linux-gnu) over the musl-generic one
+	@cp -f $(LWEXT4_CMAKE) $(LWEXT4_DIR)/toolchain/musl-generic.cmake
+	@# Copy ulibc.c into lwext4 src tree so it gets compiled into the .a
+	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_DIR)/src/ulibc.c
+	@# Ensure ulibc.c is in the library sources (no git apply needed)
+	@grep -q 'ulibc.c' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
+		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_DIR)/src/CMakeLists.txt
+	@grep -q '$${M_SRC}' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
+		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_DIR)/src/CMakeLists.txt
+	@# Build with cmake directly (bypasses the lwext4 Makefile)
+	@mkdir -p $(LWEXT4_DIR)/build_lwext4-rv64
+	@cd $(LWEXT4_DIR)/build_lwext4-rv64 && \
+		ARCH=riscv64 cmake -G"Unix Makefiles" \
+			-DCMAKE_BUILD_TYPE=Release \
+			-DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
+			-DLWEXT4_BUILD_SHARED_LIB=OFF \
+			-DLIB_ONLY=TRUE \
+			-DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
+			.. 2>&1 | tail -5
+	@cd $(LWEXT4_DIR)/build_lwext4-rv64 && make lwext4 -j$$(nproc)
+	@cp -f $(LWEXT4_DIR)/build_lwext4-rv64/src/liblwext4.a $(LWEXT4_RV_LIB)
+	@echo "=== lwext4 riscv64 .a built at $(LWEXT4_RV_LIB) ==="
+
+clean-lwext4-rv:
+	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
+
 ifeq ($(BOARD), vf2)
-	ROOTFS_IMG := /dev/sdc
+ROOTFS_IMG := /dev/sdc
 else
-	ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
+ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
 endif
 
 APPS := ../user/src/bin/*
@@ -50,7 +108,7 @@ endif
 ifeq ($(BOARD), rvqemu)
 	KERNEL_ENTRY_PA := 0x80200000
 else ifeq ($(BOARD), vf2)
-	KERNEL_ENTRY_PA := 0x80020000
+	KERNEL_ENTRY_PA := 0x40200000
 endif
 
 # Binutils from rustup's llvm-tools-preview component. This avoids depending on
@@ -77,7 +135,6 @@ build: env $(KERNEL_BIN) mv
 
 env:
 	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	rustup target add $(TARGET)
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
 
@@ -93,11 +150,23 @@ $(APPS):
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
-# Initramfs cpio generation (always needed when feature is in Cargo defaults)
+# Initramfs cpio generation — parameterized for normal / regression profiles
 INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
 RNG_TEST_RUNTIME ?= 0
+REGRESSION_CPIO_RV := ../fs-img-dir/initramfs-regression-rv.cpio
 
-kernel: $(INITRAMFS_CPIO_RV)
+# INITRAMFS_PROFILE: "normal" (default) or "regression"
+INITRAMFS_PROFILE ?= normal
+
+ifeq ($(INITRAMFS_PROFILE),regression)
+  KERNEL_INITRAMFS_CPIO_RV := $(REGRESSION_CPIO_RV)
+  INITRAMFS_PROFILE_FEATURES := regression_initramfs
+else
+  KERNEL_INITRAMFS_CPIO_RV := $(INITRAMFS_CPIO_RV)
+  INITRAMFS_PROFILE_FEATURES :=
+endif
+
+KERNEL_CMDLINE ?= mango.mode=normal
 
 $(INITRAMFS_CPIO_RV): user
 	@mkdir -p ../fs-img-dir
@@ -105,31 +174,41 @@ $(INITRAMFS_CPIO_RV): user
 		./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
 	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
 
+$(REGRESSION_CPIO_RV): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
+	@touch src/initramfs-regression-rv.S
+
 # xein TODO: 注意需要评估zero_init启用与否的影响
-kernel:
+# lwext4: always build C library (now the default ext4 backend)
+export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_DIR))
+LWEXT4_PREREQ := lwext4-rv64
+
+kernel: $(KERNEL_INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
-    ifeq ($(MODE), debug)
-		@LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
-    else
-		@LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
-    endif
+ifeq ($(MODE), debug)
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
+else
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
+endif
 
 clean:
-	@cargo clean
+	@which cargo >/dev/null 2>&1 && cargo clean || true
 	@rm -rf $(KERNEL_RV)
+	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
 
 run: build
 ifeq ($(BOARD), rvqemu)
 	@qemu-system-riscv64 \
   		-machine virt \
   		-nographic \
-  		-bios $(BOOTLOADER) \
-  		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-  		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-  		-drive if=none,file=../disk.img,format=raw,id=x1 \
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+        -drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
+        $(BLK_DEV_x0) \
+        -drive if=none,file=../disk.img,format=raw,id=x1 \
+        $(BLK_DEV_x1) \
 		$(VIRTIO_RNG_DEVICE) \
   		-m 1024 \
   		-smp threads=$(CORE_NUM)
@@ -145,9 +224,9 @@ gdb:
 	-bios $(BOOTLOADER) \
 	-device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 \
 	-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
-	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+	$(BLK_DEV_x0) \
 	-drive file=../disk.img,if=none,format=raw,id=x1 \
-	-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+	$(BLK_DEV_x1) \
 	$(VIRTIO_RNG_DEVICE) \
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
@@ -160,9 +239,9 @@ runsimple:
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
 		-m 1024 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        $(BLK_DEV_x0) \
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+        $(BLK_DEV_x1) \
 		$(VIRTIO_RNG_DEVICE) \
 		-smp threads=$(CORE_NUM)
 
@@ -175,13 +254,13 @@ comp:
 		-smp 1 \
 		-bios default \
 		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(BLK_DEV_x0) \
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
-		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(BLK_DEV_x1) \
 		$(VIRTIO_RNG_DEVICE) \
 		-no-reboot \
 		-rtc base=utc \
-		-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
+		$(NET_DEV) \
 		-object filter-dump,id=f1,netdev=net,file=packets.pcap
 
 comp-gdb:
@@ -193,15 +272,62 @@ comp-gdb:
         -smp 1 \
         -bios default \
         -drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        $(BLK_DEV_x0) \
         -drive file=../disk.img,if=none,format=raw,id=x1 \
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+        $(BLK_DEV_x1) \
 	$(VIRTIO_RNG_DEVICE) \
         -no-reboot \
         -rtc base=utc \
-	-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
+	$(NET_DEV) \
 	-object filter-dump,id=f1,netdev=net,file=packets.pcap \
         -S \
         -s
 
 .PHONY: user
+
+# ─────────────────────────────────────────────────────────
+#  L3 Kernel self-test (mango.mode=ktest)
+# ─────────────────────────────────────────────────────────
+# Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
+# The kernel needs initramfs cpio (embedded via .S), so user
+# programs must be built first.
+ktest-run: $(INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ)
+	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
+	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
+ifeq ($(MODE), debug)
+	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+		cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+else
+	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+endif
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 \
+		-machine virt \
+		-nographic \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-m 1024 \
+		-smp threads=1
+
+# ─────────────────────────────────────────────────────────
+#  L4 User-mode regression test (mango.mode=regression)
+# ─────────────────────────────────────────────────────────
+REGRESSION_CMDLINE := mango.mode=regression
+
+regression-run:
+	@echo "[regression] Building kernel with regression initramfs..."
+	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
+		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
+	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
+	@timeout --foreground 60 qemu-system-riscv64 \
+		-machine virt \
+		-nographic \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-m 1024 \
+		-smp threads=1 2>&1 | tee /tmp/regression-rv.log
+	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
+		&& echo "=== REGRESSION PASS ===" \
+		|| (echo "=== REGRESSION FAIL ===" && exit 1)

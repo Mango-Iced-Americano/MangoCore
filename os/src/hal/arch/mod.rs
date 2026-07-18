@@ -7,20 +7,22 @@
 pub mod loongarch64;
 #[cfg(feature = "loongarch64")]
 pub use loongarch64::{
-    time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
-    KernelPageTableImpl, PageTableImpl, __switch, board,
+    __switch, board,
     board::MMIO,
     bootstrap_init, config,
     config::BUFFER_CACHE_NUM,
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
-    console_flush, console_getchar, console_putchar, kstack_alloc, local_irq_restore,
-    local_irq_save, machine_init, shutdown, tlb_invalidate,
+    console_flush, console_getchar, console_putchar, console_write_bytes, kstack_alloc,
+    local_irq_restore, local_irq_save, machine_init, shutdown, syscall_id,
+    time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
+    tlb_invalidate,
     trap::{
-        get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return,
-        LsxRegs, MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
+        get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return, LsxRegs,
+        MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
     },
-    trap_cx_bottom_from_tid, user_hwcap, ustack_bottom_from_tid, KernelStack, BLOCK_SZ,
+    trap_cx_bottom_from_tid, user_hwcap, ustack_bottom_from_tid, KernelPageTableImpl, KernelStack,
+    PageTableImpl, BLOCK_SZ,
 };
 #[cfg(feature = "riscv")]
 pub mod riscv;
@@ -35,11 +37,12 @@ pub use riscv::{
     machine_init,
     rv_board::MMIO,
     sbi::{
-        console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save,
-        set_timer, shutdown,
+        console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
+        local_irq_save, set_timer, shutdown,
     },
     sv39::tlb_invalidate,
     switch::__switch,
+    syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     trap::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,

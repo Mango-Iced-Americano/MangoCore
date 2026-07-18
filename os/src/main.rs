@@ -84,9 +84,11 @@ extern crate bitflags;
 
 #[macro_use]
 mod console;
+mod bootargs;
 mod drivers;
 mod fs;
 mod hal;
+mod kernel_tests;
 mod lang_items;
 mod math;
 mod mm;
@@ -113,10 +115,30 @@ core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
 // ── Initramfs root cpio (small boot root filesystem) ──
-#[cfg(all(feature = "initramfs", feature = "loongarch64"))]
+#[cfg(all(
+    feature = "initramfs",
+    feature = "loongarch64",
+    not(feature = "regression_initramfs")
+))]
 core::arch::global_asm!(include_str!("initramfs-la.S"));
-#[cfg(all(feature = "initramfs", feature = "riscv"))]
+#[cfg(all(
+    feature = "initramfs",
+    feature = "loongarch64",
+    feature = "regression_initramfs"
+))]
+core::arch::global_asm!(include_str!("initramfs-regression-la.S"));
+#[cfg(all(
+    feature = "initramfs",
+    feature = "riscv",
+    not(feature = "regression_initramfs")
+))]
 core::arch::global_asm!(include_str!("initramfs-rv.S"));
+#[cfg(all(
+    feature = "initramfs",
+    feature = "riscv",
+    feature = "regression_initramfs"
+))]
+core::arch::global_asm!(include_str!("initramfs-regression-rv.S"));
 
 // ── Legacy: block_mem full rootfs image ──
 #[cfg(all(feature = "block_mem", feature = "loongarch64"))]
@@ -246,6 +268,9 @@ pub fn rust_main() -> ! {
     machine_init();
     crate::task::timer_subsystem_init();
 
+    // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
+    let boot_config = crate::bootargs::load();
+
     if let Err(error) = random::init() {
         println!(
             "[kernel] random: secure source unavailable ({:?}); secure reads will fail",
@@ -254,22 +279,24 @@ pub fn rust_main() -> ! {
     }
     task::perf::record_boot_stage(task::perf::BOOT_STAGE_DRIVERS);
 
-    // Non-destructive GMAC/PHY handoff inspection. This runs before any block
-    // driver allocation and deliberately leaves U-Boot's MAC/PHY state intact.
-    #[cfg(all(feature = "board_2k1000", feature = "gmac_probe"))]
-    drivers::net::gmac_2k1000::probe_all();
+    if boot_config.mode != crate::bootargs::BootMode::Regression {
+        // Non-destructive GMAC/PHY handoff inspection. This runs before any block
+        // driver allocation and deliberately leaves U-Boot's MAC/PHY state intact.
+        #[cfg(all(feature = "board_2k1000", feature = "gmac_probe"))]
+        drivers::net::gmac_2k1000::probe_all();
 
-    // Explicit opt-in validation for the integrated 2K1000 SATA controller.
-    // This performs IDENTIFY and repeated reads of LBA0 only; force_ramfs below
-    // remains active, so the SSD is neither mounted nor written.
-    #[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
-    drivers::block::sata_read_only_probe();
+        // Explicit opt-in validation for the integrated 2K1000 SATA controller.
+        // This performs IDENTIFY and repeated reads of LBA0 only; force_ramfs below
+        // remains active, so the SSD is neither mounted nor written.
+        #[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
+        drivers::block::sata_read_only_probe();
 
-    // Explicit destructive validation. The probe verifies the prepared disk,
-    // writes only beyond all MBR partitions, and restores the original sectors
-    // before the ramfs-only boot continues.
-    #[cfg(all(feature = "board_2k1000", feature = "sata_write_probe"))]
-    drivers::block::sata_write_probe();
+        // Explicit destructive validation. The probe verifies the prepared disk,
+        // writes only beyond all MBR partitions, and restores the original sectors
+        // before the ramfs-only boot continues.
+        #[cfg(all(feature = "board_2k1000", feature = "sata_write_probe"))]
+        drivers::block::sata_write_probe();
+    }
 
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
@@ -299,58 +326,64 @@ pub fn rust_main() -> ! {
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
-        #[cfg(any(
-            not(feature = "board_2k1000"),
-            all(feature = "board_2k1000", feature = "gmac_2k1000")
-        ))]
-        drivers::init_net_device();
-        #[cfg(all(feature = "board_2k1000", not(feature = "gmac_2k1000")))]
-        {
-            // 实板网卡不是 QEMU virtio-net；最小上板阶段保留回环接口和网络核心，
-            // 暂不枚举 virtio PCI 网卡，后续再接 GMAC/PHY 驱动。
-            boot_trace!("[kernel] 2K1000 board bring-up: external net probe skipped");
-        }
-        net::config::init();
-        task::perf::record_boot_stage(task::perf::BOOT_STAGE_NET);
+        // Regression uses only the embedded initramfs, so it must not touch
+        // external network or block devices (including a board SSD).
+        if boot_config.mode != crate::bootargs::BootMode::Regression {
+            #[cfg(any(
+                not(feature = "board_2k1000"),
+                all(feature = "board_2k1000", feature = "gmac_2k1000")
+            ))]
+            drivers::init_net_device();
+            #[cfg(all(feature = "board_2k1000", not(feature = "gmac_2k1000")))]
+            {
+                // 实板网卡不是 QEMU virtio-net；最小上板阶段保留回环接口和网络核心，
+                // 暂不枚举 virtio PCI 网卡，后续再接 GMAC/PHY 驱动。
+                boot_trace!("[kernel] 2K1000 board bring-up: external net probe skipped");
+            }
+            net::config::init();
+            task::perf::record_boot_stage(task::perf::BOOT_STAGE_NET);
 
-        // 在安装 preload payload 前探测，保证 AHCI/virtio DMA 页仍可从低碎片
-        // 物理内存中分配。
-        #[cfg(all(not(feature = "board_2k1000"), not(feature = "p4_persist_rw")))]
-        fs::mount_boot_block_devices();
-        #[cfg(all(not(feature = "board_2k1000"), feature = "p4_persist_rw"))]
-        fs::mount_boot_block_devices_with_writable_persist();
-        #[cfg(all(
-            feature = "board_2k1000",
-            feature = "block_sata",
-            not(any(feature = "sata_probe", feature = "sata_write_probe"))
-        ))]
-        #[cfg(all(not(feature = "sata_scratch_rw"), not(feature = "p4_persist_rw")))]
-        fs::mount_boot_block_devices_read_only();
-        #[cfg(all(feature = "sata_scratch_rw", not(feature = "p4_persist_rw")))]
-        fs::mount_boot_block_devices_with_writable_scratch();
-        #[cfg(all(feature = "board_2k1000", feature = "p4_persist_rw"))]
-        fs::mount_boot_block_devices_with_writable_persist();
-        #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
-        fs::run_board_scratch_write_probe();
-        #[cfg(all(
-            feature = "board_2k1000",
-            any(
-                not(feature = "block_sata"),
-                feature = "sata_probe",
-                feature = "sata_write_probe"
-            )
-        ))]
-        boot_trace!("[kernel] 2K1000 board bring-up: block device mount skipped");
+            // 在安装 preload payload 前探测，保证 AHCI/virtio DMA 页仍可从低碎片
+            // 物理内存中分配。
+            #[cfg(all(not(feature = "board_2k1000"), not(feature = "p4_persist_rw")))]
+            fs::mount_boot_block_devices();
+            #[cfg(all(not(feature = "board_2k1000"), feature = "p4_persist_rw"))]
+            fs::mount_boot_block_devices_with_writable_persist();
+            #[cfg(all(
+                feature = "board_2k1000",
+                feature = "block_sata",
+                not(any(feature = "sata_probe", feature = "sata_write_probe"))
+            ))]
+            #[cfg(all(not(feature = "sata_scratch_rw"), not(feature = "p4_persist_rw")))]
+            fs::mount_boot_block_devices_read_only();
+            #[cfg(all(feature = "sata_scratch_rw", not(feature = "p4_persist_rw")))]
+            fs::mount_boot_block_devices_with_writable_scratch();
+            #[cfg(all(feature = "board_2k1000", feature = "p4_persist_rw"))]
+            fs::mount_boot_block_devices_with_writable_persist();
+            #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
+            fs::run_board_scratch_write_probe();
+            #[cfg(all(
+                feature = "board_2k1000",
+                any(
+                    not(feature = "block_sata"),
+                    feature = "sata_probe",
+                    feature = "sata_write_probe"
+                )
+            ))]
+            boot_trace!("[kernel] 2K1000 board bring-up: block device mount skipped");
 
-        // 安装预装载的测试载荷。QEMU 和 2K1000 SATA 路径都先完成块设备探测，
-        // 以减少 DMA 页碎片；救援/probe 镜像则直接安装到 initramfs/ramfs 根。
-        #[cfg(feature = "preload_payloads")]
-        {
-            #[cfg(feature = "board_2k1000")]
-            boot_trace!("[bringup][main:01] preload payload installation begin");
-            fs::install_preload_payloads();
-            #[cfg(feature = "board_2k1000")]
-            boot_trace!("[bringup][main:02] preload payload installation complete");
+            // 安装预装载的测试载荷。QEMU 和 2K1000 SATA 路径都先完成块设备探测，
+            // 以减少 DMA 页碎片；救援/probe 镜像则直接安装到 initramfs/ramfs 根。
+            #[cfg(feature = "preload_payloads")]
+            {
+                #[cfg(feature = "board_2k1000")]
+                boot_trace!("[bringup][main:01] preload payload installation begin");
+                fs::install_preload_payloads();
+                #[cfg(feature = "board_2k1000")]
+                boot_trace!("[bringup][main:02] preload payload installation complete");
+            }
+        } else {
+            crate::println!("[kernel] Regression mode — skipping net/block init");
         }
     }
 
@@ -375,6 +408,29 @@ pub fn rust_main() -> ! {
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
     #[cfg(feature = "board_2k1000")]
     boot_trace!("[bringup][main:03] init task construction begin");
+
+    // ── Kernel self-test mode (mango.mode=ktest) ──
+    // When ktest runs with the scheduler active, we spawn the test runner
+    // as a kernel task and enter run_tasks().  The runner and any spawned
+    // test helpers are the only tasks — initproc is *not* added.
+    if boot_config.mode == crate::bootargs::BootMode::Ktest {
+        crate::println!(
+            "[kernel] Entering kernel test mode (ktest) — tests: {:?}, repeat: {}",
+            boot_config.tests,
+            boot_config.repeat,
+        );
+        // Store the config so the fn()-only trampoline can access it.
+        *crate::kernel_tests::KTEST_BOOT_CONFIG.lock() = Some(boot_config);
+        // Spawn the test runner as a kernel task.  It will run all
+        // selected tests, then call hal::shutdown().
+        // Spawned test helpers (wakers, additional waiters) run and exit
+        // within the scheduler before the runner finishes.
+        crate::task::spawn_ktest_task(crate::kernel_tests::run_ktest_entry);
+        // Enter scheduler — ktest runner runs as a scheduled task.
+        task::run_tasks();
+    }
+
+    // ── Normal boot ──
     task::add_initproc();
     task::perf::record_boot_stage(task::perf::BOOT_STAGE_INITPROC);
     #[cfg(feature = "board_2k1000")]

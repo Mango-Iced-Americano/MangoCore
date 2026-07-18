@@ -18,7 +18,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use super::vfs::IndexNode;
@@ -36,13 +36,13 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
 static WRITEBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// 后台写回启动阈值（页数，约 8MB，高于典型 4MB 测试集避免频繁触发）
-const DIRTY_BACKGROUND: usize = 2048;
-/// 写入者节流阈值（页数，约 16MB）
-const DIRTY_THROTTLE: usize = 4096;
+const DIRTY_BACKGROUND: usize = 8192;
+/// 写入者节流阈值（页数，约 64MB）
+const DIRTY_THROTTLE: usize = 16384;
 /// 正常后台写回批次大小
-const WB_BATCH_PAGES: usize = 64;
+const WB_BATCH_PAGES: usize = 256;
 /// 节流时的最大写回页数
-const WB_BG_MAX_PAGES: usize = 128;
+const WB_BG_MAX_PAGES: usize = 256;
 
 /// 全局脏页计数快照（用于诊断）
 pub fn global_dirty_pages() -> usize {
@@ -92,7 +92,9 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
     if seg_start >= VALID_SEG_COUNT {
         return 0;
     }
-    ((1u8 << (seg_end - seg_start)) - 1) << seg_start
+    let count = seg_end - seg_start;
+    let low_mask: u8 = if count == 8 { u8::MAX } else { (1u8 << count) - 1 };
+    low_mask << seg_start
 }
 
 static PAGE_CACHE_REGISTRY: Mutex<Vec<Weak<PageCache>>> = Mutex::new(Vec::new());
@@ -191,7 +193,7 @@ pub struct RaState {
 /// 最小预取页数（冷启动窗口）
 pub const MIN_RA_PAGES: usize = 4;
 /// 最大预取页数（= IO_CHUNK_SIZE / PAGE_SIZE = 64）
-pub const MAX_RA_PAGES: usize = crate::hal::IO_CHUNK_SIZE / PAGE_SIZE;
+pub const MAX_RA_PAGES: usize = 128;
 
 impl RaState {
     pub fn new() -> Self {
@@ -417,6 +419,29 @@ impl InnerPageCache {
     }
 }
 
+// ── Batch read planning types ──────────────────────────────────────────
+
+/// A single page copy instruction collected under entries lock, executed without lock.
+struct ReadCopy {
+    entry: Arc<PageEntry>,
+    dst_offset: usize,   // offset into destination buffer
+    page_offset: usize,  // offset within the page
+    len: usize,
+}
+
+/// Contiguous missing page range for batch fill.
+struct MissRun {
+    start_page: usize,
+    count: usize,
+}
+
+/// Result of scanning the full read range under one entries lock.
+struct ReadPlan {
+    copies: Vec<ReadCopy>,
+    miss_runs: Vec<MissRun>,
+    needs_valid_fill: BTreeSet<usize>,  // pages that exist but partially valid
+}
+
 // ── PageCache ────────────────────────────────────────────────────────────
 
 /// 页面缓存
@@ -634,6 +659,8 @@ impl PageCache {
         let init_mask = old_file_size.map_or(0, |s| initial_valid_mask(page_index, s));
         let beyond_eof = init_mask == VALID_ALL;
 
+        let _t_lock = perf::perf_time_now();
+        let mut had_io_miss = false;
         let mut entries = self.entries.lock();
 
         // 扩展 entries 数组
@@ -642,6 +669,8 @@ impl PageCache {
         }
 
         if let Some(entry) = &entries[page_index] {
+            let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
+            perf::record_pc_lock_hold(elapsed, false);
             entry.mark_referenced();
             return Ok(entry.clone());
         }
@@ -656,6 +685,7 @@ impl PageCache {
         let entry = if populate && !beyond_eof {
             // 正常路径：从后端读取数据
             perf::record_pc_miss();
+            had_io_miss = true;
             let entry = Arc::new(PageEntry::new(frame, PageState::UpToDate));
             if let Some(backend) = self.backend() {
                 let buf = entry.as_slice_mut();
@@ -686,6 +716,9 @@ impl PageCache {
 
         // Clock eviction: mark page as recently referenced
         entry_clone.mark_referenced();
+
+        let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
+        perf::record_pc_lock_hold(elapsed, had_io_miss);
 
         Ok(entry_clone)
     }
@@ -892,6 +925,126 @@ impl PageCache {
         Ok(())
     }
 
+    // ── Batch read helpers ───────────────────────────────────────────
+
+    /// Scan [start_page..=end_page] under ONE entries lock.
+    /// HIT: mark_referenced, check is_fully_valid(), push ReadCopy.
+    /// MISS: record in miss_runs (coalesced into contiguous runs).
+    /// PARTIAL: if entry exists but !is_fully_valid(), push to needs_valid_fill.
+    fn lookup_read_range_fast(
+        &self,
+        offset: usize,
+        buf_len: usize,
+        start_page: usize,
+        end_page: usize,
+    ) -> ReadPlan {
+        let mut plan = ReadPlan { copies: Vec::new(), miss_runs: Vec::new(), needs_valid_fill: BTreeSet::new() };
+        let entries = self.entries.lock();
+
+        for page_index in start_page..=end_page {
+            let page_start = page_index * PAGE_SIZE;
+            let read_start = offset.max(page_start);
+            let read_end = (offset + buf_len).min(page_start + PAGE_SIZE);
+            if read_end <= read_start { continue; }
+            let sub_len = read_end - read_start;
+
+            let dst_offset = read_start - offset;
+            let page_offset = read_start - page_start;
+
+            // Check entry existence
+            if page_index < entries.len() {
+                if let Some(entry) = &entries[page_index] {
+                    entry.mark_referenced();
+                    if entry.is_fully_valid() {
+                        plan.copies.push(ReadCopy {
+                            entry: entry.clone(),
+                            dst_offset,
+                            page_offset,
+                            len: sub_len,
+                        });
+                        continue;
+                    } else {
+                        plan.needs_valid_fill.insert(page_index);
+                        continue;
+                    }
+                }
+            }
+            // Miss: page not in cache — coalesce into contiguous runs
+            if let Some(last) = plan.miss_runs.last_mut() {
+                if last.start_page + last.count == page_index {
+                    last.count += 1;
+                } else {
+                    plan.miss_runs.push(MissRun { start_page: page_index, count: 1 });
+                }
+            } else {
+                plan.miss_runs.push(MissRun { start_page: page_index, count: 1 });
+            }
+        }
+        plan
+    }
+
+    /// Fill contiguous missing page runs using backend.read_pages().
+    /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
+    fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
+        let backend = self.backend().ok_or(SyscallErr::EIO)?;
+        let backend_npages = backend.npages();
+
+        for run in runs {
+            // 1. Alloc frames for all pages in this run
+            let mut new_entries: Vec<(usize, Arc<PageEntry>)> = Vec::with_capacity(run.count);
+            for i in 0..run.count {
+                let page_index = run.start_page + i;
+                let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
+                new_entries.push((page_index, Arc::new(PageEntry::new(frame, PageState::UpToDate))));
+            }
+
+            // 2. Call read_pages() for contiguous subruns within backend range
+            let mut i = 0;
+            while i < new_entries.len() {
+                let start = new_entries[i].0;
+                if start >= backend_npages {
+                    // Hole past EOF: zero-fill (frame_alloc already zeroed), mark fully valid
+                    new_entries[i].1.valid_mask.store(VALID_ALL, Ordering::Release);
+                    i += 1;
+                    continue;
+                }
+                let run_start = start;
+                let mut bufs: Vec<&mut [u8]> = Vec::new();
+                while i < new_entries.len()
+                    && new_entries[i].0 == run_start + bufs.len()
+                    && new_entries[i].0 < backend_npages
+                {
+                    // SAFETY: we own the only mutable ref to this frame (not yet published to entries)
+                    unsafe { bufs.push(&mut *(new_entries[i].1.as_slice_mut() as *mut [u8])); }
+                    i += 1;
+                }
+                let n = backend.read_pages(run_start, &mut bufs)?;
+                // Pages fully within the read result are fully valid
+                let full_pages = (n / PAGE_SIZE).min(bufs.len());
+                for j in 0..full_pages {
+                    let idx = new_entries.len() - bufs.len() + j;
+                    new_entries[idx].1.valid_mask.store(VALID_ALL, Ordering::Release);
+                }
+                // Record miss for perf
+                perf::record_pc_miss();
+            }
+
+            // 3. Publish: insert into entries (only if slot still empty)
+            {
+                let mut entries = self.entries.lock();
+                let mut inner = self.inner.lock();
+                for (page_index, entry) in new_entries {
+                    while entries.len() <= page_index { entries.push(None); }
+                    if entries[page_index].is_none() {
+                        entries[page_index] = Some(entry.clone());
+                        inner.pages.insert(page_index);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── 读取 ─────────────────────────────────────────────────────────
 
     /// 从指定偏移量读取数据
@@ -937,65 +1090,101 @@ impl PageCache {
             return Ok(sub_len);
         }
 
-        // Phase 1: 收集拷贝项（持锁）
-        struct CopyItem {
-            entry: Arc<PageEntry>,
-            page_offset: usize,
-            sub_len: usize,
-        }
+        // Multi-page: batch lookup with ONE entries lock, retry if misses
+        let mut retried = false;
+        let total_len = buf.len();
+        loop {
+            let _t_lookup = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+            let plan = self.lookup_read_range_fast(offset, total_len, start_page, end_page);
+            let lookup_cycles =
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_lookup);
+            perf::record_pc_lookup_cycles(lookup_cycles);
 
-        let mut copies: Vec<CopyItem> = Vec::new();
-        let mut total_read = 0usize;
-        let mut pages = 0usize;
+            // Fast path: all pages cached and fully valid
+            if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
+                let _t_copy = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+                for item in &plan.copies {
+                    let src = item.entry.as_slice();
+                    buf[item.dst_offset..item.dst_offset + item.len]
+                        .copy_from_slice(&src[item.page_offset..item.page_offset + item.len]);
+                }
+                let copy_cycles =
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_copy);
+                perf::record_pc_copy_cycles(copy_cycles);
 
-        let _t_lookup = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-        for page_index in start_page..=end_page {
-            let page_start = page_index << PAGE_SIZE_BITS;
-            let page_end = page_start + PAGE_SIZE;
-            let read_start = core::cmp::max(offset, page_start);
-            let read_end = core::cmp::min(offset + buf.len(), page_end);
-            let sub_len = read_end.saturating_sub(read_start);
-
-            if sub_len == 0 {
-                continue;
+                let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+                let total_cycles =
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
+                let pages = end_page - start_page + 1;
+                if had_miss {
+                    perf::record_pc_read(pages, total_cycles, 0, total_cycles);
+                } else {
+                    perf::record_pc_read(pages, total_cycles, total_cycles, 0);
+                }
+                return Ok(total_len);
             }
 
-            pages += 1;
-            let entry = self.get_page_for_read(page_index)?;
-            self.ensure_fully_valid(page_index)?;
-            copies.push(CopyItem {
-                entry,
-                page_offset: read_start - page_start,
-                sub_len,
-            });
-            total_read += sub_len;
-        }
-        let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-        let lookup_cycles =
-            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_lookup);
-        perf::record_pc_lookup_cycles(lookup_cycles);
+            // If we already retried, fall through to slow per-page path
+            if retried {
+                struct CopyItem {
+                    entry: Arc<PageEntry>,
+                    page_offset: usize,
+                    sub_len: usize,
+                }
 
-        // Phase 2: 拷贝数据（无锁）
-        let _t_copy = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-        let mut dst_offset = 0;
-        for item in &copies {
-            let src = item.entry.as_slice();
-            let src_start = item.page_offset;
-            buf[dst_offset..dst_offset + item.sub_len]
-                .copy_from_slice(&src[src_start..src_start + item.sub_len]);
-            dst_offset += item.sub_len;
-        }
-        let copy_cycles =
-            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_copy);
-        perf::record_pc_copy_cycles(copy_cycles);
+                let mut copies: Vec<CopyItem> = Vec::new();
+                let mut total_read = 0usize;
+                for page_index in start_page..=end_page {
+                    let page_start = page_index << PAGE_SIZE_BITS;
+                    let page_end = page_start + PAGE_SIZE;
+                    let read_start = core::cmp::max(offset, page_start);
+                    let read_end = core::cmp::min(offset + buf.len(), page_end);
+                    let sub_len = read_end.saturating_sub(read_start);
 
-        let total_cycles = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
-        if had_miss {
-            perf::record_pc_read(pages, total_cycles, 0, total_cycles);
-        } else {
-            perf::record_pc_read(pages, total_cycles, total_cycles, 0);
+                    if sub_len == 0 {
+                        continue;
+                    }
+
+                    let entry = self.get_page_for_read(page_index)?;
+                    self.ensure_fully_valid(page_index)?;
+                    copies.push(CopyItem {
+                        entry,
+                        page_offset: read_start - page_start,
+                        sub_len,
+                    });
+                    total_read += sub_len;
+                }
+                let mut dst_offset = 0;
+                for item in &copies {
+                    let src = item.entry.as_slice();
+                    let src_start = item.page_offset;
+                    buf[dst_offset..dst_offset + item.sub_len]
+                        .copy_from_slice(&src[src_start..src_start + item.sub_len]);
+                    dst_offset += item.sub_len;
+                }
+                let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+                let total_cycles =
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
+                let pages = end_page - start_page + 1;
+                if had_miss {
+                    perf::record_pc_read(pages, total_cycles, 0, total_cycles);
+                } else {
+                    perf::record_pc_read(pages, total_cycles, total_cycles, 0);
+                }
+                return Ok(total_read);
+            }
+
+            // First iteration: fill misses and valid gaps, then retry once
+            if !plan.needs_valid_fill.is_empty() {
+                for &page_index in &plan.needs_valid_fill {
+                    self.ensure_fully_valid(page_index)?;
+                }
+            }
+            if !plan.miss_runs.is_empty() {
+                self.fill_miss_runs(&plan.miss_runs)?;
+            }
+            retried = true;
         }
-        Ok(total_read)
     }
 
     // ── 写入 ─────────────────────────────────────────────────────────
@@ -1135,51 +1324,81 @@ impl PageCache {
             let sub_len = len.min(PAGE_SIZE - page_offset);
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
+            let _t_copy = perf::perf_time_now();
             let src = entry.as_slice();
             dst.write_at(0, &src[page_offset..page_offset + sub_len]);
+            let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+            perf::record_pc_copy_cycles(copy_cycles);
             return Ok(sub_len);
         }
 
-        struct CopyItem {
-            entry: Arc<PageEntry>,
-            page_offset: usize,
-            sub_len: usize,
-        }
+        // Multi-page with batch lookup + retry
+        let mut retried = false;
+        loop {
+            let plan = self.lookup_read_range_fast(offset, len, start_page, end_page);
 
-        let mut copies: Vec<CopyItem> = Vec::new();
-        let mut total_read = 0usize;
-
-        for page_index in start_page..=end_page {
-            let page_start = page_index << PAGE_SIZE_BITS;
-            let page_end = page_start + PAGE_SIZE;
-            let read_start = core::cmp::max(offset, page_start);
-            let read_end = core::cmp::min(offset + len, page_end);
-            let sub_len = read_end.saturating_sub(read_start);
-
-            if sub_len == 0 {
-                continue;
+            if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
+                // All hits: copy to UserBuffer
+                let _t_copy = perf::perf_time_now();
+                for item in &plan.copies {
+                    let src = item.entry.as_slice();
+                    dst.write_at(item.dst_offset, &src[item.page_offset..item.page_offset + item.len]);
+                }
+                let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+                perf::record_pc_copy_cycles(copy_cycles);
+                return Ok(plan.copies.iter().map(|c| c.len).sum());
             }
 
-            let entry = self.get_page_for_read(page_index)?;
-            self.ensure_fully_valid(page_index)?;
-            copies.push(CopyItem {
-                entry,
-                page_offset: read_start - page_start,
-                sub_len,
-            });
-            total_read += sub_len;
-        }
+            if retried {
+                // Fallback per-page
+                struct CopyItem {
+                    entry: Arc<PageEntry>,
+                    page_offset: usize,
+                    sub_len: usize,
+                }
 
-        // Phase 2: copy page data into UserBuffer (no locks held)
-        let mut dst_offset = 0;
-        for item in &copies {
-            let src = item.entry.as_slice();
-            let src_start = item.page_offset;
-            dst.write_at(dst_offset, &src[src_start..src_start + item.sub_len]);
-            dst_offset += item.sub_len;
-        }
+                let mut copies: Vec<CopyItem> = Vec::new();
+                for page_index in start_page..=end_page {
+                    let page_start = page_index << PAGE_SIZE_BITS;
+                    let page_end = page_start + PAGE_SIZE;
+                    let read_start = core::cmp::max(offset, page_start);
+                    let read_end = core::cmp::min(offset + len, page_end);
+                    let sub_len = read_end.saturating_sub(read_start);
 
-        Ok(total_read)
+                    if sub_len == 0 {
+                        continue;
+                    }
+
+                    let entry = self.get_page_for_read(page_index)?;
+                    self.ensure_fully_valid(page_index)?;
+                    copies.push(CopyItem {
+                        entry,
+                        page_offset: read_start - page_start,
+                        sub_len,
+                    });
+                }
+                let _t_copy = perf::perf_time_now();
+                let mut dst_off = 0;
+                for item in &copies {
+                    let src = item.entry.as_slice();
+                    dst.write_at(dst_off, &src[item.page_offset..item.page_offset + item.sub_len]);
+                    dst_off += item.sub_len;
+                }
+                let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+                perf::record_pc_copy_cycles(copy_cycles);
+                return Ok(copies.iter().map(|c| c.sub_len).sum());
+            }
+
+            if !plan.needs_valid_fill.is_empty() {
+                for &page_index in &plan.needs_valid_fill {
+                    self.ensure_fully_valid(page_index)?;
+                }
+            }
+            if !plan.miss_runs.is_empty() {
+                self.fill_miss_runs(&plan.miss_runs)?;
+            }
+            retried = true;
+        }
     }
 
     /// 从 UserBuffer 写入数据到指定偏移量。
@@ -1422,7 +1641,7 @@ impl PageCache {
     // ── 回写 ─────────────────────────────────────────────────────────
 
     /// 单次回写批次的最大页面数
-    const MAX_WRITEBACK_PAGES: usize = 32;
+    const MAX_WRITEBACK_PAGES: usize = 256;
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
@@ -2072,6 +2291,29 @@ impl PageCacheBackend for FatPageCacheBackend {
 
 // ── Ext4PageCacheBackend ─────────────────────────────────────────────────
 
+/// Extent lookup cache: avoids repeated extent tree walks for sequential block access.
+/// Uses lock-free atomics — just a hint cache, reset on miss.
+struct Ext4MapCache {
+    valid: AtomicBool,
+    inode_num: AtomicU32,
+    lblock_start: AtomicU32,
+    /// u32::MAX sentinel for holes
+    pblock_start: AtomicU32,
+    lblock_count: AtomicU32,
+}
+
+impl Ext4MapCache {
+    fn new() -> Self {
+        Ext4MapCache {
+            valid: AtomicBool::new(false),
+            inode_num: AtomicU32::new(0),
+            lblock_start: AtomicU32::new(0),
+            pblock_start: AtomicU32::new(0),
+            lblock_count: AtomicU32::new(0),
+        }
+    }
+}
+
 /// EXT4 文件系统专用 PageCache 后端
 ///
 /// 通过弱引用访问 Ext4FileSystem + inode_num，将页面偏移动态映射为物理块号。
@@ -2081,6 +2323,8 @@ pub struct Ext4PageCacheBackend {
     inode_num: u32,
     block_size: usize,
     blocks_per_page: usize,
+    /// Extent lookup hint cache: avoids repeated extent tree walks for sequential block access
+    map_cache: Ext4MapCache,
 }
 
 impl Ext4PageCacheBackend {
@@ -2098,16 +2342,59 @@ impl Ext4PageCacheBackend {
             inode_num,
             block_size,
             blocks_per_page,
+            map_cache: Ext4MapCache::new(),
         }
     }
 
     fn block_id_for_offset(&self, page_index: usize, block_off: usize) -> Option<usize> {
+        let lblock = (page_index * self.blocks_per_page + block_off) as u32;
+
+        // Fast path: check extent hint cache
+        if self.map_cache.valid.load(Ordering::Relaxed)
+            && self.map_cache.inode_num.load(Ordering::Relaxed) == self.inode_num
+        {
+            let cache_start = self.map_cache.lblock_start.load(Ordering::Relaxed);
+            let cache_count = self.map_cache.lblock_count.load(Ordering::Relaxed);
+            if lblock >= cache_start && lblock < cache_start.saturating_add(cache_count) {
+                crate::task::perf::record_ext4_map_cache_hit();
+                let pstart = self.map_cache.pblock_start.load(Ordering::Relaxed);
+                if pstart == u32::MAX {
+                    return None; // cached hole
+                }
+                return Some(pstart as usize + (lblock - cache_start) as usize);
+            }
+        }
+
+        // Slow path: extent tree lookup
+        crate::task::perf::record_ext4_map_lblock();
         let fs = self.ext4fs.upgrade()?;
         let ino_ref = fs.get_inode_ref(self.inode_num);
-        let lblock = (page_index * self.blocks_per_page + block_off) as u32;
-        match fs.get_pblock_idx(&ino_ref, lblock) {
-            Ok(pblock) => Some(pblock as usize),
-            Err(_) => None, // hole
+        let _t = perf::perf_time_now();
+        match fs.get_pblock_with_extent(&ino_ref, lblock) {
+            Ok((pblock, ext_first, ext_len)) => {
+                let elapsed = perf::perf_time_now().wrapping_sub(_t);
+                perf::record_ext4_map_lblock_cost(elapsed);
+                // Cache the full extent range
+                self.map_cache.valid.store(true, Ordering::Relaxed);
+                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
+                self.map_cache.lblock_start.store(ext_first, Ordering::Relaxed);
+                self.map_cache.pblock_start
+                    .store(pblock - (lblock - ext_first), Ordering::Relaxed);
+                self.map_cache.lblock_count.store(ext_len, Ordering::Relaxed);
+                Some(pblock as usize)
+            }
+            Err(_) => {
+                let elapsed = perf::perf_time_now().wrapping_sub(_t);
+                perf::record_ext4_map_lblock_cost(elapsed);
+                crate::task::perf::record_ext4_map_hole();
+                // Cache the hole (single block only — extent range doesn't cover holes)
+                self.map_cache.valid.store(true, Ordering::Relaxed);
+                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
+                self.map_cache.lblock_start.store(lblock, Ordering::Relaxed);
+                self.map_cache.pblock_start.store(u32::MAX, Ordering::Relaxed);
+                self.map_cache.lblock_count.store(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 }
@@ -2179,13 +2466,76 @@ impl PageCacheBackend for Ext4PageCacheBackend {
     }
 
     fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
-        // 只有 block_size == PAGE_SIZE 时才能做物理块级的批量合并
+        crate::task::perf::record_ext4_pc_writepages_calls();
+        crate::task::perf::record_ext4_pc_writepages_pages(pages.len());
+        // 当 blocks_per_page > 1 时，打平所有 lblock，按物理连续分组批量写入
         if self.blocks_per_page != 1 {
-            let mut written = 0;
+            let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+            let blk = &fs.block_device;
+            let block_sz = self.block_size;
+            let bpp = self.blocks_per_page;
+            let mut run_count = 0usize;
+
+            // 阶段 1：打平所有 (page_idx, block_off, pblock)
+            let mut block_list: Vec<(usize, usize, usize)> = Vec::new();
             for (i, page) in pages.iter().enumerate() {
-                written += self.write_page(start_index + i, page)?;
+                if page.len() < crate::config::PAGE_SIZE {
+                    return Err(SyscallErr::ENOBUFS);
+                }
+                let page_index = start_index + i;
+                for bo in 0..bpp {
+                    match self.block_id_for_offset(page_index, bo) {
+                        Some(pblock) => block_list.push((i, bo, pblock)),
+                        None => return Err(SyscallErr::EIO),
+                    }
+                }
             }
-            return Ok(written);
+
+            // 阶段 2：按物理连续分组为 run，从页面收集数据后逐块写入
+            let mut i = 0;
+            while i < block_list.len() {
+                let first_pblock = block_list[i].2;
+                let run_start = i;
+                let mut run_len = 1;
+                let mut expected_pblock = first_pblock + 1;
+                i += 1;
+                while i < block_list.len() && block_list[i].2 == expected_pblock {
+                    run_len += 1;
+                    expected_pblock = block_list[i].2 + 1;
+                    i += 1;
+                }
+
+                // 收集 run 中各块数据到 staging buffer
+                let staging_size = run_len * block_sz;
+                let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
+                for j in 0..run_len {
+                    let (page_idx, block_off, _) = block_list[run_start + j];
+                    let src_start = block_off * block_sz;
+                    let dst_start = j * block_sz;
+                    staging[dst_start..dst_start + block_sz]
+                        .copy_from_slice(&pages[page_idx][src_start..src_start + block_sz]);
+                }
+
+                // 批量写入块设备：将整个 run 作为一次 write_block 调用
+                // pblock 是 512B 单位，需转为 BLOCK_SZ 单位（pblock / blocks_per_page）
+                // staging 按 512B 拼接，因 run 跨整页边界，staging_size 必为 BLOCK_SZ 的整数倍
+                let first_pblock_4k = first_pblock / bpp;
+                blk.write_block(first_pblock_4k, &staging);
+
+                // 更新计数器（等价于逐块调用）
+                for _ in 0..run_len {
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_WRITE
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
+                    );
+                }
+                run_count += 1;
+            }
+
+            crate::task::perf::record_ext4_pc_writepages_runs(run_count);
+            return Ok(pages.len() * crate::config::PAGE_SIZE);
         }
 
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
@@ -2207,6 +2557,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
 
         // 第二阶段：将物理连续块分组为 run，通过 staging buffer 批量写入
         let mut i = 0;
+        let mut run_count = 0usize;
         let blk = &fs.block_device;
         while i < block_map.len() {
             let first_pblock = block_map[i].1;
@@ -2242,19 +2593,102 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                     crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
                 );
             }
+            run_count += 1;
         }
 
+        crate::task::perf::record_ext4_pc_writepages_runs(run_count);
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 
-    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
-        // 只有 block_size == PAGE_SIZE 时才能做物理块级的批量合并
+    fn read_pages(
+        &self,
+        start_index: usize,
+        pages: &mut [&mut [u8]],
+    ) -> Result<usize, SyscallErr> {
+        crate::task::perf::record_ext4_pc_readpages_calls();
+        crate::task::perf::record_ext4_pc_readpages_pages(pages.len());
+        // 当 blocks_per_page > 1 时，打平所有 lblock，按物理连续分组批量读取
         if self.blocks_per_page != 1 {
-            let mut total = 0;
-            for (i, page) in pages.iter_mut().enumerate() {
-                total += self.read_page(start_index + i, *page)?;
+            let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+            let blk = &fs.block_device;
+            let block_sz = self.block_size;
+            let bpp = self.blocks_per_page;
+
+            // 阶段 1：打平所有 (page_idx, block_off, pblock_opt)
+            let mut block_list: Vec<(usize, usize, Option<usize>)> = Vec::new();
+            for (i, page) in pages.iter().enumerate() {
+                if page.len() < crate::config::PAGE_SIZE {
+                    return Err(SyscallErr::ENOBUFS);
+                }
+                let page_index = start_index + i;
+                for bo in 0..bpp {
+                    let pblock = self.block_id_for_offset(page_index, bo);
+                    block_list.push((i, bo, pblock));
+                }
             }
-            return Ok(total);
+
+            // 阶段 2：按物理连续分组为 run，批量读取后分散到各页面
+            let mut i = 0;
+            let mut run_count = 0usize;
+            while i < block_list.len() {
+                // 跳过空洞（零填充在循环外统一处理）
+                if block_list[i].2.is_none() {
+                    i += 1;
+                    continue;
+                }
+
+                let first_pblock = block_list[i].2.unwrap();
+                let run_start = i;
+                let mut run_len = 1;
+                let mut expected_pblock = first_pblock + 1;
+                i += 1;
+                while i < block_list.len() {
+                    match block_list[i].2 {
+                        Some(pb) if pb == expected_pblock => {
+                            run_len += 1;
+                            expected_pblock = pb + 1;
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // 批量读取到 staging buffer
+                let staging_size = run_len * block_sz;
+                let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
+                blk.read_block(first_pblock, &mut staging);
+
+                // 分散到各页面的对应 block_off 位置
+                for j in 0..run_len {
+                    let (page_idx, block_off, _) = block_list[run_start + j];
+                    let src_start = j * block_sz;
+                    let dst_start = block_off * block_sz;
+                    pages[page_idx][dst_start..dst_start + block_sz]
+                        .copy_from_slice(&staging[src_start..src_start + block_sz]);
+                }
+
+                // 更新计数器
+                for _ in 0..run_len {
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_READ
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_READ_TOTAL
+                    );
+                }
+                run_count += 1;
+            }
+
+            // 阶段 3：零填充所有空洞对应的 page 位置
+            for (page_idx, block_off, pblock_opt) in &block_list {
+                if pblock_opt.is_none() {
+                    let dst_start = block_off * block_sz;
+                    pages[*page_idx][dst_start..dst_start + block_sz].fill(0);
+                }
+            }
+
+            crate::task::perf::record_ext4_pc_readpages_runs(run_count);
+            return Ok(pages.len() * crate::config::PAGE_SIZE);
         }
 
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
@@ -2275,6 +2709,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         // 第二阶段：将物理连续块分组为 run，批量读取
         // 只对映射块做批量读取；空洞单独零填充
         let mut idx = 0;
+        let mut run_count = 0usize;
         let blk = &fs.block_device;
         while idx < block_map.len() {
             // 跳过空洞（零填充在循环外统一处理）
@@ -2320,6 +2755,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                     crate::fs::ext4::counters::BLOCK_READ_TOTAL
                 );
             }
+            run_count += 1;
         }
 
         // 第三阶段：零填充所有空洞页面
@@ -2329,6 +2765,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             }
         }
 
+        crate::task::perf::record_ext4_pc_readpages_runs(run_count);
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 }

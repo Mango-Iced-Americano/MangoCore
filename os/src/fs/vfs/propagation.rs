@@ -443,6 +443,8 @@ pub fn propagate_mount(
     new_child: &Arc<MountFS>,
     child_name: &str,
 ) {
+    let _start = crate::task::perf::perf_time_now();
+    super::mount::counters::MOUNT_LIST_PROPAGATE_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
@@ -453,6 +455,10 @@ pub fn propagate_mount(
         child_name,
         &mut visited,
         MAX_DEPTH,
+    );
+    super::mount::counters::MOUNT_LIST_PROPAGATE_CYCLES.fetch_add(
+        crate::task::perf::perf_time_now().wrapping_sub(_start),
+        core::sync::atomic::Ordering::Relaxed,
     );
 }
 
@@ -535,9 +541,9 @@ fn propagate_to_mount(
         if root_md.inode_id == mountpoint_id {
             let mount_path = target.mount_path().unwrap_or_default();
             if let Ok(new_mount) = target_root.mount_subtree_inner(
-                new_child.inner_filesystem(),
+                new_child.lifecycle.clone(),
                 new_child.root_inner_inode(),
-                new_child.mount_flags().persistent(),
+                super::canonicalize_state(new_child.mount_flags().persistent()),
                 Some(mount_path),
                 false,
             ) {
@@ -557,9 +563,9 @@ fn propagate_to_mount(
         .unwrap_or_else(|| new_child.root_inner_inode());
 
     let new_mount = MountFS::new_with_root(
-        new_child.inner_filesystem(),
+        new_child.lifecycle.clone(),
         new_child.root_inner_inode(),
-        new_child.mount_flags().persistent(),
+        super::canonicalize_state(new_child.mount_flags().persistent()),
     );
     let backref = MountFSInode::new(inner_inode, Arc::clone(target));
     new_mount.set_self_mountpoint(Some(backref));
@@ -591,12 +597,18 @@ fn propagate_to_mount(
             let ex_root = existing_mnt.covered_root_inode();
             let ex_path = existing_mnt.mount_path().unwrap_or_default();
             if let Ok(descend) = ex_root.mount_subtree_inner(
-                new_child.inner_filesystem(),
+                new_child.lifecycle.clone(),
                 new_child.root_inner_inode(),
-                new_child.mount_flags().persistent(),
+                super::canonicalize_state(new_child.mount_flags().persistent()),
                 Some(ex_path),
                 false,
             ) {
+                // Clean up the temporary MountFS before returning descend.
+                // It was created speculatively, added to MOUNT_LIST, and
+                // given a self_mountpoint — all of which must be undone
+                // so the Arc drops cleanly with a single release().
+                super::mount::MOUNT_LIST.remove_fs(&new_mount);
+                new_mount.set_self_mountpoint(None);
                 finish_propagated_mount(&descend, existing_mnt, source_child_group, as_slave);
                 return Some(descend);
             }

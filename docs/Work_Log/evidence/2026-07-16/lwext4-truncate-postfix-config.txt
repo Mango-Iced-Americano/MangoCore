@@ -1,0 +1,3 @@
+# Run the preloaded regression binary after the normal boot path mounts /sdcard.
+mode=regression
+diag=0

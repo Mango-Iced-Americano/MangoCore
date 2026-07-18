@@ -8,7 +8,7 @@ use crate::fs::{
 };
 use crate::mm::{
     copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, translated_str,
-    FrameTracker, MapFlags, MapPermission,
+    frames_alloc_any, FrameTracker, MapFlags, MapPermission,
 };
 use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;
@@ -789,7 +789,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
         }
         if seg.frames.is_empty() {
             let page_count = (seg.size + crate::config::PAGE_SIZE - 1) / crate::config::PAGE_SIZE;
-            let Some(frames) = crate::mm::frames_alloc_any(page_count) else {
+            let Some(frames) = frames_alloc_any(page_count) else {
                 return ENOMEM;
             };
             seg.frames = frames;

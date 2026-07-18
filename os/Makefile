@@ -16,7 +16,17 @@ AUTO_REBUILD_MEM ?= 1
 RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
+# Architecture builds switch the repository-local rustup override, and the
+# tools-disk recipes share a mount point. This orchestration makefile is
+# intentionally serial even when the caller supplies -j; Cargo/CMake retain
+# their own internal parallelism.
+.NOTPARALLEL:
+
 .PHONY: all $(ARCHS) clean prepare-cargo-config \
+	rv64_all la64_all \
+	rv64-kernel-build-only la64-kernel-build-only \
+	rv64-regression la64-regression rv64-ktest la64-ktest \
+	regression-all ktest-all initramfs-rv initramfs-la initramfs-all \
 	la64-2k1000-core-tests \
 	la64-2k1000-shell \
 	la64-2k1000-curl-shell \
@@ -38,6 +48,8 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 	la64-qemu-apk-persist-shell-run \
 	rv64-cpython-tests rv64-cpython-run \
 	la64-cpython-tests la64-cpython-run \
+	tools-cpython-rv tools-cpython-la tools-cpython-la-alpine tools-cpython \
+	tools-cpython-clean maybe-tools-cpython-rv maybe-tools-cpython-la \
 	la64-2k1000-run-clean
 
 all: prepare-cargo-config rv64_all la64_all
@@ -92,6 +104,13 @@ rv64-run: prepare-cargo-config
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp
+
+# Regression test: self-contained initramfs — NO external disks
+rv64-regression: prepare-cargo-config
+	@rustup override set $(RV_TOOLCHAIN)
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+	make -f make/rv64.mk regression-run MODE=${MODE} LOG=${LOG}
 
 la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
@@ -379,7 +398,7 @@ la64-debug:
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk all MODE=debug	
+	make -f make/la64.mk all MODE=debug
 
 la64-run-only:
 	@rustup override set $(LA_TOOLCHAIN)
@@ -392,6 +411,12 @@ la64-run: prepare-cargo-config
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk comp MODE=${MODE} LOG=${LOG}
+
+la64-regression: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	make -f make/la64.mk regression-run MODE=${MODE} LOG=${LOG}
 
 comp:
 	make -f make/$(CURR_ARCH).mk comp
@@ -424,7 +449,7 @@ la64-gdb: la64-debug
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk comp-gdb	
+	make -f make/la64.mk comp-gdb
 
 rvchange:
 	rm -f ../sdcard-rv.img
@@ -495,13 +520,15 @@ inject-test:
 
 TOOLS_IMG_RV := ../disk.img
 TOOLS_IMG_LA := ../disk-la.img
-TOOLS_SIZE_RV := 768
-TOOLS_SIZE_LA := 768
+TOOLS_SIZE_RV := 2048
+TOOLS_SIZE_LA := 2048
 TOOLS_SRC_RV := ../user/tools/riscv64
 TOOLS_SRC_LA := ../user/tools/loongarch64
 
 # Isolated CPython runtime. Downloads are explicit by default so routine
 # kernel builds remain reproducible and do not silently depend on the network.
+# The optional Alpine target remains available for develop/QEMU experiments;
+# 2K1000LA uses the reviewed strict-aligned runtime by default.
 CPYTHON_COMMON := ../user/tools/cpython
 CPYTHON_SRC_RV := ../user/tools/riscv64/tests/cpython
 CPYTHON_SRC_LA := ../user/tools/loongarch64/tests/cpython
@@ -519,12 +546,8 @@ define build_tools_disk
 	@mkfs.ext4 -F /tmp/tools-pl-$(4).img -b 4096 2>/dev/null
 	@mkdir -p /tmp/tools-mnt
 	@mount -o loop /tmp/tools-pl-$(4).img /tmp/tools-mnt
-	@mkdir -p /tmp/tools-mnt/bin /tmp/tools-mnt/lib /tmp/tools-mnt/usr/bin /tmp/tools-mnt/usr/sbin /tmp/tools-mnt/etc /tmp/tools-mnt/tests
-	@echo "  copying files..."
-	@cp -a $(3)/bin/* /tmp/tools-mnt/bin/ 2>/dev/null || true
-	@cp -a $(3)/lib/* /tmp/tools-mnt/lib/ 2>/dev/null || true
-	@cp -a $(3)/sbin/* /tmp/tools-mnt/sbin/ 2>/dev/null || true
-	@cp -a $(3)/etc/* /tmp/tools-mnt/etc/ 2>/dev/null || true
+	@echo "  copying files from $(3)..."
+	@cp -a $(3)/. /tmp/tools-mnt/ 2>/dev/null || true
 	@echo "  copying test binaries..."
 	@case "$(4)" in rv) target=riscv64gc-unknown-none-elf ;; la) target=loongarch64-unknown-linux-gnu ;; esac; \
 	for t in inet_test fs_test unix_test; do \
@@ -537,6 +560,8 @@ define build_tools_disk
 		mkdir -p /tmp/tools-mnt/tests/cpython; \
 		cp -a $(CPYTHON_COMMON)/. /tmp/tools-mnt/tests/cpython/; \
 		echo "    [cpython] common scripts included"; \
+	else \
+		echo "    [cpython] common scripts missing, skipping"; \
 	fi
 	@if [ -d $(3)/tests/cpython ]; then \
 		mkdir -p /tmp/tools-mnt/tests/cpython; \
@@ -677,7 +702,8 @@ tools-alpine-la:
 tools-alpine: tools-alpine-rv tools-alpine-la
 
 # ============================================================
-# CPython runtime provisioning
+# CPython runtime provisioning. Caches live under
+# user/tools/{arch}/tests/cpython/ and are gitignored.
 # ============================================================
 
 tools-cpython-rv:
@@ -689,21 +715,34 @@ tools-cpython-la:
 	@python3 ../scripts/install_cpython_runtime_la64_strict.py \
 		--artifact-index $(CPYTHON_STRICT_INDEX_LA) --dest $(CPYTHON_SRC_LA)
 
+# Keep develop's direct Alpine runtime available for QEMU diagnostics without
+# weakening the default 2K1000LA strict-aligned provenance gate.
+tools-cpython-la-alpine:
+	@python3 ../scripts/fetch_cpython_runtime.py \
+		--arch loongarch64 \
+		--mirror $(ALPINE_MIRROR) \
+		--dest $(CPYTHON_SRC_LA)
+
 tools-cpython: tools-cpython-rv tools-cpython-la
 
 maybe-tools-cpython-rv:
 	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
 		$(MAKE) --no-print-directory tools-cpython-rv; \
+	else \
+		echo "[cpython] CPYTHON_AUTO=0, skipping riscv64 runtime"; \
 	fi
 
 maybe-tools-cpython-la:
 	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
 		$(MAKE) --no-print-directory tools-cpython-la; \
+	else \
+		echo "[cpython] CPYTHON_AUTO=0, skipping loongarch64 runtime"; \
 	fi
 
 tools-cpython-clean:
-	@rm -rf $(CPYTHON_SRC_RV) $(CPYTHON_SRC_LA)
-	@echo "[cpython] runtime caches removed"
+	@rm -rf $(CPYTHON_SRC_RV)/.apk-cache $(CPYTHON_SRC_RV)/bin $(CPYTHON_SRC_RV)/lib $(CPYTHON_SRC_RV)/usr $(CPYTHON_SRC_RV)/etc $(CPYTHON_SRC_RV)/var $(CPYTHON_SRC_RV)/tmp $(CPYTHON_SRC_RV)/.cpython-*.stamp $(CPYTHON_SRC_RV)/manifest*.txt
+	@rm -rf $(CPYTHON_SRC_LA)/.apk-cache $(CPYTHON_SRC_LA)/bin $(CPYTHON_SRC_LA)/lib $(CPYTHON_SRC_LA)/usr $(CPYTHON_SRC_LA)/etc $(CPYTHON_SRC_LA)/var $(CPYTHON_SRC_LA)/tmp $(CPYTHON_SRC_LA)/.cpython-*.stamp $(CPYTHON_SRC_LA)/manifest*.txt
+	@echo "[cpython] generated runtime caches removed"
 
 CURL_RUNTIME_LA_MANIFEST := ../user/tools/loongarch64/curl-runtime/manifest.txt
 
@@ -863,3 +902,73 @@ initramfs-la: user
 	@DNS_SERVER=$(DNS_SERVER) ./build_initramfs.sh la64 $(MODE) $(INITRAMFS_DIR_LA)
 
 initramfs-all: initramfs-rv initramfs-la
+
+# ============================================================
+# lwext4 targets
+# ============================================================
+lwext4-rv64:
+	make -f make/rv64.mk lwext4-rv64
+
+lwext4-la64:
+	make -f make/la64.mk lwext4-la64
+
+.PHONY: lwext4-rv64 lwext4-la64
+
+# ============================================================
+# L3 Kernel self-test (mango.mode=ktest)
+# ============================================================
+# Usage:
+#   make rv64-ktest
+#   make rv64-ktest KTEST=waitqueue KREPEAT=100
+#   make rv64-ktest KTEST=sched KTRACE=waitqueue,sched
+#   make la64-ktest KTEST=all KTIMEOUT_MS=10000
+KTEST ?= all
+KREPEAT ?= 1
+KTIMEOUT_MS ?= 5000
+KTRACE ?=
+KTEST_QEMU_TIMEOUT ?= 30
+export KTEST_QEMU_TIMEOUT
+
+KTEST_CMDLINE := mango.mode=ktest mango.test=$(KTEST) mango.test.repeat=$(KREPEAT) mango.test.timeout_ms=$(KTIMEOUT_MS) mango.test.failfast=0
+ifneq ($(KTRACE),)
+KTEST_CMDLINE := $(KTEST_CMDLINE) mango.trace=$(KTRACE)
+endif
+export KTEST_CMDLINE
+
+rv64-ktest: prepare-cargo-config
+	@rustup override set $(RV_TOOLCHAIN)
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+	make -f make/rv64.mk ktest-run MODE=${MODE} LOG=${LOG}
+
+la64-ktest: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	make -f make/la64.mk ktest-run MODE=${MODE} LOG=${LOG}
+
+# Composite: fast check + unit test + kernel test
+.PHONY: bugscan
+bugscan: check-fast rv64-ktest
+	@echo "[bugscan] All checks passed."
+
+# Fast static checks (no QEMU needed)
+.PHONY: check-fast
+check-fast:
+	@echo "[check-fast] Running cargo check..."
+	@rustup override set $(RV_TOOLCHAIN) 2>/dev/null
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs 2>/dev/null
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs 2>/dev/null
+	cargo check --features "board_rvqemu block_virt" 2>&1 | tail -1
+
+# ─────────────────────────────────────────────────────────
+#  Aggregate targets — serial execution (toolchain conflict)
+# ─────────────────────────────────────────────────────────
+
+regression-all:
+	@$(MAKE) rv64-regression
+	@$(MAKE) la64-regression
+
+ktest-all:
+	@$(MAKE) rv64-ktest KTEST=all
+	@$(MAKE) la64-ktest KTEST=all

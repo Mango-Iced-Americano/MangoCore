@@ -13,7 +13,7 @@ tags: [docs, index, overview]
 
 本文档是 MangoCore 项目所有文档的入口。它描述了目录结构，为不同读者提供推荐阅读路径，并收录每个现有模块文档及其状态。
 
-文档遵循 10 类别布局（`00_overview` 到 `09_debug`），另含工作日志、Bug 事后分析、LTP 测试计划和架构设计等遗留目录。
+文档遵循编号布局（`00_overview` 到 `10_plan`），另含工作日志、Bug 事后分析、LTP 测试计划和架构设计等遗留目录。
 
 ## 评审材料（竞赛评委优先阅读）
 
@@ -41,10 +41,11 @@ tags: [docs, index, overview]
 | `diagrams/` | 架构图 | 子系统架构图、流程图、关系图等图片资源 |
 | `08_testing/` | 测试 | 隔离 CPython/APK 运行时、QEMU 与实板测试门禁 |
 | [`09_debug/`](09_debug/README.md) | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（多篇） |
+| `10_plan/` | 计划 | 跨子系统设计方案、性能分析和迁移计划 |
 | `_templates/` | 模板 | 新模块文档的标准文档模板 |
 | `kernel/` | 遗留子系统文档 | 旧版模块文档（待迁移到 00-09 布局） |
 | `ltp/` | LTP 测试计划 | LTP 测试策略、各子系统状态、工作流 |
-| `plan/` | 架构计划 | 设计方案和迁移计划 |
+| `10_plan/` | 架构计划 | 设计方案和迁移计划 |
 | `Work_Log.md` | 开发日志 | 所有重要变更的时间顺序记录 |
 
 ## 阅读指南
@@ -109,7 +110,7 @@ tags: [docs, index, overview]
 | `docs/kernel/fs/` | `ext4-cache-design.md` — ext4 的 PageCache 设计 |
 | `docs/kernel/net/` | `README.md`、`architecture.md`（迁移前版本）、`device-layer.md`、`multi-iface-routing.md`、`roadmap.md`、`socket-subsystem.md`、`syscalls.md`、`tcp-state-machine.md` |
 | `docs/kernel/` | `futex.md`、`Nanosleep.md`、`tgkill.md`、`信号.md` — 子系统深入分析 |
-| `docs/ltp/` | LTP 测试策略（`LTP_BOTTOM_UP_GUIDE.md`）、各子系统计划和状态（`ltp_fs_plan.md`、`ltp_fs_status.md`、`ltp_mount_plan.md`、`ltp_mount_status.md`、`ltp_net_plan.md`、`ltp_net_status.md`）、工作流（`ltp_workflow.md`）、完整堆追踪报告及 MM 重构指南 |
-| `docs/09_debug/` | 多个 Bug 的事后分析及 `la64_on_board/` 实板专题，包括 LA64 用户栈 ABI、ext4 rename、mount bind 泄露、virtio 块对齐和内核栈溢出 |
+| `docs/ltp/` | LTP 测试策略（`LTP_BOTTOM_UP_GUIDE.md`）、各子系统计划和状态（`ltp_fs_plan.md`、`ltp_fs_status.md`、`ltp_mount_plan.md`、`ltp_mount_status.md`、`ltp_net_plan.md`、`ltp_net_status.md`）、deferred 失败清单（`ltp_net_deferred.md`）、工作流（`ltp_workflow.md`）、完整堆追踪报告及 MM 重构指南 |
+| `docs/09_debug/` | 多个已修复 Bug 的事后分析及 `la64_on_board/` 实板专题，包括 LA64 用户栈 ABI、ext4 rename、mount bind 泄露、virtio 块对齐和内核栈溢出 |
 | `docs/plan/` | 架构提案：NET_PLAN、UDP 改进计划、VFS 迁移计划、I/O 分块计划 |
 | `docs/Work_Log.md` | 每日开发日志，涵盖所有重要内核变更及编译和 QEMU 验证结果 |

@@ -48,4 +48,18 @@ impl TaskContext {
     pub fn bringup_resume_state(&self) -> (usize, usize) {
         (self.ra, self.sp)
     }
+
+    /// 构造首次被调度时跳转到任意地址的上下文。
+    ///
+    /// # Semantics
+    ///
+    /// 供 ktest 等不需要用户态陷阱返回的场景使用。`ra` 设为目标函数地址，
+    /// `sp` 指向内核栈顶，调度器首次切入该任务时直接跳到 `addr` 执行。
+    pub fn goto_address(addr: usize, kstack_top: usize) -> Self {
+        Self {
+            ra: addr,
+            sp: kstack_top,
+            s: [0; 12],
+        }
+    }
 }

@@ -1,0 +1,7 @@
+mode=run
+mask=0x800
+ltp_runner=suite
+ltp_libc=glibc
+ltp_suites=fs
+ltp_include=gf27
+skip_apk=1

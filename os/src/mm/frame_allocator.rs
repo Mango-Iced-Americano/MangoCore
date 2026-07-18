@@ -15,6 +15,7 @@
 
 use super::{PhysAddr, PhysPageNum};
 use crate::config::{FIRMWARE_RESERVED_REGIONS, MEMORY_REGIONS, PAGE_SIZE};
+use crate::hal::{local_irq_restore, local_irq_save};
 #[cfg(feature = "oom_handler")]
 use crate::task::current_task_ref;
 
@@ -491,6 +492,49 @@ impl StackFrameAllocator {
         Some(frames)
     }
 
+    /// Allocate a fresh physically contiguous extent from one DRAM region.
+    ///
+    /// This deliberately bypasses recycled pages so DMA queue setup is not
+    /// sensitive to free-list fragmentation. Small tails skipped here remain
+    /// available to later single-page allocations.
+    fn alloc_fresh_contiguous(&mut self, num: usize) -> Option<Vec<Arc<FrameTracker>>> {
+        let mut frames = Vec::new();
+        if frames.try_reserve(num).is_err() {
+            return None;
+        }
+        if num == 0 {
+            return Some(frames);
+        }
+
+        let region_index = self
+            .regions
+            .iter()
+            .enumerate()
+            .skip(self.fresh_region)
+            .find(|(_, region)| region.end.saturating_sub(region.current) >= num)
+            .map(|(index, _)| index)?;
+        let start = self.regions[region_index].current;
+        self.regions[region_index].current += num;
+
+        for ppn in start..start + num {
+            let started =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
+            crate::task::perf::record_frame_alloc();
+            #[cfg(not(feature = "zero_init"))]
+            let frame = FrameTracker::new(ppn.into());
+            #[cfg(feature = "zero_init")]
+            // Safety: this fresh extent has not previously been handed out and
+            // zero_init cleared every allocator-owned region during boot.
+            let frame = unsafe { FrameTracker::new_uninit(ppn.into()) };
+            frames.push(Arc::new(frame));
+            crate::task::perf::record_frame_alloc_time_us(
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .saturating_sub(started),
+            );
+        }
+        Some(frames)
+    }
+
     fn take_recycled_ppn(&mut self) -> Option<usize> {
         let ppn = self.recycled.pop()?;
         if let Some(region) = self
@@ -879,20 +923,31 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
 
 /// Allocate `num` physically contiguous pages from one ownership region.
 ///
+/// The allocator lock covers the entire extent selection, and interrupts are
+/// disabled while that lock is held so an interrupt-side frame allocation
+/// cannot recurse into the same spin lock.
+///
 /// # Errors
 ///
 /// Returns `None` when no registered fresh or recycled region has a large
 /// enough extent, or the result vector cannot be reserved. The function never
 /// spans a DRAM hole.
 pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
-    FRAME_ALLOCATOR.write().alloc_contiguous(num)
+    let was_enabled = local_irq_save();
+    let result = FRAME_ALLOCATOR.write().alloc_contiguous(num);
+    local_irq_restore(was_enabled);
+    result
 }
 
-/// Allocate `num` pages without requiring physical contiguity.
+/// Allocate `num` physical pages without requiring physical contiguity.
 ///
-/// This is intended for page-table-backed mappings such as SysV SHM. DMA
-/// callers must use `frames_alloc`, whose single-region extent guarantee is
-/// required before treating the first physical address as a linear buffer.
+/// Unlike `frames_alloc`, this does NOT enforce `base + i` PPN ordering.
+/// Suitable for virtual-memory mappings (e.g. SysV SHM) that map pages
+/// individually via page tables.  DMA callers must use `frames_alloc` or
+/// `frames_alloc_fresh_contiguous`.
+///
+/// # Errors
+/// `Vec` reservation failure or any single-page allocation failure → `None`.
 pub fn frames_alloc_any(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     let mut frames = Vec::new();
     if frames.try_reserve(num).is_err() {
@@ -906,6 +961,21 @@ pub fn frames_alloc_any(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
         }
     }
     Some(frames)
+}
+
+/// 从 fresh pool 分配 `num` 个物理连续页，完全绕过回收栈。
+///
+/// 从 `FRAME_ALLOCATOR` 单调递增计数器直接分配，保证物理连续且不受
+/// 碎片化回收模式影响。适用于 DMA/VirtIO 等要求物理连续的场景。
+///
+/// # Errors
+///
+/// fresh 页不足或 `Vec` 预留失败时返回 `None`；已分配帧会随局部变量释放回收。
+pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
+    let was_enabled = local_irq_save();
+    let result = FRAME_ALLOCATOR.write().alloc_fresh_contiguous(num);
+    local_irq_restore(was_enabled);
+    result
 }
 
 #[cfg(not(feature = "oom_handler"))]

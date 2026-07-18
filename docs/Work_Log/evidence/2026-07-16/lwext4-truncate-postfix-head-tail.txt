@@ -1,0 +1,82 @@
+--- first 40 lines ---
+make: Entering directory '/app/os'
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk comp
+make[1]: Entering directory '/app/os'
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+--- last 40 lines ---
+  read(timerfd) returned 8 (expirations=1)
+  timer fired 1 time(s) — OK
+  monotonic timerfd armed: 100ms
+  monotonic timerfd fired after 98ms (expirations=1)
+[regression_timer_realtime_jump] PASS
+ok 3 timer_realtime_jump
+[regression_rename_long_name] start
+  creating file with 255 byte name
+  255-byte file created OK
+  rename(255-byte → short) returned -18
+  rename failed with -18 — acceptable
+  attempting file with 256 byte name
+  openat(256-byte name) returned -36 — name rejected, OK
+  rename(short → 4096-byte) returned -2 (must not panic)
+  returned -2 — acceptable (non-panic)
+[regression_rename_long_name] PASS
+ok 4 rename_long_name
+[regression_lwext4_trunc_hole] start: 8 pages, cold-reopen sparse-hole + batch read_pages + post-write persist
+  phase 1: wrote 8 pages 0xa0..0xa7
+  phase 1: synced and closed
+  phase 2: truncated to 1 page
+  phase 2: synced and closed
+  phase 3: extended back to 8 pages (cold reopen)
+  phase 3a: page-0 (within eof): 4096 bytes all 0xa0 OK
+  phase 3b: page-1 single (read_page): 4096 bytes all 0x00 OK
+  phase 3c: pages-1-2 batch (read_pages): 8192 bytes all 0x00 OK
+  phase 3d: wrote marker 0xbb to page 3
+  phase 3: synced and closed
+  phase 4a: page-3 marker persist: 4096 bytes all 0xbb OK
+  phase 4b: page-2 adj hole: 4096 bytes all 0x00 OK
+  phase 4c: page-4 adj hole: 4096 bytes all 0x00 OK
+  phase 4d: page-0 intact: 4096 bytes all 0xa0 OK
+  phase 4: verified, closed
+  cleanup: test file removed
+[regression_lwext4_trunc_hole] PASS
+ok 5 lwext4_truncate_hole
+# results: 4 passed, 1 failed, 5 total
+[L4 REGRESSION FAILED] exit_code=1
+make[1]: Leaving directory '/app/os'
+make: Leaving directory '/app/os'

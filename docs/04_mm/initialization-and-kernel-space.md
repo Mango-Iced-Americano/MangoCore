@@ -88,7 +88,7 @@ rust_main()
 static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 ```
 
-`init_heap()` 将该数组交给 `OomAwareAllocator` 的内部 buddy allocator：
+`init_heap()` 将该数组交给 `KernelAllocator` 的内部 buddy heap（`MetadataHeap<32, 12>`）和 slab 分配器：
 
 ```rust
 HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
@@ -96,7 +96,7 @@ KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
 KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
 ```
 
-分配器不是直接使用 `LockedHeap`，而是包装成 `OomAwareAllocator`。这样普通内核堆分配失败时可以先尝试 OOM recovery，再决定是否进入 fatal 分配错误处理。
+`KernelAllocator` 组合了 slab 分配器（9 个 size class: 8~2048 bytes）和 `MetadataHeap<32, 12>` buddy allocator。小对象走 slab，大对象直接走 buddy。分配失败时仍支持 OOM recovery 路径。
 
 ### 4.1 分配失败路径
 

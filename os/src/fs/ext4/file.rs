@@ -594,6 +594,8 @@ impl Ext4FileSystem {
             return Ok(0);
         }
 
+        crate::task::perf::record_ext4_direct_write_at();
+
         // get the inode reference
         let mut inode_ref = self.get_inode_ref(inode);
 

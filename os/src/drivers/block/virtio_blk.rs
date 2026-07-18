@@ -1,6 +1,7 @@
 use super::BlockDevice;
 use crate::mm::{
-    frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl, PhysAddr, VirtAddr,
+    frames_alloc, frames_alloc_fresh_contiguous, kernel_token, FrameTracker, PageTable,
+    PageTableImpl, PhysAddr, VirtAddr,
 };
 use alloc::collections::BTreeMap;
 use alloc::{sync::Arc, vec::Vec};
@@ -11,13 +12,16 @@ use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
+use super::virtio_dma_pool;
 use crate::hal::{
     config::{PAGE_SIZE, PAGE_SIZE_BITS},
     BLOCK_SZ,
 };
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
-const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
+// Multi-page DMA uses the pool for contiguity; fallback to BLOCK_SZ when pool
+// is exhausted.  See virtio_dma_pool.rs.
+const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
 const VIRTIO_MMIO_BASE: usize = 0x10001000;
@@ -30,25 +34,79 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
 }
 
+/// Bridges the DMA pool reservation from `read_block`/`write_block` to
+/// `VirtioHal::share()`.  The virtio-drivers library calls `share()` internally
+/// during `dev.read_blocks()`/`write_blocks()`, passing through no extra
+/// parameters, so the reservation is communicated via this static.
+/// Stores `(slot, gen)` from `DmaReservation`.
+static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+
 impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
-        for (chunk_idx, chunk) in buf.chunks_mut(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
-            dev.read_blocks(first_sector, chunk)
+
+        let mut offset: usize = 0;
+        while offset < buf.len() {
+            let remaining = buf.len() - offset;
+            let wanted = remaining.min(MAX_VIRTIO_REQ_BYTES);
+            let pages = (wanted + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+
+            let reservation = virtio_dma_pool::dma_pool_reserve(pages);
+            let chunk_len = if reservation.is_some() {
+                wanted
+            } else {
+                BLOCK_SZ
+            };
+
+            // Store (slot, gen) for VirtioHal::share() to consume.
+            // consume the original DmaReservation — the tuple alone is enough
+            // for share() to reconstruct a DmaReservation and consume it.
+            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+
+            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
+            dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len])
                 .expect("Error when reading VirtIOBlk");
+
+            // share() should have consumed the reservation. If it didn't (e.g.
+            // because the virtio-drivers library split the buffer), cancel it.
+            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
+                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
+            }
+
+            offset += chunk_len;
         }
     }
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
-        for (chunk_idx, chunk) in buf.chunks(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
-            dev.write_blocks(first_sector, chunk)
+
+        let mut offset: usize = 0;
+        while offset < buf.len() {
+            let remaining = buf.len() - offset;
+            let wanted = remaining.min(MAX_VIRTIO_REQ_BYTES);
+            let pages = (wanted + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+
+            let reservation = virtio_dma_pool::dma_pool_reserve(pages);
+            let chunk_len = if reservation.is_some() {
+                wanted
+            } else {
+                BLOCK_SZ
+            };
+
+            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+
+            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
+            dev.write_blocks(first_sector, &buf[offset..offset + chunk_len])
                 .expect("Error when writing VirtIOBlk");
+
+            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
+                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
+            }
+
+            offset += chunk_len;
         }
     }
 
@@ -79,6 +137,7 @@ pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
     let d0 =
         VirtIOBlock::try_new(VIRTIO_MMIO_BASE).map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
     if d0.is_some() {
+        virtio_dma_pool::dma_pool_init_once();
         println!(
             "[kernel] block device 0: official fs (MMIO {:#x})",
             VIRTIO_MMIO_BASE
@@ -122,18 +181,45 @@ unsafe impl Hal for VirtioHal {
     unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> usize {
         let buffer = buffer.as_ref();
         let pages = (buffer.len() + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
-        let frames = frames_alloc(pages).expect("share: failed to alloc frames");
 
+        // Check for pending pool reservation (set by read_block/write_block).
+        // A single read_blocks/write_blocks generates 3 share() calls:
+        // BlkReq header (16B), data, BlkResp status (1B).
+        // Only consume for the data buffer (>= BLOCK_SZ); leave header/status
+        // small descriptors to fall through to the single-page path.
+        let mut pending = PENDING_DMA_RESERVATION.lock();
+        if let Some((slot, gen)) = pending.take() {
+            if buffer.len() >= BLOCK_SZ {
+                drop(pending);
+                let reservation = virtio_dma_pool::DmaReservation { slot, gen };
+                let pa = virtio_dma_pool::dma_pool_consume_reserved(reservation);
+
+                if matches!(
+                    direction,
+                    BufferDirection::DriverToDevice | BufferDirection::Both
+                ) {
+                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                        .copy_from_slice(buffer);
+                }
+                return pa;
+            }
+            // Small descriptor (header/status) — put reservation back for data call
+            *pending = Some((slot, gen));
+        }
+        drop(pending);
+
+        // Fallback: single-page allocation.
+        // Multi-page without reservation cannot happen because read_block/write_block
+        // always reserves before submitting multi-page chunks.
+        assert_eq!(pages, 1, "share: multi-page DMA without pool reservation");
+        let frames = frames_alloc(1).expect("share: failed to alloc frame");
+        let pa = frames[0].ppn.start_addr().0;
         if matches!(
             direction,
             BufferDirection::DriverToDevice | BufferDirection::Both
         ) {
-            let pa_start = frames[0].ppn.start_addr().0;
-            let dst_slice = core::slice::from_raw_parts_mut(pa_start as *mut u8, buffer.len());
-            dst_slice.copy_from_slice(buffer);
+            core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len()).copy_from_slice(buffer);
         }
-
-        let pa = frames[0].ppn.start_addr().0;
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
         assert!(
             old.is_none(),
@@ -144,43 +230,54 @@ unsafe impl Hal for VirtioHal {
     }
 
     unsafe fn unshare(paddr: usize, mut buffer: NonNull<[u8]>, direction: BufferDirection) {
-        // Remove from map first — if paddr is unknown, panic before copying garbage
+        // Check if this is a pool slot first.
+        if let Some(slot) = virtio_dma_pool::dma_pool_lookup(paddr) {
+            if matches!(
+                direction,
+                BufferDirection::DeviceToDriver | BufferDirection::Both
+            ) {
+                let buffer = buffer.as_mut();
+                let src = paddr as *const u8;
+                buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
+            }
+            virtio_dma_pool::dma_pool_finish_unshare(slot);
+            return;
+        }
+
+        // Fallback: single-page allocation from QUEUE_FRAMES.
         let frames = QUEUE_FRAMES
             .lock()
             .remove(&paddr)
             .unwrap_or_else(|| panic!("[virtio] unshare unknown paddr=0x{:x}", paddr));
 
-        // Copy data while frames are still alive (paddr is valid)
         if matches!(
             direction,
             BufferDirection::DeviceToDriver | BufferDirection::Both
         ) {
             let buffer = buffer.as_mut();
-            let src_ptr = paddr as *const u8;
-            buffer.copy_from_slice(core::slice::from_raw_parts(src_ptr, buffer.len()));
+            let src = paddr as *const u8;
+            buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
         }
 
-        // Drop frames OUTSIDE the lock to avoid deadlock
-        // (FrameTracker::drop → frame_dealloc → FRAME_ALLOCATOR lock)
         drop(frames);
     }
 }
 
 #[no_mangle]
 pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr {
-    let frames = frames_alloc(pages).expect("virtio DMA contiguous allocation failed");
-    let ppn_base = frames
-        .first()
-        .expect("virtio DMA cannot allocate an empty extent")
-        .ppn;
-    let pa = PhysAddr::from(ppn_base).0;
+    // Use fresh contiguous allocation — bypasses recycled stack fragmentation.
+    let frames = frames_alloc_fresh_contiguous(pages)
+        .expect("virtio_dma_alloc: failed to alloc contiguous fresh frames");
+
+    let pa = PhysAddr::from(frames[0].ppn).0;
+    let ppn = frames[0].ppn;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
     assert!(
         old.is_none(),
         "[virtio] dma_alloc key collision pa=0x{:x}",
         pa
     );
-    ppn_base.into()
+    ppn.into()
 }
 
 #[no_mangle]

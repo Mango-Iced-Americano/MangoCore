@@ -22,6 +22,8 @@ pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 #[cfg(feature = "board_cv1811h")]
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
+#[cfg(feature = "board_vf2")]
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 pub const MMAP_BASE: usize = 0x2000_0000;
 pub const MMAP_END: usize = 0xb800_0000;
 // 公共内核 ELF 映射代码需要架构专属上界。RISC-V 不存在独立的高地址 PGDH 栈别名，
@@ -30,18 +32,28 @@ pub const KERNEL_PROGRAM_END: usize = MMAP_END;
 pub const SKIP_NUM: usize = 2;
 
 // manually make usable memory space equal
+#[cfg(not(feature = "board_vf2"))]
 pub const MEMORY_START: usize = 0x0000_0000_8000_0000;
+#[cfg(feature = "board_vf2")]
+pub const MEMORY_START: usize = 0x4000_0000;
 #[cfg(feature = "board_rvqemu")]
 pub const MEMORY_END: usize = MEMORY_START + MEMORY_SIZE;
 #[cfg(feature = "board_fu740")]
 pub const MEMORY_END: usize = 0x9000_0000;
 #[cfg(feature = "board_cv1811h")]
 pub const MEMORY_END: usize = 0x9000_0000; //256M
+#[cfg(feature = "board_vf2")]
+pub const MEMORY_END: usize = 0xC000_0000;
+
 /// Physical DRAM banks as half-open byte ranges.
 pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
 /// OpenSBI occupies the low 2 MiB of DRAM and transfers control to the kernel
 /// at this address.
+#[cfg(not(feature = "board_vf2"))]
 pub const FIRMWARE_END: usize = 0x8020_0000;
+/// VisionFive 2 loads the kernel at 0x4020_0000, above its low OpenSBI area.
+#[cfg(feature = "board_vf2")]
+pub const FIRMWARE_END: usize = 0x4020_0000;
 /// This range must never enter the frame allocator or the optional bulk-zero
 /// path: overwriting it makes an early SATP switch re-enter the
 /// firmware/kernel bootstrap loop.

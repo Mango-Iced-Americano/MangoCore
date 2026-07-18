@@ -505,6 +505,14 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
             crate::task::processor::disable_sched_profile();
             0
         }
+        20 => {
+            crate::syscall::fs::reset_dac_parent_search_calls();
+            0
+        }
+        21 => crate::syscall::fs::dac_parent_search_calls() as isize,
+        22 => crate::syscall::fs::dac_parent_search_ticks() as isize,
+        23 => crate::fs::vfs_lookup_calls() as isize,
+        24 => crate::fs::vfs_lookup_ticks() as isize,
         _ => -22, // EINVAL
     }
 }

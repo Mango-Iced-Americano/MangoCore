@@ -1,0 +1,36 @@
+=== Kernel binary freshness ===
+kernel-rv: 1784165337 /app/kernel-rv
+kernel-os.bin: 1784165336 /app/os/target/riscv64gc-unknown-none-elf/release/os.bin
+
+=== Source file timestamps (latest) ===
+1784159186 /app/os/src/fs/mod.rs
+1784115126 /app/os/src/fs/ext4/counters.rs
+1784042443 /app/os/src/fs/ext4/ext4fs.rs
+1783318668 /app/os/src/fs/ext4/mod.rs
+1783318668 /app/os/src/fs/ext4/file.rs
+
+=== Git info ===
+commit: 7c8c0b3c-dirty
+hash: 7c8c0b3c92a699f70d63dcf37ed1115b4b505888
+7c8c0b3c fix: ext4 getxattr — return ERANGE when value > buffer size
+dbeea9f2 修改initproc
+31d9d051 fix: O_TMPFILE on '.' path — return EOPNOTSUPP, not open dir as writable
+
+=== Docker container ===
+container: pxy-mangocore-os-dev-1
+Container ID: e10937008fee763dd4363785090e02b46b05b734d387db018c9c6ba736d9e128
+Mount: /etc/localtime -> /etc/localtime
+Mount: /home/pxy/projects/MangoCore -> /app
+
+
+=== Config checksums ===
+bc10f1447dcd78b763eb69e8206440fb62af0cf50d079815b19fd64d43196a3d  /home/pxy/projects/MangoCore/testresults/mount07-rv64-20260716-093101/os_test_mount07.conf
+
+=== Test result ===
+Summary:
+passed   14
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mount07 : 0

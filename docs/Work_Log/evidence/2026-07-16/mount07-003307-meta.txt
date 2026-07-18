@@ -1,0 +1,116 @@
+=== Test Evidence: mount07 MS_NOSYMFOLLOW Regression (post-RELATIME/STRICTATIME correction) ===
+Date (UTC):    2026-07-16 00:35:10
+Date (CST):    2026-07-16 08:35:10
+Git hash:      7c8c0b3c-dirty
+Git commit:    7c8c0b3c92a699f70d63dcf37ed1115b4b505888
+Branch:        fix/fs-syscall-semantics
+Container ID:  e10937008fee763dd4363785090e02b46b05b734d387db018c9c6ba736d9e128
+Container:     pxy-mangocore-os-dev-1 (zhouzhouyi/os-contest:20260104)
+Mount:         /home/pxy/projects/MangoCore -> /app (rw)
+
+Kernel:
+  Path:     /home/pxy/projects/MangoCore/kernel-rv
+  Size:     79367136 bytes
+  SHA-256:  eb593b837e8279074c54377382368dbd3c3d8e29dc6ed968bb3e054650fd61fc
+
+Image:
+  Path:     /home/pxy/projects/MangoCore/sdcard-rv.img
+  Size:     4294967296 bytes (4 GiB)
+  SHA-256:  (not computed — 4 GiB image, unchanged from base)
+
+Injected config (focused_os_test.conf):
+  SHA-256:  bc10f1447dcd78b763eb69e8206440fb62af0cf50d079815b19fd64d43196a3d
+  Content:
+    mode=run
+    mask=0x800
+    ltp_runner=suite
+    ltp_libc=glibc
+    ltp_suites=syscalls
+    ltp_include=mount07
+
+Production os_test.conf:
+  SHA-256:  607f7544170c636035eb0898e6ffaf93b9818ab730f03c501a9881a1280b4092
+  Status:   UNMODIFIED (verified after test)
+
+Inject command:
+  docker exec -e ARCH=rv64 -e BLK_MODE=virt \
+    -e CONF_FILE=/app/testresult/regression_20260716_003307/focused_os_test.conf \
+    pxy-mangocore-os-dev-1 bash -c 'cd /app/os && ./inject_os_test_conf.sh'
+  Exit code: 0
+  debugfs ctime: 2026-07-16 00:33:51 UTC
+
+Build command:
+  docker exec pxy-mangocore-os-dev-1 bash -c 'cd /app/os && make rv64-kernel-build-only'
+  Exit code: 0
+  Kernel SHA-256: eb593b837e8279074c54377382368dbd3c3d8e29dc6ed968bb3e054650fd61fc
+
+QEMU command:
+  docker exec pxy-mangocore-os-dev-1 bash -c 'cd /app/os && make rv64-run'
+  Exit code: 0
+
+Test log:
+  Path:     testresult/regression_20260716_003307/qemu-mount07.log
+  Written:  2026-07-16 08:34:51 CST (2026-07-16 00:34:51 UTC)
+  Size:     207 lines
+  SHA-256:  6405709e12bcf9870439f9f862b986d1ee70ab444b7207af6b82b444c6f219fb
+
+Freshness check:
+  Kernel built:    2026-07-16 08:32 CST (build output finish)
+  Config injected: 2026-07-16 00:33:51 UTC (debugfs ctime)
+  ntpd time sync:  2026-07-16 00:34:26 UTC (QEMU log)
+  LTP mount07 run: 2026-07-16 00:34:2x UTC (immediately after ntpd sync)
+  QEMU log written: 2026-07-16 00:34:51 UTC (file stat)
+  Meta written:    2026-07-16 00:35:10 UTC
+  All artifacts post-date the build and config injection — evidence is fresh ✓
+
+=== Uncommitted RELATIME/STRICTATIME source changes tested ===
+  os/src/fs/vfs/mount.rs       — RELATIME (0x200000) + STRICTATIME (0x1000000) flags,
+                                  mount_flags_to_st_flags() with ST_RELATIME=0x1000,
+                                  BackendLifecycle state machine, MOUNT_LIFECYCLE_DIAG
+  os/src/fs/vfs/mod.rs         — BackendLifecycle re-export, drain_one_dying_lifecycle
+  os/src/fs/vfs/propagation.rs — mount lifecycle diagnostic integration
+  os/src/syscall/fs/sys_mount.rs — RELATIME/STRICTATIME flag parsing + remount preservation
+  os/src/syscall/fs/common.rs  — atime policy handling
+  os/src/fs/mod.rs             — lifecycle counters integration
+  os/src/fs/sysfs/files/diag.rs — mount diag sysfs interface
+  os/src/task/processor.rs     — drain_one_dying_lifecycle scheduler hook
+
+=== LTP mount07 Results (suite-mode, ext4-bound /tmp) ===
+
+Phase 1 — Without MS_NOSYMFOLLOW:
+  mount07.c:55  TPASS  open(link_file, O_RDWR) returned fd 3
+  mount07.c:67  TPASS  readlink(link_file) returned 47
+  mount07.c:73  TPASS  readlink strcmp succeeded
+  mount07.c:90  TPASS  realpath strcmp succeeded
+  mount07.c:96  TPASS  symlink(test_file, temp_link_file) passed
+  mount07.c:98  TPASS  unlink(temp_link_file) passed
+  mount07.c:110 TPASS  ST_NOSYMFOLLOW not set on mntpoint
+
+Phase 2 — With MS_NOSYMFOLLOW (mount -o nosymfollow):
+  mount07.c:52  TPASS  open(link_file, O_RDWR) : ELOOP (40)  ← KEY FIX
+  mount07.c:67  TPASS  readlink(link_file) returned 47
+  mount07.c:73  TPASS  readlink strcmp succeeded
+  mount07.c:90  TPASS  realpath strcmp succeeded
+  mount07.c:96  TPASS  symlink(test_file, temp_link_file) passed
+  mount07.c:98  TPASS  unlink(temp_link_file) passed
+  mount07.c:107 TPASS  ST_NOSYMFOLLOW set on mntpoint
+
+Summary:
+  passed   14
+  failed   0
+  broken   0
+  skipped  0
+  warnings 0
+  FAIL LTP CASE mount07: 0
+
+LTP runner summary:
+  executed=1 passed=1 failed=0 skipped=0 total_ms=3049
+
+=== Comparison with stale evidence (regression_20260716_000645) ===
+  Previous: 14/14 TPASS on git 7c8c0b3c-dirty (predates atime correction)
+  Current:  14/14 TPASS on git 7c8c0b3c-dirty (with RELATIME/STRICTATIME in working tree)
+  Verdict:  mount07 regression coverage — NO REGRESSION ✓
+
+=== Verdict ===
+mount07: PASS (14 passed, 0 failed, 0 broken, 0 skipped)
+Target:  passed=14 failed=0  ✓ ACHIEVED

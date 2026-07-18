@@ -1,0 +1,56 @@
+=== FIRST 20 LINES ===
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk comp
+make[1]: Entering directory '/app/os'
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+
+=== LAST 20 LINES ===
+mount07.c:98: [1;32mTPASS: [0munlink(temp_link_file) passed
+mount07.c:107: [1;32mTPASS: [0mST_NOSYMFOLLOW set on mntpoint
+mount07.c:158: [1;34mTINFO: [0mUmounting /tmp/LTP_mouoLdedG/mntpoint
+tst_device.c:442: [1;34mTINFO: [0mNo device is mounted at mntpoint
+
+Summary:
+passed   14
+failed   0
+broken   0
+skipped  0
+warnings 0
+DONE LTP CASE mount07 : 0
+#### OS COMP TEST GROUP END ltp-glibc ####
+[initproc] done ltp_testcode.sh in /glibc exit_code=0
+[timer] group ltp in /glibc took 4s
+[initproc] sleep 1s before next group
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+make[1]: Leaving directory '/app/os'
+
+=== TIMESTAMPS ===
+kernel-rv: 2026-07-16 01:53:37.498822071 +0000
+mount.rs:  2026-07-16 01:39:24.406427512 +0000
+result generated: 2026-07-16T09:55:26+08:00
+
+=== PRODUCTION CONFIG (host) ===
+mode=run
+mask=0x800
+ltp_runner=suite
+ltp_libc=glibc
+ltp_suites=syscalls,fcntl-locktests,fs,fs_perms_simple,fs_readonly
+ltp_exclude=execve05,fallocate06,mmap16,rename10,shmctl01,copy_file_range02,pipe13,splice02,splice07,timer_settime03,statx11,prot_hsymlinks,send02,futex_cmp_requeue01

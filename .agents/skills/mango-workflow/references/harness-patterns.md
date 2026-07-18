@@ -78,20 +78,7 @@ Round 3: 加 heap allocator 计数器（alloc/dealloc ticks + dealloc scan_steps
 - 哪个计数器和 lmbench 分数的变化趋势最吻合？
 - 如果数据不够区分，下一轮加什么计数器？
 
-### 第四步：Oracle 多轮咨询时机
-
-Oracle 很贵，不要一开始就问。正确节奏：
-
-| 时机 | 问什么 |
-|------|--------|
-| 有足够数据但不知道下一步方向时 | "基于这些数据，最可能根因是什么？下一步加什么计数器？" |
-| 数据强烈指向某个方向后 | "这个模式说明什么？最优修复方案是什么？" |
-| 实现修复后 | "审查这个改动，有没有安全/边界问题？" |
-| 修复加安全加固都做完后 | "最终验证：是否可以判定 DONE？" |
-
-本案例中 Oracle 用了 4 轮，每一轮都在关键分叉点。第 3 轮 Oracle 指出的 4 个安全缺口（对齐、边界、下溢、null 指针）直接阻止了线上 crash。
-
-### 第五步：bitmap guard 模式（可复用修复技术）
+### 第四步：bitmap guard 模式（可复用修复技术）
 
 当退化根因是**有状态数据结构的 O(n) 操作**时，bitmap guard 是通用修复：
 
@@ -115,7 +102,7 @@ before:                       after:
 
 ```
 [问题信号] → [建测量框架] → [隔离退化层] → [加计数器] → [跑实验] → 
-[看数据决策] → {数据够了? → [问 Oracle] → [修根因] → [补安全] → [跑全量] → 完成
+[看数据决策] → {数据够了? → [诊断根因] → [修根因] → [补安全] → [跑全量] → 完成
               数据不够? → [加计数器] → [跑实验] → ...}
 ```
 
@@ -142,9 +129,6 @@ diag=1
 3. **渐进退化根因不在最明显的地方**：所有人都以为在 null syscall，实际在 heap dealloc。
 4. **不要依赖单一指标**：lmbench composite score + 每个子项 + 内核 P0/P1 计数器一起看。
 5. **计数器增减要与 lmbench 分数变化吻合**：如果 scan_steps 涨了但 lmbench 没变，说明不是根因。
-6. **Oracle 在关键分叉点问，不要每步问**：用数据排除大部分可能性后，让 Oracle 做最难的一跳。
-
-## 网络绩效
 
 ## 网络绩效
 
@@ -182,6 +166,16 @@ diag=1
 - **相关文件**: `os/src/fs/mod.rs` (parse_path), `os/src/syscall/fs.rs` (sys_unlinkat)
 
 ## 测试 Harness / LTP
+
+### 只读累计 sysfs 计数器的逐用例 wrapping 差分
+
+- **场景**：内核只暴露累计只读计数器，外部既没有安全 reset 接口，也不能为了诊断改变测试全局状态。
+- **模式**：用户态 runner 先以 feature 文件 gate 诊断；每个实际执行 case 紧邻执行前后各读取一次同一 stats 文件，严格解析已知字段，计算 `post.wrapping_sub(pre)`。
+- **降级**：配置缺失或为 false 时完全不 probe、不输出；feature、读取或严格解析失败只输出一次稳定的 unavailable 原因，绝不影响 case 顺序、执行、计分或退出码。
+- **ABI**：`user_lib::open()` 直接把 Rust `&str` 指针交给路径 syscall，固定诊断 sysfs 常量必须恰有一个尾随 NUL。
+- **输出**：每个成功执行且有完整 pre/post snapshot 的 case 后，在现有 LTP/QEMU log 输出一条有界的数值序号、退出码和 24 个 counter delta；用既有 `#<index> ... case=<name>` 行关联 case 名，诊断不保存名称、不创建 report 或其他文件。
+- **调试层级**：先用这类可开关、有界的现有 QEMU log 验证单一核心假设；只有需要跨运行留存、自动聚合或对外审计时，才增加 report 落盘、镜像提取和元数据归档。不要先为一次性根因定位构建持久化证据管线。
+- **相关文件**：`user/src/bin/ltprunner/lwext4_perf/`、`docs/ltp/lwext4_perf_diagnostic.md`
 
 ### 长测第二轮 PID 超过 `/proc/sys/kernel/pid_max`
 - **根因**: 用户可见 PID/TID 只线性增长，释放时只为 `ns_last_pid` 打标记而不进入可复用池。全量 LTP/bench 多轮创建进程后，`getpid01` 会观察到 PID 超过内核暴露的 `/proc/sys/kernel/pid_max=32768`。
@@ -250,11 +244,6 @@ diag=1
 - **教训**: 微秒级计时 LTP 用例要区分“有 fd/事件等待”的阻塞语义和“纯 timeout sleep”的精度语义；短忙等必须有时长上限和 ready task 逃逸条件，避免拖慢并发场景。
 - **相关文件**: `os/src/fs/poll.rs`
 
-### nanosleep 唤醒后死锁
-- **根因**: 持有 `task.inner` 锁时调用 `has_actionable_signal(&task)`，后者尝试获取同一锁
-- **修复**: 任何阻塞操作唤醒后检查信号时，必须先释放锁再调用 `has_actionable_signal`
-- **相关文件**: `os/src/syscall/fs.rs`（nanosleep）、`os/src/fs/poll.rs`（pselect）
-
 ### 被屏蔽信号导致错误的 EINTR
 - **根因**: 信号检查用了 `is_empty()` 而非 `sigpending.difference(sigmask)`，忽略了信号掩码
 - **修复**: 必须用 `difference(sigmask)` 过滤被屏蔽信号
@@ -265,17 +254,6 @@ diag=1
 - **修复**: `SA_RESETHAND` 只重置 handler 为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询
 
 ## 内存管理
-
-### TLB 刷新遗漏
-- **根因**: 修改 PTE 后未执行 `sfence.vma`（riscv）/ `invtlb`（la64），CPU TLB 缓存旧 PTE
-- **症状**: CoW 绕过（父子写入同一物理页）、unmap 后读到残留数据
-- **修复**: `unmap`、`block_and_ret_mut`、`set_pte_flags`、`revoke_write` 等所有 PTE 修改操作后必须 TLB 刷新
-- **相关文件**: `os/src/mm/page_table.rs`
-
-### MAP_SHARED 参与 CoW
-- **根因**: fork 时 MAP_SHARED 页面被标记 CoW，破坏共享语义
-- **修复**: MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限，缺页时只恢复 W 不做 CoW
-- **相关文件**: `os/src/mm/memory_set.rs`
 
 ### SysV SHM 每次 shmat 分配独立匿名页
 - **根因**: `shmat()` 若直接复用匿名 `MAP_SHARED` 并让每个 VMA 自行分配物理页，同一 `shmid` 的多次 attach 会得到不同 backing，写入内容无法互通；fork 继承只能共享已有 VMA，不能修复独立 attach 的共享语义。
@@ -304,11 +282,6 @@ diag=1
   ```
 - **注意**: 上限值需权衡内存和丢包率；4096 × MTU(1500) ≈ 6MB 通常安全
 - **相关文件**: `os/src/drivers/net/veth.rs`
-
-### execve/clone 路径堆耗尽
-- **根因**: Vec 扩容在裸机环境下可能 panic
-- **修复**: 使用 `try_reserve` 并返回 `ENOMEM`
-- **相关文件**: `os/src/syscall/process/exec.rs`
 
 ### kernel stack 溢出静默破坏 heap
 - **根因**: 架构把每线程 kernel stack 直接放在 kernel heap 的 `Vec<u8>` 中时，向下增长的栈一旦越界会先写坏相邻 heap 对象，后续常表现为随机 `BTreeMap`/allocator panic，而不是在真实溢出点 fault。
@@ -346,30 +319,7 @@ diag=1
 - **教训**: 带 miss 的 I/O 路径不能只看均值；必须同时有 miss_rate 和 hit/miss 各自耗时才能判断瓶颈是"快路径太慢"还是"慢路径太多"
 - **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
 
-### ext4 sparse file hole 处理
-- **根因**: `get_pblock_idx` 对 hole 返回垃圾物理地址
-- **修复**: hole 返回 `Err`，`read_at` 填零，`write_at` 分配新块
-- **相关文件**: `os/src/fs/ext4/`
-
-### ext4 extent 搜索不验证覆盖范围
-- **根因**: `binsearch_extent` 返回最近 extent 但不保证 `lblock` 在其范围内
-- **修复**: 调用者必须检查 `lblock >= extent.first_block && lblock < extent.first_block + extent.len()`
-
-### ext4 write_at 锁重入
-- **根因**: 持有 `self.inode` 时调用 `get_new_page_cache()`，后者再次锁 `self.inode`，`TicketMutex` 不可重入
-- **修复**: 缩短 inode 锁作用域，只 clone 已存在的 PageCache 做 invalidate
-
 ## 网络栈
-
-### connect 永不返回 / pselect 永远挂起
-- **根因**: Socket 就绪检查前缺少 `NET_INTERFACE.poll()`
-- **修复**: `socket_r_ready()`/`socket_w_ready()` 中先 poll 再检查
-- **相关文件**: `os/src/net/syscall/`
-
-### 非阻塞 socket livelock
-- **根因**: 紧循环 EAGAIN 阻止定时器中断
-- **修复**: 非阻塞路径 `try_xxx` 前先调用 `NET_INTERFACE.try_poll()`
-- **相关文件**: `os/src/net/syscall/`
 
 ### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
 - **根因**: `WaitQueue::wait_until_interruptible()` 的 condition 闭包在队列锁持有时执行；如果在闭包内调用 `NET_INTERFACE.poll()`，轮询路径中 `notify_events_all_if_unlocked` 会因为队列锁已持有而静默丢弃唤醒，导致阻塞的 waiter 永久睡眠。TCP accept() 在闭包内 poll 会错过首个 SYN 连接。
@@ -382,20 +332,18 @@ diag=1
 
 ## 错误码对齐（Linux 语义）
 
-- setsockopt 未知 level → **ENOPROTOOPT(92)**，不是 EOPNOTSUPP(95)
-- socketpair 非 AF_UNIX → **EPROTONOSUPPORT(93)**，不是 EAFNOSUPPORT(97)
-- `Socket::alloc` 未知 domain → **EAFNOSUPPORT(97)**，不是 EINVAL(22)
-- getpeername NULL addr → 必须先验证参数再检查连接状态，EFAULT 优先于 ENOTCONN
-- mmap 非匿名映射的坏 fd → EBADF 优先于其他校验
-- RISC-V 未对齐 addrlen → 需显式检查 `addrlen % 4 != 0`，硬件不报错
-- 跨进程 VM 访问 → 先做权限检查返回 EPERM，再访问远程地址返回 EFAULT
+### linkat/link/renameat 多路径 syscall errno 优先级
+
+- **根因**: Linux v6.6 `do_linkat` + `vfs_link` 中 errno 有严格优先级：
+  ```
+  flags(EINVAL) > old_lookup(EBADF/ENOTDIR/ENOENT) > new_lookup(EBADF/ENOTDIR/ENOENT)
+  > EXDEV > EPERM(old_is_dir) > EEXIST > EACCES(parent_perm)
+  ```
+  **关键：old-is-dir EPERM 必须在 new_path 解析完成之后检查**，否则坏 newdirfd 会得到 EPERM 而不是正确的 EBADF/ENOENT。
+- **适用**: renameat、linkat、symlinkat 等所有同时接收 old/new 路径的 syscall。
+- **教训**: 实现双路径 syscall 时，errno 测试必须按此优先级顺序，每条路径分别构造测试用例。
 
 ## 调度/性能
-
-### futex waiter 大规模场景 O(n²)
-- **根因**: nice-aware scheduler 每次 `fetch_task()` 全队列扫描
-- **修复**: ready 队列记录非默认 nice 数量；全 nice=0 走 FIFO fast path
-- **相关文件**: `os/src/task/manager.rs`
 
 ### WaitQueue wake-all 路径性能
 - **根因**: 每唤醒一个任务都扫描全局队列
@@ -704,7 +652,6 @@ diag=1
   3. 双架构测试不能替代架构针对性测试 — la64 和 rv64 的 eviction 模式不同，rv64 正常不代表 la64 也正常
 
 - **相关文件**: `os/src/fs/page_cache.rs`（`sync_batch_read_pages`、`evict_clean_pages_clock`）
-
 ## ext4 可变长目录项：先画 `rec_len` 算术，再判定 rename 根因
 
 - **反例审计**: 不要从“调整 rename 顺序后测试通过”直接倒推出“旧删除跨过 slack 中的新项”。
@@ -816,3 +763,279 @@ diag=1
   包核心 API、运行时全 ELF hash 和既有语言功能矩阵。
 - **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`,
   `user/tools/cpython/pillow_strict_smoke.py`, `user/tools/cpython/strict_runtime_smoke.sh`
+
+- **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
+
+## Buffered I/O 必须始终走 PageCache — 禁止 fallback 到 direct I/O
+
+- **根因**: 当 `read_at`/`write_at` 使用 `if let Some(pc) = self.page_cache()` 模式时，PageCache 未创建时 fallback 到直接 open/seek/read/write/close。对于每次 I/O 都触发 open/close 的后端（如 lwext4 的 path-based API），这导致 read 吞吐降为 1/17、write 降为 1/15（vs 走 PageCache 的热路径）。
+
+- **症状**: iozone 4 readers 从 8014 KB/s（走 PageCache）降到 1901 KB/s（fallback direct I/O）；4 writers 从 155 降到 116；单次 1KB write 触发完整 open→journal→write→commit→close 链路。
+
+- **修复**: 用 `ensure_page_cache()`（懒创建）替代 `page_cache()`（只读查询）。I/O 永远路由到 PageCache，后端通过 `read_page`/`write_pages` 做实际 I/O。需配套 `logical_size` 共享计数器防止写回时 1 字节写入被 PageCache 整页写回扩成 4KB 文件。
+
+- **教训**:
+  1. 任何 buffered I/O 实现中，`page_cache()` 的 `Option` 返回只应用于 mmap 和内存管理路径；read/write 热路径必须用 `ensure_page_cache()` 确保缓存存在，没有直接 I/O fallback
+  2. 写路径的 PageCache 必须配合 shared `logical_size` 跟踪 VFS 文件大小，否则 writeback 按整页粒度写回会破坏 POSIX 文件大小语义
+  3. 当后端 I/O 有 per-call 事务开销（如 journal commit）时，仅 batch open/seek/close 不够 — 必须也 batch write 调用本身（write coalescing），否则事务次数 = 页面数而非批次数
+
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`read_at`、`write_at`、`ensure_page_cache`、`logical_size_or_refresh`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`LwExt4PageCacheBackend`、`LWEXT4_SIZE_UNKNOWN`、`ensure_size_known`）
+
+## PageCache: logical_size 必须在触发 writeback 前更新（write-ordering）
+
+- **根因**: `write_at()` 路径中 `note_logical_size()` 在 `pc.write()` **之后**调用，但 `pc.write()` 内部会调用 `balance_dirty_pages()` 唤醒 writeback。writeback 后端 `write_pages()` 以 `logical_size` 作为 EOF 夹钳 — 对于新文件 EOF=0，`total_bytes` 被夹钳为 0 → 返回 `Ok(0)` → PageCache 将脏页标记为 clean 但数据未落盘。之后再次写同一文件时 writeback 发现页面已是 clean 不再写，数据永久丢失。
+
+- **症状**: `apk add` 安装的包文件（.so 库等）为 0 字节；`dd` + `chmod` + `mv` 序列后文件数据损坏。文件创建后第一次写入数据被静默吞掉。
+
+- **修复**: 将 `note_logical_size(expected_new_end)` 移到 `pc.write()` **之前**。预发布预期 EOF（`expected_new_end = (offset + actual).max(old_size)`），确保 writeback 看到的 EOF 包含本次写入的数据。若写入部分成功，二次 `note_logical_size(actual_new_end)` 修正（fetch_max 语义下正常为 no-op）。
+
+- **教训**:
+  1. **状态更新必须在触发 side-effect 之前**：任何会触发 writeback/reclaim 的操作（`balance_dirty_pages`、`writeback_all`、`evict`）之前，被 writeback 回调依赖的状态（logical_size、inode 元数据等）必须已经反映最新的意图
+  2. **fetch_max 语义是双刃剑**：`logical_size` 的 `fetch_max` 在顺序正确时是安全的（单调递增），但无法撤销，因此必须先发布预期值再执行可能有副作用的操作
+  3. **writeback 的 Ok(0) 语义陷阱**：`write_pages` 返回 `Ok(0)` 被 PageCache 框架解释为"无数据需写入"并清理脏页标志；当 `logical_size` 为过时值导致夹钳归零时，这是错误的 — 应至少在 dirty pages > 0 但 total_bytes == 0 时记录警告（Safety Net Fix 2）
+  4. **rename flush 是独立问题**：rename 前通过 `flush_one` 调用 `writeback_all()` 强制刷页，原实现用 `let _ =` 吞掉所有错误 — 如果 writeback 因 `logical_size=0` 而静默失败，rename 后数据就丢了。修复：错误传播到调用方返回 `EIO`
+
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`write_at`、`rename`、`note_logical_size`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`write_pages`）
+
+## PageCache: registry 复用未刷新 backend 的 logical_size 引用（stale EOF 夹钳）
+
+- **根因**: `ensure_page_cache()` 从全局 `fs.page_caches` registry 命中旧 PageCache 时，backend 内部的 `Arc<AtomicUsize>`（`logical_size`）仍指向先前的 `Ext4OSInode` 实例。新 inode 有自己独立的 `logical_size` atom。`write_at` 更新新 atom，writeback 仍读旧 atom → EOF 夹钳在旧大小上，扩展写入数据静默丢失。
+- **修复**: registry 命中路径先克隆 `Arc<PageCache>`，释放 registry 锁，然后用当前 inode 的 `fs`/`path`/`logical_size`/`lw_path` 构造新 `LwExt4PageCacheBackend`，调用 `pc.set_backend(backend)` 替换。保留新 inode 的 creation path 不变。
+- **教训**: 任何全局 registry 复用带 per-instance 内部引用的对象（`Arc<AtomicUsize>`、`Weak<>`、裸指针等）时，必须检查这些内部引用是否指向当前实例的数据。注册时不只保存对象本身，还要明确哪些字段是 per-instance 的、需要在复用点刷新。解决模式是：从 registry 克隆后先释放锁，再更新需要刷新的内部状态。
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`ensure_page_cache`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`LwExt4PageCacheBackend`、`logical_size`）
+
+## LTP 驱动的批量语义修复工作流
+
+### 问题特征
+
+面对大量 LTP 失败（1300+ FAIL CASE），逐个修效率极低。需要一套系统化的"定位→分类→批量修复→验证"工作流。
+
+### 工作流范式
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ① 跑基线：mask=0x800, ltp_suites=syscalls           │
+│    输出 output-rv64.txt 作为当前状态快照               │
+├─────────────────────────────────────────────────────┤
+│ ② 分析：输入基线 log + 失败聚类                        │
+│    参考 DragonOS + Linux 6.6 → 伪代码方案              │
+│    按修复收益排序（解除最多下游 case 的优先）            │
+├─────────────────────────────────────────────────────┤
+│ ③ Subagent 分发：                                    │
+│    quick: 单文件、纯 errno/常量修正、无新逻辑           │
+│    deep:  跨文件、需新增数据结构/重构语义模型            │
+│    关键：必须用 subagent，避免主会话上下文膨胀          │
+├─────────────────────────────────────────────────────┤
+│ ④ 聚焦验证：                                          │
+│    ltp_include=case1,case2,... + ltp_runner=inline    │
+│    35 秒跑完 → 立即看到修复效果                         │
+├─────────────────────────────────────────────────────┤
+│ ⑤ 审核：                                              │
+│    检查 placeholder/hack、违规文件编辑、配置残留         │
+└─────────────────────────────────────────────────────┘
+```
+
+### 教训
+
+1. **基线先跑，不要猜**：7/9 log 里的 symlink ENOSYS 在 7/13 就修了——跑基线后才能确认当前真实状态，避免在已修复问题上浪费精力。
+
+2. **umask 这类"全线错误"优先修**：一个错误的 umask 来源导致 384 个 TFAIL——修一处解百处。识别这类"单一根因→大量失败"的模式比逐个修收益高得多。
+
+3. **score=0 ≠ 全部失败**：很多 case 被标记 FAIL 但 LTP 子测试大量 TPASS。例如 chmod01, fchmod01-04 等功能已正确，是 test setup 夹具（权限/路径）问题导致整个 case FAIL。读 TFAIL/TBROK 而非只看 FAIL LTP CASE。
+
+4. **ltp_include 是迭代利器**：`ltp_runner=inline + ltp_include=case1,case2` 可以在 35 秒内验证修复，而不必每次等全量跑几小时。
+
+5. **subagent 是强制要求**：主会话上下文膨胀后修复质量急剧下降。简单到 errno 常量修正、复杂到 11 项 fs.rs 批量修改，一律走 task()。
+
+6. **FileMode::FMODE_PATH 的静默缺失**：`new_without_open()` 不设置 FMODE_PATH 导致 O_PATH fd 不被识别。这类"创建路径不一致"的 bug 很难从失败日志直接定位——需要追踪数据流。
+
+### 基础设施利用
+
+**os_test.conf — 测试控制中心**：mask 控制测试组（`0x800`=LTP only），`ltp_suites` 选子套件，`ltp_include/exclude` 精细控制用例。注入到镜像：
+
+```bash
+make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.conf
+```
+
+注入后镜像持久化，QEMU 重启后配置仍在；如需换配置再 inject 一次即可。
+
+**编译与运行分离**：`make rv64-run` 只跑 QEMU 不重新编译——必须先 `rv64-kernel-build-only` 再跑。Docker 内：
+
+```bash
+docker exec <container> make -C /app/os rv64-kernel-build-only
+docker exec <container> sh -c "cd /app/os && make -f make/rv64.mk comp 2>&1 | tee qemu.log"
+```
+
+**perf_diag / syscall tracing**：`/sys/kernel/tracing/tracing_on` 默认开启，每个 syscall 入口写入 ring buffer（2048 entries）。调试单个 case 时：
+
+```bash
+echo 0 > /sys/kernel/tracing/tracing_on   # 先停
+echo 1 > /sys/kernel/tracing/clear         # 清空
+echo 1 > /sys/kernel/tracing/tracing_on    # 开启
+./ltp_case                                  # 跑测试
+cat /sys/kernel/tracing/trace              # 看追踪
+```
+
+Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret 事件带返回值和 err 标记。适合定位"哪个 syscall 在返回哪个 errno"这类问题。
+
+**sysfs 统计计数器**：`/sys/kernel/stats/syscall` 提供 syscall 总数和耗时分布，`/sys/kernel/stats/resource` 提供内存/进程/网络/socket/pipe 等全局资源快照。
+
+### 相关文件
+
+- `os/src/syscall/fs/common.rs`（DAC 辅助、路径校验、fd_to_inode）
+- `os/src/syscall/fs/sys_*.rs`（76 个按 syscall 拆分文件）
+- `os/src/fs/vfs/file.rs`（new_without_open、get_dirent64）
+- `os_test.conf`（mask/ltp_include/exclude/suites 配置范式）
+- `os/src/fs/sysfs/files/diag.rs`（perf_diag 统计文件注册）
+- `os/src/trace.rs`（syscall tracing ring buffer）
+
+## 性能优化失败模式（2026-07-15 经验）
+
+> 本轮尝试了 3 种性能优化方案，全部失败或回退。记录失败原因以防重复踩坑。
+
+### 1. lazy DAC（延迟权限检查）— ❌ 破坏正确性
+
+**思路**：`check_parent_search_access()` 与 `vfs_lookup()` 做双路径遍历。把权限检查移到 vfs_lookup 失败的错误分支中，成功路径只走一次 vfs_lookup。
+
+**失败原因**：对于 `open()` 等操作，vfs_lookup 成功 ≠ DAC 权限检查通过。调用者可能在父目录有读权限但无搜索权限，vfs_lookup 仍能查找到目标 inode（通过 dentry cache 或 ext4 内部遍历），但 Linux 要求此时返回 EACCES。
+
+**教训**：lazy DAC 仅对纯只读元数据操作（stat/fstat）理论安全，但实践中因 vfs_lookup 不区分"可读"与"可搜索"，仍可能漏检。**不推荐用于任何路径**。
+
+### 2. O(n²)→O(n) path walk — ❌ 破坏 mount 穿越
+
+**思路**：`check_parent_search_access()` 每次组件都重建全路径调用 `vfs_lookup`（O(n²)），用 `current.find(name)` 逐级下降（O(n)）。
+
+**失败原因**：`find()` 不处理 mount point 穿越。当路径穿过挂载点时，`find()` 返回原始 inode 而非挂载后文件系统的 root inode，导致权限检查目标错误。
+
+**教训**：所有路径遍历必须走 `vfs_lookup` 或等效的 mount-aware 路径。`IndexNode::find()` 不能替代 VFS 层路径解析。
+
+### 3. fused DAC vfs_lookup — ❌ 无性能收益
+
+**思路**：把 DAC 检查融入 `vfs_lookup` 内部（pre-lookup hook），单次遍历同时完成权限检查和路径解析。
+
+**失败原因**：hook 每次调用 `inode.metadata()` 检查权限，但 vfs_lookup 内部已有 `current.metadata()` 检查目录类型。双重 `metadata()` 调用的开销抵消了消除双遍历的收益。
+
+**教训**：融合方案要成功，必须共用 metadata() 结果——在 vfs_lookup 内部获取 metadata 后同时传给 hook，不能各自独立调用。
+
+### 4. fork+shell 退化诊断 — 需 ring buffer trace
+
+**问题**：fork+exit（+0.8%）和 fork+execve（+2.2%）正常，但 fork+/bin/sh -c 慢 84%（51ms vs 28ms 基线）。
+
+**初步发现**（drift_window + STATS_ON）：shell 启动产生 55 次 write() = 总耗时 73%。但无法确定这 55 次 write 在基线中是否也存在、以及每次 write 的 fd 目标和阻塞来源。
+
+**诊断计划**：需要内核级 ring buffer trace，记录 shell 启动期间每个 write 的 fd、长度、内容 hash、耗时、阻塞次数。配合 `env -i /bin/sh -c true` 和 `>/dev/null 2>&1` 等受控变体定位。
+
+**当前状态**：ring buffer 基础设施未实现，遗留为已知问题。
+
+### 5. 构建/测试基础设施陷阱
+
+| 陷阱 | 教训 |
+|------|------|
+| `make rv64-run` 不编译内核 | 只跑 QEMU——必须先 `rv64-kernel-build-only` |
+| `lang_items.rs` 被 subagent 修改 | 只能编辑 `.rv`/`.la` 变体；`git checkout` 恢复 |
+| `os_test.conf` 被 lmbench 配置覆盖 | 每次测试后立即 `git show HEAD:os_test.conf > os_test.conf` |
+| QEMU 串口超时截断 tee | 用 `docker exec -d ... > /tmp/qemu_out.log` + `sleep` + `docker cp` |
+| `perf_diag` feature 需显式开启 | `EXTRA_FEATURES=perf_diag` 传给 kernel build；`make rv64-run` 不认 |
+| drift_window 输出被自身 write() 污染 | `drift_snapshot()` 的 `write(1, ...)` 被计入 post-snapshot 计数器 |
+
+## 测试证据纪律
+
+### 子任务交付的证据完整性
+
+- **根因**: 子任务在完成 QEMU 测试后，仅凭临时容器内的 `/tmp` 日志声明"测试通过"。父 agent 无法验证该日志是否存在、是否对应当前代码版本、是否真正运行至结束。同时，既有测试产物时间戳可能早于最近改动，无法证明结果产自最新代码。
+- **教训**:
+  1. 容器 `/tmp` 随容器销毁而消失，不可作为证据持久化路径。所有测试日志、退出码、元数据必须写入跨容器可见的工作目录（如 `/app/os/` 下的结果目录）。
+  2. 证据元数据是强制项：每次测试交付必须包含完整的执行元数据（commit hash、container id、挂载映射、注入配置、命令、exit status、日志首尾片段）。
+  3. 新鲜性检查不可省略：父 agent 必须检查证据文件时间戳是否晚于代码或配置的最后修改时间。仅依赖子任务的"我跑了测试"声明是不够的。
+  4. 如果环境限制导致证据不可保留，必须在报告中明确声明缺失哪些字段。
+  5. 子任务临时工作区内的结果对父 agent 不可见，不作为有效交付。
+- **相关文件**: 跨所有测试场景的通用纪律。
+
+### LTP 用例体通过但清理破坏全局状态仍是 P0 失败
+
+- **现象**: 某 LTP suite 的主体用例全部 TPASS，但清理阶段引入的全局状态破坏（如 `/tmp` 目录隔离被打破、文件系统元数据残留）导致后续所有非关联 suite 大面积失败。仅看 focal case 的 body pass 会误判修复成功。
+- **根因**: LTP suite 不是独立用例的孤立集合。前序用例的清理阶段可能修改全局内核状态（如通过 ext4-bound `/tmp` 的写操作污染全局文件系统元数据）。body pass 只说明该用例的核心断言通过，不保证清理阶段无副作用。清理阶段的全局状态破坏属于 P0 级缺陷，因为它使整个测试窗口的后续结果不可信。
+- **教训**:
+  1. 验证时不能只看 focal suite 的 body 标签。必须检查 suite 完整输出（含 cleanup 阶段），以及后续无关 suite 是否出现非预期失败。
+  2. 清理阶段修改了全局状态，不等于前序用例"几乎通过"。任何全局状态损坏都应作为 P0 缺陷记录，优先级高于新增 body pass。
+  3. 诊断方向：当特定 feature 的 suite 单个通过但全量 LTP 非关联用例大面积失败时，优先怀疑该 suite 的清理阶段破坏了全局状态，而不是逐个排查后续失败用例。
+  4. 隔离策略：对清理阶段有全局破坏风险的测试，应在独立 QEMU 窗口或隔离镜像中运行，不与其他 suite 混跑同一内核实例。
+- **相关文件**: `os/src/fs/vfs/mount.rs`（挂载清理路径），通用测试隔离策略。
+
+## 高爆炸半径内核回归编排工作流
+
+### 现象特征
+
+高爆炸半径问题（如 MountFS 生命周期、VFS 路径解析、PageCache 写回路径）通常表现为：
+- 单个 LTP suite 的 body 全部 TPASS，但后续非关联 suite 大面积 RED
+- 修复假设看似合理（对照 DragonOS/Linux 语义一致），但首轮实现被 Oracle 拒绝
+- 拒绝原因涉及证据不可验证、逻辑路径遗漏或全局状态污染而非语义错误
+
+### 可复用编排模式
+
+- **根因**: 线性调试路径（观察 → 假设 → 实现 → 验证）在高爆炸半径问题中效率低。实现者容易在未确认 RED 基线的情况下直接写 patch，或在缺少参考语义的情况下凭直觉判断正确行为。Oracle 的拒绝反馈若不被视为设计信号而被视为失败，会跳过关键的差异清单修正步骤。
+- **修复**: 采用多轨并行编排工作流，父 orchestrator 负责调度和合成，不转发子任务结论。
+- **工作流拓扑**:
+
+```
+┌─ 用户假设 ─────────────────────────────────────────┐
+│ "问题在 X 子系统，根因可能是 Y"                      │
+└────────────────────┬────────────────────────────────┘
+                     │ 分解
+                     ▼
+┌─────────────────────────────────────────────────────┐
+│ ① 级联分解 → 最小有序 LTP 序列                       │
+│   先确认 RED 基线，再进入并行轨道                      │
+└──────────┬──────────────────────────┬────────────────┘
+           │ 并行                       │ 并行
+           ▼                            ▼
+┌──────────────────────┐   ┌──────────────────────────┐
+│ ②-A 本地代码分析     │   │ ②-B DragonOS/Linux 参考   │
+│ explore: 扫描实现路径 │   │ librarian: 查阅参考语义    │
+└──────────┬───────────┘   └─────────────┬────────────┘
+           │ 汇合                         │
+           ▼                              ▼
+┌─────────────────────────────────────────────────────┐
+│ ③ 差异清单：当前行为 vs 期望行为                       │
+│   (oracle 审核差异清单完整性)                          │
+└────────────────────┬────────────────────────────────┘
+                     │ 审核通过
+                     ▼
+┌─────────────────────────────────────────────────────┐
+│ ④ implementation → patch + 测试                      │
+│   RED→GREEN 门禁：最小序列全 GREEN 后扩散             │
+└────────────────────┬────────────────────────────────┘
+                     │ 交付测试结果
+                     ▼
+┌─────────────────────────────────────────────────────┐
+│ ⑤ oracle 验证                                       │
+│   - 证据完整性 + 新鲜性                               │
+│   - 逻辑完整性与边界条件                               │
+│   - 全局副作用评估                                    │
+└──────────┬──────────────────────────┬────────────────┘
+  拒绝/需修订                         通过
+     │                                  │
+     ▼                                  ▼
+┌──────────────┐             ┌──────────────────────┐
+│ 回到③更新     │             │ ⑥ 父 orchestrator    │
+│ 差异清单      │             │    合成 → Work_Log    │
+└──────────────┘             │    后续任务分离       │
+                             └──────────────────────┘
+```
+
+- **教训**:
+  1. **先确认 RED 再修复**：不确认基线就直接写 patch 是最高频的返工原因。RED 基线也是级联假设的验证手段。
+  2. **双轨参考不可省略**：本地实现可能已偏离 DragonOS 或 Linux 语义，单靠阅读当前代码无法发现差异。两条轨道独立产出后在 orchestrator 层交叉验证。
+  3. **Oracle 拒绝是节约时间的设计信号**：将拒绝视为"又失败了"会跳过差异清单修正步骤，直接重写 patch 往往重复同一错误。拒绝后必须更新差异清单再进入实现。
+  4. **父 orchestrator 不转发子任务结论**：子任务交付的"测试通过"必须经过父级的证据检查、交叉验证和合成才能成为最终结论。转发未经验证的子任务结论等同于放弃质量控制。
+   5. **一轮只修一个问题域**：P0 全局状态污染修复后暴露的语义级缺陷应分离为后续任务。混在一起会导致编排焦点丧失和上下文膨胀。
+   6. **扩散验证有先后**：最小序列 GREEN 后先跑相邻 suite（如同属 mount 组但测试不同 flag 的用例），再跑跨子系统 suite。跳跃式扩散（如直接从 mount 跳到 mm）会增加归因难度。
+- **相关文件**: 通用编排模式，适用于 `os/src/fs/vfs/`、`os/src/fs/ext4/`、`os/src/mm/` 等高爆炸半径模块的回归调试。
+
+## lwext4 inode 复用必须隔离 PageCache
+
+- **现象**：顺序运行 sparse-file LTP 时，首用例通过，后续新建文件在空洞中读到稳定旧值；单独运行后续用例可通过。
+- **根因**：`Ext4FileSystem::page_caches` 以 inode number 强引用缓存。unlink 后旧缓存仍保留，lwext4 复用 inode number 创建新文件时，新 inode 命中旧的 fully-valid 页面，绕过正确的 backend hole zero-fill。
+- **修复**：regular file 创建成功并取得真实 inode number 后，仅移除该 key 的 registry entry；旧 inode 持有的 `Arc<PageCache>` 继续有效，新 inode 则创建独立 cache。不能在普通 lookup 或 rename 中全局清缓存。
+- **教训**：缓存 key 若采用可复用的底层 ID，必须在对象 incarnation 边界解除旧 key→cache 映射；“后续 case 不创建 cache + 单跑通过”比偏移周期更能区分身份污染与底层读取算法错误。
+- **相关文件**：`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/ltprunner/lwext4_perf/`

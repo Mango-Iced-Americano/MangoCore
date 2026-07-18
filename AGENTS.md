@@ -25,7 +25,23 @@
 6. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
 7. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
 8. **不要 workaround** — 从根因解决问题，不做临时绕过
-9. **代码修改后必须调用 `skill(name="mango-workflow")`** — 自动更新 `docs/Work_Log.md`（见 §工作日志与知识维护）
+9. **Mango Workflow 门禁** — 涉及调试、代码修改（编辑/写入源文件、构建配置、测试配置）时，必须先在回复中执行 `skill(name="mango-workflow")` 加载项目知识库。修改完成后再次执行 skill 的 A→D 流程（更新 Work Log → 沉淀经验 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
+10. **回复中必须声明门禁状态** — 每次代码修改完成后，在回复末尾注明 `mango-workflow: loaded, references: <文件名或无>`。
+
+---
+
+### Mango Workflow Skill 门禁
+
+`mango-workflow` 不是"事后写日志"，而是**前置知识门禁**。
+
+**触发条件：** 任何调试、代码修改操作（编辑源文件、改构建配置、改测试配置、QEMU 调试、性能分析）。
+
+**前置阅读：**
+- 性能退化/计数器/QEMU 长测 → 先读 `references/harness-patterns.md`
+- Bug 调试/LTP/子系统故障 → 先读 `references/debugging-patterns.md`
+- 纯文档整理 → 可只加载 skill，不读 references，但需说明原因
+
+**执行记录：** 在回复中写明 `mango-workflow loaded: yes, references: <section or "none — 纯文档">`。未完成门禁不得声称任务完成。
 
 ---
 
@@ -239,6 +255,12 @@ VirtIO RNG / 2K1000LA APB RNG -> drivers/rng -> random::ChaCha20Rng
 - mmap 非匿名映射坏 fd → `EBADF` 优先于其他校验
 - 跨进程 VM 访问 → 先做权限检查（`EPERM`），再访问远程地址（`EFAULT`）
 - RISC-V 未对齐 addrlen → 需显式检查 `addrlen % 4 != 0`，硬件不报错
+- **errno 常量双取反** → 项目 errno 常量已定义为负 `isize`（如 `EINVAL = -22`），返回时不能再取反（`-EINVAL` 会变成正数被当作成功）。直接返回 `EINVAL`/`EAGAIN`。`return -ENOERR` 在本项目始终可疑。
+
+### 信号
+
+- **被屏蔽信号导致错误的 EINTR** — 信号检查必须用 `sigpending.difference(sigmask)` 过滤被屏蔽信号，不能用 `is_empty()`。忽略掩码会导致阻塞操作被不应唤醒的信号提前打断。
+- **信号检查持锁** — 必须在释放 `task.inner` 锁后调用 `has_actionable_signal()`，否则死锁。
 
 ### 编译
 
@@ -276,7 +298,7 @@ impl_file_for_socket!(MySocket);
 - [ ] `make la64-kernel-build-only` ✅
 - [ ] QEMU 启动不 panic
 - [ ] 相关测试组通过
-- [ ] 更新 `docs/Work_Log.md`（按 mango-workflow Skill 格式）
+- [ ] 更新 `docs/Work_Log/YYYY-MM-DD.md`（按 mango-workflow Skill 格式）
 
 ---
 
@@ -293,7 +315,7 @@ impl_file_for_socket!(MySocket);
 
 ### 自动 Worklog
 
-每次代码修改完成后，**必须调用 `skill(name="mango-workflow")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
+每次代码修改完成后，**必须调用 `skill(name="mango-workflow")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log/YYYY-MM-DD.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
 
 格式：日期戳条目 → 涉及文件 → 验证结果 → 备注。
 

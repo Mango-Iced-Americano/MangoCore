@@ -96,6 +96,11 @@ write ${CONF_FILE_ABS} /os_test.conf
 stat /os_test.conf
 EOF
 
+# Fix stale ext4 metadata checksums before opening with debugfs.
+# lwext4 does not update metadata_csum on bitmap writes, so
+# debugfs rejects the image on first open.
+e2fsck -fy "${IMAGE_PATH_ABS}" 2>&1 || true
+
 debugfs_output=$(debugfs -w -f "${cmd_file}" "${IMAGE_PATH_ABS}" 2>&1) || {
     echo "${debugfs_output}"
     echo "ERROR: debugfs failed while updating ${IMAGE_PATH_ABS}"

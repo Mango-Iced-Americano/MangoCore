@@ -17,6 +17,8 @@ testsuits
 
 testresult
 
+testresults
+
 .parallel-test
 
 kernel-la
@@ -49,7 +51,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Generated Alpine CPython runtimes for the target tools disks.
+# Generated Alpine CPython runtime caches for target tools disks.
 /user/tools/*/tests/cpython/.apk-cache/
 /user/tools/*/tests/cpython/bin/
 /user/tools/*/tests/cpython/lib/
@@ -78,6 +80,7 @@ sdcard-rv-noconf.img
 /tools/
 .omo/
 .env
-
 # Reproducible LoongArch curl build output.
 /user/tools/loongarch64/curl-runtime/
+os/rootfs-rv.img
+os.bin

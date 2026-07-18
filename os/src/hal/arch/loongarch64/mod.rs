@@ -20,12 +20,14 @@ mod acpi;
 mod boot;
 mod sbi;
 pub mod switch;
+pub mod syscall_id;
 pub mod time;
 pub mod trap;
 pub type KernelPageTableImpl = laflex::LAFlexPageTable;
 pub type PageTableImpl = laflex::LAFlexPageTable;
 pub use sbi::{
-    console_flush, console_getchar, console_putchar, local_irq_restore, local_irq_save, shutdown,
+    console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
+    local_irq_save, shutdown,
 };
 pub use switch::__switch;
 pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};

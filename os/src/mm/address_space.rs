@@ -23,6 +23,9 @@ use super::{
     USER_STACK_ABI_ALIGN,
 };
 use crate::config::*;
+use crate::fs::PageCache;
+use crate::fs::vfs;
+use crate::fs::vfs_lookup_absolute;
 use crate::fs::vfs::IndexNode;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -949,9 +952,12 @@ impl<T: PageTable> AddressSpace<T> {
                         &elf.input
                             [ph.offset() as usize..(ph.offset() + ph.file_size() - 1) as usize],
                     );
+                    let _t_interp = crate::task::perf::perf_time_now();
                     let interp_data = crate::task::load_elf_interp(&path)?;
                     let interp = xmas_elf::ElfFile::new(interp_data).map_err(|_| ENOEXEC)?;
                     let (_, interp_info) = self.map_elf(&interp)?;
+                    let _interp_ticks = crate::task::perf::perf_time_now().wrapping_sub(_t_interp);
+                    crate::task::perf::EXECVE_INTERP_TICKS.fetch_add(_interp_ticks, core::sync::atomic::Ordering::Relaxed);
                     interp_entry = Some(interp_info.entry);
                     interp_base = Some(interp_info.base);
                     KERNEL_SPACE
@@ -1583,6 +1589,254 @@ impl<T: PageTable> AddressSpace<T> {
         // self.remove_area_with_start_vpn(trap_cx_bottom_va.into())
         //     .unwrap();
     }
+
+    // ── Zero-copy ELF loader ──
+
+    /// Create address space directly from inode (no kernel-space mapping).
+    pub fn from_elf_inode(file: Arc<vfs::File>) -> Result<(Self, usize, ELFInfo), isize> {
+        let mut address_space = Self::new_bare();
+        if should_map_trampoline!() {
+            address_space.map_trampoline();
+        }
+        address_space.map_signaltrampoline();
+        let (program_break, elf_info) = address_space.map_elf_from_inode(file, 0)?;
+        address_space.heap_bottom = program_break;
+        address_space.heap_pt = program_break;
+        Ok((address_space, program_break, elf_info))
+    }
+
+    /// Map ELF segments directly from PageCache frames into user page table.
+    fn map_elf_from_inode(
+        &mut self,
+        file: Arc<vfs::File>,
+        interp_depth: usize,
+    ) -> Result<(usize, ELFInfo), isize> {
+        if interp_depth > 1 {
+            return Err(ENOEXEC);
+        }
+
+        let (eh, phdrs) = read_elf_headers(&file)?;
+
+        let bias: usize = match eh.etype {
+            ET_EXEC => 0,
+            ET_DYN => {
+                let interp_count = phdrs.iter().filter(|ph| ph.ty == PT_INTERP).count();
+                match interp_count {
+                    0 => ELF_DYN_BASE,
+                    1 => ELF_PIE_BASE,
+                    _ => return Err(ENOEXEC),
+                }
+            }
+            _ => return Err(ENOEXEC),
+        };
+
+        // Get PageCache — if unavailable, return ENOSYS to trigger fallback
+        let pc = file.inode.ensure_page_cache().ok_or(ENOSYS)?;
+
+        // Prefetch all PT_LOAD file pages into PageCache (batch I/O)
+        prefetch_load_pages(&pc, &phdrs)?;
+
+        let mut program_break: Option<usize> = None;
+        let mut interp_entry: Option<usize> = None;
+        let mut interp_base: Option<usize> = None;
+        let mut load_addr: Option<usize> = None;
+        let mut phdr_user_addr: Option<usize> = None;
+
+        for ph in &phdrs {
+            match ph.ty {
+                PT_LOAD => {
+                    if ph.memsz == 0 {
+                        continue;
+                    }
+                    if ph.filesz > ph.memsz {
+                        return Err(ENOEXEC);
+                    }
+                    if ph.memsz > 1024 * 1024 * 1024 {
+                        return Err(ENOMEM);
+                    }
+
+                    let start = ph.vaddr.checked_add(bias).ok_or(ENOEXEC)?;
+                    let end = start.checked_add(ph.memsz).ok_or(ENOEXEC)?;
+                    let start_va = VirtAddr::from(start);
+                    let end_va = VirtAddr::from(end);
+                    let map_perm = {
+                        let mut p = MapPermission::U;
+                        // PF_R = 4, PF_W = 2, PF_X = 1
+                        if ph.flags & 4 != 0 {
+                            p |= MapPermission::R;
+                        }
+                        if ph.flags & 2 != 0 {
+                            p |= MapPermission::W;
+                        }
+                        if ph.flags & 1 != 0 {
+                            p |= MapPermission::X;
+                        }
+                        p
+                    };
+
+                    let mut vma = Vma::try_new(start_va, end_va, map_perm, None, 0)?;
+                    vma.flags = MapFlags::MAP_PRIVATE;
+
+                    self.vmas
+                        .try_reserve(1)
+                        .map_err(|_| ENOMEM)?;
+
+                    self.map_load_segment(&mut vma, &pc, ph, bias, Some(file.inode.clone()))?;
+
+                    self.vmas.push(vma).map_err(|_| ENOMEM)?;
+
+                    if load_addr.is_none() {
+                        load_addr = Some(start);
+                    }
+
+                    // AT_PHDR computation
+                    if ph.offset <= eh.phoff
+                        && eh.phoff + (eh.phnum * eh.phentsize) <= ph.offset + ph.filesz
+                    {
+                        phdr_user_addr = Some(start + (eh.phoff - ph.offset));
+                    }
+
+                    let seg_end_page = VirtAddr::from(end_va.ceil()).0;
+                    program_break =
+                        Some(program_break.map_or(seg_end_page, |old| old.max(seg_end_page)));
+                }
+                PT_INTERP => {
+                    if interp_depth != 0 {
+                        return Err(ENOEXEC);
+                    }
+                    // Read interpreter path from file
+                    if ph.filesz == 0 || ph.filesz > 256 {
+                        return Err(ENOEXEC);
+                    }
+                    let mut path_buf = [0u8; 256];
+                    let n = file
+                        .pread(ph.offset, &mut path_buf[..ph.filesz.min(256)])
+                        .map_err(|e| -(e as isize))?;
+                    if n < ph.filesz {
+                        return Err(ENOEXEC);
+                    }
+                    let path_end = path_buf[..ph.filesz.min(255)]
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(ph.filesz.min(255));
+                    let path = core::str::from_utf8(&path_buf[..path_end]).map_err(|_| ENOEXEC)?;
+
+                    // Open interpreter file
+                    let interp_file = open_interp_file(path)?;
+
+                    let t_interp = crate::task::perf::perf_time_now();
+                    let (_, info) = self.map_elf_from_inode(interp_file, interp_depth + 1)?;
+                    crate::task::perf::EXECVE_INTERP_TICKS.fetch_add(
+                        crate::task::perf::perf_time_now().wrapping_sub(t_interp),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    interp_entry = Some(info.entry);
+                    interp_base = Some(info.base);
+                }
+                _ => {}
+            }
+        }
+
+        let program_break = program_break.ok_or(ENOEXEC)?;
+        let load_addr = load_addr.ok_or(ENOEXEC)?;
+
+        Ok((
+            program_break,
+            ELFInfo {
+                entry: eh.entry + bias,
+                interp_entry,
+                base: interp_base.unwrap_or(bias),
+                phnum: eh.phnum,
+                phent: eh.phentsize,
+                phdr: phdr_user_addr.unwrap_or(load_addr + eh.phoff),
+            },
+        ))
+    }
+
+    /// Map one PT_LOAD segment from PageCache.
+    /// Readonly full-page segments → file-backed VMA (lazy page fault).
+    /// Writable/partial/BSS → private pages with copy or zero-fill.
+    fn map_load_segment(
+        &mut self,
+        vma: &mut Vma,
+        pc: &PageCache,
+        ph: &RawPhdr,
+        bias: usize,
+        inode: Option<Arc<dyn IndexNode>>,
+    ) -> Result<(), isize> {
+        let seg_va_start = ph.vaddr.checked_add(bias).ok_or(ENOEXEC)?;
+        let seg_file_end = seg_va_start.checked_add(ph.filesz).ok_or(ENOEXEC)?;
+        let writable = vma.map_perm.contains(MapPermission::W);
+
+        // LAZY PATH: readonly full-page file-backed segment → create VMA, let page fault handle it
+        let lazy_ok = !writable
+            && ph.filesz == ph.memsz
+            && ph.filesz != 0
+            && (seg_va_start & (PAGE_SIZE - 1)) == 0
+            && (ph.offset & (PAGE_SIZE - 1)) == 0
+            && (ph.filesz & (PAGE_SIZE - 1)) == 0;
+
+        if lazy_ok {
+            if let Some(inode) = inode {
+                vma.map_file = Some(inode);
+                vma.map_file_offset = ph.offset;
+                vma.may_write = false;
+                return Ok(());
+            }
+        }
+
+        // EAGER FALLBACK: per-page mapping for writable/partial/BSS segments
+        for vpn in VPNRange::new(vma.vm_start(), vma.vm_end()) {
+            let page_va_start = VirtAddr::from(vpn).0;
+            let page_va_end = page_va_start + PAGE_SIZE;
+
+            let copy_start = page_va_start.max(seg_va_start);
+            let copy_end = page_va_end.min(seg_file_end);
+            let has_file_bytes = copy_start < copy_end;
+
+            // ZERO-COPY: readonly full-page file-backed segment with page-aligned file offset
+            let full_page_file =
+                has_file_bytes && copy_start == page_va_start && copy_end == page_va_end;
+            if !writable && full_page_file {
+                let file_off = ph.offset + (copy_start - seg_va_start);
+                if file_off & (PAGE_SIZE - 1) == 0 {
+                    let frame = pc
+                        .frame_for_read(file_off >> PAGE_SIZE_BITS)
+                        .map_err(|_| EIO)?;
+                    self.map_existing_frame(vma, vpn, frame)?;
+                    continue;
+                }
+            }
+
+            // FALLBACK: writable, partial, or misaligned page
+            let ppn = vma.map_one(&mut self.page_table, vpn)
+                .map_err(|(err, _)| if matches!(err, MemoryError::OutOfMemory) { ENOMEM } else { EIO })?;
+
+            if has_file_bytes {
+                let dst_off = copy_start - page_va_start;
+                let file_off = ph.offset + (copy_start - seg_va_start);
+                let len = copy_end - copy_start;
+                copy_from_page_cache(pc, file_off, &mut ppn.get_bytes_array()[dst_off..dst_off + len])?;
+            }
+            // BSS: frame_alloc already zeroed — no work needed
+        }
+        Ok(())
+    }
+
+    /// Map an existing physical frame into user page table.
+    fn map_existing_frame(
+        &mut self,
+        vma: &mut Vma,
+        vpn: VirtPageNum,
+        frame: Arc<FrameTracker>,
+    ) -> Result<(), isize> {
+        let ppn = frame.ppn;
+        vma.inner.alloc_in_memory(vpn, frame).map_err(|_| ENOMEM)?;
+        UserMapper::new(&mut self.page_table)
+            .map_user_page(vpn, ppn, vma.map_perm)
+            .map_err(|_| EIO)?;
+        Ok(())
+    }
 }
 
 fn memory_error_to_errno(err: MemoryError) -> isize {
@@ -1611,4 +1865,181 @@ pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<Ph
     };
     let result = vm.lock().fault_in_trap_va(addr, access);
     result
+}
+
+// ── Zero-copy ELF loader: header parser ──
+
+const ELF64_EHDR_SIZE: usize = 64;
+const ELF64_PHDR_SIZE: usize = 56;
+const MAX_PHDR_BYTES: usize = 4096;
+
+const ET_NONE: u16 = 0;
+const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
+const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
+
+#[derive(Clone, Copy)]
+struct RawElfHdr {
+    etype: u16,
+    entry: usize,
+    phoff: usize,
+    phentsize: usize,
+    phnum: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RawPhdr {
+    ty: u32,
+    flags: u32,
+    offset: usize,
+    vaddr: usize,
+    filesz: usize,
+    memsz: usize,
+}
+
+fn parse_elf64_ehdr(buf: &[u8]) -> Result<RawElfHdr, isize> {
+    if buf.len() < ELF64_EHDR_SIZE {
+        return Err(ENOSYS);
+    }
+    if &buf[0..4] != b"\x7fELF" {
+        return Err(ENOEXEC);
+    }
+    let class = buf[4];
+    let data = buf[5];
+    if class != 2 || data != 1 {
+        return Err(ENOEXEC);
+    }
+    let etype = u16::from_le_bytes([buf[16], buf[17]]);
+    let entry = usize::from_le_bytes({
+        let b = &buf[24..32];
+        [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]
+    });
+    let phoff = usize::from_le_bytes({
+        let b = &buf[32..40];
+        [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]
+    });
+    let phentsize = u16::from_le_bytes([buf[54], buf[55]]) as usize;
+    let phnum = u16::from_le_bytes([buf[56], buf[57]]) as usize;
+    if phentsize < ELF64_PHDR_SIZE || phnum == 0 {
+        return Err(ENOEXEC);
+    }
+    Ok(RawElfHdr {
+        etype,
+        entry,
+        phoff,
+        phentsize,
+        phnum,
+    })
+}
+
+fn parse_elf64_phdrs(buf: &[u8], count: usize, entsize: usize) -> Result<Vec<RawPhdr>, isize> {
+    let mut phdrs = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = i * entsize;
+        let b = &buf[off..];
+        let ty = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let flags = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+        let offset = usize::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+        let vaddr = usize::from_le_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]);
+        let filesz = usize::from_le_bytes([b[32], b[33], b[34], b[35], b[36], b[37], b[38], b[39]]);
+        let memsz = usize::from_le_bytes([b[40], b[41], b[42], b[43], b[44], b[45], b[46], b[47]]);
+        phdrs.push(RawPhdr {
+            ty,
+            flags,
+            offset,
+            vaddr,
+            filesz,
+            memsz,
+        });
+    }
+    Ok(phdrs)
+}
+
+fn pread_exact(file: &vfs::File, offset: usize, buf: &mut [u8]) -> Result<(), isize> {
+    let mut off = 0;
+    while off < buf.len() {
+        let n = file.pread(offset + off, &mut buf[off..]).map_err(|e| -(e as isize))?;
+        if n == 0 {
+            return Err(ENOEXEC);
+        }
+        off += n;
+    }
+    Ok(())
+}
+
+fn read_elf_headers(file: &vfs::File) -> Result<(RawElfHdr, Vec<RawPhdr>), isize> {
+    let size = file.get_size();
+    if size < ELF64_EHDR_SIZE {
+        return Err(ENOEXEC);
+    }
+    let mut first_page = [0u8; 4096];
+    let n = file.pread(0, &mut first_page).map_err(|e| -(e as isize))?;
+    if n < ELF64_EHDR_SIZE {
+        return Err(ENOEXEC);
+    }
+    let eh = parse_elf64_ehdr(&first_page[..ELF64_EHDR_SIZE])?;
+    let phdr_bytes = checked_mul(eh.phnum, eh.phentsize)?;
+    if phdr_bytes > MAX_PHDR_BYTES {
+        return Err(ENOEXEC);
+    }
+    let phend = eh.phoff.checked_add(phdr_bytes).ok_or(ENOEXEC)?;
+    if phend > size {
+        return Err(ENOEXEC);
+    }
+    let phdrs_bytes: Vec<u8> = if phend <= 4096 {
+        first_page[eh.phoff..phend].to_vec()
+    } else {
+        let mut buf = Vec::with_capacity(phdr_bytes);
+        buf.resize(phdr_bytes, 0);
+        pread_exact(file, eh.phoff, &mut buf)?;
+        buf
+    };
+    let phdrs = parse_elf64_phdrs(&phdrs_bytes, eh.phnum, eh.phentsize)?;
+    Ok((eh, phdrs))
+}
+
+fn checked_mul(a: usize, b: usize) -> Result<usize, isize> {
+    a.checked_mul(b).ok_or(ENOEXEC)
+}
+
+// ── Zero-copy helpers ──
+
+/// Batch prefetch all PT_LOAD file pages into PageCache.
+fn prefetch_load_pages(pc: &PageCache, phdrs: &[RawPhdr]) -> Result<(), isize> {
+    for ph in phdrs.iter().filter(|ph| ph.ty == PT_LOAD && ph.filesz > 0) {
+        let start_page = ph.offset >> PAGE_SIZE_BITS;
+        let end_off = ph.offset.saturating_add(ph.filesz);
+        let end_page = (end_off + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+        if end_page > start_page {
+            pc.sync_batch_read_pages(start_page, end_page - start_page)
+                .map_err(|_| EIO)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy data from PageCache to destination buffer.
+fn copy_from_page_cache(pc: &PageCache, mut file_off: usize, dst: &mut [u8]) -> Result<(), isize> {
+    let mut remaining = dst.len();
+    let mut dst_off = 0;
+    while remaining > 0 {
+        let page_idx = file_off >> PAGE_SIZE_BITS;
+        let page_off = file_off & (PAGE_SIZE - 1);
+        let chunk = remaining.min(PAGE_SIZE - page_off);
+        let frame = pc.frame_for_read(page_idx).map_err(|_| EIO)?;
+        dst[dst_off..dst_off + chunk]
+            .copy_from_slice(&frame.ppn.get_bytes_array()[page_off..page_off + chunk]);
+        file_off += chunk;
+        dst_off += chunk;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
+/// Open an interpreter file by absolute path.
+fn open_interp_file(path: &str) -> Result<Arc<vfs::File>, isize> {
+    let inode = vfs_lookup_absolute(path)?;
+    let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
+    Ok(file)
 }

@@ -392,7 +392,7 @@ impl Ext4FileSystem {
     /// # Arguments
     /// * `inode_ref` - The inode to associate blocks with.
     /// * `goal` - Absolute block address to start the search near.
-    /// * `count` - Number of contiguous blocks to allocate (≤ MAX_MBALLOC_BLOCKS).
+    /// * `count` - Number of contiguous blocks to allocate (≤ mballoc_block_limit).
     ///
     /// # Returns
     /// `Vec<Ext4Fsblk>` - The allocated physical block numbers (may be less than `count` if fragmented).

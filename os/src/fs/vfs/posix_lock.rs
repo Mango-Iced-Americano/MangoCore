@@ -312,6 +312,20 @@ pub fn posix_lock_get(
     owner: LockOwner,
     flock: &mut PosixFlock,
 ) -> Result<(), SyscallErr> {
+    // Validate l_type BEFORE checking the lock map.
+    // Linux semantics: invalid l_type must return EINVAL even if no lock
+    // exists for this file.
+    let query_type = match flock.l_type {
+        F_RDLCK => LockType::Read,
+        F_WRLCK => LockType::Write,
+        F_UNLCK => {
+            // No conflict possible when querying for F_UNLCK.
+            flock.l_type = F_UNLCK;
+            return Ok(());
+        }
+        _ => return Err(SyscallErr::EINVAL),
+    };
+
     let key = LockKey::from_file(file);
     let map = mgr().shards[key.shard()].0.lock();
     let entry = match map.get(&key) {
@@ -323,12 +337,6 @@ pub fn posix_lock_get(
     };
     let state = entry.state.lock();
     let (s, e) = resolve_range(file, flock)?;
-
-    let query_type = match flock.l_type {
-        F_RDLCK => LockType::Read,
-        F_WRLCK => LockType::Write,
-        _ => LockType::Read,
-    };
     let conflict = state.records.iter().find(|r| {
         !same_owner(r.owner, owner) && conflict(r.lock_type, r.start, r.end, query_type, s, e)
     });

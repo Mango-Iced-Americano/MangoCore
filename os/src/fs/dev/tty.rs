@@ -513,10 +513,30 @@ impl IndexNode for Teletype {
         buf: &[u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        let _inner = self.inner.lock();
-        match core::str::from_utf8(buf) {
-            Ok(content) => print!("{}", content),
-            Err(_) => warn!("[tty_write] Non-UTF8 characters: {:?}", buf),
+        // Read termios flags under lock, then release before I/O.
+        let onlcr = {
+            let inner = self.inner.lock();
+            // OPOST (bit 0) must be set for any output processing;
+            // ONLCR (bit 2) maps NL → CR-NL.
+            inner.termios.oflag & 0o5 == 0o5
+        };
+
+        if onlcr {
+            let mut start = 0;
+            for (i, &b) in buf.iter().enumerate() {
+                if b == b'\n' {
+                    if i > start {
+                        crate::console::write_bytes_atomic(&buf[start..i]);
+                    }
+                    crate::console::write_bytes_atomic(b"\r\n");
+                    start = i + 1;
+                }
+            }
+            if start < buf.len() {
+                crate::console::write_bytes_atomic(&buf[start..]);
+            }
+        } else {
+            crate::console::write_bytes_atomic(buf);
         }
         Ok(buf.len())
     }

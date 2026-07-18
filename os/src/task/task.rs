@@ -14,6 +14,7 @@ use super::process::ProcessControlBlock;
 use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
+use super::perf;
 use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
 use super::{
@@ -116,6 +117,9 @@ pub struct TaskControlBlock {
     pub tid: Arc<TidHandle>,
     /// 同一地址空间内 trap context / 默认用户栈的资源槽位
     pub user_res_slot: usize,
+    /// Whether this task owns its user_res_slot. ktest tasks set this false
+    /// to avoid double-free of shared slot 0.
+    pub owns_user_res_slot: bool,
     /// 所属用户可见进程
     pub process: Arc<ProcessControlBlock>,
     /// 内核栈
@@ -746,18 +750,20 @@ impl TaskControlBlock {
 
         let keep_trap_context = self.process.try_cache_trap_context_slot(self.user_res_slot);
         super::perf::record_exit_thread(clear_child_tid != 0, keep_trap_context);
-        let vm = self.process.vm();
-        let mut vm = vm.lock();
-        if keep_trap_context {
-            vm.dealloc_user_res_keep_trap(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
-        } else {
-            vm.dealloc_user_res_with_stack(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
+        if self.owns_user_res_slot {
+            let vm = self.process.vm();
+            let mut vm = vm.lock();
+            if keep_trap_context {
+                vm.dealloc_user_res_keep_trap(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                );
+            } else {
+                vm.dealloc_user_res_with_stack(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                );
+            }
         }
 
         true
@@ -896,6 +902,7 @@ impl TaskControlBlock {
         let task_control_block = Arc::new(Self {
             tid: tid_handle,
             user_res_slot,
+            owns_user_res_slot: true,
             process,
             kstack,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
@@ -1014,6 +1021,121 @@ impl TaskControlBlock {
         task_control_block
     }
 
+    /// 为 ktest 模式创建最小化 TCB。
+    ///
+    /// # Semantics
+    ///
+    /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
+    /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
+    /// 调用方负责通过 `add_task()` 将返回的 TCB 加入 ready 队列。
+    pub fn new_ktest_minimal(
+        tid: Arc<TidHandle>,
+        process: Arc<ProcessControlBlock>,
+        kstack: KernelStack,
+        task_cx: TaskContext,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            tid,
+            user_res_slot: 0,
+            owns_user_res_slot: false,
+            process,
+            kstack,
+            ustack_base: 0,
+            user_stack_allocated: AtomicBool::new(false),
+            thread_live_counted: AtomicBool::new(false),
+            seccomp_counted: AtomicBool::new(false),
+            uid_hint: AtomicUsize::new(0),
+            euid_hint: AtomicUsize::new(0),
+            suid_hint: AtomicUsize::new(0),
+            gid_hint: AtomicUsize::new(0),
+            egid_hint: AtomicUsize::new(0),
+            sgid_hint: AtomicUsize::new(0),
+            exit_signal: Signals::empty(),
+            _thread_quota: None,
+            wait_io_timer_pending: AtomicBool::new(false),
+            wait_timer_generation: AtomicUsize::new(0),
+            wait_io_fallback_active_generation: AtomicUsize::new(0),
+            sched_nice_hint: AtomicI32::new(0),
+            asid: core::sync::atomic::AtomicU16::new(0),
+            inner: Mutex::new(TaskControlBlockInner {
+                sigmask: Signals::empty(),
+                sigmask_to_restore: None,
+                sigpending: SignalQueue::empty(),
+                signal_wait_mask: Signals::empty(),
+                signal_stack: SignalStack::disabled(),
+                trap_cx_ppn: PhysPageNum(0),
+                task_cx,
+                task_status: TaskStatus::Ready,
+                sched_policy: 0,
+                sched_priority: 0,
+                sched_reset_on_fork: false,
+                sched_nice: 0,
+                sched_vruntime: 0,
+                sched_runtime: 0,
+                sched_deadline: 0,
+                sched_period: 0,
+                ioprio_class: 2,
+                ioprio_prio: 4,
+                membarrier_private_expedited_registered: false,
+                rtprio_limit_cur: 0,
+                rtprio_limit_max: 0,
+                nice_limit_cur: usize::MAX,
+                nice_limit_max: usize::MAX,
+                sigpending_limit_cur: usize::MAX,
+                sigpending_limit_max: usize::MAX,
+                stack_limit_cur: USER_STACK_SIZE,
+                stack_limit_max: USER_STACK_SIZE,
+                memlock_limit_cur: usize::MAX,
+                memlock_limit_max: usize::MAX,
+                fsize_limit_cur: usize::MAX,
+                fsize_limit_max: usize::MAX,
+                nproc_limit_cur: SYSTEM_TASK_LIMIT,
+                nproc_limit_max: SYSTEM_TASK_LIMIT,
+                cpu_limit_cur: usize::MAX,
+                cpu_limit_max: usize::MAX,
+                cpu_limit_sigxcpu_sent: false,
+                core_limit_cur: 0,
+                core_limit_max: usize::MAX,
+                personality: 0,
+                pdeath_signal: 0,
+                dumpable: 1,
+                task_comm: default_task_comm(),
+                timer_slack_ns: DEFAULT_TIMER_SLACK_NS,
+                timer_slack_default_ns: DEFAULT_TIMER_SLACK_NS,
+                ptrace_traceme: false,
+                uid: 0,
+                euid: 0,
+                suid: 0,
+                fsuid: 0,
+                gid: 0,
+                egid: 0,
+                sgid: 0,
+                fsgid: 0,
+                umask: 0o022,
+                groups: default_groups(),
+                cap_effective: TASK_CAP_FULL_SET,
+                cap_permitted: TASK_CAP_FULL_SET,
+                cap_inheritable: 0,
+                cap_bounding: TASK_CAP_FULL_SET,
+                no_new_privs: false,
+                thp_disabled: false,
+                securebits: 0,
+                cap_ambient: 0,
+                seccomp_mode: 0,
+                seccomp_filter: Vec::new(),
+                clear_child_tid: 0,
+                robust_list: RobustList::default(),
+                rusage: Rusage::new(),
+                clock: ProcClock::new(),
+                timer: [ITimerVal::new(); 3],
+                real_timer_deadline: None,
+                real_timer_generation: 0,
+                posix_timers: Vec::new(),
+                pending_oom_kill: false,
+            }),
+        })
+    }
+
     /// 加载ELF文件
     pub fn load_elf(
         &self,
@@ -1034,19 +1156,28 @@ impl TaskControlBlock {
         }
 
         // 将ELF文件映射到内核空间
+        let _t_kmap = perf::perf_time_now();
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         if elf_data.is_empty() {
             log::error!("[load_elf] ELF file is empty (size=0)");
             return Err(ENOEXEC);
         }
+        let _kmap_ticks = perf::perf_time_now().wrapping_sub(_t_kmap);
+        perf::EXECVE_KERNEL_MAP_TICKS.fetch_add(_kmap_ticks, Ordering::Relaxed);
         // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpace）
+        let _t_map = perf::perf_time_now();
         let load_result = AddressSpace::from_elf(elf_data);
+        let _map_ticks = perf::perf_time_now().wrapping_sub(_t_map);
+        perf::EXECVE_MAP_ELF_TICKS.fetch_add(_map_ticks, Ordering::Relaxed);
 
         // 清除临时映射
+        let _t_teardown = perf::perf_time_now();
         crate::mm::KERNEL_SPACE
             .lock()
             .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
             .unwrap();
+        let _td_ticks = perf::perf_time_now().wrapping_sub(_t_teardown);
+        perf::EXECVE_TEARDOWN_TICKS.fetch_add(_td_ticks, Ordering::Relaxed);
 
         let (mut memory_set, program_break, elf_info) = match load_result {
             Ok(result) => result,
@@ -1064,6 +1195,7 @@ impl TaskControlBlock {
             MapPermission::R | MapPermission::W | MapPermission::U,
         );
         // 为当前线程分配用户资源，并保留 trap context PPN，避免再次页表遍历。
+        let _t_stack = perf::perf_time_now();
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
             .map_err(|_| ENOMEM)?;
@@ -1071,6 +1203,8 @@ impl TaskControlBlock {
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
+        let _stack_ticks = perf::perf_time_now().wrapping_sub(_t_stack);
+        perf::EXECVE_STACK_TABLES_TICKS.fetch_add(_stack_ticks, Ordering::Relaxed);
         // 初始化陷阱上下文
         let trap_cx = TrapContext::app_init_context(
             if let Some(interp_entry) = elf_info.interp_entry {
@@ -1139,6 +1273,108 @@ impl TaskControlBlock {
         Ok(())
         // **** 释放当前PCB锁
     }
+
+    /// 加载ELF文件（零拷贝路径：直接通过 PageCache 映射，无需内核空间临时映射）。
+    /// 若文件所在文件系统无 PageCache，返回 `ENOSYS` 以触发回退到 `load_elf`。
+    pub fn load_elf_direct(
+        &self,
+        elf: Arc<vfs::File>,
+        argv_vec: &Vec<String>,
+        envp_vec: &Vec<String>,
+    ) -> Result<(), isize> {
+        if elf.is_dir() {
+            return Err(EISDIR);
+        }
+        // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页。
+        let current_vm = self.process.vm();
+        if Arc::strong_count(&current_vm) <= 2 {
+            current_vm.lock().recycle_data_pages();
+        }
+
+        // 直接从 inode 和 PageCache 解析 ELF 并映射到用户地址空间
+        let _t_map = perf::perf_time_now();
+        let load_result = AddressSpace::from_elf_inode(elf.clone());
+        let _map_ticks = perf::perf_time_now().wrapping_sub(_t_map);
+        perf::EXECVE_MAP_ELF_TICKS.fetch_add(_map_ticks, Ordering::Relaxed);
+        // 零拷贝路径无需 kmap 和 teardown —— 记录零值用于性能对比
+        perf::EXECVE_KERNEL_MAP_TICKS.fetch_add(0, Ordering::Relaxed);
+        perf::EXECVE_TEARDOWN_TICKS.fetch_add(0, Ordering::Relaxed);
+
+        let (mut memory_set, program_break, elf_info) = match load_result {
+            Ok(result) => result,
+            Err(e) => return Err(e),
+        };
+        // 为 glibc 分配用户 heap 空间
+        use crate::mm::{MapPermission, VirtAddr};
+
+        let page_size = 0x1000;
+        let heap_start = align_up(program_break, page_size);
+        let heap_end = heap_start + 0x20000; // 64KiB
+        memory_set.insert_framed_area(
+            VirtAddr::from(heap_start),
+            VirtAddr::from(heap_end),
+            MapPermission::R | MapPermission::W | MapPermission::U,
+        );
+        // 为当前线程分配用户资源
+        let _t_stack = perf::perf_time_now();
+        let trap_cx_ppn = memory_set
+            .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
+            .map_err(|_| ENOMEM)?;
+        self.user_stack_allocated.store(true, Ordering::Relaxed);
+        // 创建ELF参数表
+        let user_sp =
+            memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
+        let _stack_ticks = perf::perf_time_now().wrapping_sub(_t_stack);
+        perf::EXECVE_STACK_TABLES_TICKS.fetch_add(_stack_ticks, Ordering::Relaxed);
+        // 初始化陷阱上下文
+        let trap_cx = TrapContext::app_init_context(
+            if let Some(interp_entry) = elf_info.interp_entry {
+                interp_entry
+            } else {
+                elf_info.entry
+            },
+            user_sp,
+            KERNEL_SPACE.lock().token(),
+            self.kstack.get_top(),
+            trap_handler as usize,
+        );
+        let other_threads: Vec<_> = self
+            .process
+            .threads()
+            .into_iter()
+            .filter(|task| task.tid.0 != self.tid.0)
+            .collect();
+        for task in &other_threads {
+            task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
+        }
+        super::remove_tasks_from_queues(&other_threads);
+
+        {
+            let mut inner = self.acquire_inner_lock();
+            inner.trap_cx_ppn = trap_cx_ppn;
+            *inner.get_trap_cx() = trap_cx;
+            inner.clear_child_tid = 0;
+            inner.robust_list = RobustList::default();
+            inner.signal_stack = SignalStack::disabled();
+        }
+        if Arc::strong_count(&current_vm) > 2 {
+            current_vm.lock().dealloc_user_res_with_stack(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Relaxed),
+            );
+        }
+        self.process.replace_exe(elf);
+        {
+            let files_ref = self.process.files();
+            let mut fd_table = files_ref.lock();
+            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
+        }
+        self.process.replace_vm(memory_set);
+        self.process.sighand().lock().reset();
+        self.process.futex().lock().clear();
+        Ok(())
+    }
+
     /// 创建新的任务控制块
     pub fn sys_clone(
         self: &Arc<TaskControlBlock>,
@@ -1358,6 +1594,7 @@ impl TaskControlBlock {
             // 基础标识信息
             tid: tid_handle,
             user_res_slot,
+            owns_user_res_slot: true,
             process,
             kstack,
             ustack_base: if !stack.is_null() {
@@ -1641,10 +1878,12 @@ impl Drop for TaskControlBlock {
         self.unaccount_seccomp_enabled();
         registry::unregister_task(self.tid.0);
         self.process.remove_thread(self);
-        self.process
-            .user_res_slot_allocator()
-            .lock()
-            .dealloc(self.user_res_slot);
+        if self.owns_user_res_slot {
+            self.process
+                .user_res_slot_allocator()
+                .lock()
+                .dealloc(self.user_res_slot);
+        }
         // Free ASID if one was allocated (la64 only; no-op on rv64)
         let asid = self.asid.load(core::sync::atomic::Ordering::Relaxed);
         if asid != 0 {

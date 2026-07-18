@@ -350,7 +350,14 @@ fn exec_opened_file(
     let task = current_task_ref().unwrap();
     show_frame_consumption! {
         "load_elf";
-        if let Err(_errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
+        // Try zero-copy direct loader first; fall back to old kmap-based loader
+        // if the file's filesystem doesn't provide a PageCache.
+        let result = task.load_elf_direct(elf.clone(), &argv_vec, &envp_vec);
+        let result = match result {
+            Err(ENOSYS) => task.load_elf(elf, &argv_vec, &envp_vec),
+            other => other,
+        };
+        if let Err(_errno) = result {
             exit_current_and_run_next(127);
         };
     }

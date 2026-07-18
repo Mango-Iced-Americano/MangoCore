@@ -138,6 +138,8 @@ impl AddAssign for TimeSpec {
     fn add_assign(&mut self, rhs: Self) {
         self.tv_sec += rhs.tv_sec;
         self.tv_nsec += rhs.tv_nsec;
+        self.tv_sec += self.tv_nsec / NSEC_PER_SEC;
+        self.tv_nsec %= NSEC_PER_SEC;
     }
 }
 

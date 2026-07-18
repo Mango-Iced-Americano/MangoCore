@@ -51,7 +51,10 @@ pub use file::{
 };
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::{CreateAttrs, IndexNode};
-pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
+pub use mount::{
+    canonicalize_state, drain_one_dying_lifecycle, normalize_request, BackendLifecycle, MountFS,
+    MountFSInode, MountFlags, MountList, MountPath,
+};
 pub use propagation::{
     configure_propagation_no_register, get_slaves, install_propagation, propagate_mount,
     propagate_umount, register_current_propagation, register_peer, register_slave,

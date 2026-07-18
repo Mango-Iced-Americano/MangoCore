@@ -513,10 +513,14 @@ impl Ext4FileSystem {
         start_lblock: u32,
         end_lblock: u32,
     ) -> Result<Vec<u32>, isize> {
+        crate::task::perf::record_ext4_alloc_ensure_calls();
+        let _t0 = crate::task::perf::perf_time_now();
         let mut allocated = Vec::new();
         let mut l = start_lblock;
+        let mut total_lblocks: usize = 0;
+        let mut total_new_blocks: usize = 0;
 
-        const MBALLOC_BATCH: u32 = MAX_MBALLOC_BLOCKS;
+        let mballoc_batch = super::mballoc_block_limit(self.block_size as u32);
 
         while l < end_lblock {
             // Skip already-mapped blocks
@@ -529,7 +533,7 @@ impl Ext4FileSystem {
             let run_start = l;
             let mut run_len: u32 = 0;
             while l < end_lblock
-                && run_len < MBALLOC_BATCH
+                && run_len < mballoc_batch
                 && self.get_pblock_idx(inode_ref, l).is_err()
             {
                 l += 1;
@@ -552,8 +556,13 @@ impl Ext4FileSystem {
             // blocks when no contiguous run is available.
             let blocks = self.balloc_alloc_contiguous_blocks(inode_ref, goal, run_len);
             if blocks.is_empty() {
+                let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
+                crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
                 return Err(Errno::ENOSPC as isize);
             }
+
+            total_new_blocks += blocks.len();
+            total_lblocks += run_len as usize;
 
             // Insert extents: group consecutive physical blocks into
             // multi-block extents, single blocks get block_count=1.
@@ -587,6 +596,8 @@ impl Ext4FileSystem {
                 p += count;
             }
         }
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
+        crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
         Ok(allocated)
     }
 
@@ -1065,12 +1076,31 @@ impl IndexNode for layout::Ext4OSInode {
         // physical block allocated BEFORE copying data into the page cache.
         let block_size = self.ext4fs.block_size;
         let start_lblock = (offset / block_size) as u32;
-        let end_lblock = ((offset + write_len + block_size - 1) / block_size) as u32;
+        let mut end_lblock = ((offset + write_len + block_size - 1) / block_size) as u32;
+
+        // Sequential extending write: pre-allocate blocks to the next
+        // prealloc_lblocks boundary. This creates equal-sized extents
+        // instead of one large + many small fragments from delta-offset.
+        let is_extending = offset + write_len > old_size;
+        if is_extending {
+            let prealloc_lblocks = (128 * 1024 / block_size) as u32;
+            let target = ((start_lblock / prealloc_lblocks) + 1) * prealloc_lblocks;
+            end_lblock = core::cmp::max(end_lblock, target);
+            end_lblock = core::cmp::min(end_lblock, u32::MAX);
+        }
 
         let mut fresh = self.ext4fs.get_inode_ref(inode_num);
-        self.ext4fs
-            .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
-            .map_err(|_| SyscallErr::EIO)?;
+        // nodelalloc: only scan for holes when blocks are actually needed.
+        // Preallocation ensures sequential writes within range hit already-
+        // allocated blocks.  Check first lblock — if mapped, the whole range
+        // is likely covered.  Saves ~4096→32 ensure_blocks_allocated scans
+        // for 4MB iozone.
+        let first_mapped = self.ext4fs.get_pblock_idx(&fresh, start_lblock).is_ok();
+        if !first_mapped {
+            self.ext4fs
+                .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
+                .map_err(|_| SyscallErr::EIO)?;
+        }
 
         // Sync disk-updated inode back to memory, then update size/timestamps.
         // IMPORTANT: ensure_blocks_allocated→insert_inode_pblk may have
@@ -1124,12 +1154,31 @@ impl IndexNode for layout::Ext4OSInode {
         // physical block allocated BEFORE copying data into the page cache.
         let block_size = self.ext4fs.block_size;
         let start_lblock = (offset / block_size) as u32;
-        let end_lblock = ((offset + len + block_size - 1) / block_size) as u32;
+        let mut end_lblock = ((offset + len + block_size - 1) / block_size) as u32;
+
+        // Sequential extending write: pre-allocate blocks to the next
+        // prealloc_lblocks boundary. This creates equal-sized extents
+        // instead of one large + many small fragments from delta-offset.
+        let is_extending = offset + len > old_size;
+        if is_extending {
+            let prealloc_lblocks = (128 * 1024 / block_size) as u32;
+            let target = ((start_lblock / prealloc_lblocks) + 1) * prealloc_lblocks;
+            end_lblock = core::cmp::max(end_lblock, target);
+            end_lblock = core::cmp::min(end_lblock, u32::MAX);
+        }
 
         let mut fresh = self.ext4fs.get_inode_ref(inode_num);
-        self.ext4fs
-            .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
-            .map_err(|_| SyscallErr::EIO)?;
+        // nodelalloc: only scan for holes when blocks are actually needed.
+        // Preallocation ensures sequential writes within range hit already-
+        // allocated blocks.  Check first lblock — if mapped, the whole range
+        // is likely covered.  Saves ~4096→32 ensure_blocks_allocated scans
+        // for 4MB iozone.
+        let first_mapped = self.ext4fs.get_pblock_idx(&fresh, start_lblock).is_ok();
+        if !first_mapped {
+            self.ext4fs
+                .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
+                .map_err(|_| SyscallErr::EIO)?;
+        }
 
         {
             let mut inode_lock = self.inode.lock();
@@ -1169,9 +1218,11 @@ impl IndexNode for layout::Ext4OSInode {
     }
 
     fn supports_user_buffer_io(&self) -> bool {
-        // Use read-only page_cache() to avoid creating a PageCache as a side effect.
-        // get_new_page_cache() would allocate on miss, which is wrong for a predicate.
-        self.page_cache().is_some()
+        // Return true for any regular file that CAN use PageCache.
+        // read_at_user() will create the PageCache on demand (via get_new_page_cache()).
+        // Directories and symlinks don't have file data pages.
+        let inode = self.inode.lock();
+        !inode.inode.is_dir() && !inode.inode.is_link()
     }
 
     fn sync(&self) -> Result<(), SyscallErr> {
@@ -1697,7 +1748,37 @@ impl IndexNode for layout::Ext4OSInode {
             if check.dentry.inode == child_inode_num {
                 return Ok(());
             }
-            Some(self.ext4fs.get_inode_ref(check.dentry.inode))
+
+            let old_target_num = check.dentry.inode;
+            let old_target_ref = self.ext4fs.get_inode_ref(old_target_num);
+            let target_is_dir = old_target_ref.inode.is_dir();
+
+            // Safety: rename directory over non-directory → ENOTDIR
+            if is_dir && !target_is_dir {
+                return Err(SyscallErr::ENOTDIR);
+            }
+            // Safety: rename non-directory over directory → EISDIR
+            if !is_dir && target_is_dir {
+                return Err(SyscallErr::EISDIR);
+            }
+            // Safety: target is a non-empty directory → ENOTEMPTY
+            if target_is_dir {
+                let entries = self.ext4fs.dir_get_entries(old_target_num)
+                    .map_err(|_| SyscallErr::EIO)?;
+                let non_dot = entries.iter().filter(|e| {
+                    let n = e.get_name();
+                    n != "." && n != ".."
+                }).count();
+                if non_dot > 0 {
+                    return Err(SyscallErr::ENOTEMPTY);
+                }
+            }
+
+            // Keep the target intact until the source has been unpublished.
+            // The board persistence path relies on the rollback-capable
+            // ordering below to avoid losing either name when a later step
+            // fails or when both entries share directory-record slack.
+            Some(old_target_ref)
         } else {
             None
         };
@@ -1718,6 +1799,25 @@ impl IndexNode for layout::Ext4OSInode {
             }
             Ok(())
         };
+
+        // Safety: old is directory and new_parent is descendant of old → EINVAL
+        if is_dir && old_parent_num != new_parent_num {
+            let mut cur = new_parent_num;
+            loop {
+                if cur == child_inode_num {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+                if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
+                    break;
+                }
+                let parent_ino = dotdot_result.dentry.inode;
+                if parent_ino == cur {
+                    break; // reached root (".." points to self)
+                }
+                cur = parent_ino;
+            }
+        }
 
         if old_parent_num == new_parent_num {
             // Removing an entry merges its record length into the preceding

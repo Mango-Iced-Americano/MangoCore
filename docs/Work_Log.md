@@ -1,4 +1,112 @@
-# 工作日志
+# Work Log — Index
+
+新的按日期日志存放在 `docs/Work_Log/`；本文件同时保留尚未拆分的
+`la64-on-board` 实板工作日志，避免分支融合时丢失已验证证据。
+
+## 2026-07-18
+
+### merge/fs: 将 develop lwext4 融合到 2K1000LA 板端主线
+
+**涉及文件：**
+- `dependency/lwext4_rust/`、`os/src/fs/ext4_lwext4/` — 接入 develop 的 lwext4
+  默认后端，并补齐只读参数传递、底层写拒绝、挂载分阶段状态、
+  失败逆序回滚、只读 cache discard 和 8 个多实例 slot。
+- `os/src/fs/{mod.rs,vfs/,page_cache.rs,tmpfs/,dev/pipe.rs}`、`os/src/syscall/fs/` — 融合
+  `BackendLifecycle`、MountFS/chroot/mount 语义和 syscall 拆分；读写模式 remount
+  在 backend 无原子重配置契约时统一返回 `EOPNOTSUPP`。
+- `os/src/{hal,mm,drivers,task}/` — 保留 develop 的 DMA pool、多 region 内存和 slab，
+  同时保留 2K1000LA AHCI/GMAC/P4、firmware carveout、strict-align 和可信 RNG 板端能力。
+- `os/{Makefile,make/,build_initramfs.sh}`、`user/src/bin/` — 融合双工具链、回归
+  initramfs、LTP/CPython 与 P4 持久化入口；修正 regression PID1 收尾和
+  `mprotect` 页对齐测试前置条件。
+- `docs/10_plan/board-develop-ext4-migration.md`、本日志和 mango-workflow references —
+  记录新旧后端差异、性能基线、分支/回退结构、只读门禁和剩余风险。
+
+**验证：**
+- merge index 未解决条目为 0，自研源码冲突标记与 whitespace 扫描通过 ✅
+- 项目 Docker 镜像内严格串行执行 `make rv64-kernel-build-only` 和
+  `make la64-kernel-build-only`，均退出 0；分别为 187/173 条已有 warning ✅
+- RV64 与 LA64 `KTEST=ext4` 均为 4/4，包括 unformatted mount 失败路径；
+  均打印 `[KTEST RESULT: PASS]` 并正常关机 ✅
+- RV64 与 LA64 L4 regression 均为 5/5；pipe usercopy、mmap/mprotect、timer、
+  rename 和 lwext4 truncate/hole cold-reopen 全部通过，均打印
+  `[L4 REGRESSION RESULT: PASS]` 并正常关机 ✅
+- SSD 备份救援内核固定在 `la64-on-board@464e24b5`，块节点及 P1/P3/P4
+  均为只读；32,017,047,552 B 原始流正在宿主持续压缩/计数/哈希。
+  本条记录时传输未完成，不记备份 PASS ⚠️
+
+**备注：**
+- 融合输入固定为 `la64-on-board@464e24b5` 和 `develop@60800fa2`；两个输入
+  分支不改写，以双 parent merge commit 推进 `board-develop-combined`。
+- develop 原始只读路径仍可启动 journal/recovery，且 C/Rust 失败清理可留下
+  全局悬挂指针；融合后由 VFS、lwext4 adapter 和物理 block wrapper 三层独立
+  拒绝写入，只读卷带 `RECOVER` 位时 fail closed 为 `EROFS`。
+- 首次 L4 运行的 4/5 与随后 5/5-但超时都未被误报为通过：前者是
+  develop 用例错用非页对齐 `mprotect` 起点，后者是 PID1 直接 `exec` 后无法
+  wait/打印最终标记/关机。均修正根因后重跑双架构。
+- 实板融合内核只读验收、受控写入、跨重启检查和新旧性能 A/B 仍待
+  备份通过 zstd 完整性、解压后精确字节数和原始 SHA-256 门禁后执行。
+
+## 按日期日志
+
+- [2026-07-17](Work_Log/2026-07-17.md)
+- [2026-07-16](Work_Log/2026-07-16.md)
+- [2026-07-15](Work_Log/2026-07-15.md)
+- [2026-07-14](Work_Log/2026-07-14.md)
+- [2026-07-13](Work_Log/2026-07-13.md)
+- [2026-07-12](Work_Log/2026-07-12.md)
+- [2026-07-11](Work_Log/2026-07-11.md)
+- [2026-07-10](Work_Log/2026-07-10.md)
+- [2026-07-09](Work_Log/2026-07-09.md)
+- [2026-07-08](Work_Log/2026-07-08.md)
+- [2026-07-04](Work_Log/2026-07-04.md)
+- [2026-07-03](Work_Log/2026-07-03.md)
+- [2026-07-02](Work_Log/2026-07-02.md)
+- [2026-07-01](Work_Log/2026-07-01.md)
+- [2026-06-29](Work_Log/2026-06-29.md)
+- [2026-06-28](Work_Log/2026-06-28.md)
+- [2026-06-25](Work_Log/2026-06-25.md)
+- [2026-06-24](Work_Log/2026-06-24.md)
+- [2026-06-20](Work_Log/2026-06-20.md)
+- [2026-06-19](Work_Log/2026-06-19.md)
+- [2026-06-18](Work_Log/2026-06-18.md)
+- [2026-06-17](Work_Log/2026-06-17.md)
+- [2026-06-16](Work_Log/2026-06-16.md)
+- [2026-06-15](Work_Log/2026-06-15.md)
+- [2026-06-14](Work_Log/2026-06-14.md)
+- [2026-06-13](Work_Log/2026-06-13.md)
+- [2026-06-12](Work_Log/2026-06-12.md)
+- [2026-06-11](Work_Log/2026-06-11.md)
+- [2026-06-10](Work_Log/2026-06-10.md)
+- [2026-06-09](Work_Log/2026-06-09.md)
+- [2026-06-08](Work_Log/2026-06-08.md)
+- [2026-06-06](Work_Log/2026-06-06.md)
+- [2026-06-05](Work_Log/2026-06-05.md)
+- [2026-06-04](Work_Log/2026-06-04.md)
+- [2026-06-03](Work_Log/2026-06-03.md)
+- [2026-06-01](Work_Log/2026-06-01.md)
+- [2026-05-31](Work_Log/2026-05-31.md)
+- [2026-05-30](Work_Log/2026-05-30.md)
+- [2026-05-29](Work_Log/2026-05-29.md)
+- [2026-05-28](Work_Log/2026-05-28.md)
+- [2026-05-21](Work_Log/2026-05-21.md)
+- [2026-05-20](Work_Log/2026-05-20.md)
+- [2026-05-19](Work_Log/2026-05-19.md)
+- [2026-05-18](Work_Log/2026-05-18.md)
+- [2026-05-17](Work_Log/2026-05-17.md)
+- [2026-05-16](Work_Log/2026-05-16.md)
+- [2026-05-15](Work_Log/2026-05-15.md)
+- [2026-05-13](Work_Log/2026-05-13.md)
+- [2026-05-12](Work_Log/2026-05-12.md)
+- [2026-05-09](Work_Log/2026-05-09.md)
+- [2026-05-05](Work_Log/2026-05-05.md)
+- [2026-05-04](Work_Log/2026-05-04.md)
+- [2026-05-03](Work_Log/2026-05-03.md)
+- [2026-05-01](Work_Log/2026-05-01.md)
+
+## `la64-on-board` 尚未拆分日志
+
+# 工作日志（实板历史）
 
 ---
 

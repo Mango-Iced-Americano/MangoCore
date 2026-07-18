@@ -9,6 +9,7 @@ use crate::fs::dev::DEV_FS;
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
+use crate::mm::UserBuffer;
 use crate::task::{current_task, Signals, WaitQueue};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -261,7 +262,7 @@ const FIONREAD: u32 = 0x541B;
 const CAP_SYS_RESOURCE: usize = 24;
 const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
 
-fn send_sigpipe_to_current() {
+pub(crate) fn send_sigpipe_to_current() {
     if let Some(task) = current_task() {
         task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
     }
@@ -274,8 +275,8 @@ pub struct Pipe {
     // Locking: writes notify `read_wait` via `notify_events_at_most(EPOLLIN)`,
     // waking blocked readers.  Reads notify `write_wait` via
     // `notify_events_at_most(EPOLLOUT)`, waking blocked writers.
-    read_wait: EventWaitQueue,
-    write_wait: EventWaitQueue,
+    pub(crate) read_wait: EventWaitQueue,
+    pub(crate) write_wait: EventWaitQueue,
     fasync: crate::fs::vfs::fasync::FAsyncItems,
 }
 
@@ -332,6 +333,89 @@ impl IndexNode for Pipe {
             };
             pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
             (Ok(read_bytes), write_end)
+        };
+        if let Ok(_n) = &result {
+            if let Some(write_end) = write_end {
+                write_end
+                    .write_wait
+                    .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                pipe_inc(profiling, &PIPE_NOTIFY_WRITE);
+                if !write_end.fasync.is_empty() {
+                    write_end.fasync.send_sigio(None);
+                }
+            }
+        }
+        pipe_finish_read(profile_start, &result);
+        result
+    }
+
+    fn read_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        dst: &mut UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_READ_CALLS);
+        let profile_start = pipe_profile_start(profiling);
+        if !self.readable {
+            let result = Err(SyscallErr::EBADF);
+            pipe_finish_read(profile_start, &result);
+            return result;
+        }
+        if dst.len() == 0 {
+            let result = Ok(0);
+            pipe_finish_read(profile_start, &result);
+            return result;
+        }
+        let (result, write_end) = {
+            let mut ring = self.buffer.lock();
+            let write_end = ring.write_end.as_ref().and_then(Weak::upgrade);
+            if ring.status == RingBufferStatus::EMPTY {
+                if write_end.is_none() {
+                    pipe_record_ring_sizes(0, ring.get_free_size());
+                    let result = Ok(0);
+                    pipe_finish_read(profile_start, &result);
+                    return result;
+                }
+                pipe_record_ring_sizes(0, ring.get_free_size());
+                let result = Err(SyscallErr::EAGAIN);
+                pipe_finish_read(profile_start, &result);
+                return result;
+            }
+            // Direct ring→UserBuffer copy, segment by segment
+            let mut total = 0usize;
+            let dst_len = dst.len();
+            while total < dst_len && ring.status != RingBufferStatus::EMPTY {
+                let seg_start = ring.head;
+                let seg_end = if ring.tail <= ring.head {
+                    ring.capacity
+                } else {
+                    ring.tail
+                };
+                let seg_len = (dst_len - total).min(seg_end - seg_start);
+                if seg_len == 0 {
+                    break;
+                }
+                let seg_bytes = &ring.arr[seg_start..seg_start + seg_len];
+                let n = dst.write_at(total, seg_bytes);
+                ring.head = if seg_start + n == ring.capacity {
+                    0
+                } else {
+                    seg_start + n
+                };
+                total += n;
+                ring.status = if ring.head == ring.tail {
+                    RingBufferStatus::EMPTY
+                } else {
+                    RingBufferStatus::NORMAL
+                };
+                if n < seg_len {
+                    break;
+                }
+            }
+            pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+            (Ok(total), write_end)
         };
         if let Ok(_n) = &result {
             if let Some(write_end) = write_end {
@@ -409,6 +493,98 @@ impl IndexNode for Pipe {
         result
     }
 
+    fn write_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        src: &UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_WRITE_CALLS);
+        let profile_start = pipe_profile_start(profiling);
+        if !self.writable {
+            let result = Err(SyscallErr::EBADF);
+            pipe_finish_write(profile_start, &result);
+            return result;
+        }
+        if src.len() == 0 {
+            let result = Ok(0);
+            pipe_finish_write(profile_start, &result);
+            return result;
+        }
+        let (result, read_end) = {
+            let mut ring = self.buffer.lock();
+            let read_end = ring.read_end.as_ref().and_then(Weak::upgrade);
+            if read_end.is_none() {
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+                (Err(SyscallErr::EPIPE), None)
+            } else if ring.status == RingBufferStatus::FULL {
+                pipe_record_ring_sizes(ring.get_used_size(), 0);
+                (Err(SyscallErr::EAGAIN), read_end)
+            } else if src.len() <= PAGE_SIZE && ring.get_free_size() < src.len() {
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+                (Err(SyscallErr::EAGAIN), read_end)
+            } else {
+                // Direct UserBuffer→ring copy, segment by segment.
+                let mut total = 0usize;
+                let src_len = src.len();
+                while total < src_len && ring.status != RingBufferStatus::FULL {
+                    let seg_start = ring.tail;
+                    let seg_end = if ring.tail < ring.head {
+                        ring.head
+                    } else {
+                        ring.capacity
+                    };
+                    let free = ring.get_free_size();
+                    let seg_len = (src_len - total)
+                        .min(free)
+                        .min(seg_end - seg_start)
+                        .min(PAGE_SIZE);
+                    if seg_len == 0 {
+                        break;
+                    }
+                    // Read directly from UserBuffer into ring buffer
+                    let n = src.read_at(total, &mut ring.arr[seg_start..seg_start + seg_len]);
+                    if n == 0 {
+                        break;
+                    }
+                    ring.tail = if seg_start + n == ring.capacity {
+                        0
+                    } else {
+                        seg_start + n
+                    };
+                    total += n;
+                    ring.status = if ring.head == ring.tail {
+                        RingBufferStatus::FULL
+                    } else {
+                        RingBufferStatus::NORMAL
+                    };
+                    if n < seg_len {
+                        break;
+                    }
+                }
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+                (Ok(total), read_end)
+            }
+        };
+        if matches!(result, Err(SyscallErr::EPIPE)) {
+            send_sigpipe_to_current();
+        }
+        if let Ok(_n) = &result {
+            if let Some(read_end) = read_end {
+                read_end
+                    .read_wait
+                    .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
+                pipe_inc(profiling, &PIPE_NOTIFY_READ);
+                if !read_end.fasync.is_empty() {
+                    read_end.fasync.send_sigio(None);
+                }
+            }
+        }
+        pipe_finish_write(profile_start, &result);
+        result
+    }
+
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
             dev_id: 0,
@@ -430,6 +606,10 @@ impl IndexNode for Pipe {
     }
 
     fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
         true
     }
 
@@ -539,11 +719,27 @@ impl Pipe {
         self.buffer.lock().set_capacity_compat(requested)
     }
 
-    fn peer_read_end(&self) -> Option<Arc<Pipe>> {
-        self.buffer.lock().read_end.as_ref().and_then(Weak::upgrade)
+    /// Return a reference to the shared ring buffer `Arc`.
+    /// Used by splice/tee to detect same-pipe identity via `Arc::ptr_eq`.
+    pub fn buffer_arc(&self) -> &Arc<Mutex<PipeRingBuffer>> {
+        &self.buffer
     }
 
-    fn peer_write_end(&self) -> Option<Arc<Pipe>> {
+    /// Peek data from the pipe without consuming it (head not advanced).
+    /// Returns the number of bytes copied into `buf`.
+    pub fn peek_at(&self, buf: &mut [u8]) -> usize {
+        self.buffer.lock().peek_data(buf)
+    }
+
+    pub(crate) fn peer_read_end(&self) -> Option<Arc<Pipe>> {
+        self.buffer
+            .lock()
+            .read_end
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
+    pub(crate) fn peer_write_end(&self) -> Option<Arc<Pipe>> {
         self.buffer
             .lock()
             .write_end
@@ -654,7 +850,7 @@ impl PipeRingBuffer {
         }
     }
     #[allow(unused)]
-    fn get_used_size(&self) -> usize {
+    pub(crate) fn get_used_size(&self) -> usize {
         if self.status == RingBufferStatus::FULL {
             self.capacity
         } else if self.status == RingBufferStatus::EMPTY {
@@ -783,16 +979,129 @@ impl PipeRingBuffer {
         }
         total
     }
+    /// Peek data from the ring buffer without advancing head.
+    /// Used by tee() to duplicate pipe data without consuming it.
+    /// Returns the number of bytes actually copied (≤ `buf.len()` and available data).
+    pub fn peek_data(&self, buf: &mut [u8]) -> usize {
+        if self.status == RingBufferStatus::EMPTY {
+            return 0;
+        }
+        let available = self.get_used_size();
+        let n = buf.len().min(available);
+        let mut total = 0;
+        let mut pos = self.head;
+        while total < n {
+            let end = if self.tail <= pos { self.capacity } else { self.tail };
+            let chunk = (n - total).min(end - pos);
+            if chunk == 0 {
+                break;
+            }
+            // Safety: pos..pos+chunk is within arr bounds (guaranteed by ring invariants),
+            // and total..total+chunk is within buf bounds.
+            unsafe {
+                copy_nonoverlapping(
+                    self.arr.as_ptr().add(pos),
+                    buf.as_mut_ptr().add(total),
+                    chunk,
+                );
+            }
+            total += chunk;
+            pos = if pos + chunk == self.capacity { 0 } else { pos + chunk };
+        }
+        total
+    }
+
+    /// Atomically move up to `max_bytes` bytes from `src` into `dst`.
+    /// Both ring buffers MUST already be locked by the caller.
+    /// Returns the number of bytes actually moved (0 if no progress could
+    /// be made — src empty, dst full, or both).
+    pub fn splice_move(src: &mut Self, dst: &mut Self, max_bytes: usize) -> usize {
+        let avail = src.get_used_size();
+        let space = dst.get_free_size();
+        let want = max_bytes.min(avail).min(space);
+        if want == 0 {
+            return 0;
+        }
+
+        let mut remaining = want;
+        while remaining > 0 {
+            // --- readable segment in `src` (ring-buffer invariant) -------
+            // Valid data spans [src.head, src.tail) wrapping at capacity.
+            let src_seg_end = if src.tail <= src.head {
+                src.capacity
+            } else {
+                src.tail
+            };
+            let src_seg_len = (src_seg_end - src.head).min(remaining);
+            if src_seg_len == 0 {
+                break;
+            }
+
+            // --- writable segment in `dst` (ring-buffer invariant) ------
+            // Free region spans [dst.tail, dst.head) wrapping at capacity.
+            let dst_seg_end = if dst.tail < dst.head {
+                dst.head
+            } else {
+                dst.capacity
+            };
+            let dst_seg_len = (dst_seg_end - dst.tail).min(src_seg_len);
+            if dst_seg_len == 0 {
+                break;
+            }
+
+            let chunk = src_seg_len.min(dst_seg_len);
+            // Safety: `src.arr` and `dst.arr` are two distinct heap
+            // allocations (each in its own `Box`).  The [head, head+chunk)
+            // and [tail, tail+chunk) ranges are within their respective
+            // capacities because the segment calculations above are bounded
+            // by `remaining <= want <= space` and the ring invariants.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.arr.as_ptr().add(src.head),
+                    dst.arr.as_mut_ptr().add(dst.tail),
+                    chunk,
+                );
+            }
+
+            src.head = if src.head + chunk == src.capacity {
+                0
+            } else {
+                src.head + chunk
+            };
+            dst.tail = if dst.tail + chunk == dst.capacity {
+                0
+            } else {
+                dst.tail + chunk
+            };
+            remaining -= chunk;
+        }
+
+        let moved = want - remaining;
+        if moved > 0 {
+            src.status = if src.head == src.tail {
+                RingBufferStatus::EMPTY
+            } else {
+                RingBufferStatus::NORMAL
+            };
+            dst.status = if dst.head == dst.tail {
+                RingBufferStatus::FULL
+            } else {
+                RingBufferStatus::NORMAL
+            };
+        }
+        moved
+    }
+
     fn set_write_end(&mut self, write_end: &Arc<Pipe>) {
         self.write_end = Some(Arc::downgrade(write_end));
     }
     fn set_read_end(&mut self, read_end: &Arc<Pipe>) {
         self.read_end = Some(Arc::downgrade(read_end));
     }
-    fn all_write_ends_closed(&self) -> bool {
+    pub(crate) fn all_write_ends_closed(&self) -> bool {
         self.write_end.as_ref().unwrap().upgrade().is_none()
     }
-    fn all_read_ends_closed(&self) -> bool {
+    pub(crate) fn all_read_ends_closed(&self) -> bool {
         self.read_end.as_ref().unwrap().upgrade().is_none()
     }
 }
@@ -855,7 +1164,12 @@ static FIFO_REGISTRY: spin::Mutex<BTreeMap<(usize, usize), FifoEntry>> =
 /// Open a named FIFO inode, returning a Pipe end matching the access mode.
 /// `dev_inode` identifies the FIFO (dev_id, inode_id).
 /// `for_read` selects the read end; `for_write` selects the write end.
-pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> Option<Arc<Pipe>> {
+pub fn fifo_open(
+    dev_inode: (usize, usize),
+    for_read: bool,
+    for_write: bool,
+    nonblock: bool,
+) -> Result<Arc<Pipe>, SyscallErr> {
     let profiling = pipe_profile_enabled();
     pipe_inc(profiling, &PIPE_FIFO_OPEN);
     let mut reg = FIFO_REGISTRY.lock();
@@ -886,7 +1200,7 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
             if end.writable {
                 pipe_inc(profiling, &PIPE_FIFO_HIT_READ);
                 pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
-                return Some(end);
+                return Ok(end);
             }
         }
         let end = Arc::new(Pipe::read_write_end_with_buffer(buffer.clone()));
@@ -894,32 +1208,44 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
         buffer.lock().set_write_end(&end);
         entry.read_end = Arc::downgrade(&end);
         entry.write_end = Arc::downgrade(&end);
-        return Some(end);
+        return Ok(end);
     }
 
     if for_read {
         if let Some(r) = entry.read_end.upgrade() {
             pipe_inc(profiling, &PIPE_FIFO_HIT_READ);
-            return Some(r);
+            return Ok(r);
         }
         let r = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
         buffer.lock().set_read_end(&r);
         entry.read_end = Arc::downgrade(&r);
-        return Some(r);
+        return Ok(r);
     }
 
     if for_write {
+        // O_WRONLY | O_NONBLOCK 且无读者 → ENXIO（Linux 语义）
+        if nonblock && entry.read_end.strong_count() == 0 {
+            return Err(SyscallErr::ENXIO);
+        }
         if let Some(w) = entry.write_end.upgrade() {
             pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
-            return Some(w);
+            return Ok(w);
         }
         let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
         buffer.lock().set_write_end(&w);
         entry.write_end = Arc::downgrade(&w);
-        return Some(w);
+        return Ok(w);
     }
 
-    None
+    // O_RDWR: return write end (rare case)
+    if let Some(w) = entry.write_end.upgrade() {
+        pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
+        return Ok(w);
+    }
+    let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+    buffer.lock().set_write_end(&w);
+    entry.write_end = Arc::downgrade(&w);
+    Ok(w)
 }
 
 /// 清理 FIFO_REGISTRY 中所有两端都已关闭的陈旧条目，
@@ -937,3 +1263,16 @@ pub fn compact_fifo_registry() -> usize {
     }
     removed
 }
+
+// ── Public accessors for /sys/kernel/stats/pipe ──────────────────────
+
+pub fn pipe_read_calls() -> u64  { PIPE_READ_CALLS.load(Ordering::Relaxed) }
+pub fn pipe_write_calls() -> u64 { PIPE_WRITE_CALLS.load(Ordering::Relaxed) }
+pub fn pipe_read_bytes() -> u64  { PIPE_READ_BYTES.load(Ordering::Relaxed) }
+pub fn pipe_write_bytes() -> u64 { PIPE_WRITE_BYTES.load(Ordering::Relaxed) }
+pub fn pipe_read_cycles() -> u64  { PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed) }
+pub fn pipe_write_cycles() -> u64 { PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed) }
+pub fn pipe_read_cycles_max() -> u64  { PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed) }
+pub fn pipe_write_cycles_max() -> u64 { PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed) }
+pub fn pipe_read_eagain() -> u64  { PIPE_READ_EAGAIN.load(Ordering::Relaxed) }
+pub fn pipe_write_eagain() -> u64 { PIPE_WRITE_EAGAIN.load(Ordering::Relaxed) }

@@ -1,0 +1,3 @@
+894edc4f29c112ea5f410d8f030adc143f81bbf922008230aac29124c7ff286a
+/home/pxy/projects/MangoCore -> /app
+

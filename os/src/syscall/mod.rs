@@ -30,6 +30,9 @@ pub use process::{
     sysv_shm_proc_snapshot, sysv_shmall, sysv_shmmax, sysv_shmmni, CloneFlags,
 };
 use syscall_id::*;
+
+#[cfg(feature = "riscv")]
+use crate::hal::arch::syscall_id::{SYSCALL_RISCV_FLUSH_ICACHE, SYSCALL_RISCV_HWPROBE};
 pub fn syscall_name(id: usize) -> &'static str {
     match id {
         SYSCALL_SETXATTR => "setxattr",
@@ -249,6 +252,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MLOCKALL => "mlockall",
         SYSCALL_MUNLOCKALL => "munlockall",
         SYSCALL_MINCORE => "mincore",
+        #[cfg(feature = "riscv")]
+        SYSCALL_RISCV_HWPROBE => "riscv_hwprobe",
+        #[cfg(feature = "riscv")]
         SYSCALL_RISCV_FLUSH_ICACHE => "riscv_flush_icache",
         SYSCALL_FADVISE64 => "fadvise64",
         SYSCALL_MLOCK2 => "mlock2",
@@ -307,7 +313,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     } else {
         0
     };
-    crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
+    if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::trace::event(
+            syscall_id as u64,
+            args[0] as u64,
+            args[1] as u64,
+            args[2] as u64,
+            args[3] as u64,
+            args[4] as u64,
+            args[5] as u64,
+        );
+    }
     // 记录当前系统调用 ID，供 OOM 诊断使用
     crate::task::set_current_syscall_id(Some(syscall_id));
     let syscall_info_log_enabled = matches!(option_env!("LOG"), Some("info" | "debug" | "trace"));
@@ -512,6 +528,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as *mut usize,
             args[4],
             args[5] as u32,
+        ),
+        SYSCALL_TEE => sys_tee(
+            args[0],
+            args[1],
+            args[2],
+            args[3] as u32,
         ),
         SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_READLINKAT => {
@@ -835,6 +857,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MLOCKALL => sys_mlockall(args[0]),
         SYSCALL_MUNLOCKALL => sys_munlockall(),
         SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2]),
+        #[cfg(feature = "riscv")]
+        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *const u8, args[1], args[2], args[3], args[4]),
+        #[cfg(feature = "riscv")]
         SYSCALL_RISCV_FLUSH_ICACHE => sys_riscv_flush_icache(args[0], args[1], args[2]),
         SYSCALL_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
@@ -929,15 +954,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
             if syscall_id == 242 {
-                crate::trace_event!(
-                    0xB042,
-                    args[0] as u64,
-                    args[1] as u64,
-                    args[2] as u64,
-                    args[3] as u64,
-                    0,
-                    0
-                );
+                if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::trace::event(
+                        0xB042,
+                        args[0] as u64,
+                        args[1] as u64,
+                        args[2] as u64,
+                        args[3] as u64,
+                        0,
+                        0,
+                    );
+                }
             }
             println!(
                 "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
@@ -993,6 +1020,19 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         crate::task::perf::record_getppid_cost(_syscall_ticks);
     }
     crate::task::perf::record_syscall(syscall_id, ret);
+    crate::task::perf::record_syscall_time(syscall_id, _syscall_ticks);
+    // Trace syscall return
+    if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::trace::event(
+            crate::trace::TRACE_RET_MASK | syscall_id as u64,
+            ret as u64,
+            (ret < 0) as u64,
+            0,
+            0,
+            0,
+            0,
+        );
+    }
     ret
 }
 
@@ -1040,4 +1080,9 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
     }
     crate::random::wipe_sensitive(&mut chunk);
     buflen as isize
+}
+
+#[cfg(feature = "riscv")]
+pub fn sys_riscv_hwprobe(_pairs: *const u8, _count: usize, _cpusetsize: usize, _cpuset: usize, _flags: usize) -> isize {
+    errno::ENOSYS
 }

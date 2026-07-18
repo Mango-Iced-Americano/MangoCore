@@ -224,6 +224,7 @@ impl LAFlexPageTable {
     }
     #[inline(always)]
     fn invalidate_page(&self, vpn: VirtPageNum) {
+        let start = crate::task::perf::perf_time_now();
         if self.is_kernel_pt() {
             // 动态 PGDH 映射不保证形成全局偶奇双页 TLB 项。必须刷新全部 ASID，
             // 防止复用的栈或程序虚拟地址保留其他任务留下的非全局旧表项。
@@ -231,6 +232,8 @@ impl LAFlexPageTable {
         } else {
             tlb_invalidate_page(vpn);
         }
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+        crate::task::perf::record_tlb_page_flush_cycles(elapsed);
     }
     /// Find the page in the page table, creating the page on the way if not exists.
     /// Note: It does NOT create the terminal node. The caller must verify its validity and create according to his own needs.
@@ -332,7 +335,7 @@ impl PageTable for LAFlexPageTable {
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0 << 32),
             frames: {
-                let mut vec = Vec::with_capacity(256);
+                let mut vec = Vec::with_capacity(32);
                 vec.push(frame);
                 vec
             },
@@ -343,7 +346,7 @@ impl PageTable for LAFlexPageTable {
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0),
             frames: {
-                let mut vec = Vec::with_capacity(256);
+                let mut vec = Vec::with_capacity(32);
                 vec.push(frame);
                 vec
             },
@@ -467,7 +470,10 @@ impl PageTable for LAFlexPageTable {
         }
     }
     fn flush_tlb(&self) {
+        let start = crate::task::perf::perf_time_now();
         tlb_invalidate();
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+        crate::task::perf::record_tlb_full_flush_cycles(elapsed);
     }
     /// Return the physical token to current page.
     /// NOTE: NEVER use this token to fill a PGD!
@@ -552,11 +558,17 @@ impl PageTable for LAFlexPageTable {
     }
     fn activate(&self) {
         if self.is_kernel_pt() {
+            let start = crate::task::perf::perf_time_now();
             tlb_global_invalidate();
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+            crate::task::perf::record_tlb_activate_cycles(elapsed);
             super::register::PGDH::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         } else {
             // 1. Flush old process's non-global TLB entries (current ASID)
+            let start = crate::task::perf::perf_time_now();
             super::tlb::tlb_invalidate();
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+            crate::task::perf::record_tlb_activate_cycles(elapsed);
             crate::task::perf::record_tlb_activate();
             // 2. Allocate ASID for the incoming process if needed
             if let Some(task) = crate::task::current_task() {
