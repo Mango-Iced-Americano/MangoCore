@@ -1,0 +1,34 @@
+scope=temporary P4 copies only; production SSD and compressed backup were not modified
+
+untouched_p4_sha256=35ad1da5dbeb48ab514e920f0513f2e2cfdba90f2975b1b8309a3674e0117b18
+reviewed_ddgs_sha256=3c321b9445ec57db0bd1d06899c6a10eeeea2817fa7ecbc1b2e08f37878bed24
+corrupted_ddgs_sha256=a0d47e45aa3f763f9b147a26bd383b689e570c284589f9c769c9b93431e7b816
+
+before new-lwext4 write:
+  ddgs inode=60994 type=regular mode=0644 size=26641
+  ddgs extents=797722..797728
+  debugfs testi <60994>: inode is marked in use
+  debugfs testb 797722..797728: every block is NOT in use
+  superblock state=clean, but e2fsck -fn reports bitmap/extent/directory errors
+
+after writing and deleting /root/mango-final10-probe:
+  probe payload=P4_RW_OK
+  ddgs.py first bytes=50 34 5f 52 57 5f 4f 4b 0a followed by zeroes
+  ddgs.py size remains 26641 and still points to extent 797722..797728
+  next boot integrity gate rejects a0d47e45...; this is corruption, not a new DDGS version
+
+temporary-copy repair:
+  e2fsck -fy pass 1 repairs live-block bitmap, inode bitmap, duplicate names and directories
+  e2fsck -fy pass 2 repairs remaining dot/dotdot/refcount issues
+  repair passes 3, 4 and 5 are clean
+  final e2fsck -fn completes Pass 1..5 without repair
+  repaired_p4_sha256=a1af08bb8a1e8bbe79526354e3dcf579a2fe2126afcad4753dd29e530e736681
+  repaired ddgs sha256=3c321b9445ec57db0bd1d06899c6a10eeeea2817fa7ecbc1b2e08f37878bed24
+
+post-repair new-lwext4 gate:
+  first boot: stage=reuse, stage=prepared, RESULT=PASS, ready
+  interactive Python: PERSIST_FSCKED_FIRST_PYTHON_OK
+  P4 write/read/delete: P4_FSCKED_RW_OK
+  cold reuse: stage=reuse, stage=prepared, RESULT=PASS, ready
+  online ddgs sha256=3c321b9445ec57db0bd1d06899c6a10eeeea2817fa7ecbc1b2e08f37878bed24
+  final offline e2fsck -fn: Pass 1..5, no repair

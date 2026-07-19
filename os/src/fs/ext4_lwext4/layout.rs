@@ -1599,6 +1599,14 @@ impl IndexNode for Ext4OSInode {
         let child_path = join_path(&parent_path, name);
         let _lock = self.fs.lw.lock();
         self.validate_path_locked(&parent_path)?;
+        // symlink(2) is create-exclusive.  ext4_fsymlink() otherwise opens
+        // and overwrites an existing symlink of the same type.  The lw lock
+        // keeps this existence check atomic with the following C operation.
+        match self.fs.probe_inode_meta_locked(&child_path) {
+            Ok(_) => return Err(SyscallErr::EEXIST),
+            Err(SyscallErr::ENOENT) => {}
+            Err(error) => return Err(error),
+        }
         let lw_child = self.fs.lw_path(&child_path);
         // ext4_fsymlink(target, path): target = destination, path = new symlink
         // NOTE: target is NOT translated — it is user-data, VFS-semantic.

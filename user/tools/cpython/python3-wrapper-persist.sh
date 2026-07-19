@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -e
 
 # LoongArch production policy: Python is allowed to run only from the
 # strict-aligned runtime published on P4 ext4.  /tools is deliberately not a

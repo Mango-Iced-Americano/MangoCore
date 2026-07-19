@@ -1061,3 +1061,20 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
   镜像 hash 与两次启动身份。
 - **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
   `os/src/kernel_tests/ext4.rs`、`os/make/rv64.mk`、`os/make/la64.mk`
+
+### 精确 wait 与通用 reaper 不能竞争同一个子进程
+
+- **现象**：子命令已经明确报错，supervisor 却打印 ready/PASS；随后真正入口因准备未完成而失败。
+- **根因**：精确 `waitpid(pid, WNOHANG)` 之前调用 `waitpid(-1, WNOHANG)`，通用 reaper 可能先回收目标 pid 并丢弃状态。精确 wait 随后得到 `ECHILD`，若 status 还以 0 初始化，就会把失败伪装成成功。
+- **修复**：目标子进程 outstanding 时只做精确 wait；通用 orphan 回收放到目标状态已取得之后。status 以 `127 << 8` fail closed，任何精确 wait 错误都保留非零状态并记录 errno。
+- **教训**：一个 child 的退出状态只能有一个 owner。凡是同时存在 supervisor wait 和全局 reaper，都要明确所有权，不能把 `ret < 0` 与“已成功取得状态”合并处理。
+- **相关文件**：`user/src/bin/initproc.rs`
+
+### 成熟 ext4 卷迁移不能只用全新 fixture 验证
+
+- **现象**：全新 QEMU ext4 上嵌套 symlink 创建/删除都通过，真实旧卷却出现同名目录项、dentry type 与 inode mode 冲突、`ln`/`chroot` 失败；应用门禁甚至可能先 PASS，下一次小文件写入却覆盖无关 Python 源码。
+- **根因**：旧驱动可能留下重复同名目录项、不可靠 file type，以及“inode/extent 仍引用数据块、块位图却标为空闲”的跨层不一致。全新 fixture 没有历史状态；新驱动按位图合法分配时会复用仍被旧文件引用的块。底层 symlink API 若不是 create-exclusive，还会继续覆盖并隐藏目录问题。
+- **定位**：在全盘备份副本上用 `debugfs ls/stat/testi/testb/blocks` 同时审计目录项、inode 和位图，不能只看文件可读。整文件摘要门禁若在一次小写入后变化，要比较异常文件内容与探针 payload；命中就先按跨文件块复用处理，而不是把新摘要加入版本白名单。
+- **修复**：路径遍历复用本来就要加载的 child inode，并始终以真实 inode mode 校验类型；适配层补 symlink `EEXIST`，迁移器只删除 readlink 可证明的旧 symlink。更重要的是，成熟旧卷在新后端第一次写入前必须离线 `e2fsck -fy` 到收敛，再以 `e2fsck -fn` 复检 clean；无法安全修复时从逻辑文件备份重建新卷。
+- **验收**：至少包含“fresh fixture 语义测试 + 旧卷只读结构/位图审计 + offline-fsck-clean 前置条件 + 同一修复卷首次写入 + 冷启动复用 + 最终离线 fsck + 关键文件摘要”。在线 raw 快照的 fsck 结果不能直接外推为当前实盘状态，但只要该副本能复现 live extent 被标 free 并发生串写，就已经足以否决在该副本上直接迁移；生产卷必须取得自身的离线证据。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/initproc.rs`、`scripts/board/patch_ddgs_redirect.py`

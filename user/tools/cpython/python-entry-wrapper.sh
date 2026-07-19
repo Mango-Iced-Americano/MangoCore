@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -e
 
 # Run Python console entry points through the P4 strict-aligned interpreter,
 # ignoring any stale shebang written by an older pip/runtime.

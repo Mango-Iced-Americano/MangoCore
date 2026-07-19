@@ -1316,6 +1316,7 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 
 	int r;
 	int len;
+	bool ref_loaded = false;
 	struct ext4_mountpoint *mp = ext4_get_mount(path);
 	struct ext4_dir_search_result result;
 	struct ext4_inode_ref ref;
@@ -1343,6 +1344,7 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 	r = ext4_fs_get_inode_ref(fs, EXT4_INODE_ROOT_INDEX, &ref);
 	if (r != EOK)
 		return r;
+	ref_loaded = true;
 
 	if (parent_inode)
 		*parent_inode = ref.index;
@@ -1402,44 +1404,34 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 			*parent_inode = ref.index;
 
 		next_inode = ext4_dir_en_get_inode(result.dentry);
-		if (ext4_sb_feature_incom(sb, EXT4_FINCOM_FILETYPE)) {
-			uint8_t t;
-			t = ext4_dir_en_get_inode_type(sb, result.dentry);
-			imode = ext4_fs_correspond_inode_mode(t);
-		} else {
-			struct ext4_inode_ref child_ref;
-			r = ext4_fs_get_inode_ref(fs, next_inode, &child_ref);
-			if (r != EOK)
-				break;
-
-			imode = ext4_inode_type(sb, child_ref.inode);
-			ext4_fs_put_inode_ref(&child_ref);
-		}
-
 		r = ext4_dir_destroy_result(&ref, &result);
 		if (r != EOK)
 			break;
 
-		/*If expected file error*/
-		if (imode != EXT4_INODE_MODE_DIRECTORY && !is_goal) {
-			r = ENOENT;
-			break;
-		}
-		if (ftype != EXT4_DE_UNKNOWN) {
-			bool df = imode != ext4_fs_correspond_inode_mode(ftype);
-			if (df && is_goal) {
-				r = ENOENT;
-				break;
-			}
-		}
-
 		r = ext4_fs_put_inode_ref(&ref);
+		ref_loaded = false;
 		if (r != EOK)
 			break;
 
 		r = ext4_fs_get_inode_ref(fs, next_inode, &ref);
 		if (r != EOK)
 			break;
+		ref_loaded = true;
+
+		/* Directory-entry file types are hints and may be stale on mature
+		 * filesystems.  We need the child inode reference for traversal/open
+		 * anyway, so validate against its authoritative mode without an
+		 * additional get/put pair. */
+		imode = ext4_inode_type(sb, ref.inode);
+		if (imode != EXT4_INODE_MODE_DIRECTORY && !is_goal) {
+			r = ENOENT;
+			break;
+		}
+		if (ftype != EXT4_DE_UNKNOWN && is_goal &&
+		    imode != ext4_fs_correspond_inode_mode(ftype)) {
+			r = ENOENT;
+			break;
+		}
 
 		if (is_goal)
 			break;
@@ -1451,7 +1443,8 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 	}
 
 	if (r != EOK) {
-		ext4_fs_put_inode_ref(&ref);
+		if (ref_loaded)
+			ext4_fs_put_inode_ref(&ref);
 		return r;
 	}
 

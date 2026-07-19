@@ -3,7 +3,7 @@ title: "APK 隔离与 P4 持久化测试"
 category: testing
 status: draft
 author: MangoCore Team
-last_update: 2026-07-18
+last_update: 2026-07-19
 tags: [testing, apk, qemu, loongarch64, 2k1000, https, filesystem]
 code_paths:
   - "os/Cargo.toml"
@@ -199,7 +199,31 @@ APK 的 libfetch 会报 `TLS: server certificate not trusted`。每次启动还�
 `/proc/net/resolv.conf` 复制为 P4 ext4 上有真实长度的普通 `/etc/resolv.conf`，并在
 每次进入 `persist-shell` 前刷新；这是因为 c-ares 会用 seek/`ftell()` 读取 resolver
 配置，不能直接使用 `st_size=0` 的 procfs 链接。准备门禁要求目标非链接、非空且与
-当前 procfs 内容一致，旧 P4 的链接会在 `stage=reuse` 时自动迁移。每次启动还会把当前
+当前 procfs 内容一致，旧 P4 的链接会在 `stage=reuse` 时自动迁移。
+
+旧 ext4 曾在 `/persist/apk-root/bin` 留下多个同名 `sh` 目录项；迁移器现在有界地逐项
+删除不可执行的旧 symlink/不可分类条目，最后只创建一个相对 `sh -> busybox`。若同名
+对象是普通文件则拒绝覆盖并 fail closed。lwext4 适配层同时保证重复 symlink 创建返回
+`EEXIST`。路径解析复用每个分量本来就会加载的 child inode，以真实 inode mode 校验
+中间目录和目标类型；不能只在 file type 为 unknown 时回退，因为旧卷也可能留下
+“dentry 标为 regular、inode 实为 symlink”这类非 unknown 的错误提示。
+
+旧 P4 还可能包含比目录项更严重的历史元数据损坏：inode extent 仍引用数据块，但块位图
+把这些块标为空闲。新 lwext4 按位图分配新文件时会合法复用该块，造成无关文件被覆盖；
+应用层 `RESULT=PASS`、文件当前可读或 superblock `state=clean` 都不能排除这一情况。
+因此历史 P4 在新后端第一次写入前必须离线运行 `e2fsck -fy` 到收敛，并再以
+`e2fsck -fn` 完整通过 Pass 1-5。无法安全离线修复时，应从已验证备份提取逻辑文件，
+重建全新 P4，而不是在线边运行边修复。
+
+DDGS 的整文件 SHA-256 白名单属于源码完整性门禁，不是软件许可名单。迁移实验中异常
+摘要对应的实际内容是另一个临时文件的 `P4_RW_OK` 加零填充，说明发生了跨文件块覆盖；
+这种摘要必须继续 fail closed，绝不能作为“新版本”加入白名单。
+
+准备与验证子进程由 PID1 精确等待。精确等待期间不得运行 `waitpid(-1, WNOHANG)` 通用
+reaper，否则目标退出状态可能被提前消费并把失败伪装成 ready；目标 wait 失败也统一按
+127 fail closed。chroot 验证使用显式 `/bin/busybox cat/rm`，不依赖安装树是否为每个
+applet 建立独立链接。
+
 此外，每次启动会把 `/rescue/python3-wrapper` 安装为应用根的 `python3`/`python`，并将
 P4 strict runtime 与用户状态目录绑定进 chroot；因此宿主与 `persist-shell` 使用同一套
 P4 CPython release 和字节码缓存，P3 `/tools` 仅作备份而不参与默认执行。P4 用户目录还
@@ -260,8 +284,11 @@ QEMU 最小复现确认 ext4 同目录 rename 会在新目录项落入旧目录�
 2026-07-18 的普通文件修复上板后，P4 `stage=reuse` 自动迁移为 23 字节文件，默认
 `curl` 连续两次返回 HTTP 200（一次 DNS lookup 约 13 ms），aligned Python
 `socket.getaddrinfo()` 也成功；无需硬编码公共 DNS或传 `--dns-servers`。
-已写入持久标记并 `sync`，包含 CA 自动修复的新 uImage 也已生成；由于本轮第二次
-`RESET` 未发生，真实 SSD 上的完整复位复用仍是下一门禁。
+2026-07-19 在切换到 `ext4_lwext4` 后再次完成真实 P4 迁移和冷启动复用：历史 3 个同名
+`sh` 条目收敛为唯一相对 `sh -> busybox`，最终输出 `stage=prepared`、`RESULT=PASS` 和
+ready。随后实际进入 `MangoPersist:/#`，验证 APK、P4 strict Python 身份和临时文件写读删，
+输出 `PERSIST_INTERACTIVE_PASS`。最终镜像 SHA-256 为
+`691bbc6658aac197d20798b7ca17038208e95a87ca7f4aaca46d67d5afef8eda`。
 
 当前门禁验证 `/persist/python-runtime` 与 `/persist/python` 两个 P4 bind：应用根内
 `python3 -S` 必须确认 `CPYTHON_ROOT` 指向 `/persist/python-runtime/releases/...`、策略为

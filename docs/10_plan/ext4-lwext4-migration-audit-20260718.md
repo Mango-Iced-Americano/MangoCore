@@ -1,9 +1,9 @@
 ---
 title: "ext4_lwext4 融合迁移审计与实施报告"
 category: plan
-status: runtime-semantics-under-validation-production-blocked
+status: draft
 owner: MangoCore Team
-last_updated: 2026-07-18
+last_updated: 2026-07-19
 tags: [ext4, lwext4, migration, audit, 2k1000la, ssd, crash-consistency]
 entry_points:
   - "os/src/fs/ext4_lwext4/ext4fs.rs"
@@ -26,6 +26,12 @@ related_docs:
 ---
 
 # ext4_lwext4 融合迁移审计与实施报告
+
+> 2026-07-19 更新：本文 2026-07-18 的“禁止生产 P4 写入”是当时的历史门禁结论。
+> 后续已经完成全盘备份校验、journal flush、persistent orphan/QEMU 掉电恢复、真实
+> 2K1000LA P4 正常读写与冷启动，并在本次修复后完成旧目录项迁移和交互式
+> `persist-shell` 验收。下文未逐段重写的门禁表仅代表 2026-07-18 快照，不能作为当前
+> 状态；当前证据以 `docs/Work_Log/2026-07-19.md` 和同日 evidence manifest 为准。
 
 ## 1. 结论先行
 
@@ -457,7 +463,7 @@ mount lifecycle 和用户态测试经常跨目录耦合。
 | G6 实板只读 | SSD identity/MBR/P1-P4、2K byte mapping、多实例、所有写节点拒绝 | 未执行 | 不发出任何 SSD write，目录和 hash 可读一致 |
 | G7 crash consistency | journal/orphan/replay、故障注入、每个 crash image fsck | 未实现 | 全窗口 clean；否则生产阻塞 |
 | G8 性能 A/B | §7.4 单变量矩阵 | 未执行 | 无未解释 >10% median 回退或数量级 tail |
-| G9 受控 SSD 写 | 仅备份完成后，在可丢弃 scratch/P4 fixture 上 write/fsync/reboot/hash | 备份前提已完成；写入仍禁止 | G0-G8 全通过且另行确认目标 |
+| G9 受控 SSD 写 | 仅备份完成后，在 offline-fsck-clean 的 scratch/P4 fixture 上 write/fsync/reboot/hash/fsck | 旧 P4 备份副本已证明块位图损坏；修复副本 QEMU 双启与最终 fsck 通过，生产 SSD 仍禁止 | 生产 P4 自身离线 fsck clean 或重建，且 G0-G8 全通过并另行确认目标 |
 
 注意：双架构使用不同 nightly，G1-G5 的 RV64/LA64 构建必须串行，不能并发切换
 `rustup override`。
@@ -475,7 +481,9 @@ mount lifecycle 和用户态测试经常跨目录耦合。
 - 备份期间和本轮代码测试均未运行 `board_2k1000` 写 feature、未 remount P4 rw、未执行
   设备写探针；
 - 备份完成也不是自动写入许可，仍要完成 G6 只读身份、G7 crash safety、G8 性能和受控
-  scratch 目标确认。生产 P4 继续只读保护。
+  scratch 目标确认。备份 P4 已复现 live extent 对应块在 bitmap 中为 free，并在新写入后
+  覆盖无关 DDGS 源码；生产 P4 必须取得自身的离线 fsck clean 证据或由逻辑备份重建，
+  继续保持只读保护。
 
 ## 13. 完成定义
 
@@ -486,11 +494,12 @@ mount lifecycle 和用户态测试经常跨目录耦合。
 3. 全新 fixture 在 workload 后重挂载且离线 fsck clean；
 4. 真实 2K1000LA 完成只读 block/partition/multi-mount 验收；
 5. SSD 全盘备份完成长度、双 hash 和压缩流验证；
-6. journal-enabled orphan/replay 和 rename/unlink 故障注入闭环；
-7. 新旧后端在同一实板完成可重复性能 A/B；
-8. 受控 scratch 写入跨 reboot/hash 通过；
-9. 生成文件、Work Log、证据目录和相关架构文档同步完成；
-10. 最终 tag 指向通过上述全部门禁的 commit。
+6. 历史 P4 在新后端首次写入前离线 fsck clean，或从备份重建并验证关键文件摘要；
+7. journal-enabled orphan/replay 和 rename/unlink 故障注入闭环；
+8. 新旧后端在同一实板完成可重复性能 A/B；
+9. 受控 scratch 写入跨 reboot/hash/fsck 通过；
+10. 生成文件、Work Log、证据目录和相关架构文档同步完成；
+11. 最终 tag 指向通过上述全部门禁的 commit。
 
 在第 6 项完成前，最准确的交付语句只能是：
 

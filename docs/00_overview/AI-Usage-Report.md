@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-18
+> Coverage: 2026-04-01 to 2026-07-19
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -48,6 +48,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | 2K1000LA CPython 实机适配 | 2026-07-13 至 2026-07-14 | OpenAI Codex, max reasoning mode | 选择性审计 develop 分支 CPython 链路；对照 QEMU 与实机定位 LSX/FPR 上下文差异，补齐 FAT/TmpFS、外网测试语义和受限 P3 更新工具 | 修复实机 trap 后向量损坏、FAT rename 覆盖和 TmpFS symlink；rv64/la64 QEMU 与 2K1000LA 实板 CPython L3-L9 均 72/72 |
 | 2K1000LA c-ares 默认 DNS 闭环 | 2026-07-18 | OpenAI Codex | 对照默认/显式 DNS、procfs inode 元数据和 c-ares 文件加载源码，区分 macOS 网络共享、内核数据面和配置发布问题 | 将 `/etc/resolv.conf` 改为可刷新的普通快照；双架构、LA64 QEMU 和实板 P4 ext4 验证默认 curl/Python DNS |
 | onboard/develop ext4_lwext4 融合审计 | 2026-07-18 | OpenAI Codex multi-agent | 并行审计旧 ext4 修正、新 lwext4 适配、2K 分区边界、inode lifetime、性能与 crash consistency | 补齐运行期 byte bridge/namespace 方案，同时识别无 journal/orphan 使生产 SSD 切换保持阻塞 |
+| lwext4 旧 P4 迁移与 persist-shell 假 ready | 2026-07-19 | OpenAI Codex multi-agent | 对照完整 SSD 备份、真实 P4、C/Rust 适配层和 PID1 wait/reaper，建立 RED 后逐层实板验收 | 修复 dentry/inode 类型冲突、symlink `EEXIST` 和目标 wait 假成功；进一步由 DDGS 摘要异常定位旧卷 live extent/bitmap 冲突，确立离线 fsck clean 后才能接管的迁移门禁 |
 
 ## 4. 详细使用场景
 
@@ -295,6 +296,29 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   QEMU 验证，但当前无 journal 的 P4 和缺少 orphan/replay 的实现被明确标为生产 blocker，
   禁止宣称已可写入生产 SSD。
 
+### Case 14: lwext4 旧 P4 迁移与 persist-shell 假 ready
+
+- Evidence: `docs/Work_Log/2026-07-19.md`、
+  `docs/Work_Log/evidence/2026-07-19/persist-shell-lwext4-repair-manifest.md`
+- AI tools: OpenAI Codex multi-agent
+- Problem: 新 lwext4 在全新 fixture 上可创建嵌套 symlink，但真实 P4 的应用根有三个同名
+  `sh` 目录项；准备脚本已经失败，PID1 却仍发布 ready，用户进入时才看到
+  `persistent environment is not ready`。
+- AI contribution: 将问题拆为旧卷只读取证、lwext4 C/Rust 语义和 wait/reaper 生命周期三轨；
+  在修改前增加重复 symlink RED；从完整 SSD 备份副本确认三个 inode 和旧绝对 target；定位
+  `waitpid(-1)` 抢收目标状态、concrete dentry type 与 inode mode 冲突、`ext4_fsymlink()`
+  非排他覆盖。后续 QEMU 冷启动的 DDGS 摘要异常没有被当成版本升级，而是通过内容比对和
+  `debugfs testi/testb/blocks` 证明旧卷 live extent 的数据块被 bitmap 标为空闲。
+- Human verification: Docker 中 RV64/LA64 ext4 9/9、teardown 与离线 fsck；最终源码严格串行
+  双架构编译；维护者在完成全盘备份后授权真实 P4 实验。未经 fsck 的备份副本复现跨文件
+  覆盖 RED；仅在临时副本上多轮 fsck 收敛后，首次接管、写读删、冷启动复用、最终离线 fsck
+  和 DDGS 整文件摘要全部通过。
+- Result: 旧目录可收敛为唯一相对 `sh -> busybox`，失败不再伪装 ready；同时明确应用
+  `RESULT=PASS` 不能替代卷一致性。新 lwext4 只允许接管 offline-fsck-clean 卷，异常 DDGS
+  摘要不得加入白名单；生产 SSD 在自身离线修复或重建前继续禁止写入。历史实板镜像
+  SHA-256 `691bbc6658aac197d20798b7ca17038208e95a87ca7f4aaca46d67d5afef8eda`，实板输出
+  `RESULT=PASS` 和 `PERSIST_INTERACTIVE_PASS`。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -350,6 +374,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md` 2026-07-18 | c-ares/procfs resolver 默认 DNS | 记录 Codex 通过默认/显式 DNS A/B、inode 元数据和 c-ares 源码闭环根因，以及双架构、QEMU 和 P4 ext4 实板验证 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
 | `docs/Work_Log/2026-07-18.md` | ext4_lwext4 融合审计 | 记录 Codex multi-agent 对 onboard 修正覆盖、2K 边界、inode lifetime、性能和无 journal/orphan 生产 blocker 的审计，以及双架构 QEMU/build/fsck 正式证据 |
+| `docs/Work_Log/2026-07-19.md` | lwext4 旧 P4 迁移与 persist-shell | 记录 Codex multi-agent 对备份旧卷目录项、lwext4 symlink/unknown type、PID1 wait/reaper 假成功的根因分析，以及 RED/GREEN、双架构和实板交互验收 |
 
 ## 9. 交互记录与留痕方式
 

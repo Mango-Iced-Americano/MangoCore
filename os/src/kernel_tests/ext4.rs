@@ -173,7 +173,80 @@ pub fn tests() -> Vec<KernelTest> {
             "ext4::lwext4_flush_forwarding",
             test_lwext4_flush_forwarding,
         ),
+        KernelTest::new(
+            "ext4::lwext4_nested_symlink_recreate",
+            test_lwext4_nested_symlink_recreate,
+        ),
     ]
+}
+
+/// Exercise the persistent-shell layout: a relative symlink is created in a
+/// nested directory next to its executable target, removed, and recreated.
+/// Both cycles must leave a discoverable symlink inode rather than ENOENT.
+fn test_lwext4_nested_symlink_recreate() -> Result<(), &'static str> {
+    use crate::fs::vfs::{FileType, InodeMode};
+
+    const ROOT_NAME: &str = ".ktest_lwext4_symlink";
+    const DIR_NAME: &str = "bin";
+    const TARGET_NAME: &str = "busybox";
+    const LINK_NAME: &str = "sh";
+
+    let root = crate::fs::vfs_lookup_absolute("/sdcard")
+        .map_err(|_| "ktest ext4 fixture is not mounted at /sdcard")?;
+    let test_root = root
+        .create(ROOT_NAME, FileType::Dir, InodeMode::S_IRWXU)
+        .map_err(|_| "failed to create symlink test root")?;
+    let bin = test_root
+        .create(DIR_NAME, FileType::Dir, InodeMode::S_IRWXU)
+        .map_err(|_| "failed to create symlink test bin directory")?;
+    bin.create(
+        TARGET_NAME,
+        FileType::File,
+        InodeMode::S_IRUSR | InodeMode::S_IWUSR | InodeMode::S_IXUSR,
+    )
+    .map_err(|_| "failed to create symlink target")?;
+
+    for _ in 0..2 {
+        let link = bin
+            .symlink(LINK_NAME, TARGET_NAME)
+            .map_err(|_| "failed to create nested relative symlink")?;
+        match bin.symlink(LINK_NAME, "other-target") {
+            Err(crate::utils::error::SyscallErr::EEXIST) => {}
+            Ok(_) => return Err("duplicate symlink creation unexpectedly succeeded"),
+            Err(_) => return Err("duplicate symlink creation returned wrong errno"),
+        }
+        if link
+            .metadata()
+            .map_err(|_| "failed to stat created symlink")?
+            .file_type
+            != FileType::SymLink
+        {
+            return Err("created inode is not a symlink");
+        }
+        if bin
+            .find(LINK_NAME)
+            .map_err(|_| "created symlink is not discoverable")?
+            .metadata()
+            .map_err(|_| "failed to stat discovered symlink")?
+            .file_type
+            != FileType::SymLink
+        {
+            return Err("discovered inode is not a symlink");
+        }
+        bin.unlink(LINK_NAME)
+            .map_err(|_| "failed to remove nested relative symlink")?;
+    }
+
+    bin.unlink(TARGET_NAME)
+        .map_err(|_| "failed to remove symlink target")?;
+    test_root
+        .rmdir(DIR_NAME)
+        .map_err(|_| "failed to remove symlink test bin directory")?;
+    root.rmdir(ROOT_NAME)
+        .map_err(|_| "failed to remove symlink test root")?;
+    root.sync()
+        .map_err(|_| "failed to sync symlink test cleanup")?;
+    Ok(())
 }
 
 /// The crash producer intentionally never returns: QEMU is killed while the

@@ -170,8 +170,11 @@ QEMU。修正后门禁由 Makefile 以退出码和 `L4 REGRESSION RESULT` 双重
 
 ### G4：实板受控写入
 
-仅在全盘备份完成后启用。先使用一次性 scratch/P4 fixture，完成 write/fsync/reopen/hash、
-卸载/重启后复核；再决定是否将融合分支作为日常 P4 可写运行分支。
+仅在全盘备份完成后启用。历史 P4 还必须先在离线状态执行 `e2fsck -fy` 到收敛，并由
+`e2fsck -fn` 复检 clean；superblock 的 `state=clean` 和在线可读都不是替代证据。若发现
+live extent 对应块在 bitmap 中仍为 free，禁止新后端写入，应先修复副本或从逻辑备份
+重建 P4。随后使用一次性 scratch/P4 fixture，完成 write/fsync/reopen/hash、卸载/重启
+和最终离线 fsck；再决定是否将融合分支作为日常 P4 可写运行分支。
 
 ## 7. 提交与回退结构
 
@@ -198,6 +201,7 @@ merge 原子提交，避免产生一个表面可编译但可写性说谎的中�
 - 两架构编译通过；
 - QEMU focused FS 回归通过；
 - 实板只读启动和多分区隔离通过；
+- 生产 P4 自身取得离线 fsck clean 证据，或从备份重建并完成文件摘要校验；
 - 至少一轮受控 P4 写入跨重启验证通过；
 - 新旧性能 A/B 有可复现输入和原始日志；
 - `board-develop-combined` 指向通过全部必需门禁的提交，两个输入分支保持不变。

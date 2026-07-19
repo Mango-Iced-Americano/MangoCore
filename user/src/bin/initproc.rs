@@ -368,6 +368,12 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
 fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> i32 {
     let pid = fork();
     if pid == 0 {
+		// Give the command and every descendant a private process group so a
+		// timed-out shell cannot leave background children behind.
+		if setpgid(0, 0) < 0 {
+			println!("[initproc] failed to create command process group");
+			exit(126);
+		}
         let shell_new = "/bin/bash\0";
         let shell_old = "/bash\0";
         let dash_c = "-c\0";
@@ -388,34 +394,69 @@ fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> 
         exit(127);
     }
     if pid > 0 {
-        let mut code = 0;
+        // Fail closed if the target-specific wait itself fails.  A zero
+        // initializer would turn ECHILD/EFAULT into a false command success.
+        let mut code = 127 << 8;
         let start_ms = get_time() as u64;
         let timeout_ms = timeout_secs.saturating_mul(1000);
+		let mut timed_out = false;
         loop {
-            reap_orphans();
+            // Do not call reap_orphans() while this child is outstanding:
+            // waitpid(-1, WNOHANG) may consume `pid` and discard its status
+            // before the target-specific wait below observes it.
             let ret = waitpid_wnohang(pid as isize, &mut code);
-            if ret == pid as isize || ret < 0 {
+            if ret == pid as isize {
+                break;
+            }
+            if ret < 0 {
+                println!(
+                    "[initproc] waitpid failed pid={} errno={}",
+                    pid,
+                    -ret
+                );
+                code = 127 << 8;
                 break;
             }
             if timeout_secs > 0 && (get_time() as u64).saturating_sub(start_ms) >= timeout_ms {
-                let _ = kill(pid as usize, SIGKILL);
-                loop {
-                    let ret2 = waitpid_wnohang(pid as isize, &mut code);
-                    if ret2 == pid as isize || ret2 < 0 {
-                        break;
-                    }
-                    sleep(10);
-                }
+				timed_out = true;
+				let pgid_arg = !(pid as usize) + 1;
+				let group_kill_ret = kill(pgid_arg, SIGKILL);
+				let child_kill_ret = kill(pid as usize, SIGKILL);
+				if group_kill_ret < 0 && child_kill_ret < 0 {
+					println!(
+						"[initproc] timeout kill failed pid={} group_errno={} child_errno={}",
+						pid,
+						-group_kill_ret,
+						-child_kill_ret
+					);
+				}
                 break;
             }
             sleep(10);
         }
-        // 目标进程已回收。但它在运行期间可能创建了大量子进程；
-        // 那些子进程在目标进程退出后成为 initproc 的孤儿，仍占用
-        // clone quota。若不清空就直接运行下一个测试，vfork 可能
-        // 因 quota 满而失败（EAGAIN → 退出码 127）。
-        drain_children();
-        return code;
+		// Never block indefinitely on descendants. Kill process-group
+		// stragglers and then wait, with a hard deadline, until initproc has no
+		// child left. This preserves the old clone-quota cleanup guarantee
+		// without restoring its unbounded wait. A failure to close the process
+		// tree is fatal: continuing would let a stale installer race the next
+		// command or the interactive shell.
+		let final_group_kill_ret = kill(!(pid as usize) + 1, SIGKILL);
+		if timed_out && final_group_kill_ret < 0 {
+			println!(
+				"[initproc] final process-group kill failed pid={} errno={}",
+				pid,
+				-final_group_kill_ret
+			);
+		}
+		if !drain_children_bounded(5_000) {
+			println!(
+				"[initproc] FATAL: command process tree pid={} did not quiesce",
+				pid
+			);
+			let _ = shutdown();
+			exit(124);
+		}
+		return if timed_out { 124 << 8 } else { code };
     }
     -1
 }
@@ -461,17 +502,23 @@ fn reap_orphans() {
     }
 }
 
-/// 阻塞等待所有子进程退出并回收（直到 ECHILD）
-fn drain_children() {
-    // 先非阻塞快速收一轮
-    reap_orphans();
-    // 再阻塞等待剩余还在运行的子进程
-    loop {
-        let mut status = 0i32;
-        if waitpid(!0, &mut status) < 0 {
-            break; // ECHILD — 真的没有子进程了
-        }
-    }
+/// Reap all children without allowing a failed or hostile command to stall
+/// PID 1 forever. Returning false is a fail-closed condition for the caller.
+fn drain_children_bounded(timeout_ms: u64) -> bool {
+	let start_ms = get_time() as u64;
+	loop {
+		let mut status = 0i32;
+		let ret = waitpid_wnohang(-1, &mut status);
+		if ret < 0 {
+			return true;
+		}
+		if (get_time() as u64).saturating_sub(start_ms) >= timeout_ms {
+			return false;
+		}
+		if ret == 0 {
+			sleep(10);
+		}
+	}
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -3803,7 +3850,55 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             "$root/usr/bin" "$root/var/cache/mango-python" \
             "$root/etc/apk/keys" "$root/etc/ssl/certs"
         chmod 1777 "$root/tmp"
-        [ -e "$root/bin/sh" ] || ln -s busybox "$root/bin/sh"
+
+        repair_busybox_sh() {
+            path=$1
+            target=$2
+			mutations=0
+			max_mutations=16
+			while :; do
+				listing=$(/bin/busybox mktemp /scratch/mango-bin-entries.XXXXXX) || return 1
+				if ! /bin/busybox ls -1A "$root/bin" > "$listing"; then
+					echo '[apk-persist-shell] failed to enumerate apk bin directory' >&2
+					/bin/busybox rm -f "$listing"
+					return 1
+				fi
+				count=$(/bin/busybox awk '$0 == "sh" { n++ } END { print n + 0 }' "$listing")
+				/bin/busybox rm -f "$listing"
+				case "$count" in *[!0-9]*|'')
+					echo '[apk-persist-shell] invalid apk bin enumeration result' >&2
+					return 1;;
+				esac
+
+				current_target=
+				if [ "$count" -gt 0 ]; then
+					if ! current_target=$(/bin/busybox readlink "$path"); then
+						echo "[apk-persist-shell] refusing unclassified entry $path" >&2
+						return 1
+					fi
+				fi
+
+				if [ "$count" -eq 1 ] && [ "$current_target" = "$target" ] && [ -x "$path" ]; then
+					return 0
+				fi
+				if [ "$mutations" -ge "$max_mutations" ]; then
+					break
+				fi
+
+				if [ "$count" -gt 0 ]; then
+					# readlink above proves that the lookup-selected entry is a
+					# symlink.  Remove exactly one legacy entry per iteration.
+					/bin/busybox rm -f "$path" || return 1
+				else
+					/bin/busybox ln -s "$target" "$path" || true
+				fi
+				mutations=$((mutations + 1))
+            done
+            echo "[apk-persist-shell] failed to repair $path" >&2
+            return 1
+        }
+
+        repair_busybox_sh "$root/bin/sh" busybox
 
         install_changed() {
             src=$1
@@ -3885,6 +3980,12 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             set -eu
             /sbin/apk info -e busybox >/dev/null
             /sbin/apk info -e zlib >/dev/null
+			[ "$(/bin/busybox readlink /bin/sh)" = busybox ]
+			verify_listing=$(/bin/busybox mktemp /tmp/mango-bin-entries.XXXXXX)
+			/bin/busybox ls -1A /bin > "$verify_listing"
+			sh_count=$(/bin/busybox grep -xc sh "$verify_listing")
+			/bin/busybox rm -f "$verify_listing"
+			[ "$sh_count" = 1 ]
             [ -r /etc/ssl/cert.pem ]
             [ -r /proc/net/resolv.conf ]
             [ -f /etc/resolv.conf ]
@@ -3896,8 +3997,8 @@ fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
             [ "$python_result" = PERSIST_STRICT_PYTHON_OK ]
             probe=/tmp/mango-persist-shell-probe
             echo ok > "$probe"
-            [ "$(cat "$probe")" = ok ]
-            rm -f "$probe"
+            [ "$(/bin/busybox cat "$probe")" = ok ]
+            /bin/busybox rm -f "$probe"
             /bin/busybox echo PERSIST_SHELL_OK
         ')
         [ "$result" = PERSIST_SHELL_OK ]
