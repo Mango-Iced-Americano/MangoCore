@@ -335,7 +335,14 @@ comp-gdb:
 #  L3 Kernel self-test (mango.mode=ktest)
 # ─────────────────────────────────────────────────────────
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
-ktest-run: $(INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ)
+KTEST_EXT4_IMG_LA ?= /tmp/mango-lwext4-ktest-la.img
+.PHONY: ktest-ext4-image
+ktest-ext4-image:
+	@truncate -s 64M $(KTEST_EXT4_IMG_LA)
+	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(KTEST_EXT4_IMG_LA)
+	@e2fsck -f -n $(KTEST_EXT4_IMG_LA) >/dev/null
+
+ktest-run: $(INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ) ktest-ext4-image
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@test -f $(LINKER_SCRIPT) || { echo "missing linker script: $(LINKER_SCRIPT)" >&2; exit 1; }
 	@cp -f $(LINKER_SCRIPT) src/hal/arch/loongarch64/linker.ld
@@ -351,28 +358,45 @@ endif
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
+		-drive if=none,file=$(KTEST_EXT4_IMG_LA),format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
 		-m 1024 \
 		-smp threads=1
+	@e2fsck -f -n $(KTEST_EXT4_IMG_LA)
 
 # ─────────────────────────────────────────────────────────
 #  L4 User-mode regression test (mango.mode=regression)
 # ─────────────────────────────────────────────────────────
 # Builds minimal initramfs with /init=regression_init and
-# /regression. Launches QEMU with NO disk drives. Parses
+# /regression. Launches QEMU with a disposable ext4 drive. Parses
 # console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
 REGRESSION_CMDLINE := mango.mode=regression
+REGRESSION_EXT4_IMG_LA ?= /tmp/mango-lwext4-regression-la.img
+REGRESSION_LOG_LA ?= /tmp/regression-la.log
+REGRESSION_STATUS_LA ?= /tmp/regression-la.status
+.PHONY: regression-ext4-image regression-run
 
-regression-run:
+regression-ext4-image:
+	@truncate -s 64M $(REGRESSION_EXT4_IMG_LA)
+	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(REGRESSION_EXT4_IMG_LA)
+	@e2fsck -f -n $(REGRESSION_EXT4_IMG_LA) >/dev/null
+
+regression-run: regression-ext4-image
 	@echo "[regression] Building la64 kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 qemu-system-loongarch64 \
+	@echo "[regression] Launching QEMU with disposable ext4 fixture (timeout 60s)..."
+	@{ timeout --foreground 60 qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
+		-drive file=$(REGRESSION_EXT4_IMG_LA),if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
 		-m 1024 \
-		-smp threads=1 2>&1 | tee /tmp/regression-la.log
-	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-la.log \
+			-smp threads=1; echo "$$?" > $(REGRESSION_STATUS_LA); } \
+			2>&1 | tee $(REGRESSION_LOG_LA)
+	@e2fsck -f -n $(REGRESSION_EXT4_IMG_LA)
+	@test "$$(cat $(REGRESSION_STATUS_LA))" -eq 0 \
+		&& grep -q "L4 REGRESSION RESULT: PASS" $(REGRESSION_LOG_LA) \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)

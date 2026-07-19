@@ -1,13 +1,20 @@
 ---
 title: "2K1000LA board/develop ext4 融合迁移计划"
 category: plan
-status: integration-validated-backup-pending
+status: runtime-validation-in-progress-crash-safety-blocked
 owner: MangoCore Team
 last_updated: 2026-07-18
 tags: [ext4, lwext4, migration, 2k1000la, ssd, branch]
 ---
 
 # 2K1000LA board/develop ext4 融合迁移计划
+
+> 2026-07-18 后续审计：本文件中的双架构 4/4 ktest 与 5/5 L4 结果属于融合提交
+> `78dd1c8c` 形成前的基线，不替代当前 inode-lifetime/2K bridge 补丁复验。当前 P4 与
+> regression fixture 无 journal，deferred unlink 也没有 on-disk orphan/replay，因此生产
+> SSD 切换保持阻塞。当前 dirty patch 已完成双架构 build、顶层 regression 6/6、namespace
+> 9/9、ext4 ktest 7/7 和正常关机镜像 fsck；覆盖矩阵与完整门禁见
+> [`ext4-lwext4-migration-audit-20260718.md`](ext4-lwext4-migration-audit-20260718.md)。
 
 ## 1. 目标与冻结基线
 
@@ -35,6 +42,11 @@ worktree 完成，最终只以 fast-forward 方式推进目标分支。
 6. 只有 `.part` 文件通过全部门禁后才原子改名为正式备份。
 
 备份失败或中断不影响源盘；失败的 `.part` 只能作为断点诊断材料，不能作为可恢复镜像。
+
+2026-07-18 本轮备份已经完成：原始镜像长度 `32,017,047,552` 字节，raw SHA-256 为
+`815df871d006032eec47c1fd1b44dded43ba4c2618a07bf8a1b49ae1de930b08`，zstd SHA-256 为
+`ea14dfabb08a9047d671eac0a300c8be8b0f5c7ad75c84b5bff1d38904ff3f95`；压缩流完整解压和
+首 1 MiB 对比通过。此项只解除“没有回滚副本”的 blocker，不解除实板写保护。
 
 ## 3. 新旧实现对比
 
@@ -72,6 +84,9 @@ worktree 完成，最终只以 fast-forward 方式推进目标分支。
   只解释约 23% 的 sys 时间，其余主要在 VFS、ext4、PageCache 和路径/元数据软件路径。
 - `ext4_lwext4` 带来更成熟的磁盘格式处理和 develop 的批量 I/O/DMA pool，但路径型
   FFI、重复 metadata probe、C 句柄 open/close 和每实例 Mutex 可能增加小文件固定成本。
+- 本轮保持连续 PageCache run 的批量提交和 aligned middle 直通；partial partition RMW、
+  per-inode I/O gate、generation/path 校验和全局 guard 是新增正确性税，预计主要影响
+  小文件、同 inode 并发和非对齐小写，而不是大块顺序 I/O。
 - 大块顺序 I/O 更可能从 batch PageCache、连续 DMA 和减少 512B fallback 中受益；
   小文件/目录项性能必须单独测量，不能由顺序吞吐外推。
 
@@ -140,6 +155,12 @@ L4 门禁还暴露并修复了 develop 自带的两个测试设施问题：`mpro
 用例曾违反页对齐前置条件，以及 PID1 直接 `exec` 后无人输出最终标记并关闭
 QEMU。修正后门禁由 Makefile 以退出码和 `L4 REGRESSION RESULT` 双重确认。
 
+当前 dirty patch 的重新验证另行归档在 `docs/Work_Log/evidence/2026-07-18/`：RV64/LA64
+`kernel-build-only` 均退出 0；两架构 regression 均为顶层 6/6、namespace 9/9；RV64
+全量 ktest 21/21，LA64 ext4-only 7/7。LA64 全量 ktest 另有一个既有
+`timer::tick_advances` 1 ms 取样失败，故如实记为 20/21。五份正常 teardown fixture 的
+`e2fsck -fn` 均完成 Pass 1-5 且无修复项。
+
 ### G3：实板只读验收
 
 - IDENTIFY 型号、容量和 MBR 与备份清单一致；
@@ -165,9 +186,9 @@ merge 原子提交，避免产生一个表面可编译但可写性说谎的中�
 
 ## 8. 完成定义
 
-当前状态是“代码融合 + 双架构 QEMU 已验证”，不是“实板迁移已完成”。
-SSD 全盘镜像正在宿主 `/Users/luzimo/dev/ssd-backups/` 流式备份，该流程完成
-前禁止融合内核对实板 SSD 做任何受控写入。另有一个独立语义边界待后续实现：
+当前状态是“代码融合 + 双架构 QEMU 专项 + 正常关机 fsck + SSD 备份已验证”，不是
+“实板迁移已完成”。备份位于宿主 `/Users/luzimo/dev/ssd-backups/`；尽管长度、双 hash
+和解压校验已经完成，融合内核仍不得对生产 P4 写入。另有一个独立语义边界待后续实现：
 `MS_REMOUNT|MS_BIND` 目前仍先进入 bind 路径，未实现 Linux 的 per-mount bind-remount
 策略更新；这与本轮明确拒绝 backend 读写模式切换是两个不同问题。
 

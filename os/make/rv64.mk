@@ -291,7 +291,14 @@ comp-gdb:
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
 # The kernel needs initramfs cpio (embedded via .S), so user
 # programs must be built first.
-ktest-run: $(INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ)
+KTEST_EXT4_IMG_RV ?= /tmp/mango-lwext4-ktest-rv.img
+.PHONY: ktest-ext4-image
+ktest-ext4-image:
+	@truncate -s 64M $(KTEST_EXT4_IMG_RV)
+	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(KTEST_EXT4_IMG_RV)
+	@e2fsck -f -n $(KTEST_EXT4_IMG_RV) >/dev/null
+
+ktest-run: $(INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ) ktest-ext4-image
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
 ifeq ($(MODE), debug)
@@ -308,26 +315,43 @@ endif
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-drive if=none,file=$(KTEST_EXT4_IMG_RV),format=raw,id=x0 \
+		$(BLK_DEV_x0) \
 		-m 1024 \
 		-smp threads=1
+	@e2fsck -f -n $(KTEST_EXT4_IMG_RV)
 
 # ─────────────────────────────────────────────────────────
 #  L4 User-mode regression test (mango.mode=regression)
 # ─────────────────────────────────────────────────────────
 REGRESSION_CMDLINE := mango.mode=regression
+REGRESSION_EXT4_IMG_RV ?= /tmp/mango-lwext4-regression-rv.img
+REGRESSION_LOG_RV ?= /tmp/regression-rv.log
+REGRESSION_STATUS_RV ?= /tmp/regression-rv.status
+.PHONY: regression-ext4-image regression-run
 
-regression-run:
+regression-ext4-image:
+	@truncate -s 64M $(REGRESSION_EXT4_IMG_RV)
+	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(REGRESSION_EXT4_IMG_RV)
+	@e2fsck -f -n $(REGRESSION_EXT4_IMG_RV) >/dev/null
+
+regression-run: regression-ext4-image
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 qemu-system-riscv64 \
+	@echo "[regression] Launching QEMU with disposable ext4 fixture (timeout 60s)..."
+	@{ timeout --foreground 60 qemu-system-riscv64 \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-drive file=$(REGRESSION_EXT4_IMG_RV),if=none,format=raw,id=x0 \
+		$(BLK_DEV_x0) \
 		-m 1024 \
-		-smp threads=1 2>&1 | tee /tmp/regression-rv.log
-	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
+			-smp threads=1; echo "$$?" > $(REGRESSION_STATUS_RV); } \
+			2>&1 | tee $(REGRESSION_LOG_RV)
+	@e2fsck -f -n $(REGRESSION_EXT4_IMG_RV)
+	@test "$$(cat $(REGRESSION_STATUS_RV))" -eq 0 \
+		&& grep -q "L4 REGRESSION RESULT: PASS" $(REGRESSION_LOG_RV) \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)

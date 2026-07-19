@@ -9,16 +9,14 @@
 //! For batching, `read_pages`/`write_pages` open once and do sequential I/O.
 
 use alloc::sync::{Arc, Weak};
-use alloc::string::String;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PAGE_SIZE;
 use crate::fs::page_cache::PageCacheBackend;
 use crate::utils::error::SyscallErr;
 
-use lwext4_rust::{Ext4File, InodeTypes};
-
 use super::errno::from_lwext4;
+use super::inode_state::Ext4InodeState;
 
 /// Sentinel: size has not been fetched from lwext4 yet.
 /// usize::MAX is chosen because no real file can be > 2^64 bytes,
@@ -33,11 +31,8 @@ pub(crate) const LWEXT4_SIZE_UNKNOWN: usize = usize::MAX;
 pub struct LwExt4PageCacheBackend {
     /// Weak reference to the owning filesystem (for lwext4 C call serialization)
     fs: Weak<super::ext4fs::Ext4FileSystem>,
-    /// Full path from mount root, e.g. "/bin/busybox"
-    path: String,
-    /// lwext4-internal path with mount point prefix, e.g. "/e1/bin/busybox".
-    /// Pre-computed at construction time from `fs.lw_path(&path)`.
-    lw_path: String,
+    /// Shared inode identity/path/open-handle state.
+    state: Arc<Ext4InodeState>,
     /// Shared logical file size — writeback clamps to this to prevent
     /// 1-byte writes from producing 4KB files. Lazily refreshed on first I/O.
     logical_size: Arc<AtomicUsize>,
@@ -50,14 +45,12 @@ impl LwExt4PageCacheBackend {
     /// `LWEXT4_SIZE_UNKNOWN` and is lazily refreshed on first I/O.
     pub fn new(
         fs: Weak<super::ext4fs::Ext4FileSystem>,
-        path: String,
-        logical_size: Arc<AtomicUsize>,
-        lw_path: String,
+        state: Arc<Ext4InodeState>,
     ) -> Self {
+        let logical_size = state.logical_size();
         Self {
             fs,
-            path,
-            lw_path,
+            state,
             logical_size,
         }
     }
@@ -87,15 +80,10 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         }
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let offset = index * PAGE_SIZE;
-        let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        f.file_open(&self.lw_path, 0x0)
-            .map_err(|e| from_lwext4(e.abs()))?;
-        // Snapshot physical EOF from lwext4 — NOT the shared logical_size which
-        // may reflect VFS-level extensions that lwext4 hasn't materialized.
-        let physical_eof = f.file_size() as usize;
-        // Use closure to ensure file_close() on all error paths
-        let result = (|| -> Result<usize, SyscallErr> {
+        self.state.with_file(&fs, false, |f| {
+            // Snapshot physical EOF from lwext4 — NOT the shared logical_size
+            // which may reflect VFS-level extensions not yet materialized.
+            let physical_eof = f.file_size() as usize;
             if offset >= physical_eof {
                 // Page wholly beyond physical EOF — pure hole, zero-fill
                 buf[..PAGE_SIZE].fill(0);
@@ -103,17 +91,15 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
             }
             let physical_len = PAGE_SIZE.min(physical_eof - offset);
             f.file_seek(offset as i64, 0)
-                .map_err(|e| from_lwext4(e.abs()))?;
+                .map_err(|error| from_lwext4(error.abs()))?;
             let n = f.file_read(&mut buf[..physical_len])
-                .map_err(|e| from_lwext4(e.abs()))?;
+                .map_err(|error| from_lwext4(error.abs()))?;
             // Zero-fill the remainder of the page (tail of last partial page)
             if n < PAGE_SIZE {
                 buf[n..PAGE_SIZE].fill(0);
             }
             Ok(PAGE_SIZE)
-        })();
-        f.file_close().ok();
-        result
+        })
     }
 
     fn write_page(&self, index: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
@@ -121,27 +107,44 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
             return Err(SyscallErr::ENOBUFS);
         }
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
-        let offset = index * PAGE_SIZE;
-        let write_len = PAGE_SIZE.min(buf.len());
-        let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        // Try O_RDWR ("r+") first, fall back to O_RDWR|O_CREAT|O_TRUNC ("w+")
-        if f.file_open(&self.lw_path, 0x2).is_err() {
-            f.file_open(&self.lw_path, 0x242)
-                .map_err(|e| from_lwext4(e.abs()))?;
+        let offset = index.checked_mul(PAGE_SIZE).ok_or(SyscallErr::EFBIG)?;
+        let raw_len = PAGE_SIZE.min(buf.len());
+        let eof = self.logical_size.load(Ordering::Relaxed);
+        let write_len = if eof == LWEXT4_SIZE_UNKNOWN {
+            raw_len
+        } else {
+            raw_len.min(eof.saturating_sub(offset))
+        };
+        if write_len == 0 {
+            // A dirty page outside the published EOF is a caller-ordering
+            // violation.  Do not report success and silently discard it.
+            return Err(SyscallErr::EIO);
         }
-        // Use closure to ensure file_close() on all error paths
-        let result = (|| -> Result<usize, SyscallErr> {
+        self.state.with_file(&fs, true, |f| {
+            if offset > f.file_size() as usize {
+                f.file_truncate(offset as u64)
+                    .map_err(|error| from_lwext4(error.abs()))?;
+            }
             f.file_seek(offset as i64, 0)
-                .map_err(|e| from_lwext4(e.abs()))?;
+                .map_err(|error| from_lwext4(error.abs()))?;
             let n = f.file_write(&buf[..write_len])
-                .map_err(|e| from_lwext4(e.abs()))?;
+                .map_err(|error| from_lwext4(error.abs()))?;
+            if n != write_len {
+                return Err(SyscallErr::EIO);
+            }
+            // The wrapper keeps lwext4's block cache in write-back mode for
+            // the lifetime of the mount.  Partial data blocks therefore stay
+            // in that lower cache after ext4_fwrite() returns.  A successful
+            // PageCacheBackend write must nevertheless be visible after the
+            // upper PageCache evicts this page, because ext4_fread() performs
+            // direct block reads.  Flush before allowing PageCache to mark
+            // the page clean.
+            f.file_cache_flush()
+                .map_err(|error| from_lwext4(error.abs()))?;
             // fetch_max: update logical_size if we extended the file
             Self::note_logical_size_atomic(&self.logical_size, offset + n);
             Ok(n)
-        })();
-        f.file_close().ok();
-        result
+        })
     }
 
     fn read_pages(
@@ -151,15 +154,10 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
     ) -> Result<usize, SyscallErr> {
         crate::task::perf::record_pc_miss();
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
-        let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        f.file_open(&self.lw_path, 0x0)
-            .map_err(|e| from_lwext4(e.abs()))?;
-        // Snapshot physical EOF from lwext4 once — avoid seeking/reading past
-        // it for pages that map to holes beyond lwext4's actual inode size.
-        let physical_eof = f.file_size() as usize;
-        // Use closure to ensure file_close() on all error paths
-        let result = (|| -> Result<usize, SyscallErr> {
+        self.state.with_file(&fs, false, |f| {
+            // Snapshot physical EOF from lwext4 once — avoid seeking/reading
+            // past it for pages that map to holes beyond actual inode size.
+            let physical_eof = f.file_size() as usize;
             for (i, page) in pages.iter_mut().enumerate() {
                 let page_offset = (start_index + i) * PAGE_SIZE;
                 if page_offset >= physical_eof {
@@ -169,9 +167,9 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 } else {
                     let physical_len = PAGE_SIZE.min(physical_eof - page_offset);
                     f.file_seek(page_offset as i64, 0)
-                        .map_err(|e| from_lwext4(e.abs()))?;
+                        .map_err(|error| from_lwext4(error.abs()))?;
                     let n = f.file_read(&mut page[..physical_len])
-                        .map_err(|e| from_lwext4(e.abs()))?;
+                        .map_err(|error| from_lwext4(error.abs()))?;
                     if n < PAGE_SIZE {
                         let page_len = page.len();
                         page[n..PAGE_SIZE.min(page_len)].fill(0);
@@ -179,9 +177,7 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 }
             }
             Ok(pages.len() * PAGE_SIZE)
-        })();
-        f.file_close().ok();
-        result
+        })
     }
 
     fn write_pages(
@@ -190,14 +186,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         pages: &[&[u8]],
     ) -> Result<usize, SyscallErr> {
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
-        let _lock = fs.lw.lock();
-        let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        if f.file_open(&self.lw_path, 0x2).is_err() {
-            f.file_open(&self.lw_path, 0x242)
-                .map_err(|e| from_lwext4(e.abs()))?;
-        }
         let start_offset = start_index * PAGE_SIZE;
-        let result = (|| -> Result<usize, SyscallErr> {
+        self.state.with_file(&fs, true, |f| {
             // Compute total raw bytes from all pages
             let raw_total: usize = pages.iter().map(|p| PAGE_SIZE.min(p.len())).sum();
             // Clamp to logical EOF to avoid writing a full page for a partial last page
@@ -217,9 +207,10 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                     log::warn!(
                         "[lwext4-wb] skipping dirty writeback for {}: \
                          EOF={} but {} dirty bytes at offset {} ({} pages)",
-                        self.lw_path, eof, raw_total, start_offset,
+                        self.state.inode_id(), eof, raw_total, start_offset,
                         pages.len()
                     );
+                    return Err(SyscallErr::EIO);
                 }
                 return Ok(0);
             }
@@ -238,29 +229,38 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 copied += n;
             }
 
+            if start_offset > f.file_size() as usize {
+                f.file_truncate(start_offset as u64)
+                    .map_err(|error| from_lwext4(error.abs()))?;
+            }
             f.file_seek(start_offset as i64, 0)
-                .map_err(|e| from_lwext4(e.abs()))?;
+                .map_err(|error| from_lwext4(error.abs()))?;
             let n = f.file_write(&staging[..total_bytes])
-                .map_err(|e| from_lwext4(e.abs()))?;
+                .map_err(|error| from_lwext4(error.abs()))?;
+            if n != total_bytes {
+                return Err(SyscallErr::EIO);
+            }
+
+            // See write_page(): this is one flush per contiguous writeback
+            // batch, not one flush per page.  Returning success before this
+            // point would let an upper-cache eviction expose stale disk data.
+            f.file_cache_flush()
+                .map_err(|error| from_lwext4(error.abs()))?;
 
             // Single logical_size update for entire batch
             Self::note_logical_size_atomic(&self.logical_size, start_offset + n);
             Ok(n)
-        })();
-        f.file_close().ok();
-        result
+        })
     }
 
     fn npages(&self) -> usize {
         // Refresh size from lwext4 on first call
         if self.logical_size.load(Ordering::Relaxed) == LWEXT4_SIZE_UNKNOWN {
             if let Some(fs) = self.fs.upgrade() {
-                let _lock = fs.lw.lock();
-                let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
-                if f.file_open(&self.lw_path, 0x0).is_ok() {
-                    let s = f.file_size() as usize;
+                if let Ok(s) = self.state.with_file(&fs, false, |file| {
+                    Ok(file.file_size() as usize)
+                }) {
                     self.logical_size.store(s, Ordering::Relaxed);
-                    f.file_close().ok();
                 }
             }
         }

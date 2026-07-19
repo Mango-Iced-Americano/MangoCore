@@ -448,6 +448,10 @@ struct ReadPlan {
 ///
 /// 为 inode 提供页面级别的缓存，管理内存中的文件数据副本。
 pub struct PageCache {
+    /// Serializes page-state transitions that must be atomic with backend
+    /// writeback/truncate.  In particular, truncate must not race a writeback
+    /// after it has changed Dirty -> Writeback but before backend I/O starts.
+    io_gate: Mutex<()>,
     /// 内部状态
     inner: Mutex<InnerPageCache>,
     /// 缓存后端
@@ -466,6 +470,7 @@ impl PageCache {
     /// 创建一个不含 backend 和 inode 关联的空 PageCache，自动注册到全局列表。
     pub fn new() -> Arc<Self> {
         let pc = Arc::new(PageCache {
+            io_gate: Mutex::new(()),
             inner: Mutex::new(InnerPageCache::new()),
             backend: Mutex::new(None),
             inode: Mutex::new(None),
@@ -986,6 +991,10 @@ impl PageCache {
     /// Fill contiguous missing page runs using backend.read_pages().
     /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
     fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
+        // Publish-after-I/O must serialize with truncate. Otherwise a read
+        // started before backend truncation could publish stale pages after
+        // truncate already pruned the cache.
+        let _io = self.io_gate.lock();
         let backend = self.backend().ok_or(SyscallErr::EIO)?;
         let backend_npages = backend.npages();
 
@@ -1198,6 +1207,35 @@ impl PageCache {
         buf: &[u8],
         old_file_size: Option<usize>,
     ) -> Result<usize, SyscallErr> {
+        let result = {
+            let _io = self.io_gate.lock();
+            self.write_without_balance(offset, buf, old_file_size)
+        };
+        if result.is_ok() {
+            balance_dirty_pages();
+        }
+        result
+    }
+
+    /// Execute an inode-level operation while excluding PageCache writers and
+    /// the complete Dirty -> Writeback -> completion transition.
+    pub(crate) fn with_io_gate<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, SyscallErr>,
+    ) -> Result<T, SyscallErr> {
+        let _io = self.io_gate.lock();
+        operation()
+    }
+
+    /// PageCache write body for callers that already hold `io_gate` and need
+    /// to publish inode EOF in the same serialization interval.  Dirty-page
+    /// balancing must run only after the caller releases the gate.
+    pub(crate) fn write_without_balance(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         if buf.is_empty() {
             perf::record_pc_write(
@@ -1230,7 +1268,6 @@ impl PageCache {
                 full_page_overwrite,
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
             );
-            balance_dirty_pages();
             return Ok(sub_len);
         }
 
@@ -1295,7 +1332,6 @@ impl PageCache {
             any_full_overwrite,
             perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
         );
-        balance_dirty_pages();
         Ok(total_written)
     }
 
@@ -1509,6 +1545,11 @@ impl PageCache {
             return Ok(0);
         }
 
+        // Readahead uses the same publish-after-I/O pattern as batch misses.
+        // Order it against truncate so old backend data cannot be published
+        // after cache pruning has completed.
+        let _io = self.io_gate.lock();
+
         let backend = match self.backend() {
             Some(b) => b,
             None => return Ok(0),
@@ -1584,13 +1625,20 @@ impl PageCache {
             let mut entries = self.entries.lock();
             let mut inner = self.inner.lock();
             for p in &pending {
-                p.entry.set_state(PageState::UpToDate);
                 // 扩展 entries 数组
                 while entries.len() <= p.index {
                     entries.push(None);
                 }
-                entries[p.index] = Some(p.entry.clone());
-                inner.pages.insert(p.index);
+                // A fault/direct reader can populate (and even dirty) this
+                // slot while readahead I/O is in flight because those paths
+                // intentionally do not take io_gate.  Never overwrite that
+                // winner: doing so would detach its dirty data while leaving
+                // dirty accounting pointed at this index.
+                if entries[p.index].is_none() {
+                    p.entry.set_state(PageState::UpToDate);
+                    entries[p.index] = Some(p.entry.clone());
+                    inner.pages.insert(p.index);
+                }
             }
         }
 
@@ -1645,6 +1693,7 @@ impl PageCache {
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
+        let _io = self.io_gate.lock();
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let entry = {
             let entries = self.entries.lock();
@@ -1685,7 +1734,17 @@ impl PageCache {
 
         let result = if let Some(backend) = self.backend() {
             // 写回前确保所有 segment 有效（填充部分写入的页面空洞）
-            self.ensure_fully_valid(page_index)?;
+            if let Err(error) = self.ensure_fully_valid(page_index) {
+                // Dirty -> Writeback accounting has already been committed.
+                // A populate failure must make the page retryable instead of
+                // leaving it permanently stranded in Writeback.
+                entry.test_and_clear_flag(PG_REDIRTIED);
+                entry.set_state(PageState::Dirty);
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
+                self.inner.lock().mark_dirty(page_index);
+                return Err(error);
+            }
             let data = entry.as_slice();
             let result = backend.write_page(page_index, data);
             match result {
@@ -1737,6 +1796,7 @@ impl PageCache {
     /// 非 Dirty 的页面被跳过。批次中至少一个页面被写入时，调用
     /// `backend.write_pages()` 批量提交；否则直接返回 Ok。
     fn writeback_pages_run(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
+        let _io = self.io_gate.lock();
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
 
         // 第一阶段：持有 entries 锁，收集 Dirty 页面，CAS 为 Writeback
@@ -1772,49 +1832,19 @@ impl PageCache {
             }
         }
 
-        // 写回前确保所有 segment 有效（填充部分写入的页面空洞）
-        for (idx, _) in &page_slices {
-            self.ensure_fully_valid(*idx)?;
-        }
-
-        // 构建连续的 &[u8] 切片（start 即为第一个 Dirty 页的实际索引）
-        // Invariant: 调用者保证该范围内不存在非 Dirty 页空洞，否则需拆分 run。
-        let actual_start = page_slices[0].0;
-        let slices: Vec<&[u8]> = page_slices.iter().map(|(_, e)| e.as_slice()).collect();
-
-        let result = if let Some(backend) = self.backend() {
-            let write_result = backend.write_pages(actual_start, &slices);
-            match write_result {
-                Ok(_) => {
-                    let mut inner = self.inner.lock();
-                    for (idx, entry) in &page_slices {
-                        if entry.test_and_clear_flag(PG_REDIRTIED) {
-                            // Redirtied during writeback → restore to Dirty
-                            entry.set_state(PageState::Dirty);
-                            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                            inner.mark_dirty(*idx);
-                        } else {
-                            entry.set_state(PageState::UpToDate);
-                        }
-                        GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    Ok(())
-                }
-                Err(e) => {
-                    // 写回失败：恢复为 Dirty 状态以便重试
-                    let mut inner = self.inner.lock();
-                    for (idx, entry) in &page_slices {
-                        entry.set_state(PageState::Dirty);
-                        GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                        GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                        inner.mark_dirty(*idx);
-                    }
-                    Err(e)
-                }
-            }
-        } else {
+        let restore_dirty = |pages: &[(usize, Arc<PageEntry>)]| {
             let mut inner = self.inner.lock();
-            for (idx, entry) in &page_slices {
+            for (idx, entry) in pages {
+                entry.test_and_clear_flag(PG_REDIRTIED);
+                entry.set_state(PageState::Dirty);
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
+                inner.mark_dirty(*idx);
+            }
+        };
+        let complete_writeback = |pages: &[(usize, Arc<PageEntry>)]| {
+            let mut inner = self.inner.lock();
+            for (idx, entry) in pages {
                 if entry.test_and_clear_flag(PG_REDIRTIED) {
                     entry.set_state(PageState::Dirty);
                     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -1824,11 +1854,53 @@ impl PageCache {
                 }
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
             }
+        };
+
+        // 写回前确保所有 segment 有效（填充部分写入的页面空洞）。
+        // Any populate failure must roll every page out of Writeback state.
+        for (idx, _) in &page_slices {
+            if let Err(error) = self.ensure_fully_valid(*idx) {
+                restore_dirty(&page_slices);
+                return Err(error);
+            }
+        }
+
+        let result = if let Some(backend) = self.backend() {
+            // CAS may have skipped a page that another writer already owns.
+            // Split the pages actually acquired into contiguous sub-runs so
+            // later pages can never be shifted onto an earlier file offset.
+            let mut cursor = 0;
+            let mut result = Ok(());
+            while cursor < page_slices.len() {
+                let mut end = cursor + 1;
+                while end < page_slices.len()
+                    && page_slices[end].0 == page_slices[end - 1].0 + 1
+                {
+                    end += 1;
+                }
+                let run = &page_slices[cursor..end];
+                let slices: Vec<&[u8]> = run
+                    .iter()
+                    .map(|(_, entry)| entry.as_slice())
+                    .collect();
+                match backend.write_pages(run[0].0, &slices) {
+                    Ok(_) => complete_writeback(run),
+                    Err(error) => {
+                        restore_dirty(&page_slices[cursor..]);
+                        result = Err(error);
+                        break;
+                    }
+                }
+                cursor = end;
+            }
+            result
+        } else {
+            complete_writeback(&page_slices);
             Ok(())
         };
 
         perf::record_pc_writeback(
-            slices.len(),
+            page_slices.len(),
             perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
         );
         result
@@ -1945,25 +2017,90 @@ impl PageCache {
 
     /// 截断 page cache 到指定大小
     pub fn truncate(&self, new_size: usize) -> Result<(), SyscallErr> {
-        let hole_start_page = (new_size + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+        self.truncate_with_backend(new_size, || Ok(()))
+    }
 
-        // 收集需要移除的页面索引
-        let to_remove: Vec<usize> = {
+    /// Atomically order a persistent truncate between PageCache writeback and
+    /// ordinary cached writes.  `persistent` runs only after confirming that
+    /// no page in the discarded range is already in Writeback; cache removal
+    /// is committed only after the backend operation succeeds.
+    pub(crate) fn truncate_with_backend(
+        &self,
+        new_size: usize,
+        persistent: impl FnOnce() -> Result<(), SyscallErr>,
+    ) -> Result<(), SyscallErr> {
+        let _io = self.io_gate.lock();
+        let hole_start_page = new_size.div_ceil(PAGE_SIZE);
+
+        // Never detach a page while a backend write still owns it: that I/O
+        // could complete after the on-disk truncate and extend the file again.
+        // Callers may retry once the synchronous writeback finishes.
+        {
             let entries = self.entries.lock();
-            (hole_start_page..entries.len()).collect()
-        };
+            if entries[hole_start_page.min(entries.len())..]
+                .iter()
+                .flatten()
+                .any(|entry| entry.state() == PageState::Writeback)
+            {
+                return Err(SyscallErr::EBUSY);
+            }
+        }
+
+        // No writer/writeback can cross io_gate, so the preflight remains
+        // valid while persistent storage is changed and the cache is pruned.
+        persistent()?;
 
         let mut entries = self.entries.lock();
         let mut inner = self.inner.lock();
-        for page_index in to_remove {
-            if page_index < entries.len() {
-                entries[page_index] = None;
+
+        for page_index in hole_start_page..entries.len() {
+            if let Some(entry) = entries[page_index].take() {
+                if entry.state() == PageState::Dirty {
+                    GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+                }
+                inner.pages.remove(&page_index);
+                inner.dirty_pages.remove(&page_index);
             }
-            inner.pages.remove(&page_index);
-            inner.dirty_pages.remove(&page_index);
+        }
+
+        // Keep a retained cache page coherent with the new EOF.  These bytes
+        // are outside the file and must read as zero after a later extension.
+        let offset_in_page = new_size & (PAGE_SIZE - 1);
+        if offset_in_page > 0 {
+            let tail_page = new_size / PAGE_SIZE;
+            if let Some(Some(entry)) = entries.get(tail_page) {
+                entry.as_slice_mut()[offset_in_page..].fill(0);
+            }
         }
 
         Ok(())
+    }
+
+    /// Roll back cache pages created by a failed file extension.
+    ///
+    /// Unlike normal truncate, this helper only discards pages that are not
+    /// already in writeback.  A failed `PageCache::write()` returns before it
+    /// invokes dirty balancing, so extension-only pages are normally Dirty;
+    /// accounting must be undone when those speculative pages are removed.
+    pub(crate) fn rollback_failed_extension(&self, restored_size: usize) {
+        let first_discard = restored_size.div_ceil(PAGE_SIZE);
+        let mut entries = self.entries.lock();
+        let mut inner = self.inner.lock();
+        for page_index in first_discard..entries.len() {
+            let removable = entries[page_index]
+                .as_ref()
+                .is_some_and(|entry| entry.state() != PageState::Writeback);
+            if !removable {
+                continue;
+            }
+            if let Some(entry) = entries[page_index].take() {
+                if entry.state() == PageState::Dirty {
+                    GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+                }
+                inner.pages.remove(&page_index);
+                inner.dirty_pages.remove(&page_index);
+            }
+        }
     }
 
     /// 收集所有页面的 FrameTracker，用于内核空间映射

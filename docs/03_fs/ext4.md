@@ -4,7 +4,7 @@ module: "fs/ext4"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-15"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/ext4/"
   - "os/src/fs/filesystem.rs"
@@ -39,6 +39,7 @@ tests:
     - "libctest"
     - "iozone"
 related_docs:
+  - "docs/10_plan/ext4-lwext4-migration-audit-20260718.md"
   - "docs/03_fs/architecture.md"
   - "docs/03_fs/vfs-core.md"
   - "docs/03_fs/page-cache.md"
@@ -47,6 +48,11 @@ related_docs:
 ---
 
 ## 概述
+
+> 本文主体描述仍保留的 legacy 纯 Rust `os/src/fs/ext4/`，不代表当前
+> `ext4_lwext4` 融合候选的实现细节或生产状态。新旧差异、onboard 修正覆盖、性能判断、
+> 双架构专项证据和 journal/orphan blocker 见
+> [`ext4-lwext4-migration-audit-20260718.md`](../10_plan/ext4-lwext4-migration-audit-20260718.md)。
 
 Ext4 是 MangoCore 的主力持久化文件系统。它直接运行在块设备之上（virtio-blk），实现了 Linux ext4 格式的核心子集，包括 extent 树、稀疏文件、符号链接、硬链接、目录项缓存和元数据块缓存。所有 I/O 路径在 VFS 层通过 PageCache 缓存，写操作在 PageCache 回写时同步到块设备。
 

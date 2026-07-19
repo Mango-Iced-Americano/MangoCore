@@ -1039,3 +1039,36 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 - **修复**：regular file 创建成功并取得真实 inode number 后，仅移除该 key 的 registry entry；旧 inode 持有的 `Arc<PageCache>` 继续有效，新 inode 则创建独立 cache。不能在普通 lookup 或 rename 中全局清缓存。
 - **教训**：缓存 key 若采用可复用的底层 ID，必须在对象 incarnation 边界解除旧 key→cache 映射；“后续 case 不创建 cache + 单跑通过”比偏移周期更能区分身份污染与底层读取算法错误。
 - **相关文件**：`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/ltprunner/lwext4_perf/`
+
+## extent 范围删除的起点位于 hole 时不能直接判定为空操作
+
+- **现象**：稀疏文件的 truncate/unlink 在运行期返回成功，inode 和目录项都消失，但
+  离线 `e2fsck -fn` 报 block bitmap 多占用；泄漏的物理块属于首 extent 之前有 hole，
+  或 range 起点位于两个 extent 之间的文件。
+- **根因**：extent binsearch 往往返回“相邻候选”，不保证 query block 被该 extent 覆盖。
+  删除器只检查 `from` 是否落在返回 extent 内，若不覆盖就返回成功，会跳过 range 内的
+  下一已分配 extent。随后 inode bitmap 已释放，块 bitmap 却仍置位。
+- **修复**：若候选 extent 起点大于 `from`，把 `from` 归一化到该起点；若候选结束小于
+  `from`，显式查找下一 allocated block，确认仍在 `to` 内后重新构造 extent path。leaf
+  remove 和底层 free 的错误必须继续向上传播。
+- **门禁**：至少覆盖 leading hole、同 leaf inter-extent hole、跨 leaf hole、next extent
+  超出 `to`、after-last no-op；不能只看冷 reopen 数据，还要正常 teardown 后逐镜像 fsck。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_extent.c`、
+  `user/src/bin/regression/regression_lwext4_truncate_hole.rs`
+
+## 文件系统测试 PASS 必须包含后端 teardown 与离线一致性
+
+- **现象**：TAP/用户回归全绿且 QEMU 已 halt，但 fixture 的 superblock summary 或 bitmap
+  仍是旧值；若 ktest 直接调用 HAL shutdown，lwext4 挂载级 writeback cache 不会因为单个
+  inode close 自动提交。
+- **根因**：测试断言只覆盖内核内存态；PageCache flush、C block cache、journal stop、
+  superblock 更新和设备 detach 是另一条可失败事务。进程 PASS 早于这条事务时，日志会
+  给出假绿。
+- **修复**：统一执行 PageCache writeback → filesystem sync → 可失败 `on_umount()` →
+  backend detach → HAL halt；最终 PASS marker 放在 teardown 成功之后。失败 backend 保持
+  Dying 并重试，回调期间不得持 lifecycle registry 锁。
+- **门禁**：每轮使用全新 disposable fixture，保留完整串口、QEMU status、最终 marker、
+  container/mount 元数据；关机后再运行只读 `e2fsck -fn`。容器 exit 0 不能覆盖 TAP 中的
+  semantic FAIL。
+- **相关文件**：`os/src/fs/vfs/file_system.rs`、`os/src/fs/vfs/mount.rs`、
+  `os/src/kernel_tests/runner.rs`、`os/src/syscall/process/misc.rs`

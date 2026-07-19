@@ -1,0 +1,38 @@
+No os_test.conf was injected. These are isolated kernel/user regression gates,
+not the competition suite runner.
+
+Docker:
+  image: zhouzhouyi/os-contest:20260104
+  platform: linux/amd64
+  mount: /Users/luzimo/dev/MangoCore -> /app
+  workdir: /app
+  host block devices: none
+
+RV64 regression:
+  kernel cmdline: mango.mode=regression
+  machine: qemu-system-riscv64 -machine virt -m 1024 -smp threads=1
+  timeout: 60s
+  fixture: 64 MiB, ext4, 4096-byte fs block, 0% reserved, ^has_journal
+
+LA64 regression:
+  kernel cmdline: mango.mode=regression
+  machine: qemu-system-loongarch64 -machine virt -m 1024 -smp threads=1
+  timeout: 60s
+  fixture: 64 MiB, ext4, 4096-byte fs block, 0% reserved, ^has_journal
+
+Kernel tests:
+  all cmdline: mango.mode=ktest mango.test=all mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0
+  ext4 cmdline: mango.mode=ktest mango.test=ext4 mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0
+  QEMU timeout: 30s
+  fixture: 64 MiB, ext4, 4096-byte fs block, 0% reserved, ^has_journal
+
+Offline consistency check:
+  e2fsck 1.47.0
+  flags: -f -n
+  images: rv64-regression, rv64-ktest, la64-regression, la64-ktest,
+          la64-ktest-ext4
+
+Safety boundary:
+  Every disk image is a disposable regular file under this evidence directory.
+  No /dev node, physical SSD, board serial session, or board network session was
+  passed to any container.

@@ -136,8 +136,14 @@ pub trait FileSystem: Any + Send + Sync + Debug {
         FsPermissionPolicy::Dac
     }
 
-    /// 卸载后回调
-    fn on_umount(&self) {}
+    /// 卸载后回调。
+    ///
+    /// 后端必须在所有必要的写回和资源脱钩都成功后才返回
+    /// `Ok(())`。返回错误时，VFS 会保留后端的 `Dying` 状态并在后续
+    /// drain 中重试，避免将尚未完全卸载的文件系统误标为 `Dead`。
+    fn on_umount(&self) -> Result<(), SyscallErr> {
+        Ok(())
+    }
 
     /// 转换为 Any 引用（用于向下转型）
     fn as_any_ref(&self) -> &dyn Any;

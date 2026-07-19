@@ -486,11 +486,11 @@ Error:
  * @return standard error code*/
 int jbd_put_fs(struct jbd_fs *jbd_fs)
 {
-	int rc = EOK;
-	rc = jbd_write_sb(jbd_fs);
+	int rc = jbd_write_sb(jbd_fs);
+	if (rc != EOK)
+		return rc;
 
-	ext4_fs_put_inode_ref(&jbd_fs->inode_ref);
-	return rc;
+	return ext4_fs_put_inode_ref(&jbd_fs->inode_ref);
 }
 
 /**@brief  Data block lookup helper.

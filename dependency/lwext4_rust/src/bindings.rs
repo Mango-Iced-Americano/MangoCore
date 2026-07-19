@@ -1774,6 +1774,29 @@ extern "C" {
     pub fn ext4_fremove(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
 }
 extern "C" {
+    pub fn ext4_fremove2(
+        path: *const ::core::ffi::c_char,
+        defer_inode_free: bool,
+        inode_out: *mut u32,
+        links_out: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_fremove_finalize(file: *mut ext4_file) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_file_inode_generation(
+        file: *mut ext4_file,
+        generation_out: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_flink_from_file(
+        file: *mut ext4_file,
+        path: *const ::core::ffi::c_char,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
     #[doc = "@brief   Create a hardlink for a file.\n\n @param   path Path to file.\n @param   hardlink_path Path of hardlink.\n\n @return  Standard error code."]
     pub fn ext4_flink(
         path: *const ::core::ffi::c_char,
@@ -1969,6 +1992,9 @@ extern "C" {
 extern "C" {
     #[doc = "@brief   Recursive directory remove.\n\n @param   path Directory path to remove\n\n @return  Standard error code."]
     pub fn ext4_dir_rm(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_dir_rm_empty(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
 }
 extern "C" {
     #[doc = "@brief Rename/move directory.\n\n @param path     Source path.\n @param new_path Destination path.\n\n @return  Standard error code."]

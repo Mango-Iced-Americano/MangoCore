@@ -169,6 +169,75 @@ impl Ext4File {
         Ok(EOK as usize)
     }
 
+    /// Remove a directory entry, optionally keeping a zero-link inode alive
+    /// for an already-open descriptor.  Returns `(inode, remaining_links)`.
+    pub fn file_remove_deferred(
+        &mut self,
+        path: &str,
+        defer_inode_free: bool,
+    ) -> Result<(u32, u32), i32> {
+        let c_path = CString::new(path).expect("CString::new failed");
+        let c_path = c_path.into_raw();
+        let mut inode = 0u32;
+        let mut links = 0u32;
+        let r = unsafe {
+            ext4_fremove2(c_path, defer_inode_free, &mut inode, &mut links)
+        };
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        if r != EOK as i32 {
+            error!("ext4_fremove2 error: rc = {}", r);
+            return Err(r);
+        }
+        Ok((inode, links))
+    }
+
+    /// Finish truncating/freeing an inode whose last directory entry was
+    /// removed while this descriptor remained open.
+    pub fn file_finalize_unlinked(&mut self) -> Result<usize, i32> {
+        let r = unsafe { ext4_fremove_finalize(&mut self.file_desc) };
+        if r != EOK as i32 {
+            error!("ext4_fremove_finalize error: rc = {}", r);
+            return Err(r);
+        }
+        Ok(EOK as usize)
+    }
+
+    pub fn file_link_from_handle(&mut self, path: &str) -> Result<usize, i32> {
+        let c_path = CString::new(path).expect("CString::new failed");
+        let c_path = c_path.into_raw();
+        let r = unsafe { ext4_flink_from_file(&mut self.file_desc, c_path) };
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        if r != EOK as i32 {
+            error!("ext4_flink_from_file error: rc = {}", r);
+            return Err(r);
+        }
+        Ok(EOK as usize)
+    }
+
+    pub fn is_open(&self) -> bool {
+        !self.file_desc.mp.is_null()
+    }
+
+    pub fn inode_id(&self) -> u32 {
+        self.file_desc.inode
+    }
+
+    pub fn inode_generation(&mut self) -> Result<u32, i32> {
+        let mut generation = 0u32;
+        let r = unsafe {
+            ext4_file_inode_generation(&mut self.file_desc, &mut generation)
+        };
+        if r != EOK as i32 {
+            error!("ext4_file_inode_generation error: rc = {}", r);
+            return Err(r);
+        }
+        Ok(generation)
+    }
+
     pub fn file_seek(&mut self, offset: i64, seek_type: u32) -> Result<usize, i32> {
         let r = unsafe { ext4_fseek(&mut self.file_desc, offset, seek_type) };
         if r != EOK as i32 {
@@ -251,13 +320,13 @@ impl Ext4File {
     pub fn file_cache_flush(&mut self) -> Result<usize, i32> {
         let c_path = self.file_path.clone();
         let c_path = c_path.into_raw();
+        let r = unsafe { ext4_cache_flush(c_path) };
         unsafe {
-            let r = ext4_cache_flush(c_path);
-            if r != EOK as i32 {
-                error!("ext4_cache_flush: rc = {}", r);
-                return Err(r);
-            }
             drop(CString::from_raw(c_path));
+        }
+        if r != EOK as i32 {
+            error!("ext4_cache_flush: rc = {}", r);
+            return Err(r);
         }
         Ok(0)
     }
@@ -380,7 +449,32 @@ impl Ext4File {
         Ok(EOK as usize)
     }
 
+    /// Remove exactly one empty directory; never recurse into children.
+    pub fn dir_rm_empty(&mut self, path: &str) -> Result<usize, i32> {
+        let c_path = CString::new(path).expect("CString::new failed");
+        let c_path = c_path.into_raw();
+        let r = unsafe { ext4_dir_rm_empty(c_path) };
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        if r != EOK as i32 {
+            error!("ext4_dir_rm_empty: rc = {}", r);
+            return Err(r);
+        }
+        Ok(EOK as usize)
+    }
+
     pub fn lwext4_dir_entries(&self) -> Result<(Vec<Vec<u8>>, Vec<InodeTypes>), i32> {
+        let (names, types, _inodes) = self.lwext4_dir_entries_with_ino()?;
+        Ok((names, types))
+    }
+
+    /// Enumerate directory entries while preserving the real ext4 inode
+    /// number carried by each dirent.  VFS getdents callers need this stable
+    /// identity; hashing the pathname breaks across rename and collisions.
+    pub fn lwext4_dir_entries_with_ino(
+        &self,
+    ) -> Result<(Vec<Vec<u8>>, Vec<InodeTypes>, Vec<u32>), i32> {
         if self.this_type != InodeTypes::EXT4_DE_DIR {
             return Err(-1);
         }
@@ -391,6 +485,7 @@ impl Ext4File {
 
         let mut name: Vec<Vec<u8>> = Vec::new();
         let mut inode_type: Vec<InodeTypes> = Vec::new();
+        let mut inode_number: Vec<u32> = Vec::new();
 
         //info!("ls {}", str::from_utf8(path).unwrap());
         unsafe {
@@ -418,13 +513,14 @@ impl Ext4File {
                 );
                 name.push(sss);
                 inode_type.push((dentry.inode_type as usize).into());
+                inode_number.push(dentry.inode);
 
                 de = ext4_dir_entry_next(&mut d);
             }
             ext4_dir_close(&mut d);
         }
 
-        Ok((name, inode_type))
+        Ok((name, inode_type, inode_number))
     }
 }
 

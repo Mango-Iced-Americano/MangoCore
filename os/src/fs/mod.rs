@@ -56,19 +56,25 @@ pub fn force_ramfs() {
 
 pub(crate) fn adapt_filesystem_device(
     block_device: Arc<dyn BlockDevice>,
-    native_block_size: usize,
+    detected: DetectedFs,
     read_only: bool,
 ) -> Arc<dyn BlockDevice> {
     use crate::drivers::block::partition::{BlockSizeAdapter, ReadOnlyBlockDevice};
 
     let mut device = block_device;
-    if native_block_size != crate::hal::BLOCK_SZ {
+    // FAT addresses the device with BPB-native sector numbers, so its block
+    // numbers need translating to the platform BlockDevice unit. lwext4 is
+    // different: MangoKernelDevOp already translates its byte seek/read/write
+    // stream to platform blocks. Wrapping lwext4 in BlockSizeAdapter would
+    // scale the offset a second time (and rejects a 2 KiB bridge request when
+    // the ext4 block size is 4 KiB on 2K1000).
+    if detected.fs_type == FS_Type::Fat32 && detected.block_size != crate::hal::BLOCK_SZ {
         boot_trace!(
             "[fs] adapting native block size {} to platform block size {}",
-            native_block_size,
+            detected.block_size,
             crate::hal::BLOCK_SZ
         );
-        device = Arc::new(BlockSizeAdapter::new(device, native_block_size));
+        device = Arc::new(BlockSizeAdapter::new(device, detected.block_size));
     }
     if read_only {
         device = Arc::new(ReadOnlyBlockDevice::new(device));
@@ -91,7 +97,7 @@ lazy_static! {
             Some(detected) if detected.fs_type == self::filesystem::FS_Type::Fat32 => {
                 let device = adapt_filesystem_device(
                     crate::drivers::BLOCK_DEVICE.clone(),
-                    detected.block_size,
+                    detected,
                     false,
                 );
                 let efs = self::fat32::EasyFileSystem::open(device);
@@ -103,7 +109,7 @@ lazy_static! {
             Some(detected) if detected.fs_type == self::filesystem::FS_Type::Ext4 => {
                 let device = adapt_filesystem_device(
                     crate::drivers::BLOCK_DEVICE.clone(),
-                    detected.block_size,
+                    detected,
                     false,
                 );
                 let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(
@@ -502,7 +508,7 @@ pub fn mount_block_fs_with_flags(
     };
     let fs_device = adapt_filesystem_device(
         block_device.clone(),
-        detected.block_size,
+        detected,
         mount_flags.contains(self::vfs::MountFlags::RDONLY),
     );
 
@@ -968,7 +974,7 @@ fn board_scratch_fat32_root() -> Result<Arc<dyn self::vfs::IndexNode>, &'static 
     if detected.fs_type != self::filesystem::FS_Type::Fat32 {
         return Err("P2 is not FAT32");
     }
-    let fs_device = adapt_filesystem_device(partition_device, detected.block_size, false);
+    let fs_device = adapt_filesystem_device(partition_device, detected, false);
     let filesystem = self::fat32::EasyFileSystem::open(fs_device);
     Ok(filesystem.root_inode())
 }

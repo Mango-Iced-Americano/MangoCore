@@ -3532,7 +3532,7 @@ impl NewFileSystem for Ext4FileSystem {
         }
     }
 
-    fn on_umount(&self) {
+    fn on_umount(&self) -> Result<(), SyscallErr> {
         crate::fs::page_cache::flush_all_page_caches();
         self.flush_metadata_cache();
         // Evict stale dentry/Weak caches to release table entries, name strings,
@@ -3542,6 +3542,7 @@ impl NewFileSystem for Ext4FileSystem {
         if cleared > 0 {
             log::debug!("ext4 on_umount: cleared {} dentry cache entries", cleared);
         }
+        Ok(())
     }
 
     fn as_any_ref(&self) -> &dyn core::any::Any {

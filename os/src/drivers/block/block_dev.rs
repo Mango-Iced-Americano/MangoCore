@@ -24,6 +24,15 @@ pub trait BlockDevice: Send + Sync + Any {
     /// 当buf大小不为BLOCK_SZ的整数倍的时候，该函数会崩溃
     fn write_block(&self, block_id: usize, buf: &[u8]);
 
+    /// Internal write entry used while the partition byte-RMW transaction
+    /// lock is already held.  Ordinary devices delegate to `write_block`;
+    /// byte-addressing wrappers override it to avoid recursively acquiring
+    /// the same global lock when wrappers are stacked.
+    #[doc(hidden)]
+    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
+        self.write_block(block_id, buf);
+    }
+
     /// 返回块设备的可用字节大小。
     /// 默认返回 None（未知大小）。有能力报告大小的驱动应 override。
     fn size_bytes(&self) -> Option<u64> {

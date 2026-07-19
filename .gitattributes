@@ -1,0 +1,6 @@
+# Preserve byte-exact Docker/QEMU evidence. Serial logs contain CRLF, ANSI,
+# and occasional NUL padding; treating them as text creates false whitespace
+# diagnostics and risks newline conversion on checkout.
+docs/Work_Log/evidence/2026-07-18/*.log binary
+docs/Work_Log/evidence/2026-07-18/*.img binary
+docs/Work_Log/evidence/2026-07-18/qemu-head-tail.txt binary

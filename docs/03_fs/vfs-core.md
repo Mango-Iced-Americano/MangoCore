@@ -4,7 +4,7 @@ module: "fs/vfs"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-15"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/vfs/file.rs"
   - "os/src/fs/vfs/index_node.rs"
@@ -222,12 +222,19 @@ pub trait FileSystem: Any + Send + Sync + Debug {
     fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<SuperBlock, SyscallErr>;
     fn support_readahead(&self) -> bool;
     fn permission_policy(&self) -> FsPermissionPolicy;
-    fn on_umount(&self);
+    fn on_umount(&self) -> Result<(), SyscallErr>;
     fn as_any_ref(&self) -> &dyn Any;
 }
 ```
 
 `root_inode` 是路径解析的起点。`info` 返回 FsInfo（块设备 ID / 最大文件名长度 / 特性列表）。`super_block` 和 `statfs` 提供 statfs 系统调用所需信息。
+
+`on_umount()` 是可失败的 teardown 事务：具体后端只有在数据/元数据写回、journal/cache
+停止和 C/设备注册表脱钩全部成功后才返回 `Ok(())`。`BackendLifecycle` 使用
+`Active -> Dying -> Dead` 状态机；最后一个 MountFS 引用消失后进入 Dying，调度器在不持
+registry 锁时调用回调。失败时仍保持 Dying 并重新入队，不能把半卸载后端标成 Dead。
+正常关机路径先完成全局 PageCache writeback，再调用所有 backend teardown；任一失败都
+阻止“持久化成功”的最终状态，但不会阻止其他独立后端尝试提交。
 
 `identity_key()` 是仅在本次启动期有效的文件系统实例身份，不是用户态 `st_dev`。
 默认实现使用具体文件系统对象地址；`MountFS` 必须转发到底层文件系统，使同一 inode

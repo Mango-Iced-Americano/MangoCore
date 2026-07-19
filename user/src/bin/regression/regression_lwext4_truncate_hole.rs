@@ -4,11 +4,12 @@
 //!      zero-filled by LwExt4PageCacheBackend. This regression exercises both
 //!      single-page read_page and batch read_pages for sparse holes beyond
 //!      physical EOF, plus post-write marker persistence across close→reopen.
-//! Expected: After write→fsync→close→open→shrink→fsync→close→open→extend,
-//!           page 0 retains its written pattern; single-page read of hole
-//!           page 1 returns zeros; 8192-byte batch read spanning pages 1-2
-//!           returns zeros; marker written to page 3 persists after
-//!           fsync→close→reopen while adjacent hole pages 2,4 stay zero.
+//! Expected: a non-block-aligned shrink retains its prefix and permanently
+//!           zeroes the truncated block tail; later extension yields zero
+//!           holes; a true seek-beyond-EOF partial write keeps both its gap
+//!           and the unwritten suffix of its newly allocated block zero;
+//!           truncation starting in a hole must free later extents, while a
+//!           truncate range after the final extent remains a safe no-op.
 //! Related subsystem: lwext4 / PageCache / read_page + read_pages
 //! Source: kernel pre-shrink zero-write patch fix regression
 
@@ -22,6 +23,9 @@ const PAGE_SIZE: usize = 4096;
 const TWO_PAGES: usize = 8192;
 const N_PAGES: usize = 8;
 const FILE_SIZE: usize = N_PAGES * PAGE_SIZE;
+const SHRINK_SIZE: usize = 123;
+const SPARSE_OFFSET: usize = 3 * PAGE_SIZE + 123;
+const SPARSE_MARKER_LEN: usize = 17;
 
 const O_RDWR: u32 = 0o2;
 const O_CREAT: u32 = 0o100;
@@ -29,6 +33,7 @@ const O_TRUNC: u32 = 0o1000;
 
 /// Unique test file on /sdcard (NUL-terminated, pure ASCII).
 const TEST_PATH: &str = "/sdcard/reg_lwext4_trunc_hole\0";
+const SPARSE_PATH: &str = "/sdcard/reg_lwext4_sparse_pwrite\0";
 
 /// Single-page read+verify helper: seeks to `offset`, reads `PAGE_SIZE` bytes,
 /// checks all bytes equal `expect_val`. Returns 0 on success, reports
@@ -120,7 +125,7 @@ pub fn run() -> i32 {
         println!("  phase 1: synced and closed");
     }
 
-    // ── Phase 2: Reopen, shrink to one page, fsync, close ────────────
+    // ── Phase 2: Reopen, shrink inside a data block, fsync, close ────
     {
         let fd = sys_open(TEST_PATH, O_RDWR);
         if fd < 0 {
@@ -129,13 +134,13 @@ pub fn run() -> i32 {
         }
         let f = fd as usize;
 
-        let ret = sys_ftruncate(f, PAGE_SIZE as isize);
+        let ret = sys_ftruncate(f, SHRINK_SIZE as isize);
         if ret < 0 {
             println!("FAIL: phase 2 ftruncate shrink returned {}", ret);
             let _ = sys_close(f);
             return 1;
         }
-        println!("  phase 2: truncated to 1 page");
+        println!("  phase 2: truncated to {} bytes inside page 0", SHRINK_SIZE);
 
         let ret = sys_fsync(f);
         if ret < 0 {
@@ -154,7 +159,7 @@ pub fn run() -> i32 {
 
     // ── Phase 3: Cold reopen, extend, exercise read_page + read_pages ─
     // After close, PageCache is invalidated; next reads must go through
-    // the backend. Page 0 is within physical EOF; pages 1+ are sparse holes.
+    // the backend. The first 123 bytes remain data; the rest must be zero.
     {
         let fd = sys_open(TEST_PATH, O_RDWR);
         if fd < 0 {
@@ -163,7 +168,8 @@ pub fn run() -> i32 {
         }
         let f = fd as usize;
 
-        // Extend back to original size (creates hole from PAGE_SIZE to FILE_SIZE)
+        // Extend back to original size. The retained block tail and all later
+        // holes must read as zero after a cold reopen.
         let ret = sys_ftruncate(f, FILE_SIZE as isize);
         if ret < 0 {
             println!("FAIL: phase 3 ftruncate extend returned {}", ret);
@@ -172,8 +178,12 @@ pub fn run() -> i32 {
         }
         println!("  phase 3: extended back to {} pages (cold reopen)", N_PAGES);
 
-        // 3a — Page 0: single page, within physical EOF, must retain 0xA0
-        if verify_page(f, 0, 0xA0u8, "phase 3a: page-0 (within eof)") != 0 {
+        // 3a — Retained prefix survives, truncated bytes in the same physical
+        // block are persistently zeroed before i_size grows again.
+        if verify_batch(f, 0, SHRINK_SIZE, 0xA0u8,
+                        "phase 3a: retained partial-block prefix") != 0
+            || verify_batch(f, SHRINK_SIZE as isize, PAGE_SIZE - SHRINK_SIZE, 0u8,
+                            "phase 3a: truncated same-block tail") != 0 {
             let _ = sys_close(f);
             return 1;
         }
@@ -256,8 +266,11 @@ pub fn run() -> i32 {
             return 1;
         }
 
-        // 4d — Page 0: original data still intact
-        if verify_page(f, 0, 0xA0u8, "phase 4d: page-0 intact") != 0 {
+        // 4d — Partial-block truncate state remains stable after another write
+        if verify_batch(f, 0, SHRINK_SIZE, 0xA0u8,
+                        "phase 4d: retained prefix intact") != 0
+            || verify_batch(f, SHRINK_SIZE as isize, PAGE_SIZE - SHRINK_SIZE, 0u8,
+                            "phase 4d: truncated tail remains zero") != 0 {
             let _ = sys_close(f);
             return 1;
         }
@@ -270,6 +283,148 @@ pub fn run() -> i32 {
         println!("  phase 4: verified, closed");
     }
 
+    // ── Phase 5: true sparse write beyond EOF, cold reopen ───────────
+    // This does not pre-extend with ftruncate.  SEEK_SET beyond EOF followed
+    // by a partial write must leave the entire gap zero and publish the marker
+    // at the requested logical offset rather than at the former EOF block.
+    {
+        let fd = sys_open(SPARSE_PATH, O_CREAT | O_RDWR | O_TRUNC);
+        if fd < 0 {
+            println!("FAIL: phase 5 sparse create returned {}", fd);
+            return 1;
+        }
+        let f = fd as usize;
+        let pos = sys_lseek(f, SPARSE_OFFSET as isize, SEEK_SET);
+        if pos != SPARSE_OFFSET as isize {
+            println!("FAIL: phase 5 sparse lseek returned {}", pos);
+            let _ = sys_close(f);
+            return 1;
+        }
+        let marker = [0xCCu8; SPARSE_MARKER_LEN];
+        let n = sys_write(f, &marker);
+        if n != SPARSE_MARKER_LEN as isize || sys_fsync(f) != 0 || sys_close(f) != 0 {
+            println!("FAIL: phase 5 sparse write/sync/close returned {}", n);
+            return 1;
+        }
+
+        let fd = sys_open(SPARSE_PATH, O_RDWR);
+        if fd < 0 {
+            println!("FAIL: phase 5 sparse cold reopen returned {}", fd);
+            return 1;
+        }
+        let f = fd as usize;
+        if verify_page(f, 0, 0u8, "phase 5a: sparse gap page 0") != 0
+            || verify_page(f, PAGE_SIZE as isize, 0u8, "phase 5b: sparse gap page 1") != 0
+            || verify_page(f, (2 * PAGE_SIZE) as isize, 0u8, "phase 5c: sparse gap page 2") != 0
+            || verify_batch(f, (3 * PAGE_SIZE) as isize, 123, 0u8,
+                            "phase 5d: new-block zero prefix") != 0
+            || verify_batch(f, SPARSE_OFFSET as isize, SPARSE_MARKER_LEN, 0xCCu8,
+                            "phase 5e: sparse marker") != 0 {
+            let _ = sys_close(f);
+            return 1;
+        }
+
+        // Grow to the end of the marker block, then cold reopen again. Bytes
+        // never written after the marker must also be zero, not old disk data.
+        if sys_ftruncate(f, (4 * PAGE_SIZE) as isize) != 0
+            || sys_fsync(f) != 0
+            || sys_close(f) != 0 {
+            println!("FAIL: phase 5 sparse extend/sync/close");
+            return 1;
+        }
+        let fd = sys_open(SPARSE_PATH, O_RDWR);
+        if fd < 0 {
+            println!("FAIL: phase 5 second cold reopen returned {}", fd);
+            return 1;
+        }
+        let f = fd as usize;
+        let suffix_offset = SPARSE_OFFSET + SPARSE_MARKER_LEN;
+        let suffix_len = 4 * PAGE_SIZE - suffix_offset;
+        if verify_batch(f, suffix_offset as isize, suffix_len, 0u8,
+                        "phase 5f: new-block zero suffix after extend") != 0 {
+            let _ = sys_close(f);
+            return 1;
+        }
+        if sys_close(f) != 0 {
+            println!("FAIL: phase 5 final close");
+            return 1;
+        }
+    }
+
+    // ── Phase 6: truncate ranges that start inside sparse holes ──────
+    // Add an extent at logical block 0 while retaining the extent at block 3.
+    // Shrinking to two pages starts removal in the hole between them and must
+    // free the block-3 extent.  Extending and shrinking once more then starts
+    // removal after the final extent and must be a harmless no-op.
+    {
+        let fd = sys_open(SPARSE_PATH, O_RDWR);
+        if fd < 0 {
+            println!("FAIL: phase 6 sparse reopen returned {}", fd);
+            return 1;
+        }
+        let f = fd as usize;
+        let head_marker = [0xDDu8; 1];
+        if sys_lseek(f, 0, SEEK_SET) != 0
+            || sys_write(f, &head_marker) != 1
+            || sys_fsync(f) != 0 {
+            println!("FAIL: phase 6 create leading extent");
+            let _ = sys_close(f);
+            return 1;
+        }
+
+        if sys_ftruncate(f, TWO_PAGES as isize) != 0
+            || sys_fsync(f) != 0
+            || sys_close(f) != 0 {
+            println!("FAIL: phase 6 truncate from inter-extent hole");
+            return 1;
+        }
+
+        let fd = sys_open(SPARSE_PATH, O_RDWR);
+        if fd < 0 {
+            println!("FAIL: phase 6 cold reopen returned {}", fd);
+            return 1;
+        }
+        let f = fd as usize;
+        if verify_batch(f, 0, 1, 0xDDu8,
+                        "phase 6a: leading extent survives hole truncate") != 0
+            || verify_batch(f, 1, TWO_PAGES - 1, 0u8,
+                            "phase 6b: retained sparse range stays zero") != 0 {
+            let _ = sys_close(f);
+            return 1;
+        }
+
+        // No allocated extent exists at or after logical block 2.  This
+        // shrink exercises the next-allocated-block sentinel path.
+        if sys_ftruncate(f, (4 * PAGE_SIZE) as isize) != 0
+            || sys_ftruncate(f, TWO_PAGES as isize) != 0
+            || sys_fsync(f) != 0
+            || sys_close(f) != 0 {
+            println!("FAIL: phase 6 truncate after final extent");
+            return 1;
+        }
+
+        let fd = sys_open(SPARSE_PATH, O_RDWR);
+        if fd < 0 {
+            println!("FAIL: phase 6 second cold reopen returned {}", fd);
+            return 1;
+        }
+        let f = fd as usize;
+        let mut eof_probe = [0u8; 1];
+        if verify_batch(f, 0, 1, 0xDDu8,
+                        "phase 6c: data survives after-last no-op") != 0
+            || sys_lseek(f, TWO_PAGES as isize, SEEK_SET) != TWO_PAGES as isize
+            || sys_read(f, &mut eof_probe) != 0 {
+            println!("FAIL: phase 6 final size/EOF verification");
+            let _ = sys_close(f);
+            return 1;
+        }
+        if sys_close(f) != 0 {
+            println!("FAIL: phase 6 final close");
+            return 1;
+        }
+        println!("  phase 6: inter-extent hole and after-last truncate paths OK");
+    }
+
     // ── Cleanup (best-effort) ────────────────────────────────────────
     {
         let ret = sys_unlinkat(AT_FDCWD, TEST_PATH, 0);
@@ -277,6 +432,10 @@ pub fn run() -> i32 {
             println!("  cleanup: unlink returned {} (non-fatal)", ret);
         } else {
             println!("  cleanup: test file removed");
+        }
+        let ret = sys_unlinkat(AT_FDCWD, SPARSE_PATH, 0);
+        if ret < 0 {
+            println!("  cleanup: sparse unlink returned {} (non-fatal)", ret);
         }
     }
 

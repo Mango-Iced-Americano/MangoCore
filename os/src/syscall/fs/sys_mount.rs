@@ -565,7 +565,7 @@ pub fn sys_mount(
                     // the selected backend.
                     let fs_device = crate::fs::adapt_filesystem_device(
                         blk_dev.clone(),
-                        detected.block_size,
+                        detected,
                         mountflags.contains(MountFlags::MS_RDONLY),
                     );
                     let new_fs: Arc<dyn vfs::FileSystem> = match detected.fs_type {

@@ -444,7 +444,7 @@ fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
 ///
 /// * `Active`   — at least one `MountFS` holds a reference; `acquire()` succeeds.
 /// * `Dying`    — last `MountFS` reference released; blocked for new acquisitions.
-/// * `Dead`     — `on_umount()` has been called; terminal.
+/// * `Dead`     — `on_umount()` has completed successfully; terminal.
 ///
 /// Transition rules:
 /// 1. `BackendLifecycle::new()`  → Active (count=0); NOT yet registered.
@@ -452,7 +452,8 @@ fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
 ///    into global list in an allocation-safe caller context.
 /// 3. `.release()` (from Drop)   → count-1; CAS Active→Dying when count→0.
 /// 4. `drain_one_dying()` (sched) → finds Dying entry, removes from registry,
-///    calls `on_umount()` outside ANY lock, then marks Dead.
+///    and calls `on_umount()` outside ANY lock.  Success marks it Dead; failure
+///    leaves it Dying and re-inserts it so a later scheduler tick can retry.
 ///
 /// Count-0 lifecycles never enter the registry: if no MountFS ever acquires,
 /// the lifecycle is dropped without leaking registry entries.
@@ -611,8 +612,11 @@ impl BackendLifecycle {
 /// # Locking
 ///
 /// The registry lock is held only long enough to remove the entry.
-/// `on_umount()` is called **outside** any lock, after which the entry
-/// is marked Dead and dropped (which drops `Arc<dyn FileSystem>`).
+/// `on_umount()` is called **outside** any lock.  On success the entry is
+/// marked Dead and dropped (which drops `Arc<dyn FileSystem>`).  On failure it
+/// remains Dying and is re-inserted into the registry for a later retry; the
+/// backend must stay alive because it may still be registered with lower-level
+/// resources.
 ///
 /// Returns `true` if work was done.
 pub fn drain_one_dying_lifecycle() -> bool {
@@ -625,14 +629,63 @@ pub fn drain_one_dying_lifecycle() -> bool {
         }
     };
     if let Some(lc) = entry {
-        lc.fs.on_umount();
-        // Mark Dead so stale diagnostics can distinguish it.
-        lc.packed.store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
-        LC_DRAIN.fetch_add(1, Ordering::Relaxed);
-        // `lc` drops here → Arc<BackendLifecycle> → Arc<dyn FileSystem> released.
+        match lc.fs.on_umount() {
+            Ok(()) => {
+                // Dead is reserved for a backend whose teardown transaction
+                // completed; only then may the lifecycle release its fs Arc.
+                lc.packed.store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
+                LC_DRAIN.fetch_add(1, Ordering::Relaxed);
+                // `lc` drops here → Arc<BackendLifecycle> →
+                // Arc<dyn FileSystem> released.
+            }
+            Err(error) => {
+                log::error!(
+                    "filesystem backend umount failed: {:?}; keeping lifecycle Dying for retry",
+                    error
+                );
+                // The entry was removed before calling into the backend so no
+                // registry lock was held across I/O.  Put the same strong Arc
+                // back only after the callback returns; state remains Dying,
+                // therefore acquire() stays blocked until teardown succeeds.
+                LIFECYCLE_REGISTRY.lock().push(lc);
+            }
+        }
         true
     } else {
         false
+    }
+}
+
+/// Commit and detach every registered filesystem backend before an orderly
+/// machine shutdown.
+///
+/// PageCache writeback must run before this function.  The registry lock is
+/// released before any backend I/O, and all backends are attempted even if
+/// one fails so independent filesystems still get a durability boundary.
+pub fn shutdown_all_backends() -> Result<(), SyscallErr> {
+    let lifecycles: alloc::vec::Vec<_> = LIFECYCLE_REGISTRY
+        .lock()
+        .iter()
+        .filter(|lifecycle| lifecycle.state() != LC_STATE_DEAD)
+        .cloned()
+        .collect();
+    let mut first_error = None;
+
+    for lifecycle in lifecycles {
+        if let Err(error) = lifecycle.fs.on_umount() {
+            log::error!(
+                "filesystem backend shutdown failed: {:?}; continuing other backends",
+                error
+            );
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 

@@ -888,6 +888,26 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **教训**: 不要对 POSIX 行为做"防御性"修正，尤其当底层 C 库（lwext4 ext4_fseek）已经实现了 POSIX 语义时。mmap 脏页回写、pwrite 等场景依赖 seek-beyond-EOF。
 - **相关文件**: `dependency/lwext4_rust/src/file.rs`
 
+### open-unlink 的内存 handle 不等于掉电安全 orphan 协议
+
+- **现象**: unlink 后旧 fd 在内核持续运行时可以继续读写，最后 close 也能回收 inode；
+  focused namespace 测试看起来完全符合 POSIX，但突然掉电后仍可能泄漏 zero-link inode、
+  丢失覆盖 rename 的目标名称或依赖离线 fsck。
+- **根因**: `ext4_file` handle、open count 和失败 relink 只存在于内存。若文件系统无 journal，
+  或 link count 变为 0 前没有在同一 journal transaction 中把 inode 加入 on-disk orphan
+  chain，mount 时就没有可 replay 的持久恢复意图。多个 path API 拼出的 rename rollback
+  也只能处理内核仍运行时的错误，不能跨 power loss。
+- **修复**: namespace detach 先生成带 fs identity、inode number、inode generation 和稳定
+  handle 的 reclaim cookie；zero-link 时在同一 journal transaction 加入 orphan chain，
+  final close 完成 truncate/free 后再移除；mount/recovery replay orphan。覆盖 rename 应收敛
+  为同一 mount lock/journal transaction 内的单一 API，并在每个 metadata write/flush
+  边界故障注入，逐镜像执行 mount replay 和 `e2fsck -fn`。
+- **教训**: 运行期 open-unlink/rename 回归 GREEN 只能证明 VFS identity 生命周期，不能证明
+  crash atomicity。审计时必须同时检查卷的实际 `has_journal` feature、orphan 持久化、inode
+  generation 防复用和设备 flush；静态能力字符串或库中存在 JBD 源码都不是证据。
+- **相关文件**: `os/src/fs/ext4_lwext4/inode_state.rs`,
+  `os/src/fs/ext4_lwext4/layout.rs`, `dependency/lwext4_rust/c/lwext4/src/ext4.c`
+
 ## 纯逻辑 Bug
 
 ### TimeSpec::AddAssign 不归一化导致时间计算错误

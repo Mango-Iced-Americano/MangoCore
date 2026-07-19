@@ -24,6 +24,7 @@ use crate::utils::error::SyscallErr;
 
 use super::blockdev::{MangoBlockDev, MangoKernelDevOp};
 use super::errno::from_lwext4;
+use super::inode_state::Ext4InodeState;
 use super::layout::Ext4OSInode;
 use lwext4_rust::blockdev::Ext4BlockWrapper;
 use lwext4_rust::InodeTypes;
@@ -38,11 +39,13 @@ pub type Ext4FsRef = Arc<Ext4FileSystem>;
 #[derive(Debug)]
 pub(crate) struct LookupCacheEntry {
     pub inode_id: usize,
+    pub generation: u32,
     pub file_type: FileType,
     pub inode_mode: InodeMode,
     pub size: usize,
     pub uid: u32,
     pub gid: u32,
+    pub nlinks: usize,
 }
 
 /// lwext4-based ext4 filesystem.
@@ -71,12 +74,17 @@ pub struct Ext4FileSystem {
     /// Generated from the atomic counter at mount time.  All VFS paths
     /// passed to lwext4 C API are prefixed with this via `lw_path()`.
     lw_mount_point: String,
-    /// PageCache registry keyed by inode_id — shares PageCache across
-    /// different Ext4OSInode instances pointing to the same file.
+    /// PageCache registry keyed by (inode_id, generation) — shares PageCache
+    /// across aliases without crossing an inode-number reuse boundary.
     /// Strong Arc registry — keeps dirty PageCache alive after last
     /// inode reference is dropped (dentry eviction).  Without this,
     /// dirty pages are lost when dentry cache pressure evicts inodes.
-    pub(crate) page_caches: Mutex<BTreeMap<usize, Arc<crate::fs::page_cache::PageCache>>>,
+    pub(crate) page_caches:
+        Mutex<BTreeMap<(usize, u32), Arc<crate::fs::page_cache::PageCache>>>,
+    /// Weak runtime-state registry keyed by ext4 inode number + generation.
+    /// All path aliases and independently-created VFS inode objects share
+    /// the same open handle, pathname updates, link count, and logical EOF.
+    pub(crate) inode_states: Mutex<BTreeMap<(usize, u32), Weak<Ext4InodeState>>>,
 }
 
 // Safety: MangoCore is single-core; lwext4 C global state is only accessed
@@ -168,7 +176,7 @@ impl Ext4FileSystem {
         let fs_info = FsInfo {
             blk_dev_id: fs_id,
             max_name_len: 255,
-            features: vec!["ext4", "lwext4", "extent", "journal"],
+            features: vec!["ext4", "lwext4", "extent"],
         };
 
         let fs = Arc::new(Self {
@@ -181,10 +189,17 @@ impl Ext4FileSystem {
             mounted: AtomicBool::new(true),
             lw_mount_point: mount_point,
             page_caches: Mutex::new(BTreeMap::new()),
+            inode_states: Mutex::new(BTreeMap::new()),
         });
 
-        // 4. Create root inode (inode 2 is always root in ext4)
-        let root = Ext4OSInode::new_root(fs.clone(), 2);
+        // 4. Create root inode (inode 2 is always root in ext4).
+        let root_meta = fs.probe_inode_meta("/")?;
+        let root = Ext4OSInode::new_root(
+            fs.clone(),
+            root_meta.inode_id,
+            root_meta.generation,
+            root_meta.nlinks,
+        );
         *fs.root.lock() = Some(root);
 
         log::info!("[lwext4] filesystem ready (id={}), root inode created", fs_id);
@@ -211,6 +226,60 @@ impl Ext4FileSystem {
     /// Block size in bytes.
     pub(crate) fn block_size(&self) -> usize {
         self.block_size
+    }
+
+    pub(crate) fn inode_state(
+        &self,
+        inode_id: usize,
+        generation: u32,
+        path: &str,
+        size: usize,
+        nlinks: usize,
+    ) -> Arc<Ext4InodeState> {
+        let mut states = self.inode_states.lock();
+        let key = (inode_id, generation);
+        if let Some(state) = states.get(&key).and_then(Weak::upgrade) {
+            state.observe_path(path, size, nlinks);
+            return state;
+        }
+        let state = Ext4InodeState::new(
+            inode_id,
+            generation,
+            String::from(path),
+            size,
+            nlinks,
+        );
+        states.insert(key, Arc::downgrade(&state));
+        state
+    }
+
+    pub(crate) fn lookup_inode_state(
+        &self,
+        inode_id: usize,
+        generation: u32,
+    ) -> Option<Arc<Ext4InodeState>> {
+        self.inode_states
+            .lock()
+            .get(&(inode_id, generation))
+            .and_then(Weak::upgrade)
+    }
+
+    pub(crate) fn forget_inode_state(&self, inode_id: usize, generation: u32) {
+        self.inode_states.lock().remove(&(inode_id, generation));
+    }
+
+    /// Update every live inode-state pathname affected by a namespace move.
+    /// This includes already-open directory objects and cached descendants.
+    pub(crate) fn rename_inode_path_prefix(&self, old_path: &str, new_path: &str) {
+        let states: alloc::vec::Vec<_> = self
+            .inode_states
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for state in states {
+            state.rename_path_prefix(old_path, new_path);
+        }
     }
 
     /// Get the real ext4 inode number for a path using ext4_raw_inode_fill.
@@ -243,17 +312,26 @@ impl Ext4FileSystem {
         Ok(ino as usize)
     }
 
-    /// Call lwext4 umount during shutdown.  Idempotent — safe to call
-    /// multiple times (e.g. explicit `on_umount` + `Drop`).
-    fn umount(&self) {
-        if !self.mounted.load(Ordering::Relaxed) {
-            return; // already unmounted
+    /// Call lwext4 umount during shutdown.  Idempotent — safe to retry after
+    /// a partial lower-level teardown or call again after success.
+    fn umount(&self) -> Result<(), SyscallErr> {
+        if !self.mounted.load(Ordering::Acquire) {
+            return Ok(()); // already unmounted
         }
         let mut lw = self.lw.lock();
         match lw.lwext4_umount() {
-            Ok(_) => self.mounted.store(false, Ordering::Relaxed),
+            Ok(_) => {
+                self.mounted.store(false, Ordering::Release);
+                Ok(())
+            }
             Err(error) => {
-                log::error!("[lwext4] umount failed: errno={}", error);
+                let mapped = from_lwext4(error.saturating_abs());
+                log::error!(
+                    "[lwext4] umount failed: raw errno={}, mapped={:?}",
+                    error,
+                    mapped
+                );
+                Err(mapped)
             }
         }
     }
@@ -283,6 +361,15 @@ impl Ext4FileSystem {
         path: &str,
     ) -> Result<LookupCacheEntry, SyscallErr> {
         let _lock = self.lw.lock();
+        self.probe_inode_meta_locked(path)
+    }
+
+    /// Variant for callers that already hold `self.lw` across validation and
+    /// a following namespace operation.
+    pub(crate) fn probe_inode_meta_locked(
+        &self,
+        path: &str,
+    ) -> Result<LookupCacheEntry, SyscallErr> {
         let lw_path = self.lw_path(path);
         let c_path =
             CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
@@ -313,11 +400,13 @@ impl Ext4FileSystem {
             | unsafe { ((raw_inode.osd2.linux2.gid_high as u32) << 16) };
         let entry = LookupCacheEntry {
             inode_id: ret_ino as usize,
+            generation: raw_inode.generation,
             file_type: mapped.file_type,
             inode_mode: mapped.inode_mode,
             size,
             uid,
             gid,
+            nlinks: raw_inode.links_count as usize,
         };
         Ok(entry)
     }
@@ -385,8 +474,38 @@ impl FileSystem for Ext4FileSystem {
         FsPermissionPolicy::Dac
     }
 
-    fn on_umount(&self) {
-        self.umount();
+    fn on_umount(&self) -> Result<(), SyscallErr> {
+        // The registry intentionally holds dirty PageCaches after dentry/file
+        // eviction.  Drain this filesystem's caches before stopping lwext4;
+        // never hold the registry lock across block I/O.
+        let caches: alloc::vec::Vec<_> =
+            self.page_caches.lock().values().cloned().collect();
+        for cache in caches {
+            if let Err(error) = cache.writeback_all() {
+                log::error!(
+                    "[lwext4] refusing umount after PageCache writeback failure: {:?}",
+                    error
+                );
+                return Err(error);
+            }
+        }
+        // lwext4_umount first disables its internal write-back cache, then
+        // stops the journal and detaches the block device.  Preserve all VFS
+        // ownership until that transaction succeeds so a failed drain remains
+        // retryable and cannot leave dangling C registrations.
+        self.umount()?;
+
+        // Ext4OSInode owns a strong fs Arc, while the filesystem caches the
+        // root inode.  Break that fs → root → fs cycle only after lwext4 is
+        // fully detached.  Move registry contents out under their locks and
+        // drop them afterwards, avoiding destructor work while locks are held.
+        let root = self.root.lock().take();
+        let page_caches = core::mem::take(&mut *self.page_caches.lock());
+        let inode_states = core::mem::take(&mut *self.inode_states.lock());
+        drop(page_caches);
+        drop(inode_states);
+        drop(root);
+        Ok(())
     }
 
     fn as_any_ref(&self) -> &dyn Any {

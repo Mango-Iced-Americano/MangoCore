@@ -47,6 +47,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | 2K1000LA 2 GiB 内存拓扑审计 | 2026-07-13 | OpenAI Codex multi-agent, max reasoning mode | 复核早期扩容方案；并行审计 VA/PA 掩码、DMW cache 属性、U-Boot LMB、DVO DMA、CPU1 park loop 和连续 DMA 分配 | 推翻“DRAM 即已交接”的错误前提；建立双 bank allocator 与临时 carveout，完成跨 bank 320 MiB 压力、QEMU VirtIO/Ext4/LTP 和实板 AHCI 只读验收 |
 | 2K1000LA CPython 实机适配 | 2026-07-13 至 2026-07-14 | OpenAI Codex, max reasoning mode | 选择性审计 develop 分支 CPython 链路；对照 QEMU 与实机定位 LSX/FPR 上下文差异，补齐 FAT/TmpFS、外网测试语义和受限 P3 更新工具 | 修复实机 trap 后向量损坏、FAT rename 覆盖和 TmpFS symlink；rv64/la64 QEMU 与 2K1000LA 实板 CPython L3-L9 均 72/72 |
 | 2K1000LA c-ares 默认 DNS 闭环 | 2026-07-18 | OpenAI Codex | 对照默认/显式 DNS、procfs inode 元数据和 c-ares 文件加载源码，区分 macOS 网络共享、内核数据面和配置发布问题 | 将 `/etc/resolv.conf` 改为可刷新的普通快照；双架构、LA64 QEMU 和实板 P4 ext4 验证默认 curl/Python DNS |
+| onboard/develop ext4_lwext4 融合审计 | 2026-07-18 | OpenAI Codex multi-agent | 并行审计旧 ext4 修正、新 lwext4 适配、2K 分区边界、inode lifetime、性能与 crash consistency | 补齐运行期 byte bridge/namespace 方案，同时识别无 journal/orphan 使生产 SSD 切换保持阻塞 |
 
 ## 4. 详细使用场景
 
@@ -274,6 +275,26 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Oracle 结合 opt-in 逐用例 counter delta 与 PageCache registry 生命周期，定位 inode number 复用导致新文件继承旧 fully-valid 页面；随后将诊断收敛为有界 QEMU log，而非无关的 report 落盘链路。
 - Verification: Docker 串行 RV64/LA64 build 通过；RV64 focused QEMU 从 1 PASS/3 FAIL 变为 4 PASS/0 FAIL。
 
+### Case 13: onboard/develop ext4_lwext4 融合的运行期语义与掉电边界
+
+- Evidence: `docs/10_plan/ext4-lwext4-migration-audit-20260718.md`、
+  `docs/Work_Log/2026-07-18.md`
+- AI tools: OpenAI Codex multi-agent
+- Problem: 新 lwext4 已在 develop 成为默认 ext4 后端，但 onboard 的 2 KiB 分区边界、
+  旧自研 ext4 的持久写修正、open-unlink/overwrite-rename 生命周期和 SSD 掉电恢复能力
+  不能从“库支持 ext4”直接外推。
+- AI contribution: 并行追溯两条分支提交和新旧源码，将旧修正分为“应迁移代码、应迁移
+  不变量、由新引擎替代”三类；设计参数化 2 KiB byte bridge/partition 边界门禁和真实
+  inode shared state；进一步审查 C remove/rename 顺序后指出内存 handle rollback 没有
+  on-disk orphan chain、inode generation 或 journal replay，不能提供掉电原子性。
+- Human verification: 维护者要求本轮构建/QEMU 不映射实板设备并保留旧分支回退点；
+  双架构 build、顶层 regression 6/6、namespace 9/9、ext4 ktest 7/7、正常 teardown 和
+  五镜像离线 fsck 已形成持久证据。LA64 全量中一个无关 timer 取样失败如实保留；真实
+  2 KiB 实板、crash injection 和性能 A/B 仍在门禁中，没有从 QEMU 外推。
+- Result: 融合继续在 `board-develop-combined`，旧 `la64-on-board` 冻结；运行期修复可继续
+  QEMU 验证，但当前无 journal 的 P4 和缺少 orphan/replay 的实现被明确标为生产 blocker，
+  禁止宣称已可写入生产 SSD。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -328,6 +349,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md` 2026-07-14 | persist-shell CPython/ext4 rename | 记录 Codex 对 chroot bind 边界、ext4 不定长目录项邻接覆盖的根因定位，以及双架构、两类 P3 和 rename 专项证据 |
 | `docs/Work_Log.md` 2026-07-18 | c-ares/procfs resolver 默认 DNS | 记录 Codex 通过默认/显式 DNS A/B、inode 元数据和 c-ares 源码闭环根因，以及双架构、QEMU 和 P4 ext4 实板验证 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
+| `docs/Work_Log/2026-07-18.md` | ext4_lwext4 融合审计 | 记录 Codex multi-agent 对 onboard 修正覆盖、2K 边界、inode lifetime、性能和无 journal/orphan 生产 blocker 的审计，以及双架构 QEMU/build/fsck 正式证据 |
 
 ## 9. 交互记录与留痕方式
 

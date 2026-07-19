@@ -2,6 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 
 use super::BlockDevice;
 use crate::hal::BLOCK_SZ;
@@ -11,6 +12,12 @@ const MBR_SIGNATURE_OFF: usize = 510;
 const MBR_PART_TABLE_OFF: usize = 446;
 const MBR_PART_ENTRY_SIZE: usize = 16;
 const MBR_MAX_PRIMARY: usize = 4;
+
+/// Serializes byte-level read-modify-write transactions across every
+/// partition/size adapter.  Sibling partitions may share one platform block
+/// when an MBR boundary is not aligned to `BLOCK_SZ`; per-filesystem locks do
+/// not protect that shared physical block.
+static PARTITION_RMW_LOCK: Mutex<()> = Mutex::new(());
 
 const _: () = assert!(BLOCK_SZ >= LOGICAL_SECTOR_SIZE as usize);
 const _: () = assert!(BLOCK_SZ % LOGICAL_SECTOR_SIZE as usize == 0);
@@ -90,39 +97,71 @@ fn read_parent_bytes(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &mut [u8
         return;
     }
 
-    let mut bounce = vec![0u8; BLOCK_SZ];
     let mut done = 0usize;
-    while done < buf.len() {
+
+    let head_offset = (absolute % BLOCK_SZ as u64) as usize;
+    if head_offset != 0 {
+        let copy_len = (BLOCK_SZ - head_offset).min(buf.len());
+        let mut bounce = vec![0u8; BLOCK_SZ];
+        parent.read_block((absolute / BLOCK_SZ as u64) as usize, &mut bounce);
+        buf[..copy_len].copy_from_slice(&bounce[head_offset..head_offset + copy_len]);
+        done = copy_len;
+    }
+
+    let middle_len = ((buf.len() - done) / BLOCK_SZ) * BLOCK_SZ;
+    if middle_len != 0 {
+        let parent_block = ((absolute + done as u64) / BLOCK_SZ as u64) as usize;
+        parent.read_block(parent_block, &mut buf[done..done + middle_len]);
+        done += middle_len;
+    }
+
+    if done < buf.len() {
         let position = absolute + done as u64;
-        let parent_block = (position / BLOCK_SZ as u64) as usize;
-        let in_block = (position % BLOCK_SZ as u64) as usize;
-        let copy_len = (BLOCK_SZ - in_block).min(buf.len() - done);
-        parent.read_block(parent_block, &mut bounce);
-        buf[done..done + copy_len].copy_from_slice(&bounce[in_block..in_block + copy_len]);
-        done += copy_len;
+        let mut bounce = vec![0u8; BLOCK_SZ];
+        parent.read_block((position / BLOCK_SZ as u64) as usize, &mut bounce);
+        let tail_len = buf.len() - done;
+        buf[done..].copy_from_slice(&bounce[..tail_len]);
     }
 }
 
-fn write_parent_bytes(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &[u8]) {
+/// Write bytes while `PARTITION_RMW_LOCK` is already held.
+fn write_parent_bytes_guarded(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &[u8]) {
     if buf.is_empty() {
         return;
     }
     if absolute % BLOCK_SZ as u64 == 0 && buf.len() % BLOCK_SZ == 0 {
-        parent.write_block((absolute / BLOCK_SZ as u64) as usize, buf);
+        parent.write_block_rmw_guarded((absolute / BLOCK_SZ as u64) as usize, buf);
         return;
     }
 
-    let mut bounce = vec![0u8; BLOCK_SZ];
     let mut done = 0usize;
-    while done < buf.len() {
+
+    let head_offset = (absolute % BLOCK_SZ as u64) as usize;
+    if head_offset != 0 {
+        let copy_len = (BLOCK_SZ - head_offset).min(buf.len());
+        let parent_block = (absolute / BLOCK_SZ as u64) as usize;
+        let mut bounce = vec![0u8; BLOCK_SZ];
+        parent.read_block(parent_block, &mut bounce);
+        bounce[head_offset..head_offset + copy_len].copy_from_slice(&buf[..copy_len]);
+        parent.write_block_rmw_guarded(parent_block, &bounce);
+        done = copy_len;
+    }
+
+    let middle_len = ((buf.len() - done) / BLOCK_SZ) * BLOCK_SZ;
+    if middle_len != 0 {
+        let parent_block = ((absolute + done as u64) / BLOCK_SZ as u64) as usize;
+        parent.write_block_rmw_guarded(parent_block, &buf[done..done + middle_len]);
+        done += middle_len;
+    }
+
+    if done < buf.len() {
         let position = absolute + done as u64;
         let parent_block = (position / BLOCK_SZ as u64) as usize;
-        let in_block = (position % BLOCK_SZ as u64) as usize;
-        let copy_len = (BLOCK_SZ - in_block).min(buf.len() - done);
+        let mut bounce = vec![0u8; BLOCK_SZ];
         parent.read_block(parent_block, &mut bounce);
-        bounce[in_block..in_block + copy_len].copy_from_slice(&buf[done..done + copy_len]);
-        parent.write_block(parent_block, &bounce);
-        done += copy_len;
+        let tail_len = buf.len() - done;
+        bounce[..tail_len].copy_from_slice(&buf[done..]);
+        parent.write_block_rmw_guarded(parent_block, &bounce);
     }
 }
 
@@ -259,26 +298,65 @@ impl PartitionBlockDevice {
     }
 
     pub fn block_count(&self) -> u64 {
-        self.size_bytes / BLOCK_SZ as u64
+        self.size_bytes.div_ceil(BLOCK_SZ as u64)
     }
 
-    fn absolute_offset(&self, block_id: usize, len: usize) -> u64 {
-        let relative = checked_device_offset(block_id, BLOCK_SZ, len, Some(self.size_bytes));
-        self.start_byte
+    fn io_range(&self, block_id: usize, len: usize) -> (u64, usize) {
+        assert_eq!(
+            len % BLOCK_SZ,
+            0,
+            "partition I/O length must use platform blocks"
+        );
+        let relative = (block_id as u64)
+            .checked_mul(BLOCK_SZ as u64)
+            .expect("partition block offset overflow");
+        let end = relative
+            .checked_add(len as u64)
+            .expect("partition I/O length overflow");
+        let padded_size = self
+            .size_bytes
+            .checked_add(BLOCK_SZ as u64 - 1)
+            .expect("partition padded size overflow")
+            / BLOCK_SZ as u64
+            * BLOCK_SZ as u64;
+        assert!(
+            end <= padded_size,
+            "partition block I/O out of bounds: block_id={} len={} size={}",
+            block_id,
+            len,
+            self.size_bytes
+        );
+        let valid_len = self
+            .size_bytes
+            .saturating_sub(relative)
+            .min(len as u64) as usize;
+        let absolute = self
+            .start_byte
             .checked_add(relative)
-            .expect("partition absolute offset overflow")
+            .expect("partition absolute offset overflow");
+        (absolute, valid_len)
     }
 }
 
 impl BlockDevice for PartitionBlockDevice {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let absolute = self.absolute_offset(block_id, buf.len());
-        read_parent_bytes(&self.parent, absolute, buf);
+        let (absolute, valid_len) = self.io_range(block_id, buf.len());
+        if valid_len != 0 {
+            read_parent_bytes(&self.parent, absolute, &mut buf[..valid_len]);
+        }
+        buf[valid_len..].fill(0);
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let absolute = self.absolute_offset(block_id, buf.len());
-        write_parent_bytes(&self.parent, absolute, buf);
+        let _rmw = PARTITION_RMW_LOCK.lock();
+        self.write_block_rmw_guarded(block_id, buf);
+    }
+
+    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
+        let (absolute, valid_len) = self.io_range(block_id, buf.len());
+        if valid_len != 0 {
+            write_parent_bytes_guarded(&self.parent, absolute, &buf[..valid_len]);
+        }
     }
 
     fn size_bytes(&self) -> Option<u64> {
@@ -326,8 +404,13 @@ impl BlockDevice for BlockSizeAdapter {
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
+        let _rmw = PARTITION_RMW_LOCK.lock();
+        self.write_block_rmw_guarded(block_id, buf);
+    }
+
+    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
         let absolute = self.absolute_offset(block_id, buf.len());
-        write_parent_bytes(&self.parent, absolute, buf);
+        write_parent_bytes_guarded(&self.parent, absolute, buf);
     }
 
     fn size_bytes(&self) -> Option<u64> {

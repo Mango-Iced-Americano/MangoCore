@@ -326,8 +326,9 @@ pub fn rust_main() -> ! {
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
-        // Regression uses only the embedded initramfs, so it must not touch
-        // external network or block devices (including a board SSD).
+        // Regression never initializes networking. QEMU regression builds may
+        // attach a disposable ext4 fixture as block device 0; real-board builds
+        // remain excluded so regression mode can never touch a board SSD.
         if boot_config.mode != crate::bootargs::BootMode::Regression {
             #[cfg(any(
                 not(feature = "board_2k1000"),
@@ -383,7 +384,15 @@ pub fn rust_main() -> ! {
                 boot_trace!("[bringup][main:02] preload payload installation complete");
             }
         } else {
-            crate::println!("[kernel] Regression mode — skipping net/block init");
+            #[cfg(not(feature = "board_2k1000"))]
+            {
+                crate::println!(
+                    "[kernel] Regression mode — mounting disposable QEMU block fixture"
+                );
+                fs::mount_boot_block_devices();
+            }
+            #[cfg(feature = "board_2k1000")]
+            crate::println!("[kernel] Regression mode — board net/block init disabled");
         }
     }
 

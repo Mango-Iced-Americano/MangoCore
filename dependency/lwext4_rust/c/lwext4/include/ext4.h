@@ -277,6 +277,37 @@ int ext4_cache_flush(const char *path);
  * @return  Standard error code. */
 int ext4_fremove(const char *path);
 
+/**@brief Remove a directory entry while optionally deferring final inode
+ *        truncation/freeing.  Deferred removal is used for POSIX
+ *        unlink-while-open semantics; the caller must later invoke
+ *        ext4_fremove_finalize() on an open descriptor when the last VFS
+ *        reference is closed.
+ * @param path file path to remove
+ * @param defer_inode_free keep a zero-link inode allocated when true
+ * @param inode_out optional removed inode number
+ * @param links_out optional link count after removal
+ * @return standard error code */
+int ext4_fremove2(const char *path, bool defer_inode_free,
+		  uint32_t *inode_out, uint32_t *links_out);
+
+/**@brief Truncate and free a previously deferred zero-link inode.
+ * @param file open descriptor that pins the inode identity
+ * @return standard error code */
+int ext4_fremove_finalize(ext4_file *file);
+
+/**@brief Read the on-disk generation of the inode pinned by a descriptor.
+ * @param file open descriptor
+ * @param generation_out returned inode generation
+ * @return standard error code */
+int ext4_file_inode_generation(ext4_file *file, uint32_t *generation_out);
+
+/**@brief Re-publish an inode held by an open descriptor at a new path.
+ *        Intended for rollback of a detached rename target.
+ * @param file open descriptor that identifies the inode
+ * @param path destination path
+ * @return standard error code */
+int ext4_flink_from_file(ext4_file *file, const char *path);
+
 /**@brief   Create a hardlink for a file.
  *
  * @param   path Path to file.
@@ -573,6 +604,12 @@ int ext4_removexattr(const char *path, const char *name, size_t name_len);
  *
  * @return  Standard error code.*/
 int ext4_dir_rm(const char *path);
+
+/**@brief Remove one directory only if it is empty.  Unlike ext4_dir_rm(),
+ *        this function is deliberately non-recursive.
+ * @param path directory path
+ * @return standard error code (ENOTEMPTY when children exist) */
+int ext4_dir_rm_empty(const char *path);
 
 /**@brief Rename/move directory.
  *
