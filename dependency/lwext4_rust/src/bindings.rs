@@ -721,6 +721,10 @@ pub struct ext4_blockdev_iface {
     pub close: ::core::option::Option<
         extern "C" fn(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int,
     >,
+    #[doc = "@brief   Force completed writes to stable storage. Not mandatory.\n @param   bdev block device."]
+    pub flush: ::core::option::Option<
+        extern "C" fn(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int,
+    >,
     #[doc = "@brief   Lock block device. Required in multi partition mode\n          operations. Not mandatory field.\n @param   bdev block device."]
     pub lock: ::core::option::Option<
         extern "C" fn(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int,
@@ -780,6 +784,10 @@ extern "C" {
 extern "C" {
     #[doc = "@brief   Close block device\n @param   bdev block device descriptor\n @return  standard error code"]
     pub fn ext4_block_fini(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int;
+}
+extern "C" {
+    #[doc = "@brief   Force all completed writes to stable storage.\n @param   bdev block device descriptor\n @return  standard error code"]
+    pub fn ext4_block_flush_device(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int;
 }
 extern "C" {
     #[doc = "@brief   Flush data in given buffer to disk.\n @param   bdev block device descriptor\n @param   buf buffer\n @return  standard error code"]

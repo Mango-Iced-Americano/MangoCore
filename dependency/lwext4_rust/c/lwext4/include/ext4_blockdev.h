@@ -70,6 +70,10 @@ struct ext4_blockdev_iface {
 	 * @param   bdev block device.*/
 	int (*close)(struct ext4_blockdev *bdev);
 
+	/**@brief   Force completed writes to stable storage. Not mandatory.
+	 * @param   bdev block device.*/
+	int (*flush)(struct ext4_blockdev *bdev);
+
 	/**@brief   Lock block device. Required in multi partition mode
 	 *          operations. Not mandatory field.
 	 * @param   bdev block device.*/
@@ -140,6 +144,7 @@ struct ext4_blockdev {
 		.bread = __bread,                                              \
 		.bwrite = __bwrite,                                            \
 		.close = __close,                                              \
+		.flush = NULL,                                                 \
 		.lock = __lock,                                                \
 		.unlock = __unlock,                                            \
 		.ph_bsize = __bsize,                                           \
@@ -167,6 +172,11 @@ int ext4_block_bind_bcache(struct ext4_blockdev *bdev, struct ext4_bcache *bc);
  * @param   bdev block device descriptor
  * @return  standard error code*/
 int ext4_block_fini(struct ext4_blockdev *bdev);
+
+/**@brief   Force all completed writes to stable storage.
+ * @param   bdev block device descriptor
+ * @return  standard error code*/
+int ext4_block_flush_device(struct ext4_blockdev *bdev);
 
 /**@brief   Flush data in given buffer to disk.
  * @param   bdev block device descriptor

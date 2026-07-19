@@ -19,6 +19,7 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::drivers::block::BlockDevice;
@@ -92,6 +93,7 @@ unsafe impl Sync for TestMemBlock {}
 struct RecordingMemBlock<const BLOCK_SIZE: usize> {
     data: Mutex<Vec<u8>>,
     calls: Mutex<Vec<(bool, usize, usize)>>,
+    flushes: AtomicUsize,
 }
 
 impl<const BLOCK_SIZE: usize> RecordingMemBlock<BLOCK_SIZE> {
@@ -99,6 +101,7 @@ impl<const BLOCK_SIZE: usize> RecordingMemBlock<BLOCK_SIZE> {
         Self {
             data: Mutex::new(alloc::vec![fill; size_bytes]),
             calls: Mutex::new(Vec::new()),
+            flushes: AtomicUsize::new(0),
         }
     }
 
@@ -108,6 +111,10 @@ impl<const BLOCK_SIZE: usize> RecordingMemBlock<BLOCK_SIZE> {
 
     fn take_calls(&self) -> Vec<(bool, usize, usize)> {
         core::mem::take(&mut *self.calls.lock())
+    }
+
+    fn flush_count(&self) -> usize {
+        self.flushes.load(Ordering::Relaxed)
     }
 }
 
@@ -130,6 +137,11 @@ impl<const BLOCK_SIZE: usize> BlockDevice for RecordingMemBlock<BLOCK_SIZE> {
 
     fn size_bytes(&self) -> Option<u64> {
         Some(self.data.lock().len() as u64)
+    }
+
+    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+        self.flushes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -156,6 +168,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "ext4::lwext4_partial_writeback_visibility",
             test_lwext4_partial_writeback_visibility,
+        ),
+        KernelTest::new(
+            "ext4::lwext4_flush_forwarding",
+            test_lwext4_flush_forwarding,
         ),
     ]
 }
@@ -473,6 +489,40 @@ fn test_partition_unaligned_batching() -> Result<(), &'static str> {
         || nested_after[1024..1536] != [0x22; 512]
     {
         return Err("nested block-size adapter corrupted sibling partition bytes");
+    }
+    Ok(())
+}
+
+fn test_lwext4_flush_forwarding() -> Result<(), &'static str> {
+    use crate::drivers::block::partition::{
+        BlockSizeAdapter, PartitionBlockDevice, ReadOnlyBlockDevice,
+    };
+    use crate::fs::ext4_lwext4::blockdev::{MangoBlockDev, MangoKernelDevOp};
+    use lwext4_rust::KernelDevOp;
+
+    let concrete = Arc::new(RecordingMemBlock::<BLOCK_SZ>::new(
+        4 * BLOCK_SZ,
+        0,
+    ));
+    let parent: Arc<dyn BlockDevice> = concrete.clone();
+    let partition: Arc<dyn BlockDevice> =
+        Arc::new(PartitionBlockDevice::new(parent, 1, 8));
+    let adapted: Arc<dyn BlockDevice> =
+        Arc::new(BlockSizeAdapter::new(partition, 512));
+    let read_only: Arc<dyn BlockDevice> =
+        Arc::new(ReadOnlyBlockDevice::new(adapted));
+    let mut bridge = MangoBlockDev {
+        dev: read_only,
+        pos: 0,
+        size: (4 * BLOCK_SZ) as u64,
+        read_only: true,
+        blocked_writes: 0,
+    };
+
+    MangoKernelDevOp::flush(&mut bridge)
+        .map_err(|_| "lwext4 bridge flush failed")?;
+    if concrete.flush_count() != 1 {
+        return Err("lwext4 flush did not reach the physical block device once");
     }
     Ok(())
 }

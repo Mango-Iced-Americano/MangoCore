@@ -14,6 +14,8 @@ use log::info;
 use pci::*;
 use spin::Mutex;
 
+use crate::utils::error::SyscallErr;
+
 /// One reusable AHCI DMA slot. The controller is serialized by `SataBlock`'s
 /// mutex, so one slot covers every in-flight request without the per-request
 /// allocation and fragmentation risks that the VirtIO DMA pool was designed to
@@ -104,6 +106,20 @@ impl BlockDevice for SataBlock {
 
     fn size_bytes(&self) -> Option<u64> {
         self.0.lock().capacity_bytes()
+    }
+
+    fn flush(&self) -> Result<(), SyscallErr> {
+        let started =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
+        let result = self.0.lock().flush().map_err(|err| {
+            log::error!("SATA cache flush failed: {:?}", err);
+            SyscallErr::EIO
+        });
+        crate::task::perf::record_sata_flush(
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .wrapping_sub(started),
+        );
+        result
     }
 }
 

@@ -23,6 +23,7 @@ use crate::hal::{
     BLOCK_SZ,
 };
 use crate::task::perf;
+use crate::utils::error::SyscallErr;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 #[cfg(not(target_arch = "riscv64"))]
@@ -112,6 +113,13 @@ impl BlockDevice for VirtIOBlock {
         let sectors = self.0.lock().capacity();
         let bytes = sectors.saturating_mul(512);
         Some(bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
+    }
+
+    fn flush(&self) -> Result<(), SyscallErr> {
+        self.0.lock().flush().map_err(|err| {
+            log::error!("VirtIO PCI block flush failed: {:?}", err);
+            SyscallErr::EIO
+        })
     }
 }
 

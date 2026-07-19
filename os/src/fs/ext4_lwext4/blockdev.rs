@@ -172,8 +172,8 @@ impl KernelDevOp for MangoKernelDevOp {
         Ok(buf.len())
     }
 
-    fn flush(_dev: &mut MangoBlockDev) -> Result<usize, i32> {
-        // Block devices don't need explicit flush
+    fn flush(dev: &mut MangoBlockDev) -> Result<usize, i32> {
+        dev.dev.flush().map_err(|error| error as i32)?;
         Ok(0)
     }
 }

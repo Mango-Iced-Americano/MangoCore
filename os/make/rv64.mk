@@ -292,10 +292,11 @@ comp-gdb:
 # The kernel needs initramfs cpio (embedded via .S), so user
 # programs must be built first.
 KTEST_EXT4_IMG_RV ?= /tmp/mango-lwext4-ktest-rv.img
+KTEST_EXT4_FEATURES ?= ^has_journal
 .PHONY: ktest-ext4-image
 ktest-ext4-image:
 	@truncate -s 64M $(KTEST_EXT4_IMG_RV)
-	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(KTEST_EXT4_IMG_RV)
+	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_RV)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_RV) >/dev/null
 
 ktest-run: $(INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ) ktest-ext4-image

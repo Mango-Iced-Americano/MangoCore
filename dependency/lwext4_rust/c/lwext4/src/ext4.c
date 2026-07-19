@@ -594,7 +594,16 @@ static int __ext4_recover(const char *mount_point)
 		}
 
 		r = jbd_recover(jbd_fs);
-		jbd_put_fs(jbd_fs);
+		/* jbd_recover() first makes replayed home blocks durable.  Persist
+		 * the updated journal superblock afterwards, so a successful return
+		 * can never leave the recovery marker only in a volatile cache. */
+		{
+			int cleanup_r = jbd_put_fs(jbd_fs);
+			if (cleanup_r == EOK)
+				cleanup_r = ext4_block_flush_device(mp->fs.bdev);
+			if (r == EOK)
+				r = cleanup_r;
+		}
 		ext4_free(jbd_fs);
 	}
 	if (r == EOK && !mp->fs.read_only) {

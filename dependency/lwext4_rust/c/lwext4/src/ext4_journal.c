@@ -1247,6 +1247,8 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 		jbd_fs->dirty = true;
 		r = ext4_sb_write(jbd_fs->bdev,
 				  &jbd_fs->inode_ref.fs->sb);
+		if (r == EOK)
+			r = ext4_block_flush_device(jbd_fs->bdev);
 	}
 	jbd_destroy_revoke_tree(&info);
 	return r;
@@ -1298,6 +1300,9 @@ int jbd_journal_start(struct jbd_fs *jbd_fs,
 	journal->jbd_fs = jbd_fs;
 	jbd_journal_write_sb(journal);
 	r = jbd_write_sb(jbd_fs);
+	if (r != EOK)
+		return r;
+	r = ext4_block_flush_device(jbd_fs->bdev);
 	if (r != EOK)
 		return r;
 
@@ -1364,11 +1369,12 @@ jbd_journal_skip_pure_revoke(struct jbd_journal *journal,
 	jbd_journal_write_sb(journal);
 }
 
-void
+int
 jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 			   bool flush,
 			   bool once)
 {
+	int r;
 	struct jbd_trans *trans;
 	while ((trans = TAILQ_FIRST(&journal->cp_queue))) {
 		if (!trans->data_cnt) {
@@ -1379,6 +1385,16 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 		} else {
 			if (trans->data_cnt ==
 					trans->written_cnt) {
+				if (trans->error != EOK) {
+					if (!trans->flush_pending)
+						return trans->error;
+					r = ext4_block_flush_device(
+						journal->jbd_fs->bdev);
+					if (r != EOK)
+						return r;
+					trans->error = EOK;
+					trans->flush_pending = false;
+				}
 				journal->start =
 					trans->start_iblock +
 					trans->alloc_blocks;
@@ -1408,6 +1424,7 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 		if (once)
 			break;
 	}
+	return EOK;
 }
 
 /**@brief  Stop accessing the journal.
@@ -1421,7 +1438,9 @@ int jbd_journal_stop(struct jbd_journal *journal)
 
 	/* Make sure that journalled content have reached
 	 * the disk.*/
-	jbd_journal_purge_cp_trans(journal, true, false);
+	r = jbd_journal_purge_cp_trans(journal, true, false);
+	if (r != EOK)
+		return r;
 
 	/* There should be no block record in this journal
 	 * session. */
@@ -1445,7 +1464,10 @@ int jbd_journal_stop(struct jbd_journal *journal)
 	journal->start = 0;
 	journal->trans_id = 0;
 	jbd_journal_write_sb(journal);
-	return jbd_write_sb(journal->jbd_fs);
+	r = jbd_write_sb(journal->jbd_fs);
+	if (r != EOK)
+		return r;
+	return ext4_block_flush_device(jbd_fs->bdev);
 }
 
 /**@brief  Allocate a block in the journal.
@@ -1464,7 +1486,7 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
 	/* If there is no space left, flush just one journalled
 	 * transaction.*/
 	if (journal->last == journal->start) {
-		jbd_journal_purge_cp_trans(journal, true, true);
+		(void)jbd_journal_purge_cp_trans(journal, true, true);
 		ext4_assert(journal->last != journal->start);
 	}
 
@@ -2131,6 +2153,17 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 
 	trans->written_cnt++;
 	if (trans->written_cnt == trans->data_cnt) {
+		int r;
+		if (trans->error != EOK)
+			return;
+		/* Home blocks must be durable before the journal tail can move
+		 * past this committed transaction. */
+		r = ext4_block_flush_device(journal->jbd_fs->bdev);
+		if (r != EOK) {
+			trans->error = r;
+			trans->flush_pending = true;
+			return;
+		}
 		/* If it is the first transaction on checkpoint queue,
 		 * we will shift the start of the journal to the next
 		 * transaction, and remove subsequent written
@@ -2144,7 +2177,7 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 			TAILQ_REMOVE(&journal->cp_queue, trans, trans_node);
 			jbd_journal_free_trans(journal, trans, false);
 
-			jbd_journal_purge_cp_trans(journal, false, false);
+			(void)jbd_journal_purge_cp_trans(journal, false, false);
 			jbd_journal_write_sb(journal);
 			jbd_write_sb(journal->jbd_fs);
 		}
@@ -2180,7 +2213,19 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 		goto Finish;
 	}
 
+	/* Descriptor, data and revoke records must reach stable storage before
+	 * the commit block can make the transaction replayable. */
+	rc = ext4_block_flush_device(journal->jbd_fs->bdev);
+	if (rc != EOK)
+		goto Finish;
+
 	rc = jbd_trans_write_commit_block(trans);
+	if (rc != EOK)
+		goto Finish;
+
+	/* Do not expose or checkpoint a committed transaction until its commit
+	 * block itself is durable. */
+	rc = ext4_block_flush_device(journal->jbd_fs->bdev);
 	if (rc != EOK)
 		goto Finish;
 

@@ -336,10 +336,11 @@ comp-gdb:
 # ─────────────────────────────────────────────────────────
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
 KTEST_EXT4_IMG_LA ?= /tmp/mango-lwext4-ktest-la.img
+KTEST_EXT4_FEATURES ?= ^has_journal
 .PHONY: ktest-ext4-image
 ktest-ext4-image:
 	@truncate -s 64M $(KTEST_EXT4_IMG_LA)
-	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(KTEST_EXT4_IMG_LA)
+	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_LA)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_LA) >/dev/null
 
 ktest-run: $(INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ) ktest-ext4-image

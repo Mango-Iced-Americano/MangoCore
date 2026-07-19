@@ -75,6 +75,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             bread: Some(Self::dev_bread),
             bwrite: Some(Self::dev_bwrite),
             close: Some(Self::dev_close),
+            flush: Some(Self::dev_flush),
             lock: None,
             unlock: None,
             ph_bsize: EXT4_DEV_BSIZE,
@@ -254,6 +255,30 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         debug!("CLOSE Ext4 block device");
         //fclose(dev_file);
         EOK as _
+    }
+
+    pub extern "C" fn dev_flush(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int {
+        unsafe {
+            if bdev.is_null() || (*bdev).bdif.is_null() {
+                return EIO as _;
+            }
+            let p_user = (*(*bdev).bdif).p_user;
+            if p_user.is_null() {
+                return EIO as _;
+            }
+            let devt = &mut *(p_user as *mut K::DevType);
+            match K::flush(devt) {
+                Ok(_) => EOK as _,
+                Err(error) => {
+                    let errno = if error < 0 {
+                        error.saturating_neg()
+                    } else {
+                        error
+                    };
+                    if errno == 0 { EIO as _ } else { errno as _ }
+                }
+            }
+        }
     }
 
     pub unsafe fn lwext4_mount(&mut self) -> Result<usize, i32> {

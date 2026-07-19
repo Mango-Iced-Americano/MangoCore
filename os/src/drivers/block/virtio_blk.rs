@@ -18,6 +18,7 @@ use crate::hal::{
     BLOCK_SZ,
 };
 use crate::task::perf;
+use crate::utils::error::SyscallErr;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 // Multi-page DMA uses the pool for contiguity; fallback to BLOCK_SZ when pool
 // is exhausted.  See virtio_dma_pool.rs.
@@ -114,6 +115,13 @@ impl BlockDevice for VirtIOBlock {
         let sectors = self.0.lock().capacity();
         let bytes = sectors.saturating_mul(512);
         Some(bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
+    }
+
+    fn flush(&self) -> Result<(), SyscallErr> {
+        self.0.lock().flush().map_err(|err| {
+            log::error!("VirtIO block flush failed: {:?}", err);
+            SyscallErr::EIO
+        })
     }
 }
 

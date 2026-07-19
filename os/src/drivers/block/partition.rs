@@ -362,6 +362,10 @@ impl BlockDevice for PartitionBlockDevice {
     fn size_bytes(&self) -> Option<u64> {
         Some(self.size_bytes)
     }
+
+    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+        self.parent.flush()
+    }
 }
 
 /// Translate filesystem-native block numbers to the platform `BLOCK_SZ` unit.
@@ -416,6 +420,10 @@ impl BlockDevice for BlockSizeAdapter {
     fn size_bytes(&self) -> Option<u64> {
         self.size_bytes
     }
+
+    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+        self.parent.flush()
+    }
 }
 
 /// Last-resort physical write barrier for board read-only validation images.
@@ -454,5 +462,9 @@ impl BlockDevice for ReadOnlyBlockDevice {
 
     fn size_bytes(&self) -> Option<u64> {
         self.parent.size_bytes()
+    }
+
+    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+        self.parent.flush()
     }
 }

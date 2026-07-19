@@ -1072,3 +1072,21 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   semantic FAIL。
 - **相关文件**：`os/src/fs/vfs/file_system.rs`、`os/src/fs/vfs/mount.rs`、
   `os/src/kernel_tests/runner.rs`、`os/src/syscall/process/misc.rs`
+
+## journal durability 测试必须同时证明特性与介质顺序
+
+- **现象**：journal 代码、mount/recover API 和测试名称都存在，QEMU 用例也全绿，但 fixture
+  实际由 `mke2fs -O ^has_journal` 创建；测试从未进入 journal commit/replay 路径。另一方面，
+  仅排空 lwext4 block cache 也会造成假绿，因为数据可能仍停留在 VirtIO/SATA 的 volatile cache。
+- **根因**：功能存在性、软件缓存可见性与介质持久性是三层不同断言。没有显式设备 flush 时，
+  descriptor、commit、checkpoint 的提交顺序只在 CPU/软件缓存中成立；没有 fixture 特性证明时，
+  即使 barrier 代码正确也可能完全未执行。
+- **修复**：块设备统一提供可失败 `flush()` 并穿透所有 partition/adapter wrapper；journal 顺序固定为
+  records 写入 → flush → commit 写入 → flush → home blocks 写入 → flush → tail advance。恢复时先
+  flush replayed home blocks，再清 recovery marker 并二次 flush；所有失败必须阻止 tail/teardown 成功。
+- **门禁**：每轮用全新 disposable 镜像；运行日志证明 mount、测试与完整 teardown；`dumpe2fs -h`
+  明确出现 `has_journal`；同一镜像至少冷启动两次；最终 `e2fsck -fn` 五阶段干净。正常再挂载不能
+  替代事务中途强制断电/故障注入，也不能替代 persistent orphan recovery 测试。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4_blockdev.c`、`os/src/drivers/block/`、
+  `os/make/rv64.mk`、`os/make/la64.mk`
