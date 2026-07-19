@@ -4,7 +4,8 @@ use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     add_kernel_timer, all_processes, current_task, current_task_ref, current_user_token,
-    find_process_by_pid, find_task_by_tid, signal::{SigInfo, Signals},
+    find_process_by_pid, find_task_by_tid,
+    signal::{SigInfo, Signals},
     sleep_relative_interruptible, sleep_until_realtime_interruptible, wake_interruptible,
     wake_realtime_abstime_sleepers_after_clock_set, PosixTimer, Rusage, TaskStatus, TimerAction,
 };
@@ -276,11 +277,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
     }
 }
 
-pub fn sys_timer_create(
-    clock_id: usize,
-    sevp: *const SigeventHeader,
-    timerid: *mut i32,
-) -> isize {
+pub fn sys_timer_create(clock_id: usize, sevp: *const SigeventHeader, timerid: *mut i32) -> isize {
     if timerid.is_null() {
         return EFAULT;
     }
@@ -565,11 +562,11 @@ fn posix_timer_deadline_after_absolute_overrun(
     now_monotonic: TimeSpec,
 ) -> (TimeSpec, usize, TimeSpec) {
     let interval_ns = interval.to_ns_saturating().max(1) as usize;
-    let elapsed_ns = (clock_now.to_ns_saturating() as usize)
-        .saturating_sub(value.to_ns_saturating() as usize);
+    let elapsed_ns =
+        (clock_now.to_ns_saturating() as usize).saturating_sub(value.to_ns_saturating() as usize);
     let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
-    let next_clock_ns = (value.to_ns_saturating() as usize)
-        .saturating_add(expirations.saturating_mul(interval_ns));
+    let next_clock_ns =
+        (value.to_ns_saturating() as usize).saturating_add(expirations.saturating_mul(interval_ns));
     let next_abs_deadline = TimeSpec::from_ns(next_clock_ns);
     let duration = timespec_saturating_sub(next_abs_deadline, clock_now);
     let deadline = now_monotonic + duration;
@@ -634,10 +631,19 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                         timer.value = timer.interval;
                         timer.deadline = Some(deadline);
                         timer.realtime_abs_deadline = Some(next_abs_deadline);
-                        registrations.push((task.clone(), timer_id, signal, timer.generation, deadline));
+                        registrations.push((
+                            task.clone(),
+                            timer_id,
+                            signal,
+                            timer.generation,
+                            deadline,
+                        ));
                     } else {
-                        let deadline =
-                            realtime_deadline_to_monotonic(abs_deadline, now_realtime, now_monotonic);
+                        let deadline = realtime_deadline_to_monotonic(
+                            abs_deadline,
+                            now_realtime,
+                            now_monotonic,
+                        );
                         timer.deadline = Some(deadline);
                         registrations.push((
                             task.clone(),
@@ -656,11 +662,8 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                     let _ = inner
                         .sigpending
                         .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                    if signal.wakes_interruptible(
-                        inner.sigmask,
-                        inner.signal_wait_mask,
-                        true,
-                    ) && inner.task_status == TaskStatus::Interruptible
+                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+                        && inner.task_status == TaskStatus::Interruptible
                     {
                         inner.task_status = TaskStatus::Ready;
                         should_wake_task = true;
@@ -746,8 +749,7 @@ pub fn sys_settimeofday(tv: *const TimeVal, tz: *const TimeZone) -> isize {
 }
 
 fn valid_timex_modes(modes: u32) -> bool {
-    matches!(modes, ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ)
-        || (modes & !ADJ_VALID_MASK == 0)
+    matches!(modes, ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ) || (modes & !ADJ_VALID_MASK == 0)
 }
 
 fn valid_timex_value(timex: &Timex) -> bool {
@@ -1064,9 +1066,8 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
 
 pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
     let ns = match clk_id {
-        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW
-        | CLOCK_BOOTTIME | CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM
-        | CLOCK_TAI => {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME
+        | CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM | CLOCK_TAI => {
             // hardware counter resolution: ceil(1e9 / freq)
             let freq = crate::timer::clock_freq();
             ((1_000_000_000u128 + freq as u128 - 1) / freq as u128) as usize
@@ -1143,9 +1144,7 @@ pub fn sys_clock_nanosleep(
             Ok(()) => SUCCESS,
             Err(interrupted) => {
                 if !rmtp.is_null() {
-                    if let Err(errno) =
-                        UserPtrMut::new(rmtp).write(token, &interrupted.remaining)
-                    {
+                    if let Err(errno) = UserPtrMut::new(rmtp).write(token, &interrupted.remaining) {
                         return errno;
                     }
                 }
@@ -1251,8 +1250,6 @@ fn timeval_to_user_ticks(value: TimeVal) -> usize {
     if us == 0 {
         0
     } else {
-        us.saturating_mul(USER_HZ)
-            .saturating_add(USEC_PER_SEC - 1)
-            / USEC_PER_SEC
+        us.saturating_mul(USER_HZ).saturating_add(USEC_PER_SEC - 1) / USEC_PER_SEC
     }
 }

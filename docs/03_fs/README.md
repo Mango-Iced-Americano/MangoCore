@@ -4,7 +4,7 @@ module: fs
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/"
 entry_points:
@@ -89,9 +89,9 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
 
 **IndexNode trait (os/src/fs/vfs/index_node.rs):** VFS 的核心抽象，对标 Linux inode。所有具体文件系统 inode 都实现此 trait。方法包括 `read_at()`、`write_at()`、`find()`、`create()`、`link()`、`unlink()`、`rename()`、`symlink()`、`metadata()`、`resize()`、`page_cache()`、`poll()`、`ioctl()`。每个 inode 有全局唯一的 `InodeId`。
 
-**FileSystem trait (os/src/fs/vfs/file_system.rs):** 具体文件系统的抽象接口。提供 `root_inode()`、`info()`、`name()`、`super_block()`、`statfs()` 等方法。
+**FileSystem trait (os/src/fs/vfs/file_system.rs):** 具体文件系统的抽象接口。提供 `root_inode()`、`info()`、`name()`、`super_block()`、`statfs()` 和可失败的 `on_umount()`。后端最后一个挂载引用消失后进入 Dying；只有写回、底层 cache/journal 停止和注册表脱钩全部成功才进入 Dead，失败会在无 registry 锁的 drain 中重试。
 
-**MountFS (os/src/fs/vfs/mount.rs):** 包装层，处理跨文件系统边界的路径解析和挂载传播。每个 MountFS 持有 `BTreeMap<InodeId, Arc<MountFS>>` 挂载点表，在 `find()` 时检查子挂载点并将操作委托到对应 FS。支持 bind mount、recursive bind mount、mount propagation（shared / private / slave）。
+**MountFS (os/src/fs/vfs/mount.rs):** 包装层，处理跨文件系统边界的路径解析和挂载传播。每个 MountFS 持有 `BTreeMap<InodeId, Arc<MountFS>>` 挂载点表，在 `find()` 时检查子挂载点并将操作委托到对应 FS。支持 bind mount、recursive bind mount、mount propagation（shared / private / slave）；bind 和传播副本继承源挂载的 `RDONLY` 等持久属性，所有修改操作在 MountFS 层统一返回 `EROFS`。
 
 **PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。当缓存脏页总量超过高水位（16MB）时触发 LRU 回收，每次批量回收 64 页。后台 `reclaim.rs` 线程周期性探测并回收。
 

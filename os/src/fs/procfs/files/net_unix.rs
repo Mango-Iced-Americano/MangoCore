@@ -1,6 +1,6 @@
-use alloc::string::String;
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use alloc::string::String;
 
 pub fn net_unix_content(
     _extra: usize,
@@ -8,8 +8,6 @@ pub fn net_unix_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let content = String::from(
-        "Num       RefCount Protocol Flags    Type St Inode Path\n",
-    );
+    let content = String::from("Num       RefCount Protocol Flags    Type St Inode Path\n");
     proc_read_str(offset, len, buf, &content)
 }

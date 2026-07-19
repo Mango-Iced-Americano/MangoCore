@@ -4,23 +4,25 @@ pub mod eventpoll;
 pub mod ext4;
 pub mod ext4_lwext4;
 pub mod fat32;
-pub mod pidfd;
 mod filesystem;
 #[cfg(feature = "initramfs")]
 pub mod initramfs;
 pub mod iov;
 mod layout;
 mod page_cache;
-pub use page_cache::{entries_global_stats, evict_all_clean_pages, flush_all_page_caches, registry_stats, PageCache};
+pub mod pidfd;
+pub use page_cache::{
+    entries_global_stats, evict_all_clean_pages, flush_all_page_caches, registry_stats, PageCache,
+};
 pub mod poll;
 pub mod procfs;
 pub mod ramfs;
 pub mod reclaim;
+#[cfg(feature = "swap")]
+pub mod swap;
 pub mod sysfs;
 pub mod timerfd;
 pub mod tmpfs;
-#[cfg(feature = "swap")]
-pub mod swap;
 // Xein add this
 pub mod dirent;
 // file_descriptor module removed — migrated to vfs::File
@@ -28,22 +30,20 @@ mod inode;
 mod timestamp;
 pub mod vfs;
 
-pub use self::dev::{
-    pipe::*,
-};
+pub use self::dev::pipe::*;
 
 pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
+pub use self::filesystem::{detect_fs, detect_fs_layout, DetectedFs, FS_Type};
 pub use crate::drivers::block::BlockDevice;
-pub use self::filesystem::{detect_fs, FS_Type};
 
+use self::vfs::FileSystem as _;
+use self::vfs::IndexNode;
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
 pub use dirent::Dirent;
 use lazy_static::*;
-use self::vfs::IndexNode;
-use self::vfs::FileSystem as _;
 
 /// 强制使用 ramfs，跳过块设备检测（用于 VFS 层调试 / legacy_block_root 模式）
 static FORCE_RAMFS: AtomicBool = AtomicBool::new(false);
@@ -54,38 +54,83 @@ pub fn force_ramfs() {
     crate::drivers::block::disable_block_device();
 }
 
+pub(crate) fn adapt_filesystem_device(
+    block_device: Arc<dyn BlockDevice>,
+    detected: DetectedFs,
+    read_only: bool,
+) -> Arc<dyn BlockDevice> {
+    use crate::drivers::block::partition::{BlockSizeAdapter, ReadOnlyBlockDevice};
+
+    let mut device = block_device;
+    // FAT addresses the device with BPB-native sector numbers, so its block
+    // numbers need translating to the platform BlockDevice unit. lwext4 is
+    // different: MangoKernelDevOp already translates its byte seek/read/write
+    // stream to platform blocks. Wrapping lwext4 in BlockSizeAdapter would
+    // scale the offset a second time (and rejects a 2 KiB bridge request when
+    // the ext4 block size is 4 KiB on 2K1000).
+    if detected.fs_type == FS_Type::Fat32 && detected.block_size != crate::hal::BLOCK_SZ {
+        boot_trace!(
+            "[fs] adapting native block size {} to platform block size {}",
+            detected.block_size,
+            crate::hal::BLOCK_SZ
+        );
+        device = Arc::new(BlockSizeAdapter::new(device, detected.block_size));
+    }
+    if read_only {
+        device = Arc::new(ReadOnlyBlockDevice::new(device));
+    }
+    device
+}
+
 // ── VFS_ROOT：根据特性选择初始化策略 ──
 
 /// 非 initramfs 模式：传统块设备检测，失败时 fallback 到 ramfs
 #[cfg(not(feature = "initramfs"))]
 lazy_static! {
     pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
-        let fs_type = if FORCE_RAMFS.load(Ordering::Relaxed) {
-            self::filesystem::FS_Type::Null
+        let detected = if FORCE_RAMFS.load(Ordering::Relaxed) {
+            None
         } else {
-            self::filesystem::pre_mount()
+            self::filesystem::detect_fs_layout(&crate::drivers::BLOCK_DEVICE)
         };
-        let mfs = match fs_type {
-            self::filesystem::FS_Type::Fat32 => {
-                let efs = self::fat32::EasyFileSystem::open(
+        let mfs = match detected {
+            Some(detected) if detected.fs_type == self::filesystem::FS_Type::Fat32 => {
+                let device = adapt_filesystem_device(
                     crate::drivers::BLOCK_DEVICE.clone(),
+                    detected,
+                    false,
                 );
-                self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(efs), self::vfs::MountFlags::empty())
+                let efs = self::fat32::EasyFileSystem::open(device);
+                self::vfs::MountFS::new(
+                    self::vfs::BackendLifecycle::new(efs),
+                    self::vfs::MountFlags::empty(),
+                )
             }
-            self::filesystem::FS_Type::Ext4 => {
-                let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(
+            Some(detected) if detected.fs_type == self::filesystem::FS_Type::Ext4 => {
+                let device = adapt_filesystem_device(
                     crate::drivers::BLOCK_DEVICE.clone(),
+                    detected,
+                    false,
+                );
+                let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(
+                    device,
                 ) {
                     Ok(fs) => fs,
                     Err(e) => {
                         println!("[kernel] lwext4 mount failed: {:?}, falling back to ramfs", e);
                         let ramfs = self::ramfs::RamFS::new();
-                        return self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ramfs), self::vfs::MountFlags::empty());
+                        return self::vfs::MountFS::new(
+                            self::vfs::BackendLifecycle::new(ramfs),
+                            self::vfs::MountFlags::empty(),
+                        );
                     }
                 };
-                self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ext4), self::vfs::MountFlags::empty())
+                self::vfs::MountFS::new(
+                    self::vfs::BackendLifecycle::new(ext4),
+                    self::vfs::MountFlags::empty(),
+                )
             }
-            self::filesystem::FS_Type::Null => {
+            _ => {
                 println!("[kernel] No filesystem found, falling back to ramfs");
                 let ramfs = self::ramfs::RamFS::new();
                 self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ramfs), self::vfs::MountFlags::empty())
@@ -107,7 +152,7 @@ lazy_static! {
         // 解包 initramfs cpio
         match self::initramfs::unpack_embedded(&mfs) {
             Ok(stats) => {
-                println!(
+                boot_trace!(
                     "[initramfs] unpacked: files={} dirs={} symlinks={} bytes={}",
                     stats.files, stats.dirs, stats.symlinks, stats.bytes,
                 );
@@ -130,37 +175,92 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
     // ── /dev — 设备文件系统 ──
     {
         let dev_inode = root.find("dev").unwrap_or_else(|_| {
-            root.create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
-                .expect("failed to create /dev")
+            root.create(
+                "dev",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o755),
+            )
+            .expect("failed to create /dev")
         });
         let devfs = crate::fs::dev::DEV_FS.clone();
-        devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "tty",
+                crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/tty");
-        devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "null",
+                alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/null");
-        devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "zero",
+                alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/zero");
-        devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "urandom",
+                alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom)
+                    as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/urandom");
-        devfs.add_dev("full", alloc::sync::Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "full",
+                alloc::sync::Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/full");
-        devfs.add_dev("random", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "random",
+                alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom)
+                    as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/random");
-        devfs.add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "console",
+                crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/console");
-        devfs.add_dev("ptmx", alloc::sync::Arc::new(crate::fs::dev::pty::PtmxMasterInode) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "ptmx",
+                alloc::sync::Arc::new(crate::fs::dev::pty::PtmxMasterInode)
+                    as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/ptmx");
-        devfs.add_dev("pts", alloc::sync::Arc::new(crate::fs::dev::pty::PtsDirInode) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "pts",
+                alloc::sync::Arc::new(crate::fs::dev::pty::PtsDirInode)
+                    as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/pts");
-        devfs.add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "rtc",
+                alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/rtc");
-        devfs.add_dev("cpu_dma_latency", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
+        devfs
+            .add_dev(
+                "cpu_dma_latency",
+                alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/cpu_dma_latency");
         let misc_dir = devfs
             .add_dir("misc", self::vfs::InodeMode::from_bits_truncate(0o755))
             .expect("devfs: failed to register /dev/misc");
         misc_dir
-            .add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+            .add_dev(
+                "rtc",
+                alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>,
+            )
             .expect("devfs: failed to register /dev/misc/rtc");
         let shmfs = crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096); // ~16MB for /dev/shm
         if let Ok(mut meta) = shmfs.root_inode().metadata() {
@@ -176,10 +276,19 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .metadata()
             .expect("devfs: failed to read /dev/shm metadata")
             .inode_id;
-        let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
-        let devfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(devfs), self::vfs::MountFlags::empty());
+        let dev_inode_id = dev_inode
+            .metadata()
+            .expect("dev_inode metadata failed")
+            .inode_id;
+        let devfs_mnt = self::vfs::MountFS::new(
+            self::vfs::BackendLifecycle::new(devfs),
+            self::vfs::MountFlags::empty(),
+        );
         devfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev")));
-        if let Some(dev_mfsi) = dev_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+        if let Some(dev_mfsi) = dev_inode
+            .as_any_ref()
+            .downcast_ref::<self::vfs::MountFSInode>()
+        {
             let backref = self::vfs::MountFSInode::new(
                 dev_mfsi.inner_inode.clone(),
                 dev_mfsi.mount_fs.clone(),
@@ -205,17 +314,32 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
     // ── /proc — 进程信息文件系统 ──
     {
         let proc_inode = root.find("proc").unwrap_or_else(|_| {
-            root.create("proc", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o555))
-                .expect("failed to create /proc")
+            root.create(
+                "proc",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o555),
+            )
+            .expect("failed to create /proc")
         });
-        let proc_inode_id = proc_inode.metadata().expect("proc_inode metadata failed").inode_id;
+        let proc_inode_id = proc_inode
+            .metadata()
+            .expect("proc_inode metadata failed")
+            .inode_id;
         let procfs = crate::fs::procfs::ProcFS::new();
         crate::fs::procfs::files::register_all(procfs.root())
             .expect("procfs: failed to register root entries");
-        let procfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(procfs), self::vfs::MountFlags::empty());
-        procfs_mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed);
+        let procfs_mnt = self::vfs::MountFS::new(
+            self::vfs::BackendLifecycle::new(procfs),
+            self::vfs::MountFlags::empty(),
+        );
+        procfs_mnt
+            .no_dentry_cache
+            .store(true, core::sync::atomic::Ordering::Relaxed);
         procfs_mnt.set_mount_path(Some(alloc::string::String::from("/proc")));
-        if let Some(proc_mfsi) = proc_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+        if let Some(proc_mfsi) = proc_inode
+            .as_any_ref()
+            .downcast_ref::<self::vfs::MountFSInode>()
+        {
             let backref = self::vfs::MountFSInode::new(
                 proc_mfsi.inner_inode.clone(),
                 proc_mfsi.mount_fs.clone(),
@@ -226,20 +350,35 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("failed to mount procfs at /proc");
     }
 
-     // ── /sys — kernel object filesystem ──
+    // ── /sys — kernel object filesystem ──
     {
         let sys_inode = root.find("sys").unwrap_or_else(|_| {
-            root.create("sys", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o555))
-                .expect("failed to create /sys")
+            root.create(
+                "sys",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o555),
+            )
+            .expect("failed to create /sys")
         });
-        let sys_inode_id = sys_inode.metadata().expect("sys_inode metadata failed").inode_id;
+        let sys_inode_id = sys_inode
+            .metadata()
+            .expect("sys_inode metadata failed")
+            .inode_id;
         let sysfs = crate::fs::sysfs::SysFS::new();
         crate::fs::sysfs::files::register_all(sysfs.root())
             .expect("sysfs: failed to register root entries");
-        let sysfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(sysfs), self::vfs::MountFlags::empty());
-        sysfs_mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed);
+        let sysfs_mnt = self::vfs::MountFS::new(
+            self::vfs::BackendLifecycle::new(sysfs),
+            self::vfs::MountFlags::empty(),
+        );
+        sysfs_mnt
+            .no_dentry_cache
+            .store(true, core::sync::atomic::Ordering::Relaxed);
         sysfs_mnt.set_mount_path(Some(alloc::string::String::from("/sys")));
-        if let Some(sys_mfsi) = sys_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+        if let Some(sys_mfsi) = sys_inode
+            .as_any_ref()
+            .downcast_ref::<self::vfs::MountFSInode>()
+        {
             let backref = self::vfs::MountFSInode::new(
                 sys_mfsi.inner_inode.clone(),
                 sys_mfsi.mount_fs.clone(),
@@ -250,22 +389,32 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("failed to mount sysfs at /sys");
     }
 
-     // ── /tmp — 临时文件系统（ramfs, 不受配额限制）──
+    // ── /tmp — 临时文件系统（ramfs, 不受配额限制）──
     {
         let tmp_inode = root.find("tmp").unwrap_or_else(|_| {
-            root.create("tmp", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o1777))
-                .expect("failed to create /tmp")
+            root.create(
+                "tmp",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o1777),
+            )
+            .expect("failed to create /tmp")
         });
-        let tmp_inode_id = tmp_inode.metadata().expect("tmp_inode metadata failed").inode_id;
+        let tmp_inode_id = tmp_inode
+            .metadata()
+            .expect("tmp_inode metadata failed")
+            .inode_id;
         let tmpfs = crate::fs::tmpfs::TmpFS::new(); // unlimited for /tmp
-        // 设置挂载后的根 inode 为 01777（sticky bit + 全局可读写）
+                                                    // 设置挂载后的根 inode 为 01777（sticky bit + 全局可读写）
         if let Ok(mut meta) = tmpfs.root_inode().metadata() {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
             tmpfs.root_inode().set_metadata(&meta).ok();
         }
         let tmpfs_mnt = self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(tmpfs), self::vfs::MountFlags::empty());
         tmpfs_mnt.set_mount_path(Some(alloc::string::String::from("/tmp")));
-        if let Some(tmp_mfsi) = tmp_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+        if let Some(tmp_mfsi) = tmp_inode
+            .as_any_ref()
+            .downcast_ref::<self::vfs::MountFSInode>()
+        {
             let backref = self::vfs::MountFSInode::new(
                 tmp_mfsi.inner_inode.clone(),
                 tmp_mfsi.mount_fs.clone(),
@@ -278,27 +427,43 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
     // ── /mnt — 挂载点目录 ──
     {
         root.find("mnt").unwrap_or_else(|_| {
-            root.create("mnt", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
-                .expect("failed to create /mnt")
+            root.create(
+                "mnt",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o755),
+            )
+            .expect("failed to create /mnt")
         });
     }
     // ── /run — 运行时文件 ──
     {
         root.find("run").unwrap_or_else(|_| {
-            root.create("run", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
-                .expect("failed to create /run")
+            root.create(
+                "run",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o755),
+            )
+            .expect("failed to create /run")
         });
     }
     // ── /var/tmp — 临时文件备选 ──
     {
         root.find("var").unwrap_or_else(|_| {
-            root.create("var", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
-                .expect("failed to create /var")
+            root.create(
+                "var",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o755),
+            )
+            .expect("failed to create /var")
         });
         let var = root.find("var").unwrap();
         var.find("tmp").unwrap_or_else(|_| {
-            var.create("tmp", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o1777))
-                .expect("failed to create /var/tmp")
+            var.create(
+                "tmp",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o1777),
+            )
+            .expect("failed to create /var/tmp")
         });
     }
 }
@@ -315,38 +480,94 @@ pub fn mount_block_fs(
     mount_point: &str,
     label: &str,
 ) -> Option<Arc<self::vfs::MountFS>> {
-    use self::filesystem::detect_fs;
-    use self::vfs::MountFlags;
+    mount_block_fs_with_flags(
+        parent_mfs,
+        block_device,
+        mount_point,
+        label,
+        self::vfs::MountFlags::empty(),
+    )
+}
 
-    let fs_type = detect_fs(block_device);
-    let mfs = match fs_type {
-        self::filesystem::FS_Type::Ext4 => {
-            let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device.clone()) {
-                Ok(fs) => fs,
-                Err(e) => {
-                    println!("[kernel] mount_block_fs: lwext4 mount failed: {:?}", e);
-                    return None;
-                }
-            };
-            self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(ext4), MountFlags::empty())
-        }
-        self::filesystem::FS_Type::Fat32 => {
-            let efs = self::fat32::EasyFileSystem::open(block_device.clone());
-            self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(efs), MountFlags::empty())
-        }
-        self::filesystem::FS_Type::Null => {
-            println!("[kernel] mount_block_fs: {} — no filesystem detected on block device", label);
+pub fn mount_block_fs_with_flags(
+    parent_mfs: &Arc<self::vfs::MountFS>,
+    block_device: &Arc<dyn BlockDevice>,
+    mount_point: &str,
+    label: &str,
+    mount_flags: self::vfs::MountFlags,
+) -> Option<Arc<self::vfs::MountFS>> {
+    let detected = match self::filesystem::detect_fs_layout(block_device) {
+        Some(detected) => detected,
+        None => {
+            println!(
+                "[kernel] mount_block_fs: {} — no filesystem detected on block device",
+                label
+            );
             return None;
         }
     };
+    let fs_device = adapt_filesystem_device(
+        block_device.clone(),
+        detected,
+        mount_flags.contains(self::vfs::MountFlags::RDONLY),
+    );
+
+    let fs_type = detected.fs_type;
+    let mfs = match fs_type {
+        self::filesystem::FS_Type::Ext4 => {
+            let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs_with_options(
+                fs_device,
+                mount_flags.contains(self::vfs::MountFlags::RDONLY),
+            ) {
+                Ok(fs) => fs,
+                Err(error) => {
+                    println!(
+                        "[kernel] mount_block_fs: lwext4 mount failed for {}: {:?}",
+                        label, error
+                    );
+                    return None;
+                }
+            };
+            self::vfs::MountFS::new(
+                self::vfs::BackendLifecycle::new(ext4),
+                mount_flags,
+            )
+        }
+        self::filesystem::FS_Type::Fat32 => {
+            let efs = self::fat32::EasyFileSystem::open(fs_device);
+            self::vfs::MountFS::new(self::vfs::BackendLifecycle::new(efs), mount_flags)
+        }
+        self::filesystem::FS_Type::Null => unreachable!(),
+    };
+
+    match mfs.mountpoint_root_inode().list() {
+        Ok(entries) => boot_trace!(
+            "[fs] {} root directory readable: {} entries",
+            label,
+            entries.len()
+        ),
+        Err(error) => {
+            println!(
+                "[kernel] mount_block_fs: {} root directory read failed: {:?}",
+                label, error
+            );
+            return None;
+        }
+    }
 
     let root = parent_mfs.mountpoint_root_inode();
     let mount_inode = root.find(mount_point).unwrap_or_else(|_| {
-        root.create(mount_point, self::vfs::FileType::Dir,
-            self::vfs::InodeMode::from_bits_truncate(0o755))
-            .expect("failed to create mount point")
+        root.create(
+            mount_point,
+            self::vfs::FileType::Dir,
+            self::vfs::InodeMode::from_bits_truncate(0o755),
+        )
+        .expect("failed to create mount point")
     });
-    let inode_id = mount_inode.metadata().expect("mount_inode metadata failed").inode_id;
+    let inode_id = mount_inode
+        .metadata()
+        .expect("mount_inode metadata failed")
+        .inode_id;
 
     let mount_path = if mount_point.starts_with('/') {
         alloc::string::String::from(mount_point)
@@ -356,22 +577,31 @@ pub fn mount_block_fs(
     mfs.set_mount_path(Some(mount_path.clone()));
     mfs.set_mount_source(Some(mount_path));
 
-    if let Some(mfsi) = mount_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
-        let backref = self::vfs::MountFSInode::new(
-            mfsi.inner_inode.clone(),
-            mfsi.mount_fs.clone(),
-        );
+    if let Some(mfsi) = mount_inode
+        .as_any_ref()
+        .downcast_ref::<self::vfs::MountFSInode>()
+    {
+        let backref = self::vfs::MountFSInode::new(mfsi.inner_inode.clone(), mfsi.mount_fs.clone());
         mfs.set_self_mountpoint(Some(backref));
     } else {
         println!("[kernel] WARNING: mount_block_fs {} — mount_inode not a MountFSInode, self_mountpoint NOT set", label);
     }
 
     if let Err(e) = parent_mfs.add_mount(inode_id, mfs.clone()) {
-        println!("[kernel] mount_block_fs: failed to mount {} at {}: {:?}", label, mount_point, e);
+        println!(
+            "[kernel] mount_block_fs: failed to mount {} at {}: {:?}",
+            label, mount_point, e
+        );
         return None;
     }
 
-    println!("[kernel] {} mounted at {}", label, mount_point);
+    boot_trace!(
+        "[kernel] {} ({:?}) mounted at {} flags={:?}",
+        label,
+        fs_type,
+        mount_point,
+        mount_flags
+    );
     Some(mfs)
 }
 
@@ -394,120 +624,450 @@ pub fn vfs_root() -> Arc<self::vfs::MountFS> {
     VFS_ROOT.clone()
 }
 
-/// 注册 /dev/vda 和 /dev/vdb 块设备节点到当前 devfs。
+/// 注册启动块设备节点到当前 devfs。
 /// 无需单独调用 — 由 mount_boot_block_devices 间接调用。
 pub fn register_block_device_nodes() {
     // 保留空函数体供未来 devfs 重构使用；当前块设备节点已在
     // mount_common_filesystems 中注册（使用 block_devices() 安全探测）。
 }
 
-/// 在 initramfs 模式下，首次触发 BLOCK_DEVICES 探测，并尝试挂载块设备：
-/// - x0 → /sdcard（官方 fs）
-/// - x1 → /tools（工具盘）
-///
-/// 任何设备缺失或挂载失败都只打印 warning，不 panic。
-pub fn mount_boot_block_devices() {
-    let root = vfs_root();
+fn register_block_node(name: &str, device: Arc<dyn BlockDevice>, minor: u64, read_only: bool) {
+    let inode = crate::fs::dev::block::BlockDevInode::new_with_read_only(
+        device,
+        minor,
+        String::from(name),
+        read_only,
+    );
+    if let Err(error) = crate::fs::dev::DEV_FS.add_dev(name, inode) {
+        println!("[block] failed to register /dev/{}: {:?}", name, error);
+    }
+}
 
-    // 首次真正触发 BLOCK_DEVICES probe，但此时 VFS_ROOT 已经存在
-    let devs = crate::drivers::block::block_devices();
+#[derive(Clone)]
+struct MountCandidate {
+    device: Arc<dyn BlockDevice>,
+    source: String,
+    partno: Option<u8>,
+    partition_type: Option<u8>,
+    start_lba: Option<u64>,
+    sectors: Option<u64>,
+    fs_type: self::filesystem::FS_Type,
+}
 
-    // 注册 /dev/vda（原始根设备，不做 MBR 解析以避免 FAT32 55AA 误判）
-    if let Some(ref blk0) = devs[0] {
-        let _ = crate::fs::dev::DEV_FS.add_dev(
-            "vda",
-            crate::fs::dev::block::BlockDevInode::new(blk0.clone(), 0, String::from("vda")),
-        );
+fn discover_mount_devices(
+    raw: &Arc<dyn BlockDevice>,
+    base_name: &str,
+    raw_minor: u64,
+    raw_alias: Option<(&str, u64)>,
+    partition_alias_base: Option<&str>,
+    read_only: bool,
+) -> alloc::vec::Vec<MountCandidate> {
+    use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
+
+    register_block_node(base_name, raw.clone(), raw_minor, read_only);
+    if let Some((alias, minor)) = raw_alias {
+        register_block_node(alias, raw.clone(), minor, read_only);
     }
 
-    // 尝试挂载 x0 → /sdcard
-    match devs[0].as_ref() {
-        Some(dev) => {
-            if mount_block_fs(&root, dev, "sdcard", "official fs (x0)").is_none() {
-                println!("[initramfs] official fs (x0) mount failed, leaving /sdcard empty");
+    let raw_fs = self::filesystem::detect_fs(raw);
+    if raw_fs != self::filesystem::FS_Type::Null {
+        boot_trace!("[block] /dev/{} contains raw {:?}", base_name, raw_fs);
+        return alloc::vec![MountCandidate {
+            device: raw.clone(),
+            source: alloc::format!("/dev/{}", base_name),
+            partno: None,
+            partition_type: None,
+            start_lba: None,
+            sectors: None,
+            fs_type: raw_fs,
+        }];
+    }
+
+    match probe_mbr(raw) {
+        MbrProbe::Partitions(partitions) => {
+            let mut candidates = alloc::vec::Vec::new();
+            for partition in partitions {
+                let part_device = Arc::new(PartitionBlockDevice::new(
+                    raw.clone(),
+                    partition.start_lba,
+                    partition.sectors,
+                )) as Arc<dyn BlockDevice>;
+                let name = alloc::format!("{}{}", base_name, partition.partno);
+                let minor = raw_minor
+                    .saturating_mul(16)
+                    .saturating_add(partition.partno as u64);
+                register_block_node(&name, part_device.clone(), minor, read_only);
+                if let Some(alias_base) = partition_alias_base {
+                    let alias = alloc::format!("{}{}", alias_base, partition.partno);
+                    register_block_node(
+                        &alias,
+                        part_device.clone(),
+                        100 + raw_minor.saturating_mul(16) + partition.partno as u64,
+                        read_only,
+                    );
+                }
+
+                let fs_type = self::filesystem::detect_fs(&part_device);
+                boot_trace!(
+                    "[mbr] /dev/{} type={:#04x} start_lba={} sectors={} size={}MiB fs={:?}",
+                    name,
+                    partition.type_code,
+                    partition.start_lba,
+                    partition.sectors,
+                    partition.size_bytes() / (1024 * 1024),
+                    fs_type
+                );
+                if fs_type != self::filesystem::FS_Type::Null {
+                    candidates.push(MountCandidate {
+                        device: part_device,
+                        source: alloc::format!("/dev/{}", name),
+                        partno: Some(partition.partno),
+                        partition_type: Some(partition.type_code),
+                        start_lba: Some(partition.start_lba),
+                        sectors: Some(partition.sectors),
+                        fs_type,
+                    });
+                }
             }
+            candidates
         }
-        None => {
-            println!("[initramfs] official fs (x0) not found, skipping /sdcard mount");
-        }
-    }
-
-    // 注册 /dev/vdb（原始工具盘）+ MBR 分区解析 + 分区设备注册 + 挂载
-    match devs[1].as_ref() {
-        Some(raw_vdb) => {
-            let _ = crate::fs::dev::DEV_FS.add_dev(
-                "vdb",
-                crate::fs::dev::block::BlockDevInode::new(
-                    raw_vdb.clone(), 1, String::from("vdb"),
-                ),
+        MbrProbe::NoMbr => {
+            println!(
+                "[block] /dev/{} has neither a supported filesystem nor an MBR",
+                base_name
             );
-
-            use crate::drivers::block::partition::{probe_mbr, PartitionBlockDevice, MbrProbe};
-
-            match probe_mbr(raw_vdb) {
-                MbrProbe::Partitions(parts) => {
-                    let mut vdb1_dev: Option<Arc<dyn BlockDevice>> = None;
-
-                    for p in &parts {
-                        let part_dev = Arc::new(PartitionBlockDevice::new(
-                            raw_vdb.clone(),
-                            p.start_lba,
-                            p.sectors,
-                        )) as Arc<dyn BlockDevice>;
-
-                        let name = alloc::format!("vdb{}", p.partno);
-                        let minor = 1 + p.partno as u64; // vdb1→2, vdb2→3
-                        let inode = crate::fs::dev::block::BlockDevInode::new(
-                            part_dev.clone(), minor, name.clone(),
-                        );
-                        let _ = crate::fs::dev::DEV_FS.add_dev(&name, inode);
-                        println!(
-                            "[mbr] registered /dev/{} (type={:#x}, size={}M)",
-                            name,
-                            p.type_code,
-                            p.sectors * 512 / (1024 * 1024)
-                        );
-
-                        let alias = alloc::format!("vda{}", p.partno);
-                        let alias_minor = 100 + p.partno as u64;
-                        let alias_inode = crate::fs::dev::block::BlockDevInode::new(
-                            part_dev.clone(), alias_minor, alias.clone(),
-                        );
-                        let _ = crate::fs::dev::DEV_FS.add_dev(&alias, alias_inode);
-
-                        if p.partno == 1 {
-                            vdb1_dev = Some(part_dev);
-                        }
-                    }
-
-                    // 从 vdb1 挂载 /tools
-                    match vdb1_dev {
-                        Some(ref dev) => {
-                            if mount_block_fs(&root, dev, "tools", "tools disk (vdb1)").is_none() {
-                                println!("[initramfs] tools disk (vdb1) mount failed, leaving /tools empty");
-                            }
-                        }
-                        None => {
-                            println!("[mbr] no partition 1 found, /tools not mounted");
-                        }
-                    }
-                }
-                MbrProbe::NoMbr => {
-                    // 无 MBR → 旧镜像兼容：从原始 /dev/vdb 挂载
-                    println!("[mbr] no MBR on tools disk, mounting raw /dev/vdb as /tools");
-                    if mount_block_fs(&root, raw_vdb, "tools", "tools disk (raw vdb)").is_none() {
-                        println!("[initramfs] tools disk (raw vdb) mount failed, leaving /tools empty");
-                    }
-                }
-                MbrProbe::Unsupported => {
-                    println!("[mbr] tools disk MBR present but no supported partitions, /tools not mounted");
-                }
-            }
+            alloc::vec::Vec::new()
         }
-        None => {
-            println!("[initramfs] tools disk (x1) not found, skipping /tools mount");
+        MbrProbe::Unsupported => {
+            println!(
+                "[block] /dev/{} has an unsupported partition table",
+                base_name
+            );
+            alloc::vec::Vec::new()
         }
     }
+}
+
+const P4_PERSIST_START_LBA: u64 = 0x00c0_0800;
+const P4_PERSIST_SECTORS: u64 = 0x0080_0000;
+const P4_PERSIST_UUID: [u8; 16] = [
+    0x4d, 0x41, 0x4e, 0x47, 0x53, 0x54, 0x41, 0x54, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x04,
+];
+const P4_PERSIST_LABEL: [u8; 16] = [
+    b'M', b'A', b'N', b'G', b'O', b'_', b'S', b'T', b'A', b'T', b'E', 0, 0, 0, 0, 0,
+];
+const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
+const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+
+fn validate_p4_persist(candidate: &MountCandidate) -> Result<(), &'static str> {
+    if candidate.partno != Some(4)
+        || candidate.partition_type != Some(0x83)
+        || candidate.start_lba != Some(P4_PERSIST_START_LBA)
+        || candidate.sectors != Some(P4_PERSIST_SECTORS)
+        || candidate.fs_type != self::filesystem::FS_Type::Ext4
+    {
+        return Err("P4 partition number, type, bounds, or filesystem is unexpected");
+    }
+    let identity = self::filesystem::ext4_identity(&candidate.device)
+        .ok_or("P4 ext4 superblock identity is unreadable")?;
+    if identity.uuid != P4_PERSIST_UUID || identity.volume_name != P4_PERSIST_LABEL {
+        return Err("P4 ext4 UUID or volume label is unexpected");
+    }
+    if identity.compatible_features & EXT4_FEATURE_COMPAT_HAS_JOURNAL != 0 {
+        return Err("P4 ext4 journal is enabled but journal replay is unsupported");
+    }
+    if identity.incompatible_features & EXT4_FEATURE_INCOMPAT_RECOVER != 0 {
+        return Err("P4 ext4 requires recovery");
+    }
+    Ok(())
+}
+
+fn mount_boot_block_devices_with_flags(
+    mount_flags: self::vfs::MountFlags,
+    writable_scratch: bool,
+    writable_persist: bool,
+) {
+    let root = vfs_root();
+    let devices = crate::drivers::block::block_devices();
+    let read_only = mount_flags.contains(self::vfs::MountFlags::RDONLY);
+    let mut same_disk_tools = None;
+    let mut same_disk_scratch = None;
+    let mut same_disk_persist = None;
+
+    match devices[0].as_ref() {
+        Some(raw) => {
+            #[cfg(feature = "board_2k1000")]
+            let candidates =
+                discover_mount_devices(raw, "sda", 0, Some(("vda", 100)), Some("vda"), read_only);
+            #[cfg(not(feature = "board_2k1000"))]
+            let candidates = discover_mount_devices(raw, "vda", 0, None, None, read_only);
+
+            // 实板只有一块 SATA SSD。P2 必须保留给官方测试固定使用的
+            // `/dev/vda2` FAT32 暂存盘，因此完整镜像把工具集放在 P3。
+            // QEMU 的第二块独立工具盘仍有更高优先级。
+            same_disk_tools = candidates
+                .iter()
+                .find(|candidate| candidate.partno == Some(3))
+                .cloned();
+            if writable_scratch {
+                same_disk_scratch = candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.partno == Some(2)
+                            && candidate.partition_type == Some(0x0c)
+                            && candidate.fs_type == self::filesystem::FS_Type::Fat32
+                    })
+                    .cloned();
+            }
+            if writable_persist {
+                same_disk_persist = candidates
+                    .iter()
+                    .find(|candidate| candidate.partno == Some(4))
+                    .cloned();
+            }
+
+            match candidates.first() {
+                Some(candidate) => {
+                    if mount_block_fs_with_flags(
+                        &root,
+                        &candidate.device,
+                        "sdcard",
+                        &alloc::format!("official fs ({})", candidate.source),
+                        mount_flags,
+                    )
+                    .is_none()
+                    {
+                        println!("[initramfs] official fs mount failed, leaving /sdcard empty");
+                    }
+                }
+                None => println!("[initramfs] no mountable official fs, leaving /sdcard empty"),
+            }
+        }
+        None => println!("[initramfs] official fs (x0) not found, skipping /sdcard mount"),
+    }
+
+    if writable_scratch {
+        match same_disk_scratch {
+            Some(candidate) => {
+                if mount_block_fs_with_flags(
+                    &root,
+                    &candidate.device,
+                    "scratch",
+                    &alloc::format!("writable scratch ({})", candidate.source),
+                    self::vfs::MountFlags::empty(),
+                )
+                .is_none()
+                {
+                    panic!("2K1000 writable P2 scratch mount failed");
+                }
+            }
+            None => panic!("2K1000 writable P2 FAT32 scratch partition not found"),
+        }
+    }
+
+    if writable_persist {
+        match same_disk_persist {
+            Some(candidate) => {
+                if let Err(error) = validate_p4_persist(&candidate) {
+                    panic!("2K1000 writable P4 identity check failed: {}", error);
+                }
+                if mount_block_fs_with_flags(
+                    &root,
+                    &candidate.device,
+                    "persist",
+                    &alloc::format!("persistent state ({})", candidate.source),
+                    self::vfs::MountFlags::empty(),
+                )
+                .is_none()
+                {
+                    panic!("2K1000 writable P4 ext4 mount failed");
+                }
+            }
+            None => panic!("2K1000 writable P4 ext4 partition not found"),
+        }
+    }
+
+    let separate_tools = devices[1].as_ref().and_then(|raw| {
+        discover_mount_devices(raw, "vdb", 1, None, Some("vda"), read_only)
+            .into_iter()
+            .next()
+    });
+    let use_same_disk_tools = separate_tools.is_none() && same_disk_tools.is_some();
+
+    if use_same_disk_tools {
+        if let Some(candidate) = same_disk_tools.as_ref() {
+            boot_trace!(
+                "[initramfs] tools disk (x1) not found; using {} from x0",
+                candidate.source
+            );
+        }
+    }
+    let tools_candidate = separate_tools.or(same_disk_tools);
+    match tools_candidate {
+        Some(candidate) => {
+            if mount_block_fs_with_flags(
+                &root,
+                &candidate.device,
+                "tools",
+                &alloc::format!("tools fs ({})", candidate.source),
+                mount_flags,
+            )
+            .is_none()
+            {
+                println!("[initramfs] tools fs mount failed, leaving /tools empty");
+            }
+        }
+        None => println!("[initramfs] no mountable tools fs, leaving /tools empty"),
+    }
+}
+
+/// 探测启动块设备并以读写方式挂载识别出的文件系统。
+pub fn mount_boot_block_devices() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::empty(), false, false);
+}
+
+/// 实板首次文件系统验收路径：注册设备，但只读挂载文件系统。
+pub fn mount_boot_block_devices_read_only() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, false, false);
+}
+
+/// Staged 2K1000 migration policy: keep P1/P3 and all block device nodes
+/// read-only, while mounting the validated P2 FAT32 partition at `/scratch`.
+#[cfg(all(feature = "board_2k1000", feature = "sata_scratch_rw"))]
+pub fn mount_boot_block_devices_with_writable_scratch() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, true, false);
+}
+
+/// Keep P1/P3 and all userspace block nodes read-only, mount P2 as the
+/// disposable cache, and expose only the identity-checked P4 ext4 filesystem
+/// as persistent writable state.
+#[cfg(feature = "p4_persist_rw")]
+pub fn mount_boot_block_devices_with_writable_persist() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, true, true);
+}
+
+#[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
+fn board_scratch_fat32_root() -> Result<Arc<dyn self::vfs::IndexNode>, &'static str> {
+    use self::vfs::FileSystem;
+    use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
+
+    let raw = crate::drivers::block::block_devices()[0]
+        .as_ref()
+        .cloned()
+        .ok_or("SATA device 0 is absent")?;
+    let partitions = match probe_mbr(&raw) {
+        MbrProbe::Partitions(partitions) => partitions,
+        _ => return Err("expected MBR is absent or unsupported"),
+    };
+    let partition = partitions
+        .into_iter()
+        .find(|partition| partition.partno == 2 && partition.type_code == 0x0c)
+        .ok_or("P2 is not the expected FAT32 LBA partition")?;
+    let partition_device = Arc::new(PartitionBlockDevice::new(
+        raw,
+        partition.start_lba,
+        partition.sectors,
+    )) as Arc<dyn BlockDevice>;
+    let detected = self::filesystem::detect_fs_layout(&partition_device)
+        .ok_or("P2 filesystem was not detected")?;
+    if detected.fs_type != self::filesystem::FS_Type::Fat32 {
+        return Err("P2 is not FAT32");
+    }
+    let fs_device = adapt_filesystem_device(partition_device, detected, false);
+    let filesystem = self::fat32::EasyFileSystem::open(fs_device);
+    Ok(filesystem.root_inode())
+}
+
+/// Exercise FAT32 metadata and data persistence on the dedicated P2 scratch
+/// partition without exposing a writable device node to userspace.
+#[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
+pub fn run_board_scratch_write_probe() {
+    use self::vfs::{FilePrivateData, FileType, InodeMode};
+
+    macro_rules! probe_fatal {
+        ($fmt:literal $(, $arg:expr)* $(,)?) => {
+            panic!(concat!("[sata-fs-write-probe] FATAL: ", $fmt), $($arg),*)
+        };
+    }
+
+    const DIR_NAME: &str = "MANGO_RW_PROBE";
+    const FILE_NAME: &str = "PAYLOAD.BIN";
+    const PAYLOAD_LEN: usize = 6144;
+
+    println!("[sata-fs-write-probe] begin (P2 FAT32 only)");
+    let root = match board_scratch_fat32_root() {
+        Ok(root) => root,
+        Err(error) => probe_fatal!("REFUSED: {}", error),
+    };
+    if root.find(DIR_NAME).is_ok() {
+        probe_fatal!("REFUSED: stale probe directory exists");
+    }
+    let directory = match root.mkdir(DIR_NAME, InodeMode::from_bits_truncate(0o755)) {
+        Ok(directory) => directory,
+        Err(error) => probe_fatal!("mkdir failed: {:?}", error),
+    };
+    let file = match directory.create(
+        FILE_NAME,
+        FileType::File,
+        InodeMode::from_bits_truncate(0o644),
+    ) {
+        Ok(file) => file,
+        Err(error) => probe_fatal!("create failed: {:?}", error),
+    };
+    let mut expected = alloc::vec![0u8; PAYLOAD_LEN];
+    for (index, byte) in expected.iter_mut().enumerate() {
+        *byte = 0x6d ^ (index as u8).wrapping_mul(0x3d) ^ ((index >> 8) as u8);
+    }
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    match file.write_at(0, expected.len(), &expected, private.lock()) {
+        Ok(written) if written == expected.len() => {}
+        Ok(written) => probe_fatal!("short write: {} != {}", written, expected.len()),
+        Err(error) => probe_fatal!("write failed: {:?}", error),
+    }
+    crate::fs::page_cache::flush_all_page_caches();
+    drop(file);
+    drop(directory);
+    drop(root);
+
+    let reopened_root = match board_scratch_fat32_root() {
+        Ok(root) => root,
+        Err(error) => probe_fatal!("reopen failed: {}", error),
+    };
+    let reopened_dir = match reopened_root.find(DIR_NAME) {
+        Ok(directory) => directory,
+        Err(error) => probe_fatal!("persisted directory missing: {:?}", error),
+    };
+    let reopened_file = match reopened_dir.find(FILE_NAME) {
+        Ok(file) => file,
+        Err(error) => probe_fatal!("persisted file missing: {:?}", error),
+    };
+    let mut actual = alloc::vec![0u8; PAYLOAD_LEN];
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    match reopened_file.read_at(0, actual.len(), &mut actual, private.lock()) {
+        Ok(read) if read == actual.len() && actual == expected => {}
+        Ok(read) => probe_fatal!("persisted data mismatch: read={}", read),
+        Err(error) => probe_fatal!("persisted read failed: {:?}", error),
+    }
+    drop(reopened_file);
+    if let Err(error) = reopened_dir.unlink(FILE_NAME) {
+        probe_fatal!("unlink failed: {:?}", error);
+    }
+    drop(reopened_dir);
+    if let Err(error) = reopened_root.rmdir(DIR_NAME) {
+        probe_fatal!("rmdir failed: {:?}", error);
+    }
+    crate::fs::page_cache::flush_all_page_caches();
+    drop(reopened_root);
+
+    let final_root = match board_scratch_fat32_root() {
+        Ok(root) => root,
+        Err(error) => probe_fatal!("final reopen failed: {}", error),
+    };
+    if final_root.find(DIR_NAME).is_ok() {
+        probe_fatal!("cleanup was not persistent");
+    }
+    println!("[sata-fs-write-probe] PASS: create/write/flush/reopen/read/unlink/rmdir persisted");
 }
 
 /// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。
@@ -515,7 +1075,7 @@ pub fn mount_boot_block_devices() {
 #[cfg(feature = "initramfs")]
 pub fn initramfs_init() {
     let _root = VFS_ROOT.clone();
-    println!("[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)");
+    boot_trace!("[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)");
 }
 
 /// 安装预装载的用户态 payload（initproc、bash、busybox 等）。
@@ -596,11 +1156,12 @@ pub fn vfs_lookup(
     path: &str,
     follow_final: bool,
 ) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
-    #[cfg(feature = "perf_diag")] {
+    #[cfg(feature = "perf_diag")]
+    let _guard = {
         VFS_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
-        let _guard = VfsLookupGuard(crate::timer::get_time());
-    }
-    use self::vfs::{FileType, FilePrivateData, IndexNode as _};
+        VfsLookupGuard(crate::timer::get_time())
+    };
+    use self::vfs::{FilePrivateData, FileType, IndexNode as _};
     let root_inode: Arc<dyn self::vfs::IndexNode> = current_root_inode();
 
     let has_trailing_slash = path.ends_with('/') && path != "/";
@@ -639,7 +1200,11 @@ pub fn vfs_lookup(
                 current = parent;
             } else if let Ok(abs) = current.absolute_path() {
                 let parent_path = if let Some(pos) = abs.rfind('/') {
-                    if pos == 0 { "/" } else { &abs[..pos] }
+                    if pos == 0 {
+                        "/"
+                    } else {
+                        &abs[..pos]
+                    }
                 } else {
                     "/"
                 };
@@ -701,8 +1266,10 @@ pub fn vfs_lookup(
             };
 
             // 组装新路径：符号链接目标 + 剩余组件
-            let remaining: alloc::vec::Vec<&str> =
-                components[comp_idx + 1..].iter().map(|s| s.as_str()).collect();
+            let remaining: alloc::vec::Vec<&str> = components[comp_idx + 1..]
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
             let new_path = if remaining.is_empty() {
                 String::from(target)
             } else {
@@ -909,15 +1476,47 @@ raw 255 RAW\n";
     }
 }
 
+/// Return fully copied embedded payload pages to the physical-frame allocator.
+///
+/// The end symbol may point into a partial final page. Matching the historical
+/// behavior, that page remains part of the kernel image and only the complete
+/// pages in `[start, end)` are released.
+///
+/// # Safety
+///
+/// `start` and `end` must delimit one linker-owned payload. The caller must
+/// have completed every read through those symbols before calling this helper.
+unsafe fn reclaim_preload_payload_pages(start: usize, end: usize) {
+    assert!(start <= end, "preload payload symbols are reversed");
+    assert_eq!(
+        start % crate::config::PAGE_SIZE,
+        0,
+        "preload payload start is not page-aligned"
+    );
+    let start_ppn = crate::mm::PhysAddr::from(start).floor();
+    let end_ppn = crate::mm::PhysAddr::from(end).floor();
+    // Safety: upheld by this helper's caller; the partial trailing page is not
+    // included because `end` is rounded down.
+    unsafe { crate::mm::frame_reclaim_linker_range(start_ppn, end_ppn) }
+        .unwrap_or_else(|reason| panic!("failed to reclaim preload payload pages: {}", reason));
+}
+
 #[allow(unused)]
 pub fn flush_preload() {
+    macro_rules! preload_trace {
+        ($($arg:tt)*) => {
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            println!("[bringup][preload] {}", format_args!($($arg)*));
+        };
+    }
+
     // Safety (linker-symbol `from_raw_parts`): every `s<name>` / `e<name>`
     // pair below is a linker-defined symbol pair placed by the linker script.
     // The address range `[s<name>, e<name>)` contains the raw bytes of an
     // embedded ELF payload, fully initialised at link time.  `from_raw_parts`
     // creates a `&[u8]` over this range; the slice is used immediately inside
     // the `f.write()` call and never retained.  The physical frames are
-    // released via `frame_dealloc` after writing.
+    // explicitly registered with the frame allocator after the final write.
     extern "C" {
         fn sinitproc();
         fn einitproc();
@@ -934,119 +1533,188 @@ pub fn flush_preload() {
         fn sltprunner();
         fn eltprunner();
     }
-    println!(
+    boot_trace!(
         "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}, sosconfig: {:X}, eosconfig: {:X}",
         sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
         sosconfig as usize, eosconfig as usize,
     );
+    preload_trace!("01 create /initproc");
     let initproc = create_or_open_file("initproc").unwrap();
     let initproc_len = einitproc as usize - sinitproc as usize;
-    let written = initproc.write(
-        // Safety: see block comment above — linker-symbol range validity.
-        unsafe { core::slice::from_raw_parts(sinitproc as *const u8, initproc_len) },
-    ).unwrap();
+    preload_trace!("02 /initproc opened, writing {} bytes", initproc_len);
+    let written = initproc
+        .write(
+            // Safety: see block comment above — linker-symbol range validity.
+            unsafe { core::slice::from_raw_parts(sinitproc as *const u8, initproc_len) },
+        )
+        .unwrap();
+    preload_trace!("03 /initproc write complete: {} bytes", written);
     log::debug!(
         "[kernel] flush_preload: initproc write len={} => written={} size_after={}",
         initproc_len,
         written,
         file_size("initproc").unwrap_or(0)
     );
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sinitproc as usize).floor(),
-        crate::mm::PhysAddr::from(einitproc as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
+    // Safety: `/initproc` now owns a copy and this is the final linker-symbol read.
+    unsafe { reclaim_preload_payload_pages(sinitproc as usize, einitproc as usize) };
+    preload_trace!("04 /initproc embedded frames released");
     // bash/busybox/os_test.conf/fs_test: 失败不阻塞启动
+    preload_trace!("05 install /bash");
     let _ = create_or_open_file("bash").map(|f| {
-        let _ = f.write(unsafe { core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize) });
-    });
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sbash as usize).floor(),
-        crate::mm::PhysAddr::from(ebash as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
-    let _ = create_or_open_file("busybox").map(|f| {
-        let _ = f.write(unsafe { core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize) });
-    });
-    // /bin/busybox: 必须在 frame_dealloc 之前写入，否则嵌入数据已被释放
-    {
-        let _ = vfs_lookup_parent("/bin/busybox").or_else(|_| {
-            let root = vfs_root().mountpoint_root_inode();
-            let _ = root.create("bin", self::vfs::FileType::Dir, self::vfs::InodeMode::S_IRWXUGO);
-            vfs_lookup_parent("/bin/busybox")
-        }).map(|(parent, _)| {
-            if parent.find("busybox").is_err() {
-                let _ = parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
-            }
+        let _ = f.write(unsafe {
+            core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize)
         });
+    });
+    // Safety: `/bash` now owns a copy and this is the final linker-symbol read.
+    unsafe { reclaim_preload_payload_pages(sbash as usize, ebash as usize) };
+    preload_trace!("06 /bash installed and embedded frames released");
+    preload_trace!("07 install /busybox and /bin/busybox");
+    let _ = create_or_open_file("busybox").map(|f| {
+        let _ = f.write(unsafe {
+            core::slice::from_raw_parts(
+                sbusybox as *const u8,
+                ebusybox as usize - sbusybox as usize,
+            )
+        });
+    });
+    // /bin/busybox must be written before the embedded pages are reclaimed.
+    {
+        let _ = vfs_lookup_parent("/bin/busybox")
+            .or_else(|_| {
+                let root = vfs_root().mountpoint_root_inode();
+                let _ = root.create(
+                    "bin",
+                    self::vfs::FileType::Dir,
+                    self::vfs::InodeMode::S_IRWXUGO,
+                );
+                vfs_lookup_parent("/bin/busybox")
+            })
+            .map(|(parent, _)| {
+                if parent.find("busybox").is_err() {
+                    let _ = parent.create(
+                        "busybox",
+                        self::vfs::FileType::File,
+                        self::vfs::InodeMode::S_IRWXUGO,
+                    );
+                }
+            });
         let _ = create_or_open_file("/bin/busybox").map(|f| {
             let _ = f.write(unsafe {
-                core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
+                core::slice::from_raw_parts(
+                    sbusybox as *const u8,
+                    ebusybox as usize - sbusybox as usize,
+                )
             });
         });
     }
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sbusybox as usize).floor(),
-        crate::mm::PhysAddr::from(ebusybox as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
-    }
+    // Safety: both busybox copies are complete and this is the final symbol read.
+    unsafe { reclaim_preload_payload_pages(sbusybox as usize, ebusybox as usize) };
+    preload_trace!("08 busybox copies installed and embedded frames released");
+    preload_trace!("09 install /os_test.conf");
     match file_size("os_test.conf") {
         Ok(size) => {
-            log::info!("[kernel] flush_preload: keep existing /os_test.conf size={}", size);
+            log::info!(
+                "[kernel] flush_preload: keep existing /os_test.conf size={}",
+                size
+            );
         }
         Err(_) => {
             let _ = create_or_open_file("os_test.conf").map(|f| {
                 let _ = f.write(unsafe {
-                    core::slice::from_raw_parts(sosconfig as *const u8, eosconfig as usize - sosconfig as usize)
+                    core::slice::from_raw_parts(
+                        sosconfig as *const u8,
+                        eosconfig as usize - sosconfig as usize,
+                    )
                 });
             });
         }
     }
-    for ppn in crate::mm::PPNRange::new(
-        crate::mm::PhysAddr::from(sosconfig as usize).floor(),
-        crate::mm::PhysAddr::from(eosconfig as usize).floor(),
-    ) {
-        crate::mm::frame_dealloc(ppn);
+    // Safety: the runtime config is already present or copied; no later symbol read exists.
+    unsafe { reclaim_preload_payload_pages(sosconfig as usize, eosconfig as usize) };
+    preload_trace!("10 /os_test.conf ready and embedded frames released");
+    #[cfg(feature = "board_core_test")]
+    {
+        // Runtime marker consumed by initproc. Keeping the focus selection out
+        // of the SSD config lets a diagnostic kernel boot without rewriting P1.
+        let _ = create_or_open_file("board_core_test");
+    }
+    #[cfg(feature = "cpython_test")]
+    {
+        // Select the isolated CPython group without changing the persistent
+        // os_test.conf carried by the official test image.
+        let _ = create_or_open_file("cpython_test");
+    }
+    #[cfg(feature = "apk_test")]
+    {
+        // Run the package-manager gate entirely from the writable initramfs;
+        // the marker never changes the SSD-backed test configuration.
+        let _ = create_or_open_file("apk_test");
+    }
+    #[cfg(feature = "apk_persist_test")]
+    {
+        // Select the two-boot persistent APK gate without changing P1/P3 or
+        // the test configuration carried by the official image.
+        let _ = create_or_open_file("apk_persist_test");
+    }
+    #[cfg(feature = "apk_persist_shell")]
+    {
+        // Select the interactive P4 application root without changing the
+        // persistent test configuration or making the system root writable.
+        let _ = create_or_open_file("apk_persist_shell");
+    }
+    #[cfg(feature = "board_shell")]
+    {
+        // Keep the shell selection ephemeral so booting this image never
+        // rewrites the test configuration stored on the SSD.
+        let _ = create_or_open_file("board_shell");
     }
     {
+        preload_trace!("11 install /fs_test");
         let _ = create_or_open_file("fs_test").map(|f| {
-            let _ = f.write(unsafe { core::slice::from_raw_parts(sfstest as *const u8, efstest as usize - sfstest as usize) });
+            let _ = f.write(unsafe {
+                core::slice::from_raw_parts(
+                    sfstest as *const u8,
+                    efstest as usize - sfstest as usize,
+                )
+            });
         });
-        for ppn in crate::mm::PPNRange::new(
-            crate::mm::PhysAddr::from(sfstest as usize).floor(),
-            crate::mm::PhysAddr::from(efstest as usize).floor(),
-        ) {
-            crate::mm::frame_dealloc(ppn);
-        }
+        // Safety: `/fs_test` now owns a copy and this is the final symbol read.
+        unsafe { reclaim_preload_payload_pages(sfstest as usize, efstest as usize) };
+        preload_trace!("12 /fs_test installed and embedded frames released");
     }
     {
+        preload_trace!("13 install /ltp_proto_compat.so");
         let _ = vfs_lookup_absolute("ltp_proto_compat.so")
             .and_then(|inode| inode.resize(0).map_err(|e| e as isize));
         let _ = create_or_open_file("ltp_proto_compat.so").map(|f| {
-            let _ = f.write(unsafe { core::slice::from_raw_parts(sltpcompat as *const u8, eltpcompat as usize - sltpcompat as usize) });
+            let _ = f.write(unsafe {
+                core::slice::from_raw_parts(
+                    sltpcompat as *const u8,
+                    eltpcompat as usize - sltpcompat as usize,
+                )
+            });
         });
-        for ppn in crate::mm::PPNRange::new(
-            crate::mm::PhysAddr::from(sltpcompat as usize).floor(),
-            crate::mm::PhysAddr::from(eltpcompat as usize).floor(),
-        ) {
-            crate::mm::frame_dealloc(ppn);
-        }
+        // Safety: the compatibility library was copied and is no longer read in place.
+        unsafe { reclaim_preload_payload_pages(sltpcompat as usize, eltpcompat as usize) };
+        preload_trace!("14 /ltp_proto_compat.so installed and embedded frames released");
     }
     {
+        preload_trace!("15 install /ltprunner");
         let _ = vfs_lookup_absolute("ltprunner")
             .and_then(|inode| inode.resize(0).map_err(|e| e as isize));
         let _ = create_or_open_file("ltprunner").map(|f| {
-            let _ = f.write(unsafe { core::slice::from_raw_parts(sltprunner as *const u8, eltprunner as usize - sltprunner as usize) });
+            let _ = f.write(unsafe {
+                core::slice::from_raw_parts(
+                    sltprunner as *const u8,
+                    eltprunner as usize - sltprunner as usize,
+                )
+            });
         });
-        for ppn in crate::mm::PPNRange::new(
-            crate::mm::PhysAddr::from(sltprunner as usize).floor(),
-            crate::mm::PhysAddr::from(eltprunner as usize).floor(),
-        ) {
-            crate::mm::frame_dealloc(ppn);
-        }
+        // Safety: `/ltprunner` now owns a copy and this is the final symbol read.
+        unsafe { reclaim_preload_payload_pages(sltprunner as usize, eltprunner as usize) };
+        preload_trace!("16 /ltprunner installed and embedded frames released");
     }
+    preload_trace!("17 install compatibility files under /etc");
     ensure_ltp_compat_etc_files();
+    preload_trace!("18 all preload payloads installed");
 }

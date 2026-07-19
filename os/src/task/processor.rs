@@ -26,12 +26,15 @@ use core::hint::spin_loop;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use lazy_static::*;
-use log;
 use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
 const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
+
+#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// 当前 CPU 的调度状态。
 ///
@@ -130,11 +133,12 @@ pub fn run_tasks() {
         schedule_tick = schedule_tick.wrapping_add(1);
         // Read one character from UART per iteration. Handle in priority order:
         // 1. Magic key (Ctrl+T) → trace dump + shutdown
-        // 2. VINTR (Ctrl+C) → SIGINT to foreground/blocked task
-        // 3. Normal character → stash for TTY
+        // 2. Other input → stash, then feed the TTY line discipline.  The
+        //    production path owns both task and epoll readiness notification.
         //
         // On rv64 this is an SBI ecall, so do not pay it on every context
-        // switch. TTY read paths still poll the console directly.
+        // switch. Blocked readers are covered by the scheduler's periodic
+        // console poll and the existing wait-IO fallback timer.
         #[cfg(target_arch = "riscv64")]
         let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
         #[cfg(not(target_arch = "riscv64"))]
@@ -145,11 +149,9 @@ pub fn run_tasks() {
             if ch != 0xFF {
                 if crate::trace::check_magic_key(ch, "schedule") {
                     // check_magic_key → dump_from → shutdown, never returns.
-                } else if crate::fs::dev::tty::Teletype::handle_vintr(ch) {
-                    log::info!("[vintr-poll] SIGINT sent! ch={:#x}", ch);
                 } else {
                     crate::trace::stash_char(ch);
-                    crate::fs::dev::tty::Teletype::wake_readers();
+                    crate::fs::dev::tty::Teletype::receive_stashed();
                 }
             }
             sched_record_stage(
@@ -238,18 +240,26 @@ pub fn run_tasks() {
                 let mut int_zombie = 0usize;
                 let mut nonzero_nice = 0usize;
                 for t in &manager.ready_queue {
-                    if t.acquire_inner_lock().is_zombie() { ready_zombie += 1; }
-                    if t.sched_nice_hint.load(Ordering::Relaxed) != 0 { nonzero_nice += 1; }
+                    if t.acquire_inner_lock().is_zombie() {
+                        ready_zombie += 1;
+                    }
+                    if t.sched_nice_hint.load(Ordering::Relaxed) != 0 {
+                        nonzero_nice += 1;
+                    }
                 }
                 for t in &manager.interruptible_queue {
-                    if t.acquire_inner_lock().is_zombie() { int_zombie += 1; }
+                    if t.acquire_inner_lock().is_zombie() {
+                        int_zombie += 1;
+                    }
                 }
                 (ready_zombie, int_zombie, nonzero_nice)
             };
             crate::task::perf::record_taskq_queue_lens(
                 crate::task::manager::ready_count_fast() as usize,
                 crate::task::manager::interruptible_count_fast() as usize,
-                ready_z, int_z, nnice,
+                ready_z,
+                int_z,
+                nnice,
             );
             sched_record_stage(
                 sched_profile,
@@ -262,7 +272,9 @@ pub fn run_tasks() {
             crate::task::perf::record_taskq_queue_lens(
                 crate::task::manager::ready_count_fast() as usize,
                 crate::task::manager::interruptible_count_fast() as usize,
-                0, 0, 0,
+                0,
+                0,
+                0,
             );
         }
         // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
@@ -305,6 +317,8 @@ pub fn run_tasks() {
         }
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            let trace_first_switch = !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
             let stage_t0 = sched_profile_start(sched_profile);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // 独占地访问即将运行的任务的 TCB
@@ -327,7 +341,10 @@ pub fn run_tasks() {
                 &task_inner.task_cx as *const TaskContext
             };
             // 设置当前正在运行的任务
-            CURRENT_TASK_PTR.store(Arc::as_ptr(&task) as *mut TaskControlBlock, Ordering::Relaxed);
+            CURRENT_TASK_PTR.store(
+                Arc::as_ptr(&task) as *mut TaskControlBlock,
+                Ordering::Relaxed,
+            );
             CURRENT_PID.store(task.pid(), Ordering::Relaxed);
             CURRENT_TID.store(task.gettid(), Ordering::Relaxed);
             CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Relaxed);
@@ -354,6 +371,21 @@ pub fn run_tasks() {
                 SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
             }
             sched_record_loop_cycles(sched_profile, loop_t0);
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            if trace_first_switch {
+                // 安全性：选中任务仍由 `processor.current` 持有，在 `__switch` 使用
+                // 该上下文前不会发生修改。
+                let (resume_pc, resume_sp) = unsafe { (&*next_task_cx_ptr).bringup_resume_state() };
+                println!(
+                    "[bringup][sched:01] switching idle -> init: pid={} tid={} task_cx={:#x} resume_pc={:#x} expected_pc={:#x} resume_sp={:#x}",
+                    current_pid(),
+                    current_tid(),
+                    next_task_cx_ptr as usize,
+                    resume_pc,
+                    crate::hal::trap_return as usize,
+                    resume_sp
+                );
+            }
             // Safety: `idle_task_cx_ptr` points into `PROCESSOR.idle_task_cx`
             // and `next_task_cx_ptr` points into the selected task's TCB. The
             // processor lock has been dropped, so the switched-in task can later
@@ -361,6 +393,10 @@ pub fn run_tasks() {
             unsafe {
                 crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
+            }
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            if trace_first_switch {
+                println!("[bringup][sched:02] first init context returned to idle scheduler");
             }
         } else {
             // 没有就绪的任务 → CPU idle
@@ -586,7 +622,10 @@ pub fn current_user_token() -> usize {
 /// 返回的引用来自当前任务 inner 锁保护的数据。调用方只能在立即读写 trap
 /// context 的短路径中使用，不能跨阻塞点保存。
 pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task_ref().unwrap().acquire_inner_lock().get_trap_cx()
+    current_task_ref()
+        .unwrap()
+        .acquire_inner_lock()
+        .get_trap_cx()
 }
 
 /// 从当前任务切换回 idle 调度上下文。
@@ -702,11 +741,18 @@ fn sched_rdcycle() -> u64 {
         lo as u64
     }
     #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
-    { 0 }
+    {
+        0
+    }
 }
 fn sched_atomic_max(slot: &AtomicU64, v: u64) {
     let mut cur = slot.load(SchedOrdering::Relaxed);
-    while v > cur { match slot.compare_exchange_weak(cur, v, SchedOrdering::Relaxed, SchedOrdering::Relaxed) { Ok(_) => break, Err(n) => cur = n } }
+    while v > cur {
+        match slot.compare_exchange_weak(cur, v, SchedOrdering::Relaxed, SchedOrdering::Relaxed) {
+            Ok(_) => break,
+            Err(n) => cur = n,
+        }
+    }
 }
 
 #[inline(always)]
@@ -851,23 +897,75 @@ pub fn reset_sched_profile() {
     SCHED_INTERRUPTIBLE_LEN_SUM.store(0, SchedOrdering::Relaxed);
     SCHED_INTERRUPTIBLE_LEN_SAMPLES.store(0, SchedOrdering::Relaxed);
     SCHED_INTERRUPTIBLE_LEN_MAX.store(0, SchedOrdering::Relaxed);
-    reset_stage(&SCHED_STAGE_CONSOLE_CALLS, &SCHED_STAGE_CONSOLE_CYCLES_TOTAL, &SCHED_STAGE_CONSOLE_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_WAKE_EXPIRED_CALLS, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_NET_POLL_CALLS, &SCHED_STAGE_NET_POLL_CYCLES_TOTAL, &SCHED_STAGE_NET_POLL_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_RECLAIM_CALLS, &SCHED_STAGE_RECLAIM_CYCLES_TOTAL, &SCHED_STAGE_RECLAIM_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_ZOMBIE_QUEUE_CALLS, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_STALE_ZOMBIE_CALLS, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_FUTEX_COMPACT_CALLS, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_FETCH_TASK_CALLS, &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL, &SCHED_STAGE_FETCH_TASK_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_QUEUE_SAMPLE_CALLS, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_SWITCH_PREP_CALLS, &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL, &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX);
-    reset_stage(&SCHED_STAGE_IDLE_CALLS, &SCHED_STAGE_IDLE_CYCLES_TOTAL, &SCHED_STAGE_IDLE_CYCLES_MAX);
+    reset_stage(
+        &SCHED_STAGE_CONSOLE_CALLS,
+        &SCHED_STAGE_CONSOLE_CYCLES_TOTAL,
+        &SCHED_STAGE_CONSOLE_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_WAKE_EXPIRED_CALLS,
+        &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL,
+        &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_NET_POLL_CALLS,
+        &SCHED_STAGE_NET_POLL_CYCLES_TOTAL,
+        &SCHED_STAGE_NET_POLL_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_RECLAIM_CALLS,
+        &SCHED_STAGE_RECLAIM_CYCLES_TOTAL,
+        &SCHED_STAGE_RECLAIM_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_ZOMBIE_QUEUE_CALLS,
+        &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL,
+        &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_STALE_ZOMBIE_CALLS,
+        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL,
+        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_FUTEX_COMPACT_CALLS,
+        &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL,
+        &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_FETCH_TASK_CALLS,
+        &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL,
+        &SCHED_STAGE_FETCH_TASK_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_QUEUE_SAMPLE_CALLS,
+        &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL,
+        &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_SWITCH_PREP_CALLS,
+        &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
+        &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_STAGE_IDLE_CALLS,
+        &SCHED_STAGE_IDLE_CYCLES_TOTAL,
+        &SCHED_STAGE_IDLE_CYCLES_MAX,
+    );
     SCHED_TIMER_TRAP_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
     SCHED_TIMER_TRAP_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
     SCHED_TIMER_HANDLER_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
     SCHED_TIMER_HANDLER_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
-    reset_stage(&SCHED_PROGRAM_TIMER_CALLS, &SCHED_PROGRAM_TIMER_CYCLES_TOTAL, &SCHED_PROGRAM_TIMER_CYCLES_MAX);
-    reset_stage(&SCHED_SBI_SET_TIMER_CALLS, &SCHED_SBI_SET_TIMER_CYCLES_TOTAL, &SCHED_SBI_SET_TIMER_CYCLES_MAX);
+    reset_stage(
+        &SCHED_PROGRAM_TIMER_CALLS,
+        &SCHED_PROGRAM_TIMER_CYCLES_TOTAL,
+        &SCHED_PROGRAM_TIMER_CYCLES_MAX,
+    );
+    reset_stage(
+        &SCHED_SBI_SET_TIMER_CALLS,
+        &SCHED_SBI_SET_TIMER_CYCLES_TOTAL,
+        &SCHED_SBI_SET_TIMER_CYCLES_MAX,
+    );
     SCHED_PROFILE_ENABLED.store(true, SchedOrdering::Relaxed);
 }
 
@@ -891,10 +989,14 @@ pub fn dump_sched_profile(label: &str) {
         "sched_profile enabled={}",
         SCHED_PROFILE_ENABLED.load(SchedOrdering::Relaxed) as usize
     );
-    println!("sched loops={} fetch={} idle={} switches={} timer_ints={}",
-        SCHED_LOOPS.load(SchedOrdering::Relaxed), SCHED_FETCH.load(SchedOrdering::Relaxed),
-        SCHED_IDLE.load(SchedOrdering::Relaxed), SCHED_SWITCHES.load(SchedOrdering::Relaxed),
-        SCHED_TIMER_INTS.load(SchedOrdering::Relaxed));
+    println!(
+        "sched loops={} fetch={} idle={} switches={} timer_ints={}",
+        SCHED_LOOPS.load(SchedOrdering::Relaxed),
+        SCHED_FETCH.load(SchedOrdering::Relaxed),
+        SCHED_IDLE.load(SchedOrdering::Relaxed),
+        SCHED_SWITCHES.load(SchedOrdering::Relaxed),
+        SCHED_TIMER_INTS.load(SchedOrdering::Relaxed)
+    );
     println!("sched loop_cycles_total={} loop_cycles_max={} reclaim_call_cycles_total={} reclaim_call_cycles_max={}",
         SCHED_LOOP_CYCLES_TOTAL.load(SchedOrdering::Relaxed), SCHED_LOOP_CYCLES_MAX.load(SchedOrdering::Relaxed),
         SCHED_RECLAIM_CALL_CYCLES_TOTAL.load(SchedOrdering::Relaxed), SCHED_RECLAIM_CALL_CYCLES_MAX.load(SchedOrdering::Relaxed));
@@ -917,17 +1019,72 @@ pub fn dump_sched_profile(label: &str) {
         } else {
             0
         });
-    dump_stage("console", &SCHED_STAGE_CONSOLE_CALLS, &SCHED_STAGE_CONSOLE_CYCLES_TOTAL, &SCHED_STAGE_CONSOLE_CYCLES_MAX);
-    dump_stage("wake_expired", &SCHED_STAGE_WAKE_EXPIRED_CALLS, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX);
-    dump_stage("net_poll", &SCHED_STAGE_NET_POLL_CALLS, &SCHED_STAGE_NET_POLL_CYCLES_TOTAL, &SCHED_STAGE_NET_POLL_CYCLES_MAX);
-    dump_stage("reclaim", &SCHED_STAGE_RECLAIM_CALLS, &SCHED_STAGE_RECLAIM_CYCLES_TOTAL, &SCHED_STAGE_RECLAIM_CYCLES_MAX);
-    dump_stage("zombie_queue", &SCHED_STAGE_ZOMBIE_QUEUE_CALLS, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX);
-    dump_stage("stale_zombie", &SCHED_STAGE_STALE_ZOMBIE_CALLS, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX);
-    dump_stage("futex_compact", &SCHED_STAGE_FUTEX_COMPACT_CALLS, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX);
-    dump_stage("fetch_task", &SCHED_STAGE_FETCH_TASK_CALLS, &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL, &SCHED_STAGE_FETCH_TASK_CYCLES_MAX);
-    dump_stage("queue_sample", &SCHED_STAGE_QUEUE_SAMPLE_CALLS, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX);
-    dump_stage("switch_prep", &SCHED_STAGE_SWITCH_PREP_CALLS, &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL, &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX);
-    dump_stage("idle", &SCHED_STAGE_IDLE_CALLS, &SCHED_STAGE_IDLE_CYCLES_TOTAL, &SCHED_STAGE_IDLE_CYCLES_MAX);
+    dump_stage(
+        "console",
+        &SCHED_STAGE_CONSOLE_CALLS,
+        &SCHED_STAGE_CONSOLE_CYCLES_TOTAL,
+        &SCHED_STAGE_CONSOLE_CYCLES_MAX,
+    );
+    dump_stage(
+        "wake_expired",
+        &SCHED_STAGE_WAKE_EXPIRED_CALLS,
+        &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL,
+        &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
+    );
+    dump_stage(
+        "net_poll",
+        &SCHED_STAGE_NET_POLL_CALLS,
+        &SCHED_STAGE_NET_POLL_CYCLES_TOTAL,
+        &SCHED_STAGE_NET_POLL_CYCLES_MAX,
+    );
+    dump_stage(
+        "reclaim",
+        &SCHED_STAGE_RECLAIM_CALLS,
+        &SCHED_STAGE_RECLAIM_CYCLES_TOTAL,
+        &SCHED_STAGE_RECLAIM_CYCLES_MAX,
+    );
+    dump_stage(
+        "zombie_queue",
+        &SCHED_STAGE_ZOMBIE_QUEUE_CALLS,
+        &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL,
+        &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
+    );
+    dump_stage(
+        "stale_zombie",
+        &SCHED_STAGE_STALE_ZOMBIE_CALLS,
+        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL,
+        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX,
+    );
+    dump_stage(
+        "futex_compact",
+        &SCHED_STAGE_FUTEX_COMPACT_CALLS,
+        &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL,
+        &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX,
+    );
+    dump_stage(
+        "fetch_task",
+        &SCHED_STAGE_FETCH_TASK_CALLS,
+        &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL,
+        &SCHED_STAGE_FETCH_TASK_CYCLES_MAX,
+    );
+    dump_stage(
+        "queue_sample",
+        &SCHED_STAGE_QUEUE_SAMPLE_CALLS,
+        &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL,
+        &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX,
+    );
+    dump_stage(
+        "switch_prep",
+        &SCHED_STAGE_SWITCH_PREP_CALLS,
+        &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
+        &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
+    );
+    dump_stage(
+        "idle",
+        &SCHED_STAGE_IDLE_CALLS,
+        &SCHED_STAGE_IDLE_CYCLES_TOTAL,
+        &SCHED_STAGE_IDLE_CYCLES_MAX,
+    );
     println!(
         "sched_timer trap_cycles_total={} trap_cycles_max={} handler_cycles_total={} handler_cycles_max={} program_timer_calls={} program_timer_cycles_total={} program_timer_cycles_max={} sbi_set_timer_calls={} sbi_set_timer_cycles_total={} sbi_set_timer_cycles_max={}",
         SCHED_TIMER_TRAP_CYCLES_TOTAL.load(SchedOrdering::Relaxed),

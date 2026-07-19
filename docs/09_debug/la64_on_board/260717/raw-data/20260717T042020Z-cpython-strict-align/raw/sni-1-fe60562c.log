@@ -1,0 +1,8 @@
+2026-07-17T04:58:20.127137Z __PERF_BEGIN_sni-1-fe60562c__
+2026-07-17T04:58:20.949665Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_sni-1-fe60562c_TRACE_OFF__
+2026-07-17T04:58:23.237435Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_sni-1-fe60562c__
+2026-07-17T04:58:23.280576Z drwxr-xr-x    5 root     root          4096 Jan  1  1970 [1;34m/persist/pyperf/r/.s-dbdb27d10477.staging[m
+2026-07-17T04:58:23.317293Z directory 755
+2026-07-17T04:58:23.396291Z __PERF_WORK_END_sni-1-fe60562c__
+2026-07-17T04:58:23.399683Z __PERF_ACK_sni-1-fe60562c_WORK__
+2026-07-17T04:58:23.760600Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_sni-1-fe60562c__ rc=0

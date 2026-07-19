@@ -3,8 +3,8 @@ title: "初始化流程 (Initialization Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [architecture, boot, init]
+last_update: 2026-07-15
+tags: [architecture, boot, init, random]
 ---
 
 # 初始化流程
@@ -16,7 +16,7 @@ tags: [architecture, boot, init]
 | 类别 | 代表入口 | 作用 |
 |------|----------|------|
 | 机器状态 | `bootstrap_init()`、`machine_init()` | 配置异常入口、timer interrupt、架构寄存器和页表后端 |
-| 内核服务 | `console::log_init()`、`trace::init()`、`mm::init()` | 输出、trace、堆、物理页、内核地址空间 |
+| 内核服务 | `console::log_init()`、`trace::init()`、`mm::init()`、`random::init()` | 输出、trace、堆、物理页、内核地址空间、安全随机流 |
 | 用户态运行环境 | `fs::*`、`drivers::init_net_device()`、`net::config::init()`、`task::add_initproc()` | 根文件系统、设备、网络、init 任务 |
 
 初始化路径不创建独立内核线程。所有启动阶段工作都在 `rust_main()` 所在执行流中完成，直到 `task::run_tasks()` 进入单核调度循环。
@@ -34,13 +34,17 @@ trace::init()
 mm::init()
 machine_init()
 task::timer_subsystem_init()
+random::init()
 
 if initramfs:
   fs::vfs::posix_lock::init_posix_lock_manager()
+  fs::force_ramfs()                    [board_2k1000 rescue/sata_probe]
   fs::initramfs_init()
-  drivers::init_net_device()
+  drivers::init_net_device()           [not board_2k1000]
   net::config::init()
-  fs::mount_boot_block_devices()
+  fs::mount_boot_block_devices()       [not board_2k1000]
+  fs::mount_boot_block_devices_read_only()
+                                        [board_2k1000 + block_sata - sata_probe]
   fs::install_preload_payloads()        [preload_payloads]
 else:
   drivers::init_net_device()
@@ -54,6 +58,8 @@ task::run_tasks()
 ```
 
 `task::run_tasks()` 不返回。`rust_main()` 末尾的 `panic!("Unreachable in rust_main!")` 是不可达路径诊断。
+
+诊断构建还会在入口、console、MM、driver、net、FS、initproc 和进入 scheduler 前各写入一次启动里程碑。`/sys/kernel/stats/boot` 暴露从 Rust 入口起算的累计 raw ticks 与时钟频率；这些一次性值不受 `stats_on` 控制，也不会被运行期 `reset` 清除。生产构建中的同名调用编译为 no-op，正式启动性能仍以串口外部时间戳为准。
 
 ### 2.1 主入口源码
 
@@ -79,18 +85,44 @@ pub fn rust_main() -> ! {
     machine_init();
     crate::task::timer_subsystem_init();
 
+    if let Err(error) = random::init() {
+        println!(
+            "[kernel] random: secure source unavailable ({:?}); secure reads will fail",
+            error
+        );
+    }
+
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
+        #[cfg(all(
+            feature = "board_2k1000",
+            any(not(feature = "block_sata"), feature = "sata_probe")
+        ))]
+        {
+            fs::force_ramfs();
+        }
         fs::initramfs_init();
 
+        #[cfg(not(feature = "board_2k1000"))]
         drivers::init_net_device();
+        #[cfg(feature = "board_2k1000")]
+        {
+            // 实板网卡不是 QEMU virtio-net，最小上板阶段暂不枚举 virtio PCI 网卡。
+        }
         net::config::init();
 
-        // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
+        // 块设备 DMA 使用单一 DRAM region 内的连续 extent；先探测以减少早期碎片
+        #[cfg(not(feature = "board_2k1000"))]
         fs::mount_boot_block_devices();
+        #[cfg(all(
+            feature = "board_2k1000",
+            feature = "block_sata",
+            not(feature = "sata_probe")
+        ))]
+        fs::mount_boot_block_devices_read_only();
 
         // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
         #[cfg(feature = "preload_payloads")]
@@ -121,7 +153,7 @@ pub fn rust_main() -> ! {
 }
 ```
 
-函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。`block_mem` 路径会先把链接进内核的镜像移动到高地址；`initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备；非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
+函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。随机池在这些分支之前初始化，确保首个用户任务和 TLS/库初始化不会先观察到未播种状态；平台熵源失败时保留启动能力，但安全读取统一返回 `EAGAIN`。`block_mem` 路径会先把链接进内核的镜像移动到高地址；默认 `initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备。`board_2k1000` 救援/探测构建保持 ramfs-only，普通 SATA 构建跳过外部网卡但只读挂载 SSD。非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
 
 ## 3. 早期阶段
 
@@ -132,9 +164,9 @@ pub fn rust_main() -> ! {
 | 架构 | 当前行为 |
 |------|----------|
 | rv64 | `hal/arch/riscv/mod.rs` 中为空实现 |
-| la64 | `hal/arch/loongarch64/mod.rs` 中只允许 core 0 继续；配置 exception entry、TLB refill entry、timer vector、FPU/SIMD、paging、DMW2、page walk 寄存器 |
+| la64 | `hal/arch/loongarch64/mod.rs` 中只允许 core 0 继续；关闭 `RVACFG` 缩减模式，配置 exception entry、TLB refill entry、4KiB TLB page size、timer vector、FPU/SIMD、paging、DMW2、page walk，并校验 `CPUCFG1` 的 VALEN/PALEN |
 
-la64 的 `bootstrap_init()` 执行在 `mem_clear()` 前，因此该阶段只依赖架构寄存器、链接符号和已可用的基础输出路径。rv64 对应配置主要由 OpenSBI 和后续 `machine_init()` 承担。
+la64 的 `bootstrap_init()` 执行在 `mem_clear()` 前，因此该阶段只依赖架构寄存器、链接符号和已可用的基础输出路径。硬件/构建地址位宽不一致会在 `mm::init()` 前直接 panic。rv64 对应配置主要由 OpenSBI 和后续 `machine_init()` 承担。
 
 ### 3.2 `mem_clear()`
 
@@ -182,10 +214,10 @@ KERNEL_SPACE.lock().activate()
 |------|------|------|
 | 初始化内核堆 | 链接脚本和静态 heap 区 | `alloc` 容器可用 |
 | 初始化 heap trace | `heap_trace` feature | 记录堆分配追踪 |
-| 初始化物理页分配器 | `ekernel..MEMORY_END` | `FrameTracker` 分配可用 |
+| 初始化物理页分配器 | DRAM region 表减去内核/固件保留区 | `FrameTracker` 分配可用 |
 | 激活内核地址空间 | `KERNEL_SPACE` lazy 构造 | 后续驱动、FS、task 在内核页表下运行 |
 
-`KERNEL_SPACE` 映射 trampoline、内核代码/只读/数据/BSS 段、`ekernel..MEMORY_END` 物理内存和 `MMIO` 表中的设备区间。具体映射策略在 `docs/04_mm/initialization-and-kernel-space.md` 展开。
+`KERNEL_SPACE` 映射 trampoline、内核代码/只读/数据/BSS 段、各 usable DRAM region 和 `MMIO` 表中的设备区间。具体映射策略在 `docs/04_mm/initialization-and-kernel-space.md` 展开。
 
 ## 5. 平台运行期初始化
 
@@ -196,6 +228,14 @@ KERNEL_SPACE.lock().activate()
 | rv64 | `trap::init()` 安装 kernel trap entry；`trap::enable_timer_interrupt()` 打开 supervisor timer interrupt |
 | la64 | `trap::init()`；`get_timer_freq_first_time()`；打印 CPUCFG/Misc/RVACfg/MMAP_BASE；启用 timer interrupt |
 
+### 5.1 随机池初始化
+
+`random::init()` 位于 `machine_init()` 和 timer 子系统之后、所有文件系统和用户任务
+之前。QEMU 从 VirtIO entropy device 采样，2K1000LA 从 APB RNG 采样；64 字节
+启动样本通过健康检查后用于播种 ChaCha20 CSPRNG。初始化失败不会阻止救援 shell
+启动，但 `getrandom`、`/dev/random` 和 `/dev/urandom` 的安全读取会 fail closed。
+完整设计见 `docs/07_driver/random.md`。
+
 随后调用 `task::timer_subsystem_init()`。项目注释明确说明第一次 timer deadline 由任务 timer 子系统在启动后设置，而不是 rv64 `machine_init()` 立即设置。
 
 ## 6. initramfs 启动路径
@@ -204,10 +244,13 @@ KERNEL_SPACE.lock().activate()
 
 ```
 fs::vfs::posix_lock::init_posix_lock_manager()
+fs::force_ramfs()                     [board_2k1000 rescue/sata_probe]
 fs::initramfs_init()
-drivers::init_net_device()
+drivers::init_net_device()            [not board_2k1000]
 net::config::init()
-fs::mount_boot_block_devices()
+fs::mount_boot_block_devices()        [not board_2k1000]
+fs::mount_boot_block_devices_read_only()
+                                      [board_2k1000 + block_sata - sata_probe]
 fs::install_preload_payloads()          [preload_payloads]
 ```
 
@@ -217,11 +260,15 @@ fs::install_preload_payloads()          [preload_payloads]
 
 ### 6.2 网卡与网络配置
 
-initramfs 路径先执行 `drivers::init_net_device()`，再执行 `net::config::init()`。这个顺序保证网络协议栈配置时可以看到已注册的网络设备。
+默认 initramfs 路径先执行 `drivers::init_net_device()`，再执行 `net::config::init()`。这个顺序保证网络协议栈配置时可以看到已注册的网络设备。
+
+`board_2k1000` 最小上板阶段跳过 `drivers::init_net_device()`，只保留 `net::config::init()` 的协议栈配置。原因是实板网卡不是 QEMU virtio-net，GMAC/PHY 驱动接入前不应枚举 virtio PCI 网卡。
 
 ### 6.3 块设备挂载和 payload
 
-`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。`main.rs` 注释给出的理由是块设备探测需要连续物理页 DMA，先于 preload 分配页可以降低页碎片影响。
+默认 initramfs 路径中，`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。块设备 DMA 使用单一 DRAM region 内的连续 extent；保持当前顺序还能减少早期碎片并尽快验证启动盘。
+
+`board_2k1000` 的救援和 `sata_probe` 构建调用 `fs::force_ramfs()` 并跳过挂载；普通 `block_sata` 构建调用 `mount_boot_block_devices_read_only()`，在 payload 安装前完成 AHCI 探测、MBR/文件系统识别和根目录读取。三种构建均跳过 QEMU virtio 网卡枚举。
 
 ## 7. legacy 启动路径
 

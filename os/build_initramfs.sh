@@ -16,6 +16,7 @@ PROFILE="${4:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 # 将输出路径转为绝对路径
 case "$OUT" in
   /*) OUT_ABS="$OUT" ;;
@@ -77,16 +78,34 @@ else
     DNS_SERVER="${DNS_SERVER:-10.0.2.3}"
     printf 'nameserver %s\n' "$DNS_SERVER" > "$STAGE/etc/resolv.conf"
 
+    # NTP can be unavailable during early bring-up. Record a reproducible lower
+    # bound for the wall clock so TLS validation never uses a stale fixed date.
+    BUILD_EPOCH="${SOURCE_DATE_EPOCH:-$(date -u +%s)}"
+    case "$BUILD_EPOCH" in
+      ''|*[!0-9]*)
+        echo "[initramfs] ERROR: invalid SOURCE_DATE_EPOCH: $BUILD_EPOCH"
+        rm -rf "$STAGE"
+        exit 1
+        ;;
+    esac
+    printf '%s\n' "$BUILD_EPOCH" > "$STAGE/etc/build-epoch"
+
     # 2. 确定架构相关的路径
     case "$ARCH" in
       rv64)
         INIT_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/init"
         BUSYBOX_SRC="../user/tools/riscv64/bin/busybox"
+        APK_SRC="../user/tools/riscv64/bin/apk.static"
+        INET_TEST_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/inet_test"
+        RNG_TEST_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/rng_test"
         REG_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/regression"
         ;;
       la64)
         INIT_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/init"
         BUSYBOX_SRC="../user/tools/loongarch64/bin/busybox"
+        APK_SRC="../user/tools/loongarch64/bin/apk.static"
+        INET_TEST_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/inet_test"
+        RNG_TEST_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/rng_test"
         REG_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/regression"
         ;;
       *)
@@ -95,6 +114,65 @@ else
         exit 1
         ;;
     esac
+
+    # Optional package-manager runtime used by isolated APK gates.
+    if [ "${APK_RUNTIME:-0}" = "1" ]; then
+        if [ ! -x "$APK_SRC" ]; then
+            echo "[initramfs] ERROR: missing apk runtime; run make tools-apk"
+            rm -rf "$STAGE"
+            exit 1
+        fi
+        install -m 0755 "$APK_SRC" "$STAGE/bin/apk.static"
+        cp -a "$SCRIPT_DIR/initramfs/apk/." "$STAGE/"
+        echo "[initramfs] installed self-contained $ARCH apk.static"
+    fi
+
+    # Optional self-contained HTTPS curl runtime for QEMU and 2K1000 shells.
+    if [ "${CURL_RUNTIME:-0}" = "1" ]; then
+        if [ "$ARCH" != "la64" ]; then
+            echo "[initramfs] ERROR: curl runtime is currently available only for la64"
+            rm -rf "$STAGE"
+            exit 1
+        fi
+        CURL_SRC="../user/tools/loongarch64/curl-runtime"
+        if [ ! -x "$CURL_SRC/bin/curl" ]; then
+            echo "[initramfs] ERROR: missing curl runtime; run make tools-curl-la"
+            rm -rf "$STAGE"
+            exit 1
+        fi
+        cp -a "$CURL_SRC/bin/." "$STAGE/bin/"
+        if [ -d "$CURL_SRC/lib" ]; then
+            cp -a "$CURL_SRC/lib/." "$STAGE/lib/"
+        fi
+        if [ -d "$CURL_SRC/lib64" ]; then
+            mkdir -p "$STAGE/lib64"
+            cp -a "$CURL_SRC/lib64/." "$STAGE/lib64/"
+        fi
+        cp -a "$CURL_SRC/etc/." "$STAGE/etc/"
+        echo "[initramfs] installed self-contained LoongArch64 curl runtime"
+    fi
+
+    # Keep opt-in board diagnostics pinned to the same source revision as the
+    # kernel instead of taking potentially stale copies from the tools disk.
+    if [ "${INET_TEST_RUNTIME:-0}" = "1" ]; then
+        if [ ! -x "$INET_TEST_SRC" ]; then
+            echo "[initramfs] ERROR: missing inet_test build: $INET_TEST_SRC"
+            rm -rf "$STAGE"
+            exit 1
+        fi
+        install -m 0755 "$INET_TEST_SRC" "$STAGE/bin/inet_test"
+        echo "[initramfs] installed current inet_test at /bin/inet_test"
+    fi
+
+    if [ "${RNG_TEST_RUNTIME:-0}" = "1" ]; then
+        if [ ! -x "$RNG_TEST_SRC" ]; then
+            echo "[initramfs] ERROR: missing rng_test build: $RNG_TEST_SRC"
+            rm -rf "$STAGE"
+            exit 1
+        fi
+        install -m 0755 "$RNG_TEST_SRC" "$STAGE/bin/rng_test"
+        echo "[initramfs] installed current rng_test at /bin/rng_test"
+    fi
 
     # 3. 安装 /init（从 initproc 构建产物）— stage-1 引导入口
     if [ -f "$INIT_SRC" ]; then
@@ -120,6 +198,45 @@ else
     else
         echo "[initramfs] WARNING: $REG_SRC not found, /regression will be missing"
     fi
+
+    # RV64 keeps its optional isolated-runtime launcher. The strict LoongArch
+    # helpers are P4-specific and must not become prerequisites of ordinary
+    # QEMU, regression, or non-persistent board images.
+    if [ "$ARCH" = "rv64" ]; then
+        CPYTHON_WRAPPER_SRC="../user/tools/cpython/python3-wrapper.sh"
+        if [ -x "$CPYTHON_WRAPPER_SRC" ]; then
+            mkdir -p "$STAGE/rescue"
+            install -m 0755 "$CPYTHON_WRAPPER_SRC" "$STAGE/rescue/python3-wrapper"
+            echo "[initramfs] installed RV64 CPython wrapper at /rescue/python3-wrapper"
+        fi
+    elif [ "${PERSIST_PYTHON_RUNTIME:-0}" = "1" ]; then
+        CPYTHON_WRAPPER_SRC="../user/tools/cpython/python3-wrapper-persist.sh"
+        CPYTHON_ENTRY_SRC="../user/tools/cpython/python-entry-wrapper.sh"
+        CPYTHON_VERIFY_SRC="../scripts/board/verify_persist_python.sh"
+        SMOLAGENTS_PATCH_SRC="../scripts/board/patch_smolagents_action_type.py"
+        DDGS_PATCH_SRC="../scripts/board/patch_ddgs_redirect.py"
+
+        for required_file in \
+            "$CPYTHON_WRAPPER_SRC" \
+            "$CPYTHON_ENTRY_SRC" \
+            "$CPYTHON_VERIFY_SRC" \
+            "$SMOLAGENTS_PATCH_SRC" \
+            "$DDGS_PATCH_SRC"; do
+            if [ ! -f "$required_file" ]; then
+                echo "[initramfs] ERROR: missing required P4 Python resource: $required_file" >&2
+                exit 1
+            fi
+        done
+
+        mkdir -p "$STAGE/rescue"
+        install -m 0755 "$CPYTHON_WRAPPER_SRC" "$STAGE/rescue/python3-wrapper"
+        install -m 0755 "$CPYTHON_ENTRY_SRC" "$STAGE/rescue/python-entry"
+        install -m 0755 "$CPYTHON_VERIFY_SRC" "$STAGE/rescue/verify-persist-python"
+        install -m 0755 "$SMOLAGENTS_PATCH_SRC" "$STAGE/rescue/patch-smolagents-action-type"
+        install -m 0755 "$DDGS_PATCH_SRC" "$STAGE/rescue/patch-ddgs-redirect"
+        echo "[initramfs] installed strict P4 Python launch and verification resources"
+    fi
+
 fi
 
 # 6. 生成 newc cpio 归档

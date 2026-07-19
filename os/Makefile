@@ -5,6 +5,9 @@ TOP_BLK_MODE_ORIGIN := $(origin BLK_MODE)
 BLK_MODE ?= virt
 LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_MODE))
 MODE ?= release
+NET_PERF_EXTRA_FEATURES ?=
+NET_PERF_IMAGE ?= kernel-2k1000-net-perf-shell.ui
+PERF_DIAG_EXTRA_FEATURES ?=
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
 CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
@@ -13,7 +16,41 @@ AUTO_REBUILD_MEM ?= 1
 RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config
+# Architecture builds switch the repository-local rustup override, and the
+# tools-disk recipes share a mount point. This orchestration makefile is
+# intentionally serial even when the caller supplies -j; Cargo/CMake retain
+# their own internal parallelism.
+.NOTPARALLEL:
+
+.PHONY: all $(ARCHS) clean prepare-cargo-config \
+	rv64_all la64_all \
+	rv64-kernel-build-only la64-kernel-build-only \
+	rv64-regression la64-regression rv64-ktest la64-ktest \
+	regression-all ktest-all initramfs-rv initramfs-la initramfs-all \
+	la64-2k1000-core-tests \
+	la64-2k1000-shell \
+	la64-2k1000-curl-shell \
+	la64-2k1000-net-tests \
+	la64-2k1000-apk-tests \
+	la64-2k1000-apk-persist-tests \
+	la64-2k1000-apk-persist-shell \
+	la64-2k1000-perf-diag-shell \
+	la64-2k1000-net-perf-shell \
+	la64-2k1000-cpython-tests \
+	la64-2k1000-cpython-tools \
+	la64-qemu-curl-shell \
+	la64-qemu-curl-shell-run \
+	la64-qemu-apk-tests \
+	la64-qemu-apk-run \
+	la64-qemu-apk-persist-tests \
+	la64-qemu-apk-persist-run \
+	la64-qemu-apk-persist-shell \
+	la64-qemu-apk-persist-shell-run \
+	rv64-cpython-tests rv64-cpython-run \
+	la64-cpython-tests la64-cpython-run \
+	tools-cpython-rv tools-cpython-la tools-cpython-la-alpine tools-cpython \
+	tools-cpython-clean maybe-tools-cpython-rv maybe-tools-cpython-la \
+	la64-2k1000-run-clean
 
 all: prepare-cargo-config rv64_all la64_all
 
@@ -41,7 +78,8 @@ rv64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG}
+	make -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG} \
+		EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 rv64-debug:
 	@rustup override set $(RV_TOOLCHAIN)
@@ -53,7 +91,7 @@ rv64-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk all BLK_MODE=${BLK_MODE}
+	make -f make/rv64.mk all BLK_MODE=${BLK_MODE} EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 rv64-run-only:
 	@rustup override set $(RV_TOOLCHAIN)
@@ -78,19 +116,289 @@ la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk all MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk all MODE=${MODE} LOG=${LOG} EXTRA_FEATURES="$(EXTRA_FEATURES)"
 
 la64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG} \
+		EXTRA_FEATURES="$(EXTRA_FEATURES)"
+
+# Isolated Alpine CPython QEMU gates. The feature marker overrides the test
+# selection in ramfs, so the official sdcard os_test.conf is left untouched.
+rv64-cpython-tests: prepare-cargo-config tools-disk-cpython-rv
+	@rustup override set $(RV_TOOLCHAIN)
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+	$(MAKE) -B -f make/rv64.mk build BLK_MODE=virt MODE=$(MODE) LOG=off \
+		EXTRA_FEATURES="cpython_test"
+	cp -f target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-cpython
+
+rv64-cpython-run: rv64-cpython-tests
+	$(MAKE) -f make/rv64.mk comp MODE=$(MODE) KERNEL_RV=../kernel-rv-cpython
+
+la64-cpython-tests: prepare-cargo-config tools-disk-cpython-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		MODE=$(MODE) LOG=off EXTRA_FEATURES="cpython_test"
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os ../kernel-la-cpython
+
+la64-cpython-run: la64-cpython-tests
+	$(MAKE) -f make/la64.mk comp MODE=$(MODE) KERNEL_LA=../kernel-la-cpython
+
+# Focused real-board diagnostic image. It keeps the normal SATA/scratch safety
+# boundary but overrides the SSD test config at runtime to run libctest,
+# cyclictest, and a curated non-network LTP syscall set.
+la64-2k1000-core-tests: prepare-cargo-config
+	@grep -Eq '^mode=run$$' ../os_test.conf || { \
+		echo "os_test.conf must contain mode=run" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw board_core_test" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-core-tests.ui
+
+# Interactive bring-up image: initramfs userspace + GMAC0, no test execution
+# and no dependency on the SSD. The shell override is an ephemeral ramfs
+# marker, so the persistent os_test.conf remains untouched.
+la64-2k1000-shell: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt \
+		EXTRA_FEATURES="gmac_2k1000 board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-shell.ui
+
+# Self-contained HTTPS curl integration image. The LoongArch64 glibc runtime,
+# static Mbed TLS backend and CA bundle are embedded in initramfs, so this
+# target does not require rewriting the SSD tools partition.
+la64-2k1000-curl-shell: prepare-cargo-config tools-curl-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		CURL_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-curl-shell.ui
+
+# QEMU-first HTTPS gate. Build the same curl runtime used by the real board,
+# force initproc into an interactive shell, and keep a separate kernel artifact
+# so normal la64-run workflows are not overwritten accidentally.
+la64-qemu-curl-shell: prepare-cargo-config tools-curl-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		CURL_RUNTIME=1 EXTRA_FEATURES="board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
+		../kernel-la-curl-shell
+
+la64-qemu-curl-shell-run: la64-qemu-curl-shell
+	$(MAKE) -f make/la64.mk qemu-curl-shell MODE=$(MODE)
+
+# Isolated Alpine package-manager gate. apk.static, repositories and signing
+# keys are embedded in initramfs; the test installs into RAM and never writes
+# the official QEMU disk image.
+la64-qemu-apk-tests: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		APK_RUNTIME=1 EXTRA_FEATURES="apk_test" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
+		../kernel-la-apk-tests
+
+la64-qemu-apk-run: la64-qemu-apk-tests
+	$(MAKE) -f make/la64.mk qemu-apk-tests MODE=$(MODE)
+
+# Persistent APK gate against the same fixed MBR layout used on the board.
+# Run the resulting QEMU fixture twice without rebuilding it: the first run
+# installs, while the second must reuse the committed ext4 package tree.
+la64-qemu-apk-persist-tests: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@test -f ../mango-2k1000la-p4-qemu.img || { \
+		echo "missing P4 QEMU disk; run make 2k1000-p4-qemu-disk from the repo root" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		APK_RUNTIME=1 EXTRA_FEATURES="p4_persist_rw apk_persist_test" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
+		../kernel-la-apk-persist-tests
+
+la64-qemu-apk-persist-run: la64-qemu-apk-persist-tests
+	$(MAKE) -f make/la64.mk qemu-apk-persist-tests MODE=$(MODE)
+
+# Interactive P4 application root. This reuses the validated P4 layout and
+# exposes plain `apk` plus `persist-shell` without making `/` writable.
+la64-qemu-apk-persist-shell: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@test -f ../mango-2k1000la-p4-qemu.img || { \
+		echo "missing P4 QEMU disk; run make 2k1000-p4-qemu-disk from the repo root" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
+		APK_RUNTIME=1 EXTRA_FEATURES="p4_persist_rw apk_persist_shell" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
+		../kernel-la-apk-persist-shell
+
+la64-qemu-apk-persist-shell-run: la64-qemu-apk-persist-shell
+	$(MAKE) -f make/la64.mk qemu-apk-persist-shell MODE=$(MODE)
+
+# Real-board counterpart of the QEMU gate. P1/P3 and block-device nodes keep
+# their read-only policy; only the already validated P2 scratch cache is used.
+la64-2k1000-apk-tests: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 EXTRA_FEATURES="sata_scratch_rw gmac_dhcp apk_test" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-apk-tests.ui
+
+# Board P4 gate. P1/P3 and every userspace block node remain read-only; P2 is
+# only a download cache and the identity-checked P4 is mounted at /persist.
+la64-2k1000-apk-persist-tests: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_test" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-apk-persist-tests.ui
+
+la64-2k1000-apk-persist-shell: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-persist-shell.ui
+
+# Same userspace, storage and network policy as the production persistent
+# shell, with only bounded perf_diag counters compiled in. Event tracing such
+# as net_perf_diag must be requested explicitly after a stable anomaly exists.
+la64-2k1000-perf-diag-shell: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell perf_diag $(PERF_DIAG_EXTRA_FEATURES)" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-perf-diag-shell.ui
+
+# Feature-gated performance probe image. It keeps the production GMAC ring and
+# TCP parameters unless NET_PERF_EXTRA_FEATURES selects one explicit A/B knob.
+la64-2k1000-net-perf-shell: prepare-cargo-config
+	@test -x ../user/tools/loongarch64/bin/apk.static || { \
+		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		APK_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell net_perf_diag $(NET_PERF_EXTRA_FEATURES)" \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../$(NET_PERF_IMAGE)
+
+# Real-board network regression image. Keep the current inet_test in
+# initramfs so an older /tools partition cannot silently change test coverage.
+la64-2k1000-net-tests: prepare-cargo-config tools-curl-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		CURL_RUNTIME=1 INET_TEST_RUNTIME=1 \
+		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-net-tests.ui
+
+# CPython board gate: use writable P2 scratch for filesystem tests and GMAC
+# DHCP for the required DNS/HTTP/HTTPS layer. The runtime itself lives on P3
+# and is built separately by la64-2k1000-cpython-tools.
+la64-2k1000-cpython-tests: prepare-cargo-config tools-cpython-la
+	@test -x ../user/tools/loongarch64/tests/cpython/usr/bin/python3 || { \
+		echo "missing LoongArch CPython runtime cache" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp cpython_test" MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-cpython-tests.ui
+
+la64-2k1000-cpython-tools: prepare-cargo-config tools-cpython-la
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -f make/la64.mk user BOARD=2k1000 MODE=$(MODE)
+	python3 ../scripts/make_2k1000_tools_partition.py \
+		--tools-root ../user/tools/loongarch64 \
+		--user-bin-dir ../user/target/loongarch64-unknown-linux-gnu/$(MODE) \
+		--output ../mango-2k1000la-cpython-tools-p3.img --force
+
+# Competition run image: no board bring-up trace, log level off, and the
+# embedded fallback configuration must be the normal full-suite run mode.
+la64-2k1000-run-clean: prepare-cargo-config
+	@grep -Eq '^mode=run$$' ../os_test.conf || { \
+		echo "os_test.conf must contain mode=run" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-run.ui
 
 la64-debug:
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk all MODE=debug	
+	make -f make/la64.mk all MODE=debug
 
 la64-run-only:
 	@rustup override set $(LA_TOOLCHAIN)
@@ -141,7 +449,7 @@ la64-gdb: la64-debug
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk comp-gdb	
+	make -f make/la64.mk comp-gdb
 
 rvchange:
 	rm -f ../sdcard-rv.img
@@ -217,11 +525,15 @@ TOOLS_SIZE_LA := 2048
 TOOLS_SRC_RV := ../user/tools/riscv64
 TOOLS_SRC_LA := ../user/tools/loongarch64
 
-# CPython runtime
+# Isolated CPython runtime. Downloads are explicit by default so routine
+# kernel builds remain reproducible and do not silently depend on the network.
+# The optional Alpine target remains available for develop/QEMU experiments;
+# 2K1000LA uses the reviewed strict-aligned runtime by default.
 CPYTHON_COMMON := ../user/tools/cpython
 CPYTHON_SRC_RV := ../user/tools/riscv64/tests/cpython
 CPYTHON_SRC_LA := ../user/tools/loongarch64/tests/cpython
-CPYTHON_AUTO ?= 1
+CPYTHON_STRICT_INDEX_LA := ../target/cpython-strict/artifacts/current.json
+CPYTHON_AUTO ?= 0
 
 # MBR 脚本路径
 MBR_SCRIPT := ../scripts/make_mbr_tools_disk.py
@@ -254,13 +566,17 @@ define build_tools_disk
 	@if [ -d $(3)/tests/cpython ]; then \
 		mkdir -p /tmp/tools-mnt/tests/cpython; \
 		cp -a $(3)/tests/cpython/. /tmp/tools-mnt/tests/cpython/; \
-		if [ -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 ]; then \
-			echo "    [cpython] runtime included"; \
-		else \
-			echo "    [cpython] arch runtime copied but python3 not found"; \
-		fi; \
+		test -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 && \
+			echo "    [cpython] runtime included" || \
+			echo "    [cpython] runtime cache incomplete"; \
 	else \
-		echo "    [cpython] no arch runtime cache, skipping"; \
+		echo "    [cpython] runtime cache absent"; \
+	fi
+	@if [ -x /tmp/tools-mnt/tests/cpython/python3-wrapper.sh ] && \
+	    [ -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 ]; then \
+		ln -sf /tools/tests/cpython/python3-wrapper.sh /tmp/tools-mnt/usr/bin/python3; \
+		ln -sf /tools/tests/cpython/python3-wrapper.sh /tmp/tools-mnt/usr/bin/python; \
+		echo "    [cpython] global launchers included"; \
 	fi
 	@if [ -d $(3)/apk ]; then \
 		cp -a $(3)/apk /tmp/tools-mnt/ 2>/dev/null; \
@@ -311,6 +627,12 @@ tools-disk-la: maybe-tools-cpython-la
 	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
 
 tools-disk: tools-disk-rv tools-disk-la
+
+tools-disk-cpython-rv: tools-cpython-rv
+	$(MAKE) --no-print-directory CPYTHON_AUTO=0 tools-disk-rv
+
+tools-disk-cpython-la: tools-cpython-la
+	$(MAKE) --no-print-directory CPYTHON_AUTO=0 tools-disk-la
 
 # ============================================================
 # Alpine 预编译工具下载（本地缓存，避免每次下载）
@@ -380,44 +702,56 @@ tools-alpine-la:
 tools-alpine: tools-alpine-rv tools-alpine-la
 
 # ============================================================
-# CPython runtime downloader（从 Alpine 下载 python3 及依赖）
-# 缓存到 user/tools/{arch}/tests/cpython/（gitignored）
+# CPython runtime provisioning. Caches live under
+# user/tools/{arch}/tests/cpython/ and are gitignored.
 # ============================================================
 
 tools-cpython-rv:
 	@python3 ../scripts/fetch_cpython_runtime.py \
-		--arch riscv64 \
-		--mirror $(ALPINE_MIRROR) \
-		--dest ../user/tools/riscv64/tests/cpython
+		--arch riscv64 --mirror $(ALPINE_MIRROR) --dest $(CPYTHON_SRC_RV)
 
 tools-cpython-la:
+	@cd .. && ./scripts/build_cpython_runtime_la64_strict.sh
+	@python3 ../scripts/install_cpython_runtime_la64_strict.py \
+		--artifact-index $(CPYTHON_STRICT_INDEX_LA) --dest $(CPYTHON_SRC_LA)
+
+# Keep develop's direct Alpine runtime available for QEMU diagnostics without
+# weakening the default 2K1000LA strict-aligned provenance gate.
+tools-cpython-la-alpine:
 	@python3 ../scripts/fetch_cpython_runtime.py \
 		--arch loongarch64 \
 		--mirror $(ALPINE_MIRROR) \
-		--dest ../user/tools/loongarch64/tests/cpython
+		--dest $(CPYTHON_SRC_LA)
 
 tools-cpython: tools-cpython-rv tools-cpython-la
 
 maybe-tools-cpython-rv:
 	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
-		$(MAKE) --no-print-directory tools-cpython-rv || \
-		echo "[cpython] riscv64 download failed, continuing without CPython runtime"; \
+		$(MAKE) --no-print-directory tools-cpython-rv; \
 	else \
 		echo "[cpython] CPYTHON_AUTO=0, skipping riscv64 runtime"; \
 	fi
 
 maybe-tools-cpython-la:
 	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
-		$(MAKE) --no-print-directory tools-cpython-la || \
-		echo "[cpython] loongarch64 download failed, continuing without CPython runtime"; \
+		$(MAKE) --no-print-directory tools-cpython-la; \
 	else \
 		echo "[cpython] CPYTHON_AUTO=0, skipping loongarch64 runtime"; \
 	fi
 
 tools-cpython-clean:
-	@rm -rf $(CPYTHON_SRC_RV)/.apk-cache $(CPYTHON_SRC_RV)/lib $(CPYTHON_SRC_RV)/usr $(CPYTHON_SRC_RV)/etc $(CPYTHON_SRC_RV)/var $(CPYTHON_SRC_RV)/.cpython-*.stamp $(CPYTHON_SRC_RV)/manifest*.txt
-	@rm -rf $(CPYTHON_SRC_LA)/.apk-cache $(CPYTHON_SRC_LA)/lib $(CPYTHON_SRC_LA)/usr $(CPYTHON_SRC_LA)/etc $(CPYTHON_SRC_LA)/var $(CPYTHON_SRC_LA)/.cpython-*.stamp $(CPYTHON_SRC_LA)/manifest*.txt
-	@echo "[cpython] cache cleaned"
+	@rm -rf $(CPYTHON_SRC_RV)/.apk-cache $(CPYTHON_SRC_RV)/bin $(CPYTHON_SRC_RV)/lib $(CPYTHON_SRC_RV)/usr $(CPYTHON_SRC_RV)/etc $(CPYTHON_SRC_RV)/var $(CPYTHON_SRC_RV)/tmp $(CPYTHON_SRC_RV)/.cpython-*.stamp $(CPYTHON_SRC_RV)/manifest*.txt
+	@rm -rf $(CPYTHON_SRC_LA)/.apk-cache $(CPYTHON_SRC_LA)/bin $(CPYTHON_SRC_LA)/lib $(CPYTHON_SRC_LA)/usr $(CPYTHON_SRC_LA)/etc $(CPYTHON_SRC_LA)/var $(CPYTHON_SRC_LA)/tmp $(CPYTHON_SRC_LA)/.cpython-*.stamp $(CPYTHON_SRC_LA)/manifest*.txt
+	@echo "[cpython] generated runtime caches removed"
+
+CURL_RUNTIME_LA_MANIFEST := ../user/tools/loongarch64/curl-runtime/manifest.txt
+
+tools-curl-la: $(CURL_RUNTIME_LA_MANIFEST)
+
+$(CURL_RUNTIME_LA_MANIFEST): ../scripts/build_curl_runtime_la64.sh \
+		initramfs/common/etc/ssl/certs/ca-certificates.crt
+	cd .. && sh scripts/build_curl_runtime_la64.sh \
+		user/tools/loongarch64/curl-runtime
 
 # ============================================================
 # apk 包管理器下载 + 本地 repo 配置

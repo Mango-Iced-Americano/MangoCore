@@ -1,0 +1,24 @@
+2026-07-16T09:21:15.219417Z __PERF_BEGIN_cpybench_verify-1-91ea1bb4__
+2026-07-16T09:21:16.119701Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_cpybench_verify-1-91ea1bb4_TRACE_OFF__
+2026-07-16T09:21:18.235007Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_WORK_BEGIN_cpybench_verify-1-91ea1bb4__
+2026-07-16T09:21:18.361381Z bm_bytesio
+2026-07-16T09:21:18.361411Z bm_chaos
+2026-07-16T09:21:18.364196Z bm_decimal
+2026-07-16T09:21:18.364216Z bm_dict
+2026-07-16T09:21:18.364224Z bm_fileio
+2026-07-16T09:21:18.364244Z bm_float
+2026-07-16T09:21:18.367034Z bm_fork
+2026-07-16T09:21:18.367045Z bm_hash
+2026-07-16T09:21:18.369983Z bm_json_loads
+2026-07-16T09:21:18.369997Z bm_list
+2026-07-16T09:21:18.370003Z bm_nbody
+2026-07-16T09:21:18.372873Z bm_pidigits
+2026-07-16T09:21:18.372890Z bm_regex
+2026-07-16T09:21:18.372898Z bm_richards
+2026-07-16T09:21:18.375778Z bm_sort
+2026-07-16T09:21:18.375794Z bm_spectral_norm
+2026-07-16T09:21:18.375801Z bm_string
+2026-07-16T09:21:18.376760Z bm_thread
+2026-07-16T09:21:18.384515Z __PERF_WORK_END_cpybench_verify-1-91ea1bb4__
+2026-07-16T09:21:18.388698Z __PERF_ACK_cpybench_verify-1-91ea1bb4_WORK__
+2026-07-16T09:21:18.825709Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_END_cpybench_verify-1-91ea1bb4__ rc=0

@@ -1,0 +1,23 @@
+source=/private/tmp/mango-p4-before-lwext4.img
+source_origin=read-only extraction of P4 from verified full SSD backup
+tool=e2fsprogs debugfs 1.47.0
+mode=read-only
+
+debugfs -R 'ls -l /apk-root/bin' ... (matching sh entries):
+295  120777 (1)  0  0  12  14-Jul-2026 05:09 sh
+606  120777 (1)  0  0  12  14-Jul-2026 05:09 sh
+986  120777 (1)  0  0  12  14-Jul-2026 09:28 sh
+
+debugfs -R 'stat <295>' ...:
+Inode: 295   Type: symlink    Mode: 0777   Size: 12   Links: 1
+Fast link dest: "/bin/busybox"
+
+debugfs -R 'stat <606>' ...:
+Inode: 606   Type: symlink    Mode: 0777   Size: 12   Links: 1
+Fast link dest: "/bin/busybox"
+
+debugfs -R 'stat <986>' ...:
+Inode: 986   Type: symlink    Mode: 0777   Size: 12   Links: 1
+Fast link dest: "/bin/busybox"
+
+The live-disk raw backup also exposes repeated applet entries and a directory-block checksum warning. This evidence is used only to prove the three directly observed sh entries and targets; it is not treated as a clean offline-fsck verdict for the current SSD.

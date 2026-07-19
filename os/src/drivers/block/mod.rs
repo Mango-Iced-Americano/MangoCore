@@ -64,7 +64,7 @@ lazy_static! {
     /// 每个条目在设备未探测到时为 None。
     pub static ref BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2] = {
         if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
-            println!("[kernel] block devices skipped (ramfs-only mode)");
+            boot_trace!("[kernel] block devices skipped (ramfs-only mode)");
             [None, None]
         } else {
             probe_block_devices()
@@ -75,7 +75,7 @@ lazy_static! {
     /// ramfs-only 模式下返回 DummyBlockDevice；否则要求 device 0 存在。
     pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = {
         if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
-            println!("[kernel] block device skipped (ramfs-only mode)");
+            boot_trace!("[kernel] block device skipped (ramfs-only mode)");
             Arc::new(DummyBlockDevice)
         } else {
             BLOCK_DEVICES[0].clone().expect(
@@ -93,6 +93,16 @@ pub fn block_devices() -> &'static [Option<Arc<dyn BlockDevice>>; 2] {
 /// 获取指定索引的块设备（存在时返回 Some）
 pub fn get_block_device(index: usize) -> Option<Arc<dyn BlockDevice>> {
     BLOCK_DEVICES.get(index).and_then(|dev| dev.clone())
+}
+
+#[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
+pub fn sata_read_only_probe() {
+    sata_blk::read_only_probe();
+}
+
+#[cfg(all(feature = "board_2k1000", feature = "sata_write_probe"))]
+pub fn sata_write_probe() {
+    sata_blk::write_probe();
 }
 
 #[allow(unused)]

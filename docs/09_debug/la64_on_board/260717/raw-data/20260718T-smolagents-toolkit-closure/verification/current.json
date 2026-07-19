@@ -1,0 +1,8 @@
+{
+  "artifact": "cpython-la64-strict-3.14.5-28f61fb764f3.tar.xz",
+  "manifest_schema": 4,
+  "manifest_sha256": "79b62ebc16e710347dba720969036dda8ebaf73c453c1ce84febbe263ddec70c",
+  "runtime_policy": "mangocore-la64-strict-align-v1",
+  "schema": 1,
+  "sha256": "28f61fb764f3c25ba2f5b032259b47a491334f382ed243475cfcbaaad1d1e75e"
+}

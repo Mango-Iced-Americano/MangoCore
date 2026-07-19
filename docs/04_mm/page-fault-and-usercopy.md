@@ -305,7 +305,7 @@ self.do_page_fault(addr, access)
 `validate_user_fault_result()` 会检查：
 
 1. `page_table.translate_va(addr)` 必须成功。
-2. 物理地址必须在 `MEMORY_START..MEMORY_END`。
+2. 物理地址必须位于真实 DRAM bank，且不能是第 0 页或固件 carveout。
 3. Load 对应 `user_access_ok(Read)`。
 4. Store 对应 `user_access_ok(Write)`。
 5. Execute 要求 PTE valid 且 executable。

@@ -219,9 +219,12 @@ pub fn sys_futex(
                 }
             }
             match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Private(key)) => {
-                    current_task_ref().unwrap().process.futex().lock().wake(key, val)
-                }
+                Ok(FutexKey::Private(key)) => current_task_ref()
+                    .unwrap()
+                    .process
+                    .futex()
+                    .lock()
+                    .wake(key, val),
                 Ok(FutexKey::Shared(phys_key)) => futex_wake_shared(phys_key, val),
                 Err(errno) => errno,
             }
@@ -258,14 +261,12 @@ pub fn sys_futex(
                 Err(errno) => return errno,
             };
             match (key, key2) {
-                (FutexKey::Private(key), FutexKey::Private(key2)) => {
-                    current_task_ref()
-                        .unwrap()
-                        .process
-                        .futex()
-                        .lock()
-                        .requeue(key, key2, val, val2)
-                }
+                (FutexKey::Private(key), FutexKey::Private(key2)) => current_task_ref()
+                    .unwrap()
+                    .process
+                    .futex()
+                    .lock()
+                    .requeue(key, key2, val, val2),
                 (FutexKey::Shared(key), FutexKey::Shared(key2)) => {
                     futex_requeue_shared(key, key2, val, val2)
                 }

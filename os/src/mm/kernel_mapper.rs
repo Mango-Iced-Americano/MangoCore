@@ -9,8 +9,8 @@
 //! 架构页表层统一保证。
 
 use super::{
-    mapper::PageMapper, MapPermission, MmResult, PageTable, PhysPageNum, VirtAddr, VirtPageNum,
-    VPNRange,
+    mapper::PageMapper, MapPermission, MmResult, PageTable, PhysPageNum, VPNRange, VirtAddr,
+    VirtPageNum,
 };
 
 /// 对内核页表执行受限映射操作的适配器。

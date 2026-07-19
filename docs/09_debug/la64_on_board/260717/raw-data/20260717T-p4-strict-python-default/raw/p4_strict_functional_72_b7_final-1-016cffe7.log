@@ -1,0 +1,179 @@
+2026-07-17T14:05:27.255248Z __PERF_BEGIN_p4_strict_functional_72_b7_final-1-016cffe7__
+2026-07-17T14:05:28.255868Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_strict_functional_72_b7_final-1-016cffe7_TRACE_OFF__
+2026-07-17T14:05:30.197488Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_strict_functional_72_b7_final-1-016cffe7__
+2026-07-17T14:05:30.960391Z #### OS COMP TEST GROUP START cpython-isolated ####
+2026-07-17T14:05:31.029375Z [CPYTHON ENV] tmpdir=/persist/pyperf/f-p4-b7-final
+2026-07-17T14:05:31.034929Z [CPYTHON L3 START] L3_check_files.sh
+2026-07-17T14:05:31.101348Z [CPYTHON L3] check: python3 binary OK
+2026-07-17T14:05:31.111144Z [CPYTHON L3] check: musl loader OK
+2026-07-17T14:05:31.117290Z [CPYTHON L3] check: usr/lib OK
+2026-07-17T14:05:31.245582Z [CPYTHON L3] check: encodings OK
+2026-07-17T14:05:31.255223Z [CPYTHON L3] check: CA certs OK
+2026-07-17T14:05:31.316242Z [CPYTHON L3] check: lib libpython3.14.so OK
+2026-07-17T14:05:31.362869Z [CPYTHON L3] check: lib libpython3.14.so.1.0 OK
+2026-07-17T14:05:31.421250Z [CPYTHON L3] check: lib libc.musl-loongarch64.so.1 OK
+2026-07-17T14:05:31.467839Z [CPYTHON L3] check: lib ld-musl-loongarch64.so.1 OK
+2026-07-17T14:05:31.529307Z [CPYTHON L3] check: lib libcrypto.so OK
+2026-07-17T14:05:31.577910Z [CPYTHON L3] check: lib libcrypto.so.3 OK
+2026-07-17T14:05:31.638001Z [CPYTHON L3] check: lib libssl.so OK
+2026-07-17T14:05:31.683650Z [CPYTHON L3] check: lib libssl.so.3 OK
+2026-07-17T14:05:31.687113Z [CPYTHON L3] files OK
+2026-07-17T14:05:31.692700Z [CPYTHON L3 PASS] L3_check_files.sh
+2026-07-17T14:05:31.696851Z [CPYTHON L4 START] L4_startup.sh
+2026-07-17T14:05:31.755514Z [CPYTHON GLOBAL] test: python3/python commands
+2026-07-17T14:05:32.419193Z Python 3.14.5
+2026-07-17T14:05:33.454605Z global-python-command-ok
+2026-07-17T14:05:33.534387Z [CPYTHON GLOBAL] python3/python commands PASS
+2026-07-17T14:05:33.538748Z [CPYTHON L4] test: python3 --version
+2026-07-17T14:05:33.659172Z Python 3.14.5
+2026-07-17T14:05:33.666399Z [CPYTHON L4] test: python3 --version PASS
+2026-07-17T14:05:33.669844Z [CPYTHON L4] test: exit code 37
+2026-07-17T14:05:34.637789Z [CPYTHON L4] test: exit code 37 PASS
+2026-07-17T14:05:34.642596Z [CPYTHON L4] test: import sys, encodings
+2026-07-17T14:05:35.216645Z 3.14.5 (main, Jul 17 2026, 04:01:01) [GCC 15.2.0]
+2026-07-17T14:05:35.287447Z [CPYTHON L4] test: import sys, encodings PASS
+2026-07-17T14:05:35.292926Z [CPYTHON L4] test: sys.prefix discovery
+2026-07-17T14:05:35.851306Z /persist/python-runtime/releases/b7f361382399/usr
+2026-07-17T14:05:35.923061Z [CPYTHON L4] test: sys.prefix discovery PASS
+2026-07-17T14:05:35.926406Z [CPYTHON L4] startup OK
+2026-07-17T14:05:35.935111Z [CPYTHON L4 PASS] L4_startup.sh
+2026-07-17T14:05:35.939848Z [CPYTHON L5 START] L5_language.py
+2026-07-17T14:05:38.394899Z [CPYTHON L5] test: arithmetic
+2026-07-17T14:05:38.398038Z [CPYTHON L5] test: arithmetic PASS
+2026-07-17T14:05:38.401347Z [CPYTHON L5] test: strings
+2026-07-17T14:05:38.404297Z [CPYTHON L5] test: strings PASS
+2026-07-17T14:05:38.407470Z [CPYTHON L5] test: lists
+2026-07-17T14:05:38.409842Z [CPYTHON L5] test: lists PASS
+2026-07-17T14:05:38.412393Z [CPYTHON L5] test: dicts
+2026-07-17T14:05:38.415443Z [CPYTHON L5] test: dicts PASS
+2026-07-17T14:05:38.418603Z [CPYTHON L5] test: comprehensions
+2026-07-17T14:05:38.422870Z [CPYTHON L5] test: comprehensions PASS
+2026-07-17T14:05:38.426001Z [CPYTHON L5] test: exceptions
+2026-07-17T14:05:38.429215Z [CPYTHON L5] test: exceptions PASS
+2026-07-17T14:05:38.432040Z [CPYTHON L5] test: functions
+2026-07-17T14:05:38.435313Z [CPYTHON L5] test: functions PASS
+2026-07-17T14:05:38.437952Z [CPYTHON L5] test: loops
+2026-07-17T14:05:38.440800Z [CPYTHON L5] test: loops PASS
+2026-07-17T14:05:38.443811Z [CPYTHON L5] test: booleans
+2026-07-17T14:05:38.446755Z [CPYTHON L5] test: booleans PASS
+2026-07-17T14:05:38.449269Z [CPYTHON L5] test: sets
+2026-07-17T14:05:38.452273Z [CPYTHON L5] test: sets PASS
+2026-07-17T14:05:38.455249Z [CPYTHON L5] language core OK
+2026-07-17T14:05:38.595249Z [CPYTHON L5 PASS] L5_language.py
+2026-07-17T14:05:38.600357Z [CPYTHON L6 START] L6_stdlib.py
+2026-07-17T14:05:40.980106Z [CPYTHON L6] test: os.getcwd
+2026-07-17T14:05:40.987447Z [CPYTHON L6] test: os.getcwd PASS
+2026-07-17T14:05:40.990922Z [CPYTHON L6] test: os.environ
+2026-07-17T14:05:40.994230Z [CPYTHON L6] test: os.environ PASS
+2026-07-17T14:05:40.997561Z [CPYTHON L6] test: os.listdir
+2026-07-17T14:05:41.002351Z [CPYTHON L6] test: os.listdir PASS
+2026-07-17T14:05:41.005300Z [CPYTHON L6] test: time.time
+2026-07-17T14:05:41.008884Z [CPYTHON L6] test: time.time PASS
+2026-07-17T14:05:41.012136Z [CPYTHON L6] test: time.monotonic
+2026-07-17T14:05:41.016142Z [CPYTHON L6] test: time.monotonic PASS
+2026-07-17T14:05:41.018831Z [CPYTHON L6] test: math
+2026-07-17T14:05:41.033166Z [CPYTHON L6] test: math PASS
+2026-07-17T14:05:41.035542Z [CPYTHON L6] test: json
+2026-07-17T14:05:43.058102Z [CPYTHON L6] test: json PASS
+2026-07-17T14:05:43.060649Z [CPYTHON L6] test: re.match
+2026-07-17T14:05:43.066356Z [CPYTHON L6] test: re.match PASS
+2026-07-17T14:05:43.069821Z [CPYTHON L6] test: random.randint
+2026-07-17T14:05:43.397569Z [CPYTHON L6] test: random.randint PASS
+2026-07-17T14:05:43.401186Z [CPYTHON L6] test: hashlib.sha256
+2026-07-17T14:05:43.621476Z [CPYTHON L6] test: hashlib.sha256 PASS
+2026-07-17T14:05:43.624043Z [CPYTHON L6] test: zlib
+2026-07-17T14:05:43.644858Z [CPYTHON L6] test: zlib PASS
+2026-07-17T14:05:43.647797Z [CPYTHON L6] test: select.select
+2026-07-17T14:05:43.666385Z [CPYTHON L6] test: select.select PASS
+2026-07-17T14:05:43.670647Z [CPYTHON L6] test: signal handler roundtrip
+2026-07-17T14:05:43.745466Z [CPYTHON L6] test: signal handler roundtrip PASS
+2026-07-17T14:05:43.748371Z [CPYTHON L6] test: tempfile
+2026-07-17T14:05:45.518551Z [CPYTHON L6] test: tempfile PASS
+2026-07-17T14:05:45.521450Z [CPYTHON L6] test: pathlib
+2026-07-17T14:05:46.401064Z [CPYTHON L6] test: pathlib PASS
+2026-07-17T14:05:46.404004Z [CPYTHON L6] test: struct
+2026-07-17T14:05:46.438884Z [CPYTHON L6] test: struct PASS
+2026-07-17T14:05:46.441950Z [CPYTHON L6] test: sqlite3
+2026-07-17T14:05:46.608952Z [CPYTHON L6] test: sqlite3 PASS
+2026-07-17T14:05:46.613082Z [CPYTHON L6] stdlib core OK
+2026-07-17T14:05:46.854547Z [CPYTHON L6 PASS] L6_stdlib.py
+2026-07-17T14:05:46.859476Z [CPYTHON L7 START] L7_filesystem.py
+2026-07-17T14:05:53.056246Z [CPYTHON L7] base: /persist/pyperf/f-p4-b7-final/cpython_l7_fs_588
+2026-07-17T14:05:53.071459Z [CPYTHON L7] posix base: /persist/pyperf/f-p4-b7-final/cpython_l7_fs_588/cpython_l7_posix_588
+2026-07-17T14:05:53.075457Z [CPYTHON L7] test: open write read close
+2026-07-17T14:05:53.086805Z [CPYTHON L7] test: open write read close PASS
+2026-07-17T14:05:53.092291Z [CPYTHON L7] test: O_CREAT O_TRUNC O_APPEND semantics
+2026-07-17T14:05:53.107444Z [CPYTHON L7] test: O_CREAT O_TRUNC O_APPEND semantics PASS
+2026-07-17T14:05:53.111680Z [CPYTHON L7] test: relative path resolution
+2026-07-17T14:05:53.125678Z [CPYTHON L7] test: relative path resolution PASS
+2026-07-17T14:05:53.129858Z [CPYTHON L7] test: mkdir file inside rmdir
+2026-07-17T14:05:53.147513Z [CPYTHON L7] test: mkdir file inside rmdir PASS
+2026-07-17T14:05:53.151639Z [CPYTHON L7] test: rename over existing file
+2026-07-17T14:05:53.492069Z [CPYTHON L7] test: rename over existing file PASS
+2026-07-17T14:05:53.495014Z [CPYTHON L7] test: unlink file
+2026-07-17T14:05:53.505503Z [CPYTHON L7] test: unlink file PASS
+2026-07-17T14:05:53.511158Z [CPYTHON L7] test: symlink readlink and read through symlink
+2026-07-17T14:05:53.529306Z [CPYTHON L7] test: symlink readlink and read through symlink PASS
+2026-07-17T14:05:53.532658Z [CPYTHON L7] test: stat and lstat
+2026-07-17T14:05:53.538373Z [CPYTHON L7] test: stat and lstat PASS
+2026-07-17T14:05:53.543687Z [CPYTHON L7] test: directory iteration listdir scandir
+2026-07-17T14:05:53.568678Z [CPYTHON L7] test: directory iteration listdir scandir PASS
+2026-07-17T14:05:53.571553Z [CPYTHON L7] test: ftruncate
+2026-07-17T14:05:53.581665Z [CPYTHON L7] test: ftruncate PASS
+2026-07-17T14:05:53.585020Z [CPYTHON L7] test: flush and fsync
+2026-07-17T14:05:53.671256Z [CPYTHON L7] test: flush and fsync PASS
+2026-07-17T14:05:53.676019Z [CPYTHON L7] test: tempfile creation and cleanup
+2026-07-17T14:05:53.704286Z [CPYTHON L7] test: tempfile creation and cleanup PASS
+2026-07-17T14:05:53.709455Z [CPYTHON L7] test: open file unlink remains readable
+2026-07-17T14:05:53.735870Z [CPYTHON L7] test: open file unlink remains readable PASS
+2026-07-17T14:05:53.783230Z [CPYTHON L7] RESULT PASS
+2026-07-17T14:05:53.994758Z [CPYTHON L7 PASS] L7_filesystem.py
+2026-07-17T14:05:53.999645Z [CPYTHON L8 START] L8_thread.py
+2026-07-17T14:05:57.201415Z [CPYTHON L8] test: thread start join
+2026-07-17T14:05:57.210775Z [CPYTHON L8] test: thread start join PASS
+2026-07-17T14:05:57.215771Z [CPYTHON L8] test: contended lock acquire release
+2026-07-17T14:05:57.225152Z [CPYTHON L8] test: contended lock acquire release PASS
+2026-07-17T14:05:57.228554Z [CPYTHON L8] test: queue put get
+2026-07-17T14:05:57.239268Z [CPYTHON L8] test: queue put get PASS
+2026-07-17T14:05:57.243925Z [CPYTHON L8] test: four threads increment counter
+2026-07-17T14:05:57.269323Z [CPYTHON L8] test: four threads increment counter PASS
+2026-07-17T14:05:57.273220Z [CPYTHON L8] test: daemon thread starts
+2026-07-17T14:05:57.290218Z [CPYTHON L8] test: daemon thread starts PASS
+2026-07-17T14:05:57.292837Z [CPYTHON L8] RESULT PASS
+2026-07-17T14:05:57.457711Z [CPYTHON L8 PASS] L8_thread.py
+2026-07-17T14:05:57.463503Z [CPYTHON L8-SUBPROC START] L8_subprocess.py
+2026-07-17T14:06:02.530658Z [CPYTHON L8-SUBPROC] test: helper locates python subprocess command
+2026-07-17T14:06:02.617815Z [CPYTHON L8-SUBPROC] python command: /persist/python-runtime/releases/b7f361382399/lib/ld-musl-loongarch64.so.1 --library-path /persist/python-runtime/releases/b7f361382399/usr/lib:/persist/python-runtime/releases/b7f361382399/lib /persist/python-runtime/releases/b7f361382399/usr/bin/python3 ...
+2026-07-17T14:06:02.624377Z [CPYTHON L8-SUBPROC] test: helper locates python subprocess command PASS
+2026-07-17T14:06:02.630802Z [CPYTHON L8-SUBPROC] test: subprocess.run capture_output python
+2026-07-17T14:06:03.340591Z [CPYTHON L8-SUBPROC] test: subprocess.run capture_output python PASS
+2026-07-17T14:06:03.346595Z [CPYTHON L8-SUBPROC] test: subprocess.Popen pipe communication
+2026-07-17T14:06:04.046083Z [CPYTHON L8-SUBPROC] test: subprocess.Popen pipe communication PASS
+2026-07-17T14:06:04.051200Z [CPYTHON L8-SUBPROC] test: exit code propagation
+2026-07-17T14:06:04.733430Z [CPYTHON L8-SUBPROC] test: exit code propagation PASS
+2026-07-17T14:06:04.737824Z [CPYTHON L8-SUBPROC] test: stderr capture
+2026-07-17T14:06:05.424047Z [CPYTHON L8-SUBPROC] test: stderr capture PASS
+2026-07-17T14:06:05.429178Z [CPYTHON L8-SUBPROC] test: busybox echo subprocess
+2026-07-17T14:06:05.487647Z [CPYTHON L8-SUBPROC] test: busybox echo subprocess PASS
+2026-07-17T14:06:05.490697Z [CPYTHON L8-SUBPROC] RESULT PASS
+2026-07-17T14:06:05.723059Z [CPYTHON L8-SUBPROC PASS] L8_subprocess.py
+2026-07-17T14:06:05.727547Z [CPYTHON L9 START] L9_socket.py
+2026-07-17T14:06:17.093695Z [CPYTHON L9] test: layer1 socket create close
+2026-07-17T14:06:17.101199Z [CPYTHON L9] test: layer1 socket create close PASS
+2026-07-17T14:06:17.106935Z [CPYTHON L9] test: layer2 socketpair local communication
+2026-07-17T14:06:17.116109Z [CPYTHON L9] test: layer2 socketpair local communication PASS
+2026-07-17T14:06:17.121582Z [CPYTHON L9] test: layer3 DNS getaddrinfo cloudflare.com
+2026-07-17T14:06:17.465040Z [CPYTHON L9] DNS addr: ('104.16.132.229', 80)
+2026-07-17T14:06:17.470836Z [CPYTHON L9] test: layer3 DNS getaddrinfo cloudflare.com PASS
+2026-07-17T14:06:17.475618Z [CPYTHON L9] test: layer4 TCP HTTP cloudflare.com
+2026-07-17T14:06:17.785755Z [CPYTHON L9] HTTP head: b'HTTP/1.1 200 OK\r\nDate: Fri, 17 Jul 2026 14:06:17 GMT\r\nConten'
+2026-07-17T14:06:17.790915Z [CPYTHON L9] test: layer4 TCP HTTP cloudflare.com PASS
+2026-07-17T14:06:17.795607Z [CPYTHON L9] test: layer5 HTTPS cloudflare.com
+2026-07-17T14:06:18.803181Z [CPYTHON L9] HTTPS status: 200
+2026-07-17T14:06:18.808165Z [CPYTHON L9] test: layer5 HTTPS cloudflare.com PASS
+2026-07-17T14:06:18.810538Z [CPYTHON L9] RESULT PASS
+2026-07-17T14:06:19.182847Z [CPYTHON L9 PASS] L9_socket.py
+2026-07-17T14:06:19.189537Z #### OS COMP TEST GROUP END cpython-isolated ####
+2026-07-17T14:06:19.202973Z __PERF_WORK_END_p4_strict_functional_72_b7_final-1-016cffe7__
+2026-07-17T14:06:19.208856Z __PERF_ACK_p4_strict_functional_72_b7_final-1-016cffe7_WORK__
+2026-07-17T14:06:19.749391Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_strict_functional_72_b7_final-1-016cffe7__ rc=0

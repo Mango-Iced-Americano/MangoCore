@@ -1,0 +1,1 @@
+sample_id,arch,platform,clock_freq_hz,boot_console_ticks,boot_mm_ticks,boot_drivers_ticks,boot_net_ticks,boot_fs_ticks,boot_initproc_ticks,boot_scheduler_ticks

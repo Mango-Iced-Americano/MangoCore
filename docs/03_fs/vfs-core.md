@@ -4,11 +4,12 @@ module: "fs/vfs"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/vfs/file.rs"
   - "os/src/fs/vfs/index_node.rs"
   - "os/src/fs/vfs/file_system.rs"
+  - "os/src/fs/vfs/mount.rs"
 entry_points:
   - "File"
   - "IndexNode trait"
@@ -213,6 +214,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
 ```rust
 pub trait FileSystem: Any + Send + Sync + Debug {
+    fn identity_key(&self) -> usize;
     fn root_inode(&self) -> Arc<dyn IndexNode>;
     fn info(&self) -> FsInfo;
     fn name(&self) -> &str;
@@ -220,12 +222,27 @@ pub trait FileSystem: Any + Send + Sync + Debug {
     fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<SuperBlock, SyscallErr>;
     fn support_readahead(&self) -> bool;
     fn permission_policy(&self) -> FsPermissionPolicy;
-    fn on_umount(&self);
+    fn on_umount(&self) -> Result<(), SyscallErr>;
     fn as_any_ref(&self) -> &dyn Any;
 }
 ```
 
 `root_inode` 是路径解析的起点。`info` 返回 FsInfo（块设备 ID / 最大文件名长度 / 特性列表）。`super_block` 和 `statfs` 提供 statfs 系统调用所需信息。
+
+`on_umount()` 是可失败的 teardown 事务：具体后端只有在数据/元数据写回、journal/cache
+停止和 C/设备注册表脱钩全部成功后才返回 `Ok(())`。`BackendLifecycle` 使用
+`Active -> Dying -> Dead` 状态机；最后一个 MountFS 引用消失后进入 Dying，调度器在不持
+registry 锁时调用回调。失败时仍保持 Dying 并重新入队，不能把半卸载后端标成 Dead。
+正常关机路径先完成全局 PageCache writeback，再调用所有 backend teardown；任一失败都
+阻止“持久化成功”的最终状态，但不会阻止其他独立后端尝试提交。
+
+`identity_key()` 是仅在本次启动期有效的文件系统实例身份，不是用户态 `st_dev`。
+默认实现使用具体文件系统对象地址；`MountFS` 必须转发到底层文件系统，使同一 inode
+经普通挂载或 bind mount 访问时仍使用同一身份。全局 inode 注册表必须以
+`(identity_key, inode_id)` 为键，不能直接使用尚未为所有文件系统实现的 `Metadata.dev_id`，
+否则 ramfs、tmpfs 和 ext4 都报告占位值 0 时，相同 inode 号会互相触发 `ETXTBSY` 等状态。
+`ftruncate -9` 如何由 reopen 的 `ETXTBSY` 二次遮蔽而来，见
+[`18b-cross-filesystem-executable-inode-identity.md`](../09_debug/la64_on_board/260710/18b-cross-filesystem-executable-inode-identity.md)。
 
 `SuperBlock` 结构体直接对标 Linux `struct statfs`：
 - f_type（文件系统魔数）、f_bsize（块大小）、f_blocks / f_bfree / f_bavail（块计数）、f_files / f_ffree（inode 计数）、f_namelen（最大文件名长度）、f_fsid（文件系统 ID）、f_frsize（片段大小）、flags（挂载标志）。

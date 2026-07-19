@@ -173,7 +173,7 @@ KERNEL_SPACE.lock().activate()
 | `.rodata` | `R` |
 | `.data` | `R | W | G` |
 | `.bss` | `R | W | G` |
-| `ekernel..MEMORY_END` | `R | W | G` |
+| 每个 usable DRAM region | `R | W | G` |
 | `MMIO` | `R | W | G` |
 
 ### 5.2 ELF 地址空间
@@ -346,7 +346,7 @@ self.validate_fault_phys_addr(addr, pa)
 | `expand_growsdown_for_fault()` | 栈类 VMA 可因向下访问而扩展，普通 VMA 不会被隐式创建。 |
 | `find_user_vma_mut()` | 找到可变 VMA 后，缺页动作会更新 `VmPageStore`、VMA 统计或页表。 |
 | `handle_page_fault()` | 先检查 VMA 权限，再分类为 lazy、file-backed、shared write、CoW 等动作。 |
-| `validate_fault_phys_addr()` | 即使动作返回物理地址，也要确认它落在 `MEMORY_START..MEMORY_END` 内。 |
+| `validate_fault_phys_addr()` | 即使动作返回物理地址，也要确认它属于可分配 DRAM，拒绝地址空洞、第 0 页和固件 carveout。 |
 
 缺页处理的权限来源是 VMA，而不是硬件 fault 类型本身。写 fault 落在只读 VMA 上会返回 `NoPermission`；写 fault 落在私有可写但 PTE 被 fork 撤销 W 的页上，才会进入 CoW。
 

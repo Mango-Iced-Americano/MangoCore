@@ -1,6 +1,12 @@
+#[cfg(all(
+    target_arch = "loongarch64",
+    feature = "board_2k1000",
+    any(feature = "gmac_probe", feature = "gmac_2k1000")
+))]
+pub mod gmac_2k1000;
+pub mod veth;
 #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
 pub mod virtio_net;
-pub mod veth;
 
 pub trait NetDevice: Send + Sync {
     /// 接收一个数据包
@@ -20,7 +26,25 @@ lazy_static! {
 }
 
 pub fn init_net_device() {
-    #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
+    #[cfg(all(
+        target_arch = "loongarch64",
+        feature = "board_2k1000",
+        feature = "gmac_2k1000"
+    ))]
+    {
+        match gmac_2k1000::Gmac2k1000::new() {
+            Ok(net_dev) => *NET_DEVICE.lock() = Some(Arc::new(net_dev)),
+            Err(error) => println!("[gmac] initialization failed: {:?}", error),
+        }
+    }
+    #[cfg(all(
+        any(feature = "block_virt", feature = "block_virt_pci"),
+        not(all(
+            target_arch = "loongarch64",
+            feature = "board_2k1000",
+            feature = "gmac_2k1000"
+        ))
+    ))]
     {
         if let Some(net_dev) = virtio_net::VirtIONetWrapper::new() {
             *NET_DEVICE.lock() = Some(Arc::new(net_dev));

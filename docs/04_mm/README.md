@@ -61,7 +61,7 @@ frame_allocator::init_frame_allocator()
 KERNEL_SPACE.lock().activate()
 ```
 
-如果启用堆追踪特性，`heap_trace::enable()` 会在堆初始化后执行。物理页分配器从 `ekernel` 到 `MEMORY_END` 建立可分配区间；内核地址空间激活后，后续文件系统、驱动和任务初始化运行在内核页表之上。
+如果启用堆追踪特性，`heap_trace::enable()` 会在堆初始化后执行。物理页分配器遍历 `MEMORY_REGIONS`，扣除第 0 页、内核镜像和固件 carveout 后建立多个可分配区间；内核地址空间激活后，后续文件系统、驱动和任务初始化运行在内核页表之上。
 
 ## 核心数据结构
 

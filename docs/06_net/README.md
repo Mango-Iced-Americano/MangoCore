@@ -27,6 +27,7 @@ related_docs:
   - "docs/06_net/architecture.md"
   - "docs/06_net/socket-trait-and-fd.md"
   - "docs/06_net/syscall-layer.md"
+  - "docs/07_driver/2k1000-gmac.md"
 ---
 
 # 网络子系统
@@ -62,7 +63,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 |              Device adapter (IfaceDevice + polling)                |
 |  (os/src/net/adapter.rs, router_device.rs, iface.rs)             |
 +-------------------------------------------------------------------+
-|  virtio_net driver  |  veth driver  | smoltcp (external crate)   |
+| virtio_net | 2K1000LA GMAC0 (experimental) | veth | smoltcp      |
 +-------------------------------------------------------------------+
 |                     QEMU / Hardware NIC                            |
 +-------------------------------------------------------------------+

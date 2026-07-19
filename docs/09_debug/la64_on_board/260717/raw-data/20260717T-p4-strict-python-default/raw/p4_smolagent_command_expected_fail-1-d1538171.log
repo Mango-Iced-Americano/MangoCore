@@ -1,0 +1,10 @@
+2026-07-17T12:58:11.675584Z __PERF_BEGIN_p4_smolagent_command_expected_fail-1-d1538171__
+2026-07-17T12:58:12.691148Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_smolagent_command_expected_fail-1-d1538171_TRACE_OFF__
+2026-07-17T12:58:14.358310Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_smolagent_command_expected_fail-1-d1538171__
+2026-07-17T12:58:16.711596Z   File [35m"/persist/python/user/bin/smolagent"[0m, line [35m2[0m
+2026-07-17T12:58:16.720550Z     [1;31mexec python3 /var/cache/mango-python/user/bin/smolagent.real[0m "$@"
+2026-07-17T12:58:16.726191Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-17T12:58:16.734854Z [1;35mSyntaxError[0m: [35mMissing parentheses in call to 'exec'. Did you mean exec(...)?[0m
+2026-07-17T12:58:16.948002Z __PERF_WORK_END_p4_smolagent_command_expected_fail-1-d1538171__
+2026-07-17T12:58:16.953928Z __PERF_ACK_p4_smolagent_command_expected_fail-1-d1538171_WORK__
+2026-07-17T12:58:17.511775Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_smolagent_command_expected_fail-1-d1538171__ rc=1

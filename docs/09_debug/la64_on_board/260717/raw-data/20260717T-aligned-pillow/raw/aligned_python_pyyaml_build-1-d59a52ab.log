@@ -1,0 +1,135 @@
+2026-07-17T16:12:03.561930Z docker run --rm --user "$(id -u):$(id -g)" \
+2026-07-17T16:12:03.562003Z 		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+2026-07-17T16:12:03.562017Z 		./scripts/build_cpython_runtime_la64_strict.sh
+2026-07-17T16:12:04.965305Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-17T16:12:05.160396Z [strict-cpython] fetching and verifying pinned sources
+2026-07-17T16:12:05.533601Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+2026-07-17T16:12:05.533640Z                                  Dload  Upload   Total   Spent    Left  Speed
+2026-07-17T16:12:05.533747Z 
+2026-07-17T16:12:05.863970Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-07-17T16:12:06.052893Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-07-17T16:12:06.052925Z 100  127k  100  127k    0     0   244k      0 --:--:-- --:--:-- --:--:--  245k
+2026-07-17T16:12:07.840094Z /app/target/cpython-strict/pillow-build-deps/setuptools/dist.py:759: SetuptoolsDeprecationWarning: License classifiers are deprecated.
+2026-07-17T16:12:07.840127Z !!
+2026-07-17T16:12:07.840136Z 
+2026-07-17T16:12:07.840147Z         ********************************************************************************
+2026-07-17T16:12:07.840158Z         Please consider removing the following classifiers in favor of a SPDX license expression:
+2026-07-17T16:12:07.840165Z 
+2026-07-17T16:12:07.840172Z         License :: OSI Approved :: MIT License
+2026-07-17T16:12:07.840179Z 
+2026-07-17T16:12:07.840188Z         See https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#license for details.
+2026-07-17T16:12:07.840197Z         ********************************************************************************
+2026-07-17T16:12:07.840204Z 
+2026-07-17T16:12:07.840210Z !!
+2026-07-17T16:12:07.840218Z   self._finalize_license_expression()
+2026-07-17T16:12:07.841835Z running bdist_wheel
+2026-07-17T16:12:07.850783Z running build
+2026-07-17T16:12:07.850817Z running build_py
+2026-07-17T16:12:07.854556Z creating build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.855287Z copying lib/yaml/scanner.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.856368Z copying lib/yaml/error.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.857098Z copying lib/yaml/constructor.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.857785Z copying lib/yaml/composer.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.858548Z copying lib/yaml/events.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.859210Z copying lib/yaml/__init__.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.860420Z copying lib/yaml/representer.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.861242Z copying lib/yaml/tokens.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.861965Z copying lib/yaml/dumper.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.862683Z copying lib/yaml/cyaml.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.863328Z copying lib/yaml/parser.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.863971Z copying lib/yaml/reader.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.865212Z copying lib/yaml/loader.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.865956Z copying lib/yaml/resolver.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.866524Z copying lib/yaml/serializer.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.867904Z copying lib/yaml/nodes.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.868806Z copying lib/yaml/emitter.py -> build/lib.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.869777Z creating build/lib.linux-x86_64-cpython-314/_yaml
+2026-07-17T16:12:07.870190Z copying lib/_yaml/__init__.py -> build/lib.linux-x86_64-cpython-314/_yaml
+2026-07-17T16:12:07.871886Z running build_ext
+2026-07-17T16:12:07.877644Z No `pyyaml_build_config` setting found.
+2026-07-17T16:12:07.877668Z building 'yaml._yaml' extension
+2026-07-17T16:12:07.877917Z creating build/temp.linux-x86_64-cpython-314/yaml
+2026-07-17T16:12:07.878403Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -fno-strict-overflow -Wsign-compare -DNDEBUG -g -O3 -Wall -fPIC -I/app/target/cpython-strict/host-python/include/python3.14 -c yaml/_yaml.c -o build/temp.linux-x86_64-cpython-314/yaml/_yaml.o
+2026-07-17T16:12:07.956647Z cc1: fatal error: yaml/_yaml.c: No such file or directory
+2026-07-17T16:12:07.956680Z compilation terminated.
+2026-07-17T16:12:07.959129Z Error compiling module, falling back to pure Python
+2026-07-17T16:12:07.964885Z /app/target/cpython-strict/pillow-build-deps/setuptools/_distutils/cmd.py:90: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+2026-07-17T16:12:07.964930Z !!
+2026-07-17T16:12:07.964946Z 
+2026-07-17T16:12:07.964956Z         ********************************************************************************
+2026-07-17T16:12:07.964965Z         Please avoid running ``setup.py`` directly.
+2026-07-17T16:12:07.964972Z         Instead, use pypa/build, pypa/installer or other
+2026-07-17T16:12:07.964978Z         standards-based tools.
+2026-07-17T16:12:07.964984Z 
+2026-07-17T16:12:07.964992Z         This deprecation is overdue, please update your project and remove deprecated
+2026-07-17T16:12:07.964998Z         calls to avoid build errors in the future.
+2026-07-17T16:12:07.965003Z 
+2026-07-17T16:12:07.965011Z         See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+2026-07-17T16:12:07.965019Z         ********************************************************************************
+2026-07-17T16:12:07.965023Z 
+2026-07-17T16:12:07.965028Z !!
+2026-07-17T16:12:07.965044Z   self.initialize_options()
+2026-07-17T16:12:07.968113Z installing to build/bdist.linux-x86_64/wheel
+2026-07-17T16:12:07.968525Z running install
+2026-07-17T16:12:07.971890Z running install_lib
+2026-07-17T16:12:07.976160Z creating build/bdist.linux-x86_64/wheel
+2026-07-17T16:12:07.976817Z creating build/bdist.linux-x86_64/wheel/_yaml
+2026-07-17T16:12:07.977269Z copying build/lib.linux-x86_64-cpython-314/_yaml/__init__.py -> build/bdist.linux-x86_64/wheel/./_yaml
+2026-07-17T16:12:07.978462Z creating build/bdist.linux-x86_64/wheel/yaml
+2026-07-17T16:12:07.978965Z copying build/lib.linux-x86_64-cpython-314/yaml/scanner.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.980028Z copying build/lib.linux-x86_64-cpython-314/yaml/error.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.980824Z copying build/lib.linux-x86_64-cpython-314/yaml/constructor.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.982126Z copying build/lib.linux-x86_64-cpython-314/yaml/composer.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.983320Z copying build/lib.linux-x86_64-cpython-314/yaml/events.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.984278Z copying build/lib.linux-x86_64-cpython-314/yaml/__init__.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.985710Z copying build/lib.linux-x86_64-cpython-314/yaml/representer.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.986721Z copying build/lib.linux-x86_64-cpython-314/yaml/tokens.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.988094Z copying build/lib.linux-x86_64-cpython-314/yaml/dumper.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.990068Z copying build/lib.linux-x86_64-cpython-314/yaml/cyaml.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.991133Z copying build/lib.linux-x86_64-cpython-314/yaml/parser.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.992030Z copying build/lib.linux-x86_64-cpython-314/yaml/reader.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.993010Z copying build/lib.linux-x86_64-cpython-314/yaml/loader.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.994144Z copying build/lib.linux-x86_64-cpython-314/yaml/resolver.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.995298Z copying build/lib.linux-x86_64-cpython-314/yaml/serializer.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.996656Z copying build/lib.linux-x86_64-cpython-314/yaml/nodes.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.998079Z copying build/lib.linux-x86_64-cpython-314/yaml/emitter.py -> build/bdist.linux-x86_64/wheel/./yaml
+2026-07-17T16:12:07.999037Z running install_egg_info
+2026-07-17T16:12:08.004223Z running egg_info
+2026-07-17T16:12:08.006951Z writing lib/PyYAML.egg-info/PKG-INFO
+2026-07-17T16:12:08.008859Z writing dependency_links to lib/PyYAML.egg-info/dependency_links.txt
+2026-07-17T16:12:08.010174Z writing top-level names to lib/PyYAML.egg-info/top_level.txt
+2026-07-17T16:12:08.017494Z reading manifest file 'lib/PyYAML.egg-info/SOURCES.txt'
+2026-07-17T16:12:08.074881Z reading manifest template 'MANIFEST.in'
+2026-07-17T16:12:08.075516Z warning: no files found matching 'README'
+2026-07-17T16:12:08.092109Z adding license file 'LICENSE'
+2026-07-17T16:12:08.096726Z writing manifest file 'lib/PyYAML.egg-info/SOURCES.txt'
+2026-07-17T16:12:08.103473Z Copying lib/PyYAML.egg-info to build/bdist.linux-x86_64/wheel/./PyYAML-6.0.3-py3.14.egg-info
+2026-07-17T16:12:08.110706Z running install_scripts
+2026-07-17T16:12:08.125939Z creating build/bdist.linux-x86_64/wheel/pyyaml-6.0.3.dist-info/WHEEL
+2026-07-17T16:12:08.128211Z creating '/app/target/cpython-strict/build/pyyaml-6.0.3-wheels/pyyaml-6.0.3-cp314-cp314-linux_x86_64.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+2026-07-17T16:12:08.132594Z adding '_yaml/__init__.py'
+2026-07-17T16:12:08.135413Z adding 'pyyaml-6.0.3.dist-info/licenses/LICENSE'
+2026-07-17T16:12:08.136516Z adding 'yaml/__init__.py'
+2026-07-17T16:12:08.137190Z adding 'yaml/composer.py'
+2026-07-17T16:12:08.138281Z adding 'yaml/constructor.py'
+2026-07-17T16:12:08.138942Z adding 'yaml/cyaml.py'
+2026-07-17T16:12:08.139628Z adding 'yaml/dumper.py'
+2026-07-17T16:12:08.140891Z adding 'yaml/emitter.py'
+2026-07-17T16:12:08.141545Z adding 'yaml/error.py'
+2026-07-17T16:12:08.142094Z adding 'yaml/events.py'
+2026-07-17T16:12:08.142862Z adding 'yaml/loader.py'
+2026-07-17T16:12:08.143488Z adding 'yaml/nodes.py'
+2026-07-17T16:12:08.144447Z adding 'yaml/parser.py'
+2026-07-17T16:12:08.145188Z adding 'yaml/reader.py'
+2026-07-17T16:12:08.145974Z adding 'yaml/representer.py'
+2026-07-17T16:12:08.146742Z adding 'yaml/resolver.py'
+2026-07-17T16:12:08.147977Z adding 'yaml/scanner.py'
+2026-07-17T16:12:08.148765Z adding 'yaml/serializer.py'
+2026-07-17T16:12:08.149437Z adding 'yaml/tokens.py'
+2026-07-17T16:12:08.149944Z adding 'pyyaml-6.0.3.dist-info/METADATA'
+2026-07-17T16:12:08.150480Z adding 'pyyaml-6.0.3.dist-info/WHEEL'
+2026-07-17T16:12:08.151000Z adding 'pyyaml-6.0.3.dist-info/top_level.txt'
+2026-07-17T16:12:08.152421Z adding 'pyyaml-6.0.3.dist-info/RECORD'
+2026-07-17T16:12:08.152663Z removing build/bdist.linux-x86_64/wheel
+2026-07-17T16:12:08.202570Z pure PyYAML build unexpectedly compiled native code
+2026-07-17T16:12:08.318268Z make: *** [cpython-la64-runtime-build] Error 1

@@ -1,0 +1,6 @@
+2026-07-16T12:02:33.755108Z __PERF_BEGIN_ext4_post_sync-1-3d9ada12__
+2026-07-16T12:02:34.651904Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_ext4_post_sync-1-3d9ada12_TRACE_OFF__
+2026-07-16T12:02:35.864949Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_ext4_post_sync-1-3d9ada12__
+2026-07-16T12:02:35.927115Z __PERF_WORK_END_ext4_post_sync-1-3d9ada12__
+2026-07-16T12:02:35.931216Z __PERF_ACK_ext4_post_sync-1-3d9ada12_WORK__
+2026-07-16T12:02:36.363110Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_ext4_post_sync-1-3d9ada12__ rc=0

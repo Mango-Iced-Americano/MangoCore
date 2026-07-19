@@ -245,9 +245,7 @@ fn restore_shared_write<T: PageTable>(
 ) -> Result<PhysAddr, MemoryError> {
     // 文件共享页恢复 W 之前先进入 page cache 写路径，确保 dirty 状态不会丢失。
     if area.vm_kind() == VmAreaKind::FileBacked {
-        if let (Some(inode), Ok(file_offset)) =
-            (area.vm_file(), area.vm_file_offset(ctx.vpn))
-        {
+        if let (Some(inode), Ok(file_offset)) = (area.vm_file(), area.vm_file_offset(ctx.vpn)) {
             if let Some(pc) = inode.ensure_page_cache() {
                 let page_index = file_offset >> crate::config::PAGE_SIZE_BITS;
                 if let Err(e) = pc.frame_for_write(page_index) {

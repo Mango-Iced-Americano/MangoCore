@@ -5,10 +5,7 @@
 //!
 //! 整个内核（VFS、net、设备驱动）统一使用此类型作为 poll 事件位掩码。
 
-use alloc::{
-    sync::Weak,
-    vec::Vec,
-};
+use alloc::{sync::Weak, vec::Vec};
 use spin::{Mutex, MutexGuard};
 
 use crate::task::WaitQueue;

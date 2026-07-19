@@ -4,7 +4,7 @@ module: "net/socket/raw"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-07-13
 code_paths:
   - "os/src/net/socket/inet/raw/"
 entry_points:
@@ -37,14 +37,14 @@ RAW 套接字提供对 IP 层协议的原始访问。MangoCore 通过 `RawSocket
 ```rust
 pub struct RawSocket {
     inner: Mutex<RawSocketInner>,
-    socket_handlers: Vec<RouteSocketHandle>,
+    socket_handlers: Vec<(u32, RouteSocketHandle)>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
 }
 ```
 
 - **inner**: 核心内部状态，通过 `Mutex` 保护
-- **socket_handlers**: 路由套接字句柄列表。索引 0 为主句柄，后续元素覆盖其他协议栈 （lo, veth）。初始化时遍历 `NET_INTERFACE.stack_ifindexes()`，为每个接口创建独立的 smoltcp raw socket
+- **socket_handlers**: `(ifindex, routed handle)` 列表。初始化时遍历 `NET_INTERFACE.stack_ifindexes()`，为每个接口创建独立的 smoltcp raw socket；发送时按路由或 `SO_BINDTODEVICE` 选择目标 ifindex 对应的既有 handler
 - **recv_waiters / send_waiters**: 用于 epoll 集成和阻塞 I/O 的事件等待队列
 
 ### RawSocketInner
@@ -90,7 +90,9 @@ ip_pkg.payload_mut().copy_from_slice(user_buf);
 ip_pkg.fill_checksum();
 ```
 
-`send_to()` 在发送后执行双轮 `NET_INTERFACE.poll()`：第一轮将 TX 数据刷入对端 rx_queue，第二轮将对端的回复回收入本端 rx_queue。
+`send_to()` 不迁移 handler。它先由路由或 `SO_BINDTODEVICE` 得到输出 ifindex，再通过 `handler_for_ifindex()` 选择该设备栈创建时已有的 handler。发送后执行双轮 `NET_INTERFACE.poll()`：第一轮刷新 TX，第二轮处理可能到达的回复。
+
+该约束避免多接口 RAW socket 的重复交付：如果把主 `lo` handler 迁到已经拥有 handler 的 `eth0`，同一个 ICMP reply 会被两个 smoltcp raw socket 各入队一次，表现为外网/网关 ping 持续出现 `DUP`，而 loopback ping 正常。
 
 接收时，`try_recv()` 返回完整 IP 数据包（含 IP 头）。IPv4 路径保留整个包（包括 IP 头），而 IPv6 路径剥离 40 字节的 IPv6 头，仅返回 payload。
 
@@ -144,9 +146,9 @@ pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>>;
 pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>>;
 ```
 
-`RawSocket::register_raw_socket()` 在创建时将 `(handler, Weak<RawSocket>)` 注册到 `RAW_SOCKETS`。`wake_raw_waiters()` 在每次 poll 后遍历所有 RAW_SOCKETS，检查各套接字的 `can_recv()` 状态，若有数据则通过 `EventWaitQueue` 通知等待中的 epoll 或阻塞线程。
+`RawSocket::register_raw_socket()` 只把主 handler 与 `Weak<RawSocket>` 注册到 `RAW_SOCKETS`，保持全局统计仍按逻辑 socket 计数。`wake_raw_waiters()` 在每次 poll 后调用逻辑 socket 的 `recv_ready()`，由其扫描全部接口 handler；任一接口有数据就通过 `EventWaitQueue` 通知等待中的 epoll 或阻塞线程。
 
-`Drop` 实现遍历 `socket_handlers`，从 `RAW_SOCKETS` 中移除所有句柄，并调用 `NET_INTERFACE.remove_routed()` 释放 smoltcp 资源。`RAW_SOCKETS_TO_REMOVE` 用于延迟清理。
+`Drop` 实现遍历 `socket_handlers`，从 `RAW_SOCKETS` 中移除匹配项，并调用 `NET_INTERFACE.remove_routed()` 释放每个接口的 smoltcp 资源。`RAW_SOCKETS_TO_REMOVE` 用于延迟清理。
 
 ## IPv6 Pseudo-Header Checksum
 
@@ -157,6 +159,7 @@ pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>>;
 ```
 try_send() / send_to()
   ├─ connected: 构造 IP 头 → 路由确定源 IP / ifindex
+  │   ├─ 按 ifindex 选择创建时已有的 handler（禁止迁移到已有 RAW handler 的栈）
   │   ├─ IPv4: smoltcp::wire::Ipv4Packet → fill_checksum
   │   └─ IPv6: smoltcp::wire::Ipv6Packet → 可选伪头校验和
   └─ unconnected: 直接 send_slice（用户包含完整 IP 头）
@@ -184,11 +187,11 @@ try_recv()
 | LTP raw01 | RAW 套接字 sendto/recvfrom | 通过 |
 | LTP asapi_01 | IPV6_CHECKSUM / ICMP6_FILTER | 通过 |
 | OSComp basic | 基础 RAW 通信 | 通过 |
-| ping (busybox) | ICMP raw socket 使用 | 通过 |
+| ping (busybox) | 2K1000LA 多接口 ICMP；loopback、网关、公网和域名 | 实板通过，均无 DUP |
 
 ## 已知问题
 
-1. **shutdown 未实现**: `RawSocket::shutdown()` 当前为 `todo!()`。调用 `shutdown()` 会 panic。计划实现半关闭语义
+1. **shutdown 未实现**: `RawSocket::shutdown()` 当前返回 `EOPNOTSUPP`。计划实现半关闭语义
 2. **IPv6 头剥离不对称**: IPv6 接收时剥离 40 字节头而 IPv4 保留，与应用层期望可能不一致。当前行为与 Linux 的 `IP_HDRINCL=0` 模式对齐
 3. **多 handler 遍历**: `try_recv()` 和 `socket_r_ready()` 遍历所有 handler 时按顺序返回第一个可用数据。多接口场景下可能存在饥饿
 4. **发送后双轮 poll**: `send_to()` 的 `NET_INTERFACE.poll() x 2` 是经验值。在一些拓扑下可能不足或多余

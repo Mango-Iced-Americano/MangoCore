@@ -1,11 +1,9 @@
 use alloc::sync::Arc;
 use core::any::Any;
 
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
-};
-use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::dev::DEV_FS;
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -20,7 +18,7 @@ impl IndexNode for Urandom {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        crate::random::fill_random(buf);
+        crate::random::fill_bytes(buf).map_err(|_| SyscallErr::EAGAIN)?;
         Ok(buf.len())
     }
 
@@ -31,6 +29,9 @@ impl IndexNode for Urandom {
         buf: &[u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        // Linux accepts writes as supplemental pool input but does not credit
+        // caller-controlled bytes as entropy.
+        crate::random::mix_untrusted(buf);
         Ok(buf.len())
     }
 

@@ -1,0 +1,23 @@
+2026-07-17T12:53:48.998038Z __PERF_BEGIN_p4_direct_entrypoints_final-1-4d670a7f__
+2026-07-17T12:53:50.012720Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_direct_entrypoints_final-1-4d670a7f_TRACE_OFF__
+2026-07-17T12:53:53.030388Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_direct_entrypoints_final-1-4d670a7f__
+2026-07-17T12:53:53.034132Z python=/usr/bin/python
+2026-07-17T12:53:53.071620Z /rescue/python3-wrapper
+2026-07-17T12:53:53.076922Z python3=/usr/bin/python3
+2026-07-17T12:53:53.113510Z /rescue/python3-wrapper
+2026-07-17T12:53:53.117926Z pip=/usr/bin/pip
+2026-07-17T12:53:53.154315Z /rescue/python-entry
+2026-07-17T12:53:53.158838Z pip3=/usr/bin/pip3
+2026-07-17T12:53:53.195159Z /rescue/python-entry
+2026-07-17T12:53:53.200801Z smolagent=/usr/bin/smolagent
+2026-07-17T12:53:53.236907Z /rescue/python-entry
+2026-07-17T12:53:53.242736Z smolagents=/usr/bin/smolagents
+2026-07-17T12:53:53.278918Z /rescue/python-entry
+2026-07-17T12:53:53.919221Z Python 3.14.5
+2026-07-17T12:53:54.880190Z /persist/python-runtime/releases/a420d79ddb07/usr/bin/python3
+2026-07-17T12:53:54.884897Z /persist/python-runtime/releases/a420d79ddb07
+2026-07-17T12:54:03.957043Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-17T12:54:13.725770Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-17T12:54:14.683179Z __PERF_WORK_END_p4_direct_entrypoints_final-1-4d670a7f__
+2026-07-17T12:54:14.688583Z __PERF_ACK_p4_direct_entrypoints_final-1-4d670a7f_WORK__
+2026-07-17T12:54:15.219579Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_direct_entrypoints_final-1-4d670a7f__ rc=0

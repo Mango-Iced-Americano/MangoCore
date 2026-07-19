@@ -2,9 +2,10 @@
 
 docker-compose.override.yml
 
-os/target/
+# Root-level generated performance artifacts and disk images.
+/target/
 
-target/
+os/target/
 
 os/qemu.log
 
@@ -32,6 +33,9 @@ disk.img
 
 disk-la.img
 
+# Generated regression disk images; keep them out of Git/Codex snapshots.
+/tmp/*.img
+
 cc-codex/*.clean.img
 
 *digest.txt
@@ -47,7 +51,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# CPython runtime cache for tools disk
+# Generated Alpine CPython runtime caches for target tools disks.
 /user/tools/*/tests/cpython/.apk-cache/
 /user/tools/*/tests/cpython/bin/
 /user/tools/*/tests/cpython/lib/
@@ -61,11 +65,22 @@ __pycache__/
 /user/tools/*/tests/cpython/manifest*.txt
 /user/tools/*/tests/cpython/**/*.so
 /user/tools/*/tests/cpython/**/*.so.*
+/kernel-rv-cpython
+/kernel-la-cpython
+/kernel-2k1000-cpython-tests.ui
+/mango-2k1000la-cpython-tools-p3.img
+/mango-2k1000la-cpython-tools-p3.img.json
+/kernel-2k1000-apk-persist-tests.ui
+/kernel-la-apk-persist-tests
+/mango-2k1000la-state-p4.img
+/mango-2k1000la-state-p4.img.json
+/mango-2k1000la-p4-qemu.img
 .sisyphus/
 sdcard-rv-noconf.img
 /tools/
 .omo/
 .env
+# Reproducible LoongArch curl build output.
+/user/tools/loongarch64/curl-runtime/
 os/rootfs-rv.img
 os.bin
-.env

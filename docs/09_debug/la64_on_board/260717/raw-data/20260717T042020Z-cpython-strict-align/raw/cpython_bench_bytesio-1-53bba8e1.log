@@ -1,0 +1,165 @@
+2026-07-17T05:18:50.164951Z __PERF_BEGIN_cpython_bench_bytesio-1-53bba8e1__
+2026-07-17T05:18:51.101271Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_TRACE_OFF__
+2026-07-17T05:18:51.750465Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_STATS_OFF__
+2026-07-17T05:18:52.387379Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_PROFILE__
+2026-07-17T05:18:52.990836Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_RESET__
+2026-07-17T05:18:53.660935Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_BOOT__
+2026-07-17T05:18:53.695542Z clock_freq_hz=100000000
+2026-07-17T05:18:53.697976Z boot_console_ticks=1187996205
+2026-07-17T05:18:53.700923Z boot_mm_ticks=1215127604
+2026-07-17T05:18:53.703578Z boot_drivers_ticks=1215533788
+2026-07-17T05:18:53.706332Z boot_net_ticks=1226121614
+2026-07-17T05:18:53.709117Z boot_fs_ticks=1238201751
+2026-07-17T05:18:53.711834Z boot_initproc_ticks=1240403467
+2026-07-17T05:18:53.712836Z boot_scheduler_ticks=1240403496
+2026-07-17T05:18:53.717393Z __PERF_STATS_BEFORE_BOOT_END__
+2026-07-17T05:18:54.403164Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_TASKQ__
+2026-07-17T05:18:54.437749Z ready_len_max=0
+2026-07-17T05:18:54.440393Z interruptible_len_max=0
+2026-07-17T05:18:54.440532Z ready_zombie_max=0
+2026-07-17T05:18:54.443001Z interruptible_zombie_max=0
+2026-07-17T05:18:54.445866Z dup_enqueue_total=0
+2026-07-17T05:18:54.448534Z add_ready_total=0
+2026-07-17T05:18:54.448598Z add_interruptible_total=0
+2026-07-17T05:18:54.451536Z wake_interruptible_total=0
+2026-07-17T05:18:54.454224Z fair_pick_calls=0
+2026-07-17T05:18:54.454295Z fast_path_calls=0
+2026-07-17T05:18:54.456930Z fair_scan_max=0
+2026-07-17T05:18:54.459911Z zombie_drain_scan_total=0
+2026-07-17T05:18:54.462476Z zombie_drain_calls=0
+2026-07-17T05:18:54.462555Z zombie_drain_removed=0
+2026-07-17T05:18:54.464428Z ready_nonzero_nice_cur=0
+2026-07-17T05:18:54.469113Z __PERF_STATS_BEFORE_TASKQ_END__
+2026-07-17T05:18:55.166518Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_TIMER__
+2026-07-17T05:18:55.200201Z ktimer_len_max=0
+2026-07-17T05:18:55.202789Z ktimer_add_total=0
+2026-07-17T05:18:55.202880Z ktimer_pop_max=0
+2026-07-17T05:18:55.205502Z ktimer_pop_total=0
+2026-07-17T05:18:55.208557Z ktimer_stale_waketask=0
+2026-07-17T05:18:55.208703Z ktimer_real_wake=0
+2026-07-17T05:18:55.211089Z ktimer_compact_calls=0
+2026-07-17T05:18:55.213974Z ktimer_stale_removed=0
+2026-07-17T05:18:55.216760Z wait_with_timeout_total=0
+2026-07-17T05:18:55.216875Z timer_irq_ticks_total=0
+2026-07-17T05:18:55.219946Z timer_irq_ticks_max=0
+2026-07-17T05:18:55.222408Z timer_pop_nodes_total=0
+2026-07-17T05:18:55.225011Z timer_pop_ticks_total=0
+2026-07-17T05:18:55.225122Z timer_pop_ticks_max=0
+2026-07-17T05:18:55.229714Z __PERF_STATS_BEFORE_TIMER_END__
+2026-07-17T05:18:55.960422Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_SECCOMP__
+2026-07-17T05:18:55.994207Z seccomp_check_calls=0
+2026-07-17T05:18:55.996987Z seccomp_check_ticks_total=0
+2026-07-17T05:18:55.999686Z seccomp_check_ticks_max=0
+2026-07-17T05:18:56.001216Z seccomp_disabled_bypass=0
+2026-07-17T05:18:56.005564Z __PERF_STATS_BEFORE_SECCOMP_END__
+2026-07-17T05:18:56.735024Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_SYSCALL__
+2026-07-17T05:18:56.769059Z syscall_total=0
+2026-07-17T05:18:56.771641Z syscall_getppid_total=0
+2026-07-17T05:18:56.774289Z syscall_cost_max_ticks=0
+2026-07-17T05:18:56.774349Z syscall_cost_ticks_total=0
+2026-07-17T05:18:56.777236Z getppid_cost_ticks_total=0
+2026-07-17T05:18:56.779867Z getppid_cost_ticks_max=0
+2026-07-17T05:18:56.782780Z ecall_trap_cost_ticks_total=0
+2026-07-17T05:18:56.785482Z ecall_trap_cost_ticks_max=0
+2026-07-17T05:18:56.788336Z user_unaligned_traps=0
+2026-07-17T05:18:56.791112Z user_unaligned_ticks_total=0
+2026-07-17T05:18:56.793822Z user_unaligned_ticks_max=0
+2026-07-17T05:18:56.793902Z user_unaligned_load_2=0
+2026-07-17T05:18:56.796713Z user_unaligned_load_4=0
+2026-07-17T05:18:56.799363Z user_unaligned_load_8=0
+2026-07-17T05:18:56.802252Z user_unaligned_store_2=0
+2026-07-17T05:18:56.804947Z user_unaligned_store_4=0
+2026-07-17T05:18:56.804997Z user_unaligned_store_8=0
+2026-07-17T05:18:56.807800Z user_unaligned_float_loads=0
+2026-07-17T05:18:56.810328Z user_unaligned_float_stores=0
+2026-07-17T05:18:56.815015Z __PERF_STATS_BEFORE_SYSCALL_END__
+2026-07-17T05:18:57.509322Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_CTXSW__
+2026-07-17T05:18:57.543217Z context_switch_total=0
+2026-07-17T05:18:57.547492Z __PERF_STATS_BEFORE_CTXSW_END__
+2026-07-17T05:18:58.187178Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_STATS_ON__
+2026-07-17T05:18:59.982830Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_cpython_bench_bytesio-1-53bba8e1__
+2026-07-17T05:19:00.725469Z [CPYTHON BENCH START] bm_bytesio tmp=/persist/pyperf/w-sa-20260717a/run-239
+2026-07-17T05:19:13.442833Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/persist/pyperf/r/s-abbc714ce59f/usr/bin/python3","python_version":"3.14.5 (main, Jul 17 2026, 04:01:01) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1","target_stats":true,"tmpdir":"/persist/pyperf/w-sa-20260717a/run-239/tmp","type":"environment","warmups":1}
+2026-07-17T05:19:13.456819Z CPYTHON_BENCH_JSON {"benchmark":"bm_bytesio","schema":1,"type":"start"}
+2026-07-17T05:19:19.346272Z CPYTHON_BENCH_JSON {"benchmark":"bm_bytesio","schema":1,"type":"warmup","warmup":1}
+2026-07-17T05:19:25.251628Z CPYTHON_BENCH_JSON {"benchmark":"bm_bytesio","elapsed_ns":5826147870,"elapsed_seconds":5.82614787,"max_rss":17728,"result":"3556178","sample":1,"schema":1,"sys_seconds":1.3499300000000005,"type":"sample","user_seconds":4.467131}
+2026-07-17T05:19:25.275255Z CPYTHON_BENCH_JSON {"benchmark":"bm_bytesio","cv_percent":0.0,"max_ns":5826147870,"mean_ns":5826147870,"median_ns":5826147870,"min_ns":5826147870,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":1}
+2026-07-17T05:19:25.288449Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-17T05:19:25.613026Z [CPYTHON BENCH END] bm_bytesio PASS rc=0
+2026-07-17T05:19:25.669721Z __PERF_WORK_END_cpython_bench_bytesio-1-53bba8e1__
+2026-07-17T05:19:25.674492Z __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_WORK__
+2026-07-17T05:19:26.324722Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_cpython_bench_bytesio-1-53bba8e1_STATS_DONE__
+2026-07-17T05:19:26.984674Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_BOOT__
+2026-07-17T05:19:27.019547Z clock_freq_hz=100000000
+2026-07-17T05:19:27.022091Z boot_console_ticks=1187996205
+2026-07-17T05:19:27.024883Z boot_mm_ticks=1215127604
+2026-07-17T05:19:27.027619Z boot_drivers_ticks=1215533788
+2026-07-17T05:19:27.030381Z boot_net_ticks=1226121614
+2026-07-17T05:19:27.033274Z boot_fs_ticks=1238201751
+2026-07-17T05:19:27.036014Z boot_initproc_ticks=1240403467
+2026-07-17T05:19:27.036815Z boot_scheduler_ticks=1240403496
+2026-07-17T05:19:27.041425Z __PERF_STATS_AFTER_BOOT_END__
+2026-07-17T05:19:27.717884Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_TASKQ__
+2026-07-17T05:19:27.751645Z ready_len_max=2
+2026-07-17T05:19:27.754234Z interruptible_len_max=5
+2026-07-17T05:19:27.754293Z ready_zombie_max=0
+2026-07-17T05:19:27.756982Z interruptible_zombie_max=0
+2026-07-17T05:19:27.759705Z dup_enqueue_total=0
+2026-07-17T05:19:27.762529Z add_ready_total=519
+2026-07-17T05:19:27.762581Z add_interruptible_total=6
+2026-07-17T05:19:27.765369Z wake_interruptible_total=6
+2026-07-17T05:19:27.768885Z fair_pick_calls=0
+2026-07-17T05:19:27.771121Z fast_path_calls=519
+2026-07-17T05:19:27.771176Z fair_scan_max=0
+2026-07-17T05:19:27.773828Z zombie_drain_scan_total=0
+2026-07-17T05:19:27.776513Z zombie_drain_calls=0
+2026-07-17T05:19:27.776572Z zombie_drain_removed=0
+2026-07-17T05:19:27.778736Z ready_nonzero_nice_cur=0
+2026-07-17T05:19:27.783150Z __PERF_STATS_AFTER_TASKQ_END__
+2026-07-17T05:19:28.466968Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_TIMER__
+2026-07-17T05:19:28.500701Z ktimer_len_max=1
+2026-07-17T05:19:28.503148Z ktimer_add_total=6
+2026-07-17T05:19:28.503235Z ktimer_pop_max=1
+2026-07-17T05:19:28.505870Z ktimer_pop_total=513
+2026-07-17T05:19:28.508631Z ktimer_stale_waketask=0
+2026-07-17T05:19:28.508680Z ktimer_real_wake=6
+2026-07-17T05:19:28.511734Z ktimer_compact_calls=0
+2026-07-17T05:19:28.514301Z ktimer_stale_removed=0
+2026-07-17T05:19:28.516993Z wait_with_timeout_total=6
+2026-07-17T05:19:28.519856Z timer_irq_ticks_total=1570754
+2026-07-17T05:19:28.519932Z timer_irq_ticks_max=22134
+2026-07-17T05:19:28.522492Z timer_pop_nodes_total=6
+2026-07-17T05:19:28.525424Z timer_pop_ticks_total=70657
+2026-07-17T05:19:28.526924Z timer_pop_ticks_max=457
+2026-07-17T05:19:28.531480Z __PERF_STATS_AFTER_TIMER_END__
+2026-07-17T05:19:29.248979Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_SECCOMP__
+2026-07-17T05:19:29.283289Z seccomp_check_calls=0
+2026-07-17T05:19:29.285861Z seccomp_check_ticks_total=0
+2026-07-17T05:19:29.288738Z seccomp_check_ticks_max=0
+2026-07-17T05:19:29.289678Z seccomp_disabled_bypass=0
+2026-07-17T05:19:29.294378Z __PERF_STATS_AFTER_SECCOMP_END__
+2026-07-17T05:19:30.018276Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_SYSCALL__
+2026-07-17T05:19:30.052136Z syscall_total=246
+2026-07-17T05:19:30.054862Z syscall_getppid_total=0
+2026-07-17T05:19:30.057724Z syscall_cost_max_ticks=102337807
+2026-07-17T05:19:30.060322Z syscall_cost_ticks_total=619188899
+2026-07-17T05:19:30.063242Z getppid_cost_ticks_total=0
+2026-07-17T05:19:30.065988Z getppid_cost_ticks_max=0
+2026-07-17T05:19:30.068681Z ecall_trap_cost_ticks_total=619283886
+2026-07-17T05:19:30.071603Z ecall_trap_cost_ticks_max=102338128
+2026-07-17T05:19:30.074394Z user_unaligned_traps=0
+2026-07-17T05:19:30.077166Z user_unaligned_ticks_total=0
+2026-07-17T05:19:30.079923Z user_unaligned_ticks_max=0
+2026-07-17T05:19:30.079972Z user_unaligned_load_2=0
+2026-07-17T05:19:30.082717Z user_unaligned_load_4=0
+2026-07-17T05:19:30.085432Z user_unaligned_load_8=0
+2026-07-17T05:19:30.088174Z user_unaligned_store_2=0
+2026-07-17T05:19:30.091052Z user_unaligned_store_4=0
+2026-07-17T05:19:30.091101Z user_unaligned_store_8=0
+2026-07-17T05:19:30.093830Z user_unaligned_float_loads=0
+2026-07-17T05:19:30.096589Z user_unaligned_float_stores=0
+2026-07-17T05:19:30.101482Z __PERF_STATS_AFTER_SYSCALL_END__
+2026-07-17T05:19:30.779599Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_CTXSW__
+2026-07-17T05:19:30.813219Z context_switch_total=1038
+2026-07-17T05:19:30.817429Z __PERF_STATS_AFTER_CTXSW_END__
+2026-07-17T05:19:31.283038Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_cpython_bench_bytesio-1-53bba8e1__ rc=0

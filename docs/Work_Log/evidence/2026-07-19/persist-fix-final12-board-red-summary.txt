@@ -1,0 +1,27 @@
+command=make 2k1000-boot IMAGE=kernel-2k1000-persist-shell.ui
+image_bytes=16931816
+image_sha256=417b095b504b0fc9144f0ec71d76fc69a1debc1bc438af3ec25b9b0db7b51bae
+tftp_bytes=16931816
+tftp_crc32=c3ad3664
+iminfo=LoongArch legacy uImage; checksum OK
+
+runtime markers:
+  P4 strict-aligned Python launchers installed
+  [ddgs-redirect] FAIL: unexpected DDGS source digest: fdc6789be67b00a8ad599ed55c21ddf1af206f18d0a7633a8a9fb60455c4d4bc
+  P4 DDGS redirect compatibility patch failed; web_search remains unavailable
+  [apk-persist-shell] stage=reuse
+  [apk-persist-shell] stage=prepared
+  [apk-persist-shell] RESULT=PASS
+  [apk-persist-shell] ready: run persist-shell, then apk add <package>
+
+interpretation:
+  RESULT=PASS only proves the application checks; the unexpected source digest is an
+  independent whole-file integrity RED. The digest is not whitelisted. Production P4
+  must be handled offline before another writable new-lwext4 boot.
+
+safety response:
+  host boot harness stopped
+  no U-Boot scsi write, partition-table update or format command was issued
+  after the serial port was released, sent Ctrl-C, exit(), exit,
+  /bin/busybox sync, /bin/busybox poweroff -f
+  no poweroff echo was captured after the harness had exited

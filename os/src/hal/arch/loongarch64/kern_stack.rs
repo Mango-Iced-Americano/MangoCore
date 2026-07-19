@@ -14,6 +14,10 @@ use spin::Mutex;
 
 const KSTACK_CACHE_LIMIT: usize = 128;
 
+#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+static BOARD_FIRST_KSTACK_PROBE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 lazy_static! {
     static ref KSTACK_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
     static ref KSTACK_CACHE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -69,6 +73,37 @@ pub fn kstack_alloc() -> KernelStack {
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
     );
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    if !BOARD_FIRST_KSTACK_PROBE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        // 在启动栈仍有效时访问第一个新映射栈，从而在 `__switch` 使用新栈指针前，
+        // 同时验证开发板规范虚拟地址窗口和 PGDH/PTE 映射。
+        let probe_addr = kstack_top - core::mem::size_of::<usize>();
+        let mapped_ppn = KERNEL_SPACE
+            .lock()
+            .mapped_frame(VirtAddr::from(probe_addr).floor())
+            .map(|frame| frame.ppn.0)
+            .unwrap_or(usize::MAX);
+        println!(
+            "[bringup][kstack:01] mapped high stack: bottom={:#x} top={:#x} probe={:#x} ppn={:#x} pgdh={:#x}",
+            kstack_bottom,
+            kstack_top,
+            probe_addr,
+            mapped_ppn,
+            super::register::PGDH::read().get_base()
+        );
+        let probe_value = 0x4b53_5441_434b_4f4busize;
+        let probe_ptr = probe_addr as *mut usize;
+        // 安全性：`insert_kernel_stack_area` 已将该地址映射为可读写；初始栈为空，
+        // 且 `trap_return` 随后会覆盖栈顶字。
+        let observed = unsafe {
+            core::ptr::write_volatile(probe_ptr, probe_value);
+            core::ptr::read_volatile(probe_ptr)
+        };
+        println!(
+            "[bringup][kstack:02] high stack write/read passed: value={:#x}",
+            observed
+        );
+    }
     KernelStack(kstack_id)
 }
 

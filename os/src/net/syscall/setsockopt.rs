@@ -4,9 +4,10 @@ use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::{
-    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
-    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_RAW, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
     ICMP6_FILTER, IPV6_CHECKSUM, IPV6_RECVHOPLIMIT, IPV6_RECVPKTINFO, IPV6_V6ONLY, IP_HDRINCL,
+    IP_RECVERR, MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_RAW,
+    SOL_SOCKET, SOL_TCP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
+    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, TCP_NODELAY,
 };
 
 /// 设置 socket 选项。
@@ -19,7 +20,8 @@ use super::common::{
 ///   `SO_KEEPALIVE`、`SO_REUSEADDR`、`SO_DONTROUTE`（no-op）、
 ///   `SO_RCVTIMEO`/`SO_SNDTIMEO`（仅接受值，阻塞路径尚未使用 per-socket timeout）、
 ///   `SO_BINDTODEVICE`（NUL-terminated iface name, `IFNAMSIZ=16`）。
-/// - `SOL_IP`：`IP_HDRINCL`（no-op）、`MCAST_JOIN_GROUP`/`MCAST_LEAVE_GROUP`。
+/// - `SOL_IP`：`IP_HDRINCL`（no-op）、UDP `IP_RECVERR`、
+///   `MCAST_JOIN_GROUP`/`MCAST_LEAVE_GROUP`。
 /// - `SOL_IPV6`：`IPV6_RECVPKTINFO`/`IPV6_RECVHOPLIMIT`（no-op）、
 ///   `IPV6_CHECKSUM`（也接受在 `SOL_RAW`）、`IPV6_V6ONLY`。
 /// - `SOL_ICMPV6`：`ICMP6_FILTER`（256-bit bitmap）。
@@ -80,6 +82,14 @@ pub fn sys_setsockopt(
         }
         (SOL_IP, IP_HDRINCL) => {
             // Accept IP_HDRINCL; ping sets this but we build headers internally
+        }
+        (SOL_IP, IP_RECVERR) => {
+            if optlen < core::mem::size_of::<u32>() as u32 {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            if let Err(e) = socket.set_ip_recv_err(optval != 0) {
+                return -(e as isize);
+            }
         }
         (SOL_IPV6, IPV6_RECVPKTINFO) | (SOL_IPV6, IPV6_RECVHOPLIMIT) => {
             // Accept and ignore — kernel handles packet header construction for raw sockets
@@ -179,7 +189,10 @@ pub fn sys_setsockopt(
             if (optlen as usize) < core::mem::size_of::<TimeVal>() {
                 return -(SyscallErr::EINVAL as isize);
             }
-            if UserPtr::<TimeVal>::from_addr(optval_ptr).read(token).is_err() {
+            if UserPtr::<TimeVal>::from_addr(optval_ptr)
+                .read(token)
+                .is_err()
+            {
                 return -(SyscallErr::EFAULT as isize);
             }
             // 当前 socket 阻塞路径尚未接入 per-socket timeout；先按 Linux ABI

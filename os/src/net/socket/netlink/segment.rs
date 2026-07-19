@@ -71,7 +71,11 @@ impl<Body: SegmentBody, Attr: SegmentAttr> SegmentCommon<Body, Attr> {
         let body = Body::parse(&buf[body_start..body_end])?;
         let attrs = Attr::parse_many(&buf[body_end..])?;
 
-        Ok(Self { header, body, attrs })
+        Ok(Self {
+            header,
+            body,
+            attrs,
+        })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

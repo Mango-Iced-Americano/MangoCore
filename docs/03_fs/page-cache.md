@@ -135,6 +135,10 @@ Phase 2（无锁）: 拷贝
 
 ### 全局计数器
 
+`perf_diag` 的 `memory_io` profile 还会记录 PageCache read/write/writeback 调用、页数、
+miss、copy/lookup 与总 ticks，并与 `/sys/kernel/stats/blockio` 的后端请求差值配对。
+所有热路径计时都先检查 profile；`stats_on=0` 时既不更新原子计数，也不读取架构时钟。
+
 ```rust
 static GLOBAL_DIRTY_PAGES: AtomicUsize;    // 脏页总数
 static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数

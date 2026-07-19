@@ -1,5 +1,5 @@
-use crate::fs::BlockDevice;
 use crate::fs::timestamp::format_time;
+use crate::fs::BlockDevice;
 use alloc::string::String;
 #[allow(unused)]
 use alloc::sync::Arc;
@@ -174,8 +174,8 @@ impl Ext4Superblock {
         block_group_count as u32
     }
 
-    pub fn blocks_count(&self) -> u32 {
-        ((self.blocks_count_hi.to_le() as u64) << 32) as u32 | self.blocks_count_lo
+    pub fn blocks_count(&self) -> u64 {
+        self.blocks_count_lo as u64 | ((self.blocks_count_hi as u64) << 32)
     }
 
     pub fn desc_size(&self) -> u16 {
@@ -201,6 +201,92 @@ impl Ext4Superblock {
             inodes_per_group
         } else {
             total_inodes - ((block_group_count - 1) * inodes_per_group)
+        }
+    }
+
+    pub fn blocks_in_group(&self, bgid: u32) -> u32 {
+        let first = self.first_data_block as u64 + bgid as u64 * self.blocks_per_group as u64;
+        self.blocks_count()
+            .saturating_sub(first)
+            .min(self.blocks_per_group as u64) as u32
+    }
+
+    pub fn inode_table_blocks_per_group(&self) -> u32 {
+        let bytes = self.inodes_per_group as u64 * self.inode_size as u64;
+        bytes.div_ceil(self.block_size() as u64) as u32
+    }
+
+    pub fn has_bigalloc(&self) -> bool {
+        self.features_read_only & 0x0200 != 0
+    }
+
+    fn has_sparse_super(&self) -> bool {
+        self.features_read_only & 0x0001 != 0
+    }
+
+    fn has_sparse_super2(&self) -> bool {
+        self.features_compatible & 0x0200 != 0
+    }
+
+    fn has_meta_bg(&self) -> bool {
+        self.features_incompatible & 0x0010 != 0
+    }
+
+    fn is_power_of(mut value: u32, base: u32) -> bool {
+        if value < base {
+            return false;
+        }
+        while value % base == 0 {
+            value /= base;
+        }
+        value == 1
+    }
+
+    pub fn block_group_has_super(&self, bgid: u32) -> bool {
+        if bgid == 0 {
+            return true;
+        }
+        if self.has_sparse_super2() {
+            return self.backup_bgs.contains(&bgid);
+        }
+        if bgid <= 1 || !self.has_sparse_super() {
+            return true;
+        }
+        bgid & 1 != 0
+            && (Self::is_power_of(bgid, 3)
+                || Self::is_power_of(bgid, 5)
+                || Self::is_power_of(bgid, 7))
+    }
+
+    fn group_descriptor_blocks(&self, bgid: u32) -> u32 {
+        let desc_per_block = self.block_size() / self.desc_size() as u32;
+        let meta_group = bgid / desc_per_block;
+        if !self.has_meta_bg() || meta_group < self.first_meta_bg {
+            if !self.block_group_has_super(bgid) {
+                return 0;
+            }
+            if self.has_meta_bg() {
+                return self.first_meta_bg;
+            }
+            return self.block_group_count().div_ceil(desc_per_block);
+        }
+
+        let first = meta_group * desc_per_block;
+        let last = first + desc_per_block - 1;
+        u32::from(bgid == first || bgid == first + 1 || bgid == last)
+    }
+
+    /// Number of leading blocks reserved for super/GDT metadata in a group.
+    pub fn base_metadata_blocks_in_group(&self, bgid: u32) -> u32 {
+        let desc_per_block = self.block_size() / self.desc_size() as u32;
+        let has_super = u32::from(self.block_group_has_super(bgid));
+        if !self.has_meta_bg() || bgid < self.first_meta_bg * desc_per_block {
+            if has_super == 0 {
+                return 0;
+            }
+            has_super + self.group_descriptor_blocks(bgid) + self.s_reserved_gdt_blocks as u32
+        } else {
+            has_super + self.group_descriptor_blocks(bgid)
         }
     }
 

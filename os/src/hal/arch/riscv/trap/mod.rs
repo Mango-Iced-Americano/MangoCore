@@ -103,8 +103,10 @@ pub fn trap_handler() -> ! {
             inner.refresh_real_timer();
             inner.update_process_times_leave_trap(scause.cause());
         }
-        let _trap_ticks = crate::task::perf::perf_time_now() - _trap_start;
-        crate::task::perf::record_trap_cost_ticks(_trap_ticks);
+        if _trap_start != 0 {
+            let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
+            crate::task::perf::record_trap_cost_ticks(_trap_ticks);
+        }
         trap_return();
     }
 
@@ -132,10 +134,14 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::InstructionPageFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
-            let _pf_start = crate::task::perf::perf_time_now();
+            let _pf_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             crate::task::perf::record_page_fault();
             let pf_result = task.process.vm().lock().do_page_fault(addr, access);
-            crate::task::perf::record_pagefault_time_us(crate::task::perf::perf_time_now().saturating_sub(_pf_start));
+            crate::task::perf::record_pagefault_time_us(
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .saturating_sub(_pf_start),
+            );
             if let Err(error) = pf_result {
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
@@ -174,7 +180,9 @@ pub fn trap_handler() -> ! {
             let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
             crate::task::perf::record_timer_interrupt();
             crate::task::processor::record_sched_timer_interrupt();
-            unsafe { TIMER_INTERRUPT += 1; }
+            unsafe {
+                TIMER_INTERRUPT += 1;
+            }
             crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
             crate::task::timer_interrupt_handler();
         }

@@ -14,7 +14,9 @@ use crate::fs::dev::DEV_FS;
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file::FileFlags;
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
-use crate::fs::vfs::{FilePrivateData, FileType, InodeFlags, IndexNode, InodeId, InodeMode, Metadata};
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode, Metadata,
+};
 use crate::task::WaitQueue;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -22,7 +24,9 @@ use crate::utils::error::SyscallErr;
 // ioctl 基础命令值（去掉方向/大小编码位，取低16位 type << 8 | nr）
 // musl 对标准 TTY ioctl 发送 raw 值，对 PTY ioctl 发送编码值
 // 统一用 iocbase(cmd) 提取基础命令号
-fn iocbase(cmd: u32) -> u32 { cmd & 0xFFFF }
+fn iocbase(cmd: u32) -> u32 {
+    cmd & 0xFFFF
+}
 
 const PTY_BUF_SIZE: usize = 4096;
 const MAX_SLAVE_OPENS: usize = 256;
@@ -65,14 +69,25 @@ pub(crate) struct RingBuffer {
 
 impl RingBuffer {
     fn new(capacity: usize) -> Self {
-        RingBuffer { buf: alloc::vec![0u8; capacity], head: 0, len: 0 }
+        RingBuffer {
+            buf: alloc::vec![0u8; capacity],
+            head: 0,
+            len: 0,
+        }
     }
 
-    fn available(&self) -> usize { self.len }
+    fn available(&self) -> usize {
+        self.len
+    }
 
-    fn free_space(&self) -> usize { self.buf.len() - self.len }
+    fn free_space(&self) -> usize {
+        self.buf.len() - self.len
+    }
 
-    fn clear(&mut self) { self.head = 0; self.len = 0; }
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
 
     fn write(&mut self, data: &[u8]) -> usize {
         let cap = self.buf.len();
@@ -149,7 +164,10 @@ struct PtyManager {
 
 impl PtyManager {
     fn new() -> Self {
-        PtyManager { next_id: AtomicUsize::new(0), pairs: Mutex::new(BTreeMap::new()) }
+        PtyManager {
+            next_id: AtomicUsize::new(0),
+            pairs: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn create_pair(&self) -> (Arc<PtyInner>, String) {
@@ -166,7 +184,10 @@ impl PtyManager {
         let mut pairs = self.pairs.lock();
         pairs.retain(|_, w| w.strong_count() > 0);
         match pairs.get(&id).and_then(|w| w.upgrade()) {
-            Some(inner) => Ok(Arc::new(PtySlave { inner, uid: AtomicU32::new(0) })),
+            Some(inner) => Ok(Arc::new(PtySlave {
+                inner,
+                uid: AtomicU32::new(0),
+            })),
             None => {
                 pairs.remove(&id);
                 Err(SyscallErr::ENOENT)
@@ -196,21 +217,30 @@ impl PtySlave {
     fn do_read(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
         if self.inner.master_closed.load(Ordering::Acquire) {
             let n = { self.inner.master_to_slave.lock().read(buf) };
-            if n > 0 { return Ok(n); }
+            if n > 0 {
+                return Ok(n);
+            }
             return Ok(0);
         }
         let n = { self.inner.master_to_slave.lock().read(buf) };
         if n > 0 {
-            self.inner.master_write_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1,
-            );
+            self.inner
+                .master_write_waiters
+                .notify_events_at_most_if_unlocked(
+                    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
+                    1,
+                );
         }
         Ok(n)
     }
 
     fn do_write(&self, buf: &[u8]) -> Result<usize, SyscallErr> {
-        if buf.is_empty() { return Ok(0); }
-        if self.inner.master_closed.load(Ordering::Acquire) { return Err(SyscallErr::EIO); }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.inner.master_closed.load(Ordering::Acquire) {
+            return Err(SyscallErr::EIO);
+        }
         let onlcr = self.inner.termios.lock().oflag & ONLCR != 0;
 
         let mut rb = self.inner.slave_to_master.lock();
@@ -218,8 +248,14 @@ impl PtySlave {
             let mut w = 0;
             for &b in buf {
                 let need = if b == b'\n' { 2 } else { 1 };
-                if rb.free_space() < need { break; }
-                if b == b'\n' { rb.write(b"\r\n"); } else { rb.write(&[b]); }
+                if rb.free_space() < need {
+                    break;
+                }
+                if b == b'\n' {
+                    rb.write(b"\r\n");
+                } else {
+                    rb.write(&[b]);
+                }
                 w += 1;
             }
             w
@@ -229,9 +265,12 @@ impl PtySlave {
         drop(rb);
 
         if written > 0 {
-            self.inner.master_read_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1,
-            );
+            self.inner
+                .master_read_waiters
+                .notify_events_at_most_if_unlocked(
+                    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
+                    1,
+                );
         }
         Ok(written)
     }
@@ -239,20 +278,38 @@ impl PtySlave {
 
 impl core::fmt::Debug for PtySlave {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PtySlave").field("id", &self.inner.id).finish()
+        f.debug_struct("PtySlave")
+            .field("id", &self.inner.id)
+            .finish()
     }
 }
 
 impl IndexNode for PtySlave {
-    fn read_at(&self, _offset: usize, _len: usize, buf: &mut [u8], _data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         self.do_read(buf)
     }
 
-    fn write_at(&self, _offset: usize, _len: usize, buf: &[u8], _data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         self.do_write(buf)
     }
 
-    fn open(&self, _data: MutexGuard<FilePrivateData>, _flags: &FileFlags) -> Result<(), SyscallErr> {
+    fn open(
+        &self,
+        _data: MutexGuard<FilePrivateData>,
+        _flags: &FileFlags,
+    ) -> Result<(), SyscallErr> {
         if self.inner.locked.load(Ordering::Acquire) {
             return Err(SyscallErr::EIO);
         }
@@ -264,7 +321,9 @@ impl IndexNode for PtySlave {
         if count == 0 {
             if let Some(task) = crate::task::current_task() {
                 let uid = task.acquire_inner_lock().euid;
-                let _ = self.uid.compare_exchange(0, uid, Ordering::Relaxed, Ordering::Relaxed);
+                let _ = self
+                    .uid
+                    .compare_exchange(0, uid, Ordering::Relaxed, Ordering::Relaxed);
             }
         }
         Ok(())
@@ -274,8 +333,12 @@ impl IndexNode for PtySlave {
         let prev = self.inner.slave_open_count.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 {
             info!("[pty] slave pty{} last close, waking master", self.inner.id);
-            self.inner.master_read_waiters.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLHUP);
-            self.inner.master_write_waiters.notify_events_all(EPollEvent::EPOLLHUP);
+            self.inner
+                .master_read_waiters
+                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLHUP);
+            self.inner
+                .master_write_waiters
+                .notify_events_all(EPollEvent::EPOLLHUP);
         }
         Ok(())
     }
@@ -284,8 +347,12 @@ impl IndexNode for PtySlave {
         Ok(Metadata {
             dev_id: 0,
             inode_id: self.inner.id as InodeId + 1000,
-            size: 0, blk_size: 0, blocks: 0,
-            atime: TimeSpec::new(), mtime: TimeSpec::new(), ctime: TimeSpec::new(),
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
             file_type: FileType::CharDevice,
             mode: InodeMode::S_IFCHR | InodeMode::from_bits_truncate(0o620),
             nlinks: 1,
@@ -296,7 +363,9 @@ impl IndexNode for PtySlave {
         })
     }
 
-    fn is_stream(&self) -> bool { true }
+    fn is_stream(&self) -> bool {
+        true
+    }
 
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         let mut events = EPollEvent::empty();
@@ -312,7 +381,12 @@ impl IndexNode for PtySlave {
         Ok(events.bits())
     }
 
-    fn ioctl(&self, cmd: u32, argp: usize, _private_data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn ioctl(
+        &self,
+        cmd: u32,
+        argp: usize,
+        _private_data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         let token = crate::task::current_user_token();
         let inner = &self.inner;
         let b = iocbase(cmd);
@@ -320,11 +394,15 @@ impl IndexNode for PtySlave {
         match b {
             TCGETS | TCGETA => {
                 let t = inner.termios.lock();
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &*t).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &*t)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TCSETS | TCSETSW | TCSETSF | TCSETA | TCSETAW | TCSETAF => {
-                let new_t: Termios = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let new_t: Termios = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 if b == TCSETSF || b == TCSETAF {
                     inner.master_to_slave.lock().clear();
                 }
@@ -333,36 +411,54 @@ impl IndexNode for PtySlave {
             }
             TIOCGWINSZ => {
                 let ws = inner.winsize.lock();
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &*ws).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &*ws)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSWINSZ => {
-                let ws: WinSize = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let ws: WinSize = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 *inner.winsize.lock() = ws;
                 Ok(0)
             }
             TIOCGPGRP => {
                 let pg = *inner.foreground_pgid.lock();
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &pg).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &pg)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSPGRP => {
-                let pg: u32 = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let pg: u32 = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 *inner.foreground_pgid.lock() = pg;
                 Ok(0)
             }
             TCXONC | TCSBRK | TCSBRKP | FIONBIO => Ok(0),
             FIONREAD => {
                 let n = inner.master_to_slave.lock().available() as i32;
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &n).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &n)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSETD => {
-                let disc: i32 = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
-                if disc == 0 { Ok(0) } else { Err(SyscallErr::EINVAL) }
+                let disc: i32 = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                if disc == 0 {
+                    Ok(0)
+                } else {
+                    Err(SyscallErr::EINVAL)
+                }
             }
             TIOCGETD => {
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &0i32).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &0i32)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCGPTN | TIOCSPTLCK | TIOCGPTLCK | TIOCGPTPEER | TIOCVHANGUP => {
@@ -391,9 +487,13 @@ impl IndexNode for PtySlave {
         Some(&self.inner.slave_write_waiters)
     }
 
-    fn fs(&self) -> Arc<dyn NewFileSystem> { DEV_FS.clone() }
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        DEV_FS.clone()
+    }
 
-    fn as_any_ref(&self) -> &dyn Any { self }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ─── PtmxMasterInode ─────────────────────────────────────────────────────
@@ -401,33 +501,51 @@ impl IndexNode for PtySlave {
 pub struct PtmxMasterInode;
 
 impl PtmxMasterInode {
-    fn extract_inner<'a>(data: &'a MutexGuard<FilePrivateData>) -> Result<&'a Arc<PtyInner>, SyscallErr> {
+    fn extract_inner<'a>(
+        data: &'a MutexGuard<FilePrivateData>,
+    ) -> Result<&'a Arc<PtyInner>, SyscallErr> {
         match &**data {
             FilePrivateData::PtyMaster { inner } => Ok(inner),
             _ => Err(SyscallErr::EIO),
         }
     }
 
-    fn master_read(&self, buf: &mut [u8], data: &MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn master_read(
+        &self,
+        buf: &mut [u8],
+        data: &MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         let inner = Self::extract_inner(data)?;
-        if inner.master_closed.load(Ordering::Acquire) { return Ok(0); }
+        if inner.master_closed.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         let n = { inner.slave_to_master.lock().read(buf) };
         if n > 0 {
             inner.slave_write_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1,
+                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
+                1,
             );
         }
         Ok(n)
     }
 
-    fn master_write(&self, buf: &[u8], data: &MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn master_write(
+        &self,
+        buf: &[u8],
+        data: &MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         let inner = Self::extract_inner(data)?;
-        if buf.is_empty() { return Ok(0); }
-        if inner.master_closed.load(Ordering::Acquire) { return Err(SyscallErr::EIO); }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if inner.master_closed.load(Ordering::Acquire) {
+            return Err(SyscallErr::EIO);
+        }
         let n = { inner.master_to_slave.lock().write(buf) };
         if n > 0 {
             inner.slave_read_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1,
+                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
+                1,
             );
         }
         Ok(n)
@@ -441,17 +559,36 @@ impl core::fmt::Debug for PtmxMasterInode {
 }
 
 impl IndexNode for PtmxMasterInode {
-    fn read_at(&self, _offset: usize, _len: usize, buf: &mut [u8], data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         self.master_read(buf, &data)
     }
 
-    fn write_at(&self, _offset: usize, _len: usize, buf: &[u8], data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         self.master_write(buf, &data)
     }
 
-    fn open(&self, mut data: MutexGuard<FilePrivateData>, _flags: &FileFlags) -> Result<(), SyscallErr> {
+    fn open(
+        &self,
+        mut data: MutexGuard<FilePrivateData>,
+        _flags: &FileFlags,
+    ) -> Result<(), SyscallErr> {
         let (inner, slave_path) = PTY_MANAGER.create_pair();
-        info!("[ptmx] created PTY pair: master pty{} -> slave {}", inner.id, slave_path);
+        info!(
+            "[ptmx] created PTY pair: master pty{} -> slave {}",
+            inner.id, slave_path
+        );
         *data = FilePrivateData::PtyMaster { inner };
         Ok(())
     }
@@ -462,24 +599,39 @@ impl IndexNode for PtmxMasterInode {
             if inner.slave_open_count.load(Ordering::Acquire) > 0 {
                 inner.master_closed.store(true, Ordering::Release);
             }
-            inner.slave_read_waiters.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLHUP);
-            inner.slave_write_waiters.notify_events_all(EPollEvent::EPOLLHUP);
+            inner
+                .slave_read_waiters
+                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLHUP);
+            inner
+                .slave_write_waiters
+                .notify_events_all(EPollEvent::EPOLLHUP);
         }
         Ok(())
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
-            dev_id: 0, inode_id: 0, size: 0, blk_size: 0, blocks: 0,
-            atime: TimeSpec::new(), mtime: TimeSpec::new(), ctime: TimeSpec::new(),
+            dev_id: 0,
+            inode_id: 0,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
             file_type: FileType::CharDevice,
             mode: InodeMode::S_IFCHR | InodeMode::from_bits_truncate(0o666),
-            nlinks: 1, uid: 0, gid: 0, flags: InodeFlags::empty(),
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
             raw_dev: crate::makedev!(0x88, 0),
         })
     }
 
-    fn is_stream(&self) -> bool { true }
+    fn is_stream(&self) -> bool {
+        true
+    }
 
     fn poll(&self, private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         let inner = match &*private_data {
@@ -499,7 +651,12 @@ impl IndexNode for PtmxMasterInode {
         Ok(events.bits())
     }
 
-    fn ioctl(&self, cmd: u32, argp: usize, data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn ioctl(
+        &self,
+        cmd: u32,
+        argp: usize,
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         let inner = Self::extract_inner(&data)?;
         let token = crate::task::current_user_token();
         let b = iocbase(cmd);
@@ -507,29 +664,43 @@ impl IndexNode for PtmxMasterInode {
         match b {
             TIOCGPTN => {
                 let n = inner.id as u32;
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &n).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &n)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSPTLCK => {
-                let val: i32 = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let val: i32 = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 inner.locked.store(val != 0, Ordering::Release);
                 info!("[ptmx] pty{} slave lock: {}", inner.id, val != 0);
                 Ok(0)
             }
             TIOCGPTLCK => {
-                let locked: i32 = if inner.locked.load(Ordering::Acquire) { 1 } else { 0 };
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &locked).map_err(|_| SyscallErr::EFAULT)?;
+                let locked: i32 = if inner.locked.load(Ordering::Acquire) {
+                    1
+                } else {
+                    0
+                };
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &locked)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCGPTPEER => Err(SyscallErr::ENOTTY),
 
             TCGETS | TCGETA => {
                 let t = inner.termios.lock();
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &*t).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &*t)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TCSETS | TCSETSW | TCSETSF | TCSETA | TCSETAW | TCSETAF => {
-                let new_t: Termios = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let new_t: Termios = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 if b == TCSETSF || b == TCSETAF {
                     inner.master_to_slave.lock().clear();
                 }
@@ -538,36 +709,54 @@ impl IndexNode for PtmxMasterInode {
             }
             TIOCGWINSZ => {
                 let ws = inner.winsize.lock();
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &*ws).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &*ws)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSWINSZ => {
-                let ws: WinSize = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let ws: WinSize = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 *inner.winsize.lock() = ws;
                 Ok(0)
             }
             TIOCGPGRP => {
                 let pg = *inner.foreground_pgid.lock();
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &pg).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &pg)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSPGRP => {
-                let pg: u32 = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
+                let pg: u32 = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 *inner.foreground_pgid.lock() = pg;
                 Ok(0)
             }
             TCXONC | TCSBRK | TCSBRKP | FIONBIO => Ok(0),
             FIONREAD => {
                 let n = inner.slave_to_master.lock().available() as i32;
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &n).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &n)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCSETD => {
-                let disc: i32 = crate::mm::UserPtr::from_addr(argp).read(token).map_err(|_| SyscallErr::EFAULT)?;
-                if disc == 0 { Ok(0) } else { Err(SyscallErr::EINVAL) }
+                let disc: i32 = crate::mm::UserPtr::from_addr(argp)
+                    .read(token)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                if disc == 0 {
+                    Ok(0)
+                } else {
+                    Err(SyscallErr::EINVAL)
+                }
             }
             TIOCGETD => {
-                crate::mm::UserPtrMut::from_addr(argp).write(token, &0i32).map_err(|_| SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &0i32)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
             TIOCVHANGUP => Err(SyscallErr::ENOTTY),
@@ -578,11 +767,19 @@ impl IndexNode for PtmxMasterInode {
         }
     }
 
-    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> { None }
-    fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> { None }
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+    fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
 
-    fn fs(&self) -> Arc<dyn NewFileSystem> { DEV_FS.clone() }
-    fn as_any_ref(&self) -> &dyn Any { self }
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        DEV_FS.clone()
+    }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ─── PtsDirInode ─────────────────────────────────────────────────────────
@@ -603,26 +800,62 @@ impl IndexNode for PtsDirInode {
     }
 
     fn list(&self) -> Result<Vec<String>, SyscallErr> {
-        Ok(PTY_MANAGER.list_ids().into_iter().map(|id| alloc::format!("{}", id)).collect())
+        Ok(PTY_MANAGER
+            .list_ids()
+            .into_iter()
+            .map(|id| alloc::format!("{}", id))
+            .collect())
     }
 
     fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
-        Ok(PTY_MANAGER.list_ids().into_iter().map(|id| (alloc::format!("{}", id), id as InodeId + 1000, FileType::CharDevice)).collect())
+        Ok(PTY_MANAGER
+            .list_ids()
+            .into_iter()
+            .map(|id| {
+                (
+                    alloc::format!("{}", id),
+                    id as InodeId + 1000,
+                    FileType::CharDevice,
+                )
+            })
+            .collect())
     }
 
-    fn open(&self, _data: MutexGuard<FilePrivateData>, _flags: &FileFlags) -> Result<(), SyscallErr> { Ok(()) }
-    fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> { Ok(()) }
+    fn open(
+        &self,
+        _data: MutexGuard<FilePrivateData>,
+        _flags: &FileFlags,
+    ) -> Result<(), SyscallErr> {
+        Ok(())
+    }
+    fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
+        Ok(())
+    }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
-            dev_id: 0, inode_id: 999, size: 0, blk_size: 0, blocks: 0,
-            atime: TimeSpec::new(), mtime: TimeSpec::new(), ctime: TimeSpec::new(),
+            dev_id: 0,
+            inode_id: 999,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
             file_type: FileType::Dir,
             mode: InodeMode::S_IFDIR | InodeMode::from_bits_truncate(0o755),
-            nlinks: 2, uid: 0, gid: 0, flags: InodeFlags::empty(), raw_dev: 0,
+            nlinks: 2,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: 0,
         })
     }
 
-    fn fs(&self) -> Arc<dyn NewFileSystem> { DEV_FS.clone() }
-    fn as_any_ref(&self) -> &dyn Any { self }
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        DEV_FS.clone()
+    }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }

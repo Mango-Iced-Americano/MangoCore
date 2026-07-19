@@ -3,7 +3,7 @@ title: "ProcessControlBlock 进程级资源"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-15
 tags: [process, pcb, fd, namespace, lifecycle]
 ---
 
@@ -165,6 +165,12 @@ WRITE_INODE_REFS: BTreeMap<InodeBusyKey, usize>
 | `WRITE_INODE_REFS` | 当前以可写方式打开的 inode 引用计数 |
 
 `check_exec_metadata()` 在 exec 前检查 `is_writable_inode_busy()`，忙时返回 `ETXTBSY`。`replace_exe()` 会更新 exec key 引用计数。
+
+`InodeBusyKey` 使用 `(inode.fs().identity_key(), inode_id)`。这里不能使用
+`Metadata.dev_id` 的占位值：不同文件系统可以同时存在相同 inode 号，例如 initramfs
+中的正在执行文件与 ext4 上新建文件都可能是 inode 16；若 key 只由 `(0, 16)` 组成，
+后者会被误判为正在执行并在普通可写 reopen 时返回 `ETXTBSY`。`MountFS` 对
+`identity_key()` 的转发保证 bind mount 不会绕过同一文件的 busy 状态。
 
 ## 6. 资源共享与 unshare
 

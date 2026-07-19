@@ -298,6 +298,20 @@ diag=1
 - **教训**: 底层驱动库的 API 能力可能与上层包装不一致；先确认库支持什么粒度的 I/O，再决定是否拆分。VirtIO 安全上限 = BLOCK_SZ（单页物理连续），跨页批量需先保证 DMA 缓冲区物理连续性
 - **相关文件**: `os/src/drivers/block/virtio_blk.rs`, `os/src/drivers/block/virtio_blk_pci.rs`
 
+### 轮询 AHCI 的扇区级拆分掩盖上层批量 I/O
+
+- **根因**: PageCache/ext4 已把连续页合并为最多 256 KiB 的块请求，但 2K1000LA SATA 包装层再次按 512 B 调用轮询式 `READ/WRITE DMA EXT`。每个扇区都重复 command FIS/PRDT 设置、PxCI doorbell 和完成轮询；一个 256 KiB 请求被放大为 512 条 ATA 命令。
+- **修复**: 在控制器初始化阶段分配并永久持有一个 64 KiB 连续低端 DMA 槽，AHCI API 按缓冲区真实长度设置 PRDT byte count 和 ATA sector count，包装层只按槽位上限切分。控制器已有互斥串行化时只需一槽，不要机械移植多槽状态机。
+- **教训**: “DMA 池化”必须结合设备并发模型理解。若驱动只有一个在途命令，收益来自常驻连续缓冲和命令合并，不来自槽位数量。优化后还要分离 PageCache 命中、设备冷读和用户态 CPU 时间；本次 64 KiB 到 256 KiB 无可测收益，而 CPython 无 pyc 的解析/编译才是后续最大瓶颈。
+- **相关文件**: `dependency/dep_iso/src/block/ahci.rs`, `dependency/dep_iso/src/provider.rs`, `os/src/drivers/block/sata_blk.rs`
+
+### 只读语言运行时禁用字节码会把 CPU 瓶颈误判为磁盘慢
+
+- **根因**: 解释器和标准库放在只读分区后，启动包装器用 `PYTHONDONTWRITEBYTECODE=1` 避免写盘；每个新进程因此重复读取、解析并编译所有导入的 `.py`。把运行时复制到 tmpfs 只能减少系统态 I/O，无法消除主要的用户态编译时间。
+- **修复**: 保持源码/解释器分区只读，通过 `PYTHONPYCACHEPREFIX` 把 pyc 放到独立可写层，优先选择已验证的持久 ext4，再回退 scratch/tmpfs；继续使用解释器原生 invalidation，不复制或修改系统源码树。
+- **教训**: 性能 A/B 必须同时记录 real/user/sys。若换成 tmpfs 后 user time 几乎不变，继续扩大 DMA 很可能无效；检查 JIT、字节码、动态链接和重复解析等用户态工作。缓存首次填充与稳定命中要分别报告。
+- **相关文件**: `user/tools/cpython/python3-wrapper.sh`, `os/build_initramfs.sh`, `user/src/bin/initproc.rs`
+
 ### 性能计数器均值误导 — 必须拆 hit/miss
 
 - **根因**: `pc_read_cycles / pc_read_calls = 91K cycles/次` 看似 cache-hit 开销很大，但拆分 `PC_READ_HIT_CYCLES` / `PC_READ_MISS_CYCLES` 后发现：hit 仅 13K cycles，但 4.5% 的 miss 每次 1.8M cycles 拉高均值。iozone 场景 80% miss rate 更是完全改变了瓶颈判断
@@ -620,6 +634,7 @@ diag=1
 - **症状**: musl `getcwd()` 报 "cannot access parent directories: Invalid argument"（`EINVAL`）；`fstatat("/")` 与 `fstatat("..")` 从根子目录返回不同 inode。
 - **修复**: 在 `do_find()` 开头 special-case `name == ".."`，调用 `lookup_dotdot()`：挂载点根时先拿到 `self_mountpoint`（在父 FS 中的 backref），再对该 backref 的 `inner_inode.find("..")` 求值 → 结果在父 FS 的 MountFS 上下文中。全局根返回自身。普通目录走原路径。
 - **教训**: VFS mount-boundary 穿越需要区分两个方向 — (1) 正向：`overlaid_inode()` 覆盖子挂载；(2) 反向 ".."：需通过 `self_mountpoint` backref 回到挂载点所在父 FS。不能用同一个 `inner_inode.find("..")` 处理这两种语义；`do_parent()`（服务于 `absolute_path()`）有不同需求，不应混用。
+- **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
 
 ---
 
@@ -637,6 +652,118 @@ diag=1
   3. 双架构测试不能替代架构针对性测试 — la64 和 rv64 的 eviction 模式不同，rv64 正常不代表 la64 也正常
 
 - **相关文件**: `os/src/fs/page_cache.rs`（`sync_batch_read_pages`、`evict_clean_pages_clock`）
+## ext4 可变长目录项：先画 `rec_len` 算术，再判定 rename 根因
+
+- **反例审计**: 不要从“调整 rename 顺序后测试通过”直接倒推出“旧删除跨过 slack 中的新项”。
+  设旧记录总长为 `R`、实际占用为 `S`，插入新项后布局是 `S + (R-S)`；再删除这个非块首
+  旧记录时，前驱只增加 `S`，其新边界恰好等于新项起点，并不会越过新项。有效干预只能证明
+  改动与结果相关，不能替代记录区间的算术证明。
+- **已锁定机制**: 块内首记录没有前驱。若搜索结果用 `prev_offset=0` 表示“无前驱”，删除路径
+  却仍从偏移 0 读取前驱 `rec_len`，就会把记录自身长度加回自身，使 `R -> 2R`，下一次扫描
+  直接跳过后继。块首删除必须保留原 `rec_len`、只清 inode/body；只有非块首记录才合并到
+  紧邻前驱。
+- **身份约束**: ext4 metadata checksum 的 inode 输入是目录自身 inode，而不是块内第一条
+  目录项的 inode；第一条记录可能是普通孩子，也可能已经被清空。
+- **事务约束**: rename 的先移除源、覆盖目标处理、发布目标、失败回滚和链接计数延后仍是
+  有价值的运行期事务加固，但应与目录 framing 根因分开陈述；无 journal 时仍不具备掉电原子性。
+- **测试要求**: 同时覆盖块首/非块首删除、空目标/覆盖目标、成功后的 namespace/content、
+  重挂载与 checksum；源码里存在回归函数不等于日志已证明它被单独执行。
+- **相关文件**: `os/src/fs/ext4/direntry.rs`、`os/src/fs/ext4/ext4fs.rs`、`os/src/fs/ext4/test.rs`
+
+## Make 包装目标必须验证 feature 已传到最终 cargo 命令
+
+- **现象**: `make ... EXTRA_FEATURES=perf_diag` 成功退出，生成的内核却没有诊断节点；生产版与诊断版运行行为近似，容易被误当成“探针零开销”。
+- **根因**: 顶层 Make 目标接收了变量，但调用架构子 Make 时没有显式转发；参数在 wrapper 层被静默丢弃，编译成功只能证明生产配置可构建。
+- **修复**: 所有通用 build/all 包装目标显式传递 `EXTRA_FEATURES="$(EXTRA_FEATURES)"`；诊断构建完成后读取 `/sys/kernel/stats/features`，并用计数器非零自检确认 feature 真正生效。
+- **教训**: A/B 构建不能只比较命令行和退出码。应把“构建变量 → 最终 cargo feature → 目标运行时接口”串成三段证据链，否则探针税结论没有意义。
+- **相关文件**: `os/Makefile`, `scripts/diag_smoke_test.sh`
+
+## 诊断开关税低不等于诊断构建与生产构建结构等价
+
+- **现象**: 同一诊断二进制内 `stats_on=0/1` 差异低于 1%--2%，但相邻 production/diag-off 在高频陷阱 workload 上仍可能相差数十个百分点；普通用户态负对照却保持稳定。
+- **根因类型**: 增加 feature 会改变 `.text` 大小、函数地址、trap/uaccess/page-fault 布局和链接结果。数百万次用户/内核往返可把代码/缓存布局差异放大到用户时间，即使计数器分支本身几乎没有运行时税。
+- **门禁**: 探针报告必须分开两项：一是同一诊断构建内的 `stats_on=0/1` 运行时税；二是相邻 production/diag-off 的结构税。后者至少包含一个事件密集 workload 和一个事件稀少负对照，并固定 image、feature、initramfs、suite/runtime 哈希和文件系统路径。
+- **证据边界**: 没有 PMU cache-miss 或 PC histogram 时，只能写“代码/缓存布局敏感为高概率”，不能指定具体 L1/L2 conflict。若结构门禁失败，诊断事件数和 handler 时间仍可用于机制归因，但诊断绝对 wall/user 时间不得替代 production。
+- **相关文件**: `scripts/kernel_perf.py`, `docs/09_debug/python-performance-checkpoint-20260716.md`
+
+## 串口 benchmark 事件必须有目标端副本和可恢复字段
+
+- **现象**: workload 已 PASS，串口上的单行 JSON 却因繁忙输出丢失少数字符，宿主 analyzer 缺一条 sample；只依赖串口文本会把有效的数小时矩阵降级为不可用。
+- **设计**: runner 在目标文件系统同步写 JSONL，再向串口输出同一事件；事件至少同时保存 benchmark、sample、elapsed_ns、user/sys、result token，末尾 summary 另存 median/min/max/sample count。宿主保留原始串口，不原地修复；只有完整 summary、关键 sample 字段和 rc/PASS 同时存在时，才允许生成带 `reconstructed` 标记的派生行。
+- **介质约束**: target JSONL 应放在本次明确允许写入且已校验的测试目录；正式 ext4 结论中 suite、pycache、tmp、I/O payload 和事件副本都必须位于 ext4，不能只把脚本放在 ext4、数据仍落到 tmpfs/FAT32。
+- **教训**: analyzer 的外层 wall 包含解释器启动、import、预热和串口控制，不得替代 workload 自报 elapsed。原始日志、target JSONL、派生 CSV 的证据等级必须在报告中显式区分。
+- **相关文件**: `user/tools/cpython/bench/bench_runner.py`, `scripts/kernel_perf.py`, `scripts/run_cpython_bench_matrix.py`
+
+## 自举运行时部署不要用待替换运行时解包自身
+
+- **现象**: 在慢内核/VFS 上用旧 Python `tarfile` 解压新的完整 Python runtime，宿主超时后板端仍卡在不可中断的前台任务；改用原生 tar 后，又可能因 archive 显式包含根成员 `./` 而在最小 VFS 上失败。
+- **设计**: 宿主先验证 archive 成员不含绝对路径、`..` 或链接逃逸，再传输并让板端校验 SHA-256；板端使用已有 BusyBox/native tar+xz 解包到同一文件系统的隐藏 staging，执行 runtime smoke，`sync` 后原子 rename 发布。确定性打包使用排序文件清单并省略合成根成员，只包含根下真实成员。
+- **证据要求**: 规范化前后不能只比 archive 总哈希；应对路径归一化后的逐成员 type/mode/uid/gid/size/link/content 做无序比较，并保存 runtime 内部 manifest 哈希。部署 manifest 必须记录实际发布的 archive，而不是首次失败的构建包。
+- **介质边界**: staging、canonical runtime、work、pycache 和结果必须全部落在本轮允许写入的目标分区；旧只读 runtime 只提供下载/解包工具时，也不得因此把目标分区误写成它所在的分区。
+- **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`, `user/tools/cpython/strict_runtime_smoke.sh`
+
+## 动态语言运行时替换必须关闭全部间接回退路径
+
+- **场景**: 新解释器已经部署到持久分区，直接执行 `python3` 也命中新版本，但 pip、console
+  script、chroot、`subprocess` 或启动期功能测试仍可能通过旧 shebang、继承的 `PATH`/
+  `LD_LIBRARY_PATH`、旧用户目录别名或部署 bootstrap 间接执行退役运行时。只替换一个
+  `/usr/bin/python3` 符号链接不能证明运行时已经完成切换。
+- **设计**: 同时关闭五个面：①解释器入口固定指向验证 wrapper；②pip 和全部 console entry
+  忽略 shebang，通过同一 wrapper 执行；③wrapper 覆盖子进程的 PATH/动态库路径，不继承退役
+  分区；④chroot 只 bind 新 runtime 与新状态树，并复制相同 wrapper/profile；⑤部署只用基础
+  BusyBox 解包和验 SHA，smoke 只执行刚部署的新 runtime。任何一环缺失都保留了隐式 fallback。
+- **发布协议**: runtime 按 artifact hash 放入不可变 `releases/<id>`，manifest 与激活标记绑定
+  artifact/ELF hash，staging smoke 通过后原子更新 `current`。代码、用户包、pyc、tmp 和测试
+  输出放在同一目标文件系统；旧分区只作只读数据备份。
+- **门禁**: 缺失或无效的 `current` 必须让默认命令 fail-closed，不能让 shell 继续搜索旧路径。
+  验证应从默认命令启动，检查 `sys.executable/sys.prefix/sys.path/PATH/LD_LIBRARY_PATH`，并单独
+  验证 pip、典型 console entry、chroot 和 subprocess。包依赖失败可以记录为“新问题已暴露”，
+  但不能改回旧解释器把门禁做绿。
+- **教训**: “新运行时能执行”与“系统只会执行新运行时”是两种不同结论。后者需要从命令解析、
+  shebang、环境继承、文件系统视图和部署供应链给出闭包证据。
+- **动态链接器闭包**: wrapper 显式启动 P4 loader 仍不够，`sys.executable`、multiprocessing 和
+  pip build isolation 会直接 `execve` Python ELF。动态可执行文件的 `PT_INTERP` 必须固化到
+  稳定的 P4 `current` loader，并由 artifact manifest、安装器和板端激活前全 ELF 复核共同门禁。
+  `patchelf --set-interpreter` 对已绑定 ELF 未必字节幂等；打包脚本必须先读现值、仅在不同时
+  改写，否则仅重复打包就可能改变 ELF 布局和 artifact hash。
+- **环境与 console 闭包**: 除 PATH/库路径外还应清除 `PYTHONPATH/PYTHONHOME/PYTHONSTARTUP`、
+  `LD_PRELOAD/LD_AUDIT` 等继承注入。console entry 要解析最终路径并限制在新状态树内；若历史
+  安装产生 shell shim + `.real`，应由统一 wrapper 直接解释 `.real`，不可重新信任旧 shebang。
+- **完整性成本分层**: 每次启动只检查 manifest/activation/artifact 身份，发布新 release 前用
+  新 runtime 对 manifest 中全部 native ELF 做一次实物重哈希。这样可写 P4 release 既不会在
+  每个 Python 进程上支付 94 ELF 哈希成本，也不能把被替换的 ELF 原子激活为 canonical runtime。
+- **相关文件**: `user/tools/cpython/python3-wrapper-persist.sh`, `user/tools/cpython/python-entry-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/deploy_cpython_runtime.py`, `scripts/board/verify_persist_python.sh`
+
+## 复杂度缺陷用“实际遍历步数”闭环，不只拟合 wall 曲线
+
+- **场景**: 源码显示外层逐项删除、内层对剩余容器做全表扫描，wall time 看起来呈平方增长，但固定开销、cache、frame free 和 TLB 也会影响时间曲线。
+- **设计**: 在现有内层扫描前累加当时容器长度，得到实际 visit/retain steps；同时记录调用数、requested/resident 数、容器初始/最大规模、累计/最大 ticks、错误和有界 size buckets。只在目标 profile + stats_on 窗口启用，不逐事件打印。
+- **不变量**: 单个 N 项容器被逐项删除时，理论主扫描量是 `N(N+1)/2`。若 observed 与理论只差一个可解释的小辅助映射，复杂度证据比 `ns/page²` 拟合更强；修复后应先检查扫描步数降为近线性，再解释 wall time。
+- **真实影响**: 目标端 runner 必须预热后 reset/on，只包 workload body。比较时同时看累计占比与最大单次时延；calls 很多但每次很小，可能弱于 calls 很少却包含一个大容器的 workload。
+- **证据边界**: diagnostic ticks/body 只能作为路径归因，不能直接等同未来优化收益；production/diagnostic 结构差异和探针税仍需独立门禁。
+- **相关文件**: `os/src/mm/vma.rs`, `os/src/task/perf.rs`, `scripts/analyze_anon_unmap.py`
+
+## 交叉构建 Python 原生扩展必须同时验证编译命令、wheel tag 和最终 ELF
+
+- **场景**: 目标 CPython 已交叉编译，继续为它构建 Pillow、MarkupSafe 等第三方扩展。
+  `setup.py`/setuptools 在宿主 Python 中运行，容易读取宿主 `sysconfig`、头文件、平台名和
+  wheel tag；仅设置 `CC=<cross-gcc>` 不能证明产物属于目标环境。
+- **构建门禁**: 让目标 CPython header、目标库和目标 sysconfig 先于宿主路径；编译器
+  wrapper 在调用参数末尾追加目标 flags，防止包构建系统后写的 CFLAGS 覆盖。保存完整
+  compile log/database，逐条要求 target triple/ABI/strict flags，并禁止宿主编译器。
+- **产物门禁**: wheel 文件名和内部 `WHEEL` tag 都必须精确匹配目标 ABI（例如
+  `cp314-cp314-linux_loongarch64`）；解包后扫描所有 ELF，验证 machine、hash、NEEDED 和
+  PT_INTERP，再并入运行时总 manifest。主机 QEMU-user import 只作预检，最终仍需实板
+  执行真实功能和目标文件系统 I/O。
+- **纯 Python 例外**: 如果选择纯 Python 降低 native 闭包，必须在构建前显式关闭扩展，
+  要求 `py3-none-any`，并拒绝编译日志中的任何 C 编译命令和 wheel/安装树中的 ELF。不能
+  接受“扩展编译失败后回退成功”，因为它可能留下宿主架构 tag 或不稳定的可选行为。
+- **依赖闭包发现**: 从系统默认 console command 一直执行到成功。每次新增包后重新跑默认
+  门禁；缺下一个依赖是闭包证据，不应通过旧运行时 fallback 掩盖。最终至少覆盖默认命令、
+  包核心 API、运行时全 ELF hash 和既有语言功能矩阵。
+- **相关文件**: `scripts/build_cpython_runtime_la64_strict.sh`, `scripts/deploy_cpython_runtime.py`,
+  `user/tools/cpython/pillow_strict_smoke.py`, `user/tools/cpython/strict_runtime_smoke.sh`
+
 - **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
 
 ## Buffered I/O 必须始终走 PageCache — 禁止 fallback 到 direct I/O
@@ -912,3 +1039,75 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 - **修复**：regular file 创建成功并取得真实 inode number 后，仅移除该 key 的 registry entry；旧 inode 持有的 `Arc<PageCache>` 继续有效，新 inode 则创建独立 cache。不能在普通 lookup 或 rename 中全局清缓存。
 - **教训**：缓存 key 若采用可复用的底层 ID，必须在对象 incarnation 边界解除旧 key→cache 映射；“后续 case 不创建 cache + 单跑通过”比偏移周期更能区分身份污染与底层读取算法错误。
 - **相关文件**：`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/ltprunner/lwext4_perf/`
+
+## extent 范围删除的起点位于 hole 时不能直接判定为空操作
+
+- **现象**：稀疏文件的 truncate/unlink 在运行期返回成功，inode 和目录项都消失，但
+  离线 `e2fsck -fn` 报 block bitmap 多占用；泄漏的物理块属于首 extent 之前有 hole，
+  或 range 起点位于两个 extent 之间的文件。
+- **根因**：extent binsearch 往往返回“相邻候选”，不保证 query block 被该 extent 覆盖。
+  删除器只检查 `from` 是否落在返回 extent 内，若不覆盖就返回成功，会跳过 range 内的
+  下一已分配 extent。随后 inode bitmap 已释放，块 bitmap 却仍置位。
+- **修复**：若候选 extent 起点大于 `from`，把 `from` 归一化到该起点；若候选结束小于
+  `from`，显式查找下一 allocated block，确认仍在 `to` 内后重新构造 extent path。leaf
+  remove 和底层 free 的错误必须继续向上传播。
+- **门禁**：至少覆盖 leading hole、同 leaf inter-extent hole、跨 leaf hole、next extent
+  超出 `to`、after-last no-op；不能只看冷 reopen 数据，还要正常 teardown 后逐镜像 fsck。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_extent.c`、
+  `user/src/bin/regression/regression_lwext4_truncate_hole.rs`
+
+## 文件系统测试 PASS 必须包含后端 teardown 与离线一致性
+
+- **现象**：TAP/用户回归全绿且 QEMU 已 halt，但 fixture 的 superblock summary 或 bitmap
+  仍是旧值；若 ktest 直接调用 HAL shutdown，lwext4 挂载级 writeback cache 不会因为单个
+  inode close 自动提交。
+- **根因**：测试断言只覆盖内核内存态；PageCache flush、C block cache、journal stop、
+  superblock 更新和设备 detach 是另一条可失败事务。进程 PASS 早于这条事务时，日志会
+  给出假绿。
+- **修复**：统一执行 PageCache writeback → filesystem sync → 可失败 `on_umount()` →
+  backend detach → HAL halt；最终 PASS marker 放在 teardown 成功之后。失败 backend 保持
+  Dying 并重试，回调期间不得持 lifecycle registry 锁。
+- **门禁**：每轮使用全新 disposable fixture，保留完整串口、QEMU status、最终 marker、
+  container/mount 元数据；关机后再运行只读 `e2fsck -fn`。容器 exit 0 不能覆盖 TAP 中的
+  semantic FAIL。
+- **相关文件**：`os/src/fs/vfs/file_system.rs`、`os/src/fs/vfs/mount.rs`、
+  `os/src/kernel_tests/runner.rs`、`os/src/syscall/process/misc.rs`
+
+## journal durability 测试必须同时证明特性与介质顺序
+
+- **现象**：journal 代码、mount/recover API 和测试名称都存在，QEMU 用例也全绿，但 fixture
+  实际由 `mke2fs -O ^has_journal` 创建；测试从未进入 journal commit/replay 路径。另一方面，
+  仅排空 lwext4 block cache 也会造成假绿，因为数据可能仍停留在 VirtIO/SATA 的 volatile cache。
+- **根因**：功能存在性、软件缓存可见性与介质持久性是三层不同断言。没有显式设备 flush 时，
+  descriptor、commit、checkpoint 的提交顺序只在 CPU/软件缓存中成立；没有 fixture 特性证明时，
+  即使 barrier 代码正确也可能完全未执行。
+- **修复**：块设备统一提供可失败 `flush()` 并穿透所有 partition/adapter wrapper；journal 顺序固定为
+  records 写入 → flush → commit 写入 → flush → home blocks 写入 → flush → tail advance。恢复时先
+  flush replayed home blocks，再清 recovery marker 并二次 flush；所有失败必须阻止 tail/teardown 成功。
+- **门禁**：每轮用全新 disposable 镜像；运行日志证明 mount、测试与完整 teardown；`dumpe2fs -h`
+  明确出现 `has_journal`；同一镜像至少冷启动两次；最终 `e2fsck -fn` 五阶段干净。正常再挂载不能
+  替代事务中途强制断电/故障注入，也不能替代 persistent orphan recovery 测试。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4_blockdev.c`、`os/src/drivers/block/`、
+  `os/make/rv64.mk`、`os/make/la64.mk`
+
+## persistent orphan 恢复要覆盖 journal ordering 与 ext4 block-size 边界
+
+- **现象**：unlink 后仍打开的 fd 在运行期工作正常，但掉电后目录项已删除、zero-link inode 和数据块
+  永久占用；普通再挂载可能看似成功，只有离线 fsck 报 zero dtime 与 inode/block bitmap 差异。
+- **根因**：内存 open count 不是磁盘恢复协议。zero-link 前若未把 inode 加入 on-disk orphan chain，
+  journal replay 只能恢复 namespace transaction，无法知道还要 truncate/free 哪个 inode。journal 第一笔
+  待 checkpoint transaction 若没有先持久化非零 start pointer，掉电后甚至无法发现已提交事务。
+- **修复**：采用 ext4 legacy orphan list（superblock `s_last_orphan` 为链头，inode `i_dtime` 为 next），
+  add/del 与 inode/superblock checksum 同事务；mount 在 replay 后、开放写入前清理。清理先 O(n) 预校验
+  inode 范围、bitmap/checksum、类型、link count、next/cycle，再逐次删除链头并 truncate/free，避免边恢复
+  边发现损坏，也避免每项重新扫描形成 O(n²)。
+- **边界**：ext4 superblock 在 4 KiB 文件系统位于逻辑块 0、offset 1024，在 1 KiB 文件系统位于逻辑块 1、
+  offset 0；replay 不能硬编码 block 0。若实现仅支持 legacy list，fixture 和生产卷门禁必须显式拒绝
+  `orphan_file` incompat feature。
+- **门禁**：固定窗口首启强制截断，次启复用原镜像并断言 recovered count、namespace、写探针和 teardown，
+  最后只读 fsck；至少覆盖 RV64/LA64 4 KiB，以及一个 1 KiB superblock-location case。
+- **性能**：普通 read/write 不受影响；zero-link 多出必要的 inode/superblock journal metadata。mount cleanup
+  应保持 O(n)，orphan chain 的 n 是同时存在的 zero-link open inode 数，不是全盘 inode 数。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、`dependency/lwext4_rust/src/blockdev.rs`

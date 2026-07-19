@@ -1,0 +1,13 @@
+2026-07-16T14:20:52.974566Z __PERF_BEGIN_cpython_bench_string-3-1ebc9724__
+2026-07-16T14:20:53.925504Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_cpython_bench_string-3-1ebc9724_TRACE_OFF__
+2026-07-16T14:20:56.360216Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_cpython_bench_string-3-1ebc9724__
+2026-07-16T14:20:56.654823Z [CPYTHON BENCH START] bm_string tmp=/persist/pyperf/w/run-146
+2026-07-16T14:21:22.029992Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1","target_stats":false,"tmpdir":"/persist/pyperf/w/run-146/tmp","type":"environment","warmups":0}
+2026-07-16T14:21:22.037938Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","schema":1,"type":"start"}
+2026-07-16T14:21:33.907886Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","elapsed_ns":11305699960,"elapsed_seconds":11.30569996,"max_rss":23540,"result":"3827289","sample":1,"schema":1,"sys_seconds":8.469384000000002,"type":"sample","user_seconds":2.8134230000000002}
+2026-07-16T14:21:33.929417Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","cv_percent":0.0,"max_ns":11305699960,"mean_ns":11305699960,"median_ns":11305699960,"min_ns":11305699960,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":0}
+2026-07-16T14:21:33.940297Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T14:21:34.332059Z [CPYTHON BENCH END] bm_string PASS rc=0
+2026-07-16T14:21:34.384816Z __PERF_WORK_END_cpython_bench_string-3-1ebc9724__
+2026-07-16T14:21:34.388400Z __PERF_ACK_cpython_bench_string-3-1ebc9724_WORK__
+2026-07-16T14:21:34.856301Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_cpython_bench_string-3-1ebc9724__ rc=0

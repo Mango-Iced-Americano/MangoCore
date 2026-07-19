@@ -1,0 +1,12 @@
+2026-07-16T07:55:17.153716Z __PERF_BEGIN_diag_features-1-2fcf4906__
+2026-07-16T07:55:18.032911Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_diag_features-1-2fcf4906_TRACE_OFF__
+2026-07-16T07:55:20.191094Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_diag_features-1-2fcf4906__
+2026-07-16T07:55:20.226615Z perf_stats=true
+2026-07-16T07:55:20.229319Z perf_diag=true
+2026-07-16T07:55:20.229355Z heap_trace=false
+2026-07-16T07:55:20.229916Z stats_profile=1
+2026-07-16T07:55:20.264689Z 0
+2026-07-16T07:55:20.299799Z core 1
+2026-07-16T07:55:20.315914Z __PERF_WORK_END_diag_features-1-2fcf4906__
+2026-07-16T07:55:20.318219Z __PERF_ACK_diag_features-1-2fcf4906_WORK__
+2026-07-16T07:55:20.740921Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_diag_features-1-2fcf4906__ rc=0

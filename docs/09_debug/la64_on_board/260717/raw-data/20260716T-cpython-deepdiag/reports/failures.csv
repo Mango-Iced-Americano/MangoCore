@@ -1,0 +1,5 @@
+sample_id,test,arch,platform,build_mode,exit_status,wall_seconds,log
+prod_stats_features-1-862fa38a,prod_stats_features,la64,2k1000la,production,1,0.17215466700000004,/Users/luzimo/dev/MangoCore/target/perf-runs/20260716T-cpython-deepdiag/raw/prod_stats_features-1-862fa38a.log
+nbody_diag_off-1-fe3932a8,nbody_diag_off,la64,2k1000la,diag_off,2,0.09249791700000021,/Users/luzimo/dev/MangoCore/target/perf-runs/20260716T-cpython-deepdiag/raw/nbody_diag_off-1-fe3932a8.log
+ext4_post_reboot_verify-1-5843661d,ext4_post_reboot_verify,la64,2k1000la,diag_off,1,0.24523708299999925,/Users/luzimo/dev/MangoCore/target/perf-runs/20260716T-cpython-deepdiag/raw/ext4_post_reboot_verify-1-5843661d.log
+ext4_math_function_attribution-1-446173d1,ext4_math_function_attribution,la64,2k1000la,diag_on,2,1.5148275830000006,/Users/luzimo/dev/MangoCore/target/perf-runs/20260716T-cpython-deepdiag/raw/ext4_math_function_attribution-1-446173d1.log

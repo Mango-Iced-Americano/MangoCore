@@ -123,7 +123,7 @@ pub fn rust_main() -> ! {
         drivers::init_net_device();
         net::config::init();
 
-        // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
+        // 块设备 DMA 使用单一 DRAM region 内的连续 extent；先探测以减少早期碎片
         fs::mount_boot_block_devices();
 
         // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）

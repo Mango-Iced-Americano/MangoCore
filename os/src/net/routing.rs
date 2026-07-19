@@ -99,9 +99,7 @@ impl RouteTable {
     /// Remove connected routes for (ifindex, destination) only.
     pub fn remove_connected(&mut self, ifindex: u32, dest: &IpCidr) {
         self.entries.retain(|e| {
-            e.ifindex != ifindex
-                || e.destination != *dest
-                || e.route_type != RouteType::Connected
+            e.ifindex != ifindex || e.destination != *dest || e.route_type != RouteType::Connected
         });
     }
 }
@@ -141,6 +139,36 @@ impl Router {
     /// Remove all route entries matching the given destination CIDR.
     pub fn remove_route(&mut self, dest: &IpCidr) {
         self.table.remove(dest);
+    }
+
+    /// Atomically replace routes owned by the eth0 DHCP lease.
+    pub fn replace_dhcp_ipv4(
+        &mut self,
+        ifindex: u32,
+        cidr: Option<IpCidr>,
+        gateway: Option<Ipv4Address>,
+    ) {
+        self.table.entries.retain(|entry| {
+            entry.ifindex != ifindex
+                || !matches!(entry.route_type, RouteType::Connected | RouteType::Default)
+        });
+
+        if let Some(cidr) = cidr {
+            let network = match cidr {
+                IpCidr::Ipv4(cidr) => IpCidr::Ipv4(cidr.network()),
+                IpCidr::Ipv6(cidr) => IpCidr::Ipv6(cidr),
+            };
+            self.add_route(network, None, ifindex, 0, RouteType::Connected);
+            if let Some(gateway) = gateway {
+                self.add_route(
+                    IpCidr::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), 0),
+                    Some(IpAddress::Ipv4(gateway)),
+                    ifindex,
+                    100,
+                    RouteType::Default,
+                );
+            }
+        }
     }
 
     /// Look up the best matching route for the given destination IP.
@@ -198,8 +226,12 @@ impl Router {
 
         if let Some(cidr) = crate::net::net_core::eth0_ipv4_cidr() {
             // Connected route from DHCP CIDR
+            let network = match cidr {
+                IpCidr::Ipv4(cidr) => IpCidr::Ipv4(cidr.network()),
+                IpCidr::Ipv6(cidr) => IpCidr::Ipv6(cidr),
+            };
             self.add_route(
-                IpCidr::new(cidr.address(), cidr.prefix_len()),
+                network,
                 None,
                 eth0_ifindex,
                 0,
@@ -221,7 +253,10 @@ impl Router {
     /// Fill default routes into the current netns router.
     /// Should be called once during network init (after DHCP info is available).
     pub fn init_router() {
-        crate::net::net_core::current_netns().router.lock().fill_default();
+        crate::net::net_core::current_netns()
+            .router
+            .lock()
+            .fill_default();
     }
 }
 
@@ -304,9 +339,15 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
                 let source = list
                     .values()
                     .find(|iface| iface.nic_id() as u32 == dst_ifindex)
-                    .and_then(|iface| iface.ip_addrs().iter().find_map(|c| {
-                        if let IpAddress::Ipv6(_) = c.address() { Some(c.address()) } else { None }
-                    }))
+                    .and_then(|iface| {
+                        iface.ip_addrs().iter().find_map(|c| {
+                            if let IpAddress::Ipv6(_) = c.address() {
+                                Some(c.address())
+                            } else {
+                                None
+                            }
+                        })
+                    })
                     .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1));
                 return Ok(RouteDecision {
                     ifindex: dst_ifindex,
@@ -320,9 +361,15 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
             // ::1 loopback
             if addr == smoltcp::wire::Ipv6Address::LOOPBACK {
                 let source = crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.iface.ip_addrs().iter().find_map(|c| {
-                        if let IpAddress::Ipv6(_) = c.address() { Some(c.address()) } else { None }
-                    }))
+                    .and_then(|d| {
+                        d.iface.ip_addrs().iter().find_map(|c| {
+                            if let IpAddress::Ipv6(_) = c.address() {
+                                Some(c.address())
+                            } else {
+                                None
+                            }
+                        })
+                    })
                     .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1));
                 return Ok(RouteDecision {
                     ifindex: 1,
@@ -337,9 +384,15 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
             for entry in &router.table.entries {
                 if entry.destination.contains_addr(&dest) {
                     let source = crate::net::net_core::find_by_index(entry.ifindex)
-                        .and_then(|d| d.iface.ip_addrs().iter().find_map(|c| {
-                            if let IpAddress::Ipv6(_) = c.address() { Some(c.address()) } else { None }
-                        }))
+                        .and_then(|d| {
+                            d.iface.ip_addrs().iter().find_map(|c| {
+                                if let IpAddress::Ipv6(_) = c.address() {
+                                    Some(c.address())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
                         .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 0));
                     return Ok(RouteDecision {
                         ifindex: entry.ifindex,

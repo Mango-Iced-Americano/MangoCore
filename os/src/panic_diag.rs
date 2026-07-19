@@ -64,9 +64,13 @@ fn print_backtrace() {
     println!("--- BACKTRACE ---");
 
     #[cfg(target_arch = "riscv64")]
-    unsafe { riscv_backtrace(); }
+    unsafe {
+        riscv_backtrace();
+    }
     #[cfg(not(target_arch = "riscv64"))]
-    { println!("backtrace: use addr2line on kernel binary with RA addresses"); }
+    {
+        println!("backtrace: use addr2line on kernel binary with RA addresses");
+    }
 }
 
 #[cfg(target_arch = "riscv64")]

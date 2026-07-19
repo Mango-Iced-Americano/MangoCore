@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-12
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -48,6 +48,64 @@ trap_handler() -> syscall/MM/task
 
 `main.rs` 中 la64 entry 的 `global_asm!` 行处于注释状态；la64 的实际入口由该架构构建链路脚本和后端文件承担。文档只记录 `main.rs` 当前显式引入的段。
 
+### 2.1 2K1000LA U-Boot TFTP 启动
+
+实板调试统一使用 `192.168.9.0/24` 直连网段：开发主机/TFTP 服务器为 `192.168.9.10`，开发板为 `192.168.9.20`，掩码为 `255.255.255.0`。macOS 主机使用 `en8` 直连开发板时，TFTP 根目录为 `/private/tftpboot`。U-Boot 下载地址固定使用第二个 DRAM bank 内已经实板验证的 `0x9000000098000000`，避免覆盖 U-Boot 重定位区、设备树和保留内存。
+
+```text
+setenv ipaddr 192.168.9.20
+setenv serverip 192.168.9.10
+setenv netmask 255.255.255.0
+setenv loadaddr 0x9000000098000000
+ping ${serverip}
+tftpboot ${loadaddr} <uImage文件名>
+iminfo ${loadaddr}
+bootm ${loadaddr}
+```
+
+`iminfo` 必须确认架构为 `LoongArch`、校验为 `OK`，再执行 `bootm`。bring-up 阶段不执行 `saveenv`，避免临时网络参数或测试启动命令覆盖板载默认环境。连续向串口注入命令时应等待上一条命令返回 `=>`，否则 U-Boot 忙于校验或网络传输时可能丢失输入字符。
+
+### 2.2 2K1000LA 正式 run 镜像
+
+正式比赛镜像使用以下目标构建：
+
+```bash
+make -C os la64-2k1000-run-clean
+```
+
+目标会强制检查仓库根目录 `os_test.conf` 包含 `mode=run`，并使用 `LOG=off`、`board_2k1000 + block_sata` 生成 `kernel-2k1000-run.ui`。`board_bringup_trace` 默认不启用，因此 CPUCFG、地址布局、内存映射、预装载步骤、首次内核栈探针、首次调度切换和 PLV3 返回诊断不会进入最终二进制；panic、真实初始化错误和用户态测试结果仍然保留。
+
+需要重新定位早期上板故障时，可在底层 `make/la64.mk` 构建中显式加入 `EXTRA_FEATURES=board_bringup_trace`，不能修改正式 clean 目标。
+
+### 2.3 macOS 一键 TFTP 启动
+
+开发板保持上电、USB_DEBUG 和网线连接后，先执行无副作用检查：
+
+```bash
+make 2k1000-boot-check IMAGE=kernel-2k1000-run.ui
+```
+
+确认通过后执行：
+
+```bash
+make 2k1000-boot IMAGE=kernel-2k1000-run.ui
+```
+
+脚本 `scripts/boot_2k1000_tftp.py` 要求显式传入镜像，随后检查或设置 `en8=192.168.9.10/24`，确认 macOS `com.apple.tftpd`，将镜像按原文件名复制到 `/private/tftpboot`，并自动识别唯一的 `/dev/cu.wchusbserial*`。若同一串口被 screen 占用，只关闭对应 screen 会话；随后提示按一次 RESET，并持续发送 `c` 截停自动启动。
+
+进入 U-Boot 后，脚本逐条等待 `=>` 再设置网络参数，依次完成 `ping`、`tftpboot` 字节数校验、内存 CRC32、`iminfo` 架构与镜像校验，全部通过才执行 `bootm`。启动后当前终端进入 raw 模式并与串口双向透传，因此可直接操作交互式 Shell；粘贴或自动注入的长输入会逐字节发送并间隔 4ms，避免网络轮询期间板端 TTY 丢字。退出时恢复原终端属性。`Ctrl-C` 原样发送给开发板，用于中断板端前台进程；`Ctrl-] q` 只关闭本地监听，开发板继续运行，`Ctrl-] ?` 显示帮助。脚本不执行 `saveenv`，也不包含任何 `scsi write`。
+
+启动前不需要手工执行 `scsi scan`。2K1000 的 HBA reset 会清空多个可写 host register；内核 AHCI Provider 按随板 U-Boot 的顺序恢复 CAP.SMPS/SPM、强制 CAP.SSS，再恢复 `HOST_PORTS_IMPL=0x0f`。只恢复 PI 会让暖复位后的 `PxCMD.SUD` 被硬件清零，最终停在 `PxSSTS.DET=1`。SATA 初始化不能依赖 bootloader 曾经扫描过 SSD。
+
+网卡、镜像或串口设备名变化时可覆盖 Make 变量：
+
+```bash
+make 2k1000-boot \
+  IMAGE=kernel-2k1000-run.ui \
+  BOARD_NET_IFACE=en9 \
+  BOARD_SERIAL=/dev/cu.wchusbserial120
+```
+
 ## 3. `rust_main()` 控制流
 
 ### 3.1 固定前缀
@@ -78,14 +136,19 @@ task::timer_subsystem_init()
 
 ```
 fs::vfs::posix_lock::init_posix_lock_manager()
+fs::force_ramfs()                  [board_2k1000 rescue/sata_probe]
 fs::initramfs_init()
-drivers::init_net_device()
+drivers::init_net_device()         [not board_2k1000]
 net::config::init()
-fs::mount_boot_block_devices()
+fs::mount_boot_block_devices()     [not board_2k1000]
+fs::mount_boot_block_devices_read_only()
+                                   [board_2k1000 + block_sata - sata_probe]
 fs::install_preload_payloads()       [preload_payloads]
 ```
 
-该分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。`main.rs` 注释说明块设备探测需要连续物理页 DMA，因此放在 payload 安装之前。
+默认分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。块设备 DMA 通过 `frames_alloc()` 获取单一 DRAM region 内的连续 extent；探测仍放在 payload 安装之前，以降低早期碎片并尽快验证启动盘。
+
+`board_2k1000` 始终跳过 QEMU virtio 网卡枚举；启用 `gmac_2k1000` 的构建改由板载 DWMAC/PHY 注册 `eth0`。救援镜像和 `sata_probe` 镜像在建立 initramfs 根前调用 `fs::force_ramfs()`；普通 `block_sata` 镜像则探测 SATA SSD，并通过 `mount_boot_block_devices_read_only()` 只读挂载裸 ext4/FAT32 或 MBR 主分区。
 
 ### 3.3 legacy 分支
 
@@ -245,6 +308,8 @@ __restore(trap_cx, token, asid)
 ```
 
 两套路径的共同点是：信号处理一定发生在恢复用户上下文之前。
+
+la64 的 `__restore` 同时维护 PGDL 和 ASID。恢复汇编比较当前 PGDL/ASID，任一变化时连续写入二者并清除非 global TLB 项；ASID 只取 `CSR.ASID[9:0]`，只读的 `ASIDBITS[23:16]` 不参与新 ASID 值。这样可以避免页表根未变化但 ASID 需要更新时继续使用旧 TLB 地址空间标识。
 
 ## 10. 控制流图
 

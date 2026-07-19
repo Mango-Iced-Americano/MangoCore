@@ -346,7 +346,10 @@ fn validate_payload(kind: KeyKind, payload: *const u8, plen: usize) -> Result<Ve
 
 fn encode_i32_list(ids: &[i32]) -> Vec<u8> {
     let mut out = Vec::new();
-    if out.try_reserve(ids.len() * core::mem::size_of::<i32>()).is_err() {
+    if out
+        .try_reserve(ids.len() * core::mem::size_of::<i32>())
+        .is_err()
+    {
         return out;
     }
     for id in ids {
@@ -527,7 +530,10 @@ pub fn sys_keyctl(cmd: u32, arg2: usize, arg3: usize, arg4: usize, _arg5: usize)
                 Ok(id) => id,
                 Err(errno) => return errno,
             };
-            registry.clear_keyring(ring_id).map(|_| SUCCESS).unwrap_or_else(|errno| errno)
+            registry
+                .clear_keyring(ring_id)
+                .map(|_| SUCCESS)
+                .unwrap_or_else(|errno| errno)
         }
         KEYCTL_UNLINK => {
             let mut registry = KEY_REGISTRY.lock();

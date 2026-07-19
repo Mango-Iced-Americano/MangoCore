@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::format;
 use user_lib::*;
-use user_lib::syscall::sys_mkdirat;
+use user_lib::syscall::{sys_fsync, sys_ftruncate, sys_mkdirat, sys_unlinkat};
 use user_lib::syscall::sys_clock_settime;
 use user_lib::syscall::TimeSpec;
 
@@ -13,6 +13,91 @@ const AT_FDCWD: isize = -100;
 const NTP_ATTEMPTS: usize = 2;
 const NTP_TIMEOUT_MS: usize = 3_000;
 const NTP_POLL_MS: usize = 50;
+const MIN_VALID_BUILD_EPOCH: usize = 1_704_067_200; // 2024-01-01 UTC
+const ENOENT: isize = -2;
+const AT_REMOVEDIR: u32 = 0x200;
+
+fn run_scratch_rw_smoke() -> Result<bool, ()> {
+    const DIR: &str = "/scratch/MANGO_USR_PROBE\0";
+    const FILE: &str = "/scratch/MANGO_USR_PROBE/PAYLOAD.BIN\0";
+    const PAYLOAD_LEN: usize = 6144;
+    const TRUNCATED_LEN: usize = 2048;
+
+    let mkdir_ret = sys_mkdirat(AT_FDCWD, DIR, 0o755);
+    if mkdir_ret == ENOENT {
+        println!("[scratch-smoke] /scratch absent, skipping");
+        return Ok(false);
+    }
+    if mkdir_ret != 0 {
+        println!("[scratch-smoke] mkdir failed: {}", mkdir_ret);
+        return Err(());
+    }
+
+    let mut expected = alloc::vec![0u8; PAYLOAD_LEN];
+    for (index, byte) in expected.iter_mut().enumerate() {
+        *byte = 0x73 ^ (index as u8).wrapping_mul(0x29) ^ ((index >> 8) as u8);
+    }
+
+    let fd = open(FILE, OpenFlags::CREATE | OpenFlags::RDWR | OpenFlags::TRUNC);
+    if fd < 0 {
+        println!("[scratch-smoke] open for write failed: {}", fd);
+        return Err(());
+    }
+    let written = write(fd as usize, &expected);
+    if written != PAYLOAD_LEN as isize {
+        println!("[scratch-smoke] write failed: {}", written);
+        close(fd as usize);
+        return Err(());
+    }
+    if sys_fsync(fd as usize) != 0 {
+        println!("[scratch-smoke] fsync failed");
+        close(fd as usize);
+        return Err(());
+    }
+    if sys_ftruncate(fd as usize, TRUNCATED_LEN as isize) != 0 {
+        println!("[scratch-smoke] ftruncate failed");
+        close(fd as usize);
+        return Err(());
+    }
+    if sys_fsync(fd as usize) != 0 || close(fd as usize) != 0 {
+        println!("[scratch-smoke] final sync/close failed");
+        return Err(());
+    }
+
+    let fd = open(FILE, OpenFlags::RDONLY);
+    if fd < 0 {
+        println!("[scratch-smoke] reopen failed: {}", fd);
+        return Err(());
+    }
+    let mut actual = alloc::vec![0u8; TRUNCATED_LEN];
+    let read_len = read(fd as usize, &mut actual);
+    let mut eof = [0u8; 1];
+    let eof_len = read(fd as usize, &mut eof);
+    close(fd as usize);
+    if read_len != TRUNCATED_LEN as isize
+        || actual.as_slice() != &expected[..TRUNCATED_LEN]
+        || eof_len != 0
+    {
+        println!(
+            "[scratch-smoke] persisted data mismatch: read={} eof={}",
+            read_len, eof_len
+        );
+        return Err(());
+    }
+
+    let unlink_ret = sys_unlinkat(AT_FDCWD, FILE, 0);
+    if unlink_ret != 0 {
+        println!("[scratch-smoke] unlink failed: {}", unlink_ret);
+        return Err(());
+    }
+    let rmdir_ret = sys_unlinkat(AT_FDCWD, DIR, AT_REMOVEDIR);
+    if rmdir_ret != 0 {
+        println!("[scratch-smoke] rmdir failed: {}", rmdir_ret);
+        return Err(());
+    }
+    println!("[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir");
+    Ok(true)
+}
 
 fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
     let src_c = format!("{}\0", source);
@@ -52,7 +137,48 @@ fn wait_child_bounded(pid: isize, timeout_ms: usize) -> Option<i32> {
     None
 }
 
-/// 用 busybox ntpd 通过 NTP 同步时间；失败则回退到硬编码时间以防 TLS 失败。
+fn read_build_epoch() -> Option<usize> {
+    let fd = open("/etc/build-epoch\0", OpenFlags::RDONLY);
+    if fd < 0 {
+        return None;
+    }
+
+    let mut buf = [0u8; 32];
+    let read_len = read(fd as usize, &mut buf);
+    close(fd as usize);
+    if read_len <= 0 {
+        return None;
+    }
+
+    let mut value = 0usize;
+    let mut saw_digit = false;
+    for &byte in &buf[..read_len as usize] {
+        if byte.is_ascii_digit() {
+            saw_digit = true;
+            value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
+        } else if saw_digit && byte.is_ascii_whitespace() {
+            break;
+        } else {
+            return None;
+        }
+    }
+    (saw_digit && value >= MIN_VALID_BUILD_EPOCH).then_some(value)
+}
+
+fn set_build_time_fallback(reason: &str) {
+    match read_build_epoch() {
+        Some(epoch) => {
+            println!("[init] {}: fallback to image build epoch {}", reason, epoch);
+            set_system_time(epoch, 0);
+        }
+        None => {
+            println!("[init] {}: no valid /etc/build-epoch; keeping kernel clock", reason);
+        }
+    }
+}
+
+/// Use BusyBox ntpd for the authoritative time and the image build timestamp
+/// as a lower-bound fallback when early networking or DNS is unavailable.
 /// NTP is best-effort: early boot must continue even when guest networking or DNS stalls.
 fn try_ntp_sync() {
     for attempt in 0..NTP_ATTEMPTS {
@@ -62,8 +188,7 @@ fn try_ntp_sync() {
 
         let pid = fork();
         if pid < 0 {
-            // fork 失败，回退到硬编码时间
-            set_system_time(1749049200, 0);
+            set_build_time_fallback("ntpd fork failed");
             return;
         }
         if pid == 0 {
@@ -100,8 +225,7 @@ fn try_ntp_sync() {
             }
         }
     }
-    println!("[init] ntpd all attempts failed, fallback to hardcoded time");
-    set_system_time(1749049200, 0);
+    set_build_time_fallback("ntpd all attempts failed");
 }
 
 fn try_bind(source: &str, target: &str) {
@@ -137,24 +261,37 @@ fn set_system_time(secs: usize, nsecs: usize) {
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] MangoCore stage-1 boot (initramfs mode)");
 
+    let scratch_rw = match run_scratch_rw_smoke() {
+        Ok(available) => available,
+        Err(()) => {
+            println!("[init] FATAL: writable scratch smoke test failed");
+            loop {}
+        }
+    };
+
     try_ntp_sync();
 
     println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
 
-    // 内核已将 x0→/sdcard, x1→/tools 挂载好，直接 bind
-    // mkdir 保底：确保 target 目录存在（initramfs cpio 可能不含这些目录）
+    // Keep initramfs runtime directories writable when the staged P2 scratch
+    // mount is active. Tools and test payloads remain available at their
+    // read-only source paths.
     let _ = sys_mkdirat(AT_FDCWD, "/tmp\0", 0o755);
-    try_bind("/tools/tmp", "/tmp");
     let _ = sys_mkdirat(AT_FDCWD, "/bin\0", 0o755);
-    try_bind("/tools/bin", "/bin");
     let _ = sys_mkdirat(AT_FDCWD, "/sbin\0", 0o755);
-    try_bind("/tools/sbin", "/sbin");
     let _ = sys_mkdirat(AT_FDCWD, "/lib\0", 0o755);
-    try_bind("/tools/lib", "/lib");
     let _ = sys_mkdirat(AT_FDCWD, "/usr\0", 0o755);
-    try_bind("/tools/usr", "/usr");
     let _ = sys_mkdirat(AT_FDCWD, "/root\0", 0o755);
-    try_bind("/tools/root", "/root");
+    if scratch_rw {
+        println!("[init] staged runtime: keeping /tmp /bin /sbin /lib /usr /root writable");
+    } else {
+        try_bind("/tools/tmp", "/tmp");
+        try_bind("/tools/bin", "/bin");
+        try_bind("/tools/sbin", "/sbin");
+        try_bind("/tools/lib", "/lib");
+        try_bind("/tools/usr", "/usr");
+        try_bind("/tools/root", "/root");
+    }
     let _ = sys_mkdirat(AT_FDCWD, "/tests\0", 0o755);
     try_bind("/tools/tests", "/tests");
     // 不 bind /tools/etc — initramfs 已有完整 /etc，bind 会覆盖
@@ -163,7 +300,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let _ = sys_mkdirat(AT_FDCWD, "/glibc\0", 0o755);
     try_bind("/sdcard/glibc", "/glibc");
 
-    // /lib 已 bind 到 /tools/lib (ext4)，创建 apk db 目录使其持久化
+    // These directories live in initramfs during staged board runs and in the
+    // legacy tools mount on existing QEMU paths.
     for dir in ["/lib/apk\0", "/lib/apk/db\0", "/var/cache/apk\0"] {
         let _ = sys_mkdirat(AT_FDCWD, dir, 0o755);
     }
@@ -172,7 +310,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "SHELL=/bin/sh\0".as_ptr(),
         "PWD=/\0".as_ptr(),
         "HOME=/root\0".as_ptr(),
-        "PATH=/:/bin:/sbin:/usr/bin:/tools/bin\0".as_ptr(),
+        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin:/tools/bin:/tools/sbin:/tools/usr/bin:/tools/usr/sbin\0".as_ptr(),
         "USER=root\0".as_ptr(),
         core::ptr::null(),
     ];

@@ -1,0 +1,6 @@
+2026-07-17T04:23:22.670462Z __PERF_BEGIN_strict_runtime_download-1-c8da4ff1__
+2026-07-17T04:23:23.615987Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_strict_runtime_download-1-c8da4ff1_TRACE_OFF__
+2026-07-17T04:23:26.510584Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_strict_runtime_download-1-c8da4ff1__
+2026-07-17T04:24:04.605851Z __PERF_WORK_END_strict_runtime_download-1-c8da4ff1__
+2026-07-17T04:24:04.610746Z __PERF_ACK_strict_runtime_download-1-c8da4ff1_WORK__
+2026-07-17T04:24:05.096391Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_strict_runtime_download-1-c8da4ff1__ rc=0

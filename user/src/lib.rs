@@ -108,9 +108,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 bitflags! {
     pub struct OpenFlags: u32 {
         const RDONLY = 0;
-        const WRONLY = 1 << 0;
-        const RDWR = 1 << 1;
-        const CREATE = 1 << 9;
-        const TRUNC = 1 << 10;
+        const WRONLY = 0o1;
+        const RDWR = 0o2;
+        const CREATE = 0o100;
+        const TRUNC = 0o1000;
     }
 }

@@ -9,12 +9,12 @@ use spin::Mutex;
 
 // ── constants ───────────────────────────────────────────────────────────────
 
-const ACTIVE_CAP: usize = 1 << 20;   // 1,048,576 entries (~25 MB)
-const SITES_CAP: usize = 16384;      // 16K sites
+const ACTIVE_CAP: usize = 1 << 20; // 1,048,576 entries (~25 MB)
+const SITES_CAP: usize = 16384; // 16K sites
 const STACK_DEPTH: usize = 6;
 
 const KERNEL_TEXT_BASE: usize = 0x8020_0000;
-const KERNEL_TEXT_END: usize  = 0x8100_0000;
+const KERNEL_TEXT_END: usize = 0x8100_0000;
 
 // ── data structures ─────────────────────────────────────────────────────────
 
@@ -58,12 +58,22 @@ struct TraceState {
 unsafe impl Send for TraceState {}
 
 static mut ACTIVE_BUF: [ActiveEntry; ACTIVE_CAP] = [ActiveEntry {
-    ptr: 0, req_size: 0, actual_size: 0, site_idx: 0,
+    ptr: 0,
+    req_size: 0,
+    actual_size: 0,
+    site_idx: 0,
 }; ACTIVE_CAP];
 
 static mut SITES_BUF: [SiteEntry; SITES_CAP] = [SiteEntry {
-    hash: 0, pcs: [0; STACK_DEPTH], live_req: 0, live_actual: 0,
-    peak_req: 0, allocs: 0, frees: 0, max_req: 0, _pad: 0,
+    hash: 0,
+    pcs: [0; STACK_DEPTH],
+    live_req: 0,
+    live_actual: 0,
+    peak_req: 0,
+    allocs: 0,
+    frees: 0,
+    max_req: 0,
+    _pad: 0,
 }; SITES_CAP];
 
 static TRACE: Mutex<TraceState> = Mutex::new(TraceState::new());
@@ -250,7 +260,9 @@ impl TraceState {
     fn site_hash(pcs: &[usize; STACK_DEPTH]) -> u64 {
         let mut h: u64 = 0x9AE1_6A3B_2F90_404F;
         for &pc in pcs.iter() {
-            h = h.wrapping_mul(0xC6A4_A793_5BD1_E995).wrapping_add(pc as u64);
+            h = h
+                .wrapping_mul(0xC6A4_A793_5BD1_E995)
+                .wrapping_add(pc as u64);
         }
         h
     }
@@ -407,7 +419,10 @@ impl TraceState {
             let la = s.live_actual;
             for j in 0..20 {
                 match top[j] {
-                    None => { top[j] = Some((i, la)); break; }
+                    None => {
+                        top[j] = Some((i, la));
+                        break;
+                    }
                     Some((_, t)) if la > t => {
                         for k in (j + 1..20).rev() {
                             top[k] = top[k - 1];

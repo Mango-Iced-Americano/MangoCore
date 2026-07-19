@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-15
 tags: [mm, address-space, vma, elf, maps]
 ---
 
@@ -51,6 +51,18 @@ pub struct AddressSpace<T: PageTable> {
 | `mprotect()` | `address_space.rs:1142` | 修改 VMA/PTE 权限。 |
 
 阅读地址空间代码时，先区分入口来自哪里：`execve` 和 initproc 创建走 `from_elf()`，fork 走 `from_existing_user()`，用户触页走 `do_page_fault()`，syscall 用户指针走 `fault_in_user_va()`，显式内存 syscall 走 `mmap()/munmap()/mprotect()/sbrk()`。
+
+### 1.2 ELF 初始栈与 auxv
+
+`from_elf()` 在映射 LOAD 段后构造 argc/argv/envp 和 ELF auxiliary vector。`AT_PAGESZ`、`AT_CLKTCK`、program header、入口、UID/GID、随机数据和执行文件名均在此写入；`AT_HWCAP` 必须调用 `crate::hal::user_hwcap()`，由架构后端返回符合该架构 Linux ABI 且内核可以安全上下文切换的能力位。
+
+rv64 与 la64 的用户入口栈都必须满足 `USER_STACK_ABI_ALIGN=16`。字符串区先向下按
+16 字节对齐；内核再根据 auxv、argc、argv 和 envp 指针表的实际总长度计算动态 padding，
+保证最终传给用户入口的 `sp` 仍为 16 字节对齐。`execve` 的 `E2BIG` 容量预检使用相同
+公式，不能只按指针宽度对齐或固定塞入一个 word。LLVM 会把 ABI 对齐作为代码生成前提，
+栈实际未对齐时即使普通字节比较也可能被优化为带隐含低位假设的地址运算。
+
+不要在此复用另一架构的 HWCAP 常量。相同整数在不同 ABI 中代表完全不同的 ISA 扩展，动态加载器会据此选择优化实现；错误声明可能在任何用户 `main()` 运行前就触发非法指令。
 
 `from_existing_user()` 是 fork/非 `CLONE_VM` clone 复制地址空间的核心函数：
 

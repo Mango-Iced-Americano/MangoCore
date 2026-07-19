@@ -1,10 +1,21 @@
 //! /proc/mounts — 系统挂载表
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+fn mount_access(mfs: &crate::fs::vfs::MountFS) -> &'static str {
+    if mfs
+        .mount_flags()
+        .contains(crate::fs::vfs::MountFlags::RDONLY)
+    {
+        "ro"
+    } else {
+        "rw"
+    }
+}
 
 pub fn mounts_content(
     _extra: usize,
@@ -38,12 +49,15 @@ pub fn mounts_content(
         let fs_name = inner_fs.name();
         let source = mfs.mount_source().unwrap_or_else(|| String::from("none"));
         let path = mfs.mount_path().unwrap_or_else(|| String::from("/?"));
+        let access = mount_access(&mfs);
         s.push_str(&source);
         s.push(' ');
         s.push_str(&path);
         s.push(' ');
         s.push_str(fs_name);
-        s.push_str(" rw,relatime 0 0\n");
+        s.push(' ');
+        s.push_str(access);
+        s.push_str(",relatime 0 0\n");
 
         // Snapshot children for BFS
         {
@@ -92,12 +106,18 @@ pub fn mountinfo_content(
         let fs_name = inner_fs.name();
         let source = mfs.mount_source().unwrap_or_else(|| String::from("none"));
         let path = mfs.mount_path().unwrap_or_else(|| String::from("/?"));
+        let access = mount_access(&mfs);
         let mid = next_id;
         next_id += 1;
         // mountinfo format: mount-id parent-id major:minor root mount-point options - fs-type source super-options
         s.push_str(&alloc::format!(
-            "{} 1 0:0 / {} rw,relatime - {} {} rw,relatime\n",
-            mid, path, fs_name, source,
+            "{} 1 0:0 / {} {},relatime - {} {} {},relatime\n",
+            mid,
+            path,
+            access,
+            fs_name,
+            source,
+            access,
         ));
 
         {

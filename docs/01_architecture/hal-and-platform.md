@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-15
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -66,6 +66,7 @@ os/src/hal/
 | 配置 | `config` | 架构配置模块 |
 | 栈 | `kstack_alloc`, `KernelStack`, `trap_cx_bottom_from_tid`, `ustack_bottom_from_tid` | 内核栈和用户栈/trap context 地址计算 |
 | 启动 | `bootstrap_init`, `machine_init` | 早期机器初始化和运行期机器初始化 |
+| 用户 ABI | `user_hwcap` | 生成当前架构可安全暴露给 ELF `AT_HWCAP` 的能力位 |
 | console | `console_flush`, `console_getchar`, `console_putchar` | 字符输出输入 |
 | 中断 | `local_irq_save`, `local_irq_restore` | 保存/恢复本地中断状态 |
 | trap 查询 | `get_bad_addr`, `get_bad_instruction`, `get_exception_cause` | fault address、fault instruction、异常原因 |
@@ -86,7 +87,7 @@ pub use arch::config;
 pub use arch::kstack_alloc;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
-pub use arch::{bootstrap_init, machine_init};
+pub use arch::{bootstrap_init, machine_init, user_hwcap};
 pub use arch::{console_flush, console_getchar, console_putchar};
 pub use arch::{local_irq_restore, local_irq_save};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
@@ -196,7 +197,7 @@ la64 的早期初始化较重：
 |--------|----------|
 | CPU 核 | 非 0 号核进入死循环 |
 | interrupt vector | `ECfg` 设置 timer line-based interrupt |
-| FPU/SIMD | `EUEn` 打开 floating point、SIMD、advanced SIMD |
+| FPU/SIMD | 按 CPUCFG2 打开 scalar FPU 和 LSX；LASX 在扩展上下文保存完成前保持关闭 |
 | timer | `TIClr` 清 timer，`TCfg` 关闭早期 timer |
 | paging | `CrMd` 打开 paging，关闭中断 |
 | trap entry | `set_kernel_trap_entry()`、`set_machine_err_trap_ent()` |
@@ -205,6 +206,18 @@ la64 的早期初始化较重：
 | page walk | 配置 `STLBPS`、`TLBREHi`、`PWCL`、`PWCH` |
 
 这些配置发生在 `main.rs::mem_clear()` 之前，因此文档把它归入“架构早期初始化”。
+
+#### 6.2.1 ELF `AT_HWCAP`
+
+`AddressSpace` 构造用户栈时通过 HAL 的 `user_hwcap()` 填写 `AT_HWCAP`，不能在架构无关代码中写死同一个数字。RISC-V 返回 Linux ISA 字母位图 `0x112d`（IMAFDC）；LoongArch 按 CPUCFG1/2 映射 CPUCFG、LAM、UAL、FPU、LSX、CRC32、COMPLEX、CRYPTO、LVZ、PTW 和 LSPW。
+
+HWCAP 表示“用户态可安全使用”的能力，不只是裸硬件能力。LoongArch trap context 现在
+保存标量 FPU 与 32 个 128-bit LSX 寄存器；两者不是独立寄存器组，标量 FPR 是 LSX
+向量的低 64-bit lane。trap 返回因此按 `EUEN.SXE` 二选一：LSX 已启用时只恢复完整
+向量快照，未启用时才恢复纯标量 FPR，不能先后恢复两份互相覆盖的快照。信号帧同时
+保存 LSX；`sigreturn` 先把用户修改的标量 FPR 低 lane 合入向量快照，再由同一二选一
+路径恢复。因此 CPUCFG2 报告 LSX 且这条上下文链完整时，才可打开 `EUEN.SXE` 并发布
+`HWCAP_LSX`。LASX 和 LBT 仍未进入上下文，对应 EUEN/HWCAP 继续关闭。
 
 ### 6.3 `machine_init()`
 

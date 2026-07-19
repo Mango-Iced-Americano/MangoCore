@@ -1,0 +1,9 @@
+2026-07-17T14:04:09.710745Z __PERF_BEGIN_p4_chroot_python_b7_final-1-1785fc3a__
+2026-07-17T14:04:10.673279Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_chroot_python_b7_final-1-1785fc3a_TRACE_OFF__
+2026-07-17T14:04:13.773239Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_chroot_python_b7_final-1-1785fc3a__
+2026-07-17T14:04:14.895701Z /persist/python-runtime/releases/b7f361382399/usr/bin/python3
+2026-07-17T14:04:14.899506Z CHROOT_B7_OK
+2026-07-17T14:04:23.819976Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-17T14:04:24.742398Z __PERF_WORK_END_p4_chroot_python_b7_final-1-1785fc3a__
+2026-07-17T14:04:24.747686Z __PERF_ACK_p4_chroot_python_b7_final-1-1785fc3a_WORK__
+2026-07-17T14:04:25.245741Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_chroot_python_b7_final-1-1785fc3a__ rc=0

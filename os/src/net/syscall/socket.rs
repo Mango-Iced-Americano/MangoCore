@@ -2,7 +2,7 @@ use core::convert::TryFrom;
 use log::info;
 
 use crate::net::posix::PosixArgsSocketType;
-use crate::net::{PSOCK, Socket};
+use crate::net::{Socket, PSOCK};
 
 /// 创建 socket 并返回 fd。
 ///

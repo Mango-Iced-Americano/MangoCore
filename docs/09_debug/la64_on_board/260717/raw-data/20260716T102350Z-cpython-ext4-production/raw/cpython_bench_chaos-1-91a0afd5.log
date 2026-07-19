@@ -1,0 +1,7 @@
+2026-07-16T10:27:28.874268Z __PERF_BEGIN_cpython_bench_chaos-1-91a0afd5__
+2026-07-16T10:27:29.798925Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_cpython_bench_chaos-1-91a0afd5_TRACE_OFF__
+2026-07-16T10:27:32.165808Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_cpython_bench_chaos-1-91a0afd5__
+2026-07-16T10:27:32.475110Z [CPYTHON BENCH START] bm_chaos tmp=/persist/pyperf/w/run-129
+2026-07-16T10:28:07.156636Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1","target_stats":false,"tmpdir":"/persist/pyperf/w/run-129/tmp","type":"environment","warmups":1}
+2026-07-16T10:28:07.164900Z CPYTHON_BENCH_JSON {"benchmark":"bm_chaos","schema":1,"type":"start"}
+2026-07-16T10:31:28.257366Z CPYTHON_BENCH_JSON {"benchmark":"bm_chaos","schema":1,"type":"warmup","warmup":1}

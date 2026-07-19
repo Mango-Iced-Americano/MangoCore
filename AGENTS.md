@@ -8,8 +8,8 @@
 |------|-----|
 | 语言 | Rust nightly（双工具链：`nightly-2025-01-18` / `nightly-2024-05-01`） |
 | 架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-linux-gnu` |
-| syscall | 约 218 个（新增时同步更新本节） |
-| 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
+| syscall | 约 219 个（新增时同步更新本节） |
+| 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、ChaCha20 CSPRNG（VirtIO RNG/2K1000LA 片上 RNG）、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
 | 设计参考 | [DragonOS](https://github.com/DragonOS-Community/DragonOS)（VFS/MountFS 架构）+ Linux 6.6 语义 |
 | 约束 | **无 `cargo test`/`cargo clippy`** — 裸机内核，唯一验证 = 编译 + QEMU 集成测试 |
 
@@ -68,14 +68,15 @@ xz -dkc fs-img-dir/sdcard-la.img.xz > sdcard-la.img
 
 ### 测试配置
 
-`os_test.conf` 的 `mask` 字段用 12-bit 控制测试组（**不要日常跑全量**）：
+`os_test.conf` 的 `mask` 字段用 13-bit 控制测试组（**不要日常跑全量**）：
 
 ```
 bit0=basic  bit1=busybox  bit2=lua  bit3=libctest  bit4=iozone  bit5=unixbench
 bit6=iperf  bit7=libcbench bit8=lmbench bit9=netperf bit10=cyclictest bit11=ltp
+bit12=cpython（仅隔离 CPython 运行时镜像）
 ```
 
-常用 mask：`0x001`（basic）、`0x003`（basic+busybox）、`0xFFF`（全量，仅提交评测用）
+常用 mask：`0x001`（basic）、`0x003`（basic+busybox）、`0xFFF`（竞赛 12 组全量，仅提交评测用）、`0x1000`（仅 CPython，必须使用带运行时的 tools 镜像）
 
 配置注入镜像：
 ```bash
@@ -121,7 +122,7 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
 
 ### 内存管理
 
-- **物理内存**：栈式帧分配器，4KB/帧；`frame_store.rs` 跟踪帧状态用于 swap/zram
+- **物理内存**：多 region 栈式帧分配器，4KB/帧；平台以 `MEMORY_REGIONS` 描述 DRAM bank、以 `FIRMWARE_RESERVED_REGIONS` 描述未交接 carveout；`frame_store.rs` 跟踪帧状态用于 swap/zram
 - **虚拟内存**：SV39 页表，每进程独立 `MemorySet`；`VmaSet` 管理 VMA；`filemap.rs` 处理 mmap 文件缺页
 - **用户内存访问**：`translated_ref/refmut/byte_buffer`、`copy_from_user`、`translated_str`
 - **关键约束**：MAP_SHARED 页面不参与 CoW；修改 PTE 后必须 TLB 刷新；`execve`/`clone` 路径用 `try_reserve` 防 OOM
@@ -167,6 +168,17 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 - `wait_io` — socket 操作阻塞包装（每次重试前 poll）
 - `wait_io_core` — 通用文件 I/O 阻塞包装（不 poll）
 - 非阻塞路径（MSG_DONTWAIT）在 `try_xxx` 前必须 `try_poll()` 防 livelock
+
+### 随机数
+
+```
+VirtIO RNG / 2K1000LA APB RNG -> drivers/rng -> random::ChaCha20Rng
+  -> getrandom(2) / /dev/random / /dev/urandom
+```
+
+- 启动时必须由平台可信熵源完成播种和健康检查，之后才允许安全随机读取。
+- `GRND_INSECURE` 只允许使用未认证的启动状态，不能把它计为可信熵。
+- 写入随机设备只混入状态，不提高 ready 状态；当前实现每次输出后重键。
 
 ### IPC / 同步
 
@@ -219,6 +231,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 - **TLB 刷新**：所有 PTE 修改操作（`unmap`/`block_and_ret_mut`/`set_pte_flags`）后必须 `sfence.vma`/`invtlb`
 - **MAP_SHARED**：不参与 CoW，fork 时恢复 W 权限，缺页只恢复 W
 - **OOM**：`execve`/`clone` 路径 Vec 扩容必须 `try_reserve` 返回 `ENOMEM`
+- **非连续 DRAM**：`MEMORY_SIZE` 是容量、`MEMORY_END` 是地址上界，都不能代替 region 表；DMA 连续页必须用 `frames_alloc()`，普通页集合用 `frames_alloc_any()`
+- **固件所有权**：启动后仍被 framebuffer、其他 CPU 或 boot firmware 使用的 DRAM 必须 carveout，只有完成停 DMA/重停放/复制后才能回收
 
 ### 网络
 

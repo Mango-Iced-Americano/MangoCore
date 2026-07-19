@@ -1,0 +1,10 @@
+2026-07-17T12:36:54.864394Z __PERF_BEGIN_pyctl_get-1-ec49be23__
+2026-07-17T12:36:55.717529Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pyctl_get-1-ec49be23_TRACE_OFF__
+2026-07-17T12:36:57.255355Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pyctl_get-1-ec49be23__
+2026-07-17T12:36:57.293571Z Connecting to 192.168.9.10:8009 (192.168.9.10:8009)
+2026-07-17T12:36:57.310539Z saving to '/tmp/pyd'
+2026-07-17T12:36:57.319037Z pyd                  100% |********************************|  2500  0:00:00 ETA
+2026-07-17T12:36:57.319558Z '/tmp/pyd' saved
+2026-07-17T12:36:57.327169Z __PERF_WORK_END_pyctl_get-1-ec49be23__
+2026-07-17T12:36:57.328622Z __PERF_ACK_pyctl_get-1-ec49be23_WORK__
+2026-07-17T12:36:57.729200Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pyctl_get-1-ec49be23__ rc=0

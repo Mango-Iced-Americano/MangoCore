@@ -21,7 +21,7 @@ const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/riscv64/libgcc_
 const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/loongarch64/libgcc_s.so.1");
 // ============================================================
 // TEST_GROUPS — 组名与脚本文件名的映射
-// 索引 0..11 与 mask 的 bit0..bit11 一一对应
+// 索引 0..12 与 mask 的 bit0..bit12 一一对应
 // ⚠️ DEFAULT_TIMEOUTS 的索引与此数组一致
 // ============================================================
 const TEST_GROUPS: [(&str, &str); 13] = [
@@ -45,7 +45,7 @@ const TEST_GROUPS: [(&str, &str); 13] = [
 // 如需调整执行顺序、超时时间或 LTP 排除测例，直接修改此处即可，
 // 无需依赖 os_test.conf 注入。os_test.conf 可指定同名项覆盖。
 //
-// ⚠️ 注意：DEFAULT_TIMEOUTS 的索引与 TEST_GROUPS 数组位置（索引 0..11）
+// ⚠️ 注意：DEFAULT_TIMEOUTS 的索引与 TEST_GROUPS 数组位置（索引 0..12）
 // 一一绑定，与 DEFAULT_ORDER 中各组出现的先后顺序无关！
 // 例如 DEFAULT_TIMEOUTS[6] 永远是 iperf 的超时时间，无论 iperf
 // 在 DEFAULT_ORDER 中排在第几位。
@@ -68,14 +68,14 @@ const DEFAULT_ORDER: &[&str] = &[
     "unixbench",
 ];
 
-/// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
+/// 每组默认超时（秒），索引 0..12 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
 const DEFAULT_TIMEOUTS: [u64; 13] = [
     60,   // [0]  basic
     120,   // [1]  busybox
     60,   // [2]  lua
     120,  // [3]  libctest
-    480,  // [4]  iozone
+    1800, // [4]  iozone (real SATA/FAT32 1 KiB record workload needs ~20 min/libc)
     900,   // [5]  unixbench
     40,   // [6]  iperf
     120,  // [7]  libcbench
@@ -83,7 +83,7 @@ const DEFAULT_TIMEOUTS: [u64; 13] = [
     90,   // [9]  netperf
     60,   // [10] cyclictest
     24000, // [11] ltp
-    600,  // [12] cpython
+    900,  // [12] cpython
 ];
 
 /// LTP 默认排除测例名列表
@@ -202,6 +202,165 @@ const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
 /// la64 glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 
+/// Focused board regression set. These cases exercise process lifecycle,
+/// virtual memory, signals, timers, synchronization, fd/event primitives and
+/// local VFS semantics without requiring a physical or loopback network path.
+const BOARD_CORE_LTP_CASES: &[&str] = &[
+    "access01", "access02", "brk01", "brk02", "clock_adjtime01",
+    "clock_adjtime02", "clock_getres01", "clock_gettime01", "clock_gettime02",
+    "clock_gettime04", "clock_nanosleep01", "clock_nanosleep02",
+    "clock_nanosleep04", "clone01", "clone02", "clone03", "clone05",
+    "clone06", "clone07", "clone09", "clone301", "clone302", "close01",
+    "close02", "dup01", "dup02", "dup03", "dup04", "dup05", "dup06",
+    "dup07", "dup201", "dup202", "dup203", "dup204", "dup205", "dup206",
+    "dup207", "dup3_01", "dup3_02", "epoll_create01", "epoll_create02",
+    "epoll_create1_01", "epoll_create1_02", "epoll_ctl01", "epoll_ctl02",
+    "epoll_ctl03", "epoll_wait01", "epoll_wait03", "epoll_wait04",
+    "epoll_wait06", "epoll_wait07", "epoll_pwait01", "epoll_pwait02",
+    "epoll_pwait04", "epoll_pwait05", "eventfd01", "eventfd02", "eventfd03",
+    "eventfd04", "eventfd05", "eventfd2_01", "eventfd2_02", "eventfd2_03",
+    "execve01", "execve02", "execve03", "execve04", "execve06", "execveat01",
+    "execveat02", "execveat03", "exit01", "exit02", "exit_group01", "fork01",
+    "fork03", "fork04", "fork05", "fork07", "fork08", "fork09", "fork10",
+    "futex_cmp_requeue01", "futex_cmp_requeue02",
+    "futex_wait01", "futex_wait02", "futex_wait03", "futex_wait04",
+    "futex_wait05", "futex_wait_bitset01", "futex_wake01", "futex_wake02",
+    "futex_wake03", "getcwd01", "getcwd02", "getcwd03", "getcwd04",
+    "getdents01", "getdents02", "getpid01", "getpid02", "getppid01",
+    "getppid02", "getrlimit01", "getrlimit02", "getrlimit03", "getrusage01",
+    "getrusage02", "getrusage03", "gettimeofday01", "gettimeofday02",
+    "kill02", "kill03", "kill05", "kill06", "kill07", "kill08", "kill09",
+    "kill10", "kill11", "kill12", "madvise01", "madvise02", "madvise03",
+    "madvise05", "madvise10", "mmap01", "mmap02", "mmap03", "mmap04",
+    "mmap05", "mmap06", "mmap08", "mmap09", "mmap12", "mmap13", "mmap14",
+    "mmap15", "mmap17", "mmap18", "mmap19", "mmap20", "mprotect01",
+    "mprotect02", "mprotect03", "mprotect04", "mprotect05", "mremap01",
+    "mremap02", "mremap03", "mremap04", "mremap05", "mremap06", "msync01",
+    "msync02", "msync03", "msync04", "munmap01", "munmap02", "munmap03",
+    "nanosleep01", "nanosleep02", "nanosleep04", "pipe01", "pipe02", "pipe03",
+    "pipe04", "pipe08", "pipe09", "pipe12", "pipe13", "pipe15", "pipe2_01",
+    "pipe2_02", "pipe2_04", "poll01", "poll02", "ppoll01", "prctl01",
+    "prctl02", "prctl03", "prctl04", "prctl05", "pselect01", "pselect02",
+    "pselect03", "read01", "read02", "read03", "read04", "readv01", "readv02",
+    "rt_sigaction01", "rt_sigaction02", "rt_sigaction03", "rt_sigprocmask01",
+    "rt_sigprocmask02", "rt_sigqueueinfo01", "rt_sigsuspend01", "sched_getparam01",
+    "sched_getparam03", "sched_getscheduler01", "sched_getscheduler02",
+    "sched_rr_get_interval01", "sched_rr_get_interval02", "sched_rr_get_interval03",
+    "sched_setaffinity01", "sched_getaffinity01", "sched_setparam01",
+    "sched_setparam02", "sched_setparam03", "sched_setparam04", "sched_setparam05",
+    "sched_setscheduler01", "sched_setscheduler02", "sched_setscheduler03",
+    "sched_setscheduler04", "sched_yield01", "select01", "select02", "select03",
+    "select04", "setitimer01", "setitimer02", "sigaction01",
+    "sigaction02", "sigaltstack01", "signal01", "signal02", "signal03", "signal04",
+    "signal05", "signalfd01", "signalfd4_01", "sigpending02", "sigprocmask01",
+    "sigsuspend01", "sigtimedwait01", "sigwaitinfo01", "timer_delete01",
+    "timer_getoverrun01", "timer_gettime01",
+    "timer_settime01", "timer_settime02", "timerfd01", "timerfd_create01",
+    "timerfd_gettime01", "timerfd_settime01", "tkill01", "tkill02", "tgkill01",
+    "uname01", "uname02", "wait01", "wait02", "waitpid01", "waitpid03",
+    "waitpid04", "waitpid06", "waitpid07", "waitpid08",
+    "waitpid09", "waitid01", "waitid02", "waitid03", "waitid04", "waitid05",
+    "waitid06", "waitid08", "waitid09", "write01", "write02", "write03",
+];
+
+fn board_core_test_focus_enabled() -> bool {
+    let marker = open("/board_core_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
+fn apply_board_core_test_focus(cfg: &mut RuntimeConfig) {
+    if !board_core_test_focus_enabled() {
+        return;
+    }
+
+    cfg.mask = (1 << 3) | (1 << 10) | (1 << 11);
+    cfg.order = ["libctest", "cyclictest", "ltp"]
+        .iter()
+        .map(|name| {
+            TEST_GROUPS
+                .iter()
+                .position(|(group, _)| group == name)
+                .expect("board core test group must exist")
+        })
+        .collect();
+    cfg.timeouts[3] = 900;
+    cfg.timeouts[10] = 180;
+    cfg.timeouts[11] = 3600;
+    cfg.ltp_runner = LtpRunner::Inline;
+    cfg.ltp_libc = LtpLibc::Both;
+    cfg.ltp_include = BOARD_CORE_LTP_CASES
+        .iter()
+        .map(|name| String::from(*name))
+        .collect();
+    cfg.ltp_from = None;
+    cfg.skip_apk = true;
+    println!(
+        "[initproc] board core-test focus enabled: libctest, cyclictest, {} non-network LTP cases",
+        cfg.ltp_include.len()
+    );
+}
+
+fn apply_cpython_test_focus(cfg: &mut RuntimeConfig) {
+    let marker = open("/cpython_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return;
+    }
+    close(marker as usize);
+
+    let cpython_index = TEST_GROUPS
+        .iter()
+        .position(|(group, _)| *group == "cpython")
+        .expect("cpython test group must exist");
+    cfg.mode = RunMode::Run;
+    cfg.mask = 1u16 << cpython_index;
+    cfg.order = alloc::vec![cpython_index];
+    cfg.timeouts[cpython_index] = 900;
+    cfg.skip_apk = true;
+    println!("[initproc] isolated CPython focus enabled");
+}
+
+fn apk_test_enabled() -> bool {
+    let marker = open("/apk_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
+fn apk_persist_test_enabled() -> bool {
+    let marker = open("/apk_persist_test\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
+fn apk_persist_shell_enabled() -> bool {
+    let marker = open("/apk_persist_shell\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return false;
+    }
+    close(marker as usize);
+    true
+}
+
+fn apply_board_shell_mode(cfg: &mut RuntimeConfig) {
+    let marker = open("/board_shell\0", OpenFlags::RDONLY);
+    if marker < 0 {
+        return;
+    }
+    close(marker as usize);
+    cfg.mode = RunMode::Shell;
+    cfg.skip_apk = true;
+    println!("[initproc] board shell mode enabled");
+}
+
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     run_bash_cmd_timeout(cmd, environ, 0)
 }
@@ -209,6 +368,12 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
 fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> i32 {
     let pid = fork();
     if pid == 0 {
+		// Give the command and every descendant a private process group so a
+		// timed-out shell cannot leave background children behind.
+		if setpgid(0, 0) < 0 {
+			println!("[initproc] failed to create command process group");
+			exit(126);
+		}
         let shell_new = "/bin/bash\0";
         let shell_old = "/bash\0";
         let dash_c = "-c\0";
@@ -229,36 +394,80 @@ fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> 
         exit(127);
     }
     if pid > 0 {
-        let mut code = 0;
+        // Fail closed if the target-specific wait itself fails.  A zero
+        // initializer would turn ECHILD/EFAULT into a false command success.
+        let mut code = 127 << 8;
         let start_ms = get_time() as u64;
         let timeout_ms = timeout_secs.saturating_mul(1000);
+		let mut timed_out = false;
         loop {
-            reap_orphans();
+            // Do not call reap_orphans() while this child is outstanding:
+            // waitpid(-1, WNOHANG) may consume `pid` and discard its status
+            // before the target-specific wait below observes it.
             let ret = waitpid_wnohang(pid as isize, &mut code);
-            if ret == pid as isize || ret < 0 {
+            if ret == pid as isize {
+                break;
+            }
+            if ret < 0 {
+                println!(
+                    "[initproc] waitpid failed pid={} errno={}",
+                    pid,
+                    -ret
+                );
+                code = 127 << 8;
                 break;
             }
             if timeout_secs > 0 && (get_time() as u64).saturating_sub(start_ms) >= timeout_ms {
-                let _ = kill(pid as usize, SIGKILL);
-                loop {
-                    let ret2 = waitpid_wnohang(pid as isize, &mut code);
-                    if ret2 == pid as isize || ret2 < 0 {
-                        break;
-                    }
-                    sleep(10);
-                }
+				timed_out = true;
+				let pgid_arg = !(pid as usize) + 1;
+				let group_kill_ret = kill(pgid_arg, SIGKILL);
+				let child_kill_ret = kill(pid as usize, SIGKILL);
+				if group_kill_ret < 0 && child_kill_ret < 0 {
+					println!(
+						"[initproc] timeout kill failed pid={} group_errno={} child_errno={}",
+						pid,
+						-group_kill_ret,
+						-child_kill_ret
+					);
+				}
                 break;
             }
             sleep(10);
         }
-        // 目标进程已回收。但它在运行期间可能创建了大量子进程；
-        // 那些子进程在目标进程退出后成为 initproc 的孤儿，仍占用
-        // clone quota。若不清空就直接运行下一个测试，vfork 可能
-        // 因 quota 满而失败（EAGAIN → 退出码 127）。
-        drain_children();
-        return code;
+		// Never block indefinitely on descendants. Kill process-group
+		// stragglers and then wait, with a hard deadline, until initproc has no
+		// child left. This preserves the old clone-quota cleanup guarantee
+		// without restoring its unbounded wait. A failure to close the process
+		// tree is fatal: continuing would let a stale installer race the next
+		// command or the interactive shell.
+		let final_group_kill_ret = kill(!(pid as usize) + 1, SIGKILL);
+		if timed_out && final_group_kill_ret < 0 {
+			println!(
+				"[initproc] final process-group kill failed pid={} errno={}",
+				pid,
+				-final_group_kill_ret
+			);
+		}
+		if !drain_children_bounded(5_000) {
+			println!(
+				"[initproc] FATAL: command process tree pid={} did not quiesce",
+				pid
+			);
+			let _ = shutdown();
+			exit(124);
+		}
+		return if timed_out { 124 << 8 } else { code };
     }
     -1
+}
+
+fn scratch_runtime_enabled() -> bool {
+    let fd = open("/scratch\0", OpenFlags::RDONLY);
+    if fd < 0 {
+        return false;
+    }
+    close(fd as usize);
+    true
 }
 
 /// 提取 waitpid 返回的 status 中的退出码（与 bash $? 行为一致）
@@ -293,17 +502,23 @@ fn reap_orphans() {
     }
 }
 
-/// 阻塞等待所有子进程退出并回收（直到 ECHILD）
-fn drain_children() {
-    // 先非阻塞快速收一轮
-    reap_orphans();
-    // 再阻塞等待剩余还在运行的子进程
-    loop {
-        let mut status = 0i32;
-        if waitpid(!0, &mut status) < 0 {
-            break; // ECHILD — 真的没有子进程了
-        }
-    }
+/// Reap all children without allowing a failed or hostile command to stall
+/// PID 1 forever. Returning false is a fail-closed condition for the caller.
+fn drain_children_bounded(timeout_ms: u64) -> bool {
+	let start_ms = get_time() as u64;
+	loop {
+		let mut status = 0i32;
+		let ret = waitpid_wnohang(-1, &mut status);
+		if ret < 0 {
+			return true;
+		}
+		if (get_time() as u64).saturating_sub(start_ms) >= timeout_ms {
+			return false;
+		}
+		if ret == 0 {
+			sleep(10);
+		}
+	}
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -807,6 +1022,162 @@ fn display_path(path: &str) -> &str {
     path.trim_end_matches('\0')
 }
 
+fn group_uses_scratch_workspace(group_name: &str) -> bool {
+    matches!(
+        group_name,
+        "basic"
+            | "busybox"
+            | "lua"
+            | "lmbench"
+            | "iozone"
+            | "libcbench"
+            | "libctest"
+            | "cyclictest"
+    )
+}
+
+fn prepare_group_workdir(
+    environ: &[*const u8],
+    source_dir: &str,
+    group_name: &str,
+    libc_suffix: &str,
+) -> Option<String> {
+    if !group_uses_scratch_workspace(group_name) || !scratch_runtime_enabled() {
+        return None;
+    }
+
+    let source = display_path(source_dir);
+    let workdir = format!("/scratch/work/{}-{}", group_name, libc_suffix);
+    let payload = match group_name {
+        "basic" => format!(
+            "/bin/busybox cp -R {source}/basic {workdir}/basic 2>/dev/null || exit 1; \
+             /bin/busybox cp {source}/basic_testcode.sh {workdir}/basic_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             [ -f {workdir}/basic/run-all.sh ] || exit 1; \
+             [ -f {workdir}/basic_testcode.sh ] || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1;"
+        ),
+        "busybox" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/busybox_testcode.sh {workdir}/busybox_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/busybox_cmd.txt {workdir}/busybox_cmd.txt || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/busybox_testcode.sh ] || exit 1; \
+             [ -f {workdir}/busybox_cmd.txt ] || exit 1;"
+        ),
+        "lua" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/lua {workdir}/lua || exit 1; \
+             /bin/busybox cp {source}/lua_testcode.sh {workdir}/lua_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/test.sh {workdir}/test.sh || exit 1; \
+             /bin/busybox cp {source}/*.lua {workdir}/ || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/lua ] || exit 1; \
+             [ -f {workdir}/lua_testcode.sh ] || exit 1; \
+             [ -f {workdir}/test.sh ] || exit 1; \
+             for script in date file_io max_min random remove round_num sin30 sort strings; do \
+                 [ -f {workdir}/\x24script.lua ] || exit 1; \
+             done;"
+        ),
+        "lmbench" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/lmbench_testcode.sh {workdir}/lmbench_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/lmbench_all {workdir}/lmbench_all || exit 1; \
+             /bin/busybox cp {source}/hello {workdir}/hello || exit 1; \
+             /bin/busybox cp {source}/lat_sig {workdir}/lat_sig || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/lmbench_testcode.sh ] || exit 1; \
+             [ -f {workdir}/lmbench_all ] || exit 1; \
+             [ -f {workdir}/hello ] || exit 1; \
+             [ -f {workdir}/lat_sig ] || exit 1; \
+             /bin/busybox mkdir -p /code/lmbench_src/bin/build || exit 1; \
+             /bin/busybox rm -f /code/lmbench_src/bin/build/lmbench_all || exit 1; \
+             /bin/busybox ln -s {workdir}/lmbench_all /code/lmbench_src/bin/build/lmbench_all || exit 1;"
+        ),
+        "iozone" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/iozone_testcode.sh {workdir}/iozone_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/iozone {workdir}/iozone || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/iozone_testcode.sh ] || exit 1; \
+             [ -f {workdir}/iozone ] || exit 1;"
+        ),
+        "libcbench" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/libcbench_testcode.sh {workdir}/libcbench_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/libc-bench {workdir}/libc-bench || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/libcbench_testcode.sh ] || exit 1; \
+             [ -f {workdir}/libc-bench ] || exit 1;"
+        ),
+        "libctest" => format!(
+            "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+             /bin/busybox cp {source}/libctest_testcode.sh {workdir}/libctest_testcode.sh || exit 1; \
+             /bin/busybox cp {source}/run-static.sh {workdir}/run-static.sh || exit 1; \
+             /bin/busybox cp {source}/run-dynamic.sh {workdir}/run-dynamic.sh || exit 1; \
+             /bin/busybox cp {source}/runtest.exe {workdir}/runtest.exe || exit 1; \
+             /bin/busybox cp {source}/entry-static.exe {workdir}/entry-static.exe || exit 1; \
+             /bin/busybox cp {source}/entry-dynamic.exe {workdir}/entry-dynamic.exe || exit 1; \
+             /bin/busybox cp {source}/dlopen_dso.so {workdir}/dlopen_dso.so || exit 1; \
+             /bin/busybox cp {source}/tls_get_new-dtv_dso.so {workdir}/tls_get_new-dtv_dso.so || exit 1; \
+             /bin/busybox cp -R {source}/lib {workdir}/lib 2>/dev/null || exit 1; \
+             [ -f {workdir}/busybox ] || exit 1; \
+             [ -f {workdir}/libctest_testcode.sh ] || exit 1; \
+             [ -f {workdir}/run-static.sh ] || exit 1; \
+             [ -f {workdir}/run-dynamic.sh ] || exit 1; \
+             [ -f {workdir}/runtest.exe ] || exit 1; \
+             [ -f {workdir}/entry-static.exe ] || exit 1; \
+             [ -f {workdir}/entry-dynamic.exe ] || exit 1; \
+             [ -f {workdir}/dlopen_dso.so ] || exit 1; \
+             [ -f {workdir}/tls_get_new-dtv_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/dlopen_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/tls_align_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/tls_init_dso.so ] || exit 1; \
+             [ -f {workdir}/lib/tls_get_new-dtv_dso.so ] || exit 1;"
+        ),
+        "cyclictest" => {
+            #[cfg(target_arch = "loongarch64")]
+            // The LA musl binary stops in libc stubs before exercising kernel
+            // scheduling. Use the glibc build for both wrappers, matching the
+            // already validated QEMU compatibility path.
+            let cyclictest_source = "/glibc/cyclictest";
+            #[cfg(not(target_arch = "loongarch64"))]
+            let cyclictest_source = format!("{source}/cyclictest");
+
+            format!(
+                "/bin/busybox cp {source}/busybox {workdir}/busybox || exit 1; \
+                 /bin/busybox cp {source}/cyclictest_testcode.sh {workdir}/cyclictest_testcode.sh || exit 1; \
+                 /bin/busybox cp {cyclictest_source} {workdir}/cyclictest || exit 1; \
+                 /bin/busybox cp {source}/hackbench {workdir}/hackbench || exit 1; \
+                 [ -f {workdir}/busybox ] || exit 1; \
+                 [ -f {workdir}/cyclictest_testcode.sh ] || exit 1; \
+                 [ -f {workdir}/cyclictest ] || exit 1; \
+                 [ -f {workdir}/hackbench ] || exit 1;"
+            )
+        }
+        _ => return None,
+    };
+    let command = format!(
+        "/bin/busybox rm -rf {workdir} || exit 1; \
+         /bin/busybox mkdir -p {workdir} || exit 1; \
+         {payload} \
+         /bin/busybox sync || exit 1\0"
+    );
+    let ret = run_bash_cmd(&command, environ);
+    if ret != 0 {
+        println!(
+            "[scratch-work] prepare {} from {} failed: {}",
+            workdir, source, ret
+        );
+        return None;
+    }
+
+    println!("[scratch-work] prepared {} from {}", workdir, source);
+    let mut path = workdir;
+    path.push('\0');
+    Some(path)
+}
+
 const MAX_GROUP_RETRIES: usize = 3;
 
 /// 运行测试脚本，失败时自动重试（最多 max_retries 次）。
@@ -864,22 +1235,33 @@ fn run_group_in_dir(
     cfg: &RuntimeConfig,
 ) {
     let group_start_ms = get_time() as u64;
-    let log_dir = display_path(dir);
+    let source_log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
     let libc_suffix = if group_name == "cpython" {
         "isolated"
-    } else if log_dir.contains("musl") {
+    } else if source_log_dir.contains("musl") {
         "musl"
     } else {
         "glibc"
     };
+    let requires_scratch = group_uses_scratch_workspace(group_name) && scratch_runtime_enabled();
+    let prepared_dir = prepare_group_workdir(environ, dir, group_name, libc_suffix);
+    if requires_scratch && prepared_dir.is_none() {
+        println!(
+            "[scratch-work] FATAL: refuse read-only fallback for {}-{}",
+            group_name, libc_suffix
+        );
+        return;
+    }
+    let run_dir = prepared_dir.as_deref().unwrap_or(dir);
+    let log_dir = display_path(run_dir);
 
     let mut last_exit_code: i32 = 0;
     profile_before(group_name, libc_suffix, cfg);
     for attempt in 1..=max_retries {
         last_exit_code = run_group_once(
             environ,
-            dir,
+            run_dir,
             group_name,
             script,
             timeout_secs,
@@ -1453,6 +1835,7 @@ fn run_ltp_binaries(
 ) {
     let log_dir = display_path(dir);
     let ltp_dir = format!("{}/ltp/testcases/bin", log_dir);
+    let board_core_focus = board_core_test_focus_enabled();
 
     // 确定 libc 后缀（与 run_group_in_dir 一致，评测机依赖此格式）
     let libc_suffix = if log_dir.contains("musl") {
@@ -1637,9 +2020,17 @@ fn run_ltp_binaries(
             } else {
                 ""
             };
+            let board_env = if board_core_focus {
+                // P1 and userspace block nodes are intentionally read-only on
+                // the board. Keep all LTP scratch data in tmpfs and prevent a
+                // inherited QEMU device name from selecting /dev/vdb2.
+                "export TMPDIR=/tmp TMPBASE=/tmp HOME=/ && unset LTP_DEV LTP_DEV_FS_TYPE LTP_SINGLE_FS_TYPE && "
+            } else {
+                "export TMPDIR=/tmp TMPBASE=/tmp && "
+            };
             let cmd = format!(
-                "export LTPROOT=\"{}\" && export LTP_IPC_PATH=/tmp && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
-                ltp_root_abs, ltp_root_abs, preload, name
+                "{}export LTPROOT=\"{}\" && export LTP_IPC_PATH=/tmp && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
+                board_env, ltp_root_abs, ltp_root_abs, preload, name
             );
             let ret = run_bash_cmd_timeout(&cmd, environ, 30);
             let exit_code = exit_code_from_waitpid_status(ret);
@@ -1880,6 +2271,24 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
 
     let total_windows = cfg.drift_windows;
     for libc in libc_list {
+        let source_dir = alloc::format!("/{}\0", libc);
+        let prepared_lmbench_dir = prepare_group_workdir(
+            environ,
+            &source_dir,
+            "lmbench",
+            libc,
+        );
+        if scratch_runtime_enabled() && prepared_lmbench_dir.is_none() {
+            println!(
+                "[scratch-work] FATAL: refuse read-only fallback for lmbench-{} drift windows",
+                libc
+            );
+            continue;
+        }
+        let measurement_dir = prepared_lmbench_dir
+            .as_deref()
+            .map(display_path)
+            .unwrap_or_else(|| display_path(&source_dir));
         println!(
             "[initproc] drift_window: start libc={} windows={}",
             libc, total_windows
@@ -1932,9 +2341,12 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
                 }
             } else {
                 let cmd = if cfg.drift_measure == "full" {
-                    alloc::format!("cd /{} && sh lmbench_testcode.sh\0", libc)
+                    alloc::format!("cd {} && sh lmbench_testcode.sh\0", measurement_dir)
                 } else {
-                    alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc)
+                    alloc::format!(
+                        "cd {} && ./lmbench_all lat_syscall -P 1 null\0",
+                        measurement_dir
+                    )
                 };
                 let _ = run_bash_cmd(&cmd, environ);
             }
@@ -2092,13 +2504,17 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 }
             }
         } else if group_name == "cpython" {
+            #[cfg(target_arch = "loongarch64")]
+            let cpython_dir = "/persist/python-runtime/current\0";
+            #[cfg(target_arch = "riscv64")]
+            let cpython_dir = "/tools/tests/cpython\0";
             run_group_in_dir(
                 environ,
-                "/tools/tests/cpython\0",
+                cpython_dir,
                 group_name,
                 script,
                 timeout_secs,
-                1,  // max_retries=1
+                1,
                 cfg,
             );
             if cfg.diag {
@@ -2896,7 +3312,7 @@ pub extern "C" fn _start() -> ! {
 /// 1. busybox --install -s /bin — 把 busybox applet 装为 /bin 下的 symlink
 /// 2. musl/glibc 动态库链接到 /lib
 fn install_embedded_libgcc_s() {
-    let path = "/glibc/lib/libgcc_s.so.1\0";
+    let path = "/lib/libgcc_s.so.1\0";
     // Check if already installed (from tools disk or previous run)
     let check_fd = open(path, OpenFlags::RDONLY);
     if check_fd >= 0 {
@@ -2967,9 +3383,14 @@ fn prepare_symlink(environ: &[*const u8]) {
     \0";
     run_bash_cmd(dirs_cmd, environ);
 
-    // Phase 2: Try bind mount /tools/bin -> /bin (conservative — only /bin for now)
-    println!("[initproc] attempting bind mount /tools/bin -> /bin...");
-    try_bind("tools/bin", "bin");
+    // Keep the initramfs runtime writable in staged board mode. Existing QEMU
+    // and non-staged paths retain the legacy tools bind.
+    if scratch_runtime_enabled() {
+        println!("[initproc] staged runtime: skip /tools/bin bind");
+    } else {
+        println!("[initproc] attempting bind mount /tools/bin -> /bin...");
+        try_bind("tools/bin", "bin");
+    }
 
     // Phase 3: After bind, ensure /bin/busybox exists, then install applets
     // If bind succeeded, this writes to /tools/bin (persists on ext4 disk)
@@ -3008,7 +3429,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         environ,
     );
 
-    // Phase 5: Account/network files, lib symlinks, chmod (existing, unchanged)
+    // Phase 5: Account/network files, resolver snapshot, lib symlinks, chmod
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
         mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /sys /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; \
@@ -3016,7 +3437,12 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -f /etc/group ] || printf 'root:x:0:\\ndaemon:x:1:\\nnogroup:x:65534:\\n' > /etc/group; \
         grep -q '^daemon:x:1:' /etc/group || printf 'daemon:x:1:\\n' >> /etc/group; \
         [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
-        [ -f /etc/resolv.conf ] || printf 'nameserver 10.0.2.3\\n' > /etc/resolv.conf; \
+        rm -f /etc/.resolv.conf.mango.tmp; \
+        if ! cat /proc/net/resolv.conf > /etc/.resolv.conf.mango.tmp || [ ! -s /etc/.resolv.conf.mango.tmp ]; then \
+            printf 'nameserver 10.0.2.3\\n' > /etc/.resolv.conf.mango.tmp; \
+        fi; \
+        chmod 0644 /etc/.resolv.conf.mango.tmp; \
+        rm -f /etc/resolv.conf; mv -f /etc/.resolv.conf.mango.tmp /etc/resolv.conf; \
         [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
@@ -3056,30 +3482,29 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -e ./libtls_get_new-dtv_dso.so ] || ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
         for f in /musl/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
         for f in /glibc/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        true \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
 
     println!("prepare lmbench compatibility ...");
     let lmbench_cmd = "\
-        mkdir -p /code/lmbench_src/bin/build; \
-        ln -s /musl/lmbench_all /code/lmbench_src/bin/build/lmbench_all \
+        if [ ! -d /scratch ]; then \
+            mkdir -p /code/lmbench_src/bin/build; \
+            rm -f /code/lmbench_src/bin/build/lmbench_all; \
+            ln -s /musl/lmbench_all /code/lmbench_src/bin/build/lmbench_all; \
+        fi; \
+        true \
     \0";
     let ret = run_bash_cmd(lmbench_cmd, environ);
     println!("[initproc] lmbench compatibility done, exit={}", ret);
 
-    // Phase 5.5: Install Alpine packages via apk (mkfs.ext4 etc.)
-    // Must run AFTER lib linking (Step 2), because Step 2 does
-    // `rm -rf /usr/lib; ln -sf /lib /usr/lib` which would destroy
-    // any apk-installed libraries in /usr/lib/.
-    // install_apk_packages(environ);
-
     // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
     let cyclictest_cmd = "\
-        if [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
+        if [ ! -d /scratch ] && [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
             ln -s /glibc/cyclictest /musl/cyclictest; \
-        fi \
+        fi; true \
     \0";
     let ret = run_bash_cmd(cyclictest_cmd, environ);
     println!(
@@ -3091,11 +3516,80 @@ fn prepare_symlink(environ: &[*const u8]) {
     // ext4 镜像可能来自宿主机，文件不带有 +x 位。basic/lua/busybox 等测试
     // 脚本通过 ./run-all.sh 直接执行（不经过 bash），必须设 +x。
     // LTP inline runner 不受影响（使用 bash -c "./binary" 绕过权限检查）。
-    println!("[initproc] fixing +x permissions on test scripts ...");
-    let chmod_cmd =
-        "chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; true\0";
+    println!("[initproc] fixing +x permissions on writable test sources ...");
+    let chmod_cmd = "\
+        if [ ! -d /scratch ]; then \
+            chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; \
+        fi; true\0";
     let ret = run_bash_cmd(chmod_cmd, environ);
     println!("[initproc] chmod test scripts done, exit={}", ret);
+
+    // LA64 Python is fail-closed on the strict-aligned P4 runtime.  Never use
+    // the P3 /tools Python as a fallback: a missing or invalid P4 release must
+    // stay visible instead of silently changing the interpreter under a test.
+    #[cfg(target_arch = "loongarch64")]
+    let cpython_launcher_cmd = "\
+        launcher=/rescue/python3-wrapper; \
+        entry=/rescue/python-entry; \
+        if [ -x \"$launcher\" ] && [ -x \"$entry\" ]; then \
+            mkdir -p /usr/bin; \
+            ln -sf \"$launcher\" /usr/bin/python3; \
+            ln -sf \"$launcher\" /usr/bin/python; \
+            for name in pip pip3; do \
+                ln -sf \"$entry\" \"/usr/bin/$name\"; \
+            done; \
+            for script in /persist/python/user/bin/*; do \
+                [ -f \"$script\" ] || continue; \
+                name=${script##*/}; \
+                case \"$name\" in python|python3|pip|pip3|smolagent|smolagents) continue;; esac; \
+                ln -sf \"$entry\" \"/usr/bin/$name\"; \
+            done; \
+            if /usr/bin/python3 -S -c 'import os,sys; assert os.environ[\"CPYTHON_ROOT\"].startswith(\"/persist/python-runtime/releases/\"); assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix'; then \
+                echo 'P4 strict-aligned Python launchers installed'; \
+                if ddgs_status=$(/usr/bin/python3 -S /rescue/patch-ddgs-redirect); then \
+                    echo \"$ddgs_status\"; \
+                else \
+                    echo 'P4 DDGS redirect compatibility patch failed; web_search remains unavailable' >&2; \
+                fi; \
+                if smolagents_status=$(/usr/bin/python3 -S /rescue/patch-smolagents-action-type --allow-missing); then \
+                    echo \"$smolagents_status\"; \
+                    case \"$smolagents_status\" in \
+                        *'status=missing '*) \
+                            rm -f /usr/bin/smolagent /usr/bin/smolagents; \
+                            echo 'P4 smolagents is not installed; entries remain absent';; \
+                        *) \
+                            echo 'P4 smolagents interactive action type verified'; \
+                            for name in smolagent smolagents; do \
+                                if [ -f \"/persist/python/user/bin/$name\" ]; then \
+                                    ln -sf \"$entry\" \"/usr/bin/$name\"; \
+                                fi; \
+                            done;; \
+                    esac; \
+                else \
+                    echo 'P4 smolagents interactive action-type patch failed closed' >&2; \
+                    rm -f /usr/bin/smolagent /usr/bin/smolagents; \
+                fi; \
+            else \
+                echo 'P4 strict-aligned Python validation failed; launchers remain fail-closed' >&2; \
+            fi; \
+        else \
+            echo 'P4 strict-aligned Python policy launchers are missing' >&2; \
+        fi; \
+        true\0";
+    // RV64 has no corresponding strict-aligned P4 runtime yet. Preserve its
+    // existing isolated tools runtime instead of applying LA64 policy there.
+    #[cfg(target_arch = "riscv64")]
+    let cpython_launcher_cmd = "\
+        launcher=/tools/tests/cpython/python3-wrapper.sh; \
+        if [ -x /rescue/python3-wrapper ]; then launcher=/rescue/python3-wrapper; fi; \
+        if [ -x \"$launcher\" ] && [ -x /tools/tests/cpython/usr/bin/python3 ]; then \
+            mkdir -p /usr/bin; \
+            ln -sf \"$launcher\" /usr/bin/python3; \
+            ln -sf \"$launcher\" /usr/bin/python; \
+        fi; \
+        true\0";
+    let ret = run_bash_cmd(cpython_launcher_cmd, environ);
+    println!("[initproc] CPython launcher setup done, exit={}", ret);
 
     run_bash_cmd(
         "
@@ -3104,6 +3598,176 @@ fn prepare_symlink(environ: &[*const u8]) {
     ",
         environ,
     );
+}
+
+fn run_apk_ramfs_gate(environ: &[*const u8]) -> i32 {
+    // Keep package payloads and the APK database away from immutable P1/P3.
+    // On the board only the download cache uses the validated FAT32 scratch;
+    // the install root remains ramfs because APK needs Unix modes and links.
+    let cmd = r#"
+        set -eu
+        apk=/bin/apk.static
+        [ -x "$apk" ] || apk=/tools/bin/apk.static
+        [ -x "$apk" ]
+
+        root=/run/apk-root
+        repos=/run/apk-test.repositories
+        cache=/tmp/apk-cache
+        if [ -d /scratch ]; then
+            cache=/scratch/apk-cache
+        fi
+        rm -rf "$root"
+        mkdir -p "$root/lib/apk/db" "$root/etc/apk" "$root/var/cache/apk" "$cache"
+        : > "$root/etc/apk/world"
+        printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
+        rm -f "$cache"/zlib-*.apk
+
+        apk_cmd() {
+            "$apk" \
+                --root "$root" \
+                --cache-dir "$cache" \
+                --keys-dir /etc/apk/keys \
+                --repositories-file "$repos" \
+                "$@"
+        }
+
+        echo '[apk-test] stage=version'
+        "$apk" --version
+        echo '[apk-test] stage=update'
+        apk_cmd update
+        echo '[apk-test] stage=fetch'
+        (cd "$cache" && apk_cmd fetch zlib)
+        set -- "$cache"/zlib-*.apk
+        [ -s "$1" ]
+        echo '[apk-test] stage=add'
+        apk_cmd add busybox zlib
+        echo '[apk-test] stage=verify'
+        apk_cmd info -e busybox >/dev/null
+        [ -x "$root/bin/busybox" ]
+
+        loader="$root/lib/ld-musl-loongarch64.so.1"
+        [ -x "$loader" ]
+        echo '[apk-test] stage=exec'
+        result=$("$loader" --library-path "$root/lib" \
+            "$root/bin/busybox" echo APK_EXEC_OK)
+        [ "$result" = APK_EXEC_OK ]
+        echo "[apk-test] PASS root=$root cache=$cache"
+    "#;
+    // The board's shared-network HTTPS path can spend several minutes fetching
+    // three repository indexes. Keep a finite guard without treating that as a
+    // functional APK failure.
+    run_bash_cmd_timeout(cmd, environ, 900)
+}
+
+fn run_apk_persist_gate(environ: &[*const u8]) -> i32 {
+    // A commit marker is created only after the package tree and metadata have
+    // been flushed. If the first boot is interrupted, the next run discards
+    // the incomplete tree and installs again; a committed tree must verify as
+    // is, which makes the second boot a real persistence check.
+    let cmd = r#"
+        set -eu
+        apk=/bin/apk.static
+        [ -x "$apk" ] || apk=/tools/bin/apk.static
+        [ -x "$apk" ]
+
+        root=/persist/apk-root
+        state=/persist/apk-state
+        committed=$state/committed-v1
+        repos=/run/apk-persist.repositories
+        cache=/scratch/apk-cache
+        [ -f /persist/MANGO_STATE.txt ]
+        mkdir -p "$state" "$cache"
+        printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
+
+        apk_cmd() {
+            "$apk" \
+                --root "$root" \
+                --cache-dir "$cache" \
+                --keys-dir /etc/apk/keys \
+                --repositories-file "$repos" \
+                "$@"
+        }
+
+        mode=reuse
+        if [ ! -f "$committed" ]; then
+            mode=install
+            echo '[apk-persist] stage=prepare'
+            rm -rf "$root"
+            mkdir -p "$root/lib/apk/db" "$root/etc/apk" "$root/var/cache/apk"
+            : > "$root/etc/apk/world"
+            rm -f "$cache"/zlib-*.apk
+            echo '[apk-persist] stage=update'
+            apk_cmd update
+            echo '[apk-persist] stage=fetch'
+            (cd "$cache" && apk_cmd fetch zlib)
+            set -- "$cache"/zlib-*.apk
+            [ -s "$1" ]
+            echo '[apk-persist] stage=add'
+            apk_cmd add busybox zlib
+            sync
+            printf '%s\n' 'schema=1' 'packages=busybox,zlib' > "$state/.committed-v1.tmp"
+            sync
+            mv -f "$state/.committed-v1.tmp" "$committed"
+            sync
+        else
+            echo '[apk-persist] stage=reuse'
+        fi
+
+        echo '[apk-persist] stage=verify'
+        apk_cmd info -e busybox >/dev/null
+        apk_cmd info -e zlib >/dev/null
+        [ -x "$root/bin/busybox" ]
+        loader="$root/lib/ld-musl-loongarch64.so.1"
+        [ -x "$loader" ]
+        result=$("$loader" --library-path "$root/lib" \
+            "$root/bin/busybox" echo APK_PERSIST_EXEC_OK)
+        [ "$result" = APK_PERSIST_EXEC_OK ]
+        printf 'boot-ok mode=%s\n' "$mode" >> "$state/boot-history"
+        sync
+        echo "[apk-persist] PASS mode=$mode root=$root cache=$cache"
+    "#;
+    run_bash_cmd_timeout(cmd, environ, 900)
+}
+
+fn bind_apk_persist_runtime() -> bool {
+    const MS_BIND: usize = 4096;
+    let mut ok = true;
+    for (source, target) in [
+        ("/dev", "/persist/apk-root/dev"),
+        ("/proc", "/persist/apk-root/proc"),
+        ("/tmp", "/persist/apk-root/tmp"),
+        ("/run", "/persist/apk-root/run"),
+        ("/scratch", "/persist/apk-root/scratch"),
+        (
+            "/persist/python-runtime",
+            "/persist/apk-root/persist/python-runtime",
+        ),
+        ("/persist/python", "/persist/apk-root/persist/python"),
+        (
+            "/persist/python",
+            "/persist/apk-root/var/cache/mango-python",
+        ),
+    ] {
+        let source = format!("{}\0", source);
+        let target = format!("{}\0", target);
+        let ret = mount(source.as_ptr(), target.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
+        if ret == 0 {
+            println!(
+                "[apk-persist-shell] bind {} -> {}",
+                source.trim_end_matches('\0'),
+                target.trim_end_matches('\0')
+            );
+        } else {
+            println!(
+                "[apk-persist-shell] bind {} -> {} failed errno={}",
+                source.trim_end_matches('\0'),
+                target.trim_end_matches('\0'),
+                -ret
+            );
+            ok = false;
+        }
+    }
+    ok
 }
 
 fn install_apk_packages(environ: &[*const u8]) {
@@ -3127,6 +3791,224 @@ fn install_apk_packages(environ: &[*const u8]) {
     }
 }
 
+fn prepare_apk_persist_shell(environ: &[*const u8]) -> i32 {
+    // P4 stays an application root rather than replacing `/`. An interrupted
+    // first install has no commit marker and is rebuilt on the next boot; an
+    // already committed root is only verified and upgraded with launch files.
+    let prepare_cmd = r#"
+        set -eu
+        apk=/bin/apk.static
+        [ -x "$apk" ]
+
+        root=/persist/apk-root
+        state=/persist/apk-state
+        committed=$state/committed-v1
+        ready=$state/shell-ready-v1
+        cache=/scratch/apk-cache
+        repos=/run/apk-persist.repositories
+        [ -f /persist/MANGO_STATE.txt ]
+        mkdir -p "$state" "$cache" \
+            /persist/python/pycache /persist/python/tmp /persist/python/user
+        [ -x /persist/python-runtime/current/usr/bin/python3 ]
+        [ -r /persist/python-runtime/current/strict-runtime-manifest.json ]
+        printf '%s\n' 'https://dl-cdn.alpinelinux.org/alpine/edge/main' > "$repos"
+
+        apk_cmd() {
+            "$apk" \
+                --root "$root" \
+                --cache-dir "$cache" \
+                --keys-dir /etc/apk/keys \
+                --repositories-file "$repos" \
+                "$@"
+        }
+
+        if [ ! -f "$committed" ]; then
+            echo '[apk-persist-shell] stage=bootstrap'
+            rm -rf "$root"
+            mkdir -p "$root/lib/apk/db" "$root/etc/apk" "$root/var/cache/apk"
+            : > "$root/etc/apk/world"
+            apk_cmd update
+            apk_cmd add busybox zlib
+            sync
+            printf '%s\n' 'schema=1' 'packages=busybox,zlib' > "$state/.committed-v1.tmp"
+            sync
+            mv -f "$state/.committed-v1.tmp" "$committed"
+            sync
+        else
+            echo '[apk-persist-shell] stage=reuse'
+        fi
+
+        apk_cmd info -e busybox >/dev/null
+        apk_cmd info -e zlib >/dev/null
+        [ -x "$root/bin/busybox" ]
+        [ -x "$root/lib/ld-musl-loongarch64.so.1" ]
+
+        mkdir -p \
+            "$root/dev" "$root/proc" "$root/tmp" "$root/run" \
+            "$root/scratch" "$root/persist/python-runtime" \
+            "$root/persist/python" "$root/root" "$root/sbin" \
+            "$root/usr/bin" "$root/var/cache/mango-python" \
+            "$root/etc/apk/keys" "$root/etc/ssl/certs"
+        chmod 1777 "$root/tmp"
+
+        repair_busybox_sh() {
+            path=$1
+            target=$2
+			mutations=0
+			max_mutations=16
+			while :; do
+				listing=$(/bin/busybox mktemp /scratch/mango-bin-entries.XXXXXX) || return 1
+				if ! /bin/busybox ls -1A "$root/bin" > "$listing"; then
+					echo '[apk-persist-shell] failed to enumerate apk bin directory' >&2
+					/bin/busybox rm -f "$listing"
+					return 1
+				fi
+				count=$(/bin/busybox awk '$0 == "sh" { n++ } END { print n + 0 }' "$listing")
+				/bin/busybox rm -f "$listing"
+				case "$count" in *[!0-9]*|'')
+					echo '[apk-persist-shell] invalid apk bin enumeration result' >&2
+					return 1;;
+				esac
+
+				current_target=
+				if [ "$count" -gt 0 ]; then
+					if ! current_target=$(/bin/busybox readlink "$path"); then
+						echo "[apk-persist-shell] refusing unclassified entry $path" >&2
+						return 1
+					fi
+				fi
+
+				if [ "$count" -eq 1 ] && [ "$current_target" = "$target" ] && [ -x "$path" ]; then
+					return 0
+				fi
+				if [ "$mutations" -ge "$max_mutations" ]; then
+					break
+				fi
+
+				if [ "$count" -gt 0 ]; then
+					# readlink above proves that the lookup-selected entry is a
+					# symlink.  Remove exactly one legacy entry per iteration.
+					/bin/busybox rm -f "$path" || return 1
+				else
+					/bin/busybox ln -s "$target" "$path" || true
+				fi
+				mutations=$((mutations + 1))
+            done
+            echo "[apk-persist-shell] failed to repair $path" >&2
+            return 1
+        }
+
+        repair_busybox_sh "$root/bin/sh" busybox
+
+        install_changed() {
+            src=$1
+            dst=$2
+            mode=$3
+            if [ -L "$dst" ] || [ ! -f "$dst" ] || ! /bin/busybox cmp -s "$src" "$dst"; then
+                [ ! -L "$dst" ] || rm -f "$dst"
+                # The current ext4 driver can leave an unremovable stale
+                # `<dst>.tmp` inode after an interrupted rename.  A direct,
+                # idempotent copy avoids reusing that directory entry; a
+                # partial copy is detected and replaced on the next boot.
+                /bin/busybox cp "$src" "$dst"
+                chmod "$mode" "$dst"
+            fi
+        }
+
+        install_changed "$apk" "$root/sbin/apk.static" 0755
+        install_changed /usr/libexec/mango/apk-chroot "$root/sbin/apk" 0755
+        install_changed /usr/libexec/mango/persist-profile "$root/etc/profile" 0644
+        install_changed /rescue/python3-wrapper "$root/usr/bin/python3" 0755
+        install_changed /rescue/python-entry "$root/usr/bin/pip" 0755
+        install_changed /rescue/python-entry "$root/usr/bin/pip3" 0755
+        smolagents_ready=0
+        if [ -x /usr/bin/smolagent ] && \
+           /usr/bin/python3 -S /rescue/patch-smolagents-action-type --check >/dev/null; then
+            smolagents_ready=1
+        fi
+        for script in /persist/python/user/bin/*; do
+            [ -f "$script" ] || continue
+            name=${script##*/}
+            case "$name" in python|python3|pip|pip3|smolagent|smolagents) continue;; esac
+            install_changed /rescue/python-entry "$root/usr/bin/$name" 0755
+        done
+        if [ "$smolagents_ready" = 1 ]; then
+            for name in smolagent smolagents; do
+                if [ -f "/persist/python/user/bin/$name" ]; then
+                    install_changed /rescue/python-entry "$root/usr/bin/$name" 0755
+                fi
+            done
+        else
+            rm -f "$root/usr/bin/smolagent" "$root/usr/bin/smolagents"
+        fi
+        install_changed /etc/apk/repositories "$root/etc/apk/repositories" 0644
+        install_changed /etc/passwd "$root/etc/passwd" 0644
+        install_changed /etc/group "$root/etc/group" 0644
+        install_changed /etc/hosts "$root/etc/hosts" 0644
+        install_changed /etc/nsswitch.conf "$root/etc/nsswitch.conf" 0644
+        install_changed /proc/net/resolv.conf "$root/etc/resolv.conf" 0644
+        install_changed /etc/ssl/certs/ca-certificates.crt \
+            "$root/etc/ssl/certs/ca-certificates.crt" 0644
+        for key in /etc/apk/keys/*.pub; do
+            install_changed "$key" "$root/etc/apk/keys/$(basename "$key")" 0644
+        done
+        ln -sf /sbin/apk "$root/usr/bin/apk"
+        ln -sf python3 "$root/usr/bin/python"
+        ln -sf certs/ca-certificates.crt "$root/etc/ssl/cert.pem"
+
+        if [ ! -f "$ready" ]; then
+            printf '%s\n' 'schema=1' 'root=/persist/apk-root' > "$state/.shell-ready-v1.tmp"
+            sync
+            mv -f "$state/.shell-ready-v1.tmp" "$ready"
+            sync
+        fi
+        echo '[apk-persist-shell] stage=prepared'
+    "#;
+    let ret = run_bash_cmd_timeout(prepare_cmd, environ, 900);
+    if ret != 0 {
+        return ret;
+    }
+    if !bind_apk_persist_runtime() {
+        return 1 << 8;
+    }
+
+    let verify_cmd = r#"
+        set -eu
+        root=/persist/apk-root
+        [ -f /persist/apk-state/shell-ready-v1 ]
+        result=$(/bin/busybox chroot "$root" /bin/sh -c '
+            set -eu
+            /sbin/apk info -e busybox >/dev/null
+            /sbin/apk info -e zlib >/dev/null
+			[ "$(/bin/busybox readlink /bin/sh)" = busybox ]
+			verify_listing=$(/bin/busybox mktemp /tmp/mango-bin-entries.XXXXXX)
+			/bin/busybox ls -1A /bin > "$verify_listing"
+			sh_count=$(/bin/busybox grep -xc sh "$verify_listing")
+			/bin/busybox rm -f "$verify_listing"
+			[ "$sh_count" = 1 ]
+            [ -r /etc/ssl/cert.pem ]
+            [ -r /proc/net/resolv.conf ]
+            [ -f /etc/resolv.conf ]
+            [ ! -L /etc/resolv.conf ]
+            [ -s /etc/resolv.conf ]
+            /bin/busybox cmp -s /proc/net/resolv.conf /etc/resolv.conf
+            [ -x /usr/bin/python3 ]
+            python_result=$(/usr/bin/python3 -S -c "import os,sys; root=os.environ.get(\"CPYTHON_ROOT\",\"\"); assert root.startswith(\"/persist/python-runtime/releases/\"),root; assert os.environ.get(\"MANGO_PYTHON_POLICY\")==\"p4-strict-align-v1\"; assert \"/tools\" not in sys.executable and \"/tools\" not in sys.prefix; assert os.environ.get(\"PYTHONUSERBASE\")==\"/persist/python/user\"; print(\"PERSIST_STRICT_PYTHON_OK\")")
+            [ "$python_result" = PERSIST_STRICT_PYTHON_OK ]
+            probe=/tmp/mango-persist-shell-probe
+            echo ok > "$probe"
+            [ "$(/bin/busybox cat "$probe")" = ok ]
+            /bin/busybox rm -f "$probe"
+            /bin/busybox echo PERSIST_SHELL_OK
+        ')
+        [ "$result" = PERSIST_SHELL_OK ]
+        printf '%s\n' 'shell-ok' >> /persist/apk-state/boot-history
+        sync
+        echo '[apk-persist-shell] RESULT=PASS'
+    "#;
+    run_bash_cmd_timeout(verify_cmd, environ, 120)
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let path = "/bin/bash\0";
@@ -3143,16 +4025,16 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "OLDPWD=/root\0".as_ptr(),
         "PS1=\x1b[1m\x1b[33mMangoCore\x1b[0m:\x1b[1m\x1b[34m\\w\x1b[0m\\$ \0".as_ptr(),
         "_=/bin/bash\0".as_ptr(),
-        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin\0".as_ptr(),
+        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin:/tools/bin:/tools/sbin:/tools/usr/bin:/tools/usr/sbin\0".as_ptr(),
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        "LD_LIBRARY_PATH=/\0".as_ptr(),
+        "LD_LIBRARY_PATH=/lib:/tools/lib:/tools/usr/lib\0".as_ptr(),
         "LTP_DEV=/dev/vdb2\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext4\0".as_ptr(),
         "LTP_SINGLE_FS_TYPE=ext4\0".as_ptr(),
         core::ptr::null(),
     ];
 
-    let cfg = load_runtime_config();
+    let mut cfg = load_runtime_config();
 
     // Regression mode: run /regression binary standalone, report result, shutdown.
     if cfg.mode == RunMode::Regression {
@@ -3180,12 +4062,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     prepare_symlink(&environ);
 
-    if !cfg.skip_apk {
-        install_apk_packages(&environ);
-    } else {
-        println!("[initproc] skip_apk=true: skipping install_apk_packages");
-    }
-    
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
     let bash_ret = run_bash_cmd(bash_check, &environ);
     let has_bin_bash = bash_ret == 0;
@@ -3194,6 +4070,77 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}",
         bash_ret, has_bin_bash
     );
+
+    if apk_persist_test_enabled() {
+        println!("[apk-persist] START persistent ext4 package-manager gate");
+        let ret = run_apk_persist_gate(&environ);
+        if ret == 0 {
+            println!("[apk-persist] RESULT=PASS");
+        } else {
+            println!(
+                "[apk-persist] RESULT=FAIL wait_status={} exit={}",
+                ret,
+                exit_code_from_waitpid_status(ret)
+            );
+        }
+        println!("[apk-persist] entering diagnostic shell");
+        enter_shell(path, &environ);
+        shutdown();
+        return if ret == 0 { 0 } else { 1 };
+    }
+
+    if apk_persist_shell_enabled() {
+        println!("[apk-persist-shell] START interactive P4 application root");
+        let ret = prepare_apk_persist_shell(&environ);
+        if ret != 0 {
+            println!(
+                "[apk-persist-shell] RESULT=FAIL wait_status={} exit={}",
+                ret,
+                exit_code_from_waitpid_status(ret)
+            );
+            println!("[apk-persist-shell] entering host diagnostic shell");
+        } else {
+            println!("[apk-persist-shell] ready: run persist-shell, then apk add <package>");
+        }
+        enter_shell(path, &environ);
+        shutdown();
+        return if ret == 0 { 0 } else { 1 };
+    }
+
+    if apk_test_enabled() {
+        println!("[apk-test] START isolated ramfs package-manager gate");
+        let ret = run_apk_ramfs_gate(&environ);
+        if ret == 0 {
+            println!("[apk-test] RESULT=PASS");
+        } else {
+            println!(
+                "[apk-test] RESULT=FAIL wait_status={} exit={}",
+                ret,
+                exit_code_from_waitpid_status(ret)
+            );
+        }
+        println!("[apk-test] entering diagnostic shell");
+        enter_shell(path, &environ);
+        shutdown();
+        return if ret == 0 { 0 } else { 1 };
+    }
+
+    apply_board_core_test_focus(&mut cfg);
+    apply_cpython_test_focus(&mut cfg);
+    apply_board_shell_mode(&mut cfg);
+
+    // Keep the board's strict P4/APK marker paths deterministic. Normal develop
+    // runs still install the optional e2fsprogs package before test scheduling.
+    if !cfg.skip_apk {
+        install_apk_packages(&environ);
+    } else {
+        println!("[initproc] skip_apk=true: skipping install_apk_packages");
+    }
+
+    // println!("[initproc] running fs_test...");
+    // let fs_test_cmd = "cd / && ./fs_test\0";
+    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
+    // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     // === fs_test fork+shell perf diagnostic (uncomment to run) ===
  /* // Enable with EXTRA_FEATURES=perf_diag

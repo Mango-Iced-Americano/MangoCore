@@ -1,0 +1,88 @@
+{
+  "artifacts": [
+    {
+      "path": "/Users/luzimo/dev/MangoCore/kernel-2k1000-perf-diag-shell.ui",
+      "sha256": "5e3f6cd464be0d0dc0f72a45f49f95d6d286334779908d6671252708c21624e5",
+      "size": 16539304
+    },
+    {
+      "path": "/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-anon-unmap-quant/artifacts/kernel-la64-perf-diag-shell",
+      "sha256": "4ba561dd8bc74a752ed905806d478d885bf07257f3926f6b2b25c53a7af93654",
+      "size": 62220920
+    },
+    {
+      "path": "/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-anon-unmap-quant/artifacts/kernel-rv64-perf-diag-shell",
+      "sha256": "ffb2af99d1ad0c356b03ede23d9199060732f76a0999b7cb33211147826cf4f6",
+      "size": 77205152
+    }
+  ],
+  "artifacts_updated_utc": "2026-07-17T08:30:47.135050Z",
+  "created_utc": "2026-07-17T08:21:36.558895Z",
+  "docker_image": {
+    "id": "sha256:5c04dbc38562b1cd578c33c9cd321d4731cb8cdd00c82b2320a4350754faa6b0",
+    "name": "zhouzhouyi/os-contest:20260104",
+    "repo_digests": "[\"zhouzhouyi/os-contest@sha256:5c04dbc38562b1cd578c33c9cd321d4731cb8cdd00c82b2320a4350754faa6b0\"]"
+  },
+  "git": {
+    "branch": "la64-on-board",
+    "dirty_diff_sha256": "f5a908083c005a6a3ded01362cf3ecf3dc4b017cc87ce6456bd31dd510a1b5c8",
+    "head": "0a738d66d5caf4f816676f7f1b34af8ee00067d1",
+    "status": "M Makefile\n M os/Makefile\n M os/src/fs/sysfs/files/diag.rs\n M os/src/hal/arch/loongarch64/linker.ld\n M os/src/lang_items.rs\n M os/src/mm/vma.rs\n M os/src/mm/vma_set.rs\n M os/src/task/perf.rs\n M scripts/build_cpython_runtime_la64_strict.sh\n M scripts/diag_smoke_test.sh\n M scripts/kernel_perf.py\n M scripts/run_cpython_bench_matrix.py\n M user/src/lang_items.rs"
+  },
+  "host": {
+    "docker": "29.5.2/29.5.2",
+    "machine": "arm64",
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.9.6"
+  },
+  "notes": [
+    "strict-aligned runtime solidification and 2K1000LA P4 ext4 anonymous private VMA release quantification"
+  ],
+  "repository": "/Users/luzimo/dev/MangoCore",
+  "run_id": "20260717T-anon-unmap-quant",
+  "schema": 1,
+  "security": {
+    "environment_recorded": false,
+    "redaction": "API keys, Authorization bearer values and known key variables"
+  },
+  "serial": {
+    "device": "/dev/cu.wchusbserial120",
+    "owners": []
+  },
+  "source": {
+    "build_input_diff_sha256": "345f82e6cdef0a4d1f8cb05f9654f6d2610c78bb709da69b371784a4ade17019",
+    "dirty_diff_sha256": "f5a908083c005a6a3ded01362cf3ecf3dc4b017cc87ce6456bd31dd510a1b5c8",
+    "head": "0a738d66d5caf4f816676f7f1b34af8ee00067d1",
+    "untracked_input_sha256": "a5fd42ec95609778c025b073117e5780d8f9ec360d4c1795fac7bba9184679c6",
+    "untracked_inputs": [
+      {
+        "path": "scripts/install_cpython_runtime_la64_strict.py",
+        "sha256": "6f186b1ddd10e647f716cbbfbb2513bb4b4384810bb2c5387998208244b1fde1",
+        "size": 9405
+      },
+      {
+        "path": "user/vendor/buddy_system_allocator/Cargo.lock",
+        "sha256": "c7ba960fb407945cc90e3b29f98ffbefb137fd08905de18c355046e92137a421",
+        "size": 382
+      }
+    ]
+  },
+  "source_checkpoint": {
+    "build_input_diff_sha256": "345f82e6cdef0a4d1f8cb05f9654f6d2610c78bb709da69b371784a4ade17019",
+    "dirty_diff_sha256": "bca2555b64eb68bf7b19b4c3a4e5731386714a2fbdeb161a1cd59ef69a5d88d9",
+    "head": "0a738d66d5caf4f816676f7f1b34af8ee00067d1",
+    "untracked_input_sha256": "a5fd42ec95609778c025b073117e5780d8f9ec360d4c1795fac7bba9184679c6",
+    "untracked_inputs": [
+      {
+        "path": "scripts/install_cpython_runtime_la64_strict.py",
+        "sha256": "6f186b1ddd10e647f716cbbfbb2513bb4b4384810bb2c5387998208244b1fde1",
+        "size": 9405
+      },
+      {
+        "path": "user/vendor/buddy_system_allocator/Cargo.lock",
+        "sha256": "c7ba960fb407945cc90e3b29f98ffbefb137fd08905de18c355046e92137a421",
+        "size": 382
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+cache=/scratch/apk-cache
+if [ ! -d /scratch ]; then
+    cache=/var/cache/apk
+fi
+
+exec /sbin/apk.static \
+    --cache-dir "$cache" \
+    --keys-dir /etc/apk/keys \
+    --repositories-file /etc/apk/repositories \
+    "$@"

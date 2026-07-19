@@ -1,0 +1,164 @@
+2026-07-16T09:15:43.763521Z __PERF_BEGIN_ext4_string_memory-1-588e54d5__
+2026-07-16T09:15:44.725078Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_string_memory-1-588e54d5_TRACE_OFF__
+2026-07-16T09:15:45.352428Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_string_memory-1-588e54d5_STATS_OFF__
+2026-07-16T09:15:46.012779Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_string_memory-1-588e54d5_PROFILE__
+2026-07-16T09:15:46.598715Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_string_memory-1-588e54d5_RESET__
+2026-07-16T09:15:47.336878Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_BEFORE_RECLAIM__
+2026-07-16T09:15:47.370513Z reclaim_runs_total=0
+2026-07-16T09:15:47.373311Z reclaim_pages_scanned_total=0
+2026-07-16T09:15:47.376082Z reclaim_pages_freed_total=0
+2026-07-16T09:15:47.378822Z clock_scanned=0
+2026-07-16T09:15:47.378852Z clock_second_chance=0
+2026-07-16T09:15:47.380104Z clock_evicted=0
+2026-07-16T09:15:47.384842Z __PERF_STATS_BEFORE_RECLAIM_END__
+2026-07-16T09:15:48.045073Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_BEFORE_TLB__
+2026-07-16T09:15:48.078438Z tlb_flushes=0
+2026-07-16T09:15:48.078490Z tlb_full=0
+2026-07-16T09:15:48.081173Z tlb_page=0
+2026-07-16T09:15:48.081195Z tlb_activate=0
+2026-07-16T09:15:48.081812Z tlb_global=0
+2026-07-16T09:15:48.086458Z __PERF_STATS_BEFORE_TLB_END__
+2026-07-16T09:15:48.764196Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_BEFORE_HEAP__
+2026-07-16T09:15:48.797528Z heap_current_bytes=8487672
+2026-07-16T09:15:48.800351Z heap_max_bytes=9869464
+2026-07-16T09:15:48.803209Z heap_free_kb=188319
+2026-07-16T09:15:48.803257Z heap_total_kb=196607
+2026-07-16T09:15:48.805784Z heap_alloc_calls=0
+2026-07-16T09:15:48.808584Z heap_alloc_ticks_total=0
+2026-07-16T09:15:48.811435Z heap_alloc_ticks_max=0
+2026-07-16T09:15:48.811459Z heap_dealloc_calls=0
+2026-07-16T09:15:48.814180Z heap_dealloc_ticks_total=0
+2026-07-16T09:15:48.816965Z heap_dealloc_ticks_max=0
+2026-07-16T09:15:48.819717Z heap_dealloc_scan_steps_total=0
+2026-07-16T09:15:48.822528Z page_faults=0
+2026-07-16T09:15:48.822565Z pagefault_ticks_total=0
+2026-07-16T09:15:48.825399Z pagefault_time_count=0
+2026-07-16T09:15:48.828104Z frame_alloc_hits=0
+2026-07-16T09:15:48.828172Z frame_free_hits=0
+2026-07-16T09:15:48.830856Z frame_alloc_ticks_total=0
+2026-07-16T09:15:48.832298Z frame_alloc_time_count=0
+2026-07-16T09:15:48.836859Z __PERF_STATS_BEFORE_HEAP_END__
+2026-07-16T09:15:49.611855Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_BEFORE_PAGECACHE__
+2026-07-16T09:15:49.645807Z pc_read_calls=0
+2026-07-16T09:15:49.648617Z pc_read_pages=0
+2026-07-16T09:15:49.648638Z pc_read_miss=0
+2026-07-16T09:15:49.651402Z pc_read_cycles=0
+2026-07-16T09:15:49.651424Z pc_read_hit_cycles=0
+2026-07-16T09:15:49.654141Z pc_read_miss_cycles=0
+2026-07-16T09:15:49.656900Z pc_copy_cycles=0
+2026-07-16T09:15:49.656920Z pc_lookup_cycles=0
+2026-07-16T09:15:49.659676Z pc_write_calls=0
+2026-07-16T09:15:49.659693Z pc_write_pages=0
+2026-07-16T09:15:49.662433Z pc_write_overwrite=0
+2026-07-16T09:15:49.665313Z pc_write_eventually_full=0
+2026-07-16T09:15:49.665365Z pc_write_cycles=0
+2026-07-16T09:15:49.668113Z pc_wb_calls=0
+2026-07-16T09:15:49.668133Z pc_wb_pages=0
+2026-07-16T09:15:49.670810Z pc_wb_cycles=0
+2026-07-16T09:15:49.673676Z pc_falloc_cycles=0
+2026-07-16T09:15:49.673698Z wb_bg_calls=0
+2026-07-16T09:15:49.676232Z wb_throttle_calls=0
+2026-07-16T09:15:49.676247Z wb_redirty_pages=0
+2026-07-16T09:15:49.681082Z __PERF_STATS_BEFORE_PAGECACHE_END__
+2026-07-16T09:15:50.418562Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_BEFORE_BLOCKIO__
+2026-07-16T09:15:50.452393Z blk_vread_reqs=0
+2026-07-16T09:15:50.455049Z blk_vread_secs=0
+2026-07-16T09:15:50.455066Z blk_vwrite_reqs=0
+2026-07-16T09:15:50.457820Z blk_vwrite_secs=0
+2026-07-16T09:15:50.457835Z sata_read_reqs=0
+2026-07-16T09:15:50.460592Z sata_read_bytes=0
+2026-07-16T09:15:50.463317Z sata_read_ticks_total=0
+2026-07-16T09:15:50.463327Z sata_read_ticks_max=0
+2026-07-16T09:15:50.466128Z sata_write_reqs=0
+2026-07-16T09:15:50.468959Z sata_write_bytes=0
+2026-07-16T09:15:50.468977Z sata_write_ticks_total=0
+2026-07-16T09:15:50.471687Z sata_write_ticks_max=0
+2026-07-16T09:15:50.474476Z sata_flush_reqs=0
+2026-07-16T09:15:50.475179Z sata_flush_ticks_total=0
+2026-07-16T09:15:50.480026Z __PERF_STATS_BEFORE_BLOCKIO_END__
+2026-07-16T09:15:51.105920Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_string_memory-1-588e54d5_STATS_ON__
+2026-07-16T09:15:53.919003Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_ext4_string_memory-1-588e54d5__
+2026-07-16T09:15:54.221178Z [CPYTHON BENCH START] bm_string tmp=/persist/pyperf/work/run-195
+2026-07-16T09:16:20.083481Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"e45f6e332e3d34ddde2f574a8890e6e8eae38c3feebf51f4a114a1c45a69f184","target_stats":true,"tmpdir":"/persist/pyperf/work/run-195/tmp","type":"environment","warmups":0}
+2026-07-16T09:16:20.091559Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","schema":1,"type":"start"}
+2026-07-16T09:16:32.348248Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","elapsed_ns":11621561370,"elapsed_seconds":11.62156137,"max_rss":23572,"result":"3827289","sample":1,"schema":1,"sys_seconds":8.736127999999999,"type":"sample","user_seconds":2.867254000000001}
+2026-07-16T09:16:32.369644Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","cv_percent":0.0,"max_ns":11621561370,"mean_ns":11621561370,"median_ns":11621561370,"min_ns":11621561370,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":0}
+2026-07-16T09:16:32.380578Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T09:16:32.777466Z [CPYTHON BENCH END] bm_string PASS rc=0
+2026-07-16T09:16:32.829707Z __PERF_WORK_END_ext4_string_memory-1-588e54d5__
+2026-07-16T09:16:32.834151Z __PERF_ACK_ext4_string_memory-1-588e54d5_WORK__
+2026-07-16T09:16:33.471076Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_string_memory-1-588e54d5_STATS_DONE__
+2026-07-16T09:16:34.195725Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_AFTER_RECLAIM__
+2026-07-16T09:16:34.229553Z reclaim_runs_total=1173
+2026-07-16T09:16:34.232338Z reclaim_pages_scanned_total=0
+2026-07-16T09:16:34.235104Z reclaim_pages_freed_total=144
+2026-07-16T09:16:34.237902Z clock_scanned=1253
+2026-07-16T09:16:34.240114Z clock_second_chance=12
+2026-07-16T09:16:34.240131Z clock_evicted=144
+2026-07-16T09:16:34.244851Z __PERF_STATS_AFTER_RECLAIM_END__
+2026-07-16T09:16:34.896044Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_AFTER_TLB__
+2026-07-16T09:16:34.929254Z tlb_flushes=1761177
+2026-07-16T09:16:34.931977Z tlb_full=0
+2026-07-16T09:16:34.932009Z tlb_page=1761177
+2026-07-16T09:16:34.934096Z tlb_activate=379136
+2026-07-16T09:16:34.934110Z tlb_global=0
+2026-07-16T09:16:34.938608Z __PERF_STATS_AFTER_TLB_END__
+2026-07-16T09:16:35.606945Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_AFTER_HEAP__
+2026-07-16T09:16:35.640053Z heap_current_bytes=8526328
+2026-07-16T09:16:35.642796Z heap_max_bytes=9897056
+2026-07-16T09:16:35.645570Z heap_free_kb=188281
+2026-07-16T09:16:35.645593Z heap_total_kb=196607
+2026-07-16T09:16:35.648360Z heap_alloc_calls=21391
+2026-07-16T09:16:35.651051Z heap_alloc_ticks_total=602379
+2026-07-16T09:16:35.653956Z heap_alloc_ticks_max=351
+2026-07-16T09:16:35.656690Z heap_dealloc_calls=21079
+2026-07-16T09:16:35.659434Z heap_dealloc_ticks_total=929336
+2026-07-16T09:16:35.662307Z heap_dealloc_ticks_max=1591
+2026-07-16T09:16:35.665004Z heap_dealloc_scan_steps_total=24596
+2026-07-16T09:16:35.665029Z page_faults=4397
+2026-07-16T09:16:35.667837Z pagefault_ticks_total=11232986
+2026-07-16T09:16:35.670607Z pagefault_time_count=4397
+2026-07-16T09:16:35.673376Z frame_alloc_hits=8935
+2026-07-16T09:16:35.676167Z frame_free_hits=8556
+2026-07-16T09:16:35.678963Z frame_alloc_ticks_total=14935110
+2026-07-16T09:16:35.679608Z frame_alloc_time_count=8935
+2026-07-16T09:16:35.684428Z __PERF_STATS_AFTER_HEAP_END__
+2026-07-16T09:16:36.446614Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_AFTER_PAGECACHE__
+2026-07-16T09:16:36.480171Z pc_read_calls=0
+2026-07-16T09:16:36.482821Z pc_read_pages=0
+2026-07-16T09:16:36.482835Z pc_read_miss=8
+2026-07-16T09:16:36.485621Z pc_read_cycles=0
+2026-07-16T09:16:36.485635Z pc_read_hit_cycles=0
+2026-07-16T09:16:36.488459Z pc_read_miss_cycles=0
+2026-07-16T09:16:36.491238Z pc_copy_cycles=0
+2026-07-16T09:16:36.491253Z pc_lookup_cycles=0
+2026-07-16T09:16:36.493962Z pc_write_calls=0
+2026-07-16T09:16:36.493973Z pc_write_pages=0
+2026-07-16T09:16:36.496747Z pc_write_overwrite=0
+2026-07-16T09:16:36.499623Z pc_write_eventually_full=0
+2026-07-16T09:16:36.499646Z pc_write_cycles=0
+2026-07-16T09:16:36.502317Z pc_wb_calls=0
+2026-07-16T09:16:36.502332Z pc_wb_pages=0
+2026-07-16T09:16:36.505175Z pc_wb_cycles=0
+2026-07-16T09:16:36.507961Z pc_falloc_cycles=15940
+2026-07-16T09:16:36.507979Z wb_bg_calls=0
+2026-07-16T09:16:36.510830Z wb_throttle_calls=0
+2026-07-16T09:16:36.510851Z wb_redirty_pages=0
+2026-07-16T09:16:36.515728Z __PERF_STATS_AFTER_PAGECACHE_END__
+2026-07-16T09:16:37.239984Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_STATS_AFTER_BLOCKIO__
+2026-07-16T09:16:37.273299Z blk_vread_reqs=0
+2026-07-16T09:16:37.276054Z blk_vread_secs=0
+2026-07-16T09:16:37.276069Z blk_vwrite_reqs=0
+2026-07-16T09:16:37.278867Z blk_vwrite_secs=0
+2026-07-16T09:16:37.278888Z sata_read_reqs=8
+2026-07-16T09:16:37.281643Z sata_read_bytes=32768
+2026-07-16T09:16:37.284445Z sata_read_ticks_total=349546
+2026-07-16T09:16:37.287197Z sata_read_ticks_max=90160
+2026-07-16T09:16:37.287216Z sata_write_reqs=0
+2026-07-16T09:16:37.290041Z sata_write_bytes=0
+2026-07-16T09:16:37.292782Z sata_write_ticks_total=0
+2026-07-16T09:16:37.295504Z sata_write_ticks_max=0
+2026-07-16T09:16:37.295518Z sata_flush_reqs=0
+2026-07-16T09:16:37.297240Z sata_flush_ticks_total=0
+2026-07-16T09:16:37.302144Z __PERF_STATS_AFTER_BLOCKIO_END__
+2026-07-16T09:16:37.757791Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/mangocore-cpython-bench-suite[0m# __PERF_END_ext4_string_memory-1-588e54d5__ rc=0

@@ -32,9 +32,7 @@ pub fn program_timer_delta(delta_ticks: u64) {
     use super::register::TCfg;
     let val = (delta_ticks.max(1).saturating_add(3) & !3).max(4) as usize;
     let mut cfg = TCfg::read();
-    cfg.set_enable(true)
-        .set_periodic(false)
-        .set_init_val(val);
+    cfg.set_enable(true).set_periodic(false).set_init_val(val);
     cfg.write();
     crate::task::processor::record_sched_program_timer_cycles(profile_start);
 }
@@ -56,7 +54,7 @@ pub fn get_timer_freq_first_time() {
     let div = cfg5.get_bits(16, 31);
     // 计算时钟频率
     let cc_freq = base_freq * mul / div;
-    println!(
+    boot_trace!(
         "[get_timer_freq_first_time] clk freq: {}(from CPUCFG)",
         cc_freq
     );

@@ -1,0 +1,6 @@
+2026-07-16T07:56:19.930431Z __PERF_BEGIN_cpybench_deploy-1-addb319e__
+2026-07-16T07:56:20.868839Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_ACK_cpybench_deploy-1-addb319e_TRACE_OFF__
+2026-07-16T07:56:23.767764Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_cpybench_deploy-1-addb319e__
+2026-07-16T07:56:53.571803Z __PERF_WORK_END_cpybench_deploy-1-addb319e__
+2026-07-16T07:56:53.576174Z __PERF_ACK_cpybench_deploy-1-addb319e_WORK__
+2026-07-16T07:56:54.011090Z [1m[33mMangoCore[0m:[1m[34m/scratch[0m# __PERF_END_cpybench_deploy-1-addb319e__ rc=0

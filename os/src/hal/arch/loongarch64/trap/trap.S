@@ -1,4 +1,5 @@
 FP_START = 32
+LSX_START = 70*8
 .altmacro
 .macro SAVE_GP n
     st.d $r\n, $sp, \n*8
@@ -12,11 +13,19 @@ FP_START = 32
 .macro LOAD_FP n, m
     fld.d $f\n, $sp, \m*8
 .endm
+.macro SAVE_LSX n
+    vst $vr\n, $sp, LSX_START+(\n*16)
+.endm
+.macro LOAD_LSX n
+    vld $vr\n, $sp, LSX_START+(\n*16)
+.endm
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
     .align 2
 .equ CSR_SAVE, 0x30    
+.equ CSR_EUEN, 0x2
+.equ EUEN_LSX, 0x2
 .equ CSR_ERA, 0x6
 .equ CSR_PRMD, 0x1
 .equ CSR_ASID, 0x18
@@ -43,6 +52,18 @@ __alltraps:
         .set n, n+1
         .set m, m+1
     .endr
+
+    # Save complete LSX vectors only when bootstrap enabled EUEN.SXE. Their
+    # low halves alias the scalar FPU registers saved above.
+    csrrd $t0, CSR_EUEN
+    andi $t0, $t0, EUEN_LSX
+    beqz $t0, .Lalltraps_lsx_saved
+    .set n, 0
+    .rept 32
+        SAVE_LSX %n
+        .set n, n+1
+    .endr
+.Lalltraps_lsx_saved:
 
     # we can use t0/t1/t2 freely, because they have been saved in TrapContext
     # save FCSR
@@ -95,13 +116,17 @@ __restore:
 
     slli.d $a1, $a1, 12
     csrrd  $t0, CSR_PGDL
-    beq    $t0, $a1, 1f
-    # PGDL changed → write PGDL + ASID atomically (PTW requires no branch between them)
-    csrwr  $a1, CSR_PGDL
-    # ASID: read-modify-write to preserve ASID-width field (bits 16-23)
     csrrd  $t1, CSR_ASID
-    bstrpick.d $t1, $t1, 23, 16  # extract bits 16-23 (ASID width)
-    or     $a2, $a2, $t1         # combine with new ASID (bits 0-9)
+    # CSR_ASID[9:0] 是当前 ASID；第 [23:16] 位描述硬件实现的 ASID 位宽，绝不能
+    # 将其按位或到进程 ASID 值中。
+    bstrpick.d $t1, $t1, 9, 0
+    # PGDL 相同不代表地址空间上下文相同：两个任务可能共享页表根但使用不同 ASID。
+    # 任一字段变化时都必须重写这一对寄存器。
+    bne    $t0, $a1, 2f
+    beq    $t1, $a2, 1f
+2:
+    # 保持 PGDL 与 ASID 同步，两次写寄存器之间不能插入分支。
+    csrwr  $a1, CSR_PGDL
     csrwr  $a2, CSR_ASID
     invtlb 0x3, $zero, $zero
 1:
@@ -133,20 +158,36 @@ __restore:
     ld.d $t1, $sp, 0
     csrwr $t0, CSR_PRMD
     csrwr $t1, CSR_ERA
-    # restore general purpose registers except r0/$sp
-    LOAD_GP 1
-    LOAD_GP 2
-    .set n, 4
-    .rept 28
-        LOAD_GP %n
+    # FPRs alias the low 64 bits of LSX vector registers. Restoring scalar FPRs
+    # after VLD destroys the vector upper halves on real hardware. When LSX is
+    # enabled the complete vector snapshot is authoritative; otherwise restore
+    # the scalar-only snapshot.
+    csrrd $t0, CSR_EUEN
+    andi $t0, $t0, EUEN_LSX
+    beqz $t0, .Lrestore_scalar_fp
+    .set n, 0
+    .rept 32
+        LOAD_LSX %n
         .set n, n+1
     .endr
+    b .Lrestore_fp_done
+.Lrestore_scalar_fp:
     .set n, 0
     .set m, FP_START
     .rept 32
         LOAD_FP %n, %m
         .set n, n+1
         .set m, m+1
+    .endr
+.Lrestore_fp_done:
+    # Restore general purpose registers only after all control-flow decisions;
+    # the selection above uses $t0 and must not clobber the user's saved value.
+    LOAD_GP 1
+    LOAD_GP 2
+    .set n, 4
+    .rept 28
+        LOAD_GP %n
+        .set n, n+1
     .endr
     # back to user stack
     LOAD_GP 3

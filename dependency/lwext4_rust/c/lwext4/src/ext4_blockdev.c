@@ -85,6 +85,20 @@ static int ext4_bdif_bwrite(struct ext4_blockdev *bdev, const void *buf,
 	return r;
 }
 
+int ext4_block_flush_device(struct ext4_blockdev *bdev)
+{
+	if (!bdev || !bdev->bdif)
+		return EINVAL;
+
+	if (!bdev->bdif->flush)
+		return EOK;
+
+	ext4_bdif_lock(bdev);
+	int r = bdev->bdif->flush(bdev);
+	ext4_bdif_unlock(bdev);
+	return r;
+}
+
 int ext4_block_init(struct ext4_blockdev *bdev)
 {
 	int rc;
@@ -452,7 +466,9 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 			return r;
 
 	}
-	return EOK;
+	/* Draining the software cache is not a durability boundary when the
+	 * physical device has a volatile write cache. */
+	return ext4_block_flush_device(bdev);
 }
 
 int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)

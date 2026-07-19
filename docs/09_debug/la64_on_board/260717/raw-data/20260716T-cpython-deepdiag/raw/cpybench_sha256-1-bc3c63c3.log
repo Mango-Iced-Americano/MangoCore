@@ -1,0 +1,6 @@
+2026-07-16T08:17:36.632515Z __PERF_BEGIN_cpybench_sha256-1-bc3c63c3__
+2026-07-16T08:17:37.532570Z [1m[33mMangoCore[0m:[1m[34m/scratch[0m# __PERF_ACK_cpybench_sha256-1-bc3c63c3_TRACE_OFF__
+2026-07-16T08:17:40.138341Z [1m[33mMangoCore[0m:[1m[34m/scratch[0m# __PERF_WORK_BEGIN_cpybench_sha256-1-bc3c63c3__
+2026-07-16T08:17:42.050447Z __PERF_WORK_END_cpybench_sha256-1-bc3c63c3__
+2026-07-16T08:17:42.054574Z __PERF_ACK_cpybench_sha256-1-bc3c63c3_WORK__
+2026-07-16T08:17:42.493246Z [1m[33mMangoCore[0m:[1m[34m/scratch[0m# __PERF_END_cpybench_sha256-1-bc3c63c3__ rc=0

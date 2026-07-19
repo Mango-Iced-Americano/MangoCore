@@ -36,6 +36,7 @@ pub const TCP_INFO: u32 = 11;
 pub const TCP_CONGESTION: u32 = 13;
 
 /// option name (IP)
+pub const IP_RECVERR: u32 = 11;
 pub const MCAST_JOIN_GROUP: u32 = 42;
 pub const MCAST_LEAVE_GROUP: u32 = 45;
 
@@ -52,7 +53,8 @@ pub const SO_RCVBUF: u32 = 8;
 pub const SO_KEEPALIVE: u32 = 9;
 pub const SO_OOBINLINE: u32 = 10;
 pub const SO_REUSEPORT: u32 = 15;
-pub const SO_BINDTODEVICE: u32 = 25;pub const SO_RCVTIMEO: u32 = 20;
+pub const SO_BINDTODEVICE: u32 = 25;
+pub const SO_RCVTIMEO: u32 = 20;
 pub const SO_SNDTIMEO: u32 = 21;
 
 bitflags! {

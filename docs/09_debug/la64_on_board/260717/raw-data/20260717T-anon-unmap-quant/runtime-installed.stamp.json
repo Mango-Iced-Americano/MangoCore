@@ -1,0 +1,9 @@
+{
+  "arch": "loongarch64",
+  "artifact": "cpython-la64-strict-3.14.5-abbc714ce59f.tar.xz",
+  "artifact_sha256": "abbc714ce59f105fe1ebaab00cc053cea3d09161a6e51c2431112b6beeaff56a",
+  "installed_utc": "2026-07-17T09:16:02.217832Z",
+  "manifest_sha256": "2be976aabcf2a3f964447a3cbaca818f588683e6d3540bb40b6c5ad3eabe447c",
+  "runtime_policy": "mangocore-la64-strict-align-v1",
+  "schema": 1
+}

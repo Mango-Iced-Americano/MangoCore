@@ -95,6 +95,7 @@ pub struct UserContext {
 
 impl UserContext {
     pub const PADDING_SIZE: usize = USER_CONTEXT_SIGMASK_PADDING;
+    pub const MCONTEXT_OFFSET: usize = core::mem::offset_of!(Self, mcontext);
 
     pub fn new(
         flags: usize,

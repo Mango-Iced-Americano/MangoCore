@@ -1,7 +1,7 @@
 //! /proc/version — 内核版本信息
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::format;
 
 pub fn version_content(

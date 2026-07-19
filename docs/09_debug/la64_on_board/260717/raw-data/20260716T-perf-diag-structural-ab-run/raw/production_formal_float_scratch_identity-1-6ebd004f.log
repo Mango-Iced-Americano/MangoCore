@@ -1,0 +1,13 @@
+2026-07-16T13:16:17.146995Z __PERF_BEGIN_production_formal_float_scratch_identity-1-6ebd004f__
+2026-07-16T13:16:18.210846Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_production_formal_float_scratch_identity-1-6ebd004f_TRACE_OFF__
+2026-07-16T13:16:21.108280Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_production_formal_float_scratch_identity-1-6ebd004f__
+2026-07-16T13:16:21.513313Z [CPYTHON BENCH START] bm_float tmp=/scratch/cpython-bench/run-1314
+2026-07-16T13:16:56.466521Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"e45f6e332e3d34ddde2f574a8890e6e8eae38c3feebf51f4a114a1c45a69f184","target_stats":false,"tmpdir":"/scratch/cpython-bench/run-1314/tmp","type":"environment","warmups":0}
+2026-07-16T13:16:56.474663Z CPYTHON_BENCH_JSON {"benchmark":"bm_float","schema":1,"type":"start"}
+2026-07-16T13:19:24.945578Z CPYTHON_BENCH_JSON {"benchmark":"bm_float","elapsed_ns":148328669300,"elapsed_seconds":148.3286693,"max_rss":16716,"result":"9559531.70473361","sample":1,"schema":1,"sys_seconds":48.825765000000004,"type":"sample","user_seconds":99.27256200000001}
+2026-07-16T13:19:24.967735Z CPYTHON_BENCH_JSON {"benchmark":"bm_float","cv_percent":0.0,"max_ns":148328669300,"mean_ns":148328669300,"median_ns":148328669300,"min_ns":148328669300,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":0}
+2026-07-16T13:19:24.979012Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T13:19:25.308426Z [CPYTHON BENCH END] bm_float PASS rc=0
+2026-07-16T13:19:25.415533Z __PERF_WORK_END_production_formal_float_scratch_identity-1-6ebd004f__
+2026-07-16T13:19:25.421963Z __PERF_ACK_production_formal_float_scratch_identity-1-6ebd004f_WORK__
+2026-07-16T13:19:26.009385Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_production_formal_float_scratch_identity-1-6ebd004f__ rc=0

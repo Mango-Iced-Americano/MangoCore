@@ -18,9 +18,7 @@ fn is_local_bind_addr(addr: IpAddress) -> bool {
         return true;
     }
     match addr {
-        IpAddress::Ipv4(ip) => {
-            ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
-        }
+        IpAddress::Ipv4(ip) => ip.is_loopback() || crate::net::net_core::is_local_addr(ip),
         IpAddress::Ipv6(ip) => {
             if ip == Ipv6Address::LOOPBACK {
                 return true;
@@ -89,9 +87,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             let task = current_task().unwrap();
             if endpoint.port() < 1024 {
                 let inner = task.acquire_inner_lock();
-                if inner.euid != 0
-                    && (inner.cap_effective & (1u64 << CAP_NET_BIND_SERVICE)) == 0
-                {
+                if inner.euid != 0 && (inner.cap_effective & (1u64 << CAP_NET_BIND_SERVICE)) == 0 {
                     return -(SyscallErr::EACCES as isize);
                 }
             }

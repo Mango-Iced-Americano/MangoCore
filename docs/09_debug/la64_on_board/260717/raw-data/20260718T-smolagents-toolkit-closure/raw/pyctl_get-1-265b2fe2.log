@@ -1,0 +1,10 @@
+2026-07-18T05:11:13.860030Z __PERF_BEGIN_pyctl_get-1-265b2fe2__
+2026-07-18T05:11:14.833424Z MangoPersist:/persist/apk-root# __PERF_ACK_pyctl_get-1-265b2fe2_TRACE_OFF__
+2026-07-18T05:11:16.594092Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_pyctl_get-1-265b2fe2__
+2026-07-18T05:11:16.631780Z Connecting to 192.168.9.10:8009 (192.168.9.10:8009)
+2026-07-18T05:11:16.644478Z saving to '/tmp/pyd'
+2026-07-18T05:11:16.652957Z pyd                  100% |********************************|  2830  0:00:00 ETA
+2026-07-18T05:11:16.653440Z '/tmp/pyd' saved
+2026-07-18T05:11:16.661094Z __PERF_WORK_END_pyctl_get-1-265b2fe2__
+2026-07-18T05:11:16.662616Z __PERF_ACK_pyctl_get-1-265b2fe2_WORK__
+2026-07-18T05:11:17.116505Z MangoPersist:/persist/apk-root# __PERF_END_pyctl_get-1-265b2fe2__ rc=0

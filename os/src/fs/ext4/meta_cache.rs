@@ -17,10 +17,19 @@ struct CachedBlock {
 
 impl MetaBlockCache {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
-        Self { blocks: Mutex::new(BTreeMap::new()), max_capacity, block_size, lru_clock: Mutex::new(0) }
+        Self {
+            blocks: Mutex::new(BTreeMap::new()),
+            max_capacity,
+            block_size,
+            lru_clock: Mutex::new(0),
+        }
     }
 
-    pub fn read_block(&self, block_id: usize, read_from_device: impl FnOnce(usize, &mut [u8])) -> Vec<u8> {
+    pub fn read_block(
+        &self,
+        block_id: usize,
+        read_from_device: impl FnOnce(usize, &mut [u8]),
+    ) -> Vec<u8> {
         let mut blocks = self.blocks.lock();
         let now = self.next_lru_tick();
         if let Some(cached) = blocks.get_mut(&block_id) {
@@ -28,11 +37,20 @@ impl MetaBlockCache {
             super::counters::inc_counter!(super::counters::METADATA_BLOCK_CACHE_HIT);
             return cached.data.clone();
         }
-        if blocks.len() >= self.max_capacity { self.evict_one(&mut blocks); }
+        if blocks.len() >= self.max_capacity {
+            self.evict_one(&mut blocks);
+        }
         super::counters::inc_counter!(super::counters::METADATA_BLOCK_CACHE_MISS);
         let mut data = alloc::vec![0u8; self.block_size];
         read_from_device(block_id, &mut data);
-        blocks.insert(block_id, CachedBlock { data: data.clone(), dirty: false, last_used: now });
+        blocks.insert(
+            block_id,
+            CachedBlock {
+                data: data.clone(),
+                dirty: false,
+                last_used: now,
+            },
+        );
         data
     }
 
@@ -44,23 +62,33 @@ impl MetaBlockCache {
     ) {
         let mut blocks = self.blocks.lock();
         let now = self.next_lru_tick();
-        if blocks.len() >= self.max_capacity && !blocks.contains_key(&block_id) { self.evict_one(&mut blocks); }
+        if blocks.len() >= self.max_capacity && !blocks.contains_key(&block_id) {
+            self.evict_one(&mut blocks);
+        }
         let entry = blocks.entry(block_id).or_insert_with(|| {
             super::counters::inc_counter!(super::counters::METADATA_BLOCK_CACHE_MISS);
             let mut data = alloc::vec![0u8; self.block_size];
             read_from_device(block_id, &mut data);
-            CachedBlock { data, dirty: false, last_used: now }
+            CachedBlock {
+                data,
+                dirty: false,
+                last_used: now,
+            }
         });
         entry.last_used = now;
         f(&mut entry.data);
-        if !entry.dirty { super::counters::inc_counter!(super::counters::METADATA_DIRTY_BLOCK_COUNT); }
+        if !entry.dirty {
+            super::counters::inc_counter!(super::counters::METADATA_DIRTY_BLOCK_COUNT);
+        }
         entry.dirty = true;
     }
 
     pub fn store_dirty_block(&self, block_id: usize, data: &[u8]) {
         let mut blocks = self.blocks.lock();
         let now = self.next_lru_tick();
-        if blocks.len() >= self.max_capacity && !blocks.contains_key(&block_id) { self.evict_one(&mut blocks); }
+        if blocks.len() >= self.max_capacity && !blocks.contains_key(&block_id) {
+            self.evict_one(&mut blocks);
+        }
         let entry = blocks.entry(block_id).or_insert_with(|| CachedBlock {
             data: alloc::vec![0u8; self.block_size],
             dirty: false,
@@ -69,7 +97,9 @@ impl MetaBlockCache {
         let copy_len = core::cmp::min(entry.data.len(), data.len());
         entry.data[..copy_len].copy_from_slice(&data[..copy_len]);
         entry.last_used = now;
-        if !entry.dirty { super::counters::inc_counter!(super::counters::METADATA_DIRTY_BLOCK_COUNT); }
+        if !entry.dirty {
+            super::counters::inc_counter!(super::counters::METADATA_DIRTY_BLOCK_COUNT);
+        }
         entry.dirty = true;
     }
 
@@ -78,9 +108,24 @@ impl MetaBlockCache {
         let now = self.next_lru_tick();
         if let Some(cached) = blocks.get_mut(&block_id) {
             cached.last_used = now;
-            if !cached.dirty { super::counters::inc_counter!(super::counters::METADATA_DIRTY_BLOCK_COUNT); }
+            if !cached.dirty {
+                super::counters::inc_counter!(super::counters::METADATA_DIRTY_BLOCK_COUNT);
+            }
             cached.dirty = true;
         }
+    }
+
+    /// Discard cached contents for physical blocks that have returned to the
+    /// free-space allocator. Dirty data must not survive ownership transfer:
+    /// a later flush could otherwise overwrite a newly allocated file.
+    pub fn invalidate_range(&self, start_block: usize, block_count: usize) {
+        if block_count == 0 {
+            return;
+        }
+        let end_block = start_block.saturating_add(block_count);
+        self.blocks
+            .lock()
+            .retain(|block_id, _| *block_id < start_block || *block_id >= end_block);
     }
 
     pub fn flush_block(&self, block_id: usize, write_to_device: impl FnOnce(usize, &[u8])) {
@@ -97,7 +142,11 @@ impl MetaBlockCache {
 
     pub fn flush_all_dirty(&self, write_to_device: impl Fn(usize, &[u8])) {
         let mut blocks = self.blocks.lock();
-        let mut dirty_ids: Vec<usize> = blocks.iter().filter(|(_, b)| b.dirty).map(|(id, _)| *id).collect();
+        let mut dirty_ids: Vec<usize> = blocks
+            .iter()
+            .filter(|(_, b)| b.dirty)
+            .map(|(id, _)| *id)
+            .collect();
         dirty_ids.sort_unstable();
         let sb_blocks: Vec<usize> = dirty_ids.iter().filter(|id| **id <= 1).copied().collect();
         let other_blocks: Vec<usize> = dirty_ids.iter().filter(|id| **id > 1).copied().collect();
@@ -121,8 +170,14 @@ impl MetaBlockCache {
     }
 
     fn evict_one(&self, blocks: &mut BTreeMap<usize, CachedBlock>) {
-        let to_evict = blocks.iter().filter(|(_, block)| !block.dirty).min_by_key(|(_, block)| block.last_used).map(|(id, _)| *id);
-        if let Some(id) = to_evict { blocks.remove(&id); }
+        let to_evict = blocks
+            .iter()
+            .filter(|(_, block)| !block.dirty)
+            .min_by_key(|(_, block)| block.last_used)
+            .map(|(id, _)| *id);
+        if let Some(id) = to_evict {
+            blocks.remove(&id);
+        }
     }
 
     fn next_lru_tick(&self) -> u64 {

@@ -103,28 +103,45 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             if total_len > crate::hal::IO_CHUNK_SIZE {
                 return -(SyscallErr::EMSGSIZE as isize);
             }
-            send_single_shot(&user_iov, total_len, &*socket, dest_endpoint, msg_flags, is_nonblock)
+            send_single_shot(
+                &user_iov,
+                total_len,
+                &*socket,
+                dest_endpoint,
+                msg_flags,
+                is_nonblock,
+            )
         }
         PSOCK::Raw => {
             if total_len > crate::hal::IO_CHUNK_SIZE {
                 return -(SyscallErr::EMSGSIZE as isize);
             }
-            send_single_shot(&user_iov, total_len, &*socket, dest_endpoint, msg_flags, is_nonblock)
+            send_single_shot(
+                &user_iov,
+                total_len,
+                &*socket,
+                dest_endpoint,
+                msg_flags,
+                is_nonblock,
+            )
         }
         _ => {
             if total_len > crate::hal::IO_CHUNK_SIZE {
                 return -(SyscallErr::EMSGSIZE as isize);
             }
-            send_single_shot(&user_iov, total_len, &*socket, dest_endpoint, msg_flags, is_nonblock)
+            send_single_shot(
+                &user_iov,
+                total_len,
+                &*socket,
+                dest_endpoint,
+                msg_flags,
+                is_nonblock,
+            )
         }
     }
 }
 
-fn resolve_dest(
-    msg: &MsgHdr,
-    token: usize,
-    _socket: &crate::net::Socket,
-) -> Option<Endpoint> {
+fn resolve_dest(msg: &MsgHdr, token: usize, _socket: &crate::net::Socket) -> Option<Endpoint> {
     if msg.msg_name.is_null() || msg.msg_namelen < 16 {
         return None;
     }

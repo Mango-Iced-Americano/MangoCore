@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 fail = 0
 PREFIX = "[CPYTHON L8-SUBPROC]"
+RUNTIME_ROOT = os.environ["CPYTHON_ROOT"]
 
 
 class SkipTest(Exception):
@@ -40,8 +41,8 @@ def list_ld_musl_candidates():
         candidates.append(env_loader)
 
     dirs = [
-        "/tools/tests/cpython/lib",
-        "/tools/tests/cpython/usr/lib",
+        os.path.join(RUNTIME_ROOT, "lib"),
+        os.path.join(RUNTIME_ROOT, "usr", "lib"),
         "/lib",
         "/usr/lib",
     ]
@@ -83,9 +84,9 @@ def find_python_binary():
         os.environ.get("CPYTHON_PYTHON"),
         sys.executable if os.path.basename(sys.executable).startswith("python") else None,
         os.path.join(pyhome, "bin", "python3") if pyhome else None,
-        "/tools/tests/cpython/usr/local/bin/python3",
-        "/tools/tests/cpython/usr/bin/python3",
-        "/tools/tests/cpython/bin/python3",
+        os.path.join(RUNTIME_ROOT, "usr", "local", "bin", "python3"),
+        os.path.join(RUNTIME_ROOT, "usr", "bin", "python3"),
+        os.path.join(RUNTIME_ROOT, "bin", "python3"),
         "/usr/local/bin/python3",
         "/usr/bin/python3",
     ]

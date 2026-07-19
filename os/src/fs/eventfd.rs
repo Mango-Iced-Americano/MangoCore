@@ -8,8 +8,7 @@ use crate::{
         dev::DEV_FS,
         vfs::{
             event::{EPollEvent, EventWaitQueue},
-            File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode,
-            Metadata,
+            File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata,
         },
     },
     task::{current_task, WaitQueue},

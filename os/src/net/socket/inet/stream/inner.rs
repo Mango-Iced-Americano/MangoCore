@@ -4,6 +4,7 @@
 //! 缓存 endpoint、连接结果等）。`Inner` 枚举统一管理，通过 match 分发操作。
 //! 此架构对标 DragonOS `net/socket/inet/stream/inner.rs`。
 
+use crate::net::routing::RouteSocketHandle;
 use crate::net::{
     config::{lookup_source_ip, NET_INTERFACE},
     routing::InetProtocol,
@@ -16,7 +17,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use crate::net::routing::RouteSocketHandle;
 use smoltcp::{
     socket::tcp::{self, SocketBuffer},
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion},
@@ -86,7 +86,11 @@ impl Closed {
 fn new_smoltcp_socket_with_size(rx_size: usize, tx_size: usize) -> tcp::Socket<'static> {
     let rx_buffer = SocketBuffer::new(vec![0; rx_size]);
     let tx_buffer = SocketBuffer::new(vec![0; tx_size]);
-    tcp::Socket::new(rx_buffer, tx_buffer)
+    #[allow(unused_mut)]
+    let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
+    #[cfg(feature = "net_ack_immediate")]
+    socket.set_ack_delay(None);
+    socket
 }
 
 fn new_smoltcp_socket() -> tcp::Socket<'static> {
@@ -131,7 +135,10 @@ pub(crate) fn with_tcp_mut<R>(
     NET_INTERFACE.tcp_routed_socket(handle, f)
 }
 
-pub(crate) fn with_tcp<R>(handle: RouteSocketHandle, f: impl FnOnce(&tcp::Socket) -> R) -> Option<R> {
+pub(crate) fn with_tcp<R>(
+    handle: RouteSocketHandle,
+    f: impl FnOnce(&tcp::Socket) -> R,
+) -> Option<R> {
     NET_INTERFACE.tcp_routed_socket(handle, |s| f(s))
 }
 
@@ -213,17 +220,22 @@ impl Init {
                         port,
                     )
                 });
-                let handle = NET_INTERFACE.add_routed_socket(InetProtocol::Tcp, socket).ok_or_else(|| {
-                    (
-                        Init::Unbound(Box::new(new_smoltcp_socket()), ver),
-                        SyscallErr::EAGAIN,
-                    )
-                })?;
+                let handle = NET_INTERFACE
+                    .add_routed_socket(InetProtocol::Tcp, socket)
+                    .ok_or_else(|| {
+                        (
+                            Init::Unbound(Box::new(new_smoltcp_socket()), ver),
+                            SyscallErr::EAGAIN,
+                        )
+                    })?;
                 Ok((handle, local_ep))
             }
             Init::Bound { local, .. } => {
                 // Lazy bind: socket not yet in SocketSet; caller must attach before use
-                Err((Init::Unbound(Box::new(new_smoltcp_socket()), IpVersion::Ipv4), SyscallErr::EINVAL))
+                Err((
+                    Init::Unbound(Box::new(new_smoltcp_socket()), IpVersion::Ipv4),
+                    SyscallErr::EINVAL,
+                ))
             }
         }
     }
@@ -269,15 +281,7 @@ impl Connecting {
             ConnectResult::Connecting => 0,
             ConnectResult::Refused | ConnectResult::RefusedConsumed => 2,
         };
-        trace_event!(
-            0xB032,
-            self.handle.0 as u64,
-            result_code,
-            0,
-            0,
-            0,
-            0
-        );
+        trace_event!(0xB032, self.handle.0 as u64, result_code, 0, 0, 0, 0);
         match result {
             ConnectResult::Connected => {
                 log::info!(
@@ -477,9 +481,7 @@ impl Listening {
         // borrow, so the replacement listen socket goes on the same interface stack.
         let accepted_handle = self.handles[connected_idx];
         let binding_ifindex = NET_INTERFACE
-            .inner_handler(|inner_ref| {
-                inner_ref.bindings.get(&accepted_handle).map(|b| b.ifindex)
-            })
+            .inner_handler(|inner_ref| inner_ref.bindings.get(&accepted_handle).map(|b| b.ifindex))
             .flatten()
             .unwrap_or(1);
 
@@ -495,9 +497,9 @@ impl Listening {
         let new_listen =
             new_listen_smoltcp_socket(self.listen_addr).map_err(|_| SyscallErr::EADDRINUSE)?;
 
-        let connected_handle = if let Some(mut new_handle) = NET_INTERFACE.add_routed_socket_on(
-            InetProtocol::Tcp, new_listen, binding_ifindex
-        ) {
+        let connected_handle = if let Some(mut new_handle) =
+            NET_INTERFACE.add_routed_socket_on(InetProtocol::Tcp, new_listen, binding_ifindex)
+        {
             core::mem::swap(connected, &mut new_handle);
             new_handle
         } else {
@@ -553,7 +555,8 @@ impl Listening {
                 if socket.is_active() {
                     log::info!(
                         "[Listening::close] aborting pending handle {} (state={:?})",
-                        h, socket.state()
+                        h,
+                        socket.state()
                     );
                     socket.abort();
                 } else {
@@ -851,9 +854,7 @@ impl Inner {
         match self {
             Inner::Closed(_) => 0,
             Inner::SelfConnected(sc) => sc.rx_cap.load(Ordering::Relaxed),
-            Inner::Init(Init::Bound { socket, .. }) => {
-                socket.send_capacity()
-            }
+            Inner::Init(Init::Bound { socket, .. }) => socket.send_capacity(),
             Inner::Init(Init::Unbound(s, _)) => s.send_capacity(),
             Inner::Connecting(c) => with_tcp_mut(c.handle, |s| s.send_capacity()).unwrap_or(0),
             Inner::Listening(_) => 0,
@@ -865,9 +866,7 @@ impl Inner {
         match self {
             Inner::Closed(_) => 0,
             Inner::SelfConnected(sc) => sc.rx_cap.load(Ordering::Relaxed),
-            Inner::Init(Init::Bound { socket, .. }) => {
-                socket.recv_capacity()
-            }
+            Inner::Init(Init::Bound { socket, .. }) => socket.recv_capacity(),
             Inner::Init(Init::Unbound(s, _)) => s.recv_capacity(),
             Inner::Connecting(c) => with_tcp_mut(c.handle, |s| s.recv_capacity()).unwrap_or(0),
             Inner::Listening(_) => 0,
@@ -881,8 +880,10 @@ impl Inner {
                 Init::Unbound(_, _) => {
                     log::info!("[Inner::close] Init::Unbound — no handle to close");
                 }
-            Init::Bound { .. } => {
-                    log::info!("[Inner::close] Init::Bound — dropping boxed socket (not yet attached)");
+                Init::Bound { .. } => {
+                    log::info!(
+                        "[Inner::close] Init::Bound — dropping boxed socket (not yet attached)"
+                    );
                 }
             },
             Inner::Connecting(c) => {

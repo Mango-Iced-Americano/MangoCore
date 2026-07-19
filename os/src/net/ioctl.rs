@@ -19,10 +19,16 @@ pub const SIOCGIFTXQLEN: u32 = 0x8942;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct ifreq { pub ifr_name: [u8; 16], pub ifr_data: [u8; 24] }
+pub struct ifreq {
+    pub ifr_name: [u8; 16],
+    pub ifr_data: [u8; 24],
+}
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct ifconf { pub ifc_len: i32, pub ifc_buf: usize }
+pub struct ifconf {
+    pub ifc_len: i32,
+    pub ifc_buf: usize,
+}
 
 impl ifreq {
     fn name_str(&self) -> &str {
@@ -30,17 +36,46 @@ impl ifreq {
         core::str::from_utf8(&self.ifr_name[..len]).unwrap_or("")
     }
     fn set_name(&mut self, name: &str) {
-        let bytes = name.as_bytes(); let len = bytes.len().min(15);
-        self.ifr_name[..len].copy_from_slice(&bytes[..len]); self.ifr_name[len] = 0;
+        let bytes = name.as_bytes();
+        let len = bytes.len().min(15);
+        self.ifr_name[..len].copy_from_slice(&bytes[..len]);
+        self.ifr_name[len] = 0;
     }
-    fn ifr_ifindex(&self) -> u32 { u32::from_ne_bytes([self.ifr_data[0],self.ifr_data[1],self.ifr_data[2],self.ifr_data[3]]) }
-    fn set_ifr_ifindex(&mut self, v: u32) { self.ifr_data[..4].copy_from_slice(&v.to_ne_bytes()); }
-    fn ifr_flags(&self) -> u16 { u16::from_ne_bytes([self.ifr_data[0],self.ifr_data[1]]) }
-    fn set_ifr_flags(&mut self, v: u16) { self.ifr_data[..2].copy_from_slice(&v.to_ne_bytes()); }
-    fn ifr_mtu(&self) -> i32 { i32::from_ne_bytes([self.ifr_data[0],self.ifr_data[1],self.ifr_data[2],self.ifr_data[3]]) }
-    fn set_ifr_mtu(&mut self, v: i32) { self.ifr_data[..4].copy_from_slice(&v.to_ne_bytes()); }
+    fn ifr_ifindex(&self) -> u32 {
+        u32::from_ne_bytes([
+            self.ifr_data[0],
+            self.ifr_data[1],
+            self.ifr_data[2],
+            self.ifr_data[3],
+        ])
+    }
+    fn set_ifr_ifindex(&mut self, v: u32) {
+        self.ifr_data[..4].copy_from_slice(&v.to_ne_bytes());
+    }
+    fn ifr_flags(&self) -> u16 {
+        u16::from_ne_bytes([self.ifr_data[0], self.ifr_data[1]])
+    }
+    fn set_ifr_flags(&mut self, v: u16) {
+        self.ifr_data[..2].copy_from_slice(&v.to_ne_bytes());
+    }
+    fn ifr_mtu(&self) -> i32 {
+        i32::from_ne_bytes([
+            self.ifr_data[0],
+            self.ifr_data[1],
+            self.ifr_data[2],
+            self.ifr_data[3],
+        ])
+    }
+    fn set_ifr_mtu(&mut self, v: i32) {
+        self.ifr_data[..4].copy_from_slice(&v.to_ne_bytes());
+    }
     fn ifr_addr(&self) -> Ipv4Address {
-        Ipv4Address::new(self.ifr_data[4], self.ifr_data[5], self.ifr_data[6], self.ifr_data[7])
+        Ipv4Address::new(
+            self.ifr_data[4],
+            self.ifr_data[5],
+            self.ifr_data[6],
+            self.ifr_data[7],
+        )
     }
     fn set_ifr_addr(&mut self, ip: Ipv4Address) {
         self.ifr_data[0..2].copy_from_slice(&(2u16).to_ne_bytes()); // AF_INET
@@ -57,11 +92,15 @@ use crate::task::current_task;
 
 fn read_ifreq(arg: usize) -> Result<ifreq, SyscallErr> {
     let task = current_task().ok_or(SyscallErr::EINVAL)?;
-    UserPtr::<ifreq>::from_addr(arg).read(task.get_user_token()).map_err(|_| SyscallErr::EFAULT)
+    UserPtr::<ifreq>::from_addr(arg)
+        .read(task.get_user_token())
+        .map_err(|_| SyscallErr::EFAULT)
 }
 fn write_ifreq(arg: usize, ifr: &ifreq) -> Result<(), SyscallErr> {
     let task = current_task().ok_or(SyscallErr::EINVAL)?;
-    UserPtrMut::<ifreq>::from_addr(arg).write(task.get_user_token(), ifr).map_err(|_| SyscallErr::EFAULT)
+    UserPtrMut::<ifreq>::from_addr(arg)
+        .write(task.get_user_token(), ifr)
+        .map_err(|_| SyscallErr::EFAULT)
 }
 fn find_dev(name: &str) -> Result<crate::net::net_core::DeviceEntry, SyscallErr> {
     crate::net::net_core::find_by_name(name).ok_or(SyscallErr::ENODEV)
@@ -69,38 +108,78 @@ fn find_dev(name: &str) -> Result<crate::net::net_core::DeviceEntry, SyscallErr>
 fn siocgifconf(arg: usize) -> Result<usize, SyscallErr> {
     let task = current_task().ok_or(SyscallErr::EINVAL)?;
     let token = task.get_user_token();
-    let mut conf: ifconf = UserPtr::<ifconf>::from_addr(arg).read(token).map_err(|_| SyscallErr::EFAULT)?;
-    if conf.ifc_buf == 0 { conf.ifc_len = 0; UserPtrMut::<ifconf>::from_addr(arg).write(token, &conf).map_err(|_| SyscallErr::EFAULT)?; return Ok(0); }
+    let mut conf: ifconf = UserPtr::<ifconf>::from_addr(arg)
+        .read(token)
+        .map_err(|_| SyscallErr::EFAULT)?;
+    if conf.ifc_buf == 0 {
+        conf.ifc_len = 0;
+        UserPtrMut::<ifconf>::from_addr(arg)
+            .write(token, &conf)
+            .map_err(|_| SyscallErr::EFAULT)?;
+        return Ok(0);
+    }
     let max_bytes = conf.ifc_len as usize;
     let ns = net_core::current_netns();
     let list = ns.device_list.lock();
     let mut written = 0usize;
     for iface in list.values() {
-        if written + 40 > max_bytes { break; }
-        let mut ifr = ifreq { ifr_name: [0;16], ifr_data: [0;24] };
+        if written + 40 > max_bytes {
+            break;
+        }
+        let mut ifr = ifreq {
+            ifr_name: [0; 16],
+            ifr_data: [0; 24],
+        };
         ifr.set_name(&iface.iface_name());
-        if let Some(cidr) = iface.ip_addrs().first() { if let IpAddress::Ipv4(addr) = cidr.address() { ifr.set_ifr_addr(addr); } }
-        UserPtrMut::<ifreq>::from_addr(conf.ifc_buf + written).write(token, &ifr).map_err(|_| SyscallErr::EFAULT)?;
+        if let Some(cidr) = iface.ip_addrs().first() {
+            if let IpAddress::Ipv4(addr) = cidr.address() {
+                ifr.set_ifr_addr(addr);
+            }
+        }
+        UserPtrMut::<ifreq>::from_addr(conf.ifc_buf + written)
+            .write(token, &ifr)
+            .map_err(|_| SyscallErr::EFAULT)?;
         written += 40;
     }
     conf.ifc_len = written as i32;
-    UserPtrMut::<ifconf>::from_addr(arg).write(token, &conf).map_err(|_| SyscallErr::EFAULT)?;
+    UserPtrMut::<ifconf>::from_addr(arg)
+        .write(token, &conf)
+        .map_err(|_| SyscallErr::EFAULT)?;
     Ok(0)
 }
 
-fn siocgifindex(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_ifindex(d.ifindex); Ok(0) }
-fn siocgifflags(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_flags(d.iface.flags() as u16); Ok(0) }
+fn siocgifindex(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
+    let d = find_dev(ifr.name_str())?;
+    ifr.set_ifr_ifindex(d.ifindex);
+    Ok(0)
+}
+fn siocgifflags(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
+    let d = find_dev(ifr.name_str())?;
+    ifr.set_ifr_flags(d.iface.flags() as u16);
+    Ok(0)
+}
 fn siocgifaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
     let d = find_dev(ifr.name_str())?;
-    match d.iface.ip_addrs().first().and_then(|c| match c.address() { IpAddress::Ipv4(a) => Some(a), _ => None }) {
-        Some(a) => { ifr.set_ifr_addr(a); Ok(0) } None => Err(SyscallErr::EADDRNOTAVAIL),
+    match d.iface.ip_addrs().first().and_then(|c| match c.address() {
+        IpAddress::Ipv4(a) => Some(a),
+        _ => None,
+    }) {
+        Some(a) => {
+            ifr.set_ifr_addr(a);
+            Ok(0)
+        }
+        None => Err(SyscallErr::EADDRNOTAVAIL),
     }
 }
 fn siocgifnetmask(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
     let d = find_dev(ifr.name_str())?;
     let addrs = d.iface.ip_addrs();
     let prefix = addrs.first().map(|c| c.prefix_len()).unwrap_or(0);
-    let mask: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix)
+    };
     let b = mask.to_be_bytes();
     ifr.set_ifr_addr(Ipv4Address::new(b[0], b[1], b[2], b[3]));
     Ok(0)
@@ -108,28 +187,47 @@ fn siocgifnetmask(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
 fn siocgifbrdaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
     let d = find_dev(ifr.name_str())?;
     let addrs = d.iface.ip_addrs();
-    match addrs.first().and_then(|c| match c.address() { IpAddress::Ipv4(a) => Some((a, c.prefix_len())), _ => None }) {
+    match addrs.first().and_then(|c| match c.address() {
+        IpAddress::Ipv4(a) => Some((a, c.prefix_len())),
+        _ => None,
+    }) {
         Some((addr, prefix)) => {
             let b = addr.0;
             let ip = u32::from_be_bytes(b);
-            let m = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
-            let bcast = ip | !m; let b = bcast.to_be_bytes();
+            let m = if prefix == 0 {
+                0
+            } else {
+                !0u32 << (32 - prefix)
+            };
+            let bcast = ip | !m;
+            let b = bcast.to_be_bytes();
             ifr.set_ifr_addr(Ipv4Address::new(b[0], b[1], b[2], b[3]));
             Ok(0)
-        } None => Err(SyscallErr::EADDRNOTAVAIL),
+        }
+        None => Err(SyscallErr::EADDRNOTAVAIL),
     }
 }
 fn siocgifname(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
     let idx = ifr.ifr_ifindex();
-    if idx == 0 { return Err(SyscallErr::ENXIO); }
+    if idx == 0 {
+        return Err(SyscallErr::ENXIO);
+    }
     let ns = net_core::current_netns();
     let list = ns.device_list.lock();
     let d = list.get(&(idx as usize)).ok_or(SyscallErr::ENODEV)?;
     ifr.set_name(&d.iface_name());
     Ok(0)
 }
-fn siocgifmtu(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_mtu(d.iface.mtu() as i32); Ok(0) }
-fn siocgifhwaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_hwaddr(&d.iface.mac()); Ok(0) }
+fn siocgifmtu(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
+    let d = find_dev(ifr.name_str())?;
+    ifr.set_ifr_mtu(d.iface.mtu() as i32);
+    Ok(0)
+}
+fn siocgifhwaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
+    let d = find_dev(ifr.name_str())?;
+    ifr.set_ifr_hwaddr(&d.iface.mac());
+    Ok(0)
+}
 fn siocgiftxqlen(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
     let _d = find_dev(ifr.name_str())?;
     ifr.set_ifr_mtu(1000); // reuse mtu field for qlen — same layout
@@ -139,7 +237,16 @@ fn siocgiftxqlen(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
 pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
     match cmd {
         SIOCGIFCONF => siocgifconf(arg),
-        cmd if cmd == SIOCGIFINDEX || cmd == SIOCGIFNAME || cmd == SIOCGIFFLAGS || cmd == SIOCGIFADDR || cmd == SIOCGIFNETMASK || cmd == SIOCGIFBRDADDR || cmd == SIOCGIFMTU || cmd == SIOCGIFHWADDR || cmd == SIOCGIFTXQLEN => {
+        cmd if cmd == SIOCGIFINDEX
+            || cmd == SIOCGIFNAME
+            || cmd == SIOCGIFFLAGS
+            || cmd == SIOCGIFADDR
+            || cmd == SIOCGIFNETMASK
+            || cmd == SIOCGIFBRDADDR
+            || cmd == SIOCGIFMTU
+            || cmd == SIOCGIFHWADDR
+            || cmd == SIOCGIFTXQLEN =>
+        {
             let mut ifr = read_ifreq(arg)?;
             let r = match cmd {
                 SIOCGIFINDEX => siocgifindex(&mut ifr),
@@ -153,7 +260,9 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
                 SIOCGIFTXQLEN => siocgiftxqlen(&mut ifr),
                 _ => Err(SyscallErr::EOPNOTSUPP),
             };
-            if r.is_ok() { write_ifreq(arg, &ifr)?; }
+            if r.is_ok() {
+                write_ifreq(arg, &ifr)?;
+            }
             r
         }
         SIOCSIFFLAGS => {
@@ -163,7 +272,9 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
             let ifindex = {
                 let ns = net_core::current_netns();
                 let list = ns.device_list.lock();
-                let iface = list.values().find(|iface| iface.iface_name() == name)
+                let iface = list
+                    .values()
+                    .find(|iface| iface.iface_name() == name)
                     .ok_or(SyscallErr::ENODEV)?;
                 let combined = (iface.flags() & 0xFFFF0000) | new_low16;
                 iface.set_flags(combined);
@@ -183,9 +294,15 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
             let (ifindex, prefix) = {
                 let ns = net_core::current_netns();
                 let list = ns.device_list.lock();
-                let iface = list.values().find(|iface| iface.iface_name() == name)
+                let iface = list
+                    .values()
+                    .find(|iface| iface.iface_name() == name)
                     .ok_or(SyscallErr::ENODEV)?;
-                let prefix = iface.ip_addrs().first().map(|c| c.prefix_len()).unwrap_or(24);
+                let prefix = iface
+                    .ip_addrs()
+                    .first()
+                    .map(|c| c.prefix_len())
+                    .unwrap_or(24);
                 for old in iface.ip_addrs() {
                     iface.del_ip_addr(old);
                 }
@@ -211,7 +328,9 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
             let ifindex = {
                 let ns = net_core::current_netns();
                 let list = ns.device_list.lock();
-                let iface = list.values().find(|iface| iface.iface_name() == name)
+                let iface = list
+                    .values()
+                    .find(|iface| iface.iface_name() == name)
                     .ok_or(SyscallErr::ENODEV)?;
                 iface.set_mtu(new_mtu as usize);
                 iface.nic_id() as u32
