@@ -1,0 +1,20 @@
+UART-fix and board-gate commands
+================================
+
+Migration baseline commit:
+  git commit -m "fix(lwext4): harden board migration semantics"
+
+Pre-fix read-only SATA probe build:
+  docker run --rm --platform linux/amd64 --cidfile /Users/luzimo/dev/MangoCore/docs/Work_Log/evidence/2026-07-19/sata-probe.container-id -v /Users/luzimo/dev/MangoCore:/app -w /app zhouzhouyi/os-contest:20260104 bash -o pipefail -lc 'make -C os prepare-cargo-config && rustup override set nightly-2024-05-01 && cp os/src/lang_items.rs.la os/src/lang_items.rs && cp user/src/lang_items.rs.la user/src/lang_items.rs && make -C os -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata EXTRA_FEATURES=sata_probe MODE=release LOG=off && cp -f os/target/loongarch64-unknown-linux-gnu/release/os.ui docs/Work_Log/evidence/2026-07-19/kernel-2k1000-sata-probe-01ae0e7b.ui'
+
+Host-only preflight:
+  python3 scripts/boot_2k1000_tftp.py --interface en8 --serial /dev/cu.wchusbserial120 --image docs/Work_Log/evidence/2026-07-19/kernel-2k1000-sata-probe-01ae0e7b.ui --no-host-config --check-only
+
+Board read-only probe (repeated serial captures use run2/run3/run4 log suffixes):
+  python3 scripts/boot_2k1000_tftp.py --interface en8 --serial /dev/cu.wchusbserial120 --image docs/Work_Log/evidence/2026-07-19/kernel-2k1000-sata-probe-01ae0e7b.ui --no-host-config --log docs/Work_Log/evidence/2026-07-19/sata-probe-board-serial.log
+
+UART-fix RV64 build (exit 0):
+  docker run --rm --platform linux/amd64 --cidfile /Users/luzimo/dev/MangoCore/docs/Work_Log/evidence/2026-07-19/uart-fix-rv64-build.container-id -v /Users/luzimo/dev/MangoCore:/app -w /app zhouzhouyi/os-contest:20260104 make -C os rv64-kernel-build-only
+
+UART-fix LA64 build (exit 0):
+  docker run --rm --platform linux/amd64 --cidfile /Users/luzimo/dev/MangoCore/docs/Work_Log/evidence/2026-07-19/uart-fix-la64-build.container-id -v /Users/luzimo/dev/MangoCore:/app -w /app zhouzhouyi/os-contest:20260104 make -C os la64-kernel-build-only

@@ -1037,3 +1037,11 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
   不能将某段日志看似全绿当成门禁通过。
 - **相关文件**: `user/src/bin/regression_init.rs`、
   `user/src/bin/regression/regression_mmap_edge_cases.rs`
+
+### U-Boot 串口完整但内核长行确定性缺字时检查 THRE 握手
+
+- **现象**: 同一串口和波特率下，U-Boot 的 TFTP、CRC 和命令输出完整；内核接管 UART 后，短行只剩片段，长行稳定缺少大量字符。重复复位后缺字模式近似一致，使硬件探针实际运行却无法取得可信 PASS 证据。
+- **根因**: NS16550A 的 `Write<u8>` 实现未读取 `LSR.THRE` 就直接覆盖 THR，并无条件返回成功；上层 `console_putchar()` 又忽略返回值。CPU 连续 MMIO 写入快于 UART 移出字符时，发送保持寄存器被覆盖。
+- **修复**: `Write<u8>` 仅在 THRE 就绪时写 THR，否则返回 `WouldBlock`；上层发送函数循环重试到成功。保留整条 `print` 的 irq-save 序列化，不能用重复打印 marker 或降低日志量掩盖底层发送违规。
+- **验收**: 以修改前同一只读实板探针作为 RED，对照修改后原始串口日志必须完整包含型号、容量、重复读取结果和最终 PASS；同时顺序完成双架构编译。U-Boot 输出正常只能证明主机接收链路和波特率正确，不能替代内核 UART 握手验证。
+- **相关文件**: `os/src/drivers/serial/ns16550a.rs`, `os/src/hal/arch/loongarch64/sbi.rs`, `os/src/console.rs`

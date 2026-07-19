@@ -15,11 +15,12 @@ use super::register::CrMd;
 pub static mut UART: Ns16550a = Ns16550a { base: UART_BASE };
 
 pub fn console_putchar(c: usize) {
-    let mut retry = 0;
     // Safety: early console access is serialized by the kernel console path.
     // The global UART points at the fixed platform MMIO base.
     unsafe {
-        UART.write(c as u8);
+        while UART.write(c as u8).is_err() {
+            core::hint::spin_loop();
+        }
     }
 }
 
