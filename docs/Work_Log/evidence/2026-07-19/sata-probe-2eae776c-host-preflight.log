@@ -1,0 +1,5 @@
+[host] en8 already uses 192.168.9.10/255.255.255.0
+[host] TFTP service ready: system/com.apple.tftpd
+[host] TFTP image ready: /private/tftpboot/kernel-2k1000-sata-probe-2eae776c.ui (12600200 bytes, sha256=fb4143a2fd77387d89fa72f17ef9c0de23dccf2ba7ce6d57aa6025e22e5e1117)
+[host] serial device: /dev/cu.wchusbserial120
+[host] check complete; U-Boot commands were not sent
