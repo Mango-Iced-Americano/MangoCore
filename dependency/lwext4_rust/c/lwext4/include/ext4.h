@@ -182,6 +182,27 @@ int ext4_journal_stop(const char *mount_point);
  * @return Standard error code. */
 int ext4_recover(const char *mount_point);
 
+/**@brief Recover and free persistent zero-link orphan inodes.
+ *
+ * Journal replay must complete and journaling must be started before this
+ * function is called.  The legacy ext4 orphan chain is validated before any
+ * inode is modified; malformed chains fail closed.
+ *
+ * @param mount_point mounted filesystem path
+ * @param recovered_out optional number of inodes recovered
+ * @return standard error code */
+int ext4_orphan_cleanup(const char *mount_point, uint32_t *recovered_out);
+
+/**@brief Arm a deterministic journal power-cut test point.
+ *
+ * The next non-empty transaction stops after its commit record and journal
+ * start pointer are durable, but before checkpointing metadata home.  This is
+ * a test-only fault-injection API; normal mounts never arm it.
+ *
+ * @param mount_point mounted filesystem path
+ * @return standard error code */
+int ext4_test_arm_journal_power_cut(const char *mount_point);
+
 /**@brief   Some of the filesystem stats. */
 struct ext4_mount_stats {
 	uint32_t inodes_count;

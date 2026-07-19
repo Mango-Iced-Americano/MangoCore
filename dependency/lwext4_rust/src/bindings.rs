@@ -1734,6 +1734,17 @@ extern "C" {
     #[doc = "@brief   Journal recovery.\n @warning Must be called after @ref ext4_mount.\n\n @param   mount_point Mount point.\n\n @return Standard error code."]
     pub fn ext4_recover(mount_point: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
 }
+extern "C" {
+    pub fn ext4_orphan_cleanup(
+        mount_point: *const ::core::ffi::c_char,
+        recovered_out: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_test_arm_journal_power_cut(
+        mount_point: *const ::core::ffi::c_char,
+    ) -> ::core::ffi::c_int;
+}
 #[doc = "@brief   Some of the filesystem stats."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

@@ -176,6 +176,132 @@ pub fn tests() -> Vec<KernelTest> {
     ]
 }
 
+/// The crash producer intentionally never returns: QEMU is killed while the
+/// C journal test hook is parked between commit durability and home write.
+pub fn orphan_crash_tests() -> Vec<KernelTest> {
+    vec![KernelTest::new(
+        "ext4_orphan_crash::journal_replay_window",
+        test_lwext4_orphan_power_cut,
+    )]
+}
+
+/// Second boot of the deterministic crash test.  Mount-time recovery must
+/// replay the unlink transaction, free exactly one persistent orphan, and
+/// leave the filesystem writable.
+pub fn orphan_recovery_tests() -> Vec<KernelTest> {
+    vec![KernelTest::new(
+        "ext4_orphan_recover::mount_cleanup",
+        test_lwext4_orphan_recovery,
+    )]
+}
+
+fn test_lwext4_orphan_power_cut() -> Result<(), &'static str> {
+    use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
+    use crate::fs::vfs::{File, FileFlags, FileType, InodeMode};
+
+    const NAME: &str = ".ktest_lwext4_orphan_power_cut";
+    const PAYLOAD: &[u8] = b"mango-lwext4-orphan-replay-v1";
+
+    let root = crate::fs::vfs_lookup_absolute("/sdcard")
+        .map_err(|_| "ktest ext4 fixture is not mounted at /sdcard")?;
+    let wrapper = root.fs();
+    let mount_fs = wrapper
+        .as_any_ref()
+        .downcast_ref::<crate::fs::vfs::MountFS>()
+        .ok_or("/sdcard filesystem is not a MountFS")?;
+    let ext4 = mount_fs
+        .lifecycle
+        .fs()
+        .as_any_ref()
+        .downcast_ref::<Ext4FileSystem>()
+        .ok_or("/sdcard backend is not lwext4")?;
+
+    let _ = root.unlink(NAME);
+    let inode = root
+        .create(NAME, FileType::File, InodeMode::S_IRUSR | InodeMode::S_IWUSR)
+        .map_err(|_| "failed to create orphan crash file")?;
+    let file = File::new(inode.clone(), FileFlags::O_RDWR)
+        .map_err(|_| "failed to open orphan crash file")?;
+    if file
+        .write(PAYLOAD)
+        .map_err(|_| "failed to write orphan crash payload")?
+        != PAYLOAD.len()
+    {
+        return Err("orphan crash payload write was short");
+    }
+    inode
+        .sync()
+        .map_err(|_| "failed to persist orphan crash payload")?;
+
+    ext4
+        .arm_journal_power_cut_for_test()
+        .map_err(|_| "failed to arm journal power-cut hook")?;
+    crate::println!("[KTEST ORPHAN CRASH] unlink transaction entering power-cut window");
+
+    // This call reaches the armed hook and does not return.  `file` remains
+    // live, so the zero-link inode must be recoverable after the forced stop.
+    root.unlink(NAME)
+        .map_err(|_| "orphan crash unlink returned before power cut")?;
+    Err("journal power-cut hook unexpectedly returned")
+}
+
+fn test_lwext4_orphan_recovery() -> Result<(), &'static str> {
+    use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
+    use crate::fs::vfs::{File, FileFlags, FileType, InodeMode};
+
+    const ORPHAN: &str = ".ktest_lwext4_orphan_power_cut";
+    const PROBE: &str = ".ktest_lwext4_orphan_recovery_probe";
+    const PAYLOAD: &[u8] = b"mango-lwext4-recovery-write-probe";
+
+    let root = crate::fs::vfs_lookup_absolute("/sdcard")
+        .map_err(|_| "ktest ext4 fixture is not mounted at /sdcard")?;
+    let wrapper = root.fs();
+    let mount_fs = wrapper
+        .as_any_ref()
+        .downcast_ref::<crate::fs::vfs::MountFS>()
+        .ok_or("/sdcard filesystem is not a MountFS")?;
+    let ext4 = mount_fs
+        .lifecycle
+        .fs()
+        .as_any_ref()
+        .downcast_ref::<Ext4FileSystem>()
+        .ok_or("/sdcard backend is not lwext4")?;
+
+    if ext4.recovered_orphans() != 1 {
+        return Err("mount did not recover exactly one persistent orphan");
+    }
+    if root.find(ORPHAN).is_ok() {
+        return Err("journal-replayed orphan pathname is still visible");
+    }
+
+    let _ = root.unlink(PROBE);
+    let inode = root
+        .create(PROBE, FileType::File, InodeMode::S_IRUSR | InodeMode::S_IWUSR)
+        .map_err(|_| "failed to create post-recovery write probe")?;
+    let file = File::new(inode, FileFlags::O_RDWR)
+        .map_err(|_| "failed to open post-recovery write probe")?;
+    if file
+        .pwrite(0, PAYLOAD)
+        .map_err(|_| "post-recovery probe write failed")?
+        != PAYLOAD.len()
+    {
+        return Err("post-recovery probe write was short");
+    }
+    let mut actual = [0u8; PAYLOAD.len()];
+    if file
+        .pread(0, &mut actual)
+        .map_err(|_| "post-recovery probe read failed")?
+        != PAYLOAD.len()
+        || actual != PAYLOAD
+    {
+        return Err("post-recovery probe readback mismatch");
+    }
+    drop(file);
+    root.unlink(PROBE)
+        .map_err(|_| "failed to remove post-recovery write probe")?;
+    Ok(())
+}
+
 // ── Test 1: basic BlockDevice read/write ────────────────────────────────
 
 /// Verify that `TestMemBlock` correctly persists data written to a block.

@@ -51,6 +51,26 @@
 #include <string.h>
 #include <stdlib.h>
 
+static volatile bool jbd_test_power_cut_armed;
+
+void jbd_test_arm_power_cut(void)
+{
+	jbd_test_power_cut_armed = true;
+}
+
+static void jbd_test_power_cut_after_commit(struct jbd_trans *trans)
+{
+	(void)trans;
+	if (!jbd_test_power_cut_armed)
+		return;
+
+	ext4_dbg(DEBUG_JBD,
+		 "[LWEXT4 POWER CUT] commit durable before home write, trans=%" PRIu32 "\n",
+		 trans->trans_id);
+	for (;;)
+		;
+}
+
 /**@brief  Revoke entry during journal replay.*/
 struct revoke_entry {
 	/**@brief  Block number not to be replayed.*/
@@ -887,6 +907,9 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 	struct revoke_entry *revoke_entry;
 	struct ext4_block journal_block, ext4_block;
 	struct ext4_fs *fs = jbd_fs->inode_ref.fs;
+	uint32_t block_size;
+	ext4_fsblk_t sb_lba;
+	uint32_t sb_offset;
 
 	(*this_block)++;
 	wrap(&jbd_fs->sb, *this_block);
@@ -906,8 +929,13 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 	if (r != EOK)
 		return;
 
-	/* We need special treatment for ext4 superblock. */
-	if (tag_info->block) {
+	/* The superblock is block 0 at block sizes above 1 KiB and block 1
+	 * at 1 KiB.  Keep replay's in-memory superblock synchronized in both
+	 * layouts so mount-time orphan cleanup sees the replayed list head. */
+	block_size = ext4_sb_get_block_size(&fs->sb);
+	sb_lba = EXT4_SUPERBLOCK_OFFSET / block_size;
+	sb_offset = EXT4_SUPERBLOCK_OFFSET % block_size;
+	if (tag_info->block != sb_lba) {
 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
 		if (r != EOK) {
 			jbd_block_set(jbd_fs, &journal_block);
@@ -930,14 +958,16 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 		state = ext4_get16(&fs->sb, state);
 
 		memcpy(&fs->sb,
-			journal_block.data + EXT4_SUPERBLOCK_OFFSET,
+			journal_block.data + sb_offset,
 			EXT4_SUPERBLOCK_SIZE);
 
 		/* Mark system as mounted */
 		ext4_set16(&fs->sb, state, state);
 		r = ext4_sb_write(fs->bdev, &fs->sb);
-		if (r != EOK)
+		if (r != EOK) {
+			jbd_block_set(jbd_fs, &journal_block);
 			return;
+		}
 
 		/*Update mount count*/
 		ext4_set16(&fs->sb, mount_count, mount_count);
@@ -2272,7 +2302,15 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 			wrap(&journal->jbd_fs->sb, journal->start);
 			journal->trans_id = trans->trans_id;
 			jbd_journal_write_sb(journal);
-			jbd_write_sb(journal->jbd_fs);
+			rc = jbd_write_sb(journal->jbd_fs);
+			if (rc != EOK)
+				goto Finish;
+			/* Recovery cannot discover this first committed transaction
+			 * until the journal superblock start pointer is durable. */
+			rc = ext4_block_flush_device(journal->jbd_fs->bdev);
+			if (rc != EOK)
+				goto Finish;
+			jbd_test_power_cut_after_commit(trans);
 			TAILQ_INSERT_TAIL(&journal->cp_queue, trans,
 					trans_node);
 			jbd_journal_cp_trans(journal, trans);
@@ -2286,6 +2324,7 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 		}
 	} else {
 		/* No need to do anything to the JBD superblock. */
+		jbd_test_power_cut_after_commit(trans);
 		TAILQ_INSERT_TAIL(&journal->cp_queue, trans,
 				trans_node);
 		if (trans->data_cnt)

@@ -103,6 +103,25 @@ impl fmt::Debug for Ext4FileSystem {
 }
 
 impl Ext4FileSystem {
+    pub(crate) fn recovered_orphans(&self) -> u32 {
+        self.lw.lock().recovered_orphans()
+    }
+
+    /// Arm the lwext4 deterministic power-cut point used by the two-boot
+    /// orphan recovery ktest.  Normal filesystem operation never calls this.
+    pub(crate) fn arm_journal_power_cut_for_test(&self) -> Result<(), SyscallErr> {
+        let _lock = self.lw.lock();
+        let path = CString::new(self.lw_path("/")).map_err(|_| SyscallErr::EINVAL)?;
+        let result = unsafe {
+            lwext4_rust::bindings::ext4_test_arm_journal_power_cut(path.as_ptr())
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(from_lwext4(result.saturating_abs()))
+        }
+    }
+
     /// Open and mount an ext4 filesystem on the given block device via lwext4.
     ///
     /// Returns `Err(SyscallErr)` on mount failure instead of panicking.

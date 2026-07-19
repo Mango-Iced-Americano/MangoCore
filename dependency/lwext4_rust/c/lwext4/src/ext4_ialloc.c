@@ -155,6 +155,60 @@ ext4_ialloc_verify_bitmap_csum(struct ext4_sblock *sb, struct ext4_bgroup *bg,
 #define ext4_ialloc_verify_bitmap_csum(...) true
 #endif
 
+int ext4_ialloc_inode_is_allocated(struct ext4_fs *fs, uint32_t index,
+				   bool *allocated)
+{
+	struct ext4_sblock *sb;
+	struct ext4_block_group_ref bg_ref;
+	struct ext4_block bitmap;
+	uint32_t block_group;
+	uint32_t index_in_group;
+	ext4_fsblk_t bitmap_block_addr;
+	int rc, rr;
+	bool bg_loaded = false;
+	bool bitmap_loaded = false;
+
+	if (!fs || !allocated)
+		return EINVAL;
+	sb = &fs->sb;
+	if (!index || index > ext4_get32(sb, inodes_count))
+		return EINVAL;
+
+	block_group = ext4_ialloc_get_bgid_of_inode(sb, index);
+	rc = ext4_fs_get_block_group_ref(fs, block_group, &bg_ref);
+	if (rc != EOK)
+		return rc;
+	bg_loaded = true;
+
+	bitmap_block_addr = ext4_bg_get_inode_bitmap(bg_ref.block_group, sb);
+	rc = ext4_trans_block_get(fs->bdev, &bitmap, bitmap_block_addr);
+	if (rc != EOK)
+		goto Finish;
+	bitmap_loaded = true;
+
+	if (!ext4_ialloc_verify_bitmap_csum(sb, bg_ref.block_group,
+					    bitmap.data)) {
+		rc = EIO;
+		goto Finish;
+	}
+
+	index_in_group = ext4_ialloc_inode_to_bgidx(sb, index);
+	*allocated = ext4_bmap_is_bit_set(bitmap.data, index_in_group);
+
+Finish:
+	if (bitmap_loaded) {
+		rr = ext4_block_set(fs->bdev, &bitmap);
+		if (rc == EOK)
+			rc = rr;
+	}
+	if (bg_loaded) {
+		rr = ext4_fs_put_block_group_ref(&bg_ref);
+		if (rc == EOK)
+			rc = rr;
+	}
+	return rc;
+}
+
 int ext4_ialloc_free_inode(struct ext4_fs *fs, uint32_t index, bool is_dir)
 {
 	struct ext4_sblock *sb = &fs->sb;

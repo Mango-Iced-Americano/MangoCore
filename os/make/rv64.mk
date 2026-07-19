@@ -293,11 +293,18 @@ comp-gdb:
 # programs must be built first.
 KTEST_EXT4_IMG_RV ?= /tmp/mango-lwext4-ktest-rv.img
 KTEST_EXT4_FEATURES ?= ^has_journal
+KTEST_EXT4_BLOCK_SIZE ?= 4096
+KTEST_EXT4_REUSE ?= 0
+KTEST_POST_FSCK ?= 1
 .PHONY: ktest-ext4-image
 ktest-ext4-image:
+ifeq ($(KTEST_EXT4_REUSE),0)
 	@truncate -s 64M $(KTEST_EXT4_IMG_RV)
-	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_RV)
+	@mke2fs -q -t ext4 -F -b $(KTEST_EXT4_BLOCK_SIZE) -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_RV)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_RV) >/dev/null
+else
+	@test -f $(KTEST_EXT4_IMG_RV) || { echo "missing reusable ktest image: $(KTEST_EXT4_IMG_RV)" >&2; exit 1; }
+endif
 
 ktest-run: $(INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ) ktest-ext4-image
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
@@ -320,7 +327,9 @@ endif
 		$(BLK_DEV_x0) \
 		-m 1024 \
 		-smp threads=1
+ifeq ($(KTEST_POST_FSCK),1)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_RV)
+endif
 
 # ─────────────────────────────────────────────────────────
 #  L4 User-mode regression test (mango.mode=regression)

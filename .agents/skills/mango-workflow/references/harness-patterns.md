@@ -1090,3 +1090,24 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 - **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
   `dependency/lwext4_rust/c/lwext4/src/ext4_blockdev.c`、`os/src/drivers/block/`、
   `os/make/rv64.mk`、`os/make/la64.mk`
+
+## persistent orphan 恢复要覆盖 journal ordering 与 ext4 block-size 边界
+
+- **现象**：unlink 后仍打开的 fd 在运行期工作正常，但掉电后目录项已删除、zero-link inode 和数据块
+  永久占用；普通再挂载可能看似成功，只有离线 fsck 报 zero dtime 与 inode/block bitmap 差异。
+- **根因**：内存 open count 不是磁盘恢复协议。zero-link 前若未把 inode 加入 on-disk orphan chain，
+  journal replay 只能恢复 namespace transaction，无法知道还要 truncate/free 哪个 inode。journal 第一笔
+  待 checkpoint transaction 若没有先持久化非零 start pointer，掉电后甚至无法发现已提交事务。
+- **修复**：采用 ext4 legacy orphan list（superblock `s_last_orphan` 为链头，inode `i_dtime` 为 next），
+  add/del 与 inode/superblock checksum 同事务；mount 在 replay 后、开放写入前清理。清理先 O(n) 预校验
+  inode 范围、bitmap/checksum、类型、link count、next/cycle，再逐次删除链头并 truncate/free，避免边恢复
+  边发现损坏，也避免每项重新扫描形成 O(n²)。
+- **边界**：ext4 superblock 在 4 KiB 文件系统位于逻辑块 0、offset 1024，在 1 KiB 文件系统位于逻辑块 1、
+  offset 0；replay 不能硬编码 block 0。若实现仅支持 legacy list，fixture 和生产卷门禁必须显式拒绝
+  `orphan_file` incompat feature。
+- **门禁**：固定窗口首启强制截断，次启复用原镜像并断言 recovered count、namespace、写探针和 teardown，
+  最后只读 fsck；至少覆盖 RV64/LA64 4 KiB，以及一个 1 KiB superblock-location case。
+- **性能**：普通 read/write 不受影响；zero-link 多出必要的 inode/superblock journal metadata。mount cleanup
+  应保持 O(n)，orphan chain 的 n 是同时存在的 zero-link open inode 数，不是全盘 inode 数。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、`dependency/lwext4_rust/src/blockdev.rs`

@@ -32,6 +32,7 @@ pub struct Ext4BlockWrapper<K: KernelDevOp> {
     fs_mounted: bool,
     journal_started: bool,
     writeback_enabled: bool,
+    recovered_orphans: u32,
     pd: core::marker::PhantomData<K>,
 }
 
@@ -125,6 +126,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             fs_mounted: false,
             journal_started: false,
             writeback_enabled: false,
+            recovered_orphans: 0,
             pd: core::marker::PhantomData,
         };
 
@@ -319,6 +321,17 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             }
             self.journal_started = true;
 
+            let mut recovered_orphans = 0u32;
+            let r = ext4_orphan_cleanup(c_mountpoint, &mut recovered_orphans);
+            if r != EOK as i32 {
+                error!("ext4_orphan_cleanup: rc = {:?}\n", r);
+                return Err(r);
+            }
+            self.recovered_orphans = recovered_orphans;
+            if recovered_orphans != 0 {
+                info!("lwext4 recovered {} persistent orphan(s)", recovered_orphans);
+            }
+
             let r = ext4_cache_write_back(c_mountpoint, true);
             if r != EOK as i32 {
                 error!("ext4_cache_write_back(enable): rc = {:?}\n", r);
@@ -329,6 +342,10 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 
         info!("lwext4 mount Okay (read_only={})", self.read_only);
         Ok(0)
+    }
+
+    pub fn recovered_orphans(&self) -> u32 {
+        self.recovered_orphans
     }
 
     /// Call this when block device is being uninstalled

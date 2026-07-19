@@ -57,6 +57,14 @@ extern "C" {
 void ext4_ialloc_set_bitmap_csum(struct ext4_sblock *sb, struct ext4_bgroup *bg,
 				 void *bitmap);
 
+/**@brief Check whether an inode number is set in the allocation bitmap.
+ * @param fs filesystem instance
+ * @param index inode number
+ * @param allocated returned allocation state
+ * @return standard error code */
+int ext4_ialloc_inode_is_allocated(struct ext4_fs *fs, uint32_t index,
+				   bool *allocated);
+
 /**@brief Free i-node number and modify filesystem data structers.
  * @param fs     Filesystem, where the i-node is located
  * @param index  Index of i-node to be release

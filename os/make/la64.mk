@@ -337,11 +337,18 @@ comp-gdb:
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
 KTEST_EXT4_IMG_LA ?= /tmp/mango-lwext4-ktest-la.img
 KTEST_EXT4_FEATURES ?= ^has_journal
+KTEST_EXT4_BLOCK_SIZE ?= 4096
+KTEST_EXT4_REUSE ?= 0
+KTEST_POST_FSCK ?= 1
 .PHONY: ktest-ext4-image
 ktest-ext4-image:
+ifeq ($(KTEST_EXT4_REUSE),0)
 	@truncate -s 64M $(KTEST_EXT4_IMG_LA)
-	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_LA)
+	@mke2fs -q -t ext4 -F -b $(KTEST_EXT4_BLOCK_SIZE) -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_LA)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_LA) >/dev/null
+else
+	@test -f $(KTEST_EXT4_IMG_LA) || { echo "missing reusable ktest image: $(KTEST_EXT4_IMG_LA)" >&2; exit 1; }
+endif
 
 ktest-run: $(INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ) ktest-ext4-image
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
@@ -363,7 +370,9 @@ endif
 		-device virtio-blk-pci,drive=x0 \
 		-m 1024 \
 		-smp threads=1
+ifeq ($(KTEST_POST_FSCK),1)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_LA)
+endif
 
 # ─────────────────────────────────────────────────────────
 #  L4 User-mode regression test (mango.mode=regression)

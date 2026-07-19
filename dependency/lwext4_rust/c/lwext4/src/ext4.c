@@ -52,6 +52,7 @@
 #include <ext4_dir_idx.h>
 #include <ext4_xattr.h>
 #include <ext4_journal.h>
+#include <ext4_ialloc.h>
 
 
 #include <stdlib.h>
@@ -708,6 +709,21 @@ int ext4_recover(const char *mount_point __unused)
 	return r;
 }
 
+int ext4_test_arm_journal_power_cut(const char *mount_point)
+{
+	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
+
+	if (!mp)
+		return ENOENT;
+	if (mp->fs.read_only)
+		return EROFS;
+	if (!mp->fs.jbd_journal)
+		return ENOTSUP;
+
+	jbd_test_arm_power_cut();
+	return EOK;
+}
+
 static int ext4_trans_start(struct ext4_mountpoint *mp __unused)
 {
 	int r = EOK;
@@ -854,15 +870,22 @@ static int ext4_trunc_inode(struct ext4_mountpoint *mp,
 		return r;
 
 	inode_size = ext4_inode_get_size(&fs->sb, inode_ref.inode);
-	ext4_fs_put_inode_ref(&inode_ref);
-	if (has_trans)
-		ext4_trans_stop(mp);
+	r = ext4_fs_put_inode_ref(&inode_ref);
+	if (r != EOK)
+		return r;
+	if (has_trans) {
+		r = ext4_trans_stop(mp);
+		if (r != EOK)
+			return r;
+	}
 
 	while (inode_size > new_size + CONFIG_MAX_TRUNCATE_SIZE) {
 
 		inode_size -= CONFIG_MAX_TRUNCATE_SIZE;
 
-		ext4_trans_start(mp);
+		r = ext4_trans_start(mp);
+		if (r != EOK)
+			goto Finish;
 		r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
 		if (r != EOK) {
 			ext4_trans_abort(mp);
@@ -878,14 +901,18 @@ static int ext4_trunc_inode(struct ext4_mountpoint *mp,
 			ext4_trans_abort(mp);
 			goto Finish;
 		} else
-			ext4_trans_stop(mp);
+			r = ext4_trans_stop(mp);
+		if (r != EOK)
+			goto Finish;
 	}
 
 	if (inode_size > new_size) {
 
 		inode_size = new_size;
 
-		ext4_trans_start(mp);
+		r = ext4_trans_start(mp);
+		if (r != EOK)
+			goto Finish;
 		r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
 		if (r != EOK) {
 			ext4_trans_abort(mp);
@@ -900,15 +927,345 @@ static int ext4_trunc_inode(struct ext4_mountpoint *mp,
 		if (r != EOK)
 			ext4_trans_abort(mp);
 		else
-			ext4_trans_stop(mp);
+			r = ext4_trans_stop(mp);
 
 	}
 
 Finish:
 
-	if (has_trans)
-		ext4_trans_start(mp);
+	if (has_trans) {
+		int rr = ext4_trans_start(mp);
+		if (r == EOK)
+			r = rr;
+	}
 
+	return r;
+}
+
+static bool ext4_orphan_inode_number_valid(struct ext4_fs *fs,
+					   uint32_t index)
+{
+	uint32_t first = ext4_get32(&fs->sb, first_inode);
+	uint32_t count = ext4_get32(&fs->sb, inodes_count);
+
+	return index >= first && index <= count;
+}
+
+static int ext4_orphan_set_head(struct ext4_fs *fs, uint32_t head)
+{
+	struct ext4_block block = EXT4_BLOCK_ZERO();
+	struct ext4_sblock old_sb;
+	uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+	ext4_fsblk_t sb_lba = EXT4_SUPERBLOCK_OFFSET / block_size;
+	uint32_t sb_offset = EXT4_SUPERBLOCK_OFFSET % block_size;
+	int r, rr;
+
+	if (head && !ext4_orphan_inode_number_valid(fs, head))
+		return EIO;
+
+	r = ext4_trans_block_get(fs->bdev, &block, sb_lba);
+	if (r != EOK)
+		return r;
+
+	old_sb = fs->sb;
+	ext4_set32(&fs->sb, last_orphan, head);
+	ext4_sb_set_csum(&fs->sb);
+	memcpy(block.data + sb_offset, &fs->sb, EXT4_SUPERBLOCK_SIZE);
+	r = ext4_trans_set_block_dirty(block.buf);
+	if (r != EOK) {
+		fs->sb = old_sb;
+		memcpy(block.data + sb_offset, &old_sb,
+		       EXT4_SUPERBLOCK_SIZE);
+	}
+	rr = ext4_block_set(fs->bdev, &block);
+	if (r == EOK)
+		r = rr;
+	if (r != EOK)
+		fs->sb = old_sb;
+	return r;
+}
+
+static int ext4_orphan_inode_next(struct ext4_fs *fs, uint32_t index,
+				  uint32_t linked_exception,
+				  uint32_t *next)
+{
+	struct ext4_inode_ref inode_ref;
+	bool allocated;
+	int r, rr;
+
+	if (!next || !ext4_orphan_inode_number_valid(fs, index))
+		return EIO;
+	r = ext4_ialloc_inode_is_allocated(fs, index, &allocated);
+	if (r != EOK)
+		return r;
+	if (!allocated)
+		return EIO;
+
+	r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
+	if (r != EOK)
+		return r;
+	if (ext4_inode_type(&fs->sb, inode_ref.inode) !=
+	    EXT4_INODE_MODE_FILE) {
+		r = EIO;
+		goto Finish;
+	}
+	if (index != linked_exception &&
+	    ext4_inode_get_links_cnt(inode_ref.inode) != 0) {
+		r = EIO;
+		goto Finish;
+	}
+
+	*next = ext4_inode_get_del_time(inode_ref.inode);
+	if (*next && !ext4_orphan_inode_number_valid(fs, *next))
+		r = EIO;
+
+Finish:
+	rr = ext4_fs_put_inode_ref(&inode_ref);
+	if (r == EOK)
+		r = rr;
+	return r;
+}
+
+static int ext4_orphan_validate_chain(struct ext4_fs *fs,
+				      uint32_t linked_exception)
+{
+	uint32_t current = ext4_get32(&fs->sb, last_orphan);
+	uint32_t limit = ext4_get32(&fs->sb, inodes_count);
+	uint32_t visited = 0;
+	int r;
+
+	while (current) {
+		if (visited++ >= limit)
+			return EIO;
+		r = ext4_orphan_inode_next(fs, current, linked_exception,
+					  &current);
+		if (r != EOK)
+			return r;
+	}
+	return EOK;
+}
+
+static int ext4_orphan_find(struct ext4_fs *fs, uint32_t target,
+			    bool *found, uint32_t *previous,
+			    uint32_t *target_next)
+{
+	uint32_t current = ext4_get32(&fs->sb, last_orphan);
+	uint32_t prev = 0;
+	uint32_t next = 0;
+	uint32_t limit = ext4_get32(&fs->sb, inodes_count);
+	uint32_t visited = 0;
+	int r;
+
+	if (!found || !previous || !target_next)
+		return EINVAL;
+	*found = false;
+	*previous = 0;
+	*target_next = 0;
+
+	while (current) {
+		if (visited++ >= limit)
+			return EIO;
+		r = ext4_orphan_inode_next(fs, current, target, &next);
+		if (r != EOK)
+			return r;
+		if (current == target) {
+			if (*found)
+				return EIO;
+			*found = true;
+			*previous = prev;
+			*target_next = next;
+		}
+		prev = current;
+		current = next;
+	}
+	return EOK;
+}
+
+static int ext4_orphan_add(struct ext4_fs *fs,
+			   struct ext4_inode_ref *inode_ref)
+{
+	uint32_t head;
+	uint32_t previous;
+	uint32_t next;
+	uint32_t old_dtime;
+	bool old_dirty;
+	bool found;
+	int r;
+
+	if (!fs->jbd_journal)
+		return EOK;
+	if (!inode_ref ||
+	    ext4_inode_get_links_cnt(inode_ref->inode) != 0 ||
+	    ext4_inode_type(&fs->sb, inode_ref->inode) !=
+		EXT4_INODE_MODE_FILE)
+		return EINVAL;
+
+	r = ext4_orphan_find(fs, inode_ref->index, &found, &previous,
+			     &next);
+	if (r != EOK || found)
+		return r;
+
+	head = ext4_get32(&fs->sb, last_orphan);
+	old_dtime = ext4_inode_get_del_time(inode_ref->inode);
+	old_dirty = inode_ref->dirty;
+	ext4_inode_set_del_time(inode_ref->inode, head);
+	inode_ref->dirty = true;
+	r = ext4_orphan_set_head(fs, inode_ref->index);
+	if (r != EOK) {
+		ext4_inode_set_del_time(inode_ref->inode, old_dtime);
+		inode_ref->dirty = old_dirty;
+	}
+	return r;
+}
+
+static int ext4_orphan_del(struct ext4_fs *fs,
+			   struct ext4_inode_ref *inode_ref)
+{
+	struct ext4_inode_ref prev_ref;
+	uint32_t previous;
+	uint32_t next;
+	bool found;
+	int r, rr;
+
+	if (!fs->jbd_journal || !ext4_get32(&fs->sb, last_orphan))
+		return EOK;
+	if (!inode_ref)
+		return EINVAL;
+
+	r = ext4_orphan_find(fs, inode_ref->index, &found, &previous,
+			     &next);
+	if (r != EOK || !found)
+		return r;
+
+	if (!previous) {
+		r = ext4_orphan_set_head(fs, next);
+		if (r != EOK)
+			return r;
+	} else {
+		r = ext4_fs_get_inode_ref(fs, previous, &prev_ref);
+		if (r != EOK)
+			return r;
+		if (ext4_inode_get_del_time(prev_ref.inode) !=
+		    inode_ref->index) {
+			r = EIO;
+		} else {
+			ext4_inode_set_del_time(prev_ref.inode, next);
+			prev_ref.dirty = true;
+		}
+		rr = ext4_fs_put_inode_ref(&prev_ref);
+		if (r == EOK)
+			r = rr;
+		if (r != EOK)
+			return r;
+	}
+
+	ext4_inode_set_del_time(inode_ref->inode, 0);
+	inode_ref->dirty = true;
+	return EOK;
+}
+
+static int ext4_orphan_del_head(struct ext4_fs *fs,
+				struct ext4_inode_ref *inode_ref)
+{
+	uint32_t next;
+	int r;
+
+	if (!fs->jbd_journal || !inode_ref ||
+	    ext4_get32(&fs->sb, last_orphan) != inode_ref->index)
+		return EIO;
+	next = ext4_inode_get_del_time(inode_ref->inode);
+	if (next && !ext4_orphan_inode_number_valid(fs, next))
+		return EIO;
+	r = ext4_orphan_set_head(fs, next);
+	if (r != EOK)
+		return r;
+	ext4_inode_set_del_time(inode_ref->inode, 0);
+	inode_ref->dirty = true;
+	return EOK;
+}
+
+int ext4_orphan_cleanup(const char *mount_point, uint32_t *recovered_out)
+{
+	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
+	uint32_t recovered = 0;
+	int r = EOK;
+
+	if (recovered_out)
+		*recovered_out = 0;
+	if (!mp)
+		return ENOENT;
+	if (mp->fs.read_only)
+		return EROFS;
+
+	EXT4_MP_LOCK(mp);
+	if (!ext4_get32(&mp->fs.sb, last_orphan))
+		goto Finish;
+	if (!mp->fs.jbd_journal) {
+		r = ENOTSUP;
+		goto Finish;
+	}
+	r = ext4_orphan_validate_chain(&mp->fs, 0);
+	if (r != EOK)
+		goto Finish;
+
+	while (ext4_get32(&mp->fs.sb, last_orphan)) {
+		struct ext4_inode_ref child;
+		uint32_t index = ext4_get32(&mp->fs.sb, last_orphan);
+		bool child_loaded = false;
+		bool write_back = false;
+		int rr;
+
+		r = ext4_trans_start(mp);
+		if (r != EOK)
+			goto Finish;
+		r = ext4_fs_get_inode_ref(&mp->fs, index, &child);
+		if (r != EOK)
+			goto Abort;
+		child_loaded = true;
+		if (ext4_inode_type(&mp->fs.sb, child.inode) !=
+		    EXT4_INODE_MODE_FILE ||
+		    ext4_inode_get_links_cnt(child.inode) != 0) {
+			r = EIO;
+			goto Abort;
+		}
+
+		r = ext4_block_cache_write_back(mp->fs.bdev, 1);
+		if (r != EOK)
+			goto Abort;
+		write_back = true;
+		r = ext4_trunc_inode(mp, index, 0);
+		if (r == EOK)
+			r = ext4_orphan_del_head(&mp->fs, &child);
+		if (r == EOK) {
+			ext4_inode_set_del_time(child.inode, -1L);
+			r = ext4_fs_free_inode(&child);
+		}
+
+Abort:
+		if (write_back) {
+			rr = ext4_block_cache_write_back(mp->fs.bdev, 0);
+			if (r == EOK)
+				r = rr;
+		}
+		if (child_loaded) {
+			rr = ext4_fs_put_inode_ref(&child);
+			if (r == EOK)
+				r = rr;
+		}
+		if (r != EOK) {
+			ext4_trans_abort(mp);
+			goto Finish;
+		}
+		r = ext4_trans_stop(mp);
+		if (r != EOK)
+			goto Finish;
+		recovered++;
+	}
+
+Finish:
+	if (recovered_out)
+		*recovered_out = recovered;
+	EXT4_MP_UNLOCK(mp);
 	return r;
 }
 
@@ -1567,8 +1924,18 @@ int ext4_fremove2(const char *path, bool defer_inode_free,
 	if (links_out)
 		*links_out = ext4_inode_get_links_cnt(child.inode);
 
-	/* Link count is zero.  An open VFS descriptor may still address this
-	 * inode, in which case truncation and bitmap release wait for final close. */
+	/* Add every zero-link inode before truncation, not only deferred open-file
+	 * removals: ext4_trunc_inode() commits the namespace transaction before
+	 * chunked truncation, so the persistent orphan record closes that crash
+	 * window as well. */
+	if (!ext4_inode_get_links_cnt(child.inode)) {
+		r = ext4_orphan_add(&mp->fs, &child);
+		if (r != EOK)
+			goto Finish;
+	}
+
+	/* An open VFS descriptor may still address this inode, in which case
+	 * truncation and bitmap release wait for final close. */
 	if (!defer_inode_free && !ext4_inode_get_links_cnt(child.inode)) {
 		r = ext4_block_cache_write_back(mp->fs.bdev, 1);
 		if (r != EOK)
@@ -1576,6 +1943,9 @@ int ext4_fremove2(const char *path, bool defer_inode_free,
 		write_back = true;
 
 		r = ext4_trunc_inode(mp, child.index, 0);
+		if (r != EOK)
+			goto Finish;
+		r = ext4_orphan_del(&mp->fs, &child);
 		if (r != EOK)
 			goto Finish;
 
@@ -1666,6 +2036,9 @@ int ext4_fremove_finalize(ext4_file *file)
 	r = ext4_trunc_inode(mp, child.index, 0);
 	if (r != EOK)
 		goto Finish;
+	r = ext4_orphan_del(&mp->fs, &child);
+	if (r != EOK)
+		goto Finish;
 
 	ext4_inode_set_del_time(child.inode, -1L);
 	r = ext4_fs_free_inode(&child);
@@ -1750,6 +2123,8 @@ int ext4_flink_from_file(ext4_file *file, const char *path)
 	}
 
 	r = ext4_create_hardlink(path, &child, false);
+	if (r == EOK)
+		r = ext4_orphan_del(&mp->fs, &child);
 
 Finish:
 	if (child_loaded) {

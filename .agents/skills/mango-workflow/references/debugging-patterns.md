@@ -1045,3 +1045,19 @@ RISC-V/OpenSBI 上若 frame allocator 日志把内核入口之前的低端 DRAM 
 - **修复**: `Write<u8>` 仅在 THRE 就绪时写 THR，否则返回 `WouldBlock`；上层发送函数循环重试到成功。保留整条 `print` 的 irq-save 序列化，不能用重复打印 marker 或降低日志量掩盖底层发送违规。
 - **验收**: 以修改前同一只读实板探针作为 RED，对照修改后原始串口日志必须完整包含型号、容量、重复读取结果和最终 PASS；同时顺序完成双架构编译。U-Boot 输出正常只能证明主机接收链路和波特率正确，不能替代内核 UART 握手验证。
 - **相关文件**: `os/src/drivers/serial/ns16550a.rs`, `os/src/hal/arch/loongarch64/sbi.rs`, `os/src/console.rs`
+
+### journal 掉电恢复必须在可证明的持久化窗口外部截断
+
+- **现象**：正常卸载、冷重启和离线 fsck 都通过，但无法证明事务 commit 已落盘、home block
+  未 checkpoint 时的恢复正确性；随机关 QEMU 又难以复现，失败镜像也不可比较。
+- **方法**：在 journal 内设置默认关闭、单次触发的测试钩子。钩子只能停在 records/commit block
+  已写并 flush、journal start pointer 也已写并 flush、home checkpoint 尚未开始的位置；串口先打印
+  唯一 marker，再由宿主 timeout/kill QEMU，不能让内核自己正常 shutdown。
+- **门禁**：首启制造掉电后保留原镜像；次启必须复用同一镜像，验证 replay 后的语义状态、可写性
+  与完整 teardown；关机后再执行只读 `e2fsck -f -n`。正常 remount 或只看 journal start 清零不能替代
+  这个两阶段实验。
+- **教训**：故障点必须同时证明“恢复记录已经 durable”和“home 状态尚未 durable”；太早只是丢事务，
+  太晚只是正常 checkpoint，两者都会产生误导性的绿色结果。日志需记录 fixture feature、block size、
+  镜像 hash 与两次启动身份。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
+  `os/src/kernel_tests/ext4.rs`、`os/make/rv64.mk`、`os/make/la64.mk`
