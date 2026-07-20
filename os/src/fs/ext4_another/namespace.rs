@@ -6,6 +6,7 @@ macro_rules! writable_namespace_inode_mutations {
             file_type: crate::fs::vfs::FileType,
             mode: crate::fs::vfs::InodeMode,
         ) -> Result<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>, crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             if self.file_type != crate::fs::vfs::FileType::Dir {
                 return Err(crate::utils::error::SyscallErr::ENOTDIR);
             }
@@ -17,8 +18,7 @@ macro_rules! writable_namespace_inode_mutations {
                     let permission = another_ext4::InodeMode::from_bits_retain(
                         (mode.bits() & 0o777) as u16,
                     );
-                    let child_id = self
-                        .fs
+                    let child_id = fs
                         .inner()
                         .create(
                             u32::try_from(self.key.inode_id())
@@ -30,7 +30,7 @@ macro_rules! writable_namespace_inode_mutations {
                             ),
                         )
                         .map_err(|error| super::errno::from_another(error.code()))?;
-                    super::inode::Ext4Inode::new(self.fs.clone(), child_id)
+                    super::inode::Ext4Inode::new(fs, child_id)
                         .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
                 }
                 crate::fs::vfs::FileType::Dir => self.mkdir(name, mode),
@@ -43,6 +43,7 @@ macro_rules! writable_namespace_inode_mutations {
             name: &str,
             mode: crate::fs::vfs::InodeMode,
         ) -> Result<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>, crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             if self.file_type != crate::fs::vfs::FileType::Dir {
                 return Err(crate::utils::error::SyscallErr::ENOTDIR);
             }
@@ -50,8 +51,7 @@ macro_rules! writable_namespace_inode_mutations {
                 return Err(crate::utils::error::SyscallErr::EINVAL);
             }
             let permission = another_ext4::InodeMode::from_bits_retain((mode.bits() & 0o777) as u16);
-            let child_id = self
-                .fs
+            let child_id = fs
                 .inner()
                 .mkdir(
                     u32::try_from(self.key.inode_id())
@@ -60,7 +60,7 @@ macro_rules! writable_namespace_inode_mutations {
                     permission,
                 )
                 .map_err(|error| super::errno::from_another(error.code()))?;
-            super::inode::Ext4Inode::new(self.fs.clone(), child_id)
+            super::inode::Ext4Inode::new(fs, child_id)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
 
@@ -71,6 +71,7 @@ macro_rules! writable_namespace_inode_mutations {
             new_name: &str,
             flags: u32,
         ) -> Result<(), crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             if self.file_type != crate::fs::vfs::FileType::Dir {
                 return Err(crate::utils::error::SyscallErr::ENOTDIR);
             }
@@ -88,11 +89,11 @@ macro_rules! writable_namespace_inode_mutations {
                 .as_any_ref()
                 .downcast_ref::<super::inode::Ext4Inode>()
                 .ok_or(crate::utils::error::SyscallErr::EXDEV)?;
-            if self.fs.fs_id() != target_parent.fs.fs_id() {
+            let target_fs = target_parent.fs_arc()?;
+            if fs.fs_id() != target_fs.fs_id() {
                 return Err(crate::utils::error::SyscallErr::EXDEV);
             }
-            let replaced = self
-                .fs
+            let replaced = fs
                 .inner()
                 .lookup(
                     u32::try_from(target_parent.key.inode_id())
@@ -100,10 +101,9 @@ macro_rules! writable_namespace_inode_mutations {
                     new_name,
                 )
                 .ok()
-                .map(|inode_id| self.fs.inode_key(inode_id))
+                .map(|inode_id| fs.inode_key(inode_id))
                 .transpose()?;
-            let reclaim = self
-                .fs
+            let reclaim = fs
                 .inner()
                 .rename(
                     u32::try_from(self.key.inode_id())
@@ -115,12 +115,13 @@ macro_rules! writable_namespace_inode_mutations {
                 )
                 .map_err(|error| super::errno::from_another(error.code()))?;
             if let (Some(key), Some(handle)) = (replaced, reclaim) {
-                self.fs.attach_reclaim(key, handle)?;
+                fs.attach_reclaim(key, handle)?;
             }
             Ok(())
         }
 
         fn unlink(&self, name: &str) -> Result<(), crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             if self.file_type != crate::fs::vfs::FileType::Dir {
                 return Err(crate::utils::error::SyscallErr::ENOTDIR);
             }
@@ -129,20 +130,20 @@ macro_rules! writable_namespace_inode_mutations {
             }
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            let child = self.fs.inner().lookup(parent, name).ok()
-                .map(|inode_id| self.fs.inode_key(inode_id)).transpose()?;
-            let reclaim = self
-                .fs
+            let child = fs.inner().lookup(parent, name).ok()
+                .map(|inode_id| fs.inode_key(inode_id)).transpose()?;
+            let reclaim = fs
                 .inner()
                 .unlink(parent, name)
                 .map_err(|error| super::errno::from_another(error.code()))?;
             if let (Some(key), Some(handle)) = (child, reclaim) {
-                self.fs.attach_reclaim(key, handle)?;
+                fs.attach_reclaim(key, handle)?;
             }
             Ok(())
         }
 
         fn rmdir(&self, name: &str) -> Result<(), crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             if self.file_type != crate::fs::vfs::FileType::Dir {
                 return Err(crate::utils::error::SyscallErr::ENOTDIR);
             }
@@ -151,15 +152,14 @@ macro_rules! writable_namespace_inode_mutations {
             }
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            let child = self.fs.inner().lookup(parent, name).ok()
-                .map(|inode_id| self.fs.inode_key(inode_id)).transpose()?;
-            let reclaim = self
-                .fs
+            let child = fs.inner().lookup(parent, name).ok()
+                .map(|inode_id| fs.inode_key(inode_id)).transpose()?;
+            let reclaim = fs
                 .inner()
                 .rmdir(parent, name)
                 .map_err(|error| super::errno::from_another(error.code()))?;
             if let (Some(key), Some(handle)) = (child, reclaim) {
-                self.fs.attach_reclaim(key, handle)?;
+                fs.attach_reclaim(key, handle)?;
             }
             Ok(())
         }

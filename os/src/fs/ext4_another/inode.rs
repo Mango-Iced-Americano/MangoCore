@@ -21,7 +21,7 @@ use super::page_cache::AnotherExt4PageCacheBackend;
 
 /// Writable VFS inode identified by its stable ext4 inode number.
 pub(crate) struct Ext4Inode {
-    fs: Arc<Ext4FileSystem>,
+    owner: InodeOwner,
     key: InodeKey,
     file_type: FileType,
     self_ref: Mutex<Weak<Ext4Inode>>,
@@ -29,11 +29,29 @@ pub(crate) struct Ext4Inode {
     page_cache: Mutex<Option<Arc<PageCache>>>,
 }
 
+/// Filesystem ownership for an inode.
+///
+/// Ordinary inodes keep their filesystem alive for their whole VFS lifetime.
+/// The canonical root is owned by the filesystem itself, so its reverse edge
+/// must be weak to avoid a reference cycle.
+enum InodeOwner {
+    Strong(Arc<Ext4FileSystem>),
+    CanonicalRoot(Weak<Ext4FileSystem>),
+}
+
+impl InodeOwner {
+    fn upgrade(&self) -> Result<Arc<Ext4FileSystem>, SyscallErr> {
+        match self {
+            Self::Strong(fs) => Ok(fs.clone()),
+            Self::CanonicalRoot(fs) => fs.upgrade().ok_or(SyscallErr::EIO),
+        }
+    }
+}
+
 impl fmt::Debug for Ext4Inode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnotherExt4Inode")
-            .field("fs_id", &self.fs.fs_id())
             .field("inode_id", &self.key.inode_id())
             .field("file_type", &self.file_type)
             .finish()
@@ -42,6 +60,23 @@ impl fmt::Debug for Ext4Inode {
 
 impl Ext4Inode {
     pub(crate) fn new(fs: Arc<Ext4FileSystem>, inode_id: u32) -> Result<Arc<Self>, SyscallErr> {
+        let owner = InodeOwner::Strong(fs.clone());
+        Self::new_with_owner(fs, owner, inode_id)
+    }
+
+    pub(crate) fn new_root(
+        fs: &Arc<Ext4FileSystem>,
+        inode_id: u32,
+    ) -> Result<Arc<Self>, SyscallErr> {
+        let owner = InodeOwner::CanonicalRoot(Arc::downgrade(fs));
+        Self::new_with_owner(fs.clone(), owner, inode_id)
+    }
+
+    fn new_with_owner(
+        fs: Arc<Ext4FileSystem>,
+        owner: InodeOwner,
+        inode_id: u32,
+    ) -> Result<Arc<Self>, SyscallErr> {
         let attr = fs
             .inner()
             .getattr(inode_id)
@@ -52,7 +87,7 @@ impl Ext4Inode {
         let key = InodeKey::new(fs.fs_id(), inode_id, attr.generation);
         let lifetime = fs.lifetime(key, size);
         Ok(Arc::new_cyclic(|self_ref| Self {
-            fs,
+            owner,
             key,
             file_type,
             self_ref: Mutex::new(self_ref.clone()),
@@ -61,9 +96,12 @@ impl Ext4Inode {
         }))
     }
 
-    fn attr(&self) -> Result<another_ext4::FileAttr, SyscallErr> {
-        self.fs
-            .inner()
+    fn fs_arc(&self) -> Result<Arc<Ext4FileSystem>, SyscallErr> {
+        self.owner.upgrade()
+    }
+
+    fn attr(&self, fs: &Ext4FileSystem) -> Result<another_ext4::FileAttr, SyscallErr> {
+        fs.inner()
             .getattr(u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?)
             .map_err(|error| from_another(error.code()))
     }
@@ -76,7 +114,7 @@ impl Ext4Inode {
             .ok_or(SyscallErr::EIO)
     }
 
-    fn regular_page_cache(&self) -> Arc<PageCache> {
+    fn regular_page_cache(&self, fs: &Arc<Ext4FileSystem>) -> Arc<PageCache> {
         if let Some(cache) = self.page_cache.lock().clone() {
             return cache;
         }
@@ -86,7 +124,7 @@ impl Ext4Inode {
         }
         let cache = PageCache::new();
         cache.set_backend(Arc::new(AnotherExt4PageCacheBackend::new(
-            self.fs.clone(),
+            fs.clone(),
             self.key,
             self.lifetime.clone(),
         )));
@@ -97,6 +135,7 @@ impl Ext4Inode {
 
     fn read_regular(
         &self,
+        fs: &Arc<Ext4FileSystem>,
         offset: usize,
         len: usize,
         buffer: &mut [u8],
@@ -106,7 +145,7 @@ impl Ext4Inode {
         if actual == 0 {
             return Ok(0);
         }
-        self.regular_page_cache()
+        self.regular_page_cache(fs)
             .read(offset, &mut buffer[..actual])
             .map_err(|_| SyscallErr::EIO)
     }
@@ -121,12 +160,12 @@ impl IndexNode for Ext4Inode {
         data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
         drop(data);
+        let fs = self.fs_arc()?;
         match self.file_type {
-            FileType::File => self.read_regular(offset, len, buffer),
+            FileType::File => self.read_regular(&fs, offset, len, buffer),
             FileType::SymLink => {
                 let actual = len.min(buffer.len());
-                self.fs
-                    .inner()
+                fs.inner()
                     .readlink(
                         u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
                         offset,
@@ -152,6 +191,7 @@ impl IndexNode for Ext4Inode {
         _data: MutexGuard<FilePrivateData>,
         flags: &FileFlags,
     ) -> Result<(), SyscallErr> {
+        let _fs = self.fs_arc()?;
         if flags.contains(FileFlags::O_TRUNC) {
             self.resize(0)?;
         }
@@ -159,6 +199,7 @@ impl IndexNode for Ext4Inode {
     }
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let fs = self.fs_arc()?;
         if name.is_empty() {
             return Err(SyscallErr::ENOENT);
         }
@@ -171,20 +212,19 @@ impl IndexNode for Ext4Inode {
         if name == "." {
             return self.self_arc();
         }
-        let inode_id = self
-            .fs
+        let inode_id = fs
             .inner()
             .lookup(
                 u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
                 name,
             )
             .map_err(|error| from_another(error.code()))?;
-        Ext4Inode::new(self.fs.clone(), inode_id).map(|inode| inode as Arc<dyn IndexNode>)
+        Ext4Inode::new(fs, inode_id).map(|inode| inode as Arc<dyn IndexNode>)
     }
 
     fn list(&self) -> Result<Vec<String>, SyscallErr> {
-        let entries = self
-            .fs
+        let fs = self.fs_arc()?;
+        let entries = fs
             .inner()
             .listdir(u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?)
             .map_err(|error| from_another(error.code()))?;
@@ -192,8 +232,8 @@ impl IndexNode for Ext4Inode {
     }
 
     fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
-        let entries = self
-            .fs
+        let fs = self.fs_arc()?;
+        let entries = fs
             .inner()
             .listdir(u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?)
             .map_err(|error| from_another(error.code()))?;
@@ -210,11 +250,12 @@ impl IndexNode for Ext4Inode {
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
-        let attr = self.attr()?;
+        let fs = self.fs_arc()?;
+        let attr = self.attr(&fs)?;
         let file_type = map_file_type(attr.ftype);
         let permissions = InodeMode::from_bits_truncate(u32::from(attr.perm.bits()));
         Ok(Metadata {
-            dev_id: self.fs.fs_id(),
+            dev_id: fs.fs_id(),
             inode_id: self.key.inode_id(),
             size: i64::try_from(if self.file_type == FileType::File {
                 self.lifetime.logical_size.load(Ordering::Acquire)
@@ -238,7 +279,8 @@ impl IndexNode for Ext4Inode {
     }
 
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
-        let attr = self.attr()?;
+        let fs = self.fs_arc()?;
+        let attr = self.attr(&fs)?;
         let permissions = another_ext4::InodeMode::from_bits_retain(
             (metadata.mode & InodeMode::S_IALLUGO).bits() as u16,
         );
@@ -255,8 +297,7 @@ impl IndexNode for Ext4Inode {
             ctime: Some(u32::try_from(metadata.ctime.tv_sec).map_err(|_| SyscallErr::EFBIG)?),
             crtime: None,
         };
-        self.fs
-            .inner()
+        fs.inner()
             .setattr(
                 u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
                 attributes,
@@ -265,7 +306,10 @@ impl IndexNode for Ext4Inode {
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
-        self.fs.clone()
+        match self.fs_arc() {
+            Ok(fs) => fs,
+            Err(_) => unreachable!("MountFS must retain the filesystem for a live inode"),
+        }
     }
 
     fn page_cache(&self) -> Option<Arc<PageCache>> {
@@ -276,7 +320,7 @@ impl IndexNode for Ext4Inode {
         if self.file_type != FileType::File {
             return None;
         }
-        Some(self.regular_page_cache())
+        self.fs_arc().ok().map(|fs| self.regular_page_cache(&fs))
     }
 
     fn as_any_ref(&self) -> &dyn Any {

@@ -8,6 +8,7 @@ macro_rules! writable_data_inode_mutations {
             data: spin::MutexGuard<crate::fs::vfs::FilePrivateData>,
         ) -> Result<usize, crate::utils::error::SyscallErr> {
             drop(data);
+            let fs = self.fs_arc()?;
             match self.file_type {
                 crate::fs::vfs::FileType::Dir => {
                     return Err(crate::utils::error::SyscallErr::EISDIR)
@@ -24,12 +25,14 @@ macro_rules! writable_data_inode_mutations {
                 .ok_or(crate::utils::error::SyscallErr::EFBIG)?;
             let inode_id = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            let old_size = self.lifetime.logical_size.load(core::sync::atomic::Ordering::Acquire);
-            self.fs
-                .inner()
+            let old_size = self
+                .lifetime
+                .logical_size
+                .load(core::sync::atomic::Ordering::Acquire);
+            fs.inner()
                 .prepare_buffered_write(inode_id, offset, actual, end as u64, None)
                 .map_err(|error| super::errno::from_another(error.code()))?;
-            let written = self.regular_page_cache().write_with_after_copy(
+            let written = self.regular_page_cache(&fs).write_with_after_copy(
                 offset,
                 &buffer[..actual],
                 Some(old_size),
@@ -48,6 +51,7 @@ macro_rules! writable_data_inode_mutations {
             len: usize,
             source: &crate::mm::UserBuffer,
         ) -> Result<usize, crate::utils::error::SyscallErr> {
+            let _fs = self.fs_arc()?;
             let actual = len.min(source.len());
             let mut buffer = alloc::vec::Vec::new();
             buffer
@@ -81,6 +85,7 @@ macro_rules! writable_data_inode_mutations {
         }
 
         fn resize(&self, len: usize) -> Result<(), crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             match self.file_type {
                 crate::fs::vfs::FileType::Dir => {
                     return Err(crate::utils::error::SyscallErr::EISDIR)
@@ -94,23 +99,24 @@ macro_rules! writable_data_inode_mutations {
             }
             let inode_id = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            self.fs
-                .inner()
+            fs.inner()
                 .commit_inode_size(inode_id, len as u64, None)
                 .map_err(|error| super::errno::from_another(error.code()))?;
             if let Some(cache) = cache {
                 cache.truncate(len)?;
             }
-            self.lifetime.logical_size
+            self.lifetime
+                .logical_size
                 .store(len, core::sync::atomic::Ordering::Release);
             Ok(())
         }
 
         fn sync(&self) -> Result<(), crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
             if let Some(cache) = self.page_cache() {
                 cache.writeback_all()?;
             }
-            self.fs.flush_device()
+            fs.flush_device()
         }
 
         fn datasync(&self) -> Result<(), crate::utils::error::SyscallErr> {
@@ -123,6 +129,7 @@ macro_rules! writable_data_inode_mutations {
             _len: usize,
             _data: spin::MutexGuard<crate::fs::vfs::FilePrivateData>,
         ) -> Result<usize, crate::utils::error::SyscallErr> {
+            let _fs = self.fs_arc()?;
             Err(crate::utils::error::SyscallErr::EOPNOTSUPP)
         }
     };

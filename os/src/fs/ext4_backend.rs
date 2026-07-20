@@ -23,6 +23,7 @@ pub fn open(block_device: Arc<dyn BlockDevice>) -> Result<Arc<dyn FileSystem>, S
         not(any(feature = "ext4_legacy_backend", feature = "ext4_another_backend"))
     ))]
     {
+        crate::println!("[ext4] backend: lwext4");
         let filesystem: Arc<dyn FileSystem> =
             super::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device)?;
         Ok(filesystem)
@@ -33,6 +34,7 @@ pub fn open(block_device: Arc<dyn BlockDevice>) -> Result<Arc<dyn FileSystem>, S
         not(any(feature = "ext4_lwext4_backend", feature = "ext4_another_backend"))
     ))]
     {
+        crate::println!("[ext4] backend: legacy");
         let filesystem: Arc<dyn FileSystem> =
             super::ext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device);
         Ok(filesystem)
@@ -43,6 +45,7 @@ pub fn open(block_device: Arc<dyn BlockDevice>) -> Result<Arc<dyn FileSystem>, S
         not(any(feature = "ext4_lwext4_backend", feature = "ext4_legacy_backend"))
     ))]
     {
+        crate::println!("[ext4] backend: another_ext4");
         let filesystem: Arc<dyn FileSystem> =
             super::ext4_another::Ext4FileSystem::open(block_device)?;
         Ok(filesystem)

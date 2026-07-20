@@ -134,11 +134,41 @@ impl Ext4FileSystem {
             .values()
             .filter_map(|lifetime| lifetime.page_cache())
             .collect();
-        for cache in caches {
-            cache.writeback_all()?;
+        Self::complete_lifetime_sync(
+            || {
+                for cache in caches {
+                    cache.writeback_all()?;
+                }
+                Ok(())
+            },
+            || self.drain_reclaims(),
+            || self.flush_device(),
+        )
+    }
+
+    /// Completes writeback/reclaim phases and their mandatory final device barrier.
+    ///
+    /// The helper keeps the error-precedence contract directly testable without
+    /// constructing vendor reclaim handles in an in-kernel fixture.
+    pub(crate) fn complete_lifetime_sync<W, R, F>(
+        writeback: W,
+        reclaim: R,
+        flush: F,
+    ) -> Result<(), SyscallErr>
+    where
+        W: FnOnce() -> Result<(), SyscallErr>,
+        R: FnOnce() -> Result<(), SyscallErr>,
+        F: FnOnce() -> Result<(), SyscallErr>,
+    {
+        let first_error = match writeback() {
+            Ok(()) => reclaim().err(),
+            Err(error) => Some(error),
+        };
+        let flush_result = flush();
+        match first_error {
+            Some(error) => Err(error),
+            None => flush_result,
         }
-        self.flush_device()?;
-        self.drain_reclaims()
     }
 
     fn drain_reclaims(&self) -> Result<(), SyscallErr> {

@@ -1,4 +1,5 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -14,6 +15,9 @@ use super::inode::Ext4Inode;
 use super::lifetime::{InodeKey, InodeLifetime};
 
 static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Live writable another_ext4 instances for global `sync(2)`.
+pub(crate) static EXT4_REGISTRY: Mutex<Vec<Weak<Ext4FileSystem>>> = Mutex::new(Vec::new());
 
 /// One writable another_ext4 filesystem instance.
 pub struct Ext4FileSystem {
@@ -48,7 +52,9 @@ impl Ext4FileSystem {
             root: Mutex::new(None),
             lifetimes: Mutex::new(alloc::collections::BTreeMap::new()),
         });
-        *fs.root.lock() = Some(Ext4Inode::new(fs.clone(), another_ext4::EXT4_ROOT_INO)?);
+        let root = Ext4Inode::new_root(&fs, another_ext4::EXT4_ROOT_INO)?;
+        *fs.root.lock() = Some(root);
+        EXT4_REGISTRY.lock().push(Arc::downgrade(&fs));
         Ok(fs)
     }
 
@@ -69,6 +75,26 @@ impl Ext4FileSystem {
         self.inner()
             .flush_device()
             .map_err(|error| from_another(error.code()))
+    }
+}
+
+/// Sync every live another_ext4 instance without exposing per-instance errors to `sync(2)`.
+pub(crate) fn sync_all_instances() {
+    let live = {
+        let mut registry = EXT4_REGISTRY.lock();
+        let live: Vec<Arc<Ext4FileSystem>> = registry.iter().filter_map(Weak::upgrade).collect();
+        registry.retain(|weak| weak.strong_count() > 0);
+        live
+    };
+
+    for fs in live {
+        if let Err(error) = fs.sync_all() {
+            log::error!(
+                "another_ext4: global sync failed for filesystem {}: {:?}",
+                fs.fs_id(),
+                error
+            );
+        }
     }
 }
 
