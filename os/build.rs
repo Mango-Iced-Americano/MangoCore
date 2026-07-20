@@ -17,6 +17,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-rv.cpio");
     println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-regression-rv.cpio");
     println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-la.cpio");
+    println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-regression-la.cpio");
 
     // Re-run if MANGO_CMDLINE changes between builds
     println!("cargo:rerun-if-env-changed=MANGO_CMDLINE");
@@ -24,6 +25,26 @@ fn main() {
     // Forward the command line to rustc so option_env! picks it up
     let cmdline = std::env::var("MANGO_CMDLINE")
         .unwrap_or_else(|_| String::from("mango.mode=normal"));
+
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("riscv64") {
+        let linker_script = match (
+            std::env::var_os("CARGO_FEATURE_BOARD_RVQEMU").is_some(),
+            std::env::var_os("CARGO_FEATURE_BOARD_VF2").is_some(),
+        ) {
+            (true, false) => {
+                println!("cargo:rerun-if-changed=src/hal/arch/riscv/linker-rvqemu.ld");
+                "src/hal/arch/riscv/linker-rvqemu.ld"
+            }
+            (false, true) => {
+                println!("cargo:rerun-if-changed=src/hal/arch/riscv/linker-vf2.ld");
+                "src/hal/arch/riscv/linker-vf2.ld"
+            }
+            (false, false) => panic!("RV64 build requires exactly one board feature"),
+            (true, true) => panic!("RV64 build requires exactly one board feature"),
+        };
+
+        println!("cargo:rustc-link-arg=-T{linker_script}");
+    }
 
     // Safety: no newlines allowed in bootargs (would break parsing)
     assert!(

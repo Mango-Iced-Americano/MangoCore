@@ -10,11 +10,10 @@ rustflags = [
     "-Cforce-frame-pointers=yes",
 ]
 # Add "-Ctarget-feature=-unaligned-access" when ready.
-linker = "loongarch64-linux-gnu-gcc"
+linker = "../scripts/loongarch64-clang-lld.sh"
 
 [target.riscv64gc-unknown-none-elf]
 rustflags = [
-    "-Clink-arg=-Tsrc/hal/arch/riscv/linker.ld",
     "-Cforce-frame-pointers=yes",
 ]
 
