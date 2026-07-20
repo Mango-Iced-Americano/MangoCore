@@ -1,0 +1,4 @@
+0d6f4bf5e871a3f40990da9d4f7bfe858db6e1ca045bcb445194048340d1ebf5
+zhouzhouyi/os-contest:20260104
+/home/lzm/projects/MangoCore -> /app
+
