@@ -1,4 +1,4 @@
-EXT4_BACKEND ?= lwext4
+EXT4_BACKEND ?= another
 
 ifeq ($(EXT4_BACKEND),lwext4)
 EXT4_BACKEND_FEATURE := ext4_lwext4_backend

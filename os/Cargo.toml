@@ -94,7 +94,7 @@ board_vf2 = ["oom_handler", "riscv"]
 
 # default = ["board_laqemu", "block_sata"]
 # default = ["board_rvqemu", "block_mem"]
-default = ["initramfs", "preload_payloads", "ext4_lwext4_backend"]
+default = ["initramfs", "preload_payloads", "ext4_another_backend"]
 
 [profile.dev]
 # 优化级别
