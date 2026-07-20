@@ -9,6 +9,11 @@
 pub mod console;
 #[cfg(target_arch = "loongarch64")]
 mod la_libc_import;
+#[cfg(target_arch = "riscv64")]
+#[path = "lang_items.rs.rv"]
+mod lang_items;
+#[cfg(target_arch = "loongarch64")]
+#[path = "lang_items.rs.la"]
 mod lang_items;
 pub mod syscall;
 mod usr_call;

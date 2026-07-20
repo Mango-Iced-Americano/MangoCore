@@ -23,19 +23,11 @@ endif
 build: rust-user
 
 prepare-cargo-config:
-	@sh ../scripts/restore-cargo-vendor-checksums.sh restore ..
-	@mkdir -p .cargo
-	@test -f .cargo/config.toml || cp -f ../cargo-config/user/config.toml .cargo/config.toml
 
 toolchain-preflight:
 	@sh ../scripts/rustup-preflight.sh
 
 env: toolchain-preflight
-ifeq ($(TARGET), riscv64gc-unknown-none-elf)
-	@cp ./src/lang_items.rs.rv ./src/lang_items.rs
-else ifeq ($(TARGET), loongarch64-unknown-linux-gnu)
-	@cp ./src/lang_items.rs.la ./src/lang_items.rs
-endif
 
 rust-user: prepare-cargo-config env $(APPS)
 ifeq ($(MODE),release)
