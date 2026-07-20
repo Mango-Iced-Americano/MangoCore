@@ -1,0 +1,4 @@
+[submodule "dependency/another_ext4"]
+	path = dependency/another_ext4
+	url = git@github.com:Mango-Iced-Americano/another_ext4.git
+	branch = mango

@@ -13,13 +13,22 @@ pub fn sys_syncfs(fd: usize) -> isize {
     }
     drop(fd_table);
 
-    // Flush all page caches (global, but correct for single-fs system)
-    crate::fs::flush_all_page_caches();
-
-    // Flush ext4 metadata caches for the filesystem containing this fd.
-    // Must unwrap MountFSInode to reach the real Ext4FileSystem.
+    // Must unwrap MountFSInode to reach the filesystem selected for this fd.
     let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
     let fs = inode.fs();
+    #[cfg(feature = "ext4_another_backend")]
+    if let Some(ext4) = fs
+        .as_any_ref()
+        .downcast_ref::<crate::fs::ext4_another::Ext4FileSystem>()
+    {
+        return match ext4.sync_all() {
+            Ok(()) => SUCCESS,
+            Err(error) => -(error as isize),
+        };
+    }
+
+    // Preserve the existing legacy paths outside the another_ext4 backend.
+    crate::fs::flush_all_page_caches();
     if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
         ext4.flush_metadata_cache();
     }

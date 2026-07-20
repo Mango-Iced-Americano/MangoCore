@@ -1,26 +1,27 @@
+pub mod block;
 pub mod full;
 pub mod null;
 pub mod pipe;
 pub mod pty;
 pub mod rtc;
 pub mod tty;
-pub mod zero;
 pub mod urandom;
-pub mod block;
+pub mod zero;
 
-use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use lazy_static::*;
 use spin::{Mutex, MutexGuard};
 
+use crate::fs::vfs::file::FileFlags;
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode, Metadata, generate_inode_id,
+    generate_inode_id, FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode,
+    Metadata,
 };
-use crate::fs::vfs::file::FileFlags;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -97,9 +98,10 @@ impl FileSystem for DevFS {
 
 impl DevFS {
     pub fn new() -> Arc<Self> {
-        let root: Arc<LockedDevFSInode> = Arc::new(LockedDevFSInode(Mutex::new(
-            DevFSInode::new(FileType::Dir, InodeMode::from_bits_truncate(0o755)),
-        )));
+        let root: Arc<LockedDevFSInode> = Arc::new(LockedDevFSInode(Mutex::new(DevFSInode::new(
+            FileType::Dir,
+            InodeMode::from_bits_truncate(0o755),
+        ))));
 
         let devfs = Arc::new(DevFS {
             root_inode: root.clone(),
@@ -168,16 +170,32 @@ impl LockedDevFSInode {
 }
 
 impl IndexNode for LockedDevFSInode {
-    fn open(&self, _data: MutexGuard<FilePrivateData>, _flags: &FileFlags) -> Result<(), SyscallErr> {
+    fn open(
+        &self,
+        _data: MutexGuard<FilePrivateData>,
+        _flags: &FileFlags,
+    ) -> Result<(), SyscallErr> {
         Ok(())
     }
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
         Ok(())
     }
-    fn read_at(&self, _offset: usize, _len: usize, _buf: &mut [u8], _data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        _buf: &mut [u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }
-    fn write_at(&self, _offset: usize, _len: usize, _buf: &[u8], _data: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> {
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        _buf: &[u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }
 
@@ -187,8 +205,16 @@ impl IndexNode for LockedDevFSInode {
             return Err(SyscallErr::ENOTDIR);
         }
         match name {
-            "" | "." => inode.self_ref.upgrade().map(|n| n as Arc<dyn IndexNode>).ok_or(SyscallErr::ENOENT),
-            ".." => inode.parent.upgrade().map(|n| n as Arc<dyn IndexNode>).ok_or(SyscallErr::ENOENT),
+            "" | "." => inode
+                .self_ref
+                .upgrade()
+                .map(|n| n as Arc<dyn IndexNode>)
+                .ok_or(SyscallErr::ENOENT),
+            ".." => inode
+                .parent
+                .upgrade()
+                .map(|n| n as Arc<dyn IndexNode>)
+                .ok_or(SyscallErr::ENOENT),
             name => inode.children.get(name).cloned().ok_or(SyscallErr::ENOENT),
         }
     }

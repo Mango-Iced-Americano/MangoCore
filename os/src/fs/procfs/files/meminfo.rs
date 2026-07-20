@@ -1,7 +1,7 @@
 //! /proc/meminfo — 系统内存信息
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 
 pub fn meminfo_content(
     _extra: usize,
@@ -15,9 +15,7 @@ pub fn meminfo_content(
     let used_kb = total_kb.saturating_sub(free_kb);
 
     let (heap_free, heap_total, _au, _aa, _w) = crate::mm::heap_stats();
-    let free_available_kb = free_frame_kb
-        .saturating_add(heap_free / 1024)
-        .min(total_kb);
+    let free_available_kb = free_frame_kb.saturating_add(heap_free / 1024).min(total_kb);
 
     let mut s = alloc::string::String::with_capacity(512);
     use core::fmt::Write;
@@ -28,8 +26,16 @@ pub fn meminfo_content(
     let _ = write!(s, "Cached:               0 kB\n");
     let _ = write!(s, "SwapTotal:            0 kB\n");
     let _ = write!(s, "SwapFree:             0 kB\n");
-    let _ = write!(s, "CommitLimit:    {} kB\n", crate::mm::commit_limit_kbytes());
-    let _ = write!(s, "Committed_AS:   {} kB\n", crate::mm::committed_as_kbytes());
+    let _ = write!(
+        s,
+        "CommitLimit:    {} kB\n",
+        crate::mm::commit_limit_kbytes()
+    );
+    let _ = write!(
+        s,
+        "Committed_AS:   {} kB\n",
+        crate::mm::committed_as_kbytes()
+    );
     let _ = write!(s, "Dirty:                0 kB\n");
     let _ = write!(s, "Writeback:            0 kB\n");
     let _ = write!(s, "Mapped:          {} kB\n", used_kb);

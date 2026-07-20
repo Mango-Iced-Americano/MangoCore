@@ -4,10 +4,8 @@ use core::fmt;
 use spin::{Mutex, MutexGuard};
 
 use crate::drivers::block::BlockDevice;
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, Metadata,
-};
 use crate::fs::vfs::file_system::FileSystem;
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, Metadata};
 use crate::hal::BLOCK_SZ;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -105,13 +103,17 @@ impl IndexNode for BlockDevInode {
                 if n == 0 {
                     break;
                 }
-                self.inner.read_block(block_id, &mut bounce);
+                self.inner
+                    .read_block(block_id, &mut bounce)
+                    .map_err(|_| SyscallErr::EIO)?;
                 buf[done..done + n].copy_from_slice(&bounce[in_block..in_block + n]);
                 done += n;
                 break;
             }
 
-            self.inner.read_block(block_id, &mut bounce);
+            self.inner
+                .read_block(block_id, &mut bounce)
+                .map_err(|_| SyscallErr::EIO)?;
             buf[done..done + n].copy_from_slice(&bounce[in_block..in_block + n]);
             done += n;
         }
@@ -150,11 +152,17 @@ impl IndexNode for BlockDevInode {
             let n = (BLOCK_SZ - in_block).min(total - done);
 
             if in_block == 0 && n == BLOCK_SZ {
-                self.inner.write_block(block_id, &buf[done..done + n]);
+                self.inner
+                    .write_block(block_id, &buf[done..done + n])
+                    .map_err(|_| SyscallErr::EIO)?;
             } else {
-                self.inner.read_block(block_id, &mut bounce);
+                self.inner
+                    .read_block(block_id, &mut bounce)
+                    .map_err(|_| SyscallErr::EIO)?;
                 bounce[in_block..in_block + n].copy_from_slice(&buf[done..done + n]);
-                self.inner.write_block(block_id, &bounce);
+                self.inner
+                    .write_block(block_id, &bounce)
+                    .map_err(|_| SyscallErr::EIO)?;
             }
 
             done += n;

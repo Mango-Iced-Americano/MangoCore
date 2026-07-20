@@ -24,6 +24,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check another_ext4 isolation
+        run: sh scripts/check_another_ext4_isolation.sh
 
       - name: Free runner disk space
         run: |

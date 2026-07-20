@@ -1,4 +1,4 @@
-use super::BlockDevice;
+use super::{validate_block_buffer_length, BlockDevice, BlockDeviceResult};
 use crate::{config::DISK_IMAGE_BASE, hal::BLOCK_SZ};
 use core::slice::{from_raw_parts, from_raw_parts_mut};
 use spin::Mutex;
@@ -33,18 +33,22 @@ impl BlockDevice for MemBlockWrapper {
     /// + block_id: 块号
     /// + buf: 读取的数据存放的缓冲区
     /// 此处buf长度需要考虑对齐吗？
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
         info!("[mem read_block] len : {}", buf.len());
         let blk = self.0.lock();
         buf.copy_from_slice(blk.block_ref(block_id, buf.len()));
+        Ok(())
     }
     /// 向块设备对象写入一个块
     /// # 参数
     /// + block_id: 块号
     /// + buf: 写入的数据
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
         info!("[mem write_block] len : {}", buf.len());
         let blk = self.0.lock();
         blk.block_refmut(block_id, buf.len()).copy_from_slice(buf);
+        Ok(())
     }
 }

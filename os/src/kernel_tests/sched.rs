@@ -4,11 +4,11 @@
 //! runs inside the scheduler (run_tasks() is active). Tests verify
 //! that the scheduler is operational and tasks can be spawned+yielded.
 
+use crate::kernel_tests::runner::KernelTest;
+use crate::task;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::kernel_tests::runner::KernelTest;
-use crate::task;
 
 /// Returns all scheduler-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
@@ -41,8 +41,8 @@ fn test_scheduler_is_running() -> Result<(), &'static str> {
 
 /// Verify task_manager_counts returns valid values (no overflow/garbage).
 fn test_counts_in_range() -> Result<(), &'static str> {
-    let (ready, interruptible) = task::task_manager_counts()
-        .ok_or("task_manager_counts returned None")?;
+    let (ready, interruptible) =
+        task::task_manager_counts().ok_or("task_manager_counts returned None")?;
     // In ktest mode, ready can be 0 (only the runner is active).
     // Both counts must be in a reasonable range.
     if ready > 4096 || interruptible > 4096 {

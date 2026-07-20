@@ -1,5 +1,7 @@
 use crate::config::PAGE_SIZE;
-use crate::drivers::block::BlockDevice;
+use crate::drivers::block::{
+    validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult,
+};
 use crate::hal::BLOCK_SZ;
 use crate::mm::{frame_alloc, frame_dealloc, PhysAddr};
 use isomorphic_drivers::{
@@ -18,21 +20,33 @@ impl SataBlock {
 }
 
 impl BlockDevice for SataBlock {
-    fn read_block(&self, mut block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
         // 内核BLOCK_SZ为2048，SATA驱动中BLOCK_SIZE为512，四倍转化关系
-        block_id = block_id * (BLOCK_SZ / BLOCK_SIZE);
+        let mut block_id = block_id
+            .checked_mul(BLOCK_SZ / BLOCK_SIZE)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
         for buf in buf.chunks_mut(BLOCK_SIZE) {
             self.0.lock().read_block(block_id, buf);
-            block_id += 1;
+            block_id = block_id
+                .checked_add(1)
+                .ok_or(BlockDeviceError::OutOfBounds)?;
         }
+        Ok(())
     }
 
-    fn write_block(&self, mut block_id: usize, buf: &[u8]) {
-        block_id = block_id * (BLOCK_SZ / BLOCK_SIZE);
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
+        let mut block_id = block_id
+            .checked_mul(BLOCK_SZ / BLOCK_SIZE)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
         for buf in buf.chunks(BLOCK_SIZE) {
             self.0.lock().write_block(block_id, buf);
-            block_id += 1;
+            block_id = block_id
+                .checked_add(1)
+                .ok_or(BlockDeviceError::OutOfBounds)?;
         }
+        Ok(())
     }
 }
 

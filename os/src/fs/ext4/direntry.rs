@@ -561,7 +561,10 @@ impl Ext4FileSystem {
             if let Ok(pblock) = self.get_pblock_idx(parent, last_iblock) {
                 let mut ext4block = self.load_metadata_block(pblock as usize);
                 super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
-                if self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type).is_ok() {
+                if self
+                    .try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type)
+                    .is_ok()
+                {
                     self.dir_set_csum(&mut ext4block, parent.inode.generation());
                     self.store_metadata_block_dirty(pblock as usize, &ext4block.data);
                     super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
@@ -578,8 +581,12 @@ impl Ext4FileSystem {
                 let mut ext4block = self.load_metadata_block(pblock as usize);
                 super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
-                let result =
-                    self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type);
+                let result = self.try_insert_to_existing_block(
+                    &mut ext4block,
+                    name,
+                    child.inode_num,
+                    de_type,
+                );
 
                 if result.is_ok() {
                     // set checksum
@@ -750,7 +757,8 @@ impl Ext4FileSystem {
             parent.inode.mode
         );
         // let r = self.dir_find_entry(parent.inode_num, path, &mut result)?;
-        let _r = self.dir_find_entry(parent.inode_num, path, &mut result)
+        let _r = self
+            .dir_find_entry(parent.inode_num, path, &mut result)
             .map_err(|_| Errno::EIO as isize)?;
 
         log::debug!("[dir_remove_entry] After dir_find_entry. r: {:?}", _r);
@@ -899,7 +907,7 @@ impl Ext4FileSystem {
             iblock += 1;
         }
 
-            Err(Errno::ENOENT as isize)
+        Err(Errno::ENOENT as isize)
     }
 
     /// Debug dump of all directory entries in a block

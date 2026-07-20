@@ -6,12 +6,12 @@ use crate::fs::fat32::EasyFileSystem;
 use crate::fs::inode::InodeLock;
 use crate::fs::inode::InodeTime;
 use crate::fs::page_cache::{FatPageCacheBackend, PageCache as NewPageCache, PageCacheBackend};
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode, Metadata,
 };
-use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
-use crate::utils::error::SyscallErr;
 use crate::timer::TimeSpec;
+use crate::utils::error::SyscallErr;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -278,7 +278,6 @@ impl FatInode {
         let lock = self.file_content.read();
         f(&lock.clus_list)
     }
-
 }
 
 /// File Content Operation
@@ -991,7 +990,12 @@ impl FatInode {
     /// # 参数
     /// + `inode_lock`: inode锁
     /// + `diff`: file 大小的改变量
-    pub fn modify_size_lock(&self, _inode_lock: &RwLockWriteGuard<InodeLock>, diff: isize, _clear: bool) {
+    pub fn modify_size_lock(
+        &self,
+        _inode_lock: &RwLockWriteGuard<InodeLock>,
+        diff: isize,
+        _clear: bool,
+    ) {
         let mut lock = self.file_content.write();
 
         debug_assert!(diff.saturating_add(lock.size as isize) >= 0);
@@ -1109,14 +1113,12 @@ fn fat_do_create(
         disk_type,
     );
 
-    let short_ent_offset =
-        parent.create_dir_ent(&parent_inode_lock, short_ent, long_ents)?;
+    let short_ent_offset = parent.create_dir_ent(&parent_inode_lock, short_ent, long_ents)?;
 
     let current_file = FatInode::from_fat_ent(parent, &short_ent, short_ent_offset);
 
     if disk_type == DiskInodeType::Directory {
-        current_file.file_content.write().hint =
-            2 * core::mem::size_of::<FATDirEnt>() as u32;
+        current_file.file_content.write().hint = 2 * core::mem::size_of::<FATDirEnt>() as u32;
         FatInode::fill_empty_dir(parent, &current_file, fst_clus);
     }
 
@@ -1147,7 +1149,8 @@ impl IndexNode for FatInode {
         }
         let read_len = end - offset;
         let pc = self.get_new_page_cache();
-        pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO)
+        pc.read(offset, &mut buf[..read_len])
+            .map_err(|_| SyscallErr::EIO)
     }
 
     fn write_at(
@@ -1173,7 +1176,8 @@ impl IndexNode for FatInode {
         }
         let actual_len = write_end - offset;
         let pc = self.get_new_page_cache();
-        pc.write(offset, &buf[..actual_len], None).map_err(|_| SyscallErr::EIO)
+        pc.write(offset, &buf[..actual_len], None)
+            .map_err(|_| SyscallErr::EIO)
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {

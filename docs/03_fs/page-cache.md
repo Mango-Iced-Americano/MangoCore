@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-20"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -129,7 +129,7 @@ Phase 2（无锁）: 拷贝
     mark_valid_and_check_full()
 ```
 
-单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()` 触发节流检测。
+单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()` 触发节流检测。对必须同步发布逻辑 EOF 的后端，crate 内 `write_with_after_copy()` 在所有字节和 `valid_mask` 发布后、性能记录与节流前执行一次不可失败回调；空写和准备/复制失败不会调用它，因此写回不会观察到陈旧 EOF 或尚未复制的数据。
 
 ## 脏页追踪与回写
 
@@ -208,6 +208,10 @@ maybe_reclaim_fs_caches:
 
 PageCache 自身的 `inner` 和 `entries` 使用 `spin::Mutex`，不依赖调度器，因此即使在中断上下文中也安全。但不可重入：在持有 PageCache 锁时不得再次锁同一个 PageCache 实例。
 
+`get_or_create_entry()` 的缺页路径不会在持有 `entries` 或 `inner` 时分配页帧或调用 `PageCacheBackend::read_page()`。它先在 `entries` 中短暂查找；未命中时在锁外构造候选页并完成读取；最后重新获取 `entries`，仅当槽仍为空时才按 `entries → inner` 顺序发布。并发竞争者已发布同一槽时，当前候选页被丢弃并返回已发布页。这个发布规则避免后端重入同一 PageCache 时的自锁，也避免较晚返回的读取覆盖已经变脏的赢家。
+
+写路径把 `Loading` 用作短生命周期的独占 mutation lease：新页和已有稳定页在复制 payload 前都处于 `Loading`，此时读、竞争写和写回均返回或跳过 `EAGAIN` 路径。只有 payload 与 `valid_mask` 发布完成后，页面才转为 `Dirty` 并进入脏页记账；失败路径恢复旧状态或移除新候选页。`write_user()` 先验证请求长度不超过 `UserBuffer` 长度，避免短复制错误在修改缓存内容后才被发现。
+
 ### unevictable 页
 
 tmpfs/shmem 的 PageCache 设 `unevictable = true`，clock eviction 直接跳过。这些页没有持久化后端，回收即数据丢失。
@@ -248,6 +252,7 @@ pub struct PageCache {
 | 稀疏文件 | 超出 EOF 写入 + 空洞读取 | OSComp lua / libctest |
 | 多页读写 | 跨页边界的缓冲 I/O | iozone / unixbench |
 | 回收压力 | 大量文件读取后的回收行为 | libctest / LTP mmapstress |
+| 后端重入缺页 | 同一页 `read_page()` 回调重入 PageCache | RV64 `ktest page_cache` |
 
 ## Known Issues
 

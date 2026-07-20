@@ -6,8 +6,8 @@ use lazy_static::*;
 use log::info;
 use spin::Mutex;
 
-use crate::drivers::BLOCK_DEVICE;
 use crate::drivers::block::BlockDevice;
+use crate::drivers::BLOCK_DEVICE;
 
 /// 文件系统类型枚举。
 ///
@@ -49,7 +49,9 @@ impl FileSystem {
 /// 均不匹配时返回 `FS_Type::Null`。
 pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
     let mut buf = vec![0u8; BLOCK_SIZE];
-    block_device.read_block(0, &mut buf);
+    block_device
+        .read_block(0, &mut buf)
+        .expect("failed to read filesystem signature block");
     if buf[510] == 0x55 && buf[511] == 0xAA {
         info!("[fs] found fat32 filesystem");
         FS_Type::Fat32

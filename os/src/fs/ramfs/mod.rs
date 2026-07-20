@@ -187,8 +187,7 @@ impl RamFS {
     }
 
     fn new_inner(max_pages: usize) -> Arc<Self> {
-        let root: Arc<LockedRamFSInode> =
-            Arc::new(LockedRamFSInode(Mutex::new(RamFSInode::new())));
+        let root: Arc<LockedRamFSInode> = Arc::new(LockedRamFSInode(Mutex::new(RamFSInode::new())));
 
         let result: Arc<RamFS> = Arc::new(RamFS {
             root_inode: root,
@@ -562,9 +561,7 @@ impl IndexNode for LockedRamFSInode {
         // 初始化自引用
         result.0.lock().self_ref = Arc::downgrade(&result);
 
-        inode
-            .children
-            .insert(String::from(name), result.clone());
+        inode.children.insert(String::from(name), result.clone());
         if file_type == FileType::Dir {
             inode.metadata.nlinks += 1;
         }
@@ -602,10 +599,7 @@ impl IndexNode for LockedRamFSInode {
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let child = inode
-            .children
-            .remove(name)
-            .ok_or(SyscallErr::ENOENT)?;
+        let child = inode.children.remove(name).ok_or(SyscallErr::ENOENT)?;
         let child_inode: &LockedRamFSInode = child
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
@@ -613,7 +607,9 @@ impl IndexNode for LockedRamFSInode {
         // unlink 不可用于目录 — 必须返回 EISDIR
         if child_inode.0.lock().metadata.file_type == FileType::Dir {
             // 恢复: 刚才 remove 了 child，但这是非法操作
-            inode.children.insert(alloc::string::String::from(name), child.clone());
+            inode
+                .children
+                .insert(alloc::string::String::from(name), child.clone());
             return Err(SyscallErr::EISDIR);
         }
         let child_pages: usize = {
@@ -734,7 +730,9 @@ impl IndexNode for LockedRamFSInode {
             if is_dir {
                 new_locked.metadata.nlinks += 1;
             }
-            new_locked.children.insert(String::from(new_name), child.clone());
+            new_locked
+                .children
+                .insert(String::from(new_name), child.clone());
             if is_dir {
                 let parent_weak = new_locked.self_ref.clone();
                 drop(new_locked);
@@ -885,12 +883,7 @@ impl IndexNode for LockedRamFSInode {
         Ok(len)
     }
 
-    fn setxattr(
-        &self,
-        name: &str,
-        value: &[u8],
-        flags: u32,
-    ) -> Result<usize, SyscallErr> {
+    fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> Result<usize, SyscallErr> {
         const XATTR_CREATE: u32 = 1;
         const XATTR_REPLACE: u32 = 2;
         let mut inode = self.0.lock();

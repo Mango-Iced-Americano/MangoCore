@@ -291,7 +291,14 @@ impl Ext4FileSystem {
     ///
     /// # 返回值:
     /// + `Result<Ext4InodeRef>` - 新文件的inode
-    pub fn create(&self, parent: u32, name: &str, inode_mode: u16, uid: u16, gid: u16) -> Result<Ext4InodeRef, isize> {
+    pub fn create(
+        &self,
+        parent: u32,
+        name: &str,
+        inode_mode: u16,
+        uid: u16,
+        gid: u16,
+    ) -> Result<Ext4InodeRef, isize> {
         let mut parent_inode_ref = self.get_inode_ref(parent);
         let init_child_ref = self.create_inode(inode_mode, uid, gid)?;
         let mut child_mut = init_child_ref.clone();
@@ -313,7 +320,10 @@ impl Ext4FileSystem {
         uid: u16,
         gid: u16,
     ) -> Result<Ext4InodeRef, isize> {
-        assert!(target.len() <= 60, "create_fast_symlink: target too long for fast symlink");
+        assert!(
+            target.len() <= 60,
+            "create_fast_symlink: target too long for fast symlink"
+        );
 
         // 1. Allocate inode number
         let ino = self.ialloc_alloc_inode(false)?;
@@ -339,7 +349,10 @@ impl Ext4FileSystem {
         block_bytes[..target.len()].copy_from_slice(target);
         block_bytes[target.len()..60].fill(0);
 
-        let child_ref = Ext4InodeRef { inode_num: ino, inode };
+        let child_ref = Ext4InodeRef {
+            inode_num: ino,
+            inode,
+        };
 
         // 3. Add directory entry and link (no parent flush — done in step 4)
         let mut parent_ref = self.get_inode_ref(parent);
@@ -412,8 +425,8 @@ impl Ext4FileSystem {
         // set extent — only for regular files and directories
         // symlinks use i_block directly (fast) or data blocks (long);
         // device files / fifos / sockets don't need extents
-        let needs_extents = inode_file_type == InodeFileType::S_IFREG
-            || inode_file_type == InodeFileType::S_IFDIR;
+        let needs_extents =
+            inode_file_type == InodeFileType::S_IFREG || inode_file_type == InodeFileType::S_IFDIR;
         if needs_extents {
             inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
             inode.extent_tree_init();
@@ -477,8 +490,8 @@ impl Ext4FileSystem {
         // Fast symlink: target stored in i_block (no data blocks, no extents)
         {
             let is_symlink = inode_ref.inode.get_file_type() == DiskInodeType::Link;
-            let uses_extents = (inode_ref.inode.flags()
-                & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
+            let uses_extents =
+                (inode_ref.inode.flags() & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
             if is_symlink && !uses_extents && file_size <= 60 {
                 let size = file_size as usize;
                 let to_read = core::cmp::min(size, read_buf.len());
@@ -521,7 +534,9 @@ impl Ext4FileSystem {
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
                     let mut data = vec![0u8; self.block_size];
-                    self.block_device.read_block(pblock_idx as usize, &mut data);
+                    self.block_device
+                        .read_block(pblock_idx as usize, &mut data)
+                        .map_err(|_| -5isize)?;
                     read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
                         &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
                     );
@@ -547,7 +562,9 @@ impl Ext4FileSystem {
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
                     let mut data = vec![0u8; self.block_size];
-                    self.block_device.read_block(pblock_idx as usize, &mut data);
+                    self.block_device
+                        .read_block(pblock_idx as usize, &mut data)
+                        .map_err(|_| -5isize)?;
                     read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
                 }
                 Err(_) => {
@@ -668,7 +685,8 @@ impl Ext4FileSystem {
             for i in 0..fblock_count {
                 let block_offset =
                     fblock_start as usize * self.block_size + i as usize * self.block_size;
-                let mut block = Block::load_offset(self.block_device.clone(), block_offset, self.block_size);
+                let mut block =
+                    Block::load_offset(self.block_device.clone(), block_offset, self.block_size);
                 let write_size = min(self.block_size, write_buf_len - written);
                 block.write_offset(0, &write_buf[written..written + write_size], write_size);
                 block.sync_blk_to_disk(self.block_device.clone());

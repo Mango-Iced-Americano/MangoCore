@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-19"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -176,9 +176,11 @@ Pty 系统由 `PtyManager` 管理，每对 PTY 包含一个 master（`PtmxMaster
 
 BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主设备号固定为 254（VIRTIO_BLK_MAJOR）。
 
-**读**：按 BLOCK_SZ 块对齐分片读取，通过 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0。
+**读**：按 BLOCK_SZ 块对齐分片读取，通过返回 `BlockDeviceResult` 的 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0；底层读失败转换为 `EIO`。
 
-**写**：按块对齐写入。非整块写入时先读后写（read-modify-write）。超出设备大小返回 `ENOSPC`。
+**写**：按块对齐写入。非整块写入时先读后写（read-modify-write）。超出设备大小返回 `ENOSPC`；底层读写失败转换为 `EIO`。
+
+`BlockDevInode` 不通过 ioctl 暴露 flush；文件系统回写层使用 `BlockDevice::flush` 时，只有 `supports_reliable_flush()` 为真才能将成功视为持久化屏障。
 
 **ioctl**：
 

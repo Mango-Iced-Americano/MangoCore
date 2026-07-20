@@ -5,6 +5,7 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 KERNEL_UIMG := $(KERNEL_ELF).ui
 BLK_MODE := virt_pci
+include make/ext4_backend.mk
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-la.img
 ROOTFS_IMG_DIR := ../fs-img-dir
@@ -142,17 +143,21 @@ $(REGRESSION_CPIO_LA): user
 	./build_initramfs.sh la64 $(MODE) $(REGRESSION_CPIO_LA) regression
 	@touch src/initramfs-regression-la.S
 
-# lwext4: always build C library (now the default ext4 backend)
+# lwext4 C library is only needed by the selected lwext4 backend.
 export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_LA_DIR))
+ifeq ($(EXT4_BACKEND),lwext4)
 LWEXT4_LA_PREREQ := lwext4-la64
+else
+LWEXT4_LA_PREREQ :=
+endif
 
 kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true 2>/dev/null || true
 ifeq ($(MODE), debug)
-	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --no-default-features --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(KERNEL_BASE_FEATURES) $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --release --no-default-features --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(KERNEL_BASE_FEATURES) $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
 endif
 
 # uImage (la64-specific: for uboot boot)
@@ -238,14 +243,17 @@ ktest-run: user $(LWEXT4_LA_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
 	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
-		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+		cargo build --release --no-default-features --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(KERNEL_BASE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-kernel $(KERNEL_ELF) \
+		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
+		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
 		-m 1024 \
 		-smp threads=1
 

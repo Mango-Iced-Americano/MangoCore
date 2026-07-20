@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-use super::{InodeId, IndexNode, MountFS, MountFSInode};
+use super::{IndexNode, InodeId, MountFS, MountFSInode};
 
 // ============================================================================
 // PropagationType
@@ -154,8 +154,12 @@ fn set_propagation_state_no_register(
     peer_gid: Option<u32>,
     master_gid: Option<u32>,
 ) {
-    mnt_fs.propagation().set_peer_group_id(peer_gid.unwrap_or(0));
-    mnt_fs.propagation().set_master_group_id(master_gid.unwrap_or(0));
+    mnt_fs
+        .propagation()
+        .set_peer_group_id(peer_gid.unwrap_or(0));
+    mnt_fs
+        .propagation()
+        .set_master_group_id(master_gid.unwrap_or(0));
 
     let prop_type = match (peer_gid, master_gid) {
         (Some(_), Some(_)) => PropagationType::SharedSlave,
@@ -196,11 +200,7 @@ pub fn configure_propagation_no_register(
 /// propagation type + peer group + master group, then registers.
 /// peer_gid: Some(id) enables Shared; master_gid: Some(id) enables Slave.
 /// When both are Some, the mount becomes SharedSlave.
-pub fn install_propagation(
-    mnt_fs: &Arc<MountFS>,
-    peer_gid: Option<u32>,
-    master_gid: Option<u32>,
-) {
+pub fn install_propagation(mnt_fs: &Arc<MountFS>, peer_gid: Option<u32>, master_gid: Option<u32>) {
     unregister_peer_mount(mnt_fs);
     unregister_slave_mount(mnt_fs);
     set_propagation_state_no_register(mnt_fs, peer_gid, master_gid);
@@ -211,7 +211,9 @@ pub fn install_propagation(
 /// Used when a mount event occurs under a shared parent — the new
 /// child mount must form its own peer group, not join the parent's.
 pub fn set_shared_new_group(mnt_fs: &Arc<MountFS>) {
-    mnt_fs.propagation().set_shared_with_group(allocate_group_id());
+    mnt_fs
+        .propagation()
+        .set_shared_with_group(allocate_group_id());
 }
 
 // ============================================================================
@@ -320,16 +322,14 @@ pub fn get_peers(mfs: &Arc<MountFS>) -> Vec<Arc<MountFS>> {
         return Vec::new();
     }
     let groups = PEER_GROUPS.lock();
-    groups
-        .get(&gid)
-        .map_or(Vec::new(), |peers| {
-            peers
-                .iter()
-                .filter_map(|w| w.upgrade())
-                .filter(|a| !Arc::ptr_eq(a, mfs))
-                .filter(|a| a.propagation().is_shared() && a.propagation().peer_group_id() == gid)
-                .collect()
-        })
+    groups.get(&gid).map_or(Vec::new(), |peers| {
+        peers
+            .iter()
+            .filter_map(|w| w.upgrade())
+            .filter(|a| !Arc::ptr_eq(a, mfs))
+            .filter(|a| a.propagation().is_shared() && a.propagation().peer_group_id() == gid)
+            .collect()
+    })
 }
 
 /// Get all slave mounts that receive propagation from a master group.
@@ -348,10 +348,7 @@ pub fn get_slaves(master_gid: u32) -> Vec<Arc<MountFS>> {
             false
         }
     });
-    slaves
-        .iter()
-        .filter_map(|w| w.upgrade())
-        .collect()
+    slaves.iter().filter_map(|w| w.upgrade()).collect()
 }
 
 // ============================================================================
@@ -379,7 +376,11 @@ pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
     match t {
         PropagationType::Shared => {
             // Preserve slave state: Slave+Shared = SharedSlave
-            let master = if old_type.is_slave() { Some(old_master) } else { None };
+            let master = if old_type.is_slave() {
+                Some(old_master)
+            } else {
+                None
+            };
             if old_type.is_shared() && old_peer != 0 {
                 // Already shared: idempotent, keep existing peer group.
                 // DragonOS/Linux: make-rshared on already-shared is a no-op.
@@ -396,7 +397,11 @@ pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
         PropagationType::Slave => {
             // Master = old peer group if old was Shared; otherwise old_master.
             // SharedSlave → Slave: keep existing master, drop peer.
-            let master = if old_type.is_shared() { old_peer } else { old_master };
+            let master = if old_type.is_shared() {
+                old_peer
+            } else {
+                old_master
+            };
             unregister_peer_mount(mfs);
             unregister_slave_mount(mfs);
             let new_master = if master != 0 { Some(master) } else { None };
@@ -439,11 +444,19 @@ pub fn propagate_mount(
     child_name: &str,
 ) {
     let _start = crate::task::perf::perf_time_now();
-    super::mount::counters::MOUNT_LIST_PROPAGATE_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    super::mount::counters::MOUNT_LIST_PROPAGATE_CALLS
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
-    propagate_mount_inner(source, mountpoint_id, new_child, child_name, &mut visited, MAX_DEPTH);
+    propagate_mount_inner(
+        source,
+        mountpoint_id,
+        new_child,
+        child_name,
+        &mut visited,
+        MAX_DEPTH,
+    );
     super::mount::counters::MOUNT_LIST_PROPAGATE_CYCLES.fetch_add(
         crate::task::perf::perf_time_now().wrapping_sub(_start),
         core::sync::atomic::Ordering::Relaxed,
@@ -470,7 +483,14 @@ fn propagate_mount_inner(
 
     // Propagate to shared peers
     for peer in get_peers(source) {
-        propagate_to_mount(&peer, mountpoint_id, new_child, child_name, source_child_group, false);
+        propagate_to_mount(
+            &peer,
+            mountpoint_id,
+            new_child,
+            child_name,
+            source_child_group,
+            false,
+        );
     }
 
     // Propagate to slaves. SharedSlave receivers forward to their own peers.
@@ -481,14 +501,24 @@ fn propagate_mount_inner(
             continue;
         }
         let created = propagate_to_mount(
-            &slave, mountpoint_id, new_child, child_name, source_child_group, true,
+            &slave,
+            mountpoint_id,
+            new_child,
+            child_name,
+            source_child_group,
+            true,
         );
         // If slave is SharedSlave and a mount was created, recurse
         if let Some(ref created_mount) = created {
             if slave.propagation().is_shared() {
                 visited.push(slave_ptr);
                 propagate_mount_inner(
-                    &slave, mountpoint_id, created_mount, child_name, visited, max_depth,
+                    &slave,
+                    mountpoint_id,
+                    created_mount,
+                    child_name,
+                    visited,
+                    max_depth,
                 );
             }
         }
@@ -528,7 +558,8 @@ fn propagate_to_mount(
     // Fallback: use mountpoint_id directly (DragonOS approach).
     // The inode_id is the same across peers sharing the same filesystem.
     // No find(child_name) — that only works for direct children of root.
-    let inner_inode = new_child.self_mountpoint()
+    let inner_inode = new_child
+        .self_mountpoint()
         .map(|mp| mp.inner_inode.clone())
         .unwrap_or_else(|| new_child.root_inner_inode());
 
@@ -640,7 +671,14 @@ pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId, removed: 
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
     let expected_group = removed.propagation().peer_group_id();
-    propagate_umount_inner(source, mountpoint_id, removed, expected_group, &mut visited, MAX_DEPTH);
+    propagate_umount_inner(
+        source,
+        mountpoint_id,
+        removed,
+        expected_group,
+        &mut visited,
+        MAX_DEPTH,
+    );
 }
 
 fn propagate_umount_inner(
@@ -660,13 +698,19 @@ fn propagate_umount_inner(
     }
 
     for peer in get_peers(source) {
-        let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) else { continue };
-        if Arc::ptr_eq(&child, removed) { continue; }
+        let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) else {
+            continue;
+        };
+        if Arc::ptr_eq(&child, removed) {
+            continue;
+        }
         // Filter by expected group (per-level, not original removed's group)
         if expected_group != 0 {
             let cg = child.propagation().peer_group_id();
             let cm = child.propagation().master_group_id();
-            if cg != expected_group && cm != expected_group { continue; }
+            if cg != expected_group && cm != expected_group {
+                continue;
+            }
         }
         child.umount_at_peer();
     }
@@ -674,13 +718,21 @@ fn propagate_umount_inner(
     let master_gid = source.propagation().peer_group_id();
     for slave in get_slaves(master_gid) {
         let slave_ptr = Arc::as_ptr(&slave) as usize;
-        if visited.contains(&slave_ptr) { continue; }
-        let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) else { continue };
-        if Arc::ptr_eq(&child, removed) { continue; }
+        if visited.contains(&slave_ptr) {
+            continue;
+        }
+        let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) else {
+            continue;
+        };
+        if Arc::ptr_eq(&child, removed) {
+            continue;
+        }
         if expected_group != 0 {
             let cg = child.propagation().peer_group_id();
             let cm = child.propagation().master_group_id();
-            if cg != expected_group && cm != expected_group { continue; }
+            if cg != expected_group && cm != expected_group {
+                continue;
+            }
         }
         let next_group = child.propagation().peer_group_id();
         child.umount_at_peer();
@@ -688,7 +740,14 @@ fn propagate_umount_inner(
             visited.push(slave_ptr);
             // Pass child's group as the next expected_group — multi-level
             // slave chains allocate fresh peer groups per level
-            propagate_umount_inner(&slave, mountpoint_id, removed, next_group, visited, max_depth);
+            propagate_umount_inner(
+                &slave,
+                mountpoint_id,
+                removed,
+                next_group,
+                visited,
+                max_depth,
+            );
         }
     }
 }

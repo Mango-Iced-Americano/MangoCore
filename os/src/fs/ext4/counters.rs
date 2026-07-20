@@ -9,9 +9,15 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static COUNTERS_ENABLED: AtomicBool = AtomicBool::new(false);
 
-pub fn enable_counters() { COUNTERS_ENABLED.store(true, Ordering::Relaxed); }
-pub fn disable_counters() { COUNTERS_ENABLED.store(false, Ordering::Relaxed); }
-pub fn counters_enabled() -> bool { COUNTERS_ENABLED.load(Ordering::Relaxed) }
+pub fn enable_counters() {
+    COUNTERS_ENABLED.store(true, Ordering::Relaxed);
+}
+pub fn disable_counters() {
+    COUNTERS_ENABLED.store(false, Ordering::Relaxed);
+}
+pub fn counters_enabled() -> bool {
+    COUNTERS_ENABLED.load(Ordering::Relaxed)
+}
 
 // ── 总 block I/O ───────────────────────────────────────────────────────
 
@@ -166,47 +172,94 @@ pub(crate) use inc_counter;
 /// 重置所有计数器（每个测试场景前调用）
 pub fn reset_counters() {
     let all = [
-        &BLOCK_READ_TOTAL, &BLOCK_WRITE_TOTAL,
-        &BLOCK_READ_COUNT, &BLOCK_WRITE_COUNT,
-        &INODE_OBJ_CACHE_HIT, &INODE_OBJ_CACHE_MISS, &INODE_OBJ_INSERT,
-        &INODE_OBJ_REMOVE, &INODE_OBJ_INVALIDATE,
-        &DIR_CHILDREN_CACHE_HIT, &DIR_CHILDREN_CACHE_MISS, &DIR_CHILDREN_INSERT,
-        &DIR_CHILDREN_REMOVE, &DIR_CHILDREN_INVALIDATE, &DIR_CHILDREN_STALE_WEAK,
-        &INODE_OBJ_STALE, &PAGE_CACHE_STALE,
-        &INODE_CACHE_INSERT, &INODE_CACHE_EVICT_CLEAN,
-        &INODE_CACHE_EVICT_DIRTY_FLUSH, &INODE_CACHE_EVICT_FAILED_DIRTY,
+        &BLOCK_READ_TOTAL,
+        &BLOCK_WRITE_TOTAL,
+        &BLOCK_READ_COUNT,
+        &BLOCK_WRITE_COUNT,
+        &INODE_OBJ_CACHE_HIT,
+        &INODE_OBJ_CACHE_MISS,
+        &INODE_OBJ_INSERT,
+        &INODE_OBJ_REMOVE,
+        &INODE_OBJ_INVALIDATE,
+        &DIR_CHILDREN_CACHE_HIT,
+        &DIR_CHILDREN_CACHE_MISS,
+        &DIR_CHILDREN_INSERT,
+        &DIR_CHILDREN_REMOVE,
+        &DIR_CHILDREN_INVALIDATE,
+        &DIR_CHILDREN_STALE_WEAK,
+        &INODE_OBJ_STALE,
+        &PAGE_CACHE_STALE,
+        &INODE_CACHE_INSERT,
+        &INODE_CACHE_EVICT_CLEAN,
+        &INODE_CACHE_EVICT_DIRTY_FLUSH,
+        &INODE_CACHE_EVICT_FAILED_DIRTY,
         &INODE_CACHE_REMOVE_UNLINKED,
-        &INODE_META_CACHE_HIT, &INODE_META_CACHE_MISS,
-        &SYMLINK_TARGET_CACHE_HIT, &SYMLINK_TARGET_CACHE_MISS,
-        &METADATA_DIRTY_MARK, &METADATA_FLUSH_COUNT, &METADATA_FLUSH_ERROR,
-        &METADATA_BLOCK_READ_COUNT, &METADATA_BLOCK_WRITE_COUNT,
-        &METADATA_BLOCK_CACHE_HIT, &METADATA_BLOCK_CACHE_MISS,
-        &METADATA_DIRTY_BLOCK_COUNT, &METADATA_FLUSH_IMMEDIATE_COUNT,
-        &INODE_CACHE_HIT, &INODE_CACHE_MISS, &INODE_CACHE_FLUSH,
-        &INODE_LOAD_COUNT, &INODE_DIRTY_COUNT, &INODE_FLUSH_COUNT,
-        &DENTRY_LOOKUP_COUNT, &DENTRY_CACHE_HIT, &DENTRY_CACHE_MISS,
-        &NEGATIVE_DENTRY_HIT, &NEGATIVE_DENTRY_INSERT,
-        &DIR_LOOKUP_COUNT, &DIR_FULL_SCAN_COUNT, &DIR_FULL_SCAN_ENTRIES,
-        &CACHE_ALL_SUBFILE_COUNT, &CACHE_ALL_SUBFILE_ENTRIES_LOADED,
+        &INODE_META_CACHE_HIT,
+        &INODE_META_CACHE_MISS,
+        &SYMLINK_TARGET_CACHE_HIT,
+        &SYMLINK_TARGET_CACHE_MISS,
+        &METADATA_DIRTY_MARK,
+        &METADATA_FLUSH_COUNT,
+        &METADATA_FLUSH_ERROR,
+        &METADATA_BLOCK_READ_COUNT,
+        &METADATA_BLOCK_WRITE_COUNT,
+        &METADATA_BLOCK_CACHE_HIT,
+        &METADATA_BLOCK_CACHE_MISS,
+        &METADATA_DIRTY_BLOCK_COUNT,
+        &METADATA_FLUSH_IMMEDIATE_COUNT,
+        &INODE_CACHE_HIT,
+        &INODE_CACHE_MISS,
+        &INODE_CACHE_FLUSH,
+        &INODE_LOAD_COUNT,
+        &INODE_DIRTY_COUNT,
+        &INODE_FLUSH_COUNT,
+        &DENTRY_LOOKUP_COUNT,
+        &DENTRY_CACHE_HIT,
+        &DENTRY_CACHE_MISS,
+        &NEGATIVE_DENTRY_HIT,
+        &NEGATIVE_DENTRY_INSERT,
+        &DIR_LOOKUP_COUNT,
+        &DIR_FULL_SCAN_COUNT,
+        &DIR_FULL_SCAN_ENTRIES,
+        &CACHE_ALL_SUBFILE_COUNT,
+        &CACHE_ALL_SUBFILE_ENTRIES_LOADED,
         &CACHE_ALL_SUBFILE_INODE_LOADS,
-        &DIR_CACHE_HIT, &DIR_CACHE_MISS, &DIR_CACHE_FULL_INDEX_BUILD,
-        &DIR_CACHE_ENTRY_COUNT, &DIR_CACHE_LINEAR_SCAN,
-        &DIR_CACHE_SCANNED_ENTRIES, &DIR_CACHE_SCANNED_MAX,
-        &GETDENTS_CALL_COUNT, &GETDENTS_RETURNED_ENTRIES,
-        &GETDENTS_RETURNED_BYTES, &GETDENTS_INVALID_RECLEN_COUNT,
-        &INODE_TABLE_READ, &INODE_TABLE_WRITE,
-        &INODE_BITMAP_READ, &INODE_BITMAP_WRITE,
-        &BLOCK_BITMAP_READ, &BLOCK_BITMAP_WRITE,
-        &DIR_BLOCK_READ, &DIR_BLOCK_WRITE,
+        &DIR_CACHE_HIT,
+        &DIR_CACHE_MISS,
+        &DIR_CACHE_FULL_INDEX_BUILD,
+        &DIR_CACHE_ENTRY_COUNT,
+        &DIR_CACHE_LINEAR_SCAN,
+        &DIR_CACHE_SCANNED_ENTRIES,
+        &DIR_CACHE_SCANNED_MAX,
+        &GETDENTS_CALL_COUNT,
+        &GETDENTS_RETURNED_ENTRIES,
+        &GETDENTS_RETURNED_BYTES,
+        &GETDENTS_INVALID_RECLEN_COUNT,
+        &INODE_TABLE_READ,
+        &INODE_TABLE_WRITE,
+        &INODE_BITMAP_READ,
+        &INODE_BITMAP_WRITE,
+        &BLOCK_BITMAP_READ,
+        &BLOCK_BITMAP_WRITE,
+        &DIR_BLOCK_READ,
+        &DIR_BLOCK_WRITE,
         &READDIR_DIR_BLOCK_READ,
-        &GROUP_DESC_READ, &GROUP_DESC_WRITE,
-        &SUPERBLOCK_READ, &SUPERBLOCK_WRITE,
-        &DATA_BLOCK_READ, &DATA_BLOCK_WRITE,
-        &OTHER_META_READ, &OTHER_META_WRITE,
-        &SYMLINK_CREATE_COUNT, &FAST_SYMLINK_CREATE_COUNT,
-        &SYMLINK_READLINK_COUNT, &FAST_SYMLINK_READ_INLINE_COUNT,
-        &SYMLINK_INODE_WRITE_COUNT, &SYMLINK_PARENT_INODE_WRITE_COUNT,
-        &SYMLINK_DIR_BLOCK_WRITE_COUNT, &SYMLINK_SLOW_COUNT,
+        &GROUP_DESC_READ,
+        &GROUP_DESC_WRITE,
+        &SUPERBLOCK_READ,
+        &SUPERBLOCK_WRITE,
+        &DATA_BLOCK_READ,
+        &DATA_BLOCK_WRITE,
+        &OTHER_META_READ,
+        &OTHER_META_WRITE,
+        &SYMLINK_CREATE_COUNT,
+        &FAST_SYMLINK_CREATE_COUNT,
+        &SYMLINK_READLINK_COUNT,
+        &FAST_SYMLINK_READ_INLINE_COUNT,
+        &SYMLINK_INODE_WRITE_COUNT,
+        &SYMLINK_PARENT_INODE_WRITE_COUNT,
+        &SYMLINK_DIR_BLOCK_WRITE_COUNT,
+        &SYMLINK_SLOW_COUNT,
     ];
     for c in &all {
         c.store(0, Ordering::Relaxed);
@@ -216,40 +269,74 @@ pub fn reset_counters() {
 /// 场景化输出 — 单行紧凑格式便于脚本解析
 pub fn dump_scenario(label: &str) {
     println!("=== ext4 I/O Profile: {} ===", label);
-    println!("block_read_total={} block_write_total={}",
+    println!(
+        "block_read_total={} block_write_total={}",
         BLOCK_READ_TOTAL.load(Ordering::Relaxed),
-        BLOCK_WRITE_TOTAL.load(Ordering::Relaxed));
-    println!("ino_tbl r={} w={} | ino_bmp r={} w={} | blk_bmp r={} w={}",
-        INODE_TABLE_READ.load(Ordering::Relaxed), INODE_TABLE_WRITE.load(Ordering::Relaxed),
-        INODE_BITMAP_READ.load(Ordering::Relaxed), INODE_BITMAP_WRITE.load(Ordering::Relaxed),
-        BLOCK_BITMAP_READ.load(Ordering::Relaxed), BLOCK_BITMAP_WRITE.load(Ordering::Relaxed));
-    println!("dir r={} w={} | gd r={} w={} | sb r={} w={}",
-        DIR_BLOCK_READ.load(Ordering::Relaxed), DIR_BLOCK_WRITE.load(Ordering::Relaxed),
-        GROUP_DESC_READ.load(Ordering::Relaxed), GROUP_DESC_WRITE.load(Ordering::Relaxed),
-        SUPERBLOCK_READ.load(Ordering::Relaxed), SUPERBLOCK_WRITE.load(Ordering::Relaxed));
-    println!("data r={} w={}",
-        DATA_BLOCK_READ.load(Ordering::Relaxed), DATA_BLOCK_WRITE.load(Ordering::Relaxed));
-    println!("readdir_dir r={}",
-        READDIR_DIR_BLOCK_READ.load(Ordering::Relaxed));
-    println!("inode_obj hit={} miss={} | children hit={} miss={} stale_weak={}",
-        INODE_OBJ_CACHE_HIT.load(Ordering::Relaxed), INODE_OBJ_CACHE_MISS.load(Ordering::Relaxed),
-        DIR_CHILDREN_CACHE_HIT.load(Ordering::Relaxed), DIR_CHILDREN_CACHE_MISS.load(Ordering::Relaxed),
-        DIR_CHILDREN_STALE_WEAK.load(Ordering::Relaxed));
-    println!("inode_cache hit={} miss={} flush={} | meta hit={} miss={}",
-        INODE_CACHE_HIT.load(Ordering::Relaxed), INODE_CACHE_MISS.load(Ordering::Relaxed),
+        BLOCK_WRITE_TOTAL.load(Ordering::Relaxed)
+    );
+    println!(
+        "ino_tbl r={} w={} | ino_bmp r={} w={} | blk_bmp r={} w={}",
+        INODE_TABLE_READ.load(Ordering::Relaxed),
+        INODE_TABLE_WRITE.load(Ordering::Relaxed),
+        INODE_BITMAP_READ.load(Ordering::Relaxed),
+        INODE_BITMAP_WRITE.load(Ordering::Relaxed),
+        BLOCK_BITMAP_READ.load(Ordering::Relaxed),
+        BLOCK_BITMAP_WRITE.load(Ordering::Relaxed)
+    );
+    println!(
+        "dir r={} w={} | gd r={} w={} | sb r={} w={}",
+        DIR_BLOCK_READ.load(Ordering::Relaxed),
+        DIR_BLOCK_WRITE.load(Ordering::Relaxed),
+        GROUP_DESC_READ.load(Ordering::Relaxed),
+        GROUP_DESC_WRITE.load(Ordering::Relaxed),
+        SUPERBLOCK_READ.load(Ordering::Relaxed),
+        SUPERBLOCK_WRITE.load(Ordering::Relaxed)
+    );
+    println!(
+        "data r={} w={}",
+        DATA_BLOCK_READ.load(Ordering::Relaxed),
+        DATA_BLOCK_WRITE.load(Ordering::Relaxed)
+    );
+    println!(
+        "readdir_dir r={}",
+        READDIR_DIR_BLOCK_READ.load(Ordering::Relaxed)
+    );
+    println!(
+        "inode_obj hit={} miss={} | children hit={} miss={} stale_weak={}",
+        INODE_OBJ_CACHE_HIT.load(Ordering::Relaxed),
+        INODE_OBJ_CACHE_MISS.load(Ordering::Relaxed),
+        DIR_CHILDREN_CACHE_HIT.load(Ordering::Relaxed),
+        DIR_CHILDREN_CACHE_MISS.load(Ordering::Relaxed),
+        DIR_CHILDREN_STALE_WEAK.load(Ordering::Relaxed)
+    );
+    println!(
+        "inode_cache hit={} miss={} flush={} | meta hit={} miss={}",
+        INODE_CACHE_HIT.load(Ordering::Relaxed),
+        INODE_CACHE_MISS.load(Ordering::Relaxed),
         INODE_CACHE_FLUSH.load(Ordering::Relaxed),
-        INODE_META_CACHE_HIT.load(Ordering::Relaxed), INODE_META_CACHE_MISS.load(Ordering::Relaxed));
-    println!("symlink_target hit={} miss={} | sym_create={} fast={} readlink={} inline={}",
-        SYMLINK_TARGET_CACHE_HIT.load(Ordering::Relaxed), SYMLINK_TARGET_CACHE_MISS.load(Ordering::Relaxed),
-        SYMLINK_CREATE_COUNT.load(Ordering::Relaxed), FAST_SYMLINK_CREATE_COUNT.load(Ordering::Relaxed),
-        SYMLINK_READLINK_COUNT.load(Ordering::Relaxed), FAST_SYMLINK_READ_INLINE_COUNT.load(Ordering::Relaxed));
-    println!("symlink_io ino_w={} parent_w={} dir_w={}",
+        INODE_META_CACHE_HIT.load(Ordering::Relaxed),
+        INODE_META_CACHE_MISS.load(Ordering::Relaxed)
+    );
+    println!(
+        "symlink_target hit={} miss={} | sym_create={} fast={} readlink={} inline={}",
+        SYMLINK_TARGET_CACHE_HIT.load(Ordering::Relaxed),
+        SYMLINK_TARGET_CACHE_MISS.load(Ordering::Relaxed),
+        SYMLINK_CREATE_COUNT.load(Ordering::Relaxed),
+        FAST_SYMLINK_CREATE_COUNT.load(Ordering::Relaxed),
+        SYMLINK_READLINK_COUNT.load(Ordering::Relaxed),
+        FAST_SYMLINK_READ_INLINE_COUNT.load(Ordering::Relaxed)
+    );
+    println!(
+        "symlink_io ino_w={} parent_w={} dir_w={}",
         SYMLINK_INODE_WRITE_COUNT.load(Ordering::Relaxed),
         SYMLINK_PARENT_INODE_WRITE_COUNT.load(Ordering::Relaxed),
-        SYMLINK_DIR_BLOCK_WRITE_COUNT.load(Ordering::Relaxed));
-    println!("block_read_count={} block_write_count={}",
+        SYMLINK_DIR_BLOCK_WRITE_COUNT.load(Ordering::Relaxed)
+    );
+    println!(
+        "block_read_count={} block_write_count={}",
         BLOCK_READ_COUNT.load(Ordering::Relaxed),
-        BLOCK_WRITE_COUNT.load(Ordering::Relaxed));
+        BLOCK_WRITE_COUNT.load(Ordering::Relaxed)
+    );
     println!("metadata_block_read_count={} metadata_block_write_count={} metadata_block_cache_hit={} metadata_block_cache_miss={} metadata_dirty_block_count={} metadata_flush_immediate_count={}",
         METADATA_BLOCK_READ_COUNT.load(Ordering::Relaxed),
         METADATA_BLOCK_WRITE_COUNT.load(Ordering::Relaxed),
@@ -257,20 +344,24 @@ pub fn dump_scenario(label: &str) {
         METADATA_BLOCK_CACHE_MISS.load(Ordering::Relaxed),
         METADATA_DIRTY_BLOCK_COUNT.load(Ordering::Relaxed),
         METADATA_FLUSH_IMMEDIATE_COUNT.load(Ordering::Relaxed));
-    println!("inode_load_count={} inode_dirty_count={} inode_flush_count={}",
+    println!(
+        "inode_load_count={} inode_dirty_count={} inode_flush_count={}",
         INODE_LOAD_COUNT.load(Ordering::Relaxed),
         INODE_DIRTY_COUNT.load(Ordering::Relaxed),
-        INODE_FLUSH_COUNT.load(Ordering::Relaxed));
+        INODE_FLUSH_COUNT.load(Ordering::Relaxed)
+    );
     println!("dentry_lookup_count={} dentry_cache_hit={} dentry_cache_miss={} negative_dentry_hit={} negative_dentry_insert={}",
         DENTRY_LOOKUP_COUNT.load(Ordering::Relaxed),
         DENTRY_CACHE_HIT.load(Ordering::Relaxed),
         DENTRY_CACHE_MISS.load(Ordering::Relaxed),
         NEGATIVE_DENTRY_HIT.load(Ordering::Relaxed),
         NEGATIVE_DENTRY_INSERT.load(Ordering::Relaxed));
-    println!("dir_lookup_count={} dir_full_scan_count={} dir_full_scan_entries={}",
+    println!(
+        "dir_lookup_count={} dir_full_scan_count={} dir_full_scan_entries={}",
         DIR_LOOKUP_COUNT.load(Ordering::Relaxed),
         DIR_FULL_SCAN_COUNT.load(Ordering::Relaxed),
-        DIR_FULL_SCAN_ENTRIES.load(Ordering::Relaxed));
+        DIR_FULL_SCAN_ENTRIES.load(Ordering::Relaxed)
+    );
     println!("dir_cache_hit={} dir_cache_miss={} dir_cache_full_index_build={} dir_cache_entry_count={} dir_cache_linear_scan={} dir_cache_scanned_entries={} dir_cache_scanned_max={}",
         DIR_CACHE_HIT.load(Ordering::Relaxed),
         DIR_CACHE_MISS.load(Ordering::Relaxed),
@@ -288,8 +379,10 @@ pub fn dump_scenario(label: &str) {
         GETDENTS_RETURNED_ENTRIES.load(Ordering::Relaxed),
         GETDENTS_RETURNED_BYTES.load(Ordering::Relaxed),
         GETDENTS_INVALID_RECLEN_COUNT.load(Ordering::Relaxed));
-    println!("symlink_slow_count={}",
-        SYMLINK_SLOW_COUNT.load(Ordering::Relaxed));
+    println!(
+        "symlink_slow_count={}",
+        SYMLINK_SLOW_COUNT.load(Ordering::Relaxed)
+    );
 }
 
 // ── syscall 接口 ──────────────────────────────────────────────────────────
@@ -299,9 +392,18 @@ pub fn dump_scenario(label: &str) {
 ///   cmd=4: begin_meta_batch, cmd=5: end_meta_batch_and_flush, cmd=7: abort_meta_batch
 pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isize {
     match cmd {
-        0 => { enable_counters(); 0 }
-        1 => { disable_counters(); 0 }
-        2 => { reset_counters(); 0 }
+        0 => {
+            enable_counters();
+            0
+        }
+        1 => {
+            disable_counters();
+            0
+        }
+        2 => {
+            reset_counters();
+            0
+        }
         3 => {
             let label = read_label(label_ptr, label_len);
             dump_scenario(&label);
@@ -377,21 +479,36 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
             crate::fs::reclaim::dump_reclaim_stats(&label);
             0
         }
-        14 => { crate::fs::dev::pipe::reset_pipe_profile(); 0 }
+        14 => {
+            crate::fs::dev::pipe::reset_pipe_profile();
+            0
+        }
         15 => {
             let label = read_label(label_ptr, label_len);
             crate::fs::dev::pipe::dump_pipe_profile(&label);
             0
         }
-        16 => { crate::task::processor::reset_sched_profile(); 0 }
+        16 => {
+            crate::task::processor::reset_sched_profile();
+            0
+        }
         17 => {
             let label = read_label(label_ptr, label_len);
             crate::task::processor::dump_sched_profile(&label);
             0
         }
-        18 => { crate::fs::dev::pipe::disable_pipe_profile(); 0 }
-        19 => { crate::task::processor::disable_sched_profile(); 0 }
-        20 => { crate::syscall::fs::reset_dac_parent_search_calls(); 0 }
+        18 => {
+            crate::fs::dev::pipe::disable_pipe_profile();
+            0
+        }
+        19 => {
+            crate::task::processor::disable_sched_profile();
+            0
+        }
+        20 => {
+            crate::syscall::fs::reset_dac_parent_search_calls();
+            0
+        }
         21 => crate::syscall::fs::dac_parent_search_calls() as isize,
         22 => crate::syscall::fs::dac_parent_search_ticks() as isize,
         23 => crate::fs::vfs_lookup_calls() as isize,
@@ -403,10 +520,8 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
 fn read_label(label_ptr: usize, label_len: usize) -> alloc::string::String {
     if label_ptr != 0 && label_len > 0 && label_len <= 64 {
         let token = crate::task::current_user_token();
-        crate::mm::translated_str(
-            token,
-            label_ptr as *const u8,
-        ).unwrap_or_else(|_| alloc::string::String::from("unknown"))
+        crate::mm::translated_str(token, label_ptr as *const u8)
+            .unwrap_or_else(|_| alloc::string::String::from("unknown"))
     } else {
         alloc::string::String::from("unknown")
     }
@@ -421,8 +536,14 @@ pub fn sys_ext4_meta_batch(cmd: usize) -> isize {
     };
     drop(guard);
     match cmd {
-        4 => { fs.begin_meta_batch(); 0 }
-        5 => { fs.end_meta_batch_and_flush(); 0 }
+        4 => {
+            fs.begin_meta_batch();
+            0
+        }
+        5 => {
+            fs.end_meta_batch_and_flush();
+            0
+        }
         _ => -22,
     }
 }

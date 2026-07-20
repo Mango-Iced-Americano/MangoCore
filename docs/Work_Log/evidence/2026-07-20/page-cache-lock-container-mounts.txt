@@ -1,0 +1,3 @@
+/etc/localtime -> /etc/localtime
+/home/pxy/projects/MangoCore -> /app
+

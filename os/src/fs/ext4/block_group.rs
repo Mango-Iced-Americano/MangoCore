@@ -275,7 +275,9 @@ impl Ext4BlockGroup {
         //     block_id
         // );
         let mut origin_block_data = vec![0u8; BLOCK_SIZE];
-        block_device.read_block(block_id, &mut origin_block_data);
+        block_device
+            .read_block(block_id, &mut origin_block_data)
+            .expect("failed to read ext4 block-group descriptor block");
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
         // 然后按偏移量将数据覆写到读取的块数据
@@ -284,7 +286,9 @@ impl Ext4BlockGroup {
         }
         // origin_block_data[offset..offset + data.len()].copy_from_slice(data);
         // 最后写入块
-        block_device.write_block(block_id, &origin_block_data);
+        block_device
+            .write_block(block_id, &origin_block_data)
+            .expect("failed to write ext4 block-group descriptor block");
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
         super::counters::inc_counter!(super::counters::GROUP_DESC_WRITE);
         // block_device.write_block(block_id, buf);
@@ -378,7 +382,9 @@ impl Block {
         let block_id = offset / block_size;
         // Self::load_id(block_device, block_id, offset)
         let mut buf = vec![0u8; 4096];
-        block_device.read_block(block_id, &mut buf);
+        block_device
+            .read_block(block_id, &mut buf)
+            .expect("failed to read ext4 superblock block");
         let data = buf;
         Block {
             disk_offset: offset,
@@ -397,7 +403,9 @@ impl Block {
     ) -> Self {
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         let mut buf = vec![0u8; block_size];
-        block_device.read_block(block_id, &mut buf);
+        block_device
+            .read_block(block_id, &mut buf)
+            .expect("failed to read ext4 block");
         let data = buf.to_vec();
         Block {
             disk_offset: offset,
@@ -542,8 +550,7 @@ impl Block {
         if self.disk_offset % block_size != 0 {
             panic!(
                 "sync_blk_to_disk: write_offset {} is not a multiple of BLOCK_SIZE {}",
-                self.disk_offset,
-                block_size
+                self.disk_offset, block_size
             )
         }
         let block_id = self.disk_offset / block_size;
@@ -553,7 +560,9 @@ impl Block {
         //     self.disk_offset,
         //     self.data.len()
         // );
-        block_device.write_block(block_id, &self.data);
+        block_device
+            .write_block(block_id, &self.data)
+            .expect("failed to write ext4 block");
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
     }
 }

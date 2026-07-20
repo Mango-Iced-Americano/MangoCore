@@ -22,13 +22,18 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt::Debug;
-use core::sync::atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering};
-use spin::{Mutex, MutexGuard};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use lazy_static::lazy_static;
+use spin::{Mutex, MutexGuard};
 
 use super::dentry_cache::DentryCache;
 use super::{
-    file::FileFlags, file_system::FileSystem, propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount, unregister_slave_mount},
+    file::FileFlags,
+    file_system::FileSystem,
+    propagation::{
+        propagate_mount, propagate_umount, register_peer, unregister_peer_mount,
+        unregister_slave_mount, MountPropagation, PropagationType,
+    },
     FilePrivateData, FileType, IndexNode, InodeId, InodeMode,
 };
 
@@ -74,15 +79,15 @@ bitflags! {
 ///
 /// Most MS_* → ST_* values are identical; only the exceptions are documented.
 /// - `NOSYMFOLLOW`: MS_NOSYMFOLLOW = 0x100 → ST_NOSYMFOLLOW = 0x2000
-pub const ST_RDONLY: u64      = 0x0001;
-pub const ST_NOSUID: u64      = 0x0002;
-pub const ST_NODEV: u64       = 0x0004;
-pub const ST_NOEXEC: u64      = 0x0008;
+pub const ST_RDONLY: u64 = 0x0001;
+pub const ST_NOSUID: u64 = 0x0002;
+pub const ST_NODEV: u64 = 0x0004;
+pub const ST_NOEXEC: u64 = 0x0008;
 pub const ST_SYNCHRONOUS: u64 = 0x0010;
-pub const ST_MANDLOCK: u64    = 0x0040;
-pub const ST_NOATIME: u64     = 0x0400;
-pub const ST_NODIRATIME: u64  = 0x0800;
-pub const ST_RELATIME: u64    = 0x1000;
+pub const ST_MANDLOCK: u64 = 0x0040;
+pub const ST_NOATIME: u64 = 0x0400;
+pub const ST_NODIRATIME: u64 = 0x0800;
+pub const ST_RELATIME: u64 = 0x1000;
 pub const ST_NOSYMFOLLOW: u64 = 0x2000;
 
 /// Convert VFS internal `MountFlags` (MS_* bit assignments) to `statfs`
@@ -92,17 +97,39 @@ pub const ST_NOSYMFOLLOW: u64 = 0x2000;
 /// `NOSYMFOLLOW` (0x100 → 0x2000).
 pub fn mount_flags_to_st_flags(mf: MountFlags) -> u64 {
     let mut st = 0u64;
-    if mf.contains(MountFlags::RDONLY)      { st |= ST_RDONLY; }
-    if mf.contains(MountFlags::NOSUID)      { st |= ST_NOSUID; }
-    if mf.contains(MountFlags::NODEV)       { st |= ST_NODEV; }
-    if mf.contains(MountFlags::NOEXEC)      { st |= ST_NOEXEC; }
-    if mf.contains(MountFlags::SYNCHRONOUS) { st |= ST_SYNCHRONOUS; }
-    if mf.contains(MountFlags::MANDLOCK)    { st |= ST_MANDLOCK; }
-    if mf.contains(MountFlags::DIRSYNC)     { st |= 0x0080; }  // same bit
-    if mf.contains(MountFlags::NOSYMFOLLOW) { st |= ST_NOSYMFOLLOW; }
-    if mf.contains(MountFlags::NOATIME)     { st |= ST_NOATIME; }
-    if mf.contains(MountFlags::NODIRATIME)  { st |= ST_NODIRATIME; }
-    if mf.contains(MountFlags::RELATIME)    { st |= ST_RELATIME; }
+    if mf.contains(MountFlags::RDONLY) {
+        st |= ST_RDONLY;
+    }
+    if mf.contains(MountFlags::NOSUID) {
+        st |= ST_NOSUID;
+    }
+    if mf.contains(MountFlags::NODEV) {
+        st |= ST_NODEV;
+    }
+    if mf.contains(MountFlags::NOEXEC) {
+        st |= ST_NOEXEC;
+    }
+    if mf.contains(MountFlags::SYNCHRONOUS) {
+        st |= ST_SYNCHRONOUS;
+    }
+    if mf.contains(MountFlags::MANDLOCK) {
+        st |= ST_MANDLOCK;
+    }
+    if mf.contains(MountFlags::DIRSYNC) {
+        st |= 0x0080;
+    } // same bit
+    if mf.contains(MountFlags::NOSYMFOLLOW) {
+        st |= ST_NOSYMFOLLOW;
+    }
+    if mf.contains(MountFlags::NOATIME) {
+        st |= ST_NOATIME;
+    }
+    if mf.contains(MountFlags::NODIRATIME) {
+        st |= ST_NODIRATIME;
+    }
+    if mf.contains(MountFlags::RELATIME) {
+        st |= ST_RELATIME;
+    }
     st
 }
 
@@ -272,8 +299,12 @@ pub mod counters {
     pub static MOUNTFS_ALIVE: AtomicUsize = AtomicUsize::new(0);
     pub static MOUNTFSINODE_ALIVE: AtomicUsize = AtomicUsize::new(0);
 
-    pub fn mountfs_alive() -> usize { MOUNTFS_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
-    pub fn mountfsinode_alive() -> usize { MOUNTFSINODE_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
+    pub fn mountfs_alive() -> usize {
+        MOUNTFS_ALIVE.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn mountfsinode_alive() -> usize {
+        MOUNTFSINODE_ALIVE.load(core::sync::atomic::Ordering::Relaxed)
+    }
 
     // VFS find diagnostic counters
     pub static FIND_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -286,7 +317,17 @@ pub mod counters {
     pub static FIND_INSERT_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static FIND_OVERLAY_TICKS: AtomicUsize = AtomicUsize::new(0);
 
-    pub fn find_snapshot() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+    pub fn find_snapshot() -> (
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
         let calls = FIND_CALLS.load(core::sync::atomic::Ordering::Relaxed);
         let ticks = FIND_TICKS.load(core::sync::atomic::Ordering::Relaxed);
         let overlay = FIND_SELF_OVERLAY.load(core::sync::atomic::Ordering::Relaxed);
@@ -296,7 +337,9 @@ pub mod counters {
         let inner = FIND_INNER_TICKS.load(core::sync::atomic::Ordering::Relaxed);
         let insert = FIND_INSERT_TICKS.load(core::sync::atomic::Ordering::Relaxed);
         let ov_ticks = FIND_OVERLAY_TICKS.load(core::sync::atomic::Ordering::Relaxed);
-        (calls, ticks, overlay, hit, miss, lock, inner, insert, ov_ticks)
+        (
+            calls, ticks, overlay, hit, miss, lock, inner, insert, ov_ticks,
+        )
     }
 
     // MountFSInode creation source counters
@@ -329,7 +372,17 @@ pub mod counters {
     pub static RBIND_DIRENT_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static RBIND_SEEN_SCAN: AtomicUsize = AtomicUsize::new(0);
 
-    pub fn mount_perf_snapshot() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+    pub fn mount_perf_snapshot() -> (
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
         (
             MOUNT_LIST_PROPAGATE_CALLS.load(core::sync::atomic::Ordering::Relaxed),
             MOUNT_LIST_PROPAGATE_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
@@ -376,18 +429,30 @@ fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
             return;
         }
         let self_ptr = Arc::as_ptr(mfs) as usize;
-        let lc_count = mfs.lifecycle.packed.load(core::sync::atomic::Ordering::Relaxed) & ((1u64 << 30) - 1);
-        let lc_state = mfs.lifecycle.packed.load(core::sync::atomic::Ordering::Relaxed) >> 62;
+        let lc_count = mfs
+            .lifecycle
+            .packed
+            .load(core::sync::atomic::Ordering::Relaxed)
+            & ((1u64 << 30) - 1);
+        let lc_state = mfs
+            .lifecycle
+            .packed
+            .load(core::sync::atomic::Ordering::Relaxed)
+            >> 62;
         let parent_info = mfs.self_mountpoint().map(|mp| {
             let parent_ptr = Arc::as_ptr(&mp.mount_fs) as usize;
-            let ino = mp.inner_inode.metadata().map(|m| {
-                alloc::format!("{:?}", m.inode_id)
-            }).unwrap_or_else(|_| alloc::string::String::from("?"));
+            let ino = mp
+                .inner_inode
+                .metadata()
+                .map(|m| alloc::format!("{:?}", m.inode_id))
+                .unwrap_or_else(|_| alloc::string::String::from("?"));
             (parent_ptr, ino)
         });
         let flags = mfs.mount_flags();
         let prop = mfs.propagation();
-        let path = mfs.mount_path().unwrap_or_else(|| alloc::string::String::from("(nopath)"));
+        let path = mfs
+            .mount_path()
+            .unwrap_or_else(|| alloc::string::String::from("(nopath)"));
 
         log::warn!(
             "[mount_diag] {} mfs=0x{:x} lc_count={} lc_state={} path={} flags={:?} prop={:?} peer_gid={} master_gid={} parent_mfs={} parent_ino={}",
@@ -429,8 +494,8 @@ fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
 const LC_STATE_SHIFT: u64 = 62;
 const LC_COUNT_MASK: u64 = (1u64 << 30) - 1;
 const LC_STATE_ACTIVE: u64 = 0;
-const LC_STATE_DYING: u64  = 1;
-const LC_STATE_DEAD: u64   = 2;
+const LC_STATE_DYING: u64 = 1;
+const LC_STATE_DEAD: u64 = 2;
 
 /// Persistent linear registry of every **acquired** `BackendLifecycle`.
 ///
@@ -506,16 +571,15 @@ impl BackendLifecycle {
                 return None;
             }
             let new = old + 1; // state stays Active, count++
-            match self.packed.compare_exchange_weak(
-                old, new, Ordering::AcqRel, Ordering::Acquire,
-            ) {
+            match self
+                .packed
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => {
                     LC_ACQUIRE.fetch_add(1, Ordering::Relaxed);
                     // Lazily register on first acquire (0→1).
                     // This guarantee: no count-0 lifecycle ever enters the registry.
-                    if count == 0
-                        && !self.registered.swap(true, Ordering::AcqRel)
-                    {
+                    if count == 0 && !self.registered.swap(true, Ordering::AcqRel) {
                         LIFECYCLE_REGISTRY.lock().push(self.clone());
                     }
                     return Some(self.clone());
@@ -542,7 +606,10 @@ impl BackendLifecycle {
                 // Last reference: transition to Dying.
                 let new = LC_STATE_DYING << LC_STATE_SHIFT;
                 match self.packed.compare_exchange_weak(
-                    old, new, Ordering::AcqRel, Ordering::Acquire,
+                    old,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
                 ) {
                     Ok(_) => {
                         LC_RELEASE_DYING.fetch_add(1, Ordering::Relaxed);
@@ -553,7 +620,10 @@ impl BackendLifecycle {
             } else {
                 let new = (state << LC_STATE_SHIFT) | (count - 1);
                 match self.packed.compare_exchange_weak(
-                    old, new, Ordering::AcqRel, Ordering::Acquire,
+                    old,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
                 ) {
                     Ok(_) => return false,
                     Err(_) => continue,
@@ -569,7 +639,9 @@ impl BackendLifecycle {
     }
 
     #[inline]
-    fn is_dying(&self) -> bool { self.state() == LC_STATE_DYING }
+    fn is_dying(&self) -> bool {
+        self.state() == LC_STATE_DYING
+    }
 }
 
 /// Drain **one** Dying lifecycle from the global registry.
@@ -595,7 +667,8 @@ pub fn drain_one_dying_lifecycle() -> bool {
     if let Some(lc) = entry {
         lc.fs.on_umount();
         // Mark Dead so stale diagnostics can distinguish it.
-        lc.packed.store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
+        lc.packed
+            .store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
         LC_DRAIN.fetch_add(1, Ordering::Relaxed);
         // `lc` drops here → Arc<BackendLifecycle> → Arc<dyn FileSystem> released.
         true
@@ -715,9 +788,13 @@ impl MountFSInode {
 
     /// 判断当前 inode 是否为挂载点根
     pub fn is_mountpoint_root(&self) -> bool {
-        let Ok(cur_md) = self.inner_inode.metadata() else { return false };
+        let Ok(cur_md) = self.inner_inode.metadata() else {
+            return false;
+        };
         let root_inner = self.mount_fs.root_inner_inode();
-        let Ok(root_md) = root_inner.metadata() else { return false };
+        let Ok(root_md) = root_inner.metadata() else {
+            return false;
+        };
         cur_md.inode_id == root_md.inode_id
     }
 
@@ -750,7 +827,10 @@ impl MountFSInode {
                 None => return current,
             }
         }
-        log::warn!("overlaid_inode: max overlay depth {} reached, stopping", MAX_OVERLAY);
+        log::warn!(
+            "overlaid_inode: max overlay depth {} reached, stopping",
+            MAX_OVERLAY
+        );
         current
     }
 
@@ -790,10 +870,8 @@ impl MountFSInode {
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
         if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             let inner_inode = self.inner_inode.find(name)?;
-            let result = MountFSInode::overlaid_inode(MountFSInode::new(
-                inner_inode,
-                self.mount_fs.clone(),
-            ));
+            let result =
+                MountFSInode::overlaid_inode(MountFSInode::new(inner_inode, self.mount_fs.clone()));
             result.remember_path_hint(parent_ino, name);
             counters::MFSI_FROM_FIND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return Ok(result);
@@ -812,10 +890,15 @@ impl MountFSInode {
 
         // Cache miss: record generation before disk I/O
         if crate::fs::ext4::counters::counters_enabled() {
-            crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            crate::fs::ext4::counters::DENTRY_CACHE_MISS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DENTRY_CACHE_MISS
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
-        let gen_before = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
+        let gen_before = self
+            .mount_fs
+            .dentry_gen
+            .load(core::sync::atomic::Ordering::Acquire);
 
         // Release cache lock, perform actual filesystem lookup
         let inner_inode = self.inner_inode.find(name)?;
@@ -826,7 +909,10 @@ impl MountFSInode {
         counters::MFSI_FROM_FIND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         // Insert into cache — only if directory was not modified concurrently
-        let gen_after = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
+        let gen_after = self
+            .mount_fs
+            .dentry_gen
+            .load(core::sync::atomic::Ordering::Acquire);
         if gen_before == gen_after {
             let (entry, evicted) = {
                 let mut cache = self.mount_fs.dentry_cache.lock();
@@ -1115,7 +1201,9 @@ impl IndexNode for MountFSInode {
         }
 
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create(name, file_type, mode)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
@@ -1147,9 +1235,13 @@ impl IndexNode for MountFSInode {
         data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
-        let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
+        let inner_inode = self
+            .inner_inode
+            .create_with_data(name, file_type, mode, data)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
         if let Some(parent_ino) = parent_ino {
             wrapper.remember_path_hint(parent_ino, name);
@@ -1161,7 +1253,10 @@ impl IndexNode for MountFSInode {
                     parent_ino: parent_md.inode_id,
                     name: String::from(name),
                 };
-                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                let (_, evicted) = self
+                    .mount_fs
+                    .dentry_cache
+                    .lock()
                     .insert_or_get(key, wrapper.clone());
                 drop(evicted);
             }
@@ -1176,7 +1271,9 @@ impl IndexNode for MountFSInode {
         attrs: super::index_node::CreateAttrs,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create_with_attrs(name, file_type, attrs)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
@@ -1190,7 +1287,10 @@ impl IndexNode for MountFSInode {
                     parent_ino: parent_md.inode_id,
                     name: String::from(name),
                 };
-                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                let (_, evicted) = self
+                    .mount_fs
+                    .dentry_cache
+                    .lock()
                     .insert_or_get(key, wrapper.clone());
                 drop(evicted);
             }
@@ -1200,7 +1300,9 @@ impl IndexNode for MountFSInode {
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.symlink(name, target)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
@@ -1214,7 +1316,10 @@ impl IndexNode for MountFSInode {
                     parent_ino: parent_md.inode_id,
                     name: String::from(name),
                 };
-                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                let (_, evicted) = self
+                    .mount_fs
+                    .dentry_cache
+                    .lock()
                     .insert_or_get(key, wrapper.clone());
                 drop(evicted);
             }
@@ -1224,7 +1329,9 @@ impl IndexNode for MountFSInode {
 
     fn link(&self, name: &str, other: &Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         let other = MountFSInode::unwrap_inode(other);
         self.inner_inode.link(name, &other)?;
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
@@ -1238,8 +1345,7 @@ impl IndexNode for MountFSInode {
                     self.mount_fs.clone(),
                 );
                 linked.remember_path_hint(parent_md.inode_id, name);
-                let (_, evicted) = self.mount_fs.dentry_cache.lock()
-                    .insert_or_get(key, linked);
+                let (_, evicted) = self.mount_fs.dentry_cache.lock().insert_or_get(key, linked);
                 drop(evicted);
             }
         }
@@ -1254,7 +1360,9 @@ impl IndexNode for MountFSInode {
         flags: u32,
     ) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
 
         // Also check destination parent mount is writable
         if let Some(new_mnt) = new_parent.as_any_ref().downcast_ref::<MountFSInode>() {
@@ -1268,7 +1376,8 @@ impl IndexNode for MountFSInode {
             .and_then(|inode| inode.metadata().ok().map(|m| m.inode_id));
 
         let new_parent = MountFSInode::unwrap_inode(new_parent);
-        self.inner_inode.rename(old_name, &new_parent, new_name, flags)?;
+        self.inner_inode
+            .rename(old_name, &new_parent, new_name, flags)?;
         if let Some(child_ino) = renamed_ino {
             if let Ok(new_parent_md) = new_parent.metadata() {
                 self.mount_fs.remember_inode_path_hint(
@@ -1313,7 +1422,9 @@ impl IndexNode for MountFSInode {
 
     fn unlink(&self, name: &str) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         // 检查是否为挂载点
         let child_inode_id = if let Ok(inode) = self.inner_inode.find(name) {
             let inode_id = inode.metadata()?.inode_id;
@@ -1346,7 +1457,9 @@ impl IndexNode for MountFSInode {
 
     fn rmdir(&self, name: &str) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
         // 检查是否为挂载点
         let child_inode_id = if let Ok(inode) = self.inner_inode.find(name) {
             let inode_id = inode.metadata()?.inode_id;
@@ -1393,12 +1506,7 @@ impl IndexNode for MountFSInode {
         self.inner_inode.set_metadata(metadata)
     }
 
-    fn setxattr(
-        &self,
-        name: &str,
-        value: &[u8],
-        flags: u32,
-    ) -> Result<usize, SyscallErr> {
+    fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> Result<usize, SyscallErr> {
         self.ensure_mount_writable()?;
         self.inner_inode.setxattr(name, value, flags)
     }
@@ -1557,13 +1665,12 @@ impl IndexNode for MountFSInode {
             // 在 parent 中查找 current 的名称
             let child_ino = current.metadata()?.inode_id;
             let parent_ino = parent.metadata()?.inode_id;
-            let name = if let Some(name) =
-                current.valid_path_hint_name(&parent, parent_ino, child_ino)
-            {
-                name
-            } else {
-                parent.get_entry_name(child_ino)?
-            };
+            let name =
+                if let Some(name) = current.valid_path_hint_name(&parent, parent_ino, child_ino) {
+                    name
+                } else {
+                    parent.get_entry_name(child_ino)?
+                };
             path_parts.push(name);
 
             if path_parts.len() > 64 {
@@ -1661,7 +1768,9 @@ impl MountFS {
     /// `MountFS` holds one reference.  The caller must have pre-registered
     /// the lifecycle via `BackendLifecycle::new()`.
     pub fn new(lifecycle: Arc<BackendLifecycle>, mount_flags: MountFlags) -> Arc<Self> {
-        let _ = lifecycle.acquire().expect("BackendLifecycle::acquire failed on fresh lifecycle");
+        let _ = lifecycle
+            .acquire()
+            .expect("BackendLifecycle::acquire failed on fresh lifecycle");
         counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let mfs = Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: None,
@@ -1691,7 +1800,9 @@ impl MountFS {
         root_inner_inode: Arc<dyn IndexNode>,
         mount_flags: MountFlags,
     ) -> Arc<Self> {
-        let _ = lifecycle.acquire().expect("BackendLifecycle::acquire failed on fresh lifecycle");
+        let _ = lifecycle
+            .acquire()
+            .expect("BackendLifecycle::acquire failed on fresh lifecycle");
         counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let mfs = Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: Some(root_inner_inode),
@@ -1778,7 +1889,11 @@ impl MountFS {
     /// Old mount is fully detached so its parent backref and cached children
     /// cannot keep the covered subtree alive after overmount.
     /// Returns the old mount (None if no existing mount).
-    pub fn overmount_and_add(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Option<Arc<MountFS>> {
+    pub fn overmount_and_add(
+        &self,
+        inode_id: InodeId,
+        mount_fs: Arc<MountFS>,
+    ) -> Option<Arc<MountFS>> {
         let mut mps = self.mountpoints.lock();
         let old = mps.remove(&inode_id);
         if let Some(ref old_mfs) = old {
@@ -1801,8 +1916,8 @@ impl MountFS {
     /// Debug: dump mount state for diagnosing EBUSY/EINVAL on umount.
     /// Does NOT panic — all reads are fallible via if-let/ok() chains.
     pub fn dump_mount_state(self: &Arc<Self>, reason: &str) {
-        use log::warn;
         use alloc::string::ToString;
+        use log::warn;
 
         let path = self.mount_path().unwrap_or_else(|| "(none)".to_string());
         let source = self.mount_source().unwrap_or_else(|| "(none)".to_string());
@@ -1821,7 +1936,10 @@ impl MountFS {
         // self_mountpoint info
         if let Some(mp) = self.self_mountpoint() {
             if let Ok(md) = mp.inner_inode.metadata() {
-                let parent_path = mp.mount_fs.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                let parent_path = mp
+                    .mount_fs
+                    .mount_path()
+                    .unwrap_or_else(|| "(nopath)".to_string());
                 let parent_ptr = Arc::as_ptr(&mp.mount_fs) as usize;
                 warn!(
                     "  self_mountpoint: parent_inode_id={:?} parent_fs_name={} parent=0x{:x} parent_path={}",
@@ -1830,7 +1948,8 @@ impl MountFS {
                 // Check if parent's mountpoints table actually has an entry for us
                 {
                     let parent_mps = mp.mount_fs.mountpoints.lock();
-                    let parent_has_us = parent_mps.get(&md.inode_id)
+                    let parent_has_us = parent_mps
+                        .get(&md.inode_id)
                         .map(|child| Arc::ptr_eq(child, self));
                     warn!(
                         "  parent.mountpoints[inode_id={:?}].ptr_eq(self) = {:?} (parent has {} entries)",
@@ -1841,9 +1960,13 @@ impl MountFS {
                         warn!("  parent mounts table:");
                         for (&ino, child) in parent_mps.iter() {
                             let child_ptr = Arc::as_ptr(child) as usize;
-                            let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                            let child_path =
+                                child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
                             let is_us = Arc::ptr_eq(child, self);
-                            warn!("    ino={:?} child=0x{:x} path={} is_self={}", ino, child_ptr, child_path, is_us);
+                            warn!(
+                                "    ino={:?} child=0x{:x} path={} is_self={}",
+                                ino, child_ptr, child_path, is_us
+                            );
                         }
                     }
                 }
@@ -1869,9 +1992,14 @@ impl MountFS {
             for (ino, child) in mps.iter() {
                 let child_ptr = Arc::as_ptr(child) as usize;
                 let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
-                let child_source = child.mount_source().unwrap_or_else(|| "(nosrc)".to_string());
+                let child_source = child
+                    .mount_source()
+                    .unwrap_or_else(|| "(nosrc)".to_string());
                 let is_self = Arc::ptr_eq(child, self);
-                warn!("    ino={:?} child=0x{:x} path={} source={} self_ref={}", ino, child_ptr, child_path, child_source, is_self);
+                warn!(
+                    "    ino={:?} child=0x{:x} path={} source={} self_ref={}",
+                    ino, child_ptr, child_path, child_source, is_self
+                );
             }
         }
 
@@ -1886,7 +2014,11 @@ impl MountFS {
         }
         if master_gid != 0 {
             let slaves = super::propagation::get_slaves(master_gid);
-            warn!("  slave_group(master={}): {} active slaves", master_gid, slaves.len());
+            warn!(
+                "  slave_group(master={}): {} active slaves",
+                master_gid,
+                slaves.len()
+            );
         }
 
         // Dump full MOUNT_LIST (global perspective — matches /proc/mounts)
@@ -1897,8 +2029,10 @@ impl MountFS {
                 let mfs_ptr = Arc::as_ptr(mfs) as usize;
                 let is_self = Arc::ptr_eq(mfs, self);
                 let m_path = mfs.mount_path().unwrap_or_else(|| "(nopath)".to_string());
-                warn!("    path={} mfs=0x{:x} mfs_path={} ino={:?} is_self={}",
-                    p, mfs_ptr, m_path, ino, is_self);
+                warn!(
+                    "    path={} mfs=0x{:x} mfs_path={} ino={:?} is_self={}",
+                    p, mfs_ptr, m_path, ino, is_self
+                );
             }
         }
 
@@ -1911,7 +2045,11 @@ impl MountFS {
     /// 当 force=false 且子挂载存在时返回 EBUSY（保留 Linux 语义）。
     ///
     /// DragonOS phase order: children check → detach from parent → propagate → cleanup self.
-    pub fn umount_inner(self: &Arc<Self>, do_propagate: bool, force: bool) -> Result<(), SyscallErr> {
+    pub fn umount_inner(
+        self: &Arc<Self>,
+        do_propagate: bool,
+        force: bool,
+    ) -> Result<(), SyscallErr> {
         // Phase 1: check children
         {
             let mountpoints = self.mountpoints.lock();
@@ -2029,14 +2167,20 @@ impl MountFS {
         self.detach_recursive_inner(true)
     }
 
-    pub(crate) fn detach_recursive_inner(self: &Arc<Self>, do_propagate: bool) -> Result<(), SyscallErr> {
+    pub(crate) fn detach_recursive_inner(
+        self: &Arc<Self>,
+        do_propagate: bool,
+    ) -> Result<(), SyscallErr> {
         if self.self_mountpoint.lock().is_none() {
             return Err(SyscallErr::EINVAL);
         }
 
         let propagation_target = if do_propagate {
             self.self_mountpoint.lock().clone().and_then(|mp| {
-                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+                mp.inner_inode
+                    .metadata()
+                    .ok()
+                    .map(|md| (mp.mount_fs.clone(), md.inode_id))
             })
         } else {
             None
@@ -2160,7 +2304,10 @@ impl FileSystem for MountFS {
         sb
     }
 
-    fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<super::file_system::SuperBlock, SyscallErr> {
+    fn statfs(
+        &self,
+        inode: &Arc<dyn IndexNode>,
+    ) -> Result<super::file_system::SuperBlock, SyscallErr> {
         // Unwrap MountFSInode to reach the inner filesystem's statfs,
         // then OR in the mount-level flags (converted to ST_* ABI) so
         // that statfs(2) reports ST_RDONLY / ST_NOSYMFOLLOW etc.

@@ -7,6 +7,7 @@ owner: MangoCore Team
 last_updated: 2026-06-29
 code_paths:
   - "os/src/fs/mod.rs"
+  - "os/src/fs/ext4_backend.rs"
   - "os/src/fs/filesystem.rs"
   - "os/src/fs/initramfs.rs"
 entry_points:
@@ -37,6 +38,10 @@ related_docs:
 根文件系统初始化是内核启动的关键阶段。它在内存管理初始化之后执行，负责探测块设备、识别文件系统类型、创建 VFS 根并挂载默认伪文件系统。无论底层是 ext4、FAT32 还是 ramfs，最终的根文件系统都被包装为统一的 `MountFS` 实例，供上层系统和用户进程通过 VFS 接口访问。
 
 整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `rust_main` 在合适的时机触发。
+
+### Ext4 后端选择
+
+`os/src/fs/ext4_backend.rs` 是所有 ext4 打开路径的唯一 facade。Cargo 必须且只能启用 `ext4_lwext4_backend`、`ext4_legacy_backend`、`ext4_another_backend` 之一；默认选择 lwext4。`VFS_ROOT`、`mount_block_fs` 与 `sys_mount` 都调用该 facade，因此构建不会在运行时回退或切换 ext4 后端。`EXT4_BACKEND=lwext4|legacy|another` 由 `os/make/ext4_backend.mk` 映射到对应 Cargo feature。`another` 当前通过 `ext4_another` bridge 以只读方式挂载：只接受 `load_read_only_checked` 验证的干净介质，常规文件读取复用 Mango PageCache，所有写入与元数据变更返回 `EROFS`。
 
 ## 2. 启动流程
 

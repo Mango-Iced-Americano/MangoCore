@@ -13,6 +13,8 @@ AUTO_REBUILD_MEM ?= 1
 RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
+include make/ext4_backend.mk
+
 .PHONY: all $(ARCHS) clean prepare-cargo-config
 
 all: prepare-cargo-config rv64_all la64_all

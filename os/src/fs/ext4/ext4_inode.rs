@@ -3,8 +3,8 @@ use core::mem::size_of;
 use core::panic;
 
 use crate::fs::inode::{InodeLock, InodeTime};
-use crate::fs::DiskInodeType;
 use crate::fs::vfs::FileSystem;
+use crate::fs::DiskInodeType;
 use alloc::string::String;
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};
@@ -38,14 +38,23 @@ bitflags! {
 impl InodeFileType {
     pub fn to_dir_entry_type(&self) -> crate::fs::ext4::direntry::DirEntryType {
         use crate::fs::ext4::direntry::DirEntryType;
-        if self.contains(InodeFileType::S_IFREG) { DirEntryType::EXT4_DE_REG_FILE }
-        else if self.contains(InodeFileType::S_IFDIR) { DirEntryType::EXT4_DE_DIR }
-        else if self.contains(InodeFileType::S_IFLNK) { DirEntryType::EXT4_DE_SYMLINK }
-        else if self.contains(InodeFileType::S_IFCHR) { DirEntryType::EXT4_DE_CHRDEV }
-        else if self.contains(InodeFileType::S_IFBLK) { DirEntryType::EXT4_DE_BLKDEV }
-        else if self.contains(InodeFileType::S_IFIFO) { DirEntryType::EXT4_DE_FIFO }
-        else if self.contains(InodeFileType::S_IFSOCK) { DirEntryType::EXT4_DE_SOCK }
-        else { DirEntryType::EXT4_DE_UNKNOWN }
+        if self.contains(InodeFileType::S_IFREG) {
+            DirEntryType::EXT4_DE_REG_FILE
+        } else if self.contains(InodeFileType::S_IFDIR) {
+            DirEntryType::EXT4_DE_DIR
+        } else if self.contains(InodeFileType::S_IFLNK) {
+            DirEntryType::EXT4_DE_SYMLINK
+        } else if self.contains(InodeFileType::S_IFCHR) {
+            DirEntryType::EXT4_DE_CHRDEV
+        } else if self.contains(InodeFileType::S_IFBLK) {
+            DirEntryType::EXT4_DE_BLKDEV
+        } else if self.contains(InodeFileType::S_IFIFO) {
+            DirEntryType::EXT4_DE_FIFO
+        } else if self.contains(InodeFileType::S_IFSOCK) {
+            DirEntryType::EXT4_DE_SOCK
+        } else {
+            DirEntryType::EXT4_DE_UNKNOWN
+        }
     }
 }
 
@@ -651,12 +660,16 @@ impl Ext4Inode {
         );
 
         let mut buf = vec![0u8; block_size];
-        block_device.read_block(block_id, &mut buf);
+        block_device
+            .read_block(block_id, &mut buf)
+            .expect("failed to read ext4 inode table block");
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
 
         buf[offset..offset + write_len].copy_from_slice(&data);
-        block_device.write_block(block_id, &buf);
+        block_device
+            .write_block(block_id, &buf)
+            .expect("failed to write ext4 inode table block");
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
         super::counters::inc_counter!(super::counters::INODE_TABLE_WRITE);
     }
@@ -713,8 +726,13 @@ impl Ext4FileSystem {
     /// 直接从磁盘读取 inode，不走 cache。仅用于 get_inode_cached miss 路径。
     pub(crate) fn read_inode_from_disk_uncached(&self, inode_num: u32) -> Ext4InodeRef {
         super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
-        debug_assert!(self.block_size == crate::hal::BLOCK_SZ || self.block_size == 1024 || self.block_size == 2048,
-            "block_size corrupted: {}", self.block_size);
+        debug_assert!(
+            self.block_size == crate::hal::BLOCK_SZ
+                || self.block_size == 1024
+                || self.block_size == 2048,
+            "block_size corrupted: {}",
+            self.block_size
+        );
         let offset = self.inode_disk_pos(inode_num);
         let mut ext4block = self.load_metadata_block_offset(offset);
         let blk_offset = offset % self.block_size;
@@ -846,11 +864,17 @@ impl Ext4FileSystem {
             return Err(Errno::ENOTSUP as isize);
         }
         let _t = crate::task::perf::perf_time_now();
-        let mut meta_reads_before = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let mut meta_reads_before = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT
+            .load(core::sync::atomic::Ordering::Relaxed);
         let search_path = self.find_extent(inode_ref, lblock);
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t);
-        let meta_reads = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT.load(core::sync::atomic::Ordering::Relaxed).saturating_sub(meta_reads_before);
-        let depth = search_path.as_ref().map(|sp| sp.depth as usize).unwrap_or(0) as usize;
+        let meta_reads = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(meta_reads_before);
+        let depth = search_path
+            .as_ref()
+            .map(|sp| sp.depth as usize)
+            .unwrap_or(0) as usize;
         crate::task::perf::record_ext4_find_extent_cost(elapsed, depth, meta_reads as usize);
         if let Ok(path) = search_path {
             if let Some(node) = path.path.last() {

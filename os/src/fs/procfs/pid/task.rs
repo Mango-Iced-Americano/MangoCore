@@ -38,11 +38,8 @@ pub fn task_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn Ind
         (dir_lock.self_ref.clone(), dir_lock.fs.clone())
     };
 
-    let dir = LockedProcInode::new_dir_wired(
-        parent_weak,
-        fs_weak,
-        InodeMode::from_bits_truncate(0o555),
-    );
+    let dir =
+        LockedProcInode::new_dir_wired(parent_weak, fs_weak, InodeMode::from_bits_truncate(0o555));
     {
         let mut data = dir.0.lock();
         data.extra_data = tid;
@@ -79,7 +76,10 @@ pub fn task_comm_content(
         None => return Err(SyscallErr::ENOENT),
     };
     let comm = task.acquire_inner_lock().task_comm;
-    let comm_len = comm.iter().position(|&byte| byte == 0).unwrap_or(comm.len());
+    let comm_len = comm
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(comm.len());
     let name = core::str::from_utf8(&comm[..comm_len]).unwrap_or("");
     let mut out = String::from(name);
     out.push('\n');

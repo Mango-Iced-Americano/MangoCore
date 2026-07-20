@@ -13,9 +13,9 @@
 //! block boundaries. The bridge handles the general case (partial-block
 //! overlap via read-modify-write) for correctness.
 
-use alloc::sync::Arc;
 use crate::drivers::block::BlockDevice;
 use crate::hal::BLOCK_SZ;
+use alloc::sync::Arc;
 use lwext4_rust::KernelDevOp;
 
 /// Holds the MangoCore block device and current seek position for lwext4.
@@ -38,13 +38,13 @@ impl KernelDevOp for MangoKernelDevOp {
 
     fn seek(dev: &mut MangoBlockDev, off: i64, whence: i32) -> Result<i64, i32> {
         let new_pos: i64 = match whence {
-            0 => off,                                 // SEEK_SET
-            1 => dev.pos as i64 + off,                // SEEK_CUR
-            2 => dev.size as i64 + off,               // SEEK_END
-            _ => return Err(-22),                     // EINVAL
+            0 => off,                   // SEEK_SET
+            1 => dev.pos as i64 + off,  // SEEK_CUR
+            2 => dev.size as i64 + off, // SEEK_END
+            _ => return Err(-22),       // EINVAL
         };
         if new_pos < 0 {
-            return Err(-22);                          // EINVAL
+            return Err(-22); // EINVAL
         }
         dev.pos = new_pos as usize;
         Ok(new_pos)
@@ -66,11 +66,12 @@ impl KernelDevOp for MangoKernelDevOp {
 
             // Read full MangoCore block (4096 bytes)
             let mut blk_buf = [0u8; 4096];
-            dev.dev.read_block(block_id, &mut blk_buf[..BLOCK_SZ]);
+            dev.dev
+                .read_block(block_id, &mut blk_buf[..BLOCK_SZ])
+                .map_err(block_device_error_to_errno)?;
 
             // Copy the requested portion into output buffer
-            buf[total..total + chunk]
-                .copy_from_slice(&blk_buf[block_off..block_off + chunk]);
+            buf[total..total + chunk].copy_from_slice(&blk_buf[block_off..block_off + chunk]);
 
             total += chunk;
         }
@@ -95,14 +96,19 @@ impl KernelDevOp for MangoKernelDevOp {
 
             if chunk == BLOCK_SZ && block_off == 0 {
                 // Full-block aligned write — pass slice directly
-                dev.dev.write_block(block_id, &buf[total..total + BLOCK_SZ]);
+                dev.dev
+                    .write_block(block_id, &buf[total..total + BLOCK_SZ])
+                    .map_err(block_device_error_to_errno)?;
             } else {
                 // Partial-block write — read-modify-write
                 let mut blk_buf = [0u8; 4096];
-                dev.dev.read_block(block_id, &mut blk_buf[..BLOCK_SZ]);
-                blk_buf[block_off..block_off + chunk]
-                    .copy_from_slice(&buf[total..total + chunk]);
-                dev.dev.write_block(block_id, &blk_buf[..BLOCK_SZ]);
+                dev.dev
+                    .read_block(block_id, &mut blk_buf[..BLOCK_SZ])
+                    .map_err(block_device_error_to_errno)?;
+                blk_buf[block_off..block_off + chunk].copy_from_slice(&buf[total..total + chunk]);
+                dev.dev
+                    .write_block(block_id, &blk_buf[..BLOCK_SZ])
+                    .map_err(block_device_error_to_errno)?;
             }
             total += chunk;
         }
@@ -111,8 +117,15 @@ impl KernelDevOp for MangoKernelDevOp {
         Ok(total)
     }
 
-    fn flush(_dev: &mut MangoBlockDev) -> Result<usize, i32> {
-        // Block devices don't need explicit flush
+    fn flush(dev: &mut MangoBlockDev) -> Result<usize, i32> {
+        if !dev.dev.supports_reliable_flush() {
+            return Err(-95);
+        }
+        dev.dev.flush().map_err(block_device_error_to_errno)?;
         Ok(0)
     }
+}
+
+const fn block_device_error_to_errno(_: crate::drivers::block::BlockDeviceError) -> i32 {
+    -5
 }

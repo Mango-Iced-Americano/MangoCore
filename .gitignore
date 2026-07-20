@@ -32,6 +32,8 @@ disk.img
 
 disk-la.img
 
+docs/Work_Log/evidence/*
+
 cc-codex/*.clean.img
 
 *digest.txt

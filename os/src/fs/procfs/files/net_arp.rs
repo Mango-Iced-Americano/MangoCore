@@ -1,6 +1,6 @@
-use alloc::string::String;
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use alloc::string::String;
 use smoltcp::wire::IpAddress;
 
 pub fn net_arp_content(
@@ -17,7 +17,8 @@ pub fn net_arp_content(
     for (ifindex, ip, mac, _state) in &entries {
         if let IpAddress::Ipv4(a) = ip {
             let dev_name = crate::net::net_core::current_netns()
-                .device_list.lock()
+                .device_list
+                .lock()
                 .iter()
                 .find(|(_, iface)| iface.nic_id() as u32 == *ifindex)
                 .map(|(_, iface)| iface.iface_name().clone())
@@ -27,7 +28,12 @@ pub fn net_arp_content(
                 alloc::format!("{}.{}.{}.{}", a.0[0], a.0[1], a.0[2], a.0[3]),
                 alloc::format!(
                     "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
+                    mac.0[0],
+                    mac.0[1],
+                    mac.0[2],
+                    mac.0[3],
+                    mac.0[4],
+                    mac.0[5]
                 ),
                 dev_name,
             ));

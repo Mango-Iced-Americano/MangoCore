@@ -21,11 +21,11 @@ use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
-use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use super::event::EventWaitQueue;
+use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
+use crate::config::SYSTEM_FD_LIMIT;
 use crate::mm::UserBuffer;
 use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
-use crate::config::SYSTEM_FD_LIMIT;
 
 // ── Globally-unique open file id counter ────────────────────────────────
 
@@ -166,10 +166,15 @@ impl FileFlags {
 }
 
 /// Mask of all status (non-access-mode) flags returned by fcntl(F_GETFL).
-pub const STATUS_MASK: u32 = FileFlags::O_APPEND.bits() | FileFlags::O_NONBLOCK.bits()
-    | FileFlags::O_DSYNC.bits() | FileFlags::O_SYNC.bits() | FileFlags::O_ASYNC.bits()
-    | FileFlags::O_DIRECT.bits() | FileFlags::O_LARGEFILE.bits()
-    | FileFlags::O_NOATIME.bits() | FileFlags::O_PATH.bits();
+pub const STATUS_MASK: u32 = FileFlags::O_APPEND.bits()
+    | FileFlags::O_NONBLOCK.bits()
+    | FileFlags::O_DSYNC.bits()
+    | FileFlags::O_SYNC.bits()
+    | FileFlags::O_ASYNC.bits()
+    | FileFlags::O_DIRECT.bits()
+    | FileFlags::O_LARGEFILE.bits()
+    | FileFlags::O_NOATIME.bits()
+    | FileFlags::O_PATH.bits();
 
 // ── FileMode ────────────────────────────────────────────────────────────
 
@@ -384,7 +389,8 @@ impl FdTable {
         if old_capacity >= limit {
             return Err(SyscallErr::EMFILE);
         }
-        let new_capacity = core::cmp::min(old_capacity.saturating_mul(2).max(old_capacity + 1), limit);
+        let new_capacity =
+            core::cmp::min(old_capacity.saturating_mul(2).max(old_capacity + 1), limit);
         self.resize_to_capacity(new_capacity)?;
         // 递归分配
         self.alloc_fd(file, cloexec)
@@ -475,7 +481,10 @@ impl FdTable {
         if fd >= self.fds.len() {
             return Err(SyscallErr::EBADF);
         }
-        self.fds[fd].as_ref().map(|f| Arc::clone(f)).ok_or(SyscallErr::EBADF)
+        self.fds[fd]
+            .as_ref()
+            .map(|f| Arc::clone(f))
+            .ok_or(SyscallErr::EBADF)
     }
 
     /// 获取 fd 对应的 File 引用（不 clone Arc —— borrow only）
@@ -592,7 +601,9 @@ impl FdTable {
     }
 
     pub fn insert_at(&mut self, file: Arc<File>, pos: usize) -> Result<usize, isize> {
-        let (fd, _old) = self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))?;
+        let (fd, _old) = self
+            .alloc_fd_at(pos, file, false)
+            .map_err(|e| -(e as isize))?;
         Ok(fd)
     }
 
@@ -601,14 +612,22 @@ impl FdTable {
     }
 
     pub fn check(&self, fd: usize) -> Result<(), isize> {
-        self.fds.get(fd).and_then(|f| f.as_ref()).map(|_| ()).ok_or(-(SyscallErr::EBADF as isize))
+        self.fds
+            .get(fd)
+            .and_then(|f| f.as_ref())
+            .map(|_| ())
+            .ok_or(-(SyscallErr::EBADF as isize))
     }
 
-    pub fn get_soft_limit(&self) -> usize { self.soft_limit }
+    pub fn get_soft_limit(&self) -> usize {
+        self.soft_limit
+    }
     pub fn set_soft_limit(&mut self, limit: usize) {
         self.soft_limit = limit.min(Self::MAX_CAPACITY);
     }
-    pub fn get_hard_limit(&self) -> usize { self.hard_limit }
+    pub fn get_hard_limit(&self) -> usize {
+        self.hard_limit
+    }
     pub fn set_hard_limit(&mut self, limit: usize) {
         self.hard_limit = limit.min(Self::MAX_CAPACITY);
     }
@@ -1074,7 +1093,11 @@ impl File {
         }
 
         let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream { 0 } else { self.offset.load(Ordering::SeqCst) };
+        let offset = if is_stream {
+            0
+        } else {
+            self.offset.load(Ordering::SeqCst)
+        };
 
         let n = self
             .inode
@@ -1187,7 +1210,11 @@ impl File {
         }
 
         let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream { 0 } else { self.offset.load(Ordering::SeqCst) };
+        let offset = if is_stream {
+            0
+        } else {
+            self.offset.load(Ordering::SeqCst)
+        };
 
         match self.inode.read_at_user(offset, len, dst) {
             Ok(n) => {
@@ -1201,7 +1228,9 @@ impl File {
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
                 // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
                 // The uninitialized memory is immediately filled by `read_at` below.
-                unsafe { kbuf.set_len(len); }
+                unsafe {
+                    kbuf.set_len(len);
+                }
                 let n = self
                     .inode
                     .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
@@ -1237,7 +1266,9 @@ impl File {
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
                 // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
                 // The uninitialized memory is immediately filled by `read_at` below.
-                unsafe { kbuf.set_len(len); }
+                unsafe {
+                    kbuf.set_len(len);
+                }
                 let n = self
                     .inode
                     .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
@@ -1289,7 +1320,9 @@ impl File {
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
                 // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
                 // The uninitialized memory is immediately filled by `src.read_at` below.
-                unsafe { kbuf.set_len(len); }
+                unsafe {
+                    kbuf.set_len(len);
+                }
                 let copied = src.read_at(0, &mut kbuf);
                 let n = self.inode.write_at(
                     offset,
@@ -1347,7 +1380,9 @@ impl File {
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
                 // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
                 // The uninitialized memory is immediately filled by `src.read_at` below.
-                unsafe { kbuf.set_len(len); }
+                unsafe {
+                    kbuf.set_len(len);
+                }
                 let copied = src.read_at(0, &mut kbuf);
                 let n = self.inode.write_at(
                     offset,
@@ -1380,7 +1415,9 @@ impl File {
         };
 
         self.check_memfd_write_seals(offset, len)?;
-        let n = self.inode.discard_write_at(offset, len, self.private_data.lock())?;
+        let n = self
+            .inode
+            .discard_write_at(offset, len, self.private_data.lock())?;
 
         if n > 0 && !is_stream {
             self.offset.fetch_add(n, Ordering::SeqCst);
@@ -1462,9 +1499,8 @@ impl File {
 
     /// 写就绪检查（poll 用）
     pub fn w_ready(&self) -> bool {
-        self.poll_events().intersects(
-            super::event::EPollEvent::EPOLLOUT | super::event::EPollEvent::EPOLLWRNORM,
-        )
+        self.poll_events()
+            .intersects(super::event::EPollEvent::EPOLLOUT | super::event::EPollEvent::EPOLLWRNORM)
     }
 
     /// 统一 poll 事件检查。
@@ -1482,10 +1518,12 @@ impl File {
     pub fn poll_events(&self) -> super::event::EPollEvent {
         match self.inode.poll(&*self.private_data.lock()) {
             Ok(revents) => super::event::EPollEvent::from_bits_truncate(revents),
-            Err(_) => super::event::EPollEvent::EPOLLIN
-                | super::event::EPollEvent::EPOLLOUT
-                | super::event::EPollEvent::EPOLLRDNORM
-                | super::event::EPollEvent::EPOLLWRNORM,
+            Err(_) => {
+                super::event::EPollEvent::EPOLLIN
+                    | super::event::EPollEvent::EPOLLOUT
+                    | super::event::EPollEvent::EPOLLRDNORM
+                    | super::event::EPollEvent::EPOLLWRNORM
+            }
         }
     }
 
@@ -1556,9 +1594,11 @@ impl File {
         let new_bits = old_flags.bits() & !SETFL_MASK | new_flags.bits() & SETFL_MASK;
         // Use fetch_update with cur-based closure to avoid overwriting concurrent
         // nonblock/F_SETFL changes with a stale snapshot.
-        let _ = self.flags.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-            Some((cur & !SETFL_MASK) | (new_flags.bits() & SETFL_MASK))
-        });
+        let _ = self
+            .flags
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some((cur & !SETFL_MASK) | (new_flags.bits() & SETFL_MASK))
+            });
         Ok(())
     }
 
@@ -1612,8 +1652,7 @@ impl File {
     }
 
     pub fn memfd_seal_bits(&self) -> Option<usize> {
-        self.memfd_seals()
-            .map(|seals| seals.load(Ordering::SeqCst))
+        self.memfd_seals().map(|seals| seals.load(Ordering::SeqCst))
     }
 
     fn check_memfd_write_seals(&self, offset: usize, len: usize) -> Result<(), SyscallErr> {
@@ -1645,9 +1684,11 @@ impl File {
     /// 设置 O_NONBLOCK 标志
     pub fn set_nonblock(&self, nonblock: bool) {
         if nonblock {
-            self.flags.fetch_or(FileFlags::O_NONBLOCK.bits(), Ordering::Relaxed);
+            self.flags
+                .fetch_or(FileFlags::O_NONBLOCK.bits(), Ordering::Relaxed);
         } else {
-            self.flags.fetch_and(!FileFlags::O_NONBLOCK.bits(), Ordering::Relaxed);
+            self.flags
+                .fetch_and(!FileFlags::O_NONBLOCK.bits(), Ordering::Relaxed);
         }
     }
 
@@ -1664,43 +1705,52 @@ impl File {
     /// 当 inode 有 page_cache 时直接使用页缓存物理帧；
     /// 否则（如 ramfs）手动分配帧并从文件读取数据。
     pub fn map_to_kernel_space(&self, base: usize) -> &'static [u8] {
-        use crate::mm::{frame_alloc, Frame, FrameTracker, MapPermission, KERNEL_SPACE};
         use crate::config::PAGE_SIZE;
+        use crate::mm::{frame_alloc, Frame, FrameTracker, MapPermission, KERNEL_SPACE};
         use core::convert::TryInto;
 
         let size = self.get_size();
-        log::info!("[map_to_kernel_space] size={} inode={:?}", size, self.inode.metadata().ok());
-        let need_pages = if size == 0 { 0 } else { (size + PAGE_SIZE - 1) / PAGE_SIZE };
+        log::info!(
+            "[map_to_kernel_space] size={} inode={:?}",
+            size,
+            self.inode.metadata().ok()
+        );
+        let need_pages = if size == 0 {
+            0
+        } else {
+            (size + PAGE_SIZE - 1) / PAGE_SIZE
+        };
 
         // Helper: allocate frames + pread full file content into them
-        let alloc_and_pread = |size: usize, need_pages: usize| -> Vec<Arc<FrameTracker>> {
-            log::debug!(
-                "[map_to_kernel_space] allocating {} frames + pread {} bytes (page-at-a-time)",
-                need_pages,
-                size
-            );
-            let mut trackers: Vec<Arc<FrameTracker>> = Vec::with_capacity(need_pages);
-            for _ in 0..need_pages {
-                trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
-            }
-            // pread directly into each frame, avoiding a monolithic heap Vec
-            let mut offset = 0;
-            for tracker in &trackers {
-                let dst = tracker.ppn.get_bytes_array();
-                let chunk = (size - offset).min(PAGE_SIZE);
-                let n = self
-                    .pread(offset, &mut dst[..chunk])
-                    .expect("map_to_kernel_space: pread failed");
-                if n != chunk {
-                    log::warn!(
+        let alloc_and_pread =
+            |size: usize, need_pages: usize| -> Vec<Arc<FrameTracker>> {
+                log::debug!(
+                    "[map_to_kernel_space] allocating {} frames + pread {} bytes (page-at-a-time)",
+                    need_pages,
+                    size
+                );
+                let mut trackers: Vec<Arc<FrameTracker>> = Vec::with_capacity(need_pages);
+                for _ in 0..need_pages {
+                    trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
+                }
+                // pread directly into each frame, avoiding a monolithic heap Vec
+                let mut offset = 0;
+                for tracker in &trackers {
+                    let dst = tracker.ppn.get_bytes_array();
+                    let chunk = (size - offset).min(PAGE_SIZE);
+                    let n = self
+                        .pread(offset, &mut dst[..chunk])
+                        .expect("map_to_kernel_space: pread failed");
+                    if n != chunk {
+                        log::warn!(
                         "[map_to_kernel_space] pread at offset {} returned {} bytes, expected {}",
                         offset, n, chunk
                     );
+                    }
+                    offset += chunk;
                 }
-                offset += chunk;
-            }
-            trackers
-        };
+                trackers
+            };
 
         let frames: Vec<Arc<FrameTracker>> = if need_pages == 0 {
             Vec::new()
@@ -1765,14 +1815,14 @@ impl File {
                     Ok(child) => match child.metadata() {
                         Ok(m) => {
                             let dt = match m.file_type {
-                                FileType::Dir => 4,       // DT_DIR
-                                FileType::File => 8,       // DT_REG
-                                FileType::SymLink => 10,   // DT_LNK
-                                FileType::CharDevice => 2, // DT_CHR
-                                FileType::BlockDevice => 6,// DT_BLK
-                                FileType::Pipe => 5,       // DT_FIFO
-                                FileType::Socket => 12,    // DT_SOCK
-                                _ => 0,                    // DT_UNKNOWN
+                                FileType::Dir => 4,         // DT_DIR
+                                FileType::File => 8,        // DT_REG
+                                FileType::SymLink => 10,    // DT_LNK
+                                FileType::CharDevice => 2,  // DT_CHR
+                                FileType::BlockDevice => 6, // DT_BLK
+                                FileType::Pipe => 5,        // DT_FIFO
+                                FileType::Socket => 12,     // DT_SOCK
+                                _ => 0,                     // DT_UNKNOWN
                             };
                             (dt, m.inode_id)
                         }
@@ -1926,7 +1976,10 @@ impl Drop for File {
 /// Track mount-level writer count for MS_REMOUNT EBUSY check.
 /// `add`: true for open, false for close.
 fn track_mount_writer(inode: &Arc<dyn IndexNode>, add: bool) {
-    if let Some(mnt) = inode.as_any_ref().downcast_ref::<super::mount::MountFSInode>() {
+    if let Some(mnt) = inode
+        .as_any_ref()
+        .downcast_ref::<super::mount::MountFSInode>()
+    {
         if add {
             mnt.mount_fs.inc_writers();
         } else {

@@ -1,0 +1,3 @@
+rv64 build: docker compose exec -T os-dev bash -lc "cd /app/os && make rv64-kernel-build-only EXT4_BACKEND=another" (exit 0)
+la64 build: docker compose exec -T os-dev bash -lc "cd /app/os && make la64-kernel-build-only EXT4_BACKEND=another" (exit 0)
+rv64 focused ktest: docker compose exec -T os-dev bash -lc "cd /app/os && make rv64-ktest KTEST=page_cache EXT4_BACKEND=another" (exit 0)

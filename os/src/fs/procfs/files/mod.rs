@@ -8,9 +8,9 @@ pub mod meminfo;
 pub mod mounts;
 pub mod net_arp;
 pub mod net_dev;
+pub mod net_if_inet6;
 pub mod net_igmp;
 pub mod net_igmp6;
-pub mod net_if_inet6;
 pub mod net_raw;
 pub mod net_raw6;
 pub mod net_route;
@@ -26,20 +26,65 @@ pub mod sysvipc;
 pub mod uptime;
 pub mod version;
 
-use alloc::sync::Arc;
 use crate::fs::vfs::InodeMode;
 use crate::utils::error::SyscallErr;
+use alloc::sync::Arc;
 
 pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<(), SyscallErr> {
-    root.add_file("cmdline", InodeMode::from_bits_truncate(0o444), cmdline::cmdline_content, 0)?;
-    root.add_file("version", InodeMode::from_bits_truncate(0o444), version::version_content, 0)?;
-    root.add_file("uptime", InodeMode::from_bits_truncate(0o444), uptime::uptime_content, 0)?;
-    root.add_file("meminfo", InodeMode::from_bits_truncate(0o444), meminfo::meminfo_content, 0)?;
-    root.add_file("cpuinfo", InodeMode::from_bits_truncate(0o444), cpuinfo::cpuinfo_content, 0)?;
-    root.add_file("mounts", InodeMode::from_bits_truncate(0o444), mounts::mounts_content, 0)?;
-    root.add_file("stat", InodeMode::from_bits_truncate(0o444), stat::stat_content, 0)?;
-    root.add_file("config", InodeMode::from_bits_truncate(0o444), config::config_content, 0)?;
-    root.add_file("filesystems", InodeMode::from_bits_truncate(0o444), filesystems::filesystems_content, 0)?;
+    root.add_file(
+        "cmdline",
+        InodeMode::from_bits_truncate(0o444),
+        cmdline::cmdline_content,
+        0,
+    )?;
+    root.add_file(
+        "version",
+        InodeMode::from_bits_truncate(0o444),
+        version::version_content,
+        0,
+    )?;
+    root.add_file(
+        "uptime",
+        InodeMode::from_bits_truncate(0o444),
+        uptime::uptime_content,
+        0,
+    )?;
+    root.add_file(
+        "meminfo",
+        InodeMode::from_bits_truncate(0o444),
+        meminfo::meminfo_content,
+        0,
+    )?;
+    root.add_file(
+        "cpuinfo",
+        InodeMode::from_bits_truncate(0o444),
+        cpuinfo::cpuinfo_content,
+        0,
+    )?;
+    root.add_file(
+        "mounts",
+        InodeMode::from_bits_truncate(0o444),
+        mounts::mounts_content,
+        0,
+    )?;
+    root.add_file(
+        "stat",
+        InodeMode::from_bits_truncate(0o444),
+        stat::stat_content,
+        0,
+    )?;
+    root.add_file(
+        "config",
+        InodeMode::from_bits_truncate(0o444),
+        config::config_content,
+        0,
+    )?;
+    root.add_file(
+        "filesystems",
+        InodeMode::from_bits_truncate(0o444),
+        filesystems::filesystems_content,
+        0,
+    )?;
     let sys_dir = root.add_dir_locked("sys", InodeMode::from_bits_truncate(0o555))?;
     let kernel_dir = sys_dir.add_dir_locked("kernel", InodeMode::from_bits_truncate(0o555))?;
     kernel_dir.add_file(
@@ -261,10 +306,17 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     let ipv6_dir = net_dir.add_dir_locked("ipv6", InodeMode::from_bits_truncate(0o555))?;
     let ipv6_conf_dir = ipv6_dir.add_dir_locked("conf", InodeMode::from_bits_truncate(0o555))?;
     let ipv6_all_dir = ipv6_conf_dir.add_dir_locked("all", InodeMode::from_bits_truncate(0o555))?;
-    let ipv6_default_dir = ipv6_conf_dir.add_dir_locked("default", InodeMode::from_bits_truncate(0o555))?;
+    let ipv6_default_dir =
+        ipv6_conf_dir.add_dir_locked("default", InodeMode::from_bits_truncate(0o555))?;
     let ipv6_lo_dir = ipv6_conf_dir.add_dir_locked("lo", InodeMode::from_bits_truncate(0o555))?;
-    let ipv6_eth0_dir = ipv6_conf_dir.add_dir_locked("eth0", InodeMode::from_bits_truncate(0o555))?;
-    for dir in [&ipv6_all_dir, &ipv6_default_dir, &ipv6_lo_dir, &ipv6_eth0_dir] {
+    let ipv6_eth0_dir =
+        ipv6_conf_dir.add_dir_locked("eth0", InodeMode::from_bits_truncate(0o555))?;
+    for dir in [
+        &ipv6_all_dir,
+        &ipv6_default_dir,
+        &ipv6_lo_dir,
+        &ipv6_eth0_dir,
+    ] {
         dir.add_writable_file(
             "disable_ipv6",
             InodeMode::from_bits_truncate(0o644),
@@ -277,30 +329,125 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     ipv6_conf_dir.set_hooks(ipv6_conf_find_hook, |_| alloc::vec![]);
 
     let net_dir = root.add_dir_locked("net", InodeMode::from_bits_truncate(0o555))?;
-    net_dir.add_file("arp", InodeMode::from_bits_truncate(0o444), net_arp::net_arp_content, 0)?;
-    net_dir.add_file("dev", InodeMode::from_bits_truncate(0o444), net_dev::net_dev_content, 0)?;
-    net_dir.add_file("if_inet6", InodeMode::from_bits_truncate(0o444), net_if_inet6::net_if_inet6_content, 0)?;
-    net_dir.add_file("raw", InodeMode::from_bits_truncate(0o444), net_raw::net_raw_content, 0)?;
-    net_dir.add_file("raw6", InodeMode::from_bits_truncate(0o444), net_raw6::net_raw6_content, 0)?;
-    net_dir.add_file("route", InodeMode::from_bits_truncate(0o444), net_route::net_route_content, 0)?;
-    net_dir.add_file("tcp", InodeMode::from_bits_truncate(0o444), net_tcp::net_tcp_content, 0)?;
-    net_dir.add_file("tcp6", InodeMode::from_bits_truncate(0o444), net_tcp6::net_tcp6_content, 0)?;
-    net_dir.add_file("udp", InodeMode::from_bits_truncate(0o444), net_udp::net_udp_content, 0)?;
-    net_dir.add_file("udp6", InodeMode::from_bits_truncate(0o444), net_udp6::net_udp6_content, 0)?;
-    net_dir.add_file("unix", InodeMode::from_bits_truncate(0o444), net_unix::net_unix_content, 0)?;
+    net_dir.add_file(
+        "arp",
+        InodeMode::from_bits_truncate(0o444),
+        net_arp::net_arp_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "dev",
+        InodeMode::from_bits_truncate(0o444),
+        net_dev::net_dev_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "if_inet6",
+        InodeMode::from_bits_truncate(0o444),
+        net_if_inet6::net_if_inet6_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "raw",
+        InodeMode::from_bits_truncate(0o444),
+        net_raw::net_raw_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "raw6",
+        InodeMode::from_bits_truncate(0o444),
+        net_raw6::net_raw6_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "route",
+        InodeMode::from_bits_truncate(0o444),
+        net_route::net_route_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "tcp",
+        InodeMode::from_bits_truncate(0o444),
+        net_tcp::net_tcp_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "tcp6",
+        InodeMode::from_bits_truncate(0o444),
+        net_tcp6::net_tcp6_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "udp",
+        InodeMode::from_bits_truncate(0o444),
+        net_udp::net_udp_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "udp6",
+        InodeMode::from_bits_truncate(0o444),
+        net_udp6::net_udp6_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "unix",
+        InodeMode::from_bits_truncate(0o444),
+        net_unix::net_unix_content,
+        0,
+    )?;
     // Minimal stub files for netstat -s / -gn compatibility
-    net_dir.add_file("snmp", InodeMode::from_bits_truncate(0o444), sys::net_snmp_content, 0)?;
-    net_dir.add_file("netstat", InodeMode::from_bits_truncate(0o444), sys::net_netstat_content, 0)?;
-    net_dir.add_file("snmp6", InodeMode::from_bits_truncate(0o444), sys::net_snmp6_content, 0)?;
+    net_dir.add_file(
+        "snmp",
+        InodeMode::from_bits_truncate(0o444),
+        sys::net_snmp_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "netstat",
+        InodeMode::from_bits_truncate(0o444),
+        sys::net_netstat_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "snmp6",
+        InodeMode::from_bits_truncate(0o444),
+        sys::net_snmp6_content,
+        0,
+    )?;
     // Multicast group membership for netstat -gn
-    net_dir.add_file("igmp", InodeMode::from_bits_truncate(0o444), net_igmp::net_igmp_content, 0)?;
-    net_dir.add_file("igmp6", InodeMode::from_bits_truncate(0o444), net_igmp6::net_igmp6_content, 0)?;
+    net_dir.add_file(
+        "igmp",
+        InodeMode::from_bits_truncate(0o444),
+        net_igmp::net_igmp_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "igmp6",
+        InodeMode::from_bits_truncate(0o444),
+        net_igmp6::net_igmp6_content,
+        0,
+    )?;
 
     root.add_dynamic_symlink("self", self_::self_content, 0)?;
     let sysvipc_dir = root.add_dir_locked("sysvipc", InodeMode::from_bits_truncate(0o555))?;
-    sysvipc_dir.add_file("shm", InodeMode::from_bits_truncate(0o444), sysvipc::shm_content, 0)?;
-    sysvipc_dir.add_file("msg", InodeMode::from_bits_truncate(0o444), sysvipc::msg_content, 0)?;
-    sysvipc_dir.add_file("sem", InodeMode::from_bits_truncate(0o444), sysvipc::sem_content, 0)?;
+    sysvipc_dir.add_file(
+        "shm",
+        InodeMode::from_bits_truncate(0o444),
+        sysvipc::shm_content,
+        0,
+    )?;
+    sysvipc_dir.add_file(
+        "msg",
+        InodeMode::from_bits_truncate(0o444),
+        sysvipc::msg_content,
+        0,
+    )?;
+    sysvipc_dir.add_file(
+        "sem",
+        InodeMode::from_bits_truncate(0o444),
+        sysvipc::sem_content,
+        0,
+    )?;
 
     crate::fs::procfs::pid::setup_pid_hooks(root);
 

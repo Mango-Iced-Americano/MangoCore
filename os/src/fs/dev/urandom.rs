@@ -1,11 +1,9 @@
 use alloc::sync::Arc;
 use core::any::Any;
 
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
-};
-use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::dev::DEV_FS;
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 

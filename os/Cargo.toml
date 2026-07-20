@@ -24,7 +24,8 @@ volatile = "0.3.0"
 rand_core = "0.6.4"
 managed = { version = "0.8", default-features = false, features = ["map"] }
 virtio-drivers = { path = "../dependency/virtio-drivers", default-features = false, features = ["alloc"] }
-lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false }
+lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false, optional = true }
+another_ext4 = { path = "../dependency/another_ext4", optional = true }
 
 rustsbi = { path = "../dependency/rustsbi" }
 
@@ -73,6 +74,9 @@ comp = []
 heap_trace = []
 perf_stats = []
 perf_diag = ["perf_stats"]
+ext4_lwext4_backend = ["dep:lwext4_rust"]
+ext4_legacy_backend = []
+ext4_another_backend = ["dep:another_ext4"]
 initramfs = []
 regression_initramfs = []
 legacy_block_root = []
@@ -90,7 +94,7 @@ board_vf2 = ["oom_handler", "riscv"]
 
 # default = ["board_laqemu", "block_sata"]
 # default = ["board_rvqemu", "block_mem"]
-default = ["initramfs", "preload_payloads"]
+default = ["initramfs", "preload_payloads", "ext4_lwext4_backend"]
 
 [profile.dev]
 # 优化级别

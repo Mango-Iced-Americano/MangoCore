@@ -553,8 +553,11 @@ pub fn sys_mount(
                     // 4. Open the filesystem
                     let new_fs: Arc<dyn vfs::FileSystem> = match detected {
                         crate::fs::FS_Type::Ext4 => {
-                            crate::fs::ext4::ext4fs::Ext4FileSystem::open_ext4rs(blk_dev.clone())
-                        }
+                            match crate::fs::ext4_backend::open(blk_dev.clone()) {
+                                Ok(fs) => fs,
+                                Err(e) => return -(e as isize),
+                            }
+                        },
                         crate::fs::FS_Type::Fat32 => {
                             crate::fs::fat32::EasyFileSystem::open(blk_dev.clone())
                         }

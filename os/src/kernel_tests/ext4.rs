@@ -21,7 +21,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::drivers::block::BlockDevice;
+use crate::drivers::block::{
+    validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult,
+};
 use crate::hal::BLOCK_SZ;
 use crate::kernel_tests::runner::KernelTest;
 
@@ -29,9 +31,8 @@ use crate::kernel_tests::runner::KernelTest;
 
 /// A simple block device backed by `Vec<u8>`, sized in bytes on construction.
 ///
-/// All reads beyond the device boundary return zeros; writes beyond the
-/// boundary are silently truncated.  This matches the expected behaviour of
-/// the `BlockDevice` trait for block-id-based I/O.
+/// Out-of-range I/O returns an error so tests exercise the production
+/// BlockDevice contract rather than masking failed I/O as success.
 struct TestMemBlock {
     data: Mutex<Vec<u8>>,
     size: u64,
@@ -48,32 +49,36 @@ impl TestMemBlock {
 }
 
 impl BlockDevice for TestMemBlock {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let offset = block_id * BLOCK_SZ;
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
+        let offset = block_id
+            .checked_mul(BLOCK_SZ)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
         let data = self.data.lock();
-        if offset >= data.len() {
-            buf.fill(0);
-            return;
+        let end = offset
+            .checked_add(buf.len())
+            .ok_or(BlockDeviceError::OutOfBounds)?;
+        if end > data.len() {
+            return Err(BlockDeviceError::OutOfBounds);
         }
-        let end = core::cmp::min(offset + buf.len(), data.len());
-        let copy_len = end - offset;
-        buf[..copy_len].copy_from_slice(&data[offset..end]);
-        // Remaining bytes stay zero (buf was likely zeroed by the caller, but
-        // we explicitly fill to be safe).
-        if copy_len < buf.len() {
-            buf[copy_len..].fill(0);
-        }
+        buf.copy_from_slice(&data[offset..end]);
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let offset = block_id * BLOCK_SZ;
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
+        let offset = block_id
+            .checked_mul(BLOCK_SZ)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
         let mut data = self.data.lock();
-        if offset >= data.len() {
-            return; // silently ignore out-of-bounds writes
+        let end = offset
+            .checked_add(buf.len())
+            .ok_or(BlockDeviceError::OutOfBounds)?;
+        if end > data.len() {
+            return Err(BlockDeviceError::OutOfBounds);
         }
-        let end = core::cmp::min(offset + buf.len(), data.len());
-        let copy_len = end - offset;
-        data[offset..end].copy_from_slice(&buf[..copy_len]);
+        data[offset..end].copy_from_slice(buf);
+        Ok(())
     }
 
     fn size_bytes(&self) -> Option<u64> {
@@ -90,15 +95,31 @@ unsafe impl Sync for TestMemBlock {}
 
 /// Returns all ext4-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
-    vec![
+    #[cfg(feature = "ext4_lwext4_backend")]
+    let mut tests = vec![
         KernelTest::new("ext4::memblk_read_write", test_memblk_read_write),
         KernelTest::new("ext4::memblk_isolation", test_memblk_isolation),
-        KernelTest::new(
+    ];
+
+    #[cfg(not(feature = "ext4_lwext4_backend"))]
+    let tests = vec![
+        KernelTest::new("ext4::memblk_read_write", test_memblk_read_write),
+        KernelTest::new("ext4::memblk_isolation", test_memblk_isolation),
+    ];
+
+    #[cfg(feature = "ext4_lwext4_backend")]
+    {
+        tests.push(KernelTest::new(
             "ext4::open_unformatted_returns_err",
             test_open_unformatted_returns_err,
-        ),
-        KernelTest::new("ext4::lw_path_isolation", test_lw_path_isolation),
-    ]
+        ));
+        tests.push(KernelTest::new(
+            "ext4::lw_path_isolation",
+            test_lw_path_isolation,
+        ));
+    }
+
+    tests
 }
 
 // ── Test 1: basic BlockDevice read/write ────────────────────────────────
@@ -112,11 +133,13 @@ fn test_memblk_read_write() -> Result<(), &'static str> {
     for i in 0..BLOCK_SZ {
         pattern[i] = (i % 256) as u8;
     }
-    dev.write_block(0, &pattern);
+    dev.write_block(0, &pattern)
+        .map_err(|_| "block 0 write failed")?;
 
     // Read back and compare
     let mut actual = [0u8; BLOCK_SZ];
-    dev.read_block(0, &mut actual);
+    dev.read_block(0, &mut actual)
+        .map_err(|_| "block 0 read failed")?;
 
     if pattern != actual {
         return Err("block 0: read data does not match written data");
@@ -124,16 +147,19 @@ fn test_memblk_read_write() -> Result<(), &'static str> {
 
     // Write different pattern to block 1
     let pattern2 = [0xABu8; BLOCK_SZ];
-    dev.write_block(1, &pattern2);
+    dev.write_block(1, &pattern2)
+        .map_err(|_| "block 1 write failed")?;
 
-    dev.read_block(1, &mut actual);
+    dev.read_block(1, &mut actual)
+        .map_err(|_| "block 1 read failed")?;
     if pattern2 != actual {
         return Err("block 1: read data does not match written data");
     }
 
     // Block 0 must still hold the original data
     let mut actual0 = [0u8; BLOCK_SZ];
-    dev.read_block(0, &mut actual0);
+    dev.read_block(0, &mut actual0)
+        .map_err(|_| "block 0 verification read failed")?;
     if pattern != actual0 {
         return Err("block 0: data corrupted after writing block 1");
     }
@@ -152,18 +178,20 @@ fn test_memblk_isolation() -> Result<(), &'static str> {
     let buf1 = [0x11u8; BLOCK_SZ];
     let buf2 = [0x22u8; BLOCK_SZ];
 
-    dev1.write_block(0, &buf1);
-    dev2.write_block(0, &buf2);
+    dev1.write_block(0, &buf1)
+        .map_err(|_| "dev1 write failed")?;
+    dev2.write_block(0, &buf2)
+        .map_err(|_| "dev2 write failed")?;
 
     // dev1 must see buf1
     let mut r = [0u8; BLOCK_SZ];
-    dev1.read_block(0, &mut r);
+    dev1.read_block(0, &mut r).map_err(|_| "dev1 read failed")?;
     if r != buf1 {
         return Err("dev1: data leaked from dev2 or not written correctly");
     }
 
     // dev2 must see buf2
-    dev2.read_block(0, &mut r);
+    dev2.read_block(0, &mut r).map_err(|_| "dev2 read failed")?;
     if r != buf2 {
         return Err("dev2: data leaked from dev1 or not written correctly");
     }
@@ -175,6 +203,7 @@ fn test_memblk_isolation() -> Result<(), &'static str> {
 
 /// `Ext4FileSystem::open_ext4rs` must return an error (not panic) when the
 /// underlying block device contains no valid ext4 superblock.
+#[cfg(feature = "ext4_lwext4_backend")]
 fn test_open_unformatted_returns_err() -> Result<(), &'static str> {
     use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
 
@@ -197,6 +226,7 @@ fn test_open_unformatted_returns_err() -> Result<(), &'static str> {
 /// all instances (known limitation), we access `lw_path` via a single
 /// successfully-opened instance and verify the general contract:
 /// different `lw_mount_point` values → different `lw_path` outputs.
+#[cfg(feature = "ext4_lwext4_backend")]
 fn test_lw_path_isolation() -> Result<(), &'static str> {
     use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
 

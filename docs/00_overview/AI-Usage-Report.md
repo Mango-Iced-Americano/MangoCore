@@ -212,6 +212,22 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Oracle 结合 opt-in 逐用例 counter delta 与 PageCache registry 生命周期，定位 inode number 复用导致新文件继承旧 fully-valid 页面；随后将诊断收敛为有界 QEMU log，而非无关的 report 落盘链路。
 - Verification: Docker 串行 RV64/LA64 build 通过；RV64 focused QEMU 从 1 PASS/3 FAIL 变为 4 PASS/0 FAIL。
 
+### Case 7: another_ext4 PageCache 生命周期与 EOF 发布顺序
+
+- Evidence: `docs/Work_Log/2026-07-20.md`、`docs/Work_Log/evidence/2026-07-20/another-wave1-eof-{baseline,red,green}-rv64-ktest.log`。
+- AI tools: Sisyphus, Oracle, GPT-5.6-terra。
+- Problem: another_ext4 的弱 PageCache 索引会丢弃未写回脏页；并且 `logical_size` 在 `PageCache::write()` 的脏页节流之后才发布，强制早写回时会丢失非对齐 EOF 扩展的数据。
+- AI contribution: Sisyphus 组织独立 ownership 与 EOF-order toggle；Oracle 审核无环 ownership 和 copy-after callback 边界；最终实现活跃 inode 的强缓存所有权与复制/valid 发布后的 EOF callback。
+- Verification: Docker RV64 focused QEMU 从受控 2/3 RED 恢复为 3/3 GREEN；RV64/LA64 another_ext4 kernel build 均通过。
+
+### Case 8: PageCache 后端重入与写入可见性
+
+- Evidence: `docs/Work_Log/2026-07-20.md`、`docs/Work_Log/evidence/2026-07-20/page-cache-{visibility-red-rv64-ktest,userbuffer-green-rv64-ktest}.log`。
+- AI tools: Sisyphus, Explore, Oracle, GPT-5.6-terra。
+- Problem: `entries` 锁跨越后端读取会在同 cache 重入时死锁；进一步审查发现写入 payload 前的 Dirty 页可能被读取或写回，且 batch prefetch 可覆盖重入赢家。
+- AI contribution: Sisyphus 编排确定性 RED 回归和无锁发布；Oracle 拒绝首版修复并定位写入可见性与短 UserBuffer 失败回滚缺口，推动以 `Loading` lease 和突变前预校验完成修复。
+- Verification: Docker 串行 RV64/LA64 builds 通过；RV64 focused PageCache ktest 达到 4/4 GREEN，Oracle 最终 GO。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -246,6 +262,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `fd735048` | Judge docs | `Ultraworked with Sisyphus`; `Co-authored-by: Sisyphus` | 新增 Technical Report 和 Engineering Casebook |
 | 2026-06-29 | `81a24d2a` | Documentation fact-check | `Oracle-reviewed fixes`; `Co-authored-by: Sisyphus` | 修复多处文档事实问题 |
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
+| 2026-07-20 | 未提交（工作树） | another_ext4 PageCache lifecycle / EOF ordering | Sisyphus 编排受控 RED→GREEN；Oracle 审核 callback 时序 | 修复脏页所有权与早写回观察陈旧 EOF |
 
 ## 8. Work_Log 证据表
 
@@ -260,6 +277,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:1455-1658` | Timer subsystem | 记录 timer deadline / one-shot / timekeeping 修复与测试 |
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
+| `docs/Work_Log/2026-07-20.md` | another_ext4 PageCache lifecycle / EOF ordering | 记录受控 ownership 与 early-writeback toggle、Oracle 审核及 RV64 3/3、双架构构建证据 |
 
 ## 9. 交互记录与留痕方式
 

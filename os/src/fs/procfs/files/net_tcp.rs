@@ -1,12 +1,13 @@
-use alloc::string::String;
 use crate::fs::procfs::proc_read_str;
 use crate::net::Socket;
 use crate::utils::error::SyscallErr;
+use alloc::string::String;
 use core::fmt::Write;
 
 fn format_sock_addr(ip: smoltcp::wire::Ipv4Address, port: u16) -> String {
     let b = ip.as_bytes();
-    let le_ip = (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16) | ((b[3] as u32) << 24);
+    let le_ip =
+        (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16) | ((b[3] as u32) << 24);
     alloc::format!("{:08X}:{:04X}", le_ip, port)
 }
 
@@ -40,7 +41,11 @@ pub fn net_tcp_content(
                 _ => String::from("00000000:0000"),
             };
             let st = socket.tcp_state().map(|s| s as u8).unwrap_or_else(|| {
-                if remote.is_some() { 1 } else { 10 }
+                if remote.is_some() {
+                    1
+                } else {
+                    10
+                }
             });
 
             let _ = write!(

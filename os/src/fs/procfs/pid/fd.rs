@@ -1,12 +1,17 @@
-use alloc::{format, string::String, sync::Arc, vec::Vec, vec};
-use crate::fs::procfs::{LockedProcInode, proc_read_str};
+use crate::fs::procfs::{proc_read_str, LockedProcInode};
 use crate::fs::vfs::IndexNode as _;
+use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 
 fn get_pid(inode: &LockedProcInode) -> usize {
     inode.0.lock().extra_data
 }
 
-fn fd_content_fn(extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, crate::utils::error::SyscallErr> {
+fn fd_content_fn(
+    extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, crate::utils::error::SyscallErr> {
     if offset != 0 {
         return Ok(0);
     }
@@ -50,7 +55,10 @@ pub fn fd_list_hook(inode: &LockedProcInode) -> Vec<String> {
     fds
 }
 
-pub fn fd_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn crate::fs::vfs::IndexNode>> {
+pub fn fd_find_hook(
+    inode: &LockedProcInode,
+    name: &str,
+) -> Option<Arc<dyn crate::fs::vfs::IndexNode>> {
     let pid = get_pid(inode);
     let fd: usize = name.parse().ok()?;
     let task = crate::task::find_process_by_pid(pid)?;
@@ -64,11 +72,7 @@ pub fn fd_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn crate
         let dir_lock = inode.0.lock();
         (dir_lock.self_ref.clone(), dir_lock.fs.clone())
     };
-    let symlink = LockedProcInode::new_dynamic_symlink_wired(
-        parent_weak,
-        fs_weak,
-        fd_content_fn,
-        extra,
-    );
+    let symlink =
+        LockedProcInode::new_dynamic_symlink_wired(parent_weak, fs_weak, fd_content_fn, extra);
     Some(symlink as Arc<dyn crate::fs::vfs::IndexNode>)
 }

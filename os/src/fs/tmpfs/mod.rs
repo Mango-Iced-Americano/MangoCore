@@ -223,7 +223,11 @@ impl FileSystem for TmpFS {
         let (total, free) = match limit {
             Some(max_bytes) if max_bytes > 0 => {
                 let total_blocks = ((max_bytes + bsize - 1) / bsize).max(1);
-                let used_blocks = if used > 0 { (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE } else { 0 };
+                let used_blocks = if used > 0 {
+                    (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE
+                } else {
+                    0
+                };
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
                 (total_blocks, free_blocks)
             }
@@ -231,7 +235,11 @@ impl FileSystem for TmpFS {
                 // 无限制：基于可用物理内存计算
                 let available_frames = crate::mm::unallocated_frames() as u64;
                 let available_bytes = available_frames * PAGE_SIZE as u64;
-                let used_blocks = if used > 0 { (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE } else { 0 };
+                let used_blocks = if used > 0 {
+                    (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE
+                } else {
+                    0
+                };
                 let avail_blocks = available_bytes / bsize;
                 let total_blocks = used_blocks + avail_blocks;
                 (total_blocks, avail_blocks)
@@ -270,13 +278,16 @@ impl TmpFS {
     /// 创建带大小限制的 TmpFS
     /// - `max_bytes`: 0 = 不限制
     pub fn new_with_options(max_bytes: u64) -> Arc<Self> {
-        let size_limit = if max_bytes == 0 { None } else { Some(max_bytes) };
+        let size_limit = if max_bytes == 0 {
+            None
+        } else {
+            Some(max_bytes)
+        };
         Self::new_inner(size_limit)
     }
 
     fn new_inner(size_limit: Option<u64>) -> Arc<Self> {
-        let root: Arc<LockedTmpFSInode> =
-            Arc::new(LockedTmpFSInode(Mutex::new(TmpFSInode::new())));
+        let root: Arc<LockedTmpFSInode> = Arc::new(LockedTmpFSInode(Mutex::new(TmpFSInode::new())));
 
         let result: Arc<TmpFS> = Arc::new(TmpFS {
             root_inode: root,
@@ -306,8 +317,7 @@ impl TmpFS {
     /// 添加或移除已用字节数
     fn add_size(&self, delta: i64) {
         if delta > 0 {
-            self.current_size
-                .fetch_add(delta as u64, Ordering::Relaxed);
+            self.current_size.fetch_add(delta as u64, Ordering::Relaxed);
         } else if delta < 0 {
             let sub = (-delta) as u64;
             self.current_size.fetch_sub(sub, Ordering::Relaxed);
@@ -460,7 +470,7 @@ impl IndexNode for LockedTmpFSInode {
         }
 
         // Hold inode lock through write + size update to avoid race with truncate/resize
-            let n = pc.write_user(offset, len, src, None)?;
+        let n = pc.write_user(offset, len, src, None)?;
 
         // 更新文件大小
         if new_size > inode.file_size {
@@ -615,15 +625,12 @@ impl IndexNode for LockedTmpFSInode {
             child_inner.init_page_cache();
         }
 
-        let child: Arc<LockedTmpFSInode> =
-            Arc::new(LockedTmpFSInode(Mutex::new(child_inner)));
+        let child: Arc<LockedTmpFSInode> = Arc::new(LockedTmpFSInode(Mutex::new(child_inner)));
 
         // 初始化自引用
         child.0.lock().self_ref = Arc::downgrade(&child);
 
-        inode
-            .children
-            .insert(String::from(name), child.clone());
+        inode.children.insert(String::from(name), child.clone());
         if file_type == FileType::Dir {
             inode.metadata.nlinks += 1;
         }
@@ -685,10 +692,7 @@ impl IndexNode for LockedTmpFSInode {
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let child = inode
-            .children
-            .remove(name)
-            .ok_or(SyscallErr::ENOENT)?;
+        let child = inode.children.remove(name).ok_or(SyscallErr::ENOENT)?;
         let child_inode: &LockedTmpFSInode = child
             .as_any_ref()
             .downcast_ref::<LockedTmpFSInode>()
@@ -737,7 +741,12 @@ impl IndexNode for LockedTmpFSInode {
             .ok_or(SyscallErr::EXDEV)?;
 
         let self_fs = self.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
-        let new_fs = new_parent_inode.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let new_fs = new_parent_inode
+            .0
+            .lock()
+            .fs
+            .upgrade()
+            .ok_or(SyscallErr::EIO)?;
         if !Arc::ptr_eq(&self_fs, &new_fs) {
             return Err(SyscallErr::EXDEV);
         }
@@ -770,10 +779,7 @@ impl IndexNode for LockedTmpFSInode {
 
         if id_self == id_new {
             let mut locked = self.0.lock();
-            let child = locked
-                .children
-                .remove(old_name)
-                .ok_or(SyscallErr::ENOENT)?;
+            let child = locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
 
             if old_name == new_name {
                 locked.children.insert(String::from(old_name), child);
@@ -1137,12 +1143,7 @@ impl IndexNode for LockedTmpFSInode {
         Ok(len)
     }
 
-    fn setxattr(
-        &self,
-        name: &str,
-        value: &[u8],
-        flags: u32,
-    ) -> Result<usize, SyscallErr> {
+    fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> Result<usize, SyscallErr> {
         const XATTR_CREATE: u32 = 1;
         const XATTR_REPLACE: u32 = 2;
         let mut inode = self.0.lock();

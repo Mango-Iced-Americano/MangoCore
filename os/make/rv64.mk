@@ -5,6 +5,7 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
 BLK_MODE ?= virt
+include make/ext4_backend.mk
 # QEMU device types based on transport
 ifeq ($(BLK_MODE),virt_pci)
   BLK_DEV_x0 = -device virtio-blk-pci,drive=x0
@@ -24,6 +25,7 @@ KERNEL_RV := ../kernel-rv
 KERNEL_LA := ../kernel-la
 SDCARD_RV := ../sdcard-rv.img
 SDCARD_LA := ../sdcard-la.img
+DISK_RV ?= ../disk.img
 
 # ============================================================
 # lwext4 C library
@@ -177,17 +179,21 @@ $(REGRESSION_CPIO_RV): user
 	@touch src/initramfs-regression-rv.S
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
-# lwext4: always build C library (now the default ext4 backend)
+# lwext4 C library is only needed by the selected lwext4 backend.
 export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_DIR))
+ifeq ($(EXT4_BACKEND),lwext4)
 LWEXT4_PREREQ := lwext4-rv64
+else
+LWEXT4_PREREQ :=
+endif
 
 kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
     ifeq ($(MODE), debug)
-		@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --no-default-features --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(KERNEL_BASE_FEATURES) $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
     else
-		@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --release --no-default-features --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(KERNEL_BASE_FEATURES) $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
     endif
 
 clean:
@@ -287,7 +293,7 @@ ktest-run: user $(LWEXT4_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
 	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
-		cargo build --$(MODE) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		cargo build --$(MODE) --no-default-features --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(KERNEL_BASE_FEATURES) $(EXTRA_FEATURES)"
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 \
@@ -295,6 +301,10 @@ ktest-run: user $(LWEXT4_PREREQ)
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
+		$(BLK_DEV_x0) \
+		-drive file=$(DISK_RV),if=none,format=raw,id=x1 \
+		$(BLK_DEV_x1) \
 		-m 1024 \
 		-smp threads=1
 

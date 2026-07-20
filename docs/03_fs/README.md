@@ -4,7 +4,7 @@ module: fs
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-07-19"
 code_paths:
   - "os/src/fs/"
 entry_points:
@@ -78,7 +78,8 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
   +-------------------------------------------------------------------+
   +-------------------------------------------------------------------+
   |                  BlockDevice 层 (驱动抽象)                          |
-  |    read_block() / write_block() / size_bytes()                    |
+  |    read_block() / write_block() / flush() -> BlockDeviceResult    |
+  |    size_bytes()；virtio 的可靠 flush 能力显式报告                  |
   |    virtio_blk (rv64) / virtio_blk_pci (la64)                     |
   +-------------------------------------------------------------------+
 ```
@@ -115,6 +116,7 @@ FD 抽象不限于磁盘文件。以下特殊 fd 也通过 `File` trait 集成�
 | FS 类型 | 模块路径 | inode trait | 存储后端 | 持久化 | 大小限制 | 状态 |
 |---------|----------|-------------|----------|--------|----------|------|
 | ext4 | `os/src/fs/ext4/` | Ext4Inode | BlockDevice | 是 | 无 | stable |
+| ext4_another | `os/src/fs/ext4_another/` | Ext4Inode | BlockDevice + another_ext4 | 否（只读） | 无 | experimental |
 | FAT32 | `os/src/fs/fat32/` | FatInode | BlockDevice | 是 | 无 | stable |
 | tmpfs | `os/src/fs/tmpfs/` | LockedTmpFSInode | 内存 | 否 | 无（默认）/ 可配 | stable |
 | ramfs | `os/src/fs/ramfs/` | LockedRamFSInode | 物理页 | 否 | 无 | stable |
@@ -126,6 +128,8 @@ FD 抽象不限于磁盘文件。以下特殊 fd 也通过 `File` trait 集成�
 ### FS 类型说明
 
 **ext4:** 主力文件系统，支持 extent 树、稀疏文件、符号链接、硬链接。通过 `Ext4FileSystem` 包装，在块设备上实现 `FileSystem` trait。LTP 测试覆盖 open / read / write / rename / link / unlink / chmod 等主要操作。
+
+**ext4_another:** `ext4_another_backend` 选择下的实验性只读 bridge。挂载只调用 `another_ext4::Ext4::load_read_only_checked`，不会回退至其它 ext4 后端；普通文件数据经 Mango PageCache 读取，写入、创建、删除、重命名和元数据变更均返回 `EROFS`。
 
 **FAT32:** 引导分区和 EFI 分区支持。通过 `EasyFileSystem` 提供简单接口，注意目录项大小写不敏感等 FAT 特有语义。
 
@@ -148,6 +152,8 @@ FD 抽象不限于磁盘文件。以下特殊 fd 也通过 `File` trait 集成�
 | vfs | `os/src/fs/vfs/` | VFS 抽象层：IndexNode / FileSystem / File / MountFS / dentry_cache / propagation / posix_lock / fasync / fcntl |
 | page_cache | `os/src/fs/page_cache.rs` | PageCache 缓存层 + `reclaim.rs` 后台回写 |
 | ext4 | `os/src/fs/ext4/` | ext4 文件系统实现（extent 树、块分配、目录项） |
+| ext4_another | `os/src/fs/ext4_another/` | another_ext4 的只读 VFS bridge、BlockDevice adapter 与 PageCache backend |
+| ext4_backend | `os/src/fs/ext4_backend.rs` | 编译期唯一 ext4 后端选择与启动、块设备挂载、`sys_mount` 共用 facade |
 | fat32 | `os/src/fs/fat32/` | FAT32 文件系统实现 |
 | tmpfs | `os/src/fs/tmpfs/` | 临时内存文件系统 |
 | ramfs | `os/src/fs/ramfs/` | 物理页内存文件系统 |

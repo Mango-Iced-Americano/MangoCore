@@ -1,7 +1,7 @@
 //! /proc/mounts — 系统挂载表
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -97,7 +97,10 @@ pub fn mountinfo_content(
         // mountinfo format: mount-id parent-id major:minor root mount-point options - fs-type source super-options
         s.push_str(&alloc::format!(
             "{} 1 0:0 / {} rw,relatime - {} {} rw,relatime\n",
-            mid, path, fs_name, source,
+            mid,
+            path,
+            fs_name,
+            source,
         ));
 
         {

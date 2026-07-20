@@ -18,7 +18,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use super::vfs::IndexNode;
@@ -87,13 +87,17 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
         return 0;
     }
     let seg_start = page_offset >> VALID_SEG_SHIFT;
-    let seg_end = ((page_offset + len + (1 << VALID_SEG_SHIFT) - 1) >> VALID_SEG_SHIFT)
-        .min(VALID_SEG_COUNT);
+    let seg_end =
+        ((page_offset + len + (1 << VALID_SEG_SHIFT) - 1) >> VALID_SEG_SHIFT).min(VALID_SEG_COUNT);
     if seg_start >= VALID_SEG_COUNT {
         return 0;
     }
     let count = seg_end - seg_start;
-    let low_mask: u8 = if count == 8 { u8::MAX } else { (1u8 << count) - 1 };
+    let low_mask: u8 = if count == 8 {
+        u8::MAX
+    } else {
+        (1u8 << count) - 1
+    };
     low_mask << seg_start
 }
 
@@ -141,12 +145,18 @@ pub fn registry_stats() -> (usize, usize, usize, usize) {
 
 /// 聚合所有 alive PageCache 的 entries 统计: (total_len, total_cap, total_live, total_holes)
 pub fn entries_global_stats() -> (usize, usize, usize, usize) {
-    let mut tlen = 0; let mut tcap = 0; let mut tlive = 0; let mut tholes = 0;
+    let mut tlen = 0;
+    let mut tcap = 0;
+    let mut tlive = 0;
+    let mut tholes = 0;
     let reg = PAGE_CACHE_REGISTRY.lock();
     for weak in reg.iter() {
         if let Some(pc) = weak.upgrade() {
             let (len, cap, live, holes) = pc.entries_stats();
-            tlen += len; tcap += cap; tlive += live; tholes += holes;
+            tlen += len;
+            tcap += cap;
+            tlive += live;
+            tholes += holes;
         }
     }
     (tlen, tcap, tlive, tholes)
@@ -228,11 +238,7 @@ pub trait PageCacheBackend: Send + Sync {
     /// 批量读取连续页面：start_index..start_index+pages.len()
     /// pages 为可变切片（每个元素长度 = PAGE_SIZE），从后端批量读取填充。
     /// 默认回退为逐页调用 read_page；支持合并读取的后端（如 EXT4）应覆盖此方法
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         for (i, page) in pages.iter_mut().enumerate() {
             self.read_page(start_index + i, *page)?;
         }
@@ -422,8 +428,8 @@ impl InnerPageCache {
 /// A single page copy instruction collected under entries lock, executed without lock.
 struct ReadCopy {
     entry: Arc<PageEntry>,
-    dst_offset: usize,   // offset into destination buffer
-    page_offset: usize,  // offset within the page
+    dst_offset: usize,  // offset into destination buffer
+    page_offset: usize, // offset within the page
     len: usize,
 }
 
@@ -437,7 +443,14 @@ struct MissRun {
 struct ReadPlan {
     copies: Vec<ReadCopy>,
     miss_runs: Vec<MissRun>,
-    needs_valid_fill: BTreeSet<usize>,  // pages that exist but partially valid
+    needs_valid_fill: BTreeSet<usize>, // pages that exist but partially valid
+}
+
+struct WriteLease {
+    page_index: usize,
+    entry: Arc<PageEntry>,
+    previous_state: PageState,
+    newly_installed: bool,
 }
 
 // ── PageCache ────────────────────────────────────────────────────────────
@@ -648,6 +661,9 @@ impl PageCache {
     ///   - 页面超出旧 EOF → valid_mask=VALID_ALL，不 populate
     ///   - 页面跨越 EOF → 超出部分 valid_mask 标记，populate 后 OR 入
     ///   - 页面完全在文件中 → valid_mask=0，populate 从后端加载
+    ///
+    /// `entries` 仅在查找或发布时持有；帧分配和后端 I/O 均在所有 PageCache 锁外完成。
+    /// 发布时保持 `entries` → `inner` 的锁顺序。
     fn get_or_create_entry(
         &self,
         page_index: usize,
@@ -657,37 +673,35 @@ impl PageCache {
         let init_mask = old_file_size.map_or(0, |s| initial_valid_mask(page_index, s));
         let beyond_eof = init_mask == VALID_ALL;
 
-        let _t_lock = perf::perf_time_now();
-        let mut had_io_miss = false;
-        let mut entries = self.entries.lock();
-
-        // 扩展 entries 数组
-        while entries.len() <= page_index {
-            entries.push(None);
-        }
-
-        if let Some(entry) = &entries[page_index] {
-            let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
-            perf::record_pc_lock_hold(elapsed, false);
+        let (existing, lookup_lock_hold) = {
+            let entries = self.entries.lock();
+            let _t_lookup = perf::perf_time_now();
+            let existing = entries
+                .get(page_index)
+                .and_then(|entry| entry.as_ref().cloned());
+            (
+                existing,
+                perf::perf_time_now().wrapping_sub(_t_lookup),
+            )
+        };
+        perf::record_pc_lock_hold(lookup_lock_hold, false);
+        if let Some(entry) = existing {
             entry.mark_referenced();
-            return Ok(entry.clone());
+            return Ok(entry);
         }
 
-        // 分配新帧（frame_alloc 返回零填充页）
+        // 分配和 populate 均在 PageCache 锁外进行；失败时不留下缓存元数据。
         let _t_falloc = perf::perf_time_now();
         let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
         perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
 
-        let entry = if populate && !beyond_eof {
+        let candidate = if populate && !beyond_eof {
             // 正常路径：从后端读取数据
             perf::record_pc_miss();
-            had_io_miss = true;
             let entry = Arc::new(PageEntry::new(frame, PageState::UpToDate));
             if let Some(backend) = self.backend() {
                 let buf = entry.as_slice_mut();
-                if let Err(e) = backend.read_page(page_index, buf) {
-                    return Err(e);
-                }
+                backend.read_page(page_index, buf)?;
             }
             // 页面跨越 EOF：populate 从后端读取文件内的数据，超出部分为零填充
             // 需要 OR 入超出部分的初始 valid_mask
@@ -704,19 +718,31 @@ impl PageCache {
             Arc::new(PageEntry::new(frame, PageState::UpToDate))
         };
 
-        let entry_clone = entry.clone();
-        entries[page_index] = Some(entry);
+        let (winner, publish_lock_hold) = {
+            let mut entries = self.entries.lock();
+            let _t_publish = perf::perf_time_now();
+            while entries.len() <= page_index {
+                entries.push(None);
+            }
 
-        let mut inner = self.inner.lock();
-        inner.pages.insert(page_index);
+            let winner = if let Some(entry) = entries[page_index].as_ref() {
+                entry.clone()
+            } else {
+                entries[page_index] = Some(candidate.clone());
+                let mut inner = self.inner.lock();
+                inner.pages.insert(page_index);
+                candidate
+            };
+            (
+                winner,
+                perf::perf_time_now().wrapping_sub(_t_publish),
+            )
+        };
+        perf::record_pc_lock_hold(publish_lock_hold, false);
 
-        // Clock eviction: mark page as recently referenced
-        entry_clone.mark_referenced();
-
-        let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
-        perf::record_pc_lock_hold(elapsed, had_io_miss);
-
-        Ok(entry_clone)
+        // Clock eviction: mark the published or concurrent winner as recently referenced.
+        winner.mark_referenced();
+        Ok(winner)
     }
 
     /// 获取页面用于读取。
@@ -735,65 +761,126 @@ impl PageCache {
     /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
     pub fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
         // 读取路径：始终 populate（old_file_size=None → 全量从后端加载），后续 ensure_fully_valid 补齐空洞
-        self.get_or_create_entry(page_index, true, None)
+        let entry = self.get_or_create_entry(page_index, true, None)?;
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => Ok(entry),
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+            PageState::Error => Err(SyscallErr::EIO),
+        }
     }
 
-    /// 获取页面用于写入（默认行为：部分写时从后端 populate）。
-    ///
-    /// # Locking
-    ///
-    /// 内部获取 `self.entries` → `self.inner`（按序）。标记脏页时更新全局脏页计数。
-    ///
-    /// # Errors
-    ///
-    /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
-    pub fn get_page_for_write(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
-        self.get_page_for_write_populate(page_index, None, false)
-    }
-
-    /// 获取页面用于写入，可选择是否从后端 populate。
-    /// `old_file_size`：旧文件大小。对于 page_index * PAGE_SIZE >= old_file_size
-    /// 的页面（完全超出旧 EOF），跳过 backend read_page 以减少 I/O，
-    /// 帧内存保持零填充，初始 valid_mask=VALID_ALL。
-    /// `full_overwrite`：该页是否被完全覆盖写入（可跳过 populate）。
-    /// - `None` + `false`: 当前 populate 逻辑（部分写入时从后端读取）
-    /// - `Some(size)` + `false`: 页面超出 EOF 时，zero-fill + valid_mask=VALID_ALL
-    /// - `true`: 整页覆写，跳过 populate
-    pub fn get_page_for_write_populate(
+    fn prepare_write_lease(
         &self,
         page_index: usize,
         old_file_size: Option<usize>,
         full_overwrite: bool,
-    ) -> Result<Arc<PageEntry>, SyscallErr> {
-        let beyond_eof = old_file_size
-            .map(|s| page_index * PAGE_SIZE >= s)
-            .unwrap_or(false);
+    ) -> Result<WriteLease, SyscallErr> {
+        let existing = {
+            let entries = self.entries.lock();
+            entries
+                .get(page_index)
+                .and_then(|entry| entry.as_ref().cloned())
+        };
+        if let Some(entry) = existing {
+            return self.acquire_existing_write_lease(page_index, entry);
+        }
+
+        let init_mask = old_file_size.map_or(0, |size| initial_valid_mask(page_index, size));
+        let beyond_eof = init_mask == VALID_ALL;
         let populate = !full_overwrite && !beyond_eof;
-        let entry = self.get_or_create_entry(page_index, populate, old_file_size)?;
-        // Atomic dirty marking: CAS UpToDate→Dirty, or set PG_REDIRTIED if Writeback
-        loop {
-            let raw = entry.state_raw();
-            let st = PageEntry::decode_state(raw);
-            match st {
-                PageState::Dirty => break,
-                PageState::UpToDate => {
-                    match entry.compare_exchange_state(raw, PageState::Dirty as u8) {
-                        Ok(_) => {
-                            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                            self.inner.lock().mark_dirty(page_index);
-                            break;
-                        }
-                        Err(_) => continue,
-                    }
-                }
-                PageState::Writeback => {
-                    entry.set_flag(PG_REDIRTIED);
-                    break;
-                }
-                _ => break,
+
+        let _t_falloc = perf::perf_time_now();
+        let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
+        perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
+        let candidate = Arc::new(PageEntry::new(frame, PageState::Loading));
+        if populate {
+            perf::record_pc_miss();
+            if let Some(backend) = self.backend() {
+                backend.read_page(page_index, candidate.as_slice_mut())?;
             }
         }
-        Ok(entry)
+        if init_mask != 0 {
+            candidate.valid_mask.fetch_or(init_mask, Ordering::Release);
+        }
+
+        let (winner, newly_installed) = {
+            let mut entries = self.entries.lock();
+            while entries.len() <= page_index {
+                entries.push(None);
+            }
+            if let Some(entry) = entries[page_index].as_ref() {
+                (entry.clone(), false)
+            } else {
+                entries[page_index] = Some(candidate.clone());
+                self.inner.lock().pages.insert(page_index);
+                (candidate, true)
+            }
+        };
+
+        if newly_installed {
+            winner.mark_referenced();
+            return Ok(WriteLease {
+                page_index,
+                entry: winner,
+                previous_state: PageState::UpToDate,
+                newly_installed: true,
+            });
+        }
+
+        self.acquire_existing_write_lease(page_index, winner)
+    }
+
+    fn acquire_existing_write_lease(
+        &self,
+        page_index: usize,
+        entry: Arc<PageEntry>,
+    ) -> Result<WriteLease, SyscallErr> {
+        entry.mark_referenced();
+        let raw = entry.state_raw();
+        let previous_state = PageEntry::decode_state(raw);
+        match previous_state {
+            PageState::UpToDate | PageState::Dirty => {
+                if entry
+                    .compare_exchange_state(raw, PageState::Loading as u8)
+                    .is_err()
+                {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                Ok(WriteLease {
+                    page_index,
+                    entry,
+                    previous_state,
+                    newly_installed: false,
+                })
+            }
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+            PageState::Error => Err(SyscallErr::EIO),
+        }
+    }
+
+    fn commit_write_lease(&self, lease: &WriteLease) {
+        if lease.previous_state != PageState::Dirty {
+            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+            self.inner.lock().mark_dirty(lease.page_index);
+        }
+        lease.entry.set_state(PageState::Dirty);
+    }
+
+    fn abort_write_lease(&self, lease: &WriteLease) {
+        if !lease.newly_installed {
+            lease.entry.set_state(lease.previous_state);
+            return;
+        }
+
+        let mut entries = self.entries.lock();
+        let removes_candidate = match entries.get(lease.page_index) {
+            Some(Some(entry)) => Arc::ptr_eq(entry, &lease.entry),
+            _ => false,
+        };
+        if removes_candidate {
+            entries[lease.page_index] = None;
+            self.inner.lock().pages.remove(&lease.page_index);
+        }
     }
 
     /// 获取页帧用于文件映射读（如 `MAP_PRIVATE` file-backed page fault）。
@@ -812,7 +899,7 @@ impl PageCache {
     ///
     /// 内部获取 `self.entries` → `self.inner`（按序）。
     pub fn frame_for_read(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
-        let entry = self.get_or_create_entry(page_index, true, None)?;
+        let entry = self.get_page_for_read(page_index)?;
         // 保证部分写入的页面在映射前所有 segment 均有效
         self.ensure_fully_valid(page_index)?;
         let state = entry.state();
@@ -824,56 +911,32 @@ impl PageCache {
     }
 
     /// 获取页帧用于文件映射写（如 `MAP_SHARED` file-backed page fault）。
-    ///
-    /// # Semantics
-    ///
-    /// 返回 PageCache 中的 `Arc<FrameTracker>`，自动通过 CAS 标记脏页。
-    /// 写回期间被再次标记脏时通过 `PG_REDIRTIED` 标志保证数据不丢失。
-    ///
-    /// # Errors
-    ///
-    /// - `EIO`：页面状态为 `Error`
-    /// - `EAGAIN`：页面状态为 `Loading` 或 `Writeback`
-    ///
-    /// # Locking
-    ///
-    /// 内部获取 `self.entries` → `self.inner`（按序）。修改全局脏页计数。
     pub fn frame_for_write(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
         let entry = self.get_or_create_entry(page_index, true, None)?;
-        // 保证部分写入的页面在映射前所有 segment 均有效
+        match entry.state() {
+            PageState::Loading | PageState::Writeback => return Err(SyscallErr::EAGAIN),
+            PageState::Error => return Err(SyscallErr::EIO),
+            PageState::UpToDate | PageState::Dirty => {}
+        }
         self.ensure_fully_valid(page_index)?;
-        let state = entry.state();
-        if state != PageState::UpToDate && state != PageState::Dirty {
-            return match state {
-                PageState::Error => Err(SyscallErr::EIO),
-                PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
-                _ => Err(SyscallErr::EIO),
-            };
-        }
-        // Atomic dirty marking: CAS UpToDate→Dirty, or set PG_REDIRTIED if Writeback
-        loop {
-            let raw = entry.state_raw();
-            let st = PageEntry::decode_state(raw);
-            match st {
-                PageState::Dirty => break,
-                PageState::UpToDate => {
-                    match entry.compare_exchange_state(raw, PageState::Dirty as u8) {
-                        Ok(_) => {
-                            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                            self.inner.lock().mark_dirty(page_index);
-                            break;
-                        }
-                        Err(_) => continue,
-                    }
+
+        let raw = entry.state_raw();
+        match PageEntry::decode_state(raw) {
+            PageState::Dirty => Ok(entry.page.clone()),
+            PageState::UpToDate => {
+                if entry
+                    .compare_exchange_state(raw, PageState::Dirty as u8)
+                    .is_err()
+                {
+                    return Err(SyscallErr::EAGAIN);
                 }
-                PageState::Writeback => {
-                    entry.set_flag(PG_REDIRTIED);
-                    break;
-                }
-                _ => break,
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                self.inner.lock().mark_dirty(page_index);
+                Ok(entry.page.clone())
             }
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+            PageState::Error => Err(SyscallErr::EIO),
         }
-        Ok(entry.page.clone())
     }
 
     /// 确保页面所有 segment 均已有效（读取缺失的 segment 并合并）。
@@ -891,6 +954,12 @@ impl PageCache {
                 None => return Ok(()),
             }
         };
+
+        match entry.state() {
+            PageState::Loading => return Err(SyscallErr::EAGAIN),
+            PageState::Error => return Err(SyscallErr::EIO),
+            PageState::UpToDate | PageState::Dirty | PageState::Writeback => {}
+        }
 
         if entry.is_fully_valid() {
             return Ok(());
@@ -933,15 +1002,21 @@ impl PageCache {
         buf_len: usize,
         start_page: usize,
         end_page: usize,
-    ) -> ReadPlan {
-        let mut plan = ReadPlan { copies: Vec::new(), miss_runs: Vec::new(), needs_valid_fill: BTreeSet::new() };
+    ) -> Result<ReadPlan, SyscallErr> {
+        let mut plan = ReadPlan {
+            copies: Vec::new(),
+            miss_runs: Vec::new(),
+            needs_valid_fill: BTreeSet::new(),
+        };
         let entries = self.entries.lock();
 
         for page_index in start_page..=end_page {
             let page_start = page_index * PAGE_SIZE;
             let read_start = offset.max(page_start);
             let read_end = (offset + buf_len).min(page_start + PAGE_SIZE);
-            if read_end <= read_start { continue; }
+            if read_end <= read_start {
+                continue;
+            }
             let sub_len = read_end - read_start;
 
             let dst_offset = read_start - offset;
@@ -950,6 +1025,13 @@ impl PageCache {
             // Check entry existence
             if page_index < entries.len() {
                 if let Some(entry) = &entries[page_index] {
+                    match entry.state() {
+                        PageState::Loading | PageState::Writeback => {
+                            return Err(SyscallErr::EAGAIN);
+                        }
+                        PageState::Error => return Err(SyscallErr::EIO),
+                        PageState::UpToDate | PageState::Dirty => {}
+                    }
                     entry.mark_referenced();
                     if entry.is_fully_valid() {
                         plan.copies.push(ReadCopy {
@@ -970,13 +1052,19 @@ impl PageCache {
                 if last.start_page + last.count == page_index {
                     last.count += 1;
                 } else {
-                    plan.miss_runs.push(MissRun { start_page: page_index, count: 1 });
+                    plan.miss_runs.push(MissRun {
+                        start_page: page_index,
+                        count: 1,
+                    });
                 }
             } else {
-                plan.miss_runs.push(MissRun { start_page: page_index, count: 1 });
+                plan.miss_runs.push(MissRun {
+                    start_page: page_index,
+                    count: 1,
+                });
             }
         }
-        plan
+        Ok(plan)
     }
 
     /// Fill contiguous missing page runs using backend.read_pages().
@@ -991,7 +1079,10 @@ impl PageCache {
             for i in 0..run.count {
                 let page_index = run.start_page + i;
                 let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
-                new_entries.push((page_index, Arc::new(PageEntry::new(frame, PageState::UpToDate))));
+                new_entries.push((
+                    page_index,
+                    Arc::new(PageEntry::new(frame, PageState::UpToDate)),
+                ));
             }
 
             // 2. Call read_pages() for contiguous subruns within backend range
@@ -1000,7 +1091,10 @@ impl PageCache {
                 let start = new_entries[i].0;
                 if start >= backend_npages {
                     // Hole past EOF: zero-fill (frame_alloc already zeroed), mark fully valid
-                    new_entries[i].1.valid_mask.store(VALID_ALL, Ordering::Release);
+                    new_entries[i]
+                        .1
+                        .valid_mask
+                        .store(VALID_ALL, Ordering::Release);
                     i += 1;
                     continue;
                 }
@@ -1011,7 +1105,9 @@ impl PageCache {
                     && new_entries[i].0 < backend_npages
                 {
                     // SAFETY: we own the only mutable ref to this frame (not yet published to entries)
-                    unsafe { bufs.push(&mut *(new_entries[i].1.as_slice_mut() as *mut [u8])); }
+                    unsafe {
+                        bufs.push(&mut *(new_entries[i].1.as_slice_mut() as *mut [u8]));
+                    }
                     i += 1;
                 }
                 let n = backend.read_pages(run_start, &mut bufs)?;
@@ -1019,7 +1115,10 @@ impl PageCache {
                 let full_pages = (n / PAGE_SIZE).min(bufs.len());
                 for j in 0..full_pages {
                     let idx = new_entries.len() - bufs.len() + j;
-                    new_entries[idx].1.valid_mask.store(VALID_ALL, Ordering::Release);
+                    new_entries[idx]
+                        .1
+                        .valid_mask
+                        .store(VALID_ALL, Ordering::Release);
                 }
                 // Record miss for perf
                 perf::record_pc_miss();
@@ -1030,7 +1129,9 @@ impl PageCache {
                 let mut entries = self.entries.lock();
                 let mut inner = self.inner.lock();
                 for (page_index, entry) in new_entries {
-                    while entries.len() <= page_index { entries.push(None); }
+                    while entries.len() <= page_index {
+                        entries.push(None);
+                    }
                     if entries[page_index].is_none() {
                         entries[page_index] = Some(entry.clone());
                         inner.pages.insert(page_index);
@@ -1065,7 +1166,8 @@ impl PageCache {
             let _t_lookup = perf::perf_time_now();
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
-            let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+            let had_miss =
+                perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
             let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
             let _t_copy = perf::perf_time_now();
@@ -1087,7 +1189,7 @@ impl PageCache {
         let total_len = buf.len();
         loop {
             let _t_lookup = perf::perf_time_now();
-            let plan = self.lookup_read_range_fast(offset, total_len, start_page, end_page);
+            let plan = self.lookup_read_range_fast(offset, total_len, start_page, end_page)?;
             let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
 
@@ -1102,7 +1204,8 @@ impl PageCache {
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
 
-                let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+                let had_miss =
+                    perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
                 let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
                 let pages = end_page - start_page + 1;
                 if had_miss {
@@ -1151,7 +1254,8 @@ impl PageCache {
                         .copy_from_slice(&src[src_start..src_start + item.sub_len]);
                     dst_offset += item.sub_len;
                 }
-                let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+                let had_miss =
+                    perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
                 let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
                 let pages = end_page - start_page + 1;
                 if had_miss {
@@ -1180,7 +1284,57 @@ impl PageCache {
     /// 从指定偏移量写入数据
     /// 两阶段写入：持锁收集目标页 → 解锁写入数据
     /// `old_file_size`: 旧文件大小，用于判断页面是否超出 EOF 以跳过不必要的后端读取
-    pub fn write(&self, offset: usize, buf: &[u8], old_file_size: Option<usize>) -> Result<usize, SyscallErr> {
+    pub fn write(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        self.write_with_after_copy(offset, buf, old_file_size, |_| {})
+    }
+
+    /// 从指定偏移量写入数据，并在所有数据及有效位发布后执行回调。
+    ///
+    /// `after_copy` 仅在成功写入非空缓冲区后调用一次，且在性能统计和脏页节流之前。
+    pub(crate) fn write_with_after_copy<F>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        after_copy: F,
+    ) -> Result<usize, SyscallErr>
+    where
+        F: FnOnce(usize),
+    {
+        self.write_with_copy_callbacks(offset, buf, old_file_size, |_| Ok(()), after_copy)
+    }
+
+    /// Test-only seam which runs after Loading publication but before payload bytes are copied.
+    pub(crate) fn write_with_before_copy<F>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: F,
+    ) -> Result<usize, SyscallErr>
+    where
+        F: FnOnce(usize) -> Result<(), SyscallErr>,
+    {
+        self.write_with_copy_callbacks(offset, buf, old_file_size, before_copy, |_| {})
+    }
+
+    fn write_with_copy_callbacks<BeforeCopy, AfterCopy>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: BeforeCopy,
+        after_copy: AfterCopy,
+    ) -> Result<usize, SyscallErr>
+    where
+        BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
+        AfterCopy: FnOnce(usize),
+    {
         let _t0 = perf::perf_time_now();
         if buf.is_empty() {
             perf::record_pc_write(0, false, perf::perf_time_now().wrapping_sub(_t0));
@@ -1196,20 +1350,30 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
-            let dst = entry.as_slice_mut();
+            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite)?;
+            if let Err(error) = before_copy(sub_len) {
+                self.abort_write_lease(&lease);
+                return Err(error);
+            }
+            let dst = lease.entry.as_slice_mut();
             dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
-            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            let became_full = lease.entry.mark_valid_and_check_full(page_offset, sub_len);
+            self.commit_write_lease(&lease);
+            after_copy(sub_len);
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
-            perf::record_pc_write(1, full_page_overwrite, perf::perf_time_now().wrapping_sub(_t0));
+            perf::record_pc_write(
+                1,
+                full_page_overwrite,
+                perf::perf_time_now().wrapping_sub(_t0),
+            );
             balance_dirty_pages();
             return Ok(sub_len);
         }
 
         struct CopyItem {
-            entry: Arc<PageEntry>,
+            lease: WriteLease,
             page_offset: usize,
             sub_len: usize,
             full_page_overwrite: bool,
@@ -1234,10 +1398,20 @@ impl PageCache {
             pages += 1;
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            if full_page_overwrite { any_full_overwrite = true; }
-            let entry = self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            if full_page_overwrite {
+                any_full_overwrite = true;
+            }
+            let lease = match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    for item in &copies {
+                        self.abort_write_lease(&item.lease);
+                    }
+                    return Err(error);
+                }
+            };
             copies.push(CopyItem {
-                entry,
+                lease,
                 page_offset,
                 sub_len,
                 full_page_overwrite,
@@ -1246,20 +1420,41 @@ impl PageCache {
         }
 
         // Phase 2: 写入数据（无锁）
+        if let Err(error) = before_copy(total_written) {
+            for item in &copies {
+                self.abort_write_lease(&item.lease);
+            }
+            return Err(error);
+        }
         let mut src_offset = 0;
+        let mut eventually_full = 0usize;
         for item in &copies {
-            let dst = item.entry.as_slice_mut();
+            let dst = item.lease.entry.as_slice_mut();
             let dst_start = item.page_offset;
             dst[dst_start..dst_start + item.sub_len]
                 .copy_from_slice(&buf[src_offset..src_offset + item.sub_len]);
-            let became_full = item.entry.mark_valid_and_check_full(item.page_offset, item.sub_len);
+            let became_full = item
+                .lease
+                .entry
+                .mark_valid_and_check_full(item.page_offset, item.sub_len);
             if became_full && !item.full_page_overwrite {
-                perf::record_pc_write_eventually_full();
+                eventually_full += 1;
             }
             src_offset += item.sub_len;
         }
 
-        perf::record_pc_write(pages, any_full_overwrite, perf::perf_time_now().wrapping_sub(_t0));
+        for item in &copies {
+            self.commit_write_lease(&item.lease);
+        }
+        after_copy(total_written);
+        for _ in 0..eventually_full {
+            perf::record_pc_write_eventually_full();
+        }
+        perf::record_pc_write(
+            pages,
+            any_full_overwrite,
+            perf::perf_time_now().wrapping_sub(_t0),
+        );
         balance_dirty_pages();
         Ok(total_written)
     }
@@ -1300,14 +1495,17 @@ impl PageCache {
         // Multi-page with batch lookup + retry
         let mut retried = false;
         loop {
-            let plan = self.lookup_read_range_fast(offset, len, start_page, end_page);
+            let plan = self.lookup_read_range_fast(offset, len, start_page, end_page)?;
 
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
                 // All hits: copy to UserBuffer
                 let _t_copy = perf::perf_time_now();
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(item.dst_offset, &src[item.page_offset..item.page_offset + item.len]);
+                    dst.write_at(
+                        item.dst_offset,
+                        &src[item.page_offset..item.page_offset + item.len],
+                    );
                 }
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
@@ -1346,7 +1544,10 @@ impl PageCache {
                 let mut dst_off = 0;
                 for item in &copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(dst_off, &src[item.page_offset..item.page_offset + item.sub_len]);
+                    dst.write_at(
+                        dst_off,
+                        &src[item.page_offset..item.page_offset + item.sub_len],
+                    );
                     dst_off += item.sub_len;
                 }
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
@@ -1377,6 +1578,9 @@ impl PageCache {
         src: &crate::mm::UserBuffer,
         old_file_size: Option<usize>,
     ) -> Result<usize, SyscallErr> {
+        if len > src.len() {
+            return Err(SyscallErr::EFAULT);
+        }
         if len == 0 {
             return Ok(0);
         }
@@ -1390,10 +1594,11 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = len.min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
-            let dst = entry.as_slice_mut();
+            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite)?;
+            let dst = lease.entry.as_slice_mut();
             src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
-            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            let became_full = lease.entry.mark_valid_and_check_full(page_offset, sub_len);
+            self.commit_write_lease(&lease);
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
@@ -1402,7 +1607,7 @@ impl PageCache {
         }
 
         struct CopyItem {
-            entry: Arc<PageEntry>,
+            lease: WriteLease,
             page_offset: usize,
             sub_len: usize,
             full_page_overwrite: bool,
@@ -1424,9 +1629,17 @@ impl PageCache {
 
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            let lease = match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    for item in &copies {
+                        self.abort_write_lease(&item.lease);
+                    }
+                    return Err(error);
+                }
+            };
             copies.push(CopyItem {
-                entry,
+                lease,
                 page_offset: write_start - page_start,
                 sub_len,
                 full_page_overwrite,
@@ -1437,16 +1650,22 @@ impl PageCache {
         // Phase 2: copy data from UserBuffer into pages (no locks held)
         let mut src_offset = 0;
         for item in &copies {
-            let dst = item.entry.as_slice_mut();
+            let dst = item.lease.entry.as_slice_mut();
             let dst_start = item.page_offset;
             src.read_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]);
-            let became_full = item.entry.mark_valid_and_check_full(item.page_offset, item.sub_len);
+            let became_full = item
+                .lease
+                .entry
+                .mark_valid_and_check_full(item.page_offset, item.sub_len);
             if became_full && !item.full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
             src_offset += item.sub_len;
         }
 
+        for item in &copies {
+            self.commit_write_lease(&item.lease);
+        }
         balance_dirty_pages();
         Ok(total_written)
     }
@@ -1478,28 +1697,25 @@ impl PageCache {
 
         // Phase 1: 收集需要新建的页面，已缓存的跳过
         struct PendingPage {
-            index: usize,       // absolute page index
+            index: usize, // absolute page index
             entry: Arc<PageEntry>,
         }
-        let mut pending: Vec<PendingPage> = Vec::new();
-        {
+        let missing_indices: Vec<usize> = {
             let entries = self.entries.lock();
-            for page_index in start_page..start_page + count {
-                // 跳过已缓存的页面
-                if page_index < entries.len() && entries[page_index].is_some() {
-                    continue;
-                }
-                // 分配新帧（frame_alloc 返回零填充页）
-                let frame = match frame_alloc() {
-                    Some(f) => f,
-                    None => return Err(SyscallErr::ENOMEM),
-                };
-                let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
-                pending.push(PendingPage {
-                    index: page_index,
-                    entry,
-                });
-            }
+            (start_page..start_page + count)
+                .filter(|page_index| {
+                    *page_index >= entries.len() || entries[*page_index].is_none()
+                })
+                .collect()
+        };
+        let mut pending: Vec<PendingPage> = Vec::new();
+        for page_index in missing_indices {
+            let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
+            let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
+            pending.push(PendingPage {
+                index: page_index,
+                entry,
+            });
         }
 
         if pending.is_empty() {
@@ -1540,18 +1756,20 @@ impl PageCache {
             }
         }
 
-        // Phase 4: 标记 UpToDate 并插入到 entries
+        // Phase 4: only publish pages whose target slot is still empty.
         {
             let mut entries = self.entries.lock();
             let mut inner = self.inner.lock();
             for p in &pending {
-                p.entry.set_state(PageState::UpToDate);
                 // 扩展 entries 数组
                 while entries.len() <= p.index {
                     entries.push(None);
                 }
-                entries[p.index] = Some(p.entry.clone());
-                inner.pages.insert(p.index);
+                if entries[p.index].is_none() {
+                    p.entry.set_state(PageState::UpToDate);
+                    entries[p.index] = Some(p.entry.clone());
+                    inner.pages.insert(p.index);
+                }
             }
         }
 
@@ -1566,14 +1784,8 @@ impl PageCache {
     /// - 非顺序访问时重置窗口：ra_size = MIN_RA_PAGES
     /// - 更新 prev_page 记录
     /// - 批量预取 ahead pages
-    pub fn maybe_readahead(
-        &self,
-        page_index: usize,
-        ra: &mut RaState,
-        req_pages: usize,
-    ) {
-        let sequential =
-            page_index == ra.prev_page + 1 || page_index == ra.prev_page;
+    pub fn maybe_readahead(&self, page_index: usize, ra: &mut RaState, req_pages: usize) {
+        let sequential = page_index == ra.prev_page + 1 || page_index == ra.prev_page;
 
         if !sequential {
             ra.ra_size = MIN_RA_PAGES;
@@ -1629,10 +1841,7 @@ impl PageCache {
         };
 
         // CAS Dirty → Writeback
-        match entry.compare_exchange_state(
-            PageState::Dirty as u8,
-            PageState::Writeback as u8,
-        ) {
+        match entry.compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8) {
             Ok(_) => {
                 GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -1704,10 +1913,9 @@ impl PageCache {
             let end = (start + count).min(entries.len());
             for i in start..end {
                 if let Some(entry) = &entries[i] {
-                    match entry.compare_exchange_state(
-                        PageState::Dirty as u8,
-                        PageState::Writeback as u8,
-                    ) {
+                    match entry
+                        .compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8)
+                    {
                         Ok(_) => {
                             GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                             GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -2121,7 +2329,8 @@ impl PageCacheBackend for BlockPageCacheBackend {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= PAGE_SIZE);
             self.block_device
-                .read_block(block_id, &mut buf[start..start + self.block_size]);
+                .read_block(block_id, &mut buf[start..start + self.block_size])
+                .map_err(|_| SyscallErr::EIO)?;
         }
 
         Ok(PAGE_SIZE)
@@ -2139,7 +2348,8 @@ impl PageCacheBackend for BlockPageCacheBackend {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= PAGE_SIZE);
             self.block_device
-                .write_block(block_id, &buf[start..start + self.block_size]);
+                .write_block(block_id, &buf[start..start + self.block_size])
+                .map_err(|_| SyscallErr::EIO)?;
         }
 
         Ok(PAGE_SIZE)
@@ -2213,7 +2423,8 @@ impl PageCacheBackend for FatPageCacheBackend {
                     let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                     self.fs
                         .block_device
-                        .read_block(blk_id, &mut blk_buf);
+                        .read_block(blk_id, &mut blk_buf)
+                        .map_err(|_| SyscallErr::EIO)?;
                     buf[start..start + self.block_size]
                         .copy_from_slice(&blk_buf[blk_off..blk_off + self.block_size]);
                 }
@@ -2239,12 +2450,14 @@ impl PageCacheBackend for FatPageCacheBackend {
                 let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                 self.fs
                     .block_device
-                    .read_block(blk_id, &mut blk_buf);
+                    .read_block(blk_id, &mut blk_buf)
+                    .map_err(|_| SyscallErr::EIO)?;
                 blk_buf[blk_off..blk_off + self.block_size]
                     .copy_from_slice(&buf[start..start + self.block_size]);
                 self.fs
                     .block_device
-                    .write_block(blk_id, &blk_buf);
+                    .write_block(blk_id, &blk_buf)
+                    .map_err(|_| SyscallErr::EIO)?;
             }
         }
         Ok(crate::config::PAGE_SIZE)
@@ -2305,7 +2518,9 @@ impl Ext4PageCacheBackend {
         ext4fs: alloc::sync::Weak<crate::fs::ext4::ext4fs::Ext4FileSystem>,
         inode_num: u32,
     ) -> Self {
-        let fs = ext4fs.upgrade().expect("Ext4PageCacheBackend: ext4fs dropped");
+        let fs = ext4fs
+            .upgrade()
+            .expect("Ext4PageCacheBackend: ext4fs dropped");
         let block_size = fs.block_size;
         let blocks_per_page = crate::config::PAGE_SIZE / block_size;
         Ext4PageCacheBackend {
@@ -2347,11 +2562,18 @@ impl Ext4PageCacheBackend {
                 perf::record_ext4_map_lblock_cost(elapsed);
                 // Cache the full extent range
                 self.map_cache.valid.store(true, Ordering::Relaxed);
-                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
-                self.map_cache.lblock_start.store(ext_first, Ordering::Relaxed);
-                self.map_cache.pblock_start
+                self.map_cache
+                    .inode_num
+                    .store(self.inode_num, Ordering::Relaxed);
+                self.map_cache
+                    .lblock_start
+                    .store(ext_first, Ordering::Relaxed);
+                self.map_cache
+                    .pblock_start
                     .store(pblock - (lblock - ext_first), Ordering::Relaxed);
-                self.map_cache.lblock_count.store(ext_len, Ordering::Relaxed);
+                self.map_cache
+                    .lblock_count
+                    .store(ext_len, Ordering::Relaxed);
                 Some(pblock as usize)
             }
             Err(_) => {
@@ -2360,9 +2582,13 @@ impl Ext4PageCacheBackend {
                 crate::task::perf::record_ext4_map_hole();
                 // Cache the hole (single block only — extent range doesn't cover holes)
                 self.map_cache.valid.store(true, Ordering::Relaxed);
-                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
+                self.map_cache
+                    .inode_num
+                    .store(self.inode_num, Ordering::Relaxed);
                 self.map_cache.lblock_start.store(lblock, Ordering::Relaxed);
-                self.map_cache.pblock_start.store(u32::MAX, Ordering::Relaxed);
+                self.map_cache
+                    .pblock_start
+                    .store(u32::MAX, Ordering::Relaxed);
                 self.map_cache.lblock_count.store(1, Ordering::Relaxed);
                 None
             }
@@ -2382,9 +2608,14 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             match self.block_id_for_offset(index, block_off) {
                 Some(block_id) => {
                     fs.block_device
-                        .read_block(block_id, &mut buf[start..start + self.block_size]);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_READ);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::BLOCK_READ_TOTAL);
+                        .read_block(block_id, &mut buf[start..start + self.block_size])
+                        .map_err(|_| SyscallErr::EIO)?;
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_READ
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_READ_TOTAL
+                    );
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -2405,9 +2636,14 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             match self.block_id_for_offset(index, block_off) {
                 Some(block_id) => {
                     fs.block_device
-                        .write_block(block_id, &buf[start..start + self.block_size]);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_WRITE);
-                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::BLOCK_WRITE_TOTAL);
+                        .write_block(block_id, &buf[start..start + self.block_size])
+                        .map_err(|_| SyscallErr::EIO)?;
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_WRITE
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
+                    );
                 }
                 None => {
                     // Unmapped block — cannot write; keep page dirty for retry
@@ -2483,7 +2719,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 // pblock 是 512B 单位，需转为 BLOCK_SZ 单位（pblock / blocks_per_page）
                 // staging 按 512B 拼接，因 run 跨整页边界，staging_size 必为 BLOCK_SZ 的整数倍
                 let first_pblock_4k = first_pblock / bpp;
-                blk.write_block(first_pblock_4k, &staging);
+                blk.write_block(first_pblock_4k, &staging)
+                    .map_err(|_| SyscallErr::EIO)?;
 
                 // 更新计数器（等价于逐块调用）
                 for _ in 0..run_len {
@@ -2545,7 +2782,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             }
 
             // 批量写入块设备
-            blk.write_block(first_pblock, &staging);
+            blk.write_block(first_pblock, &staging)
+                .map_err(|_| SyscallErr::EIO)?;
 
             // 更新计数器（等价于逐块调用）
             for _ in 0..run_len {
@@ -2563,11 +2801,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         crate::task::perf::record_ext4_pc_readpages_calls();
         crate::task::perf::record_ext4_pc_readpages_pages(pages.len());
         // 当 blocks_per_page > 1 时，打平所有 lblock，按物理连续分组批量读取
@@ -2619,7 +2853,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 // 批量读取到 staging buffer
                 let staging_size = run_len * block_sz;
                 let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
-                blk.read_block(first_pblock, &mut staging);
+                blk.read_block(first_pblock, &mut staging)
+                    .map_err(|_| SyscallErr::EIO)?;
 
                 // 分散到各页面的对应 block_off 位置
                 for j in 0..run_len {
@@ -2701,7 +2936,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             // 批量读取物理连续块到 staging buffer
             let staging_size = run_len * block_sz;
             let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
-            blk.read_block(first_pblock, &mut staging);
+            blk.read_block(first_pblock, &mut staging)
+                .map_err(|_| SyscallErr::EIO)?;
 
             // 将 staging buffer 中的数据拷贝到各页面
             for j in 0..run_len {
@@ -2713,9 +2949,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
 
             // 更新计数器
             for _ in 0..run_len {
-                crate::fs::ext4::counters::inc_counter!(
-                    crate::fs::ext4::counters::DATA_BLOCK_READ
-                );
+                crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_READ);
                 crate::fs::ext4::counters::inc_counter!(
                     crate::fs::ext4::counters::BLOCK_READ_TOTAL
                 );

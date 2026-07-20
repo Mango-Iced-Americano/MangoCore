@@ -1,6 +1,4 @@
-use crate::fs::{
-    ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE},
-};
+use crate::fs::ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE};
 use alloc::vec;
 
 use super::{
@@ -78,7 +76,9 @@ impl Ext4FileSystem {
                 self.defer_superblock_write(&super_block);
                 // 看是否写入成功
                 let mut test_super_block = vec![0u8; self.block_size];
-                self.block_device.read_block(0, &mut test_super_block);
+                self.block_device
+                    .read_block(0, &mut test_super_block)
+                    .map_err(|_| -5isize)?;
 
                 /* Compute the absolute i-nodex number */
                 // 计算inode号

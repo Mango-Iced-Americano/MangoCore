@@ -8,8 +8,8 @@
 //! Slow but correct — each page I/O does fopen/fseek/fread/fwrite/fclose.
 //! For batching, `read_pages`/`write_pages` open once and do sequential I/O.
 
-use alloc::sync::{Arc, Weak};
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PAGE_SIZE;
@@ -70,7 +70,10 @@ impl LwExt4PageCacheBackend {
         }
         while new_size > prev {
             match logical_size.compare_exchange_weak(
-                prev, new_size, Ordering::Relaxed, Ordering::Relaxed,
+                prev,
+                new_size,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => prev = actual,
@@ -104,7 +107,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
             let physical_len = PAGE_SIZE.min(physical_eof - offset);
             f.file_seek(offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            let n = f.file_read(&mut buf[..physical_len])
+            let n = f
+                .file_read(&mut buf[..physical_len])
                 .map_err(|e| from_lwext4(e.abs()))?;
             // Zero-fill the remainder of the page (tail of last partial page)
             if n < PAGE_SIZE {
@@ -134,7 +138,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         let result = (|| -> Result<usize, SyscallErr> {
             f.file_seek(offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            let n = f.file_write(&buf[..write_len])
+            let n = f
+                .file_write(&buf[..write_len])
                 .map_err(|e| from_lwext4(e.abs()))?;
             // fetch_max: update logical_size if we extended the file
             Self::note_logical_size_atomic(&self.logical_size, offset + n);
@@ -144,11 +149,7 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         result
     }
 
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         crate::task::perf::record_pc_miss();
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let _lock = fs.lw.lock();
@@ -170,7 +171,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                     let physical_len = PAGE_SIZE.min(physical_eof - page_offset);
                     f.file_seek(page_offset as i64, 0)
                         .map_err(|e| from_lwext4(e.abs()))?;
-                    let n = f.file_read(&mut page[..physical_len])
+                    let n = f
+                        .file_read(&mut page[..physical_len])
                         .map_err(|e| from_lwext4(e.abs()))?;
                     if n < PAGE_SIZE {
                         let page_len = page.len();
@@ -184,11 +186,7 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         result
     }
 
-    fn write_pages(
-        &self,
-        start_index: usize,
-        pages: &[&[u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let _lock = fs.lw.lock();
         let mut f = Ext4File::new(&self.lw_path, InodeTypes::EXT4_DE_REG_FILE);
@@ -217,7 +215,10 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                     log::warn!(
                         "[lwext4-wb] skipping dirty writeback for {}: \
                          EOF={} but {} dirty bytes at offset {} ({} pages)",
-                        self.lw_path, eof, raw_total, start_offset,
+                        self.lw_path,
+                        eof,
+                        raw_total,
+                        start_offset,
                         pages.len()
                     );
                 }
@@ -232,7 +233,9 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
             for page in pages.iter() {
                 let page_bytes = PAGE_SIZE.min(page.len());
                 let remaining = total_bytes.saturating_sub(copied);
-                if remaining == 0 { break; }
+                if remaining == 0 {
+                    break;
+                }
                 let n = page_bytes.min(remaining);
                 staging[copied..copied + n].copy_from_slice(&page[..n]);
                 copied += n;
@@ -240,7 +243,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
 
             f.file_seek(start_offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            let n = f.file_write(&staging[..total_bytes])
+            let n = f
+                .file_write(&staging[..total_bytes])
                 .map_err(|e| from_lwext4(e.abs()))?;
 
             // Single logical_size update for entire batch

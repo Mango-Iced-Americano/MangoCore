@@ -1,9 +1,9 @@
 //! /proc/net/route — 路由表（小端格式）
 
-use alloc::format;
-use alloc::string::{String, ToString};
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use alloc::format;
+use alloc::string::{String, ToString};
 use smoltcp::wire::Ipv4Address;
 
 fn ip_to_le_hex(ip: Ipv4Address) -> String {
@@ -18,9 +18,16 @@ pub fn net_route_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut content = String::new();
-    content.push_str("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n");
+    content.push_str(
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n",
+    );
 
-    let entries = crate::net::net_core::current_netns().router.lock().table.entries.clone();
+    let entries = crate::net::net_core::current_netns()
+        .router
+        .lock()
+        .table
+        .entries
+        .clone();
     for entry in &entries {
         let ifname = crate::net::net_core::find_by_index(entry.ifindex)
             .map(|d| d.iface.iface_name())
@@ -35,7 +42,11 @@ pub fn net_route_content(
             _ => String::from("00000000"),
         };
         let prefix = entry.destination.prefix_len();
-        let mask_u32: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+        let mask_u32: u32 = if prefix == 0 {
+            0
+        } else {
+            !0u32 << (32 - prefix)
+        };
         let mask_str = format!("{:08X}", u32::to_le(mask_u32));
         let flags = match entry.route_type {
             crate::net::routing::RouteType::Default => "0003",

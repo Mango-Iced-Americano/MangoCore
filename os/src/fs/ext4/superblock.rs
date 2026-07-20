@@ -1,5 +1,5 @@
-use crate::fs::BlockDevice;
 use crate::fs::timestamp::format_time;
+use crate::fs::BlockDevice;
 use alloc::string::String;
 #[allow(unused)]
 use alloc::sync::Arc;
@@ -232,11 +232,15 @@ impl Ext4Superblock {
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
         let mut buf = vec![0u8; BLOCK_SIZE];
-        block_device.read_block(superblk_id, &mut buf);
+        block_device
+            .read_block(superblk_id, &mut buf)
+            .expect("failed to read ext4 superblock");
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         super::counters::inc_counter!(super::counters::SUPERBLOCK_READ);
         buf[1024..2048].copy_from_slice(data);
-        block_device.write_block(superblk_id, &buf);
+        block_device
+            .write_block(superblk_id, &buf)
+            .expect("failed to write ext4 superblock");
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
         super::counters::inc_counter!(super::counters::SUPERBLOCK_WRITE);
     }
@@ -258,11 +262,15 @@ impl Ext4Superblock {
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
         let mut buf = vec![0u8; BLOCK_SIZE];
         // 先读取第一个块
-        block_device.read_block(superblk_id, &mut buf);
+        block_device
+            .read_block(superblk_id, &mut buf)
+            .expect("failed to read ext4 superblock");
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         super::counters::inc_counter!(super::counters::SUPERBLOCK_READ);
         buf[1024..2048].copy_from_slice(data);
-        block_device.write_block(superblk_id, &buf);
+        block_device
+            .write_block(superblk_id, &buf)
+            .expect("failed to write ext4 superblock");
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
         super::counters::inc_counter!(super::counters::SUPERBLOCK_WRITE);
     }

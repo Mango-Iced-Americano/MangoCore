@@ -2,12 +2,13 @@ mod block_dev;
 mod mem_blk;
 pub mod partition;
 mod sata_blk;
-pub mod virtio_dma_pool;
 #[cfg(feature = "block_virt")]
 pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
 pub mod virtio_blk_pci;
-pub use block_dev::BlockDevice;
+pub mod virtio_dma_pool;
+pub(crate) use block_dev::validate_block_buffer_length;
+pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceResult};
 #[cfg(feature = "block_mem")]
 type BlockDeviceImpl = mem_blk::MemBlockWrapper;
 #[cfg(feature = "block_sata")]
@@ -33,11 +34,12 @@ pub fn disable_block_device() {
 /// 虚拟块设备 — 用于 ramfs-only 模式下 BLOCK_DEVICE 的占位
 struct DummyBlockDevice;
 impl BlockDevice for DummyBlockDevice {
-    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) {
-        panic!("DummyBlockDevice::read_block called — block device is disabled (ramfs-only mode)");
+    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) -> BlockDeviceResult {
+        Err(BlockDeviceError::DeviceUnavailable)
     }
-    fn write_block(&self, _block_id: usize, _buf: &[u8]) {
-        panic!("DummyBlockDevice::write_block called — block device is disabled (ramfs-only mode)");
+
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> BlockDeviceResult {
+        Err(BlockDeviceError::DeviceUnavailable)
     }
 }
 
@@ -104,8 +106,12 @@ pub fn block_device_test() {
         for byte in write_buffer.iter_mut() {
             *byte = i as u8;
         }
-        block_device.write_block(i as usize, &write_buffer);
-        block_device.read_block(i as usize, &mut read_buffer);
+        block_device
+            .write_block(i, &write_buffer)
+            .expect("block device test write failed");
+        block_device
+            .read_block(i, &mut read_buffer)
+            .expect("block device test read failed");
         assert_eq!(write_buffer, read_buffer);
     }
     println!("block device test passed!");

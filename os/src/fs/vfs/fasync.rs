@@ -2,15 +2,12 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::fs::vfs::File;
 use crate::fs::vfs::file::{FileOwnerSnapshot, FileOwnerTarget};
+use crate::fs::vfs::File;
 use crate::fs::vfs::FileFlags;
 use crate::task::{
-    find_process_by_pid, find_task_by_tid,
-    send_process_signal,
-    send_thread_signal,
-    signal::Signals,
-    ProcessManager,
+    find_process_by_pid, find_task_by_tid, send_process_signal, send_thread_signal,
+    signal::Signals, ProcessManager,
 };
 use crate::utils::error::SyscallErr;
 
@@ -115,11 +112,7 @@ impl FAsyncItems {
 /// Called from `fcntl(F_SETFL)` when the `O_ASYNC` bit toggles.  Inodes
 /// that do not support fasync (default for most FS inodes) silently
 /// return `Ok(())`.
-pub fn set_file_fasync(
-    file: &Arc<File>,
-    fd: i32,
-    enabled: bool,
-) -> Result<(), SyscallErr> {
+pub fn set_file_fasync(file: &Arc<File>, fd: i32, enabled: bool) -> Result<(), SyscallErr> {
     let fasync_items = match file.inode.fasync_items() {
         Some(items) => items,
         None => return Ok(()),

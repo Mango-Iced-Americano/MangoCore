@@ -33,24 +33,41 @@ pub struct Fat {
 
 impl Fat {
     /// 从 FAT 表中读取指定扇区的 u32 entry（直接块设备读，替代旧 BlockCacheManager）
-    fn read_fat_entry(&self, block_device: &Arc<dyn BlockDevice>, sec_num: usize, offset: usize) -> u32 {
+    fn read_fat_entry(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        sec_num: usize,
+        offset: usize,
+    ) -> u32 {
         // FAT 扇区是 512 字节，BlockDevice 以 BLOCK_SZ(4096) 为单位
         let block_id = sec_num / SECTORS_PER_BLOCK;
         let sector_off = (sec_num % SECTORS_PER_BLOCK) * 512;
         let mut buf = alloc::vec![0u8; BLOCK_SZ];
-        block_device.read_block(block_id, &mut buf);
+        block_device
+            .read_block(block_id, &mut buf)
+            .expect("failed to read FAT block");
         let off = sector_off + offset;
         u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
     }
 
-    fn write_fat_entry(&self, block_device: &Arc<dyn BlockDevice>, sec_num: usize, offset: usize, val: u32) {
+    fn write_fat_entry(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        sec_num: usize,
+        offset: usize,
+        val: u32,
+    ) {
         let block_id = sec_num / SECTORS_PER_BLOCK;
         let sector_off = (sec_num % SECTORS_PER_BLOCK) * 512;
         let mut buf = alloc::vec![0u8; BLOCK_SZ];
-        block_device.read_block(block_id, &mut buf);
+        block_device
+            .read_block(block_id, &mut buf)
+            .expect("failed to read FAT block");
         let off = sector_off + offset;
         buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
-        block_device.write_block(block_id, &buf);
+        block_device
+            .write_block(block_id, &buf)
+            .expect("failed to write FAT block");
     }
 
     /// 获取当前fat表项指向的的下一个簇号
@@ -86,11 +103,7 @@ impl Fat {
     }
 
     /// Constructor for fat
-    pub fn new(
-        rsvd_sec_cnt: usize,
-        byts_per_sec: usize,
-        clus: usize,
-    ) -> Self {
+    pub fn new(rsvd_sec_cnt: usize, byts_per_sec: usize, clus: usize) -> Self {
         Self {
             start_block_id: rsvd_sec_cnt,
             byts_per_sec,

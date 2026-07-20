@@ -267,6 +267,16 @@
 - **教训**: 对早期启动、NTP、nanosleep、futex timeout、timerfd 这类等待路径，正确性兜底往往比性能优化更早暴露风险。优化顺序应是“让兜底便宜”，不是先删除兜底。
 - **相关文件**: `os/src/task/manager.rs`, `os/src/task/processor.rs`
 
+## PageCache 写回时序
+
+### 逻辑 EOF 在脏页节流后发布导致早写回丢数据
+
+- **现象**: 非零 offset 的短写入随后 `sync()` 和冷查找，正常路径可能通过；但在 PageCache 复制完成后、调用方更新逻辑大小前强制一次写回时，零填充 gap 或 payload 消失。
+- **根因**: `PageCache::write()` 可在返回前触发 `balance_dirty_pages()`。若后端按独立逻辑 EOF 截断 writeback，而调用方在 `write()` 返回后才发布 EOF，写回会跳过新页或以旧大小提交元数据，之后页面已变干净，后续 `sync()` 无数据可补写。
+- **修复**: 保留通用 `write()` 行为，增加仅在所有字节和 valid 位发布成功后、节流前调用一次的不可失败 callback；后端在 callback 中执行最小原子 EOF 更新。空写和任何 prepare/copy 失败均不得调用 callback。
+- **验证**: 以受控早写回作为 RED toggle，再以非对齐 EOF、单 inode `sync()`、drop 后冷查找的 QEMU regression 验证 GREEN。
+- **相关文件**: `os/src/fs/page_cache.rs`, `os/src/fs/ext4_another/mutations.rs`, `os/src/kernel_tests/ext4_another_lifetime.rs`
+
 ## lwext4 VFS 适配器常见陷阱
 
 ### spin::Mutex 不可重入 — 持有外层锁时调用内层加锁函数会死锁

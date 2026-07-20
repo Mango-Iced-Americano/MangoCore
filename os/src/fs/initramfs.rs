@@ -11,17 +11,10 @@
 //! 不支持的类型（char/block/fifo/socket）静默跳过，因为 /dev
 //! 由 DevFS 管理。
 
-use alloc::{
-    string::String,
-    sync::Arc,
-    vec::Vec,
-};
 use crate::utils::error::SyscallErr;
+use alloc::{string::String, sync::Arc, vec::Vec};
 
-use super::vfs::{
-    FileType, IndexNode, InodeMode, MountFS as _,
-    File, FileFlags, MountFS,
-};
+use super::vfs::{File, FileFlags, FileType, IndexNode, InodeMode, MountFS as _, MountFS};
 
 // ── 常量 ────────────────────────────────────────────────────────────────
 
@@ -137,11 +130,11 @@ fn mode_to_filetype(mode: u32) -> Option<FileType> {
         S_IFDIR => Some(FileType::Dir),
         S_IFREG => Some(FileType::File),
         S_IFLNK => Some(FileType::SymLink),
-        S_IFBLK => None,   // skip, managed by DevFS
-        S_IFCHR => None,   // skip, managed by DevFS
-        S_IFIFO => None,   // skip
-        S_IFSOCK => None,  // skip
-        _ => None,         // unknown
+        S_IFBLK => None,  // skip, managed by DevFS
+        S_IFCHR => None,  // skip, managed by DevFS
+        S_IFIFO => None,  // skip
+        S_IFSOCK => None, // skip
+        _ => None,        // unknown
     }
 }
 
@@ -178,10 +171,12 @@ fn next_entry(archive: &[u8], pos: usize) -> Result<Option<(NewcEntry, usize)>, 
 
     let name_bytes = &archive[pos + HEADER_LEN..pos + HEADER_LEN + namesize];
     // newc 格式要求文件名以 NUL 结尾
-    let name_nul_pos = name_bytes.iter().position(|&b| b == 0)
+    let name_nul_pos = name_bytes
+        .iter()
+        .position(|&b| b == 0)
         .ok_or(InitramfsError::BadName)?;
-    let name = core::str::from_utf8(&name_bytes[..name_nul_pos])
-        .map_err(|_| InitramfsError::BadName)?;
+    let name =
+        core::str::from_utf8(&name_bytes[..name_nul_pos]).map_err(|_| InitramfsError::BadName)?;
 
     // newc 对齐规则：header + filename 整体对齐到 4 字节
     let header_filename_end = pos + HEADER_LEN + namesize;
@@ -203,11 +198,7 @@ fn next_entry(archive: &[u8], pos: usize) -> Result<Option<(NewcEntry, usize)>, 
 
     let mode = field_u32(header, 14)?;
 
-    Ok(Some((NewcEntry {
-        mode,
-        name,
-        data,
-    }, data_aligned)))
+    Ok(Some((NewcEntry { mode, name, data }, data_aligned)))
 }
 
 /// 对齐到 4 字节
@@ -226,10 +217,7 @@ fn align4(n: usize) -> usize {
 /// 等会**递归触发 `VFS_ROOT`** 的函数。
 ///
 /// 使用传入的 `root.mountpoint_root_inode()` 作为查找起点。
-pub fn unpack_newc(
-    root: &Arc<MountFS>,
-    archive: &[u8],
-) -> Result<InitramfsStats, InitramfsError> {
+pub fn unpack_newc(root: &Arc<MountFS>, archive: &[u8]) -> Result<InitramfsStats, InitramfsError> {
     let root_inode: Arc<dyn IndexNode> = root.mountpoint_root_inode();
     let mut stats = InitramfsStats::default();
     let mut pos = 0;
@@ -275,7 +263,8 @@ pub fn unpack_newc(
                     continue;
                 }
                 let mode = mode_to_inodemode(entry.mode) | InodeMode::S_IFDIR;
-                parent.create(basename, FileType::Dir, mode)
+                parent
+                    .create(basename, FileType::Dir, mode)
                     .map_err(InitramfsError::Vfs)?;
                 stats.dirs += 1;
             }
@@ -284,13 +273,13 @@ pub fn unpack_newc(
                     existing
                 } else {
                     let mode = mode_to_inodemode(entry.mode) | InodeMode::S_IFREG;
-                    parent.create(basename, FileType::File, mode)
+                    parent
+                        .create(basename, FileType::File, mode)
                         .map_err(InitramfsError::Vfs)?
                 };
                 // 写入文件内容
                 if !entry.data.is_empty() {
-                    let file = File::new(inode, FileFlags::O_RDWR)
-                        .map_err(InitramfsError::Vfs)?;
+                    let file = File::new(inode, FileFlags::O_RDWR).map_err(InitramfsError::Vfs)?;
                     file.write(entry.data).map_err(InitramfsError::Vfs)?;
                 }
                 stats.files += 1;
@@ -300,9 +289,10 @@ pub fn unpack_newc(
                 if parent.find(basename).is_ok() {
                     continue;
                 }
-                let target = core::str::from_utf8(entry.data)
-                    .map_err(|_| InitramfsError::BadName)?;
-                parent.symlink(basename, target)
+                let target =
+                    core::str::from_utf8(entry.data).map_err(|_| InitramfsError::BadName)?;
+                parent
+                    .symlink(basename, target)
                     .map_err(InitramfsError::Vfs)?;
                 stats.symlinks += 1;
             }
@@ -338,7 +328,8 @@ fn resolve_parent<'a>(
             Ok(inode) => inode,
             Err(_) => {
                 // 自动创建中间目录
-                current.create(part, FileType::Dir, InodeMode::from_bits_truncate(0o755))
+                current
+                    .create(part, FileType::Dir, InodeMode::from_bits_truncate(0o755))
                     .map_err(InitramfsError::Vfs)?
             }
         };
