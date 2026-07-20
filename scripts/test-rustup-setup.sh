@@ -10,6 +10,18 @@ mkdir -p "$fixture_root/scripts" "$work_dir/bin"
 cp "$repo_root/rust-toolchain.toml" "$fixture_root/rust-toolchain.toml"
 cp "$repo_root/scripts/rustup-setup.sh" "$fixture_root/scripts/rustup-setup.sh"
 cp "$repo_root/scripts/rustup-preflight.sh" "$fixture_root/scripts/rustup-preflight.sh"
+mv "$fixture_root/scripts/rustup-preflight.sh" \
+    "$fixture_root/scripts/rustup-preflight-real.sh"
+cat >"$fixture_root/scripts/rustup-preflight.sh" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ -n "${FAKE_SETUP_SEQUENCE:-}" ]; then
+    printf '%s\n' preflight >>"$FAKE_SETUP_SEQUENCE"
+fi
+exec sh "$(dirname "$0")/rustup-preflight-real.sh"
+EOF
+chmod +x "$fixture_root/scripts/rustup-preflight.sh"
 
 sed \
     -e 's/nightly-2026-05-10/nightly-2099-01-01/' \
@@ -32,6 +44,9 @@ fi
 printf '%s\n' "$@" >"$FAKE_RUSTUP_LOG"
 printf '%s\n' "${RUSTUP_HOME-}" >"$FAKE_RUSTUP_RUSTUP_HOME"
 printf '%s\n' "${CARGO_HOME-}" >"$FAKE_RUSTUP_CARGO_HOME"
+if [ -n "${FAKE_SETUP_SEQUENCE:-}" ]; then
+    printf '%s\n' rustup-install >>"$FAKE_SETUP_SEQUENCE"
+fi
 
 if [ "${FAKE_RUSTUP_FAIL:-0}" -ne 0 ]; then
     exit "$FAKE_RUSTUP_FAIL"
@@ -77,10 +92,20 @@ run_setup() {
             FAKE_RUSTUP_LOG="$work_dir/rustup.argv" \
             FAKE_RUSTUP_RUSTUP_HOME="$work_dir/rustup-home.env" \
             FAKE_RUSTUP_CARGO_HOME="$work_dir/cargo-home.env" \
+            FAKE_SETUP_SEQUENCE="$work_dir/setup.sequence" \
             sh scripts/rustup-setup.sh
     ) >"$output_file" 2>&1
     status=$?
     set -e
+}
+
+seed_complete_layout() {
+    rustup_home=$1
+    toolchain_dir="$rustup_home/toolchains/nightly-2099-01-01-fixture"
+    mkdir -p \
+        "$toolchain_dir/lib/rustlib/fixture-rv64/lib" \
+        "$toolchain_dir/lib/rustlib/fixture-la64/lib"
+    printf '%s\n' fixture-src fixture-llvm >"$toolchain_dir/lib/rustlib/components"
 }
 
 echo "SCENARIO missing RUSTUP_HOME"
@@ -103,6 +128,27 @@ if [ "$status" -ne 0 ] && [ ! -e "$work_dir/rustup.argv" ]; then
 else
     echo "FAIL: missing RUSTUP_HOME (expected failure without fake rustup invocation)"
     cat "$work_dir/missing-home.out" >&2
+    overall=1
+fi
+
+echo "SCENARIO complete layout preflight fast path"
+rm -f "$work_dir/rustup.argv"
+rustup_home=$work_dir/complete-rustup
+cargo_home=$work_dir/complete-cargo
+mkdir -p "$rustup_home" "$cargo_home"
+seed_complete_layout "$rustup_home"
+: >"$work_dir/setup.sequence"
+export RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home"
+snapshot_inputs
+run_setup "$work_dir/complete.out"
+check_unchanged "complete layout preflight fast path"
+if [ "$status" -eq 0 ] && [ ! -e "$work_dir/rustup.argv" ] \
+    && [ "$(cat "$work_dir/setup.sequence")" = preflight ] \
+    && [ ! -s "$work_dir/complete.out" ]; then
+    echo "PASS: complete layout preflight fast path"
+else
+    echo "FAIL: complete layout preflight fast path (expected no rustup invocation)"
+    cat "$work_dir/complete.out" >&2
     overall=1
 fi
 
@@ -171,16 +217,38 @@ echo "SCENARIO setup-to-preflight integration"
 rustup_home=$work_dir/integration-rustup
 cargo_home=$work_dir/integration-cargo
 mkdir -p "$rustup_home" "$cargo_home"
+: >"$work_dir/setup.sequence"
 export RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home"
 snapshot_inputs
 run_setup "$work_dir/integration.out"
 check_unchanged "setup-to-preflight integration"
-if [ "$status" -eq 0 ] && grep -Fqx \
-    "Rust toolchain preflight passed: nightly-2099-01-01" "$work_dir/integration.out"; then
-    echo "PASS: setup-to-preflight integration"
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.sequence")" = "preflight
+rustup-install
+preflight" ] \
+    && grep -Fqx "Rust toolchain preflight passed: nightly-2099-01-01" "$work_dir/integration.out"; then
+    echo "PASS: incomplete layout installs before preflight"
 else
-    echo "FAIL: setup-to-preflight integration (expected setup-created layout to pass preflight)"
+    echo "FAIL: incomplete layout installs before preflight (expected ordered setup-created layout)"
     cat "$work_dir/integration.out" >&2
+    overall=1
+fi
+
+echo "SCENARIO install then immediate repeat fast path"
+snapshot_inputs
+run_setup "$work_dir/integration-repeat.out"
+check_unchanged "install then immediate repeat fast path"
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.sequence")" = "preflight
+rustup-install
+preflight
+preflight" ] \
+    && cmp -s "$expected_args" "$work_dir/rustup.argv" \
+    && [ ! -s "$work_dir/integration-repeat.out" ]; then
+    echo "PASS: install then immediate repeat fast path"
+else
+    echo "FAIL: install then immediate repeat fast path (expected exactly one install, then preflight-only repeat)"
+    cat "$work_dir/integration-repeat.out" >&2
     overall=1
 fi
 

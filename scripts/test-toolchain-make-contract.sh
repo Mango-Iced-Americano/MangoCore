@@ -7,7 +7,14 @@ case "$repo_root" in
     *) repo_root=$(CDPATH= cd -- "$repo_root" && pwd) ;;
 esac
 
-makefiles='Makefile os/Makefile os/make/rv64.mk os/make/la64.mk user/Makefile'
+required_makefiles='Makefile os/Makefile os/make/rv64.mk os/make/la64.mk user/Makefile'
+makefiles=$(find "$repo_root" \
+    \( -path "$repo_root/.git" -o -path "$repo_root/dependency" \) -prune -o \
+    -type f \( -name Makefile -o -name GNUmakefile -o -name '*.mk' \) -print \
+    | LC_ALL=C sort \
+    | while IFS= read -r makefile; do
+        printf '%s\n' "${makefile#"$repo_root"/}"
+    done)
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/toolchain-make-contract.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
 overall=0
@@ -68,32 +75,32 @@ require_dependency() {
 
 require_root_all_recipe_order() {
     if awk '
-        /^all:[[:space:]]*toolchain-preflight[[:space:]]*$/ {
+        /^all:[[:space:]]*toolchain-setup[[:space:]]*$/ {
             header = 1
             next
         }
         header && /^\t/ {
             if (stage == 0 && $0 ~ /\$\(MAKE\)[[:space:]]+prepare-cargo-config/) {
                 stage = 1
-            } else if (stage == 1 && $0 ~ /\$\(MAKE\)[[:space:]]+clean/) {
+            } else if ($0 ~ /\$\(MAKE\)[[:space:]]+clean/) {
+                clean = 1
+            } else if (stage == 1 && $0 ~ /\$\(MAKE\)[[:space:]]+-C[[:space:]]+os[[:space:]]+all/) {
                 stage = 2
-            } else if (stage == 2 && $0 ~ /\$\(MAKE\)[[:space:]]+-C[[:space:]]+os[[:space:]]+all/) {
-                stage = 3
             }
             next
         }
         header && /^[^[:space:]#]/ {
-            exit(stage == 3 ? 0 : 1)
+            exit(stage == 2 && !clean ? 0 : 1)
         }
-        END { exit(header && stage == 3 ? 0 : 1) }
+        END { exit(header && stage == 2 && !clean ? 0 : 1) }
     ' "$repo_root/Makefile"; then
-        pass 'root all orders preflight, prepare-cargo-config, clean, then os all'
+        pass 'root all orders setup, prepare-cargo-config, then os all without clean'
     else
-        fail 'root all must order preflight, prepare-cargo-config, clean, then os all'
+        fail 'root all must order setup, prepare-cargo-config, then os all without a clean edge'
     fi
 }
 
-for makefile in $makefiles; do
+for makefile in $required_makefiles; do
     if [ -r "$repo_root/$makefile" ]; then
         pass "read $makefile"
     else
@@ -101,16 +108,26 @@ for makefile in $makefiles; do
     fi
 done
 
-for makefile in $makefiles; do
-    require_match "$makefile" \
+common_toolchain=$repo_root/os/make/common/toolchain.mk
+if [ -r "$common_toolchain" ]; then
+    require_match os/make/common/toolchain.mk \
         '^[[:space:]]*export[[:space:]]+RUSTUP_AUTO_INSTALL[[:space:]]*:=[[:space:]]*0[[:space:]]*$' \
-        "$makefile exports RUSTUP_AUTO_INSTALL=0"
-    require_match "$makefile" \
+        'common/toolchain.mk declares RUSTUP_AUTO_INSTALL=0 authoritatively'
+    require_match os/make/common/toolchain.mk \
         '^[[:space:]]*unexport[[:space:]]+RUSTUP_TOOLCHAIN[[:space:]]*$' \
-        "$makefile unexports RUSTUP_TOOLCHAIN"
-done
+        'common/toolchain.mk unexports RUSTUP_TOOLCHAIN authoritatively'
+else
+    for makefile in $required_makefiles; do
+        require_match "$makefile" \
+            '^[[:space:]]*export[[:space:]]+RUSTUP_AUTO_INSTALL[[:space:]]*:=[[:space:]]*0[[:space:]]*$' \
+            "$makefile exports RUSTUP_AUTO_INSTALL=0"
+        require_match "$makefile" \
+            '^[[:space:]]*unexport[[:space:]]+RUSTUP_TOOLCHAIN[[:space:]]*$' \
+            "$makefile unexports RUSTUP_TOOLCHAIN"
+    done
+fi
 
-require_absent 'rustup[[:space:]]+(default|override[[:space:]]+set|target[[:space:]]+add|component[[:space:]]+add)' \
+require_absent 'rustup[[:space:]]+(default|override[[:space:]]+set|toolchain[[:space:]]+install|target[[:space:]]+add|component[[:space:]]+add)' \
     'no first-party Makefile provisions or mutates Rustup'
 require_absent '^[[:space:]]*[-@]*-[[:space:]]*\(?rustup[[:space:]]' \
     'no first-party Makefile ignores Rustup failures with a Make error prefix'
@@ -119,20 +136,41 @@ require_absent 'rustup[[:space:]].*\|\|[[:space:]]*(true|:)' \
 
 setup_calls=0
 for makefile in $makefiles; do
-    count=$(grep -Ec '^[[:space:]]*@?sh[[:space:]]+[^[:space:]]*rustup-setup\.sh[[:space:]]*$' \
+    count=$(grep -Ec '^[[:space:]]*[^#].*rustup-setup\.sh' \
         "$repo_root/$makefile" || true)
     setup_calls=$((setup_calls + count))
 done
 if [ "$setup_calls" -eq 1 ] \
-    && grep -Eq '^[[:space:]]*@?sh[[:space:]]+scripts/rustup-setup\.sh[[:space:]]*$' "$repo_root/Makefile" \
-    && ! grep -Eq 'rustup-setup\.sh' "$repo_root/os/Makefile" "$repo_root/os/make/rv64.mk" \
-        "$repo_root/os/make/la64.mk" "$repo_root/user/Makefile"; then
-    pass 'root Makefile is the only setup-script caller'
+    && awk '
+        /^[^[:space:]#][^:]*:/ {
+            in_setup_target = $0 ~ /^toolchain-setup:[[:space:]]*$/
+            next
+        }
+        in_setup_target && /^\t/ \
+            && $0 ~ /^[[:space:]]*@?sh[[:space:]]+scripts\/rustup-setup\.sh[[:space:]]*$/ {
+            setup_recipe_calls++
+        }
+        END { exit(setup_recipe_calls == 1 ? 0 : 1) }
+    ' "$repo_root/Makefile"; then
+    pass 'root toolchain-setup is the only setup-script caller'
 else
-    fail 'root Makefile must be the only setup-script caller'
+    fail 'root toolchain-setup must be the only setup-script caller'
 fi
 
-require_dependency Makefile all toolchain-preflight
+require_match Makefile \
+    '^[[:space:]]*RUSTUP_HOME[[:space:]]*\?=[[:space:]]*\$\(HOME\)/\.rustup[[:space:]]*$' \
+    'root Makefile defaults RUSTUP_HOME from HOME without replacing overrides'
+require_match Makefile \
+    '^[[:space:]]*CARGO_HOME[[:space:]]*\?=[[:space:]]*\$\(HOME\)/\.cargo[[:space:]]*$' \
+    'root Makefile defaults CARGO_HOME from HOME without replacing overrides'
+require_match Makefile \
+    '^[[:space:]]*export[[:space:]].*RUSTUP_HOME' \
+    'root Makefile exports RUSTUP_HOME'
+require_match Makefile \
+    '^[[:space:]]*export[[:space:]].*CARGO_HOME' \
+    'root Makefile exports CARGO_HOME'
+
+require_dependency Makefile all toolchain-setup
 require_dependency Makefile env toolchain-preflight
 require_dependency Makefile kernel toolchain-preflight
 require_dependency Makefile run toolchain-preflight
@@ -184,31 +222,43 @@ require_dependency os/make/la64.mk regression-run toolchain-preflight
 require_dependency user/Makefile env toolchain-preflight
 require_dependency user/Makefile rust-user env
 
-has_setup_dependency=0
+has_unapproved_setup_dependency=0
 for makefile in $makefiles; do
-    if ! awk '
-    /^[^[:space:]#][^:]*:/ && $0 !~ /^(\.PHONY|toolchain-setup):/ && index($0, "toolchain-setup") {
-        violates = 1
+    if ! awk -v root_makefile="$repo_root/Makefile" '
+    /^[^[:space:]#][^:]*:/ && $0 !~ /^[[:space:]]*(\.PHONY|toolchain-setup)[[:space:]]*:/ \
+        && index($0, "toolchain-setup") {
+        split($0, parts, ":")
+        count = split(parts[1], targets, /[[:space:]]+/)
+        for (item = 1; item <= count; item++) {
+            if (targets[item] != "all" || FILENAME != root_makefile) {
+                violates = 1
+            }
+        }
     }
     END { exit(violates ? 1 : 0) }
 ' "$repo_root/$makefile"; then
-        has_setup_dependency=1
+        has_unapproved_setup_dependency=1
     fi
 done
-if [ "$has_setup_dependency" -eq 0 ]; then
-    pass 'normal targets depend on preflight rather than setup'
+if [ "$has_unapproved_setup_dependency" -eq 0 ]; then
+    pass 'only root all may depend on toolchain-setup'
 else
-    fail 'normal targets must not depend on toolchain-setup'
+    fail 'toolchain-setup must not be a dependency outside root all'
 fi
 
 fixture_root=$work_dir/fixture
 fixture_rustup_home=$work_dir/rustup-home
+fixture_home=$work_dir/home
 fixture_path=$work_dir/bin:/usr/bin:/bin
 mkdir -p "$fixture_root/os/make" "$fixture_root/user/src" "$fixture_root/scripts" \
-    "$work_dir/bin" "$fixture_rustup_home"
+    "$work_dir/bin" "$fixture_rustup_home" "$fixture_home"
 for makefile in $makefiles; do
-    mkdir -p "$fixture_root/$(dirname "$makefile")"
-    cp "$repo_root/$makefile" "$fixture_root/$makefile"
+    if [ -r "$repo_root/$makefile" ]; then
+        mkdir -p "$fixture_root/$(dirname "$makefile")"
+        cp "$repo_root/$makefile" "$fixture_root/$makefile"
+    else
+        fail "first-party Make/module disappeared before fixture copy: $makefile"
+    fi
 done
 sed -i \
     -e "s|rustc -vV|PATH=$fixture_path rustc -vV|" \
@@ -243,13 +293,56 @@ if [ "${RUSTUP_TOOLCHAIN+x}" = x ]; then
     echo "fake preflight: caller RUSTUP_TOOLCHAIN leaked into recipe" >&2
     exit 91
 fi
-if [ "${RUSTUP_HOME-}" != "${FAKE_RUSTUP_HOME:?}" ]; then
-    echo "fake preflight: RUSTUP_HOME was not the harness-owned directory" >&2
+expected_rustup_home=${FAKE_EXPECTED_RUSTUP_HOME:-${FAKE_RUSTUP_HOME:?}}
+if [ "${RUSTUP_HOME-}" != "$expected_rustup_home" ]; then
+    echo "fake preflight: RUSTUP_HOME did not match the expected home" >&2
     exit 92
+fi
+if [ "${FAKE_PREFLIGHT_REQUIRES_SETUP:-0}" = 1 ] \
+    && [ ! -s "${FAKE_SETUP_LOG:?}" ]; then
+    echo "fake preflight: root all reached preflight without setup" >&2
+    exit 93
 fi
 printf '%s\n' "${FAKE_PREFLIGHT_LABEL:?}" >>"${FAKE_PREFLIGHT_LOG:?}"
 EOF
 chmod +x "$fixture_root/scripts/rustup-preflight.sh"
+
+cat >"$fixture_root/scripts/rustup-setup.sh" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ -z "${RUSTUP_HOME-}" ] || [ -z "${CARGO_HOME-}" ]; then
+    echo "fake setup: root all did not export nonempty Rustup and Cargo homes" >&2
+    exit 94
+fi
+printf 'setup\t%s\t%s\n' "$RUSTUP_HOME" "$CARGO_HOME" >>"${FAKE_SETUP_LOG:?}"
+printf '%s\n' setup >>"${FAKE_ORDER_LOG:?}"
+if [ "${FAKE_SETUP_FAIL:-0}" -ne 0 ]; then
+    exit "$FAKE_SETUP_FAIL"
+fi
+EOF
+chmod +x "$fixture_root/scripts/rustup-setup.sh"
+
+cat >"$work_dir/bin/make" <<'EOF'
+#!/bin/sh
+set -eu
+
+case " $* " in
+    *' prepare-cargo-config ')
+        printf '%s\n' prepare-cargo-config >>"${FAKE_SUBMAKE_LOG:?}"
+        printf '%s\n' prepare-cargo-config >>"${FAKE_ORDER_LOG:?}"
+        ;;
+    *' -C os all ')
+        printf '%s\n' os-all >>"${FAKE_SUBMAKE_LOG:?}"
+        printf '%s\n' os-all >>"${FAKE_ORDER_LOG:?}"
+        ;;
+    *)
+        echo "fake make: unexpected recursive invocation: $*" >&2
+        exit 95
+        ;;
+esac
+EOF
+chmod +x "$work_dir/bin/make"
 
 cat >"$work_dir/bin/rustup" <<'EOF'
 #!/bin/sh
@@ -305,6 +398,9 @@ chmod +x "$work_dir/bin/rustc"
 
 : >"$work_dir/preflight.log"
 : >"$work_dir/rustup.log"
+: >"$work_dir/setup.log"
+: >"$work_dir/submake.log"
+: >"$work_dir/order.log"
 : >"$fixture_rustup_home/rustc.log"
 
 run_env() {
@@ -335,12 +431,12 @@ run_env() {
     fi
 }
 
-run_env root "$fixture_root" make env
-run_env os "$fixture_root/os" make env
-run_env rv64 "$fixture_root/os" make -f make/toolchain-contract.mk -f make/rv64.mk env
-run_env rv64-probe "$fixture_root/os" make -f make/toolchain-contract.mk -f make/rv64.mk toolchain-contract-rustc-probe
-run_env la64 "$fixture_root/os" make -f make/la64.mk env
-run_env user "$fixture_root/user" make env
+run_env root "$fixture_root" /usr/bin/make env
+run_env os "$fixture_root/os" /usr/bin/make env
+run_env rv64 "$fixture_root/os" /usr/bin/make -f make/toolchain-contract.mk -f make/rv64.mk env
+run_env rv64-probe "$fixture_root/os" /usr/bin/make -f make/toolchain-contract.mk -f make/rv64.mk toolchain-contract-rustc-probe
+run_env la64 "$fixture_root/os" /usr/bin/make -f make/la64.mk env
+run_env user "$fixture_root/user" /usr/bin/make env
 
 expected_labels='root
 os
@@ -363,6 +459,12 @@ else
     cat "$work_dir/rustup.log" >&2
 fi
 
+if grep -Fqx os "$work_dir/preflight.log" && [ ! -s "$work_dir/setup.log" ]; then
+    pass 'direct make -C os env remains preflight-only and never provisions'
+else
+    fail 'direct make -C os env must not invoke toolchain-setup'
+fi
+
 if awk -F '\t' '
     $1 == "-vV" && $2 == "0" && $3 == "unset" { host = 1 }
     $1 == "--print sysroot" && $2 == "0" && $3 == "unset" { sysroot = 1 }
@@ -372,6 +474,220 @@ if awk -F '\t' '
 else
     fail 'RV64 parse-time probes must use the constrained fake rustc'
     cat "$fixture_rustup_home/rustc.log" >&2
+fi
+
+run_root_all() {
+    label=$1
+    home_mode=$2
+    rustup_home_mode=$3
+    cargo_home_mode=$4
+    setup_fail=$5
+    parallel_mode=$6
+    : >"$work_dir/setup.log"
+    : >"$work_dir/submake.log"
+    : >"$work_dir/order.log"
+    set +e
+    (
+        cd "$fixture_root"
+        unset HOME RUSTUP_HOME CARGO_HOME
+        case "$home_mode" in
+            present)
+                HOME=$fixture_home
+                export HOME
+                ;;
+            missing) ;;
+            empty)
+                HOME=
+                export HOME
+                ;;
+            *)
+                echo "invalid HOME fixture mode: $home_mode" >&2
+                exit 102
+                ;;
+        esac
+        case "$rustup_home_mode" in
+            default)
+                expected_rustup_home="$fixture_home/.rustup"
+                ;;
+            override)
+                expected_rustup_home="$work_dir/$label-rustup"
+                RUSTUP_HOME=$expected_rustup_home
+                export RUSTUP_HOME
+                ;;
+            *)
+                echo "invalid RUSTUP_HOME fixture mode: $rustup_home_mode" >&2
+                exit 103
+                ;;
+        esac
+        case "$cargo_home_mode" in
+            default)
+                expected_cargo_home="$fixture_home/.cargo"
+                ;;
+            override)
+                expected_cargo_home="$work_dir/$label-cargo"
+                CARGO_HOME=$expected_cargo_home
+                export CARGO_HOME
+                ;;
+            *)
+                echo "invalid CARGO_HOME fixture mode: $cargo_home_mode" >&2
+                exit 104
+                ;;
+        esac
+        PATH=$fixture_path
+        FAKE_SETUP_LOG="$work_dir/setup.log"
+        FAKE_ORDER_LOG="$work_dir/order.log"
+        FAKE_SUBMAKE_LOG="$work_dir/submake.log"
+        FAKE_PREFLIGHT_LABEL=$label
+        FAKE_PREFLIGHT_LOG="$work_dir/preflight.log"
+        FAKE_PREFLIGHT_REQUIRES_SETUP=1
+        FAKE_EXPECTED_RUSTUP_HOME=$expected_rustup_home
+        FAKE_SETUP_FAIL=$setup_fail
+        MAKE=make
+        export PATH FAKE_SETUP_LOG FAKE_ORDER_LOG FAKE_SUBMAKE_LOG \
+            FAKE_PREFLIGHT_LABEL FAKE_PREFLIGHT_LOG FAKE_PREFLIGHT_REQUIRES_SETUP \
+            FAKE_EXPECTED_RUSTUP_HOME FAKE_SETUP_FAIL MAKE
+        case "$parallel_mode" in
+            serial) /usr/bin/make all ;;
+            parallel) /usr/bin/make -j 8 all ;;
+            *)
+                echo "invalid make fixture mode: $parallel_mode" >&2
+                exit 105
+                ;;
+        esac
+    ) >"$work_dir/$label.out" 2>&1
+    status=$?
+    set -e
+}
+
+expected_root_submakes='prepare-cargo-config
+os-all'
+expected_root_order='setup
+prepare-cargo-config
+os-all'
+expected_default_setup=$(printf 'setup\t%s\t%s' "$fixture_home/.rustup" "$fixture_home/.cargo")
+expected_override_setup=$(printf 'setup\t%s\t%s' \
+    "$work_dir/root-all-overrides-rustup" "$work_dir/root-all-overrides-cargo")
+
+run_root_all root-all-defaults present default default 0 serial
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$expected_default_setup" ] \
+    && [ "$(cat "$work_dir/submake.log")" = "$expected_root_submakes" ]; then
+    pass 'root all derives and exports homes, then serializes setup before downstream makes'
+else
+    fail 'root all must provision with HOME-derived homes before prepare-cargo-config and os all'
+    cat "$work_dir/root-all-defaults.out" >&2
+fi
+
+run_root_all root-all-overrides present override override 0 serial
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$expected_override_setup" ] \
+    && [ "$(cat "$work_dir/submake.log")" = "$expected_root_submakes" ]; then
+    pass 'root all preserves explicit Rustup and Cargo home overrides'
+else
+    fail 'root all must propagate explicit Rustup and Cargo home overrides to setup'
+    cat "$work_dir/root-all-overrides.out" >&2
+fi
+
+run_root_all root-all-missing-home-default missing default default 0 serial
+if [ "$status" -ne 0 ] && [ ! -s "$work_dir/setup.log" ] && [ ! -s "$work_dir/submake.log" ] \
+    && grep -Fq 'HOME must be set and non-empty when RUSTUP_HOME is not supplied' \
+        "$work_dir/root-all-missing-home-default.out"; then
+    pass 'missing HOME rejects default Rustup and Cargo homes before provisioning'
+else
+    fail 'missing HOME with default homes must fail before toolchain setup'
+    cat "$work_dir/root-all-missing-home-default.out" >&2
+fi
+
+run_root_all root-all-empty-home-default empty default default 0 serial
+if [ "$status" -ne 0 ] && [ ! -s "$work_dir/setup.log" ] && [ ! -s "$work_dir/submake.log" ] \
+    && grep -Fq 'HOME must be set and non-empty when RUSTUP_HOME is not supplied' \
+        "$work_dir/root-all-empty-home-default.out"; then
+    pass 'empty HOME rejects default Rustup and Cargo homes before provisioning'
+else
+    fail 'empty HOME with default homes must fail before toolchain setup'
+    cat "$work_dir/root-all-empty-home-default.out" >&2
+fi
+
+run_root_all root-all-missing-home-rustup-only missing override default 0 serial
+if [ "$status" -ne 0 ] && [ ! -s "$work_dir/setup.log" ] && [ ! -s "$work_dir/submake.log" ] \
+    && grep -Fq 'HOME must be set and non-empty when CARGO_HOME is not supplied' \
+        "$work_dir/root-all-missing-home-rustup-only.out"; then
+    pass 'missing HOME rejects a partial Rustup-only override before provisioning'
+else
+    fail 'missing HOME with only RUSTUP_HOME overridden must fail before toolchain setup'
+    cat "$work_dir/root-all-missing-home-rustup-only.out" >&2
+fi
+
+run_root_all root-all-empty-home-cargo-only empty default override 0 serial
+if [ "$status" -ne 0 ] && [ ! -s "$work_dir/setup.log" ] && [ ! -s "$work_dir/submake.log" ] \
+    && grep -Fq 'HOME must be set and non-empty when RUSTUP_HOME is not supplied' \
+        "$work_dir/root-all-empty-home-cargo-only.out"; then
+    pass 'empty HOME rejects a partial Cargo-only override before provisioning'
+else
+    fail 'empty HOME with only CARGO_HOME overridden must fail before toolchain setup'
+    cat "$work_dir/root-all-empty-home-cargo-only.out" >&2
+fi
+
+run_root_all root-all-missing-home-overrides missing override override 0 serial
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$(printf 'setup\t%s\t%s' \
+        "$work_dir/root-all-missing-home-overrides-rustup" \
+        "$work_dir/root-all-missing-home-overrides-cargo")" ] \
+    && [ "$(cat "$work_dir/submake.log")" = "$expected_root_submakes" ]; then
+    pass 'missing HOME accepts complete explicit Rustup and Cargo home overrides'
+else
+    fail 'missing HOME with complete overrides must provision using those overrides'
+    cat "$work_dir/root-all-missing-home-overrides.out" >&2
+fi
+
+run_root_all root-all-empty-home-overrides empty override override 0 serial
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$(printf 'setup\t%s\t%s' \
+        "$work_dir/root-all-empty-home-overrides-rustup" \
+        "$work_dir/root-all-empty-home-overrides-cargo")" ] \
+    && [ "$(cat "$work_dir/submake.log")" = "$expected_root_submakes" ]; then
+    pass 'empty HOME accepts complete explicit Rustup and Cargo home overrides'
+else
+    fail 'empty HOME with complete overrides must provision using those overrides'
+    cat "$work_dir/root-all-empty-home-overrides.out" >&2
+fi
+
+run_root_all root-all-parallel present default default 0 parallel
+if [ "$status" -eq 0 ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$expected_default_setup" ] \
+    && [ "$(cat "$work_dir/submake.log")" = "$expected_root_submakes" ] \
+    && [ "$(cat "$work_dir/order.log")" = "$expected_root_order" ]; then
+    pass 'make -j all serializes setup before prepare-cargo-config and os all'
+else
+    fail 'make -j all must serialize setup before downstream makes'
+    cat "$work_dir/root-all-parallel.out" >&2
+fi
+
+run_root_all root-all-repeat-one present default default 0 serial
+repeat_one_status=$status
+repeat_one_setup=$(cat "$work_dir/setup.log")
+repeat_one_submakes=$(cat "$work_dir/submake.log")
+run_root_all root-all-repeat-two present default default 0 serial
+if [ "$repeat_one_status" -eq 0 ] && [ "$status" -eq 0 ] \
+    && [ "$repeat_one_setup" = "$expected_default_setup" ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$expected_default_setup" ] \
+    && [ "$repeat_one_submakes" = "$expected_root_submakes" ] \
+    && [ "$(cat "$work_dir/submake.log")" = "$expected_root_submakes" ]; then
+    pass 'repeated root all invocations retain the automatic setup contract'
+else
+    fail 'repeated root all invocations must each run setup before downstream makes'
+    cat "$work_dir/root-all-repeat-one.out" >&2
+    cat "$work_dir/root-all-repeat-two.out" >&2
+fi
+
+run_root_all root-all-setup-failure present default default 73 serial
+if [ "$status" -ne 0 ] \
+    && [ "$(cat "$work_dir/setup.log")" = "$expected_default_setup" ] \
+    && [ ! -s "$work_dir/submake.log" ]; then
+    pass 'root all short-circuits after toolchain-setup failure'
+else
+    fail 'root all must stop before prepare-cargo-config and os all when setup fails'
+    cat "$work_dir/root-all-setup-failure.out" >&2
 fi
 
 exit "$overall"

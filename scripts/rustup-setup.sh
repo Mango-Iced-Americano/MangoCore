@@ -9,6 +9,10 @@ if [ -z "${RUSTUP_HOME:-}" ]; then
     exit 1
 fi
 
+if sh "$script_dir/rustup-preflight.sh" >/dev/null 2>&1; then
+    exit 0
+fi
+
 if [ ! -r "$manifest" ]; then
     echo "$manifest: missing or unreadable rust-toolchain.toml; setup is explicit" >&2
     exit 1

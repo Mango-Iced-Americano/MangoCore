@@ -6,21 +6,36 @@ DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
 export RUSTUP_AUTO_INSTALL := 0
 unexport RUSTUP_TOOLCHAIN
 
+ifeq ($(origin RUSTUP_HOME),undefined)
+ifeq ($(strip $(HOME)),)
+$(error HOME must be set and non-empty when RUSTUP_HOME is not supplied)
+endif
+endif
+ifeq ($(origin CARGO_HOME),undefined)
+ifeq ($(strip $(HOME)),)
+$(error HOME must be set and non-empty when CARGO_HOME is not supplied)
+endif
+endif
+RUSTUP_HOME ?= $(HOME)/.rustup
+CARGO_HOME ?= $(HOME)/.cargo
+ifeq ($(strip $(RUSTUP_HOME)),)
+$(error RUSTUP_HOME must be set and non-empty)
+endif
+ifeq ($(strip $(CARGO_HOME)),)
+$(error CARGO_HOME must be set and non-empty)
+endif
+export RUSTUP_HOME CARGO_HOME
+
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
 QEMU_DIR := util/qemu-2k1000/tmp
 QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
-all: toolchain-preflight
+all: toolchain-setup
 	$(MAKE) prepare-cargo-config
-	$(MAKE) clean
 	$(MAKE) -C os all
 
 prepare-cargo-config:
-	@sh scripts/restore-cargo-vendor-checksums.sh restore .
-	mkdir -p os/.cargo user/.cargo
-	test -f os/.cargo/config.toml || cp -f cargo-config/os/config.toml os/.cargo/config.toml
-	test -f user/.cargo/config.toml || cp -f cargo-config/user/config.toml user/.cargo/config.toml
 
 toolchain-setup:
 	@sh scripts/rustup-setup.sh
