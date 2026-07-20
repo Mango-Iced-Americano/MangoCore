@@ -3,7 +3,7 @@ title: "内核模块地图 (Kernel Module Map)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-20
 tags: [architecture, modules, kernel]
 ---
 
@@ -37,7 +37,7 @@ MangoCore 的组织方式接近“硬件后端集中、内核服务分层、sysc
 | `drivers` | `os/src/drivers/mod.rs` | 设备驱动模块入口；当前启动主线显式调用 `drivers::init_net_device()` |
 | `fs` | `os/src/fs/mod.rs` | VFS、MountFS、具体文件系统、dev/proc/tmp 挂载、预加载 payload、块设备挂载 |
 | `hal` | `os/src/hal/mod.rs` | 架构后端导出；页表、trap、timer、TLB、上下文切换、console、shutdown |
-| `lang_items` | `os/src/lang_items.rs` | 裸机 Rust 所需 lang items；实际文件由架构变体维护 |
+| `lang_items` | `os/src/lang_items.rs.rv` / `os/src/lang_items.rs.la` | 裸机 Rust 所需 lang items；`main.rs` 以 `target_arch` 和 `#[path]` 在编译期选择变体 |
 | `math` | `os/src/math/` | 内核数学辅助实现 |
 | `mm` | `os/src/mm/mod.rs` | 堆、物理页、内核地址空间、用户地址空间、VMA、mmap、缺页、uaccess |
 | `net` | `os/src/net/mod.rs` | Socket trait、TCP/UDP/RAW/Unix/Netlink/Packet、smoltcp 接入、网络 syscall |

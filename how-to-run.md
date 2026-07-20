@@ -26,6 +26,8 @@ make docker
 
 第一次运行会拉取镜像，请耐心等待。
 
+根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在需要时自动执行 setup 和 preflight。全新容器首次运行可能使用网络。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可运行 `make toolchain-setup` 准备固定的 `nightly-2026-05-10`。LA64 使用的 target 仍为 `loongarch64-unknown-linux-gnu`。
+
 ## 3. 线上测评/正式提交
 
 评测机会在项目根目录执行：
@@ -36,10 +38,10 @@ make all
 
 当前根目录 `Makefile` 的 `all` 目标会：
 
-1. 恢复被评测 clone 过滤掉的隐藏 Cargo 配置和 vendor checksum。
-2. 清理旧构建产物。
-3. 编译 rv64 和 la64。
-4. 在项目根目录生成 ELF 格式的 `kernel-rv` 和 `kernel-la`。
+ 1. 派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并按需执行工具链 setup 和 preflight。
+ 2. 串行执行 `make -C os rv64_all`，构建 RV64 内核、用户态和镜像。
+ 3. 串行执行 `make -C os la64_all`，构建 LA64 内核、用户态和镜像。
+ 4. 在项目根目录生成 ELF 格式的 `kernel-rv` 和 `kernel-la`。
 
 提交前建议在 Docker 中手动验证一次：
 
@@ -201,7 +203,7 @@ TEST_ARCH=both TEST_GROUPS=basic,busybox GROUP_TIMEOUT_SEC=300 bash run_test.sh
 
 ## 8. 双 Docker 并行跑双架构测试
 
-`TEST_ARCH=both bash run_test.sh` 仍然是在同一个工作目录里串行跑。由于构建和运行目标会切换 `rustup override`，并复制架构相关的 `lang_items.rs`，不要在同一个工作目录里直接后台并发跑 `rv64-run` 和 `la64-run`。
+`TEST_ARCH=both bash run_test.sh` 仍然是在同一个工作目录里串行跑。由于共享工作目录中的构建路径会写入架构生成状态，不要在同一个工作目录里直接后台并发跑 `rv64-run` 和 `la64-run`。`lang_items.rs` 变体由编译期 `target_arch` 选择；正常构建和运行目标不会切换 `rustup override`。
 
 需要并行跑双架构时，在宿主机项目根目录执行：
 
@@ -237,7 +239,7 @@ PARALLEL_BUILD=1 GROUP_TIMEOUT_SEC=1800 make docker-test-parallel
 
 说明：
 
-- 默认 Docker 镜像与 `docker-compose.yml` 保持一致：`zhouzhouyi/os-contest:20260104`。可用 `DOCKER_IMAGE=...` 覆盖。
+- 默认 Docker 镜像与 `docker-compose.yml` 保持一致：`zhouzhouyi/os-contest:20260510`。可用 `DOCKER_IMAGE=...` 覆盖。
 - `.parallel-test/` 会保留以便复用；需要清理时直接删除该目录即可。
 - 默认 `PARALLEL_IMAGE_MODE=bind`，不会复制 4G sdcard 镜像；测试会像普通 `run_test.sh` 一样直接修改根目录镜像里的 `/os_test.conf`。
 - 如需完全隔离根目录镜像，可设置 `PARALLEL_IMAGE_MODE=copy`，脚本会给两个工作目录各复制对应架构的镜像和 kernel。

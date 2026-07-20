@@ -20,6 +20,8 @@ MangoCore 是一个 **#![no_std] Rust 内核**，支持 **riscv64** 和 **loonga
 make docker          # 启动容器并进入 bash
 ```
 
+根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在需要时自动执行 setup 和 preflight。全新容器首次运行可能使用网络。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可运行 `make toolchain-setup`，固定工具链仍为 `nightly-2026-05-10`。
+
 ### 构建
 
 ```bash
@@ -35,9 +37,9 @@ cd os && make la64-only
 make all
 ```
 
-**注意：** rv64 和 la64 使用**不同的 nightly 工具链**（`nightly-2025-01-18` vs `nightly-2024-05-01`）。Makefile 会自动切换 `rustup override`。**不要并行编译两个架构**——会竞态冲突。
+**注意：** rv64 和 la64 共用根目录固定的 `nightly-2026-05-10`，LA64 target 仍为 `loongarch64-unknown-linux-gnu`。**不要并行编译两个架构**，因为两条路径共享架构生成状态，必须串行执行。根目录 `make all` 仅在需要时 provisioning，直接构建路径只做 preflight。
 
-**注意：** 永远不要直接编辑 `os/src/lang_items.rs` 或 `user/src/lang_items.rs`——编辑对应的 `.rv` / `.la` 变体文件。Makefile 在编译前会自动复制正确的变体。
+**注意：** 永远不要直接编辑 `os/src/lang_items.rs` 或 `user/src/lang_items.rs`——编辑对应的 `.rv` / `.la` 变体文件。编译期由 `target_arch` 直接选择正确变体。
 
 ### 运行测试
 
@@ -193,7 +195,7 @@ PageCache（状态机：Loading→UpToDate↔Dirty→Writeback→UpToDate）
 - **不要在持有 `task.inner` 锁时调用 `has_actionable_signal()`**——内部会获取同一把锁，导致死锁。参考 `pselect`/`wait_io_core` 的模式。
 - **ext4 `get_pblock_idx` 对 hole 返回 `Err`**——sparse file 的 hole 是合法状态，读取应返回零填充数据，写入应分配新块。
 - **永远不要直接编辑 `lang_items.rs`**——编辑 `lang_items.rs.rv` / `lang_items.rs.la`。
-- **rv64 和 la64 编译必须分开运行**——它们会切换 `rustup override`。
+- **rv64 和 la64 编译必须分开运行**——两条路径共享架构生成状态，必须串行；正常编译不会切换 `rustup override`。
 
 ## 交流语言
 

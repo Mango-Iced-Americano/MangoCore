@@ -6,7 +6,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 语言 | Rust nightly（双工具链：`nightly-2025-01-18` / `nightly-2024-05-01`） |
+| 语言 | Rust `nightly-2026-05-10`（单一根目录工具链合同） |
 | 架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-linux-gnu` |
 | syscall | 约 218 个（新增时同步更新本节） |
 | 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
@@ -18,15 +18,16 @@
 ## 不可违反的规则
 
 1. **Docker 优先** — 所有编译/运行/调试在 Docker 容器内：`make docker`
-2. **不要并行编译双架构** — rv64 和 la64 使用不同 nightly 工具链，Makefile 会切换 `rustup override`，并行会竞态。必须分开命令行执行
-3. **永远不要直接编辑 `lang_items.rs`** — 编辑 `lang_items.rs.rv` / `lang_items.rs.la` 变体；`user/src/lang_items.rs` 同理
-4. **每次修改必须双架构编译验证** — `make rv64-kernel-build-only` + `make la64-kernel-build-only`
-5. **修改核心功能后必须 QEMU 测试** — 不要只靠编译通过
-6. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
-7. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
-8. **不要 workaround** — 从根因解决问题，不做临时绕过
-9. **Mango Workflow 门禁** — 涉及调试、代码修改（编辑/写入源文件、构建配置、测试配置）时，必须先在回复中执行 `skill(name="mango-workflow")` 加载项目知识库。修改完成后再次执行 skill 的 A→D 流程（更新 Work Log → 沉淀经验 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
-10. **回复中必须声明门禁状态** — 每次代码修改完成后，在回复末尾注明 `mango-workflow: loaded, references: <文件名或无>`。
+2. **工具链 provisioning** — 根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME`/`CARGO_HOME`，并在需要时自动执行 setup 和 preflight；全新容器首次运行可能使用网络。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可在容器内运行 `make toolchain-setup`
+3. **不要并行编译双架构** — rv64 和 la64 共用单一根目录 `nightly-2026-05-10`，并写入共享的架构生成状态；必须分开命令行串行执行
+4. **永远不要直接编辑 `lang_items.rs`** — 编译期按 `target_arch` 直接选择 `lang_items.rs.rv` / `lang_items.rs.la`；`user/src/lang_items.rs` 同理
+5. **每次修改必须双架构编译验证** — `make rv64-kernel-build-only` + `make la64-kernel-build-only`
+6. **修改核心功能后必须 QEMU 测试** — 不要只靠编译通过
+7. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
+8. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
+9. **不要 workaround** — 从根因解决问题，不做临时绕过
+10. **Mango Workflow 门禁** — 涉及调试、代码修改（编辑/写入源文件、构建配置、测试配置）时，必须先在回复中执行 `skill(name="mango-workflow")` 加载项目知识库。修改完成后再次执行 skill 的 A→D 流程（更新 Work Log → 沉淀经验 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
+11. **回复中必须声明门禁状态** — 每次代码修改完成后，在回复末尾注明 `mango-workflow: loaded, references: <文件名或无>`。
 
 ---
 
