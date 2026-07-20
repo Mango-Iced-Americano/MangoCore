@@ -24,13 +24,13 @@ pub mod runner;
 mod kt_block_device;
 #[path = "ext4.rs"]
 mod kt_ext4;
-#[path = "ext4_another.rs"]
+#[path = "ext4_another/mod.rs"]
 mod kt_ext4_another;
 #[path = "ext4_another_lifetime.rs"]
 mod kt_ext4_another_lifetime;
 #[path = "mm.rs"]
 mod kt_mm;
-#[path = "page_cache.rs"]
+#[path = "page_cache/mod.rs"]
 mod kt_page_cache;
 #[path = "sched.rs"]
 mod kt_sched;

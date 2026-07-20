@@ -1,10 +1,14 @@
 //! Generation-lifetime regressions for the feature-gated another_ext4 bridge.
 
 #[cfg(feature = "ext4_another_backend")]
-use alloc::sync::Arc;
-#[cfg(feature = "ext4_another_backend")]
 use crate::fs::vfs::{FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode};
 use crate::kernel_tests::runner::KernelTest;
+#[cfg(feature = "ext4_another_backend")]
+use alloc::sync::Arc;
+
+#[cfg(feature = "ext4_another_backend")]
+#[path = "ext4_another_lifetime_sync.rs"]
+mod sync;
 
 /// Returns generation-aware another_ext4 lifetime tests.
 pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
@@ -22,6 +26,10 @@ pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
             KernelTest::new(
                 "ext4_another::persists_non_aligned_eof_extension_across_early_writeback_and_cold_lookup",
                 test_persists_non_aligned_eof_extension_across_early_writeback_and_cold_lookup,
+            ),
+            KernelTest::new(
+                "ext4_another::partial_reclaim_still_runs_final_barrier_and_keeps_scoped_error",
+                sync::test_partial_reclaim_still_runs_final_barrier_and_keeps_scoped_error,
             ),
         ];
     }
@@ -59,7 +67,12 @@ fn read_file(inode: &Arc<dyn IndexNode>, expected: &[u8]) -> Result<(), &'static
     let mut readback = [0u8; 8];
     let private = spin::Mutex::new(FilePrivateData::Unused);
     let read = inode
-        .read_at(0, expected.len(), &mut readback[..expected.len()], private.lock())
+        .read_at(
+            0,
+            expected.len(),
+            &mut readback[..expected.len()],
+            private.lock(),
+        )
         .map_err(|_| "read of regular file failed")?;
     if read != expected.len() || readback[..expected.len()] != *expected {
         return Err("regular file data did not match its lifetime");
@@ -80,7 +93,8 @@ fn test_open_dirty_unlink_recreate_does_not_alias_old_inode() -> Result<(), &'st
             .create(NAME, FileType::File, InodeMode::S_IRWXUGO)
             .map_err(|_| "create old file failed")?;
         write_open_file(&old, OLD)?;
-        root.unlink(NAME).map_err(|_| "unlink old open file failed")?;
+        root.unlink(NAME)
+            .map_err(|_| "unlink old open file failed")?;
         old.metadata()
             .map_err(|_| "unlink immediately reclaimed the old open inode")?;
 
