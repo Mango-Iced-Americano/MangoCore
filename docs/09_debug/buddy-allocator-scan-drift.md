@@ -3,7 +3,7 @@ title: "堆分配器 buddy merge 线性扫描导致的渐进性能退化"
 category: debug
 status: verified
 author: MangoCore Team
-last_update: 2026-06-20
+last_update: 2026-07-18
 tags: [buddy-allocator, heap, free-list, bitmap, drift, performance, lmbench, O(n)-scan]
 ---
 
@@ -167,7 +167,7 @@ getppid() 只读取 `current_task().process.ppid` 这一个字段，全程不调
 
 ### 4.2 数据结构
 
-修改文件：`os/vendor/buddy_system_allocator/src/lib.rs`
+修改文件：`dependency/buddy_system_allocator/src/lib.rs`
 
 ```rust
 pub struct Heap<const ORDER: usize> {
@@ -313,7 +313,7 @@ open/close 略有下趋势（280→246 μs），无退化。scan steps 稳定在
 ## 7. 涉及文件
 
 ```
-os/vendor/buddy_system_allocator/src/lib.rs       # 根因所在 + bitmap guard 修复
+dependency/buddy_system_allocator/src/lib.rs      # 根因所在 + bitmap guard 修复
 os/src/task/perf.rs                                 # P0 级 heap 计数器（7 个）
 os/src/mm/heap_allocator.rs                        # alloc/dealloc 计时插桩 + DEALLOC_SCAN_HOOK 注册
 os/src/fs/sysfs/files/diag.rs                      # /sys/kernel/stats/heap 暴露
@@ -382,4 +382,3 @@ scripts/analyze_drift.py                           # 自动分析脚本
 | W1 | 60,273,820 | 3,569 | 16,889× |
 | W2 | 41,122,853 | 4,986 | 8,248× |
 | W3 | 70,421,086 | 386 | **182,438×** |
-
