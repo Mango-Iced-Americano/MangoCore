@@ -1,0 +1,1 @@
+504c605a test: add la64 regression log gate
