@@ -126,6 +126,13 @@
 
 ## QEMU / 测试
 
+### 候选 LoongArch toolchain 在 GNU ld 遇到 `R_LARCH_CALL36` (`0x6e`)
+
+- **现象**: 容器 GNU ld 2.41 链接包含 `R_LARCH_CALL36` 的 LoongArch 对象时报告 `unsupported relocation type 0x6e`；Cargo 的 `linker = "loongarch64-linux-gnu-gcc"` 会把该限制带入 OS 与 user 两条构建路径。
+- **修复**: 使用一个受版本控制、将 PATH 限制为镜像系统路径且无条件 `exec /usr/bin/clang --target=loongarch64-linux-gnu -fuse-ld=lld "$@"` 的 wrapper，并同时更新 canonical 与已消费的 Cargo 配置。不要在 wrapper 中改变/过滤 Cargo 参数。
+- **验证**: 先以 Cargo verbose 日志固定原 linker、target 与 `-T`/`-nostdlib`/`-static` 参数；以 `clang -###` 确认 image Clang 实际选择 `ld.lld -m elf64loongarch`；在临时 Rustup/Cargo homes 和干净容器副本中离线完成 LA64 build，再检查 ELF `Machine: LoongArch` 与日志中不存在 `0x6e`。
+- **相关文件**: `scripts/loongarch64-clang-lld.sh`, `cargo-config/{os,user}/config.toml`, `{os,user}/.cargo/config.toml`
+
 ### `make docker` 拉镜像超时但 Docker CE 源已换国内镜像
 
 - **现象**: `apt update`/`apt install docker-compose-plugin` 已走清华等 Docker CE 软件源，但 `make docker` 仍在拉 `os-dev` 镜像时 timeout。
