@@ -17,6 +17,22 @@ env:
   QEMU_TIMEOUT: "7200"
 
 jobs:
+  toolchain-contracts:
+    name: Toolchain provisioning contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Rustup and Make provisioning contracts
+        run: |
+          set -euo pipefail
+          sh scripts/test-toolchain-make-contract.sh
+          sh scripts/test-rustup-setup.sh
+          sh scripts/test-rustup-preflight.sh
+          sh scripts/test-source-purity-make-contract.sh
+
   full-test:
     name: Main — Full QEMU Test
     runs-on: ubuntu-24.04
