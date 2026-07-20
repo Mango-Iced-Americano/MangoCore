@@ -1,0 +1,11 @@
+Docker container: e10937008fee (workspace mounted at /app)
+
+Builds, executed serially:
+make -C /app/os rv64-only EXT4_BACKEND=another
+make -C /app/os la64-only EXT4_BACKEND=another
+
+Configuration injection:
+make -C /app/os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../docs/Work_Log/evidence/2026-07-20/another-comp-003.conf CONF_IMAGE=../docs/Work_Log/evidence/2026-07-20/another-comp-003-rv64-sdcard.img EXT4_BACKEND=another
+make -C /app/os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../docs/Work_Log/evidence/2026-07-20/another-comp-003.conf CONF_IMAGE=../docs/Work_Log/evidence/2026-07-20/another-comp-003-la64-sdcard.img EXT4_BACKEND=another
+
+QEMU used independent x0 candidates and snapshot=on for both drives. RV64 used /app/rv64-tools-eio-clean-disk-rv.img as x1; LA64 used /app/docs/Work_Log/evidence/2026-07-20/la64-001-tools-override-disk-la.img as x1. Full QEMU serial output and exit status are stored in the sibling architecture-specific files.
