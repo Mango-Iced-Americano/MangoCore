@@ -108,14 +108,22 @@ pub fn register_page_cache(pc: &Arc<PageCache>) {
 }
 
 pub fn flush_all_page_caches() {
-    PAGE_CACHE_REGISTRY.lock().retain(|weak| {
-        if let Some(pc) = weak.upgrade() {
-            let _ = pc.writeback_all();
-            true
-        } else {
-            false
-        }
-    });
+    let page_caches: Vec<Arc<PageCache>> = {
+        let mut registry = PAGE_CACHE_REGISTRY.lock();
+        let mut page_caches = Vec::new();
+        registry.retain(|weak| match weak.upgrade() {
+            Some(pc) => {
+                page_caches.push(pc);
+                true
+            }
+            None => false,
+        });
+        page_caches
+    };
+
+    for page_cache in page_caches {
+        let _ = page_cache.writeback_all();
+    }
 }
 
 /// Evict clean pages from all registered caches using clock/second-chance.
@@ -679,10 +687,7 @@ impl PageCache {
             let existing = entries
                 .get(page_index)
                 .and_then(|entry| entry.as_ref().cloned());
-            (
-                existing,
-                perf::perf_time_now().wrapping_sub(_t_lookup),
-            )
+            (existing, perf::perf_time_now().wrapping_sub(_t_lookup))
         };
         perf::record_pc_lock_hold(lookup_lock_hold, false);
         if let Some(entry) = existing {
@@ -733,10 +738,7 @@ impl PageCache {
                 inner.pages.insert(page_index);
                 candidate
             };
-            (
-                winner,
-                perf::perf_time_now().wrapping_sub(_t_publish),
-            )
+            (winner, perf::perf_time_now().wrapping_sub(_t_publish))
         };
         perf::record_pc_lock_hold(publish_lock_hold, false);
 
@@ -1401,15 +1403,16 @@ impl PageCache {
             if full_page_overwrite {
                 any_full_overwrite = true;
             }
-            let lease = match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
-                Ok(lease) => lease,
-                Err(error) => {
-                    for item in &copies {
-                        self.abort_write_lease(&item.lease);
+            let lease =
+                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        for item in &copies {
+                            self.abort_write_lease(&item.lease);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
-            };
+                };
             copies.push(CopyItem {
                 lease,
                 page_offset,
@@ -1629,15 +1632,16 @@ impl PageCache {
 
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let lease = match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
-                Ok(lease) => lease,
-                Err(error) => {
-                    for item in &copies {
-                        self.abort_write_lease(&item.lease);
+            let lease =
+                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        for item in &copies {
+                            self.abort_write_lease(&item.lease);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
-            };
+                };
             copies.push(CopyItem {
                 lease,
                 page_offset: write_start - page_start,
@@ -1703,9 +1707,7 @@ impl PageCache {
         let missing_indices: Vec<usize> = {
             let entries = self.entries.lock();
             (start_page..start_page + count)
-                .filter(|page_index| {
-                    *page_index >= entries.len() || entries[*page_index].is_none()
-                })
+                .filter(|page_index| *page_index >= entries.len() || entries[*page_index].is_none())
                 .collect()
         };
         let mut pending: Vec<PendingPage> = Vec::new();
