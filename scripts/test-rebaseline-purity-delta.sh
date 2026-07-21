@@ -27,7 +27,7 @@ is_allowlisted_deleted() {
 snapshot_tracked() {
     stage_file=$(mktemp "${TMPDIR:-/tmp}/rebaseline-purity-stage.XXXXXX")
     trap 'rm -f "$stage_file"' EXIT HUP INT TERM
-    git -C "$repo_root" ls-files --stage >"$stage_file" ||
+    git -C "$repo_root" -c core.quotePath=false ls-files --stage >"$stage_file" ||
         fail 'cannot read tracked-file stage entries'
 
     tab=$(printf '\t')
