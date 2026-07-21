@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    printf '%s\n' "usage: $0 --allowlist FILE --repo-root DIR --verify-fingerprints" >&2
+    printf '%s\n' "usage: $0 --allowlist FILE [--repo-root DIR] --verify-fingerprints" >&2
     printf '%s\n' "       $0 --fixture staged-unowned" >&2
     exit 2
 }
@@ -33,7 +33,7 @@ run_staged_unowned_fixture() {
     fi
     grep -F 'FAIL: dirty path is not allowlisted: staged.txt' "$fixture_root/output" >/dev/null ||
         fail 'staged-unowned fixture did not identify staged.txt'
-    printf '%s\n' 'PASS: staged-unowned fixture rejected'
+    fail 'staged-unowned fixture confirmed rejection: dirty path is not allowlisted: staged.txt'
 }
 
 if [ "$#" -eq 2 ] && [ "$1" = '--fixture' ] && [ "$2" = 'staged-unowned' ]; then
@@ -41,12 +41,21 @@ if [ "$#" -eq 2 ] && [ "$1" = '--fixture' ] && [ "$2" = 'staged-unowned' ]; then
     exit 0
 fi
 
-[ "$#" -eq 5 ] || usage
+[ "$#" -eq 3 ] || [ "$#" -eq 5 ] || usage
 [ "$1" = '--allowlist' ] || usage
 allowlist=$2
-[ "$3" = '--repo-root' ] || usage
-repo_root=$4
-[ "$5" = '--verify-fingerprints' ] || usage
+case "$#" in
+    3)
+        [ "$3" = '--verify-fingerprints' ] || usage
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null) ||
+            fail 'default repo root is not a Git worktree'
+        ;;
+    5)
+        [ "$3" = '--repo-root' ] || usage
+        repo_root=$4
+        [ "$5" = '--verify-fingerprints' ] || usage
+        ;;
+esac
 
 [ -r "$allowlist" ] || fail "allowlist is not readable: $allowlist"
 repo_root=$(CDPATH= cd -- "$repo_root" && pwd)
@@ -77,6 +86,28 @@ while IFS=' ' read -r path fingerprint disposition extra; do
     fi
     printf '%s %s %s\n' "$path" "$fingerprint" "$disposition" >>"$allowlist_entries"
 done <"$allowlist"
+
+while IFS=' ' read -r path expected_hash disposition; do
+    if [ "$expected_hash" = 'DELETED' ]; then
+        [ ! -e "$repo_root/$path" ] ||
+            fail "DELETED allowlist path must be absent: $path"
+        continue
+    fi
+
+    [ -e "$repo_root/$path" ] || fail "allowlisted path is absent: $path"
+    actual_hash=$(sha256sum "$repo_root/$path" | cut -d ' ' -f 1) ||
+        fail "cannot hash allowlisted path: $path"
+    path_status=$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all -- "$path") ||
+        fail "cannot inspect allowlisted path: $path"
+    if [ -n "$path_status" ]; then
+        [ "$actual_hash" = "$expected_hash" ] || fail "fingerprint mismatch: $path"
+        continue
+    fi
+
+    committed_hash=$(git -C "$repo_root" show "HEAD:$path" | sha256sum | cut -d ' ' -f 1) ||
+        fail "cannot read committed allowlisted path: $path"
+    [ "$actual_hash" = "$committed_hash" ] || fail "clean allowlisted path differs from HEAD: $path"
+done <"$allowlist_entries"
 
 status_file=$(mktemp "${TMPDIR:-/tmp}/rebaseline-status.XXXXXX")
 trap 'rm -f "$allowlist_entries" "$status_file"' EXIT HUP INT TERM
