@@ -49,8 +49,9 @@ repo_root=$4
 [ "$5" = '--verify-fingerprints' ] || usage
 
 [ -r "$allowlist" ] || fail "allowlist is not readable: $allowlist"
-[ -d "$repo_root/.git" ] || fail "repo root is not a Git worktree: $repo_root"
 repo_root=$(CDPATH= cd -- "$repo_root" && pwd)
+git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    fail "repo root is not a Git worktree: $repo_root"
 
 allowlist_entries=$(mktemp "${TMPDIR:-/tmp}/rebaseline-allowlist.XXXXXX")
 trap 'rm -f "$allowlist_entries"' EXIT HUP INT TERM
