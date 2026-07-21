@@ -47,7 +47,8 @@ snapshot_tracked() {
 
         case "$mode" in
             160000)
-                gitlink_head=$(git -C "$repo_root/$path" rev-parse --verify 'HEAD^{commit}') ||
+                gitlink_head=$(git -c safe.directory="$repo_root/$path" -C "$repo_root/$path" \
+                    rev-parse --verify 'HEAD^{commit}') ||
                     fail "gitlink HEAD is unavailable: $path"
                 printf 'GITLINK\t%s\t%s\t%s\n' "$index_oid" "$gitlink_head" "$path"
                 ;;
