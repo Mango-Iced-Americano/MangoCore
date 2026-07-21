@@ -9,7 +9,7 @@ esac
 
 required_makefiles='Makefile os/Makefile os/make/rv64.mk os/make/la64.mk user/Makefile'
 makefiles=$(find "$repo_root" \
-    \( -path "$repo_root/.git" -o -path "$repo_root/dependency" \) -prune -o \
+    \( -path "$repo_root/.git" -o -path "$repo_root/dependency" -o -path "$repo_root/testresult" -o -path "$repo_root/testresults" \) -prune -o \
     -type f \( -name Makefile -o -name GNUmakefile -o -name '*.mk' \) -print \
     | LC_ALL=C sort \
     | while IFS= read -r makefile; do
