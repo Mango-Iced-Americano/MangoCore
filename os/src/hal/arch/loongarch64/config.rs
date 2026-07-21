@@ -79,10 +79,10 @@ pub const USR_VIRT_SPACE_END: usize = USR_SPACE_LEN - 1;
 pub const USER_VA_BASE: usize = LA_START;
 pub const USER_VA_END: usize = LA_START + USR_SPACE_LEN;
 pub const ELF_PIE_BASE: usize = USER_VA_BASE + 0x0040_0000;
-pub const TRAMPOLINE: usize = SIGNAL_TRAMPOLINE; // The trampoline is NOT mapped in LA.
 pub const SIGNAL_TRAMPOLINE: usize = USR_VIRT_SPACE_END - PAGE_SIZE + 1;
-pub const TRAP_CONTEXT_BASE: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
-pub const USR_MMAP_END: usize = TRAP_CONTEXT_BASE - PAGE_SIZE;
+pub const TRAMPOLINE: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
+pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - KERNEL_STACK_MAX_SLOTS * PAGE_SIZE;
+pub const USR_MMAP_END: usize = TRAP_CONTEXT_BASE;
 pub const USR_MMAP_BASE: usize = USR_MMAP_END - USR_SPACE_LEN / 8 + 0x3000;
 pub const TASK_SIZE: usize = USR_MMAP_BASE - USR_SPACE_LEN / 8;
 pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & (!(PAGE_SIZE - 1));
@@ -159,7 +159,7 @@ macro_rules! newline {
 #[macro_export]
 macro_rules! should_map_trampoline {
     () => {
-        false
+        true
     };
 }
 

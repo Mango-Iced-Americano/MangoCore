@@ -101,7 +101,13 @@ impl Drop for KernelStack {
 
 /// 根据线程id计算trap context的地址
 pub fn trap_cx_bottom_from_tid(tid: usize) -> usize {
-    TRAP_CONTEXT_BASE - tid * PAGE_SIZE
+    if !(1..=KERNEL_STACK_MAX_SLOTS).contains(&tid) {
+        panic!(
+            "la64 trap context slot {} is outside 1..={}",
+            tid, KERNEL_STACK_MAX_SLOTS
+        );
+    }
+    TRAP_CONTEXT_BASE + (tid - 1) * PAGE_SIZE
 }
 
 /// 根据线程id计算用户栈的地址

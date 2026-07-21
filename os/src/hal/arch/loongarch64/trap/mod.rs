@@ -35,7 +35,6 @@ pub type TrapImpl = Trap;
 global_asm!(include_str!("trap.S"));
 
 extern "C" {
-    pub fn __alltraps();
     pub fn __restore();
     pub fn __call_sigreturn();
     pub fn strampoline();
@@ -425,19 +424,15 @@ pub fn trap_return() -> ! {
         crate::task::perf::record_tlb_activate();
     }
     let user_satp = current_user_token();
-    let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
+    let restore_va = __restore as usize;
     unsafe {
         asm!(
             "ibar 0",
-            "move $ra, {0}",
-            "move $a0, {1}",
-            "move $a1, {2}",
-            "move $a2, {3}",
-            "jr $ra",
-            in(reg) restore_va,
-            in(reg) trap_cx_ptr,
-            in(reg) user_satp,
-            in(reg) asid as usize,
+            "jr {restore}",
+            restore = in(reg) restore_va,
+            in("$a0") trap_cx_ptr,
+            in("$a1") user_satp,
+            in("$a2") asid as usize,
             options(noreturn)
         );
     }
