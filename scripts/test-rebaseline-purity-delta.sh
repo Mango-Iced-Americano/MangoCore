@@ -17,6 +17,13 @@ repo_root=${REBASELINE_PURITY_REPO_ROOT:-$(CDPATH= cd -- "$script_dir/.." && pwd
 allowlist=${REBASELINE_PURITY_ALLOWLIST:-$repo_root/.omo/rebaseline-allowlist.txt}
 make_cmd=${REBASELINE_PURITY_MAKE:-make}
 
+is_allowlisted_deleted() {
+    awk -v candidate="$1" '
+        $1 == candidate && $2 == "DELETED" { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$allowlist"
+}
+
 snapshot_tracked() {
     stage_file=$(mktemp "${TMPDIR:-/tmp}/rebaseline-purity-stage.XXXXXX")
     trap 'rm -f "$stage_file"' EXIT HUP INT TERM
@@ -45,9 +52,15 @@ snapshot_tracked() {
                 printf 'GITLINK\t%s\t%s\t%s\n' "$index_oid" "$gitlink_head" "$path"
                 ;;
             *)
-                worktree_oid=$(git -C "$repo_root" hash-object --no-filters -- "$path") ||
-                    fail "tracked file is missing or unreadable: $path"
-                printf 'FILE\t%s\t%s\t%s\n' "$index_oid" "$worktree_oid" "$path"
+                if [ ! -e "$repo_root/$path" ] && [ ! -L "$repo_root/$path" ]; then
+                    is_allowlisted_deleted "$path" ||
+                        fail "tracked file is missing or unreadable: $path"
+                    printf 'MISSING\t%s\n' "$index_oid" "$path"
+                else
+                    worktree_oid=$(git -C "$repo_root" hash-object --no-filters -- "$path") ||
+                        fail "tracked file is missing or unreadable: $path"
+                    printf 'FILE\t%s\t%s\t%s\n' "$index_oid" "$worktree_oid" "$path"
+                fi
                 ;;
         esac
     done <"$stage_file"
