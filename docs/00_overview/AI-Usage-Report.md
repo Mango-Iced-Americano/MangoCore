@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-21
+> Coverage: 2026-04-01 to 2026-07-22
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -42,6 +42,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | 性能退化调试系统 | 2026-06-19 至 2026-06-20 | Oracle, Sisyphus, specialized agents | `perf_diag` counters、`drift_window`、lmbench 漂移分析、buddy allocator bitmap guard | 建立自动漂移分析脚本与诊断 counters，定位并修复 allocator 退化 |
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
 | LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
+| Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 
 ## 4. 详细使用场景
 
@@ -222,6 +223,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 维护者依据源码、contracts 和 Docker/QEMU 输出将 exclusive end 修正为 `TRAP_CONTEXT_BASE`，并在普通 mmap 与 SysV shm mmap 中于 unmap 前拒绝 LA64 `MAP_FIXED`、`MAP_FIXED_NOREPLACE` 相交请求。
 - Verification: RV64 → LA64 按串行顺序完成 preflight、contracts、build 和 regression；两者均为 TAP `1..6`，各有 6 个 `ok`，包含 `ok 2 mmap_edge_cases` 和 `ok 6 clone_vm_second_slot`。LA64 精确分类器为 `STATE=PASS STATUS=0`。十个源码输入 pre/post SHA-256 一致，且 source → ELF → CPIO → kernel 严格新鲜。补充证据进一步将既有 QEMU 日志绑定到真实 `/regression` ELF；Oracle 最终验收通过。该结果不外推为 full LTP 或 basic 全量覆盖。
 
+### Case 8: Canonical normal run facade 一次性 setup 审查
+
+- Evidence: `docs/Work_Log/2026-07-22.md`。
+- AI tools: Sisyphus, Oracle。
+- Problem: root generic `run` 同时把 logo/preflight 声明为 prerequisites，并在 recipe 中递归调用它们；一次 run 因而重复执行两个 setup 动作。
+- AI contribution: Oracle 通过 dry-run 审查定位重复调用，并要求将一次性副作用和 `-j8` invalid-input behavior 写入 contract。
+- Human action: root `run` 保留一次直接 prerequisite，移除递归 setup 调用，并以 target-scoped `.NOTPARALLEL` 保持 `validate-run → print-logo → toolchain-preflight` 顺序。
+- Verification: normal-run、toolchain、source-purity、layering 与 root facade contracts 均通过；RV64/LA64 dry-run 各有一次 logo、一次 root preflight 与一次 OS dispatch；无效 `-j8` 输入无 setup 或 arch-run 输出。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -271,6 +281,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
 | `docs/Work_Log/2026-07-21.md`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-artifact-binding-supplement-20260721T063550+0800/` | LA64 mmap arena 边界与 trap-context 窗口 | 记录旧范围导致的非固定 mmap RED、最终 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)` 修正、固定映射拒绝规则、RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`、真实 `/regression` ELF 绑定及 Oracle 最终验收 |
+| `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 
 ## 9. 交互记录与留痕方式
 
