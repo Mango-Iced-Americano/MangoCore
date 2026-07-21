@@ -36,6 +36,15 @@ fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), 
     Ok((VirtAddr::from(start), VirtAddr::from(end)))
 }
 
+#[cfg(target_arch = "loongarch64")]
+fn fixed_mmap_intersects_la64_trap_context_window(start: VirtAddr, end: VirtAddr) -> bool {
+    let request_start = start.floor();
+    let request_end = end.ceil();
+    let reserved_start = VirtAddr::from(TRAP_CONTEXT_BASE).floor();
+    let reserved_end = VirtAddr::from(TRAMPOLINE).ceil();
+    request_start < reserved_end && reserved_start < request_end
+}
+
 fn charges_overcommit(prot: MapPermission, flags: MapFlags) -> bool {
     flags.contains(MapFlags::MAP_ANONYMOUS) && prot.contains(MapPermission::W)
 }
@@ -198,6 +207,10 @@ pub(super) fn do_mmap<T: PageTable>(
     let start_va: VirtAddr = if fixed {
         let start_vpn = start_hint.floor();
         let end_vpn = requested_end.ceil();
+        #[cfg(target_arch = "loongarch64")]
+        if fixed_mmap_intersects_la64_trap_context_window(start_hint, requested_end) {
+            return EINVAL;
+        }
         if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
             && address_space.vmas.has_overlap(start_vpn, end_vpn)
         {
@@ -328,6 +341,10 @@ pub(super) fn do_shm_mmap<T: PageTable>(
     let start_va = if fixed {
         let start_vpn = start_hint.floor();
         let end_vpn = requested_end.ceil();
+        #[cfg(target_arch = "loongarch64")]
+        if fixed_mmap_intersects_la64_trap_context_window(start_hint, requested_end) {
+            return EINVAL;
+        }
         if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
             && address_space.vmas.has_overlap(start_vpn, end_vpn)
         {
