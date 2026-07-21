@@ -35,6 +35,9 @@ all: toolchain-setup
 	$(MAKE) prepare-cargo-config
 	$(MAKE) -C os all
 
+build:
+	$(MAKE) -C os all
+
 prepare-cargo-config:
 
 toolchain-setup:
@@ -70,7 +73,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env
+.PHONY: all build clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
