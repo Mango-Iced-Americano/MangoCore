@@ -30,13 +30,17 @@ all: toolchain-preflight fs-img build
 
 debug: build mv-debug
 
-mv:
-	cp -f $(KERNEL_ELF) ../kernel-rv
+stage-kernel:
+	@mkdir -p $(dir $(KERNEL_RV))
+	cp -f $(KERNEL_ELF) $(KERNEL_RV)
+
+mv: stage-kernel
+	@echo "[deprecated] mv stages the RV64 kernel; root publication happens only after make all succeeds"
 
 mv-debug:
 	cp -f $(KERNEL_ELF) ../kernel-rv
 
-build: env $(KERNEL_BIN) mv
+build: env $(KERNEL_BIN) stage-kernel
 
 toolchain-preflight:
 	@sh ../scripts/rustup-preflight.sh
@@ -45,7 +49,7 @@ env: toolchain-preflight
 
 # build all user programs
 user: toolchain-preflight
-	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE)
+	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE) USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)"
 
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
@@ -53,17 +57,18 @@ $(KERNEL_BIN): kernel
 $(APPS):
 
 fs-img: toolchain-preflight user
-	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
+	@mkdir -p $(dir $(ROOTFS_IMG))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
 kernel: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_RV)
 
 $(INITRAMFS_CPIO_RV): user
-	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
+	@mkdir -p $(dir $(INITRAMFS_CPIO_RV))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
 
 $(REGRESSION_CPIO_RV): user
-	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
+	@mkdir -p $(dir $(REGRESSION_CPIO_RV))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
 
 kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)

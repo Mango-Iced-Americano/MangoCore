@@ -1,17 +1,21 @@
 # Building
+BUILD_ROOT ?= $(abspath ../build)
+PROFILE ?= normal
 TARGET := loongarch64-unknown-linux-gnu
 MODE := release
-KERNEL_OUTPUT_ROOT ?= target
+PRODUCT_ROOT ?= $(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)
+KERNEL_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/kernel
+USER_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/user
 KERNEL_ELF := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 KERNEL_UIMG := $(KERNEL_ELF).ui
 BLK_MODE := virt_pci
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-la.img
-ROOTFS_IMG_DIR := ../fs-img-dir
+ROOTFS_IMG_DIR := $(PRODUCT_ROOT)/image
 CORE_NUM := 1
 LOG ?= off
-KERNEL_LA := ../kernel-la
+KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
 SDCARD_LA := ../sdcard-la.img
 DISK_LA := ../disk-la.img
 
@@ -62,8 +66,8 @@ ifeq ($(BOARD), laqemu)
 endif
 
 # Initramfs cpio generation — parameterized for normal / regression profiles
-INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
-REGRESSION_CPIO_LA := ../fs-img-dir/initramfs-regression-la.cpio
+INITRAMFS_CPIO_LA := $(PRODUCT_ROOT)/initramfs/initramfs-la.cpio
+REGRESSION_CPIO_LA := $(PRODUCT_ROOT)/initramfs/initramfs-regression-la.cpio
 
 INITRAMFS_PROFILE ?= normal
 ifeq ($(INITRAMFS_PROFILE),regression)

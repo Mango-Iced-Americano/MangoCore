@@ -1,6 +1,7 @@
 TARGET := riscv64gc-unknown-none-elf
 MODE := debug
 COMP ?= yes
+USER_OUTPUT_ROOT ?= target
 
 export RUSTUP_AUTO_INSTALL := 0
 unexport RUSTUP_TOOLCHAIN
@@ -31,9 +32,9 @@ env: toolchain-preflight
 
 rust-user: prepare-cargo-config env $(APPS)
 ifeq ($(MODE),release)
-	cargo build --target=$(TARGET) --release
+	CARGO_TARGET_DIR="$(USER_OUTPUT_ROOT)" cargo build --target=$(TARGET) --release
 else
-	cargo build --target=$(TARGET)
+	CARGO_TARGET_DIR="$(USER_OUTPUT_ROOT)" cargo build --target=$(TARGET)
 endif
 
 clean:

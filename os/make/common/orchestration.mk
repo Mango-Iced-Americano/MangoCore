@@ -1,11 +1,17 @@
 ARCHS = rv64
 CURR_ARCH ?= la64
+BUILD_ROOT ?= $(abspath ../build)
+COMPAT_OUTPUT_DIR ?= $(abspath ..)
+ARCH ?= rv64
+PROFILE ?= normal
+PRODUCT_ROOT ?= $(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)
 FS_MODE ?= ext4
 TOP_BLK_MODE_ORIGIN := $(origin BLK_MODE)
 BLK_MODE ?= virt
 LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_MODE))
 MODE ?= release
-KERNEL_OUTPUT_ROOT ?= target
+KERNEL_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/kernel
+USER_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/user
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
 CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
@@ -18,8 +24,8 @@ AUTO_REBUILD_MEM ?= 1
 # 来源：user/tools/{riscv64,loongarch64}/
 # ============================================================
 
-TOOLS_IMG_RV := ../disk.img
-TOOLS_IMG_LA := ../disk-la.img
+TOOLS_IMG_RV ?= $(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img
+TOOLS_IMG_LA ?= $(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img
 TOOLS_SIZE_RV := 2048
 TOOLS_SIZE_LA := 2048
 TOOLS_SRC_RV := ../user/tools/riscv64

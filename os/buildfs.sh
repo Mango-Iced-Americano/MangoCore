@@ -1,6 +1,7 @@
 SUDO=$(if [ $(whoami) = "root" ]; then echo -n ""; else echo -n "sudo"; fi)
 U_FS_DIR="../fs-img-dir"
 U_FS="$1"
+USER_OUTPUT_ROOT="${USER_OUTPUT_ROOT:-../user/target}"
 BLK_SZ="4096"
 TARGET=riscv64gc-unknown-none-elf
 MODE="release"
@@ -80,7 +81,7 @@ printf 'root:x:0:0:root:/root:/bin/bash\n' > ${U_FS_DIR}/fs/etc/passwd
 touch ${U_FS_DIR}/fs/root/.bash_history
 
 for programname in $(ls ../user/src/bin); do
-    cp -r ../user/target/${TARGET}/${MODE}/${programname%.rs} ${U_FS_DIR}/fs/${programname%.rs}
+    cp -r ${USER_OUTPUT_ROOT}/${TARGET}/${MODE}/${programname%.rs} ${U_FS_DIR}/fs/${programname%.rs}
 done
 
 if [ ! -f ${U_FS_DIR}/fs/syscall ]; then
@@ -92,13 +93,13 @@ if [ "$2" = "laqemu" ]; then
     cp -r ../user/fs/* ${U_FS_DIR}/fs/
     cp ./bash-la ${U_FS_DIR}/fs/bin/bash
     cp ./busybox-la ${U_FS_DIR}/fs/bin/busybox
-    cp ../user/target/loongarch64-unknown-linux-gnu/release/initproc ${U_FS_DIR}/fs/
+    cp ${USER_OUTPUT_ROOT}/loongarch64-unknown-linux-gnu/release/initproc ${U_FS_DIR}/fs/
 fi
 
 if [ "$2" = "rvqemu" ]; then
     cp ./bash-rv ${U_FS_DIR}/fs/bin/bash
     cp ./busybox-rv ${U_FS_DIR}/fs/bin/busybox
-    cp ../user/target/riscv64gc-unknown-none-elf/release/initproc ${U_FS_DIR}/fs/
+    cp ${USER_OUTPUT_ROOT}/riscv64gc-unknown-none-elf/release/initproc ${U_FS_DIR}/fs/
     cp ../1.txt ${U_FS_DIR}/fs/ 2>/dev/null || true
 fi
 

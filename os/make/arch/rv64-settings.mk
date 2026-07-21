@@ -1,7 +1,11 @@
 # Building
+BUILD_ROOT ?= $(abspath ../build)
+PROFILE ?= normal
 TARGET := riscv64gc-unknown-none-elf
 MODE := release
-KERNEL_OUTPUT_ROOT ?= target
+PRODUCT_ROOT ?= $(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)
+KERNEL_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/kernel
+USER_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/user
 KERNEL_ELF := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/asm
@@ -18,11 +22,11 @@ else
 endif
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-rv.img
-ROOTFS_IMG_DIR := ../fs-img-dir
+ROOTFS_IMG_DIR := $(PRODUCT_ROOT)/image
 CORE_NUM := 1
 LOG ?= off
-KERNEL_RV := ../kernel-rv
-KERNEL_LA := ../kernel-la
+KERNEL_RV := $(PRODUCT_ROOT)/kernel/kernel-rv
+KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
 SDCARD_RV := ../sdcard-rv.img
 SDCARD_LA := ../sdcard-la.img
 
@@ -89,8 +93,8 @@ OBJCOPY := $(LLVM_TOOLS_DIR)/rust-objcopy --binary-architecture=riscv64
 DISASM ?= -x
 
 # Initramfs cpio generation — parameterized for normal / regression profiles
-INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
-REGRESSION_CPIO_RV := ../fs-img-dir/initramfs-regression-rv.cpio
+INITRAMFS_CPIO_RV := $(PRODUCT_ROOT)/initramfs/initramfs-rv.cpio
+REGRESSION_CPIO_RV := $(PRODUCT_ROOT)/initramfs/initramfs-regression-rv.cpio
 
 # INITRAMFS_PROFILE: "normal" (default) or "regression"
 INITRAMFS_PROFILE ?= normal

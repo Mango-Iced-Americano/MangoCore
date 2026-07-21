@@ -1,10 +1,13 @@
 include make/common/toolchain.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run validate-run
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint validate-run publish-compatibility
 .NOTPARALLEL:
 
-all: prepare-cargo-config rv64_all la64_all
+all: prepare-cargo-config
+	$(MAKE) rv64_all
+	$(MAKE) la64_all
+	$(MAKE) publish-compatibility
 
 include make/tools.mk
 include make/initramfs.mk
@@ -30,19 +33,37 @@ image: prepare-cargo-config
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk fs-img MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
 
 toolchain-preflight:
-	@sh ../scripts/rustup-preflight.sh
+	@if [ "$(CANONICAL_BUILD_FIXTURE)" = "second-stage-failure" ]; then :; else sh ../scripts/rustup-preflight.sh; fi
 
 env: toolchain-preflight
 
 prepare-cargo-config: toolchain-preflight
 
+ifeq ($(CANONICAL_BUILD_FIXTURE),second-stage-failure)
+rv64_all: prepare-cargo-config
+	@mkdir -p $(BUILD_ROOT)/rv64/$(MODE)/normal
+	@touch $(BUILD_ROOT)/rv64/$(MODE)/normal/fixture-rv64
+
+la64_all: prepare-cargo-config
+	@echo "[fixture] forcing LA64 stage failure"
+	@exit 1
+else
 rv64_all: prepare-cargo-config tools-disk-rv
 	@echo "Building rv64"
-	make ARCH=rv64 -f make/rv64.mk all MODE=${MODE}
+	$(MAKE) ARCH=rv64 PROFILE=normal -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
 
 la64_all: prepare-cargo-config tools-disk-la
 	@echo "Building la64"
-	make ARCH=la64 -f make/la64.mk all MODE=${MODE} LOG=${LOG}
+	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
+endif
+
+publish-compatibility:
+	@echo "[publish-compatibility] publishing both completed architecture products"
+	@mkdir -p "$(COMPAT_OUTPUT_DIR)"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/kernel-rv" "$(COMPAT_OUTPUT_DIR)/kernel-rv"
+	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"
+	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"
 
 rv64-kernel-build-only: prepare-cargo-config
 	$(MAKE) -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG} KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)"
@@ -102,6 +123,18 @@ validate-run:
 
 run: validate-run toolchain-preflight
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk run INITRAMFS_PROFILE=$(PROFILE)
+
+test: prepare-cargo-config
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk regression-run MODE=$(MODE) PRODUCT_ROOT="$(PRODUCT_ROOT)" KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)"
+
+check: prepare-cargo-config
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" cargo check --target $(if $(filter rv64,$(ARCH)),riscv64gc-unknown-none-elf,loongarch64-unknown-linux-gnu)
+
+lint: prepare-cargo-config
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	cargo fmt --check
 
 gdb: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk gdb

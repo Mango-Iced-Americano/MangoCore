@@ -13,6 +13,7 @@ ARCH="$1"
 MODE="${2:-release}"
 OUT="$3"
 PROFILE="${4:-}"
+USER_OUTPUT_ROOT="${USER_OUTPUT_ROOT:-../user/target}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$(mktemp -d)"
@@ -33,12 +34,12 @@ if [ "$PROFILE" = "regression" ]; then
     # Determine arch-specific paths
     case "$ARCH" in
       rv64)
-        INIT_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/regression_init"
-        REG_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/regression"
+        INIT_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/regression_init"
+        REG_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/regression"
         ;;
       la64)
-        INIT_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/regression_init"
-        REG_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/regression"
+        INIT_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/regression_init"
+        REG_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/regression"
         ;;
       *)
         echo "[initramfs] ERROR: unknown arch: $ARCH"
@@ -80,14 +81,14 @@ else
     # 2. 确定架构相关的路径
     case "$ARCH" in
       rv64)
-        INIT_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/init"
+        INIT_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/init"
         BUSYBOX_SRC="../user/tools/riscv64/bin/busybox"
-        REG_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/regression"
+        REG_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/regression"
         ;;
       la64)
-        INIT_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/init"
+        INIT_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/init"
         BUSYBOX_SRC="../user/tools/loongarch64/bin/busybox"
-        REG_SRC="../user/target/loongarch64-unknown-linux-gnu/$MODE/regression"
+        REG_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/regression"
         ;;
       *)
         echo "[initramfs] ERROR: unknown arch: $ARCH"
@@ -123,6 +124,7 @@ else
 fi
 
 # 6. 生成 newc cpio 归档
+mkdir -p "$(dirname "$OUT_ABS")"
 (
     cd "$STAGE"
     find . -print0 | LC_ALL=C sort -z | cpio --null -o -H newc -R 0:0 > "$OUT_ABS" 2>/dev/null
