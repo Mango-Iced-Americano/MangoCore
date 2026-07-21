@@ -51,6 +51,13 @@ snapshot_tracked() {
                     fail "gitlink HEAD is unavailable: $path"
                 printf 'GITLINK\t%s\t%s\t%s\n' "$index_oid" "$gitlink_head" "$path"
                 ;;
+            120000)
+                link_target=$(readlink "$repo_root/$path") ||
+                    fail "tracked symlink is missing or unreadable: $path"
+                worktree_oid=$(printf '%s' "$link_target" | git -C "$repo_root" hash-object --stdin) ||
+                    fail "cannot hash tracked symlink: $path"
+                printf 'SYMLINK\t%s\t%s\t%s\n' "$index_oid" "$worktree_oid" "$path"
+                ;;
             *)
                 if [ ! -e "$repo_root/$path" ] && [ ! -L "$repo_root/$path" ]; then
                     is_allowlisted_deleted "$path" ||
