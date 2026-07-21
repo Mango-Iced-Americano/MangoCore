@@ -9,8 +9,8 @@ pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; overall=1; }
 
 require_valid() {
-    entry=$1 arch=$2
-    if output=$(make -C "$repo_root" -n $entry "ARCH=$arch" "PROFILE=normal" run 2>&1); then
+    entry=$1 entry_dir=$2 arch=$3
+    if output=$(make -C "$entry_dir" -n "ARCH=$arch" "PROFILE=normal" run 2>&1); then
         if printf '%s\n' "$output" | grep -Fq "make ARCH=$arch -f make/$arch.mk run INITRAMFS_PROFILE=normal"; then
             pass "$entry run accepts ARCH=$arch PROFILE=normal"
         else
@@ -22,13 +22,26 @@ require_valid() {
 }
 
 require_invalid() {
-    entry=$1 description=$2; shift 2
-    if output=$(make -C "$repo_root" -n $entry "$@" run 2>&1); then
+    entry=$1 entry_dir=$2 description=$3; shift 3
+    if output=$(make -C "$entry_dir" -n "$@" run 2>&1); then
         fail "$entry run must reject $description"
     elif printf '%s\n' "$output" | grep -Eq 'make/(rv64|la64)\.mk[[:space:]]+run'; then
         fail "$entry run must reject $description before architecture run delegation"
     else
         pass "$entry run rejects $description before architecture run delegation"
+    fi
+}
+
+require_direct_os_baseline() {
+    if output=$(make -C "$repo_root/os" -n "ARCH=rv64" "PROFILE=normal" run 2>&1); then
+        if printf '%s\n' "$output" | grep -Fq 'sh ../scripts/rustup-preflight.sh' \
+            && ! printf '%s\n' "$output" | grep -Fq 'Welcome to MangoCore'; then
+            pass "direct os run executes os/Makefile rather than a root os goal"
+        else
+            fail "direct os run must execute os/Makefile rather than a root os goal"
+        fi
+    else
+        fail "direct os run must accept ARCH=rv64 PROFILE=normal"
     fi
 }
 
@@ -59,22 +72,27 @@ require_root_parallel_invalid() {
     fi
 }
 
-require_valid . rv64
-require_valid . la64
-require_valid os rv64
-require_valid os la64
+require_valid root "$repo_root" rv64
+require_valid root "$repo_root" la64
+require_valid os "$repo_root/os" rv64
+require_valid os "$repo_root/os" la64
+require_direct_os_baseline
 require_root_setup_once rv64
 require_root_setup_once la64
 require_root_parallel_invalid
 
 for entry in . os; do
-    require_invalid "$entry" 'missing ARCH and PROFILE'
-    require_invalid "$entry" 'missing PROFILE' 'ARCH=rv64'
-    require_invalid "$entry" 'missing ARCH' 'PROFILE=normal'
-    require_invalid "$entry" 'invalid ARCH' 'ARCH=bad' 'PROFILE=normal'
-    require_invalid "$entry" 'non-normal PROFILE' 'ARCH=rv64' 'PROFILE=regression'
-    require_invalid "$entry" 'multiple ARCH values' 'ARCH=rv64 la64' 'PROFILE=normal'
-    require_invalid "$entry" 'multiple PROFILE values' 'ARCH=rv64' 'PROFILE=normal extra'
+    case "$entry" in
+        .) entry_dir=$repo_root ;;
+        os) entry_dir=$repo_root/os ;;
+    esac
+    require_invalid "$entry" "$entry_dir" 'missing ARCH and PROFILE'
+    require_invalid "$entry" "$entry_dir" 'missing PROFILE' 'ARCH=rv64'
+    require_invalid "$entry" "$entry_dir" 'missing ARCH' 'PROFILE=normal'
+    require_invalid "$entry" "$entry_dir" 'invalid ARCH' 'ARCH=bad' 'PROFILE=normal'
+    require_invalid "$entry" "$entry_dir" 'non-normal PROFILE' 'ARCH=rv64' 'PROFILE=regression'
+    require_invalid "$entry" "$entry_dir" 'multiple ARCH values' 'ARCH=rv64 la64' 'PROFILE=normal'
+    require_invalid "$entry" "$entry_dir" 'multiple PROFILE values' 'ARCH=rv64' 'PROFILE=normal extra'
 done
 
 for legacy in rv64-run la64-run; do
