@@ -1,4 +1,8 @@
 MODE ?= release
+PROFILE ?= normal
+REPO_ROOT := $(CURDIR)
+BUILD_ROOT ?= $(REPO_ROOT)/build
+COMPAT_OUTPUT_DIR ?= $(REPO_ROOT)
 FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
@@ -33,10 +37,12 @@ QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
 all: toolchain-setup
 	$(MAKE) prepare-cargo-config
-	$(MAKE) -C os all
+	$(MAKE) -C os "MODE=$(MODE)" "BUILD_ROOT=$(BUILD_ROOT)" "COMPAT_OUTPUT_DIR=$(COMPAT_OUTPUT_DIR)" "CANONICAL_BUILD_FIXTURE=$(CANONICAL_BUILD_FIXTURE)" all
 
 build:
-	$(MAKE) -C os all
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build
 
 prepare-cargo-config:
 
@@ -49,20 +55,32 @@ toolchain-preflight:
 env: toolchain-preflight
 
 kernel: toolchain-preflight
-	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" kernel
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" kernel
 
 user: toolchain-preflight
-	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" user
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" user
 
 image: toolchain-preflight
-	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" image
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" image
 
 validate-run:
 	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
 	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
 
 run: validate-run print-logo toolchain-preflight
-	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" run
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" run
+
+test: toolchain-preflight
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=regression" "BUILD_ROOT=$(BUILD_ROOT)" test
+
+check: toolchain-preflight
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" check
+
+lint: toolchain-preflight
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" lint
 
 .NOTPARALLEL: run
 
@@ -85,7 +103,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all build clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env user image validate-run
+.PHONY: all build kernel user image run test check lint clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -122,7 +140,8 @@ $(QEMU_TAR_PATH):
 	fi
 
 clean:
-	make -C os clean
+	$(MAKE) -C os "BUILD_ROOT=$(BUILD_ROOT)" clean
+	rm -rf "$(BUILD_ROOT)"
 
 rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
@@ -160,4 +179,4 @@ testsuits-download:
 
 	
 
-.PHONY: all kernel run clean testsuits-download docker docker-test-parallel regression check-fast unittest bugscan
+.PHONY: all build kernel user image run test check lint clean testsuits-download docker docker-test-parallel regression check-fast unittest bugscan
