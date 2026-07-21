@@ -3,7 +3,7 @@ title: "系统架构 (System Architecture)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-21
 tags: [architecture, boot, hal, kernel]
 ---
 
@@ -177,6 +177,7 @@ pub fn rust_main() -> ! {
 | `module-map.md` | 内核根模块、依赖方向、feature 影响 |
 | `initialization-flow.md` | `rust_main()` 初始化阶段、initramfs/legacy 分支 |
 | `boot-and-trap.md` | 启动细节、系统调用和异常/中断路径 |
+| `lock-order.md` | SMP 目标锁序、IRQ 上下文能力和禁止的锁组合（proposed） |
 | `trap-and-syscall-entry.md` | trap 分类、syscall ABI 接入、缺页和 timer 中断 |
 | `hal-and-platform.md` | HAL 接口、rv64/la64 平台后端差异 |
 | `riscv64-platform.md` | RISC-V 64 HAL 后端、SV39、SBI、trap |
