@@ -3,27 +3,27 @@ include make/arch/la64-settings.mk
 
 lwext4-la64: $(LWEXT4_LA_LIB)
 
-$(LWEXT4_LA_LIB): $(LWEXT4_LA_SRCS) $(LWEXT4_LA_HDRS) $(LWEXT4_LA_CMAKE_INPUTS)
+$(LWEXT4_LA_PREPARED): $(LWEXT4_LA_INPUTS)
+	@rm -rf $(LWEXT4_LA_SOURCE_DIR) $(LWEXT4_LA_BUILD_DIR)
+	@mkdir -p $(LWEXT4_LA_SOURCE_DIR)
+	@tar -C $(LWEXT4_LA_DIR) --exclude='build_*' -cf - . | tar -C $(LWEXT4_LA_SOURCE_DIR) -xf -
+	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_SOURCE_DIR)/src/ulibc.c
+	@touch $@
+
+$(LWEXT4_LA_LIB): $(LWEXT4_LA_PREPARED)
 	@echo "=== Building lwext4 C library for loongarch64 ==="
-	@cp -f ../dependency/lwext4_rust/c/elf-linux-gnu.cmake $(LWEXT4_LA_DIR)/toolchain/musl-generic.cmake
-	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_DIR)/src/ulibc.c
-	@grep -q 'ulibc.c' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
-		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
-	@grep -q '$${M_SRC}' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
-		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
-	@mkdir -p $(LWEXT4_LA_DIR)/build_lwext4-la64
 	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
 	 ARCH=loongarch64 cmake -G"Unix Makefiles" \
 	   -DCMAKE_BUILD_TYPE=Release \
 	   -DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
 	   -DLWEXT4_BUILD_SHARED_LIB=OFF \
 	   -DLIB_ONLY=TRUE \
-	   -DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
-	   -S $(LWEXT4_LA_DIR) \
-	   -B $(LWEXT4_LA_DIR)/build_lwext4-la64 2>&1 | tail -5
+	   -DCMAKE_TOOLCHAIN_FILE=$(abspath $(LWEXT4_LA_CMAKE)) \
+	   -S $(LWEXT4_LA_SOURCE_DIR) \
+	   -B $(LWEXT4_LA_BUILD_DIR)
 	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
-	 $(MAKE) -C $(LWEXT4_LA_DIR)/build_lwext4-la64 lwext4 -j$$(nproc)
-	@cp -f $(LWEXT4_LA_DIR)/build_lwext4-la64/src/liblwext4.a $(LWEXT4_LA_LIB)
+	 cmake --build $(LWEXT4_LA_BUILD_DIR) --target lwext4 --parallel $$(nproc)
+	@cp -f $(LWEXT4_LA_BUILD_DIR)/src/liblwext4.a $(LWEXT4_LA_LIB)
 	@echo "=== lwext4 loongarch64 .a built ==="
 
 # ============================================================
@@ -68,11 +68,9 @@ $(INITRAMFS_CPIO_LA): user
 $(REGRESSION_CPIO_LA): user
 	@mkdir -p ../fs-img-dir
 	./build_initramfs.sh la64 $(MODE) $(REGRESSION_CPIO_LA) regression
-	@touch src/initramfs-regression-la.S
 
 kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
-	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true 2>/dev/null || true
 ifeq ($(MODE), debug)
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
 else
@@ -88,7 +86,7 @@ uimage: $(KERNEL_BIN)
 clean:
 	@which cargo >/dev/null 2>&1 && cargo clean || true
 	@rm -rf $(KERNEL_LA)
-	@rm -rf $(LWEXT4_LA_DIR)/build_lwext4-la64 $(LWEXT4_LA_LIB)
+	@rm -rf $(LWEXT4_LA_OUTPUT_DIR)
 
 # ============================================================
 # QEMU run targets
@@ -160,8 +158,7 @@ comp-gdb: toolchain-preflight
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
 ktest-run: toolchain-preflight user $(LWEXT4_LA_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
-	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
-	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
 		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."

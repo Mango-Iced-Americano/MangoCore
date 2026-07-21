@@ -3,33 +3,28 @@ include make/arch/rv64-settings.mk
 
 lwext4-rv64: $(LWEXT4_RV_LIB)
 
-$(LWEXT4_RV_LIB): $(LWEXT4_RV_SRCS) $(LWEXT4_RV_HDRS) $(LWEXT4_RV_CMAKE_INPUTS)
+$(LWEXT4_RV_PREPARED): $(LWEXT4_RV_INPUTS)
+	@rm -rf $(LWEXT4_RV_SOURCE_DIR) $(LWEXT4_RV_BUILD_DIR)
+	@mkdir -p $(LWEXT4_RV_SOURCE_DIR)
+	@tar -C $(LWEXT4_DIR) --exclude='build_*' -cf - . | tar -C $(LWEXT4_RV_SOURCE_DIR) -xf -
+	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_RV_SOURCE_DIR)/src/ulibc.c
+	@touch $@
+
+$(LWEXT4_RV_LIB): $(LWEXT4_RV_PREPARED)
 	@echo "=== Building lwext4 C library for riscv64 ==="
-	@# Copy our cmake toolchain (linux-gnu) over the musl-generic one
-	@cp -f $(LWEXT4_CMAKE) $(LWEXT4_DIR)/toolchain/musl-generic.cmake
-	@# Copy ulibc.c into lwext4 src tree so it gets compiled into the .a
-	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_DIR)/src/ulibc.c
-	@# Ensure ulibc.c is in the library sources (no git apply needed)
-	@grep -q 'ulibc.c' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
-		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_DIR)/src/CMakeLists.txt
-	@grep -q '$${M_SRC}' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
-		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_DIR)/src/CMakeLists.txt
-	@# Build with cmake directly (bypasses the lwext4 Makefile)
-	@mkdir -p $(LWEXT4_DIR)/build_lwext4-rv64
-	@cd $(LWEXT4_DIR)/build_lwext4-rv64 && \
-		ARCH=riscv64 cmake -G"Unix Makefiles" \
+	@ARCH=riscv64 cmake -G"Unix Makefiles" \
 			-DCMAKE_BUILD_TYPE=Release \
 			-DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
 			-DLWEXT4_BUILD_SHARED_LIB=OFF \
 			-DLIB_ONLY=TRUE \
-			-DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
-			.. 2>&1 | tail -5
-	@cd $(LWEXT4_DIR)/build_lwext4-rv64 && make lwext4 -j$$(nproc)
-	@cp -f $(LWEXT4_DIR)/build_lwext4-rv64/src/liblwext4.a $(LWEXT4_RV_LIB)
+			-DCMAKE_TOOLCHAIN_FILE=$(abspath $(LWEXT4_CMAKE)) \
+			-S $(LWEXT4_RV_SOURCE_DIR) -B $(LWEXT4_RV_BUILD_DIR)
+	@cmake --build $(LWEXT4_RV_BUILD_DIR) --target lwext4 --parallel $$(nproc)
+	@cp -f $(LWEXT4_RV_BUILD_DIR)/src/liblwext4.a $(LWEXT4_RV_LIB)
 	@echo "=== lwext4 riscv64 .a built at $(LWEXT4_RV_LIB) ==="
 
 clean-lwext4-rv:
-	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
+	@rm -rf $(LWEXT4_RV_OUTPUT_DIR)
 
 all: toolchain-preflight fs-img build
 
@@ -69,7 +64,6 @@ $(INITRAMFS_CPIO_RV): user
 $(REGRESSION_CPIO_RV): user
 	@mkdir -p ../fs-img-dir
 	./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
-	@touch src/initramfs-regression-rv.S
 
 kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)
@@ -82,7 +76,7 @@ kernel: $(LWEXT4_PREREQ)
 clean:
 	@which cargo >/dev/null 2>&1 && cargo clean || true
 	@rm -rf $(KERNEL_RV)
-	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
+	@rm -rf $(LWEXT4_RV_OUTPUT_DIR)
 
 run: toolchain-preflight build
 ifeq ($(BOARD), rvqemu)
@@ -174,9 +168,8 @@ comp-gdb: toolchain-preflight
 # programs must be built first.
 ktest-run: toolchain-preflight user $(LWEXT4_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
-	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
-	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
-		cargo build --$(MODE) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 \
