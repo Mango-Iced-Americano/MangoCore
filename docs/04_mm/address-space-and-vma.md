@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-19
 tags: [mm, address-space, vma, elf, maps]
 ---
 
@@ -454,19 +454,11 @@ LOAD 段权限来自 `MapPermission::from_ph_flags(ph.flags())`。ELF 类型处�
 | `SharedObject` 且一个 `PT_INTERP` | `ELF_PIE_BASE` |
 | 其他或多个解释器 | `ENOEXEC` / `EINVAL` |
 
-## 6. 只读段 fast map
+相邻 `PT_LOAD` 段允许在同一个向上取整的页中相接或重叠。加载器先验证每段的派生范围与文件范围，再按 VPN 去重并合并 `R/W/X/U` 权限；连续且权限相同的页组成一个 VMA。每页只映射和清零一次，随后仍按 program header 顺序覆盖文件字节，因此后一段在共享页中的字节保持 ELF 规定的顺序。无效范围返回 `ENOEXEC`，页帧或 VMA 容量不足返回 `ENOMEM`。
 
-`map_elf()` 对部分只读 LOAD 段有快速路径：
+## 6. PT_LOAD 共享页映射
 
-```rust
-let can_fast_map_readonly_segment = start_va_page_offset == 0
-    && (file_offset & (PAGE_SIZE - 1)) == 0
-    && file_size != 0
-    && !map_perm.contains(MapPermission::W)
-    && file_page_count == vma_page_count;
-```
-
-满足条件时，用户 VMA 可通过 `map_from_kernel_area()` 映射内核中 ELF 数据所在页，避免复制。失败则回退到 `push_with_offset()` 复制加载。
+该规则同时适用于 boot initproc 和 inode-backed ELF 加载路径，避免同一合法共享页被重复 `Vma::map_one()` 并错误转换为 `ENOEXEC`。
 
 ## 7. 用户栈与 trap context
 

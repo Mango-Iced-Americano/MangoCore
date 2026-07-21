@@ -36,6 +36,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 use core::fmt::Write;
 use log::{debug, error, warn};
 
@@ -859,95 +860,54 @@ impl<T: PageTable> AddressSpace<T> {
             _ => return Err(ENOEXEC),
         };
 
-        let mut program_break: Option<usize> = None;
+        let mut load_segments = Vec::new();
+        load_segments
+            .try_reserve(elf.header.pt2.ph_count() as usize)
+            .map_err(|_| ENOMEM)?;
+        for ph in elf.program_iter() {
+            if ph.get_type().map_err(|_| ENOEXEC)? != xmas_elf::program::Type::Load {
+                continue;
+            }
+            let vaddr = usize::try_from(ph.virtual_addr()).map_err(|_| ENOEXEC)?;
+            let memsz = usize::try_from(ph.mem_size()).map_err(|_| ENOEXEC)?;
+            let file_offset = usize::try_from(ph.offset()).map_err(|_| ENOEXEC)?;
+            let filesz = usize::try_from(ph.file_size()).map_err(|_| ENOEXEC)?;
+            if let Some(segment) = build_load_segment(
+                vaddr,
+                memsz,
+                file_offset,
+                filesz,
+                MapPermission::from_ph_flags(ph.flags()),
+                bias,
+            )? {
+                load_segments.push(segment);
+            }
+        }
+        validate_load_segment_file_bounds(&load_segments, elf.input.len())?;
+        let (program_break, load_addr) = elf_load_summary(&load_segments)?;
+        self.map_elf_load_segments(&load_segments)?;
+        for segment in &load_segments {
+            self.copy_load_segment(segment, |file_offset, dst| {
+                let file_end = file_offset.checked_add(dst.len()).ok_or(ENOEXEC)?;
+                let src = elf.input.get(file_offset..file_end).ok_or(ENOEXEC)?;
+                dst.copy_from_slice(src);
+                Ok(())
+            })?;
+        }
+
         let mut interp_entry: Option<usize> = None;
         let mut interp_base: Option<usize> = None;
-        let mut load_addr: Option<usize> = None; // top va of ELF which points to ELF header
 
         for ph in elf.program_iter() {
-            // Map only when the sections that is to be loaded.
-            match ph.get_type().unwrap() {
-                xmas_elf::program::Type::Load => {
-                    // 防御性检查：拒绝超大段（> 1GB），避免 ELF 加载路径一次性映射过大。
-                    if ph.mem_size() as usize > 1024 * 1024 * 1024 {
-                        log::error!("[map_elf] Segment too large: {} bytes", ph.mem_size());
-                        return Err(ENOMEM);
-                    }
-                    let start_va: VirtAddr = (ph.virtual_addr() as usize + bias).into();
-                    let end_va: VirtAddr =
-                        ((ph.virtual_addr() + ph.mem_size()) as usize + bias).into();
-                    let start_va_page_offset = start_va.page_offset();
-
-                    let map_perm = MapPermission::from_ph_flags(ph.flags());
-                    if load_addr.is_none() {
-                        load_addr = Some(start_va.into());
-                    }
-                    let mut vma = match Vma::try_new(start_va, end_va, map_perm, None, 0) {
-                        Ok(area) => area,
-                        Err(e) => return Err(e),
-                    };
-                    vma.flags = MapFlags::MAP_PRIVATE;
-                    let file_offset = ph.offset() as usize;
-                    let file_size = ph.file_size() as usize;
-                    let file_end = file_offset.checked_add(file_size).ok_or(ENOEXEC)?;
-                    let segment_data = elf.input.get(file_offset..file_end).ok_or(ENOEXEC)?;
-                    let vma_page_count = vma.get_end::<T>().0 - vma.get_start::<T>().0;
-                    let file_page_count = VirtAddr::from(file_size).ceil().0;
-                    let can_fast_map_readonly_segment = start_va_page_offset == 0
-                        && (file_offset & (PAGE_SIZE - 1)) == 0
-                        && file_size != 0
-                        && !map_perm.contains(MapPermission::W)
-                        && file_page_count == vma_page_count;
-
-                    if can_fast_map_readonly_segment {
-                        let kernel_start_vpn =
-                            (VirtAddr::from(elf.input.as_ptr() as usize + file_offset)).floor();
-                        if vma
-                            .map_from_kernel_area(&mut self.page_table, kernel_start_vpn)
-                            .is_ok()
-                        {
-                            self.vmas.push(vma).map_err(|_| ENOMEM)?;
-                        } else {
-                            warn!(
-                                "[map_elf] readonly segment fast map failed; falling back to copy load: va={:#x}, file_offset={:#x}, file_size={:#x}",
-                                start_va.0,
-                                file_offset,
-                                file_size
-                            );
-                            if let Err((err, vpn)) =
-                                self.push_with_offset(vma, start_va_page_offset, segment_data)
-                            {
-                                error!(
-                                    "[map_elf] fallback copy load failed: err={:?}, vpn={:?}",
-                                    err, vpn
-                                );
-                                return Err(match err {
-                                    MemoryError::OutOfMemory => ENOMEM,
-                                    _ => ENOEXEC,
-                                });
-                            }
-                        }
-                    } else {
-                        if let Err((err, vpn)) =
-                            self.push_with_offset(vma, start_va_page_offset, segment_data)
-                        {
-                            error!("[map_elf] copy load failed: err={:?}, vpn={:?}", err, vpn);
-                            return Err(match err {
-                                MemoryError::OutOfMemory => ENOMEM,
-                                _ => ENOEXEC,
-                            });
-                        };
-                    }
-                    let segment_end = VirtAddr::from(end_va.ceil()).0;
-                    program_break =
-                        Some(program_break.map_or(segment_end, |brk| brk.max(segment_end)));
-                }
+            match ph.get_type().map_err(|_| ENOEXEC)? {
+                xmas_elf::program::Type::Load => {}
                 xmas_elf::program::Type::Interp => {
-                    //assert!(elf.input[(ph.offset() + ph.file_size()) as usize] == b'\0');
-                    let path = String::from_utf8_lossy(
-                        &elf.input
-                            [ph.offset() as usize..(ph.offset() + ph.file_size() - 1) as usize],
-                    );
+                    let path_offset = usize::try_from(ph.offset()).map_err(|_| ENOEXEC)?;
+                    let path_len = usize::try_from(ph.file_size()).map_err(|_| ENOEXEC)?;
+                    let path_end = path_offset.checked_add(path_len).ok_or(ENOEXEC)?;
+                    let path_without_nul = path_len.checked_sub(1).ok_or(ENOEXEC)?;
+                    let path_bytes = elf.input.get(path_offset..path_end).ok_or(ENOEXEC)?;
+                    let path = String::from_utf8_lossy(&path_bytes[..path_without_nul]);
                     let _t_interp = crate::task::perf::perf_time_now();
                     let interp_data = crate::task::load_elf_interp(&path)?;
                     let interp = xmas_elf::ElfFile::new(interp_data).map_err(|_| ENOEXEC)?;
@@ -966,24 +926,19 @@ impl<T: PageTable> AddressSpace<T> {
                 _ => {}
             }
         }
-        match (program_break, load_addr) {
-            (Some(program_break), Some(load_addr)) => Ok((
-                program_break,
-                ELFInfo {
-                    entry: elf.header.pt2.entry_point() as usize + bias,
-                    interp_entry,
-                    base: if let Some(interp_base) = interp_base {
-                        interp_base
-                    } else {
-                        bias
-                    },
-                    phnum: elf.header.pt2.ph_count() as usize,
-                    phent: elf.header.pt2.ph_entry_size() as usize,
-                    phdr: load_addr + elf.header.pt2.ph_offset() as usize,
-                },
-            )),
-            _ => Err(ENOEXEC),
-        }
+        let entry = usize::try_from(elf.header.pt2.entry_point()).map_err(|_| ENOEXEC)?;
+        let phoff = usize::try_from(elf.header.pt2.ph_offset()).map_err(|_| ENOEXEC)?;
+        Ok((
+            program_break,
+            ELFInfo {
+                entry: entry.checked_add(bias).ok_or(ENOEXEC)?,
+                interp_entry,
+                base: interp_base.unwrap_or(bias),
+                phnum: elf.header.pt2.ph_count() as usize,
+                phent: elf.header.pt2.ph_entry_size() as usize,
+                phdr: load_addr.checked_add(phoff).ok_or(ENOEXEC)?,
+            },
+        ))
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp and entry point.
@@ -1605,75 +1560,40 @@ impl<T: PageTable> AddressSpace<T> {
             _ => return Err(ENOEXEC),
         };
 
-        // Get PageCache — if unavailable, return ENOSYS to trigger fallback
         let pc = file.inode.ensure_page_cache().ok_or(ENOSYS)?;
+        let load_segments = collect_raw_load_segments(&phdrs, bias)?;
+        validate_load_segment_file_bounds(&load_segments, file.get_size())?;
+        prefetch_load_pages(&pc, &load_segments)?;
+        let (program_break, load_addr) = elf_load_summary(&load_segments)?;
+        self.map_elf_load_segments(&load_segments)?;
+        for segment in &load_segments {
+            self.map_load_segment(&pc, segment)?;
+        }
 
-        // Prefetch all PT_LOAD file pages into PageCache (batch I/O)
-        prefetch_load_pages(&pc, &phdrs)?;
-
-        let mut program_break: Option<usize> = None;
         let mut interp_entry: Option<usize> = None;
         let mut interp_base: Option<usize> = None;
-        let mut load_addr: Option<usize> = None;
         let mut phdr_user_addr: Option<usize> = None;
+        let phdr_bytes = checked_mul(eh.phnum, eh.phentsize)?;
+        let phdr_end = eh.phoff.checked_add(phdr_bytes).ok_or(ENOEXEC)?;
 
         for ph in &phdrs {
             match ph.ty {
                 PT_LOAD => {
-                    if ph.memsz == 0 {
+                    let Some(segment) = build_load_segment(
+                        ph.vaddr,
+                        ph.memsz,
+                        ph.offset,
+                        ph.filesz,
+                        map_permission_from_raw_flags(ph.flags),
+                        bias,
+                    )? else {
                         continue;
-                    }
-                    if ph.filesz > ph.memsz {
-                        return Err(ENOEXEC);
-                    }
-                    if ph.memsz > 1024 * 1024 * 1024 {
-                        return Err(ENOMEM);
-                    }
-
-                    let start = ph.vaddr.checked_add(bias).ok_or(ENOEXEC)?;
-                    let end = start.checked_add(ph.memsz).ok_or(ENOEXEC)?;
-                    let start_va = VirtAddr::from(start);
-                    let end_va = VirtAddr::from(end);
-                    let map_perm = {
-                        let mut p = MapPermission::U;
-                        // PF_R = 4, PF_W = 2, PF_X = 1
-                        if ph.flags & 4 != 0 {
-                            p |= MapPermission::R;
-                        }
-                        if ph.flags & 2 != 0 {
-                            p |= MapPermission::W;
-                        }
-                        if ph.flags & 1 != 0 {
-                            p |= MapPermission::X;
-                        }
-                        p
                     };
-
-                    let mut vma = Vma::try_new(start_va, end_va, map_perm, None, 0)?;
-                    vma.flags = MapFlags::MAP_PRIVATE;
-
-                    self.vmas
-                        .try_reserve(1)
-                        .map_err(|_| ENOMEM)?;
-
-                    self.map_load_segment(&mut vma, &pc, ph, bias, Some(file.inode.clone()))?;
-
-                    self.vmas.push(vma).map_err(|_| ENOMEM)?;
-
-                    if load_addr.is_none() {
-                        load_addr = Some(start);
+                    let file_end = ph.offset.checked_add(ph.filesz).ok_or(ENOEXEC)?;
+                    if ph.offset <= eh.phoff && phdr_end <= file_end {
+                        let phdr_offset = eh.phoff.checked_sub(ph.offset).ok_or(ENOEXEC)?;
+                        phdr_user_addr = Some(segment.start.checked_add(phdr_offset).ok_or(ENOEXEC)?);
                     }
-
-                    // AT_PHDR computation
-                    if ph.offset <= eh.phoff
-                        && eh.phoff + (eh.phnum * eh.phentsize) <= ph.offset + ph.filesz
-                    {
-                        phdr_user_addr = Some(start + (eh.phoff - ph.offset));
-                    }
-
-                    let seg_end_page = VirtAddr::from(end_va.ceil()).0;
-                    program_break =
-                        Some(program_break.map_or(seg_end_page, |old| old.max(seg_end_page)));
                 }
                 PT_INTERP => {
                     if interp_depth != 0 {
@@ -1712,105 +1632,115 @@ impl<T: PageTable> AddressSpace<T> {
             }
         }
 
-        let program_break = program_break.ok_or(ENOEXEC)?;
-        let load_addr = load_addr.ok_or(ENOEXEC)?;
-
         Ok((
             program_break,
             ELFInfo {
-                entry: eh.entry + bias,
+                entry: eh.entry.checked_add(bias).ok_or(ENOEXEC)?,
                 interp_entry,
                 base: interp_base.unwrap_or(bias),
                 phnum: eh.phnum,
                 phent: eh.phentsize,
-                phdr: phdr_user_addr.unwrap_or(load_addr + eh.phoff),
+                phdr: phdr_user_addr.unwrap_or(load_addr.checked_add(eh.phoff).ok_or(ENOEXEC)?),
             },
         ))
     }
 
-    /// Map one PT_LOAD segment from PageCache.
-    /// Readonly full-page segments → file-backed VMA (lazy page fault).
-    /// Writable/partial/BSS → private pages with copy or zero-fill.
-    fn map_load_segment(
-        &mut self,
-        vma: &mut Vma,
-        pc: &PageCache,
-        ph: &RawPhdr,
-        bias: usize,
-        inode: Option<Arc<dyn IndexNode>>,
-    ) -> Result<(), isize> {
-        let seg_va_start = ph.vaddr.checked_add(bias).ok_or(ENOEXEC)?;
-        let seg_file_end = seg_va_start.checked_add(ph.filesz).ok_or(ENOEXEC)?;
-        let writable = vma.map_perm.contains(MapPermission::W);
+    /// Map each rounded PT_LOAD page exactly once using its final permission union.
+    fn map_elf_load_segments(&mut self, segments: &[ElfLoadSegment]) -> Result<(), isize> {
+        let pages = collect_load_pages(segments)?;
+        self.map_elf_page_runs(&pages)?;
+        self.zero_elf_load_pages(&pages)?;
+        Ok(())
+    }
 
-        // LAZY PATH: readonly full-page file-backed segment → create VMA, let page fault handle it
-        let lazy_ok = !writable
-            && ph.filesz == ph.memsz
-            && ph.filesz != 0
-            && (seg_va_start & (PAGE_SIZE - 1)) == 0
-            && (ph.offset & (PAGE_SIZE - 1)) == 0
-            && (ph.filesz & (PAGE_SIZE - 1)) == 0;
-
-        if lazy_ok {
-            if let Some(inode) = inode {
-                vma.map_file = Some(inode);
-                vma.map_file_offset = ph.offset;
-                vma.may_write = false;
-                return Ok(());
-            }
-        }
-
-        // EAGER FALLBACK: per-page mapping for writable/partial/BSS segments
-        for vpn in VPNRange::new(vma.vm_start(), vma.vm_end()) {
-            let page_va_start = VirtAddr::from(vpn).0;
-            let page_va_end = page_va_start + PAGE_SIZE;
-
-            let copy_start = page_va_start.max(seg_va_start);
-            let copy_end = page_va_end.min(seg_file_end);
-            let has_file_bytes = copy_start < copy_end;
-
-            // ZERO-COPY: readonly full-page file-backed segment with page-aligned file offset
-            let full_page_file =
-                has_file_bytes && copy_start == page_va_start && copy_end == page_va_end;
-            if !writable && full_page_file {
-                let file_off = ph.offset + (copy_start - seg_va_start);
-                if file_off & (PAGE_SIZE - 1) == 0 {
-                    let frame = pc
-                        .frame_for_read(file_off >> PAGE_SIZE_BITS)
-                        .map_err(|_| EIO)?;
-                    self.map_existing_frame(vma, vpn, frame)?;
-                    continue;
+    /// Create non-overlapping VMA runs for adjacent pages with equal permissions.
+    fn map_elf_page_runs(&mut self, pages: &[ElfLoadPage]) -> Result<(), isize> {
+        let mut run_start = 0;
+        while run_start < pages.len() {
+            let map_perm = pages[run_start].map_perm;
+            let mut run_end = run_start + 1;
+            while run_end < pages.len() {
+                let expected_vpn = pages[run_end - 1]
+                    .vpn
+                    .0
+                    .checked_add(1)
+                    .ok_or(ENOEXEC)?;
+                if pages[run_end].vpn.0 != expected_vpn || pages[run_end].map_perm != map_perm {
+                    break;
                 }
+                run_end += 1;
             }
 
-            // FALLBACK: writable, partial, or misaligned page
-            let ppn = vma.map_one(&mut self.page_table, vpn)
-                .map_err(|(err, _)| if matches!(err, MemoryError::OutOfMemory) { ENOMEM } else { EIO })?;
+            let end_vpn = pages[run_end - 1]
+                .vpn
+                .0
+                .checked_add(1)
+                .ok_or(ENOEXEC)?;
+            let mut vma = Vma::try_new(
+                VirtAddr::from(pages[run_start].vpn),
+                VirtAddr::from(VirtPageNum(end_vpn)),
+                map_perm,
+                None,
+                0,
+            )
+            .map_err(elf_vma_errno)?;
+            vma.flags = MapFlags::MAP_PRIVATE;
 
-            if has_file_bytes {
-                let dst_off = copy_start - page_va_start;
-                let file_off = ph.offset + (copy_start - seg_va_start);
-                let len = copy_end - copy_start;
-                copy_from_page_cache(pc, file_off, &mut ppn.get_bytes_array()[dst_off..dst_off + len])?;
+            self.vmas.try_reserve(1).map_err(|_| ENOMEM)?;
+            for page in &pages[run_start..run_end] {
+                vma.map_one(&mut self.page_table, page.vpn)
+                    .map_err(|(err, _)| elf_memory_errno(err))?;
             }
-            // BSS: frame_alloc already zeroed — no work needed
+            self.vmas.push(vma).map_err(elf_vma_errno)?;
+            run_start = run_end;
         }
         Ok(())
     }
 
-    /// Map an existing physical frame into user page table.
-    fn map_existing_frame(
-        &mut self,
-        vma: &mut Vma,
-        vpn: VirtPageNum,
-        frame: Arc<FrameTracker>,
-    ) -> Result<(), isize> {
-        let ppn = frame.ppn;
-        vma.inner.alloc_in_memory(vpn, frame).map_err(|_| ENOMEM)?;
-        UserMapper::new(&mut self.page_table)
-            .map_user_page(vpn, ppn, vma.map_perm)
-            .map_err(|_| EIO)?;
+    /// Initialize all shared load pages before ordered file-byte overlays.
+    fn zero_elf_load_pages(&mut self, pages: &[ElfLoadPage]) -> Result<(), isize> {
+        for page in pages {
+            let ppn = translate_page(&self.page_table, page.vpn).ok_or(ENOEXEC)?;
+            ppn.get_bytes_array().fill(0);
+        }
         Ok(())
+    }
+
+    /// Copy one PT_LOAD file range into pages that have already been mapped.
+    fn copy_load_segment<F>(
+        &mut self,
+        segment: &ElfLoadSegment,
+        mut copy_file: F,
+    ) -> Result<(), isize>
+    where
+        F: FnMut(usize, &mut [u8]) -> Result<(), isize>,
+    {
+        let mut remaining = segment.filesz;
+        let mut virtual_address = segment.start;
+        let mut file_offset = segment.file_offset;
+        while remaining > 0 {
+            let vpn = VirtAddr::from(virtual_address).floor();
+            let page_offset = virtual_address & (PAGE_SIZE - 1);
+            let copy_len = remaining.min(PAGE_SIZE - page_offset);
+            let page_end = page_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
+            let ppn = translate_page(&self.page_table, vpn).ok_or(ENOEXEC)?;
+            copy_file(file_offset, &mut ppn.get_bytes_array()[page_offset..page_end])?;
+            virtual_address = virtual_address.checked_add(copy_len).ok_or(ENOEXEC)?;
+            file_offset = file_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
+            remaining -= copy_len;
+        }
+        Ok(())
+    }
+
+    /// Overlay one PT_LOAD file range from PageCache onto mapped load pages.
+    fn map_load_segment(
+        &mut self,
+        pc: &PageCache,
+        segment: &ElfLoadSegment,
+    ) -> Result<(), isize> {
+        self.copy_load_segment(segment, |file_offset, dst| {
+            copy_from_page_cache(pc, file_offset, dst)
+        })
     }
 }
 
@@ -1873,6 +1803,23 @@ struct RawPhdr {
     memsz: usize,
 }
 
+const MAX_ELF_LOAD_SEGMENT_SIZE: usize = 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ElfLoadSegment {
+    start: usize,
+    end: usize,
+    file_offset: usize,
+    filesz: usize,
+    map_perm: MapPermission,
+}
+
+#[derive(Clone, Copy)]
+struct ElfLoadPage {
+    vpn: VirtPageNum,
+    map_perm: MapPermission,
+}
+
 fn parse_elf64_ehdr(buf: &[u8]) -> Result<RawElfHdr, isize> {
     if buf.len() < ELF64_EHDR_SIZE {
         return Err(ENOSYS);
@@ -1909,10 +1856,11 @@ fn parse_elf64_ehdr(buf: &[u8]) -> Result<RawElfHdr, isize> {
 }
 
 fn parse_elf64_phdrs(buf: &[u8], count: usize, entsize: usize) -> Result<Vec<RawPhdr>, isize> {
-    let mut phdrs = Vec::with_capacity(count);
+    let mut phdrs = Vec::new();
+    phdrs.try_reserve(count).map_err(|_| ENOMEM)?;
     for i in 0..count {
-        let off = i * entsize;
-        let b = &buf[off..];
+        let off = checked_mul(i, entsize)?;
+        let b = buf.get(off..).ok_or(ENOEXEC)?;
         let ty = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         let flags = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
         let offset = usize::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
@@ -1934,11 +1882,14 @@ fn parse_elf64_phdrs(buf: &[u8], count: usize, entsize: usize) -> Result<Vec<Raw
 fn pread_exact(file: &vfs::File, offset: usize, buf: &mut [u8]) -> Result<(), isize> {
     let mut off = 0;
     while off < buf.len() {
-        let n = file.pread(offset + off, &mut buf[off..]).map_err(|e| -(e as isize))?;
+        let file_offset = offset.checked_add(off).ok_or(ENOEXEC)?;
+        let n = file
+            .pread(file_offset, &mut buf[off..])
+            .map_err(|e| -(e as isize))?;
         if n == 0 {
             return Err(ENOEXEC);
         }
-        off += n;
+        off = off.checked_add(n).ok_or(ENOEXEC)?;
     }
     Ok(())
 }
@@ -1965,7 +1916,8 @@ fn read_elf_headers(file: &vfs::File) -> Result<(RawElfHdr, Vec<RawPhdr>), isize
     let phdrs_bytes: Vec<u8> = if phend <= 4096 {
         first_page[eh.phoff..phend].to_vec()
     } else {
-        let mut buf = Vec::with_capacity(phdr_bytes);
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(phdr_bytes).map_err(|_| ENOMEM)?;
         buf.resize(phdr_bytes, 0);
         pread_exact(file, eh.phoff, &mut buf)?;
         buf
@@ -1978,14 +1930,181 @@ fn checked_mul(a: usize, b: usize) -> Result<usize, isize> {
     a.checked_mul(b).ok_or(ENOEXEC)
 }
 
-// ── Zero-copy helpers ──
+fn build_load_segment(
+    vaddr: usize,
+    memsz: usize,
+    file_offset: usize,
+    filesz: usize,
+    map_perm: MapPermission,
+    bias: usize,
+) -> Result<Option<ElfLoadSegment>, isize> {
+    if memsz == 0 {
+        return Ok(None);
+    }
+    if filesz > memsz {
+        return Err(ENOEXEC);
+    }
+    if memsz > MAX_ELF_LOAD_SEGMENT_SIZE {
+        return Err(ENOMEM);
+    }
+    let start = vaddr.checked_add(bias).ok_or(ENOEXEC)?;
+    let end = start.checked_add(memsz).ok_or(ENOEXEC)?;
+    file_offset.checked_add(filesz).ok_or(ENOEXEC)?;
+    Ok(Some(ElfLoadSegment {
+        start,
+        end,
+        file_offset,
+        filesz,
+        map_perm,
+    }))
+}
+
+fn map_permission_from_raw_flags(flags: u32) -> MapPermission {
+    let mut map_perm = MapPermission::U;
+    if flags & 4 != 0 {
+        map_perm |= MapPermission::R;
+    }
+    if flags & 2 != 0 {
+        map_perm |= MapPermission::W;
+    }
+    if flags & 1 != 0 {
+        map_perm |= MapPermission::X;
+    }
+    map_perm
+}
+
+fn collect_raw_load_segments(
+    phdrs: &[RawPhdr],
+    bias: usize,
+) -> Result<Vec<ElfLoadSegment>, isize> {
+    let mut segments = Vec::new();
+    segments.try_reserve(phdrs.len()).map_err(|_| ENOMEM)?;
+    for ph in phdrs {
+        if ph.ty != PT_LOAD {
+            continue;
+        }
+        if let Some(segment) = build_load_segment(
+            ph.vaddr,
+            ph.memsz,
+            ph.offset,
+            ph.filesz,
+            map_permission_from_raw_flags(ph.flags),
+            bias,
+        )? {
+            segments.push(segment);
+        }
+    }
+    Ok(segments)
+}
+
+fn validate_load_segment_file_bounds(
+    segments: &[ElfLoadSegment],
+    file_size: usize,
+) -> Result<(), isize> {
+    if segments.is_empty() {
+        return Err(ENOEXEC);
+    }
+    for segment in segments {
+        let file_end = segment
+            .file_offset
+            .checked_add(segment.filesz)
+            .ok_or(ENOEXEC)?;
+        if file_end > file_size {
+            return Err(ENOEXEC);
+        }
+    }
+    Ok(())
+}
+
+fn elf_load_page_range(segment: &ElfLoadSegment) -> Result<(VirtPageNum, VirtPageNum), isize> {
+    let page_start = segment.start & !(PAGE_SIZE - 1);
+    let page_end = segment
+        .end
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or(ENOEXEC)?
+        & !(PAGE_SIZE - 1);
+    if page_start >= page_end {
+        return Err(ENOEXEC);
+    }
+    Ok((
+        VirtAddr::from(page_start).floor(),
+        VirtAddr::from(page_end).floor(),
+    ))
+}
+
+fn elf_load_summary(segments: &[ElfLoadSegment]) -> Result<(usize, usize), isize> {
+    let first = segments.first().ok_or(ENOEXEC)?;
+    let mut program_break = 0;
+    for segment in segments {
+        let (_, end_vpn) = elf_load_page_range(segment)?;
+        let segment_end = VirtAddr::from(end_vpn).0;
+        program_break = program_break.max(segment_end);
+    }
+    Ok((program_break, first.start))
+}
+
+fn collect_load_pages(segments: &[ElfLoadSegment]) -> Result<Vec<ElfLoadPage>, isize> {
+    let mut page_capacity = 0usize;
+    for segment in segments {
+        let (start_vpn, end_vpn) = elf_load_page_range(segment)?;
+        let page_count = end_vpn.0.checked_sub(start_vpn.0).ok_or(ENOEXEC)?;
+        page_capacity = page_capacity.checked_add(page_count).ok_or(ENOEXEC)?;
+    }
+
+    let mut pages: Vec<ElfLoadPage> = Vec::new();
+    pages.try_reserve(page_capacity).map_err(|_| ENOMEM)?;
+    for segment in segments {
+        let (start_vpn, end_vpn) = elf_load_page_range(segment)?;
+        for vpn_value in start_vpn.0..end_vpn.0 {
+            let vpn = VirtPageNum(vpn_value);
+            match pages.binary_search_by(|page| page.vpn.0.cmp(&vpn.0)) {
+                Ok(index) => {
+                    let page = &mut pages[index];
+                    page.map_perm |= segment.map_perm;
+                }
+                Err(index) => pages.insert(
+                    index,
+                    ElfLoadPage {
+                        vpn,
+                        map_perm: segment.map_perm,
+                    },
+                ),
+            }
+        }
+    }
+    if pages.is_empty() {
+        return Err(ENOEXEC);
+    }
+    Ok(pages)
+}
+
+fn elf_memory_errno(err: MemoryError) -> isize {
+    match err {
+        MemoryError::OutOfMemory => ENOMEM,
+        _ => ENOEXEC,
+    }
+}
+
+fn elf_vma_errno(err: isize) -> isize {
+    if err == ENOMEM {
+        ENOMEM
+    } else {
+        ENOEXEC
+    }
+}
 
 /// Batch prefetch all PT_LOAD file pages into PageCache.
-fn prefetch_load_pages(pc: &PageCache, phdrs: &[RawPhdr]) -> Result<(), isize> {
-    for ph in phdrs.iter().filter(|ph| ph.ty == PT_LOAD && ph.filesz > 0) {
-        let start_page = ph.offset >> PAGE_SIZE_BITS;
-        let end_off = ph.offset.saturating_add(ph.filesz);
-        let end_page = (end_off + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+fn prefetch_load_pages(pc: &PageCache, segments: &[ElfLoadSegment]) -> Result<(), isize> {
+    for segment in segments.iter().filter(|segment| segment.filesz > 0) {
+        let start_page = segment.file_offset >> PAGE_SIZE_BITS;
+        let file_end = segment
+            .file_offset
+            .checked_add(segment.filesz)
+            .ok_or(ENOEXEC)?;
+        let end_page = file_end
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(ENOEXEC)?
+            >> PAGE_SIZE_BITS;
         if end_page > start_page {
             pc.sync_batch_read_pages(start_page, end_page - start_page)
                 .map_err(|_| EIO)?;
@@ -2005,8 +2124,8 @@ fn copy_from_page_cache(pc: &PageCache, mut file_off: usize, dst: &mut [u8]) -> 
         let frame = pc.frame_for_read(page_idx).map_err(|_| EIO)?;
         dst[dst_off..dst_off + chunk]
             .copy_from_slice(&frame.ppn.get_bytes_array()[page_off..page_off + chunk]);
-        file_off += chunk;
-        dst_off += chunk;
+        file_off = file_off.checked_add(chunk).ok_or(ENOEXEC)?;
+        dst_off = dst_off.checked_add(chunk).ok_or(ENOEXEC)?;
         remaining -= chunk;
     }
     Ok(())
