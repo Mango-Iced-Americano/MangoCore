@@ -57,8 +57,14 @@ user: toolchain-preflight
 image: toolchain-preflight
 	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" image
 
-run: print-logo toolchain-preflight
-	cd os && make run
+validate-run:
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
+
+run: validate-run print-logo toolchain-preflight
+	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" run
+
+.NOTPARALLEL: run
 
 runsimple: toolchain-preflight
 	cd os && make runsimple
@@ -79,7 +85,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all build clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env user image
+.PHONY: all build clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env user image validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage

@@ -1,7 +1,7 @@
 include make/common/toolchain.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run validate-run
 .NOTPARALLEL:
 
 all: prepare-cargo-config rv64_all la64_all
@@ -96,8 +96,12 @@ laclean:
 fs-img: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk fs-img FS_MODE=$(FS_MODE)
 
-run: toolchain-preflight
-	make -f make/$(CURR_ARCH).mk run
+validate-run:
+	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
+
+run: validate-run toolchain-preflight
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk run INITRAMFS_PROFILE=$(PROFILE)
 
 gdb: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk gdb
