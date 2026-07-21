@@ -1,7 +1,8 @@
 # Building
 TARGET := loongarch64-unknown-linux-gnu
 MODE := release
-KERNEL_ELF := target/$(TARGET)/$(MODE)/os
+KERNEL_OUTPUT_ROOT ?= target
+KERNEL_ELF := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 KERNEL_UIMG := $(KERNEL_ELF).ui
 BLK_MODE := virt_pci

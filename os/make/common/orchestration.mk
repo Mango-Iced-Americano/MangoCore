@@ -5,6 +5,7 @@ TOP_BLK_MODE_ORIGIN := $(origin BLK_MODE)
 BLK_MODE ?= virt
 LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_MODE))
 MODE ?= release
+KERNEL_OUTPUT_ROOT ?= target
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
 CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
