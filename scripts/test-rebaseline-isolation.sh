@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     printf '%s\n' "usage: $0 --allowlist FILE [--repo-root DIR] --verify-fingerprints" >&2
-    printf '%s\n' "       $0 --fixture staged-unowned" >&2
+    printf '%s\n' "       $0 --fixture staged-unowned|staged-allowlisted" >&2
     exit 2
 }
 
@@ -31,13 +31,42 @@ run_staged_unowned_fixture() {
         >"$fixture_root/output" 2>&1; then
         fail 'staged-unowned fixture was accepted'
     fi
-    grep -F 'FAIL: dirty path is not allowlisted: staged.txt' "$fixture_root/output" >/dev/null ||
+    grep -F 'FAIL: staged/index status requires reconciliation: staged.txt' "$fixture_root/output" >/dev/null ||
         fail 'staged-unowned fixture did not identify staged.txt'
-    fail 'staged-unowned fixture confirmed rejection: dirty path is not allowlisted: staged.txt'
+    fail 'staged-unowned fixture confirmed rejection: staged/index status requires reconciliation: staged.txt'
 }
 
-if [ "$#" -eq 2 ] && [ "$1" = '--fixture' ] && [ "$2" = 'staged-unowned' ]; then
-    run_staged_unowned_fixture
+run_staged_allowlisted_fixture() {
+    fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/rebaseline-isolation-fixture.XXXXXX")
+    trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+    repo=$fixture_root/repo
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email rebaseline@example.invalid
+    git -C "$repo" config user.name rebaseline-test
+    printf '%s\n' base >"$repo/protected.txt"
+    git -C "$repo" add protected.txt
+    git -C "$repo" commit -qm baseline
+    printf '%s\n' staged >"$repo/protected.txt"
+    git -C "$repo" add protected.txt
+    fingerprint=$(sha256sum "$repo/protected.txt" | cut -d ' ' -f 1)
+    printf '%s %s %s\n' protected.txt "$fingerprint" outside-rebaseline >"$fixture_root/allowlist"
+
+    if "$0" --allowlist "$fixture_root/allowlist" --repo-root "$repo" --verify-fingerprints \
+        >"$fixture_root/output" 2>&1; then
+        fail 'staged-allowlisted fixture was accepted'
+    fi
+    grep -F 'FAIL: staged/index status requires reconciliation: protected.txt' "$fixture_root/output" >/dev/null ||
+        fail 'staged-allowlisted fixture did not identify protected.txt'
+    fail 'staged-allowlisted fixture confirmed rejection: staged/index status requires reconciliation: protected.txt'
+}
+
+if [ "$#" -eq 2 ] && [ "$1" = '--fixture' ]; then
+    case "$2" in
+        staged-unowned) run_staged_unowned_fixture ;;
+        staged-allowlisted) run_staged_allowlisted_fixture ;;
+        *) usage ;;
+    esac
     exit 0
 fi
 
@@ -118,9 +147,12 @@ while IFS= read -r status_line; do
     [ -n "$status_line" ] || continue
     status=${status_line%${status_line#??}}
     path=${status_line#???}
+    index_status=${status%?}
     case "$status" in
         R*|C*|?R|?C) fail "rename/copy status requires reconciliation: $path" ;;
     esac
+    [ "$status" = '??' ] || [ "$index_status" = ' ' ] ||
+        fail "staged/index status requires reconciliation: $path"
     entry=$(grep -F "${path} " "$allowlist_entries" || true)
     [ -n "$entry" ] || fail "dirty path is not allowlisted: $path"
     set -- $entry
