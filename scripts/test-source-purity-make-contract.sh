@@ -170,6 +170,31 @@ check_variant_copy_recipes() {
     fi
 }
 
+check_profile_build_mutations() {
+    source_path=$1
+    makefile_name=${source_path#"$repo_root"/}
+    violations=$(awk '
+        /^\t/ {
+            line = $0
+            if (line ~ /(^|[[:space:]])(cp|mv|touch|sed[[:space:]]+-i|patch|git[[:space:]]+(checkout|restore))([[:space:]]|$)/ &&
+                line ~ /src\/hal\/arch\/(riscv|loongarch64)\/linker\.ld|src\/initramfs-regression-(rv|la)\.S/) {
+                print FILENAME ":" NR ":" $0
+            }
+            if (line ~ /\$\((LWEXT4_DIR|LWEXT4_LA_DIR)\)\/(toolchain|src)\// &&
+                line ~ /(^|[[:space:]])(cp|mv|touch|sed[[:space:]]+-i|patch)([[:space:]]|$)/) {
+                print FILENAME ":" NR ":" $0
+            }
+        }
+    ' "$source_path")
+
+    if [ -n "$violations" ]; then
+        fail "$makefile_name normal, ktest, or regression recipe mutates tracked linker/initramfs/vendor inputs"
+        printf '%s\n' "$violations" >&2
+    else
+        pass "$makefile_name normal, ktest, and regression recipes write only declared outputs"
+    fi
+}
+
 for required_makefile in Makefile os/Makefile user/Makefile; do
     if [ -r "$repo_root/$required_makefile" ]; then
         pass "read $required_makefile"
@@ -181,6 +206,10 @@ done
 for discovered_makefile in $makefiles; do
     check_prepare_cargo_config_purity "$discovered_makefile"
     check_variant_copy_recipes "$discovered_makefile"
+done
+
+for profile_makefile in os/make/rv64.mk os/make/la64.mk; do
+    check_profile_build_mutations "$repo_root/$profile_makefile"
 done
 
 check_target_selected_lang_items "$repo_root/os/src/main.rs" riscv64 lang_items.rs.rv

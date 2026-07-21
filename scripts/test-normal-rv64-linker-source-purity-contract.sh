@@ -96,6 +96,74 @@ if [ -f "$ROOT_CARGO_CONFIG" ] && [ -f "$OS_CARGO_CONFIG" ]; then
     fi
 fi
 
+build_probe=$(mktemp)
+trap 'rm -f "$root_stanza" "$os_stanza" "$build_probe"' 0
+
+if rustc "$BUILD_RS" -o "$build_probe"; then
+    run_valid_feature_probe() {
+        board=$1
+        feature=$2
+        linker=$3
+        if output=$(env CARGO_CFG_TARGET_ARCH=riscv64 "$feature"=1 "$build_probe" 2>&1); then
+            case "$output" in
+                *"cargo:rerun-if-changed=$linker"*"cargo:rustc-link-arg=-T$linker"*)
+                    printf '%s\n' "PASS: RV64 $board-only feature selects $linker"
+                    ;;
+                *)
+                    fail "RV64 $board-only feature must select $linker"
+                    ;;
+            esac
+        else
+            fail "RV64 $board-only feature probe must succeed"
+        fi
+    }
+
+    run_invalid_feature_probe() {
+        fixture=$1
+        shift
+        if output=$(env CARGO_CFG_TARGET_ARCH=riscv64 "$@" "$build_probe" 2>&1); then
+            fail "$fixture fixture must reject an invalid RV64 board feature set"
+            return
+        fi
+        case "$output" in
+            *"RV64 build requires exactly one board feature"*)
+                fail "$fixture fixture confirmed rejection of invalid RV64 board feature set"
+                ;;
+            *)
+                fail "$fixture fixture must report the RV64 board-feature invariant"
+                ;;
+        esac
+    }
+
+    case "${1:-}" in
+        '')
+            run_valid_feature_probe rvqemu CARGO_FEATURE_BOARD_RVQEMU src/hal/arch/riscv/linker-rvqemu.ld
+            run_valid_feature_probe vf2 CARGO_FEATURE_BOARD_VF2 src/hal/arch/riscv/linker-vf2.ld
+            ;;
+        --fixture)
+            case "${2:-}" in
+                no-board)
+                    run_invalid_feature_probe no-board
+                    ;;
+                dual-board)
+                    run_invalid_feature_probe dual-board CARGO_FEATURE_BOARD_RVQEMU=1 CARGO_FEATURE_BOARD_VF2=1
+                    ;;
+                *)
+                    printf '%s\n' 'usage: test-normal-rv64-linker-source-purity-contract.sh [--fixture no-board|dual-board]' >&2
+                    exit 2
+                    ;;
+            esac
+            exit 1
+            ;;
+        *)
+            printf '%s\n' 'usage: test-normal-rv64-linker-source-purity-contract.sh [--fixture no-board|dual-board]' >&2
+            exit 2
+            ;;
+    esac
+else
+    fail 'cannot compile os/build.rs for RV64 linker feature probes'
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf '%s\n' "normal RV64 linker source purity contract: RED ($failures failure(s))" >&2
     exit 1
