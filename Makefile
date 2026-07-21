@@ -49,7 +49,7 @@ toolchain-preflight:
 env: toolchain-preflight
 
 kernel: toolchain-preflight
-	cd os && make kernel
+	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" kernel
 
 run: print-logo toolchain-preflight
 	cd os && make run
