@@ -15,6 +15,8 @@ mod lang_items;
 #[cfg(target_arch = "loongarch64")]
 #[path = "lang_items.rs.la"]
 mod lang_items;
+#[cfg(target_arch = "loongarch64")]
+pub mod layout;
 pub mod syscall;
 mod usr_call;
 
