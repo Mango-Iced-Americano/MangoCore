@@ -14,7 +14,7 @@
 
 use super::{PhysAddr, PhysPageNum};
 use crate::hal::{local_irq_restore, local_irq_save};
-use crate::config::{MEMORY_START, PAGE_SIZE};
+use crate::config::PAGE_SIZE;
 use crate::hal::MEMORY_END;
 #[cfg(feature = "oom_handler")]
 use crate::task::current_task_ref;
@@ -116,6 +116,8 @@ pub struct StackFrameAllocator {
 impl StackFrameAllocator {
     /// 初始化可分配物理页范围 `[l, r)`。
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
+        self.recycled.clear();
+        self.recycled_flags.clear();
         self.start = l.0;
         self.current = l.0;
         self.end = r.0;
@@ -231,7 +233,7 @@ impl FrameAllocator for StackFrameAllocator {
     /// 释放一个物理页。
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0;
-        let alloc_start = PhysAddr::from(MEMORY_START).floor().0;
+        let alloc_start = self.start;
         if ppn < alloc_start || ppn >= self.end || ppn >= self.current {
             log::warn!(
                 "[frame_dealloc] ignore invalid ppn={:#x}, valid=[{:#x}, {:#x}), current={:#x}",
