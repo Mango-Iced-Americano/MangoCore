@@ -1491,14 +1491,12 @@ impl<T: PageTable> AddressSpace<T> {
         if let Some(ppn) = self.translate(VirtAddr::from(trap_cx_bottom).into()) {
             return Ok(ppn);
         }
-        let trap_cx_ppn = self
-            .insert_framed_area_first_ppn(
-                trap_cx_bottom.into(),
-                trap_cx_top.into(),
-                MapPermission::R | MapPermission::W,
-            )
-            .map_err(|(err, _)| err)?;
-        Ok(trap_cx_ppn)
+        self.insert_framed_area_first_ppn(
+            trap_cx_bottom.into(),
+            trap_cx_top.into(),
+            MapPermission::R | MapPermission::W,
+        )
+        .map_err(|(err, _)| err)
     }
 
     pub fn dealloc_user_res(&mut self, slot: usize) {
