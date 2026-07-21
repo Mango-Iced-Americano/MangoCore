@@ -54,6 +54,9 @@ kernel: toolchain-preflight
 user: toolchain-preflight
 	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" user
 
+image: toolchain-preflight
+	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" image
+
 run: print-logo toolchain-preflight
 	cd os && make run
 
@@ -76,7 +79,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all build clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env user
+.PHONY: all build clean print-logo run run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env user image
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
