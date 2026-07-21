@@ -3,7 +3,7 @@ title: "MangoCore 文档索引"
 category: overview
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-17
+last_updated: 2026-07-21
 tags: [docs, index, overview]
 ---
 
@@ -85,6 +85,7 @@ tags: [docs, index, overview]
 | `05_process/` | [README.md](05_process/README.md) | 稳定 | 进程文档含 17 篇文档，覆盖 TCB/PCB、调度、WaitQueue、clone/namespace、exec、exit/wait、signal、futex、IPC 和 rlimit |
 | `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
 | `09_debug/` | [README.md](09_debug/README.md) | 持续更新 | `la64_on_board/` 按工作批次归档：`260710/` 保存 32 篇 bring-up 总账/专题，`260717/` 保存 Python 性能报告与原始数据 |
+| `10_plan/` | [SMP 实施方案](10_plan/smp-8core-implementation.md)、[Agent 执行规范](10_plan/smp-agent-execution-spec.md) | 提案/规范 | RISC-V 与 LoongArch QEMU 1/2/4/8 核 SMP 的设计、逐批人工确认、约 50 行关键代码原则和验收门禁 |
 
 ### 测试与实板使用
 

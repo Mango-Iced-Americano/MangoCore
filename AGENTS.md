@@ -27,6 +27,7 @@
 8. **不要 workaround** — 从根因解决问题，不做临时绕过
 9. **Mango Workflow 门禁** — 涉及调试、代码修改（编辑/写入源文件、构建配置、测试配置）时，必须先在回复中执行 `skill(name="mango-workflow")` 加载项目知识库。修改完成后再次执行 skill 的 A→D 流程（更新 Work Log → 沉淀经验 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
 10. **回复中必须声明门禁状态** — 每次代码修改完成后，在回复末尾注明 `mango-workflow: loaded, references: <文件名或无>`。
+11. **SMP 适配必须逐批人工确认** — 开始任何 SMP 相关代码修改前，必须完整阅读 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md)。每批关键实现代码原则上约 50 行，保持不变量完整时可少量超出并说明；修改前申请、修改后详细汇报并停止，关键并发代码必须写直接注释，未经用户明确批准不得进入下一批。
 
 ---
 
