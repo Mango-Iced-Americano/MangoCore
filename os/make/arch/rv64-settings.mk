@@ -30,16 +30,16 @@ SDCARD_LA := ../sdcard-la.img
 # lwext4 C library
 # ============================================================
 LWEXT4_DIR := ../dependency/lwext4_rust/c/lwext4
-LWEXT4_RV_LIB := $(LWEXT4_DIR)/liblwext4-riscv64.a
+LWEXT4_RV_OUTPUT_DIR := $(KERNEL_OUTPUT_ROOT)/lwext4/rv64
+LWEXT4_RV_SOURCE_DIR := $(LWEXT4_RV_OUTPUT_DIR)/source
+LWEXT4_RV_BUILD_DIR := $(LWEXT4_RV_OUTPUT_DIR)/build
+LWEXT4_RV_LIB := $(LWEXT4_RV_OUTPUT_DIR)/liblwext4-riscv64.a
+LWEXT4_RV_PREPARED := $(LWEXT4_RV_OUTPUT_DIR)/.prepared
 LWEXT4_CMAKE := ../dependency/lwext4_rust/c/elf-linux-gnu.cmake
-LWEXT4_PATCH := ../dependency/lwext4_rust/c/lwext4-make.patch
 # Prerequisites for archive rebuild invalidation
-LWEXT4_RV_SRCS := $(wildcard $(LWEXT4_DIR)/src/*.c)
-LWEXT4_RV_HDRS := $(wildcard $(LWEXT4_DIR)/include/*.h) $(wildcard $(LWEXT4_DIR)/include/misc/*.h)
-LWEXT4_RV_CMAKE_INPUTS := $(LWEXT4_DIR)/CMakeLists.txt \
-                          $(LWEXT4_DIR)/src/CMakeLists.txt \
-                          $(LWEXT4_CMAKE) \
-                          ../dependency/lwext4_rust/c/ulibc.c
+LWEXT4_RV_INPUTS := $(shell find "$(LWEXT4_DIR)" -type f ! -path "$(LWEXT4_DIR)/build_*/*") \
+                    $(LWEXT4_CMAKE) \
+                    ../dependency/lwext4_rust/c/ulibc.c
 
 ifeq ($(BOARD), vf2)
 ROOTFS_IMG := /dev/sdc
@@ -107,7 +107,7 @@ KERNEL_CMDLINE ?= mango.mode=normal
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
 # lwext4: always build C library (now the default ext4 backend)
-export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_DIR))
+export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_RV_OUTPUT_DIR))
 LWEXT4_PREREQ := lwext4-rv64
 
 # ─────────────────────────────────────────────────────────

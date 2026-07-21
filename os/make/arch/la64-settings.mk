@@ -19,15 +19,17 @@ DISK_LA := ../disk-la.img
 # lwext4 C library (la64: uses pre-installed cross-compiler)
 # ============================================================
 LWEXT4_LA_DIR := ../dependency/lwext4_rust/c/lwext4
-LWEXT4_LA_LIB := $(LWEXT4_LA_DIR)/liblwext4-loongarch64.a
+LWEXT4_LA_OUTPUT_DIR := $(KERNEL_OUTPUT_ROOT)/lwext4/la64
+LWEXT4_LA_SOURCE_DIR := $(LWEXT4_LA_OUTPUT_DIR)/source
+LWEXT4_LA_BUILD_DIR := $(LWEXT4_LA_OUTPUT_DIR)/build
+LWEXT4_LA_LIB := $(LWEXT4_LA_OUTPUT_DIR)/liblwext4-loongarch64.a
+LWEXT4_LA_PREPARED := $(LWEXT4_LA_OUTPUT_DIR)/.prepared
 LWEXT4_LA_TOOLCHAIN_PATH := /opt/gcc-13.2.0-loongarch64-linux-gnu/bin
+LWEXT4_LA_CMAKE := ../dependency/lwext4_rust/c/elf-linux-gnu.cmake
 # Prerequisites for archive rebuild invalidation
-LWEXT4_LA_SRCS := $(wildcard $(LWEXT4_LA_DIR)/src/*.c)
-LWEXT4_LA_HDRS := $(wildcard $(LWEXT4_LA_DIR)/include/*.h) $(wildcard $(LWEXT4_LA_DIR)/include/misc/*.h)
-LWEXT4_LA_CMAKE_INPUTS := $(LWEXT4_LA_DIR)/CMakeLists.txt \
-                          $(LWEXT4_LA_DIR)/src/CMakeLists.txt \
-                          ../dependency/lwext4_rust/c/elf-linux-gnu.cmake \
-                          ../dependency/lwext4_rust/c/ulibc.c
+LWEXT4_LA_INPUTS := $(shell find "$(LWEXT4_LA_DIR)" -type f ! -path "$(LWEXT4_LA_DIR)/build_*/*") \
+                    $(LWEXT4_LA_CMAKE) \
+                    ../dependency/lwext4_rust/c/ulibc.c
 
 # BOARD
 BOARD ?= laqemu
@@ -75,7 +77,7 @@ endif
 KERNEL_CMDLINE ?= mango.mode=normal
 
 # lwext4: always build C library (now the default ext4 backend)
-export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_LA_DIR))
+export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_LA_OUTPUT_DIR))
 LWEXT4_LA_PREREQ := lwext4-la64
 
 # ─────────────────────────────────────────────────────────
