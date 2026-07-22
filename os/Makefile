@@ -66,7 +66,7 @@ publish-compatibility:
 	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"
 
 rv64-kernel-build-only: prepare-cargo-config
-	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk build BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk build BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
 
 rv64-debug: toolchain-preflight
 	make -f make/rv64.mk debug BLK_MODE=${BLK_MODE} MODE=debug
@@ -88,7 +88,7 @@ la64-only: prepare-cargo-config
 	make -f make/la64.mk all MODE=${MODE} LOG=${LOG}
 
 la64-kernel-build-only: prepare-cargo-config
-	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk build BLK_MODE=$(LA64_BLK_MODE) MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user"
+	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk build BLK_MODE=$(LA64_BLK_MODE) MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user"
 
 la64-debug: toolchain-preflight
 	make -f make/la64.mk all MODE=debug	

@@ -62,14 +62,11 @@ use crate::hal::machine_init;
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
 // ── Initramfs root cpio (small boot root filesystem) ──
-	#[cfg(all(feature = "initramfs", feature = "loongarch64", not(feature = "regression_initramfs")))]
-	core::arch::global_asm!(include_str!("initramfs-la.S"));
-	#[cfg(all(feature = "initramfs", feature = "loongarch64", feature = "regression_initramfs"))]
-	core::arch::global_asm!(include_str!("initramfs-regression-la.S"));
-	#[cfg(all(feature = "initramfs", feature = "riscv", not(feature = "regression_initramfs")))]
-core::arch::global_asm!(include_str!("initramfs-rv.S"));
-#[cfg(all(feature = "initramfs", feature = "riscv", feature = "regression_initramfs"))]
-core::arch::global_asm!(include_str!("initramfs-regression-rv.S"));
+// The build script writes this only after validating the profile-selected CPIO.
+#[cfg(all(feature = "initramfs", target_arch = "loongarch64"))]
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
+#[cfg(all(feature = "initramfs", target_arch = "riscv64"))]
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
 
 // ── Legacy: block_mem full rootfs image ──
 #[cfg(all(feature = "block_mem", feature = "loongarch64"))]
@@ -80,15 +77,15 @@ core::arch::global_asm!(include_str!("load_img-rv.S"));
 // ── Preload test payloads (initproc, bash, busybox, LTP) ──
 // When preload_payloads feature is active AND we're not in block_mem mode
 #[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "riscv"))]
-core::arch::global_asm!(include_str!("preload_app-rv.S"));
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 #[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("preload_app.S"));
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 
 // ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
 #[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "riscv"))]
-core::arch::global_asm!(include_str!("preload_app-rv.S"));
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 #[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("preload_app.S"));
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 
 fn mem_clear() {
     extern "C" {
