@@ -73,8 +73,6 @@ grep -F -- 'cargo:rerun-if-changed=' "$build_source" >/dev/null 2>&1 ||
     fail 'build.rs must track generated initramfs inputs'
 grep -F -- 'initramfs.S' "$build_source" >/dev/null 2>&1 ||
     fail 'build.rs must generate the initramfs assembly in OUT_DIR'
-grep -F -- 'preload_app.S' "$build_source" >/dev/null 2>&1 ||
-    fail 'build.rs must generate preload assembly in OUT_DIR'
 echo 'PASS: build.rs declares isolated initramfs artifact inputs and OUT_DIR output'
 
 grep -F -- 'include_str!(concat!(env!("OUT_DIR"), "/initramfs.S"))' "$main_source" >/dev/null 2>&1 ||

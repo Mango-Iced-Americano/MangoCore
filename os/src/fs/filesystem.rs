@@ -6,12 +6,11 @@ use lazy_static::*;
 use log::info;
 use spin::Mutex;
 
-use crate::drivers::BLOCK_DEVICE;
 use crate::drivers::block::BlockDevice;
 
 /// 文件系统类型枚举。
 ///
-/// `Null` 表示未检测到已知文件系统（或 `FORCE_RAMFS` 强制跳过块设备检测）。
+/// `Null` 表示未检测到已知文件系统。
 #[allow(unused, non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum FS_Type {
@@ -68,16 +67,4 @@ pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
             FS_Type::Null
         }
     }
-}
-
-/// 挂载前的文件系统检测入口。
-///
-/// 若 `FORCE_RAMFS` 标志为 `true`，跳过块设备检测，直接返回 `FS_Type::Null`
-///（由 ramfs 接管）。否则调用 `detect_fs(&BLOCK_DEVICE)`。
-pub fn pre_mount() -> FS_Type {
-    if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
-        println!("[fs] ramfs forced, skipping block device detection");
-        return FS_Type::Null;
-    }
-    detect_fs(&BLOCK_DEVICE)
 }

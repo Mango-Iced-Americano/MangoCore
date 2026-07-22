@@ -57,9 +57,7 @@ case "$arch" in
     rv64)
         target="riscv64gc-unknown-none-elf"
         board="rvqemu"
-        # Use minimal features for lint: exclude preload_payloads to avoid
-        # requiring prebuilt user binaries (build.rs skips preload generation
-        # when preload_payloads is off and initramfs is on).
+        # initramfs is the canonical boot root for lint builds.
         features="board_${board},block_virt,oom_handler,initramfs"
         ;;
     la64)

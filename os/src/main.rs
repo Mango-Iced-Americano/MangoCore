@@ -23,8 +23,6 @@
 compile_error!("features initramfs and legacy_block_root are mutually exclusive");
 #[cfg(all(feature = "initramfs", feature = "block_mem"))]
 compile_error!("features initramfs and block_mem are mutually exclusive");
-#[cfg(all(feature = "preload_payloads", not(feature = "initramfs")))]
-compile_error!("feature preload_payloads requires initramfs");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -72,37 +70,6 @@ core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
 core::arch::global_asm!(include_str!("load_img.S"));
 #[cfg(all(feature = "block_mem", feature = "riscv"))]
 core::arch::global_asm!(include_str!("load_img-rv.S"));
-
-// ── Preload test payloads (initproc, bash, busybox, LTP) ──
-// When preload_payloads feature is active AND we're not in block_mem mode
-#[cfg(all(
-    not(feature = "block_mem"),
-    feature = "preload_payloads",
-    feature = "riscv"
-))]
-core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
-#[cfg(all(
-    not(feature = "block_mem"),
-    feature = "preload_payloads",
-    feature = "loongarch64"
-))]
-core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
-
-// ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
-#[cfg(all(
-    not(feature = "block_mem"),
-    not(feature = "initramfs"),
-    not(feature = "preload_payloads"),
-    feature = "riscv"
-))]
-core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
-#[cfg(all(
-    not(feature = "block_mem"),
-    not(feature = "initramfs"),
-    not(feature = "preload_payloads"),
-    feature = "loongarch64"
-))]
-core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 
 fn mem_clear() {
     extern "C" {
@@ -182,30 +149,12 @@ pub fn rust_main() -> ! {
             drivers::init_net_device();
             net::config::init();
 
-            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA，必须在 preload 分配页之前做）。
+            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
             // PID1 owns the later x0/x1 mount policy.
             fs::register_boot_block_devices();
-
-            // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
-            #[cfg(feature = "preload_payloads")]
-            fs::install_preload_payloads();
         } else {
             crate::println!("[kernel] Regression mode — skipping net/block init");
         }
-    }
-
-    // ── Legacy 启动路径（initramfs 特性未启用时）──
-    #[cfg(not(feature = "initramfs"))]
-    {
-        drivers::init_net_device();
-        net::config::init();
-        #[cfg(feature = "block_virt")]
-        println!("[kernel] block in virt mode!");
-        #[cfg(feature = "oom_handler")]
-        println!("[kernel] oom_handler is enabled!");
-        #[cfg(feature = "heap_trace")]
-        println!("[kernel] heap_trace is enabled!");
-        fs::flush_preload();
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();

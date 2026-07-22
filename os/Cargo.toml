@@ -56,9 +56,9 @@ riscv = { path = "../dependency/riscv", features = ["inline-asm"] }
 
 [features]
 # Boot-profile legality:
-# - `initramfs` owns the embedded root and may optionally enable `preload_payloads`.
-# - `legacy_block_root` and `block_mem` are legacy-root modes and must not be combined
-#   with `initramfs`; `preload_payloads` requires `initramfs`.
+# - `initramfs` owns the embedded root.
+# - `legacy_block_root` is a retired compatibility selector and must not be
+#   combined with `initramfs` until T9 removes it in its own change.
 # - normal and regression CPIO selection is Make-only via `MANGO_INITRAMFS_CPIO`,
 #   not a Cargo feature.
 zero_init = []
@@ -81,7 +81,6 @@ perf_stats = []
 perf_diag = ["perf_stats"]
 initramfs = []
 legacy_block_root = []
-preload_payloads = []
 
 # LoongArch Boards:
 loongarch64 = []
@@ -94,8 +93,7 @@ board_vf2 = ["oom_handler", "riscv"]
 # END of LoongArch Boards.
 
 # default = ["board_laqemu", "block_sata"]
-# default = ["board_rvqemu", "block_mem"]
-default = ["initramfs", "preload_payloads"]
+default = ["initramfs"]
 
 [profile.dev]
 # 优化级别
