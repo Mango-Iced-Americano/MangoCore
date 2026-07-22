@@ -1,6 +1,7 @@
 include make/common/toolchain.mk
 include make/image-roles.mk
 include make/arch/rv64-settings.mk
+include make/qemu-profiles.mk
 
 lwext4-rv64: $(LWEXT4_RV_LIB)
 
@@ -87,101 +88,27 @@ check-development-x0:
 
 run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), rvqemu)
-	@qemu-system-riscv64 \
-  		-machine virt \
-  		-nographic \
-  		-bios $(BOOTLOADER) \
-  		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-        -drive if=none,file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),format=raw,id=x0 \
-        $(BLK_DEV_x0) \
-        -drive if=none,file=$(IMAGE_ROLE_RV64_X1),format=raw,id=x1 \
-        $(BLK_DEV_x1) \
-  		-m 1024 \
-  		-smp threads=$(CORE_NUM)
+	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64) -m 1024 -smp threads=$(CORE_NUM)
 endif
 
 monitor:
 	riscv64-unknown-elf-gdb -ex 'file target/riscv64gc-unknown-none-elf/debug/os' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
 gdb: check-development-x0
-	@qemu-system-riscv64 \
-	-machine virt \
-	-nographic \
-	-bios $(BOOTLOADER) \
-	-device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 \
-	-drive file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),if=none,format=raw,id=x0 \
-	$(BLK_DEV_x0) \
-	-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
-	$(BLK_DEV_x1) \
-	-m 1024 \
-	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
+	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64) -m 1024 -smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
 runsimple: toolchain-preflight check-development-x0
-	@qemu-system-riscv64 \
-		-machine virt \
-		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-drive file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),if=none,format=raw,id=x0 \
-		-m 1024 \
-        $(BLK_DEV_x0) \
-		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
-        $(BLK_DEV_x1) \
-		-smp threads=$(CORE_NUM)
+	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64) -m 1024 -smp threads=$(CORE_NUM)
 
 comp: toolchain-preflight
-	@qemu-system-riscv64 \
-		-machine virt \
-		-kernel $(KERNEL_RV) \
-		-m 1024 \
-		-nographic \
-		-smp 1 \
-		-bios default \
-		-drive file=$(IMAGE_ROLE_RV64_COMPETITION_X0),if=none,format=raw,id=x0 \
-		$(BLK_DEV_x0) \
-		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
-		$(BLK_DEV_x1) \
-		-no-reboot \
-		-rtc base=utc \
-		$(NET_DEV) \
-		-object filter-dump,id=f1,netdev=net,file=packets.pcap
+	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default $(call qemu_two_drives,$(IMAGE_ROLE_RV64_COMPETITION_X0),RV64) -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap
 
 derived-comp: toolchain-preflight
 	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch rv64 --path "$(IMAGE_ROLE_RV64_DERIVED_X0)" >/dev/null
-	@qemu-system-riscv64 \
-		-machine virt \
-		-kernel $(KERNEL_RV) \
-		-m 1024 \
-		-nographic \
-		-smp 1 \
-		-bios default \
-		-drive file=$(IMAGE_ROLE_RV64_DERIVED_X0),if=none,format=raw,id=x0 \
-		$(BLK_DEV_x0) \
-		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
-		$(BLK_DEV_x1) \
-		-no-reboot \
-		-rtc base=utc \
-		$(NET_DEV) \
-		-object filter-dump,id=f1,netdev=net,file=packets.pcap
+	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DERIVED_X0),RV64) -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap
 
 comp-gdb: toolchain-preflight
-	@qemu-system-riscv64 \
-        -machine virt \
-        -kernel $(KERNEL_RV) \
-        -m 1024 \
-        -nographic \
-        -smp 1 \
-        -bios default \
-		-drive file=$(IMAGE_ROLE_RV64_COMPETITION_X0),if=none,format=raw,id=x0 \
-        $(BLK_DEV_x0) \
-		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
-        $(BLK_DEV_x1) \
-        -no-reboot \
-        -rtc base=utc \
-	$(NET_DEV) \
-	-object filter-dump,id=f1,netdev=net,file=packets.pcap \
-        -S \
-        -s
+	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default $(call qemu_two_drives,$(IMAGE_ROLE_RV64_COMPETITION_X0),RV64) -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap -S -s
 
 .PHONY: user env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
@@ -203,26 +130,14 @@ ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_RV) $(LWEXT4_
 ktest-run: toolchain-preflight ktest-build-only
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 \
-		-machine virt \
-		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 1024 \
-		-smp threads=1
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_zero_drives) -m 1024 -smp threads=1
 
 regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 qemu-system-riscv64 \
-		-machine virt \
-		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 1024 \
-		-smp threads=1 2>&1 | tee /tmp/regression-rv.log
+	@timeout --foreground 60 qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_zero_drives) -m 1024 -smp threads=1 2>&1 | tee /tmp/regression-rv.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)
