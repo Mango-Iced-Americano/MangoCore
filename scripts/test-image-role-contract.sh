@@ -152,18 +152,18 @@ check_repo() {
     require_line 'include make/qemu-profiles.mk' "$la_make" 'LA64 QEMU must use centralized arguments'
     require_line 'define qemu_two_drives' "$qemu_profiles" 'central QEMU profile must define x0+x1 construction'
     require_line 'define qemu_zero_drives' "$qemu_profiles" 'central QEMU profile must define diskless construction'
-    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64)' "$rv_make" \
-        'RV64 development x0 must use the role map'
-    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_RV64_COMPETITION_X0),RV64)' "$rv_make" \
-        'RV64 development x1 must use the role map'
-    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_RV64_DERIVED_X0),RV64)' "$rv_make" \
-        'RV64 competition x0 must use the role map'
-    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),LA64)' "$la_make" \
-        'LA64 development x0 must use the role map'
-    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_LA64_COMPETITION_X0),LA64)' "$la_make" \
-        'LA64 development x1 must use the role map'
-    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_LA64_DERIVED_X0),LA64)' "$la_make" \
-        'LA64 competition x0 must use the role map'
+    require_line 'qemu_profile_command,development' "$rv_make" \
+        'RV64 development must use the canonical QEMU profile command'
+    require_line 'qemu_profile_command,competition' "$rv_make" \
+        'RV64 competition must use the canonical QEMU profile command'
+    require_line 'qemu_profile_command,derived-competition' "$rv_make" \
+        'RV64 derived-competition must use the canonical QEMU profile command'
+    require_line 'qemu_profile_command,development' "$la_make" \
+        'LA64 development must use the canonical QEMU profile command'
+    require_line 'qemu_profile_command,competition' "$la_make" \
+        'LA64 competition must use the canonical QEMU profile command'
+    require_line 'qemu_profile_command,derived-competition' "$la_make" \
+        'LA64 derived-competition must use the canonical QEMU profile command'
     require_line 'IMAGE_ROLE_RV64_DEVELOPMENT_X0' "$rv_settings" \
         'RV64 development rootfs producer must consult the role map'
     require_line 'IMAGE_ROLE_LA64_DEVELOPMENT_X0' "$la_settings" \
@@ -207,8 +207,8 @@ check_repo() {
     for consumer in "$run_full" "$auto_include" "$auto_exclude"; do
         require_line 'from image_roles import' "$consumer" 'Python consumer bypasses image-role interface'
     done
-    require_line 'derived_x0' "$run_full" 'full-test QEMU must use derived x0 roles'
-    require_line 'roles.path(f"IMAGE_ROLE_{arch.upper()}_X1")' "$run_full" 'full-test x1 must use the role manifest'
+    require_line 'from image_roles import' "$run_full" 'full-test commands must load the image-role interface'
+    require_line 'qemu-profile-dry-run' "$run_full" 'full-test QEMU commands must delegate to the Make profile renderer'
     require_line 'validate_official' "$run_full_runner" 'full-test must validate official archives before extraction'
     for consumer in "$auto_include" "$auto_exclude"; do
         require_line 'derived-run' "$consumer" 'LTP must run named derived-image QEMU targets'
