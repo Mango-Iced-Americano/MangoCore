@@ -31,6 +31,13 @@ $(error CARGO_HOME must be set and non-empty)
 endif
 export RUSTUP_HOME CARGO_HOME
 
+define validate-formal-inputs
+$(if $(filter command line environment environment override,$(origin ARCH)),,$(error ARCH must be explicitly provided))
+$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+$(if $(filter command line environment environment override,$(origin PROFILE)),,$(error PROFILE must be explicitly provided))
+$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+endef
+
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
 QEMU_DIR := util/qemu-2k1000/tmp
@@ -41,8 +48,7 @@ all: toolchain-setup
 	$(MAKE) -C os all
 
 build:
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build
 
 prepare-cargo-config:
@@ -56,32 +62,42 @@ toolchain-preflight:
 env: toolchain-preflight
 
 kernel: toolchain-preflight
+	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" kernel
 
 user: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" user
 
 image: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" image
 
 validate-run:
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 
 run: validate-run print-logo toolchain-preflight
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" run
 
 test: toolchain-preflight
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=regression" "BUILD_ROOT=$(BUILD_ROOT)" test
+	$(call validate-formal-inputs)
+	$(if $(filter regression,$(PROFILE)),,$(error PROFILE must be regression))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" test
 
 check: toolchain-preflight
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" check
 
 lint: toolchain-preflight
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" lint
+
+ktest-build-only: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-build-only
 
 .NOTPARALLEL: run
 
@@ -104,7 +120,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all build kernel user image run test check lint clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
+.PHONY: all build kernel user image run test check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage

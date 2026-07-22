@@ -1,7 +1,7 @@
 include make/common/toolchain.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -12,24 +12,29 @@ all: prepare-cargo-config
 include make/tools.mk
 include make/initramfs.mk
 
+define validate-formal-inputs
+$(if $(filter command line environment environment override,$(origin ARCH)),,$(error ARCH must be explicitly provided))
+$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+$(if $(filter command line environment environment override,$(origin PROFILE)),,$(error PROFILE must be explicitly provided))
+$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+endef
+
 arch-build: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+	$(call validate-formal-inputs)
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
 
 kernel: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+	$(call validate-formal-inputs)
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
 
 user: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk user MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
 
 image: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk fs-img MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
 
 toolchain-preflight:
@@ -119,24 +124,28 @@ fs-img: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk fs-img FS_MODE=$(FS_MODE)
 
 validate-run:
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal)),$(error PROFILE must be normal))
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 
 run: validate-run toolchain-preflight
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk run INITRAMFS_PROFILE=$(PROFILE)
 
 test: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(call validate-formal-inputs)
+	$(if $(filter regression,$(PROFILE)),,$(error PROFILE must be regression))
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk regression-run MODE=$(MODE) PRODUCT_ROOT="$(PRODUCT_ROOT)" KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)"
 
 check: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+	$(call validate-formal-inputs)
 	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk check MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE)) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
 
 lint: prepare-cargo-config
-	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+	$(call validate-formal-inputs)
 	cargo fmt --check
+
+ktest-build-only: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
 
 gdb: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk gdb
