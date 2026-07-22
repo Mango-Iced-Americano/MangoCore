@@ -73,7 +73,9 @@ fn generate_initramfs_assembly() {
 fn generate_preload_assembly() {
     let initramfs_enabled = env::var_os("CARGO_FEATURE_INITRAMFS").is_some();
     let preload_enabled = env::var_os("CARGO_FEATURE_PRELOAD_PAYLOADS").is_some();
-    if initramfs_enabled && !preload_enabled {
+    let legacy_arch_enabled = env::var_os("CARGO_FEATURE_RISCV").is_some()
+        || env::var_os("CARGO_FEATURE_LOONGARCH64").is_some();
+    if !preload_enabled && (initramfs_enabled || !legacy_arch_enabled) {
         return;
     }
 
