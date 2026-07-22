@@ -1,5 +1,5 @@
-# Shared QEMU argument construction. Every launch profile supplies only its
-# loader/kernel choice and x0 role; drives and base arguments are centralized.
+# Shared QEMU argument construction. Architecture makefiles provide the
+# architecture-specific fragments; this file owns every profile selection.
 QEMU_BASE_ARGS = -machine virt -nographic
 
 define qemu_two_drives
@@ -9,3 +9,28 @@ endef
 define qemu_zero_drives
 
 endef
+
+define qemu_competition_command
+$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_COMPETITION_BEFORE_DRIVES) $(call qemu_two_drives,$(1),$(QEMU_ROLE_ARCH)) $(QEMU_COMPETITION_AFTER_DRIVES)
+endef
+
+define qemu_competition_gdb_command
+$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_COMPETITION_GDB_BEFORE_DRIVES) $(call qemu_two_drives,$(QEMU_COMPETITION_X0),$(QEMU_ROLE_ARCH)) $(QEMU_COMPETITION_GDB_AFTER_DRIVES)
+endef
+
+define qemu_development_command
+$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_DEVELOPMENT_BEFORE_DRIVES) $(call qemu_two_drives,$(QEMU_DEVELOPMENT_X0),$(QEMU_ROLE_ARCH)) $(QEMU_DEVELOPMENT_AFTER_DRIVES)
+endef
+
+define qemu_zero_drive_command
+$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(1) $(call qemu_zero_drives) $(2)
+endef
+
+define qemu_profile_command
+$(strip $(if $(filter normal derived-competition,$(1)),$(call qemu_competition_command,$(QEMU_DERIVED_X0)),$(if $(filter competition,$(1)),$(call qemu_competition_command,$(QEMU_COMPETITION_X0)),$(if $(filter development,$(1)),$(call qemu_development_command),$(if $(filter debug,$(1)),$(call qemu_development_command) -S -s,$(if $(filter regression,$(1)),$(call qemu_zero_drive_command,$(QEMU_REGRESSION_BEFORE_DRIVES),$(QEMU_REGRESSION_AFTER_DRIVES)),$(if $(filter ktest,$(1)),$(call qemu_zero_drive_command,$(QEMU_KTEST_BEFORE_DRIVES),$(QEMU_KTEST_AFTER_DRIVES)),$(error unsupported QEMU profile: $(1)))))))))
+endef
+
+qemu-profile-dry-run:
+	@printf '%s\n' "$(call qemu_profile_command,$(QEMU_PROFILE))"
+
+.PHONY: qemu-profile-dry-run

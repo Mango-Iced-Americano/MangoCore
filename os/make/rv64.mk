@@ -3,6 +3,22 @@ include make/image-roles.mk
 include make/arch/rv64-settings.mk
 include make/qemu-profiles.mk
 
+QEMU_EXECUTABLE = qemu-system-riscv64
+QEMU_ROLE_ARCH = RV64
+QEMU_COMPETITION_X0 = $(IMAGE_ROLE_RV64_COMPETITION_X0)
+QEMU_DERIVED_X0 = $(IMAGE_ROLE_RV64_DERIVED_X0)
+QEMU_DEVELOPMENT_X0 = $(IMAGE_ROLE_RV64_DEVELOPMENT_X0)
+QEMU_COMPETITION_BEFORE_DRIVES = -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default
+QEMU_COMPETITION_AFTER_DRIVES = -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap
+QEMU_COMPETITION_GDB_BEFORE_DRIVES = $(QEMU_COMPETITION_BEFORE_DRIVES)
+QEMU_COMPETITION_GDB_AFTER_DRIVES = $(QEMU_COMPETITION_AFTER_DRIVES) -S -s
+QEMU_DEVELOPMENT_BEFORE_DRIVES = -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+QEMU_DEVELOPMENT_AFTER_DRIVES = -m 1024 -smp threads=$(CORE_NUM)
+QEMU_REGRESSION_BEFORE_DRIVES = -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1
+QEMU_KTEST_BEFORE_DRIVES = $(QEMU_REGRESSION_BEFORE_DRIVES)
+QEMU_KTEST_AFTER_DRIVES = $(QEMU_REGRESSION_AFTER_DRIVES)
+
 lwext4-rv64: $(LWEXT4_RV_LIB)
 
 $(LWEXT4_RV_PREPARED): $(LWEXT4_RV_INPUTS)
@@ -88,27 +104,27 @@ check-development-x0:
 
 run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), rvqemu)
-	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64) -m 1024 -smp threads=$(CORE_NUM)
+	@$(call qemu_profile_command,development)
 endif
 
 monitor:
 	riscv64-unknown-elf-gdb -ex 'file target/riscv64gc-unknown-none-elf/debug/os' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
 gdb: check-development-x0
-	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64) -m 1024 -smp threads=$(CORE_NUM) -S -s | tee qemu.log
+	@$(call qemu_profile_command,debug) | tee qemu.log
 
 runsimple: toolchain-preflight check-development-x0
-	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64) -m 1024 -smp threads=$(CORE_NUM)
+	@$(call qemu_profile_command,development)
 
 comp: toolchain-preflight
-	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default $(call qemu_two_drives,$(IMAGE_ROLE_RV64_COMPETITION_X0),RV64) -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap
+	@$(call qemu_profile_command,competition)
 
 derived-comp: toolchain-preflight
 	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch rv64 --path "$(IMAGE_ROLE_RV64_DERIVED_X0)" >/dev/null
-	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default $(call qemu_two_drives,$(IMAGE_ROLE_RV64_DERIVED_X0),RV64) -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap
+	@$(call qemu_profile_command,derived-competition)
 
 comp-gdb: toolchain-preflight
-	@qemu-system-riscv64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_RV) -m 1024 -smp 1 -bios default $(call qemu_two_drives,$(IMAGE_ROLE_RV64_COMPETITION_X0),RV64) -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap -S -s
+	@$(call qemu_competition_gdb_command)
 
 .PHONY: user env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
@@ -130,14 +146,14 @@ ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_RV) $(LWEXT4_
 ktest-run: toolchain-preflight ktest-build-only
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_zero_drives) -m 1024 -smp threads=1
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest)
 
 regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 qemu-system-riscv64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_zero_drives) -m 1024 -smp threads=1 2>&1 | tee /tmp/regression-rv.log
+	@timeout --foreground 60 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)

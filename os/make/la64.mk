@@ -3,6 +3,22 @@ include make/image-roles.mk
 include make/arch/la64-settings.mk
 include make/qemu-profiles.mk
 
+QEMU_EXECUTABLE = qemu-system-loongarch64
+QEMU_ROLE_ARCH = LA64
+QEMU_COMPETITION_X0 = $(IMAGE_ROLE_LA64_COMPETITION_X0)
+QEMU_DERIVED_X0 = $(IMAGE_ROLE_LA64_DERIVED_X0)
+QEMU_DEVELOPMENT_X0 = $(IMAGE_ROLE_LA64_DEVELOPMENT_X0)
+QEMU_COMPETITION_BEFORE_DRIVES = -kernel $(KERNEL_LA) -m 1G -smp 1
+QEMU_COMPETITION_AFTER_DRIVES = -no-reboot $(NET_DEV) -rtc base=utc
+QEMU_COMPETITION_GDB_BEFORE_DRIVES = -kernel $(KERNEL_LA) -m 1024 -smp 1
+QEMU_COMPETITION_GDB_AFTER_DRIVES = -no-reboot -rtc base=utc -S -s
+QEMU_DEVELOPMENT_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
+QEMU_DEVELOPMENT_AFTER_DRIVES = -m 1024 -smp threads=$(CORE_NUM)
+QEMU_REGRESSION_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
+QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1
+QEMU_KTEST_BEFORE_DRIVES = -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+QEMU_KTEST_AFTER_DRIVES = -m 1024 -smp threads=1
+
 lwext4-la64: $(LWEXT4_LA_LIB)
 
 $(LWEXT4_LA_PREPARED): $(LWEXT4_LA_INPUTS)
@@ -102,21 +118,21 @@ check-development-x0:
 
 run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), laqemu)
-	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_ELF) $(call qemu_two_drives,$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),LA64) -m 1024 -smp threads=$(CORE_NUM)
+	@$(call qemu_profile_command,development)
 endif
 
 runsimple: toolchain-preflight check-development-x0
-	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_ELF) $(call qemu_two_drives,$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),LA64) -m 1024 -smp threads=$(CORE_NUM)
+	@$(call qemu_profile_command,development)
 
 comp: toolchain-preflight
-	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_LA) -m 1G -smp 1 $(call qemu_two_drives,$(IMAGE_ROLE_LA64_COMPETITION_X0),LA64) -no-reboot $(NET_DEV) -rtc base=utc
+	@$(call qemu_profile_command,competition)
 
 derived-comp: toolchain-preflight
 	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch la64 --path "$(IMAGE_ROLE_LA64_DERIVED_X0)" >/dev/null
-	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_LA) -m 1G -smp 1 $(call qemu_two_drives,$(IMAGE_ROLE_LA64_DERIVED_X0),LA64) -no-reboot $(NET_DEV) -rtc base=utc
+	@$(call qemu_profile_command,derived-competition)
 
 comp-gdb: toolchain-preflight
-	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_LA) -m 1024 -smp 1 $(call qemu_two_drives,$(IMAGE_ROLE_LA64_COMPETITION_X0),LA64) -no-reboot -rtc base=utc -S -s
+	@$(call qemu_competition_gdb_command)
 
 .PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
@@ -136,14 +152,14 @@ ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_
 ktest-run: toolchain-preflight ktest-build-only
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_zero_drives) -m 1024 -smp threads=1
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest)
 
 regression-run: toolchain-preflight
 	@echo "[regression] Building la64 kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_ELF) $(call qemu_zero_drives) -m 1024 -smp threads=1 >/tmp/regression-la.log 2>&1; \
+	@timeout --foreground 60 $(call qemu_profile_command,regression) >/tmp/regression-la.log 2>&1; \
 	qemu_status=$$?; \
 	cat /tmp/regression-la.log; \
 	state=$$(../scripts/check-la64-regression-log.sh /tmp/regression-la.log $$qemu_status); \
