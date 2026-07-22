@@ -23,6 +23,55 @@ The following paths were already dirty and were not modified by this repair:
 | deleted | `run_test.sh` |
 | untracked | `docs/Work_Log/2026-07-19.md` |
 
+## Final clean and root-build contract repair
+
+### RED reproduction
+
+In a Docker dry-run before this repair, both commands exited 0:
+
+```sh
+make -C os -n BUILD_ROOT=/tmp/t3-build clean
+make -n BUILD_ROOT=/tmp/t3-build COMPAT_OUTPUT_DIR=/tmp/t3-compat clean
+```
+
+The OS trace contained only `for arch in rv64; do`, so LA64 clean was omitted. The root trace only delegated to OS clean and removed BUILD_ROOT; it did not remove `kernel-rv`, `kernel-la`, `disk.img`, or `disk-la.img` from COMPAT_OUTPUT_DIR.
+
+### Repair
+
+- `os/Makefile` now explicitly runs both `rv64` and `la64` architecture clean routes before user cleanup.
+- Root `Makefile` removes only the four published compatibility artifact names from COMPAT_OUTPUT_DIR and removes BUILD_ROOT; it does not delete arbitrary COMPAT_OUTPUT_DIR content.
+- `test-canonical-build-graph.sh` creates temporary BUILD_ROOT/COMPAT_OUTPUT_DIR sentinels, validates both architecture routes, verifies intended artifact removal, and verifies an unrelated sentinel survives.
+- `test-root-build-contract.sh` now rejects missing, invalid, and multiple ARCH/PROFILE values before formal build delegation while retaining root `all` evaluator ordering checks.
+
+### Final Docker validation statuses
+
+The final temporary Docker run used the already-recorded provisioned image and same-path linked-worktree/common-Git mounts. It used temporary `safe.directory` configuration only inside the container.
+
+```text
+T1-rebaseline-isolation exit=0
+T2-source-purity exit=0
+T2-rv64-linker-purity exit=0
+T2-initramfs-purity exit=0
+T2-make-layering exit=0
+T2-toolchain-contract exit=0
+T2-purity-delta-serial exit=0
+facade-root-build exit=0
+facade-root-kernel exit=0
+facade-root-user exit=0
+facade-root-image exit=0
+facade-normal-run exit=0
+facade-expanded-entrypoint exit=0
+T3-canonical-matrix exit=0
+T3-second-stage-failure exit=1 (expected 1)
+serial-os-clean exit=0
+serial-rv64-build exit=0
+serial-la64-build exit=0
+serial-root-clean exit=0
+serial-clean-artifact-sentinels exit=0
+```
+
+`serial-clean-artifact-sentinels` proves the temporary BUILD_ROOT and all four known compatibility artifacts were removed, while the unrelated COMPAT_OUTPUT_DIR sentinel remained. The protected dirty snapshot before and after this run remained exactly the eight paths listed above, with no staged entries.
+
 ## RED reproduction
 
 Before the repair, Docker dry-runs showed that the OS formal `check` and architecture-specific ktest wrappers accepted omitted `ARCH` and/or `PROFILE` through Makefile defaults. The five root facade contracts also failed because their exact-recipe assertions no longer reflected the explicit forwarding interface.

@@ -45,3 +45,17 @@ RV64/LA64 x normal/regression formal check (4 commands): 0
 ```
 
 The protected dirty set was identical before and after: `.gdbinit`, `.omo/boulder.json`, the three listed `cc-codex` deletions, `os_test.conf`, `run_test.sh`, and untracked `docs/Work_Log/2026-07-19.md`. No staged entries were present during validation.
+
+## Final clean contract
+
+Before the repair, Docker dry-runs exited 0 but showed only `for arch in rv64; do` for OS clean and no root COMPAT_OUTPUT_DIR artifact removal. Final Docker validation passed T1/T2, all facade/entrypoint contracts, T3 matrix, and the expected second-stage fixture failure. A temporary sentinel sequence completed serially:
+
+```text
+os clean: 0
+rv64-kernel-build-only: 0
+la64-kernel-build-only: 0
+root clean: 0
+artifact sentinel check: 0
+```
+
+The final sentinel check proved the supplied BUILD_ROOT and `kernel-rv`, `kernel-la`, `disk.img`, `disk-la.img` were removed while an unrelated file in COMPAT_OUTPUT_DIR survived.
