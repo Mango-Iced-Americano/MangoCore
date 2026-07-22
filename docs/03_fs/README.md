@@ -4,7 +4,7 @@ module: fs
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-07-23"
 code_paths:
   - "os/src/fs/"
 entry_points:
@@ -48,7 +48,7 @@ related_docs:
 
 文件系统子系统是 MangoCore 中最核心、代码量最大的模块。它提供了一套完整的 VFS 抽象层，支持多种具体文件系统类型，并通过 PageCache、MountFS 和 syscall 接口与内核其他部分交互。
 
-系统从 `rust_main()` 启动：`VFS_ROOT`（lazy_static 单例）根据编译特性选择 initramfs 或传统块设备模式初始化根文件系统，并只挂载供 PID1 fd 0/1/2 使用的 devfs `/dev`。initramfs 模式下还会解包嵌入式 cpio 归档并延迟发现、注册块设备；`/sbin/init` 随后挂载 `/proc`、`/sys`、`/run`、`/tmp`、`/dev/shm`、`/sdcard` 和 `/tools`。
+系统从 `rust_main()` 启动：`VFS_ROOT`（lazy_static 单例）解包 initramfs CPIO，并只挂载供 PID1 fd 0/1/2 使用的 devfs `/dev`。内核随后发现、注册块设备；`/sbin/init` 挂载 `/proc`、`/sys`、`/run`、`/dev/shm`、x0 `/sdcard` 与 x1 P1 `/tools`，并优先将 `/sdcard/tmp` bind 到 `/tmp`，失败时回退 tmpfs。
 
 ## 架构
 
@@ -74,7 +74,7 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
   +-------------------------------------------------------------------+
 |                  PageCache 层 (缓存 + 回写)                         |
 |    Loading -> UpToDate <-> Dirty -> Writeback                     |
-|    LRU 回收 (高水位 16MB, 批量 64 页)                              |
+|    后台写回约 32MB，节流约 64MB，批量 256 页                       |
   +-------------------------------------------------------------------+
   +-------------------------------------------------------------------+
   |                  BlockDevice 层 (驱动抽象)                          |
@@ -93,7 +93,7 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
 
 **MountFS (os/src/fs/vfs/mount.rs):** 包装层，处理跨文件系统边界的路径解析和挂载传播。每个 MountFS 持有 `BTreeMap<InodeId, Arc<MountFS>>` 挂载点表，在 `find()` 时检查子挂载点并将操作委托到对应 FS。支持 bind mount、recursive bind mount、mount propagation（shared / private / slave）。
 
-**PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。当缓存脏页总量超过高水位（16MB）时触发 LRU 回收，每次批量回收 64 页。后台 `reclaim.rs` 线程周期性探测并回收。
+**PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。后台写回阈值约 32MB、节流阈值约 64MB，批量为 256 页；`reclaim.rs` 周期性探测并回收。
 
 ### 特殊文件描述符
 
@@ -131,7 +131,7 @@ FD 抽象不限于磁盘文件。以下特殊 fd 也通过 `File` trait 集成�
 
 **tmpfs:** 无大小限制的内存文件系统（可配上限），用于 `/tmp` 和 `/dev/shm`。支持 sticky bit、权限检查和目录层级。
 
-**ramfs:** 物理页支持的内存文件系统。作为 initramfs 和非 initramfs 模式的 fallback 根文件系统。不参与块设备回写。
+**ramfs:** 物理页支持的内存文件系统，供 initramfs bootstrap 使用，不参与块设备回写。
 
 **procfs:** `/proc` 伪文件系统。动态生成进程信息（`/proc/[pid]/status`、`maps`、`fd` 等）。支持缓存文本文件（`/proc/version`、`/proc/cpuinfo`）和动态符号链接。
 
@@ -139,7 +139,7 @@ FD 抽象不限于磁盘文件。以下特殊 fd 也通过 `File` trait 集成�
 
 **sysfs:** `/sys` 伪文件系统，提供内核对象信息。架构与 procfs 类似，注册点位于 `sysfs/files.rs`。
 
-**initramfs:** 可选启动模式。在内存中创建 RamFS，解包内嵌 `newc` 格式 cpio 归档，创建挂载点并挂载最小 devfs；最后延迟探测块设备并注册 `/dev/vd*`。常规伪文件系统和磁盘挂载由 PID1 执行。
+**initramfs:** 生产启动根。在内存中创建 RamFS，解包内嵌 `newc` 格式 cpio 归档，创建挂载点并挂载最小 devfs；最后延迟探测块设备并注册 `/dev/vd*`。常规伪文件系统和磁盘挂载由 PID1 执行。
 
 ## FS 子模块索引
 

@@ -71,8 +71,8 @@ rust_main()
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 仅挂载 devfs，并注册 `/dev/tty` 以建立 PID1 的 fd 0/1/2；其余挂载点只是目录。
 4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。
-5. `/sbin/init` 挂载 procfs、sysfs 和 tmpfs，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。
-5. 块设备故障只打印 warning，不 panic。
+5. `/sbin/init` 挂载 procfs、sysfs、`/run`、`/dev/shm`，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。
+6. `/tmp` 优先 bind `/sdcard/tmp`；x0 或 bind 失败时挂载 tmpfs。块设备故障只打印 warning，不 panic。
 
 ## 3. VFS_ROOT lazy_static
 
@@ -107,7 +107,7 @@ lazy_static! {
 | `/dev/shm` | PID1 tmpfs | 共享内存；内核只提供 devfs cover 目录 |
 | `/proc` | PID1 procfs | 进程信息文件系统，动态内容禁用 dentry cache |
 | `/sys` | PID1 sysfs | 内核对象文件系统，动态内容禁用 dentry cache |
-| `/tmp` | PID1 tmpfs | 临时文件系统 |
+| `/tmp` | PID1 bind 或 tmpfs | 优先绑定 `/sdcard/tmp`，失败时 tmpfs |
 | `/mnt` | (目录) | 通用挂载点，权限 0755 |
 | `/run` | PID1 tmpfs | 运行时文件 |
 | `/var/tmp` | (目录) | 临时文件备选，权限 01777 |

@@ -77,7 +77,7 @@ tags: [docs, index, overview]
 
 | 目录 | 文档索引 | 状态 | 说明 |
 |-----------|----------|--------|------|
-| `01_architecture/` | [README.md](01_architecture/README.md) | 稳定 | 架构文档含 11 篇文档，覆盖总体架构、初始化、trap/syscall 入口、HAL、双架构平台和调试映射 |
+| `01_architecture/` | [README.md](01_architecture/README.md) | 草稿 | 架构文档已对齐 CPIO→PID1→runner、镜像角色与当前 Make facade；其余专题按需更新 |
 | `02_syscall/` | [README.md](02_syscall/README.md) | 稳定 | 系统调用文档含 12 篇文档，覆盖 ABI、分发、syscall 表、文件/fd/event、进程、MM、signal/time/IPC、网络索引和错误码 |
 | `03_fs/` | [README.md](03_fs/README.md) | 草稿 | 文件系统子系统含 14 篇文档，涵盖 VFS、PageCache、ext4、FAT32、tmpfs、procfs 等 |
 | `04_mm/` | [README.md](04_mm/README.md) | 稳定 | 内存管理文档含 14 篇文档，覆盖 frame allocator、页表/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、CoW、filemap 和 OOM |
