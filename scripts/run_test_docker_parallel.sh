@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+printf '%s\n' 'ERROR: deprecated: run_test.sh was removed; use python3 scripts/run_full_test.py --serial inside the project Docker container.' >&2
+exit 64
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 

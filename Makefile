@@ -190,7 +190,8 @@ docker:
 	fi
 
 docker-test-parallel:
-	bash scripts/run_test_docker_parallel.sh
+	@printf '%s\n' 'ERROR: docker-test-parallel is deprecated; run python3 scripts/run_full_test.py --serial inside Docker instead.' >&2
+	@exit 64
 
 testsuits-download:
 	cd fs-img-dir && \

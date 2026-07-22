@@ -91,8 +91,8 @@ LTP 本地调试：`ltp_runner=inline` + `ltp_include=read01,write01`（提交�
 ```bash
 cd os && make rv64-run            # LOG=info 查看 syscall 追踪
 cd os && make la64-run
-python3 scripts/run_full_test.py  # 全量一键
-make docker-test-parallel         # 双架构并行
+python3 scripts/run_full_test.py --serial  # 全量一键（串行架构）
+# docker-test-parallel 已弃用并 fail-closed；不得并行双架构构建
 ```
 
 ---
