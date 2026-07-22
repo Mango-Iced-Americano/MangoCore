@@ -72,6 +72,48 @@ serial-clean-artifact-sentinels exit=0
 
 `serial-clean-artifact-sentinels` proves the temporary BUILD_ROOT and all four known compatibility artifacts were removed, while the unrelated COMPAT_OUTPUT_DIR sentinel remained. The protected dirty snapshot before and after this run remained exactly the eight paths listed above, with no staged entries.
 
+## Current-HEAD clean-boundary acceptance
+
+### Reproduced Oracle deletion
+
+Before the repair, the following Docker command returned `root-clean-exit=0 os-target=deleted user-target=deleted` after creating sentinels in `os/target` and `user/target`:
+
+```sh
+mkdir -p os/target user/target
+touch os/target/t3-clean-sentinel user/target/t3-clean-sentinel
+make BUILD_ROOT=/tmp/t3-clean-red-build COMPAT_OUTPUT_DIR=/tmp/t3-clean-red-compat clean
+```
+
+The cause was architecture `clean` recipes calling unscoped `cargo clean` and `os clean` calling an unparameterized `user make clean`.
+
+### Current run metadata
+
+- Git HEAD: `c116be335dd25bc370111a68b2af493b7fcca55c`.
+- UTC start: `2026-07-22T06:22:33Z`.
+- Docker image: `mango-t3-verify:local` (provisioned fixed toolchain).
+- Container ID: `a9a15876f303d2d3159e4fba75c5956ca66748e06014824be94b36ea5fdf38a4`.
+- Mounts: `/home/pxy/projects/MangoCore` -> `/home/pxy/projects/MangoCore` (read-only); `/home/pxy/projects/MangoCore-cleanup` -> `/home/pxy/projects/MangoCore-cleanup` (read-write).
+- Raw output references: retained container `mango-t3-clean-currenthead-20260722`; use `docker logs mango-t3-clean-currenthead-20260722`, and per-command logs remain at `/tmp/t3-clean-current-head-logs/<command>.log` inside that container.
+
+### Full commands and statuses
+
+```text
+T1: sh scripts/test-rebaseline-isolation.sh --allowlist .omo/rebaseline-allowlist.txt --repo-root /home/pxy/projects/MangoCore-cleanup --verify-fingerprints = 0
+T2: test-source-purity, test-normal-rv64-linker-source-purity, test-normal-initramfs-source-purity, test-make-layering, test-toolchain-make, test-rebaseline-purity-delta --serial-kernel-builds = 0 each
+Facades: test-root-build, test-root-kernel, test-root-user, test-root-image, test-normal-run, test-canonical-entrypoint = 0 each
+T3: sh scripts/test-canonical-build-graph.sh --matrix serial = 0
+T3 fixture: sh scripts/test-canonical-build-graph.sh --fixture second-stage-failure = 1 (expected)
+Serial: make -C os BUILD_ROOT=<tmp>/build USER_OUTPUT_ROOT=<tmp>/user clean = 0
+Serial: make -C os BUILD_ROOT=<tmp>/build rv64-kernel-build-only = 0
+Serial: make -C os BUILD_ROOT=<tmp>/build la64-kernel-build-only = 0
+Serial: make BUILD_ROOT=<tmp>/build COMPAT_OUTPUT_DIR=<tmp>/compat USER_OUTPUT_ROOT=<tmp>/user clean = 0
+Serial boundary assertions (target sentinels preserved; BUILD_ROOT, USER_OUTPUT_ROOT, four named artifacts removed; unrelated compat sentinel preserved) = 0
+```
+
+### Protected fingerprints before and after
+
+The status set was identical before and after: deleted `.gdbinit`, the three listed `cc-codex` records, and `run_test.sh`; modified `.omo/boulder.json` (`c2370b7bd6021b3194a9ac13c42f994645ce9398e178b48cd7368dbbbc46aa65`) and `os_test.conf` (`5d78edc2d7733352046cad727983238de167c597ee6a223afbc980346aa6be22`); untracked `docs/Work_Log/2026-07-19.md` (`b30b14a47df9c0ad6370ec495a52ff641627b8137f7ef0a7774be69b5ad323a4`). No staged entries existed during the run.
+
 ## RED reproduction
 
 Before the repair, Docker dry-runs showed that the OS formal `check` and architecture-specific ktest wrappers accepted omitted `ARCH` and/or `PROFILE` through Makefile defaults. The five root facade contracts also failed because their exact-recipe assertions no longer reflected the explicit forwarding interface.

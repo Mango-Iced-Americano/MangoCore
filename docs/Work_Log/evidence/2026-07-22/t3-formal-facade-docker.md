@@ -59,3 +59,13 @@ artifact sentinel check: 0
 ```
 
 The final sentinel check proved the supplied BUILD_ROOT and `kernel-rv`, `kernel-la`, `disk.img`, `disk-la.img` were removed while an unrelated file in COMPAT_OUTPUT_DIR survived.
+
+## Current-HEAD boundary evidence
+
+- HEAD: `c116be335dd25bc370111a68b2af493b7fcca55c`
+- UTC: `2026-07-22T06:22:33Z`
+- Container: `a9a15876f303d2d3159e4fba75c5956ca66748e06014824be94b36ea5fdf38a4` (`mango-t3-clean-currenthead-20260722`)
+- Mounts: `/home/pxy/projects/MangoCore` -> same path (ro); `/home/pxy/projects/MangoCore-cleanup` -> same path (rw).
+- Raw logs: `docker logs mango-t3-clean-currenthead-20260722`; per-command logs at `/tmp/t3-clean-current-head-logs/` in that retained container.
+
+All T1/T2/facade/T3 gates passed at this HEAD; the second-stage fixture returned expected 1. The serial clean/build chain passed while preserving `os/target` and `user/target` sentinels, and pre/post protected fingerprints matched.
