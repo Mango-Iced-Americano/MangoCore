@@ -126,6 +126,14 @@
 
 ## QEMU / 测试
 
+### QEMU console ANSI/CRLF 使严格 evidence gate 误判
+
+- **现象**：QEMU guest 已输出精确 backend/workload-success marker 和 iozone START/END delimiter，QEMU exit 0，但 runner 报 marker 或 selected iozone group 缺失。
+- **根因**：串口输出可在行首带 ANSI SGR（如 `\033[0m`），且每行以 CRLF 结束；持久化日志中的 `\r` 会使 `grep ...$` 和 AWK `$0 == marker` 的严格匹配失败。
+- **修复**：保留原始 `qemu-output.log` 作为证据。在 iozone 展示文本解析时去除 ANSI SGR；在机器 completion marker 的消费边界仅 `sub(/\015$/, "", line)`，再执行完整 run ID/backend/sample regex 与 boot-before-success 顺序检查。不得使用 `tr -d '\r'`、通用 whitespace trim 或非锚定匹配。
+- **验证**：deterministic fixture 同时覆盖健康 CRLF、倒序 marker、错误 run ID、CR 前尾随空格；再以私有 QEMU 单样本端到端验证。
+- **相关文件**：`scripts/run_ext4_backend_ab.sh`
+
 ### `make docker` 拉镜像超时但 Docker CE 源已换国内镜像
 
 - **现象**: `apt update`/`apt install docker-compose-plugin` 已走清华等 Docker CE 软件源，但 `make docker` 仍在拉 `os-dev` 镜像时 timeout。
