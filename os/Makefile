@@ -2,7 +2,7 @@ include make/common/toolchain.mk
 include make/image-roles.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -158,6 +158,10 @@ lint-format: prepare-cargo-config
 ktest-build-only: prepare-cargo-config
 	$(call validate-formal-inputs)
 	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
+
+ktest-run: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk ktest-run MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
 
 gdb: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk gdb
