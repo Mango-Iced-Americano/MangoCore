@@ -106,11 +106,25 @@ else
     fail 'root build target must be available to make -n'
 fi
 
-if make -C "$repo_root" -n build >/dev/null 2>&1; then
-    fail 'root build must reject missing ARCH and PROFILE'
-else
-    pass 'root build rejects missing ARCH and PROFILE'
-fi
+require_invalid_build() {
+    description=$1
+    shift
+    if output=$(make -C "$repo_root" -n "$@" build 2>&1); then
+        fail "root build must reject $description"
+    elif printf '%s\n' "$output" | grep -Eq 'make/(rv64|la64)\.mk[[:space:]]+build'; then
+        fail "root build must reject $description before architecture build delegation"
+    else
+        pass "root build rejects $description before architecture build delegation"
+    fi
+}
+
+require_invalid_build 'missing ARCH and PROFILE'
+require_invalid_build 'missing PROFILE' ARCH=rv64
+require_invalid_build 'missing ARCH' PROFILE=normal
+require_invalid_build 'invalid ARCH' ARCH=arm64 PROFILE=normal
+require_invalid_build 'invalid PROFILE' ARCH=rv64 PROFILE=staging
+require_invalid_build 'multiple ARCH values' 'ARCH=rv64 la64' PROFILE=normal
+require_invalid_build 'multiple PROFILE values' ARCH=rv64 'PROFILE=normal regression'
 
 if all_trace=$(make -C "$repo_root" -n -j8 all 2>&1); then
     setup_line=$(printf '%s\n' "$all_trace" | awk '/scripts\/rustup-setup\.sh/ { print NR; exit }')

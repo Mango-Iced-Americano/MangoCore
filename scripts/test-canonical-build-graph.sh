@@ -95,4 +95,49 @@ else
     fail 'root all dry-run must succeed'
 fi
 
+clean_tmp=$(mktemp -d)
+trap 'rm -rf "$clean_tmp"' EXIT HUP INT TERM
+os_build_root="$clean_tmp/os-build"
+root_build_root="$clean_tmp/root-build"
+compat_output="$clean_tmp/compat"
+
+mkdir -p "$os_build_root/rv64" "$os_build_root/la64" "$root_build_root/rv64" "$root_build_root/la64" "$compat_output"
+touch "$os_build_root/rv64/sentinel" "$os_build_root/la64/sentinel"
+
+if clean_trace=$(make -C "$repo_root/os" -n BUILD_ROOT="$os_build_root" clean 2>&1); then
+    case "$clean_trace" in
+        *'for arch in rv64 la64; do'*'/rv64/release/normal/kernel/kernel-rv'* ) pass 'os clean dispatches the RV64 architecture clean route' ;;
+        * ) fail 'os clean must dispatch the RV64 architecture clean route' ;;
+    esac
+    case "$clean_trace" in
+        *'for arch in rv64 la64; do'*'/la64/release/normal/kernel/kernel-la'* ) pass 'os clean dispatches the LA64 architecture clean route' ;;
+        * ) fail 'os clean must dispatch the LA64 architecture clean route' ;;
+    esac
+else
+    fail 'os clean dry-run must succeed'
+fi
+
+if make -C "$repo_root/os" BUILD_ROOT="$os_build_root" clean >/dev/null 2>&1 && [ ! -e "$os_build_root" ]; then
+    pass 'os clean removes the supplied BUILD_ROOT after both architecture routes'
+else
+    fail 'os clean must remove the supplied BUILD_ROOT'
+fi
+
+for artifact in kernel-rv kernel-la disk.img disk-la.img; do
+    touch "$compat_output/$artifact"
+done
+touch "$compat_output/unrelated-sentinel"
+
+if make -C "$repo_root" BUILD_ROOT="$root_build_root" COMPAT_OUTPUT_DIR="$compat_output" clean >/dev/null 2>&1 \
+    && [ ! -e "$root_build_root" ] \
+    && [ ! -e "$compat_output/kernel-rv" ] \
+    && [ ! -e "$compat_output/kernel-la" ] \
+    && [ ! -e "$compat_output/disk.img" ] \
+    && [ ! -e "$compat_output/disk-la.img" ] \
+    && [ -e "$compat_output/unrelated-sentinel" ]; then
+    pass 'root clean removes only known compatibility artifacts and the supplied BUILD_ROOT'
+else
+    fail 'root clean must remove known compatibility artifacts without touching unrelated files'
+fi
+
 exit "$overall"
