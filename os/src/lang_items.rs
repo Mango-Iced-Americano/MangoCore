@@ -1,3 +1,5 @@
+#[cfg(target_arch = "riscv64")]
+use core::fmt::Write;
 use crate::hal::shutdown;
 use core::panic::PanicInfo;
 

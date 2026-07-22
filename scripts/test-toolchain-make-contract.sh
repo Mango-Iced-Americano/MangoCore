@@ -286,8 +286,7 @@ export FAKE_PREFLIGHT_LOG
 FAKE_RUSTUP_LOG := $work_dir/rustup.log
 export FAKE_RUSTUP_LOG
 EOF
-: >"$fixture_root/user/src/lang_items.rs.rv"
-: >"$fixture_root/user/src/lang_items.rs.la"
+: >"$fixture_root/user/src/lang_items.rs"
 
 cat >"$fixture_root/scripts/rustup-preflight.sh" <<'EOF'
 #!/bin/sh

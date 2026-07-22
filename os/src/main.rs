@@ -39,11 +39,6 @@ mod drivers;
 mod fs;
 mod hal;
 mod kernel_tests;
-#[cfg(target_arch = "riscv64")]
-#[path = "lang_items.rs.rv"]
-mod lang_items;
-#[cfg(target_arch = "loongarch64")]
-#[path = "lang_items.rs.la"]
 mod lang_items;
 mod math;
 mod mm;

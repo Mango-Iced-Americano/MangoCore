@@ -90,25 +90,15 @@ check_prepare_cargo_config_purity() {
     fi
 }
 
-check_target_selected_lang_items() {
+check_lang_items_unified() {
     source=$1
-    expected_arch=$2
-    expected_path=$3
+    label=$2
 
-    if ! awk -v arch="$expected_arch" -v path="$expected_path" '
-        $0 ~ "^#[[:space:]]*\\[cfg\\(target_arch[[:space:]]*=[[:space:]]*\"" arch "\"\\)\\][[:space:]]*$" {
-            getline path_line
-            getline mod_line
-            if (path_line ~ "^#[[:space:]]*\\[path[[:space:]]*=[[:space:]]*\"" path "\"\\][[:space:]]*$" &&
-                mod_line ~ "^[[:space:]]*mod[[:space:]]+lang_items[[:space:]]*;[[:space:]]*$") {
-                found = 1
-            }
-        }
-        END { exit(found ? 0 : 1) }
-    ' "$source"; then
-        fail "$source missing target-selected #[path] $expected_path for target_arch=$expected_arch"
+    if grep -E '^mod lang_items;' "$source" >/dev/null 2>&1 && \
+       ! grep -F '[path = "lang_items.rs.' "$source" >/dev/null 2>&1; then
+        pass "$label uses unified lang_items (no variant paths)"
     else
-        pass "$source selects $expected_path for target_arch=$expected_arch"
+        fail "$label still uses variant-specific lang_items #[path]"
     fi
 }
 
@@ -212,10 +202,8 @@ for profile_makefile in os/make/rv64.mk os/make/la64.mk; do
     check_profile_build_mutations "$repo_root/$profile_makefile"
 done
 
-check_target_selected_lang_items "$repo_root/os/src/main.rs" riscv64 lang_items.rs.rv
-check_target_selected_lang_items "$repo_root/os/src/main.rs" loongarch64 lang_items.rs.la
-check_target_selected_lang_items "$repo_root/user/src/lib.rs" riscv64 lang_items.rs.rv
-check_target_selected_lang_items "$repo_root/user/src/lib.rs" loongarch64 lang_items.rs.la
+check_lang_items_unified "$repo_root/os/src/main.rs" 'os/src/main.rs'
+check_lang_items_unified "$repo_root/user/src/lib.rs" 'user/src/lib.rs'
 
 run_adversarial_fixture() {
     fixture_parent=$(mktemp -d "${TMPDIR:-/tmp}/source-purity-make-contract.XXXXXX")
@@ -236,19 +224,9 @@ prepare-cargo-config:
 
 EOF
     cat >"$fixture_root/os/src/main.rs" <<'EOF'
-#[cfg(target_arch = "riscv64")]
-#[path = "lang_items.rs.rv"]
-mod lang_items;
-#[cfg(target_arch = "loongarch64")]
-#[path = "lang_items.rs.la"]
 mod lang_items;
 EOF
     cat >"$fixture_root/user/src/lib.rs" <<'EOF'
-#[cfg(target_arch = "riscv64")]
-#[path = "lang_items.rs.rv"]
-mod lang_items;
-#[cfg(target_arch = "loongarch64")]
-#[path = "lang_items.rs.la"]
 mod lang_items;
 EOF
     cat >"$fixture_root/modules/variant-copy.mk" <<'EOF'
