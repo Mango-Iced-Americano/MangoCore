@@ -46,6 +46,7 @@ fn write_assembly(filename: &str, source: String) {
 fn generate_initramfs_assembly() {
     println!("cargo:rerun-if-env-changed=MANGO_INITRAMFS_CPIO");
     println!("cargo:rerun-if-env-changed=MANGO_USER_OUTPUT_ROOT");
+    println!("cargo:rerun-if-env-changed=MANGO_USER_OUTPUT_MODE");
 
     if env::var_os("CARGO_FEATURE_INITRAMFS").is_none() {
         return;
@@ -80,7 +81,8 @@ fn generate_preload_assembly() {
     }
 
     let user_output_root = required_path("MANGO_USER_OUTPUT_ROOT");
-    let profile = env::var("PROFILE").unwrap_or_else(|_| String::from("release"));
+    let user_output_mode = env::var("MANGO_USER_OUTPUT_MODE")
+        .unwrap_or_else(|_| panic!("MANGO_USER_OUTPUT_MODE is required for preload payloads"));
     let (target, tool_arch, compat_library) = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("riscv64") => (
             "riscv64gc-unknown-none-elf",
@@ -95,7 +97,7 @@ fn generate_preload_assembly() {
         Ok(arch) => panic!("preload payloads do not support target architecture: {}", arch),
         Err(_) => panic!("CARGO_CFG_TARGET_ARCH is required for preload payloads"),
     };
-    let user_bin = user_output_root.join(target).join(profile);
+    let user_bin = user_output_root.join(target).join(user_output_mode);
     let repo_root = required_path("CARGO_MANIFEST_DIR")
         .parent()
         .unwrap_or_else(|| panic!("os manifest directory has no repository parent"))

@@ -43,6 +43,7 @@ for arch in rv64 la64; do
             fail "$arch $profile ktest build-only dry-run must succeed"
         require_trace "$trace" "MANGO_INITRAMFS_CPIO=" "$arch $profile ktest receives the selected CPIO"
         require_trace "$trace" "MANGO_USER_OUTPUT_ROOT=" "$arch $profile ktest receives the selected user root"
+        require_trace "$trace" "MANGO_USER_OUTPUT_MODE=\"release\"" "$arch $profile ktest receives the selected user mode"
         require_trace "$trace" "$cpio" "$arch $profile ktest selects its CPIO artifact"
         case "$trace" in
             *qemu-system-*) fail "$arch $profile ktest build-only dry-run must not launch QEMU" ;;
@@ -58,6 +59,7 @@ for arch in rv64 la64; do
             fail "$arch $profile formal check dry-run must succeed"
         require_trace "$trace" "MANGO_INITRAMFS_CPIO=" "$arch $profile formal check receives the selected CPIO"
         require_trace "$trace" "MANGO_USER_OUTPUT_ROOT=" "$arch $profile formal check receives the selected user root"
+        require_trace "$trace" "MANGO_USER_OUTPUT_MODE=\"release\"" "$arch $profile formal check receives the selected user mode"
         require_trace "$trace" "$cpio" "$arch $profile formal check selects its CPIO artifact"
         require_trace "$trace" "$board" "$arch $profile formal check selects a valid board feature"
         require_trace "$trace" "$target" "$arch $profile formal check selects its target"
