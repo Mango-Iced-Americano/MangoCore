@@ -17,6 +17,7 @@ USER_OUTPUT_ROOT="${USER_OUTPUT_ROOT:-../user/target}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$(mktemp -d)"
+mkdir -p "$STAGE/proc" "$STAGE/sys" "$STAGE/run" "$STAGE/tmp" "$STAGE/dev/shm" "$STAGE/sdcard" "$STAGE/tools"
 # 将输出路径转为绝对路径
 case "$OUT" in
   /*) OUT_ABS="$OUT" ;;

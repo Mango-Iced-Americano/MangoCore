@@ -2,16 +2,17 @@
 #![no_main]
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use user_lib::syscall::{sys_mkdirat, sys_mount};
 use user_lib::{
-    exec, exit, fork, getpid, kill, open, println, read, shutdown, sigaction, sleep,
+    exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
     waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
 };
-use user_lib::syscall::sys_mkdirat;
 
 const PID1: isize = 1;
 const RUNNER: &str = "/usr/libexec/mangocore/test-runner\0";
 const RESCUE_SHELL: &str = "/rescue/sh\0";
 const SIGACTION_RESTART: usize = 0x10000000;
+const MS_BIND: usize = 4096;
 static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -53,10 +54,42 @@ fn reap_orphans() {
 
 fn prepare_pseudo_fs_framework() {
     const AT_FDCWD: isize = -100;
-    for path in ["/dev\0", "/proc\0", "/sys\0", "/run\0", "/tmp\0", "/dev/shm\0"] {
+    for path in [
+        "/dev\0",
+        "/proc\0",
+        "/sys\0",
+        "/run\0",
+        "/tmp\0",
+        "/dev/shm\0",
+    ] {
         let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
     }
-    println!("[initd] pseudo-fs mount framework ready; policy deferred to T8");
+    println!("[initd] pseudo-fs mount framework ready");
+}
+
+fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
+    let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
+    if result < 0 {
+        println!(
+            "[initd] mount {} at {} failed: {}",
+            fstype.trim_end_matches('\0'),
+            target.trim_end_matches('\0'),
+            result
+        );
+        return false;
+    }
+    true
+}
+
+fn mount_pseudo_filesystems() {
+    let _ = try_mount("none\0", "/proc\0", "proc\0");
+    let _ = try_mount("none\0", "/sys\0", "sysfs\0");
+    let _ = try_mount("none\0", "/run\0", "tmpfs\0");
+    let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
+}
+
+fn mount_disk(source: &'static str, target: &'static str) -> bool {
+    try_mount(source, target, "ext4\0") || try_mount(source, target, "fat32\0")
 }
 
 fn boot_profile() -> &'static str {
@@ -67,7 +100,17 @@ fn boot_profile() -> &'static str {
     let mut cmdline = [0u8; 256];
     let size = read(fd as usize, &mut cmdline);
     let _ = user_lib::close(fd as usize);
-    if size > 0 && cmdline[..size as usize].windows(b"profile=rescue".len()).any(|v| v == b"profile=rescue") {
+    if size > 0
+        && cmdline[..size as usize]
+            .windows(b"mango.mode=regression".len())
+            .any(|v| v == b"mango.mode=regression")
+    {
+        "regression"
+    } else if size > 0
+        && cmdline[..size as usize]
+            .windows(b"profile=rescue".len())
+            .any(|v| v == b"profile=rescue")
+    {
         "rescue"
     } else {
         "normal"
@@ -75,10 +118,10 @@ fn boot_profile() -> &'static str {
 }
 
 fn runner_environment(profile: &str) -> [*const u8; 8] {
-    let profile_var = if profile == "rescue" {
-        "MANGO_BOOT_PROFILE=rescue\0"
-    } else {
-        "MANGO_BOOT_PROFILE=normal\0"
+    let profile_var = match profile {
+        "regression" => "MANGO_BOOT_PROFILE=regression\0",
+        "rescue" => "MANGO_BOOT_PROFILE=rescue\0",
+        _ => "MANGO_BOOT_PROFILE=normal\0",
     };
     [
         "SHELL=/bin/sh\0".as_ptr(),
@@ -97,7 +140,11 @@ fn rescue_forever() -> ! {
     loop {
         let shell = fork();
         if shell == 0 {
-            exec(RESCUE_SHELL, &[RESCUE_SHELL.as_ptr(), core::ptr::null()], &[core::ptr::null()]);
+            exec(
+                RESCUE_SHELL,
+                &[RESCUE_SHELL.as_ptr(), core::ptr::null()],
+                &[core::ptr::null()],
+            );
             exit(127);
         }
         if shell < 0 {
@@ -120,9 +167,43 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     }
     install_signal_handlers();
     prepare_pseudo_fs_framework();
+    mount_pseudo_filesystems();
     let profile = boot_profile();
+    if profile != "regression" {
+        let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
+        if !mount_disk("/dev/vdb1\0", "/tools\0") {
+            let _ = mount_disk("/dev/vdb\0", "/tools\0");
+        }
+        // /tmp: prefer ext4-backed /tmp if a block device is available
+        if disk_ok {
+            const AT_FDCWD: isize = -100;
+            let _ = sys_mkdirat(AT_FDCWD, "/sdcard/tmp\0", 0o1777);
+            let result = sys_mount(
+                "/sdcard/tmp\0".as_ptr(),
+                "/tmp\0".as_ptr(),
+                core::ptr::null(),
+                MS_BIND,
+                0,
+            );
+            if result < 0 {
+                println!("[initd] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs", result);
+                let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+            } else {
+                println!("[initd] /tmp is bind-mounted from ext4 /sdcard/tmp");
+            }
+        } else {
+            let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+        }
+    } else {
+        // No block device in regression mode
+        let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+    }
     let environ = runner_environment(profile);
-    println!("[initd] PID1 profile={} runner={}", profile, RUNNER.trim_end_matches('\0'));
+    println!(
+        "[initd] PID1 profile={} runner={}",
+        profile,
+        RUNNER.trim_end_matches('\0')
+    );
 
     loop {
         let pid = fork();
@@ -141,13 +222,19 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         loop {
             let waited = waitpid_wnohang(pid, &mut status);
             if waited == pid {
-                println!("[initd] MANGO_RUNNER_FAILURE: runner exited status={}", status);
+                println!(
+                    "[initd] MANGO_RUNNER_FAILURE: runner exited status={}",
+                    status
+                );
                 reap_orphans();
                 shutdown();
                 rescue_forever();
             }
             if waited < 0 {
-                println!("[initd] MANGO_RUNNER_FAILURE: runner wait failed ret={}", waited);
+                println!(
+                    "[initd] MANGO_RUNNER_FAILURE: runner wait failed ret={}",
+                    waited
+                );
                 reap_orphans();
                 shutdown();
                 rescue_forever();

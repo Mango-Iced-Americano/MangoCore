@@ -75,15 +75,33 @@ core::arch::global_asm!(include_str!("load_img-rv.S"));
 
 // ── Preload test payloads (initproc, bash, busybox, LTP) ──
 // When preload_payloads feature is active AND we're not in block_mem mode
-#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "riscv"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    feature = "preload_payloads",
+    feature = "riscv"
+))]
 core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
-#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "loongarch64"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    feature = "preload_payloads",
+    feature = "loongarch64"
+))]
 core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 
 // ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
-#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "riscv"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    not(feature = "initramfs"),
+    not(feature = "preload_payloads"),
+    feature = "riscv"
+))]
 core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
-#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "loongarch64"))]
+#[cfg(all(
+    not(feature = "block_mem"),
+    not(feature = "initramfs"),
+    not(feature = "preload_payloads"),
+    feature = "loongarch64"
+))]
 core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/preload_app.S")));
 
 fn mem_clear() {
@@ -155,7 +173,7 @@ pub fn rust_main() -> ! {
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
-        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
+        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs bootstrap
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
@@ -164,8 +182,9 @@ pub fn rust_main() -> ! {
             drivers::init_net_device();
             net::config::init();
 
-            // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
-            fs::mount_boot_block_devices();
+            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA，必须在 preload 分配页之前做）。
+            // PID1 owns the later x0/x1 mount policy.
+            fs::register_boot_block_devices();
 
             // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
             #[cfg(feature = "preload_payloads")]
@@ -187,7 +206,6 @@ pub fn rust_main() -> ! {
         #[cfg(feature = "heap_trace")]
         println!("[kernel] heap_trace is enabled!");
         fs::flush_preload();
-        fs::mount_tools_disk();
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();

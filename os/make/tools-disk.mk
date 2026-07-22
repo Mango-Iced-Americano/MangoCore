@@ -53,6 +53,7 @@ define build_tools_disk
 		for applet in cp mv rm ln ls mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test mkfs.vfat; do \
 			ln -sf busybox "$$applet" 2>/dev/null; \
 		done && ln -sf bash sh 2>/dev/null || true; \
+	cd "$$workspace"; \
 	umount "$$mountpoint"; mounted=0; rmdir "$$mountpoint"; \
 	echo "[tools-disk] Wrapping with MBR → $(1)..."; \
 	python3 $(MBR_SCRIPT) "$$payload" $(1); \

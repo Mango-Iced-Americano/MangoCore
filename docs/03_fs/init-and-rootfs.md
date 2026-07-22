@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-07-22
 code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/fs/filesystem.rs"
@@ -34,9 +34,9 @@ related_docs:
 
 ## 1. 概述
 
-根文件系统初始化是内核启动的关键阶段。它在内存管理初始化之后执行，负责探测块设备、识别文件系统类型、创建 VFS 根并挂载默认伪文件系统。无论底层是 ext4、FAT32 还是 ramfs，最终的根文件系统都被包装为统一的 `MountFS` 实例，供上层系统和用户进程通过 VFS 接口访问。
+根文件系统初始化是内核启动的关键阶段。它在内存管理初始化之后执行，负责创建 VFS 根、解包 initramfs、提供 PID1 所需的最小 devfs/tty bootstrap，并发现和注册块设备。常规伪文件系统和磁盘挂载由 `/sbin/init` 通过 `mount` syscall 执行。
 
-整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `rust_main` 在合适的时机触发。
+内核初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `prepare_kernel_bootstrap_filesystem` 函数中；PID1 挂载策略集中在 `user/src/bin/initd.rs`。
 
 ## 2. 启动流程
 
@@ -50,17 +50,13 @@ rust_main()
   |     |-- fs::initramfs_init()       触发 VFS_ROOT lazy_static
   |     |     |-- [new RamFS]
   |     |     |-- [unpack_embedded()]  解包内嵌 cpio 归档
-  |     |     |-- [mount_common_filesystems()]
-  |     |     |     |-- /dev (devfs)
-  |     |     |     |-- /proc (procfs)
-  |     |     |     |-- /sys (sysfs)
-  |     |     |     |-- /tmp (tmpfs)
-  |     |     |     |-- /dev/shm (tmpfs)
-  |     |     |     |-- /mnt, /run, /var/tmp (目录)
+   |     |     |-- [prepare_kernel_bootstrap_filesystem()]
+   |     |     |     |-- 创建 PID1 挂载点目录
+   |     |     |     |-- /dev (devfs，含 /dev/tty 与 /dev/shm cover 目录)
   |     |
   |     |-- drivers::init_net_device()
   |     |-- net::config::init()
-  |     |-- fs::mount_boot_block_devices()  探测块设备并挂载
+   |     |-- fs::register_boot_block_devices()  探测块设备并注册 /dev/vd*
   |
   |-- [initramfs 特性未启用: legacy 路径]
   |     |-- drivers::init_net_device()
@@ -70,8 +66,10 @@ rust_main()
   |           |-- ext4/fat32 或 fallback ramfs
   |           |-- mount_common_filesystems()
   |
-  |-- task::add_initproc()            加载 init 进程
-  |-- task::run_tasks()               进入调度
+   |-- task::add_initproc()            加载 init 进程（fd 0/1/2 使用 /dev/tty）
+   |-- task::run_tasks()               进入调度
+   |     |-- /sbin/init: 挂载 proc/sys/run/tmp/dev/shm
+   |     |-- /sbin/init: normal 模式挂载 x0→/sdcard、x1→/tools
 ```
 
 ### 2.1 两种启动模式
@@ -80,8 +78,9 @@ rust_main()
 
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
-3. 挂载 devfs、procfs、sysfs、tmpfs 等伪文件系统。
-4. 调用 `mount_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点；当前内核兼容层随后将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。设备发现/注册与该临时挂载策略已分离，挂载策略将在 T8 移交 PID1。
+3. 仅挂载 devfs，并注册 `/dev/tty` 以建立 PID1 的 fd 0/1/2；其余挂载点只是目录。
+4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。
+5. `/sbin/init` 挂载 procfs、sysfs 和 tmpfs，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。
 5. 块设备故障只打印 warning，不 panic。
 
 **Legacy 模式**（`initramfs` 特性未启用）：
@@ -90,7 +89,7 @@ rust_main()
 2. `pre_mount()` 调用 `detect_fs()` 读取块 0 的引导扇区，识别文件系统类型。
 3. 根据 `FS_Type` 打开 ext4 或 FAT32 文件系统，包装为 `MountFS`。
 4. 如果均未识别（`FS_Type::Null`），fallback 到 ramfs。
-5. 挂载 devfs、procfs、sysfs、tmpfs。
+5. 仅挂载 devfs bootstrap；用户态 PID1 继续承担常规挂载策略。
 
 ### 2.2 force_ramfs 调试开关
 
@@ -124,7 +123,7 @@ lazy_static! {
 }
 ```
 
-初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 挂载伪文件系统。块设备在此阶段不参与，后续通过 `mount_boot_block_devices()` 以子挂载形式接入。
+初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 创建挂载点 → 挂载 devfs。块设备在此阶段不参与，后续仅由 `register_boot_block_devices()` 注册为设备节点。
 
 ### 3.2 Legacy 模式
 
@@ -148,30 +147,30 @@ lazy_static! {
 }
 ```
 
-初始化流程：可选择跳过块设备检测 → `pre_mount()` → `detect_fs()` → 打开具体文件系统 → MountFS 包装 → 挂载伪文件系统。
+初始化流程：可选择跳过块设备检测 → `pre_mount()` → `detect_fs()` → 打开具体文件系统 → MountFS 包装 → 挂载 devfs bootstrap。
 
 `detect_fs()` 读取块 0 的一个完整块（BLOCK_SIZE）：首先检查偏移 510 处 MBR 签名 `0x55AA`，若无 MBR 则检查偏移 1024 + 56 = 1080 处 ext4 超级块魔数 `0xEF53`。
 
 ## 4. 默认挂载点
 
-`mount_common_filesystems()` 在根文件系统就绪后统一挂载以下伪文件系统和目录：
+内核 `prepare_kernel_bootstrap_filesystem()` 只创建以下挂载点并挂载 devfs；PID1 随后使用 mount syscall 覆盖对应目录：
 
 | 挂载点 | 文件系统类型 | 说明 |
 |--------|-------------|------|
 | `/dev` | devfs | 设备文件系统，注册 tty、null、zero、urandom、full、random、console、ptmx、pts、rtc、cpu_dma_latency、misc/rtc |
-| `/dev/shm` | tmpfs | 共享内存，容量 16MB，权限 01777（sticky bit） |
-| `/proc` | procfs | 进程信息文件系统，权限 0555，禁用 dentry cache |
-| `/sys` | sysfs | 内核对象文件系统，权限 0555，禁用 dentry cache |
-| `/tmp` | tmpfs | 临时文件系统，无大小限制，权限 01777 |
+| `/dev/shm` | PID1 tmpfs | 共享内存；内核只提供 devfs cover 目录 |
+| `/proc` | PID1 procfs | 进程信息文件系统，动态内容禁用 dentry cache |
+| `/sys` | PID1 sysfs | 内核对象文件系统，动态内容禁用 dentry cache |
+| `/tmp` | PID1 tmpfs | 临时文件系统 |
 | `/mnt` | (目录) | 通用挂载点，权限 0755 |
-| `/run` | (目录) | 运行时文件，权限 0755 |
+| `/run` | PID1 tmpfs | 运行时文件 |
 | `/var/tmp` | (目录) | 临时文件备选，权限 01777 |
 
-devfs 使用 `MountFS` 子挂载注入，`/dev/shm` 的 tmpfs 作为 devfs 的子挂载注册。procfs 和 sysfs 禁用 dentry cache，因为它们的内容动态生成。
+devfs 使用 `MountFS` 子挂载注入，并在 PID1 创建前注册 `/dev/tty`。procfs 和 sysfs 由 `sys_mount` 创建，且因内容动态生成而禁用 dentry cache。
 
 ### 4.1 PID1 tty 与后续挂载职责
 
-内核在创建 PID1 前完成 devfs 挂载并注册 `/dev/tty`，因此 `TaskControlBlock::new()` 可以为 fd 0、1、2 打开最小控制台 bootstrap。ktest 的独立内核任务没有用户态 fd，显式跳过这一步。除这个 `/dev/tty` bootstrap 外，其余启动挂载策略仍是过渡性内核兼容逻辑，计划在 T8 由 PID1 接管。
+内核在创建 PID1 前完成 devfs 挂载并注册 `/dev/tty`，因此 `TaskControlBlock::new()` 可以为 fd 0、1、2 打开最小控制台 bootstrap。ktest 的独立内核任务没有用户态 fd，显式跳过这一步。除此 `/dev/tty` bootstrap 外，所有正常启动挂载策略均由 PID1 接管。
 
 ## 5. Initramfs 解包
 
@@ -217,7 +216,7 @@ pub fn vfs_root() -> Arc<MountFS> {
 ## 8. 关键设计点
 
 - **VFS_ROOT 初始化顺序**：必须发生在 `mm::init()` 之后（需要堆分配器），且在 `task::add_initproc()` 之前（init 进程需要根文件系统）。
-- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA，必须在内存分配压力低时进行。initramfs 路径将块设备探测（`mount_boot_block_devices`）推迟到网络初始化之后、preload payload 安装之前。
+- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA，必须在内存分配压力低时进行。initramfs 路径将块设备发现/注册（`register_boot_block_devices`）推迟到网络初始化之后、preload payload 安装之前；不得在内核中选择或挂载 x0/x1。
 - **不可递归触发 VFS_ROOT**：initramfs 解包期间（`unpack_newc`）严禁调用 `vfs_root()`，必须使用传入的 `root` 参数，否则引发递归 lazy_static 初始化死锁。
 - **块设备故障不 panic**：无论是根文件系统未识别还是 tools 盘缺失，均 fallback 到 ramfs 或打印 warning 继续执行。这对调试和 CI 环境至关重要。
 - **MountFS 包装统一入口**：无论底层是磁盘文件系统（ext4/FAT32）还是伪文件系统（ramfs），全部包装为 `MountFS`，使路径解析、子挂载管理、挂载传播通过统一的 MountFS 层处理。

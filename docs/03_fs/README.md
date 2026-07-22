@@ -10,8 +10,8 @@ code_paths:
 entry_points:
   - "VFS_ROOT"
   - "initramfs_init"
-  - "mount_common_filesystems"
-  - "mount_boot_block_devices"
+  - "prepare_kernel_bootstrap_filesystem"
+  - "register_boot_block_devices"
   - "vfs_lookup"
 arch:
   rv64: supported
@@ -48,7 +48,7 @@ related_docs:
 
 文件系统子系统是 MangoCore 中最核心、代码量最大的模块。它提供了一套完整的 VFS 抽象层，支持多种具体文件系统类型，并通过 PageCache、MountFS 和 syscall 接口与内核其他部分交互。
 
-系统从 `rust_main()` 启动：`VFS_ROOT`（lazy_static 单例）根据编译特性选择 initramfs 或传统块设备模式初始化根文件系统，然后依次挂载 devfs、procfs、sysfs、tmpfs 到 `/dev`、`/proc`、`/sys`、`/tmp`。initramfs 模式下还会解包嵌入式 cpio 归档并延迟挂载块设备（`/sdcard`、`/tools`）。
+系统从 `rust_main()` 启动：`VFS_ROOT`（lazy_static 单例）根据编译特性选择 initramfs 或传统块设备模式初始化根文件系统，并只挂载供 PID1 fd 0/1/2 使用的 devfs `/dev`。initramfs 模式下还会解包嵌入式 cpio 归档并延迟发现、注册块设备；`/sbin/init` 随后挂载 `/proc`、`/sys`、`/run`、`/tmp`、`/dev/shm`、`/sdcard` 和 `/tools`。
 
 ## 架构
 
@@ -139,7 +139,7 @@ FD 抽象不限于磁盘文件。以下特殊 fd 也通过 `File` trait 集成�
 
 **sysfs:** `/sys` 伪文件系统，提供内核对象信息。架构与 procfs 类似，注册点位于 `sysfs/files.rs`。
 
-**initramfs:** 可选启动模式。在内存中创建 RamFS，解包内嵌 `newc` 格式 cpio 归档，然后挂载 devfs / procfs / tmpfs，最后延迟探测块设备并挂载 `/sdcard` 和 `/tools`。
+**initramfs:** 可选启动模式。在内存中创建 RamFS，解包内嵌 `newc` 格式 cpio 归档，创建挂载点并挂载最小 devfs；最后延迟探测块设备并注册 `/dev/vd*`。常规伪文件系统和磁盘挂载由 PID1 执行。
 
 ## FS 子模块索引
 
