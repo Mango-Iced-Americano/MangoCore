@@ -51,6 +51,40 @@ require_zero_drive_profile() {
     fail "$target must remain a zero-drive profile in $file"
 }
 
+assert_injection_guard() {
+    destination=$1
+    mkdir -p "$repo/build/development/rv64" "$repo/build/development/la64" "$fixture_root/bin"
+    : >"$repo/sdcard-rv.img"
+    sha256sum "$repo/sdcard-rv.img" >"$repo/sdcard-rv.img.sha256"
+    : >"$repo/sdcard-la.img"
+    sha256sum "$repo/sdcard-la.img" >"$repo/sdcard-la.img.sha256"
+    printf '%s\n' 'mask=0x001' >"$fixture_root/os_test.conf"
+    cat >"$fixture_root/bin/cp" <<'EOF'
+#!/bin/sh
+printf '%s\n' cp >>"$FIXTURE_MUTATION_LOG"
+exit 99
+EOF
+    cat >"$fixture_root/bin/e2fsck" <<'EOF'
+#!/bin/sh
+printf '%s\n' e2fsck >>"$FIXTURE_MUTATION_LOG"
+exit 99
+EOF
+    cat >"$fixture_root/bin/debugfs" <<'EOF'
+#!/bin/sh
+printf '%s\n' debugfs >>"$FIXTURE_MUTATION_LOG"
+exit 99
+EOF
+    chmod +x "$fixture_root/bin/cp" "$fixture_root/bin/e2fsck" "$fixture_root/bin/debugfs"
+
+    if PATH="$fixture_root/bin:$PATH" FIXTURE_MUTATION_LOG="$fixture_root/mutations" \
+        ARCH=rv64 BLK_MODE=virt CONF_FILE="$fixture_root/os_test.conf" \
+        DERIVED_IMAGE_PATH="$destination" "$repo/os/inject_os_test_conf.sh" >"$fixture_root/output" 2>&1; then
+        fail "fixture was accepted: $fixture"
+    fi
+    grep -F 'image-role error:' "$fixture_root/output" >/dev/null || fail 'injection guard fixture lacked a diagnostic'
+    [ ! -e "$fixture_root/mutations" ] || fail 'injection guard mutated an image before rejection'
+}
+
 check_repo() {
     root=$1
     role_map=$root/os/make/image-roles.mk
@@ -60,6 +94,10 @@ check_repo() {
     la_make=$root/os/make/la64.mk
     tools_make=$root/os/make/tools-disk.mk
     inject_script=$root/os/inject_os_test_conf.sh
+    role_tool=$root/scripts/image_roles.py
+    run_full=$root/scripts/run_full_test.py
+    auto_include=$root/scripts/auto_include_ltp.py
+    auto_exclude=$root/scripts/auto_exclude_ltp.py
 
     [ -r "$role_map" ] || fail 'missing centralized image role map'
     for role in \
@@ -71,6 +109,10 @@ check_repo() {
         IMAGE_ROLE_LA64_DEVELOPMENT_X0 \
         IMAGE_ROLE_RV64_COMPETITION_X0 \
         IMAGE_ROLE_LA64_COMPETITION_X0 \
+        IMAGE_ROLE_RV64_DERIVED_X0 \
+        IMAGE_ROLE_LA64_DERIVED_X0 \
+        IMAGE_ROLE_RV64_DERIVED_X0_NEXT \
+        IMAGE_ROLE_LA64_DERIVED_X0_NEXT \
         IMAGE_ROLE_RV64_X1 \
         IMAGE_ROLE_LA64_X1 \
         IMAGE_ROLE_X1_PARTITION1 \
@@ -80,7 +122,7 @@ check_repo() {
         require_role "$role"
     done
 
-    [ "$(role_value IMAGE_ROLE_MANIFEST_VERSION "$role_map")" = '1' ] ||
+    [ "$(role_value IMAGE_ROLE_MANIFEST_VERSION "$role_map")" = '2' ] ||
         fail 'unsupported image role manifest version'
     [ "$(role_value IMAGE_ROLE_DRIVE_ORDER "$role_map")" = 'x0 x1' ] ||
         fail 'normal development ABI must be exactly x0 x1'
@@ -142,16 +184,37 @@ check_repo() {
         fail 'tools disk builder must not use a global /tmp mountpoint'
     fi
 
-    require_line 'official evaluator image is immutable' "$inject_script" \
-        'config injection must reject official x0 mutation'
     require_line 'DERIVED_IMAGE_PATH' "$inject_script" \
         'config injection must require a named derived development image'
+    require_line 'validate-derived' "$inject_script" \
+        'config injection must validate the derived output before mutation'
+    require_line 'validate-mutable' "$inject_script" \
+        'config injection must reject every official alias before fsck/debugfs'
     if grep -E 'debugfs -w.*sdcard-(rv|la)\.img' "$inject_script" >/dev/null 2>&1; then
         fail 'config injection still writes an official sdcard directly'
     fi
     if grep -E 'debugfs -w.*sdcard-(rv|la)\.img|cp .*sdcard-(rv|la)\.img' "$root/os/Makefile" >/dev/null 2>&1; then
         fail 'legacy Make target still mutates an official evaluator image'
     fi
+    [ -r "$role_tool" ] || fail 'Python consumers need the image-role interface'
+    for consumer in "$run_full" "$auto_include" "$auto_exclude"; do
+        require_line 'from image_roles import' "$consumer" 'Python consumer bypasses image-role interface'
+    done
+    require_line 'derived_x0' "$run_full" 'full-test QEMU must use derived x0 roles'
+    require_line 'ROLES.path("IMAGE_ROLE_RV64_X1")' "$run_full" 'full-test RV64 x1 must use the role manifest'
+    require_line 'ROLES.path("IMAGE_ROLE_LA64_X1")' "$run_full" 'full-test LA64 x1 must use the role manifest'
+    require_line 'validate_official' "$run_full" 'full-test must validate official archives before extraction'
+    for consumer in "$auto_include" "$auto_exclude"; do
+        require_line 'derived-run' "$consumer" 'LTP must run named derived-image QEMU targets'
+        require_line 'CONF_IMAGE=' "$consumer" 'LTP injection must name its derived x0 target'
+        require_line 'validate_official' "$consumer" 'LTP must validate official archives before extraction'
+    done
+    if grep -E 'sdcard-(rv|la)\.img|disk(-la)?\.img' "$run_full" "$auto_include" "$auto_exclude" >/dev/null 2>&1; then
+        fail 'a Python image consumer still hard-codes an image role'
+    fi
+    require_line 'workspace=$$(mktemp -d' "$tools_make" 'tools workspace must fail fast when mktemp fails'
+    require_line 'tools workspace creation failed' "$tools_make" 'tools mktemp failure must preserve a diagnostic'
+    require_line 'preserving $$workspace' "$tools_make" 'tools unmount failure must preserve diagnostics and workspace'
 
     printf '%s\n' 'PASS: image role contract'
 }
@@ -168,8 +231,13 @@ run_fixture() {
         os/make/arch/la64-settings.mk \
         os/make/rv64.mk \
         os/make/la64.mk \
+        os/make/common/toolchain.mk \
         os/make/tools-disk.mk \
         os/inject_os_test_conf.sh \
+        scripts/image_roles.py \
+        scripts/run_full_test.py \
+        scripts/auto_include_ltp.py \
+        scripts/auto_exclude_ltp.py \
         scripts/make_mbr_tools_disk.py; do
         mkdir -p "$repo/$(dirname "$file")"
         cp "$repo_root/$file" "$repo/$file"
@@ -187,6 +255,100 @@ run_fixture() {
             ;;
         mutate-official-x0)
             printf '%s\n' 'IMAGE_ROLE_OFFICIAL_X0_MUTABLE := yes' >>"$repo/os/make/image-roles.mk"
+            ;;
+        remaining-consumer)
+            printf '%s\n' '"-drive file=sdcard-rv.img,if=none,format=raw,id=x0 "' >>"$repo/scripts/run_full_test.py"
+            ;;
+        cross-arch-derived)
+            assert_injection_guard "$repo/build/development/la64/sdcard-la.img"
+            printf '%s\n' "PASS: fixture rejected: $fixture"
+            return
+            ;;
+        symlink-alias|hardlink-alias)
+            mkdir -p "$repo/build/development/rv64"
+            : >"$repo/sdcard-rv.img"
+            case "$fixture" in
+                symlink-alias) ln -s "$repo/sdcard-rv.img" "$repo/build/development/rv64/sdcard-rv-derived.img" ;;
+                hardlink-alias) ln "$repo/sdcard-rv.img" "$repo/build/development/rv64/sdcard-rv-derived.img" ;;
+            esac
+            assert_injection_guard "$repo/build/development/rv64/sdcard-rv-derived.img"
+            printf '%s\n' "PASS: fixture rejected: $fixture"
+            return
+            ;;
+        basename-alias)
+            mkdir -p "$repo/build/development/rv64"
+            : >"$repo/sdcard-rv.img"
+            if python3 "$repo/scripts/image_roles.py" validate-mutable --repo-root "$repo" --arch rv64 --path "$repo/build/development/rv64/sdcard-rv.img" >"$fixture_root/output" 2>&1; then
+                fail "fixture was accepted: $fixture"
+            fi
+            grep -F 'image-role error:' "$fixture_root/output" >/dev/null || fail 'alias fixture lacked a diagnostic'
+            printf '%s\n' "PASS: fixture rejected: $fixture"
+            return
+            ;;
+        make-override)
+            if make -n -C "$repo/os" -f make/rv64.mk check-development-x0 IMAGE_ROLE_RV64_DEVELOPMENT_X0=../sdcard-rv.img >"$fixture_root/output" 2>&1; then
+                fail "fixture was accepted: $fixture"
+            fi
+            grep -F 'IMAGE_ROLE_RV64_DEVELOPMENT_X0 resolves to an immutable official x0' "$fixture_root/output" >/dev/null || fail 'Make override fixture lacked a diagnostic'
+            printf '%s\n' "PASS: fixture rejected: $fixture"
+            return
+            ;;
+        mktemp-failure|unmount-failure)
+            mkdir -p "$repo/empty" "$fixture_root/bin"
+cat >"$repo/fixture.mk" <<'EOF'
+CPYTHON_COMMON := $(CURDIR)/missing-cpython
+include os/make/tools-disk.mk
+all:
+	$(call build_tools_disk,$(CURDIR)/out.img,1,$(CURDIR)/empty,rv)
+EOF
+            cat >"$fixture_root/bin/mktemp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+            chmod +x "$fixture_root/bin/mktemp"
+            if [ "$fixture" = unmount-failure ]; then
+                cat >"$fixture_root/bin/mktemp" <<'EOF'
+#!/bin/sh
+mkdir -p "${TMPDIR:-/tmp}/fixture-workspace"
+printf '%s\n' "${TMPDIR:-/tmp}/fixture-workspace"
+EOF
+                cat >"$fixture_root/bin/dd" <<'EOF'
+#!/bin/sh
+for arg in "$@"; do case "$arg" in of=*) : >"${arg#of=}" ;; esac; done
+EOF
+                cat >"$fixture_root/bin/mkfs.ext4" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+                cat >"$fixture_root/bin/mount" <<'EOF'
+#!/bin/sh
+for last; do :; done
+mkdir -p "$last/lib" "$last/bin" "$last/tests"
+EOF
+                cat >"$fixture_root/bin/umount" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'fixture umount failure' >&2
+exit 1
+EOF
+                chmod +x "$fixture_root/bin/mktemp" "$fixture_root/bin/dd" "$fixture_root/bin/mkfs.ext4" "$fixture_root/bin/mount" "$fixture_root/bin/umount"
+            fi
+            status=0
+            PATH="$fixture_root/bin:$PATH" TMPDIR="$fixture_root" timeout 5 make -C "$repo" -f fixture.mk all >"$fixture_root/output" 2>&1 || status=$?
+            if [ "$status" -eq 0 ]; then
+                fail "fixture was accepted: $fixture"
+            fi
+            if [ "$status" -eq 124 ]; then
+                cat "$fixture_root/output" >&2
+                fail "$fixture fixture did not fail fast"
+            fi
+            expected='tools workspace creation failed'
+            [ "$fixture" = unmount-failure ] && expected='tools workspace unmount failed; preserving'
+            if ! grep -F "$expected" "$fixture_root/output" >/dev/null; then
+                cat "$fixture_root/output" >&2
+                fail "$fixture fixture lacked a diagnostic"
+            fi
+            printf '%s\n' "PASS: fixture rejected: $fixture"
+            return
             ;;
         *) usage ;;
     esac
