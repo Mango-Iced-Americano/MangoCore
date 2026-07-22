@@ -75,3 +75,26 @@ if make -C "$repo_root/os" -n ARCH=rv64 PROFILE=invalid check >/dev/null 2>&1; t
     fail 'formal check must reject an invalid profile'
 fi
 printf 'PASS: formal check rejects an invalid profile\n'
+
+require_facade_rejection() {
+    entry=$1
+    target=$2
+    description=$3
+    shift 3
+    if make -C "$entry" -n "$@" "$target" >/dev/null 2>&1; then
+        fail "$target at $entry must reject $description"
+    fi
+    printf 'PASS: %s at %s rejects %s\n' "$target" "$entry" "$description"
+}
+
+for entry in "$repo_root" "$repo_root/os"; do
+    for target in check ktest-build-only; do
+        require_facade_rejection "$entry" "$target" 'missing ARCH and PROFILE'
+        require_facade_rejection "$entry" "$target" 'missing PROFILE' ARCH=rv64
+        require_facade_rejection "$entry" "$target" 'missing ARCH' PROFILE=normal
+        require_facade_rejection "$entry" "$target" 'invalid ARCH' ARCH=invalid PROFILE=normal
+        require_facade_rejection "$entry" "$target" 'invalid PROFILE' ARCH=rv64 PROFILE=invalid
+        require_facade_rejection "$entry" "$target" 'multiple ARCH values' 'ARCH=rv64 la64' PROFILE=normal
+        require_facade_rejection "$entry" "$target" 'multiple PROFILE values' ARCH=rv64 'PROFILE=normal regression'
+    done
+done
