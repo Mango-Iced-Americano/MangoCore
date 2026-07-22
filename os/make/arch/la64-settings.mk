@@ -11,13 +11,12 @@ KERNEL_BIN := $(KERNEL_ELF).bin
 KERNEL_UIMG := $(KERNEL_ELF).ui
 BLK_MODE := virt_pci
 FS_MODE ?= ext4
-ROOTFS_IMG_NAME = rootfs-la.img
-ROOTFS_IMG_DIR := $(PRODUCT_ROOT)/image
+IMAGE_ROLE_LA64_PRODUCT_ROOT := $(PRODUCT_ROOT)
 CORE_NUM := 1
 LOG ?= off
 KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
-SDCARD_LA := ../sdcard-la.img
-DISK_LA := ../disk-la.img
+SDCARD_LA := $(IMAGE_ROLE_LA64_COMPETITION_X0)
+DISK_LA := $(IMAGE_ROLE_LA64_X1)
 
 # ============================================================
 # lwext4 C library (la64: uses pre-installed cross-compiler)
@@ -62,11 +61,11 @@ APPS := ../user/src/bin/*
 
 # RootFS image
 ifeq ($(BOARD), laqemu)
-	ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
+	ROOTFS_IMG := $(IMAGE_ROLE_LA64_DEVELOPMENT_X0)
 endif
 
 # Initramfs cpio generation — parameterized for normal / regression profiles
-INITRAMFS_CPIO_LA := $(PRODUCT_ROOT)/initramfs/initramfs-la.cpio
+INITRAMFS_CPIO_LA := $(IMAGE_ROLE_LA64_BOOTSTRAP_ROOT)
 REGRESSION_CPIO_LA := $(PRODUCT_ROOT)/initramfs/initramfs-regression-la.cpio
 
 INITRAMFS_PROFILE ?= normal

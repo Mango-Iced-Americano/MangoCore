@@ -21,14 +21,12 @@ else
   NET_DEV     = -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net
 endif
 FS_MODE ?= ext4
-ROOTFS_IMG_NAME = rootfs-rv.img
-ROOTFS_IMG_DIR := $(PRODUCT_ROOT)/image
+IMAGE_ROLE_RV64_PRODUCT_ROOT := $(PRODUCT_ROOT)
 CORE_NUM := 1
 LOG ?= off
 KERNEL_RV := $(PRODUCT_ROOT)/kernel/kernel-rv
 KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
-SDCARD_RV := ../sdcard-rv.img
-SDCARD_LA := ../sdcard-la.img
+SDCARD_RV := $(IMAGE_ROLE_RV64_COMPETITION_X0)
 
 # ============================================================
 # lwext4 C library
@@ -48,7 +46,7 @@ LWEXT4_RV_INPUTS := $(shell find "$(LWEXT4_DIR)" -type f ! -path "$(LWEXT4_DIR)/
 ifeq ($(BOARD), vf2)
 ROOTFS_IMG := /dev/sdc
 else
-ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
+ROOTFS_IMG := $(IMAGE_ROLE_RV64_DEVELOPMENT_X0)
 endif
 
 APPS := ../user/src/bin/*
@@ -93,7 +91,7 @@ OBJCOPY := $(LLVM_TOOLS_DIR)/rust-objcopy --binary-architecture=riscv64
 DISASM ?= -x
 
 # Initramfs cpio generation — parameterized for normal / regression profiles
-INITRAMFS_CPIO_RV := $(PRODUCT_ROOT)/initramfs/initramfs-rv.cpio
+INITRAMFS_CPIO_RV := $(IMAGE_ROLE_RV64_BOOTSTRAP_ROOT)
 REGRESSION_CPIO_RV := $(PRODUCT_ROOT)/initramfs/initramfs-regression-rv.cpio
 
 # INITRAMFS_PROFILE: "normal" (default) or "regression"

@@ -24,8 +24,8 @@ AUTO_REBUILD_MEM ?= 1
 # 来源：user/tools/{riscv64,loongarch64}/
 # ============================================================
 
-TOOLS_IMG_RV ?= $(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img
-TOOLS_IMG_LA ?= $(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img
+TOOLS_IMG_RV ?= $(IMAGE_ROLE_RV64_X1)
+TOOLS_IMG_LA ?= $(IMAGE_ROLE_LA64_X1)
 TOOLS_SIZE_RV := 2048
 TOOLS_SIZE_LA := 2048
 TOOLS_SRC_RV := ../user/tools/riscv64

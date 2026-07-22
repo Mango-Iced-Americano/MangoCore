@@ -1,4 +1,5 @@
 include make/common/toolchain.mk
+include make/image-roles.mk
 include make/common/orchestration.mk
 
 .PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only
@@ -162,12 +163,12 @@ la64-gdb: la64-debug
 	make -f make/la64.mk comp-gdb	
 
 rvchange:
-	rm -f ../sdcard-rv.img
-	cp ../../imgbk/sdcard-rv.img ../sdcard-rv.img
+	@echo "ERROR: official evaluator x0 is immutable; create a derived development image instead" >&2
+	@exit 2
 
 lachange:
-	rm -f ../sdcard-la.img
-	cp ../../imgbk/sdcard-la.img ../sdcard-la.img
+	@echo "ERROR: official evaluator x0 is immutable; create a derived development image instead" >&2
+	@exit 2
 
 docker:
 	docker compose up -d
@@ -180,30 +181,13 @@ conf-inject: prepare-cargo-config
 	done
 
 la64-inject-runtime: toolchain-preflight
-	@cd ../user && make rust-user BOARD=laqemu MODE=$(MODE)
-	@cmd_file=$$(mktemp); \
-	printf '%s\n' \
-		'rm /initproc' \
-		'rm /bin/bash' \
-		'rm /bin/busybox' \
-		'write ../user/target/loongarch64-unknown-linux-gnu/$(MODE)/initproc /initproc' \
-		'write ./bash-la /bin/bash' \
-		'write ./busybox-la /bin/busybox' \
-		'stat /initproc' \
-		'stat /bin/bash' \
-		'stat /bin/busybox' > $$cmd_file; \
-	debugfs -w -f $$cmd_file ../sdcard-la.img; \
-	rm -f $$cmd_file
+	@echo "ERROR: direct runtime injection into official evaluator x0 is disabled; use a derived development image" >&2
+	@exit 2
 
 # 将所有用户态测试程序（user/src/bin/*.rs）注入到 sdcard-rv.img
 inject-test: toolchain-preflight
-	@cd ../user && make rust-user MODE=release BOARD=rvqemu 2>&1 | tail -5
-	@echo "[inject] Updating test binaries in ../sdcard-rv.img..."
-	@for testname in $$(ls ../user/src/bin/*.rs | xargs -n1 basename | sed 's/\.rs$$//'); do \
-		debugfs -w -R "rm $$testname" ../sdcard-rv.img 2>/dev/null || true; \
-		debugfs -w -R "write ../user/target/riscv64gc-unknown-none-elf/release/$$testname $$testname" ../sdcard-rv.img 2>&1; \
-	done
-	@echo "[inject] Done."
+	@echo "ERROR: direct test injection into official evaluator x0 is disabled; use a derived development image" >&2
+	@exit 2
 
 # ============================================================
 # lwext4 targets
