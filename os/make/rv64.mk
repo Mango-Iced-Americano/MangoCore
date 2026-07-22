@@ -82,7 +82,10 @@ kernel: $(LWEXT4_PREREQ)
 clean:
 	@rm -rf "$(KERNEL_OUTPUT_ROOT)" "$(LWEXT4_RV_OUTPUT_DIR)"
 
-run: toolchain-preflight build
+check-development-x0:
+	@python3 ../scripts/image_roles.py validate-mutable --repo-root .. --arch rv64 --path "$(IMAGE_ROLE_RV64_DEVELOPMENT_X0)" >/dev/null
+
+run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), rvqemu)
 	@qemu-system-riscv64 \
   		-machine virt \
@@ -100,7 +103,7 @@ endif
 monitor:
 	riscv64-unknown-elf-gdb -ex 'file target/riscv64gc-unknown-none-elf/debug/os' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
-gdb:
+gdb: check-development-x0
 	@qemu-system-riscv64 \
 	-machine virt \
 	-nographic \
@@ -113,7 +116,7 @@ gdb:
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
-runsimple: toolchain-preflight
+runsimple: toolchain-preflight check-development-x0
 	@qemu-system-riscv64 \
 		-machine virt \
 		-nographic \
@@ -143,6 +146,24 @@ comp: toolchain-preflight
 		$(NET_DEV) \
 		-object filter-dump,id=f1,netdev=net,file=packets.pcap
 
+derived-comp: toolchain-preflight
+	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch rv64 --path "$(IMAGE_ROLE_RV64_DERIVED_X0)" >/dev/null
+	@qemu-system-riscv64 \
+		-machine virt \
+		-kernel $(KERNEL_RV) \
+		-m 1024 \
+		-nographic \
+		-smp 1 \
+		-bios default \
+		-drive file=$(IMAGE_ROLE_RV64_DERIVED_X0),if=none,format=raw,id=x0 \
+		$(BLK_DEV_x0) \
+		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
+		$(BLK_DEV_x1) \
+		-no-reboot \
+		-rtc base=utc \
+		$(NET_DEV) \
+		-object filter-dump,id=f1,netdev=net,file=packets.pcap
+
 comp-gdb: toolchain-preflight
 	@qemu-system-riscv64 \
         -machine virt \
@@ -162,7 +183,7 @@ comp-gdb: toolchain-preflight
         -S \
         -s
 
-.PHONY: user env toolchain-preflight check ktest-build-only
+.PHONY: user env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
 check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_RV)
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_RV))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \

@@ -22,6 +22,9 @@ import json
 import math
 import shutil
 from datetime import datetime
+from pathlib import Path
+
+from image_roles import ImageRoles, load_roles
 
 # ======================== Paths ========================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +32,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 TESTRESULT_DIR = os.path.join(PROJECT_ROOT, "testresult")
 JUDGE_DIR = os.path.join(PROJECT_ROOT, "judge")
 FS_IMG_DIR = os.path.join(PROJECT_ROOT, "fs-img-dir")
+ROLES: ImageRoles = load_roles(Path(PROJECT_ROOT))
 
 QEMU_TIMEOUT = int(os.environ.get("QEMU_TIMEOUT", "7200"))  # 默认 2 小时超时
 
@@ -200,6 +204,8 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
 
 def build_rv64_cmd():
     """构建 rv64 QEMU 命令，参数参照 os/make/rv64.mk 的 comp 目标。"""
+    x0 = ROLES.derived_x0("rv64")
+    x1 = ROLES.path("IMAGE_ROLE_RV64_X1")
     return (
         "qemu-system-riscv64 "
         "-machine virt "
@@ -208,9 +214,9 @@ def build_rv64_cmd():
         "-nographic "
         "-smp 1 "
         "-bios default "
-        "-drive file=sdcard-rv.img,if=none,format=raw,id=x0 "
+        f"-drive file={x0},if=none,format=raw,id=x0 "
         "-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 "
-        "-drive file=disk.img,if=none,format=raw,id=x1 "
+        f"-drive file={x1},if=none,format=raw,id=x1 "
         "-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 "
         "-no-reboot "
         "-rtc base=utc "
@@ -221,15 +227,17 @@ def build_rv64_cmd():
 
 def build_la64_cmd():
     """构建 la64 QEMU 命令，参数参照 os/make/la64.mk 的 comp 目标。"""
+    x0 = ROLES.derived_x0("la64")
+    x1 = ROLES.path("IMAGE_ROLE_LA64_X1")
     return (
         "qemu-system-loongarch64 "
         "-kernel kernel-la "
         "-m 1G "
         "-nographic "
         "-smp 1 "
-        "-drive file=sdcard-la.img,if=none,format=raw,id=x0 "
+        f"-drive file={x0},if=none,format=raw,id=x0 "
         "-device virtio-blk-pci,drive=x0 "
-        "-drive file=disk-la.img,if=none,format=raw,id=x1 "
+        f"-drive file={x1},if=none,format=raw,id=x1 "
         "-device virtio-blk-pci,drive=x1 "
         "-no-reboot "
         "-device virtio-net-pci,netdev=net0 "
@@ -335,20 +343,22 @@ def main():
     log("Phase 1-2/6: 编译内核 + 解压 sdcard 镜像（并行）", BOLD)
     log("=" * 50, BOLD)
 
-    rv_xz = os.path.join(FS_IMG_DIR, "sdcard-rv.img.xz")
-    la_xz = os.path.join(FS_IMG_DIR, "sdcard-la.img.xz")
+    rv_xz = ROLES.official_archive("rv64")
+    la_xz = ROLES.official_archive("la64")
+    rv_derived = ROLES.derived_x0("rv64")
+    la_derived = ROLES.derived_x0("la64")
 
     # 先确保 xz 文件存在（串行下载，不影响大局）
-    if not os.path.exists(rv_xz):
-        log("未找到 sdcard-rv.img.xz，尝试下载...", YELLOW)
+    if not rv_xz.exists():
+        log(f"未找到 {rv_xz.name}，尝试下载...", YELLOW)
         run_cmd("make testsuits-download", cwd=PROJECT_ROOT)
 
-    if not os.path.exists(la_xz):
-        log("未找到 sdcard-la.img.xz，尝试下载...", YELLOW)
+    if not la_xz.exists():
+        log(f"未找到 {la_xz.name}，尝试下载...", YELLOW)
         run_cmd("make testsuits-download", cwd=PROJECT_ROOT)
 
     # 再检查一次，仍然没有就终止
-    if not os.path.exists(rv_xz) or not os.path.exists(la_xz):
+    if not rv_xz.exists() or not la_xz.exists():
         log("❌ sdcard 镜像 xz 文件不存在，无法继续", RED)
         sys.exit(1)
 
@@ -359,15 +369,20 @@ def main():
         rc = run_cmd("make all", cwd=PROJECT_ROOT)
         build_ok[0] = (rc == 0)
 
-    def do_extract(arch_label, xz_path, out_name):
+    def do_extract(arch_label, xz_path, output_path):
         nonlocal extract_ok
-        rc = run_cmd(f"xz -dkc '{xz_path}' > {out_name}", cwd=PROJECT_ROOT)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        rc = run_cmd(f"xz -dkc '{xz_path}' > '{output_path}'", cwd=PROJECT_ROOT)
         idx = 0 if "rv" in arch_label else 1
         extract_ok[idx] = (rc == 0)
 
     build_thread = threading.Thread(target=do_build, name="make-all")
-    extract_rv = threading.Thread(target=do_extract, args=("rv", rv_xz, "sdcard-rv.img"), name="xz-rv")
-    extract_la = threading.Thread(target=do_extract, args=("la", la_xz, "sdcard-la.img"), name="xz-la")
+    ROLES.validate_official("rv64", rv_xz, archive=True)
+    ROLES.validate_official("la64", la_xz, archive=True)
+    ROLES.validate_derived_output("rv64", rv_derived)
+    ROLES.validate_derived_output("la64", la_derived)
+    extract_rv = threading.Thread(target=do_extract, args=("rv", rv_xz, rv_derived), name="xz-rv")
+    extract_la = threading.Thread(target=do_extract, args=("la", la_xz, la_derived), name="xz-la")
 
     build_thread.start()
     extract_rv.start()
@@ -383,11 +398,11 @@ def main():
     log("✅ make all 完成", GREEN)
 
     if not extract_ok[0]:
-        log("❌ 解压 sdcard-rv.img.xz 失败", RED)
+        log(f"❌ 解压 {rv_xz.name} 失败", RED)
         sys.exit(1)
 
     if not extract_ok[1]:
-        log("❌ 解压 sdcard-la.img.xz 失败", RED)
+        log(f"❌ 解压 {la_xz.name} 失败", RED)
         sys.exit(1)
 
     log("✅ 镜像就绪", GREEN)

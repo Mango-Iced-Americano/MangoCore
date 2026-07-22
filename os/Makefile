@@ -2,7 +2,7 @@ include make/common/toolchain.mk
 include make/image-roles.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -86,6 +86,9 @@ rv64-run-only: toolchain-preflight
 rv64-run: prepare-cargo-config
 	make -f make/rv64.mk comp
 
+rv64-derived-run: prepare-cargo-config
+	make -f make/rv64.mk derived-comp
+
 # Regression test: self-contained initramfs — NO external disks
 rv64-regression: prepare-cargo-config
 	make -f make/rv64.mk regression-run MODE=${MODE} LOG=${LOG}
@@ -104,6 +107,9 @@ la64-run-only: toolchain-preflight
 
 la64-run: prepare-cargo-config
 	make -f make/la64.mk comp MODE=${MODE} LOG=${LOG}
+
+la64-derived-run: prepare-cargo-config
+	make -f make/la64.mk derived-comp MODE=${MODE} LOG=${LOG}
 
 la64-regression: prepare-cargo-config
 	make -f make/la64.mk regression-run MODE=${MODE} LOG=${LOG}

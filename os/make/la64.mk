@@ -96,7 +96,10 @@ clean:
 # QEMU run targets
 # ============================================================
 
-run: toolchain-preflight build
+check-development-x0:
+	@python3 ../scripts/image_roles.py validate-mutable --repo-root .. --arch la64 --path "$(IMAGE_ROLE_LA64_DEVELOPMENT_X0)" >/dev/null
+
+run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), laqemu)
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -110,7 +113,7 @@ ifeq ($(BOARD), laqemu)
 		-smp threads=$(CORE_NUM)
 endif
 
-runsimple: toolchain-preflight
+runsimple: toolchain-preflight check-development-x0
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
@@ -138,6 +141,23 @@ comp: toolchain-preflight
 		-netdev user,id=net0 \
 		-rtc base=utc
 
+derived-comp: toolchain-preflight
+	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch la64 --path "$(IMAGE_ROLE_LA64_DERIVED_X0)" >/dev/null
+	@qemu-system-loongarch64 \
+		-machine virt \
+		-kernel $(KERNEL_LA) \
+		-m 1G \
+		-nographic \
+		-smp 1 \
+		-drive file=$(IMAGE_ROLE_LA64_DERIVED_X0),if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
+		-drive file=$(IMAGE_ROLE_LA64_X1),if=none,format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
+		-no-reboot \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
+		-rtc base=utc
+
 comp-gdb: toolchain-preflight
 	@qemu-system-loongarch64 \
 		-machine virt \
@@ -154,7 +174,7 @@ comp-gdb: toolchain-preflight
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only
+.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
 check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) \
