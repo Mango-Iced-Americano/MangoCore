@@ -1,15 +1,15 @@
 # Scoped tools-disk construction.  The caller supplies the final image, payload
 # size, source directory, and architecture suffix through build_tools_disk.
 define build_tools_disk
-	@workspace=$$(mktemp -d "$${TMPDIR:-/tmp}/mango-tools-$(4).XXXXXX"); \
-	payload="$$workspace/payload.img"; mountpoint="$$workspace/mount"; \
-	cleanup() { umount "$$mountpoint" 2>/dev/null || true; rm -rf "$$workspace"; }; \
+	@set -eu; workspace=$$(mktemp -d "$${TMPDIR:-/tmp}/mango-tools-$(4).XXXXXX") || { echo "ERROR: tools workspace creation failed" >&2; exit 1; }; \
+	payload="$$workspace/payload.img"; mountpoint="$$workspace/mount"; mounted=0; cleaned=0; \
+	cleanup() { status=$$?; [ "$$cleaned" -eq 0 ] || exit "$$status"; cleaned=1; trap - EXIT HUP INT TERM; if [ "$$mounted" -eq 1 ] && ! umount "$$mountpoint"; then echo "ERROR: tools workspace unmount failed; preserving $$workspace" >&2; exit 1; fi; mounted=0; rm -rf "$$workspace"; exit "$$status"; }; \
 	trap cleanup EXIT HUP INT TERM; \
 	echo "[tools-disk] Building $(4) tools payload ($(2)MB)..."; \
 	dd if=/dev/zero of="$$payload" bs=1M count=$(2) 2>/dev/null; \
 	mkfs.ext4 -F "$$payload" -b 4096 2>/dev/null; \
 	mkdir -p "$$mountpoint"; \
-	mount -o loop "$$payload" "$$mountpoint"; \
+	mount -o loop "$$payload" "$$mountpoint"; mounted=1; \
 	echo "  copying files from $(3)..."; \
 	cp -a $(3)/. "$$mountpoint"/ 2>/dev/null || true; \
 	echo "  copying test binaries..."; \
@@ -53,7 +53,7 @@ define build_tools_disk
 		for applet in cp mv rm ln ls mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test mkfs.vfat; do \
 			ln -sf busybox "$$applet" 2>/dev/null; \
 		done && ln -sf bash sh 2>/dev/null || true; \
-	umount "$$mountpoint"; rmdir "$$mountpoint"; \
+	umount "$$mountpoint"; mounted=0; rmdir "$$mountpoint"; \
 	echo "[tools-disk] Wrapping with MBR → $(1)..."; \
 	python3 $(MBR_SCRIPT) "$$payload" $(1); \
 	rm -f "$$payload"; trap - EXIT HUP INT TERM; rmdir "$$workspace"; \

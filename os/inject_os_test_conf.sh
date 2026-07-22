@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+ROLE_TOOL="${REPO_ROOT}/scripts/image_roles.py"
 
 ARCH=${ARCH:-la64}
 BLK_MODE=${BLK_MODE:-mem}
@@ -21,7 +22,7 @@ Environment variables:
   ARCH              la64|rv64 (default: la64)
   BLK_MODE          mem|virt|virt_pci|sata (default: mem)
   CONF_FILE         path to config file (default: ../os_test.conf)
-   IMAGE_PATH        override a non-official target image path
+   IMAGE_PATH         override a mutable target image path
    DERIVED_IMAGE_PATH named derived image for virt/virt_pci injection
   AUTO_REBUILD_MEM  1 to rebuild kernel automatically for mem mode (default: 1)
   MODE              release|debug for auto rebuild (default: release)
@@ -30,7 +31,7 @@ Environment variables:
 Examples:
   ARCH=la64 BLK_MODE=mem CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
   ARCH=rv64 BLK_MODE=virt CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
-  IMAGE_PATH=../sdcard-la.img CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
+   DERIVED_IMAGE_PATH=../build/development/la64/sdcard-la-derived.img CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
 EOF
 }
 
@@ -53,13 +54,6 @@ if [[ ! -f "${CONF_FILE}" ]]; then
     exit 1
 fi
 
-official_image_name() {
-    case "$(basename -- "$1")" in
-        sdcard-rv.img|sdcard-la.img) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 if [[ -z "${IMAGE_PATH}" ]]; then
     case "${BLK_MODE}" in
         mem)
@@ -70,11 +64,13 @@ if [[ -z "${IMAGE_PATH}" ]]; then
             fi
             ;;
         *)
-            if [[ "${ARCH}" == "la64" ]]; then source_image="${REPO_ROOT}/sdcard-la.img"; else source_image="${REPO_ROOT}/sdcard-rv.img"; fi
+            source_image=$(python3 "${ROLE_TOOL}" official --repo-root "${REPO_ROOT}" --arch "${ARCH}")
             if [[ -z "${DERIVED_IMAGE_PATH}" ]]; then
-                DERIVED_IMAGE_PATH="${REPO_ROOT}/build/${ARCH}/${MODE}/development/image/sdcard-${ARCH}-derived.img"
+                DERIVED_IMAGE_PATH=$(python3 "${ROLE_TOOL}" derived --repo-root "${REPO_ROOT}" --arch "${ARCH}")
             fi
-            [[ -f "${source_image}" ]] || { echo "ERROR: official evaluator image not found: ${source_image}"; exit 1; }
+            source_image=$(python3 "${ROLE_TOOL}" validate-official --repo-root "${REPO_ROOT}" --arch "${ARCH}" --path "${source_image}")
+            DERIVED_IMAGE_PATH=$(python3 "${ROLE_TOOL}" validate-derived --repo-root "${REPO_ROOT}" --arch "${ARCH}" --path "${DERIVED_IMAGE_PATH}")
+            DERIVED_IMAGE_PATH=$(python3 "${ROLE_TOOL}" validate-mutable --repo-root "${REPO_ROOT}" --arch "${ARCH}" --path "${DERIVED_IMAGE_PATH}")
             mkdir -p "$(dirname -- "${DERIVED_IMAGE_PATH}")"
             cp --reflink=auto "${source_image}" "${DERIVED_IMAGE_PATH}"
             IMAGE_PATH="${DERIVED_IMAGE_PATH}"
@@ -82,10 +78,10 @@ if [[ -z "${IMAGE_PATH}" ]]; then
     esac
 fi
 
-if official_image_name "${IMAGE_PATH}"; then
-    echo "ERROR: official evaluator image is immutable; inject a named derived development image instead"
-    exit 1
+if [[ "${BLK_MODE}" != "mem" ]]; then
+    IMAGE_PATH=$(python3 "${ROLE_TOOL}" validate-derived --repo-root "${REPO_ROOT}" --arch "${ARCH}" --path "${IMAGE_PATH}")
 fi
+IMAGE_PATH=$(python3 "${ROLE_TOOL}" validate-mutable --repo-root "${REPO_ROOT}" --arch "${ARCH}" --path "${IMAGE_PATH}")
 
 if [[ ! -f "${IMAGE_PATH}" ]]; then
     echo "ERROR: target image not found: ${IMAGE_PATH}"
@@ -97,8 +93,8 @@ if ! command -v debugfs >/dev/null 2>&1; then
     exit 1
 fi
 
-CONF_FILE_ABS=$(cd -- "$(dirname -- "${CONF_FILE}")" && pwd)/$(basename -- "${CONF_FILE}")
-IMAGE_PATH_ABS=$(cd -- "$(dirname -- "${IMAGE_PATH}")" && pwd)/$(basename -- "${IMAGE_PATH}")
+CONF_FILE_ABS=$(realpath -e -- "${CONF_FILE}")
+IMAGE_PATH_ABS=$(realpath -e -- "${IMAGE_PATH}")
 
 echo "[conf-inject] arch=${ARCH} blk_mode=${BLK_MODE}"
 echo "[conf-inject] conf=${CONF_FILE_ABS}"
