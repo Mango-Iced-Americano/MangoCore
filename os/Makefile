@@ -112,8 +112,8 @@ comp: toolchain-preflight
 
 clean:
 	@rm -rf "$(BUILD_ROOT)"
-	for arch in $(ARCHS); do \
-		make ARCH=$$arch -f make/$$arch.mk clean; \
+	for arch in rv64 la64; do \
+		$(MAKE) ARCH=$$arch -f make/$$arch.mk clean; \
 	done
 	cd ../user && make clean
 
