@@ -182,9 +182,17 @@ require_dependency Makefile unittest toolchain-preflight
 require_root_all_recipe_order
 require_match os/Makefile '^[[:space:]]*\.NOTPARALLEL:[[:space:]]*$' \
     'os/Makefile disables parallel execution'
-require_match os/Makefile \
-    '^[[:space:]]*all:[[:space:]]+prepare-cargo-config[[:space:]]+rv64_all[[:space:]]+la64_all[[:space:]]*$' \
-    'os all orders prepare-cargo-config, rv64_all, then la64_all'
+if awk '
+    /^all:[[:space:]]+prepare-cargo-config[[:space:]]*$/ { all = 1; next }
+    all && /^[[:space:]]*\$\(MAKE\)[[:space:]]+rv64_all[[:space:]]*$/ { rv = 1; next }
+    rv && /^[[:space:]]*\$\(MAKE\)[[:space:]]+la64_all[[:space:]]*$/ { la = 1; next }
+    la && /^[[:space:]]*\$\(MAKE\)[[:space:]]+publish-compatibility[[:space:]]*$/ { publish = 1 }
+    END { exit(all && rv && la && publish ? 0 : 1) }
+' "$repo_root/os/Makefile"; then
+    pass 'os all serializes prepare-cargo-config, rv64_all, la64_all, then publication'
+else
+    fail 'os all must serialize prepare-cargo-config, rv64_all, la64_all, then publication'
+fi
 require_dependency os/Makefile prepare-cargo-config toolchain-preflight
 require_dependency os/Makefile env toolchain-preflight
 require_dependency os/Makefile rv64-debug toolchain-preflight

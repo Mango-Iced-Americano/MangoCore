@@ -3,6 +3,7 @@ PROFILE ?= normal
 REPO_ROOT := $(CURDIR)
 BUILD_ROOT ?= $(REPO_ROOT)/build
 COMPAT_OUTPUT_DIR ?= $(REPO_ROOT)
+export BUILD_ROOT COMPAT_OUTPUT_DIR CANONICAL_BUILD_FIXTURE
 FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
@@ -37,7 +38,7 @@ QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
 all: toolchain-setup
 	$(MAKE) prepare-cargo-config
-	$(MAKE) -C os "MODE=$(MODE)" "BUILD_ROOT=$(BUILD_ROOT)" "COMPAT_OUTPUT_DIR=$(COMPAT_OUTPUT_DIR)" "CANONICAL_BUILD_FIXTURE=$(CANONICAL_BUILD_FIXTURE)" all
+	$(MAKE) -C os all
 
 build:
 	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
