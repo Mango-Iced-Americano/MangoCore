@@ -8,6 +8,7 @@ ARCH=${ARCH:-la64}
 BLK_MODE=${BLK_MODE:-mem}
 CONF_FILE=${CONF_FILE:-"${REPO_ROOT}/os_test.conf"}
 IMAGE_PATH=${IMAGE_PATH:-}
+DERIVED_IMAGE_PATH=${DERIVED_IMAGE_PATH:-}
 AUTO_REBUILD_MEM=${AUTO_REBUILD_MEM:-1}
 MODE=${MODE:-release}
 LOG=${LOG:-error}
@@ -20,7 +21,8 @@ Environment variables:
   ARCH              la64|rv64 (default: la64)
   BLK_MODE          mem|virt|virt_pci|sata (default: mem)
   CONF_FILE         path to config file (default: ../os_test.conf)
-  IMAGE_PATH        override target image path
+   IMAGE_PATH        override a non-official target image path
+   DERIVED_IMAGE_PATH named derived image for virt/virt_pci injection
   AUTO_REBUILD_MEM  1 to rebuild kernel automatically for mem mode (default: 1)
   MODE              release|debug for auto rebuild (default: release)
   LOG               log level for auto rebuild (default: error)
@@ -51,6 +53,13 @@ if [[ ! -f "${CONF_FILE}" ]]; then
     exit 1
 fi
 
+official_image_name() {
+    case "$(basename -- "$1")" in
+        sdcard-rv.img|sdcard-la.img) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [[ -z "${IMAGE_PATH}" ]]; then
     case "${BLK_MODE}" in
         mem)
@@ -61,13 +70,21 @@ if [[ -z "${IMAGE_PATH}" ]]; then
             fi
             ;;
         *)
-            if [[ "${ARCH}" == "la64" ]]; then
-                IMAGE_PATH="${REPO_ROOT}/sdcard-la.img"
-            else
-                IMAGE_PATH="${REPO_ROOT}/sdcard-rv.img"
+            if [[ "${ARCH}" == "la64" ]]; then source_image="${REPO_ROOT}/sdcard-la.img"; else source_image="${REPO_ROOT}/sdcard-rv.img"; fi
+            if [[ -z "${DERIVED_IMAGE_PATH}" ]]; then
+                DERIVED_IMAGE_PATH="${REPO_ROOT}/build/${ARCH}/${MODE}/development/image/sdcard-${ARCH}-derived.img"
             fi
+            [[ -f "${source_image}" ]] || { echo "ERROR: official evaluator image not found: ${source_image}"; exit 1; }
+            mkdir -p "$(dirname -- "${DERIVED_IMAGE_PATH}")"
+            cp --reflink=auto "${source_image}" "${DERIVED_IMAGE_PATH}"
+            IMAGE_PATH="${DERIVED_IMAGE_PATH}"
             ;;
     esac
+fi
+
+if official_image_name "${IMAGE_PATH}"; then
+    echo "ERROR: official evaluator image is immutable; inject a named derived development image instead"
+    exit 1
 fi
 
 if [[ ! -f "${IMAGE_PATH}" ]]; then
