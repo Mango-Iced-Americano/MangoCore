@@ -150,6 +150,15 @@ ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_
 		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
 ktest-run: toolchain-preflight ktest-build-only
+	@if [ "x$(KTEST_FIXTURE)" = "xborrows-initproc" ]; then \
+		echo "[ktest-fixture] borrows-initproc: checking ktest is independent of INITPROC.process..."; \
+		ktest_refs=$$(grep -n 'INITPROC\.process' ../os/src/task/mod.rs ../os/src/task/task.rs 2>/dev/null | grep -i 'spawn_ktest\|new_ktest\|ktest_trampoline\|zombify_ktest\|KTEST'); \
+		if [ -n "$$ktest_refs" ]; then \
+			echo "FAIL: KTEST_FIXTURE=borrows-initproc — INITPROC.process referenced in ktest code path:" >&2; \
+			echo "$$ktest_refs" >&2; exit 1; \
+		fi; \
+		echo "PASS: KTEST_FIXTURE=borrows-initproc — ktest is independent of INITPROC"; \
+	fi
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest)
