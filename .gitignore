@@ -76,3 +76,7 @@ os.bin
 .env
 /.opencode/*.bak
 /.codex-*.conf
+
+# Lint-check stub ELF binaries (created by scripts/lint-check.sh)
+/user/tools/*/bin/
+/user/tools/*/lib/

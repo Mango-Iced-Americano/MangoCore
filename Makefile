@@ -92,8 +92,7 @@ check: toolchain-preflight
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" check
 
 lint: toolchain-preflight
-	$(call validate-formal-inputs)
-	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" lint
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(or $(PROFILE),normal)" "BUILD_ROOT=$(BUILD_ROOT)" lint
 
 ktest-build-only: toolchain-preflight
 	$(call validate-formal-inputs)
@@ -174,7 +173,7 @@ regression: toolchain-preflight
 check-fast: toolchain-preflight
 	cargo check -p mango-kernel-core
 	cargo fmt --check -p mango-kernel-core
-	cargo clippy -p mango-kernel-core 2>/dev/null || true
+	cargo clippy -p mango-kernel-core
 
 unittest: toolchain-preflight
 	cargo test -p mango-kernel-core

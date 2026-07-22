@@ -141,6 +141,11 @@ check: prepare-cargo-config
 
 lint: prepare-cargo-config
 	$(call validate-formal-inputs)
+	@echo "[lint] Checking first-party warning regression for $(ARCH) $(MODE)..."
+	@sh ../scripts/lint-check.sh --arch $(ARCH) --mode $(MODE)
+
+# Check formatting (separate from lint gate; not part of T10 warning baseline)
+lint-format: prepare-cargo-config
 	cargo fmt --check
 
 ktest-build-only: prepare-cargo-config

@@ -15,9 +15,9 @@
 #![feature(const_maybe_uninit_assume_init)]
 #![feature(trait_upcasting)]
 #![feature(core_intrinsics)]
-#![allow(dead_code)]
-#![allow(unused_assignments)]
-#![allow(unused_variables)]
+// Note: no crate-level allow(dead_code) — use #[expect(dead_code, reason = "...")]
+// on specific items. Crate-level allows were removed in T10 rebaseline to
+// prevent new dead code from being silently introduced.
 
 #[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
 compile_error!("features initramfs and legacy_block_root are mutually exclusive");
