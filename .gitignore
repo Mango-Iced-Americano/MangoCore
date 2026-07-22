@@ -34,6 +34,8 @@ disk.img
 disk-la.img
 
 docs/Work_Log/evidence/*
+!docs/Work_Log/evidence/2026-07-22/
+!docs/Work_Log/evidence/2026-07-22/t3-formal-facade-docker.md
 
 cc-codex/*.clean.img
 
