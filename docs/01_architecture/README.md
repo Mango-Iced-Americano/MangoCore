@@ -1,7 +1,7 @@
 ---
 title: "系统架构 (System Architecture)"
 category: architecture
-status: stable
+status: draft
 author: MangoCore Team
 last_update: 2026-06-29
 tags: [architecture, boot, hal, kernel]

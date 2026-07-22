@@ -1,7 +1,7 @@
 ---
 title: "内核模块地图 (Kernel Module Map)"
 category: architecture
-status: stable
+status: draft
 author: MangoCore Team
 last_update: 2026-07-20
 tags: [architecture, modules, kernel]

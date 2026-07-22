@@ -12,7 +12,6 @@ code_paths:
 entry_points:
   - "VFS_ROOT"
   - "fs::initramfs_init"
-  - "force_ramfs"
   - "detect_fs"
 arch:
   rv64: supported
@@ -58,14 +57,6 @@ rust_main()
   |     |-- net::config::init()
    |     |-- fs::register_boot_block_devices()  探测块设备并注册 /dev/vd*
   |
-  |-- [initramfs 特性未启用: legacy 路径]
-  |     |-- drivers::init_net_device()
-  |     |-- net::config::init()
-  |     |-- [VFS_ROOT 被延迟到首次访问时初始化]
-  |           |-- pre_mount() / detect_fs()  块设备探测
-  |           |-- ext4/fat32 或 fallback ramfs
-  |           |-- mount_common_filesystems()
-  |
    |-- task::add_initproc()            加载 init 进程（fd 0/1/2 使用 /dev/tty）
    |-- task::run_tasks()               进入调度
    |     |-- /sbin/init: 挂载 proc/sys/run/tmp/dev/shm
@@ -82,27 +73,6 @@ rust_main()
 4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。
 5. `/sbin/init` 挂载 procfs、sysfs 和 tmpfs，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。
 5. 块设备故障只打印 warning，不 panic。
-
-**Legacy 模式**（`initramfs` 特性未启用）：
-
-1. 块设备已就绪后首次访问 `VFS_ROOT` 时触发初始化。
-2. `pre_mount()` 调用 `detect_fs()` 读取块 0 的引导扇区，识别文件系统类型。
-3. 根据 `FS_Type` 打开 ext4 或 FAT32 文件系统，包装为 `MountFS`。
-4. 如果均未识别（`FS_Type::Null`），fallback 到 ramfs。
-5. 仅挂载 devfs bootstrap；用户态 PID1 继续承担常规挂载策略。
-
-### 2.2 force_ramfs 调试开关
-
-```rust
-static FORCE_RAMFS: AtomicBool = AtomicBool::new(false);
-
-pub fn force_ramfs() {
-    FORCE_RAMFS.store(true, Ordering::Relaxed);
-    crate::drivers::block::disable_block_device();
-}
-```
-
-调用 `force_ramfs()` 可在块设备初始化之前跳过物理设备探测，直接使用 ramfs 启动。这个路径用于 VFS 层调试或 legacy block root 模式。它同时禁用块设备子系统，确保后续代码不会误访问硬件。
 
 ## 3. VFS_ROOT lazy_static
 
@@ -124,30 +94,6 @@ lazy_static! {
 ```
 
 初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 创建挂载点 → 挂载 devfs。块设备在此阶段不参与，后续仅由 `register_boot_block_devices()` 注册为设备节点。
-
-### 3.2 Legacy 模式
-
-```rust
-#[cfg(not(feature = "initramfs"))]
-lazy_static! {
-    pub static ref VFS_ROOT: Arc<MountFS> = {
-        let fs_type = if FORCE_RAMFS.load(Ordering::Relaxed) {
-            FS_Type::Null
-        } else {
-            pre_mount()
-        };
-        let mfs = match fs_type {
-            FS_Type::Fat32 => { /* open FAT32 -> MountFS */ }
-            FS_Type::Ext4  => { /* open ext4 -> MountFS */ }
-            FS_Type::Null  => { /* new RamFS -> MountFS */ }
-        };
-        mount_common_filesystems(&mfs);
-        mfs
-    };
-}
-```
-
-初始化流程：可选择跳过块设备检测 → `pre_mount()` → `detect_fs()` → 打开具体文件系统 → MountFS 包装 → 挂载 devfs bootstrap。
 
 `detect_fs()` 读取块 0 的一个完整块（BLOCK_SIZE）：首先检查偏移 510 处 MBR 签名 `0x55AA`，若无 MBR 则检查偏移 1024 + 56 = 1080 处 ext4 超级块魔数 `0xEF53`。
 
@@ -211,12 +157,11 @@ pub fn vfs_root() -> Arc<MountFS> {
 | ext4 检测 | `detect_fs` | — | basic | pass |
 | FAT32 检测 | `detect_fs` | — | basic | pass |
 | initramfs 启动 | `initramfs_init` | — | basic | pass |
-| force_ramfs 回退 | `force_ramfs` | — | 调试 | pass |
 
 ## 8. 关键设计点
 
 - **VFS_ROOT 初始化顺序**：必须发生在 `mm::init()` 之后（需要堆分配器），且在 `task::add_initproc()` 之前（init 进程需要根文件系统）。
-- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA，必须在内存分配压力低时进行。initramfs 路径将块设备发现/注册（`register_boot_block_devices`）推迟到网络初始化之后、preload payload 安装之前；不得在内核中选择或挂载 x0/x1。
+- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA；initramfs 路径在网络初始化后只发现/注册（`register_boot_block_devices`），不得在内核中选择或挂载 x0/x1。
 - **不可递归触发 VFS_ROOT**：initramfs 解包期间（`unpack_newc`）严禁调用 `vfs_root()`，必须使用传入的 `root` 参数，否则引发递归 lazy_static 初始化死锁。
 - **块设备故障不 panic**：无论是根文件系统未识别还是 tools 盘缺失，均 fallback 到 ramfs 或打印 warning 继续执行。这对调试和 CI 环境至关重要。
 - **MountFS 包装统一入口**：无论底层是磁盘文件系统（ext4/FAT32）还是伪文件系统（ramfs），全部包装为 `MountFS`，使路径解析、子挂载管理、挂载传播通过统一的 MountFS 层处理。

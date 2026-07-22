@@ -1,7 +1,7 @@
 ---
 title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
-status: stable
+status: draft
 author: MangoCore Team
 last_update: 2026-06-29
 tags: [architecture, boot, trap, syscall]

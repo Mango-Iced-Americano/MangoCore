@@ -1,7 +1,7 @@
 ---
 title: "初始化流程 (Initialization Flow)"
 category: architecture
-status: stable
+status: draft
 author: MangoCore Team
 last_update: 2026-06-29
 tags: [architecture, boot, init]

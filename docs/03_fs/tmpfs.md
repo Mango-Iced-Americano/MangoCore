@@ -159,10 +159,9 @@ ramfs 的读写路径直接操作物理页，单次 `read_at` 中拷贝字节数
 
 两者通过 VFS 初始化流程集成到系统中：
 
-- **ramfs** 作为根文件系统的首选 fallback。`VFS_ROOT` 在 initramfs 模式下直接基于 ramfs 构建，在非 initramfs 模式下当块设备 FS 检测失败时回退到 ramfs。
+- **ramfs** 作为 initramfs 的内存根文件系统。
 - **tmpfs** 通过 `mount_common_filesystems()` 挂载到 `/tmp`（无大小限制，权限 01777）和 `/dev/shm`（16MB 大小限制，权限 01777）。`/dev/shm` 的 tmpfs 作为 devfs 的子挂载注册到挂载树。
 
-ramfs 的 `force_ramfs()` 开关可在块设备初始化之前禁用所有磁盘文件系统，直接使用 ramfs 启动，用于 VFS 层调试。
 
 ## 6. Test Mapping
 
@@ -176,7 +175,6 @@ ramfs 的 `force_ramfs()` 开关可在块设备初始化之前禁用所有磁盘
 | tmpfs xattr | `getxattr`/`setxattr` | `setxattr01` | basic | pass |
 | tmpfs 大小限制 | `check_space` | `tmpfs01` | basic | pass |
 | ramfs 根文件系统 | `VFS_ROOT` | `mount01` | basic | pass |
-| ramfs fallback | `force_ramfs` | — | 调试 | pass |
 | ramfs initramfs 解包 | `unpack_embedded` | — | basic | pass |
 
 ## 7. 已知问题

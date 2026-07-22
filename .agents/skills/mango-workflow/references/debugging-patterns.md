@@ -185,11 +185,11 @@
 
 - **现象**: `rv64-kernel-build-only` 成功，但同样的 initramfs 代码在 la64 上报大量编译错误
 - **根因**: la64 的 `make/la64o.mk` 使用 `--no-default-features`，而 rv64 使用默认 features（含 `initramfs`）。la64 内核中部分代码路径只在 `initramfs` 特性 gate 下才编译通过
-- **修复**: la64 构建必须显式传递 `initramfs` 和 `preload_payloads`：
+- **修复**: la64 构建必须显式传递 `initramfs`：
   ```
-  cargo build --no-default-features --release --features "comp board_laqemu block_virt_pci log_off initramfs preload_payloads"
+  cargo build --no-default-features --release --features "comp board_laqemu block_virt_pci log_off initramfs"
   ```
-  或通过 `make -f make/la64o.mk build EXTRA_FEATURES="initramfs preload_payloads"`
+  或通过 `make -f make/la64o.mk build EXTRA_FEATURES="initramfs"`
 - **注意**: 根 Makefile 没有 `la64-kernel-build-only` 目标；`rv64_all`/`la64_all` 通过不同的 Makefile 目标处理特性
 - **相关文件**: `os/make/la64o.mk`, `os/Makefile`
 
