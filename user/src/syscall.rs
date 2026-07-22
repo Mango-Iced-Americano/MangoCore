@@ -229,6 +229,10 @@ pub fn sys_getpid() -> isize {
     syscall(SYSCALL_GETPID, [0, 0, 0])
 }
 
+pub fn sys_getppid() -> isize {
+    syscall(SYSCALL_GETPPID, [0, 0, 0])
+}
+
 pub fn sys_fork() -> isize {
     const SIGCHLD: usize = 17;
     syscall(SYSCALL_CLONE, [SIGCHLD, 0, 0])
@@ -266,6 +270,13 @@ pub fn sys_waitpid_flags(pid: isize, exit_code: *mut i32, options: usize) -> isi
 
 pub fn sys_kill(pid: usize, sig: usize) -> isize {
     syscall(SYSCALL_KILL, [pid, sig, 0])
+}
+
+pub fn sys_rt_sigaction(signum: usize, action: usize, old_action: usize, sigsetsize: usize) -> isize {
+    syscall6(
+        SYSCALL_SIGACTION,
+        [signum, action, old_action, sigsetsize, 0, 0],
+    )
 }
 
 pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
