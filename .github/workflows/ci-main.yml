@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CI_IMAGE: zhouzhouyi/os-contest:20260104
+  CI_IMAGE: zhouzhouyi/os-contest:20260510
   QEMU_TIMEOUT: "7200"
 
 jobs:
@@ -77,7 +77,15 @@ jobs:
                 rm -f fs-img-dir/sdcard-*.img.xz
                 make testsuits-download
               fi
-            '
+             '
+
+      - name: Enforce warning baseline
+        run: |
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app \
+            "$CI_IMAGE" \
+            bash -lc 'set -euxo pipefail; make lint'
 
       - name: Run full test
         id: full
@@ -93,7 +101,7 @@ jobs:
             "$CI_IMAGE" \
             bash -lc '
               set -euxo pipefail
-              python3 scripts/run_full_test.py
+              python3 scripts/run_full_test.py --serial
             ' 2>&1 | tee testresult/full-test.log
 
       - name: Analyze score gates
