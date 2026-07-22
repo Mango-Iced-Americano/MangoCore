@@ -228,6 +228,14 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Sisyphus 编排确定性 RED 回归和无锁发布；Oracle 拒绝首版修复并定位写入可见性与短 UserBuffer 失败回滚缺口，推动以 `Loading` lease 和突变前预校验完成修复。
 - Verification: Docker 串行 RV64/LA64 builds 通过；RV64 focused PageCache ktest 达到 4/4 GREEN，Oracle 最终 GO。
 
+### Case 9: ext4 A/B runner 的 QEMU console framing gate
+
+- Evidence: `docs/Work_Log/2026-07-22.md`、`docs/Work_Log/evidence/2026-07-22/ext4-backend-ab-la64-lwext4-la64-lwext4-readiness-crlf-20260722T0820Z/`。
+- AI tools: Sisyphus, Oracle, GPT-5.6-terra。
+- Problem: 真实 guest 已完成 iozone 并输出 backend/workload-success，但 colored delimiter 和 CRLF 行尾使 fail-closed parser 错判样本失败。
+- AI contribution: Sisyphus 用持久 QEMU 原始字节复现；三路 Oracle 审核确认只在消费边界删除单个终止 CR，并要求保留锚定 identity、顺序与 adversarial fixture 约束。
+- Verification: Docker shell self-test 与私有 LA64 lwext4 单样本均通过；结论限于 baseline readiness，未宣称 A/B 性能 parity。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -278,6 +286,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
 | `docs/Work_Log/2026-07-20.md` | another_ext4 PageCache lifecycle / EOF ordering | 记录受控 ownership 与 early-writeback toggle、Oracle 审核及 RV64 3/3、双架构构建证据 |
+| `docs/Work_Log/2026-07-22.md` | ext4 A/B console framing gate | 记录 Oracle 审核 ANSI/CRLF normalization、私有 LA64 readiness evidence 与 parity 边界 |
 
 ## 9. 交互记录与留痕方式
 
