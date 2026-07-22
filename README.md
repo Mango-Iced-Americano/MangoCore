@@ -28,20 +28,20 @@ make all
 # 4. 直接进入 OS 构建时，先只读检查工具链
 make toolchain-preflight
 
-# 5. 构建单架构完整镜像（内核 + 用户态 + 文件系统）
-cd os && make rv64_all
+# 5. 构建单架构完整产物（内核 + 用户态 + 文件系统）
+make build ARCH=rv64 PROFILE=normal
 
 # 6. 在 QEMU 中运行
-make rv64-run
+make run ARCH=rv64 PROFILE=normal
 ```
 
 进入容器后，首次构建需编译内核、用户态程序并打包文件系统镜像，耗时约 1-2 分钟。后续迭代可使用快速编译命令。
 
 根目录 `make all` 会为评测派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在工具链缺失时自动执行 setup 和 preflight。全新容器上的首次 `make all` 可能访问网络。直接执行 `make -C os`、用户态或架构目标不会自动安装工具链，须先运行 `make toolchain-preflight`；需要手动准备时仍可运行 `make toolchain-setup`。
 
-**la64 版本：** 将 `rv64_all` / `rv64-run` 替换为 `la64_all` / `la64-run` 即可。
+**LA64 版本：** 使用 `ARCH=la64`；与 RV64 共用根目录工具链和生成状态，必须在 RV64 完成后串行执行。
 
-> ⚠️ 双架构共享根目录固定的 Rust nightly 和架构生成状态；必须分开串行构建，禁止并行执行。`lang_items.rs` 变体由编译期 `target_arch` 直接选择，不会由 Make 配方覆盖活动文件。
+> ⚠️ 双架构共享根目录固定的 Rust nightly 和架构生成状态；必须分开串行构建，禁止并行执行。内核 `lang_items.rs` 在同一文件内用 `#[cfg(target_arch = ...)]` 选择架构分支。
 
 <div align="center">
   <img src="docs/diagrams/rv启动.png" alt="RISC-V QEMU 启动" width="45%">
@@ -51,31 +51,34 @@ make rv64-run
 ### 快速迭代（仅编译内核）
 
 ```bash
-cd os && make rv64-kernel-build-only
-cd os && make la64-kernel-build-only
+make kernel ARCH=rv64 PROFILE=normal
+make kernel ARCH=la64 PROFILE=normal
 ```
 
 ### 架构参数化构建 facade
 
-`os/Makefile` 提供兼容优先的 `kernel`、`arch-build`、`user` 和 `image` facade。它们复用现有构建路径，不替代既有运行、QEMU、测试或直接 `make -f make/{rv64,la64}.mk` 入口。
+根目录 Makefile 提供参数化 facade；所有正式目标都要求显式的 `ARCH` 与 `PROFILE`。`PROFILE` 为 `normal` 或 `regression`，其中 `run`、`user` 和 `image` 仅接受 `normal`。
 
 | Target | `ARCH` | `PROFILE` | 范围 |
 |--------|--------|-----------|------|
 | `kernel` | `rv64` 或 `la64` | `normal` 或 `regression` | 构建对应架构内核 |
-| `arch-build` | `rv64` 或 `la64` | `normal` 或 `regression` | 调用对应架构 Makefile 的 `build` |
+| `build` | `rv64` 或 `la64` | `normal` 或 `regression` | 构建对应架构完整产物 |
 | `user` | `rv64` 或 `la64` | 仅 `normal` | 构建用户态，并作为 `rootfs` 镜像输入 |
 | `image` | `rv64` 或 `la64` | 仅 `normal` | 构建用户态及其 `rootfs` 镜像 |
+| `check` | `rv64` 或 `la64` | `normal` 或 `regression` | 构建检查入口 |
+| `-C os ktest-run` | `rv64` 或 `la64` | `normal` 或 `regression` | 独立内核测试 |
+| `test` | `rv64` 或 `la64` | 仅 `regression` | 零盘 regression QEMU 测试 |
 
 ```bash
-make -C os ARCH=rv64 PROFILE=normal kernel
-make -C os ARCH=la64 PROFILE=regression kernel
-make -C os ARCH=rv64 PROFILE=normal arch-build
-make -C os ARCH=la64 PROFILE=regression arch-build
-make -C os ARCH=rv64 PROFILE=normal user
-make -C os ARCH=la64 PROFILE=normal image
+make kernel ARCH=rv64 PROFILE=normal
+make build ARCH=la64 PROFILE=normal
+make check ARCH=rv64 PROFILE=normal
+make -C os ktest-run ARCH=rv64 PROFILE=normal
+make test ARCH=rv64 PROFILE=regression
+make lint
 ```
 
-`PROFILE=normal|regression` 只选择既有的构建配置。`MODE=release|debug` 仍独立控制 Cargo 构建模式。`user` 和 `image` 当前只接受 `PROFILE=normal`，并只映射到用户态和 `rootfs` 镜像路径，不表示通用工具、评测器或磁盘创建接口。`run`、`test`、`check`、`lint` 和 `clean` facade 仍延期，不能用这些名称推断出已提供对应 API。
+`MODE=release|debug` 独立控制 Cargo 构建模式。`make lint` 是四格（双架构 × debug/release）首方 warning 基线门禁；显式 `ARCH`/`MODE` 时只检查对应单元。`make all` 是评测入口，串行完成双架构并发布兼容产物。
 
 需要双架构时，仍必须先执行 RV64，再执行 LA64，两个命令串行运行。上述 facade 已完成 Docker build-only 验证；这不表示 QEMU、CI 或运行时支持已经验证。
 
@@ -93,8 +96,8 @@ make docker
 
 | 架构 | 平台 | 固件 | 块/网 | 运行命令 |
 |------|------|------|--------|----------|
-| riscv64gc | QEMU virt | OpenSBI | virtio-blk / virtio-net | `make -C os rv64-run` |
-| loongarch64 | QEMU virt | QEMU | virtio / PCI | `make -C os la64-run` |
+| riscv64gc | QEMU virt | OpenSBI | virtio-blk / virtio-net | `make run ARCH=rv64 PROFILE=normal` |
+| loongarch64 | QEMU virt | QEMU | virtio / PCI | `make run ARCH=la64 PROFILE=normal` |
 
 ---
 
@@ -138,7 +141,7 @@ MangoCore 基于 [NPUcore-Blossom](https://gitlab.eduxiji.net/educg-group-35806-
 ### 快速冒烟
 
 ```bash
-cd os && make rv64-run
+make run ARCH=rv64 PROFILE=normal
 ```
 
 ### 测试配置
@@ -163,7 +166,7 @@ xz -dkc fs-img-dir/sdcard-la.img.xz > sdcard-la.img
 ### 全量自动化测试
 
 ```bash
-python3 scripts/run_full_test.py         # 一键双架构全量
+python3 scripts/run_full_test.py --serial # 一键双架构全量（串行）
 ```
 
 ### 注入自定义测试配置
@@ -219,9 +222,10 @@ docker-compose.yml 开发容器配置
 
 - **Docker 是唯一构建环境**，宿主机只需 Git 和 Docker
 - **工具链：** 根目录 `make all` 会在需要时自动 setup 和 preflight；直接 OS、用户态或架构目标只做 preflight，不自动 provisioning。手动流程可运行 `make toolchain-setup`
-- **禁止并行构建双架构** — 两条路径共享架构生成状态，必须串行；`lang_items.rs` 变体由编译期选择，不会写入 tracked 活动文件
-- **快速验证：** `make -C os rv64-kernel-build-only`（仅内核，约 20s）
-- **双架构编译验证：** 每次变更后执行 `make -C os rv64-kernel-build-only && make -C os la64-kernel-build-only`
+- **禁止并行构建双架构** — 两条路径共享架构生成状态，必须串行；`lang_items.rs` 使用单文件 cfg 分支，不会写入 tracked 活动文件
+- **快速验证：** `make kernel ARCH=rv64 PROFILE=normal`
+- **双架构编译验证：** 每次变更后串行执行 `make kernel ARCH=rv64 PROFILE=normal && make kernel ARCH=la64 PROFILE=normal`
+- **lint 门禁：** `make lint` 验证双架构 debug/release 的首方 warning 基线
 - 详细开发工作流（TLB 刷新、锁约定、errno 约定等）见项目根目录 `AGENTS.md`
 
 ---
