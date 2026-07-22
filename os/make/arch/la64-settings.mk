@@ -10,6 +10,9 @@ KERNEL_ELF := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 KERNEL_UIMG := $(KERNEL_ELF).ui
 BLK_MODE := virt_pci
+BLK_DEV_x0 = -device virtio-blk-pci,drive=x0
+BLK_DEV_x1 = -device virtio-blk-pci,drive=x1
+NET_DEV = -device virtio-net-pci,netdev=net0 -netdev user,id=net0
 FS_MODE ?= ext4
 IMAGE_ROLE_LA64_PRODUCT_ROOT := $(PRODUCT_ROOT)
 CORE_NUM := 1

@@ -1,6 +1,7 @@
 include make/common/toolchain.mk
 include make/image-roles.mk
 include make/arch/la64-settings.mk
+include make/qemu-profiles.mk
 
 lwext4-la64: $(LWEXT4_LA_LIB)
 
@@ -101,78 +102,21 @@ check-development-x0:
 
 run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), laqemu)
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive if=none,file=$(IMAGE_ROLE_LA64_X1),format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		-m 1024 \
-		-smp threads=$(CORE_NUM)
+	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_ELF) $(call qemu_two_drives,$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),LA64) -m 1024 -smp threads=$(CORE_NUM)
 endif
 
 runsimple: toolchain-preflight check-development-x0
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive if=none,file=$(IMAGE_ROLE_LA64_X1),format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		-m 1024 \
-		-smp threads=$(CORE_NUM)
+	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_ELF) $(call qemu_two_drives,$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),LA64) -m 1024 -smp threads=$(CORE_NUM)
 
 comp: toolchain-preflight
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel $(KERNEL_LA) \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(IMAGE_ROLE_LA64_COMPETITION_X0),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(IMAGE_ROLE_LA64_X1),if=none,format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_LA) -m 1G -smp 1 $(call qemu_two_drives,$(IMAGE_ROLE_LA64_COMPETITION_X0),LA64) -no-reboot $(NET_DEV) -rtc base=utc
 
 derived-comp: toolchain-preflight
 	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch la64 --path "$(IMAGE_ROLE_LA64_DERIVED_X0)" >/dev/null
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel $(KERNEL_LA) \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(IMAGE_ROLE_LA64_DERIVED_X0),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(IMAGE_ROLE_LA64_X1),if=none,format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_LA) -m 1G -smp 1 $(call qemu_two_drives,$(IMAGE_ROLE_LA64_DERIVED_X0),LA64) -no-reboot $(NET_DEV) -rtc base=utc
 
 comp-gdb: toolchain-preflight
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel $(KERNEL_LA) \
-		-m 1024 \
-		-nographic \
-		-smp 1 \
-		-drive file=$(IMAGE_ROLE_LA64_COMPETITION_X0),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(IMAGE_ROLE_LA64_X1),if=none,format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		-no-reboot \
-		-rtc base=utc \
-		-S \
-		-s
+	@qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_LA) -m 1024 -smp 1 $(call qemu_two_drives,$(IMAGE_ROLE_LA64_COMPETITION_X0),LA64) -no-reboot -rtc base=utc -S -s
 
 .PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
@@ -192,25 +136,14 @@ ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_
 ktest-run: toolchain-preflight ktest-build-only
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 \
-		-machine virt \
-		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 1024 \
-		-smp threads=1
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 $(QEMU_BASE_ARGS) -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) $(call qemu_zero_drives) -m 1024 -smp threads=1
 
 regression-run: toolchain-preflight
 	@echo "[regression] Building la64 kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 qemu-system-loongarch64 \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-m 1024 \
-		-smp threads=1 >/tmp/regression-la.log 2>&1; \
+	@timeout --foreground 60 qemu-system-loongarch64 $(QEMU_BASE_ARGS) -kernel $(KERNEL_ELF) $(call qemu_zero_drives) -m 1024 -smp threads=1 >/tmp/regression-la.log 2>&1; \
 	qemu_status=$$?; \
 	cat /tmp/regression-la.log; \
 	state=$$(../scripts/check-la64-regression-log.sh /tmp/regression-la.log $$qemu_status); \
