@@ -92,10 +92,12 @@ check_repo() {
     la_settings=$root/os/make/arch/la64-settings.mk
     rv_make=$root/os/make/rv64.mk
     la_make=$root/os/make/la64.mk
+    qemu_profiles=$root/os/make/qemu-profiles.mk
     tools_make=$root/os/make/tools-disk.mk
     inject_script=$root/os/inject_os_test_conf.sh
     role_tool=$root/scripts/image_roles.py
-    run_full=$root/scripts/run_full_test.py
+    run_full=$root/scripts/full_test/commands.py
+    run_full_runner=$root/scripts/full_test/runner.py
     auto_include=$root/scripts/auto_include_ltp.py
     auto_exclude=$root/scripts/auto_exclude_ltp.py
 
@@ -145,17 +147,22 @@ check_repo() {
         'LA64 external evaluator sdcard name changed'
     require_line 'include make/image-roles.mk' "$rv_make" 'RV64 QEMU must load the role map'
     require_line 'include make/image-roles.mk' "$la_make" 'LA64 QEMU must load the role map'
-    require_line 'file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),format=raw,id=x0' "$rv_make" \
+    [ -r "$qemu_profiles" ] || fail 'missing centralized QEMU profile arguments'
+    require_line 'include make/qemu-profiles.mk' "$rv_make" 'RV64 QEMU must use centralized arguments'
+    require_line 'include make/qemu-profiles.mk' "$la_make" 'LA64 QEMU must use centralized arguments'
+    require_line 'define qemu_two_drives' "$qemu_profiles" 'central QEMU profile must define x0+x1 construction'
+    require_line 'define qemu_zero_drives' "$qemu_profiles" 'central QEMU profile must define diskless construction'
+    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),RV64)' "$rv_make" \
         'RV64 development x0 must use the role map'
-    require_line 'file=$(IMAGE_ROLE_RV64_X1),format=raw,id=x1' "$rv_make" \
+    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_RV64_COMPETITION_X0),RV64)' "$rv_make" \
         'RV64 development x1 must use the role map'
-    require_line 'file=$(IMAGE_ROLE_RV64_COMPETITION_X0),if=none,format=raw,id=x0' "$rv_make" \
+    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_RV64_DERIVED_X0),RV64)' "$rv_make" \
         'RV64 competition x0 must use the role map'
-    require_line 'file=$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),format=raw,id=x0' "$la_make" \
+    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),LA64)' "$la_make" \
         'LA64 development x0 must use the role map'
-    require_line 'file=$(IMAGE_ROLE_LA64_X1),format=raw,id=x1' "$la_make" \
+    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_LA64_COMPETITION_X0),LA64)' "$la_make" \
         'LA64 development x1 must use the role map'
-    require_line 'file=$(IMAGE_ROLE_LA64_COMPETITION_X0),if=none,format=raw,id=x0' "$la_make" \
+    require_line '$(call qemu_two_drives,$(IMAGE_ROLE_LA64_DERIVED_X0),LA64)' "$la_make" \
         'LA64 competition x0 must use the role map'
     require_line 'IMAGE_ROLE_RV64_DEVELOPMENT_X0' "$rv_settings" \
         'RV64 development rootfs producer must consult the role map'
@@ -201,15 +208,14 @@ check_repo() {
         require_line 'from image_roles import' "$consumer" 'Python consumer bypasses image-role interface'
     done
     require_line 'derived_x0' "$run_full" 'full-test QEMU must use derived x0 roles'
-    require_line 'ROLES.path("IMAGE_ROLE_RV64_X1")' "$run_full" 'full-test RV64 x1 must use the role manifest'
-    require_line 'ROLES.path("IMAGE_ROLE_LA64_X1")' "$run_full" 'full-test LA64 x1 must use the role manifest'
-    require_line 'validate_official' "$run_full" 'full-test must validate official archives before extraction'
+    require_line 'roles.path(f"IMAGE_ROLE_{arch.upper()}_X1")' "$run_full" 'full-test x1 must use the role manifest'
+    require_line 'validate_official' "$run_full_runner" 'full-test must validate official archives before extraction'
     for consumer in "$auto_include" "$auto_exclude"; do
         require_line 'derived-run' "$consumer" 'LTP must run named derived-image QEMU targets'
         require_line 'CONF_IMAGE=' "$consumer" 'LTP injection must name its derived x0 target'
         require_line 'validate_official' "$consumer" 'LTP must validate official archives before extraction'
     done
-    if grep -E 'sdcard-(rv|la)\.img|disk(-la)?\.img' "$run_full" "$auto_include" "$auto_exclude" >/dev/null 2>&1; then
+    if grep -E 'sdcard-(rv|la)\.img|disk(-la)?\.img' "$run_full" "$run_full_runner" "$auto_include" "$auto_exclude" >/dev/null 2>&1; then
         fail 'a Python image consumer still hard-codes an image role'
     fi
     require_line 'workspace=$$(mktemp -d' "$tools_make" 'tools workspace must fail fast when mktemp fails'
@@ -231,11 +237,16 @@ run_fixture() {
         os/make/arch/la64-settings.mk \
         os/make/rv64.mk \
         os/make/la64.mk \
+        os/make/qemu-profiles.mk \
         os/make/common/toolchain.mk \
         os/make/tools-disk.mk \
         os/inject_os_test_conf.sh \
         scripts/image_roles.py \
         scripts/run_full_test.py \
+        scripts/full_test/__init__.py \
+        scripts/full_test/commands.py \
+        scripts/full_test/runner.py \
+        scripts/full_test/cli.py \
         scripts/auto_include_ltp.py \
         scripts/auto_exclude_ltp.py \
         scripts/make_mbr_tools_disk.py; do
