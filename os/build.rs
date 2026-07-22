@@ -13,7 +13,7 @@ use std::{env, fs, path::PathBuf};
 fn required_path(name: &str) -> PathBuf {
     env::var_os(name)
         .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("{name} is required when initramfs is enabled"))
+        .unwrap_or_else(|| panic!("{} is required when initramfs is enabled", name))
 }
 
 fn assembly_path(path: &std::path::Path) -> String {
@@ -90,7 +90,7 @@ fn generate_preload_assembly() {
             "loongarch64",
             "ltp_proto_compat-la.so",
         ),
-        Ok(arch) => panic!("preload payloads do not support target architecture: {arch}"),
+        Ok(arch) => panic!("preload payloads do not support target architecture: {}", arch),
         Err(_) => panic!("CARGO_CFG_TARGET_ARCH is required for preload payloads"),
     };
     let user_bin = user_output_root.join(target).join(profile);
