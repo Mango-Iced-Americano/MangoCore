@@ -2,6 +2,7 @@
 
 - UTC date: 2026-07-22
 - Host worktree: `/home/pxy/projects/MangoCore-cleanup`
+- Repository revision during fixture: `a2a19e15-dirty`
 - Container ID: `c238e449081e4c68d07b193d7e7e7c357406503eaab22305cc763a4d9c2e1161`
 - Image: `zhouzhouyi/os-contest:20260510`
 - Mount: `/home/pxy/projects/MangoCore-cleanup -> /app`
