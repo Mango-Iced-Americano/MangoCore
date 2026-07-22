@@ -22,11 +22,19 @@ ktest 是零盘 initramfs profile。不得增加永久第三盘，也不得把 x
 外部评测盘的来源记录为 `oscomp/testsuits-for-oskernel pre-20250615`。下载归档
 及解压后的外部输入应由使用方记录 SHA-256；本仓库不在构建阶段下载、格式化或
 写入这些输入。`conf-inject` 对 virt/virt_pci 默认先复制为
-`build/<arch>/<mode>/development/image/sdcard-<arch>-derived.img`，随后只写该
-派生镜像；直接指定 `sdcard-rv.img` 或 `sdcard-la.img` 会被拒绝。
+`build/development/<arch>/sdcard-<arch>-derived.img`，随后只写该派生镜像；
+`run_full_test.py` 与 LTP 自动化脚本也只消费该 manifest 导出的派生 x0。
+
+在 `cp`、`e2fsck` 或 `debugfs` 前，注入路径必须先通过角色表验证：输入的
+official x0 校验 SHA-256，输出必须为当前架构的命名 derived x0。验证会拒绝
+路径中的符号链接、解析后等于 official x0 的路径、以及与任一 official x0
+共享 device/inode 的硬链接；RV64 不可把 LA64 的 derived 或 official 名称作为
+目标。`make -n` 同样在解析阶段拒绝把 development x0 override 解析为 official
+x0，避免 dry-run 掩盖危险配置。
 
 工具盘构建使用每次调用独有的 `mktemp -d` workspace，并在 trap 清理 loop mount；
-不会使用共享的 `/tmp/tools-mnt`。
+不会使用共享的 `/tmp/tools-mnt`。workspace 创建失败会立即报错；若 unmount
+失败，构建以非零状态退出并保留 workspace 路径以保全诊断。
 
 ## 合同验证
 
@@ -34,11 +42,15 @@ ktest 是零盘 initramfs profile。不得增加永久第三盘，也不得把 x
 
 ```sh
 sh scripts/test-image-role-contract.sh
-for fixture in swapped-drive third-drive missing-payload mutate-official-x0; do
+for fixture in \
+    swapped-drive third-drive missing-payload mutate-official-x0 \
+    remaining-consumer cross-arch-derived symlink-alias hardlink-alias \
+    make-override mktemp-failure unmount-failure; do
     sh scripts/test-image-role-contract.sh --fixture "$fixture"
 done
 ```
 
 该检查只读取 Make、脚本和 MBR metadata，不构建外部镜像、不启动 QEMU。它验证
 RV64/LA64 development/competition 消费者均引用角色表、x1 的 P1/P2 所有权、零盘
-profile、禁止第三盘，以及外部 x0 的不可变性。
+profile、禁止第三盘，以及外部 x0 的不可变性。对注入 guard 的 fixture 还以
+`cp`、`e2fsck`、`debugfs` 哨兵验证拒绝发生在任何可变操作之前。
