@@ -1,7 +1,7 @@
 include make/common/toolchain.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint validate-run publish-compatibility
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -131,7 +131,8 @@ test: prepare-cargo-config
 
 check: prepare-cargo-config
 	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
-	CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" cargo check --target $(if $(filter rv64,$(ARCH)),riscv64gc-unknown-none-elf,loongarch64-unknown-linux-gnu)
+	$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk check MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE)) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
 
 lint: prepare-cargo-config
 	$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
@@ -202,10 +203,16 @@ lwext4-la64:
 .PHONY: lwext4-rv64 lwext4-la64
 
 rv64-ktest: prepare-cargo-config
-	make -f make/rv64.mk ktest-run MODE=${MODE} LOG=${LOG}
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk ktest-run MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
+
+rv64-ktest-build-only: prepare-cargo-config
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
 
 la64-ktest: prepare-cargo-config
-	make -f make/la64.mk ktest-run MODE=${MODE} LOG=${LOG}
+	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk ktest-run MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user"
+
+la64-ktest-build-only: prepare-cargo-config
+	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user"
 
 # Composite: fast check + unit test + kernel test
 .PHONY: bugscan
