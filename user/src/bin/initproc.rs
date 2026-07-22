@@ -2,6 +2,9 @@
 #![no_main]
 extern crate alloc;
 
+#[path = "initproc/ext4_ab_diag.rs"]
+mod ext4_ab_diag;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -71,19 +74,19 @@ const DEFAULT_ORDER: &[&str] = &[
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
 const DEFAULT_TIMEOUTS: [u64; 13] = [
-    60,   // [0]  basic
+    60,    // [0]  basic
     120,   // [1]  busybox
-    60,   // [2]  lua
-    120,  // [3]  libctest
-    480,  // [4]  iozone
+    60,    // [2]  lua
+    120,   // [3]  libctest
+    480,   // [4]  iozone
     900,   // [5]  unixbench
-    40,   // [6]  iperf
-    120,  // [7]  libcbench
-    900, // [8]  lmbench
-    90,   // [9]  netperf
-    60,   // [10] cyclictest
+    40,    // [6]  iperf
+    120,   // [7]  libcbench
+    900,   // [8]  lmbench
+    90,    // [9]  netperf
+    60,    // [10] cyclictest
     24000, // [11] ltp
-    600,  // [12] cpython
+    600,   // [12] cpython
 ];
 
 /// LTP 默认排除测例名列表
@@ -315,6 +318,104 @@ enum RunMode {
     Regression,
 }
 
+#[derive(Clone)]
+struct AbRunId(String);
+
+#[derive(Copy, Clone)]
+enum AbBackend {
+    LwExt4,
+    Legacy,
+    Another,
+}
+
+impl AbBackend {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::LwExt4 => "lwext4",
+            Self::Legacy => "legacy",
+            Self::Another => "another",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum IozoneLibc {
+    Musl,
+    Glibc,
+}
+
+#[derive(Clone)]
+enum AbConfigField<T> {
+    Absent,
+    Valid(T),
+    Invalid,
+}
+
+enum IozoneAbScope {
+    Absent,
+    Complete,
+    Invalid,
+}
+
+#[derive(Copy, Clone)]
+enum IozoneRunPlan {
+    Default,
+    Selected(IozoneLibc),
+    Invalid,
+}
+
+fn iozone_run_plan(cfg: &RuntimeConfig) -> IozoneRunPlan {
+    let scope = match (&cfg.ab_run_id, &cfg.ab_backend) {
+        (AbConfigField::Absent, AbConfigField::Absent) => IozoneAbScope::Absent,
+        (AbConfigField::Valid(_), AbConfigField::Valid(_)) => IozoneAbScope::Complete,
+        (AbConfigField::Absent, AbConfigField::Valid(_))
+        | (AbConfigField::Absent, AbConfigField::Invalid)
+        | (AbConfigField::Valid(_), AbConfigField::Absent)
+        | (AbConfigField::Valid(_), AbConfigField::Invalid)
+        | (AbConfigField::Invalid, AbConfigField::Absent)
+        | (AbConfigField::Invalid, AbConfigField::Valid(_))
+        | (AbConfigField::Invalid, AbConfigField::Invalid) => IozoneAbScope::Invalid,
+    };
+
+    match (scope, &cfg.ab_iozone_libc) {
+        (IozoneAbScope::Absent, AbConfigField::Absent) => IozoneRunPlan::Default,
+        (IozoneAbScope::Complete, AbConfigField::Valid(libc)) => IozoneRunPlan::Selected(*libc),
+        (IozoneAbScope::Absent, AbConfigField::Valid(_))
+        | (IozoneAbScope::Absent, AbConfigField::Invalid)
+        | (IozoneAbScope::Complete, AbConfigField::Absent)
+        | (IozoneAbScope::Complete, AbConfigField::Invalid)
+        | (IozoneAbScope::Invalid, AbConfigField::Absent)
+        | (IozoneAbScope::Invalid, AbConfigField::Valid(_))
+        | (IozoneAbScope::Invalid, AbConfigField::Invalid) => IozoneRunPlan::Invalid,
+    }
+}
+
+struct GroupRunSummary {
+    failures: usize,
+    iozone_samples: usize,
+    unverified_groups: usize,
+}
+
+impl GroupRunSummary {
+    const fn new() -> Self {
+        Self {
+            failures: 0,
+            iozone_samples: 0,
+            unverified_groups: 0,
+        }
+    }
+
+    fn record(&mut self, group_name: &str, passed: bool) {
+        if passed {
+            if group_name == "iozone" {
+                self.iozone_samples += 1;
+            }
+        } else {
+            self.failures += 1;
+        }
+    }
+}
+
 fn mode_name(mode: RunMode) -> &'static str {
     match mode {
         RunMode::Run => "run",
@@ -377,6 +478,13 @@ struct RuntimeConfig {
     drift_pre_mask: u16,
     /// drift_window 模式：测量目标 "null"（lat_syscall null）| "full"（全量 lmbench）
     drift_measure: String,
+    /// A/B runner identity. Both fields must be present and valid before a marker can emit.
+    ab_run_id: AbConfigField<AbRunId>,
+    ab_backend: AbConfigField<AbBackend>,
+    /// A/B iozone libc selector. It is valid only with a complete A/B identity.
+    ab_iozone_libc: AbConfigField<IozoneLibc>,
+    /// Enable bounded another_ext4 diagnostics for focused A/B iozone workloads only.
+    ext4_ab_diag: bool,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -460,6 +568,10 @@ impl RuntimeConfig {
             drift_libc: String::from("both"),
             drift_pre_mask: 0,
             drift_measure: String::from("null"),
+            ab_run_id: AbConfigField::Absent,
+            ab_backend: AbConfigField::Absent,
+            ab_iozone_libc: AbConfigField::Absent,
+            ext4_ab_diag: false,
         }
     }
 }
@@ -541,6 +653,48 @@ fn parse_csv_with_defaults(defaults: &[&str], val: &[u8]) -> Option<Vec<String>>
 fn parse_bool_flag(val: &[u8]) -> bool {
     let val = trim_ascii(val);
     val == b"1" || val == b"true" || val == b"yes" || val == b"on"
+}
+
+fn parse_ab_run_id(val: &[u8]) -> Option<AbRunId> {
+    if val.is_empty() || val.len() > 80 || !val[0].is_ascii_alphanumeric() {
+        return None;
+    }
+    if !val[1..]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
+    {
+        return None;
+    }
+    core::str::from_utf8(val)
+        .ok()
+        .map(|value| AbRunId(String::from(value)))
+}
+
+fn parse_ab_backend(val: &[u8]) -> Option<AbBackend> {
+    match val {
+        b"lwext4" => Some(AbBackend::LwExt4),
+        b"legacy" => Some(AbBackend::Legacy),
+        b"another" => Some(AbBackend::Another),
+        _ => None,
+    }
+}
+
+fn parse_iozone_libc(val: &[u8]) -> Option<IozoneLibc> {
+    match val {
+        b"musl" => Some(IozoneLibc::Musl),
+        b"glibc" => Some(IozoneLibc::Glibc),
+        _ => None,
+    }
+}
+
+fn set_ab_field<T>(field: &mut AbConfigField<T>, value: Option<T>) {
+    *field = match core::mem::replace(field, AbConfigField::Invalid) {
+        AbConfigField::Absent => match value {
+            Some(value) => AbConfigField::Valid(value),
+            None => AbConfigField::Invalid,
+        },
+        AbConfigField::Valid(_) | AbConfigField::Invalid => AbConfigField::Invalid,
+    };
 }
 
 fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
@@ -673,6 +827,14 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             if let Some(s) = s {
                 cfg.drift_measure = String::from(s.trim());
             }
+        } else if key == b"ext4_ab_run_id" {
+            set_ab_field(&mut cfg.ab_run_id, parse_ab_run_id(val));
+        } else if key == b"ext4_ab_backend" {
+            set_ab_field(&mut cfg.ab_backend, parse_ab_backend(val));
+        } else if key == b"ext4_ab_iozone_libc" {
+            set_ab_field(&mut cfg.ab_iozone_libc, parse_iozone_libc(val));
+        } else if key == b"ext4_ab_diag" {
+            cfg.ext4_ab_diag = parse_bool_flag(val);
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -862,7 +1024,7 @@ fn run_group_in_dir(
     timeout_secs: u64,
     max_retries: usize,
     cfg: &RuntimeConfig,
-) {
+) -> bool {
     let group_start_ms = get_time() as u64;
     let log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
@@ -894,7 +1056,7 @@ fn run_group_in_dir(
                 group_name, log_dir, elapsed_s
             );
             profile_after(group_name, libc_suffix, cfg);
-            return; // 成功，直接返回
+            return true; // 成功，直接返回
         }
         // SIGKILL 是 initproc 超时后主动发送的，说明我们故意要终止它，不重试
         if (last_exit_code & 0x7F) == SIGKILL as i32 {
@@ -907,7 +1069,7 @@ fn run_group_in_dir(
                 group_name, log_dir, elapsed_s
             );
             profile_after(group_name, libc_suffix, cfg);
-            return;
+            return false;
         }
         if attempt < max_retries {
             println!(
@@ -928,6 +1090,7 @@ fn run_group_in_dir(
         group_name, log_dir, elapsed_s
     );
     profile_after(group_name, libc_suffix, cfg);
+    false
 }
 
 /// 单次执行测试脚本（无重试），返回子进程退出码。
@@ -947,6 +1110,24 @@ fn run_group_once(
         group_name, libc_suffix
     );
 
+    let mut ext4_ab_diag = match iozone_run_plan(cfg) {
+        IozoneRunPlan::Selected(_) if cfg.ext4_ab_diag && group_name == "iozone" => {
+            match (&cfg.ab_run_id, &cfg.ab_backend) {
+                (AbConfigField::Valid(run_id), AbConfigField::Valid(backend)) => {
+                    ext4_ab_diag::Session::begin(&run_id.0, backend.as_str(), get_time() as u64)
+                }
+                (AbConfigField::Absent, AbConfigField::Absent)
+                | (AbConfigField::Absent, AbConfigField::Valid(_))
+                | (AbConfigField::Absent, AbConfigField::Invalid)
+                | (AbConfigField::Valid(_), AbConfigField::Absent)
+                | (AbConfigField::Valid(_), AbConfigField::Invalid)
+                | (AbConfigField::Invalid, AbConfigField::Absent)
+                | (AbConfigField::Invalid, AbConfigField::Valid(_))
+                | (AbConfigField::Invalid, AbConfigField::Invalid) => None,
+            }
+        }
+        IozoneRunPlan::Default | IozoneRunPlan::Selected(_) | IozoneRunPlan::Invalid => None,
+    };
     let pid = fork();
     if pid < 0 {
         println!(
@@ -1034,6 +1215,9 @@ fn run_group_once(
             }
 
             let elapsed_ms = (get_time() as u64).saturating_sub(start_ms);
+            if let Some(diag) = ext4_ab_diag.as_mut() {
+                diag.emit_if_due(get_time() as u64);
+            }
             if elapsed_ms >= timeout_ms {
                 timed_out = true;
                 let pgid = getpgid(pid as usize);
@@ -1043,6 +1227,9 @@ fn run_group_once(
                 );
                 profile_dump(group_name, libc_suffix, "timeout", cfg);
                 let t_kill = get_time() as u64;
+                if let Some(diag) = ext4_ab_diag.as_mut() {
+                    diag.emit_timeout(t_kill);
+                }
                 // kill 整个进程组，消灭 script fork 出来的子进程
                 if pgid > 0 {
                     let _ = kill(!(pgid as usize) + 1, SIGKILL);
@@ -1951,10 +2138,7 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     if !diag {
         return;
     }
-    println!(
-        "[initproc] [diag] === stats T{} {}:{} ===",
-        n, group, libc
-    );
+    println!("[initproc] [diag] === stats T{} {}:{} ===", n, group, libc);
     let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
@@ -1975,10 +2159,14 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/syscall_top\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/pagefault\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/vm\0", environ);
-    println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
+    println!(
+        "[initproc] [diag] === stats T{} {}:{} end ===",
+        n, group, libc
+    );
 }
 
-fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
+fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) -> GroupRunSummary {
+    let mut summary = GroupRunSummary::new();
     println!(
         "[initproc] run_selected_groups start mask=0x{:03X} order={:?}",
         cfg.mask,
@@ -1999,8 +2187,12 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             "[initproc] select group={} timeout={}s",
             group_name, timeout_secs
         );
-        // Diag: enable stats and reset counters before each group
-        if cfg.diag {
+        let ext4_ab_diag_active = match iozone_run_plan(cfg) {
+            IozoneRunPlan::Selected(_) => cfg.ext4_ab_diag && group_name == "iozone",
+            IozoneRunPlan::Default | IozoneRunPlan::Invalid => false,
+        };
+        // Diag: enable stats and reset counters before each requested diagnostic group.
+        if cfg.diag || ext4_ab_diag_active {
             let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/stats_on\0", environ);
             let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
             println!(
@@ -2009,6 +2201,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             );
         }
         if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Suite {
+            summary.unverified_groups += 1;
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 run_ltp_suite_runner(
@@ -2029,6 +2222,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 );
             }
         } else if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
+            summary.unverified_groups += 1;
             // 本地调试路径：LTP 使用内联枚举，支持 include/exclude/from。
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
@@ -2065,11 +2259,12 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
-                if(cfg.diag) {
+                if (cfg.diag) {
                     snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
                 }
             }
         } else if group_name == "ltp" {
+            summary.unverified_groups += 1;
             // 提交默认路径：运行镜像内官方 ltp_testcode.sh，保持评测器期望的串口协议。
             // LTP 不重试——超时说明内核有问题，重试没有意义。
             let libc = cfg.ltp_libc;
@@ -2078,35 +2273,80 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 snapshot_diag(cfg.diag, n, group_name, "musl", environ);
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1, cfg);
+                run_group_in_dir(
+                    environ,
+                    "/glibc\0",
+                    group_name,
+                    script,
+                    timeout_secs,
+                    1,
+                    cfg,
+                );
                 snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
                 run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1, cfg);
-                if(cfg.diag) {
+                if (cfg.diag) {
                     snapshot_diag(cfg.diag, n, group_name, "musl", environ);
                 }
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1, cfg);
-                if(cfg.diag) {
+                run_group_in_dir(
+                    environ,
+                    "/glibc\0",
+                    group_name,
+                    script,
+                    timeout_secs,
+                    1,
+                    cfg,
+                );
+                if (cfg.diag) {
                     snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
                 }
             }
         } else if group_name == "cpython" {
-            run_group_in_dir(
+            let passed = run_group_in_dir(
                 environ,
                 "/tools/tests/cpython\0",
                 group_name,
                 script,
                 timeout_secs,
-                1,  // max_retries=1
+                1, // max_retries=1
                 cfg,
             );
+            summary.record(group_name, passed);
             if cfg.diag {
                 snapshot_diag(cfg.diag, n, group_name, "isolated", environ);
             }
+        } else if group_name == "iozone" {
+            let retries = if group_name == "lmbench" {
+                1
+            } else {
+                MAX_GROUP_RETRIES
+            };
+            let libc_dirs: &[(&str, &str)] = match iozone_run_plan(cfg) {
+                IozoneRunPlan::Default => &[("/musl\0", "musl"), ("/glibc\0", "glibc")],
+                IozoneRunPlan::Selected(IozoneLibc::Musl) => &[("/musl\0", "musl")],
+                IozoneRunPlan::Selected(IozoneLibc::Glibc) => &[("/glibc\0", "glibc")],
+                IozoneRunPlan::Invalid => &[],
+            };
+            if libc_dirs.is_empty() {
+                println!("[initproc] invalid ext4 A/B iozone config: skipping both libc runs");
+                summary.record(group_name, false);
+            }
+            for &(dir, libc) in libc_dirs {
+                let passed =
+                    run_group_in_dir(environ, dir, group_name, script, timeout_secs, retries, cfg);
+                summary.record(group_name, passed);
+                if cfg.diag {
+                    snapshot_diag(cfg.diag, n, group_name, libc, environ);
+                }
+            }
         } else {
-            let retries = if group_name == "lmbench" { 1 } else { MAX_GROUP_RETRIES };
-            run_group_in_dir(
+            let retries = if group_name == "lmbench" {
+                1
+            } else {
+                MAX_GROUP_RETRIES
+            };
+            let musl_passed = run_group_in_dir(
                 environ,
                 "/musl\0",
                 group_name,
@@ -2115,10 +2355,11 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 retries,
                 cfg,
             );
-            if(cfg.diag) {
+            summary.record(group_name, musl_passed);
+            if (cfg.diag) {
                 snapshot_diag(cfg.diag, n, group_name, "musl", environ);
             }
-            run_group_in_dir(
+            let glibc_passed = run_group_in_dir(
                 environ,
                 "/glibc\0",
                 group_name,
@@ -2127,15 +2368,20 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 retries,
                 cfg,
             );
-            if(cfg.diag) {
+            summary.record(group_name, glibc_passed);
+            if (cfg.diag) {
                 snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
             }
+        }
+        if ext4_ab_diag_active && !cfg.diag {
+            let _ = run_bash_cmd("echo 0 > /sys/kernel/stats/stats_on\0", environ);
         }
         // 每组之间休息一会，清理孤儿进程、让网络连接完全关闭
         println!("[initproc] sleep 1s before next group");
         sleep(1000);
     }
     println!("[initproc] run_selected_groups done");
+    summary
 }
 
 fn run_unix_standalone_tests(environ: &[*const u8]) {
@@ -3111,7 +3357,7 @@ fn install_apk_packages(environ: &[*const u8]) {
     let pkgs = "e2fsprogs\0";
     let cmd = alloc::format!(
         "{} add {} && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
-    //        apk.trim_end_matches('\0'),
+        //        apk.trim_end_matches('\0'),
         apk.trim_end_matches('\0'),
         pkgs.trim_end_matches('\0'),
     );
@@ -3185,7 +3431,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     } else {
         println!("[initproc] skip_apk=true: skipping install_apk_packages");
     }
-    
+
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
     let bash_ret = run_bash_cmd(bash_check, &environ);
     let has_bin_bash = bash_ret == 0;
@@ -3196,7 +3442,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     );
 
     // === fs_test fork+shell perf diagnostic (uncomment to run) ===
- /* // Enable with EXTRA_FEATURES=perf_diag
+    /* // Enable with EXTRA_FEATURES=perf_diag
     println!("[initproc] running fs_test fork+shell bench...");
     let tests = ["perf_fork_exec_shell", "perf_fork_exec_shell_quiet", "perf_fork_exec_shell_min", "perf_fork_exec", "perf_fork_only"];
     for t in &tests {
@@ -3254,7 +3500,33 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         return 0;
     }
 
-    run_selected_groups(&environ, &cfg);
+    let summary = run_selected_groups(&environ, &cfg);
+    match iozone_run_plan(&cfg) {
+        IozoneRunPlan::Selected(_) => match (&cfg.ab_run_id, &cfg.ab_backend) {
+            (AbConfigField::Valid(run_id), AbConfigField::Valid(backend)) => {
+                if summary.failures == 0
+                    && summary.unverified_groups == 0
+                    && summary.iozone_samples > 0
+                {
+                    println!(
+                        "[ext4-ab] workload-success run_id={} backend={} failures=0 perf_samples={}",
+                        run_id.0,
+                        backend.as_str(),
+                        summary.iozone_samples
+                    );
+                }
+            }
+            (AbConfigField::Absent, AbConfigField::Absent)
+            | (AbConfigField::Absent, AbConfigField::Valid(_))
+            | (AbConfigField::Absent, AbConfigField::Invalid)
+            | (AbConfigField::Valid(_), AbConfigField::Absent)
+            | (AbConfigField::Valid(_), AbConfigField::Invalid)
+            | (AbConfigField::Invalid, AbConfigField::Absent)
+            | (AbConfigField::Invalid, AbConfigField::Valid(_))
+            | (AbConfigField::Invalid, AbConfigField::Invalid) => {}
+        },
+        IozoneRunPlan::Default | IozoneRunPlan::Invalid => {}
+    }
 
     if cfg.mode == RunMode::RunThenShell {
         println!("[initproc] run_then_shell -> shell");
