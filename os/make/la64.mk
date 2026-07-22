@@ -1,4 +1,5 @@
 include make/common/toolchain.mk
+include make/image-roles.mk
 include make/arch/la64-settings.mk
 
 lwext4-la64: $(LWEXT4_LA_LIB)
@@ -101,9 +102,9 @@ ifeq ($(BOARD), laqemu)
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
+		-drive if=none,file=$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
-		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
+		-drive if=none,file=$(IMAGE_ROLE_LA64_X1),format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
 		-m 1024 \
 		-smp threads=$(CORE_NUM)
@@ -114,9 +115,9 @@ runsimple: toolchain-preflight
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
+		-drive if=none,file=$(IMAGE_ROLE_LA64_DEVELOPMENT_X0),format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
-		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
+		-drive if=none,file=$(IMAGE_ROLE_LA64_X1),format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
 		-m 1024 \
 		-smp threads=$(CORE_NUM)
@@ -128,9 +129,9 @@ comp: toolchain-preflight
 		-m 1G \
 		-nographic \
 		-smp 1 \
-		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
+		-drive file=$(IMAGE_ROLE_LA64_COMPETITION_X0),if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
+		-drive file=$(IMAGE_ROLE_LA64_X1),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
 		-no-reboot \
 		-device virtio-net-pci,netdev=net0 \
@@ -144,9 +145,9 @@ comp-gdb: toolchain-preflight
 		-m 1024 \
 		-nographic \
 		-smp 1 \
-		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
+		-drive file=$(IMAGE_ROLE_LA64_COMPETITION_X0),if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
+		-drive file=$(IMAGE_ROLE_LA64_X1),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 \
 		-no-reboot \
 		-rtc base=utc \

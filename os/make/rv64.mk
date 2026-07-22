@@ -1,4 +1,5 @@
 include make/common/toolchain.mk
+include make/image-roles.mk
 include make/arch/rv64-settings.mk
 
 lwext4-rv64: $(LWEXT4_RV_LIB)
@@ -88,9 +89,9 @@ ifeq ($(BOARD), rvqemu)
   		-nographic \
   		-bios $(BOOTLOADER) \
   		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-        -drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
+        -drive if=none,file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),format=raw,id=x0 \
         $(BLK_DEV_x0) \
-        -drive if=none,file=../disk.img,format=raw,id=x1 \
+        -drive if=none,file=$(IMAGE_ROLE_RV64_X1),format=raw,id=x1 \
         $(BLK_DEV_x1) \
   		-m 1024 \
   		-smp threads=$(CORE_NUM)
@@ -105,9 +106,9 @@ gdb:
 	-nographic \
 	-bios $(BOOTLOADER) \
 	-device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 \
-	-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
+	-drive file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),if=none,format=raw,id=x0 \
 	$(BLK_DEV_x0) \
-	-drive file=../disk.img,if=none,format=raw,id=x1 \
+	-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
 	$(BLK_DEV_x1) \
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
@@ -118,10 +119,10 @@ runsimple: toolchain-preflight
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
+		-drive file=$(IMAGE_ROLE_RV64_DEVELOPMENT_X0),if=none,format=raw,id=x0 \
 		-m 1024 \
         $(BLK_DEV_x0) \
-		-drive file=../disk.img,if=none,format=raw,id=x1 \
+		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
         $(BLK_DEV_x1) \
 		-smp threads=$(CORE_NUM)
 
@@ -133,9 +134,9 @@ comp: toolchain-preflight
 		-nographic \
 		-smp 1 \
 		-bios default \
-		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
+		-drive file=$(IMAGE_ROLE_RV64_COMPETITION_X0),if=none,format=raw,id=x0 \
 		$(BLK_DEV_x0) \
-		-drive file=../disk.img,if=none,format=raw,id=x1 \
+		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
 		$(BLK_DEV_x1) \
 		-no-reboot \
 		-rtc base=utc \
@@ -150,9 +151,9 @@ comp-gdb: toolchain-preflight
         -nographic \
         -smp 1 \
         -bios default \
-        -drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
+		-drive file=$(IMAGE_ROLE_RV64_COMPETITION_X0),if=none,format=raw,id=x0 \
         $(BLK_DEV_x0) \
-        -drive file=../disk.img,if=none,format=raw,id=x1 \
+		-drive file=$(IMAGE_ROLE_RV64_X1),if=none,format=raw,id=x1 \
         $(BLK_DEV_x1) \
         -no-reboot \
         -rtc base=utc \
