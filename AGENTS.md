@@ -11,7 +11,7 @@
 | syscall | 约 218 个（新增时同步更新本节） |
 | 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
 | 设计参考 | [DragonOS](https://github.com/DragonOS-Community/DragonOS)（VFS/MountFS 架构）+ Linux 6.6 语义 |
-| 约束 | **无 `cargo test`/`cargo clippy`** — 裸机内核，唯一验证 = 编译 + QEMU 集成测试 |
+| 验证 | 使用 Make facade：`make check ARCH=<rv64|la64> PROFILE=<normal|regression>`、`make lint`、编译与 QEMU 集成测试 |
 
 ---
 
@@ -20,8 +20,8 @@
 1. **Docker 优先** — 所有编译/运行/调试在 Docker 容器内：`make docker`
 2. **工具链 provisioning** — 根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME`/`CARGO_HOME`，并在需要时自动执行 setup 和 preflight；全新容器首次运行可能使用网络。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可在容器内运行 `make toolchain-setup`
 3. **不要并行编译双架构** — rv64 和 la64 共用单一根目录 `nightly-2026-05-10`，并写入共享的架构生成状态；必须分开命令行串行执行
-4. **永远不要直接编辑 `lang_items.rs`** — 编译期按 `target_arch` 直接选择 `lang_items.rs.rv` / `lang_items.rs.la`；`user/src/lang_items.rs` 同理
-5. **每次修改必须双架构编译验证** — `make rv64-kernel-build-only` + `make la64-kernel-build-only`
+4. **`lang_items.rs` 使用单文件 cfg 分支** — 内核的架构差异由 `#[cfg(target_arch = ...)]` 选择；不要再复制、生成或寻找 `.rv`/`.la` 变体
+5. **每次修改必须双架构编译验证** — 串行执行 `make kernel ARCH=rv64 PROFILE=normal` 和 `make kernel ARCH=la64 PROFILE=normal`
 6. **修改核心功能后必须 QEMU 测试** — 不要只靠编译通过
 7. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
 8. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
@@ -51,12 +51,13 @@
 ### 日常编译
 
 ```bash
-make docker                                    # 进入容器
-cd os && make rv64-kernel-build-only           # rv64 快速编译
-cd os && make la64-kernel-build-only           # la64 快速编译
-cd os && make rv64-only                        # rv64 完整（含用户态+镜像）
-cd os && make la64-only                        # la64 完整
-make all                                       # 根目录双架构全量
+make docker
+make kernel ARCH=rv64 PROFILE=normal            # RV64 内核
+make kernel ARCH=la64 PROFILE=normal            # LA64 内核（必须在 RV64 后串行执行）
+make build ARCH=rv64 PROFILE=normal             # RV64 完整产物
+make build ARCH=la64 PROFILE=normal             # LA64 完整产物
+make all                                        # 评测用串行双架构全量
+make lint                                       # 四格首方 warning 基线门禁
 ```
 
 ### 测试镜像
@@ -89,8 +90,10 @@ LTP 本地调试：`ltp_runner=inline` + `ltp_include=read01,write01`（提交�
 ### 运行测试
 
 ```bash
-cd os && make rv64-run            # LOG=info 查看 syscall 追踪
-cd os && make la64-run
+make run ARCH=rv64 PROFILE=normal  # LOG=info 查看 syscall 追踪
+make run ARCH=la64 PROFILE=normal
+make -C os ktest-run ARCH=rv64 PROFILE=normal
+make test ARCH=rv64 PROFILE=regression
 python3 scripts/run_full_test.py --serial  # 全量一键（串行架构）
 # docker-test-parallel 已弃用并 fail-closed；不得并行双架构构建
 ```
@@ -102,9 +105,10 @@ python3 scripts/run_full_test.py --serial  # 全量一键（串行架构）
 ### 启动流程
 
 ```
-QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
-  console::init() → mm::init() → drivers::init() → fs::init()
-  → net::init() → task::init() [加载 initproc ELF] → run_tasks()
+QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
+  → initramfs CPIO → VFS_ROOT → devfs bootstrap
+  → 加载 /init（exec 到 /sbin/init）→ PID1 → test-runner
+  → run_tasks()
 ```
 
 ### 系统调用
@@ -151,7 +155,9 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
 | procfs | `fs/procfs/` | `/proc` 伪文件系统（含 `/proc/[pid]/status/maps/fd`） |
 | devfs | `fs/dev/` | 设备文件（null/zero/urandom/tty/pipe/pty/rtc） |
 
-**PageCache**：状态机（Loading→UpToDate↔Dirty→Writeback），LRU 回收（高水位 64MB，批量 64 页）。`reclaim.rs` 周期性后台回收。
+**PageCache**：状态机（Loading→UpToDate↔Dirty→Writeback）；后台写回阈值约 32MB、节流阈值约 64MB，批量 256 页。`reclaim.rs` 周期性后台回收。
+
+**镜像角色**：normal QEMU 固定为 `x0` 根文件系统/sdcard 与 `x1` 工具盘；`x1` 的 P1 是 ext4 工具分区，P2 是 FAT32 scratch 分区。regression 与 ktest 不挂外部磁盘。
 
 **MountFS**：包装层，处理跨 FS 边界 lookup 和挂载传播（shared/private/slave）。
 
@@ -253,7 +259,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 
 - `cargo check` 必须从 `os/` 目录用 Makefile 目标，不能在根目录
 - `Vec` 重复定义 → 检查是否同时 `use alloc::vec;` 和 `use alloc::vec::Vec;`
-- lang_items 不匹配 → 编辑 `.rv`/`.la` 变体，不编辑 `lang_items.rs`
+- lang_items 不匹配 → 检查单个 `lang_items.rs` 中的 `#[cfg(target_arch = ...)]` 分支；不复制架构变体文件
 
 ---
 
@@ -281,8 +287,9 @@ impl_file_for_socket!(MySocket);
 
 ### 验证清单
 
-- [ ] `make rv64-kernel-build-only` ✅
-- [ ] `make la64-kernel-build-only` ✅
+- [ ] `make kernel ARCH=rv64 PROFILE=normal` ✅
+- [ ] `make kernel ARCH=la64 PROFILE=normal` ✅
+- [ ] `make lint` ✅（首方 warning 必须匹配四格基线）
 - [ ] QEMU 启动不 panic
 - [ ] 相关测试组通过
 - [ ] 更新 `docs/Work_Log/YYYY-MM-DD.md`（按 mango-workflow Skill 格式）
