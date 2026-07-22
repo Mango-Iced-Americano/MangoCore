@@ -426,14 +426,23 @@ for facade in arch-build kernel user image; do
     require_phony_target os/Makefile "$facade"
 done
 
+if awk '
+    /^define[[:space:]]+validate-formal-inputs[[:space:]]*$/ { in_macro = 1; next }
+    in_macro && /^endef[[:space:]]*$/ { exit(found_arch && found_profile ? 0 : 1) }
+    in_macro && /filter[[:space:]]+rv64[[:space:]]+la64,[[:space:]]*\$\(ARCH\)/ { found_arch = 1 }
+    in_macro && /filter[[:space:]]+normal[[:space:]]+regression,[[:space:]]*\$\(PROFILE\)/ { found_profile = 1 }
+    END { exit(found_arch && found_profile ? 0 : 1) }
+' "$repo_root/os/Makefile"; then
+    pass 'os/Makefile shared formal-input validator restricts ARCH and PROFILE'
+else
+    fail 'os/Makefile must define a shared formal-input validator for ARCH and PROFILE'
+fi
+
 for facade in arch-build kernel; do
     if target_exists os/Makefile "$facade"; then
         require_body_match os/Makefile "$facade" \
-            'validates ARCH exactly as rv64 or la64' \
-            'filter[[:space:]]+rv64[[:space:]]+la64,[[:space:]]*\$\(ARCH\)'
-        require_body_match os/Makefile "$facade" \
-            'validates PROFILE exactly as normal or regression' \
-            'filter[[:space:]]+normal[[:space:]]+regression,[[:space:]]*\$\(PROFILE\)'
+            'calls the shared formal-input validator' \
+            '\$\(call[[:space:]]+validate-formal-inputs\)'
         require_body_match os/Makefile "$facade" \
             'delegates to legacy build only' \
             '\$\(MAKE\).*build([[:space:]]|$)'
@@ -449,8 +458,8 @@ done
 for facade in user image; do
     if target_exists os/Makefile "$facade"; then
         require_body_match os/Makefile "$facade" \
-            'validates ARCH exactly as rv64 or la64' \
-            'filter[[:space:]]+rv64[[:space:]]+la64,[[:space:]]*\$\(ARCH\)'
+            'calls the shared formal-input validator' \
+            '\$\(call[[:space:]]+validate-formal-inputs\)'
         require_body_match os/Makefile "$facade" \
             'accepts only PROFILE=normal' \
             'filter[[:space:]]+normal,[[:space:]]*\$\(PROFILE\)'
