@@ -79,9 +79,7 @@ kernel: $(LWEXT4_PREREQ)
     endif
 
 clean:
-	@which cargo >/dev/null 2>&1 && cargo clean || true
-	@rm -rf $(KERNEL_RV)
-	@rm -rf $(LWEXT4_RV_OUTPUT_DIR)
+	@rm -rf "$(KERNEL_OUTPUT_ROOT)" "$(LWEXT4_RV_OUTPUT_DIR)"
 
 run: toolchain-preflight build
 ifeq ($(BOARD), rvqemu)

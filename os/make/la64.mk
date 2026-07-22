@@ -89,9 +89,7 @@ uimage: $(KERNEL_BIN)
 	  -n NPUcore+ -d $(KERNEL_BIN) $(KERNEL_UIMG)
 
 clean:
-	@which cargo >/dev/null 2>&1 && cargo clean || true
-	@rm -rf $(KERNEL_LA)
-	@rm -rf $(LWEXT4_LA_OUTPUT_DIR)
+	@rm -rf "$(KERNEL_OUTPUT_ROOT)" "$(LWEXT4_LA_OUTPUT_DIR)"
 
 # ============================================================
 # QEMU run targets

@@ -38,6 +38,6 @@ else
 endif
 
 clean:
-	@cargo clean
+	@rm -rf "$(USER_OUTPUT_ROOT)"
 
 .PHONY: build rust-user clean prepare-cargo-config env toolchain-preflight

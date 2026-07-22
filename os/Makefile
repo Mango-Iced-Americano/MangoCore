@@ -115,7 +115,7 @@ clean:
 	for arch in rv64 la64; do \
 		$(MAKE) ARCH=$$arch -f make/$$arch.mk clean; \
 	done
-	cd ../user && make clean
+	$(MAKE) -C ../user clean USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)"
 
 laclean:
 	make -f make/la64.mk clean
