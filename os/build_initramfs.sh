@@ -105,6 +105,24 @@ else
         echo "[initramfs] WARNING: $INIT_SRC not found, /init will be missing"
     fi
 
+    # 3a. T7 lifecycle split: keep the legacy entrypoints as shims, while
+    # /sbin/init owns PID1 and the runner is an ordinary child process.
+    INIT_DIR="${INIT_SRC%/*}"
+    INITD_SRC="$INIT_DIR/initd"
+    INITPROC_SRC="$INIT_DIR/initproc"
+    RUNNER_SRC="$INIT_DIR/test_runner"
+    if [ -f "$INITD_SRC" ] && [ -f "$INITPROC_SRC" ] && [ -f "$RUNNER_SRC" ]; then
+        mkdir -p "$STAGE/sbin" "$STAGE/usr/libexec/mangocore"
+        install -m 0755 "$INITD_SRC" "$STAGE/sbin/init"
+        install -m 0755 "$INITPROC_SRC" "$STAGE/initproc"
+        install -m 0755 "$RUNNER_SRC" "$STAGE/usr/libexec/mangocore/test-runner"
+        echo "[initramfs] installed T7 PID1, compatibility shims, and test runner"
+    else
+        echo "[initramfs] ERROR: missing T7 lifecycle binary under $INIT_DIR"
+        rm -rf "$STAGE"
+        exit 1
+    fi
+
     # 4. 安装 /rescue/sh（静态 BusyBox，救援 shell）
     if [ -f "$BUSYBOX_SRC" ]; then
         mkdir -p "$STAGE/rescue"
