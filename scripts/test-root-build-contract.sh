@@ -86,23 +86,30 @@ build_recipe=$(awk '
     }
     in_rule && /^[[:space:]]*\t/ { print }
 ' "$repo_root/Makefile")
-if [ "$build_recipe" = '	$(MAKE) -C os all' ]; then
-    pass 'root build target has exactly one os-all recipe'
+if printf '%s\n' "$build_recipe" | grep -Fq '$(call validate-formal-inputs)' \
+    && printf '%s\n' "$build_recipe" | grep -Fq '$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build'; then
+    pass 'root build validates explicit inputs and delegates to os arch-build'
 else
-    fail 'root build target must have exactly one os-all recipe'
+    fail 'root build must validate explicit inputs and delegate to os arch-build'
 fi
 
-if build_trace=$(make -C "$repo_root" -n -j8 build 2>&1); then
-    delegation_count=$(printf '%s\n' "$build_trace" | grep -Fc 'make -C os all')
+if build_trace=$(make -C "$repo_root" -n -j8 ARCH=rv64 PROFILE=normal build 2>&1); then
+    delegation_count=$(printf '%s\n' "$build_trace" | grep -Fc 'make -C os "ARCH=rv64" "MODE=release" "PROFILE=normal"')
     if [ "$delegation_count" -eq 1 ]; then
-        pass 'root build delegates to os all exactly once under -j8'
+        pass 'root build delegates to os arch-build exactly once under -j8'
     else
-        fail 'root build must delegate to os all exactly once under -j8'
+        fail 'root build must delegate to os arch-build exactly once under -j8'
     fi
     require_trace_absent "$build_trace" 'root build does not provision Rustup' 'scripts/rustup-setup.sh'
     require_trace_absent "$build_trace" 'root build does not rerun root preparation' 'make prepare-cargo-config'
 else
     fail 'root build target must be available to make -n'
+fi
+
+if make -C "$repo_root" -n build >/dev/null 2>&1; then
+    fail 'root build must reject missing ARCH and PROFILE'
+else
+    pass 'root build rejects missing ARCH and PROFILE'
 fi
 
 if all_trace=$(make -C "$repo_root" -n -j8 all 2>&1); then

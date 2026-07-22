@@ -49,10 +49,11 @@ else
     fail 'root kernel must retain only toolchain-preflight prerequisite'
 fi
 
-if [ "$(target_recipe)" = '	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" kernel' ]; then
-    pass 'root kernel forwards quoted ARCH and PROFILE only to os kernel'
+if printf '%s\n' "$(target_recipe)" | grep -Fq '$(call validate-formal-inputs)' \
+    && printf '%s\n' "$(target_recipe)" | grep -Fq '$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" kernel'; then
+    pass 'root kernel validates explicit inputs and forwards them to os kernel'
 else
-    fail 'root kernel must forward quoted ARCH and PROFILE only to os kernel'
+    fail 'root kernel must validate explicit inputs and forward them to os kernel'
 fi
 
 require_valid() {
@@ -60,7 +61,7 @@ require_valid() {
     profile=$2
     expected_arch_make=$3
     if output=$(make -C "$repo_root" -n "ARCH=$arch" "PROFILE=$profile" kernel 2>&1); then
-        if ! printf '%s\n' "$output" | grep -Fq "make -C os \"ARCH=$arch\" \"PROFILE=$profile\" kernel"; then
+        if ! printf '%s\n' "$output" | grep -Fq "make -C os \"ARCH=$arch\" \"MODE=release\" \"PROFILE=$profile\""; then
             fail "root kernel must forward ARCH=$arch PROFILE=$profile to os"
         elif ! printf '%s\n' "$output" | grep -Fq "make ARCH=$arch -f make/$expected_arch_make.mk build"; then
             fail "root kernel must delegate ARCH=$arch to make/$expected_arch_make.mk"

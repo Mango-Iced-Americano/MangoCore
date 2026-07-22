@@ -48,16 +48,17 @@ else
     fail 'root image must retain only toolchain-preflight prerequisite'
 fi
 
-if [ "$(target_recipe)" = '	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" image' ]; then
-    pass 'root image forwards quoted ARCH and PROFILE only to os image'
+if printf '%s\n' "$(target_recipe)" | grep -Fq '$(call validate-formal-inputs)' \
+    && printf '%s\n' "$(target_recipe)" | grep -Fq '$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" image'; then
+    pass 'root image validates explicit inputs and forwards them to os image'
 else
-    fail 'root image must forward quoted ARCH and PROFILE only to os image'
+    fail 'root image must validate explicit inputs and forward them to os image'
 fi
 
 require_valid() {
     arch=$1
     if output=$(make -C "$repo_root" -n "ARCH=$arch" "PROFILE=normal" image 2>&1); then
-        if ! printf '%s\n' "$output" | grep -Fq "make -C os \"ARCH=$arch\" \"PROFILE=normal\" image"; then
+        if ! printf '%s\n' "$output" | grep -Fq "make -C os \"ARCH=$arch\" \"MODE=release\" \"PROFILE=normal\""; then
             fail "root image must forward ARCH=$arch PROFILE=normal to os"
         elif ! printf '%s\n' "$output" | grep -Fq "make ARCH=$arch -f make/$arch.mk fs-img"; then
             fail "root image must delegate ARCH=$arch to make/$arch.mk fs-img"

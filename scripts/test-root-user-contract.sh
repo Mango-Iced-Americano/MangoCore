@@ -59,16 +59,17 @@ else
     fail 'root user must retain only toolchain-preflight prerequisite'
 fi
 
-if [ "$(user_recipe)" = '	$(MAKE) -C os "ARCH=$(ARCH)" "PROFILE=$(PROFILE)" user' ]; then
-    pass 'root user forwards quoted ARCH and PROFILE only to os user'
+if printf '%s\n' "$(user_recipe)" | grep -Fq '$(call validate-formal-inputs)' \
+    && printf '%s\n' "$(user_recipe)" | grep -Fq '$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" user'; then
+    pass 'root user validates explicit inputs and forwards them to os user'
 else
-    fail 'root user must forward quoted ARCH and PROFILE only to os user'
+    fail 'root user must validate explicit inputs and forward them to os user'
 fi
 
 require_valid() {
     arch=$1
     if output=$(make -C "$repo_root" -n "ARCH=$arch" "PROFILE=normal" user 2>&1); then
-        if ! printf '%s\n' "$output" | grep -Fq "make -C os \"ARCH=$arch\" \"PROFILE=normal\" user"; then
+        if ! printf '%s\n' "$output" | grep -Fq "make -C os \"ARCH=$arch\" \"MODE=release\" \"PROFILE=normal\""; then
             fail "root user must forward ARCH=$arch PROFILE=normal to os"
         elif ! printf '%s\n' "$output" | grep -Fq "make ARCH=$arch -f make/$arch.mk user"; then
             fail "root user must delegate ARCH=$arch to make/$arch.mk user"
