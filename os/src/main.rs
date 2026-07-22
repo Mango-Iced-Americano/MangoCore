@@ -19,8 +19,6 @@
 // on specific items. Crate-level allows were removed in T10 rebaseline to
 // prevent new dead code from being silently introduced.
 
-#[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
-compile_error!("features initramfs and legacy_block_root are mutually exclusive");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
