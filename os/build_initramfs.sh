@@ -98,7 +98,7 @@ else
         ;;
     esac
 
-    # 3. 安装 /init（从 initproc 构建产物）— stage-1 引导入口
+    # 3. 安装 /init（exec shim）— stage-1 引导入口
     if [ -f "$INIT_SRC" ]; then
         install -m 0755 "$INIT_SRC" "$STAGE/init"
         echo "[initramfs] installed /init from $INIT_SRC"
@@ -107,7 +107,7 @@ else
     fi
 
     # 3a. /sbin/init owns PID1; /init is a thin exec shim.
-    # The kernel always finds /init first; /initproc fallback is obsolete.
+    # The kernel enters through /init; the shim transfers control to PID1.
     INIT_DIR="${INIT_SRC%/*}"
     INITD_SRC="$INIT_DIR/initd"
     RUNNER_SRC="$INIT_DIR/test_runner"
@@ -117,7 +117,7 @@ else
         install -m 0755 "$RUNNER_SRC" "$STAGE/usr/libexec/mangocore/test-runner"
         echo "[initramfs] installed /sbin/init and test runner"
     else
-        echo "[initramfs] ERROR: missing T7 lifecycle binary under $INIT_DIR"
+        echo "[initramfs] ERROR: missing PID1 or test-runner binary under $INIT_DIR"
         rm -rf "$STAGE"
         exit 1
     fi
