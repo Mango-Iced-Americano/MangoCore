@@ -241,7 +241,7 @@ runsimple:
 		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
 		-m 1024 \
         $(BLK_DEV_x0) \
-		-drive file=../disk.img,if=none,format=raw,id=x1 \
+		-drive file=$(DISK_RV),if=none,format=raw,id=x1 \
         $(BLK_DEV_x1) \
 		-smp threads=$(CORE_NUM)
 
@@ -255,7 +255,7 @@ comp:
 		-bios default \
 		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
 		$(BLK_DEV_x0) \
-		-drive file=../disk.img,if=none,format=raw,id=x1 \
+		-drive file=$(DISK_RV),if=none,format=raw,id=x1 \
 		$(BLK_DEV_x1) \
 		-no-reboot \
 		-rtc base=utc \
