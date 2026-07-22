@@ -100,44 +100,89 @@ trap 'rm -rf "$clean_tmp"' EXIT HUP INT TERM
 os_build_root="$clean_tmp/os-build"
 root_build_root="$clean_tmp/root-build"
 compat_output="$clean_tmp/compat"
+os_user_root="$clean_tmp/os-user"
+rv_kernel_root="$clean_tmp/rv-kernel"
+rv_lwext4_root="$clean_tmp/rv-lwext4"
+la_kernel_root="$clean_tmp/la-kernel"
+la_lwext4_root="$clean_tmp/la-lwext4"
 
-mkdir -p "$os_build_root/rv64" "$os_build_root/la64" "$root_build_root/rv64" "$root_build_root/la64" "$compat_output"
+mkdir -p "$os_build_root/rv64" "$os_build_root/la64" "$root_build_root/rv64" "$root_build_root/la64" "$compat_output" "$os_user_root" "$rv_kernel_root" "$rv_lwext4_root" "$la_kernel_root" "$la_lwext4_root"
 touch "$os_build_root/rv64/sentinel" "$os_build_root/la64/sentinel"
+touch "$os_user_root/sentinel" "$rv_kernel_root/sentinel" "$rv_lwext4_root/sentinel" "$la_kernel_root/sentinel" "$la_lwext4_root/sentinel"
+mkdir -p "$repo_root/os/target" "$repo_root/user/target"
+touch "$repo_root/os/target/formal-clean-sentinel" "$repo_root/user/target/formal-clean-sentinel"
 
 if clean_trace=$(make -C "$repo_root/os" -n BUILD_ROOT="$os_build_root" clean 2>&1); then
     case "$clean_trace" in
-        *'for arch in rv64 la64; do'*'/rv64/release/normal/kernel/kernel-rv'* ) pass 'os clean dispatches the RV64 architecture clean route' ;;
+        *'for arch in rv64 la64; do'*"$os_build_root/rv64/release/normal/kernel"* ) pass 'os clean dispatches the RV64 architecture clean route' ;;
         * ) fail 'os clean must dispatch the RV64 architecture clean route' ;;
     esac
     case "$clean_trace" in
-        *'for arch in rv64 la64; do'*'/la64/release/normal/kernel/kernel-la'* ) pass 'os clean dispatches the LA64 architecture clean route' ;;
+        *'for arch in rv64 la64; do'*"$os_build_root/la64/release/normal/kernel"* ) pass 'os clean dispatches the LA64 architecture clean route' ;;
         * ) fail 'os clean must dispatch the LA64 architecture clean route' ;;
     esac
 else
     fail 'os clean dry-run must succeed'
 fi
 
-if make -C "$repo_root/os" BUILD_ROOT="$os_build_root" clean >/dev/null 2>&1 && [ ! -e "$os_build_root" ]; then
-    pass 'os clean removes the supplied BUILD_ROOT after both architecture routes'
+if make -C "$repo_root/os" BUILD_ROOT="$os_build_root" USER_OUTPUT_ROOT="$os_user_root" clean >/dev/null 2>&1 \
+    && [ ! -e "$os_build_root" ] && [ ! -e "$os_user_root" ]; then
+    pass 'os clean removes only its supplied BUILD_ROOT and USER_OUTPUT_ROOT'
 else
-    fail 'os clean must remove the supplied BUILD_ROOT'
+    fail 'os clean must remove its supplied BUILD_ROOT and USER_OUTPUT_ROOT'
 fi
+
+if [ -e "$repo_root/os/target/formal-clean-sentinel" ] && [ -e "$repo_root/user/target/formal-clean-sentinel" ]; then
+    pass 'os formal clean preserves unscoped os/target and user/target'
+else
+    fail 'os formal clean must preserve unscoped os/target and user/target'
+fi
+rm -f "$repo_root/os/target/formal-clean-sentinel" "$repo_root/user/target/formal-clean-sentinel"
+
+if make -C "$repo_root/os" -f make/rv64.mk KERNEL_OUTPUT_ROOT="$rv_kernel_root" LWEXT4_RV_OUTPUT_DIR="$rv_lwext4_root" clean >/dev/null 2>&1 \
+    && [ ! -e "$rv_kernel_root" ] && [ ! -e "$rv_lwext4_root" ]; then
+    pass 'rv64 architecture clean removes only its declared output roots'
+else
+    fail 'rv64 architecture clean must remove its declared output roots'
+fi
+
+if make -C "$repo_root/os" -f make/la64.mk KERNEL_OUTPUT_ROOT="$la_kernel_root" LWEXT4_LA_OUTPUT_DIR="$la_lwext4_root" clean >/dev/null 2>&1 \
+    && [ ! -e "$la_kernel_root" ] && [ ! -e "$la_lwext4_root" ]; then
+    pass 'la64 architecture clean removes only its declared output roots'
+else
+    fail 'la64 architecture clean must remove its declared output roots'
+fi
+
+mkdir -p "$repo_root/user/target"
+touch "$repo_root/user/target/legacy-clean-sentinel" "$repo_root/user/unrelated-clean-sentinel"
+if make -C "$repo_root/user" clean >/dev/null 2>&1 \
+    && [ ! -e "$repo_root/user/target" ] && [ -e "$repo_root/user/unrelated-clean-sentinel" ]; then
+    pass 'direct legacy user clean removes only its default USER_OUTPUT_ROOT'
+else
+    fail 'direct legacy user clean must remove only its default USER_OUTPUT_ROOT'
+fi
+rm -f "$repo_root/user/unrelated-clean-sentinel"
 
 for artifact in kernel-rv kernel-la disk.img disk-la.img; do
     touch "$compat_output/$artifact"
 done
 touch "$compat_output/unrelated-sentinel"
+mkdir -p "$repo_root/os/target" "$repo_root/user/target"
+touch "$repo_root/os/target/root-clean-sentinel" "$repo_root/user/target/root-clean-sentinel"
 
-if make -C "$repo_root" BUILD_ROOT="$root_build_root" COMPAT_OUTPUT_DIR="$compat_output" clean >/dev/null 2>&1 \
+if make -C "$repo_root" BUILD_ROOT="$root_build_root" COMPAT_OUTPUT_DIR="$compat_output" USER_OUTPUT_ROOT="$clean_tmp/root-user" clean >/dev/null 2>&1 \
     && [ ! -e "$root_build_root" ] \
     && [ ! -e "$compat_output/kernel-rv" ] \
     && [ ! -e "$compat_output/kernel-la" ] \
     && [ ! -e "$compat_output/disk.img" ] \
     && [ ! -e "$compat_output/disk-la.img" ] \
-    && [ -e "$compat_output/unrelated-sentinel" ]; then
-    pass 'root clean removes only known compatibility artifacts and the supplied BUILD_ROOT'
+    && [ -e "$compat_output/unrelated-sentinel" ] \
+    && [ -e "$repo_root/os/target/root-clean-sentinel" ] \
+    && [ -e "$repo_root/user/target/root-clean-sentinel" ]; then
+    pass 'root clean removes only bounded outputs and preserves unscoped targets'
 else
-    fail 'root clean must remove known compatibility artifacts without touching unrelated files'
+    fail 'root clean must remove bounded outputs without touching unrelated files or targets'
 fi
+rm -f "$repo_root/os/target/root-clean-sentinel" "$repo_root/user/target/root-clean-sentinel"
 
 exit "$overall"
