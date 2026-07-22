@@ -1,5 +1,4 @@
 mod block_dev;
-mod mem_blk;
 pub mod partition;
 mod sata_blk;
 pub mod virtio_dma_pool;
@@ -8,8 +7,6 @@ pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
 pub mod virtio_blk_pci;
 pub use block_dev::BlockDevice;
-#[cfg(feature = "block_mem")]
-type BlockDeviceImpl = mem_blk::MemBlockWrapper;
 #[cfg(feature = "block_sata")]
 type BlockDeviceImpl = sata_blk::SataBlock;
 #[cfg(feature = "block_virt")]

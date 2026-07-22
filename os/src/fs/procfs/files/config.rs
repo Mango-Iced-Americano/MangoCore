@@ -70,8 +70,6 @@ pub fn config_content(
     let _ = writeln!(s, "CONFIG_VIRTIO_BLK=y");
     #[cfg(feature = "block_virt_pci")]
     let _ = writeln!(s, "CONFIG_VIRTIO_BLK_PCI=y");
-    #[cfg(feature = "block_mem")]
-    let _ = writeln!(s, "CONFIG_BLK_MEM=y");
 
     // ── Network ──
     let _ = writeln!(s, "CONFIG_NET=y");

@@ -21,8 +21,6 @@
 
 #[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
 compile_error!("features initramfs and legacy_block_root are mutually exclusive");
-#[cfg(all(feature = "initramfs", feature = "block_mem"))]
-compile_error!("features initramfs and block_mem are mutually exclusive");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -49,8 +47,6 @@ mod timer;
 mod trace;
 mod utils;
 
-#[cfg(feature = "block_mem")]
-use crate::config::DISK_IMAGE_BASE;
 use crate::hal::bootstrap_init;
 use crate::hal::machine_init;
 // #[cfg(feature = "loongarch64")]
@@ -64,12 +60,6 @@ core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
 #[cfg(all(feature = "initramfs", target_arch = "riscv64"))]
 core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
-
-// ── Legacy: block_mem full rootfs image ──
-#[cfg(all(feature = "block_mem", feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("load_img.S"));
-#[cfg(all(feature = "block_mem", feature = "riscv"))]
-core::arch::global_asm!(include_str!("load_img-rv.S"));
 
 fn mem_clear() {
     extern "C" {
@@ -91,35 +81,10 @@ fn mem_clear() {
     }
 }
 
-#[cfg(feature = "block_mem")]
-fn move_to_high_address() {
-    extern "C" {
-        fn simg();
-        fn eimg();
-    }
-    unsafe {
-        // 加载根文件系统镜像
-        let img =
-            core::slice::from_raw_parts(simg as usize as *mut u8, eimg as usize - simg as usize);
-        // 以DISK_IMAGE_BASE到MEMORY_END上的内存作为根文件系统镜像
-        let mem_disk = core::slice::from_raw_parts_mut(
-            DISK_IMAGE_BASE as *mut u8,
-            // 大小为256MB
-            0x1000_0000,
-        );
-        // 清空mem_disk上的内容
-        mem_disk.fill(0);
-        mem_disk[..img.len()].copy_from_slice(img);
-    }
-}
-
 #[no_mangle]
 pub fn rust_main() -> ! {
     bootstrap_init();
     mem_clear();
-    // 这一行可能有误，需要后续处理
-    #[cfg(all(feature = "block_mem"))]
-    move_to_high_address();
     console::log_init();
     trace::init();
     println!("[kernel] Console initialized.");

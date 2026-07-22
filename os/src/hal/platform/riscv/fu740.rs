@@ -18,8 +18,6 @@ pub const MMIO: &[(usize, usize)] = &[
     (DISK_IMAGE_BASE, 0x800_0000), // disk image
 ];
 
-pub type BlockDeviceImpl = crate::drivers::block::MemBlockWrapper;
-
 pub fn clock_init() {
     let prci = unsafe { Peripherals::steal().PRCI };
     let clock = prci.setup().coreclk(1_500u32.mhz()).freeze();
