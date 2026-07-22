@@ -6,13 +6,13 @@
 #   sh scripts/test-lint-gate-fixture.sh --inject unused-first-party
 #
 # The fixture:
-#   1. Backs up the lint baseline.
-#   2. Injects an `#[allow(dead_code)]`-bypassing unused function into
-#      a first-party kernel source file (tests/lint_fixture.rs) that is
+#   1. Preserves the committed lint baseline.
+#   2. Injects an unused function into a first-party kernel source file
+#      (`os/src/lint_fixture.rs`) that is
 #      compiled as part of the kernel but never called.
 #   3. Runs `make lint ARCH=rv64 MODE=debug` (the fastest single cell).
 #   4. Verifies the lint gate exits nonzero.
-#   5. Restores the baseline and cleans up the injected file.
+#   5. Cleans up the injected file without changing the baseline.
 
 set -eu
 
@@ -31,43 +31,19 @@ esac
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-# ---- 1. Save baseline ----
-lint_baseline="$repo_root/lint-baseline"
-if [ -d "$lint_baseline" ]; then
-    baseline_backup=$(mktemp -d "${TMPDIR:-/tmp}/lint-baseline-backup.XXXXXX")
-    cp -a "$lint_baseline"/* "$baseline_backup/" 2>/dev/null || true
-    trap 'rm -rf "$baseline_backup"' EXIT HUP INT TERM
-fi
-
 # ---- 2. Inject a dead-code warning into first-party source ----
-# We create a small module that is included by main.rs via a conditional
-# feature. We add a feature to Cargo.toml temporarily.
-#
-# Simpler approach: directly add an unused function to an existing
-# first-party source file that does NOT have crate-level allow(dead_code).
-# We'll add to os/src/timer.rs since it has #![allow(unused)] but we can
-# add an unused function that triggers "unused" warning even with that —
-# actually #![allow(unused)] suppresses all unused warnings.
-#
-# Better approach: add a test source file and include it in main.rs behind
-# a fixture feature.
-
 # First, capture the current state of main.rs for restoration
 main_rs="$repo_root/os/src/main.rs"
 main_backup=$(mktemp)
 cp "$main_rs" "$main_backup"
-trap 'cp "$main_backup" "$main_rs"; rm -f "$main_backup"; rm -rf "$baseline_backup"' EXIT HUP INT TERM
+trap 'cp "$main_backup" "$main_rs"; rm -f "$main_backup"; rm -f "$fixture_file" "$lint_output"' EXIT HUP INT TERM
 
 # Create a fixture module file
 fixture_file="$repo_root/os/src/lint_fixture.rs"
 cat > "$fixture_file" << 'FIEOF'
 // Lint fixture: intentionally unused function to test the lint gate.
 // This file is removed by test-lint-gate-fixture.sh --inject.
-#![allow(unused_imports)]
-use crate::println;
-fn intentionally_unused_lint_fixture_function() {
-    println!("This function is never called — should trigger unused warning");
-}
+fn intentionally_unused_lint_fixture_function() {}
 FIEOF
 
 # Add `mod lint_fixture;` to main.rs before the task module
@@ -82,29 +58,25 @@ else
     fail "could not find 'mod task;' in main.rs to insert fixture"
 fi
 
-# Also update the baseline for rv64-debug to not include this warning
-# (The fixture test should work even if baseline doesn't match exactly —
-#  the point is the lint gate detects the NEW warning that wasn't there before.)
-# Remove rv64-debug baseline to ensure the injected warning is detected as new
-rm -f "$lint_baseline/rv64-debug.txt"
-
 # Remove cached target for this lint-check to force re-check
 rm -rf "$repo_root/build/lint-check"
 
 # ---- 3. Run make lint ----
 printf 'Running make lint ARCH=rv64 MODE=debug (expecting FAILURE)...\n' >&2
+lint_output=$(mktemp)
 set +e
-make lint ARCH=rv64 MODE=debug 2>&1
+make lint ARCH=rv64 MODE=debug >"$lint_output" 2>&1
 lint_exit=$?
 set -e
+cat "$lint_output"
 
 # ---- 4. Verify it failed ----
 if [ "$lint_exit" -eq 0 ]; then
     fail "lint gate returned 0 despite injected first-party warning"
-elif [ "$lint_exit" -ge 1 ]; then
+elif grep -q 'new first-party warning: .* in src/lint_fixture.rs' "$lint_output"; then
     printf 'PASS: lint gate correctly rejected first-party warning (exit %d)\n' "$lint_exit"
 else
-    fail "unexpected exit code $lint_exit from make lint"
+    fail "lint gate failed for a reason other than the injected first-party warning"
 fi
 
 # ---- 5. Final summary ----

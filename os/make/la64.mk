@@ -136,9 +136,13 @@ comp-gdb: toolchain-preflight
 
 .PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 
+ifeq ($(MODE),release)
+CHECK_RELEASE_FLAG := --release
+endif
+
 check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) \
-		cargo check --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+		cargo check $(CHECK_RELEASE_FLAG) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
 # ─────────────────────────────────────────────────────────
 #  L3 Kernel self-test (mango.mode=ktest)

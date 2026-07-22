@@ -106,18 +106,16 @@ else
         echo "[initramfs] WARNING: $INIT_SRC not found, /init will be missing"
     fi
 
-    # 3a. T7 lifecycle split: keep the legacy entrypoints as shims, while
-    # /sbin/init owns PID1 and the runner is an ordinary child process.
+    # 3a. /sbin/init owns PID1; /init is a thin exec shim.
+    # The kernel always finds /init first; /initproc fallback is obsolete.
     INIT_DIR="${INIT_SRC%/*}"
     INITD_SRC="$INIT_DIR/initd"
-    INITPROC_SRC="$INIT_DIR/initproc"
     RUNNER_SRC="$INIT_DIR/test_runner"
-    if [ -f "$INITD_SRC" ] && [ -f "$INITPROC_SRC" ] && [ -f "$RUNNER_SRC" ]; then
+    if [ -f "$INITD_SRC" ] && [ -f "$RUNNER_SRC" ]; then
         mkdir -p "$STAGE/sbin" "$STAGE/usr/libexec/mangocore"
         install -m 0755 "$INITD_SRC" "$STAGE/sbin/init"
-        install -m 0755 "$INITPROC_SRC" "$STAGE/initproc"
         install -m 0755 "$RUNNER_SRC" "$STAGE/usr/libexec/mangocore/test-runner"
-        echo "[initramfs] installed T7 PID1, compatibility shims, and test runner"
+        echo "[initramfs] installed /sbin/init and test runner"
     else
         echo "[initramfs] ERROR: missing T7 lifecycle binary under $INIT_DIR"
         rm -rf "$STAGE"

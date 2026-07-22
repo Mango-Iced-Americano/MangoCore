@@ -92,13 +92,17 @@ check: toolchain-preflight
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" check
 
 lint: toolchain-preflight
-	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(or $(PROFILE),normal)" "BUILD_ROOT=$(BUILD_ROOT)" lint
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=rv64" "MODE=debug" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=rv64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=debug" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(or $(PROFILE),normal)" "BUILD_ROOT=$(BUILD_ROOT)" lint,@true)
 
 ktest-build-only: toolchain-preflight
 	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-build-only
 
-.NOTPARALLEL: run
+.NOTPARALLEL: run lint
 
 runsimple: toolchain-preflight
 	cd os && make runsimple

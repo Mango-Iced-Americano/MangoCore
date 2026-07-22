@@ -273,15 +273,24 @@ static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 
 /// 初始化内核堆。
 pub fn init_heap() {
-    // Safety: `HEAP_SPACE` 是本模块唯一的静态堆缓冲区，初始化只在启动早期执行一次。
+    // SAFETY: [Category 13 — GlobalAlloc contract] `HEAP_SPACE` is exclusively
+    // owned by this allocator, and the single-threaded boot path calls init once
+    // before any allocation can occur. `addr_of_mut!` creates no reference to the
+    // mutable static, so it preserves the static-mut aliasing invariant.
     unsafe {
-        HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
+        HEAP_ALLOCATOR.init(
+            core::ptr::addr_of_mut!(HEAP_SPACE).cast::<u8>() as usize,
+            KERNEL_HEAP_SIZE,
+        );
     }
     KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
     KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
 }
 
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "manual boot-time allocator diagnostic is retained for bring-up investigations"
+)]
 /// 启动期堆分配自检。
 pub fn heap_test() {
     use alloc::boxed::Box;

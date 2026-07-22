@@ -156,14 +156,14 @@ trap 'rm -f "$warnings_raw" "$normalized" "$summary"' EXIT HUP INT TERM
 # Parse each warning block into category:code:file tuples
 awk '
 function classify_file(path) {
-    # First-party: os/src/ or user/src/ (normalized), or bare src/ (os crate root)
-    if (path ~ /^os\/src\// || path ~ /^user\/src\// || path ~ /^src\//) return "first-party"
-    if (path ~ /\/dependency\//) return "maintained"
-    if (path ~ /\/vendor\//) return "vendor"
+    # First-party: kernel sources (the lint target is the os crate).
+    if (path ~ /^os\/src\// || path ~ /^src\//) return "first-party"
+    # Maintained dependency: local core library under active project ownership.
+    if (path ~ /(^|\/)libs\/mango-kernel-core\/src\//) return "maintained"
+    # Vendored/upstream dependencies are recorded but never gate first-party work.
+    if (path ~ /(^|\/)dependency\// || path ~ /(^|\/)vendor\//) return "vendor"
     if (path ~ /\/target\//) return "generated"
-    # Relative paths from os/ crate context
-    if (path ~ /^src\//) return "first-party"
-    return "maintained"
+    return "vendor"
 }
 
 BEGIN {
@@ -279,6 +279,9 @@ new_fp=$(printf '%s\n' "$new_warnings" | grep '^first-party:' || true)
 resolved_fp=$(printf '%s\n' "$resolved_warnings" | grep '^first-party:' || true)
 
 if [ -n "$new_fp" ]; then
+    # The reporting loop is a pipeline and therefore runs in a subshell in POSIX
+    # sh. Set the gate result in the parent before emitting each diagnostic.
+    overall=1
     printf '%s\n' "$new_fp" | while IFS=: read -r cat code file; do
         fail "new first-party warning: $code in $file"
     done
@@ -305,5 +308,7 @@ if [ -n "$resolved_other" ]; then
     done
 fi
 
-pass "first-party warnings match baseline ($count_first fp, $count_maintained mt, $count_vendor vd)"
+if [ "$overall" -eq 0 ]; then
+    pass "first-party warnings match baseline ($count_first fp, $count_maintained mt, $count_vendor vd)"
+fi
 exit "$overall"

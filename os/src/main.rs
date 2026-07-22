@@ -15,6 +15,13 @@
 #![feature(const_maybe_uninit_assume_init)]
 #![feature(trait_upcasting)]
 #![feature(core_intrinsics)]
+#![deny(
+    future_incompatible,
+    improper_ctypes,
+    clashing_extern_declarations,
+    unexpected_cfgs,
+    static_mut_refs
+)]
 // Note: no crate-level allow(dead_code) — use #[expect(dead_code, reason = "...")]
 // on specific items. Crate-level allows were removed in T10 rebaseline to
 // prevent new dead code from being silently introduced.
