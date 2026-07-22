@@ -81,7 +81,7 @@ rust_main()
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 挂载 devfs、procfs、sysfs、tmpfs 等伪文件系统。
-4. 调用 `mount_boot_block_devices()` 探测 virtio 块设备，注册 `/dev/vda` 和 `/dev/vdb`，解析 MBR 分区，将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。
+4. 调用 `mount_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点；当前内核兼容层随后将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。设备发现/注册与该临时挂载策略已分离，挂载策略将在 T8 移交 PID1。
 5. 块设备故障只打印 warning，不 panic。
 
 **Legacy 模式**（`initramfs` 特性未启用）：
@@ -168,6 +168,10 @@ lazy_static! {
 | `/var/tmp` | (目录) | 临时文件备选，权限 01777 |
 
 devfs 使用 `MountFS` 子挂载注入，`/dev/shm` 的 tmpfs 作为 devfs 的子挂载注册。procfs 和 sysfs 禁用 dentry cache，因为它们的内容动态生成。
+
+### 4.1 PID1 tty 与后续挂载职责
+
+内核在创建 PID1 前完成 devfs 挂载并注册 `/dev/tty`，因此 `TaskControlBlock::new()` 可以为 fd 0、1、2 打开最小控制台 bootstrap。ktest 的独立内核任务没有用户态 fd，显式跳过这一步。除这个 `/dev/tty` bootstrap 外，其余启动挂载策略仍是过渡性内核兼容逻辑，计划在 T8 由 PID1 接管。
 
 ## 5. Initramfs 解包
 
