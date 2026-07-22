@@ -55,6 +55,12 @@ smoltcp = { version = "0.10.0", default-features = false, features = [
 riscv = { path = "../dependency/riscv", features = ["inline-asm"] }
 
 [features]
+# Boot-profile legality:
+# - `initramfs` owns the embedded root and may optionally enable `preload_payloads`.
+# - `legacy_block_root` and `block_mem` are legacy-root modes and must not be combined
+#   with `initramfs`; `preload_payloads` requires `initramfs`.
+# - normal and regression CPIO selection is Make-only via `MANGO_INITRAMFS_CPIO`,
+#   not a Cargo feature.
 zero_init = []
 swap = []
 zram = []
@@ -74,7 +80,6 @@ heap_trace = []
 perf_stats = []
 perf_diag = ["perf_stats"]
 initramfs = []
-regression_initramfs = []
 legacy_block_root = []
 preload_payloads = []
 

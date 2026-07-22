@@ -99,11 +99,11 @@ INITRAMFS_PROFILE ?= normal
 
 ifeq ($(INITRAMFS_PROFILE),regression)
   KERNEL_INITRAMFS_CPIO_RV := $(REGRESSION_CPIO_RV)
-  INITRAMFS_PROFILE_FEATURES := regression_initramfs
 else
   KERNEL_INITRAMFS_CPIO_RV := $(INITRAMFS_CPIO_RV)
-  INITRAMFS_PROFILE_FEATURES :=
 endif
+# Cargo has no initramfs-profile feature: profile selection is solely the
+# MANGO_INITRAMFS_CPIO environment value passed by the architecture Makefile.
 
 KERNEL_CMDLINE ?= mango.mode=normal
 

@@ -21,6 +21,10 @@
 
 #[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
 compile_error!("features initramfs and legacy_block_root are mutually exclusive");
+#[cfg(all(feature = "initramfs", feature = "block_mem"))]
+compile_error!("features initramfs and block_mem are mutually exclusive");
+#[cfg(all(feature = "preload_payloads", not(feature = "initramfs")))]
+compile_error!("feature preload_payloads requires initramfs");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
