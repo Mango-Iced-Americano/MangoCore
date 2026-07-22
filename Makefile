@@ -193,6 +193,10 @@ docker-test-parallel:
 	@printf '%s\n' 'ERROR: docker-test-parallel is deprecated; run python3 scripts/run_full_test.py --serial inside Docker instead.' >&2
 	@exit 64
 
+test-docker-parallel:
+	@printf '%s\n' 'ERROR: test-docker-parallel is deprecated; run python3 scripts/run_full_test.py --serial inside Docker instead.' >&2
+	@exit 64
+
 testsuits-download:
 	cd fs-img-dir && \
 	wget -O sdcard-la.img.xz https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-la.img.xz && \
@@ -200,4 +204,4 @@ testsuits-download:
 
 	
 
-.PHONY: all build kernel user image run test check lint clean testsuits-download docker docker-test-parallel regression check-fast unittest bugscan
+.PHONY: all build kernel user image run test check lint clean testsuits-download docker docker-test-parallel test-docker-parallel regression check-fast unittest bugscan
