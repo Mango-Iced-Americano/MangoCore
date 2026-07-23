@@ -107,26 +107,40 @@ def _judge(project_root: Path, output: Path, archive: Path) -> tuple[bool, set[s
 
 
 def _extract(roles: ImageRoles, arch: str, archive: Path) -> tuple[bool, str]:
+    from datetime import datetime
     source, destination = roles.official_archive(arch), roles.derived_x0(arch)
     roles.validate_official(arch, source, archive=True)
     roles.validate_derived_output(arch, destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] Phase 2/{arch}: decompressing {source.name} → {destination}...")
     with destination.open("wb") as target, (archive / "extract.log").open("wb") as log:
         completed = subprocess.run(["xz", "-dkc", str(source)], stdout=target, stderr=log, check=False)
     if completed.returncode != 0:
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] ERROR: xz extraction exited {completed.returncode}")
         return False, f"xz extraction exited {completed.returncode}"
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] Phase 2/{arch} complete: extraction succeeded")
     return True, "extraction succeeded"
 
 
 def _build(project_root: Path, archive: Path) -> tuple[bool, str]:
     """Build through the root serial graph; never spawn per-architecture build threads."""
+    from datetime import datetime
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] Phase 1/5: make all (serial RV64 → LA64 build)...")
     build_log = archive / "build.log"
     with build_log.open("wb") as log:
         completed = subprocess.run(["make", "all"], cwd=project_root, stdout=log, stderr=subprocess.STDOUT, check=False)
     for arch in ARCHES:
         shutil.copyfile(build_log, _arch_archive(archive, arch) / "build.log")
     if completed.returncode != 0:
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] ERROR: make all exited {completed.returncode}")
         return False, f"make all exited {completed.returncode}"
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] Phase 1 complete: build succeeded")
     return True, "build succeeded"
 
 
@@ -145,35 +159,52 @@ def _qemu_failure(result: ProcessResult) -> tuple[str, str] | None:
 
 def run_full_test(project_root: Path, roles: ImageRoles, timeout: int, serial: bool) -> int:
     """Run the canonical full test and return nonzero for every failed gate."""
+    from datetime import datetime
+
     archive = _archive_root(project_root)
     archive.mkdir(parents=True)
     _prepare_archives(archive)
+
+    # Phase 1: Build
     build_ok, build_diagnostic = _build(project_root, archive)
     if not build_ok:
         for arch in ARCHES:
             arch_archive = _arch_archive(archive, arch)
             _write_result(arch_archive, "build", "failed", build_diagnostic)
         return 1
+
+    # Phase 2: Extract
     for arch in ARCHES:
         arch_archive = _arch_archive(archive, arch)
         extract_ok, extract_diagnostic = _extract(roles, arch, arch_archive)
         if not extract_ok:
             _write_result(arch_archive, "extract", "failed", extract_diagnostic)
             return 1
+
+    # Phase 3-4: QEMU + Judge
     results: dict[str, ProcessResult] = {}
-    # Serial is explicit for auditability. The default remains parallel QEMU only;
-    # all builds above are inherently serial via the root Make graph.
     arches = ARCHES
+    mode = "serial" if serial else "parallel"
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] Phase 3-4: launching QEMU ({mode}, timeout {timeout}s)...")
     if serial:
         for arch in arches:
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] QEMU {arch}: starting... (timeout {timeout}s)")
             results[arch] = _run_to_file(build_qemu_args(roles, arch, "normal"), _arch_archive(archive, arch) / "qemu.log", timeout)
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] QEMU {arch}: finished (rc={results[arch].returncode})")
     else:
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             futures = {executor.submit(_run_to_file, build_qemu_args(roles, arch, "normal"), _arch_archive(archive, arch) / "qemu.log", timeout): arch for arch in arches}
             for future in concurrent.futures.as_completed(futures):
-                results[futures[future]] = future.result()
+                arch = futures[future]
+                result = future.result()
+                results[arch] = result
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"[{ts}] QEMU {arch}: finished (rc={result.returncode})")
     ok = True
     for arch in arches:
         result = results[arch]
@@ -182,19 +213,32 @@ def run_full_test(project_root: Path, roles: ImageRoles, timeout: int, serial: b
         if qemu_failure is not None:
             stage, diagnostic = qemu_failure
             _write_result(arch_archive, stage, "failed", diagnostic)
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] {arch}: {stage} — FAILED ({diagnostic})")
             ok = False
             continue
         judge_ok, groups, judge_diagnostic = _judge(project_root, result.output, arch_archive)
         if not judge_ok:
             _write_result(arch_archive, "judge", "failed", judge_diagnostic)
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] {arch}: judge — FAILED ({judge_diagnostic[:80]})")
             ok = False
             continue
         if not REQUIRED_JUDGE_GROUPS <= groups:
             _write_result(arch_archive, "judge-groups", "failed", "required judge groups are missing")
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] {arch}: judge groups — FAILED (missing required groups)")
             ok = False
             continue
         _write_result(arch_archive, "complete", "passed", "all fail-closed gates passed")
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] {arch}: PASSED — all gates passed")
     (archive / "summary.txt").write_text(f"success={ok}\nserial={serial}\n", encoding="utf-8")
+    ts = datetime.now().strftime("%H:%M:%S")
+    if ok:
+        print(f"[{ts}] Phase 5/5: ALL PASSED — archives at {archive}")
+    else:
+        print(f"[{ts}] Phase 5/5: FAILURES DETECTED — archives at {archive}")
     return 0 if ok else 1
 
 
