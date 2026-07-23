@@ -3,7 +3,7 @@
 define build_tools_disk
 	@set -eu; workspace=$$(mktemp -d "$${TMPDIR:-/tmp}/mango-tools-$(4).XXXXXX") || { echo "ERROR: tools workspace creation failed" >&2; exit 1; }; \
 	payload="$$workspace/payload.img"; staging="$$workspace/staging"; cleaned=0; \
-	cleanup() { status=$$?; [ "$$cleaned" -eq 0 ] || exit "$$status"; cleaned=1; trap - EXIT HUP INT TERM; rm -rf "$$workspace"; exit "$$status"; }; \
+	cleanup() { status=$$?; [ "$$cleaned" -eq 0 ] || exit "$$status"; cleaned=1; trap - EXIT HUP INT TERM; if [ "$$status" -ne 0 ]; then echo "[tools-disk] failed; preserving $$workspace for diagnostics" >&2; else rm -rf "$$workspace"; fi; exit "$$status"; }; \
 	trap cleanup EXIT HUP INT TERM; \
 	echo "[tools-disk] Building $(4) tools payload ($(2)MB)..."; \
 	mkdir -p "$$staging"; \
