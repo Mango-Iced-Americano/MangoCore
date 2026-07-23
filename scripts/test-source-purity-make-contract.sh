@@ -114,7 +114,7 @@ check_variant_copy_recipes() {
             command = recipe
             gsub(/["\047]/, "", command)
             sub(/^[[:space:]]*[-@[:space:]]*[[:space:]]*/, "", command)
-            if (command ~ /(^|[[:space:];])(cp|\/bin\/cp|\$\(CP\))([[:space:]]+-[^[:space:]]+)*[[:space:]]+[^[:space:]]*src\/lang_items\.rs\.(rv|la)[[:space:]]+[^[:space:]]*src\/lang_items\.rs([[:space:];]|$)/) {
+            if (command ~ /(^|[[:space:];])(cp|\/bin\/cp|\$\(CP\))([[:space:]]+-[^[:space:]]+)*[[:space:]]+[^[:space:]]*src\/[^[:space:]]*\.rs\.(rv|la)[[:space:]]+[^[:space:]]*src\/[^[:space:]]*\.rs([[:space:];]|$)/) {
                 print FILENAME ":" recipe_start ": " recipe
             }
             recipe = ""
@@ -153,10 +153,10 @@ check_variant_copy_recipes() {
     ' "$source_path")
 
     if [ -n "$violations" ]; then
-        fail "$makefile_name recipes copy variant lang_items into tracked active lang_items.rs"
+        fail "$makefile_name recipes copy variant Rust sources into tracked active Rust sources"
         printf '%s\n' "$violations" >&2
     else
-        pass "$makefile_name recipes do not copy variant lang_items into active files"
+        pass "$makefile_name recipes do not copy variant Rust sources into active files"
     fi
 }
 
@@ -231,15 +231,15 @@ mod lang_items;
 EOF
     cat >"$fixture_root/modules/variant-copy.mk" <<'EOF'
 plain:
-	cp src/lang_items.rs.rv src/lang_items.rs
+	cp src/dummy_config.rs.rv src/dummy_config.rs
 dash-prefix:
-	-@cp src/lang_items.rs.la src/lang_items.rs
+	-@cp src/dummy_config.rs.la src/dummy_config.rs
 at-space-prefix:
-	@ cp src/lang_items.rs.rv src/lang_items.rs
+	@ cp src/dummy_config.rs.rv src/dummy_config.rs
 make-variable:
-	$(CP) "src/lang_items.rs.la" "src/lang_items.rs"
+	$(CP) "src/dummy_config.rs.la" "src/dummy_config.rs"
 absolute-quoted:
-	/bin/cp 'src/lang_items.rs.rv' 'src/lang_items.rs'
+	/bin/cp 'src/dummy_config.rs.rv' 'src/dummy_config.rs'
 EOF
 
     set +e
@@ -263,7 +263,7 @@ EOF
         fi
     done
     if [ "$fixture_coverage" -eq 1 ]; then
-        pass 'adversarial fixture rejects plain, -@cp, @ cp, $(CP), /bin/cp, and quoted variant copies'
+        pass 'adversarial fixture rejects plain, -@cp, @ cp, $(CP), /bin/cp, and quoted variant Rust copies'
         pass 'fixture modules/variant-copy.mk is outside os/Makefile and would have been missed by the former os/Makefile-only scanner'
     else
         fail 'adversarial fixture must report every variant-copy spelling with file:line diagnostics'
