@@ -98,6 +98,34 @@ pub(crate) fn sync_all_instances() {
     }
 }
 
+/// Shutdown every live another_ext4 instance: sync data, then clear
+/// FEATURE_INCOMPAT_RECOVER so the next boot does not see a dirty journal.
+pub(crate) fn shutdown_all_instances() {
+    let live = {
+        let mut registry = EXT4_REGISTRY.lock();
+        let live: Vec<Arc<Ext4FileSystem>> = registry.iter().filter_map(Weak::upgrade).collect();
+        registry.retain(|weak| weak.strong_count() > 0);
+        live
+    };
+
+    for fs in live {
+        if let Err(error) = fs.sync_all() {
+            log::error!(
+                "another_ext4: sync before shutdown failed for filesystem {}: {:?}",
+                fs.fs_id(),
+                error
+            );
+        }
+        if let Err(error) = fs.inner().shutdown_writable() {
+            log::error!(
+                "another_ext4: shutdown_writable failed for filesystem {}: {:?}",
+                fs.fs_id(),
+                error
+            );
+        }
+    }
+}
+
 impl FileSystem for Ext4FileSystem {
     fn root_inode(&self) -> Arc<dyn IndexNode> {
         self.root
