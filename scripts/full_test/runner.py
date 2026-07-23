@@ -108,9 +108,9 @@ def _judge(project_root: Path, output: Path, archive: Path) -> tuple[bool, set[s
 
 def _extract(roles: ImageRoles, arch: str, archive: Path) -> tuple[bool, str]:
     from datetime import datetime
-    source, destination = roles.official_archive(arch), roles.derived_x0(arch)
+    source = roles.official_archive(arch)
+    destination = roles.official_x0(arch)  # decompress directly to ../sdcard-{rv,la}.img
     roles.validate_official(arch, source, archive=True)
-    roles.validate_derived_output(arch, destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file() and destination.stat().st_mtime >= source.stat().st_mtime:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -164,26 +164,31 @@ def _qemu_failure(result: ProcessResult) -> tuple[str, str] | None:
 def run_full_test(project_root: Path, roles: ImageRoles, timeout: int, serial: bool) -> int:
     """Run the canonical full test and return nonzero for every failed gate."""
     from datetime import datetime
+    import concurrent.futures
 
     archive = _archive_root(project_root)
     archive.mkdir(parents=True)
     _prepare_archives(archive)
 
-    # Phase 1: Build
-    build_ok, build_diagnostic = _build(project_root, archive)
-    if not build_ok:
-        for arch in ARCHES:
-            arch_archive = _arch_archive(archive, arch)
-            _write_result(arch_archive, "build", "failed", build_diagnostic)
-        return 1
-
-    # Phase 2: Extract
-    for arch in ARCHES:
-        arch_archive = _arch_archive(archive, arch)
-        extract_ok, extract_diagnostic = _extract(roles, arch, arch_archive)
-        if not extract_ok:
-            _write_result(arch_archive, "extract", "failed", extract_diagnostic)
+    # Phase 1+2: Build + Extract (all parallel — make all is independent of sdcard decompression)
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] Phase 1+2: make all + decompress sdcard images (parallel)...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        build_future = executor.submit(_build, project_root, archive)
+        extract_futures = {
+            arch: executor.submit(_extract, roles, arch, _arch_archive(archive, arch))
+            for arch in ARCHES
+        }
+        build_ok, build_diagnostic = build_future.result()
+        if not build_ok:
+            for arch in ARCHES:
+                _write_result(_arch_archive(archive, arch), "build", "failed", build_diagnostic)
             return 1
+        for arch, future in extract_futures.items():
+            extract_ok, extract_diagnostic = future.result()
+            if not extract_ok:
+                _write_result(_arch_archive(archive, arch), "extract", "failed", extract_diagnostic)
+                return 1
 
     # Phase 3-4: QEMU + Judge
     results: dict[str, ProcessResult] = {}
@@ -195,7 +200,7 @@ def run_full_test(project_root: Path, roles: ImageRoles, timeout: int, serial: b
         for arch in arches:
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] QEMU {arch}: starting... (timeout {timeout}s)")
-            results[arch] = _run_to_file(build_qemu_args(roles, arch, "normal"), _arch_archive(archive, arch) / "qemu.log", timeout)
+            results[arch] = _run_to_file(build_qemu_args(roles, arch, "competition"), _arch_archive(archive, arch) / "qemu.log", timeout)
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] QEMU {arch}: finished (rc={results[arch].returncode})")
     else:
