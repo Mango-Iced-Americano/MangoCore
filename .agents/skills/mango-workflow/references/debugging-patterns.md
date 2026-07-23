@@ -419,3 +419,12 @@
 - **修复**: 将 offset 推进推迟到写入成功后执行。读取阶段仅使用 offset 定位，不修改它；写入阶段成功后 `*off += wrote`（其中 `wrote ≤ n`），确保 offset 精确反映已确认写入目标的字节数。
 - **教训**: 任何跨越两个独立 I/O 对象的 syscall（splice、sendfile、copy_file_range）都必须遵循"状态推进在输出确认之后"的原则。对于文件源的显式 offset 参数，推进发生在写入成功之后而非读取成功之后。管道源是破坏性读取（无可回滚机制），需通过容量探测或最小化读取窗口来限制损失。
 - **相关文件**: `os/src/syscall/fs/sys_splice.rs`
+
+## ext4 延迟初始化位图
+
+### `BLOCK_UNINIT` 清零后未保留元数据导致文件数据覆盖文件系统
+
+- **根因**: `EXT4_BG_BLOCK_UNINIT` 的磁盘位图可以是全零占位；直接清零并清除标志会把超级块、GDT/保留 GDT、位图和 inode table 暴露为可分配数据块。flex_bg 下这些后几类元数据还可能属于别的 block group。
+- **修复**: 初始化时先清零，按物理 block group 与系统元数据范围的交集置位，再将最后一个不完整 group 的 bitmap tail 置位，清除标志并更新 bitmap checksum；所有单块、批量和 transaction allocator 都必须经过同一个初始化器。
+- **教训**: 位图延迟初始化不是“补零”操作，而是重建文件系统布局。不要只使用当前 group descriptor 的元数据地址；必须把跨 group 的 flex_bg 元数据归入其物理所属组。
+- **相关文件**: `dependency/another_ext4/src/ext4/alloc.rs`、`dependency/another_ext4/src/ext4/mod.rs`
