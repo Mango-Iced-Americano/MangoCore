@@ -136,11 +136,11 @@ impl Ext4FileSystem {
             .lifetimes
             .lock()
             .iter()
-            .map(|(key, lifetime)| {
-                (lifetime.page_cache(), *key, lifetime.clone())
-            })
+            .map(|(key, lifetime)| (lifetime.page_cache(), *key, lifetime.clone()))
             .collect();
-        Self::complete_lifetime_sync(
+        let mut committed_generations = Vec::new();
+        let mut flush_succeeded = false;
+        let result = Self::complete_lifetime_sync(
             || {
                 for (maybe_cache, _key, _lifetime) in &all {
                     if let Some(cache) = maybe_cache {
@@ -152,24 +152,33 @@ impl Ext4FileSystem {
                     if generation == 0 {
                         continue;
                     }
-                    let id = u32::try_from(key.inode_id())
-                        .map_err(|_| SyscallErr::EFBIG)?;
+                    let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
                     let size = lifetime.logical_size.load(Ordering::Acquire);
                     self.inner()
                         .commit_inode_size(id, size as u64, None)
                         .map_err(|error| from_another(error.code()))?;
-                    let _ = lifetime.size_generation.compare_exchange(
-                        generation,
-                        0,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
+                    committed_generations.push((lifetime.clone(), generation));
                 }
                 Ok(())
             },
             || self.drain_reclaims(),
-            || self.flush_device(),
-        )
+            || {
+                let result = self.flush_device();
+                flush_succeeded = result.is_ok();
+                result
+            },
+        );
+        if flush_succeeded {
+            for (lifetime, generation) in committed_generations {
+                let _ = lifetime.size_generation.compare_exchange(
+                    generation,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+        }
+        result
     }
 
     /// Completes writeback/reclaim phases and their mandatory final device barrier.

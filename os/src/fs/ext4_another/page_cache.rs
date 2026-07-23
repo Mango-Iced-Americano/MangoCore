@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PAGE_SIZE;
 use crate::fs::page_cache::PageCacheBackend;
+use crate::task::perf;
 use crate::utils::error::SyscallErr;
 
 use super::errno::from_another;
@@ -40,6 +41,8 @@ impl Drop for AnotherExt4PageCacheBackend {
 
 impl PageCacheBackend for AnotherExt4PageCacheBackend {
     fn read_page(&self, index: usize, buffer: &mut [u8]) -> Result<usize, SyscallErr> {
+        crate::task::perf::record_ext4_pc_readpages_calls();
+        crate::task::perf::record_ext4_pc_readpages_pages(1);
         if buffer.len() < PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
@@ -78,6 +81,8 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         if total_bytes == 0 {
             return Ok(0);
         }
+        crate::task::perf::record_ext4_pc_writepages_calls();
+        crate::task::perf::record_ext4_pc_writepages_pages(pages.len());
         // Build staging buffer for a single write_data_only call
         let mut staging = alloc::vec![0u8; total_bytes];
         let mut copied = 0;
@@ -95,6 +100,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         let batch_end = start_offset
             .checked_add(total_bytes)
             .ok_or(SyscallErr::EFBIG)?;
+        let _t0 = perf::perf_time_now();
         let data_written = self
             .fs
             .inner()
@@ -107,12 +113,29 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                 Some(&staging[..total_bytes]),
             )
             .map_err(|error| from_another(error.code()))?;
+        let _t1 = perf::perf_time_now();
+        perf::record_ext4_alloc_ensure(
+            (total_bytes / crate::config::PAGE_SIZE) as usize,
+            0,
+            _t1.wrapping_sub(_t0),
+        );
         if !data_written {
             self.fs
                 .inner()
                 .write_data_only(inode_id, start_offset, &staging[..total_bytes])
                 .map_err(|error| from_another(error.code()))?;
         }
+        let _t2 = perf::perf_time_now();
+        #[cfg(feature = "perf_diag")]
+        crate::println!(
+            "[ext4_another] write_pages ino={} pages={} total_bytes={} prepare_cycles={} commit_cycles={} direct={}",
+            inode_id,
+            pages.len(),
+            total_bytes,
+            _t1.wrapping_sub(_t0),
+            _t2.wrapping_sub(_t1),
+            data_written,
+        );
         Ok(total_bytes)
     }
 
