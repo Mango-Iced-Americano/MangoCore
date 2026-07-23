@@ -68,26 +68,52 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
         let size = self.lifetime.logical_size.load(Ordering::Acquire);
         let inode_id = u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
-        for (index, page) in pages.iter().enumerate() {
-            if page.len() < PAGE_SIZE {
-                return Err(SyscallErr::ENOBUFS);
+        let start_offset = Self::page_offset(start_index)?;
+        if start_offset >= size {
+            return Ok(0);
+        }
+        // Compute total bytes from all pages, clamped to logical EOF
+        let raw_total: usize = pages.iter().map(|p| PAGE_SIZE.min(p.len())).sum();
+        let total_bytes = raw_total.min(size.saturating_sub(start_offset));
+        if total_bytes == 0 {
+            return Ok(0);
+        }
+        // Build staging buffer for a single write_data_only call
+        let mut staging = alloc::vec![0u8; total_bytes];
+        let mut copied = 0;
+        for page in pages.iter() {
+            let page_bytes = PAGE_SIZE.min(page.len());
+            let remaining = total_bytes.saturating_sub(copied);
+            if remaining == 0 {
+                break;
             }
-            let page_index = start_index.checked_add(index).ok_or(SyscallErr::EFBIG)?;
-            let offset = Self::page_offset(page_index)?;
-            if offset >= size {
-                continue;
-            }
-            let write_len = PAGE_SIZE.min(size - offset);
+            let n = page_bytes.min(remaining);
+            staging[copied..copied + n].copy_from_slice(&page[..n]);
+            copied += n;
+        }
+        // Batch-allocate blocks for the entire write range (like lwext4 delayed alloc)
+        let batch_end = start_offset
+            .checked_add(total_bytes)
+            .ok_or(SyscallErr::EFBIG)?;
+        let data_written = self
+            .fs
+            .inner()
+            .prepare_buffered_write_with_data(
+                inode_id,
+                start_offset,
+                total_bytes,
+                batch_end as u64,
+                None,
+                Some(&staging[..total_bytes]),
+            )
+            .map_err(|error| from_another(error.code()))?;
+        if !data_written {
             self.fs
                 .inner()
-                .write_data_only(inode_id, offset, &page[..write_len])
+                .write_data_only(inode_id, start_offset, &staging[..total_bytes])
                 .map_err(|error| from_another(error.code()))?;
         }
-        self.fs
-            .inner()
-            .commit_inode_size(inode_id, size as u64, None)
-            .map_err(|error| from_another(error.code()))?;
-        Ok(pages.len() * PAGE_SIZE)
+        Ok(total_bytes)
     }
 
     fn npages(&self) -> usize {

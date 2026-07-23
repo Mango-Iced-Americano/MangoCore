@@ -41,9 +41,35 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
             .map_err(|error| another_ext4::Ext4Error::new(from_block_device(error)))
     }
 
+    fn read_blocks(&self, start: u64, buf: &mut [u8]) -> Result<(), another_ext4::Ext4Error> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if buf.len() % another_ext4::BLOCK_SIZE != 0 {
+            return Err(another_ext4::Ext4Error::new(another_ext4::ErrCode::EINVAL));
+        }
+        let block_index = Self::block_index(start)?;
+        self.device
+            .read_block(block_index, buf)
+            .map_err(|error| another_ext4::Ext4Error::new(from_block_device(error)))
+    }
+
     fn flush(&self) -> Result<(), another_ext4::Ext4Error> {
         self.device
             .flush()
+            .map_err(|error| another_ext4::Ext4Error::new(from_block_device(error)))
+    }
+
+    fn write_blocks(&self, start: u64, data: &[u8]) -> Result<(), another_ext4::Ext4Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        if data.len() % another_ext4::BLOCK_SIZE != 0 {
+            return Err(another_ext4::Ext4Error::new(another_ext4::ErrCode::EINVAL));
+        }
+        let block_index = Self::block_index(start)?;
+        self.device
+            .write_block(block_index, data)
             .map_err(|error| another_ext4::Ext4Error::new(from_block_device(error)))
     }
 

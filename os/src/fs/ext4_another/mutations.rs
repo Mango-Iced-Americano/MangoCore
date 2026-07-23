@@ -29,9 +29,6 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            fs.inner()
-                .prepare_buffered_write(inode_id, offset, actual, end as u64, None)
-                .map_err(|error| super::errno::from_another(error.code()))?;
             let written = self.regular_page_cache(&fs).write_with_after_copy(
                 offset,
                 &buffer[..actual],
@@ -40,6 +37,9 @@ macro_rules! writable_data_inode_mutations {
                     self.lifetime
                         .logical_size
                         .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
+                    self.lifetime
+                        .size_generation
+                        .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
                 },
             )?;
             Ok(written)
@@ -116,6 +116,25 @@ macro_rules! writable_data_inode_mutations {
             if let Some(cache) = self.page_cache() {
                 cache.writeback_all()?;
             }
+            let id = u32::try_from(self.key.inode_id())
+                .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
+            let generation = self
+                .lifetime
+                .size_generation
+                .load(core::sync::atomic::Ordering::Acquire);
+            let size = self
+                .lifetime
+                .logical_size
+                .load(core::sync::atomic::Ordering::Acquire);
+            fs.inner()
+                .commit_inode_size(id, size as u64, None)
+                .map_err(|error| super::errno::from_another(error.code()))?;
+            let _ = self.lifetime.size_generation.compare_exchange(
+                generation,
+                0,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            );
             fs.flush_device()
         }
 

@@ -37,6 +37,9 @@ pub(crate) struct InodeLifetime {
     reclaim: Mutex<Option<another_ext4::InodeReclaimHandle>>,
     reclaim_error: Mutex<Option<SyscallErr>>,
     pins: AtomicUsize,
+    /// Incremented after each page-cache copy; reset only if a size commit
+    /// observes the same generation throughout its transaction.
+    pub(crate) size_generation: AtomicUsize,
 }
 
 impl InodeLifetime {
@@ -47,6 +50,7 @@ impl InodeLifetime {
             reclaim: Mutex::new(None),
             reclaim_error: Mutex::new(None),
             pins: AtomicUsize::new(0),
+            size_generation: AtomicUsize::new(0),
         }
     }
 
@@ -128,16 +132,38 @@ impl Ext4FileSystem {
     }
 
     pub(crate) fn sync_lifetimes(&self) -> Result<(), SyscallErr> {
-        let caches: Vec<Arc<PageCache>> = self
+        let all: Vec<(Option<Arc<PageCache>>, InodeKey, Arc<InodeLifetime>)> = self
             .lifetimes
             .lock()
-            .values()
-            .filter_map(|lifetime| lifetime.page_cache())
+            .iter()
+            .map(|(key, lifetime)| {
+                (lifetime.page_cache(), *key, lifetime.clone())
+            })
             .collect();
         Self::complete_lifetime_sync(
             || {
-                for cache in caches {
-                    cache.writeback_all()?;
+                for (maybe_cache, _key, _lifetime) in &all {
+                    if let Some(cache) = maybe_cache {
+                        cache.writeback_all()?;
+                    }
+                }
+                for (_maybe_cache, key, lifetime) in &all {
+                    let generation = lifetime.size_generation.load(Ordering::Acquire);
+                    if generation == 0 {
+                        continue;
+                    }
+                    let id = u32::try_from(key.inode_id())
+                        .map_err(|_| SyscallErr::EFBIG)?;
+                    let size = lifetime.logical_size.load(Ordering::Acquire);
+                    self.inner()
+                        .commit_inode_size(id, size as u64, None)
+                        .map_err(|error| from_another(error.code()))?;
+                    let _ = lifetime.size_generation.compare_exchange(
+                        generation,
+                        0,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
                 }
                 Ok(())
             },
