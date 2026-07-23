@@ -135,6 +135,14 @@
 
 ## QEMU / 测试
 
+### LA64 首次用户态恢复跳入 kernel trap stub
+
+- **现象**: competition 启动在 PID1 已入 ready queue、`trap_return()` 已执行后静默空转，始终没有 `[initd]` 首行。
+- **根因**: `restore_va` 用 `strampoline` 对 `__restore` 做重定位。LA64 static link 中该 extern 函数符号可解析为 `skern_trap`，使 restore 跳入错误的 kernel trap 区域，而不是 `.text.trampoline` 中的 `__restore`。
+- **修复**: LA64 `trap_return()` 直接以链接后的 `__restore as usize` 作为跳转目标；不要通过 `strampoline` 重新计算该地址。
+- **教训**: bare-metal assembly entry symbols经 Rust FFI 取地址时，必须核对最终 ELF 符号和反汇编。若首个用户任务已被 scheduler 选中却没有用户输出，优先比较计算出的跳转地址与 `llvm-nm`/`llvm-objdump` 中的 `__restore`。
+- **相关文件**: `os/src/hal/arch/loongarch64/trap/mod.rs`, `os/src/hal/arch/loongarch64/trap/trap.S`
+
 ### 候选 LoongArch toolchain 在 GNU ld 遇到 `R_LARCH_CALL36` (`0x6e`)
 
 - **现象**: 容器 GNU ld 2.41 链接包含 `R_LARCH_CALL36` 的 LoongArch 对象时报告 `unsupported relocation type 0x6e`；Cargo 的 `linker = "loongarch64-linux-gnu-gcc"` 会把该限制带入 OS 与 user 两条构建路径。
