@@ -1,6 +1,7 @@
 include make/common/toolchain.mk
 include make/image-roles.mk
 include make/arch/rv64-settings.mk
+include make/common/orchestration.mk
 include make/qemu-profiles.mk
 
 QEMU_EXECUTABLE = qemu-system-riscv64

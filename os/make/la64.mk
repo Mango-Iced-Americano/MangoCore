@@ -1,6 +1,7 @@
 include make/common/toolchain.mk
 include make/image-roles.mk
 include make/arch/la64-settings.mk
+include make/common/orchestration.mk
 include make/qemu-profiles.mk
 
 QEMU_EXECUTABLE = qemu-system-loongarch64
@@ -16,7 +17,10 @@ QEMU_DEVELOPMENT_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
 QEMU_DEVELOPMENT_AFTER_DRIVES = -m 1024 -smp threads=$(CORE_NUM)
 QEMU_REGRESSION_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
 QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1
-QEMU_KTEST_BEFORE_DRIVES = -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+# LoongArch QEMU loads the ELF directly.  Unlike RV64, this architecture has
+# no BOOTLOADER value; pairing an empty `-bios` with `-device loader,...`
+# makes QEMU consume the loader device text as a firmware filename.
+QEMU_KTEST_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
 QEMU_KTEST_AFTER_DRIVES = -m 1024 -smp threads=1
 
 lwext4-la64: $(LWEXT4_LA_LIB)
