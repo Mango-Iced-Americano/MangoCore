@@ -776,7 +776,6 @@ impl TaskControlBlock {
     /// 该构造器只用于内核启动阶段加载 `/init`。普通 fork/clone 必须走
     /// `sys_clone()`，exec 必须走 `load_elf()`。
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
-        println!("[diag] TaskControlBlock::new begin");
         macro_rules! init_task_trace {
             ($($arg:tt)*) => {
                 #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
@@ -790,13 +789,11 @@ impl TaskControlBlock {
         if elf_data.is_empty() {
             panic!("[TCB::new] initproc ELF is empty");
         }
-        println!("[diag] after map_to_kernel_space");
         init_task_trace!("02 init ELF mapped: {} bytes", elf_data.len());
         // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, _user_heap, elf_info) =
             AddressSpace::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
-        println!("[diag] after from_elf");
         init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
         // 在内核空间中删除ELF区域
         crate::mm::KERNEL_SPACE
@@ -850,7 +847,6 @@ impl TaskControlBlock {
         };
         init_task_trace!("07 argc/argv/envp stack created: user_sp={:#x}", init_sp);
         // 初始化新 VFS 文件描述符表
-        println!("[diag] before tty setup");
         let mut fd_table = vfs::FdTable::new();
         // The kernel bootstrap mounts devfs before creating PID1, then opens
         // /dev/tty for stdin/stdout/stderr (fd 0/1/2). Ktest's independent
@@ -1005,7 +1001,6 @@ impl TaskControlBlock {
                 pending_oom_kill: false,
             }),
         });
-        println!("[diag] TCB created");
         task_control_block.process.add_thread(&task_control_block);
         registry::register_process(&task_control_block.process);
         registry::register_task(&task_control_block);
