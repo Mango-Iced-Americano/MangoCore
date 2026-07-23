@@ -207,7 +207,7 @@ def run_full_test(project_root: Path, roles: ImageRoles, timeout: int, serial: b
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {executor.submit(_run_to_file, build_qemu_args(roles, arch, "normal"), _arch_archive(archive, arch) / "qemu.log", timeout): arch for arch in arches}
+            futures = {executor.submit(_run_to_file, build_qemu_args(roles, arch, "competition"), _arch_archive(archive, arch) / "qemu.log", timeout): arch for arch in arches}
             for future in concurrent.futures.as_completed(futures):
                 arch = futures[future]
                 result = future.result()
