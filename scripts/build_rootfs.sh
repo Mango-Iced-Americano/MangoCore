@@ -93,13 +93,11 @@ if [ "$2" = "laqemu" ]; then
     cp -r ../user/fs/* ${U_FS_DIR}/fs/
     cp ./bash-la ${U_FS_DIR}/fs/bin/bash
     cp ./busybox-la ${U_FS_DIR}/fs/bin/busybox
-    cp ${USER_OUTPUT_ROOT}/loongarch64-unknown-linux-gnu/release/initproc ${U_FS_DIR}/fs/
 fi
 
 if [ "$2" = "rvqemu" ]; then
     cp ./bash-rv ${U_FS_DIR}/fs/bin/bash
     cp ./busybox-rv ${U_FS_DIR}/fs/bin/busybox
-    cp ${USER_OUTPUT_ROOT}/riscv64gc-unknown-none-elf/release/initproc ${U_FS_DIR}/fs/
     cp ../1.txt ${U_FS_DIR}/fs/ 2>/dev/null || true
 fi
 

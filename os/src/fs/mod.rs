@@ -36,7 +36,7 @@ pub use self::dev::pipe::*;
 pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
-pub use self::filesystem::{detect_fs, FS_Type};
+pub use self::filesystem::{detect_fs, detect_fs_layout, DetectedFs, FS_Type};
 pub use crate::drivers::block::BlockDevice;
 
 use self::vfs::FileSystem as _;
@@ -46,6 +46,27 @@ use boot_block::register_boot_block_devices as register_discovered_boot_block_de
 use core::sync::atomic::Ordering;
 pub use dirent::Dirent;
 use lazy_static::*;
+
+/// Adapt a physical device to a filesystem's native block unit and mount mode.
+pub fn adapt_filesystem_device(
+    device: Arc<dyn BlockDevice>,
+    detected: DetectedFs,
+    read_only: bool,
+) -> Arc<dyn BlockDevice> {
+    let device: Arc<dyn BlockDevice> = if detected.block_size == crate::config::PAGE_SIZE {
+        device
+    } else {
+        Arc::new(crate::drivers::block::partition::BlockSizeAdapter::new(
+            device,
+            detected.block_size,
+        ))
+    };
+    if read_only {
+        Arc::new(crate::drivers::block::partition::ReadOnlyBlockDevice::new(device))
+    } else {
+        device
+    }
+}
 
 /// initramfs 模式：创建 RamFS → 解包内嵌 cpio → 准备挂载点并挂载 devfs。
 /// 完全不依赖 BLOCK_DEVICE；PID1 负责其余伪文件系统和磁盘挂载策略。

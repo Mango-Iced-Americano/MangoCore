@@ -170,12 +170,7 @@ pub fn ext4_identity(block_device: &Arc<dyn BlockDevice>) -> Option<Ext4Identity
 
 /// 挂载前的文件系统检测入口。
 ///
-/// 若 `FORCE_RAMFS` 标志为 `true`，跳过块设备检测，直接返回 `FS_Type::Null`
-///（由 ramfs 接管）。否则调用 `detect_fs(&BLOCK_DEVICE)`。
+/// Detect the filesystem currently exposed by the primary block device.
 pub fn pre_mount() -> FS_Type {
-    if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
-        println!("[fs] ramfs forced, skipping block device detection");
-        return FS_Type::Null;
-    }
     detect_fs(&BLOCK_DEVICE)
 }

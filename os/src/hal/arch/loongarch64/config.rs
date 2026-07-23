@@ -231,7 +231,7 @@ const _: () = {
 // QEMU 将传统内存磁盘镜像放在 RAM 起点以上 256MiB 处。
 #[cfg(feature = "board_laqemu")]
 pub const DISK_IMAGE_BASE: usize = 0x1000_0000 + MEMORY_START;
-// 2K1000 上板阶段不启用 block_mem；将占位地址放到帧分配器管理范围之外，避免与
+// 2K1000 上板阶段不启用该旧内存根路径；将占位地址放到帧分配器管理范围之外，避免与
 // 内核镜像发生冲突。
 #[cfg(feature = "board_2k1000")]
 pub const DISK_IMAGE_BASE: usize = MEMORY_END;

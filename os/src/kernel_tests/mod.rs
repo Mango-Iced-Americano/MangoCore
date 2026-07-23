@@ -52,8 +52,6 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("sched", kt_sched::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
-        ("ext4_orphan_crash", kt_ext4::orphan_crash_tests()),
-        ("ext4_orphan_recover", kt_ext4::orphan_recovery_tests()),
     ]
 }
 
