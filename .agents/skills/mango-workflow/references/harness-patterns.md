@@ -291,6 +291,13 @@ diag=1
 
 ## 文件系统
 
+### 直接范围分配应把完整块 payload 融入数据先行事务
+
+- **根因**: 新文件的大范围 append 若先对已分配块零填充、提交 allocation metadata，再由 PageCache 写回真实数据，会对同一块发出两轮写入，吞吐损失接近一半。
+- **修复**: buffered-write prepare API 接收可选 payload；仅当 payload 覆盖整个已分配的块范围时，在 allocation transaction 内按现有块设备批量粒度直接写入数据，并让调用方以返回状态跳过后续 `write_data_only()`。payload 不足整段、重写已有块或 direct-range 回退时保留原路径。
+- **教训**: 直接写数据仍必须在 inode extent 发布前穿过原有可靠 flush 边界；不能为了减少 I/O 改变 data-before-metadata 顺序，也不能把部分块 payload 当成完整块覆盖。
+- **相关文件**: `dependency/another_ext4/src/ext4/low_level.rs`, `os/src/fs/ext4_another/page_cache.rs`
+
 ### VirtIO 块驱动 512B 拆分导致 8x I/O 请求放大
 
 - **根因**: `virtio-drivers` 库的 `read_blocks(sector, buf)` / `write_blocks(sector, buf)` 实际支持多扇区缓冲区（buf 可以是 N×512B），但 MangoCore 的 `VirtIOBlock::read_block/write_block` 用 `buf.chunks(512)` 把每个 4KB 块拆成了 8 次独立 VirtIO 请求

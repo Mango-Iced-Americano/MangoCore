@@ -236,6 +236,14 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Sisyphus 用持久 QEMU 原始字节复现；三路 Oracle 审核确认只在消费边界删除单个终止 CR，并要求保留锚定 identity、顺序与 adversarial fixture 约束。
 - Verification: Docker shell self-test 与私有 LA64 lwext4 单样本均通过；结论限于 baseline readiness，未宣称 A/B 性能 parity。
 
+### Case 10: another_ext4 generation 同步与批量读回归
+
+- Evidence: `docs/Work_Log/2026-07-23.md`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: 布尔 `size_dirty` 可在 size commit 期间吞掉并发写入；批量 `read_pages()` staging 路径使缓存命中读吞吐下降；direct-range 零填充在真实数据写入前额外执行同步 flush。
+- AI contribution: Oracle 分别给出 generation/CAS 提交协议、回退默认逐页读路径和延后零填充 flush 的最小修复建议；实现后保留直接范围零填充的覆盖写与最终 sync 持久化屏障。
+- Verification: Docker 串行 RV64/LA64 kernel build 通过。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -271,6 +279,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `81a24d2a` | Documentation fact-check | `Oracle-reviewed fixes`; `Co-authored-by: Sisyphus` | 修复多处文档事实问题 |
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
 | 2026-07-20 | 未提交（工作树） | another_ext4 PageCache lifecycle / EOF ordering | Sisyphus 编排受控 RED→GREEN；Oracle 审核 callback 时序 | 修复脏页所有权与早写回观察陈旧 EOF |
+| 2026-07-23 | 未提交（工作树） | another_ext4 sync/read/direct-range | Oracle-identified generation race、批量读回归和中间 flush | 消除丢失的 size update，恢复逐页读，延后零填充 flush |
 
 ## 8. Work_Log 证据表
 
@@ -287,6 +296,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
 | `docs/Work_Log/2026-07-20.md` | another_ext4 PageCache lifecycle / EOF ordering | 记录受控 ownership 与 early-writeback toggle、Oracle 审核及 RV64 3/3、双架构构建证据 |
 | `docs/Work_Log/2026-07-22.md` | ext4 A/B console framing gate | 记录 Oracle 审核 ANSI/CRLF normalization、私有 LA64 readiness evidence 与 parity 边界 |
+| `docs/Work_Log/2026-07-23.md` | another_ext4 generation / read / direct-range | 记录 Oracle 定位的 size 同步竞态、批量读性能回归与直接范围 flush 屏障 |
 
 ## 9. 交互记录与留痕方式
 
