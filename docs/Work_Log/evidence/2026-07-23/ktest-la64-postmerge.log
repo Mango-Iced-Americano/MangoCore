@@ -1,5 +1,3 @@
-git_hash=14b87fa3
-command=make ktest ARCH=la64 PROFILE=normal
 Rust toolchain preflight passed: nightly-2026-05-10
 make -C os "ARCH=la64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=/app/build" ktest-run
 make[1]: Entering directory '/app/os'
@@ -60,35 +58,19 @@ warning: feature `asm_experimental_arch` is declared but not used
   = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
 
 warning: `user_lib` (lib) generated 5 warnings
-warning: the `#![no_std]` attribute can only be used at the crate root
-  --> src/bin/regression/regression_lwext4_truncate_hole.rs:16:1
-   |
-16 | #![no_std]
-   | ^^^^^^^^^^
-   |
-   = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
-
-warning: the `#![no_main]` attribute can only be used at the crate root
-  --> src/bin/regression/regression_lwext4_truncate_hole.rs:17:1
-   |
-17 | #![no_main]
-   | ^^^^^^^^^^^
-
-warning: the `#![no_std]` attribute can only be used at the crate root
- --> src/bin/regression/regression_clone_vm_second_slot.rs:5:1
-  |
-5 | #![no_std]
-  | ^^^^^^^^^^
-
-warning: the `#![no_main]` attribute can only be used at the crate root
- --> src/bin/regression/regression_clone_vm_second_slot.rs:6:1
-  |
-6 | #![no_main]
-  | ^^^^^^^^^^^
-
 warning: linker stderr: clang: argument unused during compilation: '-pie' [-Wunused-command-line-argument]
   |
   = note: `#[warn(linker_messages)]` on by default
+
+warning: field `index` is never read
+ --> src/bin/ltprunner/suite.rs:7:9
+  |
+6 | pub struct LtpCase {
+  |            ------- field in this struct
+7 |     pub index: usize,
+  |         ^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: unnecessary parentheses around assigned value
     --> src/bin/fs_test.rs:2005:19
@@ -316,6 +298,32 @@ help: convert the identifier to upper case (notice the capitalization)
 1947 +     const O_CREATC: u32 = 0o100;
      |
 
+warning: the `#![no_std]` attribute can only be used at the crate root
+  --> src/bin/regression/regression_lwext4_truncate_hole.rs:16:1
+   |
+16 | #![no_std]
+   | ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: the `#![no_main]` attribute can only be used at the crate root
+  --> src/bin/regression/regression_lwext4_truncate_hole.rs:17:1
+   |
+17 | #![no_main]
+   | ^^^^^^^^^^^
+
+warning: the `#![no_std]` attribute can only be used at the crate root
+ --> src/bin/regression/regression_clone_vm_second_slot.rs:5:1
+  |
+5 | #![no_std]
+  | ^^^^^^^^^^
+
+warning: the `#![no_main]` attribute can only be used at the crate root
+ --> src/bin/regression/regression_clone_vm_second_slot.rs:6:1
+  |
+6 | #![no_main]
+  | ^^^^^^^^^^^
+
 warning: variable does not need to be mutable
    --> src/bin/inet_test.rs:622:9
     |
@@ -436,16 +444,6 @@ warning: creating a shared reference to mutable static
      = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
      = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
 
-warning: field `index` is never read
- --> src/bin/ltprunner/suite.rs:7:9
-  |
-6 | pub struct LtpCase {
-  |            ------- field in this struct
-7 |     pub index: usize,
-  |         ^^^^^
-  |
-  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
 warning: fields `ltp_suites`, `ext4_profile`, and `reclaim_profile` are never read
   --> src/bin/test_runner/config/mod.rs:18:59
    |
@@ -472,16 +470,16 @@ warning: function `sub_ns` is never used
 3 | pub fn sub_ns(time: TimeSpec, nanoseconds: usize) -> TimeSpec { let seconds = nanoseconds / 1_000_000_000; let remainder = nanosecond...
   |        ^^^^^^
 
-warning: `user_lib` (bin "regression") generated 5 warnings
-warning: `user_lib` (bin "fs_test") generated 22 warnings (1 duplicate) (run `cargo fix --bin "fs_test" -p user_lib` to apply 16 suggestions)
-warning: `user_lib` (bin "inet_test") generated 15 warnings (1 duplicate) (run `cargo fix --bin "inet_test" -p user_lib` to apply 9 suggestions)
-warning: `user_lib` (bin "rng_test") generated 1 warning (1 duplicate)
-warning: `user_lib` (bin "unix_test") generated 1 warning (1 duplicate)
-warning: `user_lib` (bin "initd") generated 1 warning (1 duplicate)
-warning: `user_lib` (bin "regression_init") generated 1 warning (1 duplicate)
-warning: `user_lib` (bin "ltprunner") generated 2 warnings (1 duplicate)
-warning: `user_lib` (bin "test_runner") generated 4 warnings (1 duplicate)
+warning: `user_lib` (bin "rng_test") generated 1 warning
 warning: `user_lib` (bin "init") generated 1 warning (1 duplicate)
+warning: `user_lib` (bin "initd") generated 1 warning (1 duplicate)
+warning: `user_lib` (bin "ltprunner") generated 2 warnings (1 duplicate)
+warning: `user_lib` (bin "fs_test") generated 22 warnings (1 duplicate) (run `cargo fix --bin "fs_test" -p user_lib` to apply 16 suggestions)
+warning: `user_lib` (bin "regression") generated 5 warnings (1 duplicate)
+warning: `user_lib` (bin "inet_test") generated 15 warnings (1 duplicate) (run `cargo fix --bin "inet_test" -p user_lib` to apply 9 suggestions)
+warning: `user_lib` (bin "unix_test") generated 1 warning (1 duplicate)
+warning: `user_lib` (bin "regression_init") generated 1 warning (1 duplicate)
+warning: `user_lib` (bin "test_runner") generated 4 warnings (1 duplicate)
     Finished `release` profile [optimized] target(s) in 0.08s
 make[3]: Leaving directory '/app/user'
 USER_OUTPUT_ROOT="/app/build/la64/release/normal/user" ../scripts/build_initramfs.sh la64 release /app/build/la64/release/normal/initramfs/initramfs-la.cpio
@@ -628,36 +626,6 @@ warning: the type `[&mut [IXGBESendDesc]; 4]` does not permit being left uniniti
     = note: `#[warn(invalid_value)]` on by default
 
 warning: `isomorphic_drivers` (lib) generated 3 warnings (run `cargo fix --lib -p isomorphic_drivers` to apply 1 suggestion)
-warning: unused import: `log::info`
- --> /app/dependency/virtio-drivers/src/device/blk.rs:9:5
-  |
-9 | use log::info;
-  |     ^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: the feature `raw_ref_op` has been stable since 1.82.0 and no longer requires an attribute to enable
-  --> /app/dependency/virtio-drivers/src/lib.rs:45:12
-   |
-45 | #![feature(raw_ref_op)]
-   |            ^^^^^^^^^^
-   |
-   = note: `#[warn(stable_features)]` on by default
-
-warning: hiding a lifetime that's elided elsewhere is confusing
-   --> /app/dependency/virtio-drivers/src/transport/pci/bus.rs:187:25
-    |
-187 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator<C> {
-    |                         ^^^^^ the lifetime is elided here          ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
-    |
-    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
-    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
-help: use `'_` for type paths
-    |
-187 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator<'_, C> {
-    |                                                                                       +++
-
-warning: `virtio-drivers` (lib) generated 3 warnings (run `cargo fix --lib -p virtio-drivers` to apply 2 suggestions)
 warning: unexpected `cfg` condition name: `riscv`
   --> /app/dependency/riscv/src/asm.rs:9:27
    |
@@ -28567,6 +28535,35 @@ help: use `'_` for type paths
 
 warning: `riscv` (lib) generated 1475 warnings
 warning: `smoltcp` (lib) generated 13 warnings (run `cargo fix --lib -p smoltcp` to apply 6 suggestions)
+warning: unused import: `log::info`
+ --> /app/dependency/virtio-drivers/src/device/blk.rs:9:5
+  |
+9 | use log::info;
+  |     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: the feature `raw_ref_op` has been stable since 1.82.0 and no longer requires an attribute to enable
+  --> /app/dependency/virtio-drivers/src/lib.rs:45:12
+   |
+45 | #![feature(raw_ref_op)]
+   |            ^^^^^^^^^^
+   |
+   = note: `#[warn(stable_features)]` on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> /app/dependency/virtio-drivers/src/transport/pci/bus.rs:187:25
+    |
+187 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator<C> {
+    |                         ^^^^^ the lifetime is elided here          ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+187 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator<'_, C> {
+    |                                                                                       +++
+
 warning: calls to `std::mem::drop` with a value that implements `Copy` does nothing
    --> /app/dependency/rustsbi/src/hart_mask.rs:109:13
     |
@@ -28597,6 +28594,7 @@ help: use `'_` for type paths
 147 |     pub fn lock(&self) -> AmoMutexGuard<'_, T> {
     |                                         +++
 
+warning: `virtio-drivers` (lib) generated 3 warnings (run `cargo fix --lib -p virtio-drivers` to apply 2 suggestions)
 warning: `rustsbi` (lib) generated 2 warnings (run `cargo fix --lib -p rustsbi` to apply 1 suggestion)
 warning: unused import: `Cmdline`
  --> src/bootargs.rs:6:61
@@ -36281,330 +36279,103 @@ warning: feature `core_intrinsics` is declared but not used
 17 | #![feature(core_intrinsics)]
    |            ^^^^^^^^^^^^^^^
 
-warning: `os` (bin "os") generated 1018 warnings (run `cargo fix --bin "os" -p os` to apply 256 suggestions)
-    Finished `release` profile [optimized + debuginfo] target(s) in 2m 07s
+warning: linker stderr: clang: argument unused during compilation: '-pie' [-Wunused-command-line-argument]
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `os` (bin "os") generated 1019 warnings (run `cargo fix --bin "os" -p os` to apply 256 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2m 08s
 [ktest] Launching QEMU (timeout: 30s)...
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-Unhandled Trap Cause!!!
-qemu-system-loongarch64: terminating on signal 15 from pid 15745 (timeout)
-make[2]: *** [make/la64.mk:186: ktest-run] Error 124
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+[memory] 128382 usable physical frames across 1 region(s)
+[memory] region0: [0x90a82000, 0xb0000000) frames=128382
+.text [0x80000000, 0x80296000)
+.rodata [0x80296000, 0x802b4000)
+.data [0x80303000, 0x8096b000)
+.bss [0x8096b000, 0x90a82000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Hello, world!
+[get_timer_freq_first_time] clk freq: 100000000(from CPUCFG)
+[machine_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[CPUCFG 0x0] 1359888
+[CPUCFG 0x1] 66253566
+[CPUCFG 0x2] 6340815
+[CPUCFG 0x3] 0
+[CPUCFG 0x4] 100000000
+[CPUCFG 0x5] 65537
+[CPUCFG 0x6] 0
+[CPUCFG 0x10] 11325
+[CPUCFG 0x11] 101187587
+[CPUCFG 0x12] 101187587
+[CPUCFG 0x13] 101187599
+[CPUCFG 0x14] 101580815
+Misc { 32-bit addr plv(1,2,3):: false,false,false, rdtime allowed for plv(1,2,3):: false,false,false, Disable dirty bit check for plv(0,1,2):: false,false,false, Misalignment check for plv(0,1,2,4):: false,false,false,false }
+RVACfg { rbits: 0 }
+[machine_init] MMAP_BASE: 0xffffff8000000000
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[kernel] PRNG init warning: Entropy(DeviceUnavailable)
+[memory] reclaimed linker frames: [0x80303000, 0x80956000) frames=1619
+[initramfs] unpacked: files=36 dirs=25 symlinks=1 bytes=6624086
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + devfs bootstrap)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[kernel] Entering kernel test mode (ktest) — tests: ["all"], repeat: 1
+TAP version 13
+# arch: loongarch64
+# mode: ktest
+# repeat: 1
+# timeout_ms: 5000
+# failfast: false
+1..21
+[32mok[0m 1 waitqueue::wake_before_wait_should_not_sleep
+[32mok[0m 2 waitqueue::basic_queue_ops
+[32mok[0m 3 waitqueue::wake_all_on_empty
+[32mok[0m 4 waitqueue::wake_one
+[32mok[0m 5 timer::tick_advances
+[32mok[0m 6 timer::time_spec_ops
+[32mok[0m 7 timer::now_monotonic
+[32mok[0m 8 sched::current_task_exists
+[32mok[0m 9 sched::scheduler_is_running
+[32mok[0m 10 sched::counts_in_range
+[32mok[0m 11 sched::spawn_and_yield
+[32mok[0m 12 mm::alloc_free_one_page
+[32mok[0m 13 mm::alloc_contiguous_pages
+[32mok[0m 14 mm::alloc_then_free_then_alloc
+[32mok[0m 15 ext4::memblk_read_write
+[32mok[0m 16 ext4::memblk_isolation
+[32mok[0m 17 ext4::open_unformatted_returns_err
+[KTEST SKIP] ext4::lw_path_isolation: zero-drive fixture has no block device
+[32mok[0m 18 ext4::lw_path_isolation
+[32mok[0m 19 ext4::lwext4_2k_byte_bridge
+[32mok[0m 20 ext4::partition_unaligned_batching
+[32mok[0m 21 ext4::lwext4_flush_forwarding
+[32m# results: 21 passed, 0 failed, 21 total[0m
+# ktest: tests passed; committing filesystems before shutdown.
+[32m[KTEST RESULT: PASS][0m
+# ktest: all tests and filesystem teardown passed. shutting down.
 make[2]: Leaving directory '/app/os'
-make[1]: *** [Makefile:176: ktest-run] Error 2
 make[1]: Leaving directory '/app/os'
-make: *** [Makefile:107: ktest] Error 2
-exit_status=2
