@@ -3,7 +3,7 @@ use alloc::format;
 use user_lib::{exec, exit, fork, get_time, kill, mount, println, sleep, waitpid_wnohang, SIGKILL};
 use user_lib::syscall::{sys_clock_settime, sys_mkdirat, TimeSpec};
 const MS_BIND: usize = 4096; const AT_FDCWD: isize = -100;
-fn bind(source: &str, target: &str) { let source = format!("{}\0", source); let target = format!("{}\0", target); let _ = mount(source.as_ptr(), target.as_ptr(), "\0".as_ptr(), MS_BIND, 0); }
+fn bind(source: &str, target: &str) { let source = format!("{}\0", source); let target = format!("{}\0", target); /* idempotent: re-mount returns EBUSY, silently ignored */ let _ = mount(source.as_ptr(), target.as_ptr(), "\0".as_ptr(), MS_BIND, 0); }
 fn sync_time() {
     let pid = fork(); if pid == 0 { exec("/rescue/sh\0", &["ntpd\0".as_ptr(), "-n\0".as_ptr(), "-q\0".as_ptr(), "-p\0".as_ptr(), "time.cloudflare.com\0".as_ptr(), core::ptr::null()], &[core::ptr::null()]); exit(127); }
     let mut status = 0; let start = get_time() as usize; while pid > 0 && waitpid_wnohang(pid, &mut status) == 0 { if (get_time() as usize).saturating_sub(start) >= 3_000 { let _ = kill(pid as usize, SIGKILL); break; } sleep(50); }
