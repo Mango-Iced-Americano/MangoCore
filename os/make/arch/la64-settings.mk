@@ -39,6 +39,7 @@ LWEXT4_LA_INPUTS := $(shell find "$(LWEXT4_LA_DIR)" -type f ! -path "$(LWEXT4_LA
 
 # BOARD
 BOARD ?= laqemu
+LINKER_SCRIPT := src/hal/arch/loongarch64/linker-$(BOARD).ld
 
 # Logging
 ifndef LOG
@@ -47,17 +48,22 @@ else
 	LOG_OPTION := "log_${LOG}"
 endif
 
-# Kernel entry (for -device loader fallback)
+# Kernel entry and uImage addresses are board ABI, not QEMU defaults.  Keep
+# the linker input immutable and select it through Cargo flags in la64.mk.
+ifeq ($(BOARD),2k1000)
+KERNEL_ENTRY_PA := 0x90000000
+LA_LOAD_ADDR := 0x90000000
+LA_ENTRY_POINT := 0x90000000
+else
 KERNEL_ENTRY_PA := 0x9000000090000000
+LA_LOAD_ADDR := 0x9000000090000000
+LA_ENTRY_POINT := 0x9000000090000000
+endif
 
 # Binutils (cross toolchain, not llvm)
 OBJCOPY := loongarch64-linux-gnu-objcopy
 OBJDUMP := loongarch64-linux-gnu-objdump
 READELF := loongarch64-linux-gnu-readelf
-
-# uImage config
-LA_LOAD_ADDR := 0x9000000090000000
-LA_ENTRY_POINT := 0x9000000090000000
 
 # Applications
 APPS := ../user/src/bin/*
