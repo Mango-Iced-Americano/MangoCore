@@ -1,3 +1,0 @@
-/home/pxy/projects/MangoCore-cleanup -> /app
-/etc/localtime -> /etc/localtime
-

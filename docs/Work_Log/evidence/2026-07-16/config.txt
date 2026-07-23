@@ -1,3 +1,0 @@
-regression mode, sdcard-rv.img as x0, mango.mode=regression
-Command: make -C os -f make/rv64.mk regression-run MODE=release
-Exit status: 1 (mmap test pre-existing failure, test 6 PASSED)

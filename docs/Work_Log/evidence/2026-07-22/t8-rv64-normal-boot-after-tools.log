@@ -1,9 +1,0 @@
-Rust toolchain preflight passed: nightly-2026-05-10
-make -f make/rv64.mk comp
-make[1]: Entering directory '/app/os'
-Rust toolchain preflight passed: nightly-2026-05-10
-qemu-system-riscv64: -drive if=none,file=/app/build/rv64/release/normal/tools/disk.img,format=raw,id=x1: Could not open '/app/build/rv64/release/normal/tools/disk.img': No such file or directory
-make[1]: *** [make/rv64.mk:120: comp] Error 1
-make[1]: Leaving directory '/app/os'
-make: *** [Makefile:87: rv64-run] Error 2
-

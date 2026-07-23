@@ -1,2 +1,0 @@
-debugfs 1.47.0 (5-Feb-2023)
-/bin/bash: Directory block checksum does not match directory block 

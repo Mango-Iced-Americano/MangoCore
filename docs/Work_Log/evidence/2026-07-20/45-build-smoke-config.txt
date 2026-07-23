@@ -1,1 +1,0 @@
-No os_test.conf was injected. Standard basic sdcard images were absent locally; diskless regression-initramfs smoke was used.
