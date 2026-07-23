@@ -307,6 +307,7 @@ lazy_static! {
     ///
     /// 优先加载 `/init`，缺失时兼容传统镜像里的 `/initproc`。
     pub static ref INITPROC: Arc<TaskControlBlock> = {
+        println!("[diag] INITPROC lazy_static begin");
         // 优先使用 /init（initramfs 模式），fallback 到 /initproc（传统模式）
         let (_init_path, inode) = match vfs_lookup_absolute("/init") {
             Ok(inode) => ("/init", inode),
@@ -327,6 +328,7 @@ lazy_static! {
             task.pid(),
             task.gettid()
         );
+        println!("[diag] INITPROC lazy_static done");
         task
     };
 
@@ -350,6 +352,7 @@ pub fn add_initproc() {
     add_task(INITPROC.clone());
     #[cfg(feature = "board_2k1000")]
     boot_trace!("[bringup][init:05] initial task is on ready queue");
+    println!("[diag] after add_initproc, about to run_tasks");
 }
 
 // ── ktest multi-task harness ────────────────────────────────────────

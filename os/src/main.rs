@@ -124,6 +124,7 @@ pub fn rust_main() -> ! {
             // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
             // PID1 owns the later x0/x1 mount policy.
             fs::register_boot_block_devices();
+            println!("[diag] after register_boot_block_devices");
         } else {
             crate::println!("[kernel] Regression mode — skipping net/block init");
         }
@@ -153,6 +154,7 @@ pub fn rust_main() -> ! {
     }
 
     // ── Normal boot ──
+    println!("[diag] before add_initproc");
     task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.

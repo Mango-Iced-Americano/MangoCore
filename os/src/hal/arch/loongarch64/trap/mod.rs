@@ -466,7 +466,9 @@ pub fn trap_return() -> ! {
         crate::task::perf::record_tlb_activate();
     }
     let user_satp = current_user_token();
-    let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
+    // On LA64, `strampoline` resolves to the kernel-trap stub under the
+    // static link. `__restore` is already in the direct-map executable range.
+    let restore_va = __restore as usize;
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
         println!(

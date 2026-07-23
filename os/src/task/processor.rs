@@ -123,8 +123,14 @@ lazy_static! {
 /// 调用 `__switch` 前必须释放 `PROCESSOR` 锁；被切入任务后该函数直到任务主动
 /// `schedule()` 回 idle 才会继续执行。
 pub fn run_tasks() {
+    static DIAG_FIRST_RUN_TASKS_LOOP: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
     let mut schedule_tick = 0usize;
     loop {
+        let first_schedule_loop = !DIAG_FIRST_RUN_TASKS_LOOP.swap(true, Ordering::Relaxed);
+        if first_schedule_loop {
+            println!("[diag] run_tasks loop enter");
+        }
         let sched_profile = sched_profile_enabled();
         if sched_profile {
             SCHED_LOOPS.fetch_add(1, SchedOrdering::Relaxed);
@@ -289,7 +295,17 @@ pub fn run_tasks() {
         );
         let stage_t0 = sched_profile_start(sched_profile);
         let mut processor = PROCESSOR.lock();
+        if first_schedule_loop {
+            println!("[diag] before fetch_task");
+        }
         let next_task = fetch_task();
+        if first_schedule_loop {
+            if next_task.is_some() {
+                println!("[diag] fetch_task got task");
+            } else {
+                println!("[diag] fetch_task returned None");
+            }
+        }
         sched_record_stage(
             sched_profile,
             &SCHED_STAGE_FETCH_TASK_CALLS,
@@ -385,6 +401,9 @@ pub fn run_tasks() {
                     crate::hal::trap_return as usize,
                     resume_sp
                 );
+            }
+            if first_schedule_loop {
+                println!("[diag] before first __switch");
             }
             // Safety: `idle_task_cx_ptr` points into `PROCESSOR.idle_task_cx`
             // and `next_task_cx_ptr` points into the selected task's TCB. The
