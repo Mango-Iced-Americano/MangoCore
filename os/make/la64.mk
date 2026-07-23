@@ -25,7 +25,7 @@ QEMU_KTEST_AFTER_DRIVES = -m 1024 -smp threads=1
 
 BOARD_2K1000_ARTIFACT_ROOT ?= $(PRODUCT_ROOT)/board/2k1000
 BOARD_2K1000_TEST_CONFIG ?= $(abspath ../os_test.conf)
-LA64_LINKER_RUSTFLAGS = -C link-arg=-nostdlib -C link-arg=-T$(abspath $(LINKER_SCRIPT))
+LA64_LINKER_RUSTFLAGS = -C link-arg=-nostdlib -C link-arg=-static -C force-frame-pointers=yes -C link-arg=-T$(abspath $(LINKER_SCRIPT))
 
 lwext4-la64: $(LWEXT4_LA_LIB)
 
