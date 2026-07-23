@@ -5,7 +5,7 @@ docker-compose.override.yml
 os/target/
 
 target/
-build/
+/build/
 
 os/qemu.log
 
@@ -19,7 +19,7 @@ testresult
 
 testresults
 
-.parallel-test
+/.parallel-test/
 
 kernel-la
 
@@ -33,14 +33,16 @@ disk.img
 
 disk-la.img
 
-docs/Work_Log/evidence/*
-!docs/Work_Log/evidence/2026-07-22/
-!docs/Work_Log/evidence/2026-07-22/t3-formal-facade-docker.md
+/docs/Work_Log/evidence/*
+!/docs/Work_Log/evidence/2026-07-22/
+/docs/Work_Log/evidence/2026-07-22/*
+!/docs/Work_Log/evidence/2026-07-22/t3-formal-facade-docker.md
+!/docs/Work_Log/evidence/2026-07-22/t3-initramfs-outdir-docker.md
 
 cc-codex/*.clean.img
 
 *digest.txt
- 
+
 *packets.pcap
 WORK_LOG.md
 EXPERIENCE.md
@@ -68,15 +70,24 @@ __pycache__/
 /user/tools/*/tests/cpython/**/*.so.*
 .sisyphus/
 sdcard-rv-noconf.img
-/tools/
-.omo/
+/.omo/
 .env
 os/rootfs-rv.img
 os.bin
-.env
 /.opencode/*.bak
 /.codex-*.conf
-
-# Lint-check stub ELF binaries (created by scripts/lint-check.sh)
-/user/tools/*/bin/
-/user/tools/*/lib/
+/.codegraph
+*.swp
+*.swo
+*.orig
+*~
+/core
+/core.*
+/.opencode/node_modules/
+/.opencode/package.json
+/.opencode/package-lock.json
+/.opencode/bun.lock
+/.opencode/.gitignore
+/judge/qemu.log
+/judge/console_log
+/user/fs/var/tmp/*
