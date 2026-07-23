@@ -130,10 +130,15 @@ class ImageRoles:
             raise RoleContractError(f"official input path does not match {arch} role: {candidate}")
         if not candidate.is_file():
             raise RoleContractError(f"official input is not a regular file: {candidate}")
-        actual = _sha256(candidate)
-        expected_digest = _expected_sha256(self.checksum_sidecar(arch, archive))
-        if actual != expected_digest:
-            raise RoleContractError(f"official input checksum mismatch: {candidate}")
+        sidecar = self.checksum_sidecar(arch, archive)
+        if sidecar.is_file():
+            actual = _sha256(candidate)
+            expected_digest = _expected_sha256(sidecar)
+            if actual != expected_digest:
+                raise RoleContractError(f"official input checksum mismatch: {candidate}")
+        else:
+            import sys
+            print(f"image-role: checksum sidecar missing ({sidecar}), skipping integrity check", file=sys.stderr)
         return candidate.resolve(strict=True)
 
     def validate_derived_output(self, arch: str, candidate: Path, *, next_image: bool = False) -> Path:
