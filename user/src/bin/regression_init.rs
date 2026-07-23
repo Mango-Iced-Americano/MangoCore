@@ -8,11 +8,37 @@
 
 extern crate alloc;
 
-use user_lib::{exec, exit, fork, println, shutdown, waitpid};
+use user_lib::syscall::sys_mkdirat;
+use user_lib::{
+    close, exec, exit, fork, mount, open, println, shutdown, waitpid, write, OpenFlags,
+};
+
+const AT_FDCWD: isize = -100;
+
+fn write_etc_file(path: &str, contents: &[u8]) {
+    let fd = open(path, OpenFlags::CREATE | OpenFlags::WRONLY | OpenFlags::TRUNC);
+    if fd >= 0 {
+        let _ = write(fd as usize, contents);
+        let _ = close(fd as usize);
+    }
+}
+
+fn prepare_regression_etc() {
+    let _ = sys_mkdirat(AT_FDCWD, "/etc\0", 0o755);
+    let _ = mount("none\0".as_ptr(), "/etc\0".as_ptr(), "tmpfs\0".as_ptr(), 0, 0);
+    write_etc_file("/etc/passwd\0", b"root:x:0:0:root:/root:/bin/sh\n");
+    write_etc_file("/etc/group\0", b"root:x:0:\n");
+    write_etc_file("/etc/hosts\0", b"127.0.0.1 localhost\n");
+    write_etc_file("/etc/resolv.conf\0", b"nameserver 10.0.2.3\n");
+    write_etc_file("/etc/nsswitch.conf\0", b"passwd: files\ngroup: files\nhosts: files dns\n");
+    write_etc_file("/etc/hostname\0", b"mangocore\n");
+    write_etc_file("/etc/protocols\0", b"ip 0 IP\ntcp 6 TCP\nudp 17 UDP\n");
+}
 
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[regression_init] starting regression suite");
+    prepare_regression_etc();
 
     let pid = fork();
     if pid == 0 {

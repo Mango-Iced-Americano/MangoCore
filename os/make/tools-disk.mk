@@ -12,6 +12,10 @@ define build_tools_disk
 	mount -o loop "$$payload" "$$mountpoint"; mounted=1; \
 	echo "  copying files from $(3)..."; \
 	cp -a $(3)/. "$$mountpoint"/ 2>/dev/null || true; \
+	echo "  installing persistent /etc config..."; \
+	for f in passwd group hosts resolv.conf nsswitch.conf hostname protocols; do \
+		cp -a initramfs/common/etc/"$$f" "$$mountpoint/etc/" 2>/dev/null || true; \
+	done; \
 	echo "  copying test binaries..."; \
 	case "$(4)" in rv) target=riscv64gc-unknown-none-elf ;; la) target=loongarch64-unknown-linux-gnu ;; esac; \
 	for t in inet_test fs_test unix_test; do \

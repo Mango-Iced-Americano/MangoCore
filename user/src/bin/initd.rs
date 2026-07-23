@@ -171,9 +171,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let profile = boot_profile();
     if profile != "regression" {
         let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
-        if !mount_disk("/dev/vdb1\0", "/tools\0") {
-            let _ = mount_disk("/dev/vdb\0", "/tools\0");
-        }
+        let tools_ok = mount_disk("/dev/vdb1\0", "/tools\0")
+            || mount_disk("/dev/vdb\0", "/tools\0");
         // /tmp: prefer ext4-backed /tmp if a block device is available
         if disk_ok {
             const AT_FDCWD: isize = -100;
@@ -193,6 +192,23 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             }
         } else {
             let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+        }
+        if tools_ok {
+            let result = sys_mount(
+                "/tools/etc\0".as_ptr(),
+                "/etc\0".as_ptr(),
+                core::ptr::null(),
+                MS_BIND,
+                0,
+            );
+            if result < 0 {
+                println!(
+                    "[initd] bind-mount /tools/etc → /etc failed: {}, keeping initramfs /etc",
+                    result
+                );
+            } else {
+                println!("[initd] /etc is bind-mounted from tools disk");
+            }
         }
     } else {
         // No block device in regression mode

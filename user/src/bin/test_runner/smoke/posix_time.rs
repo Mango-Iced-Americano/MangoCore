@@ -1,0 +1,3 @@
+use user_lib::syscall::TimeSpec;
+pub fn add_ns(time: TimeSpec, nanoseconds: usize) -> TimeSpec { let total = time.tv_nsec.saturating_add(nanoseconds); TimeSpec { tv_sec: time.tv_sec.saturating_add(total / 1_000_000_000), tv_nsec: total % 1_000_000_000 } }
+pub fn sub_ns(time: TimeSpec, nanoseconds: usize) -> TimeSpec { let seconds = nanoseconds / 1_000_000_000; let remainder = nanoseconds % 1_000_000_000; if time.tv_nsec >= remainder { TimeSpec { tv_sec: time.tv_sec.saturating_sub(seconds), tv_nsec: time.tv_nsec - remainder } } else { TimeSpec { tv_sec: time.tv_sec.saturating_sub(seconds + 1), tv_nsec: time.tv_nsec + 1_000_000_000 - remainder } } }
