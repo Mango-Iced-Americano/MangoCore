@@ -33,6 +33,12 @@ related_docs:
 > `persist-shell` 验收。下文未逐段重写的门禁表仅代表 2026-07-18 快照，不能作为当前
 > 状态；当前证据以 `docs/Work_Log/2026-07-19.md` 和同日 evidence manifest 为准。
 
+> 2026-07-23 cleanup merge：零盘 ktest 恢复 2 KiB byte bridge、未对齐 partition 和
+> flush forwarding 三项纯内存回归；`lw_path_isolation` 在无盘时输出明确 topology skip，
+> 有盘 fixture 才验证真实实例路径。partial-writeback、nested-symlink 与 orphan
+> power-cut/recovery 需要 PID1/持久卷或已移除的故障注入钩子，保持 deferred，不把 skip
+> 伪装为语义通过。
+
 ## 1. 结论先行
 
 当前融合方向是正确的：继续在 `board-develop-combined` 上完成迁移，不再把新文件系统
