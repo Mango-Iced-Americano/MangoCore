@@ -341,4 +341,4 @@ AI 助手使用**中文**与用户交流。代码、注释、commit message 使�
 - 设计蓝本：[DragonOS](https://github.com/DragonOS-Community/DragonOS)
 - 详细测试策略：`Doc/Work_Log.md`、`Doc/LTP_BOTTOM_UP_GUIDE.md`
 - VFS 迁移历史：`Doc/vfs-migration-plan.md`
-- 调试技巧：`how-to-run.md`
+- 调试技巧：`docs/08_testing/README.md`
