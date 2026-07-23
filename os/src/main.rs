@@ -101,8 +101,10 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
-    let _ = random::init();
-    println!("[kernel] PRNG initialized.");
+    match random::init() {
+        Ok(()) => println!("[kernel] PRNG initialized."),
+        Err(e) => println!("[kernel] PRNG init warning: {:?}", e),
+    }
 
     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
     let boot_config = crate::bootargs::load();
