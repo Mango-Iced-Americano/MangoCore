@@ -54,8 +54,8 @@ mod utils;
 
 use crate::hal::bootstrap_init;
 use crate::hal::machine_init;
-// #[cfg(feature = "loongarch64")]
-// core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
+#[cfg(all(feature = "loongarch64", feature = "board_2k1000"))]
+core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
 #[cfg(feature = "riscv")]
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
@@ -101,7 +101,7 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
-    random::init();
+    let _ = random::init();
     println!("[kernel] PRNG initialized.");
 
     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
