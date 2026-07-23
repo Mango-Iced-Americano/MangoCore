@@ -47,7 +47,7 @@ impl BlockDevice for FlushFailsAfterMountDevice {
     }
 
     fn flush(&self) -> BlockDeviceResult {
-        if self.flush_count.fetch_add(1, Ordering::AcqRel) == 0 {
+        if self.flush_count.fetch_add(1, Ordering::AcqRel) < 4 {
             self.inner.flush()
         } else {
             Err(BlockDeviceError::DeviceError)
