@@ -112,6 +112,10 @@ def _extract(roles: ImageRoles, arch: str, archive: Path) -> tuple[bool, str]:
     roles.validate_official(arch, source, archive=True)
     roles.validate_derived_output(arch, destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file() and destination.stat().st_mtime >= source.stat().st_mtime:
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] Phase 2/{arch}: {destination.name} up-to-date, skipping decompress")
+        return True, "extraction cached"
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] Phase 2/{arch}: decompressing {source.name} → {destination}...")
     with destination.open("wb") as target, (archive / "extract.log").open("wb") as log:
