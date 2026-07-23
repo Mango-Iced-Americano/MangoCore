@@ -58,12 +58,12 @@ def _prepare_archives(archive: Path) -> None:
         (arch_archive / "qemu.log").write_text("QEMU not started.\n", encoding="utf-8")
 
 
-def _run_to_file(command: tuple[str, ...], output: Path, timeout: int) -> ProcessResult:
+def _run_to_file(command: tuple[str, ...], output: Path, timeout: int, *, cwd: Path | None = None) -> ProcessResult:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as stream:
         stream.write(f"# QEMU CMD: {' '.join(command)}\n".encode())
         try:
-            completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+            completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=timeout, cwd=cwd, check=False)
         except subprocess.TimeoutExpired:
             return ProcessResult(returncode=-1, timed_out=True, output=output)
     return ProcessResult(returncode=completed.returncode, timed_out=False, output=output)
@@ -200,14 +200,14 @@ def run_full_test(project_root: Path, roles: ImageRoles, timeout: int, serial: b
         for arch in arches:
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] QEMU {arch}: starting... (timeout {timeout}s)")
-            results[arch] = _run_to_file(build_qemu_args(roles, arch, "competition"), _arch_archive(archive, arch) / "qemu.log", timeout)
+            results[arch] = _run_to_file(build_qemu_args(roles, arch, "competition"), _arch_archive(archive, arch) / "qemu.log", timeout, cwd=roles.repository / "os")
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] QEMU {arch}: finished (rc={results[arch].returncode})")
     else:
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {executor.submit(_run_to_file, build_qemu_args(roles, arch, "competition"), _arch_archive(archive, arch) / "qemu.log", timeout): arch for arch in arches}
+            futures = {executor.submit(_run_to_file, build_qemu_args(roles, arch, "competition"), _arch_archive(archive, arch) / "qemu.log", timeout, cwd=roles.repository / "os"): arch for arch in arches}
             for future in concurrent.futures.as_completed(futures):
                 arch = futures[future]
                 result = future.result()
