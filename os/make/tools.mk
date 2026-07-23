@@ -1,9 +1,19 @@
 include make/tools-disk.mk
 
-tools-disk-rv: maybe-tools-cpython-rv
+.PHONY: tools-user-rv tools-user-la tools-disk-rv tools-disk-la tools-disk
+
+# The tools payload copies test binaries from user/target, independent of the
+# architecture product's USER_OUTPUT_ROOT.  Build that cargo target first.
+tools-user-rv:
+	@$(MAKE) --no-print-directory ARCH=rv64 PROFILE=normal USER_OUTPUT_ROOT="$(abspath ../user/target)" user
+
+tools-user-la:
+	@$(MAKE) --no-print-directory ARCH=la64 PROFILE=normal USER_OUTPUT_ROOT="$(abspath ../user/target)" user
+
+tools-disk-rv: tools-user-rv maybe-tools-cpython-rv
 	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
 
-tools-disk-la: maybe-tools-cpython-la
+tools-disk-la: tools-user-la maybe-tools-cpython-la
 	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
 
 tools-disk: tools-disk-rv tools-disk-la
