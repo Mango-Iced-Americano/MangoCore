@@ -115,7 +115,7 @@ jobs:
             -e ARCH=rv64 -e BLK_MODE=virt \
             -e CONF_FILE=/app/os_test_develop.conf \
             "$CI_IMAGE" \
-            bash -lc './inject_os_test_conf.sh'
+            bash -lc '../scripts/inject_os_test_conf.sh'
 
       - name: Extract la64 image + inject config
         run: |
@@ -126,7 +126,7 @@ jobs:
             -e ARCH=la64 -e BLK_MODE=virt_pci \
             -e CONF_FILE=/app/os_test_develop.conf \
             "$CI_IMAGE" \
-            bash -lc './inject_os_test_conf.sh'
+            bash -lc '../scripts/inject_os_test_conf.sh'
 
       - name: Run QEMU through the serial fail-closed runner
         timeout-minutes: 60

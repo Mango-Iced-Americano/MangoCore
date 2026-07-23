@@ -1,7 +1,7 @@
 #!/bin/sh
 # build_initramfs.sh — 构建 tiny initramfs newc cpio 归档
 #
-# 用法: ./build_initramfs.sh <arch> <mode> <output_path> [profile]
+# 用法: scripts/build_initramfs.sh <arch> <mode> <output_path> [profile]
 #   arch: rv64 | la64
 #   mode: release | debug
 #   output_path: 生成的 cpio 路径 (如 ../fs-img-dir/initramfs-rv.cpio)
@@ -13,9 +13,9 @@ ARCH="$1"
 MODE="${2:-release}"
 OUT="$3"
 PROFILE="${4:-}"
-USER_OUTPUT_ROOT="${USER_OUTPUT_ROOT:-../user/target}"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+USER_OUTPUT_ROOT="${USER_OUTPUT_ROOT:-$REPO_ROOT/user/target}"
 STAGE="$(mktemp -d)"
 mkdir -p "$STAGE/proc" "$STAGE/sys" "$STAGE/run" "$STAGE/tmp" "$STAGE/dev/shm" "$STAGE/sdcard" "$STAGE/tools"
 # 将输出路径转为绝对路径
@@ -28,7 +28,7 @@ if [ "$PROFILE" = "regression" ]; then
     echo "[initramfs] Building regression initramfs for $ARCH ($MODE)..."
 
     # Copy common skeleton (needed for /dev, /etc, /tmp dirs etc.)
-    cp -a "$SCRIPT_DIR/initramfs/common/." "$STAGE/"
+    cp -a "$REPO_ROOT/os/initramfs/common/." "$STAGE/"
     # Remove files we don't need in regression mode
     rm -rf "$STAGE/bin" "$STAGE/rescue" "$STAGE/apk" 2>/dev/null || true
 
@@ -73,7 +73,7 @@ else
     echo "[initramfs] Building initramfs for $ARCH ($MODE)..."
 
     # 1. 复制 common skeleton
-    cp -a "$SCRIPT_DIR/initramfs/common/." "$STAGE/"
+    cp -a "$REPO_ROOT/os/initramfs/common/." "$STAGE/"
 
     # 1b. 生成 /etc/resolv.conf（DNS_SERVER 环境变量可配置，默认 10.0.2.3 适配 QEMU user 网）
     DNS_SERVER="${DNS_SERVER:-10.0.2.3}"
@@ -83,12 +83,12 @@ else
     case "$ARCH" in
       rv64)
         INIT_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/init"
-        BUSYBOX_SRC="../user/tools/riscv64/bin/busybox"
+        BUSYBOX_SRC="$REPO_ROOT/user/tools/riscv64/bin/busybox"
         REG_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/regression"
         ;;
       la64)
         INIT_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/init"
-        BUSYBOX_SRC="../user/tools/loongarch64/bin/busybox"
+        BUSYBOX_SRC="$REPO_ROOT/user/tools/loongarch64/bin/busybox"
         REG_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/regression"
         ;;
       *)

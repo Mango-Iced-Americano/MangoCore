@@ -78,7 +78,7 @@ EOF
 
     if PATH="$fixture_root/bin:$PATH" FIXTURE_MUTATION_LOG="$fixture_root/mutations" \
         ARCH=rv64 BLK_MODE=virt CONF_FILE="$fixture_root/os_test.conf" \
-        DERIVED_IMAGE_PATH="$destination" "$repo/os/inject_os_test_conf.sh" >"$fixture_root/output" 2>&1; then
+        DERIVED_IMAGE_PATH="$destination" "$repo/scripts/inject_os_test_conf.sh" >"$fixture_root/output" 2>&1; then
         fail "fixture was accepted: $fixture"
     fi
     grep -F 'image-role error:' "$fixture_root/output" >/dev/null || fail 'injection guard fixture lacked a diagnostic'
@@ -94,7 +94,7 @@ check_repo() {
     la_make=$root/os/make/la64.mk
     qemu_profiles=$root/os/make/qemu-profiles.mk
     tools_make=$root/os/make/tools-disk.mk
-    inject_script=$root/os/inject_os_test_conf.sh
+    inject_script=$root/scripts/inject_os_test_conf.sh
     role_tool=$root/scripts/image_roles.py
     run_full=$root/scripts/full_test/commands.py
     run_full_runner=$root/scripts/full_test/runner.py
@@ -240,7 +240,7 @@ run_fixture() {
         os/make/qemu-profiles.mk \
         os/make/common/toolchain.mk \
         os/make/tools-disk.mk \
-        os/inject_os_test_conf.sh \
+        scripts/inject_os_test_conf.sh \
         scripts/image_roles.py \
         scripts/run_full_test.py \
         scripts/full_test/__init__.py \

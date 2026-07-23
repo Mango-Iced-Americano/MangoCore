@@ -4,7 +4,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OBSERVATION_COMMIT="883f73c2"
-PLAN="${PLAN:-$ROOT/.omo/plans/mangocore-repository-rebaseline.md}"
+PLAN="${PLAN:-$ROOT/docs/plans/repository-rebaseline.md}"
 MAP="${CONTRACT_MAP:-$ROOT/docs/architecture/2026-07-18-mangocore-contract-map.md}"
 MATRIX="${CONTRACT_MATRIX:-$ROOT/docs/architecture/2026-07-18-mangocore-contract-matrix.yaml}"
 SELF_TEST_PARENT="${SELF_TEST_PARENT:-false}"
@@ -72,7 +72,7 @@ validate_staged_paths() {
                 printf 'forbidden staged path: %s\n' "$path" >&2
                 valid=false
                 ;;
-            .omo/plans/mangocore-repository-rebaseline.md)
+            docs/plans/repository-rebaseline.md)
                 if [ "$staged_plan" = true ]; then
                     printf 'duplicate staged Phase-0 path: %s\n' "$path" >&2
                     valid=false
@@ -108,7 +108,7 @@ validate_staged_paths() {
     done < "$paths_file"
 
     if [ "$staged_plan" != true ]; then
-        printf 'missing staged Phase-0 path: .omo/plans/mangocore-repository-rebaseline.md\n' >&2
+        printf 'missing staged Phase-0 path: docs/plans/repository-rebaseline.md\n' >&2
         valid=false
     fi
     if [ "$staged_map" != true ]; then
@@ -191,7 +191,7 @@ check "matrix explicitly denies Phase-0 and rebaseline completion" \
 check "plan defines a documentation-only Phase-0 task" \
     bash -c 'grep -Fq "No build, QEMU run, lint, CI run, or repository purity check" "$1" && grep -Fq "no-evidence-commit policy" "$1"' _ "$PLAN"
 check "matrix publishes the exact four-file Phase-0 allowlist" \
-    bash -c 'for path in ".omo/plans/mangocore-repository-rebaseline.md" "docs/architecture/2026-07-18-mangocore-contract-map.md" "docs/architecture/2026-07-18-mangocore-contract-matrix.yaml" "docs/architecture/2026-07-18-verify-contract-map.sh"; do grep -Fxq "    - $path" "$1" || exit 1; done' _ "$MATRIX"
+    bash -c 'for path in "docs/plans/repository-rebaseline.md" "docs/architecture/2026-07-18-mangocore-contract-map.md" "docs/architecture/2026-07-18-mangocore-contract-matrix.yaml" "docs/architecture/2026-07-18-verify-contract-map.sh"; do grep -Fxq "    - $path" "$1" || exit 1; done' _ "$MATRIX"
 check "matrix forbids Work_Log and evidence in the Phase-0 commit" \
     bash -c 'grep -Fxq "    - docs/Work_Log/" "$1" && grep -Fxq "    - docs/Work_Log/evidence/" "$1"' _ "$MATRIX"
 

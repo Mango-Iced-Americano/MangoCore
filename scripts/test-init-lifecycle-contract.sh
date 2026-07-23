@@ -87,9 +87,9 @@ for shim in user/src/bin/init.rs; do
     fi
 done
 
-require 'INITD_SRC="$INIT_DIR/initd"' os/build_initramfs.sh
-require 'RUNNER_SRC="$INIT_DIR/test_runner"' os/build_initramfs.sh
-require '"$STAGE/sbin/init"' os/build_initramfs.sh
-require '"$STAGE/usr/libexec/mangocore/test-runner"' os/build_initramfs.sh
+require 'INITD_SRC="$INIT_DIR/initd"' scripts/build_initramfs.sh
+require 'RUNNER_SRC="$INIT_DIR/test_runner"' scripts/build_initramfs.sh
+require '"$STAGE/sbin/init"' scripts/build_initramfs.sh
+require '"$STAGE/usr/libexec/mangocore/test-runner"' scripts/build_initramfs.sh
 
 printf 'PASS: init lifecycle contract\n'

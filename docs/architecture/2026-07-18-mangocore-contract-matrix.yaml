@@ -12,7 +12,7 @@ status_vocabulary:
 documentation_only_commit:
   purpose: "Freeze the Phase-0 contract map without claiming rebaseline completion."
   staged_allowlist:
-    - .omo/plans/mangocore-repository-rebaseline.md
+    - docs/plans/repository-rebaseline.md
     - docs/architecture/2026-07-18-mangocore-contract-map.md
     - docs/architecture/2026-07-18-mangocore-contract-matrix.yaml
     - docs/architecture/2026-07-18-verify-contract-map.sh

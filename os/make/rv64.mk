@@ -77,17 +77,17 @@ $(APPS):
 
 fs-img: toolchain-preflight user
 	@mkdir -p $(dir $(ROOTFS_IMG))
-	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_rootfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
 kernel: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_RV)
 
 $(INITRAMFS_CPIO_RV): user
 	@mkdir -p $(dir $(INITRAMFS_CPIO_RV))
-	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
 
 $(REGRESSION_CPIO_RV): user
 	@mkdir -p $(dir $(REGRESSION_CPIO_RV))
-	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
 
 kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)

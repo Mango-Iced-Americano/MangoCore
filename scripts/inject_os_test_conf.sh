@@ -29,9 +29,9 @@ Environment variables:
   LOG               log level for auto rebuild (default: error)
 
 Examples:
-  ARCH=la64 BLK_MODE=mem CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
-  ARCH=rv64 BLK_MODE=virt CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
-   DERIVED_IMAGE_PATH=../build/development/la64/sdcard-la-derived.img CONF_FILE=../os_test.conf ./inject_os_test_conf.sh
+   ARCH=la64 BLK_MODE=mem CONF_FILE=os_test.conf scripts/inject_os_test_conf.sh
+   ARCH=rv64 BLK_MODE=virt CONF_FILE=os_test.conf scripts/inject_os_test_conf.sh
+   DERIVED_IMAGE_PATH=build/development/la64/sdcard-la-derived.img CONF_FILE=os_test.conf scripts/inject_os_test_conf.sh
 EOF
 }
 
@@ -130,7 +130,7 @@ echo "[conf-inject] injected /os_test.conf into ${IMAGE_PATH_ABS}"
 
 if [[ "${BLK_MODE}" == "mem" && "${AUTO_REBUILD_MEM}" == "1" ]]; then
     echo "[conf-inject] mem mode detected, rebuilding kernel so embedded rootfs takes effect..."
-    pushd "${SCRIPT_DIR}" >/dev/null
+    pushd "${REPO_ROOT}/os" >/dev/null
     if [[ "${ARCH}" == "la64" ]]; then
 # la64.mk has no "build" target; rebuild kernel and refresh ../kernel-la explicitly.
 make -f make/la64.mk kernel mv BLK_MODE=mem MODE="${MODE}" LOG="${LOG}"

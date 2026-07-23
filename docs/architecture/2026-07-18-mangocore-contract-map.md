@@ -13,10 +13,10 @@
 |---|---|
 | **observed at 883f73c2** | 从观察提交中的受版本控制文件读取到的行为或消费者。它不是认可的未来设计，也不是运行成功证明。 |
 | **uncommitted candidate** | 当前工作树中的未提交或未跟踪重基线改动。它不能改变观察提交的事实，也不能作为已完成工作的证据。 |
-| **required future contract** | `.omo/plans/mangocore-repository-rebaseline.md` 要求后续实现和验收的目标。它不是当前行为。 |
+| **required future contract** | `docs/plans/repository-rebaseline.md` 要求后续实现和验收的目标。它不是当前行为。 |
 | **unverified** | 目前没有本轮允许的运行、构建、启动、CI 或元数据证据。静态引用可以保留，但不能写成通过或完成。 |
 
-本次 Phase-0 文档提交允许且只允许包含以下四个文件：`.omo/plans/mangocore-repository-rebaseline.md`、`docs/architecture/2026-07-18-mangocore-contract-map.md`、`docs/architecture/2026-07-18-mangocore-contract-matrix.yaml`、`docs/architecture/2026-07-18-verify-contract-map.sh`。按计划的 no-evidence-commit policy，`docs/Work_Log/**`、evidence、原始日志、镜像、缓存、boulder 状态和任何产品改动都必须保持不在本提交中。
+本次 Phase-0 文档提交允许且只允许包含以下四个文件：`docs/plans/repository-rebaseline.md`、`docs/architecture/2026-07-18-mangocore-contract-map.md`、`docs/architecture/2026-07-18-mangocore-contract-matrix.yaml`、`docs/architecture/2026-07-18-verify-contract-map.sh`。按计划的 no-evidence-commit policy，`docs/Work_Log/**`、evidence、原始日志、镜像、缓存、boulder 状态和任何产品改动都必须保持不在本提交中。
 
 ## 2. 基线边界
 
@@ -180,5 +180,5 @@ Phase-0 verifier 已成功运行并检查了本地图的静态结构和声明一
 ## 9. 参考边界
 
 * 观察事实：`883f73c2` 及其四个前置 cleanup commit。
-* 执行计划：`.omo/plans/mangocore-repository-rebaseline.md`。
+* 执行计划：`docs/plans/repository-rebaseline.md`。
 * Phase-0 配套 YAML 和 verifier 属于本次文档提交的四文件 allowlist；verifier 的成功运行只证明静态检查通过，不证明 build、run、Make、Cargo、Docker、QEMU、Rustup、network、CI 或 source purity。
