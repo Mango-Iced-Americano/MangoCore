@@ -102,6 +102,10 @@ full-test:
 	@echo "=== Running full test suite (serial build, parallel QEMU) ==="
 	python3 scripts/run_full_test.py
 
+ktest: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-run
+
 ktest-build-only: toolchain-preflight
 	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-build-only
@@ -127,7 +131,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all build kernel user image run test full-test check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
+.PHONY: all build kernel user image run test full-test ktest check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage

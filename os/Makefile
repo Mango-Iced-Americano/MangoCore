@@ -2,7 +2,13 @@ include make/common/toolchain.mk
 include make/image-roles.mk
 include make/common/orchestration.mk
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight env arch-build kernel user image run test check lint ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+RUSTUP_HOME ?= $(HOME)/.rustup
+CARGO_HOME ?= $(HOME)/.cargo
+export RUSTUP_HOME CARGO_HOME
+
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -40,6 +46,9 @@ image: prepare-cargo-config
 
 toolchain-preflight:
 	@if [ "$(CANONICAL_BUILD_FIXTURE)" = "second-stage-failure" ]; then :; else sh ../scripts/rustup-preflight.sh; fi
+
+toolchain-setup:
+	@sh ../scripts/rustup-setup.sh
 
 env: toolchain-preflight
 
