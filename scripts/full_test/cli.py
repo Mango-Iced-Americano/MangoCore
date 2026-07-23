@@ -15,7 +15,7 @@ from .runner import run_fixture, run_full_test
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="print canonical commands without building or launching QEMU")
-    parser.add_argument("--serial", action="store_true", help="launch RV64 then LA64 after the serial build/extract stages")
+    parser.add_argument("--serial", action="store_true", help="run RV64 QEMU then LA64 QEMU sequentially (default: parallel, build is always serial)")
     parser.add_argument("--fixture", choices=("abnormal-signature", "build-failure", "extraction-failure", "qemu-timeout", "missing-terminal-marker", "judge-missing-group", "judge-nonzero", "qemu-nonzero"))
     return parser
 

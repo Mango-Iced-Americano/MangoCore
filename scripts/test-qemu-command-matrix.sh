@@ -123,7 +123,7 @@ for deprecated in \
     if sh -c "$deprecated" 2>"$deprecated_stderr"; then
         fail "$deprecated unexpectedly succeeded"
     fi
-    grep -F -- 'scripts/run_full_test.py --serial' "$deprecated_stderr" >/dev/null || fail "$deprecated omitted the serial migration"
+    grep -F -- 'scripts/run_full_test.py' "$deprecated_stderr" >/dev/null || fail "$deprecated omitted the serial migration"
     rm -f "$deprecated_stderr"
 done
 

@@ -98,6 +98,10 @@ lint: toolchain-preflight
 	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
 	$(if $(strip $(ARCH)),$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(or $(PROFILE),normal)" "BUILD_ROOT=$(BUILD_ROOT)" lint,@true)
 
+full-test:
+	@echo "=== Running full test suite (serial build, parallel QEMU) ==="
+	python3 scripts/run_full_test.py
+
 ktest-build-only: toolchain-preflight
 	$(call validate-formal-inputs)
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-build-only
@@ -123,7 +127,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all build kernel user image run test check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
+.PHONY: all build kernel user image run test full-test check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -194,11 +198,11 @@ docker:
 	fi
 
 docker-test-parallel:
-	@printf '%s\n' 'ERROR: docker-test-parallel is deprecated; run python3 scripts/run_full_test.py --serial inside Docker instead.' >&2
+	@printf '%s\n' 'ERROR: docker-test-parallel is deprecated; run make full-test or python3 scripts/run_full_test.py inside Docker instead.' >&2
 	@exit 64
 
 test-docker-parallel:
-	@printf '%s\n' 'ERROR: test-docker-parallel is deprecated; run python3 scripts/run_full_test.py --serial inside Docker instead.' >&2
+	@printf '%s\n' 'ERROR: test-docker-parallel is deprecated; run make full-test or python3 scripts/run_full_test.py inside Docker instead.' >&2
 	@exit 64
 
 testsuits-download:
