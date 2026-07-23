@@ -1,0 +1,192 @@
+2026-07-17T08:37:15.222406Z __PERF_BEGIN_anon_mmap_release_32m-1-0b3084aa__
+2026-07-17T08:37:16.153614Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_TRACE_OFF__
+2026-07-17T08:37:16.794090Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_STATS_OFF__
+2026-07-17T08:37:17.456452Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_PROFILE__
+2026-07-17T08:37:18.059257Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_RESET__
+2026-07-17T08:37:18.775196Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_RECLAIM__
+2026-07-17T08:37:18.808942Z reclaim_runs_total=0
+2026-07-17T08:37:18.811570Z reclaim_pages_scanned_total=0
+2026-07-17T08:37:18.814451Z reclaim_pages_freed_total=0
+2026-07-17T08:37:18.817071Z clock_scanned=0
+2026-07-17T08:37:18.817119Z clock_second_chance=0
+2026-07-17T08:37:18.818370Z clock_evicted=0
+2026-07-17T08:37:18.823059Z __PERF_STATS_BEFORE_RECLAIM_END__
+2026-07-17T08:37:19.469368Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_TLB__
+2026-07-17T08:37:19.502738Z tlb_flushes=0
+2026-07-17T08:37:19.502873Z tlb_full=0
+2026-07-17T08:37:19.505354Z tlb_page=0
+2026-07-17T08:37:19.505429Z tlb_activate=0
+2026-07-17T08:37:19.506050Z tlb_global=0
+2026-07-17T08:37:19.510496Z __PERF_STATS_BEFORE_TLB_END__
+2026-07-17T08:37:20.175387Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_HEAP__
+2026-07-17T08:37:20.209604Z heap_current_bytes=8634832
+2026-07-17T08:37:20.212393Z heap_max_bytes=10192904
+2026-07-17T08:37:20.215129Z heap_free_kb=188175
+2026-07-17T08:37:20.215206Z heap_total_kb=196607
+2026-07-17T08:37:20.217811Z heap_alloc_calls=0
+2026-07-17T08:37:20.220630Z heap_alloc_ticks_total=0
+2026-07-17T08:37:20.223476Z heap_alloc_ticks_max=0
+2026-07-17T08:37:20.223546Z heap_dealloc_calls=0
+2026-07-17T08:37:20.226242Z heap_dealloc_ticks_total=0
+2026-07-17T08:37:20.229110Z heap_dealloc_ticks_max=0
+2026-07-17T08:37:20.231873Z heap_dealloc_scan_steps_total=0
+2026-07-17T08:37:20.234680Z page_faults=0
+2026-07-17T08:37:20.234759Z pagefault_ticks_total=0
+2026-07-17T08:37:20.237367Z pagefault_time_count=0
+2026-07-17T08:37:20.240252Z frame_alloc_hits=0
+2026-07-17T08:37:20.240348Z frame_free_hits=0
+2026-07-17T08:37:20.242947Z frame_alloc_ticks_total=0
+2026-07-17T08:37:20.244507Z frame_alloc_time_count=0
+2026-07-17T08:37:20.248967Z __PERF_STATS_BEFORE_HEAP_END__
+2026-07-17T08:37:21.022930Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_ANON_UNMAP__
+2026-07-17T08:37:21.058106Z anon_unmap_calls_total=0
+2026-07-17T08:37:21.060771Z anon_unmap_range_calls=0
+2026-07-17T08:37:21.063635Z anon_unmap_area_calls=0
+2026-07-17T08:37:21.066366Z anon_unmap_requested_pages_total=0
+2026-07-17T08:37:21.069068Z anon_unmap_resident_pages_total=0
+2026-07-17T08:37:21.071845Z anon_unmap_active_before_total=0
+2026-07-17T08:37:21.074623Z anon_unmap_active_before_max=0
+2026-07-17T08:37:21.077423Z anon_unmap_retain_scan_steps_total=0
+2026-07-17T08:37:21.080108Z anon_unmap_ticks_total=0
+2026-07-17T08:37:21.082867Z anon_unmap_ticks_max=0
+2026-07-17T08:37:21.085721Z anon_unmap_errors_total=0
+2026-07-17T08:37:21.088564Z anon_unmap_pages_le_16=0
+2026-07-17T08:37:21.088606Z anon_unmap_pages_le_256=0
+2026-07-17T08:37:21.091316Z anon_unmap_pages_le_4096=0
+2026-07-17T08:37:21.093463Z anon_unmap_pages_gt_4096=0
+2026-07-17T08:37:21.098533Z __PERF_STATS_BEFORE_ANON_UNMAP_END__
+2026-07-17T08:37:21.852602Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_PAGECACHE__
+2026-07-17T08:37:21.886811Z pc_read_calls=0
+2026-07-17T08:37:21.889603Z pc_read_pages=0
+2026-07-17T08:37:21.889697Z pc_read_miss=0
+2026-07-17T08:37:21.892258Z pc_read_cycles=0
+2026-07-17T08:37:21.892310Z pc_read_hit_cycles=0
+2026-07-17T08:37:21.895200Z pc_read_miss_cycles=0
+2026-07-17T08:37:21.897919Z pc_copy_cycles=0
+2026-07-17T08:37:21.897984Z pc_lookup_cycles=0
+2026-07-17T08:37:21.900686Z pc_write_calls=0
+2026-07-17T08:37:21.900737Z pc_write_pages=0
+2026-07-17T08:37:21.903503Z pc_write_overwrite=0
+2026-07-17T08:37:21.906222Z pc_write_eventually_full=0
+2026-07-17T08:37:21.906335Z pc_write_cycles=0
+2026-07-17T08:37:21.909016Z pc_wb_calls=0
+2026-07-17T08:37:21.909083Z pc_wb_pages=0
+2026-07-17T08:37:21.911778Z pc_wb_cycles=0
+2026-07-17T08:37:21.914681Z pc_falloc_cycles=0
+2026-07-17T08:37:21.914751Z wb_bg_calls=0
+2026-07-17T08:37:21.917115Z wb_throttle_calls=0
+2026-07-17T08:37:21.917178Z wb_redirty_pages=0
+2026-07-17T08:37:21.922319Z __PERF_STATS_BEFORE_PAGECACHE_END__
+2026-07-17T08:37:22.648092Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_BLOCKIO__
+2026-07-17T08:37:22.682079Z blk_vread_reqs=0
+2026-07-17T08:37:22.684717Z blk_vread_secs=0
+2026-07-17T08:37:22.684795Z blk_vwrite_reqs=0
+2026-07-17T08:37:22.687378Z blk_vwrite_secs=0
+2026-07-17T08:37:22.687426Z sata_read_reqs=0
+2026-07-17T08:37:22.690191Z sata_read_bytes=0
+2026-07-17T08:37:22.693068Z sata_read_ticks_total=0
+2026-07-17T08:37:22.693154Z sata_read_ticks_max=0
+2026-07-17T08:37:22.695756Z sata_write_reqs=0
+2026-07-17T08:37:22.698565Z sata_write_bytes=0
+2026-07-17T08:37:22.698614Z sata_write_ticks_total=0
+2026-07-17T08:37:22.701416Z sata_write_ticks_max=0
+2026-07-17T08:37:22.704193Z sata_flush_reqs=0
+2026-07-17T08:37:22.704772Z sata_flush_ticks_total=0
+2026-07-17T08:37:22.709555Z __PERF_STATS_BEFORE_BLOCKIO_END__
+2026-07-17T08:37:23.342442Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_STATS_ON__
+2026-07-17T08:37:25.335636Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_anon_mmap_release_32m-1-0b3084aa__
+2026-07-17T08:37:28.787556Z CPYTHON_DIAG_JSON {"elapsed_ns":959497400,"pages":8192,"size_mib":32,"sys_seconds":0.9668130000000001,"type":"mmap_release","user_seconds":0.001607000000000025}
+2026-07-17T08:37:28.916926Z __PERF_WORK_END_anon_mmap_release_32m-1-0b3084aa__
+2026-07-17T08:37:28.921580Z __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_WORK__
+2026-07-17T08:37:29.565985Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_anon_mmap_release_32m-1-0b3084aa_STATS_DONE__
+2026-07-17T08:37:30.290076Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_RECLAIM__
+2026-07-17T08:37:30.323821Z reclaim_runs_total=1
+2026-07-17T08:37:30.326360Z reclaim_pages_scanned_total=0
+2026-07-17T08:37:30.329241Z reclaim_pages_freed_total=0
+2026-07-17T08:37:30.331926Z clock_scanned=0
+2026-07-17T08:37:30.331991Z clock_second_chance=0
+2026-07-17T08:37:30.333209Z clock_evicted=0
+2026-07-17T08:37:30.337864Z __PERF_STATS_AFTER_RECLAIM_END__
+2026-07-17T08:37:30.980417Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_TLB__
+2026-07-17T08:37:31.014443Z tlb_flushes=8225
+2026-07-17T08:37:31.014528Z tlb_full=0
+2026-07-17T08:37:31.017285Z tlb_page=8225
+2026-07-17T08:37:31.017404Z tlb_activate=45
+2026-07-17T08:37:31.018538Z tlb_global=0
+2026-07-17T08:37:31.023019Z __PERF_STATS_AFTER_TLB_END__
+2026-07-17T08:37:31.674044Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_HEAP__
+2026-07-17T08:37:31.707765Z heap_current_bytes=8624624
+2026-07-17T08:37:31.710272Z heap_max_bytes=10192904
+2026-07-17T08:37:31.713027Z heap_free_kb=188185
+2026-07-17T08:37:31.713080Z heap_total_kb=196607
+2026-07-17T08:37:31.715873Z heap_alloc_calls=74
+2026-07-17T08:37:31.718700Z heap_alloc_ticks_total=2230
+2026-07-17T08:37:31.721577Z heap_alloc_ticks_max=108
+2026-07-17T08:37:31.724421Z heap_dealloc_calls=9619
+2026-07-17T08:37:31.727063Z heap_dealloc_ticks_total=645711
+2026-07-17T08:37:31.729738Z heap_dealloc_ticks_max=589
+2026-07-17T08:37:31.732640Z heap_dealloc_scan_steps_total=20766
+2026-07-17T08:37:31.732685Z page_faults=7
+2026-07-17T08:37:31.735285Z pagefault_ticks_total=127591
+2026-07-17T08:37:31.738211Z pagefault_time_count=7
+2026-07-17T08:37:31.738251Z frame_alloc_hits=6
+2026-07-17T08:37:31.740871Z frame_free_hits=8194
+2026-07-17T08:37:31.743758Z frame_alloc_ticks_total=10231
+2026-07-17T08:37:31.745223Z frame_alloc_time_count=6
+2026-07-17T08:37:31.750072Z __PERF_STATS_AFTER_HEAP_END__
+2026-07-17T08:37:32.508907Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_ANON_UNMAP__
+2026-07-17T08:37:32.543747Z anon_unmap_calls_total=2
+2026-07-17T08:37:32.546293Z anon_unmap_range_calls=2
+2026-07-17T08:37:32.549168Z anon_unmap_area_calls=0
+2026-07-17T08:37:32.551974Z anon_unmap_requested_pages_total=8225
+2026-07-17T08:37:32.554878Z anon_unmap_resident_pages_total=8194
+2026-07-17T08:37:32.557547Z anon_unmap_active_before_total=8194
+2026-07-17T08:37:32.563134Z anon_unmap_active_before_max=8192
+2026-07-17T08:37:32.565812Z anon_unmap_retain_scan_steps_total=33558531
+2026-07-17T08:37:32.568707Z anon_unmap_ticks_total=95838295
+2026-07-17T08:37:32.571457Z anon_unmap_ticks_max=95836752
+2026-07-17T08:37:32.574262Z anon_unmap_errors_total=0
+2026-07-17T08:37:32.576963Z anon_unmap_pages_le_16=1
+2026-07-17T08:37:32.577044Z anon_unmap_pages_le_256=0
+2026-07-17T08:37:32.579865Z anon_unmap_pages_le_4096=0
+2026-07-17T08:37:32.582125Z anon_unmap_pages_gt_4096=1
+2026-07-17T08:37:32.586998Z __PERF_STATS_AFTER_ANON_UNMAP_END__
+2026-07-17T08:37:33.334725Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_PAGECACHE__
+2026-07-17T08:37:33.368618Z pc_read_calls=0
+2026-07-17T08:37:33.371310Z pc_read_pages=0
+2026-07-17T08:37:33.371425Z pc_read_miss=4
+2026-07-17T08:37:33.374120Z pc_read_cycles=0
+2026-07-17T08:37:33.374197Z pc_read_hit_cycles=0
+2026-07-17T08:37:33.376756Z pc_read_miss_cycles=0
+2026-07-17T08:37:33.379586Z pc_copy_cycles=0
+2026-07-17T08:37:33.379651Z pc_lookup_cycles=0
+2026-07-17T08:37:33.382422Z pc_write_calls=0
+2026-07-17T08:37:33.382490Z pc_write_pages=0
+2026-07-17T08:37:33.385182Z pc_write_overwrite=0
+2026-07-17T08:37:33.388051Z pc_write_eventually_full=0
+2026-07-17T08:37:33.388121Z pc_write_cycles=0
+2026-07-17T08:37:33.390799Z pc_wb_calls=0
+2026-07-17T08:37:33.390869Z pc_wb_pages=0
+2026-07-17T08:37:33.393716Z pc_wb_cycles=0
+2026-07-17T08:37:33.396376Z pc_falloc_cycles=7434
+2026-07-17T08:37:33.396432Z wb_bg_calls=0
+2026-07-17T08:37:33.399285Z wb_throttle_calls=0
+2026-07-17T08:37:33.399352Z wb_redirty_pages=0
+2026-07-17T08:37:33.403948Z __PERF_STATS_AFTER_PAGECACHE_END__
+2026-07-17T08:37:34.115393Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_BLOCKIO__
+2026-07-17T08:37:34.148986Z blk_vread_reqs=0
+2026-07-17T08:37:34.151574Z blk_vread_secs=0
+2026-07-17T08:37:34.151665Z blk_vwrite_reqs=0
+2026-07-17T08:37:34.154335Z blk_vwrite_secs=0
+2026-07-17T08:37:34.154416Z sata_read_reqs=4
+2026-07-17T08:37:34.157076Z sata_read_bytes=16384
+2026-07-17T08:37:34.159765Z sata_read_ticks_total=72433
+2026-07-17T08:37:34.162637Z sata_read_ticks_max=29873
+2026-07-17T08:37:34.162696Z sata_write_reqs=0
+2026-07-17T08:37:34.165385Z sata_write_bytes=0
+2026-07-17T08:37:34.168221Z sata_write_ticks_total=0
+2026-07-17T08:37:34.170959Z sata_write_ticks_max=0
+2026-07-17T08:37:34.171020Z sata_flush_reqs=0
+2026-07-17T08:37:34.172604Z sata_flush_ticks_total=0
+2026-07-17T08:37:34.177592Z __PERF_STATS_AFTER_BLOCKIO_END__
+2026-07-17T08:37:34.643937Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_anon_mmap_release_32m-1-0b3084aa__ rc=0

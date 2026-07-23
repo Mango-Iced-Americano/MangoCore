@@ -1,0 +1,621 @@
+
+=> 
+>>> setenv ipaddr 192.168.9.20
+setenv ipaddr 192.168.9.20
+=> 
+>>> setenv serverip 192.168.9.10
+setenv serverip 192.168.9.10
+=> 
+>>> setenv netmask 255.255.255.0
+setenv netmask 255.255.255.0
+=> 
+>>> setenv loadaddr 0x9000000098000000
+setenv loadaddr 0x9000000098000000
+=> 
+>>> ping 192.168.9.10
+ping 192.168.9.10
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+host 192.168.9.10 is alive
+=> 
+>>> tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+TFTP from server 192.168.9.10; our IP address is 192.168.9.20
+Filename 'kernel-2k1000-persist-shell.ui'.
+Load address: 0x9000000098000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ######################################
+	 6.4 MiB/s
+done
+Bytes transferred = 16765184 (ffd100 hex)
+=> 
+>>> crc32 0x9000000098000000 0xffd100
+crc32 0x9000000098000000 0xffd100
+CRC32 for 9000000098000000 ... 9000000098ffd0ff ==> 663eb714
+=> 
+>>> iminfo 0x9000000098000000
+iminfo 0x9000000098000000
+
+## Checking Image at 9000000098000000 ...
+   Legacy image found
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16765120 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+=> 
+>>> bootm 0x9000000098000000
+bootm 0x9000000098000000
+## Booting kernel from Legacy Image at 9000000098000000 ...
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16765120 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+   Loading Kernel Image
+Warning: invalid device tree. Used linux default dtb
+2048 MiB
+[kernel] random: initialized from 2k1000-rng
+[gmac] gmac0 DWMAC=0xd137 PHY=0x10a mac=8e:f8:cc:05:ed:1b
+[gmac] rings desc=0x9096d000 rx=48 tx=16 link=up 1000M full
+[net] eth0 DHCP client started
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir
+[net] DHCP configured eth0=Cidr { address: Address([192, 168, 2, 2]), prefix_len: 24 } gateway=Some(Address([192, 168, 2, 1])) dns=[Address([192, 168, 2, 1])]
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784283679
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] staged runtime: keeping /bin /sbin /lib /usr writable
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] staged runtime: skip /tools/bin bind
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s bytes=2811472 expected=2811472
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+python3: P4 runtime is not an active release: /persist/python-runtime/current
+P4 strict-aligned Python validation failed; launchers remain fail-closed
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[apk-persist-shell] START interactive P4 application root
+[apk-persist-shell] bind /dev -> /persist/apk-root/dev
+[apk-persist-shell] bind /proc -> /persist/apk-root/proc
+[apk-persist-shell] bind /tmp -> /persist/apk-root/tmp
+[apk-persist-shell] bind /run -> /persist/apk-root/run
+[apk-persist-shell] bind /scratch -> /persist/apk-root/scratch
+[apk-persist-shell] bind /persist/python-runtime -> /persist/apk-root/persist/python-runtime failed errno=2
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/persist/python failed errno=2
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/var/cache/mango-python
+[apk-persist-shell] RESULT=FAIL wait_status=256 exit=1
+[apk-persist-shell] entering host diagnostic shell
+[1m[33mMangoCore[0m:[1m[34m/[0m# 
+[1m[33mMangoCore[0m:[1m[34m/[0m# cccccccccccccccccccccccccccccccccccccc<[34m/[0m# ccccccccccccccccccccccccccccccccccccccc                         ccccccccccccccccccccccccc<ccccccccccccccccccccccccccccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccc
+ _     __   __  _  _  ___  ___  __  _  _    /   ___  __  \ 
+ |    |  | |  | |\ | | __ [__  |  | |\ |    |  | __ |  \ | 
+ |___ |__| |__| | \| |__] ___] |__| | \|    \  |__] |__/ / 
+
+Trying to boot from BootSpace
+
+
+U-Boot 2022.04-v2.1.0-00349-g4ce7c922 (Apr 16 2024 - 18:37:57 +0800), Build: jenkins-u-boot-2022.04-2k1000-dp-2G-factory-7
+
+CPU:   LA264
+Speed: Cpu @ 500 MHz/ Mem @ 400 MHz/ Bus @ 125 MHz
+Model: loongson-2k1000
+Board: LS2K1000-DP-FACTORY
+DRAM:  2048 MiB
+2 GiB
+Core:  79 devices, 22 uclasses, devicetree: board
+SF: Detected w25q64cv with page size 256 Bytes, erase size 4 KiB, total 8 MiB
+bdinfo is in spi-flash
+cam_disable:1, vpu_disable:1, pcie0_enable:0, pcie1_enable:1
+Loading Environment from SPIFlash... OK
+Cannot get ddc bus
+In:    serial gpiobtn 
+Out:   serial 
+Err:   serial vidconsole 
+Net:   eth0: ethernet@40040000, eth1: ethernet@40050000
+************************** Notice **************************
+Press c to enter u-boot console, m to enter boot menu
+************************************************************
+Bus otg@40000000: dwc2_usb otg@40000000: Core Release: 2.93a
+USB DWC2
+Bus ehci@40060000: USB EHCI 1.00
+Bus ohci@40070000: USB OHCI 1.0
+scanning bus otg@40000000 for devices... 1 USB Device(s) found
+scanning bus ehci@40060000 for devices... 1 USB Device(s) found
+scanning bus ohci@40070000 for devices... 1 USB Device(s) found
+Autoboot in 0 seconds
+[2J=> ccccccccccccccc<INTERRUPT>
+=> 
+=> 
+>>> setenv ipaddr 192.168.9.20
+setenv ipaddr 192.168.9.20
+=> 
+>>> setenv serverip 192.168.9.10
+setenv serverip 192.168.9.10
+=> 
+>>> setenv netmask 255.255.255.0
+setenv netmask 255.255.255.0
+=> 
+>>> setenv loadaddr 0x9000000098000000
+setenv loadaddr 0x9000000098000000
+=> 
+>>> ping 192.168.9.10
+ping 192.168.9.10
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+host 192.168.9.10 is alive
+=> 
+>>> tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+TFTP from server 192.168.9.10; our IP address is 192.168.9.20
+Filename 'kernel-2k1000-persist-shell.ui'.
+Load address: 0x9000000098000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ######################################
+	 7.3 MiB/s
+done
+Bytes transferred = 16765184 (ffd100 hex)
+=> 
+>>> crc32 0x9000000098000000 0xffd100
+crc32 0x9000000098000000 0xffd100
+CRC32 for 9000000098000000 ... 9000000098ffd0ff ==> 663eb714
+=> 
+>>> iminfo 0x9000000098000000
+iminfo 0x9000000098000000
+
+## Checking Image at 9000000098000000 ...
+   Legacy image found
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16765120 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+=> 
+>>> bootm 0x9000000098000000
+bootm 0x9000000098000000
+## Booting kernel from Legacy Image at 9000000098000000 ...
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16765120 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+   Loading Kernel Image
+Warning: invalid device tree. Used linux default dtb
+2048 MiB
+[kernel] random: initialized from 2k1000-rng
+[gmac] gmac0 DWMAC=0xd137 PHY=0x10a mac=8e:f8:cc:05:ed:1b
+[gmac] rings desc=0x9096d000 rx=48 tx=16 link=up 1000M full
+[net] eth0 DHCP client started
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir
+[net] DHCP configured eth0=Cidr { address: Address([192, 168, 2, 2]), prefix_len: 24 } gateway=Some(Address([192, 168, 2, 1])) dns=[Address([192, 168, 2, 1])]
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784283679
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] staged runtime: keeping /bin /sbin /lib /usr writable
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] staged runtime: skip /tools/bin bind
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s bytes=2811472 expected=2811472
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+P4 strict-aligned Python launchers installed
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[apk-persist-shell] START interactive P4 application root
+[apk-persist-shell] stage=reuse
+mv: can't rename '/persist/apk-root/usr/bin/pygmentize.tmp': I/O error
+[apk-persist-shell] bind /dev -> /persist/apk-root/dev
+[apk-persist-shell] bind /proc -> /persist/apk-root/proc
+[apk-persist-shell] bind /tmp -> /persist/apk-root/tmp
+[apk-persist-shell] bind /run -> /persist/apk-root/run
+[apk-persist-shell] bind /scratch -> /persist/apk-root/scratch
+[apk-persist-shell] bind /persist/python-runtime -> /persist/apk-root/persist/python-runtime
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/persist/python
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/var/cache/mango-python
+/bin/bash: command substitution: line 39: syntax error near unexpected token `('
+[apk-persist-shell] ready: run persist-shell, then apk add <package>
+[1m[33mMangoCore[0m:[1m[34m/[0m# 
+[1m[33mMangoCore[0m:[1m[34m/[0m# cccccccccccccccccccccccccccccccccccccc<[34m/[0m# ccccccccccccccccccccccccccccccccccccccc                         ccccccccccccccccccccccccc<ccccccccccccccccccccccccccccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         cccccccccc
+ _     __   __  _  _  ___  ___  __  _  _    /   ___  __  \ 
+ |    |  | |  | |\ | | __ [__  |  | |\ |    |  | __ |  \ | 
+ |___ |__| |__| | \| |__] ___] |__| | \|    \  |__] |__/ / 
+
+Trying to boot from BootSpace
+
+
+U-Boot 2022.04-v2.1.0-00349-g4ce7c922 (Apr 16 2024 - 18:37:57 +0800), Build: jenkins-u-boot-2022.04-2k1000-dp-2G-factory-7
+
+CPU:   LA264
+Speed: Cpu @ 500 MHz/ Mem @ 400 MHz/ Bus @ 125 MHz
+Model: loongson-2k1000
+Board: LS2K1000-DP-FACTORY
+DRAM:  2048 MiB
+2 GiB
+Core:  79 devices, 22 uclasses, devicetree: board
+SF: Detected w25q64cv with page size 256 Bytes, erase size 4 KiB, total 8 MiB
+bdinfo is in spi-flash
+cam_disable:1, vpu_disable:1, pcie0_enable:0, pcie1_enable:1
+Loading Environment from SPIFlash... OK
+Cannot get ddc bus
+In:    serial gpiobtn 
+Out:   serial 
+Err:   serial vidconsole 
+Net:   eth0: ethernet@40040000, eth1: ethernet@40050000
+************************** Notice **************************
+Press c to enter u-boot console, m to enter boot menu
+************************************************************
+Bus otg@40000000: dwc2_usb otg@40000000: Core Release: 2.93a
+USB DWC2
+Bus ehci@40060000: USB EHCI 1.00
+Bus ohci@40070000: USB OHCI 1.0
+scanning bus otg@40000000 for devices... 1 USB Device(s) found
+scanning bus ehci@40060000 for devices... 1 USB Device(s) found
+scanning bus ohci@40070000 for devices... 1 USB Device(s) found
+Autoboot in 0 seconds
+[2J=> ccccccccccccccc<INTERRUPT>
+=> 
+=> 
+>>> setenv ipaddr 192.168.9.20
+setenv ipaddr 192.168.9.20
+=> 
+>>> setenv serverip 192.168.9.10
+setenv serverip 192.168.9.10
+=> 
+>>> setenv netmask 255.255.255.0
+setenv netmask 255.255.255.0
+=> 
+>>> setenv loadaddr 0x9000000098000000
+setenv loadaddr 0x9000000098000000
+=> 
+>>> ping 192.168.9.10
+ping 192.168.9.10
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+host 192.168.9.10 is alive
+=> 
+>>> tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+TFTP from server 192.168.9.10; our IP address is 192.168.9.20
+Filename 'kernel-2k1000-persist-shell.ui'.
+Load address: 0x9000000098000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ######################################
+	 7.6 MiB/s
+done
+Bytes transferred = 16769280 (ffe100 hex)
+=> 
+>>> crc32 0x9000000098000000 0xffe100
+crc32 0x9000000098000000 0xffe100
+CRC32 for 9000000098000000 ... 9000000098ffe0ff ==> b49404ce
+=> 
+>>> iminfo 0x9000000098000000
+iminfo 0x9000000098000000
+
+## Checking Image at 9000000098000000 ...
+   Legacy image found
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16769216 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+=> 
+>>> bootm 0x9000000098000000
+bootm 0x9000000098000000
+## Booting kernel from Legacy Image at 9000000098000000 ...
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16769216 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+   Loading Kernel Image
+Warning: invalid device tree. Used linux default dtb
+2048 MiB
+[kernel] random: initialized from 2k1000-rng
+[gmac] gmac0 DWMAC=0xd137 PHY=0x10a mac=8e:f8:cc:05:ed:1b
+[gmac] rings desc=0x9096e000 rx=48 tx=16 link=up 1000M full
+[net] eth0 DHCP client started
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir
+[net] DHCP configured eth0=Cidr { address: Address([192, 168, 2, 2]), prefix_len: 24 } gateway=Some(Address([192, 168, 2, 1])) dns=[Address([192, 168, 2, 1])]
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784291974
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] staged runtime: keeping /bin /sbin /lib /usr writable
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] staged runtime: skip /tools/bin bind
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s bytes=2811472 expected=2811472
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+P4 strict-aligned Python launchers installed
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[apk-persist-shell] START interactive P4 application root
+[apk-persist-shell] stage=reuse
+cp: can't create '/persist/apk-root/usr/bin/pygmentize.tmp': File exists
+[apk-persist-shell] bind /dev -> /persist/apk-root/dev
+[apk-persist-shell] bind /proc -> /persist/apk-root/proc
+[apk-persist-shell] bind /tmp -> /persist/apk-root/tmp
+[apk-persist-shell] bind /run -> /persist/apk-root/run
+[apk-persist-shell] bind /scratch -> /persist/apk-root/scratch
+[apk-persist-shell] bind /persist/python-runtime -> /persist/apk-root/persist/python-runtime
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/persist/python
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/var/cache/mango-python
+[apk-persist-shell] RESULT=PASS
+[apk-persist-shell] ready: run persist-shell, then apk add <package>
+[1m[33mMangoCore[0m:[1m[34m/[0m# 
+[1m[33mMangoCore[0m:[1m[34m/[0m# cccccccccccccccccccccccccccccccccccccc<[34m/[0m# ccccccccccccccccccccccccccccccccccccccc                         ccccccccccccccccccccccccc<ccccccccccccccccccccccccccccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccccccccccc                         ccccccccccccccccc
+ _     __   __  _  _  ___  ___  __  _  _    /   ___  __  \ 
+ |    |  | |  | |\ | | __ [__  |  | |\ |    |  | __ |  \ | 
+ |___ |__| |__| | \| |__] ___] |__| | \|    \  |__] |__/ / 
+
+Trying to boot from BootSpace
+
+
+U-Boot 2022.04-v2.1.0-00349-g4ce7c922 (Apr 16 2024 - 18:37:57 +0800), Build: jenkins-u-boot-2022.04-2k1000-dp-2G-factory-7
+
+CPU:   LA264
+Speed: Cpu @ 500 MHz/ Mem @ 400 MHz/ Bus @ 125 MHz
+Model: loongson-2k1000
+Board: LS2K1000-DP-FACTORY
+DRAM:  2048 MiB
+2 GiB
+Core:  79 devices, 22 uclasses, devicetree: board
+SF: Detected w25q64cv with page size 256 Bytes, erase size 4 KiB, total 8 MiB
+bdinfo is in spi-flash
+cam_disable:1, vpu_disable:1, pcie0_enable:0, pcie1_enable:1
+Loading Environment from SPIFlash... OK
+Cannot get ddc bus
+In:    serial gpiobtn 
+Out:   serial 
+Err:   serial vidconsole 
+Net:   eth0: ethernet@40040000, eth1: ethernet@40050000
+************************** Notice **************************
+Press c to enter u-boot console, m to enter boot menu
+************************************************************
+Bus otg@40000000: dwc2_usb otg@40000000: Core Release: 2.93a
+USB DWC2
+Bus ehci@40060000: USB EHCI 1.00
+Bus ohci@40070000: USB OHCI 1.0
+scanning bus otg@40000000 for devices... 1 USB Device(s) found
+scanning bus ehci@40060000 for devices... 1 USB Device(s) found
+scanning bus ohci@40070000 for devices... 1 USB Device(s) found
+Autoboot in 0 seconds
+[2J=> ccccccccccccccc<INTERRUPT>
+=> 
+=> 
+>>> setenv ipaddr 192.168.9.20
+setenv ipaddr 192.168.9.20
+=> 
+>>> setenv serverip 192.168.9.10
+setenv serverip 192.168.9.10
+=> 
+>>> setenv netmask 255.255.255.0
+setenv netmask 255.255.255.0
+=> 
+>>> setenv loadaddr 0x9000000098000000
+setenv loadaddr 0x9000000098000000
+=> 
+>>> ping 192.168.9.10
+ping 192.168.9.10
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+host 192.168.9.10 is alive
+=> 
+>>> tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+tftpboot 0x9000000098000000 kernel-2k1000-persist-shell.ui
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+TFTP from server 192.168.9.10; our IP address is 192.168.9.20
+Filename 'kernel-2k1000-persist-shell.ui'.
+Load address: 0x9000000098000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ######################################
+	 7.7 MiB/s
+done
+Bytes transferred = 16769280 (ffe100 hex)
+=> 
+>>> crc32 0x9000000098000000 0xffe100
+crc32 0x9000000098000000 0xffe100
+CRC32 for 9000000098000000 ... 9000000098ffe0ff ==> ffeb1631
+=> 
+>>> iminfo 0x9000000098000000
+iminfo 0x9000000098000000
+
+## Checking Image at 9000000098000000 ...
+   Legacy image found
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16769216 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+=> 
+>>> bootm 0x9000000098000000
+bootm 0x9000000098000000
+## Booting kernel from Legacy Image at 9000000098000000 ...
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    16769216 Bytes = 16 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+   Loading Kernel Image
+Warning: invalid device tree. Used linux default dtb
+2048 MiB
+[kernel] random: initialized from 2k1000-rng
+[gmac] gmac0 DWMAC=0xd137 PHY=0x10a mac=8e:f8:cc:05:ed:1b
+[gmac] rings desc=0x9096e000 rx=48 tx=16 link=up 1000M full
+[net] eth0 DHCP client started
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir
+[net] DHCP configured eth0=Cidr { address: Address([192, 168, 2, 2]), prefix_len: 24 } gateway=Some(Address([192, 168, 2, 1])) dns=[Address([192, 168, 2, 1])]
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784293370
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] staged runtime: keeping /bin /sbin /lib /usr writable
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] staged runtime: skip /tools/bin bind
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s bytes=2811472 expected=2811472
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+P4 strict-aligned Python launchers installed
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[apk-persist-shell] START interactive P4 application root
+[apk-persist-shell] stage=reuse
+rm: can't remove '/persist/apk-root/usr/bin/pygmentize.tmp': I/O error
+[apk-persist-shell] bind /dev -> /persist/apk-root/dev
+[apk-persist-shell] bind /proc -> /persist/apk-root/proc
+[apk-persist-shell] bind /tmp -> /persist/apk-root/tmp
+[apk-persist-shell] bind /run -> /persist/apk-root/run
+[apk-persist-shell] bind /scratch -> /persist/apk-root/scratch
+[apk-persist-shell] bind /persist/python-runtime -> /persist/apk-root/persist/python-runtime
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/persist/python
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/var/cache/mango-python
+[apk-persist-shell] RESULT=PASS
+[apk-persist-shell] ready: run persist-shell, then apk add <package>
+[1m[33mMangoCore[0m:[1m[34m/[0m# 

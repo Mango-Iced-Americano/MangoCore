@@ -1,0 +1,14 @@
+87b1d7a2635586666258577ed3e46f0ff2642ec4993800373cb8d754aa75458e  docs/Work_Log/evidence/2026-07-18/rv64-regression.log
+2d56ef3355a19ae1c6ec92398163f59b7849048007cd294a0540b50a7287ab12  docs/Work_Log/evidence/2026-07-18/rv64-regression.img
+5ca940d88ab18d5193c4b400d9309c658d286a8847257c28d72a1db76618f7d7  docs/Work_Log/evidence/2026-07-18/rv64-ktest.log
+ea49d1e3687f9c21edc740ed960c275447c6204024ab7f8500999e3c4c42163c  docs/Work_Log/evidence/2026-07-18/rv64-ktest.img
+021bb81fb17cbde01247a1817d3fd86be0c58dc8d213586e20e26ef77c65331a  docs/Work_Log/evidence/2026-07-18/la64-regression.log
+f9ebccddbcece66f158a13847f63ba4fb58392bca180e71c7e6249f87fdd2e15  docs/Work_Log/evidence/2026-07-18/la64-regression.img
+8611bdcd84a6682ed266bf70ff9f86deb0c42a6236dddbab97d821a7d95c093e  docs/Work_Log/evidence/2026-07-18/la64-ktest.log
+e63543881b9f05375b9bd1a5ceefbf97aec76d6319cef150994165fae4b8a9e8  docs/Work_Log/evidence/2026-07-18/la64-ktest.img
+6827f56108cdc82dcf4497148412518598e5dd278cc6809b63bdc77f30e0abe7  docs/Work_Log/evidence/2026-07-18/la64-ktest-ext4.log
+8a4980d868f3ee15a749ebca58b4dc743625a06593174abceff3a042c9ce5fdf  docs/Work_Log/evidence/2026-07-18/la64-ktest-ext4.img
+de8a4b8c44a7c3dc176292fed74d37b3e8a5e240eaf2eab098742d92ef8eacab  docs/Work_Log/evidence/2026-07-18/rv64-build-only.log
+13525aa1df4b9c6552db7135bfed9ed0b77e1c362d694ae8fa336bd6686b99da  docs/Work_Log/evidence/2026-07-18/la64-build-only.log
+075f4b6d8aca7df057e2864264cde92e55febf4147ac4205cba3ca933c9f4314  docs/Work_Log/evidence/2026-07-18/qemu-output.log
+095cf87ad4ee819e33561450c28cd06d4eee160eb864ad2df1386e6bd4fec3d3  docs/Work_Log/evidence/2026-07-18/qemu-head-tail.txt

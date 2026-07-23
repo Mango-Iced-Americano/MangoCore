@@ -1,0 +1,15 @@
+2026-07-17T14:03:47.720068Z __PERF_BEGIN_p4_smolagent_b7_fail_exposed_final-1-e5efea7e__
+2026-07-17T14:03:48.903582Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_smolagent_b7_fail_exposed_final-1-e5efea7e_TRACE_OFF__
+2026-07-17T14:03:51.401733Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_smolagent_b7_fail_exposed_final-1-e5efea7e__
+2026-07-17T14:03:54.920498Z Traceback (most recent call last):
+2026-07-17T14:03:54.925958Z   File "/persist/python/user/bin/smolagent.real", line 3, in <module>
+2026-07-17T14:03:54.928727Z     from smolagents.cli import main
+2026-07-17T14:03:54.937023Z   File "/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py", line 19, in <module>
+2026-07-17T14:03:54.942687Z     from .agent_types import *  # noqa: I001
+2026-07-17T14:03:54.945458Z     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-17T14:03:54.953805Z   File "/persist/python/user/lib/python3.14/site-packages/smolagents/agent_types.py", line 23, in <module>
+2026-07-17T14:03:54.956579Z     import PIL.Image
+2026-07-17T14:03:54.958646Z ModuleNotFoundError: No module named 'PIL'
+2026-07-17T14:03:55.005639Z __PERF_WORK_END_p4_smolagent_b7_fail_exposed_final-1-e5efea7e__
+2026-07-17T14:03:55.011759Z __PERF_ACK_p4_smolagent_b7_fail_exposed_final-1-e5efea7e_WORK__
+2026-07-17T14:03:55.568438Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_smolagent_b7_fail_exposed_final-1-e5efea7e__ rc=0

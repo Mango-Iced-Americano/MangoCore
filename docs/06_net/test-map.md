@@ -3,8 +3,11 @@ title: "网络子系统测试映射"
 category: testing
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-07-13
 tags: [net, testing, ltp, oscomp]
+code_paths:
+  - "user/src/bin/inet_test.rs"
+  - "os/build_initramfs.sh"
 ---
 
 # 网络子系统测试映射
@@ -93,13 +96,47 @@ Round-2 测试包括多连接压力、TCP 拥塞控制、吞吐量基准。具�
 | cyclictest | 0x400 | 实时性测试，不直接涉及网络 | 不适用 |
 | ltp | 0x800 | 完整 LTP 网络测例集 | 所有网络系统调用 |
 
+### 4.1 2K1000LA 实板 inet 回归
+
+实板网络回归镜像将当前构建的 `inet_test` 固定放入 initramfs 的
+`/bin/inet_test`，避免 SSD `/tools/tests` 中的旧副本改变测试覆盖范围：
+
+```bash
+make -C os la64-2k1000-net-tests
+make 2k1000-boot IMAGE=kernel-2k1000-net-tests.ui
+```
+
+| profile | 覆盖范围 | 2K1000LA 实测 | 备注 |
+|---------|----------|---------------|------|
+| `core` | 接口、绑定、路由、procfs、ioctl、rtnetlink、loopback UDP | 29/29 PASS | DHCP 地址从 `SIOCGIFADDR` 动态获取 |
+| `external` | DNS、TCP connect/send/recv、HTTP、UDP DNS、默认路由 | 9/9 PASS | DNS 从 `/etc/resolv.conf` 获取，HTTP 目标运行时解析 |
+| `board` | `core + loopback + external` | 分组结果已覆盖 | 便于一次运行功能回归 |
+| `veth` | veth/虚拟链路 | NOT_RUN | 不是当前实板 GMAC 验收重点 |
+| `tls` | 内嵌 TLS 诊断 | 不作为证书验收 | 该 profile 使用 NoVerify；正式验收由 curl 默认 CA 校验完成 |
+
+2026-07-13 实测环境为 macOS Wi-Fi 互联网共享到 `bridge100`：开发板取得
+`192.168.2.2/24`，网关及 DNS 为 `192.168.2.1`。`core` 和 `external` 返回码
+均为 0；另以 curl 访问 `www.baidu.com` 收到 HTTP 200。
+
+HTTPS 使用独立 QEMU-first 门禁：`make -C os la64-qemu-curl-shell-run`。QEMU 和
+2K1000LA 均以 curl 8.19.0 + Mbed TLS 3.6.7 + 内嵌 CA bundle 在不使用 `-k` 的
+情况下访问 `https://www.baidu.com/`，得到 HTTP 200 和 2443 字节；再访问
+`https://wrong.host.badssl.com/`，两端均因主机名不匹配返回 curl 60。该正反测试
+才是当前证书链与主机名校验的验收依据，`inet_test tls` 只保留为协议诊断。
+
+外网测试不得把 QEMU 的 `10.0.2.15/10.0.2.3` 或单个公共 IP 当作固定真值。
+本地网络会阻断部分公共端口，代理 TUN 还可能返回 `198.18.0.0/16` Fake-IP；
+应使用运行时接口/DNS，并先确认宿主机对同一目标可达。
+
 ## 5. 当前状态总览
 
 | 统计项 | 数量 | 说明 |
 |--------|------|------|
 | 镜像中 NET 相关 LTP 二进制 | 约 106 | 交叉编译后包含的网络 LTP 测试程序 |
 | 强制排除集 | 约 50 以上 | FEATURE_MISSING 类测例，运行前已过滤 |
-| 回归集 | 0 | 尚未完成任何轮次的验证 |
+| LTP NET 回归集 | 0 | 尚未完成 NET-Round 原生 LTP 轮次验证 |
+| 实板 inet 回归集 | 38 | `core` 29 项和 `external` 9 项已在 2K1000LA 通过 |
+| HTTPS curl 门禁 | 2 个环境 | QEMU 与 2K1000LA 的成功请求和错误主机名拒绝均通过 |
 | NET-Round-0 核心测例 | 约 55 | 优先推进的套接字生命周期测例 |
 | NET-Round-1 扩展测例 | 约 30 以上 | 依赖 Round-0 稳定 |
 | NET-Round-2 压力测例 | 约 20 以上 | 远期规划 |

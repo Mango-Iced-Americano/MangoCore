@@ -1,0 +1,7 @@
+2026-07-18T05:28:04.376340Z __PERF_BEGIN_native-1-950def0f__
+2026-07-18T05:28:05.343667Z MangoPersist:/persist/apk-root# __PERF_ACK_native-1-950def0f_TRACE_OFF__
+2026-07-18T05:28:07.581462Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_native-1-950def0f__
+2026-07-18T05:28:35.479359Z native-user-site-ok /persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/primp/primp.abi3.so
+2026-07-18T05:28:35.971476Z __PERF_WORK_END_native-1-950def0f__
+2026-07-18T05:28:35.972579Z __PERF_ACK_native-1-950def0f_WORK__
+2026-07-18T05:28:36.405792Z MangoPersist:/persist/apk-root# __PERF_END_native-1-950def0f__ rc=0

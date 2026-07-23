@@ -1,0 +1,38 @@
+2026-07-16T14:15:26.836381Z __PERF_BEGIN_adjacent_diag_list-1-83c2835c__
+2026-07-16T14:15:27.763236Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_adjacent_diag_list-1-83c2835c_TRACE_OFF__
+2026-07-16T14:15:29.488250Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_adjacent_diag_list-1-83c2835c__
+2026-07-16T14:15:29.571705Z /persist/pyperf
+2026-07-16T14:15:29.589774Z /persist/pyperf/b.zip
+2026-07-16T14:15:29.595258Z /persist/pyperf/mangocore-cpython-bench-suite
+2026-07-16T14:15:29.598113Z /persist/pyperf/mangocore-cpython-bench-suite/bench
+2026-07-16T14:15:29.606426Z /persist/pyperf/mangocore-cpython-bench-suite/bench/PYPERFORMANCE_LICENSE.txt
+2026-07-16T14:15:29.611985Z /persist/pyperf/mangocore-cpython-bench-suite/bench/README.md
+2026-07-16T14:15:29.617598Z /persist/pyperf/mangocore-cpython-bench-suite/bench/__init__.py
+2026-07-16T14:15:29.623169Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bench_runner.py
+2026-07-16T14:15:29.628727Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_bytesio.py
+2026-07-16T14:15:29.634280Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_chaos.py
+2026-07-16T14:15:29.639851Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_decimal.py
+2026-07-16T14:15:29.645414Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_dict.py
+2026-07-16T14:15:29.651004Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_fileio.py
+2026-07-16T14:15:29.656589Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_float.py
+2026-07-16T14:15:29.662117Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_fork.py
+2026-07-16T14:15:29.667711Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_hash.py
+2026-07-16T14:15:29.673288Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_json_loads.py
+2026-07-16T14:15:29.678856Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_list.py
+2026-07-16T14:15:29.684414Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_nbody.py
+2026-07-16T14:15:29.692764Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_pidigits.py
+2026-07-16T14:15:29.698370Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_regex.py
+2026-07-16T14:15:29.703927Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_richards.py
+2026-07-16T14:15:29.711494Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_sort.py
+2026-07-16T14:15:29.715222Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_spectral_norm.py
+2026-07-16T14:15:29.720765Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_string.py
+2026-07-16T14:15:29.726355Z /persist/pyperf/mangocore-cpython-bench-suite/bench/bm_thread.py
+2026-07-16T14:15:29.734718Z /persist/pyperf/mangocore-cpython-bench-suite/bench/diag_math_unaligned.py
+2026-07-16T14:15:29.740271Z /persist/pyperf/mangocore-cpython-bench-suite/bench/diag_mmap_release.py
+2026-07-16T14:15:29.745855Z /persist/pyperf/mangocore-cpython-bench-suite/cpython_benchmark.sh
+2026-07-16T14:15:29.751407Z /persist/pyperf/mangocore-cpython-bench-suite/bundle_manifest.json
+2026-07-16T14:15:29.754206Z /persist/pyperf/work
+2026-07-16T14:15:29.754216Z /persist/pyperf/w
+2026-07-16T14:15:29.760724Z __PERF_WORK_END_adjacent_diag_list-1-83c2835c__
+2026-07-16T14:15:29.765142Z __PERF_ACK_adjacent_diag_list-1-83c2835c_WORK__
+2026-07-16T14:15:30.220737Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_adjacent_diag_list-1-83c2835c__ rc=0

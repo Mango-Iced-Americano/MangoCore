@@ -14,9 +14,9 @@ use riscv::register::satp;
 /// 将 vpn 转换为字节地址后做单页 TLB 刷新
 macro_rules! tlb_invalidate_vpn {
     ($vpn:expr) => {
-        $crate::hal::arch::riscv::sv39::tlb_invalidate_addr(
-            usize::from($crate::mm::VirtAddr::from($vpn)),
-        )
+        $crate::hal::arch::riscv::sv39::tlb_invalidate_addr(usize::from(
+            $crate::mm::VirtAddr::from($vpn),
+        ))
     };
 }
 
@@ -137,7 +137,10 @@ pub struct Sv39PageTable {
 impl Sv39PageTable {
     /// Find the page in the page table, creating the page on the way if not exists.
     /// Note: It does NOT create the terminal node. The caller must verify its validity and create according to his own needs.
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Result<&mut Sv39PageTableEntry, MemoryError> {
+    fn find_pte_create(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Result<&mut Sv39PageTableEntry, MemoryError> {
         let idxs: [usize; 3] = vpn.indexes();
         let mut ppn = self.root_ppn;
         for i in 0..3 {
@@ -263,7 +266,8 @@ impl PageTable for Sv39PageTable {
         if pte.is_valid() {
             return Err(MemoryError::AlreadyMapped);
         }
-        let mut pte_flags = PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V | PTEFlags::A | PTEFlags::D;
+        let mut pte_flags =
+            PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V | PTEFlags::A | PTEFlags::D;
         if flags.contains(MapPermission::G) {
             pte_flags |= PTEFlags::G;
         }

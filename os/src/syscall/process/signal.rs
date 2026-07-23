@@ -483,27 +483,47 @@ pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: u
                 }
             };
 
-            if Arc::ptr_eq(&inode1, &inode2) { 0 } else { 1 }
+            if Arc::ptr_eq(&inode1, &inode2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_VM => {
             let vm1 = process1.vm();
             let vm2 = process2.vm();
-            if Arc::ptr_eq(&vm1, &vm2) { 0 } else { 1 }
+            if Arc::ptr_eq(&vm1, &vm2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_FILES => {
             let files1 = process1.files();
             let files2 = process2.files();
-            if Arc::ptr_eq(&files1, &files2) { 0 } else { 1 }
+            if Arc::ptr_eq(&files1, &files2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_FS => {
             let fs1 = process1.fs();
             let fs2 = process2.fs();
-            if Arc::ptr_eq(&fs1, &fs2) { 0 } else { 1 }
+            if Arc::ptr_eq(&fs1, &fs2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_SIGHAND => {
             let sighand1 = process1.sighand();
             let sighand2 = process2.sighand();
-            if Arc::ptr_eq(&sighand1, &sighand2) { 0 } else { 1 }
+            if Arc::ptr_eq(&sighand1, &sighand2) {
+                0
+            } else {
+                1
+            }
         }
         KCMP_IO | KCMP_SYSVSEM => 0,
         _ => EINVAL,
@@ -624,7 +644,11 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
             if target_pid != task.pid() && siginfo.is_kernel_generated() {
                 return EPERM;
             }
-            send_process_signal_info(&process, signal, siginfo.with_signal_sender(sig, task.pid()));
+            send_process_signal_info(
+                &process,
+                signal,
+                siginfo.with_signal_sender(sig, task.pid()),
+            );
             SUCCESS
         }
         None => ProcessManager::send_signal_to_process(target_pid, signal),
@@ -778,10 +802,7 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let mcontext_addr = match sigmask_addr
-        .checked_add(size_of::<UserSignalMask>())
-        .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
-    {
+    let mcontext_addr = match ucontext_addr.checked_add(crate::hal::UserContext::MCONTEXT_OFFSET) {
         Some(addr) => addr,
         None => {
             error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
@@ -797,6 +818,18 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
+    #[cfg(feature = "loongarch64")]
+    let restored_lsx = match ucontext_addr
+        .checked_add(crate::hal::UserContext::LSX_OFFSET)
+        .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
+    {
+        Some(lsx) => lsx,
+        None => {
+            error!("[sys_sigreturn] bad LSX context in signal frame, send SIGSEGV");
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
     let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
     if copy_from_user(
         token,
@@ -808,6 +841,18 @@ pub fn sys_sigreturn() -> isize {
         error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
         drop(inner);
         exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    }
+    #[cfg(feature = "loongarch64")]
+    {
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.lsx = restored_lsx;
+        // LoongArch FPRs alias the low 64 bits of LSX registers. The signal
+        // ABI exposes both snapshots, and the existing scalar mcontext has
+        // precedence when a handler edits it. Merge that low lane before the
+        // trap return path restores the complete LSX register file.
+        for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
+            vector[0] = *scalar as u64;
+        }
     }
     inner.sigmask = restored_sigmask;
     inner.get_trap_cx().gp.a0 as isize // return a0: not modify any of trap_cx

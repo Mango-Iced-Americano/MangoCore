@@ -33,12 +33,7 @@ const MAX_IOVEC_COUNT: usize = 1024;
 ///
 /// This is a non-faulting probe: it only walks existing PTEs and must not
 /// allocate, fault-in, or trigger CoW/lazy population.
-pub fn user_accessible_len(
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-    access: UserAccess,
-) -> usize {
+pub fn user_accessible_len(token: usize, ptr: *const u8, len: usize, access: UserAccess) -> usize {
     if len == 0 {
         return 0;
     }
@@ -347,10 +342,18 @@ impl UserBufferWriter {
     ///
     /// 用户地址非法、超出上限或缺页处理失败时返回负 errno。
     pub fn new(token: usize, ptr: *mut u8, len: usize) -> Result<Self, isize> {
-        let buffer = match translate_single_page_user_bytes(token, ptr as *const u8, len, UserAccess::Write)? {
+        let buffer = match translate_single_page_user_bytes(
+            token,
+            ptr as *const u8,
+            len,
+            UserAccess::Write,
+        )? {
             Some(slice) => UserBuffer::single(slice),
             None => UserBuffer::new(translated_byte_buffer(
-                token, ptr as *const u8, len, UserAccess::Write,
+                token,
+                ptr as *const u8,
+                len,
+                UserAccess::Write,
             )?),
         };
         Ok(Self { buffer })
@@ -582,9 +585,7 @@ fn is_current_user_token(token: usize) -> bool {
     crate::task::try_current_user_token() == Some(token)
 }
 
-fn current_user_vm(
-    token: usize,
-) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>>>, isize> {
+fn current_user_vm(token: usize) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>>>, isize> {
     let task = current_task_ref().ok_or(crate::syscall::errno::EFAULT)?;
     if crate::task::current_user_token() != token {
         return Err(crate::syscall::errno::EFAULT);
@@ -866,18 +867,30 @@ impl UserBuffer {
     pub fn new(buffers: Vec<&'static mut [u8]>) -> Self {
         let len = buffers.iter().map(|buffer| buffer.len()).sum();
         if buffers.len() == 0 {
-            return Self { segments: UserBufferSegments::Empty, len };
+            return Self {
+                segments: UserBufferSegments::Empty,
+                len,
+            };
         }
         if buffers.len() == 1 {
             let single = buffers.into_iter().next().unwrap();
-            return Self { segments: UserBufferSegments::Single(single), len };
+            return Self {
+                segments: UserBufferSegments::Single(single),
+                len,
+            };
         }
-        Self { segments: UserBufferSegments::Multi(buffers), len }
+        Self {
+            segments: UserBufferSegments::Multi(buffers),
+            len,
+        }
     }
 
     pub(crate) fn single(slice: &'static mut [u8]) -> Self {
         let len = slice.len();
-        Self { segments: UserBufferSegments::Single(slice), len }
+        Self {
+            segments: UserBufferSegments::Single(slice),
+            len,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -891,7 +904,9 @@ impl UserBuffer {
                 let n = buf.len().min(dst.len());
                 // Safety: both slices are valid for `n` bytes and may overlap
                 // conservatively handled by `copy`.
-                unsafe { core::ptr::copy(buf.as_ptr(), dst.as_mut_ptr(), n); }
+                unsafe {
+                    core::ptr::copy(buf.as_ptr(), dst.as_mut_ptr(), n);
+                }
                 n
             }
             UserBufferSegments::Multi(buffers) => {
@@ -903,13 +918,17 @@ impl UserBuffer {
                         let n = dst_len - start;
                         // Safety: `start < dst_len` and `n` is capped by the
                         // remaining destination length.
-                        unsafe { core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n); }
+                        unsafe {
+                            core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n);
+                        }
                         return dst_len;
                     } else {
                         let n = buffer.len();
                         // Safety: the logical cursor guarantees the destination
                         // range `[start, start + n)` is within `dst`.
-                        unsafe { core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n); }
+                        unsafe {
+                            core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n);
+                        }
                     }
                     start = end;
                 }
@@ -925,7 +944,9 @@ impl UserBuffer {
                 let n = buf.len().min(src.len());
                 // Safety: both slices are valid for `n` bytes and may overlap
                 // conservatively handled by `copy`.
-                unsafe { core::ptr::copy(src.as_ptr(), buf.as_mut_ptr(), n); }
+                unsafe {
+                    core::ptr::copy(src.as_ptr(), buf.as_mut_ptr(), n);
+                }
                 n
             }
             UserBufferSegments::Multi(buffers) => {
@@ -937,13 +958,17 @@ impl UserBuffer {
                         let n = src_len - start;
                         // Safety: `start < src_len` and `n` is capped by the
                         // remaining source length.
-                        unsafe { core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n); }
+                        unsafe {
+                            core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n);
+                        }
                         return src_len;
                     } else {
                         let n = buffer.len();
                         // Safety: the logical cursor guarantees the source range
                         // `[start, start + n)` is within `src`.
-                        unsafe { core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n); }
+                        unsafe {
+                            core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n);
+                        }
                     }
                     start = end;
                 }
@@ -963,7 +988,9 @@ impl UserBuffer {
                 let n = (buf.len() - start).min(dst.len());
                 // Safety: `offset < self.len`, and `n` is capped by both the
                 // source segment and destination slice lengths.
-                unsafe { core::ptr::copy(buf.as_ptr().add(start), dst.as_mut_ptr(), n); }
+                unsafe {
+                    core::ptr::copy(buf.as_ptr().add(start), dst.as_mut_ptr(), n);
+                }
                 n
             }
             UserBufferSegments::Multi(buffers) => {
@@ -1011,7 +1038,9 @@ impl UserBuffer {
                 let n = (buf.len() - start).min(src.len());
                 // Safety: `offset < self.len`, and `n` is capped by both the
                 // destination segment and source slice lengths.
-                unsafe { core::ptr::copy(src.as_ptr(), buf.as_mut_ptr().add(start), n); }
+                unsafe {
+                    core::ptr::copy(src.as_ptr(), buf.as_mut_ptr().add(start), n);
+                }
                 n
             }
             UserBufferSegments::Multi(buffers) => {
@@ -1052,9 +1081,9 @@ impl UserBuffer {
         match &mut self.segments {
             UserBufferSegments::Empty => {}
             UserBufferSegments::Single(buf) => buf.fill(0),
-            UserBufferSegments::Multi(buffers) => {
-                buffers.iter_mut().for_each(|buffer| { buffer.fill(0); })
-            }
+            UserBufferSegments::Multi(buffers) => buffers.iter_mut().for_each(|buffer| {
+                buffer.fill(0);
+            }),
         }
     }
 
@@ -1142,13 +1171,25 @@ impl IntoIterator for UserBuffer {
     type IntoIter = UserBufferIterator;
     fn into_iter(self) -> Self::IntoIter {
         match self.segments {
-            UserBufferSegments::Empty => UserBufferIterator { buffers: Vec::new(), current_buffer: 0, current_idx: 0 },
+            UserBufferSegments::Empty => UserBufferIterator {
+                buffers: Vec::new(),
+                current_buffer: 0,
+                current_idx: 0,
+            },
             UserBufferSegments::Single(buf) => {
                 let mut v = alloc::vec::Vec::new();
                 v.push(buf);
-                UserBufferIterator { buffers: v, current_buffer: 0, current_idx: 0 }
+                UserBufferIterator {
+                    buffers: v,
+                    current_buffer: 0,
+                    current_idx: 0,
+                }
+            }
+            UserBufferSegments::Multi(buffers) => UserBufferIterator {
+                buffers,
+                current_buffer: 0,
+                current_idx: 0,
             },
-            UserBufferSegments::Multi(buffers) => UserBufferIterator { buffers, current_buffer: 0, current_idx: 0 },
         }
     }
 }
@@ -1217,9 +1258,7 @@ fn copy_single_page_from_user(
     dst: *mut u8,
     len: usize,
 ) -> Result<bool, isize> {
-    if let Some(user_bytes) =
-        translate_single_page_user_bytes(token, src, len, UserAccess::Read)?
-    {
+    if let Some(user_bytes) = translate_single_page_user_bytes(token, src, len, UserAccess::Read)? {
         // Safety: `user_bytes` is valid for `len` bytes after translation, and
         // callers of copy_from_user provide a writable kernel `dst`.
         unsafe {

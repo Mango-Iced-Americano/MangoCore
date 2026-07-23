@@ -1,0 +1,14 @@
+2026-07-16T12:59:29.751224Z __PERF_BEGIN_production_math_sqrt_micro-2-b7275714__
+2026-07-16T12:59:30.719990Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_production_math_sqrt_micro-2-b7275714_TRACE_OFF__
+2026-07-16T12:59:33.245437Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_production_math_sqrt_micro-2-b7275714__
+2026-07-16T12:59:38.529468Z Traceback (most recent call last):
+2026-07-16T12:59:38.565488Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-16T12:59:38.579417Z     import math,time;t=time.perf_counter_ns();[31mexec[0m[1;31m("x=0.0\\nfor i in range(1,20001): x+=math.sqrt((i*.0001)**2+1)")[0m;print("MATH_SQRT",time.perf_counter_ns()-t,x)
+2026-07-16T12:59:38.591092Z                                               [31m~~~~[0m[1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-16T12:59:38.602300Z   File [35m"<string>"[0m, line [35m1[0m
+2026-07-16T12:59:38.609673Z     x=0.0\[1;31mn[0mfor i in range(1,20001): x+=math.sqrt((i*.0001)**2+1)
+2026-07-16T12:59:38.612076Z           [1;31m^[0m
+2026-07-16T12:59:38.620463Z [1;35mSyntaxError[0m: [35munexpected character after line continuation character[0m
+2026-07-16T12:59:38.831485Z __PERF_WORK_END_production_math_sqrt_micro-2-b7275714__
+2026-07-16T12:59:38.836557Z __PERF_ACK_production_math_sqrt_micro-2-b7275714_WORK__
+2026-07-16T12:59:39.340678Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_production_math_sqrt_micro-2-b7275714__ rc=1

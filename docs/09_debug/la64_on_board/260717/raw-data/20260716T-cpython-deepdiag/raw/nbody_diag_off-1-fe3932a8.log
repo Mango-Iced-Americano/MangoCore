@@ -1,0 +1,10 @@
+2026-07-16T07:55:37.417471Z __PERF_BEGIN_nbody_diag_off-1-fe3932a8__
+2026-07-16T07:55:38.348002Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_nbody_diag_off-1-fe3932a8_TRACE_OFF__
+2026-07-16T07:55:41.106090Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_nbody_diag_off-1-fe3932a8__
+2026-07-16T07:55:41.159213Z ./cpython_benchmark.sh: line 3: bm_*.py: command not found
+2026-07-16T07:55:41.168553Z ./cpython_benchmark.sh: line 3: The: command not found
+2026-07-16T07:55:41.180434Z ./cpython_benchmark.sh: line 4: syntax error near unexpected token `https://github.com/Mango-Iced-Americano/cpython-tests'
+2026-07-16T07:55:41.191727Z ./cpython_benchmark.sh: line 4: `[`Mango-Iced-Americano/cpython-tests`](https://github.com/Mango-Iced-Americano/cpython-tests)'
+2026-07-16T07:55:41.198594Z __PERF_WORK_END_nbody_diag_off-1-fe3932a8__
+2026-07-16T07:55:41.201248Z __PERF_ACK_nbody_diag_off-1-fe3932a8_WORK__
+2026-07-16T07:55:41.631575Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_nbody_diag_off-1-fe3932a8__ rc=2

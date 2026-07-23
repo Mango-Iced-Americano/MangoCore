@@ -94,6 +94,19 @@ def test_stdlib():
         r, w, x = select.select([], [], [], 0)
         assert r == [] and w == [] and x == []
 
+    # signal delivery exercises the libc restorer and kernel ucontext path.
+    with check("signal handler roundtrip"):
+        import os
+        import signal
+        seen = []
+
+        previous = signal.signal(signal.SIGUSR1, lambda signum, frame: seen.append(signum))
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+        assert seen == [signal.SIGUSR1], seen
+
     # tempfile — tmpfs write
     with check("tempfile"):
         import tempfile

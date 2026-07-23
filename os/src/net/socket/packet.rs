@@ -7,11 +7,11 @@ use smoltcp::time::Instant;
 
 use crate::fs::vfs::event::EPollEvent;
 use crate::fs::vfs::event::EventWaitQueue;
+use crate::net::adapter::IfaceDevice;
 use crate::net::config::NET_INTERFACE;
 use crate::net::syscall::common::MsgFlags;
-use crate::net::{Endpoint, Mutex, PSOCK, Socket};
+use crate::net::{Endpoint, Mutex, Socket, PSOCK};
 use crate::net::{PacketEndpoint, PACKET_SOCKETS};
-use crate::net::adapter::IfaceDevice;
 use crate::task::WaitQueue;
 use crate::timer::current_time_duration;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
@@ -134,7 +134,11 @@ impl crate::net::Socket for PacketSocket {
         match iface {
             Some(iface) => {
                 self.inner.lock().bound_ifindex = iface.nic_id() as u32;
-                log::info!("[PacketSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                log::info!(
+                    "[PacketSocket] bound to device {} (ifindex={})",
+                    ifname,
+                    iface.nic_id()
+                );
                 Ok(0)
             }
             None => Err(SyscallErr::ENODEV),
@@ -296,10 +300,7 @@ pub fn deliver_frame_to_packet_sockets(frame: &[u8], ifindex: u32) {
         let mut inner = socket.inner.lock();
         inner.rx_queue.push_back(frame.to_vec());
         if let Some(wq) = socket.recv_event_queue() {
-            wq.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
-                1,
-            );
+            wq.notify_events_at_most_if_unlocked(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
         }
     }
 

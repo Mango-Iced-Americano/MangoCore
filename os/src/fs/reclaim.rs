@@ -257,13 +257,13 @@ fn dump_stage(name: &str, calls: &AtomicU64, total: &AtomicU64, max: &AtomicU64)
 }
 
 const THROTTLE: usize = 64;
-const LOW_WATER_PAGES: isize = 1024;   // 4MB — gentle eviction
-const HIGH_WATER_PAGES: isize = 4096;  // 16MB — aggressive eviction
+const LOW_WATER_PAGES: isize = 1024; // 4MB — gentle eviction
+const HIGH_WATER_PAGES: isize = 4096; // 16MB — aggressive eviction
 const BATCH_PAGES: usize = 64;
 const LOW_BATCH_PAGES: usize = 8;
 const CRITICAL_BATCH_PAGES: usize = 32;
-const HEAP_PRESSURE_PCT: usize = 75;   // trigger eviction when >75% heap used
-const HEAP_CRITICAL_PCT: usize = 90;   // aggressive multi-cache eviction
+const HEAP_PRESSURE_PCT: usize = 75; // trigger eviction when >75% heap used
+const HEAP_CRITICAL_PCT: usize = 90; // aggressive multi-cache eviction
 const INODE_PRUNE_BUDGET: usize = 64;
 const CHILDREN_PRUNE_PARENT_BUDGET: usize = 8;
 const CHILDREN_PRUNE_ENTRY_BUDGET: usize = 64;
@@ -482,7 +482,10 @@ pub fn maybe_reclaim_fs_caches() {
             if freed > 0 {
                 log::debug!(
                     "[reclaim] high-water clean_freed={} stale: io={} pc={} kids={}",
-                    freed, io_removed, pc_removed, kids_removed
+                    freed,
+                    io_removed,
+                    pc_removed,
+                    kids_removed
                 );
             }
         } else if cached > LOW_WATER_PAGES || under_pressure {
@@ -500,13 +503,19 @@ pub fn maybe_reclaim_fs_caches() {
             if freed > 0 {
                 log::debug!(
                     "[reclaim] low-water clean_freed={} stale: io={} pc={} kids={} cached={}",
-                    freed, io_removed, pc_removed, kids_removed, cached
+                    freed,
+                    io_removed,
+                    pc_removed,
+                    kids_removed,
+                    cached
                 );
             }
         } else if io_removed + pc_removed + kids_removed > 0 {
             log::debug!(
                 "[reclaim] stale: io={} pc={} kids={}",
-                io_removed, pc_removed, kids_removed
+                io_removed,
+                pc_removed,
+                kids_removed
             );
         }
     }

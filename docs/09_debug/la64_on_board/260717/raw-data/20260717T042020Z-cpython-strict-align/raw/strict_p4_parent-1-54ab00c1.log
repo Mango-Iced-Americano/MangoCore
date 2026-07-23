@@ -1,0 +1,6 @@
+2026-07-17T05:03:08.161240Z __PERF_BEGIN_strict_p4_parent-1-54ab00c1__
+2026-07-17T05:03:09.060440Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_strict_p4_parent-1-54ab00c1_TRACE_OFF__
+2026-07-17T05:03:10.901026Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_strict_p4_parent-1-54ab00c1__
+2026-07-17T05:03:10.979583Z __PERF_WORK_END_strict_p4_parent-1-54ab00c1__
+2026-07-17T05:03:10.982401Z __PERF_ACK_strict_p4_parent-1-54ab00c1_WORK__
+2026-07-17T05:03:11.427392Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_strict_p4_parent-1-54ab00c1__ rc=0

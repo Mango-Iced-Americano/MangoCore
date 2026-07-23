@@ -1,0 +1,6 @@
+2026-07-16T14:05:21.514793Z __PERF_BEGIN_cpucfg_probe_deploy_init-1-157905a3__
+2026-07-16T14:05:22.470689Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_cpucfg_probe_deploy_init-1-157905a3_TRACE_OFF__
+2026-07-16T14:05:24.301322Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_cpucfg_probe_deploy_init-1-157905a3__
+2026-07-16T14:05:24.346970Z __PERF_WORK_END_cpucfg_probe_deploy_init-1-157905a3__
+2026-07-16T14:05:24.352191Z __PERF_ACK_cpucfg_probe_deploy_init-1-157905a3_WORK__
+2026-07-16T14:05:24.844870Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_cpucfg_probe_deploy_init-1-157905a3__ rc=0

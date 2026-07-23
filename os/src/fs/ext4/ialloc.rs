@@ -1,146 +1,158 @@
-use crate::fs::{
-    ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE},
-};
-use alloc::vec;
-
 use super::{
-    bitmap::{ext4_bmap_bit_clr, ext4_bmap_bit_find_clr, ext4_bmap_bit_set},
+    bitmap::{ext4_bmap_bit_clr, ext4_bmap_bit_find_clr, ext4_bmap_bit_set, ext4_bmap_is_bit_set},
+    block_group::Ext4BlockGroup,
     error::Errno,
     ext4fs::Ext4FileSystem,
+    EXT4_BG_INODE_UNINIT,
 };
 
 impl Ext4FileSystem {
-    /// 分配inode号
-    /// # 参数
-    /// + is_dir: 是否是文件夹
-    /// # 返回值
-    /// + 新的inode号
-    pub fn ialloc_alloc_inode(&self, is_dir: bool) -> Result<u32, isize> {
-        let mut bgid = 0;
-        let bg_count = self.superblock.block_group_count();
-        let mut super_block = self.superblock;
+    fn load_inode_bitmap_for_allocation(
+        &self,
+        bgid: u32,
+        bg: &mut Ext4BlockGroup,
+    ) -> Result<(usize, alloc::vec::Vec<u8>), isize> {
+        let inode_bitmap_block = bg.get_inode_bitmap_block(&self.superblock) as usize;
+        let mut bitmap = self.read_metadata_block(inode_bitmap_block);
+        super::counters::inc_counter!(super::counters::INODE_BITMAP_READ);
 
-        while bgid <= bg_count {
-            if bgid == bg_count {
-                bgid = 0;
+        if bg.has_flag(EXT4_BG_INODE_UNINIT) {
+            if bgid == 0 {
+                return Err(Errno::EIO as isize);
+            }
+            bitmap.fill(0);
+            let valid_inodes = self.superblock.get_inodes_in_group_cnt(bgid);
+            let bitmap_bits = (bitmap.len() * 8) as u32;
+            if valid_inodes > bitmap_bits {
+                return Err(Errno::EIO as isize);
+            }
+            for bit in valid_inodes..bitmap_bits {
+                ext4_bmap_bit_set(&mut bitmap, bit);
+            }
+            bg.clear_flag(EXT4_BG_INODE_UNINIT);
+        }
+
+        Ok((inode_bitmap_block, bitmap))
+    }
+
+    fn zero_allocated_inode_slot(&self, bg: &Ext4BlockGroup, idx_in_bg: u32) -> Result<(), isize> {
+        let inode_size = self.superblock.inode_size() as usize;
+        let inode_pos = bg.get_inode_table_blk_num() as usize * self.block_size
+            + idx_in_bg as usize * inode_size;
+        let block_id = inode_pos / self.block_size;
+        let offset = inode_pos % self.block_size;
+        if offset + inode_size > self.block_size {
+            return Err(Errno::EIO as isize);
+        }
+        self.with_metadata_block_mut(block_id, |data| {
+            data[offset..offset + inode_size].fill(0);
+        });
+        super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
+        super::counters::inc_counter!(super::counters::INODE_TABLE_WRITE);
+        Ok(())
+    }
+
+    /// Allocate one inode and update bitmap, group descriptor and superblock.
+    pub fn ialloc_alloc_inode(&self, is_dir: bool) -> Result<u32, isize> {
+        let bg_count = self.superblock.block_group_count();
+
+        for bgid in 0..bg_count {
+            let mut bg = self.load_block_group_cached(&self.superblock, bgid as usize);
+            let free_inodes = bg.get_free_inodes_count();
+            if free_inodes == 0 {
                 continue;
             }
 
-            // 获取块组
-            let mut bg = self.load_block_group_cached(&super_block, bgid as usize);
-
-            let mut free_inodes = bg.get_free_inodes_count();
-
-            if free_inodes > 0 {
-                let inode_bitmap_block = bg.get_inode_bitmap_block(&super_block);
-
-                let mut raw_data = self.read_metadata_block(inode_bitmap_block as usize);
-                super::counters::inc_counter!(super::counters::INODE_BITMAP_READ);
-
-                let inodes_in_bg = super_block.get_inodes_in_group_cnt(bgid);
-
-                let bitmap_data = &mut raw_data[..];
-
-                let mut idx_in_bg = 0;
-
-                ext4_bmap_bit_find_clr(bitmap_data, 0, inodes_in_bg, &mut idx_in_bg);
-                ext4_bmap_bit_set(bitmap_data, idx_in_bg);
-
-                // update bitmap in disk
-                // 此处因为是直接进行块单位的写入，所以不需要考虑对齐
-                // log::warn!("[WRITE_CALLER] ialloc_alloc_inode: write inode_bitmap block={}, idx_in_bg={}, new_ino={}",
-                //     inode_bitmap_block, idx_in_bg, bgid * super_block.inodes_per_group() + (idx_in_bg + 1));
-                self.store_metadata_block_dirty(inode_bitmap_block as usize, bitmap_data);
-                super::counters::inc_counter!(super::counters::INODE_BITMAP_WRITE);
-
-                bg.set_block_group_ialloc_bitmap_csum(&super_block, bitmap_data);
-
-                // 修改文件系统计数器
-                free_inodes -= 1;
-                bg.set_free_inodes_count(&super_block, free_inodes);
-
-                /* Increment used directories counter */
-                if is_dir {
-                    let used_dirs = bg.get_used_dirs_count(&super_block) + 1;
-                    bg.set_used_dirs_count(&super_block, used_dirs);
-                }
-
-                // 减少未使用inode计数
-                let mut unused = bg.get_itable_unused(&super_block);
-                let free = inodes_in_bg - unused;
-                if idx_in_bg >= free {
-                    unused = inodes_in_bg - (idx_in_bg + 1);
-                    bg.set_itable_unused(&super_block, unused);
-                }
-
-                // 同步块组内容和超级块（Phase 5: defer if batch mode）
-                self.defer_bg_write(&bg, bgid as u32, &super_block);
-                self.defer_superblock_write(&super_block);
-                // 看是否写入成功
-                let mut test_super_block = vec![0u8; self.block_size];
-                self.block_device.read_block(0, &mut test_super_block);
-
-                /* Compute the absolute i-nodex number */
-                // 计算inode号
-                let inodes_per_group = super_block.inodes_per_group();
-                let inode_num = bgid * inodes_per_group + (idx_in_bg + 1);
-
-                log::debug!(
-                    "[ALLOC_TRACE] Ino: {}, is_dir: {}, caller: generic_open",
-                    inode_num,
-                    is_dir
+            let was_uninit = bg.has_flag(EXT4_BG_INODE_UNINIT);
+            let (inode_bitmap_block, mut bitmap) =
+                self.load_inode_bitmap_for_allocation(bgid, &mut bg)?;
+            let inodes_in_bg = self.superblock.get_inodes_in_group_cnt(bgid);
+            let mut idx_in_bg = 0;
+            if !ext4_bmap_bit_find_clr(&bitmap, 0, inodes_in_bg, &mut idx_in_bg) {
+                log::error!(
+                    "ext4 inode bitmap/count mismatch: bg={} free_inodes={}",
+                    bgid,
+                    free_inodes
                 );
-                return Ok(inode_num);
+                continue;
             }
 
-            bgid += 1;
+            self.zero_allocated_inode_slot(&bg, idx_in_bg)?;
+            ext4_bmap_bit_set(&mut bitmap, idx_in_bg);
+            bg.set_block_group_ialloc_bitmap_csum(&self.superblock, &bitmap);
+            self.store_metadata_block_dirty(inode_bitmap_block, &bitmap);
+            super::counters::inc_counter!(super::counters::INODE_BITMAP_WRITE);
+
+            bg.set_free_inodes_count(&self.superblock, free_inodes - 1);
+            if is_dir {
+                let used_dirs = bg.get_used_dirs_count(&self.superblock) + 1;
+                bg.set_used_dirs_count(&self.superblock, used_dirs);
+            }
+
+            let first_unused = if was_uninit {
+                0
+            } else {
+                inodes_in_bg - bg.get_itable_unused(&self.superblock)
+            };
+            if idx_in_bg >= first_unused {
+                bg.set_itable_unused(&self.superblock, inodes_in_bg - idx_in_bg - 1);
+            }
+
+            let mut super_block = self.current_superblock();
+            super_block.decrease_free_inodes_count();
+            self.defer_bg_write(&bg, bgid, &super_block);
+            self.defer_superblock_write(&super_block);
+
+            let inode_num = bgid * self.superblock.inodes_per_group() + idx_in_bg + 1;
+            log::debug!(
+                "[ALLOC_TRACE] Ino: {}, is_dir: {}, caller: generic_open",
+                inode_num,
+                is_dir
+            );
+            return Ok(inode_num);
         }
 
         println!("[kernel ialloc] alloc inode failed");
-        return Err(Errno::ENOSPC as isize);
+        Err(Errno::ENOSPC as isize)
     }
 
     pub fn ialloc_free_inode(&self, index: u32, is_dir: bool) {
-        log::debug!(
-            "[ext4:debug] ialloc_free_inode ENTER: index={}, is_dir={}, inodes_per_group={}, fs_ptr={:p}",
-            index,
-            is_dir,
-            self.superblock.inodes_per_group(),
-            self as *const _,
-        );
-        // Compute index of block group
         let bgid = self.get_bgid_of_inode(index);
-        let block_device = self.block_device.clone();
-
-        let mut super_block = self.superblock;
-        let mut bg = self.load_block_group_cached(&super_block, bgid as usize);
-
-        // Load inode bitmap block
-        let inode_bitmap_block = bg.get_inode_bitmap_block(&self.superblock);
-        let mut bitmap_data = self.read_metadata_block(inode_bitmap_block as usize);
+        let mut super_block = self.current_superblock();
+        let mut bg = self.load_block_group_cached(&self.superblock, bgid as usize);
+        let inode_bitmap_block = bg.get_inode_bitmap_block(&self.superblock) as usize;
+        let mut bitmap = self.read_metadata_block(inode_bitmap_block);
         super::counters::inc_counter!(super::counters::INODE_BITMAP_READ);
 
-        // Find index within group and clear bit
         let index_in_group = self.inode_to_bgidx(index);
-        ext4_bmap_bit_clr(&mut bitmap_data, index_in_group);
-
-        self.store_metadata_block_dirty(inode_bitmap_block as usize, &bitmap_data);
-        super::counters::inc_counter!(super::counters::INODE_BITMAP_WRITE);
-        bg.set_block_group_ialloc_bitmap_csum(&super_block, &bitmap_data);
-
-        // Update free inodes count in block group
-        let free_inodes = bg.get_free_inodes_count() + 1;
-        bg.set_free_inodes_count(&self.superblock, free_inodes);
-
-        // If inode was a directory, decrement the used directories count
-        if is_dir {
-            let used_dirs = bg.get_used_dirs_count(&self.superblock) - 1;
-            bg.set_used_dirs_count(&self.superblock, used_dirs);
+        if !ext4_bmap_is_bit_set(&bitmap, index_in_group) {
+            log::warn!("ignoring duplicate ext4 inode free: ino={}", index);
+            return;
         }
 
-        self.defer_bg_write(&bg, bgid as u32, &super_block);
+        let mut inode_ref = self.get_inode_ref(index);
+        inode_ref
+            .inode
+            .set_dtime((crate::timer::current_time_safe() as u32).max(1));
+        self.write_back_inode(&mut inode_ref);
 
+        ext4_bmap_bit_clr(&mut bitmap, index_in_group);
+        bg.set_block_group_ialloc_bitmap_csum(&self.superblock, &bitmap);
+        self.store_metadata_block_dirty(inode_bitmap_block, &bitmap);
+        super::counters::inc_counter!(super::counters::INODE_BITMAP_WRITE);
+
+        bg.set_free_inodes_count(
+            &self.superblock,
+            bg.get_free_inodes_count().saturating_add(1),
+        );
+        if is_dir {
+            bg.set_used_dirs_count(
+                &self.superblock,
+                bg.get_used_dirs_count(&self.superblock).saturating_sub(1),
+            );
+        }
         super_block.increase_free_inodes_count();
+        self.defer_bg_write(&bg, bgid, &super_block);
         self.defer_superblock_write(&super_block);
     }
 }

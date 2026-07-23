@@ -1,0 +1,27 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -43,3 +43,15 @@
+ add_definitions(-DBORINGSSL_IMPLEMENTATION)
+-
++
++# BoringSSL 44b3df6 predates LoongArch support.  LoongArch64 is a standard
++# little-endian LP64 target, but it has no BoringSSL assembly backend here.
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "^loongarch")
++  set(OPENSSL_NO_ASM ON CACHE BOOL "Disable unavailable LoongArch assembly" FORCE)
++  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
++  # boring-sys2 identifies this old source layout as Bazel-style merely
++  # because it contains src/, and consequently searches ${prefix}/lib even
++  # though cmake-rs normally leaves the archives in ${prefix}/build.  Keep
++  # the generated layout consistent with that public build-script contract.
++  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../lib")
++endif()
++
+ if(OPENSSL_NO_ASM)
+--- a/src/include/openssl/base.h
++++ b/src/include/openssl/base.h
+@@ -107,2 +107,5 @@
+ #define OPENSSL_RISCV64
++#elif defined(__loongarch64) && __SIZEOF_POINTER__ == 8
++#define OPENSSL_64_BIT
++#define OPENSSL_LOONGARCH64
+ #elif defined(__riscv) && __SIZEOF_POINTER__ == 4

@@ -65,3 +65,13 @@ pub struct MsgHdr {
     #[cfg(target_pointer_width = "64")]
     pub _pad1: i32,
 }
+
+/// Linux `struct mmsghdr` used by batched message syscalls.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MMsgHdr {
+    pub msg_hdr: MsgHdr,
+    pub msg_len: u32,
+    #[cfg(target_pointer_width = "64")]
+    pub _pad: u32,
+}

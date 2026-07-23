@@ -101,9 +101,9 @@ pub const CONFIG_XATTR_ENABLE: u32 = 1;
 pub const CONFIG_EXTENTS_ENABLE: u32 = 1;
 pub const CONFIG_BLOCK_DEV_ENABLE_STATS: u32 = 1;
 pub const CONFIG_EXT4_MAX_BLOCKDEV_NAME: u32 = 32;
-pub const CONFIG_EXT4_BLOCKDEVS_COUNT: u32 = 2;
+pub const CONFIG_EXT4_BLOCKDEVS_COUNT: u32 = 8;
 pub const CONFIG_EXT4_MAX_MP_NAME: u32 = 32;
-pub const CONFIG_EXT4_MOUNTPOINTS_COUNT: u32 = 2;
+pub const CONFIG_EXT4_MOUNTPOINTS_COUNT: u32 = 8;
 pub const CONFIG_MAX_TRUNCATE_SIZE: u32 = 16777216;
 pub const CONFIG_UNALIGNED_ACCESS: u32 = 0;
 pub const true_: u32 = 1;
@@ -721,6 +721,10 @@ pub struct ext4_blockdev_iface {
     pub close: ::core::option::Option<
         extern "C" fn(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int,
     >,
+    #[doc = "@brief   Force completed writes to stable storage. Not mandatory.\n @param   bdev block device."]
+    pub flush: ::core::option::Option<
+        extern "C" fn(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int,
+    >,
     #[doc = "@brief   Lock block device. Required in multi partition mode\n          operations. Not mandatory field.\n @param   bdev block device."]
     pub lock: ::core::option::Option<
         extern "C" fn(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int,
@@ -780,6 +784,10 @@ extern "C" {
 extern "C" {
     #[doc = "@brief   Close block device\n @param   bdev block device descriptor\n @return  standard error code"]
     pub fn ext4_block_fini(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int;
+}
+extern "C" {
+    #[doc = "@brief   Force all completed writes to stable storage.\n @param   bdev block device descriptor\n @return  standard error code"]
+    pub fn ext4_block_flush_device(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int;
 }
 extern "C" {
     #[doc = "@brief   Flush data in given buffer to disk.\n @param   bdev block device descriptor\n @param   buf buffer\n @return  standard error code"]
@@ -1726,6 +1734,17 @@ extern "C" {
     #[doc = "@brief   Journal recovery.\n @warning Must be called after @ref ext4_mount.\n\n @param   mount_point Mount point.\n\n @return Standard error code."]
     pub fn ext4_recover(mount_point: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
 }
+extern "C" {
+    pub fn ext4_orphan_cleanup(
+        mount_point: *const ::core::ffi::c_char,
+        recovered_out: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_test_arm_journal_power_cut(
+        mount_point: *const ::core::ffi::c_char,
+    ) -> ::core::ffi::c_int;
+}
 #[doc = "@brief   Some of the filesystem stats."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1772,6 +1791,29 @@ extern "C" {
 extern "C" {
     #[doc = "@brief   Remove file by path.\n\n @param   path Path to file.\n\n @return  Standard error code."]
     pub fn ext4_fremove(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_fremove2(
+        path: *const ::core::ffi::c_char,
+        defer_inode_free: bool,
+        inode_out: *mut u32,
+        links_out: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_fremove_finalize(file: *mut ext4_file) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_file_inode_generation(
+        file: *mut ext4_file,
+        generation_out: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_flink_from_file(
+        file: *mut ext4_file,
+        path: *const ::core::ffi::c_char,
+    ) -> ::core::ffi::c_int;
 }
 extern "C" {
     #[doc = "@brief   Create a hardlink for a file.\n\n @param   path Path to file.\n @param   hardlink_path Path of hardlink.\n\n @return  Standard error code."]
@@ -1969,6 +2011,9 @@ extern "C" {
 extern "C" {
     #[doc = "@brief   Recursive directory remove.\n\n @param   path Directory path to remove\n\n @return  Standard error code."]
     pub fn ext4_dir_rm(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
+}
+extern "C" {
+    pub fn ext4_dir_rm_empty(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
 }
 extern "C" {
     #[doc = "@brief Rename/move directory.\n\n @param path     Source path.\n @param new_path Destination path.\n\n @return  Standard error code."]

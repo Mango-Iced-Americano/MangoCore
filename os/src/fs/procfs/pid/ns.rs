@@ -12,7 +12,7 @@ use crate::fs::{
     procfs::ProcFS,
     vfs::{FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata},
 };
-use crate::task::{NetNamespace, MountNamespace, IpcNamespace};
+use crate::task::{IpcNamespace, MountNamespace, NetNamespace};
 use crate::utils::error::SyscallErr;
 
 /// Inode for /proc/<pid>/ns/net.
@@ -107,13 +107,35 @@ impl ProcNsMntInode {
 }
 
 impl IndexNode for ProcNsMntInode {
-    fn read_at(&self, _o: usize, _l: usize, _buf: &mut [u8], _d: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> { Ok(0) }
-    fn write_at(&self, _o: usize, _l: usize, _b: &[u8], _d: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> { Err(SyscallErr::EINVAL) }
-    fn metadata(&self) -> Result<Metadata, SyscallErr> { Ok(self.metadata.clone()) }
-    fn fs(&self) -> Arc<dyn FileSystem> {
-        self.procfs.upgrade().expect("ProcNsMntInode: ProcFS dropped")
+    fn read_at(
+        &self,
+        _o: usize,
+        _l: usize,
+        _buf: &mut [u8],
+        _d: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Ok(0)
     }
-    fn as_any_ref(&self) -> &dyn Any { self }
+    fn write_at(
+        &self,
+        _o: usize,
+        _l: usize,
+        _b: &[u8],
+        _d: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::EINVAL)
+    }
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(self.metadata.clone())
+    }
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        self.procfs
+            .upgrade()
+            .expect("ProcNsMntInode: ProcFS dropped")
+    }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ── /proc/<pid>/ns/ipc ────────────────────────────────────────────────
@@ -143,11 +165,33 @@ impl ProcNsIpcInode {
 }
 
 impl IndexNode for ProcNsIpcInode {
-    fn read_at(&self, _o: usize, _l: usize, _buf: &mut [u8], _d: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> { Ok(0) }
-    fn write_at(&self, _o: usize, _l: usize, _b: &[u8], _d: MutexGuard<FilePrivateData>) -> Result<usize, SyscallErr> { Err(SyscallErr::EINVAL) }
-    fn metadata(&self) -> Result<Metadata, SyscallErr> { Ok(self.metadata.clone()) }
-    fn fs(&self) -> Arc<dyn FileSystem> {
-        self.procfs.upgrade().expect("ProcNsIpcInode: ProcFS dropped")
+    fn read_at(
+        &self,
+        _o: usize,
+        _l: usize,
+        _buf: &mut [u8],
+        _d: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Ok(0)
     }
-    fn as_any_ref(&self) -> &dyn Any { self }
+    fn write_at(
+        &self,
+        _o: usize,
+        _l: usize,
+        _b: &[u8],
+        _d: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::EINVAL)
+    }
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(self.metadata.clone())
+    }
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        self.procfs
+            .upgrade()
+            .expect("ProcNsIpcInode: ProcFS dropped")
+    }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }

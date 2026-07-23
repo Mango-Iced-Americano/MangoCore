@@ -8,10 +8,11 @@
 //! PTE 修改通过 `KernelMapper` 进入页表实现。新增直接页表操作时必须保持架构层
 //! 的 TLB 刷新契约。
 
+use super::frame_allocator::for_each_usable_frame_region;
 use super::kernel_mapper::KernelMapper;
 use super::{
-    frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr,
-    VirtPageNum, VPNRange,
+    frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum,
+    VPNRange, VirtAddr, VirtPageNum,
 };
 use crate::config::*;
 use crate::hal::MMIO;
@@ -168,12 +169,13 @@ impl<T: PageTable> KernelSpace<T> {
             kernel_space.map_trampoline();
         }
         // map kernel sections
-        println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
-        println!(
+        boot_trace!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
+        boot_trace!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
+        boot_trace!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        boot_trace!(
             ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize, ebss as usize
+            sbss_with_stack as usize,
+            ebss as usize
         );
         macro_rules! kernel_identical_map {
             ($begin:expr,$end:expr,$permission:expr) => {
@@ -186,7 +188,7 @@ impl<T: PageTable> KernelSpace<T> {
                     .unwrap();
             };
             ($name:literal,$begin:expr,$end:expr,$permission:expr) => {
-                println!("mapping {}", $name);
+                boot_trace!("mapping {}", $name);
                 kernel_identical_map!($begin, $end, $permission);
             };
         }
@@ -209,14 +211,16 @@ impl<T: PageTable> KernelSpace<T> {
             ebss,
             MapPermission::R | MapPermission::W | MapPermission::G
         );
-        kernel_identical_map!(
-            "physical memory",
-            ekernel,
-            MEMORY_END,
-            MapPermission::R | MapPermission::W | MapPermission::G
-        );
+        for_each_usable_frame_region(|start, end| {
+            kernel_identical_map!(
+                "physical memory region",
+                start.start_addr().0,
+                end.start_addr().0,
+                MapPermission::R | MapPermission::W | MapPermission::G
+            );
+        });
 
-        println!("mapping memory-mapped registers");
+        boot_trace!("mapping memory-mapped registers");
         for pair in MMIO {
             kernel_identical_map!(
                 (*pair).0,
@@ -262,13 +266,8 @@ impl<T: PageTable> KernelSpace<T> {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        self.try_insert_framed_area(
-            start_va,
-            end_va,
-            permission,
-            KernelMappingKind::KernelStack,
-        )
-        .unwrap();
+        self.try_insert_framed_area(start_va, end_va, permission, KernelMappingKind::KernelStack)
+            .unwrap();
     }
 
     fn try_insert_framed_area(
@@ -299,8 +298,7 @@ impl<T: PageTable> KernelSpace<T> {
                 MemoryError::OutOfMemory
             })?;
             let ppn = frame.ppn;
-            if let Err(err) =
-                KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
+            if let Err(err) = KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
             {
                 self.rollback_mapped_pages(&mapped_vpns);
                 return Err(err);
@@ -308,8 +306,11 @@ impl<T: PageTable> KernelSpace<T> {
             mapped_vpns.push(vpn);
             frames.insert(vpn, frame);
         }
-        self.kernel_mappings
-            .insert(KernelMapping::new(VPNRange::new(start_vpn, end_vpn), frames, kind))
+        self.kernel_mappings.insert(KernelMapping::new(
+            VPNRange::new(start_vpn, end_vpn),
+            frames,
+            kind,
+        ))
     }
 
     pub fn insert_program_area(
@@ -328,10 +329,24 @@ impl<T: PageTable> KernelSpace<T> {
         permission: MapPermission,
         frames: Vec<Arc<FrameTracker>>,
     ) -> Result<(), MemoryError> {
-        let start_vpn = start_va.floor();
-        let end_vpn = VirtPageNum::from(start_vpn.0 + frames.len());
-        if start_vpn == end_vpn {
+        if frames.is_empty() {
             return Ok(());
+        }
+        let start_vpn = start_va.floor();
+        let end_vpn = VirtPageNum::from(
+            start_vpn
+                .0
+                .checked_add(frames.len())
+                .ok_or(MemoryError::BadAddress)?,
+        );
+        // 程序载荷只会在此临时映射到完成 ELF 解析。LoongArch 上若允许该区间越过
+        // KERNEL_PROGRAM_END，就可能命中与高地址内核栈相同的低 39 位 PGDH 索引。
+        // 普通区间重叠检查无法发现这种架构别名，因此必须在安装任何 PTE 前拒绝该
+        // 范围。上方 checked_add 还可防止 end_vpn 回绕后绕过边界比较。
+        let arena_start = VirtAddr::from(MMAP_BASE).floor();
+        let arena_end = VirtAddr::from(KERNEL_PROGRAM_END).floor();
+        if start_vpn < arena_start || end_vpn > arena_end {
+            return Err(MemoryError::BadAddress);
         }
         if self.kernel_mappings.has_overlap(start_vpn, end_vpn) {
             return Err(MemoryError::AlreadyMapped);
@@ -346,8 +361,7 @@ impl<T: PageTable> KernelSpace<T> {
         for (idx, frame) in frames.into_iter().enumerate() {
             let vpn = VirtPageNum::from(start_vpn.0 + idx);
             let ppn = frame.ppn;
-            if let Err(err) =
-                KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
+            if let Err(err) = KernelMapper::new(&mut self.page_table).map_page(vpn, ppn, permission)
             {
                 self.rollback_mapped_pages(&mapped_vpns);
                 return Err(err);
@@ -355,12 +369,11 @@ impl<T: PageTable> KernelSpace<T> {
             mapped_vpns.push(vpn);
             frame_map.insert(vpn, frame);
         }
-        self.kernel_mappings
-            .insert(KernelMapping::new(
-                VPNRange::new(start_vpn, end_vpn),
-                frame_map,
-                KernelMappingKind::Program,
-            ))
+        self.kernel_mappings.insert(KernelMapping::new(
+            VPNRange::new(start_vpn, end_vpn),
+            frame_map,
+            KernelMappingKind::Program,
+        ))
     }
 
     pub fn remove_area_with_start_vpn(

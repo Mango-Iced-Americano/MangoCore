@@ -2387,15 +2387,3 @@ pub(crate) fn fd_to_inode(fd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
 
     Ok(inode)
 }
-
-
-
-
-
-
-
-
-
-
-
-

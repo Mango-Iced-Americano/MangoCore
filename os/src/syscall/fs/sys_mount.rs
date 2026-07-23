@@ -382,16 +382,20 @@ pub fn sys_mount(
         // a persistent flag itself).
         let old_flags = mnt_inode.mount_fs.mount_flags();
 
-        // If switching to read-only while writers exist → EBUSY
+        // Access-mode remounting needs an atomic backend transition (journal,
+        // lwext4 read_only state, cache writeback and the physical block-device
+        // barrier).  Merely changing the VFS bit would either leave a nominally
+        // read-only mount writable underneath, or report a read-write remount
+        // while the original read-only device wrapper still discards writes.
+        // Until every backend implements that transition, reject it explicitly
+        // and continue to support remounts that only change VFS policy flags.
         if user_flags.contains(vfs::MountFlags::RDONLY)
-            && !old_flags.contains(vfs::MountFlags::RDONLY)
-            && mnt_inode.mount_fs.has_writers()
+            != old_flags.contains(vfs::MountFlags::RDONLY)
         {
-            return EBUSY;
+            return EOPNOTSUPP;
         }
 
-        let non_atime_mod = vfs::MountFlags::RDONLY
-            | vfs::MountFlags::NOSUID
+        let non_atime_mod = vfs::MountFlags::NOSUID
             | vfs::MountFlags::NODEV
             | vfs::MountFlags::NOEXEC
             | vfs::MountFlags::SYNCHRONOUS
@@ -539,24 +543,43 @@ pub fn sys_mount(
                     };
                     let blk_dev = &bdi.inner;
 
-                    // 2. Detect actual FS type from superblock
-                    let detected = crate::fs::detect_fs(blk_dev);
+                    // 2. Detect both filesystem type and its native block
+                    // size.  Dynamic mounts must use the same device adapter
+                    // path as boot-time mounts (notably for 512-byte FAT
+                    // sectors on a 4 KiB platform block device).
+                    let detected = match crate::fs::detect_fs_layout(blk_dev) {
+                        Some(detected) => detected,
+                        None => return -(SyscallErr::EINVAL as isize),
+                    };
 
                     // 3. Validate FS type matches user request
                     let is_ext = matches!(filesystemtype.as_str(), "ext2" | "ext3" | "ext4");
-                    match (&detected, is_ext) {
+                    match (detected.fs_type, is_ext) {
                         (crate::fs::FS_Type::Ext4, true) => {}
                         (crate::fs::FS_Type::Fat32, false) => {}
                         _ => return -(SyscallErr::EINVAL as isize),
                     }
 
-                    // 4. Open the filesystem
-                    let new_fs: Arc<dyn vfs::FileSystem> = match detected {
+                    // 4. Adapt native I/O granularity and enforce MS_RDONLY
+                    // at the physical block-device boundary before opening
+                    // the selected backend.
+                    let fs_device = crate::fs::adapt_filesystem_device(
+                        blk_dev.clone(),
+                        detected,
+                        mountflags.contains(MountFlags::MS_RDONLY),
+                    );
+                    let new_fs: Arc<dyn vfs::FileSystem> = match detected.fs_type {
                         crate::fs::FS_Type::Ext4 => {
-                            crate::fs::ext4::ext4fs::Ext4FileSystem::open_ext4rs(blk_dev.clone())
+                            match crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs_with_options(
+                                fs_device,
+                                mountflags.contains(MountFlags::MS_RDONLY),
+                            ) {
+                                Ok(fs) => fs,
+                                Err(e) => return -(e as isize),
+                            }
                         }
                         crate::fs::FS_Type::Fat32 => {
-                            crate::fs::fat32::EasyFileSystem::open(blk_dev.clone())
+                            crate::fs::fat32::EasyFileSystem::open(fs_device)
                         }
                         _ => return -(SyscallErr::EINVAL as isize),
                     };

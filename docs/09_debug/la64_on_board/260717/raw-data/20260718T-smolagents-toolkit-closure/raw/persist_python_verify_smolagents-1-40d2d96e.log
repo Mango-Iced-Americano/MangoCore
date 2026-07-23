@@ -1,0 +1,7 @@
+2026-07-18T05:19:19.513595Z __PERF_BEGIN_persist_python_verify_smolagents-1-40d2d96e__
+2026-07-18T05:19:20.656460Z MangoPersist:/persist/apk-root# __PERF_ACK_persist_python_verify_smolagents-1-40d2d96e_TRACE_OFF__
+2026-07-18T05:19:22.754627Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_persist_python_verify_smolagents-1-40d2d96e__
+2026-07-18T05:19:22.761347Z /bin/sh: /rescue/verify-persist-python: not found
+2026-07-18T05:19:22.769505Z __PERF_WORK_END_persist_python_verify_smolagents-1-40d2d96e__
+2026-07-18T05:19:22.775235Z __PERF_ACK_persist_python_verify_smolagents-1-40d2d96e_WORK__
+2026-07-18T05:19:23.393721Z MangoPersist:/persist/apk-root# __PERF_END_persist_python_verify_smolagents-1-40d2d96e__ rc=127

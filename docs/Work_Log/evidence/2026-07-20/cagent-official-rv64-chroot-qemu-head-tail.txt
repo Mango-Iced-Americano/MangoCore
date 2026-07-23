@@ -1,0 +1,90 @@
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+Request: POST /v1/chat/completions HTTP/1.1
+Request: POST /v1/chat/completions HTTP/1.1
+Request: POST /v1/chat/completions HTTP/1.1
+Request: POST /v1/chat/completions HTTP/1.1
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888480, 32, 0, 4047507571, 18446744073709551615, 536888512]
+Request: POST /v1/chat/completions HTTP/1.1
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+testcase cagent factorial pass 4950
+testcase cagent fs-create pass 3864
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+testcase cagent fs-readwrite pass 5562
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+testcase cagent cpu pass 5176
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+testcase cagent date pass 5839
+Request: POST /v1/chat/completions HTTP/1.1
+testcase cagent network pass 6486
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+testcase cagent kernel pass 6089
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [538937344, 32, 0, 4047507571, 18446744073709551615, 538937376]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+testcase cagent fs-usage pass 4797
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+testcase cagent fs-search pass 6796
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888448, 32, 0, 4047507571, 18446744073709551615, 536888480]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [536888480, 32, 0, 4047507571, 18446744073709551615, 536888512]
+[syscall] Unsupported syscall: unknown (293), calling over arguments: [539171040, 32, 0, 4047507571, 18446744073709551615, 539171072]
+testcase cagent fs-directory pass 10195

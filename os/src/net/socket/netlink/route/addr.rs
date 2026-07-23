@@ -10,8 +10,8 @@ use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use crate::net::iface::Iface;
 use crate::utils::error::SyscallErr;
 
-use super::super::NetlinkSocket;
 use super::super::netlink::{build_nlmsg_error, IFA_ADDRESS, IFA_LOCAL, NLM_F_EXCL, NLM_F_REPLACE};
+use super::super::NetlinkSocket;
 
 /// Parse an IPv4 address from the RTA attributes following the `ifaddrmsg` header.
 fn parse_ifa_addr(payload: &[u8], mut offset: usize) -> Option<Ipv4Address> {
@@ -84,7 +84,13 @@ fn find_iface_by_index(index: i32) -> Option<alloc::sync::Arc<dyn Iface>> {
 
 /// Push an `NLMSG_ERROR` ACK onto the socket's receive queue.
 /// Returns `Err(ENOBUFS)` if the queue is full.
-fn send_ack(sock: &NetlinkSocket, seq: u32, pid: u32, errno: i32, orig: &[u8; 16]) -> Result<(), SyscallErr> {
+fn send_ack(
+    sock: &NetlinkSocket,
+    seq: u32,
+    pid: u32,
+    errno: i32,
+    orig: &[u8; 16],
+) -> Result<(), SyscallErr> {
     if !sock.push_recv(build_nlmsg_error(errno, seq, pid, orig)) {
         return Err(SyscallErr::ENOBUFS);
     }
@@ -161,7 +167,10 @@ pub fn handle_newaddr(
             sync_addr_to_smoltcp(msg.index as u32, cidr);
 
             let ns = crate::net::net_core::current_netns();
-            let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
+            let net_cidr = IpCidr::new(
+                IpAddress::Ipv4(network_base(addr, msg.prefixlen)),
+                msg.prefixlen,
+            );
             let mut router = ns.router.lock();
             router.table.remove_connected(msg.index as u32, &net_cidr);
             router.add_route(
@@ -197,7 +206,10 @@ pub fn handle_newaddr(
             sync_addr_to_smoltcp(msg.index as u32, cidr);
 
             let ns = crate::net::net_core::current_netns();
-            let net_cidr = IpCidr::new(IpAddress::Ipv6(network_base_v6(&addr, msg.prefixlen)), msg.prefixlen);
+            let net_cidr = IpCidr::new(
+                IpAddress::Ipv6(network_base_v6(&addr, msg.prefixlen)),
+                msg.prefixlen,
+            );
             let mut router = ns.router.lock();
             router.table.remove_connected(msg.index as u32, &net_cidr);
             router.add_route(
@@ -241,7 +253,10 @@ pub fn handle_deladdr(
             unsync_addr_from_smoltcp(msg.index as u32, cidr);
 
             let ns = crate::net::net_core::current_netns();
-            let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
+            let net_cidr = IpCidr::new(
+                IpAddress::Ipv4(network_base(addr, msg.prefixlen)),
+                msg.prefixlen,
+            );
             let mut router = ns.router.lock();
             router.table.remove_connected(msg.index as u32, &net_cidr);
         }
@@ -255,7 +270,10 @@ pub fn handle_deladdr(
             unsync_addr_from_smoltcp(msg.index as u32, cidr);
 
             let ns = crate::net::net_core::current_netns();
-            let net_cidr = IpCidr::new(IpAddress::Ipv6(network_base_v6(&addr, msg.prefixlen)), msg.prefixlen);
+            let net_cidr = IpCidr::new(
+                IpAddress::Ipv6(network_base_v6(&addr, msg.prefixlen)),
+                msg.prefixlen,
+            );
             let mut router = ns.router.lock();
             router.table.remove_connected(msg.index as u32, &net_cidr);
         }
@@ -278,7 +296,11 @@ fn unsync_addr_from_smoltcp(ifindex: u32, cidr: IpCidr) {
 
 fn network_base(addr: Ipv4Address, prefix_len: u8) -> Ipv4Address {
     let ip = u32::from_be_bytes(addr.0);
-    let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix_len)
+    };
     Ipv4Address::from_bytes(&(ip & mask).to_be_bytes())
 }
 

@@ -1,0 +1,13 @@
+artifact_sha256=5298fb0fa48577aaebff592fa6b7e410e3d9d1f4311367ced2e26913f7f495b9
+release=/persist/python-runtime/releases/5298fb0fa485
+current=/persist/python-runtime/current
+pyctl_get command_bytes=73 wrapped_bytes=247
+/bin/busybox wget -O /tmp/pyd http://192.168.2.1:8009/pyd-5298fb0fa485.sh
+pyctl_sha command_bytes=113 wrapped_bytes=287
+printf '30c4cd43de406c40ce6f67624ea47455b4795b88b52a4073dccf385d67e4c415  /tmp/pyd\n'|/bin/busybox sha256sum -c -
+pyctl_run command_bytes=16 wrapped_bytes=190
+/bin/sh /tmp/pyd
+pyctl_rm command_bytes=14 wrapped_bytes=185
+rm -f /tmp/pyd
+control_script_bytes=2499
+control_script_sha256=30c4cd43de406c40ce6f67624ea47455b4795b88b52a4073dccf385d67e4c415

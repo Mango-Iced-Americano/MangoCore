@@ -1,0 +1,39 @@
+2026-07-16T13:10:33.460634Z __PERF_BEGIN_board_suite_file_identity-1-3066dbd4__
+2026-07-16T13:10:34.426688Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# test -w /sys/kernel/tr<[34m/persist/pyperf/s[0m# test -w /sys/kernel/tra                         cing/tracing_on && echo 0<# test -w /sys/kernel/tracing/tracing_on && echo 0                          > /sys/kernel/tracing/tra<ing/tracing_on && echo 0 > /sys/kernel/tracing/trac                         ing_on; printf '__PERF_AC< /sys/kernel/tracing/tracing_on; printf '__PERF_ACK                         _board_suite_file_identit<ng_on; printf '__PERF_ACK_board_suite_file_identity                         -1-3066dbd4_TRACE_OFF__\n<board_suite_file_identity-1-3066dbd4_TRACE_OFF__\n'                         
+2026-07-16T13:10:34.432205Z __PERF_ACK_board_suite_file_identity-1-3066dbd4_TRACE_OFF__
+2026-07-16T13:10:37.141090Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# printf '__PERF_WORK_BE<[34m/persist/pyperf/s[0m# printf '__PERF_WORK_BEG                         IN_board_suite_file_ident<# printf '__PERF_WORK_BEGIN_board_suite_file_identi                         ty-1-3066dbd4__\n'; { cat<N_board_suite_file_identity-1-3066dbd4__\n'; { cat                          /proc/mounts; for d in /s<y-1-3066dbd4__\n'; { cat /proc/mounts; for d in /sc                         ratch/mangocore-cpython-b<proc/mounts; for d in /scratch/mangocore-cpython-be                         nch-suite /persist/pyperf<atch/mangocore-cpython-bench-suite /persist/pyperf/                         s; do echo DIR=$d; sha256<ch-suite /persist/pyperf/s; do echo DIR=$d; sha256s                         um $d/bench/bench_runner.<; do echo DIR=$d; sha256sum $d/bench/bench_runner.p                         y $d/bench/bm_float.py $d<m $d/bench/bench_runner.py $d/bench/bm_float.py $d/                         bench/bm_string.py $d/ben< $d/bench/bm_float.py $d/bench/bm_string.py $d/benc                         h/bm_nbody.py 2>&1; done;<ench/bm_string.py $d/bench/bm_nbody.py 2>&1; done;                          }; __perf_rc=$?; printf '</bm_nbody.py 2>&1; done; }; __perf_rc=$?; printf '_                         _PERF_WORK_END_board_suit<; __perf_rc=$?; printf '__PERF_WORK_END_board_suite                         _file_identity-1-3066dbd4<PERF_WORK_END_board_suite_file_identity-1-3066dbd4_                         _\n'; printf '__PERF_ACK_<file_identity-1-3066dbd4__\n'; printf '__PERF_ACK_b                         oard_suite_file_identity-<\n'; printf '__PERF_ACK_board_suite_file_identity-1                         -3066dbd4_WORK__\n'
+2026-07-16T13:10:37.141528Z __PERF_WORK_BEGIN_board_suite_file_identity-1-3066dbd4__
+2026-07-16T13:10:37.178179Z none / rootfs rw,relatime 0 0
+2026-07-16T13:10:37.183676Z /tools/tests /tests ext4 ro,relatime 0 0
+2026-07-16T13:10:37.186522Z /persist /persist ext4 rw,relatime 0 0
+2026-07-16T13:10:37.192092Z /persist/python /persist/apk-root/var/cache/mango-python ext4 rw,relatime 0 0
+2026-07-16T13:10:37.197638Z /tools /persist/apk-root/tools ext4 ro,relatime 0 0
+2026-07-16T13:10:37.203251Z /scratch /persist/apk-root/scratch fat32 rw,relatime 0 0
+2026-07-16T13:10:37.208803Z /run /persist/apk-root/run ramfs rw,relatime 0 0
+2026-07-16T13:10:37.211567Z /tmp /persist/apk-root/tmp tmpfs rw,relatime 0 0
+2026-07-16T13:10:37.217160Z /dev /persist/apk-root/dev devfs rw,relatime 0 0
+2026-07-16T13:10:37.219877Z /proc /persist/apk-root/proc proc rw,relatime 0 0
+2026-07-16T13:10:37.225489Z /scratch /scratch fat32 rw,relatime 0 0
+2026-07-16T13:10:37.228283Z none /sys sysfs rw,relatime 0 0
+2026-07-16T13:10:37.231098Z /tools /tools ext4 ro,relatime 0 0
+2026-07-16T13:10:37.233872Z none /tmp tmpfs rw,relatime 0 0
+2026-07-16T13:10:37.236645Z /sdcard /sdcard ext4 ro,relatime 0 0
+2026-07-16T13:10:37.239458Z none /proc proc rw,relatime 0 0
+2026-07-16T13:10:37.242211Z /sdcard/musl /musl ext4 ro,relatime 0 0
+2026-07-16T13:10:37.247762Z /sdcard/glibc /glibc ext4 ro,relatime 0 0
+2026-07-16T13:10:37.250645Z none /dev devfs rw,relatime 0 0
+2026-07-16T13:10:37.251503Z none /dev/shm tmpfs rw,relatime 0 0
+2026-07-16T13:10:37.257774Z DIR=/scratch/mangocore-cpython-bench-suite
+2026-07-16T13:10:37.327254Z 586c5abc1fabc20c3ad45117afd858f7be185c06e7348747f58713996e11020b  /scratch/mangocore-cpython-bench-suite/bench/bench_runner.py
+2026-07-16T13:10:37.342549Z d45dc5c511ee9443c4597f5853d25d930b6e99d233c2806e4f95c19fccf6fe5f  /scratch/mangocore-cpython-bench-suite/bench/bm_float.py
+2026-07-16T13:10:37.360380Z 197961d009b9d3c1b0cadcba3fc3b6fe8ebb0ad2cd6fd0a98ec2c671c6cea6be  /scratch/mangocore-cpython-bench-suite/bench/bm_string.py
+2026-07-16T13:10:37.378296Z 2c54c012fe1decd0c365b018b54a677e4152fa2e8fecb97457f530070b3102bc  /scratch/mangocore-cpython-bench-suite/bench/bm_nbody.py
+2026-07-16T13:10:37.382205Z DIR=/persist/pyperf/s
+2026-07-16T13:10:37.436676Z 586c5abc1fabc20c3ad45117afd858f7be185c06e7348747f58713996e11020b  /persist/pyperf/s/bench/bench_runner.py
+2026-07-16T13:10:37.447359Z d45dc5c511ee9443c4597f5853d25d930b6e99d233c2806e4f95c19fccf6fe5f  /persist/pyperf/s/bench/bm_float.py
+2026-07-16T13:10:37.458638Z 197961d009b9d3c1b0cadcba3fc3b6fe8ebb0ad2cd6fd0a98ec2c671c6cea6be  /persist/pyperf/s/bench/bm_string.py
+2026-07-16T13:10:37.471901Z 2c54c012fe1decd0c365b018b54a677e4152fa2e8fecb97457f530070b3102bc  /persist/pyperf/s/bench/bm_nbody.py
+2026-07-16T13:10:37.478690Z __PERF_WORK_END_board_suite_file_identity-1-3066dbd4__
+2026-07-16T13:10:37.483784Z __PERF_ACK_board_suite_file_identity-1-3066dbd4_WORK__
+2026-07-16T13:10:37.984058Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# printf '__PERF_END_boa<[34m/persist/pyperf/s[0m# printf '__PERF_END_boar                         d_suite_file_identity-1-3<# printf '__PERF_END_board_suite_file_identity-1-30                         66dbd4__ rc=%s\n' "$__per<_suite_file_identity-1-3066dbd4__ rc=%s\n' "$__perf                         _rc"
+2026-07-16T13:10:37.984374Z __PERF_END_board_suite_file_identity-1-3066dbd4__ rc=0

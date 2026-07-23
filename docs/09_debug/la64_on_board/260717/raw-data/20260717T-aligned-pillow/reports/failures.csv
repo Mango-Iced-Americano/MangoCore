@@ -1,0 +1,9 @@
+sample_id,test,arch,platform,build_mode,exit_status,wall_seconds,log
+pyctl_get-1-dff182ae,pyctl_get,la64,2k1000la,production,124,1.5420000001320489e-06,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/pyctl_get-1-dff182ae.log
+p4_default_python_and_smolagent_gate-1-6cda9738,p4_default_python_and_smolagent_gate,la64,2k1000la,production,1,52.846309375,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/p4_default_python_and_smolagent_gate-1-6cda9738.log
+pyctl_run-1-15430c69,pyctl_run,la64,2k1000la,production,1,403.890348,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/pyctl_run-1-15430c69.log
+p4_space_audit-1-5e6214a7,p4_space_audit,la64,2k1000la,production,124,124.469520875,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/p4_space_audit-1-5e6214a7.log
+pyctl_run-1-98635f81,pyctl_run,la64,2k1000la,production,1,619.023681459,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/pyctl_run-1-98635f81.log
+persist_default_gate-1-2e6fb8fb,persist_default_gate,la64,2k1000la,production,1,50.804206042000004,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/persist_default_gate-1-2e6fb8fb.log
+aligned_python_pyyaml_build-1-d59a52ab,aligned_python_pyyaml_build,la64,host-docker,production,2,4.763110458,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/aligned_python_pyyaml_build-1-d59a52ab.log
+final_rv64_kernel_build-1-999d765b,final_rv64_kernel_build,rv64,docker,production,2,6.442118334,/Users/luzimo/dev/MangoCore/target/perf-runs/20260717T-aligned-pillow/raw/final_rv64_kernel_build-1-999d765b.log

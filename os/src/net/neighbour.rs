@@ -97,7 +97,9 @@ pub fn try_capture_arp_reply(frame_buf: &[u8], ifindex: u32) {
         return;
     }
 
-    let mac = EthernetAddress([src_hw[0], src_hw[1], src_hw[2], src_hw[3], src_hw[4], src_hw[5]]);
+    let mac = EthernetAddress([
+        src_hw[0], src_hw[1], src_hw[2], src_hw[3], src_hw[4], src_hw[5],
+    ]);
     let ip = IpAddress::v4(src_proto[0], src_proto[1], src_proto[2], src_proto[3]);
 
     neighbour_record(ifindex, ip, mac);

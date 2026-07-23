@@ -10,7 +10,8 @@ fail = 0
 PREFIX = "[CPYTHON L9]"
 REQUIRE_NET = os.environ.get("CPYTHON_L9_REQUIRE_NET") == "1"
 
-CA_FILE = "/tools/tests/cpython/etc/ssl/certs/ca-certificates.crt"
+RUNTIME_ROOT = os.environ["CPYTHON_ROOT"]
+CA_FILE = os.path.join(RUNTIME_ROOT, "etc", "ssl", "certs", "ca-certificates.crt")
 if "SSL_CERT_FILE" not in os.environ and os.path.exists(CA_FILE):
     os.environ["SSL_CERT_FILE"] = CA_FILE
 
@@ -87,14 +88,16 @@ with check("layer3 DNS getaddrinfo cloudflare.com"):
     print(f"{PREFIX} DNS addr: {dns_addr}", flush=True)
 
 
-with check("layer4 TCP HTTP 1.1.1.1"):
+with check("layer4 TCP HTTP cloudflare.com"):
     s = None
     try:
-        s = socket.create_connection(("1.1.1.1", 80), timeout=10.0)
+        if dns_addr is None:
+            raise RuntimeError("DNS layer did not return an IPv4 endpoint")
+        s = socket.create_connection(dns_addr, timeout=10.0)
         s.settimeout(10.0)
         req = (
             b"GET /cdn-cgi/trace HTTP/1.0\r\n"
-            b"Host: 1.1.1.1\r\n"
+            b"Host: cloudflare.com\r\n"
             b"Connection: close\r\n"
             b"\r\n"
         )

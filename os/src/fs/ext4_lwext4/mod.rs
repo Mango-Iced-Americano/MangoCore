@@ -7,5 +7,6 @@ pub mod blockdev;
 pub mod counters;
 pub mod errno;
 pub mod ext4fs;
+pub(crate) mod inode_state;
 pub mod layout;
 pub mod page_cache;

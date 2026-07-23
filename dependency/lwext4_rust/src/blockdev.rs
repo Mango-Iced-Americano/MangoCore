@@ -23,10 +23,16 @@ pub trait KernelDevOp {
 }
 
 pub struct Ext4BlockWrapper<K: KernelDevOp> {
-    value: Box<ext4_blockdev>,
+    value: Option<Box<ext4_blockdev>>,
     //block_dev: K::DevType,
     name: [u8; 16],
     mount_point: [u8; 32],
+    read_only: bool,
+    device_registered: bool,
+    fs_mounted: bool,
+    journal_started: bool,
+    writeback_enabled: bool,
+    recovered_orphans: u32,
     pd: core::marker::PhantomData<K>,
 }
 
@@ -45,6 +51,20 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         dev_name: &str,
         mount_point_str: &str,
     ) -> Result<Self, i32> {
+        Self::new_with_names_and_read_only(block_dev, dev_name, mount_point_str, false)
+    }
+
+    /// Full constructor with custom names and explicit mount access mode.
+    ///
+    /// A read-only mount must be communicated to lwext4 itself, not only to
+    /// the backing device: otherwise mount-time journal recovery may still
+    /// issue writes before the VFS has a chance to enforce `MS_RDONLY`.
+    pub fn new_with_names_and_read_only(
+        block_dev: K::DevType,
+        dev_name: &str,
+        mount_point_str: &str,
+        read_only: bool,
+    ) -> Result<Self, i32> {
         // note this ownership
         let devt_user = Box::into_raw(Box::new(block_dev)) as *mut c_void;
 
@@ -56,6 +76,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             bread: Some(Self::dev_bread),
             bwrite: Some(Self::dev_bwrite),
             close: Some(Self::dev_close),
+            flush: Some(Self::dev_flush),
             lock: None,
             unlock: None,
             ph_bsize: EXT4_DEV_BSIZE,
@@ -67,13 +88,14 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             p_user: devt_user,
         };
 
-        let bcbuf: Box<ext4_bcache> = Box::new(unsafe { core::mem::zeroed() });
-
         let ext4dev = ext4_blockdev {
             bdif: Box::into_raw(Box::new(ext4bdif)),
             part_offset: 0,
             part_size: 0 * EXT4_DEV_BSIZE as u64,
-            bc: Box::into_raw(bcbuf),
+            // lwext4 binds this to its mount-point-owned cache during mount.
+            // Allocating a placeholder here only leaks it when C overwrites
+            // the pointer.
+            bc: null_mut(),
             lg_bsize: 0,
             lg_bcnt: 0,
             cache_write_back: 0,
@@ -96,9 +118,15 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             .copy_from_slice(&c_mountpoint[..c_mountpoint.len().min(32)]);
 
         let mut ext4bd = Self {
-            value: Box::new(ext4dev),
+            value: Some(Box::new(ext4dev)),
             name,
             mount_point,
+            read_only,
+            device_registered: false,
+            fs_mounted: false,
+            journal_started: false,
+            writeback_enabled: false,
+            recovered_orphans: 0,
             pd: core::marker::PhantomData,
         };
 
@@ -214,11 +242,10 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 
         let buf_len = ((*(*bdev).bdif).ph_bsize * blk_cnt * 1) as usize;
         let buffer = unsafe { from_raw_parts(buf as *const u8, buf_len) };
-        let write_cnt = K::write(devt, buffer);
-        match write_cnt {
-            Ok(v) => v,
-            Err(_e) => return EIO as _,
-        };
+        if let Err(e) = K::write(devt, buffer) {
+            let errno = if e < 0 { e.saturating_neg() } else { e };
+            return if errno == 0 { EIO as _ } else { errno as _ };
+        }
 
         // drop_cache();
         // sync
@@ -232,43 +259,93 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         EOK as _
     }
 
+    pub extern "C" fn dev_flush(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int {
+        unsafe {
+            if bdev.is_null() || (*bdev).bdif.is_null() {
+                return EIO as _;
+            }
+            let p_user = (*(*bdev).bdif).p_user;
+            if p_user.is_null() {
+                return EIO as _;
+            }
+            let devt = &mut *(p_user as *mut K::DevType);
+            match K::flush(devt) {
+                Ok(_) => EOK as _,
+                Err(error) => {
+                    let errno = if error < 0 {
+                        error.saturating_neg()
+                    } else {
+                        error
+                    };
+                    if errno == 0 { EIO as _ } else { errno as _ }
+                }
+            }
+        }
+    }
+
     pub unsafe fn lwext4_mount(&mut self) -> Result<usize, i32> {
         let c_name = &self.name as *const _ as *const c_char;
         let c_mountpoint = &self.mount_point as *const _ as *const c_char;
 
-        let r = ext4_device_register(self.value.as_mut(), c_name);
+        if self.device_registered || self.fs_mounted {
+            error!("lwext4_mount called on an active block wrapper");
+            return Err(EIO as i32);
+        }
+
+        let value = self.value.as_deref_mut().ok_or(EIO as i32)?;
+        let r = ext4_device_register(value, c_name);
         if r != EOK as i32 {
             error!("ext4_device_register: rc = {:?}\n", r);
             return Err(r);
         }
-        let r = ext4_mount(c_name, c_mountpoint, false);
+        self.device_registered = true;
+
+        let r = ext4_mount(c_name, c_mountpoint, self.read_only);
         if r != EOK as i32 {
             error!("ext4_mount: rc = {:?}\n", r);
             return Err(r);
         }
-        let r = ext4_recover(c_mountpoint);
-        if (r != EOK as i32) && (r != ENOTSUP as i32) {
-            error!("ext4_recover: rc = {:?}\n", r);
-            return Err(r);
+        self.fs_mounted = true;
+
+        if !self.read_only {
+            let r = ext4_recover(c_mountpoint);
+            if (r != EOK as i32) && (r != ENOTSUP as i32) {
+                error!("ext4_recover: rc = {:?}\n", r);
+                return Err(r);
+            }
+
+            let r = ext4_journal_start(c_mountpoint);
+            if r != EOK as i32 {
+                error!("ext4_journal_start: rc = {:?}\n", r);
+                return Err(r);
+            }
+            self.journal_started = true;
+
+            let mut recovered_orphans = 0u32;
+            let r = ext4_orphan_cleanup(c_mountpoint, &mut recovered_orphans);
+            if r != EOK as i32 {
+                error!("ext4_orphan_cleanup: rc = {:?}\n", r);
+                return Err(r);
+            }
+            self.recovered_orphans = recovered_orphans;
+            if recovered_orphans != 0 {
+                info!("lwext4 recovered {} persistent orphan(s)", recovered_orphans);
+            }
+
+            let r = ext4_cache_write_back(c_mountpoint, true);
+            if r != EOK as i32 {
+                error!("ext4_cache_write_back(enable): rc = {:?}\n", r);
+                return Err(r);
+            }
+            self.writeback_enabled = true;
         }
 
-        //  ext4_mount("sda1", "/");
-        //  ext4_journal_start("/");
-        //
-        // File operations here...
-        //
-        //  ext4_journal_stop("/");
-        //  ext4_umount("/");
-        let r = ext4_journal_start(c_mountpoint);
-        if r != EOK as i32 {
-            error!("ext4_journal_start: rc = {:?}\n", r);
-            return Err(r);
-        }
-        ext4_cache_write_back(c_mountpoint, true);
-        // ext4_bcache
-
-        info!("lwext4 mount Okay");
+        info!("lwext4 mount Okay (read_only={})", self.read_only);
         Ok(0)
+    }
+
+    pub fn recovered_orphans(&self) -> u32 {
+        self.recovered_orphans
     }
 
     /// Call this when block device is being uninstalled
@@ -277,24 +354,40 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         let c_mountpoint = &self.mount_point as *const _ as *const c_char;
 
         unsafe {
-            ext4_cache_write_back(c_mountpoint, false);
-
-            let r = ext4_journal_stop(c_mountpoint);
-            if r != EOK as i32 {
-                error!("ext4_journal_stop: fail {}", r);
-                return Err(r);
+            if self.writeback_enabled {
+                let r = ext4_cache_write_back(c_mountpoint, false);
+                if r != EOK as i32 {
+                    error!("ext4_cache_write_back(disable): fail {}", r);
+                    return Err(r);
+                }
+                self.writeback_enabled = false;
             }
 
-            let r = ext4_umount(c_mountpoint);
-            if r != EOK as i32 {
-                error!("ext4_umount: fail {}", r);
-                return Err(r);
+            if self.journal_started {
+                let r = ext4_journal_stop(c_mountpoint);
+                if r != EOK as i32 {
+                    error!("ext4_journal_stop: fail {}", r);
+                    return Err(r);
+                }
+                self.journal_started = false;
             }
 
-            let r = ext4_device_unregister(c_name);
-            if r != EOK as i32 {
-                error!("ext4_device_unregister: fail {}", r);
-                return Err(r);
+            if self.fs_mounted {
+                let r = ext4_umount(c_mountpoint);
+                if r != EOK as i32 {
+                    error!("ext4_umount: fail {}", r);
+                    return Err(r);
+                }
+                self.fs_mounted = false;
+            }
+
+            if self.device_registered {
+                let r = ext4_device_unregister(c_name);
+                if r != EOK as i32 {
+                    error!("ext4_device_unregister: fail {}", r);
+                    return Err(r);
+                }
+                self.device_registered = false;
             }
         }
 
@@ -373,7 +466,9 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
     }
 
     pub fn print_lwext4_block_stats(&self) {
-        let ext4dev = &(self.value);
+        let Some(ext4dev) = self.value.as_ref() else {
+            return;
+        };
         //if ext4dev.is_null { return; }
 
         info!("********************");
@@ -396,8 +491,44 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
     fn drop(&mut self) {
         info!("Drop struct Ext4BlockWrapper");
-        self.lwext4_umount().ok();
-        let devtype = unsafe { Box::from_raw((*(&self.value).bdif).p_user as *mut K::DevType) };
-        drop(devtype);
+        let detached = self.lwext4_umount().is_ok()
+            && !self.device_registered
+            && !self.fs_mounted
+            && !self.journal_started
+            && !self.writeback_enabled;
+
+        let Some(mut value) = self.value.take() else {
+            return;
+        };
+
+        if !detached {
+            // C may still retain pointers into `value` or its p_user object.
+            // Leaking on a fatal teardown error is safer than leaving a
+            // dangling pointer in lwext4's global registry.
+            error!("lwext4 teardown incomplete; leaking registered block device safely");
+            core::mem::forget(value);
+            return;
+        }
+
+        unsafe {
+            let bdif = value.bdif;
+            if !bdif.is_null() {
+                let p_user = (*bdif).p_user;
+                let ph_bbuf = (*bdif).ph_bbuf;
+                (*bdif).p_user = null_mut();
+                (*bdif).ph_bbuf = null_mut();
+                value.bdif = null_mut();
+
+                if !p_user.is_null() {
+                    drop(Box::from_raw(p_user as *mut K::DevType));
+                }
+                if !ph_bbuf.is_null() {
+                    drop(Box::from_raw(
+                        ph_bbuf as *mut [u8; EXT4_DEV_BSIZE as usize]
+                    ));
+                }
+                drop(Box::from_raw(bdif));
+            }
+        }
     }
 }

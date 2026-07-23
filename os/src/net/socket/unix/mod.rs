@@ -213,8 +213,8 @@ pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> Sys
 
     // 写入用户空间缓冲区
     let write_len = actual_len.min(capacity);
-    let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, write_len)
-        .map_err(|_| SyscallErr::EFAULT)?;
+    let mut user_buf =
+        UserBufferWriter::new(token, addr as *mut u8, write_len).map_err(|_| SyscallErr::EFAULT)?;
     user_buf
         .write_from(&data[..write_len])
         .map_err(|_| SyscallErr::EFAULT)?;
@@ -234,7 +234,9 @@ pub fn alloc_socket_fd(
 ) -> Result<usize, SyscallErr> {
     let socket_file: Arc<dyn crate::fs::vfs::IndexNode> = Arc::new(SocketFile::new(socket));
     let mut flags = FileFlags::O_RDWR;
-    if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
+    if is_nonblock {
+        flags.insert(FileFlags::O_NONBLOCK);
+    }
     let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
     let task = current_task().ok_or(SyscallErr::ESRCH)?;
     let files_ref = task.process.files();

@@ -1,10 +1,10 @@
+use crate::net::{Endpoint, Socket, PSOCK};
+use crate::task::WaitQueue;
+use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::net::{Endpoint, PSOCK, Socket};
-use crate::task::WaitQueue;
-use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use spin::Mutex;
 
 pub mod netlink;
@@ -76,20 +76,40 @@ impl Socket for NetlinkSocket {
         }
         Ok(0)
     }
-    fn listen(&self) -> SyscallRet { Err(SyscallErr::EOPNOTSUPP) }
-    fn connect(&self, _ep: &Endpoint) -> SyscallRet { Err(SyscallErr::EOPNOTSUPP) }
-    fn accept(&self, _fd: u32, _a: usize, _l: usize) -> SyscallRet { Err(SyscallErr::EOPNOTSUPP) }
-    fn socket_type(&self) -> PSOCK { PSOCK::Raw }
-    fn recv_buf_size(&self) -> usize { 65536 }
-    fn send_buf_size(&self) -> usize { 65536 }
+    fn listen(&self) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn connect(&self, _ep: &Endpoint) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn accept(&self, _fd: u32, _a: usize, _l: usize) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn socket_type(&self) -> PSOCK {
+        PSOCK::Raw
+    }
+    fn recv_buf_size(&self) -> usize {
+        65536
+    }
+    fn send_buf_size(&self) -> usize {
+        65536
+    }
     fn set_recv_buf_size(&self, _s: usize) {}
     fn set_send_buf_size(&self, _s: usize) {}
     fn local_endpoint(&self) -> Option<Endpoint> {
         let id = *self.local_portid.lock();
-        if id != 0 { Some(Endpoint::Netlink(id)) } else { Some(Endpoint::Netlink(0)) }
+        if id != 0 {
+            Some(Endpoint::Netlink(id))
+        } else {
+            Some(Endpoint::Netlink(0))
+        }
     }
-    fn remote_endpoint(&self) -> Option<Endpoint> { None }
-    fn shutdown(&self, _h: u32) -> GeneralRet<()> { Ok(()) }
+    fn remote_endpoint(&self) -> Option<Endpoint> {
+        None
+    }
+    fn shutdown(&self, _h: u32) -> GeneralRet<()> {
+        Ok(())
+    }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         let mut q = self.recv_queue.lock();
@@ -98,8 +118,13 @@ impl Socket for NetlinkSocket {
                 let orig_len = data.len();
                 let copy_len = orig_len.min(buf.len());
                 buf[..copy_len].copy_from_slice(&data[..copy_len]);
-                q.pop_front();  // consume only after successful peek
-                log::warn!("[netlink] try_recv: orig={} copied={} queue_rem={}", orig_len, copy_len, q.len());
+                q.pop_front(); // consume only after successful peek
+                log::warn!(
+                    "[netlink] try_recv: orig={} copied={} queue_rem={}",
+                    orig_len,
+                    copy_len,
+                    q.len()
+                );
                 Ok(orig_len as isize)
             }
             None => {
@@ -121,7 +146,7 @@ impl Socket for NetlinkSocket {
                 let orig_len = data.len();
                 let copy_len = orig_len.min(buf.len());
                 buf[..copy_len].copy_from_slice(&data[..copy_len]);
-                Ok((orig_len as isize, Some(Endpoint::Netlink(0))))  // return full message length for MSG_TRUNC
+                Ok((orig_len as isize, Some(Endpoint::Netlink(0)))) // return full message length for MSG_TRUNC
             }
             None => Err(SyscallErr::EAGAIN),
         }
@@ -131,11 +156,20 @@ impl Socket for NetlinkSocket {
         Some(Endpoint::Netlink(0))
     }
 
-    fn try_send(&self, buf: &[u8], _f: crate::net::syscall::common::MsgFlags) -> Result<isize, SyscallErr> {
+    fn try_send(
+        &self,
+        buf: &[u8],
+        _f: crate::net::syscall::common::MsgFlags,
+    ) -> Result<isize, SyscallErr> {
         self.try_sendmsg(buf, None, _f)
     }
 
-    fn try_sendmsg(&self, buf: &[u8], _dest: Option<Endpoint>, _flags: crate::net::syscall::common::MsgFlags) -> Result<isize, SyscallErr> {
+    fn try_sendmsg(
+        &self,
+        buf: &[u8],
+        _dest: Option<Endpoint>,
+        _flags: crate::net::syscall::common::MsgFlags,
+    ) -> Result<isize, SyscallErr> {
         log::warn!("[netlink] try_sendmsg: buf_len={}", buf.len());
         let mut consumed = 0usize;
         while consumed + 16 <= buf.len() {
@@ -160,11 +194,17 @@ impl Socket for NetlinkSocket {
         if consumed == 0 {
             return Err(crate::utils::error::SyscallErr::EINVAL);
         }
-        log::trace!("[netlink] try_sendmsg done, consumed={}/{}", consumed, buf.len());
+        log::trace!(
+            "[netlink] try_sendmsg done, consumed={}/{}",
+            consumed,
+            buf.len()
+        );
         Ok(buf.len() as isize)
     }
 
-    fn socket_r_ready(&self) -> bool { !self.recv_queue.lock().is_empty() }
+    fn socket_r_ready(&self) -> bool {
+        !self.recv_queue.lock().is_empty()
+    }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(&self.recv_wait)
@@ -177,5 +217,7 @@ impl Socket for NetlinkSocket {
             Err(SyscallErr::ENOBUFS)
         }
     }
-    fn is_netlink_socket(&self) -> bool { true }
+    fn is_netlink_socket(&self) -> bool {
+        true
+    }
 }

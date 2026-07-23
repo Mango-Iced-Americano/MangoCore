@@ -1,0 +1,6 @@
+kernel-rv size=80377920 mtime=2026-07-20 08:55:52.246149412 +0800
+kernel-la size=63669888 mtime=2026-07-20 09:28:50.971014302 +0800
+docs/Work_Log/evidence/2026-07-20/cagent-official-rv64-chroot-qemu-output.log size=24101 mtime=2026-07-20 09:25:13.101373498 +0800
+docs/Work_Log/evidence/2026-07-20/cagent-official-la64-chroot-qemu-output.log size=23218 mtime=2026-07-20 09:29:50.665987385 +0800
+docs/Work_Log/evidence/2026-07-20/cagent-official-rv64-chroot-judge.json size=1125 mtime=2026-07-20 09:25:38.022798312 +0800
+docs/Work_Log/evidence/2026-07-20/cagent-official-la64-chroot-judge.json size=1127 mtime=2026-07-20 09:30:21.285483191 +0800

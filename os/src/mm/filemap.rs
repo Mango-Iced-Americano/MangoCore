@@ -109,7 +109,8 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     let _copy_start = crate::task::perf::perf_time_now();
     dst.copy_from_slice(src);
     let copy_ticks = crate::task::perf::perf_time_now().wrapping_sub(_copy_start);
-    crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS.fetch_add(copy_ticks, core::sync::atomic::Ordering::Relaxed);
+    crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS
+        .fetch_add(copy_ticks, core::sync::atomic::Ordering::Relaxed);
     zero_tail(file_size, file_offset, dst);
 
     crate::task::perf::FILEMAP_FAULT_TICKS.fetch_add(
@@ -164,7 +165,8 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         return Err(err);
     }
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
-    crate::task::perf::FILEMAP_MAP_USER_TICKS.fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);
+    crate::task::perf::FILEMAP_MAP_USER_TICKS
+        .fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);
 
     crate::task::perf::FILEMAP_FAULT_TICKS.fetch_add(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
@@ -201,14 +203,14 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
         .map_err(|_| MemoryError::AlreadyAllocated)?;
 
     let _map_start = crate::task::perf::perf_time_now();
-    if let Err(err) =
-        UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, area.vm_perm())
+    if let Err(err) = UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, area.vm_perm())
     {
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);
     }
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
-    crate::task::perf::FILEMAP_MAP_USER_TICKS.fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);
+    crate::task::perf::FILEMAP_MAP_USER_TICKS
+        .fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);
 
     crate::task::perf::FILEMAP_FAULT_TICKS.fetch_add(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),

@@ -1,0 +1,8 @@
+2026-07-16T13:10:46.604249Z __PERF_BEGIN_board_suite_wrapper_identity-1-9f577406__
+2026-07-16T13:10:47.589613Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_board_suite_wrapper_identity-1-9f577406_TRACE_OFF__
+2026-07-16T13:10:49.709541Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_board_suite_wrapper_identity-1-9f577406__
+2026-07-16T13:10:49.763172Z 1e5fe9146daaa91b2ab8220186cfbb43b9a4321b4cccc1da9581b26066fc8a4c  /scratch/mangocore-cpython-bench-suite/cpython_benchmark.sh
+2026-07-16T13:10:49.776208Z 8f2ba2c998deaf4551ba564b019080e384c33f637d26e2455c021ec0402ff1b0  /persist/pyperf/s/cpython_benchmark.sh
+2026-07-16T13:10:49.783400Z __PERF_WORK_END_board_suite_wrapper_identity-1-9f577406__
+2026-07-16T13:10:49.788654Z __PERF_ACK_board_suite_wrapper_identity-1-9f577406_WORK__
+2026-07-16T13:10:50.307804Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_board_suite_wrapper_identity-1-9f577406__ rc=0

@@ -1,0 +1,8 @@
+2026-07-17T12:55:04.747126Z __PERF_BEGIN_p4_tools_isolation_final-1-3291c1b1__
+2026-07-17T12:55:05.691159Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_tools_isolation_final-1-3291c1b1_TRACE_OFF__
+2026-07-17T12:55:08.264189Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_tools_isolation_final-1-3291c1b1__
+2026-07-17T12:55:08.302803Z /tools /tools ext4 ro,relatime 0 0
+2026-07-17T12:55:09.368282Z PYTHON_TREE_TOOLS_FREE
+2026-07-17T12:55:09.479366Z __PERF_WORK_END_p4_tools_isolation_final-1-3291c1b1__
+2026-07-17T12:55:09.484364Z __PERF_ACK_p4_tools_isolation_final-1-3291c1b1_WORK__
+2026-07-17T12:55:09.967201Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_tools_isolation_final-1-3291c1b1__ rc=0

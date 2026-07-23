@@ -29,6 +29,13 @@ pub fn sys_shutdown() -> isize {
         ext4fs.flush_metadata_cache();
     }
     info!("[sys_shutdown] ext4 metadata cache flushed");
+    info!("[sys_shutdown] committing and detaching filesystem backends...");
+    if let Err(error) = crate::fs::vfs::mount::shutdown_all_backends() {
+        log::error!(
+            "[sys_shutdown] one or more filesystem backends failed to shut down: {:?}",
+            error
+        );
+    }
     info!("[sys_shutdown] halting");
     shutdown()
 }

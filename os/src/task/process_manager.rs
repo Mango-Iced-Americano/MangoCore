@@ -11,8 +11,8 @@ use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    add_task, current_task_ref, quota, registry, signal::send_process_signal,
-    ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
+    add_task, current_task_ref, quota, registry, signal::send_process_signal, ProcessControlBlock,
+    ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
 #[derive(Clone, Copy, Debug)]

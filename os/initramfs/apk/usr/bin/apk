@@ -1,0 +1,23 @@
+#!/rescue/sh
+set -e
+
+root="${MANGO_APK_ROOT:-/persist/apk-root}"
+state=/persist/apk-state
+cache=/scratch/apk-cache
+apk=/bin/apk.static
+
+[ -x "$apk" ] || apk=/tools/bin/apk.static
+if [ ! -x "$apk" ] || [ ! -f "$state/shell-ready-v1" ]; then
+    echo "apk: persistent environment is not ready; boot the persist-shell image first" >&2
+    exit 1
+fi
+if [ ! -d "$cache" ]; then
+    cache="$root/var/cache/apk"
+fi
+
+exec "$apk" \
+    --root "$root" \
+    --cache-dir "$cache" \
+    --keys-dir "$root/etc/apk/keys" \
+    --repositories-file "$root/etc/apk/repositories" \
+    "$@"

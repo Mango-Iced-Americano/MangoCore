@@ -1,0 +1,16 @@
+2026-07-16T12:08:12.830580Z __PERF_BEGIN_smolagents_import_failure-1-1d1612f9__
+2026-07-16T12:08:13.794888Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_smolagents_import_failure-1-1d1612f9_TRACE_OFF__
+2026-07-16T12:08:15.870200Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_smolagents_import_failure-1-1d1612f9__
+2026-07-16T12:08:23.746002Z Traceback (most recent call last):
+2026-07-16T12:08:23.790875Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-16T12:08:23.796367Z     [1;31mimport smolagents[0m; print(smolagents.__file__)
+2026-07-16T12:08:23.796847Z     [1;31m^^^^^^^^^^^^^^^^^[0m
+2026-07-16T12:08:23.811628Z   File [35m"/var/cache/mango-python/user/lib/python3.14/site-packages/smolagents/__init__.py"[0m, line [35m19[0m, in [35m<module>[0m
+2026-07-16T12:08:23.817207Z     [1;31mfrom .agent_types import *[0m  # noqa: I001
+2026-07-16T12:08:23.818896Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-16T12:08:23.833172Z   File [35m"/var/cache/mango-python/user/lib/python3.14/site-packages/smolagents/agent_types.py"[0m, line [35m23[0m, in [35m<module>[0m
+2026-07-16T12:08:23.833909Z     import PIL.Image
+2026-07-16T12:08:23.840077Z [1;35mModuleNotFoundError[0m: [35mNo module named 'PIL'[0m
+2026-07-16T12:08:24.166016Z __PERF_WORK_END_smolagents_import_failure-1-1d1612f9__
+2026-07-16T12:08:24.170476Z __PERF_ACK_smolagents_import_failure-1-1d1612f9_WORK__
+2026-07-16T12:08:24.671289Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_smolagents_import_failure-1-1d1612f9__ rc=1

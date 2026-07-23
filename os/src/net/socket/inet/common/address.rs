@@ -174,12 +174,12 @@ pub fn endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
 pub fn _to_endpoint(listen_endpoint: IpListenEndpoint) -> IpEndpoint {
     let addr = match listen_endpoint.addr {
         Some(addr) if addr.is_unspecified() => crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+            .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
         Some(addr) => addr,
         None => crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+            .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
     };
     IpEndpoint::new(addr, listen_endpoint.port)
 }
@@ -189,12 +189,12 @@ pub fn _endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
     let listen_endpoint = listen_endpoint(addr_buf)?;
     let addr = match listen_endpoint.addr {
         Some(addr) if addr.is_unspecified() => crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+            .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
         Some(addr) => addr,
         None => crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+            .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
     };
     Ok(IpEndpoint::new(addr, listen_endpoint.port))
 }

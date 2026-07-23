@@ -195,7 +195,11 @@ impl Ext4Extent {
 impl ExtentNode {
     /// Load the extent node from the data.
     /// Returns Err(-EIO) if data length is invalid.
-    pub fn try_load_from_data(data: &[u8], is_root: bool, block_size: usize) -> Result<Self, isize> {
+    pub fn try_load_from_data(
+        data: &[u8],
+        is_root: bool,
+        block_size: usize,
+    ) -> Result<Self, isize> {
         if is_root {
             if data.len() != 15 * 4 {
                 log::error!("extent: Invalid data length for root node: {}", data.len());
@@ -216,7 +220,10 @@ impl ExtentNode {
             })
         } else {
             if data.len() != block_size {
-                log::error!("extent: Invalid data length for internal node: {}", data.len());
+                log::error!(
+                    "extent: Invalid data length for internal node: {}",
+                    data.len()
+                );
                 return Err(-(SyscallErr::EIO as isize));
             }
             let header = Ext4ExtentHeader::load_from_u8(&data[..size_of::<Ext4ExtentHeader>()]);
@@ -230,7 +237,11 @@ impl ExtentNode {
 
     /// Load the extent node from the data mutably.
     /// Returns Err(-EIO) if data length is invalid.
-    pub fn try_load_from_data_mut(data: &mut [u8], is_root: bool, block_size: usize) -> Result<Self, isize> {
+    pub fn try_load_from_data_mut(
+        data: &mut [u8],
+        is_root: bool,
+        block_size: usize,
+    ) -> Result<Self, isize> {
         if is_root {
             if data.len() != 15 * 4 {
                 log::error!("extent: Invalid data length for root node: {}", data.len());
@@ -251,7 +262,10 @@ impl ExtentNode {
             })
         } else {
             if data.len() != block_size {
-                log::error!("extent: Invalid data length for internal node: {}", data.len());
+                log::error!(
+                    "extent: Invalid data length for internal node: {}",
+                    data.len()
+                );
                 return Err(-(SyscallErr::EIO as isize));
             }
             let header =
@@ -771,7 +785,11 @@ impl Ext4FileSystem {
     }
 
     /// Get extent from the node at the given position.
-    fn get_extent_from_node(&self, node: &ExtentPathNode, pos: usize) -> Result<Option<Ext4Extent>, isize> {
+    fn get_extent_from_node(
+        &self,
+        node: &ExtentPathNode,
+        pos: usize,
+    ) -> Result<Option<Ext4Extent>, isize> {
         let data = self.read_metadata_block(node.pblock as usize);
         let extent_node = ExtentNode::try_load_from_data(&data, false, self.block_size)?;
 
@@ -1408,10 +1426,17 @@ impl Ext4FileSystem {
         let mut header = path.path[i].header;
 
         // 获取要删除的索引块
-        let leaf_block = path.path[i].index.ok_or_else(|| {
-            log::error!("ext_remove_idx: index is None at depth={} pos={}", i, path.path[i].position);
-            -(SyscallErr::EIO as isize)
-        })?.get_pblock();
+        let leaf_block = path.path[i]
+            .index
+            .ok_or_else(|| {
+                log::error!(
+                    "ext_remove_idx: index is None at depth={} pos={}",
+                    i,
+                    path.path[i].position
+                );
+                -(SyscallErr::EIO as isize)
+            })?
+            .get_pblock();
 
         // 如果当前索引不是最后一个索引，将后续的索引前移
         if path.path[i].position != header.entries_count as usize - 1 {
@@ -1462,7 +1487,10 @@ impl Ext4FileSystem {
             let parent_idx = i - 1;
             let (left, right) = path.path.split_at_mut(i);
             let parent_index = left[parent_idx].index.as_mut().ok_or_else(|| {
-                log::error!("ext_remove_idx: parent index is None at depth={}", parent_idx);
+                log::error!(
+                    "ext_remove_idx: parent index is None at depth={}",
+                    parent_idx
+                );
                 -(SyscallErr::EIO as isize)
             })?;
             let current_index = right[0].index.ok_or_else(|| {

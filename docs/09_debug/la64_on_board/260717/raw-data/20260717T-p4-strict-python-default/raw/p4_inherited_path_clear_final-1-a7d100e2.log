@@ -1,0 +1,7 @@
+2026-07-17T12:55:48.885172Z __PERF_BEGIN_p4_inherited_path_clear_final-1-a7d100e2__
+2026-07-17T12:55:49.867173Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_inherited_path_clear_final-1-a7d100e2_TRACE_OFF__
+2026-07-17T12:55:52.440740Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_inherited_path_clear_final-1-a7d100e2__
+2026-07-17T12:55:53.482545Z INHERITED_PATH_CLEARED
+2026-07-17T12:55:53.572801Z __PERF_WORK_END_p4_inherited_path_clear_final-1-a7d100e2__
+2026-07-17T12:55:53.578207Z __PERF_ACK_p4_inherited_path_clear_final-1-a7d100e2_WORK__
+2026-07-17T12:55:54.102698Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_inherited_path_clear_final-1-a7d100e2__ rc=0

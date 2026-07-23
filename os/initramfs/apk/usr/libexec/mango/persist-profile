@@ -1,0 +1,12 @@
+export HOME=/root
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export SHELL=/bin/sh
+export CPYTHON_ROOT=/persist/python-runtime/current
+export PYTHONUSERBASE=/persist/python/user
+export PYTHONPYCACHEPREFIX=/persist/python/pycache
+export TMPDIR=/persist/python/tmp
+export MANGO_PYTHON_POLICY=p4-strict-align-v1
+export PIP_BREAK_SYSTEM_PACKAGES=1
+export PIP_ROOT_USER_ACTION=ignore
+export PS1='MangoPersist:\w# '
+umask 022

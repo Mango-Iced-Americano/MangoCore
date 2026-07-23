@@ -18,11 +18,11 @@ mod manager;
 pub mod mount_namespace;
 pub mod net_namespace;
 use spin::MutexGuard;
+pub mod perf;
 pub mod pid;
 mod process;
 mod process_manager;
 pub(crate) mod processor;
-pub mod perf;
 pub mod quota;
 mod registry;
 pub mod signal;
@@ -47,10 +47,9 @@ pub use manager::{
     add_kernel_timer, add_task, add_zombie_task, all_pids, do_oom, do_wake_expired, has_ready_task,
     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
     remove_zombie_tasks_by_pid, send_signal_to_interruptible, sleep_interruptible,
-    timer_interrupt_handler, timer_subsystem_init,
     take_one_interruptible_zombie, take_one_ready_zombie, take_zombie_tasks, task_manager_counts,
-    update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
-    WaitQueue, WaitResult,
+    timer_interrupt_handler, timer_subsystem_init, update_ready_nice, wait_with_timeout,
+    wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
 pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
@@ -67,10 +66,9 @@ pub use process::{
 pub use process_manager::ProcessManager;
 pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sgid, current_sid, current_suid,
-    current_syscall_name, current_task, current_task_ref, current_tid, current_trap_cx,
-    current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
-    take_current_task, try_current_user_token,
+    current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_task_ref,
+    current_tid, current_trap_cx, current_uid, current_user_token, run_tasks, schedule,
+    set_current_syscall_id, take_current_task, try_current_user_token,
 };
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
@@ -78,8 +76,8 @@ pub use registry::{
 };
 pub use signal::*;
 pub use sleep::{
-    sleep_relative_interruptible, sleep_until_interruptible,
-    sleep_until_realtime_interruptible, wake_realtime_abstime_sleepers_after_clock_set,
+    sleep_relative_interruptible, sleep_until_interruptible, sleep_until_realtime_interruptible,
+    wake_realtime_abstime_sleepers_after_clock_set,
 };
 pub use task::{
     any_seccomp_enabled, FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn,
@@ -310,11 +308,26 @@ lazy_static! {
     /// 优先加载 `/init`，缺失时兼容传统镜像里的 `/initproc`。
     pub static ref INITPROC: Arc<TaskControlBlock> = {
         // 优先使用 /init（initramfs 模式），fallback 到 /initproc（传统模式）
-        let inode = vfs_lookup_absolute("/init")
-            .or_else(|_| vfs_lookup_absolute("/initproc"))
-            .expect("[kernel] no /init or /initproc found");
+        let (_init_path, inode) = match vfs_lookup_absolute("/init") {
+            Ok(inode) => ("/init", inode),
+            Err(_) => (
+                "/initproc",
+                vfs_lookup_absolute("/initproc").expect("[kernel] no /init or /initproc found"),
+            ),
+        };
+        #[cfg(feature = "board_2k1000")]
+        boot_trace!("[bringup][init:01] selected userspace entry {}", _init_path);
         let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
-        TaskControlBlock::new(elf)
+        #[cfg(feature = "board_2k1000")]
+        boot_trace!("[bringup][init:02] entry file opened; building initial task");
+        let task = TaskControlBlock::new(elf);
+        #[cfg(feature = "board_2k1000")]
+        boot_trace!(
+            "[bringup][init:03] initial task built: pid={} tid={}",
+            task.pid(),
+            task.gettid()
+        );
+        task
     };
 
     /// Ktest-only orphan reaper.
@@ -332,7 +345,11 @@ lazy_static! {
 
 /// 将 init 进程加入 ready 队列。
 pub fn add_initproc() {
+    #[cfg(feature = "board_2k1000")]
+    boot_trace!("[bringup][init:04] enqueue initial task");
     add_task(INITPROC.clone());
+    #[cfg(feature = "board_2k1000")]
+    boot_trace!("[bringup][init:05] initial task is on ready queue");
 }
 
 // ── ktest multi-task harness ────────────────────────────────────────

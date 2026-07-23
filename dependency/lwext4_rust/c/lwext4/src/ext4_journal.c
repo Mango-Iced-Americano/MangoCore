@@ -51,6 +51,26 @@
 #include <string.h>
 #include <stdlib.h>
 
+static volatile bool jbd_test_power_cut_armed;
+
+void jbd_test_arm_power_cut(void)
+{
+	jbd_test_power_cut_armed = true;
+}
+
+static void jbd_test_power_cut_after_commit(struct jbd_trans *trans)
+{
+	(void)trans;
+	if (!jbd_test_power_cut_armed)
+		return;
+
+	ext4_dbg(DEBUG_JBD,
+		 "[LWEXT4 POWER CUT] commit durable before home write, trans=%" PRIu32 "\n",
+		 trans->trans_id);
+	for (;;)
+		;
+}
+
 /**@brief  Revoke entry during journal replay.*/
 struct revoke_entry {
 	/**@brief  Block number not to be replayed.*/
@@ -486,11 +506,11 @@ Error:
  * @return standard error code*/
 int jbd_put_fs(struct jbd_fs *jbd_fs)
 {
-	int rc = EOK;
-	rc = jbd_write_sb(jbd_fs);
+	int rc = jbd_write_sb(jbd_fs);
+	if (rc != EOK)
+		return rc;
 
-	ext4_fs_put_inode_ref(&jbd_fs->inode_ref);
-	return rc;
+	return ext4_fs_put_inode_ref(&jbd_fs->inode_ref);
 }
 
 /**@brief  Data block lookup helper.
@@ -887,6 +907,9 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 	struct revoke_entry *revoke_entry;
 	struct ext4_block journal_block, ext4_block;
 	struct ext4_fs *fs = jbd_fs->inode_ref.fs;
+	uint32_t block_size;
+	ext4_fsblk_t sb_lba;
+	uint32_t sb_offset;
 
 	(*this_block)++;
 	wrap(&jbd_fs->sb, *this_block);
@@ -906,8 +929,13 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 	if (r != EOK)
 		return;
 
-	/* We need special treatment for ext4 superblock. */
-	if (tag_info->block) {
+	/* The superblock is block 0 at block sizes above 1 KiB and block 1
+	 * at 1 KiB.  Keep replay's in-memory superblock synchronized in both
+	 * layouts so mount-time orphan cleanup sees the replayed list head. */
+	block_size = ext4_sb_get_block_size(&fs->sb);
+	sb_lba = EXT4_SUPERBLOCK_OFFSET / block_size;
+	sb_offset = EXT4_SUPERBLOCK_OFFSET % block_size;
+	if (tag_info->block != sb_lba) {
 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
 		if (r != EOK) {
 			jbd_block_set(jbd_fs, &journal_block);
@@ -930,14 +958,16 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 		state = ext4_get16(&fs->sb, state);
 
 		memcpy(&fs->sb,
-			journal_block.data + EXT4_SUPERBLOCK_OFFSET,
+			journal_block.data + sb_offset,
 			EXT4_SUPERBLOCK_SIZE);
 
 		/* Mark system as mounted */
 		ext4_set16(&fs->sb, state, state);
 		r = ext4_sb_write(fs->bdev, &fs->sb);
-		if (r != EOK)
+		if (r != EOK) {
+			jbd_block_set(jbd_fs, &journal_block);
 			return;
+		}
 
 		/*Update mount count*/
 		ext4_set16(&fs->sb, mount_count, mount_count);
@@ -1247,6 +1277,8 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 		jbd_fs->dirty = true;
 		r = ext4_sb_write(jbd_fs->bdev,
 				  &jbd_fs->inode_ref.fs->sb);
+		if (r == EOK)
+			r = ext4_block_flush_device(jbd_fs->bdev);
 	}
 	jbd_destroy_revoke_tree(&info);
 	return r;
@@ -1298,6 +1330,9 @@ int jbd_journal_start(struct jbd_fs *jbd_fs,
 	journal->jbd_fs = jbd_fs;
 	jbd_journal_write_sb(journal);
 	r = jbd_write_sb(jbd_fs);
+	if (r != EOK)
+		return r;
+	r = ext4_block_flush_device(jbd_fs->bdev);
 	if (r != EOK)
 		return r;
 
@@ -1364,11 +1399,12 @@ jbd_journal_skip_pure_revoke(struct jbd_journal *journal,
 	jbd_journal_write_sb(journal);
 }
 
-void
+int
 jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 			   bool flush,
 			   bool once)
 {
+	int r;
 	struct jbd_trans *trans;
 	while ((trans = TAILQ_FIRST(&journal->cp_queue))) {
 		if (!trans->data_cnt) {
@@ -1379,6 +1415,16 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 		} else {
 			if (trans->data_cnt ==
 					trans->written_cnt) {
+				if (trans->error != EOK) {
+					if (!trans->flush_pending)
+						return trans->error;
+					r = ext4_block_flush_device(
+						journal->jbd_fs->bdev);
+					if (r != EOK)
+						return r;
+					trans->error = EOK;
+					trans->flush_pending = false;
+				}
 				journal->start =
 					trans->start_iblock +
 					trans->alloc_blocks;
@@ -1408,6 +1454,7 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 		if (once)
 			break;
 	}
+	return EOK;
 }
 
 /**@brief  Stop accessing the journal.
@@ -1421,7 +1468,9 @@ int jbd_journal_stop(struct jbd_journal *journal)
 
 	/* Make sure that journalled content have reached
 	 * the disk.*/
-	jbd_journal_purge_cp_trans(journal, true, false);
+	r = jbd_journal_purge_cp_trans(journal, true, false);
+	if (r != EOK)
+		return r;
 
 	/* There should be no block record in this journal
 	 * session. */
@@ -1445,7 +1494,10 @@ int jbd_journal_stop(struct jbd_journal *journal)
 	journal->start = 0;
 	journal->trans_id = 0;
 	jbd_journal_write_sb(journal);
-	return jbd_write_sb(journal->jbd_fs);
+	r = jbd_write_sb(journal->jbd_fs);
+	if (r != EOK)
+		return r;
+	return ext4_block_flush_device(jbd_fs->bdev);
 }
 
 /**@brief  Allocate a block in the journal.
@@ -1464,7 +1516,7 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
 	/* If there is no space left, flush just one journalled
 	 * transaction.*/
 	if (journal->last == journal->start) {
-		jbd_journal_purge_cp_trans(journal, true, true);
+		(void)jbd_journal_purge_cp_trans(journal, true, true);
 		ext4_assert(journal->last != journal->start);
 	}
 
@@ -2131,6 +2183,17 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 
 	trans->written_cnt++;
 	if (trans->written_cnt == trans->data_cnt) {
+		int r;
+		if (trans->error != EOK)
+			return;
+		/* Home blocks must be durable before the journal tail can move
+		 * past this committed transaction. */
+		r = ext4_block_flush_device(journal->jbd_fs->bdev);
+		if (r != EOK) {
+			trans->error = r;
+			trans->flush_pending = true;
+			return;
+		}
 		/* If it is the first transaction on checkpoint queue,
 		 * we will shift the start of the journal to the next
 		 * transaction, and remove subsequent written
@@ -2144,7 +2207,7 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 			TAILQ_REMOVE(&journal->cp_queue, trans, trans_node);
 			jbd_journal_free_trans(journal, trans, false);
 
-			jbd_journal_purge_cp_trans(journal, false, false);
+			(void)jbd_journal_purge_cp_trans(journal, false, false);
 			jbd_journal_write_sb(journal);
 			jbd_write_sb(journal->jbd_fs);
 		}
@@ -2180,7 +2243,19 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 		goto Finish;
 	}
 
+	/* Descriptor, data and revoke records must reach stable storage before
+	 * the commit block can make the transaction replayable. */
+	rc = ext4_block_flush_device(journal->jbd_fs->bdev);
+	if (rc != EOK)
+		goto Finish;
+
 	rc = jbd_trans_write_commit_block(trans);
+	if (rc != EOK)
+		goto Finish;
+
+	/* Do not expose or checkpoint a committed transaction until its commit
+	 * block itself is durable. */
+	rc = ext4_block_flush_device(journal->jbd_fs->bdev);
 	if (rc != EOK)
 		goto Finish;
 
@@ -2227,7 +2302,15 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 			wrap(&journal->jbd_fs->sb, journal->start);
 			journal->trans_id = trans->trans_id;
 			jbd_journal_write_sb(journal);
-			jbd_write_sb(journal->jbd_fs);
+			rc = jbd_write_sb(journal->jbd_fs);
+			if (rc != EOK)
+				goto Finish;
+			/* Recovery cannot discover this first committed transaction
+			 * until the journal superblock start pointer is durable. */
+			rc = ext4_block_flush_device(journal->jbd_fs->bdev);
+			if (rc != EOK)
+				goto Finish;
+			jbd_test_power_cut_after_commit(trans);
 			TAILQ_INSERT_TAIL(&journal->cp_queue, trans,
 					trans_node);
 			jbd_journal_cp_trans(journal, trans);
@@ -2241,6 +2324,7 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 		}
 	} else {
 		/* No need to do anything to the JBD superblock. */
+		jbd_test_power_cut_after_commit(trans);
 		TAILQ_INSERT_TAIL(&journal->cp_queue, trans,
 				trans_node);
 		if (trans->data_cnt)

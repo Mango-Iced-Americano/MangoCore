@@ -1,5 +1,5 @@
 use crate::net::net_core;
-use crate::net::{Endpoint, PSOCK, Socket, SocketFile};
+use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
@@ -133,7 +133,11 @@ impl PortManager {
             }
             let local = match socket.local_endpoint() {
                 Some(Endpoint::Ip(ep)) => IpListenEndpoint {
-                    addr: if ep.addr.is_unspecified() { None } else { Some(ep.addr) },
+                    addr: if ep.addr.is_unspecified() {
+                        None
+                    } else {
+                        Some(ep.addr)
+                    },
                     port: ep.port,
                 },
                 _ => continue, // 非 INET socket 不参与端口冲突检查
@@ -200,7 +204,11 @@ impl PortManager {
             }
         };
         if Self::check_bind_conflict(task, listen_ep, socket) {
-            log::debug!("bind conflict: port={} type={:?}", ep.port, socket.socket_type());
+            log::debug!(
+                "bind conflict: port={} type={:?}",
+                ep.port,
+                socket.socket_type()
+            );
             return Err(crate::utils::error::SyscallErr::EADDRINUSE);
         }
         let ret = socket.bind(endpoint);
@@ -212,31 +220,40 @@ impl PortManager {
                     _ => ep.port,
                 })
                 .unwrap_or(ep.port);
-            let ifindex =
-                crate::net::net_core::ifindex_for_local_addr(listen_ep.addr);
+            let ifindex = crate::net::net_core::ifindex_for_local_addr(listen_ep.addr);
             match socket.socket_type() {
                 PSOCK::Stream => {
                     log::debug!(
                         "bind: {:?}:{} ifindex={} type={:?}",
-                        listen_ep.addr, actual_port, ifindex, PSOCK::Stream,
+                        listen_ep.addr,
+                        actual_port,
+                        ifindex,
+                        PSOCK::Stream,
                     );
-                    log::info!(
-                        "[PortManager] bind success: port={} type=TCP",
-                        actual_port
+                    log::info!("[PortManager] bind success: port={} type=TCP", actual_port);
+                    Self::register_tcp_bind(
+                        actual_port,
+                        Self::addr_to_ipv4(listen_ep.addr),
+                        socket,
                     );
-                    Self::register_tcp_bind(actual_port, Self::addr_to_ipv4(listen_ep.addr), socket);
                 }
                 PSOCK::Datagram => {
                     let reuseaddr = socket.reuse_addr().is_ok();
                     log::debug!(
                         "bind: {:?}:{} ifindex={} type={:?}",
-                        listen_ep.addr, actual_port, ifindex, PSOCK::Datagram,
+                        listen_ep.addr,
+                        actual_port,
+                        ifindex,
+                        PSOCK::Datagram,
                     );
-                    log::info!(
-                        "[PortManager] bind success: port={} type=UDP",
-                        actual_port
+                    log::info!("[PortManager] bind success: port={} type=UDP", actual_port);
+                    Self::register_udp_bind(
+                        actual_port,
+                        Self::addr_to_ipv4(listen_ep.addr),
+                        reuseaddr,
+                        reuseaddr,
+                        socket,
                     );
-                    Self::register_udp_bind(actual_port, Self::addr_to_ipv4(listen_ep.addr), reuseaddr, reuseaddr, socket);
                 }
                 _ => {}
             }
@@ -277,16 +294,13 @@ impl PortManager {
         for list in table.values_mut() {
             list.retain(|b| b.socket_weak.upgrade().is_some());
         }
-        table
-            .entry(port)
-            .or_default()
-            .push(UdpPortBinding {
-                port,
-                addr,
-                reuseaddr,
-                reuseport,
-                socket_weak: Arc::downgrade(socket),
-            });
+        table.entry(port).or_default().push(UdpPortBinding {
+            port,
+            addr,
+            reuseaddr,
+            reuseport,
+            socket_weak: Arc::downgrade(socket),
+        });
     }
 
     /// 从全局 UDP_PORTS 表注销端口绑定。

@@ -1,0 +1,158 @@
+2026-07-16T09:34:58.022942Z __PERF_BEGIN_ext4_mmap_release_16m-1-441bcd08__
+2026-07-16T09:34:59.104380Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_TRACE_OFF__
+2026-07-16T09:34:59.835631Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_STATS_OFF__
+2026-07-16T09:35:00.614571Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_PROFILE__
+2026-07-16T09:35:01.293872Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_RESET__
+2026-07-16T09:35:02.143403Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_BEFORE_RECLAIM__
+2026-07-16T09:35:02.175967Z reclaim_runs_total=0
+2026-07-16T09:35:02.178729Z reclaim_pages_scanned_total=0
+2026-07-16T09:35:02.181532Z reclaim_pages_freed_total=0
+2026-07-16T09:35:02.184303Z clock_scanned=0
+2026-07-16T09:35:02.184312Z clock_second_chance=0
+2026-07-16T09:35:02.185512Z clock_evicted=0
+2026-07-16T09:35:02.190255Z __PERF_STATS_BEFORE_RECLAIM_END__
+2026-07-16T09:35:02.962358Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_BEFORE_TLB__
+2026-07-16T09:35:02.994645Z tlb_flushes=0
+2026-07-16T09:35:02.994673Z tlb_full=0
+2026-07-16T09:35:02.997323Z tlb_page=0
+2026-07-16T09:35:02.997332Z tlb_activate=0
+2026-07-16T09:35:02.997968Z tlb_global=0
+2026-07-16T09:35:03.002596Z __PERF_STATS_BEFORE_TLB_END__
+2026-07-16T09:35:03.797453Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_BEFORE_HEAP__
+2026-07-16T09:35:03.829852Z heap_current_bytes=8454888
+2026-07-16T09:35:03.832577Z heap_max_bytes=9897056
+2026-07-16T09:35:03.835356Z heap_free_kb=188351
+2026-07-16T09:35:03.835365Z heap_total_kb=196607
+2026-07-16T09:35:03.838132Z heap_alloc_calls=0
+2026-07-16T09:35:03.840913Z heap_alloc_ticks_total=0
+2026-07-16T09:35:03.843695Z heap_alloc_ticks_max=0
+2026-07-16T09:35:03.843703Z heap_dealloc_calls=0
+2026-07-16T09:35:03.846479Z heap_dealloc_ticks_total=0
+2026-07-16T09:35:03.849208Z heap_dealloc_ticks_max=0
+2026-07-16T09:35:03.852054Z heap_dealloc_scan_steps_total=0
+2026-07-16T09:35:03.854850Z page_faults=0
+2026-07-16T09:35:03.854862Z pagefault_ticks_total=0
+2026-07-16T09:35:03.857634Z pagefault_time_count=0
+2026-07-16T09:35:03.860450Z frame_alloc_hits=0
+2026-07-16T09:35:03.860459Z frame_free_hits=0
+2026-07-16T09:35:03.863205Z frame_alloc_ticks_total=0
+2026-07-16T09:35:03.864608Z frame_alloc_time_count=0
+2026-07-16T09:35:03.869152Z __PERF_STATS_BEFORE_HEAP_END__
+2026-07-16T09:35:04.752668Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_BEFORE_PAGECACHE__
+2026-07-16T09:35:04.785364Z pc_read_calls=0
+2026-07-16T09:35:04.788117Z pc_read_pages=0
+2026-07-16T09:35:04.788131Z pc_read_miss=0
+2026-07-16T09:35:04.790893Z pc_read_cycles=0
+2026-07-16T09:35:04.790906Z pc_read_hit_cycles=0
+2026-07-16T09:35:04.793663Z pc_read_miss_cycles=0
+2026-07-16T09:35:04.796446Z pc_copy_cycles=0
+2026-07-16T09:35:04.796454Z pc_lookup_cycles=0
+2026-07-16T09:35:04.799179Z pc_write_calls=0
+2026-07-16T09:35:04.799187Z pc_write_pages=0
+2026-07-16T09:35:04.802022Z pc_write_overwrite=0
+2026-07-16T09:35:04.804800Z pc_write_eventually_full=0
+2026-07-16T09:35:04.804807Z pc_write_cycles=0
+2026-07-16T09:35:04.807652Z pc_wb_calls=0
+2026-07-16T09:35:04.807663Z pc_wb_pages=0
+2026-07-16T09:35:04.810436Z pc_wb_cycles=0
+2026-07-16T09:35:04.813174Z pc_falloc_cycles=0
+2026-07-16T09:35:04.813181Z wb_bg_calls=0
+2026-07-16T09:35:04.815630Z wb_throttle_calls=0
+2026-07-16T09:35:04.815639Z wb_redirty_pages=0
+2026-07-16T09:35:04.820721Z __PERF_STATS_BEFORE_PAGECACHE_END__
+2026-07-16T09:35:05.658941Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_BEFORE_BLOCKIO__
+2026-07-16T09:35:05.691656Z blk_vread_reqs=0
+2026-07-16T09:35:05.694189Z blk_vread_secs=0
+2026-07-16T09:35:05.694200Z blk_vwrite_reqs=0
+2026-07-16T09:35:05.696956Z blk_vwrite_secs=0
+2026-07-16T09:35:05.696964Z sata_read_reqs=0
+2026-07-16T09:35:05.699676Z sata_read_bytes=0
+2026-07-16T09:35:05.702527Z sata_read_ticks_total=0
+2026-07-16T09:35:05.702534Z sata_read_ticks_max=0
+2026-07-16T09:35:05.705264Z sata_write_reqs=0
+2026-07-16T09:35:05.708102Z sata_write_bytes=0
+2026-07-16T09:35:05.708116Z sata_write_ticks_total=0
+2026-07-16T09:35:05.710875Z sata_write_ticks_max=0
+2026-07-16T09:35:05.713673Z sata_flush_reqs=0
+2026-07-16T09:35:05.714312Z sata_flush_ticks_total=0
+2026-07-16T09:35:05.719267Z __PERF_STATS_BEFORE_BLOCKIO_END__
+2026-07-16T09:35:06.447937Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_STATS_ON__
+2026-07-16T09:35:08.661944Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_WORK_BEGIN_ext4_mmap_release_16m-1-441bcd08__
+2026-07-16T09:35:16.871196Z CPYTHON_DIAG_JSON {"elapsed_ns":239028990,"pages":4096,"size_mib":16,"sys_seconds":0.2413369999999997,"type":"mmap_release","user_seconds":0.0014260000000003714}
+2026-07-16T09:35:17.029372Z __PERF_WORK_END_ext4_mmap_release_16m-1-441bcd08__
+2026-07-16T09:35:17.034130Z __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_WORK__
+2026-07-16T09:35:17.782026Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_mmap_release_16m-1-441bcd08_STATS_DONE__
+2026-07-16T09:35:18.595935Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_AFTER_RECLAIM__
+2026-07-16T09:35:18.629812Z reclaim_runs_total=1
+2026-07-16T09:35:18.632522Z reclaim_pages_scanned_total=0
+2026-07-16T09:35:18.635353Z reclaim_pages_freed_total=0
+2026-07-16T09:35:18.638139Z clock_scanned=0
+2026-07-16T09:35:18.638147Z clock_second_chance=0
+2026-07-16T09:35:18.639353Z clock_evicted=0
+2026-07-16T09:35:18.644313Z __PERF_STATS_AFTER_RECLAIM_END__
+2026-07-16T09:35:19.389764Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_AFTER_TLB__
+2026-07-16T09:35:19.422003Z tlb_flushes=4129
+2026-07-16T09:35:19.422019Z tlb_full=0
+2026-07-16T09:35:19.424761Z tlb_page=4129
+2026-07-16T09:35:19.424773Z tlb_activate=45
+2026-07-16T09:35:19.426030Z tlb_global=0
+2026-07-16T09:35:19.430595Z __PERF_STATS_AFTER_TLB_END__
+2026-07-16T09:35:20.176056Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_AFTER_HEAP__
+2026-07-16T09:35:20.209430Z heap_current_bytes=8459752
+2026-07-16T09:35:20.212195Z heap_max_bytes=9897056
+2026-07-16T09:35:20.214951Z heap_free_kb=188346
+2026-07-16T09:35:20.214960Z heap_total_kb=196607
+2026-07-16T09:35:20.217764Z heap_alloc_calls=75
+2026-07-16T09:35:20.220494Z heap_alloc_ticks_total=2423
+2026-07-16T09:35:20.223333Z heap_alloc_ticks_max=123
+2026-07-16T09:35:20.226161Z heap_dealloc_calls=4841
+2026-07-16T09:35:20.228908Z heap_dealloc_ticks_total=265823
+2026-07-16T09:35:20.231704Z heap_dealloc_ticks_max=3048
+2026-07-16T09:35:20.234476Z heap_dealloc_scan_steps_total=8396
+2026-07-16T09:35:20.234486Z page_faults=7
+2026-07-16T09:35:20.237252Z pagefault_ticks_total=122408
+2026-07-16T09:35:20.240059Z pagefault_time_count=7
+2026-07-16T09:35:20.240067Z frame_alloc_hits=6
+2026-07-16T09:35:20.242829Z frame_free_hits=4098
+2026-07-16T09:35:20.245556Z frame_alloc_ticks_total=10201
+2026-07-16T09:35:20.247047Z frame_alloc_time_count=6
+2026-07-16T09:35:20.251766Z __PERF_STATS_AFTER_HEAP_END__
+2026-07-16T09:35:21.113742Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_AFTER_PAGECACHE__
+2026-07-16T09:35:21.147623Z pc_read_calls=0
+2026-07-16T09:35:21.150386Z pc_read_pages=0
+2026-07-16T09:35:21.150395Z pc_read_miss=4
+2026-07-16T09:35:21.153162Z pc_read_cycles=0
+2026-07-16T09:35:21.153171Z pc_read_hit_cycles=0
+2026-07-16T09:35:21.155951Z pc_read_miss_cycles=0
+2026-07-16T09:35:21.158732Z pc_copy_cycles=0
+2026-07-16T09:35:21.158740Z pc_lookup_cycles=0
+2026-07-16T09:35:21.161516Z pc_write_calls=0
+2026-07-16T09:35:21.161523Z pc_write_pages=0
+2026-07-16T09:35:21.164267Z pc_write_overwrite=0
+2026-07-16T09:35:21.167090Z pc_write_eventually_full=0
+2026-07-16T09:35:21.167101Z pc_write_cycles=0
+2026-07-16T09:35:21.169870Z pc_wb_calls=0
+2026-07-16T09:35:21.169878Z pc_wb_pages=0
+2026-07-16T09:35:21.172653Z pc_wb_cycles=0
+2026-07-16T09:35:21.175438Z pc_falloc_cycles=7350
+2026-07-16T09:35:21.175444Z wb_bg_calls=0
+2026-07-16T09:35:21.178252Z wb_throttle_calls=0
+2026-07-16T09:35:21.178259Z wb_redirty_pages=0
+2026-07-16T09:35:21.183116Z __PERF_STATS_AFTER_PAGECACHE_END__
+2026-07-16T09:35:22.010317Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_STATS_AFTER_BLOCKIO__
+2026-07-16T09:35:22.042764Z blk_vread_reqs=0
+2026-07-16T09:35:22.045459Z blk_vread_secs=0
+2026-07-16T09:35:22.045474Z blk_vwrite_reqs=0
+2026-07-16T09:35:22.048338Z blk_vwrite_secs=0
+2026-07-16T09:35:22.048347Z sata_read_reqs=4
+2026-07-16T09:35:22.051061Z sata_read_bytes=16384
+2026-07-16T09:35:22.053854Z sata_read_ticks_total=73565
+2026-07-16T09:35:22.056624Z sata_read_ticks_max=30843
+2026-07-16T09:35:22.056631Z sata_write_reqs=0
+2026-07-16T09:35:22.059415Z sata_write_bytes=0
+2026-07-16T09:35:22.062194Z sata_write_ticks_total=0
+2026-07-16T09:35:22.064935Z sata_write_ticks_max=0
+2026-07-16T09:35:22.064942Z sata_flush_reqs=0
+2026-07-16T09:35:22.066741Z sata_flush_ticks_total=0
+2026-07-16T09:35:22.071673Z __PERF_STATS_AFTER_BLOCKIO_END__
+2026-07-16T09:35:22.625818Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_END_ext4_mmap_release_16m-1-441bcd08__ rc=0

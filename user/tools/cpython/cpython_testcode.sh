@@ -2,20 +2,60 @@
 set -u
 
 echo "#### OS COMP TEST GROUP START cpython-isolated ####"
-cd /tools/tests/cpython || {
-    echo "[CPYTHON L0 FAIL] missing /tools/tests/cpython"
+if [ -z "${CPYTHON_TEST_ROOT:-}" ]; then
+    CPYTHON_TEST_ROOT=$(CDPATH= cd "$(/bin/busybox dirname "$0")" && pwd)
+fi
+CPYTHON_ROOT=${CPYTHON_ROOT:-$CPYTHON_TEST_ROOT}
+export CPYTHON_TEST_ROOT
+export CPYTHON_ROOT
+cd "$CPYTHON_TEST_ROOT" || {
+    echo "[CPYTHON L0 FAIL] missing $CPYTHON_TEST_ROOT"
     echo "#### OS COMP TEST GROUP END cpython-isolated ####"
     exit 1
 }
 
 . ./run_cpython.sh
 
+# Keep the read-only tools partition immutable on the real board.  An explicit
+# directory is fail-closed so performance runs can require P4 ext4 rather than
+# silently falling back to another filesystem.
+configured_test_tmpdir=${CPYTHON_TEST_TMPDIR:-}
+if [ -n "$configured_test_tmpdir" ]; then
+    if /bin/busybox mkdir -p "$configured_test_tmpdir"; then
+        CPYTHON_TEST_TMPDIR=$configured_test_tmpdir
+    else
+        echo "[CPYTHON ENV FAIL] cannot create configured tmpdir=$configured_test_tmpdir"
+        exit 2
+    fi
+elif [ "${MANGO_PYTHON_POLICY:-}" = p4-strict-align-v1 ]; then
+    CPYTHON_TEST_TMPDIR=/persist/python/test-tmp
+    /bin/busybox mkdir -p "$CPYTHON_TEST_TMPDIR" || {
+        echo "[CPYTHON ENV FAIL] P4 test tmpdir is unavailable"
+        exit 2
+    }
+elif [ -d /scratch ] && /bin/busybox mkdir -p /scratch/cpython; then
+    CPYTHON_TEST_TMPDIR=/scratch/cpython
+    # The staged 2K1000LA target enables GMAC/DHCP and must not turn a broken
+    # external network path into a successful group via L9 SKIP records.
+    CPYTHON_L9_REQUIRE_NET=1
+    export CPYTHON_L9_REQUIRE_NET
+elif /bin/busybox touch "$CPYTHON_TEST_ROOT/.write-probe" 2>/dev/null; then
+    /bin/busybox rm -f "$CPYTHON_TEST_ROOT/.write-probe"
+    CPYTHON_TEST_TMPDIR=$CPYTHON_TEST_ROOT
+else
+    /bin/busybox mkdir -p /tmp/cpython
+    CPYTHON_TEST_TMPDIR=/tmp/cpython
+fi
+export CPYTHON_TEST_TMPDIR
+export TMPDIR="$CPYTHON_TEST_TMPDIR"
+echo "[CPYTHON ENV] tmpdir=$CPYTHON_TEST_TMPDIR"
+
 fail=0
 
 run_sh() {
     name="$1" layer="$2"
     echo "[CPYTHON $layer START] $name"
-    if "/tools/tests/cpython/$name"; then
+    if "$CPYTHON_TEST_ROOT/$name"; then
         rc=0
     else
         rc=$?
@@ -31,7 +71,7 @@ run_sh() {
 run_py() {
     name="$1" layer="$2"
     echo "[CPYTHON $layer START] $name"
-    if "$CPYTHON_LD" --library-path "$LD_LIBRARY_PATH" "$CPYTHON_PY" "/tools/tests/cpython/$name"; then
+    if "$CPYTHON_LD" --library-path "$LD_LIBRARY_PATH" "$CPYTHON_PY" "$CPYTHON_TEST_ROOT/$name"; then
         rc=0
     else
         rc=$?
@@ -67,6 +107,19 @@ run_py L8_subprocess.py L8-SUBPROC
 
 # L9: Networking (DNS/TCP/HTTPS may SKIP without network)
 run_py L9_socket.py L9
+
+# Performance sampling is deliberately separate from the 72-item functional
+# gate.  Set this only in an explicitly budgeted QEMU/board run.
+if [ "${CPYTHON_RUN_BENCHMARKS:-0}" = "1" ]; then
+    echo "[CPYTHON BENCH SUITE START]"
+    if "$CPYTHON_TEST_ROOT/cpython_benchmark.sh"; then
+        echo "[CPYTHON BENCH SUITE PASS]"
+    else
+        rc=$?
+        echo "[CPYTHON BENCH SUITE FAIL] exit=$rc"
+        fail=1
+    fi
+fi
 
 echo "#### OS COMP TEST GROUP END cpython-isolated ####"
 exit "$fail"

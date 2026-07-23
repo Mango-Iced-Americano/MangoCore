@@ -1,6 +1,6 @@
-use alloc::string::String;
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use alloc::string::String;
 
 pub fn net_tcp6_content(
     _extra: usize,

@@ -1,0 +1,35 @@
+2026-07-16T14:15:13.256436Z __PERF_BEGIN_adjacent_diag_identity-1-f0bec42c__
+2026-07-16T14:15:14.205934Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_adjacent_diag_identity-1-f0bec42c_TRACE_OFF__
+2026-07-16T14:15:17.034875Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_adjacent_diag_identity-1-f0bec42c__
+2026-07-16T14:15:17.074616Z none on / type rootfs (rw,relatime)
+2026-07-16T14:15:17.077421Z /tools/tests on /tests type ext4 (ro,relatime)
+2026-07-16T14:15:17.083138Z /persist on /persist type ext4 (rw,relatime)
+2026-07-16T14:15:17.088840Z /persist/python on /persist/apk-root/var/cache/mango-python type ext4 (rw,relatime)
+2026-07-16T14:15:17.094576Z /tools on /persist/apk-root/tools type ext4 (ro,relatime)
+2026-07-16T14:15:17.100315Z /scratch on /persist/apk-root/scratch type fat32 (rw,relatime)
+2026-07-16T14:15:17.105982Z /run on /persist/apk-root/run type ramfs (rw,relatime)
+2026-07-16T14:15:17.111743Z /tmp on /persist/apk-root/tmp type tmpfs (rw,relatime)
+2026-07-16T14:15:17.114623Z /dev on /persist/apk-root/dev type devfs (rw,relatime)
+2026-07-16T14:15:17.120251Z /proc on /persist/apk-root/proc type proc (rw,relatime)
+2026-07-16T14:15:17.125941Z /scratch on /scratch type fat32 (rw,relatime)
+2026-07-16T14:15:17.128763Z none on /sys type sysfs (rw,relatime)
+2026-07-16T14:15:17.131760Z /tools on /tools type ext4 (ro,relatime)
+2026-07-16T14:15:17.134645Z none on /tmp type tmpfs (rw,relatime)
+2026-07-16T14:15:17.140342Z /sdcard on /sdcard type ext4 (ro,relatime)
+2026-07-16T14:15:17.143127Z none on /proc type proc (rw,relatime)
+2026-07-16T14:15:17.145991Z /sdcard/musl on /musl type ext4 (ro,relatime)
+2026-07-16T14:15:17.151618Z /sdcard/glibc on /glibc type ext4 (ro,relatime)
+2026-07-16T14:15:17.154401Z none on /dev type devfs (rw,relatime)
+2026-07-16T14:15:17.157268Z none on /dev/shm type tmpfs (rw,relatime)
+2026-07-16T14:15:17.203812Z sha256sum: can't open '/persist/pyperf/s/bench_runner.py': No such file or directory
+2026-07-16T14:15:17.212318Z sha256sum: can't open '/persist/pyperf/s/benchmarks/bm_nbody.py': No such file or directory
+2026-07-16T14:15:17.221013Z sha256sum: can't open '/persist/pyperf/s/benchmarks/bm_string.py': No such file or directory
+2026-07-16T14:15:17.229513Z sha256sum: can't open '/persist/pyperf/s/benchmarks/bm_float.py': No such file or directory
+2026-07-16T14:15:17.267182Z perf_stats=true
+2026-07-16T14:15:17.269815Z perf_diag=true
+2026-07-16T14:15:17.269847Z heap_trace=false
+2026-07-16T14:15:17.270532Z stats_profile=1
+2026-07-16T14:15:17.305300Z 0
+2026-07-16T14:15:17.311748Z __PERF_WORK_END_adjacent_diag_identity-1-f0bec42c__
+2026-07-16T14:15:17.316648Z __PERF_ACK_adjacent_diag_identity-1-f0bec42c_WORK__
+2026-07-16T14:15:17.795658Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_adjacent_diag_identity-1-f0bec42c__ rc=0

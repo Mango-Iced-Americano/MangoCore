@@ -1,0 +1,17 @@
+2026-07-17T14:40:51.598373Z docker run --rm --user "$(id -u):$(id -g)" \
+2026-07-17T14:40:51.598458Z 		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+2026-07-17T14:40:51.598472Z 		./scripts/build_cpython_runtime_la64_strict.sh
+2026-07-17T14:40:51.674475Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-17T14:40:51.945547Z [strict-cpython] fetching and verifying pinned sources
+2026-07-17T14:41:25.538010Z current_artifact=cpython-la64-strict-3.14.5-071e4e258421.tar.xz
+2026-07-17T14:41:25.538412Z current_sha256=071e4e2584214b5174a6cee507de23c6d35f6f7fb026083832b453c6075600ea
+2026-07-17T14:41:25.677993Z docker run --rm --user "$(id -u):$(id -g)" \
+2026-07-17T14:41:25.678074Z 		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+2026-07-17T14:41:25.678105Z 		python3 scripts/install_cpython_runtime_la64_strict.py \
+2026-07-17T14:41:25.678131Z 		--artifact-index target/cpython-strict/artifacts/current.json --verify-only
+2026-07-17T14:41:25.724734Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-17T14:41:32.764469Z runtime_policy=mangocore-la64-strict-align-v1
+2026-07-17T14:41:32.764858Z artifact=/app/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-071e4e258421.tar.xz
+2026-07-17T14:41:32.764933Z artifact_sha256=071e4e2584214b5174a6cee507de23c6d35f6f7fb026083832b453c6075600ea
+2026-07-17T14:41:32.764964Z manifest_schema=3
+2026-07-17T14:41:32.764987Z elf_count=99

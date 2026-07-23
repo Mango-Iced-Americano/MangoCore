@@ -15,8 +15,8 @@ use alloc::{
 use core::any::Any;
 use spin::{Mutex, MutexGuard};
 
-use crate::utils::error::SyscallErr;
 use crate::task::ProcessControlBlock;
+use crate::utils::error::SyscallErr;
 
 use super::vfs::{
     generate_inode_id, FileFlags, FilePrivateData, FileSystem, FileType, FsInfo, IndexNode,
@@ -35,16 +35,13 @@ const PROCFS_SYMLINK_MAX: usize = 64;
 /// 文件内容生成函数
 ///
 /// `extra_data` 由 inode 携带（如 PID）。返回实际拷贝的字节数。
-pub type ProcContentFn = fn(
-    extra_data: usize,
-    offset: usize,
-    len: usize,
-    buf: &mut [u8],
-) -> Result<usize, SyscallErr>;
+pub type ProcContentFn =
+    fn(extra_data: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr>;
 
 pub type ProcTextFn = fn(extra_data: usize) -> Result<String, SyscallErr>;
 
-pub type ProcWriteFn = fn(extra_data: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr>;
+pub type ProcWriteFn =
+    fn(extra_data: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr>;
 
 fn empty_content(
     _extra_data: usize,
@@ -340,11 +337,7 @@ impl LockedProcInode {
         if name.len() > PROCFS_MAX_NAMELEN as usize {
             return Err(SyscallErr::ENAMETOOLONG);
         }
-        let child = LockedProcInode::new_dir_wired(
-            this.self_ref.clone(),
-            this.fs.clone(),
-            mode,
-        );
+        let child = LockedProcInode::new_dir_wired(this.self_ref.clone(), this.fs.clone(), mode);
         this.children.insert(String::from(name), child.clone());
         this.metadata.nlinks += 1;
         Ok(child)
@@ -495,11 +488,8 @@ impl LockedProcInode {
         if target.len() > PROCFS_SYMLINK_MAX {
             return Err(SyscallErr::ENAMETOOLONG);
         }
-        let child = LockedProcInode::new_symlink_wired(
-            this.self_ref.clone(),
-            this.fs.clone(),
-            target,
-        );
+        let child =
+            LockedProcInode::new_symlink_wired(this.self_ref.clone(), this.fs.clone(), target);
         this.children.insert(String::from(name), child.clone());
         Ok(child)
     }
@@ -740,19 +730,12 @@ impl IndexNode for LockedProcInode {
             if data.metadata.file_type != FileType::Dir {
                 return Err(SyscallErr::ENOTDIR);
             }
-            let self_ref = data
-                .self_ref
-                .upgrade()
-                .map(|n| n as Arc<dyn IndexNode>);
+            let self_ref = data.self_ref.upgrade().map(|n| n as Arc<dyn IndexNode>);
             let parent = data
                 .parent
                 .upgrade()
                 .map(|n| n as Arc<dyn IndexNode>)
-                .or_else(|| {
-                    data.self_ref
-                        .upgrade()
-                        .map(|n| n as Arc<dyn IndexNode>)
-                });
+                .or_else(|| data.self_ref.upgrade().map(|n| n as Arc<dyn IndexNode>));
             let child = data.children.get(name).cloned();
             let hook = data.find_hook;
             (self_ref, parent, child, hook)
@@ -832,7 +815,12 @@ impl IndexNode for LockedProcInode {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            (data.metadata.file_type, data.metadata.inode_id, parent, children)
+            (
+                data.metadata.file_type,
+                data.metadata.inode_id,
+                parent,
+                children,
+            )
         };
 
         if own_inode_id == ino {
@@ -845,18 +833,19 @@ impl IndexNode for LockedProcInode {
         }
 
         // Scan children (lock released, each child locks only itself)
-        let mut matches: Vec<String> = children
-            .into_iter()
-            .filter_map(|(name, child)| {
-                child.metadata().ok().and_then(|m| {
-                    if m.inode_id == ino {
-                        Some(name)
-                    } else {
-                        None
-                    }
+        let mut matches: Vec<String> =
+            children
+                .into_iter()
+                .filter_map(|(name, child)| {
+                    child.metadata().ok().and_then(|m| {
+                        if m.inode_id == ino {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
         match matches.len() {
             0 => Err(SyscallErr::ENOENT),

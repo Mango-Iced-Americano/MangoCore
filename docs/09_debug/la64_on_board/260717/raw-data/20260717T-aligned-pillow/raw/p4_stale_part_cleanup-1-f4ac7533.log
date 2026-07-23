@@ -1,0 +1,14 @@
+2026-07-17T15:30:09.458903Z __PERF_BEGIN_p4_stale_part_cleanup-1-f4ac7533__
+2026-07-17T15:30:10.377030Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_stale_part_cleanup-1-f4ac7533_TRACE_OFF__
+2026-07-17T15:30:13.285905Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_stale_part_cleanup-1-f4ac7533__
+2026-07-17T15:30:13.424921Z total 6
+2026-07-17T15:30:13.431998Z drwxrwxrwx    6 root     root          4096 Jan  1  1970 [1;34m.[m
+2026-07-17T15:30:13.438442Z drwxrwxrwx    3 root     root          4096 Jan  1  1970 [1;34m..[m
+2026-07-17T15:30:13.445721Z drwxrwxrwx    5 root     root          4096 Jan  1  1970 [1;34m071e4e258421[m
+2026-07-17T15:30:13.453050Z drwxrwxrwx    5 root     root          4096 Jan  1  1970 [1;34m5298fb0fa485[m
+2026-07-17T15:30:13.460471Z drwxrwxrwx    5 root     root          4096 Jan  1  1970 [1;34ma420d79ddb07[m
+2026-07-17T15:30:13.467791Z drwxrwxrwx    5 root     root          4096 Jan  1  1970 [1;34mb7f361382399[m
+2026-07-17T15:30:13.508645Z /persist/python-runtime/releases/071e4e258421
+2026-07-17T15:30:13.515287Z __PERF_WORK_END_p4_stale_part_cleanup-1-f4ac7533__
+2026-07-17T15:30:13.520063Z __PERF_ACK_p4_stale_part_cleanup-1-f4ac7533_WORK__
+2026-07-17T15:30:13.983698Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_stale_part_cleanup-1-f4ac7533__ rc=0

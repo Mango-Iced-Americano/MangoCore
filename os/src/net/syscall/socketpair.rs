@@ -79,10 +79,8 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     }
 
     let task = current_task().unwrap();
-    let vf1 =
-        vfs::File::new_without_open(socket_file1, vfs_flags, vfs::FileType::Socket);
-    let vf2 =
-        vfs::File::new_without_open(socket_file2, vfs_flags, vfs::FileType::Socket);
+    let vf1 = vfs::File::new_without_open(socket_file1, vfs_flags, vfs::FileType::Socket);
+    let vf2 = vfs::File::new_without_open(socket_file2, vfs_flags, vfs::FileType::Socket);
 
     let files_ref = task.process.files();
     let fd1 = files_ref

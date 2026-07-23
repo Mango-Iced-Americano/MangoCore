@@ -1,0 +1,7 @@
+2026-07-17T15:07:48.976428Z __PERF_BEGIN_aligned_pillow_p4_ext4_io-1-67a356aa__
+2026-07-17T15:07:49.936523Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_aligned_pillow_p4_ext4_io-1-67a356aa_TRACE_OFF__
+2026-07-17T15:07:52.112442Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_aligned_pillow_p4_ext4_io-1-67a356aa__
+2026-07-17T15:07:57.701538Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "files": {"jpg": "/persist/python/tmp/aligned-pillow-smoke-071e4e258421/aligned-pillow-smoke.jpg", "png": "/persist/python/tmp/aligned-pillow-smoke-071e4e258421/aligned-pillow-smoke.png"}, "imaging_module": "/persist/python-runtime/releases/071e4e258421/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/persist/python-runtime/releases/071e4e258421/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-17T15:07:58.183268Z __PERF_WORK_END_aligned_pillow_p4_ext4_io-1-67a356aa__
+2026-07-17T15:07:58.187622Z __PERF_ACK_aligned_pillow_p4_ext4_io-1-67a356aa_WORK__
+2026-07-17T15:07:58.684248Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_aligned_pillow_p4_ext4_io-1-67a356aa__ rc=0

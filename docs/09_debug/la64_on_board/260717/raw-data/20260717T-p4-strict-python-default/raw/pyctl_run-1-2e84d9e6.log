@@ -1,0 +1,12 @@
+2026-07-17T12:05:19.755761Z __PERF_BEGIN_pyctl_run-1-2e84d9e6__
+2026-07-17T12:05:20.586996Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pyctl_run-1-2e84d9e6_TRACE_OFF__
+2026-07-17T12:05:21.735849Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pyctl_run-1-2e84d9e6__
+2026-07-17T12:05:21.771368Z [python-deploy] stage=p4-preflight
+2026-07-17T12:05:21.927913Z [python-deploy] stage=identity
+2026-07-17T12:05:22.097457Z [python-deploy] stage=smoke
+2026-07-17T12:05:24.774797Z strict-runtime-board-smoke-ok
+2026-07-17T12:05:24.981962Z [python-deploy] stage=publish-current
+2026-07-17T12:05:26.473204Z [python-deploy] PASS current=/persist/python-runtime/releases/5298fb0fa485
+2026-07-17T12:05:26.505889Z __PERF_WORK_END_pyctl_run-1-2e84d9e6__
+2026-07-17T12:05:26.507475Z __PERF_ACK_pyctl_run-1-2e84d9e6_WORK__
+2026-07-17T12:05:26.893185Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pyctl_run-1-2e84d9e6__ rc=0

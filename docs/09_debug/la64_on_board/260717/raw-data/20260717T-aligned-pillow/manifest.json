@@ -1,0 +1,283 @@
+{
+  "artifacts": [
+    {
+      "path": "/Users/luzimo/dev/MangoCore/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-071e4e258421.tar.xz",
+      "sha256": "071e4e2584214b5174a6cee507de23c6d35f6f7fb026083832b453c6075600ea",
+      "size": 82289040
+    },
+    {
+      "path": "/Users/luzimo/dev/MangoCore/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz",
+      "sha256": "43d7bb2ecf21d662c427959c0b07612d05379d26a8b05bbc3bde84aa6cb4579e",
+      "size": 82412900
+    },
+    {
+      "path": "/Users/luzimo/dev/MangoCore/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-e14f2fd9cc6d.tar.xz",
+      "sha256": "e14f2fd9cc6d35c0544978b148c52271862370a79fdc84bcbd3bbff5e1290007",
+      "size": 82336872
+    }
+  ],
+  "artifacts_updated_utc": "2026-07-17T16:16:27.590045Z",
+  "created_utc": "2026-07-17T14:36:13.629852Z",
+  "docker_image": {
+    "id": "sha256:5c04dbc38562b1cd578c33c9cd321d4731cb8cdd00c82b2320a4350754faa6b0",
+    "name": "zhouzhouyi/os-contest:20260104",
+    "repo_digests": "[\"zhouzhouyi/os-contest@sha256:5c04dbc38562b1cd578c33c9cd321d4731cb8cdd00c82b2320a4350754faa6b0\"]"
+  },
+  "git": {
+    "branch": "la64-on-board",
+    "dirty_diff_sha256": "22c2909863d6444dac958c17a914ed9d5a121b32a35ceb5ad5290b6598658f37",
+    "head": "e275292b39baf7845dd7c8f0df4b2e9902cbf44d",
+    "status": "M .agents/skills/mango-workflow/references/harness-patterns.md\n M Makefile\n M docs/08_testing/cpython-isolated.md\n M docs/08_testing/mangocore-python-guide.md\n M docs/09_debug/la64_on_board/260717/06-raw-data-index.md\n M docs/09_debug/la64_on_board/260717/README.md\n M docs/09_debug/la64_on_board/260717/raw-data/ARTIFACTS.sha256\n M docs/Work_Log.md\n M os/build_initramfs.sh\n M os/initramfs/apk/usr/libexec/mango/persist-profile\n M os/src/hal/arch/loongarch64/linker.ld\n M os/src/lang_items.rs\n M scripts/backup_2k1000_p3.py\n M scripts/board/backup_2k1000_p3.sh\n M scripts/build_cpython_runtime_la64_strict.sh\n M scripts/deploy_cpython_bench.py\n M scripts/deploy_cpython_runtime.py\n M scripts/install_cpython_runtime_la64_strict.py\n M scripts/run_cpython_bench_matrix.py\n M user/src/bin/initproc.rs\n M user/src/lang_items.rs\n M user/tools/cpython/L3_check_files.sh\n M user/tools/cpython/L4_startup.sh\n M user/tools/cpython/L7_filesystem.py\n M user/tools/cpython/L8_subprocess.py\n M user/tools/cpython/L9_socket.py\n M user/tools/cpython/cpython_benchmark.sh\n M user/tools/cpython/cpython_testcode.sh\n M user/tools/cpython/run_cpython.sh\n M user/tools/cpython/run_strict_benchmark.sh\n M user/tools/cpython/run_strict_functional.sh\n M user/tools/cpython/strict_runtime_smoke.sh"
+  },
+  "host": {
+    "docker": "29.5.2/29.5.2",
+    "machine": "arm64",
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.9.6"
+  },
+  "notes": [
+    "Pillow 12.3.0 and libjpeg-turbo 3.1.4.1 strict-aligned build, P4 ext4 deployment and 2K1000LA validation"
+  ],
+  "repository": "/Users/luzimo/dev/MangoCore",
+  "run_id": "20260717T-aligned-pillow",
+  "schema": 1,
+  "security": {
+    "environment_recorded": false,
+    "redaction": "API keys, Authorization bearer values and known key variables"
+  },
+  "serial": {
+    "device": "/dev/cu.wchusbserial120",
+    "owners": [
+      {
+        "command": "Python",
+        "pid": "188"
+      }
+    ]
+  },
+  "source": {
+    "build_input_diff_sha256": "6aec2d2912ae8d048ac4ef98b5e5926cae66b0ba6075c5223ca09df4d7778846",
+    "dirty_diff_sha256": "22c2909863d6444dac958c17a914ed9d5a121b32a35ceb5ad5290b6598658f37",
+    "head": "e275292b39baf7845dd7c8f0df4b2e9902cbf44d",
+    "untracked_input_sha256": "cf1d9942ce113b66e8484f9d3265c91d7458b469b2762fb1bcd8a0213c7feffe",
+    "untracked_inputs": [
+      {
+        "path": "scripts/board/verify_persist_python.sh",
+        "sha256": "68c317ef96377e99ce63a54ea2eedaae7f397df90d2517246844b2200cb4076c",
+        "size": 4469
+      },
+      {
+        "path": "user/tools/cpython/pillow_strict_smoke.py",
+        "sha256": "0251c965927ac86b0c3ed71f9208e73c1f8ffe5c7cb5171bbe640e021088fdfa",
+        "size": 4027
+      },
+      {
+        "path": "user/tools/cpython/python-entry-wrapper.sh",
+        "sha256": "520c43056b7aee82b11b95881ed2130a868ec1115fff67ed7303bfa08684b778",
+        "size": 1732
+      },
+      {
+        "path": "user/tools/cpython/python3-wrapper-persist.sh",
+        "sha256": "bd2483de4853697df7e566911a36bdd22e33440906dcdb716693bb8764eb9ad2",
+        "size": 4554
+      },
+      {
+        "path": "user/tools/cpython/verify_runtime_integrity.py",
+        "sha256": "358fd962356ea0841b85636545ca807bd4601355e483a5bc5831a70bfd144646",
+        "size": 1210
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L3_check_files.sh",
+        "sha256": "037451c91074ac817da913d51ad8601556969b729ef40346cf902204811cbff5",
+        "size": 2880
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L4_startup.sh",
+        "sha256": "8a993fdde9b821df066bd41e301ed1c4970f31c229ddcbd9a775e02c8041c255",
+        "size": 1916
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L5_language.py",
+        "sha256": "78c75cd1b0fa440f846d270cb548a31691f67fa7ea886e628ae16906371f832c",
+        "size": 2416
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L6_stdlib.py",
+        "sha256": "b7527866e78f2d89d3f7c140499f14ffa04add2309e17347098c7337000640a7",
+        "size": 4069
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L7_filesystem.py",
+        "sha256": "42ec21210b8b68d33e8fc9564086bc6d5aa08e495ad50142a56b347d9697fa5b",
+        "size": 7773
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L8_subprocess.py",
+        "sha256": "8e1cd2ab7294e2efc114da786f561bdedbe7d9c89caa04f57631341d3e23ce1e",
+        "size": 5601
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L8_thread.py",
+        "sha256": "445b4a07b190d2317b607c23656ebe9307a13fba53708975d16075061c9e6788",
+        "size": 2758
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L9_socket.py",
+        "sha256": "cbb416c556d5f963cc8bdb88a0223505db470fef547fe9e2db549b49a324726a",
+        "size": 4031
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/cpython_testcode.sh",
+        "sha256": "3f7e3d7986e1c6d5d9c9ceebe76d3603031809c28cd3adf932503f8b290a3e4a",
+        "size": 3210
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/python3-wrapper.sh",
+        "sha256": "43158cfe17ab36881d408e490663c40809d88881081b979b1049254e8b145241",
+        "size": 2976
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/run_cpython.sh",
+        "sha256": "2db27c559dc79ce30ed9f8e7372324ae71f66a05c400857f30d39f592ad58fe7",
+        "size": 1068
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/run_strict_benchmark.sh",
+        "sha256": "6c61048748a8c06dd982f8ab3d17bce4eed9b53e3e67a453519114d14c76d286",
+        "size": 2418
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/run_strict_functional.sh",
+        "sha256": "8db83132e73f77f757fd99b63be9e9dd6ae68bea3acd26042847d0bdfb97bee1",
+        "size": 1000
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/strict-runtime-manifest.json",
+        "sha256": "2be976aabcf2a3f964447a3cbaca818f588683e6d3540bb40b6c5ad3eabe447c",
+        "size": 28694
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/strict_runtime_smoke.sh",
+        "sha256": "0ef2144db4e23625164f2cd2b157917297465043e11f0c783d91d1227463815e",
+        "size": 1130
+      },
+      {
+        "path": "user/vendor/buddy_system_allocator/Cargo.lock",
+        "sha256": "c7ba960fb407945cc90e3b29f98ffbefb137fd08905de18c355046e92137a421",
+        "size": 382
+      }
+    ]
+  },
+  "source_checkpoint": {
+    "build_input_diff_sha256": "3bb07df462cd170950fc35c1a1c7d93e759d58f035bb9646ba6480e28e8bdf00",
+    "dirty_diff_sha256": "4807c899a4a808d7b1fb29abea5d8eb6a88ade2cda279ab20c1b69729216d660",
+    "head": "e275292b39baf7845dd7c8f0df4b2e9902cbf44d",
+    "untracked_input_sha256": "cf1d9942ce113b66e8484f9d3265c91d7458b469b2762fb1bcd8a0213c7feffe",
+    "untracked_inputs": [
+      {
+        "path": "scripts/board/verify_persist_python.sh",
+        "sha256": "68c317ef96377e99ce63a54ea2eedaae7f397df90d2517246844b2200cb4076c",
+        "size": 4469
+      },
+      {
+        "path": "user/tools/cpython/pillow_strict_smoke.py",
+        "sha256": "0251c965927ac86b0c3ed71f9208e73c1f8ffe5c7cb5171bbe640e021088fdfa",
+        "size": 4027
+      },
+      {
+        "path": "user/tools/cpython/python-entry-wrapper.sh",
+        "sha256": "520c43056b7aee82b11b95881ed2130a868ec1115fff67ed7303bfa08684b778",
+        "size": 1732
+      },
+      {
+        "path": "user/tools/cpython/python3-wrapper-persist.sh",
+        "sha256": "bd2483de4853697df7e566911a36bdd22e33440906dcdb716693bb8764eb9ad2",
+        "size": 4554
+      },
+      {
+        "path": "user/tools/cpython/verify_runtime_integrity.py",
+        "sha256": "358fd962356ea0841b85636545ca807bd4601355e483a5bc5831a70bfd144646",
+        "size": 1210
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L3_check_files.sh",
+        "sha256": "037451c91074ac817da913d51ad8601556969b729ef40346cf902204811cbff5",
+        "size": 2880
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L4_startup.sh",
+        "sha256": "8a993fdde9b821df066bd41e301ed1c4970f31c229ddcbd9a775e02c8041c255",
+        "size": 1916
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L5_language.py",
+        "sha256": "78c75cd1b0fa440f846d270cb548a31691f67fa7ea886e628ae16906371f832c",
+        "size": 2416
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L6_stdlib.py",
+        "sha256": "b7527866e78f2d89d3f7c140499f14ffa04add2309e17347098c7337000640a7",
+        "size": 4069
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L7_filesystem.py",
+        "sha256": "42ec21210b8b68d33e8fc9564086bc6d5aa08e495ad50142a56b347d9697fa5b",
+        "size": 7773
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L8_subprocess.py",
+        "sha256": "8e1cd2ab7294e2efc114da786f561bdedbe7d9c89caa04f57631341d3e23ce1e",
+        "size": 5601
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L8_thread.py",
+        "sha256": "445b4a07b190d2317b607c23656ebe9307a13fba53708975d16075061c9e6788",
+        "size": 2758
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/L9_socket.py",
+        "sha256": "cbb416c556d5f963cc8bdb88a0223505db470fef547fe9e2db549b49a324726a",
+        "size": 4031
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/cpython_testcode.sh",
+        "sha256": "3f7e3d7986e1c6d5d9c9ceebe76d3603031809c28cd3adf932503f8b290a3e4a",
+        "size": 3210
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/python3-wrapper.sh",
+        "sha256": "43158cfe17ab36881d408e490663c40809d88881081b979b1049254e8b145241",
+        "size": 2976
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/run_cpython.sh",
+        "sha256": "2db27c559dc79ce30ed9f8e7372324ae71f66a05c400857f30d39f592ad58fe7",
+        "size": 1068
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/run_strict_benchmark.sh",
+        "sha256": "6c61048748a8c06dd982f8ab3d17bce4eed9b53e3e67a453519114d14c76d286",
+        "size": 2418
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/run_strict_functional.sh",
+        "sha256": "8db83132e73f77f757fd99b63be9e9dd6ae68bea3acd26042847d0bdfb97bee1",
+        "size": 1000
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/strict-runtime-manifest.json",
+        "sha256": "2be976aabcf2a3f964447a3cbaca818f588683e6d3540bb40b6c5ad3eabe447c",
+        "size": 28694
+      },
+      {
+        "path": "user/tools/loongarch64/tests/cpython/strict_runtime_smoke.sh",
+        "sha256": "0ef2144db4e23625164f2cd2b157917297465043e11f0c783d91d1227463815e",
+        "size": 1130
+      },
+      {
+        "path": "user/vendor/buddy_system_allocator/Cargo.lock",
+        "sha256": "c7ba960fb407945cc90e3b29f98ffbefb137fd08905de18c355046e92137a421",
+        "size": 382
+      }
+    ]
+  }
+}

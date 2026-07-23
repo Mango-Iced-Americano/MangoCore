@@ -14,10 +14,10 @@
 //! - `shutdown` 未实现
 //! - `listen`/`accept` 不支持（数据报类型无连接语义）
 
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{Endpoint, Socket, PSOCK};
-use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::collections::BTreeMap;
@@ -253,11 +253,7 @@ impl UnixDatagramSocket {
         (socket_a, socket_b)
     }
 
-    fn send_to_bound(
-        &self,
-        peer_addr: UnixEndpointBound,
-        buf: &[u8],
-    ) -> Result<isize, SyscallErr> {
+    fn send_to_bound(&self, peer_addr: UnixEndpointBound, buf: &[u8]) -> Result<isize, SyscallErr> {
         let local_addr = self.inner.lock().local_addr.clone();
         let peer_socket = BIND_TABLE
             .lookup(&peer_addr)

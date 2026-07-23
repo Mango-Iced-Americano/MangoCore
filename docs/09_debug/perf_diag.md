@@ -3,15 +3,17 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-06-19
+last_update: 2026-07-16
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
 # 统一内核观测系统 (perf_diag)
 
+> 2026-07-16 Python 实板性能检查的停止点、18 项 production 基线、三项问题证据与诊断构建结构偏差，见 [2K1000LA Python 性能专项](la64_on_board/260717/README.md)。该批次明确区分 production 正式数字、诊断机制证据、strict-align 第一次实验和未完成项，并保留完整文本原始数据。
+
 ## 概述
 
-perf_diag 将内核中散落的 trace、perf、stats 三套观测机制统一收敛到 `/sys/kernel/` 文件接口下。统计计数器编译期零开销（feature 关闭时编译为 no-op），运行时通过 `stats_on` AtomicBool 控制，数据通过 `cat` 文件以 `key=value` 文本格式暴露。
+perf_diag 将内核中散落的 trace、perf、stats 三套观测机制统一收敛到 `/sys/kernel/` 文件接口下。统计计数器编译期零开销（feature 关闭时编译为 no-op），运行时通过 `stats_on` AtomicBool 控制，并用 `profile` 将热点探针限制在单个诊断组；数据通过 `cat` 文件以 `key=value` 文本格式暴露。
 
 ## 架构
 
@@ -21,9 +23,9 @@ perf_diag 将内核中散落的 trace、perf、stats 三套观测机制统一收
 │    ├─ 关闭: 所有 hook 编译为 no-op                  │
 │    └─ 开启: hook 编译为 AtomicUsize RMW             │
 ├────────────────────────────────────────────────────┤
-│  运行时: /sys/kernel/stats/stats_on (AtomicBool)    │
-│    ├─ 0: hook 内 AtomicBool::load → 立即返回        │
-│    └─ 1: 执行计数器更新                             │
+│  运行时: /sys/kernel/stats/{stats_on,profile}       │
+│    ├─ stats_on=0: hook 立即返回且不读硬件时钟       │
+│    └─ stats_on=1: 只记录 profile 选中的计数器       │
 ├────────────────────────────────────────────────────┤
 │  暴露面: sysfs 文件接口                             │
 │    /sys/kernel/stats/{taskq,timer,syscall,...}      │
@@ -66,10 +68,15 @@ cat /sys/kernel/stats/features
 |------|------|------|
 | `features` | ro | 编译期 feature 状态（perf_stats / perf_diag / heap_trace） |
 | `stats_on` | rw | 运行时统计开关（0=关闭 / 1=开启） |
+| `profile` | rw | `core` / `memory_io` / `network_runtime`；诊断窗口一次只启用一组 |
 | `reset` | wo | 重置所有 delta 计数器 |
+| `boot` | ro | 从 Rust 入口起算的 console/MM/driver/net/FS/initproc/scheduler 累计 ticks；不随 `reset` 清零 |
 | `taskq` | ro | 调度队列指标（15 项） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
+| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时 |
+| `anon_unmap` | ro | private anonymous VMA 释放次数、页数、精确 retain 扫描步数和耗时 |
+| `net` | ro | poll、RX/TX/drop 与 exec/openat/read/mmap 运行时归因 |
 | `resource` | ro | 资源 gauge（内存/Task/Socket/Pipe/PageCache/Dentry 等） |
 | `buddyinfo` | ro | Buddy 空闲块直方图（order → free_blocks） |
 | `zombies` | ro | Zombie 按 parent PID 分组 Top10 |
@@ -90,9 +97,10 @@ cat /sys/kernel/stats/features
 ### 手动诊断
 
 ```bash
-# 开启统计
-echo 1 > /sys/kernel/stats/stats_on
+# 先选组，再开启统计
+echo core > /sys/kernel/stats/profile
 echo 1 > /sys/kernel/stats/reset
+echo 1 > /sys/kernel/stats/stats_on
 
 # 运行负载
 busybox ls -la / > /dev/null
@@ -101,6 +109,12 @@ busybox ls -la / > /dev/null
 cat /sys/kernel/stats/taskq
 cat /sys/kernel/stats/timer
 cat /sys/kernel/stats/syscall
+
+# 下一个窗口切换到内存/文件/块设备组
+echo 0 > /sys/kernel/stats/stats_on
+echo memory_io > /sys/kernel/stats/profile
+echo 1 > /sys/kernel/stats/reset
+echo 1 > /sys/kernel/stats/stats_on
 ```
 
 ### 追踪调试
@@ -119,6 +133,14 @@ echo 1 > /sys/kernel/tracing/clear
 ```
 
 ## 计数器参考
+
+正式采样固定使用“关闭追踪 → `stats_on=0` → 选择 `profile` → `reset` → 前快照 → `stats_on=1` → 工作负载 → `stats_on=0` → 后快照”。`all`（数值 7）仅用于接口排障，不用于正式性能结论。
+
+| profile | 数值 | 覆盖范围 |
+|---------|------|----------|
+| `core` | 1 | 启动后调度、timer、futex、syscall/trap |
+| `memory_io` | 2 | 缺页、TLB、frame/heap、PageCache、VFS、VirtIO/SATA |
+| `network_runtime` | 4 | poll、RX/TX/drop，以及 Python 相关 exec/openat/read/mmap |
 
 ### taskq（调度队列）
 
@@ -162,6 +184,50 @@ echo 1 > /sys/kernel/tracing/clear
 | `syscall_getppid_total` | counter | getppid（syscall 173）调用次数 |
 | `syscall_cost_max_ticks` | max | 单次 syscall 最大耗时（rdcycle） |
 | `trap_enter_cost_max_ticks` | max | 单次 trap 最大耗时（rdcycle） |
+| `user_unaligned_traps` | counter | 用户态非对齐访存异常总数（LoongArch） |
+| `user_unaligned_ticks_total/max` | counter/max | 非对齐 Rust handler 的累计/最大耗时；不含汇编 trap entry/restore |
+| `user_unaligned_load_{2,4,8}` | counter | 按访问宽度分类的非对齐 load |
+| `user_unaligned_store_{2,4,8}` | counter | 按访问宽度分类的非对齐 store |
+| `user_unaligned_float_{loads,stores}` | counter | 解码为浮点访存的非对齐异常 |
+
+非对齐计数必须包住 workload body，不能把解释器启动/import 混入。对 store 型负载，建议同时采集 `memory_io` 的 `tlb_page`：`sum(store_width * store_count)` 与 `tlb_page` 接近时，说明逐字节模拟正在放大 private-store/COW/TLB 路径。handler ticks 只覆盖 Rust 分支，完整异常成本还包括 GP/FPR/LSX 保存恢复，因此只能作为下界。
+
+### memory_io（内存、PageCache、块设备）
+
+| 计数器 | 类型 | 含义 |
+|--------|------|------|
+| `page_faults` / `pagefault_ticks_total` | counter | 缺页次数与 handler 累计 ticks |
+| `frame_alloc_hits` / `frame_alloc_ticks_total` | counter | frame 分配次数与累计 ticks |
+| `frame_free_hits` | counter | frame 释放次数 |
+| `tlb_{full,page,activate,global}` | counter | 各类 TLB 操作；`activate` 不是实际地址空间切换数 |
+| `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
+| `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
+| `sata_flush_{reqs,ticks_total}` | counter | SATA cache flush 次数与累计耗时 |
+
+#### anonymous private VMA release
+
+`anon_unmap` 只在 `memory_io` profile 下记录 anonymous + private VMA；file/shared mapping
+不进入该组。计时覆盖 `Vma::unmap` 内部，`retain_scan_steps_total` 在每次现有
+`VecDeque::retain` 之前累加当时 `active.len()`，因此是实际扫描量而不是按页数推算。
+
+| 计数器 | 类型 | 含义 |
+|--------|------|------|
+| `anon_unmap_calls_total` | counter | 满足记录条件的 VMA unmap 调用数 |
+| `anon_unmap_{range,area}_calls` | counter | range unmap 与 remove-area 来源分类 |
+| `anon_unmap_requested_pages_total` | counter | 调用请求范围页数，含未 resident 页 |
+| `anon_unmap_resident_pages_total` | counter | 实际删除的 resident 页数 |
+| `anon_unmap_active_before_total/max` | counter/max | 调用开始时 frame store active 规模 |
+| `anon_unmap_retain_scan_steps_total` | counter | 当前实现所有 retain 的实际遍历元素数 |
+| `anon_unmap_ticks_total/max` | counter/max | unmap 累计与最大 rdtime ticks |
+| `anon_unmap_errors_total` | counter | 释放过程错误数 |
+| `anon_unmap_pages_le_16/le_256/le_4096/gt_4096` | counter | resident pages 分桶 |
+
+合成居民映射的正确性不变量为：单个 N 页 VMA 全部逐页删除时，主项扫描数应为
+`N(N+1)/2`。真实 workload 归因必须在目标进程内完成“预热 → reset/on → body → off”，
+否则 shell/启动/退出会引入额外 VMA。2026-07-17 的实板量化见
+[strict runtime 与匿名释放量化](la64_on_board/260717/07-strict-runtime-and-anon-unmap-quantification.md)。
+
+块设备 ticks 统计的是驱动同步调用窗口，不等于 workload 的完整 I/O wait。用 `(read + write + flush) ticks / sys time` 估算设备直接占比后，剩余时间仍可能位于 VFS/ext4、PageCache、锁、分配和用户复制。若 write 与 flush 近似一一对应，应回到块设备调用点确认 flush 粒度，不能把全部 sys 直接归因于磁盘介质。
 
 ### resource（资源 gauge）
 
@@ -215,7 +281,7 @@ ready_len_max=4
 ### 工作流程
 
 1. 每组测试开始前，initproc 自动执行 `echo 1 > /sys/kernel/stats/stats_on` 和 `echo 1 > /sys/kernel/stats/reset`
-2. 测试运行完毕后，initproc 依次 `cat` 六个 stats 文件（taskq / timer / syscall / resource / buddyinfo / zombies）
+2. 测试运行完毕后，initproc 按启用 profile 读取对应 stats 文件；手工性能窗口还应保存前后快照，而不是只保存结束绝对值
 3. 分别针对 musl 和 glibc 各输出一次快照
 
 ## 竞赛构建
@@ -236,13 +302,15 @@ perf_diag feature 关闭时（默认构建）：
 | `stats_on` 写入成功但计数器仍 0 | 写入在 open 阶段失败（O_TRUNC 旧 bug） | 同上，检查 feature 状态 |
 | `syscall_getppid_total` 为 0 | 内核 syscall ID 173（getppid）未被调用 | 正常，lmbench `lat_syscall null` 使用 getppid |
 | trace 无输出 | `tracing_on` 为 0 或被 `clear` 清空 | `echo 1 > /sys/kernel/tracing/tracing_on` |
+| QEMU 没有非对齐异常、实板大量出现 | 两平台 UAL 能力不同 | 读取实板 CPUCFG，并以实板计数作为最终标准 |
+| 计数器能解释 sys、却小于完整 sys | handler ticks 不含汇编入口/出口，或 rusage 未聚合线程/child | 将结果视为下界，并核对 rusage 语义 |
 
 ## 实现文件
 
 | 文件 | 职责 |
 |------|------|
 | `os/Cargo.toml` | `perf_diag = ["perf_stats"]` feature 定义 |
-| `os/src/task/perf.rs` | P0 AtomicUsize 计数器 + record 函数（878 行） |
+| `os/src/task/perf.rs` | profile-aware AtomicUsize 计数器、时钟门禁与 record 函数 |
 | `os/src/task/manager.rs` | 调度 + 计时器插桩点 |
 | `os/src/task/processor.rs` | 调度循环队列快照 |
 | `os/src/syscall/mod.rs` | Syscall 入口/出口计时 |
@@ -252,6 +320,17 @@ perf_diag feature 关闭时（默认构建）：
 | `os/src/fs/sysfs/files/diag.rs` | /sys/kernel/ 文件注册与内容格式化 |
 | `os/src/fs/sysfs/files/mod.rs` | Feature-gated 注册入口 |
 | `user/src/bin/initproc.rs` | diag 模式自动 snapshot |
+| `scripts/kernel_perf.py` | 源码/镜像指纹、串口 ACK、前后快照、脱敏、JSONL/CSV 分析 |
+| `user/tools/cpython/bench/bench_runner.py` | workload body 边界、target-side JSONL 与 CPython benchmark 事件 |
+
+## 2K1000LA Python/ext4 已验证实例
+
+2026-07-16 的 production 正式矩阵和 `perf_diag` 定向窗口保存在：
+
+- `target/perf-runs/20260716T102350Z-cpython-ext4-production/`
+- `target/perf-runs/20260716T-cpython-deepdiag/`
+
+该实例证明了三类不同瓶颈必须分开观测：非对齐异常可解释 `bm_string/bm_float` 的大部分 sys；匿名 resident mapping 的关闭时间随 page 数平方增长；ext4 小文件样本中 SATA 直接耗时只占 sys 的一部分。正式结论见 production 目录的 `reports/cpython_ext4_kernel_analysis.md`。`target/` 为未跟踪结果目录，归档或跨机器复现时必须连同 manifest、records.jsonl 和 raw 日志一起保存。
 
 ## 参考
 

@@ -1,7 +1,7 @@
 //! /proc/<pid>/status — 进程状态
 
-use crate::fs::procfs::proc_read_str;
 use crate::config::SYSTEM_FD_LIMIT;
+use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
 use alloc::string::{String, ToString};
 

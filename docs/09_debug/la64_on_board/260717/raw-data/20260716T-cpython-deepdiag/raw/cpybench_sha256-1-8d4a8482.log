@@ -1,0 +1,6 @@
+2026-07-16T09:33:32.498108Z __PERF_BEGIN_cpybench_sha256-1-8d4a8482__
+2026-07-16T09:33:33.536626Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_cpybench_sha256-1-8d4a8482_TRACE_OFF__
+2026-07-16T09:33:36.571980Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_WORK_BEGIN_cpybench_sha256-1-8d4a8482__
+2026-07-16T09:33:38.480444Z __PERF_WORK_END_cpybench_sha256-1-8d4a8482__
+2026-07-16T09:33:38.483022Z __PERF_ACK_cpybench_sha256-1-8d4a8482_WORK__
+2026-07-16T09:33:38.987419Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_END_cpybench_sha256-1-8d4a8482__ rc=0

@@ -3,8 +3,8 @@ use core::mem::size_of;
 use core::panic;
 
 use crate::fs::inode::{InodeLock, InodeTime};
-use crate::fs::DiskInodeType;
 use crate::fs::vfs::FileSystem;
+use crate::fs::DiskInodeType;
 use alloc::string::String;
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};
@@ -12,7 +12,6 @@ use spin::{Mutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
 
 use super::*;
 use super::{
-    bitmap::{ext4_bmap_bit_find_clr, ext4_bmap_bit_set},
     block_group::{Block, Ext4BlockGroup},
     crc::{ext4_crc32c, EXT4_CRC32_INIT},
     direntry::DirEntryType,
@@ -38,14 +37,16 @@ bitflags! {
 impl InodeFileType {
     pub fn to_dir_entry_type(&self) -> crate::fs::ext4::direntry::DirEntryType {
         use crate::fs::ext4::direntry::DirEntryType;
-        if self.contains(InodeFileType::S_IFREG) { DirEntryType::EXT4_DE_REG_FILE }
-        else if self.contains(InodeFileType::S_IFDIR) { DirEntryType::EXT4_DE_DIR }
-        else if self.contains(InodeFileType::S_IFLNK) { DirEntryType::EXT4_DE_SYMLINK }
-        else if self.contains(InodeFileType::S_IFCHR) { DirEntryType::EXT4_DE_CHRDEV }
-        else if self.contains(InodeFileType::S_IFBLK) { DirEntryType::EXT4_DE_BLKDEV }
-        else if self.contains(InodeFileType::S_IFIFO) { DirEntryType::EXT4_DE_FIFO }
-        else if self.contains(InodeFileType::S_IFSOCK) { DirEntryType::EXT4_DE_SOCK }
-        else { DirEntryType::EXT4_DE_UNKNOWN }
+        match *self {
+            InodeFileType::S_IFREG => DirEntryType::EXT4_DE_REG_FILE,
+            InodeFileType::S_IFDIR => DirEntryType::EXT4_DE_DIR,
+            InodeFileType::S_IFLNK => DirEntryType::EXT4_DE_SYMLINK,
+            InodeFileType::S_IFCHR => DirEntryType::EXT4_DE_CHRDEV,
+            InodeFileType::S_IFBLK => DirEntryType::EXT4_DE_BLKDEV,
+            InodeFileType::S_IFIFO => DirEntryType::EXT4_DE_FIFO,
+            InodeFileType::S_IFSOCK => DirEntryType::EXT4_DE_SOCK,
+            _ => DirEntryType::EXT4_DE_UNKNOWN,
+        }
     }
 }
 
@@ -713,8 +714,13 @@ impl Ext4FileSystem {
     /// 直接从磁盘读取 inode，不走 cache。仅用于 get_inode_cached miss 路径。
     pub(crate) fn read_inode_from_disk_uncached(&self, inode_num: u32) -> Ext4InodeRef {
         super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
-        debug_assert!(self.block_size == crate::hal::BLOCK_SZ || self.block_size == 1024 || self.block_size == 2048,
-            "block_size corrupted: {}", self.block_size);
+        debug_assert!(
+            self.block_size == crate::hal::BLOCK_SZ
+                || self.block_size == 1024
+                || self.block_size == 2048,
+            "block_size corrupted: {}",
+            self.block_size
+        );
         let offset = self.inode_disk_pos(inode_num);
         let mut ext4block = self.load_metadata_block_offset(offset);
         let blk_offset = offset % self.block_size;
@@ -917,48 +923,7 @@ impl Ext4FileSystem {
 
     /// 分配一个新的块
     pub fn allocate_new_block(&self, inode_ref: &mut Ext4InodeRef) -> Result<Ext4Fsblk, isize> {
-        let mut super_block = self.superblock;
-        let inodes_per_group = super_block.inodes_per_group();
-        let bgid = (inode_ref.inode_num - 1) / inodes_per_group;
-        let index = (inode_ref.inode_num - 1) % inodes_per_group;
-
-        // load block group
-        let mut block_group = self.load_block_group_cached(&super_block, bgid as usize);
-
-        let block_bitmap_block = block_group.get_block_bitmap_block(&super_block);
-
-        let mut block_bmap_raw_data = self.read_metadata_block(block_bitmap_block as usize);
-        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
-        let data: &mut Vec<u8> = &mut block_bmap_raw_data.to_vec();
-        let mut rel_blk_idx = 0;
-
-        ext4_bmap_bit_find_clr(data, index, 0x8000, &mut rel_blk_idx);
-        ext4_bmap_bit_set(data, rel_blk_idx);
-
-        block_group.set_block_group_balloc_bitmap_csum(&super_block, data);
-        self.store_metadata_block_dirty(block_bitmap_block as usize, data);
-        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
-
-        /* Update superblock free blocks count */
-        let mut super_blk_free_blocks = super_block.free_blocks_count();
-        super_blk_free_blocks -= 1;
-        super_block.set_free_blocks_count(super_blk_free_blocks);
-        self.defer_superblock_write(&super_block);
-
-        /* Update inode blocks (different block size!) count */
-        let mut inode_blocks = inode_ref.inode.blocks_count();
-        // inode_blocks += (self.block_size / EXT4_INODE_BLOCK_SIZE) as u64;
-        inode_blocks += (self.block_size / 512) as u64;
-        inode_ref.inode.set_blocks_count(inode_blocks);
-        self.write_back_inode(inode_ref);
-
-        /* Update block group free blocks count */
-        let mut fb_cnt = block_group.get_free_blocks_count();
-        fb_cnt -= 1;
-        block_group.set_free_blocks_count(fb_cnt as u32);
-        self.defer_bg_write(&block_group, bgid as u32, &super_block);
-
-        Ok(rel_blk_idx as Ext4Fsblk)
+        self.balloc_alloc_block(inode_ref, None)
     }
 
     /// Append a new block to the inode and update the extent tree.

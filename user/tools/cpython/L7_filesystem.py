@@ -22,10 +22,12 @@ def check(name):
 
 
 def make_base_dir():
+    configured = os.environ.get("CPYTHON_TEST_TMPDIR")
     candidates = [
-        os.environ.get("CPYTHON_TEST_TMPDIR"),
+        configured,
+    ] if configured else [
         os.getcwd(),
-        "/tools/tests/cpython",
+        os.environ.get("CPYTHON_TEST_ROOT"),
         "/tmp",
     ]
     last_err = None
@@ -46,11 +48,21 @@ def make_base_dir():
 
 old_cwd = os.getcwd()
 base = None
+posix_base = None
 
 try:
     base = make_base_dir()
     print(f"{PREFIX} base: {base}", flush=True)
     os.chdir(base)
+
+    # Keep the symlink-specific checks on the same configured filesystem as
+    # every other writable path.  The strict board run points this tree at P4
+    # ext4, so falling back to /tmp would invalidate the ext4-only gate.
+    posix_base = os.path.join(base, f"cpython_l7_posix_{os.getpid()}")
+    if os.path.exists(posix_base):
+        shutil.rmtree(posix_base)
+    os.mkdir(posix_base)
+    print(f"{PREFIX} posix base: {posix_base}", flush=True)
 
     with check("open write read close"):
         with open("basic.txt", "w", encoding="utf-8") as f:
@@ -90,14 +102,28 @@ try:
         assert not os.path.exists("dir1")
 
     with check("rename over existing file"):
-        with open("rename_src.txt", "w", encoding="utf-8") as f:
-            f.write("src")
-        with open("rename_dst.txt", "w", encoding="utf-8") as f:
-            f.write("dst")
+        open("rename_src.txt", "w", encoding="utf-8").close()
+        open("rename_dst.txt", "w", encoding="utf-8").close()
         os.rename("rename_src.txt", "rename_dst.txt")
         assert not os.path.exists("rename_src.txt")
-        with open("rename_dst.txt", "r", encoding="utf-8") as f:
-            assert f.read() == "src"
+        assert os.stat("rename_dst.txt").st_size == 0
+        os.unlink("rename_dst.txt")
+
+        # Reuse both names and freshly allocated FAT clusters. A one-shot
+        # check misses stale inode/PageCache aliases when the allocator
+        # returns a cluster that still contains an older target payload.
+        for i in range(20):
+            expected = f"source-{i:02d}"
+            old_target = f"target-{i:02d}"
+            with open("rename_src.txt", "w", encoding="utf-8") as f:
+                f.write(expected)
+            with open("rename_dst.txt", "w", encoding="utf-8") as f:
+                f.write(old_target)
+            os.rename("rename_src.txt", "rename_dst.txt")
+            assert not os.path.exists("rename_src.txt")
+            with open("rename_dst.txt", "r", encoding="utf-8") as f:
+                assert f.read() == expected
+            os.unlink("rename_dst.txt")
 
     with check("unlink file"):
         with open("unlink_me.txt", "w", encoding="utf-8") as f:
@@ -106,18 +132,20 @@ try:
         assert not os.path.exists("unlink_me.txt")
 
     with check("symlink readlink and read through symlink"):
-        with open("target.txt", "w", encoding="utf-8") as f:
+        target_path = os.path.join(posix_base, "target.txt")
+        link_path = os.path.join(posix_base, "link.txt")
+        with open(target_path, "w", encoding="utf-8") as f:
             f.write("target-data")
-        os.symlink("target.txt", "link.txt")
-        target = os.readlink("link.txt")
+        os.symlink("target.txt", link_path)
+        target = os.readlink(link_path)
         assert target == "target.txt", target
-        with open("link.txt", "r", encoding="utf-8") as f:
+        with open(link_path, "r", encoding="utf-8") as f:
             assert f.read() == "target-data"
 
     with check("stat and lstat"):
-        st_file = os.stat("target.txt")
-        st_link = os.lstat("link.txt")
-        st_follow = os.stat("link.txt")
+        st_file = os.stat(target_path)
+        st_link = os.lstat(link_path)
+        st_follow = os.stat(link_path)
         assert stat.S_ISREG(st_file.st_mode)
         assert stat.S_ISLNK(st_link.st_mode)
         assert stat.S_ISREG(st_follow.st_mode)
@@ -185,6 +213,8 @@ finally:
     os.chdir(old_cwd)
     if base is not None:
         shutil.rmtree(base, ignore_errors=True)
+    if posix_base is not None:
+        shutil.rmtree(posix_base, ignore_errors=True)
 
 print(f"{PREFIX} RESULT {'PASS' if fail == 0 else 'FAIL'}", flush=True)
 sys.exit(fail)

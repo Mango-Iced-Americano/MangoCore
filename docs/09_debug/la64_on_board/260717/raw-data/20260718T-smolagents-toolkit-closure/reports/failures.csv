@@ -1,0 +1,5 @@
+sample_id,test,arch,platform,build_mode,exit_status,wall_seconds,log
+pyctl_run-1-c0855d82,pyctl_run,la64,2k1000la,production,1,531.151872083,/Users/luzimo/dev/MangoCore/target/perf-runs/20260718T050500Z-smolagents-toolkit-closure/raw/pyctl_run-1-c0855d82.log
+persist_python_verify_smolagents-1-40d2d96e,persist_python_verify_smolagents,la64,2k1000la,production,127,0.014773625000000123,/Users/luzimo/dev/MangoCore/target/perf-runs/20260718T050500Z-smolagents-toolkit-closure/raw/persist_python_verify_smolagents-1-40d2d96e.log
+tools-1-b754e31f,tools,la64,2k1000la,production,1,59.160780249999995,/Users/luzimo/dev/MangoCore/target/perf-runs/20260718T050500Z-smolagents-toolkit-closure/raw/tools-1-b754e31f.log
+cwd-1-b868c08f,cwd,la64,2k1000la,production,1,0.12413449999999981,/Users/luzimo/dev/MangoCore/target/perf-runs/20260718T050500Z-smolagents-toolkit-closure/raw/cwd-1-b868c08f.log

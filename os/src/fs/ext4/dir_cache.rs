@@ -159,7 +159,10 @@ impl Ext4DirectoryLookupCache {
 
             // Entry count counter: tracks entries in the most recent full-index build.
             // Not a live gauge — only updated on build_full_index, not on incremental inserts/removes.
-            crate::fs::ext4::counters::DIR_CACHE_ENTRY_COUNT.store(per_dir.entries.len() as u64, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DIR_CACHE_ENTRY_COUNT.store(
+                per_dir.entries.len() as u64,
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         self.evict_if_needed();
@@ -202,7 +205,8 @@ impl Ext4DirectoryLookupCache {
         }
         // Reset entry count if all caches cleared
         if dirs.is_empty() {
-            crate::fs::ext4::counters::DIR_CACHE_ENTRY_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DIR_CACHE_ENTRY_COUNT
+                .store(0, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }

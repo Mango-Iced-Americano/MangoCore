@@ -1,0 +1,7 @@
+2026-07-17T04:22:24.777519Z __PERF_BEGIN_strict_suite_preflight-1-e2c2ef00__
+2026-07-17T04:22:25.721105Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_strict_suite_preflight-1-e2c2ef00_TRACE_OFF__
+2026-07-17T04:22:28.810265Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_strict_suite_preflight-1-e2c2ef00__
+2026-07-17T04:22:51.821696Z 6a4c6a1896cbbe1ae55be8fe1149c679bacdbf4a05759b7db3280593c10e0ce1
+2026-07-17T04:22:52.107747Z __PERF_WORK_END_strict_suite_preflight-1-e2c2ef00__
+2026-07-17T04:22:52.112505Z __PERF_ACK_strict_suite_preflight-1-e2c2ef00_WORK__
+2026-07-17T04:22:52.595361Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_strict_suite_preflight-1-e2c2ef00__ rc=0

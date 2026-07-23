@@ -85,6 +85,7 @@ struct jbd_trans {
 	uint32_t data_csum;
 	int written_cnt;
 	int error;
+	bool flush_pending;
 
 	struct jbd_journal *journal;
 
@@ -132,7 +133,11 @@ void jbd_journal_free_trans(struct jbd_journal *journal,
 			    bool abort);
 int jbd_journal_commit_trans(struct jbd_journal *journal,
 			     struct jbd_trans *trans);
-void
+
+/** Arm the deterministic power-cut test hook for the next committed
+ * transaction.  The hook is dormant unless explicitly armed. */
+void jbd_test_arm_power_cut(void);
+int
 jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 			   bool flush,
 			   bool once);

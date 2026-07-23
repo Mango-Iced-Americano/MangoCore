@@ -1,0 +1,27 @@
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk build BLK_MODE=virt MODE=release LOG= \
+	EXTRA_FEATURES=""
+make[1]: Entering directory '/app/os'
+(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add riscv64gc-unknown-none-elf
+riscv64gc-unknown-none-elf (installed)
+rustup target add riscv64gc-unknown-none-elf
+rustup component add rust-src
+rustup component add llvm-tools-preview
+make[2]: Entering directory '/app/user'
+(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add riscv64gc-unknown-none-elf
+riscv64gc-unknown-none-elf (installed)
+rustup component add rust-src
+rustup component add llvm-tools-preview
+cargo build --target=riscv64gc-unknown-none-elf --release
+make[2]: Leaving directory '/app/user'
+RNG_TEST_RUNTIME=0 \
+	./build_initramfs.sh rv64 release ../fs-img-dir/initramfs-rv.cpio
+[initramfs] Building initramfs for rv64 (release)...
+[initramfs] installed /init from ../user/target/riscv64gc-unknown-none-elf/release/init
+[initramfs] installed /rescue/sh from ../user/tools/riscv64/bin/busybox
+[initramfs] installed current CPython wrapper at /rescue/python3-wrapper
+[initramfs] generated /app/os/../fs-img-dir/initramfs-rv.cpio (2.1M)
+Platform: rvqemu
+cp -f target/riscv64gc-unknown-none-elf/release/os ../kernel-rv
+make[1]: Leaving directory '/app/os'

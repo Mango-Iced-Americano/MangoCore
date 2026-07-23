@@ -41,7 +41,11 @@ impl Inner {
                 });
                 let local = IpEndpoint::new(local_addr, port);
 
-                Ok(Inner::Init(Init::Bound { socket, local, pending_error: None }))
+                Ok(Inner::Init(Init::Bound {
+                    socket,
+                    local,
+                    pending_error: None,
+                }))
             }
             Inner::Init(Init::Bound { .. }) => {
                 log::debug!("[TCP] already bound");
@@ -53,7 +57,11 @@ impl Inner {
 
     /// connect 操作：Unbound 先 bind_ephemeral → 发起 SYN
     /// If `bound_ifindex` is Some, use it instead of route-based ifindex lookup.
-    pub fn connect(self, remote_endpoint: IpEndpoint, bound_ifindex: Option<u32>) -> Result<Connecting, (Self, SyscallErr)> {
+    pub fn connect(
+        self,
+        remote_endpoint: IpEndpoint,
+        bound_ifindex: Option<u32>,
+    ) -> Result<Connecting, (Self, SyscallErr)> {
         let (socket, local, ver) = match self {
             Inner::Init(Init::Unbound(_, ver)) => {
                 let port = PortManager::alloc_ephemeral_port();
@@ -66,7 +74,11 @@ impl Inner {
                 };
                 (socket, local, ver)
             }
-            Inner::Init(Init::Bound { socket, local, pending_error: None }) => {
+            Inner::Init(Init::Bound {
+                socket,
+                local,
+                pending_error: None,
+            }) => {
                 let local = if local.addr.is_unspecified() {
                     IpEndpoint::new(lookup_source_ip(remote_endpoint.addr), local.port)
                 } else {
@@ -82,16 +94,29 @@ impl Inner {
         };
 
         if let Err(e) = route_check(remote_endpoint.addr) {
-            log::info!("[tcp::connect] route_check failed for {:?}: {:?}", remote_endpoint.addr, e);
+            log::info!(
+                "[tcp::connect] route_check failed for {:?}: {:?}",
+                remote_endpoint.addr,
+                e
+            );
             let new_sock = Box::new(socket);
-            return Err((Inner::Init(Init::Bound { socket: new_sock, local, pending_error: Some(e) }), e));
+            return Err((
+                Inner::Init(Init::Bound {
+                    socket: new_sock,
+                    local,
+                    pending_error: Some(e),
+                }),
+                e,
+            ));
         }
 
         // Route to determine target ifindex for this connection
         // SO_BINDTODEVICE overrides route-based ifindex
         let ifindex = bound_ifindex.unwrap_or_else(|| {
             let route = crate::net::routing::route_output(remote_endpoint.addr).ok();
-            route.as_ref().map(|r| r.ifindex)
+            route
+                .as_ref()
+                .map(|r| r.ifindex)
                 .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(local.addr)))
         });
 
@@ -101,7 +126,14 @@ impl Inner {
                 let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
                 let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
                 let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
-                (Inner::Init(Init::Bound { socket: new_sock, local, pending_error: None }), SyscallErr::EAGAIN)
+                (
+                    Inner::Init(Init::Bound {
+                        socket: new_sock,
+                        local,
+                        pending_error: None,
+                    }),
+                    SyscallErr::EAGAIN,
+                )
             })?;
 
         let ret = NET_INTERFACE
@@ -133,7 +165,14 @@ impl Inner {
                 let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
                 let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
                 let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
-                Err((Inner::Init(Init::Bound { socket: new_sock, local, pending_error: Some(err) }), err))
+                Err((
+                    Inner::Init(Init::Bound {
+                        socket: new_sock,
+                        local,
+                        pending_error: Some(err),
+                    }),
+                    err,
+                ))
             }
         }
     }
@@ -152,7 +191,11 @@ impl Inner {
                 );
                 (*socket, unspec, ver)
             }
-            Inner::Init(Init::Bound { socket, local, pending_error: None }) => {
+            Inner::Init(Init::Bound {
+                socket,
+                local,
+                pending_error: None,
+            }) => {
                 let ver = match local.addr {
                     IpAddress::Ipv4(_) => IpVersion::Ipv4,
                     _ => IpVersion::Ipv6,
@@ -170,20 +213,27 @@ impl Inner {
 
         if listen_addr.port == 0 {
             return Err((
-                Inner::Init(Init::Bound { socket: Box::new(socket), local: local_endpoint, pending_error: None }),
+                Inner::Init(Init::Bound {
+                    socket: Box::new(socket),
+                    local: local_endpoint,
+                    pending_error: None,
+                }),
                 SyscallErr::EINVAL,
             ));
         }
 
         if backlog > u16::MAX as usize {
             return Err((
-                Inner::Init(Init::Bound { socket: Box::new(socket), local: local_endpoint, pending_error: None }),
+                Inner::Init(Init::Bound {
+                    socket: Box::new(socket),
+                    local: local_endpoint,
+                    pending_error: None,
+                }),
                 SyscallErr::EINVAL,
             ));
         }
 
-        let listen_ifindex =
-            crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
+        let listen_ifindex = crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
 
         let handle = NET_INTERFACE
             .add_routed_socket_on(InetProtocol::Tcp, socket, listen_ifindex)
@@ -191,7 +241,14 @@ impl Inner {
                 let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
                 let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
                 let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
-                (Inner::Init(Init::Bound { socket: new_sock, local: local_endpoint, pending_error: None }), SyscallErr::EAGAIN)
+                (
+                    Inner::Init(Init::Bound {
+                        socket: new_sock,
+                        local: local_endpoint,
+                        pending_error: None,
+                    }),
+                    SyscallErr::EAGAIN,
+                )
             })?;
 
         // 第一个 listen socket 用已有的 handle
@@ -208,7 +265,11 @@ impl Inner {
             let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
             let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
             return Err((
-                Inner::Init(Init::Bound { socket: new_sock, local: local_endpoint, pending_error: None }),
+                Inner::Init(Init::Bound {
+                    socket: new_sock,
+                    local: local_endpoint,
+                    pending_error: None,
+                }),
                 e,
             ));
         }
@@ -239,7 +300,9 @@ impl Inner {
                     })?;
                 s
             };
-            if let Some(h) = NET_INTERFACE.add_routed_socket_on(InetProtocol::Tcp, new_socket, listen_ifindex) {
+            if let Some(h) =
+                NET_INTERFACE.add_routed_socket_on(InetProtocol::Tcp, new_socket, listen_ifindex)
+            {
                 handles.push(h);
             }
         }

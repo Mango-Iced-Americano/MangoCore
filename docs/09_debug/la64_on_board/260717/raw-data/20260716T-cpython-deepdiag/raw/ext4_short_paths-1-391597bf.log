@@ -1,0 +1,6 @@
+2026-07-16T09:23:19.399827Z __PERF_BEGIN_ext4_short_paths-1-391597bf__
+2026-07-16T09:23:20.331656Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_ACK_ext4_short_paths-1-391597bf_TRACE_OFF__
+2026-07-16T09:23:22.321550Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_WORK_BEGIN_ext4_short_paths-1-391597bf__
+2026-07-16T09:23:22.483450Z __PERF_WORK_END_ext4_short_paths-1-391597bf__
+2026-07-16T09:23:22.487604Z __PERF_ACK_ext4_short_paths-1-391597bf_WORK__
+2026-07-16T09:23:22.929194Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_END_ext4_short_paths-1-391597bf__ rc=0

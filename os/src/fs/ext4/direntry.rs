@@ -70,6 +70,76 @@ pub struct Ext4DirSearchResult {
     pub prev_offset: usize, //prev direntry offset
 }
 
+/// Remove one variable-length ext4 directory record from a block.
+///
+/// A record at offset zero has no predecessor in the same block. Its `rec_len`
+/// must remain intact so the unused record still spans to the next entry.
+/// Otherwise the removed record is absorbed into its immediate predecessor.
+pub(super) fn remove_dir_entry_record(
+    block_data: &mut [u8],
+    data_end: usize,
+    offset: usize,
+    prev_offset: usize,
+    entry_len: u16,
+) -> Result<(), isize> {
+    const FIXED_ENTRY_SIZE: usize = size_of::<Ext4FakeDirEntry>();
+    const REC_LEN_OFFSET: usize = 4;
+    const NAME_LEN_OFFSET: usize = 6;
+
+    let entry_len = entry_len as usize;
+    let entry_end = offset.checked_add(entry_len).ok_or(Errno::EIO as isize)?;
+    if data_end > block_data.len()
+        || entry_len < FIXED_ENTRY_SIZE
+        || entry_len % 4 != 0
+        || entry_end > data_end
+    {
+        return Err(Errno::EIO as isize);
+    }
+
+    if offset == 0 {
+        // Linux ext4_generic_delete_entry() preserves rec_len when there is
+        // no predecessor, otherwise the next directory scan loses framing.
+        block_data[..REC_LEN_OFFSET].fill(0);
+        block_data[NAME_LEN_OFFSET..entry_end].fill(0);
+        return Ok(());
+    }
+
+    if prev_offset >= offset {
+        return Err(Errno::EIO as isize);
+    }
+    let prev_rec_len_offset = prev_offset
+        .checked_add(REC_LEN_OFFSET)
+        .ok_or(Errno::EIO as isize)?;
+    if prev_rec_len_offset + size_of::<u16>() > data_end {
+        return Err(Errno::EIO as isize);
+    }
+
+    let prev_len = u16::from_le_bytes([
+        block_data[prev_rec_len_offset],
+        block_data[prev_rec_len_offset + 1],
+    ]) as usize;
+    if prev_len < FIXED_ENTRY_SIZE
+        || prev_len % 4 != 0
+        || prev_offset.checked_add(prev_len) != Some(offset)
+    {
+        return Err(Errno::EIO as isize);
+    }
+
+    let merged_len = prev_len
+        .checked_add(entry_len)
+        .filter(|len| {
+            prev_offset
+                .checked_add(*len)
+                .is_some_and(|end| end <= data_end)
+        })
+        .and_then(|len| u16::try_from(len).ok())
+        .ok_or(Errno::EIO as isize)?;
+    block_data[prev_rec_len_offset..prev_rec_len_offset + size_of::<u16>()]
+        .copy_from_slice(&merged_len.to_le_bytes());
+    block_data[offset..entry_end].fill(0);
+    Ok(())
+}
+
 impl Ext4DirSearchResult {
     pub fn new(dentry: Ext4DirEntry) -> Self {
         Self {
@@ -216,24 +286,6 @@ impl Ext4DirEntry {
 }
 
 impl Ext4DirEntry {
-    /// Get the checksum of the directory entry.
-    #[allow(unused)]
-    pub fn ext4_dir_get_csum(&self, s: &Ext4Superblock, blk_data: &[u8], ino_gen: u32) -> u32 {
-        let ino_index = self.inode;
-
-        let mut csum = 0;
-
-        let uuid = s.uuid;
-
-        csum = ext4_crc32c(EXT4_CRC32_INIT, &uuid, uuid.len() as u32);
-        csum = ext4_crc32c(csum, &ino_index.to_le_bytes(), 4);
-        csum = ext4_crc32c(csum, &ino_gen.to_le_bytes(), 4);
-
-        let tail_offset = blk_data.len() - core::mem::size_of::<Ext4DirEntryTail>();
-        csum = ext4_crc32c(csum, &blk_data[..tail_offset], tail_offset as u32);
-        csum
-    }
-
     /// Write de to block
     pub fn write_de_to_blk(&self, dst_blk: &mut Block, offset: usize) {
         let count = core::mem::size_of::<Ext4DirEntry>() / core::mem::size_of::<u8>();
@@ -269,6 +321,15 @@ impl Ext4DirEntry {
 
 impl Ext4DirEntry {}
 
+fn ext4_dir_block_csum(s: &Ext4Superblock, dir_inode: u32, blk_data: &[u8], ino_gen: u32) -> u32 {
+    let mut csum = ext4_crc32c(EXT4_CRC32_INIT, &s.uuid, s.uuid.len() as u32);
+    csum = ext4_crc32c(csum, &dir_inode.to_le_bytes(), 4);
+    csum = ext4_crc32c(csum, &ino_gen.to_le_bytes(), 4);
+
+    let tail_offset = blk_data.len() - core::mem::size_of::<Ext4DirEntryTail>();
+    ext4_crc32c(csum, &blk_data[..tail_offset], tail_offset as u32)
+}
+
 impl Ext4DirEntryTail {
     pub fn new() -> Self {
         Self {
@@ -283,12 +344,11 @@ impl Ext4DirEntryTail {
     pub fn tail_set_csum(
         &mut self,
         s: &Ext4Superblock,
-        diren: &Ext4DirEntry,
+        dir_inode: u32,
         blk_data: &[u8],
         ino_gen: u32,
     ) {
-        let csum = diren.ext4_dir_get_csum(s, blk_data, ino_gen);
-        self.checksum = csum;
+        self.checksum = ext4_dir_block_csum(s, dir_inode, blk_data, ino_gen);
     }
 
     pub fn copy_to_slice(&self, array: &mut [u8]) {
@@ -519,13 +579,11 @@ impl Ext4FileSystem {
         Ok((entries, next_index))
     }
 
-    pub fn dir_set_csum(&self, dst_blk: &mut Block, ino_gen: u32) {
-        let parent_de = Ext4DirEntry::try_from(&dst_blk.data[0..]).unwrap();
-
+    pub fn dir_set_csum(&self, dst_blk: &mut Block, dir_inode: u32, ino_gen: u32) {
         let tail_offset = self.block_size - size_of::<Ext4DirEntryTail>();
         let mut tail: Ext4DirEntryTail = *dst_blk.read_offset_as_mut(tail_offset);
 
-        tail.tail_set_csum(&self.superblock, &parent_de, &dst_blk.data[..], ino_gen);
+        tail.tail_set_csum(&self.superblock, dir_inode, &dst_blk.data[..], ino_gen);
 
         tail.copy_to_slice(&mut dst_blk.data);
     }
@@ -561,8 +619,11 @@ impl Ext4FileSystem {
             if let Ok(pblock) = self.get_pblock_idx(parent, last_iblock) {
                 let mut ext4block = self.load_metadata_block(pblock as usize);
                 super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
-                if self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type).is_ok() {
-                    self.dir_set_csum(&mut ext4block, parent.inode.generation());
+                if self
+                    .try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type)
+                    .is_ok()
+                {
+                    self.dir_set_csum(&mut ext4block, parent.inode_num, parent.inode.generation());
                     self.store_metadata_block_dirty(pblock as usize, &ext4block.data);
                     super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
                     return Ok(EOK);
@@ -578,12 +639,16 @@ impl Ext4FileSystem {
                 let mut ext4block = self.load_metadata_block(pblock as usize);
                 super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
-                let result =
-                    self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type);
+                let result = self.try_insert_to_existing_block(
+                    &mut ext4block,
+                    name,
+                    child.inode_num,
+                    de_type,
+                );
 
                 if result.is_ok() {
                     // set checksum
-                    self.dir_set_csum(&mut ext4block, parent.inode.generation());
+                    self.dir_set_csum(&mut ext4block, parent.inode_num, parent.inode.generation());
                     self.store_metadata_block_dirty(pblock as usize, &ext4block.data);
                     super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
 
@@ -625,7 +690,11 @@ impl Ext4FileSystem {
         self.insert_to_new_block(&mut new_ext4block, child.inode_num, name, de_type);
 
         // set checksum
-        self.dir_set_csum(&mut new_ext4block, parent.inode.generation());
+        self.dir_set_csum(
+            &mut new_ext4block,
+            parent.inode_num,
+            parent.inode.generation(),
+        );
         self.store_metadata_block_dirty(new_block as usize, &new_ext4block.data);
         super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
 
@@ -750,31 +819,27 @@ impl Ext4FileSystem {
             parent.inode.mode
         );
         // let r = self.dir_find_entry(parent.inode_num, path, &mut result)?;
-        let _r = self.dir_find_entry(parent.inode_num, path, &mut result)
+        let _r = self
+            .dir_find_entry(parent.inode_num, path, &mut result)
             .map_err(|_| Errno::EIO as isize)?;
 
         log::debug!("[dir_remove_entry] After dir_find_entry. r: {:?}", _r);
         let mut ext4block = self.load_metadata_block(result.pblock_id);
         super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
-        let de_del_entry_len = result.dentry.entry_len();
+        let data_end = self
+            .block_size
+            .checked_sub(size_of::<Ext4DirEntryTail>())
+            .ok_or(Errno::EIO as isize)?;
+        remove_dir_entry_record(
+            &mut ext4block.data,
+            data_end,
+            result.offset,
+            result.prev_offset,
+            result.dentry.entry_len(),
+        )?;
 
-        // prev entry
-        let pde_entry_len_offset = result.prev_offset + 4; // entry_len is at offset 4
-        let current_len = u16::from_le_bytes([
-            ext4block.data[pde_entry_len_offset],
-            ext4block.data[pde_entry_len_offset + 1],
-        ]);
-        let new_len = current_len + de_del_entry_len;
-        ext4block.data[pde_entry_len_offset..pde_entry_len_offset + 2]
-            .copy_from_slice(&new_len.to_le_bytes());
-
-        // de_del
-        let de_del_inode_offset = result.offset;
-        ext4block.data[de_del_inode_offset..de_del_inode_offset + 4]
-            .copy_from_slice(&0u32.to_le_bytes());
-
-        self.dir_set_csum(&mut ext4block, parent.inode.generation());
+        self.dir_set_csum(&mut ext4block, parent.inode_num, parent.inode.generation());
         self.store_metadata_block_dirty(result.pblock_id, &ext4block.data);
         super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
 
@@ -899,7 +964,7 @@ impl Ext4FileSystem {
             iblock += 1;
         }
 
-            Err(Errno::ENOENT as isize)
+        Err(Errno::ENOENT as isize)
     }
 
     /// Debug dump of all directory entries in a block

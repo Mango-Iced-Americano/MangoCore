@@ -15,12 +15,17 @@
 //! `handle_alloc_error`。
 
 use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
-use buddy_system_allocator::{MetadataHeap, PageOrder, PageRun, AllocError as PageAllocError};
+use buddy_system_allocator::{AllocError as PageAllocError, MetadataHeap, PageOrder, PageRun};
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::mm::slab::{SlabAllocator, SlabAllocResult, slab_class_for, direct_charge, PageAllocator};
+use crate::mm::slab::{direct_charge, slab_class_for, PageAllocator, SlabAllocator};
+
+#[inline]
+fn memory_perf_time_now() -> usize {
+    crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+}
 
 /// Thin adapter that implements our PageAllocator trait on MetadataHeap<32, 12>.
 struct HeapPageAlloc<'a>(&'a mut MetadataHeap<32, 12>);
@@ -69,7 +74,10 @@ impl KernelAllocator {
     /// used by any other allocator or static object for the kernel's lifetime.
     pub unsafe fn init(&self, start: usize, size: usize) {
         let mut inner = self.inner.lock();
-        inner.heap.try_init(start, size).expect("kernel heap init failed");
+        inner
+            .heap
+            .try_init(start, size)
+            .expect("kernel heap init failed");
         inner.slab.init();
     }
 
@@ -138,14 +146,14 @@ unsafe impl GlobalAlloc for KernelAllocator {
         for _ in 0..3 {
             let mut guard = self.inner.lock();
             let inner = &mut *guard;
-            let _alloc_start = crate::task::perf::perf_time_now();
+            let alloc_start = memory_perf_time_now();
 
             // Try the slab first for small objects.
             if let Some(result) = {
                 let mut heap_alloc = HeapPageAlloc(&mut inner.heap);
                 inner.slab.alloc(&mut heap_alloc, layout)
             } {
-                let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+                let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                 crate::task::perf::record_heap_alloc();
                 crate::task::perf::record_heap_alloc_cost(elapsed);
                 let charge = result.charge;
@@ -160,7 +168,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
             // Direct buddy allocation for objects too large for slab.
             match inner.heap.alloc(layout) {
                 Ok(ptr) => {
-                    let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+                    let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                     crate::task::perf::record_heap_alloc();
                     crate::task::perf::record_heap_alloc_cost(elapsed);
                     let charge = direct_charge(layout);
@@ -171,7 +179,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     return ptr.as_ptr();
                 }
                 Err(_) => {
-                    let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+                    let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                     crate::task::perf::record_heap_alloc();
                     crate::task::perf::record_heap_alloc_cost(elapsed);
                     drop(guard);
@@ -194,7 +202,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
         crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
 
         crate::task::perf::record_heap_dealloc();
-        let _dealloc_start = crate::task::perf::perf_time_now();
+        let dealloc_start = memory_perf_time_now();
 
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
@@ -204,14 +212,14 @@ unsafe impl GlobalAlloc for KernelAllocator {
             let mut heap_alloc = HeapPageAlloc(&mut inner.heap);
             unsafe { inner.slab.dealloc(&mut heap_alloc, ptr, layout) };
             let charge = slab_class_for(layout).unwrap().1;
-            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_dealloc_start);
+            let elapsed = memory_perf_time_now().wrapping_sub(dealloc_start);
             crate::task::perf::record_heap_dealloc_cost(elapsed);
             drop(guard);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);
         } else {
             unsafe { inner.heap.dealloc(ptr, layout) };
             let charge = direct_charge(layout);
-            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_dealloc_start);
+            let elapsed = memory_perf_time_now().wrapping_sub(dealloc_start);
             crate::task::perf::record_heap_dealloc_cost(elapsed);
             drop(guard);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);

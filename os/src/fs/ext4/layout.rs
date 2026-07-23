@@ -122,7 +122,11 @@ impl Drop for Ext4OSInode {
         }
         let (ino, links, is_dir) = {
             let guard = self.inode.lock();
-            (guard.inode_num, guard.inode.links_count(), guard.inode.is_dir())
+            (
+                guard.inode_num,
+                guard.inode.links_count(),
+                guard.inode.is_dir(),
+            )
         };
         if links == 0 {
             // Defense-in-depth: re-read authoritative link count from cache
@@ -136,7 +140,11 @@ impl Drop for Ext4OSInode {
                 return;
             }
             // truncate_inode(0) 释放所有数据块，失败则跳过后续 inode 号释放
-            if self.ext4fs.truncate_inode(&mut *self.inode.lock(), 0).is_ok() {
+            if self
+                .ext4fs
+                .truncate_inode(&mut *self.inode.lock(), 0)
+                .is_ok()
+            {
                 self.ext4fs.ialloc_free_inode(ino, is_dir);
             }
             self.ext4fs.unregister_page_cache(ino);

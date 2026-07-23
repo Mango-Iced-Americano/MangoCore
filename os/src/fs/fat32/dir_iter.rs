@@ -116,11 +116,10 @@ impl<'a, 'b> DirIter<'a, 'b> {
             log::error!("write_to_current_ent: offset is None");
             return false;
         };
-        if self.inode.write_at_block_cache_lock(
-            &mut self.inode_lock,
-            off as usize,
-            ent.as_bytes(),
-        ) != ent.as_bytes().len()
+        if self
+            .inode
+            .write_at_block_cache_lock(&mut self.inode_lock, off as usize, ent.as_bytes())
+            != ent.as_bytes().len()
         {
             log::error!("write_to_current_ent: write failed at offset={}", off);
             return false;

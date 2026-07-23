@@ -1,0 +1,8 @@
+p3_backup_deploy timeout=120 command_bytes=94
+/bin/busybox wget -O /scratch/backup_2k1000_p3.sh http://192.168.9.10:8009/backup_2k1000_p3.sh
+p3_backup_script_sha256 timeout=120 command_bytes=133
+printf 'fc1a41e8e1d95f26557997c89e9c15b2c292683af2a3da3bfca46882f1314d31  /scratch/backup_2k1000_p3.sh\n'|/bin/busybox sha256sum -c -
+p3_backup_copy_verify timeout=3600 command_bytes=44
+/bin/sh /scratch/backup_2k1000_p3.sh dry-run
+p3_backup_complete_gate timeout=120 command_bytes=123
+test -f /persist/backups/dry-run/COMPLETE&&cat /persist/backups/dry-run/COMPLETE&&cat /persist/backups/dry-run/MANIFEST.txt

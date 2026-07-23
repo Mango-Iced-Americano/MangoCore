@@ -1,0 +1,237 @@
+WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART Debug Triggers  : 2 triggers
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+[memory] 194086 usable physical frames across 1 region(s)
+[memory] region0: [0x909da000, 0xc0000000) frames=194086
+.text [0x80200000, 0x803dc000)
+.rodata [0x803dc000, 0x8040f000)
+.data [0x8040f000, 0x80978000)
+.bss [0x80978000, 0x909da000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] random: initialized from virtio-rng
+[memory] reclaimed linker frames: [0x8040f000, 0x805c6000) frames=439
+[initramfs] unpacked: files=33 dirs=21 symlinks=1 bytes=1790913
+[kernel] perf_diag features: perf_stats=true perf_diag=true
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] VirtIO net device not found, skipping network init
+[kernel] No net device, using null device (loopback only)
+[kernel] net interface initialized (loopback only, no NIC)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[block] /dev/vda contains raw Ext4
+[fs] official fs (/dev/vda) root directory readable: 25 entries
+[kernel] official fs (/dev/vda) (Ext4) mounted at sdcard flags=(empty)
+[mbr] valid MBR with 2 usable partition(s)
+[mbr] /dev/vdb1 type=0x83 start_lba=2048 sectors=1572864 size=768MiB fs=Ext4
+[mbr] /dev/vdb2 type=0x0c start_lba=1574912 sectors=2621440 size=1280MiB fs=Fat32
+[fs] tools fs (/dev/vdb1) root directory readable: 9 entries
+[kernel] tools fs (/dev/vdb1) (Ext4) mounted at tools flags=(empty)
+sinitproc: 805C6000, einitproc: 80664F98, sbash: 80665000, ebash: 8077D378, sbusybox: 8077E000, ebusybox: 808D0C28, sosconfig: 808D1000, eosconfig: 808D118E
+[memory] reclaimed linker frames: [0x805c6000, 0x80664000) frames=158
+[memory] reclaimed linker frames: [0x80665000, 0x8077d000) frames=280
+[memory] reclaimed linker frames: [0x8077e000, 0x808d0000) frames=338
+[memory] reclaimed linker frames: [0x808d2000, 0x8092e000) frames=92
+[memory] reclaimed linker frames: [0x8092f000, 0x80931000) frames=2
+[memory] reclaimed linker frames: [0x80932000, 0x80976000) frames=68
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] /scratch absent, skipping
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784204763
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/bin -> /bin
+[init] bind /tools/sbin -> /sbin: skipped (errno=2)
+[init] bind /tools/lib -> /lib
+[init] bind /tools/usr -> /usr
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin
+[initproc] installing busybox applets to /bin ...
+busybox applets already installed, skipping --install
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: File exists
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+CPython launchers installed: /usr/bin/python3, /usr/bin/python
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] config source=/sdcard/os_test.conf mode=shell mask=0x003 ltp_runner=suite timer_smoke=false ext4_profile=false reclaim_profile=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02", "execve05", "fallocate06", "mmap16", "rename10", "shmctl01", "copy_file_range02", "pipe13", "splice02", "splice07", "timer_settime03", "statx11", "prot_hsymlinks", "send02"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["epoll_create02", "atof01", "fptest01", "fptest02"], glibc: ["nice05"]
+[initproc] entering shell mode
+[1m[33mMangoCore[0m:[1m[34m/[0m# sh /sdcard/diag_smoke_test.sh
+=== DIAG SMOKE TEST ===
+[1/7] Checking /sys/kernel/ exists...
+[1;34mstats[m    [1;34mtracing[m
+[2/7] Checking stats files...
+[0;0mblockio[m    [0;0mctxsw[m      [0;0mnet[m        [0;0mreclaim[m    [0;0mseccomp[m    [0;0mtaskq[m      [0;0mzombies[m
+[0;0mboot[m       [0;0mfeatures[m   [0;0mpagecache[m  [0;0mreset[m      [0;0mstats_on[m   [0;0mtimer[m
+[0;0mbuddyinfo[m  [0;0mheap[m       [0;0mprofile[m    [0;0mresource[m   [0;0msyscall[m    [0;0mtlb[m
+0
+core 1
+clock_freq_hz=12500000
+boot_console_ticks=2443759
+boot_mm_ticks=6780639
+boot_drivers_ticks=7079702
+boot_net_ticks=8684943
+boot_fs_ticks=9616602
+boot_initproc_ticks=10146171
+boot_scheduler_ticks=10146364
+[3/7] Enable core profile and run workload...
+[4/7] Read stats...
+--- taskq ---
+ready_len_max=2
+interruptible_len_max=4
+ready_zombie_max=0
+interruptible_zombie_max=0
+dup_enqueue_total=0
+add_ready_total=25
+add_interruptible_total=4
+wake_interruptible_total=0
+fair_pick_calls=0
+fast_path_calls=25
+fair_scan_max=0
+zombie_drain_scan_total=0
+zombie_drain_calls=3
+zombie_drain_removed=3
+ready_nonzero_nice_cur=0
+--- timer ---
+ktimer_len_max=0
+ktimer_add_total=0
+ktimer_pop_max=0
+ktimer_pop_total=20
+ktimer_stale_waketask=0
+ktimer_real_wake=0
+ktimer_compact_calls=0
+ktimer_stale_removed=0
+wait_with_timeout_total=0
+timer_irq_ticks_total=2531500
+timer_irq_ticks_max=697041
+timer_pop_nodes_total=0
+timer_pop_ticks_total=544044
+timer_pop_ticks_max=255167
+--- syscall ---
+syscall_total=331
+syscall_getppid_total=0
+syscall_cost_max_ticks=79193833
+syscall_cost_ticks_total=317150498
+getppid_cost_ticks_total=0
+getppid_cost_ticks_max=0
+ecall_trap_cost_ticks_total=318745040
+ecall_trap_cost_ticks_max=79197375
+user_unaligned_traps=0
+user_unaligned_ticks_total=0
+user_unaligned_ticks_max=0
+user_unaligned_load_2=0
+user_unaligned_load_4=0
+user_unaligned_load_8=0
+user_unaligned_store_2=0
+user_unaligned_store_4=0
+user_unaligned_store_8=0
+user_unaligned_float_loads=0
+user_unaligned_float_stores=0
+[5/7] Verify counters are non-zero...
+PASS: syscall_total=484 (non-zero, stats working!)
+[6/7] Verify stats_on=0 freezes counters...
+PASS: counters frozen at syscall_total=544
+[7/7] Verify bounded profile selection and runtime counters...
+net_poll_calls=6
+net_poll_progress=0
+net_poll_lock_busy=0
+net_rx_packets=0
+net_rx_bytes=0
+net_rx_drops=0
+net_tx_submit_packets=0
+net_tx_submit_bytes=0
+net_tx_drops=0
+runtime_exec_calls=3
+runtime_exec_ticks_total=31191959
+runtime_openat_calls=3
+runtime_read_calls=2
+runtime_mmap_calls=0
+=== DIAG SMOKE TEST DONE ===
+[1m[33mMangoCore[0m:[1m[34m/[0m# exit
+exit

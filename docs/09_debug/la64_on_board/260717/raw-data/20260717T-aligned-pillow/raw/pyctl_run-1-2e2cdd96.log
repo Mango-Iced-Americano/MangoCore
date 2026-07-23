@@ -1,0 +1,23 @@
+2026-07-17T16:18:00.204160Z __PERF_BEGIN_pyctl_run-1-2e2cdd96__
+2026-07-17T16:18:01.118824Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pyctl_run-1-2e2cdd96_TRACE_OFF__
+2026-07-17T16:18:02.393056Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pyctl_run-1-2e2cdd96__
+2026-07-17T16:18:02.427277Z [python-deploy] stage=p4-preflight
+2026-07-17T16:18:02.588133Z [python-deploy] stage=download
+2026-07-17T16:18:02.736528Z Connecting to 192.168.9.10:8009 (192.168.9.10:8009)
+2026-07-17T16:18:02.752486Z saving to '/tmp/.cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz.part'
+2026-07-17T16:18:11.980648Z .cpython-la64-strict   7% |**                              | 6152k  0:00:12 ETA.cpython-la64-strict  18% |*****                           | 14.4M  0:00:08 ETA.cpython-la64-strict  29% |*********                       | 22.9M  0:00:07 ETA.cpython-la64-strict  40% |************                    | 31.4M  0:00:05 ETA.cpython-la64-strict  50% |****************                | 40.0M  0:00:04 ETA.cpython-la64-strict  61% |*******************             | 48.6M  0:00:03 ETA.cpython-la64-strict  72% |***********************         | 57.0M  0:00:02 ETA.cpython-la64-strict  83% |**************************      | 65.6M  0:00:01 ETA.cpython-la64-strict  94% |******************************  | 74.0M  0:00:00 ETA.cpython-la64-strict 100% |********************************| 78.5M  0:00:00 ETA
+2026-07-17T16:18:11.985424Z '/tmp/.cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz.part' saved
+2026-07-17T16:19:33.980176Z /tmp/.cpython-la64-strict-3.14.5-43d7bb2ecf21.tar.xz.part: OK
+2026-07-17T16:19:33.984945Z [python-deploy] stage=extract
+2026-07-17T16:29:11.418337Z [python-deploy] stage=identity
+2026-07-17T16:29:11.599360Z [python-deploy] stage=smoke
+2026-07-17T16:29:23.112670Z strict-runtime-integrity-ok elfs=100
+2026-07-17T16:29:27.882267Z strict-runtime-board-smoke-ok
+2026-07-17T16:29:48.024506Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/persist/python-runtime/releases/43d7bb2ecf21/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/persist/python-runtime/releases/43d7bb2ecf21/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-17T16:29:50.490689Z strict-markupsafe-board-smoke-ok /persist/python-runtime/releases/43d7bb2ecf21/usr/lib/python3.14/site-packages/markupsafe/_speedups.cpython-314.so
+2026-07-17T16:29:55.129279Z strict-pyyaml-pure-board-smoke-ok /persist/python-runtime/releases/43d7bb2ecf21/usr/lib/python3.14/site-packages/yaml/__init__.py
+2026-07-17T16:29:55.332656Z [python-deploy] stage=publish-current
+2026-07-17T16:29:57.487218Z [python-deploy] PASS current=/persist/python-runtime/releases/43d7bb2ecf21
+2026-07-17T16:29:57.519544Z __PERF_WORK_END_pyctl_run-1-2e2cdd96__
+2026-07-17T16:29:57.521219Z __PERF_ACK_pyctl_run-1-2e2cdd96_WORK__
+2026-07-17T16:29:57.988607Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pyctl_run-1-2e2cdd96__ rc=0

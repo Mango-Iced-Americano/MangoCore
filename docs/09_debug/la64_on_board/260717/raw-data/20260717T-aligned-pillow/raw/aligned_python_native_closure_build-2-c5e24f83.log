@@ -1,0 +1,93 @@
+2026-07-17T15:12:17.770386Z docker run --rm --user "$(id -u):$(id -g)" \
+2026-07-17T15:12:17.770482Z 		-v "/Users/luzimo/dev/MangoCore:/app" -w /app zhouzhouyi/os-contest:20260104 \
+2026-07-17T15:12:17.770497Z 		./scripts/build_cpython_runtime_la64_strict.sh
+2026-07-17T15:12:19.211609Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-17T15:12:19.442542Z [strict-cpython] fetching and verifying pinned sources
+2026-07-17T15:12:19.857287Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+2026-07-17T15:12:19.857334Z                                  Dload  Upload   Total   Spent    Left  Speed
+2026-07-17T15:12:19.857670Z 
+2026-07-17T15:12:20.271916Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-07-17T15:12:20.428213Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-07-17T15:12:20.428255Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-07-17T15:12:20.693303Z 
+2026-07-17T15:12:20.693343Z 100 80313  100 80313    0     0  95562      0 --:--:-- --:--:-- --:--:-- 95562
+2026-07-17T15:12:22.364044Z running bdist_wheel
+2026-07-17T15:12:22.372100Z running build
+2026-07-17T15:12:22.372134Z running build_py
+2026-07-17T15:12:22.375532Z creating build/lib.linux-loongarch64-cpython-314/markupsafe
+2026-07-17T15:12:22.376606Z copying src/markupsafe/__init__.py -> build/lib.linux-loongarch64-cpython-314/markupsafe
+2026-07-17T15:12:22.378496Z copying src/markupsafe/_native.py -> build/lib.linux-loongarch64-cpython-314/markupsafe
+2026-07-17T15:12:22.379287Z running egg_info
+2026-07-17T15:12:22.382860Z writing src/MarkupSafe.egg-info/PKG-INFO
+2026-07-17T15:12:22.384727Z writing dependency_links to src/MarkupSafe.egg-info/dependency_links.txt
+2026-07-17T15:12:22.387265Z writing top-level names to src/MarkupSafe.egg-info/top_level.txt
+2026-07-17T15:12:22.395720Z reading manifest file 'src/MarkupSafe.egg-info/SOURCES.txt'
+2026-07-17T15:12:22.400756Z reading manifest template 'MANIFEST.in'
+2026-07-17T15:12:22.402199Z no previously-included directories found matching 'docs/_build'
+2026-07-17T15:12:22.403126Z warning: no previously-included files matching '*.pyc' found anywhere in distribution
+2026-07-17T15:12:22.403274Z adding license file 'LICENSE.txt'
+2026-07-17T15:12:22.404240Z writing manifest file 'src/MarkupSafe.egg-info/SOURCES.txt'
+2026-07-17T15:12:22.405662Z copying src/markupsafe/_speedups.c -> build/lib.linux-loongarch64-cpython-314/markupsafe
+2026-07-17T15:12:22.407177Z copying src/markupsafe/_speedups.pyi -> build/lib.linux-loongarch64-cpython-314/markupsafe
+2026-07-17T15:12:22.409221Z copying src/markupsafe/py.typed -> build/lib.linux-loongarch64-cpython-314/markupsafe
+2026-07-17T15:12:22.411177Z running build_ext
+2026-07-17T15:12:22.414962Z building 'markupsafe._speedups' extension
+2026-07-17T15:12:22.415027Z creating build/temp.linux-loongarch64-cpython-314/src/markupsafe
+2026-07-17T15:12:22.416410Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include -fPIC -I/app/target/cpython-strict/host-python/include/python3.14 -c src/markupsafe/_speedups.c -o build/temp.linux-loongarch64-cpython-314/src/markupsafe/_speedups.o
+2026-07-17T15:12:23.218187Z /app/target/cpython-strict/cross/loongarch64-linux-musl-gcc -shared -L/app/target/cpython-strict/sysroot/usr/lib -L/app/target/cpython-strict/sysroot/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/usr/lib -Wl,-rpath-link,/app/target/cpython-strict/sysroot/lib -Wl,--as-needed -Wl,-O1 -Wl,--sort-common -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -march=loongarch64 -mabi=lp64d -mstrict-align -I/app/target/cpython-strict/runtime/usr/include/python3.14 -I/app/target/cpython-strict/sysroot/usr/include build/temp.linux-loongarch64-cpython-314/src/markupsafe/_speedups.o -L/usr/lib -o build/lib.linux-loongarch64-cpython-314/markupsafe/_speedups.cpython-314.so
+2026-07-17T15:12:23.363782Z /app/target/cpython-strict/pillow-build-deps/setuptools/_distutils/cmd.py:90: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+2026-07-17T15:12:23.363816Z !!
+2026-07-17T15:12:23.363826Z 
+2026-07-17T15:12:23.363837Z         ********************************************************************************
+2026-07-17T15:12:23.363847Z         Please avoid running ``setup.py`` directly.
+2026-07-17T15:12:23.363897Z         Instead, use pypa/build, pypa/installer or other
+2026-07-17T15:12:23.363916Z         standards-based tools.
+2026-07-17T15:12:23.363925Z 
+2026-07-17T15:12:23.363936Z         This deprecation is overdue, please update your project and remove deprecated
+2026-07-17T15:12:23.363943Z         calls to avoid build errors in the future.
+2026-07-17T15:12:23.363949Z 
+2026-07-17T15:12:23.363957Z         See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+2026-07-17T15:12:23.363966Z         ********************************************************************************
+2026-07-17T15:12:23.363973Z 
+2026-07-17T15:12:23.363980Z !!
+2026-07-17T15:12:23.363989Z   self.initialize_options()
+2026-07-17T15:12:23.368542Z installing to build/bdist.linux-loongarch64/wheel
+2026-07-17T15:12:23.368603Z running install
+2026-07-17T15:12:23.376277Z running install_lib
+2026-07-17T15:12:23.381439Z creating build/bdist.linux-loongarch64/wheel
+2026-07-17T15:12:23.382465Z creating build/bdist.linux-loongarch64/wheel/markupsafe
+2026-07-17T15:12:23.382999Z copying build/lib.linux-loongarch64-cpython-314/markupsafe/_speedups.c -> build/bdist.linux-loongarch64/wheel/./markupsafe
+2026-07-17T15:12:23.384418Z copying build/lib.linux-loongarch64-cpython-314/markupsafe/__init__.py -> build/bdist.linux-loongarch64/wheel/./markupsafe
+2026-07-17T15:12:23.386074Z copying build/lib.linux-loongarch64-cpython-314/markupsafe/_speedups.cpython-314.so -> build/bdist.linux-loongarch64/wheel/./markupsafe
+2026-07-17T15:12:23.387745Z copying build/lib.linux-loongarch64-cpython-314/markupsafe/_native.py -> build/bdist.linux-loongarch64/wheel/./markupsafe
+2026-07-17T15:12:23.389376Z copying build/lib.linux-loongarch64-cpython-314/markupsafe/_speedups.pyi -> build/bdist.linux-loongarch64/wheel/./markupsafe
+2026-07-17T15:12:23.390897Z copying build/lib.linux-loongarch64-cpython-314/markupsafe/py.typed -> build/bdist.linux-loongarch64/wheel/./markupsafe
+2026-07-17T15:12:23.391739Z running install_egg_info
+2026-07-17T15:12:23.395763Z Copying src/MarkupSafe.egg-info to build/bdist.linux-loongarch64/wheel/./MarkupSafe-3.0.3-py3.14.egg-info
+2026-07-17T15:12:23.401927Z running install_scripts
+2026-07-17T15:12:23.417589Z creating build/bdist.linux-loongarch64/wheel/markupsafe-3.0.3.dist-info/WHEEL
+2026-07-17T15:12:23.421441Z creating '/app/target/cpython-strict/build/markupsafe-3.0.3-wheels/markupsafe-3.0.3-cp314-cp314-linux_loongarch64.whl' and adding 'build/bdist.linux-loongarch64/wheel' to it
+2026-07-17T15:12:23.426385Z adding 'markupsafe/__init__.py'
+2026-07-17T15:12:23.428653Z adding 'markupsafe/_native.py'
+2026-07-17T15:12:23.429551Z adding 'markupsafe/_speedups.c'
+2026-07-17T15:12:23.431660Z adding 'markupsafe/_speedups.cpython-314.so'
+2026-07-17T15:12:23.432738Z adding 'markupsafe/_speedups.pyi'
+2026-07-17T15:12:23.433428Z adding 'markupsafe/py.typed'
+2026-07-17T15:12:23.435106Z adding 'markupsafe-3.0.3.dist-info/licenses/LICENSE.txt'
+2026-07-17T15:12:23.435702Z adding 'markupsafe-3.0.3.dist-info/METADATA'
+2026-07-17T15:12:23.436502Z adding 'markupsafe-3.0.3.dist-info/WHEEL'
+2026-07-17T15:12:23.437521Z adding 'markupsafe-3.0.3.dist-info/top_level.txt'
+2026-07-17T15:12:23.439219Z adding 'markupsafe-3.0.3.dist-info/RECORD'
+2026-07-17T15:12:23.439587Z removing build/bdist.linux-loongarch64/wheel
+2026-07-17T15:12:23.617186Z markupsafe_strict_compile_units=1
+2026-07-17T15:12:29.336225Z native_elfs=100
+2026-07-17T15:12:29.336424Z stripped_elfs=21
+2026-07-17T15:12:31.716464Z p4_interp_elfs=usr/bin/python3.14
+2026-07-17T15:12:31.716519Z p4_interp_rewritten=none
+2026-07-17T15:12:33.716890Z strict-runtime-smoke-ok
+2026-07-17T15:12:35.617272Z strict-markupsafe-smoke-ok /app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/markupsafe/_speedups.cpython-314.so
+2026-07-17T15:12:38.424182Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/app/target/cpython-strict/runtime/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-17T15:14:54.319077Z [strict-cpython] artifact: /app/target/cpython-strict/artifacts/cpython-la64-strict-3.14.5-e14f2fd9cc6d.tar.xz
+2026-07-17T15:14:54.319493Z [strict-cpython] sha256: e14f2fd9cc6d35c0544978b148c52271862370a79fdc84bcbd3bbff5e1290007
+2026-07-17T15:15:29.329089Z current_artifact=cpython-la64-strict-3.14.5-e14f2fd9cc6d.tar.xz
+2026-07-17T15:15:29.329372Z current_sha256=e14f2fd9cc6d35c0544978b148c52271862370a79fdc84bcbd3bbff5e1290007

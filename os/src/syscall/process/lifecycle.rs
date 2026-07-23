@@ -70,13 +70,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
     }
 }
 
-pub fn sys_waitid(
-    idtype: usize,
-    id: usize,
-    infop: usize,
-    options: u32,
-    _ru: *mut Rusage,
-) -> isize {
+pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: u32, _ru: *mut Rusage) -> isize {
     const P_PIDFD: usize = 3;
 
     let option = match WaitOption::from_bits(options) {
@@ -132,8 +126,7 @@ pub fn sys_waitid(
         Ok(Some(child)) => {
             if infop != 0 {
                 let siginfo = waitid_siginfo(child.pid, child.status);
-                if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
-                {
+                if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo) {
                     return errno;
                 }
             }
@@ -143,8 +136,7 @@ pub fn sys_waitid(
             if nonblock {
                 EAGAIN
             } else if infop != 0 {
-                match UserPtrMut::<SigInfo>::from_addr(infop).write(token, &SigInfo::new(0, 0, 0))
-                {
+                match UserPtrMut::<SigInfo>::from_addr(infop).write(token, &SigInfo::new(0, 0, 0)) {
                     Ok(()) => SUCCESS,
                     Err(errno) => errno,
                 }
@@ -207,8 +199,7 @@ fn waitid_wait_child(
         Ok(Some(child)) => {
             if infop != 0 {
                 let siginfo = waitid_siginfo(child.pid, child.status);
-                if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
-                {
+                if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo) {
                     return errno;
                 }
             }
@@ -216,8 +207,7 @@ fn waitid_wait_child(
         }
         Ok(None) => {
             if infop != 0 {
-                match UserPtrMut::<SigInfo>::from_addr(infop).write(token, &SigInfo::new(0, 0, 0))
-                {
+                match UserPtrMut::<SigInfo>::from_addr(infop).write(token, &SigInfo::new(0, 0, 0)) {
                     Ok(()) => SUCCESS,
                     Err(errno) => errno,
                 }
@@ -250,13 +240,7 @@ fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
 
     if (wait_status & 0xff) == 0x7f {
         let stop_signal = ((wait_status >> 8) & 0xff) as usize;
-        return SigInfo::new_with_sender_value(
-            SIGCHLD_SIGNUM,
-            0,
-            CLD_STOPPED,
-            pid,
-            stop_signal,
-        );
+        return SigInfo::new_with_sender_value(SIGCHLD_SIGNUM, 0, CLD_STOPPED, pid, stop_signal);
     }
 
     let term_signal = (wait_status & 0x7f) as usize;
@@ -321,10 +305,8 @@ pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) 
         let target_gid = task.gid();
         let target_egid = task.egid();
         let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
-        let same_creds = uid == target_uid
-            && euid == target_euid
-            && gid == target_gid
-            && egid == target_egid;
+        let same_creds =
+            uid == target_uid && euid == target_euid && gid == target_gid && egid == target_egid;
         if !privileged && !same_creds {
             return EPERM;
         }

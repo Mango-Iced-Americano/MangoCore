@@ -35,6 +35,12 @@ impl Read<u8> for Ns16550a {
 
 impl Write<u8> for Ns16550a {
     fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
+        let ready =
+            unsafe { read_volatile((self.base + offsets::LSR) as *const u8) } & masks::THRE;
+        if ready == 0 {
+            return Err(nb::Error::WouldBlock);
+        }
+
         // 原样输出字节，不做 \n→\r\n 展开。
         // CR 处理由更上层的 println!/TTY ONLCR 路径负责（la64 调用方已提供 \r\n），
         // 此处若再次插入 \r 会导致 \r\r\n 重复。

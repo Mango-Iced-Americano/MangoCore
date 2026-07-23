@@ -63,6 +63,12 @@ pub struct Vma {
     pub fork_inherited: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum VmaUnmapReason {
+    RemoveArea,
+    Range,
+}
+
 impl Vma {
     pub fn try_clone(&self) -> Result<Self, isize> {
         let inner = self.inner.try_clone()?;
@@ -384,17 +390,88 @@ impl Vma {
         Ok(())
     }
     /// Unmap resident pages in `self` from `page_table`.
-    pub fn unmap<T: PageTable>(&mut self, page_table: &mut T) -> Result<(), MemoryError> {
+    pub(super) fn unmap<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        reason: VmaUnmapReason,
+    ) -> Result<(), MemoryError> {
+        let record_anon_private = crate::task::perf::stats_enabled_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        ) && self.map_file.is_none()
+            && self
+                .flags
+                .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+            && !self.flags.contains(MapFlags::MAP_SHARED);
+        let requested_pages = self.vm_end().0.saturating_sub(self.vm_start().0);
+        let start_ticks = if record_anon_private {
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+        } else {
+            0
+        };
+        #[cfg(feature = "oom_handler")]
+        let active_before = if record_anon_private {
+            self.inner.active_len()
+        } else {
+            0
+        };
+        #[cfg(not(feature = "oom_handler"))]
+        let active_before = 0;
         let mut resident_vpns = Vec::new();
-        resident_vpns
+        if resident_vpns
             .try_reserve(self.inner.in_memory_len())
-            .map_err(|_| MemoryError::OutOfMemory)?;
+            .is_err()
+        {
+            if record_anon_private {
+                crate::task::perf::record_anon_unmap(
+                    matches!(reason, VmaUnmapReason::Range),
+                    requested_pages,
+                    0,
+                    active_before,
+                    0,
+                    start_ticks,
+                    true,
+                );
+            }
+            return Err(MemoryError::OutOfMemory);
+        }
         self.inner
             .for_each_in_memory_vpn(|vpn| resident_vpns.push(vpn));
+        let resident_pages = resident_vpns.len();
         let mut mapper = UserMapper::new(page_table);
+        let mut retain_scan_steps = 0usize;
         for vpn in resident_vpns {
-            let _ = mapper.unmap_user_page_if_mapped(vpn)?;
+            if let Err(error) = mapper.unmap_user_page_if_mapped(vpn) {
+                if record_anon_private {
+                    crate::task::perf::record_anon_unmap(
+                        matches!(reason, VmaUnmapReason::Range),
+                        requested_pages,
+                        resident_pages,
+                        active_before,
+                        retain_scan_steps,
+                        start_ticks,
+                        true,
+                    );
+                }
+                return Err(error);
+            }
+            if record_anon_private {
+                #[cfg(feature = "oom_handler")]
+                {
+                    retain_scan_steps = retain_scan_steps.saturating_add(self.inner.active_len());
+                }
+            }
             self.inner.remove_in_memory(&vpn);
+        }
+        if record_anon_private {
+            crate::task::perf::record_anon_unmap(
+                matches!(reason, VmaUnmapReason::Range),
+                requested_pages,
+                resident_pages,
+                active_before,
+                retain_scan_steps,
+                start_ticks,
+                false,
+            );
         }
         Ok(())
     }

@@ -1,0 +1,19 @@
+e2fsck 1.47.0 (5-Feb-2023)
+Pass 1: Checking inodes, blocks, and sizes
+Deleted inode 12 has zero dtime.  Fix? no
+
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+Block bitmap differences:  -2065
+Fix? no
+
+Inode bitmap differences:  -12
+Fix? no
+
+
+/app/docs/Work_Log/evidence/2026-07-19/rv64-lwext4-orphan-red.img: ********** WARNING: Filesystem still has errors **********
+
+/app/docs/Work_Log/evidence/2026-07-19/rv64-lwext4-orphan-red.img: 12/16384 files (8.3% non-contiguous), 2066/16384 blocks
+e2fsck_exit=4

@@ -1,0 +1,8 @@
+2026-07-17T15:26:23.256550Z __PERF_BEGIN_p4_space_audit-1-5e6214a7__
+2026-07-17T15:26:24.149398Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_space_audit-1-5e6214a7_TRACE_OFF__
+2026-07-17T15:26:26.760422Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_space_audit-1-5e6214a7__
+2026-07-17T15:26:26.801793Z Filesystem           1K-blocks      Used Available Use% Mounted on
+2026-07-17T15:26:26.808251Z none                  16350816   2463168  13887648  15% /
+2026-07-17T15:26:58.288287Z 131770	/persist/python-runtime/releases/071e4e258421
+2026-07-17T15:27:30.126197Z 130964	/persist/python-runtime/releases/5298fb0fa485
+2026-07-17T15:28:02.035752Z 130967	/persist/python-runtime/releases/a420d79ddb07

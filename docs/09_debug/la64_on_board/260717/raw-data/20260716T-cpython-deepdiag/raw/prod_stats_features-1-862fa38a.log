@@ -1,0 +1,10 @@
+2026-07-16T07:21:01.858578Z __PERF_BEGIN_prod_stats_features-1-862fa38a__
+2026-07-16T07:21:02.779322Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_ACK_prod_stats_features-1-862fa38a_TRACE_OFF__
+2026-07-16T07:21:04.835422Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_prod_stats_features-1-862fa38a__
+2026-07-16T07:21:04.876488Z cat: can't open '/sys/kernel/stats/features': No such file or directory
+2026-07-16T07:21:04.918028Z cat: can't open '/sys/kernel/stats/stats_on': No such file or directory
+2026-07-16T07:21:04.959744Z cat: can't open '/sys/kernel/stats/syscall': No such file or directory
+2026-07-16T07:21:05.001256Z cat: can't open '/sys/kernel/stats/pagecache': No such file or directory
+2026-07-16T07:21:05.007587Z __PERF_WORK_END_prod_stats_features-1-862fa38a__
+2026-07-16T07:21:05.012292Z __PERF_ACK_prod_stats_features-1-862fa38a_WORK__
+2026-07-16T07:21:05.473543Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_prod_stats_features-1-862fa38a__ rc=1

@@ -11,8 +11,7 @@ use crate::{
         dev::DEV_FS,
         vfs::{
             event::{EPollEvent, EventWaitQueue},
-            File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode,
-            Metadata,
+            File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata,
         },
     },
     mm::{UserPtr, UserPtrMut},
@@ -497,10 +496,7 @@ pub fn handle_realtime_clock_was_set() -> usize {
             for weak in registry.iter() {
                 if let Some(timerfd) = weak.upgrade() {
                     woke = woke.saturating_add(
-                        timerfd.sync_realtime_deadline_after_clock_set(
-                            now_realtime,
-                            now_monotonic,
-                        ),
+                        timerfd.sync_realtime_deadline_after_clock_set(now_realtime, now_monotonic),
                     );
                 }
             }

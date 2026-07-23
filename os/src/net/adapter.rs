@@ -1,11 +1,11 @@
 use core::convert::TryInto;
 use core::result;
 
+use crate::drivers::net::veth::VethDriver;
+use crate::drivers::net::NetDevice;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::drivers::net::NetDevice;
-use crate::drivers::net::veth::VethDriver;
 use smoltcp::phy::{Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
@@ -276,10 +276,17 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                                 let dst_ip = IpAddress::Ipv4(dst_addr);
                                 let is_loopback = dst_addr.as_bytes()[0] == 127;
                                 let is_local = crate::net::net_core::current_netns()
-                                    .device_list.lock().values()
-                                    .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == dst_ip));
+                                    .device_list
+                                    .lock()
+                                    .values()
+                                    .any(|iface| {
+                                        iface.ip_addrs().iter().any(|c| c.address() == dst_ip)
+                                    });
                                 if is_loopback || is_local {
-                                    log::debug!("[RoutingTxToken] dst={} -> local delivery (lo)", dst_addr);
+                                    log::debug!(
+                                        "[RoutingTxToken] dst={} -> local delivery (lo)",
+                                        dst_addr
+                                    );
                                     send_to_lo = true;
                                     send_to_eth = false;
                                 } else {
@@ -291,12 +298,18 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                         EthernetProtocol::Arp => {
                             if let Ok(arp) = ArpPacket::new_checked(frame.payload()) {
                                 let target_ip = arp.target_protocol_addr();
-                                let ipv4 = Ipv4Address::from_bytes(&target_ip[..4].try_into().unwrap_or([0;4]));
+                                let ipv4 = Ipv4Address::from_bytes(
+                                    &target_ip[..4].try_into().unwrap_or([0; 4]),
+                                );
                                 let dst_ip = IpAddress::Ipv4(ipv4);
                                 let is_loopback = ipv4.as_bytes()[0] == 127;
                                 let is_local = crate::net::net_core::current_netns()
-                                    .device_list.lock().values()
-                                    .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == dst_ip));
+                                    .device_list
+                                    .lock()
+                                    .values()
+                                    .any(|iface| {
+                                        iface.ip_addrs().iter().any(|c| c.address() == dst_ip)
+                                    });
                                 if is_loopback || is_local {
                                     send_to_lo = true;
                                     send_to_eth = false;
@@ -353,6 +366,7 @@ impl Device for SmoltcpDeviceAdapter {
         let mut buf = [0u8; 2048];
 
         if let Some(len) = self.inner.receive(&mut buf) {
+            crate::task::perf::record_net_rx(len);
             let packet = buf[..len].to_vec();
             let rx = NetRxToken { buf: packet };
             let tx = NetTxToken {
@@ -417,6 +431,7 @@ impl TxToken for NetTxToken {
 
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
+        crate::task::perf::record_net_tx_submit(len);
         self.inner.transmit(&buf);
         result
     }

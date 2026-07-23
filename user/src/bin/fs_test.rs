@@ -674,16 +674,33 @@ fn test_fstatat() -> bool {
 // ── Phase A: ftruncate ──────────────────────────────────────────────────
 
 fn test_ftruncate() -> bool {
-    sys_mkdirat(AT_FDCWD, "/tmp14\0", 0o777);
+    let ret = sys_mkdirat(AT_FDCWD, "/tmp14\0", 0o777);
+    if ret < 0 {
+        println!("  FAIL: ftruncate setup mkdir returned {}", ret);
+        return false;
+    }
 
     const O_CREAT: u32 = 0o100;
     const O_RDWR: u32 = 0o2;
     let fd = sys_open("/tmp14/truncfile\0", O_CREAT | O_RDWR);
-    sys_write(fd as usize, b"0123456789ABCDEF"); // 16 bytes
+    if fd < 0 {
+        println!("  FAIL: ftruncate setup open returned {}", fd);
+        return false;
+    }
+    let written = sys_write(fd as usize, b"0123456789ABCDEF"); // 16 bytes
+    if written != 16 {
+        println!("  FAIL: ftruncate setup write returned {}", written);
+        sys_close(fd as usize);
+        return false;
+    }
     sys_close(fd as usize);
 
     // truncate to 6 bytes
     let fd = sys_open("/tmp14/truncfile\0", O_RDWR);
+    if fd < 0 {
+        println!("  FAIL: ftruncate reopen returned {}", fd);
+        return false;
+    }
     let ret = sys_ftruncate(fd as usize, 6);
     if ret < 0 {
         println!("  FAIL: ftruncate returned {}", ret);

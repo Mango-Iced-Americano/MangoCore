@@ -3,11 +3,11 @@
 //! Spec: https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/serial-ata-ahci-spec-rev1-3-1.pdf
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::hint::spin_loop;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::slice;
+use core::sync::atomic::{fence, Ordering};
 
 use bit_field::*;
 use bitflags::*;
@@ -26,7 +26,78 @@ pub struct AHCI<P: Provider> {
     cmd_table: &'static mut AHCICommandTable,
     data: &'static mut [u8],
     port: &'static mut AHCIPort,
+    port_num: usize,
+    sectors: u64,
+    serial: String,
+    firmware: String,
+    model: String,
 }
+
+/// AHCI initialization and polled-command failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AhciError {
+    InvalidMmioSize {
+        size: usize,
+    },
+    AhciEnableTimeout {
+        ghc: u32,
+    },
+    ControllerResetTimeout {
+        ghc: u32,
+    },
+    NoUsablePort {
+        implemented: u32,
+        port0_status: u32,
+    },
+    PortStopTimeout {
+        port: usize,
+        command: u32,
+        mask: u32,
+    },
+    PortStartTimeout {
+        port: usize,
+        command: u32,
+    },
+    LinkTimeout {
+        port: usize,
+        sata_status: u32,
+        sata_control: u32,
+        sata_error: u32,
+        command: u32,
+    },
+    DeviceBusyTimeout {
+        operation: &'static str,
+        tfd: u32,
+    },
+    CommandTimeout {
+        operation: &'static str,
+        ci: u32,
+        tfd: u32,
+        interrupt_status: u32,
+        sata_error: u32,
+    },
+    CommandFailed {
+        operation: &'static str,
+        tfd: u32,
+        interrupt_status: u32,
+        sata_error: u32,
+    },
+    InvalidBufferLength {
+        expected: usize,
+        actual: usize,
+    },
+    LbaOutOfRange {
+        lba: u64,
+        sectors: u64,
+    },
+    InvalidCapacity,
+}
+
+// These are bounded polling loops rather than time measurements because this
+// reusable driver has no timer callback in Provider. On timeout the register
+// snapshot is returned to the platform driver for diagnostics.
+const REGISTER_POLL_LIMIT: usize = 10_000_000;
+const COMMAND_POLL_LIMIT: usize = 50_000_000;
 
 /// AHCI Generic Host Control (3.1)
 #[repr(C)]
@@ -83,37 +154,45 @@ bitflags! {
 }
 
 impl AHCIGenericHostControl {
-    fn enable_ahci(&mut self) {
+    fn enable_ahci(&mut self) -> Result<(), AhciError> {
         // ref: Linux ahci_enable_ahci
         self.global_host_control.update(|v| {
             // GHC.AE
             v.set_bit(31, true);
         });
-        for i in 0..1000 {
+        for _ in 0..1000 {
             if self.global_host_control.read().get_bit(31) {
-                break;
+                return Ok(());
             }
             self.global_host_control.update(|v| {
                 // GHC.AE
                 v.set_bit(31, true);
             });
+            spin_loop();
         }
+        Err(AhciError::AhciEnableTimeout {
+            ghc: self.global_host_control.read(),
+        })
     }
-    fn enable(&mut self) {
+    fn enable(&mut self) -> Result<(), AhciError> {
         // ref: Linux ahci_reset_controller
-        self.enable_ahci();
-
-        let ctl = self.global_host_control.read();
-        if !ctl.get_bit(0) {
-            self.global_host_control.update(|v| {
-                // GHC.HR
-                v.set_bit(0, true);
-            });
-            // flush
-            self.global_host_control.read();
-            while self.global_host_control.read().get_bit(0) {}
-            self.enable_ahci();
+        self.enable_ahci()?;
+        self.global_host_control.update(|v| {
+            // Polling mode: disable global interrupts and request HBA reset.
+            v.set_bit(1, false);
+            v.set_bit(0, true);
+        });
+        // Flush the posted MMIO write.
+        self.global_host_control.read();
+        for _ in 0..REGISTER_POLL_LIMIT {
+            if !self.global_host_control.read().get_bit(0) {
+                return self.enable_ahci();
+            }
+            spin_loop();
         }
+        Err(AhciError::ControllerResetTimeout {
+            ghc: self.global_host_control.read(),
+        })
     }
     fn num_ports(&self) -> usize {
         self.capability.read().bits().get_bits(0..5) as usize + 1
@@ -147,14 +226,154 @@ struct AHCIPort {
 }
 
 impl AHCIPort {
-    fn spin_on_slot(&mut self, slot: usize) {
-        loop {
-            let ci = self.command_issue.read();
-            if !ci.get_bit(slot) {
-                break;
+    fn wait_command_clear(&mut self, port: usize, mask: u32) -> Result<(), AhciError> {
+        for _ in 0..REGISTER_POLL_LIMIT {
+            let command = self.command.read();
+            if command & mask == 0 {
+                return Ok(());
             }
             spin_loop();
         }
+        Err(AhciError::PortStopTimeout {
+            port,
+            command: self.command.read(),
+            mask,
+        })
+    }
+
+    fn stop(&mut self, port: usize) -> Result<(), AhciError> {
+        // AHCI 1.3.1 section 10.1.2: stop command processing before FIS RX.
+        self.command.update(|c| {
+            c.set_bit(0, false);
+        });
+        self.wait_command_clear(port, 1 << 15)?; // PxCMD.CR
+        self.command.update(|c| {
+            c.set_bit(4, false);
+        });
+        self.wait_command_clear(port, 1 << 14) // PxCMD.FR
+    }
+
+    fn start(&mut self, port: usize) -> Result<(), AhciError> {
+        self.command.update(|c| {
+            c.set_bit(4, true); // PxCMD.FRE
+        });
+        self.command.read();
+        self.command.update(|c| {
+            c.set_bit(0, true); // PxCMD.ST
+        });
+        self.command.read();
+        for _ in 0..REGISTER_POLL_LIMIT {
+            let command = self.command.read();
+            if command.get_bit(0) && command.get_bit(4) {
+                return Ok(());
+            }
+            spin_loop();
+        }
+        Err(AhciError::PortStartTimeout {
+            port,
+            command: self.command.read(),
+        })
+    }
+
+    fn wait_ready(&mut self, operation: &'static str) -> Result<(), AhciError> {
+        const ATA_DEV_BUSY: u32 = 1 << 7;
+        const ATA_DEV_DRQ: u32 = 1 << 3;
+        for _ in 0..REGISTER_POLL_LIMIT {
+            let tfd = self.task_file_data.read();
+            if tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ) == 0 {
+                return Ok(());
+            }
+            spin_loop();
+        }
+        Err(AhciError::DeviceBusyTimeout {
+            operation,
+            tfd: self.task_file_data.read(),
+        })
+    }
+
+    fn wait_link_active<P: Provider>(
+        &mut self,
+        port: usize,
+        attempts: usize,
+    ) -> Result<(), AhciError> {
+        for _ in 0..attempts {
+            let status = self.sata_status.read();
+            let det_present = status.get_bits(0..4) == 3;
+            let ipm_active = status.get_bits(8..12) == 1;
+            if det_present && ipm_active {
+                return Ok(());
+            }
+            P::delay_us(1_000);
+        }
+        Err(AhciError::LinkTimeout {
+            port,
+            sata_status: self.sata_status.read(),
+            sata_control: self.sata_control.read(),
+            sata_error: self.sata_error.read(),
+            command: self.command.read(),
+        })
+    }
+
+    fn request_power_and_active_state(&mut self) {
+        self.command.update(|command| {
+            command.set_bit(1, true); // PxCMD.SUD: spin-up device
+            command.set_bit(2, true); // PxCMD.POD: power on device
+            command.set_bits(28..32, 1); // PxCMD.ICC: active
+        });
+        self.command.read();
+    }
+
+    fn hard_reset_link<P: Provider>(&mut self) {
+        // AHCI 1.3.1 section 10.4.2 and Linux sata_link_hardreset(): assert
+        // COMRESET through SControl.DET for at least 1 ms, then release it.
+        // Preserve the negotiated speed limit (SPD) and disallow partial and
+        // slumber states while bringing the link back.
+        self.sata_error.write(u32::MAX);
+        self.sata_error.read();
+        let speed = self.sata_control.read() & 0x0f0;
+        self.sata_control.write(speed | 0x301);
+        self.sata_control.read();
+        P::delay_us(1_000);
+        self.sata_control.write(speed | 0x300);
+        self.sata_control.read();
+        P::delay_us(1_000);
+        self.sata_error.write(u32::MAX);
+        self.sata_error.read();
+        self.request_power_and_active_state();
+    }
+
+    fn spin_on_slot(&mut self, slot: usize, operation: &'static str) -> Result<(), AhciError> {
+        for _ in 0..COMMAND_POLL_LIMIT {
+            let ci = self.command_issue.read();
+            if !ci.get_bit(slot) {
+                fence(Ordering::SeqCst);
+                let tfd = self.task_file_data.read();
+                let interrupt_status = self.interrupt_status.read();
+                let sata_error = self.sata_error.read();
+                const ATA_DEV_ERR: u32 = 1;
+                const PORT_IRQ_TF_ERR: u32 = 1 << 30;
+                if tfd & ATA_DEV_ERR != 0
+                    || interrupt_status & PORT_IRQ_TF_ERR != 0
+                    || sata_error != 0
+                {
+                    return Err(AhciError::CommandFailed {
+                        operation,
+                        tfd,
+                        interrupt_status,
+                        sata_error,
+                    });
+                }
+                return Ok(());
+            }
+            spin_loop();
+        }
+        Err(AhciError::CommandTimeout {
+            operation,
+            ci: self.command_issue.read(),
+            tfd: self.task_file_data.read(),
+            interrupt_status: self.interrupt_status.read(),
+            sata_error: self.sata_error.read(),
+        })
     }
     fn issue_command(&mut self, slot: usize) {
         assert!(slot < 32);
@@ -249,6 +468,7 @@ const FIS_REG_H2D: u8 = 0x27;
 const CMD_READ_DMA_EXT: u8 = 0x25;
 const CMD_WRITE_DMA_EXT: u8 = 0x35;
 const CMD_IDENTIFY_DEVICE: u8 = 0xec;
+const CMD_FLUSH_CACHE_EXT: u8 = 0xea;
 
 /// SATA Register FIS - Host to Device
 ///
@@ -300,219 +520,324 @@ struct ATAIdentifyPacket {
     model: [u8; 40],   // words 27-46
     _3: [u16; 13],
     lba_sectors: u32, // words 60-61
-    _4: [u16; 38],
+    _4a: [u16; 21],
+    command_set_support: u16, // word 83; bit 10 means 48-bit LBA support
+    _4b: [u16; 16],
     lba48_sectors: u64, // words 100-103
 }
 
 impl<P: Provider> AHCI<P> {
-    pub fn new(header: usize, size: usize) -> Option<Self> {
+    pub fn new(header: usize, size: usize) -> Result<Self, AhciError> {
+        if size < 0x100 + size_of::<AHCIPort>() {
+            return Err(AhciError::InvalidMmioSize { size });
+        }
         let ghc = unsafe { &mut *(header as *mut AHCIGenericHostControl) };
 
-        ghc.enable();
+        let capability_before_reset = ghc.capability.read().bits();
+        ghc.enable()?;
 
-        if let Some(port_num) = (0..ghc.num_ports()).find(|&i| {
-            if !ghc.has_port(i) {
-                return false;
-            }
-            let sata_status = unsafe { &mut *ghc.port_ptr(i) }.sata_status.read();
-            let ipm_active = sata_status.get_bits(8..12) == 1;
-            let det_present = sata_status.get_bits(0..4) == 3;
-            ipm_active && det_present
-        }) {
-            let port = unsafe { &mut *ghc.port_ptr(port_num) };
-
-            debug!("AHCI probing port {}", port_num);
-            // Disable Port First
-            // ref: Linux ahci_stop_engine
-            port.command.update(|c| {
-                // ST
-                c.set_bit(0, false);
-            });
-            // LIST_ON
-            while port.command.read() | (1 << 15) == 1 {}
-            // ref: Linux ahci_stop_fis_rx
-            port.command.update(|c| {
-                // FRE
-                c.set_bit(4, false);
-            });
-            // FIS_ON
-            while port.command.read() | (1 << 14) == 1 {}
-
-            let (rfis_va, rfis_pa) = P::alloc_dma(P::PAGE_SIZE);
-            let (cmd_list_va, cmd_list_pa) = P::alloc_dma(P::PAGE_SIZE);
-            let (cmd_table_va, cmd_table_pa) = P::alloc_dma(P::PAGE_SIZE);
-            let (data_va, data_pa) = P::alloc_dma(P::PAGE_SIZE);
-
-            let received_fis = unsafe { &mut *(rfis_va as *mut AHCIReceivedFIS) };
-            let cmd_list = unsafe {
-                slice::from_raw_parts_mut(
-                    cmd_list_va as *mut AHCICommandHeader,
-                    P::PAGE_SIZE / size_of::<AHCICommandHeader>(),
-                )
-            };
-            let cmd_table = unsafe { &mut *(cmd_table_va as *mut AHCICommandTable) };
-            let identify_data = unsafe { &*(data_va as *mut ATAIdentifyPacket) };
-
-            cmd_table.prdt[0].data_base_address = data_pa as u64;
-            cmd_table.prdt[0].byte_count_i = (BLOCK_SIZE - 1) as u32;
-
-            cmd_list[0].command_table_base_address = cmd_table_pa as u64;
-            cmd_list[0].prdt_length = 1;
-            cmd_list[0].prd_byte_count = 0;
-            // cfl=4
-            cmd_list[0].flags = 4;
-
-            port.command_list_base_address.write(cmd_list_pa as u64);
-            port.fis_base_address.write(rfis_pa as u64);
-
-            // clear errors
-            port.sata_error.write(0xffffffff);
-
-            // ref: Linux ahci_power_up
-            // spin up device
-            port.command.update(|c| {
-                // SUD
-                *c |= 1 << 1;
-            });
-            // power up
-            port.command.update(|c| {
-                // ICC
-                *c &= !(0xf << 28);
-                *c |= 1 << 28;
-            });
-
-            // ref: Linux ahci_start_fis_rx
-            // enable fre
-            port.command.update(|c| {
-                // FRE
-                *c |= 1 << 4;
-            });
-            // flush
-            port.command.read();
-
-            // ref: Linux ahci_start_engine
-            // enable port
-            port.command.update(|c| {
-                // ST
-                *c |= 1 << 0;
-            });
-            // flush
-            port.command.read();
-
-            // wait for ST
-            while port.command.read() | (1 << 0) == 0 {}
-
-            let stat = port.sata_status.read();
-            if stat == 0 {
-                warn!("port is not connected to external drive?");
-                return None;
-            }
-
-            let fis = &mut cmd_table.cfis;
-            // Register FIS from HBA to device
-            fis.fis_type = FIS_REG_H2D;
-            fis.cflags = 1 << 7;
-
-            // 7.15 IDENTIFY DEVICE - ECh, PIO Data-In
-            fis.command = CMD_IDENTIFY_DEVICE;
-            fis.sector_count = 1;
-
-            port.issue_command(0);
-            port.spin_on_slot(0);
-
-            debug!(
-                "Found ATA Device serial {} firmware {} model {} sectors 24bit={} 48bit={}",
-                from_ata_string(&identify_data.serial).trim_end(),
-                from_ata_string(&identify_data.firmware).trim_end(),
-                from_ata_string(&identify_data.model).trim_end(),
-                identify_data.lba_sectors,
-                identify_data.lba48_sectors
-            );
-
-            let data = unsafe { slice::from_raw_parts_mut(data_va as *mut u8, BLOCK_SIZE) };
-
-            Some(AHCI {
-                header,
-                size,
-                provider: PhantomData,
-                ghc,
-                received_fis,
-                cmd_list,
-                cmd_table,
-                data,
-                port,
-            })
-        } else {
-            None
+        // The 2K1000 integration exposes a writable CAP register and clears
+        // it during HBA reset. Restore only bits selected by the platform;
+        // generic AHCI controllers keep the default zero masks and are never
+        // written here.
+        let capability_restore = (capability_before_reset & P::AHCI_CAPABILITY_SAVE_MASK)
+            | P::AHCI_CAPABILITY_FORCE_BITS;
+        if P::AHCI_CAPABILITY_SAVE_MASK != 0 || P::AHCI_CAPABILITY_FORCE_BITS != 0 {
+            ghc.capability
+                .write(AHCICap::from_bits_truncate(capability_restore));
+            ghc.capability.read(); // Flush the posted MMIO write.
         }
+
+        // Some integrated controllers clear the writable PI register during
+        // HBA reset. Restore only a bitmap supplied by the platform provider;
+        // generic PCI controllers continue to use their hardware value.
+        if let Some(port_map) = P::AHCI_PORTS_IMPLEMENTED {
+            ghc.port_implemented.write(port_map);
+            ghc.port_implemented.read(); // Flush the posted MMIO write.
+        }
+
+        assert_eq!(size_of::<SATAFISRegH2D>(), 64);
+        assert_eq!(size_of::<AHCIReceivedFIS>(), 256);
+        assert_eq!(size_of::<AHCICommandHeader>(), 32);
+
+        let mapped_ports = (size - 0x100) / 0x80;
+        let implemented = ghc.port_implemented.read();
+        let port_count = ghc.num_ports().min(mapped_ports).min(32);
+        // Select an implemented port before waiting for DET/IPM. Controllers
+        // with staggered spin-up may not report DET=3 until PxCMD.SUD is set.
+        let port_num =
+            (0..port_count)
+                .find(|&i| ghc.has_port(i))
+                .ok_or(AhciError::NoUsablePort {
+                    implemented,
+                    port0_status: if port_count == 0 {
+                        0
+                    } else {
+                        unsafe { &mut *ghc.port_ptr(0) }.sata_status.read()
+                    },
+                })?;
+        let port = unsafe { &mut *ghc.port_ptr(port_num) };
+
+        debug!("AHCI probing port {}", port_num);
+        port.stop(port_num)?;
+
+        let (rfis_va, rfis_pa) = P::alloc_dma(P::PAGE_SIZE);
+        let (cmd_list_va, cmd_list_pa) = P::alloc_dma(P::PAGE_SIZE);
+        let (cmd_table_va, cmd_table_pa) = P::alloc_dma(P::PAGE_SIZE);
+        let max_transfer_bytes = P::AHCI_MAX_TRANSFER_SECTORS
+            .checked_mul(BLOCK_SIZE)
+            .expect("AHCI maximum transfer size overflow");
+        assert!(
+            P::AHCI_MAX_TRANSFER_SECTORS > 0
+                && P::AHCI_MAX_TRANSFER_SECTORS <= u16::MAX as usize
+                && max_transfer_bytes <= 4 * 1024 * 1024,
+            "AHCI transfer must fit one PRDT entry and ATA sector count"
+        );
+        let (data_va, data_pa) = P::alloc_dma(max_transfer_bytes);
+
+        let received_fis = unsafe { &mut *(rfis_va as *mut AHCIReceivedFIS) };
+        let cmd_list = unsafe {
+            slice::from_raw_parts_mut(
+                cmd_list_va as *mut AHCICommandHeader,
+                P::PAGE_SIZE / size_of::<AHCICommandHeader>(),
+            )
+        };
+        let cmd_table = unsafe { &mut *(cmd_table_va as *mut AHCICommandTable) };
+        let data = unsafe {
+            slice::from_raw_parts_mut(data_va as *mut u8, max_transfer_bytes)
+        };
+
+        cmd_table.prdt[0].data_base_address = data_pa as u64;
+        cmd_table.prdt[0].reserved = 0;
+        cmd_table.prdt[0].byte_count_i = (BLOCK_SIZE - 1) as u32;
+        cmd_list[0].command_table_base_address = cmd_table_pa as u64;
+        cmd_list[0].prdt_length = 1;
+        cmd_list[0].prd_byte_count = 0;
+        cmd_list[0].flags = 5; // Register H2D FIS is five DWORDs.
+
+        port.command_list_base_address.write(cmd_list_pa as u64);
+        port.fis_base_address.write(rfis_pa as u64);
+        port.interrupt_enable.write(0);
+        port.interrupt_status.write(u32::MAX);
+        port.sata_error.write(u32::MAX);
+
+        let mut ahci = AHCI {
+            header,
+            size,
+            provider: PhantomData,
+            ghc,
+            received_fis,
+            cmd_list,
+            cmd_table,
+            data,
+            port,
+            port_num,
+            sectors: 0,
+            serial: String::new(),
+            firmware: String::new(),
+            model: String::new(),
+        };
+
+        // Power on and spin up the drive before requesting the active interface
+        // state. POD matters on warm reset even when cold boot firmware happened
+        // to leave the port powered.
+        ahci.port.request_power_and_active_state();
+        // Warm board resets can leave PxSSTS.DET at 1 (device detected but no
+        // PHY communication). A short timed wait handles normal spin-up; if it
+        // does not converge, establish a fresh link with COMRESET and use the
+        // AHCI-defined 10 second upper bound.
+        if ahci.port.wait_link_active::<P>(port_num, 200).is_err() {
+            ahci.port.hard_reset_link::<P>();
+            ahci.port.wait_link_active::<P>(port_num, 10_000)?;
+        }
+        // PxSIG is only a classification hint. 2K1000LA may return 0xffff_ffff
+        // here after HBA reset even though PxSSTS reports an active SATA link;
+        // the board U-Boot likewise proceeds from link-up to an ATA command
+        // without rejecting the port by signature. IDENTIFY DEVICE below is
+        // the authoritative, read-only test that an ATA disk is present.
+        ahci.port.start(port_num)?;
+
+        ahci.prepare_command(false, BLOCK_SIZE, CMD_IDENTIFY_DEVICE);
+        ahci.cmd_table.cfis.sector_count = 1;
+        ahci.execute_command("IDENTIFY DEVICE")?;
+
+        let identify_data = unsafe { &*(ahci.data.as_ptr() as *const ATAIdentifyPacket) };
+        let lba28_sectors = identify_data.lba_sectors as u64;
+        let lba48_sectors = identify_data.lba48_sectors;
+        let supports_lba48 = identify_data.command_set_support & (1 << 10) != 0;
+        ahci.sectors = if supports_lba48 && lba48_sectors != 0 {
+            lba48_sectors
+        } else {
+            lba28_sectors
+        };
+        if ahci.sectors == 0 {
+            return Err(AhciError::InvalidCapacity);
+        }
+        ahci.serial = from_ata_string(&identify_data.serial);
+        ahci.firmware = from_ata_string(&identify_data.firmware);
+        ahci.model = from_ata_string(&identify_data.model);
+
+        debug!(
+            "Found ATA Device serial {} firmware {} model {} sectors={}",
+            ahci.serial.trim_end(),
+            ahci.firmware.trim_end(),
+            ahci.model.trim_end(),
+            ahci.sectors
+        );
+        Ok(ahci)
     }
 
-    pub fn read_block(&mut self, block_id: usize, buf: &mut [u8]) -> usize {
-        // cfl=4
-        self.cmd_list[0].flags = 4;
-
+    fn prepare_command(&mut self, write: bool, transfer_bytes: usize, command: u8) {
+        assert!(
+            transfer_bytes <= self.data.len(),
+            "AHCI command exceeds reusable DMA buffer"
+        );
+        unsafe {
+            core::ptr::write_bytes(&mut self.cmd_table.cfis as *mut SATAFISRegH2D, 0, 1);
+        }
+        self.cmd_list[0].flags = 5 | if write {
+            CommandHeaderFlags::WRITE.bits()
+        } else {
+            0
+        };
+        self.cmd_list[0].prdt_length = if transfer_bytes == 0 { 0 } else { 1 };
+        self.cmd_list[0].prd_byte_count = 0;
+        if transfer_bytes != 0 {
+            self.cmd_table.prdt[0].byte_count_i = (transfer_bytes - 1) as u32;
+        }
         let fis = &mut self.cmd_table.cfis;
-        // Register FIS from HBA to device
         fis.fis_type = FIS_REG_H2D;
         fis.cflags = 1 << 7;
-        // 7.25 READ DMA EXT - 25h, DMA
-        fis.command = CMD_READ_DMA_EXT;
-        fis.sector_count = 1;
-        fis.dev_head = 0x40; // LBA
-        fis.control = 0x80; // LBA48
-        fis.set_lba(block_id as u64);
-
-        self.port.issue_command(0);
-        self.port.spin_on_slot(0);
-
-        let len = buf.len().min(BLOCK_SIZE);
-        buf[..len].clone_from_slice(&self.data[0..len]);
-        len
+        fis.command = command;
     }
 
-    pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> usize {
-        // cfl=4
-        self.cmd_list[0].flags = 4 | CommandHeaderFlags::WRITE.bits(); // device write
-
-        let len = buf.len().min(BLOCK_SIZE);
-        self.data[0..len].clone_from_slice(&buf[..len]);
-
-        let fis = &mut self.cmd_table.cfis;
-        // Register FIS from HBA to device
-        fis.fis_type = FIS_REG_H2D;
-        fis.cflags = 1 << 7;
-        // ATA8-ACS
-        // 7.63 WRITE DMA EXT - 35h, DMA
-        fis.command = CMD_WRITE_DMA_EXT;
-        fis.sector_count = 1;
-        fis.dev_head = 0x40; // LBA
-        fis.control = 0x80; // LBA48
-        fis.set_lba(block_id as u64);
-
+    fn execute_command(&mut self, operation: &'static str) -> Result<(), AhciError> {
+        self.port.interrupt_status.write(u32::MAX);
+        self.port.sata_error.write(u32::MAX);
+        // Read back both W1C registers to flush posted clears before issuing CI.
+        self.port.interrupt_status.read();
+        self.port.sata_error.read();
+        self.port.wait_ready(operation)?;
+        fence(Ordering::SeqCst);
         self.port.issue_command(0);
-        self.port.spin_on_slot(0);
+        self.port.spin_on_slot(0, operation)
+    }
 
-        len
+    fn check_io(&self, lba: u64, actual: usize) -> Result<usize, AhciError> {
+        if actual == 0 || actual % BLOCK_SIZE != 0 || actual > self.data.len() {
+            return Err(AhciError::InvalidBufferLength {
+                expected: self.data.len(),
+                actual,
+            });
+        }
+        let sector_count = actual / BLOCK_SIZE;
+        if lba
+            .checked_add(sector_count as u64)
+            .map_or(true, |end| end > self.sectors)
+        {
+            return Err(AhciError::LbaOutOfRange {
+                lba,
+                sectors: self.sectors,
+            });
+        }
+        Ok(sector_count)
+    }
+
+    pub fn read_block(&mut self, block_id: usize, buf: &mut [u8]) -> Result<usize, AhciError> {
+        self.read_blocks(block_id, buf)
+    }
+
+    /// Read one physically contiguous run with one ATA DMA command.
+    pub fn read_blocks(&mut self, block_id: usize, buf: &mut [u8]) -> Result<usize, AhciError> {
+        let lba = block_id as u64;
+        let sector_count = self.check_io(lba, buf.len())?;
+        self.prepare_command(false, buf.len(), CMD_READ_DMA_EXT);
+        let fis = &mut self.cmd_table.cfis;
+        fis.sector_count = sector_count as u16;
+        fis.dev_head = 0x40;
+        fis.set_lba(lba);
+        self.execute_command("READ DMA EXT")?;
+        fence(Ordering::SeqCst);
+        buf.copy_from_slice(&self.data[..buf.len()]);
+        Ok(buf.len())
+    }
+
+    pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> Result<usize, AhciError> {
+        self.write_blocks(block_id, buf)
+    }
+
+    /// Write one physically contiguous run with one ATA DMA command.
+    pub fn write_blocks(&mut self, block_id: usize, buf: &[u8]) -> Result<usize, AhciError> {
+        let lba = block_id as u64;
+        let sector_count = self.check_io(lba, buf.len())?;
+        self.data[..buf.len()].copy_from_slice(buf);
+        self.prepare_command(true, buf.len(), CMD_WRITE_DMA_EXT);
+        let fis = &mut self.cmd_table.cfis;
+        fis.sector_count = sector_count as u16;
+        fis.dev_head = 0x40;
+        fis.set_lba(lba);
+        self.execute_command("WRITE DMA EXT")?;
+        Ok(buf.len())
+    }
+
+    pub fn flush(&mut self) -> Result<(), AhciError> {
+        self.prepare_command(false, 0, CMD_FLUSH_CACHE_EXT);
+        self.execute_command("FLUSH CACHE EXT")
+    }
+
+    pub fn capacity_sectors(&self) -> u64 {
+        self.sectors
+    }
+
+    pub fn capacity_bytes(&self) -> Option<u64> {
+        self.sectors.checked_mul(BLOCK_SIZE as u64)
+    }
+
+    pub fn serial(&self) -> &str {
+        self.serial.trim_end()
+    }
+
+    pub fn firmware(&self) -> &str {
+        self.firmware.trim_end()
+    }
+
+    pub fn model(&self) -> &str {
+        self.model.trim_end()
     }
 }
 
 impl<P: Provider> Drop for AHCI<P> {
     fn drop(&mut self) {
+        // Never return DMA pages while the HBA may still own them. If stopping
+        // the engine times out, retaining every control/data page is safer than
+        // a DMA use-after-free.
+        if self.port.stop(self.port_num).is_err() {
+            warn!(
+                "AHCI port {} did not stop; retaining DMA pages",
+                self.port_num
+            );
+            return;
+        }
         P::dealloc_dma(self.received_fis as *mut _ as usize, P::PAGE_SIZE);
         P::dealloc_dma(self.cmd_list.as_ptr() as usize, P::PAGE_SIZE);
         P::dealloc_dma(self.cmd_table as *mut _ as usize, P::PAGE_SIZE);
-        P::dealloc_dma(self.data.as_ptr() as usize, P::PAGE_SIZE);
+        P::dealloc_dma(self.data.as_ptr() as usize, self.data.len());
     }
 }
 
 pub const BLOCK_SIZE: usize = 512;
 
 fn from_ata_string(data: &[u8]) -> String {
-    let mut swapped_data = Vec::new();
     assert_eq!(data.len() % 2, 0);
+    let mut value = String::new();
     for i in (0..data.len()).step_by(2) {
-        swapped_data.push(data[i + 1]);
-        swapped_data.push(data[i]);
+        for byte in [data[i + 1], data[i]] {
+            value.push(if byte == b' ' || byte.is_ascii_graphic() {
+                byte as char
+            } else {
+                '?'
+            });
+        }
     }
-    return String::from_utf8(swapped_data).unwrap();
+    value
 }

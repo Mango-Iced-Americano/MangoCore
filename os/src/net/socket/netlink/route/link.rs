@@ -1,16 +1,14 @@
+use crate::net::iface::Iface;
+use crate::utils::error::SyscallErr;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::net::iface::Iface;
-use crate::utils::error::SyscallErr;
 
-use super::super::NetlinkSocket;
 use super::super::netlink::{
-    IFLA_IFNAME, IFLA_LINKINFO, IFLA_INFO_KIND, IFLA_INFO_DATA,
-    IFLA_MTU, IFLA_NET_NS_PID,
-    NLA_F_NESTED, NLM_F_CREATE, NLM_F_EXCL,
-    VETH_INFO_PEER,
+    IFLA_IFNAME, IFLA_INFO_DATA, IFLA_INFO_KIND, IFLA_LINKINFO, IFLA_MTU, IFLA_NET_NS_PID,
+    NLA_F_NESTED, NLM_F_CREATE, NLM_F_EXCL, VETH_INFO_PEER,
 };
+use super::super::NetlinkSocket;
 
 pub fn handle_newlink(
     seq: u32,
@@ -19,7 +17,13 @@ pub fn handle_newlink(
     flags: u16,
     sock: &NetlinkSocket,
 ) -> Result<isize, crate::utils::error::SyscallErr> {
-    log::warn!("[netlink] handle_newlink called: seq={} pid={} flags={:#x} buf_len={}", seq, pid, flags, buf.len());
+    log::warn!(
+        "[netlink] handle_newlink called: seq={} pid={} flags={:#x} buf_len={}",
+        seq,
+        pid,
+        flags,
+        buf.len()
+    );
     let payload = &buf[16..];
     if payload.len() < 16 {
         return Err(crate::utils::error::SyscallErr::EINVAL);
@@ -48,12 +52,20 @@ pub fn handle_newlink(
 
         match rta_type {
             IFLA_IFNAME => {
-                let len = rta_payload.iter().position(|&b| b == 0).unwrap_or(rta_payload.len());
-                ifname = Some(String::from(core::str::from_utf8(&rta_payload[..len]).unwrap_or("")));
+                let len = rta_payload
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(rta_payload.len());
+                ifname = Some(String::from(
+                    core::str::from_utf8(&rta_payload[..len]).unwrap_or(""),
+                ));
             }
             IFLA_NET_NS_PID if rta_payload.len() >= 4 => {
                 target_netns_pid = Some(u32::from_ne_bytes([
-                    rta_payload[0], rta_payload[1], rta_payload[2], rta_payload[3],
+                    rta_payload[0],
+                    rta_payload[1],
+                    rta_payload[2],
+                    rta_payload[3],
                 ]));
             }
             IFLA_LINKINFO => {
@@ -61,17 +73,22 @@ pub fn handle_newlink(
                 // ---- Walk IFLA_LINKINFO nested attributes: IFLA_INFO_KIND, IFLA_INFO_DATA ----
                 let mut loff = 0;
                 while loff + 4 <= rta_payload.len() {
-                    let l_len = u16::from_ne_bytes([rta_payload[loff], rta_payload[loff + 1]]) as usize;
+                    let l_len =
+                        u16::from_ne_bytes([rta_payload[loff], rta_payload[loff + 1]]) as usize;
                     if l_len < 4 || loff + l_len > rta_payload.len() {
                         break;
                     }
-                    let l_type_raw = u16::from_ne_bytes([rta_payload[loff + 2], rta_payload[loff + 3]]);
+                    let l_type_raw =
+                        u16::from_ne_bytes([rta_payload[loff + 2], rta_payload[loff + 3]]);
                     let l_type = l_type_raw & !NLA_F_NESTED;
                     let l_payload = &rta_payload[loff + 4..loff + l_len];
 
                     match l_type {
                         IFLA_INFO_KIND => {
-                            let len = l_payload.iter().position(|&b| b == 0).unwrap_or(l_payload.len());
+                            let len = l_payload
+                                .iter()
+                                .position(|&b| b == 0)
+                                .unwrap_or(l_payload.len());
                             linkkind = Some(String::from(
                                 core::str::from_utf8(&l_payload[..len]).unwrap_or(""),
                             ));
@@ -80,15 +97,16 @@ pub fn handle_newlink(
                             // ---- Walk VETH-specific nested data: VETH_INFO_PEER ----
                             let mut ploff = 0;
                             while ploff + 4 <= l_payload.len() {
-                                let p_len = u16::from_ne_bytes(
-                                    [l_payload[ploff], l_payload[ploff + 1]],
-                                ) as usize;
+                                let p_len =
+                                    u16::from_ne_bytes([l_payload[ploff], l_payload[ploff + 1]])
+                                        as usize;
                                 if p_len < 4 || ploff + p_len > l_payload.len() {
                                     break;
                                 }
-                                let p_type_raw = u16::from_ne_bytes(
-                                    [l_payload[ploff + 2], l_payload[ploff + 3]],
-                                );
+                                let p_type_raw = u16::from_ne_bytes([
+                                    l_payload[ploff + 2],
+                                    l_payload[ploff + 3],
+                                ]);
                                 let p_type = p_type_raw & !NLA_F_NESTED;
                                 let p_payload = &l_payload[ploff + 4..ploff + p_len];
 
@@ -97,15 +115,18 @@ pub fn handle_newlink(
                                     if p_payload.len() >= 16 {
                                         let mut poff = 16;
                                         while poff + 4 <= p_payload.len() {
-                                            let pp_len = u16::from_ne_bytes(
-                                                [p_payload[poff], p_payload[poff + 1]],
-                                            ) as usize;
+                                            let pp_len = u16::from_ne_bytes([
+                                                p_payload[poff],
+                                                p_payload[poff + 1],
+                                            ])
+                                                as usize;
                                             if pp_len < 4 || poff + pp_len > p_payload.len() {
                                                 break;
                                             }
-                                            let pp_type_raw = u16::from_ne_bytes(
-                                                [p_payload[poff + 2], p_payload[poff + 3]],
-                                            );
+                                            let pp_type_raw = u16::from_ne_bytes([
+                                                p_payload[poff + 2],
+                                                p_payload[poff + 3],
+                                            ]);
                                             let pp_type = pp_type_raw & !NLA_F_NESTED;
                                             let pp_data = &p_payload[poff + 4..poff + pp_len];
 
@@ -164,7 +185,11 @@ pub fn handle_newlink(
         };
         let dst_ns = target_proc.net();
         ns.remove_device(iface.nic_id());
-        iface.common().net_namespace.write().replace(Arc::downgrade(&dst_ns));
+        iface
+            .common()
+            .net_namespace
+            .write()
+            .replace(Arc::downgrade(&dst_ns));
         dst_ns.add_device(iface);
         send_ack(sock, buf, seq, pid)?;
         return Ok(0);
@@ -172,7 +197,13 @@ pub fn handle_newlink(
 
     // ---- Dispatch: existing-link modification (no IFLA_INFO_KIND) ----
     let kind = linkkind.as_deref().unwrap_or("");
-    log::info!("[netlink] handle_newlink: kind='{}' ifindex={} ifname={:?} peer={:?}", kind, ifindex, ifname, peer_name);
+    log::info!(
+        "[netlink] handle_newlink: kind='{}' ifindex={} ifname={:?} peer={:?}",
+        kind,
+        ifindex,
+        ifname,
+        peer_name
+    );
     if kind.is_empty() && (ifindex > 0 || ifname.is_some()) {
         return handle_setlink(seq, pid, buf, sock);
     }
@@ -211,7 +242,10 @@ pub fn handle_newlink(
     let (ifidx1, ifidx2) = crate::drivers::net::veth::veth_pair_new(&name1, &name2);
     log::info!(
         "[netlink] created veth pair: {} (ifindex={}) <-> {} (ifindex={})",
-        name1, ifidx1, name2, ifidx2
+        name1,
+        ifidx1,
+        name2,
+        ifidx2
     );
 
     // ---- Send ACK —— rollback on failure ----
@@ -225,7 +259,6 @@ pub fn handle_newlink(
     Ok(0)
 }
 
-
 fn send_ack(sock: &NetlinkSocket, buf: &[u8], seq: u32, pid: u32) -> Result<(), SyscallErr> {
     let mut orig = [0u8; 16];
     orig.copy_from_slice(&buf[..16]);
@@ -235,10 +268,18 @@ fn send_ack(sock: &NetlinkSocket, buf: &[u8], seq: u32, pid: u32) -> Result<(), 
     Ok(())
 }
 
-fn send_error(sock: &NetlinkSocket, buf: &[u8], seq: u32, pid: u32, errno: i32) -> Result<(), SyscallErr> {
+fn send_error(
+    sock: &NetlinkSocket,
+    buf: &[u8],
+    seq: u32,
+    pid: u32,
+    errno: i32,
+) -> Result<(), SyscallErr> {
     let mut orig = [0u8; 16];
     orig.copy_from_slice(&buf[..16]);
-    if !sock.push_recv(super::super::netlink::build_nlmsg_error(errno, seq, pid, &orig)) {
+    if !sock.push_recv(super::super::netlink::build_nlmsg_error(
+        errno, seq, pid, &orig,
+    )) {
         return Err(SyscallErr::ENOBUFS);
     }
     Ok(())
@@ -273,7 +314,9 @@ pub fn handle_setlink(
     buf: &[u8],
     sock: &NetlinkSocket,
 ) -> Result<isize, crate::utils::error::SyscallErr> {
-    let payload = buf.get(16..).ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    let payload = buf
+        .get(16..)
+        .ok_or(crate::utils::error::SyscallErr::EINVAL)?;
     // ifinfomsg is 16 bytes: family(1) + pad(1) + type(2) + index(4) + flags(4) + change(4)
     if payload.len() < 16 {
         return Err(crate::utils::error::SyscallErr::EINVAL);
@@ -307,10 +350,11 @@ pub fn handle_setlink(
                 new_name = Some(s);
             }
             IFLA_MTU if rta_data.len() >= 4 => {
-                new_mtu = Some(
-                    u32::from_ne_bytes([rta_data[0], rta_data[1], rta_data[2], rta_data[3]])
-                        as usize,
-                );
+                new_mtu =
+                    Some(
+                        u32::from_ne_bytes([rta_data[0], rta_data[1], rta_data[2], rta_data[3]])
+                            as usize,
+                    );
             }
             _ => {}
         }
@@ -322,7 +366,9 @@ pub fn handle_setlink(
     let iface = if ifindex > 0 {
         ns.device_by_index(ifindex as usize)
     } else {
-        name_filter.as_ref().and_then(|name| ns.device_by_name(name))
+        name_filter
+            .as_ref()
+            .and_then(|name| ns.device_by_name(name))
     };
 
     let iface = match iface {
@@ -370,7 +416,9 @@ pub fn handle_dellink(
     buf: &[u8],
     sock: &NetlinkSocket,
 ) -> Result<isize, crate::utils::error::SyscallErr> {
-    let payload = buf.get(16..).ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    let payload = buf
+        .get(16..)
+        .ok_or(crate::utils::error::SyscallErr::EINVAL)?;
     if payload.len() < 16 {
         return Err(crate::utils::error::SyscallErr::EINVAL);
     }
@@ -428,7 +476,11 @@ pub fn handle_dellink(
 fn infer_veth_peer_name(name: &str) -> String {
     // Find the trailing digit sequence (e.g., "veth_t01" -> "veth_t02", "eth0" -> "eth1").
     let bytes = name.as_bytes();
-    let digit_len = bytes.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    let digit_len = bytes
+        .iter()
+        .rev()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
     if digit_len > 0 {
         let split = name.len() - digit_len;
         let prefix = &name[..split];
