@@ -20,14 +20,14 @@
 1. **Docker 优先** — 所有编译/运行/调试在 Docker 容器内：`make docker`
 2. **不要并行编译双架构** — rv64 和 la64 使用不同 nightly 工具链，Makefile 会切换 `rustup override`，并行会竞态。必须分开命令行执行
 3. **永远不要直接编辑 `lang_items.rs`** — 编辑 `lang_items.rs.rv` / `lang_items.rs.la` 变体；`user/src/lang_items.rs` 同理
-4. **每次修改必须双架构编译验证** — `make rv64-kernel-build-only` + `make la64-kernel-build-only`
-5. **修改核心功能后必须 QEMU 测试** — 不要只靠编译通过
+4. **验证强度匹配风险** — 文档/注释不编译；架构专用代码先验证受影响架构；共享生产代码在工作包或提交前串行完成双架构编译。SMP 代码按 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md) 的 T0-T3 分级执行
+5. **核心功能按风险做 QEMU 测试** — trap、IPI、调度、MM/TLB、锁与用户可见语义必须做对应 focused QEMU；纯重构、诊断或未改变运行语义的修改不机械重复全矩阵
 6. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
 7. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
 8. **不要 workaround** — 从根因解决问题，不做临时绕过
-9. **Mango Workflow 门禁** — 涉及调试、代码修改（编辑/写入源文件、构建配置、测试配置）时，必须先在回复中执行 `skill(name="mango-workflow")` 加载项目知识库。修改完成后再次执行 skill 的 A→D 流程（更新 Work Log → 沉淀经验 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
-10. **回复中必须声明门禁状态** — 每次代码修改完成后，在回复末尾注明 `mango-workflow: loaded, references: <文件名或无>`。
-11. **SMP 适配必须逐批人工确认** — 开始任何 SMP 相关代码修改前，必须完整阅读 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md)。每批关键实现代码原则上约 50 行，保持不变量完整时可少量超出并说明；修改前申请、修改后详细汇报并停止，关键并发代码必须写直接注释，未经用户明确批准不得进入下一批。
+9. **Mango Workflow 门禁** — 调试或代码任务首次写入前加载 `mango-workflow`；同一连续任务且 Skill 未变化时复用已加载状态，不为每个 patch 重复全文读取。完整工作包结束时执行 A→D（更新 Work Log → 判断经验沉淀 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
+10. **回复中必须声明门禁状态** — 每个代码工作包完成后，在回复末尾注明 `mango-workflow: loaded/reused, references: <文件名或无>`。
+11. **SMP 适配按工作包人工确认** — 每个工作包围绕一个完整不变量，关键实现代码目标约 100 行，保持语义闭合时可合理超出并说明。新任务首次修改前完整阅读 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md)；同一连续任务且规范未变化时复用已加载结论，只重读当前 Phase 和相关章节。高风险并发工作包修改前申请、修改后详细汇报并停止；低/中风险的已批准连续步骤可在同一工作包内完成，不为机械行数或中间 patch 反复停顿。
 
 ---
 
@@ -35,14 +35,16 @@
 
 `mango-workflow` 不是"事后写日志"，而是**前置知识门禁**。
 
-**触发条件：** 任何调试、代码修改操作（编辑源文件、改构建配置、改测试配置、QEMU 调试、性能分析）。
+**触发条件：** 调试、代码工作包首次开始，以及工作包完成收尾。同一连续任务中的中间 patch、
+编译重试和文档收尾复用已加载状态。
 
 **前置阅读：**
 - 性能退化/计数器/QEMU 长测 → 先读 `references/harness-patterns.md`
 - Bug 调试/LTP/子系统故障 → 先读 `references/debugging-patterns.md`
 - 纯文档整理 → 可只加载 skill，不读 references，但需说明原因
 
-**执行记录：** 在回复中写明 `mango-workflow loaded: yes, references: <section or "none — 纯文档">`。未完成门禁不得声称任务完成。
+**执行记录：** 在回复中写明 `mango-workflow loaded: yes/reused, references:
+<section or "none — 纯文档">`。未完成工作包收尾不得声称任务完成。
 
 ---
 
@@ -295,10 +297,9 @@ impl_file_for_socket!(MySocket);
 
 ### 验证清单
 
-- [ ] `make rv64-kernel-build-only` ✅
-- [ ] `make la64-kernel-build-only` ✅
-- [ ] QEMU 启动不 panic
-- [ ] 相关测试组通过
+- [ ] 已按改动风险选择验证档位并说明理由
+- [ ] 受影响架构构建通过；共享生产代码在提交/门禁前补齐双架构
+- [ ] 改变运行语义时，对应 focused QEMU/测试组通过
 - [ ] 更新 `docs/Work_Log/YYYY-MM-DD.md`（按 mango-workflow Skill 格式）
 
 ---
@@ -316,7 +317,9 @@ impl_file_for_socket!(MySocket);
 
 ### 自动 Worklog
 
-每次代码修改完成后，**必须调用 `skill(name="mango-workflow")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log/YYYY-MM-DD.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
+每个完整代码工作包结束时必须执行 `mango-workflow` A→D。同一连续任务只加载一次 Skill；
+中间 patch 不单独制造 Work Log 条目，编译错误修复、对称架构实现和文档同步合并记录到工作包。
+新任务、Skill 已变化或上下文没有加载记录时才重新全文读取。
 
 格式：日期戳条目 → 涉及文件 → 验证结果 → 备注。
 

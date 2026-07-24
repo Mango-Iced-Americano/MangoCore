@@ -1,7 +1,7 @@
 ---
 name: mango-workflow
-description: 自动维护 oskernel2026-mango 项目的工作日志、可复用经验模式，以及性能调试知识库。每次代码修改后触发：更新 docs/Work_Log/YYYY-MM-DD.md；调试/性能任务前加载 references/ 作为前置参考；发现可复用模式时沉淀到 references/。
-version: 1.1.0
+description: 自动维护 oskernel2026-mango 项目的工作日志、可复用经验模式，以及性能调试知识库。完整工作包结束时更新 docs/Work_Log/YYYY-MM-DD.md；调试/性能任务按需加载 references/；发现可复用模式时沉淀到 references/。
+version: 1.2.0
 allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 ---
 
@@ -16,7 +16,7 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 
 以下任一情况发生时，必须执行本 Skill：
 
-1. 完成了一次代码修改（无论大小）
+1. 完成一个语义闭合的代码工作包
 2. 修复了一个 bug
 3. 新增了一个功能
 4. 用户说"记录一下"、"更新 worklog"、"沉淀经验"
@@ -37,7 +37,10 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 
 读完后再开始分析和插桩，避免从零开始摸索。
 
-### A. 更新 Work_Log（每次修改后）
+同一连续任务只需完整加载本 Skill 一次；中间 patch、编译重试和紧耦合的双架构实现复用
+已加载规则。新任务、Skill 内容变化或上下文没有加载记录时再重新全文读取。
+
+### A. 更新 Work_Log（每个工作包后）
 
 在 `docs/Work_Log/YYYY-MM-DD.md` 顶部追加日期戳条目（如果当天已有条目则追加到该条目下）：
 
@@ -89,7 +92,7 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 - 已经在 AGENTS.md Critical Pitfalls 中覆盖的
 - 纯项目特定、不可能复现的
 
-### D. 同步文档（每次代码修改后）
+### D. 同步文档（每个工作包后）
 
 **特殊文档：`AI-Usage-Report.md`**
 - 当使用**新的 AI 工具/模型**时，需更新第 2 节工具清单
@@ -124,35 +127,28 @@ rg -l "os/src/net/config.rs" docs/ --type md
 
 ### E. 证据纪律（子任务验证）
 
-任何子任务（subagent）在报告测试结果时，必须提供可验证的执行证据，而不是仅凭临时日志声明成功。
+验证证据按改动风险和结论强度分级，不能让常规迭代承担阶段验收的全部归档成本：
 
-**证据归档规范：**
+- **常规迭代**：文档/注释只记录静态检查；局部构建在 Work Log 记录命令、退出码和关键结果；
+  focused QEMU 记录命令、配置和 PASS/FAIL 标记，不强制每次保存完整串口日志。
+- **完整归档**：高风险并发、阶段/发布门禁、性能对比、难复现失败和需要跨任务交接的结果，
+  保存到 `docs/Work_Log/evidence/YYYY-MM-DD/`。
+- **同环境复用**：同一连续任务的 container ID、image、mount 和 QEMU 版本记录一次后可引用；
+  不为每次重复运行重新采集相同元数据。
 
-- **唯一持久归档路径**：`docs/Work_Log/evidence/YYYY-MM-DD/` 是唯一受版本控制的证据归档目录。每个日期只能有一个日期目录，所有当天可验收证据必须写入该目录。
-- **日期目录命名**：固定使用 `YYYY-MM-DD`，如 `docs/Work_Log/evidence/2026-07-16/`。同一天的不同测试通过文件名前缀区分，不得再创建多个主题子目录。
-- **禁止使用 `testresults/`**：项目根目录 `testresults/` 已保留，禁止写入任何证据文件。子任务不得以任何理由向此路径输出内容。
-- **`testresult/` 仅限临时输出**：项目根目录 `testresult/` 已被 `.gitignore` 忽略，可作为测试框架的临时工作区，但其内容不具备验收效力。要验收的证据必须复制到当天的 `docs/Work_Log/evidence/YYYY-MM-DD/` 持久路径。
+**完整归档规范：**
 
-**硬性要求：**
+- 日期目录固定为 `YYYY-MM-DD`，同日通过文件名前缀区分，不创建主题子目录；
+- `testresults/` 禁止作为证据路径；`testresult/` 和容器 `/tmp` 只允许临时输出；
+- 编译和运行必须在 Docker 中完成；rv64/la64 不并行切换 nightly；
+- 至少保存 commit/dirty 状态、容器与 mount、配置、完整命令和退出码、QEMU 完整日志或足以
+  重建结论的原始结果；
+- 阶段/发布门禁检查证据相对被测源码的新鲜性；若验证后只修改文档/注释，不要求重跑；
+- 环境限制导致字段缺失时明确声明，不把缺失证据包装为完整验收。
 
-- **Docker 隔离**：所有编译和测试须在 Docker 容器内完成。记录 container ID 和宿主机工作目录到容器的挂载映射（`docker inspect <container> --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'`）。
-- **持久化证据路径**：证据必须写入当天的 `docs/Work_Log/evidence/YYYY-MM-DD/` 目录，该目录受版本控制，容灾后仍可访问。容器 `/tmp` 下的临时日志和 `testresult/` 下的临时输出均不是有效证据，子任务不得以此作为完成依据。
-- **结果元数据**：每次测试运行的结果目录下至少包含以下文件：
-  - `git-hash.txt` — 内核 commit（`git describe --always --dirty`）
-  - `container-id.txt` — container ID 与 mount 映射
-  - `config.txt` — 注入的 `os_test.conf` 内容或其 checksum
-  - `qemu-output.log` — 完整 QEMU 串口输出日志
-  - `qemu-head-tail.txt` — 日志首尾各 30-50 行，证明测试实际运行至结束
-  - 执行的完整命令与 exit status 记录
-- **父级可读**：证据必须交付到调用方（父 agent）可以读取的持久路径，不能仅存在于子任务临时工作区或 `docker exec` 会话中。
-- **新鲜性检查**：证据文件的时间戳必须晚于被测试代码或配置的最后修改时间，证明结果产自当前改动，而非老旧缓存。父 agent 必须进行这项检查。
-- **不可保留时声明**：如果环境限制导致部分或全部证据不可保留（如容器销毁），报告中必须明确列出缺失哪些字段及原因。
-
-**验收规则：**
-- 父 agent 收到测试结果后，必须先验证证据完整性和新鲜性。
-- 证据不满足要求的，不得验收为通过。
-- 子任务交付的结果若仅引用 `/tmp` 下临时日志或 `testresult/` 下的临时输出，视为无效交付，必须重做。
-- 任何声称"QEMU 测试通过"但没有对应元数据的结论，不具备有效性。
+子任务报告常规构建结果时，父 agent 可以根据可见命令输出和 Work Log 验收；声称高风险竞态、
+阶段或发布完成时，父 agent 必须检查完整持久证据。证据要求由所声称的结论决定，不因缺少一个
+机械元数据文件自动重做已经充分验证的低风险工作。
 
 ### F. 编排工作流（高爆炸半径内核回归调试）
 
@@ -230,4 +226,4 @@ Oracle 拒绝修复方案不是失败，而是设计循环的必要反馈：
 - Work_Log.md 追加在**顶部**（最新在前）
 - Reference 文件按**现象分类**追加在底部
 - 使用中文编写
-- 每次代码修改后执行 **A → D** 全流程（更新 Work_Log → 沉淀经验 → 同步文档）
+- 每个完整工作包后执行 **A → D** 全流程（更新 Work_Log → 判断经验沉淀 → 同步文档）

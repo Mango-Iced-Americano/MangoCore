@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-21
+last_updated: 2026-07-24
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -293,8 +293,8 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   IPI ping-pong、任务唯一运行和 TLB 失效；
 - 冻结实施基线：记录 commit、分支、dirty status、双架构 1 核日志和成绩；从该 commit
   创建专用 SMP branch/worktree，后续批次不得直接堆叠在持续变化的 develop 上；
-- 默认开发核数为 CORE_NUM=2，每批保留 CORE_NUM=1 回归；4/8 核只作为阶段门禁和压力矩阵，
-  避免把启动慢或 QEMU 噪声混入最小问题定位。
+- 默认开发核数为 CORE_NUM=2；是否补 CORE_NUM=1 由本工作包是否可能破坏单核退化路径决定。
+  4/8 核主要用于并发覆盖或阶段门禁，不在不相关的局部修改后机械重复。
 
 #### 退出条件
 
@@ -548,17 +548,19 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 ## 4. 测试、证据与验收
 
-### 4.1 每阶段强制门禁
+### 4.1 工作包与阶段的自适应门禁
 
-严格串行执行：
+日常工作包按 `smp-agent-execution-spec.md` 的 T0-T3 选择最小充分验证：
 
-~~~text
-make rv64-kernel-build-only
-make la64-kernel-build-only
-~~~
+- T0 文档/注释只做静态 diff 检查；
+- T1 局部或架构隔离改动先构建受影响架构，共享代码或准备提交时补齐双架构；
+- T2 启动/per-CPU/共享原子改动按实际行为选择 CORE_NUM=1/2 focused QEMU；
+- T3 trap、IPI、调度、TLB/ASID、锁序和 unsafe 生命周期执行双架构构建与对应并发测试；
+- 只有 Phase 退出或合并门禁固定执行双架构 build、CORE_NUM=1 回归和该阶段
+  CORE_NUM=1/2/4/8 focused 矩阵。
 
-随后执行该阶段 focused QEMU 测试，并至少复跑一次 <code>CORE_NUM=1</code>。
-双架构编译不得并行，避免 nightly override 竞态。
+所有构建和 QEMU 均在 Docker 内执行。需要双架构时严格串行，避免 nightly override 竞态；
+已经在同一源码状态通过的结果，不因随后只修改文档、注释或证据文件而重复运行。
 
 ### 4.2 SMP Ktest
 
@@ -578,19 +580,22 @@ make la64-kernel-build-only
 | 网络 | 多 socket 并发、单 poll owner、路由缓冲隔离 |
 | 停机 | panic/normal shutdown 停止其他 CPU |
 
-竞争敏感用例使用 <code>KREPEAT=100</code>；失败时打印 CPU、任务状态、队列归属和最后一次
-IPI/TLB sequence。调度/TLB 竞态测试显式使用 MTTCG；证据同时记录宿主 vCPU 线程和 victim
-观察窗口 trap count。
+竞争敏感用例根据故障概率和单次耗时选择重复次数：日常 smoke 通常为 1～10 次，阶段门禁通常
+为 20～100 次；不为达到固定数字重复已经稳定且与本批无关的测试。失败时打印 CPU、任务状态、
+队列归属和最后一次 IPI/TLB sequence。调度/TLB 竞态测试显式使用 MTTCG；只有在证明真实并发
+覆盖时才额外记录宿主 vCPU 线程和 victim 观察窗口 trap count。
 
 ### 4.3 最终矩阵
 
-对两种架构分别执行：
+最终候选版本对两种架构分别执行以下基线矩阵；若某子系统本阶段未改变，可以引用同一候选
+commit 上已有的新鲜结果，不重复制造等价运行：
 
 - CORE_NUM=1/2/4/8 的 SMP focused ktest；
-- CORE_NUM=1/2/4/8 的 basic + busybox（mask 0x003）；
+- CORE_NUM=1 和 CORE_NUM=8 的 basic + busybox（mask 0x003）；
 - CORE_NUM=1 和 CORE_NUM=8 的竞赛 12 组全量（mask 0xFFF）；
-- 每种架构、每种 CPU 数量连续启动 10 次；
-- 每种架构 8 核混合压力运行至少 30 分钟：
+- 每种架构的 1 核和 8 核至少连续启动 3 次；
+- 每种架构 8 核混合压力先运行 10 分钟；出现不稳定、修改高风险并发路径或形成最终发布候选时
+  扩展到 30 分钟：
   - CPU worker；
   - fork/exec/exit；
   - futex/pipe/eventfd；
@@ -600,24 +605,26 @@ IPI/TLB sequence。调度/TLB 竞态测试显式使用 MTTCG；证据同时记�
 
 ### 4.4 性能判定
 
-不设置固定线性加速要求，因为 QEMU TCG 和宿主调度会显著影响结果，但必须满足：
+性能门禁只在修改调度、IPI、shootdown、锁竞争或明确以性能为目标时执行。QEMU TCG 和宿主
+调度会显著影响结果，不设置固定线性加速要求，但相关工作包必须满足：
 
 - 结构上不存在全局 ready queue；
-- 使用至少 5 次同宿主、同镜像、同 workload 样本报告 median 和 MAD；
+- 日常比较至少使用 3 次同宿主、同镜像、同 workload 样本；噪声较大或结论接近阈值时再扩展
+  到 5 次并报告 median 和 MAD；
 - 8 核 CPU-bound 吞吐不得连续两组低于 4 核，除非差异位于
   <code>max(10%, 2×MAD)</code> 噪声带内；
 - 若 8 核明显低于 4 核，必须用 runqueue、migration、IPI、shootdown 和锁等待计数解释后才能验收。
 
 ### 4.5 证据归档
 
-每阶段证据统一保存到当天唯一的日期目录：
+T3、阶段门禁、性能对比和难复现失败的证据统一保存到当天唯一的日期目录：
 
 ~~~text
 docs/Work_Log/evidence/YYYY-MM-DD/
 ~~~
 
-同一日期内使用 <code>smp-phase-&lt;N&gt;-</code> 文件名前缀区分阶段，不再创建主题子目录。
-每阶段至少包含：
+同一日期内使用 <code>smp-phase-&lt;N&gt;-</code> 或批次前缀区分，不再创建主题子目录。
+阶段门禁至少包含：
 
 - git commit/worktree 状态；
 - Docker image ID、digest 和 QEMU 版本；
@@ -626,6 +633,9 @@ docs/Work_Log/evidence/YYYY-MM-DD/
 - QEMU 完整输出和结果判定；
 - CPU 数、online mask 和测试重复次数；
 - 压力测试统计与性能原始样本。
+
+T0/T1 只需在 Work Log 记录静态检查或构建结果；T2 保存命令、退出码和关键串口标记，只有不稳定
+或需要交接时保存完整日志。同一连续任务的容器、镜像和 mount 元数据可记录一次后引用。
 
 阶段状态只能写为 <code>not-run</code>、<code>red</code>、<code>partial</code>
 或 <code>pass</code>，不得用“预计通过”替代证据。
@@ -640,9 +650,10 @@ docs/Work_Log/evidence/YYYY-MM-DD/
 - 用户任务在 TLB 和共享子系统门禁通过前保持 CPU0 affinity；
 - RISC-V HSM/RFENCE 缺失时明确报错或使用本文指定的 IPI fallback，不做静默降级；
 - 实板 2K1000LA 始终配置为单核，本计划不宣称实板 SMP 支持；
-- 实际进入代码实施后，各阶段必须重新加载 mango-workflow 对应调试参考，并更新 Work Log；
-- 实施从冻结基线创建专用 SMP branch/worktree；每批在人工审核后按用户授权独立提交，
-  不要求在包含无关用户修改的 dirty develop 上制造“批次提交”；
+- 实际进入代码实施后，新任务首次修改加载 mango-workflow；同一连续任务复用已加载状态，只有
+  bug/性能场景才读取对应调试参考，并在工作包完成时更新 Work Log；
+- 实施从冻结基线创建专用 SMP branch/worktree；每个完整工作包在人工审核后按用户授权独立提交，
+  已批准的低/中风险紧耦合步骤可以合并为一个可审查工作包，不要求为每个机械子步骤制造提交；
 - 状态和测试结论必须引用可复核证据，不得将未执行项目标为通过。
 
 ## 6. 外部参考
