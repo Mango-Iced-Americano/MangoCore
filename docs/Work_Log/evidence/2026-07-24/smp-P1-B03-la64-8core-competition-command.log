@@ -1,0 +1,97 @@
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+[memory] 127254 usable physical frames across 1 region(s)
+[memory] region0: [0x90eea000, 0xb0000000) frames=127254
+.text [0x80000000, 0x802b0000)
+.rodata [0x802b0000, 0x802e7000)
+.data [0x8031a000, 0x80c13000)
+.bss [0x80c13000, 0x90eea000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Hello, world!
+[get_timer_freq_first_time] clk freq: 100000000(from CPUCFG)
+[machine_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[CPUCFG 0x0] 1359888
+[CPUCFG 0x1] 66253566
+[CPUCFG 0x2] 6340815
+[CPUCFG 0x3] 0
+[CPUCFG 0x4] 100000000
+[CPUCFG 0x5] 65537
+[CPUCFG 0x6] 0
+[CPUCFG 0x10] 11325
+[CPUCFG 0x11] 101187587
+[CPUCFG 0x12] 101187587
+[CPUCFG 0x13] 101187599
+[CPUCFG 0x14] 101580815
+Misc { 32-bit addr plv(1,2,3):: false,false,false, rdtime allowed for plv(1,2,3):: false,false,false, Disable dirty bit check for plv(0,1,2):: false,false,false, Misalignment check for plv(0,1,2,4):: false,false,false,false }
+RVACfg { rbits: 0 }
+[machine_init] MMAP_BASE: 0xffffff8000000000
+[smp] minimal boot ready: configured=8 boot_hw_id=0 online_mask=0xff
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[kernel] random: secure source unavailable (Entropy(DeviceUnavailable)); secure reads will fail
+[memory] reclaimed linker frames: [0x8031a000, 0x80570000) frames=598
+[initramfs] unpacked: files=33 dirs=21 symlinks=1 bytes=2443329
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[kernel] block device 0: official fs (DeviceFunction { bus: 0, device: 2, function: 0 })
+[block] /dev/vda contains raw Ext4
+[fs] official fs (/dev/vda) root directory readable: 3 entries
+[kernel] official fs (/dev/vda) (Ext4) mounted at sdcard flags=(empty)
+[initramfs] no mountable tools fs, leaving /tools empty
+sinitproc: 80571000, einitproc: 80859B60, sbash: 8085A000, ebash: 809AB878, sbusybox: 809AC000, ebusybox: 80BA45F8, sosconfig: 80BA5000, eosconfig: 80BA5F09
+[memory] reclaimed linker frames: [0x80571000, 0x80859000) frames=744
+[memory] reclaimed linker frames: [0x8085a000, 0x809ab000) frames=337
+[memory] reclaimed linker frames: [0x809ac000, 0x80ba4000) frames=504
+[memory] reclaimed linker frames: [0x80ba6000, 0x80bd8000) frames=50
+[memory] reclaimed linker frames: [0x80bd9000, 0x80bdd000) frames=4
+[memory] reclaimed linker frames: [0x80bde000, 0x80bfa000) frames=28
+[kernel] Entering kernel test mode (ktest) — tests: ["waitqueue"], repeat: 1
+TAP version 13
+# arch: loongarch64
+# mode: ktest
+# repeat: 1
+# timeout_ms: 5000
+# failfast: false
+1..4
+[32mok[0m 1 waitqueue::wake_before_wait_should_not_sleep
+[32mok[0m 2 waitqueue::basic_queue_ops
+[32mok[0m 3 waitqueue::wake_all_on_empty
+[32mok[0m 4 waitqueue::wake_one
+[32m# results: 4 passed, 0 failed, 4 total[0m
+# ktest: tests passed; committing filesystems before shutdown.
+[32m[KTEST RESULT: PASS][0m
+# ktest: all tests and filesystem teardown passed. shutting down.

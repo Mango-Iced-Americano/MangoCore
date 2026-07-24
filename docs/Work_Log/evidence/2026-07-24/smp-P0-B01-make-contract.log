@@ -1,0 +1,12 @@
+ACCEPT file=make/rv64.mk CORE_NUM=1 status=0
+ACCEPT file=make/rv64.mk CORE_NUM=2 status=0
+ACCEPT file=make/rv64.mk CORE_NUM=4 status=0
+ACCEPT file=make/rv64.mk CORE_NUM=8 status=0
+make/rv64.mk:27: *** CORE_NUM must be one of 1 2 4 8, got '3'.  Stop.
+EXPECTED_REJECT file=make/rv64.mk CORE_NUM=3 status=2
+ACCEPT file=make/la64.mk CORE_NUM=1 status=0
+ACCEPT file=make/la64.mk CORE_NUM=2 status=0
+ACCEPT file=make/la64.mk CORE_NUM=4 status=0
+ACCEPT file=make/la64.mk CORE_NUM=8 status=0
+make/la64.mk:17: *** CORE_NUM must be one of 1 2 4 8, got '3'.  Stop.
+EXPECTED_REJECT file=make/la64.mk CORE_NUM=3 status=2

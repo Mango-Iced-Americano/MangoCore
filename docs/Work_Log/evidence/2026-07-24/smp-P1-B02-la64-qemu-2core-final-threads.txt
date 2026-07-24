@@ -1,0 +1,6 @@
+[qemu-process] pid=53157
+  53157   53157 qemu-system-loo
+  53157   53159 qemu-system-loo
+  53157   53160 qemu-system-loo
+  53157   53161 qemu-system-loo
+  53157   53162 qemu-system-loo

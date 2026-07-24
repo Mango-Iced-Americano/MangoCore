@@ -171,10 +171,7 @@ pub fn pre_start_init() {
     EEntry::empty().set_exception_entry(strampoline as usize);
 }
 #[no_mangle]
-pub fn bootstrap_init() {
-    if CPUId::read().get_core_id() != 0 {
-        loop {}
-    };
+pub fn bootstrap_init(cpu_id: usize) {
     ECfg::empty()
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
@@ -234,26 +231,83 @@ pub fn bootstrap_init() {
         .set_dir4_width(0)
         .write();
 
-    boot_trace!("[kernel] UART address: {:#x}", UART_BASE);
-    let cfg1 = CPUCfg1::read();
-    boot_trace!(
-        "[bootstrap_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
-        cfg1.get_valen(),
-        cfg1.get_palen(),
-        VALEN,
-        PALEN
-    );
-    // 如果镜像按错误的开发板配置构建，应在启用正常内存分配前停止。继续运行会让
-    // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
-    assert_eq!(
-        cfg1.get_valen(),
-        VALEN,
-        "kernel VALEN does not match CPUCFG1"
-    );
-    assert_eq!(
-        cfg1.get_palen(),
-        PALEN,
-        "kernel PALEN does not match CPUCFG1"
-    );
-    boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
+    // The raw UART singleton is not yet cross-CPU serialized.  CPU0 validates
+    // the homogeneous QEMU/board configuration; APs stay silent and only
+    // publish their online bit after this local routine returns.
+    if cpu_id == 0 {
+        boot_trace!("[kernel] UART address: {:#x}", UART_BASE);
+        let cfg1 = CPUCfg1::read();
+        boot_trace!(
+            "[bootstrap_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
+            cfg1.get_valen(),
+            cfg1.get_palen(),
+            VALEN,
+            PALEN
+        );
+        // 如果镜像按错误的开发板配置构建，应在启用正常内存分配前停止。继续运行会让
+        // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
+        assert_eq!(
+            cfg1.get_valen(),
+            VALEN,
+            "kernel VALEN does not match CPUCFG1"
+        );
+        assert_eq!(
+            cfg1.get_palen(),
+            PALEN,
+            "kernel PALEN does not match CPUCFG1"
+        );
+        boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
+    }
+}
+
+/// Wake one LA64 QEMU AP from the slave boot ROM and send it to `_start`.
+#[cfg(feature = "board_laqemu")]
+pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
+    // QEMU 9.2.1's direct-boot ROM waits for IPI vector 0, then reads the
+    // 64-bit entry address from the target CPU's first mailbox buffer.
+    const IOCSR_IPI_SEND: usize = 0x1040;
+    const IOCSR_MAIL_SEND: usize = 0x1048;
+
+    // The QEMU ROM consumes a physical entry that fits in its low mailbox word.
+    if start_addr > u32::MAX as usize {
+        return Err(-3);
+    }
+    // MAIL_SEND encodes the target CPU in bits 16..25 and one 32-bit mailbox
+    // word in bits 32..63. Offset zero selects the low half of CORE_BUF_20.
+    let mail = ((start_addr as u64) << 32) | ((cpu_id as u64) << 16);
+    // IPI_SEND uses the same target field; vector zero occupies bits 0..4.
+    let doorbell = (cpu_id as u32) << 16;
+
+    // Safety: these IOCSR addresses are the architected QEMU virt IPI device.
+    // CPU0 is the sole startup writer, and cpu_id is bounded by MAX_CPUS.
+    unsafe {
+        core::arch::asm!(
+            "iocsrwr.d {mail}, {mail_addr}",
+            mail = in(reg) mail,
+            mail_addr = in(reg) IOCSR_MAIL_SEND,
+        );
+        // Do not let the AP observe the doorbell before its entry mailbox.
+        core::arch::asm!("dbar 0");
+        core::arch::asm!(
+            "iocsrwr.w {doorbell}, {ipi_addr}",
+            doorbell = in(reg) doorbell,
+            ipi_addr = in(reg) IOCSR_IPI_SEND,
+        );
+    }
+    Ok(())
+}
+
+/// The 2K1000LA remains intentionally single-core in this QEMU-only phase.
+#[cfg(feature = "board_2k1000")]
+pub fn start_secondary_cpu(_cpu_id: usize, _start_addr: usize) -> Result<(), isize> {
+    Err(-2)
+}
+
+/// Keep an online Phase 1 AP outside interrupts and shared runtime code.
+pub fn boot_cpu_park() -> ! {
+    loop {
+        // LoongArch idle/IPI wakeup is introduced in Phase 2.  A spin hint is
+        // deliberately used here so this minimal park has no wakeup contract.
+        core::hint::spin_loop();
+    }
 }

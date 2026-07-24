@@ -1,0 +1,46 @@
+[qemu-command] qemu-system-loongarch64 -accel tcg,thread=multi -machine virt -nographic -kernel target/loongarch64-unknown-linux-gnu/release/os -drive if=none,file=/tmp/mango-smp-P1-B02-la-2core.img,format=raw,id=x0 -device virtio-blk-pci,drive=x0 -m 1024 -smp cpus=2,sockets=1,cores=2,threads=1
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+awk: cmd. line:1: NR == 1 { print \ }
+awk: cmd. line:1:                 ^ backslash not last character on line
+[qemu-process] child-not-observed
+qemu-system-loongarch64: terminating on signal 15 from pid 47732 (timeout)

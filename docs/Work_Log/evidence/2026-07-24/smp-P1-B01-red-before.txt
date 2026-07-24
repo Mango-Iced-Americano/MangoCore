@@ -1,0 +1,13 @@
+0000000080a14000 B boot_stack
+0000000080a54000 B boot_stack_top
+
+target/riscv64gc-unknown-none-elf/release/os:	file format elf64-littleriscv
+
+Disassembly of section .text:
+
+0000000080200000 <_start>:
+80200000: 17 41 85 00  	auipc	sp, 0x854
+80200004: 13 01 01 00  	mv	sp, sp
+80200008: 97 80 18 00  	auipc	ra, 0x188
+8020000c: e7 80 40 e7  	jalr	-0x18c(ra) <rust_main>
+		...

@@ -1,0 +1,2 @@
+EXPORT file=make/rv64.mk MANGO_CORE_NUM=2
+EXPORT file=make/la64.mk MANGO_CORE_NUM=2

@@ -1,0 +1,8 @@
+stack_base=0x80c12000
+stack_array_size=0x200000 expected=0x200000
+sbss_minus_stack=0x200000 expected=0x200000
+stack_page_aligned=yes
+cpu0_historical_top=0x80c52000
+instruction_order=cpuid<guard<stack_base<offset<multiply<sp_assign
+layout_arithmetic_check=pass
+instruction_pattern_check=pass

@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-12
+last_update: 2026-07-24
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -47,6 +47,26 @@ trap_handler() -> syscall/MM/task
 | preload_payloads + la64 | `preload_app.S` |
 
 `main.rs` 中 la64 entry 的 `global_asm!` 行处于注释状态；la64 的实际入口由该架构构建链路脚本和后端文件承担。文档只记录 `main.rs` 当前显式引入的段。
+
+RV64 的 `_start` 在使用栈之前校验 OpenSBI 传入的 hart ID，并从
+`.bss.stack` 中按 hart 选择独立的 256 KiB 启动栈；当前固定预留 8 个槽。
+LA64 QEMU 的 `boot.rs` 同样在设置 `$sp` 前读取并校验 `CSR.CPUID`，再从
+8 个 256 KiB 槽中选择当前 CPU 的栈；2K1000LA 汇编入口仍保持单核配置。
+两架构 QEMU 的完整栈数组均位于 `sbss` 之前，不会被 `mem_clear()` 清零。
+
+`rust_main(hardware_id, boot_arg)` 现已拆为 BSP/AP 两条路径。OpenSBI 在
+MTTCG 下不保证 hart 0 赢得 cold-boot lottery，因此实际启动 hart 会登记为
+逻辑 CPU0，其余连续硬件 ID 经可逆排列映射为逻辑 `1..N-1`。RISC-V CPU0
+使用 SBI BASE probe + HSM `hart_start` 唤醒其余 hart；LoongArch QEMU
+CPU0 按 QEMU 9.2 直启协议先写 `IOCSR_MAIL_SEND(0x1048)`，执行 `dbar` 后
+再写 `IOCSR_IPI_SEND(0x1040)`，使 slave boot ROM 跳转到内核 `_start`。
+
+AP 在 Acquire 观察到 CPU0 对 `.data.boot` 启动阶段的 Release 发布后，才
+执行 CPU-local `bootstrap_init()`，以 Release 原子设置在线位，然后永久
+park。CPU0 最多等待 5 秒，成功时一次性输出 configured 数、实际 boot
+hardware ID 和 online mask；超时时报告 missing mask。当前仍是最小启动
+闭环：AP 不启用普通 timer/IPI handler、不进入现有全局调度器，也不访问
+FS、网络或驱动，所有内核和用户任务仍只由逻辑 CPU0 运行。
 
 ### 2.1 2K1000LA U-Boot TFTP 启动
 
@@ -111,7 +131,12 @@ make 2k1000-boot \
 ### 3.1 固定前缀
 
 ```
-bootstrap_init()
+rust_main(hardware_id, boot_arg)
+  -> register_cpu_entry()
+  -> logical CPU0: bsp_main()
+  -> logical CPU1..N-1: secondary_main() -> local bootstrap -> online -> park
+
+bootstrap_init(logical_cpu_id)   [BSP]
 mem_clear()
 move_to_high_address()        [block_mem]
 console::log_init()
@@ -119,11 +144,13 @@ trace::init()
 mm::init()
 machine_init()
 task::timer_subsystem_init()
+smp::bring_up_secondary_cpus()
 ```
 
 | 步骤 | 关键结果 |
 |------|----------|
-| `bootstrap_init()` | 架构早期机器状态准备；la64 配置 exception/TLB/page walk/DMW |
+| `register_cpu_entry()` | 将固件/硬件 ID 映射为连续逻辑 CPU ID，启动核固定为逻辑 CPU0 |
+| `bootstrap_init()` | 架构早期 CPU-local 状态准备；la64 配置 exception/TLB/page walk/DMW |
 | `mem_clear()` | 清零 BSS 或 `sbss..MEMORY_END` |
 | `move_to_high_address()` | `block_mem` 下复制内嵌根文件系统镜像 |
 | `console::log_init()` | 日志输出可用 |
@@ -131,6 +158,7 @@ task::timer_subsystem_init()
 | `mm::init()` | heap、frame allocator、内核页表可用 |
 | `machine_init()` | trap entry 和 timer interrupt 可用 |
 | `task::timer_subsystem_init()` | task 层 timeout/wakeup 设施可用 |
+| `smp::bring_up_secondary_cpus()` | 启动/释放 AP，等待 online mask；AP 上线后只 park |
 
 ### 3.2 initramfs 分支
 

@@ -18,7 +18,9 @@ pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 #[cfg(feature = "loongarch64")]
 pub use arch::LsxRegs;
-pub use arch::{bootstrap_init, machine_init, user_hwcap};
+pub use arch::{
+    boot_cpu_park, bootstrap_init, machine_init, start_secondary_cpu, user_hwcap,
+};
 pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};

@@ -1,0 +1,100 @@
+info: override toolchain for '/app/os' set to 'nightly-2024-05-01-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.la ./src/lang_items.rs
+cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+make -f make/la64.mk ktest-run MODE=release LOG=
+make[1]: Entering directory '/app/os'
+make[2]: Entering directory '/app/user'
+info: override toolchain for '/app/user' set to 'nightly-2024-05-01-x86_64-unknown-linux-gnu'
+(rustup target list | grep "loongarch64-unknown-linux-gnu (installed)") || rustup target add loongarch64-unknown-linux-gnu
+loongarch64-unknown-linux-gnu (installed)
+rustup component add rust-src
+info: component 'rust-src' is up to date
+rustup component add llvm-tools-preview
+info: component 'llvm-tools' for target 'x86_64-unknown-linux-gnu' is up to date
+cargo build --target=loongarch64-unknown-linux-gnu --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+   Compiling user_lib v0.1.0 (/app/user)
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: unreachable statement
+  --> src/lib.rs:60:9
+   |
+58 |             _parameter(argc, argv);
+   |             ---------------------- any code following this expression is unreachable
+59 |         }
+60 |         unreachable!();
+   |         ^^^^^^^^^^^^^^ unreachable statement
+   |
+   = note: `#[warn(unreachable_code)]` on by default
+   = note: this warning originates in the macro `unreachable` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `user_lib` (lib) generated 2 warnings
+warning: crate-level attribute should be in the root module
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[kernel] block device 0: official fs (DeviceFunction { bus: 0, device: 2, function: 0 })
+[block] /dev/vda contains raw Ext4
+[fs] official fs (/dev/vda) root directory readable: 3 entries
+[kernel] official fs (/dev/vda) (Ext4) mounted at sdcard flags=(empty)
+[initramfs] no mountable tools fs, leaving /tools empty
+sinitproc: 8056F000, einitproc: 80857B60, sbash: 80858000, ebash: 809A9878, sbusybox: 809AA000, ebusybox: 80BA25F8, sosconfig: 80BA3000, eosconfig: 80BA3F09
+[memory] reclaimed linker frames: [0x8056f000, 0x80857000) frames=744
+[memory] reclaimed linker frames: [0x80858000, 0x809a9000) frames=337
+[memory] reclaimed linker frames: [0x809aa000, 0x80ba2000) frames=504
+[memory] reclaimed linker frames: [0x80ba4000, 0x80bd6000) frames=50
+[memory] reclaimed linker frames: [0x80bd7000, 0x80bdb000) frames=4
+[memory] reclaimed linker frames: [0x80bdc000, 0x80bf8000) frames=28
+[kernel] Entering kernel test mode (ktest) — tests: ["waitqueue"], repeat: 1
+TAP version 13
+# arch: loongarch64
+# mode: ktest
+# repeat: 1
+# timeout_ms: 5000
+# failfast: false
+1..4
+[32mok[0m 1 waitqueue::wake_before_wait_should_not_sleep
+[32mok[0m 2 waitqueue::basic_queue_ops
+[32mok[0m 3 waitqueue::wake_all_on_empty
+[32mok[0m 4 waitqueue::wake_one
+[32m# results: 4 passed, 0 failed, 4 total[0m
+# ktest: tests passed; committing filesystems before shutdown.
+[32m[KTEST RESULT: PASS][0m
+# ktest: all tests and filesystem teardown passed. shutting down.
+e2fsck 1.47.0 (5-Feb-2023)
+Pass 1: Checking inodes, blocks, and sizes
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+/tmp/mango-lwext4-ktest-la.img: 11/16384 files (0.0% non-contiguous), 1041/16384 blocks
+make[1]: Leaving directory '/app/os'

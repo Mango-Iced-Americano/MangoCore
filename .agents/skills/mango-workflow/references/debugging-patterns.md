@@ -185,6 +185,41 @@
 
 ## QEMU / 测试
 
+### RISC-V MTTCG 下不能把 OpenSBI Boot HART 写死为 hart0
+
+- **现象**: `-smp 2` 时内核正常，扩到 4/8 核后只看到 OpenSBI banner，
+  内核无输出或所有 CPU 都在等待 AP release；日志中的 `Boot HART ID`
+  可能是 1、2、6 等非零值。
+- **根因**: 省略 `-accel` 并不等于单线程。QEMU TCG 在前后端支持且没有
+  icount/replay 等冲突功能时默认启用 multi-thread；OpenSBI cold-boot
+  lottery 的获胜者不属于 OS ABI 保证。宿主调度恰好长期选中同一 hart
+  也不能当作固件契约。
+- **修复**: 将实际启动 hart 登记为逻辑 CPU0，建立硬件 hart ID 与连续
+  逻辑 CPU ID 的可逆映射；调用 SBI HSM 时必须把逻辑目标反向映射回真实
+  hart ID。只有控制并验证了定制 OpenSBI cold-boot policy 时，才能删除
+  映射并固定物理 hart0。
+- **验证**: 同时覆盖显式 `-accel tcg,thread=multi` 和比赛式省略
+  `-accel`、`-bios default -smp 8`；判定必须检查 Boot HART、online
+  mask、测试 PASS 和无 panic，不能只看 QEMU 退出码。
+- **相关文件**: `os/src/smp.rs`, `os/src/hal/arch/riscv/sbi.rs`,
+  `os/make/rv64.mk`
+
+### LoongArch QEMU 直启的 AP 在 slave boot ROM 等 mailbox + IPI
+
+- **现象**: CPU0 可以完整启动，但 `CORE_NUM=2` 时 online mask 始终只有
+  bit0；把 `start_secondary_cpu()` 写成 no-op 会稳定等待超时。
+- **根因**: QEMU 9.2 direct-kernel boot 只让第一个 CPU 进入 kernel
+  entry；其余 CPU 从 pflash 的 `slave_boot_code` 启动，打开 IPI 后
+  `idle`，直到 mailbox 含入口且收到 IPI vector 0。
+- **修复**: CPU0 先向 `IOCSR_MAIL_SEND(0x1048)` 写目标 CPU 和入口低
+  32 位，执行 `dbar` 保证 mailbox 先于 doorbell，再向
+  `IOCSR_IPI_SEND(0x1040)` 发送 vector 0。AP 跳到 `_start` 后仍需独立的
+  Release/Acquire 启动阶段门，不能把“硬件已唤醒”等同于“共享内存可用”。
+- **官方依据**: QEMU v9.2.1 `hw/loongarch/boot.c`、
+  `hw/intc/loongson_ipi_common.c` 和
+  `include/hw/intc/loongson_ipi_common.h`。
+- **相关文件**: `os/src/hal/arch/loongarch64/mod.rs`, `os/src/smp.rs`
+
 ### `make docker` 拉镜像超时但 Docker CE 源已换国内镜像
 
 - **现象**: `apt update`/`apt install docker-compose-plugin` 已走清华等 Docker CE 软件源，但 `make docker` 仍在拉 `os-dev` 镜像时 timeout。

@@ -1,0 +1,9 @@
+source_epoch=1784873714
+rv_build_log_epoch=1784873978 after_source=yes
+la_build_log_epoch=1784874156 after_source=yes
+layout_check_log_epoch=1784874207 after_source=yes
+la_1core_qemu_log_epoch=1784874389 after_source=yes
+la_2core_kernel_build_log_epoch=1784874555 after_source=yes
+la_2core_qemu_log_epoch=1784874632 after_source=yes
+4c614f45329dbd3cd71e3d917e7d48faba84a02d7bae67a3e379ed3d68d35053  os/src/hal/arch/loongarch64/boot.rs
+freshness_check=pass

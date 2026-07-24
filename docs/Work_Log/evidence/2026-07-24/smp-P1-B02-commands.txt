@@ -1,0 +1,50 @@
+# Pre-change RED witness
+loongarch64-unknown-linux-gnu-nm -S \
+  target/loongarch64-unknown-linux-gnu/release/os
+rust-objdump -d --disassemble-symbols=_start \
+  target/loongarch64-unknown-linux-gnu/release/os
+
+# Required serial final build gate
+make rv64-kernel-build-only CORE_NUM=1
+make la64-kernel-build-only CORE_NUM=1
+
+# Two-core LA64 focused kernel build
+make -f make/la64.mk kernel CORE_NUM=2 BOARD=laqemu MODE=release \
+  KERNEL_CMDLINE="mango.mode=ktest mango.test=waitqueue \
+  mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0"
+
+# Post-change ELF inspection and fail-closed assertions
+loongarch64-unknown-linux-gnu-nm -n -S \
+  target/loongarch64-unknown-linux-gnu/release/os
+rust-objdump -d --disassemble-symbols=_start \
+  target/loongarch64-unknown-linux-gnu/release/os
+# Assertions cover array size, sbss boundary, all eight slot intervals, and
+# CPUID -> guard -> base -> offset -> multiply -> sp assignment order.
+
+# Focused final single-core regression
+make la64-ktest KTEST=waitqueue KREPEAT=1 CORE_NUM=1 \
+  KTEST_QEMU_TIMEOUT=45
+
+# Focused final two-core topology regression
+qemu-system-loongarch64 \
+  -accel tcg,thread=multi \
+  -machine virt \
+  -nographic \
+  -kernel target/loongarch64-unknown-linux-gnu/release/os \
+  -drive if=none,file=/tmp/mango-smp-P1-B02-la-2core-final.img,format=raw,id=x0 \
+  -device virtio-blk-pci,drive=x0 \
+  -m 1024 \
+  -smp cpus=2,sockets=1,cores=2,threads=1
+
+# QEMU process witness and filesystem integrity
+ps -T -p <qemu-pid> -o pid=,spid=,comm=
+e2fsck -fn /tmp/mango-smp-P1-B02-la-2core-final.img
+
+# Static and worktree checks
+git diff --check
+git diff --numstat -- os/src/hal/arch/loongarch64/boot.rs
+git diff --unified=0 -- os/src/hal/arch/loongarch64/boot.rs
+
+# Not run by design
+# CORE_NUM=4/8 and AP-online tests
+# Reason: this batch establishes only the pre-Rust stack-isolation invariant.

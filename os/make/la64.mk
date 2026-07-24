@@ -8,7 +8,15 @@ BLK_MODE := virt_pci
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-la.img
 ROOTFS_IMG_DIR := ../fs-img-dir
-CORE_NUM := 1
+# One value drives both Cargo and every parameterized QEMU entry point.
+# Keep non-QEMU boards at the default of one until a board-specific caller
+# deliberately opts into a supported QEMU topology.
+CORE_NUM ?= 1
+VALID_CORE_NUMS := 1 2 4 8
+ifeq ($(filter $(CORE_NUM),$(VALID_CORE_NUMS)),)
+$(error CORE_NUM must be one of $(VALID_CORE_NUMS), got '$(CORE_NUM)')
+endif
+export MANGO_CORE_NUM := $(CORE_NUM)
 LOG ?= off
 VIRTIO_RNG_DEVICE := -device virtio-rng-pci
 KERNEL_LA := ../kernel-la
@@ -200,6 +208,7 @@ clean:
 run: build
 ifeq ($(BOARD), laqemu)
 	@qemu-system-loongarch64 \
+		-accel tcg,thread=multi \
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
@@ -209,11 +218,12 @@ ifeq ($(BOARD), laqemu)
 		-device virtio-blk-pci,drive=x1 \
 		$(VIRTIO_RNG_DEVICE) \
 		-m 1024 \
-		-smp threads=$(CORE_NUM)
+		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
 endif
 
 runsimple:
 	@qemu-system-loongarch64 \
+		-accel tcg,thread=multi \
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
@@ -223,7 +233,7 @@ runsimple:
 		-device virtio-blk-pci,drive=x1 \
 		$(VIRTIO_RNG_DEVICE) \
 		-m 1024 \
-		-smp threads=$(CORE_NUM)
+		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
 
 comp:
 	@qemu-system-loongarch64 \
@@ -363,13 +373,14 @@ else
 endif
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 \
+		-accel tcg,thread=multi \
 		-machine virt \
 		-nographic \
 		-kernel $(KERNEL_ELF) \
 		-drive if=none,file=$(KTEST_EXT4_IMG_LA),format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
 		-m 1024 \
-		-smp threads=1
+		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
 ifeq ($(KTEST_POST_FSCK),1)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_LA)
 endif

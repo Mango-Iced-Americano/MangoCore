@@ -14,7 +14,8 @@ pub use loongarch64::{
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
     console_flush, console_getchar, console_putchar, console_write_bytes, kstack_alloc,
-    local_irq_restore, local_irq_save, machine_init, shutdown, syscall_id,
+    boot_cpu_park, local_irq_restore, local_irq_save, machine_init, shutdown,
+    start_secondary_cpu, syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     tlb_invalidate,
     trap::{
@@ -28,13 +29,13 @@ pub use loongarch64::{
 pub mod riscv;
 #[cfg(feature = "riscv")]
 pub use riscv::{
-    bootstrap_init, config,
+    boot_cpu_park, bootstrap_init, config,
     config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END},
     kern_stack::kstack_alloc,
     kern_stack::trap_cx_bottom_from_tid,
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
-    machine_init,
+    machine_init, start_secondary_cpu,
     rv_board::MMIO,
     sbi::{
         console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,

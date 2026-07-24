@@ -1,0 +1,8 @@
+ELF=target/riscv64gc-unknown-none-elf/release/os sdata=0x80429000 edata=0x80a14000
+BOOT_HARDWARE_ID=0x80a13098 inside_data=yes
+BOOT_PHASE=0x80a130a0 inside_data=yes
+ONLINE_MASK=0x80a130a8 inside_data=yes
+ELF=target/loongarch64-unknown-linux-gnu/release/os sdata=0x8031a000 edata=0x80c13000
+BOOT_HARDWARE_ID=0x80c08bd8 inside_data=yes
+BOOT_PHASE=0x80c08be0 inside_data=yes
+ONLINE_MASK=0x80c08be8 inside_data=yes

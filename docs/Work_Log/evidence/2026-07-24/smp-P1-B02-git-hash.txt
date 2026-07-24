@@ -1,0 +1,4 @@
+branch=smp
+head=d764f8853487848c8ab5559880447cd7425d3c80
+baseline_state=dirty
+note=Pre-existing user changes and earlier approved SMP batches were preserved.

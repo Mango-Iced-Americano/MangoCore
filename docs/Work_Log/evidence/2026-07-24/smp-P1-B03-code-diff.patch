@@ -1,0 +1,678 @@
+diff --git tmp/mango-b03-baseline.JNzVFq/os/make/rv64.mk os/make/rv64.mk
+index 7f0365a6..412a6d91 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/make/rv64.mk
++++ os/make/rv64.mk
+@@ -18,7 +18,7 @@ endif
+ FS_MODE ?= ext4
+ ROOTFS_IMG_NAME = rootfs-rv.img
+ ROOTFS_IMG_DIR := ../fs-img-dir
+-# One value drives both Cargo and, in the next batch, every QEMU entry point.
++# One value drives both Cargo and every parameterized QEMU entry point.
+ # Reject unsupported counts while parsing the Makefile, before Cargo can emit
+ # an image whose compiled topology disagrees with the requested machine.
+ CORE_NUM ?= 1
+@@ -209,6 +209,7 @@ clean:
+ run: build
+ ifeq ($(BOARD), rvqemu)
+ 	@qemu-system-riscv64 \
++		-accel tcg,thread=multi \
+   		-machine virt \
+   		-nographic \
+ 		-bios $(BOOTLOADER) \
+@@ -219,7 +220,7 @@ ifeq ($(BOARD), rvqemu)
+         $(BLK_DEV_x1) \
+ 		$(VIRTIO_RNG_DEVICE) \
+   		-m 1024 \
+-  		-smp threads=$(CORE_NUM)
++		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+ endif
+ 
+ monitor:
+@@ -227,6 +228,7 @@ monitor:
+ 
+ gdb:
+ 	@qemu-system-riscv64 \
++	-accel tcg,thread=multi \
+ 	-machine virt \
+ 	-nographic \
+ 	-bios $(BOOTLOADER) \
+@@ -237,10 +239,11 @@ gdb:
+ 	$(BLK_DEV_x1) \
+ 	$(VIRTIO_RNG_DEVICE) \
+ 	-m 1024 \
+-	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
++	-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1 -S -s | tee qemu.log
+ 
+ runsimple:
+ 	@qemu-system-riscv64 \
++		-accel tcg,thread=multi \
+ 		-machine virt \
+ 		-nographic \
+ 		-bios $(BOOTLOADER) \
+@@ -251,7 +254,7 @@ runsimple:
+ 		-drive file=../disk.img,if=none,format=raw,id=x1 \
+         $(BLK_DEV_x1) \
+ 		$(VIRTIO_RNG_DEVICE) \
+-		-smp threads=$(CORE_NUM)
++		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+ 
+ comp:
+ 	@qemu-system-riscv64 \
+@@ -327,6 +330,7 @@ endif
+ 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+ 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
+ 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 \
++		-accel tcg,thread=multi \
+ 		-machine virt \
+ 		-nographic \
+ 		-bios $(BOOTLOADER) \
+@@ -334,7 +338,7 @@ endif
+ 		-drive if=none,file=$(KTEST_EXT4_IMG_RV),format=raw,id=x0 \
+ 		$(BLK_DEV_x0) \
+ 		-m 1024 \
+-		-smp threads=1
++		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+ ifeq ($(KTEST_POST_FSCK),1)
+ 	@e2fsck -f -n $(KTEST_EXT4_IMG_RV)
+ endif
+diff --git tmp/mango-b03-baseline.JNzVFq/os/make/la64.mk os/make/la64.mk
+index e40fbb77..28ca2a36 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/make/la64.mk
++++ os/make/la64.mk
+@@ -8,7 +8,7 @@ BLK_MODE := virt_pci
+ FS_MODE ?= ext4
+ ROOTFS_IMG_NAME = rootfs-la.img
+ ROOTFS_IMG_DIR := ../fs-img-dir
+-# One value drives both Cargo and, in the next batch, every QEMU entry point.
++# One value drives both Cargo and every parameterized QEMU entry point.
+ # Keep non-QEMU boards at the default of one until a board-specific caller
+ # deliberately opts into a supported QEMU topology.
+ CORE_NUM ?= 1
+@@ -208,6 +208,7 @@ clean:
+ run: build
+ ifeq ($(BOARD), laqemu)
+ 	@qemu-system-loongarch64 \
++		-accel tcg,thread=multi \
+ 		-machine virt \
+ 		-nographic \
+ 		-kernel $(KERNEL_ELF) \
+@@ -217,11 +218,12 @@ ifeq ($(BOARD), laqemu)
+ 		-device virtio-blk-pci,drive=x1 \
+ 		$(VIRTIO_RNG_DEVICE) \
+ 		-m 1024 \
+-		-smp threads=$(CORE_NUM)
++		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+ endif
+ 
+ runsimple:
+ 	@qemu-system-loongarch64 \
++		-accel tcg,thread=multi \
+ 		-machine virt \
+ 		-nographic \
+ 		-kernel $(KERNEL_ELF) \
+@@ -231,7 +233,7 @@ runsimple:
+ 		-device virtio-blk-pci,drive=x1 \
+ 		$(VIRTIO_RNG_DEVICE) \
+ 		-m 1024 \
+-		-smp threads=$(CORE_NUM)
++		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+ 
+ comp:
+ 	@qemu-system-loongarch64 \
+@@ -371,13 +373,14 @@ else
+ endif
+ 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
+ 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 \
++		-accel tcg,thread=multi \
+ 		-machine virt \
+ 		-nographic \
+ 		-kernel $(KERNEL_ELF) \
+ 		-drive if=none,file=$(KTEST_EXT4_IMG_LA),format=raw,id=x0 \
+ 		-device virtio-blk-pci,drive=x0 \
+ 		-m 1024 \
+-		-smp threads=1
++		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+ ifeq ($(KTEST_POST_FSCK),1)
+ 	@e2fsck -f -n $(KTEST_EXT4_IMG_LA)
+ endif
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/main.rs os/src/main.rs
+index d8516a10..f0b9443c 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/main.rs
++++ os/src/main.rs
+@@ -95,6 +95,7 @@ mod mm;
+ mod net;
+ mod panic_diag;
+ mod random;
++mod smp;
+ mod syscall;
+ mod task;
+ mod timer;
+@@ -246,10 +247,26 @@ fn move_to_high_address() {
+     }
+ }
+ 
++/// Common firmware entry for both architectures.
++///
++/// RV64 receives `(hart_id, dtb_or_hsm_opaque)` in `a0/a1`; LA64 QEMU and
++/// 2K1000LA normalize the same pair in their assembly/Rust entry stubs.
+ #[no_mangle]
+-pub fn rust_main() -> ! {
++pub extern "C" fn rust_main(cpu_id: usize, boot_arg: usize) -> ! {
++    let logical_cpu_id = smp::register_cpu_entry(cpu_id);
++    if logical_cpu_id == smp::BOOT_CPU_ID {
++        bsp_main(logical_cpu_id, boot_arg)
++    } else {
++        smp::secondary_main(logical_cpu_id)
++    }
++}
++
++/// Preserve the historical MangoCore initialization path as the BSP-only path.
++fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
+     task::perf::record_boot_stage(task::perf::BOOT_STAGE_ENTRY);
+-    bootstrap_init();
++    // Only CPU0 reaches this function, so BSS, heap, drivers, filesystems, and
++    // the legacy global scheduler remain single-owner during Phase 1.
++    bootstrap_init(cpu_id);
+     mem_clear();
+     // 这一行可能有误，需要后续处理
+     #[cfg(all(feature = "block_mem"))]
+@@ -267,6 +284,9 @@ pub fn rust_main() -> ! {
+ 
+     machine_init();
+     crate::task::timer_subsystem_init();
++    // Release APs only after memory and CPU0's machine state are usable.  APs
++    // report online and park; CPU0 alone continues into shared subsystems.
++    smp::bring_up_secondary_cpus();
+ 
+     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
+     let boot_config = crate::bootargs::load();
+diff --git os/src/smp.rs os/src/smp.rs
+new file mode 100644
+index 00000000..1787b38c
+--- /dev/null
++++ os/src/smp.rs
+@@ -0,0 +1,174 @@
++//! Minimal BSP/AP boot handshake.
++//!
++//! Phase 1 deliberately stops secondary CPUs before scheduling, interrupts, or
++//! shared subsystems.  The two atomics below are the only state APs may touch.
++
++use core::{
++    hint::spin_loop,
++    sync::atomic::{AtomicUsize, Ordering},
++};
++
++pub const BOOT_CPU_ID: usize = 0;
++pub const MAX_CPUS: usize = 8;
++
++// build.rs rejects every value except the one-byte strings 1/2/4/8.
++pub const CONFIGURED_CPU_COUNT: usize =
++    (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
++
++const AP_RELEASED: usize = 1;
++const ONLINE_TIMEOUT_SECONDS: usize = 5;
++const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
++
++// These values must survive CPU0's BSS clear while LA64 APs are already
++// polling them on their private boot stacks.
++#[link_section = ".data.boot"]
++static BOOT_HARDWARE_ID: AtomicUsize = AtomicUsize::new(UNCLAIMED_BOOT_HARDWARE_ID);
++#[link_section = ".data.boot"]
++static BOOT_PHASE: AtomicUsize = AtomicUsize::new(0);
++#[link_section = ".data.boot"]
++static ONLINE_MASK: AtomicUsize = AtomicUsize::new(0);
++
++const fn expected_online_mask() -> usize {
++    (1usize << CONFIGURED_CPU_COUNT) - 1
++}
++
++/// Convert the firmware/hardware ID at `_start` into MangoCore's logical ID.
++///
++/// OpenSBI may choose any configured hart for cold boot under MTTCG.  The
++/// winner remains the physical BSP but is always exposed as logical CPU0.
++pub fn register_cpu_entry(hardware_id: usize) -> usize {
++    if hardware_id >= CONFIGURED_CPU_COUNT {
++        crate::hal::boot_cpu_park();
++    }
++
++    // Only the cold-boot CPU can reach the kernel before CPU0 invokes the AP
++    // start protocol, so it safely claims the sentinel.  Later APs read the
++    // already-published hardware ID through the compare_exchange failure.
++    let boot_hardware_id = match BOOT_HARDWARE_ID.compare_exchange(
++        UNCLAIMED_BOOT_HARDWARE_ID,
++        hardware_id,
++        Ordering::AcqRel,
++        Ordering::Acquire,
++    ) {
++        Ok(_) => hardware_id,
++        Err(existing) => existing,
++    };
++    hardware_to_logical_id(hardware_id, boot_hardware_id)
++}
++
++const fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> usize {
++    if hardware_id == boot_hardware_id {
++        BOOT_CPU_ID
++    } else if hardware_id < boot_hardware_id {
++        hardware_id + 1
++    } else {
++        hardware_id
++    }
++}
++
++const fn logical_to_hardware_id(logical_id: usize, boot_hardware_id: usize) -> usize {
++    if logical_id == BOOT_CPU_ID {
++        boot_hardware_id
++    } else if logical_id <= boot_hardware_id {
++        logical_id - 1
++    } else {
++        logical_id
++    }
++}
++
++/// Entry for every non-boot CPU.
++///
++/// Before the Acquire succeeds, an AP may use only its boot stack and
++/// `.data.boot`; the heap, page tables, console, and ordinary globals still
++/// belong exclusively to CPU0.
++pub fn secondary_main(cpu_id: usize) -> ! {
++    // A QEMU/kernel topology mismatch must not let an unconfigured CPU touch
++    // shared state.  It owns a reserved stack, so it can safely park here.
++    if cpu_id >= CONFIGURED_CPU_COUNT {
++        crate::hal::boot_cpu_park();
++    }
++
++    // CPU0's Release publishes BSS clearing and the minimal MM/console setup.
++    // Acquire is required: a Relaxed load could observe the phase without the
++    // initialized memory that the phase promises.
++    while BOOT_PHASE.load(Ordering::Acquire) != AP_RELEASED {
++        spin_loop();
++    }
++
++    // This routine is CPU-local.  It must not allocate, print, enable the
++    // normal timer interrupt, or enter the legacy scheduler.
++    crate::hal::bootstrap_init(cpu_id);
++
++    let cpu_bit = 1usize << cpu_id;
++    // Release makes completion of local initialization precede publication of
++    // the online bit.  Concurrent APs merge bits through one atomic RMW.
++    ONLINE_MASK.fetch_or(cpu_bit, Ordering::Release);
++
++    // Phase 1 APs remain outside every shared runtime path after becoming
++    // online.  A later IPI batch will replace this permanent park loop.
++    crate::hal::boot_cpu_park();
++}
++
++/// Start/release APs and wait until the configured topology is online.
++///
++/// Called by CPU0 only, after the existing global MM and machine initialization
++/// has completed but before filesystems, networking, or tasks are exposed.
++pub fn bring_up_secondary_cpus() {
++    let expected = expected_online_mask();
++    let boot_hardware_id = BOOT_HARDWARE_ID.load(Ordering::Acquire);
++    assert_ne!(
++        boot_hardware_id, UNCLAIMED_BOOT_HARDWARE_ID,
++        "BSP hardware ID was not registered"
++    );
++
++    // CPU0 is already locally initialized.  This Relaxed store is sequenced
++    // before BOOT_PHASE's Release, which performs the actual publication.
++    ONLINE_MASK.store(1usize << BOOT_CPU_ID, Ordering::Relaxed);
++
++    extern "C" {
++        fn _start();
++    }
++    let secondary_entry = _start as usize;
++
++    for cpu_id in 1..CONFIGURED_CPU_COUNT {
++        let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
++        // RV64 uses OpenSBI HSM. LA64 uses QEMU's mailbox-plus-IPI slave ROM.
++        if let Err(error) = crate::hal::start_secondary_cpu(hardware_id, secondary_entry) {
++            panic!(
++                "failed to start logical CPU {} (hardware {}) through firmware: error {}",
++                cpu_id, hardware_id, error
++            );
++        }
++    }
++
++    // Every AP that observes this Release may now access the initialized
++    // memory promised above and execute only its CPU-local bootstrap routine.
++    BOOT_PHASE.store(AP_RELEASED, Ordering::Release);
++
++    let timeout_ticks =
++        crate::hal::get_clock_freq().saturating_mul(ONLINE_TIMEOUT_SECONDS);
++    let deadline = crate::hal::get_time().saturating_add(timeout_ticks);
++
++    loop {
++        // Acquire pairs with each AP's Release fetch_or.  Seeing a bit therefore
++        // means that CPU finished its local initialization before publication.
++        let online = ONLINE_MASK.load(Ordering::Acquire);
++        if online & expected == expected {
++            crate::println!(
++                "[smp] minimal boot ready: configured={} boot_hw_id={} online_mask={:#x}",
++                CONFIGURED_CPU_COUNT,
++                boot_hardware_id,
++                online
++            );
++            return;
++        }
++        if crate::hal::get_time() >= deadline {
++            let missing = expected & !online;
++            panic!(
++                "secondary CPU online timeout: expected={:#x} online={:#x} missing={:#x}",
++                expected, online, missing
++            );
++        }
++        spin_loop();
++    }
++}
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/mod.rs os/src/hal/mod.rs
+index 2851fb3b..dafd2178 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/mod.rs
++++ os/src/hal/mod.rs
+@@ -18,7 +18,9 @@ pub use arch::shutdown;
+ pub use arch::tlb_invalidate;
+ #[cfg(feature = "loongarch64")]
+ pub use arch::LsxRegs;
+-pub use arch::{bootstrap_init, machine_init, user_hwcap};
++pub use arch::{
++    boot_cpu_park, bootstrap_init, machine_init, start_secondary_cpu, user_hwcap,
++};
+ pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
+ pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
+ pub use arch::{get_clock_freq, get_time};
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/mod.rs os/src/hal/arch/mod.rs
+index e5f7983a..22512d31 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/mod.rs
++++ os/src/hal/arch/mod.rs
+@@ -14,7 +14,8 @@ pub use loongarch64::{
+     config::KERNEL_HEAP_SIZE,
+     config::MEMORY_END,
+     console_flush, console_getchar, console_putchar, console_write_bytes, kstack_alloc,
+-    local_irq_restore, local_irq_save, machine_init, shutdown, syscall_id,
++    boot_cpu_park, local_irq_restore, local_irq_save, machine_init, shutdown,
++    start_secondary_cpu, syscall_id,
+     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
+     tlb_invalidate,
+     trap::{
+@@ -28,13 +29,13 @@ pub use loongarch64::{
+ pub mod riscv;
+ #[cfg(feature = "riscv")]
+ pub use riscv::{
+-    bootstrap_init, config,
++    boot_cpu_park, bootstrap_init, config,
+     config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END},
+     kern_stack::kstack_alloc,
+     kern_stack::trap_cx_bottom_from_tid,
+     kern_stack::ustack_bottom_from_tid,
+     kern_stack::KernelStack,
+-    machine_init,
++    machine_init, start_secondary_cpu,
+     rv_board::MMIO,
+     sbi::{
+         console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/riscv/mod.rs os/src/hal/arch/riscv/mod.rs
+index ca127e16..52e0145b 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/riscv/mod.rs
++++ os/src/hal/arch/riscv/mod.rs
+@@ -34,7 +34,23 @@ pub type TrapImpl = riscv::register::scause::Trap;
+ pub type InterruptImpl = riscv::register::scause::Interrupt;
+ pub type ExceptionImpl = riscv::register::scause::Exception;
+ 
+-pub fn bootstrap_init() {}
++pub fn bootstrap_init(_cpu_id: usize) {}
++
++/// Ask OpenSBI HSM to enter the common assembly entry on one stopped hart.
++pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
++    // HSM passes its opaque argument in a1.  Phase 1 does not consume an
++    // architecture boot argument on APs, so publish an explicit zero.
++    sbi::hart_start(cpu_id, start_addr, 0)
++}
++
++/// Keep an online Phase 1 AP outside the legacy scheduler.
++pub fn boot_cpu_park() -> ! {
++    loop {
++        // Safety: WFI is only a local processor hint.  AP interrupts remain
++        // disabled, and a later IPI phase will replace this permanent park.
++        unsafe { riscv::asm::wfi() };
++    }
++}
+ 
+ /// Return the Linux-compatible RISC-V ISA-letter bitmap for `AT_HWCAP`.
+ pub fn user_hwcap() -> usize {
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/riscv/sbi.rs os/src/hal/arch/riscv/sbi.rs
+index db716a5d..ae4a6b25 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/riscv/sbi.rs
++++ os/src/hal/arch/riscv/sbi.rs
+@@ -17,6 +17,19 @@ const SBI_REMOTE_SFENCE_VMA: usize = 6;
+ const SBI_REMOTE_SFENCE_VMA_ASID: usize = 7;
+ const SBI_SHUTDOWN: usize = 8;
+ 
++const SBI_EXT_BASE: usize = 0x10;
++const SBI_BASE_PROBE_EXTENSION: usize = 3;
++const SBI_EXT_HSM: usize = 0x48534d;
++const SBI_HSM_HART_START: usize = 0;
++const SBI_ERR_NOT_SUPPORTED: isize = -2;
++const SBI_ERR_ALREADY_AVAILABLE: isize = -6;
++
++#[derive(Clone, Copy, Debug)]
++struct SbiRet {
++    error: isize,
++    value: usize,
++}
++
+ #[inline(always)]
+ /// `ecall` wrapper to switch trap into S level.
+ fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
+@@ -35,6 +48,62 @@ fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
+     ret
+ }
+ 
++/// Invoke an SBI v0.2+ extension using the `(error, value)` return convention.
++#[inline(always)]
++fn sbi_call_v02(
++    extension: usize,
++    function: usize,
++    arg0: usize,
++    arg1: usize,
++    arg2: usize,
++) -> SbiRet {
++    let error: isize;
++    let value: usize;
++    // Safety: the SBI v0.2 ABI assigns a0-a2 to arguments, a6/a7 to
++    // function/extension IDs, and returns error/value in a0/a1.  No Rust
++    // reference crosses the privilege boundary.
++    unsafe {
++        asm!(
++            "ecall",
++            inlateout("x10") arg0 => error,
++            inlateout("x11") arg1 => value,
++            in("x12") arg2,
++            in("x16") function,
++            in("x17") extension,
++        );
++    }
++    SbiRet { error, value }
++}
++
++/// Start one stopped hart at the physical `_start` address.
++pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<(), isize> {
++    let probe = sbi_call_v02(
++        SBI_EXT_BASE,
++        SBI_BASE_PROBE_EXTENSION,
++        SBI_EXT_HSM,
++        0,
++        0,
++    );
++    if probe.error != 0 {
++        return Err(probe.error);
++    }
++    if probe.value == 0 {
++        return Err(SBI_ERR_NOT_SUPPORTED);
++    }
++
++    let result = sbi_call_v02(
++        SBI_EXT_HSM,
++        SBI_HSM_HART_START,
++        hart_id,
++        start_addr,
++        opaque,
++    );
++    match result.error {
++        0 | SBI_ERR_ALREADY_AVAILABLE => Ok(()),
++        error => Err(error),
++    }
++}
++
+ pub fn set_timer(timer: usize) {
+     let profile_start = crate::task::processor::sched_profile_cycle_start();
+     sbi_call(SBI_SET_TIMER, timer, 0, 0);
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/loongarch64/boot.rs os/src/hal/arch/loongarch64/boot.rs
+index 5c1ac69c..0c3bfdeb 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/loongarch64/boot.rs
++++ os/src/hal/arch/loongarch64/boot.rs
+@@ -43,6 +43,8 @@ unsafe extern "C" fn _start() -> ! {
+             # Stacks grow down, so $sp begins at the slot's exclusive upper bound.
+             add.d       $sp, $sp, $t0
+ 
++            # LA64 QEMU has no DTB/opaque boot argument in this phase.
++            addi.d      $a1, $zero, 0
+             # 将全局符号entry即程序入口地址rust_main地址放到临时寄存器t0中
+             la.global   $t0, {entry}
+             jirl        $zero,$t0,0x0
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/loongarch64/entry.asm os/src/hal/arch/loongarch64/entry.asm
+index 08f7944e..08bc4bc9 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/loongarch64/entry.asm
++++ os/src/hal/arch/loongarch64/entry.asm
+@@ -23,6 +23,9 @@ _start:
+     csrwr       $t0,    0x181
+     sub.d       $t0,    $t0,    $t0
+     la.global $sp, boot_stack_top
++    # 2K1000LA remains single-core; normalize the common Rust entry ABI.
++    sub.d       $a0,    $a0,    $a0
++    sub.d       $a1,    $a1,    $a1
+     bl          rust_main
+ 
+     .section .bss.stack
+diff --git tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/loongarch64/mod.rs os/src/hal/arch/loongarch64/mod.rs
+index 08d152dd..2a741ea3 100755
+--- tmp/mango-b03-baseline.JNzVFq/os/src/hal/arch/loongarch64/mod.rs
++++ os/src/hal/arch/loongarch64/mod.rs
+@@ -171,10 +171,7 @@ pub fn pre_start_init() {
+     EEntry::empty().set_exception_entry(strampoline as usize);
+ }
+ #[no_mangle]
+-pub fn bootstrap_init() {
+-    if CPUId::read().get_core_id() != 0 {
+-        loop {}
+-    };
++pub fn bootstrap_init(cpu_id: usize) {
+     ECfg::empty()
+         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
+         .write();
+@@ -234,26 +231,83 @@ pub fn bootstrap_init() {
+         .set_dir4_width(0)
+         .write();
+ 
+-    boot_trace!("[kernel] UART address: {:#x}", UART_BASE);
+-    let cfg1 = CPUCfg1::read();
+-    boot_trace!(
+-        "[bootstrap_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
+-        cfg1.get_valen(),
+-        cfg1.get_palen(),
+-        VALEN,
+-        PALEN
+-    );
+-    // 如果镜像按错误的开发板配置构建，应在启用正常内存分配前停止。继续运行会让
+-    // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
+-    assert_eq!(
+-        cfg1.get_valen(),
+-        VALEN,
+-        "kernel VALEN does not match CPUCFG1"
+-    );
+-    assert_eq!(
+-        cfg1.get_palen(),
+-        PALEN,
+-        "kernel PALEN does not match CPUCFG1"
+-    );
+-    boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
++    // The raw UART singleton is not yet cross-CPU serialized.  CPU0 validates
++    // the homogeneous QEMU/board configuration; APs stay silent and only
++    // publish their online bit after this local routine returns.
++    if cpu_id == 0 {
++        boot_trace!("[kernel] UART address: {:#x}", UART_BASE);
++        let cfg1 = CPUCfg1::read();
++        boot_trace!(
++            "[bootstrap_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
++            cfg1.get_valen(),
++            cfg1.get_palen(),
++            VALEN,
++            PALEN
++        );
++        // 如果镜像按错误的开发板配置构建，应在启用正常内存分配前停止。继续运行会让
++        // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
++        assert_eq!(
++            cfg1.get_valen(),
++            VALEN,
++            "kernel VALEN does not match CPUCFG1"
++        );
++        assert_eq!(
++            cfg1.get_palen(),
++            PALEN,
++            "kernel PALEN does not match CPUCFG1"
++        );
++        boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
++    }
++}
++
++/// Wake one LA64 QEMU AP from the slave boot ROM and send it to `_start`.
++#[cfg(feature = "board_laqemu")]
++pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
++    // QEMU 9.2.1's direct-boot ROM waits for IPI vector 0, then reads the
++    // 64-bit entry address from the target CPU's first mailbox buffer.
++    const IOCSR_IPI_SEND: usize = 0x1040;
++    const IOCSR_MAIL_SEND: usize = 0x1048;
++
++    // The QEMU ROM consumes a physical entry that fits in its low mailbox word.
++    if start_addr > u32::MAX as usize {
++        return Err(-3);
++    }
++    // MAIL_SEND encodes the target CPU in bits 16..25 and one 32-bit mailbox
++    // word in bits 32..63. Offset zero selects the low half of CORE_BUF_20.
++    let mail = ((start_addr as u64) << 32) | ((cpu_id as u64) << 16);
++    // IPI_SEND uses the same target field; vector zero occupies bits 0..4.
++    let doorbell = (cpu_id as u32) << 16;
++
++    // Safety: these IOCSR addresses are the architected QEMU virt IPI device.
++    // CPU0 is the sole startup writer, and cpu_id is bounded by MAX_CPUS.
++    unsafe {
++        core::arch::asm!(
++            "iocsrwr.d {mail}, {mail_addr}",
++            mail = in(reg) mail,
++            mail_addr = in(reg) IOCSR_MAIL_SEND,
++        );
++        // Do not let the AP observe the doorbell before its entry mailbox.
++        core::arch::asm!("dbar 0");
++        core::arch::asm!(
++            "iocsrwr.w {doorbell}, {ipi_addr}",
++            doorbell = in(reg) doorbell,
++            ipi_addr = in(reg) IOCSR_IPI_SEND,
++        );
++    }
++    Ok(())
++}
++
++/// The 2K1000LA remains intentionally single-core in this QEMU-only phase.
++#[cfg(feature = "board_2k1000")]
++pub fn start_secondary_cpu(_cpu_id: usize, _start_addr: usize) -> Result<(), isize> {
++    Err(-2)
++}
++
++/// Keep an online Phase 1 AP outside interrupts and shared runtime code.
++pub fn boot_cpu_park() -> ! {
++    loop {
++        // LoongArch idle/IPI wakeup is introduced in Phase 2.  A spin hint is
++        // deliberately used here so this minimal park has no wakeup contract.
++        core::hint::spin_loop();
++    }
+ }

@@ -17,6 +17,19 @@ const SBI_REMOTE_SFENCE_VMA: usize = 6;
 const SBI_REMOTE_SFENCE_VMA_ASID: usize = 7;
 const SBI_SHUTDOWN: usize = 8;
 
+const SBI_EXT_BASE: usize = 0x10;
+const SBI_BASE_PROBE_EXTENSION: usize = 3;
+const SBI_EXT_HSM: usize = 0x48534d;
+const SBI_HSM_HART_START: usize = 0;
+const SBI_ERR_NOT_SUPPORTED: isize = -2;
+const SBI_ERR_ALREADY_AVAILABLE: isize = -6;
+
+#[derive(Clone, Copy, Debug)]
+struct SbiRet {
+    error: isize,
+    value: usize,
+}
+
 #[inline(always)]
 /// `ecall` wrapper to switch trap into S level.
 fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
@@ -33,6 +46,62 @@ fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
         );
     }
     ret
+}
+
+/// Invoke an SBI v0.2+ extension using the `(error, value)` return convention.
+#[inline(always)]
+fn sbi_call_v02(
+    extension: usize,
+    function: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+) -> SbiRet {
+    let error: isize;
+    let value: usize;
+    // Safety: the SBI v0.2 ABI assigns a0-a2 to arguments, a6/a7 to
+    // function/extension IDs, and returns error/value in a0/a1.  No Rust
+    // reference crosses the privilege boundary.
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("x10") arg0 => error,
+            inlateout("x11") arg1 => value,
+            in("x12") arg2,
+            in("x16") function,
+            in("x17") extension,
+        );
+    }
+    SbiRet { error, value }
+}
+
+/// Start one stopped hart at the physical `_start` address.
+pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<(), isize> {
+    let probe = sbi_call_v02(
+        SBI_EXT_BASE,
+        SBI_BASE_PROBE_EXTENSION,
+        SBI_EXT_HSM,
+        0,
+        0,
+    );
+    if probe.error != 0 {
+        return Err(probe.error);
+    }
+    if probe.value == 0 {
+        return Err(SBI_ERR_NOT_SUPPORTED);
+    }
+
+    let result = sbi_call_v02(
+        SBI_EXT_HSM,
+        SBI_HSM_HART_START,
+        hart_id,
+        start_addr,
+        opaque,
+    );
+    match result.error {
+        0 | SBI_ERR_ALREADY_AVAILABLE => Ok(()),
+        error => Err(error),
+    }
 }
 
 pub fn set_timer(timer: usize) {

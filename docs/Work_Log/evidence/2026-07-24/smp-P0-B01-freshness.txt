@@ -1,0 +1,12 @@
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-rv64-build-after.log source=os/build.rs
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-rv64-build-after.log source=os/make/rv64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-rv64-build-after.log source=os/make/la64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-la64-build-after.log source=os/build.rs
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-la64-build-after.log source=os/make/rv64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-la64-build-after.log source=os/make/la64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-rv64-qemu-output.log source=os/build.rs
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-rv64-qemu-output.log source=os/make/rv64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-rv64-qemu-output.log source=os/make/la64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-la64-qemu-output.log source=os/build.rs
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-la64-qemu-output.log source=os/make/rv64.mk
+FRESH evidence=docs/Work_Log/evidence/2026-07-24/smp-P0-B01-la64-qemu-output.log source=os/make/la64.mk

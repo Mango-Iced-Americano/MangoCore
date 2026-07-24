@@ -1,0 +1,13 @@
+ M docs/01_architecture/boot-and-trap.md
+ M docs/10_plan/smp-8core-implementation.md
+ M docs/Work_Log/2026-07-19.md
+ M os/build.rs
+ M os/make/la64.mk
+ M os/make/rv64.mk
+ M os/src/hal/arch/loongarch64/boot.rs
+ M os/src/hal/arch/riscv/entry.asm
+?? docs/Work_Log/2026-07-24.md
+?? docs/Work_Log/evidence/2026-07-24/
+
+The repository also contains unrelated pre-existing untracked user artifacts.
+They are intentionally omitted from this compact snapshot and were not edited.

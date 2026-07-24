@@ -1,0 +1,4 @@
+EXPECTED_REJECT target=rv64-kernel-build-only CORE_NUM=3 status=2
+make/rv64.mk:27: *** CORE_NUM must be one of 1 2 4 8, got '3'.  Stop.
+EXPECTED_REJECT target=la64-kernel-build-only CORE_NUM=3 status=2
+make/la64.mk:17: *** CORE_NUM must be one of 1 2 4 8, got '3'.  Stop.

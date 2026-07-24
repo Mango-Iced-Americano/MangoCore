@@ -1,0 +1,6 @@
+29913:Platform HART Count       : 1
+29917:Platform HSM Device       : ---
+29935:Boot HART ID              : 0
+29979:[kernel] Entering kernel test mode (ktest) — tests: ["waitqueue"], repeat: 1
+29991:[32m# results: 4 passed, 0 failed, 4 total[0m
+29993:[32m[KTEST RESULT: PASS][0m

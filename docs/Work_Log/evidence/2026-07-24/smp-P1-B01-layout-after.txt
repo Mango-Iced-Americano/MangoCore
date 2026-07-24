@@ -1,0 +1,26 @@
+[symbols]
+0000000080a14000 B boot_stack
+0000000080a54000 B boot_stack_top
+0000000080c14000 B boot_stack_upper_bound
+0000000080c14000 B sbss
+[entry-disassembly]
+
+target/riscv64gc-unknown-none-elf/release/os:	file format elf64-littleriscv
+
+Disassembly of section .text:
+
+0000000080200000 <stext>:
+80200000: a1 42        	li	t0, 0x8
+80200002: 63 7e 55 00  	bgeu	a0, t0, 0x8020001e <.Lpcrel_hi0+0x18>
+
+0000000080200006 <.Lpcrel_hi0>:
+80200006: 17 41 81 00  	auipc	sp, 0x814
+8020000a: 13 01 a1 ff  	addi	sp, sp, -0x6
+8020000e: 93 02 15 00  	addi	t0, a0, 0x1
+80200012: ca 02        	slli	t0, t0, 0x12
+80200014: 16 91        	add	sp, sp, t0
+80200016: 97 80 18 00  	auipc	ra, 0x188
+8020001a: e7 80 60 e6  	jalr	-0x19a(ra) <rust_main>
+8020001e: 73 00 50 10  	wfi
+80200022: f5 bf        	j	0x8020001e <.Lpcrel_hi0+0x18>
+		...

@@ -1,0 +1,12 @@
+batch=SMP-P0-B01
+branch=smp
+baseline_commit=d764f885
+configured_cpu_count=1
+allowed_cpu_counts=1,2,4,8
+rejected_cpu_count=3
+ktest_group=waitqueue
+ktest_repeat=1
+ktest_timeout_ms=5000
+qemu_timeout_seconds=45
+kernel_cmdline=mango.mode=ktest mango.test=waitqueue mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0
+qemu_topology=current single-core target (-smp threads=1); deliberately unchanged in this batch

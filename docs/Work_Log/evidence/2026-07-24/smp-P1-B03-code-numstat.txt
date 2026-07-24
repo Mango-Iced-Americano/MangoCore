@@ -1,0 +1,11 @@
+9	5	{/tmp/mango-b03-baseline.JNzVFq/os => os}/make/rv64.mk
+7	4	{/tmp/mango-b03-baseline.JNzVFq/os => os}/make/la64.mk
+22	2	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/main.rs
+174	0	/dev/null => os/src/smp.rs
+3	1	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/mod.rs
+4	3	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/arch/mod.rs
+17	1	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/arch/riscv/mod.rs
+69	0	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/arch/riscv/sbi.rs
+2	0	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/arch/loongarch64/boot.rs
+3	0	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/arch/loongarch64/entry.asm
+80	26	{/tmp/mango-b03-baseline.JNzVFq/os => os}/src/hal/arch/loongarch64/mod.rs

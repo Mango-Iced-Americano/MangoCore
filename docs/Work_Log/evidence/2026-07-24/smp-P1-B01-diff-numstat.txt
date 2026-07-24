@@ -1,0 +1,1 @@
+35	2	os/src/hal/arch/riscv/entry.asm

@@ -18,7 +18,15 @@ endif
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-rv.img
 ROOTFS_IMG_DIR := ../fs-img-dir
-CORE_NUM := 1
+# One value drives both Cargo and every parameterized QEMU entry point.
+# Reject unsupported counts while parsing the Makefile, before Cargo can emit
+# an image whose compiled topology disagrees with the requested machine.
+CORE_NUM ?= 1
+VALID_CORE_NUMS := 1 2 4 8
+ifeq ($(filter $(CORE_NUM),$(VALID_CORE_NUMS)),)
+$(error CORE_NUM must be one of $(VALID_CORE_NUMS), got '$(CORE_NUM)')
+endif
+export MANGO_CORE_NUM := $(CORE_NUM)
 LOG ?= off
 VIRTIO_RNG_DEVICE := -device virtio-rng-device,bus=virtio-mmio-bus.2
 KERNEL_RV := ../kernel-rv
@@ -201,6 +209,7 @@ clean:
 run: build
 ifeq ($(BOARD), rvqemu)
 	@qemu-system-riscv64 \
+		-accel tcg,thread=multi \
   		-machine virt \
   		-nographic \
 		-bios $(BOOTLOADER) \
@@ -211,7 +220,7 @@ ifeq ($(BOARD), rvqemu)
         $(BLK_DEV_x1) \
 		$(VIRTIO_RNG_DEVICE) \
   		-m 1024 \
-  		-smp threads=$(CORE_NUM)
+		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
 endif
 
 monitor:
@@ -219,6 +228,7 @@ monitor:
 
 gdb:
 	@qemu-system-riscv64 \
+	-accel tcg,thread=multi \
 	-machine virt \
 	-nographic \
 	-bios $(BOOTLOADER) \
@@ -229,10 +239,11 @@ gdb:
 	$(BLK_DEV_x1) \
 	$(VIRTIO_RNG_DEVICE) \
 	-m 1024 \
-	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
+	-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1 -S -s | tee qemu.log
 
 runsimple:
 	@qemu-system-riscv64 \
+		-accel tcg,thread=multi \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
@@ -243,7 +254,7 @@ runsimple:
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
         $(BLK_DEV_x1) \
 		$(VIRTIO_RNG_DEVICE) \
-		-smp threads=$(CORE_NUM)
+		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
 
 comp:
 	@qemu-system-riscv64 \
@@ -319,6 +330,7 @@ endif
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
 	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-riscv64 \
+		-accel tcg,thread=multi \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
@@ -326,7 +338,7 @@ endif
 		-drive if=none,file=$(KTEST_EXT4_IMG_RV),format=raw,id=x0 \
 		$(BLK_DEV_x0) \
 		-m 1024 \
-		-smp threads=1
+		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
 ifeq ($(KTEST_POST_FSCK),1)
 	@e2fsck -f -n $(KTEST_EXT4_IMG_RV)
 endif

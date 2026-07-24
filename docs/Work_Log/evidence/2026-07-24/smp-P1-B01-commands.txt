@@ -1,0 +1,25 @@
+# Pre-change RED witness
+riscv64-unknown-elf-nm -n target/riscv64gc-unknown-none-elf/release/os
+rust-objdump -d --disassemble-symbols=_start target/riscv64gc-unknown-none-elf/release/os
+
+# Required serial build gate
+make rv64-kernel-build-only CORE_NUM=1
+make la64-kernel-build-only CORE_NUM=1
+
+# Post-change ELF inspection
+riscv64-unknown-elf-nm -n target/riscv64gc-unknown-none-elf/release/os
+rust-objdump -d --start-address=0x80200000 --stop-address=0x80200040 \
+  target/riscv64gc-unknown-none-elf/release/os
+
+# Focused single-core regression
+make rv64-ktest KTEST=waitqueue KREPEAT=1 CORE_NUM=1 \
+  KTEST_QEMU_TIMEOUT=45
+
+# Static and worktree checks
+git diff --check
+git diff --numstat -- os/src/hal/arch/riscv/entry.asm
+git diff --unified=0 -- os/src/hal/arch/riscv/entry.asm
+
+# Not run by design
+# make rv64-ktest ... CORE_NUM=2/4/8
+# Reason: the BSP/AP rust_main split is a later, separately approved batch.

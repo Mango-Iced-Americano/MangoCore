@@ -23,6 +23,9 @@ _start:
     csrwr       $t0,    0x181
     sub.d       $t0,    $t0,    $t0
     la.global $sp, boot_stack_top
+    # 2K1000LA remains single-core; normalize the common Rust entry ABI.
+    sub.d       $a0,    $a0,    $a0
+    sub.d       $a1,    $a1,    $a1
     bl          rust_main
 
     .section .bss.stack

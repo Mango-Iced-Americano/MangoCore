@@ -95,6 +95,7 @@ mod mm;
 mod net;
 mod panic_diag;
 mod random;
+mod smp;
 mod syscall;
 mod task;
 mod timer;
@@ -246,10 +247,26 @@ fn move_to_high_address() {
     }
 }
 
+/// Common firmware entry for both architectures.
+///
+/// RV64 receives `(hart_id, dtb_or_hsm_opaque)` in `a0/a1`; LA64 QEMU and
+/// 2K1000LA normalize the same pair in their assembly/Rust entry stubs.
 #[no_mangle]
-pub fn rust_main() -> ! {
+pub extern "C" fn rust_main(cpu_id: usize, boot_arg: usize) -> ! {
+    let logical_cpu_id = smp::register_cpu_entry(cpu_id);
+    if logical_cpu_id == smp::BOOT_CPU_ID {
+        bsp_main(logical_cpu_id, boot_arg)
+    } else {
+        smp::secondary_main(logical_cpu_id)
+    }
+}
+
+/// Preserve the historical MangoCore initialization path as the BSP-only path.
+fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
     task::perf::record_boot_stage(task::perf::BOOT_STAGE_ENTRY);
-    bootstrap_init();
+    // Only CPU0 reaches this function, so BSS, heap, drivers, filesystems, and
+    // the legacy global scheduler remain single-owner during Phase 1.
+    bootstrap_init(cpu_id);
     mem_clear();
     // 这一行可能有误，需要后续处理
     #[cfg(all(feature = "block_mem"))]
@@ -267,6 +284,9 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
+    // Release APs only after memory and CPU0's machine state are usable.  APs
+    // report online and park; CPU0 alone continues into shared subsystems.
+    smp::bring_up_secondary_cpus();
 
     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
     let boot_config = crate::bootargs::load();

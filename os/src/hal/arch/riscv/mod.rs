@@ -34,7 +34,23 @@ pub type TrapImpl = riscv::register::scause::Trap;
 pub type InterruptImpl = riscv::register::scause::Interrupt;
 pub type ExceptionImpl = riscv::register::scause::Exception;
 
-pub fn bootstrap_init() {}
+pub fn bootstrap_init(_cpu_id: usize) {}
+
+/// Ask OpenSBI HSM to enter the common assembly entry on one stopped hart.
+pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
+    // HSM passes its opaque argument in a1.  Phase 1 does not consume an
+    // architecture boot argument on APs, so publish an explicit zero.
+    sbi::hart_start(cpu_id, start_addr, 0)
+}
+
+/// Keep an online Phase 1 AP outside the legacy scheduler.
+pub fn boot_cpu_park() -> ! {
+    loop {
+        // Safety: WFI is only a local processor hint.  AP interrupts remain
+        // disabled, and a later IPI phase will replace this permanent park.
+        unsafe { riscv::asm::wfi() };
+    }
+}
 
 /// Return the Linux-compatible RISC-V ISA-letter bitmap for `AT_HWCAP`.
 pub fn user_hwcap() -> usize {
