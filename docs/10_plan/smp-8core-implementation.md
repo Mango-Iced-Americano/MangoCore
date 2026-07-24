@@ -16,6 +16,7 @@ code_paths:
   - "os/src/mm/"
 related_docs:
   - "docs/10_plan/smp-agent-execution-spec.md"
+  - "docs/01_architecture/lock-order.md"
   - "docs/01_architecture/boot-and-trap.md"
   - "docs/04_mm/page-table-and-tlb.md"
   - "docs/05_process/scheduler.md"
@@ -53,6 +54,8 @@ related_docs:
 - 任意内核指令位置的完全抢占；
 - CFS、实时调度类或复杂调度域；
 - VirtIO 多队列、网络多队列和文件系统并行性能重构。
+- Linux rseq ABI；syscall 293 本轮明确返回 ENOSYS，并关闭逐次 unknown-syscall 噪声日志。
+  已观察到测试环境中的 glibc 可回退，但这不是对所有 libc/应用的兼容保证。
 
 2K1000LA 等非 QEMU 平台继续使用
 <code>configured_cpu_count() == 1</code>，不得因 SMP 改造破坏现有单核路径。
@@ -79,8 +82,9 @@ related_docs:
 | 启动 | RISC-V 所有 hart 共用一个 boot stack；LA64 非零 CPU 永久自旋 | 栈覆盖、AP 无法上线 |
 | 初始化 | rust_main() 无条件执行 BSS、MM、驱动、FS 初始化 | 多核重复初始化和全局状态破坏 |
 | trap | RISC-V 内核态 trap 直接 panic；LA64 IPI 未实现 | 内核执行期间无法处理 IPI/shootdown |
-| current task | 全局 PROCESSOR、裸指针和 relaxed atomic cache | 跨核读到其他 CPU 的任务或悬空引用 |
+| current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
+| 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | 全局 NEXT_SCHED_TICK_NS，中断中直接切换任务 | 多核重复推进时间或在危险位置调度 |
 | MM/TLB | PTE 修改只刷新本地 TLB | 远端 CPU 继续使用旧权限、旧物理页 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
@@ -98,8 +102,9 @@ flowchart TD
     B --> G["一次性全局初始化"]
     A --> W["AP 启动栈上等待"]
     G --> R["发布 PerCpu、内核页表和 SCHED_READY"]
-    R --> L["每 CPU 本地 trap/timer/IPI 初始化"]
-    L --> S["每 CPU 调度循环"]
+    R --> L["每 CPU 本地 trap/IPI 初始化"]
+    L --> P["Phase 1/2: AP park"]
+    P --> S["Phase 3: 每 CPU 调度循环"]
     S --> Q0["本地 RunQueue"]
     S --> I["IPI / 负载均衡"]
     S --> M["MM active mask / TLB generation"]
@@ -205,7 +210,11 @@ New / Blocked
 4. 不同时持有两个 runqueue 锁；
 5. 不嵌套持有 task.inner 与 runqueue 锁；
 6. 不跨 context switch、IPI ack 或其他等待点持锁；
-7. current_task() 返回克隆的 Arc，删除 current-task 裸指针和伪造的 static 引用。
+7. current_task() 返回克隆的 Arc，删除 current-task 裸指针和伪造的 static 引用；
+8. pid/tid 等不可变 per-CPU hint 可作为快路径；parent pid、pgid/sid、credentials、
+   user token 等可变 hint 必须有集中更新/失效协议，否则读取权威对象；
+9. interruptible_queue 不得成为第二套 runnable queue；其信号枚举、OOM、zombie 清理和
+   统计职责迁入任务 registry、WaitQueue 或专用 registry 后，才能退役或降为非运行实体索引。
 
 ### 2.6 MM/TLB 协议
 
@@ -270,22 +279,51 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - QEMU 参数统一为：
 
 ~~~text
--smp cpus=N,sockets=1,cores=N,threads=1
+-accel tcg,thread=multi -smp cpus=N,sockets=1,cores=N,threads=1
 ~~~
 
+- focused 竞态测试必须显式请求 MTTCG，并记录 QEMU 完整命令和宿主侧实际 vCPU 线程；
+  若后端或功能组合不支持 MTTCG，证据标记覆盖限制，不得把单 TCG 线程时序当作并行证明；
 - 非 1、2、4、8 的值在构建前直接报错；
 - Docker 前置检查执行 pull 和 force-recreate，记录 image ID、repo digest、创建时间及两种 QEMU 版本；
 - 不能仅凭容器内显示 9.2.1 判断镜像是否最新；当前
   <code>pull_policy: missing</code> 不会自动刷新已存在的同名 tag，必须以 digest
   和重建后的容器为准；
 - 建立 <code>KTEST=smp</code> RED 用例：在线 CPU 数、独立栈、per-CPU 隔离、
-  IPI ping-pong、任务唯一运行和 TLB 失效。
+  IPI ping-pong、任务唯一运行和 TLB 失效；
+- 冻结实施基线：记录 commit、分支、dirty status、双架构 1 核日志和成绩；从该 commit
+  创建专用 SMP branch/worktree，后续批次不得直接堆叠在持续变化的 develop 上；
+- 默认开发核数为 CORE_NUM=2，每批保留 CORE_NUM=1 回归；4/8 核只作为阶段门禁和压力矩阵，
+  避免把启动慢或 QEMU 噪声混入最小问题定位。
 
 #### 退出条件
 
 - 单核双架构基线日志归档；
+- 基线 commit 和隔离 branch/worktree 可复核，当前参考基线成绩 RV64 199.1/200、
+  LA64 197.1/200，不把成绩记录误写成 SMP 已验证；
 - 所有测试入口均可显式传递 CORE_NUM；
 - 多核 RED 测试稳定暴露当前缺口，而不是超时原因不明。
+
+### Phase 0.5：IRQ-safe 原语、锁序与早期 console
+
+#### 实施内容
+
+- 实现并验证双架构 IrqSaveSpinLock/IrqSpinLock：guard 保存原中断状态、关闭本地中断并在
+  Drop 时恢复原状态，嵌套严格 LIFO，不得无条件开中断；
+- 明确 irq depth 与 preempt depth 的关系；正确性依赖“保存并恢复原状态”，不强制把某个
+  depth 计数器当作唯一实现；
+- 以 `docs/01_architecture/lock-order.md` 为中央锁契约，先固化 runqueue、task.inner、
+  WaitQueue、MM/PTE、timer、console 和 lwext4 的部分序及禁止组合；
+- console 在 AP 打印 online 之前改为全局 irq-safe 串行化；panic/STOP 路径提供不等待锁的
+  raw UART/SBI fallback，避免最早的多核日志本身产生数据竞争或死锁；
+- 增加 guard 嵌套恢复和持锁时 IRQ 重入的单核 focused ktest；准备双 CPU console 用例，
+  实际并发证据在 Phase 1 AP 可启动后补齐。
+
+#### 退出条件
+
+- IrqSaveSpinLock 在 enabled→nested→restore 与 disabled→nested→restore 两种初始状态下通过；
+- hard IRQ/IPI 路径不获取普通业务锁，锁序文档与代码中的新增关系一致；
+- panic fallback 的单核持锁注入测试证明其不等待 console 锁。
 
 ### Phase 1：BSP/AP 启动与 Per-CPU 基础
 
@@ -302,50 +340,89 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   CORE_NUM 大于 1 且 HSM 不可用时明确失败；
 - LoongArch QEMU 中非零 CPU 不再永久循环，改为在自己的启动栈上等待 release；
 - 将现有 bootstrap_init()/machine_init() 拆为一次性 global init 和每 CPU local init；
-- AP 完成本地 trap、timer、per-CPU 寄存器和 idle context 初始化后设置 online bit；
+- AP 完成 per-CPU 寄存器、最小 trap/IPI 向量和 idle context 初始化后设置 online bit；timer
+  本阶段只写入配置，不使能本地 timer 中断；
 - BSP 使用有界超时等待目标 mask；超时时打印 missing mask 并停止启动；
-- 所有 CPU 在 SCHED_READY 发布后进入各自调度循环。
+- CPU0 继续独占现有全局 PROCESSOR、ready queue 和 run_tasks()；AP 设置 online 后进入只检查
+  release/mailbox 的 park loop，本阶段不得调用现有 run_tasks() 或运行普通任务。
 
 #### 退出条件
 
 - 1/2/4/8 核均能打印一次且仅一次的 CPU online 记录；
 - 每个 CPU 的 boot stack、idle stack、cpu_id() 和 PerCpu 地址互不混淆；
 - 全局初始化计数始终为 1；
-- 本阶段用户任务仍固定在 CPU0。
+- 双 CPU 并发启动日志不会交叉破坏，panic fallback 不等待被其他 CPU 持有的 console 锁；
+- AP 本地 timer/普通中断保持关闭，只能停驻或处理已证明安全的启动 mailbox；
+- 本阶段所有内核和用户任务仍只在 CPU0 运行。
 
-### Phase 2：内核 trap、IPI 与 idle
+### Phase 2：内核 trap、IPI 与 AP park/idle 唤醒
 
 #### 实施内容
 
-- RISC-V 增加真正的内核 trap 汇编入口，完整保存易失寄存器并区分中断和内核异常；
-- LoongArch64 扩展现有内核 trap，支持 line-based IPI；
-- 内核异常仍 panic；内核 timer/IPI 中断只更新无锁 per-CPU 状态，不直接调度、不获取普通锁；
-- 用户 trap 建立完整内核上下文后允许本地中断，使长 syscall 期间仍可响应 shootdown 和 STOP；
+- 先完成 RISC-V 真正的内核 trap 汇编入口，完整保存易失寄存器并区分中断和内核异常；
+  LoongArch64 扩展现有内核 trap，支持 line-based IPI；
+- 第一子阶段仅开放 IPI 中断窗口：内核异常仍 panic，IPI handler 只更新无锁 per-CPU 状态，
+  不调度、不分配、不获取普通锁；
 - IPI 发布顺序为：先 Release 写 mailbox/reason，再触发硬件 doorbell；接收端 Acquire 读取；
 - RESCHEDULE 只设置 need_resched；
-- TIMER_REPROGRAM 只根据原子 deadline 重编程本地 timer；
 - STOP 关闭本地中断、设置停止 ack 并进入不可返回的 idle；
-- idle 路径按“关中断—发布 idle—重查 runqueue/IPI—执行架构 idle—恢复”实现并测试丢失唤醒；
+- AP park/idle 路径按“关中断—发布 idle—重查 mailbox—执行架构 idle—恢复”实现；本阶段
+  用 mailbox/IPI 唤醒测试 lost wakeup，不引用尚未存在的远程 runqueue；
+- 第二子阶段才接入 timer IRQ：handler 只推进原子 deadline/need_resched 并把到期工作延后到
+  安全点；旧 timer 回调、网络 poll、唤醒扫描和 schedule 不得在 IRQ 中直接执行；
+- 只有 trap frame、锁序和 deferred timer 门禁完成后，才在受控的长 syscall 区间开放本地
+  IPI/timer 中断，以保证后续 shootdown 和 STOP 能及时响应；
+- TIMER_REPROGRAM 只根据原子 deadline 重编程本地 timer；
 - panic 和 shutdown 向其他在线 CPU 广播 STOP；等待有界 ack 后由 CPU0 执行最终关机。
 
 #### 退出条件
 
 - 双架构 IPI 单播、广播、交叉发送和 10,000 次 ping-pong 无丢失；
-- idle CPU 收到远程入队后必定恢复运行；
+- park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
+
+Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
+timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。
+
+### Phase 2.5：单核状态迁移 API 与本地 TLB batch
+
+#### 实施内容
+
+- 在仍只有 CPU0 调度任务时，将所有 task_status 写入集中到 transition API，并引入可编码
+  `New/Blocked/Queued(cpu)/Running(cpu)/Zombie` 的原子调度状态；
+- 在 smp_debug 下对非法转换、重复入队、队列 owner 不一致立即 panic；release 构建保留计数，
+  使问题在 per-CPU runqueue 之前暴露；
+- 逐一替换 wake、timeout、signal、block、yield、exit 的直接 task_status 写入；旧字段若暂时保留，
+  只能是由 transition API 更新的兼容投影，不得继续作为并行真值来源；
+- 盘点 interruptible_queue 的信号枚举、OOM、zombie 清理和统计调用方；先把 runnable 所有权与
+  这些 registry 职责分离，CAS 成功后才允许入队，旧全局扫描不得再次把任务重复加入 ready queue；
+- 在没有远程 CPU 使用用户 MM 时先引入本地 TlbBatch facade：复用现有 raw/no-flush 操作与
+  本地 sfence.vma/invtlb，将所有已发布 PTE 修改机械收口到统一提交入口；
+- 本阶段不实现 remote ack，但接口必须显式区分 unpublished/local-only/published，禁止把
+  local-only 实现描述成 shootdown 完成。
+
+#### 退出条件
+
+- 单核 focused test 覆盖所有合法转换，非法转换和重复 wake 能稳定触发诊断；
+- 仓库内不再有绕过 transition API 的 runnable 状态写入；
+- interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
+- 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
 #### 实施内容
 
-- 删除全局 PROCESSOR、全局 current-task cache 和全局 ready queue；
+- 删除全局 PROCESSOR、current-task 裸指针和全局 ready queue；把不可变 pid/tid hint 迁到
+  per-CPU，可变身份 hint 按集中更新协议迁移或改读权威对象；
 - 每 CPU 使用本地 Processor、RunQueue、idle context 和 zombie 回收队列；
 - 本地选择继续保留 FIFO fast path 和现有 nice-aware 选择；
 - 新任务或被唤醒任务的目标 CPU 选择规则固定为：
   - last_cpu 在线、在 affinity 内且负载不超过最小负载 +1 时优先复用；
   - 否则选择 affinity 内 nr_running 最小的 CPU；
 - 远程入队后，如果目标 CPU idle 或任务优先级需要尽快运行，发送 RESCHEDULE IPI；
-- idle CPU 只从一个选定 victim 偷取一个允许迁移的任务，整个过程不同时持有两个 runqueue 锁；
+- Phase 3a 先只实现 per-CPU queue、目标选择和远程 enqueue；work stealing 默认关闭；
+- Phase 3b 在 3a 唯一运行和远程唤醒门禁通过后再开启 steal：idle CPU 只从一个选定 victim
+  取一个允许迁移的任务，整个过程不同时持有两个 runqueue 锁；
 - affinity 变化后，正在运行的非法 CPU 设置 migration_pending 和 need_resched；
   已排队任务在出队时重新定向，避免跨队列双锁迁移；
 - 安全抢占点仅包括：
@@ -360,9 +437,9 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 
 #### 退出条件
 
-- CPU-bound 内核任务能分布到全部在线 CPU；
+- Phase 3a 的 CPU-bound 内核任务能通过目标选择和远程 enqueue 分布到全部在线 CPU；
 - 同一任务从不并发运行，重复 wake 不会重复入队；
-- affinity、迁移、阻塞和远程唤醒压力测试通过；
+- affinity、迁移、阻塞和远程唤醒压力测试通过；Phase 3b 另行验证 steal 并保持可关闭；
 - 当前阶段普通用户任务仍默认固定 CPU0，避免在 TLB shootdown 完成前跨核运行。
 
 ### Phase 4：TLB shootdown、ASID 与用户 MM
@@ -380,20 +457,28 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   - GLOBAL 面向所有在线 CPU；
   - PRIVATE_EXPEDITED 面向当前进程 MM 的 active CPU；
   - 使用同一 IPI/ack 基础设施和完整内存屏障；
-- 完成 MM 专项测试后，才允许受控用户测试任务跨 CPU 运行。
+- RISC-V 现有 trap 入口/返回执行全量 sfence.vma，stale-TLB 用例必须建立“victim 无 trap
+  观察窗口”或测试态暂停 victim timer，并记录窗口前后 trap count；普通用户循环不能单独证明
+  远端 shootdown，因为周期 timer trap 可能偶然清掉旧项；
+- TLB 用例同时校验 shootdown sequence/ack 和 ack 前 frame 不复用；LoongArch 作为不被
+  trap 自动全刷掩盖的强暴露平台，必须单独保留证据；
+- 完成 MM 专项测试后，才允许受控用户测试任务跨 CPU 运行。该测试必须是 hermetic 的
+  CPU/MM-only workload，使用匿名或启动前预载内存；除串行化结果输出外，不进入尚未审计的
+  文件系统、网络、VirtIO 或设备并发路径。
 
 #### 退出条件
 
 - 一核反复 unmap/protect/CoW，其他核并发访问时不出现旧权限或旧物理页；
 - LoongArch 强制 ASID rollover 后无跨进程数据污染；
 - shootdown 期间即使目标 CPU 正在执行长 syscall 也能及时 ack；
-- frame 释放计数证明不存在 ack 前复用。
+- frame 释放计数证明不存在 ack 前复用；
+- RISC-V victim 观察窗口 trap count 不变，结果不能由 trap.S 的全量 sfence.vma 偶然制造。
 
 ### Phase 5：共享子系统与进程语义审计
 
 #### 实施内容
 
-- console 使用全局 irq-safe 锁；panic 路径提供不等待锁的原始 UART fallback；
+- 复核 Phase 0.5 已落地的 console irq-safe 锁和 panic raw fallback，不在本阶段首次补救；
 - TIME_SOURCE、CLOCK_FREQ、timer 计数、LoongArch DIRTY、UART 和诊断缓冲改为原子、
   受锁对象或 per-CPU 状态；
 - VirtIO 队列在 v1 中继续单队列串行化；DMA reservation 改为 per-CPU，
@@ -418,7 +503,8 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   - sched_setaffinity() 保存 mask 并触发必要迁移；
   - /proc/cpuinfo 为每个 configured CPU 输出处理器项；
   - /proc/stat 输出 cpu0..cpuN；
-  - 默认任务 affinity 为 configured online mask。
+  - 默认任务 affinity 为 configured online mask；
+  - rseq(293) 明确返回 ENOSYS，非诊断构建不为每次调用输出 unknown-syscall 日志。
 
 #### 退出条件
 
@@ -436,7 +522,8 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   - 各类 IPI 收发与 ack；
   - TLB shootdown 数量、范围和等待时间；
   - timer interrupt、reschedule；
-  - 无效任务状态转换和重复入队；
+- Phase 2.5/3 已用于正确性门禁的无效状态转换和重复入队断言继续保留；Phase 6 只补充
+  汇总、导出和低开销 release 计数，不能把首次发现竞态的能力拖到稳定化阶段；
 - panic 时输出所有 CPU 的 current TID、runqueue、IRQ/preempt depth、active MM 和 pending IPI；
 - 同步更新启动/trap、调度器、页表/TLB、测试文档和根 AGENTS.md 中的“单核”描述；
 - 每个阶段形成独立、可回退提交，不把启动、调度和 TLB 改动压成一次大提交。
@@ -466,7 +553,7 @@ make la64-kernel-build-only
 | 调度 | 唯一运行、重复 wake、远程 enqueue、steal、affinity、迁移 |
 | 同步 | futex、WaitQueue、Completion、eventfd、signal |
 | MM | unmap、mprotect、CoW、MAP_SHARED、exec、kernel mapping |
-| TLB | generation race、ack 前不释放、目标正在 syscall |
+| TLB | generation race、sequence/ack、ack 前不释放、目标正在 syscall、victim 无 trap 窗口 |
 | LA ASID | 多 MM、强制 rollover、epoch 后复用 |
 | 进程 | exit_group、fatal signal、多线程 exec |
 | FS | 多核 create/read/write/rename/unlink/fsync |
@@ -474,7 +561,8 @@ make la64-kernel-build-only
 | 停机 | panic/normal shutdown 停止其他 CPU |
 
 竞争敏感用例使用 <code>KREPEAT=100</code>；失败时打印 CPU、任务状态、队列归属和最后一次
-IPI/TLB sequence。
+IPI/TLB sequence。调度/TLB 竞态测试显式使用 MTTCG；证据同时记录宿主 vCPU 线程和 victim
+观察窗口 trap count。
 
 ### 4.3 最终矩阵
 
@@ -535,6 +623,8 @@ docs/Work_Log/evidence/YYYY-MM-DD/
 - RISC-V HSM/RFENCE 缺失时明确报错或使用本文指定的 IPI fallback，不做静默降级；
 - 实板 2K1000LA 始终配置为单核，本计划不宣称实板 SMP 支持；
 - 实际进入代码实施后，各阶段必须重新加载 mango-workflow 对应调试参考，并更新 Work Log；
+- 实施从冻结基线创建专用 SMP branch/worktree；每批在人工审核后按用户授权独立提交，
+  不要求在包含无关用户修改的 dirty develop 上制造“批次提交”；
 - 状态和测试结论必须引用可复核证据，不得将未执行项目标为通过。
 
 ## 6. 外部参考
@@ -543,3 +633,4 @@ docs/Work_Log/evidence/YYYY-MM-DD/
 - [RISC-V SBI IPI Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-ipi.adoc)
 - [RISC-V SBI Remote Fence Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-rfence.adoc)
 - [LoongArch Reference Manual, Volume 1](https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html)
+- [QEMU 9.2 Invocation: TCG thread option](https://qemu.readthedocs.io/en/v9.2.0/system/invocation.html)

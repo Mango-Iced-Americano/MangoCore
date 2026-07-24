@@ -7,6 +7,7 @@ last_updated: 2026-07-21
 tags: [smp, agent, workflow, review, safety]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
+  - "docs/01_architecture/lock-order.md"
   - "docs/08_testing/README.md"
 ---
 
@@ -37,7 +38,9 @@ related_docs:
 
 未获得修改前确认不得编辑 SMP 代码。提交修改后报告后，不得自动进入下一批。
 
-用户给出的“继续全部计划”等总体授权不替代逐批沟通；但用户可以在当前批次批准一个明确的小范围连续操作。
+用户给出的“继续全部计划”等总体授权不替代逐批沟通。用户可以预先批准一个列出编号、范围和
+预算的连续批次序列，但 agent 每批仍须停止、提交报告并等待下一条明确指令；序列授权不允许静默
+跨过人工审核点。
 
 每批使用编号 <code>SMP-P&lt;phase&gt;-B&lt;sequence&gt;</code>，便于报告、Work Log 和证据文件互相对应。
 
@@ -72,6 +75,17 @@ related_docs:
 - 含尾部注释的代码行仍是关键代码行；
 - formatter 或 codegen 意外改变关键代码时同样计入。
 
+计数采用“机器生成原始补丁账本 + 人工语义分类”两层证据：
+
+1. 保存 `git diff --numstat`、`git diff --unified=0` 和目标文件清单，机器不得漏掉 rename、
+   generated file、配置或汇编；
+2. 对每个新增/删除行标记 critical、comment、test、doc 或 diagnostic，并写明排除理由；
+3. 脚本只能辅助分类，无法识别“日志是否改变控制流”“测试配置是否改变 PASS 判定”等语义，
+   未分类行必须 fail-closed 计入 critical；
+4. 报告同时给出 raw added/deleted 和 semantic critical count，人工可据补丁复算。
+
+不得只引用一个自报总数，也不得把自动脚本输出当作无需审查的权威结论。
+
 ### 3.3 允许少量超出
 
 50 行是批次设计目标，不是为了破坏正确性的机械硬切点。
@@ -96,8 +110,9 @@ related_docs:
 3. SMP bug、竞态或子系统故障先读 debugging-patterns.md；
 4. 性能、计数器或 QEMU 长测先读 harness-patterns.md；
 5. 检查 git status、目标文件现有 diff 和相关调用链；
-6. 确认前一批已经完成人工审核；
-7. 尽可能运行能证明当前缺口的最小 RED 或基线测试。
+6. 检查 `docs/01_architecture/lock-order.md`，列出本批新增或改变的锁关系；
+7. 确认位于冻结基线派生的专用 SMP branch/worktree，并确认前一批已经完成人工审核；
+8. 尽可能运行能证明当前缺口的最小 RED 或基线测试。
 
 不得只根据旧文档或记忆修改并发代码。当前源码、汇编入口、调用方和测试入口都要重新核对。
 
@@ -124,6 +139,7 @@ related_docs:
 - 目标文件或要维护的不变量发生变化；
 - 关键代码预计超过 60 行；
 - 需要新增 unsafe、锁层级、IPI reason 或公共接口；
+- 实际锁关系超出 lock-order.md 已批准的部分序；
 - RED 结果与原根因假设不一致；
 - 需要触碰用户已有修改；
 - 中间状态必须依赖下一批才安全。
@@ -179,7 +195,7 @@ related_docs:
 
 ## 6. 修改执行纪律
 
-- 使用 apply_patch 精确修改批准的 hunk；
+- 使用宿主环境支持的精确 hunk 编辑方式，禁止整文件重写；在 Codex 环境中使用 apply_patch；
 - 不运行会重写整文件或全仓库的 formatter；
 - 不在同批混合重命名、格式整理和行为变化；
 - 不顺手修复无关 warning、typo 或邻近 bug；
@@ -200,7 +216,9 @@ related_docs:
 
 验证失败时先只读定位。修复仍属于原不变量且总体约 50 行时，可以说明后继续；涉及新不变量或明显超过 60 行时必须重新确认。
 
-禁止使用 git reset 或 git checkout 清理工作树。需要撤销时，用 apply_patch 精确反向恢复本批 hunk，并先征得用户同意。
+禁止使用 git reset 或 git checkout 清理工作树。需要撤销未提交批次时，使用精确反向 patch 并先
+征得用户同意；已经提交且没有后续依赖时优先使用 `git revert`，存在依赖批次时先给出逐 hunk
+回退顺序和影响，不能机械 revert 破坏后续不变量。
 
 ### 6.2 脏工作树
 
@@ -209,6 +227,9 @@ related_docs:
 - 目标 hunk 与已有改动重叠时先请求专项许可；
 - 无法可靠分离 agent 与用户改动时停止；
 - 不删除无关未跟踪文件或历史证据。
+
+SMP 实施默认从冻结基线创建独立 branch/worktree。人工审核后只有在用户明确授权 commit 时，
+才把本批批准文件独立提交；不得为了“一批一提交”把用户无关修改一并暂存，也不得自行 push。
 
 ## 7. SMP 专项审查清单
 
@@ -219,6 +240,7 @@ related_docs:
 - 只有 CPU0 执行全局初始化；
 - AP 在访问堆和全局对象前 Acquire 观察 BSP 的 Release；
 - 非法 CPU ID 和 online timeout 可诊断；
+- Phase 1 AP online 后只进入 park loop，不调用旧 run_tasks，不使能普通 timer 中断；
 - CORE_NUM=1 走同一实现的退化路径。
 
 ### 7.2 trap、IPI 与 timer
@@ -229,6 +251,7 @@ related_docs:
 - 重复或合并 IPI 保持幂等；
 - 内核态 timer/IPI 只设置 deferred state，不直接切换任务；
 - idle 检查、发布和休眠之间不存在 lost wakeup。
+- IPI-only 与 timer-enabled 中断窗口分阶段验证，timer 回调工作延迟到安全点。
 
 ### 7.3 调度器
 
@@ -238,6 +261,8 @@ related_docs:
 - 不嵌套 task.inner 与 runqueue 锁；
 - 远程 enqueue 在释放锁后发送 IPI；
 - current_task 返回 Arc，不制造伪 static 引用；
+- 可变 current hint 有集中更新/失效协议，或改读权威对象；
+- interruptible_queue 不作为 runnable queue，旧扫描不能绕过状态 CAS 重复入队；
 - block、wake、exit、migration 和 affinity 有 focused race 测试。
 
 ### 7.4 MM、TLB 与 ASID
@@ -249,6 +274,8 @@ related_docs:
 - shootdown 等待路径自身能响应 IPI；
 - LoongArch ASID 属于 MM，epoch rollover 做全核失效；
 - RISC-V RFENCE 和 IPI fallback 提供相同上层语义。
+- RISC-V stale 测试记录 victim 无 trap 窗口和 trap count，不能依赖 trap.S 的全量 sfence.vma；
+- Phase 4 跨核用户测试保持 CPU/MM-only，不进入 Phase 5 才审计的共享子系统。
 
 ### 7.5 共享子系统
 
@@ -257,6 +284,19 @@ related_docs:
 - 持锁路径不 yield、schedule 或等待远端 ack；
 - static mut 替换为原子、锁或 per-CPU 所有权；
 - CPU0 housekeeping 与任意 CPU syscall 不重复推进全局状态。
+
+### 7.6 阶段依赖复核
+
+| 阶段 | 允许出现的并发 | 本阶段禁止提前引入 |
+|---|---|---|
+| 0/0.5 | 单 CPU 任务；锁原语/console focused test | AP 运行任务、普通 timer IRQ |
+| 1 | AP online + park mailbox | AP run_tasks、远程 runqueue |
+| 2 | IPI-only，随后 deferred timer | per-CPU runnable task |
+| 2.5 | CPU0 单核状态 CAS、本地 TLB batch | remote shootdown、用户迁移 |
+| 3a | per-CPU queue、目标选择、远程 enqueue | 默认开启 steal、用户 MM 跨核 |
+| 3b | 可关闭的 work stealing | 普通用户任务跨核 |
+| 4 | hermetic CPU/MM 用户测试 | 未审计 FS/net/device 并发 |
+| 5 | 审计通过的共享子系统与普通用户任务 | 未证明的 unsafe/全局状态 |
 
 ## 8. 验证与证据
 
@@ -268,9 +308,12 @@ related_docs:
 2. Docker 内执行 RV64 kernel build；
 3. RV64 结束后再执行 LA64 kernel build；
 4. 执行与本批不变量对应的 focused QEMU/ktest；
-5. 执行 CORE_NUM=1 单核回归；
-6. 涉及 AP、IPI、runqueue 或 shootdown 时执行目标核数；
+5. 执行 CORE_NUM=1 单核回归，并以 CORE_NUM=2 作为日常最小 SMP 配置；
+6. 涉及 AP、IPI、runqueue 或 shootdown 时执行本阶段要求的 4/8 核门禁；
 7. 核心竞态路径执行必要的重复或并发压力。
+
+调度、IPI 和 TLB 竞态测试应显式使用 `-accel tcg,thread=multi`，保存完整命令并记录宿主侧
+vCPU 线程证据；MTTCG 不可用时必须标为覆盖限制。
 
 双架构编译命令：
 
@@ -303,6 +346,7 @@ BLOCKED 和 NOT RUN 不得写成“预计通过”。既有失败要说明是否
 - 构建/QEMU 完整日志与 head-tail；
 - PASS/FAIL 判定和时间戳；
 - 关键代码行数统计；
+- raw diff 账本、逐行语义分类和排除理由；
 - 日志相对被测代码的新鲜性检查。
 
 没有可复核证据时，只能报告“已执行但不可验收”。
@@ -316,7 +360,7 @@ BLOCKED 和 NOT RUN 不得写成“预计通过”。既有失败要说明是否
 - 批次编号与目标；
 - 状态：完成、失败或阻塞；
 - 是否完全落在批准范围；
-- 当前动作固定为“等待人工审核”。
+- 当前动作固定为“等待人工审核”，即使存在预批准序列也不自动开始下一批。
 
 ### 9.2 行数账本
 
@@ -325,6 +369,7 @@ BLOCKED 和 NOT RUN 不得写成“预计通过”。既有失败要说明是否
 | path | N | N | N | N | N | N |
 
 给出关键代码总数、是否超过 50、超出理由和统计方法。
+同时附 raw diff 行数、未分类行数和机器辅助工具版本；未分类行按关键代码计数。
 
 ### 9.3 修改思路
 
@@ -365,6 +410,7 @@ BLOCKED 和 NOT RUN 不得写成“预计通过”。既有失败要说明是否
 - weakening test、扩大超时或忽略失败制造 PASS；
 - 没有双架构验证和证据却声称完成；
 - 未经要求 commit、push、创建 PR 或进入下一批。
+- 用单线程 TCG 结果宣称已覆盖真实 vCPU 并行竞态。
 
 ## 11. 批次结束条件
 
@@ -404,6 +450,7 @@ BLOCKED 和 NOT RUN 不得写成“预计通过”。既有失败要说明是否
 并发设计：
 - 状态所有者：
 - 锁与中断：
+- lock-order.md 关系：
 - 原子同步：
 - 生命周期/TLB：
 
@@ -433,7 +480,9 @@ BLOCKED 和 NOT RUN 不得写成“预计通过”。既有失败要说明是否
 | ... | ... | ... | ... | ... | ... | ... |
 - 关键代码总计：
 - 超出 50 的理由：
-- 统计方法：
+- raw added/deleted：
+- 未分类行（按 critical 计）：
+- 统计方法/工具版本：
 
 修改思路：
 1. 修改前控制流：
