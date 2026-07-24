@@ -36,6 +36,25 @@ pub type ExceptionImpl = riscv::register::scause::Exception;
 
 pub fn bootstrap_init(_cpu_id: usize) {}
 
+/// Install the Phase 1 boot-only CPU-local anchor in `tp`.
+pub fn install_boot_cpu_local(ptr: usize) {
+    // Safety: the psABI makes x4/tp non-allocatable to compiler temporaries,
+    // but user TLS still owns it.  This boot-only write happens before traps.
+    unsafe {
+        core::arch::asm!("mv tp, {ptr}", ptr = in(reg) ptr, options(nostack));
+    }
+}
+
+/// Read back the current CPU's boot-only anchor for immediate verification.
+pub fn boot_cpu_local_ptr() -> usize {
+    let ptr;
+    // Safety: this is a read-only move from the same CPU-local register.
+    unsafe {
+        core::arch::asm!("mv {ptr}, tp", ptr = out(reg) ptr, options(nostack));
+    }
+    ptr
+}
+
 /// Ask OpenSBI HSM to enter the common assembly entry on one stopped hart.
 pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
     // HSM passes its opaque argument in a1.  Phase 1 does not consume an

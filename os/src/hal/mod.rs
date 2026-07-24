@@ -19,7 +19,8 @@ pub use arch::tlb_invalidate;
 #[cfg(feature = "loongarch64")]
 pub use arch::LsxRegs;
 pub use arch::{
-    boot_cpu_park, bootstrap_init, machine_init, start_secondary_cpu, user_hwcap,
+    boot_cpu_local_ptr, boot_cpu_park, bootstrap_init, install_boot_cpu_local, machine_init,
+    start_secondary_cpu, user_hwcap,
 };
 pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};

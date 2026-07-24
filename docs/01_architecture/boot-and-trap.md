@@ -68,6 +68,13 @@ hardware ID 和 online mask；超时时报告 missing mask。当前仍是最小�
 闭环：AP 不启用普通 timer/IPI handler、不进入现有全局调度器，也不访问
 FS、网络或驱动，所有内核和用户任务仍只由逻辑 CPU0 运行。
 
+每个 CPU 在完成硬件 ID 到逻辑 ID 的映射后，会把
+`&PER_CPUS[logical_id]` 写入启动期 CPU-local 寄存器并立即回读校验。
+`PER_CPUS` 固定为 8 个 64 字节对齐、非 BSS 的只读锚点；RV64 使用 `tp`，
+LA64 使用 `$r21`。这一步只建立启动期身份锚点：用户上下文能够覆盖这些
+寄存器，而 trap 入口尚未恢复内核值，因此当前没有对运行期公开 `cpu_id()`
+或让调度、MM 等子系统读取该指针。
+
 ### 2.1 2K1000LA U-Boot TFTP 启动
 
 实板调试统一使用 `192.168.9.0/24` 直连网段：开发主机/TFTP 服务器为 `192.168.9.10`，开发板为 `192.168.9.20`，掩码为 `255.255.255.0`。macOS 主机使用 `en8` 直连开发板时，TFTP 根目录为 `/private/tftpboot`。U-Boot 下载地址固定使用第二个 DRAM bank 内已经实板验证的 `0x9000000098000000`，避免覆盖 U-Boot 重定位区、设备树和保留内存。
@@ -149,7 +156,7 @@ smp::bring_up_secondary_cpus()
 
 | 步骤 | 关键结果 |
 |------|----------|
-| `register_cpu_entry()` | 将固件/硬件 ID 映射为连续逻辑 CPU ID，启动核固定为逻辑 CPU0 |
+| `register_cpu_entry()` | 将固件/硬件 ID 映射为连续逻辑 CPU ID，启动核固定为逻辑 CPU0，并安装/回读启动期 PerCpu 锚点 |
 | `bootstrap_init()` | 架构早期 CPU-local 状态准备；la64 配置 exception/TLB/page walk/DMW |
 | `mem_clear()` | 清零 BSS 或 `sbss..MEMORY_END` |
 | `move_to_high_address()` | `block_mem` 下复制内嵌根文件系统镜像 |

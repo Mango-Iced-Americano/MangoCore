@@ -11,6 +11,31 @@ use core::{
 pub const BOOT_CPU_ID: usize = 0;
 pub const MAX_CPUS: usize = 8;
 
+/// Phase 1 CPU-local anchor; later batches extend this without moving entries.
+#[repr(C, align(64))]
+struct PerCpu {
+    logical_id: usize,
+}
+
+impl PerCpu {
+    const fn new(logical_id: usize) -> Self {
+        Self { logical_id }
+    }
+}
+
+// The immutable array lives outside BSS, so every early CPU may address its
+// own cache-line-sized entry before CPU0 clears or initializes shared memory.
+static PER_CPUS: [PerCpu; MAX_CPUS] = [
+    PerCpu::new(0),
+    PerCpu::new(1),
+    PerCpu::new(2),
+    PerCpu::new(3),
+    PerCpu::new(4),
+    PerCpu::new(5),
+    PerCpu::new(6),
+    PerCpu::new(7),
+];
+
 // build.rs rejects every value except the one-byte strings 1/2/4/8.
 pub const CONFIGURED_CPU_COUNT: usize =
     (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
@@ -53,7 +78,25 @@ pub fn register_cpu_entry(hardware_id: usize) -> usize {
         Ok(_) => hardware_id,
         Err(existing) => existing,
     };
-    hardware_to_logical_id(hardware_id, boot_hardware_id)
+    let logical_id = hardware_to_logical_id(hardware_id, boot_hardware_id);
+    install_boot_cpu_local(logical_id);
+    logical_id
+}
+
+/// Install and immediately verify the boot-only CPU-local pointer.
+///
+/// No runtime caller may consume this pointer yet: user state can replace the
+/// CPU-local GPR until trap entry learns to restore the kernel value.
+fn install_boot_cpu_local(logical_id: usize) {
+    let per_cpu = &PER_CPUS[logical_id];
+    debug_assert_eq!(per_cpu.logical_id, logical_id);
+    let expected = per_cpu as *const PerCpu as usize;
+    crate::hal::install_boot_cpu_local(expected);
+    assert_eq!(
+        crate::hal::boot_cpu_local_ptr(),
+        expected,
+        "CPU-local register readback failed for logical CPU {logical_id}"
+    );
 }
 
 const fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> usize {
