@@ -109,7 +109,7 @@ else
     # 3a. /sbin/init owns PID1; /init is a thin exec shim.
     # The kernel enters through /init; the shim transfers control to PID1.
     INIT_DIR="${INIT_SRC%/*}"
-    INITD_SRC="$INIT_DIR/initd"
+    INITD_SRC="$INIT_DIR/init"
     RUNNER_SRC="$INIT_DIR/test_runner"
     LTPRUNNER_SRC="$INIT_DIR/ltprunner"
     if [ -f "$INITD_SRC" ] && [ -f "$RUNNER_SRC" ]; then
