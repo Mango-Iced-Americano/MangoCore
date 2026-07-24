@@ -198,6 +198,11 @@ impl IndexNode for Ext4Inode {
         Ok(())
     }
 
+    fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
+        drop(_data);
+        self.fs_arc()?.sync_all()
+    }
+
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         let fs = self.fs_arc()?;
         if name.is_empty() {
