@@ -47,7 +47,7 @@ fn load(path: &str, cfg: &mut RuntimeConfig) -> bool {
 pub fn load_runtime_config() -> RuntimeConfig {
     let mut cfg = RuntimeConfig::default();
     let source = if load("/sdcard/os_test.conf\0", &mut cfg) { "/sdcard/os_test.conf" } else if load("/os_test.conf\0", &mut cfg) { "/os_test.conf" } else if load("/etc/os_test.conf\0", &mut cfg) { "/etc/os_test.conf" } else { "<default>" };
-    cfg.conf_source = Some(format!("{}\0", source).into_bytes());
+    cfg.conf_source = Some(source.as_bytes().to_vec());
     println!("[initproc] config source={} mode={} mask=0x{:03X} timer_smoke={} skip_apk={}", source, match cfg.mode { RunMode::Run => "run", RunMode::Shell => "shell", RunMode::RunThenShell => "run_then_shell", RunMode::DriftWindow => "drift_window", RunMode::Regression => "regression" }, cfg.mask, cfg.timer_smoke, cfg.skip_apk);
     cfg
 }
