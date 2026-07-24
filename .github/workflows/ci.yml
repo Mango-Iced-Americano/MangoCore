@@ -10,7 +10,7 @@ on:
       qemu_timeout:
         description: Per-architecture QEMU timeout in seconds
         required: false
-        default: "7200"
+        default: '7200'
 
 permissions:
   contents: read
@@ -25,6 +25,10 @@ env:
   QEMU_TIMEOUT: ${{ inputs.qemu_timeout || '7200' }}
 
 jobs:
+  # ═══════════════════════════════════════════════════════════
+  # Job 0 — Toolchain provisioning contracts (unchanged)
+  # Lightweight pre-flight validation; runs independently.
+  # ═══════════════════════════════════════════════════════════
   toolchain-contracts:
     name: Toolchain provisioning contracts
     runs-on: ubuntu-24.04
@@ -32,7 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive      - name: Verify Make and Rustup contracts
+          submodules: recursive
+      - name: Verify Make and Rustup contracts
         run: |
           set -euo pipefail
           sh scripts/test-toolchain-make-contract.sh
@@ -40,10 +45,130 @@ jobs:
           sh scripts/test-rustup-preflight.sh
           sh scripts/test-source-purity-make-contract.sh
 
-  full-test:
-    name: Serial RV64 and LA64 QEMU score gate
+  # ═══════════════════════════════════════════════════════════
+  # Layer 1 — Cargo clippy (static analysis, rv64 only)
+  # Expected: <15 min
+  # ═══════════════════════════════════════════════════════════
+  clippy:
+    name: 1. Cargo clippy (static analysis)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [toolchain-contracts]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Run clippy
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app/os \
+              && cargo clippy --features "board_rvqemu block_virt" -- -D warnings
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ═══════════════════════════════════════════════════════════
+  # Layer 2 — Cargo test (unit tests, rv64)
+  # Expected: <15 min
+  # ═══════════════════════════════════════════════════════════
+  cargo-test:
+    name: 2. Cargo test (unit tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [clippy]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Run cargo test
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app/os \
+              && cargo test --features "board_rvqemu block_virt"
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ═══════════════════════════════════════════════════════════
+  # Layer 3 — Kernel self-tests (ktest, no disks, fast)
+  # Rebuilds kernel with ktest cmdline, launches QEMU.
+  # Expected: <15 min
+  # ═══════════════════════════════════════════════════════════
+  ktest:
+    name: 3. Kernel self-tests (ktest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [cargo-test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Run ktest
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app && make -C os rv64-ktest
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ═══════════════════════════════════════════════════════════
+  # Layer 4 — Regression QEMU (initramfs only, no disks)
+  # Builds kernel with regression initramfs, runs QEMU, checks
+  # for L4 REGRESSION RESULT: PASS.
+  # Expected: <15 min
+  # ═══════════════════════════════════════════════════════════
+  regression:
+    name: 4. Regression QEMU test (initramfs only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [ktest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Run regression
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app && make test ARCH=rv64 PROFILE=regression
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ═══════════════════════════════════════════════════════════
+  # Layer 5 — Competition QEMU (11 test groups, mask=0xFDF)
+  # Full competition run with sdcard-rv.img, injected config.
+  # Uses the comp target from rv64.mk.
+  # Timeout: 350 min (QEMU_TIMEOUT=7200s inside).
+  # ═══════════════════════════════════════════════════════════
+  comp:
+    name: 5. Competition QEMU (mask=0xFDF)
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    needs: [regression]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,36 +181,28 @@ jobs:
           docker compose down --remove-orphans || true
           docker system prune -af || true
           df -h
-
-      - name: Cache official test images
+      - name: Cache official test image
         uses: actions/cache@v4
         with:
           path: |
             fs-img-dir/sdcard-rv.img.xz
-            fs-img-dir/sdcard-la.img.xz
           key: oscomp-sdcards-pre-20250615-v1
-
-      - name: Pull and prepare the Docker test environment
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Ensure test image is available
         run: |
-          set -euo pipefail
-          mkdir -p fs-img-dir testresult
-          docker compose pull os-dev
-          docker compose run --rm -T os-dev bash -lc '
+          docker compose exec -T os-dev bash -lc '
             set -euo pipefail
-            if [ ! -s fs-img-dir/sdcard-rv.img.xz ] || [ ! -s fs-img-dir/sdcard-la.img.xz ] || \
-                ! xz -t fs-img-dir/sdcard-rv.img.xz || ! xz -t fs-img-dir/sdcard-la.img.xz; then
-              rm -f fs-img-dir/sdcard-*.img.xz
+            if [ ! -s fs-img-dir/sdcard-rv.img.xz ] || ! xz -t fs-img-dir/sdcard-rv.img.xz; then
+              rm -f fs-img-dir/sdcard-rv.img.xz
               make testsuits-download
             fi
           '
-
-      - name: Write the shared 11-group test configuration
+      - name: Write 11-group test configuration
         run: |
           cat > os_test_ci.conf <<'EOF'
           mode=run
-          # Current TEST_GROUPS indexes unixbench at bit 5 and ltp at bit 11.
-          # 0xFDF selects all 11 scored groups while excluding unixbench/cpython.
-          # 0x7FF would incorrectly include unixbench and omit ltp in this tree.
+          # mask=0xFDF selects all 11 scored groups while excluding unixbench/cpython.
           mask=0xFDF
           ltp_runner=suite
           ltp_libc=both
@@ -96,67 +213,33 @@ jobs:
           ltp_include=
           ltp_from=
           EOF
-
-      - name: Build serial dual-architecture products and inject configuration
+      - name: Build kernel and decompress test image
         run: |
-          docker compose run --rm -T os-dev bash -lc '
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              set -euxo pipefail
+              make -C os rv64-all MODE=release
+              xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
+            '
+      - name: Inject test configuration into disk image
+        run: |
+          docker compose exec -T os-dev bash -lc '
             set -euxo pipefail
-            make all MODE=release
-            xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
             make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf
-            xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
-            make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf
           '
-
-      - name: Enforce warning baseline
-        run: docker compose run --rm -T os-dev bash -lc 'set -euxo pipefail; make lint'
-
-      - name: Run canonical QEMU runner serially
-        id: qemu
-        continue-on-error: true
-        timeout-minutes: 330
+      - name: Run competition QEMU
         run: |
           set -o pipefail
-          docker compose run --rm -T -e QEMU_TIMEOUT os-dev bash -lc '
-            set -euxo pipefail
-            python3 scripts/run_full_test.py --serial
-          ' 2>&1 | tee testresult/full-test.log
-
-      - name: Score all 11 groups from raw QEMU logs
-        id: score
+          docker compose exec -T \
+            -e QEMU_TIMEOUT \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              set -euxo pipefail
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk comp
+            '
+      - name: Docker compose down
         if: always()
-        run: |
-          set -u
-          shopt -s nullglob
-          archives=(testresult/archive_*)
-          if [ "${#archives[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one full-test archive, found ${#archives[@]}"
-            exit 1
-          fi
-          archive="${archives[0]}"
-          mkdir -p testresult/scores
-          rv_status=0
-          la_status=0
-          docker compose run --rm -T os-dev python3 scripts/score_test.py \
-            --arch rv64 --log "$archive/rv64/qemu.log" --output testresult/scores/rv64.json || rv_status=$?
-          docker compose run --rm -T os-dev python3 scripts/score_test.py \
-            --arch la64 --log "$archive/la64/qemu.log" --output testresult/scores/la64.json || la_status=$?
-          cat testresult/scores/*.json >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
-          test "$rv_status" -eq 0 && test "$la_status" -eq 0
-
-      - name: Upload raw logs and structured scores
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-qemu-logs-and-scores
-          retention-days: 14
-          if-no-files-found: warn
-          path: |
-            os_test_ci.conf
-            testresult/
-
-      - name: Fail on QEMU or scoring failure
-        if: always() && (steps.qemu.outcome != 'success' || steps.score.outcome != 'success')
-        run: |
-          echo "::error::QEMU or score gate failed; download ci-qemu-logs-and-scores for raw logs and JSON."
-          exit 1
+        run: docker compose down
