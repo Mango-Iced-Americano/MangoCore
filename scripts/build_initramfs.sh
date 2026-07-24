@@ -111,10 +111,15 @@ else
     INIT_DIR="${INIT_SRC%/*}"
     INITD_SRC="$INIT_DIR/initd"
     RUNNER_SRC="$INIT_DIR/test_runner"
+    LTPRUNNER_SRC="$INIT_DIR/ltprunner"
     if [ -f "$INITD_SRC" ] && [ -f "$RUNNER_SRC" ]; then
         mkdir -p "$STAGE/sbin" "$STAGE/usr/libexec/mangocore"
         install -m 0755 "$INITD_SRC" "$STAGE/sbin/init"
         install -m 0755 "$RUNNER_SRC" "$STAGE/usr/libexec/mangocore/test-runner"
+        if [ -f "$LTPRUNNER_SRC" ]; then
+            install -m 0755 "$LTPRUNNER_SRC" "$STAGE/ltprunner"
+            echo "[initramfs] installed /ltprunner from $LTPRUNNER_SRC"
+        fi
         echo "[initramfs] installed /sbin/init and test runner"
     else
         echo "[initramfs] ERROR: missing PID1 or test-runner binary under $INIT_DIR"
