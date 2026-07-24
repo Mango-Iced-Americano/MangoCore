@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+use alloc::format;
 use core::sync::atomic::{AtomicBool, Ordering};
 use user_lib::syscall::{sys_mkdirat, sys_mount};
 use user_lib::{
@@ -90,6 +92,41 @@ fn mount_pseudo_filesystems() {
 
 fn mount_disk(source: &'static str, target: &'static str) -> bool {
     try_mount(source, target, "ext4\0") || try_mount(source, target, "fat32\0")
+}
+
+fn try_bind_mount(source: &str, target: &str) {
+    let src = alloc::format!("{}\0", source);
+    let tgt = alloc::format!("{}\0", target);
+    let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
+    if ret == 0 {
+        println!("[initd] bind mount {} -> {}", source, target);
+    } else {
+        println!("[initd] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+    }
+}
+
+fn bind_tools_and_sdcard(tools_ok: bool, disk_ok: bool) {
+    // Tools disk: bind-mount key directories to root so writes persist across reboots.
+    if tools_ok {
+        for (src, dst) in [
+            ("/tools/bin", "/bin"),
+            ("/tools/sbin", "/sbin"),
+            ("/tools/lib", "/lib"),
+            ("/tools/usr", "/usr"),
+            ("/tools/root", "/root"),
+        ] {
+            try_bind_mount(src, dst);
+        }
+    }
+    // sdcard: bind-mount musl/glibc runtime directories.
+    if disk_ok {
+        for (src, dst) in [
+            ("/sdcard/musl", "/musl"),
+            ("/sdcard/glibc", "/glibc"),
+        ] {
+            try_bind_mount(src, dst);
+        }
+    }
 }
 
 fn boot_profile() -> &'static str {
@@ -210,6 +247,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
                 println!("[initd] /etc is bind-mounted from tools disk");
             }
         }
+        // Bind-mount tools and sdcard subdirectories so writes persist.
+        bind_tools_and_sdcard(tools_ok, disk_ok);
     } else {
         // No block device in regression mode
         let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
