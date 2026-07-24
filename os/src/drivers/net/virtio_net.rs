@@ -34,13 +34,15 @@ impl VirtIONetWrapper {
             let transport = MmioTransport::new(
                 NonNull::new_unchecked(VIRTIO_NET_BASE as *mut VirtIOHeader),
                 0x1000,
-            ).ok()?;
+            )
+            .ok()?;
 
             // 创建网卡设备，注意这里直接把 VirtioHal 传进去了
             let net = VirtIONet::<VirtioHal, MmioTransport<'static>, QUEUE_SIZE>::new(
                 transport,
                 NET_BUF_SIZE,
-            ).ok()?;
+            )
+            .ok()?;
 
             Some(Self(Mutex::new(net)))
         }
@@ -51,8 +53,8 @@ impl VirtIONetWrapper {
 impl VirtIONetWrapper {
     pub fn new() -> Option<Self> {
         let transport = enumerate_virtio_pci(DeviceType::Network)?;
-        let net = VirtIONet::<VirtioHal, PciTransport, QUEUE_SIZE>::new(transport, NET_BUF_SIZE)
-            .ok()?;
+        let net =
+            VirtIONet::<VirtioHal, PciTransport, QUEUE_SIZE>::new(transport, NET_BUF_SIZE).ok()?;
 
         Some(Self(Mutex::new(net)))
     }
@@ -66,7 +68,8 @@ impl NetDevice for VirtIONetWrapper {
                 let packet = rx_buffer.packet();
                 let len = packet.len();
                 buf[..len].copy_from_slice(packet);
-                net.recycle_rx_buffer(rx_buffer).expect("Failed to recycle rx buffer");
+                net.recycle_rx_buffer(rx_buffer)
+                    .expect("Failed to recycle rx buffer");
                 Some(len)
             }
             Err(virtio_drivers::Error::NotReady) => None, // 暂无数据包

@@ -1,0 +1,50 @@
+# another_ext4 post-persistence-fix iozone — rv64
+
+## Run metadata
+
+- Date: 2026-07-23
+- Kernel: `8cc2751d-dirty` (`another_ext4`, P9/P10 reverted; P8/P11 retained)
+- Container: `fba442b0132ed67fdd5b17f188e8323464b131951a1c6349e52b0082809c711d`
+- Mount: `/home/pxy/projects/MangoCore -> /app`
+- Config: `os_test_iozone.conf`, SHA-256 `fae48ebbb7c82813349fff23a963d2ad94e8e1b5b30cbf73f249d927546baf16` (`mode=run`, `mask=0x010`, `diag=1`)
+- Preparation: restored `sdcard-rv.img` from `fs-img-dir/sdcard-rv.img.xz`; rebuilt rv64 with `EXTRA_FEATURES=perf_diag LOG=error`; injected the configuration once; used `/app/empty-disk.img` as the tools disk.
+- Run: `docker compose exec -T os-dev bash -c "cd /app/os && DISK_RV=/app/empty-disk.img timeout 300 make -f make/rv64.mk comp LOG=error 2>&1" > /tmp/iozone-fix.log`
+
+`timeout` cannot directly execute an environment assignment, so `DISK_RV` was placed before `timeout`; this is the shell-equivalent invocation of the requested `comp` target.
+
+## Musl throughput — 4 processes, kB/sec
+
+The completed musl group exited 0 in 153 s.  The reference is the fresh-image rv64 baseline in `baseline-rejection.txt` (approximately 2,000 kB/sec writers).
+
+| workload | children post-fix | parent post-fix | children baseline | parent baseline | children delta | parent delta |
+|---|---:|---:|---:|---:|---:|---:|
+| initial writers | 2234.64 | 2165.35 | 2231.20 | 2152.07 | +0.15% | +0.62% |
+| rewriters | 2326.56 | 2275.77 | 2197.53 | 2152.78 | +5.87% | +5.71% |
+| readers | 7763.08 | 7267.02 | 7859.11 | 7278.29 | -1.22% | -0.15% |
+
+Additional completed musl measurements: random writers 2017.22/1965.29 (children/parent), random readers 5622.22/5354.43, reverse readers 5648.52/5382.52, stride readers 5730.74/5424.09, fwriters 2220.13/2163.84, and pread readers 8127.12/7581.63.
+
+**Assessment:** initial writer throughput remains above the ~2000 kB/sec baseline; the synchronous persistence checkpoint has no material initial-write regression in this sample. Any checkpoint-related reduction would be acceptable for correctness.
+
+## Perf counters
+
+| counter | post-fix musl |
+|---|---:|
+| `pc_write_cycles` | 1,090,190,366 |
+| `pc_wb_cycles` | 35,388,449,026 |
+| `ext4_alloc_cycles` | 0 |
+
+The same-workload baseline contains no emitted perf-counter block, so a numeric counter delta cannot be calculated without fabricating a baseline. The values above are retained for the next like-for-like run.
+
+## another_ext4 diagnostics
+
+- `plan_reject:out_of_bounds`: 3,126 lines; no `before_eof`, `append_shape`, or `direct_reject` line was observed in the captured output.
+- `[ext4_another] write_pages`: 2,100 lines, all `direct=false`; no `direct=true` line was emitted.
+- Representative rejection: `[ext4_diag] plan_reject:out_of_bounds lblock=0 count=1 min=4 max=256`
+- Representative writeback: `[ext4_another] write_pages ino=3215 pages=1 total_bytes=1024 prepare_cycles=44640714 commit_cycles=4638648 direct=false`
+
+## Completion boundary
+
+The host 300 s cap captured the full musl group and the beginning of glibc automatic I/O, but no glibc group-end marker, glibc stats block, or `run_selected_groups done` marker. This is therefore a valid completed musl measurement and a partial overall iozone capture; no glibc or full-suite claim is made.
+
+Raw serial log: `/tmp/iozone-fix.log` on the collection host.

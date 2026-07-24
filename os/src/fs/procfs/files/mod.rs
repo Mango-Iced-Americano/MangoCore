@@ -13,6 +13,7 @@ pub mod net_igmp;
 pub mod net_igmp6;
 pub mod net_raw;
 pub mod net_raw6;
+pub mod net_resolv;
 pub mod net_route;
 pub mod net_tcp;
 pub mod net_tcp6;
@@ -357,6 +358,12 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         "raw6",
         InodeMode::from_bits_truncate(0o444),
         net_raw6::net_raw6_content,
+        0,
+    )?;
+    net_dir.add_file(
+        "resolv.conf",
+        InodeMode::from_bits_truncate(0o444),
+        net_resolv::net_resolv_content,
         0,
     )?;
     net_dir.add_file(

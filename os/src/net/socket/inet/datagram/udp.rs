@@ -25,10 +25,10 @@ use smoltcp::{
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion, Ipv4Address},
 };
 
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::config::NetInterfaceInner;
 use crate::net::socket::inet::common::{BoundInner, PortManager};
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
-use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::task::WaitQueue;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
@@ -53,6 +53,7 @@ struct UdpSocketInner {
     recvbuf_size: usize,
     sendbuf_size: usize,
     reuse_addr: bool,
+    ip_recv_err: bool,
     multicast_group_joined: bool,
     ipv6_checksum_offset: Option<u32>,
 }
@@ -115,7 +116,12 @@ impl Socket for UdpSocket {
         self.bound
             .lock()
             .bind(self.socket_handler, ifindex, bind_addr.addr, bind_addr.port);
-        log::debug!("udp_bind: addr={:?} port={} ifindex={}", bind_addr.addr, bind_addr.port, ifindex);
+        log::debug!(
+            "udp_bind: addr={:?} port={} ifindex={}",
+            bind_addr.addr,
+            bind_addr.port,
+            ifindex
+        );
         Ok(0)
     }
 
@@ -204,7 +210,11 @@ impl Socket for UdpSocket {
         self.bound
             .lock()
             .bind(self.socket_handler, ifindex, local_ep.addr, local_ep.port);
-        log::debug!("udp_connect: remote={:?} ifindex={}", remote_endpoint, ifindex);
+        log::debug!(
+            "udp_connect: remote={:?} ifindex={}",
+            remote_endpoint,
+            ifindex
+        );
         NET_INTERFACE.poll();
         Ok(0)
     }
@@ -279,6 +289,15 @@ impl Socket for UdpSocket {
         Ok(0)
     }
 
+    fn ip_recv_err(&self) -> Result<bool, SyscallErr> {
+        Ok(self.inner.lock().ip_recv_err)
+    }
+
+    fn set_ip_recv_err(&self, enabled: bool) -> SyscallRet {
+        self.inner.lock().ip_recv_err = enabled;
+        Ok(0)
+    }
+
     fn set_bind_to_device(&self, ifname: &str) -> SyscallRet {
         if ifname.is_empty() {
             *self.bound_ifindex.lock() = None;
@@ -291,7 +310,11 @@ impl Socket for UdpSocket {
         match iface {
             Some(iface) => {
                 *self.bound_ifindex.lock() = Some(iface.nic_id() as u32);
-                log::info!("[UdpSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                log::info!(
+                    "[UdpSocket] bound to device {} (ifindex={})",
+                    ifname,
+                    iface.nic_id()
+                );
                 Ok(0)
             }
             None => Err(SyscallErr::ENODEV),
@@ -592,7 +615,9 @@ impl UdpSocket {
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = socket::udp::Socket::new(rx_buf, tx_buf);
-        let socket_handler = NET_INTERFACE.add_routed_socket(InetProtocol::Udp, socket).unwrap();
+        let socket_handler = NET_INTERFACE
+            .add_routed_socket(InetProtocol::Udp, socket)
+            .unwrap();
         log::info!("[UdpSocket::new] new {}", socket_handler);
         NET_INTERFACE.poll();
         Self {
@@ -605,6 +630,7 @@ impl UdpSocket {
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
+                ip_recv_err: false,
                 multicast_group_joined: false,
                 ipv6_checksum_offset: None,
             }),
@@ -662,9 +688,7 @@ impl UdpSocket {
             return true;
         }
         match addr {
-            IpAddress::Ipv4(ip) => {
-                ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
-            }
+            IpAddress::Ipv4(ip) => ip.is_loopback() || crate::net::net_core::is_local_addr(ip),
             IpAddress::Ipv6(ip) => ip.is_loopback(),
         }
     }

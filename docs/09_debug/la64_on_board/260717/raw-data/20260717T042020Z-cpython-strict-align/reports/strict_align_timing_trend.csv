@@ -1,0 +1,20 @@
+benchmark,old_production_elapsed_seconds,strict_diag_elapsed_seconds,auxiliary_speedup,strict_user_seconds,strict_sys_seconds,strict_sys_percent,strict_unaligned_traps,interpretation
+bm_bytesio,69.74137670,5.82614787,11.97,4.467131,1.349930,23.17,0,auxiliary_only
+bm_chaos,199.54113057,14.59169547,13.67,14.513306,0.050051,0.34,0,auxiliary_only
+bm_decimal,39.15315191,15.29126354,2.56,14.606998,0.648359,4.24,0,auxiliary_only
+bm_dict,61.23026413,6.24629224,9.80,4.953064,1.280471,20.50,0,auxiliary_only
+bm_fileio,48.67692665,43.12707679,1.13,8.607959,34.418366,79.81,0,ext4_still_dominates
+bm_float,150.03331754,10.35825785,14.48,10.316053,0.027063,0.26,0,auxiliary_production_trend_and_separate_matched_diag_evidence
+bm_fork,124.35805931,38.01291723,3.27,0.554104,0.780300,2.05,0,parent_rusage_excludes_children
+bm_hash,7.84850686,3.41640009,2.30,3.357461,0.056183,1.64,0,auxiliary_only
+bm_json_loads,255.94736825,80.79507381,3.17,80.288421,0.297004,0.37,0,auxiliary_only
+bm_list,54.58464682,21.12246662,2.58,12.969275,8.105259,38.37,0,auxiliary_only
+bm_nbody,8.70811702,7.59548427,1.15,7.563465,0.020751,0.27,0,low_old_trap_negative_control
+bm_pidigits,6.09329696,4.66950223,1.30,3.658342,1.003495,21.49,0,auxiliary_only
+bm_regex,421.44744253,4.53768746,92.88,4.290953,0.239877,5.29,0,auxiliary_only_no_old_matched_trap_counter
+bm_richards,33.19738164,2.52114884,13.17,2.509645,0.010856,0.43,0,auxiliary_only
+bm_sort,83.75005545,9.56716802,8.75,8.590621,0.953681,9.97,0,auxiliary_only
+bm_spectral_norm,99.80495559,8.88051202,11.24,8.840344,0.026346,0.30,0,auxiliary_only
+bm_string,15.66980023,1.35406829,11.57,0.908570,0.446945,33.01,0,auxiliary_production_trend_and_separate_near_matched_diag_evidence
+bm_thread,249.01989485,25.55725312,9.74,23.755384,0.857149,3.35,0,auxiliary_only_no_old_matched_trap_counter
+TOTAL,1928.80569301,303.47041576,6.36,214.751096,50.572086,,0,"84.27% lower elapsed, but old production versus new diag-on/full-runtime rebuild is not an isolated timing A/B"

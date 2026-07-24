@@ -1,0 +1,219 @@
+{
+  "artifacts": [
+    {
+      "path": "/Users/luzimo/dev/MangoCore/kernel-2k1000-persist-shell.ui",
+      "sha256": "bf1668b9bdbd1068914ac1a683ef58c821c6b03af1016f69771a9a2c25ba63c0",
+      "size": 16756992
+    },
+    {
+      "path": "/Users/luzimo/dev/MangoCore/target/cpython-bench/cpython-bench-suite.zip",
+      "sha256": "5059b61e4b241f35ef2f46a859df1848dd056e3a08d2127f7b2bd340a9abdb4e",
+      "size": 73688
+    }
+  ],
+  "created_utc": "2026-07-16T10:23:58.586928Z",
+  "docker_image": {
+    "id": "sha256:5c04dbc38562b1cd578c33c9cd321d4731cb8cdd00c82b2320a4350754faa6b0",
+    "name": "zhouzhouyi/os-contest:20260104",
+    "repo_digests": "[\"zhouzhouyi/os-contest@sha256:5c04dbc38562b1cd578c33c9cd321d4731cb8cdd00c82b2320a4350754faa6b0\"]"
+  },
+  "git": {
+    "branch": "la64-on-board",
+    "dirty_diff_sha256": "e5e835b9b1676857efff6ea2d336608efa53493511fcabae67b9e65f4585ad4e",
+    "head": "934c4af9f9c84d38b4dff9c7c2a58bccc83f6ee9",
+    "status": "M .agents/skills/mango-workflow/references/debugging-patterns.md\n M .agents/skills/mango-workflow/references/harness-patterns.md\n M .gitignore\n M Makefile\n M docs/01_architecture/initialization-flow.md\n M docs/03_fs/2k1000-full-test-disk.md\n M docs/03_fs/page-cache.md\n M docs/06_net/device-stack-and-poll.md\n M docs/07_driver/2k1000-ahci.md\n M docs/09_debug/la64_on_board/development-log.md\n M docs/09_debug/perf_diag.md\n M docs/Work_Log.md\n M os/Makefile\n M os/src/drivers/block/sata_blk.rs\n M os/src/drivers/net/gmac_2k1000.rs\n M os/src/fs/page_cache.rs\n M os/src/fs/sysfs/files/diag.rs\n M os/src/hal/arch/loongarch64/trap/mod.rs\n M os/src/hal/arch/riscv/trap/mod.rs\n M os/src/lang_items.rs\n M os/src/main.rs\n M os/src/mm/frame_allocator.rs\n M os/src/mm/heap_allocator.rs\n M os/src/net/adapter.rs\n M os/src/net/config.rs\n M os/src/syscall/mod.rs\n M os/src/task/perf.rs\n M scripts/boot_2k1000_tftp.py\n M scripts/diag_smoke_test.sh\n M scripts/write_2k1000_p3.py\n M user/src/lang_items.rs\n M user/tools/cpython/cpython_testcode.sh\n M user/tools/cpython/run_cpython.sh"
+  },
+  "host": {
+    "docker": "29.5.2/29.5.2",
+    "machine": "arm64",
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.9.6"
+  },
+  "notes": [
+    "2K1000LA production Python benchmark; suite and all writable work paths on /persist ext4; one warmup plus one measured sample"
+  ],
+  "repository": "/Users/luzimo/dev/MangoCore",
+  "run_id": "20260716T102350Z-cpython-ext4-production",
+  "schema": 1,
+  "security": {
+    "environment_recorded": false,
+    "redaction": "API keys, Authorization bearer values and known key variables"
+  },
+  "serial": {
+    "device": "/dev/cu.wchusbserial120",
+    "owners": []
+  },
+  "source": {
+    "build_input_diff_sha256": "94a8ed6236cc836e3792d23ced6d517d8c7949690053e7b38dee62b6f0cc9eaf",
+    "dirty_diff_sha256": "e5e835b9b1676857efff6ea2d336608efa53493511fcabae67b9e65f4585ad4e",
+    "head": "934c4af9f9c84d38b4dff9c7c2a58bccc83f6ee9",
+    "untracked_input_sha256": "ff1b03e99f6dc7179f33805d725767004e4d116d7d8da93ebb2ec7330ecbc2ef",
+    "untracked_inputs": [
+      {
+        "path": "scripts/backup_2k1000_p3.py",
+        "sha256": "e78da67cf3153f31d920a5f9f5ce99feacfcfb685f09a1ad0f5b9fb95fd3ceaf",
+        "size": 4879
+      },
+      {
+        "path": "scripts/board/backup_2k1000_p3.sh",
+        "sha256": "75c39c94dbc4773473859aca886ad9a07176184b8c0bbd2fa24cbc03bf385469",
+        "size": 4702
+      },
+      {
+        "path": "scripts/deploy_cpython_bench.py",
+        "sha256": "897f1ba31967305e797a81c6943b811656210cc7acb9df756f5e056b6221e444",
+        "size": 4799
+      },
+      {
+        "path": "scripts/kernel_perf.py",
+        "sha256": "e714c1160cb5346b4158d02ebeffd48ba0b4e0194f3d20ee5f805f8c3e59e71b",
+        "size": 39340
+      },
+      {
+        "path": "scripts/package_cpython_bench.py",
+        "sha256": "673c0c3adf80fc6107e41ca8aa1435517cc6d5595303f75f825a91a479a6d2e5",
+        "size": 3051
+      },
+      {
+        "path": "scripts/qemu_diag_smoke.py",
+        "sha256": "7b2b910ee3f68f6512ce5d693b4c44a911c3cc3e6c894aa0b037bebe749afbf0",
+        "size": 3038
+      },
+      {
+        "path": "scripts/run_cpython_bench_matrix.py",
+        "sha256": "4c971951cc9ca7a82b6141f0421f1fa804a69f47b98feabc6bdc206a651c5a10",
+        "size": 4746
+      },
+      {
+        "path": "user/tools/cpython/bench/PYPERFORMANCE_LICENSE.txt",
+        "sha256": "1281fd70e5459a1d6fa392158ec755d45f0de7c766919860d5adcad351b1ada3",
+        "size": 1040
+      },
+      {
+        "path": "user/tools/cpython/bench/README.md",
+        "sha256": "eec36e70c016b7d82d3eed1e4dd19842f2573e2d00f39f6e3207c4834e158171",
+        "size": 2458
+      },
+      {
+        "path": "user/tools/cpython/bench/__init__.py",
+        "sha256": "1d5c65c40eb31051b1fd1d918b8bdd4d7af40b1e8aefab9aebf2c94a5d55e8c1",
+        "size": 151
+      },
+      {
+        "path": "user/tools/cpython/bench/bench_runner.py",
+        "sha256": "586c5abc1fabc20c3ad45117afd858f7be185c06e7348747f58713996e11020b",
+        "size": 10057
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_bytesio.py",
+        "sha256": "0d73fa4f1573eccd07eacb10b61b15a8946e752a286ca8f635dcf0b26bea16ca",
+        "size": 1700
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_chaos.py",
+        "sha256": "7581be455266b4571605558d050d032b35f361239655e9a2df4b936452da467f",
+        "size": 1231
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_decimal.py",
+        "sha256": "409184410691a522a85f9223f7b38e1f2b6f4cf30645f687543f4591424f5647",
+        "size": 1407
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_dict.py",
+        "sha256": "b814bccda89cec1354d9030694b44c9b5c895cf43768b48da262124127c1b357",
+        "size": 1419
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_fileio.py",
+        "sha256": "6028f4e8b26e949187f0414d830e4aeda0b46628a7449e9e8b9d6630300109e3",
+        "size": 4648
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_float.py",
+        "sha256": "d45dc5c511ee9443c4597f5853d25d930b6e99d233c2806e4f95c19fccf6fe5f",
+        "size": 918
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_fork.py",
+        "sha256": "65254cfe40829cbc19b42960c867c48f96dc93cd18c4f4842603cabfe4218fa1",
+        "size": 2712
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_hash.py",
+        "sha256": "fb49b9467cdba13bb4efbdafb16ada4a8fa5105f02a84d4da2fd9c82f413b836",
+        "size": 2208
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_json_loads.py",
+        "sha256": "a326947fa23ab7e98a9b6cf3d458da15b8ea19c6790cf31060b6bea17991fd14",
+        "size": 1561
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_list.py",
+        "sha256": "d842a2c384cd1c6eb71c4377c6eaf18e510f6bfcbc926a8276324b67ed9362e2",
+        "size": 1625
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_nbody.py",
+        "sha256": "2c54c012fe1decd0c365b018b54a677e4152fa2e8fecb97457f530070b3102bc",
+        "size": 3785
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_pidigits.py",
+        "sha256": "092af6e6794c2b93440c117abb370c3a81e9094bf4e7ea49c5f897a3abc64784",
+        "size": 1192
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_regex.py",
+        "sha256": "660fca777d12afc9ec484963dabfba05881fd1ee8f0c441047b1d706a1a3bf38",
+        "size": 2044
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_richards.py",
+        "sha256": "ca469559ad7a31d0ad0e9d56e5b14b0ea49df912aeac1678e295b98bba7e43a1",
+        "size": 9998
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_sort.py",
+        "sha256": "86f3c9347c041933bee79b13014bf9abd676a2dac326736592e75227f197a4fd",
+        "size": 1952
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_spectral_norm.py",
+        "sha256": "8b2e4f6ca06d6d81ef968464b96b5159cb28246fc322a66c30fdee0d2e022f5c",
+        "size": 1589
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_string.py",
+        "sha256": "197961d009b9d3c1b0cadcba3fc3b6fe8ebb0ad2cd6fd0a98ec2c671c6cea6be",
+        "size": 1470
+      },
+      {
+        "path": "user/tools/cpython/bench/bm_thread.py",
+        "sha256": "0db8ea4201dfeb60e301f1249797abae7e06cd8ea419a4cf3e0d7c9b5010b387",
+        "size": 2604
+      },
+      {
+        "path": "user/tools/cpython/bench/diag_math_unaligned.py",
+        "sha256": "7caec5717382b3fa21bf39da55523f72589db80cc6f5fa37e4d1ef54310fef13",
+        "size": 2564
+      },
+      {
+        "path": "user/tools/cpython/bench/diag_mmap_release.py",
+        "sha256": "5976f90678d77f34dc1330a22c3bec48154e0fd97b63a9bf20b4e7e12a54a9d3",
+        "size": 1561
+      },
+      {
+        "path": "user/tools/cpython/cpython_benchmark.sh",
+        "sha256": "8f2ba2c998deaf4551ba564b019080e384c33f637d26e2455c021ec0402ff1b0",
+        "size": 3231
+      },
+      {
+        "path": "user/vendor/buddy_system_allocator/Cargo.lock",
+        "sha256": "c7ba960fb407945cc90e3b29f98ffbefb137fd08905de18c355046e92137a421",
+        "size": 382
+      }
+    ]
+  }
+}

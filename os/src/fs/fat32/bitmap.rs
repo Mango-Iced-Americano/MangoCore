@@ -1,6 +1,5 @@
 use super::layout::BAD_BLOCK;
 use super::BlockDevice;
-use crate::hal::BLOCK_SZ;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use spin::{Mutex, MutexGuard};
 
@@ -8,23 +7,27 @@ const VACANT_CLUS_CACHE_SIZE: usize = 64;
 const FAT_ENTRY_FREE: u32 = 0;
 const FAT_ENTRY_RESERVED_TO_END: u32 = 0x0FFF_FFF8;
 pub const EOC: u32 = 0x0FFF_FFFF;
-const SECTORS_PER_BLOCK: usize = BLOCK_SZ / 512;
 /// *In-memory* data structure
 /// 内存内的fat数据结构.
-/// 在Fat32文件系统中，有两个fat表，这里只使用第一张fat表
-///
-/// # Limitations
-///
-/// 未实现 FAT 检错功能：当前仅读取第一张 FAT 表，不利用第二张 FAT 表
-/// 进行数据完整性校验。Exit condition: 实现双 FAT 表交叉验证或至少检测不一致。
+/// FAT32 normally keeps mirrored FAT copies. Reads use the active copy selected
+/// by BPB_ExtFlags, and updates are mirrored unless the BPB explicitly disables
+/// mirroring.
 pub struct Fat {
     /// The first block id of FAT.
     /// In FAT32, this is equal to bpb.rsvd_sec_cnt
     start_block_id: usize,
     /// size fo sector in bytes copied from BPB
     byts_per_sec: usize,
+    /// Number of sectors occupied by one FAT copy.
+    sectors_per_fat: usize,
+    /// Number of FAT copies recorded in the BPB.
+    num_fats: usize,
+    /// FAT copy used for reads when BPB_ExtFlags disables mirroring.
+    active_fat: usize,
+    /// Whether writes must be mirrored to every FAT copy.
+    mirror_writes: bool,
     /// The total number of FAT entries
-    tot_ent: usize,
+    max_cluster_exclusive: usize,
     /// The queue used to store known vacant clusters
     vacant_clus: Mutex<VecDeque<u32>>,
     /// The final unused cluster id we found
@@ -32,42 +35,61 @@ pub struct Fat {
 }
 
 impl Fat {
-    /// 从 FAT 表中读取指定扇区的 u32 entry（直接块设备读，替代旧 BlockCacheManager）
+    /// Read one FAT32 entry. The mount path has already adapted `block_device`
+    /// so block IDs are expressed in BPB_BytsPerSec units.
     fn read_fat_entry(
         &self,
         block_device: &Arc<dyn BlockDevice>,
-        sec_num: usize,
+        fat_sector_offset: usize,
         offset: usize,
     ) -> u32 {
-        // FAT 扇区是 512 字节，BlockDevice 以 BLOCK_SZ(4096) 为单位
-        let block_id = sec_num / SECTORS_PER_BLOCK;
-        let sector_off = (sec_num % SECTORS_PER_BLOCK) * 512;
-        let mut buf = alloc::vec![0u8; BLOCK_SZ];
-        block_device
-            .read_block(block_id, &mut buf)
-            .expect("failed to read FAT block");
-        let off = sector_off + offset;
-        u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+        assert!(fat_sector_offset < self.sectors_per_fat);
+        assert!(offset
+            .checked_add(4)
+            .is_some_and(|end| end <= self.byts_per_sec));
+        let sector =
+            self.start_block_id + self.active_fat * self.sectors_per_fat + fat_sector_offset;
+        let mut buf = alloc::vec![0u8; self.byts_per_sec];
+        block_device.read_block(sector, &mut buf);
+        u32::from_le_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ])
     }
 
     fn write_fat_entry(
         &self,
         block_device: &Arc<dyn BlockDevice>,
-        sec_num: usize,
+        fat_sector_offset: usize,
         offset: usize,
         val: u32,
     ) {
-        let block_id = sec_num / SECTORS_PER_BLOCK;
-        let sector_off = (sec_num % SECTORS_PER_BLOCK) * 512;
-        let mut buf = alloc::vec![0u8; BLOCK_SZ];
-        block_device
-            .read_block(block_id, &mut buf)
-            .expect("failed to read FAT block");
-        let off = sector_off + offset;
-        buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
-        block_device
-            .write_block(block_id, &buf)
-            .expect("failed to write FAT block");
+        assert!(fat_sector_offset < self.sectors_per_fat);
+        assert!(offset
+            .checked_add(4)
+            .is_some_and(|end| end <= self.byts_per_sec));
+        let first_fat = if self.mirror_writes {
+            0
+        } else {
+            self.active_fat
+        };
+        let fat_count = if self.mirror_writes { self.num_fats } else { 1 };
+        for fat_index in first_fat..first_fat + fat_count {
+            let sector = self.start_block_id + fat_index * self.sectors_per_fat + fat_sector_offset;
+            let mut buf = alloc::vec![0u8; self.byts_per_sec];
+            block_device.read_block(sector, &mut buf);
+            let old = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
+            let updated = (old & 0xF000_0000) | (val & EOC);
+            buf[offset..offset + 4].copy_from_slice(&updated.to_le_bytes());
+            block_device.write_block(sector, &buf);
+        }
     }
 
     /// 获取当前fat表项指向的的下一个簇号
@@ -78,7 +100,7 @@ impl Fat {
     ) -> u32 {
         self.read_fat_entry(
             block_device,
-            self.this_fat_sec_num(current_clus_num),
+            self.this_fat_sector_offset(current_clus_num),
             self.this_fat_ent_offset(current_clus_num),
         ) & EOC
     }
@@ -103,20 +125,54 @@ impl Fat {
     }
 
     /// Constructor for fat
-    pub fn new(rsvd_sec_cnt: usize, byts_per_sec: usize, clus: usize) -> Self {
+    pub fn new(
+        rsvd_sec_cnt: usize,
+        byts_per_sec: usize,
+        sectors_per_fat: usize,
+        num_fats: usize,
+        ext_flags: u16,
+        cluster_count: usize,
+    ) -> Self {
+        assert!(byts_per_sec >= 512 && byts_per_sec.is_power_of_two());
+        assert!(sectors_per_fat > 0);
+        assert!(num_fats > 0);
+        let mirror_writes = ext_flags & 0x0080 == 0;
+        let active_fat = if mirror_writes {
+            0
+        } else {
+            (ext_flags & 0x000f) as usize
+        };
+        assert!(active_fat < num_fats, "active FAT index is out of range");
+        let max_cluster_exclusive = cluster_count
+            .checked_add(2)
+            .expect("FAT cluster count overflow");
+        let fat_entry_capacity = sectors_per_fat
+            .checked_mul(byts_per_sec)
+            .and_then(|bytes| bytes.checked_div(4))
+            .expect("FAT entry capacity overflow");
+        assert!(
+            max_cluster_exclusive <= fat_entry_capacity,
+            "data cluster count exceeds FAT capacity"
+        );
         Self {
             start_block_id: rsvd_sec_cnt,
             byts_per_sec,
-            tot_ent: clus,
+            sectors_per_fat,
+            num_fats,
+            active_fat,
+            mirror_writes,
+            // FAT cluster numbers start at 2, so N data clusters occupy IDs
+            // 2..N+2 rather than 0..N.
+            max_cluster_exclusive,
             vacant_clus: Mutex::new(VecDeque::new()),
-            hint: Mutex::new(0),
+            hint: Mutex::new(2),
         }
     }
 
     #[inline(always)]
-    pub fn this_fat_sec_num(&self, clus_num: u32) -> usize {
+    pub fn this_fat_sector_offset(&self, clus_num: u32) -> usize {
         let fat_offset = clus_num * 4;
-        (self.start_block_id as u32 + (fat_offset / (self.byts_per_sec as u32))) as usize
+        (fat_offset / self.byts_per_sec as u32) as usize
     }
 
     #[inline(always)]
@@ -133,7 +189,7 @@ impl Fat {
         let current = current.unwrap();
         self.write_fat_entry(
             block_device,
-            self.this_fat_sec_num(current),
+            self.this_fat_sector_offset(current),
             self.this_fat_ent_offset(current),
             next,
         )
@@ -181,19 +237,24 @@ impl Fat {
             return None;
         }
         let free_clus_id = free_clus_id.unwrap();
-        **hlock = (free_clus_id + 1) as usize % self.tot_ent;
+        **hlock = if free_clus_id as usize + 1 < self.max_cluster_exclusive {
+            free_clus_id as usize + 1
+        } else {
+            2
+        };
 
         self.set_next_clus(block_device, last, free_clus_id);
         Some(free_clus_id)
     }
 
     fn get_next_free_clus(&self, start: u32, block_device: &Arc<dyn BlockDevice>) -> Option<u32> {
-        for clus_id in start..self.tot_ent as u32 {
+        let start = start.max(2).min(self.max_cluster_exclusive as u32);
+        for clus_id in start..self.max_cluster_exclusive as u32 {
             if FAT_ENTRY_FREE == self.get_next_clus_num(clus_id, block_device) {
                 return Some(clus_id);
             }
         }
-        for clus_id in 0..start {
+        for clus_id in 2..start {
             if FAT_ENTRY_FREE == self.get_next_clus_num(clus_id, block_device) {
                 return Some(clus_id);
             }

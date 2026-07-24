@@ -4,7 +4,7 @@ module: "fs"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/vfs/"
 entry_points:
@@ -76,6 +76,7 @@ BlockDevice trait (块设备: read_block, write_block)
 
 ```rust
 pub trait FileSystem: Any + Send + Sync + Debug {
+    fn identity_key(&self) -> usize;
     fn root_inode(&self) -> Arc<dyn IndexNode>;
     fn info(&self) -> FsInfo;
     fn name(&self) -> &str;
@@ -83,6 +84,7 @@ pub trait FileSystem: Any + Send + Sync + Debug {
     fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<SuperBlock, SyscallErr>;
     fn support_readahead(&self) -> bool;
     fn permission_policy(&self) -> FsPermissionPolicy;
+    fn on_umount(&self) -> Result<(), SyscallErr>;
 }
 ```
 
@@ -91,6 +93,10 @@ pub trait FileSystem: Any + Send + Sync + Debug {
 - `info()`: 返回 `FsInfo`，包含块设备 ID、文件名最大长度、支持的特性列表。
 - `super_block()`: 返回 `SuperBlock`，提供 `statfs` 所需的块大小、总块数、空闲块数等信息。
 - `support_readahead()`: 指示该文件系统是否支持 PageCache 预读。
+- `identity_key()`: 返回本次启动期的文件系统实例身份，供跨 bind mount 的 inode/cache
+  规范化使用。
+- `on_umount()`: 可失败 teardown；只有全部写回并脱钩后才成功。MountFS lifecycle 在
+  失败时保持 Dying 并于后续 drain 重试，回调期间不持全局 registry 锁。
 
 ### IndexNode trait
 

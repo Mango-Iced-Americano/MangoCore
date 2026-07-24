@@ -1,5 +1,4 @@
 mod block_dev;
-mod mem_blk;
 pub mod partition;
 mod sata_blk;
 #[cfg(feature = "block_virt")]
@@ -9,8 +8,6 @@ pub mod virtio_blk_pci;
 pub mod virtio_dma_pool;
 pub(crate) use block_dev::validate_block_buffer_length;
 pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceResult};
-#[cfg(feature = "block_mem")]
-type BlockDeviceImpl = mem_blk::MemBlockWrapper;
 #[cfg(feature = "block_sata")]
 type BlockDeviceImpl = sata_blk::SataBlock;
 #[cfg(feature = "block_virt")]

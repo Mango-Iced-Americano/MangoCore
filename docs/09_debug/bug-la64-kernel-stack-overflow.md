@@ -144,3 +144,44 @@ make la64-run
 **验证状态：**
 - 2026-06-18: 64KB 栈 `clone09` 必现溢出 → 临时调至 128KB 绕过
 - 128KB 是否足够其他深调用场景（LTP 全量）：待跑全量验证
+
+---
+
+## 2026-07-10 更新：2K1000LA 实板栈窗口必须符合 40 位 VALEN
+
+guard page 映射栈在 QEMU 上验证有效，但最初直接把 QEMU 栈窗口用于 2K1000LA，导致首个任务创建时访问栈顶即 panic：
+
+```text
+[bringup][kstack:01] ... probe=0xffffff7fffffeff8 ...
+Exception(AddressError), bad addr=0xffffff7fffffeff8, subcode=1
+```
+
+实板 `CPUCFG1=0x03e2727e`，按 LoongArch `PABITS=[11:4]`、`VABITS=[19:12]` 解码后，`PALEN=VALEN=40`。对于 40 位虚拟地址，`0xffffff8000000000` 是第一个合法高半地址；旧 `KERNEL_STACK_TOP=MMAP_BASE-PAGE_SIZE` 位于它下方，因此属于非规范地址。该异常发生在页表查询之前，与 PGDH、PTE、TLB refill 或 `__switch` ABI 无关。
+
+修复后的平台布局：
+
+| 平台 | PALEN / VALEN | kernel stack window |
+|------|---------------|---------------------|
+| LA64 QEMU | 48 / 48 | `MMAP_BASE - PAGE_SIZE` 向下 |
+| 2K1000LA | 40 / 40 | `MMAP_END - PAGE_SIZE` 向下 |
+
+两条路径都保留 128KiB 映射栈和每 slot 一个 guard page。实板首个栈探针只执行一次；预期先出现 `kstack:01`，随后出现 `kstack:02`，再进入 `sched:01` 和 `user:01`。
+
+调试时应先根据异常类别分流：`AddressError` 优先检查 `CPUCFG1`、地址规范性和平台常量；只有 `PageInvalid*`、TLB refill 等异常才进入 PGDH/PTE/TLB 排查。
+
+### VALEN=40 全链路审计结论
+
+并行审计覆盖 `VA_MASK/SEG_MASK`、VPN/VPPN 截取、PTE PPN、TLB refill、ASID、DMW 和临时内核映射边界。结论是首栈顶 `0xfffffffffffef000` 本身正确，1024 个 `128KiB + 4KiB guard` slot 的完整窗口 `0xfffffffff7bef000..0xfffffffffffef000` 均为 40 位 canonical 高地址。
+
+审计同时发现并修复了以下关联缺陷：
+
+1. `STLBPS`/`TLBREHI.PS` 曾错误使用 `PTE_WIDTH_BITS=3`；4KiB 页必须写 `12`。
+2. LAFlex PTE 的 PPN 掩码曾多左移 12 位；现按 `PA[PALEN-1:12]` 截取。
+3. TLBEHI 写入高地址 VPPN 前未裁剪字段宽度，会触发 `bit_field` 越界断言；读回也缺少 paired-page 左移和 VPN 符号扩展。
+4. 临时内核 ELF 映射过去没有上界，可能覆盖实板栈窗口或 QEMU 下低 39 位同址的页表别名；现由 `KERNEL_PROGRAM_END` 拒绝越界。
+5. `__restore` 曾把只读 `ASIDBITS` 混入 ASID，并在 PGDL 不变时跳过 ASID 更新；ASID 分配耗尽哨兵也可能被写成 10-bit ASID 1023。现分别比较 PGDL/ASID并成对更新，耗尽时安全退化到 ASID 0。
+6. 2K1000 PCI ECAM/AHCI CPU 访存改走 DMW2 SUC 别名，避免把 `0xfe00000000` 当作非 canonical 普通 VA 或以 cached 属性访问 MMIO。
+
+构建期断言固定了 2K1000 的 `VALEN/PALEN=40/40`、首栈顶/窗口下界、VA/VPN 符号扩展和 39-bit 软件页表别名边界。启动期在 `mm::init()` 前再次用 `CPUCFG1` 校验硬件位宽，并强制 `RVACFG.RBits=0`。
+
+仍需单独处理的风险不属于本次 VALEN 修复：kernel stack slot 耗尽目前仍 panic；临时 ELF 映射失败路径还缺少完整 RAII 回滚；单页 guard 无法拦截一次跨越超过 4KiB 的大幅栈指针跳转。它们不影响当前首栈地址合法性结论，但应在压力回归前继续修复。

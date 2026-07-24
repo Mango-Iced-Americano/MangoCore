@@ -91,6 +91,13 @@ void ext4_bcache_cleanup(struct ext4_bcache *bc)
 	}
 }
 
+void ext4_bcache_cleanup_discard(struct ext4_bcache *bc)
+{
+	struct ext4_buf *buf, *tmp;
+	RB_FOREACH_SAFE(buf, ext4_buf_lba, &bc->lba_root, tmp)
+		ext4_bcache_drop_buf(bc, buf);
+}
+
 int ext4_bcache_fini_dynamic(struct ext4_bcache *bc)
 {
 	memset(bc, 0, sizeof(struct ext4_bcache));
@@ -195,8 +202,18 @@ void ext4_bcache_invalidate_lba(struct ext4_bcache *bc,
 				uint64_t from,
 				uint32_t cnt)
 {
-	uint64_t end = from + cnt - 1;
-	struct ext4_buf *tmp = ext4_buf_lookup(bc, from), *buf;
+	uint64_t span;
+	uint64_t end;
+	struct ext4_buf key = { .lba = from };
+	struct ext4_buf *tmp, *buf;
+
+	if (!cnt)
+		return;
+	span = (uint64_t)cnt - 1;
+	end = span > (uint64_t)-1 - from ? (uint64_t)-1 : from + span;
+	/* Start from the first cached LBA >= `from`; an exact RB_FIND would
+	 * skip the whole range whenever its first block was not cached. */
+	tmp = RB_NFIND(ext4_buf_lba, &bc->lba_root, &key);
 	RB_FOREACH_FROM(buf, ext4_buf_lba, tmp) {
 		if (buf->lba > end)
 			break;

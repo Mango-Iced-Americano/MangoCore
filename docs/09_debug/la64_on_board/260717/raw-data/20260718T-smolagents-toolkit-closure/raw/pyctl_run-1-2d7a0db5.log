@@ -1,0 +1,24 @@
+2026-07-18T05:11:23.047911Z __PERF_BEGIN_pyctl_run-1-2d7a0db5__
+2026-07-18T05:11:24.025714Z MangoPersist:/persist/apk-root# __PERF_ACK_pyctl_run-1-2d7a0db5_TRACE_OFF__
+2026-07-18T05:11:25.358971Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_pyctl_run-1-2d7a0db5__
+2026-07-18T05:11:25.395367Z [python-deploy] stage=p4-preflight
+2026-07-18T05:11:25.562240Z [python-deploy] stage=download
+2026-07-18T05:11:25.700933Z Connecting to 192.168.9.10:8009 (192.168.9.10:8009)
+2026-07-18T05:11:25.717350Z saving to '/tmp/.cpython-la64-strict-3.14.5-28f61fb764f3.tar.xz.part'
+2026-07-18T05:11:32.354296Z .cpython-la64-strict   2% |                                | 1780k  0:00:46 ETA.cpython-la64-strict  17% |*****                           | 14.3M  0:00:09 ETA.cpython-la64-strict  32% |**********                      | 26.9M  0:00:06 ETA.cpython-la64-strict  47% |***************                 | 39.4M  0:00:04 ETA.cpython-la64-strict  62% |********************            | 51.9M  0:00:02 ETA.cpython-la64-strict  77% |************************        | 64.4M  0:00:01 ETA.cpython-la64-strict  92% |*****************************   | 76.9M  0:00:00 ETA.cpython-la64-strict 100% |********************************| 83.0M  0:00:00 ETA
+2026-07-18T05:11:32.359089Z '/tmp/.cpython-la64-strict-3.14.5-28f61fb764f3.tar.xz.part' saved
+2026-07-18T05:11:38.975974Z /tmp/.cpython-la64-strict-3.14.5-28f61fb764f3.tar.xz.part: OK
+2026-07-18T05:11:38.980197Z [python-deploy] stage=extract
+2026-07-18T05:17:07.700021Z [python-deploy] stage=identity
+2026-07-18T05:17:07.846887Z [python-deploy] stage=smoke
+2026-07-18T05:17:21.308395Z strict-runtime-integrity-ok elfs=113
+2026-07-18T05:17:27.835106Z strict-runtime-board-smoke-ok
+2026-07-18T05:17:51.423679Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-18T05:17:56.842286Z strict-markupsafe-board-smoke-ok /persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/markupsafe/_speedups.cpython-314.so
+2026-07-18T05:18:04.170666Z strict-pyyaml-pure-board-smoke-ok /persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/yaml/__init__.py
+2026-07-18T05:18:42.166419Z smolagents-toolkit-offline-smoke-ok mode=exact beautifulsoup4=4.12.3 click=8.1.8 ddgs=9.0.0 lxml=6.1.1 markdownify=0.14.1 primp=0.15.0 six=1.17.0 soupsieve=2.6
+2026-07-18T05:18:43.046443Z [python-deploy] stage=publish-current
+2026-07-18T05:18:45.507631Z [python-deploy] PASS current=/persist/python-runtime/releases/28f61fb764f3
+2026-07-18T05:18:45.553989Z __PERF_WORK_END_pyctl_run-1-2d7a0db5__
+2026-07-18T05:18:45.555454Z __PERF_ACK_pyctl_run-1-2d7a0db5_WORK__
+2026-07-18T05:18:46.008275Z MangoPersist:/persist/apk-root# __PERF_END_pyctl_run-1-2d7a0db5__ rc=0

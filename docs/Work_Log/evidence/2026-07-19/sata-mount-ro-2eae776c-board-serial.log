@@ -1,0 +1,988 @@
+
+ _     __   __  _  _  ___  ___  __  _  _    /   ___  __  \ 
+ |    |  | |  | |\ | | __ [__  |  | |\ |    |  | __ |  \ | 
+ |___ |__| |__| | \| |__] ___] |__| | \|    \  |__] |__/ / 
+
+Trying to boot from BootSpace
+
+
+U-Boot 2022.04-v2.1.0-00349-g4ce7c922 (Apr 16 2024 - 18:37:57 +0800), Build: jenkins-u-boot-2022.04-2k1000-dp-2G-factory-7
+
+CPU:   LA264
+Speed: Cpu @ 500 MHz/ Mem @ 400 MHz/ Bus @ 125 MHz
+Model: loongson-2k1000
+Board: LS2K1000-DP-FACTORY
+DRAM:  2048 MiB
+2 GiB
+Core:  79 devices, 22 uclasses, devicetree: board
+SF: Detected w25q64cv with page size 256 Bytes, erase size 4 KiB, total 8 MiB
+bdinfo is in spi-flash
+cam_disable:1, vpu_disable:1, pcie0_enable:0, pcie1_enable:1
+Loading Environment from SPIFlash... OK
+Cannot get ddc bus
+In:    serial gpiobtn 
+Out:   serial 
+Err:   serial vidconsole 
+Net:   eth0: ethernet@40040000, eth1: ethernet@40050000
+************************** Notice **************************
+Press c to enter u-boot console, m to enter boot menu
+************************************************************
+Bus otg@40000000: dwc2_usb otg@40000000: Core Release: 2.93a
+USB DWC2
+Bus ehci@40060000: USB EHCI 1.00
+Bus ohci@40070000: USB OHCI 1.0
+scanning bus otg@40000000 for devices... 1 USB Device(s) found
+scanning bus ehci@40060000 for devices... 1 USB Device(s) found
+scanning bus ohci@40070000 for devices... 1 USB Device(s) found
+Autoboot in 0 seconds
+[2J=> ccccccccccccccc<INTERRUPT>
+=> 
+=> 
+>>> setenv ipaddr 192.168.9.20
+setenv ipaddr 192.168.9.20
+=> 
+>>> setenv serverip 192.168.9.10
+setenv serverip 192.168.9.10
+=> 
+>>> setenv netmask 255.255.255.0
+setenv netmask 255.255.255.0
+=> 
+>>> setenv loadaddr 0x9000000098000000
+setenv loadaddr 0x9000000098000000
+=> 
+>>> ping 192.168.9.10
+ping 192.168.9.10
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+host 192.168.9.10 is alive
+=> 
+>>> tftpboot 0x9000000098000000 kernel-2k1000-sata-mount-ro-2eae776c.ui
+tftpboot 0x9000000098000000 kernel-2k1000-sata-mount-ro-2eae776c.ui
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+TFTP from server 192.168.9.10; our IP address is 192.168.9.20
+Filename 'kernel-2k1000-sata-mount-ro-2eae776c.ui'.
+Load address: 0x9000000098000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ##############
+	 6.9 MiB/s
+done
+Bytes transferred = 12595672 (c031d8 hex)
+=> 
+>>> crc32 0x9000000098000000 0xc031d8
+crc32 0x9000000098000000 0xc031d8
+CRC32 for 9000000098000000 ... 9000000098c031d7 ==> d26ec9e8
+=> 
+>>> iminfo 0x9000000098000000
+iminfo 0x9000000098000000
+
+## Checking Image at 9000000098000000 ...
+   Legacy image found
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    12595608 Bytes = 12 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+=> 
+>>> bootm 0x9000000098000000
+bootm 0x9000000098000000
+## Booting kernel from Legacy Image at 9000000098000000 ...
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    12595608 Bytes = 12 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+   Loading Kernel Image
+Warning: invalid device tree. Used linux default dtb
+2048 MiB
+[kernel] random: initialized from 2k1000-rng
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] /scratch absent, skipping
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784422814
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/tmp -> /tmp: skipped (errno=2)
+[init] bind /tools/bin -> /bin
+[init] bind /tools/sbin -> /sbin
+[init] bind /tools/lib -> /lib
+[init] bind /tools/usr -> /usr
+[init] bind /tools/root -> /root: skipped (errno=2)
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0xFFF ltp_runner=suite timer_smoke=false ext4_profile=false reclaim_profile=false skip_apk=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02", "execve05", "fallocate06", "mmap16", "rename10", "shmctl01", "copy_file_range02", "pipe13", "splice02", "splice07", "timer_settime03", "statx11", "prot_hsymlinks", "send02"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["clone08"], glibc: []
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin
+[initproc] installing busybox applets to /bin ...
+busybox: /bin/[: Read-only file system
+busybox: /bin/[[: Read-only file system
+busybox: /bin/acpid: Read-only file system
+busybox: /bin/add-shell: Read-only file system
+busybox: /bin/addgroup: Read-only file system
+busybox: /bin/adduser: Read-only file system
+busybox: /bin/adjtimex: Read-only file system
+busybox: /bin/arch: Read-only file system
+busybox: /bin/arp: Read-only file system
+busybox: /bin/arping: Read-only file system
+busybox: /bin/ash: Read-only file system
+busybox: /bin/awk: Read-only file system
+busybox: /bin/base32: Read-only file system
+busybox: /bin/base64: Read-only file system
+busybox: /bin/basename: Read-only file system
+busybox: /bin/bc: Read-only file system
+busybox: /bin/beep: Read-only file system
+busybox: /bin/blkdiscard: Read-only file system
+busybox: /bin/blkid: Read-only file system
+busybox: /bin/blockdev: Read-only file system
+busybox: /bin/bootchartd: Read-only file system
+busybox: /bin/brctl: Read-only file system
+busybox: /bin/bunzip2: Read-only file system
+busybox: /bin/bzcat: Read-only file system
+busybox: /bin/bzip2: Read-only file system
+busybox: /bin/cal: Read-only file system
+busybox: /bin/cat: Read-only file system
+busybox: /bin/chat: Read-only file system
+busybox: /bin/chattr: Read-only file system
+busybox: /bin/chgrp: Read-only file system
+busybox: /bin/chmod: Read-only file system
+busybox: /bin/chown: Read-only file system
+busybox: /bin/chpasswd: Read-only file system
+busybox: /bin/chpst: Read-only file system
+busybox: /bin/chroot: Read-only file system
+busybox: /bin/chrt: Read-only file system
+busybox: /bin/chvt: Read-only file system
+busybox: /bin/cksum: Read-only file system
+busybox: /bin/clear: Read-only file system
+busybox: /bin/cmp: Read-only file system
+busybox: /bin/comm: Read-only file system
+busybox: /bin/conspy: Read-only file system
+busybox: /bin/cp: Read-only file system
+busybox: /bin/cpio: Read-only file system
+busybox: /bin/crond: Read-only file system
+busybox: /bin/crontab: Read-only file system
+busybox: /bin/cryptpw: Read-only file system
+busybox: /bin/cttyhack: Read-only file system
+busybox: /bin/cut: Read-only file system
+busybox: /bin/date: Read-only file system
+busybox: /bin/dc: Read-only file system
+busybox: /bin/dd: Read-only file system
+busybox: /bin/deallocvt: Read-only file system
+busybox: /bin/delgroup: Read-only file system
+busybox: /bin/deluser: Read-only file system
+busybox: /bin/depmod: Read-only file system
+busybox: /bin/devmem: Read-only file system
+busybox: /bin/df: Read-only file system
+busybox: /bin/dhcprelay: Read-only file system
+busybox: /bin/diff: Read-only file system
+busybox: /bin/dirname: Read-only file system
+busybox: /bin/dmesg: Read-only file system
+busybox: /bin/dnsd: Read-only file system
+busybox: /bin/dnsdomainname: Read-only file system
+busybox: /bin/dos2unix: Read-only file system
+busybox: /bin/dpkg: Read-only file system
+busybox: /bin/dpkg-deb: Read-only file system
+busybox: /bin/du: Read-only file system
+busybox: /bin/dumpkmap: Read-only file system
+busybox: /bin/dumpleases: Read-only file system
+busybox: /bin/echo: Read-only file system
+busybox: /bin/ed: Read-only file system
+busybox: /bin/egrep: Read-only file system
+busybox: /bin/eject: Read-only file system
+busybox: /bin/env: Read-only file system
+busybox: /bin/envdir: Read-only file system
+busybox: /bin/envuidgid: Read-only file system
+busybox: /bin/ether-wake: Read-only file system
+busybox: /bin/expand: Read-only file system
+busybox: /bin/expr: Read-only file system
+busybox: /bin/factor: Read-only file system
+busybox: /bin/fakeidentd: Read-only file system
+busybox: /bin/fallocate: Read-only file system
+busybox: /bin/false: Read-only file system
+busybox: /bin/fatattr: Read-only file system
+busybox: /bin/fbset: Read-only file system
+busybox: /bin/fbsplash: Read-only file system
+busybox: /bin/fdflush: Read-only file system
+busybox: /bin/fdformat: Read-only file system
+busybox: /bin/fdisk: Read-only file system
+busybox: /bin/fgconsole: Read-only file system
+busybox: /bin/fgrep: Read-only file system
+busybox: /bin/find: Read-only file system
+busybox: /bin/findfs: Read-only file system
+busybox: /bin/flock: Read-only file system
+busybox: /bin/fold: Read-only file system
+busybox: /bin/free: Read-only file system
+busybox: /bin/freeramdisk: Read-only file system
+busybox: /bin/fsck: Read-only file system
+busybox: /bin/fsck.minix: Read-only file system
+busybox: /bin/fsfreeze: Read-only file system
+busybox: /bin/fstrim: Read-only file system
+busybox: /bin/fsync: Read-only file system
+busybox: /bin/ftpd: Read-only file system
+busybox: /bin/ftpget: Read-only file system
+busybox: /bin/ftpput: Read-only file system
+busybox: /bin/fuser: Read-only file system
+busybox: /bin/getopt: Read-only file system
+busybox: /bin/getty: Read-only file system
+busybox: /bin/grep: Read-only file system
+busybox: /bin/groups: Read-only file system
+busybox: /bin/gunzip: Read-only file system
+busybox: /bin/gzip: Read-only file system
+busybox: /bin/halt: Read-only file system
+busybox: /bin/hd: Read-only file system
+busybox: /bin/hdparm: Read-only file system
+busybox: /bin/head: Read-only file system
+busybox: /bin/hexdump: Read-only file system
+busybox: /bin/hexedit: Read-only file system
+busybox: /bin/hostid: Read-only file system
+busybox: /bin/hostname: Read-only file system
+busybox: /bin/httpd: Read-only file system
+busybox: /bin/hush: Read-only file system
+busybox: /bin/hwclock: Read-only file system
+busybox: /bin/i2cdetect: Read-only file system
+busybox: /bin/i2cdump: Read-only file system
+busybox: /bin/i2cget: Read-only file system
+busybox: /bin/i2cset: Read-only file system
+busybox: /bin/i2ctransfer: Read-only file system
+busybox: /bin/id: Read-only file system
+busybox: /bin/ifconfig: Read-only file system
+busybox: /bin/ifdown: Read-only file system
+busybox: /bin/ifenslave: Read-only file system
+busybox: /bin/ifplugd: Read-only file system
+busybox: /bin/ifup: Read-only file system
+busybox: /bin/inetd: Read-only file system
+busybox: /bin/init: Read-only file system
+busybox: /bin/insmod: Read-only file system
+busybox: /bin/install: Read-only file system
+busybox: /bin/ionice: Read-only file system
+busybox: /bin/iostat: Read-only file system
+busybox: /bin/ip: Read-only file system
+busybox: /bin/ipaddr: Read-only file system
+busybox: /bin/ipcalc: Read-only file system
+busybox: /bin/ipcrm: Read-only file system
+busybox: /bin/ipcs: Read-only file system
+busybox: /bin/iplink: Read-only file system
+busybox: /bin/ipneigh: Read-only file system
+busybox: /bin/iproute: Read-only file system
+busybox: /bin/iprule: Read-only file system
+busybox: /bin/iptunnel: Read-only file system
+busybox: /bin/kbd_mode: Read-only file system
+busybox: /bin/kill: Read-only file system
+busybox: /bin/killall: Read-only file system
+busybox: /bin/killall5: Read-only file system
+busybox: /bin/klogd: Read-only file system
+busybox: /bin/last: Read-only file system
+busybox: /bin/less: Read-only file system
+busybox: /bin/link: Read-only file system
+busybox: /bin/linux32: Read-only file system
+busybox: /bin/linux64: Read-only file system
+busybox: /bin/linuxrc: Read-only file system
+busybox: /bin/ln: Read-only file system
+busybox: /bin/loadfont: Read-only file system
+busybox: /bin/loadkmap: Read-only file system
+busybox: /bin/logger: Read-only file system
+busybox: /bin/login: Read-only file system
+busybox: /bin/logname: Read-only file system
+busybox: /bin/logread: Read-only file system
+busybox: /bin/losetup: Read-only file system
+busybox: /bin/lpd: Read-only file system
+busybox: /bin/lpq: Read-only file system
+busybox: /bin/lpr: Read-only file system
+busybox: /bin/ls: Read-only file system
+busybox: /bin/lsattr: Read-only file system
+busybox: /bin/lsmod: Read-only file system
+busybox: /bin/lsof: Read-only file system
+busybox: /bin/lspci: Read-only file system
+busybox: /bin/lsscsi: Read-only file system
+busybox: /bin/lsusb: Read-only file system
+busybox: /bin/lzcat: Read-only file system
+busybox: /bin/lzma: Read-only file system
+busybox: /bin/lzop: Read-only file system
+busybox: /bin/makedevs: Read-only file system
+busybox: /bin/makemime: Read-only file system
+busybox: /bin/man: Read-only file system
+busybox: /bin/md5sum: Read-only file system
+busybox: /bin/mdev: Read-only file system
+busybox: /bin/mesg: Read-only file system
+busybox: /bin/microcom: Read-only file system
+busybox: /bin/mim: Read-only file system
+busybox: /bin/mkdir: Read-only file system
+busybox: /bin/mkdosfs: Read-only file system
+busybox: /bin/mke2fs: Read-only file system
+busybox: /bin/mkfifo: Read-only file system
+busybox: /bin/mkfs.ext2: Read-only file system
+busybox: /bin/mkfs.minix: Read-only file system
+busybox: /bin/mkfs.vfat: Read-only file system
+busybox: /bin/mknod: Read-only file system
+busybox: /bin/mkpasswd: Read-only file system
+busybox: /bin/mkswap: Read-only file system
+busybox: /bin/mktemp: Read-only file system
+busybox: /bin/modinfo: Read-only file system
+busybox: /bin/modprobe: Read-only file system
+busybox: /bin/more: Read-only file system
+busybox: /bin/mount: Read-only file system
+busybox: /bin/mountpoint: Read-only file system
+busybox: /bin/mpstat: Read-only file system
+busybox: /bin/mt: Read-only file system
+busybox: /bin/mv: Read-only file system
+busybox: /bin/nameif: Read-only file system
+busybox: /bin/nanddump: Read-only file system
+busybox: /bin/nandwrite: Read-only file system
+busybox: /bin/nbd-client: Read-only file system
+busybox: /bin/nc: Read-only file system
+busybox: /bin/netstat: Read-only file system
+busybox: /bin/nice: Read-only file system
+busybox: /bin/nl: Read-only file system
+busybox: /bin/nmeter: Read-only file system
+busybox: /bin/nohup: Read-only file system
+busybox: /bin/nologin: Read-only file system
+busybox: /bin/nproc: Read-only file system
+busybox: /bin/nsenter: Read-only file system
+busybox: /bin/nslookup: Read-only file system
+busybox: /bin/ntpd: Read-only file system
+busybox: /bin/od: Read-only file system
+busybox: /bin/openvt: Read-only file system
+busybox: /bin/partprobe: Read-only file system
+busybox: /bin/passwd: Read-only file system
+busybox: /bin/paste: Read-only file system
+busybox: /bin/patch: Read-only file system
+busybox: /bin/pgrep: Read-only file system
+busybox: /bin/pidof: Read-only file system
+busybox: /bin/ping: Read-only file system
+busybox: /bin/ping6: Read-only file system
+busybox: /bin/pipe_progress: Read-only file system
+busybox: /bin/pivot_root: Read-only file system
+busybox: /bin/pkill: Read-only file system
+busybox: /bin/pmap: Read-only file system
+busybox: /bin/popmaildir: Read-only file system
+busybox: /bin/poweroff: Read-only file system
+busybox: /bin/powertop: Read-only file system
+busybox: /bin/printenv: Read-only file system
+busybox: /bin/printf: Read-only file system
+busybox: /bin/ps: Read-only file system
+busybox: /bin/pscan: Read-only file system
+busybox: /bin/pstree: Read-only file system
+busybox: /bin/pwd: Read-only file system
+busybox: /bin/pwdx: Read-only file system
+busybox: /bin/raidautorun: Read-only file system
+busybox: /bin/rdate: Read-only file system
+busybox: /bin/rdev: Read-only file system
+busybox: /bin/readahead: Read-only file system
+busybox: /bin/readlink: Read-only file system
+busybox: /bin/readprofile: Read-only file system
+busybox: /bin/realpath: Read-only file system
+busybox: /bin/reboot: Read-only file system
+busybox: /bin/reformime: Read-only file system
+busybox: /bin/remove-shell: Read-only file system
+busybox: /bin/renice: Read-only file system
+busybox: /bin/reset: Read-only file system
+busybox: /bin/resize: Read-only file system
+busybox: /bin/resume: Read-only file system
+busybox: /bin/rev: Read-only file system
+busybox: /bin/rm: Read-only file system
+busybox: /bin/rmdir: Read-only file system
+busybox: /bin/rmmod: Read-only file system
+busybox: /bin/route: Read-only file system
+busybox: /bin/rpm: Read-only file system
+busybox: /bin/rpm2cpio: Read-only file system
+busybox: /bin/rtcwake: Read-only file system
+busybox: /bin/run-init: Read-only file system
+busybox: /bin/run-parts: Read-only file system
+busybox: /bin/runlevel: Read-only file system
+busybox: /bin/runsv: Read-only file system
+busybox: /bin/runsvdir: Read-only file system
+busybox: /bin/rx: Read-only file system
+busybox: /bin/script: Read-only file system
+busybox: /bin/scriptreplay: Read-only file system
+busybox: /bin/sed: Read-only file system
+busybox: /bin/sendmail: Read-only file system
+busybox: /bin/seq: Read-only file system
+busybox: /bin/setarch: Read-only file system
+busybox: /bin/setconsole: Read-only file system
+busybox: /bin/setfattr: Read-only file system
+busybox: /bin/setfont: Read-only file system
+busybox: /bin/setkeycodes: Read-only file system
+busybox: /bin/setlogcons: Read-only file system
+busybox: /bin/setpriv: Read-only file system
+busybox: /bin/setserial: Read-only file system
+busybox: /bin/setsid: Read-only file system
+busybox: /bin/setuidgid: Read-only file system
+busybox: /bin/sh: Read-only file system
+busybox: /bin/sha1sum: Read-only file system
+busybox: /bin/sha256sum: Read-only file system
+busybox: /bin/sha3sum: Read-only file system
+busybox: /bin/sha512sum: Read-only file system
+busybox: /bin/showkey: Read-only file system
+busybox: /bin/shred: Read-only file system
+busybox: /bin/shuf: Read-only file system
+busybox: /bin/slattach: Read-only file system
+busybox: /bin/sleep: Read-only file system
+busybox: /bin/smemcap: Read-only file system
+busybox: /bin/softlimit: Read-only file system
+busybox: /bin/sort: Read-only file system
+busybox: /bin/split: Read-only file system
+busybox: /bin/ssl_client: Read-only file system
+busybox: /bin/start-stop-daemon: Read-only file system
+busybox: /bin/stat: Read-only file system
+busybox: /bin/strings: Read-only file system
+busybox: /bin/stty: Read-only file system
+busybox: /bin/su: Read-only file system
+busybox: /bin/sulogin: Read-only file system
+busybox: /bin/sum: Read-only file system
+busybox: /bin/sv: Read-only file system
+busybox: /bin/svc: Read-only file system
+busybox: /bin/svlogd: Read-only file system
+busybox: /bin/svok: Read-only file system
+busybox: /bin/swapoff: Read-only file system
+busybox: /bin/swapon: Read-only file system
+busybox: /bin/switch_root: Read-only file system
+busybox: /bin/sync: Read-only file system
+busybox: /bin/sysctl: Read-only file system
+busybox: /bin/syslogd: Read-only file system
+busybox: /bin/tac: Read-only file system
+busybox: /bin/tail: Read-only file system
+busybox: /bin/tar: Read-only file system
+busybox: /bin/taskset: Read-only file system
+busybox: /bin/tc: Read-only file system
+busybox: /bin/tcpsvd: Read-only file system
+busybox: /bin/tee: Read-only file system
+busybox: /bin/telnet: Read-only file system
+busybox: /bin/telnetd: Read-only file system
+busybox: /bin/test: Read-only file system
+busybox: /bin/tftp: Read-only file system
+busybox: /bin/tftpd: Read-only file system
+busybox: /bin/time: Read-only file system
+busybox: /bin/timeout: Read-only file system
+busybox: /bin/top: Read-only file system
+busybox: /bin/touch: Read-only file system
+busybox: /bin/tr: Read-only file system
+busybox: /bin/traceroute: Read-only file system
+busybox: /bin/traceroute6: Read-only file system
+busybox: /bin/true: Read-only file system
+busybox: /bin/truncate: Read-only file system
+busybox: /bin/ts: Read-only file system
+busybox: /bin/tty: Read-only file system
+busybox: /bin/ttysize: Read-only file system
+busybox: /bin/tunctl: Read-only file system
+busybox: /bin/ubiattach: Read-only file system
+busybox: /bin/ubidetach: Read-only file system
+busybox: /bin/ubimkvol: Read-only file system
+busybox: /bin/ubirename: Read-only file system
+busybox: /bin/ubirmvol: Read-only file system
+busybox: /bin/ubirsvol: Read-only file system
+busybox: /bin/ubiupdatevol: Read-only file system
+busybox: /bin/udhcpc: Read-only file system
+busybox: /bin/udhcpc6: Read-only file system
+busybox: /bin/udhcpd: Read-only file system
+busybox: /bin/udpsvd: Read-only file system
+busybox: /bin/uevent: Read-only file system
+busybox: /bin/umount: Read-only file system
+busybox: /bin/uname: Read-only file system
+busybox: /bin/unexpand: Read-only file system
+busybox: /bin/uniq: Read-only file system
+busybox: /bin/unix2dos: Read-only file system
+busybox: /bin/unlink: Read-only file system
+busybox: /bin/unlzma: Read-only file system
+busybox: /bin/unshare: Read-only file system
+busybox: /bin/unxz: Read-only file system
+busybox: /bin/unzip: Read-only file system
+busybox: /bin/uptime: Read-only file system
+busybox: /bin/users: Read-only file system
+busybox: /bin/usleep: Read-only file system
+busybox: /bin/uudecode: Read-only file system
+busybox: /bin/uuencode: Read-only file system
+busybox: /bin/vconfig: Read-only file system
+busybox: /bin/vi: Read-only file system
+busybox: /bin/vlock: Read-only file system
+busybox: /bin/volname: Read-only file system
+busybox: /bin/w: Read-only file system
+busybox: /bin/wall: Read-only file system
+busybox: /bin/watch: Read-only file system
+busybox: /bin/watchdog: Read-only file system
+busybox: /bin/wc: Read-only file system
+busybox: /bin/wget: Read-only file system
+busybox: /bin/which: Read-only file system
+busybox: /bin/who: Read-only file system
+busybox: /bin/whoami: Read-only file system
+busybox: /bin/whois: Read-only file system
+busybox: /bin/xargs: Read-only file system
+busybox: /bin/xxd: Read-only file system
+busybox: /bin/xz: Read-only file system
+busybox: /bin/xzcat: Read-only file system
+busybox: /bin/yes: Read-only file system
+busybox: /bin/zcat: Read-only file system
+busybox: /bin/zcip: Read-only file system
+[initproc] busybox --install -s /bin -> exit=0
+ln: /bin/apk: Read-only file system
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] linking musl/glibc libs to /lib ...
+mkdir: can't create directory '/usr/lib': Read-only file system
+mkdir: can't create directory '/usr/lib64': Read-only file system
+ln: /usr/lib: Read-only file system
+ln: /usr/lib64: Read-only file system
+mkdir: can't create directory '/lib/modules/': Read-only file system
+mkdir: can't create directory '/lib/modules/': Read-only file system
+/bin/bash: line 1: /lib/modules/5.10.0-1-rv64/modules.dep: No such file or directory
+/bin/bash: line 1: /lib/modules/5.10.0-1-la64/modules.dep: No such file or directory
+/bin/bash: line 2: /lib/modules/5.10.0-1-rv64/modules.builtin: No such file or directory
+/bin/bash: line 3: /lib/modules/5.10.0-1-la64/modules.builtin: No such file or directory
+ln: /sbin/modprobe: Read-only file system
+ln: /bin/modprobe: Read-only file system
+ln: /lib/ld-musl-riscv64-sf.so.1: Read-only file system
+ln: /lib/ld-musl-riscv64.so.1: Read-only file system
+ln: /lib/ld-linux-riscv64-lp64d.so.1: Read-only file system
+ln: /glibc/lib/libgcc_s.so.1: Read-only file system
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: Read-only file system
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+P4 strict-aligned Python policy launchers are missing
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] apk add e2fsprogs ...
+ERROR: Unable to lock database: No such file or directory
+ERROR: Failed to open apk database: No such file or directory
+[initproc] apk add -> exit=0
+[initproc] run_selected_groups start mask=0xFFF order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] select group=basic timeout=60s
+#### OS COMP TEST GROUP START basic-musl ####
+./basic_testcode.sh: line 3: ./run-all.sh: Permission denied
+#### OS COMP TEST GROUP END basic-musl ####
+[initproc] done basic_testcode.sh in /musl exit_code=0
+[timer] group basic in /musl took 0s
+#### OS COMP TEST GROUP START basic-glibc ####
+./basic_testcode.sh: line 3: ./run-all.sh: Permission denied
+#### OS COMP TEST GROUP END basic-glibc ####
+[initproc] done basic_testcode.sh in /glibc exit_code=0
+[timer] group basic in /glibc took 0s
+[initproc] sleep 1s before next group
+[initproc] select group=busybox timeout=120s
+#### OS COMP TEST GROUP START busybox-musl ####
+#### independent command test
+testcase busybox echo "#### independent command test" success
+testcase busybox ash -c exit success
+testcase busybox sh -c exit success
+bbb
+testcase busybox basename /aaa/bbb success
+     July 2026
+Su Mo Tu We Th Fr Sa
+          1  2  3  4
+ 5  6  7  8  9 10 11
+12 13 14 15 16 17 18
+19 20 21 22 23 24 25
+26 27 28 29 30 31
+                     
+testcase busybox cal success
+[H[Jtestcase busybox clear success
+Sun Jul 19 01:00:19 UTC 2026
+testcase busybox date success
+Filesystem           1K-blocks      Used Available Use% Mounted on
+none                  16350816   2414880  13935936  15% /
+/tools/tests            786432    123700    662732  16% /tests
+/tools/usr              786432    123700    662732  16% /usr
+/tools                  786432    123700    662732  16% /tools
+none                   1741992         0   1741992   0% /tmp
+/sdcard                4194304   3508840    685464  84% /sdcard
+/tools/sbin             786432    123700    662732  16% /sbin
+/sdcard/musl           4194304   3508840    685464  84% /musl
+/tools/lib              786432    123700    662732  16% /lib
+/sdcard/glibc          4194304   3508840    685464  84% /glibc
+none                     16384         0     16384   0% /dev/shm
+/tools/bin              786432    123700    662732  16% /bin
+/tools/bin              786432    123700    662732  16% /bin
+testcase busybox df success
+/aaa
+testcase busybox dirname /aaa/bbb success
+[    0.000000] Linux version 5.10.102.1-MangoCore (mango@kernel.org) (gcc (Ubuntu 9.4.0-1ubuntu1~20.04) 9.4.0, GNU ld (GNU Binutils for Ubuntu) 2.34) #1 SMP Thu Mar 10 13:31:47 CST 2022
+testcase busybox dmesg success
+0	./basic/mnt
+1966	./basic
+1070	./lib
+187	./ltp/bin
+200	./ltp/runtest
+1	./ltp/scenario_groups
+25	./ltp/testscripts
+33	./ltp/testcases/bin/ftrace_stress
+2634	./ltp/testcases/bin/datafiles
+1559610	./ltp/testcases/bin
+3	./ltp/testcases/data/ar01
+50	./ltp/testcases/data/file01
+3	./ltp/testcases/data/ld01
+127	./ltp/testcases/data/ldd01
+82	./ltp/testcases/data/nm01
+3	./ltp/testcases/data/unzip01
+1	./ltp/testcases/data/binfmt_misc02
+1	./ltp/testcases/data/ima_kexec
+2	./ltp/testcases/data/ima_keys
+1	./ltp/testcases/data/ima_policy
+1	./ltp/testcases/data/ima_selinux
+5	./ltp/testcases/data/lvm
+1	./ltp/testcases/data/mc_member
+277	./ltp/testcases/data
+1559886	./ltp/testcases
+178	./ltp/libkirk
+522	./ltp/metadata
+1561171	./ltp
+1571930	.
+testcase busybox du success
+2
+testcase busybox expr 1 + 1 success
+testcase busybox false success
+testcase busybox true success
+/bin/ls
+testcase busybox which ls success
+Linux
+testcase busybox uname success
+ 01:00:24 up 0 min,  0 users,  load average: 0.06, 0.01, 0.00
+testcase busybox uptime success
+abcntestcase busybox printf "abcn" success
+PID   USER     TIME  COMMAND
+    1 root      0:31 initproc
+   70 root      0:31 busybox_testcode.sh
+   73 root      0:31 busybox_testcode.sh
+   92 root      0:31 busybox
+testcase busybox ps success
+/musl
+testcase busybox pwd success
+              total        used        free      shared  buff/cache   available
+Mem:        2043852      301848     1742004           0           0     1994012
+-/+ buffers/cache:       301848     1742004
+Swap:             0           0           0
+testcase busybox free success
+Sun Jul 19 01:00:24 2026  0.000000 seconds
+testcase busybox hwclock success
+testcase busybox sh -c 'sleep 5' & ./busybox kill $! success
+[1;32marithoh[m                 [1;32miperf3[m                  [1;34mltp[m
+[1;34mbasic[m                   [1;32miperf_testcode.sh[m       [1;32mltp_testcode.sh[m
+[1;32mbasic_testcode.sh[m       [1;32mlat_cmd[m                 [1;32mlua[m
+[1;32mbusy[m                    [1;32mlat_connect[m             [1;32mlua_testcode.sh[m
+[1;32mbusybox[m                 [1;32mlat_ctx[m                 [1;32mmax_min.lua[m
+[0;0mbusybox_cmd.txt[m         [1;32mlat_dram_page[m           [1;32mmemsize[m
+[1;32mbusybox_testcode.sh[m     [1;32mlat_fcntl[m               [1;32mmhz[m
+[1;32mbw_file_rd[m              [1;32mlat_fifo[m                [1;32mmsleep[m
+[1;32mbw_mem[m                  [1;32mlat_fs[m                  [0;0mmulti.sh[m
+[1;32mbw_mmap_rd[m              [1;32mlat_http[m                [1;32mnetperf[m
+[1;32mbw_pipe[m                 [1;32mlat_mem_rd[m              [1;32mnetperf_testcode.sh[m
+[1;32mbw_tcp[m                  [1;32mlat_mmap[m                [1;32mnetserver[m
+[1;32mbw_unix[m                 [1;32mlat_ops[m                 [1;32mpar_mem[m
+[1;32mcache[m                   [1;32mlat_pagefault[m           [1;32mpar_ops[m
+[1;32mclock[m                   [1;32mlat_pipe[m                [1;32mpipe[m
+[1;32mcontext1[m                [1;32mlat_pmake[m               [1;32mrandom.lua[m
+[1;32mcyclictest[m              [1;32mlat_proc[m                [1;32mregister[m
+[1;32mcyclictest_testcode.sh[m  [1;32mlat_rand[m                [1;32mremove.lua[m
+[1;32mdate.lua[m                [1;32mlat_rpc[m                 [1;32mrhttp[m
+[1;32mdhry2[m                   [1;32mlat_select[m              [1;32mround_num.lua[m
+[1;32mdhry2reg[m                [1;32mlat_sem[m                 [1;32mrun-dynamic.sh[m
+[1;32mdisk[m                    [1;32mlat_sig[m                 [1;32mrun-static.sh[m
+[1;32mdlopen_dso.so[m           [1;32mlat_syscall[m             [1;32mruntest.exe[m
+[1;32mdouble[m                  [1;32mlat_tcp[m                 [1;32mseek[m
+[1;32menough[m                  [1;32mlat_udp[m                 [1;32mshort[m
+[1;32mentry-dynamic.exe[m       [1;32mlat_unix[m                [1;32msin30.lua[m
+[1;32mentry-static.exe[m        [1;32mlat_unix_connect[m        [1;32msort.lua[m
+[1;32mexecl[m                   [1;32mlat_usleep[m              [1;32mspawn[m
+[1;32mfile_io.lua[m             [1;34mlib[m                     [1;32mstream[m
+[1;32mfloat[m                   [1;32mlibc-bench[m              [1;32mstrings.lua[m
+[1;32mflushdisk[m               [1;32mlibcbench_testcode.sh[m   [1;32msyscall[m
+[1;32mfstime[m                  [1;32mlibctest_testcode.sh[m    [1;32mtest.sh[m
+[1;32mgetopt[m                  [1;32mline[m                    [1;32mtiming_o[m
+[0;0mgfx-x11[m                 [1;32mlmbench[m                 [1;32mtlb[m
+[1;32mhackbench[m               [1;32mlmbench_all[m             [1;32mtls_get_new-dtv_dso.so[m
+[1;32mhanoi[m                   [1;32mlmbench_testcode.sh[m     [0;0mtst.sh[m
+[1;32mhello[m                   [1;32mlmdd[m                    [0;0munixbench.logo[m
+[0;0mindex.base[m              [1;32mlmhttp[m                  [1;32munixbench_testcode.sh[m
+[1;32mint[m                     [1;32mlong[m                    [1;32mwhetstone-double[m
+[1;32miozone[m                  [1;32mloop_o[m
+[1;32miozone_testcode.sh[m      [1;32mlooper[m
+testcase busybox ls success
+testcase busybox sleep 1 success
+#### file opration test
+testcase busybox echo "#### file opration test" success
+touch: test.txt: Read-only file system
+testcase busybox touch test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "hello world" > test.txt fail
+cat: can't open 'test.txt': No such file or directory
+testcase busybox cat test.txt fail
+cut: test.txt: No such file or directory
+testcase busybox cut -c 3 test.txt fail
+od: test.txt: No such file or directory
+testcase busybox od test.txt fail
+head: test.txt: No such file or directory
+testcase busybox head test.txt fail
+tail: can't open 'test.txt': No such file or directory
+tail: no files
+testcase busybox tail test.txt fail
+hexdump: test.txt: No such file or directory
+hexdump: test.txt: Bad file descriptor
+testcase busybox hexdump -C test.txt fail
+md5sum: can't open 'test.txt': No such file or directory
+testcase busybox md5sum test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "ccccccc" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "bbbbbbb" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "aaaaaaa" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "2222222" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "1111111" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "bbbbbbb" >> test.txt fail
+sort: test.txt: No such file or directory
+testcase busybox sort test.txt | ./busybox uniq success
+stat: can't stat 'test.txt': No such file or directory
+testcase busybox stat test.txt fail
+strings: test.txt: No such file or directory
+testcase busybox strings test.txt fail
+wc: test.txt: No such file or directory
+testcase busybox wc test.txt fail
+testcase busybox [ -f test.txt ] fail
+more: test.txt: No such file or directory
+testcase busybox more test.txt success
+rm: can't remove 'test.txt': No such file or directory
+testcase busybox rm test.txt fail
+mkdir: can't create directory 'test_dir': Read-only file system
+testcase busybox mkdir test_dir fail
+mv: can't rename 'test_dir': Read-only file system
+testcase busybox mv test_dir test fail
+rmdir: 'test': Read-only file system
+testcase busybox rmdir test fail
+echo "hello world" > test.txt
+grep hello busybox_cmd.txt
+testcase busybox grep hello busybox_cmd.txt success
+cp: can't create 'busybox_cmd.bak': Read-only file system
+testcase busybox cp busybox_cmd.txt busybox_cmd.bak fail
+rm: can't remove 'busybox_cmd.bak': No such file or directory
+testcase busybox rm busybox_cmd.bak fail
+./busybox_cmd.txt
+testcase busybox find -name "busybox_cmd.txt" success
+#### OS COMP TEST GROUP END busybox-musl ####
+[initproc] done busybox_testcode.sh in /musl exit_code=0
+[timer] group busybox in /musl took 13s
+#### OS COMP TEST GROUP START busybox-glibc ####
+#### independent command test
+testcase busybox echo "#### independent command test" success
+testcase busybox ash -c exit success
+testcase busybox sh -c exit success
+bbb
+testcase busybox basename /aaa/bbb success
+     July 2026
+Su Mo Tu We Th Fr Sa
+          1  2  3  4
+ 5  6  7  8  9 10 11
+12 13 14 15 16 17 18
+19 20 21 22 23 24 25
+26 27 28 29 30 31
+                     
+testcase busybox cal success
+[H[Jtestcase busybox clear success
+Sun Jul 19 01:00:32 UTC 2026
+testcase busybox date success
+Filesystem           1K-blocks      Used Available Use% Mounted on
+none                  16350816   2419552  13931264  15% /
+/tools/tests            786432    123700    662732  16% /tests
+/tools/usr              786432    123700    662732  16% /usr
+/tools                  786432    123700    662732  16% /tools
+none                   1741408         0   1741408   0% /tmp
+/sdcard                4194304   3508840    685464  84% /sdcard
+/tools/sbin             786432    123700    662732  16% /sbin
+/sdcard/musl           4194304   3508840    685464  84% /musl
+/tools/lib              786432    123700    662732  16% /lib
+/sdcard/glibc          4194304   3508840    685464  84% /glibc
+none                     16384         0     16384   0% /dev/shm
+/tools/bin              786432    123700    662732  16% /bin
+/tools/bin              786432    123700    662732  16% /bin
+testcase busybox df success
+/aaa
+testcase busybox dirname /aaa/bbb success
+[    0.000000] Linux version 5.10.102.1-MangoCore (mango@kernel.org) (gcc (Ubuntu 9.4.0-1ubuntu1~20.04) 9.4.0, GNU ld (GNU Binutils for Ubuntu) 2.34) #1 SMP Thu Mar 10 13:31:47 CST 2022
+testcase busybox dmesg success
+0	./basic/mnt
+1966	./basic
+17441	./lib
+224	./ltp/bin
+200	./ltp/runtest
+1	./ltp/scenario_groups
+25	./ltp/testscripts
+33	./ltp/testcases/bin/ftrace_stress
+2634	./ltp/testcases/bin/datafiles
+1744041	./ltp/testcases/bin
+3	./ltp/testcases/data/ar01
+54	./ltp/testcases/data/file01
+3	./ltp/testcases/data/ld01
+134	./ltp/testcases/data/ldd01
+100	./ltp/testcases/data/nm01
+3	./ltp/testcases/data/unzip01
+1	./ltp/testcases/data/binfmt_misc02
+1	./ltp/testcases/data/ima_kexec
+2	./ltp/testcases/data/ima_keys
+1	./ltp/testcases/data/ima_policy
+1	./ltp/testcases/data/ima_selinux
+5	./ltp/testcases/data/lvm
+1	./ltp/testcases/data/mc_member
+306	./ltp/testcases/data
+1744346	./ltp/testcases
+178	./ltp/libkirk
+522	./ltp/metadata
+1745684	./ltp
+1795510	.
+testcase busybox du success
+2
+testcase busybox expr 1 + 1 success
+testcase busybox false success
+testcase busybox true success
+/bin/ls
+testcase busybox which ls success
+Linux
+testcase busybox uname success
+ 01:00:39 up 0 min,  0 users,  load average: 0.06, 0.01, 0.00
+testcase busybox uptime success
+abcntestcase busybox printf "abcn" success
+PID   USER     TIME  COMMAND
+    1 root      0:45 initproc
+  133 root      0:45 busybox_testcode.sh
+  136 root      0:45 busybox_testcode.sh
+  155 root      0:45 busybox
+testcase busybox ps success
+/glibc
+testcase busybox pwd success
+              total        used        free      shared  buff/cache   available
+Mem:        2043852      302436     1741416           0           0     1992172
+-/+ buffers/cache:       302436     1741416
+Swap:             0           0           0
+testcase busybox free success
+Sun Jul 19 01:00:39 2026  0.000000 seconds
+testcase busybox hwclock success
+testcase busybox sh -c 'sleep 5' & ./busybox kill $! success
+[1;32marithoh[m                 [1;32miperf3[m                  [1;34mltp[m
+[1;34mbasic[m                   [1;32miperf_testcode.sh[m       [1;32mltp_testcode.sh[m
+[1;32mbasic_testcode.sh[m       [1;32mlat_cmd[m                 [1;32mlua[m
+[1;32mbusy[m                    [1;32mlat_connect[m             [1;32mlua_testcode.sh[m
+[1;32mbusybox[m                 [1;32mlat_ctx[m                 [1;32mmax_min.lua[m
+[0;0mbusybox_cmd.txt[m         [1;32mlat_dram_page[m           [1;32mmemsize[m
+[1;32mbusybox_testcode.sh[m     [1;32mlat_fcntl[m               [1;32mmhz[m
+[1;32mbw_file_rd[m              [1;32mlat_fifo[m                [1;32mmsleep[m
+[1;32mbw_mem[m                  [1;32mlat_fs[m                  [0;0mmulti.sh[m
+[1;32mbw_mmap_rd[m              [1;32mlat_http[m                [1;32mnetperf[m
+[1;32mbw_pipe[m                 [1;32mlat_mem_rd[m              [1;32mnetperf_testcode.sh[m
+[1;32mbw_tcp[m                  [1;32mlat_mmap[m                [1;32mnetserver[m
+[1;32mbw_unix[m                 [1;32mlat_ops[m                 [1;32mpar_mem[m
+[1;32mcache[m                   [1;32mlat_pagefault[m           [1;32mpar_ops[m
+[1;32mclock[m                   [1;32mlat_pipe[m                [1;32mpipe[m
+[1;32mcontext1[m                [1;32mlat_pmake[m               [1;32mrandom.lua[m
+[1;32mcyclictest[m              [1;32mlat_proc[m                [1;32mregister[m
+[1;32mcyclictest_testcode.sh[m  [1;32mlat_rand[m                [1;32mremove.lua[m
+[1;32mdate.lua[m                [1;32mlat_rpc[m                 [1;32mrhttp[m
+[1;32mdhry2[m                   [1;32mlat_select[m              [1;32mround_num.lua[m
+[1;32mdhry2reg[m                [1;32mlat_sem[m                 [1;32mrun-dynamic.sh[m
+[1;32mdisk[m                    [1;32mlat_sig[m                 [1;32mrun-static.sh[m
+[1;32mdlopen_dso.so[m           [1;32mlat_syscall[m             [1;32mruntest.exe[m
+[1;32mdouble[m                  [1;32mlat_tcp[m                 [1;32mseek[m
+[1;32menough[m                  [1;32mlat_udp[m                 [1;32mshort[m
+[1;32mentry-dynamic.exe[m       [1;32mlat_unix[m                [1;32msin30.lua[m
+[1;32mentry-static.exe[m        [1;32mlat_unix_connect[m        [1;32msort.lua[m
+[1;32mexecl[m                   [1;32mlat_usleep[m              [1;32mspawn[m
+[1;32mfile_io.lua[m             [1;34mlib[m                     [1;32mstream[m
+[1;32mfloat[m                   [1;32mlibc-bench[m              [1;32mstrings.lua[m
+[1;32mflushdisk[m               [1;32mlibcbench_testcode.sh[m   [1;32msyscall[m
+[1;32mfstime[m                  [1;32mlibctest_testcode.sh[m    [1;32mtest.sh[m
+[1;32mgetopt[m                  [1;32mline[m                    [1;32mtiming_o[m
+[0;0mgfx-x11[m                 [1;32mlmbench[m                 [1;32mtlb[m
+[1;32mhackbench[m               [1;32mlmbench_all[m             [1;32mtls_get_new-dtv_dso.so[m
+[1;32mhanoi[m                   [1;32mlmbench_testcode.sh[m     [0;0mtst.sh[m
+[1;32mhello[m                   [1;32mlmdd[m                    [0;0munixbench.logo[m
+[0;0mindex.base[m              [1;32mlmhttp[m                  [1;32munixbench_testcode.sh[m
+[1;32mint[m                     [1;32mlong[m                    [1;32mwhetstone-double[m
+[1;32miozone[m                  [1;32mloop_o[m
+[1;32miozone_testcode.sh[m      [1;32mlooper[m
+testcase busybox ls success
+testcase busybox sleep 1 success
+#### file opration test
+testcase busybox echo "#### file opration test" success
+touch: test.txt: Read-only file system
+testcase busybox touch test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "hello world" > test.txt fail
+cat: can't open 'test.txt': No such file or directory
+testcase busybox cat test.txt fail
+cut: test.txt: No such file or directory
+testcase busybox cut -c 3 test.txt fail
+od: test.txt: No such file or directory
+testcase busybox od test.txt fail
+head: test.txt: No such file or directory
+testcase busybox head test.txt fail
+tail: can't open 'test.txt': No such file or directory
+tail: no files
+testcase busybox tail test.txt fail
+hexdump: test.txt: No such file or directory
+hexdump: test.txt: Bad file descriptor
+testcase busybox hexdump -C test.txt fail
+md5sum: can't open 'test.txt': No such file or directory
+testcase busybox md5sum test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "ccccccc" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "bbbbbbb" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "aaaaaaa" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "2222222" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "1111111" >> test.txt fail
+sh: can't open 'test.txt': Read-only file system
+testcase busybox echo "bbbbbbb" >> test.txt fail
+sort: test.txt: No such file or directory
+testcase busybox sort test.txt | ./busybox uniq success
+stat: can't stat 'test.txt': No such file or directory
+testcase busybox stat test.txt fail
+strings: test.txt: No such file or directory
+testcase busybox strings test.txt fail
+wc: test.txt: No such file or directory
+testcase busybox wc test.txt fail
+testcase busybox [ -f test.txt ] fail
+more: test.txt: No such file or directory
+testcase busybox more test.txt success
+rm: can't remove 'test.txt': No such file or directory
+testcase busybox rm test.txt fail
+mkdir: can't create directory 'test_dir': Read-only file system
+testcase busybox mkdir test_dir fail
+mv: can't rename 'test_dir': Read-only file system
+testcase busybox mv test_dir test fail
+rmdir: 'test': Read-only file system
+testcase busybox rmdir test fail
+echo "hello world" > test.txt
+grep hello busybox_cmd.txt
+testcase busybox grep hello busybox_cmd.txt success
+cp: can't create 'busybox_cmd.bak': Read-only file system
+testcase busybox cp busybox_cmd.txt busybox_cmd.bak fail
+rm: can't remove 'busybox_cmd.bak': No such file or directory
+testcase busybox rm busybox_cmd.bak fail
+./busybox_cmd.txt

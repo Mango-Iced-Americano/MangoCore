@@ -18,18 +18,20 @@ use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
-use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
-use crate::fs::page_cache::PageCache;
+use crate::fs::vfs::{
+    CreateAttrs, FilePrivateData, FileType, InodeFlags, InodeId,
+    InodeMode, IndexNode, Metadata,
+};
 use crate::fs::vfs::file::FileFlags;
 use crate::fs::vfs::file_system::FileSystem;
-use crate::fs::vfs::{
-    CreateAttrs, FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode, Metadata,
-};
+use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::fs::page_cache::PageCache;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 use super::counters;
 use super::errno::from_lwext4;
+use super::inode_state::{CachedMeta, Ext4InodeState};
 use super::page_cache::{LwExt4PageCacheBackend, LWEXT4_SIZE_UNKNOWN};
 use lwext4_rust::{Ext4File, InodeTypes};
 
@@ -45,25 +47,19 @@ pub(crate) fn map_lwext4_mode(mode_raw: u32) -> MappedType {
     let type_bits = mode_raw & 0xF000;
     let file_type = match type_bits {
         0x8000 => FileType::File,        // S_IFREG
-        0x4000 => FileType::Dir,         // S_IFDIR
+        0x4000 => FileType::Dir,          // S_IFDIR
         0xA000 => FileType::SymLink,     // S_IFLNK
         0x2000 => FileType::CharDevice,  // S_IFCHR
         0x6000 => FileType::BlockDevice, // S_IFBLK
         0x1000 => FileType::Pipe,        // S_IFIFO
         0xC000 => FileType::Socket,      // S_IFSOCK
         _ => {
-            log::warn!(
-                "[lwext4] unknown mode type bits 0x{:x}, assuming File",
-                type_bits
-            );
+            log::warn!("[lwext4] unknown mode type bits 0x{:x}, assuming File", type_bits);
             FileType::File
         }
     };
     let inode_mode = InodeMode::from_bits_truncate(mode_raw);
-    MappedType {
-        file_type,
-        inode_mode,
-    }
+    MappedType { file_type, inode_mode }
 }
 
 /// Build a child path from parent.
@@ -73,15 +69,6 @@ fn join_path(parent: &str, name: &str) -> String {
     } else {
         alloc::format!("{}/{}", parent, name)
     }
-}
-
-/// DJB2 hash — fallback inode ID when ext4_raw_inode_fill fails.
-fn hash_path(path: &str) -> usize {
-    let mut hash: usize = 5381;
-    for b in path.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(b as usize);
-    }
-    hash
 }
 
 // ── FileGuard: RAII close for Ext4File handles ──────────────────────────
@@ -104,26 +91,16 @@ impl<'a> Drop for FileGuard<'a> {
     }
 }
 
-/// Cached inode metadata — avoids per-write lwext4 probing.
-/// Built on first `metadata()` call, updated by `set_metadata()`.
-/// Timestamps are not cached (always fresh from `TimeSpec::new()`).
-#[derive(Clone, Copy)]
-struct CachedMeta {
-    mode: InodeMode,
-    uid: u32,
-    gid: u32,
-}
-
 // ── Ext4OSInode ─────────────────────────────────────────────────────────
 
-/// A VFS inode backed by a path on an lwext4-mounted filesystem.
+/// A VFS inode backed by an lwext4 on-disk inode identity.
 pub struct Ext4OSInode {
     /// Owning filesystem (strong reference — kernel is long-lived).
     fs: Arc<super::ext4fs::Ext4FileSystem>,
-    /// Full path from mount root, e.g. `/bin/busybox`.
-    path: String,
     /// Real ext4 inode number (obtained via ext4_raw_inode_fill).
     inode_id: usize,
+    /// State shared by every alias/VFS object for this on-disk inode.
+    state: Arc<Ext4InodeState>,
     /// Cached file type (always known at construction time).
     file_type: FileType,
     /// Weak self-reference for `find(".")`.
@@ -134,8 +111,6 @@ pub struct Ext4OSInode {
     /// file size (1-byte write must not produce 4KB file).
     /// Lazily probed from lwext4 on first I/O via `logical_size_or_refresh()`.
     logical_size: Arc<AtomicUsize>,
-    /// Cached inode metadata — avoids lwext4 probe on every touch_modified().
-    cached_meta: Mutex<Option<CachedMeta>>,
 }
 
 // Safety: MangoCore is single-core; the circular Weak<Self> reference is
@@ -146,7 +121,7 @@ unsafe impl Sync for Ext4OSInode {}
 impl fmt::Debug for Ext4OSInode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ext4OSInode")
-            .field("path", &self.path)
+            .field("path", &self.state.current_path())
             .field("inode_id", &self.inode_id)
             .field("file_type", &self.file_type)
             .finish()
@@ -155,16 +130,24 @@ impl fmt::Debug for Ext4OSInode {
 
 impl Ext4OSInode {
     /// Create a root inode (inode 2).
-    pub(crate) fn new_root(fs: Arc<super::ext4fs::Ext4FileSystem>, inode_id: usize) -> Arc<Self> {
-        Arc::new_cyclic(|weak| Self {
-            fs,
-            path: String::from("/"),
-            inode_id,
-            file_type: FileType::Dir,
-            self_ref: Mutex::new(Some(weak.clone())),
-            page_cache: Mutex::new(None),
-            logical_size: Arc::new(AtomicUsize::new(LWEXT4_SIZE_UNKNOWN)),
-            cached_meta: Mutex::new(None),
+    pub(crate) fn new_root(
+        fs: Arc<super::ext4fs::Ext4FileSystem>,
+        inode_id: usize,
+        generation: u32,
+        nlinks: usize,
+    ) -> Arc<Self> {
+        let state = fs.inode_state(inode_id, generation, "/", 0, nlinks);
+        let logical_size = state.logical_size();
+        Arc::new_cyclic(move |weak| {
+            Self {
+                fs,
+                inode_id,
+                state,
+                file_type: FileType::Dir,
+                self_ref: Mutex::new(Some(weak.clone())),
+                page_cache: Mutex::new(None),
+                logical_size,
+            }
         })
     }
 
@@ -175,17 +158,27 @@ impl Ext4OSInode {
         fs: Arc<super::ext4fs::Ext4FileSystem>,
         path: String,
         inode_id: usize,
+        generation: u32,
         file_type: FileType,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|weak| Self {
-            fs,
-            path,
+        let state = fs.inode_state(
             inode_id,
-            file_type,
-            self_ref: Mutex::new(Some(weak.clone())),
-            page_cache: Mutex::new(None),
-            logical_size: Arc::new(AtomicUsize::new(LWEXT4_SIZE_UNKNOWN)),
-            cached_meta: Mutex::new(None),
+            generation,
+            &path,
+            LWEXT4_SIZE_UNKNOWN,
+            1,
+        );
+        let logical_size = state.logical_size();
+        Arc::new_cyclic(move |weak| {
+            Self {
+                fs,
+                inode_id,
+                state,
+                file_type,
+                self_ref: Mutex::new(Some(weak.clone())),
+                page_cache: Mutex::new(None),
+                logical_size,
+            }
         })
     }
 
@@ -196,26 +189,55 @@ impl Ext4OSInode {
         fs: Arc<super::ext4fs::Ext4FileSystem>,
         path: String,
         inode_id: usize,
+        generation: u32,
         file_type: FileType,
         inode_mode: InodeMode,
         size: usize,
         uid: u32,
         gid: u32,
+        nlinks: usize,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|weak| Self {
-            fs,
-            path,
-            inode_id,
-            file_type,
-            self_ref: Mutex::new(Some(weak.clone())),
-            page_cache: Mutex::new(None),
-            logical_size: Arc::new(AtomicUsize::new(size)),
-            cached_meta: Mutex::new(Some(CachedMeta {
-                mode: inode_mode,
-                uid,
-                gid,
-            })),
+        let state = fs.inode_state(inode_id, generation, &path, size, nlinks);
+        state.seed_cached_meta(CachedMeta {
+            mode: inode_mode,
+            uid,
+            gid,
+        });
+        let logical_size = state.logical_size();
+        Arc::new_cyclic(move |weak| {
+            Self {
+                fs,
+                inode_id,
+                state,
+                file_type,
+                self_ref: Mutex::new(Some(weak.clone())),
+                page_cache: Mutex::new(None),
+                logical_size,
+            }
         })
+    }
+
+    /// Return the currently valid namespace path.  The shared state is
+    /// rewritten after rename, so old VFS objects never fall back to a stale
+    /// pathname that may later name a different inode.
+    fn live_path(&self) -> Result<String, SyscallErr> {
+        self.state.current_path().ok_or(SyscallErr::ENOENT)
+    }
+
+    /// Revalidate a previously-snapshotted pathname while the caller holds
+    /// `fs.lw`.  Namespace paths are mutable shared state: a rename can change
+    /// them between `live_path()` and a path-based lwext4 call.  Refusing the
+    /// operation on an inode/generation mismatch prevents a stale pathname
+    /// from mutating a newly-created inode that reused the old name.
+    fn validate_path_locked(&self, path: &str) -> Result<(), SyscallErr> {
+        let current = self.fs.probe_inode_meta_locked(path)?;
+        if current.inode_id != self.inode_id
+            || current.generation != self.state.generation()
+            || current.file_type != self.file_type
+        {
+            return Err(SyscallErr::EAGAIN);
+        }
+        Ok(())
     }
 
     /// Get logical file size, lazily probing from lwext4 on first call.
@@ -230,27 +252,12 @@ impl Ext4OSInode {
             );
             return Ok(cached);
         }
-        // One-time probe: open + file_size + close
-        let size = {
-            let _lock = self.fs.lw.lock();
-            let lw_path = self.fs.lw_path(&self.path);
-            let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
-            if f.file_open(&lw_path, 0x0).is_err() {
-                // File doesn't exist yet — store 0 to avoid re-probing on
-                // every write_at call. The file will be created on first
-                // writeback (via O_RDWR|O_CREAT|O_TRUNC in write_page).
-                self.logical_size.store(0, Ordering::Relaxed);
-                counters::LWEXT4_LOGICAL_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
-                counters::LWEXT4_LOGICAL_SIZE_CYCLES.fetch_add(
-                    crate::task::perf::perf_time_now().wrapping_sub(_start),
-                    Ordering::Relaxed,
-                );
-                return Ok(0);
-            }
-            let s = f.file_size() as usize;
-            f.file_close().ok();
-            s
-        };
+        // One-time probe through the inode handle when the file is open.
+        // This remains valid after rename/unlink and never recreates a stale
+        // pathname as an accidental writeback target.
+        let size = self
+            .state
+            .with_file(&self.fs, false, |file| Ok(file.file_size() as usize))?;
         self.logical_size.store(size, Ordering::Relaxed);
         counters::LWEXT4_LOGICAL_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
         counters::LWEXT4_LOGICAL_SIZE_CYCLES.fetch_add(
@@ -268,10 +275,7 @@ impl Ext4OSInode {
         }
         while new_size > prev {
             match self.logical_size.compare_exchange_weak(
-                prev,
-                new_size,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                prev, new_size, Ordering::Relaxed, Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => prev = actual,
@@ -291,12 +295,12 @@ impl IndexNode for Ext4OSInode {
         // Fast path: return from cache for regular files.
         // Saves ~5 lwext4 FFI calls (file_mode_get/file_open/file_size/file_close)
         // on every touch_modified() after write.
-        if let Some(ref cached) = *self.cached_meta.lock() {
+        if let Some(cached) = self.state.cached_meta() {
             counters::LWEXT4_METADATA_HOT.fetch_add(1, Ordering::Relaxed);
             let size_raw = self.logical_size.load(Ordering::Relaxed);
             let size: i64 = if size_raw == LWEXT4_SIZE_UNKNOWN {
                 // Fallback: probe size (should be rare after cache-first find)
-                self.logical_size_or_refresh().unwrap_or(0) as i64
+                self.logical_size_or_refresh()? as i64
             } else {
                 size_raw as i64
             };
@@ -305,9 +309,7 @@ impl IndexNode for Ext4OSInode {
                 // lwext4 does not expose ext4 i_blocks directly, so we
                 // conservatively ceil-divide the file size by 512.
                 (size as usize + 511) / 512
-            } else {
-                0
-            };
+            } else { 0 };
             return Ok(Metadata {
                 dev_id: self.fs.dev_id(),
                 inode_id: self.inode_id,
@@ -320,11 +322,7 @@ impl IndexNode for Ext4OSInode {
                 file_type: self.file_type,
                 mode: cached.mode,
                 flags: InodeFlags::empty(),
-                nlinks: if self.file_type == FileType::Dir {
-                    2
-                } else {
-                    1
-                },
+                nlinks: self.state.nlinks() as u64,
                 uid: cached.uid,
                 gid: cached.gid,
                 raw_dev: 0,
@@ -337,9 +335,11 @@ impl IndexNode for Ext4OSInode {
         // and cause a spin::Mutex deadlock (spin::Mutex is not reentrant).
         let _cold_start = crate::task::perf::perf_time_now();
         counters::LWEXT4_METADATA_COLD.fetch_add(1, Ordering::Relaxed);
+        let path = self.live_path()?;
         let (file_type, inode_mode, size, blocks, uid, gid) = {
             let _lock = self.fs.lw.lock();
-            let lw_path = self.fs.lw_path(&self.path);
+            self.validate_path_locked(&path)?;
+            let lw_path = self.fs.lw_path(&path);
             let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
             let mode_raw = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
             let mapped = map_lwext4_mode(mode_raw);
@@ -347,13 +347,15 @@ impl IndexNode for Ext4OSInode {
             // Fetch real uid/gid from on-disk inode via ext4_owner_get
             let mut lu: u32 = 0;
             let mut lg: u32 = 0;
-            let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+            let c_path = CString::new(lw_path.as_str())
+                .map_err(|_| SyscallErr::EINVAL)?;
             let c_path = c_path.into_raw();
-            unsafe {
-                lwext4_rust::bindings::ext4_owner_get(c_path, &mut lu, &mut lg);
-            }
-            unsafe {
-                let _ = CString::from_raw(c_path);
+            let owner_result = unsafe {
+                lwext4_rust::bindings::ext4_owner_get(c_path, &mut lu, &mut lg)
+            };
+            unsafe { let _ = CString::from_raw(c_path); }
+            if owner_result != 0 {
+                return Err(from_lwext4(owner_result.abs()));
             }
 
             let (size, blocks) = match mapped.file_type {
@@ -361,7 +363,8 @@ impl IndexNode for Ext4OSInode {
                 FileType::SymLink => {
                     let mut rbuf = [0u8; 256];
                     let mut rcnt: usize = 0;
-                    let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+                    let c_path = CString::new(lw_path.as_str())
+                        .map_err(|_| SyscallErr::EINVAL)?;
                     let c_path = c_path.into_raw();
                     let r = unsafe {
                         lwext4_rust::bindings::ext4_readlink(
@@ -371,9 +374,7 @@ impl IndexNode for Ext4OSInode {
                             &mut rcnt,
                         )
                     };
-                    unsafe {
-                        let _ = CString::from_raw(c_path);
-                    }
+                    unsafe { let _ = CString::from_raw(c_path); }
                     if r != 0 {
                         (0i64, 0usize)
                     } else {
@@ -413,15 +414,13 @@ impl IndexNode for Ext4OSInode {
                     }
                 }
             };
+            self.state.set_cached_meta(CachedMeta {
+                mode: mapped.inode_mode,
+                uid: lu,
+                gid: lg,
+            });
             (mapped.file_type, mapped.inode_mode, size, blocks, lu, lg)
         };
-
-        // Cache mode for hot path
-        *self.cached_meta.lock() = Some(CachedMeta {
-            mode: inode_mode,
-            uid,
-            gid,
-        });
 
         counters::LWEXT4_METADATA_COLD_CYCLES.fetch_add(
             crate::task::perf::perf_time_now().wrapping_sub(_cold_start),
@@ -441,7 +440,7 @@ impl IndexNode for Ext4OSInode {
             file_type,
             mode: inode_mode,
             flags: InodeFlags::empty(),
-            nlinks: if file_type == FileType::Dir { 2 } else { 1 },
+            nlinks: self.state.nlinks() as u64,
             uid,
             gid,
             raw_dev: 0,
@@ -466,11 +465,14 @@ impl IndexNode for Ext4OSInode {
             FileType::Dir => Err(SyscallErr::EISDIR),
             FileType::SymLink => {
                 // Use ext4_readlink to get the symlink target content
+                let path = self.live_path()?;
                 let _lock = self.fs.lw.lock();
-                let lw_path = self.fs.lw_path(&self.path);
+                self.validate_path_locked(&path)?;
+                let lw_path = self.fs.lw_path(&path);
                 let mut rbuf = [0u8; 256];
                 let mut rcnt: usize = 0;
-                let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+                let c_path = CString::new(lw_path.as_str())
+                    .map_err(|_| SyscallErr::EINVAL)?;
                 let c_path = c_path.into_raw();
                 let r = unsafe {
                     lwext4_rust::bindings::ext4_readlink(
@@ -480,9 +482,7 @@ impl IndexNode for Ext4OSInode {
                         &mut rcnt,
                     )
                 };
-                unsafe {
-                    let _ = CString::from_raw(c_path);
-                }
+                unsafe { let _ = CString::from_raw(c_path); }
                 if r != 0 {
                     return Err(from_lwext4(r.abs()));
                 }
@@ -496,7 +496,7 @@ impl IndexNode for Ext4OSInode {
             FileType::File => {
                 // Always use PageCache (lazily created on first I/O)
                 let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
-                let file_size = self.logical_size_or_refresh().unwrap_or(0);
+                let file_size = self.logical_size_or_refresh()?;
                 let read_end = (offset + actual).min(file_size);
                 if offset >= read_end {
                     return Ok(0);
@@ -505,8 +505,7 @@ impl IndexNode for Ext4OSInode {
                 // ── Readahead: batch prefetch sequential pages (like legacy ext4) ──
                 if let FilePrivateData::Readahead { ra_state } = &*_data {
                     let start_page = offset >> crate::config::PAGE_SIZE_BITS;
-                    let end_page =
-                        (offset + actual.saturating_sub(1)) >> crate::config::PAGE_SIZE_BITS;
+                    let end_page = (offset + actual.saturating_sub(1)) >> crate::config::PAGE_SIZE_BITS;
                     let req_pages = end_page.saturating_sub(start_page) + 1;
                     let mut ra = ra_state.lock();
                     pc.maybe_readahead(start_page, &mut ra, req_pages);
@@ -565,8 +564,10 @@ impl IndexNode for Ext4OSInode {
 
         // ".." — return parent, or self if already at root
         if name == ".." {
-            let result = if self.path == "/" {
-                self.self_ref
+            let path = self.live_path()?;
+            let result = if path == "/" {
+                self
+                    .self_ref
                     .lock()
                     .as_ref()
                     .and_then(|w| w.upgrade())
@@ -574,32 +575,30 @@ impl IndexNode for Ext4OSInode {
                     .ok_or(SyscallErr::EIO)
             } else {
                 // Compute parent path
-                let parent_path = match self.path.rfind('/') {
+                let parent_path = match path.rfind('/') {
                     Some(0) => "/",
-                    Some(pos) => &self.path[..pos],
+                    Some(pos) => &path[..pos],
                     None => "/",
                 };
                 let parent_path = String::from(parent_path);
-                // Use probe_inode_meta (cached) instead of get_inode_id
-                let entry = self.fs.probe_inode_meta(&parent_path).unwrap_or_else(|_| {
-                    super::ext4fs::LookupCacheEntry {
-                        inode_id: 0,
-                        file_type: FileType::Dir,
-                        inode_mode: InodeMode::S_IFDIR | InodeMode::from_bits_truncate(0o755),
-                        size: 0,
-                        uid: 0,
-                        gid: 0,
-                    }
-                });
+                // Metadata/I/O failures must propagate; a synthetic inode 0
+                // would still carry a live path and could mutate real data.
+                let entry = {
+                    let _lock = self.fs.lw.lock();
+                    self.validate_path_locked(&path)?;
+                    self.fs.probe_inode_meta_locked(&parent_path)?
+                };
                 Ok(Ext4OSInode::new_child_seeded(
                     self.fs.clone(),
                     parent_path,
                     entry.inode_id,
+                    entry.generation,
                     FileType::Dir,
                     entry.inode_mode,
                     entry.size,
                     entry.uid,
                     entry.gid,
+                    entry.nlinks,
                 ) as Arc<dyn IndexNode>)
             };
             let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
@@ -609,20 +608,29 @@ impl IndexNode for Ext4OSInode {
         }
 
         // Build child path
-        let child_path = join_path(&self.path, name);
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, name);
 
-        // Single lwext4 probe
-        let entry = self.fs.probe_inode_meta(&child_path)?;
+        // Validate the snapshotted parent and resolve the child under the
+        // same mount lock, so a concurrent directory move cannot redirect
+        // this lookup through a stale pathname.
+        let entry = {
+            let _lock = self.fs.lw.lock();
+            self.validate_path_locked(&parent_path)?;
+            self.fs.probe_inode_meta_locked(&child_path)?
+        };
 
         let result = Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
             child_path,
             entry.inode_id,
+            entry.generation,
             entry.file_type,
             entry.inode_mode,
             entry.size,
             entry.uid,
             entry.gid,
+            entry.nlinks,
         ) as Arc<dyn IndexNode>);
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
         counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -638,12 +646,16 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::ENOTDIR);
         }
 
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
-        let lw_path = self.fs.lw_path(&self.path);
+        self.validate_path_locked(&path)?;
+        let lw_path = self.fs.lw_path(&path);
         let dir = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_DIR);
 
         let _de_start = crate::task::perf::perf_time_now();
-        let (names, _types) = dir.lwext4_dir_entries().map_err(|e| from_lwext4(e.abs()))?;
+        let (names, _types) = dir
+            .lwext4_dir_entries()
+            .map_err(|e| from_lwext4(e.abs()))?;
         counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
         counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
             crate::task::perf::perf_time_now().wrapping_sub(_de_start),
@@ -673,11 +685,14 @@ impl IndexNode for Ext4OSInode {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
-        let lw_path = self.fs.lw_path(&self.path);
+        self.validate_path_locked(&path)?;
+        let lw_path = self.fs.lw_path(&path);
         let dir = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_DIR);
         let _de_start = crate::task::perf::perf_time_now();
-        let (names, types) = dir.lwext4_dir_entries().map_err(|e| from_lwext4(e.abs()))?;
+        let (names, types, inode_numbers) = dir.lwext4_dir_entries_with_ino()
+            .map_err(|e| from_lwext4(e.abs()))?;
         counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
         counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
             crate::task::perf::perf_time_now().wrapping_sub(_de_start),
@@ -686,16 +701,13 @@ impl IndexNode for Ext4OSInode {
 
         let mut result = Vec::with_capacity(names.len());
         for (i, name_bytes) in names.iter().enumerate() {
-            let len = name_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(name_bytes.len());
+            let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
             if let Ok(s) = core::str::from_utf8(&name_bytes[..len]) {
                 if !s.is_empty() {
-                    let child_path = join_path(&self.path, s);
-                    // Use hash-based pseudo inode ID to avoid re-locking
-                    // self.fs.lw (spin::Mutex is not reentrant).
-                    let inode_id = hash_path(&child_path);
+                    let inode_id = inode_numbers
+                        .get(i)
+                        .copied()
+                        .ok_or(SyscallErr::EIO)? as usize;
                     let ft = match types.get(i).unwrap_or(&InodeTypes::EXT4_DE_UNKNOWN) {
                         InodeTypes::EXT4_DE_REG_FILE => FileType::File,
                         InodeTypes::EXT4_DE_DIR => FileType::Dir,
@@ -732,11 +744,39 @@ impl IndexNode for Ext4OSInode {
         _data: MutexGuard<FilePrivateData>,
         _flags: &FileFlags,
     ) -> Result<(), SyscallErr> {
+        if self.file_type == FileType::File {
+            self.state.open(&self.fs)?;
+        }
         Ok(())
     }
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
-        // No-op: explicit sync/fsync is the durability boundary, not close.
+        if self.file_type != FileType::File {
+            return Ok(());
+        }
+        if !self.state.drop_open_ref()? {
+            return Ok(());
+        }
+
+        // Normal close is not a durability boundary.  A zero-link inode is
+        // the exception: its pathname is gone, so dirty pages must reach the
+        // still-open inode handle before final block/inode reclamation.
+        if self.state.nlinks() == 0 {
+            let key = (self.inode_id, self.state.generation());
+            let page_cache = self.fs.page_caches.lock().get(&key).cloned();
+            if let Some(page_cache) = page_cache {
+                page_cache.writeback_all().map_err(|_| SyscallErr::EIO)?;
+            }
+        }
+        let deleted = self.state.finish_last_close(&self.fs)?;
+        if deleted {
+            let generation = self.state.generation();
+            self.fs
+                .page_caches
+                .lock()
+                .remove(&(self.inode_id, generation));
+            self.fs.forget_inode_state(self.inode_id, generation);
+        }
         Ok(())
     }
 
@@ -747,11 +787,23 @@ impl IndexNode for Ext4OSInode {
         if let Some(pc) = self.page_cache.lock().clone() {
             pc.writeback_all().map_err(|_| SyscallErr::EIO)?;
         }
-        // Then flush lwext4 internal caches
-        let _lock = self.fs.lw.lock();
-        let lw_path = self.fs.lw_path(&self.path);
-        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
-        f.file_cache_flush().map_err(|e| from_lwext4(e.abs()))?;
+        // Then flush lwext4 internal caches.  Regular files use their inode
+        // handle so sync remains valid after namespace detach.
+        if self.file_type == FileType::File {
+            self.state.with_file(&self.fs, false, |file| {
+                file.file_cache_flush()
+                    .map_err(|error| from_lwext4(error.abs()))?;
+                Ok(())
+            })?;
+        } else {
+            let path = self.live_path()?;
+            let _lock = self.fs.lw.lock();
+            self.validate_path_locked(&path)?;
+            let lw_path = self.fs.lw_path(&path);
+            let mut file = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
+            file.file_cache_flush()
+                .map_err(|error| from_lwext4(error.abs()))?;
+        }
         Ok(())
     }
 
@@ -787,7 +839,7 @@ impl IndexNode for Ext4OSInode {
             }
             FileType::File => {
                 let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
-                let file_size = self.logical_size_or_refresh().unwrap_or(0);
+                let file_size = self.logical_size_or_refresh()?;
                 let read_end = (offset + len).min(file_size);
                 if offset >= read_end {
                     return Ok(0);
@@ -830,39 +882,37 @@ impl IndexNode for Ext4OSInode {
         counters::LWEXT4_ENSURE_PC_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut cache = self.page_cache.lock();
         if cache.is_none() {
-            // Check global registry for existing PageCache (shared across inode instances).
-            // The lock guard is ephemeral — released after .cloned() so no lock is held
-            // during set_backend() below.
-            let cached_pc = self.fs.page_caches.lock().get(&self.inode_id).cloned();
-            if let Some(pc) = cached_pc {
-                // Registry hit: cached pages survive dentry eviction, but the old
-                // backend still references a stale logical_size atom (Arc<AtomicUsize>)
-                // from the prior inode instance. Replace it with a fresh backend
-                // pointing at this inode's current atom so writeback clamps to the
-                // correct EOF.
-                let backend = Arc::new(LwExt4PageCacheBackend::new(
-                    Arc::downgrade(&self.fs),
-                    self.path.clone(),
-                    self.logical_size.clone(),
-                    self.fs.lw_path(&self.path),
-                ));
-                pc.set_backend(backend);
-                *cache = Some(pc);
-                return cache.clone();
+            let key = (self.inode_id, self.state.generation());
+            // Fast registry hit.  The backend already references the shared
+            // generation-qualified inode state, so aliases must not replace it.
+            if let Some(pc) = self.fs.page_caches.lock().get(&key).cloned() {
+                *cache = Some(pc.clone());
+                return Some(pc);
             }
-            // No existing PageCache — create new one and register
-            let backend = Arc::new(LwExt4PageCacheBackend::new(
-                Arc::downgrade(&self.fs),
-                self.path.clone(),
-                self.logical_size.clone(),
-                self.fs.lw_path(&self.path),
-            ));
-            let pc = PageCache::new();
-            pc.set_backend(backend);
-            // Register in global strong registry — dirty pages survive dentry eviction
-            self.fs.page_caches.lock().insert(self.inode_id, pc.clone());
+
+            // Local inode locks do not serialize hard-link aliases.  Build an
+            // unbound candidate, then perform a second lookup while holding
+            // the global registry lock.  Only the candidate that wins this
+            // get-or-insert race receives a backend and becomes globally
+            // visible; losers adopt the already-published PageCache.
+            let candidate = PageCache::new();
+            let pc = {
+                let mut registry = self.fs.page_caches.lock();
+                if let Some(existing) = registry.get(&key) {
+                    existing.clone()
+                } else {
+                    let backend = Arc::new(LwExt4PageCacheBackend::new(
+                        Arc::downgrade(&self.fs),
+                        self.state.clone(),
+                    ));
+                    candidate.set_backend(backend);
+                    registry.insert(key, candidate.clone());
+                    counters::LWEXT4_ENSURE_PC_CREATES
+                        .fetch_add(1, Ordering::Relaxed);
+                    candidate
+                }
+            };
             *cache = Some(pc);
-            counters::LWEXT4_ENSURE_PC_CREATES.fetch_add(1, Ordering::Relaxed);
         }
         cache.clone()
     }
@@ -889,35 +939,80 @@ impl IndexNode for Ext4OSInode {
         // Regular files: always use PageCache (lazily created on first I/O)
         if self.file_type == FileType::File {
             let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
-            let old_size = self.logical_size_or_refresh().unwrap_or(0);
-            // Pre-publish expected EOF so writeback inside balance_dirty_pages()
-            // (triggered by pc.write()) sees the new file size instead of
-            // clamping writes to the old EOF (e.g. 0 for a new file).
-            // Without this, a balance_dirty_pages() → write_pages() call
-            // during pc.write() would see the stale EOF, return Ok(0), and
-            // permanently clean dirty pages without writing them.
-            let expected_new_end = (offset + actual).max(old_size);
-            self.note_logical_size(expected_new_end);
-            let n = pc
-                .write(offset, &buf[..actual], Some(old_size))
-                .map_err(|_| SyscallErr::EIO)?;
-            // If the write was partial, note_logical_size is a fetch_max —
-            // this is a no-op when the full write succeeded.
-            let actual_new_end = offset + n;
-            self.note_logical_size(actual_new_end);
-            return Ok(n);
+            let result = pc.with_io_gate(|| {
+                let old_size = self.logical_size_or_refresh()?;
+                // Publish EOF in the same PageCache serialization interval as
+                // the data copy.  Background writeback therefore cannot see
+                // a new page with an old EOF, and truncate cannot interleave
+                // between EOF publication and dirty-page creation.
+                let requested_end =
+                    offset.checked_add(actual).ok_or(SyscallErr::EFBIG)?;
+                let expected_new_end = requested_end.max(old_size);
+                self.note_logical_size(expected_new_end);
+                let n = match pc.write_without_balance(
+                    offset,
+                    &buf[..actual],
+                    Some(old_size),
+                ) {
+                    Ok(n) => n,
+                    Err(error) => {
+                        // Roll the speculative EOF back only if no later
+                        // writer superseded it inside this serialization
+                        // interval.  Discard extension-only dirty pages too.
+                        if self
+                            .logical_size
+                            .compare_exchange(
+                                expected_new_end,
+                                old_size,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            pc.rollback_failed_extension(old_size);
+                        }
+                        return Err(error);
+                    }
+                };
+                let actual_new_end =
+                    offset.checked_add(n).ok_or(SyscallErr::EFBIG)?;
+                let committed_end = actual_new_end.max(old_size);
+                if n != actual
+                    && self
+                        .logical_size
+                        .compare_exchange(
+                            expected_new_end,
+                            committed_end,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                {
+                    pc.rollback_failed_extension(committed_end);
+                } else {
+                    self.note_logical_size(committed_end);
+                }
+                Ok(n)
+            });
+            if result.is_ok() {
+                // Never run global writeback while holding this PageCache's
+                // io_gate: it may select the same cache and would deadlock.
+                crate::fs::page_cache::balance_dirty_pages();
+            }
+            return result;
         }
 
         // Non-File types: keep existing behavior (PageCache or direct I/O)
         if let Some(pc) = self.page_cache() {
-            return pc
-                .write(offset, &buf[..actual], None)
+            return pc.write(offset, &buf[..actual], None)
                 .map_err(|_| SyscallErr::EIO);
         }
 
         // Direct I/O fallback
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
-        let lw_path = self.fs.lw_path(&self.path);
+        self.validate_path_locked(&path)?;
+        let lw_path = self.fs.lw_path(&path);
         let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
         // O_RDWR ("r+"): does not truncate. Fall back to O_RDWR|O_CREAT|O_TRUNC
         // ("w+") only if the file doesn't exist yet.
@@ -927,13 +1022,9 @@ impl IndexNode for Ext4OSInode {
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
         let guard = FileGuard::new(&mut f);
-        guard
-            .f
-            .file_seek(offset as i64, 0)
+        guard.f.file_seek(offset as i64, 0)
             .map_err(|e| from_lwext4(e.abs()))?;
-        let n = guard
-            .f
-            .file_write(&buf[..actual])
+        let n = guard.f.file_write(&buf[..actual])
             .map_err(|e| from_lwext4(e.abs()))?;
         drop(guard);
         Ok(n)
@@ -951,10 +1042,12 @@ impl IndexNode for Ext4OSInode {
         if name.is_empty() || name.len() > 255 || name.contains('/') {
             return Err(SyscallErr::EINVAL);
         }
-        let child_path = join_path(&self.path, name);
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, name);
         match file_type {
             FileType::File => {
                 let _lock = self.fs.lw.lock();
+                self.validate_path_locked(&parent_path)?;
                 let lw_child = self.fs.lw_path(&child_path);
                 let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_REG_FILE);
                 if f.check_inode_exist(&lw_child, InodeTypes::EXT4_DE_REG_FILE) {
@@ -968,23 +1061,27 @@ impl IndexNode for Ext4OSInode {
                 }
                 f.file_mode_set(mode.bits())
                     .map_err(|e| from_lwext4(e.abs()))?;
-                drop(_lock);
                 // Use real ext4 inode number so the PageCache stays findable
-                // after rename (the real inode number is stable across renames;
-                // hash_path changes when the path changes).
-                let real_inode = self.fs.probe_inode_meta(&child_path)?.inode_id;
+                // after rename (the real inode number is stable across renames).
+                let created = self.fs.probe_inode_meta_locked(&child_path)?;
+                drop(_lock);
                 // inode numbers can be reused after unlink. A new file must not
                 // inherit fully-valid pages from a prior inode incarnation.
-                self.fs.page_caches.lock().remove(&real_inode);
+                self.fs
+                    .page_caches
+                    .lock()
+                    .remove(&(created.inode_id, created.generation));
                 let inode = Ext4OSInode::new_child_seeded(
                     self.fs.clone(),
                     child_path,
-                    real_inode,
+                    created.inode_id,
+                    created.generation,
                     FileType::File,
                     mode,
                     0,
                     0,
                     0,
+                    1,
                 );
                 Ok(inode)
             }
@@ -1034,36 +1131,41 @@ impl IndexNode for Ext4OSInode {
         Ok(inode)
     }
 
-    fn mkdir(&self, name: &str, mode: InodeMode) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+    fn mkdir(
+        &self,
+        name: &str,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
         if name.is_empty() || name.len() > 255 || name.contains('/') {
             return Err(SyscallErr::EINVAL);
         }
-        let child_path = join_path(&self.path, name);
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, name);
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&parent_path)?;
         let lw_child = self.fs.lw_path(&child_path);
         let mut d = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
-        d.dir_mk(&lw_child).map_err(|e| from_lwext4(e.abs()))?;
+        d.dir_mk(&lw_child)
+            .map_err(|e| from_lwext4(e.abs()))?;
         // Set mode on the newly created directory
         d.file_mode_set(mode.bits())
             .map_err(|e| from_lwext4(e.abs()))?;
+        let created = self.fs.probe_inode_meta_locked(&child_path)?;
         drop(_lock);
-        let real_inode = self
-            .fs
-            .probe_inode_meta(&child_path)
-            .map(|e| e.inode_id)
-            .unwrap_or_else(|_| hash_path(&child_path));
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
             child_path,
-            real_inode,
+            created.inode_id,
+            created.generation,
             FileType::Dir,
             mode,
             0,
             0,
             0,
+            2,
         ))
     }
 
@@ -1071,19 +1173,68 @@ impl IndexNode for Ext4OSInode {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let child_path = join_path(&self.path, name);
-        let _lock = self.fs.lw.lock();
-        let lw_child = self.fs.lw_path(&child_path);
-        // Verify the file exists (file_remove tolerates ENOENT in lwext4)
-        // Use EXT4_DE_UNKNOWN to accept any non-directory type (files, symlinks, FIFOs, etc.)
-        let mut probe = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_UNKNOWN);
-        if !probe.check_inode_exist(&lw_child, InodeTypes::EXT4_DE_UNKNOWN) {
-            return Err(SyscallErr::ENOENT);
+        if name.is_empty() || name.len() > 255 || name.contains('/') {
+            return Err(SyscallErr::EINVAL);
         }
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, name);
+        let entry = self.fs.probe_inode_meta(&child_path)?;
+        if entry.file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
+        }
+        let state = self
+            .fs
+            .lookup_inode_state(entry.inode_id, entry.generation);
+        let observed_open = state.as_ref().is_some_and(|state| state.is_open());
+
+        // A closed inode can still have dirty pages in the strong registry.
+        // They must be written before immediate reclaim; an open zero-link
+        // inode can keep using the same cache/handle until final close.
+        if !observed_open {
+            if let Some(page_cache) = self
+                .fs
+                .page_caches
+                .lock()
+                .get(&(entry.inode_id, entry.generation))
+                .cloned()
+            {
+                page_cache.writeback_all().map_err(|_| SyscallErr::EIO)?;
+            }
+        }
+
+        let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&parent_path)?;
+        let current = self.fs.probe_inode_meta_locked(&child_path)?;
+        if current.inode_id != entry.inode_id
+            || current.generation != entry.generation
+            || current.file_type != entry.file_type
+        {
+            return Err(SyscallErr::EAGAIN);
+        }
+        // Re-evaluate at the same mount-lock serialization point as the C
+        // namespace mutation.  An open may have started while writeback was
+        // waiting, or the former last opener may have completed safely.
+        let defer_inode_free = state.as_ref().is_some_and(|state| state.is_open());
+        let lw_child = self.fs.lw_path(&child_path);
         let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_UNKNOWN);
-        let r = f.file_remove(&lw_child);
-        if r.is_err() {
-            return Err(from_lwext4(r.unwrap_err().abs()));
+        let (removed_inode, remaining_links) = f
+            .file_remove_deferred(&lw_child, defer_inode_free)
+            .map_err(|error| from_lwext4(error.abs()))?;
+        if removed_inode as usize != entry.inode_id {
+            return Err(SyscallErr::EIO);
+        }
+
+        if let Some(state) = state.as_ref() {
+            state.remove_path(&child_path, remaining_links as usize);
+        }
+        drop(_lock);
+        if remaining_links == 0 && !defer_inode_free {
+            self.fs
+                .page_caches
+                .lock()
+                .remove(&(entry.inode_id, entry.generation));
+            self.fs
+                .forget_inode_state(entry.inode_id, entry.generation);
         }
         Ok(())
     }
@@ -1092,62 +1243,32 @@ impl IndexNode for Ext4OSInode {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let child_path = join_path(&self.path, name);
-        let lw_child;
-        let mut candidates;
-
-        // ── Phase 1: list directory entries under lock ──
-        {
-            let _lock = self.fs.lw.lock();
-            lw_child = self.fs.lw_path(&child_path);
-            let dir = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
-            let _de_start = crate::task::perf::perf_time_now();
-            let (entries, types) = dir.lwext4_dir_entries().map_err(|e| from_lwext4(e.abs()))?;
-            counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
-            counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
-                crate::task::perf::perf_time_now().wrapping_sub(_de_start),
-                Ordering::Relaxed,
-            );
-
-            // Collect non-trivial child names, skipping EXT4_DE_UNKNOWN
-            // (inode freed but directory entry survived).
-            candidates = Vec::new();
-            for (b, t) in entries.iter().zip(types.iter()) {
-                if *t == InodeTypes::EXT4_DE_UNKNOWN {
-                    continue;
-                }
-                let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
-                let s = core::str::from_utf8(&b[..len]).unwrap_or("");
-                if s == "." || s == ".." || s.is_empty() {
-                    continue;
-                }
-                candidates.push(alloc::string::String::from(s));
-            }
-        } // _lock dropped here
-
-        // ── Phase 2: verify each candidate's inode still exists ──
-        // A directory entry may have a valid file_type byte but a
-        // freed inode (inode == 0 on disk).  The EXT4_DE_UNKNOWN
-        // check above catches type==0, but the type byte is set at
-        // file creation and never cleared when the inode is freed.
-        // We must probe the inode directly to distinguish orphans.
-        let has_real = candidates.iter().any(|s| {
-            let entry_path = alloc::format!("{}/{}", lw_child, s);
-            let path = self.fs.lw_path(&entry_path);
-            let mut probe = Ext4File::new(&path, InodeTypes::EXT4_DE_UNKNOWN);
-            probe.check_inode_exist(&path, InodeTypes::EXT4_DE_UNKNOWN)
-        });
-        if has_real {
-            return Err(SyscallErr::ENOTEMPTY);
+        if name.is_empty() || name.len() > 255 || name.contains('/') {
+            return Err(SyscallErr::EINVAL);
         }
-
-        // ── Phase 3: all children are orphans — remove the dir ──
-        {
-            let _lock = self.fs.lw.lock();
-            let lw_child = self.fs.lw_path(&child_path);
-            let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
-            f.dir_rm(&lw_child).map_err(|e| from_lwext4(e.abs()))?;
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, name);
+        // Use the C-side atomic, non-recursive primitive.  It distinguishes
+        // iterator errors from EOF under the mount lock and will never turn
+        // an incomplete directory listing into recursive data deletion.
+        let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&parent_path)?;
+        let entry = self.fs.probe_inode_meta_locked(&child_path)?;
+        if entry.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
         }
+        let state = self
+            .fs
+            .lookup_inode_state(entry.inode_id, entry.generation);
+        let lw_child = self.fs.lw_path(&child_path);
+        let mut f = Ext4File::new(&lw_child, InodeTypes::EXT4_DE_DIR);
+        f.dir_rm_empty(&lw_child)
+            .map_err(|e| from_lwext4(e.abs()))?;
+        if let Some(state) = state {
+            state.remove_path(&child_path, 0);
+        }
+        self.fs
+            .forget_inode_state(entry.inode_id, entry.generation);
         Ok(())
     }
 
@@ -1163,7 +1284,17 @@ impl IndexNode for Ext4OSInode {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let old_path = join_path(&self.path, old_name);
+        if old_name.is_empty()
+            || old_name.len() > 255
+            || old_name.contains('/')
+            || new_name.is_empty()
+            || new_name.len() > 255
+            || new_name.contains('/')
+        {
+            return Err(SyscallErr::EINVAL);
+        }
+        let old_parent_path = self.live_path()?;
+        let old_path = join_path(&old_parent_path, old_name);
         let new_parent_node = new_parent
             .as_any_ref()
             .downcast_ref::<Ext4OSInode>()
@@ -1172,7 +1303,8 @@ impl IndexNode for Ext4OSInode {
         if !Arc::ptr_eq(&self.fs, &new_parent_node.fs) {
             return Err(SyscallErr::EXDEV);
         }
-        let new_path = join_path(&new_parent_node.path, new_name);
+        let new_parent_path = new_parent_node.live_path()?;
+        let new_path = join_path(&new_parent_path, new_name);
 
         // ── Pre-rename safety checks (Linux rename semantics) ──
         // These MUST run BEFORE any destructive operations (target removal,
@@ -1185,19 +1317,30 @@ impl IndexNode for Ext4OSInode {
         }
 
         // 1. Probe source inode — fail fast if source doesn't exist
-        let src_entry = self
-            .fs
-            .probe_inode_meta(&old_path)
+        let src_entry = self.fs.probe_inode_meta(&old_path)
             .map_err(|_| SyscallErr::ENOENT)?;
         let src_is_dir = src_entry.file_type == FileType::Dir;
 
-        // 2. Probe target inode (may not exist — `ok()` swallows ENOENT)
-        if let Ok(tgt) = self.fs.probe_inode_meta(&new_path) {
+        // 2. Probe target inode; only ENOENT means "no replacement target".
+        let target_entry = match self.fs.probe_inode_meta(&new_path) {
+            Ok(entry) => Some(entry),
+            Err(SyscallErr::ENOENT) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(tgt) = target_entry.as_ref() {
             let target_is_dir = tgt.file_type == FileType::Dir;
 
             // 2a. RENAME_NOREPLACE — target exists but caller forbids overwrite
             if flags & RENAME_NOREPLACE != 0 {
                 return Err(SyscallErr::EEXIST);
+            }
+
+            // POSIX rename is a no-op when both names already resolve to the
+            // same inode (for example, two hard links to one file).
+            if tgt.inode_id == src_entry.inode_id
+                && tgt.generation == src_entry.generation
+            {
+                return Ok(());
             }
 
             // 2b. Type-mismatch checks (Linux rename(2) semantics)
@@ -1218,20 +1361,30 @@ impl IndexNode for Ext4OSInode {
                     let _lock = self.fs.lw.lock();
                     let lw_new = self.fs.lw_path(&new_path);
                     let dir = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_DIR);
-                    let (names, types) =
-                        dir.lwext4_dir_entries().map_err(|e| from_lwext4(e.abs()))?;
-                    names.iter().zip(types.iter()).any(|(b, t)| {
-                        if *t == InodeTypes::EXT4_DE_UNKNOWN {
-                            return false;
-                        }
+                    let (names, _types) = dir
+                        .lwext4_dir_entries()
+                        .map_err(|e| from_lwext4(e.abs()))?;
+                    names.iter().any(|b| {
                         let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
-                        let s = core::str::from_utf8(&b[..len]).unwrap_or("");
-                        s != "." && s != ".." && !s.is_empty()
+                        match core::str::from_utf8(&b[..len]) {
+                            Ok(".") | Ok("..") => false,
+                            // Empty/invalid records are corruption, not EOF;
+                            // fail closed before any destructive operation.
+                            Ok("") | Ok(_) | Err(_) => true,
+                        }
                     })
                 };
                 if non_empty {
                     return Err(SyscallErr::ENOTEMPTY);
                 }
+                // lwext4 has no atomic directory-overwrite primitive and its
+                // recursive remover cannot preserve an open target or roll
+                // back if publishing the source fails.  Fail closed until
+                // the journaled C-side rename transaction is implemented.
+                return Err(SyscallErr::EOPNOTSUPP);
+            }
+            if tgt.file_type != FileType::File {
+                return Err(SyscallErr::EOPNOTSUPP);
             }
         }
 
@@ -1240,89 +1393,165 @@ impl IndexNode for Ext4OSInode {
         //    Path-based check: if new_parent's path lies inside old_path.
         if src_is_dir {
             let prefix = alloc::format!("{}/", old_path);
-            if new_parent_node.path == old_path || new_parent_node.path.starts_with(&prefix) {
+            if new_parent_path == old_path
+                || new_parent_path.starts_with(&prefix)
+            {
                 return Err(SyscallErr::EINVAL);
             }
         }
 
-        // ── PageCache coherence: flush dirty pages before rename ──
-        // The PageCache may hold dirty write data for the source (or target)
-        // file.  If we rename without flushing, those dirty pages will later
-        // be written back using the old path, potentially recreating the file.
-        // After Fix 1, the inode_id is the real ext4 inode (stable across
-        // renames), so the PageCache is findable by inode_id — but the
-        // backend still stores the old lw_path.  Flush to disk first, then
-        // invalidate the cache so a fresh one with the new path is created
-        // on next access.
-        let flush_one =
-            |fs: &Arc<super::ext4fs::Ext4FileSystem>, path: &str| -> Result<usize, SyscallErr> {
-                // Get the inode_id: try real inode first, fall back to hash_path
-                // (for files created before Fix 1).
-                let inode_id = fs
-                    .probe_inode_meta(path)
-                    .map(|e| e.inode_id)
-                    .unwrap_or_else(|_| hash_path(path));
-                let registry = fs.page_caches.lock();
-                if let Some(pc) = registry.get(&inode_id).cloned() {
-                    drop(registry);
-                    pc.writeback_all().map_err(|_| SyscallErr::EIO)?;
-                }
-                Ok(inode_id)
-            };
+        // ── PageCache coherence: flush dirty source/target pages ──
+        let flush_one = |fs: &Arc<super::ext4fs::Ext4FileSystem>,
+                         inode_id: usize,
+                         generation: u32|
+         -> Result<(), SyscallErr> {
+            let registry = fs.page_caches.lock();
+            if let Some(pc) = registry.get(&(inode_id, generation)).cloned() {
+                drop(registry);
+                pc.writeback_all().map_err(|_| SyscallErr::EIO)?;
+            }
+            Ok(())
+        };
 
-        let old_inode_id = flush_one(&self.fs, &old_path)?;
-        let new_inode_id = flush_one(&self.fs, &new_path)?;
+        flush_one(&self.fs, src_entry.inode_id, src_entry.generation)?;
+        if let Some(target) = target_entry.as_ref() {
+            flush_one(&self.fs, target.inode_id, target.generation)?;
+        }
 
         // ── Actual rename ──
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&old_parent_path)?;
+        new_parent_node.validate_path_locked(&new_parent_path)?;
+
+        // Re-resolve both names at the mutation serialization point.  The
+        // earlier probes were deliberately outside this lock so dirty-page
+        // writeback could run; no destructive operation is allowed if either
+        // pathname changed identity in that interval.
+        let current_source = self
+            .fs
+            .probe_inode_meta_locked(&old_path)
+            .map_err(|_| SyscallErr::EAGAIN)?;
+        if current_source.inode_id != src_entry.inode_id
+            || current_source.generation != src_entry.generation
+            || current_source.file_type != src_entry.file_type
+        {
+            return Err(SyscallErr::EAGAIN);
+        }
+        let current_target = match self.fs.probe_inode_meta_locked(&new_path) {
+            Ok(entry) => Some(entry),
+            Err(SyscallErr::ENOENT) => None,
+            Err(error) => return Err(error),
+        };
+        match (target_entry.as_ref(), current_target.as_ref()) {
+            (None, None) => {}
+            (Some(expected), Some(current))
+                if expected.inode_id == current.inode_id
+                    && expected.generation == current.generation
+                    && expected.file_type == current.file_type => {}
+            _ => return Err(SyscallErr::EAGAIN),
+        }
+
         let lw_old = self.fs.lw_path(&old_path);
         let lw_new = self.fs.lw_path(&new_path);
 
-        // Handle target-exists before rename.
-        // Use a short-lived probe to check existence, then drop it before
-        // any mutation so that fresh Ext4File objects are used for removal.
-        let target_exists = {
-            let mut probe = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_UNKNOWN);
-            probe.check_inode_exist(&lw_new, InodeTypes::EXT4_DE_UNKNOWN)
-        };
-        if target_exists {
-            if flags & RENAME_NOREPLACE != 0 {
-                return Err(SyscallErr::EEXIST);
-            }
-            // Normal rename (no RENAME_NOREPLACE): remove target with
-            // a fresh Ext4File — never reuse the probe object.
-            let target_is_dir = {
-                let mut p = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_DIR);
-                p.check_inode_exist(&lw_new, InodeTypes::EXT4_DE_DIR)
-            };
-            if target_is_dir {
-                let mut d = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_DIR);
-                d.dir_rm(&lw_new).map_err(|e| from_lwext4(e.abs()))?;
-            } else {
-                let mut f = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_UNKNOWN);
-                f.file_remove(&lw_new).map_err(|e| from_lwext4(e.abs()))?;
+        let target_state = target_entry
+            .as_ref()
+            .and_then(|target| {
+                self.fs
+                    .lookup_inode_state(target.inode_id, target.generation)
+            });
+        let mut detached_target: Option<(Ext4File, usize)> = None;
+        if let Some(target) = target_entry.as_ref() {
+            if target.file_type == FileType::File {
+                // Keep an inode descriptor across namespace replacement.  It
+                // both preserves already-open target fds and provides a
+                // rollback anchor if publishing the source fails.
+                let mut target_file = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_REG_FILE);
+                target_file
+                    .file_open(&lw_new, 0x2)
+                    .map_err(|error| from_lwext4(error.abs()))?;
+                let mut remover = Ext4File::new(&lw_new, InodeTypes::EXT4_DE_UNKNOWN);
+                let (removed_inode, remaining_links) = remover
+                    .file_remove_deferred(&lw_new, true)
+                    .map_err(|error| from_lwext4(error.abs()))?;
+                if removed_inode as usize != target.inode_id {
+                    target_file.file_close().ok();
+                    return Err(SyscallErr::EIO);
+                }
+                detached_target = Some((target_file, remaining_links as usize));
             }
         }
 
-        // Try file_rename first; if it fails (likely because source is a
-        // directory), fall back to dir_mv.
+        // ext4_frename handles both files and directories; ext4_dir_mv is an
+        // alias of the same C function, so retrying it cannot add correctness.
         let mut f = Ext4File::new(&lw_old, InodeTypes::EXT4_DE_UNKNOWN);
-        let r = f.file_rename(&lw_old, &lw_new);
-        if r.is_err() {
-            let mut d = Ext4File::new(&lw_old, InodeTypes::EXT4_DE_DIR);
-            d.dir_mv(&lw_old, &lw_new)
-                .map_err(|e| from_lwext4(e.abs()))?;
+        if let Err(rename_error) = f.file_rename(&lw_old, &lw_new) {
+            if let Some((target_file, _)) = detached_target.as_mut() {
+                if let Err(rollback_error) = target_file.file_link_from_handle(&lw_new) {
+                    log::error!(
+                        "[lwext4] rename rollback failed: rename_errno={} rollback_errno={}",
+                        rename_error,
+                        rollback_error
+                    );
+                    target_file.file_close().ok();
+                    return Err(SyscallErr::EIO);
+                }
+                target_file.file_close().ok();
+            }
+            return Err(from_lwext4(rename_error.abs()));
         }
-        drop(_lock);
 
-        // ── PageCache coherence: invalidate stale entries after rename ──
-        // The source file's PageCache backend still references the old
-        // lw_path.  Remove it from the registry; the next access to the
-        // file under its new name will create a fresh PageCache with the
-        // correct path.
-        self.fs.page_caches.lock().remove(&old_inode_id);
-        // Also remove the overwritten target's cache (its inode is gone).
-        self.fs.page_caches.lock().remove(&new_inode_id);
+        let mut target_deleted = None;
+        let mut post_rename_error = None;
+        if let Some((mut target_file, remaining_links)) = detached_target {
+            let target_is_still_open = target_state
+                .as_ref()
+                .is_some_and(|state| state.is_open());
+            if remaining_links == 0 && !target_is_still_open {
+                match target_file.file_finalize_unlinked() {
+                    Ok(_) => {
+                        target_deleted = target_entry
+                            .as_ref()
+                            .map(|target| (target.inode_id, target.generation));
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "[lwext4] target finalize failed after rename committed: errno={}",
+                            error
+                        );
+                        post_rename_error = Some(from_lwext4(error.abs()));
+                    }
+                }
+            }
+            if let Err(error) = target_file.file_close() {
+                log::error!(
+                    "[lwext4] detached target close failed after rename committed: errno={}",
+                    error
+                );
+                if post_rename_error.is_none() {
+                    post_rename_error = Some(from_lwext4(error.abs()));
+                }
+            }
+            if let Some(state) = target_state.as_ref() {
+                state.remove_path(&new_path, remaining_links);
+            }
+        }
+        self.fs.rename_inode_path_prefix(&old_path, &new_path);
+        drop(_lock);
+        if let Some((inode_id, generation)) = target_deleted {
+            self.fs
+                .page_caches
+                .lock()
+                .remove(&(inode_id, generation));
+            self.fs.forget_inode_state(inode_id, generation);
+        }
+
+        // The namespace move is already committed.  Always publish its new
+        // in-memory pathname before surfacing a later reclamation/close error;
+        // otherwise callers would retain stale aliases to unrelated inodes.
+        if let Some(error) = post_rename_error {
+            return Err(error);
+        }
 
         Ok(())
     }
@@ -1331,41 +1560,23 @@ impl IndexNode for Ext4OSInode {
         if self.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
-        // lwext4 truncate: must hold fs.lw
-        {
-            let _lock = self.fs.lw.lock();
-            let lw_path = self.fs.lw_path(&self.path);
-            let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
-            f.file_open(&lw_path, 0x2)
-                .map_err(|e| from_lwext4(e.abs()))?;
-            let guard = FileGuard::new(&mut f);
-
+        // All aliases share this registry PageCache.  Its io_gate covers the
+        // complete backend truncate + cache prune + EOF publication, while
+        // writeback holds the same gate across Dirty -> Writeback -> I/O.
+        // This prevents an old dirty page from extending the file again and
+        // prevents a concurrent writer from being discarded after truncate.
+        let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
+        pc.truncate_with_backend(len, || {
             // VFS logical_size may exceed lwext4 on-disk size after extension;
-            // the gap is a sparse tail that LwExt4PageCacheBackend::read_page
-            // zero-fills on eviction/remount.  Shrinking does NOT need to
-            // pre-write zeros over [len, old_size) — file_truncate is enough.
-            guard
-                .f
-                .file_truncate(len as u64)
-                .map_err(|e| from_lwext4(e.abs()))?;
-            drop(guard);
-            // _lock released here
-        }
-
-        // Ensure PageCache coherence after on-disk truncation:
-        // remove pages above new EOF and zero the tail of the retained page.
-        if let Some(pc) = self.page_cache() {
-            pc.truncate(len)?;
-            let offset_in_page = len & (PAGE_SIZE - 1);
-            if offset_in_page > 0 {
-                let tail_page = len >> PAGE_SIZE_BITS;
-                if pc.contains_page(tail_page) {
-                    let frame = pc.frame_for_read(tail_page)?;
-                    frame.ppn.get_bytes_array()[offset_in_page..].fill(0);
-                }
-            }
-        }
-        self.logical_size.store(len, Ordering::Relaxed);
+            // use the pinned inode handle so ftruncate survives rename/unlink.
+            self.state.with_file(&self.fs, true, |file| {
+                file.file_truncate(len as u64)
+                    .map_err(|error| from_lwext4(error.abs()))?;
+                Ok(())
+            })?;
+            self.logical_size.store(len, Ordering::Release);
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -1373,15 +1584,29 @@ impl IndexNode for Ext4OSInode {
         self.truncate(len)
     }
 
-    fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+    fn symlink(
+        &self,
+        name: &str,
+        target: &str,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
         if name.is_empty() || name.len() > 255 || name.contains('/') {
             return Err(SyscallErr::EINVAL);
         }
-        let child_path = join_path(&self.path, name);
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, name);
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&parent_path)?;
+        // symlink(2) is create-exclusive.  ext4_fsymlink() otherwise opens
+        // and overwrites an existing symlink of the same type.  The lw lock
+        // keeps this existence check atomic with the following C operation.
+        match self.fs.probe_inode_meta_locked(&child_path) {
+            Ok(_) => return Err(SyscallErr::EEXIST),
+            Err(SyscallErr::ENOENT) => {}
+            Err(error) => return Err(error),
+        }
         let lw_child = self.fs.lw_path(&child_path);
         // ext4_fsymlink(target, path): target = destination, path = new symlink
         // NOTE: target is NOT translated — it is user-data, VFS-semantic.
@@ -1397,21 +1622,19 @@ impl IndexNode for Ext4OSInode {
         if r != 0 {
             return Err(from_lwext4(r.abs()));
         }
+        let created = self.fs.probe_inode_meta_locked(&child_path)?;
         drop(_lock);
-        let real_inode = self
-            .fs
-            .probe_inode_meta(&child_path)
-            .map(|e| e.inode_id)
-            .unwrap_or_else(|_| hash_path(&child_path));
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
             child_path,
-            real_inode,
+            created.inode_id,
+            created.generation,
             FileType::SymLink,
             InodeMode::S_IFLNK | InodeMode::from_bits_truncate(0o777),
             target.len(),
             0,
             0,
+            1,
         ))
     }
 
@@ -1419,7 +1642,11 @@ impl IndexNode for Ext4OSInode {
         if self.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        let new_path = join_path(&self.path, name);
+        if name.is_empty() || name.len() > 255 || name.contains('/') {
+            return Err(SyscallErr::EINVAL);
+        }
+        let parent_path = self.live_path()?;
+        let new_path = join_path(&parent_path, name);
         let other_node = other
             .as_any_ref()
             .downcast_ref::<Ext4OSInode>()
@@ -1428,8 +1655,16 @@ impl IndexNode for Ext4OSInode {
         if !Arc::ptr_eq(&self.fs, &other_node.fs) {
             return Err(SyscallErr::EXDEV);
         }
+        let other_path = other_node.live_path()?;
         let _lock = self.fs.lw.lock();
-        let lw_src = self.fs.lw_path(&other_node.path);
+        self.validate_path_locked(&parent_path)?;
+        let source = self.fs.probe_inode_meta_locked(&other_path)?;
+        if source.inode_id != other_node.inode_id
+            || source.generation != other_node.state.generation()
+        {
+            return Err(SyscallErr::EAGAIN);
+        }
+        let lw_src = self.fs.lw_path(&other_path);
         let lw_new = self.fs.lw_path(&new_path);
         // ext4_flink(path, hardlink_path): path = source, hardlink_path = new link
         let c_src = CString::new(lw_src.as_str()).map_err(|_| SyscallErr::EINVAL)?;
@@ -1444,69 +1679,95 @@ impl IndexNode for Ext4OSInode {
         if r != 0 {
             return Err(from_lwext4(r.abs()));
         }
+        let linked = self.fs.probe_inode_meta_locked(&other_path)?;
+        other_node.state.observe_path(
+            &new_path,
+            linked.size,
+            linked.nlinks,
+        );
         Ok(())
     }
 
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
-        // Check if only timestamps changed (touch_modified after write).
-        // In that case, just update the cache — skip all lwext4 FFI calls.
-        // Actual time persistence happens at sync() time.
-        let time_only = {
-            if let Some(ref cached) = *self.cached_meta.lock() {
-                cached.mode == metadata.mode
-                    && cached.uid == metadata.uid
-                    && cached.gid == metadata.gid
-            } else {
-                false
-            }
-        };
+        let timestamps_requested = metadata.atime.tv_sec != 0
+            || metadata.mtime.tv_sec != 0
+            || metadata.ctime.tv_sec != 0;
+        let path = self.live_path()?;
+        let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&path)?;
+        // Serialize the change decision with every alias setter.  The cache
+        // lock is acquired only after fs.lw and is never held while waiting
+        // for fs.lw, matching the cold metadata publication order.
+        let cached = self.state.cached_meta();
+        let mode_changed = cached.map_or(true, |value| value.mode != metadata.mode);
+        let owner_changed = cached.map_or(true, |value| {
+            value.uid != metadata.uid || value.gid != metadata.gid
+        });
+        if !mode_changed && !owner_changed && !timestamps_requested {
+            return Ok(());
+        }
 
-        // Always update cache
-        *self.cached_meta.lock() = Some(CachedMeta {
+        let lw_path = self.fs.lw_path(&path);
+        let result = (|| -> Result<(), SyscallErr> {
+            if mode_changed {
+                let mut file = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
+                file.file_mode_set(metadata.mode.bits())
+                    .map_err(|error| from_lwext4(error.abs()))?;
+            }
+
+            let c_path =
+                CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+            let raw = c_path.as_ptr();
+            if owner_changed {
+                let rc = unsafe {
+                    lwext4_rust::bindings::ext4_owner_set(
+                        raw,
+                        metadata.uid,
+                        metadata.gid,
+                    )
+                };
+                if rc != 0 {
+                    return Err(from_lwext4(rc.abs()));
+                }
+            }
+            for (timestamp, setter) in [
+                (
+                    metadata.atime.tv_sec,
+                    lwext4_rust::bindings::ext4_atime_set
+                        as unsafe extern "C" fn(*const core::ffi::c_char, u32) -> i32,
+                ),
+                (
+                    metadata.mtime.tv_sec,
+                    lwext4_rust::bindings::ext4_mtime_set
+                        as unsafe extern "C" fn(*const core::ffi::c_char, u32) -> i32,
+                ),
+                (
+                    metadata.ctime.tv_sec,
+                    lwext4_rust::bindings::ext4_ctime_set
+                        as unsafe extern "C" fn(*const core::ffi::c_char, u32) -> i32,
+                ),
+            ] {
+                if timestamp != 0 {
+                    let rc = unsafe { setter(raw, timestamp as u32) };
+                    if rc != 0 {
+                        return Err(from_lwext4(rc.abs()));
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            // Some C setters may already have succeeded.  Never retain a
+            // speculative permission/owner cache after any later failure.
+            self.state.clear_cached_meta();
+            return Err(error);
+        }
+        self.state.set_cached_meta(CachedMeta {
             mode: metadata.mode,
             uid: metadata.uid,
             gid: metadata.gid,
         });
-
-        // Time-only: skip lwext4 FFI, defer to sync()
-        if time_only {
-            return Ok(());
-        }
-
-        // Mode/owner changed: do full lwext4 write-through
-        let _lock = self.fs.lw.lock();
-        let lw_path = self.fs.lw_path(&self.path);
-
-        // 1. chmod — fmode_set is a standalone operation (path-based, no open needed)
-        let mut f = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
-        f.file_mode_set(metadata.mode.bits())
-            .map_err(|e| from_lwext4(e.abs()))?;
-
-        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
-        let raw = c_path.into_raw();
-
-        // 2. chown — ext4_owner_set(path, uid: u32, gid: u32) -> c_int
-        //    Non-root callers will get EPERM; silently ignore.
-        let _ = unsafe { lwext4_rust::bindings::ext4_owner_set(raw, metadata.uid, metadata.gid) };
-
-        // 3. utime — ext4_{atime,mtime,ctime}_set(path, timestamp: u32) -> c_int
-        //    Only set timestamps with non-zero tv_sec (caller signals intent).
-        if metadata.atime.tv_sec != 0 {
-            let _ =
-                unsafe { lwext4_rust::bindings::ext4_atime_set(raw, metadata.atime.tv_sec as u32) };
-        }
-        if metadata.mtime.tv_sec != 0 {
-            let _ =
-                unsafe { lwext4_rust::bindings::ext4_mtime_set(raw, metadata.mtime.tv_sec as u32) };
-        }
-        if metadata.ctime.tv_sec != 0 {
-            let _ =
-                unsafe { lwext4_rust::bindings::ext4_ctime_set(raw, metadata.ctime.tv_sec as u32) };
-        }
-
-        unsafe {
-            let _ = CString::from_raw(raw);
-        }
         Ok(())
     }
 
@@ -1532,12 +1793,13 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::EINVAL);
         }
 
-        let child_path = join_path(&self.path, filename);
+        let parent_path = self.live_path()?;
+        let child_path = join_path(&parent_path, filename);
 
         // Map InodeMode::S_IFMT to lwext4 EXT4_DE_* file type constant
         let mode_bits = mode & InodeMode::S_IFMT;
         let (lw_type, file_type): (i32, FileType) = if mode_bits == InodeMode::S_IFIFO {
-            (5, FileType::Pipe) // EXT4_DE_FIFO
+            (5, FileType::Pipe)  // EXT4_DE_FIFO
         } else if mode_bits == InodeMode::S_IFCHR {
             (3, FileType::CharDevice) // EXT4_DE_CHRDEV
         } else if mode_bits == InodeMode::S_IFBLK {
@@ -1549,14 +1811,15 @@ impl IndexNode for Ext4OSInode {
         };
 
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&parent_path)?;
         let lw_child = self.fs.lw_path(&child_path);
 
         let c_path = CString::new(lw_child.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
-        let r = unsafe { lwext4_rust::bindings::ext4_mknod(c_path, lw_type, dev_t as u32) };
-        unsafe {
-            let _ = CString::from_raw(c_path);
-        }
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_mknod(c_path, lw_type, dev_t as u32)
+        };
+        unsafe { let _ = CString::from_raw(c_path); }
         if r != 0 {
             return Err(from_lwext4(r.abs()));
         }
@@ -1566,16 +1829,19 @@ impl IndexNode for Ext4OSInode {
         f.file_mode_set(mode.bits())
             .map_err(|e| from_lwext4(e.abs()))?;
 
-        let h = hash_path(&child_path);
+        let created = self.fs.probe_inode_meta_locked(&child_path)?;
+        drop(_lock);
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
             child_path,
-            h,
+            created.inode_id,
+            created.generation,
             file_type,
             mode,
             0,
             0,
             0,
+            1,
         ))
     }
 
@@ -1589,9 +1855,11 @@ impl IndexNode for Ext4OSInode {
     /// If `buf` is empty, returns the attribute value size without writing.
     /// Returns `ENODATA` if the attribute does not exist.
     fn getxattr(&self, name: &str, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&path)?;
 
-        let lw_path = self.fs.lw_path(&self.path);
+        let lw_path = self.fs.lw_path(&path);
         let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
@@ -1611,9 +1879,7 @@ impl IndexNode for Ext4OSInode {
                 &mut data_size,
             )
         };
-        unsafe {
-            let _ = CString::from_raw(c_path);
-        }
+        unsafe { let _ = CString::from_raw(c_path); }
 
         if r != 0 {
             return Err(from_lwext4(r.abs()));
@@ -1633,10 +1899,17 @@ impl IndexNode for Ext4OSInode {
     ///
     /// Flags: XATTR_CREATE(1) fails if attr exists, XATTR_REPLACE(2)
     /// fails if attr does not exist, 0 = create-or-replace.
-    fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> Result<usize, SyscallErr> {
+    fn setxattr(
+        &self,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> Result<usize, SyscallErr> {
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&path)?;
 
-        let lw_path = self.fs.lw_path(&self.path);
+        let lw_path = self.fs.lw_path(&path);
         let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
@@ -1655,9 +1928,7 @@ impl IndexNode for Ext4OSInode {
                 )
             };
             if probe == 0 {
-                unsafe {
-                    let _ = CString::from_raw(c_path);
-                }
+                unsafe { let _ = CString::from_raw(c_path); }
                 return Err(SyscallErr::EEXIST);
             }
         } else if flags == 2 {
@@ -1674,9 +1945,7 @@ impl IndexNode for Ext4OSInode {
                 )
             };
             if probe != 0 {
-                unsafe {
-                    let _ = CString::from_raw(c_path);
-                }
+                unsafe { let _ = CString::from_raw(c_path); }
                 return Err(SyscallErr::ENODATA);
             }
         }
@@ -1690,9 +1959,7 @@ impl IndexNode for Ext4OSInode {
                 value.len(),
             )
         };
-        unsafe {
-            let _ = CString::from_raw(c_path);
-        }
+        unsafe { let _ = CString::from_raw(c_path); }
 
         if r != 0 {
             return Err(from_lwext4(r.abs()));
@@ -1708,9 +1975,11 @@ impl IndexNode for Ext4OSInode {
     /// If `buf` is empty, returns the total size needed.
     /// Returns `ERANGE` if the buffer is too small.
     fn listxattr(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&path)?;
 
-        let lw_path = self.fs.lw_path(&self.path);
+        let lw_path = self.fs.lw_path(&path);
         let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
@@ -1721,11 +1990,14 @@ impl IndexNode for Ext4OSInode {
             buf.as_mut_ptr() as *mut _
         };
         let r = unsafe {
-            lwext4_rust::bindings::ext4_listxattr(c_path, list_ptr, buf.len(), &mut ret_size)
+            lwext4_rust::bindings::ext4_listxattr(
+                c_path,
+                list_ptr,
+                buf.len(),
+                &mut ret_size,
+            )
         };
-        unsafe {
-            let _ = CString::from_raw(c_path);
-        }
+        unsafe { let _ = CString::from_raw(c_path); }
 
         if r != 0 {
             return Err(from_lwext4(r.abs()));
@@ -1740,18 +2012,22 @@ impl IndexNode for Ext4OSInode {
     ///
     /// Returns `ENODATA` if the attribute does not exist.
     fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
+        let path = self.live_path()?;
         let _lock = self.fs.lw.lock();
+        self.validate_path_locked(&path)?;
 
-        let lw_path = self.fs.lw_path(&self.path);
+        let lw_path = self.fs.lw_path(&path);
         let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
 
         let r = unsafe {
-            lwext4_rust::bindings::ext4_removexattr(c_path, name.as_ptr() as *const _, name.len())
+            lwext4_rust::bindings::ext4_removexattr(
+                c_path,
+                name.as_ptr() as *const _,
+                name.len(),
+            )
         };
-        unsafe {
-            let _ = CString::from_raw(c_path);
-        }
+        unsafe { let _ = CString::from_raw(c_path); }
 
         if r != 0 {
             return Err(from_lwext4(r.abs()));

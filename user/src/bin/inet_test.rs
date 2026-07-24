@@ -13,9 +13,12 @@ const AF_INET: usize = 2;
 const SOCK_STREAM: usize = 1;
 const SOCK_DGRAM: usize = 2;
 const IPPROTO_TCP: usize = 6;
+const IPPROTO_IP: usize = 0;
+const IP_RECVERR: usize = 11;
+const MSG_ERRQUEUE: usize = 0x2000;
 
-// QEMU SLIRP 内置 DNS 代理地址
-const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
+// Used only before DHCP/procfs has published a runtime resolver.
+const DEFAULT_DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
 
 // ============================================================
 // sockaddr_in — Linux 兼容的 IPv4 地址结构
@@ -52,6 +55,35 @@ impl sockaddr_in {
     fn len() -> usize {
         core::mem::size_of::<Self>()
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TestIoVec {
+    iov_base: *const u8,
+    iov_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TestMsgHdr {
+    msg_name: *mut u8,
+    msg_namelen: u32,
+    _pad0: u32,
+    msg_iov: *mut TestIoVec,
+    msg_iovlen: usize,
+    msg_control: *mut u8,
+    msg_controllen: usize,
+    msg_flags: i32,
+    _pad1: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TestMMsgHdr {
+    msg_hdr: TestMsgHdr,
+    msg_len: u32,
+    _pad: u32,
 }
 
 // ============================================================
@@ -143,7 +175,7 @@ fn http_get_request(host: &str) -> ([u8; 256], usize) {
 }
 
 // ============================================================
-// DNS Helpers: 将域名解析为 IPv4 地址（UDP → QEMU SLIRP DNS）
+// DNS Helpers: 将域名解析为 IPv4 地址（使用运行时 resolv.conf）
 // ============================================================
 
 /// 将域名编码为 DNS label 格式（例如 "baidu.com" → \x05baidu\x03com\x00）
@@ -160,7 +192,54 @@ fn encode_dns_name(name: &str) -> ([u8; 256], usize) {
     (buf, pos + 1)
 }
 
-/// 向 QEMU SLIRP DNS (10.0.2.3:53) 查询域名的 A 记录
+fn parse_ipv4(text: &str) -> Option<[u8; 4]> {
+    let mut address = [0u8; 4];
+    let mut count = 0usize;
+    for part in text.split('.') {
+        if count == address.len() || part.is_empty() {
+            return None;
+        }
+        let mut value = 0u16;
+        for byte in part.bytes() {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value.checked_mul(10)?.checked_add((byte - b'0') as u16)?;
+            if value > u8::MAX as u16 {
+                return None;
+            }
+        }
+        address[count] = value as u8;
+        count += 1;
+    }
+    (count == address.len()).then_some(address)
+}
+
+fn configured_dns_server() -> [u8; 4] {
+    let fd = sys_open("/etc/resolv.conf\0", 0);
+    if fd < 0 {
+        return DEFAULT_DNS_SERVER;
+    }
+    let mut buffer = [0u8; 256];
+    let read_len = sys_read(fd as usize, &mut buffer);
+    sys_close(fd as usize);
+    if read_len <= 0 {
+        return DEFAULT_DNS_SERVER;
+    }
+
+    let content = core::str::from_utf8(&buffer[..read_len as usize]).unwrap_or("");
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() == Some("nameserver") {
+            if let Some(address) = fields.next().and_then(parse_ipv4) {
+                return address;
+            }
+        }
+    }
+    DEFAULT_DNS_SERVER
+}
+
+/// 向运行时配置的 DNS 服务器查询域名的 A 记录。
 /// 成功返回 Some([a, b, c, d])，失败返回 None
 fn dns_lookup(domain: &str) -> Option<[u8; 4]> {
     let fd = sys_socket(AF_INET, SOCK_DGRAM, 0);
@@ -185,7 +264,8 @@ fn dns_lookup(domain: &str) -> Option<[u8; 4]> {
     let pkt_len = off + 4;
 
     // --- 发送到 DNS 服务器 ---
-    let addr = sockaddr_in::new(DNS_SERVER, 53);
+    let dns_server = configured_dns_server();
+    let addr = sockaddr_in::new(dns_server, 53);
     let ret = sys_sendto(
         fd,
         pkt.as_ptr(),
@@ -282,6 +362,18 @@ fn dns_lookup(domain: &str) -> Option<[u8; 4]> {
     None
 }
 
+const EXTERNAL_HTTP_HOST: &str = "www.baidu.com";
+
+fn external_http_ipv4(test_name: &str) -> Option<[u8; 4]> {
+    match dns_lookup(EXTERNAL_HTTP_HOST) {
+        Some(ip) => Some(ip),
+        None => {
+            tfail!("INET", test_name, "DNS lookup failed for {}", EXTERNAL_HTTP_HOST);
+            None
+        }
+    }
+}
+
 // ============================================================
 // Helper: fork + exec bash -c（从 unix_test.rs 借鉴）
 // ============================================================
@@ -340,14 +432,12 @@ fn test_tcp_connect_to(target_name: &str, ip: [u8; 4], port: u16) -> i32 {
     0
 }
 
-// Phase 1 子测试：单目标（Cloudflare 已验证可通，仅做参考）
+// Phase 1 子测试：解析运行时可访问的 HTTP 目标，避免依赖特定公网 IP。
 fn test_tcp_connect_all() -> i32 {
-    let targets: [(&str, [u8; 4], u16); 1] = [("cloudflare", [1, 1, 1, 1], 80)];
-    let mut ok = true;
-    for (name, ip, port) in &targets {
-        if test_tcp_connect_to(name, *ip, *port) != 0 { ok = false; }
-    }
-    if ok { 0 } else { 1 }
+    let Some(ip) = external_http_ipv4("tcp_connect") else {
+        return 1;
+    };
+    test_tcp_connect_to(EXTERNAL_HTTP_HOST, ip, 80)
 }
 
 // ============================================================
@@ -395,6 +485,13 @@ fn test_tcp_send_recv(target_name: &str, ip: [u8; 4]) -> i32 {
     0
 }
 
+fn test_tcp_send_recv_external() -> i32 {
+    let Some(ip) = external_http_ipv4("tcp_send_recv") else {
+        return 1;
+    };
+    test_tcp_send_recv(EXTERNAL_HTTP_HOST, ip)
+}
+
 // ============================================================
 // Phase 2: HTTP GET — 完整请求 / 循环接收 / 解析状态码
 // ============================================================
@@ -408,7 +505,10 @@ fn test_http_get() -> i32 {
     }
     let fd = fd as usize;
 
-    let addr = sockaddr_in::new([1, 1, 1, 1], 80);
+    let Some(ip) = external_http_ipv4(NAME) else {
+        return 1;
+    };
+    let addr = sockaddr_in::new(ip, 80);
     let ret = sys_connect(fd, addr.as_ptr(), sockaddr_in::len());
     if ret < 0 {
         tfail!(GROUP, NAME, "connect returned errno={}", -ret);
@@ -416,7 +516,7 @@ fn test_http_get() -> i32 {
         return 1;
     }
 
-    let (req, req_len) = http_get_request("1.1.1.1");
+    let (req, req_len) = http_get_request(EXTERNAL_HTTP_HOST);
     let wret = tcp_send(fd, &req[..req_len]);
     if wret < 0 {
         tfail!(GROUP, NAME, "send returned {}", wret);
@@ -637,7 +737,7 @@ fn test_udp_loopback_pair() -> i32 {
     0
 }
 
-// --- UDP External: DNS query to 1.1.1.1:53 (外网 UDP) ---
+// --- UDP External: query the resolver published through /etc/resolv.conf ---
 fn test_udp_external_dns() -> i32 {
     const GROUP: &str = "INET";
     const NAME: &str = "udp_external_dns";
@@ -661,9 +761,10 @@ fn test_udp_external_dns() -> i32 {
     pkt[off + 2..off + 4].copy_from_slice(&[0x00, 0x01]);
     let pkt_len = off + 4;
 
-    let target = sockaddr_in::new([1, 1, 1, 1], 53);
+    let dns_server = configured_dns_server();
+    let target = sockaddr_in::new(dns_server, 53);
     let wret = sys_sendto(fd, pkt.as_ptr(), pkt_len, 0, target.as_ptr(), sockaddr_in::len());
-    if wret < 0 { tfail!(GROUP, NAME, "sendto 1.1.1.1:53 returned errno={}", -wret); sys_close(fd); return 1; }
+    if wret < 0 { tfail!(GROUP, NAME, "sendto runtime DNS returned errno={}", -wret); sys_close(fd); return 1; }
 
     let mut resp = [0u8; 512];
     let rret = sys_recvfrom(fd, resp.as_mut_ptr(), resp.len(), 0, core::ptr::null_mut(), core::ptr::null_mut());
@@ -672,7 +773,7 @@ fn test_udp_external_dns() -> i32 {
 
     if rret >= 12 && resp[0..2] == [0xab, 0xcd] {
         sys_close(fd);
-        tpass!(GROUP, NAME, "UDP external DNS to 1.1.1.1 works");
+        tpass!(GROUP, NAME, "UDP query to runtime DNS works");
         0
     } else {
         tfail!(GROUP, NAME, "invalid DNS response"); sys_close(fd); 1
@@ -947,7 +1048,12 @@ fn net_core01_interface_basic() -> i32 {
         return 1;
     }
 
-    // Test 10.0.2.15 (eth0)
+    // Test the address currently assigned to eth0 (QEMU static or board DHCP).
+    let Some(eth0_addr) = interface_ipv4("eth0") else {
+        sys_close(fd1);
+        tconf!(GROUP, NAME, "eth0 has no IPv4 address");
+        return 0;
+    };
     let fd2 = sys_socket(AF_INET, SOCK_DGRAM, 0);
     if fd2 < 0 {
         sys_close(fd1);
@@ -955,7 +1061,7 @@ fn net_core01_interface_basic() -> i32 {
         return 1;
     }
     let fd2 = fd2 as usize;
-    let addr2 = sockaddr_in::new([10, 0, 2, 15], 0);
+    let addr2 = sockaddr_in::new(eth0_addr, 0);
     let ret2 = sys_bind(fd2, addr2.as_ptr(), sockaddr_in::len());
     if ret2 < 0 {
         let err = errno_from_ret(ret2);
@@ -963,9 +1069,9 @@ fn net_core01_interface_basic() -> i32 {
         sys_close(fd2);
         if err == 99 {
             // EADDRNOTAVAIL
-            tfail!(GROUP, NAME, "bind to 10.0.2.15 failed with EADDRNOTAVAIL");
+            tfail!(GROUP, NAME, "bind to runtime eth0 address failed with EADDRNOTAVAIL");
         } else {
-            tbrok!(GROUP, NAME, "bind to 10.0.2.15 failed with errno {}", err);
+            tbrok!(GROUP, NAME, "bind to runtime eth0 address failed with errno {}", err);
         }
         return 1;
     }
@@ -1020,6 +1126,145 @@ fn net_core02_loopback_and_default_iface() -> i32 {
     sys_close(fd_tcp);
 
     tpass!(GROUP, NAME, "loopback routing verified");
+    0
+}
+
+fn net_core_ip_recverr() -> i32 {
+    const GROUP: &str = "NET_CORE";
+    const NAME: &str = "net_core_ip_recverr";
+
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    if fd < 0 {
+        tbrok!(GROUP, NAME, "UDP socket failed: {}", fd);
+        return 1;
+    }
+    let fd = fd as usize;
+
+    let mut value = u32::MAX;
+    let mut len = core::mem::size_of::<u32>();
+    let mut ret = sys_getsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &mut value as *mut u32 as *mut u8, &mut len);
+    if ret < 0 || value != 0 || len != core::mem::size_of::<u32>() {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "default state mismatch: ret={} value={} len={}", ret, value, len);
+        return 1;
+    }
+
+    value = 1;
+    ret = sys_setsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &value as *const u32 as *const u8, core::mem::size_of::<u32>());
+    if ret < 0 {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "enable failed with errno {}", errno_from_ret(ret));
+        return 1;
+    }
+
+    value = 0;
+    len = core::mem::size_of::<u32>();
+    ret = sys_getsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &mut value as *mut u32 as *mut u8, &mut len);
+    if ret < 0 || value != 1 {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "enabled state mismatch: ret={} value={}", ret, value);
+        return 1;
+    }
+
+    let mut byte = 0u8;
+    ret = sys_recvfrom(fd, &mut byte, 1, MSG_ERRQUEUE,
+        core::ptr::null_mut(), core::ptr::null_mut());
+    if errno_from_ret(ret) != 11 {
+        sys_close(fd);
+        tfail!(GROUP, NAME, "empty error queue returned {}, expected EAGAIN", ret);
+        return 1;
+    }
+
+    value = 0;
+    ret = sys_setsockopt(fd, IPPROTO_IP, IP_RECVERR,
+        &value as *const u32 as *const u8, core::mem::size_of::<u32>());
+    sys_close(fd);
+    if ret < 0 {
+        tfail!(GROUP, NAME, "disable failed with errno {}", errno_from_ret(ret));
+        return 1;
+    }
+
+    tpass!(GROUP, NAME, "IP_RECVERR state and empty error queue verified");
+    0
+}
+
+fn net_core_sendmmsg() -> i32 {
+    const GROUP: &str = "NET_CORE";
+    const NAME: &str = "net_core_sendmmsg";
+
+    let receiver = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    let sender = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    if receiver < 0 || sender < 0 {
+        if receiver >= 0 { sys_close(receiver as usize); }
+        if sender >= 0 { sys_close(sender as usize); }
+        tbrok!(GROUP, NAME, "socket creation failed: receiver={} sender={}", receiver, sender);
+        return 1;
+    }
+    let receiver = receiver as usize;
+    let sender = sender as usize;
+    let destination = sockaddr_in::new([127, 0, 0, 1], 23457);
+    let bind_ret = sys_bind(receiver, destination.as_ptr(), sockaddr_in::len());
+    if bind_ret < 0 {
+        sys_close(sender);
+        sys_close(receiver);
+        tbrok!(GROUP, NAME, "receiver bind failed with errno {}", errno_from_ret(bind_ret));
+        return 1;
+    }
+
+    let first = b"sendmmsg-first";
+    let second = b"sendmmsg-second";
+    let mut iov = [
+        TestIoVec { iov_base: first.as_ptr(), iov_len: first.len() },
+        TestIoVec { iov_base: second.as_ptr(), iov_len: second.len() },
+    ];
+    let iov_ptr = iov.as_mut_ptr();
+    let base_hdr = TestMsgHdr {
+        msg_name: &destination as *const sockaddr_in as *mut u8,
+        msg_namelen: sockaddr_in::len() as u32,
+        _pad0: 0,
+        msg_iov: core::ptr::null_mut(),
+        msg_iovlen: 1,
+        msg_control: core::ptr::null_mut(),
+        msg_controllen: 0,
+        msg_flags: 0,
+        _pad1: 0,
+    };
+    let mut messages = [
+        TestMMsgHdr { msg_hdr: TestMsgHdr { msg_iov: iov_ptr, ..base_hdr }, msg_len: 0, _pad: 0 },
+        TestMMsgHdr { msg_hdr: TestMsgHdr { msg_iov: iov_ptr.wrapping_add(1), ..base_hdr }, msg_len: 0, _pad: 0 },
+    ];
+
+    let zero_ret = sys_sendmmsg(sender, messages.as_mut_ptr() as *mut u8, 0, 0);
+    let send_ret = sys_sendmmsg(sender, messages.as_mut_ptr() as *mut u8, messages.len(), 0);
+    if zero_ret != 0 || send_ret != 2
+        || messages[0].msg_len as usize != first.len()
+        || messages[1].msg_len as usize != second.len() {
+        sys_close(sender);
+        sys_close(receiver);
+        tfail!(GROUP, NAME, "batch mismatch: zero={} sent={} lengths=[{}, {}]",
+            zero_ret, send_ret, messages[0].msg_len, messages[1].msg_len);
+        return 1;
+    }
+
+    let expected: [&[u8]; 2] = [first, second];
+    let mut recv_buf = [0u8; 32];
+    for packet in expected {
+        let recv_ret = sys_recvfrom(receiver, recv_buf.as_mut_ptr(), recv_buf.len(), 0,
+            core::ptr::null_mut(), core::ptr::null_mut());
+        if recv_ret != packet.len() as isize || &recv_buf[..packet.len()] != packet {
+            sys_close(sender);
+            sys_close(receiver);
+            tfail!(GROUP, NAME, "received datagram mismatch: ret={}", recv_ret);
+            return 1;
+        }
+    }
+
+    sys_close(sender);
+    sys_close(receiver);
+    tpass!(GROUP, NAME, "two datagrams sent with lengths reported");
     0
 }
 
@@ -1084,19 +1329,23 @@ fn net_core03_route_lookup() -> i32 {
     }
     sys_close(fd);
 
-    // UDP bind to 10.0.2.15
+    // UDP bind to the runtime eth0 address.
+    let Some(eth0_addr) = interface_ipv4("eth0") else {
+        tconf!(GROUP, NAME, "eth0 has no IPv4 address");
+        return 0;
+    };
     let fd2 = sys_socket(AF_INET, SOCK_DGRAM, 0);
     if fd2 < 0 {
         tbrok!(GROUP, NAME, "second socket failed: {}", fd2);
         return 1;
     }
     let fd2 = fd2 as usize;
-    let addr2 = sockaddr_in::new([10, 0, 2, 15], 0);
+    let addr2 = sockaddr_in::new(eth0_addr, 0);
     let ret2 = sys_bind(fd2, addr2.as_ptr(), sockaddr_in::len());
     if ret2 < 0 {
         let err = errno_from_ret(ret2);
         sys_close(fd2);
-        tfail!(GROUP, NAME, "bind to 10.0.2.15 failed with errno {}", err);
+        tfail!(GROUP, NAME, "bind to runtime eth0 address failed with errno {}", err);
         return 1;
     }
     sys_close(fd2);
@@ -1371,12 +1620,17 @@ fn net_route02_eth_local_addr() -> i32 {
     }
     let fd = fd as usize;
 
-    let addr = sockaddr_in::new([10, 0, 2, 15], 0);
+    let Some(eth0_addr) = interface_ipv4("eth0") else {
+        sys_close(fd);
+        tconf!(GROUP, NAME, "eth0 has no IPv4 address");
+        return 0;
+    };
+    let addr = sockaddr_in::new(eth0_addr, 0);
     let ret = sys_bind(fd, addr.as_ptr(), sockaddr_in::len());
     sys_close(fd);
 
     if ret == 0 {
-        tpass!(GROUP, NAME, "bind to eth0 local address (10.0.2.15) succeeded");
+        tpass!(GROUP, NAME, "bind to runtime eth0 local address succeeded");
         0
     } else {
         let err = errno_from_ret(ret);
@@ -1384,7 +1638,7 @@ fn net_route02_eth_local_addr() -> i32 {
             // EADDRNOTAVAIL
             tfail!(GROUP, NAME, "cannot bind to eth0 local address (EADDRNOTAVAIL)");
         } else {
-            tbrok!(GROUP, NAME, "bind to 10.0.2.15 failed with unexpected errno {}", err);
+            tbrok!(GROUP, NAME, "bind to runtime eth0 address failed with unexpected errno {}", err);
         }
         1
     }
@@ -1489,7 +1743,11 @@ fn proc_net02_route() -> i32 {
     sys_close(fd as usize);
     if n <= 0 { tfail!(GROUP, NAME, "read returned {}", n); return 1; }
     let content = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
-    if content.contains("Iface") && content.contains("lo") { tpass!(GROUP, NAME, "route table accessible"); 0 }
+    let has_route = content.lines().skip(1).any(|line| {
+        let iface = line.split_whitespace().next().unwrap_or("");
+        iface == "lo" || iface == "eth0"
+    });
+    if content.contains("Iface") && has_route { tpass!(GROUP, NAME, "route table accessible"); 0 }
     else { tfail!(GROUP, NAME, "missing route table content"); 1 }
 }
 fn proc_net03_tcp_header() -> i32 {
@@ -1553,6 +1811,24 @@ const SIOCGIFADDR: u32 = 0x8915;
 const SIOCGIFCONF: u32 = 0x8912;
 
 #[repr(C)] struct ifreq { ifr_name: [u8; 16], ifr_data: [u8; 24] }
+
+fn interface_ipv4(name: &str) -> Option<[u8; 4]> {
+    let fd = sys_socket(AF_INET, SOCK_DGRAM, 0);
+    if fd < 0 {
+        return None;
+    }
+    let fd = fd as usize;
+    let mut ifr = ifreq { ifr_name: [0; 16], ifr_data: [0; 24] };
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(15);
+    ifr.ifr_name[..len].copy_from_slice(&bytes[..len]);
+    let result = sys_ioctl(fd, SIOCGIFADDR, &mut ifr as *mut ifreq as usize);
+    sys_close(fd);
+    if result < 0 || u16::from_ne_bytes([ifr.ifr_data[0], ifr.ifr_data[1]]) != AF_INET as u16 {
+        return None;
+    }
+    Some([ifr.ifr_data[4], ifr.ifr_data[5], ifr.ifr_data[6], ifr.ifr_data[7]])
+}
 
 fn ioctl_get(fd: usize, cmd: u32, name: &str) -> isize {
     let mut ifr = ifreq { ifr_name: [0; 16], ifr_data: [0; 24] };
@@ -1942,20 +2218,48 @@ fn run_with_watchdog(name: &str, test_fn: fn() -> i32, timeout_ms: usize) -> boo
 
 const WATCHDOG_SECS: usize = 60;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TestStage {
+    Core,
+    Veth,
+    Loopback,
+    External,
+    Tls,
+}
+
+fn test_stage(index: usize) -> TestStage {
+    match index {
+        0..=23 => TestStage::Core,
+        24..=34 => TestStage::Veth,
+        35..=39 => TestStage::Loopback,
+        40..=48 => TestStage::External,
+        _ => TestStage::Tls,
+    }
+}
+
+fn profile_allows(profile: &str, stage: TestStage) -> bool {
+    match profile {
+        "all" => true,
+        "core" => matches!(stage, TestStage::Core | TestStage::Loopback),
+        "veth" => stage == TestStage::Veth,
+        "external" => stage == TestStage::External,
+        "board" => matches!(stage, TestStage::Core | TestStage::Loopback | TestStage::External),
+        "tls" => stage == TestStage::Tls,
+        _ => false,
+    }
+}
+
 // ============================================================
 // main
 // ============================================================
 #[no_mangle]
-fn main(_argc: usize, _argv: &[&str]) -> i32 {
-    println!("{}", C_RESET);
-    println!("{}============================================", C_CYAN);
-    println!("  INET Connectivity Test Suite (48 tests)");
-    println!("============================================{}", C_RESET);
-
-    let tests: [(&str, fn() -> i32); 49] = [
+fn main(argc: usize, argv: &[&str]) -> i32 {
+    let tests: [(&str, fn() -> i32); 51] = [
         // ── Step 1: unit / self-contained tests — no external dependencies ──
         ("[NET_CORE] net_core01_interface_basic", net_core01_interface_basic),
         ("[NET_CORE] net_core02_loopback_and_default_iface", net_core02_loopback_and_default_iface),
+        ("[NET_CORE] net_core_ip_recverr", net_core_ip_recverr),
+        ("[NET_CORE] net_core_sendmmsg", net_core_sendmmsg),
         ("[NET_CORE] net_core03_route_lookup", net_core03_route_lookup),
         ("[NET_CORE] net_core04_ephemeral_port_range", net_core04_ephemeral_port_range),
         ("[NET_CORE] net_core05_port_bind_conflict", net_core05_port_bind_conflict),
@@ -2001,11 +2305,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         ("[NET_ROUTE] net_route01_loopback_udp", net_route01_loopback_udp),
         ("[NET_ROUTE] net_route02_eth_local_addr", net_route02_eth_local_addr),
 
-        // ── Step 4: external connectivity (requires QEMU SLIRP / virtio-net) ──
+        // ── Step 4: external connectivity (QEMU SLIRP or a routed board link) ──
         ("tcp_connect", test_tcp_connect_all),
-        ("tcp_send_recv", || {
-            test_tcp_send_recv("cloudflare", [1, 1, 1, 1])
-        }),
+        ("tcp_send_recv", test_tcp_send_recv_external),
         ("http_get", test_http_get),
         ("dns+baidu.com:80", || test_dns_and_tcp("baidu.com")),
         ("dns+bilibili.com:80", || test_dns_and_tcp("bilibili.com")),
@@ -2017,13 +2319,33 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         // ── Step 5: TLS (requires crypto + external connectivity) ──
         ("https_tls", test_https_tls),
         ("https_tls_download", test_https_download),
-    ]; // 48 total tests
+    ]; // 51 total tests
 
-    let total = tests.len();
+    let profile = if argc > 1 { argv[1] } else { "all" };
+    if !matches!(profile, "all" | "core" | "veth" | "external" | "board" | "tls") {
+        println!("usage: inet_test [all|core|veth|external|board|tls]");
+        return 2;
+    }
+    let selected = tests
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| profile_allows(profile, test_stage(*index)))
+        .count();
+
+    println!("{}", C_RESET);
+    println!("{}============================================", C_CYAN);
+    println!("  INET Connectivity Test Suite");
+    println!("  profile={} selected={}/{}", profile, selected, tests.len());
+    println!("============================================{}", C_RESET);
+
+    let total = selected;
     let mut passed = 0;
     let mut failed = 0;
 
-    for (name, func) in tests.iter() {
+    for (index, (name, func)) in tests.iter().enumerate() {
+        if !profile_allows(profile, test_stage(index)) {
+            continue;
+        }
         println!("");
         let ok = run_with_watchdog(name, *func, WATCHDOG_SECS * 1000);
         if ok {

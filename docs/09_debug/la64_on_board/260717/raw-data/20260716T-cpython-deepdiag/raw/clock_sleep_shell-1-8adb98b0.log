@@ -1,0 +1,6 @@
+2026-07-16T08:14:57.920582Z __PERF_BEGIN_clock_sleep_shell-1-8adb98b0__
+2026-07-16T08:14:58.831896Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_ACK_clock_sleep_shell-1-8adb98b0_TRACE_OFF__
+2026-07-16T08:15:00.119118Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_clock_sleep_shell-1-8adb98b0__
+2026-07-16T08:15:01.158334Z __PERF_WORK_END_clock_sleep_shell-1-8adb98b0__
+2026-07-16T08:15:01.162799Z __PERF_ACK_clock_sleep_shell-1-8adb98b0_WORK__
+2026-07-16T08:15:01.612683Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_clock_sleep_shell-1-8adb98b0__ rc=0

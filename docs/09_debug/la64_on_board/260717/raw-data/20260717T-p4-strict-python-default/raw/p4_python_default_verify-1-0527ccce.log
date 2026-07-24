@@ -1,0 +1,20 @@
+2026-07-17T12:09:10.334632Z __PERF_BEGIN_p4_python_default_verify-1-0527ccce__
+2026-07-17T12:09:11.288856Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_python_default_verify-1-0527ccce_TRACE_OFF__
+2026-07-17T12:09:12.840137Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_python_default_verify-1-0527ccce__
+2026-07-17T12:09:14.196678Z [persist-python-verify] interpreter=/persist/python-runtime/releases/5298fb0fa485/usr/bin/python3
+2026-07-17T12:09:14.203416Z [persist-python-verify] root=/persist/python-runtime/releases/5298fb0fa485
+2026-07-17T12:09:27.626818Z Traceback (most recent call last):
+2026-07-17T12:09:27.653975Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-17T12:09:27.662312Z     [1;31mimport smolagents[0m; print("[persist-python-verify] smolagents=" + smolagents.__file__)
+2026-07-17T12:09:27.663387Z     [1;31m^^^^^^^^^^^^^^^^^[0m
+2026-07-17T12:09:27.677464Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py"[0m, line [35m19[0m, in [35m<module>[0m
+2026-07-17T12:09:27.680201Z     [1;31mfrom .agent_types import *[0m  # noqa: I001
+2026-07-17T12:09:27.683880Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-17T12:09:27.697890Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/agent_types.py"[0m, line [35m23[0m, in [35m<module>[0m
+2026-07-17T12:09:27.697955Z     import PIL.Image
+2026-07-17T12:09:27.703712Z [1;35mModuleNotFoundError[0m: [35mNo module named 'PIL'[0m
+2026-07-17T12:09:28.080310Z [persist-python-verify] smolagents_import=failed-exposed
+2026-07-17T12:09:28.091185Z [persist-python-verify] PASS policy=p4-strict-align-v1 release=/persist/python-runtime/releases/5298fb0fa485
+2026-07-17T12:09:28.097859Z __PERF_WORK_END_p4_python_default_verify-1-0527ccce__
+2026-07-17T12:09:28.102942Z __PERF_ACK_p4_python_default_verify-1-0527ccce_WORK__
+2026-07-17T12:09:28.596854Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_python_default_verify-1-0527ccce__ rc=0

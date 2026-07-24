@@ -1,0 +1,3 @@
+2026-07-18T00:18:54.512907Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-18T00:18:59.308941Z make: rustup: Permission denied
+2026-07-18T00:18:59.309011Z make: *** [Makefile:66: rv64-kernel-build-only] Error 127

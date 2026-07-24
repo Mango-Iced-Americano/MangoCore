@@ -255,6 +255,49 @@ impl EventPoll {
         );
     }
 
+    /// Record a producer-side readiness notification.
+    ///
+    /// `record_observed_event` is used by a state scan and therefore suppresses
+    /// an edge-triggered bit until a later scan observes that bit cleared.
+    /// A producer callback is different: the underlying object has explicitly
+    /// announced a new readiness edge.  Suppressing that callback with the
+    /// previous scan's `last_ready` value loses the edge when the transition
+    /// races with the next `epoll_wait` scan (Tokio/Mio exposes this reliably
+    /// because it always registers sockets with `EPOLLET`).
+    fn record_notified_event(&self, fd: usize, notified: EPollEvent) {
+        let mut inner = self.inner.lock();
+        let Some(item) = inner.items.get_mut(&fd) else {
+            return;
+        };
+        if !item.enabled {
+            return;
+        }
+
+        let returned = Self::returned_events(notified, item.events);
+        if returned.is_empty() {
+            return;
+        }
+
+        if !item.events.contains(EPollEvent::EPOLLET) {
+            item.last_ready = returned;
+        } else {
+            // The callback itself is the edge.  Keep the scan state current so
+            // a subsequent level observation does not manufacture a duplicate,
+            // but do not reject a real producer notification merely because a
+            // previous edge carried the same readiness bit.
+            item.last_ready |= returned;
+        }
+        let data = item.data;
+        Self::push_ready_locked(
+            &mut inner,
+            ReadyEvent {
+                fd,
+                events: returned,
+                data,
+            },
+        );
+    }
+
     fn take_ready(&self, maxevents: usize) -> Vec<ReadyEvent> {
         let mut inner = self.inner.lock();
         let mut ready = Vec::new();
@@ -470,7 +513,7 @@ impl EventPoll {
 
 impl EventListener for EventPoll {
     fn on_event(&self, key: usize, events: EPollEvent) {
-        self.record_observed_event(key, events);
+        self.record_notified_event(key, events);
         self.wait_queue.lock().wake_all();
     }
 }

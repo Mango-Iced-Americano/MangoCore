@@ -1,0 +1,7 @@
+2026-07-16T12:59:52.709622Z __PERF_BEGIN_production_math_sqrt_micro-3-a4ea3ae5__
+2026-07-16T12:59:53.673681Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_production_math_sqrt_micro-3-a4ea3ae5_TRACE_OFF__
+2026-07-16T12:59:56.097005Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_production_math_sqrt_micro-3-a4ea3ae5__
+2026-07-16T13:00:01.207129Z MATH_SQRT 3514041820 29579.47519233426
+2026-07-16T13:00:01.299531Z __PERF_WORK_END_production_math_sqrt_micro-3-a4ea3ae5__
+2026-07-16T13:00:01.304159Z __PERF_ACK_production_math_sqrt_micro-3-a4ea3ae5_WORK__
+2026-07-16T13:00:01.812754Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_production_math_sqrt_micro-3-a4ea3ae5__ rc=0

@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-19"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -16,6 +16,10 @@ code_paths:
   - "os/src/fs/dev/pty.rs"
   - "os/src/fs/dev/rtc.rs"
   - "os/src/fs/dev/block.rs"
+  - "os/src/drivers/block/partition.rs"
+  - "os/src/syscall/fs.rs"
+  - "os/src/fs/page_cache.rs"
+  - "os/src/fs/mod.rs"
 entry_points:
   - "DEV_FS"
   - "DevFS"
@@ -36,6 +40,7 @@ related_docs:
   - "docs/03_fs/architecture.md"
   - "docs/03_fs/vfs-core.md"
   - "docs/03_fs/init-and-rootfs.md"
+  - "docs/09_debug/la64_on_board/260717/10-tty-smolagent-interactive-fix.md"
 ---
 
 ## 概述
@@ -116,7 +121,7 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 ### /dev/urandom 和 /dev/random
 
-当前用 0 填充缓冲区（暂未实现真随机数生成器）。返回 `buf.len()` 而非 0（避免调用方误判为 EOF）。写完全丢弃。`/dev/random` 是 urandom 的别名，共享同一个 `Urandom` 类型实例。主次设备号 makedev!(1, 9)。
+两者共享内核 ChaCha20 CSPRNG。QEMU 由 VirtIO RNG 播种，2K1000LA 由片上 APB RNG 播种；启动样本通过基本重复/卡死健康检查后，随机池才进入 ready 状态。读操作返回请求长度的安全随机字节，可信熵源初始化失败时返回 `EAGAIN`，不会回退到全零或时间种子。写入数据会混入私有状态，但不会提高 ready 状态或被计为可信熵。`/dev/random` 当前仍是 `/dev/urandom` 的同实现别名，主次设备号为 makedev!(1, 9)。
 
 ### /dev/full
 
@@ -126,11 +131,30 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 控制台终端。`/dev/console` 是 TTY 的别名。
 
-**读**：从物理串口（`console_getchar`）或 stashed 输入区取一个字符，写入用户缓冲区。如果字符匹配 VINTR（默认 Ctrl-C）且 ISIG 标志置位，向前台进程组发送 SIGINT 并返回 `EAGAIN`。ECHO 模式下回显字符（`\r` 转 `\n`）。
+**输入生产与通知**：调度器从物理 UART 取字符，先经过 magic-key 识别，再放入 trace
+stash；`Teletype::receive_stashed()` 将字符送入 line discipline。只有生产侧在字符真正使
+TTY 可读后才通知普通 read waiter 和 epoll listener；`read_at()` 只消费数据，`poll()` 只
+查询状态，两者都不会反向通知自己的读等待队列。这个约束避免 `WaitQueue` 在持锁重查
+read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形成单核自锁。
+
+**输入变换与规范模式**：输入先应用 `IGNCR` / `ICRNL` / `INLCR`。默认 `ICRNL` 因而会
+把串口 Enter 的 `CR` 转为用户态 `NL`。`ICANON` 下使用固定 1024 字节环形队列保存完整
+记录和当前可编辑行，支持换行、`VEOL` / `VEOL2`、`VEOF`、`VERASE`、`VKILL`，并按
+`ECHO` / `ECHOE` / `ECHOK` / `ECHONL` / `ECHOKE` 做最小回显。规范 read 最多返回一条
+记录；在 Enter 前输入普通字符只进入当前行，不会提前返回给 Python `input()`。
+
+**非规范模式**：清除 `ICANON` 后支持 `VMIN` / `VTIME` 四种基本组合。每个有效字节
+都会在生产侧唤醒 waiter，`VTIME` 由现有 wait-I/O 兜底定时复查。当前计时状态仍属于
+整个 `Teletype`，而不是每个 open/read；多个并发 reader 的完整 Linux N_TTY 语义尚未
+实现。
+
+**控制字符**：`ISIG` 下的 VINTR（默认 Ctrl-C）会按 `NOFLSH` 决定是否清空输入，并在
+释放 TTY 内部锁后向前台进程组投递 SIGINT，避免持 TTY 锁扫描全局 task/process 表。
+没有可用 foreground pgid 时仍保留调度器场景的 interruptible-task fallback。
 
 **写**：将 UTF-8 字符串直接输出到串口（`print!`）。
 
-**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。
+**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
 
 ### Pipe（匿名管道）
 
@@ -176,35 +200,62 @@ Pty 系统由 `PtyManager` 管理，每对 PTY 包含一个 master（`PtmxMaster
 
 BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主设备号固定为 254（VIRTIO_BLK_MAJOR）。
 
-**读**：按 BLOCK_SZ 块对齐分片读取，通过返回 `BlockDeviceResult` 的 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0；底层读失败转换为 `EIO`。
+**读**：按 BLOCK_SZ 块对齐分片读取，通过 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0。
 
-**写**：按块对齐写入。非整块写入时先读后写（read-modify-write）。超出设备大小返回 `ENOSPC`；底层读写失败转换为 `EIO`。
-
-`BlockDevInode` 不通过 ioctl 暴露 flush；文件系统回写层使用 `BlockDevice::flush` 时，只有 `supports_reliable_flush()` 为真才能将成功视为持久化屏障。
+**写**：按块对齐写入。非整块写入时先读后写（read-modify-write）。超出设备大小返回 `ENOSPC`。
 
 **ioctl**：
 
 - `BLKGETSIZE64`：获取设备字节大小
 - `BLKSSZGET`：获取逻辑扇区大小（固定返回 512）
 
-**动态注册路径**：`mount_boot_block_devices` 在探测到底层块设备后依次注册：
+**动态注册路径**：`mount_boot_block_devices` 先注册原始设备，再对未识别为裸
+ext4/FAT32 的设备解析 MBR 主分区。QEMU 使用：
 
 ```
 /dev/vda       (原始根设备, minor=0)
 /dev/vdb       (工具盘, minor=1)
-/dev/vdb1..N   (MBR 分区, minor=2..)
-/dev/vda1..N   (别名, minor=100..)
+/dev/vda1..N   (vda 的 MBR 主分区，或 vdb 分区兼容别名)
+/dev/vdb1..N   (vdb 的 MBR 主分区)
 ```
 
-分区节点通过 `probe_mbr` 解析 MBR 表，为每个有效分区创建 `PartitionBlockDevice` 包装器，再封装为 `BlockDevInode` 注册到 DEV_FS。
+2K1000LA 的单块 SATA SSD 使用：
+
+```
+/dev/sda       (原始 SATA SSD)
+/dev/sda1..N   (MBR 主分区)
+/dev/vda       (sda 兼容别名)
+/dev/vda1..N   (sdaN 兼容别名)
+```
+
+完整测试镜像固定保留以下设备 ABI：
+
+| 分区 | 兼容节点 | 内容 | 自动挂载 |
+|------|----------|------|----------|
+| P1 | `/dev/vda1` | 4GiB 官方 LA64 测试集 ext4 | `/sdcard` |
+| P2 | `/dev/vda2` | 1280MiB FAT32 暂存盘 | 否；由 basic/mount 测试临时挂载 |
+| P3 | `/dev/vda3` | 768MiB MangoCore 工具 ext4 | 无第二块盘时挂到 `/tools` |
+
+`PartitionBlockDevice` 保留 MBR 的 512 字节 LBA 语义，并转换到平台
+`BLOCK_SZ`。未按 2KiB/4KiB 对齐的分区通过 bounce buffer 访问；自然对齐分区
+走整块直接 I/O。文件系统打开前还会按 ext4 原生块大小或 FAT BPB
+`BytsPerSec` 包装 `BlockSizeAdapter`，因此文件系统块号不会被误当成平台块号。
+用户态 `mount(2)` 打开 ext4/FAT32 时也走同一 `detect_fs_layout()` 和
+`BlockSizeAdapter` 路径，不能直接把 `BlockDevInode.inner` 交给文件系统。
+当前只解析四个 MBR 主分区，不支持扩展分区和 GPT；包含 protective MBR 的
+混合分区表也会整盘拒绝。
+
+2K1000LA 只读验收镜像将 `/dev/sda*` 与 `/dev/vda*` 节点标记为 `0440`，
+节点写入直接返回 `EROFS`。挂载使用 `MountFlags::RDONLY`，底层再套一层
+`ReadOnlyBlockDevice`，用于拦截 FAT inode drop 等绕过 VFS 的内部回写。
 
 ### /dev/cpu_dma_latency
 
 Null 类型的别名。写入丢弃，读返回 EOF。用于需要打开 `/dev/cpu_dma_latency` 的测试程序。
 
-### PTMX 的随机数提升
+### 随机设备安全边界
 
-`/dev/random` 和 `/dev/urandom` 当前用零填充的实现是一个已知的暂时性限制。部分 LTP 和 libc 测试依赖随机数设备存在且可用，零填充保证它们不会因 EOF 假阳性而崩溃，但不提供真随机性。
+随机设备不直接输出硬件寄存器内容。硬件样本只负责启动播种，用户可见字节统一来自 ChaCha20 流，并在每次请求后用隐藏输出重键。该设计已经消除全零实现，但当前尚未实现运行期按字节数或时间阈值重新采集硬件熵；详见 `docs/07_driver/random.md`。
 
 ## 初始化流程
 
@@ -221,9 +272,10 @@ rust_main
         -> misc_dir.add_dev("rtc")  // /dev/misc/rtc
       -> DEV_FS.add_dir("shm")      // /dev/shm 覆盖挂载点
     -> mount_boot_block_devices()
-      -> DEV_FS.add_dev("vda")     // 原始块设备
-      -> DEV_FS.add_dev("vdb")     // 工具盘
-      -> probe_mbr -> DEV_FS.add_dev("vdb1")...  // 分区节点
+      -> detect_fs(raw)             // 优先识别整盘裸 ext4/FAT32
+      -> probe_mbr(raw)             // 裸盘未识别时解析主分区
+      -> DEV_FS.add_dev("vda1")...  // 或 2K1000 的 sda/sdaN
+      -> detect_fs(partition)       // 选择首个可挂载分区
 ```
 
 ## Test Mapping
@@ -233,20 +285,22 @@ rust_main
 | null 读写 | /dev/null | busybox dd, LTP open05 | pass |
 | zero 填零读 | /dev/zero | busybox dd, mmap 测试 | pass |
 | full 写返回 ENOSPC | /dev/full | LTP fcntl01 | pass |
-| urandom 读取 | /dev/urandom | openssl, LTP getdents01 | partial |
+| urandom 读取 | /dev/urandom | rng_test（getrandom/设备活性、差异性） | pass/QEMU+2K1000LA |
 | tty 字符 IO | /dev/tty | login, shell 交互 | pass |
 | pipe 环形缓冲 | pipe() syscall | LTP pipe*, libc 测试 | pass |
 | pty pair 创建 | /dev/ptmx | busybox, telnetd | pass |
 | rtc 时间查询 | /dev/rtc | hwclock, LTP | pass |
-| 块设备原始 IO | /dev/vda | dd, mkfs, mount | pass |
+| 块设备原始 IO | /dev/vda、/dev/sda | dd, mkfs, mount | pass/board pending |
+| MBR 分区节点 | /dev/vdb1、/dev/sda1 | QEMU LBA63 ext4/FAT32 镜像 | pass/board pending |
+| 原生块大小转换 | BlockSizeAdapter | ext4 1KiB、FAT32 512B 根目录读取 | pass/board pending |
 
 ## Known Issues
 
-1. **urandom 随机数质量**
-   - 现象：`/dev/urandom` 和 `/dev/random` 返回全零数据
-   - 根因：尚未集成硬件随机数生成器或软件 CSPRNG
-   - 影响：依赖真随机数的加密应用（openssl、ssh）行为不可预测
-   - 修复方向：集成 riscv64 Zkr 扩展或 loongarch64 的硬件随机指令；fallback 到软件 ChaCha20
+1. **随机池只在启动时采集硬件熵**
+   - 现状：VirtIO RNG 或 2K1000LA APB RNG 提供 64 字节启动样本，之后由 ChaCha20 CSPRNG 输出并逐请求重键
+   - 边界：尚未按输出量或运行时间周期性重新读取硬件熵
+   - 影响：已具备启动后安全随机流和前向重键，但长期运行时不能宣称持续硬件重播种
+   - 修复方向：持久化平台熵设备句柄，在不持有随机池锁时采样，并按阈值混入且执行连续健康检查
 
 2. **pty 缓冲区大小固定**
    - 现象：master 到 slave 和 slave 到 master 各只有 4KB 环形缓冲区
@@ -271,3 +325,9 @@ rust_main
    - 根因：Teletype 的 `last_char` 暂存仅缓存一个字符，没有行缓冲或 raw 模式连续读取
    - 影响：cat 等逐字节读取工作的应用性能差
    - 修复方向：实现 ICANON 模式的行缓冲和 raw 模式的批量读取
+
+6. **分区表范围仅覆盖 MBR 主分区**
+   - 现象：protective MBR、GPT 和扩展分区会报告 unsupported
+   - 原因：本阶段只为 2K1000LA SSD 的首次只读挂载接入传统 MBR
+   - 影响：GPT 格式 SSD 不能挂载
+   - 后续方向：实板 MBR 路径稳定后，再独立实现 GPT 校验和分区项解析

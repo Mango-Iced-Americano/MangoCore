@@ -328,6 +328,19 @@ impl Ext4FileSystem {
         super_block: &super::superblock::Ext4Superblock,
         block_group_idx: usize,
     ) -> super::block_group::Ext4BlockGroup {
+        if self
+            .meta_batch_active
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(bg) = self
+                .meta_batch_bgs
+                .lock()
+                .get(&(block_group_idx as u32))
+                .copied()
+            {
+                return bg;
+            }
+        }
         let dsc_cnt = self.block_size / super_block.desc_size() as usize;
         let dsc_id = block_group_idx / dsc_cnt;
         let block_id = super_block.first_data_block as usize + dsc_id + 1;
@@ -335,6 +348,19 @@ impl Ext4FileSystem {
         let ext4block = self.load_metadata_block(block_id);
         super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
         ext4block.read_offset_as(offset)
+    }
+
+    pub(crate) fn current_superblock(&self) -> super::superblock::Ext4Superblock {
+        if self
+            .meta_batch_active
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(sb) = *self.meta_batch_sb.lock() {
+                return sb;
+            }
+        }
+        self.load_metadata_block(super::SUPERBLOCK_OFFSET / self.block_size)
+            .read_offset_as(super::SUPERBLOCK_OFFSET % self.block_size)
     }
 
     // Opens and loads an Ext4 from the `block_device`.
@@ -531,11 +557,7 @@ impl Ext4FileSystem {
             let blocks = self.balloc_alloc_contiguous_blocks(inode_ref, goal, run_len);
             if blocks.is_empty() {
                 let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
-                crate::task::perf::record_ext4_alloc_ensure(
-                    total_lblocks,
-                    total_new_blocks,
-                    elapsed,
-                );
+                crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
                 return Err(Errno::ENOSPC as isize);
             }
 
@@ -590,14 +612,16 @@ impl Ext4FileSystem {
 
         for bgid in 0..bg_count {
             let mut bg = self.load_block_group_cached(sblk, bgid);
+            let bmp_blk = bg.get_block_bitmap_block(sblk) as usize;
+            let bmp = match self.load_block_bitmap_for_allocation(bgid as u32, &mut bg) {
+                Ok(bitmap) => bitmap,
+                Err(_) => continue,
+            };
             let free = bg.get_free_blocks_count() as usize;
             if free < blocks {
                 continue;
             }
 
-            let bmp_blk = bg.get_block_bitmap_block(sblk) as usize;
-            let bmp = self.load_metadata_block(bmp_blk);
-            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
             let bit_cnt = blocks_per_group.min(bmp.data.len() * 8);
 
             // Find a contiguous range of free blocks
@@ -624,7 +648,7 @@ impl Ext4FileSystem {
 
                         // Update block group free count
                         bg.set_free_blocks_count((free - blocks) as u32);
-                        let mut sb = *sblk;
+                        let mut sb = self.current_superblock();
                         let sb_free = sb.free_blocks_count();
                         sb.set_free_blocks_count(sb_free - blocks as u64);
                         self.defer_superblock_write(&sb);
@@ -701,7 +725,7 @@ impl Ext4FileSystem {
     }
 
     pub fn get_superblock(&self) -> Ext4Superblock {
-        self.superblock
+        self.current_superblock()
     }
 
     pub fn get_block_group(&self, blk_grp_idx: usize) -> Ext4BlockGroup {
@@ -801,11 +825,59 @@ impl layout::Ext4OSInode {
         cache.insert(alloc::string::String::from(name), version);
     }
 
+    fn ensure_child_name_absent(&self, parent: u32, name: &str) -> Result<(), SyscallErr> {
+        let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+        match self.ext4fs.dir_find_entry(parent, name, &mut result) {
+            Ok(_) => Err(SyscallErr::EEXIST),
+            Err(err) if err.error() == Errno::ENOENT => Ok(()),
+            Err(_) => Err(SyscallErr::EIO),
+        }
+    }
+
+    /// Low-level ext4 helpers operate on a fresh `Ext4InodeRef`. Keep the VFS
+    /// object's snapshot coherent before a later operation uses it as the
+    /// authoritative parent inode and writes it back.
+    fn refresh_inode_snapshot(&self) {
+        let inode_num = self.inode.lock().inode_num;
+        let fresh = self.ext4fs.get_inode_ref(inode_num);
+        self.inode.lock().inode = fresh.inode;
+    }
+
     /// 在 reclaim 周期中调用，清理过期的 negative dentry 条目。
     /// version 不匹配的条目表示目录已被修改，条目已失效。
     pub fn prune_negative_dentry(&self) {
         let current = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
         self.negative_dentry.lock().retain(|_, ver| *ver == current);
+    }
+
+    fn finalize_removed_inode(&self, child_ref: &mut Ext4InodeRef) -> Result<(), SyscallErr> {
+        let child_num = child_ref.inode_num;
+        let links = child_ref.inode.links_count();
+        self.ext4fs.write_back_inode(child_ref);
+
+        let live_object = self.ext4fs.lookup_inode_object(child_num);
+        if let Some(child_obj) = live_object.as_ref() {
+            if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                osi.inode.lock().inode.set_links_count(links);
+            }
+        }
+        if links != 0 {
+            return Ok(());
+        }
+
+        self.ext4fs.cleanup_inode_caches_on_unlink(child_num);
+        self.ext4fs.unregister_page_cache(child_num);
+        if live_object.is_some() {
+            return Ok(());
+        }
+
+        self.ext4fs
+            .truncate_inode(child_ref, 0)
+            .map_err(|_| SyscallErr::EIO)?;
+        self.ext4fs
+            .ialloc_free_inode(child_num, child_ref.inode.is_dir());
+        self.ext4fs.evict_inode_object_if_deleted(child_num);
+        Ok(())
     }
 }
 
@@ -1468,6 +1540,7 @@ impl IndexNode for layout::Ext4OSInode {
         mode: InodeMode,
     ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         let parent = self.inode.lock().inode_num;
+        self.ensure_child_name_absent(parent, name)?;
         let inode_mode =
             vfs_type_to_inode_mode(file_type) | (mode & InodeMode::S_IALLUGO).bits() as u16;
         let new_ref = self
@@ -1482,6 +1555,7 @@ impl IndexNode for layout::Ext4OSInode {
                     SyscallErr::ENOSYS
                 }
             })?;
+        self.refresh_inode_snapshot();
         self.bump_dir_version();
         self.clear_negative_dentry(name);
         let child_ino = new_ref.inode_num;
@@ -1510,6 +1584,7 @@ impl IndexNode for layout::Ext4OSInode {
         attrs: crate::fs::vfs::CreateAttrs,
     ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         let parent = self.inode.lock().inode_num;
+        self.ensure_child_name_absent(parent, name)?;
         let inode_mode =
             vfs_type_to_inode_mode(file_type) | (attrs.mode & InodeMode::S_IALLUGO).bits() as u16;
         // Pass uid/gid directly through to ext4 create, avoiding
@@ -1526,6 +1601,7 @@ impl IndexNode for layout::Ext4OSInode {
                     SyscallErr::ENOSYS
                 }
             })?;
+        self.refresh_inode_snapshot();
         self.bump_dir_version();
         self.clear_negative_dentry(name);
         let child_ino = new_ref.inode_num;
@@ -1576,6 +1652,7 @@ impl IndexNode for layout::Ext4OSInode {
         super::counters::inc_counter!(super::counters::SYMLINK_CREATE_COUNT);
 
         let parent = self.inode.lock().inode_num;
+        self.ensure_child_name_absent(parent, name)?;
         let target_bytes = target.as_bytes();
         let new_ref = if target_bytes.len() <= 60 {
             super::counters::inc_counter!(super::counters::FAST_SYMLINK_CREATE_COUNT);
@@ -1594,6 +1671,7 @@ impl IndexNode for layout::Ext4OSInode {
                 .map_err(|_| SyscallErr::EIO)?;
             new_ref
         };
+        self.refresh_inode_snapshot();
         // Phase 4: bump dir_version + clear negative (ONLY after successful creation)
         self.bump_dir_version();
         self.clear_negative_dentry(name);
@@ -1661,7 +1739,16 @@ impl IndexNode for layout::Ext4OSInode {
             .ext4fs
             .dir_find_entry(new_parent_num, new_name, &mut check)
             .is_ok();
-        if target_exists {
+        let overwritten_target = if target_exists {
+            if flags & RENAME_NOREPLACE != 0 {
+                return Err(SyscallErr::EEXIST);
+            }
+            // POSIX rename is a no-op when both names already resolve to the
+            // same inode (for example, two hard links to one file).
+            if check.dentry.inode == child_inode_num {
+                return Ok(());
+            }
+
             let old_target_num = check.dentry.inode;
             let old_target_ref = self.ext4fs.get_inode_ref(old_target_num);
             let target_is_dir = old_target_ref.inode.is_dir();
@@ -1676,48 +1763,42 @@ impl IndexNode for layout::Ext4OSInode {
             }
             // Safety: target is a non-empty directory → ENOTEMPTY
             if target_is_dir {
-                let entries = self
-                    .ext4fs
-                    .dir_get_entries(old_target_num)
+                let entries = self.ext4fs.dir_get_entries(old_target_num)
                     .map_err(|_| SyscallErr::EIO)?;
-                let non_dot = entries
-                    .iter()
-                    .filter(|e| {
-                        let n = e.get_name();
-                        n != "." && n != ".."
-                    })
-                    .count();
+                let non_dot = entries.iter().filter(|e| {
+                    let n = e.get_name();
+                    n != "." && n != ".."
+                }).count();
                 if non_dot > 0 {
                     return Err(SyscallErr::ENOTEMPTY);
                 }
             }
-            if flags & RENAME_NOREPLACE != 0 {
-                return Err(SyscallErr::EEXIST);
+
+            // Keep the target intact until the source has been unpublished.
+            // The board persistence path relies on the rollback-capable
+            // ordering below to avoid losing either name when a later step
+            // fails or when both entries share directory-record slack.
+            Some(old_target_ref)
+        } else {
+            None
+        };
+
+        let finalize_overwrite = || -> Result<(), SyscallErr> {
+            if let Some(target) = overwritten_target.as_ref() {
+                let mut target = target.clone();
+                let links = target.inode.links_count();
+                if links > 0 {
+                    target.inode.set_links_count(links - 1);
+                }
+                self.finalize_removed_inode(&mut target)?;
+                if target.inode.is_dir() {
+                    self.ext4fs
+                        .dir_lookup_cache
+                        .remove_dir_cache(target.inode_num);
+                }
             }
-            // Overwrite: remove existing new_name dirent before adding the new one.
-            // This prevents dir_add_entry from creating duplicate dirents when
-            // the target name already exists (e.g. apk rename(tmpl, final)).
-            {
-                let mut parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
-                self.ext4fs
-                    .dir_remove_entry(&mut parent_ref, new_name)
-                    .map_err(|_| SyscallErr::EIO)?;
-            }
-            // Decrement old target's link count (minimal cleanup; full inode
-            // truncate/free handled lazily if links reach 0 via Drop).
-            let mut old_target = self.ext4fs.get_inode_ref(old_target_num);
-            let links = old_target.inode.links_count();
-            if links > 0 {
-                old_target.inode.set_links_count(links - 1);
-                self.ext4fs.write_back_inode(&mut old_target);
-            }
-            // FIX3: if overwriting a directory, remove its dir lookup cache
-            if old_target.inode.is_dir() {
-                self.ext4fs
-                    .dir_lookup_cache
-                    .remove_dir_cache(old_target_num);
-            }
-        }
+            Ok(())
+        };
 
         // Safety: old is directory and new_parent is descendant of old → EINVAL
         if is_dir && old_parent_num != new_parent_num {
@@ -1727,11 +1808,7 @@ impl IndexNode for layout::Ext4OSInode {
                     return Err(SyscallErr::EINVAL);
                 }
                 let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-                if self
-                    .ext4fs
-                    .dir_find_entry(cur, "..", &mut dotdot_result)
-                    .is_err()
-                {
+                if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
                     break;
                 }
                 let parent_ino = dotdot_result.dentry.inode;
@@ -1743,14 +1820,50 @@ impl IndexNode for layout::Ext4OSInode {
         }
 
         if old_parent_num == new_parent_num {
+            // Removing an entry merges its record length into the preceding
+            // dirent. A separately-created temporary source may already live
+            // in the target's slack, so removing the target first can hide the
+            // source too. Always remove the source first, then the overwritten
+            // target, and only then publish the replacement name.
             let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
-            self.ext4fs
+            if self
+                .ext4fs
+                .dir_remove_entry(&mut parent_ref, old_name)
+                .is_err()
+            {
+                return Err(SyscallErr::EIO);
+            }
+            if overwritten_target.is_some() {
+                let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
+                if self
+                    .ext4fs
+                    .dir_remove_entry(&mut parent_ref, new_name)
+                    .is_err()
+                {
+                    let mut rollback = self.ext4fs.get_inode_ref(old_parent_num);
+                    let _ = self
+                        .ext4fs
+                        .dir_add_entry(&mut rollback, &child_ref, old_name);
+                    return Err(SyscallErr::EIO);
+                }
+            }
+            let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
+            if self
+                .ext4fs
                 .dir_add_entry(&mut parent_ref, &child_ref, new_name)
-                .map_err(|_| SyscallErr::ENOSPC)?;
-            let mut parent_ref2 = self.ext4fs.get_inode_ref(old_parent_num);
-            self.ext4fs
-                .dir_remove_entry(&mut parent_ref2, old_name)
-                .map_err(|_| SyscallErr::EIO)?;
+                .is_err()
+            {
+                let mut rollback = self.ext4fs.get_inode_ref(old_parent_num);
+                let _ = self
+                    .ext4fs
+                    .dir_add_entry(&mut rollback, &child_ref, old_name);
+                if let Some(target) = overwritten_target.as_ref() {
+                    let mut rollback = self.ext4fs.get_inode_ref(old_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, target, new_name);
+                }
+                return Err(SyscallErr::ENOSPC);
+            }
+            finalize_overwrite()?;
             let v = self.bump_dir_version();
             // Invalidate dir cache for old_name and new_name
             self.ext4fs
@@ -1774,16 +1887,43 @@ impl IndexNode for layout::Ext4OSInode {
                     self.ext4fs.mark_children_prune_pending();
                 }
             }
+            drop(children);
+            self.refresh_inode_snapshot();
             Ok(())
         } else {
+            if overwritten_target.is_some() {
+                let mut new_parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
+                self.ext4fs
+                    .dir_remove_entry(&mut new_parent_ref, new_name)
+                    .map_err(|_| SyscallErr::EIO)?;
+            }
             let mut new_parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
-            self.ext4fs
+            if self
+                .ext4fs
                 .dir_add_entry(&mut new_parent_ref, &child_ref, new_name)
-                .map_err(|_| SyscallErr::ENOSPC)?;
+                .is_err()
+            {
+                if let Some(target) = overwritten_target.as_ref() {
+                    let mut rollback = self.ext4fs.get_inode_ref(new_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, target, new_name);
+                }
+                return Err(SyscallErr::ENOSPC);
+            }
             let mut old_parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
-            self.ext4fs
+            if self
+                .ext4fs
                 .dir_remove_entry(&mut old_parent_ref, old_name)
-                .map_err(|_| SyscallErr::EIO)?;
+                .is_err()
+            {
+                let mut rollback = self.ext4fs.get_inode_ref(new_parent_num);
+                let _ = self.ext4fs.dir_remove_entry(&mut rollback, new_name);
+                if let Some(target) = overwritten_target.as_ref() {
+                    let mut rollback = self.ext4fs.get_inode_ref(new_parent_num);
+                    let _ = self.ext4fs.dir_add_entry(&mut rollback, target, new_name);
+                }
+                return Err(SyscallErr::EIO);
+            }
+            finalize_overwrite()?;
             if is_dir {
                 let mut old_p_ref = self.ext4fs.get_inode_ref(old_parent_num);
                 let links = old_p_ref.inode.links_count();
@@ -1835,6 +1975,9 @@ impl IndexNode for layout::Ext4OSInode {
                     super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
                 }
             }
+            drop(new_children);
+            self.refresh_inode_snapshot();
+            new_parent_ext4.refresh_inode_snapshot();
             Ok(())
         }
     }
@@ -1866,6 +2009,7 @@ impl IndexNode for layout::Ext4OSInode {
             .link(&mut parent_ref, &mut child_ref, name)
             .map_err(|_| SyscallErr::EIO)?;
         self.ext4fs.write_back_inode(&mut child_ref);
+        self.refresh_inode_snapshot();
         self.bump_dir_version();
         self.clear_negative_dentry(name);
         if !is_special_dot(name) {
@@ -1901,38 +2045,10 @@ impl IndexNode for layout::Ext4OSInode {
             .map_err(|_| SyscallErr::EIO)?;
 
         let mut child_ref = self.ext4fs.get_inode_ref(child_num);
-        let old_links = child_ref.inode.links_count();
         self.ext4fs
             .unlink(&mut self.inode.lock(), &mut child_ref, name)
             .map_err(|_| SyscallErr::EIO)?;
-        let new_links = child_ref.inode.links_count(); // already decremented in Ext4FileSystem::unlink
-        self.ext4fs.write_back_inode(&mut child_ref);
-
-        // 传播 links_count 到活着的 Ext4OSInode（若存在），
-        // 确保 Drop 能检测到 links_count==0 并触发延迟回收
-        if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_num) {
-            if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
-                let mut guard = osi.inode.lock();
-                guard.inode.set_links_count(new_links);
-            }
-        }
-
-        // 没有活着的 Ext4OSInode（文件从未被打开/mmapped）：直接回收 inode 和数据块
-        let has_live_object = self.ext4fs.lookup_inode_object(child_num).is_some();
-        if new_links == 0 && !has_live_object {
-            self.ext4fs.cleanup_inode_caches_on_unlink(child_num);
-            let _ = self.ext4fs.truncate_inode(&mut child_ref, 0);
-            let is_dir = child_ref.inode.is_dir();
-            self.ext4fs.ialloc_free_inode(child_num, is_dir);
-            self.ext4fs.evict_inode_object_if_deleted(child_num);
-            self.ext4fs.unregister_page_cache(child_num);
-        } else if new_links == 0 {
-            // 有活着的 Ext4OSInode：仅清理 soft caches，硬回收由 Drop 负责
-            self.ext4fs.cleanup_inode_caches_on_unlink(child_num);
-            self.ext4fs.unregister_page_cache(child_num);
-            // 不调 evict_inode_object_if_deleted：inode_cache 仍需有效供缺页使用
-        }
-        // new_links > 0（hard link 场景）：不清理任何缓存，保留完整可用性
+        self.finalize_removed_inode(&mut child_ref)?;
 
         // 从 parent.children 移除 (Weak, 不需要持锁释放)
         {
@@ -1978,37 +2094,30 @@ impl IndexNode for layout::Ext4OSInode {
         if non_dot > 0 {
             return Err(SyscallErr::ENOTEMPTY);
         }
-        self.ext4fs.flush_inode_pagecache_if_dirty(child_ino);
         self.ext4fs
-            .unlink(&mut self.inode.lock(), &mut child_ref, name)
+            .flush_inode_pagecache_if_dirty(child_ino)
             .map_err(|_| SyscallErr::EIO)?;
-        let new_links = child_ref.inode.links_count();
-        self.ext4fs.write_back_inode(&mut child_ref);
+        {
+            let mut parent_ref = self.inode.lock();
+            self.ext4fs
+                .unlink(&mut parent_ref, &mut child_ref, name)
+                .map_err(|_| SyscallErr::EIO)?;
 
-        // 传播 links_count 到活着的 Ext4OSInode
-        if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_ino) {
-            if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
-                let mut guard = osi.inode.lock();
-                guard.inode.set_links_count(new_links);
-            }
+            // Removing a subdirectory also removes its ".." reference to the
+            // parent.  The low-level unlink above only accounts for the named
+            // parent entry, so update the parent directory link count here.
+            let parent_links = parent_ref.inode.links_count();
+            parent_ref
+                .inode
+                .set_links_count(parent_links.saturating_sub(1));
+            self.ext4fs.write_back_inode(&mut parent_ref);
         }
 
-        // rmdir: 检查是否有 live object 再决定是否释放 ext4 底层资源
-        // 即使目录被 unlink，仍可能有 fd/cwd 持有 Arc<dyn IndexNode>，
-        // 此时不能释放 inode 和数据块（否则 Drop 会二次释放）。
-        let has_live = self.ext4fs.lookup_inode_object(child_ino).is_some();
-        if new_links == 0 && !has_live {
-            // 无 live object：安全释放 ext4 底层资源
-            self.ext4fs.cleanup_inode_caches_on_unlink(child_ino);
-            let _ = self.ext4fs.truncate_inode(&mut child_ref, 0);
-            self.ext4fs.ialloc_free_inode(child_ino, true);
-            self.ext4fs.evict_inode_object_if_deleted(child_ino);
-            self.ext4fs.unregister_page_cache(child_ino);
-        } else if new_links == 0 {
-            // 有 live object：仅清理 soft caches，硬回收由 Drop 负责
-            self.ext4fs.cleanup_inode_caches_on_unlink(child_ino);
-            self.ext4fs.unregister_page_cache(child_ino);
-        }
+        // An empty directory has two links before rmdir: its parent entry and
+        // its own "." entry.  Both disappear atomically from the namespace.
+        // Keeping the count at one leaves an allocated, unreachable inode.
+        child_ref.inode.set_links_count(0);
+        self.finalize_removed_inode(&mut child_ref)?;
 
         // 从 parent.children 移除 (Weak, 不需要持锁释放)
         {
@@ -3017,6 +3126,7 @@ impl Ext4FileSystem {
     /// 进入 metadata defer 模式：暂停 superblock 和 group descriptor 的磁盘写入。
     /// 仅在初始化/prepare 阶段显式调用。普通 syscall 路径默认不开启。
     pub fn begin_meta_batch(&self) {
+        let current_superblock = self.current_superblock();
         if self
             .meta_batch_active
             .swap(true, core::sync::atomic::Ordering::Relaxed)
@@ -3026,7 +3136,7 @@ impl Ext4FileSystem {
         }
         // 先清空 pending，再缓存当前状态
         self.meta_batch_bgs.lock().clear();
-        *self.meta_batch_sb.lock() = Some(self.superblock);
+        *self.meta_batch_sb.lock() = Some(current_superblock);
         println!("[ext4] meta_batch: begin (superblock + group desc writes deferred)");
     }
 
@@ -3041,12 +3151,12 @@ impl Ext4FileSystem {
             return;
         }
         let _ = self.flush_dirty_inodes();
+        let batch_superblock = (*self.meta_batch_sb.lock()).unwrap_or(self.superblock);
         {
             let mut bgs = self.meta_batch_bgs.lock();
             for (bgid, bg) in bgs.iter_mut() {
-                let sb = self.superblock;
-                bg.set_block_group_checksum(*bgid, &sb);
-                self.sync_block_group_to_metadata_cache(bg, *bgid as usize, &sb);
+                bg.set_block_group_checksum(*bgid, &batch_superblock);
+                self.sync_block_group_to_metadata_cache(bg, *bgid as usize, &batch_superblock);
             }
             bgs.clear();
         }
@@ -3422,7 +3532,7 @@ impl NewFileSystem for Ext4FileSystem {
         }
     }
 
-    fn on_umount(&self) {
+    fn on_umount(&self) -> Result<(), SyscallErr> {
         crate::fs::page_cache::flush_all_page_caches();
         self.flush_metadata_cache();
         // Evict stale dentry/Weak caches to release table entries, name strings,
@@ -3432,6 +3542,7 @@ impl NewFileSystem for Ext4FileSystem {
         if cleared > 0 {
             log::debug!("ext4 on_umount: cleared {} dentry cache entries", cleared);
         }
+        Ok(())
     }
 
     fn as_any_ref(&self) -> &dyn core::any::Any {

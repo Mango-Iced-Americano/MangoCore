@@ -1,8 +1,6 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs;
-use crate::mm::{
-    copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess,
-};
+use crate::mm::{copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess};
 use crate::syscall::errno::*;
 use crate::task::{current_task_ref, current_user_token};
 use alloc::vec::Vec;
@@ -158,16 +156,12 @@ pub fn sys_mmap(
             return EACCES;
         }
         let file_writable = file.writable().is_ok();
-        if flags.contains(MapFlags::MAP_SHARED)
-            && prot.contains(MapPermission::W)
-            && !file_writable
+        if flags.contains(MapFlags::MAP_SHARED) && prot.contains(MapPermission::W) && !file_writable
         {
             return EACCES;
         }
         let seals = file.memfd_seal_bits().unwrap_or(0);
-        let sealed_against_write = (seals
-            & (vfs::F_SEAL_WRITE | vfs::F_SEAL_FUTURE_WRITE))
-            != 0;
+        let sealed_against_write = (seals & (vfs::F_SEAL_WRITE | vfs::F_SEAL_FUTURE_WRITE)) != 0;
         if flags.contains(MapFlags::MAP_SHARED) && sealed_against_write {
             write_sealed = true;
             if prot.contains(MapPermission::W) {
@@ -284,18 +278,10 @@ fn copy_current_user_range(src: usize, dst: usize, len: usize) -> Result<(), isi
         let chunk_len = (len - copied).min(PAGE_SIZE);
         let src_addr = src.checked_add(copied).ok_or(EFAULT)?;
         let dst_addr = dst.checked_add(copied).ok_or(EFAULT)?;
-        let src_buf = translated_byte_buffer(
-            token,
-            src_addr as *const u8,
-            chunk_len,
-            UserAccess::Read,
-        )?;
-        let mut dst_buf = translated_byte_buffer(
-            token,
-            dst_addr as *const u8,
-            chunk_len,
-            UserAccess::Write,
-        )?;
+        let src_buf =
+            translated_byte_buffer(token, src_addr as *const u8, chunk_len, UserAccess::Read)?;
+        let mut dst_buf =
+            translated_byte_buffer(token, dst_addr as *const u8, chunk_len, UserAccess::Write)?;
         if src_buf.len() != 1 || dst_buf.len() != 1 {
             return Err(EFAULT);
         }
@@ -625,11 +611,11 @@ pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> isize {
     residency.resize(page_count, 0);
 
     let task = current_task_ref().unwrap();
-    if let Err(errno) = task
-        .process
-        .vm()
-        .lock()
-        .mincore(addr, rounded_len, residency.as_mut_slice())
+    if let Err(errno) =
+        task.process
+            .vm()
+            .lock()
+            .mincore(addr, rounded_len, residency.as_mut_slice())
     {
         return errno;
     }
@@ -681,24 +667,10 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     }
 
     match advice {
-        MADV_NORMAL
-        | MADV_RANDOM
-        | MADV_SEQUENTIAL
-        | MADV_WILLNEED
-        | MADV_DONTNEED
-        | MADV_FREE
-        | MADV_DONTFORK
-        | MADV_DOFORK
-        | MADV_MERGEABLE
-        | MADV_UNMERGEABLE
-        | MADV_HUGEPAGE
-        | MADV_NOHUGEPAGE
-        | MADV_DONTDUMP
-        | MADV_DODUMP
-        | MADV_WIPEONFORK
-        | MADV_KEEPONFORK
-        | MADV_COLD
-        | MADV_PAGEOUT => {
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED | MADV_FREE
+        | MADV_DONTFORK | MADV_DOFORK | MADV_MERGEABLE | MADV_UNMERGEABLE | MADV_HUGEPAGE
+        | MADV_NOHUGEPAGE | MADV_DONTDUMP | MADV_DODUMP | MADV_WIPEONFORK | MADV_KEEPONFORK
+        | MADV_COLD | MADV_PAGEOUT => {
             match current_task_ref()
                 .unwrap()
                 .process

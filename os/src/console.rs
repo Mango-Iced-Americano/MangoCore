@@ -47,6 +47,19 @@ macro_rules! println {
     }
 }
 
+/// Early-boot diagnostics stay enabled on emulators and can be explicitly
+/// restored on 2K1000LA. Production board images omit them entirely.
+#[macro_export]
+macro_rules! boot_trace {
+    ($fmt: literal $(, $($arg: tt)+)?) => {{
+        #[cfg(any(
+            not(feature = "board_2k1000"),
+            feature = "board_bringup_trace"
+        ))]
+        $crate::println!($fmt $(, $($arg)+)?);
+    }}
+}
+
 pub fn log_init() {
     static LOGGER: Logger = Logger;
     log::set_logger(&LOGGER).unwrap();
@@ -58,7 +71,7 @@ pub fn log_init() {
         Some("trace") => LevelFilter::Trace,
         _ => LevelFilter::Off,
     });
-    println!("[kernel] logger inited, level= {:?}", log::max_level());
+    boot_trace!("[kernel] logger inited, level= {:?}", log::max_level());
 }
 
 struct Logger;

@@ -35,3 +35,9 @@ pub type InterruptImpl = riscv::register::scause::Interrupt;
 pub type ExceptionImpl = riscv::register::scause::Exception;
 
 pub fn bootstrap_init() {}
+
+/// Return the Linux-compatible RISC-V ISA-letter bitmap for `AT_HWCAP`.
+pub fn user_hwcap() -> usize {
+    // IMAFDC, with the bit position derived from the extension letter.
+    0x112d
+}

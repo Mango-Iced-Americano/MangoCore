@@ -3,11 +3,15 @@ title: "测试体系 (Testing Framework)"
 category: testing
 status: stable
 author: MangoCore Team
-last_update: 2026-07-10
+last_update: 2026-07-20
 tags: [testing, ktest, cargo-test, LTP, regression, tap]
 ---
 
 # 测试体系
+
+## CI 评分门禁
+
+`develop` 和 `main` 共用 [统一 CI 与 L5 评分](ci-scoring.md)：Docker Compose 中串行执行 RV64/LA64 QEMU，归档原始日志，并按 11 个 musl/glibc 组输出结构化评分 JSON。
 
 ## 概述
 
@@ -18,6 +22,16 @@ MangoCore 采用五层自底向上的测试体系，从纯逻辑单元测试到�
 所有测试命令在 **Docker 容器内**执行（`make docker` 进入）：
 
 ```bash
+# 根目录评测入口会按需 provision；全新容器首次运行可能使用网络
+cd /app
+make all
+
+# 直接运行 OS、用户态或架构目标前，先只读检查
+make toolchain-preflight
+
+# 手动/direct workflow 仍可显式准备工具链
+make toolchain-setup
+
 # ── L1: 纯逻辑单元测试（秒级，host 上跑）──
 cd /app
 cargo test -p mango-kernel-core   # 148 个测试
@@ -59,6 +73,7 @@ LTP/lmbench/official /L5 →  判断系统兼容性、性能和比赛表现
 | L3 页分配器测试 | `os/src/kernel_tests/mm.rs` |
 | ktest 启动分支 | `os/src/main.rs` (`add_initproc()` 之后) |
 | ktest Makefile 目标 | `os/Makefile`, `os/make/rv64.mk`, `os/make/la64.mk` |
+| 工具链固定与检查 | `rust-toolchain.toml`, `scripts/rustup-{setup,preflight}.sh` |
 | L5 测试配置与注入 | `os_test.conf`, `os/Makefile` (`conf-inject`) |
 | L5 测试脚本 | `scripts/run_full_test.py` |
 
@@ -108,7 +123,7 @@ make check-fast
 | 格式检查 | `cargo fmt --check` | ~2s |
 | Lint | `cargo clippy` | ~30s |
 
-编译器在 `os/` 目录内通过 Makefile 执行，自动处理双架构的工具链切换和 `lang_items.rs` 变体拷贝。
+编译器由根 `rust-toolchain.toml` 固定。根目录 `make all` 会派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在需要时执行 setup 和 preflight。直接 OS、用户态或架构目标只做 preflight，不自动安装 Rustup 工具链。
 
 ---
 
@@ -428,6 +443,13 @@ L5 发现 bug 后：先尝试写 L4 regression → 如涉及内核机制，进�
 > `make docker` 进入容器。
 
 ```bash
+# 根目录评测构建，按需 setup/preflight，首次容器可能联网
+make all
+# 直接 OS、用户态或架构目标前运行，只读，不下载/安装
+make toolchain-preflight
+# 手动/direct workflow 的显式准备入口
+make toolchain-setup
+
 # L0 — 静态检查
 make check-fast
 

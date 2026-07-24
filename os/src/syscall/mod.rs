@@ -2,16 +2,14 @@
 mod syscall_macro;
 
 pub mod errno;
-pub mod fs;
 mod flock;
+pub mod fs;
 mod process;
 mod syscall_id;
 pub mod utils;
 
 use crate::fs::eventfd::sys_eventfd2;
-use crate::fs::eventpoll::{
-    sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait, sys_epoll_pwait2,
-};
+use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait, sys_epoll_pwait2};
 use crate::fs::iov::IOVec;
 use crate::fs::timerfd::{
     sys_timerfd_create, sys_timerfd_gettime, sys_timerfd_settime, TimerFdSpec,
@@ -21,17 +19,16 @@ use core::convert::TryFrom;
 use flock::*;
 use fs::*;
 use log::{error, info};
-pub use process::{
-    CloneFlags, posix_mq_msg_default, posix_mq_msg_max, posix_mq_msgsize_default,
-    posix_mq_msgsize_max, posix_mq_queues_max, set_posix_mq_msg_default,
-    set_posix_mq_msg_max, set_posix_mq_msgsize_default, set_posix_mq_msgsize_max,
-    set_posix_mq_queues_max, set_sysv_msg_next_id, set_sysv_msgmax, set_sysv_msgmnb,
-    set_sysv_msgmni, set_sysv_sem_limits, shm_clone_attachments, shm_detach_process,
-    sysv_msg_next_id, sysv_msg_proc_snapshot, sysv_msgmax, sysv_msgmnb, sysv_msgmni,
-    sysv_sem_limits, sysv_sem_proc_snapshot, sysv_shmall, sysv_shm_proc_snapshot,
-    sysv_shmmax, sysv_shmmni,
-};
 use process::*;
+pub use process::{
+    posix_mq_msg_default, posix_mq_msg_max, posix_mq_msgsize_default, posix_mq_msgsize_max,
+    posix_mq_queues_max, set_posix_mq_msg_default, set_posix_mq_msg_max,
+    set_posix_mq_msgsize_default, set_posix_mq_msgsize_max, set_posix_mq_queues_max,
+    set_sysv_msg_next_id, set_sysv_msgmax, set_sysv_msgmnb, set_sysv_msgmni, set_sysv_sem_limits,
+    shm_clone_attachments, shm_detach_process, sysv_msg_next_id, sysv_msg_proc_snapshot,
+    sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits, sysv_sem_proc_snapshot,
+    sysv_shm_proc_snapshot, sysv_shmall, sysv_shmmax, sysv_shmmni, CloneFlags,
+};
 use syscall_id::*;
 
 #[cfg(feature = "riscv")]
@@ -229,6 +226,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETPEERNAME => "getpeername",
         SYSCALL_SENDTO => "sendto",
         SYSCALL_RECVFROM => "recvfrom",
+        SYSCALL_SENDMSG => "sendmsg",
+        SYSCALL_RECVMSG => "recvmsg",
+        SYSCALL_SENDMMSG => "sendmmsg",
         SYSCALL_SETSOCKOPT => "setsockopt",
         SYSCALL_GETSOCKOPT => "getsockopt",
         SYSCALL_SBRK => "sbrk",
@@ -308,6 +308,11 @@ use crate::{
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
     let _syscall_start = crate::task::perf::perf_time_now();
+    let _runtime_exec_start = if matches!(syscall_id, SYSCALL_EXECVE | SYSCALL_EXECVEAT) {
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME)
+    } else {
+        0
+    };
     if crate::trace::TRACING_ON.load(core::sync::atomic::Ordering::Relaxed) {
         crate::trace::event(
             syscall_id as u64,
@@ -375,23 +380,41 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
     let ret = match syscall_id {
         SYSCALL_SETXATTR => sys_setxattr(
-            args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3], args[4] as u32,
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4] as u32,
         ),
         SYSCALL_LSETXATTR => sys_lsetxattr(
-            args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3], args[4] as u32,
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4] as u32,
         ),
         SYSCALL_FSETXATTR => sys_fsetxattr(
-            args[0], args[1] as *const u8, args[2] as *const u8, args[3], args[4] as u32,
+            args[0],
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4] as u32,
         ),
         SYSCALL_GETXATTR => sys_getxattr(
-            args[0] as *const u8, args[1] as *const u8, args[2] as *mut u8, args[3],
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
         ),
         SYSCALL_LGETXATTR => sys_lgetxattr(
-            args[0] as *const u8, args[1] as *const u8, args[2] as *mut u8, args[3],
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
         ),
-        SYSCALL_FGETXATTR => sys_fgetxattr(
-            args[0], args[1] as *const u8, args[2] as *mut u8, args[3],
-        ),
+        SYSCALL_FGETXATTR => {
+            sys_fgetxattr(args[0], args[1] as *const u8, args[2] as *mut u8, args[3])
+        }
         SYSCALL_LISTXATTR => sys_listxattr(args[0] as *const u8, args[1] as *mut u8, args[2]),
         SYSCALL_LLISTXATTR => sys_llistxattr(args[0] as *const u8, args[1] as *mut u8, args[2]),
         SYSCALL_FLISTXATTR => sys_flistxattr(args[0], args[1] as *mut u8, args[2]),
@@ -432,7 +455,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MKNODAT => sys_mknodat(args[0], args[1] as *const u8, args[2] as u32, args[3]),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0], args[1] as *const u8, args[2] as u32),
         SYSCALL_SYMLINKAT => sys_symlinkat(args[0] as *const u8, args[1], args[2] as *const u8),
-        SYSCALL_LINKAT => sys_linkat(args[0], args[1] as *const u8, args[2], args[3] as *const u8, args[4] as u32),
+        SYSCALL_LINKAT => sys_linkat(
+            args[0],
+            args[1] as *const u8,
+            args[2],
+            args[3] as *const u8,
+            args[4] as u32,
+        ),
         SYSCALL_UMOUNT2 => sys_umount2(args[0] as *const u8, args[1] as u32),
         SYSCALL_MOUNT => sys_mount(
             args[0] as *const u8,
@@ -446,7 +475,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_CHROOT => sys_chroot(args[0] as *const u8),
         SYSCALL_FCHDIR => sys_fchdir(args[0]),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1] as u32),
-        SYSCALL_FCHMODAT => sys_fchmodat(args[0], args[1] as *const u8, args[2] as u32, args[3] as u32),
+        SYSCALL_FCHMODAT => sys_fchmodat(
+            args[0],
+            args[1] as *const u8,
+            args[2] as u32,
+            args[3] as u32,
+        ),
         SYSCALL_FCHOWNAT => sys_fchownat(
             args[0],
             args[1] as *const u8,
@@ -535,9 +569,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
         ),
         SYSCALL_CAPGET => sys_capget(args[0] as *mut CapUserHeader, args[1] as *mut CapUserData),
-        SYSCALL_CAPSET => {
-            sys_capset(args[0] as *mut CapUserHeader, args[1] as *const CapUserData)
-        }
+        SYSCALL_CAPSET => sys_capset(args[0] as *mut CapUserHeader, args[1] as *const CapUserData),
         SYSCALL_PERSONALITY => sys_personality(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as u32),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as u32),
@@ -588,9 +620,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *const ITimerVal,
             args[2] as *mut ITimerVal,
         ),
-        SYSCALL_TIMER_CREATE => {
-            sys_timer_create(args[0], args[1] as *const SigeventHeader, args[2] as *mut i32)
-        }
+        SYSCALL_TIMER_CREATE => sys_timer_create(
+            args[0],
+            args[1] as *const SigeventHeader,
+            args[2] as *mut i32,
+        ),
         SYSCALL_TIMER_GETTIME => sys_timer_gettime(args[0], args[1] as *mut ITimerSpec),
         SYSCALL_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
         SYSCALL_TIMER_SETTIME => sys_timer_settime(
@@ -611,9 +645,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0] as *mut crate::timer::TimeVal,
             args[1] as *mut crate::timer::TimeZone,
         ),
-        SYSCALL_SET_TIME_OF_DAY => {
-            sys_settimeofday(args[0] as *const TimeVal, args[1] as *const crate::timer::TimeZone)
-        }
+        SYSCALL_SET_TIME_OF_DAY => sys_settimeofday(
+            args[0] as *const TimeVal,
+            args[1] as *const crate::timer::TimeZone,
+        ),
         SYSCALL_ADJTIMEX => sys_adjtimex(args[0] as *mut Timex),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1] as *mut Timex),
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
@@ -710,17 +745,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SETUID => sys_setuid(args[0]),
         SYSCALL_SETREUID => sys_setreuid(args[0], args[1]),
         SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
-        SYSCALL_GETRESUID => {
-            sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32)
-        }
+        SYSCALL_GETRESUID => sys_getresuid(
+            args[0] as *mut u32,
+            args[1] as *mut u32,
+            args[2] as *mut u32,
+        ),
         SYSCALL_GETGID => sys_getgid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SETGID => sys_setgid(args[0]),
         SYSCALL_SETREGID => sys_setregid(args[0], args[1]),
         SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
-        SYSCALL_GETRESGID => {
-            sys_getresgid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32)
-        }
+        SYSCALL_GETRESGID => sys_getresgid(
+            args[0] as *mut u32,
+            args[1] as *mut u32,
+            args[2] as *mut u32,
+        ),
         SYSCALL_SETFSUID => sys_setfsuid(args[0]),
         SYSCALL_SETFSGID => sys_setfsgid(args[0]),
         SYSCALL_GETGROUPS => sys_getgroups(args[0], args[1] as *mut u32),
@@ -729,7 +768,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETPRIORITY => sys_getpriority(args[0], args[1]),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut Sysinfo),
-        SYSCALL_MQ_OPEN => sys_mq_open(args[0] as *const u8, args[1] as u32, args[2] as u32, args[3]),
+        SYSCALL_MQ_OPEN => sys_mq_open(
+            args[0] as *const u8,
+            args[1] as u32,
+            args[2] as u32,
+            args[3],
+        ),
         SYSCALL_MQ_UNLINK => sys_mq_unlink(args[0] as *const u8),
         SYSCALL_MQ_TIMEDSEND => {
             sys_mq_timedsend(args[0], args[1], args[2], args[3] as u32, args[4])
@@ -774,9 +818,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             sys_remap_file_pages(args[0], args[1], args[2], args[3], args[4])
         }
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
-        SYSCALL_PKEY_MPROTECT => {
-            sys_pkey_mprotect(args[0], args[1], args[2], args[3] as isize)
-        }
+        SYSCALL_PKEY_MPROTECT => sys_pkey_mprotect(args[0], args[1], args[2], args[3] as isize),
         SYSCALL_PKEY_ALLOC => sys_pkey_alloc(args[0], args[1]),
         SYSCALL_PKEY_FREE => sys_pkey_free(args[0] as isize),
         SYSCALL_PSELECT6 => sys_pselect(
@@ -874,22 +916,23 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         SYSCALL_SOCK_SHUTDOWN => sys_sock_shutdown(args[0] as u32, args[1] as u32),
         SYSCALL_SENDMSG => sys_sendmsg(args[0] as u32, args[1], args[2] as u32),
+        SYSCALL_SENDMMSG => sys_sendmmsg(args[0] as u32, args[1], args[2] as u32, args[3] as u32),
         SYSCALL_RECVMSG => sys_recvmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_BPF => sys_bpf(args[0] as u32, args[1], args[2]),
         SYSCALL_DELETE_MODULE => sys_delete_module(args[0] as *const u8, args[1] as u32),
         SYSCALL_SHUTDOWN => sys_shutdown(),
-        SYSCALL_EXT4_COUNTERS => crate::fs::ext4::counters::sys_ext4_counters(args[0], args[1], args[2]),
+        SYSCALL_EXT4_COUNTERS => {
+            crate::fs::ext4::counters::sys_ext4_counters(args[0], args[1], args[2])
+        }
         SYSCALL_SCHED_SETPARAM => sys_sched_setparam(args[0], args[1] as *const SchedParam),
         SYSCALL_SCHED_SETSCHEDULER => {
             sys_sched_setscheduler(args[0], args[1], args[2] as *const SchedParam)
         }
         SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0]),
         SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0], args[1] as *mut SchedParam),
-        SYSCALL_SCHED_SETAFFINITY => {
-            sys_sched_setaffinity(args[0], args[1], args[2] as *const u8)
-        }
+        SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0], args[1], args[2] as *const u8),
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
         SYSCALL_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0]),
         SYSCALL_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
@@ -963,9 +1006,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             ),
         }
     }
-    let _syscall_ticks = crate::task::perf::perf_time_now() - _syscall_start;
-    crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
-    if syscall_id == 173 {
+    let _syscall_ticks = crate::task::perf::perf_time_now().wrapping_sub(_syscall_start);
+    if _syscall_start != 0 {
+        crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
+    }
+    if _runtime_exec_start != 0 && matches!(syscall_id, SYSCALL_EXECVE | SYSCALL_EXECVEAT) {
+        let runtime_ticks =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME)
+                .wrapping_sub(_runtime_exec_start);
+        crate::task::perf::record_runtime_exec_cost(syscall_id, runtime_ticks);
+    }
+    if _syscall_start != 0 && syscall_id == 173 {
         crate::task::perf::record_getppid_cost(_syscall_ticks);
     }
     crate::task::perf::record_syscall(syscall_id, ret);
@@ -994,6 +1045,9 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
     if flags & !GRND_ALLOWED != 0 {
         return errno::EINVAL;
     }
+    if flags & GRND_RANDOM != 0 && flags & GRND_INSECURE != 0 {
+        return errno::EINVAL;
+    }
     if buflen == 0 {
         return 0;
     }
@@ -1009,13 +1063,22 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
     };
     let mut user = UserBuffer::new(buffers);
     let mut offset = 0usize;
-    let mut chunk = [0u8; 64];
+    let mut chunk = [0u8; 256];
     while offset < buflen {
         let copy_len = core::cmp::min(chunk.len(), buflen - offset);
-        crate::random::fill_random(&mut chunk[..copy_len]);
+        let result = if flags & GRND_INSECURE != 0 {
+            crate::random::fill_insecure_bytes(&mut chunk[..copy_len])
+        } else {
+            crate::random::fill_bytes(&mut chunk[..copy_len])
+        };
+        if result.is_err() {
+            crate::random::wipe_sensitive(&mut chunk);
+            return errno::EAGAIN;
+        }
         user.write_at(offset, &chunk[..copy_len]);
         offset += copy_len;
     }
+    crate::random::wipe_sensitive(&mut chunk);
     buflen as isize
 }
 

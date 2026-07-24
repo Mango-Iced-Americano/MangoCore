@@ -1,0 +1,7 @@
+2026-07-16T12:05:45.360372Z __PERF_BEGIN_persist_shell_path-1-1f7ccf02__
+2026-07-16T12:05:46.288135Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_persist_shell_path-1-1f7ccf02_TRACE_OFF__
+2026-07-16T12:05:47.671669Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_persist_shell_path-1-1f7ccf02__
+2026-07-16T12:05:47.710022Z /usr/bin/persist-shell
+2026-07-16T12:05:47.716362Z __PERF_WORK_END_persist_shell_path-1-1f7ccf02__
+2026-07-16T12:05:47.721181Z __PERF_ACK_persist_shell_path-1-1f7ccf02_WORK__
+2026-07-16T12:05:48.175423Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_persist_shell_path-1-1f7ccf02__ rc=0

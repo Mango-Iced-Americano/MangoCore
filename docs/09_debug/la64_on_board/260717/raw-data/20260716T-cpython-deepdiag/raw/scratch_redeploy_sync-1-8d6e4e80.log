@@ -1,0 +1,9 @@
+2026-07-16T07:57:14.905802Z __PERF_BEGIN_scratch_redeploy_sync-1-8d6e4e80__
+2026-07-16T07:57:15.850544Z [1m[33mMangoCore[0m:[1m[34m/scratch[0m# __PERF_ACK_scratch_redeploy_sync-1-8d6e4e80_TRACE_OFF__
+2026-07-16T07:57:17.874474Z [1m[33mMangoCore[0m:[1m[34m/scratch[0m# __PERF_WORK_BEGIN_scratch_redeploy_sync-1-8d6e4e80__
+2026-07-16T07:57:18.519652Z 1e5fe9146daaa91b2ab8220186cfbb43b9a4321b4cccc1da9581b26066fc8a4c  cpython_benchmark.sh
+2026-07-16T07:57:18.528522Z ac261a9afaa54495a4831ef480b55c64f7f35837a69e29852cb83ca38b555426  bench/README.md
+2026-07-16T07:57:18.540151Z 2c54c012fe1decd0c365b018b54a677e4152fa2e8fecb97457f530070b3102bc  bench/bm_nbody.py
+2026-07-16T07:57:18.546423Z __PERF_WORK_END_scratch_redeploy_sync-1-8d6e4e80__
+2026-07-16T07:57:18.551202Z __PERF_ACK_scratch_redeploy_sync-1-8d6e4e80_WORK__
+2026-07-16T07:57:19.027152Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_scratch_redeploy_sync-1-8d6e4e80__ rc=0

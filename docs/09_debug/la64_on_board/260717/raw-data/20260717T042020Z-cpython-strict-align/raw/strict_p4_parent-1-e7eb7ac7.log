@@ -1,0 +1,6 @@
+2026-07-17T04:23:12.502992Z __PERF_BEGIN_strict_p4_parent-1-e7eb7ac7__
+2026-07-17T04:23:13.412824Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_strict_p4_parent-1-e7eb7ac7_TRACE_OFF__
+2026-07-17T04:23:15.252622Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_strict_p4_parent-1-e7eb7ac7__
+2026-07-17T04:23:15.332463Z __PERF_WORK_END_strict_p4_parent-1-e7eb7ac7__
+2026-07-17T04:23:15.336726Z __PERF_ACK_strict_p4_parent-1-e7eb7ac7_WORK__
+2026-07-17T04:23:15.779916Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_strict_p4_parent-1-e7eb7ac7__ rc=0

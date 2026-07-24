@@ -28,12 +28,18 @@ pub fn asid_alloc() -> u16 {
     let mut map = ASID_BITMAP.lock();
     let start = ASID_NEXT_HINT.load(Ordering::Relaxed);
     for offset in 0..(USER_ASID_MAX - USER_ASID_BASE) {
-        let id = USER_ASID_BASE + ((start - USER_ASID_BASE + offset) % (USER_ASID_MAX - USER_ASID_BASE));
+        let id =
+            USER_ASID_BASE + ((start - USER_ASID_BASE + offset) % (USER_ASID_MAX - USER_ASID_BASE));
         let word = (id as usize) / 64;
         let bit = (id as usize) % 64;
         if map[word] & (1u64 << bit) == 0 {
             map[word] |= 1u64 << bit;
-            ASID_NEXT_HINT.store(id.wrapping_add(1).min(USER_ASID_MAX - 1).max(USER_ASID_BASE), Ordering::Relaxed);
+            ASID_NEXT_HINT.store(
+                id.wrapping_add(1)
+                    .min(USER_ASID_MAX - 1)
+                    .max(USER_ASID_BASE),
+                Ordering::Relaxed,
+            );
             return id;
         }
     }

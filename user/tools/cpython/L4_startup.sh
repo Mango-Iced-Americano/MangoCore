@@ -18,7 +18,20 @@ run_py_test() {
 }
 
 # Source the environment
-. /tools/tests/cpython/run_cpython.sh
+if [ -z "${CPYTHON_TEST_ROOT:-}" ]; then
+    CPYTHON_TEST_ROOT=$(CDPATH= cd "$(/bin/busybox dirname "$0")" && pwd)
+fi
+. "$CPYTHON_TEST_ROOT/run_cpython.sh"
+
+# Test 0: The boot-time global launchers must provide an ordinary shell UX.
+echo "[CPYTHON GLOBAL] test: python3/python commands"
+if /usr/bin/python3 --version && /usr/bin/python -S -c 'print("global-python-command-ok")'; then
+    echo "[CPYTHON GLOBAL] python3/python commands PASS"
+else
+    rc=$?
+    echo "[CPYTHON GLOBAL] python3/python commands FAIL (exit=$rc)"
+    fail=1
+fi
 
 # Test 1: Binary executes and prints version
 echo "[CPYTHON L4] test: python3 --version"

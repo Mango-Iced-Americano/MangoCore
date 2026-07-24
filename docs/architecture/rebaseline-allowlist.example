@@ -1,0 +1,15 @@
+# Copy this file to .omo/rebaseline-allowlist.txt before Repository Rebaseline execution.
+# Each pre-existing dirty or untracked path must have exactly one line:
+# <relative-path> <SHA-256> <disposition>
+#
+# disposition is one of:
+#   outside-rebaseline  - fingerprint-protected; this work must never be staged,
+#                         edited, deleted, or committed by the rebaseline.
+#   reconcile-before    - overlaps a planned rebaseline file; its owner must
+#                         commit or otherwise resolve it independently before
+#                         rebaseline execution begins. It cannot be absorbed.
+#
+# Populate SHA-256 from the exact current file bytes. For deleted paths, use
+# the literal SHA-256 `DELETED` and reconcile them before any task that would
+# touch their former path. The owner must review and explicitly approve the
+# completed .omo/rebaseline-allowlist.txt.

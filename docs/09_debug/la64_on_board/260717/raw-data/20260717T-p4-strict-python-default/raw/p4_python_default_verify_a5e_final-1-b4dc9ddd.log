@@ -1,0 +1,23 @@
+2026-07-17T13:17:10.589147Z __PERF_BEGIN_p4_python_default_verify_a5e_final-1-b4dc9ddd__
+2026-07-17T13:17:11.595615Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_python_default_verify_a5e_final-1-b4dc9ddd_TRACE_OFF__
+2026-07-17T13:17:13.337838Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_python_default_verify_a5e_final-1-b4dc9ddd__
+2026-07-17T13:17:14.819534Z [persist-python-verify] interpreter=/persist/python-runtime/releases/a420d79ddb07/usr/bin/python3
+2026-07-17T13:17:14.826457Z [persist-python-verify] root=/persist/python-runtime/releases/a420d79ddb07
+2026-07-17T13:17:17.161896Z [persist-python-verify] normal_site=pass
+2026-07-17T13:17:19.218088Z [persist-python-verify] self_exec=/persist/python-runtime/releases/a420d79ddb07/usr/bin/python3
+2026-07-17T13:17:28.440778Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-17T13:17:34.997913Z Traceback (most recent call last):
+2026-07-17T13:17:35.026695Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-17T13:17:35.034964Z     [1;31mimport smolagents[0m; print("[persist-python-verify] smolagents=" + smolagents.__file__)
+2026-07-17T13:17:35.036111Z     [1;31m^^^^^^^^^^^^^^^^^[0m
+2026-07-17T13:17:35.050067Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py"[0m, line [35m19[0m, in [35m<module>[0m
+2026-07-17T13:17:35.052872Z     [1;31mfrom .agent_types import *[0m  # noqa: I001
+2026-07-17T13:17:35.056447Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-17T13:17:35.070689Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/agent_types.py"[0m, line [35m23[0m, in [35m<module>[0m
+2026-07-17T13:17:35.070881Z     import PIL.Image
+2026-07-17T13:17:35.076451Z [1;35mModuleNotFoundError[0m: [35mNo module named 'PIL'[0m
+2026-07-17T13:17:35.403692Z [persist-python-verify] smolagents_import=failed-exposed
+2026-07-17T13:17:35.414562Z [persist-python-verify] PASS policy=p4-strict-align-v1 release=/persist/python-runtime/releases/a420d79ddb07
+2026-07-17T13:17:35.422657Z __PERF_WORK_END_p4_python_default_verify_a5e_final-1-b4dc9ddd__
+2026-07-17T13:17:35.428587Z __PERF_ACK_p4_python_default_verify_a5e_final-1-b4dc9ddd_WORK__
+2026-07-17T13:17:35.979066Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_python_default_verify_a5e_final-1-b4dc9ddd__ rc=0

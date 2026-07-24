@@ -1,0 +1,20 @@
+artifact_sha256=dbdb27d10477d91ce9e1c1d9ff98241a6b2e9810800c1d72b847c0f8ce2853dd
+target=/persist/pyperf/r/s-dbdb27d10477
+strict_p4_mount command_bytes=203 wrapped_bytes=395
+/bin/busybox grep -Eq '^/persist[[:space:]]+/persist[[:space:]]+ext4[[:space:]]+rw([,[:space:]])' /proc/mounts&&test ! -L /persist&&test -w /persist&&test "$(blockdev --getsize64 /dev/sda4)" = 4294967296
+strict_p4_parent command_bytes=100 wrapped_bytes=295
+mkdir -p /persist/pyperf/r&&test "$(/bin/busybox readlink -f /persist/pyperf/r)" = /persist/pyperf/r
+strict_runtime_prepare command_bytes=219 wrapped_bytes=432
+test ! -e /persist/pyperf/r/s-dbdb27d10477&&rm -rf /persist/pyperf/r/.s-dbdb27d10477.staging&&rm -f /persist/pyperf/r/.cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz.part&&mkdir /persist/pyperf/r/.s-dbdb27d10477.staging
+strict_runtime_download command_bytes=249 wrapped_bytes=465
+/tools/tests/cpython/python3-wrapper.sh -c 'import urllib.request as u;u.urlretrieve('"'"'http://192.168.9.10:8009/cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz'"'"','"'"'/persist/pyperf/r/.cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz.part'"'"')'
+strict_runtime_sha256 command_bytes=180 wrapped_bytes=390
+printf '%s\n' 'dbdb27d10477d91ce9e1c1d9ff98241a6b2e9810800c1d72b847c0f8ce2853dd  /persist/pyperf/r/.cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz.part'|/bin/busybox sha256sum -c -
+strict_runtime_extract command_bytes=254 wrapped_bytes=467
+/tools/tests/cpython/python3-wrapper.sh -c 'import tarfile as t;t.open('"'"'/persist/pyperf/r/.cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz.part'"'"','"'"'r:xz'"'"').extractall('"'"'/persist/pyperf/r/.s-dbdb27d10477.staging'"'"',filter='"'"'data'"'"')'
+strict_runtime_smoke command_bytes=65 wrapped_bytes=272
+/persist/pyperf/r/.s-dbdb27d10477.staging/strict_runtime_smoke.sh
+strict_runtime_publish command_bytes=133 wrapped_bytes=346
+test ! -e /persist/pyperf/r/s-dbdb27d10477&&sync&&mv /persist/pyperf/r/.s-dbdb27d10477.staging /persist/pyperf/r/s-dbdb27d10477&&sync
+strict_runtime_cleanup command_bytes=76 wrapped_bytes=289
+rm -f /persist/pyperf/r/.cpython-la64-strict-3.14.5-dbdb27d10477.tar.xz.part

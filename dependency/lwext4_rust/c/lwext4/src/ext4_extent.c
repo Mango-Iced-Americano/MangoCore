@@ -1701,10 +1701,15 @@ static bool ext4_ext_more_to_rm(struct ext4_extent_path *path, ext4_lblk_t to)
 	return true;
 }
 
+static ext4_lblk_t
+ext4_ext_next_allocated_block(struct ext4_extent_path *path);
+
 int ext4_extent_remove_space(struct ext4_inode_ref *inode_ref, ext4_lblk_t from,
 			     ext4_lblk_t to)
 {
 	struct ext4_extent_path *path = NULL;
+	struct ext4_extent *ex;
+	ext4_lblk_t next;
 	int ret = EOK;
 	int32_t depth = ext_depth(inode_ref->inode);
 	int32_t i;
@@ -1718,12 +1723,37 @@ int ext4_extent_remove_space(struct ext4_inode_ref *inode_ref, ext4_lblk_t from,
 		goto out;
 	}
 
-	bool in_range = IN_RANGE(from, to_le32(path[depth].extent->first_block),
-				 ext4_ext_get_actual_len(path[depth].extent));
+	/*
+	 * ext4_find_extent() returns the closest extent at or before @from.
+	 * For a sparse file, @from may therefore be in a hole before that
+	 * extent or between it and the next allocated extent.  Removal still
+	 * has work to do in both cases: normalize @from to the first allocated
+	 * block inside the requested range instead of treating the hole as EOF.
+	 */
+	ex = path[depth].extent;
+	if (from < to_le32(ex->first_block)) {
+		if (to_le32(ex->first_block) > to)
+			goto out;
 
-	if (!in_range) {
-		ret = EOK;
-		goto out;
+		from = to_le32(ex->first_block);
+	} else if (!IN_RANGE(from, to_le32(ex->first_block),
+				    ext4_ext_get_actual_len(ex))) {
+		next = ext4_ext_next_allocated_block(path);
+		if (next == EXT_MAX_BLOCKS || next > to)
+			goto out;
+
+		ret = ext4_find_extent(inode_ref, next, &path, 0);
+		if (ret != EOK)
+			goto out;
+
+		ex = path[depth].extent;
+		if (!ex || !IN_RANGE(next, to_le32(ex->first_block),
+					     ext4_ext_get_actual_len(ex))) {
+			ret = EIO;
+			goto out;
+		}
+
+		from = next;
 	}
 
 	/* If we do remove_space inside the range of an extent */
@@ -1772,8 +1802,10 @@ int ext4_extent_remove_space(struct ext4_inode_ref *inode_ref, ext4_lblk_t from,
 			if (leaf_to > to)
 				leaf_to = to;
 
-			ext4_ext_remove_leaf(inode_ref, path, leaf_from,
-					     leaf_to);
+			ret = ext4_ext_remove_leaf(inode_ref, path, leaf_from,
+					   leaf_to);
+			if (ret != EOK)
+				goto out;
 			ext4_ext_drop_refs(inode_ref, path + i, 0);
 			i--;
 			continue;

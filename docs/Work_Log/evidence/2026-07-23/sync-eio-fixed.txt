@@ -1,0 +1,30 @@
+another_ext4 alloc_lock experiment — NOT ACCEPTED
+
+Submodule commit: 89eef4f416c2b824d30e7a07f0e9e52828b65440
+Change: dependency/another_ext4/src/ext4/alloc.rs,
+transaction_alloc_direct_range(): added
+    let _alloc_guard = self.alloc_lock.lock();
+
+Container: pxy-mangocore-os-dev-1
+Container ID: fba442b0132ed67fdd5b17f188e8323464b131951a1c6349e52b0082809c711d
+Mount: /home/pxy/projects/MangoCore -> /app
+
+Build command:
+docker exec pxy-mangocore-os-dev-1 bash -c "cd /app/os && make rv64-kernel-build-only EXTRA_FEATURES=perf_diag LOG=error 2>&1 | tail -3"
+Build result: PASS
+
+QEMU setup:
+docker exec pxy-mangocore-os-dev-1 bash -c "cd /app/os && make conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_iozone.conf"
+QEMU command:
+docker exec pxy-mangocore-os-dev-1 bash -c "cd /app/os && make rv64-run EXTRA_FEATURES=perf_diag LOG=error DISK_RV=/app/empty-disk.img"
+Config: mode=run; mask=0x010; diag=1
+
+Result: FAIL — 29 matches of
+"another_ext4: global sync failed for filesystem [0-9]+: EIO"
+in sync-eio-qemu-output.log. The required count is zero. The musl group completed,
+but glibc iozone was killed by its 480-second guest timeout, so this is not valid
+green evidence.
+
+Artifacts:
+- sync-eio-config-inject.log
+- sync-eio-qemu-output.log

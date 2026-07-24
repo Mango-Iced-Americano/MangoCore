@@ -1,0 +1,13 @@
+2026-07-16T08:19:39.238435Z __PERF_BEGIN_string_body_off-1-fd3c6c52__
+2026-07-16T08:19:40.139043Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_ACK_string_body_off-1-fd3c6c52_TRACE_OFF__
+2026-07-16T08:19:42.592261Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_string_body_off-1-fd3c6c52__
+2026-07-16T08:19:42.976410Z [CPYTHON BENCH START] bm_string tmp=/scratch/cpython-bench/run-230
+2026-07-16T08:20:08.567305Z CPYTHON_BENCH_JSON {"machine":"la64","perf_counter_monotonic":true,"perf_counter_resolution_seconds":1e-08,"pycache_prefix":"","pyperformance_revision":"216cbeb5f828b8ee5864f9bb52f3563d2d1a4846","python_executable":"/tools/tests/cpython/usr/bin/python3","python_version":"3.14.5 (main, Jun 20 2026, 00:29:39) [GCC 15.2.0]","runs":1,"schema":1,"source_repository":"Mango-Iced-Americano/cpython-tests","source_revision":"c50669c2b59a7d6d979fb12aea42c1b508ed3765","suite_sha256":"e45f6e332e3d34ddde2f574a8890e6e8eae38c3feebf51f4a114a1c45a69f184","target_stats":false,"tmpdir":"/scratch/cpython-bench/run-230/tmp","type":"environment","warmups":0}
+2026-07-16T08:20:08.575149Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","schema":1,"type":"start"}
+2026-07-16T08:20:20.473481Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","elapsed_ns":11328026330,"elapsed_seconds":11.32802633,"max_rss":23544,"result":"3827289","sample":1,"schema":1,"sys_seconds":8.520565,"type":"sample","user_seconds":2.7868379999999995}
+2026-07-16T08:20:20.494982Z CPYTHON_BENCH_JSON {"benchmark":"bm_string","cv_percent":0.0,"max_ns":11328026330,"mean_ns":11328026330,"median_ns":11328026330,"min_ns":11328026330,"samples":1,"schema":1,"status":"pass","type":"summary","warmups":0}
+2026-07-16T08:20:20.505596Z CPYTHON_BENCH_JSON {"benchmarks":1,"failed":0,"passed":1,"schema":1,"status":"pass","type":"suite_summary"}
+2026-07-16T08:20:20.898436Z [CPYTHON BENCH END] bm_string PASS rc=0
+2026-07-16T08:20:21.007413Z __PERF_WORK_END_string_body_off-1-fd3c6c52__
+2026-07-16T08:20:21.009960Z __PERF_ACK_string_body_off-1-fd3c6c52_WORK__
+2026-07-16T08:20:21.443216Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_string_body_off-1-fd3c6c52__ rc=0

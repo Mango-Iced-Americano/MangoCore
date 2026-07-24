@@ -31,6 +31,37 @@ fn read_counter(c: &core::sync::atomic::AtomicUsize) -> usize {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  STATS: one-shot boot milestones (elapsed raw ticks from Rust entry)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_boot_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(320);
+    let _ = writeln!(s, "clock_freq_hz={}", crate::hal::get_clock_freq());
+    macro_rules! counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    counter!("boot_console_ticks", BOOT_CONSOLE_TICKS);
+    counter!("boot_mm_ticks", BOOT_MM_TICKS);
+    counter!("boot_drivers_ticks", BOOT_DRIVERS_TICKS);
+    counter!("boot_net_ticks", BOOT_NET_TICKS);
+    counter!("boot_fs_ticks", BOOT_FS_TICKS);
+    counter!("boot_initproc_ticks", BOOT_INITPROC_TICKS);
+    counter!("boot_scheduler_ticks", BOOT_SCHEDULER_TICKS);
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  STATS: Task Queue
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -247,7 +278,7 @@ fn stats_syscall_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(384);
+    let mut s = String::with_capacity(512);
     let _ = writeln!(
         s,
         "syscall_total={}",
@@ -288,6 +319,38 @@ fn stats_syscall_content(
         "ecall_trap_cost_ticks_max={}",
         read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_MAX)
     );
+    let _ = writeln!(
+        s,
+        "user_unaligned_traps={}",
+        read_counter(&crate::task::perf::USER_UNALIGNED_TRAPS)
+    );
+    let _ = writeln!(
+        s,
+        "user_unaligned_ticks_total={}",
+        read_counter(&crate::task::perf::USER_UNALIGNED_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "user_unaligned_ticks_max={}",
+        read_counter(&crate::task::perf::USER_UNALIGNED_TICKS_MAX)
+    );
+    macro_rules! unaligned_counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    unaligned_counter!("user_unaligned_load_2", USER_UNALIGNED_LOAD_2);
+    unaligned_counter!("user_unaligned_load_4", USER_UNALIGNED_LOAD_4);
+    unaligned_counter!("user_unaligned_load_8", USER_UNALIGNED_LOAD_8);
+    unaligned_counter!("user_unaligned_store_2", USER_UNALIGNED_STORE_2);
+    unaligned_counter!("user_unaligned_store_4", USER_UNALIGNED_STORE_4);
+    unaligned_counter!("user_unaligned_store_8", USER_UNALIGNED_STORE_8);
+    unaligned_counter!("user_unaligned_float_loads", USER_UNALIGNED_FLOAT_LOADS);
+    unaligned_counter!("user_unaligned_float_stores", USER_UNALIGNED_FLOAT_STORES);
     write_str(offset, len, buf, &s)
 }
 
@@ -379,7 +442,7 @@ fn stats_heap_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1024);
     let (free, total, _, _, _) = crate::mm::heap_stats();
     let _ = writeln!(
         s,
@@ -428,6 +491,75 @@ fn stats_heap_content(
         "heap_dealloc_scan_steps_total={}",
         read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL)
     );
+    let _ = writeln!(
+        s,
+        "page_faults={}",
+        read_counter(&crate::task::perf::PAGE_FAULTS)
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_ticks_total={}",
+        read_counter(&crate::task::perf::PAGEFAULT_TIME_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_time_count={}",
+        read_counter(&crate::task::perf::PAGEFAULT_TIME_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_hits={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_free_hits={}",
+        read_counter(&crate::task::perf::FRAME_FREE_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_TIME_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_time_count={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_TIME_COUNT)
+    );
+    write_str(offset, len, buf, &s)
+}
+
+fn stats_anon_unmap_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(768);
+    macro_rules! counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    counter!("anon_unmap_calls_total", ANON_UNMAP_CALLS_TOTAL);
+    counter!("anon_unmap_range_calls", ANON_UNMAP_RANGE_CALLS);
+    counter!("anon_unmap_area_calls", ANON_UNMAP_AREA_CALLS);
+    counter!("anon_unmap_requested_pages_total", ANON_UNMAP_REQUESTED_PAGES_TOTAL);
+    counter!("anon_unmap_resident_pages_total", ANON_UNMAP_RESIDENT_PAGES_TOTAL);
+    counter!("anon_unmap_active_before_total", ANON_UNMAP_ACTIVE_BEFORE_TOTAL);
+    counter!("anon_unmap_active_before_max", ANON_UNMAP_ACTIVE_BEFORE_MAX);
+    counter!("anon_unmap_retain_scan_steps_total", ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL);
+    counter!("anon_unmap_ticks_total", ANON_UNMAP_TICKS_TOTAL);
+    counter!("anon_unmap_ticks_max", ANON_UNMAP_TICKS_MAX);
+    counter!("anon_unmap_errors_total", ANON_UNMAP_ERRORS_TOTAL);
+    counter!("anon_unmap_pages_le_16", ANON_UNMAP_PAGES_LE_16);
+    counter!("anon_unmap_pages_le_256", ANON_UNMAP_PAGES_LE_256);
+    counter!("anon_unmap_pages_le_4096", ANON_UNMAP_PAGES_LE_4096);
+    counter!("anon_unmap_pages_gt_4096", ANON_UNMAP_PAGES_GT_4096);
     write_str(offset, len, buf, &s)
 }
 
@@ -483,22 +615,19 @@ fn stats_resource_content(
     let _ = writeln!(s, "pc_entries_live={}", pc_ent_live);
     let _ = writeln!(s, "pc_entries_holes={}", pc_ent_holes);
     // lwext4 metadata probes (embedded here so old initproc can see them)
-    #[cfg(feature = "ext4_lwext4_backend")]
-    {
-        let lw = crate::fs::ext4_lwext4::counters::snapshot();
-        let _ = writeln!(s, "lwext4_find={}", lw.0);
-        let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
-        let _ = writeln!(s, "lwext4_meta_cold={}", lw.7);
-        let _ = writeln!(s, "lwext4_meta_hot={}", lw.8);
-        let _ = writeln!(s, "lwext4_file_open={}", lw.10);
-        let _ = writeln!(s, "lwext4_file_close={}", lw.13);
-        let _ = writeln!(s, "lwext4_dir_entries={}", lw.15);
-        let _ = writeln!(s, "lwext4_create_pre={}", lw.17);
-        let _ = writeln!(s, "lwext4_ensure_pc={}", lw.20);
-        let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
-        let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
-        let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
-    }
+    let lw = crate::fs::ext4_lwext4::counters::snapshot();
+    let _ = writeln!(s, "lwext4_find={}", lw.0);
+    let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
+    let _ = writeln!(s, "lwext4_meta_cold={}", lw.7);
+    let _ = writeln!(s, "lwext4_meta_hot={}", lw.8);
+    let _ = writeln!(s, "lwext4_file_open={}", lw.10);
+    let _ = writeln!(s, "lwext4_file_close={}", lw.13);
+    let _ = writeln!(s, "lwext4_dir_entries={}", lw.15);
+    let _ = writeln!(s, "lwext4_create_pre={}", lw.17);
+    let _ = writeln!(s, "lwext4_ensure_pc={}", lw.20);
+    let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
+    let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
+    let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
     // mount/bind probes
     let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
     let _ = writeln!(s, "mnt_propagate={}", mnt.0);
@@ -586,6 +715,11 @@ fn stats_features_content(
     let _ = writeln!(s, "perf_stats={}", cfg!(feature = "perf_stats"));
     let _ = writeln!(s, "perf_diag={}", cfg!(feature = "perf_diag"));
     let _ = writeln!(s, "heap_trace={}", cfg!(feature = "heap_trace"));
+    let _ = writeln!(
+        s,
+        "stats_profile={}",
+        crate::task::perf::STATS_PROFILE.load(Ordering::Relaxed)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -614,6 +748,43 @@ fn stats_on_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, Sy
         _ => return Err(SyscallErr::EINVAL),
     };
     crate::task::perf::STATS_ON.store(val, Ordering::Relaxed);
+    Ok(buf.len())
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: profile (rw) — select one bounded diagnostic counter group
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_profile_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let profile = crate::task::perf::STATS_PROFILE.load(Ordering::Relaxed);
+    let name = match profile {
+        crate::task::perf::STATS_PROFILE_CORE => "core",
+        crate::task::perf::STATS_PROFILE_MEMORY_IO => "memory_io",
+        crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME => "network_runtime",
+        crate::task::perf::STATS_PROFILE_ALL => "all",
+        _ => "unknown",
+    };
+    let value = format!("{} {}\n", name, profile);
+    write_str(offset, len, buf, &value)
+}
+
+fn stats_profile_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+    let command = core::str::from_utf8(buf)
+        .map_err(|_| SyscallErr::EINVAL)?
+        .trim();
+    let profile = match command {
+        "core" | "1" => crate::task::perf::STATS_PROFILE_CORE,
+        "memory_io" | "2" => crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        "network_runtime" | "4" => crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME,
+        "all" | "7" => crate::task::perf::STATS_PROFILE_ALL,
+        _ => return Err(SyscallErr::EINVAL),
+    };
+    crate::task::perf::STATS_PROFILE.store(profile, Ordering::Relaxed);
     Ok(buf.len())
 }
 
@@ -845,7 +1016,7 @@ fn stats_blockio_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(256);
+    let mut s = String::with_capacity(768);
     let _ = writeln!(
         s,
         "blk_vread_reqs={}",
@@ -866,6 +1037,93 @@ fn stats_blockio_content(
         "blk_vwrite_secs={}",
         read_counter(&crate::task::perf::BLK_VWRITE_SECS)
     );
+    let _ = writeln!(
+        s,
+        "sata_read_reqs={}",
+        read_counter(&crate::task::perf::SATA_READ_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "sata_read_bytes={}",
+        read_counter(&crate::task::perf::SATA_READ_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "sata_read_ticks_total={}",
+        read_counter(&crate::task::perf::SATA_READ_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "sata_read_ticks_max={}",
+        read_counter(&crate::task::perf::SATA_READ_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_reqs={}",
+        read_counter(&crate::task::perf::SATA_WRITE_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_bytes={}",
+        read_counter(&crate::task::perf::SATA_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_ticks_total={}",
+        read_counter(&crate::task::perf::SATA_WRITE_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "sata_write_ticks_max={}",
+        read_counter(&crate::task::perf::SATA_WRITE_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "sata_flush_reqs={}",
+        read_counter(&crate::task::perf::SATA_FLUSH_REQS)
+    );
+    let _ = writeln!(
+        s,
+        "sata_flush_ticks_total={}",
+        read_counter(&crate::task::perf::SATA_FLUSH_TICKS_TOTAL)
+    );
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: Network and Python/runtime attribution
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_net_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(768);
+    macro_rules! counter {
+        ($name:literal, $counter:ident) => {
+            let _ = writeln!(
+                s,
+                concat!($name, "={}"),
+                read_counter(&crate::task::perf::$counter)
+            );
+        };
+    }
+    counter!("net_poll_calls", NET_POLL_CALLS);
+    counter!("net_poll_progress", NET_POLL_PROGRESS);
+    counter!("net_poll_lock_busy", NET_POLL_LOCK_BUSY);
+    counter!("net_rx_packets", NET_RX_PACKETS);
+    counter!("net_rx_bytes", NET_RX_BYTES);
+    counter!("net_rx_drops", NET_RX_DROPS);
+    counter!("net_tx_submit_packets", NET_TX_SUBMIT_PACKETS);
+    counter!("net_tx_submit_bytes", NET_TX_SUBMIT_BYTES);
+    counter!("net_tx_drops", NET_TX_DROPS);
+    counter!("runtime_exec_calls", RUNTIME_EXEC_CALLS);
+    counter!("runtime_exec_ticks_total", RUNTIME_EXEC_TICKS_TOTAL);
+    counter!("runtime_openat_calls", RUNTIME_OPENAT_CALLS);
+    counter!("runtime_read_calls", RUNTIME_READ_CALLS);
+    counter!("runtime_mmap_calls", RUNTIME_MMAP_CALLS);
     write_str(offset, len, buf, &s)
 }
 
@@ -880,106 +1138,26 @@ fn stats_ext4_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(768);
-    let _ = writeln!(
-        s,
-        "ext4_map_lblock_calls={}",
-        read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CALLS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_map_lblock_cycles={}",
-        read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CYCLES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_map_cache_hits={}",
-        read_counter(&crate::task::perf::EXT4_MAP_CACHE_HITS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_map_holes={}",
-        read_counter(&crate::task::perf::EXT4_MAP_HOLES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_find_extent_calls={}",
-        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CALLS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_find_extent_cycles={}",
-        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CYCLES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_find_extent_depth={}",
-        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_DEPTH_SUM)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_find_extent_meta_reads={}",
-        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_META_READS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_readpages_calls={}",
-        read_counter(&crate::task::perf::EXT4_PC_READPAGES_CALLS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_readpages_pages={}",
-        read_counter(&crate::task::perf::EXT4_PC_READPAGES_PAGES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_readpages_runs={}",
-        read_counter(&crate::task::perf::EXT4_PC_READPAGES_RUNS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_writepages_calls={}",
-        read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_CALLS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_writepages_pages={}",
-        read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_PAGES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_writepages_runs={}",
-        read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_RUNS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_pc_512b_fallback={}",
-        read_counter(&crate::task::perf::EXT4_PC_512B_FALLBACK_PAGES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_alloc_ensure_calls={}",
-        read_counter(&crate::task::perf::EXT4_ALLOC_ENSURE_CALLS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_alloc_lblocks={}",
-        read_counter(&crate::task::perf::EXT4_ALLOC_LBLOCKS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_alloc_new_blocks={}",
-        read_counter(&crate::task::perf::EXT4_ALLOC_NEW_BLOCKS)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_alloc_cycles={}",
-        read_counter(&crate::task::perf::EXT4_ALLOC_CYCLES)
-    );
-    let _ = writeln!(
-        s,
-        "ext4_direct_write_at_calls={}",
-        read_counter(&crate::task::perf::EXT4_DIRECT_WRITE_AT_CALLS)
-    );
+    let _ = writeln!(s, "ext4_map_lblock_calls={}", read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CALLS));
+    let _ = writeln!(s, "ext4_map_lblock_cycles={}", read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CYCLES));
+    let _ = writeln!(s, "ext4_map_cache_hits={}", read_counter(&crate::task::perf::EXT4_MAP_CACHE_HITS));
+    let _ = writeln!(s, "ext4_map_holes={}", read_counter(&crate::task::perf::EXT4_MAP_HOLES));
+    let _ = writeln!(s, "ext4_find_extent_calls={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CALLS));
+    let _ = writeln!(s, "ext4_find_extent_cycles={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CYCLES));
+    let _ = writeln!(s, "ext4_find_extent_depth={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_DEPTH_SUM));
+    let _ = writeln!(s, "ext4_find_extent_meta_reads={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_META_READS));
+    let _ = writeln!(s, "ext4_pc_readpages_calls={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_CALLS));
+    let _ = writeln!(s, "ext4_pc_readpages_pages={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_PAGES));
+    let _ = writeln!(s, "ext4_pc_readpages_runs={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_RUNS));
+    let _ = writeln!(s, "ext4_pc_writepages_calls={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_CALLS));
+    let _ = writeln!(s, "ext4_pc_writepages_pages={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_PAGES));
+    let _ = writeln!(s, "ext4_pc_writepages_runs={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_RUNS));
+    let _ = writeln!(s, "ext4_pc_512b_fallback={}", read_counter(&crate::task::perf::EXT4_PC_512B_FALLBACK_PAGES));
+    let _ = writeln!(s, "ext4_alloc_ensure_calls={}", read_counter(&crate::task::perf::EXT4_ALLOC_ENSURE_CALLS));
+    let _ = writeln!(s, "ext4_alloc_lblocks={}", read_counter(&crate::task::perf::EXT4_ALLOC_LBLOCKS));
+    let _ = writeln!(s, "ext4_alloc_new_blocks={}", read_counter(&crate::task::perf::EXT4_ALLOC_NEW_BLOCKS));
+    let _ = writeln!(s, "ext4_alloc_cycles={}", read_counter(&crate::task::perf::EXT4_ALLOC_CYCLES));
+    let _ = writeln!(s, "ext4_direct_write_at_calls={}", read_counter(&crate::task::perf::EXT4_DIRECT_WRITE_AT_CALLS));
     write_str(offset, len, buf, &s)
 }
 
@@ -993,39 +1171,33 @@ fn stats_lwext4_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    #[cfg(feature = "ext4_lwext4_backend")]
-    {
-        let lw = crate::fs::ext4_lwext4::counters::snapshot();
-        let mut s = String::with_capacity(512);
-        let _ = writeln!(s, "lwext4_find_calls={}", lw.0);
-        let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
-        let _ = writeln!(s, "lwext4_probe_type_calls={}", lw.2);
-        let _ = writeln!(s, "lwext4_probe_type_cycles={}", lw.3);
-        let _ = writeln!(s, "lwext4_get_inode_id_calls={}", lw.4);
-        let _ = writeln!(s, "lwext4_get_inode_id_enoint={}", lw.5);
-        let _ = writeln!(s, "lwext4_get_inode_id_cycles={}", lw.6);
-        let _ = writeln!(s, "lwext4_metadata_cold={}", lw.7);
-        let _ = writeln!(s, "lwext4_metadata_hot={}", lw.8);
-        let _ = writeln!(s, "lwext4_metadata_cold_cycles={}", lw.9);
-        let _ = writeln!(s, "lwext4_file_open_calls={}", lw.10);
-        let _ = writeln!(s, "lwext4_file_open_cycles={}", lw.11);
-        let _ = writeln!(s, "lwext4_file_size_calls={}", lw.12);
-        let _ = writeln!(s, "lwext4_file_close_calls={}", lw.13);
-        let _ = writeln!(s, "lwext4_file_close_cycles={}", lw.14);
-        let _ = writeln!(s, "lwext4_dir_entries_calls={}", lw.15);
-        let _ = writeln!(s, "lwext4_dir_entries_cycles={}", lw.16);
-        let _ = writeln!(s, "lwext4_create_pre_check={}", lw.17);
-        let _ = writeln!(s, "lwext4_logical_size_calls={}", lw.18);
-        let _ = writeln!(s, "lwext4_logical_size_cycles={}", lw.19);
-        let _ = writeln!(s, "lwext4_ensure_pc_calls={}", lw.20);
-        let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
-        let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
-        let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
-        return write_str(offset, len, buf, &s);
-    }
-
-    #[cfg(not(feature = "ext4_lwext4_backend"))]
-    write_str(offset, len, buf, "lwext4 backend unavailable\n")
+    let lw = crate::fs::ext4_lwext4::counters::snapshot();
+    let mut s = String::with_capacity(512);
+    let _ = writeln!(s, "lwext4_find_calls={}", lw.0);
+    let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
+    let _ = writeln!(s, "lwext4_probe_type_calls={}", lw.2);
+    let _ = writeln!(s, "lwext4_probe_type_cycles={}", lw.3);
+    let _ = writeln!(s, "lwext4_get_inode_id_calls={}", lw.4);
+    let _ = writeln!(s, "lwext4_get_inode_id_enoint={}", lw.5);
+    let _ = writeln!(s, "lwext4_get_inode_id_cycles={}", lw.6);
+    let _ = writeln!(s, "lwext4_metadata_cold={}", lw.7);
+    let _ = writeln!(s, "lwext4_metadata_hot={}", lw.8);
+    let _ = writeln!(s, "lwext4_metadata_cold_cycles={}", lw.9);
+    let _ = writeln!(s, "lwext4_file_open_calls={}", lw.10);
+    let _ = writeln!(s, "lwext4_file_open_cycles={}", lw.11);
+    let _ = writeln!(s, "lwext4_file_size_calls={}", lw.12);
+    let _ = writeln!(s, "lwext4_file_close_calls={}", lw.13);
+    let _ = writeln!(s, "lwext4_file_close_cycles={}", lw.14);
+    let _ = writeln!(s, "lwext4_dir_entries_calls={}", lw.15);
+    let _ = writeln!(s, "lwext4_dir_entries_cycles={}", lw.16);
+    let _ = writeln!(s, "lwext4_create_pre_check={}", lw.17);
+    let _ = writeln!(s, "lwext4_logical_size_calls={}", lw.18);
+    let _ = writeln!(s, "lwext4_logical_size_cycles={}", lw.19);
+    let _ = writeln!(s, "lwext4_ensure_pc_calls={}", lw.20);
+    let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
+    let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
+    let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
+    write_str(offset, len, buf, &s)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1040,8 +1212,8 @@ fn stats_mount_content(
 ) -> Result<usize, SyscallErr> {
     let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
     let lc = crate::fs::vfs::mount::counters::lifecycle_snapshot();
-    let diag_on =
-        crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG.load(core::sync::atomic::Ordering::Relaxed);
+    let diag_on = crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG
+        .load(core::sync::atomic::Ordering::Relaxed);
     let mut s = String::with_capacity(512);
     let _ = writeln!(s, "mount_diag_on={}", if diag_on { 1 } else { 0 });
     let _ = writeln!(s, "mount_propagate_calls={}", mnt.0);
@@ -1058,26 +1230,14 @@ fn stats_mount_content(
     let _ = writeln!(s, "mount_lifecycle_detach={}", lc.2);
     let _ = writeln!(s, "mount_lifecycle_drop={}", lc.3);
     // BackendLifecycle counters
-    let _ = writeln!(
-        s,
-        "lc_new={}",
-        crate::fs::vfs::mount::LC_NEW.load(core::sync::atomic::Ordering::Relaxed)
-    );
-    let _ = writeln!(
-        s,
-        "lc_acquire={}",
-        crate::fs::vfs::mount::LC_ACQUIRE.load(core::sync::atomic::Ordering::Relaxed)
-    );
-    let _ = writeln!(
-        s,
-        "lc_release_dying={}",
-        crate::fs::vfs::mount::LC_RELEASE_DYING.load(core::sync::atomic::Ordering::Relaxed)
-    );
-    let _ = writeln!(
-        s,
-        "lc_drain={}",
-        crate::fs::vfs::mount::LC_DRAIN.load(core::sync::atomic::Ordering::Relaxed)
-    );
+    let _ = writeln!(s, "lc_new={}",
+        crate::fs::vfs::mount::LC_NEW.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(s, "lc_acquire={}",
+        crate::fs::vfs::mount::LC_ACQUIRE.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(s, "lc_release_dying={}",
+        crate::fs::vfs::mount::LC_RELEASE_DYING.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(s, "lc_drain={}",
+        crate::fs::vfs::mount::LC_DRAIN.load(core::sync::atomic::Ordering::Relaxed));
     write_str(offset, len, buf, &s)
 }
 
@@ -1091,7 +1251,9 @@ fn mount_diag_on_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let val = if crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG.load(Ordering::Relaxed) {
+    let val = if crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG
+        .load(Ordering::Relaxed)
+    {
         "1\n"
     } else {
         "0\n"
@@ -1113,55 +1275,18 @@ fn mount_diag_on_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usiz
 //  STATS: Pipe
 // ═══════════════════════════════════════════════════════════════════════
 
-fn stats_pipe_content(
-    _extra: usize,
-    offset: usize,
-    len: usize,
-    buf: &mut [u8],
-) -> Result<usize, SyscallErr> {
+fn stats_pipe_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(384);
     let _ = writeln!(s, "read_calls={}", crate::fs::dev::pipe::pipe_read_calls());
     let _ = writeln!(s, "read_bytes={}", crate::fs::dev::pipe::pipe_read_bytes());
-    let _ = writeln!(
-        s,
-        "read_eagain={}",
-        crate::fs::dev::pipe::pipe_read_eagain()
-    );
-    let _ = writeln!(
-        s,
-        "read_cycles_total={}",
-        crate::fs::dev::pipe::pipe_read_cycles()
-    );
-    let _ = writeln!(
-        s,
-        "read_cycles_max={}",
-        crate::fs::dev::pipe::pipe_read_cycles_max()
-    );
-    let _ = writeln!(
-        s,
-        "write_calls={}",
-        crate::fs::dev::pipe::pipe_write_calls()
-    );
-    let _ = writeln!(
-        s,
-        "write_bytes={}",
-        crate::fs::dev::pipe::pipe_write_bytes()
-    );
-    let _ = writeln!(
-        s,
-        "write_eagain={}",
-        crate::fs::dev::pipe::pipe_write_eagain()
-    );
-    let _ = writeln!(
-        s,
-        "write_cycles_total={}",
-        crate::fs::dev::pipe::pipe_write_cycles()
-    );
-    let _ = writeln!(
-        s,
-        "write_cycles_max={}",
-        crate::fs::dev::pipe::pipe_write_cycles_max()
-    );
+    let _ = writeln!(s, "read_eagain={}", crate::fs::dev::pipe::pipe_read_eagain());
+    let _ = writeln!(s, "read_cycles_total={}", crate::fs::dev::pipe::pipe_read_cycles());
+    let _ = writeln!(s, "read_cycles_max={}", crate::fs::dev::pipe::pipe_read_cycles_max());
+    let _ = writeln!(s, "write_calls={}", crate::fs::dev::pipe::pipe_write_calls());
+    let _ = writeln!(s, "write_bytes={}", crate::fs::dev::pipe::pipe_write_bytes());
+    let _ = writeln!(s, "write_eagain={}", crate::fs::dev::pipe::pipe_write_eagain());
+    let _ = writeln!(s, "write_cycles_total={}", crate::fs::dev::pipe::pipe_write_cycles());
+    let _ = writeln!(s, "write_cycles_max={}", crate::fs::dev::pipe::pipe_write_cycles_max());
     let _ = writeln!(s, "buf_alive={}", crate::fs::dev::pipe::pipe_buf_alive());
     let _ = writeln!(s, "buf_bytes={}", crate::fs::dev::pipe::pipe_buf_bytes());
     write_str(offset, len, buf, &s)
@@ -1192,11 +1317,7 @@ fn stats_syscall_top_content(
     for &(id, count, ticks) in entries.iter().take(20) {
         let name = crate::syscall::syscall_name(id);
         let avg = if count > 0 { ticks / count } else { 0 };
-        let _ = writeln!(
-            s,
-            "{}:{} count:{} ticks:{} avg:{}",
-            id, name, count, ticks, avg
-        );
+        let _ = writeln!(s, "{}:{} count:{} ticks:{} avg:{}", id, name, count, ticks, avg);
     }
     write_str(offset, len, buf, &s)
 }
@@ -1232,66 +1353,18 @@ fn stats_vm_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
-    let _ = writeln!(
-        s,
-        "filemap_fault_frames={}",
-        read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES)
-    );
-    let _ = writeln!(
-        s,
-        "filemap_fault_ticks={}",
-        read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "filemap_private_copy_ticks={}",
-        read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "filemap_map_user_ticks={}",
-        read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "tlb_page_flush_cycles={}",
-        read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES)
-    );
-    let _ = writeln!(
-        s,
-        "tlb_full_flush_cycles={}",
-        read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES)
-    );
-    let _ = writeln!(
-        s,
-        "tlb_activate_cycles={}",
-        read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES)
-    );
-    let _ = writeln!(
-        s,
-        "execve_map_elf_ticks={}",
-        read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "execve_kernel_map_ticks={}",
-        read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "execve_interp_ticks={}",
-        read_counter(&crate::task::perf::EXECVE_INTERP_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "execve_stack_tables_ticks={}",
-        read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS)
-    );
-    let _ = writeln!(
-        s,
-        "execve_teardown_ticks={}",
-        read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS)
-    );
+    let _ = writeln!(s, "filemap_fault_frames={}", read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES));
+    let _ = writeln!(s, "filemap_fault_ticks={}", read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS));
+    let _ = writeln!(s, "filemap_private_copy_ticks={}", read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS));
+    let _ = writeln!(s, "filemap_map_user_ticks={}", read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS));
+    let _ = writeln!(s, "tlb_page_flush_cycles={}", read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES));
+    let _ = writeln!(s, "tlb_full_flush_cycles={}", read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES));
+    let _ = writeln!(s, "tlb_activate_cycles={}", read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES));
+    let _ = writeln!(s, "execve_map_elf_ticks={}", read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS));
+    let _ = writeln!(s, "execve_kernel_map_ticks={}", read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS));
+    let _ = writeln!(s, "execve_interp_ticks={}", read_counter(&crate::task::perf::EXECVE_INTERP_TICKS));
+    let _ = writeln!(s, "execve_stack_tables_ticks={}", read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS));
+    let _ = writeln!(s, "execve_teardown_ticks={}", read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS));
     write_str(offset, len, buf, &s)
 }
 
@@ -1321,6 +1394,12 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
         stats_on_write,
     )?;
     stats_dir.add_writable_file_with_write(
+        "profile",
+        rw_mode,
+        stats_profile_content,
+        stats_profile_write,
+    )?;
+    stats_dir.add_writable_file_with_write(
         "mount_diag_on",
         rw_mode,
         mount_diag_on_content,
@@ -1331,6 +1410,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
         InodeMode::from_bits_truncate(0o200),
         stats_reset_write,
     )?;
+    stats_dir.add_file("boot", ro_mode, stats_boot_content)?;
     stats_dir.add_file("taskq", ro_mode, stats_taskq_content)?;
     stats_dir.add_file("timer", ro_mode, stats_timer_content)?;
     stats_dir.add_file("seccomp", ro_mode, stats_seccomp_content)?;
@@ -1339,8 +1419,10 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("reclaim", ro_mode, stats_reclaim_content)?;
     stats_dir.add_file("tlb", ro_mode, stats_tlb_content)?;
     stats_dir.add_file("heap", ro_mode, stats_heap_content)?;
+    stats_dir.add_file("anon_unmap", ro_mode, stats_anon_unmap_content)?;
     stats_dir.add_file("pagecache", ro_mode, stats_pagecache_content)?;
     stats_dir.add_file("blockio", ro_mode, stats_blockio_content)?;
+    stats_dir.add_file("net", ro_mode, stats_net_content)?;
     stats_dir.add_file("ext4", ro_mode, stats_ext4_content)?;
     stats_dir.add_file("resource", ro_mode, stats_resource_content)?;
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;

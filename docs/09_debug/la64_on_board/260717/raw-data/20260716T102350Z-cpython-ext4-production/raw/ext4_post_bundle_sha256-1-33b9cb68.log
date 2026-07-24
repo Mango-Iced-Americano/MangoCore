@@ -1,0 +1,7 @@
+2026-07-16T12:01:54.170260Z __PERF_BEGIN_ext4_post_bundle_sha256-1-33b9cb68__
+2026-07-16T12:01:55.117688Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_ext4_post_bundle_sha256-1-33b9cb68_TRACE_OFF__
+2026-07-16T12:01:56.652355Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_ext4_post_bundle_sha256-1-33b9cb68__
+2026-07-16T12:01:56.770797Z 5059b61e4b241f35ef2f46a859df1848dd056e3a08d2127f7b2bd340a9abdb4e  /persist/pyperf/b.zip
+2026-07-16T12:01:56.777272Z __PERF_WORK_END_ext4_post_bundle_sha256-1-33b9cb68__
+2026-07-16T12:01:56.782442Z __PERF_ACK_ext4_post_bundle_sha256-1-33b9cb68_WORK__
+2026-07-16T12:01:57.267329Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_ext4_post_bundle_sha256-1-33b9cb68__ rc=0

@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-17
+> Coverage: 2026-04-01 to 2026-07-22
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -41,6 +41,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | LTP 修复与 FS 性能优化 | 2026-06-10 至 2026-06-16 | Oracle, Sisyphus | LTP syscall 兼容性修复、FS hot path 优化、PageCache fast path、UserBuffer fast path | 修复多批 LTP 失败项，提升 lmbench/IO 性能 |
 | 性能退化调试系统 | 2026-06-19 至 2026-06-20 | Oracle, Sisyphus, specialized agents | `perf_diag` counters、`drift_window`、lmbench 漂移分析、buddy allocator bitmap guard | 建立自动漂移分析脚本与诊断 counters，定位并修复 allocator 退化 |
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
+| LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
+| Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 
 ## 4. 详细使用场景
 
@@ -212,45 +214,23 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Oracle 结合 opt-in 逐用例 counter delta 与 PageCache registry 生命周期，定位 inode number 复用导致新文件继承旧 fully-valid 页面；随后将诊断收敛为有界 QEMU log，而非无关的 report 落盘链路。
 - Verification: Docker 串行 RV64/LA64 build 通过；RV64 focused QEMU 从 1 PASS/3 FAIL 变为 4 PASS/0 FAIL。
 
-### Case 7: another_ext4 PageCache 生命周期与 EOF 发布顺序
+### Case 7: LA64 mmap arena 边界与 trap-context 窗口修复
 
-- Evidence: `docs/Work_Log/2026-07-20.md`、`docs/Work_Log/evidence/2026-07-20/another-wave1-eof-{baseline,red,green}-rv64-ktest.log`。
-- AI tools: Sisyphus, Oracle, GPT-5.6-terra。
-- Problem: another_ext4 的弱 PageCache 索引会丢弃未写回脏页；并且 `logical_size` 在 `PageCache::write()` 的脏页节流之后才发布，强制早写回时会丢失非对齐 EOF 扩展的数据。
-- AI contribution: Sisyphus 组织独立 ownership 与 EOF-order toggle；Oracle 审核无环 ownership 和 copy-after callback 边界；最终实现活跃 inode 的强缓存所有权与复制/valid 发布后的 EOF callback。
-- Verification: Docker RV64 focused QEMU 从受控 2/3 RED 恢复为 3/3 GREEN；RV64/LA64 another_ext4 kernel build 均通过。
+- Evidence: `docs/Work_Log/2026-07-21.md`；RED `docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`；最终 PASS `docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`
+- AI roles: Sisyphus 负责任务编排、证据整理和文档修订；Oracle 负责根因与边界审查。
+- Problem: `USR_MMAP_END == TRAMPOLINE` 使半开 mmap arena 错误地覆盖 `[TRAP_CONTEXT_BASE, TRAMPOLINE)`，固定映射请求可能在 unmap 前触及 trap-context window。安全非固定 red 测试记录 `mmap accepted trap-context slot-2 hint`，即 `not ok 2 mmap_edge_cases`。
+- AI contribution: 协助核对 `SIGNAL_TRAMPOLINE → TRAMPOLINE` 布局、one-based TID 槽位公式、mmap arena 半开范围和固定映射相交检查语义。
+- Human action: 维护者依据源码、contracts 和 Docker/QEMU 输出将 exclusive end 修正为 `TRAP_CONTEXT_BASE`，并在普通 mmap 与 SysV shm mmap 中于 unmap 前拒绝 LA64 `MAP_FIXED`、`MAP_FIXED_NOREPLACE` 相交请求。
+- Verification: RV64 → LA64 按串行顺序完成 preflight、contracts、build 和 regression；两者均为 TAP `1..6`，各有 6 个 `ok`，包含 `ok 2 mmap_edge_cases` 和 `ok 6 clone_vm_second_slot`。LA64 精确分类器为 `STATE=PASS STATUS=0`。十个源码输入 pre/post SHA-256 一致，且 source → ELF → CPIO → kernel 严格新鲜。补充证据进一步将既有 QEMU 日志绑定到真实 `/regression` ELF；Oracle 最终验收通过。该结果不外推为 full LTP 或 basic 全量覆盖。
 
-### Case 8: PageCache 后端重入与写入可见性
+### Case 8: Canonical normal run facade 一次性 setup 审查
 
-- Evidence: `docs/Work_Log/2026-07-20.md`、`docs/Work_Log/evidence/2026-07-20/page-cache-{visibility-red-rv64-ktest,userbuffer-green-rv64-ktest}.log`。
-- AI tools: Sisyphus, Explore, Oracle, GPT-5.6-terra。
-- Problem: `entries` 锁跨越后端读取会在同 cache 重入时死锁；进一步审查发现写入 payload 前的 Dirty 页可能被读取或写回，且 batch prefetch 可覆盖重入赢家。
-- AI contribution: Sisyphus 编排确定性 RED 回归和无锁发布；Oracle 拒绝首版修复并定位写入可见性与短 UserBuffer 失败回滚缺口，推动以 `Loading` lease 和突变前预校验完成修复。
-- Verification: Docker 串行 RV64/LA64 builds 通过；RV64 focused PageCache ktest 达到 4/4 GREEN，Oracle 最终 GO。
-
-### Case 9: ext4 A/B runner 的 QEMU console framing gate
-
-- Evidence: `docs/Work_Log/2026-07-22.md`、`docs/Work_Log/evidence/2026-07-22/ext4-backend-ab-la64-lwext4-la64-lwext4-readiness-crlf-20260722T0820Z/`。
-- AI tools: Sisyphus, Oracle, GPT-5.6-terra。
-- Problem: 真实 guest 已完成 iozone 并输出 backend/workload-success，但 colored delimiter 和 CRLF 行尾使 fail-closed parser 错判样本失败。
-- AI contribution: Sisyphus 用持久 QEMU 原始字节复现；三路 Oracle 审核确认只在消费边界删除单个终止 CR，并要求保留锚定 identity、顺序与 adversarial fixture 约束。
-- Verification: Docker shell self-test 与私有 LA64 lwext4 单样本均通过；结论限于 baseline readiness，未宣称 A/B 性能 parity。
-
-### Case 10: another_ext4 generation 同步与批量读回归
-
-- Evidence: `docs/Work_Log/2026-07-23.md`。
-- AI tools: Oracle, GPT-5.6-terra。
-- Problem: 布尔 `size_dirty` 可在 size commit 期间吞掉并发写入；批量 `read_pages()` staging 路径使缓存命中读吞吐下降；direct-range 零填充在真实数据写入前额外执行同步 flush。
-- AI contribution: Oracle 分别给出 generation/CAS 提交协议、回退默认逐页读路径和延后零填充 flush 的最小修复建议；实现后保留直接范围零填充的覆盖写与最终 sync 持久化屏障。
-- Verification: Docker 串行 RV64/LA64 kernel build 通过。
-
-### Case 11: another_ext4 VFS 符号链接创建桥接
-
-- Evidence: `docs/Work_Log/2026-07-24.md`、`docs/Work_Log/evidence/2026-07-24/symlink-ktest-qemu-output.log`。
-- AI tools: Oracle, GPT-5.6-terra。
-- Problem: VFS bridge 的 `create()` 仅支持普通文件和目录；APK 创建共享库 SONAME 符号链接时收到 `EINVAL`，导致 LTP 依赖库安装失败。
-- AI contribution: Oracle 指出 bridge 拒绝 `FileType::SymLink`，并确认依赖库提供原子初始化目标后再发布目录项的 `symlink_with_owner_and_attr()` API；实现将 VFS symlink 直接桥接到该 API，并注册已有的短/长目标 remount 回归测试。
-- Verification: Docker RV64/LA64 kernel build 均通过；RV64 another_ext4 KTest 14/14 通过，含两个 symlink persistence 测试。
+- Evidence: `docs/Work_Log/2026-07-22.md`。
+- AI tools: Sisyphus, Oracle。
+- Problem: root generic `run` 同时把 logo/preflight 声明为 prerequisites，并在 recipe 中递归调用它们；一次 run 因而重复执行两个 setup 动作。
+- AI contribution: Oracle 通过 dry-run 审查定位重复调用，并要求将一次性副作用和 `-j8` invalid-input behavior 写入 contract。
+- Human action: root `run` 保留一次直接 prerequisite，移除递归 setup 调用，并以 target-scoped `.NOTPARALLEL` 保持 `validate-run → print-logo → toolchain-preflight` 顺序。
+- Verification: normal-run、toolchain、source-purity、layering 与 root facade contracts 均通过；RV64/LA64 dry-run 各有一次 logo、一次 root preflight 与一次 OS dispatch；无效 `-j8` 输入无 setup 或 arch-run 输出。
 
 ## 6. 质量控制与验证方式
 
@@ -286,9 +266,6 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `fd735048` | Judge docs | `Ultraworked with Sisyphus`; `Co-authored-by: Sisyphus` | 新增 Technical Report 和 Engineering Casebook |
 | 2026-06-29 | `81a24d2a` | Documentation fact-check | `Oracle-reviewed fixes`; `Co-authored-by: Sisyphus` | 修复多处文档事实问题 |
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
-| 2026-07-20 | 未提交（工作树） | another_ext4 PageCache lifecycle / EOF ordering | Sisyphus 编排受控 RED→GREEN；Oracle 审核 callback 时序 | 修复脏页所有权与早写回观察陈旧 EOF |
-| 2026-07-23 | 未提交（工作树） | another_ext4 sync/read/direct-range | Oracle-identified generation race、批量读回归和中间 flush | 消除丢失的 size update，恢复逐页读，延后零填充 flush |
-| 2026-07-24 | `fe974c87` | another_ext4 symlink VFS bridge | Oracle root-cause analysis | APK library SONAME symlink creation and 14/14 KTest pass |
 
 ## 8. Work_Log 证据表
 
@@ -303,10 +280,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:1455-1658` | Timer subsystem | 记录 timer deadline / one-shot / timekeeping 修复与测试 |
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
-| `docs/Work_Log/2026-07-20.md` | another_ext4 PageCache lifecycle / EOF ordering | 记录受控 ownership 与 early-writeback toggle、Oracle 审核及 RV64 3/3、双架构构建证据 |
-| `docs/Work_Log/2026-07-22.md` | ext4 A/B console framing gate | 记录 Oracle 审核 ANSI/CRLF normalization、私有 LA64 readiness evidence 与 parity 边界 |
-| `docs/Work_Log/2026-07-23.md` | another_ext4 generation / read / direct-range | 记录 Oracle 定位的 size 同步竞态、批量读性能回归与直接范围 flush 屏障 |
-| `docs/Work_Log/2026-07-24.md` | another_ext4 symlink VFS bridge | 记录 Oracle 定位的 VFS `SymLink` 缺口、双架构构建和 RV64 14/14 KTest 证据 |
+| `docs/Work_Log/2026-07-21.md`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-artifact-binding-supplement-20260721T063550+0800/` | LA64 mmap arena 边界与 trap-context 窗口 | 记录旧范围导致的非固定 mmap RED、最终 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)` 修正、固定映射拒绝规则、RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`、真实 `/regression` ELF 绑定及 Oracle 最终验收 |
+| `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 
 ## 9. 交互记录与留痕方式
 

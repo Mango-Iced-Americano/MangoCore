@@ -1,7 +1,4 @@
 use crate::fs::ext4::ext4fs::EXT4_REGISTRY;
-use crate::fs::ext4_another::sync_all_instances;
-#[cfg(feature = "ext4_another_backend")]
-use crate::fs::ext4_another::shutdown_all_instances;
 use crate::fs::flush_all_page_caches;
 use crate::hal::shutdown;
 use crate::mm::{copy_to_user_array, translated_str};
@@ -21,13 +18,13 @@ const CAP_SYSLOG: usize = 34;
 static SYSLOG_READ_ALL_CLEARED: AtomicBool = AtomicBool::new(false);
 
 pub fn sys_shutdown() -> isize {
-    info!("[sys_shutdown] flushing page caches...");
-    flush_all_page_caches();
-    info!("[sys_shutdown] syncing another_ext4 instances...");
-    sync_all_instances();
     #[cfg(feature = "ext4_another_backend")]
-    shutdown_all_instances();
-    info!("[sys_shutdown] flushing legacy ext4 instances...");
+    {
+        crate::fs::ext4_another::shutdown_all_instances();
+    }
+    info!("[sys_shutdown] flushing page caches and ext4 metadata...");
+    flush_all_page_caches();
+    info!("[sys_shutdown] flushing all ext4 instances...");
     let mut guard = EXT4_REGISTRY.lock();
     let live: alloc::vec::Vec<_> = guard.iter().filter_map(|w| w.upgrade()).collect();
     guard.retain(|w| w.strong_count() > 0);
@@ -35,7 +32,15 @@ pub fn sys_shutdown() -> isize {
     for ext4fs in &live {
         ext4fs.flush_metadata_cache();
     }
-    info!("[sys_shutdown] done, halting");
+    info!("[sys_shutdown] ext4 metadata cache flushed");
+    info!("[sys_shutdown] committing and detaching filesystem backends...");
+    if let Err(error) = crate::fs::vfs::mount::shutdown_all_backends() {
+        log::error!(
+            "[sys_shutdown] one or more filesystem backends failed to shut down: {:?}",
+            error
+        );
+    }
+    info!("[sys_shutdown] halting");
     shutdown()
 }
 

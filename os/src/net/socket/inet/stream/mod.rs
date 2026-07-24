@@ -36,13 +36,92 @@ use crate::{
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
-use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use self::inner::{
     with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::{BoundInner, PortManager};
 use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
+
+#[cfg(feature = "net_perf_diag")]
+const TCP_RECV_PERF_REPORT_INTERVAL_SECS: usize = 2;
+#[cfg(feature = "net_perf_diag")]
+const TCP_RECV_PERF_TIME_CHECK_MASK: usize = 0x1f;
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_EAGAIN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_ZERO: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_REQUESTED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static TCP_RECV_PERF_LAST_REPORT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "net_perf_diag")]
+fn record_tcp_recv_perf(requested: usize, result: &Result<isize, SyscallErr>) {
+    TCP_RECV_PERF_CALLS.fetch_add(1, Ordering::Relaxed);
+    TCP_RECV_PERF_REQUESTED.fetch_add(requested, Ordering::Relaxed);
+    match result {
+        Ok(bytes) if *bytes > 0 => {
+            TCP_RECV_PERF_BYTES.fetch_add(*bytes as usize, Ordering::Relaxed);
+        }
+        Ok(_) => {
+            TCP_RECV_PERF_ZERO.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(SyscallErr::EAGAIN) => {
+            TCP_RECV_PERF_EAGAIN.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {}
+    }
+
+    let calls = TCP_RECV_PERF_CALLS.load(Ordering::Relaxed);
+    if calls & TCP_RECV_PERF_TIME_CHECK_MASK != 0 {
+        return;
+    }
+    let now = crate::hal::get_time();
+    let frequency = crate::hal::get_clock_freq().max(1);
+    let previous = TCP_RECV_PERF_LAST_REPORT.load(Ordering::Relaxed);
+    if previous == 0 {
+        let _ = TCP_RECV_PERF_LAST_REPORT.compare_exchange(
+            0,
+            now,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        return;
+    }
+    let elapsed_ticks = now.wrapping_sub(previous);
+    if elapsed_ticks < frequency.saturating_mul(TCP_RECV_PERF_REPORT_INTERVAL_SECS) {
+        return;
+    }
+    if TCP_RECV_PERF_LAST_REPORT
+        .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let elapsed_ms = elapsed_ticks.saturating_mul(1000) / frequency;
+    let calls = TCP_RECV_PERF_CALLS.swap(0, Ordering::Relaxed);
+    let bytes = TCP_RECV_PERF_BYTES.swap(0, Ordering::Relaxed);
+    let eagain = TCP_RECV_PERF_EAGAIN.swap(0, Ordering::Relaxed);
+    let zero = TCP_RECV_PERF_ZERO.swap(0, Ordering::Relaxed);
+    let requested = TCP_RECV_PERF_REQUESTED.swap(0, Ordering::Relaxed);
+    println!(
+        "[net-perf][tcp-rx] dt_ms={} calls={} bytes={} kib_s={} avg_req={} eagain={} zero={}",
+        elapsed_ms,
+        calls,
+        bytes,
+        bytes.saturating_mul(1000) / elapsed_ms.max(1) / 1024,
+        requested / calls.max(1),
+        eagain,
+        zero
+    );
+}
+
 /// TCP Socket —— 对外表现为 Socket trait
 pub struct TcpSocket {
     pub inner: Mutex<Inner>,
@@ -166,10 +245,12 @@ impl TcpSocket {
     }
 
     /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
-    pub fn update_io_events(&self) {
-        // NET_INTERFACE.try_poll();
+    pub fn update_io_events(&self) -> (usize, usize) {
+        let previous = self.pollee.load(Ordering::Acquire);
         let inner = self.inner.lock();
         inner.update_io_events(&self.pollee);
+        let current = self.pollee.load(Ordering::Acquire);
+        (previous, current)
     }
 
     /// 唤醒所有等待队列（无差别，仅在 shutdown/close 时使用）
@@ -182,50 +263,69 @@ impl TcpSocket {
         );
         self.connect_waiters
             .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
-        self.accept_waiters
-            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP);
+        self.accept_waiters.notify_events_all(
+            EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
+        );
     }
 
     /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
     /// 用于 poll 后的批量唤醒，避免无差别唤醒造成的活锁（connect 在 SynSent 被反复唤醒）。
     pub fn wake_if_ready(&self) {
-        // 先同步 pollee 缓存的 IO 事件
-        self.update_io_events();
-        let events = self.pollee.load(Ordering::Acquire);
+        // EventWaitQueue callbacks are edge notifications.  Publish only bits
+        // that became ready in this refresh; repeatedly notifying every socket
+        // that remains writable would turn EPOLLET back into level-triggered
+        // polling and can keep Tokio's reactor permanently runnable.
+        let (previous, events) = self.update_io_events();
+        let became_ready = events & !previous;
 
         // accept 等待者：Listening 收到了新连接
-        if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits() != 0 {
+        let accept_events = EPollEvent::from_bits_truncate(
+            became_ready & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
+        );
+        if !accept_events.is_empty() {
             self.accept_waiters
-                .notify_events_all_if_unlocked(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+                .notify_events_all_if_unlocked(accept_events);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
-        if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits() != 0
-        {
-            self.connect_waiters.notify_events_all_if_unlocked(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP,
-            );
+        let connect_events = EPollEvent::from_bits_truncate(
+            became_ready
+                & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits(),
+        );
+        if !connect_events.is_empty() {
+            self.connect_waiters
+                .notify_events_all_if_unlocked(connect_events);
         }
 
-        // recv 等待者：有数据可读或对端关闭
-        if events
-            & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
-            != 0
-        {
-            self.recv_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP,
-                1,
-            );
+        // recv 等待者：有数据可读、对端关闭或 socket 出错。通知载荷只能
+        // 包含本次真实边沿；把整个候选掩码传下去会在普通 EPOLLIN 上伪造
+        // EPOLLRDHUP，使 Tokio 将连接永久标记为 read-closed。
+        let recv_events = EPollEvent::from_bits_truncate(
+            became_ready
+                & (EPollEvent::EPOLLIN
+                    | EPollEvent::EPOLLRDNORM
+                    | EPollEvent::EPOLLRDHUP
+                    | EPollEvent::EPOLLHUP
+                    | EPollEvent::EPOLLERR)
+                    .bits(),
+        );
+        if !recv_events.is_empty() {
+            self.recv_waiters
+                .notify_events_at_most_if_unlocked(recv_events, 1);
         }
 
-        // send 等待者：可发送或写端已 shutdown（shutdown 时 send 会返回 EPIPE）
-        if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits() != 0
-            || self.write_shutdown.load(Ordering::Acquire)
-        {
-            self.send_waiters.notify_events_at_most_if_unlocked(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
-                1,
-            );
+        // send 等待者：发送缓冲从不可写转为可写，或 socket 关闭/出错。
+        let send_events = EPollEvent::from_bits_truncate(
+            became_ready
+                & (EPollEvent::EPOLLOUT
+                    | EPollEvent::EPOLLWRNORM
+                    | EPollEvent::EPOLLHUP
+                    | EPollEvent::EPOLLERR)
+                    .bits(),
+        );
+        if !send_events.is_empty() {
+            self.send_waiters
+                .notify_events_at_most_if_unlocked(send_events, 1);
         }
     }
 
@@ -376,8 +476,7 @@ impl Socket for TcpSocket {
         match new_inner.listen(BACKLOG_SIZE as usize) {
             Ok(listening) => {
                 let listen_addr = listening.listen_addr();
-                let ifindex =
-                    crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
+                let ifindex = crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
                 if let Some(&handle) = listening.handles.first() {
                     self.bound
                         .lock()
@@ -447,11 +546,15 @@ impl Socket for TcpSocket {
         let bound_ifindex_capture = *self.bound_ifindex.lock();
         match new_inner.connect(remote_endpoint, bound_ifindex_capture) {
             Ok(connecting) => {
-                let ifindex = bound_ifindex_capture
-                    .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr)));
-                self.bound
-                    .lock()
-                    .bind(connecting.handle, ifindex, Some(connecting.local.addr), connecting.local.port);
+                let ifindex = bound_ifindex_capture.unwrap_or_else(|| {
+                    crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr))
+                });
+                self.bound.lock().bind(
+                    connecting.handle,
+                    ifindex,
+                    Some(connecting.local.addr),
+                    connecting.local.port,
+                );
                 *inner = Inner::Connecting(connecting);
                 drop(inner);
                 // 做一次非阻塞状态检查
@@ -598,9 +701,9 @@ impl Socket for TcpSocket {
         let mut fast_ifindex: u32 = 0;
 
         let accepted_bound = if let Inner::Established(ref est) = connected_inner {
-            if let Some(binding) = NET_INTERFACE.inner_handler(|inner_ref| {
-                inner_ref.bindings.get(&est.handle).copied()
-            }).flatten()
+            if let Some(binding) = NET_INTERFACE
+                .inner_handler(|inner_ref| inner_ref.bindings.get(&est.handle).copied())
+                .flatten()
             {
                 fast_route = Some(est.handle);
                 fast_ifindex = binding.ifindex;
@@ -645,11 +748,9 @@ impl Socket for TcpSocket {
 
         let task = current_task().unwrap();
         let files_ref = task.process.files();
-    let mut fd_table = files_ref.lock();
+        let mut fd_table = files_ref.lock();
         let old_cloexec = fd_table.get_cloexec(sockfd as usize);
-        let vf = vfs::File::new_without_open(
-            socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,
-        );
+        let vf = vfs::File::new_without_open(socket_file, FileFlags::O_RDWR, vfs::FileType::Socket);
         let new_fd = fd_table
             .alloc_fd(vf, old_cloexec)
             .map_err(|_| SyscallErr::EMFILE)?;
@@ -724,6 +825,7 @@ impl Socket for TcpSocket {
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
         let inner = self.inner.lock();
         let result = inner.shutdown(how);
+        drop(inner);
         if result.is_ok() {
             match how {
                 0 => self.read_shutdown.store(true, Ordering::Release), // SHUT_RD
@@ -733,6 +835,10 @@ impl Socket for TcpSocket {
                     self.write_shutdown.store(true, Ordering::Release); // SHUT_RDWR
                 }
             }
+            // shutdown is itself the state transition.  Do not rely on a later
+            // network poll to repeat a level-like notification: EPOLLET users
+            // and blocked send/recv calls must be woken immediately.
+            self.wake_wait_queues();
         }
         result
     }
@@ -768,7 +874,11 @@ impl Socket for TcpSocket {
         match iface {
             Some(iface) => {
                 *self.bound_ifindex.lock() = Some(iface.nic_id() as u32);
-                log::info!("[TcpSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                log::info!(
+                    "[TcpSocket] bound to device {} (ifindex={})",
+                    ifname,
+                    iface.nic_id()
+                );
                 Ok(0)
             }
             None => Err(SyscallErr::ENODEV),
@@ -828,42 +938,45 @@ impl Socket for TcpSocket {
             }
         }
         if self.read_shutdown.load(Ordering::Acquire) {
-            return Ok(0);
+            let ret = Ok(0);
+            #[cfg(feature = "net_perf_diag")]
+            record_tcp_recv_perf(buf.len(), &ret);
+            return ret;
         }
 
         if let Some((route, _ifindex)) = fast {
-            if let Some((ret, ready_after)) =
-                NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
-                    let result = if tcp_sock.can_recv() {
-                        tcp_sock
-                            .recv_slice(buf)
-                            .map(|n| n as isize)
-                            .map_err(|_| SyscallErr::ENOTCONN)
-                    } else {
-                        match tcp_sock.state() {
-                            tcp::State::CloseWait
+            if let Some((ret, ready_after)) = NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
+                let result = if tcp_sock.can_recv() {
+                    tcp_sock
+                        .recv_slice(buf)
+                        .map(|n| n as isize)
+                        .map_err(|_| SyscallErr::ENOTCONN)
+                } else {
+                    match tcp_sock.state() {
+                        tcp::State::CloseWait
+                        | tcp::State::Closing
+                        | tcp::State::LastAck
+                        | tcp::State::TimeWait => Ok(0),
+                        tcp::State::Closed => Err(SyscallErr::ECONNRESET),
+                        _ if !tcp_sock.may_recv() => Ok(0),
+                        _ => Err(SyscallErr::EAGAIN),
+                    }
+                };
+                let readable = tcp_sock.can_recv()
+                    || !tcp_sock.may_recv()
+                    || matches!(
+                        tcp_sock.state(),
+                        tcp::State::CloseWait
                             | tcp::State::Closing
                             | tcp::State::LastAck
-                            | tcp::State::TimeWait => Ok(0),
-                            tcp::State::Closed => Err(SyscallErr::ECONNRESET),
-                            _ if !tcp_sock.may_recv() => Ok(0),
-                            _ => Err(SyscallErr::EAGAIN),
-                        }
-                    };
-                    let readable = tcp_sock.can_recv()
-                        || !tcp_sock.may_recv()
-                        || matches!(
-                            tcp_sock.state(),
-                            tcp::State::CloseWait
-                                | tcp::State::Closing
-                                | tcp::State::LastAck
-                                | tcp::State::TimeWait
-                                | tcp::State::Closed
-                        );
-                    (result, readable)
-                })
-            {
+                            | tcp::State::TimeWait
+                            | tcp::State::Closed
+                    );
+                (result, readable)
+            }) {
                 update_ready_bit(&self.pollee, EPollEvent::EPOLLIN.bits(), ready_after);
+                #[cfg(feature = "net_perf_diag")]
+                record_tcp_recv_perf(buf.len(), &ret);
                 return ret;
             }
             self.invalidate_fast();
@@ -872,11 +985,13 @@ impl Socket for TcpSocket {
         let inner = self.inner.lock();
         let ret = inner.try_recv(buf);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLIN.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // A successful short read may have drained the receive queue.  Derive
+        // readiness from the socket after I/O instead of treating every
+        // successful return as still readable; otherwise EPOLLET users never
+        // observe the next empty -> readable transition.
+        self.update_io_events();
+        #[cfg(feature = "net_perf_diag")]
+        record_tcp_recv_perf(buf.len(), &ret);
         ret
     }
 
@@ -929,33 +1044,31 @@ impl Socket for TcpSocket {
         }
 
         if let Some((route, _ifindex)) = fast {
-            if let Some((ret, ready_after)) =
-                NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
-                    let result = if tcp_sock.can_send() {
-                        tcp_sock
-                            .send_slice(buf)
-                            .map(|n| n as isize)
-                            .map_err(|_| SyscallErr::ECONNABORTED)
-                    } else {
-                        match tcp_sock.state() {
-                            tcp::State::Closed => Err(SyscallErr::ECONNRESET),
-                            tcp::State::TimeWait
-                            | tcp::State::Closing
-                            | tcp::State::LastAck => Err(SyscallErr::EPIPE),
-                            _ => Err(SyscallErr::EAGAIN),
+            if let Some((ret, ready_after)) = NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
+                let result = if tcp_sock.can_send() {
+                    tcp_sock
+                        .send_slice(buf)
+                        .map(|n| n as isize)
+                        .map_err(|_| SyscallErr::ECONNABORTED)
+                } else {
+                    match tcp_sock.state() {
+                        tcp::State::Closed => Err(SyscallErr::ECONNRESET),
+                        tcp::State::TimeWait | tcp::State::Closing | tcp::State::LastAck => {
+                            Err(SyscallErr::EPIPE)
                         }
-                    };
-                    let writable = tcp_sock.can_send()
-                        && !matches!(
-                            tcp_sock.state(),
-                            tcp::State::Closed
-                                | tcp::State::TimeWait
-                                | tcp::State::Closing
-                                | tcp::State::LastAck
-                        );
-                    (result, writable)
-                })
-            {
+                        _ => Err(SyscallErr::EAGAIN),
+                    }
+                };
+                let writable = tcp_sock.can_send()
+                    && !matches!(
+                        tcp_sock.state(),
+                        tcp::State::Closed
+                            | tcp::State::TimeWait
+                            | tcp::State::Closing
+                            | tcp::State::LastAck
+                    );
+                (result, writable)
+            }) {
                 update_ready_bit(&self.pollee, EPollEvent::EPOLLOUT.bits(), ready_after);
                 return ret;
             }
@@ -965,11 +1078,9 @@ impl Socket for TcpSocket {
         let inner = self.inner.lock();
         let ret = inner.try_send(buf);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLOUT.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // A partial write can fill the send queue even though it succeeded.
+        // Refresh from smoltcp so a later writable transition produces an edge.
+        self.update_io_events();
         ret
     }
 
@@ -978,19 +1089,22 @@ impl Socket for TcpSocket {
             NET_INTERFACE.try_poll();
         }
         if self.read_shutdown.load(Ordering::Acquire) {
-            return Ok(0);
+            let ret = Ok(0);
+            #[cfg(feature = "net_perf_diag")]
+            record_tcp_recv_perf(buf.len(), &ret);
+            return ret;
         }
         let inner = self.inner.lock();
         let _ = flags;
-        let ret = inner
-            .recv_to_user(buf, 0, buf.len())
-            .map(|n| n as isize);
+        let ret = inner.recv_to_user(buf, 0, buf.len()).map(|n| n as isize);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLIN.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // sys_read/readv use this direct UserBuffer path.  In particular,
+        // Tokio's TcpStream reads land here, and Tokio clears its userspace
+        // readiness after a short read.  Mirror the actual post-read socket
+        // state so the next packet can generate a fresh EPOLLET notification.
+        self.update_io_events();
+        #[cfg(feature = "net_perf_diag")]
+        record_tcp_recv_perf(buf.len(), &ret);
         ret
     }
 
@@ -1013,11 +1127,7 @@ impl Socket for TcpSocket {
             let inner = self.inner.lock();
             let ret = inner.try_send(&[]);
             drop(inner);
-            update_ready_bit(
-                &self.pollee,
-                EPollEvent::EPOLLOUT.bits(),
-                !matches!(ret, Err(SyscallErr::EAGAIN)),
-            );
+            self.update_io_events();
             return ret;
         }
         let mut tmp = alloc::vec![0u8; total];
@@ -1025,11 +1135,9 @@ impl Socket for TcpSocket {
         let inner = self.inner.lock();
         let ret = inner.try_send(&tmp[..n]);
         drop(inner);
-        update_ready_bit(
-            &self.pollee,
-            EPollEvent::EPOLLOUT.bits(),
-            !matches!(ret, Err(SyscallErr::EAGAIN)),
-        );
+        // Keep the producer-side readiness cache aligned with the real send
+        // queue; syscall success alone does not imply that it remains writable.
+        self.update_io_events();
         ret
     }
 

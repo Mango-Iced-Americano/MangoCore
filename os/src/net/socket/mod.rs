@@ -1,14 +1,11 @@
 pub mod common;
 pub mod inet;
-pub mod unix;
 pub mod netlink;
 pub mod packet;
+pub mod unix;
 
 use crate::{
-    fs::{
-        fat32::DiskInodeType,
-        vfs, vfs::FileFlags, Dirent, OpenFlags, SeekWhence, Stat,
-    },
+    fs::{fat32::DiskInodeType, vfs, vfs::FileFlags, Dirent, OpenFlags, SeekWhence, Stat},
     mm::{UserBuffer, UserBufferWriter, UserPtr, UserPtrMut},
     net::{
         posix::PosixArgsSocketType,
@@ -37,12 +34,10 @@ use crate::net::routing::RouteSocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 use spin::Mutex;
 
-use crate::fs::vfs::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
-};
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
+use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::timer::TimeSpec;
 
 /// Socket 虚拟文件系统（用于 IndexNode::fs()）
@@ -54,11 +49,21 @@ impl FileSystem for SocketFS {
         panic!("SocketFS has no root inode")
     }
     fn info(&self) -> FsInfo {
-        FsInfo { blk_dev_id: 0, max_name_len: 0, features: vec!["socketfs"] }
+        FsInfo {
+            blk_dev_id: 0,
+            max_name_len: 0,
+            features: vec!["socketfs"],
+        }
     }
-    fn name(&self) -> &str { "socketfs" }
-    fn super_block(&self) -> SuperBlock { SuperBlock::default() }
-    fn as_any_ref(&self) -> &dyn Any { self }
+    fn name(&self) -> &str {
+        "socketfs"
+    }
+    fn super_block(&self) -> SuperBlock {
+        SuperBlock::default()
+    }
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }
 
 lazy_static::lazy_static! {
@@ -153,8 +158,8 @@ pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>> = Mutex
 pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
 
 // packet
-pub static PACKET_SOCKETS: Mutex<Vec<Weak<crate::net::socket::packet::PacketSocket>>> = Mutex::new(Vec::new());
-
+pub static PACKET_SOCKETS: Mutex<Vec<Weak<crate::net::socket::packet::PacketSocket>>> =
+    Mutex::new(Vec::new());
 
 // ── Endpoint 枚举 ─────────────────────────────────────────────────────
 
@@ -250,7 +255,8 @@ impl Endpoint {
                 if addr_buf.len() < 12 {
                     return Err(SyscallErr::EINVAL);
                 }
-                let nl_pid = u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+                let nl_pid =
+                    u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
                 Ok(Endpoint::Netlink(nl_pid))
             }
             AF_PACKET => {
@@ -259,7 +265,8 @@ impl Endpoint {
                     return Err(SyscallErr::EINVAL);
                 }
                 let protocol = u16::from_be_bytes([addr_buf[2], addr_buf[3]]);
-                let ifindex = u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+                let ifindex =
+                    u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
                 let hatype = u16::from_ne_bytes([addr_buf[8], addr_buf[9]]);
                 let pkttype = addr_buf[10];
                 let halen = addr_buf[11];
@@ -312,12 +319,9 @@ impl Endpoint {
                 // pad[2..4] = 0
                 buf[4..8].copy_from_slice(&nl_pid.to_ne_bytes());
                 // nl_groups[8..12] = 0
-                let mut user_buf =
-                    UserBufferWriter::new(token, addr as *mut u8, 12)
-                        .map_err(|_| SyscallErr::EFAULT)?;
-                user_buf
-                    .write_from(&buf)
+                let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, 12)
                     .map_err(|_| SyscallErr::EFAULT)?;
+                user_buf.write_from(&buf).map_err(|_| SyscallErr::EFAULT)?;
                 addrlen_ptr
                     .write(token, &12u32)
                     .map_err(|_| SyscallErr::EFAULT)?;
@@ -346,12 +350,9 @@ impl Endpoint {
                 buf[10] = pep.pkttype;
                 buf[11] = pep.halen;
                 buf[12..20].copy_from_slice(&pep.addr);
-                let mut user_buf =
-                    UserBufferWriter::new(token, addr as *mut u8, 20)
-                        .map_err(|_| SyscallErr::EFAULT)?;
-                user_buf
-                    .write_from(&buf)
+                let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, 20)
                     .map_err(|_| SyscallErr::EFAULT)?;
+                user_buf.write_from(&buf).map_err(|_| SyscallErr::EFAULT)?;
                 addrlen_ptr
                     .write(token, &20u32)
                     .map_err(|_| SyscallErr::EFAULT)?;
@@ -377,9 +378,8 @@ impl Endpoint {
 
                 // 写入 AF_UNSPEC（2 字节）
                 let write_len = 2;
-                let mut user_buf =
-                    UserBufferWriter::new(token, addr as *mut u8, write_len)
-                        .map_err(|_| SyscallErr::EFAULT)?;
+                let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, write_len)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 user_buf
                     .write_from(&AF_UNSPEC.to_ne_bytes())
                     .map_err(|_| SyscallErr::EFAULT)?;
@@ -403,7 +403,9 @@ pub trait Socket: Send + Sync {
         Err(SyscallErr::EOPNOTSUPP)
     }
     /// 读取并清除 socket 的待处理错误（用于 getsockopt(SO_ERROR)）
-    fn take_error(&self) -> Option<SyscallErr> { None }
+    fn take_error(&self) -> Option<SyscallErr> {
+        None
+    }
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet;
     fn socket_type(&self) -> PSOCK;
     fn recv_buf_size(&self) -> usize;
@@ -430,6 +432,12 @@ pub trait Socket: Send + Sync {
     }
     fn set_bind_to_device(&self, _ifname: &str) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn ip_recv_err(&self) -> Result<bool, SyscallErr> {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
+    fn set_ip_recv_err(&self, _enabled: bool) -> SyscallRet {
+        Err(SyscallErr::ENOPROTOOPT)
     }
     fn set_ipv6_v6only(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::ENOPROTOOPT)
@@ -715,7 +723,9 @@ impl IndexNode for SocketFile {
         buf: &[u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        self.inner.try_send(buf, MsgFlags::empty()).map(|n| n as usize)
+        self.inner
+            .try_send(buf, MsgFlags::empty())
+            .map(|n| n as usize)
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
@@ -810,14 +820,17 @@ impl dyn Socket {
         is_cloexec: bool,
     ) -> GeneralRet<usize> {
         log::info!("[Socket::new] domain: {}, psock: {:?}", domain, psock);
-        let alloc_socket_fd = |socket_file: Arc<dyn crate::fs::vfs::IndexNode>| -> GeneralRet<usize> {
-            let mut flags = FileFlags::O_RDWR;
-            if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
-            let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
-            let files_ref = current_task().unwrap().process.files();
-            let result = files_ref.lock().alloc_fd(vf, is_cloexec);
-            result
-        };
+        let alloc_socket_fd =
+            |socket_file: Arc<dyn crate::fs::vfs::IndexNode>| -> GeneralRet<usize> {
+                let mut flags = FileFlags::O_RDWR;
+                if is_nonblock {
+                    flags.insert(FileFlags::O_NONBLOCK);
+                }
+                let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
+                let files_ref = current_task().unwrap().process.files();
+                let result = files_ref.lock().alloc_fd(vf, is_cloexec);
+                result
+            };
         match domain as u16 {
             AF_INET | AF_UNSPEC | AF_INET6 => {
                 let ver = if domain as u16 == AF_INET6 {
@@ -870,7 +883,8 @@ impl dyn Socket {
             }
             AF_NETLINK => match psock {
                 PSOCK::Raw | PSOCK::Datagram => {
-                    let socket: Arc<dyn Socket> = Arc::new(crate::net::socket::netlink::NetlinkSocket::new(protocol));
+                    let socket: Arc<dyn Socket> =
+                        Arc::new(crate::net::socket::netlink::NetlinkSocket::new(protocol));
                     let socket_file = Arc::new(SocketFile::new(socket));
                     alloc_socket_fd(socket_file)
                 }
@@ -933,7 +947,10 @@ impl dyn Socket {
         let task = current_task().ok_or(SyscallErr::EINVAL)?;
         let token = task.get_user_token();
         // 探针读取 — 无效地址会触发 page fault → EFAULT
-        UserPtr::<u8>::from_addr(addr).read(token).map(|_| ()).map_err(|_| SyscallErr::EFAULT)
+        UserPtr::<u8>::from_addr(addr)
+            .read(token)
+            .map(|_| ())
+            .map_err(|_| SyscallErr::EFAULT)
     }
 
     /// 读取并验证用户空间的 socklen_t 值，优先于连接状态检查。
@@ -1029,11 +1046,11 @@ pub fn wake_raw_waiters() {
             }
         }
     }
-    for (handler, socket) in &live_sockets {
-        let can_recv = crate::net::config::NET_INTERFACE
-            .raw_routed_socket(*handler, |s| s.can_recv())
-            .unwrap_or(false);
-        if can_recv {
+    for (_, socket) in &live_sockets {
+        // A raw socket owns one smoltcp handler per interface. The registry
+        // keeps only its primary handle for identity/cleanup, so readiness must
+        // query the socket and cover every handler rather than only lo.
+        if socket.recv_ready() {
             if let Some(wq) = socket.recv_event_queue() {
                 wq.notify_events_at_most_if_unlocked(
                     EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,

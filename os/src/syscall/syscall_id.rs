@@ -192,6 +192,7 @@ pub const SYSCALL_SETSOCKOPT: usize = 208;
 pub const SYSCALL_GETSOCKOPT: usize = 209;
 pub const SYSCALL_ACCEPT4: usize = 242;
 pub const SYSCALL_CLOCK_ADJTIME: usize = 266;
+pub const SYSCALL_SENDMMSG: usize = 269;
 pub const SYSCALL_SOCK_SHUTDOWN: usize = 210;
 pub const SYSCALL_SENDMSG: usize = 211;
 pub const SYSCALL_RECVMSG: usize = 212;

@@ -1,0 +1,7 @@
+2026-07-18T05:21:34.343296Z __PERF_BEGIN_paths-1-eb5bc032__
+2026-07-18T05:21:35.281127Z MangoPersist:/persist/apk-root# __PERF_ACK_paths-1-eb5bc032_TRACE_OFF__
+2026-07-18T05:21:37.298224Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_paths-1-eb5bc032__
+2026-07-18T05:21:57.167967Z /persist/python-runtime/releases/28f61fb764f3 /persist/python-runtime/releases/28f61fb764f3/usr/bin/python3 /persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/lxml/etree.cpython-314.so /persist/python-runtime/releases/28f61fb764f3/usr/lib/python3.14/site-packages/primp/__init__.py
+2026-07-18T05:21:57.683748Z __PERF_WORK_END_paths-1-eb5bc032__
+2026-07-18T05:21:57.684683Z __PERF_ACK_paths-1-eb5bc032_WORK__
+2026-07-18T05:21:58.106786Z MangoPersist:/persist/apk-root# __PERF_END_paths-1-eb5bc032__ rc=0

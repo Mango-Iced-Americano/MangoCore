@@ -1,0 +1,7 @@
+2026-07-18T05:26:06.779801Z __PERF_BEGIN_t-1-b2e57f5c__
+2026-07-18T05:26:07.714896Z MangoPersist:/persist/apk-root# __PERF_ACK_t-1-b2e57f5c_TRACE_OFF__
+2026-07-18T05:26:10.897195Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_t-1-b2e57f5c__
+2026-07-18T05:27:10.472951Z builtin-tools-ok python_interpreter,web_search,visit_webpage
+2026-07-18T05:27:13.013660Z __PERF_WORK_END_t-1-b2e57f5c__
+2026-07-18T05:27:13.016217Z __PERF_ACK_t-1-b2e57f5c_WORK__
+2026-07-18T05:27:13.424593Z MangoPersist:/persist/apk-root# __PERF_END_t-1-b2e57f5c__ rc=0

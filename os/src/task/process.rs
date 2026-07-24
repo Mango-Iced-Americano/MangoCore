@@ -165,16 +165,12 @@ lazy_static! {
 }
 
 fn inode_busy_key(inode: &Arc<dyn vfs::IndexNode>) -> Option<InodeBusyKey> {
-    inode
-        .metadata()
-        .ok()
-        .map(|meta| (meta.dev_id, meta.inode_id))
+    let inode_id = inode.metadata().ok()?.inode_id;
+    Some((inode.fs().identity_key(), inode_id))
 }
 
 fn exec_key_from_file(file: &vfs::File) -> Option<InodeBusyKey> {
-    file.metadata()
-        .ok()
-        .map(|meta| (meta.dev_id, meta.inode_id))
+    inode_busy_key(&file.inode)
 }
 
 fn register_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {

@@ -763,11 +763,18 @@ impl Pipe {
             fasync: crate::fs::vfs::fasync::FAsyncItems::new(),
         }
     }
+    pub fn read_write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
+        Self {
+            readable: true,
+            writable: true,
+            buffer,
+            read_wait: EventWaitQueue::new(),
+            write_wait: EventWaitQueue::new(),
+            fasync: crate::fs::vfs::fasync::FAsyncItems::new(),
+        }
+    }
 }
 
-#[cfg(feature = "board_fu740")]
-const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
-#[cfg(not(feature = "board_fu740"))]
 const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 
 use core::sync::atomic::AtomicUsize;
@@ -1188,6 +1195,22 @@ pub fn fifo_open(
     });
 
     let buffer = entry.buffer.clone();
+
+    if for_read && for_write {
+        if let Some(end) = entry.read_end.upgrade() {
+            if end.writable {
+                pipe_inc(profiling, &PIPE_FIFO_HIT_READ);
+                pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
+                return Ok(end);
+            }
+        }
+        let end = Arc::new(Pipe::read_write_end_with_buffer(buffer.clone()));
+        buffer.lock().set_read_end(&end);
+        buffer.lock().set_write_end(&end);
+        entry.read_end = Arc::downgrade(&end);
+        entry.write_end = Arc::downgrade(&end);
+        return Ok(end);
+    }
 
     if for_read {
         if let Some(r) = entry.read_end.upgrade() {

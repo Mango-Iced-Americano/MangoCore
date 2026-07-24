@@ -1,0 +1,82 @@
+2026-07-18T01:13:40.849473Z __PERF_BEGIN_dependency_versions-1-b19f2483__
+2026-07-18T01:13:41.768563Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_dependency_versions-1-b19f2483_TRACE_OFF__
+2026-07-18T01:13:42.403940Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:13:42.408876Z __PERF_ACK_dependency_versions-1-b19f2483_STATS_OFF__
+2026-07-18T01:13:43.112756Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/profile: No such file or directory
+2026-07-18T01:13:43.117670Z __PERF_ACK_dependency_versions-1-b19f2483_PROFILE__
+2026-07-18T01:13:43.713258Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/reset: No such file or directory
+2026-07-18T01:13:43.718185Z __PERF_ACK_dependency_versions-1-b19f2483_RESET__
+2026-07-18T01:13:44.372944Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_NET__
+2026-07-18T01:13:44.411113Z cat: can't open '/sys/kernel/stats/net': No such file or directory
+2026-07-18T01:13:44.415809Z __PERF_STATS_BEFORE_NET_END__
+2026-07-18T01:13:45.168997Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_BEFORE_RESOURCE__
+2026-07-18T01:13:45.206986Z cat: can't open '/sys/kernel/stats/resource': No such file or directory
+2026-07-18T01:13:45.211849Z __PERF_STATS_BEFORE_RESOURCE_END__
+2026-07-18T01:13:45.841691Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:13:45.846709Z __PERF_ACK_dependency_versions-1-b19f2483_STATS_ON__
+2026-07-18T01:13:47.551074Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_dependency_versions-1-b19f2483__
+2026-07-18T01:14:00.675756Z Name: openai
+2026-07-18T01:14:00.687234Z Version: 1.35.15
+2026-07-18T01:14:00.699070Z Summary: The official Python library for the openai API
+2026-07-18T01:14:00.710396Z Home-page: https://github.com/openai/openai-python
+2026-07-18T01:14:00.718498Z Author: 
+2026-07-18T01:14:00.729013Z Author-email: OpenAI <support@openai.com>
+2026-07-18T01:14:00.736899Z License: 
+2026-07-18T01:14:00.748688Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-18T01:14:00.762195Z Requires: anyio, distro, httpx, pydantic, sniffio, tqdm, typing-extensions
+2026-07-18T01:14:00.770236Z Required-by: 
+2026-07-18T01:14:01.163203Z ---
+2026-07-18T01:14:01.171780Z Name: pydantic
+2026-07-18T01:14:01.180282Z Version: 1.10.26
+2026-07-18T01:14:01.193536Z Summary: Data validation and settings management using python type hints
+2026-07-18T01:14:01.204703Z Home-page: https://github.com/pydantic/pydantic
+2026-07-18T01:14:01.212430Z Author: 
+2026-07-18T01:14:01.223162Z Author-email: Samuel Colvin <s@muelcolvin.com>
+2026-07-18T01:14:01.231227Z License: MIT
+2026-07-18T01:14:01.243274Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-18T01:14:01.252923Z Requires: typing-extensions
+2026-07-18T01:14:01.261054Z Required-by: openai
+2026-07-18T01:14:01.572768Z ---
+2026-07-18T01:14:01.580701Z Name: httpx
+2026-07-18T01:14:01.588927Z Version: 0.27.2
+2026-07-18T01:14:01.599419Z Summary: The next generation HTTP client.
+2026-07-18T01:14:01.610105Z Home-page: https://github.com/encode/httpx
+2026-07-18T01:14:01.617649Z Author: 
+2026-07-18T01:14:01.628868Z Author-email: Tom Christie <tom@tomchristie.com>
+2026-07-18T01:14:01.636520Z License: 
+2026-07-18T01:14:01.648270Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-18T01:14:01.659363Z Requires: anyio, certifi, httpcore, idna, sniffio
+2026-07-18T01:14:01.669203Z Required-by: huggingface_hub, openai
+2026-07-18T01:14:01.939812Z ---
+2026-07-18T01:14:01.948599Z Name: typing_extensions
+2026-07-18T01:14:01.956788Z Version: 4.16.0
+2026-07-18T01:14:01.969108Z Summary: Backported and Experimental Type Hints for Python 3.9+
+2026-07-18T01:14:01.977009Z Home-page: 
+2026-07-18T01:14:01.984614Z Author: 
+2026-07-18T01:14:02.000148Z Author-email: "Guido van Rossum, Jukka Lehtosalo, Aukasz Langa, Michael Lee" <levkivskyi@gmail.com>
+2026-07-18T01:14:02.009682Z License-Expression: PSF-2.0
+2026-07-18T01:14:02.021735Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-18T01:14:02.029246Z Requires: 
+2026-07-18T01:14:02.040290Z Required-by: huggingface_hub, openai, pydantic
+2026-07-18T01:14:02.389687Z ---
+2026-07-18T01:14:02.398101Z Name: smolagents
+2026-07-18T01:14:02.406116Z Version: 1.26.0
+2026-07-18T01:14:02.424470Z Summary:  smolagents: a barebones library for agents. Agents write python code to call tools or orchestrate other agents.
+2026-07-18T01:14:02.432424Z Home-page: 
+2026-07-18T01:14:02.440006Z Author: 
+2026-07-18T01:14:02.450704Z Author-email: Aymeric Roucher <aymeric@hf.co>
+2026-07-18T01:14:02.458497Z License: 
+2026-07-18T01:14:02.470343Z Location: /persist/python/user/lib/python3.14/site-packages
+2026-07-18T01:14:02.483369Z Requires: huggingface-hub, jinja2, pillow, python-dotenv, requests, rich
+2026-07-18T01:14:02.491579Z Required-by: 
+2026-07-18T01:14:03.577945Z __PERF_WORK_END_dependency_versions-1-b19f2483__
+2026-07-18T01:14:03.582508Z __PERF_ACK_dependency_versions-1-b19f2483_WORK__
+2026-07-18T01:14:04.224804Z [1m[33mMangoCore[0m:[1m[34m/[0m# bash: /sys/kernel/stats/stats_on: No such file or directory
+2026-07-18T01:14:04.229885Z __PERF_ACK_dependency_versions-1-b19f2483_STATS_DONE__
+2026-07-18T01:14:04.877717Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_NET__
+2026-07-18T01:14:04.915921Z cat: can't open '/sys/kernel/stats/net': No such file or directory
+2026-07-18T01:14:04.920487Z __PERF_STATS_AFTER_NET_END__
+2026-07-18T01:14:05.659818Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_STATS_AFTER_RESOURCE__
+2026-07-18T01:14:05.698136Z cat: can't open '/sys/kernel/stats/resource': No such file or directory
+2026-07-18T01:14:05.702987Z __PERF_STATS_AFTER_RESOURCE_END__
+2026-07-18T01:14:06.163677Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_dependency_versions-1-b19f2483__ rc=0

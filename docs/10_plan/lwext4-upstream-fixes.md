@@ -1,6 +1,6 @@
 # lwext4 + lwext4_rust 上游修复记录
 
-**状态：进行中** | **分支：refactor/ext4** | **最新更新：2026-07-16**（创建于 2026-07-06）
+**状态：进行中** | **分支：board-develop-combined** | **最新更新：2026-07-19**（创建于 2026-07-06）
 
 本文档记录在 MangoCore 集成 lwext4 + lwext4_rust 过程中发现的 vendored 代码缺陷，用于后续向上游提 PR。
 
@@ -10,7 +10,7 @@
 
 **文件**：`dependency/lwext4_rust/src/bindings.rs`（bindgen 自动生成）
 
-**问题**：bindings.rs 使用 `unsafe extern "C" { ... }` 语法（218 处），该语法在 Rust < 1.82 中不可用。MangoCore la64 使用 nightly-2024-05-01，不支持此语法。
+**问题**：bindings.rs 使用 `unsafe extern "C" { ... }` 语法（218 处），该语法在 Rust < 1.82 中不可用。历史上 MangoCore la64 使用 nightly-2024-05-01，因而不支持此语法；当前项目已统一固定到 nightly-2026-05-10。
 
 **症状**：`error: extern block cannot be declared unsafe` × 218
 
@@ -376,3 +376,36 @@ Implemented in commit implementing multi-ext4-instance mount isolation:
 - `os/src/fs/ext4_lwext4/page_cache.rs` — Added `lw_path` field, pre-computed at construction time; all `Ext4File` operations use translated path
 - rv64 compile: zero errors from ext4_lwext4 files ✅
 - la64: toolchain corrupted (pre-existing env issue, not code-related)
+
+---
+
+## 修复 11：目录项 file type 不能覆盖真实 inode mode
+
+**文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`
+
+**问题**：启用 `INCOMPAT_FILETYPE` 后，`ext4_generic_open2()` 把目录项 file type 当作
+路径类型真值；`EXT4_DE_UNKNOWN` 会被映射为 regular，更隐蔽的是旧卷还可能出现
+“dentry=regular、inode=symlink”这类非 unknown 冲突。此时 `lstat`/`test -L` 与
+`readlink` 可得出矛盾结果，迁移器无法安全删除旧链接。
+
+**修复**：找到每个路径分量后，复用遍历/open 本来就必须加载的 child inode，并通过
+`ext4_inode_type()` 得到权威类型；中间分量必须为目录，目标若指定具体类型则必须与
+inode mode 一致。目录项 file type 只保留为提示，不再参与语义判定。健康路径没有额外
+inode get/put，错误或损坏目录项路径反而更早 fail closed。
+
+**上游 PR 建议**：提交最小 C 修复，并同时增加两类 fixture：FILETYPE 已启用但单个
+dentry type 为 unknown，以及 dentry concrete type 与 inode mode 冲突。覆盖中间目录、
+最终 symlink/readlink 和引用释放失败路径。
+
+## 修复 12：`ext4_fsymlink()` 覆盖已存在的同类型 symlink
+
+**文件**：`os/src/fs/ext4_lwext4/layout.rs`（适配层修复）
+
+**问题**：底层 `ext4_fsymlink()` 经 open 路径可重写已存在的同类型 symlink，而 POSIX
+symlink create 必须是排他的，目标存在应返回 `EEXIST`。这还会掩盖旧卷中的重复目录项。
+
+**修复**：在 Rust 适配层的 lwext4 全局锁内先 probe 目标，存在立即返回 `EEXIST`，不存在
+才调用 C API，使检查与创建相对于本内核所有 lwext4 操作原子。RV64/LA64 新回归均 9/9。
+
+**上游 PR 建议**：C API 本身应提供 create-exclusive 语义并用目录锁保证原子性；在此之前
+保留适配层门禁，不能依赖调用方先 unlink。

@@ -1,0 +1,168 @@
+make: Entering directory '/app/os'
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+[memory] 126647 usable physical frames across 1 region(s)
+[memory] region0: [0x91149000, 0xb0000000) frames=126647
+.text [0x80000000, 0x802b1000)
+.rodata [0x802b1000, 0x802e8000)
+.data [0x8031b000, 0x81032000)
+.bss [0x81032000, 0x91149000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Hello, world!
+[get_timer_freq_first_time] clk freq: 100000000(from CPUCFG)
+[machine_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[CPUCFG 0x0] 1359888
+[CPUCFG 0x1] 66253566
+[CPUCFG 0x2] 6340815
+[CPUCFG 0x3] 0
+[CPUCFG 0x4] 100000000
+[CPUCFG 0x5] 65537
+[CPUCFG 0x6] 0
+[CPUCFG 0x10] 11325
+[CPUCFG 0x11] 101187587
+[CPUCFG 0x12] 101187587
+[CPUCFG 0x13] 101187599
+[CPUCFG 0x14] 101580815
+Misc { 32-bit addr plv(1,2,3):: false,false,false, rdtime allowed for plv(1,2,3):: false,false,false, Disable dirty bit check for plv(0,1,2):: false,false,false, Misalignment check for plv(0,1,2,4):: false,false,false,false }
+RVACfg { rbits: 0 }
+[machine_init] MMAP_BASE: 0xffffff8000000000
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1005
+[PCI] VirtIO device: EntropySource
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[PCI] Device DeviceFunction { bus: 0, device: 3, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[kernel] random: initialized from virtio-rng
+[memory] reclaimed linker frames: [0x8031b000, 0x80990000) frames=1653
+[initramfs] unpacked: files=43 dirs=24 symlinks=1 bytes=6761681
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1005
+[PCI] VirtIO device: EntropySource
+[PCI] Device DeviceFunction { bus: 0, device: 3, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1005
+[PCI] VirtIO device: EntropySource
+[PCI] Device DeviceFunction { bus: 0, device: 3, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[kernel] block device 0: official fs (DeviceFunction { bus: 0, device: 1, function: 0 })
+[mbr] valid MBR with 4 usable partition(s)
+[mbr] /dev/vda1 type=0x83 start_lba=2048 sectors=8388608 size=4096MiB fs=Ext4
+[mbr] /dev/vda2 type=0x0c start_lba=8390656 sectors=2621440 size=1280MiB fs=Fat32
+[mbr] /dev/vda3 type=0x83 start_lba=11012096 sectors=1572864 size=768MiB fs=Ext4
+[mbr] /dev/vda4 type=0x83 start_lba=12584960 sectors=8388608 size=4096MiB fs=Ext4
+[fs] official fs (/dev/vda1) root directory readable: 4 entries
+[kernel] official fs (/dev/vda1) (Ext4) mounted at sdcard flags=RDONLY
+[fs] adapting native block size 512 to platform block size 4096
+[fs] writable scratch (/dev/vda2) root directory readable: 2 entries
+[kernel] writable scratch (/dev/vda2) (Fat32) mounted at scratch flags=(empty)
+[fs] persistent state (/dev/vda4) root directory readable: 11 entries
+[kernel] persistent state (/dev/vda4) (Ext4) mounted at persist flags=(empty)
+[initramfs] tools disk (x1) not found; using /dev/vda3 from x0
+[fs] tools fs (/dev/vda3) root directory readable: 4 entries
+[kernel] tools fs (/dev/vda3) (Ext4) mounted at tools flags=RDONLY
+sinitproc: 80990000, einitproc: 80C78B60, sbash: 80C79000, ebash: 80DCA878, sbusybox: 80DCB000, ebusybox: 80FC35F8, sosconfig: 80FC4000, eosconfig: 80FC4F09
+[memory] reclaimed linker frames: [0x80990000, 0x80c78000) frames=744
+[memory] reclaimed linker frames: [0x80c79000, 0x80dca000) frames=337
+[memory] reclaimed linker frames: [0x80dcb000, 0x80fc3000) frames=504
+[memory] reclaimed linker frames: [0x80fc5000, 0x80ff7000) frames=50
+[memory] reclaimed linker frames: [0x80ff8000, 0x80ffc000) frames=4
+[memory] reclaimed linker frames: [0x80ffd000, 0x81019000) frames=28
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+ntpd: setting time to 2026-07-19 06:21:41.871557 (offset -14319504.592449s)
+[init] ntpd time sync ok
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] staged runtime: keeping /tmp /bin /sbin /lib /usr /root writable
+[init] bind /tools/tests -> /tests: skipped (errno=2)
+[init] bind /sdcard/musl -> /musl: skipped (errno=2)
+[init] bind /sdcard/glibc -> /glibc: skipped (errno=2)
+[initproc] config source=/os_test.conf mode=run mask=0x800 ltp_runner=suite timer_smoke=false ext4_profile=false reclaim_profile=false skip_apk=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02", "execve05", "fallocate06", "mmap16", "rename10", "shmctl01", "copy_file_range02", "pipe13", "splice02", "splice07", "timer_settime03", "statx11", "prot_hsymlinks", "send02", "futex_cmp_requeue01"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["clone08"], glibc: []
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+/bin/bash: line 1: chmod: command not found
+[initproc] staged runtime: skip /tools/bin bind
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s bytes=2811472 expected=2811472
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+P4 strict-aligned Python launchers installed
+[ddgs-redirect] status=overlay-verified version=9.0.0 user_site=/persist/python/user/lib/python3.14/site-packages
+[smolagents-action-type] status=already-patched version=1.26.0 site=/persist/python/user/lib/python3.14/site-packages
+P4 smolagents interactive action type verified
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[apk-persist-shell] START interactive P4 application root
+[apk-persist-shell] stage=reuse
+[apk-persist-shell] stage=prepared
+[apk-persist-shell] bind /dev -> /persist/apk-root/dev
+[apk-persist-shell] bind /proc -> /persist/apk-root/proc
+[apk-persist-shell] bind /tmp -> /persist/apk-root/tmp
+[apk-persist-shell] bind /run -> /persist/apk-root/run
+[apk-persist-shell] bind /scratch -> /persist/apk-root/scratch
+[apk-persist-shell] bind /persist/python-runtime -> /persist/apk-root/persist/python-runtime
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/persist/python
+[apk-persist-shell] bind /persist/python -> /persist/apk-root/var/cache/mango-python
+[apk-persist-shell] RESULT=PASS
+[apk-persist-shell] ready: run persist-shell, then apk add <package>
+[1m[33mMangoCore[0m:[1m[34m/[0m# /bin/busybox readlink /persist/apk-roo<[34m/[0m# /bin/busybox readlink /persist/apk-root                         /bin/sh
+ersisbusybox
+t-s[1m[33mMangoCore[0m:[1m[34m/[0m# persist-shell
+MangoPersist:/# [6n/usr/bin/python3 -S -c "import os; print('PERSIST_INTERACTIVE_PY
+THON_OK', os.environ.get('MANGO_PYTHON_POLICY'))"
+PERSIST_INTERACTIVE_PYTHON_OK p4-strict-align-v1
+MangoPersist:/# [6necho P4_RW_OK > /root/mango-final10-probe
+MangoPersist:/# /bin/busybox cat /root/mango-final10-probe
+P4_RW_OK
+MangoPersist:/# /bin/busybox rm -f /root/mango-final10-probe
+MangoPersist:/# /bin/busybox sync
+MangoPersist:/# exit
+[1m[33mMangoCore[0m:[1m[34m/[0m# /bin/busybox sync
+[1m[33mMangoCore[0m:[1m[34m/[0m# 

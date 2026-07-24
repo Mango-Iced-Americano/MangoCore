@@ -79,6 +79,7 @@ const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
+const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
 // Not standard POSIX sys_call
 const SYSCALL_LS: usize = 500;
@@ -204,6 +205,17 @@ pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
     )
 }
 
+pub fn sys_getrandom(buffer: &mut [u8], flags: u32) -> isize {
+    syscall(
+        SYSCALL_GETRANDOM,
+        [
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+            flags as usize,
+        ],
+    )
+}
+
 pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
     syscall(SYSCALL_WRITE, [fd, buffer.as_ptr() as usize, buffer.len()])
 }
@@ -227,6 +239,10 @@ pub fn sys_get_time() -> isize {
 
 pub fn sys_getpid() -> isize {
     syscall(SYSCALL_GETPID, [0, 0, 0])
+}
+
+pub fn sys_getppid() -> isize {
+    syscall(SYSCALL_GETPPID, [0, 0, 0])
 }
 
 pub fn sys_fork() -> isize {
@@ -268,6 +284,13 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     syscall(SYSCALL_KILL, [pid, sig, 0])
 }
 
+pub fn sys_rt_sigaction(signum: usize, action: usize, old_action: usize, sigsetsize: usize) -> isize {
+    syscall6(
+        SYSCALL_SIGACTION,
+        [signum, action, old_action, sigsetsize, 0, 0],
+    )
+}
+
 pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     syscall(SYSCALL_SETPGID, [pid, pgid, 0])
 }
@@ -297,6 +320,7 @@ pub const SYSCALL_GETSOCKOPT: usize = 209;
 pub const SYSCALL_SOCK_SHUTDOWN: usize = 210;
 pub const SYSCALL_SENDMSG: usize = 211;
 pub const SYSCALL_RECVMSG: usize = 212;
+pub const SYSCALL_SENDMMSG: usize = 269;
 pub const SYSCALL_ACCEPT4: usize = 242;
 
 pub fn sys_socket(domain: usize, type_: usize, protocol: usize) -> isize {
@@ -376,6 +400,13 @@ pub fn sys_recvfrom(
             src_addr as usize,
             addrlen as usize,
         ],
+    )
+}
+
+pub fn sys_sendmmsg(sockfd: usize, msgvec: *mut u8, vlen: usize, flags: usize) -> isize {
+    syscall4(
+        SYSCALL_SENDMMSG,
+        [sockfd, msgvec as usize, vlen, flags],
     )
 }
 

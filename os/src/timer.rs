@@ -83,11 +83,9 @@ pub fn ns_to_ticks_ceil(ns: u64) -> u64 {
     let sec = ns / NSEC_PER_SEC_U64;
     let rem_ns = ns % NSEC_PER_SEC_U64;
     // ceil(rem_ns * freq / NSEC_PER_SEC)
-    let rem_ticks = ((rem_ns as u128 * freq as u128)
-        .saturating_add(NSEC_PER_SEC_U64 as u128 - 1))
+    let rem_ticks = ((rem_ns as u128 * freq as u128).saturating_add(NSEC_PER_SEC_U64 as u128 - 1))
         / NSEC_PER_SEC_U64 as u128;
-    sec.saturating_mul(freq)
-        .saturating_add(rem_ticks as u64)
+    sec.saturating_mul(freq).saturating_add(rem_ticks as u64)
 }
 
 /// Nanoseconds since boot (monotonic, never wraps).
@@ -154,7 +152,10 @@ impl Add for TimeSpec {
         let mut nsec = self.tv_nsec + other.tv_nsec;
         sec += nsec / NSEC_PER_SEC;
         nsec %= NSEC_PER_SEC;
-        Self { tv_sec: sec, tv_nsec: nsec }
+        Self {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
     }
 }
 
@@ -173,7 +174,10 @@ impl Sub for TimeSpec {
             sec -= 1;
             self.tv_nsec + NSEC_PER_SEC - other.tv_nsec
         };
-        Self { tv_sec: sec, tv_nsec: nsec }
+        Self {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
     }
 }
 
@@ -196,7 +200,10 @@ impl PartialOrd for TimeSpec {
 impl TimeSpec {
     #[inline(always)]
     pub fn new() -> Self {
-        Self { tv_sec: 0, tv_nsec: 0 }
+        Self {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }
     }
 
     /// Build from raw tick count — safe, no overflow.
@@ -207,7 +214,10 @@ impl TimeSpec {
 
     #[inline(always)]
     pub fn from_s(s: usize) -> Self {
-        Self { tv_sec: s, tv_nsec: 0 }
+        Self {
+            tv_sec: s,
+            tv_nsec: 0,
+        }
     }
 
     #[inline(always)]
@@ -287,7 +297,10 @@ pub struct TimeVal {
 impl TimeVal {
     #[inline(always)]
     pub fn new() -> Self {
-        Self { tv_sec: 0, tv_usec: 0 }
+        Self {
+            tv_sec: 0,
+            tv_usec: 0,
+        }
     }
 
     /// Build from raw tick count — safe, no precision loss.
@@ -304,7 +317,10 @@ impl TimeVal {
 
     #[inline(always)]
     pub fn from_s(s: usize) -> Self {
-        Self { tv_sec: s, tv_usec: 0 }
+        Self {
+            tv_sec: s,
+            tv_usec: 0,
+        }
     }
 
     #[inline(always)]
@@ -349,7 +365,10 @@ impl Add for TimeVal {
         let mut usec = self.tv_usec + other.tv_usec;
         sec += usec / USEC_PER_SEC;
         usec %= USEC_PER_SEC;
-        Self { tv_sec: sec, tv_usec: usec }
+        Self {
+            tv_sec: sec,
+            tv_usec: usec,
+        }
     }
 }
 
@@ -368,7 +387,10 @@ impl Sub for TimeVal {
             sec -= 1;
             self.tv_usec + USEC_PER_SEC - other.tv_usec
         };
-        Self { tv_sec: sec, tv_usec: usec }
+        Self {
+            tv_sec: sec,
+            tv_usec: usec,
+        }
     }
 }
 
@@ -447,16 +469,15 @@ static BOOT_TIME_OFFSET_NS: AtomicU64 =
 static mut TIME_SOURCE: Option<&'static dyn TimeSource> = None;
 
 pub fn init_time_source(ts: &'static dyn TimeSource) {
-    unsafe { TIME_SOURCE = Some(ts); }
+    unsafe {
+        TIME_SOURCE = Some(ts);
+    }
 }
 
 pub fn init_time_from_cmdline(cmdline: &str) {
     if let Some(ts) = parse_cmdline_boot_time(cmdline) {
         let uptime = uptime();
-        BOOT_TIME_OFFSET_NS.store(
-            (ts - uptime) * NSEC_PER_SEC as u64,
-            AtomicOrdering::Relaxed,
-        );
+        BOOT_TIME_OFFSET_NS.store((ts - uptime) * NSEC_PER_SEC as u64, AtomicOrdering::Relaxed);
     } else {
         panic!("no valid now= timestamp in cmdline");
     }
@@ -478,7 +499,8 @@ pub fn current_timespec() -> TimeSpec {
 
 /// Current realtime as TimeVal (monotonic + boot offset).
 pub fn current_timeval() -> TimeVal {
-    let offset_us = (BOOT_TIME_OFFSET_NS.load(AtomicOrdering::Relaxed) / NSEC_PER_USEC as u64) as usize;
+    let offset_us =
+        (BOOT_TIME_OFFSET_NS.load(AtomicOrdering::Relaxed) / NSEC_PER_USEC as u64) as usize;
     TimeVal::from_us(get_time_us().saturating_add(offset_us))
 }
 

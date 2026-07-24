@@ -1,0 +1,7 @@
+2026-07-18T00:15:33.059095Z __PERF_BEGIN_smolagent_agentimage-1-a4ef3edf__
+2026-07-18T00:15:33.990711Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_smolagent_agentimage-1-a4ef3edf_TRACE_OFF__
+2026-07-18T00:15:36.563514Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_smolagent_agentimage-1-a4ef3edf__
+2026-07-18T00:16:01.549265Z smolagent-agentimage-ok Image (3, 2)
+2026-07-18T00:16:03.764710Z __PERF_WORK_END_smolagent_agentimage-1-a4ef3edf__
+2026-07-18T00:16:03.769505Z __PERF_ACK_smolagent_agentimage-1-a4ef3edf_WORK__
+2026-07-18T00:16:04.236374Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_smolagent_agentimage-1-a4ef3edf__ rc=0

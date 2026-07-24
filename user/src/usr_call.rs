@@ -44,6 +44,9 @@ pub fn get_time() -> isize {
 pub fn getpid() -> isize {
     sys_getpid()
 }
+pub fn getppid() -> isize {
+    sys_getppid()
+}
 pub fn fork() -> isize {
     sys_fork()
 }
@@ -81,6 +84,25 @@ pub fn kill(pid: usize, sig: usize) -> isize {
 }
 pub const SIGKILL: usize = 9;
 pub const SIGTERM: usize = 15;
+pub const SIGINT: usize = 2;
+pub const SIGCHLD: usize = 17;
+
+#[repr(C)]
+pub struct SigAction {
+    pub handler: usize,
+    pub flags: usize,
+    pub restorer: usize,
+    pub mask: u64,
+}
+
+pub fn sigaction(signum: usize, action: &SigAction) -> isize {
+    sys_rt_sigaction(
+        signum,
+        action as *const SigAction as usize,
+        0,
+        core::mem::size_of::<u64>(),
+    )
+}
 
 pub fn setpgid(pid: usize, pgid: usize) -> isize {
     sys_setpgid(pid, pgid)

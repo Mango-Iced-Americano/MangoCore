@@ -18,11 +18,11 @@ mod manager;
 pub mod mount_namespace;
 pub mod net_namespace;
 use spin::MutexGuard;
+pub mod perf;
 pub mod pid;
 mod process;
 mod process_manager;
 pub(crate) mod processor;
-pub mod perf;
 pub mod quota;
 mod registry;
 pub mod signal;
@@ -32,7 +32,12 @@ pub mod threads;
 
 use crate::fs::{self, vfs_lookup_absolute};
 use crate::hal::__switch;
-use alloc::{sync::Arc, vec::Vec};
+use crate::mm::{AddressSpace, PageTableImpl};
+use alloc::{
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
@@ -42,10 +47,9 @@ pub use manager::{
     add_kernel_timer, add_task, add_zombie_task, all_pids, do_oom, do_wake_expired, has_ready_task,
     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
     remove_zombie_tasks_by_pid, send_signal_to_interruptible, sleep_interruptible,
-    timer_interrupt_handler, timer_subsystem_init,
     take_one_interruptible_zombie, take_one_ready_zombie, take_zombie_tasks, task_manager_counts,
-    update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
-    WaitQueue, WaitResult,
+    timer_interrupt_handler, timer_subsystem_init, update_ready_nice, wait_with_timeout,
+    wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
 pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
@@ -62,10 +66,9 @@ pub use process::{
 pub use process_manager::ProcessManager;
 pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sgid, current_sid, current_suid,
-    current_syscall_name, current_task, current_task_ref, current_tid, current_trap_cx,
-    current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
-    take_current_task, try_current_user_token,
+    current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_task_ref,
+    current_tid, current_trap_cx, current_uid, current_user_token, run_tasks, schedule,
+    set_current_syscall_id, take_current_task, try_current_user_token,
 };
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
@@ -73,8 +76,8 @@ pub use registry::{
 };
 pub use signal::*;
 pub use sleep::{
-    sleep_relative_interruptible, sleep_until_interruptible,
-    sleep_until_realtime_interruptible, wake_realtime_abstime_sleepers_after_clock_set,
+    sleep_relative_interruptible, sleep_until_interruptible, sleep_until_realtime_interruptible,
+    wake_realtime_abstime_sleepers_after_clock_set,
 };
 pub use task::{
     any_seccomp_enabled, FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn,
@@ -305,17 +308,48 @@ lazy_static! {
     /// 优先加载 `/init`，缺失时兼容传统镜像里的 `/initproc`。
     pub static ref INITPROC: Arc<TaskControlBlock> = {
         // 优先使用 /init（initramfs 模式），fallback 到 /initproc（传统模式）
-        let inode = vfs_lookup_absolute("/init")
-            .or_else(|_| vfs_lookup_absolute("/initproc"))
-            .expect("[kernel] no /init or /initproc found");
+        let (_init_path, inode) = match vfs_lookup_absolute("/init") {
+            Ok(inode) => ("/init", inode),
+            Err(_) => (
+                "/initproc",
+                vfs_lookup_absolute("/initproc").expect("[kernel] no /init or /initproc found"),
+            ),
+        };
+        #[cfg(feature = "board_2k1000")]
+        boot_trace!("[bringup][init:01] selected userspace entry {}", _init_path);
         let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
-        TaskControlBlock::new(elf)
+        #[cfg(feature = "board_2k1000")]
+        boot_trace!("[bringup][init:02] entry file opened; building initial task");
+        let task = TaskControlBlock::new(elf);
+        #[cfg(feature = "board_2k1000")]
+        boot_trace!(
+            "[bringup][init:03] initial task built: pid={} tid={}",
+            task.pid(),
+            task.gettid()
+        );
+        task
+    };
+
+    /// Ktest-only orphan reaper.
+    ///
+    /// Ktest enters the scheduler without constructing `INITPROC`; this PCB
+    /// owns no TCB and exists only to keep ktest child/zombie ownership from
+    /// falling back to the normal-boot reaper.
+    static ref KTEST_REAPER: Arc<ProcessControlBlock> = {
+        let tid_handle = tid_alloc();
+        let reaper = new_ktest_process(tid_handle, None);
+        reaper.set_child_subreaper(true);
+        reaper
     };
 }
 
 /// 将 init 进程加入 ready 队列。
 pub fn add_initproc() {
+    #[cfg(feature = "board_2k1000")]
+    boot_trace!("[bringup][init:04] enqueue initial task");
     add_task(INITPROC.clone());
+    #[cfg(feature = "board_2k1000")]
+    boot_trace!("[bringup][init:05] initial task is on ready queue");
 }
 
 // ── ktest multi-task harness ────────────────────────────────────────
@@ -323,6 +357,51 @@ pub fn add_initproc() {
 /// Stores the function pointer for the next ktest spawned task.
 /// The trampoline reads this to know which test function to invoke.
 static KTEST_SPAWN_FN: spin::Mutex<fn()> = spin::Mutex::new(|| {});
+
+/// Build a kernel-only PCB for a ktest task without loading `/init`.
+///
+/// The root VFS and devfs are initialized before ktest enters this path.  The
+/// PCB therefore has a valid root cwd but an empty descriptor table and bare
+/// address space; ktest tasks never enter userspace and do not need tty fds.
+fn new_ktest_process(
+    tid_handle: Arc<TidHandle>,
+    parent: Option<Weak<ProcessControlBlock>>,
+) -> Arc<ProcessControlBlock> {
+    let root_inode = fs::vfs_root().mountpoint_root_inode();
+    let root_file = fs::vfs::File::new(
+        root_inode,
+        fs::vfs::FileFlags::O_RDONLY | fs::vfs::FileFlags::O_DIRECTORY,
+    )
+    .expect("ktest root VFS must be initialized before task creation");
+    let pid = tid_handle.0;
+
+    Arc::new(ProcessControlBlock::new(
+        pid,
+        tid_handle.0,
+        tid_handle,
+        quota::TaskQuotaGuard::acquire_for_init(),
+        pid,
+        pid,
+        parent,
+        Arc::new(spin::Mutex::new(root_file.clone())),
+        String::from("[ktest]"),
+        Arc::new(spin::Mutex::new(fs::vfs::FdTable::new())),
+        Arc::new(spin::Mutex::new(FsStatus {
+            working_inode: root_file,
+            working_path: String::from("/"),
+            root_inode: None,
+            umask: 0,
+        })),
+        Arc::new(spin::Mutex::new(UtsNamespace::new())),
+        INIT_NET_NAMESPACE.clone(),
+        INIT_MOUNT_NAMESPACE.clone(),
+        INIT_IPC_NAMESPACE.clone(),
+        Arc::new(spin::Mutex::new(AddressSpace::<PageTableImpl>::new_bare())),
+        Arc::new(spin::Mutex::new(Sighand::new())),
+        Arc::new(spin::Mutex::new(threads::Futex::new())),
+        Arc::new(spin::Mutex::new(pid::RecycleAllocator::new())),
+    ))
+}
 
 /// Trampoline for ktest kernel tasks.
 ///
@@ -337,7 +416,8 @@ extern "C" fn ktest_trampoline() -> ! {
 
 /// Spawn a minimal kernel task for ktest mode only.
 ///
-/// The task has a bare kernel stack, no user memory, no file descriptors.
+/// The task has a bare kernel stack, kernel-only PCB, no user memory, and no
+/// file descriptors.  It never touches `INITPROC` or parses an init ELF.
 /// It runs `f()` and then calls [`zombify_current_and_run_next`].
 ///
 /// # Panics
@@ -349,8 +429,11 @@ pub fn spawn_ktest_task(f: fn()) {
     let kstack = crate::hal::kstack_alloc();
     let kstack_top = kstack.get_top();
     let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
-    let pcb = INITPROC.process.clone();
-    let tcb = TaskControlBlock::new_ktest_minimal(tid_handle, pcb, kstack, task_cx);
+    let pcb = new_ktest_process(tid_handle.clone(), Some(Arc::downgrade(&KTEST_REAPER)));
+    let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx);
+    tcb.process.add_thread(&tcb);
+    registry::register_process(&tcb.process);
+    registry::register_task(&tcb);
     add_task(tcb);
 }
 

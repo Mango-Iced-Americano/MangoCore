@@ -1,12 +1,15 @@
 use crate::mm::{UserBufferWriter, UserPtrMut};
-use crate::net::{TcpInfo, TCP_MSS, PSOCK};
+use crate::net::{TcpInfo, PSOCK, TCP_MSS};
 use crate::task::current_task;
 use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
+use super::common::{
+    IPV6_RECVPKTINFO, IP_RECVERR, SO_ERROR, SO_PEERCRED, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR,
+    SO_SNDBUF, SO_SNDTIMEO, SO_TYPE,
+};
 use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED, SO_ERROR, IPV6_RECVPKTINFO};
 
 /// 查询 socket 选项值。
 ///
@@ -14,11 +17,12 @@ use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO
 ///
 /// 按 `(level, optname)` 分发到对应读取逻辑。
 /// 支持的选项：
-/// - `SOL_SOCKET`：`SO_ERROR`（读并清除 pending error）、`SO_SNDBUF`/`SO_RCVBUF`、
+/// - `SOL_SOCKET`：`SO_ERROR`（读并清除 pending error）、`SO_TYPE`、`SO_SNDBUF`/`SO_RCVBUF`、
 ///   `SO_REUSEADDR`、`SO_PEERCRED`（`pid,uid,gid` = 12 bytes）、
 ///   `SO_RCVTIMEO`/`SO_SNDTIMEO`（返回零值 `TimeVal`）。
 /// - `SOL_TCP`：`TCP_MAXSEG`（返回 `TCP_MSS`）、`TCP_INFO`（返回 `TcpInfo` 结构体）、
 ///   `TCP_CONGESTION`（返回 `"reno"`）。
+/// - `SOL_IP`：UDP `IP_RECVERR`。
 /// - `SOL_IPV6`：`IPV6_RECVPKTINFO`（返回 0）。
 ///
 /// # Errors
@@ -61,7 +65,8 @@ pub fn sys_getsockopt(
     match (level, optname) {
         (SOL_SOCKET, SO_ERROR) => {
             // 读并清除 socket 待处理错误（非阻塞 connect 失败后 getsockopt(SO_ERROR)）
-            let so_error = socket.take_error()
+            let so_error = socket
+                .take_error()
                 .map(|e| (-(e as isize)) as u32)
                 .unwrap_or(0);
             if optval_ptr.write(token, &so_error).is_err()
@@ -71,8 +76,19 @@ pub fn sys_getsockopt(
             }
         }
         (SOL_SOCKET, SO_TYPE) => {
-            let ty = socket.socket_type() as u32;
-            if optval_ptr.write(token, &ty).is_err()
+            let socket_type = socket.socket_type() as u32;
+            if optval_ptr.write(token, &socket_type).is_err()
+                || optlen_ptr.write(token, &4u32).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
+            }
+        }
+        (SOL_IP, IP_RECVERR) => {
+            let enabled = match socket.ip_recv_err() {
+                Ok(enabled) => enabled,
+                Err(e) => return -(e as isize),
+            };
+            if optval_ptr.write(token, &(enabled as u32)).is_err()
                 || optlen_ptr.write(token, &4u32).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);
@@ -126,7 +142,7 @@ pub fn sys_getsockopt(
                 Ok(len) => len,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
-    if (optlen_val as i32) < 0 || optlen_val < 4 {
+            if (optlen_val as i32) < 0 || optlen_val < 4 {
                 return -(SyscallErr::EINVAL as isize);
             }
             let socket = crate::get_socket!(sockfd);
@@ -207,9 +223,7 @@ pub fn sys_getsockopt(
         }
         (SOL_IPV6, IPV6_RECVPKTINFO) => {
             let val: u32 = 0;
-            if optval_ptr.write(token, &val).is_err()
-                || optlen_ptr.write(token, &4u32).is_err()
-            {
+            if optval_ptr.write(token, &val).is_err() || optlen_ptr.write(token, &4u32).is_err() {
                 return -(SyscallErr::EFAULT as isize);
             }
         }
@@ -218,7 +232,8 @@ pub fn sys_getsockopt(
             // 未知 level 或 level 与 socket 类型不兼容 → EOPNOTSUPP
             // 已知 level 但未知 optname → ENOPROTOOPT
             let s_type = socket.socket_type();
-            let level_compat = level == SOL_SOCKET || level == SOL_IP
+            let level_compat = level == SOL_SOCKET
+                || level == SOL_IP
                 || (level == SOL_TCP && matches!(s_type, PSOCK::Stream))
                 || (level == 17 /* SOL_UDP */ && matches!(s_type, PSOCK::Datagram))
                 || (level == 255 /* SOL_RAW */ && matches!(s_type, PSOCK::Raw));

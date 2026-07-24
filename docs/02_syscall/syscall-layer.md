@@ -3,8 +3,8 @@ title: "系统调用层详解 (Syscall Layer)"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [syscall, abi, dispatch, errno, seccomp]
+last_update: 2026-07-13
+tags: [syscall, abi, dispatch, errno, seccomp, random]
 ---
 
 # 系统调用层详解
@@ -682,6 +682,26 @@ return ret
 | 字符串无 NUL | `translated_str()` 有扫描上限，超过限制返回错误而不是无限扫描。 |
 
 因此，syscall 代码中看到 `*const u8` 或 `usize` 用户地址时，应继续追到 `uaccess.rs` 或具体 helper，而不是把它理解为内核地址。
+
+### 6.9 `sys_getrandom`
+
+`getrandom(278)` 不再维护独立的临时时间种子，而是与 `/dev/random`、
+`/dev/urandom` 共用 `random::ChaCha20Rng`。平台必须先由 VirtIO RNG 或
+2K1000LA 片上 RNG 完成可信播种；安全流未就绪时返回 `EAGAIN`，不会输出全零或
+把时间/地址状态伪装为安全随机数。
+
+flag 语义如下：
+
+| flag | 语义 |
+|------|------|
+| `GRND_NONBLOCK` | 未就绪返回 `EAGAIN`；就绪后正常读取 |
+| `GRND_RANDOM` | 当前与主安全 CSPRNG 流一致 |
+| `GRND_INSECURE` | 可使用未认证启动状态，但不提高随机池 ready 状态 |
+
+未知位以及 `GRND_RANDOM | GRND_INSECURE` 返回 `EINVAL`。实现先用
+`translated_byte_buffer(..., UserAccess::Write)` fault-in 并校验整段用户输出区，
+再以 256 字节内核临时块分段生成和复制；临时块在返回前清零。零长度请求不解引用
+用户指针，直接返回 0。完整熵源和健康检查设计见 `docs/07_driver/random.md`。
 
 ## 7. 阻塞、重启与等待队列
 

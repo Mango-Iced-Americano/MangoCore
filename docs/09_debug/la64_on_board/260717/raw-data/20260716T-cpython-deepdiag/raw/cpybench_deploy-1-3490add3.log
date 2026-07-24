@@ -1,0 +1,6 @@
+2026-07-16T09:32:57.417666Z __PERF_BEGIN_cpybench_deploy-1-3490add3__
+2026-07-16T09:32:58.431481Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_cpybench_deploy-1-3490add3_TRACE_OFF__
+2026-07-16T09:33:02.049480Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_cpybench_deploy-1-3490add3__
+2026-07-16T09:33:30.720663Z __PERF_WORK_END_cpybench_deploy-1-3490add3__
+2026-07-16T09:33:30.724852Z __PERF_ACK_cpybench_deploy-1-3490add3_WORK__
+2026-07-16T09:33:31.228899Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf[0m# __PERF_END_cpybench_deploy-1-3490add3__ rc=0

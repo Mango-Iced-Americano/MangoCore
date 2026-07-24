@@ -4,7 +4,7 @@ module: "os/src/net/routing.rs + config.rs (route_check, lookup_source_ip)"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-07-13"
 code_paths:
   - "os/src/net/routing.rs"
   - "os/src/net/config.rs"
@@ -30,6 +30,11 @@ related_docs:
 ---
 
 # 路由子系统 (Routing / FIB Layer)
+
+> 2026-07-13：DHCP 运行时事件通过 Router::replace_dhcp_ipv4() 一次替换 eth0
+> 的 connected/default 路由；租约失效时同时删除两者，避免保留过期网关。
+> connected 路由在写表前按前缀归一化，例如租约 `192.168.1.3/24`
+> 发布为 `192.168.1.0/24`，而接口地址仍保持主机地址。
 
 ## 概述
 
@@ -208,7 +213,7 @@ IPv6 路径先检查本机地址，再查 `::1` loopback，最后线性扫描路
 | 目标 | 下一跳 | ifindex | metric | 类型 | 来源 |
 |------|--------|---------|--------|------|------|
 | `127.0.0.0/8` | None | 1 (lo) | 0 | Connected | 固定 |
-| DHCP CIDR | None | 2 (eth0) | 0 | Connected | `eth0_ipv4_cidr()` |
+| DHCP CIDR 的 network | None | 2 (eth0) | 0 | Connected | `eth0_ipv4_cidr()` |
 | `0.0.0.0/0` | DHCP 网关 | 2 (eth0) | 100 | Default | `default_gateway()` |
 
 默认路由的 metric 为 100（高于直连路由的 0），确保直连匹配优先。此方法可安全多次调用——调用前已确保路由表为空才触发填充。

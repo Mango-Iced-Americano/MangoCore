@@ -4,7 +4,11 @@
 
 // Sizes
 /// QEMU la64 exposes high memory as memory@80000000 with size 0x30000000.
+#[cfg(feature = "board_laqemu")]
 pub const MEMORY_SIZE: usize = 0x3000_0000;
+/// 2K1000LA exposes two DRAM banks whose combined capacity is 2 GiB.
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_SIZE: usize = 0x8000_0000;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x100;
 pub const USER_STACK_INIT_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
@@ -29,6 +33,11 @@ pub const PAGE_SIZE_BITS: usize = PAGE_SIZE.trailing_zeros() as usize;
 pub const PTE_WIDTH: usize = 8;
 pub const PTE_WIDTH_BITS: usize = PTE_WIDTH.trailing_zeros() as usize;
 pub const DIR_WIDTH: usize = PAGE_SIZE_BITS - PTE_WIDTH_BITS;
+/// 三级页表的三个 9 位索引覆盖 VA[38:12]。VA[VALEN-1] 用于选择 PGDL/PGDH，
+/// 不属于页表内部索引。因此，仅在第 38 位以上不同的虚拟地址可能在同一根页表中
+/// 形成别名，必须显式隔离各虚拟地址分配区间。
+pub const PAGE_TABLE_VA_BITS: usize = PAGE_SIZE_BITS + DIR_WIDTH * 3;
+pub const PAGE_TABLE_VA_MASK: usize = (1usize << PAGE_TABLE_VA_BITS) - 1;
 
 #[cfg(debug_assertions)]
 pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
@@ -42,10 +51,17 @@ pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x40;
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 
 // Addresses
-/// Maximum length of a physical address
+/// QEMU 提供 48 位物理/虚拟地址模型。
+#[cfg(feature = "board_laqemu")]
 pub const PALEN: usize = 48;
-/// Maximum length of a virtual address
+#[cfg(feature = "board_laqemu")]
 pub const VALEN: usize = 48;
+/// 2K1000LA 在 CPUCFG1 中报告 PABITS=VABITS=40。如果误用 QEMU 的 48 位模型，
+/// 内核会接受非规范地址，CPU 将在硬件页表遍历器读取有效 PTE 前抛出 AddressError。
+#[cfg(feature = "board_2k1000")]
+pub const PALEN: usize = 40;
+#[cfg(feature = "board_2k1000")]
+pub const VALEN: usize = 40;
 /// Maximum address in virtual address space.
 /// May be used to extract virtual address from a segmented address
 /// `0`-extension may be performed using this mask.
@@ -55,11 +71,39 @@ pub const VA_MASK: usize = (1 << VALEN) - 1;
 /// `1`-extension may be performed using this mask.
 /// e.g. `flag` |= `SEG_MASK`
 pub const SEG_MASK: usize = !VA_MASK;
+/// 未进行符号扩展的 VPN 位掩码，对应 VA[VALEN-1:PAGE_SHIFT]。
+pub const VPN_MASK: usize = VA_MASK >> PAGE_SIZE_BITS;
+/// TLB 偶奇页对的 VPPN 字段掩码，对应 VA[VALEN-1:PAGE_SHIFT+1]。
+pub const VPPN_MASK: usize = VPN_MASK >> 1;
 /// Mask for extracting segment number from VPN.
 /// All-one for segment field.
 /// `1`-extension may be performed using this mask.
 /// e.g. `flag` |= `SEG_MASK`
 pub const VPN_SEG_MASK: usize = SEG_MASK >> PAGE_SIZE_BITS;
+
+/// 为原始 VALEN 位虚拟地址恢复架构规定的符号扩展。
+pub const fn canonicalize_vaddr(addr: usize) -> usize {
+    let raw = addr & VA_MASK;
+    if raw & (1usize << (VALEN - 1)) != 0 {
+        raw | SEG_MASK
+    } else {
+        raw
+    }
+}
+
+pub const fn is_canonical_vaddr(addr: usize) -> bool {
+    canonicalize_vaddr(addr) == addr
+}
+
+/// 恢复规范虚拟地址转换为 VPN 时移除的符号扩展。
+pub const fn canonicalize_vpn(vpn: usize) -> usize {
+    let raw = vpn & VPN_MASK;
+    if raw & (1usize << (VALEN - PAGE_SIZE_BITS - 1)) != 0 {
+        raw | VPN_SEG_MASK
+    } else {
+        raw
+    }
+}
 
 pub const HIGH_BASE_EIGHT: usize = 0x8000_0000_0000_0000;
 pub const HIGH_BASE_ZERO: usize = 0x0000_0000_0000_0000;
@@ -69,8 +113,49 @@ pub const SUC_DMW_VSEG: usize = 8;
 pub const MEMORY_HIGH_BASE: usize = HIGH_BASE_ZERO;
 pub const MEMORY_HIGH_BASE_VPN: usize = MEMORY_HIGH_BASE >> PAGE_SIZE_BITS;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE | LA_START;
+#[cfg(feature = "board_laqemu")]
 pub const MEMORY_START: usize = 0x0000_0000_8000_0000;
+// `MEMORY_START` remains the kernel load bank base. It is not the lowest DRAM
+// address on 2K1000LA; callers that need all RAM must iterate MEMORY_REGIONS.
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_START: usize = 0x0000_0000_9000_0000;
+#[cfg(feature = "board_laqemu")]
 pub const MEMORY_END: usize = MEMORY_SIZE + MEMORY_START;
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_END: usize = 0x0000_0001_0000_0000;
+
+/// Physical DRAM banks as half-open byte ranges.
+///
+/// The 2K1000LA hole at 0x10000000..0x90000000 contains MMIO/non-RAM and must
+/// never be converted into allocatable frames. U-Boot enters MangoCore through
+/// a DMW alias, but these are the raw physical addresses used in PTEs and DMA.
+#[cfg(feature = "board_laqemu")]
+pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
+#[cfg(feature = "board_2k1000")]
+pub const MEMORY_REGIONS: &[(usize, usize)] =
+    &[(0x0000_0000, 0x1000_0000), (0x9000_0000, MEMORY_END)];
+
+/// DRAM ranges still owned by firmware or active devices after `bootm`.
+#[cfg(feature = "board_laqemu")]
+pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[];
+#[cfg(feature = "board_2k1000")]
+pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[
+    // U-Boot LMB/stack, the active DVO framebuffer, CPU1's U-Boot park loop,
+    // and BPI/SMBIOS data. This can be split and reclaimed only after those
+    // owners have been explicitly quiesced or copied.
+    (0x0cbf_4000, 0x1000_0000),
+];
+
+/// RAM currently available to MangoCore after static firmware reservations.
+///
+/// `MEMORY_SIZE` is the installed DRAM capacity. Linux-compatible memory
+/// statistics use this smaller value until the board handoff code explicitly
+/// quiesces the firmware owners and releases their carveouts.
+#[cfg(feature = "board_laqemu")]
+pub const USABLE_MEMORY_SIZE: usize = MEMORY_SIZE;
+#[cfg(feature = "board_2k1000")]
+pub const USABLE_MEMORY_SIZE: usize =
+    MEMORY_SIZE - (FIRMWARE_RESERVED_REGIONS[0].1 - FIRMWARE_RESERVED_REGIONS[0].0) - PAGE_SIZE;
 
 pub const SV39_SPACE: usize = 1 << 39;
 pub const USR_SPACE_LEN: usize = SV39_SPACE >> 2;
@@ -79,10 +164,10 @@ pub const USR_VIRT_SPACE_END: usize = USR_SPACE_LEN - 1;
 pub const USER_VA_BASE: usize = LA_START;
 pub const USER_VA_END: usize = LA_START + USR_SPACE_LEN;
 pub const ELF_PIE_BASE: usize = USER_VA_BASE + 0x0040_0000;
-pub const TRAMPOLINE: usize = SIGNAL_TRAMPOLINE; // The trampoline is NOT mapped in LA.
 pub const SIGNAL_TRAMPOLINE: usize = USR_VIRT_SPACE_END - PAGE_SIZE + 1;
-pub const TRAP_CONTEXT_BASE: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
-pub const USR_MMAP_END: usize = TRAP_CONTEXT_BASE - PAGE_SIZE;
+pub const TRAMPOLINE: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
+pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - KERNEL_STACK_MAX_SLOTS * PAGE_SIZE;
+pub const USR_MMAP_END: usize = TRAP_CONTEXT_BASE;
 pub const USR_MMAP_BASE: usize = USR_MMAP_END - USR_SPACE_LEN / 8 + 0x3000;
 pub const TASK_SIZE: usize = USR_MMAP_BASE - USR_SPACE_LEN / 8;
 pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & (!(PAGE_SIZE - 1));
@@ -90,13 +175,66 @@ pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & 
 // 512G的虚拟内存？
 pub const MMAP_BASE: usize = 0xFFFF_FF80_0000_0000;
 pub const MMAP_END: usize = 0xFFFF_FFFF_FFFF_0000;
+#[cfg(feature = "board_laqemu")]
 pub const KERNEL_STACK_TOP: usize = MMAP_BASE - PAGE_SIZE;
+// 当 VALEN=40 时，MMAP_BASE 是高半区第一个规范地址。若将栈放在它下方，会产生
+// 位于非规范空洞中的 0xffffff7... 地址，并在页表转换开始前触发 AddressError。
+// 因此改为从规范高半区顶部向下分配栈槽。
+#[cfg(feature = "board_2k1000")]
+pub const KERNEL_STACK_TOP: usize = MMAP_END - PAGE_SIZE;
 pub const KERNEL_STACK_BOTTOM: usize =
     KERNEL_STACK_TOP - KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS;
+/// 内核临时 ELF 映射的上界。PGDH 负责选择高半区，其下三级页表仅索引 VA[38:12]。
+/// 因此该表达式同时保留真实栈窗口及其最近的低 39 位别名，防止临时 ELF 映射
+/// 覆盖内核栈 PTE。
+pub const KERNEL_PROGRAM_END: usize =
+    (!PAGE_TABLE_VA_MASK) | (KERNEL_STACK_BOTTOM & PAGE_TABLE_VA_MASK);
 pub const SKIP_NUM: usize = 1;
 
-// 0x98000000
+const _: () = {
+    assert!(PALEN > PAGE_SIZE_BITS && PALEN < usize::BITS as usize);
+    assert!(VALEN > PAGE_TABLE_VA_BITS && VALEN < usize::BITS as usize);
+    assert!(VA_MASK & SEG_MASK == 0);
+    assert!(VA_MASK | SEG_MASK == usize::MAX);
+    assert!(VPN_MASK | VPN_SEG_MASK == usize::MAX >> PAGE_SIZE_BITS);
+    assert!(VPPN_MASK == (1usize << (VALEN - PAGE_SIZE_BITS - 1)) - 1);
+    assert!(is_canonical_vaddr(MMAP_BASE));
+    assert!(is_canonical_vaddr(MMAP_END));
+    assert!(is_canonical_vaddr(KERNEL_STACK_BOTTOM));
+    assert!(is_canonical_vaddr(KERNEL_STACK_TOP));
+    assert!(
+        canonicalize_vpn(KERNEL_STACK_TOP >> PAGE_SIZE_BITS) == KERNEL_STACK_TOP >> PAGE_SIZE_BITS
+    );
+    assert!(
+        KERNEL_STACK_TOP - KERNEL_STACK_BOTTOM == KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS
+    );
+    assert!(MMAP_BASE < KERNEL_PROGRAM_END);
+    assert!(KERNEL_PROGRAM_END <= MMAP_END);
+    assert!(KERNEL_PROGRAM_END & PAGE_TABLE_VA_MASK == KERNEL_STACK_BOTTOM & PAGE_TABLE_VA_MASK);
+};
+
+#[cfg(feature = "board_2k1000")]
+const _: () = {
+    assert!(MEMORY_SIZE == 0x1000_0000 + 0x7000_0000);
+    assert!(MEMORY_END == 0x1_0000_0000);
+    assert!(MEMORY_REGIONS[0].1 <= MEMORY_REGIONS[1].0);
+    assert!(FIRMWARE_RESERVED_REGIONS[0].0 % PAGE_SIZE == 0);
+    assert!(FIRMWARE_RESERVED_REGIONS[0].1 % PAGE_SIZE == 0);
+    assert!(MEMORY_REGIONS[0].0 <= FIRMWARE_RESERVED_REGIONS[0].0);
+    assert!(FIRMWARE_RESERVED_REGIONS[0].1 <= MEMORY_REGIONS[0].1);
+    assert!(USABLE_MEMORY_SIZE == 0x7cbf_3000);
+    assert!(KERNEL_STACK_TOP == 0xFFFF_FFFF_FFFE_F000);
+    assert!(KERNEL_STACK_BOTTOM == 0xFFFF_FFFF_F7BE_F000);
+    assert!(KERNEL_PROGRAM_END == KERNEL_STACK_BOTTOM);
+};
+
+// QEMU 将传统内存磁盘镜像放在 RAM 起点以上 256MiB 处。
+#[cfg(feature = "board_laqemu")]
 pub const DISK_IMAGE_BASE: usize = 0x1000_0000 + MEMORY_START;
+// 2K1000 上板阶段不启用该旧内存根路径；将占位地址放到帧分配器管理范围之外，避免与
+// 内核镜像发生冲突。
+#[cfg(feature = "board_2k1000")]
+pub const DISK_IMAGE_BASE: usize = MEMORY_END;
 // 256
 pub const BUFFER_CACHE_NUM: usize = 256 * 1024 * 1024 / 2048 * 4 / 2048;
 
@@ -139,12 +277,15 @@ macro_rules! def_cpu_cfg {
     };
 }
 def_cpu_cfg!(CPUCfg0, 0);
+def_cpu_cfg!(CPUCfg1, 1);
 def_cpu_cfg!(CPUCfg4, 4);
 def_cpu_cfg!(CPUCfg5, 5);
-impl CPUCfg0 {
+impl CPUCfg1 {
+    /// CPUCFG1.VABITS 的第 19:12 位保存硬件实现位宽减一后的值。
     pub fn get_valen(&self) -> usize {
         (self.get_bits(12, 19) + 1) as usize
     }
+    /// CPUCFG1.PABITS 的第 11:4 位保存硬件实现位宽减一后的值。
     pub fn get_palen(&self) -> usize {
         (self.get_bits(4, 11) + 1) as usize
     }
@@ -159,7 +300,7 @@ macro_rules! newline {
 #[macro_export]
 macro_rules! should_map_trampoline {
     () => {
-        false
+        true
     };
 }
 

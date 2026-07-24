@@ -6,9 +6,7 @@ use spin::{Mutex, MutexGuard};
 
 use crate::fs::{
     dev::DEV_FS,
-    vfs::{
-        File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata,
-    },
+    vfs::{File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata},
 };
 use crate::mm::{copy_from_user, UserBufferReader, UserBufferWriter};
 use crate::syscall::errno::*;
@@ -244,11 +242,7 @@ fn read_attr<T: Copy + Default + 'static>(
         return Err(EINVAL);
     }
     let mut out = T::default();
-    copy_from_user(
-        current_user_token(),
-        attr as *const T,
-        &mut out as *mut T,
-    )?;
+    copy_from_user(current_user_token(), attr as *const T, &mut out as *mut T)?;
     Ok(out)
 }
 

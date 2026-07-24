@@ -194,6 +194,10 @@ uint32_t ext4_inodes_in_group_cnt(struct ext4_sblock *s, uint32_t bgid);
 
 /***************************Read/write/check superblock**********************/
 
+/**@brief   Recalculate the primary superblock checksum in memory.
+ * @param   s superblock descriptor */
+void ext4_sb_set_csum(struct ext4_sblock *s);
+
 /**@brief   Superblock write.
  * @param   bdev block device descriptor.
  * @param   s superblock descriptor

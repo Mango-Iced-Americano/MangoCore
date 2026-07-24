@@ -15,6 +15,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "net_perf_diag")]
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
@@ -28,14 +30,114 @@ use smoltcp::{
 /// # Locking
 ///
 /// 内部使用 `Mutex<Option<NetInterfaceInner>>` 保护。`init()` 完成后 `inner` 始终为
-/// `Some(…)`。`try_poll()` / `try_poll_stack()` 通过 `try_lock()` 实现无 spin 的快速
-/// 路径，适合中断上下文调用。
+/// `Some(…)`。`try_poll_irq()` 通过 `try_lock()` 实现无 spin 的中断路径，
+/// 并把需要其他子系统锁的 DHCP 租约提交延迟到任务上下文。
 ///
 /// # Ownership
 ///
 /// `DeviceStack` 仅存储在 `NetInterfaceInner::stacks` 中。`add_veth_stack()`
 /// / `remove_veth_stack()` 管理 veth 设备的全局注册，调用者负责传入正确的 `Arc<dyn Iface>`。
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
+
+#[cfg(feature = "net_perf_diag")]
+const NET_PERF_REPORT_INTERVAL_SECS: usize = 2;
+#[cfg(feature = "net_perf_diag")]
+const NET_PERF_TIME_CHECK_MASK: usize = 0xff;
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_POLL_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_LAST_REPORT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_FULL_POLLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_FULL_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_STACK_POLLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_STACK_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_LOCK_BUSY: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_POLL_TICKS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "net_perf_diag")]
+static NET_PERF_POLL_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "net_perf_diag")]
+fn record_poll_perf(stack_only: bool, progressed: bool, lock_busy: bool, elapsed_ticks: usize) {
+    if stack_only {
+        NET_PERF_STACK_POLLS.fetch_add(1, AtomicOrdering::Relaxed);
+        if progressed {
+            NET_PERF_STACK_PROGRESS.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    } else {
+        NET_PERF_FULL_POLLS.fetch_add(1, AtomicOrdering::Relaxed);
+        if progressed {
+            NET_PERF_FULL_PROGRESS.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+    if lock_busy {
+        NET_PERF_LOCK_BUSY.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    NET_PERF_POLL_TICKS.fetch_add(elapsed_ticks, AtomicOrdering::Relaxed);
+    NET_PERF_POLL_TICKS_MAX.fetch_max(elapsed_ticks, AtomicOrdering::Relaxed);
+
+    let samples = NET_PERF_POLL_SAMPLES.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    if samples & NET_PERF_TIME_CHECK_MASK != 0 {
+        return;
+    }
+
+    let now = crate::hal::get_time();
+    let frequency = crate::hal::get_clock_freq().max(1);
+    let previous = NET_PERF_LAST_REPORT.load(AtomicOrdering::Relaxed);
+    if previous == 0 {
+        let _ = NET_PERF_LAST_REPORT.compare_exchange(
+            0,
+            now,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        );
+        return;
+    }
+    let elapsed_ticks = now.wrapping_sub(previous);
+    if elapsed_ticks < frequency.saturating_mul(NET_PERF_REPORT_INTERVAL_SECS) {
+        return;
+    }
+    if NET_PERF_LAST_REPORT
+        .compare_exchange(
+            previous,
+            now,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let elapsed_ms = elapsed_ticks.saturating_mul(1000) / frequency;
+    let full_polls = NET_PERF_FULL_POLLS.swap(0, AtomicOrdering::Relaxed);
+    let full_progress = NET_PERF_FULL_PROGRESS.swap(0, AtomicOrdering::Relaxed);
+    let stack_polls = NET_PERF_STACK_POLLS.swap(0, AtomicOrdering::Relaxed);
+    let stack_progress = NET_PERF_STACK_PROGRESS.swap(0, AtomicOrdering::Relaxed);
+    let lock_busy = NET_PERF_LOCK_BUSY.swap(0, AtomicOrdering::Relaxed);
+    let poll_ticks = NET_PERF_POLL_TICKS.swap(0, AtomicOrdering::Relaxed);
+    let poll_ticks_max = NET_PERF_POLL_TICKS_MAX.swap(0, AtomicOrdering::Relaxed);
+    let poll_permille = poll_ticks.saturating_mul(1000) / elapsed_ticks.max(1);
+    let poll_count = full_polls.saturating_add(stack_polls);
+    let poll_ticks_avg = poll_ticks / poll_count.max(1);
+    println!(
+        "[net-perf][poll] dt_ms={} full={}/{} stack={}/{} lock_busy={} cpu_permille={} ticks_avg={} ticks_max={}",
+        elapsed_ms,
+        full_progress,
+        full_polls,
+        stack_progress,
+        stack_polls,
+        lock_busy,
+        poll_permille,
+        poll_ticks_avg,
+        poll_ticks_max
+    );
+}
 
 /// 初始化网络子系统。必须先调用 `net_core::init()` 注册 lo/eth0 设备，
 /// 再调用本函数创建对应的 `smoltcp::Interface` 并启动 DHCP 探测。
@@ -48,10 +150,17 @@ pub fn init() {
     let has_nic = NET_DEVICE.lock().is_some();
     net_core::init();
     NET_INTERFACE.init();
+    #[cfg(feature = "net_perf_diag")]
+    println!(
+        "[net-perf] tcp_buffer rx={} tx={} listen={} bytes",
+        crate::net::socket::inet::stream::inner::DEFAULT_RX_BUF_SIZE,
+        crate::net::socket::inet::stream::inner::DEFAULT_TX_BUF_SIZE,
+        crate::net::socket::inet::stream::inner::LISTEN_BUFFER_SIZE
+    );
     if has_nic {
-        println!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
+        boot_trace!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
     } else {
-        println!("[kernel] net interface initialized (loopback only, no NIC)");
+        boot_trace!("[kernel] net interface initialized (loopback only, no NIC)");
     }
 }
 
@@ -60,9 +169,8 @@ pub fn init() {
 ///
 /// # Locking
 ///
-/// 所有公开方法获取 `self.inner` 锁。`try_poll()` / `try_poll_stack()` 使用
-/// `try_lock()` 避免在中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，
-/// 不能从持锁路径中重入。
+/// 所有公开方法获取 `self.inner` 锁。`try_poll_irq()` 使用 `try_lock()` 避免在
+/// 中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，不能从持锁路径中重入。
 ///
 /// # Ownership
 ///
@@ -85,6 +193,105 @@ pub struct DeviceStack<'a> {
     pub device: IfaceDevice,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
+    /// Persistent DHCP socket for interfaces that require lease renewal.
+    pub dhcp_handle: Option<SocketHandle>,
+    /// Latest lease event awaiting commit outside interrupt context.
+    pending_dhcp_event: Option<DhcpLeaseEvent>,
+}
+
+enum DhcpLeaseEvent {
+    Configured {
+        address: smoltcp::wire::Ipv4Cidr,
+        router: Option<smoltcp::wire::Ipv4Address>,
+        dns_servers: Vec<smoltcp::wire::Ipv4Address>,
+    },
+    Deconfigured,
+}
+
+fn take_dhcp_event(stack: &mut DeviceStack<'_>) -> Option<DhcpLeaseEvent> {
+    let handle = stack.dhcp_handle?;
+    let event = match stack.sockets.get_mut::<dhcpv4::Socket>(handle).poll()? {
+        dhcpv4::Event::Configured(config) => DhcpLeaseEvent::Configured {
+            address: config.address,
+            router: config.router,
+            dns_servers: config.dns_servers.iter().copied().collect(),
+        },
+        dhcpv4::Event::Deconfigured => DhcpLeaseEvent::Deconfigured,
+    };
+
+    match &event {
+        DhcpLeaseEvent::Configured {
+            address, router, ..
+        } => {
+            stack.iface.update_ip_addrs(|addrs| {
+                addrs.retain(|cidr| !matches!(cidr, IpCidr::Ipv4(_)));
+                let _ = addrs.push(IpCidr::Ipv4(*address));
+            });
+            stack.iface.routes_mut().remove_default_ipv4_route();
+            if let Some(router) = router {
+                if stack
+                    .iface
+                    .routes_mut()
+                    .add_default_ipv4_route(*router)
+                    .is_err()
+                {
+                    log::error!("[net::dhcp] smoltcp route table is full");
+                }
+            }
+        }
+        DhcpLeaseEvent::Deconfigured => {
+            stack.iface.update_ip_addrs(|addrs| {
+                addrs.retain(|cidr| !matches!(cidr, IpCidr::Ipv4(_)));
+            });
+            stack.iface.routes_mut().remove_default_ipv4_route();
+        }
+    }
+    Some(event)
+}
+
+fn capture_dhcp_event(stack: &mut DeviceStack<'_>) -> bool {
+    match take_dhcp_event(stack) {
+        Some(event) => {
+            // Only the newest state matters: Configured followed by
+            // Deconfigured must not briefly publish the stale lease.
+            stack.pending_dhcp_event = Some(event);
+            true
+        }
+        None => false,
+    }
+}
+
+fn commit_dhcp_event(ifindex: u32, event: DhcpLeaseEvent) {
+    match event {
+        DhcpLeaseEvent::Configured {
+            address,
+            router,
+            dns_servers,
+        } => {
+            let cidr = IpCidr::Ipv4(address);
+            net_core::set_eth0_ipv4(cidr);
+            net_core::set_default_gateway(router);
+            net_core::set_dns_servers(&dns_servers);
+            net_core::current_netns()
+                .router
+                .lock()
+                .replace_dhcp_ipv4(ifindex, Some(cidr), router);
+            println!(
+                "[net] DHCP configured eth0={:?} gateway={:?} dns={:?}",
+                address, router, dns_servers
+            );
+        }
+        DhcpLeaseEvent::Deconfigured => {
+            net_core::clear_eth0_ipv4();
+            net_core::set_default_gateway(None);
+            net_core::set_dns_servers(&[]);
+            net_core::current_netns()
+                .router
+                .lock()
+                .replace_dhcp_ipv4(ifindex, None, None);
+            println!("[net] DHCP lease lost on eth0; discovery restarted");
+        }
+    }
 }
 
 /// `NetInterfaceInner` 持有所有 `DeviceStack`、socket 路由绑定表和 socket ID 计数器。
@@ -102,7 +309,9 @@ pub struct NetInterfaceInner<'a> {
 
 impl<'a> NetInterfaceInner<'a> {
     pub(crate) fn stack_mut(&mut self, ifindex: u32) -> Option<&mut DeviceStack<'a>> {
-        self.stacks.iter_mut().find(|s| s.nic.nic_id() as u32 == ifindex)
+        self.stacks
+            .iter_mut()
+            .find(|s| s.nic.nic_id() as u32 == ifindex)
     }
 
     fn resolve(&self, rh: RouteSocketHandle) -> Option<SocketHandle> {
@@ -122,7 +331,9 @@ impl<'a> NetInterfaceInner<'a> {
                     crate::net::net_core::DeviceKind::Loopback,
                     [0u8; 6],
                     65536,
-                    crate::net::net_core::IFF_UP | crate::net::net_core::IFF_LOOPBACK | crate::net::net_core::IFF_RUNNING,
+                    crate::net::net_core::IFF_UP
+                        | crate::net::net_core::IFF_LOOPBACK
+                        | crate::net::net_core::IFF_RUNNING,
                     vec![
                         IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
                         IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
@@ -139,14 +350,20 @@ impl<'a> NetInterfaceInner<'a> {
             let mut lo_iface = Interface::new(lo_config, &mut lo_device, now);
             let mut lo_sockets = SocketSet::new(vec![]);
             lo_iface.update_ip_addrs(|addrs| {
-                addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
-                addrs.push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128)).unwrap();
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+                    .unwrap();
+                addrs
+                    .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
+                    .unwrap();
             });
             stacks.push(DeviceStack {
                 nic: lo_nic,
                 device: lo_device,
                 iface: lo_iface,
                 sockets: lo_sockets,
+                dhcp_handle: None,
+                pending_dhcp_event: None,
             });
         }
 
@@ -154,13 +371,21 @@ impl<'a> NetInterfaceInner<'a> {
         let (eth_adapter, hw_addr, has_real_nic) = match NET_DEVICE.lock().take() {
             Some(net_device) => {
                 let mac = net_device.mac_address();
-                (SmoltcpDeviceAdapter::new(net_device), EthernetAddress(mac), true)
+                (
+                    SmoltcpDeviceAdapter::new(net_device),
+                    EthernetAddress(mac),
+                    true,
+                )
             }
             None => {
-                println!("[kernel] No net device, using null device (loopback only)");
+                boot_trace!("[kernel] No net device, using null device (loopback only)");
                 let null_dev = Arc::new(NullNetDevice);
                 let null_mac = [0x02u8, 0, 0, 0, 0, 1];
-                (SmoltcpDeviceAdapter::new(null_dev), EthernetAddress(null_mac), false)
+                (
+                    SmoltcpDeviceAdapter::new(null_dev),
+                    EthernetAddress(null_mac),
+                    false,
+                )
             }
         };
 
@@ -186,7 +411,35 @@ impl<'a> NetInterfaceInner<'a> {
             let eth_config = Config::new(HardwareAddress::Ethernet(hw_addr));
             let mut eth_iface = Interface::new(eth_config, &mut eth_device, now);
             let mut eth_sockets = SocketSet::new(vec![]);
+            let mut runtime_dhcp_handle = None;
 
+            #[cfg(all(
+                feature = "board_2k1000",
+                feature = "gmac_2k1000",
+                not(feature = "gmac_dhcp")
+            ))]
+            if has_real_nic {
+                let static_cidr = IpCidr::new(IpAddress::v4(192, 168, 9, 20), 24);
+                net_core::set_eth0_ipv4(static_cidr);
+                net_core::set_default_gateway(None);
+                println!("[net] eth0 static address 192.168.9.20/24");
+            }
+
+            #[cfg(all(feature = "board_2k1000", feature = "gmac_dhcp"))]
+            if has_real_nic {
+                let mut dhcp_socket = dhcpv4::Socket::new();
+                dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
+                    discover_timeout: Duration::from_secs(2),
+                    initial_request_timeout: Duration::from_secs(1),
+                    request_retries: 3,
+                    min_renew_timeout: Duration::from_secs(60),
+                    ..dhcpv4::RetryConfig::default()
+                });
+                runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+                println!("[net] eth0 DHCP client started");
+            }
+
+            #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
             if has_real_nic {
                 // DHCP probe
                 let mut dhcp_socket = dhcpv4::Socket::new();
@@ -198,12 +451,12 @@ impl<'a> NetInterfaceInner<'a> {
                     ..dhcpv4::RetryConfig::default()
                 });
                 let dhcp_handle = eth_sockets.add(dhcp_socket);
-                let deadline = Instant::from_millis(
-                    current_time_duration().as_millis() as i64 + 5000,
-                );
+                let deadline =
+                    Instant::from_millis(current_time_duration().as_millis() as i64 + 5000);
 
                 loop {
-                    let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+                    let timestamp =
+                        Instant::from_millis(current_time_duration().as_millis() as i64);
                     *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
                     eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
 
@@ -212,10 +465,13 @@ impl<'a> NetInterfaceInner<'a> {
                         Some(dhcpv4::Event::Configured(cfg)) => {
                             net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
                             net_core::set_default_gateway(cfg.router);
+                            let dns_servers: Vec<_> = cfg.dns_servers.iter().copied().collect();
+                            net_core::set_dns_servers(&dns_servers);
                             log::info!(
-                                "[net::config] DHCP: got IP {:?} gateway {:?}",
+                                "[net::config] DHCP: got IP {:?} gateway {:?} DNS {:?}",
                                 cfg.address,
-                                cfg.router
+                                cfg.router,
+                                dns_servers
                             );
                             break;
                         }
@@ -258,6 +514,8 @@ impl<'a> NetInterfaceInner<'a> {
                 device: eth_device,
                 iface: eth_iface,
                 sockets: eth_sockets,
+                dhcp_handle: runtime_dhcp_handle,
+                pending_dhcp_event: None,
             });
         }
 
@@ -295,7 +553,14 @@ impl<'a> NetInterface<'a> {
     where
         T: AnySocket<'a>,
     {
-        Some(self.inner.lock().as_mut()?.stack_mut(ifindex)?.sockets.add(socket))
+        Some(
+            self.inner
+                .lock()
+                .as_mut()?
+                .stack_mut(ifindex)?
+                .sockets
+                .add(socket),
+        )
     }
 
     /// Add a veth device as a DeviceStack into NET_INTERFACE.
@@ -315,6 +580,8 @@ impl<'a> NetInterface<'a> {
                 device: veth_device,
                 iface: veth_iface,
                 sockets: veth_sockets,
+                dhcp_handle: None,
+                pending_dhcp_event: None,
             });
         }
     }
@@ -397,10 +664,8 @@ impl<'a> NetInterface<'a> {
 
     /// Return the ifindex of every currently-registered DeviceStack.
     pub fn stack_ifindexes(&self) -> Vec<u32> {
-        self.inner_handler(|inner| {
-            inner.stacks.iter().map(|s| s.nic.nic_id() as u32).collect()
-        })
-        .unwrap_or_default()
+        self.inner_handler(|inner| inner.stacks.iter().map(|s| s.nic.nic_id() as u32).collect())
+            .unwrap_or_default()
     }
 
     /// 返回 (tcp_count, udp_count, raw_count, pending_remove)
@@ -411,15 +676,21 @@ impl<'a> NetInterface<'a> {
         // UDP: count via inner sockets (only if initialized)
         let udp = match self.inner.lock().as_ref() {
             Some(inner) => {
-                let tcp_count = inner.stacks.iter()
+                let tcp_count = inner
+                    .stacks
+                    .iter()
                     .flat_map(|s| s.sockets.iter())
                     .filter(|(_h, sock)| matches!(sock, smoltcp::socket::Socket::Tcp(_)))
                     .count();
-                let raw_count = inner.stacks.iter()
+                let raw_count = inner
+                    .stacks
+                    .iter()
                     .flat_map(|s| s.sockets.iter())
                     .filter(|(_h, sock)| matches!(sock, smoltcp::socket::Socket::Raw(_)))
                     .count();
-                inner.stacks.iter()
+                inner
+                    .stacks
+                    .iter()
                     .flat_map(|s| s.sockets.iter())
                     .count()
                     .saturating_sub(tcp_count)
@@ -432,23 +703,94 @@ impl<'a> NetInterface<'a> {
 
     pub fn poll(&self) {
         if self.inner.lock().is_none() {
+            crate::task::perf::record_net_poll(false, false);
+            #[cfg(feature = "net_perf_diag")]
+            record_poll_perf(false, false, false, 0);
             return;
         }
-        self.poll_once();
+        #[cfg(feature = "net_perf_diag")]
+        let poll_start = crate::hal::get_time();
+        let progressed = self.poll_once(true);
+        crate::task::perf::record_net_poll(progressed, false);
+        #[cfg(feature = "net_perf_diag")]
+        record_poll_perf(
+            false,
+            progressed,
+            false,
+            crate::hal::get_time().wrapping_sub(poll_start),
+        );
     }
 
-    /// Non-blocking poll: skip if the inner lock is already held
-    /// (e.g., a syscall handler is already polling).
-    /// Safe for use in interrupt contexts — never spins.
+    /// Non-blocking task-context poll: skip if the inner lock is already held.
+    /// Lease events are committed after the interface lock is released.
     pub fn try_poll(&self) -> bool {
         let guard = self.inner.try_lock();
         match guard {
             Some(inner) if inner.is_some() => {
                 drop(inner);
-                self.poll_once();
+                #[cfg(feature = "net_perf_diag")]
+                let poll_start = crate::hal::get_time();
+                let progressed = self.poll_once(true);
+                crate::task::perf::record_net_poll(progressed, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(
+                    false,
+                    progressed,
+                    false,
+                    crate::hal::get_time().wrapping_sub(poll_start),
+                );
                 true
             }
-            _ => false, // lock held by another context, or NetInterface not yet initialized
+            Some(_) => {
+                crate::task::perf::record_net_poll(false, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, false, 0);
+                false
+            }
+            None => {
+                crate::task::perf::record_net_poll(false, true);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, true, 0);
+                false
+            }
+        }
+    }
+
+    /// Interrupt-safe non-blocking poll.
+    ///
+    /// smoltcp may consume a DHCP event here, but publishing that lease needs
+    /// device-list and router locks. The event is retained in DeviceStack and
+    /// committed by the next task-context poll.
+    pub fn try_poll_irq(&self) -> bool {
+        let guard = self.inner.try_lock();
+        match guard {
+            Some(inner) if inner.is_some() => {
+                drop(inner);
+                #[cfg(feature = "net_perf_diag")]
+                let poll_start = crate::hal::get_time();
+                let progressed = self.poll_once(false);
+                crate::task::perf::record_net_poll(progressed, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(
+                    false,
+                    progressed,
+                    false,
+                    crate::hal::get_time().wrapping_sub(poll_start),
+                );
+                true
+            }
+            Some(_) => {
+                crate::task::perf::record_net_poll(false, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, false, 0);
+                false
+            }
+            None => {
+                crate::task::perf::record_net_poll(false, true);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(false, false, true, 0);
+                false
+            }
         }
     }
     /// Non-blocking poll ONLY the specified stack (by ifindex).
@@ -457,15 +799,30 @@ impl<'a> NetInterface<'a> {
     pub fn try_poll_stack(&self, ifindex: u32) -> bool {
         let mut guard = match self.inner.try_lock() {
             Some(g) => g,
-            None => return false,
+            None => {
+                crate::task::perf::record_net_poll(false, true);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, true, 0);
+                return false;
+            }
         };
         let inner = match guard.as_mut() {
             Some(i) => i,
-            None => return false,
+            None => {
+                crate::task::perf::record_net_poll(false, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, false, 0);
+                return false;
+            }
         };
         let stack = match inner.stack_mut(ifindex) {
             Some(s) => s,
-            None => return false,
+            None => {
+                crate::task::perf::record_net_poll(false, false);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, false, 0);
+                return false;
+            }
         };
 
         use crate::net::neighbour::CURRENT_POLL_IFINDEX;
@@ -475,39 +832,75 @@ impl<'a> NetInterface<'a> {
         *CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
+        #[cfg(feature = "net_perf_diag")]
+        let poll_start = crate::hal::get_time();
+        let mut progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
+        progressed |= capture_dhcp_event(stack);
+        let dhcp_event = stack
+            .pending_dhcp_event
+            .take()
+            .map(|event| (ifindex, event));
         dispatch_udp_packets(&mut stack.sockets);
         drop(guard);
+
+        if let Some((ifindex, event)) = dhcp_event {
+            commit_dhcp_event(ifindex, event);
+        }
 
         if progressed {
             crate::net::wake_tcp_waiters();
             crate::net::wake_raw_waiters();
         }
+        crate::task::perf::record_net_poll(progressed, false);
         crate::net::wake_tcp_accept_waiters();
+        #[cfg(feature = "net_perf_diag")]
+        record_poll_perf(
+            true,
+            progressed,
+            false,
+            crate::hal::get_time().wrapping_sub(poll_start),
+        );
         progressed
     }
 
-    fn poll_once(&self) -> bool {
+    fn poll_once(&self, commit_dhcp: bool) -> bool {
         let mut progressed = false;
+        let mut dhcp_events = Vec::new();
         self.inner_handler(|inner| {
             // Pre-collect all removal handles with their ifindex
             let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
             let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
 
             for stack in inner.stacks.iter_mut() {
@@ -530,7 +923,9 @@ impl<'a> NetInterface<'a> {
                     let nic_id = stack.nic.nic_id() as u32;
                     if let IfaceDevice::Veth(ref veth_driver) = stack.device {
                         let rx_queue = veth_driver.inner.rx_queue.lock();
-                        crate::net::socket::packet::deliver_frames_from_veth_queue(nic_id, &rx_queue);
+                        crate::net::socket::packet::deliver_frames_from_veth_queue(
+                            nic_id, &rx_queue,
+                        );
                     }
                 }
 
@@ -539,10 +934,20 @@ impl<'a> NetInterface<'a> {
                 progressed |= stack
                     .iface
                     .poll(timestamp, &mut stack.device, &mut stack.sockets);
+                if capture_dhcp_event(stack) {
+                    progressed = true;
+                }
+                if commit_dhcp {
+                    if let Some(event) = stack.pending_dhcp_event.take() {
+                        dhcp_events.push((stack.nic.nic_id() as u32, event));
+                    }
+                }
 
                 // 3. Clean up TCP sockets belonging to this stack
                 for (resolved, ifindex, rh) in &tcp_removes {
-                    if *ifindex as usize != stack.nic.nic_id() { continue; }
+                    if *ifindex as usize != stack.nic.nic_id() {
+                        continue;
+                    }
                     let can_remove = match resolved {
                         Some(h) => {
                             let socket = stack.sockets.get::<tcp::Socket>(*h);
@@ -564,6 +969,9 @@ impl<'a> NetInterface<'a> {
                 dispatch_udp_packets(&mut stack.sockets);
             }
         });
+        for (ifindex, event) in dhcp_events {
+            commit_dhcp_event(ifindex, event);
+        }
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
         if progressed {
             crate::net::wake_tcp_waiters();
@@ -588,21 +996,37 @@ impl<'a> NetInterface<'a> {
         self.inner_handler(|inner| {
             let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
             let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| {
-                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex)
-                        .or_else(|| crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex))
-                        .unwrap_or(1);
-                    (inner.resolve(rh), ifindex, rh)
-                }).collect()
+                to_remove
+                    .drain(..)
+                    .map(|rh| {
+                        let ifindex = inner
+                            .bindings
+                            .get(&rh)
+                            .map(|b| b.ifindex)
+                            .or_else(|| {
+                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
+                            })
+                            .unwrap_or(1);
+                        (inner.resolve(rh), ifindex, rh)
+                    })
+                    .collect()
             };
 
             for stack in inner.stacks.iter_mut() {
@@ -622,7 +1046,9 @@ impl<'a> NetInterface<'a> {
                     let nic_id = stack.nic.nic_id() as u32;
                     if let IfaceDevice::Veth(ref veth_driver) = stack.device {
                         let rx_queue = veth_driver.inner.rx_queue.lock();
-                        crate::net::socket::packet::deliver_frames_from_veth_queue(nic_id, &rx_queue);
+                        crate::net::socket::packet::deliver_frames_from_veth_queue(
+                            nic_id, &rx_queue,
+                        );
                     }
                 }
 
@@ -633,7 +1059,9 @@ impl<'a> NetInterface<'a> {
                 );
 
                 for (resolved, ifindex, rh) in &tcp_removes {
-                    if *ifindex as usize != stack.nic.nic_id() { continue; }
+                    if *ifindex as usize != stack.nic.nic_id() {
+                        continue;
+                    }
                     let can_remove = match resolved {
                         Some(h) => {
                             let socket = stack.sockets.get::<tcp::Socket>(*h);
@@ -685,9 +1113,7 @@ impl<'a> NetInterface<'a> {
     {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let target_ifindex = net_core::default_iface()
-            .map(|d| d.ifindex)
-            .unwrap_or(1);
+        let target_ifindex = net_core::default_iface().map(|d| d.ifindex).unwrap_or(1);
         let stack = inner_ref.stack_mut(target_ifindex)?;
         let handle = stack.sockets.add(socket);
         let id = inner_ref.next_socket_id;
@@ -818,52 +1244,6 @@ impl<'a> NetInterface<'a> {
                 proto: InetProtocol::Udp,
             },
         );
-        Some(rh)
-    }
-
-    pub fn rebind_routed_raw(
-        &self,
-        rh: RouteSocketHandle,
-        new_ifindex: u32,
-        ip_version: smoltcp::wire::IpVersion,
-        ip_protocol: smoltcp::wire::IpProtocol,
-    ) -> Option<RouteSocketHandle> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let old_binding = inner_ref.bindings.remove(&rh)?;
-        if old_binding.ifindex == new_ifindex {
-            inner_ref.bindings.insert(rh, old_binding);
-            return Some(rh);
-        }
-        let rx_buf = raw::PacketBuffer::new(
-            vec![raw::PacketMetadata::EMPTY; 128],
-            vec![0u8; crate::net::MAX_BUFFER_SIZE],
-        );
-        let tx_buf = raw::PacketBuffer::new(
-            vec![raw::PacketMetadata::EMPTY; 128],
-            vec![0u8; crate::net::MAX_BUFFER_SIZE],
-        );
-        let new_socket = raw::Socket::new(
-            ip_version,
-            ip_protocol,
-            rx_buf,
-            tx_buf,
-        );
-        {
-            let old_stack = inner_ref.stack_mut(old_binding.ifindex)?;
-            old_stack.sockets.remove(old_binding.handle);
-        }
-        let new_stack = inner_ref.stack_mut(new_ifindex)?;
-        let new_handle = new_stack.sockets.add(new_socket);
-        inner_ref.bindings.insert(
-            rh,
-            SocketBinding {
-                ifindex: new_ifindex,
-                handle: new_handle,
-                proto: InetProtocol::Raw,
-            },
-        );
-        log::info!("[net] rebind_routed_raw {} from if={} to if={}", rh, old_binding.ifindex, new_ifindex);
         Some(rh)
     }
 

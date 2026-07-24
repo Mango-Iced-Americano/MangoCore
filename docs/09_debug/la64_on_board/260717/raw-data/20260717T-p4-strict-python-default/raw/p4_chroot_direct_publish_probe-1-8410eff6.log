@@ -1,0 +1,7 @@
+2026-07-17T13:07:03.868164Z __PERF_BEGIN_p4_chroot_direct_publish_probe-1-8410eff6__
+2026-07-17T13:07:04.835458Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_chroot_direct_publish_probe-1-8410eff6_TRACE_OFF__
+2026-07-17T13:07:07.659861Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_chroot_direct_publish_probe-1-8410eff6__
+2026-07-17T13:07:07.786343Z DIRECT_PUBLISH_PASS
+2026-07-17T13:07:07.791893Z __PERF_WORK_END_p4_chroot_direct_publish_probe-1-8410eff6__
+2026-07-17T13:07:07.797587Z __PERF_ACK_p4_chroot_direct_publish_probe-1-8410eff6_WORK__
+2026-07-17T13:07:08.321686Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_chroot_direct_publish_probe-1-8410eff6__ rc=0

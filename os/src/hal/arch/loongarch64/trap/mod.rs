@@ -8,6 +8,7 @@ mod mem_access;
 use self::context::GeneralRegs;
 
 use super::register::{self, Exception, Interrupt, Trap, ERA};
+use super::tlb::{ASID_NONE, KERN_ASID};
 use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
 use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
@@ -23,10 +24,14 @@ use crate::task::{
     current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
-use core::arch::{asm, global_asm};
+use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
-pub use context::{MachineContext, TrapContext, UserContext, UserSignalMask};
+#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+static BOARD_FIRST_TRAP_RETURN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub use context::{LsxRegs, MachineContext, TrapContext, UserContext, UserSignalMask};
 use register::{
     BadV, EStat, TLBRBadV, TLBREHi, TLBRELo0, TLBRELo1, TLBRPrMd, PGD, PGDH, PGDL, PWCH, PWCL,
     TLBRERA,
@@ -44,14 +49,13 @@ extern "C" {
 
 #[allow(unused)]
 #[link_section = ".text.__rfill"]
-#[naked]
+#[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn __rfill() {
     //crmd = 0b0_01_01_10_0_00;
     //         w_dm_df_pd_i_lv;
     // let i = 0xA8;
-    unsafe {
-        asm!(
+    naked_asm!(
             // PGD: 0x1b CRMD:0x0 PWCL:0x1c TLBRBADV:0x89 TLBERA:0x8a TLBRSAVE:0x8b SAVE:0x30
             // TLBREHi: 0x8e STLBPS: 0x1e MERRsave:0x95
             "
@@ -95,6 +99,9 @@ pub extern "C" fn __rfill() {
     ertn
 1:
     csrrd  $t0, 0x8e
+    # TLBREHI.PS 可能保留固件或上一次 TLB 重填的状态。若不先清除第 5:0 位，
+    # 直接与 0xC 按位或无法保证得到 4KiB 所需的 PS=12。
+    bstrins.d $t0, $zero, 5, 0
     ori    $t0, $t0, 0xC
     csrwr  $t0, 0x8e
 
@@ -106,10 +113,8 @@ pub extern "C" fn __rfill() {
     csrrd  $t0, 0x8c
     csrwr  $t0, 0x8d
     b      2b
-",
-            options(noreturn)
-        )
-    }
+"
+    )
 }
 
 pub fn init() {
@@ -198,8 +203,10 @@ pub fn trap_handler() -> ! {
             }
             inner.update_process_times_leave_trap(cause);
         }
-        let _trap_ticks = crate::task::perf::perf_time_now() - _trap_start;
-        crate::task::perf::record_trap_cost_ticks(_trap_ticks);
+        if _trap_start != 0 {
+            let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
+            crate::task::perf::record_trap_cost_ticks(_trap_ticks);
+        }
         trap_return();
     }
 
@@ -231,8 +238,15 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::PageNonExecutableFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
+            let _pf_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             crate::task::perf::record_page_fault();
-            match mset_lock.do_page_fault(addr, access) {
+            let pf_result = mset_lock.do_page_fault(addr, access);
+            crate::task::perf::record_pagefault_time_us(
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .saturating_sub(_pf_start),
+            );
+            match pf_result {
                 Err(error) => match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
@@ -302,6 +316,7 @@ pub fn trap_handler() -> ! {
             read_bp();
         }
         Trap::Exception(Exception::AddressNotAligned) => {
+            let unaligned_start = crate::task::perf::perf_time_now();
             let cx = current_trap_cx();
             let token = current_user_token();
             let pc = cx.gp.pc;
@@ -316,11 +331,13 @@ pub fn trap_handler() -> ! {
             let addr = BadV::read().get_vaddr();
             //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
             let sz = op.get_size();
+            let is_store = op.is_store();
+            let is_float = op.is_float_op();
             let is_aligned: bool = addr % sz == 0;
             if !is_aligned {
                 assert!([2, 4, 8].contains(&sz));
-                if op.is_store() {
-                    let mut rd = if !op.is_float_op() {
+                if is_store {
+                    let mut rd = if !is_float {
                         cx.gp[ins.get_rd_num()]
                     } else {
                         cx.fp.f[ins.get_rd_num()]
@@ -347,7 +364,7 @@ pub fn trap_handler() -> ! {
                             _ => unreachable!(),
                         }
                     }
-                    if !op.is_float_op() {
+                    if !is_float {
                         cx.gp[ins.get_rd_num()] = rd;
                     } else {
                         cx.fp.f[ins.get_rd_num()] = rd;
@@ -362,6 +379,12 @@ pub fn trap_handler() -> ! {
                     pc
                 );
             }
+            crate::task::perf::record_user_unaligned_trap(
+                unaligned_start,
+                is_store,
+                sz,
+                is_float,
+            );
         }
         Trap::Interrupt(Interrupt::IPI)
         | Trap::MachineError(_)
@@ -415,17 +438,49 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    let trace_first_return =
+        !BOARD_FIRST_TRAP_RETURN.swap(true, core::sync::atomic::Ordering::Relaxed);
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    if trace_first_return {
+        println!("[bringup][user:01] first task reached trap_return");
+    }
     let task = do_signal();
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    if trace_first_return {
+        println!("[bringup][user:02] initial signal check complete");
+    }
     set_user_trap_entry();
     let trap_cx = task.acquire_inner_lock().get_trap_cx();
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
     trap_cx.sstatus.set_pplv(3).set_pie(true);
-    let asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+    let allocated_asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+    // ASID_NONE 是软件分配失败哨兵，不是硬件 ASID。这里使用保留的内核 ASID 0；
+    // 地址空间激活路径会执行保守刷新，以保持回退地址空间之间的隔离。
+    let asid = if allocated_asid == ASID_NONE {
+        KERN_ASID
+    } else {
+        allocated_asid
+    };
     if asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
     let user_satp = current_user_token();
-    let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
+    // On LA64, `strampoline` resolves to the kernel-trap stub under the
+    // static link. `__restore` is already in the direct-map executable range.
+    let restore_va = __restore as usize;
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    if trace_first_return {
+        println!(
+            "[bringup][user:03] entering PLV3: pc={:#x} sp={:#x} trap_cx={:#x} token={:#x} asid={} restore={:#x}",
+            trap_cx.gp.pc,
+            trap_cx.gp.sp,
+            trap_cx_ptr,
+            user_satp,
+            asid,
+            restore_va
+        );
+    }
     unsafe {
         asm!(
             "ibar 0",

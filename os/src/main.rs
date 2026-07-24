@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(linkage)]
+#![feature(lint_reasons)]
 #![feature(asm_const)]
 #![feature(naked_functions)]
 #![feature(asm_experimental_arch)]
@@ -15,12 +16,17 @@
 #![feature(const_maybe_uninit_assume_init)]
 #![feature(trait_upcasting)]
 #![feature(core_intrinsics)]
-#![allow(dead_code)]
-#![allow(unused_assignments)]
-#![allow(unused_variables)]
+#![deny(
+    future_incompatible,
+    improper_ctypes,
+    clashing_extern_declarations,
+    unexpected_cfgs,
+    static_mut_refs
+)]
+// Note: no crate-level allow(dead_code) — use #[expect(dead_code, reason = "...")]
+// on specific items. Crate-level allows were removed in T10 rebaseline to
+// prevent new dead code from being silently introduced.
 
-#[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
-compile_error!("features initramfs and legacy_block_root are mutually exclusive");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -47,43 +53,19 @@ mod timer;
 mod trace;
 mod utils;
 
-#[cfg(feature = "block_mem")]
-use crate::config::DISK_IMAGE_BASE;
 use crate::hal::bootstrap_init;
 use crate::hal::machine_init;
-// #[cfg(feature = "loongarch64")]
-// core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
+#[cfg(all(feature = "loongarch64", feature = "board_2k1000"))]
+core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
 #[cfg(feature = "riscv")]
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
 // ── Initramfs root cpio (small boot root filesystem) ──
-	#[cfg(all(feature = "initramfs", feature = "loongarch64", not(feature = "regression_initramfs")))]
-	core::arch::global_asm!(include_str!("initramfs-la.S"));
-	#[cfg(all(feature = "initramfs", feature = "loongarch64", feature = "regression_initramfs"))]
-	core::arch::global_asm!(include_str!("initramfs-regression-la.S"));
-	#[cfg(all(feature = "initramfs", feature = "riscv", not(feature = "regression_initramfs")))]
-core::arch::global_asm!(include_str!("initramfs-rv.S"));
-#[cfg(all(feature = "initramfs", feature = "riscv", feature = "regression_initramfs"))]
-core::arch::global_asm!(include_str!("initramfs-regression-rv.S"));
-
-// ── Legacy: block_mem full rootfs image ──
-#[cfg(all(feature = "block_mem", feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("load_img.S"));
-#[cfg(all(feature = "block_mem", feature = "riscv"))]
-core::arch::global_asm!(include_str!("load_img-rv.S"));
-
-// ── Preload test payloads (initproc, bash, busybox, LTP) ──
-// When preload_payloads feature is active AND we're not in block_mem mode
-#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "riscv"))]
-core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("preload_app.S"));
-
-// ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
-#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "riscv"))]
-core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("preload_app.S"));
+// The build script writes this only after validating the profile-selected CPIO.
+#[cfg(all(feature = "initramfs", target_arch = "loongarch64"))]
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
+#[cfg(all(feature = "initramfs", target_arch = "riscv64"))]
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
 
 fn mem_clear() {
     extern "C" {
@@ -105,35 +87,10 @@ fn mem_clear() {
     }
 }
 
-#[cfg(feature = "block_mem")]
-fn move_to_high_address() {
-    extern "C" {
-        fn simg();
-        fn eimg();
-    }
-    unsafe {
-        // 加载根文件系统镜像
-        let img =
-            core::slice::from_raw_parts(simg as usize as *mut u8, eimg as usize - simg as usize);
-        // 以DISK_IMAGE_BASE到MEMORY_END上的内存作为根文件系统镜像
-        let mem_disk = core::slice::from_raw_parts_mut(
-            DISK_IMAGE_BASE as *mut u8,
-            // 大小为256MB
-            0x1000_0000,
-        );
-        // 清空mem_disk上的内容
-        mem_disk.fill(0);
-        mem_disk[..img.len()].copy_from_slice(img);
-    }
-}
-
 #[no_mangle]
 pub fn rust_main() -> ! {
     bootstrap_init();
     mem_clear();
-    // 这一行可能有误，需要后续处理
-    #[cfg(all(feature = "block_mem"))]
-    move_to_high_address();
     console::log_init();
     trace::init();
     println!("[kernel] Console initialized.");
@@ -145,8 +102,10 @@ pub fn rust_main() -> ! {
 
     machine_init();
     crate::task::timer_subsystem_init();
-    random::init();
-    println!("[kernel] PRNG initialized.");
+    match random::init() {
+        Ok(()) => println!("[kernel] PRNG initialized."),
+        Err(e) => println!("[kernel] PRNG init warning: {:?}", e),
+    }
 
     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
     let boot_config = crate::bootargs::load();
@@ -154,7 +113,7 @@ pub fn rust_main() -> ! {
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
-        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
+        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs bootstrap
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
@@ -163,30 +122,12 @@ pub fn rust_main() -> ! {
             drivers::init_net_device();
             net::config::init();
 
-            // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
-            fs::mount_boot_block_devices();
-
-            // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
-            #[cfg(feature = "preload_payloads")]
-            fs::install_preload_payloads();
+            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
+            // PID1 owns the later x0/x1 mount policy.
+            fs::register_boot_block_devices();
         } else {
             crate::println!("[kernel] Regression mode — skipping net/block init");
         }
-    }
-
-    // ── Legacy 启动路径（initramfs 特性未启用时）──
-    #[cfg(not(feature = "initramfs"))]
-    {
-        drivers::init_net_device();
-        net::config::init();
-        #[cfg(feature = "block_virt")]
-        println!("[kernel] block in virt mode!");
-        #[cfg(feature = "oom_handler")]
-        println!("[kernel] oom_handler is enabled!");
-        #[cfg(feature = "heap_trace")]
-        println!("[kernel] heap_trace is enabled!");
-        fs::flush_preload();
-        fs::mount_tools_disk();
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();

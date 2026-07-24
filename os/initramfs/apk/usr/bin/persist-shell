@@ -1,0 +1,39 @@
+#!/rescue/sh
+set -e
+
+root="${MANGO_APK_ROOT:-/persist/apk-root}"
+if [ ! -f /persist/apk-state/shell-ready-v1 ] || [ ! -x "$root/bin/sh" ]; then
+    echo "persist-shell: persistent environment is not ready" >&2
+    exit 1
+fi
+
+# c-ares seeks to the end of resolv.conf before reading it.  MangoCore procfs
+# files report st_size=0, so a symlink to /proc/net/resolv.conf makes c-ares
+# treat a non-empty resolver configuration as empty.  Keep a regular snapshot
+# in the chroot and refresh it on every entry so DHCP changes are propagated.
+resolv_src=/proc/net/resolv.conf
+resolv_dst="$root/etc/resolv.conf"
+if [ ! -r "$resolv_src" ]; then
+    echo "persist-shell: resolver configuration is not readable" >&2
+    exit 1
+fi
+if [ -L "$resolv_dst" ] || [ ! -f "$resolv_dst" ] || \
+   ! /bin/busybox cmp -s "$resolv_src" "$resolv_dst"; then
+    [ ! -L "$resolv_dst" ] || /bin/busybox rm -f "$resolv_dst"
+    # Use an idempotent direct copy: the current ext4 implementation can
+    # retain an unremovable stale temporary inode after interrupted renames.
+    /bin/busybox cp "$resolv_src" "$resolv_dst"
+    /bin/busybox chmod 0644 "$resolv_dst"
+fi
+if [ -L "$resolv_dst" ] || [ ! -s "$resolv_dst" ]; then
+    echo "persist-shell: resolver snapshot is invalid" >&2
+    exit 1
+fi
+
+unset LD_LIBRARY_PATH
+export HOME=/root
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export SHELL=/bin/sh
+export PS1='MangoPersist:\w# '
+
+exec /bin/busybox chroot "$root" /bin/sh -l

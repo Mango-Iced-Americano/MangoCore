@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::config::{PAGE_SIZE, USER_STACK_INIT_SIZE};
 use crate::fs::{vfs, vfs_lookup};
-use crate::mm::{UserCString, UserPtr};
+use crate::mm::{UserCString, UserPtr, USER_STACK_ABI_ALIGN};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
@@ -180,32 +180,26 @@ fn validate_exec_stack_usage(argv_vec: &[String], envp_vec: &[String]) -> Result
     for value in argv_vec.iter().chain(envp_vec.iter()) {
         checked_add_exec_bytes(&mut bytes, value.len().checked_add(1).ok_or(E2BIG)?)?;
     }
-    bytes = (bytes + word - 1) & !(word - 1);
+    debug_assert!(USER_STACK_ABI_ALIGN.is_power_of_two());
+    bytes = bytes.checked_add(USER_STACK_ABI_ALIGN - 1).ok_or(E2BIG)? & !(USER_STACK_ABI_ALIGN - 1);
     checked_add_exec_bytes(&mut bytes, 2 * word)?; // AT_RANDOM bytes
-    checked_add_exec_bytes(&mut bytes, word)?; // padding
-    checked_add_exec_bytes(
-        &mut bytes,
-        EXEC_AUXV_ENTRY_COUNT
-            .checked_mul(core::mem::size_of::<AuxvEntry>())
-            .ok_or(E2BIG)?,
-    )?;
-    checked_add_exec_bytes(
-        &mut bytes,
-        argv_vec
-            .len()
-            .checked_add(1)
-            .and_then(|n| n.checked_mul(word))
-            .ok_or(E2BIG)?,
-    )?;
-    checked_add_exec_bytes(
-        &mut bytes,
-        envp_vec
-            .len()
-            .checked_add(1)
-            .and_then(|n| n.checked_mul(word))
-            .ok_or(E2BIG)?,
-    )?;
-    checked_add_exec_bytes(&mut bytes, word)?; // argc
+    let auxv_bytes = EXEC_AUXV_ENTRY_COUNT
+        .checked_mul(core::mem::size_of::<AuxvEntry>())
+        .ok_or(E2BIG)?;
+    let pointer_words = argv_vec
+        .len()
+        .checked_add(1)
+        .and_then(|words| words.checked_add(envp_vec.len().checked_add(1)?))
+        .and_then(|words| words.checked_add(1)) // argc
+        .ok_or(E2BIG)?;
+    let table_bytes = pointer_words
+        .checked_mul(word)
+        .and_then(|pointer_bytes| pointer_bytes.checked_add(auxv_bytes))
+        .ok_or(E2BIG)?;
+    let padding = (USER_STACK_ABI_ALIGN - (table_bytes & (USER_STACK_ABI_ALIGN - 1)))
+        & (USER_STACK_ABI_ALIGN - 1);
+    checked_add_exec_bytes(&mut bytes, padding)?;
+    checked_add_exec_bytes(&mut bytes, table_bytes)?;
     if bytes > USER_STACK_INIT_SIZE.saturating_sub(PAGE_SIZE) {
         return Err(E2BIG);
     }

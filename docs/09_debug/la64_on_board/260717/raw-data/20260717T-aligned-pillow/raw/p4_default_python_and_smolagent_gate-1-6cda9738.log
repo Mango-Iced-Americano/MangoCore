@@ -1,0 +1,28 @@
+2026-07-17T15:06:24.043461Z __PERF_BEGIN_p4_default_python_and_smolagent_gate-1-6cda9738__
+2026-07-17T15:06:25.059171Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_default_python_and_smolagent_gate-1-6cda9738_TRACE_OFF__
+2026-07-17T15:06:26.952851Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_default_python_and_smolagent_gate-1-6cda9738__
+2026-07-17T15:06:28.593578Z [persist-python-verify] interpreter=/persist/python-runtime/releases/071e4e258421/usr/bin/python3
+2026-07-17T15:06:28.600376Z [persist-python-verify] root=/persist/python-runtime/releases/071e4e258421
+2026-07-17T15:06:31.212903Z [persist-python-verify] normal_site=pass
+2026-07-17T15:06:33.604751Z [persist-python-verify] self_exec=/persist/python-runtime/releases/071e4e258421/usr/bin/python3
+2026-07-17T15:06:54.158395Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-17T15:07:18.865313Z Traceback (most recent call last):
+2026-07-17T15:07:18.897764Z   File [35m"<string>"[0m, line [35m1[0m, in [35m<module>[0m
+2026-07-17T15:07:18.906112Z     [1;31mimport smolagents[0m; print("[persist-python-verify] smolagents=" + smolagents.__file__)
+2026-07-17T15:07:18.907216Z     [1;31m^^^^^^^^^^^^^^^^^[0m
+2026-07-17T15:07:18.921340Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py"[0m, line [35m19[0m, in [35m<module>[0m
+2026-07-17T15:07:18.924085Z     [1;31mfrom .agent_types import *[0m  # noqa: I001
+2026-07-17T15:07:18.927664Z     [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+2026-07-17T15:07:18.941667Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/agent_types.py"[0m, line [35m26[0m, in [35m<module>[0m
+2026-07-17T15:07:18.943725Z     from .utils import _is_package_available
+2026-07-17T15:07:18.956872Z   File [35m"/persist/python/user/lib/python3.14/site-packages/smolagents/utils.py"[0m, line [35m34[0m, in [35m<module>[0m
+2026-07-17T15:07:18.956940Z     import jinja2
+2026-07-17T15:07:18.968074Z   File [35m"/persist/python/user/lib/python3.14/site-packages/jinja2/__init__.py"[0m, line [35m9[0m, in [35m<module>[0m
+2026-07-17T15:07:18.973208Z     from .environment import Environment as Environment
+2026-07-17T15:07:18.987116Z   File [35m"/persist/python/user/lib/python3.14/site-packages/jinja2/environment.py"[0m, line [35m15[0m, in [35m<module>[0m
+2026-07-17T15:07:18.987758Z     from markupsafe import Markup
+2026-07-17T15:07:18.994477Z [1;35mModuleNotFoundError[0m: [35mNo module named 'markupsafe'[0m
+2026-07-17T15:07:19.779837Z [persist-python-verify] FAIL: smolagents import failed under the strict runtime
+2026-07-17T15:07:19.798600Z __PERF_WORK_END_p4_default_python_and_smolagent_gate-1-6cda9738__
+2026-07-17T15:07:19.804643Z __PERF_ACK_p4_default_python_and_smolagent_gate-1-6cda9738_WORK__
+2026-07-17T15:07:20.374156Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_default_python_and_smolagent_gate-1-6cda9738__ rc=1

@@ -7,11 +7,11 @@
 //!
 //! A machine-parseable result marker is printed before shutdown for CI integration.
 
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::bootargs::BootConfig;
 use crate::hal;
 use crate::timer;
-use alloc::vec;
-use alloc::vec::Vec;
 
 // ── ANSI color constants ────────────────────────────────────────
 const COLOR_GREEN: &str = "\x1b[32m";
@@ -58,17 +58,11 @@ impl KernelTest {
 /// Get the architecture name string for diagnostic output.
 fn arch_name() -> &'static str {
     #[cfg(feature = "riscv")]
-    {
-        "riscv64"
-    }
+    { "riscv64" }
     #[cfg(feature = "loongarch64")]
-    {
-        "loongarch64"
-    }
+    { "loongarch64" }
     #[cfg(not(any(feature = "riscv", feature = "loongarch64")))]
-    {
-        "unknown"
-    }
+    { "unknown" }
 }
 
 /// Test result summary returned by the runner.
@@ -159,23 +153,11 @@ pub fn run_tests_return(
 
             match result {
                 Ok(()) => {
-                    crate::println!(
-                        "{}ok{} {} {}",
-                        COLOR_GREEN,
-                        COLOR_RESET,
-                        test_num,
-                        test.name
-                    );
+                    crate::println!("{}ok{} {} {}", COLOR_GREEN, COLOR_RESET, test_num, test.name);
                     passed += 1;
                 }
                 Err(reason) => {
-                    crate::println!(
-                        "{}not ok{} {} {}",
-                        COLOR_RED,
-                        COLOR_RESET,
-                        test_num,
-                        test.name
-                    );
+                    crate::println!("{}not ok{} {} {}", COLOR_RED, COLOR_RESET, test_num, test.name);
                     crate::println!("  ---");
                     crate::println!("  reason: {}", reason);
                     crate::println!("  elapsed_ms: {}", elapsed);
@@ -200,11 +182,7 @@ pub fn run_tests_return(
             if elapsed > per_test_timeout {
                 crate::println!(
                     "{}# WARNING:{} {} took {}ms (timeout={}ms)",
-                    COLOR_YELLOW,
-                    COLOR_RESET,
-                    test.name,
-                    elapsed,
-                    per_test_timeout
+                    COLOR_YELLOW, COLOR_RESET, test.name, elapsed, per_test_timeout
                 );
             }
 
@@ -233,29 +211,31 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
     if results.failed > 0 {
         crate::println!(
             "{}# results: {} passed, {} failed, {} total{}",
-            COLOR_RED,
-            results.passed,
-            results.failed,
-            results.total,
-            COLOR_RESET
+            COLOR_RED, results.passed, results.failed, results.total, COLOR_RESET
         );
         shutdown_failure();
     } else {
         crate::println!(
             "{}# results: {} passed, {} failed, {} total{}",
-            COLOR_GREEN,
-            results.passed,
-            results.failed,
-            results.total,
-            COLOR_RESET
+            COLOR_GREEN, results.passed, results.failed, results.total, COLOR_RESET
         );
         shutdown_success();
     }
 }
 
 fn shutdown_success() -> ! {
-    crate::println!("{}[KTEST RESULT: PASS]{}", COLOR_GREEN, COLOR_RESET);
-    crate::println!("# ktest: all tests passed. shutting down.");
+    crate::println!("# ktest: tests passed; committing filesystems before shutdown.");
+    crate::fs::flush_all_page_caches();
+    match crate::fs::vfs::mount::shutdown_all_backends() {
+        Ok(()) => {
+            crate::println!("{}[KTEST RESULT: PASS]{}", COLOR_GREEN, COLOR_RESET);
+            crate::println!("# ktest: all tests and filesystem teardown passed. shutting down.");
+        }
+        Err(error) => {
+            crate::println!("# ktest: filesystem shutdown failed: {:?}", error);
+            crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
+        }
+    }
     for _ in 0..1000 {
         core::hint::spin_loop();
     }
@@ -263,8 +243,13 @@ fn shutdown_success() -> ! {
 }
 
 fn shutdown_failure() -> ! {
+    crate::println!("# ktest: tests FAILED; attempting filesystem teardown.");
+    crate::fs::flush_all_page_caches();
+    if let Err(error) = crate::fs::vfs::mount::shutdown_all_backends() {
+        crate::println!("# ktest: filesystem shutdown failed: {:?}", error);
+    }
     crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
-    crate::println!("# ktest: tests FAILED. shutting down.");
+    crate::println!("# ktest: shutting down.");
     for _ in 0..1000 {
         core::hint::spin_loop();
     }

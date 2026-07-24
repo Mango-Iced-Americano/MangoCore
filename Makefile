@@ -1,42 +1,125 @@
 MODE ?= release
+PROFILE ?= normal
+REPO_ROOT := $(CURDIR)
+BUILD_ROOT ?= $(REPO_ROOT)/build
+COMPAT_OUTPUT_DIR ?= $(REPO_ROOT)
+export BUILD_ROOT COMPAT_OUTPUT_DIR CANONICAL_BUILD_FIXTURE
 FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
-LA_TOOLCHAIN ?= nightly-2024-05-01
+
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+
+ifeq ($(origin RUSTUP_HOME),undefined)
+ifeq ($(strip $(HOME)),)
+$(error HOME must be set and non-empty when RUSTUP_HOME is not supplied)
+endif
+endif
+ifeq ($(origin CARGO_HOME),undefined)
+ifeq ($(strip $(HOME)),)
+$(error HOME must be set and non-empty when CARGO_HOME is not supplied)
+endif
+endif
+RUSTUP_HOME ?= $(HOME)/.rustup
+CARGO_HOME ?= $(HOME)/.cargo
+ifeq ($(strip $(RUSTUP_HOME)),)
+$(error RUSTUP_HOME must be set and non-empty)
+endif
+ifeq ($(strip $(CARGO_HOME)),)
+$(error CARGO_HOME must be set and non-empty)
+endif
+export RUSTUP_HOME CARGO_HOME
+
+define validate-formal-inputs
+$(if $(filter command line environment environment override,$(origin ARCH)),,$(error ARCH must be explicitly provided))
+$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+$(if $(filter command line environment environment override,$(origin PROFILE)),,$(error PROFILE must be explicitly provided))
+$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+endef
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
 QEMU_DIR := util/qemu-2k1000/tmp
 QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
-all:
+all: toolchain-setup
 	$(MAKE) prepare-cargo-config
-	$(MAKE) clean
 	$(MAKE) -C os all
 
+build:
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build
+
 prepare-cargo-config:
-	@sh scripts/restore-cargo-vendor-checksums.sh restore .
-	mkdir -p os/.cargo user/.cargo
-	test -f os/.cargo/config.toml || cp -f cargo-config/os/config.toml os/.cargo/config.toml
-	test -f user/.cargo/config.toml || cp -f cargo-config/user/config.toml user/.cargo/config.toml
 
-env:
-	rustup default $(LA_TOOLCHAIN)
+toolchain-setup:
+	@sh scripts/rustup-setup.sh
 
-kernel:
-	cd os && make kernel
+toolchain-preflight:
+	@sh scripts/rustup-preflight.sh
 
-run: print-logo
-	cd os && make run
+env: toolchain-preflight
 
-runsimple:
+kernel: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" kernel
+
+user: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" user
+
+image: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" image
+
+validate-run:
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+
+run: validate-run print-logo toolchain-preflight
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" run
+
+test: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter regression,$(PROFILE)),,$(error PROFILE must be regression))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" test
+
+check: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" check
+
+lint: toolchain-preflight
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=rv64" "MODE=debug" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=rv64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=debug" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(or $(PROFILE),normal)" "BUILD_ROOT=$(BUILD_ROOT)" lint,@true)
+
+full-test:
+	@echo "=== Running full test suite (serial build, parallel QEMU) ==="
+	python3 scripts/run_full_test.py
+
+ktest: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-run
+
+ktest-build-only: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-build-only
+
+.NOTPARALLEL: run lint
+
+runsimple: toolchain-preflight
 	cd os && make runsimple
 
-change-kernel-only:
+change-kernel-only: toolchain-preflight
 	cd os && make build && make runsimple
 
 print-logo:
-	@echo "Welcome to NPUCore Project Aspera🚀"
+	@echo "Welcome to MangoCore Project Aspera🚀"
 	@echo "                                                                            "
 	@echo "  ________    ________    ________    _______     ________    ________      "
 	@echo " |\   __  \  |\   ____\  |\   __  \  |\  ___ \   |\   __  \  |\   __  \     "
@@ -48,7 +131,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config
+.PHONY: all build kernel user image run test full-test ktest check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -85,21 +168,26 @@ $(QEMU_TAR_PATH):
 	fi
 
 clean:
-	make -C os clean
+	$(MAKE) -C os "BUILD_ROOT=$(BUILD_ROOT)" clean
+	rm -f "$(COMPAT_OUTPUT_DIR)/kernel-rv" \
+		"$(COMPAT_OUTPUT_DIR)/kernel-la" \
+		"$(COMPAT_OUTPUT_DIR)/disk.img" \
+		"$(COMPAT_OUTPUT_DIR)/disk-la.img"
+	rm -rf "$(BUILD_ROOT)"
 
 rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
 
-regression:
+regression: toolchain-preflight
 	$(MAKE) -C os regression-all
 
 # ── Testing shortcuts (run inside Docker container) ──
-check-fast:
+check-fast: toolchain-preflight
 	cargo check -p mango-kernel-core
 	cargo fmt --check -p mango-kernel-core
-	cargo clippy -p mango-kernel-core 2>/dev/null || true
+	cargo clippy -p mango-kernel-core
 
-unittest:
+unittest: toolchain-preflight
 	cargo test -p mango-kernel-core
 
 bugscan: unittest
@@ -114,7 +202,12 @@ docker:
 	fi
 
 docker-test-parallel:
-	bash scripts/run_test_docker_parallel.sh
+	@printf '%s\n' 'ERROR: docker-test-parallel is deprecated; run make full-test or python3 scripts/run_full_test.py inside Docker instead.' >&2
+	@exit 64
+
+test-docker-parallel:
+	@printf '%s\n' 'ERROR: test-docker-parallel is deprecated; run make full-test or python3 scripts/run_full_test.py inside Docker instead.' >&2
+	@exit 64
 
 testsuits-download:
 	cd fs-img-dir && \
@@ -123,4 +216,4 @@ testsuits-download:
 
 	
 
-.PHONY: all kernel run clean testsuits-download docker docker-test-parallel regression check-fast unittest bugscan
+.PHONY: all build kernel user image run test check lint clean testsuits-download docker docker-test-parallel test-docker-parallel regression check-fast unittest bugscan

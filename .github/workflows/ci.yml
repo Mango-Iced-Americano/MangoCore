@@ -1,0 +1,298 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      qemu_timeout:
+        description: Per-architecture QEMU timeout in seconds
+        required: false
+        default: '7200'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_IMAGE: zhouzhouyi/os-contest:20260510
+  QEMU_TIMEOUT: ${{ inputs.qemu_timeout || '7200' }}
+
+jobs:
+  # ════════════════════════════════════════════════
+  # Job 0 — Toolchain provisioning contracts
+  # ════════════════════════════════════════════════
+  toolchain-contracts:
+    name: Toolchain provisioning contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify Make and Rustup contracts
+        run: |
+          set -euo pipefail
+          sh scripts/test-toolchain-make-contract.sh
+          sh scripts/test-rustup-setup.sh
+          sh scripts/test-rustup-preflight.sh
+          sh scripts/test-source-purity-make-contract.sh
+
+  # ════════════════════════════════════════════════
+  # Layer 1 — Cargo clippy (rv64 + la64 serial)
+  # ════════════════════════════════════════════════
+  clippy:
+    name: 1. Cargo clippy (rv64 → la64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [toolchain-contracts]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Create dummy initramfs (clippy needs MANGO_INITRAMFS_CPIO)
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            echo dummy | cpio -o -H newc > /tmp/dummy.cpio 2>/dev/null || touch /tmp/dummy.cpio
+          '
+      - name: Clippy rv64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
+            os-dev bash -lc '
+              cd /app/os && cargo clippy --features "board_rvqemu block_virt" -- -D warnings
+            '
+      - name: Clippy la64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
+            os-dev bash -lc '
+              cd /app/os && cargo clippy --features "board_laqemu block_virt_pci" -- -D warnings
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ════════════════════════════════════════════════
+  # Layer 2 — Cargo test (rv64 + la64 serial)
+  # ════════════════════════════════════════════════
+  cargo-test:
+    name: 2. Cargo test (rv64 → la64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [clippy]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Create dummy initramfs
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            echo dummy | cpio -o -H newc > /tmp/dummy.cpio 2>/dev/null || touch /tmp/dummy.cpio
+          '
+      - name: Cargo test rv64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
+            os-dev bash -lc '
+              cd /app/os && cargo test --features "board_rvqemu block_virt"
+            '
+      - name: Cargo test la64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
+            os-dev bash -lc '
+              cd /app/os && cargo test --features "board_laqemu block_virt_pci"
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ════════════════════════════════════════════════
+  # Layer 3 — Kernel self-tests (rv64 → la64)
+  # ════════════════════════════════════════════════
+  ktest:
+    name: 3. Kernel self-tests / ktest (rv64 → la64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [cargo-test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: ktest rv64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app && make -C os rv64-ktest
+            '
+      - name: ktest la64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app && make -C os la64-ktest
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ════════════════════════════════════════════════
+  # Layer 4 — Regression QEMU test (rv64 → la64)
+  # ════════════════════════════════════════════════
+  regression:
+    name: 4. Regression QEMU test (rv64 → la64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [ktest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Regression rv64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app && make test ARCH=rv64 PROFILE=regression
+            '
+      - name: Regression la64
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              cd /app && make test ARCH=la64 PROFILE=regression
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ════════════════════════════════════════════════
+  # Layer 5 — Competition QEMU (rv64 → la64)
+  # ════════════════════════════════════════════════
+  comp:
+    name: 5. Competition QEMU mask=0xFDF (rv64 → la64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    needs: [regression]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker compose down --remove-orphans || true
+          docker system prune -af || true
+          df -h
+      - name: Cache official test images
+        uses: actions/cache@v4
+        with:
+          path: |
+            fs-img-dir/sdcard-rv.img.xz
+            fs-img-dir/sdcard-la.img.xz
+          key: oscomp-sdcards-pre-20250615-v2
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Ensure test images are available
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            set -euo pipefail
+            for img in sdcard-rv.img.xz sdcard-la.img.xz; do
+              if [ ! -s fs-img-dir/$img ] || ! xz -t fs-img-dir/$img; then
+                rm -f fs-img-dir/$img
+                make testsuits-download
+                break
+              fi
+            done
+          '
+      - name: Write 11-group test configuration
+        run: |
+          cat > os_test_ci.conf <<'EOF'
+          mode=run
+          mask=0xFDF
+          ltp_runner=suite
+          ltp_libc=both
+          ltp_suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
+          ltp_exclude=execve05,fallocate06,mmap16,rename10,shmctl01,copy_file_range02,pipe13,splice02,splice07,timer_settime03,statx11,prot_hsymlinks,send02,futex_cmp_requeue01
+          ltp_exclude_musl=
+          ltp_exclude_glibc=
+          ltp_include=
+          ltp_from=
+          EOF
+      - name: Build and prepare images (rv64 → la64)
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              set -euxo pipefail
+              make all MODE=release
+            '
+      - name: Decompress test images
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            set -euxo pipefail
+            xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
+            xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
+          '
+      - name: Inject test configuration into disk images
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            set -euxo pipefail
+            make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf
+            make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf
+          '
+      - name: Run competition QEMU rv64
+        run: |
+          set -o pipefail
+          docker compose exec -T \
+            -e QEMU_TIMEOUT \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              set -euxo pipefail
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk comp
+            '
+      - name: Run competition QEMU la64
+        run: |
+          set -o pipefail
+          docker compose exec -T \
+            -e QEMU_TIMEOUT \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              set -euxo pipefail
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk comp
+            '
+      - name: Docker compose down
+        if: always()
+        run: docker compose down

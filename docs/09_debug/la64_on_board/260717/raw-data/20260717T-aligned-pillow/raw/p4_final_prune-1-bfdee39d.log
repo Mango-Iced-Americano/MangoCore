@@ -1,0 +1,9 @@
+2026-07-18T00:17:54.748287Z __PERF_BEGIN_p4_final_prune-1-bfdee39d__
+2026-07-18T00:17:55.643909Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_final_prune-1-bfdee39d_TRACE_OFF__
+2026-07-18T00:17:58.328446Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_final_prune-1-bfdee39d__
+2026-07-18T00:18:34.815457Z [1;34m43d7bb2ecf21[m
+2026-07-18T00:18:34.817821Z [1;34me14f2fd9cc6d[m
+2026-07-18T00:18:34.857499Z /persist/python-runtime/releases/43d7bb2ecf21
+2026-07-18T00:18:34.863518Z __PERF_WORK_END_p4_final_prune-1-bfdee39d__
+2026-07-18T00:18:34.867679Z __PERF_ACK_p4_final_prune-1-bfdee39d_WORK__
+2026-07-18T00:18:35.296688Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_final_prune-1-bfdee39d__ rc=0

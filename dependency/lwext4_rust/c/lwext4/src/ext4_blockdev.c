@@ -85,6 +85,20 @@ static int ext4_bdif_bwrite(struct ext4_blockdev *bdev, const void *buf,
 	return r;
 }
 
+int ext4_block_flush_device(struct ext4_blockdev *bdev)
+{
+	if (!bdev || !bdev->bdif)
+		return EINVAL;
+
+	if (!bdev->bdif->flush)
+		return EOK;
+
+	ext4_bdif_lock(bdev);
+	int r = bdev->bdif->flush(bdev);
+	ext4_bdif_unlock(bdev);
+	return r;
+}
+
 int ext4_block_init(struct ext4_blockdev *bdev)
 {
 	int rc;
@@ -452,6 +466,11 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 			return r;
 
 	}
+	/* Software cache drain only — journal, fsync and umount paths already
+	 * issue their own ext4_block_flush_device() at the correct ordering
+	 * points.  Adding a device flush here causes every page-cache writeback
+	 * batch to stall on synchronous VirtIO FLUSH, which makes iozone and
+	 * other heavy writers time out (>480 s for a 4 MiB run). */
 	return EOK;
 }
 

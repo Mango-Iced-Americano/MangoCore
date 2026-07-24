@@ -1,0 +1,1 @@
+30|mango.mode=ktest mango.test=all mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0

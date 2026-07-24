@@ -8,7 +8,7 @@ smoltcp = {path = "../dependency/smoltcp" }
 
 [dependencies]
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
-buddy_system_allocator = { git = "https://github.com/Mango-Iced-Americano/buddy_system_allocator", branch = "feat/metadata-heap", default-features = false, features = ["metadata_heap"] }
+buddy_system_allocator = { path = "../dependency/buddy_system_allocator", default-features = false, features = ["metadata_heap"] }
 spin = "0.7"
 bitflags = "1.3"
 xmas-elf = "0.7.0"
@@ -22,10 +22,10 @@ bit_field = "0.10.1"
 rlibc = "1.0.0"
 volatile = "0.3.0"
 rand_core = "0.6.4"
+rand_chacha = { version = "0.3.1", default-features = false }
 managed = { version = "0.8", default-features = false, features = ["map"] }
 virtio-drivers = { path = "../dependency/virtio-drivers", default-features = false, features = ["alloc"] }
-lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false, optional = true }
-another_ext4 = { path = "../dependency/another_ext4", optional = true }
+lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false }
 
 rustsbi = { path = "../dependency/rustsbi" }
 
@@ -56,6 +56,10 @@ smoltcp = { version = "0.10.0", default-features = false, features = [
 riscv = { path = "../dependency/riscv", features = ["inline-asm"] }
 
 [features]
+# Boot-profile legality:
+# - `initramfs` owns the embedded root.
+# - normal and regression CPIO selection is Make-only via `MANGO_INITRAMFS_CPIO`,
+#   not a Cargo feature.
 zero_init = []
 swap = []
 zram = []
@@ -67,20 +71,20 @@ log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
 block_sata = []
-block_mem = []
 block_virt = []
 block_virt_pci = []
 comp = []
 heap_trace = []
 perf_stats = []
 perf_diag = ["perf_stats"]
-ext4_lwext4_backend = ["dep:lwext4_rust"]
-ext4_legacy_backend = []
-ext4_another_backend = ["dep:another_ext4"]
+ext4_another_backend = []
+board_bringup_trace = []
+gmac_probe = []
+gmac_2k1000 = []
+gmac_dhcp = []
+net_perf_diag = []
+net_ack_immediate = []
 initramfs = []
-regression_initramfs = []
-legacy_block_root = []
-preload_payloads = []
 
 # LoongArch Boards:
 loongarch64 = []
@@ -93,8 +97,7 @@ board_vf2 = ["oom_handler", "riscv"]
 # END of LoongArch Boards.
 
 # default = ["board_laqemu", "block_sata"]
-# default = ["board_rvqemu", "block_mem"]
-default = ["initramfs", "preload_payloads", "ext4_another_backend"]
+default = ["initramfs"]
 
 [profile.dev]
 # 优化级别

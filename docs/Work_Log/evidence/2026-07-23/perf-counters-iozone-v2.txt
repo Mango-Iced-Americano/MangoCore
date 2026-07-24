@@ -1,0 +1,44 @@
+perf_diag another_ext4 writeback split-phase collection (v2)
+=============================================================
+
+Git hash: 8cc2751d-dirty
+Build command:
+  docker compose exec -T os-dev bash -c "cd /app/os && make rv64-kernel-build-only EXTRA_FEATURES=perf_diag"
+Build result: PASS (release kernel built; repository-wide warnings only)
+
+Run command:
+  docker compose exec -T os-dev bash -c "cd /app/os && timeout 600 make rv64-run 2>&1" > /tmp/qemu-perf-v2.log
+Run result: QEMU completed, but the requested iozone workload did not execute.
+
+Extracted [ext4_another] write_pages lines:
+  (none)
+
+Requested iozone:musl diag stats block:
+  (none)
+
+Extracted iozone throughput (writers, rewriters, readers kB/sec):
+  (none)
+
+Relevant QEMU output:
+  [kernel] perf_diag features: perf_stats=true perf_diag=true
+  [kernel] mount_block_fs: ext4 mount failed: EIO
+  [initramfs] official fs (x0) mount failed, leaving /sdcard empty
+  [initproc] config source=/os_test.conf mode=run mask=0xFFF ltp_runner=suite ...
+  [initproc] select group=iozone timeout=480s
+  /bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+  [initproc] iozone_testcode.sh in /musl failed after 3 retries, final exit_code=32512
+
+Split-phase summary:
+  write_pages calls observed: 0
+  prepare_cycles total: unavailable (no write_pages instrumentation output)
+  commit_cycles total: unavailable (no write_pages instrumentation output)
+  commit / prepare ratio: unavailable
+  average prepare_cycles per call: unavailable
+  average commit_cycles per call: unavailable
+
+Conclusion:
+  The perf_diag kernel build includes the new instrumentation, but QEMU booted an
+  image whose /os_test.conf is mask=0xFFF rather than the expected iozone-only
+  diag configuration. Both ext4 test-disk mounts failed with EIO, so /sdcard and
+  /tools were empty and iozone could not run. No numeric split-phase timing data
+  exists for this run; values above are intentionally not fabricated.

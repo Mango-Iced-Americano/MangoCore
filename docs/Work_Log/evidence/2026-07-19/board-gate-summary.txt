@@ -1,0 +1,41 @@
+2K1000LA lwext4 migration real-board gate summary
+=================================================
+
+Source commit:
+  2eae776c9af94760a9904a9f2d28952b618eb2ea
+  Commit time: 2026-07-19T08:54:23+08:00
+  All three images and serial captures are newer than the source commit.
+
+Gate 1 — raw SATA read-only probe: PASS
+  TFTP: 12600200 bytes, CRC32 75e1ba61, LoongArch uImage checksum OK
+  ATA: TS32GMTS400, serial F697095467, firmware S0322B
+  Capacity: 62533296 sectors / 32017047552 bytes
+  Repeated LBA0 reads matched; MBR signature 55aa
+
+Gate 2 — lwext4 read-only mount and traversal: PASS
+  /dev/sda1 -> /sdcard: ext4 RDONLY, 4194304 KiB
+  /dev/sda3 -> /tools: ext4 RDONLY, 786432 KiB
+  Disk config loaded from /sdcard/os_test.conf
+  Bind views for bin/sbin/lib/usr/tests/musl/glibc succeeded
+  Expected VFS EROFS rejections: 435
+  Bottom ReadOnlyBlockDevice write-barrier hits: 0
+  Panic/panicked matches: 0
+
+Gate 3 — interactive read-only audit: PASS
+  TFTP: 12613024 bytes, CRC32 6b24bf50, LoongArch uImage checksum OK
+  /proc/mounts: all 10 ext4 mount/bind views are ro
+  /dev/sda through /dev/sda4: br--r-----
+  P4 check: __P4_NOT_MOUNTED__
+  /sdcard and /tools directory traversal succeeded
+  Repeated /sdcard/os_test.conf SHA-256:
+    5aacd7a142b235e0d97fc3c3d254f3178adf77ebcd9cfcea2cadd41732187976
+  /tools/bin/busybox SHA-256:
+    1cde097a9adadcd58be1afcc4f78dfac9c4ed6349f8513fe1cfe93aad58e1d94
+  Bottom ReadOnlyBlockDevice write-barrier hits: 0
+  Panic/panicked matches: 0
+
+Safety boundary:
+  No saveenv or scsi write command was issued.
+  No writable SATA/P4 feature was built into these images.
+  P4 was detected only; it was never mounted or written.
+  Production-write testing remains blocked pending journal/orphan/flush integrity work.

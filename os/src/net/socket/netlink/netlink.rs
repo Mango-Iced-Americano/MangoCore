@@ -56,7 +56,7 @@ pub const NLM_F_APPEND: u16 = 0x800;
 
 // ── NLA attribute flags (linux/netlink.h) ──
 /// Attribute is nested (contains sub-attributes)
-pub const NLA_F_NESTED: u16 = 1 << 15;       // 0x8000
+pub const NLA_F_NESTED: u16 = 1 << 15; // 0x8000
 /// Attribute payload is in network byte order
 pub const NLA_F_NET_BYTEORDER: u16 = 1 << 14; // 0x4000
 

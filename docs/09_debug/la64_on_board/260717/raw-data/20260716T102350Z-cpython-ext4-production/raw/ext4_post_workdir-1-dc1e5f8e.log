@@ -1,0 +1,9 @@
+2026-07-16T12:02:07.379340Z __PERF_BEGIN_ext4_post_workdir-1-dc1e5f8e__
+2026-07-16T12:02:08.294666Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_ext4_post_workdir-1-dc1e5f8e_TRACE_OFF__
+2026-07-16T12:02:09.689169Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_ext4_post_workdir-1-dc1e5f8e__
+2026-07-16T12:02:09.724777Z total 2
+2026-07-16T12:02:09.731861Z drwxrwxrwx    2 root     root          4096 Jan  1  1970 [1;34m.[m
+2026-07-16T12:02:09.738370Z drwxrwxrwx    5 root     root          4096 Jan  1  1970 [1;34m..[m
+2026-07-16T12:02:09.744477Z __PERF_WORK_END_ext4_post_workdir-1-dc1e5f8e__
+2026-07-16T12:02:09.748919Z __PERF_ACK_ext4_post_workdir-1-dc1e5f8e_WORK__
+2026-07-16T12:02:10.199741Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_ext4_post_workdir-1-dc1e5f8e__ rc=0

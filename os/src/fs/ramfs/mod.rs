@@ -161,9 +161,26 @@ impl FileSystem for RamFS {
     }
 
     fn super_block(&self) -> SuperBlock {
+        let used_pages = *self.page_count.lock();
+        let (total_pages, free_pages) = if self.max_pages > 0 {
+            (self.max_pages, self.max_pages.saturating_sub(used_pages))
+        } else {
+            (
+                crate::config::USABLE_MEMORY_SIZE / PAGE_SIZE,
+                crate::mm::unallocated_frames(),
+            )
+        };
+        let blocks_per_page = PAGE_SIZE as u64 / RAMFS_BLOCK_SIZE;
         SuperBlock {
             f_type: RAMFS_MAGIC,
             f_bsize: RAMFS_BLOCK_SIZE,
+            f_blocks: total_pages as u64 * blocks_per_page,
+            f_bfree: free_pages as u64 * blocks_per_page,
+            f_bavail: free_pages as u64 * blocks_per_page,
+            // RamFS has no fixed inode table. Report a conservative dynamic
+            // capacity so statvfs users can distinguish it from an unusable FS.
+            f_files: total_pages as u64,
+            f_ffree: free_pages as u64,
             f_namelen: RAMFS_MAX_NAMELEN as u64,
             ..SuperBlock::default()
         }

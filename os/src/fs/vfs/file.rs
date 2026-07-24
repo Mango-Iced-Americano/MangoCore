@@ -12,8 +12,7 @@
 //! so status flags (O_NONBLOCK, O_APPEND) are shared correctly per POSIX.
 
 use crate::utils::error::SyscallErr;
-use alloc::string::String;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -1864,11 +1863,11 @@ impl File {
         }
 
         let mut snapshot = self.dirent_snapshot.lock();
-        let mut idx = self.offset.load(Ordering::SeqCst);
+        let mut index = self.offset.load(Ordering::SeqCst);
 
         // Rebuild the name snapshot when starting from the beginning or
         // when no snapshot exists yet.
-        if idx == 0 || snapshot.is_none() {
+        if index == 0 || snapshot.is_none() {
             *snapshot = Some(
                 self.inode
                     .list_dirents()
@@ -1878,32 +1877,29 @@ impl File {
                     .collect(),
             );
         }
-        let names = snapshot.as_ref().unwrap();
-
+        let names = snapshot.as_ref().expect("directory snapshot initialized");
         let mut written = 0usize;
-        while idx < names.len() {
-            let name = &names[idx];
 
-            // Look up the real inode — may have been deleted since the snapshot
+        while index < names.len() {
+            let name = &names[index];
             let child = match self.inode.find(name) {
-                Ok(i) => i,
-                Err(e) => {
-                    if -(e as isize) == crate::syscall::errno::ENOENT {
-                        idx += 1; // deleted, skip
-                        continue;
-                    }
-                    self.offset.store(idx, Ordering::SeqCst); // save progress before error
-                    return Err(-(e as isize));
-                }
-            };
-            let meta = match child.metadata() {
-                Ok(m) => m,
-                Err(e) => {
-                    idx += 1;
+                Ok(child) => child,
+                Err(SyscallErr::ENOENT) => {
+                    index += 1;
                     continue;
                 }
+                Err(error) => {
+                    self.offset.store(index, Ordering::SeqCst);
+                    return Err(-(error as isize));
+                }
             };
-
+            let metadata = match child.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    self.offset.store(index, Ordering::SeqCst);
+                    return Err(-(error as isize));
+                }
+            };
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let raw_size = 8 + 8 + 2 + 1 + name_len + 1;
@@ -1911,7 +1907,7 @@ impl File {
 
             if written + reclen > buf.len() {
                 if written == 0 {
-                    self.offset.store(idx, Ordering::SeqCst); // save progress before error
+                    self.offset.store(index, Ordering::SeqCst); // save progress before error
                     return Err(crate::syscall::errno::EINVAL);
                 }
                 break;
@@ -1922,7 +1918,7 @@ impl File {
                 *b = 0;
             }
 
-            let d_type = match meta.file_type {
+            let d_type = match metadata.file_type {
                 FileType::Dir => 4u8,
                 FileType::File => 8u8,
                 FileType::SymLink => 10u8,
@@ -1933,19 +1929,19 @@ impl File {
                 _ => 0u8,
             };
 
-            let d_off = (idx + 1) as i64; // stable cookie = next index
-            buf[pos..pos + 8].copy_from_slice(&(meta.inode_id as u64).to_le_bytes());
-            buf[pos + 8..pos + 16].copy_from_slice(&d_off.to_le_bytes());
+            let next_cookie = (index + 1) as i64;
+            buf[pos..pos + 8].copy_from_slice(&(metadata.inode_id as u64).to_le_bytes());
+            buf[pos + 8..pos + 16].copy_from_slice(&next_cookie.to_le_bytes());
             buf[pos + 16..pos + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
             buf[pos + 18] = d_type;
             buf[pos + 19..pos + 19 + name_len].copy_from_slice(&name_bytes[..name_len]);
             buf[pos + 19 + name_len] = 0;
 
             written += reclen;
-            idx += 1;
+            index += 1;
         }
 
-        self.offset.store(idx, Ordering::SeqCst);
+        self.offset.store(index, Ordering::SeqCst);
         Ok(written)
     }
 

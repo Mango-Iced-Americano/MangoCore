@@ -534,9 +534,7 @@ impl Ext4FileSystem {
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
                     let mut data = vec![0u8; self.block_size];
-                    self.block_device
-                        .read_block(pblock_idx as usize, &mut data)
-                        .map_err(|_| -5isize)?;
+                    self.block_device.read_block(pblock_idx as usize, &mut data);
                     read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
                         &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
                     );
@@ -562,9 +560,7 @@ impl Ext4FileSystem {
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
                     let mut data = vec![0u8; self.block_size];
-                    self.block_device
-                        .read_block(pblock_idx as usize, &mut data)
-                        .map_err(|_| -5isize)?;
+                    self.block_device.read_block(pblock_idx as usize, &mut data);
                     read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
                 }
                 Err(_) => {

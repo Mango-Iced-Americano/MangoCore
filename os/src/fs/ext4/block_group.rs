@@ -136,7 +136,7 @@ impl Ext4BlockGroup {
     pub fn get_itable_unused(&mut self, s: &Ext4Superblock) -> u32 {
         let mut v = self.itable_unused_lo as u32;
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            v |= ((self.itable_unused_hi as u64) << 32) as u32;
+            v |= (self.itable_unused_hi as u32) << 16;
         }
         v
     }
@@ -145,16 +145,16 @@ impl Ext4BlockGroup {
     pub fn get_used_dirs_count(&self, s: &Ext4Superblock) -> u32 {
         let mut v = self.used_dirs_count_lo as u32;
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            v |= ((self.used_dirs_count_hi as u64) << 32) as u32;
+            v |= (self.used_dirs_count_hi as u32) << 16;
         }
         v
     }
 
     /// 设置块组中使用的目录数
     pub fn set_used_dirs_count(&mut self, s: &Ext4Superblock, cnt: u32) {
-        self.itable_unused_lo = (cnt & 0xffff) as u16;
+        self.used_dirs_count_lo = (cnt & 0xffff) as u16;
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            self.itable_unused_hi = (cnt >> 16) as u16;
+            self.used_dirs_count_hi = (cnt >> 16) as u16;
         }
     }
 
@@ -176,12 +176,20 @@ impl Ext4BlockGroup {
 
     /// 获取块组中空闲的Inode节点数
     pub fn get_free_inodes_count(&self) -> u32 {
-        ((self.free_inodes_count_hi as u64) << 32) as u32 | self.free_inodes_count_lo as u32
+        ((self.free_inodes_count_hi as u32) << 16) | self.free_inodes_count_lo as u32
     }
 
     /// 获取块组的Inode节点表块号
-    pub fn get_inode_table_blk_num(&self) -> u32 {
-        ((self.inode_table_first_block_hi as u64) << 32) as u32 | self.inode_table_first_block_lo
+    pub fn get_inode_table_blk_num(&self) -> u64 {
+        ((self.inode_table_first_block_hi as u64) << 32) | self.inode_table_first_block_lo as u64
+    }
+
+    pub fn has_flag(&self, flag: u16) -> bool {
+        self.flags & flag != 0
+    }
+
+    pub fn clear_flag(&mut self, flag: u16) {
+        self.flags &= !flag;
     }
 }
 
@@ -275,9 +283,7 @@ impl Ext4BlockGroup {
         //     block_id
         // );
         let mut origin_block_data = vec![0u8; BLOCK_SIZE];
-        block_device
-            .read_block(block_id, &mut origin_block_data)
-            .expect("failed to read ext4 block-group descriptor block");
+        block_device.read_block(block_id, &mut origin_block_data);
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
         // 然后按偏移量将数据覆写到读取的块数据
@@ -286,9 +292,7 @@ impl Ext4BlockGroup {
         }
         // origin_block_data[offset..offset + data.len()].copy_from_slice(data);
         // 最后写入块
-        block_device
-            .write_block(block_id, &origin_block_data)
-            .expect("failed to write ext4 block-group descriptor block");
+        block_device.write_block(block_id, &origin_block_data);
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
         super::counters::inc_counter!(super::counters::GROUP_DESC_WRITE);
         // block_device.write_block(block_id, buf);
@@ -382,9 +386,7 @@ impl Block {
         let block_id = offset / block_size;
         // Self::load_id(block_device, block_id, offset)
         let mut buf = vec![0u8; 4096];
-        block_device
-            .read_block(block_id, &mut buf)
-            .expect("failed to read ext4 superblock block");
+        block_device.read_block(block_id, &mut buf);
         let data = buf;
         Block {
             disk_offset: offset,
@@ -403,9 +405,7 @@ impl Block {
     ) -> Self {
         super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         let mut buf = vec![0u8; block_size];
-        block_device
-            .read_block(block_id, &mut buf)
-            .expect("failed to read ext4 block");
+        block_device.read_block(block_id, &mut buf);
         let data = buf.to_vec();
         Block {
             disk_offset: offset,
@@ -560,9 +560,7 @@ impl Block {
         //     self.disk_offset,
         //     self.data.len()
         // );
-        block_device
-            .write_block(block_id, &self.data)
-            .expect("failed to write ext4 block");
+        block_device.write_block(block_id, &self.data);
         super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
     }
 }

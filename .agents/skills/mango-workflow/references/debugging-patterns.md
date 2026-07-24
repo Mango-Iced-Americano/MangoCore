@@ -2,6 +2,15 @@
 
 > 跨对话可复用的调试技巧和排查方法。
 
+## 文本解析
+
+### awk 匹配多段文本时无意中匹配到统计摘要行
+
+- **根因**: awk 模式 `/^(first-party|maintained|vendor):/ && !/^#/` 同时匹配了数据行（如 `first-party:dead_code:src/file.rs`）和摘要行（如 `first-party: 175`），因为两者都以此前缀开头且摘要行不是 `#` 注释。导致基线比较时多出 175 个"已解决"的假阳性。
+- **修复**: 在类别前缀后加 `[^ \t]` 排除摘要行：`/^(first-party|maintained|vendor):[^ \t]/ && !/^#/`。此模式要求冒号后紧跟非空白字符，有效将统计摘要过滤掉。
+- **教训**: 解析带多个段（数据 + 统计摘要 + 页眉/页脚）的结构化文本文件时，awk 模式不能仅匹配行前缀就确定身份。必须显式检查分隔符后续的第一个字符，避免摘要/页眉/页脚行被当作数据行处理。这是 grep/awk 解析中的常见陷阱。
+- **相关文件**: `scripts/lint-check.sh:272`
+
 ## 堆分配器性能退化
 
 ### buddy allocator free-list 线性扫描导致渐进退化
@@ -126,13 +135,20 @@
 
 ## QEMU / 测试
 
-### QEMU console ANSI/CRLF 使严格 evidence gate 误判
+### LA64 首次用户态恢复跳入 kernel trap stub
 
-- **现象**：QEMU guest 已输出精确 backend/workload-success marker 和 iozone START/END delimiter，QEMU exit 0，但 runner 报 marker 或 selected iozone group 缺失。
-- **根因**：串口输出可在行首带 ANSI SGR（如 `\033[0m`），且每行以 CRLF 结束；持久化日志中的 `\r` 会使 `grep ...$` 和 AWK `$0 == marker` 的严格匹配失败。
-- **修复**：保留原始 `qemu-output.log` 作为证据。在 iozone 展示文本解析时去除 ANSI SGR；在机器 completion marker 的消费边界仅 `sub(/\015$/, "", line)`，再执行完整 run ID/backend/sample regex 与 boot-before-success 顺序检查。不得使用 `tr -d '\r'`、通用 whitespace trim 或非锚定匹配。
-- **验证**：deterministic fixture 同时覆盖健康 CRLF、倒序 marker、错误 run ID、CR 前尾随空格；再以私有 QEMU 单样本端到端验证。
-- **相关文件**：`scripts/run_ext4_backend_ab.sh`
+- **现象**: competition 启动在 PID1 已入 ready queue、`trap_return()` 已执行后静默空转，始终没有 `[initd]` 首行。
+- **根因**: `restore_va` 用 `strampoline` 对 `__restore` 做重定位。LA64 static link 中该 extern 函数符号可解析为 `skern_trap`，使 restore 跳入错误的 kernel trap 区域，而不是 `.text.trampoline` 中的 `__restore`。
+- **修复**: LA64 `trap_return()` 直接以链接后的 `__restore as usize` 作为跳转目标；不要通过 `strampoline` 重新计算该地址。
+- **教训**: bare-metal assembly entry symbols经 Rust FFI 取地址时，必须核对最终 ELF 符号和反汇编。若首个用户任务已被 scheduler 选中却没有用户输出，优先比较计算出的跳转地址与 `llvm-nm`/`llvm-objdump` 中的 `__restore`。
+- **相关文件**: `os/src/hal/arch/loongarch64/trap/mod.rs`, `os/src/hal/arch/loongarch64/trap/trap.S`
+
+### 候选 LoongArch toolchain 在 GNU ld 遇到 `R_LARCH_CALL36` (`0x6e`)
+
+- **现象**: 容器 GNU ld 2.41 链接包含 `R_LARCH_CALL36` 的 LoongArch 对象时报告 `unsupported relocation type 0x6e`；Cargo 的 `linker = "loongarch64-linux-gnu-gcc"` 会把该限制带入 OS 与 user 两条构建路径。
+- **修复**: 使用一个受版本控制、将 PATH 限制为镜像系统路径且无条件 `exec /usr/bin/clang --target=loongarch64-linux-gnu -fuse-ld=lld "$@"` 的 wrapper，并同时更新 canonical 与已消费的 Cargo 配置。不要在 wrapper 中改变/过滤 Cargo 参数。
+- **验证**: 先以 Cargo verbose 日志固定原 linker、target 与 `-T`/`-nostdlib`/`-static` 参数；以 `clang -###` 确认 image Clang 实际选择 `ld.lld -m elf64loongarch`；在临时 Rustup/Cargo homes 和干净容器副本中离线完成 LA64 build，再检查 ELF `Machine: LoongArch` 与日志中不存在 `0x6e`。
+- **相关文件**: `scripts/loongarch64-clang-lld.sh`, `cargo-config/{os,user}/config.toml`, `{os,user}/.cargo/config.toml`
 
 ### `make docker` 拉镜像超时但 Docker CE 源已换国内镜像
 
@@ -177,11 +193,11 @@
 
 - **现象**: `rv64-kernel-build-only` 成功，但同样的 initramfs 代码在 la64 上报大量编译错误
 - **根因**: la64 的 `make/la64o.mk` 使用 `--no-default-features`，而 rv64 使用默认 features（含 `initramfs`）。la64 内核中部分代码路径只在 `initramfs` 特性 gate 下才编译通过
-- **修复**: la64 构建必须显式传递 `initramfs` 和 `preload_payloads`：
+- **修复**: la64 构建必须显式传递 `initramfs`：
   ```
-  cargo build --no-default-features --release --features "comp board_laqemu block_virt_pci log_off initramfs preload_payloads"
+  cargo build --no-default-features --release --features "comp board_laqemu block_virt_pci log_off initramfs"
   ```
-  或通过 `make -f make/la64o.mk build EXTRA_FEATURES="initramfs preload_payloads"`
+  或通过 `make -f make/la64o.mk build EXTRA_FEATURES="initramfs"`
 - **注意**: 根 Makefile 没有 `la64-kernel-build-only` 目标；`rv64_all`/`la64_all` 通过不同的 Makefile 目标处理特性
 - **相关文件**: `os/make/la64o.mk`, `os/Makefile`
 
@@ -274,16 +290,6 @@
 - **修复**: 不直接删除 sweep；为 timer queue 和 timeout waitqueue 维护 cached earliest deadline。热路径先读 pending + next deadline，未到期直接返回；只有到期或 next deadline 不可信时才加锁处理。这个模式类似 Linux timer/hrtimer 使用 cached next expiry 决定下一次处理/重编程。
 - **教训**: 对早期启动、NTP、nanosleep、futex timeout、timerfd 这类等待路径，正确性兜底往往比性能优化更早暴露风险。优化顺序应是“让兜底便宜”，不是先删除兜底。
 - **相关文件**: `os/src/task/manager.rs`, `os/src/task/processor.rs`
-
-## PageCache 写回时序
-
-### 逻辑 EOF 在脏页节流后发布导致早写回丢数据
-
-- **现象**: 非零 offset 的短写入随后 `sync()` 和冷查找，正常路径可能通过；但在 PageCache 复制完成后、调用方更新逻辑大小前强制一次写回时，零填充 gap 或 payload 消失。
-- **根因**: `PageCache::write()` 可在返回前触发 `balance_dirty_pages()`。若后端按独立逻辑 EOF 截断 writeback，而调用方在 `write()` 返回后才发布 EOF，写回会跳过新页或以旧大小提交元数据，之后页面已变干净，后续 `sync()` 无数据可补写。
-- **修复**: 保留通用 `write()` 行为，增加仅在所有字节和 valid 位发布成功后、节流前调用一次的不可失败 callback；后端在 callback 中执行最小原子 EOF 更新。空写和任何 prepare/copy 失败均不得调用 callback。
-- **验证**: 以受控早写回作为 RED toggle，再以非对齐 EOF、单 inode `sync()`、drop 后冷查找的 QEMU regression 验证 GREEN。
-- **相关文件**: `os/src/fs/page_cache.rs`, `os/src/fs/ext4_another/mutations.rs`, `os/src/kernel_tests/ext4_another_lifetime.rs`
 
 ## lwext4 VFS 适配器常见陷阱
 
@@ -419,12 +425,3 @@
 - **修复**: 将 offset 推进推迟到写入成功后执行。读取阶段仅使用 offset 定位，不修改它；写入阶段成功后 `*off += wrote`（其中 `wrote ≤ n`），确保 offset 精确反映已确认写入目标的字节数。
 - **教训**: 任何跨越两个独立 I/O 对象的 syscall（splice、sendfile、copy_file_range）都必须遵循"状态推进在输出确认之后"的原则。对于文件源的显式 offset 参数，推进发生在写入成功之后而非读取成功之后。管道源是破坏性读取（无可回滚机制），需通过容量探测或最小化读取窗口来限制损失。
 - **相关文件**: `os/src/syscall/fs/sys_splice.rs`
-
-## ext4 延迟初始化位图
-
-### `BLOCK_UNINIT` 清零后未保留元数据导致文件数据覆盖文件系统
-
-- **根因**: `EXT4_BG_BLOCK_UNINIT` 的磁盘位图可以是全零占位；直接清零并清除标志会把超级块、GDT/保留 GDT、位图和 inode table 暴露为可分配数据块。flex_bg 下这些后几类元数据还可能属于别的 block group。
-- **修复**: 初始化时先清零，按物理 block group 与系统元数据范围的交集置位，再将最后一个不完整 group 的 bitmap tail 置位，清除标志并更新 bitmap checksum；所有单块、批量和 transaction allocator 都必须经过同一个初始化器。
-- **教训**: 位图延迟初始化不是“补零”操作，而是重建文件系统布局。不要只使用当前 group descriptor 的元数据地址；必须把跨 group 的 flex_bg 元数据归入其物理所属组。
-- **相关文件**: `dependency/another_ext4/src/ext4/alloc.rs`、`dependency/another_ext4/src/ext4/mod.rs`

@@ -1,0 +1,15 @@
+2026-07-18T00:12:43.464755Z __PERF_BEGIN_persist_default_gate-2-c3c0b0a4__
+2026-07-18T00:12:44.397231Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_persist_default_gate-2-c3c0b0a4_TRACE_OFF__
+2026-07-18T00:12:45.995256Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_persist_default_gate-2-c3c0b0a4__
+2026-07-18T00:12:47.730765Z [persist-python-verify] interpreter=/persist/python-runtime/releases/43d7bb2ecf21/usr/bin/python3
+2026-07-18T00:12:47.735114Z [persist-python-verify] root=/persist/python-runtime/releases/43d7bb2ecf21
+2026-07-18T00:12:50.404882Z [persist-python-verify] normal_site=pass
+2026-07-18T00:12:52.831315Z [persist-python-verify] self_exec=/persist/python-runtime/releases/43d7bb2ecf21/usr/bin/python3
+2026-07-18T00:13:13.443865Z pip 26.1.1 from /persist/python/user/lib/python3.14/site-packages/pip (python 3.14)
+2026-07-18T00:14:33.565329Z [persist-python-verify] smolagents=/persist/python/user/lib/python3.14/site-packages/smolagents/__init__.py
+2026-07-18T00:14:35.967389Z [persist-python-verify] smolagents_import=pass
+2026-07-18T00:15:03.556730Z [persist-python-verify] smolagent_command=pass
+2026-07-18T00:15:03.567450Z [persist-python-verify] PASS policy=p4-strict-align-v1 release=/persist/python-runtime/releases/43d7bb2ecf21
+2026-07-18T00:15:03.592650Z __PERF_WORK_END_persist_default_gate-2-c3c0b0a4__
+2026-07-18T00:15:03.597434Z __PERF_ACK_persist_default_gate-2-c3c0b0a4_WORK__
+2026-07-18T00:15:04.066472Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_persist_default_gate-2-c3c0b0a4__ rc=0

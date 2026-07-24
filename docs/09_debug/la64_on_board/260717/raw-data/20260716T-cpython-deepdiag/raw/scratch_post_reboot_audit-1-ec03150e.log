@@ -1,0 +1,18 @@
+2026-07-16T07:55:59.840895Z __PERF_BEGIN_scratch_post_reboot_audit-1-ec03150e__
+2026-07-16T07:56:00.838809Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_ACK_scratch_post_reboot_audit-1-ec03150e_TRACE_OFF__
+2026-07-16T07:56:03.253567Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_scratch_post_reboot_audit-1-ec03150e__
+2026-07-16T07:56:03.299649Z -rwxrwxrwx    1 root     root          1172 Jan  1  1970 [1;32mbench/README.md[m
+2026-07-16T07:56:03.306543Z -rwxrwxrwx    1 root     root          3038 Jan  1  1970 [1;32mcpython_benchmark.sh[m
+2026-07-16T07:56:03.353277Z 167053e24daf8fcbb24b336ff5976f13b5fe17c94c916eb0930caf8176b90a6f  cpython_benchmark.sh
+2026-07-16T07:56:03.364060Z 4f155e14fba7ad811776a336bf19a3246429b499808dd1ac6870194e1fd83e66  bench/README.md
+2026-07-16T07:56:03.402416Z # MangoCore CPython benchmarks
+2026-07-16T07:56:03.405020Z 
+2026-07-16T07:56:03.407785Z The 18 `bm_*.py` workloads are derived from
+2026-07-16T07:56:03.416187Z [`Mango-Iced-Americano/cpython-tests`](https://github.com/Mango-Iced-Americano/cpython-tests)
+2026-07-16T07:56:03.421798Z at commit `c50669c2b59a7d6d979fb12aea42c1b508ed3765`.
+2026-07-16T07:56:03.421830Z 
+2026-07-16T07:56:03.427301Z The source repository's `pidigits` produced variable-width values instead of
+2026-07-16T07:56:03.433657Z 2000 decimal digits, and its `richards` workload severed the task chain during
+2026-07-16T07:56:03.440956Z __PERF_WORK_END_scratch_post_reboot_audit-1-ec03150e__
+2026-07-16T07:56:03.445287Z __PERF_ACK_scratch_post_reboot_audit-1-ec03150e_WORK__
+2026-07-16T07:56:03.944866Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_scratch_post_reboot_audit-1-ec03150e__ rc=0

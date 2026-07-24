@@ -3,7 +3,7 @@ title: "LoongArch64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-21
 tags: [architecture, loongarch64, hal]
 ---
 
@@ -243,6 +243,27 @@ la64 `trap_return()` 的关键语义：
 | 参数 | trap context、用户 token、ASID 传给 `__restore` |
 
 该路径保证信号交付发生在恢复用户态前。
+
+### 9.1 用户态返回地址布局与 trap context 槽位
+
+LA64 的用户态返回相关虚拟地址按从低到高排列为：
+
+```
+trap-context window → TRAMPOLINE → SIGNAL_TRAMPOLINE
+[KERNEL_STACK_MAX_SLOTS pages]
+```
+
+用户 mmap arena 是半开区间 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`。旧的 `USR_MMAP_END == TRAMPOLINE` 会使该 arena 错误地覆盖 `[TRAP_CONTEXT_BASE, TRAMPOLINE)`，因此不能再把 `USR_MMAP_END` 解释为 trampoline 地址。当前 exclusive end 为 `TRAP_CONTEXT_BASE`。
+
+`TRAMPOLINE` 位于 trap-context window 之上，不属于该窗口。普通 mmap 和 SysV shm mmap 对 LA64 的 `MAP_FIXED`、`MAP_FIXED_NOREPLACE` 请求，必须在 unmap 前检查请求区间；只要与 `[TRAP_CONTEXT_BASE, TRAMPOLINE)` 相交就拒绝。`tid_alloc()` 使用从 1 开始的编号，合法槽位 `tid` 的底部地址为：
+
+```text
+trap_cx_bottom_from_tid(tid) = TRAP_CONTEXT_BASE + (tid - 1) * PAGE_SIZE
+```
+
+实现必须拒绝 `tid < 1` 或 `tid > KERNEL_STACK_MAX_SLOTS`，窗口范围是从 `TRAP_CONTEXT_BASE` 开始的连续 `KERNEL_STACK_MAX_SLOTS` 个 trap-context pages。新映射成功时直接返回新映射的 PPN，调用方不应从 trampoline 或其他相邻地址重新推导 PPN。这个布局和范围约束保护 `trap_return → __restore` 使用的 frame pointer，避免 trap context 映射覆盖 trampoline 物理页。
+
+2026-07-21 的最终双架构 regression 已验证 mmap 边界和第二个槽位：RV64 和 LA64 均完成 TAP `1..6`，包含 `ok 2 mmap_edge_cases` 和 `ok 6 clone_vm_second_slot`，LA64 分类器为 `STATE=PASS STATUS=0`。最终证据目录为 `docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`。该 focused regression 不代表 full LTP 或 basic 全量覆盖。
 
 LoongArch64 后端比 rv64 多两个需要重点理解的机制：ASID 和硬件 dirty/page-modify 语义。任务创建或 clone 后会分配/继承 ASID，返回用户态时 token 和 ASID 一起传给恢复汇编；页被写入时可能先触发 page modify，trap 后端通过 `LAFlexPageTable::set_dirty_bit()` 补 dirty bit，再让用户指令重试。这些机制使 la64 的“同一个虚拟地址”是否命中旧 TLB，不仅取决于页表内容，也取决于 ASID 和 invalidate 是否正确。
 

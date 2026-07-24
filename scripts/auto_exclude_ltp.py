@@ -31,10 +31,13 @@ import threading
 import subprocess
 from pathlib import Path
 
+from image_roles import ImageRoles, RoleContractError, load_roles
+
 # ============================================================
 # 配置
 # ============================================================
 REPO_ROOT = Path(__file__).resolve().parent.parent
+ROLES: ImageRoles = load_roles(REPO_ROOT)
 ARCH = os.environ.get("ARCH", "rv64")
 LTP_LIBC = os.environ.get("LTP_LIBC", "glibc")
 TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "35"))
@@ -84,18 +87,21 @@ def resolve_blk_mode(arch: str) -> str:
 
 
 def resolve_run_target(arch: str) -> str:
-    return "rv64-run" if arch == "rv64" else "la64-run"
+    return "rv64-derived-run" if arch == "rv64" else "la64-derived-run"
 
 
 def resolve_image_paths(arch: str):
-    if arch == "rv64":
-        return REPO_ROOT / "sdcard-rv.img", REPO_ROOT / "fs-img-dir/sdcard-rv.img.xz"
-    else:
-        return REPO_ROOT / "sdcard-la.img", REPO_ROOT / "fs-img-dir/sdcard-la.img.xz"
+    return ROLES.derived_x0(arch), ROLES.official_archive(arch), ROLES.derived_x0_next(arch)
 
 
-def restore_image(img_file: Path, img_backup: Path) -> bool:
+def restore_image(arch: str, img_file: Path, img_backup: Path) -> bool:
     """同步解压镜像（仅在初始化时使用）。"""
+    try:
+        ROLES.validate_official(arch, img_backup, archive=True)
+        ROLES.validate_derived_output(arch, img_file)
+    except RoleContractError as error:
+        log(f"ERROR: {error}")
+        return False
     if not img_backup.exists():
         log(f"ERROR: backup image not found: {img_backup}, cannot restore")
         return False
@@ -106,9 +112,12 @@ def restore_image(img_file: Path, img_backup: Path) -> bool:
     return True
 
 
-def bkg_decompress(img_backup: Path, output_path: Path):
+def bkg_decompress(arch: str, img_backup: Path, output_path: Path):
     """后台解压镜像到临时文件。失败时删除不完整文件。"""
     try:
+        ROLES.validate_official(arch, img_backup, archive=True)
+        ROLES.validate_derived_output(arch, output_path, next_image=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "wb") as f:
             subprocess.run(
                 ["xz", "-dkc", str(img_backup)],
@@ -220,6 +229,7 @@ def conf_inject(
                 f"CONF_ARCH={arch}",
                 f"CONF_BLK_MODE={blk_mode}",
                 f"CONF_FILE={str(conf_path)}",
+                f"CONF_IMAGE={ROLES.derived_x0(arch)}",
             ],
             capture_output=True, text=True,
         )
@@ -418,7 +428,7 @@ def main():
     arch = normalize_arch(ARCH)
     blk_mode = resolve_blk_mode(arch)
     run_target = resolve_run_target(arch)
-    img_file, img_backup = resolve_image_paths(arch)
+    img_file, img_backup, next_img_path = resolve_image_paths(arch)
 
     if LTP_LIBC not in ("musl", "glibc"):
         die(f"LTP_LIBC must be 'musl' or 'glibc', got '{LTP_LIBC}'")
@@ -445,14 +455,13 @@ def main():
         log(f"ltp_from={ltp_from} (resuming)")
 
     # 恢复原始镜像作为起点（同步解压）
-    if not restore_image(img_file, img_backup):
+    if not restore_image(arch, img_file, img_backup):
         die("initial image restore failed")
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     bg_decompress_thread: threading.Thread | None = None
-    next_img_path = Path(str(img_file) + ".next")
 
     for round_num in range(1, MAX_ROUNDS + 1):
         if _should_stop:
@@ -466,7 +475,7 @@ def main():
                 log(f"swapped fresh image for round {round_num}")
             else:
                 log(f"WARNING: background decompress did not produce {next_img_path}, re-decompressing")
-                if not restore_image(img_file, img_backup):
+                if not restore_image(arch, img_file, img_backup):
                     die("re-decompress failed")
             bg_decompress_thread = None
 
@@ -482,7 +491,7 @@ def main():
 
         # 启动后台解压，为下一轮准备镜像（QEMU 运行时并行解压）
         bg_decompress_thread = threading.Thread(
-            target=bkg_decompress, args=(img_backup, next_img_path),
+            target=bkg_decompress, args=(arch, img_backup, next_img_path),
             daemon=True,
         )
         bg_decompress_thread.start()

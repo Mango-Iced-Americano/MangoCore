@@ -17,22 +17,22 @@
 pub mod address;
 mod address_space;
 mod filemap;
-mod frame_store;
 mod frame_allocator;
+mod frame_store;
 mod heap_allocator;
-mod slab;
 #[cfg(feature = "heap_trace")]
 pub mod heap_trace;
 mod kernel_mapper;
 mod kernel_space;
-mod vma;
 mod mapper;
 mod mmap;
 mod page_fault;
 mod page_table;
+mod slab;
 mod sysctl;
 mod uaccess;
 mod user_mapper;
+mod vma;
 mod vma_set;
 #[cfg(feature = "zram")]
 mod zram;
@@ -40,23 +40,33 @@ pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
 pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+pub use address_space::{AddressSpace, MemoryError};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reserve, frames_alloc,
-    frames_alloc_any, frames_alloc_fresh_contiguous, unallocated_frames, FrameTracker,
+    frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
+    frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
+    is_allocatable_ram_phys_addr, is_ram_phys_addr, unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;
-pub use heap_allocator::{heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES};
-pub use vma::{MapFlags, MapPermission};
-pub use address_space::{AddressSpace, MemoryError};
+pub use heap_allocator::{
+    heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES,
+};
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
 pub use sysctl::{
-    commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count,
-    min_free_kbytes, overcommit_memory, overcommit_ratio, panic_on_oom, set_max_map_count,
+    commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count, min_free_kbytes,
+    overcommit_allows, overcommit_memory, overcommit_ratio, panic_on_oom, set_max_map_count,
     set_min_free_kbytes, set_overcommit_memory, set_overcommit_ratio, set_panic_on_oom,
-    overcommit_allows, total_memory_kbytes,
+    total_memory_kbytes,
 };
+pub use vma::{MapFlags, MapPermission};
 type MmResult<T> = Result<T, MemoryError>;
+
+/// Stack alignment required whenever the kernel enters userspace.
+///
+/// Both the RISC-V ELF psABI and the LoongArch ELF ABI require a 16-byte
+/// aligned stack pointer at function entry. LLVM relies on this invariant
+/// when folding address additions into alignment-sensitive instructions.
+pub const USER_STACK_ABI_ALIGN: usize = 16;
 #[allow(unused_imports)]
 pub use uaccess::{
     check_user_range,
@@ -74,6 +84,7 @@ pub use uaccess::{
     translated_refmut,
     translated_str,
     try_get_from_user,
+    user_accessible_len,
     UserBuffer,
     UserBufferReader,
     UserBufferWriter,
@@ -81,7 +92,6 @@ pub use uaccess::{
     UserIoVec,
     UserPtr,
     UserPtrMut,
-    user_accessible_len,
     UserSlice,
     // UserBufferIterator,
 };

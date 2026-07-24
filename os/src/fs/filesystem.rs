@@ -6,6 +6,7 @@ use lazy_static::*;
 use log::info;
 use spin::Mutex;
 
+use crate::config::PAGE_SIZE;
 use crate::drivers::block::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
 
@@ -13,11 +14,27 @@ use crate::drivers::BLOCK_DEVICE;
 ///
 /// `Null` 表示未检测到已知文件系统（或 `FORCE_RAMFS` 强制跳过块设备检测）。
 #[allow(unused, non_camel_case_types)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FS_Type {
     Null,
     Fat32,
     Ext4,
+}
+
+/// Result of probing an on-disk filesystem, including its native block unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectedFs {
+    pub fs_type: FS_Type,
+    pub block_size: usize,
+}
+
+/// Identity and recovery-relevant fields from an ext4 primary superblock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ext4Identity {
+    pub uuid: [u8; 16],
+    pub volume_name: [u8; 16],
+    pub compatible_features: u32,
+    pub incompatible_features: u32,
 }
 
 /// 检测到的文件系统描述符。
@@ -43,43 +60,117 @@ impl FileSystem {
     }
 }
 
-/// 读取块设备的第一个扇区（`BLOCK_SIZE` 字节），通过魔数检测文件系统类型。
-///
-/// 检测顺序：FAT32（`0x55AA` 在偏移 510）→ ext4（`0xEF53` 在偏移 1080）。
-/// 均不匹配时返回 `FS_Type::Null`。
-pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
-    let mut buf = vec![0u8; BLOCK_SIZE];
-    block_device
-        .read_block(0, &mut buf)
-        .expect("failed to read filesystem signature block");
-    if buf[510] == 0x55 && buf[511] == 0xAA {
-        info!("[fs] found fat32 filesystem");
-        FS_Type::Fat32
-    } else {
-        let superblock_offset = 1024;
-        let magic_number_high_index = superblock_offset + 56;
-        let magic_number_low_index = superblock_offset + 57;
-        let magic_number =
-            u16::from_le_bytes([buf[magic_number_high_index], buf[magic_number_low_index]]);
-        info!("[fs] read magic number: {}", magic_number);
-        if magic_number == 0xEF53 {
-            info!("[fs] found ext4 filesystem");
-            FS_Type::Ext4
-        } else {
-            info!("[fs] no filesystem found");
-            FS_Type::Null
-        }
+fn read_u16_le(buf: &[u8], offset: usize) -> Option<u16> {
+    let bytes = buf.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
+    let bytes = buf.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// 校验 FAT32 BIOS 参数块，避免把同样以 0x55AA 结尾的 MBR 分区表误判为 FAT。
+fn fat32_sector_size(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 512 || buf[510] != 0x55 || buf[511] != 0xaa {
+        return None;
     }
+
+    let jump_is_valid = (buf[0] == 0xeb && buf[2] == 0x90) || buf[0] == 0xe9;
+    let bytes_per_sector = read_u16_le(buf, 11).unwrap_or(0) as usize;
+    let sectors_per_cluster = buf[13];
+    let reserved_sectors = read_u16_le(buf, 14).unwrap_or(0);
+    let fat_count = buf[16];
+    let root_entry_count = read_u16_le(buf, 17).unwrap_or(u16::MAX);
+    let fat_size_16 = read_u16_le(buf, 22).unwrap_or(u16::MAX);
+    let total_sectors_32 = read_u32_le(buf, 32).unwrap_or(0);
+    let fat_size_32 = read_u32_le(buf, 36).unwrap_or(0);
+    let root_cluster = read_u32_le(buf, 44).unwrap_or(0);
+
+    let valid = jump_is_valid
+        && matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096)
+        && bytes_per_sector <= PAGE_SIZE
+        && PAGE_SIZE % bytes_per_sector == 0
+        && sectors_per_cluster.is_power_of_two()
+        && reserved_sectors != 0
+        && matches!(fat_count, 1 | 2)
+        && root_entry_count == 0
+        && fat_size_16 == 0
+        && total_sectors_32 != 0
+        && fat_size_32 != 0
+        && root_cluster >= 2;
+    valid.then_some(bytes_per_sector)
+}
+
+/// 读取首个平台块并识别裸 ext4/FAT32 及其原生块大小。
+pub fn detect_fs_layout(block_device: &Arc<dyn BlockDevice>) -> Option<DetectedFs> {
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    block_device.read_block(0, &mut buf);
+    let ext4_magic = read_u16_le(&buf, 1024 + 56).unwrap_or(0);
+    if ext4_magic == 0xef53 {
+        let log_block_size = read_u32_le(&buf, 1024 + 24).unwrap_or(u32::MAX);
+        let block_size = 1024usize.checked_shl(log_block_size).unwrap_or(0);
+        if block_size.is_power_of_two()
+            && (1024..=PAGE_SIZE).contains(&block_size)
+            && PAGE_SIZE % block_size == 0
+        {
+            info!("[fs] found ext4 filesystem, block_size={}", block_size);
+            return Some(DetectedFs {
+                fs_type: FS_Type::Ext4,
+                block_size,
+            });
+        }
+        info!(
+            "[fs] ext4 magic found but block size {} is unsupported",
+            block_size
+        );
+        return None;
+    }
+    if let Some(block_size) = fat32_sector_size(&buf) {
+        info!("[fs] found fat32 filesystem, sector_size={}", block_size);
+        return Some(DetectedFs {
+            fs_type: FS_Type::Fat32,
+            block_size,
+        });
+    }
+    info!("[fs] no filesystem found");
+    None
+}
+
+/// 兼容旧调用方的类型探测入口。
+pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
+    detect_fs_layout(block_device)
+        .map(|detected| detected.fs_type)
+        .unwrap_or(FS_Type::Null)
+}
+
+/// Read the identity needed by a policy-controlled writable ext4 mount.
+///
+/// Filesystem type detection alone is insufficient for a writable board
+/// partition: an unrelated ext4 filesystem at the same partition number must
+/// not silently become the persistent state directory.
+pub fn ext4_identity(block_device: &Arc<dyn BlockDevice>) -> Option<Ext4Identity> {
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    block_device.read_block(0, &mut buf);
+    let base = 1024usize;
+    if read_u16_le(&buf, base + 0x38)? != 0xef53 {
+        return None;
+    }
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(buf.get(base + 0x68..base + 0x78)?);
+    let mut volume_name = [0u8; 16];
+    volume_name.copy_from_slice(buf.get(base + 0x78..base + 0x88)?);
+    Some(Ext4Identity {
+        uuid,
+        volume_name,
+        compatible_features: read_u32_le(&buf, base + 0x5c)?,
+        incompatible_features: read_u32_le(&buf, base + 0x60)?,
+    })
 }
 
 /// 挂载前的文件系统检测入口。
 ///
-/// 若 `FORCE_RAMFS` 标志为 `true`，跳过块设备检测，直接返回 `FS_Type::Null`
-///（由 ramfs 接管）。否则调用 `detect_fs(&BLOCK_DEVICE)`。
+/// Detect the filesystem currently exposed by the primary block device.
 pub fn pre_mount() -> FS_Type {
-    if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
-        println!("[fs] ramfs forced, skipping block device detection");
-        return FS_Type::Null;
-    }
     detect_fs(&BLOCK_DEVICE)
 }

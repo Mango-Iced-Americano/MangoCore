@@ -266,17 +266,29 @@ pub fn veth_pair_delete(iface: alloc::sync::Arc<dyn crate::net::iface::Iface>) {
     let veth_iface: &VethInterface =
         unsafe { &*(alloc::sync::Arc::as_ptr(&iface) as *const VethInterface) };
 
-    let own_nic = veth_iface.common.nic_id.load(core::sync::atomic::Ordering::Relaxed) as u32;
+    let own_nic = veth_iface
+        .common
+        .nic_id
+        .load(core::sync::atomic::Ordering::Relaxed) as u32;
     // Find which namespace owns this device — not necessarily current_netns()
     // (e.g., after IFLA_NET_NS_PID move).
-    let own_ns = veth_iface.common.net_namespace.read()
+    let own_ns = veth_iface
+        .common
+        .net_namespace
+        .read()
         .as_ref()
         .and_then(|w| w.upgrade())
         .unwrap_or_else(crate::net::net_core::current_netns);
 
     if let Some(peer) = veth_iface.data.peer.lock().upgrade() {
-        let peer_nic = peer.common.nic_id.load(core::sync::atomic::Ordering::Relaxed) as u32;
-        let peer_ns = peer.common.net_namespace.read()
+        let peer_nic = peer
+            .common
+            .nic_id
+            .load(core::sync::atomic::Ordering::Relaxed) as u32;
+        let peer_ns = peer
+            .common
+            .net_namespace
+            .read()
             .as_ref()
             .and_then(|w| w.upgrade())
             .unwrap_or_else(crate::net::net_core::current_netns);
@@ -286,14 +298,18 @@ pub fn veth_pair_delete(iface: alloc::sync::Arc<dyn crate::net::iface::Iface>) {
         crate::net::config::NET_INTERFACE.remove_veth_stack(peer_nic);
         log::info!(
             "[veth] deleted veth pair: {} (ifindex={}) <-> {} (ifindex={})",
-            veth_iface.iface_name(), own_nic, peer.iface_name(), peer_nic
+            veth_iface.iface_name(),
+            own_nic,
+            peer.iface_name(),
+            peer_nic
         );
     } else {
         own_ns.remove_device(own_nic as usize);
         crate::net::config::NET_INTERFACE.remove_veth_stack(own_nic);
         log::info!(
             "[veth] deleted veth (peer absent): {} (ifindex={})",
-            veth_iface.iface_name(), own_nic
+            veth_iface.iface_name(),
+            own_nic
         );
     }
 }

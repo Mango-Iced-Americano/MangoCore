@@ -1,0 +1,6 @@
+2026-07-17T12:48:44.032939Z __PERF_BEGIN_pyctl_rm-1-cc43deed__
+2026-07-17T12:48:44.866026Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_pyctl_rm-1-cc43deed_TRACE_OFF__
+2026-07-17T12:48:45.996734Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_pyctl_rm-1-cc43deed__
+2026-07-17T12:48:46.038418Z __PERF_WORK_END_pyctl_rm-1-cc43deed__
+2026-07-17T12:48:46.039977Z __PERF_ACK_pyctl_rm-1-cc43deed_WORK__
+2026-07-17T12:48:46.424915Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_pyctl_rm-1-cc43deed__ rc=0

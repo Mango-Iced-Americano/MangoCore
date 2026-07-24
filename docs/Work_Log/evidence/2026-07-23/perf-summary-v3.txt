@@ -1,0 +1,25 @@
+# another_ext4 iozone v3 performance summary
+
+## Build and runtime metadata
+
+- Build: `docker compose exec -T os-dev bash -c "cd /app/os && make rv64-kernel-build-only EXTRA_FEATURES=perf_diag"` completed successfully.
+- Runtime: `docker compose exec -T os-dev bash -c "cd /app/os && timeout 600 make rv64-run 2>&1" > /tmp/qemu-perf-v3.log` completed successfully.
+- Container: `fba442b0132ed67fdd5b17f188e8323464b131951a1c6349e52b0082809c711d`.
+- Mount: `/home/pxy/projects/MangoCore -> /app`.
+- Kernel checkout at collection: `8cc2751d-dirty`.
+- another_ext4 optimization commit: `df3f02c` (`perf(ext4): skip zero-fill for buffered writes, lower DIRECT_RANGE_MIN_BLOCKS 16→4`).
+
+## Python grouping calculation
+
+Parser: `prepare_cycles=(\d+) commit_cycles=(\d+) direct=(true|false)`
+
+| direct | calls | prepare_cycles sum | commit_cycles sum | prepare_cycles/call | commit_cycles/call |
+|---|---:|---:|---:|---:|---:|
+| true | 0 | 0 | 0 | 0.00 | 0.00 |
+| false | 0 | 0 | 0 | 0.00 | 0.00 |
+
+## Result
+
+The QEMU boot selected `mask=0xFFF`, not the expected iozone-only configuration, and then failed to find `iozone_testcode.sh` in both `/musl` and `/glibc` (exit code 32512). Consequently no `write_pages` diagnostics, musl T4 stats, or iozone throughput were produced. These zero-valued buckets indicate absent samples, not measured zero-cost operations; no performance comparison can be made from v3.
+
+Per task constraint, the configuration was not re-injected and the run was not repeated.

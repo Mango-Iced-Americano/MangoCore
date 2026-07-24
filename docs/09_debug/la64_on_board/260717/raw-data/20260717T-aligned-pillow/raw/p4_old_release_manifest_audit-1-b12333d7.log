@@ -1,0 +1,10 @@
+2026-07-17T15:42:56.591043Z __PERF_BEGIN_p4_old_release_manifest_audit-1-b12333d7__
+2026-07-17T15:42:57.555147Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_p4_old_release_manifest_audit-1-b12333d7_TRACE_OFF__
+2026-07-17T15:43:00.682437Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_p4_old_release_manifest_audit-1-b12333d7__
+2026-07-17T15:43:00.722943Z /persist/python-runtime/releases/071e4e258421
+2026-07-17T15:43:00.804338Z 3ef05721e7802b5f998f5ab4def9c775bc9ac7000a456d0635011065bdd22ed0  /persist/python-runtime/releases/5298fb0fa485/strict-runtime-manifest.json
+2026-07-17T15:43:00.851403Z 196c4fbe8705ba523eca556c309aa792ba82b8d3ad38f9c2eaeaa96a11d4955f  /persist/python-runtime/releases/a420d79ddb07/strict-runtime-manifest.json
+2026-07-17T15:43:00.898114Z 3617070c7b187543bd23945ba60b451d653af89ba557199c1e1e9e6f224a1dd0  /persist/python-runtime/releases/b7f361382399/strict-runtime-manifest.json
+2026-07-17T15:43:00.905391Z __PERF_WORK_END_p4_old_release_manifest_audit-1-b12333d7__
+2026-07-17T15:43:00.910900Z __PERF_ACK_p4_old_release_manifest_audit-1-b12333d7_WORK__
+2026-07-17T15:43:01.429785Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_p4_old_release_manifest_audit-1-b12333d7__ rc=0

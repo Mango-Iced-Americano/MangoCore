@@ -1,0 +1,6 @@
+2026-07-16T12:04:06.012366Z __PERF_BEGIN_python_startup_site-1-9279f36a__
+2026-07-16T12:04:06.937987Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_ACK_python_startup_site-1-9279f36a_TRACE_OFF__
+2026-07-16T12:04:08.366227Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_WORK_BEGIN_python_startup_site-1-9279f36a__
+2026-07-16T12:04:09.996328Z __PERF_WORK_END_python_startup_site-1-9279f36a__
+2026-07-16T12:04:10.000839Z __PERF_ACK_python_startup_site-1-9279f36a_WORK__
+2026-07-16T12:04:10.464612Z [1m[33mMangoCore[0m:[1m[34m/persist/pyperf/s[0m# __PERF_END_python_startup_site-1-9279f36a__ rc=0

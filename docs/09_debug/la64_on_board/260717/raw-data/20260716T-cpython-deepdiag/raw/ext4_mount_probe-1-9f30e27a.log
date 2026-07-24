@@ -1,0 +1,30 @@
+2026-07-16T08:27:32.886564Z __PERF_BEGIN_ext4_mount_probe-1-9f30e27a__
+2026-07-16T08:27:33.792874Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_ACK_ext4_mount_probe-1-9f30e27a_TRACE_OFF__
+2026-07-16T08:27:36.467751Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_WORK_BEGIN_ext4_mount_probe-1-9f30e27a__
+2026-07-16T08:27:36.503267Z none / rootfs rw,relatime 0 0
+2026-07-16T08:27:36.508808Z /tools/tests /tests ext4 ro,relatime 0 0
+2026-07-16T08:27:36.511497Z /persist /persist ext4 rw,relatime 0 0
+2026-07-16T08:27:36.517089Z /persist/python /persist/apk-root/var/cache/mango-python ext4 rw,relatime 0 0
+2026-07-16T08:27:36.522724Z /tools /persist/apk-root/tools ext4 ro,relatime 0 0
+2026-07-16T08:27:36.528246Z /scratch /persist/apk-root/scratch fat32 rw,relatime 0 0
+2026-07-16T08:27:36.533740Z /run /persist/apk-root/run ramfs rw,relatime 0 0
+2026-07-16T08:27:36.536613Z /tmp /persist/apk-root/tmp tmpfs rw,relatime 0 0
+2026-07-16T08:27:36.542155Z /dev /persist/apk-root/dev devfs rw,relatime 0 0
+2026-07-16T08:27:36.544905Z /proc /persist/apk-root/proc proc rw,relatime 0 0
+2026-07-16T08:27:36.550473Z /scratch /scratch fat32 rw,relatime 0 0
+2026-07-16T08:27:36.553345Z none /sys sysfs rw,relatime 0 0
+2026-07-16T08:27:36.556071Z /tools /tools ext4 ro,relatime 0 0
+2026-07-16T08:27:36.558873Z none /tmp tmpfs rw,relatime 0 0
+2026-07-16T08:27:36.561629Z /sdcard /sdcard ext4 ro,relatime 0 0
+2026-07-16T08:27:36.564395Z none /proc proc rw,relatime 0 0
+2026-07-16T08:27:36.567185Z /sdcard/musl /musl ext4 ro,relatime 0 0
+2026-07-16T08:27:36.572749Z /sdcard/glibc /glibc ext4 ro,relatime 0 0
+2026-07-16T08:27:36.575540Z none /dev devfs rw,relatime 0 0
+2026-07-16T08:27:36.576357Z none /dev/shm tmpfs rw,relatime 0 0
+2026-07-16T08:27:36.618245Z Filesystem           1K-blocks      Used Available Use% Mounted on
+2026-07-16T08:27:36.624859Z none                  16350816   2424192  13926624  15% /
+2026-07-16T08:27:36.631777Z none                  16350816   2424192  13926624  15% /
+2026-07-16T08:27:37.318675Z ext4-write-ok
+2026-07-16T08:27:37.362828Z __PERF_WORK_END_ext4_mount_probe-1-9f30e27a__
+2026-07-16T08:27:37.367053Z __PERF_ACK_ext4_mount_probe-1-9f30e27a_WORK__
+2026-07-16T08:27:37.810231Z [1m[33mMangoCore[0m:[1m[34m/scratch/mangocore-cpython-bench-suite[0m# __PERF_END_ext4_mount_probe-1-9f30e27a__ rc=0

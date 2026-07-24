@@ -1,0 +1,187 @@
+
+ _     __   __  _  _  ___  ___  __  _  _    /   ___  __  \ 
+ |    |  | |  | |\ | | __ [__  |  | |\ |    |  | __ |  \ | 
+ |___ |__| |__| | \| |__] ___] |__| | \|    \  |__] |__/ / 
+
+Trying to boot from BootSpace
+
+
+U-Boot 2022.04-v2.1.0-00349-g4ce7c922 (Apr 16 2024 - 18:37:57 +0800), Build: jenkins-u-boot-2022.04-2k1000-dp-2G-factory-7
+
+CPU:   LA264
+Speed: Cpu @ 500 MHz/ Mem @ 400 MHz/ Bus @ 125 MHz
+Model: loongson-2k1000
+Board: LS2K1000-DP-FACTORY
+DRAM:  2048 MiB
+2 GiB
+Core:  79 devices, 22 uclasses, devicetree: board
+SF: Detected w25q64cv with page size 256 Bytes, erase size 4 KiB, total 8 MiB
+bdinfo is in spi-flash
+cam_disable:1, vpu_disable:1, pcie0_enable:0, pcie1_enable:1
+Loading Environment from SPIFlash... OK
+Cannot get ddc bus
+In:    serial gpiobtn 
+Out:   serial 
+Err:   serial vidconsole 
+Net:   eth0: ethernet@40040000, eth1: ethernet@40050000
+************************** Notice **************************
+Press c to enter u-boot console, m to enter boot menu
+************************************************************
+Bus otg@40000000: dwc2_usb otg@40000000: Core Release: 2.93a
+USB DWC2
+Bus ehci@40060000: USB EHCI 1.00
+Bus ohci@40070000: USB OHCI 1.0
+scanning bus otg@40000000 for devices... 1 USB Device(s) found
+scanning bus ehci@40060000 for devices... 1 USB Device(s) found
+scanning bus ohci@40070000 for devices... 1 USB Device(s) found
+Autoboot in 0 seconds
+[2J=> ccccccccccccccc<INTERRUPT>
+=> 
+=> 
+>>> setenv ipaddr 192.168.9.20
+setenv ipaddr 192.168.9.20
+=> 
+>>> setenv serverip 192.168.9.10
+setenv serverip 192.168.9.10
+=> 
+>>> setenv netmask 255.255.255.0
+setenv netmask 255.255.255.0
+=> 
+>>> setenv loadaddr 0x9000000098000000
+setenv loadaddr 0x9000000098000000
+=> 
+>>> ping 192.168.9.10
+ping 192.168.9.10
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+host 192.168.9.10 is alive
+=> 
+>>> tftpboot 0x9000000098000000 kernel-2k1000-sata-probe-2eae776c.ui
+tftpboot 0x9000000098000000 kernel-2k1000-sata-probe-2eae776c.ui
+Speed: 1000, full duplex
+Using ethernet@40040000 device
+TFTP from server 192.168.9.10; our IP address is 192.168.9.20
+Filename 'kernel-2k1000-sata-probe-2eae776c.ui'.
+Load address: 0x9000000098000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ##############
+	 7 MiB/s
+done
+Bytes transferred = 12600200 (c04388 hex)
+=> 
+>>> crc32 0x9000000098000000 0xc04388
+crc32 0x9000000098000000 0xc04388
+CRC32 for 9000000098000000 ... 9000000098c04387 ==> 75e1ba61
+=> 
+>>> iminfo 0x9000000098000000
+iminfo 0x9000000098000000
+
+## Checking Image at 9000000098000000 ...
+   Legacy image found
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    12600136 Bytes = 12 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+=> 
+>>> bootm 0x9000000098000000
+bootm 0x9000000098000000
+## Booting kernel from Legacy Image at 9000000098000000 ...
+   Image Name:   MangoCore
+   Image Type:   LoongArch Linux Kernel Image (uncompressed)
+   Data Size:    12600136 Bytes = 12 MiB
+   Load Address: 90000000
+   Entry Point:  90000000
+   Verifying Checksum ... OK
+   Loading Kernel Image
+Warning: invalid device tree. Used linux default dtb
+2048 MiB
+[kernel] random: initialized from 2k1000-rng
+[sata-probe] begin (IDENTIFY + repeated LBA0 read; no disk writes)
+[sata-probe] ATA model='TS32GMTS400' serial='F697095467' firmware='S0322B' sectors=62533296 bytes=32017047552
+[sata-probe] LBA0 first 16 bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+[sata-probe] PASS: repeated LBA0 reads match; MBR signature=55aa
+[init] MangoCore stage-1 boot (initramfs mode)
+[scratch-smoke] /scratch absent, skipping
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+[init] ntpd pid=3 timed out after 3000ms, killing
+[init] ntpd attempt 1 failed (status=9)
+[init] ntpd all attempts failed: fallback to image build epoch 1784422502
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/tmp -> /tmp: skipped (errno=2)
+[init] bind /tools/bin -> /bin: skipped (errno=2)
+[init] bind /tools/sbin -> /sbin: skipped (errno=2)
+[init] bind /tools/lib -> /lib: skipped (errno=2)
+[init] bind /tools/usr -> /usr: skipped (errno=2)
+[init] bind /tools/root -> /root: skipped (errno=2)
+[init] bind /tools/tests -> /tests: skipped (errno=2)
+[init] bind /sdcard/musl -> /musl: skipped (errno=2)
+[init] bind /sdcard/glibc -> /glibc: skipped (errno=2)
+[initproc] config source=/os_test.conf mode=run mask=0x800 ltp_runner=suite timer_smoke=false ext4_profile=false reclaim_profile=false skip_apk=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02", "execve05", "fallocate06", "mmap16", "rename10", "shmctl01", "copy_file_range02", "pipe13", "splice02", "splice07", "timer_settime03", "statx11", "prot_hsymlinks", "send02", "futex_cmp_requeue01"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["clone08"], glibc: []
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+/bin/bash: line 1: chmod: command not found
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin: skipped (errno=2)
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s bytes=2811472 expected=2811472
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on writable test sources ...
+[initproc] chmod test scripts done, exit=0
+P4 strict-aligned Python policy launchers are missing
+[initproc] CPython launcher setup done, exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] apk add e2fsprogs ...
+/bin/bash: line 1: /tools/bin/apk.static: No such file or directory
+[initproc] apk add -> exit=0
+[initproc] run_selected_groups start mask=0x800 order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] skip iozone (mask bit4 not set)
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] select group=ltp timeout=24000s
+#### OS COMP TEST GROUP START ltp-glibc ####
+[ltprunner] warning: suite 'syscalls' not found at /glibc/ltp/runtest/syscalls
+[ltprunner] warning: suite 'fs' not found at /glibc/ltp/runtest/fs
+[ltprunner] warning: suite 'fs_perms_simple' not found at /glibc/ltp/runtest/fs_perms_simple
+[ltprunner] warning: suite 'fs_readonly' not found at /glibc/ltp/runtest/fs_readonly
+[ltprunner] warning: suite 'fcntl-locktests' not found at /glibc/ltp/runtest/fcntl-locktests
+[ltprunner] warning: no cases found in any suite
+#### OS COMP TEST GROUP END ltp-glibc ####
+[initproc] done ltprunner (libc=glibc) exit_code=0
+[timer] group ltprunner (libc=glibc) took 0s
+[initproc] sleep 1s before next group
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done

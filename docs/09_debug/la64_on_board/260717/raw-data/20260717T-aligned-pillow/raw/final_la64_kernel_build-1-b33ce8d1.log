@@ -1,0 +1,1589 @@
+2026-07-18T00:20:41.618160Z WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+2026-07-18T00:20:47.387943Z info: override toolchain for '/app/os' set to 'nightly-2024-05-01-x86_64-unknown-linux-gnu'
+2026-07-18T00:20:47.396243Z cp ./src/lang_items.rs.la ./src/lang_items.rs
+2026-07-18T00:20:47.411583Z cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+2026-07-18T00:20:47.426145Z make -f make/la64.mk build BLK_MODE=virt_pci MODE=release LOG= \
+2026-07-18T00:20:47.426216Z 	EXTRA_FEATURES=""
+2026-07-18T00:20:47.471075Z make[1]: Entering directory '/app/os'
+2026-07-18T00:20:47.471167Z (rustup target list | grep "loongarch64-unknown-linux-gnu (installed)") || rustup target add loongarch64-unknown-linux-gnu
+2026-07-18T00:20:47.738119Z loongarch64-unknown-linux-gnu (installed)
+2026-07-18T00:20:47.740051Z rustup component add rust-src
+2026-07-18T00:20:47.958605Z info: downloading component 'rust-src'
+2026-07-18T00:20:48.626153Z info: installing component 'rust-src'
+2026-07-18T00:20:48.971231Z make[2]: Entering directory '/app/user'
+2026-07-18T00:20:53.454163Z info: override toolchain for '/app/user' set to 'nightly-2024-05-01-x86_64-unknown-linux-gnu'
+2026-07-18T00:20:53.472400Z (rustup target list | grep "loongarch64-unknown-linux-gnu (installed)") || rustup target add loongarch64-unknown-linux-gnu
+2026-07-18T00:20:53.617437Z loongarch64-unknown-linux-gnu (installed)
+2026-07-18T00:20:53.619100Z rustup component add rust-src
+2026-07-18T00:20:53.803652Z info: component 'rust-src' is up to date
+2026-07-18T00:20:53.808760Z rustup component add llvm-tools-preview
+2026-07-18T00:20:53.991542Z info: component 'llvm-tools' for target 'x86_64-unknown-linux-gnu' is up to date
+2026-07-18T00:20:53.995509Z cargo build --target=loongarch64-unknown-linux-gnu --release
+2026-07-18T00:20:54.148234Z warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+2026-07-18T00:20:54.148275Z note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+2026-07-18T00:20:54.848351Z    Compiling user_lib v0.1.0 (/app/user)
+2026-07-18T00:20:55.117223Z warning: the feature `lang_items` is internal to the compiler or standard library
+2026-07-18T00:20:55.117257Z  --> src/lib.rs:6:12
+2026-07-18T00:20:55.117268Z   |
+2026-07-18T00:20:55.117277Z 6 | #![feature(lang_items)]
+2026-07-18T00:20:55.117284Z   |            ^^^^^^^^^^
+2026-07-18T00:20:55.117292Z   |
+2026-07-18T00:20:55.117299Z   = note: using it is strongly discouraged
+2026-07-18T00:20:55.117308Z   = note: `#[warn(internal_features)]` on by default
+2026-07-18T00:20:55.117315Z 
+2026-07-18T00:20:55.472843Z warning: unreachable statement
+2026-07-18T00:20:55.472900Z   --> src/lib.rs:60:9
+2026-07-18T00:20:55.472923Z    |
+2026-07-18T00:20:55.472943Z 58 |             _parameter(argc, argv);
+2026-07-18T00:20:55.472971Z    |             ---------------------- any code following this expression is unreachable
+2026-07-18T00:20:55.472989Z 59 |         }
+2026-07-18T00:20:55.473007Z 60 |         unreachable!();
+2026-07-18T00:20:55.473027Z    |         ^^^^^^^^^^^^^^ unreachable statement
+2026-07-18T00:20:55.473043Z    |
+2026-07-18T00:20:55.473061Z    = note: `#[warn(unreachable_code)]` on by default
+2026-07-18T00:20:55.473085Z    = note: this warning originates in the macro `unreachable` (in Nightly builds, run with -Z macro-backtrace for more info)
+2026-07-18T00:20:55.473103Z 
+2026-07-18T00:20:56.869421Z warning: `user_lib` (lib) generated 2 warnings
+2026-07-18T00:20:57.169892Z warning: unnecessary parentheses around assigned value
+2026-07-18T00:20:57.169961Z     --> src/bin/fs_test.rs:2005:19
+2026-07-18T00:20:57.169980Z      |
+2026-07-18T00:20:57.169999Z 2005 |         let val = (0xA0 + i as u8);
+2026-07-18T00:20:57.170016Z      |                   ^              ^
+2026-07-18T00:20:57.170031Z      |
+2026-07-18T00:20:57.170048Z      = note: `#[warn(unused_parens)]` on by default
+2026-07-18T00:20:57.170089Z help: remove these parentheses
+2026-07-18T00:20:57.170105Z      |
+2026-07-18T00:20:57.170122Z 2005 -         let val = (0xA0 + i as u8);
+2026-07-18T00:20:57.170145Z 2005 +         let val = 0xA0 + i as u8;
+2026-07-18T00:20:57.170159Z      |
+2026-07-18T00:20:57.170172Z 
+2026-07-18T00:20:57.172861Z warning: unnecessary parentheses around assigned value
+2026-07-18T00:20:57.172899Z     --> src/bin/fs_test.rs:2018:28
+2026-07-18T00:20:57.172908Z      |
+2026-07-18T00:20:57.172917Z 2018 |             let expected = (0xA0 + i as u8);
+2026-07-18T00:20:57.172926Z      |                            ^              ^
+2026-07-18T00:20:57.172932Z      |
+2026-07-18T00:20:57.172939Z help: remove these parentheses
+2026-07-18T00:20:57.172945Z      |
+2026-07-18T00:20:57.172951Z 2018 -             let expected = (0xA0 + i as u8);
+2026-07-18T00:20:57.172958Z 2018 +             let expected = 0xA0 + i as u8;
+2026-07-18T00:20:57.172963Z      |
+2026-07-18T00:20:57.172969Z 
+2026-07-18T00:20:57.290478Z warning: unnecessary parentheses around `if` condition
+2026-07-18T00:20:57.290650Z     --> src/bin/initproc.rs:2362:19
+2026-07-18T00:20:57.290709Z      |
+2026-07-18T00:20:57.290787Z 2362 |                 if(cfg.diag) {
+2026-07-18T00:20:57.290820Z      |                   ^        ^
+2026-07-18T00:20:57.290837Z      |
+2026-07-18T00:20:57.290873Z      = note: `#[warn(unused_parens)]` on by default
+2026-07-18T00:20:57.290893Z help: remove these parentheses
+2026-07-18T00:20:57.290908Z      |
+2026-07-18T00:20:57.290923Z 2362 -                 if(cfg.diag) {
+2026-07-18T00:20:57.290938Z 2362 +                 if cfg.diag {
+2026-07-18T00:20:57.290952Z      |
+2026-07-18T00:20:57.290965Z 
+2026-07-18T00:20:57.295349Z warning: unnecessary parentheses around `if` condition
+2026-07-18T00:20:57.295396Z     --> src/bin/initproc.rs:2378:19
+2026-07-18T00:20:57.295412Z      |
+2026-07-18T00:20:57.295430Z 2378 |                 if(cfg.diag) {
+2026-07-18T00:20:57.295445Z      |                   ^        ^
+2026-07-18T00:20:57.295459Z      |
+2026-07-18T00:20:57.295474Z help: remove these parentheses
+2026-07-18T00:20:57.295490Z      |
+2026-07-18T00:20:57.295508Z 2378 -                 if(cfg.diag) {
+2026-07-18T00:20:57.295523Z 2378 +                 if cfg.diag {
+2026-07-18T00:20:57.295536Z      |
+2026-07-18T00:20:57.295558Z 
+2026-07-18T00:20:57.295615Z warning: unnecessary parentheses around `if` condition
+2026-07-18T00:20:57.295661Z     --> src/bin/initproc.rs:2384:19
+2026-07-18T00:20:57.295952Z      |
+2026-07-18T00:20:57.295999Z 2384 |                 if(cfg.diag) {
+2026-07-18T00:20:57.296017Z      |                   ^        ^
+2026-07-18T00:20:57.296064Z      |
+2026-07-18T00:20:57.296090Z help: remove these parentheses
+2026-07-18T00:20:57.296106Z      |
+2026-07-18T00:20:57.296149Z 2384 -                 if(cfg.diag) {
+2026-07-18T00:20:57.296166Z 2384 +                 if cfg.diag {
+2026-07-18T00:20:57.296180Z      |
+2026-07-18T00:20:57.296195Z 
+2026-07-18T00:20:57.296244Z warning: unnecessary parentheses around `if` condition
+2026-07-18T00:20:57.296268Z     --> src/bin/initproc.rs:2414:15
+2026-07-18T00:20:57.296284Z      |
+2026-07-18T00:20:57.296299Z 2414 |             if(cfg.diag) {
+2026-07-18T00:20:57.296334Z      |               ^        ^
+2026-07-18T00:20:57.296350Z      |
+2026-07-18T00:20:57.296366Z help: remove these parentheses
+2026-07-18T00:20:57.296380Z      |
+2026-07-18T00:20:57.296395Z 2414 -             if(cfg.diag) {
+2026-07-18T00:20:57.296412Z 2414 +             if cfg.diag {
+2026-07-18T00:20:57.296426Z      |
+2026-07-18T00:20:57.296439Z 
+2026-07-18T00:20:57.296460Z warning: unnecessary parentheses around `if` condition
+2026-07-18T00:20:57.296518Z     --> src/bin/initproc.rs:2426:15
+2026-07-18T00:20:57.296722Z      |
+2026-07-18T00:20:57.296743Z 2426 |             if(cfg.diag) {
+2026-07-18T00:20:57.296799Z      |               ^        ^
+2026-07-18T00:20:57.296816Z      |
+2026-07-18T00:20:57.296857Z help: remove these parentheses
+2026-07-18T00:20:57.296870Z      |
+2026-07-18T00:20:57.296886Z 2426 -             if(cfg.diag) {
+2026-07-18T00:20:57.296922Z 2426 +             if cfg.diag {
+2026-07-18T00:20:57.296938Z      |
+2026-07-18T00:20:57.296951Z 
+2026-07-18T00:20:57.724259Z warning: unused variable: `label`
+2026-07-18T00:20:57.724304Z    --> src/bin/ltprunner.rs:888:13
+2026-07-18T00:20:57.724313Z     |
+2026-07-18T00:20:57.724322Z 888 |         let label = if ret == 0 {
+2026-07-18T00:20:57.724331Z     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_label`
+2026-07-18T00:20:57.724339Z     |
+2026-07-18T00:20:57.724346Z     = note: `#[warn(unused_variables)]` on by default
+2026-07-18T00:20:57.724353Z 
+2026-07-18T00:20:57.787016Z warning: fields `ltp_root_s`, `path_s`, `tmpdir_s`, `tmpbase_s`, and `pwd_s` are never read
+2026-07-18T00:20:57.787080Z    --> src/bin/ltprunner.rs:512:5
+2026-07-18T00:20:57.787099Z     |
+2026-07-18T00:20:57.787934Z 511 | struct PrecomputedEnv {
+2026-07-18T00:20:57.787976Z     |        -------------- fields in this struct
+2026-07-18T00:20:57.787994Z 512 |     ltp_root_s: String,
+2026-07-18T00:20:57.788009Z     |     ^^^^^^^^^^
+2026-07-18T00:20:57.789236Z 513 |     path_s: String,
+2026-07-18T00:20:57.789267Z     |     ^^^^^^
+2026-07-18T00:20:57.789277Z 514 |     tmpdir_s: String,
+2026-07-18T00:20:57.789285Z     |     ^^^^^^^^
+2026-07-18T00:20:57.789291Z 515 |     tmpbase_s: String,
+2026-07-18T00:20:57.789297Z     |     ^^^^^^^^^
+2026-07-18T00:20:57.789303Z 516 |     pwd_s: String,
+2026-07-18T00:20:57.789308Z     |     ^^^^^
+2026-07-18T00:20:57.789313Z     |
+2026-07-18T00:20:57.789324Z     = note: `#[warn(dead_code)]` on by default
+2026-07-18T00:20:57.789331Z 
+2026-07-18T00:20:57.932065Z warning: constant `O_RDONLY` is never used
+2026-07-18T00:20:57.932166Z    --> src/bin/fs_test.rs:903:64
+2026-07-18T00:20:57.932186Z     |
+2026-07-18T00:20:57.932208Z 903 |     const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+2026-07-18T00:20:57.932228Z     |                                                                ^^^^^^^^
+2026-07-18T00:20:57.932243Z     |
+2026-07-18T00:20:57.932260Z     = note: `#[warn(dead_code)]` on by default
+2026-07-18T00:20:57.932273Z 
+2026-07-18T00:20:57.932295Z warning: constant `O_RDONLY` is never used
+2026-07-18T00:20:57.932311Z     --> src/bin/fs_test.rs:1379:64
+2026-07-18T00:20:57.932324Z      |
+2026-07-18T00:20:57.932346Z 1379 |     const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+2026-07-18T00:20:57.932365Z      |                                                                ^^^^^^^^
+2026-07-18T00:20:57.932379Z 
+2026-07-18T00:20:57.933035Z warning: function `run_profile_audit` is never used
+2026-07-18T00:20:57.933076Z     --> src/bin/fs_test.rs:2180:4
+2026-07-18T00:20:57.933095Z      |
+2026-07-18T00:20:57.933110Z 2180 | fn run_profile_audit() {}
+2026-07-18T00:20:57.933125Z      |    ^^^^^^^^^^^^^^^^^
+2026-07-18T00:20:57.933139Z 
+2026-07-18T00:20:57.940148Z warning: constant `O_CREATc` should have an upper case name
+2026-07-18T00:20:57.940233Z     --> src/bin/fs_test.rs:1712:15
+2026-07-18T00:20:57.940254Z      |
+2026-07-18T00:20:57.940274Z 1712 |         const O_CREATc: u32 = 0o100; const O_WRONLYc: u32 = 0o1;
+2026-07-18T00:20:57.940326Z      |               ^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_CREATC`
+2026-07-18T00:20:57.940349Z      |
+2026-07-18T00:20:57.940369Z      = note: `#[warn(non_upper_case_globals)]` on by default
+2026-07-18T00:20:57.940390Z 
+2026-07-18T00:20:57.940411Z warning: constant `O_WRONLYc` should have an upper case name
+2026-07-18T00:20:57.940427Z     --> src/bin/fs_test.rs:1712:44
+2026-07-18T00:20:57.940441Z      |
+2026-07-18T00:20:57.940460Z 1712 |         const O_CREATc: u32 = 0o100; const O_WRONLYc: u32 = 0o1;
+2026-07-18T00:20:57.940483Z      |                                            ^^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_WRONLYC`
+2026-07-18T00:20:57.940497Z 
+2026-07-18T00:20:57.940833Z warning: constant `O_CREATp` should have an upper case name
+2026-07-18T00:20:57.940885Z     --> src/bin/fs_test.rs:1720:15
+2026-07-18T00:20:57.940904Z      |
+2026-07-18T00:20:57.940924Z 1720 |         const O_CREATp: u32 = 0o100; const O_WRONLYp: u32 = 0o1;
+2026-07-18T00:20:57.940954Z      |               ^^^^^^^^ help: convert the identifier to upper case: `O_CREATP`
+2026-07-18T00:20:57.940969Z 
+2026-07-18T00:20:57.942521Z warning: constant `O_WRONLYp` should have an upper case name
+2026-07-18T00:20:57.942564Z     --> src/bin/fs_test.rs:1720:44
+2026-07-18T00:20:57.942580Z      |
+2026-07-18T00:20:57.942599Z 1720 |         const O_CREATp: u32 = 0o100; const O_WRONLYp: u32 = 0o1;
+2026-07-18T00:20:57.942621Z      |                                            ^^^^^^^^^ help: convert the identifier to upper case: `O_WRONLYP`
+2026-07-18T00:20:57.942634Z 
+2026-07-18T00:20:57.942651Z warning: constant `O_RDWRc` should have an upper case name
+2026-07-18T00:20:57.942666Z     --> src/bin/fs_test.rs:1758:11
+2026-07-18T00:20:57.942679Z      |
+2026-07-18T00:20:57.942693Z 1758 |     const O_RDWRc: u32 = 0o2;
+2026-07-18T00:20:57.942713Z      |           ^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_RDWRC`
+2026-07-18T00:20:57.942726Z 
+2026-07-18T00:20:57.942966Z warning: constant `O_CREATc` should have an upper case name
+2026-07-18T00:20:57.942990Z     --> src/bin/fs_test.rs:1759:11
+2026-07-18T00:20:57.943005Z      |
+2026-07-18T00:20:57.943021Z 1759 |     const O_CREATc: u32 = 0o100;
+2026-07-18T00:20:57.943042Z      |           ^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_CREATC`
+2026-07-18T00:20:57.943057Z 
+2026-07-18T00:20:57.943397Z warning: constant `O_RDWRc` should have an upper case name
+2026-07-18T00:20:57.943421Z     --> src/bin/fs_test.rs:1792:11
+2026-07-18T00:20:57.943430Z      |
+2026-07-18T00:20:57.943438Z 1792 |     const O_RDWRc: u32 = 0o2;
+2026-07-18T00:20:57.943449Z      |           ^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_RDWRC`
+2026-07-18T00:20:57.943455Z 
+2026-07-18T00:20:57.943462Z warning: constant `O_CREATc` should have an upper case name
+2026-07-18T00:20:57.943469Z     --> src/bin/fs_test.rs:1793:11
+2026-07-18T00:20:57.943474Z      |
+2026-07-18T00:20:57.943480Z 1793 |     const O_CREATc: u32 = 0o100;
+2026-07-18T00:20:57.943489Z      |           ^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_CREATC`
+2026-07-18T00:20:57.943494Z 
+2026-07-18T00:20:57.945328Z warning: constant `O_RDWRc` should have an upper case name
+2026-07-18T00:20:57.945368Z     --> src/bin/fs_test.rs:1832:11
+2026-07-18T00:20:57.945388Z      |
+2026-07-18T00:20:57.945405Z 1832 |     const O_RDWRc: u32 = 0o2;
+2026-07-18T00:20:57.945427Z      |           ^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_RDWRC`
+2026-07-18T00:20:57.945442Z 
+2026-07-18T00:20:57.945467Z warning: constant `O_CREATc` should have an upper case name
+2026-07-18T00:20:57.945484Z     --> src/bin/fs_test.rs:1833:11
+2026-07-18T00:20:57.945497Z      |
+2026-07-18T00:20:57.945514Z 1833 |     const O_CREATc: u32 = 0o100;
+2026-07-18T00:20:57.945580Z      |           ^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_CREATC`
+2026-07-18T00:20:57.945595Z 
+2026-07-18T00:20:57.945803Z warning: constant `O_RDWRc` should have an upper case name
+2026-07-18T00:20:57.945846Z     --> src/bin/fs_test.rs:1889:11
+2026-07-18T00:20:57.945880Z      |
+2026-07-18T00:20:57.945898Z 1889 |     const O_RDWRc: u32 = 0o2;
+2026-07-18T00:20:57.945921Z      |           ^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_RDWRC`
+2026-07-18T00:20:57.945998Z 
+2026-07-18T00:20:57.946031Z warning: constant `O_CREATc` should have an upper case name
+2026-07-18T00:20:57.946048Z     --> src/bin/fs_test.rs:1890:11
+2026-07-18T00:20:57.946075Z      |
+2026-07-18T00:20:57.946129Z 1890 |     const O_CREATc: u32 = 0o100;
+2026-07-18T00:20:57.946150Z      |           ^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_CREATC`
+2026-07-18T00:20:57.946163Z 
+2026-07-18T00:20:57.946367Z warning: constant `O_RDWRc` should have an upper case name
+2026-07-18T00:20:57.946420Z     --> src/bin/fs_test.rs:1946:11
+2026-07-18T00:20:57.946616Z      |
+2026-07-18T00:20:57.946638Z 1946 |     const O_RDWRc: u32 = 0o2;
+2026-07-18T00:20:57.946660Z      |           ^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_RDWRC`
+2026-07-18T00:20:57.946749Z 
+2026-07-18T00:20:57.948229Z warning: constant `O_CREATc` should have an upper case name
+2026-07-18T00:20:57.948291Z     --> src/bin/fs_test.rs:1947:11
+2026-07-18T00:20:57.948311Z      |
+2026-07-18T00:20:57.948330Z 1947 |     const O_CREATc: u32 = 0o100;
+2026-07-18T00:20:57.948353Z      |           ^^^^^^^^ help: convert the identifier to upper case (notice the capitalization): `O_CREATC`
+2026-07-18T00:20:57.948384Z 
+2026-07-18T00:20:58.034643Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.034913Z    --> src/bin/inet_test.rs:622:9
+2026-07-18T00:20:58.034942Z     |
+2026-07-18T00:20:58.034968Z 622 |     let mut bound_addr = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.034976Z     |         ----^^^^^^^^^^
+2026-07-18T00:20:58.034983Z     |         |
+2026-07-18T00:20:58.034991Z     |         help: remove this `mut`
+2026-07-18T00:20:58.034997Z     |
+2026-07-18T00:20:58.035004Z     = note: `#[warn(unused_mut)]` on by default
+2026-07-18T00:20:58.035010Z 
+2026-07-18T00:20:58.036520Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.036545Z    --> src/bin/inet_test.rs:642:9
+2026-07-18T00:20:58.036553Z     |
+2026-07-18T00:20:58.036563Z 642 |     let mut from = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.036569Z     |         ----^^^^
+2026-07-18T00:20:58.036575Z     |         |
+2026-07-18T00:20:58.036581Z     |         help: remove this `mut`
+2026-07-18T00:20:58.036586Z 
+2026-07-18T00:20:58.040232Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.040262Z    --> src/bin/inet_test.rs:692:9
+2026-07-18T00:20:58.040271Z     |
+2026-07-18T00:20:58.040280Z 692 |     let mut bound_b = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.040287Z     |         ----^^^^^^^
+2026-07-18T00:20:58.040293Z     |         |
+2026-07-18T00:20:58.040300Z     |         help: remove this `mut`
+2026-07-18T00:20:58.040306Z 
+2026-07-18T00:20:58.042709Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.042835Z    --> src/bin/inet_test.rs:706:9
+2026-07-18T00:20:58.042844Z     |
+2026-07-18T00:20:58.042852Z 706 |     let mut from = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.042888Z     |         ----^^^^
+2026-07-18T00:20:58.042946Z     |         |
+2026-07-18T00:20:58.042965Z     |         help: remove this `mut`
+2026-07-18T00:20:58.042979Z 
+2026-07-18T00:20:58.046071Z warning: unused variable: `ip`
+2026-07-18T00:20:58.046140Z    --> src/bin/inet_test.rs:744:9
+2026-07-18T00:20:58.046177Z     |
+2026-07-18T00:20:58.046236Z 744 |     let ip = match dns_lookup("baidu.com") {
+2026-07-18T00:20:58.046265Z     |         ^^ help: if this is intentional, prefix it with an underscore: `_ip`
+2026-07-18T00:20:58.046273Z     |
+2026-07-18T00:20:58.046281Z     = note: `#[warn(unused_variables)]` on by default
+2026-07-18T00:20:58.046287Z 
+2026-07-18T00:20:58.077705Z warning: variable `timed_out` is assigned to, but never used
+2026-07-18T00:20:58.077765Z     --> src/bin/initproc.rs:2107:13
+2026-07-18T00:20:58.077785Z      |
+2026-07-18T00:20:58.077870Z 2107 |     let mut timed_out = false;
+2026-07-18T00:20:58.077903Z      |             ^^^^^^^^^
+2026-07-18T00:20:58.077934Z      |
+2026-07-18T00:20:58.077952Z      = note: consider using `_timed_out` instead
+2026-07-18T00:20:58.078016Z      = note: `#[warn(unused_variables)]` on by default
+2026-07-18T00:20:58.078042Z 
+2026-07-18T00:20:58.083217Z warning: value assigned to `timed_out` is never read
+2026-07-18T00:20:58.083255Z     --> src/bin/initproc.rs:2120:13
+2026-07-18T00:20:58.083264Z      |
+2026-07-18T00:20:58.083272Z 2120 |             timed_out = true;
+2026-07-18T00:20:58.083279Z      |             ^^^^^^^^^
+2026-07-18T00:20:58.083284Z      |
+2026-07-18T00:20:58.083291Z      = help: maybe it is overwritten before being read?
+2026-07-18T00:20:58.083298Z      = note: `#[warn(unused_assignments)]` on by default
+2026-07-18T00:20:58.083311Z 
+2026-07-18T00:20:58.109300Z warning: unused variable: `io_multiplex_cases`
+2026-07-18T00:20:58.109342Z     --> src/bin/initproc.rs:2549:9
+2026-07-18T00:20:58.109352Z      |
+2026-07-18T00:20:58.109361Z 2549 |     let io_multiplex_cases = [
+2026-07-18T00:20:58.109371Z      |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_io_multiplex_cases`
+2026-07-18T00:20:58.109378Z 
+2026-07-18T00:20:58.113248Z warning: unused variable: `unix_socket_cases`
+2026-07-18T00:20:58.113286Z     --> src/bin/initproc.rs:2591:9
+2026-07-18T00:20:58.113295Z      |
+2026-07-18T00:20:58.113304Z 2591 |     let unix_socket_cases = [
+2026-07-18T00:20:58.113314Z      |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unix_socket_cases`
+2026-07-18T00:20:58.113320Z 
+2026-07-18T00:20:58.151172Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.151230Z     --> src/bin/inet_test.rs:1293:9
+2026-07-18T00:20:58.151249Z      |
+2026-07-18T00:20:58.151268Z 1293 |     let mut bound = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.151282Z      |         ----^^^^^
+2026-07-18T00:20:58.151296Z      |         |
+2026-07-18T00:20:58.151312Z      |         help: remove this `mut`
+2026-07-18T00:20:58.151325Z 
+2026-07-18T00:20:58.156049Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.156097Z     --> src/bin/inet_test.rs:1388:9
+2026-07-18T00:20:58.156112Z      |
+2026-07-18T00:20:58.156130Z 1388 |     let mut bound = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.156144Z      |         ----^^^^^
+2026-07-18T00:20:58.156158Z      |         |
+2026-07-18T00:20:58.156175Z      |         help: remove this `mut`
+2026-07-18T00:20:58.156188Z 
+2026-07-18T00:20:58.164541Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.164592Z     --> src/bin/inet_test.rs:1542:9
+2026-07-18T00:20:58.164609Z      |
+2026-07-18T00:20:58.164667Z 1542 |     let mut bound = sockaddr_in::new([0, 0, 0, 0], 0);
+2026-07-18T00:20:58.164698Z      |         ----^^^^^
+2026-07-18T00:20:58.164731Z      |         |
+2026-07-18T00:20:58.164824Z      |         help: remove this `mut`
+2026-07-18T00:20:58.164851Z 
+2026-07-18T00:20:58.192974Z warning: variable does not need to be mutable
+2026-07-18T00:20:58.193019Z     --> src/bin/inet_test.rs:1843:9
+2026-07-18T00:20:58.193030Z      |
+2026-07-18T00:20:58.193039Z 1843 |     let mut buf = [0u8; 256];
+2026-07-18T00:20:58.193180Z      |         ----^^^
+2026-07-18T00:20:58.193225Z      |         |
+2026-07-18T00:20:58.193284Z      |         help: remove this `mut`
+2026-07-18T00:20:58.193309Z 
+2026-07-18T00:20:58.226987Z warning: function `run_unix_standalone_tests` is never used
+2026-07-18T00:20:58.227033Z     --> src/bin/initproc.rs:2437:4
+2026-07-18T00:20:58.227050Z      |
+2026-07-18T00:20:58.227069Z 2437 | fn run_unix_standalone_tests(environ: &[*const u8]) {
+2026-07-18T00:20:58.227084Z      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:20:58.227097Z      |
+2026-07-18T00:20:58.227113Z      = note: `#[warn(dead_code)]` on by default
+2026-07-18T00:20:58.227126Z 
+2026-07-18T00:20:58.227400Z warning: function `run_ltp_network_tests` is never used
+2026-07-18T00:20:58.227432Z     --> src/bin/initproc.rs:2452:4
+2026-07-18T00:20:58.227448Z      |
+2026-07-18T00:20:58.227467Z 2452 | fn run_ltp_network_tests(environ: &[*const u8], exclude: &[String]) {
+2026-07-18T00:20:58.227486Z      |    ^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:20:58.227507Z 
+2026-07-18T00:20:58.227756Z warning: function `run_ltp_signal_tests` is never used
+2026-07-18T00:20:58.227816Z     --> src/bin/initproc.rs:2689:4
+2026-07-18T00:20:58.227867Z      |
+2026-07-18T00:20:58.227891Z 2689 | fn run_ltp_signal_tests(environ: &[*const u8], exclude: &[String]) {
+2026-07-18T00:20:58.227907Z      |    ^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:20:58.227920Z 
+2026-07-18T00:20:58.227938Z warning: function `should_enter_debug_shell` is never used
+2026-07-18T00:20:58.227954Z     --> src/bin/initproc.rs:2753:4
+2026-07-18T00:20:58.227978Z      |
+2026-07-18T00:20:58.227993Z 2753 | fn should_enter_debug_shell() -> bool {
+2026-07-18T00:20:58.228008Z      |    ^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:20:58.228020Z 
+2026-07-18T00:21:00.427508Z warning: `user_lib` (bin "fs_test") generated 19 warnings (run `cargo fix --bin "fs_test"` to apply 2 suggestions)
+2026-07-18T00:21:01.292817Z warning: `user_lib` (bin "ltprunner") generated 2 warnings
+2026-07-18T00:21:01.543083Z warning: `user_lib` (bin "initproc") generated 13 warnings (run `cargo fix --bin "initproc"` to apply 5 suggestions)
+2026-07-18T00:21:01.652672Z warning: `user_lib` (bin "inet_test") generated 9 warnings (run `cargo fix --bin "inet_test"` to apply 8 suggestions)
+2026-07-18T00:21:01.653137Z     Finished `release` profile [optimized] target(s) in 7.51s
+2026-07-18T00:21:01.681651Z make[2]: Leaving directory '/app/user'
+2026-07-18T00:21:01.701528Z CURL_RUNTIME=0 APK_RUNTIME=0 \
+2026-07-18T00:21:01.701582Z 	INET_TEST_RUNTIME=0 \
+2026-07-18T00:21:01.701600Z 	RNG_TEST_RUNTIME=0 \
+2026-07-18T00:21:01.701620Z 	./build_initramfs.sh la64 release ../fs-img-dir/initramfs-la.cpio
+2026-07-18T00:21:01.777036Z [initramfs] Building initramfs for la64 (release)...
+2026-07-18T00:21:01.883217Z [initramfs] installed /init from ../user/target/loongarch64-unknown-linux-gnu/release/init
+2026-07-18T00:21:01.917207Z [initramfs] installed /rescue/sh from ../user/tools/loongarch64/bin/busybox
+2026-07-18T00:21:01.954904Z [initramfs] installed current CPython wrapper at /rescue/python3-wrapper
+2026-07-18T00:21:01.975096Z [initramfs] installed P4 Python console-entry wrapper at /rescue/python-entry
+2026-07-18T00:21:01.991538Z [initramfs] installed P4 Python verification gate
+2026-07-18T00:21:02.169339Z [initramfs] generated /app/os/../fs-img-dir/initramfs-la.cpio (3.1M)
+2026-07-18T00:21:02.212131Z Platform: laqemu
+2026-07-18T00:21:02.214473Z # 在调用 rustc 前直接失败，避免继续使用过期的 linker.ld 编译。
+2026-07-18T00:21:02.458409Z warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+2026-07-18T00:21:02.458454Z note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+2026-07-18T00:21:02.535459Z warning: unused manifest key: target.riscv64gc-unknown-none-gnu.rustflags
+2026-07-18T00:21:03.168887Z warning: the feature `const_fn_trait_bound` has been stable since 1.61.0 and no longer requires an attribute to enable
+2026-07-18T00:21:03.168927Z  --> /app/dependency/dep_iso/src/lib.rs:3:12
+2026-07-18T00:21:03.168937Z   |
+2026-07-18T00:21:03.168946Z 3 | #![feature(const_fn_trait_bound)]
+2026-07-18T00:21:03.168953Z   |            ^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:03.168959Z   |
+2026-07-18T00:21:03.168966Z   = note: `#[warn(stable_features)]` on by default
+2026-07-18T00:21:03.169005Z 
+2026-07-18T00:21:03.169030Z warning: variable does not need to be mutable
+2026-07-18T00:21:03.169042Z    --> /app/dependency/dep_iso/src/net/ethernet/intel/ixgbe.rs:310:13
+2026-07-18T00:21:03.169050Z     |
+2026-07-18T00:21:03.169058Z 310 |         let mut recv_queue = unsafe {
+2026-07-18T00:21:03.169065Z     |             ----^^^^^^^^^^
+2026-07-18T00:21:03.169072Z     |             |
+2026-07-18T00:21:03.169079Z     |             help: remove this `mut`
+2026-07-18T00:21:03.169084Z     |
+2026-07-18T00:21:03.169091Z     = note: `#[warn(unused_mut)]` on by default
+2026-07-18T00:21:03.169098Z 
+2026-07-18T00:21:03.169106Z warning: the type `[&mut [IXGBESendDesc]; 4]` does not permit being left uninitialized
+2026-07-18T00:21:03.169115Z    --> /app/dependency/dep_iso/src/net/ethernet/intel/ixgbe.rs:500:22
+2026-07-18T00:21:03.169121Z     |
+2026-07-18T00:21:03.169129Z 500 |             unsafe { MaybeUninit::uninit().assume_init() };
+2026-07-18T00:21:03.169137Z     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:03.169143Z     |                      |
+2026-07-18T00:21:03.169151Z     |                      this code causes undefined behavior when executed
+2026-07-18T00:21:03.169161Z     |                      help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+2026-07-18T00:21:03.169176Z     |
+2026-07-18T00:21:03.169182Z     = note: references must be non-null
+2026-07-18T00:21:03.169189Z     = note: `#[warn(invalid_value)]` on by default
+2026-07-18T00:21:03.169195Z 
+2026-07-18T00:21:03.169836Z warning: unnecessary `unsafe` block
+2026-07-18T00:21:03.169873Z    --> vendor/buddy_system_allocator/src/lib.rs:331:13
+2026-07-18T00:21:03.169881Z     |
+2026-07-18T00:21:03.169888Z 284 |         unsafe {
+2026-07-18T00:21:03.169896Z     |         ------ because it's nested under this `unsafe` block
+2026-07-18T00:21:03.169901Z ...
+2026-07-18T00:21:03.169908Z 331 |             unsafe { DEALLOC_SCAN_HOOK(scan_steps); }
+2026-07-18T00:21:03.169916Z     |             ^^^^^^ unnecessary `unsafe` block
+2026-07-18T00:21:03.169921Z     |
+2026-07-18T00:21:03.169928Z     = note: `#[warn(unused_unsafe)]` on by default
+2026-07-18T00:21:03.169933Z 
+2026-07-18T00:21:03.170551Z warning: `isomorphic_drivers` (lib) generated 3 warnings (run `cargo fix --lib -p isomorphic_drivers` to apply 1 suggestion)
+2026-07-18T00:21:03.170567Z warning: `buddy_system_allocator` (lib) generated 1 warning
+2026-07-18T00:21:03.171390Z warning: unused import: `LinearMap`
+2026-07-18T00:21:03.171434Z   --> /app/dependency/smoltcp/src/iface/interface/mod.rs:28:16
+2026-07-18T00:21:03.171455Z    |
+2026-07-18T00:21:03.171474Z 28 | use heapless::{LinearMap, Vec};
+2026-07-18T00:21:03.171493Z    |                ^^^^^^^^^
+2026-07-18T00:21:03.171507Z    |
+2026-07-18T00:21:03.171524Z    = note: `#[warn(unused_imports)]` on by default
+2026-07-18T00:21:03.171539Z 
+2026-07-18T00:21:03.171561Z warning: unused imports: `IFACE_MAX_MULTICAST_GROUP_COUNT`, `IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT`
+2026-07-18T00:21:03.171580Z   --> /app/dependency/smoltcp/src/iface/interface/mod.rs:36:54
+2026-07-18T00:21:03.171597Z    |
+2026-07-18T00:21:03.171618Z 36 |     FRAGMENTATION_BUFFER_SIZE, IFACE_MAX_ADDR_COUNT, IFACE_MAX_MULTICAST_GROUP_COUNT,
+2026-07-18T00:21:03.171655Z    |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:03.171693Z 37 |     IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT,
+2026-07-18T00:21:03.171730Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:03.171748Z 
+2026-07-18T00:21:03.171823Z warning: unused import: `super::IpProtocol as Protocol`
+2026-07-18T00:21:03.171857Z  --> /app/dependency/smoltcp/src/wire/ipv6fragment.rs:6:9
+2026-07-18T00:21:03.171875Z   |
+2026-07-18T00:21:03.171896Z 6 | pub use super::IpProtocol as Protocol;
+2026-07-18T00:21:03.171930Z   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:03.172013Z 
+2026-07-18T00:21:03.172024Z warning: unused variable: `addr`
+2026-07-18T00:21:03.172033Z     --> /app/dependency/smoltcp/src/iface/interface/mod.rs:1286:55
+2026-07-18T00:21:03.172039Z      |
+2026-07-18T00:21:03.172047Z 1286 |     fn has_multicast_group<T: Into<IpAddress>>(&self, addr: T) -> bool {
+2026-07-18T00:21:03.172057Z      |                                                       ^^^^ help: if this is intentional, prefix it with an underscore: `_addr`
+2026-07-18T00:21:03.172127Z      |
+2026-07-18T00:21:03.172187Z      = note: `#[warn(unused_variables)]` on by default
+2026-07-18T00:21:03.172224Z 
+2026-07-18T00:21:03.172242Z warning: field `0` is never read
+2026-07-18T00:21:03.172270Z    --> /app/dependency/smoltcp/src/iface/interface/mod.rs:882:22
+2026-07-18T00:21:03.172332Z     |
+2026-07-18T00:21:03.172345Z 882 |             Dispatch(DispatchError),
+2026-07-18T00:21:03.172370Z     |             -------- ^^^^^^^^^^^^^
+2026-07-18T00:21:03.172392Z     |             |
+2026-07-18T00:21:03.172411Z     |             field in this variant
+2026-07-18T00:21:03.172427Z     |
+2026-07-18T00:21:03.172444Z     = note: `#[warn(dead_code)]` on by default
+2026-07-18T00:21:03.172468Z help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+2026-07-18T00:21:03.172507Z     |
+2026-07-18T00:21:03.172775Z 882 |             Dispatch(()),
+2026-07-18T00:21:03.172849Z     |                      ~~
+2026-07-18T00:21:03.172869Z 
+2026-07-18T00:21:03.172905Z warning: method `emit_header` is never used
+2026-07-18T00:21:03.172927Z    --> /app/dependency/smoltcp/src/wire/udp.rs:256:19
+2026-07-18T00:21:03.172945Z     |
+2026-07-18T00:21:03.172964Z 215 | impl Repr {
+2026-07-18T00:21:03.172996Z     | --------- method in this implementation
+2026-07-18T00:21:03.173011Z ...
+2026-07-18T00:21:03.173021Z 256 |     pub(crate) fn emit_header<T: ?Sized>(&self, packet: &mut Packet<&mut T>, payload_len: usize)
+2026-07-18T00:21:03.173029Z     |                   ^^^^^^^^^^^
+2026-07-18T00:21:03.173035Z 
+2026-07-18T00:21:03.173044Z warning: `smoltcp` (lib) generated 6 warnings (run `cargo fix --lib -p smoltcp` to apply 3 suggestions)
+2026-07-18T00:21:03.173051Z warning: unused import: `log::info`
+2026-07-18T00:21:03.173064Z  --> /app/dependency/virtio-drivers/src/device/blk.rs:9:5
+2026-07-18T00:21:03.173072Z   |
+2026-07-18T00:21:03.173077Z 9 | use log::info;
+2026-07-18T00:21:03.173084Z   |     ^^^^^^^^^
+2026-07-18T00:21:03.173089Z   |
+2026-07-18T00:21:03.173095Z   = note: `#[warn(unused_imports)]` on by default
+2026-07-18T00:21:03.173101Z 
+2026-07-18T00:21:03.173110Z warning: `virtio-drivers` (lib) generated 1 warning (run `cargo fix --lib -p virtio-drivers` to apply 1 suggestion)
+2026-07-18T00:21:03.173453Z warning: calls to `std::mem::drop` with a value that implements `Copy` does nothing
+2026-07-18T00:21:03.173476Z    --> /app/dependency/rustsbi/src/hart_mask.rs:109:13
+2026-07-18T00:21:03.173517Z     |
+2026-07-18T00:21:03.173527Z 109 |             drop(vaddr_ptr);
+2026-07-18T00:21:03.173536Z     |             ^^^^^---------^
+2026-07-18T00:21:03.173546Z     |                  |
+2026-07-18T00:21:03.173554Z     |                  argument has type `*const usize`
+2026-07-18T00:21:03.173562Z     |
+2026-07-18T00:21:03.173569Z     = note: use `let _ = ...` to ignore the expression or result
+2026-07-18T00:21:03.173578Z     = note: `#[warn(dropping_copy_types)]` on by default
+2026-07-18T00:21:03.173585Z 
+2026-07-18T00:21:03.173592Z warning: `rustsbi` (lib) generated 1 warning
+2026-07-18T00:21:03.173603Z    Compiling os v0.1.0 (/app/os)
+2026-07-18T00:21:04.053180Z warning: unused doc comment
+2026-07-18T00:21:04.053215Z    --> src/fs/mod.rs:119:1
+2026-07-18T00:21:04.053225Z     |
+2026-07-18T00:21:04.053236Z 119 | / /// initramfs 模式：创建 RamFS → 解包内嵌 cpio → 挂载 devfs/procfs/tmpfs
+2026-07-18T00:21:04.053247Z 120 | | /// 完全不依赖 BLOCK_DEVICE，块设备在后续阶段可选挂载到 /sdcard 和 /tools
+2026-07-18T00:21:04.053258Z     | |_------------------------------------------------------------------------^
+2026-07-18T00:21:04.053265Z     |   |
+2026-07-18T00:21:04.053274Z     |   rustdoc does not generate documentation for macro invocations
+2026-07-18T00:21:04.053281Z     |
+2026-07-18T00:21:04.053292Z     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+2026-07-18T00:21:04.053299Z     = note: `#[warn(unused_doc_comments)]` on by default
+2026-07-18T00:21:04.053305Z 
+2026-07-18T00:21:04.056858Z warning: unused import: `Mutex`
+2026-07-18T00:21:04.056906Z  --> src/fs/dev/block.rs:4:12
+2026-07-18T00:21:04.056933Z   |
+2026-07-18T00:21:04.056967Z 4 | use spin::{Mutex, MutexGuard};
+2026-07-18T00:21:04.057003Z   |            ^^^^^
+2026-07-18T00:21:04.057018Z   |
+2026-07-18T00:21:04.057035Z   = note: `#[warn(unused_imports)]` on by default
+2026-07-18T00:21:04.057049Z 
+2026-07-18T00:21:04.057083Z warning: unused import: `crate::syscall::errno::*`
+2026-07-18T00:21:04.057100Z  --> src/fs/dev/tty.rs:3:5
+2026-07-18T00:21:04.057113Z   |
+2026-07-18T00:21:04.057129Z 3 | use crate::syscall::errno::*;
+2026-07-18T00:21:04.057144Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.057157Z 
+2026-07-18T00:21:04.057174Z warning: unused import: `isomorphic_drivers::block`
+2026-07-18T00:21:04.057203Z   --> src/fs/ext4/direntry.rs:13:5
+2026-07-18T00:21:04.057217Z    |
+2026-07-18T00:21:04.057251Z 13 | use isomorphic_drivers::block;
+2026-07-18T00:21:04.057292Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.057301Z 
+2026-07-18T00:21:04.057316Z warning: unused import: `core::mem::size_of`
+2026-07-18T00:21:04.057369Z  --> src/fs/ext4/ext4_inode.rs:2:5
+2026-07-18T00:21:04.057380Z   |
+2026-07-18T00:21:04.057388Z 2 | use core::mem::size_of;
+2026-07-18T00:21:04.057395Z   |     ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.057401Z 
+2026-07-18T00:21:04.057412Z warning: unused imports: `InodeLock`, `InodeTime`
+2026-07-18T00:21:04.057515Z  --> src/fs/ext4/ext4_inode.rs:5:24
+2026-07-18T00:21:04.057578Z   |
+2026-07-18T00:21:04.057603Z 5 | use crate::fs::inode::{InodeLock, InodeTime};
+2026-07-18T00:21:04.057622Z   |                        ^^^^^^^^^  ^^^^^^^^^
+2026-07-18T00:21:04.057637Z 
+2026-07-18T00:21:04.057901Z warning: unused import: `crate::fs::vfs::FileSystem`
+2026-07-18T00:21:04.057917Z  --> src/fs/ext4/ext4_inode.rs:6:5
+2026-07-18T00:21:04.057924Z   |
+2026-07-18T00:21:04.057931Z 6 | use crate::fs::vfs::FileSystem;
+2026-07-18T00:21:04.057950Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.057960Z 
+2026-07-18T00:21:04.058213Z warning: unused import: `alloc::string::String`
+2026-07-18T00:21:04.058237Z  --> src/fs/ext4/ext4_inode.rs:8:5
+2026-07-18T00:21:04.058247Z   |
+2026-07-18T00:21:04.058254Z 8 | use alloc::string::String;
+2026-07-18T00:21:04.058260Z   |     ^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.058266Z 
+2026-07-18T00:21:04.058586Z warning: unused import: `vec::Vec`
+2026-07-18T00:21:04.058596Z   --> src/fs/ext4/ext4_inode.rs:10:24
+2026-07-18T00:21:04.058602Z    |
+2026-07-18T00:21:04.058609Z 10 | use alloc::{sync::Arc, vec::Vec};
+2026-07-18T00:21:04.058628Z    |                        ^^^^^^^^
+2026-07-18T00:21:04.058638Z 
+2026-07-18T00:21:04.058879Z warning: unused imports: `MutexGuard`, `Mutex`, `RwLockReadGuard`, `RwLockWriteGuard`
+2026-07-18T00:21:04.058918Z   --> src/fs/ext4/ext4_inode.rs:11:12
+2026-07-18T00:21:04.058936Z    |
+2026-07-18T00:21:04.058956Z 11 | use spin::{Mutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
+2026-07-18T00:21:04.058974Z    |            ^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.058987Z 
+2026-07-18T00:21:04.059043Z warning: unused imports: `Block`, `Ext4BlockGroup`
+2026-07-18T00:21:04.059067Z   --> src/fs/ext4/ext4_inode.rs:15:19
+2026-07-18T00:21:04.059082Z    |
+2026-07-18T00:21:04.059099Z 15 |     block_group::{Block, Ext4BlockGroup},
+2026-07-18T00:21:04.059128Z    |                   ^^^^^  ^^^^^^^^^^^^^^
+2026-07-18T00:21:04.059138Z 
+2026-07-18T00:21:04.059399Z warning: unused import: `core::panic`
+2026-07-18T00:21:04.059437Z  --> src/fs/ext4/extent.rs:1:5
+2026-07-18T00:21:04.059455Z   |
+2026-07-18T00:21:04.059472Z 1 | use core::panic;
+2026-07-18T00:21:04.059489Z   |     ^^^^^^^^^^^
+2026-07-18T00:21:04.059509Z 
+2026-07-18T00:21:04.059611Z warning: unused import: `convert::TryInto`
+2026-07-18T00:21:04.059626Z  --> src/fs/ext4/extent.rs:2:12
+2026-07-18T00:21:04.059634Z   |
+2026-07-18T00:21:04.059642Z 2 | use core::{convert::TryInto, intrinsics::size_of};
+2026-07-18T00:21:04.059649Z   |            ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.059655Z 
+2026-07-18T00:21:04.060267Z warning: unused import: `crate::timer::get_time_sec`
+2026-07-18T00:21:04.060297Z  --> src/fs/ext4/file.rs:3:5
+2026-07-18T00:21:04.060303Z   |
+2026-07-18T00:21:04.060310Z 3 | use crate::timer::get_time_sec;
+2026-07-18T00:21:04.060317Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.060323Z 
+2026-07-18T00:21:04.060330Z warning: unused import: `FileType`
+2026-07-18T00:21:04.060335Z  --> src/fs/ext4/smoke.rs:7:39
+2026-07-18T00:21:04.060341Z   |
+2026-07-18T00:21:04.060349Z 7 | use crate::fs::vfs::{FilePrivateData, FileType, IndexNode as _};
+2026-07-18T00:21:04.060356Z   |                                       ^^^^^^^^
+2026-07-18T00:21:04.060361Z 
+2026-07-18T00:21:04.061974Z warning: unused import: `string::String`
+2026-07-18T00:21:04.062024Z   --> src/fs/initramfs.rs:15:13
+2026-07-18T00:21:04.062037Z    |
+2026-07-18T00:21:04.062046Z 15 | use alloc::{string::String, sync::Arc, vec::Vec};
+2026-07-18T00:21:04.062061Z    |             ^^^^^^^^^^^^^^
+2026-07-18T00:21:04.062067Z 
+2026-07-18T00:21:04.062109Z warning: unused import: `MountFS as _`
+2026-07-18T00:21:04.062121Z   --> src/fs/initramfs.rs:17:67
+2026-07-18T00:21:04.062127Z    |
+2026-07-18T00:21:04.062135Z 17 | use super::vfs::{File, FileFlags, FileType, IndexNode, InodeMode, MountFS as _, MountFS};
+2026-07-18T00:21:04.062143Z    |                                                                   ^^^^^^^^^^^^
+2026-07-18T00:21:04.062149Z 
+2026-07-18T00:21:04.063114Z warning: unused import: `evict_all_clean_pages`
+2026-07-18T00:21:04.063234Z   --> src/fs/mod.rs:14:27
+2026-07-18T00:21:04.063250Z    |
+2026-07-18T00:21:04.063271Z 14 |     entries_global_stats, evict_all_clean_pages, flush_all_page_caches, registry_stats,
+2026-07-18T00:21:04.063288Z    |                           ^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.063302Z 
+2026-07-18T00:21:04.063773Z warning: unused import: `ToString`
+2026-07-18T00:21:04.063788Z  --> src/fs/procfs/files/net_route.rs:6:29
+2026-07-18T00:21:04.063797Z   |
+2026-07-18T00:21:04.063805Z 6 | use alloc::string::{String, ToString};
+2026-07-18T00:21:04.063812Z   |                             ^^^^^^^^
+2026-07-18T00:21:04.063817Z 
+2026-07-18T00:21:04.063940Z warning: unused import: `alloc::format`
+2026-07-18T00:21:04.063995Z  --> src/fs/procfs/files/version.rs:5:5
+2026-07-18T00:21:04.064012Z   |
+2026-07-18T00:21:04.064019Z 5 | use alloc::format;
+2026-07-18T00:21:04.064025Z   |     ^^^^^^^^^^^^^
+2026-07-18T00:21:04.064030Z 
+2026-07-18T00:21:04.064040Z warning: unused import: `FileFlags`
+2026-07-18T00:21:04.064047Z   --> src/fs/procfs/pid/ns.rs:13:11
+2026-07-18T00:21:04.064052Z    |
+2026-07-18T00:21:04.064061Z 13 |     vfs::{FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata},
+2026-07-18T00:21:04.064068Z    |           ^^^^^^^^^
+2026-07-18T00:21:04.064074Z 
+2026-07-18T00:21:04.065213Z warning: unused imports: `SysContentFn`, `SysWriteFn`
+2026-07-18T00:21:04.065249Z   --> src/fs/sysfs/files/diag.rs:13:24
+2026-07-18T00:21:04.065265Z    |
+2026-07-18T00:21:04.065286Z 13 | use crate::fs::sysfs::{SysContentFn, SysInode, SysWriteFn};
+2026-07-18T00:21:04.065304Z    |                        ^^^^^^^^^^^^            ^^^^^^^^^^
+2026-07-18T00:21:04.065319Z 
+2026-07-18T00:21:04.065522Z warning: unused import: `crate::mm::frame_alloc`
+2026-07-18T00:21:04.065537Z   --> src/fs/tmpfs/mod.rs:25:5
+2026-07-18T00:21:04.065544Z    |
+2026-07-18T00:21:04.065551Z 25 | use crate::mm::frame_alloc;
+2026-07-18T00:21:04.065558Z    |     ^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.065564Z 
+2026-07-18T00:21:04.065945Z warning: unused import: `core::any::Any`
+2026-07-18T00:21:04.065957Z  --> src/fs/inode.rs:2:5
+2026-07-18T00:21:04.065964Z   |
+2026-07-18T00:21:04.065970Z 2 | use core::any::Any;
+2026-07-18T00:21:04.065976Z   |     ^^^^^^^^^^^^^^
+2026-07-18T00:21:04.065982Z 
+2026-07-18T00:21:04.066157Z warning: unused import: `crate::fs::fat32::layout::FATDiskInodeType`
+2026-07-18T00:21:04.066193Z  --> src/fs/inode.rs:4:5
+2026-07-18T00:21:04.066210Z   |
+2026-07-18T00:21:04.066233Z 4 | use crate::fs::fat32::layout::FATDiskInodeType;
+2026-07-18T00:21:04.066241Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.066248Z 
+2026-07-18T00:21:04.066524Z warning: unused import: `alloc::sync::Arc`
+2026-07-18T00:21:04.066538Z  --> src/fs/inode.rs:5:5
+2026-07-18T00:21:04.066545Z   |
+2026-07-18T00:21:04.066599Z 5 | use alloc::sync::Arc;
+2026-07-18T00:21:04.066634Z   |     ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.066650Z 
+2026-07-18T00:21:04.066674Z warning: unused import: `alloc::vec::Vec`
+2026-07-18T00:21:04.066689Z  --> src/fs/inode.rs:6:5
+2026-07-18T00:21:04.066702Z   |
+2026-07-18T00:21:04.066795Z 6 | use alloc::vec::Vec;
+2026-07-18T00:21:04.066805Z   |     ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.066811Z 
+2026-07-18T00:21:04.066961Z warning: unused import: `fat32::fat_inode::FileContent`
+2026-07-18T00:21:04.066976Z  --> src/fs/inode.rs:7:5
+2026-07-18T00:21:04.066983Z   |
+2026-07-18T00:21:04.066991Z 7 | use fat32::fat_inode::FileContent;
+2026-07-18T00:21:04.067076Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.067123Z 
+2026-07-18T00:21:04.068856Z warning: unused import: `fat32::layout::FATShortDirEnt`
+2026-07-18T00:21:04.068874Z  --> src/fs/inode.rs:8:5
+2026-07-18T00:21:04.068880Z   |
+2026-07-18T00:21:04.068889Z 8 | use fat32::layout::FATShortDirEnt;
+2026-07-18T00:21:04.068896Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.068902Z 
+2026-07-18T00:21:04.068927Z warning: unused imports: `MutexGuard`, `Mutex`, `RwLockReadGuard`, `RwLockWriteGuard`
+2026-07-18T00:21:04.068935Z  --> src/fs/inode.rs:9:12
+2026-07-18T00:21:04.068941Z   |
+2026-07-18T00:21:04.068954Z 9 | use spin::{Mutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
+2026-07-18T00:21:04.068962Z   |            ^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.068967Z 
+2026-07-18T00:21:04.069049Z warning: unused import: `core::sync::atomic::AtomicUsize`
+2026-07-18T00:21:04.069091Z   --> src/fs/vfs/dentry_cache.rs:21:5
+2026-07-18T00:21:04.069134Z    |
+2026-07-18T00:21:04.069168Z 21 | use core::sync::atomic::AtomicUsize;
+2026-07-18T00:21:04.069191Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.069205Z 
+2026-07-18T00:21:04.069227Z warning: unused import: `FileOwnerSnapshot`
+2026-07-18T00:21:04.069245Z  --> src/fs/vfs/fasync.rs:5:28
+2026-07-18T00:21:04.069263Z   |
+2026-07-18T00:21:04.069280Z 5 | use crate::fs::vfs::file::{FileOwnerSnapshot, FileOwnerTarget};
+2026-07-18T00:21:04.069299Z   |                            ^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.069312Z 
+2026-07-18T00:21:04.070094Z warning: unused import: `ToString`
+2026-07-18T00:21:04.070128Z   --> src/fs/vfs/file.rs:15:29
+2026-07-18T00:21:04.070143Z    |
+2026-07-18T00:21:04.070160Z 15 | use alloc::string::{String, ToString};
+2026-07-18T00:21:04.070177Z    |                             ^^^^^^^^
+2026-07-18T00:21:04.070190Z 
+2026-07-18T00:21:04.070206Z warning: unused import: `InodeFlags`
+2026-07-18T00:21:04.070221Z   --> src/fs/vfs/file.rs:24:51
+2026-07-18T00:21:04.070235Z    |
+2026-07-18T00:21:04.070254Z 24 | use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
+2026-07-18T00:21:04.070272Z    |                                                   ^^^^^^^^^^
+2026-07-18T00:21:04.070285Z 
+2026-07-18T00:21:04.070574Z warning: unused import: `Frame`
+2026-07-18T00:21:04.070619Z     --> src/fs/vfs/file.rs:1693:38
+2026-07-18T00:21:04.070640Z      |
+2026-07-18T00:21:04.070661Z 1693 |         use crate::mm::{frame_alloc, Frame, FrameTracker, MapPermission, KERNEL_SPACE};
+2026-07-18T00:21:04.070678Z      |                                      ^^^^^
+2026-07-18T00:21:04.070693Z 
+2026-07-18T00:21:04.070742Z warning: unused import: `InodeFlags`
+2026-07-18T00:21:04.070764Z   --> src/fs/vfs/index_node.rs:18:68
+2026-07-18T00:21:04.070780Z    |
+2026-07-18T00:21:04.070800Z 18 |     file::FileFlags, mount::MountFlags, FilePrivateData, FileType, InodeFlags, InodeId, InodeMode,
+2026-07-18T00:21:04.070831Z    |                                                                    ^^^^^^^^^^
+2026-07-18T00:21:04.070845Z 
+2026-07-18T00:21:04.071195Z warning: unused import: `PropagationType`
+2026-07-18T00:21:04.071224Z   --> src/fs/vfs/mount.rs:35:51
+2026-07-18T00:21:04.071239Z    |
+2026-07-18T00:21:04.071259Z 35 |         unregister_slave_mount, MountPropagation, PropagationType,
+2026-07-18T00:21:04.071277Z    |                                                   ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.071321Z 
+2026-07-18T00:21:04.071347Z warning: unused import: `crate::utils::error::SyscallErr`
+2026-07-18T00:21:04.071365Z   --> src/fs/vfs/mod.rs:37:5
+2026-07-18T00:21:04.071380Z    |
+2026-07-18T00:21:04.071398Z 37 | use crate::utils::error::SyscallErr;
+2026-07-18T00:21:04.071443Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.071477Z 
+2026-07-18T00:21:04.071552Z warning: unused import: `vec::Vec`
+2026-07-18T00:21:04.071561Z   --> src/fs/vfs/mod.rs:38:40
+2026-07-18T00:21:04.071571Z    |
+2026-07-18T00:21:04.071581Z 38 | use alloc::{string::String, sync::Arc, vec::Vec};
+2026-07-18T00:21:04.071589Z    |                                        ^^^^^^^^
+2026-07-18T00:21:04.071603Z 
+2026-07-18T00:21:04.071703Z warning: unused import: `core::any::Any`
+2026-07-18T00:21:04.071756Z   --> src/fs/vfs/mod.rs:39:5
+2026-07-18T00:21:04.071770Z    |
+2026-07-18T00:21:04.071806Z 39 | use core::any::Any;
+2026-07-18T00:21:04.071817Z    |     ^^^^^^^^^^^^^^
+2026-07-18T00:21:04.071823Z 
+2026-07-18T00:21:04.071831Z warning: unused imports: `FAsyncItem`, `FAsyncItems`, `set_file_fasync`
+2026-07-18T00:21:04.071837Z   --> src/fs/vfs/mod.rs:42:18
+2026-07-18T00:21:04.071842Z    |
+2026-07-18T00:21:04.071848Z 42 | pub use fasync::{set_file_fasync, FAsyncItem, FAsyncItems};
+2026-07-18T00:21:04.071855Z    |                  ^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^
+2026-07-18T00:21:04.071933Z 
+2026-07-18T00:21:04.072216Z warning: unused imports: `F_RDLCK`, `F_UNLCK`, `F_WRLCK`, `FcntlCommand`, `PosixFlock`
+2026-07-18T00:21:04.072243Z   --> src/fs/vfs/mod.rs:44:15
+2026-07-18T00:21:04.072260Z    |
+2026-07-18T00:21:04.072294Z 44 |     FOwnerEx, FcntlCommand, PosixFlock, FD_CLOEXEC, F_OWNER_PGRP, F_OWNER_PID, F_OWNER_TID,
+2026-07-18T00:21:04.072324Z    |               ^^^^^^^^^^^^  ^^^^^^^^^^
+2026-07-18T00:21:04.072348Z 45 |     F_RDLCK, F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE, F_UNLCK,
+2026-07-18T00:21:04.072392Z    |     ^^^^^^^                                                                              ^^^^^^^
+2026-07-18T00:21:04.072410Z 46 |     F_WRLCK,
+2026-07-18T00:21:04.072428Z    |     ^^^^^^^
+2026-07-18T00:21:04.072443Z 
+2026-07-18T00:21:04.072488Z warning: unused imports: `FileOwnerSnapshot`, `FileOwner`
+2026-07-18T00:21:04.072512Z   --> src/fs/vfs/mod.rs:49:59
+2026-07-18T00:21:04.072530Z    |
+2026-07-18T00:21:04.072630Z 49 |     EventQueueHandle, FdTable, File, FileFlags, FileMode, FileOwner, FileOwnerSnapshot,
+2026-07-18T00:21:04.072663Z    |                                                           ^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.072691Z 
+2026-07-18T00:21:04.073261Z warning: unused imports: `MountList`, `MountPath`
+2026-07-18T00:21:04.073276Z   --> src/fs/vfs/mod.rs:54:52
+2026-07-18T00:21:04.073283Z    |
+2026-07-18T00:21:04.073292Z 54 | pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
+2026-07-18T00:21:04.073300Z    |                                                    ^^^^^^^^^  ^^^^^^^^^
+2026-07-18T00:21:04.073305Z 
+2026-07-18T00:21:04.073321Z warning: unused imports: `MountPropagation`, `PropagationType`, `configure_propagation_no_register`, `get_slaves`, `install_propagation`, `propagate_mount`, `propagate_umount`, `register_current_propagation`, `register_peer`, `register_slave`, `set_propagation_type`, `unregister_peer_mount`, `unregister_slave_mount`
+2026-07-18T00:21:04.073353Z   --> src/fs/vfs/mod.rs:56:5
+2026-07-18T00:21:04.073367Z    |
+2026-07-18T00:21:04.073377Z 56 |     configure_propagation_no_register, get_slaves, install_propagation, propagate_mount,
+2026-07-18T00:21:04.073386Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.073394Z 57 |     propagate_umount, register_current_propagation, register_peer, register_slave,
+2026-07-18T00:21:04.073403Z    |     ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+2026-07-18T00:21:04.073412Z 58 |     set_propagation_type, unregister_peer_mount, unregister_slave_mount, MountPropagation,
+2026-07-18T00:21:04.073420Z    |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.073426Z 59 |     PropagationType,
+2026-07-18T00:21:04.073432Z    |     ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.073437Z 
+2026-07-18T00:21:04.073779Z warning: unused import: `crate::drivers::block::BlockDevice`
+2026-07-18T00:21:04.073808Z   --> src/fs/vfs/mod.rs:62:5
+2026-07-18T00:21:04.073824Z    |
+2026-07-18T00:21:04.073845Z 62 | use crate::drivers::block::BlockDevice;
+2026-07-18T00:21:04.073863Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.073884Z 
+2026-07-18T00:21:04.073906Z warning: unused imports: `DetectedFs`, `detect_fs`
+2026-07-18T00:21:04.073941Z   --> src/fs/mod.rs:37:28
+2026-07-18T00:21:04.073957Z    |
+2026-07-18T00:21:04.073979Z 37 | pub use self::filesystem::{detect_fs, detect_fs_layout, DetectedFs, FS_Type};
+2026-07-18T00:21:04.074000Z    |                            ^^^^^^^^^                    ^^^^^^^^^^
+2026-07-18T00:21:04.074018Z 
+2026-07-18T00:21:04.075047Z warning: unused import: `crate::hal::arch::get_clock_freq`
+2026-07-18T00:21:04.075067Z   --> src/hal/arch/loongarch64/trap/mod.rs:13:5
+2026-07-18T00:21:04.075074Z    |
+2026-07-18T00:21:04.075081Z 13 | use crate::hal::arch::get_clock_freq;
+2026-07-18T00:21:04.075088Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.075095Z 
+2026-07-18T00:21:04.075138Z warning: unused import: `TCfg`
+2026-07-18T00:21:04.075173Z   --> src/hal/arch/loongarch64/trap/mod.rs:15:85
+2026-07-18T00:21:04.075190Z    |
+2026-07-18T00:21:04.075211Z 15 | use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd, TCfg, TIClr};
+2026-07-18T00:21:04.075233Z    |                                                                                     ^^^^
+2026-07-18T00:21:04.075249Z 
+2026-07-18T00:21:04.075271Z warning: unused import: `crate::hal::arch::TICKS_PER_SEC`
+2026-07-18T00:21:04.075290Z   --> src/hal/arch/loongarch64/trap/mod.rs:17:5
+2026-07-18T00:21:04.075304Z    |
+2026-07-18T00:21:04.075322Z 17 | use crate::hal::arch::TICKS_PER_SEC;
+2026-07-18T00:21:04.075338Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.075354Z 
+2026-07-18T00:21:04.075744Z warning: unused import: `crate::net::config::NET_INTERFACE`
+2026-07-18T00:21:04.075758Z   --> src/hal/arch/loongarch64/trap/mod.rs:21:5
+2026-07-18T00:21:04.075765Z    |
+2026-07-18T00:21:04.075772Z 21 | use crate::net::config::NET_INTERFACE;
+2026-07-18T00:21:04.075779Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.075784Z 
+2026-07-18T00:21:04.076861Z warning: unused imports: `do_wake_expired`, `suspend_current_and_run_next`
+2026-07-18T00:21:04.076882Z   --> src/hal/arch/loongarch64/trap/mod.rs:24:71
+2026-07-18T00:21:04.076889Z    |
+2026-07-18T00:21:04.076953Z 24 |     current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
+2026-07-18T00:21:04.077002Z    |                                                                       ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.077021Z 25 |     signal::SigInfo, suspend_current_and_run_next, Signals,
+2026-07-18T00:21:04.077030Z    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.077060Z 
+2026-07-18T00:21:04.077094Z warning: unused imports: `asid_alloc`, `asid_free`, `set_asid`
+2026-07-18T00:21:04.077118Z   --> src/hal/arch/loongarch64/mod.rs:31:15
+2026-07-18T00:21:04.077133Z    |
+2026-07-18T00:21:04.077158Z 31 | pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
+2026-07-18T00:21:04.077178Z    |               ^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^
+2026-07-18T00:21:04.077194Z 
+2026-07-18T00:21:04.077219Z warning: unused imports: `BUFFER_CACHE_NUM`, `MEMORY_END`
+2026-07-18T00:21:04.077235Z   --> src/hal/mod.rs:30:26
+2026-07-18T00:21:04.077249Z    |
+2026-07-18T00:21:04.077268Z 30 | pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
+2026-07-18T00:21:04.077286Z    |                          ^^^^^^^^^^^^^^^^                    ^^^^^^^^^^
+2026-07-18T00:21:04.077302Z 
+2026-07-18T00:21:04.079972Z warning: unused import: `address::PPNRange`
+2026-07-18T00:21:04.079997Z   --> src/mm/mod.rs:39:9
+2026-07-18T00:21:04.080005Z    |
+2026-07-18T00:21:04.080012Z 39 | pub use address::PPNRange;
+2026-07-18T00:21:04.080019Z    |         ^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.080026Z 
+2026-07-18T00:21:04.080185Z warning: unused imports: `frame_alloc_uninit`, `frame_frag_diag`, `is_ram_phys_addr`
+2026-07-18T00:21:04.080199Z   --> src/mm/mod.rs:44:18
+2026-07-18T00:21:04.080206Z    |
+2026-07-18T00:21:04.080216Z 44 |     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
+2026-07-18T00:21:04.080226Z    |                  ^^^^^^^^^^^^^^^^^^                 ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.080240Z 45 |     frame_reserve, frames_alloc, frames_alloc_any, is_allocatable_ram_phys_addr, is_ram_phys_addr,
+2026-07-18T00:21:04.080249Z    |                                                                                  ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.080257Z 
+2026-07-18T00:21:04.080395Z warning: unused import: `KernelSpace`
+2026-07-18T00:21:04.080429Z   --> src/mm/mod.rs:52:38
+2026-07-18T00:21:04.080449Z    |
+2026-07-18T00:21:04.080469Z 52 | pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
+2026-07-18T00:21:04.080487Z    |                                      ^^^^^^^^^^^
+2026-07-18T00:21:04.080501Z 
+2026-07-18T00:21:04.080527Z warning: unused import: `crate::hal::tlb_invalidate`
+2026-07-18T00:21:04.080543Z    --> src/mm/mod.rs:111:9
+2026-07-18T00:21:04.080559Z     |
+2026-07-18T00:21:04.080576Z 111 | pub use crate::hal::tlb_invalidate;
+2026-07-18T00:21:04.080594Z     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.080607Z 
+2026-07-18T00:21:04.080623Z warning: unused import: `core::result`
+2026-07-18T00:21:04.080638Z  --> src/net/adapter.rs:2:5
+2026-07-18T00:21:04.080653Z   |
+2026-07-18T00:21:04.080670Z 2 | use core::result;
+2026-07-18T00:21:04.080684Z   |     ^^^^^^^^^^^^
+2026-07-18T00:21:04.080697Z 
+2026-07-18T00:21:04.080889Z warning: unused import: `spin::Mutex`
+2026-07-18T00:21:04.080900Z   --> src/net/adapter.rs:14:5
+2026-07-18T00:21:04.080907Z    |
+2026-07-18T00:21:04.080913Z 14 | use spin::Mutex;
+2026-07-18T00:21:04.080918Z    |     ^^^^^^^^^^^
+2026-07-18T00:21:04.080924Z 
+2026-07-18T00:21:04.081090Z warning: unused import: `crate::net::socket::inet::stream::inner::tcp_state_code`
+2026-07-18T00:21:04.081120Z  --> src/net/config.rs:9:5
+2026-07-18T00:21:04.081137Z   |
+2026-07-18T00:21:04.081161Z 9 | use crate::net::socket::inet::stream::inner::tcp_state_code;
+2026-07-18T00:21:04.081172Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.081178Z 
+2026-07-18T00:21:04.081333Z warning: unused import: `TCP_SOCKETS`
+2026-07-18T00:21:04.081348Z   --> src/net/config.rs:10:18
+2026-07-18T00:21:04.081355Z    |
+2026-07-18T00:21:04.081363Z 10 | use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
+2026-07-18T00:21:04.081415Z    |                  ^^^^^^^^^^^
+2026-07-18T00:21:04.081430Z 
+2026-07-18T00:21:04.081441Z warning: unused import: `crate::trace_event`
+2026-07-18T00:21:04.081451Z   --> src/net/config.rs:12:5
+2026-07-18T00:21:04.081459Z    |
+2026-07-18T00:21:04.081465Z 12 | use crate::trace_event;
+2026-07-18T00:21:04.081472Z    |     ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.081478Z 
+2026-07-18T00:21:04.082784Z warning: unused import: `Device`
+2026-07-18T00:21:04.082801Z   --> src/net/config.rs:22:11
+2026-07-18T00:21:04.082808Z    |
+2026-07-18T00:21:04.082815Z 22 |     phy::{Device, Loopback, Medium},
+2026-07-18T00:21:04.082821Z    |           ^^^^^^
+2026-07-18T00:21:04.082827Z 
+2026-07-18T00:21:04.083602Z warning: unused import: `alloc::vec`
+2026-07-18T00:21:04.083631Z  --> src/net/ioctl.rs:3:5
+2026-07-18T00:21:04.083646Z   |
+2026-07-18T00:21:04.083661Z 3 | use alloc::vec;
+2026-07-18T00:21:04.083675Z   |     ^^^^^^^^^^
+2026-07-18T00:21:04.083689Z 
+2026-07-18T00:21:04.083830Z warning: unused import: `DeviceCapabilities`
+2026-07-18T00:21:04.083853Z   --> src/net/net_core.rs:10:20
+2026-07-18T00:21:04.083876Z    |
+2026-07-18T00:21:04.083897Z 10 | use smoltcp::phy::{DeviceCapabilities, Loopback, Medium};
+2026-07-18T00:21:04.083914Z    |                    ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.083930Z 
+2026-07-18T00:21:04.083953Z warning: unused doc comment
+2026-07-18T00:21:04.083969Z  --> src/net/posix.rs:7:1
+2026-07-18T00:21:04.083984Z   |
+2026-07-18T00:21:04.084004Z 7 | / /// POSIX socket() 系统调用的 type 参数解析器。
+2026-07-18T00:21:04.084026Z 8 | | /// 纯类型位（低 4 位）与控制标志（NONBLOCK / CLOEXEC）共存在同一个 u32 中，
+2026-07-18T00:21:04.084046Z 9 | | /// 此 bitflags 用于在 syscall 入口处一次性解析，提取出纯类型后转换为 `PSOCK` 枚举。
+2026-07-18T00:21:04.084078Z   | |_-----------------------------------------------------------------------------------^
+2026-07-18T00:21:04.084094Z   |   |
+2026-07-18T00:21:04.084114Z   |   rustdoc does not generate documentation for macro invocations
+2026-07-18T00:21:04.084130Z   |
+2026-07-18T00:21:04.084160Z   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+2026-07-18T00:21:04.084176Z 
+2026-07-18T00:21:04.084196Z warning: unused import: `super::Mutex`
+2026-07-18T00:21:04.084224Z  --> src/net/routing.rs:7:5
+2026-07-18T00:21:04.084245Z   |
+2026-07-18T00:21:04.084264Z 7 | use super::Mutex;
+2026-07-18T00:21:04.084279Z   |     ^^^^^^^^^^^^
+2026-07-18T00:21:04.084294Z 
+2026-07-18T00:21:04.084342Z warning: unused import: `net::address`
+2026-07-18T00:21:04.084404Z  --> src/net/socket/inet/datagram/udp.rs:7:5
+2026-07-18T00:21:04.084424Z   |
+2026-07-18T00:21:04.084451Z 7 |     net::address,
+2026-07-18T00:21:04.084471Z   |     ^^^^^^^^^^^^
+2026-07-18T00:21:04.084488Z 
+2026-07-18T00:21:04.084846Z warning: unused import: `alloc::string::String`
+2026-07-18T00:21:04.084861Z   --> src/net/socket/inet/datagram/udp.rs:12:5
+2026-07-18T00:21:04.084868Z    |
+2026-07-18T00:21:04.084874Z 12 | use alloc::string::String;
+2026-07-18T00:21:04.084881Z    |     ^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.084886Z 
+2026-07-18T00:21:04.085195Z warning: unused import: `crate::net::config::NetInterfaceInner`
+2026-07-18T00:21:04.085210Z   --> src/net/socket/inet/datagram/udp.rs:29:5
+2026-07-18T00:21:04.085220Z    |
+2026-07-18T00:21:04.085341Z 29 | use crate::net::config::NetInterfaceInner;
+2026-07-18T00:21:04.085365Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.085380Z 
+2026-07-18T00:21:04.085411Z warning: unused import: `lookup_source_ip`
+2026-07-18T00:21:04.085423Z  --> src/net/socket/inet/stream/inner.rs:9:14
+2026-07-18T00:21:04.085429Z   |
+2026-07-18T00:21:04.085437Z 9 |     config::{lookup_source_ip, NET_INTERFACE},
+2026-07-18T00:21:04.085444Z   |              ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.085449Z 
+2026-07-18T00:21:04.085854Z warning: unused import: `alloc::sync::Arc`
+2026-07-18T00:21:04.085869Z   --> src/net/socket/inet/stream/inner.rs:16:5
+2026-07-18T00:21:04.085876Z    |
+2026-07-18T00:21:04.085883Z 16 | use alloc::sync::Arc;
+2026-07-18T00:21:04.085890Z    |     ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.085906Z 
+2026-07-18T00:21:04.085914Z warning: unused import: `GeneralRet`
+2026-07-18T00:21:04.085921Z   --> src/net/socket/inet/stream/inner.rs:26:27
+2026-07-18T00:21:04.085927Z    |
+2026-07-18T00:21:04.085934Z 26 | use crate::utils::error::{GeneralRet, SyscallErr};
+2026-07-18T00:21:04.085943Z    |                           ^^^^^^^^^^
+2026-07-18T00:21:04.085951Z 
+2026-07-18T00:21:04.086017Z warning: unused imports: `Established`, `Init`
+2026-07-18T00:21:04.086029Z  --> src/net/socket/inet/stream/io.rs:9:34
+2026-07-18T00:21:04.086069Z   |
+2026-07-18T00:21:04.086101Z 9 | use super::inner::{with_tcp_mut, Established, Init, Inner};
+2026-07-18T00:21:04.086122Z   |                                  ^^^^^^^^^^^  ^^^^
+2026-07-18T00:21:04.086137Z 
+2026-07-18T00:21:04.086161Z warning: unused import: `crate::net::config::NET_INTERFACE`
+2026-07-18T00:21:04.086179Z   --> src/net/socket/inet/stream/io.rs:10:5
+2026-07-18T00:21:04.086195Z    |
+2026-07-18T00:21:04.086212Z 10 | use crate::net::config::NET_INTERFACE;
+2026-07-18T00:21:04.086230Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.086244Z 
+2026-07-18T00:21:04.086341Z warning: unused import: `TCP_SOCKETS_TO_REMOVE`
+2026-07-18T00:21:04.086355Z  --> src/net/socket/inet/stream/lifecycle.rs:7:5
+2026-07-18T00:21:04.086373Z   |
+2026-07-18T00:21:04.086380Z 7 |     TCP_SOCKETS_TO_REMOVE,
+2026-07-18T00:21:04.086387Z   |     ^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.086392Z 
+2026-07-18T00:21:04.086632Z warning: unused import: `alloc::vec::Vec`
+2026-07-18T00:21:04.086657Z   --> src/net/socket/inet/stream/lifecycle.rs:13:5
+2026-07-18T00:21:04.086672Z    |
+2026-07-18T00:21:04.086698Z 13 | use alloc::vec::Vec;
+2026-07-18T00:21:04.086714Z    |     ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.086729Z 
+2026-07-18T00:21:04.086747Z warning: unused import: `core::sync::atomic::Ordering`
+2026-07-18T00:21:04.086763Z   --> src/net/socket/inet/stream/lifecycle.rs:14:5
+2026-07-18T00:21:04.086779Z    |
+2026-07-18T00:21:04.086796Z 14 | use core::sync::atomic::Ordering;
+2026-07-18T00:21:04.086815Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.086830Z 
+2026-07-18T00:21:04.087716Z warning: unused import: `time::Duration`
+2026-07-18T00:21:04.087746Z   --> src/net/socket/inet/stream/lifecycle.rs:17:5
+2026-07-18T00:21:04.087762Z    |
+2026-07-18T00:21:04.087778Z 17 |     time::Duration,
+2026-07-18T00:21:04.087796Z    |     ^^^^^^^^^^^^^^
+2026-07-18T00:21:04.087810Z 
+2026-07-18T00:21:04.087829Z warning: unused imports: `SelfConnected`, `tcp_state_code`
+2026-07-18T00:21:04.087847Z   --> src/net/socket/inet/stream/lifecycle.rs:22:5
+2026-07-18T00:21:04.087861Z    |
+2026-07-18T00:21:04.087881Z 22 |     tcp_state_code, with_tcp_mut, Connecting, Established, Init, Inner, Listening, SelfConnected,
+2026-07-18T00:21:04.087903Z    |     ^^^^^^^^^^^^^^                                                                 ^^^^^^^^^^^^^
+2026-07-18T00:21:04.087917Z 
+2026-07-18T00:21:04.087938Z warning: unused import: `alloc::vec::Vec`
+2026-07-18T00:21:04.087974Z   --> src/net/socket/inet/stream/mod.rs:23:5
+2026-07-18T00:21:04.088000Z    |
+2026-07-18T00:21:04.088021Z 23 | use alloc::vec::Vec;
+2026-07-18T00:21:04.088033Z    |     ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.088039Z 
+2026-07-18T00:21:04.088053Z warning: unused imports: `Connecting`, `Established`, `Listening`, `SelfConnected`, `with_tcp_mut`
+2026-07-18T00:21:04.088077Z   --> src/net/socket/inet/stream/mod.rs:40:5
+2026-07-18T00:21:04.088088Z    |
+2026-07-18T00:21:04.088097Z 40 |     with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
+2026-07-18T00:21:04.088105Z    |     ^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^        ^^^^^^^^^  ^^^^^^^^^^^^^
+2026-07-18T00:21:04.088111Z 
+2026-07-18T00:21:04.088351Z warning: unused import: `PortManager`
+2026-07-18T00:21:04.088365Z   --> src/net/socket/inet/stream/mod.rs:43:52
+2026-07-18T00:21:04.088373Z    |
+2026-07-18T00:21:04.088383Z 43 | use crate::net::socket::inet::common::{BoundInner, PortManager};
+2026-07-18T00:21:04.088390Z    |                                                    ^^^^^^^^^^^
+2026-07-18T00:21:04.088395Z 
+2026-07-18T00:21:04.088404Z warning: unused import: `crate::trace_event`
+2026-07-18T00:21:04.088410Z   --> src/net/socket/inet/stream/mod.rs:45:5
+2026-07-18T00:21:04.088418Z    |
+2026-07-18T00:21:04.088424Z 45 | use crate::trace_event;
+2026-07-18T00:21:04.088430Z    |     ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.088448Z 
+2026-07-18T00:21:04.088691Z warning: unused import: `alloc::sync::Arc`
+2026-07-18T00:21:04.088721Z  --> src/net/socket/netlink/mod.rs:5:5
+2026-07-18T00:21:04.088736Z   |
+2026-07-18T00:21:04.088752Z 5 | use alloc::sync::Arc;
+2026-07-18T00:21:04.088767Z   |     ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.088782Z 
+2026-07-18T00:21:04.088829Z warning: unused import: `alloc::vec::Vec`
+2026-07-18T00:21:04.088848Z  --> src/net/socket/netlink/route/addr.rs:7:5
+2026-07-18T00:21:04.088862Z   |
+2026-07-18T00:21:04.088878Z 7 | use alloc::vec::Vec;
+2026-07-18T00:21:04.088894Z   |     ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.088908Z 
+2026-07-18T00:21:04.089019Z warning: unused import: `alloc::vec::Vec`
+2026-07-18T00:21:04.089058Z  --> src/net/socket/netlink/route/link.rs:5:5
+2026-07-18T00:21:04.089077Z   |
+2026-07-18T00:21:04.089093Z 5 | use alloc::vec::Vec;
+2026-07-18T00:21:04.089109Z   |     ^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.089122Z 
+2026-07-18T00:21:04.089383Z warning: unused imports: `NLM_F_CREATE`, `NLM_F_EXCL`
+2026-07-18T00:21:04.089397Z  --> src/net/socket/netlink/route/link.rs:9:19
+2026-07-18T00:21:04.089404Z   |
+2026-07-18T00:21:04.089411Z 9 |     NLA_F_NESTED, NLM_F_CREATE, NLM_F_EXCL, VETH_INFO_PEER,
+2026-07-18T00:21:04.089419Z   |                   ^^^^^^^^^^^^  ^^^^^^^^^^
+2026-07-18T00:21:04.089428Z 
+2026-07-18T00:21:04.089652Z warning: unused import: `NLM_F_CREATE`
+2026-07-18T00:21:04.089682Z  --> src/net/socket/netlink/route/route.rs:6:24
+2026-07-18T00:21:04.089699Z   |
+2026-07-18T00:21:04.089748Z 6 |     build_nlmsg_error, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, RTA_DST, RTA_GATEWAY, RTA_OIF,
+2026-07-18T00:21:04.089767Z   |                        ^^^^^^^^^^^^
+2026-07-18T00:21:04.089783Z 
+2026-07-18T00:21:04.089836Z warning: unused import: `NoAttr`
+2026-07-18T00:21:04.089858Z   --> src/net/socket/netlink/route/mod.rs:13:79
+2026-07-18T00:21:04.089874Z    |
+2026-07-18T00:21:04.089898Z 13 |     CMsgSegHdr, DoneSegment, DoneSegmentBody, ErrorSegment, ErrorSegmentBody, NoAttr,
+2026-07-18T00:21:04.089919Z    |                                                                               ^^^^^^
+2026-07-18T00:21:04.089933Z 
+2026-07-18T00:21:04.090170Z warning: unused imports: `IpCidr`, `Ipv4Address`, `Ipv6Address`
+2026-07-18T00:21:04.090213Z   --> src/net/socket/netlink/route/mod.rs:19:49
+2026-07-18T00:21:04.090244Z    |
+2026-07-18T00:21:04.090266Z 19 | use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
+2026-07-18T00:21:04.090290Z    |                                                 ^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^
+2026-07-18T00:21:04.090305Z 
+2026-07-18T00:21:04.090323Z warning: unused import: `Weak`
+2026-07-18T00:21:04.090342Z  --> src/net/socket/packet.rs:2:24
+2026-07-18T00:21:04.090359Z   |
+2026-07-18T00:21:04.090393Z 2 | use alloc::sync::{Arc, Weak};
+2026-07-18T00:21:04.090410Z   |                        ^^^^
+2026-07-18T00:21:04.090425Z 
+2026-07-18T00:21:04.092452Z warning: unused import: `alloc::vec`
+2026-07-18T00:21:04.092477Z  --> src/net/socket/packet.rs:3:5
+2026-07-18T00:21:04.092485Z   |
+2026-07-18T00:21:04.092492Z 3 | use alloc::vec;
+2026-07-18T00:21:04.092501Z   |     ^^^^^^^^^^
+2026-07-18T00:21:04.092508Z 
+2026-07-18T00:21:04.092520Z warning: unused import: `crate::net::adapter::IfaceDevice`
+2026-07-18T00:21:04.092527Z   --> src/net/socket/packet.rs:10:5
+2026-07-18T00:21:04.092532Z    |
+2026-07-18T00:21:04.092539Z 10 | use crate::net::adapter::IfaceDevice;
+2026-07-18T00:21:04.092547Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.092552Z 
+2026-07-18T00:21:04.092647Z warning: unused import: `Endpoint`
+2026-07-18T00:21:04.092658Z  --> src/net/socket/unix/ns/mod.rs:8:18
+2026-07-18T00:21:04.092665Z   |
+2026-07-18T00:21:04.092673Z 8 | use crate::net::{Endpoint, Socket};
+2026-07-18T00:21:04.092678Z   |                  ^^^^^^^^
+2026-07-18T00:21:04.092684Z 
+2026-07-18T00:21:04.092815Z warning: unused import: `UnixEndpoint`
+2026-07-18T00:21:04.092846Z   --> src/net/socket/unix/stream/inner.rs:19:32
+2026-07-18T00:21:04.092860Z    |
+2026-07-18T00:21:04.092901Z 19 | use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
+2026-07-18T00:21:04.092914Z    |                                ^^^^^^^^^^^^
+2026-07-18T00:21:04.092919Z 
+2026-07-18T00:21:04.093191Z warning: unused imports: `Dirent`, `OpenFlags`, `SeekWhence`, `Stat`, `UserBuffer`, `fat32::DiskInodeType`, `inner::with_tcp_mut`
+2026-07-18T00:21:04.093222Z   --> src/net/socket/mod.rs:8:10
+2026-07-18T00:21:04.093237Z    |
+2026-07-18T00:21:04.093261Z 8  |     fs::{fat32::DiskInodeType, vfs, vfs::FileFlags, Dirent, OpenFlags, SeekWhence, Stat},
+2026-07-18T00:21:04.093283Z    |          ^^^^^^^^^^^^^^^^^^^^                       ^^^^^^  ^^^^^^^^^  ^^^^^^^^^^  ^^^^
+2026-07-18T00:21:04.093301Z 9  |     mm::{UserBuffer, UserBufferWriter, UserPtr, UserPtrMut},
+2026-07-18T00:21:04.093318Z    |          ^^^^^^^^^^
+2026-07-18T00:21:04.093334Z ...
+2026-07-18T00:21:04.093353Z 15 |             stream::{inner::with_tcp_mut, TcpSocket},
+2026-07-18T00:21:04.093371Z    |                      ^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.093385Z 
+2026-07-18T00:21:04.093411Z warning: unused import: `alloc::collections::VecDeque`
+2026-07-18T00:21:04.093427Z   --> src/net/socket/mod.rs:22:5
+2026-07-18T00:21:04.093440Z    |
+2026-07-18T00:21:04.093456Z 22 | use alloc::collections::VecDeque;
+2026-07-18T00:21:04.093473Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.093487Z 
+2026-07-18T00:21:04.093633Z warning: unused import: `String`
+2026-07-18T00:21:04.093660Z   --> src/net/socket/mod.rs:24:14
+2026-07-18T00:21:04.093678Z    |
+2026-07-18T00:21:04.093695Z 24 |     string::{String, ToString},
+2026-07-18T00:21:04.093715Z    |              ^^^^^^
+2026-07-18T00:21:04.093729Z 
+2026-07-18T00:21:04.093798Z warning: unused import: `IpListenEndpoint`
+2026-07-18T00:21:04.093830Z   --> src/net/socket/mod.rs:34:44
+2026-07-18T00:21:04.093854Z    |
+2026-07-18T00:21:04.093876Z 34 | use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
+2026-07-18T00:21:04.093896Z    |                                            ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.093910Z 
+2026-07-18T00:21:04.093932Z warning: unused import: `alloc::string::ToString`
+2026-07-18T00:21:04.093949Z   --> src/net/syscall/bind.rs:10:5
+2026-07-18T00:21:04.093964Z    |
+2026-07-18T00:21:04.093980Z 10 | use alloc::string::ToString;
+2026-07-18T00:21:04.093998Z    |     ^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.094011Z 
+2026-07-18T00:21:04.094082Z warning: unused import: `super::common::is_known_sockopt_level`
+2026-07-18T00:21:04.094093Z  --> src/net/syscall/getsockopt.rs:7:5
+2026-07-18T00:21:04.094145Z   |
+2026-07-18T00:21:04.094177Z 7 | use super::common::is_known_sockopt_level;
+2026-07-18T00:21:04.094197Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.094212Z 
+2026-07-18T00:21:04.094280Z warning: unused import: `crate::utils::error::SyscallErr`
+2026-07-18T00:21:04.094306Z  --> src/net/syscall/shutdown.rs:1:5
+2026-07-18T00:21:04.094316Z   |
+2026-07-18T00:21:04.094323Z 1 | use crate::utils::error::SyscallErr;
+2026-07-18T00:21:04.094330Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.094384Z 
+2026-07-18T00:21:04.094630Z warning: unused imports: `ACCEPT_WAITER_COUNT`, `AF_NETLINK`, `AF_PACKET`, `Fd`, `RAW_SOCKETS_TO_REMOVE`, `SHUT_RDWR`, `SHUT_WR`
+2026-07-18T00:21:04.094660Z   --> src/net/mod.rs:27:5
+2026-07-18T00:21:04.094692Z    |
+2026-07-18T00:21:04.094708Z 27 |     Fd, PacketEndpoint, Socket, SocketFile, TcpInfo, ACCEPT_WAITER_COUNT, AF_INET, AF_INET6,
+2026-07-18T00:21:04.094744Z    |     ^^                                               ^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.094754Z 28 |     AF_NETLINK, AF_PACKET, AF_UNIX, AF_UNSPEC, MAX_BUFFER_SIZE, PACKET_SOCKETS, PSOCK, RAW_SOCKETS,
+2026-07-18T00:21:04.094763Z    |     ^^^^^^^^^^  ^^^^^^^^^
+2026-07-18T00:21:04.094771Z 29 |     RAW_SOCKETS_TO_REMOVE, SHUT_RD, SHUT_RDWR, SHUT_WR, TCP_LISTENERS, TCP_MSS, TCP_SOCKETS,
+2026-07-18T00:21:04.094778Z    |     ^^^^^^^^^^^^^^^^^^^^^           ^^^^^^^^^  ^^^^^^^
+2026-07-18T00:21:04.094783Z 
+2026-07-18T00:21:04.094794Z warning: unused imports: `init_posix_lock_manager`, `mgr`
+2026-07-18T00:21:04.094802Z  --> src/syscall/fs.rs:5:5
+2026-07-18T00:21:04.094818Z   |
+2026-07-18T00:21:04.094829Z 5 |     init_posix_lock_manager, mgr, posix_lock_get, posix_lock_set, release_posix_for_owner, LockKey,
+2026-07-18T00:21:04.094837Z   |     ^^^^^^^^^^^^^^^^^^^^^^^  ^^^
+2026-07-18T00:21:04.094844Z 
+2026-07-18T00:21:04.095051Z warning: unused import: `crate::syscall::utils::wait_io_core`
+2026-07-18T00:21:04.095060Z   --> src/syscall/fs.rs:14:5
+2026-07-18T00:21:04.095067Z    |
+2026-07-18T00:21:04.095073Z 14 | use crate::syscall::utils::wait_io_core;
+2026-07-18T00:21:04.095079Z    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.095084Z 
+2026-07-18T00:21:04.096586Z warning: unused import: `find_process_by_pid`
+2026-07-18T00:21:04.096604Z   --> src/syscall/fs.rs:16:39
+2026-07-18T00:21:04.096613Z    |
+2026-07-18T00:21:04.096622Z 16 |     current_task, current_user_token, find_process_by_pid, find_task_by_tid,
+2026-07-18T00:21:04.096630Z    |                                       ^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.096637Z 
+2026-07-18T00:21:04.096647Z warning: unused import: `alloc::boxed::Box`
+2026-07-18T00:21:04.096674Z   --> src/syscall/fs.rs:21:5
+2026-07-18T00:21:04.096681Z    |
+2026-07-18T00:21:04.096693Z 21 | use alloc::boxed::Box;
+2026-07-18T00:21:04.096699Z    |     ^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.096705Z 
+2026-07-18T00:21:04.096711Z warning: unused import: `core::mem::size_of`
+2026-07-18T00:21:04.096717Z   --> src/syscall/fs.rs:26:5
+2026-07-18T00:21:04.096722Z    |
+2026-07-18T00:21:04.096727Z 26 | use core::mem::size_of;
+2026-07-18T00:21:04.096733Z    |     ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.096739Z 
+2026-07-18T00:21:04.096943Z warning: unused import: `core::panic`
+2026-07-18T00:21:04.096987Z   --> src/syscall/fs.rs:27:5
+2026-07-18T00:21:04.096998Z    |
+2026-07-18T00:21:04.097004Z 27 | use core::panic;
+2026-07-18T00:21:04.097009Z    |     ^^^^^^^^^^^
+2026-07-18T00:21:04.097014Z 
+2026-07-18T00:21:04.099856Z warning: unused import: `alloc::boxed::Box`
+2026-07-18T00:21:04.099876Z  --> src/task/elf.rs:7:5
+2026-07-18T00:21:04.099895Z   |
+2026-07-18T00:21:04.099934Z 7 | use alloc::boxed::Box;
+2026-07-18T00:21:04.099943Z   |     ^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.099948Z 
+2026-07-18T00:21:04.100203Z warning: unused import: `Weak`
+2026-07-18T00:21:04.100217Z   --> src/task/net_namespace.rs:11:24
+2026-07-18T00:21:04.100224Z    |
+2026-07-18T00:21:04.100232Z 11 | use alloc::sync::{Arc, Weak};
+2026-07-18T00:21:04.100238Z    |                        ^^^^
+2026-07-18T00:21:04.100245Z 
+2026-07-18T00:21:04.102116Z warning: unused imports: `kernel_timer_queue_len`, `zombie_count`
+2026-07-18T00:21:04.102152Z   --> src/task/mod.rs:43:34
+2026-07-18T00:21:04.102169Z    |
+2026-07-18T00:21:04.102190Z 43 |     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
+2026-07-18T00:21:04.102212Z    |                                  ^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.102230Z ...
+2026-07-18T00:21:04.102250Z 47 |     wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
+2026-07-18T00:21:04.102269Z    |                         ^^^^^^^^^^^^
+2026-07-18T00:21:04.102287Z 
+2026-07-18T00:21:04.102312Z warning: unused import: `sleep_until_interruptible`
+2026-07-18T00:21:04.102333Z   --> src/task/mod.rs:74:35
+2026-07-18T00:21:04.102348Z    |
+2026-07-18T00:21:04.102373Z 74 |     sleep_relative_interruptible, sleep_until_interruptible, sleep_until_realtime_interruptible,
+2026-07-18T00:21:04.102393Z    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.102409Z 
+2026-07-18T00:21:04.936560Z warning: trait objects without an explicit `dyn` are deprecated
+2026-07-18T00:21:04.936608Z    --> src/net/syscall/sendmsg.rs:144:55
+2026-07-18T00:21:04.936618Z     |
+2026-07-18T00:21:04.936629Z 144 | fn resolve_dest(msg: &MsgHdr, token: usize, _socket: &crate::net::Socket) -> Option<Endpoint> {
+2026-07-18T00:21:04.936638Z     |                                                       ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:04.936644Z     |
+2026-07-18T00:21:04.936653Z     = warning: this is accepted in the current edition (Rust 2018) but is a hard error in Rust 2021!
+2026-07-18T00:21:04.936664Z     = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2021/warnings-promoted-to-error.html>
+2026-07-18T00:21:04.936673Z     = note: `#[warn(bare_trait_objects)]` on by default
+2026-07-18T00:21:04.936679Z help: if this is an object-safe trait, use `dyn`
+2026-07-18T00:21:04.936686Z     |
+2026-07-18T00:21:04.936694Z 144 | fn resolve_dest(msg: &MsgHdr, token: usize, _socket: &dyn crate::net::Socket) -> Option<Endpoint> {
+2026-07-18T00:21:04.936703Z     |                                                       +++
+2026-07-18T00:21:04.936709Z 
+2026-07-18T00:21:06.952843Z warning: trait objects without an explicit `dyn` are deprecated
+2026-07-18T00:21:06.952942Z   --> src/net/syscall/socket.rs:38:24
+2026-07-18T00:21:06.952954Z    |
+2026-07-18T00:21:06.952965Z 38 |     let result = match crate::net::Socket::alloc(domain, psock, protocol, is_nonblock, is_cloexec) {
+2026-07-18T00:21:06.952974Z    |                        ^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:06.952980Z    |
+2026-07-18T00:21:06.952989Z    = warning: this is accepted in the current edition (Rust 2018) but is a hard error in Rust 2021!
+2026-07-18T00:21:06.953001Z    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2021/warnings-promoted-to-error.html>
+2026-07-18T00:21:06.953009Z help: if this is an object-safe trait, use `dyn`
+2026-07-18T00:21:06.953015Z    |
+2026-07-18T00:21:06.953025Z 38 |     let result = match <dyn crate::net::Socket>::alloc(domain, psock, protocol, is_nonblock, is_cloexec) {
+2026-07-18T00:21:06.953033Z    |                        ++++                   +
+2026-07-18T00:21:06.953039Z 
+2026-07-18T00:21:07.512641Z warning: unused import: `Socket`
+2026-07-18T00:21:07.512673Z  --> src/net/syscall/socket.rs:5:18
+2026-07-18T00:21:07.512683Z   |
+2026-07-18T00:21:07.512691Z 5 | use crate::net::{Socket, PSOCK};
+2026-07-18T00:21:07.512698Z   |                  ^^^^^^
+2026-07-18T00:21:07.512704Z 
+2026-07-18T00:21:07.512722Z warning: unused import: `crate::fs::vfs::IndexNode`
+2026-07-18T00:21:07.512730Z  --> src/fs/procfs/pid/fd.rs:2:5
+2026-07-18T00:21:07.512737Z   |
+2026-07-18T00:21:07.512743Z 2 | use crate::fs::vfs::IndexNode as _;
+2026-07-18T00:21:07.512749Z   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:07.512756Z 
+2026-07-18T00:21:07.512763Z warning: unused import: `IndexNode`
+2026-07-18T00:21:07.512770Z   --> src/fs/vfs/propagation.rs:18:13
+2026-07-18T00:21:07.512777Z    |
+2026-07-18T00:21:07.512784Z 18 | use super::{IndexNode, InodeId, MountFS, MountFSInode};
+2026-07-18T00:21:07.512791Z    |             ^^^^^^^^^
+2026-07-18T00:21:07.512798Z 
+2026-07-18T00:21:07.512805Z warning: unused import: `IndexNode`
+2026-07-18T00:21:07.512811Z     --> src/fs/mod.rs:1085:48
+2026-07-18T00:21:07.512817Z      |
+2026-07-18T00:21:07.512825Z 1085 |     use self::vfs::{FilePrivateData, FileType, IndexNode as _};
+2026-07-18T00:21:07.512834Z      |                                                ^^^^^^^^^
+2026-07-18T00:21:07.512839Z 
+2026-07-18T00:21:07.758374Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.758416Z    --> src/fs/ext4/counters.rs:419:17
+2026-07-18T00:21:07.758427Z     |
+2026-07-18T00:21:07.758438Z 419 |             let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+2026-07-18T00:21:07.758446Z     |                 ----^^^^^
+2026-07-18T00:21:07.758454Z     |                 |
+2026-07-18T00:21:07.758462Z     |                 help: remove this `mut`
+2026-07-18T00:21:07.758470Z     |
+2026-07-18T00:21:07.758478Z     = note: `#[warn(unused_mut)]` on by default
+2026-07-18T00:21:07.758485Z 
+2026-07-18T00:21:07.761984Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.762038Z    --> src/fs/ext4/counters.rs:431:17
+2026-07-18T00:21:07.762060Z     |
+2026-07-18T00:21:07.762086Z 431 |             let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+2026-07-18T00:21:07.762107Z     |                 ----^^^^^
+2026-07-18T00:21:07.762126Z     |                 |
+2026-07-18T00:21:07.762199Z     |                 help: remove this `mut`
+2026-07-18T00:21:07.762218Z 
+2026-07-18T00:21:07.762230Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.762239Z    --> src/fs/ext4/counters.rs:442:17
+2026-07-18T00:21:07.762246Z     |
+2026-07-18T00:21:07.762257Z 442 |             let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+2026-07-18T00:21:07.762266Z     |                 ----^^^^^
+2026-07-18T00:21:07.762273Z     |                 |
+2026-07-18T00:21:07.762280Z     |                 help: remove this `mut`
+2026-07-18T00:21:07.762286Z 
+2026-07-18T00:21:07.762301Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.762311Z    --> src/fs/ext4/counters.rs:453:17
+2026-07-18T00:21:07.762317Z     |
+2026-07-18T00:21:07.762325Z 453 |             let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+2026-07-18T00:21:07.762332Z     |                 ----^^^^^
+2026-07-18T00:21:07.762341Z     |                 |
+2026-07-18T00:21:07.762349Z     |                 help: remove this `mut`
+2026-07-18T00:21:07.762354Z 
+2026-07-18T00:21:07.762362Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.762368Z    --> src/fs/ext4/counters.rs:464:17
+2026-07-18T00:21:07.762374Z     |
+2026-07-18T00:21:07.762382Z 464 |             let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+2026-07-18T00:21:07.762388Z     |                 ----^^^^^
+2026-07-18T00:21:07.762395Z     |                 |
+2026-07-18T00:21:07.762402Z     |                 help: remove this `mut`
+2026-07-18T00:21:07.762408Z 
+2026-07-18T00:21:07.762464Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.762496Z    --> src/fs/ext4/counters.rs:524:9
+2026-07-18T00:21:07.762510Z     |
+2026-07-18T00:21:07.762521Z 524 |     let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+2026-07-18T00:21:07.762529Z     |         ----^^^^^
+2026-07-18T00:21:07.762535Z     |         |
+2026-07-18T00:21:07.762558Z     |         help: remove this `mut`
+2026-07-18T00:21:07.762575Z 
+2026-07-18T00:21:07.924899Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.924935Z    --> src/fs/ext4/extent.rs:333:25
+2026-07-18T00:21:07.924946Z     |
+2026-07-18T00:21:07.924958Z 333 |                     let mut ext = Ext4Extent::load_from_u8_mut(&mut internal_data[offset..]);
+2026-07-18T00:21:07.924966Z     |                         ----^^^
+2026-07-18T00:21:07.924974Z     |                         |
+2026-07-18T00:21:07.924983Z     |                         help: remove this `mut`
+2026-07-18T00:21:07.924992Z 
+2026-07-18T00:21:07.925000Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.925008Z    --> src/fs/ext4/extent.rs:343:21
+2026-07-18T00:21:07.925015Z     |
+2026-07-18T00:21:07.925024Z 343 |                 let mut ext = Ext4Extent::load_from_u8_mut(&mut internal_data[offset..]);
+2026-07-18T00:21:07.925032Z     |                     ----^^^
+2026-07-18T00:21:07.925038Z     |                     |
+2026-07-18T00:21:07.925047Z     |                     help: remove this `mut`
+2026-07-18T00:21:07.925053Z 
+2026-07-18T00:21:07.943520Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.943553Z    --> src/fs/ext4/file.rs:462:13
+2026-07-18T00:21:07.943563Z     |
+2026-07-18T00:21:07.943574Z 462 |         let mut init_child_ref = self.create_inode(inode_mode, uid, gid)?;
+2026-07-18T00:21:07.943581Z     |             ----^^^^^^^^^^^^^^
+2026-07-18T00:21:07.943588Z     |             |
+2026-07-18T00:21:07.943597Z     |             help: remove this `mut`
+2026-07-18T00:21:07.943603Z 
+2026-07-18T00:21:07.988526Z warning: taking a mutable reference to a `const` item
+2026-07-18T00:21:07.988565Z    --> src/fs/ext4/test.rs:165:33
+2026-07-18T00:21:07.988575Z     |
+2026-07-18T00:21:07.988585Z 165 |         .generic_open("t2.txt", &mut super::ROOT_INODE, false, 0, &mut 0)
+2026-07-18T00:21:07.988594Z     |                                 ^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:07.988600Z     |
+2026-07-18T00:21:07.988608Z     = note: each usage of a `const` item creates a new temporary
+2026-07-18T00:21:07.988618Z     = note: the mutable reference will refer to this temporary, not the original `const` item
+2026-07-18T00:21:07.988626Z note: `const` item defined here
+2026-07-18T00:21:07.988633Z    --> src/fs/ext4/mod.rs:25:1
+2026-07-18T00:21:07.988642Z     |
+2026-07-18T00:21:07.988648Z 25  | pub const ROOT_INODE: u32 = 2;
+2026-07-18T00:21:07.988655Z     | ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:07.988663Z     = note: `#[warn(const_item_mutation)]` on by default
+2026-07-18T00:21:07.988669Z 
+2026-07-18T00:21:07.993634Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.993686Z    --> src/fs/ext4/test.rs:153:9
+2026-07-18T00:21:07.993698Z     |
+2026-07-18T00:21:07.993708Z 153 |     let mut pd = private_data();
+2026-07-18T00:21:07.993716Z     |         ----^^
+2026-07-18T00:21:07.993724Z     |         |
+2026-07-18T00:21:07.993734Z     |         help: remove this `mut`
+2026-07-18T00:21:07.993740Z 
+2026-07-18T00:21:07.999465Z warning: variable does not need to be mutable
+2026-07-18T00:21:07.999498Z    --> src/fs/ext4/test.rs:226:9
+2026-07-18T00:21:07.999508Z     |
+2026-07-18T00:21:07.999516Z 226 |     let mut pd = private_data();
+2026-07-18T00:21:07.999523Z     |         ----^^
+2026-07-18T00:21:07.999529Z     |         |
+2026-07-18T00:21:07.999538Z     |         help: remove this `mut`
+2026-07-18T00:21:07.999547Z 
+2026-07-18T00:21:08.001920Z warning: variable does not need to be mutable
+2026-07-18T00:21:08.001957Z    --> src/fs/ext4/test.rs:273:9
+2026-07-18T00:21:08.001968Z     |
+2026-07-18T00:21:08.001977Z 273 |     let mut pd = private_data();
+2026-07-18T00:21:08.001984Z     |         ----^^
+2026-07-18T00:21:08.001992Z     |         |
+2026-07-18T00:21:08.002000Z     |         help: remove this `mut`
+2026-07-18T00:21:08.002007Z 
+2026-07-18T00:21:08.472808Z warning: variable does not need to be mutable
+2026-07-18T00:21:08.472843Z     --> src/fs/vfs/file.rs:1792:13
+2026-07-18T00:21:08.472853Z      |
+2026-07-18T00:21:08.472866Z 1792 |         let mut dirents: Vec<crate::fs::dirent::Dirent> = names
+2026-07-18T00:21:08.472877Z      |             ----^^^^^^^
+2026-07-18T00:21:08.472886Z      |             |
+2026-07-18T00:21:08.472895Z      |             help: remove this `mut`
+2026-07-18T00:21:08.472990Z 
+2026-07-18T00:21:08.663657Z warning: unreachable pattern
+2026-07-18T00:21:08.663695Z    --> src/hal/arch/loongarch64/trap/mod.rs:395:11
+2026-07-18T00:21:08.663707Z     |
+2026-07-18T00:21:08.663717Z 395 |         | Trap::Exception(Exception::AddressError)
+2026-07-18T00:21:08.663726Z     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:08.663732Z     |
+2026-07-18T00:21:08.663740Z     = note: `#[warn(unreachable_patterns)]` on by default
+2026-07-18T00:21:08.663747Z 
+2026-07-18T00:21:09.040628Z warning: variable does not need to be mutable
+2026-07-18T00:21:09.040677Z    --> src/net/config.rs:351:17
+2026-07-18T00:21:09.040696Z     |
+2026-07-18T00:21:09.040719Z 351 |             let mut lo_sockets = SocketSet::new(vec![]);
+2026-07-18T00:21:09.040739Z     |                 ----^^^^^^^^^^
+2026-07-18T00:21:09.040756Z     |                 |
+2026-07-18T00:21:09.040773Z     |                 help: remove this `mut`
+2026-07-18T00:21:09.040791Z 
+2026-07-18T00:21:09.040809Z warning: variable does not need to be mutable
+2026-07-18T00:21:09.040826Z    --> src/net/config.rs:414:17
+2026-07-18T00:21:09.040842Z     |
+2026-07-18T00:21:09.040862Z 414 |             let mut runtime_dhcp_handle = None;
+2026-07-18T00:21:09.040880Z     |                 ----^^^^^^^^^^^^^^^^^^^
+2026-07-18T00:21:09.040897Z     |                 |
+2026-07-18T00:21:09.040915Z     |                 help: remove this `mut`
+2026-07-18T00:21:09.040933Z 
+2026-07-18T00:21:09.044562Z warning: variable does not need to be mutable
+2026-07-18T00:21:09.044600Z    --> src/net/config.rs:573:13
+2026-07-18T00:21:09.044611Z     |
+2026-07-18T00:21:09.044622Z 573 |         let mut veth_iface = Interface::new(veth_config, &mut veth_device, now);
+2026-07-18T00:21:09.044631Z     |             ----^^^^^^^^^^
+2026-07-18T00:21:09.044639Z     |             |
+2026-07-18T00:21:09.044647Z     |             help: remove this `mut`
+2026-07-18T00:21:09.044655Z 
+2026-07-18T00:21:09.165903Z warning: unreachable pattern
+2026-07-18T00:21:09.165958Z    --> src/net/socket/inet/datagram/udp.rs:419:21
+2026-07-18T00:21:09.166005Z     |
+2026-07-18T00:21:09.166035Z 419 |                     Err(_) => Err(SyscallErr::ENOBUFS),
+2026-07-18T00:21:09.166046Z     |                     ^^^^^^
+2026-07-18T00:21:09.166054Z 
+2026-07-18T00:21:09.169586Z warning: unreachable pattern
+2026-07-18T00:21:09.169626Z    --> src/net/socket/inet/datagram/udp.rs:550:21
+2026-07-18T00:21:09.169637Z     |
+2026-07-18T00:21:09.169647Z 550 |                     Err(_) => Err(SyscallErr::ENOBUFS),
+2026-07-18T00:21:09.169655Z     |                     ^^^^^^
+2026-07-18T00:21:09.169661Z 
+2026-07-18T00:21:09.359422Z warning: unreachable pattern
+2026-07-18T00:21:09.359477Z    --> src/net/socket/unix/stream/mod.rs:367:17
+2026-07-18T00:21:09.359500Z     |
+2026-07-18T00:21:09.359583Z 364 |                 SHUT_WR => {
+2026-07-18T00:21:09.359620Z     |                 ------- matches any value
+2026-07-18T00:21:09.359666Z ...
+2026-07-18T00:21:09.359691Z 367 |                 SHUT_RDWR => {
+2026-07-18T00:21:09.359738Z     |                 ^^^^^^^^^ unreachable pattern
+2026-07-18T00:21:09.359783Z 
+2026-07-18T00:21:09.359876Z warning: unreachable pattern
+2026-07-18T00:21:09.359911Z    --> src/net/socket/unix/stream/mod.rs:371:17
+2026-07-18T00:21:09.359940Z     |
+2026-07-18T00:21:09.359968Z 364 |                 SHUT_WR => {
+2026-07-18T00:21:09.360015Z     |                 ------- matches any value
+2026-07-18T00:21:09.360050Z ...
+2026-07-18T00:21:09.360087Z 371 |                 _ => return Err(SyscallErr::EINVAL),
+2026-07-18T00:21:09.360141Z     |                 ^ unreachable pattern
+2026-07-18T00:21:09.360162Z 
+2026-07-18T00:21:09.501662Z warning: variable does not need to be mutable
+2026-07-18T00:21:09.501726Z     --> src/syscall/fs.rs:1366:9
+2026-07-18T00:21:09.501757Z      |
+2026-07-18T00:21:09.501779Z 1366 |     let mut write_once = || match file.write(buf) {
+2026-07-18T00:21:09.501798Z      |         ----^^^^^^^^^^
+2026-07-18T00:21:09.501816Z      |         |
+2026-07-18T00:21:09.501835Z      |         help: remove this `mut`
+2026-07-18T00:21:09.501852Z 
+2026-07-18T00:21:09.517634Z warning: variable does not need to be mutable
+2026-07-18T00:21:09.517734Z     --> src/syscall/fs.rs:2336:9
+2026-07-18T00:21:09.517747Z      |
+2026-07-18T00:21:09.517757Z 2336 |     let mut try_write = || match file.write(&kernel_buf) {
+2026-07-18T00:21:09.517765Z      |         ----^^^^^^^^^
+2026-07-18T00:21:09.517772Z      |         |
+2026-07-18T00:21:09.517779Z      |         help: remove this `mut`
+2026-07-18T00:21:09.517787Z 
+2026-07-18T00:21:09.622394Z warning: unreachable pattern
+2026-07-18T00:21:09.622436Z     --> src/syscall/fs.rs:5948:9
+2026-07-18T00:21:09.622447Z      |
+2026-07-18T00:21:09.622456Z 5948 |         command => {
+2026-07-18T00:21:09.622463Z      |         ^^^^^^^
+2026-07-18T00:21:09.622474Z 
+2026-07-18T00:21:10.661262Z warning: type `PageEntry` is more private than the item `PageCache::get_page_for_read`
+2026-07-18T00:21:10.661316Z    --> src/fs/page_cache.rs:707:5
+2026-07-18T00:21:10.661335Z     |
+2026-07-18T00:21:10.661428Z 707 |     pub fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
+2026-07-18T00:21:10.661480Z     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `PageCache::get_page_for_read` is reachable at visibility `pub(crate)`
+2026-07-18T00:21:10.661501Z     |
+2026-07-18T00:21:10.661522Z note: but type `PageEntry` is only usable at visibility `pub(self)`
+2026-07-18T00:21:10.661561Z    --> src/fs/page_cache.rs:257:1
+2026-07-18T00:21:10.661587Z     |
+2026-07-18T00:21:10.661608Z 257 | struct PageEntry {
+2026-07-18T00:21:10.661624Z     | ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:10.661645Z     = note: `#[warn(private_interfaces)]` on by default
+2026-07-18T00:21:10.661663Z 
+2026-07-18T00:21:10.661684Z warning: type `PageEntry` is more private than the item `PageCache::get_page_for_write`
+2026-07-18T00:21:10.661704Z    --> src/fs/page_cache.rs:721:5
+2026-07-18T00:21:10.661720Z     |
+2026-07-18T00:21:10.661741Z 721 |     pub fn get_page_for_write(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
+2026-07-18T00:21:10.661795Z     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `PageCache::get_page_for_write` is reachable at visibility `pub(crate)`
+2026-07-18T00:21:10.661812Z     |
+2026-07-18T00:21:10.661860Z note: but type `PageEntry` is only usable at visibility `pub(self)`
+2026-07-18T00:21:10.661883Z    --> src/fs/page_cache.rs:257:1
+2026-07-18T00:21:10.661896Z     |
+2026-07-18T00:21:10.661906Z 257 | struct PageEntry {
+2026-07-18T00:21:10.661917Z     | ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:10.661924Z 
+2026-07-18T00:21:10.661946Z warning: type `PageEntry` is more private than the item `PageCache::get_page_for_write_populate`
+2026-07-18T00:21:10.661956Z    --> src/fs/page_cache.rs:733:5
+2026-07-18T00:21:10.661962Z     |
+2026-07-18T00:21:10.662009Z 733 | /     pub fn get_page_for_write_populate(
+2026-07-18T00:21:10.662024Z 734 | |         &self,
+2026-07-18T00:21:10.662037Z 735 | |         page_index: usize,
+2026-07-18T00:21:10.662046Z 736 | |         old_file_size: Option<usize>,
+2026-07-18T00:21:10.662054Z 737 | |         full_overwrite: bool,
+2026-07-18T00:21:10.662115Z 738 | |     ) -> Result<Arc<PageEntry>, SyscallErr> {
+2026-07-18T00:21:10.662144Z     | |___________________________________________^ method `PageCache::get_page_for_write_populate` is reachable at visibility `pub(crate)`
+2026-07-18T00:21:10.662172Z     |
+2026-07-18T00:21:10.662182Z note: but type `PageEntry` is only usable at visibility `pub(self)`
+2026-07-18T00:21:10.662190Z    --> src/fs/page_cache.rs:257:1
+2026-07-18T00:21:10.662211Z     |
+2026-07-18T00:21:10.662219Z 257 | struct PageEntry {
+2026-07-18T00:21:10.662226Z     | ^^^^^^^^^^^^^^^^
+2026-07-18T00:21:10.662234Z 
+2026-07-18T00:21:10.779934Z warning: static variable `Next_ID` should have an upper case name
+2026-07-18T00:21:10.780251Z   --> src/net/socket/unix/ns/mod.rs:16:8
+2026-07-18T00:21:10.780303Z    |
+2026-07-18T00:21:10.780355Z 16 | static Next_ID: AtomicU64 = AtomicU64::new(0);
+2026-07-18T00:21:10.780368Z    |        ^^^^^^^ help: convert the identifier to upper case: `NEXT_ID`
+2026-07-18T00:21:10.780376Z    |
+2026-07-18T00:21:10.780385Z    = note: `#[warn(non_upper_case_globals)]` on by default
+2026-07-18T00:21:10.780507Z 
+2026-07-18T00:21:10.780697Z warning: variable `SHUT_WR` should have a snake case name
+2026-07-18T00:21:10.780765Z    --> src/net/socket/unix/stream/mod.rs:364:17
+2026-07-18T00:21:10.780791Z     |
+2026-07-18T00:21:10.780812Z 364 |                 SHUT_WR => {
+2026-07-18T00:21:10.780834Z     |                 ^^^^^^^ help: convert the identifier to snake case: `shut_wr`
+2026-07-18T00:21:10.780849Z     |
+2026-07-18T00:21:10.780867Z     = note: `#[warn(non_snake_case)]` on by default
+2026-07-18T00:21:10.780883Z 
+2026-07-18T00:21:10.781135Z warning: variable `SHUT_RDWR` should have a snake case name
+2026-07-18T00:21:10.781153Z    --> src/net/socket/unix/stream/mod.rs:367:17
+2026-07-18T00:21:10.781164Z     |
+2026-07-18T00:21:10.781173Z 367 |                 SHUT_RDWR => {
+2026-07-18T00:21:10.781183Z     |                 ^^^^^^^^^ help: convert the identifier to snake case: `shut_rdwr`
+2026-07-18T00:21:10.781255Z 
+2026-07-18T00:22:12.729379Z warning: `os` (bin "os") generated 152 warnings (run `cargo fix --bin "os"` to apply 133 suggestions)
+2026-07-18T00:22:12.729572Z     Finished `release` profile [optimized + debuginfo] target(s) in 1m 10s
+2026-07-18T00:22:12.894247Z cp -f target/loongarch64-unknown-linux-gnu/release/os ../kernel-la
+2026-07-18T00:22:12.943418Z make[1]: Leaving directory '/app/os'

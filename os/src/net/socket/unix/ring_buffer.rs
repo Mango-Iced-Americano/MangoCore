@@ -14,8 +14,12 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static RB_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RB_BYTES: AtomicUsize = AtomicUsize::new(0);
-pub fn rb_alive() -> usize { RB_COUNT.load(Ordering::Relaxed) }
-pub fn rb_bytes() -> usize { RB_BYTES.load(Ordering::Relaxed) }
+pub fn rb_alive() -> usize {
+    RB_COUNT.load(Ordering::Relaxed)
+}
+pub fn rb_bytes() -> usize {
+    RB_BYTES.load(Ordering::Relaxed)
+}
 
 /// 通用环形缓冲区
 #[derive(Debug)]
@@ -112,7 +116,7 @@ impl<T> RingBuffer<T> {
     /// 设置对端关闭了读取。
     ///
     /// 使用 `Release` 语义确保本端在设置此标志之前的所有写入对 `is_recv_shutdown`
-    /// 的 `Acquire` 读取可见（本端后续 `write()` → `EPIPE` 路径）。 
+    /// 的 `Acquire` 读取可见（本端后续 `write()` → `EPIPE` 路径）。
     pub fn set_recv_shutdown(&self) {
         self.recv_shutdown.store(true, Ordering::Release);
     }

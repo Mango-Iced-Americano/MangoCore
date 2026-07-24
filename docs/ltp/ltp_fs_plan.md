@@ -395,7 +395,7 @@ Mount Round 因涉及基础设施改动（路径解析跨 mountpoint、sys_mount
 | `scripts/auto_exclude_ltp.sh` | 自动排除 panic/timeout 测例 | 可复用 panic/timeout 检测逻辑 |
 | `scripts/auto_exclude_glibc.py` | glibc 版 exclude 收集 | 可复用 glibc 排除逻辑 |
 | `scripts/run_full_test.py` | 全量编译+测试+评分+归档 | 评分部分（judge/run_parse.py）可复用 |
-| `user/src/bin/initproc.rs` | 内联 LTP runner，支持 include/exclude/from | 直接使用 `run_ltp_binaries()` |
+| `user/src/bin/test_runner.rs` | 内联 LTP runner，支持 include/exclude/from | 直接使用 `run_ltp_binaries()` |
 | `judge/judge_ltp-musl.py` / `judge_ltp-glibc.py` | 解析 RUN/FAIL LTP CASE 输出 | 可用于结果解析 |
 | `docs/LTP_BOTTOM_UP_GUIDE.md` | 自底向上适配指导 | 参考 P0-P8 优先级和代码审计结论 |
 

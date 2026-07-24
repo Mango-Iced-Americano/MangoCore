@@ -1,11 +1,12 @@
 services:
   os-dev:
-    image: zhouzhouyi/os-contest:20260104
+    image: ${DOCKER_IMAGE:-zhouzhouyi/os-contest:20260510}
     pull_policy: missing
     network_mode: host
     command: ["sleep", "infinity"]
     privileged: true
     devices:
+      # loop devices are needed locally for image mounting; may not exist in CI
       - /dev/loop-control:/dev/loop-control
       - /dev/loop0:/dev/loop0
     device_cgroup_rules:
@@ -24,12 +25,12 @@ services:
     stdin_open: true
     working_dir: /app
 
-    # IO 限速：每人 40MB/s，磁盘顺序写 ~94MB/s
+    # IO 限速：仅在存在 /dev/sdb 时生效（本地开发环境），CI 环境跳过
     # 注意：必须用整盘 /dev/sdb 而非分区 /dev/sdb2，blkio 对分区不生效
-    blkio_config:
-      device_read_bps:
-        - path: /dev/sdb
-          rate: "40m"
-      device_write_bps:
-        - path: /dev/sdb
-          rate: "40m"
+    # blkio_config:  # 取消注释可在本地启用 IO 限速
+    #   device_read_bps:
+    #     - path: /dev/sdb
+    #       rate: "40m"
+    #   device_write_bps:
+    #     - path: /dev/sdb
+    #       rate: "40m"

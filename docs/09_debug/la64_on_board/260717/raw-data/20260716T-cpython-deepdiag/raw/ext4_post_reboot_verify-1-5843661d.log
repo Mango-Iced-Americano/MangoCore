@@ -1,0 +1,49 @@
+2026-07-16T09:09:38.884740Z __PERF_BEGIN_ext4_post_reboot_verify-1-5843661d__
+2026-07-16T09:09:39.836464Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_ACK_ext4_post_reboot_verify-1-5843661d_TRACE_OFF__
+2026-07-16T09:09:42.879466Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_WORK_BEGIN_ext4_post_reboot_verify-1-5843661d__
+2026-07-16T09:09:42.915724Z perf_stats=true
+2026-07-16T09:09:42.918423Z perf_diag=true
+2026-07-16T09:09:42.918450Z heap_trace=false
+2026-07-16T09:09:42.919032Z stats_profile=1
+2026-07-16T09:09:42.956274Z syscall_total=0
+2026-07-16T09:09:42.958990Z syscall_getppid_total=0
+2026-07-16T09:09:42.961725Z syscall_cost_max_ticks=0
+2026-07-16T09:09:42.961792Z syscall_cost_ticks_total=0
+2026-07-16T09:09:42.964522Z getppid_cost_ticks_total=0
+2026-07-16T09:09:42.967310Z getppid_cost_ticks_max=0
+2026-07-16T09:09:42.970117Z ecall_trap_cost_ticks_total=0
+2026-07-16T09:09:42.972819Z ecall_trap_cost_ticks_max=0
+2026-07-16T09:09:42.975688Z user_unaligned_traps=0
+2026-07-16T09:09:42.978441Z user_unaligned_ticks_total=0
+2026-07-16T09:09:42.981229Z user_unaligned_ticks_max=0
+2026-07-16T09:09:42.981250Z user_unaligned_load_2=0
+2026-07-16T09:09:42.983998Z user_unaligned_load_4=0
+2026-07-16T09:09:42.986876Z user_unaligned_load_8=0
+2026-07-16T09:09:42.989561Z user_unaligned_store_2=0
+2026-07-16T09:09:42.992359Z user_unaligned_store_4=0
+2026-07-16T09:09:42.992376Z user_unaligned_store_8=0
+2026-07-16T09:09:42.995136Z user_unaligned_float_loads=0
+2026-07-16T09:09:42.997693Z user_unaligned_float_stores=0
+2026-07-16T09:09:43.034679Z heap_current_bytes=7858304
+2026-07-16T09:09:43.037387Z heap_max_bytes=8298408
+2026-07-16T09:09:43.040078Z heap_free_kb=188933
+2026-07-16T09:09:43.040098Z heap_total_kb=196607
+2026-07-16T09:09:43.042905Z heap_alloc_calls=0
+2026-07-16T09:09:43.045765Z heap_alloc_ticks_total=0
+2026-07-16T09:09:43.048514Z heap_alloc_ticks_max=0
+2026-07-16T09:09:43.048534Z heap_dealloc_calls=0
+2026-07-16T09:09:43.051289Z heap_dealloc_ticks_total=0
+2026-07-16T09:09:43.054069Z heap_dealloc_ticks_max=0
+2026-07-16T09:09:43.056874Z heap_dealloc_scan_steps_total=0
+2026-07-16T09:09:43.059566Z page_faults=0
+2026-07-16T09:09:43.059598Z pagefault_ticks_total=0
+2026-07-16T09:09:43.062394Z pagefault_time_count=0
+2026-07-16T09:09:43.065137Z frame_alloc_hits=0
+2026-07-16T09:09:43.065150Z frame_free_hits=0
+2026-07-16T09:09:43.068108Z frame_alloc_ticks_total=0
+2026-07-16T09:09:43.069380Z frame_alloc_time_count=0
+2026-07-16T09:09:43.109514Z /persist /persist ext4 rw,relatime 0 0
+2026-07-16T09:09:43.119479Z bash: cd: /persist/mangocore-perf: No such file or directory
+2026-07-16T09:09:43.124710Z __PERF_WORK_END_ext4_post_reboot_verify-1-5843661d__
+2026-07-16T09:09:43.129875Z __PERF_ACK_ext4_post_reboot_verify-1-5843661d_WORK__
+2026-07-16T09:09:43.616657Z [1m[33mMangoCore[0m:[1m[34m/[0m# __PERF_END_ext4_post_reboot_verify-1-5843661d__ rc=1

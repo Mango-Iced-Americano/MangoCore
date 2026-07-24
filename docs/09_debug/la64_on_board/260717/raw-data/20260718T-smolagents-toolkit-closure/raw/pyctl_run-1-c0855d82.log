@@ -1,0 +1,27 @@
+2026-07-18T04:55:59.602761Z __PERF_BEGIN_pyctl_run-1-c0855d82__
+2026-07-18T04:56:00.456247Z MangoPersist:/persist/apk-root# __PERF_ACK_pyctl_run-1-c0855d82_TRACE_OFF__
+2026-07-18T04:56:01.628529Z MangoPersist:/persist/apk-root# __PERF_WORK_BEGIN_pyctl_run-1-c0855d82__
+2026-07-18T04:56:01.665104Z [python-deploy] stage=p4-preflight
+2026-07-18T04:56:01.832946Z [python-deploy] stage=download
+2026-07-18T04:56:01.974129Z Connecting to 192.168.9.10:8009 (192.168.9.10:8009)
+2026-07-18T04:56:01.992747Z saving to '/tmp/.cpython-la64-strict-3.14.5-6117ec08760f.tar.xz.part'
+2026-07-18T04:56:08.782296Z .cpython-la64-strict  11% |***                             | 9598k  0:00:07 ETA.cpython-la64-strict  26% |********                        | 21.7M  0:00:05 ETA.cpython-la64-strict  41% |*************                   | 34.1M  0:00:04 ETA.cpython-la64-strict  56% |*****************               | 46.6M  0:00:03 ETA.cpython-la64-strict  71% |**********************          | 59.1M  0:00:02 ETA.cpython-la64-strict  86% |***************************     | 71.6M  0:00:00 ETA.cpython-la64-strict 100% |********************************| 83.0M  0:00:00 ETA
+2026-07-18T04:56:08.787002Z '/tmp/.cpython-la64-strict-3.14.5-6117ec08760f.tar.xz.part' saved
+2026-07-18T04:56:15.406744Z /tmp/.cpython-la64-strict-3.14.5-6117ec08760f.tar.xz.part: OK
+2026-07-18T04:56:15.411207Z [python-deploy] stage=extract
+2026-07-18T05:01:50.268302Z [python-deploy] stage=identity
+2026-07-18T05:01:50.413827Z [python-deploy] stage=smoke
+2026-07-18T05:02:03.075705Z strict-runtime-integrity-ok elfs=113
+2026-07-18T05:02:09.694872Z strict-runtime-board-smoke-ok
+2026-07-18T05:02:33.400584Z aligned-pillow-smoke-ok {"features": {"jpeg": true, "zlib": true}, "imaging_module": "/persist/python-runtime/releases/6117ec08760f/usr/lib/python3.14/site-packages/PIL/_imaging.cpython-314.so", "jpeg_bytes": 638, "jpeg_sha256": "6b837514e74822979cb03afcd1f73341d681502a9629a25f2fff4ede69d356f2", "pillow": "12.3.0", "pillow_module": "/persist/python-runtime/releases/6117ec08760f/usr/lib/python3.14/site-packages/PIL/__init__.py", "png_bytes": 82, "png_sha256": "bc89fe6bb077cd71fb888b588f11bfb4b34463b19b3e8fb9250db461c6c25285"}
+2026-07-18T05:02:38.840519Z strict-markupsafe-board-smoke-ok /persist/python-runtime/releases/6117ec08760f/usr/lib/python3.14/site-packages/markupsafe/_speedups.cpython-314.so
+2026-07-18T05:02:46.218464Z strict-pyyaml-pure-board-smoke-ok /persist/python-runtime/releases/6117ec08760f/usr/lib/python3.14/site-packages/yaml/__init__.py
+2026-07-18T05:03:21.985955Z Traceback (most recent call last):
+2026-07-18T05:03:22.008653Z   File [35m"/persist/python-runtime/releases/6117ec08760f/smolagents_toolkit_smoke.py"[0m, line [35m30[0m, in [35m<module>[0m
+2026-07-18T05:03:22.014229Z     assert [1;31mactual == version[0m, (distribution, actual, version)
+2026-07-18T05:03:22.016550Z            [1;31m^^^^^^^^^^^^^^^^^[0m
+2026-07-18T05:03:22.022654Z [1;35mAssertionError[0m: [35m('click', '8.4.2', '8.1.8')[0m
+2026-07-18T05:04:49.674458Z [python-deploy] stage=cleanup-failed-release
+2026-07-18T05:04:52.775532Z __PERF_WORK_END_pyctl_run-1-c0855d82__
+2026-07-18T05:04:52.777193Z __PERF_ACK_pyctl_run-1-c0855d82_WORK__
+2026-07-18T05:04:53.173542Z MangoPersist:/persist/apk-root# __PERF_END_pyctl_run-1-c0855d82__ rc=1

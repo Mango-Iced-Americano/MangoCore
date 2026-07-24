@@ -9,7 +9,7 @@
 //! `user_area_count`/`user_page_count` 必须只统计用户 VMA。
 
 use super::user_mapper::UserMapper;
-use super::vma::{MapFlags, MapPermission, Vma};
+use super::vma::{MapFlags, MapPermission, Vma, VmaUnmapReason};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
@@ -151,10 +151,7 @@ impl VmaSet {
     }
 
     pub(super) fn last_non_user(&self) -> Option<&Vma> {
-        self.vmas
-            .values()
-            .rev()
-            .find(|area| !area.vm_is_user())
+        self.vmas.values().rev().find(|area| !area.vm_is_user())
     }
 
     pub(super) fn clear(&mut self) {
@@ -256,7 +253,10 @@ impl VmaSet {
         }
         self.reserve_mmap_range(fault_vpn, old_start)
             .map_err(errno_to_memory_error)?;
-        let mut area = self.vmas.remove(&old_start).ok_or(MemoryError::BadAddress)?;
+        let mut area = self
+            .vmas
+            .remove(&old_start)
+            .ok_or(MemoryError::BadAddress)?;
         let old_pages = area_page_count(&area);
         let is_user = area.vm_is_user();
         if let Err(errno) = area.expand_down_to(VirtAddr::from(fault_vpn)) {
@@ -275,11 +275,7 @@ impl VmaSet {
         Ok(Some(new_start))
     }
 
-    pub(super) fn has_overlap(
-        &self,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
-    ) -> bool {
+    pub(super) fn has_overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
         if start_vpn >= end_vpn {
             return false;
         }
@@ -325,7 +321,7 @@ impl VmaSet {
             let start = area.vm_start();
             let end = area.vm_end();
             self.untrack_area(&area);
-            let result = area.unmap(page_table);
+            let result = area.unmap(page_table, VmaUnmapReason::RemoveArea);
             let _ = self.release_mmap_range(start, end);
             self.debug_assert_invariants();
             result
@@ -443,7 +439,7 @@ impl VmaSet {
             let released_start = target.vm_start();
             let released_end = target.vm_end();
             self.untrack_area(&target);
-            if target.unmap(page_table).is_err() {
+            if target.unmap(page_table, VmaUnmapReason::Range).is_err() {
                 warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
             }
             self.release_mmap_range(released_start, released_end)?;
@@ -559,11 +555,7 @@ impl VmaSet {
         Ok(())
     }
 
-    pub(super) fn covers_user_range(
-        &self,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
-    ) -> bool {
+    pub(super) fn covers_user_range(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
         let mut cursor = start_vpn;
         while cursor < end_vpn {
             let Some(area_start) = self.find_user_vma_key(cursor) else {
@@ -602,9 +594,7 @@ impl VmaSet {
                 return Err(ENOMEM);
             };
             let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
-            if prot.contains(MapPermission::W)
-                && area.flags.contains(MapFlags::MAP_SHARED)
-            {
+            if prot.contains(MapPermission::W) && area.flags.contains(MapFlags::MAP_SHARED) {
                 if area.write_sealed {
                     return Err(EPERM);
                 }
@@ -639,11 +629,7 @@ impl VmaSet {
         Ok(())
     }
 
-    pub(super) fn find_free_mmap_range(
-        &self,
-        len: usize,
-        align: usize,
-    ) -> Result<VirtAddr, isize> {
+    pub(super) fn find_free_mmap_range(&self, len: usize, align: usize) -> Result<VirtAddr, isize> {
         let align = align.max(PAGE_SIZE);
         for (hole_start, hole_end) in self.mmap_holes.iter() {
             let hole_start_addr = VirtAddr::from(*hole_start).0;
@@ -812,7 +798,9 @@ impl VmaSet {
             // Linux rejects at the failure point after the visible map count
             // can exceed max_map_count by one; internal non-user VMAs should
             // not reduce the user-visible limit.
-            .map_or(true, |len| len > crate::mm::max_map_count().saturating_add(1))
+            .map_or(true, |len| {
+                len > crate::mm::max_map_count().saturating_add(1)
+            })
         {
             Err(ENOMEM)
         } else {

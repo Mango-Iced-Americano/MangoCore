@@ -6,6 +6,7 @@ use crate::fs::vfs::IndexNode;
 use crate::hal::BLOCK_SZ;
 use crate::println;
 
+use super::direntry::{remove_dir_entry_record, DirEntryType};
 use super::ext4fs::Ext4FileSystem;
 use super::*;
 
@@ -55,12 +56,7 @@ unsafe impl Send for FakeBlockDevice {}
 unsafe impl Sync for FakeBlockDevice {}
 
 impl BlockDevice for FakeBlockDevice {
-    fn read_block(
-        &self,
-        block_id: usize,
-        buf: &mut [u8],
-    ) -> crate::drivers::block::BlockDeviceResult {
-        crate::drivers::block::validate_block_buffer_length(buf.len())?;
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         let data = self.data.lock();
         if block_id < data.len() {
             let copy_len = buf.len().min(BLOCK_SZ);
@@ -68,17 +64,14 @@ impl BlockDevice for FakeBlockDevice {
         } else {
             buf.fill(0);
         }
-        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) -> crate::drivers::block::BlockDeviceResult {
-        crate::drivers::block::validate_block_buffer_length(buf.len())?;
+    fn write_block(&self, block_id: usize, buf: &[u8]) {
         let mut data = self.data.lock();
         if block_id < data.len() {
             let copy_len = buf.len().min(BLOCK_SZ);
             data[block_id][..copy_len].copy_from_slice(&buf[..copy_len]);
         }
-        Ok(())
     }
 }
 
@@ -286,6 +279,171 @@ pub fn test_write_page_refuses_unmapped() -> Result<(), String> {
     Ok(())
 }
 
+/// T6: deleting the first record in a non-initial directory block must keep
+/// that record's rec_len. APK creates enough files to exercise this layout.
+pub fn test_remove_first_dir_record_preserves_framing() -> Result<(), String> {
+    const DATA_END: usize = 4084;
+    const ENTRY_LEN: u16 = 64;
+    let mut block = vec![0xA5u8; 4096];
+    block[0..4].copy_from_slice(&42u32.to_le_bytes());
+    block[4..6].copy_from_slice(&ENTRY_LEN.to_le_bytes());
+    block[6] = 8;
+    block[7] = DirEntryType::EXT4_DE_REG_FILE.bits();
+
+    remove_dir_entry_record(&mut block, DATA_END, 0, 0, ENTRY_LEN)
+        .map_err(|e| alloc::format!("remove first record: {e}"))?;
+
+    assert_eq_test!(
+        u16::from_le_bytes([block[4], block[5]]),
+        ENTRY_LEN,
+        "first record rec_len"
+    );
+    assert_test!(block[0..4].iter().all(|byte| *byte == 0), "inode cleared");
+    assert_test!(
+        block[6..ENTRY_LEN as usize].iter().all(|byte| *byte == 0),
+        "first record body cleared"
+    );
+    assert_eq_test!(block[ENTRY_LEN as usize], 0xA5, "next record untouched");
+    Ok(())
+}
+
+/// T7: deleting a non-first record still merges its span into the immediate
+/// predecessor and wipes the removed record.
+pub fn test_remove_nonfirst_dir_record_merges_predecessor() -> Result<(), String> {
+    const DATA_END: usize = 4084;
+    const PREV_LEN: u16 = 16;
+    const ENTRY_LEN: u16 = 32;
+    let mut block = vec![0xA5u8; 4096];
+    block[4..6].copy_from_slice(&PREV_LEN.to_le_bytes());
+    block[PREV_LEN as usize + 4..PREV_LEN as usize + 6].copy_from_slice(&ENTRY_LEN.to_le_bytes());
+
+    remove_dir_entry_record(&mut block, DATA_END, PREV_LEN as usize, 0, ENTRY_LEN)
+        .map_err(|e| alloc::format!("remove non-first record: {e}"))?;
+
+    assert_eq_test!(
+        u16::from_le_bytes([block[4], block[5]]),
+        PREV_LEN + ENTRY_LEN,
+        "merged predecessor rec_len"
+    );
+    assert_test!(
+        block[PREV_LEN as usize..(PREV_LEN + ENTRY_LEN) as usize]
+            .iter()
+            .all(|byte| *byte == 0),
+        "removed record wiped"
+    );
+    Ok(())
+}
+
+/// T8: ext4 directory file types are exact values, not independent flag bits,
+/// and a repeated symlink creation must fail without adding another dirent.
+pub fn test_symlink_type_and_duplicate_rejection() -> Result<(), String> {
+    let (_bd, fs) = create_test_env();
+    let root = super::layout::Ext4OSInode::new_vfs(
+        Arc::new(Mutex::new(fs.get_inode_ref(super::ROOT_INODE))),
+        fs,
+    );
+
+    root.symlink("t8_link", "/bin/busybox")
+        .map_err(|e| alloc::format!("first symlink: {e:?}"))?;
+    match root.symlink("t8_link", "/bin/busybox") {
+        Err(crate::utils::error::SyscallErr::EEXIST) => {}
+        Err(err) => return Err(alloc::format!("duplicate symlink errno: {err:?}")),
+        Ok(_) => return Err(String::from("duplicate symlink unexpectedly succeeded")),
+    }
+
+    let entries = root
+        .list_dirents()
+        .map_err(|e| alloc::format!("list_dirents: {e:?}"))?;
+    let links: Vec<_> = entries
+        .iter()
+        .filter(|(name, _, _)| name == "t8_link")
+        .collect();
+    assert_eq_test!(links.len(), 1, "single symlink dirent");
+    assert_eq_test!(
+        links[0].2,
+        crate::fs::vfs::FileType::SymLink,
+        "symlink dirent type"
+    );
+    Ok(())
+}
+
+/// T9: rmdir removes both directory links, restores the parent's link count,
+/// and defers inode reclamation only while a live VFS object still exists.
+pub fn test_rmdir_link_counts_and_reclaim() -> Result<(), String> {
+    let (_bd, fs) = create_test_env();
+    let root = super::layout::Ext4OSInode::new_vfs(
+        Arc::new(Mutex::new(fs.get_inode_ref(super::ROOT_INODE))),
+        fs.clone(),
+    );
+    let root_links_before = root
+        .metadata()
+        .map_err(|e| alloc::format!("root metadata before mkdir: {e:?}"))?
+        .nlinks;
+    let free_inodes_before = fs.get_superblock().free_inodes_count();
+
+    let child = root
+        .mkdir("t9_dir", crate::fs::vfs::InodeMode::S_IRWXUGO)
+        .map_err(|e| alloc::format!("mkdir: {e:?}"))?;
+    assert_eq_test!(
+        root.metadata()
+            .map_err(|e| alloc::format!("root metadata after mkdir: {e:?}"))?
+            .nlinks,
+        root_links_before + 1,
+        "parent link count after mkdir"
+    );
+
+    root.rmdir("t9_dir")
+        .map_err(|e| alloc::format!("rmdir: {e:?}"))?;
+    assert_eq_test!(
+        child
+            .metadata()
+            .map_err(|e| alloc::format!("unlinked child metadata: {e:?}"))?
+            .nlinks,
+        0,
+        "removed directory link count"
+    );
+    assert_eq_test!(
+        root.metadata()
+            .map_err(|e| alloc::format!("root metadata after rmdir: {e:?}"))?
+            .nlinks,
+        root_links_before,
+        "parent link count after rmdir"
+    );
+    assert_eq_test!(
+        fs.get_superblock().free_inodes_count(),
+        free_inodes_before - 1,
+        "live directory object delays inode reclaim"
+    );
+
+    drop(child);
+    assert_eq_test!(
+        fs.get_superblock().free_inodes_count(),
+        free_inodes_before,
+        "directory inode reclaimed after final reference"
+    );
+    Ok(())
+}
+
+/// T10: a freed metadata block must not retain dirty directory contents that
+/// could later be flushed over a new file reusing the same physical block.
+pub fn test_freed_metadata_block_is_invalidated() -> Result<(), String> {
+    const BLOCK_SIZE: usize = 64;
+    const BLOCK_ID: usize = 23;
+    let cache = super::meta_cache::MetaBlockCache::new(4, BLOCK_SIZE);
+    cache.store_dirty_block(BLOCK_ID, &[0xA5; BLOCK_SIZE]);
+    cache.invalidate_range(BLOCK_ID, 1);
+
+    let data = cache.read_block(BLOCK_ID, |id, buf| {
+        assert_eq!(id, BLOCK_ID);
+        buf.fill(0x5A);
+    });
+    assert_test!(
+        data.iter().all(|byte| *byte == 0x5A),
+        "freed block reloaded from its new owner"
+    );
+    Ok(())
+}
+
 /// Helper to run tests
 type TestFn = fn() -> Result<(), String>;
 
@@ -297,6 +455,26 @@ const TESTS: &[(&str, TestFn)] = &[
     (
         "write_page_refuses_unmapped",
         test_write_page_refuses_unmapped,
+    ),
+    (
+        "remove_first_dir_record_preserves_framing",
+        test_remove_first_dir_record_preserves_framing,
+    ),
+    (
+        "remove_nonfirst_dir_record_merges_predecessor",
+        test_remove_nonfirst_dir_record_merges_predecessor,
+    ),
+    (
+        "symlink_type_and_duplicate_rejection",
+        test_symlink_type_and_duplicate_rejection,
+    ),
+    (
+        "rmdir_link_counts_and_reclaim",
+        test_rmdir_link_counts_and_reclaim,
+    ),
+    (
+        "freed_metadata_block_is_invalidated",
+        test_freed_metadata_block_is_invalidated,
     ),
 ];
 
