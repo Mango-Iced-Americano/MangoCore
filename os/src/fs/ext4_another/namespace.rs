@@ -34,8 +34,35 @@ macro_rules! writable_namespace_inode_mutations {
                         .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
                 }
                 crate::fs::vfs::FileType::Dir => self.mkdir(name, mode),
+                crate::fs::vfs::FileType::SymLink => self.symlink(name, ""),
                 _ => Err(crate::utils::error::SyscallErr::EINVAL),
             }
+        }
+
+        fn symlink(
+            &self,
+            name: &str,
+            target: &str,
+        ) -> Result<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>, crate::utils::error::SyscallErr> {
+            let fs = self.fs_arc()?;
+            if self.file_type != crate::fs::vfs::FileType::Dir {
+                return Err(crate::utils::error::SyscallErr::ENOTDIR);
+            }
+            if name.is_empty() || name.len() > 255 || name.contains('/') {
+                return Err(crate::utils::error::SyscallErr::EINVAL);
+            }
+            let child = fs
+                .inner()
+                .symlink_with_owner_and_attr(
+                    u32::try_from(self.key.inode_id())
+                        .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?,
+                    name,
+                    target.as_bytes(),
+                    another_ext4::InodeOwner { uid: 0, gid: 0 },
+                )
+                .map_err(|error| super::errno::from_another(error.code()))?;
+            super::inode::Ext4Inode::new(fs, child.ino)
+                .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
 
         fn mkdir(

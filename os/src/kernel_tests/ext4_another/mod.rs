@@ -19,6 +19,8 @@ mod recording_device;
 #[cfg(feature = "ext4_another_backend")]
 mod sync;
 #[cfg(feature = "ext4_another_backend")]
+mod symlink;
+#[cfg(feature = "ext4_another_backend")]
 mod writeback_observer;
 
 /// Returns all another_ext4 bridge tests.
@@ -73,6 +75,14 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
             KernelTest::new(
                 "ext4_another::root_inode_is_canonical_and_does_not_retain_filesystem",
                 ownership::test_root_inode_is_canonical_and_does_not_retain_filesystem,
+            ),
+            KernelTest::new(
+                "ext4_another::short_symlink_persists_across_clean_remount",
+                symlink::test_short_symlink_persists_across_clean_remount,
+            ),
+            KernelTest::new(
+                "ext4_another::long_symlink_persists_across_clean_remount",
+                symlink::test_long_symlink_persists_across_clean_remount,
             ),
         ]
     }
