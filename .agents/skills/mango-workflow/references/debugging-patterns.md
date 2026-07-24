@@ -425,3 +425,12 @@
 - **修复**: 将 offset 推进推迟到写入成功后执行。读取阶段仅使用 offset 定位，不修改它；写入阶段成功后 `*off += wrote`（其中 `wrote ≤ n`），确保 offset 精确反映已确认写入目标的字节数。
 - **教训**: 任何跨越两个独立 I/O 对象的 syscall（splice、sendfile、copy_file_range）都必须遵循"状态推进在输出确认之后"的原则。对于文件源的显式 offset 参数，推进发生在写入成功之后而非读取成功之后。管道源是破坏性读取（无可回滚机制），需通过容量探测或最小化读取窗口来限制损失。
 - **相关文件**: `os/src/syscall/fs/sys_splice.rs`
+
+## 启动文件系统
+
+### initramfs 占位 `.gitkeep` 阻止目录替换为 sdcard 符号链接
+
+- **根因**: CPIO 中的 `/musl`、`/glibc` 虽然没有运行时库或测试脚本，但保留了 `.gitkeep`，使 `rmdir()` 失败；仅以 `test -e` 判断也会把空目录误当成已正确配置，最终 lmbench 仍在 initramfs 目录找脚本。
+- **修复**: 确认 `/sdcard/{musl,glibc}` 存在后，先删除 initramfs 目录的 `.gitkeep`，再 `rmdir` 并创建到 sdcard 的绝对符号链接。
+- **教训**: 需要将 CPIO 占位目录替换为挂载盘路径时，先检查打包后的 CPIO 条目，而不是只检查源码树目录是否“空”。
+- **相关文件**: `user/src/bin/test_runner/bootstrap/layout.rs`, `scripts/build_initramfs.sh`

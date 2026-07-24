@@ -1,0 +1,4 @@
+docker exec pxy-mangocore-os-dev-1 bash -o pipefail -c "cd /app && make build ARCH=rv64 PROFILE=normal 2>&1 | tee docs/Work_Log/evidence/2026-07-25/sdcard-bootstrap-rv64-build.log | tail -3"
+exit_status=0
+docker exec pxy-mangocore-os-dev-1 bash -c "cd /app && DISK_RV=/app/empty-disk.img timeout 30 qemu-system-riscv64 ..."
+exit_status=124 (expected quick-boot timeout)

@@ -1,14 +1,14 @@
 extern crate alloc;
 use alloc::string::String;
-use core::sync::atomic::Ordering;
 use user_lib::{exec, exit, fork, get_time, kill, sleep, waitpid, waitpid_wnohang, SIGKILL};
 
 pub fn run_bash_cmd(command: &str, environ: &[*const u8]) -> i32 { run_bash_cmd_timeout(command, environ, 0) }
 pub fn run_bash_cmd_timeout(command: &str, environ: &[*const u8], timeout_secs: u64) -> i32 {
     let pid = fork();
     if pid == 0 {
-        let command = String::from(command); let shell = if crate::runner::HAS_BIN_BASH.load(Ordering::Relaxed) { "/bin/bash\0" } else { "/bash\0" };
-        exec(shell, &[shell.as_ptr(), "-c\0".as_ptr(), command.as_ptr(), core::ptr::null()], environ); exit(127);
+        let command = String::from(command);
+        let shell = "/busybox\0";
+        exec(shell, &[shell.as_ptr(), "sh\0".as_ptr(), "-c\0".as_ptr(), command.as_ptr(), core::ptr::null()], environ); exit(127);
     }
     if pid < 0 { return -1; }
     let mut status = 0; let start = get_time() as u64;
