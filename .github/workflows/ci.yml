@@ -259,6 +259,7 @@ jobs:
             os-dev bash -lc '
             set -euo pipefail
             cd /app
+            mkdir -p fs-img-dir
             for img in sdcard-rv.img.xz sdcard-la.img.xz; do
               if [ ! -s fs-img-dir/$img ] || ! xz -t fs-img-dir/$img; then
                 rm -f fs-img-dir/$img
