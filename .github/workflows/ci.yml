@@ -63,7 +63,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "board_rvqemu block_virt" -- -W warnings
+              cd /app && cargo clippy --lib -p mango-kernel-core --target riscv64gc-unknown-none-elf -- -W warnings
             '
       - name: Clippy la64
         run: |
@@ -71,7 +71,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "board_laqemu block_virt_pci" -- -W warnings
+              cd /app && cargo clippy --lib -p mango-kernel-core --target loongarch64-unknown-linux-gnu -- -W warnings
             '
       - name: Docker compose down
         if: always()
@@ -92,28 +92,21 @@ jobs:
           submodules: recursive
       - name: Docker compose up
         run: docker compose up -d
-      - name: Create dummy initramfs
-        run: |
-          docker compose exec -T os-dev bash -lc '
-            echo dummy | cpio -o -H newc > /tmp/dummy.cpio 2>/dev/null || touch /tmp/dummy.cpio
-          '
       - name: Cargo test rv64
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
-            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
             os-dev bash -lc '
-              cd /app/os && cargo test --features "board_rvqemu block_virt"
+              cd /app && cargo test --lib -p mango-kernel-core
             '
       - name: Cargo test la64
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
-            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
             os-dev bash -lc '
-              cd /app/os && cargo test --features "board_laqemu block_virt_pci"
+              cd /app && cargo test --lib -p mango-kernel-core
             '
       - name: Docker compose down
         if: always()
@@ -218,7 +211,10 @@ jobs:
         run: docker compose up -d
       - name: Ensure test images are available
         run: |
-          docker compose exec -T os-dev bash -lc '
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
             set -euo pipefail
             for img in sdcard-rv.img.xz sdcard-la.img.xz; do
               if [ ! -s fs-img-dir/$img ] || ! xz -t fs-img-dir/$img; then
@@ -253,14 +249,20 @@ jobs:
             '
       - name: Decompress test images
         run: |
-          docker compose exec -T os-dev bash -lc '
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
             set -euxo pipefail
             xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
             xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
           '
       - name: Inject test configuration into disk images
         run: |
-          docker compose exec -T os-dev bash -lc '
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
             set -euxo pipefail
             make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf
             make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf
@@ -274,7 +276,7 @@ jobs:
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
               set -euxo pipefail
-              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk comp
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp
             '
       - name: Run competition QEMU la64
         run: |
@@ -285,7 +287,7 @@ jobs:
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
               set -euxo pipefail
-              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk comp
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp
             '
       - name: Docker compose down
         if: always()
