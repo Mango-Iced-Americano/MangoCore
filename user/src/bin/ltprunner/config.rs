@@ -111,7 +111,7 @@ pub fn load_conf(path: &str, libc: &str) -> LtpConfig {
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
-        println!("[ltprunner] cannot open conf {}, using defaults", path);
+        println!("[ltprunner] cannot open conf {} (errno={}), using defaults", path, -fd);
         return cfg;
     }
 

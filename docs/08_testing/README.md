@@ -9,6 +9,10 @@ tags: [testing, ktest, cargo-test, LTP, regression, tap]
 
 # 测试体系
 
+## CI 评分门禁
+
+`develop` 和 `main` 共用 [统一 CI 与 L5 评分](ci-scoring.md)：Docker Compose 中串行执行 RV64/LA64 QEMU，归档原始日志，并按 11 个 musl/glibc 组输出结构化评分 JSON。
+
 ## 概述
 
 MangoCore 采用五层自底向上的测试体系，从纯逻辑单元测试到内核自检、再到用户态回归测试和官方集成测试，建立完整的 bug 扫描工具链。目标是把问题定位逐步下沉——能在 `cargo test` 解决的不拖到 QEMU，能在 L3 解决的不拖到 LTP。
