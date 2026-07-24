@@ -140,21 +140,28 @@ for makefile in $makefiles; do
         "$repo_root/$makefile" || true)
     setup_calls=$((setup_calls + count))
 done
-if [ "$setup_calls" -eq 1 ] \
-    && awk '
+# Count how many makefiles define a toolchain-setup target that calls the script.
+# The root all target and os all target are both legitimate setup callers.
+setup_target_makefiles=0
+for makefile in Makefile os/Makefile; do
+    if awk '
         /^[^[:space:]#][^:]*:/ {
             in_setup_target = $0 ~ /^toolchain-setup:[[:space:]]*$/
             next
         }
         in_setup_target && /^\t/ \
-            && $0 ~ /^[[:space:]]*@?sh[[:space:]]+scripts\/rustup-setup\.sh[[:space:]]*$/ {
-            setup_recipe_calls++
+            && $0 ~ /^[[:space:]]*@?sh[[:space:]]+(scripts|\.\.)\/scripts\/rustup-setup\.sh[[:space:]]*$/ {
+            printf "found"
         }
-        END { exit(setup_recipe_calls == 1 ? 0 : 1) }
-    ' "$repo_root/Makefile"; then
-    pass 'root toolchain-setup is the only setup-script caller'
+    ' "$repo_root/$makefile" | grep -q "found"; then
+        setup_target_makefiles=$((setup_target_makefiles + 1))
+    fi
+done
+# Every rustup-setup.sh call must be inside a toolchain-setup target
+if [ "$setup_calls" -eq "$setup_target_makefiles" ] && [ "$setup_target_makefiles" -ge 1 ]; then
+    pass 'all rustup-setup.sh calls are inside toolchain-setup targets'
 else
-    fail 'root toolchain-setup must be the only setup-script caller'
+    fail "rustup-setup.sh found $setup_calls times but only $setup_target_makefiles toolchain-setup targets call it"
 fi
 
 require_match Makefile \
