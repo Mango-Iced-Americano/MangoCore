@@ -109,9 +109,12 @@ pub fn load_conf(path: &str, libc: &str) -> LtpConfig {
     let mut conf_arch_libc_exclude = Vec::new();
     let mut ltp_exclude_reset = false;
 
-    let fd = open(path, OpenFlags::RDONLY);
+    // sys_open uses path.as_ptr() without NUL terminator; &str from argv
+    // parsing lacks the trailing \0 that hardcoded literals provide.
+    // Format with explicit \0 so the kernel sees a proper C string.
+    let path_nul = alloc::format!("{}\0", path);
+    let fd = open(&path_nul, OpenFlags::RDONLY);
     if fd < 0 {
-        println!("[ltprunner] load_conf path='{}' len={} bytes={:?}", path, path.len(), path.as_bytes());
         println!("[ltprunner] cannot open conf {} (errno={}), using defaults", path, -fd);
         return cfg;
     }
