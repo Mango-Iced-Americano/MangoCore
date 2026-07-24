@@ -244,6 +244,14 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Oracle 分别给出 generation/CAS 提交协议、回退默认逐页读路径和延后零填充 flush 的最小修复建议；实现后保留直接范围零填充的覆盖写与最终 sync 持久化屏障。
 - Verification: Docker 串行 RV64/LA64 kernel build 通过。
 
+### Case 11: another_ext4 VFS 符号链接创建桥接
+
+- Evidence: `docs/Work_Log/2026-07-24.md`、`docs/Work_Log/evidence/2026-07-24/symlink-ktest-qemu-output.log`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: VFS bridge 的 `create()` 仅支持普通文件和目录；APK 创建共享库 SONAME 符号链接时收到 `EINVAL`，导致 LTP 依赖库安装失败。
+- AI contribution: Oracle 指出 bridge 拒绝 `FileType::SymLink`，并确认依赖库提供原子初始化目标后再发布目录项的 `symlink_with_owner_and_attr()` API；实现将 VFS symlink 直接桥接到该 API，并注册已有的短/长目标 remount 回归测试。
+- Verification: Docker RV64/LA64 kernel build 均通过；RV64 another_ext4 KTest 14/14 通过，含两个 symlink persistence 测试。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -280,6 +288,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
 | 2026-07-20 | 未提交（工作树） | another_ext4 PageCache lifecycle / EOF ordering | Sisyphus 编排受控 RED→GREEN；Oracle 审核 callback 时序 | 修复脏页所有权与早写回观察陈旧 EOF |
 | 2026-07-23 | 未提交（工作树） | another_ext4 sync/read/direct-range | Oracle-identified generation race、批量读回归和中间 flush | 消除丢失的 size update，恢复逐页读，延后零填充 flush |
+| 2026-07-24 | `fe974c87` | another_ext4 symlink VFS bridge | Oracle root-cause analysis | APK library SONAME symlink creation and 14/14 KTest pass |
 
 ## 8. Work_Log 证据表
 
@@ -297,6 +306,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-20.md` | another_ext4 PageCache lifecycle / EOF ordering | 记录受控 ownership 与 early-writeback toggle、Oracle 审核及 RV64 3/3、双架构构建证据 |
 | `docs/Work_Log/2026-07-22.md` | ext4 A/B console framing gate | 记录 Oracle 审核 ANSI/CRLF normalization、私有 LA64 readiness evidence 与 parity 边界 |
 | `docs/Work_Log/2026-07-23.md` | another_ext4 generation / read / direct-range | 记录 Oracle 定位的 size 同步竞态、批量读性能回归与直接范围 flush 屏障 |
+| `docs/Work_Log/2026-07-24.md` | another_ext4 symlink VFS bridge | 记录 Oracle 定位的 VFS `SymLink` 缺口、双架构构建和 RV64 14/14 KTest 证据 |
 
 ## 9. 交互记录与留痕方式
 
