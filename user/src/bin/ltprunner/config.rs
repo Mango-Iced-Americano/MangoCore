@@ -111,6 +111,14 @@ pub fn load_conf(path: &str, libc: &str) -> LtpConfig {
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
+        // Diagnostic: try opening a few well-known paths to narrow down the issue
+        let diag_init = open("/init\0", OpenFlags::RDONLY);
+        let diag_sdcard = open("/sdcard\0", OpenFlags::RDONLY);
+        let diag_tmp = open("/tmp\0", OpenFlags::RDONLY);
+        println!("[ltprunner] open diagnostic: /init={} /sdcard={} /tmp={}", diag_init, diag_sdcard, diag_tmp);
+        if diag_init >= 0 { let _ = close(diag_init as usize); }
+        if diag_sdcard >= 0 { let _ = close(diag_sdcard as usize); }
+        if diag_tmp >= 0 { let _ = close(diag_tmp as usize); }
         // Fallback: try initramfs /os_test.conf when sdcard path fails
         if path != "/os_test.conf" {
             println!("[ltprunner] cannot open conf {} (errno={}), falling back to /os_test.conf", path, -fd);
