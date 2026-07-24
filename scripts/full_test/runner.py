@@ -62,11 +62,20 @@ def _run_to_file(command: tuple[str, ...], output: Path, timeout: int, *, cwd: P
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as stream:
         stream.write(f"# QEMU CMD: {' '.join(command)}\n".encode())
+        stream.flush()
         try:
-            completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=timeout, cwd=cwd, check=False)
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd) as proc:
+                assert proc.stdout is not None
+                for line in iter(proc.stdout.readline, b""):
+                    stream.write(line)
+                    stream.flush()
+                proc.wait(timeout=timeout)
+                returncode = proc.returncode
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             return ProcessResult(returncode=-1, timed_out=True, output=output)
-    return ProcessResult(returncode=completed.returncode, timed_out=False, output=output)
+    return ProcessResult(returncode=returncode, timed_out=False, output=output)
 
 
 def _has_terminal_marker(output: Path) -> bool:
