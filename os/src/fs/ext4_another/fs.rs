@@ -95,7 +95,6 @@ pub(crate) fn sync_all_instances() {
                 error
             );
         }
-        } else {
     }
 }
 
