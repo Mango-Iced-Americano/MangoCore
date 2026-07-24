@@ -2,7 +2,7 @@
 title: "统一 CI 与 L5 评分"
 category: testing
 status: stable
-last_update: 2026-07-24
+last_update: 2026-07-25
 code_paths:
   - ".github/workflows/ci.yml"
   - "scripts/score_test.py"
@@ -12,16 +12,41 @@ code_paths:
 
 # 统一 CI 与 L5 评分
 
-`.github/workflows/ci.yml` 是 `develop` 与 `main` 唯一的 CI 定义：两分支 push、目标为两分支的 PR 和手动 dispatch 都运行同一条路径。手动 dispatch 的 `qemu_timeout` 直接成为 `QEMU_TIMEOUT`；默认值为每个架构 7200 秒。
+`.github/workflows/ci.yml` 是 `develop` 与 `main` 唯一的 CI 定义：两分支 push、目标为两分支的 PR 和手动 dispatch 都运行同一条路径。手动 dispatch 的 `qemu_timeout` 直接成为 `QEMU_TIMEOUT`；默认值为 7200 秒。
 
 ## 执行顺序与失败处理
 
-1. 使用 `docker compose` 拉取 `os-dev`，下载并缓存官方双架构测试镜像。
-2. 在容器内串行运行 `make all MODE=release`（RV64 后 LA64），再分别将 CI 配置注入两个镜像。
-3. 在容器内执行 `make lint`，随后运行 `python3 scripts/run_full_test.py --serial`。full-test runner 为每个架构写入 `testresult/archive_*/<arch>/qemu.log`，并对超时、非零退出、致命内核签名和缺失终止标记 fail-closed。
-4. 即使 QEMU runner 失败，评分步骤仍会尝试处理两份原始日志；最终门禁要求 QEMU runner 与两个评分命令都成功。因此失败日志和 JSON 一定会作为 artifact 尽可能保留。
+CI 采用 5 层顺序流水线，每层在独立的 Docker 容器中运行，使用 `docker compose up -d` / `docker compose exec` / `docker compose down` 模式：
 
-产物 `ci-qemu-logs-and-scores` 包含完整 `testresult/`（原始 QEMU、build、judge 日志）以及 `testresult/scores/rv64.json`、`la64.json`。它也是失败排查的唯一输入，无需重跑 QEMU。
+| 层 | Job | 命令 | 超时 |
+|----|-----|------|------|
+| 0 | `toolchain-contracts` | 工具链验收合约（不变） | 5 min |
+| 1 | `clippy` | `cargo clippy --features "board_rvqemu block_virt" -- -D warnings` | 15 min |
+| 2 | `cargo-test` | `cargo test --features "board_rvqemu block_virt"` | 15 min |
+| 3 | `ktest` | `make -C os rv64-ktest`（内核自检，无磁盘） | 15 min |
+| 4 | `regression` | `make test ARCH=rv64 PROFILE=regression`（initramfs 仅） | 15 min |
+| 5 | `comp` | `timeout 7200s make -f make/rv64.mk comp`（11 组，mask=0xFDF） | 350 min |
+
+每层通过 `needs:` 保证顺序：前一层的测试全部通过后，下一层才启动。仅构建 RV64 架构（LA64 不在 CI 中运行，以加速反馈周期）。
+
+### 各层详情
+
+**Layer 1 (clippy)：** 运行 cargo clippy 的静态分析，`-D warnings` 将任何 warning 提升为 error。无 QEMU 依赖，纯 host-side 检查。
+
+**Layer 2 (cargo test)：** 运行 `mango-kernel-core` 的纯逻辑单元测试（L1 测试集），在 host 上执行，无需 QEMU。
+
+**Layer 3 (ktest)：** 构建内核并启动 QEMU 执行内核自检（L3 测试集），使用 initramfs 而非磁盘，测试完成后 shutdown。输出 TAP 格式测试结果。
+
+**Layer 4 (regression)：** 构建内核（regression profile），启动 QEMU 执行用户态回归测试（L4 测试集），使用 initramfs 而非磁盘。检测串口输出中的 `[L4 REGRESSION RESULT: PASS]` 字样。
+
+**Layer 5 (comp)：** 完整的竞赛场景——
+1. 下载/还原缓存官方测试镜像 `sdcard-rv.img`
+2. 注入 `os_test.conf`（mask=0xFDF，排除 unixbench/cpython）
+3. 构建内核及用户程序
+4. 运行 `make -f make/rv64.mk comp`，QEMU 完成 11 组测试后 shutdown
+5. comp 目标直接根据测试结果返回退出码（CI 由此判断通过/失败）
+
+> ⚠️ 不同于旧版 CI，comp 层不再运行 `python3 scripts/run_full_test.py --serial`，也不生成评分 JSON 或上传 artifact。测试通过与否完全由 `make comp` 的退出码决定。
 
 ## 选择的测试组与掩码
 
