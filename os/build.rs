@@ -52,8 +52,24 @@ fn generate_initramfs_assembly() {
         return;
     }
 
-    let cpio = required_path("MANGO_INITRAMFS_CPIO");
-    let user_output_root = required_path("MANGO_USER_OUTPUT_ROOT");
+    // When running outside the Make build (e.g. cargo clippy, cargo test),
+    // the initramfs env vars are not set.  Use an empty cpio so the build
+    // succeeds — static analysis doesn't need a real initramfs.
+    let use_dummy = env::var_os("MANGO_INITRAMFS_CPIO").is_none();
+    let cpio: PathBuf = if use_dummy {
+        let dummy = required_path("OUT_DIR").join("__dummy_initramfs.cpio");
+        if !dummy.is_file() {
+            std::fs::write(&dummy, "dummy").unwrap();
+        }
+        dummy
+    } else {
+        required_path("MANGO_INITRAMFS_CPIO")
+    };
+    let user_output_root: PathBuf = if use_dummy {
+        required_path("OUT_DIR")
+    } else {
+        required_path("MANGO_USER_OUTPUT_ROOT")
+    };
     if !user_output_root.is_dir() {
         panic!(
             "declared user output root does not exist: {}",

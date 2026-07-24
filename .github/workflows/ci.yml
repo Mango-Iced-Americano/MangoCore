@@ -57,28 +57,21 @@ jobs:
           submodules: recursive
       - name: Docker compose up
         run: docker compose up -d
-      - name: Create dummy initramfs (clippy needs MANGO_INITRAMFS_CPIO)
-        run: |
-          docker compose exec -T os-dev bash -lc '
-            echo dummy | cpio -o -H newc > /tmp/dummy.cpio 2>/dev/null || touch /tmp/dummy.cpio
-          '
       - name: Clippy rv64
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
-            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "board_rvqemu block_virt" -- -D warnings
+              cd /app/os && cargo clippy --features "board_rvqemu block_virt" -- -W warnings
             '
       - name: Clippy la64
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
-            -e MANGO_INITRAMFS_CPIO=/tmp/dummy.cpio \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "board_laqemu block_virt_pci" -- -D warnings
+              cd /app/os && cargo clippy --features "board_laqemu block_virt_pci" -- -W warnings
             '
       - name: Docker compose down
         if: always()
@@ -91,7 +84,8 @@ jobs:
     name: 2. Cargo test (rv64 → la64)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: [clippy]
+    needs: [toolchain-contracts]
+    if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,7 +126,7 @@ jobs:
     name: 3. Kernel self-tests / ktest (rv64 → la64)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: [cargo-test]
+    needs: [toolchain-contracts]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -166,7 +160,7 @@ jobs:
     name: 4. Regression QEMU test (rv64 → la64)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: [ktest]
+    needs: [toolchain-contracts]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -200,7 +194,7 @@ jobs:
     name: 5. Competition QEMU mask=0xFDF (rv64 → la64)
     runs-on: ubuntu-24.04
     timeout-minutes: 350
-    needs: [regression]
+    needs: [toolchain-contracts]
     steps:
       - uses: actions/checkout@v4
         with:
