@@ -79,7 +79,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "board_laqemu block_virt_pci" -- -W warnings
+              cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "board_laqemu block_virt_pci" -- -W warnings
             '
       - name: Docker compose down
         if: always()
@@ -114,7 +114,8 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo test --lib -p mango-kernel-core --target riscv64gc-unknown-none-elf
+              # The bare-metal target has no libtest runner; unit tests execute on the host.
+              cd /app/os && CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu cargo test --lib -p mango-kernel-core
             '
       - name: Cargo test la64
         run: |
@@ -122,7 +123,8 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo test --lib -p mango-kernel-core --target loongarch64-unknown-linux-gnu
+              # The bare-metal target has no libtest runner; unit tests execute on the host.
+              cd /app/os && CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu cargo test --lib -p mango-kernel-core
             '
       - name: Docker compose down
         if: always()
@@ -256,6 +258,7 @@ jobs:
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
             set -euo pipefail
+            cd /app
             for img in sdcard-rv.img.xz sdcard-la.img.xz; do
               if [ ! -s fs-img-dir/$img ] || ! xz -t fs-img-dir/$img; then
                 rm -f fs-img-dir/$img
