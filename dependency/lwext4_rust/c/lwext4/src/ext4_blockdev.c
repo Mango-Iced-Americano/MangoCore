@@ -466,9 +466,12 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 			return r;
 
 	}
-	/* Draining the software cache is not a durability boundary when the
-	 * physical device has a volatile write cache. */
-	return ext4_block_flush_device(bdev);
+	/* Software cache drain only — journal, fsync and umount paths already
+	 * issue their own ext4_block_flush_device() at the correct ordering
+	 * points.  Adding a device flush here causes every page-cache writeback
+	 * batch to stall on synchronous VirtIO FLUSH, which makes iozone and
+	 * other heavy writers time out (>480 s for a 4 MiB run). */
+	return EOK;
 }
 
 int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)
