@@ -26,6 +26,9 @@ const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 const VIRTIO0: usize = 0x10001000;
 const VIRTIO_MMIO_BASE: usize = 0x10001000;
 const VIRTIO_MMIO_STRIDE: usize = 0x1000;
+/// QEMU virt exposes these MMIO slots in the kernel page table. Devices may
+/// occupy any of them, so only probe the mapped slots rather than a raw range.
+const VIRTIO_MMIO_PROBE_SLOTS: &[usize] = &[0, 1, 2, 7];
 
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
 
@@ -157,24 +160,36 @@ impl VirtIOBlock {
 
 pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
     use alloc::sync::Arc;
-    let d0 =
-        VirtIOBlock::try_new(VIRTIO_MMIO_BASE).map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
-    if d0.is_some() {
-        virtio_dma_pool::dma_pool_init_once();
+    let mut devices = [None, None];
+    let mut device_index = 0;
+
+    for slot in VIRTIO_MMIO_PROBE_SLOTS {
+        let base_addr = VIRTIO_MMIO_BASE + slot * VIRTIO_MMIO_STRIDE;
+        let Some(device) = VirtIOBlock::try_new(base_addr) else {
+            continue;
+        };
+
+        if device_index == 0 {
+            virtio_dma_pool::dma_pool_init_once();
+        }
         println!(
-            "[kernel] block device 0: official fs (MMIO {:#x})",
-            VIRTIO_MMIO_BASE
+            "[kernel] block device {}: {} (MMIO {:#x})",
+            device_index,
+            if device_index == 0 {
+                "official fs"
+            } else {
+                "tools disk"
+            },
+            base_addr
         );
+        devices[device_index] = Some(Arc::new(device) as Arc<dyn super::BlockDevice>);
+        device_index += 1;
+        if device_index == devices.len() {
+            break;
+        }
     }
-    let d1 = VirtIOBlock::try_new(VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE)
-        .map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
-    if d1.is_some() {
-        println!(
-            "[kernel] block device 1: tools disk (MMIO {:#x})",
-            VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE
-        );
-    }
-    [d0, d1]
+
+    devices
 }
 
 pub struct VirtioHal;
