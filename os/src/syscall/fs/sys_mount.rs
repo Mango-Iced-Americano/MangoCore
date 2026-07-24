@@ -563,23 +563,15 @@ pub fn sys_mount(
                     // 4. Adapt native I/O granularity and enforce MS_RDONLY
                     // at the physical block-device boundary before opening
                     // the selected backend.
-                    let fs_device = crate::fs::adapt_filesystem_device(
-                        blk_dev.clone(),
-                        detected,
-                        mountflags.contains(MountFlags::MS_RDONLY),
-                    );
                     let new_fs: Arc<dyn vfs::FileSystem> = match detected.fs_type {
                         crate::fs::FS_Type::Ext4 => {
-                            match crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs_with_options(
-                                fs_device,
-                                mountflags.contains(MountFlags::MS_RDONLY),
-                            ) {
+                            match crate::fs::ext4_backend::open(blk_dev.clone()) {
                                 Ok(fs) => fs,
                                 Err(e) => return -(e as isize),
                             }
                         }
                         crate::fs::FS_Type::Fat32 => {
-                            crate::fs::fat32::EasyFileSystem::open(fs_device)
+                            crate::fs::fat32::EasyFileSystem::open(blk_dev.clone())
                         }
                         _ => return -(SyscallErr::EINVAL as isize),
                     };

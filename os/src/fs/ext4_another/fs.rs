@@ -169,18 +169,11 @@ impl FileSystem for Ext4FileSystem {
         }
     }
 
-    fn on_umount(&self) {
-        if let Err(error) = self.sync_all() {
-            log::error!("another_ext4: writeback before unmount failed: {:?}", error);
-            return;
-        }
-        if let Err(error) = self
-            .inner()
+    fn on_umount(&self) -> Result<(), SyscallErr> {
+        self.sync_all()?;
+        self.inner()
             .shutdown_writable()
             .map_err(|failure| from_another(failure.code()))
-        {
-            log::error!("another_ext4: clean shutdown failed: {:?}", error);
-        }
     }
 
     fn as_any_ref(&self) -> &dyn Any {

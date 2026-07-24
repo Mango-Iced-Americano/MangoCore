@@ -40,7 +40,7 @@ pub use self::dev::pipe::*;
 pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
-pub use self::filesystem::{detect_fs, FS_Type};
+pub use self::filesystem::{detect_fs, detect_fs_layout, FS_Type};
 pub use crate::drivers::block::BlockDevice;
 
 use self::vfs::FileSystem as _;

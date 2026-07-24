@@ -124,7 +124,7 @@ pub fn rust_main() -> ! {
 
             // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
             // PID1 owns the later x0/x1 mount policy.
-            fs::register_boot_block_devices();
+            fs::mount_boot_block_devices();
         } else {
             crate::println!("[kernel] Regression mode — skipping net/block init");
         }

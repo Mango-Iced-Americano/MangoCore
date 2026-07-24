@@ -157,7 +157,7 @@ pub fn pci_init() -> Option<AHCI<Provider>> {
                     return None;
                 }
                 unsafe { enable(dev.loc) };
-                if let Some(x) = AHCI::new(pa as usize, len as usize) {
+                if let Ok(x) = AHCI::new(pa as usize, len as usize) {
                     return Some(x);
                 }
             }
