@@ -150,7 +150,7 @@ for makefile in Makefile os/Makefile; do
             next
         }
         in_setup_target && /^\t/ \
-            && $0 ~ /^[[:space:]]*@?sh[[:space:]]+(scripts|\.\.)\/scripts\/rustup-setup\.sh[[:space:]]*$/ {
+            && $0 ~ /^[[:space:]]*@?sh[[:space:]]+(scripts|\.\.\/scripts)\/rustup-setup\.sh[[:space:]]*$/ {
             printf "found"
         }
     ' "$repo_root/$makefile" | grep -q "found"; then
