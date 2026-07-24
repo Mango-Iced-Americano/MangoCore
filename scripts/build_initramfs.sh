@@ -140,7 +140,15 @@ else
     fi
 fi
 
-# 6. 生成 newc cpio 归档
+# 6. Copy os_test.conf into initramfs (test_runner reads LTP config from /)
+if [ -f "$REPO_ROOT/os_test.conf" ]; then
+    cp "$REPO_ROOT/os_test.conf" "$STAGE/os_test.conf"
+    echo "[initramfs] installed os_test.conf"
+else
+    echo "[initramfs] WARNING: os_test.conf not found at repo root"
+fi
+
+# 7. 生成 newc cpio 归档
 mkdir -p "$(dirname "$OUT_ABS")"
 (
     cd "$STAGE"
