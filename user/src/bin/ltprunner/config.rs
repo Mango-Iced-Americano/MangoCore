@@ -111,6 +111,11 @@ pub fn load_conf(path: &str, libc: &str) -> LtpConfig {
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
+        // Fallback: try initramfs /os_test.conf when sdcard path fails
+        if path != "/os_test.conf" {
+            println!("[ltprunner] cannot open conf {} (errno={}), falling back to /os_test.conf", path, -fd);
+            return load_conf("/os_test.conf", libc);
+        }
         println!("[ltprunner] cannot open conf {} (errno={}), using defaults", path, -fd);
         return cfg;
     }
