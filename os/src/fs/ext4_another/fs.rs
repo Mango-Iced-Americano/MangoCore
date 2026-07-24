@@ -95,6 +95,7 @@ pub(crate) fn sync_all_instances() {
                 error
             );
         }
+        } else {
     }
 }
 
@@ -115,6 +116,8 @@ pub(crate) fn shutdown_all_instances() {
                 fs.fs_id(),
                 error
             );
+            // Do NOT clear RECOVER if sync failed — data may be incomplete
+            continue;
         }
         if let Err(error) = fs.inner().shutdown_writable() {
             log::error!(
