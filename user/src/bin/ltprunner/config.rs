@@ -111,22 +111,7 @@ pub fn load_conf(path: &str, libc: &str) -> LtpConfig {
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
-        // Diagnostic: check if other files on sdcard are accessible
-        let diag_init = open("/init\0", OpenFlags::RDONLY);
-        let diag_conf_initramfs = open("/os_test.conf\0", OpenFlags::RDONLY);
-        let diag_sdcard = open("/sdcard\0", OpenFlags::RDONLY);
-        let diag_sdcard_conf = open("/sdcard/os_test.conf\0", OpenFlags::RDONLY);
-        println!("[ltprunner] diag: /init={} /os_test.conf={} /sdcard={} /sdcard/os_test.conf={}",
-            diag_init, diag_conf_initramfs, diag_sdcard, diag_sdcard_conf);
-        if diag_init >= 0 { let _ = close(diag_init as usize); }
-        if diag_conf_initramfs >= 0 { let _ = close(diag_conf_initramfs as usize); }
-        if diag_sdcard >= 0 { let _ = close(diag_sdcard as usize); }
-        if diag_sdcard_conf >= 0 { let _ = close(diag_sdcard_conf as usize); }
-        // Fallback: try initramfs /os_test.conf when sdcard path fails
-        if path != "/os_test.conf" {
-            println!("[ltprunner] cannot open conf {} (errno={}), falling back to /os_test.conf", path, -fd);
-            return load_conf("/os_test.conf", libc);
-        }
+        println!("[ltprunner] load_conf path='{}' len={} bytes={:?}", path, path.len(), path.as_bytes());
         println!("[ltprunner] cannot open conf {} (errno={}), using defaults", path, -fd);
         return cfg;
     }
