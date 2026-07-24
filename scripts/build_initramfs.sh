@@ -113,9 +113,9 @@ else
     RUNNER_SRC="$INIT_DIR/test_runner"
     LTPRUNNER_SRC="$INIT_DIR/ltprunner"
     if [ -f "$INITD_SRC" ] && [ -f "$RUNNER_SRC" ]; then
-        mkdir -p "$STAGE/sbin" "$STAGE/usr/libexec/mangocore"
+        mkdir -p "$STAGE/sbin"
         install -m 0755 "$INITD_SRC" "$STAGE/sbin/init"
-        install -m 0755 "$RUNNER_SRC" "$STAGE/usr/libexec/mangocore/test-runner"
+        install -m 0755 "$RUNNER_SRC" "$STAGE/test-runner"
         if [ -f "$LTPRUNNER_SRC" ]; then
             install -m 0755 "$LTPRUNNER_SRC" "$STAGE/ltprunner"
             echo "[initramfs] installed /ltprunner from $LTPRUNNER_SRC"

@@ -11,7 +11,7 @@ use user_lib::{
 };
 
 const PID1: isize = 1;
-const RUNNER: &str = "/usr/libexec/mangocore/test-runner\0";
+const RUNNER: &str = "/test-runner\0";
 const RESCUE_SHELL: &str = "/rescue/sh\0";
 const SIGACTION_RESTART: usize = 0x10000000;
 const MS_BIND: usize = 4096;
@@ -66,14 +66,14 @@ fn prepare_pseudo_fs_framework() {
     ] {
         let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
     }
-    println!("[initd] pseudo-fs mount framework ready");
+    println!("[init] pseudo-fs mount framework ready");
 }
 
 fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
     let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
     if result < 0 {
         println!(
-            "[initd] mount {} at {} failed: {}",
+            "[init] mount {} at {} failed: {}",
             fstype.trim_end_matches('\0'),
             target.trim_end_matches('\0'),
             result
@@ -99,9 +99,9 @@ fn try_bind_mount(source: &str, target: &str) {
     let tgt = alloc::format!("{}\0", target);
     let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
     if ret == 0 {
-        println!("[initd] bind mount {} -> {}", source, target);
+        println!("[init] bind mount {} -> {}", source, target);
     } else {
-        println!("[initd] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+        println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
     }
 }
 
@@ -173,7 +173,7 @@ fn runner_environment(profile: &str) -> [*const u8; 8] {
 }
 
 fn rescue_forever() -> ! {
-    println!("[initd] entering rescue shell");
+    println!("[init] entering rescue shell");
     loop {
         let shell = fork();
         if shell == 0 {
@@ -222,10 +222,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
                 0,
             );
             if result < 0 {
-                println!("[initd] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs", result);
+                println!("[init] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs", result);
                 let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
             } else {
-                println!("[initd] /tmp is bind-mounted from ext4 /sdcard/tmp");
+                println!("[init] /tmp is bind-mounted from ext4 /sdcard/tmp");
             }
         } else {
             let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
@@ -240,11 +240,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             );
             if result < 0 {
                 println!(
-                    "[initd] bind-mount /tools/etc → /etc failed: {}, keeping initramfs /etc",
+                    "[init] bind-mount /tools/etc → /etc failed: {}, keeping initramfs /etc",
                     result
                 );
             } else {
-                println!("[initd] /etc is bind-mounted from tools disk");
+                println!("[init] /etc is bind-mounted from tools disk");
             }
         }
         // Bind-mount tools and sdcard subdirectories so writes persist.
@@ -255,7 +255,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     }
     let environ = runner_environment(profile);
     println!(
-        "[initd] PID1 profile={} runner={}",
+        "[init] PID1 profile={} runner={}",
         profile,
         RUNNER.trim_end_matches('\0')
     );
@@ -267,7 +267,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             exit(127);
         }
         if pid < 0 {
-            println!("[initd] MANGO_RUNNER_FAILURE: fork failed ret={}", pid);
+            println!("[init] MANGO_RUNNER_FAILURE: fork failed ret={}", pid);
             reap_orphans();
             shutdown();
             rescue_forever();
@@ -278,7 +278,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             let waited = waitpid_wnohang(pid, &mut status);
             if waited == pid {
                 println!(
-                    "[initd] MANGO_RUNNER_FAILURE: runner exited status={}",
+                    "[init] MANGO_RUNNER_FAILURE: runner exited status={}",
                     status
                 );
                 reap_orphans();
@@ -287,7 +287,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             }
             if waited < 0 {
                 println!(
-                    "[initd] MANGO_RUNNER_FAILURE: runner wait failed ret={}",
+                    "[init] MANGO_RUNNER_FAILURE: runner wait failed ret={}",
                     waited
                 );
                 reap_orphans();
