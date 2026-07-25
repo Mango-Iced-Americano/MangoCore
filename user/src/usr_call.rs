@@ -189,3 +189,8 @@ pub fn sock_shutdown(sockfd: usize, how: usize) -> isize {
 pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
     sys_getdents64(fd, buf)
 }
+
+pub fn chmod(path: &str, mode: u32) -> isize {
+    sys_fchmodat(crate::syscall::AT_FDCWD, path.as_ptr() as *const u8, mode)
+}
+

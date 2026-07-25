@@ -1,6 +1,6 @@
 use alloc::format;
 use user_lib::syscall::{sys_mkdirat, sys_mount};
-use user_lib::{mount, println};
+use user_lib::{chmod, mount, println};
 
 const AT_FDCWD: isize = -100;
 const MS_BIND: usize = 4096;
@@ -37,7 +37,7 @@ pub(super) fn mount_pseudo_filesystems() {
     if try_mount("none\0", "/dev\0", "devtmpfs\0") {
         // Ensure the devtmpfs cover directory exists before mounting its tmpfs child.
         let _ = sys_mkdirat(AT_FDCWD, "/dev/shm\0", 0o1777);
-        let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
+        let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");        let _ = chmod("/dev/shm\0", 0o1777);
     }
     let _ = try_mount("none\0", "/proc\0", "proc\0");
     let _ = try_mount("none\0", "/sys\0", "sysfs\0");
