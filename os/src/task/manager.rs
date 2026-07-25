@@ -2117,7 +2117,9 @@ pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
     crate::task::perf::record_ktimer_add();
     let timer_len = { KERNEL_TIMER_QUEUE.lock().len() };
     crate::task::perf::record_ktimer_len(timer_len);
-    if new_is_earliest {
+    if new_is_earliest && !crate::smp::local_timer_pending() {
+        // hard IRQ 已把 one-shot 静默时，安全点即将按完整队列重新编程；
+        // 此处只发布更早的软件 deadline，避免长 syscall 中反复触发到期 IRQ。
         reprogram_timer_irqoff();
     }
     local_irq_restore(flags);
@@ -2148,15 +2150,32 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
     );
 }
 
-/// 统一 timer interrupt 处理入口。
+/// timer hard-IRQ fast path。
 ///
 /// # Semantics
 ///
-/// 先弹出过期 kernel timers 并在锁外执行 callback，再处理 legacy timeout queue
-/// 和 timerfd，最后推进调度 tick 并按需让出 CPU。
+/// 只清除/静默本 CPU 的 one-shot timer 并发布 per-CPU pending。这里不能获取
+/// timer、task、网络或文件系统锁，也不能执行 callback 或 context switch。
 pub fn timer_interrupt_handler() {
+    let irq_start = crate::task::perf::perf_time_now();
+    crate::hal::quiesce_local_timer_interrupt();
+    crate::smp::publish_local_timer_interrupt();
+    crate::task::perf::record_timer_irq_cost(irq_start);
+}
+
+/// 在关中断的任务返回或 scheduler idle 安全点处理一批 timer 工作。
+///
+/// 多个 hard IRQ 可以合并为一批：所有 timer action 和调度 tick 都按绝对
+/// deadline 与当前时间比较，不依赖中断次数。函数返回当前任务是否应在安全点
+/// 让出 CPU；idle scheduler 调用时已经处于调度上下文，可以忽略该返回值。
+pub fn run_deferred_timer_work() -> bool {
+    let irq_flags = local_irq_save();
+    if !crate::smp::take_local_timer_pending() {
+        local_irq_restore(irq_flags);
+        return false;
+    }
+
     let handler_profile_start = crate::task::processor::sched_profile_cycle_start();
-    let _irq_start = crate::task::perf::perf_time_now();
     let now = crate::timer::TimeSpec::now();
     let now_ns = now.to_ns_saturating();
 
@@ -2206,12 +2225,16 @@ pub fn timer_interrupt_handler() {
 
     // 3. Re-program hardware
     reprogram_timer_irqoff();
-
-    crate::task::perf::record_timer_irq_cost(_irq_start);
-
-    // 4. Yield if needed
+    crate::smp::complete_local_timer_deferred();
     crate::task::processor::record_sched_timer_handler_cycles(handler_profile_start);
-    if need_resched || woke_task {
+    crate::task::perf::record_deferred_timer_snapshot();
+    local_irq_restore(irq_flags);
+    need_resched || woke_task
+}
+
+/// 返回用户态前的 timer 安全点；调度只允许发生在这个显式边界。
+pub fn run_deferred_timer_at_task_safe_point() {
+    if run_deferred_timer_work() {
         crate::task::suspend_current_and_run_next();
     }
 }
@@ -2220,8 +2243,8 @@ pub fn timer_interrupt_handler() {
 ///
 /// # Semantics
 ///
-/// 这是旧固定 tick 路径的兼容入口；新的硬件 timer 中断主要走
-/// `timer_interrupt_handler()`。
+/// 这是旧固定 tick 路径的兼容入口；硬件 IRQ 只发布 pending，完整处理主要走
+/// `run_deferred_timer_work()`。
 pub fn do_wake_expired() {
     let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed);
     let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Relaxed);

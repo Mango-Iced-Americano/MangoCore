@@ -135,23 +135,43 @@ LoongArch static link 直接使用已链接的 `__restore` 地址，避免对符
 
 RISC-V 的 `stvec` 指向独立的 `__kern_trap`。入口在当前内核栈上建立
 272 字节、16 字节对齐的 frame，保存 `x1`、`x3..x31`、原始 `sp`、
-`sstatus` 和 `sepc`；Rust handler 只接受 Supervisor Software Interrupt，
-先清 SSIP，再消费 per-CPU mailbox。其他内核异常仍然 panic。
+`sstatus` 和 `sepc`；Rust handler 接受 Supervisor Software Interrupt
+和 Supervisor Timer Interrupt，其他内核异常仍然 panic。IPI 先清 SSIP，
+再消费 per-CPU mailbox；timer 只静默 SBI one-shot 并发布 deferred 状态。
 
 LoongArch 复用现有内核 trap frame，但把 IPI fast path 放在 BADV 和 console
 诊断之前。handler 先向 IOCSR `CORE_CLEAR` 写 1 清除 level-triggered
 vector 1，再消费 mailbox，避免陈旧 BADV 产生误诊，也避免在尚未多核安全的
-console 路径中打印。
+console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 TICLR、
+发布当前 CPU 的 deferred 状态。
 
 两个架构的 IPI handler 都只执行原子操作：不分配内存、不获取普通锁、不
 打印，也不直接切换任务。AP 仅打开 IPI 线路和全局中断，timer/external
-interrupt 继续关闭；IPI 返回后重新进入 `wfi`/`idle 0`。CPU0 的 timer
-interrupt 仍进入旧的 `task::timer_interrupt_handler()`，每 CPU timer、
-STOP、RESCHEDULE 和 AP 调度循环属于后续 Phase 2/3 范围。
+interrupt 继续关闭；IPI 返回后重新进入 `wfi`/`idle 0`。STOP、
+RESCHEDULE 和 AP 调度循环属于后续 Phase 2/3 范围。
 
-当前只允许 CPU0 向 AP 发起 PING。AP→CPU0 或交叉发送必须等 CPU0 的内核
-timer interrupt 也改为“只记账、在安全点延迟处理”后再开放，否则为了接收
-IPI 打开 CPU0 的内核中断，会让旧 timer handler 在任意内核位置直接调度。
+## Timer hard/deferred 边界
+
+CPU0 的两种 timer trap 来源共用同一 hard-IRQ fast path：
+
+1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 清除 level-triggered
+   TICLR，非周期 TCFG 保持停止；
+2. 当前 `PerCpu.timer_irq_count` 只做无锁诊断计数；
+3. 以 Release 发布 `timer_pending=true` 后立即返回被中断现场。
+
+hard IRQ 不读取 timer queue，不执行 callback、timeout wake、timerfd、网络
+poll 或 schedule；性能统计也只做原子计数，原有周期性快照打印已经移到
+deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 timer 和
+调度 tick 都使用绝对 deadline，而不是按中断次数推进。
+
+`trap_return()` 在信号投递前消费 pending，使 timer callback 新产生的信号
+可以在同一轮返回中处理；`run_tasks()` 则在取得 Processor/ready queue 锁前
+消费 pending。安全点以 Acquire 取走 pending，在关中断状态下完成旧 timer
+工作并按完整队列重新编程 one-shot；只有全部工作结束后才决定是否在这个
+显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback。
+
+该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险，但当前仍只允许 CPU0
+向 AP 发起 PING；AP→CPU0、交叉发送和长 syscall 中断窗口由下一工作包接入。
 
 ## 构建与验证
 
@@ -175,4 +195,6 @@ make ktest ARCH=la64 PROFILE=normal CORE_NUM=2 KTEST=smp
 configured CPU 数、online/idle mask、独立 CPU-local 指针、测试 PASS 和无
 panic。Phase 2 的 IPI 用例要求 CPU0 既能单播 PING，也能在统一的一秒期限
 内向全部 online AP 广播并逐项观察对应 ack。四核测试应至少覆盖三个 AP；
-RISC-V 还应保留一次物理启动 hart 不等于 0 的映射证据。
+RISC-V 还应保留一次物理启动 hart 不等于 0 的映射证据。deferred timer
+用例连续执行两轮真实内核 timer IRQ，分别断言 hard IRQ 不推进 deferred
+计数、不切换当前任务，以及安全点恰好消费一批并成功重编程下一轮。

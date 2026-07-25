@@ -26,6 +26,15 @@ pub fn program_timer_delta(delta_ticks: u64) {
     crate::task::processor::record_sched_program_timer_cycles(profile_start);
 }
 
+/// 清除当前 hart 的 timer pending，并在安全点处理前不再安排新事件。
+///
+/// SBI TIME 规定把比较值写到未来必须清除 pending bit；`usize::MAX` 在
+/// RV64 上代表最远的绝对时间。安全点完成软件 timer 工作后会重新写入真实
+/// deadline，因此 hard IRQ 不需要读取任何受锁队列。
+pub fn quiesce_local_timer_interrupt() {
+    set_timer(usize::MAX);
+}
+
 pub fn get_clock_freq() -> usize {
     CLOCK_FREQ
 }

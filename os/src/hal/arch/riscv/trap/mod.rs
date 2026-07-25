@@ -8,14 +8,9 @@ use core::arch::{asm, global_asm};
 
 use super::TrapImpl;
 use crate::config::TRAMPOLINE;
-use crate::hal::arch::riscv::time::set_next_trigger;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
-use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
-use crate::task::{
-    current_task_ref, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
-    suspend_current_and_run_next, Signals,
-};
+use crate::task::{current_task_ref, current_user_token, do_signal, signal::SigInfo, Signals};
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
 pub use context::{UserContext, UserSignalMask};
@@ -24,8 +19,6 @@ use riscv::register::{
     scause::{self, Exception, Interrupt, Trap},
     sepc, sie, sstatus, stval, stvec,
 };
-
-pub static mut TIMER_INTERRUPT: usize = 0;
 
 pub fn get_bad_addr() -> usize {
     stval::read()
@@ -68,6 +61,18 @@ pub fn enable_timer_interrupt() {
     unsafe {
         sie::set_stimer();
     }
+}
+
+/// 两种 trap 来源共享的 timer hard-IRQ fast path。
+///
+/// 性能计数和硬件静默之外只发布 per-CPU pending；队列锁、callback 和调度
+/// 统一延迟到 trap_return 或 scheduler idle 安全点。
+fn handle_timer_interrupt() {
+    let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
+    crate::task::perf::record_timer_interrupt();
+    crate::task::processor::record_sched_timer_interrupt();
+    crate::task::timer_interrupt_handler();
+    crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
 }
 
 /// 为 AP 建立只接收 IPI 的内核中断窗口。
@@ -202,14 +207,7 @@ pub fn trap_handler() -> ! {
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
-            crate::task::perf::record_timer_interrupt();
-            crate::task::processor::record_sched_timer_interrupt();
-            unsafe {
-                TIMER_INTERRUPT += 1;
-            }
-            crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
-            crate::task::timer_interrupt_handler();
+            handle_timer_interrupt();
         }
         _ => {
             panic!(
@@ -230,6 +228,9 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // trap frame 已完整、当前任务锁均已释放；这是 timer callback 和安全抢占
+    // 可以运行的第一个统一边界。新产生的信号随后由 do_signal() 同轮处理。
+    crate::task::run_deferred_timer_at_task_safe_point();
     let task = do_signal();
     set_user_trap_entry();
     // Refresh after signal/exec context changes and on every future migration:
@@ -256,12 +257,21 @@ pub fn trap_return() -> ! {
 #[no_mangle]
 pub extern "C" fn trap_from_kernel() {
     let cause = riscv::register::scause::read().cause();
-    if cause == Trap::Interrupt(Interrupt::SupervisorSoft) {
-        // OpenSBI 把 IPI 表现为 SSIP。先清电平源，再消费 Release 发布的
-        // mailbox；并发的新 doorbell 即使与 swap 交错，也只会产生空中断。
-        unsafe { asm!("csrci sip, 2") };
-        crate::smp::handle_ipi();
-        return;
+    match cause {
+        Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            // OpenSBI 把 IPI 表现为 SSIP。先清电平源，再消费 Release 发布的
+            // mailbox；并发的新 doorbell 即使与 swap 交错，也只会产生空中断。
+            unsafe { asm!("csrci sip, 2") };
+            crate::smp::handle_ipi();
+            return;
+        }
+        Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            // 内核 timer 与用户 timer 使用相同无锁 fast path；这里绝不从
+            // 被中断的任意内核位置切换任务。
+            handle_timer_interrupt();
+            return;
+        }
+        _ => {}
     }
     panic!(
         "a trap {:?} from kernel! bad addr = {:#x}, bad instruction = {:#x}",

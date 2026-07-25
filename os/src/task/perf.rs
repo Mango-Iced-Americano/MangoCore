@@ -69,6 +69,8 @@ mod enabled {
     static SCHEDULE_FETCH: AtomicUsize = AtomicUsize::new(0);
     static SCHEDULE_IDLE: AtomicUsize = AtomicUsize::new(0);
     static TIMER_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+    /// 最近一次在 deferred 安全点输出 timer 快照时对应的 1024 次分段。
+    static TIMER_SNAPSHOT_EPOCH: AtomicUsize = AtomicUsize::new(0);
     static FUTEX_WAIT: AtomicUsize = AtomicUsize::new(0);
     static FUTEX_WAIT_SHARED: AtomicUsize = AtomicUsize::new(0);
     static FUTEX_WAIT_DEADLINE: AtomicUsize = AtomicUsize::new(0);
@@ -1191,6 +1193,7 @@ mod enabled {
         SCHEDULE_FETCH.store(0, Ordering::Relaxed);
         SCHEDULE_IDLE.store(0, Ordering::Relaxed);
         TIMER_INTERRUPTS.store(0, Ordering::Relaxed);
+        TIMER_SNAPSHOT_EPOCH.store(0, Ordering::Relaxed);
         FUTEX_WAIT.store(0, Ordering::Relaxed);
         FUTEX_WAIT_SHARED.store(0, Ordering::Relaxed);
         FUTEX_WAIT_DEADLINE.store(0, Ordering::Relaxed);
@@ -1826,8 +1829,17 @@ mod enabled {
         if !stats_enabled() {
             return;
         }
-        let n = TIMER_INTERRUPTS.fetch_add(1, Ordering::Relaxed) + 1;
-        if load(&CLONE_TOTAL) >= 4500 && n % 1024 == 0 {
+        // hard IRQ 中只允许无锁计数；console 快照由 deferred 安全点负责。
+        TIMER_INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 在 timer deferred 安全点按原有节奏输出诊断快照。
+    pub fn record_deferred_timer_snapshot() {
+        if !stats_enabled() || load(&CLONE_TOTAL) < 4500 {
+            return;
+        }
+        let epoch = load(&TIMER_INTERRUPTS) / 1024;
+        if epoch != 0 && TIMER_SNAPSHOT_EPOCH.fetch_max(epoch, Ordering::Relaxed) < epoch {
             print_snapshot("timer");
         }
     }
@@ -2027,6 +2039,10 @@ pub fn record_schedule_loop(_fetched: bool) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_timer_interrupt() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_deferred_timer_snapshot() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]

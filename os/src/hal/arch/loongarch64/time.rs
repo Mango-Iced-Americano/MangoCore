@@ -37,6 +37,15 @@ pub fn program_timer_delta(delta_ticks: u64) {
     crate::task::processor::record_sched_program_timer_cycles(profile_start);
 }
 
+/// 清除当前 CPU 的 level-triggered timer，并保持 one-shot 停止状态。
+///
+/// 非周期 TCFG 到零后已经停止计数；这里只对 TICLR 执行 W1C。安全点处理完
+/// 软件 timer 队列后再由 `program_timer_delta()` 写入下一个真实 deadline。
+pub fn quiesce_local_timer_interrupt() {
+    use super::register::TIClr;
+    TIClr::read().clear_timer().write();
+}
+
 #[inline(always)]
 pub fn get_clock_freq() -> usize {
     // Safety: `CLOCK_FREQ` is initialized during early machine init before

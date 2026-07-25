@@ -16,7 +16,9 @@ pub use loongarch64::{
     console_flush, console_getchar, console_putchar, console_write_bytes, cpu_local_ptr,
     enter_secondary_idle, install_cpu_local, kstack_alloc, local_irq_restore, local_irq_save,
     machine_init, secondary_cpu_idle, send_ipi, shutdown, start_secondary_cpu, syscall_id,
-    time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
+    time::{
+        get_clock_freq, get_time, program_timer_delta, quiesce_local_timer_interrupt, TICKS_PER_SEC,
+    },
     tlb_invalidate,
     trap::{
         get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return, LsxRegs,
@@ -46,7 +48,9 @@ pub use riscv::{
     sv39::tlb_invalidate,
     switch::__switch,
     syscall_id,
-    time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
+    time::{
+        get_clock_freq, get_time, program_timer_delta, quiesce_local_timer_interrupt, TICKS_PER_SEC,
+    },
     trap::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,
         trap_return, UserContext, UserSignalMask,

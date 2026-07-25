@@ -81,11 +81,11 @@ related_docs:
 |---|---|---|
 | 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack 和 1/2/4/8 核最小 online 闭环已完成 | AP 已进入可被 IPI 唤醒的 idle loop，但尚无 STOP、timer 和调度能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | PerCpu 目前只增加最小 IPI reason/ack，完整 global/local init 仍未接入 |
-| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；RV64 已有保存完整 GPR/CSR 的内核 IPI trap；LA64 已接入 line-based IPI fast path | 当前只允许 AP 的 IPI-only 窗口，长 syscall、timer、STOP 和 shootdown 尚未接入 |
+| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；内核 trap 已支持无锁 IPI 与 timer fast path | CPU0 尚未常态开放内核中断窗口，STOP 和 shootdown 尚未接入 |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
-| timer | 全局 NEXT_SCHED_TICK_NS，中断中直接切换任务 | 多核重复推进时间或在危险位置调度 |
+| timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | PTE 修改只刷新本地 TLB | 远端 CPU 继续使用旧权限、旧物理页 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
@@ -422,7 +422,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09/B10）
+#### 当前进度（SMP-P2-B09/B10/B11）
 
 - `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
   表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
@@ -445,8 +445,18 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   覆盖了逻辑 ID 到硬件 hart ID 的非恒等映射；
 - B10 审计发现，CPU0 仍使用会在中断中直接调度的旧 timer handler；因此
   没有通过测试专用关 timer 绕过依赖，AP→CPU0 与交叉发送延后到 deferred
-  timer 完成后。并发 reason、10,000 次 ping-pong、STOP、长 syscall
-  中断窗口也尚未完成，Phase 2 状态仍为 `partial`。
+  timer 完成后；
+- B11 已把双架构 timer hard IRQ 收敛为“静默 one-shot + Release 发布
+  per-CPU pending”的无锁路径。timer queue、callback、timeout/timerfd、
+  网络 poll、诊断打印和 schedule 全部移到 `trap_return()` 或 scheduler
+  取锁前的安全点；安全点以 Acquire 消费 pending，在关中断状态下按完整
+  队列重编程下一次硬件事件；
+- B11 的双架构 `CORE_NUM=2 KTEST=smp` 均通过 6/6。新增用例连续执行两轮
+  真实内核 timer IRQ，证明 hard IRQ 不执行 deferred 工作、不切换当前
+  任务，安全点恰好消费一批且能重新触发下一轮 one-shot；
+- CPU0 尚未启用 IPI 本地 mask，也未在普通内核执行期间开放受控中断窗口。
+  AP→CPU0、交叉发送、并发 reason、10,000 次 ping-pong、STOP 和长 syscall
+  中断窗口仍未完成，Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
 timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。

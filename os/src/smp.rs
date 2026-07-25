@@ -25,6 +25,12 @@ struct PerCpu {
     pending_ipi: AtomicU32,
     /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
     ipi_ping_ack: AtomicUsize,
+    /// 本 CPU 是否有尚未在安全点处理的 timer 工作；多个 IRQ 可以合并。
+    timer_pending: AtomicBool,
+    /// 本 CPU 进入 timer 硬中断 fast path 的次数，仅用于诊断和 focused test。
+    timer_irq_count: AtomicUsize,
+    /// 本 CPU 在任务或 idle 安全点完成 timer 工作的批次数。
+    timer_deferred_count: AtomicUsize,
 }
 
 impl PerCpu {
@@ -35,6 +41,9 @@ impl PerCpu {
             idle: AtomicBool::new(false),
             pending_ipi: AtomicU32::new(0),
             ipi_ping_ack: AtomicUsize::new(0),
+            timer_pending: AtomicBool::new(false),
+            timer_irq_count: AtomicUsize::new(0),
+            timer_deferred_count: AtomicUsize::new(0),
         }
     }
 }
@@ -203,6 +212,51 @@ pub fn handle_ipi() {
         // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
         local.ipi_ping_ack.fetch_add(1, Ordering::Release);
     }
+}
+
+/// 在当前 CPU 的 timer IRQ fast path 发布一批待处理工作。
+///
+/// IRQ 只做原子记账；timer 队列、回调和调度都由后续安全点负责。Release
+/// 与 `take_local_timer_pending()` 的 Acquire 配对，使安全点观察到本次
+/// 中断在发布前完成的硬件静默操作。重复 IRQ 合并为一个 pending bit；
+/// timer 使用绝对 deadline，因此不依赖中断次数推进语义。
+pub fn publish_local_timer_interrupt() {
+    let local = &PER_CPUS[self::cpu_id()];
+    local.timer_irq_count.fetch_add(1, Ordering::Relaxed);
+    local.timer_pending.store(true, Ordering::Release);
+}
+
+/// 查询当前 CPU 是否仍有 deferred timer 工作。
+pub fn local_timer_pending() -> bool {
+    PER_CPUS[self::cpu_id()]
+        .timer_pending
+        .load(Ordering::Acquire)
+}
+
+/// 由当前 CPU 在关中断的安全点唯一消费 timer pending。
+pub fn take_local_timer_pending() -> bool {
+    PER_CPUS[self::cpu_id()]
+        .timer_pending
+        .swap(false, Ordering::Acquire)
+}
+
+/// 在 timer 队列、回调和精确重编程全部完成后记录一批 deferred 工作。
+pub fn complete_local_timer_deferred() {
+    PER_CPUS[self::cpu_id()]
+        .timer_deferred_count
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// 查询一个 CPU 的 timer hard-IRQ 次数。
+pub fn timer_irq_count(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id].timer_irq_count.load(Ordering::Relaxed)
+}
+
+/// 查询一个 CPU 已完成的 deferred timer 批次数。
+pub fn timer_deferred_count(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id]
+        .timer_deferred_count
+        .load(Ordering::Relaxed)
 }
 
 fn mark_cpu_idle(cpu_id: usize) {

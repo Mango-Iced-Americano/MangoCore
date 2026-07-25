@@ -12,7 +12,7 @@ use super::tlb::{ASID_NONE, KERN_ASID};
 use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
 use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
-use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd, TCfg, TIClr};
+use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd};
 use crate::hal::arch::loongarch64::trap::mem_access::Instruction;
 use crate::hal::arch::TICKS_PER_SEC;
 use crate::mm::{
@@ -163,6 +163,18 @@ pub fn enable_timer_interrupt() {
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
 }
+
+/// 用户态和内核态共用的 timer hard-IRQ fast path。
+///
+/// TICLR/one-shot 静默由 HAL 完成；这里不获取普通锁，也不执行 callback 或调度。
+fn handle_timer_interrupt() {
+    let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
+    crate::task::perf::record_timer_interrupt();
+    crate::task::processor::record_sched_timer_interrupt();
+    crate::task::timer_interrupt_handler();
+    crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
+}
+
 #[link_section = ".text.trap_handler"]
 #[no_mangle]
 pub fn trap_handler() -> ! {
@@ -316,12 +328,7 @@ pub fn trap_handler() -> ! {
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
         }
         Trap::Interrupt(Interrupt::Timer) => {
-            let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
-            crate::task::perf::record_timer_interrupt();
-            crate::task::processor::record_sched_timer_interrupt();
-            TIClr::read().clear_timer().write();
-            crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
-            crate::task::timer_interrupt_handler();
+            handle_timer_interrupt();
         }
         Trap::Exception(Exception::Breakpoint) => {
             read_bp();
@@ -456,6 +463,9 @@ pub fn trap_return() -> ! {
     if trace_first_return {
         println!("[bringup][user:01] first task reached trap_return");
     }
+    // 当前任务的 trap frame 已完整且业务锁已经释放；timer callback 和安全
+    // 抢占只允许在这里运行，不能发生在任意内核 timer IRQ 位置。
+    crate::task::run_deferred_timer_at_task_safe_point();
     let task = do_signal();
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
@@ -521,12 +531,21 @@ pub fn trap_return() -> ! {
 pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
     // 获取Trap原因
     let cause = get_exception_cause();
-    if let Trap::Interrupt(Interrupt::IPI) = cause {
-        // IPI fast path 必须早于 BADV/console 诊断：中断不会更新 BADV，读取
-        // 陈旧地址可能误触发栈溢出打印，而 console 尚未具备多核 irq-safe 锁。
-        super::clear_local_ipi();
-        crate::smp::handle_ipi();
-        return;
+    match cause {
+        Trap::Interrupt(Interrupt::IPI) => {
+            // IPI fast path 必须早于 BADV/console 诊断：中断不会更新 BADV，读取
+            // 陈旧地址可能误触发栈溢出打印，而 console 尚未具备多核 irq-safe 锁。
+            super::clear_local_ipi();
+            crate::smp::handle_ipi();
+            return;
+        }
+        Trap::Interrupt(Interrupt::Timer) => {
+            // timer fast path 同样必须早于 BADV 和普通异常诊断，并且只发布
+            // deferred 状态；任意内核位置都不会在这里 context switch。
+            handle_timer_interrupt();
+            return;
+        }
+        _ => {}
     }
     // 读取异常子代码（二级编号）
     let sub_code = EStat::read().exception_sub_code();

@@ -125,6 +125,10 @@ lazy_static! {
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
     loop {
+        // schedule() 可能在内核 timer 打断长 syscall 后直接切回 idle。
+        // 在获取 PROCESSOR 或队列锁之前消费 pending，保证 callback 不跨锁，
+        // 且已经处于 idle 调度上下文时无需再次 context switch。
+        let _ = super::run_deferred_timer_work();
         let sched_profile = sched_profile_enabled();
         if sched_profile {
             SCHED_LOOPS.fetch_add(1, SchedOrdering::Relaxed);

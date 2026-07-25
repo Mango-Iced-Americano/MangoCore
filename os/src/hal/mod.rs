@@ -14,6 +14,7 @@ pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;
+pub use arch::quiesce_local_timer_interrupt;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 #[cfg(feature = "loongarch64")]
