@@ -135,9 +135,6 @@ impl KernelDevOp for MangoKernelDevOp {
         }
         let start_pos = dev.pos;
         let end_pos = start_pos.checked_add(buf.len()).ok_or(-22)?;
-        if dev.size != 0 && end_pos as u64 > dev.size {
-            return Err(-22);
-        }
 
         read_bytes_for_block_size::<BLOCK_SZ>(&dev.dev, start_pos, buf);
 
@@ -162,9 +159,6 @@ impl KernelDevOp for MangoKernelDevOp {
         }
         let start_pos = dev.pos;
         let end_pos = start_pos.checked_add(buf.len()).ok_or(-22)?;
-        if dev.size != 0 && end_pos as u64 > dev.size {
-            return Err(-22);
-        }
 
         write_bytes_for_block_size::<BLOCK_SZ>(&dev.dev, start_pos, buf);
 
