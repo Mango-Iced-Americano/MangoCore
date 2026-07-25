@@ -27,6 +27,8 @@ pub struct KernelTest {
     pub func: fn() -> Result<(), &'static str>,
     /// Per-test timeout in milliseconds (0 = use global default).
     pub timeout_ms: usize,
+    /// 终态测试会永久改变机器状态，只在全部普通 repeat 完成后执行一次。
+    pub terminal: bool,
 }
 
 impl KernelTest {
@@ -35,6 +37,7 @@ impl KernelTest {
             name,
             func,
             timeout_ms: 0, // use global default
+            terminal: false,
         }
     }
 
@@ -47,6 +50,17 @@ impl KernelTest {
             name,
             func,
             timeout_ms,
+            terminal: false,
+        }
+    }
+
+    /// 创建只允许在整个测试计划末尾执行一次的终态测试。
+    pub const fn terminal(name: &'static str, func: fn() -> Result<(), &'static str>) -> Self {
+        Self {
+            name,
+            func,
+            timeout_ms: 0,
+            terminal: true,
         }
     }
 }
@@ -120,7 +134,20 @@ pub fn run_tests_return(
         };
     }
 
-    let total_tests = selected.len() * config.repeat;
+    // STOP 等终态测试不能位于每轮 repeat 中间，否则下一轮会尝试唤醒已经
+    // 永久停止的 AP。先重复全部普通测试，最后只运行一次终态集合；KTEST=all
+    // 时也因此保证 MM/FS 等其他组先完成。
+    let regular: Vec<&KernelTest> = selected
+        .iter()
+        .copied()
+        .filter(|test| !test.terminal)
+        .collect();
+    let terminal: Vec<&KernelTest> = selected
+        .iter()
+        .copied()
+        .filter(|test| test.terminal)
+        .collect();
+    let total_tests = regular.len() * config.repeat + terminal.len();
     let timeout_ms = if config.timeout_ms > 0 {
         config.timeout_ms
     } else {
@@ -139,8 +166,13 @@ pub fn run_tests_return(
     let mut passed: usize = 0;
     let mut failed: usize = 0;
 
-    for _rep in 0..config.repeat {
-        for test in &selected {
+    for phase in 0..=config.repeat {
+        let tests = if phase < config.repeat {
+            &regular
+        } else {
+            &terminal
+        };
+        for test in tests {
             let per_test_timeout = if test.timeout_ms > 0 {
                 test.timeout_ms
             } else {

@@ -42,9 +42,9 @@ firmware / QEMU
 ```
 
 当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 已
-打通 BSP→AP 的 IPI mailbox/ack 单播与广播，并完成 AP→BSP 的请求/回复
-往返。AP 尚未进入调度器，也不会访问文件系统、网络和旧的单核运行队列；
-这些共享路径仍由 CPU0 独占。
+打通 BSP→AP 的 IPI mailbox/ack 单播与广播、AP→BSP 请求/回复往返，以及
+CPU0 发起的 AP STOP/ack 终态协议。AP 尚未进入调度器，也不会访问文件系统、
+网络和旧的单核运行队列；这些共享路径仍由 CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -116,6 +116,23 @@ doorbell 在重查之后到达时会保持 pending 并唤醒 CPU；不会出现�
 永久睡眠的 lost wakeup。发送回复可能失败的诊断也只更新 per-CPU 原子
 计数，不把日志、锁或分配带回 hard IRQ。
 
+STOP 复用 reason mailbox 传递终态请求，但使用独立的 `stopped` ack 表达
+完成状态：
+
+1. CPU0 快照 online 且尚未 stopped 的 AP，以 Release 发布 STOP 后触发
+   doorbell；
+2. AP hard-IRQ handler 只以 Release 发布 `stop_requested`，不在 trap
+   frame 上停止；
+3. AP 回到独立 idle stack，以 Acquire 消费请求，先关闭全局中断和全部
+   本地 IPI source，再以 Release 发布 `stopped=true`；
+4. AP 随后只执行不可返回的 `wfi`/`idle 0`，不再恢复中断或访问共享状态；
+5. CPU0 以 Acquire 等待全部目标 ack，等待有界；重复调用会排除已经 stopped
+   的 AP，因此正常 shutdown 与测试共用同一幂等协议。
+
+只有逻辑 CPU0 负责协调 STOP。极早期尚未发布 online 的 panic，以及 AP
+上的致命异常，直接进入架构机器级关机兜底，避免在 CPU-local 尚不可用或
+尚无 CPU0 安全点时伪造跨核协调。
+
 ## CPU-local 寄存器
 
 内核运行时以架构寄存器保存 `PerCpu` 指针：
@@ -162,9 +179,10 @@ console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 T
 两个架构的 IPI handler 都只执行原子操作：不分配内存、不获取普通锁、不
 打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
 用户态和内核态 trap 共用同一 fast path；AP 仅打开 IPI 线路，timer/external
-interrupt 继续关闭。AP 的回复 doorbell 在返回 idle stack 后发送，而不在
-handler 内递归触发跨核操作。STOP、RESCHEDULE、普通内核长区间的受控中断
-窗口和 AP 调度循环属于后续 Phase 2/3 范围。
+interrupt 继续关闭。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
+stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
+RESCHEDULE、普通内核长区间的受控中断窗口和 AP 调度循环属于后续
+Phase 2/3 范围。
 
 ## Timer hard/deferred 边界
 
@@ -188,7 +206,7 @@ deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 ti
 
 该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。当前已在 focused
 测试的受控中断窗口内完成 AP→CPU0 回复；普通长 syscall 尚未常态打开
-本地中断，后续 shootdown/STOP 仍需先闭合对应安全点协议。
+本地中断，后续 shootdown 仍需先闭合对应安全点协议。
 
 ## 构建与验证
 
@@ -215,4 +233,6 @@ panic。Phase 2 的 IPI 用例要求 CPU0 既能单播 PING，也能在统一的
 AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。RISC-V
 应保留一次物理启动 hart 不等于 0 的映射证据。deferred timer 用例连续
 执行两轮真实内核 timer IRQ，分别断言 hard IRQ 不推进 deferred 计数、
-不切换当前任务，以及安全点恰好消费一批并成功重编程下一轮。
+不切换当前任务，以及安全点恰好消费一批并成功重编程下一轮。STOP 属于
+终态测试：普通用例按 `KREPEAT` 全部完成后只执行一次，并断言全部 AP ack
+以及生产 shutdown 再次调用协议时走幂等快路径。

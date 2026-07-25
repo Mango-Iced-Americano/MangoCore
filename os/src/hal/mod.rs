@@ -15,13 +15,13 @@ pub use arch::config;
 pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;
 pub use arch::quiesce_local_timer_interrupt;
-pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 #[cfg(feature = "loongarch64")]
 pub use arch::LsxRegs;
 pub use arch::{
     boot_cpu_park, bootstrap_init, cpu_local_ptr, enter_secondary_idle, install_cpu_local,
-    machine_init, secondary_cpu_wait, send_ipi, start_secondary_cpu, user_hwcap,
+    machine_init, prepare_secondary_cpu_stop, secondary_cpu_stop, secondary_cpu_wait, send_ipi,
+    start_secondary_cpu, user_hwcap,
 };
 pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
@@ -35,6 +35,22 @@ pub use arch::{
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};
+
+/// 统一停机入口：先冻结所有 online AP，再执行架构机器关机。
+///
+/// `online` 尚未发布时可能处于极早期 panic，不能读取尚未安装的 CPU-local
+/// 寄存器；此时直接走机器级兜底。当前运行期只有 CPU0 执行共享子系统，
+/// AP 上的致命异常同样直接关机，避免反向 STOP CPU0 所需的未实现安全点。
+pub fn shutdown() -> ! {
+    let _ = arch::local_irq_save();
+    let online = crate::smp::online_cpu_mask();
+    if online & (1usize << crate::smp::BOOT_CPU_ID) != 0
+        && crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID
+    {
+        let _ = crate::smp::stop_secondary_cpus();
+    }
+    arch::machine_shutdown()
+}
 
 /// Per-chunk bounce buffer size for I/O operations.
 /// Computed as KERNEL_HEAP_SIZE / 128, bounded to [64KiB, 256KiB].

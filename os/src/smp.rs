@@ -31,6 +31,10 @@ struct PerCpu {
     round_trip_reply_ack: AtomicUsize,
     /// 本 CPU 在 idle deferred 路径发送 IPI 失败的次数。
     ipi_send_failures: AtomicUsize,
+    /// hard IRQ 已收到 STOP；真正停止必须延后到 AP 独立 idle stack。
+    stop_requested: AtomicBool,
+    /// 本 CPU 已承诺不再访问共享内核状态，供 CPU0 等待停机完成。
+    stopped: AtomicBool,
     /// 本 CPU 是否有尚未在安全点处理的 timer 工作；多个 IRQ 可以合并。
     timer_pending: AtomicBool,
     /// 本 CPU 进入 timer 硬中断 fast path 的次数，仅用于诊断和 focused test。
@@ -50,6 +54,8 @@ impl PerCpu {
             round_trip_reply_pending: AtomicBool::new(false),
             round_trip_reply_ack: AtomicUsize::new(0),
             ipi_send_failures: AtomicUsize::new(0),
+            stop_requested: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             timer_pending: AtomicBool::new(false),
             timer_irq_count: AtomicUsize::new(0),
             timer_deferred_count: AtomicUsize::new(0),
@@ -71,6 +77,8 @@ impl IpiReason {
     const ROUND_TRIP_REQUEST: Self = Self(1 << 1);
     /// AP idle 上下文向 CPU0 发布的 round-trip 回复。
     const ROUND_TRIP_REPLY: Self = Self(1 << 2);
+    /// 请求 AP 在退出 hard IRQ 后停止，不再访问任何共享内核状态。
+    const STOP: Self = Self(1 << 3);
 
     const fn bits(self) -> u32 {
         self.0
@@ -96,7 +104,20 @@ const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0'
 
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;
+const STOP_TIMEOUT_SECONDS: usize = 1;
 const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
+
+/// CPU0 等待 AP 停止时唯一可能返回的错误。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopError {
+    /// 目前只有 CPU0 拥有最终停机协议；AP panic 走 HAL 的机器级兜底。
+    NotBootCpu { cpu_id: usize },
+    /// 有 AP 未在期限内发布 stopped；同时保留 doorbell 的首个发送错误。
+    Timeout {
+        missing: usize,
+        send_error: Option<isize>,
+    },
+}
 
 // These values must survive CPU0's BSS clear while LA64 APs are already
 // polling them on their private boot stacks.
@@ -137,6 +158,17 @@ pub fn idle_cpu_mask() -> usize {
     let mut mask = 0usize;
     for cpu_id in 0..CONFIGURED_CPU_COUNT {
         if PER_CPUS[cpu_id].idle.load(Ordering::Acquire) {
+            mask |= 1usize << cpu_id;
+        }
+    }
+    mask
+}
+
+/// 汇总已经进入不可返回 stop loop 的 AP。
+pub fn stopped_cpu_mask() -> usize {
+    let mut mask = 0usize;
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if PER_CPUS[cpu_id].stopped.load(Ordering::Acquire) {
             mask |= 1usize << cpu_id;
         }
     }
@@ -240,6 +272,43 @@ pub fn ipi_send_failures(cpu_id: usize) -> usize {
         .load(Ordering::Acquire)
 }
 
+/// 让所有 online AP 停止，并等待它们承诺不再访问共享状态。
+///
+/// STOP 是终态而不是 CPU hotplug：`online` 保留启动历史，重复调用通过
+/// `stopped` mask 幂等完成。即使部分 doorbell 报错，也继续等待；若目标
+/// 因已有 pending interrupt 消费了 mailbox，最终结果仍以 stopped ack 为准。
+pub fn stop_secondary_cpus() -> Result<(), StopError> {
+    let caller = self::cpu_id();
+    if caller != BOOT_CPU_ID {
+        return Err(StopError::NotBootCpu { cpu_id: caller });
+    }
+
+    let targets = online_cpu_mask()
+        & !(1usize << BOOT_CPU_ID)
+        & !stopped_cpu_mask();
+    if targets == 0 {
+        return Ok(());
+    }
+
+    let send_error = send_ipi_mask(targets, IpiReason::STOP).err();
+    let deadline = crate::hal::get_time().saturating_add(
+        crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
+    );
+    loop {
+        let missing = targets & !stopped_cpu_mask();
+        if missing == 0 {
+            return Ok(());
+        }
+        if crate::hal::get_time() >= deadline {
+            return Err(StopError::Timeout {
+                missing,
+                send_error,
+            });
+        }
+        spin_loop();
+    }
+}
+
 /// 在当前 CPU 的硬中断上下文消费 mailbox。
 ///
 /// handler 只做原子操作，不分配、不打印、不获取普通锁，也不直接调度。
@@ -261,6 +330,10 @@ pub fn handle_ipi() {
     if reasons & IpiReason::ROUND_TRIP_REPLY.bits() != 0 {
         local.round_trip_reply_ack.fetch_add(1, Ordering::Release);
     }
+    if reasons & IpiReason::STOP.bits() != 0 {
+        // 不可返回的 stop 不能发生在 trap frame 上；只向 idle 栈发布请求。
+        local.stop_requested.store(true, Ordering::Release);
+    }
 }
 
 /// 在 AP idle 栈上执行 hard IPI 延迟下来的有界工作。
@@ -271,6 +344,16 @@ fn service_secondary_ipi_work() -> bool {
     let cpu_id = self::cpu_id();
     debug_assert_ne!(cpu_id, BOOT_CPU_ID);
     let local = &PER_CPUS[cpu_id];
+
+    // STOP 优先于其他 deferred work。Release ack 承诺此前的 handler 状态
+    // 已可见。先关闭本地 interrupt source，再发布 ack；CPU0 观察到 stopped
+    // 后，AP 只剩发散 idle 指令，不会再被新 doorbell 唤醒或访问共享状态。
+    if local.stop_requested.swap(false, Ordering::Acquire) {
+        crate::hal::prepare_secondary_cpu_stop();
+        local.stopped.store(true, Ordering::Release);
+        crate::hal::secondary_cpu_stop();
+    }
+
     if !local
         .round_trip_reply_pending
         .swap(false, Ordering::Acquire)

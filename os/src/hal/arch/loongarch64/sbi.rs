@@ -60,12 +60,15 @@ pub fn console_write_bytes(data: &[u8]) {
     }
 }
 
-pub fn shutdown() -> ! {
+pub fn machine_shutdown() -> ! {
     // SAFETY: [Category 11 — Provenance] QEMU's LoongArch platform reserves this
     // MMIO address for power management. This sole shutdown path performs one
     // volatile byte write and does not create a Rust reference to the register.
     unsafe {
         (0x100E_001C as *mut u8).write_volatile(0x34);
     }
-    loop {}
+    // QEMU 若异常拒绝关机，保持 IE 关闭并低功耗停驻，不能回到 panic 递归。
+    loop {
+        unsafe { core::arch::asm!("idle 0") };
+    }
 }

@@ -79,9 +79,9 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack 和 1/2/4/8 核最小 online 闭环已完成 | AP 已进入可被 IPI 唤醒的 idle loop，但尚无 STOP、timer 和调度能力 |
+| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack、online 闭环和 STOP/ack 已完成 | AP 已进入可被 IPI 唤醒或永久停止的 idle loop，但尚无调度能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | PerCpu 目前只增加最小 IPI reason/ack，完整 global/local init 仍未接入 |
-| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI fast path，CPU0 可在受控窗口接收 AP 回复；内核 timer 已 deferred | 普通长内核区间尚未常态开放中断窗口，STOP 和 shootdown 尚未接入 |
+| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI fast path，CPU0 可在受控窗口接收 AP 回复；内核 timer 已 deferred；STOP 在 AP idle 栈执行 | 普通长内核区间尚未常态开放中断窗口，shootdown 尚未接入 |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -422,7 +422,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09/B10/B11/B12）
+#### 当前进度（SMP-P2-B09/B10/B11/B12/B13）
 
 - `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
   表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
@@ -464,8 +464,19 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B12 的双架构 `CORE_NUM=4 KTEST=smp` 均通过 7/7。每个架构的三个 AP
   各完成 64 轮顺序请求/回复，共覆盖 192 次 AP→BSP doorbell；源码验证
   前后指纹一致；
+- B13 已实现 CPU0 发起的终态 STOP/ack：hard IRQ 只发布 stop request，
+  AP 返回独立 idle stack 后先关闭全局中断和本地 IPI source，再发布
+  stopped ack 并永久执行 `wfi`/`idle 0`。CPU0 有界等待全部目标，重复调用
+  排除已 stopped AP，协议保持幂等；
+- `hal::shutdown()` 已统一在正常 CPU0 停机前 best-effort STOP 全部 online
+  AP；极早期或 AP fatal path 直接进入架构机器级关机兜底。RV64 清空 `sie`，
+  LA64 清空 `ECFG` 和 QEMU IOCSR `CORE_EN`，确保 ack 之后不再被 doorbell
+  唤醒；
+- ktest runner 新增 terminal test 语义：普通测试按 `KREPEAT` 重复，永久
+  改变机器状态的 STOP 测试在整个计划末尾只运行一次。双架构四核证据中，
+  RV64 与 LA64 均为 7 个普通用例重复两轮后 STOP 一次，共 15/15 PASS；
 - CPU0 目前只在 focused test 控制的窗口内开放中断。通用交叉发送、并发
-  reason、10,000 次 ping-pong、STOP 和普通长 syscall 中断窗口仍未完成，
+  reason、10,000 次 ping-pong、普通长 syscall 中断窗口和 RESCHEDULE 仍未完成，
   Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
@@ -731,4 +742,6 @@ T0/T1 只需在 Work Log 记录静态检查或构建结果；T2 保存命令、�
 - [RISC-V SBI IPI Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-ipi.adoc)
 - [RISC-V SBI Remote Fence Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-rfence.adoc)
 - [LoongArch Reference Manual, Volume 1](https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html)
+- [QEMU 9.2.1 Loongson IPI register definitions](https://gitlab.com/qemu-project/qemu/-/blob/v9.2.1/include/hw/intc/loongson_ipi_common.h)
+- [QEMU 9.2.1 Loongson IPI register semantics](https://gitlab.com/qemu-project/qemu/-/blob/v9.2.1/hw/intc/loongson_ipi_common.c)
 - [QEMU 9.2 Invocation: TCG thread option](https://qemu.readthedocs.io/en/v9.2.0/system/invocation.html)

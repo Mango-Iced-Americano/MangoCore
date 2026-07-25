@@ -242,6 +242,7 @@ pub struct KernelTest {
     pub name: &'static str,       // "waitqueue::wake_once"
     pub func: fn() -> Result<(), &'static str>,
     pub timeout_ms: usize,        // 0 = use global default
+    pub terminal: bool,           // true = 整个测试计划末尾只执行一次
 }
 ```
 
@@ -251,11 +252,18 @@ pub struct KernelTest {
 |------|------|
 | 测试选择 | 根据 `mango.test=waitqueue,sched` 过滤测试组；`all` 跑全部 |
 | repeat | `mango.test.repeat=N`，每个测试重复 N 次（抓偶发 bug） |
+| terminal | 普通测试全部 repeat 完成后执行一次；用于 STOP 等不可恢复测试 |
 | timeout | `mango.test.timeout_ms=N`，全局超时；测试可覆盖 |
 | failfast | `mango.test.failfast=1`，遇第一个失败即停 |
 | arch 诊断 | 输出 `# arch: riscv64` / `loongarch64` 用于 CI 区分 |
 
 **限制**：当前 timeout 是 advisory-only — 在测试函数返回后检查耗时，无法中断挂死测试。需要后续添加 watchdog timer 才可实现抢占式超时。
+
+永久停止 AP、关机或不可逆破坏全局状态的用例必须用
+`KernelTest::terminal(name, func)` 注册。runner 会先执行所有选中组的普通
+测试及其 repeat，最后才执行 terminal 集合；terminal 不参与 repeat。
+因此 `KTEST=all` 不会因 SMP STOP 提前破坏后续 MM/FS 测试，
+`KREPEAT>1` 也不会尝试再次唤醒已经停止的 AP。
 
 ### TAP 输出格式
 

@@ -27,7 +27,7 @@ pub type KernelPageTableImpl = laflex::LAFlexPageTable;
 pub type PageTableImpl = laflex::LAFlexPageTable;
 pub use sbi::{
     console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
-    local_irq_save, shutdown,
+    local_irq_save, machine_shutdown,
 };
 pub use switch::__switch;
 pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
@@ -451,6 +451,31 @@ pub(super) fn clear_local_ipi() {}
 pub fn secondary_cpu_wait() {
     // Safety: `idle 0` 只暂停当前 CPU，不访问内存或修改 CSR mask。
     unsafe { core::arch::asm!("idle 0") };
+}
+
+/// 为终态 stop 关闭 CPU 内部和 IOCSR 控制器两层 IPI 使能。
+pub fn prepare_secondary_cpu_stop() {
+    // 再次关闭全局 IE，使这个 HAL 边界不依赖调用方；ECFG 不再接受任何
+    // line-based interrupt。QEMU CORE_EN 是直接赋值寄存器（不是 set-only）。
+    CrMd::read().set_ie(false).write();
+    ECfg::empty().write();
+    #[cfg(feature = "board_laqemu")]
+    unsafe {
+        core::arch::asm!(
+            "iocsrwr.w $zero, {addr}",
+            addr = in(reg) IOCSR_IPI_ENABLE,
+            options(nostack),
+        );
+    }
+}
+
+/// 在全局中断已关闭后永久停止当前 AP。
+pub fn secondary_cpu_stop() -> ! {
+    loop {
+        // 即使实现允许 IDLE 无理由返回，也只会再次进入 IDLE；stopped ack
+        // 发布后不再恢复 IE、返回调用者或访问共享内核状态。
+        unsafe { core::arch::asm!("idle 0") };
+    }
 }
 
 /// The 2K1000LA remains intentionally single-core in this QEMU-only phase.

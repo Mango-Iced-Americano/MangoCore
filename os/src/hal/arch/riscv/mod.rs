@@ -126,6 +126,24 @@ pub fn secondary_cpu_wait() {
     unsafe { riscv::asm::wfi() };
 }
 
+/// 为终态 stop 清除全部 supervisor 本地中断使能。
+pub fn prepare_secondary_cpu_stop() {
+    // Safety: 再次清除全局 SIE，使这个 HAL 边界不依赖调用方；随后清空
+    // `sie`，没有本地 source 能使 WFI 因 enabled+pending 条件恢复。
+    unsafe {
+        core::arch::asm!("csrci sstatus, 2", "csrw sie, zero", options(nostack));
+    }
+}
+
+/// 在全局中断已关闭后永久停止当前 AP。
+pub fn secondary_cpu_stop() -> ! {
+    loop {
+        // 即使实现允许 WFI 无理由返回，也只会再次进入 WFI；本函数永不
+        // 恢复中断、返回 Rust 调用者或访问共享状态。
+        unsafe { riscv::asm::wfi() };
+    }
+}
+
 /// Keep an online Phase 1 AP outside the legacy scheduler.
 pub fn boot_cpu_park() -> ! {
     loop {

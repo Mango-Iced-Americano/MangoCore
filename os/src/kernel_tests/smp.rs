@@ -32,6 +32,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::ap_to_bsp_ipi_round_trip",
             ap_to_bsp_ipi_round_trip,
         ),
+        KernelTest::terminal(
+            "smp::secondary_cpus_stop_and_ack",
+            secondary_cpus_stop_and_ack,
+        ),
     ]
 }
 
@@ -243,6 +247,33 @@ fn round_trip_all_aps() -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+/// 在所有可重复测试结束后永久停止 AP，并验证每个目标都发布了 ack。
+fn secondary_cpus_stop_and_ack() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("STOP test ran on an AP");
+    }
+
+    let targets = crate::smp::online_cpu_mask() & !(1usize << crate::smp::BOOT_CPU_ID);
+    if let Err(error) = crate::smp::stop_secondary_cpus() {
+        crate::println!("# SMP STOP failed: targets={:#x} error={:?}", targets, error);
+        return Err("secondary CPUs did not stop");
+    }
+
+    let stopped = crate::smp::stopped_cpu_mask();
+    if stopped & targets != targets {
+        crate::println!(
+            "# SMP STOP ack mismatch: targets={:#x} stopped={:#x}",
+            targets,
+            stopped
+        );
+        return Err("STOP returned before every AP acknowledged");
+    }
+
+    // 验证生产 shutdown 再次调用同一协议时走幂等快路径。
+    crate::smp::stop_secondary_cpus()
+        .map_err(|_| "repeated STOP was not idempotent")
 }
 
 /// AP 只有在切换到独立 idle stack 后才允许发布 online。

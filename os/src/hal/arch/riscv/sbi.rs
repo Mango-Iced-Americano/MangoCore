@@ -203,7 +203,12 @@ pub fn console_write_bytes(data: &[u8]) {
     }
 }
 
-pub fn shutdown() -> ! {
+pub fn machine_shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
-    panic!("It should shutdown!");
+    // 固件若异常返回，也不能再次进入 panic → shutdown 递归；保持本地
+    // 中断关闭并永久等待，保留第一次失败现场。
+    unsafe { core::arch::asm!("csrw sie, zero", options(nostack)) };
+    loop {
+        unsafe { riscv::asm::wfi() };
+    }
 }
