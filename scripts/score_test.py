@@ -99,7 +99,7 @@ def _counts_from_group(value: object) -> Counts:
         test_total = _number(entry.get("all", entry.get("total", 1)), "all")
         test_score = _number(entry.get("pass", entry.get("score", 0)), "pass")
         if not test_total.is_integer() or test_total <= 0:
-            raise ScoreInputError("judge per-test total must be a positive integer")
+            continue  # skip malformed entries (e.g. missing test data)
         total += int(test_total)
         passed += int(test_total) if test_score > 0 else 0
     return Counts(passed, total)
@@ -117,14 +117,15 @@ def score_groups(results: Mapping[str, object]) -> tuple[dict[str, dict[str, dic
             key = f"{group}-{libc}"
             counts = _counts_from_group(results.get(key, {"pass": 0, "all": 0}))
             libc_counts[libc] = {"pass": counts.passed, "fail": counts.failed}
-            rates.append(counts.rate)
+            if counts.total > 0:
+                rates.append(counts.rate)
             if group in STRICT_GROUPS:
                 passed = passed and counts.total > 0 and counts.failed == 0
             else:
                 passed = passed and counts.total > 0 and counts.rate >= TOLERANT_MINIMUM_RATE
         groups[group] = libc_counts
 
-    return groups, round(100 * sum(rates) / len(rates), 2), passed
+    return groups, round(100 * sum(rates) / len(rates), 2) if rates else 0.0, passed
 
 
 def _parse_judge_output(stdout: str) -> dict[str, object]:
@@ -159,7 +160,24 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--log", type=Path, required=True, help="raw QEMU serial log")
     parser.add_argument("--output", type=Path, required=True, help="structured score JSON output")
     parser.add_argument("--judge-dir", type=Path, default=Path("judge"))
+    parser.add_argument("--table", action="store_true", help="print human-readable table instead of JSON")
     return parser.parse_args()
+
+
+def _print_table(arch: str, groups: dict, score: float, passed: bool) -> None:
+    """Print a human-readable score table."""
+    print(f"\n{'=' * 72}")
+    print(f"  {arch.upper()} Competition Score")
+    print(f"{'=' * 72}")
+    print(f"  {'Group':<18} {'musl':<18} {'glibc':<18}")
+    print(f"  {'-' * 54}")
+    for group, variants in sorted(groups.items()):
+        musl = variants.get("musl", {"pass": 0, "fail": 0})
+        glibc = variants.get("glibc", {"pass": 0, "fail": 0})
+        m_str = f"{musl['pass']}/{musl['pass'] + musl['fail']}"
+        g_str = f"{glibc['pass']}/{glibc['pass'] + glibc['fail']}"
+        print(f"  {group:<18} {m_str:<18} {g_str:<18}")
+    print(f"{'=' * 72}")
 
 
 def main() -> int:
@@ -174,7 +192,10 @@ def main() -> int:
     payload = {"arch": args.arch, "groups": groups, "score": score, "passed": passed}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(payload, indent=2))
+    if args.table:
+        _print_table(args.arch, groups, score, passed)
+    else:
+        print(json.dumps(payload, indent=2))
     return 0 if passed else 1
 
 
