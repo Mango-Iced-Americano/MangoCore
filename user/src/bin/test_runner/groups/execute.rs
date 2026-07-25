@@ -7,7 +7,7 @@ use user_lib::{chdir, exec, exit, fork, get_time, getpgid, kill, println, setpgi
 pub fn run_group_in_dir(environ: &[*const u8], dir: &str, group: &str, script: &str, timeout: u64) {
     let suffix = if dir.contains("musl") { "musl" } else if group == "cpython" { "isolated" } else { "glibc" };
     println!("#### OS COMP TEST GROUP START {}-{} ####", group, suffix);
-    let pid = fork(); if pid == 0 { let _ = setpgid(0, 0); if chdir(dir) < 0 { exit(126); } let command = format!("./{}\0", script); let shell = "/bin/sh\0"; exec(shell, &[shell.as_ptr(), "-c\0".as_ptr(), command.as_ptr(), core::ptr::null()], environ); exit(127); }
+    let pid = fork(); if pid == 0 { let _ = setpgid(0, 0); if chdir(dir) < 0 { exit(126); } let command = format!("./{}\0", script); let shell = "/bin/sh\0"; exec(shell, &[shell.as_ptr(), command.as_ptr(), core::ptr::null()], environ); exit(127); }
     let start = get_time() as u64; let mut status = 0;
     while pid > 0 && waitpid_wnohang(pid, &mut status) == 0 { if (get_time() as u64).saturating_sub(start) >= timeout * 1000 { let pgid = getpgid(pid as usize); if pgid > 0 { let _ = kill(!(pgid as usize) + 1, SIGKILL); } let _ = kill(pid as usize, SIGKILL); let _ = waitpid(pid as usize, &mut status); break; } sleep(100); }
     println!("#### OS COMP TEST GROUP END {}-{} ####", group, suffix); println!("[initproc] done {} in {} exit_code={}", script, dir.trim_end_matches('\0'), status);
