@@ -35,10 +35,13 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// 后台写回互斥标志（防止并发写回）
 static WRITEBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// 后台写回启动阈值（页数，约 8MB，高于典型 4MB 测试集避免频繁触发）
-const DIRTY_BACKGROUND: usize = 8192;
-/// 写入者节流阈值（页数，约 64MB）
-const DIRTY_THROTTLE: usize = 16384;
+/// Dirty pages must be substantial before a writer is allowed to perform
+/// emergency writeback. Normal writes remain fully buffered.
+const DIRTY_EMERGENCY_MIN_PAGES: usize = 65_536;
+/// Start emergency writeback only when dirty cache consumes at least 75% of
+/// the currently free physical-page budget.
+const DIRTY_EMERGENCY_FREE_RATIO_NUMERATOR: usize = 3;
+const DIRTY_EMERGENCY_FREE_RATIO_DENOMINATOR: usize = 4;
 /// 正常后台写回批次大小
 const WB_BATCH_PAGES: usize = 256;
 /// 节流时的最大写回页数
@@ -400,6 +403,8 @@ impl PageEntry {
 /// PageCache 内部状态
 #[derive(Debug)]
 struct InnerPageCache {
+    /// Write-balance suppression flag, set by write_without_balance
+    suppress_balance: AtomicBool,
     /// 页面映射: page_index → PageEntry
     pages: BTreeSet<usize>,
     /// 脏页索引
@@ -409,6 +414,7 @@ struct InnerPageCache {
 impl InnerPageCache {
     fn new() -> Self {
         InnerPageCache {
+            suppress_balance: AtomicBool::new(false),
             pages: BTreeSet::new(),
             dirty_pages: BTreeSet::new(),
         }
@@ -479,6 +485,8 @@ pub struct PageCache {
     unevictable: AtomicBool,
     /// Clock sweep 光标（second-chance eviction）
     clock_hand: AtomicUsize,
+    /// I/O gate: serialises write/truncate/writeback operations on this cache
+    io_gate: Mutex<()>,
 }
 
 impl PageCache {
@@ -491,6 +499,7 @@ impl PageCache {
             entries: Mutex::new(Vec::new()),
             unevictable: AtomicBool::new(false),
             clock_hand: AtomicUsize::new(0),
+            io_gate: Mutex::new(()),
         });
         register_page_cache(&pc);
         pc
@@ -1458,8 +1467,84 @@ impl PageCache {
             any_full_overwrite,
             perf::perf_time_now().wrapping_sub(_t0),
         );
-        balance_dirty_pages();
+        if !self.inner.lock().suppress_balance.load(core::sync::atomic::Ordering::Relaxed) {
+            balance_dirty_pages();
+        }
         Ok(total_written)
+    }
+
+    /// Acquire the I/O gate and execute `f` inside it.
+    pub fn with_io_gate<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let _guard = self.io_gate.lock();
+        f()
+    }
+
+    /// Write data without triggering global dirty-page balancing.
+    pub fn write_without_balance(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner.lock().suppress_balance.store(true, core::sync::atomic::Ordering::Relaxed);
+        let result = self.write_with_copy_callbacks(
+            offset,
+            buf,
+            old_file_size,
+            |_| Ok(()),
+            |_| {},
+        );
+        self.inner.lock().suppress_balance.store(false, core::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    /// Roll back a failed extension: discard dirty pages past `old_size`.
+    pub fn rollback_failed_extension(&self, old_size: usize) {
+        let start_page = (old_size + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
+        let mut entries = self.entries.lock();
+        let mut inner = self.inner.lock();
+        for page_index in start_page..entries.len() {
+            if let Some(ref entry) = entries[page_index] {
+                if entry.state() == PageState::Dirty {
+                    entries[page_index] = None;
+                    inner.pages.remove(&page_index);
+                    inner.dirty_pages.remove(&page_index);
+                }
+            }
+        }
+    }
+
+    /// Truncate with a backend callback, holding the I/O gate.
+    pub fn truncate_with_backend<F>(
+        &self,
+        new_size: usize,
+        backend: F,
+    ) -> Result<(), SyscallErr>
+    where
+        F: FnOnce() -> Result<(), SyscallErr>,
+    {
+        let _guard = self.io_gate.lock();
+        let hole_start_page = (new_size + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
+        let to_remove: Vec<usize> = {
+            let entries = self.entries.lock();
+            (hole_start_page..entries.len()).collect()
+        };
+        {
+            let mut entries = self.entries.lock();
+            let mut inner = self.inner.lock();
+            for page_index in to_remove {
+                if page_index < entries.len() {
+                    entries[page_index] = None;
+                }
+                inner.pages.remove(&page_index);
+                inner.dirty_pages.remove(&page_index);
+            }
+        }
+        backend()?;
+        Ok(())
     }
 
     // ── UserBuffer 读写 ──────────────────────────────────────────────
@@ -2186,17 +2271,12 @@ impl PageCache {
 /// 无新内核线程 — 利用现有 reclaim hook 调度。
 pub fn maybe_background_writeback() {
     let dirty = GLOBAL_DIRTY_PAGES.load(Ordering::Relaxed);
-    if dirty < DIRTY_BACKGROUND {
+    if !dirty_memory_pressure_is_critical(dirty) {
         return;
     }
     if WRITEBACK_ACTIVE.swap(true, Ordering::AcqRel) {
         return; // another caller is already flushing
     }
-    let budget = if dirty >= DIRTY_THROTTLE {
-        WB_BG_MAX_PAGES
-    } else {
-        WB_BATCH_PAGES
-    };
     crate::task::perf::record_wb_bg_call();
 
     // Snapshot alive page caches; drop dead weak refs
@@ -2205,7 +2285,7 @@ pub fn maybe_background_writeback() {
     let caches: Vec<Arc<PageCache>> = reg.iter().filter_map(|w| w.upgrade()).collect();
     drop(reg);
 
-    let mut remaining = budget;
+    let mut remaining = WB_BG_MAX_PAGES;
     for pc in &caches {
         if remaining == 0 {
             break;
@@ -2225,36 +2305,18 @@ pub fn maybe_background_writeback() {
 /// - 超过 DIRTY_THROTTLE：写入者帮助完成一批写回
 pub fn balance_dirty_pages() {
     let dirty = GLOBAL_DIRTY_PAGES.load(Ordering::Relaxed);
-    let wb = GLOBAL_WRITEBACK_PAGES.load(Ordering::Relaxed);
-    let total = dirty.saturating_add(wb);
-
-    if total < DIRTY_BACKGROUND {
-        return;
-    }
-
-    if total < DIRTY_THROTTLE {
-        // Below throttle: opportunistic background flush (non-blocking)
+    if dirty_memory_pressure_is_critical(dirty) {
         maybe_background_writeback();
-        return;
     }
+}
 
-    // Above throttle: writer helps with one batch
-    if !WRITEBACK_ACTIVE.swap(true, Ordering::AcqRel) {
-        crate::task::perf::record_wb_throttle_call();
-
-        let mut reg = PAGE_CACHE_REGISTRY.lock();
-        reg.retain(|w| w.strong_count() > 0);
-        let caches: Vec<Arc<PageCache>> = reg.iter().filter_map(|w| w.upgrade()).collect();
-        drop(reg);
-
-        for pc in &caches {
-            let written = pc.writeback_some_pages(WB_BATCH_PAGES);
-            if written > 0 {
-                break;
-            }
-        }
-        WRITEBACK_ACTIVE.store(false, Ordering::Release);
+fn dirty_memory_pressure_is_critical(dirty: usize) -> bool {
+    if dirty < DIRTY_EMERGENCY_MIN_PAGES {
+        return false;
     }
+    let free = crate::mm::unallocated_frames();
+    dirty.saturating_mul(DIRTY_EMERGENCY_FREE_RATIO_DENOMINATOR)
+        >= free.saturating_mul(DIRTY_EMERGENCY_FREE_RATIO_NUMERATOR)
 }
 
 // ── BlockPageCacheBackend ────────────────────────────────────────────────

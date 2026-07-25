@@ -156,6 +156,116 @@ impl PartitionBlockDevice {
     }
 }
 
+// ── BlockSizeAdapter ────────────────────────────────────────────────────
+
+/// Adapts a block device's native block size to a smaller logical block size.
+///
+/// The child block size must evenly divide the parent's native block size.
+/// Read-modify-write is used for sub-BLOCK_SZ writes, so this adapter is
+/// suitable for test setup and small I/O but not for performance paths.
+pub struct BlockSizeAdapter {
+    parent: Arc<dyn BlockDevice>,
+    child_size: usize,
+    child_per_parent: usize,
+}
+
+impl BlockSizeAdapter {
+    pub fn new(parent: Arc<dyn BlockDevice>, child_size: usize) -> Self {
+        assert!(
+            child_size > 0 && BLOCK_SZ % child_size == 0,
+            "BlockSizeAdapter: child_size {} must be a positive divisor of BLOCK_SZ {}",
+            child_size,
+            BLOCK_SZ,
+        );
+        Self {
+            parent,
+            child_size,
+            child_per_parent: BLOCK_SZ / child_size,
+        }
+    }
+
+    fn parent_for_child(&self, child_id: usize) -> (usize, usize) {
+        let parent_block = child_id / self.child_per_parent;
+        let offset_in_parent = (child_id % self.child_per_parent) * self.child_size;
+        (parent_block, offset_in_parent)
+    }
+}
+
+impl BlockDevice for BlockSizeAdapter {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        if buf.len() != self.child_size {
+            return Err(BlockDeviceError::InvalidBufferLength);
+        }
+        let (parent_block, offset_in_parent) = self.parent_for_child(block_id);
+        let mut tmp = alloc::vec![0u8; BLOCK_SZ];
+        self.parent.read_block(parent_block, &mut tmp)?;
+        buf.copy_from_slice(&tmp[offset_in_parent..offset_in_parent + self.child_size]);
+        Ok(())
+    }
+
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        if buf.len() != self.child_size {
+            return Err(BlockDeviceError::InvalidBufferLength);
+        }
+        let (parent_block, offset_in_parent) = self.parent_for_child(block_id);
+        let mut tmp = alloc::vec![0u8; BLOCK_SZ];
+        self.parent.read_block(parent_block, &mut tmp)?;
+        tmp[offset_in_parent..offset_in_parent + self.child_size].copy_from_slice(buf);
+        self.parent.write_block(parent_block, &tmp)
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        self.parent.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.parent.supports_reliable_flush()
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        self.parent.size_bytes()
+    }
+}
+
+// ── ReadOnlyBlockDevice ─────────────────────────────────────────────────
+
+/// Wraps a `BlockDevice` to reject all write operations.
+///
+/// Reads, flush, and metadata queries are forwarded to the inner device.
+pub struct ReadOnlyBlockDevice {
+    inner: Arc<dyn BlockDevice>,
+}
+
+impl ReadOnlyBlockDevice {
+    pub fn new(inner: Arc<dyn BlockDevice>) -> Self {
+        Self { inner }
+    }
+}
+
+impl BlockDevice for ReadOnlyBlockDevice {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        self.inner.read_block(block_id, buf)
+    }
+
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> BlockDeviceResult {
+        Err(BlockDeviceError::DeviceError)
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        self.inner.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.inner.supports_reliable_flush()
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        self.inner.size_bytes()
+    }
+}
+
+// ── PartitionBlockDevice BlockDevice impl ───────────────────────────────
+
 impl BlockDevice for PartitionBlockDevice {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         let parent_block_id = self.parent_block_id(block_id, buf.len())?;

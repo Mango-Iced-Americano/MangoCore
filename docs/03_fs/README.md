@@ -74,7 +74,7 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
   +-------------------------------------------------------------------+
 |                  PageCache 层 (缓存 + 回写)                         |
 |    Loading -> UpToDate <-> Dirty -> Writeback                     |
-|    后台写回约 32MB，节流约 64MB，批量 256 页                       |
+|    正常 write 延迟回写；仅 fsync/close 或紧急内存压力批量 256 页    |
   +-------------------------------------------------------------------+
   +-------------------------------------------------------------------+
   |                  BlockDevice 层 (驱动抽象)                          |
@@ -93,7 +93,7 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
 
 **MountFS (os/src/fs/vfs/mount.rs):** 包装层，处理跨文件系统边界的路径解析和挂载传播。每个 MountFS 持有 `BTreeMap<InodeId, Arc<MountFS>>` 挂载点表，在 `find()` 时检查子挂载点并将操作委托到对应 FS。支持 bind mount、recursive bind mount、mount propagation（shared / private / slave）。
 
-**PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。后台写回阈值约 32MB、节流阈值约 64MB，批量为 256 页；`reclaim.rs` 周期性探测并回收。
+**PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。正常 write 只标记脏页；`fsync`/最后一次 `close` 负责持久化，只有脏页达到最低 256 MiB 且占空闲帧至少 75% 时才允许紧急批量写回（256 页）；`reclaim.rs` 周期性探测并回收。
 
 ### 特殊文件描述符
 

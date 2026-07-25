@@ -104,12 +104,12 @@ lazy_static! {
                 )
             }
         };
-        mount_common_filesystems(&mfs);
+        prepare_common_filesystem_state(&mfs);
         mfs
     };
 }
 
-/// initramfs 模式：创建 RamFS → 解包内嵌 cpio → 挂载 devfs/procfs/tmpfs
+/// initramfs 模式：创建 RamFS → 解包内嵌 cpio → 创建伪文件系统挂载点
 /// 完全不依赖 BLOCK_DEVICE，块设备在后续阶段可选挂载到 /sdcard 和 /tools
 #[cfg(feature = "initramfs")]
 lazy_static! {
@@ -130,316 +130,104 @@ lazy_static! {
             }
         }
 
-        // 挂载 devfs/procfs/tmpfs（不含 /dev/vda/vdb）
-        mount_common_filesystems(&mfs);
+        // PID1 通过 sys_mount 挂载伪文件系统；内核只准备挂载点和设备节点。
+        prepare_common_filesystem_state(&mfs);
         mfs
     };
 }
 
-/// 无论根文件系统类型，统一挂载 DevFS、ProcFS、tmpfs
-fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
+/// 准备由 PID1 挂载伪文件系统所需的空目录，并注册内核设备节点。
+fn prepare_common_filesystem_state(mfs: &Arc<self::vfs::MountFS>) {
     let root = mfs.mountpoint_root_inode();
 
-    // ── /dev — 设备文件系统 ──
-    {
-        let dev_inode = root.find("dev").unwrap_or_else(|_| {
+    for (name, mode) in [
+        ("proc", 0o555),
+        ("sys", 0o555),
+        ("dev", 0o755),
+        ("tmp", 0o1777),
+        ("mnt", 0o755),
+        ("run", 0o755),
+        ("var", 0o755),
+    ] {
+        root.find(name).unwrap_or_else(|_| {
             root.create(
-                "dev",
+                name,
                 self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o755),
+                self::vfs::InodeMode::from_bits_truncate(mode),
             )
-            .expect("failed to create /dev")
+            .expect("failed to create pseudo-filesystem mount point")
         });
-        let devfs = crate::fs::dev::DEV_FS.clone();
-        devfs
-            .add_dev(
-                "tty",
-                crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/tty");
-        devfs
-            .add_dev(
-                "null",
-                alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/null");
-        devfs
-            .add_dev(
-                "zero",
-                alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/zero");
-        devfs
-            .add_dev(
-                "urandom",
-                alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom)
-                    as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/urandom");
-        devfs
-            .add_dev(
-                "full",
-                alloc::sync::Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/full");
-        devfs
-            .add_dev(
-                "random",
-                alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom)
-                    as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/random");
-        devfs
-            .add_dev(
-                "console",
-                crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/console");
-        devfs
-            .add_dev(
-                "ptmx",
-                alloc::sync::Arc::new(crate::fs::dev::pty::PtmxMasterInode)
-                    as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/ptmx");
-        devfs
-            .add_dev(
-                "pts",
-                alloc::sync::Arc::new(crate::fs::dev::pty::PtsDirInode)
-                    as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/pts");
-        devfs
-            .add_dev(
-                "rtc",
-                alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/rtc");
-        devfs
-            .add_dev(
-                "cpu_dma_latency",
-                alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/cpu_dma_latency");
-        let misc_dir = devfs
-            .add_dir("misc", self::vfs::InodeMode::from_bits_truncate(0o755))
-            .expect("devfs: failed to register /dev/misc");
-        misc_dir
-            .add_dev(
-                "rtc",
-                alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>,
-            )
-            .expect("devfs: failed to register /dev/misc/rtc");
-        let shmfs = crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096); // ~16MB for /dev/shm
-        if let Ok(mut meta) = shmfs.root_inode().metadata() {
-            meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
-            shmfs.root_inode().set_metadata(&meta).ok();
-        }
-        // Create a regular directory in devfs as the cover mount point,
-        // rather than leaking shmfs.root_inode() directly.
-        let shm_dir = devfs
-            .add_dir("shm", self::vfs::InodeMode::from_bits_truncate(0o1777))
-            .expect("devfs: failed to register /dev/shm");
-        let shm_inode_id = shm_dir
-            .metadata()
-            .expect("devfs: failed to read /dev/shm metadata")
-            .inode_id;
-        let dev_inode_id = dev_inode
-            .metadata()
-            .expect("dev_inode metadata failed")
-            .inode_id;
-        let devfs_mnt = self::vfs::MountFS::new(
-            self::vfs::BackendLifecycle::new(devfs),
-            self::vfs::MountFlags::empty(),
-        );
-        devfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev")));
-        if let Some(dev_mfsi) = dev_inode
-            .as_any_ref()
-            .downcast_ref::<self::vfs::MountFSInode>()
-        {
-            let backref = self::vfs::MountFSInode::new(
-                dev_mfsi.inner_inode.clone(),
-                dev_mfsi.mount_fs.clone(),
-            );
-            devfs_mnt.set_self_mountpoint(Some(backref));
-        }
-        // Mount shmfs as a sub-mount of devfs, so MountFS owns the Arc<TmpFS>
-        // and TmpFSInode.fs.upgrade() stays valid.
-        let shmfs_mnt = self::vfs::MountFS::new(
-            self::vfs::BackendLifecycle::new(shmfs),
-            self::vfs::MountFlags::empty(),
-        );
-        shmfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev/shm")));
-        let shm_backref = self::vfs::MountFSInode::new(
-            shm_dir.clone() as Arc<dyn self::vfs::IndexNode>,
-            devfs_mnt.clone(),
-        );
-        shmfs_mnt.set_self_mountpoint(Some(shm_backref));
-        devfs_mnt
-            .add_mount(shm_inode_id, shmfs_mnt)
-            .expect("failed to mount tmpfs at /dev/shm");
-        mfs.add_mount(dev_inode_id, devfs_mnt)
-            .expect("failed to mount devfs at /dev");
     }
+    let dev = root.find("dev").expect("/dev mount point must exist");
+    dev.find("shm").unwrap_or_else(|_| {
+        dev.create(
+            "shm",
+            self::vfs::FileType::Dir,
+            self::vfs::InodeMode::from_bits_truncate(0o1777),
+        )
+        .expect("failed to create /dev/shm")
+    });
+    let var = root.find("var").expect("/var mount point must exist");
+    var.find("tmp").unwrap_or_else(|_| {
+        var.create(
+            "tmp",
+            self::vfs::FileType::Dir,
+            self::vfs::InodeMode::from_bits_truncate(0o1777),
+        )
+        .expect("failed to create /var/tmp")
+    });
 
-    // ── /proc — 进程信息文件系统 ──
-    {
-        let proc_inode = root.find("proc").unwrap_or_else(|_| {
-            root.create(
-                "proc",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o555),
-            )
-            .expect("failed to create /proc")
-        });
-        let proc_inode_id = proc_inode
-            .metadata()
-            .expect("proc_inode metadata failed")
-            .inode_id;
-        let procfs = crate::fs::procfs::ProcFS::new();
-        crate::fs::procfs::files::register_all(procfs.root())
-            .expect("procfs: failed to register root entries");
-        let procfs_mnt = self::vfs::MountFS::new(
-            self::vfs::BackendLifecycle::new(procfs),
-            self::vfs::MountFlags::empty(),
-        );
-        procfs_mnt
-            .no_dentry_cache
-            .store(true, core::sync::atomic::Ordering::Relaxed);
-        procfs_mnt.set_mount_path(Some(alloc::string::String::from("/proc")));
-        if let Some(proc_mfsi) = proc_inode
-            .as_any_ref()
-            .downcast_ref::<self::vfs::MountFSInode>()
-        {
-            let backref = self::vfs::MountFSInode::new(
-                proc_mfsi.inner_inode.clone(),
-                proc_mfsi.mount_fs.clone(),
-            );
-            procfs_mnt.set_self_mountpoint(Some(backref));
-        }
-        mfs.add_mount(proc_inode_id, procfs_mnt)
-            .expect("failed to mount procfs at /proc");
-    }
+    register_common_device_nodes();
+}
 
-    // ── /sys — kernel object filesystem ──
-    {
-        let sys_inode = root.find("sys").unwrap_or_else(|_| {
-            root.create(
-                "sys",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o555),
-            )
-            .expect("failed to create /sys")
-        });
-        let sys_inode_id = sys_inode
-            .metadata()
-            .expect("sys_inode metadata failed")
-            .inode_id;
-        let sysfs = crate::fs::sysfs::SysFS::new();
-        crate::fs::sysfs::files::register_all(sysfs.root())
-            .expect("sysfs: failed to register root entries");
-        let sysfs_mnt = self::vfs::MountFS::new(
-            self::vfs::BackendLifecycle::new(sysfs),
-            self::vfs::MountFlags::empty(),
-        );
-        sysfs_mnt
-            .no_dentry_cache
-            .store(true, core::sync::atomic::Ordering::Relaxed);
-        sysfs_mnt.set_mount_path(Some(alloc::string::String::from("/sys")));
-        if let Some(sys_mfsi) = sys_inode
-            .as_any_ref()
-            .downcast_ref::<self::vfs::MountFSInode>()
-        {
-            let backref = self::vfs::MountFSInode::new(
-                sys_mfsi.inner_inode.clone(),
-                sys_mfsi.mount_fs.clone(),
-            );
-            sysfs_mnt.set_self_mountpoint(Some(backref));
-        }
-        mfs.add_mount(sys_inode_id, sysfs_mnt)
-            .expect("failed to mount sysfs at /sys");
-    }
-
-    // ── /tmp — 临时文件系统（ramfs, 不受配额限制）──
-    {
-        let tmp_inode = root.find("tmp").unwrap_or_else(|_| {
-            root.create(
-                "tmp",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o1777),
-            )
-            .expect("failed to create /tmp")
-        });
-        let tmp_inode_id = tmp_inode
-            .metadata()
-            .expect("tmp_inode metadata failed")
-            .inode_id;
-        let tmpfs = crate::fs::tmpfs::TmpFS::new(); // unlimited for /tmp
-                                                    // 设置挂载后的根 inode 为 01777（sticky bit + 全局可读写）
-        if let Ok(mut meta) = tmpfs.root_inode().metadata() {
-            meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
-            tmpfs.root_inode().set_metadata(&meta).ok();
-        }
-        let tmpfs_mnt = self::vfs::MountFS::new(
-            self::vfs::BackendLifecycle::new(tmpfs),
-            self::vfs::MountFlags::empty(),
-        );
-        tmpfs_mnt.set_mount_path(Some(alloc::string::String::from("/tmp")));
-        if let Some(tmp_mfsi) = tmp_inode
-            .as_any_ref()
-            .downcast_ref::<self::vfs::MountFSInode>()
-        {
-            let backref = self::vfs::MountFSInode::new(
-                tmp_mfsi.inner_inode.clone(),
-                tmp_mfsi.mount_fs.clone(),
-            );
-            tmpfs_mnt.set_self_mountpoint(Some(backref));
-        }
-        mfs.add_mount(tmp_inode_id, tmpfs_mnt)
-            .expect("failed to mount tmpfs at /tmp");
-    }
-    // ── /mnt — 挂载点目录 ──
-    {
-        root.find("mnt").unwrap_or_else(|_| {
-            root.create(
-                "mnt",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o755),
-            )
-            .expect("failed to create /mnt")
-        });
-    }
-    // ── /run — 运行时文件 ──
-    {
-        root.find("run").unwrap_or_else(|_| {
-            root.create(
-                "run",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o755),
-            )
-            .expect("failed to create /run")
-        });
-    }
-    // ── /var/tmp — 临时文件备选 ──
-    {
-        root.find("var").unwrap_or_else(|_| {
-            root.create(
-                "var",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o755),
-            )
-            .expect("failed to create /var")
-        });
-        let var = root.find("var").unwrap();
-        var.find("tmp").unwrap_or_else(|_| {
-            var.create(
-                "tmp",
-                self::vfs::FileType::Dir,
-                self::vfs::InodeMode::from_bits_truncate(0o1777),
-            )
-            .expect("failed to create /var/tmp")
-        });
-    }
+/// Register character devices independently from the user-visible devtmpfs mount.
+fn register_common_device_nodes() {
+    let devfs = crate::fs::dev::DEV_FS.clone();
+    devfs
+        .add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/tty");
+    devfs
+        .add_dev("null", Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/null");
+    devfs
+        .add_dev("zero", Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/zero");
+    devfs
+        .add_dev("urandom", Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/urandom");
+    devfs
+        .add_dev("full", Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/full");
+    devfs
+        .add_dev("random", Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/random");
+    devfs
+        .add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/console");
+    devfs
+        .add_dev("ptmx", Arc::new(crate::fs::dev::pty::PtmxMasterInode) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/ptmx");
+    devfs
+        .add_dev("pts", Arc::new(crate::fs::dev::pty::PtsDirInode) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/pts");
+    devfs
+        .add_dev("rtc", Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/rtc");
+    devfs
+        .add_dev(
+            "cpu_dma_latency",
+            Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>,
+        )
+        .expect("devfs: failed to register /dev/cpu_dma_latency");
+    devfs
+        .add_dir("shm", self::vfs::InodeMode::from_bits_truncate(0o1777))
+        .expect("devfs: failed to register /dev/shm mount point");
+    let misc_dir = devfs
+        .add_dir("misc", self::vfs::InodeMode::from_bits_truncate(0o755))
+        .expect("devfs: failed to register /dev/misc");
+    misc_dir
+        .add_dev("rtc", Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+        .expect("devfs: failed to register /dev/misc/rtc");
 }
 
 /// 启动时挂载块设备上的文件系统。
@@ -921,7 +709,21 @@ pub fn vfs_lookup(
 
 /// 使用新 VFS 解析绝对路径，跟随所有符号链接，返回目标 IndexNode。
 pub fn vfs_lookup_absolute(path: &str) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
-    vfs_lookup(&current_root_inode(), path, true)
+    match vfs_lookup(&current_root_inode(), path, true) {
+        Ok(inode) => Ok(inode),
+        // PID1 receives its console descriptors before it can mount devtmpfs.
+        // Expose only the registered tty device during that bootstrap window;
+        // all normal /dev lookups still require the PID1 devtmpfs mount.
+        Err(_) if path == "/dev/tty" => {
+            use self::vfs::{FileSystem as _, IndexNode as _};
+
+            crate::fs::dev::DEV_FS
+                .root_inode()
+                .find("tty")
+                .map_err(|error| -(error as isize))
+        }
+        Err(errno) => Err(errno),
+    }
 }
 
 /// 使用新 VFS 解析路径，返回 (父目录 IndexNode, 最后一级文件名)。

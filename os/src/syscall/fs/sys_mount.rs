@@ -506,6 +506,7 @@ pub fn sys_mount(
     };
 
     let new_fs: Arc<dyn vfs::FileSystem> = match filesystemtype.as_str() {
+        "devtmpfs" => crate::fs::dev::DEV_FS.clone(),
         "tmpfs" => crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096), // ~16MB default
         "sysfs" => {
             let s = crate::fs::sysfs::SysFS::new();

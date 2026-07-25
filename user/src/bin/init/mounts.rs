@@ -34,10 +34,14 @@ fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -
 }
 
 pub(super) fn mount_pseudo_filesystems() {
+    if try_mount("none\0", "/dev\0", "devtmpfs\0") {
+        // Ensure the devtmpfs cover directory exists before mounting its tmpfs child.
+        let _ = sys_mkdirat(AT_FDCWD, "/dev/shm\0", 0o1777);
+        let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
+    }
     let _ = try_mount("none\0", "/proc\0", "proc\0");
     let _ = try_mount("none\0", "/sys\0", "sysfs\0");
     let _ = try_mount("none\0", "/run\0", "tmpfs\0");
-    let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
 }
 
 pub(super) fn mount_tmpfs(target: &'static str) {

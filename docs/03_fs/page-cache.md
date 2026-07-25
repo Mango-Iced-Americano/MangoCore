@@ -129,7 +129,7 @@ Phase 2（无锁）: 拷贝
     mark_valid_and_check_full()
 ```
 
-单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()` 触发节流检测。
+单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()`，但正常写入只保留 Dirty 页并立即返回；该函数只在紧急内存压力下才启动批量写回。
 
 ## 脏页追踪与回写
 
@@ -146,20 +146,22 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 
 每个 `PageCache` 实例维护 `inner.dirty_pages: BTreeSet<usize>` 记录其脏页索引。脏页计数在 CAS UpToDate → Dirty 成功时递增，在写回完成后递减。
 
-### 节流阈值
+### 紧急写回水位
 
 | 常量 | 值 | 含义 | 动作 |
 |------|-----|------|------|
-| DIRTY_BACKGROUND | 2048 | 后台启动线（约 8MB） | 触发 `maybe_background_writeback` |
-| DIRTY_THROTTLE | 4096 | 写入者节流线（约 16MB） | 写入者同步帮助写回 |
+| DIRTY_EMERGENCY_MIN_PAGES | 65536 | 最低脏页量（256 MiB） | 低于该值时不从 write 路径写回 |
+| DIRTY_EMERGENCY_FREE_RATIO | dirty ≥ free × 3/4 | 物理帧紧急压力线 | `maybe_background_writeback` 批量写回最多 256 页 |
+
+`fsync()`、`fdatasync()`、最后一次 `close()` 和系统关闭仍使用 `writeback_all()` 保证持久化。正常 `write()` 不再因固定脏页阈值进入同步后端 I/O。
 
 ### 写回层级
 
 1. **单页写回** `writeback_page`: CAS Dirty → Writeback，调 `backend.write_page`，完成后检查 PG_REDIRTIED
 2. **批量写回** `writeback_pages_run`: 连续脏页组收集 → 统一 CAS → 调 `backend.write_pages`
 3. **全量写回** `writeback_all`: 扫描所有脏页，分组为连续 run 依次提交
-4. **合作写回** `maybe_background_writeback`: 调度器 reclaim hook 每 64 tick 触发一次，遍历 registry 所有 PageCache
-5. **写入者节流** `balance_dirty_pages`: 超过 DIRTY_THROTTLE 时，写入者主动写回一批脏页
+4. **合作写回** `maybe_background_writeback`: 仅在紧急脏页/空闲帧比率达到水位时遍历 registry 并写回
+5. **紧急检查** `balance_dirty_pages`: 每次 write 后只检查内存压力；未达紧急水位时不执行写回
 
 写回失败的处理：页面恢复为 Dirty 状态，全局计数回退，等待下次写回重试。
 
@@ -182,7 +184,7 @@ hand 指针循环扫描 entries[]
 
 Sweep 扫描上限为 `min(len*2, target*16 + 64)`，防止失控。收回的页在 `inner.pages` 中同步移除，entries 数组末尾的 `None` 槽被截断。
 
-注意：以下回收水位线与脏页节流阈值（DIRTY_BACKGROUND/DIRTY_THROTTLE）是两个独立的机制。脏页阈值触发写回（将脏页写入后端），而回收水位线触发 LRU/Clock 淘汰干净页以释放内存。两者互不依赖。
+注意：以下回收水位线与脏页紧急水位是两个独立的机制。紧急水位只在脏页占用大量可用帧时触发后端写回；回收水位线触发 LRU/Clock 淘汰干净页。两者互不依赖。
 
 ### 干净页回收水位线
 
@@ -196,7 +198,7 @@ Sweep 扫描上限为 `min(len*2, target*16 + 64)`，防止失控。收回的页
 
 ```
 maybe_reclaim_fs_caches:
-  1. maybe_background_writeback()          // 先刷脏页
+   1. maybe_background_writeback()          // 仅紧急内存压力时刷脏页
   2. compact_fifo_registry()               // pipe fifo 清理
   3. EXT4_REGISTRY 弱引用清理
   4. prune_inode_objects_budgeted()        // inode 对象回收
