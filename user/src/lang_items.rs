@@ -2,23 +2,17 @@ use super::exit;
 
 #[panic_handler]
 fn panic_handler(panic_info: &core::panic::PanicInfo) -> ! {
-    match (panic_info.location(), panic_info.message()) {
-        (Some(location), Some(message)) => {
+    match panic_info.location() {
+        Some(location) => {
             println!(
                 "Panicked at {}:{}, {}",
                 location.file(),
                 location.line(),
-                message
+                panic_info.message()
             );
         }
-        (Some(location), None) => {
-            println!("Panicked at {}:{}", location.file(), location.line());
-        }
-        (None, Some(message)) => {
-            println!("Panicked: {}", message);
-        }
-        (None, None) => {
-            println!("Panicked");
+        None => {
+            println!("Panicked: {}", panic_info.message());
         }
     }
     exit(-1);

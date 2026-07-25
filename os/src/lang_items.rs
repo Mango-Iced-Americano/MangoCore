@@ -5,15 +5,17 @@ use core::panic::PanicInfo;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    match (info.location(), info.message()) {
-        (Some(location), Some(message)) => {
-            println!("[kernel] panicked at {}: {}:{}:{}", message, location.file(), location.line(), location.column());
+    match info.location() {
+        Some(location) => {
+            println!(
+                "[kernel] panicked at {}: {}:{}:{}",
+                info.message(),
+                location.file(),
+                location.line(),
+                location.column()
+            );
         }
-        (Some(location), None) => {
-            println!("[kernel] panicked at {}:{}:{}", location.file(), location.line(), location.column());
-        }
-        (None, Some(message)) => println!("[kernel] panicked: {}", message),
-        (None, None) => println!("[kernel] panicked"),
+        None => println!("[kernel] panicked: {}", info.message()),
     }
     crate::panic_diag::dump_panic_context();
     shutdown()

@@ -88,6 +88,7 @@ gmac_dhcp = []
 net_perf_diag = []
 net_ack_immediate = []
 initramfs = []
+preload_payloads = []
 
 # LoongArch Boards:
 loongarch64 = []
