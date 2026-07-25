@@ -16,6 +16,7 @@ const SBI_REMOTE_FENCE_I: usize = 5;
 const SBI_REMOTE_SFENCE_VMA: usize = 6;
 const SBI_REMOTE_SFENCE_VMA_ASID: usize = 7;
 const SBI_SHUTDOWN: usize = 8;
+const SBI_SRST: usize = 0x5352_5354;
 
 #[inline(always)]
 /// `ecall` wrapper to switch trap into S level.
@@ -109,4 +110,12 @@ pub fn console_write_bytes(data: &[u8]) {
 pub fn shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
     panic!("It should shutdown!");
+}
+
+/// Cold reboot via SBI SRST extension (EID 0x53525354, FID 0).
+/// Falls back to shutdown if SRST is not supported by the firmware.
+pub fn reboot() -> ! {
+    sbi_call(SBI_SRST, 1, 0, 0); // reset_type=1 (cold), reason=0
+    // If SRST not supported, fall back to shutdown.
+    shutdown();
 }

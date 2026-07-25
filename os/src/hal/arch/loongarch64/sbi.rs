@@ -69,3 +69,7 @@ pub fn shutdown() -> ! {
     }
     loop {}
 }
+
+pub fn reboot() -> ! {
+    shutdown()
+}
