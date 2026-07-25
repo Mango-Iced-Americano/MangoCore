@@ -1,423 +1,210 @@
-# Building
-TARGET := loongarch64-unknown-linux-gnu
-MODE := release
-KERNEL_ELF := target/$(TARGET)/$(MODE)/os
-KERNEL_BIN := $(KERNEL_ELF).bin
-KERNEL_UIMG := $(KERNEL_ELF).ui
-BLK_MODE := virt_pci
-FS_MODE ?= ext4
-ROOTFS_IMG_NAME = rootfs-la.img
-ROOTFS_IMG_DIR := ../fs-img-dir
-# One value drives both Cargo and every parameterized QEMU entry point.
-# Keep non-QEMU boards at the default of one until a board-specific caller
-# deliberately opts into a supported QEMU topology.
-CORE_NUM ?= 1
-VALID_CORE_NUMS := 1 2 4 8
-ifeq ($(filter $(CORE_NUM),$(VALID_CORE_NUMS)),)
-$(error CORE_NUM must be one of $(VALID_CORE_NUMS), got '$(CORE_NUM)')
-endif
-export MANGO_CORE_NUM := $(CORE_NUM)
-LOG ?= off
-VIRTIO_RNG_DEVICE := -device virtio-rng-pci
-KERNEL_LA := ../kernel-la
-SDCARD_LA := ../sdcard-la.img
-DISK_LA := ../disk-la.img
-P4_QEMU_DISK := ../mango-2k1000la-p4-qemu.img
+include make/common/toolchain.mk
+include make/image-roles.mk
+include make/arch/la64-settings.mk
+include make/common/orchestration.mk
+include make/qemu-profiles.mk
 
-# Avoid rustup/toolchain and generated-file races when a caller supplies -j.
-.NOTPARALLEL:
+QEMU_EXECUTABLE = qemu-system-loongarch64
+QEMU_ROLE_ARCH = LA64
+QEMU_COMPETITION_X0 = $(IMAGE_ROLE_LA64_COMPETITION_X0)
+QEMU_DERIVED_X0 = $(IMAGE_ROLE_LA64_DERIVED_X0)
+QEMU_DEVELOPMENT_X0 = $(IMAGE_ROLE_LA64_DEVELOPMENT_X0)
+QEMU_COMPETITION_BEFORE_DRIVES = -kernel $(KERNEL_LA) -m 1G $(QEMU_SMP_ARGS)
+QEMU_COMPETITION_AFTER_DRIVES = -no-reboot $(NET_DEV) -rtc base=utc
+QEMU_COMPETITION_GDB_BEFORE_DRIVES = -kernel $(KERNEL_LA) -m 1024 -smp 1
+QEMU_COMPETITION_GDB_AFTER_DRIVES = -no-reboot -rtc base=utc -S -s
+QEMU_DEVELOPMENT_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
+QEMU_DEVELOPMENT_AFTER_DRIVES = -m 1024 $(QEMU_SMP_ARGS)
+QEMU_REGRESSION_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
+QEMU_REGRESSION_AFTER_DRIVES = -m 1024 $(QEMU_SMP_ARGS)
+# LoongArch QEMU loads the ELF directly.  Unlike RV64, this architecture has
+# no BOOTLOADER value; pairing an empty `-bios` with `-device loader,...`
+# makes QEMU consume the loader device text as a firmware filename.
+QEMU_KTEST_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
+QEMU_KTEST_AFTER_DRIVES = -m 1024 $(QEMU_SMP_ARGS)
 
-# ============================================================
-# lwext4 C library (la64: uses pre-installed cross-compiler)
-# ============================================================
-LWEXT4_LA_DIR := ../dependency/lwext4_rust/c/lwext4
-LWEXT4_LA_LIB := $(LWEXT4_LA_DIR)/liblwext4-loongarch64.a
-LWEXT4_LA_TOOLCHAIN_PATH := /opt/gcc-13.2.0-loongarch64-linux-gnu/bin
-# Prerequisites for archive rebuild invalidation
-LWEXT4_LA_SRCS := $(wildcard $(LWEXT4_LA_DIR)/src/*.c)
-LWEXT4_LA_HDRS := $(wildcard $(LWEXT4_LA_DIR)/include/*.h) $(wildcard $(LWEXT4_LA_DIR)/include/misc/*.h)
-LWEXT4_LA_CMAKE_INPUTS := $(LWEXT4_LA_DIR)/CMakeLists.txt \
-                          $(LWEXT4_LA_DIR)/src/CMakeLists.txt \
-                          ../dependency/lwext4_rust/c/elf-linux-gnu.cmake \
-                          ../dependency/lwext4_rust/c/ulibc.c
+BOARD_2K1000_ARTIFACT_ROOT ?= $(PRODUCT_ROOT)/board/2k1000
+BOARD_2K1000_TEST_CONFIG ?= $(abspath ../os_test.conf)
+LA64_LINKER_RUSTFLAGS = -C link-arg=-nostdlib -C link-arg=-static -C force-frame-pointers=yes -C link-arg=-T$(abspath $(LINKER_SCRIPT))
 
 lwext4-la64: $(LWEXT4_LA_LIB)
 
-$(LWEXT4_LA_LIB): $(LWEXT4_LA_SRCS) $(LWEXT4_LA_HDRS) $(LWEXT4_LA_CMAKE_INPUTS)
+$(LWEXT4_LA_PREPARED): $(LWEXT4_LA_INPUTS)
+	@rm -rf $(LWEXT4_LA_SOURCE_DIR) $(LWEXT4_LA_BUILD_DIR)
+	@mkdir -p $(LWEXT4_LA_SOURCE_DIR)
+	@tar -C $(LWEXT4_LA_DIR) --exclude='build_*' -cf - . | tar -C $(LWEXT4_LA_SOURCE_DIR) -xf -
+	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_SOURCE_DIR)/src/ulibc.c
+	@touch $@
+
+$(LWEXT4_LA_LIB): $(LWEXT4_LA_PREPARED)
 	@echo "=== Building lwext4 C library for loongarch64 ==="
-	@cp -f ../dependency/lwext4_rust/c/elf-linux-gnu.cmake $(LWEXT4_LA_DIR)/toolchain/musl-generic.cmake
-	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_DIR)/src/ulibc.c
-	@grep -q 'ulibc.c' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
-		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
-	@grep -q '$${M_SRC}' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
-		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
-	@mkdir -p $(LWEXT4_LA_DIR)/build_lwext4-la64
 	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
 	 ARCH=loongarch64 cmake -G"Unix Makefiles" \
 	   -DCMAKE_BUILD_TYPE=Release \
 	   -DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
 	   -DLWEXT4_BUILD_SHARED_LIB=OFF \
 	   -DLIB_ONLY=TRUE \
-	   -DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
-	   -S $(LWEXT4_LA_DIR) \
-	   -B $(LWEXT4_LA_DIR)/build_lwext4-la64 2>&1 | tail -5
+	   -DCMAKE_TOOLCHAIN_FILE=$(abspath $(LWEXT4_LA_CMAKE)) \
+	   -S $(LWEXT4_LA_SOURCE_DIR) \
+	   -B $(LWEXT4_LA_BUILD_DIR)
 	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
-	 $(MAKE) -C $(LWEXT4_LA_DIR)/build_lwext4-la64 lwext4 -j$$(nproc)
-	@cp -f $(LWEXT4_LA_DIR)/build_lwext4-la64/src/liblwext4.a $(LWEXT4_LA_LIB)
+	 cmake --build $(LWEXT4_LA_BUILD_DIR) --target lwext4 --parallel $$(nproc)
+	@cp -f $(LWEXT4_LA_BUILD_DIR)/src/liblwext4.a $(LWEXT4_LA_LIB)
 	@echo "=== lwext4 loongarch64 .a built ==="
-
-# BOARD
-BOARD ?= laqemu
-# 开发板型号同时决定链接地址和早期入口实现。这里必须保留独立的板级链接脚本来源；
-# 如果静默复用上一次 QEMU/2K1000 构建遗留的 linker.ld，可能得到格式正确但绝对地址
-# 不适用于当前机器的 ELF。
-LINKER_SCRIPT := src/hal/arch/loongarch64/linker-$(BOARD).ld
-
-# Logging
-ifndef LOG
-	LOG_OPTION := "log_off"
-else
-	LOG_OPTION := "log_${LOG}"
-endif
-
-# Kernel entry (for -device loader fallback)
-KERNEL_ENTRY_PA := 0x9000000090000000
-
-# Binutils (cross toolchain, not llvm)
-OBJCOPY := loongarch64-linux-gnu-objcopy
-OBJDUMP := loongarch64-linux-gnu-objdump
-READELF := loongarch64-linux-gnu-readelf
-
-# uImage 配置。
-# 传统 uImage 的装载地址和入口字段只有 32 位。2K1000 的 U-Boot 会在跳转前
-# 通过 DMW 将物理地址映射到 0x9000... 缓存别名，因此镜像头必须填写低物理地址。
-ifeq ($(BOARD), 2k1000)
-LA_LOAD_ADDR := 0x90000000
-LA_ENTRY_POINT := 0x90000000
-else
-LA_LOAD_ADDR := 0x9000000090000000
-LA_ENTRY_POINT := 0x9000000090000000
-endif
-
-# Applications
-APPS := ../user/src/bin/*
-
-# RootFS image
-ifeq ($(BOARD), laqemu)
-	ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
-endif
 
 # ============================================================
 # Targets (symmetric with rv64.mk)
 # ============================================================
 
-all: fs-img build
+all: toolchain-preflight fs-img build
 
 debug: build mv-debug
 
-mv:
+stage-kernel:
+	@mkdir -p $(dir $(KERNEL_LA))
 	cp -f $(KERNEL_ELF) $(KERNEL_LA)
+
+mv: stage-kernel
+	@echo "[deprecated] mv stages the LA64 kernel; root publication happens only after make all succeeds"
 
 mv-debug:
 	cp -f $(KERNEL_ELF) $(KERNEL_LA)
 
-build: env $(KERNEL_BIN) mv
+build: env $(KERNEL_BIN) stage-kernel
 
-env:
-	(rustup target list | grep "$(TARGET) (installed)") || rustup target add $(TARGET)
-	rustup component add rust-src
+toolchain-preflight:
+	@sh ../scripts/rustup-preflight.sh
+
+env: toolchain-preflight
 
 # Build all user programs
-user:
-	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE)
+user: toolchain-preflight
+	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE) USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)"
 
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
 $(APPS):
 
-fs-img: user
-	./buildfs.sh "$(ROOTFS_IMG)" "$(BOARD)" $(MODE) $(FS_MODE)
+fs-img: toolchain-preflight user
+	@mkdir -p $(dir $(ROOTFS_IMG))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_rootfs.sh "$(ROOTFS_IMG)" "$(BOARD)" $(MODE) $(FS_MODE)
 
-# Initramfs cpio generation — parameterized for normal / regression profiles
-INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
-REGRESSION_CPIO_LA := ../fs-img-dir/initramfs-regression-la.cpio
-CURL_RUNTIME ?= 0
-APK_RUNTIME ?= 0
-INET_TEST_RUNTIME ?= 0
-RNG_TEST_RUNTIME ?= 0
-# Only P4-enabled images carry the strict persistent Python policy resources.
-# Custom images can still override this explicitly on the make command line.
-PERSIST_PYTHON_RUNTIME ?= $(if $(filter p4_persist_rw,$(EXTRA_FEATURES)),1,0)
-
-INITRAMFS_PROFILE ?= normal
-ifeq ($(INITRAMFS_PROFILE),regression)
-  KERNEL_INITRAMFS_CPIO_LA := $(REGRESSION_CPIO_LA)
-  INITRAMFS_PROFILE_FEATURES := regression_initramfs
-else
-  KERNEL_INITRAMFS_CPIO_LA := $(INITRAMFS_CPIO_LA)
-  INITRAMFS_PROFILE_FEATURES :=
-endif
-
-KERNEL_CMDLINE ?= mango.mode=normal
+kernel: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 
 $(INITRAMFS_CPIO_LA): user
-	@mkdir -p ../fs-img-dir
-	CURL_RUNTIME=$(CURL_RUNTIME) APK_RUNTIME=$(APK_RUNTIME) \
-		INET_TEST_RUNTIME=$(INET_TEST_RUNTIME) \
-		RNG_TEST_RUNTIME=$(RNG_TEST_RUNTIME) \
-		PERSIST_PYTHON_RUNTIME=$(PERSIST_PYTHON_RUNTIME) \
-		./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
-	@touch src/initramfs-la.S
+	@mkdir -p $(dir $(INITRAMFS_CPIO_LA))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 
 $(REGRESSION_CPIO_LA): user
-	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh la64 $(MODE) $(REGRESSION_CPIO_LA) regression
-	@touch src/initramfs-regression-la.S
+	@mkdir -p $(dir $(REGRESSION_CPIO_LA))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh la64 $(MODE) $(REGRESSION_CPIO_LA) regression
 
-# lwext4: always build C library (now the default ext4 backend)
-export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_LA_DIR))
-LWEXT4_LA_PREREQ := lwext4-la64
-
-kernel: $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ)
+kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
-	# 在调用 rustc 前直接失败，避免继续使用过期的 linker.ld 编译。
 	@test -f $(LINKER_SCRIPT) || { echo "missing linker script: $(LINKER_SCRIPT)" >&2; exit 1; }
-	@cp -f $(LINKER_SCRIPT) src/hal/arch/loongarch64/linker.ld
 ifeq ($(MODE), debug)
-	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 endif
 
 # uImage (la64-specific: for uboot boot)
 uimage: $(KERNEL_BIN)
+	@mkdir -p $(dir $(KERNEL_UIMG))
 	../util/mkimage -A loongarch -O linux -T kernel -C none \
 	  -a $(LA_LOAD_ADDR) -e $(LA_ENTRY_POINT) \
-	  -n MangoCore -d $(KERNEL_BIN) $(KERNEL_UIMG)
+	  -n NPUcore+ -d $(KERNEL_BIN) $(KERNEL_UIMG)
+
+# Real-board images retain the historical target names, but build only through
+# the ARCH=la64 parameterized makefile and declared product/image-role inputs.
+la64-2k1000-run-clean:
+	@grep -Eq '^mode=run$$' "$(BOARD_2K1000_TEST_CONFIG)" || { echo "os_test.conf must contain mode=run" >&2; exit 1; }
+	@$(MAKE) ARCH=la64 PROFILE=normal -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-run.ui"
+
+la64-2k1000-core-tests:
+	@grep -Eq '^mode=run$$' "$(BOARD_2K1000_TEST_CONFIG)" || { echo "os_test.conf must contain mode=run" >&2; exit 1; }
+	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off EXTRA_FEATURES="sata_scratch_rw board_core_test" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-core-tests.ui"
+
+la64-2k1000-shell:
+	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=virt MODE=$(MODE) LOG=off EXTRA_FEATURES="gmac_2k1000 board_shell" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-shell.ui"
+
+la64-2k1000-apk-persist-shell:
+	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off APK_RUNTIME=1 EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-persist-shell.ui"
 
 clean:
-	@which cargo >/dev/null 2>&1 && cargo clean || true
-	@rm -rf $(KERNEL_LA)
-	@rm -rf $(LWEXT4_LA_DIR)/build_lwext4-la64 $(LWEXT4_LA_LIB)
+	@rm -rf "$(KERNEL_OUTPUT_ROOT)" "$(LWEXT4_LA_OUTPUT_DIR)"
 
 # ============================================================
 # QEMU run targets
 # ============================================================
 
-run: build
+check-development-x0:
+	@python3 ../scripts/image_roles.py validate-mutable --repo-root .. --arch la64 --path "$(IMAGE_ROLE_LA64_DEVELOPMENT_X0)" >/dev/null
+
+run: toolchain-preflight build check-development-x0
 ifeq ($(BOARD), laqemu)
-	@qemu-system-loongarch64 \
-		-accel tcg,thread=multi \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		$(VIRTIO_RNG_DEVICE) \
-		-m 1024 \
-		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+	@$(call qemu_profile_command,development)
 endif
 
-runsimple:
-	@qemu-system-loongarch64 \
-		-accel tcg,thread=multi \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		$(VIRTIO_RNG_DEVICE) \
-		-m 1024 \
-		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+runsimple: toolchain-preflight check-development-x0
+	@$(call qemu_profile_command,development)
 
-comp:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel $(KERNEL_LA) \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		$(VIRTIO_RNG_DEVICE) \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+comp: toolchain-preflight
+	@$(call qemu_profile_command,competition)
 
-# Focused HTTPS shell runner. The official disk is exposed through a QEMU
-# snapshot so interactive TLS testing cannot modify the checked-in test image;
-# all curl and CA files come from initramfs.
-qemu-curl-shell:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel ../kernel-la-curl-shell \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0,snapshot=on \
-		-device virtio-blk-pci,drive=x0 \
-		$(VIRTIO_RNG_DEVICE) \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+derived-comp: toolchain-preflight
+	@python3 ../scripts/image_roles.py validate-derived --repo-root .. --arch la64 --path "$(IMAGE_ROLE_LA64_DERIVED_X0)" >/dev/null
+	@$(call qemu_profile_command,derived-competition)
 
-# Automated APK gate. The package manager itself is embedded in initramfs and
-# all disk writes stay in QEMU snapshot/RAM state.
-qemu-apk-tests:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel ../kernel-la-apk-tests \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0,snapshot=on \
-		-device virtio-blk-pci,drive=x0 \
-		$(VIRTIO_RNG_DEVICE) \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+comp-gdb: toolchain-preflight
+	@$(call qemu_competition_gdb_command)
 
-# Persistent P4 runner deliberately avoids snapshot=on. Re-running this target
-# against the same fixture validates that the committed APK tree survives a
-# complete kernel reboot.
-qemu-apk-persist-tests:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel ../kernel-la-apk-persist-tests \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(P4_QEMU_DISK),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		$(VIRTIO_RNG_DEVICE) \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only check-development-x0 derived-comp la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
 
-qemu-apk-persist-shell:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel ../kernel-la-apk-persist-shell \
-		-m 1G \
-		-nographic \
-		-smp 1 \
-		-drive file=$(P4_QEMU_DISK),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		$(VIRTIO_RNG_DEVICE) \
-		-no-reboot \
-		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0 \
-		-rtc base=utc
+ifeq ($(MODE),release)
+CHECK_RELEASE_FLAG := --release
+endif
 
-comp-gdb:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-kernel $(KERNEL_LA) \
-		-m 1024 \
-		-nographic \
-		-smp 1 \
-		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
-		-device virtio-blk-pci,drive=x1 \
-		$(VIRTIO_RNG_DEVICE) \
-		-no-reboot \
-		-rtc base=utc \
-		-S \
-		-s
-
-.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb \
-	qemu-curl-shell qemu-apk-tests qemu-apk-persist-tests \
-	qemu-apk-persist-shell ktest-run regression-run
+check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) \
+		cargo check $(CHECK_RELEASE_FLAG) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
 # ─────────────────────────────────────────────────────────
 #  L3 Kernel self-test (mango.mode=ktest)
 # ─────────────────────────────────────────────────────────
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
-KTEST_EXT4_IMG_LA ?= /tmp/mango-lwext4-ktest-la.img
-KTEST_EXT4_FEATURES ?= ^has_journal
-KTEST_EXT4_BLOCK_SIZE ?= 4096
-KTEST_EXT4_REUSE ?= 0
-KTEST_POST_FSCK ?= 1
-.PHONY: ktest-ext4-image
-ktest-ext4-image:
-ifeq ($(KTEST_EXT4_REUSE),0)
-	@truncate -s 64M $(KTEST_EXT4_IMG_LA)
-	@mke2fs -q -t ext4 -F -b $(KTEST_EXT4_BLOCK_SIZE) -m 0 -O $(KTEST_EXT4_FEATURES) $(KTEST_EXT4_IMG_LA)
-	@e2fsck -f -n $(KTEST_EXT4_IMG_LA) >/dev/null
-else
-	@test -f $(KTEST_EXT4_IMG_LA) || { echo "missing reusable ktest image: $(KTEST_EXT4_IMG_LA)" >&2; exit 1; }
-endif
-
-ktest-run: $(INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ) ktest-ext4-image
+ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
-	@test -f $(LINKER_SCRIPT) || { echo "missing linker script: $(LINKER_SCRIPT)" >&2; exit 1; }
-	@cp -f $(LINKER_SCRIPT) src/hal/arch/loongarch64/linker.ld
-ifeq ($(MODE), debug)
-	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
-		cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
-else
-	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
 		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
-endif
+
+ktest-run: toolchain-preflight ktest-build-only
+	@if [ "x$(KTEST_FIXTURE)" = "xborrows-initproc" ]; then \
+		echo "[ktest-fixture] borrows-initproc: checking ktest is independent of INITPROC.process..."; \
+		ktest_refs=$$(grep -n 'INITPROC\.process' ../os/src/task/mod.rs ../os/src/task/task.rs 2>/dev/null | grep -i 'spawn_ktest\|new_ktest\|ktest_trampoline\|zombify_ktest\|KTEST'); \
+		if [ -n "$$ktest_refs" ]; then \
+			echo "FAIL: KTEST_FIXTURE=borrows-initproc — INITPROC.process referenced in ktest code path:" >&2; \
+			echo "$$ktest_refs" >&2; exit 1; \
+		fi; \
+		echo "PASS: KTEST_FIXTURE=borrows-initproc — ktest is independent of INITPROC"; \
+	fi
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 \
-		-accel tcg,thread=multi \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-drive if=none,file=$(KTEST_EXT4_IMG_LA),format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-m 1024 \
-		-smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
-ifeq ($(KTEST_POST_FSCK),1)
-	@e2fsck -f -n $(KTEST_EXT4_IMG_LA)
-endif
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest)
 
-# ─────────────────────────────────────────────────────────
-#  L4 User-mode regression test (mango.mode=regression)
-# ─────────────────────────────────────────────────────────
-# Builds minimal initramfs with /init=regression_init and
-# /regression. Launches QEMU with a disposable ext4 drive. Parses
-# console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
-REGRESSION_CMDLINE := mango.mode=regression
-REGRESSION_EXT4_IMG_LA ?= /tmp/mango-lwext4-regression-la.img
-REGRESSION_LOG_LA ?= /tmp/regression-la.log
-REGRESSION_STATUS_LA ?= /tmp/regression-la.status
-.PHONY: regression-ext4-image regression-run
-
-regression-ext4-image:
-	@truncate -s 64M $(REGRESSION_EXT4_IMG_LA)
-	@mke2fs -q -t ext4 -F -b 4096 -m 0 -O ^has_journal $(REGRESSION_EXT4_IMG_LA)
-	@e2fsck -f -n $(REGRESSION_EXT4_IMG_LA) >/dev/null
-
-regression-run: regression-ext4-image
+regression-run: toolchain-preflight
 	@echo "[regression] Building la64 kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU with disposable ext4 fixture (timeout 60s)..."
-	@{ timeout --foreground 60 qemu-system-loongarch64 \
-		-machine virt \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-drive file=$(REGRESSION_EXT4_IMG_LA),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-m 1024 \
-			-smp threads=1; echo "$$?" > $(REGRESSION_STATUS_LA); } \
-			2>&1 | tee $(REGRESSION_LOG_LA)
-	@e2fsck -f -n $(REGRESSION_EXT4_IMG_LA)
-	@test "$$(cat $(REGRESSION_STATUS_LA))" -eq 0 \
-		&& grep -q "L4 REGRESSION RESULT: PASS" $(REGRESSION_LOG_LA) \
-		&& echo "=== REGRESSION PASS ===" \
-		|| (echo "=== REGRESSION FAIL ===" && exit 1)
+	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
+	@timeout --foreground 60 $(call qemu_profile_command,regression) >/tmp/regression-la.log 2>&1; \
+	qemu_status=$$?; \
+	cat /tmp/regression-la.log; \
+	state=$$(../scripts/check-la64-regression-log.sh /tmp/regression-la.log $$qemu_status); \
+	printf '%s\n' "$$state"; \
+	case "$$state" in \
+		"STATE=PASS STATUS=0") echo "=== REGRESSION PASS ==="; exit 0 ;; \
+		"STATE=BLOCKED_STAGE1_PRE_ENTRY STATUS="*|"STATE=BLOCKED_STAGE1_POST_ENTRY STATUS="*) echo "=== REGRESSION BLOCKED ==="; exit 1 ;; \
+		*) echo "=== REGRESSION FAIL ==="; exit 1 ;; \
+	esac

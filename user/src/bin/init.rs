@@ -1,336 +1,309 @@
 #![no_std]
 #![no_main]
+
 extern crate alloc;
-
 use alloc::format;
-use user_lib::*;
-use user_lib::syscall::{sys_fsync, sys_ftruncate, sys_mkdirat, sys_unlinkat};
-use user_lib::syscall::sys_clock_settime;
-use user_lib::syscall::TimeSpec;
+use core::sync::atomic::{AtomicBool, Ordering};
+use user_lib::syscall::{sys_mkdirat, sys_mount};
+use user_lib::{
+    exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
+    waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
+};
 
+const PID1: isize = 1;
+const RUNNER: &str = "/test-runner\0";
+const RESCUE_SHELL: &str = "/rescue/sh\0";
+const SIGACTION_RESTART: usize = 0x10000000;
 const MS_BIND: usize = 4096;
-const AT_FDCWD: isize = -100;
-const NTP_ATTEMPTS: usize = 2;
-const NTP_TIMEOUT_MS: usize = 3_000;
-const NTP_POLL_MS: usize = 50;
-const MIN_VALID_BUILD_EPOCH: usize = 1_704_067_200; // 2024-01-01 UTC
-const ENOENT: isize = -2;
-const AT_REMOVEDIR: u32 = 0x200;
+static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-fn run_scratch_rw_smoke() -> Result<bool, ()> {
-    const DIR: &str = "/scratch/MANGO_USR_PROBE\0";
-    const FILE: &str = "/scratch/MANGO_USR_PROBE/PAYLOAD.BIN\0";
-    const PAYLOAD_LEN: usize = 6144;
-    const TRUNCATED_LEN: usize = 2048;
+extern "C" fn on_sigchld(_signal: i32) {
+    CHILD_EVENT.store(true, Ordering::Release);
+}
 
-    let mkdir_ret = sys_mkdirat(AT_FDCWD, DIR, 0o755);
-    if mkdir_ret == ENOENT {
-        println!("[scratch-smoke] /scratch absent, skipping");
-        return Ok(false);
-    }
-    if mkdir_ret != 0 {
-        println!("[scratch-smoke] mkdir failed: {}", mkdir_ret);
-        return Err(());
-    }
+extern "C" fn on_shutdown(_signal: i32) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+}
 
-    let mut expected = alloc::vec![0u8; PAYLOAD_LEN];
-    for (index, byte) in expected.iter_mut().enumerate() {
-        *byte = 0x73 ^ (index as u8).wrapping_mul(0x29) ^ ((index >> 8) as u8);
-    }
+fn handler_address(handler: extern "C" fn(i32)) -> usize {
+    handler as *const () as usize
+}
 
-    let fd = open(FILE, OpenFlags::CREATE | OpenFlags::RDWR | OpenFlags::TRUNC);
-    if fd < 0 {
-        println!("[scratch-smoke] open for write failed: {}", fd);
-        return Err(());
-    }
-    let written = write(fd as usize, &expected);
-    if written != PAYLOAD_LEN as isize {
-        println!("[scratch-smoke] write failed: {}", written);
-        close(fd as usize);
-        return Err(());
-    }
-    if sys_fsync(fd as usize) != 0 {
-        println!("[scratch-smoke] fsync failed");
-        close(fd as usize);
-        return Err(());
-    }
-    if sys_ftruncate(fd as usize, TRUNCATED_LEN as isize) != 0 {
-        println!("[scratch-smoke] ftruncate failed");
-        close(fd as usize);
-        return Err(());
-    }
-    if sys_fsync(fd as usize) != 0 || close(fd as usize) != 0 {
-        println!("[scratch-smoke] final sync/close failed");
-        return Err(());
-    }
+fn install_signal_handlers() {
+    let child = SigAction {
+        handler: handler_address(on_sigchld),
+        flags: SIGACTION_RESTART,
+        restorer: 0,
+        mask: 0,
+    };
+    let shutdown_action = SigAction {
+        handler: handler_address(on_shutdown),
+        flags: SIGACTION_RESTART,
+        restorer: 0,
+        mask: 0,
+    };
+    let _ = sigaction(SIGCHLD, &child);
+    let _ = sigaction(SIGINT, &shutdown_action);
+    let _ = sigaction(SIGTERM, &shutdown_action);
+}
 
-    let fd = open(FILE, OpenFlags::RDONLY);
-    if fd < 0 {
-        println!("[scratch-smoke] reopen failed: {}", fd);
-        return Err(());
+fn reap_orphans() {
+    let mut status = 0;
+    while waitpid_wnohang(-1, &mut status) > 0 {}
+    CHILD_EVENT.store(false, Ordering::Release);
+}
+
+fn prepare_pseudo_fs_framework() {
+    const AT_FDCWD: isize = -100;
+    for path in [
+        "/dev\0",
+        "/proc\0",
+        "/sys\0",
+        "/run\0",
+        "/tmp\0",
+        "/dev/shm\0",
+    ] {
+        let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
     }
-    let mut actual = alloc::vec![0u8; TRUNCATED_LEN];
-    let read_len = read(fd as usize, &mut actual);
-    let mut eof = [0u8; 1];
-    let eof_len = read(fd as usize, &mut eof);
-    close(fd as usize);
-    if read_len != TRUNCATED_LEN as isize
-        || actual.as_slice() != &expected[..TRUNCATED_LEN]
-        || eof_len != 0
-    {
+    println!("[init] pseudo-fs mount framework ready");
+}
+
+fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
+    let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
+    if result < 0 {
         println!(
-            "[scratch-smoke] persisted data mismatch: read={} eof={}",
-            read_len, eof_len
+            "[init] mount {} at {} failed: {}",
+            fstype.trim_end_matches('\0'),
+            target.trim_end_matches('\0'),
+            result
         );
-        return Err(());
+        return false;
     }
-
-    let unlink_ret = sys_unlinkat(AT_FDCWD, FILE, 0);
-    if unlink_ret != 0 {
-        println!("[scratch-smoke] unlink failed: {}", unlink_ret);
-        return Err(());
-    }
-    let rmdir_ret = sys_unlinkat(AT_FDCWD, DIR, AT_REMOVEDIR);
-    if rmdir_ret != 0 {
-        println!("[scratch-smoke] rmdir failed: {}", rmdir_ret);
-        return Err(());
-    }
-    println!("[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir");
-    Ok(true)
+    true
 }
 
-fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
-    let src_c = format!("{}\0", source);
-    let tgt_c = format!("{}\0", target);
-    let fs_c = format!("{}\0", fstype);
-    mount(src_c.as_ptr(), tgt_c.as_ptr(), fs_c.as_ptr(), flags, data)
+fn mount_pseudo_filesystems() {
+    let _ = try_mount("none\0", "/proc\0", "proc\0");
+    let _ = try_mount("none\0", "/sys\0", "sysfs\0");
+    let _ = try_mount("none\0", "/run\0", "tmpfs\0");
+    let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
 }
 
-fn wait_child_bounded(pid: isize, timeout_ms: usize) -> Option<i32> {
-    let mut status: i32 = 0;
-    let mut waited = 0usize;
-    while waited < timeout_ms {
-        let ret = waitpid_wnohang(pid, &mut status);
-        if ret == pid {
-            return Some(status);
-        }
-        if ret < 0 {
-            println!("[init] waitpid_wnohang pid={} failed ret={}", pid, ret);
-            return None;
-        }
-        sleep(NTP_POLL_MS);
-        waited += NTP_POLL_MS;
-    }
-
-    println!("[init] ntpd pid={} timed out after {}ms, killing", pid, timeout_ms);
-    let _ = kill(pid as usize, SIGKILL);
-    for _ in 0..20 {
-        let ret = waitpid_wnohang(pid, &mut status);
-        if ret == pid {
-            return Some(status);
-        }
-        if ret < 0 {
-            return None;
-        }
-        sleep(10);
-    }
-    None
+fn mount_disk(source: &'static str, target: &'static str) -> bool {
+    try_mount(source, target, "ext4\0") || try_mount(source, target, "fat32\0")
 }
 
-fn read_build_epoch() -> Option<usize> {
-    let fd = open("/etc/build-epoch\0", OpenFlags::RDONLY);
-    if fd < 0 {
-        return None;
-    }
-
-    let mut buf = [0u8; 32];
-    let read_len = read(fd as usize, &mut buf);
-    close(fd as usize);
-    if read_len <= 0 {
-        return None;
-    }
-
-    let mut value = 0usize;
-    let mut saw_digit = false;
-    for &byte in &buf[..read_len as usize] {
-        if byte.is_ascii_digit() {
-            saw_digit = true;
-            value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
-        } else if saw_digit && byte.is_ascii_whitespace() {
-            break;
-        } else {
-            return None;
-        }
-    }
-    (saw_digit && value >= MIN_VALID_BUILD_EPOCH).then_some(value)
-}
-
-fn set_build_time_fallback(reason: &str) {
-    match read_build_epoch() {
-        Some(epoch) => {
-            println!("[init] {}: fallback to image build epoch {}", reason, epoch);
-            set_system_time(epoch, 0);
-        }
-        None => {
-            println!("[init] {}: no valid /etc/build-epoch; keeping kernel clock", reason);
-        }
-    }
-}
-
-/// Use BusyBox ntpd for the authoritative time and the image build timestamp
-/// as a lower-bound fallback when early networking or DNS is unavailable.
-/// NTP is best-effort: early boot must continue even when guest networking or DNS stalls.
-fn try_ntp_sync() {
-    for attempt in 0..NTP_ATTEMPTS {
-        if attempt > 0 {
-            sleep(200);
-        }
-
-        let pid = fork();
-        if pid < 0 {
-            set_build_time_fallback("ntpd fork failed");
-            return;
-        }
-        if pid == 0 {
-            // child: run busybox ntpd
-            let path = "/rescue/sh\0";
-            let applet = "ntpd\0";
-            let bg = "-n\0";
-            let quit = "-q\0";
-            let flag_p = "-p\0";
-            let peer = "time.cloudflare.com\0";
-            let args: [*const u8; 6] = [
-                applet.as_ptr(),
-                bg.as_ptr(),
-                quit.as_ptr(),
-                flag_p.as_ptr(),
-                peer.as_ptr(),
-                core::ptr::null(),
-            ];
-            exec(path, &args, &[core::ptr::null()]);
-            // exec only returns on error
-            exit(-1);
-        } else {
-            match wait_child_bounded(pid, NTP_TIMEOUT_MS) {
-                Some(0) => {
-                    println!("[init] ntpd time sync ok");
-                    return;
-                }
-                Some(status) => {
-                    println!("[init] ntpd attempt {} failed (status={})", attempt, status);
-                }
-                None => {
-                    println!("[init] ntpd attempt {} did not exit cleanly", attempt);
-                }
-            }
-        }
-    }
-    set_build_time_fallback("ntpd all attempts failed");
-}
-
-fn try_bind(source: &str, target: &str) {
-    let ret = try_mount(source, target, "", MS_BIND, 0);
+fn try_bind_mount(source: &str, target: &str) {
+    let src = alloc::format!("{}\0", source);
+    let tgt = alloc::format!("{}\0", target);
+    let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
     if ret == 0 {
-        println!("[init] bind {} -> {}", source, target);
+        println!("[init] bind mount {} -> {}", source, target);
     } else {
-        println!("[init] bind {} -> {}: skipped (errno={})", source, target, -ret);
+        println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
     }
 }
 
-fn try_exec(path: &str, environ: &[*const u8]) -> bool {
-    let path_c = format!("{}\0", path);
-    let args = [path_c.as_ptr(), core::ptr::null()];
-    let ret = exec(&path_c, &args, environ);
-    if ret < 0 {
-        println!("[init] exec {} failed (errno={})", path, -ret);
-        false
-    } else {
-        true
+fn bind_tools_and_sdcard(tools_ok: bool, disk_ok: bool) {
+    // Tools disk: bind-mount key directories to root so writes persist across reboots.
+    if tools_ok {
+        for (src, dst) in [
+            ("/tools/bin", "/bin"),
+            ("/tools/sbin", "/sbin"),
+            ("/tools/lib", "/lib"),
+            ("/tools/usr", "/usr"),
+            ("/tools/root", "/root"),
+        ] {
+            try_bind_mount(src, dst);
+        }
+    }
+    // sdcard: bind-mount musl/glibc runtime directories.
+    if disk_ok {
+        for (src, dst) in [
+            ("/sdcard/musl", "/musl"),
+            ("/sdcard/glibc", "/glibc"),
+        ] {
+            try_bind_mount(src, dst);
+        }
     }
 }
 
-fn set_system_time(secs: usize, nsecs: usize) {
-    let ts = TimeSpec { tv_sec: secs, tv_nsec: nsecs };
-    let ret = sys_clock_settime(0, &ts); // CLOCK_REALTIME=0
-    if ret < 0 {
-        println!("[init] clock_settime failed: {}", -ret);
+fn boot_profile() -> &'static str {
+    let fd = open("/proc/cmdline\0", OpenFlags::RDONLY);
+    if fd < 0 {
+        return "normal";
+    }
+    let mut cmdline = [0u8; 256];
+    let size = read(fd as usize, &mut cmdline);
+    let _ = user_lib::close(fd as usize);
+    if size > 0
+        && cmdline[..size as usize]
+            .windows(b"mango.mode=regression".len())
+            .any(|v| v == b"mango.mode=regression")
+    {
+        "regression"
+    } else if size > 0
+        && cmdline[..size as usize]
+            .windows(b"profile=rescue".len())
+            .any(|v| v == b"profile=rescue")
+    {
+        "rescue"
+    } else {
+        "normal"
+    }
+}
+
+fn runner_environment(profile: &str) -> [*const u8; 8] {
+    let profile_var = match profile {
+        "regression" => "MANGO_BOOT_PROFILE=regression\0",
+        "rescue" => "MANGO_BOOT_PROFILE=rescue\0",
+        _ => "MANGO_BOOT_PROFILE=normal\0",
+    };
+    [
+        "SHELL=/bin/sh\0".as_ptr(),
+        "HOME=/root\0".as_ptr(),
+        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin\0".as_ptr(),
+        "USER=root\0".as_ptr(),
+        "PWD=/\0".as_ptr(),
+        profile_var.as_ptr(),
+        core::ptr::null(),
+        core::ptr::null(),
+    ]
+}
+
+fn rescue_forever() -> ! {
+    println!("[init] entering rescue shell");
+    loop {
+        let shell = fork();
+        if shell == 0 {
+            exec(
+                RESCUE_SHELL,
+                &[RESCUE_SHELL.as_ptr(), core::ptr::null()],
+                &[core::ptr::null()],
+            );
+            exit(127);
+        }
+        if shell < 0 {
+            reap_orphans();
+            sleep(100);
+            continue;
+        }
+        let mut status = 0;
+        while waitpid_wnohang(shell, &mut status) == 0 {
+            reap_orphans();
+            sleep(100);
+        }
     }
 }
 
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
-    println!("[init] MangoCore stage-1 boot (initramfs mode)");
-
-    let scratch_rw = match run_scratch_rw_smoke() {
-        Ok(available) => available,
-        Err(()) => {
-            println!("[init] FATAL: writable scratch smoke test failed");
-            loop {}
+    if getpid() != PID1 {
+        return 1;
+    }
+    install_signal_handlers();
+    prepare_pseudo_fs_framework();
+    mount_pseudo_filesystems();
+    let profile = boot_profile();
+    if profile != "regression" {
+        let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
+        let tools_ok = mount_disk("/dev/vdb1\0", "/tools\0")
+            || mount_disk("/dev/vdb\0", "/tools\0");
+        // /tmp: prefer ext4-backed /tmp if a block device is available
+        if disk_ok {
+            const AT_FDCWD: isize = -100;
+            let _ = sys_mkdirat(AT_FDCWD, "/sdcard/tmp\0", 0o1777);
+            let result = sys_mount(
+                "/sdcard/tmp\0".as_ptr(),
+                "/tmp\0".as_ptr(),
+                core::ptr::null(),
+                MS_BIND,
+                0,
+            );
+            if result < 0 {
+                println!("[init] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs", result);
+                let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+            } else {
+                println!("[init] /tmp is bind-mounted from ext4 /sdcard/tmp");
+            }
+        } else {
+            let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
         }
-    };
-
-    try_ntp_sync();
-
-    println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
-
-    // Keep initramfs runtime directories writable when the staged P2 scratch
-    // mount is active. Tools and test payloads remain available at their
-    // read-only source paths.
-    let _ = sys_mkdirat(AT_FDCWD, "/tmp\0", 0o755);
-    let _ = sys_mkdirat(AT_FDCWD, "/bin\0", 0o755);
-    let _ = sys_mkdirat(AT_FDCWD, "/sbin\0", 0o755);
-    let _ = sys_mkdirat(AT_FDCWD, "/lib\0", 0o755);
-    let _ = sys_mkdirat(AT_FDCWD, "/usr\0", 0o755);
-    let _ = sys_mkdirat(AT_FDCWD, "/root\0", 0o755);
-    if scratch_rw {
-        println!("[init] staged runtime: keeping /tmp /bin /sbin /lib /usr /root writable");
+        if tools_ok {
+            let result = sys_mount(
+                "/tools/etc\0".as_ptr(),
+                "/etc\0".as_ptr(),
+                core::ptr::null(),
+                MS_BIND,
+                0,
+            );
+            if result < 0 {
+                println!(
+                    "[init] bind-mount /tools/etc → /etc failed: {}, keeping initramfs /etc",
+                    result
+                );
+            } else {
+                println!("[init] /etc is bind-mounted from tools disk");
+            }
+        }
+        // Bind-mount tools and sdcard subdirectories so writes persist.
+        bind_tools_and_sdcard(tools_ok, disk_ok);
     } else {
-        try_bind("/tools/tmp", "/tmp");
-        try_bind("/tools/bin", "/bin");
-        try_bind("/tools/sbin", "/sbin");
-        try_bind("/tools/lib", "/lib");
-        try_bind("/tools/usr", "/usr");
-        try_bind("/tools/root", "/root");
+        // No block device in regression mode
+        let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
     }
-    let _ = sys_mkdirat(AT_FDCWD, "/tests\0", 0o755);
-    try_bind("/tools/tests", "/tests");
-    // 不 bind /tools/etc — initramfs 已有完整 /etc，bind 会覆盖
-    let _ = sys_mkdirat(AT_FDCWD, "/musl\0", 0o755);
-    try_bind("/sdcard/musl", "/musl");
-    let _ = sys_mkdirat(AT_FDCWD, "/glibc\0", 0o755);
-    try_bind("/sdcard/glibc", "/glibc");
+    let environ = runner_environment(profile);
+    println!(
+        "[init] PID1 profile={} runner={}",
+        profile,
+        RUNNER.trim_end_matches('\0')
+    );
 
-    // These directories live in initramfs during staged board runs and in the
-    // legacy tools mount on existing QEMU paths.
-    for dir in ["/lib/apk\0", "/lib/apk/db\0", "/var/cache/apk\0"] {
-        let _ = sys_mkdirat(AT_FDCWD, dir, 0o755);
-    }
+    loop {
+        let pid = fork();
+        if pid == 0 {
+            exec(RUNNER, &[RUNNER.as_ptr(), core::ptr::null()], &environ);
+            exit(127);
+        }
+        if pid < 0 {
+            println!("[init] MANGO_RUNNER_FAILURE: fork failed ret={}", pid);
+            reap_orphans();
+            shutdown();
+            rescue_forever();
+        }
 
-    let environ: &[*const u8] = &[
-        "SHELL=/bin/sh\0".as_ptr(),
-        "PWD=/\0".as_ptr(),
-        "HOME=/root\0".as_ptr(),
-        "PATH=/:/bin:/sbin:/usr/bin:/usr/sbin:/tools/bin:/tools/sbin:/tools/usr/bin:/tools/usr/sbin\0".as_ptr(),
-        "USER=root\0".as_ptr(),
-        core::ptr::null(),
-    ];
-
-    // Initramfs carries the freshly built runner; sdcard may still contain an
-    // older initproc from the downloaded test image.
-    if try_exec("/initproc", environ) || try_exec("/sdcard/initproc", environ) {
-        println!("[init] test runner started");
-    } else {
-        println!("[init] no test runner, entering rescue mode");
-        // exec 会替换当前进程，失败才继续下一个
-        if !try_exec("/tools/bin/sh", environ)
-            && !try_exec("/rescue/sh", environ)
-            && !try_exec("/bin/sh", environ)
-        {
-            println!("[init] FATAL: no shell available");
-            println!("[init] System halted.");
-            loop {}
+        let mut status = 0;
+        loop {
+            let waited = waitpid_wnohang(pid, &mut status);
+            if waited == pid {
+                println!(
+                    "[init] MANGO_RUNNER_FAILURE: runner exited status={}",
+                    status
+                );
+                reap_orphans();
+                shutdown();
+                rescue_forever();
+            }
+            if waited < 0 {
+                println!(
+                    "[init] MANGO_RUNNER_FAILURE: runner wait failed ret={}",
+                    waited
+                );
+                reap_orphans();
+                shutdown();
+                rescue_forever();
+            }
+            if CHILD_EVENT.load(Ordering::Acquire) {
+                reap_orphans();
+            }
+            if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+                let _ = kill(pid as usize, SIGKILL);
+                reap_orphans();
+                shutdown();
+                rescue_forever();
+            }
+            sleep(10);
         }
     }
-
-    loop {}
 }

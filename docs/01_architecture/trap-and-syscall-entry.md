@@ -602,7 +602,7 @@ pub fn trap_return() -> ! {
         crate::task::perf::record_tlb_activate();
     }
     let user_satp = current_user_token();
-    let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
+    let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     unsafe {
         asm!(
             "ibar 0",
@@ -620,6 +620,10 @@ pub fn trap_return() -> ! {
     }
 }
 ```
+
+LA64 将普通 `TRAMPOLINE`、`TRAP_CONTEXT_BASE` 与用户可执行的
+`SIGNAL_TRAMPOLINE` 分为连续三页：普通恢复页仅映射 `R|X`，信号页映射
+`R|X|U`。因此切换用户 PGDL 后，`__restore` 从普通别名执行而不会复用信号别名。
 
 ## 9. 与 syscall 分发层的边界
 

@@ -24,7 +24,7 @@ use crate::task::{
     current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
-use core::arch::{asm, global_asm};
+use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
 #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
@@ -49,14 +49,13 @@ extern "C" {
 
 #[allow(unused)]
 #[link_section = ".text.__rfill"]
-#[naked]
+#[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn __rfill() {
     //crmd = 0b0_01_01_10_0_00;
     //         w_dm_df_pd_i_lv;
     // let i = 0xA8;
-    unsafe {
-        asm!(
+    naked_asm!(
             // PGD: 0x1b CRMD:0x0 PWCL:0x1c TLBRBADV:0x89 TLBERA:0x8a TLBRSAVE:0x8b SAVE:0x30
             // TLBREHi: 0x8e STLBPS: 0x1e MERRsave:0x95
             "
@@ -114,10 +113,8 @@ pub extern "C" fn __rfill() {
     csrrd  $t0, 0x8c
     csrwr  $t0, 0x8d
     b      2b
-",
-            options(noreturn)
-        )
-    }
+"
+    )
 }
 
 pub fn init() {
@@ -374,7 +371,7 @@ pub fn trap_handler() -> ! {
                         match sz {
                             2 => rd = (rd as u16) as i16 as isize as usize,
                             4 => rd = (rd as u32) as i32 as isize as usize,
-                            8 => rd = rd,
+                            8 => {}
                             _ => unreachable!(),
                         }
                     }
@@ -483,7 +480,9 @@ pub fn trap_return() -> ! {
         crate::task::perf::record_tlb_activate();
     }
     let user_satp = current_user_token();
-    let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
+    // On LA64, `strampoline` resolves to the kernel-trap stub under the
+    // static link. `__restore` is already in the direct-map executable range.
+    let restore_va = __restore as usize;
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
         println!(
@@ -555,50 +554,53 @@ pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
         // 地址未对齐
         Trap::Exception(Exception::AddressNotAligned) => {
             let pc = gr.pc;
-            loop {
-                // 获取当前指令ins和操作码op
-                let ins = Instruction::from(gr.pc as *const Instruction);
-                let op = ins.get_op_code();
-                if op.is_err() {
-                    break;
-                }
-                let op = op.unwrap();
-                let addr = BadV::read().get_vaddr();
-                //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
-                let sz = op.get_size();
-                let is_aligned: bool = addr % sz == 0;
-                if is_aligned {
-                    break;
-                }
-                assert!([2, 4, 8].contains(&sz));
-                if op.is_store() {
-                    let mut rd = gr[ins.get_rd_num()];
-                    for i in 0..sz {
-                        unsafe { ((addr + i) as *mut u8).write_unaligned(rd as u8) };
-                        rd >>= 8;
-                    }
-                } else {
-                    let mut rd = 0;
-                    for i in (0..sz).rev() {
-                        rd <<= 8;
-                        let read_byte =
-                            (unsafe { ((addr + i) as *mut u8).read_unaligned() } as usize);
-                        rd |= read_byte;
-                        //debug!("{:#x}, {:#x}", rd, read_byte);
-                    }
-                    if !op.is_unsigned_ld() {
-                        match sz {
-                            2 => rd = (rd as u16) as i16 as isize as usize,
-                            4 => rd = (rd as u32) as i32 as isize as usize,
-                            8 => rd = rd,
-                            _ => unreachable!(),
-                        }
-                    }
-                    gr[ins.get_rd_num()] = rd;
-                }
-                gr.pc += 4;
-                break;
+            // 获取当前指令ins和操作码op
+            let ins = Instruction::from(gr.pc as *const Instruction);
+            let op = match ins.get_op_code() {
+                Ok(op) => op,
+                Err(_) => panic!(
+                    "Failed to execute the command. Bad Instruction: {}, PC:{}",
+                    unsafe { *(gr.pc as *const u32) },
+                    pc
+                ),
+            };
+            let addr = BadV::read().get_vaddr();
+            //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
+            let sz = op.get_size();
+            let is_aligned: bool = addr % sz == 0;
+            if is_aligned {
+                panic!(
+                    "Failed to execute the command. Bad Instruction: {}, PC:{}",
+                    unsafe { *(gr.pc as *const u32) },
+                    pc
+                );
             }
+            assert!([2, 4, 8].contains(&sz));
+            if op.is_store() {
+                let mut rd = gr[ins.get_rd_num()];
+                for i in 0..sz {
+                    unsafe { ((addr + i) as *mut u8).write_unaligned(rd as u8) };
+                    rd >>= 8;
+                }
+            } else {
+                let mut rd = 0;
+                for i in (0..sz).rev() {
+                    rd <<= 8;
+                    let read_byte = (unsafe { ((addr + i) as *mut u8).read_unaligned() } as usize);
+                    rd |= read_byte;
+                    //debug!("{:#x}, {:#x}", rd, read_byte);
+                }
+                if !op.is_unsigned_ld() {
+                    match sz {
+                        2 => rd = (rd as u16) as i16 as isize as usize,
+                        4 => rd = (rd as u32) as i32 as isize as usize,
+                        8 => {}
+                        _ => unreachable!(),
+                    }
+                }
+                gr[ins.get_rd_num()] = rd;
+            }
+            gr.pc += 4;
             if gr.pc == pc {
                 panic!(
                     "Failed to execute the command. Bad Instruction: {}, PC:{}",

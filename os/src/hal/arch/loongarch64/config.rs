@@ -164,10 +164,10 @@ pub const USR_VIRT_SPACE_END: usize = USR_SPACE_LEN - 1;
 pub const USER_VA_BASE: usize = LA_START;
 pub const USER_VA_END: usize = LA_START + USR_SPACE_LEN;
 pub const ELF_PIE_BASE: usize = USER_VA_BASE + 0x0040_0000;
-pub const TRAMPOLINE: usize = SIGNAL_TRAMPOLINE; // The trampoline is NOT mapped in LA.
 pub const SIGNAL_TRAMPOLINE: usize = USR_VIRT_SPACE_END - PAGE_SIZE + 1;
-pub const TRAP_CONTEXT_BASE: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
-pub const USR_MMAP_END: usize = TRAP_CONTEXT_BASE - PAGE_SIZE;
+pub const TRAMPOLINE: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
+pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - KERNEL_STACK_MAX_SLOTS * PAGE_SIZE;
+pub const USR_MMAP_END: usize = TRAP_CONTEXT_BASE;
 pub const USR_MMAP_BASE: usize = USR_MMAP_END - USR_SPACE_LEN / 8 + 0x3000;
 pub const TASK_SIZE: usize = USR_MMAP_BASE - USR_SPACE_LEN / 8;
 pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & (!(PAGE_SIZE - 1));
@@ -231,7 +231,7 @@ const _: () = {
 // QEMU 将传统内存磁盘镜像放在 RAM 起点以上 256MiB 处。
 #[cfg(feature = "board_laqemu")]
 pub const DISK_IMAGE_BASE: usize = 0x1000_0000 + MEMORY_START;
-// 2K1000 上板阶段不启用 block_mem；将占位地址放到帧分配器管理范围之外，避免与
+// 2K1000 上板阶段不启用该旧内存根路径；将占位地址放到帧分配器管理范围之外，避免与
 // 内核镜像发生冲突。
 #[cfg(feature = "board_2k1000")]
 pub const DISK_IMAGE_BASE: usize = MEMORY_END;
@@ -300,7 +300,7 @@ macro_rules! newline {
 #[macro_export]
 macro_rules! should_map_trampoline {
     () => {
-        false
+        true
     };
 }
 

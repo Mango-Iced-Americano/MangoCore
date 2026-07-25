@@ -3,7 +3,7 @@ title: "LoongArch64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-10
+last_update: 2026-07-21
 tags: [architecture, loongarch64, hal]
 ---
 
@@ -80,13 +80,12 @@ if CPUId::read().get_core_id() != 0 {
 | 普通异常入口 | `set_kernel_trap_entry()` |
 | 机器错误入口 | `set_machine_err_trap_ent()` |
 | TLB refill | `TLBREntry` 指向 `srfill` |
-| 缩减虚地址 | `RVACFG.RBits=0`，关闭固件可能遗留的 reduced-VA 模式 |
 | DMW2 | PLV0 可用，SUC VSEG，StronglyOrderedUnCached |
 | DMW3 | 清空 |
-| 页大小 | `STLBPS.PS=12`、`TLBREHi.PS=12`，对应 4KiB 页 |
+| 页大小 | `STLBPS`、`TLBREHi` 设置为 `PTE_WIDTH_BITS` |
 | page walk | `PWCL`、`PWCH` 设置页目录层级和 PTE 宽度 |
 
-最后读取 `CPUCFG1`，在 `mm::init()` 之前断言硬件 `VALEN/PALEN` 与构建常量一致，再输出 UART 地址和 `PRCfg1`。这使错误的平台 feature 或位宽常量在建立页表前直接失败，而不是到首次高地址访问时才表现为 `AddressError`。
+最后输出 UART 地址和 `PRCfg1`。这些打印来自当前 `mod.rs`。
 
 ## 4. `machine_init()`
 
@@ -97,14 +96,11 @@ pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
     get_timer_freq_first_time();
-    let cfg1 = CPUCfg1::read();
-    println!(
-        "[machine_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
-        cfg1.get_valen(),
-        cfg1.get_palen(),
-        VALEN,
-        PALEN
-    );
+    /* println!(
+     *     "[machine_init] VALEN: {}, PALEN: {}",
+     *     cfg0.get_valen(),
+     *     cfg0.get_palen()
+     * ); */
     for i in 0..=6 {
         let j: usize;
         unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
@@ -124,28 +120,6 @@ pub fn machine_init() {
 
 `trap::init()` 设置 kernel trap entry。`get_timer_freq_first_time()` 初始化 timer frequency。`trap::enable_timer_interrupt()` 设置 timer 中断向量；timer deadline 由后续 timer 子系统编程。
 
-地址位宽来自 `CPUCFG1`，其中 `PABITS` 位于 `[11:4]`、`VABITS` 位于 `[19:12]`，字段值均需加一。QEMU 报告 `PALEN=VALEN=48`；当前 2K1000LA 实板的 `CPUCFG1=0x03e2727e`，解码为 `PALEN=VALEN=40`。平台构建常量必须与硬件一致，否则 CPU 可能在页表查询前直接产生 `AddressError`。
-
-40 位虚拟地址的高半规范区从 `0xffffff8000000000` 开始。2K1000 的 guarded kernel stack 因此放在 `MMAP_END` 附近并向下分配；不能沿用 QEMU 的 `MMAP_BASE - PAGE_SIZE` 栈顶，因为该地址正好落在 40 位虚拟地址的非规范区。QEMU 仍保留原来的 48 位栈窗口。
-
-2K1000 当前地址不变量如下：
-
-| 项目 | 值 / 规则 |
-|------|-----------|
-| `VALEN/PALEN` | `40/40` |
-| 合法低半区 | `0x0000000000000000..=0x0000007fffffffff` |
-| 合法高半区 | `0xffffff8000000000..=0xffffffffffffffff` |
-| `VA_MASK` / `SEG_MASK` | `0x000000ffffffffff` / `0xffffff0000000000` |
-| 首栈顶 | `0xfffffffffffef000` |
-| 1024-slot 窗口下界 | `0xfffffffff7bef000` |
-| 首栈探针 | `0xfffffffffffeeff8` |
-
-`VirtPageNum` 保存的是 canonical VA 逻辑右移 12 位后的 52 位页号表示。`VPN_MASK` 只保留 `VA[VALEN-1:12]`，`VPN_SEG_MASK` 恢复右移后仍应保留的高位符号扩展；TLB 的 paired-page `VPPN` 则只保存 `VA[VALEN-1:13]`。这些掩码均由 `VALEN` 推导，并有编译期断言覆盖高栈地址的 VA/VPN 往返。
-
-软件页表只有 3 个 9-bit 索引，实际索引 `VA[38:12]`。因此 QEMU 的 48 位地址空间中，低 39 位相同的高地址会落到同一软件页表路径。`KERNEL_PROGRAM_END` 同时避开 2K1000 的真实栈窗口和 QEMU 中与栈窗口低 39 位相同的别名，临时内核 ELF 映射超出该上界会返回 `BadAddress`。
-
-2K1000 PCI ECAM 物理地址 `0xfe00000000` 的 bit 39 为 1，若直接当普通 40 位页模式 VA 使用则不是 canonical 地址。CPU 对 ECAM/AHCI BAR 的访问使用 DMW2 的 VSEG=8、SUC 别名；DMA 描述符仍保存原始物理地址，不能把 DMW 虚拟别名交给设备。
-
 ## 5. TLB refill 与 page walk
 
 la64 后端包含 `__rfill()` 裸函数，放置在 `.text.__rfill` 段，用于 TLB refill。该汇编读取 PGD、按目录层级查找 PTE，并执行 `tlbfill`。找不到页表项时设置 refill 相关 CSR，仍通过 `tlbfill` 建立异常项。
@@ -156,12 +130,10 @@ page walk 寄存器配置来自 `bootstrap_init()`：
 |--------|------|
 | `PWCL` | `ptbase=PAGE_SIZE_BITS`、`ptwidth=DIR_WIDTH`、`dir1_base=PAGE_SIZE_BITS+DIR_WIDTH`、`pte_width=PTE_WIDTH` |
 | `PWCH` | `dir3_base=PAGE_SIZE_BITS + DIR_WIDTH * 2`、`dir3_width=DIR_WIDTH` |
-| `TLBREHi` | `PS=PAGE_SIZE.trailing_zeros()=12` |
-| `STLBPS` | `PS=PAGE_SIZE_BITS=12` |
+| `TLBREHi` | page size = `PTE_WIDTH_BITS` |
+| `STLBPS` | page size = `PTE_WIDTH_BITS` |
 
-`PTE_WIDTH_BITS=3` 只表示 8-byte PTE 的 `log2`，不能写入 TLB 页大小字段。旧代码把 3 写入 `STLBPS/TLBREHI.PS`，等价于 8-byte 页，是与 4KiB 软件页表不一致的严重配置错误。refill 失败分支也会先清空 `TLBREHI.PS[5:0]`，再写入 12，避免继承固件或前一异常中的旧值。
-
-LAFlex PTE 和 `TLBELO/TLBRELO` 的物理页字段对应 `PA[PALEN-1:12]`。PTE 的 `PPN_MASK` 因此必须是 PALEN 位物理地址掩码再清除低 12 位，不能先左移整个 PALEN 掩码。TLBEHI 写入 VPPN 前必须裁剪到 `VALEN-13` 位；读回时左移一位恢复 paired-page VPN，并按 `VALEN` 对高地址 VPN 做符号扩展。
+这组配置说明 LAFlex 页表依赖硬件 page walk 参数，而不仅是软件页表遍历。
 
 ## 6. ASID 与 TLB
 
@@ -183,12 +155,6 @@ pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invali
 | `tlb_global_invalidate()` | 全局刷新 |
 
 `TaskControlBlock` 在 la64 架构下持有 ASID 字段。返回用户态时，`trap_return()` 把 ASID 传给恢复汇编。
-
-`__restore` 分别比较当前 PGDL 和 ASID；任一变化时连续写入新 PGDL、ASID，再清除非 global TLB 项。`CSR.ASID.ASIDBITS[23:16]` 是只读能力字段，不能提取到低位后与新 ASID 做 OR。旧实现会把 ASIDBITS 污染到 ASID 值中，并在 PGDL 未变化时漏掉 ASID 更新。
-
-ASID 分配器只使用 1..255。耗尽时的内部哨兵 `u16::MAX` 不能直接写入 10-bit CSR 字段；激活和返回路径会把它转换为 ASID 0，并在地址空间激活时先清除全部非 global TLB 项，作为正确性优先的退化路径。
-
-动态内核 PGDH 映射当前不是可靠的 global paired-page TLB 项。栈或临时程序 PTE 修改后，页级 `invtlb` 无法覆盖所有 ASID 中可能存在的同 VA 非 global 项，因此当前采用全 TLB invalidate 保证回收后不会命中旧映射。后续若把成对内核 PTE 的 `G` 语义完整实现，可再收窄为按 VA 的 global invalidate。
 
 ## 7. Trap 分支
 
@@ -277,6 +243,27 @@ la64 `trap_return()` 的关键语义：
 | 参数 | trap context、用户 token、ASID 传给 `__restore` |
 
 该路径保证信号交付发生在恢复用户态前。
+
+### 9.1 用户态返回地址布局与 trap context 槽位
+
+LA64 的用户态返回相关虚拟地址按从低到高排列为：
+
+```
+trap-context window → TRAMPOLINE → SIGNAL_TRAMPOLINE
+[KERNEL_STACK_MAX_SLOTS pages]
+```
+
+用户 mmap arena 是半开区间 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`。旧的 `USR_MMAP_END == TRAMPOLINE` 会使该 arena 错误地覆盖 `[TRAP_CONTEXT_BASE, TRAMPOLINE)`，因此不能再把 `USR_MMAP_END` 解释为 trampoline 地址。当前 exclusive end 为 `TRAP_CONTEXT_BASE`。
+
+`TRAMPOLINE` 位于 trap-context window 之上，不属于该窗口。普通 mmap 和 SysV shm mmap 对 LA64 的 `MAP_FIXED`、`MAP_FIXED_NOREPLACE` 请求，必须在 unmap 前检查请求区间；只要与 `[TRAP_CONTEXT_BASE, TRAMPOLINE)` 相交就拒绝。`tid_alloc()` 使用从 1 开始的编号，合法槽位 `tid` 的底部地址为：
+
+```text
+trap_cx_bottom_from_tid(tid) = TRAP_CONTEXT_BASE + (tid - 1) * PAGE_SIZE
+```
+
+实现必须拒绝 `tid < 1` 或 `tid > KERNEL_STACK_MAX_SLOTS`，窗口范围是从 `TRAP_CONTEXT_BASE` 开始的连续 `KERNEL_STACK_MAX_SLOTS` 个 trap-context pages。新映射成功时直接返回新映射的 PPN，调用方不应从 trampoline 或其他相邻地址重新推导 PPN。这个布局和范围约束保护 `trap_return → __restore` 使用的 frame pointer，避免 trap context 映射覆盖 trampoline 物理页。
+
+2026-07-21 的最终双架构 regression 已验证 mmap 边界和第二个槽位：RV64 和 LA64 均完成 TAP `1..6`，包含 `ok 2 mmap_edge_cases` 和 `ok 6 clone_vm_second_slot`，LA64 分类器为 `STATE=PASS STATUS=0`。最终证据目录为 `docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`。该 focused regression 不代表 full LTP 或 basic 全量覆盖。
 
 LoongArch64 后端比 rv64 多两个需要重点理解的机制：ASID 和硬件 dirty/page-modify 语义。任务创建或 clone 后会分配/继承 ASID，返回用户态时 token 和 ASID 一起传给恢复汇编；页被写入时可能先触发 page modify，trap 后端通过 `LAFlexPageTable::set_dirty_bit()` 补 dirty bit，再让用户指令重试。这些机制使 la64 的“同一个虚拟地址”是否命中旧 TLB，不仅取决于页表内容，也取决于 ASID 和 invalidate 是否正确。
 

@@ -1,51 +1,121 @@
 MODE ?= release
+PROFILE ?= normal
+REPO_ROOT := $(CURDIR)
+BUILD_ROOT ?= $(REPO_ROOT)/build
+COMPAT_OUTPUT_DIR ?= $(REPO_ROOT)
+export BUILD_ROOT COMPAT_OUTPUT_DIR CANONICAL_BUILD_FIXTURE
 FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
-LA_TOOLCHAIN ?= nightly-2024-05-01
-BOARD_NET_IFACE ?= en8
-IMAGE ?=
-P3_IMAGE ?= mango-2k1000la-cpython-tools-p3.img
-P3_MANIFEST ?= $(P3_IMAGE).json
-P3_VERIFY_FILE ?= user/tools/cpython/L7_filesystem.py
-P3_BACKUP_ID ?=
-P4_IMAGE ?= mango-2k1000la-state-p4.img
-P4_MANIFEST ?= $(P4_IMAGE).json
-P4_QEMU_DISK ?= mango-2k1000la-p4-qemu.img
-P4_MBR_SOURCE ?= /private/tftpboot/mango-2k1000la-full-test-mbr.img
-P4_DOCKER_IMAGE ?= zhouzhouyi/os-contest:20260104
-BOARD_SERIAL_ARG = $(if $(BOARD_SERIAL),--serial $(BOARD_SERIAL),)
-PYTHON_RUNTIME_BUILD_MODE ?= production
+
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+
+ifeq ($(origin RUSTUP_HOME),undefined)
+ifeq ($(strip $(HOME)),)
+$(error HOME must be set and non-empty when RUSTUP_HOME is not supplied)
+endif
+endif
+ifeq ($(origin CARGO_HOME),undefined)
+ifeq ($(strip $(HOME)),)
+$(error HOME must be set and non-empty when CARGO_HOME is not supplied)
+endif
+endif
+RUSTUP_HOME ?= $(HOME)/.rustup
+CARGO_HOME ?= $(HOME)/.cargo
+ifeq ($(strip $(RUSTUP_HOME)),)
+$(error RUSTUP_HOME must be set and non-empty)
+endif
+ifeq ($(strip $(CARGO_HOME)),)
+$(error CARGO_HOME must be set and non-empty)
+endif
+export RUSTUP_HOME CARGO_HOME
+
+define validate-formal-inputs
+$(if $(filter command line environment environment override,$(origin ARCH)),,$(error ARCH must be explicitly provided))
+$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+$(if $(filter command line environment environment override,$(origin PROFILE)),,$(error PROFILE must be explicitly provided))
+$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+endef
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
 QEMU_DIR := util/qemu-2k1000/tmp
 QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
-all:
+all: toolchain-setup
 	$(MAKE) prepare-cargo-config
-	$(MAKE) clean
 	$(MAKE) -C os all
 
+build:
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build
+
 prepare-cargo-config:
-	@sh scripts/restore-cargo-vendor-checksums.sh restore .
-	mkdir -p os/.cargo user/.cargo
-	test -f os/.cargo/config.toml || cp -f cargo-config/os/config.toml os/.cargo/config.toml
-	test -f user/.cargo/config.toml || cp -f cargo-config/user/config.toml user/.cargo/config.toml
 
-env:
-	rustup default $(LA_TOOLCHAIN)
+toolchain-setup:
+	@sh scripts/rustup-setup.sh
 
-kernel:
-	cd os && make kernel
+toolchain-preflight:
+	@sh scripts/rustup-preflight.sh
 
-run: print-logo
-	cd os && make run
+env: toolchain-preflight
 
-runsimple:
+kernel: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" kernel
+
+user: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" user
+
+image: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" image
+
+validate-run:
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+
+run: validate-run print-logo toolchain-preflight
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" run
+
+test: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(if $(filter regression,$(PROFILE)),,$(error PROFILE must be regression))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" test
+
+check: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" check
+
+lint: toolchain-preflight
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=rv64" "MODE=debug" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=rv64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=debug" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),,$(MAKE) -C os "ARCH=la64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=$(BUILD_ROOT)" lint)
+	$(if $(strip $(ARCH)),$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(or $(PROFILE),normal)" "BUILD_ROOT=$(BUILD_ROOT)" lint,@true)
+
+full-test:
+	@echo "=== Running full test suite (serial build, parallel QEMU) ==="
+	python3 scripts/run_full_test.py
+
+ktest: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-run
+
+ktest-build-only: toolchain-preflight
+	$(call validate-formal-inputs)
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" ktest-build-only
+
+.NOTPARALLEL: run lint
+
+runsimple: toolchain-preflight
 	cd os && make runsimple
 
-change-kernel-only:
+change-kernel-only: toolchain-preflight
 	cd os && make build && make runsimple
 
 print-logo:
@@ -61,11 +131,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
-	2k1000-boot 2k1000-boot-check 2k1000-p3-backup 2k1000-cpython-p3-write \
-	2k1000-p4-image 2k1000-p4-qemu-disk 2k1000-p4-preflight 2k1000-p4-write \
-	cpython-la64-runtime-build cpython-la64-runtime-verify cpython-la64-runtime-install \
-	2k1000-python-runtime-deploy
+.PHONY: all build kernel user image run test full-test ktest check lint ktest-build-only clean print-logo run-simple qemu-download prepare-cargo-config toolchain-setup toolchain-preflight env validate-run
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -102,21 +168,26 @@ $(QEMU_TAR_PATH):
 	fi
 
 clean:
-	make -C os clean
+	$(MAKE) -C os "BUILD_ROOT=$(BUILD_ROOT)" clean
+	rm -f "$(COMPAT_OUTPUT_DIR)/kernel-rv" \
+		"$(COMPAT_OUTPUT_DIR)/kernel-la" \
+		"$(COMPAT_OUTPUT_DIR)/disk.img" \
+		"$(COMPAT_OUTPUT_DIR)/disk-la.img"
+	rm -rf "$(BUILD_ROOT)"
 
 rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
 
-regression:
+regression: toolchain-preflight
 	$(MAKE) -C os regression-all
 
 # ── Testing shortcuts (run inside Docker container) ──
-check-fast:
+check-fast: toolchain-preflight
 	cargo check -p mango-kernel-core
 	cargo fmt --check -p mango-kernel-core
-	cargo clippy -p mango-kernel-core 2>/dev/null || true
+	cargo clippy -p mango-kernel-core
 
-unittest:
+unittest: toolchain-preflight
 	cargo test -p mango-kernel-core
 
 bugscan: unittest
@@ -131,120 +202,12 @@ docker:
 	fi
 
 docker-test-parallel:
-	bash scripts/run_test_docker_parallel.sh
+	@printf '%s\n' 'ERROR: docker-test-parallel is deprecated; run make full-test or python3 scripts/run_full_test.py inside Docker instead.' >&2
+	@exit 64
 
-# Canonical LoongArch runtime.  The os/Makefile tools-cpython-la target uses
-# the same verified installer, so QEMU, board tools images and explicit host
-# provisioning cannot silently fall back to an unaligned Alpine runtime.
-cpython-la64-runtime-build:
-	docker run --rm --user "$$(id -u):$$(id -g)" \
-		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
-		./scripts/build_cpython_runtime_la64_strict.sh
-
-cpython-la64-runtime-verify: cpython-la64-runtime-build
-	docker run --rm --user "$$(id -u):$$(id -g)" \
-		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
-		python3 scripts/install_cpython_runtime_la64_strict.py \
-		--artifact-index target/cpython-strict/artifacts/current.json --verify-only
-
-cpython-la64-runtime-install: cpython-la64-runtime-build
-	docker run --rm --user "$$(id -u):$$(id -g)" \
-		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
-		python3 scripts/install_cpython_runtime_la64_strict.py \
-		--artifact-index target/cpython-strict/artifacts/current.json \
-		--dest user/tools/loongarch64/tests/cpython
-
-# Publish only to P4 ext4. P3 /tools is never read or written by this flow.
-2k1000-python-runtime-deploy: cpython-la64-runtime-verify
-	@test -n "$(PERF_RUN_DIR)" || { echo "usage: make 2k1000-python-runtime-deploy PERF_RUN_DIR=<run-dir>" >&2; exit 2; }
-	python3 scripts/deploy_cpython_runtime.py \
-		--run-dir "$(PERF_RUN_DIR)" \
-		--artifact-index target/cpython-strict/artifacts/current.json \
-		--build-mode "$(PYTHON_RUNTIME_BUILD_MODE)" $(BOARD_SERIAL_ARG)
-
-2k1000-boot:
-	@test -n "$(IMAGE)" || { echo "usage: make 2k1000-boot IMAGE=<uImage>" >&2; exit 2; }
-	python3 scripts/boot_2k1000_tftp.py \
-		--interface $(BOARD_NET_IFACE) \
-		--image "$(IMAGE)" $(BOARD_SERIAL_ARG)
-
-2k1000-boot-check:
-	@test -n "$(IMAGE)" || { echo "usage: make 2k1000-boot-check IMAGE=<uImage>" >&2; exit 2; }
-	python3 scripts/boot_2k1000_tftp.py \
-		--interface $(BOARD_NET_IFACE) \
-		--image "$(IMAGE)" $(BOARD_SERIAL_ARG) \
-		--no-host-config --check-only
-
-2k1000-p3-backup:
-	@test -n "$(PERF_RUN_DIR)" || { echo "usage: make 2k1000-p3-backup PERF_RUN_DIR=<run-dir> P3_BACKUP_ID=<id> CONFIRM_P3_START=0xA80800" >&2; exit 2; }
-	@test -n "$(P3_BACKUP_ID)" || { echo "refusing P3 backup without P3_BACKUP_ID" >&2; exit 2; }
-	@test "$(CONFIRM_P3_START)" = "0xA80800" || { \
-		echo "refusing P3 backup: set CONFIRM_P3_START=0xA80800" >&2; exit 2; \
-	}
-	python3 scripts/backup_2k1000_p3.py \
-		--run-dir "$(PERF_RUN_DIR)" \
-		--backup-id "$(P3_BACKUP_ID)" \
-		--confirm-p3-start "$(CONFIRM_P3_START)" $(BOARD_SERIAL_ARG)
-
-2k1000-cpython-p3-write:
-	@test -n "$(P3_BACKUP_ID)" || { \
-		echo "refusing P3 write: first create a verified /persist backup and set P3_BACKUP_ID" >&2; exit 2; \
-	}
-	@test "$(CONFIRM_P3_START)" = "0xA80800" || { \
-		echo "refusing P3 write: set CONFIRM_P3_START=0xA80800" >&2; exit 2; \
-	}
-	python3 scripts/write_2k1000_p3.py \
-		--interface $(BOARD_NET_IFACE) \
-		--image "$(P3_IMAGE)" \
-		--manifest "$(P3_MANIFEST)" \
-		--verify-file "$(P3_VERIFY_FILE)" \
-		--backup-id "$(P3_BACKUP_ID)" \
-		--confirm-p3-start "$(CONFIRM_P3_START)" $(BOARD_SERIAL_ARG)
-
-2k1000-p4-image:
-	docker run --rm --user "$$(id -u):$$(id -g)" \
-		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
-		python3 scripts/make_2k1000_p4_ext4.py \
-		--output "$(P4_IMAGE)" --force
-
-2k1000-p4-qemu-disk:
-	@test -f "$(P4_IMAGE)" -a -f "$(P4_MANIFEST)" || $(MAKE) 2k1000-p4-image
-	docker run --rm --user "$$(id -u):$$(id -g)" \
-		-v "$(CURDIR):/app" -w /app $(P4_DOCKER_IMAGE) \
-		python3 scripts/make_2k1000_p4_qemu_disk.py \
-		--p4-image "$(P4_IMAGE)" --output "$(P4_QEMU_DISK)" --force
-
-2k1000-p4-preflight:
-	@test -f "$(P4_IMAGE)" -a -f "$(P4_MANIFEST)" || { \
-		echo "missing P4 image or manifest; run make 2k1000-p4-image" >&2; exit 2; \
-	}
-	python3 scripts/write_2k1000_p4.py \
-		--interface $(BOARD_NET_IFACE) \
-		--image "$(P4_IMAGE)" --manifest "$(P4_MANIFEST)" \
-		--mbr-source "$(P4_MBR_SOURCE)" \
-		--confirm-p4-start 0xC00800 --confirm-p4-end 0x1400800 \
-		--confirm-disk-sectors 62533296 --preflight-only $(BOARD_SERIAL_ARG)
-
-2k1000-p4-write:
-	@test -f "$(P4_IMAGE)" -a -f "$(P4_MANIFEST)" || { \
-		echo "missing P4 image or manifest; run make 2k1000-p4-image" >&2; exit 2; \
-	}
-	@test "$(CONFIRM_P4_START)" = "0xC00800" || { \
-		echo "refusing P4 write: set CONFIRM_P4_START=0xC00800" >&2; exit 2; \
-	}
-	@test "$(CONFIRM_P4_END)" = "0x1400800" || { \
-		echo "refusing P4 write: set CONFIRM_P4_END=0x1400800" >&2; exit 2; \
-	}
-	@test "$(CONFIRM_DISK_SECTORS)" = "62533296" || { \
-		echo "refusing P4 write: set CONFIRM_DISK_SECTORS=62533296" >&2; exit 2; \
-	}
-	python3 scripts/write_2k1000_p4.py \
-		--interface $(BOARD_NET_IFACE) \
-		--image "$(P4_IMAGE)" --manifest "$(P4_MANIFEST)" \
-		--mbr-source "$(P4_MBR_SOURCE)" \
-		--confirm-p4-start "$(CONFIRM_P4_START)" \
-		--confirm-p4-end "$(CONFIRM_P4_END)" \
-		--confirm-disk-sectors "$(CONFIRM_DISK_SECTORS)" $(BOARD_SERIAL_ARG)
+test-docker-parallel:
+	@printf '%s\n' 'ERROR: test-docker-parallel is deprecated; run make full-test or python3 scripts/run_full_test.py inside Docker instead.' >&2
+	@exit 64
 
 testsuits-download:
 	cd fs-img-dir && \
@@ -253,4 +216,4 @@ testsuits-download:
 
 	
 
-.PHONY: all kernel run clean testsuits-download docker docker-test-parallel regression check-fast unittest bugscan
+.PHONY: all build kernel user image run test check lint clean testsuits-download docker docker-test-parallel test-docker-parallel regression check-fast unittest bugscan

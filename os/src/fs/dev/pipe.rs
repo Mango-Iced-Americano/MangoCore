@@ -779,9 +779,6 @@ impl Pipe {
     }
 }
 
-#[cfg(feature = "board_fu740")]
-const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
-#[cfg(not(feature = "board_fu740"))]
 const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 
 use core::sync::atomic::AtomicUsize;

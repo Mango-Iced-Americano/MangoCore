@@ -15,66 +15,17 @@
 #![feature(const_maybe_uninit_assume_init)]
 #![feature(trait_upcasting)]
 #![feature(core_intrinsics)]
-#![allow(dead_code)]
-#![allow(unused_assignments)]
-#![allow(unused_variables)]
+#![deny(
+    future_incompatible,
+    improper_ctypes,
+    clashing_extern_declarations,
+    unexpected_cfgs,
+    static_mut_refs
+)]
+// Note: no crate-level allow(dead_code) — use #[expect(dead_code, reason = "...")]
+// on specific items. Crate-level allows were removed in T10 rebaseline to
+// prevent new dead code from being silently introduced.
 
-#[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
-compile_error!("features initramfs and legacy_block_root are mutually exclusive");
-// 板级选择会改变链接基址、复位入口、UART 和地址位宽模型。必须在编译期拒绝歧义
-// 组合，因为某些混合配置仍能成功链接，却会在 U-Boot 移交控制权后才发生故障。
-#[cfg(all(feature = "board_laqemu", feature = "board_2k1000"))]
-compile_error!("board_laqemu and board_2k1000 are mutually exclusive");
-#[cfg(all(
-    feature = "loongarch64",
-    not(any(feature = "board_laqemu", feature = "board_2k1000"))
-))]
-compile_error!("loongarch64 requires exactly one board_laqemu or board_2k1000 feature");
-#[cfg(all(feature = "board_2k1000", not(feature = "initramfs")))]
-compile_error!("board_2k1000 bring-up requires the initramfs feature");
-#[cfg(all(feature = "board_2k1000", feature = "block_mem"))]
-compile_error!("board_2k1000 does not define a reserved block_mem region");
-#[cfg(all(feature = "sata_probe", feature = "sata_write_probe"))]
-compile_error!("sata_probe and sata_write_probe are mutually exclusive");
-#[cfg(all(
-    feature = "sata_fs_write_probe",
-    any(feature = "sata_probe", feature = "sata_write_probe")
-))]
-compile_error!("sata_fs_write_probe cannot be combined with another SATA probe");
-#[cfg(all(feature = "sata_scratch_rw", not(feature = "board_2k1000")))]
-compile_error!("sata_scratch_rw is supported only on board_2k1000");
-#[cfg(all(feature = "p4_persist_rw", not(feature = "initramfs")))]
-compile_error!("p4_persist_rw requires the initramfs mount topology");
-#[cfg(all(feature = "apk_persist_shell", not(feature = "p4_persist_rw")))]
-compile_error!("apk_persist_shell requires the validated writable P4 mount");
-#[cfg(all(
-    feature = "board_2k1000",
-    feature = "p4_persist_rw",
-    not(feature = "sata_scratch_rw")
-))]
-compile_error!("2K1000 p4_persist_rw requires the writable P2 scratch cache");
-#[cfg(all(feature = "board_core_test", not(feature = "board_2k1000")))]
-compile_error!("board_core_test is supported only on board_2k1000");
-#[cfg(all(feature = "board_core_test", not(feature = "sata_scratch_rw")))]
-compile_error!("board_core_test requires the writable SATA scratch workspace");
-#[cfg(all(
-    feature = "sata_scratch_rw",
-    any(
-        feature = "sata_probe",
-        feature = "sata_write_probe",
-        feature = "sata_fs_write_probe"
-    )
-))]
-compile_error!("sata_scratch_rw cannot be combined with a SATA probe");
-#[cfg(all(
-    feature = "p4_persist_rw",
-    any(
-        feature = "sata_probe",
-        feature = "sata_write_probe",
-        feature = "sata_fs_write_probe"
-    )
-))]
-compile_error!("p4_persist_rw cannot be combined with a SATA probe");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -102,121 +53,32 @@ mod timer;
 mod trace;
 mod utils;
 
-#[cfg(feature = "block_mem")]
-use crate::config::DISK_IMAGE_BASE;
 use crate::hal::bootstrap_init;
 use crate::hal::machine_init;
-// U-Boot 通过 DMW 缓存别名进入开发板内核。汇编入口会保留当前执行段、建立低地址
-// 直映窗口、切换到链接时使用的 0x90000000 地址，并在进入 Rust 前创建启动栈。
-// QEMU 在 loongarch64/boot.rs 中有独立的 Rust `_start`，同时编译两者会定义两个
-// 不兼容的复位入口。
 #[cfg(all(feature = "loongarch64", feature = "board_2k1000"))]
 core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
 #[cfg(feature = "riscv")]
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
 // ── Initramfs root cpio (small boot root filesystem) ──
-#[cfg(all(
-    feature = "initramfs",
-    feature = "loongarch64",
-    not(feature = "regression_initramfs")
-))]
-core::arch::global_asm!(include_str!("initramfs-la.S"));
-#[cfg(all(
-    feature = "initramfs",
-    feature = "loongarch64",
-    feature = "regression_initramfs"
-))]
-core::arch::global_asm!(include_str!("initramfs-regression-la.S"));
-#[cfg(all(
-    feature = "initramfs",
-    feature = "riscv",
-    not(feature = "regression_initramfs")
-))]
-core::arch::global_asm!(include_str!("initramfs-rv.S"));
-#[cfg(all(
-    feature = "initramfs",
-    feature = "riscv",
-    feature = "regression_initramfs"
-))]
-core::arch::global_asm!(include_str!("initramfs-regression-rv.S"));
-
-// ── Legacy: block_mem full rootfs image ──
-#[cfg(all(feature = "block_mem", feature = "loongarch64"))]
-core::arch::global_asm!(include_str!("load_img.S"));
-#[cfg(all(feature = "block_mem", feature = "riscv"))]
-core::arch::global_asm!(include_str!("load_img-rv.S"));
-
-// ── Preload test payloads (initproc, bash, busybox, LTP) ──
-// When preload_payloads feature is active AND we're not in block_mem mode
-#[cfg(all(
-    not(feature = "block_mem"),
-    feature = "preload_payloads",
-    feature = "riscv"
-))]
-core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(
-    not(feature = "block_mem"),
-    feature = "preload_payloads",
-    feature = "loongarch64"
-))]
-core::arch::global_asm!(include_str!("preload_app.S"));
-
-// ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
-#[cfg(all(
-    not(feature = "block_mem"),
-    not(feature = "initramfs"),
-    not(feature = "preload_payloads"),
-    feature = "riscv"
-))]
-core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(
-    not(feature = "block_mem"),
-    not(feature = "initramfs"),
-    not(feature = "preload_payloads"),
-    feature = "loongarch64"
-))]
-core::arch::global_asm!(include_str!("preload_app.S"));
+// The build script writes this only after validating the profile-selected CPIO.
+#[cfg(all(feature = "initramfs", target_arch = "loongarch64"))]
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
+#[cfg(all(feature = "initramfs", target_arch = "riscv64"))]
+core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
 
 fn mem_clear() {
     extern "C" {
-        fn skernel();
         fn sbss();
         fn ebss();
-        fn ekernel();
     }
     #[cfg(feature = "zero_init")]
     unsafe {
-        // `zero_init` pre-clears fresh frames so allocation can skip per-page
-        // zeroing. Iterate real DRAM banks: a single sbss..MEMORY_END range
-        // would touch the 2K1000LA MMIO hole between its two banks.
-        for &(region_start, region_end) in crate::config::MEMORY_REGIONS {
-            let mut clear_start = region_start.max(crate::config::PAGE_SIZE);
-            if region_start < ekernel as usize && (skernel as usize) < region_end {
-                // Keep text/rodata/data and the live boot stack; clear BSS and
-                // all fresh memory after it, matching the old contiguous path.
-                clear_start = clear_start.max(sbss as usize);
-            }
-            if clear_start < region_end {
-                // Keep firmware/device-owned carveouts intact. They can contain
-                // an active display buffer or another CPU's park loop even
-                // though the addresses are backed by DRAM.
-                let mut cursor = clear_start;
-                for &(reserved_start, reserved_end) in crate::config::FIRMWARE_RESERVED_REGIONS {
-                    if reserved_end <= cursor || reserved_start >= region_end {
-                        continue;
-                    }
-                    let clear_end = reserved_start.min(region_end);
-                    if cursor < clear_end {
-                        core::ptr::write_bytes(cursor as *mut u8, 0, clear_end - cursor);
-                    }
-                    cursor = cursor.max(reserved_end).min(region_end);
-                }
-                if cursor < region_end {
-                    core::ptr::write_bytes(cursor as *mut u8, 0, region_end - cursor);
-                }
-            }
-        }
+        core::slice::from_raw_parts_mut(
+            sbss as usize as *mut u8,
+            crate::config::MEMORY_END - sbss as usize,
+        )
+        .fill(0);
     }
     #[cfg(not(feature = "zero_init"))]
     unsafe {
@@ -225,32 +87,11 @@ fn mem_clear() {
     }
 }
 
-#[cfg(feature = "block_mem")]
-fn move_to_high_address() {
-    extern "C" {
-        fn simg();
-        fn eimg();
-    }
-    unsafe {
-        // 加载根文件系统镜像
-        let img =
-            core::slice::from_raw_parts(simg as usize as *mut u8, eimg as usize - simg as usize);
-        // 以DISK_IMAGE_BASE到MEMORY_END上的内存作为根文件系统镜像
-        let mem_disk = core::slice::from_raw_parts_mut(
-            DISK_IMAGE_BASE as *mut u8,
-            // 大小为256MB
-            0x1000_0000,
-        );
-        // 清空mem_disk上的内容
-        mem_disk.fill(0);
-        mem_disk[..img.len()].copy_from_slice(img);
-    }
-}
-
-/// Common firmware entry for both architectures.
+/// 双架构共用的固件入口。
 ///
-/// RV64 receives `(hart_id, dtb_or_hsm_opaque)` in `a0/a1`; LA64 QEMU and
-/// 2K1000LA normalize the same pair in their assembly/Rust entry stubs.
+/// RV64 由 OpenSBI 在 `a0/a1` 传入 hart ID 与 DTB/opaque；LA64 的入口
+/// 代码把 CPUID 和空启动参数整理为相同 ABI。这里必须先登记逻辑 CPU，
+/// 随后才能决定当前 CPU 是否拥有全局初始化权。
 #[no_mangle]
 pub extern "C" fn rust_main(cpu_id: usize, boot_arg: usize) -> ! {
     let logical_cpu_id = smp::register_cpu_entry(cpu_id);
@@ -261,182 +102,56 @@ pub extern "C" fn rust_main(cpu_id: usize, boot_arg: usize) -> ! {
     }
 }
 
-/// Preserve the historical MangoCore initialization path as the BSP-only path.
+/// 只有逻辑 CPU0 可以进入原有的 MangoCore 全局初始化路径。
 fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
     task::perf::record_boot_stage(task::perf::BOOT_STAGE_ENTRY);
-    // Only CPU0 reaches this function, so BSS, heap, drivers, filesystems, and
-    // the legacy global scheduler remain single-owner during Phase 1.
+    // Phase 1 中 AP 只执行 CPU-local 初始化并 park，因此 BSS、堆、驱动、
+    // 文件系统和旧全局调度器仍由 CPU0 单独拥有。
     bootstrap_init(cpu_id);
     mem_clear();
-    // 这一行可能有误，需要后续处理
-    #[cfg(all(feature = "block_mem"))]
-    move_to_high_address();
     console::log_init();
     trace::init();
-    task::perf::record_boot_stage(task::perf::BOOT_STAGE_CONSOLE);
-    boot_trace!("[kernel] Console initialized.");
+    println!("[kernel] Console initialized.");
     mm::init();
-    task::perf::record_boot_stage(task::perf::BOOT_STAGE_MM);
-    boot_trace!("[kernel] Hello, world!");
+    println!("[kernel] Hello, world!");
     // note that remap_test is currently NOT supported by LA64, for the whole kernel space is RW!
     // #[cfg(feature = "riscv")]
     // mm::remap_test();
 
     machine_init();
     crate::task::timer_subsystem_init();
-    // Release APs only after memory and CPU0's machine state are usable.  APs
-    // report online and park; CPU0 alone continues into shared subsystems.
+    match random::init() {
+        Ok(()) => println!("[kernel] PRNG initialized."),
+        Err(e) => println!("[kernel] PRNG init warning: {:?}", e),
+    }
+    // CPU0 完成 BSS、内存、机器状态与全局随机源初始化后才 Release AP。
+    // AP 只发布 online 并 park，后续 initramfs、驱动和 PID1 仍由 CPU0 执行。
     smp::bring_up_secondary_cpus();
 
     // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
     let boot_config = crate::bootargs::load();
 
-    if let Err(error) = random::init() {
-        println!(
-            "[kernel] random: secure source unavailable ({:?}); secure reads will fail",
-            error
-        );
-    }
-    task::perf::record_boot_stage(task::perf::BOOT_STAGE_DRIVERS);
-
-    if boot_config.mode != crate::bootargs::BootMode::Regression {
-        // Non-destructive GMAC/PHY handoff inspection. This runs before any block
-        // driver allocation and deliberately leaves U-Boot's MAC/PHY state intact.
-        #[cfg(all(feature = "board_2k1000", feature = "gmac_probe"))]
-        drivers::net::gmac_2k1000::probe_all();
-
-        // Explicit opt-in validation for the integrated 2K1000 SATA controller.
-        // This performs IDENTIFY and repeated reads of LBA0 only; force_ramfs below
-        // remains active, so the SSD is neither mounted nor written.
-        #[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
-        drivers::block::sata_read_only_probe();
-
-        // Explicit destructive validation. The probe verifies the prepared disk,
-        // writes only beyond all MBR partitions, and restores the original sectors
-        // before the ramfs-only boot continues.
-        #[cfg(all(feature = "board_2k1000", feature = "sata_write_probe"))]
-        drivers::block::sata_write_probe();
-    }
-
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
-        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
-        #[cfg(all(
-            feature = "board_2k1000",
-            any(
-                not(feature = "block_sata"),
-                feature = "sata_probe",
-                feature = "sata_write_probe"
-            )
-        ))]
-        {
-            // 救援镜像和 sata_probe 镜像必须保持与文件系统探测解耦；普通的
-            // board_2k1000 + block_sata 镜像才进入下方只读挂载路径。
-            fs::force_ramfs();
-            boot_trace!("[kernel] 2K1000 board bring-up: ramfs-only block path enabled");
-        }
-        #[cfg(all(
-            feature = "board_2k1000",
-            feature = "block_sata",
-            not(any(feature = "sata_probe", feature = "sata_write_probe"))
-        ))]
-        boot_trace!("[kernel] 2K1000 board bring-up: SATA read-only mount enabled");
-
+        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs bootstrap
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
-        // Regression never initializes networking. QEMU regression builds may
-        // attach a disposable ext4 fixture as block device 0; real-board builds
-        // remain excluded so regression mode can never touch a board SSD.
+        // Regression 模式：跳过网卡和块设备初始化（纯 initramfs，无外部磁盘）
         if boot_config.mode != crate::bootargs::BootMode::Regression {
-            #[cfg(any(
-                not(feature = "board_2k1000"),
-                all(feature = "board_2k1000", feature = "gmac_2k1000")
-            ))]
             drivers::init_net_device();
-            #[cfg(all(feature = "board_2k1000", not(feature = "gmac_2k1000")))]
-            {
-                // 实板网卡不是 QEMU virtio-net；最小上板阶段保留回环接口和网络核心，
-                // 暂不枚举 virtio PCI 网卡，后续再接 GMAC/PHY 驱动。
-                boot_trace!("[kernel] 2K1000 board bring-up: external net probe skipped");
-            }
             net::config::init();
-            task::perf::record_boot_stage(task::perf::BOOT_STAGE_NET);
 
-            // 在安装 preload payload 前探测，保证 AHCI/virtio DMA 页仍可从低碎片
-            // 物理内存中分配。
-            #[cfg(all(not(feature = "board_2k1000"), not(feature = "p4_persist_rw")))]
-            fs::mount_boot_block_devices();
-            #[cfg(all(not(feature = "board_2k1000"), feature = "p4_persist_rw"))]
-            fs::mount_boot_block_devices_with_writable_persist();
-            #[cfg(all(
-                feature = "board_2k1000",
-                feature = "block_sata",
-                not(any(feature = "sata_probe", feature = "sata_write_probe"))
-            ))]
-            #[cfg(all(not(feature = "sata_scratch_rw"), not(feature = "p4_persist_rw")))]
-            fs::mount_boot_block_devices_read_only();
-            #[cfg(all(feature = "sata_scratch_rw", not(feature = "p4_persist_rw")))]
-            fs::mount_boot_block_devices_with_writable_scratch();
-            #[cfg(all(feature = "board_2k1000", feature = "p4_persist_rw"))]
-            fs::mount_boot_block_devices_with_writable_persist();
-            #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
-            fs::run_board_scratch_write_probe();
-            #[cfg(all(
-                feature = "board_2k1000",
-                any(
-                    not(feature = "block_sata"),
-                    feature = "sata_probe",
-                    feature = "sata_write_probe"
-                )
-            ))]
-            boot_trace!("[kernel] 2K1000 board bring-up: block device mount skipped");
-
-            // 安装预装载的测试载荷。QEMU 和 2K1000 SATA 路径都先完成块设备探测，
-            // 以减少 DMA 页碎片；救援/probe 镜像则直接安装到 initramfs/ramfs 根。
-            #[cfg(feature = "preload_payloads")]
-            {
-                #[cfg(feature = "board_2k1000")]
-                boot_trace!("[bringup][main:01] preload payload installation begin");
-                fs::install_preload_payloads();
-                #[cfg(feature = "board_2k1000")]
-                boot_trace!("[bringup][main:02] preload payload installation complete");
-            }
+            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
+            // PID1 owns the later x0/x1 mount policy.
+            fs::register_boot_block_devices();
         } else {
-            #[cfg(not(feature = "board_2k1000"))]
-            {
-                crate::println!(
-                    "[kernel] Regression mode — mounting disposable QEMU block fixture"
-                );
-                fs::mount_boot_block_devices();
-            }
-            #[cfg(feature = "board_2k1000")]
-            crate::println!("[kernel] Regression mode — board net/block init disabled");
+            crate::println!("[kernel] Regression mode — skipping net/block init");
         }
     }
 
-    // ── Legacy 启动路径（initramfs 特性未启用时）──
-    #[cfg(not(feature = "initramfs"))]
-    {
-        drivers::init_net_device();
-        net::config::init();
-        task::perf::record_boot_stage(task::perf::BOOT_STAGE_NET);
-        #[cfg(feature = "block_virt")]
-        println!("[kernel] block in virt mode!");
-        #[cfg(feature = "oom_handler")]
-        println!("[kernel] oom_handler is enabled!");
-        #[cfg(feature = "heap_trace")]
-        println!("[kernel] heap_trace is enabled!");
-        fs::flush_preload();
-        fs::mount_tools_disk();
-    }
-
-    task::perf::record_boot_stage(task::perf::BOOT_STAGE_FS);
-
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
-    #[cfg(feature = "board_2k1000")]
-    boot_trace!("[bringup][main:03] init task construction begin");
 
     // ── Kernel self-test mode (mango.mode=ktest) ──
     // When ktest runs with the scheduler active, we spawn the test runner
@@ -461,12 +176,8 @@ fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
 
     // ── Normal boot ──
     task::add_initproc();
-    task::perf::record_boot_stage(task::perf::BOOT_STAGE_INITPROC);
-    #[cfg(feature = "board_2k1000")]
-    boot_trace!("[bringup][main:04] init task queued; entering scheduler");
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
-    task::perf::record_boot_stage(task::perf::BOOT_STAGE_SCHEDULER);
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }

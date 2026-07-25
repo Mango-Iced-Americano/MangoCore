@@ -1,8 +1,0 @@
-# mount07 regression — 2026-07-16 09:00 UTC
-
-kernel:    7c8c0b3c-dirty
-image:     sha256 $(cat sdcard-rv.sha256 | awk '{print $1}')
-container: $(cat container-info.txt)
-config:    mask=0x800 ltp_include=mount07 (from testresults/20260716-090023/os_test.conf)
-command:   make -f make/rv64.mk comp
-result:    14 passed, 0 failed, 0 broken, 0 skipped

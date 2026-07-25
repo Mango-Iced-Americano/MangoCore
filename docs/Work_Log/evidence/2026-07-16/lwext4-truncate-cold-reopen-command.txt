@@ -1,4 +1,0 @@
-docker compose exec -T os-dev sh -lc 'cd /app && make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../docs/Work_Log/evidence/2026-07-16/lwext4-truncate-cold-reopen-rv64.conf'
-timeout 180s docker compose exec -T os-dev sh -lc 'cd /app && make -C os rv64-run'
-exit_status=0
-exit_status=0

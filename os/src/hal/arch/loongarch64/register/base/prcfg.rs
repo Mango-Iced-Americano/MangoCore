@@ -114,7 +114,7 @@ impl PRCfg2 {
         virt_support,
         "True indicates support for virtualization expansion"
     );
-    def_field_rd!(13,11,  lvz_ver ,"The version number of the virtualization hardware acceleration specification. 1 is the initial version number");
+    def_field_rd!(11,13,  lvz_ver ,"The version number of the virtualization hardware acceleration specification. 1 is the initial version number");
     def_field_rd!(
         22,
         atomic_support,
@@ -126,16 +126,16 @@ impl PRCfg2 {
         "1 indicates support for the software page table walking instruction"
     );
     def_field_rd!(
-        17,
         15,
+        17,
         fp_ver,
         "
 The version number of the floating-point arithmetic standard.
 1 is the initial version number to indicate compatibility with the IEEE 754-2008 standard"
     );
     def_field_rd!(
-        17,
         15,
+        17,
         llftp_ver,
         "Constant frequency counter and timer version number. 1 is the initial version "
     );

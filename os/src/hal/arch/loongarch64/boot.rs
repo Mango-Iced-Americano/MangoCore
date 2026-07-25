@@ -2,22 +2,20 @@
 //!
 //! `_start` 按 CPU ID 选择启动栈并跳转到 Rust 侧 `rust_main`。
 
-use core::arch::asm;
+use core::arch::naked_asm;
 
 use crate::config::BOOT_STACK_SIZE;
 
-// Phase 1 fixes the QEMU topology ceiling at eight contiguous CPU IDs.
+// Phase 1 固定支持最多 8 个连续 CPUID，并为每个 CPU 预留独立启动栈。
 const MAX_CPUS: usize = 8;
 
-#[naked]
+// SAFETY: 固件在尚无 Rust 栈和引用时进入这里。汇编只配置 DMW、校验本地
+// CPUID、选择边界内的启动栈，最后跳转到 `rust_main`。
+#[unsafe(naked)]
 #[no_mangle]
 #[link_section = ".text.entry"]
 unsafe extern "C" fn _start() -> ! {
-    // Safety: this is the first instruction stream after firmware jumps to the
-    // kernel. No Rust stack or references exist yet; the assembly programs DMW,
-    // validates the CPU-local ID, assigns its bounded stack, and enters Rust.
-    unsafe {
-        asm!(
+    naked_asm!(
             r"
             # 0x180 + n 为 DMWn 寄存器位置
             ori         $t0, $zero, 0x11    # 配置 CSR_DMWn_PLV0
@@ -57,9 +55,7 @@ unsafe extern "C" fn _start() -> ! {
             boot_stack_size = const BOOT_STACK_SIZE,
             boot_stack = sym BOOT_STACK,
             entry = sym crate::rust_main,
-            options(noreturn)
-        )
-    }
+    )
 }
 
 #[link_section = ".bss.stack"]

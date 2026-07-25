@@ -1,0 +1,230 @@
+schema_version: "phase-0-contract-matrix/v1"
+observation_commit: 883f73c2
+branch: chore/clean-up
+date: 2026-07-18
+
+status_vocabulary:
+  observed: "observed at 883f73c2"
+  candidate: "uncommitted candidate"
+  future: "required future contract"
+  unverified: "unverified"
+
+documentation_only_commit:
+  purpose: "Freeze the Phase-0 contract map without claiming rebaseline completion."
+  staged_allowlist:
+    - docs/plans/repository-rebaseline.md
+    - docs/architecture/2026-07-18-mangocore-contract-map.md
+    - docs/architecture/2026-07-18-mangocore-contract-matrix.yaml
+    - docs/architecture/2026-07-18-verify-contract-map.sh
+  forbidden_in_commit:
+    - docs/Work_Log/
+    - docs/Work_Log/evidence/
+    - raw logs
+    - generated reports
+    - disk images
+    - caches
+    - boulder state
+    - source changes
+    - build, CI, Docker, or toolchain changes
+
+completion:
+  phase_0_complete: false
+  rebaseline_complete: false
+  status: "unverified"
+  blocking_reason: "No build, runtime, QEMU, CI, lint, or repository-purity proof is admitted by this documentation-only task."
+  evidence_policy:
+    work_log_is_verification: false
+    evidence_directory_is_verification: false
+    candidate_files_are_verification: false
+
+baseline:
+  status: "observed at 883f73c2"
+  root_entrypoint:
+    status: "observed at 883f73c2"
+    target: make all
+    behavior:
+      - "Runs root prepare-cargo-config."
+      - "Runs root clean unconditionally before make -C os all."
+      - "Delegates to os/Makefile all, which runs RV64 before LA64."
+    unconditional_clean: true
+    incremental_contract_proven: false
+  rustup:
+    status: "observed at 883f73c2"
+    mutations:
+      - "Root env runs rustup default."
+      - "Architecture entrypoints run rustup override set."
+      - "Architecture env paths add targets and components."
+    normal_path_mutates_rustup: true
+  source_and_configuration_mutation:
+    status: "observed at 883f73c2"
+    paths:
+      lang_items:
+        - os/src/lang_items.rs
+        - user/src/lang_items.rs
+      cargo_configuration:
+        - os/.cargo/config.toml
+        - user/.cargo/config.toml
+      linker_inputs:
+        - os/src/hal/arch/riscv/linker.ld
+        - os/src/hal/arch/loongarch64/linker.ld
+      initramfs_inputs:
+        - os/src/initramfs-rv.S
+        - os/src/initramfs-la.S
+        - os/src/initramfs-regression-rv.S
+        - os/src/initramfs-regression-la.S
+      lwext4_source:
+        - dependency/lwext4_rust/c/lwext4/
+    operations:
+      - "Copies architecture lang item variants over active lang_items.rs files."
+      - "Copies linker inputs into active linker.ld paths."
+      - "Copies Cargo configuration and invokes vendor checksum restore."
+      - "Touches initramfs assembly inputs to force rebuilds."
+      - "Copies lwext4 integration files and edits src/CMakeLists.txt with sed."
+  outputs:
+    status: "observed at 883f73c2"
+    locations:
+      - kernel-rv
+      - kernel-la
+      - disk.img
+      - disk-la.img
+      - fs-img-dir/
+      - os/target/
+      - user/target/
+      - lwext4 build directories
+      - /tmp/
+    output_isolation: false
+    scattered_outside_build: true
+  docker_and_ci:
+    status: "observed at 883f73c2"
+    compose:
+      image: zhouzhouyi/os-contest:20260104
+      status: "observed at 883f73c2"
+    ci_workflows:
+      - name: ci-develop
+        image: zhouzhouyi/os-contest:20260104
+        status: "observed at 883f73c2"
+      - name: ci-main
+        image: zhouzhouyi/os-contest:20260104
+        status: "observed at 883f73c2"
+    root_makefile:
+      default_image: docker.educg.net/cg/os-contest:20250614
+      default_status: "observed at 883f73c2"
+      active_use: "unverified"
+      equivalence_to_compose_and_ci: "unverified"
+    mismatch: "The root Makefile default differs from compose and both CI workflow images."
+
+candidate:
+  status: "uncommitted candidate"
+  rule: "Working-tree rebaseline files cannot alter the observation baseline or serve as completion proof."
+  known_paths:
+    - rust-toolchain.toml
+    - scripts/rustup-setup.sh
+    - scripts/rustup-preflight.sh
+    - scripts/loongarch64-clang-lld.sh
+    - Makefile
+    - os/Makefile
+    - os/make/rv64.mk
+    - os/make/la64.mk
+    - cargo-config/
+    - os/.cargo/config.toml
+    - user/.cargo/config.toml
+    - os/src/lang_items.rs
+    - user/src/lang_items.rs
+    - Docker and CI files
+  validation: "unverified"
+
+required_future_contract:
+  status: "required future contract"
+  profiles:
+    normal:
+      status: "required future contract"
+      proof_status: "unverified"
+    competition:
+      status: "required future contract"
+      proof_status: "unverified"
+    regression:
+      status: "required future contract"
+      proof_status: "unverified"
+    ktest:
+      status: "required future contract"
+      proof_status: "unverified"
+    development:
+      status: "required future contract"
+      proof_status: "unverified"
+    debug:
+      status: "required future contract"
+      proof_status: "unverified"
+      variant_of: development
+  toolchain:
+    dated_nightly: true
+    root_manifest: rust-toolchain.toml
+    explicit_setup_only: true
+    setup_entrypoint: make toolchain-setup
+    read_only_preflight: true
+    preflight_entrypoint: make toolchain-preflight
+    rustup_auto_install: 0
+    formal_commands_may_mutate_rustup: false
+    formal_commands_may_download_toolchain: false
+    architecture_order: [rv64, la64]
+    architecture_builds_may_run_concurrently: false
+  source_purity:
+    proof_status: "unverified"
+    tracked_source_must_remain_unchanged: true
+    vendor_must_remain_unchanged: true
+    cargo_configuration_must_remain_unchanged: true
+    lang_items_must_be_declared_inputs: true
+    initramfs_must_be_declared_inputs: true
+    lwext4_source_must_remain_unchanged: true
+  output_isolation:
+    proof_status: "unverified"
+    root: build/
+    partition_by: [architecture, mode, profile]
+    build_scripts_write_only_out_dir: true
+    root_compatibility_outputs_publish_after_both_architectures: true
+  linker_configuration:
+    proof_status: "unverified"
+    external_configuration_required: true
+    linker_inputs_must_be_out_of_tree_or_committed_non_mutating_inputs: true
+  image_and_disk:
+    proof_status: "unverified"
+    drive_roles: [x0, x1]
+    x0_is_evaluator_input: true
+    normal_build_may_mutate_x0: false
+    test_injection_uses_named_derived_image: true
+    role_identification: [label, uuid, partition_metadata, central_role_map]
+  quality_and_ci:
+    proof_status: "unverified"
+    lint_gate_must_not_mask_failure: true
+    qemu_smoke_gate_required: true
+    ci_must_use_same_declared_contract: true
+
+  qemu:
+    proof_status: "unverified"
+    profiles: [normal, competition, regression, ktest, development, debug]
+    boot_and_shutdown_proven: false
+
+unverified:
+  status: "unverified"
+  claims_not_proven:
+    - source purity
+    - output isolation
+    - CI equivalence and contract compliance
+    - QEMU boot, PID 1, runner, and shutdown behavior
+    - disk and image contract
+    - warning inventory and non-bypassable lint gate
+    - dual-architecture build success
+    - incremental build behavior
+  metadata:
+    x0:
+      partition_table: null
+      filesystem: null
+      label: null
+      uuid: null
+      mount_target: null
+    x1:
+      partition_table: null
+      filesystem: null
+      label: null
+      uuid: null
+      mount_target: null
+  required_exit_condition: "Each item needs current, attributable proof from the applicable clean environment, build, QEMU, CI, image, or lint gate."

@@ -3,7 +3,7 @@ title: "MangoCore 文档索引"
 category: overview
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-24
+last_updated: 2026-07-25
 tags: [docs, index, overview]
 ---
 
@@ -31,7 +31,7 @@ tags: [docs, index, overview]
 | `00_overview/Engineering-Casebook.md` | 评审材料 | 竞赛工程案例手册：Q&A 与调试案例 |
 | `00_overview/AI-Usage-Report.md` | 评审材料 | AI 工具使用情况报告：工具清单、使用场景、证据与合规声明 |
 | `00_overview/` | 项目概述 | 项目高层描述、目标和范围 |
-| `01_architecture/` | 架构 | 系统架构、启动流程、HAL 设计 |
+| `01_architecture/` | 架构 | 系统架构、BSP/AP 启动流程、trap 与 HAL 设计 |
 | `02_syscall/` | 系统调用参考 | 系统调用表、ABI、分发结构 |
 | `03_fs/` | 文件系统 | VFS 层、ext4、FAT32、tmpfs、ramfs、procfs、devfs、PageCache |
 | `04_mm/` | 内存管理 | 物理分配器、SV39 页表、VMA、mmap、CoW、OOM |
@@ -41,11 +41,10 @@ tags: [docs, index, overview]
 | `diagrams/` | 架构图 | 子系统架构图、流程图、关系图等图片资源 |
 | `08_testing/` | 测试 | 隔离 CPython/APK 运行时、QEMU 与实板测试门禁 |
 | [`09_debug/`](09_debug/README.md) | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（多篇） |
-| `10_plan/` | 计划 | 跨子系统设计方案、性能分析和迁移计划 |
 | `_templates/` | 模板 | 新模块文档的标准文档模板 |
 | `kernel/` | 遗留子系统文档 | 旧版模块文档（待迁移到 00-09 布局） |
 | `ltp/` | LTP 测试计划 | LTP 测试策略、各子系统状态、工作流 |
-| `10_plan/` | 架构计划 | 设计方案和迁移计划 |
+| `10_plan/` | 架构计划 | SMP、跨子系统设计方案和迁移计划 |
 | `Work_Log.md` | 开发日志 | 所有重要变更的时间顺序记录 |
 
 ## 阅读指南
@@ -78,14 +77,14 @@ tags: [docs, index, overview]
 
 | 目录 | 文档索引 | 状态 | 说明 |
 |-----------|----------|--------|------|
-| `01_architecture/` | [README.md](01_architecture/README.md)、[SMP 锁序契约](01_architecture/lock-order.md) | 稳定/提案 | 架构文档含 12 篇文档；新增 SMP 目标锁序、IRQ 上下文能力和禁止组合 |
+| `01_architecture/` | [README.md](01_architecture/README.md) | 草稿 | 架构文档已对齐 CPIO→PID1→runner、镜像角色、BSP/AP 启动边界与当前 Make facade |
 | `02_syscall/` | [README.md](02_syscall/README.md) | 稳定 | 系统调用文档含 12 篇文档，覆盖 ABI、分发、syscall 表、文件/fd/event、进程、MM、signal/time/IPC、网络索引和错误码 |
 | `03_fs/` | [README.md](03_fs/README.md) | 草稿 | 文件系统子系统含 14 篇文档，涵盖 VFS、PageCache、ext4、FAT32、tmpfs、procfs 等 |
 | `04_mm/` | [README.md](04_mm/README.md) | 稳定 | 内存管理文档含 14 篇文档，覆盖 frame allocator、页表/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、CoW、filemap 和 OOM |
 | `05_process/` | [README.md](05_process/README.md) | 稳定 | 进程文档含 17 篇文档，覆盖 TCB/PCB、调度、WaitQueue、clone/namespace、exec、exit/wait、signal、futex、IPC 和 rlimit |
 | `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
 | `09_debug/` | [README.md](09_debug/README.md) | 持续更新 | `la64_on_board/` 按工作批次归档：`260710/` 保存 32 篇 bring-up 总账/专题，`260717/` 保存 Python 性能报告与原始数据 |
-| `10_plan/` | [SMP 实施方案](10_plan/smp-8core-implementation.md)、[Agent 执行规范](10_plan/smp-agent-execution-spec.md) | 提案/规范 | 双架构 SMP 的阶段依赖、风险分级工作包、约 100 行关键代码目标和自适应验证门禁 |
+| `10_plan/` | [SMP 实施方案](10_plan/smp-8core-implementation.md)、[Agent 执行规范](10_plan/smp-agent-execution-spec.md) | 提案/规范 | RISC-V 与 LoongArch QEMU 1/2/4/8 核 SMP 设计、风险分级工作包和自适应验证门禁 |
 
 ### 测试与实板使用
 

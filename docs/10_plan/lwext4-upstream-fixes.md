@@ -10,7 +10,7 @@
 
 **文件**：`dependency/lwext4_rust/src/bindings.rs`（bindgen 自动生成）
 
-**问题**：bindings.rs 使用 `unsafe extern "C" { ... }` 语法（218 处），该语法在 Rust < 1.82 中不可用。MangoCore la64 使用 nightly-2024-05-01，不支持此语法。
+**问题**：bindings.rs 使用 `unsafe extern "C" { ... }` 语法（218 处），该语法在 Rust < 1.82 中不可用。历史上 MangoCore la64 使用 nightly-2024-05-01，因而不支持此语法；当前项目已统一固定到 nightly-2026-05-10。
 
 **症状**：`error: extern block cannot be declared unsafe` × 218
 

@@ -1,0 +1,176 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    printf '%s\n' "usage: $0 --allowlist FILE [--repo-root DIR] --verify-fingerprints" >&2
+    printf '%s\n' "       $0 --fixture staged-unowned|staged-allowlisted" >&2
+    exit 2
+}
+
+fail() {
+    printf '%s\n' "FAIL: $*" >&2
+    exit 1
+}
+
+run_staged_unowned_fixture() {
+    fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/rebaseline-isolation-fixture.XXXXXX")
+    trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+    repo=$fixture_root/repo
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email rebaseline@example.invalid
+    git -C "$repo" config user.name rebaseline-test
+    printf '%s\n' base >"$repo/tracked.txt"
+    git -C "$repo" add tracked.txt
+    git -C "$repo" commit -qm baseline
+    printf '%s\n' staged >"$repo/staged.txt"
+    git -C "$repo" add staged.txt
+    : >"$fixture_root/allowlist"
+
+    if "$0" --allowlist "$fixture_root/allowlist" --repo-root "$repo" --verify-fingerprints \
+        >"$fixture_root/output" 2>&1; then
+        fail 'staged-unowned fixture was accepted'
+    fi
+    grep -F 'FAIL: staged/index status requires reconciliation: staged.txt' "$fixture_root/output" >/dev/null ||
+        fail 'staged-unowned fixture did not identify staged.txt'
+    fail 'staged-unowned fixture confirmed rejection: staged/index status requires reconciliation: staged.txt'
+}
+
+run_staged_allowlisted_fixture() {
+    fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/rebaseline-isolation-fixture.XXXXXX")
+    trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+    repo=$fixture_root/repo
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email rebaseline@example.invalid
+    git -C "$repo" config user.name rebaseline-test
+    printf '%s\n' base >"$repo/protected.txt"
+    git -C "$repo" add protected.txt
+    git -C "$repo" commit -qm baseline
+    printf '%s\n' staged >"$repo/protected.txt"
+    git -C "$repo" add protected.txt
+    fingerprint=$(sha256sum "$repo/protected.txt" | cut -d ' ' -f 1)
+    printf '%s %s %s\n' protected.txt "$fingerprint" outside-rebaseline >"$fixture_root/allowlist"
+
+    if "$0" --allowlist "$fixture_root/allowlist" --repo-root "$repo" --verify-fingerprints \
+        >"$fixture_root/output" 2>&1; then
+        fail 'staged-allowlisted fixture was accepted'
+    fi
+    grep -F 'FAIL: staged/index status requires reconciliation: protected.txt' "$fixture_root/output" >/dev/null ||
+        fail 'staged-allowlisted fixture did not identify protected.txt'
+    fail 'staged-allowlisted fixture confirmed rejection: staged/index status requires reconciliation: protected.txt'
+}
+
+if [ "$#" -eq 2 ] && [ "$1" = '--fixture' ]; then
+    case "$2" in
+        staged-unowned) run_staged_unowned_fixture ;;
+        staged-allowlisted) run_staged_allowlisted_fixture ;;
+        *) usage ;;
+    esac
+    exit 0
+fi
+
+[ "$#" -eq 3 ] || [ "$#" -eq 5 ] || usage
+[ "$1" = '--allowlist' ] || usage
+allowlist=$2
+case "$#" in
+    3)
+        [ "$3" = '--verify-fingerprints' ] || usage
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null) ||
+            fail 'default repo root is not a Git worktree'
+        ;;
+    5)
+        [ "$3" = '--repo-root' ] || usage
+        repo_root=$4
+        [ "$5" = '--verify-fingerprints' ] || usage
+        ;;
+esac
+
+[ -r "$allowlist" ] || fail "allowlist is not readable: $allowlist"
+repo_root=$(CDPATH= cd -- "$repo_root" && pwd)
+git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    fail "repo root is not a Git worktree: $repo_root"
+
+allowlist_entries=$(mktemp "${TMPDIR:-/tmp}/rebaseline-allowlist.XXXXXX")
+trap 'rm -f "$allowlist_entries"' EXIT HUP INT TERM
+
+while IFS=' ' read -r path fingerprint disposition extra; do
+    case "$path" in
+        ''|'#'*) continue ;;
+    esac
+    [ -z "${extra:-}" ] || fail "malformed allowlist entry: $path"
+    case "$path" in
+        /*|*'..'*|*'//'*) fail "unsafe allowlist path: $path" ;;
+    esac
+    case "$disposition" in
+        outside-rebaseline|reconcile-before) ;;
+        *) fail "invalid allowlist disposition for $path: $disposition" ;;
+    esac
+    case "$fingerprint" in
+        DELETED|????????????????????????????????????????????????????????????????) ;;
+        *) fail "invalid SHA-256 for $path" ;;
+    esac
+    if grep -Fqx "$path $fingerprint $disposition" "$allowlist_entries"; then
+        fail "duplicate allowlist path: $path"
+    fi
+    printf '%s %s %s\n' "$path" "$fingerprint" "$disposition" >>"$allowlist_entries"
+done <"$allowlist"
+
+while IFS=' ' read -r path expected_hash disposition; do
+    if [ "$expected_hash" = 'DELETED' ]; then
+        [ ! -e "$repo_root/$path" ] ||
+            fail "DELETED allowlist path must be absent: $path"
+        continue
+    fi
+
+    [ -e "$repo_root/$path" ] || fail "allowlisted path is absent: $path"
+    actual_hash=$(sha256sum "$repo_root/$path" | cut -d ' ' -f 1) ||
+        fail "cannot hash allowlisted path: $path"
+    path_status=$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all -- "$path") ||
+        fail "cannot inspect allowlisted path: $path"
+    if [ -n "$path_status" ]; then
+        [ "$actual_hash" = "$expected_hash" ] || fail "fingerprint mismatch: $path"
+        continue
+    fi
+
+    committed_hash=$(git -C "$repo_root" show "HEAD:$path" | sha256sum | cut -d ' ' -f 1) ||
+        fail "cannot read committed allowlisted path: $path"
+    [ "$actual_hash" = "$committed_hash" ] || fail "clean allowlisted path differs from HEAD: $path"
+done <"$allowlist_entries"
+
+status_file=$(mktemp "${TMPDIR:-/tmp}/rebaseline-status.XXXXXX")
+trap 'rm -f "$allowlist_entries" "$status_file"' EXIT HUP INT TERM
+git -C "$repo_root" status --porcelain=v1 --untracked-files=all >"$status_file" ||
+    fail 'git status failed'
+
+while IFS= read -r status_line; do
+    [ -n "$status_line" ] || continue
+    status=${status_line%${status_line#??}}
+    path=${status_line#???}
+    index_status=${status%?}
+    case "$status" in
+        R*|C*|?R|?C) fail "rename/copy status requires reconciliation: $path" ;;
+    esac
+    [ "$status" = '??' ] || [ "$index_status" = ' ' ] ||
+        fail "staged/index status requires reconciliation: $path"
+    entry=$(grep -F "${path} " "$allowlist_entries" || true)
+    [ -n "$entry" ] || fail "dirty path is not allowlisted: $path"
+    set -- $entry
+    expected_hash=$2
+    disposition=$3
+    [ "$disposition" = 'outside-rebaseline' ] ||
+        fail "dirty path requires reconciliation before execution: $path"
+    case "$status" in
+        *D*|D*)
+            [ "$expected_hash" = 'DELETED' ] || fail "deleted path must use DELETED fingerprint: $path"
+            ;;
+        *)
+            [ "$expected_hash" != 'DELETED' ] || fail "existing path cannot use DELETED fingerprint: $path"
+            actual_hash=$(sha256sum "$repo_root/$path" | cut -d ' ' -f 1) ||
+                fail "cannot hash allowlisted path: $path"
+            [ "$actual_hash" = "$expected_hash" ] || fail "fingerprint mismatch: $path"
+            ;;
+    esac
+done <"$status_file"
+
+printf '%s\n' 'PASS: rebaseline isolation allowlist verified'

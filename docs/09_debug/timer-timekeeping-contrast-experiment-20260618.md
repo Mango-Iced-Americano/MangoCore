@@ -50,7 +50,7 @@ adc90938 Fix timer deadline rounding and la64 TLB invalidation
 | QEMU 配置 | 两边使用同一 `make rv64-run` / `make la64-run` 路径，同一 `LOG=error` |
 | 测试配置 | `mask=0x000` 且 `timer_smoke=1`；basic smoke 使用 `mask=0x001` 且 `timer_smoke=0` |
 | 镜像状态 | 测试后恢复 `/os_test.conf` 为仓库默认 `os_test.conf` |
-| 架构顺序 | rv64/la64 顺序执行，不并行构建，避免 nightly override 竞态 |
+| 架构顺序 | rv64/la64 顺序执行，不并行构建，避免共享架构生成状态互相覆盖 |
 
 ## Timer Smoke 用例
 

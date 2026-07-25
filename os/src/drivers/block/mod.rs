@@ -1,5 +1,4 @@
 mod block_dev;
-mod mem_blk;
 pub mod partition;
 mod sata_blk;
 pub mod virtio_dma_pool;
@@ -8,8 +7,6 @@ pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
 pub mod virtio_blk_pci;
 pub use block_dev::BlockDevice;
-#[cfg(feature = "block_mem")]
-type BlockDeviceImpl = mem_blk::MemBlockWrapper;
 #[cfg(feature = "block_sata")]
 type BlockDeviceImpl = sata_blk::SataBlock;
 #[cfg(feature = "block_virt")]
@@ -19,27 +16,7 @@ type BlockDeviceImpl = virtio_blk_pci::VirtIOBlock;
 
 use crate::hal::BLOCK_SZ;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::*;
-
-/// 标志位：跳过块设备初始化（ramfs-only 模式时由 fs::force_ramfs() 设置）
-pub static SKIP_BLOCK_DEVICE: AtomicBool = AtomicBool::new(false);
-
-/// 在 ramfs 模式下调用，阻止 BLOCK_DEVICE 初始化
-pub fn disable_block_device() {
-    SKIP_BLOCK_DEVICE.store(true, Ordering::Relaxed);
-}
-
-/// 虚拟块设备 — 用于 ramfs-only 模式下 BLOCK_DEVICE 的占位
-struct DummyBlockDevice;
-impl BlockDevice for DummyBlockDevice {
-    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) {
-        panic!("DummyBlockDevice::read_block called — block device is disabled (ramfs-only mode)");
-    }
-    fn write_block(&self, _block_id: usize, _buf: &[u8]) {
-        panic!("DummyBlockDevice::write_block called — block device is disabled (ramfs-only mode)");
-    }
-}
 
 // ── 平台相关的块设备探测 ──
 
@@ -62,27 +39,12 @@ fn probe_block_devices() -> [Option<Arc<dyn BlockDevice>>; 2] {
 lazy_static! {
     /// 多块设备数组。索引 0 = 官方 fs (x0)，索引 1 = 工具盘 (x1)。
     /// 每个条目在设备未探测到时为 None。
-    pub static ref BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2] = {
-        if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
-            boot_trace!("[kernel] block devices skipped (ramfs-only mode)");
-            [None, None]
-        } else {
-            probe_block_devices()
-        }
-    };
+    pub static ref BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2] = probe_block_devices();
 
     /// 向后兼容别名：始终指向设备 0（官方 fs）。
-    /// ramfs-only 模式下返回 DummyBlockDevice；否则要求 device 0 存在。
-    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = {
-        if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
-            boot_trace!("[kernel] block device skipped (ramfs-only mode)");
-            Arc::new(DummyBlockDevice)
-        } else {
-            BLOCK_DEVICES[0].clone().expect(
-                "[kernel] FATAL: no block device 0 (official fs) found"
-            )
-        }
-    };
+    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = BLOCK_DEVICES[0]
+        .clone()
+        .expect("[kernel] FATAL: no block device 0 (official fs) found");
 }
 
 /// 返回块设备数组的只读引用
@@ -93,16 +55,6 @@ pub fn block_devices() -> &'static [Option<Arc<dyn BlockDevice>>; 2] {
 /// 获取指定索引的块设备（存在时返回 Some）
 pub fn get_block_device(index: usize) -> Option<Arc<dyn BlockDevice>> {
     BLOCK_DEVICES.get(index).and_then(|dev| dev.clone())
-}
-
-#[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
-pub fn sata_read_only_probe() {
-    sata_blk::read_only_probe();
-}
-
-#[cfg(all(feature = "board_2k1000", feature = "sata_write_probe"))]
-pub fn sata_write_probe() {
-    sata_blk::write_probe();
 }
 
 #[allow(unused)]

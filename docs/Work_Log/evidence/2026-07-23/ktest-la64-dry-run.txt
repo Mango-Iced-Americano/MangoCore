@@ -1,0 +1,1 @@
+qemu-system-loongarch64 -machine virt -nographic -kernel /app/build/la64/release/normal/kernel/loongarch64-unknown-linux-gnu/release/os -m 1024 -smp threads=1

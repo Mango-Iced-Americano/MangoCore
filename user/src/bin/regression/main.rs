@@ -13,7 +13,7 @@ mod regression_mmap_edge_cases;
 mod regression_timer_realtime_jump;
 mod regression_rename_long_name;
 mod regression_lwext4_truncate_hole;
-mod regression_lwext4_namespace;
+mod regression_clone_vm_second_slot;
 
 use user_lib::println;
 
@@ -51,10 +51,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if r == 0 { passed += 1; println!("ok 5 lwext4_truncate_hole"); }
     else { failed += 1; println!("not ok 5 lwext4_truncate_hole"); }
 
-    // Test 6: lwext4 namespace and open-inode lifetime
-    let r = regression_lwext4_namespace::run();
-    if r == 0 { passed += 1; println!("ok 6 lwext4_namespace"); }
-    else { failed += 1; println!("not ok 6 lwext4_namespace"); }
+    // Test 6: vfork CLONE_VM second user-resource slot
+    let r = regression_clone_vm_second_slot::run();
+    if r == 0 { passed += 1; println!("ok 6 clone_vm_second_slot"); }
+    else { failed += 1; println!("not ok 6 clone_vm_second_slot"); }
 
     println!("# results: {} passed, {} failed, {} total", passed, failed, total);
 

@@ -1,0 +1,14 @@
+#[cfg(target_arch = "loongarch64")]
+pub const PAGE_SIZE: usize = 0x1000;
+#[cfg(target_arch = "loongarch64")]
+pub const LA64_KERNEL_STACK_MAX_SLOTS: usize = 1024;
+#[cfg(target_arch = "loongarch64")]
+pub const LA64_USR_VIRT_SPACE_END: usize = (1 << 37) - 1;
+#[cfg(target_arch = "loongarch64")]
+pub const LA64_SIGNAL_TRAMPOLINE: usize = LA64_USR_VIRT_SPACE_END - PAGE_SIZE + 1;
+#[cfg(target_arch = "loongarch64")]
+pub const LA64_TRAMPOLINE: usize = LA64_SIGNAL_TRAMPOLINE - PAGE_SIZE;
+#[cfg(target_arch = "loongarch64")]
+pub const LA64_TRAP_CONTEXT_BASE: usize = LA64_TRAMPOLINE - LA64_KERNEL_STACK_MAX_SLOTS * PAGE_SIZE;
+#[cfg(target_arch = "loongarch64")]
+pub const LA64_MMAP_ARENA_END: usize = LA64_TRAP_CONTEXT_BASE;

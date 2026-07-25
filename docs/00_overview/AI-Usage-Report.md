@@ -2,12 +2,12 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-19
+> Coverage: 2026-04-01 to 2026-07-22
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
 
-MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
+MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
 
 本项目声明：
 
@@ -28,7 +28,6 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | Oracle | 高推理能力代码审查与架构咨询 agent；当前会话模型标识为 GPT-5.5 | OhMyOpenCode agent | 2026-04 至 2026-06 | 根因分析、架构评审、代码正确性验证、性能优化策略、文档事实核查 | `docs/Work_Log.md` 多处记录 `Oracle reviewed`、`Oracle analysis confirmed`、`Root cause analysis by Oracle` |
 | Explore | Codebase search / pattern discovery agent | OhMyOpenCode sub-agent | 2026-05 至 2026-06 | 跨模块代码搜索、调用关系梳理、实现模式对比 | Work log 和 Sisyphus task records |
 | librarian / plan / deep 等 sub-agents | 专用辅助 agents | OhMyOpenCode sub-agents | 2026-06 | 文档整理、资料检索、复杂任务拆分、局部实现检查 | Sisyphus 编排记录、文档生成 commit、Work_Log 记录 |
-| OpenAI Codex multi-agent | 主会话为 GPT-5 系列；2026-07-13 使用 max reasoning mode，平台未单独披露精确后端版本 | Codex desktop | 2026-07 | 2K1000LA 实板 bring-up、LoongArch VALEN/TLB/PTE/DMW、非连续 DRAM 与固件所有权并行审计、代码修复、构建和 QEMU/实板验证 | `docs/Work_Log.md` 2026-07-10/13 记录、目标文件反汇编、uImage 哈希和串口验收日志 |
 
 说明：部分 AI 平台不会在 commit metadata 中公开精确模型版本。本报告对可确认的工具名称、平台、agent 名称、commit marker 和工作日志证据进行披露；对无法从现有记录恢复的底层模型版本标注为"未完整记录"，不以猜测替代事实。
 
@@ -42,13 +41,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | LTP 修复与 FS 性能优化 | 2026-06-10 至 2026-06-16 | Oracle, Sisyphus | LTP syscall 兼容性修复、FS hot path 优化、PageCache fast path、UserBuffer fast path | 修复多批 LTP 失败项，提升 lmbench/IO 性能 |
 | 性能退化调试系统 | 2026-06-19 至 2026-06-20 | Oracle, Sisyphus, specialized agents | `perf_diag` counters、`drift_window`、lmbench 漂移分析、buddy allocator bitmap guard | 建立自动漂移分析脚本与诊断 counters，定位并修复 allocator 退化 |
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
-| 2K1000LA 实板地址/TLB 审计 | 2026-07-10 | OpenAI Codex multi-agent | 将 QEMU 内核迁移到 VALEN=40 实板；并行审计 canonical VA、VPN/VPPN、PTE PPN、TLB refill、ASID、DMW 和栈窗口 | 修复 TLB PS、PPN/VPPN、ASID、映射边界和 MMIO 别名；完成双架构编译、LA64 QEMU 用户态启动和实板 uImage 构建 |
-| 2K1000LA SATA/FAT32 分阶段写入 | 2026-07-11 | OpenAI Codex | AHCI 暖复位、P2 定向恢复、FAT32 元数据持久化、用户态 `/scratch` 隔离写入与实板串口验证 | 完成 raw write/flush、内核文件探针和用户态 write/fsync/truncate/reopen/unlink/rmdir 闭环；P1/P3 保持只读 |
-| 2K1000LA 2 GiB 内存拓扑审计 | 2026-07-13 | OpenAI Codex multi-agent, max reasoning mode | 复核早期扩容方案；并行审计 VA/PA 掩码、DMW cache 属性、U-Boot LMB、DVO DMA、CPU1 park loop 和连续 DMA 分配 | 推翻“DRAM 即已交接”的错误前提；建立双 bank allocator 与临时 carveout，完成跨 bank 320 MiB 压力、QEMU VirtIO/Ext4/LTP 和实板 AHCI 只读验收 |
-| 2K1000LA CPython 实机适配 | 2026-07-13 至 2026-07-14 | OpenAI Codex, max reasoning mode | 选择性审计 develop 分支 CPython 链路；对照 QEMU 与实机定位 LSX/FPR 上下文差异，补齐 FAT/TmpFS、外网测试语义和受限 P3 更新工具 | 修复实机 trap 后向量损坏、FAT rename 覆盖和 TmpFS symlink；rv64/la64 QEMU 与 2K1000LA 实板 CPython L3-L9 均 72/72 |
-| 2K1000LA c-ares 默认 DNS 闭环 | 2026-07-18 | OpenAI Codex | 对照默认/显式 DNS、procfs inode 元数据和 c-ares 文件加载源码，区分 macOS 网络共享、内核数据面和配置发布问题 | 将 `/etc/resolv.conf` 改为可刷新的普通快照；双架构、LA64 QEMU 和实板 P4 ext4 验证默认 curl/Python DNS |
-| onboard/develop ext4_lwext4 融合审计 | 2026-07-18 | OpenAI Codex multi-agent | 并行审计旧 ext4 修正、新 lwext4 适配、2K 分区边界、inode lifetime、性能与 crash consistency | 补齐运行期 byte bridge/namespace 方案，同时识别无 journal/orphan 使生产 SSD 切换保持阻塞 |
-| lwext4 旧 P4 迁移与 persist-shell 假 ready | 2026-07-19 | OpenAI Codex multi-agent | 对照完整 SSD 备份、真实 P4、C/Rust 适配层和 PID1 wait/reaper，建立 RED 后逐层实板验收 | 修复 dentry/inode 类型冲突、symlink `EEXIST` 和目标 wait 假成功；进一步由 DDGS 摘要异常定位旧卷 live extent/bitmap 冲突，确立离线 fsck clean 后才能接管的迁移门禁 |
+| LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
+| Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 
 ## 4. 详细使用场景
 
@@ -154,8 +148,6 @@ Ultraworked with Sisyphus (https://github.com/code-yeongyu/oh-my-openagent)
 Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 ```
 
-2026-07-10 的 2K1000LA 审计使用 Codex multi-agent 将任务拆为掩码/符号扩展、TLB/PTE/CSR、内核栈布局、启动链路和 MMIO/DMW 五个方向。主流程没有直接接受 subagent 结论，而是逐项对照本地《龙芯架构参考手册卷一》、源码、双架构构建、LA64 QEMU 用户态日志和目标文件反汇编后才修改代码。
-
 ## 5. 代表性案例
 
 ### Case 1: LTP 0 分根因分析与修复
@@ -214,61 +206,7 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 根据 Oracle review 修改文档，移除或修正不准确内容。
 - Result: 多轮文档修复 commit 保留 Sisyphus co-author marker，Work_Log 记录 Oracle 审查发现和修复项。
 
-### Case 6: 2K1000LA VALEN=40 与 TLB 全链路审计
-
-- Evidence: `docs/Work_Log.md` 2026-07-10、`docs/09_debug/bug-la64-kernel-stack-overflow.md`
-- AI tools: OpenAI Codex multi-agent
-- Problem: QEMU 的 48 位高栈窗口迁移到实板后触发 `AddressError`；修正为 40 位 canonical 高栈后，还需确认 VA/VPN/VPPN、PTE、TLB refill、ASID 和 DMW 不受连带影响。
-- AI contribution: 五个并行 subagents 独立检查不同硬件语义，主流程汇总后发现 TLB 页大小错误、PTE PPN 掩码过宽、VPPN 裁剪/符号扩展缺失、ASIDBITS 污染和高物理 MMIO VA 属性问题。
-- Human verification: 对照本地 LoongArch 官方手册字段定义；检查每处 diff；执行 rv64/la64 编译、LA64 QEMU 到 init 用户态、2K1000 uImage 构建和 `__rfill/__restore` 反汇编。
-- Result: 生成 `Load/Entry=0x90000000` 的实板镜像，SHA-256 `e8cf6b87ebd4800f3909fc9aad25d5b7d96957743f5c98fbfd7f7ba4eb8cca78`；实板运行验证仍待完成。
-
-### Case 7: 2K1000LA 2 GiB DRAM 拓扑与固件所有权审计
-
-- Evidence: `docs/Work_Log.md` 2026-07-13、`docs/04_mm/frame-allocator.md`
-- AI tools: OpenAI Codex multi-agent, max reasoning mode
-- Problem: 初版方案把 U-Boot 报告的两段 DRAM 全部交给页帧分配器，虽然跨 bank 压力短时通过，却可能覆盖仍由显示 DMA、CPU1 和启动固件使用的低端内存。
-- AI contribution: 独立 subagents 分别审计 LoongArch VA/PA/DMW 语义和 U-Boot 源码/内存所有权；发现 DMW CC/SUC 探针混用，以及 `[0x0cbf4000,0x10000000)` 内仍包含活动 framebuffer、CPU1 park loop、U-Boot 状态和 BPI/SMBIOS。主流程进一步发现连续 DMA 不能由跨 region 单页分配拼接，且链接器 payload 页需要显式所有权移交。
-- Human verification: 对照 U-Boot `bdinfo`、板级 U-Boot 源码和串口输出；串行双架构构建；LA64 QEMU VirtIO/Ext4/LTP 运行；实板 320 MiB 跨 bank 内容校验、AHCI LBA0 重复读和 ABI 内存统计检查。
-- Result: 内核识别完整 2 GiB 安装容量，当前安全报告并使用 `2043852 KiB`；保留 53,296 KiB 临时 carveout，待关闭 DVO、重停放 CPU1 并处理启动参数后再分阶段释放。
-
-### Case 8: 2K1000LA CPython 的实机 LSX/FPR 上下文损坏
-
-- Evidence: `docs/Work_Log.md` 2026-07-14、`os/src/hal/arch/loongarch64/trap/trap.S`、`os/src/syscall/process/signal.rs`、`os/src/fs/fat32/{efs.rs,fat_inode.rs}`、`os/src/fs/page_cache.rs`、`scripts/write_2k1000_p3.py`
-- AI tools: OpenAI Codex, max reasoning mode
-- Problem: Alpine LoongArch CPython 在 QEMU 可运行，实板却在 syscall、定时器或调度后出现动态运行时数据损坏；单次启动位置不固定，容易误判为 ELF、内存或 CPython 本身问题。
-- AI contribution: 对比 QEMU 与实机 CPU 扩展行为，审计 trap/save-restore 和 signal frame 后识别到标量 FPR 与 LSX 向量低 64-bit lane 的物理别名。旧汇编先恢复完整 LSX、随后执行标量 `FLD.D`，会在实机重新覆盖向量状态，而 QEMU 未可靠暴露该行为；随后根据 FAT 旧 payload 证据定位 inode/PageCache 生命周期，并生成固定边界、逐块读回的 P3 更新工具。
-- Human verification: 审阅汇编、signal ABI、FAT inode/PageCache 生命周期和写盘边界；Docker 串行双架构构建；rv64/la64 CPython L3-L9 QEMU judge 各 72/72；2K1000LA 通过 50 轮无 `fsync` rename 专项，P3 三块写入/读回 CRC 和安装文件校验，最终完整 L3-L9 同样为 72/72、退出码 0。
-- Result: trap 返回在完整 LSX 与纯标量 FPR 恢复路径中二选一，`sigreturn` 先合并标量低 lane；FAT 以首簇/空目录项双键 canonicalize inode，并让 PageCache 共享最小簇链状态，从根因修复 Drop 写回丢失；TmpFS、DNS/HTTP/HTTPS 和实板 CPython 完整组合门禁均已关闭。
-
-### Case 9: 2K1000LA Python 性能的 DMA 与字节码分层定位
-
-- Evidence: `docs/Work_Log.md` 2026-07-14、`docs/07_driver/2k1000-ahci.md`
-- AI tools: OpenAI Codex, max reasoning mode
-- Problem: Python 和其他 SSD 程序明显偏慢，初始假设是 AHCI 以过小 DMA 块搬运；需要先保存实板基线，再判断队友 VirtIO DMA 池化方案应如何迁移。
-- AI contribution: 对照 develop 的四槽 VirtIO 池、当前 PageCache 批量请求和 AHCI 单命令路径，发现 256 KiB 上层请求被重新拆成最多 512 条轮询 ATA 命令。根据 AHCI 已由互斥串行化这一事实，将方案收敛为单个常驻 64 KiB 连续低端槽和多扇区命令，而非机械移植多槽状态机。随后用 tmpfs 和 real/user/sys 拆分证明重导入的最大剩余成本是只读标准库禁用 pyc 后的用户态重复解析/编译。
-- Human verification: 在同一 2K1000LA/SSD 上记录 512 B、64 KiB、256 KiB 三版数据；执行双架构编译和 QEMU LTP 冒烟；实板完成 TFTP/uImage 校验、随机大块写入、哈希/`cmp`、P4 pyc 首次填充/稳定命中和显式同步后的复位门禁。
-- Result: 首次顺序读由 13.5 MB/s 升到 18.6 MB/s；Python 无 site 热启动由约 1.925 s 降到 1.714 s。外置持久 pyc 后进一步降到约 1.159 s，重模块导入由 18.322 s 降到约 4.495 s；256 KiB 槽无额外收益，最终保留 64 KiB。
-
-### Case 10: persist-shell CPython 可见性与 ext4 rename 目录项丢失
-
-- Evidence: `docs/Work_Log.md` 2026-07-14、`user/src/bin/initproc.rs`、`os/src/fs/ext4/ext4fs.rs`、`docs/08_testing/apk-isolated.md`
-- AI tools: OpenAI Codex, max reasoning mode
-- Problem: P3 CPython 在宿主 shell 可用，但进入 P4 `persist-shell` 后报告缺少 `/tools/tests/cpython/lib` 下的 musl loader；同时原子更新 Python 包装器或 APK 文件可能返回成功后目标文件消失。
-- AI contribution: 沿宿主 mount、bind mount、chroot 和包装器四层逐项追踪，先确认 `/tools` 未绑定进应用根；随后在 QEMU 手工复现 `cp tmp && mv -f tmp final` 返回 0 但两个名称同时消失，继续审计 ext4 不定长目录项布局，定位到“先添加新项、再删除旧项”会让新项落入旧项 slack 并被删除范围吞掉。
-- Human verification: 审阅 bind/chroot 边界和 rename 回滚；Docker 串行双架构构建；最小与完整 CPython P3 两类 LA64 QEMU 门禁；同目录空目标/覆盖目标专项；rv64 QEMU 挂载与 LTP 冒烟。
-- Result: 应用根绑定只读 `/tools` 与 P4 pyc 目录并真实执行 Python 门禁；ext4 rename 改为先移除后发布并对失败路径回滚，两个目录项专项均通过，也解释了此前 APK `wcurl` 的一次性提交异常。
-
-### Case 11: c-ares 将非空 procfs resolver 配置误判为空
-
-- Evidence: `docs/Work_Log.md` 2026-07-18、`user/src/bin/initproc.rs`、`os/initramfs/apk/usr/bin/persist-shell`、`docs/06_net/dhcp.md`
-- AI tools: OpenAI Codex
-- Problem: macOS Internet Sharing 下 BusyBox/APK 和显式 `curl --dns-servers 192.168.2.1` 正常，默认 curl 却超时，初看像宿主 DNS 代理与 c-ares 不兼容。
-- AI contribution: 用默认/显式服务器 A/B 排除 DNS 服务和数据面，继续核对 `/etc/resolv.conf -> /proc/net/resolv.conf` 的内容与 inode 元数据，发现文件可读 23 字节但 `st_size=0`；再对照 c-ares 1.34.8 的 `fseek(SEEK_END)`/`ftell()` 加载路径，确认它把配置当成空文件并回退到 loopback。
-- Human verification: 审阅两处发布逻辑和旧 P4 迁移边界；项目 Docker 镜像内顺序完成 rv64/la64 构建；LA64 QEMU 验证链接迁移与重复入口刷新；2K1000LA 通过 TFTP CRC/uImage 校验、P4 `stage=reuse`、rw ext4 文件元数据、默认 curl 两次 HTTP 200 和 aligned Python `getaddrinfo()`。
-- Result: 保留 procfs 动态状态接口，同时把宿主/P4 标准 resolver 路径发布成有真实长度的普通文件；P4 在启动和每次 `persist-shell` 入口刷新，不再需要硬编码公共 DNS或命令行 `--dns-servers`。
-
-### Case 12: lwext4 稀疏空洞的 inode-incarnation 诊断
+### Case 6: lwext4 稀疏空洞的 inode-incarnation 诊断
 
 - Evidence: `docs/Work_Log/2026-07-17.md`
 - AI tools: Oracle, GPT-5.6-terra
@@ -276,48 +214,23 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI contribution: Oracle 结合 opt-in 逐用例 counter delta 与 PageCache registry 生命周期，定位 inode number 复用导致新文件继承旧 fully-valid 页面；随后将诊断收敛为有界 QEMU log，而非无关的 report 落盘链路。
 - Verification: Docker 串行 RV64/LA64 build 通过；RV64 focused QEMU 从 1 PASS/3 FAIL 变为 4 PASS/0 FAIL。
 
-### Case 13: onboard/develop ext4_lwext4 融合的运行期语义与掉电边界
+### Case 7: LA64 mmap arena 边界与 trap-context 窗口修复
 
-- Evidence: `docs/10_plan/ext4-lwext4-migration-audit-20260718.md`、
-  `docs/Work_Log/2026-07-18.md`
-- AI tools: OpenAI Codex multi-agent
-- Problem: 新 lwext4 已在 develop 成为默认 ext4 后端，但 onboard 的 2 KiB 分区边界、
-  旧自研 ext4 的持久写修正、open-unlink/overwrite-rename 生命周期和 SSD 掉电恢复能力
-  不能从“库支持 ext4”直接外推。
-- AI contribution: 并行追溯两条分支提交和新旧源码，将旧修正分为“应迁移代码、应迁移
-  不变量、由新引擎替代”三类；设计参数化 2 KiB byte bridge/partition 边界门禁和真实
-  inode shared state；进一步审查 C remove/rename 顺序后指出内存 handle rollback 没有
-  on-disk orphan chain、inode generation 或 journal replay，不能提供掉电原子性。
-- Human verification: 维护者要求本轮构建/QEMU 不映射实板设备并保留旧分支回退点；
-  双架构 build、顶层 regression 6/6、namespace 9/9、ext4 ktest 7/7、正常 teardown 和
-  五镜像离线 fsck 已形成持久证据。LA64 全量中一个无关 timer 取样失败如实保留；真实
-  2 KiB 实板、crash injection 和性能 A/B 仍在门禁中，没有从 QEMU 外推。
-- Result: 融合继续在 `board-develop-combined`，旧 `la64-on-board` 冻结；运行期修复可继续
-  QEMU 验证，但当前无 journal 的 P4 和缺少 orphan/replay 的实现被明确标为生产 blocker，
-  禁止宣称已可写入生产 SSD。
+- Evidence: `docs/Work_Log/2026-07-21.md`；RED `docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`；最终 PASS `docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`
+- AI roles: Sisyphus 负责任务编排、证据整理和文档修订；Oracle 负责根因与边界审查。
+- Problem: `USR_MMAP_END == TRAMPOLINE` 使半开 mmap arena 错误地覆盖 `[TRAP_CONTEXT_BASE, TRAMPOLINE)`，固定映射请求可能在 unmap 前触及 trap-context window。安全非固定 red 测试记录 `mmap accepted trap-context slot-2 hint`，即 `not ok 2 mmap_edge_cases`。
+- AI contribution: 协助核对 `SIGNAL_TRAMPOLINE → TRAMPOLINE` 布局、one-based TID 槽位公式、mmap arena 半开范围和固定映射相交检查语义。
+- Human action: 维护者依据源码、contracts 和 Docker/QEMU 输出将 exclusive end 修正为 `TRAP_CONTEXT_BASE`，并在普通 mmap 与 SysV shm mmap 中于 unmap 前拒绝 LA64 `MAP_FIXED`、`MAP_FIXED_NOREPLACE` 相交请求。
+- Verification: RV64 → LA64 按串行顺序完成 preflight、contracts、build 和 regression；两者均为 TAP `1..6`，各有 6 个 `ok`，包含 `ok 2 mmap_edge_cases` 和 `ok 6 clone_vm_second_slot`。LA64 精确分类器为 `STATE=PASS STATUS=0`。十个源码输入 pre/post SHA-256 一致，且 source → ELF → CPIO → kernel 严格新鲜。补充证据进一步将既有 QEMU 日志绑定到真实 `/regression` ELF；Oracle 最终验收通过。该结果不外推为 full LTP 或 basic 全量覆盖。
 
-### Case 14: lwext4 旧 P4 迁移与 persist-shell 假 ready
+### Case 8: Canonical normal run facade 一次性 setup 审查
 
-- Evidence: `docs/Work_Log/2026-07-19.md`、
-  `docs/Work_Log/evidence/2026-07-19/persist-shell-lwext4-repair-manifest.md`
-- AI tools: OpenAI Codex multi-agent
-- Problem: 新 lwext4 在全新 fixture 上可创建嵌套 symlink，但真实 P4 的应用根有三个同名
-  `sh` 目录项；准备脚本已经失败，PID1 却仍发布 ready，用户进入时才看到
-  `persistent environment is not ready`。
-- AI contribution: 将问题拆为旧卷只读取证、lwext4 C/Rust 语义和 wait/reaper 生命周期三轨；
-  在修改前增加重复 symlink RED；从完整 SSD 备份副本确认三个 inode 和旧绝对 target；定位
-  `waitpid(-1)` 抢收目标状态、concrete dentry type 与 inode mode 冲突、`ext4_fsymlink()`
-  非排他覆盖。后续 QEMU 冷启动的 DDGS 摘要异常没有被当成版本升级，而是通过内容比对和
-  `debugfs testi/testb/blocks` 证明旧卷 live extent 的数据块被 bitmap 标为空闲。
-- Human verification: Docker 中 RV64/LA64 ext4 9/9、teardown 与离线 fsck；最终源码严格串行
-  双架构编译；维护者在完成全盘备份后授权真实 P4 实验。未经 fsck 的备份副本复现跨文件
-  覆盖 RED；仅在临时副本上多轮 fsck 收敛后，首次接管、写读删、冷启动复用、最终离线 fsck
-  和 DDGS 整文件摘要全部通过。
-- Result: 旧目录可收敛为唯一相对 `sh -> busybox`，失败不再伪装 ready；同时明确应用
-  `RESULT=PASS` 不能替代卷一致性。新 lwext4 只允许接管 offline-fsck-clean 卷，异常 DDGS
-  摘要不得加入白名单；生产 SSD 在自身离线修复或重建前继续禁止写入。历史实板镜像
-  SHA-256 `691bbc6658aac197d20798b7ca17038208e95a87ca7f4aaca46d67d5afef8eda`，实板输出
-  `RESULT=PASS` 和 `PERSIST_INTERACTIVE_PASS`。
+- Evidence: `docs/Work_Log/2026-07-22.md`。
+- AI tools: Sisyphus, Oracle。
+- Problem: root generic `run` 同时把 logo/preflight 声明为 prerequisites，并在 recipe 中递归调用它们；一次 run 因而重复执行两个 setup 动作。
+- AI contribution: Oracle 通过 dry-run 审查定位重复调用，并要求将一次性副作用和 `-j8` invalid-input behavior 写入 contract。
+- Human action: root `run` 保留一次直接 prerequisite，移除递归 setup 调用，并以 target-scoped `.NOTPARALLEL` 保持 `validate-run → print-logo → toolchain-preflight` 顺序。
+- Verification: normal-run、toolchain、source-purity、layering 与 root facade contracts 均通过；RV64/LA64 dry-run 各有一次 logo、一次 root preflight 与一次 OS dispatch；无效 `-j8` 输入无 setup 或 arch-run 输出。
 
 ## 6. 质量控制与验证方式
 
@@ -366,15 +279,9 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:1093-1125` | Network optimization | 记录 iperf TCP 34x、netperf CRR +19% 的多轮优化 |
 | `docs/Work_Log.md:1455-1658` | Timer subsystem | 记录 timer deadline / one-shot / timekeeping 修复与测试 |
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
-| `docs/Work_Log.md` 2026-07-10 | 2K1000LA VALEN/TLB 审计 | 记录 Codex 五路并行审计、官方手册交叉核对、代码修复、反汇编与构建/QEMU 证据 |
-| `docs/Work_Log.md` 2026-07-13 | 2K1000LA 2 GiB 内存审计 | 记录 Codex max reasoning 与 subagent 对 DMW、非连续 DMA、U-Boot/DVO/CPU1 所有权的复核，以及 QEMU/实板验证证据 |
-| `docs/Work_Log.md` 2026-07-14 | 2K1000LA CPython 实机适配 | 记录 Codex 对 LSX/FPR 别名、FAT rename、TmpFS symlink 和 DNS/HTTPS 测试语义的根因分析，以及双架构 72/72 与实机压力证据 |
-| `docs/Work_Log.md` 2026-07-14 | 2K1000LA AHCI/Python 性能 | 记录 Codex 对 develop DMA 池化方案的并发模型审计、512 B 命令放大根因、64/256 KiB 实板 A/B，以及 pyc 用户态瓶颈分层证据 |
-| `docs/Work_Log.md` 2026-07-14 | persist-shell CPython/ext4 rename | 记录 Codex 对 chroot bind 边界、ext4 不定长目录项邻接覆盖的根因定位，以及双架构、两类 P3 和 rename 专项证据 |
-| `docs/Work_Log.md` 2026-07-18 | c-ares/procfs resolver 默认 DNS | 记录 Codex 通过默认/显式 DNS A/B、inode 元数据和 c-ares 源码闭环根因，以及双架构、QEMU 和 P4 ext4 实板验证 |
 | `docs/Work_Log/2026-07-17.md` | lwext4 inode-incarnation cache isolation | 记录 Oracle 根因审查、直接 counter log 与 RV64 4/4 focused QEMU 验证 |
-| `docs/Work_Log/2026-07-18.md` | ext4_lwext4 融合审计 | 记录 Codex multi-agent 对 onboard 修正覆盖、2K 边界、inode lifetime、性能和无 journal/orphan 生产 blocker 的审计，以及双架构 QEMU/build/fsck 正式证据 |
-| `docs/Work_Log/2026-07-19.md` | lwext4 旧 P4 迁移与 persist-shell | 记录 Codex multi-agent 对备份旧卷目录项、lwext4 symlink/unknown type、PID1 wait/reaper 假成功的根因分析，以及 RED/GREEN、双架构和实板交互验收 |
+| `docs/Work_Log/2026-07-21.md`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-artifact-binding-supplement-20260721T063550+0800/` | LA64 mmap arena 边界与 trap-context 窗口 | 记录旧范围导致的非固定 mmap RED、最终 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)` 修正、固定映射拒绝规则、RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`、真实 `/regression` ELF 绑定及 Oracle 最终验收 |
+| `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 
 ## 9. 交互记录与留痕方式
 

@@ -10,6 +10,8 @@ pub mod console;
 #[cfg(target_arch = "loongarch64")]
 mod la_libc_import;
 mod lang_items;
+#[cfg(target_arch = "loongarch64")]
+pub mod layout;
 pub mod syscall;
 mod usr_call;
 

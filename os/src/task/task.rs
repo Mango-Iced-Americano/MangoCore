@@ -848,7 +848,9 @@ impl TaskControlBlock {
         init_task_trace!("07 argc/argv/envp stack created: user_sp={:#x}", init_sp);
         // 初始化新 VFS 文件描述符表
         let mut fd_table = vfs::FdTable::new();
-        // 打开 /dev/tty 并分配 stdin/stdout/stderr（fd 0, 1, 2）
+        // The kernel bootstrap mounts devfs before creating PID1, then opens
+        // /dev/tty for stdin/stdout/stderr (fd 0/1/2). Ktest's independent
+        // constructor deliberately skips this userspace-only bootstrap.
         let tty_inode = vfs_lookup_absolute("/dev/tty").unwrap();
         let tty_file = vfs::File::new(tty_inode, vfs::FileFlags::O_RDWR).unwrap();
         fd_table.alloc_fd(tty_file, false).unwrap();
@@ -1021,14 +1023,14 @@ impl TaskControlBlock {
         task_control_block
     }
 
-    /// 为 ktest 模式创建最小化 TCB。
+    /// 为独立 ktest 进程创建最小化 TCB。
     ///
     /// # Semantics
     ///
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
     /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
     /// 调用方负责通过 `add_task()` 将返回的 TCB 加入 ready 队列。
-    pub fn new_ktest_minimal(
+    pub fn new_ktest_independent(
         tid: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
         kstack: KernelStack,

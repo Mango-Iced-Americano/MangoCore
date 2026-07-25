@@ -1,463 +1,196 @@
-ARCHS = rv64
-CURR_ARCH ?= la64
-FS_MODE ?= ext4
-TOP_BLK_MODE_ORIGIN := $(origin BLK_MODE)
-BLK_MODE ?= virt
-LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_MODE))
-MODE ?= release
-NET_PERF_EXTRA_FEATURES ?=
-NET_PERF_IMAGE ?= kernel-2k1000-net-perf-shell.ui
-PERF_DIAG_EXTRA_FEATURES ?=
-CONF_FILE ?= ../os_test.conf
-CONF_ARCH ?= $(CURR_ARCH)
-CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
-CONF_IMAGE ?=
-AUTO_REBUILD_MEM ?= 1
-RV_TOOLCHAIN ?= nightly-2025-01-18
-LA_TOOLCHAIN ?= nightly-2024-05-01
+include make/common/toolchain.mk
+include make/image-roles.mk
+include make/common/orchestration.mk
 
-# Architecture builds switch the repository-local rustup override, and the
-# tools-disk recipes share a mount point. This orchestration makefile is
-# intentionally serial even when the caller supplies -j; Cargo/CMake retain
-# their own internal parallelism.
+export RUSTUP_AUTO_INSTALL := 0
+unexport RUSTUP_TOOLCHAIN
+RUSTUP_HOME ?= $(HOME)/.rustup
+CARGO_HOME ?= $(HOME)/.cargo
+export RUSTUP_HOME CARGO_HOME
+
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
 .NOTPARALLEL:
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config \
-	rv64_all la64_all \
-	rv64-kernel-build-only la64-kernel-build-only \
-	rv64-regression la64-regression rv64-ktest la64-ktest \
-	regression-all ktest-all initramfs-rv initramfs-la initramfs-all \
-	la64-2k1000-core-tests \
-	la64-2k1000-shell \
-	la64-2k1000-curl-shell \
-	la64-2k1000-net-tests \
-	la64-2k1000-apk-tests \
-	la64-2k1000-apk-persist-tests \
-	la64-2k1000-apk-persist-shell \
-	la64-2k1000-perf-diag-shell \
-	la64-2k1000-net-perf-shell \
-	la64-2k1000-cpython-tests \
-	la64-2k1000-cpython-tools \
-	la64-qemu-curl-shell \
-	la64-qemu-curl-shell-run \
-	la64-qemu-apk-tests \
-	la64-qemu-apk-run \
-	la64-qemu-apk-persist-tests \
-	la64-qemu-apk-persist-run \
-	la64-qemu-apk-persist-shell \
-	la64-qemu-apk-persist-shell-run \
-	rv64-cpython-tests rv64-cpython-run \
-	la64-cpython-tests la64-cpython-run \
-	tools-cpython-rv tools-cpython-la tools-cpython-la-alpine tools-cpython \
-	tools-cpython-clean maybe-tools-cpython-rv maybe-tools-cpython-la \
-	la64-2k1000-run-clean
+all: prepare-cargo-config
+	$(MAKE) rv64_all
+	$(MAKE) la64_all
+	$(MAKE) publish-compatibility
 
-all: prepare-cargo-config rv64_all la64_all
+include make/tools.mk
+include make/initramfs.mk
 
-prepare-cargo-config:
-	@sh ../scripts/restore-cargo-vendor-checksums.sh restore ..
-	@mkdir -p .cargo ../user/.cargo
-	@test -f .cargo/config.toml || cp -f ../cargo-config/os/config.toml .cargo/config.toml
-	@test -f ../user/.cargo/config.toml || cp -f ../cargo-config/user/config.toml ../user/.cargo/config.toml
+define validate-formal-inputs
+$(if $(filter command line environment environment override,$(origin ARCH)),,$(error ARCH must be explicitly provided))
+$(if $(filter 1,$(words $(ARCH))),$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64)),$(error ARCH must be rv64 or la64))
+$(if $(filter command line environment environment override,$(origin PROFILE)),,$(error PROFILE must be explicitly provided))
+$(if $(filter 1,$(words $(PROFILE))),$(if $(filter normal regression,$(PROFILE)),,$(error PROFILE must be normal or regression)),$(error PROFILE must be normal or regression))
+endef
 
+arch-build: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+
+kernel: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+
+user: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk user MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+
+image: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk fs-img MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+
+toolchain-preflight:
+	@if [ "$(CANONICAL_BUILD_FIXTURE)" = "second-stage-failure" ]; then :; else sh ../scripts/rustup-preflight.sh; fi
+
+toolchain-setup:
+	@sh ../scripts/rustup-setup.sh
+
+env: toolchain-preflight
+
+prepare-cargo-config: toolchain-preflight
+
+ifeq ($(CANONICAL_BUILD_FIXTURE),second-stage-failure)
+rv64_all: prepare-cargo-config
+	@mkdir -p $(BUILD_ROOT)/rv64/$(MODE)/normal
+	@touch $(BUILD_ROOT)/rv64/$(MODE)/normal/fixture-rv64
+
+la64_all: prepare-cargo-config
+	@echo "[fixture] forcing LA64 stage failure"
+	@exit 1
+else
 rv64_all: prepare-cargo-config tools-disk-rv
 	@echo "Building rv64"
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make ARCH=rv64 -f make/rv64.mk all MODE=${MODE}
+	$(MAKE) ARCH=rv64 PROFILE=normal -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
 
 la64_all: prepare-cargo-config tools-disk-la
 	@echo "Building la64"
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make ARCH=la64 -f make/la64.mk all MODE=${MODE} LOG=${LOG}
+	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
+endif
+
+publish-compatibility:
+	@echo "[publish-compatibility] publishing both completed architecture products"
+	@mkdir -p "$(COMPAT_OUTPUT_DIR)"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/kernel-rv" "$(COMPAT_OUTPUT_DIR)/kernel-rv"
+	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"
+	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"
 
 rv64-kernel-build-only: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG} \
-		EXTRA_FEATURES="$(EXTRA_FEATURES)"
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk build BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
 
-rv64-debug:
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+rv64-debug: toolchain-preflight
 	make -f make/rv64.mk debug BLK_MODE=${BLK_MODE} MODE=debug
 
 rv64-only: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk all BLK_MODE=${BLK_MODE} EXTRA_FEATURES="$(EXTRA_FEATURES)"
+	make -f make/rv64.mk all BLK_MODE=${BLK_MODE}
 
-rv64-run-only:
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+rv64-run-only: toolchain-preflight
 	make -f make/rv64.mk runsimple
 
 rv64-run: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp
+
+rv64-derived-run: prepare-cargo-config
+	make -f make/rv64.mk derived-comp
 
 # Regression test: self-contained initramfs — NO external disks
 rv64-regression: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk regression-run MODE=${MODE} LOG=${LOG}
 
 la64-only: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk all MODE=${MODE} LOG=${LOG} EXTRA_FEATURES="$(EXTRA_FEATURES)"
+	make -f make/la64.mk all MODE=${MODE} LOG=${LOG}
 
 la64-kernel-build-only: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG} \
-		EXTRA_FEATURES="$(EXTRA_FEATURES)"
+	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk build BLK_MODE=$(LA64_BLK_MODE) MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user"
 
-# Isolated Alpine CPython QEMU gates. The feature marker overrides the test
-# selection in ramfs, so the official sdcard os_test.conf is left untouched.
-rv64-cpython-tests: prepare-cargo-config tools-disk-cpython-rv
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	$(MAKE) -B -f make/rv64.mk build BLK_MODE=virt MODE=$(MODE) LOG=off \
-		EXTRA_FEATURES="cpython_test"
-	cp -f target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-cpython
+la64-debug: toolchain-preflight
+	make -f make/la64.mk all MODE=debug	
 
-rv64-cpython-run: rv64-cpython-tests
-	$(MAKE) -f make/rv64.mk comp MODE=$(MODE) KERNEL_RV=../kernel-rv-cpython
-
-la64-cpython-tests: prepare-cargo-config tools-disk-cpython-la
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
-		MODE=$(MODE) LOG=off EXTRA_FEATURES="cpython_test"
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os ../kernel-la-cpython
-
-la64-cpython-run: la64-cpython-tests
-	$(MAKE) -f make/la64.mk comp MODE=$(MODE) KERNEL_LA=../kernel-la-cpython
-
-# Focused real-board diagnostic image. It keeps the normal SATA/scratch safety
-# boundary but overrides the SSD test config at runtime to run libctest,
-# cyclictest, and a curated non-network LTP syscall set.
-la64-2k1000-core-tests: prepare-cargo-config
-	@grep -Eq '^mode=run$$' ../os_test.conf || { \
-		echo "os_test.conf must contain mode=run" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		EXTRA_FEATURES="sata_scratch_rw board_core_test" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-core-tests.ui
-
-# Interactive bring-up image: initramfs userspace + GMAC0, no test execution
-# and no dependency on the SSD. The shell override is an ephemeral ramfs
-# marker, so the persistent os_test.conf remains untouched.
-la64-2k1000-shell: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt \
-		EXTRA_FEATURES="gmac_2k1000 board_shell" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-shell.ui
-
-# Self-contained HTTPS curl integration image. The LoongArch64 glibc runtime,
-# static Mbed TLS backend and CA bundle are embedded in initramfs, so this
-# target does not require rewriting the SSD tools partition.
-la64-2k1000-curl-shell: prepare-cargo-config tools-curl-la
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		CURL_RUNTIME=1 \
-		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-curl-shell.ui
-
-# QEMU-first HTTPS gate. Build the same curl runtime used by the real board,
-# force initproc into an interactive shell, and keep a separate kernel artifact
-# so normal la64-run workflows are not overwritten accidentally.
-la64-qemu-curl-shell: prepare-cargo-config tools-curl-la
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
-		CURL_RUNTIME=1 EXTRA_FEATURES="board_shell" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
-		../kernel-la-curl-shell
-
-la64-qemu-curl-shell-run: la64-qemu-curl-shell
-	$(MAKE) -f make/la64.mk qemu-curl-shell MODE=$(MODE)
-
-# Isolated Alpine package-manager gate. apk.static, repositories and signing
-# keys are embedded in initramfs; the test installs into RAM and never writes
-# the official QEMU disk image.
-la64-qemu-apk-tests: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
-		APK_RUNTIME=1 EXTRA_FEATURES="apk_test" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
-		../kernel-la-apk-tests
-
-la64-qemu-apk-run: la64-qemu-apk-tests
-	$(MAKE) -f make/la64.mk qemu-apk-tests MODE=$(MODE)
-
-# Persistent APK gate against the same fixed MBR layout used on the board.
-# Run the resulting QEMU fixture twice without rebuilding it: the first run
-# installs, while the second must reuse the committed ext4 package tree.
-la64-qemu-apk-persist-tests: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@test -f ../mango-2k1000la-p4-qemu.img || { \
-		echo "missing P4 QEMU disk; run make 2k1000-p4-qemu-disk from the repo root" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
-		APK_RUNTIME=1 EXTRA_FEATURES="p4_persist_rw apk_persist_test" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
-		../kernel-la-apk-persist-tests
-
-la64-qemu-apk-persist-run: la64-qemu-apk-persist-tests
-	$(MAKE) -f make/la64.mk qemu-apk-persist-tests MODE=$(MODE)
-
-# Interactive P4 application root. This reuses the validated P4 layout and
-# exposes plain `apk` plus `persist-shell` without making `/` writable.
-la64-qemu-apk-persist-shell: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@test -f ../mango-2k1000la-p4-qemu.img || { \
-		echo "missing P4 QEMU disk; run make 2k1000-p4-qemu-disk from the repo root" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk build BOARD=laqemu BLK_MODE=virt_pci \
-		APK_RUNTIME=1 EXTRA_FEATURES="p4_persist_rw apk_persist_shell" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os \
-		../kernel-la-apk-persist-shell
-
-la64-qemu-apk-persist-shell-run: la64-qemu-apk-persist-shell
-	$(MAKE) -f make/la64.mk qemu-apk-persist-shell MODE=$(MODE)
-
-# Real-board counterpart of the QEMU gate. P1/P3 and block-device nodes keep
-# their read-only policy; only the already validated P2 scratch cache is used.
-la64-2k1000-apk-tests: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		APK_RUNTIME=1 EXTRA_FEATURES="sata_scratch_rw gmac_dhcp apk_test" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-apk-tests.ui
-
-# Board P4 gate. P1/P3 and every userspace block node remain read-only; P2 is
-# only a download cache and the identity-checked P4 is mounted at /persist.
-la64-2k1000-apk-persist-tests: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		APK_RUNTIME=1 \
-		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_test" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-apk-persist-tests.ui
-
-la64-2k1000-apk-persist-shell: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		APK_RUNTIME=1 \
-		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-persist-shell.ui
-
-# Same userspace, storage and network policy as the production persistent
-# shell, with only bounded perf_diag counters compiled in. Event tracing such
-# as net_perf_diag must be requested explicitly after a stable anomaly exists.
-la64-2k1000-perf-diag-shell: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		APK_RUNTIME=1 \
-		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell perf_diag $(PERF_DIAG_EXTRA_FEATURES)" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-perf-diag-shell.ui
-
-# Feature-gated performance probe image. It keeps the production GMAC ring and
-# TCP parameters unless NET_PERF_EXTRA_FEATURES selects one explicit A/B knob.
-la64-2k1000-net-perf-shell: prepare-cargo-config
-	@test -x ../user/tools/loongarch64/bin/apk.static || { \
-		echo "missing apk.static; run make tools-apk-la" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		APK_RUNTIME=1 \
-		EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell net_perf_diag $(NET_PERF_EXTRA_FEATURES)" \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../$(NET_PERF_IMAGE)
-
-# Real-board network regression image. Keep the current inet_test in
-# initramfs so an older /tools partition cannot silently change test coverage.
-la64-2k1000-net-tests: prepare-cargo-config tools-curl-la
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		CURL_RUNTIME=1 INET_TEST_RUNTIME=1 \
-		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp board_shell" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-net-tests.ui
-
-# CPython board gate: use writable P2 scratch for filesystem tests and GMAC
-# DHCP for the required DNS/HTTP/HTTPS layer. The runtime itself lives on P3
-# and is built separately by la64-2k1000-cpython-tools.
-la64-2k1000-cpython-tests: prepare-cargo-config tools-cpython-la
-	@test -x ../user/tools/loongarch64/tests/cpython/usr/bin/python3 || { \
-		echo "missing LoongArch CPython runtime cache" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		EXTRA_FEATURES="sata_scratch_rw gmac_dhcp cpython_test" MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-cpython-tests.ui
-
-la64-2k1000-cpython-tools: prepare-cargo-config tools-cpython-la
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -f make/la64.mk user BOARD=2k1000 MODE=$(MODE)
-	python3 ../scripts/make_2k1000_tools_partition.py \
-		--tools-root ../user/tools/loongarch64 \
-		--user-bin-dir ../user/target/loongarch64-unknown-linux-gnu/$(MODE) \
-		--output ../mango-2k1000la-cpython-tools-p3.img --force
-
-# Competition run image: no board bring-up trace, log level off, and the
-# embedded fallback configuration must be the normal full-suite run mode.
-la64-2k1000-run-clean: prepare-cargo-config
-	@grep -Eq '^mode=run$$' ../os_test.conf || { \
-		echo "os_test.conf must contain mode=run" >&2; exit 1; \
-	}
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
-		MODE=$(MODE) LOG=off
-	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
-		../kernel-2k1000-run.ui
-
-la64-debug:
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk all MODE=debug
-
-la64-run-only:
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+la64-run-only: toolchain-preflight
 	make -f make/la64.mk runsimple MODE=${MODE} LOG=${LOG}
 
 la64-run: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk comp MODE=${MODE} LOG=${LOG}
 
+la64-derived-run: prepare-cargo-config
+	make -f make/la64.mk derived-comp MODE=${MODE} LOG=${LOG}
+
 la64-regression: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk regression-run MODE=${MODE} LOG=${LOG}
 
-comp:
+la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell: prepare-cargo-config
+	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk $@ MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user"
+
+comp: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk comp
 
 clean:
-	for arch in $(ARCHS); do \
-		make ARCH=$$arch -f make/$$arch.mk clean; \
+	@rm -rf "$(BUILD_ROOT)"
+	for arch in rv64 la64; do \
+		$(MAKE) ARCH=$$arch -f make/$$arch.mk clean; \
 	done
-	cd ../user && make clean
+	$(MAKE) -C ../user clean USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)"
 
 laclean:
 	make -f make/la64.mk clean
 
-fs-img:
+fs-img: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk fs-img FS_MODE=$(FS_MODE)
 
-run:
-	make -f make/$(CURR_ARCH).mk run
+validate-run:
+	$(call validate-formal-inputs)
+	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
 
-gdb:
+run: validate-run toolchain-preflight
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk run INITRAMFS_PROFILE=$(PROFILE)
+
+test: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(if $(filter regression,$(PROFILE)),,$(error PROFILE must be regression))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk regression-run MODE=$(MODE) PRODUCT_ROOT="$(PRODUCT_ROOT)" KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)"
+
+check: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk check MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE)) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
+
+lint: prepare-cargo-config
+	$(call validate-formal-inputs)
+	@echo "[lint] Checking first-party warning regression for $(ARCH) $(MODE)..."
+	@sh ../scripts/lint-check.sh --arch $(ARCH) --mode $(MODE)
+
+# Check formatting (separate from lint gate; not part of T10 warning baseline)
+lint-format: prepare-cargo-config
+	cargo fmt --check
+
+ktest-build-only: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
+
+ktest-run: prepare-cargo-config
+	$(call validate-formal-inputs)
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk ktest-run MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user" KTEST_FIXTURE="$(KTEST_FIXTURE)"
+
+gdb: toolchain-preflight
 	make -f make/$(CURR_ARCH).mk gdb
 
 rv64-gdb: rv64-debug
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp-gdb
 
 la64-gdb: la64-debug
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk comp-gdb
+	make -f make/la64.mk comp-gdb	
 
 rvchange:
-	rm -f ../sdcard-rv.img
-	cp ../../imgbk/sdcard-rv.img ../sdcard-rv.img
+	@echo "ERROR: official evaluator x0 is immutable; create a derived development image instead" >&2
+	@exit 2
 
 lachange:
-	rm -f ../sdcard-la.img
-	cp ../../imgbk/sdcard-la.img ../sdcard-la.img
+	@echo "ERROR: official evaluator x0 is immutable; create a derived development image instead" >&2
+	@exit 2
 
 docker:
 	docker compose up -d
@@ -466,442 +199,17 @@ docker:
 conf-inject: prepare-cargo-config
 	@arch_list="$(if $(filter file default,$(origin CONF_ARCH)),rv64 la64,$(CONF_ARCH))"; \
 	for arch in $$arch_list; do \
-		case "$$arch" in \
-			la|la64) \
-				rustup override set $(LA_TOOLCHAIN); \
-				cp ./src/lang_items.rs.la ./src/lang_items.rs; \
-				cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs; \
-				;; \
-			rv|rv64) \
-				rustup override set $(RV_TOOLCHAIN); \
-				cp ./src/lang_items.rs.rv ./src/lang_items.rs; \
-				cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs; \
-				;; \
-		esac; \
-		ARCH=$$arch BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh; \
+		ARCH=$$arch BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ../scripts/inject_os_test_conf.sh; \
 	done
 
-la64-inject-runtime:
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	@cd ../user && make rust-user BOARD=laqemu MODE=$(MODE)
-	@cmd_file=$$(mktemp); \
-	printf '%s\n' \
-		'rm /initproc' \
-		'rm /bin/bash' \
-		'rm /bin/busybox' \
-		'write ../user/target/loongarch64-unknown-linux-gnu/$(MODE)/initproc /initproc' \
-		'write ./bash-la /bin/bash' \
-		'write ./busybox-la /bin/busybox' \
-		'stat /initproc' \
-		'stat /bin/bash' \
-		'stat /bin/busybox' > $$cmd_file; \
-	debugfs -w -f $$cmd_file ../sdcard-la.img; \
-	rm -f $$cmd_file
+la64-inject-runtime: toolchain-preflight
+	@echo "ERROR: direct runtime injection into official evaluator x0 is disabled; use a derived development image" >&2
+	@exit 2
 
 # 将所有用户态测试程序（user/src/bin/*.rs）注入到 sdcard-rv.img
-inject-test:
-	@rustup override set $(RV_TOOLCHAIN)
-	@cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	@cd ../user && make rust-user MODE=release BOARD=rvqemu 2>&1 | tail -5
-	@echo "[inject] Updating test binaries in ../sdcard-rv.img..."
-	@for testname in $$(ls ../user/src/bin/*.rs | xargs -n1 basename | sed 's/\.rs$$//'); do \
-		debugfs -w -R "rm $$testname" ../sdcard-rv.img 2>/dev/null || true; \
-		debugfs -w -R "write ../user/target/riscv64gc-unknown-none-elf/release/$$testname $$testname" ../sdcard-rv.img 2>&1; \
-	done
-	@echo "[inject] Done."
-
-# ============================================================
-# 工具盘构建 (disk.img / disk-la.img)
-# 内容：busybox + bash + musl/glibc 库 + 软链接
-# 来源：user/tools/{riscv64,loongarch64}/
-# ============================================================
-
-TOOLS_IMG_RV := ../disk.img
-TOOLS_IMG_LA := ../disk-la.img
-TOOLS_SIZE_RV := 2048
-TOOLS_SIZE_LA := 2048
-TOOLS_SRC_RV := ../user/tools/riscv64
-TOOLS_SRC_LA := ../user/tools/loongarch64
-
-# Isolated CPython runtime. Downloads are explicit by default so routine
-# kernel builds remain reproducible and do not silently depend on the network.
-# The optional Alpine target remains available for develop/QEMU experiments;
-# 2K1000LA uses the reviewed strict-aligned runtime by default.
-CPYTHON_COMMON := ../user/tools/cpython
-CPYTHON_SRC_RV := ../user/tools/riscv64/tests/cpython
-CPYTHON_SRC_LA := ../user/tools/loongarch64/tests/cpython
-CPYTHON_STRICT_INDEX_LA := ../target/cpython-strict/artifacts/current.json
-CPYTHON_AUTO ?= 0
-
-# MBR 脚本路径
-MBR_SCRIPT := ../scripts/make_mbr_tools_disk.py
-
-# 构建 tools 目录的通用配方
-# $(1)=最终盘镜像路径 $(2)=payload 大小MB $(3)=源目录 $(4)=架构后缀(rv|la)
-define build_tools_disk
-	@echo "[tools-disk] Building $(4) tools payload ($(2)MB)..."
-	@dd if=/dev/zero of=/tmp/tools-pl-$(4).img bs=1M count=$(2) 2>/dev/null
-	@mkfs.ext4 -F /tmp/tools-pl-$(4).img -b 4096 2>/dev/null
-	@mkdir -p /tmp/tools-mnt
-	@mount -o loop /tmp/tools-pl-$(4).img /tmp/tools-mnt
-	@echo "  copying files from $(3)..."
-	@cp -a $(3)/. /tmp/tools-mnt/ 2>/dev/null || true
-	@echo "  copying test binaries..."
-	@case "$(4)" in rv) target=riscv64gc-unknown-none-elf ;; la) target=loongarch64-unknown-linux-gnu ;; esac; \
-	for t in inet_test fs_test unix_test; do \
-		src="../user/target/$$target/release/$$t"; \
-		if [ -f "$$src" ]; then cp -a "$$src" /tmp/tools-mnt/tests/; echo "    $$t"; \
-		else echo "    [skip] $$t (not built)"; fi; \
-	done
-	@echo "  copying CPython runtime/tests..."
-	@if [ -d $(CPYTHON_COMMON) ]; then \
-		mkdir -p /tmp/tools-mnt/tests/cpython; \
-		cp -a $(CPYTHON_COMMON)/. /tmp/tools-mnt/tests/cpython/; \
-		echo "    [cpython] common scripts included"; \
-	else \
-		echo "    [cpython] common scripts missing, skipping"; \
-	fi
-	@if [ -d $(3)/tests/cpython ]; then \
-		mkdir -p /tmp/tools-mnt/tests/cpython; \
-		cp -a $(3)/tests/cpython/. /tmp/tools-mnt/tests/cpython/; \
-		test -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 && \
-			echo "    [cpython] runtime included" || \
-			echo "    [cpython] runtime cache incomplete"; \
-	else \
-		echo "    [cpython] runtime cache absent"; \
-	fi
-	@if [ -x /tmp/tools-mnt/tests/cpython/python3-wrapper.sh ] && \
-	    [ -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 ]; then \
-		ln -sf /tools/tests/cpython/python3-wrapper.sh /tmp/tools-mnt/usr/bin/python3; \
-		ln -sf /tools/tests/cpython/python3-wrapper.sh /tmp/tools-mnt/usr/bin/python; \
-		echo "    [cpython] global launchers included"; \
-	fi
-	@if [ -d $(3)/apk ]; then \
-		cp -a $(3)/apk /tmp/tools-mnt/ 2>/dev/null; \
-		echo "  [apk] local repo included"; \
-	fi
-	@echo "  creating symlinks ..."
-	@cd /tmp/tools-mnt/lib && \
-		if [ -f libc.so ]; then \
-			ln -sf libc.so ld-musl-riscv64.so.1 2>/dev/null; \
-			ln -sf libc.so ld-musl-riscv64-sf.so.1 2>/dev/null; \
-			ln -sf libc.so ld-musl-loongarch-lp64d.so.1 2>/dev/null; \
-			ln -sf libc.so libc.musl-riscv64.so.1 2>/dev/null; \
-			ln -sf libc.so libc.musl-loongarch64.so.1 2>/dev/null; \
-		fi
-	@cd /tmp/tools-mnt/lib && \
-		for f in *.so*; do \
-			[ "$$f" = "libc.so" ] && continue; \
-			[ "$$f" = "libc.so.6" ] && continue; \
-			[ "$$f" = "libm.so.6" ] && continue; \
-			[ "$$f" = "ld-linux-riscv64-lp64d.so.1" ] && continue; \
-			[ "$$f" = "ld-linux-loongarch-lp64d.so.1" ] && continue; \
-			[ "$$f" = "libgcc_s.so.1" ] && continue; \
-			ln -sf "$$f" "lib/$$f" 2>/dev/null; \
-		done 2>/dev/null; true
-	@echo "  pre-installing critical busybox applets ..."
-	@cd /tmp/tools-mnt/bin && \
-		for applet in cp mv rm ln ls mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
-			ln -sf busybox $$applet 2>/dev/null; \
-		done
-	@cd /tmp/tools-mnt/bin && ln -sf bash sh 2>/dev/null || true
-	@# mkfs applets for LTP device tests
-	@cd /tmp/tools-mnt/bin && \
-		for applet in mkfs.vfat; do \
-			ln -sf busybox $$applet 2>/dev/null; \
-		done
-	@umount /tmp/tools-mnt
-	@rmdir /tmp/tools-mnt
-	@echo "[tools-disk] Wrapping with MBR → $(1)..."
-	@python3 $(MBR_SCRIPT) /tmp/tools-pl-$(4).img $(1)
-	@rm -f /tmp/tools-pl-$(4).img
-	@echo "[tools-disk] $(1) ready."
-endef
-
-tools-disk-rv: maybe-tools-cpython-rv
-	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
-
-tools-disk-la: maybe-tools-cpython-la
-	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
-
-tools-disk: tools-disk-rv tools-disk-la
-
-tools-disk-cpython-rv: tools-cpython-rv
-	$(MAKE) --no-print-directory CPYTHON_AUTO=0 tools-disk-rv
-
-tools-disk-cpython-la: tools-cpython-la
-	$(MAKE) --no-print-directory CPYTHON_AUTO=0 tools-disk-la
-
-# ============================================================
-# Alpine 预编译工具下载（本地缓存，避免每次下载）
-# 下载到 user/tools/{arch}/，tools-disk 自动打包
-# ============================================================
-
-ALPINE_MIRROR := https://dl-cdn.alpinelinux.org/alpine/edge/main
-
-tools-alpine-rv:
-	@echo "[alpine] Downloading riscv64 tools..."
-	@mkdir -p /tmp/alpine-rv
-	@for pkg_info in \
-		"tcpdump:usr/bin/tcpdump:tcpdump:bin" \
-		"iproute2-minimal:sbin/ip:ip:bin" \
-		"iproute2-ss:sbin/ss:ss:bin" \
-		"libpcap:usr/lib/libpcap.so.1:libpcap.so.1:lib" \
-		"libcrypto3:usr/lib/libcrypto.so.3:libcrypto.so.3:lib" \
-		"libcap2:usr/lib/libcap.so.2:libcap.so.2:lib" \
-		"libmnl:usr/lib/libmnl.so.0:libmnl.so.0:lib" \
-		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib"; do \
-		pkg=$${pkg_info%%:*}; rest1=$${pkg_info#*:}; apath=$${rest1%%:*}; rest2=$${rest1#*:}; oname=$${rest2%%:*}; subdir=$${pkg_info##*:}; \
-		dest=$(CURDIR)/../user/tools/riscv64/$$subdir/$$oname; \
-		if [ -f "$$dest" ]; then \
-			echo "  [cache] $$oname"; continue; \
-		fi; \
-		apk=$$(curl -sL "$(ALPINE_MIRROR)/riscv64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
-		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
-		if [ ! -f "/tmp/alpine-rv/$$apk" ]; then \
-			echo "  fetching $$apk..."; \
-			curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o "/tmp/alpine-rv/$$apk"; \
-		fi; \
-		tar -xzf "/tmp/alpine-rv/$$apk" -C /tmp/alpine-rv 2>/dev/null; \
-		cp /tmp/alpine-rv/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
-	done
-	@rm -rf /tmp/alpine-rv
-	@echo "[alpine] riscv64 done."
-
-tools-alpine-la:
-	@echo "[alpine] Downloading loongarch64 tools..."
-	@mkdir -p /tmp/alpine-la
-	@for pkg_info in \
-		"tcpdump:usr/bin/tcpdump:tcpdump:bin" \
-		"iproute2-minimal:sbin/ip:ip:bin" \
-		"iproute2-ss:sbin/ss:ss:bin" \
-		"libpcap:usr/lib/libpcap.so.1:libpcap.so.1:lib" \
-		"libcrypto3:usr/lib/libcrypto.so.3:libcrypto.so.3:lib" \
-		"libcap2:usr/lib/libcap.so.2:libcap.so.2:lib" \
-		"libmnl:usr/lib/libmnl.so.0:libmnl.so.0:lib" \
-		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib"; do \
-		pkg=$${pkg_info%%:*}; rest1=$${pkg_info#*:}; apath=$${rest1%%:*}; rest2=$${rest1#*:}; oname=$${rest2%%:*}; subdir=$${pkg_info##*:}; \
-		dest=$(CURDIR)/../user/tools/loongarch64/$$subdir/$$oname; \
-		if [ -f "$$dest" ]; then \
-			echo "  [cache] $$oname"; continue; \
-		fi; \
-		apk=$$(curl -sL "$(ALPINE_MIRROR)/loongarch64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
-		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
-		if [ ! -f "/tmp/alpine-la/$$apk" ]; then \
-			echo "  fetching $$apk..."; \
-			curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o "/tmp/alpine-la/$$apk"; \
-		fi; \
-		tar -xzf "/tmp/alpine-la/$$apk" -C /tmp/alpine-la 2>/dev/null; \
-		cp /tmp/alpine-la/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
-	done
-	@rm -rf /tmp/alpine-la
-	@echo "[alpine] loongarch64 done."
-
-tools-alpine: tools-alpine-rv tools-alpine-la
-
-# ============================================================
-# CPython runtime provisioning. Caches live under
-# user/tools/{arch}/tests/cpython/ and are gitignored.
-# ============================================================
-
-tools-cpython-rv:
-	@python3 ../scripts/fetch_cpython_runtime.py \
-		--arch riscv64 --mirror $(ALPINE_MIRROR) --dest $(CPYTHON_SRC_RV)
-
-tools-cpython-la:
-	@cd .. && ./scripts/build_cpython_runtime_la64_strict.sh
-	@python3 ../scripts/install_cpython_runtime_la64_strict.py \
-		--artifact-index $(CPYTHON_STRICT_INDEX_LA) --dest $(CPYTHON_SRC_LA)
-
-# Keep develop's direct Alpine runtime available for QEMU diagnostics without
-# weakening the default 2K1000LA strict-aligned provenance gate.
-tools-cpython-la-alpine:
-	@python3 ../scripts/fetch_cpython_runtime.py \
-		--arch loongarch64 \
-		--mirror $(ALPINE_MIRROR) \
-		--dest $(CPYTHON_SRC_LA)
-
-tools-cpython: tools-cpython-rv tools-cpython-la
-
-maybe-tools-cpython-rv:
-	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
-		$(MAKE) --no-print-directory tools-cpython-rv; \
-	else \
-		echo "[cpython] CPYTHON_AUTO=0, skipping riscv64 runtime"; \
-	fi
-
-maybe-tools-cpython-la:
-	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
-		$(MAKE) --no-print-directory tools-cpython-la; \
-	else \
-		echo "[cpython] CPYTHON_AUTO=0, skipping loongarch64 runtime"; \
-	fi
-
-tools-cpython-clean:
-	@rm -rf $(CPYTHON_SRC_RV)/.apk-cache $(CPYTHON_SRC_RV)/bin $(CPYTHON_SRC_RV)/lib $(CPYTHON_SRC_RV)/usr $(CPYTHON_SRC_RV)/etc $(CPYTHON_SRC_RV)/var $(CPYTHON_SRC_RV)/tmp $(CPYTHON_SRC_RV)/.cpython-*.stamp $(CPYTHON_SRC_RV)/manifest*.txt
-	@rm -rf $(CPYTHON_SRC_LA)/.apk-cache $(CPYTHON_SRC_LA)/bin $(CPYTHON_SRC_LA)/lib $(CPYTHON_SRC_LA)/usr $(CPYTHON_SRC_LA)/etc $(CPYTHON_SRC_LA)/var $(CPYTHON_SRC_LA)/tmp $(CPYTHON_SRC_LA)/.cpython-*.stamp $(CPYTHON_SRC_LA)/manifest*.txt
-	@echo "[cpython] generated runtime caches removed"
-
-CURL_RUNTIME_LA_MANIFEST := ../user/tools/loongarch64/curl-runtime/manifest.txt
-
-tools-curl-la: $(CURL_RUNTIME_LA_MANIFEST)
-
-$(CURL_RUNTIME_LA_MANIFEST): ../scripts/build_curl_runtime_la64.sh \
-		initramfs/common/etc/ssl/certs/ca-certificates.crt
-	cd .. && sh scripts/build_curl_runtime_la64.sh \
-		user/tools/loongarch64/curl-runtime
-
-# ============================================================
-# apk 包管理器下载 + 本地 repo 配置
-# 下载 apk-tools-static, alpine-keys, 示例包
-# ============================================================
-
-APK_PACKAGES := musl zlib ncurses
-
-tools-apk-rv:
-	@echo "[apk] Setting up apk for riscv64..."
-	@mkdir -p /tmp/apk-rv /tmp/apk-rv-keys
-	# 1. 下载 apk-tools-static → bin/apk.static
-	@apk_url="$(ALPINE_MIRROR)/riscv64/"; \
-		apk_file=$$(curl -sL "$$apk_url" 2>/dev/null | grep -oP '"apk-tools-static-[0-9][^"]*\.apk"' | tr -d '"' | sort -V | tail -1); \
-		if [ -n "$$apk_file" ]; then \
-			dest=$(CURDIR)/../user/tools/riscv64/bin/apk.static; \
-			if [ ! -f "$$dest" ]; then \
-				echo "  fetching $$apk_file..."; \
-				curl -sL "$$apk_url/$$apk_file" -o /tmp/apk-rv/$$apk_file && \
-				tar -xzf /tmp/apk-rv/$$apk_file -C /tmp/apk-rv 2>/dev/null && \
-				cp /tmp/apk-rv/sbin/apk.static "$$dest" 2>/dev/null && \
-				echo "  [done] apk.static"; \
-			else echo "  [cache] apk.static"; fi; \
-		else echo "  [skip] apk-tools-static not found"; fi
-	# 2. 下载 alpine-keys → etc/apk/keys/
-	@apk_url="$(ALPINE_MIRROR)/riscv64/"; \
-		apk_file=$$(curl -sL "$$apk_url" 2>/dev/null | grep -oP '"alpine-keys-[0-9][^"]*\.apk"' | tr -d '"' | sort -V | tail -1); \
-		if [ -n "$$apk_file" ]; then \
-			keydir=$(CURDIR)/../user/tools/riscv64/etc/apk/keys; \
-			mkdir -p "$$keydir"; \
-			if [ -z "$$(ls -A "$$keydir" 2>/dev/null)" ]; then \
-				echo "  fetching $$apk_file..."; \
-				curl -sL "$$apk_url/$$apk_file" -o /tmp/apk-rv/$$apk_file && \
-				tar -xzf /tmp/apk-rv/$$apk_file -C /tmp/apk-rv-keys 2>/dev/null && \
-				cp /tmp/apk-rv-keys/etc/apk/keys/*.pub "$$keydir/" 2>/dev/null && \
-				echo "  [done] alpine keys"; \
-			else echo "  [cache] alpine keys"; fi; \
-		else echo "  [skip] alpine-keys not found"; fi
-	# 3. 创建 /etc/apk/repositories (指向官方源 + 本地包)
-	@repodir=$(CURDIR)/../user/tools/riscv64/etc/apk; \
-		mkdir -p "$$repodir"; \
-		if [ ! -f "$$repodir/repositories" ]; then \
-			printf '%s\n' \
-				"https://dl-cdn.alpinelinux.org/alpine/edge/main" \
-				"file:///tools/apk/packages" > "$$repodir/repositories"; \
-			echo "  [done] etc/apk/repositories"; \
-		else echo "  [cache] etc/apk/repositories"; fi
-	# 4. 下载示例包 + APKINDEX → apk/packages/<arch>/
-	@pkgdir=$(CURDIR)/../user/tools/riscv64/apk/packages/riscv64; \
-		mkdir -p "$$pkgdir"; \
-		if [ ! -f "$$pkgdir/APKINDEX.tar.gz" ]; then \
-			echo "  fetching APKINDEX.tar.gz..."; \
-			curl -sL "$(ALPINE_MIRROR)/riscv64/APKINDEX.tar.gz" -o "$$pkgdir/APKINDEX.tar.gz" 2>/dev/null && \
-			echo "  [done] APKINDEX.tar.gz"; \
-		else echo "  [cache] APKINDEX.tar.gz"; fi; \
-		apk_url="$(ALPINE_MIRROR)/riscv64/"; \
-		for pkg in $(APK_PACKAGES); do \
-			apk_file=$$(curl -sL "$$apk_url" 2>/dev/null | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
-			if [ -n "$$apk_file" ]; then \
-				if [ ! -f "$$pkgdir/$$apk_file" ]; then \
-					echo "  fetching $$apk_file..."; \
-					curl -sL "$$apk_url/$$apk_file" -o "$$pkgdir/$$apk_file" 2>/dev/null && \
-					echo "  [done] $$apk_file"; \
-				else echo "  [cache] $$apk_file"; fi; \
-			else echo "  [skip] $$pkg not found in repo"; fi; \
-		done
-	@rm -rf /tmp/apk-rv /tmp/apk-rv-keys
-	@echo "[apk] riscv64 done."
-
-tools-apk-la:
-	@echo "[apk] Setting up apk for loongarch64..."
-	@mkdir -p /tmp/apk-la /tmp/apk-la-keys
-	# 1. apk-tools-static → bin/apk.static
-	@apk_url="$(ALPINE_MIRROR)/loongarch64/"; \
-		apk_file=$$(curl -sL "$$apk_url" 2>/dev/null | grep -oP '"apk-tools-static-[0-9][^"]*\.apk"' | tr -d '"' | sort -V | tail -1); \
-		if [ -n "$$apk_file" ]; then \
-			dest=$(CURDIR)/../user/tools/loongarch64/bin/apk.static; \
-			if [ ! -f "$$dest" ]; then \
-				echo "  fetching $$apk_file..."; \
-				curl -sL "$$apk_url/$$apk_file" -o /tmp/apk-la/$$apk_file && \
-				tar -xzf /tmp/apk-la/$$apk_file -C /tmp/apk-la 2>/dev/null && \
-				cp /tmp/apk-la/sbin/apk.static "$$dest" 2>/dev/null && \
-				echo "  [done] apk.static"; \
-			else echo "  [cache] apk.static"; fi; \
-		else echo "  [skip] apk-tools-static not found"; fi
-	# 2. alpine-keys → etc/apk/keys/
-	@apk_url="$(ALPINE_MIRROR)/loongarch64/"; \
-		apk_file=$$(curl -sL "$$apk_url" 2>/dev/null | grep -oP '"alpine-keys-[0-9][^"]*\.apk"' | tr -d '"' | sort -V | tail -1); \
-		if [ -n "$$apk_file" ]; then \
-			keydir=$(CURDIR)/../user/tools/loongarch64/etc/apk/keys; \
-			mkdir -p "$$keydir"; \
-			if [ -z "$$(ls -A "$$keydir" 2>/dev/null)" ]; then \
-				echo "  fetching $$apk_file..."; \
-				curl -sL "$$apk_url/$$apk_file" -o /tmp/apk-la/$$apk_file && \
-				tar -xzf /tmp/apk-la/$$apk_file -C /tmp/apk-la-keys 2>/dev/null && \
-				cp /tmp/apk-la-keys/etc/apk/keys/*.pub "$$keydir/" 2>/dev/null && \
-				echo "  [done] alpine keys"; \
-			else echo "  [cache] alpine keys"; fi; \
-		else echo "  [skip] alpine-keys not found"; fi
-	# 3. 创建 /etc/apk/repositories
-	@repodir=$(CURDIR)/../user/tools/loongarch64/etc/apk; \
-		mkdir -p "$$repodir"; \
-		if [ ! -f "$$repodir/repositories" ]; then \
-			printf '%s\n' \
-				"https://dl-cdn.alpinelinux.org/alpine/edge/main" \
-				"file:///tools/apk/packages" > "$$repodir/repositories"; \
-			echo "  [done] etc/apk/repositories"; \
-		else echo "  [cache] etc/apk/repositories"; fi
-	# 4. 下载示例包 + APKINDEX → apk/packages/<arch>/
-	@pkgdir=$(CURDIR)/../user/tools/loongarch64/apk/packages/loongarch64; \
-		mkdir -p "$$pkgdir"; \
-		if [ ! -f "$$pkgdir/APKINDEX.tar.gz" ]; then \
-			echo "  fetching APKINDEX.tar.gz..."; \
-			curl -sL "$(ALPINE_MIRROR)/loongarch64/APKINDEX.tar.gz" -o "$$pkgdir/APKINDEX.tar.gz" 2>/dev/null && \
-			echo "  [done] APKINDEX.tar.gz"; \
-		else echo "  [cache] APKINDEX.tar.gz"; fi; \
-		apk_url="$(ALPINE_MIRROR)/loongarch64/"; \
-		for pkg in $(APK_PACKAGES); do \
-			apk_file=$$(curl -sL "$$apk_url" 2>/dev/null | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
-			if [ -n "$$apk_file" ]; then \
-				if [ ! -f "$$pkgdir/$$apk_file" ]; then \
-					echo "  fetching $$apk_file..."; \
-					curl -sL "$$apk_url/$$apk_file" -o "$$pkgdir/$$apk_file" 2>/dev/null && \
-					echo "  [done] $$apk_file"; \
-				else echo "  [cache] $$apk_file"; fi; \
-			else echo "  [skip] $$pkg not found in repo"; fi; \
-		done
-	@rm -rf /tmp/apk-la /tmp/apk-la-keys
-	@echo "[apk] loongarch64 done."
-
-tools-apk: tools-apk-rv tools-apk-la
-
-# ============================================================
-# Initramfs 构建
-# 生成 tiny newc cpio 归档，嵌入 kernel 作为初始根文件系统
-# ============================================================
-
-INITRAMFS_DIR_RV := ../fs-img-dir/initramfs-rv.cpio
-INITRAMFS_DIR_LA := ../fs-img-dir/initramfs-la.cpio
-
-# DNS 服务器：QEMU user 网用 10.0.2.3，真机/其他环境可覆写
-DNS_SERVER ?= 10.0.2.3
-
-initramfs-rv: user
-	@DNS_SERVER=$(DNS_SERVER) ./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_DIR_RV)
-
-initramfs-la: user
-	@DNS_SERVER=$(DNS_SERVER) ./build_initramfs.sh la64 $(MODE) $(INITRAMFS_DIR_LA)
-
-initramfs-all: initramfs-rv initramfs-la
+inject-test: toolchain-preflight
+	@echo "ERROR: direct test injection into official evaluator x0 is disabled; use a derived development image" >&2
+	@exit 2
 
 # ============================================================
 # lwext4 targets
@@ -914,38 +222,17 @@ lwext4-la64:
 
 .PHONY: lwext4-rv64 lwext4-la64
 
-# ============================================================
-# L3 Kernel self-test (mango.mode=ktest)
-# ============================================================
-# Usage:
-#   make rv64-ktest
-#   make rv64-ktest KTEST=waitqueue KREPEAT=100
-#   make rv64-ktest KTEST=sched KTRACE=waitqueue,sched
-#   make la64-ktest KTEST=all KTIMEOUT_MS=10000
-KTEST ?= all
-KREPEAT ?= 1
-KTIMEOUT_MS ?= 5000
-KTRACE ?=
-KTEST_QEMU_TIMEOUT ?= 30
-export KTEST_QEMU_TIMEOUT
-
-KTEST_CMDLINE := mango.mode=ktest mango.test=$(KTEST) mango.test.repeat=$(KREPEAT) mango.test.timeout_ms=$(KTIMEOUT_MS) mango.test.failfast=0
-ifneq ($(KTRACE),)
-KTEST_CMDLINE := $(KTEST_CMDLINE) mango.trace=$(KTRACE)
-endif
-export KTEST_CMDLINE
-
 rv64-ktest: prepare-cargo-config
-	@rustup override set $(RV_TOOLCHAIN)
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk ktest-run MODE=${MODE} LOG=${LOG}
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk ktest-run MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user" KTEST_FIXTURE="$(KTEST_FIXTURE)"
+
+rv64-ktest-build-only: prepare-cargo-config
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
 
 la64-ktest: prepare-cargo-config
-	@rustup override set $(LA_TOOLCHAIN)
-	cp ./src/lang_items.rs.la ./src/lang_items.rs
-	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64.mk ktest-run MODE=${MODE} LOG=${LOG}
+	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk ktest-run MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user" KTEST_FIXTURE="$(KTEST_FIXTURE)"
+
+la64-ktest-build-only: prepare-cargo-config
+	$(MAKE) ARCH=la64 PROFILE=$(PROFILE) -f make/la64.mk ktest-build-only MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/$(PROFILE)/user"
 
 # Composite: fast check + unit test + kernel test
 .PHONY: bugscan
@@ -954,15 +241,12 @@ bugscan: check-fast rv64-ktest
 
 # Fast static checks (no QEMU needed)
 .PHONY: check-fast
-check-fast:
+check-fast: toolchain-preflight
 	@echo "[check-fast] Running cargo check..."
-	@rustup override set $(RV_TOOLCHAIN) 2>/dev/null
-	cp ./src/lang_items.rs.rv ./src/lang_items.rs 2>/dev/null
-	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs 2>/dev/null
 	cargo check --features "board_rvqemu block_virt" 2>&1 | tail -1
 
 # ─────────────────────────────────────────────────────────
-#  Aggregate targets — serial execution (toolchain conflict)
+#  Aggregate targets — serial execution (architecture-specific source state)
 # ─────────────────────────────────────────────────────────
 
 regression-all:

@@ -1,5 +1,5 @@
 use core::panic;
-use core::{convert::TryInto, intrinsics::size_of};
+use core::{convert::TryInto, mem::size_of};
 
 use super::block_group::Block;
 use super::ext4fs::Ext4FileSystem;

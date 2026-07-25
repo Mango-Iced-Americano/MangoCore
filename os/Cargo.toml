@@ -8,7 +8,7 @@ smoltcp = {path = "../dependency/smoltcp" }
 
 [dependencies]
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
-buddy_system_allocator = { git = "https://github.com/Mango-Iced-Americano/buddy_system_allocator", branch = "feat/metadata-heap", default-features = false, features = ["metadata_heap"] }
+buddy_system_allocator = { path = "../dependency/buddy_system_allocator", default-features = false, features = ["metadata_heap"] }
 spin = "0.7"
 bitflags = "1.3"
 xmas-elf = "0.7.0"
@@ -56,6 +56,10 @@ smoltcp = { version = "0.10.0", default-features = false, features = [
 riscv = { path = "../dependency/riscv", features = ["inline-asm"] }
 
 [features]
+# Boot-profile legality:
+# - `initramfs` owns the embedded root.
+# - normal and regression CPIO selection is Make-only via `MANGO_INITRAMFS_CPIO`,
+#   not a Cargo feature.
 zero_init = []
 swap = []
 zram = []
@@ -67,35 +71,19 @@ log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
 block_sata = []
-sata_probe = ["block_sata"]
-sata_write_probe = ["block_sata"]
-sata_fs_write_probe = ["block_sata"]
-sata_scratch_rw = ["block_sata"]
-p4_persist_rw = []
-board_core_test = []
-board_shell = []
-cpython_test = []
-apk_test = []
-apk_persist_test = []
-apk_persist_shell = []
-gmac_probe = []
-gmac_2k1000 = []
-gmac_dhcp = ["gmac_2k1000"]
-gmac_diag = []
-net_perf_diag = []
-net_ack_immediate = []
-block_mem = []
 block_virt = []
 block_virt_pci = []
 comp = []
 heap_trace = []
 perf_stats = []
 perf_diag = ["perf_stats"]
-initramfs = []
-regression_initramfs = []
-legacy_block_root = []
-preload_payloads = []
 board_bringup_trace = []
+gmac_probe = []
+gmac_2k1000 = []
+gmac_dhcp = []
+net_perf_diag = []
+net_ack_immediate = []
+initramfs = []
 
 # LoongArch Boards:
 loongarch64 = []
@@ -108,8 +96,7 @@ board_vf2 = ["oom_handler", "riscv"]
 # END of LoongArch Boards.
 
 # default = ["board_laqemu", "block_sata"]
-# default = ["board_rvqemu", "block_mem"]
-default = ["initramfs", "preload_payloads"]
+default = ["initramfs"]
 
 [profile.dev]
 # 优化级别

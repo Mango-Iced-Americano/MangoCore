@@ -2,10 +2,10 @@
 
 docker-compose.override.yml
 
-# Root-level generated performance artifacts and disk images.
-/target/
-
 os/target/
+
+target/
+/build/
 
 os/qemu.log
 
@@ -19,7 +19,7 @@ testresult
 
 testresults
 
-.parallel-test
+/.parallel-test/
 
 kernel-la
 
@@ -33,13 +33,17 @@ disk.img
 
 disk-la.img
 
-# Generated regression disk images; keep them out of Git/Codex snapshots.
-/tmp/*.img
+/docs/Work_Log/evidence/*
+!/docs/Work_Log/evidence/2026-07-22/
+/docs/Work_Log/evidence/2026-07-22/*
+!/docs/Work_Log/evidence/2026-07-22/t3-formal-facade-docker.md
+!/docs/Work_Log/evidence/2026-07-22/t3-initramfs-outdir-docker.md
+!/docs/Work_Log/evidence/2026-07-23/
 
 cc-codex/*.clean.img
 
 *digest.txt
- 
+
 *packets.pcap
 WORK_LOG.md
 EXPERIENCE.md
@@ -51,7 +55,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Generated Alpine CPython runtime caches for target tools disks.
+# CPython runtime cache for tools disk
 /user/tools/*/tests/cpython/.apk-cache/
 /user/tools/*/tests/cpython/bin/
 /user/tools/*/tests/cpython/lib/
@@ -65,22 +69,26 @@ __pycache__/
 /user/tools/*/tests/cpython/manifest*.txt
 /user/tools/*/tests/cpython/**/*.so
 /user/tools/*/tests/cpython/**/*.so.*
-/kernel-rv-cpython
-/kernel-la-cpython
-/kernel-2k1000-cpython-tests.ui
-/mango-2k1000la-cpython-tools-p3.img
-/mango-2k1000la-cpython-tools-p3.img.json
-/kernel-2k1000-apk-persist-tests.ui
-/kernel-la-apk-persist-tests
-/mango-2k1000la-state-p4.img
-/mango-2k1000la-state-p4.img.json
-/mango-2k1000la-p4-qemu.img
 .sisyphus/
 sdcard-rv-noconf.img
-/tools/
-.omo/
+/.omo/
 .env
-# Reproducible LoongArch curl build output.
-/user/tools/loongarch64/curl-runtime/
 os/rootfs-rv.img
 os.bin
+/.opencode/*.bak
+/.codex-*.conf
+/.codegraph
+*.swp
+*.swo
+*.orig
+*~
+/core
+/core.*
+/.opencode/node_modules/
+/.opencode/package.json
+/.opencode/package-lock.json
+/.opencode/bun.lock
+/.opencode/.gitignore
+/judge/qemu.log
+/judge/console_log
+/user/fs/var/tmp/*

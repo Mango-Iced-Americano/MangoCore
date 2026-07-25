@@ -6,29 +6,30 @@
 
 | 属性 | 值 |
 |------|-----|
-| 语言 | Rust nightly（双工具链：`nightly-2025-01-18` / `nightly-2024-05-01`） |
+| 语言 | Rust `nightly-2026-05-10`（单一根目录工具链合同） |
 | 架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-linux-gnu` |
-| syscall | 约 219 个（新增时同步更新本节） |
-| 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、ChaCha20 CSPRNG（VirtIO RNG/2K1000LA 片上 RNG）、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
+| syscall | 约 218 个（新增时同步更新本节） |
+| 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
 | 设计参考 | [DragonOS](https://github.com/DragonOS-Community/DragonOS)（VFS/MountFS 架构）+ Linux 6.6 语义 |
-| 约束 | **无 `cargo test`/`cargo clippy`** — 裸机内核，唯一验证 = 编译 + QEMU 集成测试 |
+| 验证 | 使用 Make facade：`make check ARCH=<rv64|la64> PROFILE=<normal|regression>`、`make lint`、编译与 QEMU 集成测试 |
 
 ---
 
 ## 不可违反的规则
 
 1. **Docker 优先** — 所有编译/运行/调试在 Docker 容器内：`make docker`
-2. **不要并行编译双架构** — rv64 和 la64 使用不同 nightly 工具链，Makefile 会切换 `rustup override`，并行会竞态。必须分开命令行执行
-3. **永远不要直接编辑 `lang_items.rs`** — 编辑 `lang_items.rs.rv` / `lang_items.rs.la` 变体；`user/src/lang_items.rs` 同理
-4. **验证强度匹配风险** — 文档/注释不编译；架构专用代码先验证受影响架构；共享生产代码在工作包或提交前串行完成双架构编译。SMP 代码按 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md) 的 T0-T3 分级执行
-5. **核心功能按风险做 QEMU 测试** — trap、IPI、调度、MM/TLB、锁与用户可见语义必须做对应 focused QEMU；纯重构、诊断或未改变运行语义的修改不机械重复全矩阵
-6. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
-7. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
-8. **不要 workaround** — 从根因解决问题，不做临时绕过
-9. **Mango Workflow 门禁** — 调试或代码任务首次写入前加载 `mango-workflow`；同一连续任务且 Skill 未变化时复用已加载状态，不为每个 patch 重复全文读取。完整工作包结束时执行 A→D（更新 Work Log → 判断经验沉淀 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
-10. **回复中必须声明门禁状态** — 每个代码工作包完成后，在回复末尾注明 `mango-workflow: loaded/reused, references: <文件名或无>`。
-11. **SMP 适配以独立功能闭环为工作包** — 默认不设代码行数限制，尽可能一次完成一个可独立验证、可回退的功能或不变量，不按机械行数切碎实现。只有逻辑复杂、涉及多个锁或高风险并发协议时，才将关键实现代码控制在约 200 行作为审查目标；为保持语义闭合可以合理超出并说明。新任务首次修改前完整阅读 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md)；同一连续任务且规范未变化时复用已加载结论，只重读当前 Phase 和相关章节。高风险并发工作包修改前申请、修改后详细汇报并停止；低/中风险的已批准连续步骤可在同一工作包内完成，不为机械行数或中间 patch 反复停顿。
-12. **SMP 注释默认使用中文** — 新增或修改的 SMP 注释尽量使用简体中文解释设计原因、同步关系和失败后果；寄存器、指令、类型、函数、字段及其他专有名词或代码引用可保留英文。
+2. **工具链 provisioning** — 根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME`/`CARGO_HOME`，并在需要时自动执行 setup 和 preflight；全新容器首次运行可能使用网络。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可在容器内运行 `make toolchain-setup`
+3. **不要并行编译双架构** — rv64 和 la64 共用单一根目录 `nightly-2026-05-10`，并写入共享的架构生成状态；必须分开命令行串行执行
+4. **`lang_items.rs` 使用单文件 cfg 分支** — 内核的架构差异由 `#[cfg(target_arch = ...)]` 选择；不要再复制、生成或寻找 `.rv`/`.la` 变体
+5. **验证强度匹配风险** — 文档/注释不编译；架构专用代码先验证受影响架构；共享生产代码在工作包或提交前串行完成双架构编译。SMP 代码按 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md) 的 T0-T3 分级执行
+6. **核心功能按风险做 QEMU 测试** — trap、IPI、调度、MM/TLB、锁与用户可见语义必须做对应 focused QEMU；纯重构、诊断或未改变运行语义的修改不机械重复全矩阵
+7. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
+8. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
+9. **不要 workaround** — 从根因解决问题，不做临时绕过
+10. **Mango Workflow 门禁** — 调试或代码任务首次写入前加载 `mango-workflow`；同一连续任务且 Skill 未变化时复用已加载状态，不为每个 patch 重复全文读取。完整工作包结束时执行 A→D（更新 Work Log → 判断经验沉淀 → 检查文档同步）。详见下方「Mango Workflow Skill 门禁」小节。
+11. **回复中必须声明门禁状态** — 每个代码工作包完成后，在回复末尾注明 `mango-workflow: loaded/reused, references: <文件名或无>`。
+12. **SMP 适配按完整功能推进** — 默认不设机械行数上限，尽量一次完成一个语义闭合的独立功能；只有多锁、复杂并发或高风险协议才把关键实现控制在约 200 行并申请人工确认。新任务首次修改前完整阅读 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md)；同一连续任务只重读当前 Phase 和相关章节。
+13. **SMP 注释优先中文** — 并发不变量、内存序、锁顺序、BSP/AP 所有权和架构寄存器约束使用中文解释；专有名词、寄存器名和代码引用可保留英文。
 
 ---
 
@@ -36,8 +37,8 @@
 
 `mango-workflow` 不是"事后写日志"，而是**前置知识门禁**。
 
-**触发条件：** 调试、代码工作包首次开始，以及工作包完成收尾。同一连续任务中的中间 patch、
-编译重试和文档收尾复用已加载状态。
+**触发条件：** 调试、代码工作包首次开始，以及工作包完成收尾。同一连续任务中的
+中间 patch、编译重试和文档收尾复用已加载状态。
 
 **前置阅读：**
 - 性能退化/计数器/QEMU 长测 → 先读 `references/harness-patterns.md`
@@ -54,12 +55,13 @@
 ### 日常编译
 
 ```bash
-make docker                                    # 进入容器
-cd os && make rv64-kernel-build-only           # rv64 快速编译
-cd os && make la64-kernel-build-only           # la64 快速编译
-cd os && make rv64-only                        # rv64 完整（含用户态+镜像）
-cd os && make la64-only                        # la64 完整
-make all                                       # 根目录双架构全量
+make docker
+make kernel ARCH=rv64 PROFILE=normal            # RV64 内核
+make kernel ARCH=la64 PROFILE=normal            # LA64 内核（必须在 RV64 后串行执行）
+make build ARCH=rv64 PROFILE=normal             # RV64 完整产物
+make build ARCH=la64 PROFILE=normal             # LA64 完整产物
+make all                                        # 评测用串行双架构全量
+make lint                                       # 四格首方 warning 基线门禁
 ```
 
 ### 测试镜像
@@ -72,15 +74,14 @@ xz -dkc fs-img-dir/sdcard-la.img.xz > sdcard-la.img
 
 ### 测试配置
 
-`os_test.conf` 的 `mask` 字段用 13-bit 控制测试组（**不要日常跑全量**）：
+`os_test.conf` 的 `mask` 字段用 12-bit 控制测试组（**不要日常跑全量**）：
 
 ```
 bit0=basic  bit1=busybox  bit2=lua  bit3=libctest  bit4=iozone  bit5=unixbench
 bit6=iperf  bit7=libcbench bit8=lmbench bit9=netperf bit10=cyclictest bit11=ltp
-bit12=cpython（仅隔离 CPython 运行时镜像）
 ```
 
-常用 mask：`0x001`（basic）、`0x003`（basic+busybox）、`0xFFF`（竞赛 12 组全量，仅提交评测用）、`0x1000`（仅 CPython，必须使用带运行时的 tools 镜像）
+常用 mask：`0x001`（basic）、`0x003`（basic+busybox）、`0xFFF`（全量，仅提交评测用）
 
 配置注入镜像：
 ```bash
@@ -93,10 +94,12 @@ LTP 本地调试：`ltp_runner=inline` + `ltp_include=read01,write01`（提交�
 ### 运行测试
 
 ```bash
-cd os && make rv64-run            # LOG=info 查看 syscall 追踪
-cd os && make la64-run
-python3 scripts/run_full_test.py  # 全量一键
-make docker-test-parallel         # 双架构并行
+make run ARCH=rv64 PROFILE=normal  # LOG=info 查看 syscall 追踪
+make run ARCH=la64 PROFILE=normal
+make -C os ktest-run ARCH=rv64 PROFILE=normal
+make test ARCH=rv64 PROFILE=regression
+python3 scripts/run_full_test.py --serial  # 全量一键（串行架构）
+# docker-test-parallel 已弃用并 fail-closed；不得并行双架构构建
 ```
 
 ---
@@ -106,9 +109,10 @@ make docker-test-parallel         # 双架构并行
 ### 启动流程
 
 ```
-QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
-  console::init() → mm::init() → drivers::init() → fs::init()
-  → net::init() → task::init() [加载 initproc ELF] → run_tasks()
+QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
+  → initramfs CPIO → VFS_ROOT → devfs bootstrap
+  → 加载 /init（exec 到 /sbin/init）→ PID1 → test-runner
+  → run_tasks()
 ```
 
 ### 系统调用
@@ -126,7 +130,7 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
 
 ### 内存管理
 
-- **物理内存**：多 region 栈式帧分配器，4KB/帧；平台以 `MEMORY_REGIONS` 描述 DRAM bank、以 `FIRMWARE_RESERVED_REGIONS` 描述未交接 carveout；`frame_store.rs` 跟踪帧状态用于 swap/zram
+- **物理内存**：栈式帧分配器，4KB/帧；`frame_store.rs` 跟踪帧状态用于 swap/zram
 - **虚拟内存**：SV39 页表，每进程独立 `MemorySet`；`VmaSet` 管理 VMA；`filemap.rs` 处理 mmap 文件缺页
 - **用户内存访问**：`translated_ref/refmut/byte_buffer`、`copy_from_user`、`translated_str`
 - **关键约束**：MAP_SHARED 页面不参与 CoW；修改 PTE 后必须 TLB 刷新；`execve`/`clone` 路径用 `try_reserve` 防 OOM
@@ -155,7 +159,9 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main():
 | procfs | `fs/procfs/` | `/proc` 伪文件系统（含 `/proc/[pid]/status/maps/fd`） |
 | devfs | `fs/dev/` | 设备文件（null/zero/urandom/tty/pipe/pty/rtc） |
 
-**PageCache**：状态机（Loading→UpToDate↔Dirty→Writeback），LRU 回收（高水位 64MB，批量 64 页）。`reclaim.rs` 周期性后台回收。
+**PageCache**：状态机（Loading→UpToDate↔Dirty→Writeback）；后台写回阈值约 32MB、节流阈值约 64MB，批量 256 页。`reclaim.rs` 周期性后台回收。
+
+**镜像角色**：normal QEMU 固定为 `x0` 根文件系统/sdcard 与 `x1` 工具盘；`x1` 的 P1 是 ext4 工具分区，P2 是 FAT32 scratch 分区。regression 与 ktest 不挂外部磁盘。
 
 **MountFS**：包装层，处理跨 FS 边界 lookup 和挂载传播（shared/private/slave）。
 
@@ -172,17 +178,6 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 - `wait_io` — socket 操作阻塞包装（每次重试前 poll）
 - `wait_io_core` — 通用文件 I/O 阻塞包装（不 poll）
 - 非阻塞路径（MSG_DONTWAIT）在 `try_xxx` 前必须 `try_poll()` 防 livelock
-
-### 随机数
-
-```
-VirtIO RNG / 2K1000LA APB RNG -> drivers/rng -> random::ChaCha20Rng
-  -> getrandom(2) / /dev/random / /dev/urandom
-```
-
-- 启动时必须由平台可信熵源完成播种和健康检查，之后才允许安全随机读取。
-- `GRND_INSECURE` 只允许使用未认证的启动状态，不能把它计为可信熵。
-- 写入随机设备只混入状态，不提高 ready 状态；当前实现每次输出后重键。
 
 ### IPC / 同步
 
@@ -235,8 +230,6 @@ VirtIO RNG / 2K1000LA APB RNG -> drivers/rng -> random::ChaCha20Rng
 - **TLB 刷新**：所有 PTE 修改操作（`unmap`/`block_and_ret_mut`/`set_pte_flags`）后必须 `sfence.vma`/`invtlb`
 - **MAP_SHARED**：不参与 CoW，fork 时恢复 W 权限，缺页只恢复 W
 - **OOM**：`execve`/`clone` 路径 Vec 扩容必须 `try_reserve` 返回 `ENOMEM`
-- **非连续 DRAM**：`MEMORY_SIZE` 是容量、`MEMORY_END` 是地址上界，都不能代替 region 表；DMA 连续页必须用 `frames_alloc()`，普通页集合用 `frames_alloc_any()`
-- **固件所有权**：启动后仍被 framebuffer、其他 CPU 或 boot firmware 使用的 DRAM 必须 carveout，只有完成停 DMA/重停放/复制后才能回收
 
 ### 网络
 
@@ -270,7 +263,7 @@ VirtIO RNG / 2K1000LA APB RNG -> drivers/rng -> random::ChaCha20Rng
 
 - `cargo check` 必须从 `os/` 目录用 Makefile 目标，不能在根目录
 - `Vec` 重复定义 → 检查是否同时 `use alloc::vec;` 和 `use alloc::vec::Vec;`
-- lang_items 不匹配 → 编辑 `.rv`/`.la` 变体，不编辑 `lang_items.rs`
+- lang_items 不匹配 → 检查单个 `lang_items.rs` 中的 `#[cfg(target_arch = ...)]` 分支；不复制架构变体文件
 
 ---
 
@@ -301,6 +294,7 @@ impl_file_for_socket!(MySocket);
 - [ ] 已按改动风险选择验证档位并说明理由
 - [ ] 受影响架构构建通过；共享生产代码在提交/门禁前补齐双架构
 - [ ] 改变运行语义时，对应 focused QEMU/测试组通过
+- [ ] 工作包要求时执行 `make lint`，首方 warning 匹配四格基线
 - [ ] 更新 `docs/Work_Log/YYYY-MM-DD.md`（按 mango-workflow Skill 格式）
 
 ---
@@ -318,9 +312,9 @@ impl_file_for_socket!(MySocket);
 
 ### 自动 Worklog
 
-每个完整代码工作包结束时必须执行 `mango-workflow` A→D。同一连续任务只加载一次 Skill；
-中间 patch 不单独制造 Work Log 条目，编译错误修复、对称架构实现和文档同步合并记录到工作包。
-新任务、Skill 已变化或上下文没有加载记录时才重新全文读取。
+每个完整代码工作包结束时必须执行 `mango-workflow` A→D。同一连续任务只加载一次
+Skill；中间 patch 不单独制造 Work Log 条目，编译错误修复、对称架构实现和文档同步
+合并记录到工作包。新任务、Skill 已变化或上下文没有加载记录时才重新全文读取。
 
 格式：日期戳条目 → 涉及文件 → 验证结果 → 备注。
 
@@ -352,4 +346,4 @@ AI 助手使用**中文**与用户交流。代码、注释、commit message 使�
 - 设计蓝本：[DragonOS](https://github.com/DragonOS-Community/DragonOS)
 - 详细测试策略：`Doc/Work_Log.md`、`Doc/LTP_BOTTOM_UP_GUIDE.md`
 - VFS 迁移历史：`Doc/vfs-migration-plan.md`
-- 调试技巧：`how-to-run.md`
+- 调试技巧：`docs/08_testing/README.md`
