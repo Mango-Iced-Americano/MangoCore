@@ -8,8 +8,12 @@ pub const MMIO: &[(usize, usize)] = &[
     // 前者为地址，后者为大小
     (0x1000_0000, 0x1000),      // UART
     (0x1000_1000, 0x1000),      // virtio-mmio bus.0 (block x0)
-    (0x1000_2000, 0x1000),      // virtio-mmio bus.1 (block x1 / tools disk)
-    (0x1000_3000, 0x1000),      // virtio-mmio bus.2 (entropy source)
+    (0x1000_2000, 0x1000),      // virtio-mmio bus.1
+    (0x1000_3000, 0x1000),      // virtio-mmio bus.2
+    (0x1000_4000, 0x1000),      // virtio-mmio bus.3
+    (0x1000_5000, 0x1000),      // virtio-mmio bus.4
+    (0x1000_6000, 0x1000),      // virtio-mmio bus.5
+    (0x1000_7000, 0x1000),      // virtio-mmio bus.6
     (0x1000_8000, 0x1000),      // virtio-mmio bus.7 (net)
     (0x3000_0000, 0x1000_0000), // PCIe ECAM
     (0x4000_0000, 0x4000_0000), // PCIe 32-bit MMIO BAR window

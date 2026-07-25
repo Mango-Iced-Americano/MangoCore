@@ -93,6 +93,8 @@ pub(super) fn setup_persistent_mounts() {
         ("/tools/usr", "/usr"),
         ("/tools/root", "/root"),
     ] {
+        let tgt_path = format!("{}\0", target);
+        let _ = sys_mkdirat(AT_FDCWD, &tgt_path, 0o755);
         try_bind_mount(source, target);
     }
 }
