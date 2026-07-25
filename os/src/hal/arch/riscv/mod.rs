@@ -2,6 +2,8 @@
 //!
 //! 包含 QEMU/K210/FU740/VisionFive2 配置、SV39 页表、trap、SBI、时钟和上下文切换实现。
 
+use core::arch::naked_asm;
+
 pub mod config;
 pub mod kern_stack;
 pub mod sbi;
@@ -35,6 +37,47 @@ pub type InterruptImpl = riscv::register::scause::Interrupt;
 pub type ExceptionImpl = riscv::register::scause::Exception;
 
 pub fn bootstrap_init(_cpu_id: usize) {}
+
+#[repr(C, align(4096))]
+struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+
+// idle stack 直到 CPU0 清完 BSS 才会启用，因此它应位于 sbss 之后，而不是和
+// 固件入口正在使用的 boot stack 一样逃过清零。链接脚本的 `.bss.*` 通配符
+// 会把该数组保留在内核镜像范围内，物理页分配器也不会回收这段内存。
+#[link_section = ".bss.idle_stack"]
+static mut IDLE_STACKS: IdleStacks =
+    IdleStacks([0; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+
+/// 抛弃当前 boot stack，并在指定 CPU 的 idle stack 上进入 Rust。
+pub fn enter_secondary_idle(cpu_id: usize, entry: extern "C" fn(usize) -> !) -> ! {
+    assert!(cpu_id < crate::smp::configured_cpu_count());
+
+    // 只取得静态区的裸地址，不为 `static mut` 创建共享引用；每个 CPU 根据
+    // logical ID 独占一个固定槽，切栈后也不会与其他 CPU 产生别名写入。
+    let base = core::ptr::addr_of!(IDLE_STACKS).cast::<u8>() as usize;
+    let stack_top = base + (cpu_id + 1) * config::KERNEL_STACK_SIZE;
+    debug_assert_eq!(stack_top & 0xf, 0);
+
+    // Safety: cpu_id 已完成边界检查，stack_top 指向对应槽的上界；跳转目标
+    // 永不返回，因此旧栈上的 Rust frame 不会再被访问。
+    unsafe { switch_secondary_stack(cpu_id, stack_top, entry) }
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn switch_secondary_stack(
+    _cpu_id: usize,
+    _stack_top: usize,
+    _entry: extern "C" fn(usize) -> !,
+) -> ! {
+    naked_asm!(
+        "mv sp, a1",
+        // 新 idle 调用链不应沿用 boot stack 的 frame/return 链。
+        "mv s0, zero",
+        "mv ra, zero",
+        // a0 保留 logical CPU ID，tp 保留 PerCpu 指针。
+        "jr a2",
+    )
+}
 
 /// Install the current CPU's kernel-local anchor in `tp`.
 pub fn install_cpu_local(ptr: usize) {

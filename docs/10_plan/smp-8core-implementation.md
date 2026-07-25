@@ -79,8 +79,8 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU mailbox/IPI 和 1/2/4/8 核最小 online 闭环已完成 | AP 仍只 park，尚无 idle context、IPI handler 和调度能力 |
-| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点并在 CPU-local bootstrap 后发布 online；运行期 `cpu_id()` 已可校验 | 完整可变 PerCpu、global/local init 和 idle context 仍未接入 |
+| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU mailbox/IPI、独立 AP idle stack 和 1/2/4/8 核最小 online 闭环已完成 | AP 仍永久 park，尚无可唤醒 idle loop、IPI handler 和调度能力 |
+| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | 其余可变 PerCpu、完整 global/local init 仍未接入 |
 | trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；RISC-V 内核态 trap 仍直接 panic；LA64 IPI 未实现 | 内核执行期间仍无法处理 IPI/shootdown |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
@@ -103,7 +103,7 @@ flowchart TD
     A --> W["AP 启动栈上等待"]
     G --> R["发布 PerCpu、内核页表和 SCHED_READY"]
     R --> L["每 CPU 本地 trap/IPI 初始化"]
-    L --> P["Phase 1/2: AP park"]
+    L --> P["Phase 1: AP idle stack park"]
     P --> S["Phase 3: 每 CPU 调度循环"]
     S --> Q0["本地 RunQueue"]
     S --> I["IPI / 负载均衡"]
@@ -355,7 +355,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - AP 本地 timer/普通中断保持关闭，只能停驻或处理已证明安全的启动 mailbox；
 - 本阶段所有内核和用户任务仍只在 CPU0 运行。
 
-#### 当前进度（SMP-P1-B06）
+#### 当前进度（SMP-P1-B08）
 
 - 已完成双架构 `rust_main(hardware_id, boot_arg)` BSP/AP 分流、
   `.data.boot` Release/Acquire 握手、5 秒有界 online mask 等待和 AP park；
@@ -386,7 +386,13 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B06 新增 `KTEST=smp`，双架构 `CORE_NUM=2` 及 RV64 `CORE_NUM=1`
   均通过 online 拓扑与“旧调度器只运行于 CPU0”断言；ELF 符号确认
   `PER_CPUS` 大小为 `0x200` 且位于 `.data`，不存在 `ONLINE_MASK` 符号；
-- 其余 PerCpu 字段、idle stack/context、最小 trap/IPI 向量、console
+- 双架构已按 configured CPU 数在普通 BSS 中预留独立 idle stack。AP 的
+  naked trampoline 保留 logical ID 和 CPU-local GPR，只切换 `sp` 并进入
+  新栈上的 Rust idle 入口；该入口先发布 `idle`，再发布 `online`；
+- B08 的双架构 `CORE_NUM=8 KTEST=smp` 均达到 `online_mask=0xff`，新增
+  断言证明全部 7 个 AP 已进入 idle context。最终 ELF 中 RV64/LA64 idle
+  区分别为 `8×64 KiB`/`8×128 KiB`，位于 `sbss..ebss` 且页对齐；
+- 其余 PerCpu 字段、可唤醒 idle loop、最小内核 trap/IPI 向量、console
   多核串行化和全局初始化计数仍未完成，因此整个 Phase 1 状态仍为
   `partial`。
 

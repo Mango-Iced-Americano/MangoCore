@@ -260,6 +260,45 @@ pub fn bootstrap_init(cpu_id: usize) {
     }
 }
 
+#[repr(C, align(4096))]
+struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+
+// AP 只有在 CPU0 清完 BSS 并发布 BOOT_PHASE 后才会进入 idle stack，所以该
+// 数组放在普通 `.bss.*` 内。它仍属于内核镜像，不会被物理页分配器重新分配。
+#[link_section = ".bss.idle_stack"]
+static mut IDLE_STACKS: IdleStacks =
+    IdleStacks([0; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+
+/// 抛弃当前 boot stack，并在指定 CPU 的 idle stack 上进入 Rust。
+pub fn enter_secondary_idle(cpu_id: usize, entry: extern "C" fn(usize) -> !) -> ! {
+    assert!(cpu_id < crate::smp::configured_cpu_count());
+
+    // 使用裸地址避免创建指向 `static mut` 的引用。KERNEL_STACK_SIZE 为页倍数，
+    // 数组本身按页对齐，因此每个槽的顶部同时满足 LA64 ABI 的 16 字节对齐。
+    let base = core::ptr::addr_of!(IDLE_STACKS).cast::<u8>() as usize;
+    let stack_top = base + (cpu_id + 1) * config::KERNEL_STACK_SIZE;
+    debug_assert_eq!(stack_top & 0xf, 0);
+
+    // Safety: 目标槽由 cpu_id 独占，entry 永不返回，切栈后不会再读取旧 frame。
+    unsafe { switch_secondary_stack(cpu_id, stack_top, entry) }
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn switch_secondary_stack(
+    _cpu_id: usize,
+    _stack_top: usize,
+    _entry: extern "C" fn(usize) -> !,
+) -> ! {
+    core::arch::naked_asm!(
+        "addi.d $sp, $a1, 0",
+        // 清除旧 boot stack 的 frame/return 链，便于 panic 回溯在新根处终止。
+        "addi.d $fp, $zero, 0",
+        "addi.d $ra, $zero, 0",
+        // a0 保留 logical CPU ID，r21 保留 PerCpu 指针。
+        "jirl $zero, $a2, 0",
+    )
+}
+
 /// Install the current CPU's kernel-local anchor in reserved register r21.
 pub fn install_cpu_local(ptr: usize) {
     // Safety: r21 is non-allocatable in the psABI, but privilege entry does

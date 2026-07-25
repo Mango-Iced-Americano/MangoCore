@@ -17,6 +17,7 @@ pub const MAX_CPUS: usize = 8;
 struct PerCpu {
     logical_id: usize,
     online: AtomicBool,
+    idle: AtomicBool,
 }
 
 impl PerCpu {
@@ -24,6 +25,7 @@ impl PerCpu {
         Self {
             logical_id,
             online: AtomicBool::new(false),
+            idle: AtomicBool::new(false),
         }
     }
 }
@@ -43,8 +45,7 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
 ];
 
 // build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
-const CONFIGURED_CPU_COUNT: usize =
-    (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
+const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
 
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;
@@ -79,6 +80,28 @@ pub fn online_cpu_mask() -> usize {
         }
     }
     mask
+}
+
+/// 汇总已经进入 idle 执行上下文的 CPU。
+///
+/// Phase 1 的 AP 一旦置位便永久停驻；Phase 2 会复用该字段实现 idle 与远程
+/// 唤醒的握手，而不是再引入一份独立状态。
+pub fn idle_cpu_mask() -> usize {
+    let mut mask = 0usize;
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if PER_CPUS[cpu_id].idle.load(Ordering::Acquire) {
+            mask |= 1usize << cpu_id;
+        }
+    }
+    mask
+}
+
+fn mark_cpu_idle(cpu_id: usize) {
+    assert!(
+        !PER_CPUS[cpu_id].idle.swap(true, Ordering::Release),
+        "logical CPU {} entered its idle context more than once",
+        cpu_id
+    );
 }
 
 /// 由 CPU 自己唯一一次发布本地初始化完成。
@@ -220,10 +243,26 @@ pub fn secondary_main(cpu_id: usize) -> ! {
     // normal timer interrupt, or enter the legacy scheduler.
     crate::hal::bootstrap_init(cpu_id);
 
+    // 从这里开始抛弃 boot stack。架构 trampoline 会把 a0 保留为 cpu_id，
+    // 并直接跳到 secondary_idle_main；该调用按设计永不返回。
+    crate::hal::enter_secondary_idle(cpu_id, secondary_idle_main);
+}
+
+/// AP 切换到独立 idle stack 后的第一个 Rust 入口。
+extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
+    assert_eq!(
+        self::cpu_id(),
+        cpu_id,
+        "idle stack entry lost the CPU-local identity"
+    );
+
+    // online 是 BSP 继续启动的承诺，所以必须等新栈已经生效、idle 状态已经
+    // 发布后再置位。BSP 的 Acquire 读到 online 时即可依赖这些先行操作。
+    mark_cpu_idle(cpu_id);
     mark_cpu_online(cpu_id);
 
-    // Phase 1 APs remain outside every shared runtime path after becoming
-    // online.  A later IPI batch will replace this permanent park loop.
+    // Phase 1 仍不允许 AP 进入旧调度器；Phase 2 会把永久 park 替换为可被
+    // IPI 唤醒的 idle loop。
     crate::hal::boot_cpu_park();
 }
 
@@ -263,8 +302,7 @@ pub fn bring_up_secondary_cpus() {
     // memory promised above and execute only its CPU-local bootstrap routine.
     BOOT_PHASE.store(AP_RELEASED, Ordering::Release);
 
-    let timeout_ticks =
-        crate::hal::get_clock_freq().saturating_mul(ONLINE_TIMEOUT_SECONDS);
+    let timeout_ticks = crate::hal::get_clock_freq().saturating_mul(ONLINE_TIMEOUT_SECONDS);
     let deadline = crate::hal::get_time().saturating_add(timeout_ticks);
 
     loop {

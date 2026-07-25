@@ -15,6 +15,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::legacy_scheduler_stays_on_boot_cpu",
             legacy_scheduler_stays_on_boot_cpu,
         ),
+        KernelTest::new(
+            "smp::secondary_cpus_enter_idle_context",
+            secondary_cpus_enter_idle_context,
+        ),
     ]
 }
 
@@ -32,6 +36,24 @@ fn configured_cpus_are_online() -> Result<(), &'static str> {
             online
         );
         return Err("configured CPU set is not fully online");
+    }
+    Ok(())
+}
+
+/// AP 只有在切换到独立 idle stack 后才允许发布 online。
+fn secondary_cpus_enter_idle_context() -> Result<(), &'static str> {
+    let configured = crate::smp::configured_cpu_count();
+    let expected = ((1usize << configured) - 1) & !(1usize << crate::smp::BOOT_CPU_ID);
+    let idle = crate::smp::idle_cpu_mask();
+
+    if idle != expected {
+        crate::println!(
+            "# SMP idle mismatch: configured={} expected={:#x} idle={:#x}",
+            configured,
+            expected,
+            idle
+        );
+        return Err("secondary CPU did not enter its idle context");
     }
     Ok(())
 }

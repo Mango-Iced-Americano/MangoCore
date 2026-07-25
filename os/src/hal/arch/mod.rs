@@ -9,13 +9,13 @@ pub mod loongarch64;
 pub use loongarch64::{
     __switch, board,
     board::MMIO,
-    bootstrap_init, config,
+    boot_cpu_park, bootstrap_init, config,
     config::BUFFER_CACHE_NUM,
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
-    console_flush, console_getchar, console_putchar, console_write_bytes, kstack_alloc,
-    boot_cpu_park, cpu_local_ptr, install_cpu_local, local_irq_restore,
-    local_irq_save, machine_init, shutdown, start_secondary_cpu, syscall_id,
+    console_flush, console_getchar, console_putchar, console_write_bytes, cpu_local_ptr,
+    enter_secondary_idle, install_cpu_local, kstack_alloc, local_irq_restore, local_irq_save,
+    machine_init, shutdown, start_secondary_cpu, syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     tlb_invalidate,
     trap::{
@@ -29,18 +29,20 @@ pub use loongarch64::{
 pub mod riscv;
 #[cfg(feature = "riscv")]
 pub use riscv::{
-    boot_cpu_park, bootstrap_init, config, cpu_local_ptr,
+    boot_cpu_park, bootstrap_init, config,
     config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END},
+    cpu_local_ptr, enter_secondary_idle, install_cpu_local,
     kern_stack::kstack_alloc,
     kern_stack::trap_cx_bottom_from_tid,
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
-    install_cpu_local, machine_init, start_secondary_cpu,
+    machine_init,
     rv_board::MMIO,
     sbi::{
         console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
         local_irq_save, set_timer, shutdown,
     },
+    start_secondary_cpu,
     sv39::tlb_invalidate,
     switch::__switch,
     syscall_id,

@@ -36,12 +36,14 @@ firmware / QEMU
      └─ logical CPU1..N-1 → secondary_main()
         → 等待 BSP Release
         → CPU-local bootstrap
-        → 发布 online
+        → 切换到 logical CPU 独占的 idle stack
+        → 发布 idle，再发布 online
         → Phase 1 park
 ```
 
-当前 Phase 1 只完成最小 AP 启动与在线发布。AP 尚未进入调度器，也不会访问
-文件系统、网络和旧的单核运行队列；这些共享路径仍由 CPU0 独占。
+当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布。AP 尚未进入
+调度器，也不会访问文件系统、网络和旧的单核运行队列；这些共享路径仍由
+CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -49,6 +51,12 @@ RISC-V 和 LoongArch 都为最多 8 个硬件 CPU 预留独立 boot stack。入�
 使用栈之前验证 CPU ID，并按 `base + (cpu_id + 1) * BOOT_STACK_SIZE`
 计算向下增长栈的初始栈顶。整个 `.bss.stack` 位于普通 `sbss` 之前，因此
 CPU0 的 `mem_clear()` 不会清除 AP 正在使用的启动栈。
+
+两架构还按 configured CPU 数预留页对齐的 `.bss.idle_stack`。该 section
+由现有 `.bss.*` 通配符放入 `sbss..ebss`，因此 CPU0 会在 Release AP 前清零
+它，且它始终属于内核镜像、不会交给 frame allocator。AP 完成本地 bootstrap
+后通过 naked trampoline 更新 `sp`，保留 `a0` 和 `tp/$r21`，再跳到新栈上的
+Rust idle 入口；旧 boot stack 的 frame/return 链不会继续使用。
 
 越界 CPU 没有安全栈，必须留在汇编 park 循环，不能进入 Rust 或日志路径。
 
@@ -71,9 +79,10 @@ LoongArch QEMU direct-kernel boot 的其他 CPU 停在 slave boot ROM。CPU0
 2. CPU0 用 Release 发布 `BOOT_PHASE=AP_RELEASED`。
 3. AP 用 Acquire 观察启动阶段，成功前只能访问自己的 boot stack 和
    `.data.boot`。
-4. AP 完成本地 bootstrap 后，用 Release 把自己唯一的 `online` 字段从
-   `false` 改为 `true`。
-5. CPU0 用 Acquire 扫描各 `PerCpu.online`，并在有界超时内等待目标 mask。
+4. AP 完成本地 bootstrap 并切换 idle stack，在新栈上先以 Release 发布
+   `idle=true`，再用 Release 把自己的 `online` 从 `false` 改为 `true`。
+5. CPU0 用 Acquire 扫描各 `PerCpu.online`，并在有界超时内等待目标 mask；
+   观察到 online 同时证明该 AP 已不再使用 boot stack。
 
 CPU0 与 AP 使用同一个 online 发布协议；重复发布会触发 CAS 不变量失败，
 而不是被静默接受。
@@ -129,4 +138,5 @@ make ktest ARCH=la64 PROFILE=normal CORE_NUM=2 KTEST=smp
 ```
 
 双架构构建必须串行。focused SMP 测试不仅检查 QEMU 退出码，还要检查
-configured CPU 数、online mask、独立 CPU-local 指针、测试 PASS 和无 panic。
+configured CPU 数、online/idle mask、独立 CPU-local 指针、测试 PASS 和无
+panic。

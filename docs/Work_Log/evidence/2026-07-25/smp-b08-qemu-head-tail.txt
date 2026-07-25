@@ -1,0 +1,31 @@
+RV64 HEAD:
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=rv64 PROFILE=normal -f make/rv64.mk ktest-run MODE=release
+[ktest] Rebuilding kernel with: mango.mode=ktest mango.test=smp mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0
+[ktest] Launching QEMU (timeout: 30s)...
+
+RV64 TAIL:
+[smp] minimal boot ready: configured=8 boot_hw_id=6 online_mask=0xff
+1..3
+ok 1 smp::configured_cpus_are_online
+ok 2 smp::legacy_scheduler_stays_on_boot_cpu
+ok 3 smp::secondary_cpus_enter_idle_context
+# results: 3 passed, 0 failed, 3 total
+[KTEST RESULT: PASS]
+# ktest: all tests and filesystem teardown passed. shutting down.
+
+LA64 HEAD:
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=la64 PROFILE=normal -f make/la64.mk ktest-run MODE=release
+[ktest] Rebuilding kernel with: mango.mode=ktest mango.test=smp mango.test.repeat=1 mango.test.timeout_ms=5000 mango.test.failfast=0
+[ktest] Launching QEMU (timeout: 30s)...
+
+LA64 TAIL:
+[smp] minimal boot ready: configured=8 boot_hw_id=0 online_mask=0xff
+1..3
+ok 1 smp::configured_cpus_are_online
+ok 2 smp::legacy_scheduler_stays_on_boot_cpu
+ok 3 smp::secondary_cpus_enter_idle_context
+# results: 3 passed, 0 failed, 3 total
+[KTEST RESULT: PASS]
+# ktest: all tests and filesystem teardown passed. shutting down.
