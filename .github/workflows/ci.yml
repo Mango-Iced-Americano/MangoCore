@@ -283,7 +283,7 @@ jobs:
         if: always()
         run: |
           docker compose exec -T os-dev bash -lc '
-            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 --output /tmp/score-rv64.json 2>&1 || true'
+            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 --output /tmp/score-rv64.json --table 2>&1; echo "score_exit=$?"'
       - name: Docker compose down
         if: always()
         run: docker compose down
@@ -355,7 +355,7 @@ jobs:
         if: always()
         run: |
           docker compose exec -T os-dev bash -lc '
-            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 --output /tmp/score-la64.json 2>&1 || true'
+            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 --output /tmp/score-la64.json --table 2>&1; echo "score_exit=$?"'
       - name: Docker compose down
         if: always()
         run: docker compose down
