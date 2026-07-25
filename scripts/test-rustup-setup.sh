@@ -56,7 +56,7 @@ toolchain_dir="$RUSTUP_HOME/toolchains/nightly-2099-01-01-fixture"
 mkdir -p \
     "$toolchain_dir/lib/rustlib/fixture-rv64/lib" \
     "$toolchain_dir/lib/rustlib/fixture-la64/lib"
-printf '%s\n' fixture-src fixture-llvm >"$toolchain_dir/lib/rustlib/components"
+printf '%s\n' fixture-src fixture-llvm clippy >"$toolchain_dir/lib/rustlib/components"
 EOF
 chmod +x "$work_dir/bin/rustup"
 
@@ -105,7 +105,7 @@ seed_complete_layout() {
     mkdir -p \
         "$toolchain_dir/lib/rustlib/fixture-rv64/lib" \
         "$toolchain_dir/lib/rustlib/fixture-la64/lib"
-    printf '%s\n' fixture-src fixture-llvm >"$toolchain_dir/lib/rustlib/components"
+    printf '%s\n' fixture-src fixture-llvm clippy >"$toolchain_dir/lib/rustlib/components"
 }
 
 echo "SCENARIO missing RUSTUP_HOME"
@@ -172,6 +172,8 @@ minimal
 fixture-src
 --component
 fixture-llvm
+--component
+clippy
 --target
 fixture-rv64
 --target

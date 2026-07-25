@@ -360,7 +360,7 @@ pub fn trap_handler() -> ! {
                         match sz {
                             2 => rd = (rd as u16) as i16 as isize as usize,
                             4 => rd = (rd as u32) as i32 as isize as usize,
-                            8 => rd = rd,
+                            8 => {}
                             _ => unreachable!(),
                         }
                     }
@@ -540,50 +540,53 @@ pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
         // 地址未对齐
         Trap::Exception(Exception::AddressNotAligned) => {
             let pc = gr.pc;
-            loop {
-                // 获取当前指令ins和操作码op
-                let ins = Instruction::from(gr.pc as *const Instruction);
-                let op = ins.get_op_code();
-                if op.is_err() {
-                    break;
-                }
-                let op = op.unwrap();
-                let addr = BadV::read().get_vaddr();
-                //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
-                let sz = op.get_size();
-                let is_aligned: bool = addr % sz == 0;
-                if is_aligned {
-                    break;
-                }
-                assert!([2, 4, 8].contains(&sz));
-                if op.is_store() {
-                    let mut rd = gr[ins.get_rd_num()];
-                    for i in 0..sz {
-                        unsafe { ((addr + i) as *mut u8).write_unaligned(rd as u8) };
-                        rd >>= 8;
-                    }
-                } else {
-                    let mut rd = 0;
-                    for i in (0..sz).rev() {
-                        rd <<= 8;
-                        let read_byte =
-                            (unsafe { ((addr + i) as *mut u8).read_unaligned() } as usize);
-                        rd |= read_byte;
-                        //debug!("{:#x}, {:#x}", rd, read_byte);
-                    }
-                    if !op.is_unsigned_ld() {
-                        match sz {
-                            2 => rd = (rd as u16) as i16 as isize as usize,
-                            4 => rd = (rd as u32) as i32 as isize as usize,
-                            8 => rd = rd,
-                            _ => unreachable!(),
-                        }
-                    }
-                    gr[ins.get_rd_num()] = rd;
-                }
-                gr.pc += 4;
-                break;
+            // 获取当前指令ins和操作码op
+            let ins = Instruction::from(gr.pc as *const Instruction);
+            let op = match ins.get_op_code() {
+                Ok(op) => op,
+                Err(_) => panic!(
+                    "Failed to execute the command. Bad Instruction: {}, PC:{}",
+                    unsafe { *(gr.pc as *const u32) },
+                    pc
+                ),
+            };
+            let addr = BadV::read().get_vaddr();
+            //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
+            let sz = op.get_size();
+            let is_aligned: bool = addr % sz == 0;
+            if is_aligned {
+                panic!(
+                    "Failed to execute the command. Bad Instruction: {}, PC:{}",
+                    unsafe { *(gr.pc as *const u32) },
+                    pc
+                );
             }
+            assert!([2, 4, 8].contains(&sz));
+            if op.is_store() {
+                let mut rd = gr[ins.get_rd_num()];
+                for i in 0..sz {
+                    unsafe { ((addr + i) as *mut u8).write_unaligned(rd as u8) };
+                    rd >>= 8;
+                }
+            } else {
+                let mut rd = 0;
+                for i in (0..sz).rev() {
+                    rd <<= 8;
+                    let read_byte = (unsafe { ((addr + i) as *mut u8).read_unaligned() } as usize);
+                    rd |= read_byte;
+                    //debug!("{:#x}, {:#x}", rd, read_byte);
+                }
+                if !op.is_unsigned_ld() {
+                    match sz {
+                        2 => rd = (rd as u16) as i16 as isize as usize,
+                        4 => rd = (rd as u32) as i32 as isize as usize,
+                        8 => {}
+                        _ => unreachable!(),
+                    }
+                }
+                gr[ins.get_rd_num()] = rd;
+            }
+            gr.pc += 4;
             if gr.pc == pc {
                 panic!(
                     "Failed to execute the command. Bad Instruction: {}, PC:{}",
