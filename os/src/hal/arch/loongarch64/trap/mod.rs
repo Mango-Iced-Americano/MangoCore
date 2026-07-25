@@ -521,6 +521,13 @@ pub fn trap_return() -> ! {
 pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
     // 获取Trap原因
     let cause = get_exception_cause();
+    if let Trap::Interrupt(Interrupt::IPI) = cause {
+        // IPI fast path 必须早于 BADV/console 诊断：中断不会更新 BADV，读取
+        // 陈旧地址可能误触发栈溢出打印，而 console 尚未具备多核 irq-safe 锁。
+        super::clear_local_ipi();
+        crate::smp::handle_ipi();
+        return;
+    }
     // 读取异常子代码（二级编号）
     let sub_code = EStat::read().exception_sub_code();
     let bad_addr = get_bad_addr();

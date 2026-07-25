@@ -79,9 +79,9 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU mailbox/IPI、独立 AP idle stack 和 1/2/4/8 核最小 online 闭环已完成 | AP 仍永久 park，尚无可唤醒 idle loop、IPI handler 和调度能力 |
-| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | 其余可变 PerCpu、完整 global/local init 仍未接入 |
-| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；RISC-V 内核态 trap 仍直接 panic；LA64 IPI 未实现 | 内核执行期间仍无法处理 IPI/shootdown |
+| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack 和 1/2/4/8 核最小 online 闭环已完成 | AP 已进入可被 IPI 唤醒的 idle loop，但尚无 STOP、timer 和调度能力 |
+| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | PerCpu 目前只增加最小 IPI reason/ack，完整 global/local init 仍未接入 |
+| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；RV64 已有保存完整 GPR/CSR 的内核 IPI trap；LA64 已接入 line-based IPI fast path | 当前只允许 AP 的 IPI-only 窗口，长 syscall、timer、STOP 和 shootdown 尚未接入 |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -103,7 +103,7 @@ flowchart TD
     A --> W["AP 启动栈上等待"]
     G --> R["发布 PerCpu、内核页表和 SCHED_READY"]
     R --> L["每 CPU 本地 trap/IPI 初始化"]
-    L --> P["Phase 1: AP idle stack park"]
+    L --> P["Phase 2: AP IPI-only idle"]
     P --> S["Phase 3: 每 CPU 调度循环"]
     S --> Q0["本地 RunQueue"]
     S --> I["IPI / 负载均衡"]
@@ -392,9 +392,9 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B08 的双架构 `CORE_NUM=8 KTEST=smp` 均达到 `online_mask=0xff`，新增
   断言证明全部 7 个 AP 已进入 idle context。最终 ELF 中 RV64/LA64 idle
   区分别为 `8×64 KiB`/`8×128 KiB`，位于 `sbss..ebss` 且页对齐；
-- 其余 PerCpu 字段、可唤醒 idle loop、最小内核 trap/IPI 向量、console
-  多核串行化和全局初始化计数仍未完成，因此整个 Phase 1 状态仍为
-  `partial`。
+- 最小内核 trap/IPI 向量和可唤醒 idle loop 已在 B09 完成；其余 PerCpu
+  字段、console 多核串行化和全局初始化计数仍未完成，因此整个 Phase 1
+  状态仍为 `partial`。
 
 ### Phase 2：内核 trap、IPI 与 AP park/idle 唤醒
 
@@ -421,6 +421,23 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - 双架构 IPI 单播、广播、交叉发送和 10,000 次 ping-pong 无丢失；
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
+
+#### 当前进度（SMP-P2-B09）
+
+- `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。发送方以 Release
+  发布 reason 后触发 doorbell，接收方以 Acquire `swap(0)` 消费；handler
+  不分配、不打印、不持普通锁，也不调度；
+- RV64 已接入 SBI v0.2 IPI extension。AP 的 `stvec` 指向独立内核 trap
+  入口，汇编完整保存 GPR、原始 `sp`、`sstatus` 和 `sepc`，只开放 SSIP；
+- LA64 QEMU 已把运行期 IPI 固定为 vector 1，与 slave boot ROM 使用的
+  vector 0 分离；handler 先清 IOCSR level source，再进入 mailbox fast path；
+- 双架构 AP 都从永久 park 改为 `wfi`/`idle 0` 的 IPI-only idle loop，
+  仍不进入旧调度器；
+- 双架构 `CORE_NUM=2 KTEST=smp` 均通过 4/4，用例已证明 BSP 能逐个唤醒 AP
+  并收到硬中断上下文发布的 ack；
+- B09 只闭合最小单播 PING。广播、交叉发送、并发 reason、10,000 次
+  ping-pong、STOP、timer 和长 syscall 中断窗口仍未完成，因此 Phase 2
+  状态为 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
 timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。

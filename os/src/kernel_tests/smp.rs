@@ -19,6 +19,7 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::secondary_cpus_enter_idle_context",
             secondary_cpus_enter_idle_context,
         ),
+        KernelTest::new("smp::bsp_to_ap_ipi_ping", bsp_to_ap_ipi_ping),
     ]
 }
 
@@ -36,6 +37,34 @@ fn configured_cpus_are_online() -> Result<(), &'static str> {
             online
         );
         return Err("configured CPU set is not fully online");
+    }
+    Ok(())
+}
+
+/// CPU0 逐个唤醒 AP，并等待目标 CPU 在硬中断上下文发布 ack。
+fn bsp_to_ap_ipi_ping() -> Result<(), &'static str> {
+    let timeout_ticks = crate::hal::get_clock_freq();
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        let expected = match crate::smp::send_ipi_ping(cpu_id) {
+            Ok(expected) => expected,
+            Err(error) => {
+                crate::println!("# SMP IPI send failed: cpu={} error={}", cpu_id, error);
+                return Err("failed to send BSP-to-AP IPI");
+            }
+        };
+        let deadline = crate::hal::get_time().saturating_add(timeout_ticks);
+        while crate::smp::ipi_ping_ack(cpu_id) != expected {
+            if crate::hal::get_time() >= deadline {
+                crate::println!(
+                    "# SMP IPI ack timeout: cpu={} expected={} observed={}",
+                    cpu_id,
+                    expected,
+                    crate::smp::ipi_ping_ack(cpu_id)
+                );
+                return Err("AP did not acknowledge IPI");
+            }
+            core::hint::spin_loop();
+        }
     }
     Ok(())
 }

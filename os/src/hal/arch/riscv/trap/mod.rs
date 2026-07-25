@@ -22,7 +22,7 @@ pub use context::{UserContext, UserSignalMask};
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},
-    sepc, sie, stval, stvec,
+    sepc, sie, sstatus, stval, stvec,
 };
 
 pub static mut TIMER_INTERRUPT: usize = 0;
@@ -45,6 +45,7 @@ extern "C" {
     pub fn __alltraps();
     pub fn __restore();
     pub fn __call_sigreturn();
+    fn __kern_trap();
 }
 
 pub fn init() {
@@ -53,7 +54,7 @@ pub fn init() {
 
 fn set_kernel_trap_entry() {
     unsafe {
-        stvec::write(trap_from_kernel as usize, TrapMode::Direct);
+        stvec::write(__kern_trap as usize, TrapMode::Direct);
     }
 }
 
@@ -66,6 +67,19 @@ fn set_user_trap_entry() {
 pub fn enable_timer_interrupt() {
     unsafe {
         sie::set_stimer();
+    }
+}
+
+/// 为 AP 建立只接收 IPI 的内核中断窗口。
+pub fn init_ipi_only() {
+    set_kernel_trap_entry();
+    // Safety: AP 尚未 online，无发送者；先清全部局部 enable 和旧 SSIP，
+    // 再单独打开 SSIE，避免 timer/external IRQ 混入本工作包。
+    unsafe {
+        asm!("csrw sie, zero", "csrci sip, 2");
+        sie::set_ssoft();
+        // 全局 SIE 最后打开，保证 trap vector 和局部 mask 已经生效。
+        sstatus::set_sie();
     }
 }
 
@@ -240,10 +254,18 @@ pub fn trap_return() -> ! {
 }
 
 #[no_mangle]
-pub fn trap_from_kernel() -> ! {
+pub extern "C" fn trap_from_kernel() {
+    let cause = riscv::register::scause::read().cause();
+    if cause == Trap::Interrupt(Interrupt::SupervisorSoft) {
+        // OpenSBI 把 IPI 表现为 SSIP。先清电平源，再消费 Release 发布的
+        // mailbox；并发的新 doorbell 即使与 swap 交错，也只会产生空中断。
+        unsafe { asm!("csrci sip, 2") };
+        crate::smp::handle_ipi();
+        return;
+    }
     panic!(
         "a trap {:?} from kernel! bad addr = {:#x}, bad instruction = {:#x}",
-        riscv::register::scause::read().cause(),
+        cause,
         riscv::register::stval::read(),
         riscv::register::sepc::read(),
     );

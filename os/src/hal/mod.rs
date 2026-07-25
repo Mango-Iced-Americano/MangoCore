@@ -20,7 +20,7 @@ pub use arch::tlb_invalidate;
 pub use arch::LsxRegs;
 pub use arch::{
     boot_cpu_park, bootstrap_init, cpu_local_ptr, enter_secondary_idle, install_cpu_local,
-    machine_init, start_secondary_cpu, user_hwcap,
+    machine_init, secondary_cpu_idle, send_ipi, start_secondary_cpu, user_hwcap,
 };
 pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};

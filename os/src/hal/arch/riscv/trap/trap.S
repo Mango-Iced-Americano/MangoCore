@@ -101,3 +101,43 @@ __call_sigreturn:
     # ecall sys_sigreturn
     addi	a7, zero, 139
     ecall
+
+    # 内核 IPI 可能打断任意普通指令，因此必须保存所有可见 GPR，而不能只依赖
+    # C ABI 的 caller-saved 集合。slot 32/33 另存硬件改写过的 sstatus/sepc。
+    .section .text.kern_trap
+    .globl __kern_trap
+    .align 2
+__kern_trap:
+    addi sp, sp, -272
+    sd x1, 1*8(sp)
+    # x2/sp 最后用临时寄存器补入；先保存 x3..x31，避免覆盖被中断现场。
+    .set n, 3
+    .rept 29
+        SAVE_GP %n
+        .set n, n+1
+    .endr
+    .set n, 0
+    addi t0, sp, 272
+    sd t0, 2*8(sp)
+    csrr t0, sstatus
+    sd t0, 32*8(sp)
+    csrr t0, sepc
+    sd t0, 33*8(sp)
+
+    call trap_from_kernel
+
+    # handler 返回后先恢复 trap CSR，再恢复 GPR；sp 必须最后恢复，否则会
+    # 在旧栈上继续读取剩余 frame。
+    ld t0, 32*8(sp)
+    csrw sstatus, t0
+    ld t0, 33*8(sp)
+    csrw sepc, t0
+    ld x1, 1*8(sp)
+    .set n, 3
+    .rept 29
+        LOAD_GP %n
+        .set n, n+1
+    .endr
+    .set n, 0
+    ld sp, 2*8(sp)
+    sret

@@ -38,12 +38,12 @@ firmware / QEMU
         → CPU-local bootstrap
         → 切换到 logical CPU 独占的 idle stack
         → 发布 idle，再发布 online
-        → Phase 1 park
+        → IPI-only idle loop
 ```
 
-当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布。AP 尚未进入
-调度器，也不会访问文件系统、网络和旧的单核运行队列；这些共享路径仍由
-CPU0 独占。
+当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 的
+首个工作包又打通了 BSP→AP 的 IPI mailbox/ack 闭环。AP 尚未进入调度器，
+也不会访问文件系统、网络和旧的单核运行队列；这些共享路径仍由 CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -69,7 +69,8 @@ OpenSBI 在 MTTCG 下可以让任意已配置 hart 赢得 cold-boot lottery，�
 
 LoongArch QEMU direct-kernel boot 的其他 CPU 停在 slave boot ROM。CPU0
 通过 mailbox 写入 `_start` 地址，执行 `dbar` 后发送 IPI vector 0，使 AP
-重新进入统一入口。2K1000LA 当前仍保持默认单核配置。
+重新进入统一入口。进入内核后，运行期 IPI 改用 vector 1，避免和只服务于
+slave ROM 的启动门铃混淆。2K1000LA 当前仍保持默认单核配置。
 
 ## BSP/AP 内存序
 
@@ -86,6 +87,17 @@ LoongArch QEMU direct-kernel boot 的其他 CPU 停在 slave boot ROM。CPU0
 
 CPU0 与 AP 使用同一个 online 发布协议；重复发布会触发 CAS 不变量失败，
 而不是被静默接受。
+
+运行期 PING IPI 使用另一组 Release/Acquire 关系：
+
+1. 发送方用 Release 把 reason 合并进目标 `PerCpu.pending_ipi`；
+2. reason 发布完成后才触发 SBI 或 IOCSR doorbell；
+3. 接收方先清硬件电平源，再用 Acquire `swap(0)` 消费 mailbox；
+4. handler 完成后以 Release 增加 ack，等待方用 Acquire 观察完成。
+
+mailbox 表示“待处理原因集合”，不是可累计的事件队列。当前 PING 测试由
+CPU0 串行发送，同一目标收到 ack 后才复用 PING bit；后续需要累计语义的
+shootdown/STOP 会使用独立 sequence 或 slot，不能把事件次数塞进 reason bit。
 
 ## CPU-local 寄存器
 
@@ -116,8 +128,23 @@ RISC-V 返回用户态时通过 trampoline 中的 `__restore` 切换 `satp`；
 LoongArch static link 直接使用已链接的 `__restore` 地址，避免对符号重复
 重定位后误跳入 kernel trap stub。
 
-timer interrupt 目前仍进入旧的 `task::timer_interrupt_handler()`。内核态
-IPI、每 CPU timer 和 AP 调度循环属于后续 SMP Phase 2/3 范围。
+## 内核 IPI trap
+
+RISC-V 的 `stvec` 指向独立的 `__kern_trap`。入口在当前内核栈上建立
+272 字节、16 字节对齐的 frame，保存 `x1`、`x3..x31`、原始 `sp`、
+`sstatus` 和 `sepc`；Rust handler 只接受 Supervisor Software Interrupt，
+先清 SSIP，再消费 per-CPU mailbox。其他内核异常仍然 panic。
+
+LoongArch 复用现有内核 trap frame，但把 IPI fast path 放在 BADV 和 console
+诊断之前。handler 先向 IOCSR `CORE_CLEAR` 写 1 清除 level-triggered
+vector 1，再消费 mailbox，避免陈旧 BADV 产生误诊，也避免在尚未多核安全的
+console 路径中打印。
+
+两个架构的 IPI handler 都只执行原子操作：不分配内存、不获取普通锁、不
+打印，也不直接切换任务。AP 仅打开 IPI 线路和全局中断，timer/external
+interrupt 继续关闭；IPI 返回后重新进入 `wfi`/`idle 0`。CPU0 的 timer
+interrupt 仍进入旧的 `task::timer_interrupt_handler()`，每 CPU timer、
+STOP、RESCHEDULE 和 AP 调度循环属于后续 Phase 2/3 范围。
 
 ## 构建与验证
 
@@ -139,4 +166,5 @@ make ktest ARCH=la64 PROFILE=normal CORE_NUM=2 KTEST=smp
 
 双架构构建必须串行。focused SMP 测试不仅检查 QEMU 退出码，还要检查
 configured CPU 数、online/idle mask、独立 CPU-local 指针、测试 PASS 和无
-panic。
+panic。Phase 2 的最小 IPI 用例还要求 CPU0 逐个向 AP 发送 PING，并在一秒
+有界期限内观察对应 ack。

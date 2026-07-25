@@ -21,6 +21,8 @@ const SBI_EXT_BASE: usize = 0x10;
 const SBI_BASE_PROBE_EXTENSION: usize = 3;
 const SBI_EXT_HSM: usize = 0x48534d;
 const SBI_HSM_HART_START: usize = 0;
+const SBI_EXT_IPI: usize = 0x735049;
+const SBI_IPI_SEND: usize = 0;
 const SBI_ERR_NOT_SUPPORTED: isize = -2;
 const SBI_ERR_ALREADY_AVAILABLE: isize = -6;
 
@@ -101,6 +103,32 @@ pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<()
     match result.error {
         0 | SBI_ERR_ALREADY_AVAILABLE => Ok(()),
         error => Err(error),
+    }
+}
+
+/// 通过 SBI v0.2 IPI extension 向一个硬件 hart 触发 supervisor software IRQ。
+pub fn send_ipi(hart_id: usize) -> Result<(), isize> {
+    let probe = sbi_call_v02(
+        SBI_EXT_BASE,
+        SBI_BASE_PROBE_EXTENSION,
+        SBI_EXT_IPI,
+        0,
+        0,
+    );
+    if probe.error != 0 {
+        return Err(probe.error);
+    }
+    if probe.value == 0 {
+        return Err(SBI_ERR_NOT_SUPPORTED);
+    }
+
+    // 令 hart_mask_base 等于目标 hart ID，mask bit0 就精确表示该 hart，
+    // 不依赖 MangoCore logical ID 与 OpenSBI hart ID 是否相同。
+    let result = sbi_call_v02(SBI_EXT_IPI, SBI_IPI_SEND, 1, hart_id, 0);
+    if result.error == 0 {
+        Ok(())
+    } else {
+        Err(result.error)
     }
 }
 

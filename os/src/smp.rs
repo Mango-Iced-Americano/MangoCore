@@ -1,12 +1,12 @@
-//! BSP/AP 最小启动握手。
+//! BSP/AP 最小启动握手与 IPI mailbox。
 //!
-//! Phase 1 在调度、中断和共享子系统启用前停驻 AP。每个 AP 只发布自己
-//! `PerCpu` 表项中的 online 状态，不维护第二份全局 online 真相。
+//! Phase 1 建立 CPU-local 状态和独立 idle stack；Phase 2 首个子阶段只让
+//! AP 响应无锁 IPI reason，仍不进入调度器或共享子系统。
 
 use core::{
     hint::spin_loop,
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 
 pub const BOOT_CPU_ID: usize = 0;
@@ -15,9 +15,16 @@ pub const MAX_CPUS: usize = 8;
 /// Phase 1 的 CPU-local 锚点；后续批次只扩展表项，不移动现有地址。
 #[repr(C, align(64))]
 struct PerCpu {
+    /// 当前表项对应的 MangoCore 逻辑 CPU 编号，用于校验 CPU-local 指针归属。
     logical_id: usize,
+    /// 本 CPU 是否已完成本地初始化；由所属 CPU Release 发布，其他 CPU Acquire 读取。
     online: AtomicBool,
+    /// 本 CPU 是否已经切换到独立 idle stack；不表示此刻一定停在 idle 指令中。
     idle: AtomicBool,
+    /// 尚未处理的 IPI 原因位图；发送方 Release 合并，目标 CPU Acquire 消费。
+    pending_ipi: AtomicU32,
+    /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
+    ipi_ping_ack: AtomicUsize,
 }
 
 impl PerCpu {
@@ -26,9 +33,14 @@ impl PerCpu {
             logical_id,
             online: AtomicBool::new(false),
             idle: AtomicBool::new(false),
+            pending_ipi: AtomicU32::new(0),
+            ipi_ping_ack: AtomicUsize::new(0),
         }
     }
 }
+
+// PING 只证明 mailbox、doorbell、trap 和 ack 闭环，不承载调度或 TLB 语义。
+const IPI_PING: u32 = 1 << 0;
 
 // 显式放入 `.data.boot`，保证 LA64 AP 在 CPU0 清 BSS 前就能安全取得自己的
 // cache-line 表项；运行期只允许通过表项内部的原子字段修改状态。
@@ -84,8 +96,8 @@ pub fn online_cpu_mask() -> usize {
 
 /// 汇总已经进入 idle 执行上下文的 CPU。
 ///
-/// Phase 1 的 AP 一旦置位便永久停驻；Phase 2 会复用该字段实现 idle 与远程
-/// 唤醒的握手，而不是再引入一份独立状态。
+/// AP 切到独立 idle stack 后只置位一次。当前字段表示执行上下文所有权，
+/// 并不随每次 `wfi`/`idle` 睡眠清零；后续调度器会另行补全瞬时 idle 握手。
 pub fn idle_cpu_mask() -> usize {
     let mut mask = 0usize;
     for cpu_id in 0..CONFIGURED_CPU_COUNT {
@@ -94,6 +106,55 @@ pub fn idle_cpu_mask() -> usize {
         }
     }
     mask
+}
+
+/// 向一个已经 online 的逻辑 CPU 发布测试 PING，并返回应等待的 ack 序号。
+///
+/// `pending_ipi` 是按原因合并的 mailbox，不是事件队列；当前 Phase 2 子阶段
+/// 只有 CPU0 串行发出下一次 PING，必须等前一次 ack 后才能再次使用同一 bit。
+pub fn send_ipi_ping(cpu_id: usize) -> Result<usize, isize> {
+    if cpu_id >= CONFIGURED_CPU_COUNT || cpu_id == self::cpu_id() {
+        return Err(-3);
+    }
+    if !PER_CPUS[cpu_id].online.load(Ordering::Acquire) {
+        return Err(-4);
+    }
+
+    let expected_ack = PER_CPUS[cpu_id]
+        .ipi_ping_ack
+        .load(Ordering::Relaxed)
+        .wrapping_add(1);
+
+    // Release 保证 mailbox reason 先于架构 doorbell 对目标 CPU 可见；接收端
+    // 的 Acquire swap 与之配对。重复硬件中断只会看到空 mailbox，保持幂等。
+    PER_CPUS[cpu_id]
+        .pending_ipi
+        .fetch_or(IPI_PING, Ordering::Release);
+    let hardware_id = logical_to_hardware_id(
+        cpu_id,
+        BOOT_HARDWARE_ID.load(Ordering::Acquire),
+    );
+    crate::hal::send_ipi(hardware_id)?;
+    Ok(expected_ack)
+}
+
+/// 查询目标 CPU 已处理的 PING 序号。
+pub fn ipi_ping_ack(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id].ipi_ping_ack.load(Ordering::Acquire)
+}
+
+/// 在当前 CPU 的硬中断上下文消费 mailbox。
+///
+/// handler 只做原子操作，不分配、不打印、不获取普通锁，也不直接调度。
+pub fn handle_ipi() {
+    let local = &PER_CPUS[self::cpu_id()];
+    // Acquire 获取发送端在 Release fetch_or 前发布的数据；swap(0) 使原因只被
+    // 当前 CPU 消费一次。doorbell 合并或重复到达都不会重复生成 ack。
+    let reasons = local.pending_ipi.swap(0, Ordering::Acquire);
+    if reasons & IPI_PING != 0 {
+        // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
+        local.ipi_ping_ack.fetch_add(1, Ordering::Release);
+    }
 }
 
 fn mark_cpu_idle(cpu_id: usize) {
@@ -261,9 +322,8 @@ extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
     mark_cpu_idle(cpu_id);
     mark_cpu_online(cpu_id);
 
-    // Phase 1 仍不允许 AP 进入旧调度器；Phase 2 会把永久 park 替换为可被
-    // IPI 唤醒的 idle loop。
-    crate::hal::boot_cpu_park();
+    // AP 仍不进入旧调度器，只在独立 idle stack 上响应 IPI-only 中断。
+    crate::hal::secondary_cpu_idle();
 }
 
 /// Start/release APs and wait until the configured topology is online.

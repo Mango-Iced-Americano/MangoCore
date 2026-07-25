@@ -70,6 +70,15 @@ const CPUCFG2_LSPW: usize = 1 << 21;
 const CPUCFG2_LAM: usize = 1 << 22;
 const CPUCFG2_PTW: usize = 1 << 24;
 
+#[cfg(feature = "board_laqemu")]
+const IOCSR_IPI_ENABLE: usize = 0x1004;
+#[cfg(feature = "board_laqemu")]
+const IOCSR_IPI_CLEAR: usize = 0x100c;
+#[cfg(feature = "board_laqemu")]
+const IOCSR_IPI_SEND: usize = 0x1040;
+#[cfg(feature = "board_laqemu")]
+const RUNTIME_IPI_VECTOR: u32 = 1;
+
 fn read_cpucfg(index: usize) -> usize {
     let value: usize;
     // Safety: `cpucfg` only reads the CPU configuration word selected by
@@ -172,8 +181,14 @@ pub fn pre_start_init() {
 }
 #[no_mangle]
 pub fn bootstrap_init(cpu_id: usize) {
+    let local_interrupt = if cpu_id == crate::smp::BOOT_CPU_ID {
+        LineBasedInterrupt::TIMER
+    } else {
+        // AP 在当前子阶段只允许 IPI，不能提前接入普通 timer callback。
+        LineBasedInterrupt::IPI
+    };
     ECfg::empty()
-        .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
+        .set_line_based_interrupt_vector(local_interrupt)
         .write();
     let cfg2 = read_cpucfg(2);
     EUEn::read()
@@ -257,6 +272,11 @@ pub fn bootstrap_init(cpu_id: usize) {
             "kernel PALEN does not match CPUCFG1"
         );
         boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
+    } else {
+        configure_local_ipi();
+        // IPI device、ECFG 和内核 trap entry 均已就绪后才打开全局 IE；
+        // CPU 仍未 online，因此 BSP 不可能在该窗口提前发送运行期 IPI。
+        CrMd::read().set_ie(true).write();
     }
 }
 
@@ -323,7 +343,6 @@ pub fn cpu_local_ptr() -> usize {
 pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
     // QEMU 9.2.1's direct-boot ROM waits for IPI vector 0, then reads the
     // 64-bit entry address from the target CPU's first mailbox buffer.
-    const IOCSR_IPI_SEND: usize = 0x1040;
     const IOCSR_MAIL_SEND: usize = 0x1048;
 
     // The QEMU ROM consumes a physical entry that fits in its low mailbox word.
@@ -353,6 +372,77 @@ pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize
         );
     }
     Ok(())
+}
+
+/// 向一个硬件 CPU 发送运行期 IPI；vector 1 与 slave ROM 的 vector 0 分离。
+#[cfg(feature = "board_laqemu")]
+pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
+    if hardware_id >= crate::smp::configured_cpu_count() {
+        return Err(-3);
+    }
+    let doorbell = ((hardware_id as u32) << 16) | RUNTIME_IPI_VECTOR;
+    // Safety: IOCSR_IPI_SEND 是 QEMU virt IPI 控制器的跨核 doorbell。
+    unsafe {
+        core::arch::asm!("dbar 0");
+        core::arch::asm!(
+            "iocsrwr.w {doorbell}, {addr}",
+            doorbell = in(reg) doorbell,
+            addr = in(reg) IOCSR_IPI_SEND,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "board_2k1000")]
+pub fn send_ipi(_hardware_id: usize) -> Result<(), isize> {
+    Err(-2)
+}
+
+#[cfg(feature = "board_laqemu")]
+fn configure_local_ipi() {
+    let bit = 1u32 << RUNTIME_IPI_VECTOR;
+    // boot ROM 已在跳转前清除启动 vector 0；这里清掉可能残留的运行期
+    // vector 1，再只开放这一条 IPI 线路。
+    unsafe {
+        core::arch::asm!(
+            "iocsrwr.w {bit}, {addr}",
+            bit = in(reg) bit,
+            addr = in(reg) IOCSR_IPI_CLEAR
+        );
+        core::arch::asm!(
+            "iocsrwr.w {bit}, {addr}",
+            bit = in(reg) bit,
+            addr = in(reg) IOCSR_IPI_ENABLE
+        );
+    }
+}
+
+#[cfg(feature = "board_2k1000")]
+fn configure_local_ipi() {}
+
+/// 清除本 CPU 的 level-triggered 运行期 IPI 源。
+#[cfg(feature = "board_laqemu")]
+pub(super) fn clear_local_ipi() {
+    let bit = 1u32 << RUNTIME_IPI_VECTOR;
+    // Safety: CORE_CLEAR 写 1 清对应 status bit；handler 不访问普通锁或堆。
+    unsafe {
+        core::arch::asm!(
+            "iocsrwr.w {bit}, {addr}",
+            bit = in(reg) bit,
+            addr = in(reg) IOCSR_IPI_CLEAR
+        );
+    }
+}
+
+#[cfg(feature = "board_2k1000")]
+pub(super) fn clear_local_ipi() {}
+
+/// AP 的 IPI-only idle loop；内核 trap 返回后继续等待下一次 doorbell。
+pub fn secondary_cpu_idle() -> ! {
+    loop {
+        // Safety: `idle 0` 只暂停当前 CPU，全局 IE 和 IPI mask 已完成本地配置。
+        unsafe { core::arch::asm!("idle 0") };
+    }
 }
 
 /// The 2K1000LA remains intentionally single-core in this QEMU-only phase.

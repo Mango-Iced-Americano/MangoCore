@@ -36,7 +36,13 @@ pub type TrapImpl = riscv::register::scause::Trap;
 pub type InterruptImpl = riscv::register::scause::Interrupt;
 pub type ExceptionImpl = riscv::register::scause::Exception;
 
-pub fn bootstrap_init(_cpu_id: usize) {}
+pub fn bootstrap_init(cpu_id: usize) {
+    if cpu_id != crate::smp::BOOT_CPU_ID {
+        // AP 在本阶段只开放 supervisor software interrupt；timer、external
+        // interrupt 和旧调度器保持关闭。
+        trap::init_ipi_only();
+    }
+}
 
 #[repr(C, align(4096))]
 struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
@@ -103,6 +109,19 @@ pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize
     // HSM passes its opaque argument in a1.  Phase 1 does not consume an
     // architecture boot argument on APs, so publish an explicit zero.
     sbi::hart_start(cpu_id, start_addr, 0)
+}
+
+/// 向一个硬件 hart 发送运行期 IPI doorbell。
+pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
+    sbi::send_ipi(hardware_id)
+}
+
+/// AP 的最小 idle loop；SIE 已由 bootstrap 的 IPI-only 初始化打开。
+pub fn secondary_cpu_idle() -> ! {
+    loop {
+        // Safety: WFI 只暂停当前 hart；SSIP 到达后从内核 trap 返回此循环。
+        unsafe { riscv::asm::wfi() };
+    }
 }
 
 /// Keep an online Phase 1 AP outside the legacy scheduler.
