@@ -26,6 +26,8 @@ mod kt_waitqueue;
 mod kt_timer;
 #[path = "sched.rs"]
 mod kt_sched;
+#[path = "smp.rs"]
+mod kt_smp;
 #[path = "mm.rs"]
 mod kt_mm;
 #[path = "ext4.rs"]
@@ -50,6 +52,7 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("waitqueue", kt_waitqueue::tests()),
         ("timer", kt_timer::tests()),
         ("sched", kt_sched::tests()),
+        ("smp", kt_smp::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
         ("ext4_orphan_crash", kt_ext4::orphan_crash_tests()),

@@ -1,31 +1,36 @@
-//! Minimal BSP/AP boot handshake.
+//! BSP/AP 最小启动握手。
 //!
-//! Phase 1 deliberately stops secondary CPUs before scheduling, interrupts, or
-//! shared subsystems.  The three atomics below are the only state APs may touch.
+//! Phase 1 在调度、中断和共享子系统启用前停驻 AP。每个 AP 只发布自己
+//! `PerCpu` 表项中的 online 状态，不维护第二份全局 online 真相。
 
 use core::{
     hint::spin_loop,
     mem::size_of,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 pub const BOOT_CPU_ID: usize = 0;
 pub const MAX_CPUS: usize = 8;
 
-/// Phase 1 CPU-local anchor; later batches extend this without moving entries.
+/// Phase 1 的 CPU-local 锚点；后续批次只扩展表项，不移动现有地址。
 #[repr(C, align(64))]
 struct PerCpu {
     logical_id: usize,
+    online: AtomicBool,
 }
 
 impl PerCpu {
     const fn new(logical_id: usize) -> Self {
-        Self { logical_id }
+        Self {
+            logical_id,
+            online: AtomicBool::new(false),
+        }
     }
 }
 
-// The immutable array lives outside BSS, so every early CPU may address its
-// own cache-line-sized entry before CPU0 clears or initializes shared memory.
+// 显式放入 `.data.boot`，保证 LA64 AP 在 CPU0 清 BSS 前就能安全取得自己的
+// cache-line 表项；运行期只允许通过表项内部的原子字段修改状态。
+#[link_section = ".data.boot"]
 static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(0),
     PerCpu::new(1),
@@ -37,8 +42,8 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(7),
 ];
 
-// build.rs rejects every value except the one-byte strings 1/2/4/8.
-pub const CONFIGURED_CPU_COUNT: usize =
+// build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
+const CONFIGURED_CPU_COUNT: usize =
     (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
 
 const AP_RELEASED: usize = 1;
@@ -51,11 +56,49 @@ const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
 static BOOT_HARDWARE_ID: AtomicUsize = AtomicUsize::new(UNCLAIMED_BOOT_HARDWARE_ID);
 #[link_section = ".data.boot"]
 static BOOT_PHASE: AtomicUsize = AtomicUsize::new(0);
-#[link_section = ".data.boot"]
-static ONLINE_MASK: AtomicUsize = AtomicUsize::new(0);
 
 const fn expected_online_mask() -> usize {
     (1usize << CONFIGURED_CPU_COUNT) - 1
+}
+
+/// 返回本次构建配置的逻辑 CPU 数量。
+pub const fn configured_cpu_count() -> usize {
+    CONFIGURED_CPU_COUNT
+}
+
+/// 汇总当前已经完成本地初始化的 CPU。
+///
+/// online 在 Phase 1 中只会由对应 CPU 从 false 发布为 true，因此逐项
+/// Acquire 扫描即使看到中间快照也不会丢失已经观察到的发布状态。读到 true
+/// 同时保证该 CPU 在 Release 前完成的本地初始化对当前 CPU 可见。
+pub fn online_cpu_mask() -> usize {
+    let mut mask = 0usize;
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if PER_CPUS[cpu_id].online.load(Ordering::Acquire) {
+            mask |= 1usize << cpu_id;
+        }
+    }
+    mask
+}
+
+/// 由 CPU 自己唯一一次发布本地初始化完成。
+fn mark_cpu_online(cpu_id: usize) {
+    assert!(
+        cpu_id < CONFIGURED_CPU_COUNT,
+        "cannot publish unconfigured CPU {} online",
+        cpu_id
+    );
+
+    // Release 与 online_cpu_mask() 的 Acquire 配对，发布本 CPU 在此前完成的
+    // bootstrap 状态；CAS 同时把重复发布变成可诊断的不变量失败。
+    assert!(
+        PER_CPUS[cpu_id]
+            .online
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+            .is_ok(),
+        "logical CPU {} published online more than once",
+        cpu_id
+    );
 }
 
 /// Convert the firmware/hardware ID at `_start` into MangoCore's logical ID.
@@ -177,10 +220,7 @@ pub fn secondary_main(cpu_id: usize) -> ! {
     // normal timer interrupt, or enter the legacy scheduler.
     crate::hal::bootstrap_init(cpu_id);
 
-    let cpu_bit = 1usize << cpu_id;
-    // Release makes completion of local initialization precede publication of
-    // the online bit.  Concurrent APs merge bits through one atomic RMW.
-    ONLINE_MASK.fetch_or(cpu_bit, Ordering::Release);
+    mark_cpu_online(cpu_id);
 
     // Phase 1 APs remain outside every shared runtime path after becoming
     // online.  A later IPI batch will replace this permanent park loop.
@@ -199,9 +239,9 @@ pub fn bring_up_secondary_cpus() {
         "BSP hardware ID was not registered"
     );
 
-    // CPU0 is already locally initialized.  This Relaxed store is sequenced
-    // before BOOT_PHASE's Release, which performs the actual publication.
-    ONLINE_MASK.store(1usize << BOOT_CPU_ID, Ordering::Relaxed);
+    // CPU0 与 AP 走同一发布协议。若启动流程被错误地重复执行，CAS 会立即
+    // 报告重复 online，而不是静默覆盖状态。
+    mark_cpu_online(BOOT_CPU_ID);
 
     extern "C" {
         fn _start();
@@ -228,9 +268,9 @@ pub fn bring_up_secondary_cpus() {
     let deadline = crate::hal::get_time().saturating_add(timeout_ticks);
 
     loop {
-        // Acquire pairs with each AP's Release fetch_or.  Seeing a bit therefore
-        // means that CPU finished its local initialization before publication.
-        let online = ONLINE_MASK.load(Ordering::Acquire);
+        // online_cpu_mask() 对每个表项执行 Acquire；读到对应 bit 即证明该
+        // CPU 已在 Release 前完成本地初始化。
+        let online = online_cpu_mask();
         if online & expected == expected {
             crate::println!(
                 "[smp] minimal boot ready: configured={} boot_hw_id={} online_mask={:#x}",

@@ -62,16 +62,20 @@ CPU0 按 QEMU 9.2 直启协议先写 `IOCSR_MAIL_SEND(0x1048)`，执行 `dbar` �
 再写 `IOCSR_IPI_SEND(0x1040)`，使 slave boot ROM 跳转到内核 `_start`。
 
 AP 在 Acquire 观察到 CPU0 对 `.data.boot` 启动阶段的 Release 发布后，才
-执行 CPU-local `bootstrap_init()`，以 Release 原子设置在线位，然后永久
-park。CPU0 最多等待 5 秒，成功时一次性输出 configured 数、实际 boot
-hardware ID 和 online mask；超时时报告 missing mask。当前仍是最小启动
-闭环：AP 不启用普通 timer/IPI handler、不进入现有全局调度器，也不访问
-FS、网络或驱动，所有内核和用户任务仍只由逻辑 CPU0 运行。
+执行 CPU-local `bootstrap_init()`，再以 Release CAS 将自己
+`PerCpu.online` 从 false 唯一一次发布为 true，然后永久 park。CPU0 对各
+表项执行 Acquire 扫描得到 online mask，最多等待 5 秒；成功时一次性输出
+configured 数、实际 boot hardware ID 和 online mask，超时时报告 missing
+mask。当前仍是最小启动闭环：AP 不启用普通 timer/IPI handler、不进入现有
+全局调度器，也不访问 FS、网络或驱动，所有内核和用户任务仍只由逻辑 CPU0
+运行。
 
 每个 CPU 在完成硬件 ID 到逻辑 ID 的映射后，会把
 `&PER_CPUS[logical_id]` 写入 CPU-local 寄存器并立即回读校验。
-`PER_CPUS` 固定为 8 个 64 字节对齐、非 BSS 的只读锚点；RV64 使用 `tp`，
-LA64 使用 `$r21`。用户返回前，当前 CPU 把该指针写入内核私有
+`PER_CPUS` 固定为 8 个 64 字节对齐的 `.data.boot` 表项；`logical_id`
+在运行期只读，`online` 只由对应 CPU 原子发布，不再维护第二份全局
+`ONLINE_MASK`。RV64 使用 `tp`，LA64 使用 `$r21`。用户返回前，当前 CPU
+把该指针写入内核私有
 `TrapContext::kernel_cpu_local`；用户 trap 入口先保存用户寄存器，再从该字段
 重装内核值。因此运行期 `cpu_id()` 已可验证并读取当前逻辑 CPU，但 Phase 1
 仍只允许逻辑 CPU0 运行任务，调度、MM 和 IPI 尚未迁移到完整 PerCpu 状态。
@@ -166,7 +170,7 @@ smp::bring_up_secondary_cpus()
 | `mm::init()` | heap、frame allocator、内核页表可用 |
 | `machine_init()` | trap entry 和 timer interrupt 可用 |
 | `task::timer_subsystem_init()` | task 层 timeout/wakeup 设施可用 |
-| `smp::bring_up_secondary_cpus()` | 启动/释放 AP，等待 online mask；AP 上线后只 park |
+| `smp::bring_up_secondary_cpus()` | 启动/释放 AP，Acquire 汇总各 PerCpu.online；AP 上线后只 park |
 
 ### 3.2 initramfs 分支
 

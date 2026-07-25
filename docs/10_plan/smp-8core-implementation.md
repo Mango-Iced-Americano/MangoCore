@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-24
+last_updated: 2026-07-25
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -355,13 +355,18 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - AP 本地 timer/普通中断保持关闭，只能停驻或处理已证明安全的启动 mailbox；
 - 本阶段所有内核和用户任务仍只在 CPU0 运行。
 
-#### 当前进度（SMP-P1-B05）
+#### 当前进度（SMP-P1-B06）
 
 - 已完成双架构 `rust_main(hardware_id, boot_arg)` BSP/AP 分流、
   `.data.boot` Release/Acquire 握手、5 秒有界 online mask 等待和 AP park；
-- 已建立 8 项、每项独占 64 字节 cache line 的启动期 `PER_CPUS` 表；
-  `register_cpu_entry()` 在逻辑 ID 确定后将对应地址写入 RV64 `tp` 或 LA64
-  `$r21`，并在同一 CPU 上立即回读断言；
+- 已建立 8 项、每项独占 64 字节 cache line 的 `.data.boot` `PER_CPUS`
+  表；`register_cpu_entry()` 在逻辑 ID 确定后将对应地址写入 RV64 `tp`
+  或 LA64 `$r21`，并在同一 CPU 上立即回读断言；
+- 每个 `PerCpu` 已拥有只由本 CPU 写入的 `online: AtomicBool`。CPU 通过
+  Release CAS 唯一一次发布本地初始化完成，BSP 通过逐表项 Acquire 扫描
+  汇总 online mask；旧全局 `ONLINE_MASK` 已删除，重复发布会明确 panic；
+- 已公开 `configured_cpu_count()` 和 `online_cpu_mask()` 运行期查询，
+  启动等待、日志和 focused ktest 读取同一权威状态；
 - 双架构 `TrapContext` 已增加内核私有 `kernel_cpu_local`；`trap_return()`
   在每次用户返回前按当前 CPU 刷新它，用户 trap 汇编在保存用户 `tp/$r21`
   后、进入 Rust 前重装内核指针；
@@ -378,7 +383,10 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - 双架构 `CORE_NUM=2` 用户态 regression 均达到 `online_mask=0x3`，6/6
   用例通过；最终 ELF 反汇编确认用户寄存器保存、slot 70 CPU-local 加载和
   kernel stack 切换顺序正确；
-- 完整 PerCpu 字段、idle stack/context、最小 trap/IPI 向量、console
+- B06 新增 `KTEST=smp`，双架构 `CORE_NUM=2` 及 RV64 `CORE_NUM=1`
+  均通过 online 拓扑与“旧调度器只运行于 CPU0”断言；ELF 符号确认
+  `PER_CPUS` 大小为 `0x200` 且位于 `.data`，不存在 `ONLINE_MASK` 符号；
+- 其余 PerCpu 字段、idle stack/context、最小 trap/IPI 向量、console
   多核串行化和全局初始化计数仍未完成，因此整个 Phase 1 状态仍为
   `partial`。
 
