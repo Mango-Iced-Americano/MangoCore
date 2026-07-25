@@ -28,7 +28,7 @@ const VIRTIO_MMIO_BASE: usize = 0x10001000;
 const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 /// QEMU virt exposes these MMIO slots in the kernel page table. Devices may
 /// occupy any of them, so only probe the mapped slots rather than a raw range.
-const VIRTIO_MMIO_PROBE_SLOTS: &[usize] = &[7, 6, 5, 4, 3, 2, 1, 0];
+const VIRTIO_MMIO_PROBE_SLOTS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7];
 
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
 
