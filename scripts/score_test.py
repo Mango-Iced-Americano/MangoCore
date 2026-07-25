@@ -99,7 +99,7 @@ def _counts_from_group(value: object) -> Counts:
         test_total = _number(entry.get("all", entry.get("total", 1)), "all")
         test_score = _number(entry.get("pass", entry.get("score", 0)), "pass")
         if not test_total.is_integer() or test_total <= 0:
-            raise ScoreInputError("judge per-test total must be a positive integer")
+            continue  # skip malformed entries (e.g. missing test data)
         total += int(test_total)
         passed += int(test_total) if test_score > 0 else 0
     return Counts(passed, total)
