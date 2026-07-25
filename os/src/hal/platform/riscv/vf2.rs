@@ -8,6 +8,6 @@
 pub const CLOCK_FREQ: usize = 4_000_000;
 
 pub const MMIO: &[(usize, usize)] = &[
-    (0x1000_0000, 0x1000_0000), // 外设块 (UART, I2C, SPI, virtio probe 等)
+    (0x1000_0000, 0x1000_0000), // 外设块 (UART, I2C, SPI, virtio probe, GMAC0 等)
     (0x0C00_0000, 0x0040_0000), // PLIC
 ];

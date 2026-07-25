@@ -30,6 +30,9 @@ mod kt_sched;
 mod kt_mm;
 #[path = "ext4.rs"]
 mod kt_ext4;
+#[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+#[path = "gmac.rs"]
+mod kt_gmac;
 
 use runner::KernelTest;
 use alloc::vec;
@@ -52,6 +55,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("sched", kt_sched::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
+        #[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+        ("gmac", kt_gmac::tests()),
     ]
 }
 
