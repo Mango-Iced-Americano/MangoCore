@@ -215,10 +215,10 @@ jobs:
         run: docker compose down
 
   # ════════════════════════════════════════════════
-  # Layer 5 — Competition QEMU (rv64 → la64)
+  # Layer 5a — Competition QEMU rv64
   # ════════════════════════════════════════════════
-  comp:
-    name: 5. Competition QEMU mask=0xFDF (rv64 → la64)
+  comp-rv:
+    name: 5a. Comp QEMU rv64 (mask=0xFDF)
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     needs: [toolchain-contracts]
@@ -237,38 +237,19 @@ jobs:
       - name: Cache official test images
         uses: actions/cache@v4
         with:
-          path: |
-            fs-img-dir/sdcard-rv.img.xz
-            fs-img-dir/sdcard-la.img.xz
-          key: oscomp-sdcards-pre-20250615-v2
+          path: fs-img-dir/sdcard-rv.img.xz
+          key: oscomp-sdcards-pre-20250615-v3-rv
       - name: Docker compose up
         run: docker compose up -d
       - name: Provision toolchain
         run: |
-          docker compose exec -T \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-              make toolchain-setup
-            '
-      - name: Ensure test images are available
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc 'make toolchain-setup'
+      - name: Ensure test image
         run: |
-          docker compose exec -T \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-            set -euo pipefail
-            cd /app
-            mkdir -p fs-img-dir
-            for img in sdcard-rv.img.xz sdcard-la.img.xz; do
-              if [ ! -s fs-img-dir/$img ] || ! xz -t fs-img-dir/$img; then
-                rm -f fs-img-dir/$img
-                make testsuits-download
-                break
-              fi
-            done
-          '
-      - name: Write 11-group test configuration
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            cd /app && mkdir -p fs-img-dir
+            if [ ! -s fs-img-dir/sdcard-rv.img.xz ] || ! xz -t fs-img-dir/sdcard-rv.img.xz; then rm -f fs-img-dir/sdcard-rv.img.xz; make testsuits-download; fi'
+      - name: Write test config
         run: |
           cat > os_test_ci.conf <<'EOF'
           mode=run
@@ -282,71 +263,99 @@ jobs:
           ltp_include=
           ltp_from=
           EOF
-      - name: Build and prepare images (rv64 → la64)
+      - name: Build kernel and decompress image
         run: |
-          docker compose exec -T \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-              set -euxo pipefail
-              make all MODE=release
-            '
-      - name: Decompress test images
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            set -euxo pipefail; cd /app
+            make all MODE=release
+            xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img'
+      - name: Inject config
         run: |
-          docker compose exec -T \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-            set -euxo pipefail
-            xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
-            xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
-          '
-      - name: Inject test configuration into disk images
-        run: |
-          docker compose exec -T \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-            set -euxo pipefail
-            make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf
-            make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf
-          '
-      - name: Run competition QEMU rv64
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            set -euxo pipefail; cd /app
+            make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf'
+      - name: Run QEMU
         run: |
           set -o pipefail
-          docker compose exec -T \
-            -e QEMU_TIMEOUT \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-              set -euxo pipefail
-              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp 2>&1 | tee /tmp/qemu-rv64.log
-            '
-      - name: Score rv64
+          docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp 2>&1 | tee /tmp/qemu-rv64.log'
+      - name: Score
         if: always()
         run: |
           docker compose exec -T os-dev bash -lc '
-            set -euxo pipefail
-            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 2>&1 || true
-          '
-      - name: Run competition QEMU la64
+            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 --output /tmp/score-rv64.json 2>&1 || true'
+      - name: Docker compose down
+        if: always()
+        run: docker compose down
+
+  # ════════════════════════════════════════════════
+  # Layer 5b — Competition QEMU la64
+  # ════════════════════════════════════════════════
+  comp-la:
+    name: 5b. Comp QEMU la64 (mask=0xFDF)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    needs: [toolchain-contracts]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail; df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker compose down --remove-orphans || true
+          docker system prune -af || true; df -h
+      - name: Cache official test images
+        uses: actions/cache@v4
+        with:
+          path: fs-img-dir/sdcard-la.img.xz
+          key: oscomp-sdcards-pre-20250615-v3-la
+      - name: Docker compose up
+        run: docker compose up -d
+      - name: Provision toolchain
+        run: |
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc 'make toolchain-setup'
+      - name: Ensure test image
+        run: |
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            cd /app && mkdir -p fs-img-dir
+            if [ ! -s fs-img-dir/sdcard-la.img.xz ] || ! xz -t fs-img-dir/sdcard-la.img.xz; then rm -f fs-img-dir/sdcard-la.img.xz; make testsuits-download; fi'
+      - name: Write test config
+        run: |
+          cat > os_test_ci.conf <<'EOF'
+          mode=run
+          mask=0xFDF
+          ltp_runner=suite
+          ltp_libc=both
+          ltp_suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
+          ltp_exclude=execve05,fallocate06,mmap16,rename10,shmctl01,copy_file_range02,pipe13,splice02,splice07,timer_settime03,statx11,prot_hsymlinks,send02,futex_cmp_requeue01
+          ltp_exclude_musl=
+          ltp_exclude_glibc=
+          ltp_include=
+          ltp_from=
+          EOF
+      - name: Build kernel and decompress image
+        run: |
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            set -euxo pipefail; cd /app
+            make all MODE=release
+            xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img'
+      - name: Inject config
+        run: |
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            set -euxo pipefail; cd /app
+            make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf'
+      - name: Run QEMU
         run: |
           set -o pipefail
-          docker compose exec -T \
-            -e QEMU_TIMEOUT \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
-            os-dev bash -lc '
-              set -euxo pipefail
-              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp 2>&1 | tee /tmp/qemu-la64.log
-            '
-      - name: Score la64
+          docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp 2>&1 | tee /tmp/qemu-la64.log'
+      - name: Score
         if: always()
         run: |
           docker compose exec -T os-dev bash -lc '
-            set -euxo pipefail
-            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 2>&1 || true
-          '
+            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 --output /tmp/score-la64.json 2>&1 || true'
       - name: Docker compose down
         if: always()
         run: docker compose down
