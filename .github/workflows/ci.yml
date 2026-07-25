@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [develop, main, chore/clean-up]
   pull_request:
-    branches: [develop, main]
   workflow_dispatch:
     inputs:
       qemu_timeout:
