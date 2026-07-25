@@ -41,9 +41,10 @@ firmware / QEMU
         → IPI-only idle loop
 ```
 
-当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 的
-首个工作包又打通了 BSP→AP 的 IPI mailbox/ack 闭环。AP 尚未进入调度器，
-也不会访问文件系统、网络和旧的单核运行队列；这些共享路径仍由 CPU0 独占。
+当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 已
+打通 BSP→AP 的 IPI mailbox/ack 单播，并扩展为一次向全部 online AP 广播。
+AP 尚未进入调度器，也不会访问文件系统、网络和旧的单核运行队列；这些共享
+路径仍由 CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -91,13 +92,15 @@ CPU0 与 AP 使用同一个 online 发布协议；重复发布会触发 CAS 不�
 运行期 PING IPI 使用另一组 Release/Acquire 关系：
 
 1. 发送方用 Release 把 reason 合并进目标 `PerCpu.pending_ipi`；
-2. reason 发布完成后才触发 SBI 或 IOCSR doorbell；
+2. 广播时先发布全部目标 mailbox，再开始逐个触发 SBI 或 IOCSR doorbell；
 3. 接收方先清硬件电平源，再用 Acquire `swap(0)` 消费 mailbox；
 4. handler 完成后以 Release 增加 ack，等待方用 Acquire 观察完成。
 
 mailbox 表示“待处理原因集合”，不是可累计的事件队列。当前 PING 测试由
 CPU0 串行发送，同一目标收到 ack 后才复用 PING bit；后续需要累计语义的
 shootdown/STOP 会使用独立 sequence 或 slot，不能把事件次数塞进 reason bit。
+发送某个 doorbell 失败时，发送方仍继续通知本轮其余目标，并保留失败目标
+已经发布的 reason；原子 mailbox 不能安全“回滚”，后续中断仍可消费它。
 
 ## CPU-local 寄存器
 
@@ -146,6 +149,10 @@ interrupt 继续关闭；IPI 返回后重新进入 `wfi`/`idle 0`。CPU0 的 tim
 interrupt 仍进入旧的 `task::timer_interrupt_handler()`，每 CPU timer、
 STOP、RESCHEDULE 和 AP 调度循环属于后续 Phase 2/3 范围。
 
+当前只允许 CPU0 向 AP 发起 PING。AP→CPU0 或交叉发送必须等 CPU0 的内核
+timer interrupt 也改为“只记账、在安全点延迟处理”后再开放，否则为了接收
+IPI 打开 CPU0 的内核中断，会让旧 timer handler 在任意内核位置直接调度。
+
 ## 构建与验证
 
 构建期 `CORE_NUM` 同时导出为 Cargo 环境变量 `MANGO_CORE_NUM`，并生成 QEMU
@@ -166,5 +173,6 @@ make ktest ARCH=la64 PROFILE=normal CORE_NUM=2 KTEST=smp
 
 双架构构建必须串行。focused SMP 测试不仅检查 QEMU 退出码，还要检查
 configured CPU 数、online/idle mask、独立 CPU-local 指针、测试 PASS 和无
-panic。Phase 2 的最小 IPI 用例还要求 CPU0 逐个向 AP 发送 PING，并在一秒
-有界期限内观察对应 ack。
+panic。Phase 2 的 IPI 用例要求 CPU0 既能单播 PING，也能在统一的一秒期限
+内向全部 online AP 广播并逐项观察对应 ack。四核测试应至少覆盖三个 AP；
+RISC-V 还应保留一次物理启动 hart 不等于 0 的映射证据。

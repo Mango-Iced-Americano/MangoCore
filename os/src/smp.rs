@@ -39,8 +39,21 @@ impl PerCpu {
     }
 }
 
-// PING 只证明 mailbox、doorbell、trap 和 ack 闭环，不承载调度或 TLB 语义。
-const IPI_PING: u32 = 1 << 0;
+/// 可以合并进 per-CPU mailbox 的幂等 IPI 原因。
+///
+/// reason bit 只表示“至少处理一次”，不能表示事件次数；需要计数的协议必须
+/// 另外使用 sequence/ack，并在复用同一 bit 前等待前一轮完成。
+#[derive(Clone, Copy)]
+pub struct IpiReason(u32);
+
+impl IpiReason {
+    /// 只用于证明 mailbox、doorbell、trap 和 ack 闭环。
+    pub const PING: Self = Self(1 << 0);
+
+    const fn bits(self) -> u32 {
+        self.0
+    }
+}
 
 // 显式放入 `.data.boot`，保证 LA64 AP 在 CPU0 清 BSS 前就能安全取得自己的
 // cache-line 表项；运行期只允许通过表项内部的原子字段修改状态。
@@ -108,33 +121,68 @@ pub fn idle_cpu_mask() -> usize {
     mask
 }
 
-/// 向一个已经 online 的逻辑 CPU 发布测试 PING，并返回应等待的 ack 序号。
+/// 向一组 online CPU 发布同一个幂等 reason，再逐个触发硬件 doorbell。
 ///
-/// `pending_ipi` 是按原因合并的 mailbox，不是事件队列；当前 Phase 2 子阶段
-/// 只有 CPU0 串行发出下一次 PING，必须等前一次 ack 后才能再次使用同一 bit。
-pub fn send_ipi_ping(cpu_id: usize) -> Result<usize, isize> {
-    if cpu_id >= CONFIGURED_CPU_COUNT || cpu_id == self::cpu_id() {
+/// 所有 mailbox 都先完成 Release 发布，目标 CPU 才可能开始处理。若某个
+/// doorbell 失败，已经发布的 reason 保留到后续 IPI 消费，不能回滚原子状态。
+pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
+    let configured = expected_online_mask();
+    if reason.bits() == 0 || targets & !configured != 0 {
         return Err(-3);
     }
-    if !PER_CPUS[cpu_id].online.load(Ordering::Acquire) {
+    if targets & (1usize << self::cpu_id()) != 0 {
+        return Err(-3);
+    }
+    if targets & !online_cpu_mask() != 0 {
         return Err(-4);
     }
 
-    let expected_ack = PER_CPUS[cpu_id]
-        .ipi_ping_ack
-        .load(Ordering::Relaxed)
-        .wrapping_add(1);
+    // 先向全部目标 Release 发布 reason，再允许任一目标开始处理。这为整轮
+    // 广播建立统一的“publication before delivery”批次边界；handler 仍然
+    // 只读取本 CPU mailbox，不依赖其他 CPU 的状态。
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if targets & (1usize << cpu_id) != 0 {
+            PER_CPUS[cpu_id]
+                .pending_ipi
+                .fetch_or(reason.bits(), Ordering::Release);
+        }
+    }
 
-    // Release 保证 mailbox reason 先于架构 doorbell 对目标 CPU 可见；接收端
-    // 的 Acquire swap 与之配对。重复硬件中断只会看到空 mailbox，保持幂等。
-    PER_CPUS[cpu_id]
-        .pending_ipi
-        .fetch_or(IPI_PING, Ordering::Release);
-    let hardware_id = logical_to_hardware_id(
-        cpu_id,
-        BOOT_HARDWARE_ID.load(Ordering::Acquire),
-    );
-    crate::hal::send_ipi(hardware_id)?;
+    let boot_hardware_id = BOOT_HARDWARE_ID.load(Ordering::Acquire);
+    let mut first_error = None;
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if targets & (1usize << cpu_id) != 0 {
+            let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
+            // 一个 doorbell 失败不能阻止其余已发布 mailbox 的目标被唤醒；
+            // 完成整轮发送后再返回首个错误，失败目标的 reason 留待后续 IPI。
+            if let Err(error) = crate::hal::send_ipi(hardware_id) {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// 向一个逻辑 CPU 发布通用 IPI reason。
+pub fn send_ipi(cpu_id: usize, reason: IpiReason) -> Result<(), isize> {
+    if cpu_id >= CONFIGURED_CPU_COUNT {
+        return Err(-3);
+    }
+    send_ipi_mask(1usize << cpu_id, reason)
+}
+
+/// 发布测试 PING，并返回发送方应等待的 ack 序号。
+///
+/// 当前只有 CPU0 发送 PING；调用方必须等前一次 ack 后再对同一 CPU 调用，
+/// 否则 bit 合并只承诺处理一次，不能生成两个 ack。
+pub fn send_ipi_ping(cpu_id: usize) -> Result<usize, isize> {
+    if cpu_id >= CONFIGURED_CPU_COUNT {
+        return Err(-3);
+    }
+    let expected_ack = ipi_ping_ack(cpu_id).wrapping_add(1);
+    send_ipi(cpu_id, IpiReason::PING)?;
     Ok(expected_ack)
 }
 
@@ -151,7 +199,7 @@ pub fn handle_ipi() {
     // Acquire 获取发送端在 Release fetch_or 前发布的数据；swap(0) 使原因只被
     // 当前 CPU 消费一次。doorbell 合并或重复到达都不会重复生成 ack。
     let reasons = local.pending_ipi.swap(0, Ordering::Acquire);
-    if reasons & IPI_PING != 0 {
+    if reasons & IpiReason::PING.bits() != 0 {
         // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
         local.ipi_ping_ack.fetch_add(1, Ordering::Release);
     }

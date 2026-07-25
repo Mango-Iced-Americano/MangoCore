@@ -422,22 +422,31 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09）
+#### 当前进度（SMP-P2-B09/B10）
 
-- `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。发送方以 Release
-  发布 reason 后触发 doorbell，接收方以 Acquire `swap(0)` 消费；handler
-  不分配、不打印、不持普通锁，也不调度；
+- `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
+  表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
+  接收方以 Acquire `swap(0)` 消费；handler 不分配、不打印、不持普通锁，
+  也不调度；
+- 通用 `send_ipi_mask()` 已支持一次向多个 online AP 发布同一个 reason。
+  广播严格分成“先发布全部 mailbox、再触发全部 doorbell”两轮；单个
+  doorbell 失败不会阻止其余已发布目标被通知，并在整轮结束后返回首个错误。
+  该顺序建立整轮 publication-before-delivery 边界，handler 仍只读本地
+  mailbox；
 - RV64 已接入 SBI v0.2 IPI extension。AP 的 `stvec` 指向独立内核 trap
   入口，汇编完整保存 GPR、原始 `sp`、`sstatus` 和 `sepc`，只开放 SSIP；
 - LA64 QEMU 已把运行期 IPI 固定为 vector 1，与 slave boot ROM 使用的
   vector 0 分离；handler 先清 IOCSR level source，再进入 mailbox fast path；
 - 双架构 AP 都从永久 park 改为 `wfi`/`idle 0` 的 IPI-only idle loop，
   仍不进入旧调度器；
-- 双架构 `CORE_NUM=2 KTEST=smp` 均通过 4/4，用例已证明 BSP 能逐个唤醒 AP
-  并收到硬中断上下文发布的 ack；
-- B09 只闭合最小单播 PING。广播、交叉发送、并发 reason、10,000 次
-  ping-pong、STOP、timer 和长 syscall 中断窗口仍未完成，因此 Phase 2
-  状态为 `partial`。
+- B09 的双架构 `CORE_NUM=2 KTEST=smp` 均通过 4/4，证明最小单播闭环；
+  B10 的双架构 `CORE_NUM=4 KTEST=smp` 均通过 5/5，证明一次广播可唤醒
+  三个 AP 并独立收到 ack。RV64 本次由硬件 hart 1 担任逻辑 CPU0，实际
+  覆盖了逻辑 ID 到硬件 hart ID 的非恒等映射；
+- B10 审计发现，CPU0 仍使用会在中断中直接调度的旧 timer handler；因此
+  没有通过测试专用关 timer 绕过依赖，AP→CPU0 与交叉发送延后到 deferred
+  timer 完成后。并发 reason、10,000 次 ping-pong、STOP、长 syscall
+  中断窗口也尚未完成，Phase 2 状态仍为 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
 timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。

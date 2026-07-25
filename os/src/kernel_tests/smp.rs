@@ -20,6 +20,10 @@ pub fn tests() -> Vec<KernelTest> {
             secondary_cpus_enter_idle_context,
         ),
         KernelTest::new("smp::bsp_to_ap_ipi_ping", bsp_to_ap_ipi_ping),
+        KernelTest::new(
+            "smp::bsp_broadcasts_ipi_to_all_aps",
+            bsp_broadcasts_ipi_to_all_aps,
+        ),
     ]
 }
 
@@ -62,6 +66,41 @@ fn bsp_to_ap_ipi_ping() -> Result<(), &'static str> {
                     crate::smp::ipi_ping_ack(cpu_id)
                 );
                 return Err("AP did not acknowledge IPI");
+            }
+            core::hint::spin_loop();
+        }
+    }
+    Ok(())
+}
+
+/// CPU0 先发布全部 AP 的 mailbox，再连续敲响 doorbell，最后逐项等待 ack。
+fn bsp_broadcasts_ipi_to_all_aps() -> Result<(), &'static str> {
+    let targets = crate::smp::online_cpu_mask() & !(1usize << crate::smp::BOOT_CPU_ID);
+    let mut expected = [0usize; crate::smp::MAX_CPUS];
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        expected[cpu_id] = crate::smp::ipi_ping_ack(cpu_id).wrapping_add(1);
+    }
+
+    if let Err(error) = crate::smp::send_ipi_mask(targets, crate::smp::IpiReason::PING) {
+        crate::println!(
+            "# SMP IPI broadcast failed: targets={:#x} error={}",
+            targets,
+            error
+        );
+        return Err("failed to broadcast BSP-to-AP IPI");
+    }
+
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        while crate::smp::ipi_ping_ack(cpu_id) != expected[cpu_id] {
+            if crate::hal::get_time() >= deadline {
+                crate::println!(
+                    "# SMP IPI broadcast ack timeout: cpu={} expected={} observed={}",
+                    cpu_id,
+                    expected[cpu_id],
+                    crate::smp::ipi_ping_ack(cpu_id)
+                );
+                return Err("AP did not acknowledge broadcast IPI");
             }
             core::hint::spin_loop();
         }
