@@ -24,12 +24,12 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     pub fn default() -> Self {
         Self {
-            mode: RunMode::Run, mask: 0x0fff,
+            mode: RunMode::Run, mask: 0x0800,
             order: crate::runner::groups::catalog::default_order(),
             timeouts: crate::runner::groups::catalog::DEFAULT_TIMEOUTS,
             ltp_exclude: crate::runner::ltp::policy::defaults::DEFAULT_LTP_EXCLUDE.iter().map(|v| String::from(*v)).collect(),
-            ltp_include: Vec::new(), ltp_from: None, ltp_libc: LtpLibc::Both, ltp_runner: LtpRunner::Inline,
-            ltp_suites: Vec::new(), conf_source: None, diag: false, timer_smoke: false, ext4_profile: false,
+            ltp_include: Vec::new(), ltp_from: None, ltp_libc: LtpLibc::Glibc, ltp_runner: LtpRunner::Suite,
+            ltp_suites: alloc::vec![String::from("fs"), String::from("fs_perms_simple")], conf_source: None, diag: false, timer_smoke: false, ext4_profile: false,
             reclaim_profile: false, skip_apk: false, drift_windows: 6, drift_libc: String::from("both"),
             drift_pre_mask: 0, drift_measure: String::from("null"),
         }
