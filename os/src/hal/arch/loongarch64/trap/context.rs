@@ -218,13 +218,16 @@ pub struct TrapContext {
     pub trap_handler: usize,
     /// The current sp to be recovered on next entry into kernel space.
     pub kernel_sp: usize,
+    /// PerCpu pointer reinstalled in r21 after the user's value is saved.
+    pub kernel_cpu_local: usize,
     /// Complete LSX state. Kept after the fixed trap assembly fields so the
     /// established general/FPU offsets remain unchanged.
     pub lsx: LsxRegs,
 }
 
-// Keep this synchronized with `LSX_START` in `trap.S`.
-const _: () = assert!(core::mem::offset_of!(TrapContext, lsx) == 70 * 8);
+// Keep both numeric offsets synchronized with the loads in `trap.S`.
+const _: () = assert!(core::mem::offset_of!(TrapContext, kernel_cpu_local) == 70 * 8);
+const _: () = assert!(core::mem::offset_of!(TrapContext, lsx) == 72 * 8);
 
 impl Debug for TrapContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -236,6 +239,10 @@ impl Debug for TrapContext {
             .field("kernel_satp", &format_args!("{:#x}", self.kernel_satp))
             .field("trap_handler", &format_args!("{:#x}", self.trap_handler))
             .field("kernel_sp", &format_args!("{:#x}", self.kernel_sp))
+            .field(
+                "kernel_cpu_local",
+                &format_args!("{:#x}", self.kernel_cpu_local),
+            )
             .field("lsx", &self.lsx)
             .finish()
     }
@@ -260,6 +267,7 @@ impl TrapContext {
             kernel_satp,
             trap_handler,
             kernel_sp,
+            kernel_cpu_local: 0,
             lsx: LsxRegs::default(),
         };
         cx.gp.pc = entry;

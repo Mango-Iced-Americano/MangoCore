@@ -80,8 +80,8 @@ related_docs:
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
 | 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU mailbox/IPI 和 1/2/4/8 核最小 online 闭环已完成 | AP 仍只 park，尚无 idle context、IPI handler 和调度能力 |
-| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 已安装启动期 PerCpu 锚点并在 CPU-local bootstrap 后发布 online | 完整可变 PerCpu、global/local init 和 trap 恢复仍未接入 |
-| trap | RISC-V 内核态 trap 直接 panic；LA64 IPI 未实现 | 内核执行期间无法处理 IPI/shootdown |
+| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点并在 CPU-local bootstrap 后发布 online；运行期 `cpu_id()` 已可校验 | 完整可变 PerCpu、global/local init 和 idle context 仍未接入 |
+| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；RISC-V 内核态 trap 仍直接 panic；LA64 IPI 未实现 | 内核执行期间仍无法处理 IPI/shootdown |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -355,23 +355,32 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - AP 本地 timer/普通中断保持关闭，只能停驻或处理已证明安全的启动 mailbox；
 - 本阶段所有内核和用户任务仍只在 CPU0 运行。
 
-#### 当前进度（SMP-P1-B04）
+#### 当前进度（SMP-P1-B05）
 
 - 已完成双架构 `rust_main(hardware_id, boot_arg)` BSP/AP 分流、
   `.data.boot` Release/Acquire 握手、5 秒有界 online mask 等待和 AP park；
 - 已建立 8 项、每项独占 64 字节 cache line 的启动期 `PER_CPUS` 表；
   `register_cpu_entry()` 在逻辑 ID 确定后将对应地址写入 RV64 `tp` 或 LA64
   `$r21`，并在同一 CPU 上立即回读断言；
+- 双架构 `TrapContext` 已增加内核私有 `kernel_cpu_local`；`trap_return()`
+  在每次用户返回前按当前 CPU 刷新它，用户 trap 汇编在保存用户 `tp/$r21`
+  后、进入 Rust 前重装内核指针；
+- 已公开带数组范围、对齐和 configured CPU 校验的运行期 `cpu_id()`。Phase 1
+  用户 trap handler 同时断言任务仍只在逻辑 CPU0 运行；
+- LA64 LSX 保存区因新增 8 字节字段和 16 字节对齐移至 `72 * 8`，Rust
+  `offset_of!` 断言与汇编常量共同阻止布局静默漂移；
 - RISC-V 已实现 SBI v0.2 BASE probe 与 HSM `hart_start`。OpenSBI cold-boot
   hart 映射为逻辑 CPU0，不能假设物理 hart 0 固定先启动；
 - LoongArch QEMU 已按官方 slave boot ROM 协议实现 mailbox 写入口、`dbar`
   和 IPI vector 0 唤醒；2K1000LA 多核调用明确返回不支持；
 - 双架构 `CORE_NUM=1/2/4/8` 均达到期望 online mask，现有 waitqueue ktest
   通过；比赛式省略 `-accel`、使用 `-smp 8` 的双架构命令也通过；
-- 启动期寄存器尚不能作为运行期 `cpu_id()` 来源：用户态可覆盖对应 GPR，
-  trap 入口还不会重装内核锚点。完整 PerCpu 字段、idle stack/context、
-  最小 trap/IPI 向量、console 多核串行化和全局初始化计数仍未完成，因此
-  整个 Phase 1 状态仍为 `partial`。
+- 双架构 `CORE_NUM=2` 用户态 regression 均达到 `online_mask=0x3`，6/6
+  用例通过；最终 ELF 反汇编确认用户寄存器保存、slot 70 CPU-local 加载和
+  kernel stack 切换顺序正确；
+- 完整 PerCpu 字段、idle stack/context、最小 trap/IPI 向量、console
+  多核串行化和全局初始化计数仍未完成，因此整个 Phase 1 状态仍为
+  `partial`。
 
 ### Phase 2：内核 trap、IPI 与 AP park/idle 唤醒
 

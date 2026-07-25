@@ -260,17 +260,17 @@ pub fn bootstrap_init(cpu_id: usize) {
     }
 }
 
-/// Install the Phase 1 boot-only CPU-local anchor in reserved register r21.
-pub fn install_boot_cpu_local(ptr: usize) {
+/// Install the current CPU's kernel-local anchor in reserved register r21.
+pub fn install_cpu_local(ptr: usize) {
     // Safety: r21 is non-allocatable in the psABI, but privilege entry does
-    // not switch GPRs.  This boot-only write happens before normal traps.
+    // not switch GPRs, so user trap entry explicitly reinstalls this value.
     unsafe {
         core::arch::asm!("move $r21, {ptr}", ptr = in(reg) ptr, options(nostack));
     }
 }
 
-/// Read back the current CPU's boot-only anchor for immediate verification.
-pub fn boot_cpu_local_ptr() -> usize {
+/// Read the kernel-local anchor after boot or user-trap entry installed it.
+pub fn cpu_local_ptr() -> usize {
     let ptr;
     // Safety: this is a read-only move from the same CPU-local register.
     unsafe {

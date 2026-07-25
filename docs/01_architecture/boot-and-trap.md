@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-24
+last_update: 2026-07-25
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -69,11 +69,12 @@ hardware ID 和 online mask；超时时报告 missing mask。当前仍是最小�
 FS、网络或驱动，所有内核和用户任务仍只由逻辑 CPU0 运行。
 
 每个 CPU 在完成硬件 ID 到逻辑 ID 的映射后，会把
-`&PER_CPUS[logical_id]` 写入启动期 CPU-local 寄存器并立即回读校验。
+`&PER_CPUS[logical_id]` 写入 CPU-local 寄存器并立即回读校验。
 `PER_CPUS` 固定为 8 个 64 字节对齐、非 BSS 的只读锚点；RV64 使用 `tp`，
-LA64 使用 `$r21`。这一步只建立启动期身份锚点：用户上下文能够覆盖这些
-寄存器，而 trap 入口尚未恢复内核值，因此当前没有对运行期公开 `cpu_id()`
-或让调度、MM 等子系统读取该指针。
+LA64 使用 `$r21`。用户返回前，当前 CPU 把该指针写入内核私有
+`TrapContext::kernel_cpu_local`；用户 trap 入口先保存用户寄存器，再从该字段
+重装内核值。因此运行期 `cpu_id()` 已可验证并读取当前逻辑 CPU，但 Phase 1
+仍只允许逻辑 CPU0 运行任务，调度、MM 和 IPI 尚未迁移到完整 PerCpu 状态。
 
 ### 2.1 2K1000LA U-Boot TFTP 启动
 
@@ -230,6 +231,30 @@ user pc
 ```
 
 具体 `run_tasks()` 还会在选择任务前执行过期 timer 唤醒、网络 poll、FS reclaim、zombie 回收和 shared futex compact。这些维护动作属于调度循环的一部分，而不是启动阶段一次性动作。
+
+### 4.1 CPU-local 寄存器所有权切换
+
+RV64 的 `tp` 同时承载用户 TLS 与内核 PerCpu 指针，LA64 的 `$r21` 则是
+ABI 保留的内核 CPU-local 寄存器。硬件特权级切换不会自动区分这两种所有权，
+因此用户 trap 必须按以下固定顺序执行：
+
+```text
+保存用户 tp / r21 到 TrapContext.gp
+  -> 从 TrapContext slot 70 加载 kernel_cpu_local
+  -> 切换 kernel_sp
+  -> 进入 Rust trap_handler()
+```
+
+`kernel_cpu_local` 所在 trap context 页只有内核 `R|W` 权限，没有用户 `U`
+权限。`trap_return()` 在信号和 exec 可能更新上下文之后刷新该字段，所以
+fork/clone 复制的旧值以及未来任务迁移都不会把原 CPU 的指针带到目标 CPU。
+内核任务上下文切换不保存 `tp/$r21`，因为该状态归 CPU 所有而非归任务所有。
+
+两架构的 `kernel_cpu_local` 汇编偏移均为 `70 * 8`。LA64 的 `LsxRegs` 要求
+16 字节对齐，因此新增字段后 LSX 区域从 `70 * 8` 移到 `72 * 8`；Rust
+使用编译期 `offset_of!` 断言与汇编常量保持一致。`smp::cpu_id()` 在读取
+表项前先验证寄存器地址属于 configured `PER_CPUS` 范围且按表项对齐，避免
+损坏的寄存器直接演变为任意裸指针解引用。
 
 ## 5. syscall 路径
 

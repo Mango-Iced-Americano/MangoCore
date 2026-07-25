@@ -169,10 +169,21 @@ pub fn enable_timer_interrupt() {
 #[link_section = ".text.trap_handler"]
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    // Any diagnostic failure below must use the kernel trap vector rather than
+    // re-entering the user trampoline with a kernel stack in `sp`.
+    set_kernel_trap_entry();
+    // User r21 has already been saved.  This validation proves the assembly
+    // reinstalled a configured PerCpu pointer before Rust consumes CPU state.
+    let cpu_id = crate::smp::cpu_id();
+    assert_eq!(
+        cpu_id,
+        crate::smp::BOOT_CPU_ID,
+        "Phase 1 user task trapped on non-boot CPU {}",
+        cpu_id
+    );
     if PrMd::read().get_pplv() == 0 {
         panic!();
     }
-    set_kernel_trap_entry();
 
     let cause = get_exception_cause();
     let stval = get_bad_addr();
@@ -456,6 +467,9 @@ pub fn trap_return() -> ! {
     set_user_trap_entry();
     let trap_cx = task.acquire_inner_lock().get_trap_cx();
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
+    // Refresh after signal/exec context changes and on every future migration:
+    // the CPU performing this return owns the pointer installed on next trap.
+    trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
     trap_cx.sstatus.set_pplv(3).set_pie(true);
     let allocated_asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
     // ASID_NONE 是软件分配失败哨兵，不是硬件 ASID。这里使用保留的内核 ASID 0；

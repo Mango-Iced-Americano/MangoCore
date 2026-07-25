@@ -1,5 +1,6 @@
 FP_START = 32
-LSX_START = 70*8
+# `kernel_cpu_local` occupies slot 70; LsxRegs remains 16-byte aligned.
+LSX_START = 72*8
 .altmacro
 .macro SAVE_GP n
     st.d $r\n, $sp, \n*8
@@ -101,6 +102,9 @@ __alltraps:
     #ld.d $t0, $sp, 67*8
     # load trap_handler into t1
     ld.d $t1, $sp, 68*8
+    # r21 was saved above; install this CPU's kernel-owned PerCpu pointer
+    # before the handler can execute Rust code that depends on CPU identity.
+    ld.d $r21, $sp, 70*8
     # move to kernel_sp
     ld.d $sp, $sp, 69*8
     # Kernel runs through direct-map windows, so entering a trap does not switch

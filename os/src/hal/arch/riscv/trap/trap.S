@@ -50,6 +50,9 @@ __alltraps:
     ld t0, 67*8(sp)
     # load trap_handler into t1
     ld t1, 68*8(sp)
+    # x4/tp was saved above; replace the user's TLS pointer with this CPU's
+    # kernel-owned PerCpu pointer before any Rust kernel code can observe it.
+    ld tp, 70*8(sp)
     # move to kernel_sp
     ld sp, 69*8(sp)
     # switch to kernel space

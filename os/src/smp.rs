@@ -5,6 +5,7 @@
 
 use core::{
     hint::spin_loop,
+    mem::size_of,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -79,24 +80,58 @@ pub fn register_cpu_entry(hardware_id: usize) -> usize {
         Err(existing) => existing,
     };
     let logical_id = hardware_to_logical_id(hardware_id, boot_hardware_id);
-    install_boot_cpu_local(logical_id);
+    install_cpu_local(logical_id);
     logical_id
 }
 
-/// Install and immediately verify the boot-only CPU-local pointer.
+/// Install and immediately verify this CPU's kernel-local pointer.
 ///
-/// No runtime caller may consume this pointer yet: user state can replace the
-/// CPU-local GPR until trap entry learns to restore the kernel value.
-fn install_boot_cpu_local(logical_id: usize) {
+/// User mode temporarily owns the same GPR, so the user trap entry restores
+/// this pointer before any Rust kernel code consumes it.
+fn install_cpu_local(logical_id: usize) {
     let per_cpu = &PER_CPUS[logical_id];
     debug_assert_eq!(per_cpu.logical_id, logical_id);
     let expected = per_cpu as *const PerCpu as usize;
-    crate::hal::install_boot_cpu_local(expected);
+    crate::hal::install_cpu_local(expected);
     assert_eq!(
-        crate::hal::boot_cpu_local_ptr(),
+        crate::hal::cpu_local_ptr(),
         expected,
-        "CPU-local register readback failed for logical CPU {logical_id}"
+        "CPU-local register readback failed for logical CPU {}",
+        logical_id
     );
+}
+
+/// Return the logical ID owned by the CPU executing this kernel code.
+///
+/// Validate the register as an array address before indexing `PER_CPUS`; a
+/// corrupted trap offset must panic instead of becoming an arbitrary pointer
+/// dereference in a later scheduler or IPI path.
+pub fn cpu_id() -> usize {
+    let ptr = crate::hal::cpu_local_ptr();
+    let base = PER_CPUS.as_ptr() as usize;
+    let stride = size_of::<PerCpu>();
+    let offset = ptr.checked_sub(base).unwrap_or_else(|| {
+        panic!(
+            "CPU-local pointer {:#x} precedes PerCpu table {:#x}",
+            ptr, base
+        )
+    });
+
+    assert_eq!(
+        offset % stride,
+        0,
+        "CPU-local pointer {:#x} is not PerCpu-aligned",
+        ptr
+    );
+    let logical_id = offset / stride;
+    assert!(
+        logical_id < CONFIGURED_CPU_COUNT,
+        "CPU-local pointer {:#x} selects unconfigured CPU {}",
+        ptr,
+        logical_id
+    );
+    assert_eq!(PER_CPUS[logical_id].logical_id, logical_id);
+    logical_id
 }
 
 const fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> usize {

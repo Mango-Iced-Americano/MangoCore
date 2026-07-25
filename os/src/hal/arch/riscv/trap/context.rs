@@ -136,7 +136,12 @@ pub struct TrapContext {
     pub trap_handler: usize,
     /// The current sp to be recovered on next entry into kernel space.
     pub kernel_sp: usize,
+    /// PerCpu pointer reinstalled in `tp` after the user's TLS value is saved.
+    pub kernel_cpu_local: usize,
 }
+
+// Trap assembly uses this numeric offset before switching to the kernel stack.
+const _: () = assert!(core::mem::offset_of!(TrapContext, kernel_cpu_local) == 70 * 8);
 
 impl TrapContext {
     pub fn set_sp(&mut self, sp: usize) {
@@ -162,6 +167,7 @@ impl TrapContext {
             kernel_satp,
             trap_handler,
             kernel_sp,
+            kernel_cpu_local: 0,
         };
         cx.gp.pc = entry;
         cx.set_sp(sp);

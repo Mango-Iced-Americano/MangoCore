@@ -1,0 +1,148 @@
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+[memory] 127769 usable physical frames across 1 region(s)
+[memory] region0: [0x90ce7000, 0xb0000000) frames=127769
+.text [0x80000000, 0x802a9000)
+.rodata [0x802a9000, 0x802e0000)
+.data [0x80313000, 0x80a10000)
+.bss [0x80a10000, 0x90ce7000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Hello, world!
+[get_timer_freq_first_time] clk freq: 100000000(from CPUCFG)
+[machine_init] address bits: hardware VALEN=48 PALEN=48, build VALEN=48 PALEN=48
+[CPUCFG 0x0] 1359888
+[CPUCFG 0x1] 66253566
+[CPUCFG 0x2] 6340815
+[CPUCFG 0x3] 0
+[CPUCFG 0x4] 100000000
+[CPUCFG 0x5] 65537
+[CPUCFG 0x6] 0
+[CPUCFG 0x10] 11325
+[CPUCFG 0x11] 101187587
+[CPUCFG 0x12] 101187587
+[CPUCFG 0x13] 101187599
+[CPUCFG 0x14] 101580815
+Misc { 32-bit addr plv(1,2,3):: false,false,false, rdtime allowed for plv(1,2,3):: false,false,false, Disable dirty bit check for plv(0,1,2):: false,false,false, Misalignment check for plv(0,1,2,4):: false,false,false,false }
+RVACfg { rbits: 0 }
+[machine_init] MMAP_BASE: 0xffffff8000000000
+[smp] minimal boot ready: configured=2 boot_hw_id=0 online_mask=0x3
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[kernel] random: secure source unavailable (Entropy(DeviceUnavailable)); secure reads will fail
+[memory] reclaimed linker frames: [0x80313000, 0x8036d000) frames=90
+[initramfs] unpacked: files=29 dirs=19 symlinks=1 bytes=364541
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] Regression mode — mounting disposable QEMU block fixture
+[PCI] ECAM base: 0x20000000
+[PCI] Device DeviceFunction { bus: 0, device: 0, function: 0 }: vendor=0x1b36 device=0x8
+[PCI] Device DeviceFunction { bus: 0, device: 1, function: 0 }: vendor=0x1af4 device=0x1000
+[PCI] VirtIO device: Network
+[PCI] Device DeviceFunction { bus: 0, device: 2, function: 0 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[PCI] Configuring BARs...
+[PCI] BAR1: Width32, addr=0x0, size=0x1000
+[PCI] BAR4: Width64, addr=0x0, size=0x4000
+[PCI] BAR4 is 64-bit
+[PCI] Device enabled.
+[kernel] block device 0: official fs (DeviceFunction { bus: 0, device: 2, function: 0 })
+[block] /dev/vda contains raw Ext4
+[fs] official fs (/dev/vda) root directory readable: 3 entries
+[kernel] official fs (/dev/vda) (Ext4) mounted at sdcard flags=(empty)
+[initramfs] no mountable tools fs, leaving /tools empty
+[regression_init] starting regression suite
+TAP version 13
+1..6
+[regression_usercopy_pipe] start
+  pipe created: rfd=3 wfd=4
+  wrote 8 bytes to pipe
+  read(null, 8) returned -14 (expect -14)
+  second read returned 8 bytes
+[regression_usercopy_pipe] PASS
+ok 1 usercopy_pipe
+[regression_mmap_edge_cases] start
+  mmap(len=0) returned -22 (expect -22)
+  allocated page at 0x1c00000000
+  mprotect(0x1c00001000, 2048, PROT_READ) returned 0
+  first page write OK
+  readback OK (0x43)
+  MAP_FIXED at 0x1c00001000 returned 0x1c00001000
+  first page marker intact after MAP_FIXED
+[regression_mmap_edge_cases] PASS
+ok 2 mmap_edge_cases
+[regression_timer_realtime_jump] start
+  timerfd created: fd=3
+  timerfd armed: 500ms relative
+  clock jumped +2s: 1798761601 -> 1798761603
+  read(timerfd) returned 8 (expirations=1)
+  timer fired 1 time(s) — OK
+  monotonic timerfd armed: 100ms
+  monotonic timerfd fired after 100ms (expirations=1)
+[regression_timer_realtime_jump] PASS
+ok 3 timer_realtime_jump
+[regression_rename_long_name] start
+  creating file with 255 byte name
+  255-byte file created OK
+  rename(255-byte → short) returned -18
+  rename failed with -18 — acceptable
+  attempting file with 256 byte name
+  openat(256-byte name) returned -36 — name rejected, OK
+  rename(short → 4096-byte) returned 0 (must not panic)
+[regression_rename_long_name] PASS
+ok 4 rename_long_name
+[regression_lwext4_trunc_hole] start: 8 pages, cold-reopen sparse-hole + batch read_pages + post-write persist
+  phase 1: wrote 8 pages 0xa0..0xa7
+  phase 1: synced and closed
+  phase 2: truncated to 123 bytes inside page 0
+  phase 2: synced and closed
+  phase 3: extended back to 8 pages (cold reopen)
+  phase 3a: retained partial-block prefix: 123 bytes all 0xa0 OK
+  phase 3a: truncated same-block tail: 3973 bytes all 0x00 OK
+  phase 3b: page-1 single (read_page): 4096 bytes all 0x00 OK
+  phase 3c: pages-1-2 batch (read_pages): 8192 bytes all 0x00 OK
+  phase 3d: wrote marker 0xbb to page 3
+  phase 3: synced and closed
+  phase 4a: page-3 marker persist: 4096 bytes all 0xbb OK
+  phase 4b: page-2 adj hole: 4096 bytes all 0x00 OK
+  phase 4c: page-4 adj hole: 4096 bytes all 0x00 OK
+  phase 4d: retained prefix intact: 123 bytes all 0xa0 OK
+  phase 4d: truncated tail remains zero: 3973 bytes all 0x00 OK
+  phase 4: verified, closed
+  phase 5a: sparse gap page 0: 4096 bytes all 0x00 OK
+  phase 5b: sparse gap page 1: 4096 bytes all 0x00 OK
+  phase 5c: sparse gap page 2: 4096 bytes all 0x00 OK
+  phase 5d: new-block zero prefix: 123 bytes all 0x00 OK
+  phase 5e: sparse marker: 17 bytes all 0xcc OK
+  phase 5f: new-block zero suffix after extend: 3956 bytes all 0x00 OK
+  phase 6a: leading extent survives hole truncate: 1 bytes all 0xdd OK
+  phase 6b: retained sparse range stays zero: 8191 bytes all 0x00 OK
+  phase 6c: data survives after-last no-op: 1 bytes all 0xdd OK
+  phase 6: inter-extent hole and after-last truncate paths OK
+  cleanup: test file removed
+[regression_lwext4_trunc_hole] PASS
+ok 5 lwext4_truncate_hole
+[regression_lwext4_namespace] start
+  PASS: nonempty_rmdir_preserves_contents
+  PASS: rename_same_inode_is_noop
+  PASS: hardlink_metadata_is_shared
+  PASS: failed_rename_preserves_both_sides
+  PASS: empty_directory_overwrite_fails_closed
+  PASS: open_directory_fd_follows_rename
+  PASS: overwrite_keeps_open_target_inode
+  PASS: open_source_fd_follows_rename
+  PASS: unlink_open_name_reuse_isolated
+[regression_lwext4_namespace] PASS
+ok 6 lwext4_namespace
+# results: 6 passed, 0 failed, 6 total
+[L4 REGRESSION RESULT: PASS]

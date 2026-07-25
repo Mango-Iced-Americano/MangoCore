@@ -1,0 +1,70 @@
+cp ./src/lang_items.rs.la ./src/lang_items.rs
+cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+make -f make/la64.mk build BLK_MODE=virt_pci MODE=release LOG= \
+	EXTRA_FEATURES=""
+make[1]: Entering directory '/app/os'
+(rustup target list | grep "loongarch64-unknown-linux-gnu (installed)") || rustup target add loongarch64-unknown-linux-gnu
+loongarch64-unknown-linux-gnu (installed)
+rustup component add rust-src
+make[2]: Entering directory '/app/user'
+(rustup target list | grep "loongarch64-unknown-linux-gnu (installed)") || rustup target add loongarch64-unknown-linux-gnu
+loongarch64-unknown-linux-gnu (installed)
+rustup component add rust-src
+rustup component add llvm-tools-preview
+cargo build --target=loongarch64-unknown-linux-gnu --release
+make[2]: Leaving directory '/app/user'
+CURL_RUNTIME=0 APK_RUNTIME=0 \
+	INET_TEST_RUNTIME=0 \
+	RNG_TEST_RUNTIME=0 \
+	PERSIST_PYTHON_RUNTIME=0 \
+	./build_initramfs.sh la64 release ../fs-img-dir/initramfs-la.cpio
+[initramfs] Building initramfs for la64 (release)...
+[initramfs] installed /init from ../user/target/loongarch64-unknown-linux-gnu/release/init
+[initramfs] installed /rescue/sh from ../user/tools/loongarch64/bin/busybox
+[initramfs] installed /regression from ../user/target/loongarch64-unknown-linux-gnu/release/regression
+[initramfs] generated /app/os/../fs-img-dir/initramfs-la.cpio (2.4M)
+=== Building lwext4 C library for loongarch64 ===
+
+
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64
+make[2]: Entering directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[3]: Entering directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[4]: Entering directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[5]: Entering directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[5]: Leaving directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[5]: Entering directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+[  4%] Building C object src/CMakeFiles/lwext4.dir/ext4_blockdev.c.o
+[ 13%] Building C object src/CMakeFiles/lwext4.dir/ext4_ialloc.c.o
+[ 13%] Building C object src/CMakeFiles/lwext4.dir/ext4_journal.c.o
+[ 17%] Building C object src/CMakeFiles/lwext4.dir/ext4_balloc.c.o
+[ 21%] Building C object src/CMakeFiles/lwext4.dir/ext4.c.o
+[ 26%] Building C object src/CMakeFiles/lwext4.dir/ext4_xattr.c.o
+[ 30%] Building C object src/CMakeFiles/lwext4.dir/ext4_super.c.o
+[ 43%] Building C object src/CMakeFiles/lwext4.dir/ext4_bcache.c.o
+[ 43%] Building C object src/CMakeFiles/lwext4.dir/ext4_fs.c.o
+[ 43%] Building C object src/CMakeFiles/lwext4.dir/ext4_dir.c.o
+[ 47%] Building C object src/CMakeFiles/lwext4.dir/ext4_block_group.c.o
+[ 52%] Building C object src/CMakeFiles/lwext4.dir/ext4_bitmap.c.o
+[ 56%] Building C object src/CMakeFiles/lwext4.dir/ext4_dir_idx.c.o
+[ 69%] Building C object src/CMakeFiles/lwext4.dir/ext4_debug.c.o
+[ 69%] Building C object src/CMakeFiles/lwext4.dir/ext4_crc32.c.o
+[ 73%] Building C object src/CMakeFiles/lwext4.dir/ext4_extent.c.o
+[ 73%] Building C object src/CMakeFiles/lwext4.dir/ext4_hash.c.o
+[ 82%] Building C object src/CMakeFiles/lwext4.dir/ext4_inode.c.o
+[ 82%] Building C object src/CMakeFiles/lwext4.dir/ext4_mkfs.c.o
+[ 86%] Building C object src/CMakeFiles/lwext4.dir/ulibc.c.o
+[ 91%] Building C object src/CMakeFiles/lwext4.dir/ext4_mbr.c.o
+[ 95%] Building C object src/CMakeFiles/lwext4.dir/ext4_trans.c.o
+[100%] Linking C static library liblwext4.a
+make[5]: Leaving directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+[100%] Built target lwext4
+make[4]: Leaving directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[3]: Leaving directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+make[2]: Leaving directory '/app/dependency/lwext4_rust/c/lwext4/build_lwext4-la64'
+=== lwext4 loongarch64 .a built ===
+Platform: laqemu
+# 在调用 rustc 前直接失败，避免继续使用过期的 linker.ld 编译。
+cp -f target/loongarch64-unknown-linux-gnu/release/os ../kernel-la
+make[1]: Leaving directory '/app/os'

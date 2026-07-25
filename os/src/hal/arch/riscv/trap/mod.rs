@@ -71,8 +71,19 @@ pub fn enable_timer_interrupt() {
 
 #[no_mangle]
 pub fn trap_handler() -> ! {
-    let scause = scause::read();
+    // Any diagnostic failure below must use the kernel trap vector rather than
+    // re-entering the user trampoline with a kernel stack in `sp`.
     set_kernel_trap_entry();
+    // User x4/tp has already been saved.  This validation proves the assembly
+    // reinstalled a configured PerCpu pointer before Rust consumes CPU state.
+    let cpu_id = crate::smp::cpu_id();
+    assert_eq!(
+        cpu_id,
+        crate::smp::BOOT_CPU_ID,
+        "Phase 1 user task trapped on non-boot CPU {}",
+        cpu_id
+    );
+    let scause = scause::read();
     let stval = stval::read();
 
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
@@ -207,6 +218,12 @@ pub fn trap_handler() -> ! {
 pub fn trap_return() -> ! {
     let task = do_signal();
     set_user_trap_entry();
+    // Refresh after signal/exec context changes and on every future migration:
+    // the CPU performing this return owns the pointer installed on next trap.
+    {
+        let inner = task.acquire_inner_lock();
+        inner.get_trap_cx().kernel_cpu_local = crate::hal::cpu_local_ptr();
+    }
     let trap_cx_ptr = task.trap_cx_user_va();
     let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;

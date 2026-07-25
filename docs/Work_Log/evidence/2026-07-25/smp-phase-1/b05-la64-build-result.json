@@ -1,0 +1,21 @@
+{
+  "duration_seconds": 166.479,
+  "forbidden_markers_found": [],
+  "job_id": "smp-p1-b05-la64-build-20260725",
+  "mutation_detected": true,
+  "process_exit_code": 0,
+  "recipe": "la64-kernel-build",
+  "required_markers_missing": [],
+  "source_after": {
+    "head": "4cb1f08fb1d1920b3269fbccd5c9482c953869ec",
+    "status_sha256": "83b3203755bb7034b0edd0b7d794e33cfbd4b15fc6f443f3b45b3fc718fe000e",
+    "tracked_diff_sha256": "23bf2fa7f7e19d1c90fe066dc99bec8e8691ba242738cbea50678da676d72efe"
+  },
+  "source_before": {
+    "head": "4cb1f08fb1d1920b3269fbccd5c9482c953869ec",
+    "status_sha256": "ace869945010142c8bb657accf74d93f08deae23b1b5d55af642b8f99e09eb2d",
+    "tracked_diff_sha256": "5631a4179690e8e209e15099e31178a87d2736ab4c3ff926dea409d8c8fd11cb"
+  },
+  "status": "FAIL",
+  "timed_out": false
+}

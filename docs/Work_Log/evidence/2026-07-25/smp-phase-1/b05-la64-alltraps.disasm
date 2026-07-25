@@ -1,0 +1,134 @@
+
+target/loongarch64-unknown-linux-gnu/release/os:     file format elf64-loongarch
+
+
+Disassembly of section .text:
+
+0000000080001000 <__alltraps>:
+    80001000:	0400c023 	csrwr       	$sp, 0x30
+    80001004:	29c02061 	st.d        	$ra, $sp, 8
+    80001008:	29c04062 	st.d        	$tp, $sp, 16
+    8000100c:	29c08064 	st.d        	$a0, $sp, 32
+    80001010:	29c0a065 	st.d        	$a1, $sp, 40
+    80001014:	29c0c066 	st.d        	$a2, $sp, 48
+    80001018:	29c0e067 	st.d        	$a3, $sp, 56
+    8000101c:	29c10068 	st.d        	$a4, $sp, 64
+    80001020:	29c12069 	st.d        	$a5, $sp, 72
+    80001024:	29c1406a 	st.d        	$a6, $sp, 80
+    80001028:	29c1606b 	st.d        	$a7, $sp, 88
+    8000102c:	29c1806c 	st.d        	$t0, $sp, 96
+    80001030:	29c1a06d 	st.d        	$t1, $sp, 104
+    80001034:	29c1c06e 	st.d        	$t2, $sp, 112
+    80001038:	29c1e06f 	st.d        	$t3, $sp, 120
+    8000103c:	29c20070 	st.d        	$t4, $sp, 128
+    80001040:	29c22071 	st.d        	$t5, $sp, 136
+    80001044:	29c24072 	st.d        	$t6, $sp, 144
+    80001048:	29c26073 	st.d        	$t7, $sp, 152
+    8000104c:	29c28074 	st.d        	$t8, $sp, 160
+    80001050:	29c2a075 	st.d        	$r21, $sp, 168
+    80001054:	29c2c076 	st.d        	$fp, $sp, 176
+    80001058:	29c2e077 	st.d        	$s0, $sp, 184
+    8000105c:	29c30078 	st.d        	$s1, $sp, 192
+    80001060:	29c32079 	st.d        	$s2, $sp, 200
+    80001064:	29c3407a 	st.d        	$s3, $sp, 208
+    80001068:	29c3607b 	st.d        	$s4, $sp, 216
+    8000106c:	29c3807c 	st.d        	$s5, $sp, 224
+    80001070:	29c3a07d 	st.d        	$s6, $sp, 232
+    80001074:	29c3c07e 	st.d        	$s7, $sp, 240
+    80001078:	29c3e07f 	st.d        	$s8, $sp, 248
+    8000107c:	2bc40060 	fst.d       	$fa0, $sp, 256
+    80001080:	2bc42061 	fst.d       	$fa1, $sp, 264
+    80001084:	2bc44062 	fst.d       	$fa2, $sp, 272
+    80001088:	2bc46063 	fst.d       	$fa3, $sp, 280
+    8000108c:	2bc48064 	fst.d       	$fa4, $sp, 288
+    80001090:	2bc4a065 	fst.d       	$fa5, $sp, 296
+    80001094:	2bc4c066 	fst.d       	$fa6, $sp, 304
+    80001098:	2bc4e067 	fst.d       	$fa7, $sp, 312
+    8000109c:	2bc50068 	fst.d       	$ft0, $sp, 320
+    800010a0:	2bc52069 	fst.d       	$ft1, $sp, 328
+    800010a4:	2bc5406a 	fst.d       	$ft2, $sp, 336
+    800010a8:	2bc5606b 	fst.d       	$ft3, $sp, 344
+    800010ac:	2bc5806c 	fst.d       	$ft4, $sp, 352
+    800010b0:	2bc5a06d 	fst.d       	$ft5, $sp, 360
+    800010b4:	2bc5c06e 	fst.d       	$ft6, $sp, 368
+    800010b8:	2bc5e06f 	fst.d       	$ft7, $sp, 376
+    800010bc:	2bc60070 	fst.d       	$ft8, $sp, 384
+    800010c0:	2bc62071 	fst.d       	$ft9, $sp, 392
+    800010c4:	2bc64072 	fst.d       	$ft10, $sp, 400
+    800010c8:	2bc66073 	fst.d       	$ft11, $sp, 408
+    800010cc:	2bc68074 	fst.d       	$ft12, $sp, 416
+    800010d0:	2bc6a075 	fst.d       	$ft13, $sp, 424
+    800010d4:	2bc6c076 	fst.d       	$ft14, $sp, 432
+    800010d8:	2bc6e077 	fst.d       	$ft15, $sp, 440
+    800010dc:	2bc70078 	fst.d       	$fs0, $sp, 448
+    800010e0:	2bc72079 	fst.d       	$fs1, $sp, 456
+    800010e4:	2bc7407a 	fst.d       	$fs2, $sp, 464
+    800010e8:	2bc7607b 	fst.d       	$fs3, $sp, 472
+    800010ec:	2bc7807c 	fst.d       	$fs4, $sp, 480
+    800010f0:	2bc7a07d 	fst.d       	$fs5, $sp, 488
+    800010f4:	2bc7c07e 	fst.d       	$fs6, $sp, 496
+    800010f8:	2bc7e07f 	fst.d       	$fs7, $sp, 504
+    800010fc:	0400080c 	csrrd       	$t0, 0x2
+    80001100:	0340098c 	andi        	$t0, $t0, 0x2
+    80001104:	40008580 	beqz        	$t0, 132	# 80001188 <__alltraps+0x188>
+    80001108:	2c490060 	vst         	$vr0, $sp, 576
+    8000110c:	2c494061 	vst         	$vr1, $sp, 592
+    80001110:	2c498062 	vst         	$vr2, $sp, 608
+    80001114:	2c49c063 	vst         	$vr3, $sp, 624
+    80001118:	2c4a0064 	vst         	$vr4, $sp, 640
+    8000111c:	2c4a4065 	vst         	$vr5, $sp, 656
+    80001120:	2c4a8066 	vst         	$vr6, $sp, 672
+    80001124:	2c4ac067 	vst         	$vr7, $sp, 688
+    80001128:	2c4b0068 	vst         	$vr8, $sp, 704
+    8000112c:	2c4b4069 	vst         	$vr9, $sp, 720
+    80001130:	2c4b806a 	vst         	$vr10, $sp, 736
+    80001134:	2c4bc06b 	vst         	$vr11, $sp, 752
+    80001138:	2c4c006c 	vst         	$vr12, $sp, 768
+    8000113c:	2c4c406d 	vst         	$vr13, $sp, 784
+    80001140:	2c4c806e 	vst         	$vr14, $sp, 800
+    80001144:	2c4cc06f 	vst         	$vr15, $sp, 816
+    80001148:	2c4d0070 	vst         	$vr16, $sp, 832
+    8000114c:	2c4d4071 	vst         	$vr17, $sp, 848
+    80001150:	2c4d8072 	vst         	$vr18, $sp, 864
+    80001154:	2c4dc073 	vst         	$vr19, $sp, 880
+    80001158:	2c4e0074 	vst         	$vr20, $sp, 896
+    8000115c:	2c4e4075 	vst         	$vr21, $sp, 912
+    80001160:	2c4e8076 	vst         	$vr22, $sp, 928
+    80001164:	2c4ec077 	vst         	$vr23, $sp, 944
+    80001168:	2c4f0078 	vst         	$vr24, $sp, 960
+    8000116c:	2c4f4079 	vst         	$vr25, $sp, 976
+    80001170:	2c4f807a 	vst         	$vr26, $sp, 992
+    80001174:	2c4fc07b 	vst         	$vr27, $sp, 1008
+    80001178:	2c50007c 	vst         	$vr28, $sp, 1024
+    8000117c:	2c50407d 	vst         	$vr29, $sp, 1040
+    80001180:	2c50807e 	vst         	$vr30, $sp, 1056
+    80001184:	2c50c07f 	vst         	$vr31, $sp, 1072
+    80001188:	0114c80c 	movfcsr2gr  	$t0, $fcsr0
+    8000118c:	2988006c 	st.w        	$t0, $sp, 512
+    80001190:	0114dcec 	movcf2gr    	$t0, $fcc7
+    80001194:	0040858c 	slli.w      	$t0, $t0, 0x1
+    80001198:	0114dccc 	movcf2gr    	$t0, $fcc6
+    8000119c:	0040858c 	slli.w      	$t0, $t0, 0x1
+    800011a0:	0114dcac 	movcf2gr    	$t0, $fcc5
+    800011a4:	0040858c 	slli.w      	$t0, $t0, 0x1
+    800011a8:	0114dc8c 	movcf2gr    	$t0, $fcc4
+    800011ac:	0040858c 	slli.w      	$t0, $t0, 0x1
+    800011b0:	0114dc6c 	movcf2gr    	$t0, $fcc3
+    800011b4:	0040858c 	slli.w      	$t0, $t0, 0x1
+    800011b8:	0114dc4c 	movcf2gr    	$t0, $fcc2
+    800011bc:	0040858c 	slli.w      	$t0, $t0, 0x1
+    800011c0:	0114dc2c 	movcf2gr    	$t0, $fcc1
+    800011c4:	0040858c 	slli.w      	$t0, $t0, 0x1
+    800011c8:	0114dc0c 	movcf2gr    	$t0, $fcc0
+    800011cc:	2908106c 	st.b        	$t0, $sp, 516
+    800011d0:	29c82064 	st.d        	$a0, $sp, 520
+    800011d4:	0400040c 	csrrd       	$t0, 0x1
+    800011d8:	0400180d 	csrrd       	$t1, 0x6
+    800011dc:	29c8406c 	st.d        	$t0, $sp, 528
+    800011e0:	29c0006d 	st.d        	$t1, $sp, 0
+    800011e4:	0400c00e 	csrrd       	$t2, 0x30
+    800011e8:	29c0606e 	st.d        	$t2, $sp, 24
+    800011ec:	28c8806d 	ld.d        	$t1, $sp, 544
+    800011f0:	28c8c075 	ld.d        	$r21, $sp, 560
+    800011f4:	28c8a063 	ld.d        	$sp, $sp, 552
+    800011f8:	4c0001a0 	jr          	$t1
