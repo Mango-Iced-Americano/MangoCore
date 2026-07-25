@@ -175,6 +175,13 @@ pub fn machine_init() {
         boot_trace!("[machine_init] MMAP_BASE: {:#x}", MMAP_BASE);
     }
     trap::enable_timer_interrupt();
+    #[cfg(feature = "board_laqemu")]
+    {
+        // CPU0 需要接收 AP 的运行期回复；先清/开放 IOCSR vector，再把
+        // ECFG.IPI 加入本地 mask。2K1000 单核路径不执行这段代码。
+        configure_local_ipi();
+        trap::enable_ipi_interrupt();
+    }
 }
 pub fn pre_start_init() {
     EEntry::empty().set_exception_entry(strampoline as usize);
@@ -437,12 +444,13 @@ pub(super) fn clear_local_ipi() {
 #[cfg(feature = "board_2k1000")]
 pub(super) fn clear_local_ipi() {}
 
-/// AP 的 IPI-only idle loop；内核 trap 返回后继续等待下一次 doorbell。
-pub fn secondary_cpu_idle() -> ! {
-    loop {
-        // Safety: `idle 0` 只暂停当前 CPU，全局 IE 和 IPI mask 已完成本地配置。
-        unsafe { core::arch::asm!("idle 0") };
-    }
+/// 在全局 IE 关闭时等待一个中断唤醒。
+///
+/// LoongArch IDLE 被中断唤醒后从下一条指令继续；调用方随后恢复 IE，使已
+/// pending 的 IPI 进入统一内核 trap，再回到 idle 循环处理 deferred work。
+pub fn secondary_cpu_wait() {
+    // Safety: `idle 0` 只暂停当前 CPU，不访问内存或修改 CSR mask。
+    unsafe { core::arch::asm!("idle 0") };
 }
 
 /// The 2K1000LA remains intentionally single-core in this QEMU-only phase.

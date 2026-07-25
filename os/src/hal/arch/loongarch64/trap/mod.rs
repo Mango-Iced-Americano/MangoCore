@@ -164,6 +164,20 @@ pub fn enable_timer_interrupt() {
         .write();
 }
 
+/// 在不覆盖 timer mask 的前提下为 CPU0 开放本地 IPI line。
+pub fn enable_ipi_interrupt() {
+    ECfg::read()
+        .set_line_based_interrupt_vector(LineBasedInterrupt::IPI)
+        .write();
+}
+
+/// 用户态和内核态共用的 IPI hard-IRQ fast path。
+fn handle_ipi_interrupt() {
+    // IOCSR vector 是 level-triggered；先清硬件源，再 Acquire 消费 mailbox。
+    super::clear_local_ipi();
+    crate::smp::handle_ipi();
+}
+
 /// 用户态和内核态共用的 timer hard-IRQ fast path。
 ///
 /// TICLR/one-shot 静默由 HAL 完成；这里不获取普通锁，也不执行 callback 或调度。
@@ -330,6 +344,9 @@ pub fn trap_handler() -> ! {
         Trap::Interrupt(Interrupt::Timer) => {
             handle_timer_interrupt();
         }
+        Trap::Interrupt(Interrupt::IPI) => {
+            handle_ipi_interrupt();
+        }
         Trap::Exception(Exception::Breakpoint) => {
             read_bp();
         }
@@ -404,8 +421,7 @@ pub fn trap_handler() -> ! {
                 is_float,
             );
         }
-        Trap::Interrupt(Interrupt::IPI)
-        | Trap::MachineError(_)
+        Trap::MachineError(_)
         | Trap::Unknown
         | Trap::Exception(Exception::AddressError)
         | _ => {
@@ -533,10 +549,9 @@ pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
     let cause = get_exception_cause();
     match cause {
         Trap::Interrupt(Interrupt::IPI) => {
-            // IPI fast path 必须早于 BADV/console 诊断：中断不会更新 BADV，读取
-            // 陈旧地址可能误触发栈溢出打印，而 console 尚未具备多核 irq-safe 锁。
-            super::clear_local_ipi();
-            crate::smp::handle_ipi();
+            // IPI fast path 必须早于 BADV/console 诊断：中断不会更新 BADV，
+            // 陈旧地址可能误触发栈溢出打印。
+            handle_ipi_interrupt();
             return;
         }
         Trap::Interrupt(Interrupt::Timer) => {

@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-25
+last_updated: 2026-07-26
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -81,7 +81,7 @@ related_docs:
 |---|---|---|
 | 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack 和 1/2/4/8 核最小 online 闭环已完成 | AP 已进入可被 IPI 唤醒的 idle loop，但尚无 STOP、timer 和调度能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | PerCpu 目前只增加最小 IPI reason/ack，完整 global/local init 仍未接入 |
-| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；内核 trap 已支持无锁 IPI 与 timer fast path | CPU0 尚未常态开放内核中断窗口，STOP 和 shootdown 尚未接入 |
+| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI fast path，CPU0 可在受控窗口接收 AP 回复；内核 timer 已 deferred | 普通长内核区间尚未常态开放中断窗口，STOP 和 shootdown 尚未接入 |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -422,7 +422,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09/B10/B11）
+#### 当前进度（SMP-P2-B09/B10/B11/B12）
 
 - `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
   表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
@@ -454,9 +454,19 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B11 的双架构 `CORE_NUM=2 KTEST=smp` 均通过 6/6。新增用例连续执行两轮
   真实内核 timer IRQ，证明 hard IRQ 不执行 deferred 工作、不切换当前
   任务，安全点恰好消费一批且能重新触发下一轮 one-shot；
-- CPU0 尚未启用 IPI 本地 mask，也未在普通内核执行期间开放受控中断窗口。
-  AP→CPU0、交叉发送、并发 reason、10,000 次 ping-pong、STOP 和长 syscall
-  中断窗口仍未完成，Phase 2 状态保持 `partial`。
+- B12 已在 CPU0 启用 RV64 SSIE，以及 LA64 QEMU 的 IOCSR/ECFG IPI line；
+  用户态和内核态 trap 共用同一个无锁 fast path，AP→BSP 不再依赖只存在
+  于 BSP→AP 方向的假设；
+- AP 收到往返请求时，hard IRQ 只原子发布 reply pending；真正的回复
+  doorbell 延后到 AP idle stack。idle loop 在全局中断关闭后先重查
+  deferred work，再执行一次 `wfi`/`idle 0`，本地 IPI line 保持 enabled，
+  从协议上消除 check→wait 窗口中的 lost wakeup；
+- B12 的双架构 `CORE_NUM=4 KTEST=smp` 均通过 7/7。每个架构的三个 AP
+  各完成 64 轮顺序请求/回复，共覆盖 192 次 AP→BSP doorbell；源码验证
+  前后指纹一致；
+- CPU0 目前只在 focused test 控制的窗口内开放中断。通用交叉发送、并发
+  reason、10,000 次 ping-pong、STOP 和普通长 syscall 中断窗口仍未完成，
+  Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
 timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。

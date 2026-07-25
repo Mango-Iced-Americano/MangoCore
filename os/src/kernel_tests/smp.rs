@@ -28,6 +28,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::kernel_timer_irq_is_deferred",
             kernel_timer_irq_is_deferred,
         ),
+        KernelTest::new(
+            "smp::ap_to_bsp_ipi_round_trip",
+            ap_to_bsp_ipi_round_trip,
+        ),
     ]
 }
 
@@ -169,6 +173,74 @@ fn deferred_timer_round(expected_tid: usize) -> Result<(), &'static str> {
     }
     if crate::task::current_tid() != expected_tid {
         return Err("timer safe point resumed a different task");
+    }
+    Ok(())
+}
+
+/// 反复验证 AP hard IRQ → idle deferred reply → CPU0 kernel trap 的完整闭环。
+fn ap_to_bsp_ipi_round_trip() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("round-trip test ran on an AP");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    // CPU0 的 kernel task 默认关中断。请求先送到 AP，随后只在受控窗口打开
+    // 本地全局中断接收 reply；每轮结束仍保持关中断。
+    let original_irq_state = crate::hal::local_irq_save();
+    let result = round_trip_all_aps();
+    // 受控窗口内可能同时收到 timer hard IRQ；用 B11 的生产安全点收尾，
+    // 避免把 quiesced one-shot 留给后续测试或 shutdown。
+    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::hal::local_irq_restore(original_irq_state);
+    result
+}
+
+fn round_trip_all_aps() -> Result<(), &'static str> {
+    const ROUNDS_PER_AP: usize = 64;
+
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        let failures_before = crate::smp::ipi_send_failures(cpu_id);
+        for round in 0..ROUNDS_PER_AP {
+            let expected = match crate::smp::send_ipi_round_trip(cpu_id) {
+                Ok(expected) => expected,
+                Err(error) => {
+                    crate::println!(
+                        "# SMP round-trip request failed: cpu={} round={} error={}",
+                        cpu_id,
+                        round,
+                        error
+                    );
+                    return Err("failed to send round-trip request");
+                }
+            };
+
+            crate::hal::local_irq_restore(true);
+            let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+            while crate::smp::round_trip_reply_ack() != expected {
+                if crate::hal::get_time() >= deadline {
+                    let _ = crate::hal::local_irq_save();
+                    crate::println!(
+                        "# SMP round-trip timeout: cpu={} round={} expected={} observed={} send_failures={}",
+                        cpu_id,
+                        round,
+                        expected,
+                        crate::smp::round_trip_reply_ack(),
+                        crate::smp::ipi_send_failures(cpu_id)
+                    );
+                    return Err("AP-to-BSP IPI reply timed out");
+                }
+                core::hint::spin_loop();
+            }
+            if !crate::hal::local_irq_save() {
+                return Err("round-trip test lost its controlled interrupt window");
+            }
+        }
+
+        if crate::smp::ipi_send_failures(cpu_id) != failures_before {
+            return Err("AP failed to send a deferred IPI reply");
+        }
     }
     Ok(())
 }

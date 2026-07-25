@@ -23,6 +23,7 @@ pub mod rv_board;
 pub fn machine_init() {
     trap::init();
     trap::enable_timer_interrupt();
+    trap::enable_ipi_interrupt();
     // First timer deadline is set by timer_subsystem_init() after boot.
 }
 
@@ -116,12 +117,13 @@ pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
     sbi::send_ipi(hardware_id)
 }
 
-/// AP 的最小 idle loop；SIE 已由 bootstrap 的 IPI-only 初始化打开。
-pub fn secondary_cpu_idle() -> ! {
-    loop {
-        // Safety: WFI 只暂停当前 hart；SSIP 到达后从内核 trap 返回此循环。
-        unsafe { riscv::asm::wfi() };
-    }
+/// 在全局 SIE 关闭时等待一个局部已使能的中断。
+///
+/// RISC-V 规定 WFI 必须因局部 enabled+pending 的中断恢复，不受全局 SIE
+/// 影响；调用方在返回后恢复 SIE，让 pending source 真正进入 trap。
+pub fn secondary_cpu_wait() {
+    // Safety: WFI 只暂停当前 hart，不访问内存或改变中断 mask。
+    unsafe { riscv::asm::wfi() };
 }
 
 /// Keep an online Phase 1 AP outside the legacy scheduler.

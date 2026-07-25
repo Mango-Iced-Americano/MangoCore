@@ -25,6 +25,12 @@ struct PerCpu {
     pending_ipi: AtomicU32,
     /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
     ipi_ping_ack: AtomicUsize,
+    /// 收到 round-trip 请求后，由 AP idle 上下文发送回复；IRQ handler 不发门铃。
+    round_trip_reply_pending: AtomicBool,
+    /// CPU0 已在本地 trap 中处理的 round-trip 回复序号。
+    round_trip_reply_ack: AtomicUsize,
+    /// 本 CPU 在 idle deferred 路径发送 IPI 失败的次数。
+    ipi_send_failures: AtomicUsize,
     /// 本 CPU 是否有尚未在安全点处理的 timer 工作；多个 IRQ 可以合并。
     timer_pending: AtomicBool,
     /// 本 CPU 进入 timer 硬中断 fast path 的次数，仅用于诊断和 focused test。
@@ -41,6 +47,9 @@ impl PerCpu {
             idle: AtomicBool::new(false),
             pending_ipi: AtomicU32::new(0),
             ipi_ping_ack: AtomicUsize::new(0),
+            round_trip_reply_pending: AtomicBool::new(false),
+            round_trip_reply_ack: AtomicUsize::new(0),
+            ipi_send_failures: AtomicUsize::new(0),
             timer_pending: AtomicBool::new(false),
             timer_irq_count: AtomicUsize::new(0),
             timer_deferred_count: AtomicUsize::new(0),
@@ -58,6 +67,10 @@ pub struct IpiReason(u32);
 impl IpiReason {
     /// 只用于证明 mailbox、doorbell、trap 和 ack 闭环。
     pub const PING: Self = Self(1 << 0);
+    /// CPU0 请求 AP 在退出 hard IRQ 后回送一个真实 IPI。
+    const ROUND_TRIP_REQUEST: Self = Self(1 << 1);
+    /// AP idle 上下文向 CPU0 发布的 round-trip 回复。
+    const ROUND_TRIP_REPLY: Self = Self(1 << 2);
 
     const fn bits(self) -> u32 {
         self.0
@@ -195,9 +208,36 @@ pub fn send_ipi_ping(cpu_id: usize) -> Result<usize, isize> {
     Ok(expected_ack)
 }
 
+/// 从 CPU0 发起一次 AP→BSP 硬件 IPI round-trip。
+///
+/// 请求 reason 仍由 AP hard IRQ 原子消费；AP 返回独立 idle 上下文后才发送
+/// reply doorbell。调用方必须等待返回的 ack 后才能向同一目标复用 reason。
+pub fn send_ipi_round_trip(cpu_id: usize) -> Result<usize, isize> {
+    if self::cpu_id() != BOOT_CPU_ID || cpu_id == BOOT_CPU_ID || cpu_id >= CONFIGURED_CPU_COUNT {
+        return Err(-3);
+    }
+    let expected = round_trip_reply_ack().wrapping_add(1);
+    send_ipi(cpu_id, IpiReason::ROUND_TRIP_REQUEST)?;
+    Ok(expected)
+}
+
 /// 查询目标 CPU 已处理的 PING 序号。
 pub fn ipi_ping_ack(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id].ipi_ping_ack.load(Ordering::Acquire)
+}
+
+/// 查询 CPU0 已处理的 round-trip 回复序号。
+pub fn round_trip_reply_ack() -> usize {
+    PER_CPUS[BOOT_CPU_ID]
+        .round_trip_reply_ack
+        .load(Ordering::Acquire)
+}
+
+/// 查询目标 CPU 在 deferred idle 路径发送 IPI 的失败次数。
+pub fn ipi_send_failures(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id]
+        .ipi_send_failures
+        .load(Ordering::Acquire)
 }
 
 /// 在当前 CPU 的硬中断上下文消费 mailbox。
@@ -212,6 +252,36 @@ pub fn handle_ipi() {
         // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
         local.ipi_ping_ack.fetch_add(1, Ordering::Release);
     }
+    if reasons & IpiReason::ROUND_TRIP_REQUEST.bits() != 0 {
+        // hard IRQ 只发布 deferred work；SBI/MMIO doorbell 由 idle 栈发送。
+        local
+            .round_trip_reply_pending
+            .store(true, Ordering::Release);
+    }
+    if reasons & IpiReason::ROUND_TRIP_REPLY.bits() != 0 {
+        local.round_trip_reply_ack.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// 在 AP idle 栈上执行 hard IPI 延迟下来的有界工作。
+///
+/// 调用方已关闭本地全局中断，因此 pending 检查与下一次 wait 之间不存在
+/// handler 插入窗口。函数不获取普通锁，也不进入调度器。
+fn service_secondary_ipi_work() -> bool {
+    let cpu_id = self::cpu_id();
+    debug_assert_ne!(cpu_id, BOOT_CPU_ID);
+    let local = &PER_CPUS[cpu_id];
+    if !local
+        .round_trip_reply_pending
+        .swap(false, Ordering::Acquire)
+    {
+        return false;
+    }
+
+    if send_ipi(BOOT_CPU_ID, IpiReason::ROUND_TRIP_REPLY).is_err() {
+        local.ipi_send_failures.fetch_add(1, Ordering::Release);
+    }
+    true
 }
 
 /// 在当前 CPU 的 timer IRQ fast path 发布一批待处理工作。
@@ -424,8 +494,16 @@ extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
     mark_cpu_idle(cpu_id);
     mark_cpu_online(cpu_id);
 
-    // AP 仍不进入旧调度器，只在独立 idle stack 上响应 IPI-only 中断。
-    crate::hal::secondary_cpu_idle();
+    // AP 仍不进入旧调度器。全局中断关闭后先重查 deferred work，再执行
+    // 架构 wait；局部 IPI mask 保持打开，所以 check→wait 之间到达的 IPI
+    // 会使 wait 返回，恢复全局中断后进入 hard handler，不会丢失唤醒。
+    loop {
+        let irq_was_enabled = crate::hal::local_irq_save();
+        if !service_secondary_ipi_work() {
+            crate::hal::secondary_cpu_wait();
+        }
+        crate::hal::local_irq_restore(irq_was_enabled);
+    }
 }
 
 /// Start/release APs and wait until the configured topology is online.

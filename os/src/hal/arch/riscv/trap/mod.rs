@@ -63,6 +63,21 @@ pub fn enable_timer_interrupt() {
     }
 }
 
+/// CPU0 接收 AP→BSP IPI 所需的本地 SSIE；全局 SIE 仍由执行上下文控制。
+pub fn enable_ipi_interrupt() {
+    unsafe {
+        sie::set_ssoft();
+    }
+}
+
+/// 用户态和内核态共用的 IPI hard-IRQ fast path。
+fn handle_ipi_interrupt() {
+    // OpenSBI 把 IPI 表现为 SSIP。先清电平源，再消费 Release 发布的
+    // mailbox；并发的新 doorbell 即使与 swap 交错，也只会产生空中断。
+    unsafe { asm!("csrci sip, 2") };
+    crate::smp::handle_ipi();
+}
+
 /// 两种 trap 来源共享的 timer hard-IRQ fast path。
 ///
 /// 性能计数和硬件静默之外只发布 per-CPU pending；队列锁、callback 和调度
@@ -209,6 +224,9 @@ pub fn trap_handler() -> ! {
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             handle_timer_interrupt();
         }
+        Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            handle_ipi_interrupt();
+        }
         _ => {
             panic!(
                 "Unsupported trap {:?}, stval = {:#x}!",
@@ -259,10 +277,7 @@ pub extern "C" fn trap_from_kernel() {
     let cause = riscv::register::scause::read().cause();
     match cause {
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
-            // OpenSBI 把 IPI 表现为 SSIP。先清电平源，再消费 Release 发布的
-            // mailbox；并发的新 doorbell 即使与 swap 交错，也只会产生空中断。
-            unsafe { asm!("csrci sip, 2") };
-            crate::smp::handle_ipi();
+            handle_ipi_interrupt();
             return;
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
