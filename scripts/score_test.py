@@ -159,7 +159,27 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--log", type=Path, required=True, help="raw QEMU serial log")
     parser.add_argument("--output", type=Path, required=True, help="structured score JSON output")
     parser.add_argument("--judge-dir", type=Path, default=Path("judge"))
+    parser.add_argument("--table", action="store_true", help="print human-readable table instead of JSON")
     return parser.parse_args()
+
+
+def _print_table(arch: str, groups: dict, score: float, passed: bool) -> None:
+    """Print a human-readable score table."""
+    print(f"\n{'=' * 72}")
+    print(f"  {arch.upper()} Competition Score")
+    print(f"{'=' * 72}")
+    print(f"  {'Group':<18} {'musl pass/fail':<18} {'glibc pass/fail':<18} {'Status':<10}")
+    print(f"  {'-' * 68}")
+    for group, variants in sorted(groups.items()):
+        musl = variants.get("musl", {"pass": 0, "fail": 0})
+        glibc = variants.get("glibc", {"pass": 0, "fail": 0})
+        m_str = f"{musl['pass']}/{musl['fail']}"
+        g_str = f"{glibc['pass']}/{glibc['fail']}"
+        ok = "+" if musl["fail"] == 0 and glibc["fail"] == 0 else "-" if glibc["fail"] > 0 else "~"
+        print(f"  {group:<18} {m_str:<18} {g_str:<18} {ok:<10}")
+    print(f"{'=' * 72}")
+    print(f"  TOTAL SCORE: {score:.1f}/100  |  {'PASSED' if passed else 'FAILED'}")
+    print(f"{'=' * 72}\n")
 
 
 def main() -> int:
@@ -174,7 +194,10 @@ def main() -> int:
     payload = {"arch": args.arch, "groups": groups, "score": score, "passed": passed}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(payload, indent=2))
+    if args.table:
+        _print_table(args.arch, groups, score, passed)
+    else:
+        print(json.dumps(payload, indent=2))
     return 0 if passed else 1
 
 
