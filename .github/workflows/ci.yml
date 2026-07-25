@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, chore/clean-up]
   pull_request:
     branches: [develop, main]
   workflow_dispatch:
@@ -57,13 +57,21 @@ jobs:
           submodules: recursive
       - name: Docker compose up
         run: docker compose up -d
+      - name: Provision toolchain
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              make toolchain-setup
+            '
       - name: Clippy rv64
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && cargo clippy --lib -p mango-kernel-core --target riscv64gc-unknown-none-elf -- -W warnings
+              cd /app/os && cargo clippy --features "board_rvqemu block_virt" -- -W warnings
             '
       - name: Clippy la64
         run: |
@@ -71,7 +79,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && cargo clippy --lib -p mango-kernel-core --target loongarch64-unknown-linux-gnu -- -W warnings
+              cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "board_laqemu block_virt_pci" -- -W warnings
             '
       - name: Docker compose down
         if: always()
@@ -92,13 +100,22 @@ jobs:
           submodules: recursive
       - name: Docker compose up
         run: docker compose up -d
+      - name: Provision toolchain
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              make toolchain-setup
+            '
       - name: Cargo test rv64
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && cargo test --lib -p mango-kernel-core
+              # The bare-metal target has no libtest runner; unit tests execute on the host.
+              cd /app/os && CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu cargo test --lib -p mango-kernel-core
             '
       - name: Cargo test la64
         run: |
@@ -106,7 +123,8 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && cargo test --lib -p mango-kernel-core
+              # The bare-metal target has no libtest runner; unit tests execute on the host.
+              cd /app/os && CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu cargo test --lib -p mango-kernel-core
             '
       - name: Docker compose down
         if: always()
@@ -126,6 +144,14 @@ jobs:
           submodules: recursive
       - name: Docker compose up
         run: docker compose up -d
+      - name: Provision toolchain
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              make toolchain-setup
+            '
       - name: ktest rv64
         run: |
           docker compose exec -T \
@@ -160,6 +186,14 @@ jobs:
           submodules: recursive
       - name: Docker compose up
         run: docker compose up -d
+      - name: Provision toolchain
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              make toolchain-setup
+            '
       - name: Regression rv64
         run: |
           docker compose exec -T \
@@ -209,6 +243,14 @@ jobs:
           key: oscomp-sdcards-pre-20250615-v2
       - name: Docker compose up
         run: docker compose up -d
+      - name: Provision toolchain
+        run: |
+          docker compose exec -T \
+            -e RUSTUP_HOME=/root/.rustup \
+            -e CARGO_HOME=/root/.cargo \
+            os-dev bash -lc '
+              make toolchain-setup
+            '
       - name: Ensure test images are available
         run: |
           docker compose exec -T \
@@ -216,6 +258,8 @@ jobs:
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
             set -euo pipefail
+            cd /app
+            mkdir -p fs-img-dir
             for img in sdcard-rv.img.xz sdcard-la.img.xz; do
               if [ ! -s fs-img-dir/$img ] || ! xz -t fs-img-dir/$img; then
                 rm -f fs-img-dir/$img
@@ -276,8 +320,15 @@ jobs:
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
               set -euxo pipefail
-              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp 2>&1 | tee /tmp/qemu-rv64.log
             '
+      - name: Score rv64
+        if: always()
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            set -euxo pipefail
+            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 2>&1 || true
+          '
       - name: Run competition QEMU la64
         run: |
           set -o pipefail
@@ -287,8 +338,15 @@ jobs:
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
               set -euxo pipefail
-              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp
+              cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp 2>&1 | tee /tmp/qemu-la64.log
             '
+      - name: Score la64
+        if: always()
+        run: |
+          docker compose exec -T os-dev bash -lc '
+            set -euxo pipefail
+            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 2>&1 || true
+          '
       - name: Docker compose down
         if: always()
         run: docker compose down

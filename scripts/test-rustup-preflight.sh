@@ -42,7 +42,7 @@ make_fake_rustup_home() {
     mkdir -p \
         "$toolchain_dir/lib/rustlib/fixture-rv64/lib" \
         "$toolchain_dir/lib/rustlib/fixture-la64/lib"
-    printf '%s\n' fixture-src fixture-llvm >"$toolchain_dir/lib/rustlib/components"
+    printf '%s\n' fixture-src fixture-llvm clippy >"$toolchain_dir/lib/rustlib/components"
 }
 
 run_preflight() {
