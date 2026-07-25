@@ -117,14 +117,15 @@ def score_groups(results: Mapping[str, object]) -> tuple[dict[str, dict[str, dic
             key = f"{group}-{libc}"
             counts = _counts_from_group(results.get(key, {"pass": 0, "all": 0}))
             libc_counts[libc] = {"pass": counts.passed, "fail": counts.failed}
-            rates.append(counts.rate)
+            if counts.total > 0:
+                rates.append(counts.rate)
             if group in STRICT_GROUPS:
                 passed = passed and counts.total > 0 and counts.failed == 0
             else:
                 passed = passed and counts.total > 0 and counts.rate >= TOLERANT_MINIMUM_RATE
         groups[group] = libc_counts
 
-    return groups, round(100 * sum(rates) / len(rates), 2), passed
+    return groups, round(100 * sum(rates) / len(rates), 2) if rates else 0.0, passed
 
 
 def _parse_judge_output(stdout: str) -> dict[str, object]:
@@ -168,18 +169,15 @@ def _print_table(arch: str, groups: dict, score: float, passed: bool) -> None:
     print(f"\n{'=' * 72}")
     print(f"  {arch.upper()} Competition Score")
     print(f"{'=' * 72}")
-    print(f"  {'Group':<18} {'musl pass/fail':<18} {'glibc pass/fail':<18} {'Status':<10}")
-    print(f"  {'-' * 68}")
+    print(f"  {'Group':<18} {'musl':<18} {'glibc':<18}")
+    print(f"  {'-' * 54}")
     for group, variants in sorted(groups.items()):
         musl = variants.get("musl", {"pass": 0, "fail": 0})
         glibc = variants.get("glibc", {"pass": 0, "fail": 0})
-        m_str = f"{musl['pass']}/{musl['fail']}"
-        g_str = f"{glibc['pass']}/{glibc['fail']}"
-        ok = "+" if musl["fail"] == 0 and glibc["fail"] == 0 else "-" if glibc["fail"] > 0 else "~"
-        print(f"  {group:<18} {m_str:<18} {g_str:<18} {ok:<10}")
+        m_str = f"{musl['pass']}/{musl['pass'] + musl['fail']}"
+        g_str = f"{glibc['pass']}/{glibc['pass'] + glibc['fail']}"
+        print(f"  {group:<18} {m_str:<18} {g_str:<18}")
     print(f"{'=' * 72}")
-    print(f"  TOTAL SCORE: {score:.1f}/100  |  {'PASSED' if passed else 'FAILED'}")
-    print(f"{'=' * 72}\n")
 
 
 def main() -> int:
