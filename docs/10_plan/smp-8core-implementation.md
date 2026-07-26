@@ -81,7 +81,7 @@ related_docs:
 |---|---|---|
 | 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack、online 闭环和 STOP/ack 已完成 | AP 已进入可被 IPI 唤醒或永久停止的 idle loop，但尚无调度能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | PerCpu 目前只增加最小 IPI reason/ack，完整 global/local init 仍未接入 |
-| trap | 双架构用户 trap 已恢复内核 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI fast path，CPU0 可在受控窗口接收 AP 回复；内核 timer 已 deferred；STOP 在 AP idle 栈执行 | 普通长内核区间尚未常态开放中断窗口，shootdown 尚未接入 |
+| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI/timer fast path；syscall 受控窗口可跨 yield 恢复；STOP 在 AP idle 栈执行 | 非 syscall 内核区间仍关中断，shootdown 尚未接入 |
 | current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -422,7 +422,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09/B10/B11/B12/B13）
+#### 当前进度（SMP-P2-B09/B10/B11/B12/B13/B14）
 
 - `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
   表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
@@ -475,8 +475,16 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - ktest runner 新增 terminal test 语义：普通测试按 `KREPEAT` 重复，永久
   改变机器状态的 STOP 测试在整个计划末尾只运行一次。双架构四核证据中，
   RV64 与 LA64 均为 7 个普通用例重复两轮后 STOP 一次，共 15/15 PASS；
-- CPU0 目前只在 focused test 控制的窗口内开放中断。通用交叉发送、并发
-  reason、10,000 次 ping-pong、普通长 syscall 中断窗口和 RESCHEDULE 仍未完成，
+- B14 已在双架构 user-syscall 分支接入受控中断窗口。helper 只从
+  IRQ-off 的完整 trap context 进入，且一定在重新获取 `task.inner`
+  写回结果前关闭窗口；
+- `schedule()` 已显式快照并关闭 `sstatus.SIE/CRMD.IE`，使 idle scheduler
+  始终接管 IRQ-off CPU；原任务再次切入后才恢复自己的窗口。
+  panic 入口也在任何诊断前立即关中断；
+- B14 的双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 17/17 PASS。
+  新测试在窗口内 yield，证明 idle→新任务为 IRQ-off、原任务恢复
+  为 IRQ-on，然后完成真实 AP→BSP IPI reply；
+- 通用交叉发送、并发 reason、10,000 次 ping-pong 和 RESCHEDULE 仍未完成，
   Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
@@ -741,6 +749,7 @@ T0/T1 只需在 Work Log 记录静态检查或构建结果；T2 保存命令、�
 - [RISC-V SBI Hart State Management Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-hsm.adoc)
 - [RISC-V SBI IPI Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-ipi.adoc)
 - [RISC-V SBI Remote Fence Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-rfence.adoc)
+- [RISC-V Privileged Architecture: Supervisor interrupts](https://riscv.github.io/riscv-isa-manual/snapshot/privileged/)
 - [LoongArch Reference Manual, Volume 1](https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html)
 - [QEMU 9.2.1 Loongson IPI register definitions](https://gitlab.com/qemu-project/qemu/-/blob/v9.2.1/include/hw/intc/loongson_ipi_common.h)
 - [QEMU 9.2.1 Loongson IPI register semantics](https://gitlab.com/qemu-project/qemu/-/blob/v9.2.1/hw/intc/loongson_ipi_common.c)

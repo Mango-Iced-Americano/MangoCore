@@ -43,8 +43,9 @@ firmware / QEMU
 
 当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 已
 打通 BSP→AP 的 IPI mailbox/ack 单播与广播、AP→BSP 请求/回复往返，以及
-CPU0 发起的 AP STOP/ack 终态协议。AP 尚未进入调度器，也不会访问文件系统、
-网络和旧的单核运行队列；这些共享路径仍由 CPU0 独占。
+CPU0 发起的 AP STOP/ack 终态协议。CPU0 的用户 syscall 已在完整 trap
+frame 内开放受控 timer/IPI 窗口；AP 尚未进入调度器，也不会访问
+文件系统、网络和旧的单核运行队列，这些共享路径仍由 CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -181,8 +182,32 @@ console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 T
 用户态和内核态 trap 共用同一 fast path；AP 仅打开 IPI 线路，timer/external
 interrupt 继续关闭。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
-RESCHEDULE、普通内核长区间的受控中断窗口和 AP 调度循环属于后续
-Phase 2/3 范围。
+RESCHEDULE、非 syscall 内核区间和 AP 调度循环属于后续 Phase 2/3 范围。
+
+## Syscall 受控中断窗口
+
+双架构用户 trap 入口都会先完整保存用户寄存器，安装 kernel
+trap vector 和 CPU-local `tp/$r21`，再进入 Rust。syscall 分支先在
+IRQ-off 状态下短暂持有 `task.inner`，只用于取参数和更新入口计时；
+释放锁后才通过 `with_local_interrupts_enabled()` 执行真正的
+`syscall()`。闭包返回后先关闭中断，才重新获取 trap context 写回
+结果、处理信号并返回用户态。
+
+`TaskContext` 与双架构 `__switch` 只保存 callee-saved GPR，不保存
+`sstatus.SIE` 或 `CRMD.IE`。因此 `schedule()` 把中断状态作为任务的
+动态切换快照：
+
+1. 获取任何 scheduler 锁前先保存并关闭本地中断；
+2. idle scheduler 始终接管 IRQ-off CPU，不把某个任务的窗口泄漏到
+   console、net 或 FS housekeeping；
+3. 原任务再次被切入、`__switch` 返回后，才恢复它切出前的状态；
+4. `exit/exit_group` 等不返回路径不会析构窗口 guard，但
+   `schedule()` 仍会在永久切离前把 CPU 关中断；
+5. panic handler 在任何 console/锁诊断和 STOP 之前立即关闭本地中断。
+
+这是安全点抢占而不是任意内核指令抢占：timer hard IRQ 仍只发布
+pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打断点
+切换任务或获取普通锁。
 
 ## Timer hard/deferred 边界
 
@@ -204,9 +229,10 @@ deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 ti
 工作并按完整队列重新编程 one-shot；只有全部工作结束后才决定是否在这个
 显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback。
 
-该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。当前已在 focused
-测试的受控中断窗口内完成 AP→CPU0 回复；普通长 syscall 尚未常态打开
-本地中断，后续 shootdown 仍需先闭合对应安全点协议。
+该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。普通长 syscall
+现在可在任务 yield/block 之前、之后响应 timer/IPI；后续 TLB shootdown
+还需在这个窗口上增加具体 reason/ack 协议，不需再为“长 syscall 能否被
+打断”另建一套 trap 路径。
 
 ## 构建与验证
 
@@ -236,3 +262,6 @@ AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。
 不切换当前任务，以及安全点恰好消费一批并成功重编程下一轮。STOP 属于
 终态测试：普通用例按 `KREPEAT` 全部完成后只执行一次，并断言全部 AP ack
 以及生产 shutdown 再次调用协议时走幂等快路径。
+B14 还必须在窗口内真实 yield：新任务首次从 idle 切入时观测
+IRQ-off，原任务恢复后观测 IRQ-on，并在恢复后完成一次真实
+AP→BSP IPI reply。

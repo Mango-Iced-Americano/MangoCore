@@ -87,6 +87,9 @@ impl Processor {
 /// 默认性能构建不维护该字段，避免每次 syscall 入口产生原子写开销。
 /// 诊断构建中 0 表示无记录，实际 syscall id 存为 id + 1。
 static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
+/// 当前任务裸指针只能在 CPU0 的 legacy scheduler 强引用存活期间读取。
+/// syscall 中断窗口内的 timer/IPI fast path 不得解引用它；迁移到 per-CPU
+/// current slot 前，任何新 hard-IRQ 路径也必须继续遵守这个约束。
 static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock> = AtomicPtr::new(ptr::null_mut());
 static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
@@ -125,6 +128,9 @@ lazy_static! {
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
     loop {
+        // `schedule()` 保证 idle 总是以 IRQ-off 状态恢复。Phase 2 仍保持这个
+        // legacy scheduler 边界；console/net/FS reclaim 完成 IRQ 并发审计前，
+        // 不能把整个 housekeeping 循环扩大为开中断区间。
         // schedule() 可能在内核 timer 打断长 syscall 后直接切回 idle。
         // 在获取 PROCESSOR 或队列锁之前消费 pending，保证 callback 不跨锁，
         // 且已经处于 idle 调度上下文时无需再次 context switch。
@@ -639,6 +645,15 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// `switched_task_cx_ptr` 必须指向当前任务的 `TaskContext`，用于保存被切出时
 /// 的 callee-saved 寄存器。函数在 idle 再次调度该任务时返回。
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
+    // `TaskContext` / 切换汇编不保存 sstatus.SIE 或 CRMD.IE。任务可能
+    // 从 syscall 受控窗口带着开中断状态进入；必须在获取任何 scheduler
+    // 锁之前先快照并关闭，让 idle 始终接管 IRQ-off CPU。
+    //
+    // idle 调度器在整个调度循环期间保持 IRQ 关闭。当前任务被切走后
+    // `__switch` 不会直接恢复其 IRQ 状态；只有当该任务再次被调度回来
+    // 并从 `schedule()` 返回时，才通过 `local_irq_restore` 还原之前的
+    // 中断状态。
+    let irq_was_enabled = crate::hal::local_irq_save();
     // 获取空闲任务的上下文指针
     let idle_task_cx_ptr = PROCESSOR.lock().get_idle_task_cx_ptr();
     if sched_profile_enabled() {
@@ -651,6 +666,9 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
         crate::task::perf::record_context_switch();
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+    // 只有原任务被再次调度时 `__switch` 才会返回。idle 切回任务时
+    // 仍为关中断，因此这里才恢复该任务自己的入口快照。
+    crate::hal::local_irq_restore(irq_was_enabled);
 }
 
 // ── sched debug profile counters ────────────────────────────────────────

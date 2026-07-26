@@ -5,6 +5,9 @@ use core::panic::PanicInfo;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // syscall 受控窗口内可能开着本地中断进入 panic。必须在
+    // console 输出、锁诊断和跨核 STOP 之前立即关闭，避免递归 trap。
+    let _ = crate::hal::local_irq_save();
     match info.location() {
         Some(location) => {
             println!(

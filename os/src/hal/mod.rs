@@ -36,6 +36,39 @@ pub use arch::{
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};
 
+/// 在一个受控闭包内临时开放本 CPU 的全局中断。
+///
+/// 该边界只能从已关中断的完整内核上下文进入。正常返回或
+/// unwind 时 guard 都会先再次关中断，然后恢复入口状态。如果闭包经
+/// `exit` 等路径永不返回，`schedule()` 会在切离任务前接管关中断。
+/// 闭包最后一条指令与 guard 关闭之间到达的 timer 仍只发布 pending，
+/// 由随后的 `trap_return()` 安全点消费。
+pub fn with_local_interrupts_enabled<R>(f: impl FnOnce() -> R) -> R {
+    struct InterruptWindowGuard {
+        restore_enabled: bool,
+    }
+
+    impl Drop for InterruptWindowGuard {
+        fn drop(&mut self) {
+            // `local_irq_restore(false)` 当前不会主动清位，因此先无条件
+            // 关闭，再按入口快照决定是否重新开放。
+            let _ = arch::local_irq_save();
+            arch::local_irq_restore(self.restore_enabled);
+        }
+    }
+
+    let restore_enabled = arch::local_irq_save();
+    assert!(
+        !restore_enabled,
+        "controlled interrupt window requires an IRQ-off entry"
+    );
+    let guard = InterruptWindowGuard { restore_enabled };
+    arch::local_irq_restore(true);
+    let result = f();
+    drop(guard);
+    result
+}
+
 /// 统一停机入口：先冻结所有 online AP，再执行架构机器关机。
 ///
 /// `online` 尚未发布时可能处于极早期 panic，不能读取尚未安装的 CPU-local

@@ -228,7 +228,10 @@ pub fn trap_handler() -> ! {
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
             )
         };
-        let result = syscall(syscall_id, args);
+        // trap frame、kernel EENTRY 和 CPU-local r21 都已完整建立，且
+        // task.inner 已释放。只在真正执行 syscall 时开放 timer/IPI，
+        // 写回 trap context 前 helper 会恢复为关中断。
+        let result = crate::hal::with_local_interrupts_enabled(|| syscall(syscall_id, args));
         // The trap context may be replaced by execve or restored by sigreturn,
         // so fetch it again after syscall returns.
         {
@@ -488,12 +491,19 @@ pub fn trap_return() -> ! {
         println!("[bringup][user:02] initial signal check complete");
     }
     set_user_trap_entry();
-    let trap_cx = task.acquire_inner_lock().get_trap_cx();
-    let trap_cx_ptr = trap_cx as *const TrapContext as usize;
-    // Refresh after signal/exec context changes and on every future migration:
-    // the CPU performing this return owns the pointer installed on next trap.
-    trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
-    trap_cx.sstatus.set_pplv(3).set_pie(true);
+    let (trap_cx_ptr, _trap_pc, _trap_sp) = {
+        let inner = task.acquire_inner_lock();
+        let trap_cx = inner.get_trap_cx();
+        // Refresh after signal/exec context changes and on every future migration:
+        // the CPU performing this return owns the pointer installed on next trap.
+        trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
+        trap_cx.sstatus.set_pplv(3).set_pie(true);
+        (
+            trap_cx as *const TrapContext as usize,
+            trap_cx.gp.pc,
+            trap_cx.gp.sp,
+        )
+    };
     let allocated_asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
     // ASID_NONE 是软件分配失败哨兵，不是硬件 ASID。这里使用保留的内核 ASID 0；
     // 地址空间激活路径会执行保守刷新，以保持回退地址空间之间的隔离。
@@ -513,8 +523,8 @@ pub fn trap_return() -> ! {
     if trace_first_return {
         println!(
             "[bringup][user:03] entering PLV3: pc={:#x} sp={:#x} trap_cx={:#x} token={:#x} asid={} restore={:#x}",
-            trap_cx.gp.pc,
-            trap_cx.gp.sp,
+            _trap_pc,
+            _trap_sp,
             trap_cx_ptr,
             user_satp,
             asid,

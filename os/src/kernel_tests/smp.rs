@@ -1,8 +1,14 @@
 //! SMP 启动阶段的 focused ktest。
 
 use alloc::{vec, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kernel_tests::runner::KernelTest;
+
+const IRQ_PROBE_NOT_RUN: usize = 0;
+const IRQ_PROBE_DISABLED: usize = 1;
+const IRQ_PROBE_ENABLED: usize = 2;
+static IDLE_TO_TASK_IRQ_PROBE: AtomicUsize = AtomicUsize::new(IRQ_PROBE_NOT_RUN);
 
 /// 返回只依赖 Phase 1 启动不变量的测试集合。
 pub fn tests() -> Vec<KernelTest> {
@@ -31,6 +37,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::ap_to_bsp_ipi_round_trip",
             ap_to_bsp_ipi_round_trip,
+        ),
+        KernelTest::new(
+            "smp::syscall_irq_window_survives_schedule",
+            syscall_irq_window_survives_schedule,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -245,6 +255,91 @@ fn round_trip_all_aps() -> Result<(), &'static str> {
         if crate::smp::ipi_send_failures(cpu_id) != failures_before {
             return Err("AP failed to send a deferred IPI reply");
         }
+    }
+    Ok(())
+}
+
+/// 读取并原样恢复本 CPU 的全局中断状态。
+fn local_interrupts_enabled() -> bool {
+    let enabled = crate::hal::local_irq_save();
+    crate::hal::local_irq_restore(enabled);
+    enabled
+}
+
+/// 这个新任务由 idle scheduler 首次切入，因此可以直接观测 idle
+/// 传给任务的硬件中断状态。检查后保持关中断并走正常 ktest exit。
+fn probe_idle_to_task_irq_state() {
+    let enabled = crate::hal::local_irq_save();
+    IDLE_TO_TASK_IRQ_PROBE.store(
+        if enabled {
+            IRQ_PROBE_ENABLED
+        } else {
+            IRQ_PROBE_DISABLED
+        },
+        Ordering::Release,
+    );
+}
+
+/// 验证 syscall 窗口跨 yield 切换后恢复，idle 不继承开中断状态。
+fn syscall_irq_window_survives_schedule() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("syscall IRQ-window test ran on an AP");
+    }
+
+    IDLE_TO_TASK_IRQ_PROBE.store(IRQ_PROBE_NOT_RUN, Ordering::Release);
+    let original_irq_state = crate::hal::local_irq_save();
+    let result = crate::hal::with_local_interrupts_enabled(|| {
+        if !local_interrupts_enabled() {
+            return Err("controlled syscall window did not enable interrupts");
+        }
+
+        // helper 先入队，当前 runner 后入队；FIFO fast path 会先切入
+        // helper，使它观测到的正是 runner -> idle -> helper 的状态。
+        crate::task::spawn_ktest_task(probe_idle_to_task_irq_state);
+        crate::task::suspend_current_and_run_next();
+
+        match IDLE_TO_TASK_IRQ_PROBE.load(Ordering::Acquire) {
+            IRQ_PROBE_DISABLED => {}
+            IRQ_PROBE_ENABLED => return Err("idle scheduler leaked enabled IRQs into a new task"),
+            _ => return Err("idle IRQ-state probe task did not run"),
+        }
+        if !local_interrupts_enabled() {
+            return Err("resumed task did not recover its IRQ window");
+        }
+
+        // 窗口恢复后再接收一次真实 AP reply，证明不只是 CSR 位看起来
+        // 开启，而是 kernel trap 确实能在该任务上下文中往返。
+        receive_one_ap_reply_while_irqs_enabled()
+    });
+
+    // helper 正常返回后必须恢复入口快照。先关中断再消费窗口内
+    // 可能发布的 timer pending，避免把 one-shot 状态泄漏给下一用例。
+    let restored_irq_state = crate::hal::local_irq_save();
+    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::hal::local_irq_restore(original_irq_state);
+
+    result?;
+    if restored_irq_state != original_irq_state {
+        return Err("controlled syscall window did not restore entry IRQ state");
+    }
+    Ok(())
+}
+
+fn receive_one_ap_reply_while_irqs_enabled() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    let expected = crate::smp::send_ipi_round_trip(1)
+        .map_err(|_| "failed to request AP reply inside syscall IRQ window")?;
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while crate::smp::round_trip_reply_ack() != expected {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP reply did not interrupt the syscall IRQ window");
+        }
+        core::hint::spin_loop();
+    }
+    if !local_interrupts_enabled() {
+        return Err("kernel IPI trap returned with syscall IRQ window closed");
     }
     Ok(())
 }

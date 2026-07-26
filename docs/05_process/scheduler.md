@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-26
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -20,7 +20,9 @@ tags: [process, scheduler, task-manager, processor]
 | `os/src/task/mod.rs` | `suspend_current_and_run_next()`、block/exit 调度入口 |
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
-调度器按单核运行模型组织。ready queue 为主要运行队列，timer interrupt 与显式 yield/block 触发切换。
+调度器当前仍按 CPU0 单核运行模型组织。ready queue 为主要运行队列；
+timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
+延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
 ## 2. TaskManager
 
@@ -121,6 +123,8 @@ static CURRENT_SYSCALL_ID: AtomicUsize;
 `run_tasks()` 在切入任务前写入这些缓存；`take_current_task()` 在切走当前任务时清零。
 
 `current_task_ref()` 返回 `'static` 引用，但依赖单核和 `PROCESSOR.current` 持有强引用的事实。调用者不能跨调度点保存该引用。
+syscall 受控中断窗口中，timer/IPI hard path 不得解引用这个裸指针；
+只有迁移到 per-CPU current slot 并删除伪造静态生命周期后才能放宽。
 
 ## 6. run_tasks 主循环阶段
 
@@ -196,6 +200,21 @@ exit_current_and_run_next()
 8. 调用 `__switch(idle_task_cx_ptr, next_task_cx_ptr)`。
 
 任务主动让出或阻塞时，`schedule(task_cx_ptr)` 切回 idle context。
+
+### 10.1 中断状态不属于 `TaskContext`
+
+双架构 `TaskContext`/切换汇编只保存 `ra`、`sp` 和 callee-saved GPR，
+不保存 RISC-V `sstatus.SIE` 或 LoongArch `CRMD.IE`。B14 之后，用户
+syscall 可在受控区间带着开中断状态 yield/block。`schedule()` 因此：
+
+1. 在获取 `PROCESSOR` 锁前记住当前任务的中断状态并关闭中断；
+2. 以 IRQ-off 状态切回 legacy idle scheduler；
+3. 原任务再次被切入时，在 `__switch` 返回后恢复它自己的快照。
+
+legacy `run_tasks()` 当前整个 housekeeping 循环仍保持 IRQ-off，因为 console、
+network poll、FS reclaim 等共享路径尚未完成 IRQ 并发审计。后续 per-CPU
+idle 将使用独立的“关中断—重查工作—架构 wait”协议，不会盲目将这个
+旧循环扩大为开中断区间。
 
 ## 11. yield 与 block
 

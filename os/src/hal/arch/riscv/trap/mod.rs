@@ -135,7 +135,10 @@ pub fn trap_handler() -> ! {
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
             )
         };
-        let result = syscall(syscall_id, args);
+        // trap frame、kernel stvec 和 CPU-local tp 都已完整建立，且
+        // task.inner 已释放。只在真正执行 syscall 时开放 timer/IPI，
+        // 写回 trap context 前 helper 会恢复为关中断。
+        let result = crate::hal::with_local_interrupts_enabled(|| syscall(syscall_id, args));
         // The trap context may be replaced by execve or restored by sigreturn,
         // so fetch it again after syscall returns.
         {
