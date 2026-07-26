@@ -1950,6 +1950,11 @@ impl PageCache {
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
         let _guard = self.io_gate.lock();
+        self.writeback_page_locked(page_index)
+    }
+
+    /// Write back one page while the caller holds `io_gate`.
+    pub(crate) fn writeback_page_locked(&self, page_index: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now();
         let entry = {
             let entries = self.entries.lock();
@@ -2167,6 +2172,15 @@ impl PageCache {
     /// 筛选出 `[start_index, end_index]` 范围内的脏页，按连续 run 分组写回。
     pub fn writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr> {
         let _guard = self.io_gate.lock();
+        self.writeback_range_locked(start_index, end_index)
+    }
+
+    /// Write back a range while the caller holds `io_gate`.
+    fn writeback_range_locked(
+        &self,
+        start_index: usize,
+        end_index: usize,
+    ) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner
@@ -2206,6 +2220,11 @@ impl PageCache {
     /// 达到预算或脏页耗尽时停止。
     pub fn writeback_some_pages(&self, budget: usize) -> usize {
         let _guard = self.io_gate.lock();
+        self.writeback_some_pages_locked(budget)
+    }
+
+    /// Write back up to `budget` pages while the caller holds `io_gate`.
+    fn writeback_some_pages_locked(&self, budget: usize) -> usize {
         if budget == 0 {
             return 0;
         }

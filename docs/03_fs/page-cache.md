@@ -70,7 +70,7 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 
 这一设计解决了稀疏文件（sparse file）中超出旧 EOF 页面的零填充问题：当写入位置超出旧 EOF 时，`get_or_create_entry` 不触发后端 read_page，而是 `frame_alloc` 零填充页并设置 `valid_mask = VALID_ALL`。
 
-`io_gate` 串行化 PageCache 的写入、单页/批量回写和截断，避免正在复制或回写的页面被截断操作丢弃。`truncate(new_size)` 在 I/O gate 内移除完整超出 EOF 的页面；若新 EOF 落在保留页中间，则会将该页从 EOF 到页尾清零并标记为 Dirty。
+`io_gate` 串行化 PageCache 的写入、单页/批量回写和截断，避免正在复制或回写的页面被截断操作丢弃。公开回写入口负责获取 gate；已在写入 gate 内执行的回调必须调用对应的持锁辅助函数（如 `writeback_page_locked`），不能再次调用公开入口。`truncate(new_size)` 在 I/O gate 内移除完整超出 EOF 的页面；若新 EOF 落在保留页中间，则会将该页从 EOF 到页尾清零并标记为 Dirty。
 
 another_ext4 的 `truncate_inode()` 会在缩容时按 extent 尾部释放新 EOF 之后的数据块和空的 extent-tree 元数据块。bridge 在同一 I/O gate 内先回写已有脏页，截断缓存并回写保留末页的零尾，再调用该后端 API；因此不会再对将被释放的范围执行逐页零填充。
 

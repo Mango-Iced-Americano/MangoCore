@@ -29,7 +29,7 @@ pub(super) fn test_before_copy_reentry_keeps_payload_unpublished() -> Result<(),
                 Ok(frame) => callback_read_byte.store(frame.ppn.get_bytes_array()[0], Ordering::SeqCst),
                 Err(_) => return Err(SyscallErr::EIO),
             }
-            callback_cache.writeback_page(PAGE_INDEX)
+            callback_cache.writeback_page_locked(PAGE_INDEX)
         })
         .map_err(|_| "PageCache write failed during before-copy re-entry")?;
     cache
