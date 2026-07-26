@@ -97,9 +97,12 @@ RISC-V 的 RNG 设备页必须同时出现在平台 `MMIO` 表中，否则启用
 
 ### 随机设备
 
-`/dev/random` 和 `/dev/urandom` 当前共享同一个 CSPRNG 实现。读取失败语义与安全
-`getrandom` 一致。写入会混入私有状态，但调用方可控数据不提高 secure-ready，
-也不被计为熵。
+`/dev/random` 与安全 `getrandom` 一致：仅从已播种的 CSPRNG 读取，未就绪时返回
+`EAGAIN`。`/dev/urandom` 优先读取该安全流；未就绪时改用同一 ChaCha20 的显式
+`GRND_INSECURE` 启动状态，因而始终填满请求 buffer 且不返回 `EAGAIN`。仅当该内部
+回退流也意外失败时，才使用原子计数器驱动的本地 PRNG 保证非阻塞 ABI；这些回退输出
+绝不提高 secure-ready，也不应被当作可信熵。写入会混入私有状态，但调用方可控数据
+不提高 secure-ready，也不被计为熵。
 
 ## 构建与验证
 

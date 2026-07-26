@@ -374,6 +374,13 @@
 
 ## 文件系统多路径操作（renameat2）中的验证镜像缺失
 
+## 目录项发布的存在性检查必须与插入共享命名空间锁
+
+- **现象**：VFS 适配层在调用文件系统后端前用 `lookup()` 返回 `EEXIST`，但两个并发创建/硬链接任务都可能在检查时看到名称不存在，随后分别插入相同名称的目录项。
+- **根因**：检查与 `dir_add_entry()` 发布点不在同一个后端 `namespace_lock` 临界区；桥接层的检查只能优化常见失败路径，不能建立后端命名空间不变式。
+- **修复**：在所有后端命名空间操作持有 `namespace_lock` 后、调用 `dir_add_entry()`/`link_inode()` 前使用 `dir_find_entry()` 检查同名项并返回 `EEXIST`。新 inode 路径须将检查放在既有自动释放包装内，确保失败仍释放未发布 inode。
+- **相关文件**：`dependency/another_ext4/src/ext4/low_level.rs`
+
 ### 路径搜索权限检查遗漏（renameat2）
 
 - **现象**: `renameat2` 对 oldpath 做了路径遍历搜索权限检查，但对 newpath 同样路径却没有做，导致非特权进程能通过 newpath 遍历非本用户目录。

@@ -57,6 +57,10 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
                 persistence::test_writes_and_truncates_persist_across_independent_mounts,
             ),
             KernelTest::new(
+                "ext4_another::reopen_before_sync_reads_fresh_pagecache_data",
+                persistence::test_reopen_before_sync_reads_fresh_pagecache_data,
+            ),
+            KernelTest::new(
                 "ext4_another::namespace_mutations_persist_across_independent_mounts",
                 persistence::test_namespace_mutations_persist_across_independent_mounts,
             ),

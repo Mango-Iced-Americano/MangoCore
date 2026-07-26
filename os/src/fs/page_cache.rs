@@ -1346,6 +1346,23 @@ impl PageCache {
         BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
         AfterCopy: FnOnce(usize),
     {
+        let _guard = self.io_gate.lock();
+        self.write_with_copy_callbacks_locked(offset, buf, old_file_size, before_copy, after_copy)
+    }
+
+    /// Copy data while the caller holds `io_gate`.
+    fn write_with_copy_callbacks_locked<BeforeCopy, AfterCopy>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: BeforeCopy,
+        after_copy: AfterCopy,
+    ) -> Result<usize, SyscallErr>
+    where
+        BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
+        AfterCopy: FnOnce(usize),
+    {
         let _t0 = perf::perf_time_now();
         if buf.is_empty() {
             perf::record_pc_write(0, false, perf::perf_time_now().wrapping_sub(_t0));
@@ -1895,7 +1912,28 @@ impl PageCache {
 
     /// 将指定页面索引加入脏页集合，并原子递增全局脏页计数。
     pub fn mark_page_dirty(&self, page_index: usize) {
-        self.inner.lock().mark_dirty(page_index);
+        let entry = {
+            let entries = self.entries.lock();
+            entries.get(page_index).and_then(|entry| entry.clone())
+        };
+        let Some(entry) = entry else {
+            return;
+        };
+
+        match entry.state() {
+            PageState::UpToDate => {
+                if entry
+                    .compare_exchange_state(PageState::UpToDate as u8, PageState::Dirty as u8)
+                    .is_ok()
+                {
+                    GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                    self.inner.lock().mark_dirty(page_index);
+                }
+            }
+            PageState::Dirty => self.inner.lock().mark_dirty(page_index),
+            PageState::Writeback => entry.set_flag(PG_REDIRTIED),
+            PageState::Loading | PageState::Error => {}
+        }
     }
 
     /// 从脏页集合移除该索引，并原子递减全局脏页计数（写回完成后调用）。
@@ -1911,6 +1949,7 @@ impl PageCache {
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
+        let _guard = self.io_gate.lock();
         let _t0 = perf::perf_time_now();
         let entry = {
             let entries = self.entries.lock();
@@ -1990,7 +2029,7 @@ impl PageCache {
     /// `start..start+count` 范围内只对实际标记为 Dirty 的页面执行写回；
     /// 非 Dirty 的页面被跳过。批次中至少一个页面被写入时，调用
     /// `backend.write_pages()` 批量提交；否则直接返回 Ok。
-    fn writeback_pages_run(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
+    fn writeback_pages_run_locked(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now();
 
         // 第一阶段：持有 entries 锁，收集 Dirty 页面，CAS 为 Writeback
@@ -2087,6 +2126,15 @@ impl PageCache {
 
     /// 收集当前所有脏页索引并按连续 run 分组，逐 run 写回。
     pub fn writeback_all(&self) -> Result<(), SyscallErr> {
+        let _guard = self.io_gate.lock();
+        self.writeback_all_with_io_gate_held()
+    }
+
+    /// Write back all dirty pages while the caller holds `io_gate`.
+    ///
+    /// The ext4 bridge uses this to order data writeback with its inode-size
+    /// commit, so a concurrent resize cannot leave an older size on disk.
+    pub(crate) fn writeback_all_with_io_gate_held(&self) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner.dirty_pages.iter().copied().collect()
@@ -2111,13 +2159,14 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
 
     /// 筛选出 `[start_index, end_index]` 范围内的脏页，按连续 run 分组写回。
     pub fn writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr> {
+        let _guard = self.io_gate.lock();
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner
@@ -2146,7 +2195,7 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
@@ -2156,6 +2205,7 @@ impl PageCache {
     /// 用于后台合作式写回：收集连续脏页 run，持锁收集 → 解锁 → I/O。
     /// 达到预算或脏页耗尽时停止。
     pub fn writeback_some_pages(&self, budget: usize) -> usize {
+        let _guard = self.io_gate.lock();
         if budget == 0 {
             return 0;
         }
@@ -2186,7 +2236,7 @@ impl PageCache {
             // writeback_pages_run uses CAS — some pages may have been
             // concurrently consumed by another flusher. Tolerate
             // partial progress and continue.
-            let _ = self.writeback_pages_run(run_start, run_end - run_start + 1);
+            let _ = self.writeback_pages_run_locked(run_start, run_end - run_start + 1);
             total += count;
         }
         total
@@ -2196,6 +2246,20 @@ impl PageCache {
 
     /// 截断 page cache 到指定大小
     pub fn truncate(&self, new_size: usize) -> Result<(), SyscallErr> {
+        let _guard = self.io_gate.lock();
+        self.truncate_with_io_gate_held(new_size)
+    }
+
+    /// Truncate while the caller holds `io_gate`.
+    pub(crate) fn truncate_with_io_gate_held(&self, new_size: usize) -> Result<(), SyscallErr> {
+        self.truncate_locked(new_size, true)
+    }
+
+    fn truncate_locked(
+        &self,
+        new_size: usize,
+        mark_zeroed_tail_dirty: bool,
+    ) -> Result<(), SyscallErr> {
         let hole_start_page = (new_size + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
 
         // 收集需要移除的页面索引
@@ -2204,14 +2268,34 @@ impl PageCache {
             (hole_start_page..entries.len()).collect()
         };
 
-        let mut entries = self.entries.lock();
-        let mut inner = self.inner.lock();
-        for page_index in to_remove {
-            if page_index < entries.len() {
-                entries[page_index] = None;
+        let zeroed_tail = {
+            let mut entries = self.entries.lock();
+            let mut inner = self.inner.lock();
+            for page_index in to_remove {
+                if page_index < entries.len() {
+                    entries[page_index] = None;
+                }
+                inner.pages.remove(&page_index);
+                inner.dirty_pages.remove(&page_index);
             }
-            inner.pages.remove(&page_index);
-            inner.dirty_pages.remove(&page_index);
+
+            let tail_start = new_size % PAGE_SIZE;
+            if new_size > 0 && tail_start > 0 {
+                let last_page_idx = (new_size - 1) >> PAGE_SIZE_BITS;
+                if let Some(Some(entry)) = entries.get(last_page_idx) {
+                    entry.as_slice_mut()[tail_start..].fill(0);
+                    Some(last_page_idx)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if mark_zeroed_tail_dirty {
+            if let Some(last_page_idx) = zeroed_tail {
+                self.mark_page_dirty(last_page_idx);
+            }
         }
 
         Ok(())

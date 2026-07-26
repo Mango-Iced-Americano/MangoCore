@@ -186,6 +186,22 @@ impl IndexNode for Ext4Inode {
     super::mutations::writable_data_inode_mutations!();
     super::namespace::writable_namespace_inode_mutations!();
 
+    fn create_with_data(
+        &self,
+        name: &str,
+        file_type: FileType,
+        mode: InodeMode,
+        _data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        match file_type {
+            FileType::Pipe
+            | FileType::CharDevice
+            | FileType::BlockDevice
+            | FileType::Socket => self.mknod(name, mode, _data as u64),
+            _ => self.create(name, file_type, mode),
+        }
+    }
+
     fn open(
         &self,
         _data: MutexGuard<FilePrivateData>,

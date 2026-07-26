@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-18"
+last_updated: "2026-07-27"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -121,7 +121,7 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 ### /dev/urandom 和 /dev/random
 
-两者共享内核 ChaCha20 CSPRNG。QEMU 由 VirtIO RNG 播种，2K1000LA 由片上 APB RNG 播种；启动样本通过基本重复/卡死健康检查后，随机池才进入 ready 状态。读操作返回请求长度的安全随机字节，可信熵源初始化失败时返回 `EAGAIN`，不会回退到全零或时间种子。写入数据会混入私有状态，但不会提高 ready 状态或被计为可信熵。`/dev/random` 当前仍是 `/dev/urandom` 的同实现别名，主次设备号为 makedev!(1, 9)。
+两者共享内核 ChaCha20 CSPRNG。QEMU 由 VirtIO RNG 播种，2K1000LA 由片上 APB RNG 播种；启动样本通过基本重复/卡死健康检查后，随机池才进入 ready 状态。`/dev/random` 未就绪时保持返回 `EAGAIN`；`/dev/urandom` 则回退到标记为不可信的启动 ChaCha20 流，保证每次读取都返回请求长度且从不返回 `EAGAIN`。若该内部回退也意外失败，原子 PRNG 仍会填满 buffer，绝不返回全零或时间种子。写入数据会混入私有状态，但不会提高 ready 状态或被计为可信熵。两者主次设备号均为 makedev!(1, 9)。
 
 ### /dev/full
 

@@ -15,7 +15,7 @@ use super::lifetime::{InodeKey, InodeLifetime};
 pub(crate) struct AnotherExt4PageCacheBackend {
     fs: Arc<Ext4FileSystem>,
     key: InodeKey,
-    lifetime: Arc<InodeLifetime>,
+    logical_size: Arc<AtomicUsize>,
 }
 
 impl AnotherExt4PageCacheBackend {
@@ -24,18 +24,15 @@ impl AnotherExt4PageCacheBackend {
         key: InodeKey,
         lifetime: Arc<InodeLifetime>,
     ) -> Self {
-        lifetime.pin();
-        Self { fs, key, lifetime }
+        Self {
+            fs,
+            key,
+            logical_size: lifetime.logical_size.clone(),
+        }
     }
 
     fn page_offset(index: usize) -> Result<usize, SyscallErr> {
         index.checked_mul(PAGE_SIZE).ok_or(SyscallErr::EFBIG)
-    }
-}
-
-impl Drop for AnotherExt4PageCacheBackend {
-    fn drop(&mut self) {
-        self.lifetime.unpin();
     }
 }
 
@@ -47,7 +44,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             return Err(SyscallErr::ENOBUFS);
         }
         let offset = Self::page_offset(index)?;
-        let size = self.lifetime.logical_size.load(Ordering::Acquire);
+        let size = self.logical_size.load(Ordering::Acquire);
         buffer[..PAGE_SIZE].fill(0);
         if offset >= size {
             return Ok(PAGE_SIZE);
@@ -69,7 +66,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     }
 
     fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
-        let size = self.lifetime.logical_size.load(Ordering::Acquire);
+        let size = self.logical_size.load(Ordering::Acquire);
         let inode_id = u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
         let start_offset = Self::page_offset(start_index)?;
         if start_offset >= size {
@@ -140,9 +137,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     }
 
     fn npages(&self) -> usize {
-        self.lifetime
-            .logical_size
-            .load(Ordering::Acquire)
+        self.logical_size.load(Ordering::Acquire)
             .div_ceil(PAGE_SIZE)
     }
 }

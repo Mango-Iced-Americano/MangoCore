@@ -3,6 +3,41 @@ use crate::utils::error::SyscallErr;
 
 use super::fixtures::open_clean_media;
 
+pub(super) fn test_reopen_before_sync_reads_fresh_pagecache_data() -> Result<(), &'static str> {
+    const NAME: &str = "another-pagecache-reopen";
+    const HEADER: &[u8] = b"\x7fELF";
+
+    let fs = open_clean_media()?;
+    let root = fs.root_inode();
+    let file = root
+        .create(NAME, FileType::File, InodeMode::S_IRWXUGO)
+        .map_err(|_| "create for reopen test failed")?;
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    let written = file
+        .write_at(0, HEADER.len(), HEADER, private.lock())
+        .map_err(|_| "PageCache-backed header write failed")?;
+    if written != HEADER.len() {
+        return Err("PageCache-backed header write was short");
+    }
+
+    drop(file);
+    let reopened = root
+        .find(NAME)
+        .map_err(|_| "reopen before sync failed")?;
+    let mut header = [0u8; HEADER.len()];
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    let read = reopened
+        .read_at(0, header.len(), &mut header, private.lock())
+        .map_err(|_| "reopen before sync read failed")?;
+    if read != HEADER.len() || header != *HEADER {
+        return Err("reopen before sync did not preserve the executable header");
+    }
+    reopened.sync().map_err(|_| "sync after reopen test failed")?;
+    root.unlink(NAME)
+        .map_err(|_| "cleanup unlink after reopen test failed")?;
+    root.sync().map_err(|_| "sync after reopen test cleanup failed")
+}
+
 pub(super) fn test_writes_and_truncates_persist_across_independent_mounts(
 ) -> Result<(), &'static str> {
     const NAME: &str = "another-wave4-data";

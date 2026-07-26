@@ -193,13 +193,13 @@ fn register_common_device_nodes() {
         .add_dev("zero", Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
         .expect("devfs: failed to register /dev/zero");
     devfs
-        .add_dev("urandom", Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev("urandom", Arc::new(crate::fs::dev::urandom::URANDOM) as Arc<dyn self::vfs::IndexNode>)
         .expect("devfs: failed to register /dev/urandom");
     devfs
         .add_dev("full", Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>)
         .expect("devfs: failed to register /dev/full");
     devfs
-        .add_dev("random", Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev("random", Arc::new(crate::fs::dev::urandom::RANDOM) as Arc<dyn self::vfs::IndexNode>)
         .expect("devfs: failed to register /dev/random");
     devfs
         .add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)

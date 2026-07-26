@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-27"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -69,6 +69,10 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 - `ensure_fully_valid` 读取后端数据填充无效 segment（快速路径：已满则直接返回）
 
 这一设计解决了稀疏文件（sparse file）中超出旧 EOF 页面的零填充问题：当写入位置超出旧 EOF 时，`get_or_create_entry` 不触发后端 read_page，而是 `frame_alloc` 零填充页并设置 `valid_mask = VALID_ALL`。
+
+`io_gate` 串行化 PageCache 的写入、单页/批量回写和截断，避免正在复制或回写的页面被截断操作丢弃。`truncate(new_size)` 在 I/O gate 内移除完整超出 EOF 的页面；若新 EOF 落在保留页中间，则会将该页从 EOF 到页尾清零并标记为 Dirty。
+
+another_ext4 的 `truncate_inode()` 会在缩容时按 extent 尾部释放新 EOF 之后的数据块和空的 extent-tree 元数据块。bridge 在同一 I/O gate 内先回写已有脏页，截断缓存并回写保留末页的零尾，再调用该后端 API；因此不会再对将被释放的范围执行逐页零填充。
 
 ### PageEntry 内核对象引用
 

@@ -29,7 +29,8 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            let written = self.regular_page_cache(&fs).write_with_after_copy(
+            let cache = self.regular_page_cache(&fs);
+            let written = cache.write_with_after_copy(
                 offset,
                 &buffer[..actual],
                 Some(old_size),
@@ -40,6 +41,7 @@ macro_rules! writable_data_inode_mutations {
                     self.lifetime
                         .size_generation
                         .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                    self.lifetime.retain_dirty_page_cache(&cache);
                 },
             )?;
             Ok(written)
@@ -93,35 +95,87 @@ macro_rules! writable_data_inode_mutations {
                 crate::fs::vfs::FileType::File => {}
                 _ => return Err(crate::utils::error::SyscallErr::EINVAL),
             }
-            let cache = self.page_cache();
-            if let Some(cache) = cache.as_ref() {
-                cache.writeback_all()?;
-            }
             let inode_id = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            fs.inner()
-                .commit_inode_size(inode_id, len as u64, None)
-                .map_err(|error| super::errno::from_another(error.code()))?;
-            if let Some(cache) = cache {
-                cache.truncate(len)?;
-            }
-            self.lifetime
+            let old_size = self
+                .lifetime
                 .logical_size
-                .store(len, core::sync::atomic::Ordering::Release);
+                .load(core::sync::atomic::Ordering::Acquire);
+            let cache = self.regular_page_cache(&fs);
+            if len < old_size {
+                cache.with_io_gate(|| {
+                    cache.writeback_all_with_io_gate_held()?;
+                    cache.truncate_with_io_gate_held(len)?;
+                    cache.writeback_all_with_io_gate_held()?;
+                    fs.inner()
+                        .truncate_inode(inode_id, len as u64)
+                        .map_err(|error| super::errno::from_another(error.code()))?;
+                    self.lifetime
+                        .logical_size
+                        .store(len, core::sync::atomic::Ordering::Release);
+                    self.lifetime
+                        .size_generation
+                        .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                    Ok(())
+                })?;
+            } else {
+                cache.with_io_gate(|| {
+                    fs.inner()
+                        .truncate_inode(inode_id, len as u64)
+                        .map_err(|error| super::errno::from_another(error.code()))?;
+                    self.lifetime
+                        .logical_size
+                        .store(len, core::sync::atomic::Ordering::Release);
+                    self.lifetime
+                        .size_generation
+                        .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                    Ok(())
+                })?;
+            }
             Ok(())
         }
 
         fn sync(&self) -> Result<(), crate::utils::error::SyscallErr> {
             let fs = self.fs_arc()?;
             if let Some(cache) = self.page_cache() {
-                cache.writeback_all()?;
+                return cache.with_io_gate(|| {
+                    let generation = self
+                        .lifetime
+                        .size_generation
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    cache.writeback_all_with_io_gate_held()?;
+                    let id = u32::try_from(self.key.inode_id())
+                        .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
+                    let size = self
+                        .lifetime
+                        .logical_size
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    fs.inner()
+                        .commit_inode_size(id, size as u64, None)
+                        .map_err(|error| super::errno::from_another(error.code()))?;
+                    fs.flush_device()?;
+                    if self
+                        .lifetime
+                        .size_generation
+                        .compare_exchange(
+                            generation,
+                            0,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        self.lifetime.release_dirty_page_cache();
+                    }
+                    Ok(())
+                });
             }
-            let id = u32::try_from(self.key.inode_id())
-                .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let generation = self
                 .lifetime
                 .size_generation
                 .load(core::sync::atomic::Ordering::Acquire);
+            let id = u32::try_from(self.key.inode_id())
+                .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let size = self
                 .lifetime
                 .logical_size
@@ -129,13 +183,21 @@ macro_rules! writable_data_inode_mutations {
             fs.inner()
                 .commit_inode_size(id, size as u64, None)
                 .map_err(|error| super::errno::from_another(error.code()))?;
-            let _ = self.lifetime.size_generation.compare_exchange(
-                generation,
-                0,
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
-            );
-            fs.flush_device()
+            fs.flush_device()?;
+            if self
+                .lifetime
+                .size_generation
+                .compare_exchange(
+                    generation,
+                    0,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.lifetime.release_dirty_page_cache();
+            }
+            Ok(())
         }
 
         fn datasync(&self) -> Result<(), crate::utils::error::SyscallErr> {

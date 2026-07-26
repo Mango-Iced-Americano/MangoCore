@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use core::any::Any;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::dev::DEV_FS;
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
@@ -8,7 +9,29 @@ use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 #[derive(Debug)]
-pub struct Urandom;
+pub struct Urandom {
+    allow_insecure_fallback: bool,
+}
+
+pub const URANDOM: Urandom = Urandom {
+    allow_insecure_fallback: true,
+};
+
+pub const RANDOM: Urandom = Urandom {
+    allow_insecure_fallback: false,
+};
+
+static URANDOM_FALLBACK: AtomicU64 = AtomicU64::new(0x4d41_4e47_4f55_524e);
+
+fn fallback_fill(buf: &mut [u8]) {
+    let mut state = URANDOM_FALLBACK.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    for byte in buf {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *byte = (state >> 32) as u8;
+    }
+}
 
 impl IndexNode for Urandom {
     fn read_at(
@@ -18,7 +41,14 @@ impl IndexNode for Urandom {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        crate::random::fill_bytes(buf).map_err(|_| SyscallErr::EAGAIN)?;
+        if crate::random::fill_bytes(buf).is_err() {
+            if !self.allow_insecure_fallback {
+                return Err(SyscallErr::EAGAIN);
+            }
+            if crate::random::fill_insecure_bytes(buf).is_err() {
+                fallback_fill(buf);
+            }
+        }
         Ok(buf.len())
     }
 

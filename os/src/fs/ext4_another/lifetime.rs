@@ -34,6 +34,9 @@ impl InodeKey {
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
     page_cache: Mutex<Option<Weak<PageCache>>>,
+    /// Keeps dirty data reachable across independently constructed VFS inodes
+    /// until the inode size and data have reached a sync boundary.
+    dirty_page_cache: Mutex<Option<Arc<PageCache>>>,
     reclaim: Mutex<Option<another_ext4::InodeReclaimHandle>>,
     reclaim_error: Mutex<Option<SyscallErr>>,
     pins: AtomicUsize,
@@ -47,6 +50,7 @@ impl InodeLifetime {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
             page_cache: Mutex::new(None),
+            dirty_page_cache: Mutex::new(None),
             reclaim: Mutex::new(None),
             reclaim_error: Mutex::new(None),
             pins: AtomicUsize::new(0),
@@ -55,16 +59,41 @@ impl InodeLifetime {
     }
 
     pub(crate) fn page_cache(&self) -> Option<Arc<PageCache>> {
-        self.page_cache.lock().as_ref().and_then(Weak::upgrade)
+        self.dirty_page_cache
+            .lock()
+            .clone()
+            .or_else(|| self.page_cache.lock().as_ref().and_then(Weak::upgrade))
     }
 
     pub(crate) fn install_page_cache(&self, cache: Arc<PageCache>) -> Arc<PageCache> {
+        if let Some(existing) = self.page_cache() {
+            return existing;
+        }
         let mut page_cache = self.page_cache.lock();
         if let Some(existing) = page_cache.as_ref().and_then(Weak::upgrade) {
             return existing;
         }
         *page_cache = Some(Arc::downgrade(&cache));
         cache
+    }
+
+    /// Retain a cache that contains data newer than the on-disk inode size.
+    /// This closes the write → reopen window in which a new VFS inode would
+    /// otherwise allocate a cache and read the old EOF from another_ext4.
+    pub(crate) fn retain_dirty_page_cache(&self, cache: &Arc<PageCache>) {
+        let mut dirty_page_cache = self.dirty_page_cache.lock();
+        if dirty_page_cache.is_none() {
+            self.pin();
+            *dirty_page_cache = Some(cache.clone());
+        }
+    }
+
+    /// Release the temporary dirty-cache pin after a successful data and size
+    /// sync. The weak cache reference still permits live VFS inodes to reuse it.
+    pub(crate) fn release_dirty_page_cache(&self) {
+        if self.dirty_page_cache.lock().take().is_some() {
+            self.unpin();
+        }
     }
 
     pub(crate) fn pin(&self) {
@@ -132,32 +161,50 @@ impl Ext4FileSystem {
     }
 
     pub(crate) fn sync_lifetimes(&self) -> Result<(), SyscallErr> {
+        // Snapshot lifetime ownership only. Each inode's generation is loaded
+        // after its I/O gate is held, so resize cannot race its size commit.
         let all: Vec<(Option<Arc<PageCache>>, InodeKey, Arc<InodeLifetime>)> = self
             .lifetimes
             .lock()
             .iter()
-            .map(|(key, lifetime)| (lifetime.page_cache(), *key, lifetime.clone()))
+            .map(|(key, lifetime)| {
+                (lifetime.page_cache(), *key, lifetime.clone())
+            })
             .collect();
         let mut committed_generations = Vec::new();
         let mut flush_succeeded = false;
         let result = Self::complete_lifetime_sync(
             || {
-                for (maybe_cache, _key, _lifetime) in &all {
-                    if let Some(cache) = maybe_cache {
-                        cache.writeback_all()?;
+                for (maybe_cache, key, lifetime) in &all {
+                    // A concurrent resize installs its cache before publishing
+                    // a nonzero generation. Re-read it here rather than using
+                    // only the pre-sync snapshot, so that generation's commit
+                    // remains serialized with the resize.
+                    let cache = maybe_cache
+                        .as_ref()
+                        .cloned()
+                        .or_else(|| lifetime.page_cache());
+                    let mut commit_size = || {
+                        let generation = lifetime.size_generation.load(Ordering::Acquire);
+                        if generation == 0 {
+                            return Ok(());
+                        }
+                        let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
+                        let size = lifetime.logical_size.load(Ordering::Acquire);
+                        self.inner()
+                            .commit_inode_size(id, size as u64, None)
+                            .map_err(|error| from_another(error.code()))?;
+                        committed_generations.push((lifetime.clone(), generation));
+                        Ok(())
+                    };
+                    if let Some(cache) = cache {
+                        cache.with_io_gate(|| {
+                            cache.writeback_all_with_io_gate_held()?;
+                            commit_size()
+                        })?;
+                    } else {
+                        commit_size()?;
                     }
-                }
-                for (_maybe_cache, key, lifetime) in &all {
-                    let generation = lifetime.size_generation.load(Ordering::Acquire);
-                    if generation == 0 {
-                        continue;
-                    }
-                    let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
-                    let size = lifetime.logical_size.load(Ordering::Acquire);
-                    self.inner()
-                        .commit_inode_size(id, size as u64, None)
-                        .map_err(|error| from_another(error.code()))?;
-                    committed_generations.push((lifetime.clone(), generation));
                 }
                 Ok(())
             },
@@ -170,12 +217,14 @@ impl Ext4FileSystem {
         );
         if flush_succeeded {
             for (lifetime, generation) in committed_generations {
-                let _ = lifetime.size_generation.compare_exchange(
+                if lifetime.size_generation.compare_exchange(
                     generation,
                     0,
                     Ordering::AcqRel,
                     Ordering::Acquire,
-                );
+                ).is_ok() {
+                    lifetime.release_dirty_page_cache();
+                }
             }
         }
         result
