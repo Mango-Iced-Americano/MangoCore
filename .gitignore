@@ -39,6 +39,7 @@ disk-la.img
 !/docs/Work_Log/evidence/2026-07-22/t3-formal-facade-docker.md
 !/docs/Work_Log/evidence/2026-07-22/t3-initramfs-outdir-docker.md
 !/docs/Work_Log/evidence/2026-07-23/
+!/docs/Work_Log/evidence/2026-07-27/
 
 cc-codex/*.clean.img
 
