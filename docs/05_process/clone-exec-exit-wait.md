@@ -3,7 +3,7 @@ title: "clone、exec、exit、wait 生命周期总路径"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, lifecycle, clone, exec, wait]
 ---
 
@@ -162,15 +162,15 @@ task.process.complete_vfork();
 ```
 sys_exit(code)
   └── exit_current_and_run_next(encoded)
-        ├── take_current_task()
+        ├── current_task_ref()（Processor.current 保留 owner）
         ├── do_exit(task, encoded)
         │     ├── task.exit_thread_resources()
         │     └── if live_thread_count == 0:
         │           ├── release fcntl locks
         │           ├── shm_detach_process()
         │           └── process.finish_exit()
-        ├── add_zombie_task(task)
-        └── schedule(idle)
+        ├── schedule(idle)
+        └── idle: finish_switch_out() -> zombie queue
 ```
 
 `exit_group()` 先把同进程其他线程全部做线程级退出，再处理当前线程和进程级退出。

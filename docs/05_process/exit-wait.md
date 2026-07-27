@@ -3,7 +3,7 @@ title: "exit、exit_group、wait4 与 waitid"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, exit, wait, zombie]
 ---
 
@@ -79,27 +79,28 @@ process.finish_exit(task, exit_code)
 线程级退出和最后线程判断在 `task/mod.rs::do_exit()` 中完成：
 
 ```rust
-fn do_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
+fn do_exit(task: &TaskControlBlock, exit_code: u32) {
     if task.exit_thread_resources(exit_code) {
         if task.process.live_thread_count() == 0 {
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(task.as_ref(), exit_code);
+            task.process.finish_exit(task, exit_code);
         }
     }
 }
 
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
-    let task = take_current_task().unwrap();
-    do_exit(&task, exit_code);
-    add_zombie_task(task);
+    let task = current_task_ref().unwrap();
+    do_exit(task, exit_code);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
 }
 ```
 
-`exit_current_and_run_next()` 不在当前内核栈上释放最后一个 TCB 引用，而是把 task 放入 zombie queue 后切回 idle。调度循环随后负责 drain zombie queue。
+`exit_current_and_run_next()` 只借用 `Processor.current` 持有的 TCB，不 clone 一个
+永远不会返回析构的本地 Arc。任务先标记 Zombie 并切回 idle；`__switch` 返回后，
+idle 才从 current slot 取出唯一 Arc 并转入 zombie queue。
 
 `ProcessControlBlock::finish_exit()` 是最后线程退出后的进程级提交点：
 
@@ -152,12 +153,8 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
                 if let Some(parent_task) = parent_process.any_live_thread() {
                     let mut parent_inner = parent_task.acquire_inner_lock();
                     parent_inner.add_signal(exit_task.exit_signal);
-
-                    if parent_inner.task_status == TaskStatus::Interruptible {
-                        parent_inner.task_status = TaskStatus::Ready;
-                        drop(parent_inner);
-                        wake_interruptible(parent_task);
-                    }
+                    drop(parent_inner);
+                    let _ = wake_interruptible(parent_task);
                 }
             }
         }
@@ -184,10 +181,10 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
 当前任务仍运行在自己的内核栈上，不能立即 drop 最后一个 TCB 引用。退出函数：
 
 ```text
-take_current_task()
-do_exit()
-add_zombie_task(task)
+current_task_ref()（Processor.current 保持 owner）
+do_exit() -> TaskStatus::Zombie
 schedule(idle)
+idle: clear current -> finish_switch_out() -> zombie queue
 ```
 
 调度循环之后从 zombie queue 取出并 drop TCB。

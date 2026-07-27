@@ -42,15 +42,15 @@ pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
-use manager::fetch_task;
+use manager::{fetch_task, finish_switch_out};
 pub use manager::{
-    add_kernel_timer, add_task, add_zombie_task, all_pids, do_oom, do_wake_expired, has_ready_task,
+    add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
-    remove_zombie_tasks_by_pid, run_deferred_timer_at_task_safe_point, run_deferred_timer_work,
-    send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
-    take_one_ready_zombie, take_zombie_tasks, task_manager_counts, timer_interrupt_handler,
-    timer_subsystem_init, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
-    TimerAction, WaitQueue, WaitResult,
+    remove_zombie_tasks_by_pid, publish_task, run_deferred_timer_at_task_safe_point,
+    run_deferred_timer_work, send_signal_to_interruptible, sleep_interruptible,
+    take_one_interruptible_zombie, take_one_ready_zombie, take_zombie_tasks, task_manager_counts,
+    timer_interrupt_handler, timer_subsystem_init, update_ready_nice, wait_with_timeout,
+    wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
 pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
@@ -69,7 +69,7 @@ pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
     current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_task_ref,
     current_tid, current_trap_cx, current_uid, current_user_token, run_tasks, schedule,
-    set_current_syscall_id, take_current_task, try_current_user_token,
+    set_current_syscall_id, try_current_user_token,
 };
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
@@ -104,32 +104,28 @@ pub fn try_yield() {
         suspend_current_and_run_next()
     }
 }
-/// 将当前任务置为 `Ready` 并切回调度器。
+/// 将当前任务切回 idle，由 idle 在切栈完成后交还 ready queue。
 ///
 /// # Locking
 ///
-/// 只在持有当前任务 inner 锁期间修改任务状态和调度时间统计，入队前释放
-/// 该锁，避免调度器队列操作和任务内部锁形成反向锁序。
+/// 当前任务在 `__switch` 返回 idle 之前始终保持 `Running(cpu)`，避免仍使用
+/// 自身内核栈时就被另一个调度循环再次选中。
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
     // ---- hold current PCB lock
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    // Change status to Ready
-    task_inner.task_status = TaskStatus::Ready;
     task_inner.update_process_times_schedule_out();
     drop(task_inner);
     // ---- release current PCB lock
 
-    // push back to ready queue.
-    add_task(task);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
 }
 
-/// 将当前任务置为 `Interruptible` 并切回调度器。
+/// 将当前任务置为 `Blocked` 并切回调度器。
 ///
 /// # Semantics
 ///
@@ -137,13 +133,11 @@ pub fn suspend_current_and_run_next() {
 /// 超时路径重新置为 ready。
 pub(crate) fn block_current_and_run_next() {
     // There must be an application running.
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
     // ---- hold current PCB lock
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    // Change status to Interruptible
-    task_inner.task_status = TaskStatus::Interruptible;
     task_inner.update_process_times_schedule_out();
     drop(task_inner);
     // ---- release current PCB lock
@@ -165,22 +159,16 @@ pub(crate) fn block_current_and_run_next() {
 pub(crate) fn block_current_and_run_next_checked(
     should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
 ) {
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.task_status = TaskStatus::Interruptible;
     task_inner.update_process_times_schedule_out();
     drop(task_inner);
 
     sleep_interruptible(task.clone());
     if !should_block(&task) {
-        let mut task_inner = task.acquire_inner_lock();
-        if task_inner.task_status == TaskStatus::Interruptible {
-            task_inner.task_status = TaskStatus::Ready;
-            drop(task_inner);
-            wake_interruptible(task.clone());
-        }
+        let _ = wake_interruptible(task.clone());
     }
     schedule(task_cx_ptr);
 }
@@ -193,13 +181,12 @@ pub(crate) fn block_current_and_run_next_checked(
 /// 这保证唤醒方不会在“释放锁”和“睡眠入队”之间丢失唤醒。
 pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     // There must be an application running.
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
     // ---- hold current PCB lock
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
 
-    task_inner.task_status = TaskStatus::Interruptible;
     task_inner.update_process_times_schedule_out();
 
     drop(task_inner);
@@ -222,33 +209,27 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     lock: MutexGuard<'_, T>,
     should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
 ) {
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.task_status = TaskStatus::Interruptible;
     task_inner.update_process_times_schedule_out();
     drop(task_inner);
 
     sleep_interruptible(task.clone());
     if !should_block(&task) {
-        let mut task_inner = task.acquire_inner_lock();
-        if task_inner.task_status == TaskStatus::Interruptible {
-            task_inner.task_status = TaskStatus::Ready;
-            drop(task_inner);
-            wake_interruptible(task.clone());
-        }
+        let _ = wake_interruptible(task.clone());
     }
     drop(lock);
     schedule(task_cx_ptr);
 }
 
-fn do_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
+fn do_exit(task: &TaskControlBlock, exit_code: u32) {
     if task.exit_thread_resources(exit_code) {
         if task.process.live_thread_count() == 0 {
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(task.as_ref(), exit_code);
+            task.process.finish_exit(task, exit_code);
         }
     }
 }
@@ -260,10 +241,10 @@ fn do_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
 /// 当前任务会进入 zombie 队列；函数不返回。因为代码仍运行在当前任务的内核栈
 /// 上，最后一个 `Arc<TaskControlBlock>` 必须延迟到切回 idle 后释放。
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
-    let task = take_current_task().unwrap();
-    do_exit(&task, exit_code);
-    // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
-    add_zombie_task(task);
+    // 只借用由 Processor.current 持有的 TCB，不能 clone Arc：退出任务不会再
+    // 返回当前栈帧，跨过最终 schedule 的本地 Arc 将永远无法析构。
+    let task = current_task_ref().unwrap();
+    do_exit(task, exit_code);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
@@ -276,7 +257,7 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 /// 其他线程先从调度队列移除并释放线程级资源，当前线程最后进入 zombie 队列。
 /// 函数不返回，且不能让任何本地 `Arc` 跨过最终的 `schedule()`。
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
-    let task = take_current_task().unwrap();
+    let task = current_task_ref().unwrap();
 
     // 把 process Arc 的生命周期限制在 schedule() 之前。
     // 此函数返回 !，schedule() 切栈后本地变量永不析构——不能有任何 Arc 跨过它。
@@ -295,9 +276,7 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     for task in exit_list.into_iter() {
         task.exit_thread_resources(exit_code);
     }
-    do_exit(&task, exit_code);
-    // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
-    add_zombie_task(task);
+    do_exit(task, exit_code);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
@@ -348,7 +327,7 @@ lazy_static! {
 pub fn add_initproc() {
     #[cfg(feature = "board_2k1000")]
     boot_trace!("[bringup][init:04] enqueue initial task");
-    add_task(INITPROC.clone());
+    publish_task(INITPROC.clone());
     #[cfg(feature = "board_2k1000")]
     boot_trace!("[bringup][init:05] initial task is on ready queue");
 }
@@ -424,7 +403,7 @@ extern "C" fn ktest_trampoline() -> ! {
 /// # Panics
 ///
 /// Panics if called outside ktest mode (no `current_task()` is running).
-pub fn spawn_ktest_task(f: fn()) {
+pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
     *KTEST_SPAWN_FN.lock() = f;
     let tid_handle = tid_alloc();
     let kstack = crate::hal::kstack_alloc();
@@ -435,22 +414,21 @@ pub fn spawn_ktest_task(f: fn()) {
     tcb.process.add_thread(&tcb);
     registry::register_process(&tcb.process);
     registry::register_task(&tcb);
-    add_task(tcb);
+    let handle = tcb.clone();
+    publish_task(tcb);
+    handle
 }
 
 /// Minimal exit for ktest tasks: mark as zombie and schedule away.
 ///
 /// Unlike [`exit_current_and_run_next`], this does NOT call process-level
-/// cleanup. It only marks the task as [`TaskStatus::Zombie`], adds it to
-/// the zombie queue, and switches back to the scheduler. The scheduler
-/// will eventually drop the TCB via `take_zombie_tasks`.
+/// cleanup. It only marks the task as [`TaskStatus::Zombie`] and switches
+/// back to idle; idle then transfers the retained current Arc to the zombie queue.
+/// Ktest 的 live-thread 计数会在 zombie queue 最终 drop TCB 时由 `Drop` 收回。
+/// 纯内核 ktest 不向用户态暴露 rusage，因此这里不重复生产退出路径的 CPU 时间结算。
 pub fn zombify_current_and_run_next() -> ! {
-    let task = take_current_task().unwrap();
-    {
-        let mut task_inner = task.acquire_inner_lock();
-        task_inner.task_status = TaskStatus::Zombie;
-    }
-    add_zombie_task(task);
+    let task = current_task_ref().unwrap();
+    task.mark_zombie("ktest task exit");
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable after zombify_current_and_run_next");

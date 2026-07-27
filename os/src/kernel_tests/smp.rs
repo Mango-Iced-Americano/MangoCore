@@ -1,7 +1,9 @@
 //! SMP 启动阶段的 focused ktest。
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 use crate::kernel_tests::runner::KernelTest;
 
@@ -9,6 +11,12 @@ const IRQ_PROBE_NOT_RUN: usize = 0;
 const IRQ_PROBE_DISABLED: usize = 1;
 const IRQ_PROBE_ENABLED: usize = 2;
 static IDLE_TO_TASK_IRQ_PROBE: AtomicUsize = AtomicUsize::new(IRQ_PROBE_NOT_RUN);
+static SCHED_STATE_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+lazy_static! {
+    static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
+        Mutex::new(None);
+}
 
 /// 返回只依赖 Phase 1 启动不变量的测试集合。
 pub fn tests() -> Vec<KernelTest> {
@@ -41,6 +49,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::syscall_irq_window_survives_schedule",
             syscall_irq_window_survives_schedule,
+        ),
+        KernelTest::new(
+            "smp::scheduler_state_has_unique_owner",
+            scheduler_state_has_unique_owner,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -340,6 +352,77 @@ fn receive_one_ap_reply_while_irqs_enabled() -> Result<(), &'static str> {
     }
     if !local_interrupts_enabled() {
         return Err("kernel IPI trap returned with syscall IRQ window closed");
+    }
+    Ok(())
+}
+
+/// helper 被选中后确认 Queued -> Running，并通过 Completion 唤醒 blocked runner。
+fn complete_scheduler_state_probe() {
+    let task = crate::task::current_task().expect("scheduler-state helper has no current task");
+    if task.task_status() == crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
+        SCHED_STATE_HELPER_RUNS.fetch_add(1, Ordering::Release);
+    }
+    let completion = SCHED_STATE_COMPLETION
+        .lock()
+        .as_ref()
+        .expect("scheduler-state completion missing")
+        .clone();
+    completion.complete();
+}
+
+/// 覆盖任务发布、提前取消阻塞、完整睡眠/唤醒和退出回收，并验证重复 wake
+/// 不会改变队列 owner。测试只调用生产入口，不直接伪造原子状态。
+fn scheduler_state_has_unique_owner() -> Result<(), &'static str> {
+    let runner = crate::task::current_task().ok_or("scheduler-state runner is missing")?;
+    if runner.task_status() != crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
+        return Err("runner does not own CPU0 before scheduler-state test");
+    }
+
+    // checked block 会先登记 Blocking，再复查条件。这里故意返回 false，验证
+    // 早到 wake 只撤销阻塞意图，任务必须等切回 idle 后才能重新进入 runqueue。
+    let mut saw_blocking = false;
+    crate::task::block_current_and_run_next_checked(|task| {
+        saw_blocking = task.task_status()
+            == crate::task::TaskStatus::Blocking(crate::smp::BOOT_CPU_ID);
+        false
+    });
+    if !saw_blocking {
+        return Err("checked block did not expose Blocking ownership window");
+    }
+    if runner.task_status() != crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
+        return Err("cancelled block did not return runner to CPU0");
+    }
+
+    SCHED_STATE_HELPER_RUNS.store(0, Ordering::Release);
+    let completion = Arc::new(crate::task::Completion::new());
+    *SCHED_STATE_COMPLETION.lock() = Some(completion.clone());
+    let helper = crate::task::spawn_ktest_task(complete_scheduler_state_probe);
+    if helper.task_status() != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID) {
+        return Err("new helper did not acquire the CPU0 ready queue");
+    }
+
+    completion.wait_uninterruptible();
+    *SCHED_STATE_COMPLETION.lock() = None;
+    if SCHED_STATE_HELPER_RUNS.load(Ordering::Acquire) != 1 {
+        return Err("scheduler-state helper did not run exactly once");
+    }
+    if helper.task_status() != crate::task::TaskStatus::Zombie {
+        return Err("scheduler-state helper did not reach Zombie");
+    }
+    if runner.task_status() != crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
+        return Err("woken runner did not reacquire CPU0 ownership");
+    }
+
+    // 对已经 Running 的 runner 再发两次 wake；统一入口必须把它们识别为
+    // 已唤醒，且不能改变 ready/interruptible 容器。
+    let counts_before = crate::task::task_manager_counts();
+    crate::task::wake_interruptible(runner.clone());
+    crate::task::wake_interruptible(runner.clone());
+    if crate::task::task_manager_counts() != counts_before {
+        return Err("duplicate wake changed scheduler queue membership");
+    }
+    if runner.task_status() != crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
+        return Err("duplicate wake changed the running owner");
     }
     Ok(())
 }

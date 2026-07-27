@@ -145,6 +145,9 @@ pub struct TaskControlBlock {
     // 可变字段
     /// 任务内部状态，使用互斥锁保护
     inner: Mutex<TaskControlBlockInner>,
+    /// 调度状态的唯一真值。状态和 CPU owner 编码在同一个原子字中，避免
+    /// `task.inner` 与运行队列分别维护状态而产生短暂漂移。
+    sched_state: AtomicUsize,
     // 可共享&可变字段
     /// I/O 等待定时器是否已挂入 KERNEL_TIMER_QUEUE。
     /// 为 true 时，wait_io_core_with_queue 不再添加第二个定时器（Option B），
@@ -181,8 +184,6 @@ pub struct TaskControlBlockInner {
     pub trap_cx_ppn: PhysPageNum,
     /// 任务上下文
     pub task_cx: TaskContext,
-    /// 任务状态
-    pub task_status: TaskStatus,
     /// POSIX 调度策略兼容字段。当前调度器仍是单核轮转，这里用于 syscall 语义回读。
     pub sched_policy: usize,
     /// POSIX 调度优先级兼容字段。
@@ -492,14 +493,6 @@ impl TaskControlBlockInner {
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
-    /// 获取任务状态
-    fn get_status(&self) -> TaskStatus {
-        self.task_status
-    }
-    /// 判断是否为僵尸态
-    pub fn is_zombie(&self) -> bool {
-        self.get_status() == TaskStatus::Zombie
-    }
     /// 添加信号
     pub fn add_signal(&mut self, signal: Signals) {
         let _ = self.sigpending.enqueue_signal(signal, 0);
@@ -690,6 +683,88 @@ impl TaskControlBlock {
     pub fn acquire_inner_lock(&self) -> MutexGuard<TaskControlBlockInner> {
         self.inner.lock()
     }
+    /// Acquire 读取任务当前的调度所有权。
+    pub fn task_status(&self) -> TaskStatus {
+        TaskStatus::decode(self.sched_state.load(Ordering::Acquire))
+    }
+    /// 尝试完成一次精确的调度状态迁移。
+    ///
+    /// AcqRel 同时发布旧 owner 的写入，并让新 owner 观察到此前发布的数据。
+    #[must_use = "调度 CAS 的失败状态必须显式处理"]
+    pub(crate) fn try_sched_transition(
+        &self,
+        current: TaskStatus,
+        next: TaskStatus,
+    ) -> Result<(), TaskStatus> {
+        self.sched_state
+            .compare_exchange(
+                current.encode(),
+                next.encode(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(TaskStatus::decode)
+    }
+    /// 执行不允许失败的状态迁移。
+    ///
+    /// 这里处理的是调度所有权交接，而不是普通业务竞争。失败后继续运行可能让
+    /// 同一个 TCB 同时出现在 current slot 和 runqueue 中，因此所有构建都立即
+    /// 停止；允许失败的重复唤醒必须直接使用 [`Self::try_sched_transition`]。
+    pub(crate) fn require_sched_transition(
+        &self,
+        current: TaskStatus,
+        next: TaskStatus,
+        operation: &'static str,
+    ) {
+        if let Err(actual) = self.try_sched_transition(current, next) {
+            self.fail_sched_invariant(operation, current, actual, next);
+        }
+    }
+    /// 终止无法安全恢复的所有权错误。
+    ///
+    /// 这类失败与“另一唤醒方已经赢得 CAS”不同：继续运行会让任务同时属于
+    /// 两个 owner，或从所有队列中消失，因此 release 构建也不能静默降级。
+    pub(crate) fn fail_sched_invariant(
+        &self,
+        operation: &'static str,
+        expected: TaskStatus,
+        actual: TaskStatus,
+        next: TaskStatus,
+    ) -> ! {
+        panic!(
+            "scheduler ownership invariant failed in {}: tid={}, expected={:?}, actual={:?}, next={:?}",
+            operation,
+            self.gettid(),
+            expected,
+            actual,
+            next
+        );
+    }
+    /// 原子状态已经进入不可逆终态时返回 true。
+    pub fn is_zombie(&self) -> bool {
+        self.task_status() == TaskStatus::Zombie
+    }
+    /// 把未排队的任务推进到终态。
+    ///
+    /// `Queued` 必须先由运行队列移除并变成 `Blocked`；直接从 Queued 结束会让
+    /// 队列中残留一个终态 TCB，因此这里将其视为所有权错误。
+    pub(crate) fn mark_zombie(&self, operation: &'static str) -> bool {
+        let current = self.task_status();
+        match current {
+            TaskStatus::New | TaskStatus::Blocked | TaskStatus::Running(_) => {
+                self.require_sched_transition(current, TaskStatus::Zombie, operation);
+                true
+            }
+            TaskStatus::Zombie => false,
+            TaskStatus::Queued(_) | TaskStatus::Blocking(_) => self.fail_sched_invariant(
+                operation,
+                TaskStatus::Blocked,
+                current,
+                TaskStatus::Zombie,
+            ),
+        }
+    }
     pub fn account_seccomp_enabled(&self) {
         if !self.seccomp_counted.swap(true, Ordering::Relaxed) {
             ACTIVE_SECCOMP_TASKS.fetch_add(1, Ordering::Relaxed);
@@ -716,11 +791,13 @@ impl TaskControlBlock {
     pub(crate) fn exit_thread_resources(&self, exit_code: u32) -> bool {
         let clear_child_tid = {
             let mut inner = self.acquire_inner_lock();
-            if inner.task_status == TaskStatus::Zombie {
+            if self.is_zombie() {
                 return false;
             }
             inner.update_process_times_schedule_out();
-            inner.task_status = TaskStatus::Zombie;
+            if !self.mark_zombie("exit") {
+                return false;
+            }
             let clear_child_tid = inner.clear_child_tid;
             inner.clear_child_tid = 0;
             inner.robust_list = RobustList::default();
@@ -924,6 +1001,7 @@ impl TaskControlBlock {
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
+            sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -932,7 +1010,6 @@ impl TaskControlBlock {
                 signal_stack: SignalStack::disabled(),
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
-                task_status: TaskStatus::Ready,
                 sched_policy: 0,
                 sched_priority: 0,
                 sched_reset_on_fork: false,
@@ -1029,7 +1106,7 @@ impl TaskControlBlock {
     ///
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
     /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
-    /// 调用方负责通过 `add_task()` 将返回的 TCB 加入 ready 队列。
+    /// 调用方负责通过 `publish_task()` 将返回的 TCB 发布到 ready 队列。
     pub fn new_ktest_independent(
         tid: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
@@ -1059,6 +1136,7 @@ impl TaskControlBlock {
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
+            sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1067,7 +1145,6 @@ impl TaskControlBlock {
                 signal_stack: SignalStack::disabled(),
                 trap_cx_ppn: PhysPageNum(0),
                 task_cx,
-                task_status: TaskStatus::Ready,
                 sched_policy: 0,
                 sched_priority: 0,
                 sched_reset_on_fork: false,
@@ -1229,11 +1306,13 @@ impl TaskControlBlock {
             .into_iter()
             .filter(|task| task.tid.0 != self.tid.0)
             .collect();
+        // 先在 TASK_MANAGER 锁内把 Queued owner 收回为 Blocked，随后才允许
+        // 线程资源路径把它推进到 Zombie；反序会留下“队列仍拥有终态 TCB”。
+        super::remove_tasks_from_queues(&other_threads);
         for task in &other_threads {
             // execve 会杀掉同线程组的其他线程，但保留当前 process。
             task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
         }
-        super::remove_tasks_from_queues(&other_threads);
 
         {
             // **** 保持当前PCB锁
@@ -1346,10 +1425,10 @@ impl TaskControlBlock {
             .into_iter()
             .filter(|task| task.tid.0 != self.tid.0)
             .collect();
+        super::remove_tasks_from_queues(&other_threads);
         for task in &other_threads {
             task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
         }
-        super::remove_tasks_from_queues(&other_threads);
 
         {
             let mut inner = self.acquire_inner_lock();
@@ -1620,6 +1699,7 @@ impl TaskControlBlock {
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
             asid: core::sync::atomic::AtomicU16::new(0),
+            sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),
@@ -1644,7 +1724,6 @@ impl TaskControlBlock {
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 // constants
-                task_status: TaskStatus::Ready,
                 sched_policy: child_sched_policy,
                 sched_priority: child_sched_priority,
                 sched_reset_on_fork: false,
@@ -1895,15 +1974,56 @@ impl Drop for TaskControlBlock {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-/// 任务状态
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+/// 任务的调度所有权状态。
+///
+/// `Queued(cpu)` 和 `Running(cpu)` 直接携带 owner，后续拆分 per-CPU runqueue
+/// 时不需要再次替换状态表示；当前用户任务的 owner 恒为 CPU0。
 pub enum TaskStatus {
-    /// 就绪态
-    Ready,
-    /// 运行态
-    Running,
-    /// 僵尸态
+    New,
+    Queued(usize),
+    Running(usize),
+    /// 当前任务已经登记到 interruptible registry，但尚未真正切离 CPU。
+    ///
+    /// 唤醒方可以把它恢复为 `Running(cpu)`，从而取消本次阻塞；idle 侧只有在
+    /// context switch 完成后，才会把仍处于此状态的任务提交为 `Blocked`。
+    Blocking(usize),
+    Blocked,
     Zombie,
-    /// 可中断态
-    Interruptible,
+}
+
+impl TaskStatus {
+    /// 低三位：状态tag
+    /// 高位：CPU号（仅在 Queued/Running/Blocking 状态下有效）
+    const TAG_BITS: usize = 3;
+    const TAG_MASK: usize = (1 << Self::TAG_BITS) - 1;
+    const NEW_TAG: usize = 0;
+    const BLOCKED_TAG: usize = 1;
+    const QUEUED_TAG: usize = 2;
+    const RUNNING_TAG: usize = 3;
+    const BLOCKING_TAG: usize = 4;
+    const ZOMBIE_TAG: usize = 5;
+
+    const fn encode(self) -> usize {
+        match self {
+            Self::New => Self::NEW_TAG,
+            Self::Blocked => Self::BLOCKED_TAG,
+            Self::Queued(cpu) => (cpu << Self::TAG_BITS) | Self::QUEUED_TAG,
+            Self::Running(cpu) => (cpu << Self::TAG_BITS) | Self::RUNNING_TAG,
+            Self::Blocking(cpu) => (cpu << Self::TAG_BITS) | Self::BLOCKING_TAG,
+            Self::Zombie => Self::ZOMBIE_TAG,
+        }
+    }
+
+    fn decode(raw: usize) -> Self {
+        match raw & Self::TAG_MASK {
+            Self::NEW_TAG => Self::New,
+            Self::BLOCKED_TAG => Self::Blocked,
+            Self::QUEUED_TAG => Self::Queued(raw >> Self::TAG_BITS),
+            Self::RUNNING_TAG => Self::Running(raw >> Self::TAG_BITS),
+            Self::BLOCKING_TAG => Self::Blocking(raw >> Self::TAG_BITS),
+            Self::ZOMBIE_TAG => Self::Zombie,
+            tag => panic!("invalid scheduler state tag: {}", tag),
+        }
+    }
 }

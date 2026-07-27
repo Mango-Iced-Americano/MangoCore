@@ -46,7 +46,7 @@ fn print_task_info() {
             if let Some(inner) = task.try_inner() {
                 println!(
                     "status: {:?}  pending_oom_kill: {}",
-                    inner.task_status, inner.pending_oom_kill
+                    task.task_status(), inner.pending_oom_kill
                 );
             } else {
                 println!("task inner: <locked>");

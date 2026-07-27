@@ -11,8 +11,8 @@ use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    add_task, current_task_ref, quota, registry, signal::send_process_signal, ProcessControlBlock,
-    ProcessState, TaskControlBlock, WaitQueue, WaitResult,
+    current_task_ref, publish_task, quota, registry, signal::send_process_signal,
+    ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -87,10 +87,10 @@ impl ProcessManager {
     ) {
         if flags.contains(CloneFlags::CLONE_VFORK) {
             child.process.set_vfork_parent(parent);
-            add_task(child.clone());
+            publish_task(child.clone());
             child.process.wait_vfork_done_uninterruptible();
         } else {
-            add_task(child);
+            publish_task(child);
         }
     }
 

@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-25
+> Coverage: 2026-04-01 to 2026-07-27
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -45,6 +45,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
 | Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 | 双架构 SMP idle stack | 2026-07-25 | GPT/Codex, DeepSeek | AP boot→idle 栈切换设计、ABI/内存序复核、双架构 8 核证据归纳 | AP 只在独立 idle stack 上发布 online；RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 3/3 PASS |
+| SMP 调度所有权交接 | 2026-07-27 | GPT/Codex, DeepSeek | task 状态机收敛、切栈后 owner 交接与丢唤醒竞态复核 | 以六态原子状态机替代分散状态写入；双架构 4 核 SMP focused 测试均为 19/19 PASS |
 
 ## 4. 详细使用场景
 
@@ -243,6 +244,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 维护者拒绝了把可写 stack 改成 immutable static、以及把 timer/runqueue/MM 同时塞入下一包的过宽建议；保留 `static mut + addr_of!`，并把后续范围收敛为最小 IPI mailbox/ack。
 - Verification: RV64 实际以 hardware hart6 冷启动、LA64 以 CPU0 冷启动，两者均达到 `online_mask=0xff`、SMP ktest 3/3 PASS；ELF 反汇编确认切栈指令与页对齐 BSS 符号。
 
+### Case 10: SMP 调度所有权与阻塞唤醒交接
+
+- Evidence: `docs/Work_Log/2026-07-27.md`、`docs/Work_Log/evidence/2026-07-27/smp-b15-summary.md`。
+- AI roles: GPT/Codex 负责状态机取舍、实现与最终验收；DeepSeek 负责冻结源码的只读竞态审查和 Docker/QEMU 结果归纳。
+- Problem: 通用 `TaskManager::add()` 若能把仍在当前 CPU 内核栈上执行的任务直接改成 queued，真正多核后另一 CPU 可能在 context switch 完成前取走同一 TCB；阻塞登记与切栈之间还存在提前 wake 窗口。
+- AI contribution: DeepSeek 复核了六态方案、CAS 内存序、interruptible registry 与 current slot 的短暂重叠，并指出 nice-aware 选择仍在全局调度锁内读取 `task.inner` 的后续锁序债务；未建议继续扩张瞬态状态。
+- Human action: 删除通用调度 add 入口，以 `publish_task()`、`fetch_task(cpu)` 和 idle 侧 `finish_switch_out()` 收口 owner 交接；仅保留必要的 `Blocking(cpu)` 瞬态，并由统一 wake CAS 区分提前取消阻塞与真正重新入队。
+- Verification: RV64、LA64 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS；双架构 normal kernel build 通过，RV64 WaitQueue focused 测试为 4/4 PASS。证据不外推为 AP 用户任务调度、迁移或远程 TLB 正确性。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -294,6 +304,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-21.md`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-artifact-binding-supplement-20260721T063550+0800/` | LA64 mmap arena 边界与 trap-context 窗口 | 记录旧范围导致的非固定 mmap RED、最终 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)` 修正、固定映射拒绝规则、RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`、真实 `/regression` ELF 绑定及 Oracle 最终验收 |
 | `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 | `docs/Work_Log/2026-07-25.md`、`docs/Work_Log/evidence/2026-07-25/smp-b08-*` | 双架构 SMP AP idle stack | 记录 DeepSeek 只读审查、人工裁决、RV64/LA64 8 核 3/3 PASS 和 ELF 反汇编证据 |
+| `docs/Work_Log/2026-07-27.md`、`docs/Work_Log/evidence/2026-07-27/smp-b15-summary.md` | SMP 调度所有权与阻塞唤醒交接 | 记录 DeepSeek 冻结源码审查、人工收敛六态状态机、双架构 4 核 SMP 19/19 PASS 与证据边界 |
 
 ## 9. 交互记录与留痕方式
 

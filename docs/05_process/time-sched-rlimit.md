@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -331,17 +331,15 @@ pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
                 return false;
             }
 
-            let mut inner = task.acquire_inner_lock();
-            let should_wake = inner.task_status == super::TaskStatus::Interruptible;
-            if should_wake {
-                inner.task_status = super::task::TaskStatus::Ready;
-            }
-            drop(inner);
-            if should_wake {
+            let should_wake = matches!(
+                task.task_status(),
+                super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked
+            );
+            if should_wake && wake_interruptible(task) {
                 crate::task::perf::record_ktimer_real_wake();
-                wake_interruptible(task);
+                return true;
             }
-            should_wake
+            false
         }
 ```
 

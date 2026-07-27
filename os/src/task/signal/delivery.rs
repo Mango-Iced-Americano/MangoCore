@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 
 use crate::syscall::errno::EAGAIN;
 use crate::task::{
-    current_task_ref, wake_interruptible, ProcessControlBlock, TaskControlBlock, TaskStatus,
+    current_task_ref, wake_interruptible, ProcessControlBlock, TaskControlBlock,
 };
 
 use super::{is_realtime_signal, PendingSignal, SigInfo, Signals};
@@ -23,7 +23,7 @@ fn process_signal_target(
 ) -> Option<Arc<TaskControlBlock>> {
     for task in process.threads() {
         let inner = task.acquire_inner_lock();
-        if inner.task_status == TaskStatus::Zombie {
+        if task.is_zombie() {
             continue;
         }
         if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
@@ -35,12 +35,9 @@ fn process_signal_target(
 }
 
 fn wake_task_if_interruptible(task: Arc<TaskControlBlock>) {
-    let mut inner = task.acquire_inner_lock();
-    if inner.task_status == TaskStatus::Interruptible {
-        inner.task_status = TaskStatus::Ready;
-        drop(inner);
-        wake_interruptible(task);
-    }
+    // 状态判断和 CAS 必须由同一个 TASK_MANAGER 临界区完成；在此预判会让
+    // Blocking -> Blocked 的切栈窗口重新产生 TOCTOU 竞争。
+    let _ = wake_interruptible(task);
 }
 
 fn wake_process_interruptible_threads(process: &ProcessControlBlock) {
@@ -170,9 +167,7 @@ fn send_thread_signal_info(
         wake_task_if_interruptible(task.clone());
         return Ok(());
     }
-    if inner.task_status == TaskStatus::Interruptible
-        && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake)
-    {
+    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake) {
         drop(inner);
         wake_task_if_interruptible(task.clone());
     }

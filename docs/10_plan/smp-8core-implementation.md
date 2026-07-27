@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-26
+last_updated: 2026-07-27
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -495,9 +495,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 #### 实施内容
 
 - 在仍只有 CPU0 调度任务时，将所有 task_status 写入集中到 transition API，并引入可编码
-  `New/Blocked/Queued(cpu)/Running(cpu)/Zombie` 的原子调度状态；
-- 在 smp_debug 下对非法转换、重复入队、队列 owner 不一致立即 panic；release 构建保留计数，
-  使问题在 per-CPU runqueue 之前暴露；
+  `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie` 的原子调度状态；
+- 对 publish、fetch、switch-out 等必成功所有权迁移在所有构建中 fail-stop；重复 wake
+  使用允许失败的 CAS 返回 `AlreadyWaken`，不得把所有权损坏降级成计数后继续运行；
 - 逐一替换 wake、timeout、signal、block、yield、exit 的直接 task_status 写入；旧字段若暂时保留，
   只能是由 transition API 更新的兼容投影，不得继续作为并行真值来源；
 - 盘点 interruptible_queue 的信号枚举、OOM、zombie 清理和统计调用方；先把 runnable 所有权与
@@ -509,10 +509,37 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 #### 退出条件
 
-- 单核 focused test 覆盖所有合法转换，非法转换和重复 wake 能稳定触发诊断；
+- 单核 focused test 覆盖所有合法转换，重复 wake 不改变队列归属；非法必成功迁移
+  由代码审查和 fail-stop 入口保证，测试不得为触发 panic 直接伪造生产状态；
 - 仓库内不再有绕过 transition API 的 runnable 状态写入；
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
+
+#### 当前进度（SMP-P2.5-B15）
+
+- B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
+  `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
+  或第二真值；
+- publish、fetch、yield、block、wake、timeout、signal 和 exit 已统一经 CAS
+  迁移。当前全局 `TASK_MANAGER` 在同一临界区提交 CAS 与 ready/interruptible
+  容器变更，重复 wake 不会重复入队；
+- `Processor.current` 保留到真实 context switch 返回 idle 后才清空；idle 的
+  `finish_switch_out()` 统一提交 yield、阻塞和 zombie 回收。`Blocking(cpu)` 只表达
+  “已经登记睡眠但尚未切离 CPU”的必要窗口，早到 wake 恢复 `Running(cpu)` 且不入队；
+- `Queued` 任务退出前必须先从运行队列移除并转为 `Blocked`。可能造成任务丢失、
+  双重 owner 或悬挂队列节点的错误在所有构建中 fail-stop；只有重复 wake 属于
+  可恢复竞争；
+- `scheduler_state_has_unique_owner` 只通过生产 API 覆盖提前取消阻塞、完整
+  Completion 睡眠/唤醒、publish/fetch/yield/zombie 和重复 wake；冻结只读审查
+  未发现并发缺陷；
+- 双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS，且
+  `scheduler_state_has_unique_owner` 两轮通过、terminal STOP 仅最后执行；双架构
+  normal build 退出 0，RV64 WaitQueue 为 4/4 PASS。详细命令、用时和证据边界见
+  2026-07-27 Work Log 与 evidence；
+- 旧 nice-aware `pop_fair_ready()` 仍在全局 `TASK_MANAGER` 下读取 `task.inner`，
+  当前没有反向同时持锁路径，但这是 Phase 3 必须消除的已登记技术债；
+- 本批尚未拆分 per-CPU runqueue/current slot，任务 owner 仍固定 CPU0；也尚未开始
+  本地 `TlbBatch` 收口。因此 Phase 2.5 状态为 `partial`，下一包进入本地 TLB batch。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 

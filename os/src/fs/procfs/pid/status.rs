@@ -47,10 +47,12 @@ pub fn pid_status_content(
         no_new_privs,
     ) = {
         let inner = task.acquire_inner_lock();
-        let state = match inner.task_status {
-            crate::task::TaskStatus::Ready => "R (running)",
-            crate::task::TaskStatus::Running => "R (running)",
-            crate::task::TaskStatus::Interruptible => "S (sleeping)",
+        let state = match task.task_status() {
+            crate::task::TaskStatus::New | crate::task::TaskStatus::Queued(_) => "R (running)",
+            crate::task::TaskStatus::Running(_) => "R (running)",
+            crate::task::TaskStatus::Blocking(_) | crate::task::TaskStatus::Blocked => {
+                "S (sleeping)"
+            }
             crate::task::TaskStatus::Zombie => "Z (zombie)",
         };
         let ppid_str = task.process.parent_pid().to_string();

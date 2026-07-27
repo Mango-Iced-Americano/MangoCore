@@ -3,7 +3,7 @@ title: "进程与任务子系统 (Process and Task Subsystem)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, task, scheduler, signal, futex]
 ---
 
@@ -65,9 +65,11 @@ MangoCore 的执行实体分为线程级 `TaskControlBlock` 和进程级 `Proces
 
 | 状态 | 枚举 | 说明 |
 |------|------|------|
-| 任务就绪 | `TaskStatus::Ready` | 位于 ready queue，等待调度 |
-| 任务运行 | `TaskStatus::Running` | 当前正在 CPU 上运行 |
-| 任务可中断睡眠 | `TaskStatus::Interruptible` | 位于 interruptible queue，可被唤醒或信号打断 |
+| 任务未发布 | `TaskStatus::New` | 已构造但尚未进入调度器 |
+| 任务排队 | `TaskStatus::Queued(cpu)` | 由 CPU `cpu` 的 runqueue 拥有；当前仍固定 CPU0 |
+| 任务运行 | `TaskStatus::Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有；当前仍固定 CPU0 |
+| 任务准备阻塞 | `TaskStatus::Blocking(cpu)` | 已登记到 interruptible registry，但仍由 CPU `cpu` 执行；早到 wake 可取消阻塞 |
+| 任务阻塞 | `TaskStatus::Blocked` | 已切离 CPU，位于 interruptible registry，可被唤醒或信号打断 |
 | 任务僵尸 | `TaskStatus::Zombie` | 线程退出后的回收状态 |
 | 进程运行 | `ProcessState::Running` | 进程仍可调度或拥有活动线程 |
 | 进程停止 | `ProcessState::Stopped` | signal/ptrace 相关停止状态 |

@@ -7,7 +7,7 @@ use crate::task::{
     find_process_by_pid, find_task_by_tid,
     signal::{SigInfo, Signals},
     sleep_relative_interruptible, sleep_until_realtime_interruptible, wake_interruptible,
-    wake_realtime_abstime_sleepers_after_clock_set, PosixTimer, Rusage, TaskStatus, TimerAction,
+    wake_realtime_abstime_sleepers_after_clock_set, PosixTimer, Rusage, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
@@ -662,10 +662,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                     let _ = inner
                         .sigpending
                         .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                        && inner.task_status == TaskStatus::Interruptible
-                    {
-                        inner.task_status = TaskStatus::Ready;
+                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
                         should_wake_task = true;
                     }
                 }

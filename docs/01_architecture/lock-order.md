@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-21
+last_updated: 2026-07-27
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -49,8 +49,9 @@ runqueue、task.inner、MM/PTE、timer、VFS、网络或设备业务锁。
 MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以下路径必须拆成
 “锁内改变状态—释放—执行下一阶段”，从结构上消除双锁依赖：
 
-1. **唤醒**：在 WaitQueue 协议内取得任务引用，释放对象锁后 CAS
-   `Blocked -> Queued(cpu)`，再只锁一个目标 runqueue；释放 runqueue 后才发 IPI。
+1. **唤醒目标态**：统一入口在当前调度锁内裁决
+   `Blocking(cpu) -> Running(cpu)` 或 `Blocked -> Queued(cpu)`；拆分 per-CPU
+   runqueue 后只锁一个目标队列，释放 runqueue 后才发 IPI。
 2. **调度**：task.inner 与 runqueue 不得嵌套；状态转移 API 是唯一调度状态真值来源。
 3. **迁移/偷取**：任何时刻只持有一个 runqueue 锁；从 victim 取出后释放，再按 CAS
    结果进入目标队列，失败则回滚到合法状态。
@@ -63,10 +64,25 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
 7. **lwext4**：跨实例全局锁位于 C 调用外层，保护区内只允许同步块 I/O，禁止
    yield、任务事件等待或调用会反向获取 VFS 高层锁的路径。
 
+### 3.1 B15 过渡期约束
+
+B15 尚未拆分 per-CPU runqueue，所有 ready/interruptible 容器仍由单一
+`TASK_MANAGER` 保护。当前实现因此在这个锁内同时完成调度状态 CAS 与容器移动，
+保证“状态已发布但尚未入队”或“已经出队但仍标为 Queued”不会被其他唤醒路径观察。
+
+WaitQueue 的 `wake_*` 当前以 `WaitQueue -> TASK_MANAGER` 的单向顺序调用；反向获取
+不存在，且该路径不获取 `task.inner`。Phase 3 拆分目标 runqueue 时必须把候选任务
+收集与远程入队分段，落实上一节的最终部分序，不能照搬这个全局锁过渡实现。
+
+本批新增的 publish、wake、block 和 switch-out 状态迁移都不在 `TASK_MANAGER`
+内获取 `task.inner`。但旧 nice-aware `pop_fair_ready()` 仍通过 `sched_pick_key()`
+在全局队列锁内读取 `sched_vruntime/sched_nice`；当前没有反向同时持锁路径，因此尚未
+形成环，但这是明确登记的既有例外，Phase 3 必须以无锁调度 hint 或出锁快照消除。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；
-- task.inner 与任意 runqueue 锁嵌套；
+- 新增 task.inner 与任意 runqueue 锁嵌套；上述 legacy nice-aware 例外不得扩散；
 - 普通锁跨 `__switch`、schedule、yield、block、IPI ack 或 shootdown ack；
 - MM/PTE 锁内等待远端 TLB ack；
 - 发 IPI 时仍持有目标 CPU 可能在 handler 后续路径获取的锁；

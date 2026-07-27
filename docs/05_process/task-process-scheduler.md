@@ -3,7 +3,7 @@ title: "任务、进程与调度器协作路径"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, task, scheduler, integration]
 ---
 
@@ -89,16 +89,16 @@ clone 创建 child 时：
 4. registry 注册 task/process。
 5. syscall 层写 parent_tid/child_tid/pidfd。
 6. PCB 层把 child 发布为 waitable child。
-7. TaskManager 把 child 加入 ready queue。
+7. `publish_task()` 把 `New` child 发布到 ready queue。
 
 发布前失败可回滚；发布后 child 成为系统可见进程或线程。
 
 ## 4. 运行路径中的协作
 
 ```
-TaskManager::fetch()
+TaskManager::fetch_task(cpu)
   └── Processor::run_tasks()
-        ├── 设置 TCB status = Running
+        ├── CAS Queued(CPU0) -> Running(CPU0)
         ├── 写 CURRENT_* hints
         ├── processor.current = Some(task)
         └── __switch(idle, task)
@@ -141,11 +141,10 @@ pub static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 | 步骤 | 对象 |
 |------|------|
-| `take_current_task()` | Processor |
-| 设置 `TaskStatus::Ready` | TCB inner |
+| 保留 `Processor.current` | 任务真实切离 CPU 前不能撤销 current owner |
 | 结算 schedule out 时间 | TCB inner |
-| `add_task(task)` | TaskManager ready queue |
 | `schedule(task_cx_ptr)` | HAL `__switch` |
+| `finish_switch_out()` | idle 栈上清空 current，再 CAS `Running(cpu) -> Queued(cpu)` 并入队 |
 
 该路径用于 yield 或时间片触发后的普通让出。
 
@@ -154,11 +153,13 @@ pub static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
 阻塞等待通过 WaitQueue 模板：
 
 1. 当前任务加入业务 WaitQueue。
-2. 状态设为 `Interruptible`。
-3. 加入 TaskManager interruptible queue。
+2. TaskManager 锁内完成 `Running(cpu) -> Blocking(cpu)` CAS。
+3. 同一临界区加入 interruptible registry。
 4. 释放业务锁。
 5. `schedule()` 切回 idle。
-6. 唤醒方把状态改回 Ready 并加入 ready queue。
+6. idle 在真实切栈后提交 `Blocking(cpu) -> Blocked`。
+7. 早到唤醒执行 `Blocking(cpu) -> Running(cpu)`，晚到唤醒执行
+   `Blocked -> Queued(CPU0)`；两者都由同一个 TaskManager 入口裁决。
 
 带锁版本必须先入队、复查条件、再释放锁，避免丢失唤醒。
 
@@ -169,29 +170,27 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     lock: MutexGuard<'_, T>,
     should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
 ) {
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
-    let mut task_inner = task.acquire_inner_lock();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.task_status = TaskStatus::Interruptible;
-    task_inner.update_process_times_schedule_out();
-    drop(task_inner);
+    let task_cx_ptr = {
+        let mut inner = task.acquire_inner_lock();
+        inner.update_process_times_schedule_out();
+        &mut inner.task_cx as *mut TaskContext
+    };
 
     sleep_interruptible(task.clone());
     if !should_block(&task) {
-        let mut task_inner = task.acquire_inner_lock();
-        if task_inner.task_status == TaskStatus::Interruptible {
-            task_inner.task_status = TaskStatus::Ready;
-            drop(task_inner);
-            wake_interruptible(task.clone());
-        }
+        let _ = wake_interruptible(task.clone());
     }
     drop(lock);
     schedule(task_cx_ptr);
 }
 ```
 
-这个函数把 task 置为 `Interruptible`、加入 interruptible queue、复查是否仍应阻塞，然后释放业务锁并切换。`should_block` 是防丢唤醒的最后一道检查。
+这个函数先把 task 原子迁移为 `Blocking(cpu)` 并加入 interruptible registry，
+再复查是否仍应阻塞，然后释放业务锁并切换。复查失败时 wake 只取消阻塞，
+不会把仍使用当前内核栈的任务提前加入 ready queue。
+WaitQueue 自身只登记 `Weak<TaskControlBlock>`，不会提前写调度状态。
 
 ## 8. 定时器与等待
 

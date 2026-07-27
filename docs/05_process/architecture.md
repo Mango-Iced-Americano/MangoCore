@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -84,6 +84,7 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 | `ustack_base` | 用户栈基址 |
 | `exit_signal` | 非线程 clone 的退出信号 |
 | `sched_nice_hint` | ready queue 快路径 hint |
+| `sched_state` | 原子调度状态与 CPU owner，调度所有权唯一真值 |
 | `asid` | la64 ASID；rv64 保持 0 |
 | `inner` | TCB 可变状态 |
 
@@ -93,7 +94,6 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 |------|----------|
 | signal | `sigmask`, `sigpending`, `signal_wait_mask`, `signal_stack` |
 | context | `trap_cx_ppn`, `task_cx` |
-| status | `task_status` |
 | sched | `sched_policy`, `sched_priority`, `sched_nice`, `sched_vruntime` |
 | rlimit | stack、memlock、fsize、nproc、cpu、core 等 |
 | prctl/personality | `personality`, `pdeath_signal`, `dumpable`, `task_comm` |
@@ -104,21 +104,27 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 ### 4.2 TaskStatus
 
 ```
-Ready <---- suspend/wake ---- Interruptible
-  |                             ^
-  v                             |
-Running ---- block ------------+
-  |
-  v
-Zombie
+New --publish--> Queued(cpu) --fetch--> Running(cpu)
+Running(cpu) --yield + switch complete--> Queued(cpu)
+Running(cpu) --begin sleep--> Blocking(cpu)
+Blocking(cpu) --early wake--> Running(cpu)
+Blocking(cpu) --switch complete--> Blocked
+Blocked --wake--> Queued(cpu)
+Running(cpu) --exit--> Zombie --switch complete--> zombie queue
+New / Blocked --external cleanup--> Zombie
 ```
 
 | 状态 | 含义 |
 |------|------|
-| `Ready` | 位于 ready queue，等待调度 |
-| `Running` | 当前运行 |
-| `Interruptible` | 可中断睡眠，位于 interruptible queue |
+| `New` | 已构造但尚未发布 |
+| `Queued(cpu)` | 由 CPU `cpu` 的 runqueue 拥有 |
+| `Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有 |
+| `Blocking(cpu)` | 已登记阻塞意图但尚未切离 CPU；早到 wake 恢复为 `Running(cpu)` |
+| `Blocked` | 已切离 CPU并留在 interruptible registry |
 | `Zombie` | 线程退出，等待回收 |
+
+状态存放在 TCB 外层 `AtomicUsize`，状态 tag 与 CPU owner 一次 CAS 更新；
+`task.inner` 不保存第二份状态。B15 时队列仍为全局容器，owner 固定为 CPU0。
 
 ### 4.3 ProcessControlBlock
 

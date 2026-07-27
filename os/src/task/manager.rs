@@ -6,9 +6,10 @@
 //!
 //! # Locking
 //!
-//! `TASK_MANAGER` 只保护调度队列。任何可能触发 TCB/PCB 析构或用户内存访问的
-//! 操作都应在释放 `TASK_MANAGER` 后进行。`WaitQueue` 的条件闭包不得反向获取
-//! 已由调用方持有的不可重入锁。
+//! `TASK_MANAGER` 保护调度队列，并把调度状态 CAS 与对应容器变更收口在同一
+//! 临界区。任何可能触发 TCB/PCB 析构或用户内存访问的操作都应在释放
+//! `TASK_MANAGER` 后进行。`WaitQueue` 的条件闭包不得反向获取已由调用方持有的
+//! 不可重入锁。
 
 use core::cmp::Ordering;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -254,12 +255,24 @@ impl TaskManager {
             ready_nonzero_nice_count: 0,
         }
     }
-    /// 添加一个任务到就绪队列。
+    /// 首次发布一个已经构造完成的任务。
     ///
     /// # Locking
     ///
     /// 调用方已持有 `TASK_MANAGER` 锁；函数不获取任务内部锁。
-    pub fn add(&mut self, task: Arc<TaskControlBlock>) {
+    pub fn publish_task(&mut self, task: Arc<TaskControlBlock>) {
+        let target_cpu = crate::smp::BOOT_CPU_ID;
+        // `publish` 只描述 New 任务第一次获得 runqueue owner。yield、wake 和
+        // switch-out 各有自己的专用入口，不能再借这个函数任意改写 Running。
+        task.require_sched_transition(
+            TaskStatus::New,
+            TaskStatus::Queued(target_cpu),
+            "publish new task",
+        );
+        self.enqueue_ready_back(task);
+    }
+    /// 把已经取得 `Queued` owner 的任务放到队尾。
+    fn enqueue_ready_back(&mut self, task: Arc<TaskControlBlock>) {
         if task_has_nonzero_nice(&task) {
             self.ready_nonzero_nice_count += 1;
         }
@@ -267,7 +280,8 @@ impl TaskManager {
         crate::task::perf::record_taskq_add_ready();
         add_ready_count();
     }
-    fn add_front(&mut self, task: Arc<TaskControlBlock>) {
+    /// 把已经取得 `Queued` owner 的唤醒任务放到队首。
+    fn enqueue_ready_front(&mut self, task: Arc<TaskControlBlock>) {
         if task_has_nonzero_nice(&task) {
             self.ready_nonzero_nice_count += 1;
         }
@@ -304,7 +318,7 @@ impl TaskManager {
         if self
             .ready_queue
             .front()
-            .map(|task| task.acquire_inner_lock().is_zombie())
+            .map(|task| task.is_zombie())
             .unwrap_or(false)
         {
             let zombie = self.ready_queue.pop_front();
@@ -317,7 +331,7 @@ impl TaskManager {
         if self
             .ready_queue
             .back()
-            .map(|task| task.acquire_inner_lock().is_zombie())
+            .map(|task| task.is_zombie())
             .unwrap_or(false)
         {
             let zombie = self.ready_queue.pop_back();
@@ -328,7 +342,7 @@ impl TaskManager {
             return zombie;
         }
         for i in 0..self.ready_queue.len() {
-            if self.ready_queue[i].acquire_inner_lock().is_zombie() {
+            if self.ready_queue[i].is_zombie() {
                 let zombie = self.ready_queue.remove(i).unwrap();
                 self.note_ready_removed(&zombie);
                 sub_ready_count(1);
@@ -340,7 +354,7 @@ impl TaskManager {
     /// 从可中断队列中逐出一个僵尸任务（零堆分配）。
     fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
         for i in 0..self.interruptible_queue.len() {
-            if self.interruptible_queue[i].acquire_inner_lock().is_zombie() {
+            if self.interruptible_queue[i].is_zombie() {
                 let zombie = self.interruptible_queue.remove(i);
                 if zombie.is_some() {
                     sub_interruptible_count(1);
@@ -350,7 +364,7 @@ impl TaskManager {
         }
         None
     }
-    fn add_zombie(&mut self, task: Arc<TaskControlBlock>) {
+    fn enqueue_zombie(&mut self, task: Arc<TaskControlBlock>) {
         super::perf::record_zombie_enqueue();
         self.zombie_queue.push_back(task);
         add_zombie_queue_count();
@@ -379,7 +393,7 @@ impl TaskManager {
         let mut zombies = alloc::vec::Vec::new();
         let old_ready_len = self.ready_queue.len();
         self.ready_queue.retain(|task| {
-            let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
+            let is_match = task.is_zombie() && task.process.pid == pid;
             if is_match {
                 zombies.push(task.clone());
                 false
@@ -390,7 +404,7 @@ impl TaskManager {
         sub_ready_count(old_ready_len - self.ready_queue.len());
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue.retain(|task| {
-            let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
+            let is_match = task.is_zombie() && task.process.pid == pid;
             if is_match {
                 zombies.push(task.clone());
                 false
@@ -431,30 +445,92 @@ impl TaskManager {
     }
     /// 从就绪队列中取出下一个可运行任务。
     #[cfg(feature = "oom_handler")]
-    pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        match self.pop_next_ready() {
-            Some(task) => {
-                // 标记任务为激活状态
-                self.active_tracker.mark_active(task.tid.0);
-                Some(task)
-            }
-            None => None,
+    pub fn fetch_task(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
+        while let Some(task) = self.pop_next_ready() {
+            task.require_sched_transition(
+                TaskStatus::Queued(cpu),
+                TaskStatus::Running(cpu),
+                "fetch ready task",
+            );
+            // 标记任务为激活状态
+            self.active_tracker.mark_active(task.tid.0);
+            return Some(task);
         }
+        None
     }
     #[cfg(not(feature = "oom_handler"))]
     /// 从就绪队列中取出下一个可运行任务。
-    pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.pop_next_ready()
+    pub fn fetch_task(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
+        while let Some(task) = self.pop_next_ready() {
+            task.require_sched_transition(
+                TaskStatus::Queued(cpu),
+                TaskStatus::Running(cpu),
+                "fetch ready task",
+            );
+            return Some(task);
+        }
+        None
     }
 
     /// 添加一个任务到可中断队列。
-    pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
+    pub fn begin_interruptible_sleep(&mut self, task: Arc<TaskControlBlock>) {
+        let current = task.task_status();
+        let TaskStatus::Running(cpu) = current else {
+            task.fail_sched_invariant(
+                "block current task",
+                TaskStatus::Running(crate::smp::cpu_id()),
+                current,
+                TaskStatus::Blocking(crate::smp::cpu_id()),
+            );
+        };
+        if cpu != crate::smp::cpu_id() {
+            task.fail_sched_invariant(
+                "block current task on owner cpu",
+                TaskStatus::Running(crate::smp::cpu_id()),
+                current,
+                TaskStatus::Blocking(crate::smp::cpu_id()),
+            );
+        }
+        // Blocking 表示“已登记睡眠意图但仍在 CPU 上”。只有真正切回 idle 后
+        // 才能提交为 Blocked，从而关闭登记与 context switch 之间的丢唤醒窗口。
+        task.require_sched_transition(current, TaskStatus::Blocking(cpu), "block current task");
         self.interruptible_queue.push_back(task);
         crate::task::perf::record_taskq_add_interruptible();
         add_interruptible_count();
     }
+    /// 在 CPU 已经切回 idle 栈后，完成上一任务的所有权交接。
+    ///
+    /// `Processor.current` 会在调用本函数前先清空，因此这里可以安全地把
+    /// `Running` 任务重新交给 runqueue；仍为 `Blocking` 的任务则正式进入
+    /// `Blocked`，而提前收到 wake 的任务已经恢复为 `Running`，会走重新入队分支。
+    pub fn finish_switch_out(&mut self, task: Arc<TaskControlBlock>, cpu: usize) {
+        match task.task_status() {
+            TaskStatus::Running(owner) if owner == cpu => {
+                task.require_sched_transition(
+                    TaskStatus::Running(cpu),
+                    TaskStatus::Queued(cpu),
+                    "finish yielded task switch-out",
+                );
+                self.enqueue_ready_back(task);
+            }
+            TaskStatus::Blocking(owner) if owner == cpu => {
+                task.require_sched_transition(
+                    TaskStatus::Blocking(cpu),
+                    TaskStatus::Blocked,
+                    "finish blocked task switch-out",
+                );
+            }
+            TaskStatus::Zombie => self.enqueue_zombie(task),
+            actual => task.fail_sched_invariant(
+                "finish task switch-out",
+                TaskStatus::Running(cpu),
+                actual,
+                TaskStatus::Queued(cpu),
+            ),
+        }
+    }
     /// 从可中断队列中删除一个任务。
-    pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
+    pub fn remove_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
         if self
             .interruptible_queue
             .front()
@@ -483,17 +559,11 @@ impl TaskManager {
         removed != 0
     }
     fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
-        if tasks.is_empty() {
-            return 0;
-        }
-        let ptrs = sorted_task_ptrs(&tasks);
-        let old_interruptible_len = self.interruptible_queue.len();
-        self.interruptible_queue
-            .retain(|task| !task_ptr_in(&ptrs, task));
-        sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
-        let count = tasks.len();
+        let mut count = 0;
         for task in tasks.into_iter().rev() {
-            self.add_front(task);
+            if self.try_wake_interruptible(task).is_ok() {
+                count += 1;
+            }
         }
         count
     }
@@ -503,7 +573,19 @@ impl TaskManager {
         let ptrs = sorted_task_ptrs(tasks);
 
         let old_ready_len = self.ready_queue.len();
-        self.ready_queue.retain(|task| !task_ptr_in(&ptrs, task));
+        self.ready_queue.retain(|task| {
+            if !task_ptr_in(&ptrs, task) {
+                return true;
+            }
+            if let TaskStatus::Queued(cpu) = task.task_status() {
+                task.require_sched_transition(
+                    TaskStatus::Queued(cpu),
+                    TaskStatus::Blocked,
+                    "remove queued task",
+                );
+            }
+            false
+        });
         let removed_ready = old_ready_len - self.ready_queue.len();
         sub_ready_count(removed_ready);
         self.recompute_ready_nice_count();
@@ -531,7 +613,7 @@ impl TaskManager {
             .iter()
             .chain(self.interruptible_queue.iter())
         {
-            if t.acquire_inner_lock().is_zombie() {
+            if t.is_zombie() {
                 count += 1;
             }
         }
@@ -541,44 +623,75 @@ impl TaskManager {
     ///
     /// # Semantics
     ///
-    /// 若任务已经在 ready 队列中，函数静默返回。调用方必须先把
-    /// `task_status` 改为 `Ready`，本函数只维护调度队列。
-    pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) {
+    /// `Blocking -> Running` 或 `Blocked -> Queued(CPU0)` 的 CAS 与容器移动
+    /// 均在 `TASK_MANAGER` 锁内完成；重复唤醒不会再次入队。
+    pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) -> bool {
         crate::task::perf::record_taskq_wake_interruptible();
-        match self.try_wake_interruptible(task) {
-            Ok(_) => {}
-            Err(_) => {}
-        }
+        self.try_wake_interruptible(task).is_ok()
     }
     /// 尝试将任务从 interruptible 队列移动到 ready 队列。
     ///
     /// # Errors
     ///
-    /// 任务已经在 ready 队列中时返回 `WaitQueueError::AlreadyWaken`。
+    /// 任务已经运行、排队或进入终态时返回 `WaitQueueError::AlreadyWaken`。
     ///
     /// # Locking
     ///
-    /// 调用方已持有 `TASK_MANAGER` 锁；本函数不会改变 `task_status`。
+    /// 调用方已持有 `TASK_MANAGER` 锁；不得在外部提前修改调度状态。
     pub fn try_wake_interruptible(
         &mut self,
         task: Arc<TaskControlBlock>,
     ) -> Result<(), WaitQueueError> {
-        // 从可中断队列中删除指定任务
-        if self.drop_interruptible(&task) {
-            self.add_front(task);
-            return Ok(());
-        }
-        // 如果任务不在就绪队列中，将其加入就绪队列
-        if !self
-            .ready_queue
-            .iter()
-            .any(|task_in_queue| Arc::as_ptr(task_in_queue) == Arc::as_ptr(&task))
-        {
-            self.add_front(task);
-            Ok(())
-        } else {
-            crate::task::perf::record_taskq_dup_enqueue();
-            Err(WaitQueueError::AlreadyWaken)
+        loop {
+            match task.task_status() {
+                TaskStatus::Blocking(cpu) => {
+                    // 任务尚未切离 CPU：撤销阻塞意图即可，不能把仍在运行的
+                    // kernel stack 提前放进 ready queue。
+                    if task
+                        .try_sched_transition(
+                            TaskStatus::Blocking(cpu),
+                            TaskStatus::Running(cpu),
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    if !self.remove_interruptible(&task) {
+                        panic!(
+                            "woken Blocking task is absent from interruptible registry: tid={}",
+                            task.gettid()
+                        );
+                    }
+                    return Ok(());
+                }
+                TaskStatus::Blocked => {
+                    let target_cpu = crate::smp::BOOT_CPU_ID;
+                    if task
+                        .try_sched_transition(
+                            TaskStatus::Blocked,
+                            TaskStatus::Queued(target_cpu),
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    if !self.remove_interruptible(&task) {
+                        panic!(
+                            "woken Blocked task is absent from interruptible registry: tid={}",
+                            task.gettid()
+                        );
+                    }
+                    self.enqueue_ready_front(task);
+                    return Ok(());
+                }
+                TaskStatus::Queued(_) | TaskStatus::Running(_) => {
+                    crate::task::perf::record_taskq_dup_enqueue();
+                    return Err(WaitQueueError::AlreadyWaken);
+                }
+                TaskStatus::New | TaskStatus::Zombie => {
+                    return Err(WaitQueueError::AlreadyWaken);
+                }
+            }
         }
     }
     #[allow(unused)]
@@ -617,19 +730,19 @@ lazy_static! {
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
-/// 添加一个任务到 ready 队列。
-pub fn add_task(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.lock().add(task);
+/// 首次发布一个新任务到 ready 队列。
+pub fn publish_task(task: Arc<TaskControlBlock>) {
+    TASK_MANAGER.lock().publish_task(task)
 }
 
-/// 添加一个任务到显式 zombie 回收队列。
-pub fn add_zombie_task(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.lock().add_zombie(task);
+/// 在 CPU 已切回 idle 栈后完成上一任务的状态和容器交接。
+pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
+    TASK_MANAGER.lock().finish_switch_out(task, cpu);
 }
 
 /// 从 ready 队列取出下一个可运行任务。
-pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().fetch()
+pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().fetch_task(cpu)
 }
 
 /// 从显式 zombie 队列取出一个任务。
@@ -724,18 +837,19 @@ pub fn do_oom() {}
 ///
 /// # Semantics
 ///
-/// 函数不会从 ready 队列删除任务，也不会修改 `task_status`。调用方通常在
-/// 当前任务已被取出 ready 队列后，把状态设为 `Interruptible`，再调用本函数。
+/// `Running(cpu) -> Blocking(cpu)` 与加入 interruptible registry 在同一个
+/// `TASK_MANAGER` 临界区完成；真正的 `Blocked` 由 idle 侧在切栈后提交。
 pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.lock().add_interruptible(task);
+    TASK_MANAGER.lock().begin_interruptible_sleep(task);
 }
 
 /// 唤醒 interruptible 任务并加入 ready 队列。
 ///
 /// # Semantics
 ///
-/// 函数只维护调度队列，不修改 `task_status`。
-pub fn wake_interruptible(task: Arc<TaskControlBlock>) {
+/// 若任务仍为 `Blocking`，取消本次阻塞；若已为 `Blocked`，则唯一地移入
+/// ready queue。返回值表示本次调用是否实际赢得唤醒权。
+pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
     TASK_MANAGER.lock().wake_interruptible(task)
 }
 
@@ -782,9 +896,6 @@ pub fn send_signal_to_interruptible(signal: Signals) -> bool {
     for task in &tasks {
         let mut inner = task.acquire_inner_lock();
         inner.add_signal(signal);
-        if inner.task_status == TaskStatus::Interruptible {
-            inner.task_status = TaskStatus::Ready;
-        }
         sent = true;
     }
     enqueue_ready_batch(tasks);
@@ -831,8 +942,8 @@ impl WaitResult {
 ///
 /// # Locking
 ///
-/// `wake_*` 会获取被唤醒任务的 `task.inner` 并操作 `TASK_MANAGER`。调用方
-/// 不应在持有同一任务锁或调度器锁时调用唤醒函数。
+/// `wake_*` 会读取原子调度状态并操作 `TASK_MANAGER`，但不会获取
+/// `task.inner`。调用方不得在持有调度器锁时调用唤醒函数。
 pub struct WaitQueue {
     inner: VecDeque<Weak<TaskControlBlock>>,
 }
@@ -880,8 +991,7 @@ impl WaitQueue {
     ///
     /// # Locking
     ///
-    /// 会获取每个任务的 `task.inner`，并批量把任务移入 ready 队列。调用方不得
-    /// 已持有这些任务的内部锁。
+    /// 只读取 TCB 原子调度状态，并批量把 blocked 任务移入 ready 队列。
     pub fn wake_all(&mut self) -> usize {
         self.wake_at_most(usize::MAX)
     }
@@ -902,37 +1012,29 @@ impl WaitQueue {
         // 遍历全部条目以自动 compact 失效 Weak，但只唤醒 ≤limit 个任务。
         while let Some(task) = self.inner.pop_front() {
             match task.upgrade() {
-                Some(task) => {
-                    let mut inner = task.acquire_inner_lock();
-                    match inner.task_status {
-                        super::TaskStatus::Interruptible => {
-                            if wake_count < limit {
-                                inner.task_status = super::task::TaskStatus::Ready;
-                                drop(inner);
-                                task.wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                wake_count += 1;
-                                tasks_to_wake.push(task);
-                            } else {
-                                drop(inner);
-                                remaining.push_back(Arc::downgrade(&task));
-                            }
+                Some(task) => match task.task_status() {
+                    super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked => {
+                        if wake_count < limit {
+                            task.wait_timer_generation
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            wake_count += 1;
+                            tasks_to_wake.push(task);
+                        } else {
+                            remaining.push_back(Arc::downgrade(&task));
                         }
-                        super::TaskStatus::Ready => {
-                            if wake_count < limit {
-                                wake_count += 1;
-                                drop(inner);
-                                task.wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                            } else {
-                                drop(inner);
-                                remaining.push_back(Arc::downgrade(&task));
-                            }
-                        }
-                        // Zombie/Running 不应继续停留在等待队列中，直接丢弃。
-                        _ => drop(inner),
                     }
-                }
+                    super::TaskStatus::Queued(_) | super::TaskStatus::Running(_) => {
+                        if wake_count < limit {
+                            wake_count += 1;
+                            task.wait_timer_generation
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                        } else {
+                            remaining.push_back(Arc::downgrade(&task));
+                        }
+                    }
+                    // New/Zombie 不应继续停留在等待队列中，直接丢弃。
+                    _ => {}
+                },
                 None => {}
             }
         }
@@ -949,45 +1051,39 @@ impl WaitQueue {
                 Some(task) => task,
                 None => continue,
             };
-            let mut inner = task.acquire_inner_lock();
-            match inner.task_status {
-                super::TaskStatus::Interruptible => {
-                    inner.task_status = super::task::TaskStatus::Ready;
-                    drop(inner);
+            match task.task_status() {
+                super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked => {
                     task.wait_timer_generation
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     let _ = TASK_MANAGER.lock().try_wake_interruptible(task);
                     return 1;
                 }
-                super::TaskStatus::Ready => {
-                    drop(inner);
+                super::TaskStatus::Queued(_) | super::TaskStatus::Running(_) => {
                     task.wait_timer_generation
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return 1;
                 }
-                _ => drop(inner),
+                _ => {}
             }
         }
         0
     }
 
-    /// 将当前任务标记为 interruptible 并加入等待队列。
+    /// 将当前任务加入条件等待队列。
     ///
     /// # Locking
     ///
-    /// 调用方已持有等待队列所属对象的锁；本函数会短暂获取 `task.inner`。
+    /// 调用方已持有等待队列所属对象的锁。真正的 `Running -> Blocking`
+    /// 登记由随后执行的调度阻塞入口与全局 interruptible registry 一起提交；
+    /// `Blocking -> Blocked` 只能在任务切回 idle 栈后完成。
     pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
-        match task.upgrade() {
-            Some(task) => {
-                let mut task_inner = task.acquire_inner_lock();
-                task_inner.task_status = super::TaskStatus::Interruptible;
-            }
-            None => return,
+        if let Some(task) = task.upgrade() {
+            self.add_task(Arc::downgrade(&task));
         }
-        self.add_task(task);
     }
 
-    /// 从等待队列移除任务，并把仍处于 interruptible 的任务恢复为 ready。
+    /// 从条件等待队列移除任务。调度状态已经由 wake 或重新切入路径处理，
+    /// 这里不能再单独修改状态。
     ///
     /// 返回值表示该任务是否仍在队列中。若返回 `false`，通常说明它已经被
     /// 正常唤醒路径移除。
@@ -1015,10 +1111,6 @@ impl WaitQueue {
                 .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != task_ptr);
             self.inner.len() != old_len
         };
-        let mut task_inner = task.acquire_inner_lock();
-        if task_inner.task_status == super::TaskStatus::Interruptible {
-            task_inner.task_status = super::TaskStatus::Ready;
-        }
         removed
     }
 
@@ -1731,15 +1823,14 @@ impl KernelTimerQueue {
                     }
                     // active == generation: current fallback, wake normally
                     //
-                    // But first: check if the task is actually interruptible.
-                    // If not, the timer fired between arm (in wait_event_impl)
-                    // and the task becoming Interruptible (in
-                    // block_current_and_run_next_with_lock_checked).
+                    // 先确认任务已经登记阻塞意图。若仍为 Running，说明 timer
+                    // 触发在 wait_event_impl arm 与 sleep_interruptible 之间，
                     // Re-arm instead of consuming the timer, or the task
                     // will sleep forever with no wakeup.
-                    let inner = task.acquire_inner_lock();
-                    if inner.task_status != super::TaskStatus::Interruptible {
-                        drop(inner);
+                    if !matches!(
+                        task.task_status(),
+                        super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked
+                    ) {
                         if !task
                             .wait_io_timer_pending
                             .swap(true, AtomicOrdering::Relaxed)
@@ -1761,8 +1852,7 @@ impl KernelTimerQueue {
                         }
                         return false;
                     }
-                    drop(inner);
-                    // Task is Interruptible — fall through to normal wake below
+                    // Blocking 和 Blocked 都交给统一 CAS 唤醒入口处理。
                 }
 
                 // Normal wake (deadline or current fallback)
@@ -1772,17 +1862,15 @@ impl KernelTimerQueue {
                     return false; // generation mismatch, stale
                 }
 
-                let mut inner = task.acquire_inner_lock();
-                let should_wake = inner.task_status == super::TaskStatus::Interruptible;
-                if should_wake {
-                    inner.task_status = super::task::TaskStatus::Ready;
-                }
-                drop(inner);
-                if should_wake {
+                let should_wake = matches!(
+                    task.task_status(),
+                    super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked
+                );
+                if should_wake && wake_interruptible(task) {
                     crate::task::perf::record_ktimer_real_wake();
-                    wake_interruptible(task);
+                    return true;
                 }
-                should_wake
+                false
             }
             TimerAction::SendSignal {
                 task,
@@ -1822,10 +1910,7 @@ impl KernelTimerQueue {
                             next_real_timer = Some((deadline, next_generation));
                         }
                     }
-                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                        && inner.task_status == super::TaskStatus::Interruptible
-                    {
-                        inner.task_status = super::TaskStatus::Ready;
+                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
                         should_wake = true;
                     }
                 }
@@ -1901,10 +1986,7 @@ impl KernelTimerQueue {
                         let _ = inner
                             .sigpending
                             .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                            && inner.task_status == super::TaskStatus::Interruptible
-                        {
-                            inner.task_status = super::TaskStatus::Ready;
+                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
                             should_wake = true;
                         }
                     }
@@ -2004,8 +2086,8 @@ impl TimeoutWaitQueue {
     ///
     /// # Locking
     ///
-    /// 调用方持有 `TIMEOUT_WAITQUEUE` 锁。函数会获取任务内部锁并批量入 ready
-    /// 队列，不应在持有其它任务锁时调用。
+    /// 调用方持有 `TIMEOUT_WAITQUEUE` 锁。函数只收集原子状态仍为 Blocked 的
+    /// TCB，随后由统一批量入口争用唯一唤醒权。
     pub fn wake_expired(&mut self, now: TimeSpec) {
         if self
             .inner
@@ -2023,18 +2105,15 @@ impl TimeoutWaitQueue {
                 break;
             } else {
                 match waiter.task.upgrade() {
-                    Some(task) => {
-                        let mut inner = task.acquire_inner_lock();
-                        match inner.task_status {
-                            super::TaskStatus::Interruptible => {
-                                inner.task_status = super::task::TaskStatus::Ready
-                            }
-                            // Ready/Running 不需要唤醒；Zombie 不能重新入队。
-                            _ => continue,
-                        }
-                        drop(inner);
+                    Some(task)
+                        if matches!(
+                            task.task_status(),
+                            super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked
+                        ) =>
+                    {
                         tasks_to_wake.push(task);
                     }
+                    Some(_) => continue,
                     None => continue,
                 }
             }

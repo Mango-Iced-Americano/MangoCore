@@ -3,7 +3,7 @@ title: "WaitQueue、KernelTimerQueue 与 Completion"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, waitqueue, completion, timer]
 ---
 
@@ -115,10 +115,12 @@ pub enum WaitResult {
 | `contains()` | 按 weak 指针比较 |
 | `is_empty()` | 是否为空 |
 | `compact_stale()` | 删除 strong_count 为 0 的 entry |
-| `prepare_to_wait()` | 设置任务状态 `Interruptible` 并加入队列 |
-| `finish_wait()` | 从队列移除当前任务，若状态仍 Interruptible 则改 Ready |
+| `prepare_to_wait()` | 只加入 weak task，不改变调度状态 |
+| `finish_wait()` | 只从 WaitQueue 移除当前任务，不改变调度状态 |
 
-`prepare_to_wait()` 只把任务放入 WaitQueue；真正从 CPU 切走由 `block_current_and_run_next_*()` 完成。
+`prepare_to_wait()` 只把任务放入 WaitQueue；真正的
+`Running(cpu) -> Blocking(cpu)` 与加入 interruptible registry 由
+`block_current_and_run_next_*()` 在 `TASK_MANAGER` 临界区完成。
 
 ## 5. wake_one 与 wake_at_most
 
@@ -126,11 +128,15 @@ pub enum WaitResult {
 
 1. 从队头开始弹出 weak entry。
 2. 跳过失效 weak。
-3. 若任务状态为 `Interruptible`，改为 `Ready`，递增 `wait_timer_generation`。
-4. 调用 `TASK_MANAGER.try_wake_interruptible(task)`。
+3. 若任务状态为 `Blocking/Blocked`，递增 `wait_timer_generation` 并选为唤醒候选。
+4. 调用 `TASK_MANAGER.try_wake_interruptible(task)`，由调度器在锁内 CAS
+   `Blocking(cpu) -> Running(cpu)` 取消早到阻塞，或 CAS
+   `Blocked -> Queued(CPU0)` 并移动容器。
 5. 返回唤醒数量 1。
 
 `wake_at_most(limit)` 会遍历所有 entry，以便顺手 compact stale entry；唤醒超过 limit 后保留剩余可等待任务。
+已经处于 `Queued/Running` 的旧 WaitQueue 条目只按“事件已经到达”计数并丢弃，
+不会重复入队。`New/Zombie` 条目同样丢弃。
 
 ## 6. wait_event_impl
 

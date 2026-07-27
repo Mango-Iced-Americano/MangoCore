@@ -8,7 +8,7 @@
 //! `TASK_REGISTRY` 只保护映射表本身。函数返回 `Arc` 后立即释放注册表锁，
 //! 调用方再获取任务/进程内部锁，避免注册表锁参与长锁链。
 
-use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
+use super::{ProcessControlBlock, TaskControlBlock};
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -111,7 +111,7 @@ pub fn find_task_by_tid(tid: usize) -> Option<Arc<TaskControlBlock>> {
             }
         }
     };
-    let is_zombie = { task.acquire_inner_lock().task_status == TaskStatus::Zombie };
+    let is_zombie = task.is_zombie();
     if is_zombie {
         None
     } else {

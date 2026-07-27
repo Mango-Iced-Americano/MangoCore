@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-26
+last_update: 2026-07-27
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -64,6 +64,11 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 用于快速判断任
 
 这条路径在单核 ready queue 上实现简化公平选择，不维护 Linux CFS 的红黑树 runqueue 或多核负载均衡状态。
 
+B15 为后续 per-CPU runqueue 先建立了所有权协议：`TaskStatus::Queued(cpu)`
+明确记录队列 owner，`TaskStatus::Running(cpu)` 明确记录 current owner。当前容器
+仍是全局 `TASK_MANAGER`，因此生产任务的 `cpu` 仍固定为 CPU0；这一步只解决
+“同一 TCB 不能被两个执行位置同时拥有”，尚未实现跨核任务执行。
+
 ## 4. Processor
 
 `Processor` 保存当前 CPU 状态：
@@ -105,7 +110,7 @@ static CURRENT_SID: AtomicUsize;
 static CURRENT_SYSCALL_ID: AtomicUsize;
 ```
 
-这些缓存不是进程状态的唯一来源。真实所有权仍在 TCB/PCB 中；缓存只是在任务切入时发布，在切走时清零或更新。调试 getpid/getuid/uaccess token 异常时，应同时检查 `run_tasks()` 切入任务时的缓存写入和 `take_current_task()` 切走时的清理。
+这些缓存不是进程状态的唯一来源。真实所有权仍在 TCB/PCB 中；缓存只是在任务切入时发布，在真实切回 idle 后清零。调试 getpid/getuid/uaccess token 异常时，应同时检查 `run_tasks()` 的切入发布和 `finish_current_switch_out()` 的切出清理。
 
 ## 5. current task 快速缓存
 
@@ -120,7 +125,8 @@ static CURRENT_SYSCALL_ID: AtomicUsize;
 | `CURRENT_PGID/SID` | 进程组、会话查询 |
 | `CURRENT_SYSCALL_ID` | heap_trace/perf_stats 下诊断 OOM syscall |
 
-`run_tasks()` 在切入任务前写入这些缓存；`take_current_task()` 在切走当前任务时清零。
+`run_tasks()` 在切入任务前写入这些缓存；`finish_current_switch_out()` 在
+`__switch` 返回 idle 栈后清零。
 
 `current_task_ref()` 返回 `'static` 引用，但依赖单核和 `PROCESSOR.current` 持有强引用的事实。调用者不能跨调度点保存该引用。
 syscall 受控中断窗口中，timer/IPI hard path 不得解引用这个裸指针；
@@ -180,8 +186,9 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 ```text
 exit_current_and_run_next()
   ├── do_exit()
-  ├── add_zombie_task(task)
-  └── schedule(idle)
+  ├── TaskStatus = Zombie（Processor.current 仍持有 Arc）
+  ├── schedule(idle)
+  └── idle: finish_switch_out() -> zombie queue
 ```
 
 调度循环回到 idle 后通过 `take_zombie_tasks(64)` 批量取出并 drop。另有每 64 tick 兜底扫描 ready/interruptible queue 中异常残留的 zombie。
@@ -190,14 +197,12 @@ exit_current_and_run_next()
 
 切换到新任务：
 
-1. `fetch_task()` 从 ready queue 取任务。
-2. 锁住 task inner。
-3. 若已是 Zombie，跳过。
-4. 设置 `task_status = Running`。
-5. `update_process_times_schedule_in()`。
-6. 写入 current task 原子缓存。
-7. `processor.current = Some(task)`。
-8. 调用 `__switch(idle_task_cx_ptr, next_task_cx_ptr)`。
+1. `fetch_task(cpu)` 持有 `TASK_MANAGER` 锁，从 ready queue 取任务。
+2. 同一临界区 CAS `Queued(cpu) -> Running(cpu)`；只有成功者得到任务。
+3. 锁住 task inner，执行 `update_process_times_schedule_in()`。
+4. 写入 current task 原子缓存。
+5. `processor.current = Some(task)`。
+6. 调用 `__switch(idle_task_cx_ptr, next_task_cx_ptr)`。
 
 任务主动让出或阻塞时，`schedule(task_cx_ptr)` 切回 idle context。
 
@@ -221,34 +226,51 @@ idle 将使用独立的“关中断—重查工作—架构 wait”协议，不�
 `suspend_current_and_run_next()`：
 
 ```text
-take_current_task()
-task_status = Ready
 update_process_times_schedule_out()
-add_task(task)
 schedule(task_cx_ptr)
+idle: clear current -> Running(cpu) -> Queued(cpu) + ready enqueue
 ```
 
 `block_current_and_run_next()`：
 
 ```text
-take_current_task()
-task_status = Interruptible
 update_process_times_schedule_out()
-sleep_interruptible(task)
+sleep_interruptible(task): Running(cpu) -> Blocking(cpu) + registry enqueue
 schedule(task_cx_ptr)
+idle: clear current -> Blocking(cpu) -> Blocked
 ```
 
-带 `_checked` 的版本会在加入 interruptible queue 后复查条件，避免“检查条件”和“真正睡眠”之间丢失唤醒。
+带 `_checked` 的版本会在加入 interruptible registry 后复查条件。若条件已经满足，
+统一 wake 入口执行 `Blocking(cpu) -> Running(cpu)`，仅取消阻塞而不提前入队；任务
+仍会切回 idle，再由 `finish_switch_out()` 完成 `Running(cpu) -> Queued(cpu)`。
 
 ## 12. interruptible queue 唤醒
 
 `wake_interruptible(task)` 通过 `TaskManager::try_wake_interruptible()`：
 
-1. 如果任务在 interruptible queue，移除并 `add_front()` 到 ready queue。
-2. 如果不在 ready queue，也加入 ready queue。
-3. 如果已经在 ready queue，记录 duplicate enqueue 并返回 `AlreadyWaken`。
+1. 若任务尚未切离 CPU，在 `TASK_MANAGER` 锁内 CAS
+   `Blocking(cpu) -> Running(cpu)`，从 registry 移除，但不加入 ready queue。
+2. 若任务已经切离 CPU，CAS `Blocked -> Queued(CPU0)`，从 registry 移除并加入
+   ready queue 队首。
+3. CAS 失败说明其他路径已经唤醒或任务已不再可唤醒，返回
+   `AlreadyWaken`，绝不再次插入队列。
 
-`WaitQueue::wake_*()` 通常先把 task status 改为 `Ready`，再调用调度器唤醒。
+`WaitQueue::wake_*()` 只筛选原子状态并把候选交给调度器，不能在外部先写状态。
+状态迁移和 ready/interruptible 容器移动必须由同一个 `TASK_MANAGER` 临界区提交。
+
+## 12.1 状态与队列不变量
+
+- `sched_state` 是调度状态唯一真值，`task.inner` 不保留影子字段；
+- 一个任务最多属于一个 ready queue 或一个 current slot；interruptible registry
+  只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
+- `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit
+  都不能在仍使用自身内核栈时提前取走 current Arc；
+- `Queued(cpu)` 退出前必须先从相应队列移除并转为 `Blocked`；直接转 Zombie 会 fail-stop；
+- 必成功的 publish/fetch/switch-out 迁移在所有构建中 fail-stop；只有重复 wake 使用
+  允许失败的 CAS 并返回 `AlreadyWaken`；
+- 新增的状态迁移路径不在 `TASK_MANAGER` 内获取 `task.inner`。旧 nice-aware
+  `pop_fair_ready()` 仍会在全局队列锁内读取 `sched_vruntime/sched_nice`，这是 Phase 3
+  拆 per-CPU runqueue 前必须消除的既有锁序技术债。
 
 ## 13. OOM 回收调度协作
 
@@ -259,7 +281,7 @@ schedule(task_cx_ptr)
 | interruptible active task | `do_deep_clean()` |
 | ready active task | `do_shallow_clean()` |
 
-`ActiveTracker` 在 `fetch()` 时标记被调度任务 active，OOM 回收后 mark inactive。
+`ActiveTracker` 在 `fetch_task()` 时标记被调度任务 active，OOM 回收后 mark inactive。
 
 ## 14. perf/profile 状态
 

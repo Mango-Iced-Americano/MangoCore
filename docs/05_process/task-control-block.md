@@ -3,7 +3,7 @@ title: "TaskControlBlock 线程级执行实体"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, task, tcb, thread]
 ---
 
@@ -15,11 +15,10 @@ tags: [process, task, tcb, thread]
 
 ```
 TaskControlBlock
-  ├── 不可变或原子字段：tid、process、kstack、user_res_slot、hint
+  ├── 不可变或原子字段：tid、process、kstack、user_res_slot、sched_state、hint
   └── inner: Mutex<TaskControlBlockInner>
         ├── trap context / task context
         ├── signal mask / pending / alternate stack
-        ├── task status
         ├── sched ABI state
         ├── rlimit / credentials / capability
         ├── robust futex / clear_child_tid
@@ -46,6 +45,7 @@ pub struct TaskControlBlock {
     pub exit_signal: Signals,
     _thread_quota: Option<TaskQuotaGuard>,
     inner: Mutex<TaskControlBlockInner>,
+    sched_state: AtomicUsize,
     pub wait_io_timer_pending: AtomicBool,
     pub wait_timer_generation: AtomicUsize,
     pub wait_io_fallback_active_generation: AtomicUsize,
@@ -67,6 +67,7 @@ pub struct TaskControlBlock {
 | `uid/euid/suid/gid/egid/sgid_hint` | 当前身份热路径缓存 |
 | `exit_signal` | 非 `CLONE_THREAD` child 退出时投递给父进程的信号 |
 | `_thread_quota` | `CLONE_THREAD` 线程级 quota guard |
+| `sched_state` | 原子调度状态与 CPU owner，是调度所有权的唯一真值 |
 | `wait_io_timer_pending` | I/O fallback timer 去重标记 |
 | `wait_timer_generation` | wait timeout generation，过滤旧 timer |
 | `wait_io_fallback_active_generation` | fallback wait 活跃 generation |
@@ -82,7 +83,7 @@ pub struct TaskControlBlock {
 | 分组 | 字段 |
 |------|------|
 | 信号 | `sigmask`, `sigmask_to_restore`, `sigpending`, `signal_wait_mask`, `signal_stack` |
-| 上下文 | `trap_cx_ppn`, `task_cx`, `task_status` |
+| 上下文 | `trap_cx_ppn`, `task_cx` |
 | 调度兼容 | `sched_policy`, `sched_priority`, `sched_reset_on_fork`, `sched_nice`, `sched_vruntime`, `sched_runtime`, `sched_deadline`, `sched_period` |
 | I/O 优先级与 membarrier | `ioprio_class`, `ioprio_prio`, `membarrier_private_expedited_registered` |
 | rlimit | `rtprio`, `nice`, `sigpending`, `stack`, `memlock`, `fsize`, `nproc`, `cpu`, `core` |
@@ -100,7 +101,8 @@ pub struct TaskControlBlock {
 | 字段组 | 主要读写位置 | 用户可见影响 |
 |--------|--------------|--------------|
 | `sigmask/sigpending/signal_stack` | `task/signal/*`, `syscall/process/signal.rs` | `rt_sigprocmask`, `sigaltstack`, signal delivery, signalfd/sigtimedwait。 |
-| `trap_cx_ppn/task_cx/task_status` | `task/task.rs`, `task/processor.rs`, HAL trap return | 上下文切换、返回用户态、线程状态。 |
+| `trap_cx_ppn/task_cx` | `task/task.rs`, `task/processor.rs`, HAL trap return | 上下文切换、返回用户态。 |
+| 外层 `sched_state` | `task/task.rs`, `task/manager.rs`, `task/mod.rs` | 原子调度状态、队列归属和当前 CPU owner。 |
 | `sched_*` | `task/manager.rs`, `syscall/process/ids.rs` | ready queue 选择、`sched_get*`/`sched_set*` 回读。 |
 | `rlimit` 字段 | `syscall/process/ids.rs`, `syscall/fs.rs`, `syscall/process/time.rs` | 文件大小、CPU 时间、memlock、nice/rtprio 等限制。 |
 | `clear_child_tid/robust_list` | `task/task.rs::exit_thread_resources()`, `syscall/process/lifecycle.rs` | pthread join/futex robust list 退出协作。 |
@@ -115,10 +117,12 @@ pub struct TaskControlBlock {
 
 ```rust
 pub enum TaskStatus {
-    Ready,
-    Running,
+    New,
+    Queued(usize),
+    Running(usize),
+    Blocking(usize),
+    Blocked,
     Zombie,
-    Interruptible,
 }
 ```
 
@@ -126,30 +130,37 @@ pub enum TaskStatus {
 
 | 状态 | 所在位置 |
 |------|----------|
-| `Ready` | ready queue，等待 `run_tasks()` 取出 |
-| `Running` | `PROCESSOR.current` |
-| `Interruptible` | interruptible queue 或 WaitQueue 相关睡眠路径 |
+| `New` | 已构造但尚未发布到运行队列 |
+| `Queued(cpu)` | CPU `cpu` 的 runqueue 所有；B15 阶段 `cpu` 恒为 CPU0 |
+| `Running(cpu)` | CPU `cpu` 的 current slot 所有；B15 阶段 `cpu` 恒为 CPU0 |
+| `Blocking(cpu)` | 已登记到 interruptible registry，但仍由 CPU `cpu` 执行 |
+| `Blocked` | 已切离 CPU，在 interruptible registry 中等待唤醒；也可作为出队后的退出过渡态 |
 | `Zombie` | 已执行线程级退出，等待切栈后 drop 或进程级 wait 回收 |
 
-状态转换由调度路径、WaitQueue、exit 路径共同维护。文档不能把 `ProcessState::Zombie` 和 `TaskStatus::Zombie` 混为一谈。
+`sched_state` 把状态 tag 与 CPU owner 编码在一个 `AtomicUsize` 中，并通过
+Acquire 读取、AcqRel CAS 迁移。`task.inner` 不再保存第二份状态。文档不能把
+`ProcessState::Zombie` 和 `TaskStatus::Zombie` 混为一谈。
 
 ### 4.1 TaskStatus 状态图
 
 ```
-          add_task / wake
-    +-------------------------+
-    |                         v
-Interruptible <---- block ---- Running
-    ^                         |
-    |                         | suspend/yield
-    +---------- Ready <-------+
-                         |
-                         | exit_thread_resources()
-                         v
-                       Zombie
+New --publish--> Queued(cpu) --fetch--> Running(cpu)
+Running(cpu) --yield + switch complete--> Queued(cpu)
+Running(cpu) --begin sleep--> Blocking(cpu)
+Blocking(cpu) --early wake--> Running(cpu)
+Blocking(cpu) --switch complete--> Blocked
+Blocked --wake--> Queued(cpu)
+Running(cpu) --exit--> Zombie --switch complete--> zombie queue
+New / Blocked --external cleanup--> Zombie
 ```
 
-`Ready` 任务位于 `TaskManager.ready_queue`；`Interruptible` 任务可能位于全局 interruptible queue，也可能挂在 WaitQueue 中；`Zombie` TCB 会进入 zombie queue，等当前内核栈不再使用后由调度循环 drop。
+`TaskManager` 在持有自身锁时同时提交 CAS 与队列容器变更：发布任务时
+`New -> Queued(CPU0)`，取任务时 `Queued(cpu) -> Running(cpu)`，阻塞登记时
+`Running(cpu) -> Blocking(cpu)`。idle 在切栈后提交 `Blocking -> Blocked`；早到
+wake 只恢复 `Blocking -> Running`，晚到 wake 才执行 `Blocked -> Queued(CPU0)`。
+重复 wake 因 CAS 失败而不会重复入队。排队任务退出前必须先从 ready queue 移除并转成
+`Blocked`；直接 `Queued -> Zombie` 会留下悬挂队列节点，因此按所有权错误
+fail-stop。
 
 ## 5. initproc 创建
 
@@ -168,8 +179,8 @@ Interruptible <---- block ---- Running
 9. 打开 `/dev/tty` 三次作为 fd 0、1、2。
 10. cwd 设置为 `/`。
 11. 构造 `ProcessControlBlock`。
-12. 构造 TCB inner，状态为 `Ready`。
-13. 注册进程和任务。
+12. 构造 TCB，原子状态为 `New`。
+13. 注册进程和任务，并由 `publish_task()` 发布为 `Queued(CPU0)`。
 14. 初始化 trap context，入口为 ELF entry，用户栈为 init stack。
 
 initproc 的默认环境变量包括 `PATH=/:/bin:/sbin:/usr/bin:/tools/bin`、`PWD=/`、`HOME=/root`。

@@ -3,7 +3,7 @@ title: "clone、clone3、unshare 与 namespace"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, clone, namespace, pidfd, vfork]
 ---
 
@@ -606,10 +606,10 @@ pub fn schedule_clone_child(
 ) {
     if flags.contains(CloneFlags::CLONE_VFORK) {
         child.process.set_vfork_parent(parent);
-        add_task(child.clone());
+        publish_task(child.clone());
         child.process.wait_vfork_done_uninterruptible();
     } else {
-        add_task(child);
+        publish_task(child);
     }
 }
 ```

@@ -17,7 +17,7 @@ use super::{
     signal::{sigchld_requests_auto_reap, PendingSignal, Sighand, SignalQueue, Signals},
     threads::Futex,
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
-    TaskControlBlock, TaskStatus, UtsNamespace, WaitQueue, INITPROC,
+    TaskControlBlock, UtsNamespace, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -617,10 +617,7 @@ impl ProcessControlBlock {
 
     /// 返回任意一个非 zombie live 线程。
     pub fn any_live_thread(&self) -> Option<Arc<TaskControlBlock>> {
-        self.threads().into_iter().find(|task| {
-            let inner = task.acquire_inner_lock();
-            inner.task_status != TaskStatus::Zombie
-        })
+        self.threads().into_iter().find(|task| !task.is_zombie())
     }
 
     /// 返回 live-thread 计数。
@@ -1021,12 +1018,7 @@ impl ProcessControlBlock {
     fn wake_child_waiters(process: &Arc<ProcessControlBlock>) {
         process.child_exit_wait.lock().wake_all();
         if let Some(task) = process.any_live_thread() {
-            let mut inner = task.acquire_inner_lock();
-            if inner.task_status == TaskStatus::Interruptible {
-                inner.task_status = TaskStatus::Ready;
-                drop(inner);
-                wake_interruptible(task);
-            }
+            let _ = wake_interruptible(task);
         }
     }
 
@@ -1167,12 +1159,8 @@ impl ProcessControlBlock {
                     if let Some(parent_task) = parent_process.any_live_thread() {
                         let mut parent_inner = parent_task.acquire_inner_lock();
                         parent_inner.add_signal(exit_task.exit_signal);
-
-                        if parent_inner.task_status == TaskStatus::Interruptible {
-                            parent_inner.task_status = TaskStatus::Ready;
-                            drop(parent_inner);
-                            wake_interruptible(parent_task);
-                        }
+                        drop(parent_inner);
+                        let _ = wake_interruptible(parent_task);
                     }
                 }
             }

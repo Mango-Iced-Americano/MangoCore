@@ -11,13 +11,13 @@
 //! # Safety
 //!
 //! `CURRENT_TASK_PTR` 只在单核调度器持有 `PROCESSOR.current` 的强引用期间发布。
-//! `take_current_task()` 在切走当前任务前清空该指针。
+//! idle 调度器在任务真正切出后清空该指针。
 
 use super::{
     __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
     take_one_ready_zombie, take_zombie_tasks,
 };
-use super::{fetch_task, TaskStatus};
+use super::{fetch_task, finish_switch_out};
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
@@ -40,7 +40,8 @@ static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
 ///
 /// # Semantics
 ///
-/// MangoCore 当前只支持单核运行，因此该对象同时代表全局处理器状态。
+/// 当前只有 CPU0 进入 legacy 调度循环，AP 仍停留在 SMP 服务循环，因此该对象
+/// 暂时代表全局处理器状态；普通任务上 AP 前必须先拆成真正的 per-CPU `Processor`。
 pub struct Processor {
     /// 当前正在运行的任务
     current: Option<Arc<TaskControlBlock>>,
@@ -62,12 +63,13 @@ impl Processor {
         &mut self.idle_task_cx as *mut _
     }
 
-    /// 取出当前正在运行的任务。
+    /// 在 context switch 已完成后取出上一任务。
     ///
     /// # Semantics
     ///
-    /// 调用方随后必须把任务重新入队、转为 zombie，或完成退出清理。
-    pub fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
+    /// 只能由 idle 调度循环调用；任务仍在自身内核栈上时提前清空会破坏
+    /// current slot 的所有权语义。
+    fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
         // 将current字段置空，并返回其中的值
         self.current.take()
     }
@@ -127,6 +129,7 @@ lazy_static! {
 /// `schedule()` 回 idle 才会继续执行。
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
+    let cpu = crate::smp::cpu_id();
     loop {
         // `schedule()` 保证 idle 总是以 IRQ-off 状态恢复。Phase 2 仍保持这个
         // legacy scheduler 边界；console/net/FS reclaim 完成 IRQ 并发审计前，
@@ -250,7 +253,7 @@ pub fn run_tasks() {
                 let mut int_zombie = 0usize;
                 let mut nonzero_nice = 0usize;
                 for t in &manager.ready_queue {
-                    if t.acquire_inner_lock().is_zombie() {
+                    if t.is_zombie() {
                         ready_zombie += 1;
                     }
                     if t.sched_nice_hint.load(Ordering::Relaxed) != 0 {
@@ -258,7 +261,7 @@ pub fn run_tasks() {
                     }
                 }
                 for t in &manager.interruptible_queue {
-                    if t.acquire_inner_lock().is_zombie() {
+                    if t.is_zombie() {
                         int_zombie += 1;
                     }
                 }
@@ -298,8 +301,9 @@ pub fn run_tasks() {
             stage_t0,
         );
         let stage_t0 = sched_profile_start(sched_profile);
-        let mut processor = PROCESSOR.lock();
-        let next_task = fetch_task();
+        // 取任务时不持有 PROCESSOR，避免形成 PROCESSOR -> TASK_MANAGER 的
+        // 嵌套锁顺序；fetch 成功后再单独发布 current slot。
+        let next_task = fetch_task(cpu);
         sched_record_stage(
             sched_profile,
             &SCHED_STAGE_FETCH_TASK_CALLS,
@@ -330,23 +334,11 @@ pub fn run_tasks() {
             #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             let trace_first_switch = !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
             let stage_t0 = sched_profile_start(sched_profile);
+            let mut processor = PROCESSOR.lock();
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // 独占地访问即将运行的任务的 TCB
             let next_task_cx_ptr = {
                 let mut task_inner = task.acquire_inner_lock();
-                if task_inner.task_status == TaskStatus::Zombie {
-                    drop(task_inner);
-                    sched_record_stage(
-                        sched_profile,
-                        &SCHED_STAGE_SWITCH_PREP_CALLS,
-                        &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
-                        &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
-                        stage_t0,
-                    );
-                    sched_record_loop_cycles(sched_profile, loop_t0);
-                    continue;
-                }
-                task_inner.task_status = TaskStatus::Running;
                 task_inner.update_process_times_schedule_in();
                 &task_inner.task_cx as *const TaskContext
             };
@@ -404,13 +396,15 @@ pub fn run_tasks() {
                 crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
+            // 此时已经运行在 idle 栈上。先撤销 current slot，再根据任务留下的
+            // Running/Blocking/Zombie 状态完成唯一一次容器交接。
+            finish_current_switch_out(cpu);
             #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             if trace_first_switch {
                 println!("[bringup][sched:02] first init context returned to idle scheduler");
             }
         } else {
             // 没有就绪的任务 → CPU idle
-            drop(processor);
             let stage_t0 = sched_profile_start(sched_profile);
             if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
                 NET_INTERFACE.poll();
@@ -429,14 +423,8 @@ pub fn run_tasks() {
     }
 }
 
-/// 取出当前正在运行的任务并清空当前任务缓存。
-///
-/// # Semantics
-///
-/// 这是切出当前任务的唯一入口。清空 atomic 缓存后，热路径查询会回退到
-/// `PROCESSOR.current` 或返回空闲状态。
-#[inline(always)]
-pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
+/// 清空只服务于当前 CPU 热路径的无锁缓存。
+fn clear_current_task_cache() {
     CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Relaxed);
     CURRENT_PID.store(0, Ordering::Relaxed);
     CURRENT_TID.store(0, Ordering::Relaxed);
@@ -450,7 +438,18 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_SGID.store(0, Ordering::Relaxed);
     CURRENT_PGID.store(0, Ordering::Relaxed);
     CURRENT_SID.store(0, Ordering::Relaxed);
-    PROCESSOR.lock().take_current()
+}
+
+/// 在 idle 栈上收回 current slot，并把上一任务交给调度状态机收尾。
+fn finish_current_switch_out(cpu: usize) {
+    let task = {
+        let mut processor = PROCESSOR.lock();
+        clear_current_task_cache();
+        processor
+            .take_current()
+            .expect("idle resumed without a current task")
+    };
+    finish_switch_out(task, cpu);
 }
 
 /// 获取当前正在运行任务的 `Arc`。
@@ -466,8 +465,8 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
         return None;
     }
     // Safety: MangoCore is single-core. `PROCESSOR.current` owns a strong
-    // reference while `CURRENT_TASK_PTR` is published, and `take_current_task`
-    // clears the pointer before removing that owner.
+    // reference while `CURRENT_TASK_PTR` is published, and idle clears the
+    // pointer before removing that owner after the real context switch.
     unsafe {
         Arc::increment_strong_count(ptr);
         Some(Arc::from_raw(ptr))
@@ -477,7 +476,7 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 /// 获取当前正在运行任务的短生命周期引用。
 ///
 /// MangoCore 当前是单核；调度器在 `PROCESSOR.current` 持有 Arc 时同步发布这个指针，
-/// `take_current_task()` 会在切走当前任务前清空它。调用者不能把引用跨调度点保存。
+/// idle 会在任务真正切走后清空它。调用者不能把引用跨调度点保存。
 ///
 /// # Safety
 ///

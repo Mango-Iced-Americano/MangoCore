@@ -3,7 +3,7 @@ title: "进程与任务调试与测试映射"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [process, debug, scheduler, signal, futex, test]
 ---
 
@@ -54,7 +54,7 @@ wait
 |------|----------|
 | ready 任务不运行 | `TaskManager::fetch_task()`、ready queue、nice hint |
 | 睡眠任务不醒 | WaitQueue 入队、wake path、timer generation |
-| 当前任务缓存错误 | `run_tasks()` 切入发布、`take_current_task()` 清理 |
+| 当前任务缓存错误 | `run_tasks()` 切入发布、`finish_current_switch_out()` 切栈后清理 |
 | TCB drop 崩溃 | 当前任务是否先切回 idle，再 drain zombie queue |
 | 网络/timeout 依赖调度 | `run_tasks()` background poll 和 `do_wake_expired()` |
 

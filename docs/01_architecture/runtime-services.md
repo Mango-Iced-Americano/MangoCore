@@ -3,7 +3,7 @@ title: "运行期服务 (Runtime Services)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [architecture, runtime, trace, timer]
 ---
 
@@ -184,7 +184,7 @@ switch or idle
 | `CURRENT_PGID`, `CURRENT_SID` | 进程组和 session |
 | `CURRENT_SYSCALL_ID` | 诊断构建中的当前 syscall id |
 
-`current_task()` 通过 `Arc::increment_strong_count()` 从原始指针快速构造 `Arc`，避免热 syscall 路径获取 `PROCESSOR` 锁。该优化依赖 MangoCore 当前单核模型：调度器在 `PROCESSOR.current` 持有强引用时发布指针，`take_current_task()` 在切走前清空。
+`current_task()` 通过 `Arc::increment_strong_count()` 从原始指针快速构造 `Arc`，避免热 syscall 路径获取 `PROCESSOR` 锁。该优化依赖 MangoCore 当前单核模型：调度器在 `PROCESSOR.current` 持有强引用时发布指针，任务真实切回 idle 栈后，`finish_current_switch_out()` 才清空指针并取走 owner。
 
 ## 6. 调度 profiling
 

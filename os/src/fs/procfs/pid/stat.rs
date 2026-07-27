@@ -105,11 +105,10 @@ pub fn pid_stat_content(
     let state_char = if process.is_zombie() {
         'Z'
     } else if let Some(task) = process.any_live_thread() {
-        let inner = task.acquire_inner_lock();
-        match inner.task_status {
-            TaskStatus::Ready => 'R',
-            TaskStatus::Running => 'R',
-            TaskStatus::Interruptible => 'S',
+        match task.task_status() {
+            TaskStatus::New | TaskStatus::Queued(_) => 'R',
+            TaskStatus::Running(_) => 'R',
+            TaskStatus::Blocking(_) | TaskStatus::Blocked => 'S',
             TaskStatus::Zombie => 'Z',
         }
     } else {
@@ -137,14 +136,11 @@ pub fn task_stat_content(
         Some(task) => task,
         None => return Err(SyscallErr::ENOENT),
     };
-    let state_char = {
-        let inner = task.acquire_inner_lock();
-        match inner.task_status {
-            TaskStatus::Ready => 'R',
-            TaskStatus::Running => 'R',
-            TaskStatus::Interruptible => 'S',
-            TaskStatus::Zombie => 'Z',
-        }
+    let state_char = match task.task_status() {
+        TaskStatus::New | TaskStatus::Queued(_) => 'R',
+        TaskStatus::Running(_) => 'R',
+        TaskStatus::Blocking(_) | TaskStatus::Blocked => 'S',
+        TaskStatus::Zombie => 'Z',
     };
     let s = format_stat_line(tid, &process, state_char);
     proc_read_str(offset, len, buf, &s)
