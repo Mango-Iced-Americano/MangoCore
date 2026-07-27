@@ -217,11 +217,7 @@ pub(super) fn do_mmap<T: PageTable>(
             return EEXIST;
         }
         // MAP_FIXED 允许覆盖空洞，空洞不是错误
-        if let Err(errno) =
-            address_space
-                .vmas
-                .unmap_range(&mut address_space.page_table, start_vpn, end_vpn, true)
-        {
+        if let Err(errno) = address_space.unmap_user_range(start_vpn, end_vpn, true) {
             return errno;
         }
         address_space.set_locked_pages(start_vpn, end_vpn, false);
@@ -350,11 +346,7 @@ pub(super) fn do_shm_mmap<T: PageTable>(
         {
             return EEXIST;
         }
-        if let Err(errno) =
-            address_space
-                .vmas
-                .unmap_range(&mut address_space.page_table, start_vpn, end_vpn, true)
-        {
+        if let Err(errno) = address_space.unmap_user_range(start_vpn, end_vpn, true) {
             return errno;
         }
         address_space.set_locked_pages(start_vpn, end_vpn, false);
@@ -417,8 +409,7 @@ pub(super) fn do_munmap<T: PageTable>(
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
     address_space
-        .vmas
-        .unmap_range(&mut address_space.page_table, start_vpn, end_vpn, true)
+        .unmap_user_range(start_vpn, end_vpn, true)
         .map(|_| ())
 }
 
@@ -443,7 +434,5 @@ pub(super) fn do_mprotect<T: PageTable>(
     );
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
-    address_space
-        .vmas
-        .protect_range(&mut address_space.page_table, start_vpn, end_vpn, prot)
+    address_space.protect_user_range(start_vpn, end_vpn, prot)
 }

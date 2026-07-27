@@ -3,15 +3,15 @@ title: "内存管理子系统 (Memory Management)"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [mm, vma, mmap, page-fault, pagetable]
+last_update: 2026-07-27
+tags: [mm, vma, mmap, page-fault, pagetable, tlb-batch]
 ---
 
 # 内存管理子系统
 
 ## 概述
 
-MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
+MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `TlbBatch` 统一提交本地 TLB 刷新与 frame 延迟释放。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
 
 ## 依据范围
 
@@ -43,6 +43,9 @@ MangoCore 的内存管理由物理页分配器、架构页表实现、进程地�
 | page_fault.rs + filemap.rs                                  |
 | lazy anon | file read/write | shared write | CoW             |
 +-------------------------------------------------------------+
+| UserMapper + TlbBatch                                      |
+| user PTE writes | local flush | deferred frame release      |
++-------------------------------------------------------------+
 | PageTable trait + PageTableImpl                              |
 | rv64 Sv39PageTable | la64 LAFlexPageTable                    |
 +-------------------------------------------------------------+
@@ -73,6 +76,7 @@ KERNEL_SPACE.lock().activate()
 | `VmPageStore` | `frame_store.rs` | 记录每个 VPN 的物理页状态 |
 | `FrameTracker` | `frame_allocator.rs` | 物理页 RAII 包装，drop 时归还页帧 |
 | `PageTable` | `page_table.rs` | 架构无关页表操作 trait |
+| `TlbBatch` | `tlb_batch.rs` | 收集用户 PTE 修改，在刷新 TLB 后释放失效映射的 frame |
 
 ## 功能矩阵
 

@@ -11,13 +11,10 @@ use super::register::{self, Exception, Interrupt, Trap, ERA};
 use super::tlb::{ASID_NONE, KERN_ASID};
 use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
-use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
 use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd};
 use crate::hal::arch::loongarch64::trap::mem_access::Instruction;
 use crate::hal::arch::TICKS_PER_SEC;
-use crate::mm::{
-    copy_from_user, copy_to_user, frame_reserve, FaultAccess, MemoryError, PageTable, VirtAddr,
-};
+use crate::mm::{copy_from_user, copy_to_user, frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
@@ -56,9 +53,9 @@ pub extern "C" fn __rfill() {
     //         w_dm_df_pd_i_lv;
     // let i = 0xA8;
     naked_asm!(
-            // PGD: 0x1b CRMD:0x0 PWCL:0x1c TLBRBADV:0x89 TLBERA:0x8a TLBRSAVE:0x8b SAVE:0x30
-            // TLBREHi: 0x8e STLBPS: 0x1e MERRsave:0x95
-            "
+        // PGD: 0x1b CRMD:0x0 PWCL:0x1c TLBRBADV:0x89 TLBERA:0x8a TLBRSAVE:0x8b SAVE:0x30
+        // TLBREHi: 0x8e STLBPS: 0x1e MERRsave:0x95
+        "
     csrwr  $t0, 0x8b
 
 
@@ -312,15 +309,11 @@ pub fn trap_handler() -> ! {
                     }
                 },
                 Ok(_) => {
-                    //tlb_addr_allow_write(addr.floor(), _paddr.floor()).unwrap();
-                    drop(mset_lock);
                     if let Trap::Exception(
                         Exception::PageModifyFault | Exception::PageInvalidStore,
                     ) = cause
                     {
-                        LAFlexPageTable::from_token(task.get_user_token())
-                            .set_dirty_bit(addr.floor())
-                            .unwrap();
+                        mset_lock.set_user_page_dirty(addr.floor()).unwrap();
                     }
                 }
             };
@@ -417,17 +410,9 @@ pub fn trap_handler() -> ! {
                     pc
                 );
             }
-            crate::task::perf::record_user_unaligned_trap(
-                unaligned_start,
-                is_store,
-                sz,
-                is_float,
-            );
+            crate::task::perf::record_user_unaligned_trap(unaligned_start, is_store, sz, is_float);
         }
-        Trap::MachineError(_)
-        | Trap::Unknown
-        | Trap::Exception(Exception::AddressError)
-        | _ => {
+        Trap::MachineError(_) | Trap::Unknown | Trap::Exception(Exception::AddressError) | _ => {
             panic!(
                 "Unsupported trap {:?}, stval = {:#x}, BadI = {:#x}!",
                 cause, stval, badi

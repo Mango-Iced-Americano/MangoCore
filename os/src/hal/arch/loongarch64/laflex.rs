@@ -3,10 +3,7 @@
 //! 实现 `PageTable` trait，负责 LA64 页表页管理、PTE 权限转换、ASID/TLB 刷新
 //! 和内核全局映射激活。
 
-use super::{
-    tlb::{tlb_invalidate, tlb_invalidate_page},
-    tlb_global_invalidate,
-};
+use super::{tlb::tlb_invalidate, tlb_global_invalidate};
 use crate::{
     config::{
         MEMORY_END, MEMORY_HIGH_BASE_VPN, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK, VPN_SEG_MASK,
@@ -230,7 +227,9 @@ impl LAFlexPageTable {
             // 防止复用的栈或程序虚拟地址保留其他任务留下的非全局旧表项。
             tlb_global_invalidate();
         } else {
-            tlb_invalidate_page(vpn);
+            // ASID 在 Phase 4 前仍由 TCB 持有，页表对象无法知道目标 ASID。
+            // 即使调用的是旧安全接口，也必须保守清除本核全部非全局项。
+            tlb_invalidate();
         }
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
         crate::task::perf::record_tlb_page_flush_cycles(elapsed);
@@ -296,33 +295,6 @@ impl LAFlexPageTable {
     fn find_pte(&self, vpn: VirtPageNum) -> Option<&LAFlexPageTableEntry> {
         //trace!("[find_pte(as refmut)] {:?}", vpn);
         self.find_pte_refmut(vpn).map(|i| &*i)
-    }
-    pub fn set_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        if self.is_ident_map(vpn) {
-            if let Some(idx) = dirty_index(vpn) {
-                // Safety: `dirty_index` bounds-checks the index into the global
-                // bitmap, and MangoCore is currently single-core.
-                unsafe {
-                    if DIRTY[idx] {
-                        return Ok(());
-                    }
-                    DIRTY[idx] = true;
-                }
-                self.invalidate_page(vpn);
-                return Ok(());
-            }
-            return Err(());
-        }
-        if let Some(pte) = self.find_pte_refmut(vpn) {
-            if pte.is_dirty() {
-                return Ok(());
-            }
-            pte.set_dirty();
-            self.invalidate_page(vpn);
-            Ok(())
-        } else {
-            Err(())
-        }
     }
 }
 /// Assume that it won't encounter oom when creating/mapping.
@@ -395,6 +367,16 @@ impl PageTable for LAFlexPageTable {
         ppn: PhysPageNum,
         flags: MapPermission,
     ) -> Result<(), MemoryError> {
+        self.try_map_no_flush(vpn, ppn, flags)?;
+        self.invalidate_page(vpn);
+        Ok(())
+    }
+    fn try_map_no_flush(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
         let pte = self.find_pte_create(vpn)?;
         //log::trace!("[laflex::map] vpn: {:?}, ppn:{:?}", vpn, ppn);
         if pte.is_valid() {
@@ -420,7 +402,6 @@ impl PageTable for LAFlexPageTable {
         let pte_new = LAFlexPageTableEntry::new(ppn, flag);
         //log::trace!("[laflex::map] pre_wr");
         *pte = pte_new;
-        self.invalidate_page(vpn);
         Ok(())
     }
     #[allow(unused)]
@@ -428,10 +409,13 @@ impl PageTable for LAFlexPageTable {
     /// # Exceptions
     /// Panics if the `vpn` is NOT mapped (invalid).
     fn unmap(&mut self, vpn: VirtPageNum) {
+        self.unmap_no_flush(vpn);
+        self.invalidate_page(vpn);
+    }
+    fn unmap_no_flush(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte_refmut(vpn).unwrap();
         debug_assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = LAFlexPageTableEntry { bits: 0 };
-        self.invalidate_page(vpn);
     }
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` if exists
     /// `None` is returned if nothing is found.
@@ -468,6 +452,16 @@ impl PageTable for LAFlexPageTable {
         } else {
             None
         }
+    }
+    fn flush_tlb_page(&self, _vpn: VirtPageNum) {
+        // B16 的 ASID 仍归 TCB，而不是归 AddressSpace；修改一个暂未运行的
+        // LocalOnly 地址空间时，当前 CSR.ASID 不一定就是目标 ASID。此处因此
+        // 清除本核全部非全局项，不能误用只匹配“当前 ASID + VA”的 invtlb 0x5。
+        // Phase 4 把 ASID 下沉到 MM 后，才可在这里恢复目标 ASID 的精确页刷新。
+        let start = crate::task::perf::perf_time_now();
+        tlb_invalidate();
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+        crate::task::perf::record_tlb_full_flush_cycles(elapsed);
     }
     fn flush_tlb(&self) {
         let start = crate::task::perf::perf_time_now();
@@ -509,18 +503,45 @@ impl PageTable for LAFlexPageTable {
         }
     }
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
+        self.set_ppn_no_flush(vpn, ppn)?;
+        self.invalidate_page(vpn);
+        Ok(())
+    }
+    fn set_ppn_no_flush(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_ppn(ppn);
-            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
         }
     }
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
+        self.set_pte_flags_no_flush(vpn, flags)?;
+        self.invalidate_page(vpn);
+        Ok(())
+    }
+    fn set_pte_flags_no_flush(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_permission(flags);
-            self.invalidate_page(vpn);
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+    fn set_dirty_bit_no_flush(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
+        if self.is_ident_map(vpn) {
+            if let Some(idx) = dirty_index(vpn) {
+                // Safety: `dirty_index` 已校验全局位图下标；B16 尚未允许
+                // 多 CPU 并发修改该内核恒等映射状态。
+                unsafe {
+                    DIRTY[idx] = true;
+                }
+                return Ok(());
+            }
+            return Err(());
+        }
+        if let Some(pte) = self.find_pte_refmut(vpn) {
+            pte.set_dirty();
             Ok(())
         } else {
             Err(())

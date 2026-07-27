@@ -5,14 +5,15 @@
 //!
 //! # TLB
 //!
-//! 本模块通过 `Vma`/`UserMapper` 修改 PTE；具体刷新由底层 `PageTable` 方法保证。
-//! 新增直接 PTE 修改时必须同步维护 TLB 刷新契约。
+//! 本模块通过 `Vma`/`UserMapper` 向 `TlbBatch` 提交 PTE 修改。batch 在缺页
+//! 返回前统一刷新 TLB，错误路径也由 `Drop` 兜底；不得在此新增绕过 batch
+//! 的用户 PTE 写入。
 
 use super::filemap::{filemap_private_fault, filemap_read_fault, filemap_shared_write_fault};
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
-use super::{FaultAccess, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use super::{FaultAccess, MemoryError, PageTable, PhysAddr, TlbBatch, VirtAddr, VirtPageNum};
 use crate::utils::error::SyscallErr;
 use log::{error, warn};
 
@@ -82,21 +83,21 @@ struct PageFaultHandler;
 /// 修复失败时透传对应 `MemoryError`。
 pub(super) fn handle_page_fault<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    PageFaultHandler::handle(area, page_table, ctx)
+    PageFaultHandler::handle(area, batch, ctx)
 }
 
 impl PageFaultHandler {
     fn handle<T: PageTable>(
         area: &mut Vma,
-        page_table: &mut T,
+        batch: &mut TlbBatch<'_, T>,
         ctx: FaultContext,
     ) -> Result<PhysAddr, MemoryError> {
         check_area_permission(area, ctx)?;
 
-        let action = Self::classify(area, page_table, ctx)?;
+        let action = Self::classify(area, batch, ctx)?;
         let action_tag = match action {
             FaultAction::LazyAlloc => 0usize,
             FaultAction::FileBackedRead => 1,
@@ -110,36 +111,36 @@ impl PageFaultHandler {
         let result = match action {
             // 匿名页首次访问：分配清零物理页并安装用户 PTE。
             FaultAction::LazyAlloc => {
-                map_lazy_zero_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
+                map_lazy_zero_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // 文件映射页首次读取/执行：直接映射文件页缓存。
-            FaultAction::FileBackedRead => filemap_read_fault(area, page_table, ctx),
+            FaultAction::FileBackedRead => filemap_read_fault(area, batch, ctx),
             // 文件映射页首次写入共享映射：映射 page cache 帧并标脏。
-            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, page_table, ctx),
+            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, batch, ctx),
             // 文件映射页首次写入私有映射：分配私有物理页并从文件填充内容。
-            FaultAction::FileBackedWrite => filemap_private_fault(area, page_table, ctx),
+            FaultAction::FileBackedWrite => filemap_private_fault(area, batch, ctx),
             // 压缩匿名页再次访问：解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {
-                finish_decompress_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
+                finish_decompress_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // 已换出的匿名页再次访问：从 swap/zram 换入后恢复映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::SwapIn => {
-                finish_swap_in_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
+                finish_swap_in_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // MAP_SHARED 写保护 fault：恢复共享写权限。
-            FaultAction::SharedWrite => restore_shared_write(area, page_table, ctx),
+            FaultAction::SharedWrite => restore_shared_write(area, batch, ctx),
             // Stale lazy PTE：页表已有项但元数据仍未分配，先清理再修复。
-            FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, page_table, ctx),
+            FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, batch, ctx),
             // 私有已映射页写入：触发 COW。
-            FaultAction::Cow => copy_private_page(area, page_table, ctx),
+            FaultAction::Cow => copy_private_page(area, batch, ctx),
             // 已映射页读取/执行：直接翻译物理地址。
-            FaultAction::MappedRead => translate_mapped_page(page_table, ctx),
+            FaultAction::MappedRead => translate_mapped_page(batch, ctx),
             // MAP_SHARED 匿名页可以预分配共享 frame，但延迟安装用户 PTE；
             // 这样 `mincore` 仍能观察到未访问页未 present。
             FaultAction::ResidentWithoutPte => {
-                map_existing_resident_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
+                map_existing_resident_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
         };
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_pf_start);
@@ -149,10 +150,10 @@ impl PageFaultHandler {
 
     fn classify<T: PageTable>(
         area: &mut Vma,
-        page_table: &mut T,
+        batch: &mut TlbBatch<'_, T>,
         ctx: FaultContext,
     ) -> Result<FaultAction, MemoryError> {
-        if UserMapper::new(page_table).is_mapped(ctx.vpn) {
+        if UserMapper::new(batch).is_mapped(ctx.vpn) {
             return Ok(match ctx.access {
                 FaultAccess::Load | FaultAccess::Execute => FaultAction::MappedRead,
                 FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
@@ -197,29 +198,29 @@ fn check_area_permission(area: &Vma, ctx: FaultContext) -> Result<(), MemoryErro
 
 fn map_existing_resident_page<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
-    area.map_existing_in_memory(page_table, ctx.vpn)
+    area.map_existing_in_memory(batch, ctx.vpn)
 }
 
 fn map_lazy_zero_page<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
-    let ppn = area.map_one_zeroed_unchecked(page_table, ctx.vpn)?;
+    let ppn = area.map_one_zeroed_unchecked(batch, ctx.vpn)?;
     Ok(ppn)
 }
 
 #[cfg(feature = "oom_handler")]
 fn finish_decompress_page<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
     let ppn = area.vm_decompress_page(ctx.vpn)?;
-    UserMapper::new(page_table).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
+    UserMapper::new(batch).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
     area.vm_record_resident_page::<T>(ctx.vpn)?;
     area.vm_dec_compressed();
     Ok(ppn)
@@ -228,11 +229,11 @@ fn finish_decompress_page<T: PageTable>(
 #[cfg(feature = "oom_handler")]
 fn finish_swap_in_page<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
     let ppn = area.vm_swap_in_page(ctx.vpn)?;
-    UserMapper::new(page_table).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
+    UserMapper::new(batch).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
     area.vm_record_resident_page::<T>(ctx.vpn)?;
     area.vm_dec_swapped();
     Ok(ppn)
@@ -240,7 +241,7 @@ fn finish_swap_in_page<T: PageTable>(
 
 fn restore_shared_write<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     // 文件共享页恢复 W 之前先进入 page cache 写路径，确保 dirty 状态不会丢失。
@@ -257,7 +258,7 @@ fn restore_shared_write<T: PageTable>(
             }
         }
     }
-    let mut mapper = UserMapper::new(page_table);
+    let mut mapper = UserMapper::new(batch);
     mapper.set_user_flags(ctx.vpn, area.vm_perm())?;
     let ppn = mapper.translate(ctx.vpn).ok_or(MemoryError::NotMapped)?;
     Ok(ctx.offset_phys(ppn))
@@ -265,37 +266,37 @@ fn restore_shared_write<T: PageTable>(
 
 fn repair_stale_lazy_pte<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     warn!(
         "[do_page_fault] clear stale lazy pte: addr={:?}, vpn={:?}, area={:?}",
         ctx.addr, ctx.vpn, area
     );
-    area.clear_stale_pte(page_table, ctx.vpn);
+    area.clear_stale_pte(batch, ctx.vpn);
 
     if area.vm_kind() == VmAreaKind::FileBacked {
         return Err(MemoryError::NotMapped);
     }
 
-    let allocated_ppn = area.map_one_zeroed_unchecked(page_table, ctx.vpn)?;
+    let allocated_ppn = area.map_one_zeroed_unchecked(batch, ctx.vpn)?;
     Ok(ctx.offset_phys(allocated_ppn))
 }
 
 fn copy_private_page<T: PageTable>(
     area: &mut Vma,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    let allocated_ppn = area.copy_on_write(page_table, ctx.vpn)?;
+    let allocated_ppn = area.copy_on_write(batch, ctx.vpn)?;
     Ok(ctx.offset_phys(allocated_ppn))
 }
 
 fn translate_mapped_page<T: PageTable>(
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    let ppn = UserMapper::new(page_table)
+    let ppn = UserMapper::new(batch)
         .translate(ctx.vpn)
         .ok_or(MemoryError::NotMapped)?;
     Ok(ctx.offset_phys(ppn))

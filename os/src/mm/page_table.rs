@@ -5,8 +5,8 @@
 //!
 //! # TLB
 //!
-//! 默认 PTE 修改接口必须自行刷新受影响的 TLB 条目。唯一例外是名字带
-//! `_no_flush` 的批量接口，调用方必须在批量结束后调用 `flush_tlb()`。
+//! 默认 PTE 修改接口必须自行刷新受影响的 TLB 条目。名字带 `_no_flush`
+//! 的原始接口只允许 `TlbBatch` 调用，batch 负责在物理页释放前完成刷新。
 
 use super::{MapPermission, MemoryError, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 
@@ -58,9 +58,8 @@ pub enum FaultAccess {
 ///
 /// # TLB
 ///
-/// 除 `block_and_ret_mut_no_flush` 外，所有修改有效 PTE 的方法都必须刷新
-/// 当前 hart/core 上对应的 TLB 条目。批量修改时只能使用 `_no_flush` 方法，
-/// 并在最后调用 `flush_tlb()`。
+/// 不带 `_no_flush` 的修改接口必须刷新当前 hart/core 上对应的 TLB 条目。
+/// 原始接口不会刷新，只能由 `TlbBatch` 在持有延迟释放帧的前提下使用。
 pub trait PageTable {
     /// 将 `vpn` 映射到 `ppn`。
     ///
@@ -73,6 +72,13 @@ pub trait PageTable {
     ///
     /// 成功写入 PTE 后必须刷新该 VPN 对应的 TLB 条目。
     fn try_map(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError>;
+    /// 建立映射但不刷新 TLB；仅供 `TlbBatch` 使用。
+    fn try_map_no_flush(
         &mut self,
         vpn: VirtPageNum,
         ppn: PhysPageNum,
@@ -96,6 +102,8 @@ pub trait PageTable {
     /// 成功清除 PTE 后必须刷新该 VPN 对应的 TLB 条目。
     #[allow(unused)]
     fn unmap(&mut self, vpn: VirtPageNum);
+    /// 清除映射但不刷新 TLB；仅供 `TlbBatch` 使用。
+    fn unmap_no_flush(&mut self, vpn: VirtPageNum);
     #[inline(always)]
     fn unmap_identical(&mut self, vpn: VirtPageNum) {
         self.unmap(vpn)
@@ -113,11 +121,14 @@ pub trait PageTable {
     /// 成功修改 PTE 后必须立即刷新该 VPN，保证后续写访问重新缺页。
     fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
 
-    /// Revoke writable permission and return the mapped PPN without flushing TLB.
-    ///
-    /// Callers that batch multiple PTE updates must call `flush_tlb()` once after
-    /// finishing the batch.
+    /// 撤销写权限并返回 PPN，但不刷新 TLB；仅供 `TlbBatch` 使用。
     fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+
+    /// 刷新当前 CPU 上一个虚拟页对应的 TLB 条目。
+    ///
+    /// 架构若暂时无法定位目标地址空间（例如 B16 的 LA64 ASID 仍归 TCB），
+    /// 可以保守地清除本核全部非全局项，但不能缩小到错误的当前 ASID。
+    fn flush_tlb_page(&self, vpn: VirtPageNum);
 
     /// 刷新当前页表相关的 TLB 状态。
     ///
@@ -157,6 +168,8 @@ pub trait PageTable {
     ///
     /// 成功修改 PPN 后必须刷新该 VPN。
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()>;
+    /// 修改 PPN 但不刷新 TLB；仅供 `TlbBatch` 使用。
+    fn set_ppn_no_flush(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()>;
 
     /// 覆盖 `vpn` 的 PTE 权限位。
     ///
@@ -164,6 +177,11 @@ pub trait PageTable {
     ///
     /// 成功修改权限后必须刷新该 VPN。
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()>;
+    /// 修改权限但不刷新 TLB；仅供 `TlbBatch` 使用。
+    fn set_pte_flags_no_flush(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()>;
+
+    /// 设置硬件 dirty 位但不刷新 TLB；仅用于统一 LA64 的软件 dirty fault 路径。
+    fn set_dirty_bit_no_flush(&mut self, vpn: VirtPageNum) -> Result<(), ()>;
 
     /// 清除硬件访问位。
     ///

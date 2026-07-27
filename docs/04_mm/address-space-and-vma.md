@@ -3,8 +3,8 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-19
-tags: [mm, address-space, vma, elf, maps]
+last_update: 2026-07-27
+tags: [mm, address-space, vma, elf, maps, tlb-batch]
 ---
 
 # 地址空间、VMA 与用户映射
@@ -167,10 +167,10 @@ pub struct Vma {
 ```rust
 pub fn copy_on_write<T: PageTable>(
     &mut self,
-    page_table: &mut T,
+    batch: &mut TlbBatch<'_, T>,
     vpn: VirtPageNum,
 ) -> Result<PhysPageNum, MemoryError> {
-    let old_frame = match self.cow_source_frame(page_table, vpn) {
+    let old_frame = match self.cow_source_frame(batch, vpn) {
         Ok(frame) => frame,
         Err(err) => {
             warn!(
@@ -184,11 +184,11 @@ pub fn copy_on_write<T: PageTable>(
     };
     if Arc::strong_count(&old_frame) <= 2 {
         let old_ppn = old_frame.ppn;
-        UserMapper::new(page_table).set_user_flags(vpn, self.map_perm)?;
+        UserMapper::new(batch).set_user_flags(vpn, self.map_perm)?;
         Ok(old_ppn)
     } else {
         let old_ppn = old_frame.ppn;
-        if !UserMapper::new(page_table).is_mapped(vpn) {
+        if !UserMapper::new(batch).is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
         let new_frame = unsafe { frame_alloc_uninit().ok_or(MemoryError::OutOfMemory)? };
@@ -201,33 +201,42 @@ pub fn copy_on_write<T: PageTable>(
             .remove_in_memory(&vpn)
             .ok_or(MemoryError::BadAddress)?;
         if let Err(err) = self.inner.alloc_in_memory(vpn, new_frame) {
-            let _ = self.inner.alloc_in_memory(vpn, old_frame);
+            self.inner
+                .alloc_in_memory(vpn, old_frame)
+                .expect("COW rollback could not restore the source frame");
             return Err(err);
         }
-        if UserMapper::new(page_table).set_ppn(vpn, new_ppn).is_err() {
+        if UserMapper::new(batch).set_ppn(vpn, new_ppn).is_err() {
             if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                 drop(new_frame);
             }
-            let _ = self.inner.alloc_in_memory(vpn, old_frame);
+            self.inner
+                .alloc_in_memory(vpn, old_frame)
+                .expect("COW rollback could not restore the source frame");
             return Err(MemoryError::NotMapped);
         }
-        if UserMapper::new(page_table)
+        if UserMapper::new(batch)
             .set_user_flags(vpn, self.map_perm)
             .is_err()
         {
-            let _ = UserMapper::new(page_table).set_ppn(vpn, old_ppn);
+            UserMapper::new(batch)
+                .set_ppn(vpn, old_ppn)
+                .expect("COW rollback lost the PTE after replacing its PPN");
             if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
-                drop(new_frame);
+                batch.defer_frame(new_frame);
             }
-            let _ = self.inner.alloc_in_memory(vpn, old_frame);
+            self.inner
+                .alloc_in_memory(vpn, old_frame)
+                .expect("COW rollback could not restore the source frame");
             return Err(MemoryError::NotMapped);
         }
+        batch.defer_frame(old_frame);
         Ok(new_ppn)
     }
 }
 ```
 
-`Arc::strong_count(&old_frame) <= 2` 时，说明除 VMA 内部引用和本地临时引用外没有其他共享者，可以直接恢复写权限；否则分配新 frame、复制旧页数据、替换 `VmPageStore` 和页表 PPN。函数中每个失败分支都尝试回滚 frame store 和 PTE。
+`Arc::strong_count(&old_frame) <= 2` 时，说明除 VMA 内部引用和本地临时引用外没有其他共享者，可以直接恢复写权限；否则分配新 frame、复制旧页数据、替换 `VmPageStore` 和页表 PPN。函数中每个失败分支都回滚 frame store 和 PTE；成功替换的旧 frame，以及曾短暂出现在 PTE 中的回滚新 frame，都延迟到 batch 刷新后释放。
 
 ## 3. VmaSet 管理模型
 
@@ -639,12 +648,15 @@ len > crate::mm::max_map_count().saturating_add(1)
 进程退出后，`AddressSpace::release_for_zombie()` 释放大部分 MM 资源：
 
 ```rust
-self.vmas.clear_no_hole();
+self.with_tlb_batch(|vmas, batch| vmas.unmap_all(batch))
+    .expect("zombie cleanup failed to clear a resident user PTE");
 self.locked_pages.clear();
 self.page_table.release_frames();
 ```
 
-这一步不销毁进程等待元数据。僵尸进程仍可被父进程 `wait4/waitid` 收集，但不继续占用用户页和页表页。
+这一步先撤销 resident PTE，本地 TLB 提交后才释放用户 frame，最后释放
+页表页；不销毁进程等待元数据。僵尸进程仍可被父进程 `wait4/waitid` 收集，
+但不继续占用用户页和页表页。
 
 `AddressSpace` 的生命周期和 PCB 不完全相同。进程进入 zombie 后，父进程 wait 仍需要 pid、exit code、rusage、children 等 PCB 元数据，但不需要继续保留用户 VMA 和页表页。`release_for_zombie()` 正是把“可 wait 的进程对象”和“已经没必要保留的用户地址空间资源”拆开释放。
 

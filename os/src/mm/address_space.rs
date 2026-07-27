@@ -6,7 +6,8 @@
 //! # Semantics
 //!
 //! 用户页通常懒分配，真正的物理页安装发生在 page fault 或显式 fault-in 路径。
-//! 所有 PTE 修改通过 `Vma`/`VmaSet`/`UserMapper` 进入页表层，由底层负责必要的 TLB 刷新。
+//! 所有用户 PTE 修改通过 `TlbBatch` 进入页表层；batch 在释放失效映射对应的
+//! 物理页之前统一完成本地刷新，并为后续远程 shootdown 保留提交边界。
 //!
 //! # Locking
 //!
@@ -19,14 +20,14 @@ use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
 use super::{
-    FrameTracker, PhysAddr, PhysPageNum, VPNRange, VirtAddr, VirtPageNum, KERNEL_SPACE,
-    USER_STACK_ABI_ALIGN,
+    FrameTracker, PhysAddr, PhysPageNum, TlbBatch, TlbPublication, VPNRange, VirtAddr, VirtPageNum,
+    KERNEL_SPACE, USER_STACK_ABI_ALIGN,
 };
 use crate::config::*;
-use crate::fs::PageCache;
 use crate::fs::vfs;
-use crate::fs::vfs_lookup_absolute;
 use crate::fs::vfs::IndexNode;
+use crate::fs::vfs_lookup_absolute;
+use crate::fs::PageCache;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
@@ -84,6 +85,8 @@ pub struct AddressSpace<T: PageTable> {
     pub(super) heap_pt: usize,
     /// ABI-visible mlock state used for /proc/<pid>/status VmLck accounting.
     locked_pages: BTreeSet<VirtPageNum>,
+    /// 页表是否尚未发布、仅限 CPU0，或已经需要远程 shootdown。
+    tlb_publication: TlbPublication,
 }
 
 impl<T: PageTable> AddressSpace<T> {
@@ -95,7 +98,27 @@ impl<T: PageTable> AddressSpace<T> {
             heap_bottom: 0,
             heap_pt: 0,
             locked_pages: BTreeSet::new(),
+            tlb_publication: TlbPublication::Unpublished,
         }
+    }
+
+    /// 把构造完成的地址空间发布给当前单核调度域。
+    pub(crate) fn publish_local(&mut self) {
+        if self.tlb_publication == TlbPublication::Unpublished {
+            self.tlb_publication = TlbPublication::LocalOnly;
+        }
+    }
+
+    /// 在一次地址空间锁持有期内执行用户 PTE 修改并提交本地 TLB batch。
+    fn with_tlb_batch<R>(
+        &mut self,
+        operation: impl FnOnce(&mut VmaSet, &mut TlbBatch<'_, T>) -> R,
+    ) -> R {
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        let result = operation(&mut self.vmas, &mut batch);
+        batch.commit();
+        result
     }
     /// Getter to the token of current memory space, or "this" page table.
     pub fn token(&self) -> usize {
@@ -145,9 +168,15 @@ impl<T: PageTable> AddressSpace<T> {
             0,
         );
         area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_STACK;
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
         for vpn in VPNRange::new(init_top.floor(), stack_bottom.ceil()) {
-            area.map_one(&mut self.page_table, vpn)?;
+            if let Err(error) = area.map_one(&mut batch, vpn) {
+                let _ = area.unmap(&mut batch, VmaUnmapReason::RemoveArea);
+                return Err(error);
+            }
         }
+        batch.commit();
         self.vmas
             .push(area)
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))
@@ -167,8 +196,7 @@ impl<T: PageTable> AddressSpace<T> {
         &mut self,
         start_vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        self.vmas
-            .remove_area_with_start(&mut self.page_table, start_vpn)
+        self.with_tlb_batch(|vmas, batch| vmas.remove_area_with_start(batch, start_vpn))
     }
     /// Push a not-yet-mapped VMA into current address space and copy the data into it if any.
     fn push(&mut self, vma: Vma, data: Option<&[u8]>) -> Result<(), (MemoryError, VirtPageNum)> {
@@ -187,13 +215,21 @@ impl<T: PageTable> AddressSpace<T> {
         self.vmas
             .try_reserve(1)
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
         let mut first_ppn = None;
         match data {
             Some(data) => {
                 let mut start = 0;
                 let len = data.len();
                 for vpn in vma.inner.vpn_range {
-                    let ppn = vma.map_one(&mut self.page_table, vpn)?;
+                    let ppn = match vma.map_one(&mut batch, vpn) {
+                        Ok(ppn) => ppn,
+                        Err(error) => {
+                            let _ = vma.unmap(&mut batch, VmaUnmapReason::RemoveArea);
+                            return Err(error);
+                        }
+                    };
                     first_ppn.get_or_insert(ppn);
                     let end = start + PAGE_SIZE;
                     let src = &data[start..len.min(end)];
@@ -203,11 +239,18 @@ impl<T: PageTable> AddressSpace<T> {
             }
             None => {
                 for vpn in vma.inner.vpn_range {
-                    let ppn = vma.map_one(&mut self.page_table, vpn)?;
+                    let ppn = match vma.map_one(&mut batch, vpn) {
+                        Ok(ppn) => ppn,
+                        Err(error) => {
+                            let _ = vma.unmap(&mut batch, VmaUnmapReason::RemoveArea);
+                            return Err(error);
+                        }
+                    };
                     first_ppn.get_or_insert(ppn);
                 }
             }
         }
+        batch.commit();
         self.vmas
             .push(vma)
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
@@ -226,9 +269,14 @@ impl<T: PageTable> AddressSpace<T> {
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
         let len = data.len();
         let mut vpn_iter = vma.inner.vpn_range.into_iter();
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
         if let Some(vpn) = vpn_iter.next() {
             // special treatment for first page
-            let first_ppn = vma.map_one(&mut self.page_table, vpn)?;
+            let first_ppn = match vma.map_one(&mut batch, vpn) {
+                Ok(ppn) => ppn,
+                Err(error) => return Err(error),
+            };
             let first_dst = first_ppn.get_bytes_array();
             first_dst[..offset].fill(0);
             let first_src = &data[..len.min(PAGE_SIZE - offset)];
@@ -236,7 +284,13 @@ impl<T: PageTable> AddressSpace<T> {
 
             let mut start = PAGE_SIZE - offset;
             for vpn in vpn_iter {
-                let ppn = vma.map_one(&mut self.page_table, vpn)?;
+                let ppn = match vma.map_one(&mut batch, vpn) {
+                    Ok(ppn) => ppn,
+                    Err(error) => {
+                        let _ = vma.unmap(&mut batch, VmaUnmapReason::RemoveArea);
+                        return Err(error);
+                    }
+                };
                 let dst = ppn.get_bytes_array();
                 let end = start + PAGE_SIZE;
                 if start < len {
@@ -254,6 +308,7 @@ impl<T: PageTable> AddressSpace<T> {
                 start = end;
             }
         }
+        batch.commit();
         self.vmas
             .push(vma)
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
@@ -261,20 +316,27 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     /// Push the map area into the memory set without copying or allocation.
-    pub fn push_no_alloc(&mut self, vma: Vma) -> Result<(), ()> {
+    pub fn push_no_alloc(&mut self, mut vma: Vma) -> Result<(), ()> {
         self.vmas.try_reserve(1).map_err(|_| ())?;
-        let mut mapper = UserMapper::new(&mut self.page_table);
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
         for vpn in vma.inner.vpn_range {
-            let frame = vma.inner.get_in_memory(&vpn).unwrap();
-            if !mapper.is_mapped(vpn) {
+            let ppn = vma.inner.get_in_memory(&vpn).unwrap().ppn;
+            if !UserMapper::new(&mut batch).is_mapped(vpn) {
                 //if not mapped
-                mapper
-                    .map_user_page(vpn, frame.ppn.clone(), vma.map_perm)
-                    .map_err(|_| ())?;
+                if UserMapper::new(&mut batch)
+                    .map_user_page(vpn, ppn, vma.map_perm)
+                    .is_err()
+                {
+                    let _ = vma.unmap(&mut batch, VmaUnmapReason::RemoveArea);
+                    return Err(());
+                }
             } else {
+                let _ = vma.unmap(&mut batch, VmaUnmapReason::RemoveArea);
                 return Err(());
             }
         }
+        batch.commit();
         self.vmas.push(vma).map_err(|_| ())?;
         Ok(())
     }
@@ -663,9 +725,12 @@ impl<T: PageTable> AddressSpace<T> {
         };
         if area_start.is_some() {
             let ctx = super::page_fault::FaultContext::new(addr, access);
-            let page_table = &mut self.page_table;
+            let publication = self.tlb_publication;
+            let mut batch = TlbBatch::new(&mut self.page_table, publication);
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();
-            let pa = super::page_fault::handle_page_fault(area, page_table, ctx)?;
+            let result = super::page_fault::handle_page_fault(area, &mut batch, ctx);
+            batch.commit();
+            let pa = result?;
             self.validate_fault_phys_addr(addr, pa)
         } else {
             // In all segments, nothing matches the requirements. Throws.
@@ -756,8 +821,10 @@ impl<T: PageTable> AddressSpace<T> {
     #[cfg(feature = "loongarch64")]
     #[cfg(feature = "oom_handler")]
     pub fn do_shallow_clean(&mut self) -> usize {
-        let page_table = &mut self.page_table;
-        self.vmas
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        let released = self
+            .vmas
             .iter_mut()
             .filter(|area| {
                 let start_vpn = area.get_start::<T>();
@@ -765,14 +832,18 @@ impl<T: PageTable> AddressSpace<T> {
                     && start_vpn.0 < (USR_MMAP_END >> PAGE_SIZE_BITS)
                     && area.map_file.is_none()
             })
-            .map(|area| area.do_oom(page_table))
-            .sum()
+            .map(|area| area.do_oom(&mut batch))
+            .sum();
+        batch.commit();
+        released
     }
     #[cfg(feature = "riscv")]
     #[cfg(feature = "oom_handler")]
     pub fn do_shallow_clean(&mut self) -> usize {
-        let page_table = &mut self.page_table;
-        self.vmas
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        let released = self
+            .vmas
             .iter_mut()
             .filter(|area| {
                 let start_vpn = area.get_start::<T>();
@@ -780,65 +851,81 @@ impl<T: PageTable> AddressSpace<T> {
                     && start_vpn.0 < (TASK_SIZE >> PAGE_SIZE_BITS)
                     && area.map_file.is_none()
             })
-            .map(|area| area.do_oom(page_table))
-            .sum()
+            .map(|area| area.do_oom(&mut batch))
+            .sum();
+        batch.commit();
+        released
     }
     #[cfg(feature = "loongarch64")]
     #[cfg(feature = "oom_handler")]
     pub fn do_deep_clean(&mut self) -> usize {
-        let page_table = &mut self.page_table;
-        self.vmas
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        let released = self
+            .vmas
             .iter_mut()
             .filter(|area| {
                 area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
             .map(|area| {
                 if area.get_start::<T>().0 < USR_MMAP_BASE >> PAGE_SIZE_BITS {
-                    area.force_swap(page_table)
+                    area.force_swap(&mut batch)
                 } else {
-                    area.do_oom(page_table)
+                    area.do_oom(&mut batch)
                 }
             })
-            .sum()
+            .sum();
+        batch.commit();
+        released
     }
     #[cfg(feature = "riscv")]
     #[cfg(feature = "oom_handler")]
     pub fn do_deep_clean(&mut self) -> usize {
-        let page_table = &mut self.page_table;
-        self.vmas
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        let released = self
+            .vmas
             .iter_mut()
             .filter(|area| {
                 area.get_start::<T>().0 < (TASK_SIZE >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
             .map(|area| {
                 if area.get_start::<T>().0 < MMAP_BASE >> PAGE_SIZE_BITS {
-                    area.force_swap(page_table)
+                    area.force_swap(&mut batch)
                 } else {
-                    area.do_oom(page_table)
+                    area.do_oom(&mut batch)
                 }
             })
-            .sum()
+            .sum();
+        batch.commit();
+        released
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        UserMapper::new(&mut self.page_table)
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        UserMapper::new(&mut batch)
             .map_privileged_user_page(
                 VirtAddr::from(TRAMPOLINE).into(),
                 PhysAddr::from(strampoline as usize).into(),
                 MapPermission::R | MapPermission::X,
             )
             .unwrap();
+        batch.commit();
     }
 
     /// Can be accessed in user mode.
     fn map_signaltrampoline(&mut self) {
-        UserMapper::new(&mut self.page_table)
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        UserMapper::new(&mut batch)
             .map_user_page(
                 VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
                 PhysAddr::from(ssignaltrampoline as usize).into(),
                 MapPermission::R | MapPermission::X | MapPermission::U,
             )
             .unwrap();
+        batch.commit();
     }
 
     pub fn map_elf(&mut self, elf: &xmas_elf::ElfFile) -> Result<(usize, ELFInfo), isize> {
@@ -917,7 +1004,8 @@ impl<T: PageTable> AddressSpace<T> {
                     let interp = xmas_elf::ElfFile::new(interp_data).map_err(|_| ENOEXEC)?;
                     let (_, interp_info) = self.map_elf(&interp)?;
                     let _interp_ticks = crate::task::perf::perf_time_now().wrapping_sub(_t_interp);
-                    crate::task::perf::EXECVE_INTERP_TICKS.fetch_add(_interp_ticks, core::sync::atomic::Ordering::Relaxed);
+                    crate::task::perf::EXECVE_INTERP_TICKS
+                        .fetch_add(_interp_ticks, core::sync::atomic::Ordering::Relaxed);
                     interp_entry = Some(interp_info.entry);
                     interp_base = Some(interp_info.base);
                     KERNEL_SPACE
@@ -990,25 +1078,30 @@ impl<T: PageTable> AddressSpace<T> {
         {
             return Err(crate::syscall::errno::ENOMEM);
         }
-        for area in user_space
-            .vmas
-            .iter()
-            .filter(|area| area.vm_is_user() && !area.dont_fork)
         {
-            let mut new_area = if area.wipe_on_fork {
-                Vma::from_another(area)
-            } else {
-                let mut cloned = area.try_clone()?;
-                cloned
-                    .map_from_existing_page_table(
-                        &mut address_space.page_table,
-                        &mut user_space.page_table,
-                    )
-                    .map_err(|_| crate::syscall::errno::ENOMEM)?;
-                cloned
-            };
-            new_area.mark_fork_inherited();
-            address_space.vmas.push(new_area)?;
+            let dst_publication = address_space.tlb_publication;
+            let src_publication = user_space.tlb_publication;
+            let mut dst_batch = TlbBatch::new(&mut address_space.page_table, dst_publication);
+            let mut src_batch = TlbBatch::new(&mut user_space.page_table, src_publication);
+            for area in user_space
+                .vmas
+                .iter()
+                .filter(|area| area.vm_is_user() && !area.dont_fork)
+            {
+                let mut new_area = if area.wipe_on_fork {
+                    Vma::from_another(area)
+                } else {
+                    let mut cloned = area.try_clone()?;
+                    cloned
+                        .map_from_existing_page_table(&mut dst_batch, &mut src_batch)
+                        .map_err(|_| crate::syscall::errno::ENOMEM)?;
+                    cloned
+                };
+                new_area.mark_fork_inherited();
+                address_space.vmas.push(new_area)?;
+            }
+            src_batch.commit();
+            dst_batch.commit();
         }
         // Copy the current task's trap context.  A process can have stale or
         // higher-numbered non-user VMAs after clone/exit churn, so do not guess
@@ -1035,13 +1128,23 @@ impl<T: PageTable> AddressSpace<T> {
 
         Ok(address_space)
     }
-    pub fn activate(&self) {
+    pub fn activate(&mut self) {
+        self.publish_local();
         self.page_table.activate()
     }
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` in the current memory set if exists
     /// `None` is returned if nothing is found.
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         translate_page(&self.page_table, vpn)
+    }
+
+    /// 提交 LA64 软件 dirty fault 对用户 PTE 的更新。
+    pub fn set_user_page_dirty(&mut self, vpn: VirtPageNum) -> Result<(), MemoryError> {
+        let publication = self.tlb_publication;
+        let mut batch = TlbBatch::new(&mut self.page_table, publication);
+        let result = batch.set_dirty(vpn);
+        batch.commit();
+        result
     }
 
     /// Return whether a non-private futex at `addr` must use the global shared key table.
@@ -1056,8 +1159,8 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     pub fn recycle_data_pages(&mut self) {
-        //*self = Self::new_bare();
-        self.vmas.clear();
+        self.with_tlb_batch(|vmas, batch| vmas.unmap_all(batch))
+            .expect("exec cleanup failed to clear a resident user PTE");
         self.locked_pages.clear();
     }
 
@@ -1065,7 +1168,8 @@ impl<T: PageTable> AddressSpace<T> {
     /// frames, and backing Vec storage.  The zombie no longer needs address
     /// space after exit; only wait4 metadata (pid, exit_code) is required.
     pub fn release_for_zombie(&mut self) {
-        self.vmas.clear_no_hole();
+        self.with_tlb_batch(|vmas, batch| vmas.unmap_all(batch))
+            .expect("zombie cleanup failed to clear a resident user PTE");
         self.locked_pages.clear();
         self.page_table.release_frames();
     }
@@ -1121,6 +1225,24 @@ impl<T: PageTable> AddressSpace<T> {
         result
     }
 
+    pub(super) fn unmap_user_range(
+        &mut self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        allow_empty: bool,
+    ) -> Result<bool, isize> {
+        self.with_tlb_batch(|vmas, batch| vmas.unmap_range(batch, start_vpn, end_vpn, allow_empty))
+    }
+
+    pub(super) fn protect_user_range(
+        &mut self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        prot: MapPermission,
+    ) -> Result<(), isize> {
+        self.with_tlb_batch(|vmas, batch| vmas.protect_range(batch, start_vpn, end_vpn, prot))
+    }
+
     pub fn mprotect(&mut self, addr: usize, len: usize, prot: MapPermission) -> Result<(), isize> {
         super::mmap::do_mprotect(self, addr, len, prot)
     }
@@ -1133,8 +1255,7 @@ impl<T: PageTable> AddressSpace<T> {
         if advice == MADV_DONTNEED && self.locked_pages.range(start_vpn..end_vpn).next().is_some() {
             return Err(EINVAL);
         }
-        self.vmas
-            .advise_range(&mut self.page_table, start_vpn, end_vpn, advice)
+        self.with_tlb_batch(|vmas, batch| vmas.advise_range(batch, start_vpn, end_vpn, advice))
     }
 
     pub fn mincore(&self, start: usize, len: usize, residency: &mut [u8]) -> Result<(), isize> {
@@ -1609,13 +1730,15 @@ impl<T: PageTable> AddressSpace<T> {
                         ph.filesz,
                         map_permission_from_raw_flags(ph.flags),
                         bias,
-                    )? else {
+                    )?
+                    else {
                         continue;
                     };
                     let file_end = ph.offset.checked_add(ph.filesz).ok_or(ENOEXEC)?;
                     if ph.offset <= eh.phoff && phdr_end <= file_end {
                         let phdr_offset = eh.phoff.checked_sub(ph.offset).ok_or(ENOEXEC)?;
-                        phdr_user_addr = Some(segment.start.checked_add(phdr_offset).ok_or(ENOEXEC)?);
+                        phdr_user_addr =
+                            Some(segment.start.checked_add(phdr_offset).ok_or(ENOEXEC)?);
                     }
                 }
                 PT_INTERP => {
@@ -1683,22 +1806,14 @@ impl<T: PageTable> AddressSpace<T> {
             let map_perm = pages[run_start].map_perm;
             let mut run_end = run_start + 1;
             while run_end < pages.len() {
-                let expected_vpn = pages[run_end - 1]
-                    .vpn
-                    .0
-                    .checked_add(1)
-                    .ok_or(ENOEXEC)?;
+                let expected_vpn = pages[run_end - 1].vpn.0.checked_add(1).ok_or(ENOEXEC)?;
                 if pages[run_end].vpn.0 != expected_vpn || pages[run_end].map_perm != map_perm {
                     break;
                 }
                 run_end += 1;
             }
 
-            let end_vpn = pages[run_end - 1]
-                .vpn
-                .0
-                .checked_add(1)
-                .ok_or(ENOEXEC)?;
+            let end_vpn = pages[run_end - 1].vpn.0.checked_add(1).ok_or(ENOEXEC)?;
             let mut vma = Vma::try_new(
                 VirtAddr::from(pages[run_start].vpn),
                 VirtAddr::from(VirtPageNum(end_vpn)),
@@ -1710,10 +1825,15 @@ impl<T: PageTable> AddressSpace<T> {
             vma.flags = MapFlags::MAP_PRIVATE;
 
             self.vmas.try_reserve(1).map_err(|_| ENOMEM)?;
+            let publication = self.tlb_publication;
+            let mut batch = TlbBatch::new(&mut self.page_table, publication);
             for page in &pages[run_start..run_end] {
-                vma.map_one(&mut self.page_table, page.vpn)
-                    .map_err(|(err, _)| elf_memory_errno(err))?;
+                if let Err((error, _)) = vma.map_one(&mut batch, page.vpn) {
+                    let _ = vma.unmap(&mut batch, VmaUnmapReason::RemoveArea);
+                    return Err(elf_memory_errno(error));
+                }
             }
+            batch.commit();
             self.vmas.push(vma).map_err(elf_vma_errno)?;
             run_start = run_end;
         }
@@ -1747,7 +1867,10 @@ impl<T: PageTable> AddressSpace<T> {
             let copy_len = remaining.min(PAGE_SIZE - page_offset);
             let page_end = page_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             let ppn = translate_page(&self.page_table, vpn).ok_or(ENOEXEC)?;
-            copy_file(file_offset, &mut ppn.get_bytes_array()[page_offset..page_end])?;
+            copy_file(
+                file_offset,
+                &mut ppn.get_bytes_array()[page_offset..page_end],
+            )?;
             virtual_address = virtual_address.checked_add(copy_len).ok_or(ENOEXEC)?;
             file_offset = file_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             remaining -= copy_len;
@@ -1756,11 +1879,7 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     /// Overlay one PT_LOAD file range from PageCache onto mapped load pages.
-    fn map_load_segment(
-        &mut self,
-        pc: &PageCache,
-        segment: &ElfLoadSegment,
-    ) -> Result<(), isize> {
+    fn map_load_segment(&mut self, pc: &PageCache, segment: &ElfLoadSegment) -> Result<(), isize> {
         self.copy_load_segment(segment, |file_offset, dst| {
             copy_from_page_cache(pc, file_offset, dst)
         })
@@ -1996,10 +2115,7 @@ fn map_permission_from_raw_flags(flags: u32) -> MapPermission {
     map_perm
 }
 
-fn collect_raw_load_segments(
-    phdrs: &[RawPhdr],
-    bias: usize,
-) -> Result<Vec<ElfLoadSegment>, isize> {
+fn collect_raw_load_segments(phdrs: &[RawPhdr], bias: usize) -> Result<Vec<ElfLoadSegment>, isize> {
     let mut segments = Vec::new();
     segments.try_reserve(phdrs.len()).map_err(|_| ENOMEM)?;
     for ph in phdrs {
@@ -2041,11 +2157,7 @@ fn validate_load_segment_file_bounds(
 
 fn elf_load_page_range(segment: &ElfLoadSegment) -> Result<(VirtPageNum, VirtPageNum), isize> {
     let page_start = segment.start & !(PAGE_SIZE - 1);
-    let page_end = segment
-        .end
-        .checked_add(PAGE_SIZE - 1)
-        .ok_or(ENOEXEC)?
-        & !(PAGE_SIZE - 1);
+    let page_end = segment.end.checked_add(PAGE_SIZE - 1).ok_or(ENOEXEC)? & !(PAGE_SIZE - 1);
     if page_start >= page_end {
         return Err(ENOEXEC);
     }
@@ -2124,10 +2236,7 @@ fn prefetch_load_pages(pc: &PageCache, segments: &[ElfLoadSegment]) -> Result<()
             .file_offset
             .checked_add(segment.filesz)
             .ok_or(ENOEXEC)?;
-        let end_page = file_end
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or(ENOEXEC)?
-            >> PAGE_SIZE_BITS;
+        let end_page = file_end.checked_add(PAGE_SIZE - 1).ok_or(ENOEXEC)? >> PAGE_SIZE_BITS;
         if end_page > start_page {
             pc.sync_batch_read_pages(start_page, end_page - start_page)
                 .map_err(|_| EIO)?;

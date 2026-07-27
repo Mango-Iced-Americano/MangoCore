@@ -3,8 +3,8 @@ title: "内存管理架构详解 (Memory Management Architecture)"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [mm, address-space, vma, mmap, page-fault, cow]
+last_update: 2026-07-27
+tags: [mm, address-space, vma, mmap, page-fault, cow, tlb-batch]
 ---
 
 # 内存管理架构详解
@@ -147,12 +147,12 @@ rv64 mmap 范围使用 `MMAP_BASE/MMAP_END`；la64 使用 `USR_MMAP_BASE/USR_MMA
 | 类别 | 方法 |
 |------|------|
 | 创建/激活 | `new`, `new_kern_space`, `from_token`, `activate`, `token` |
-| 映射 | `try_map`, `map`, `unmap` |
+| 映射 | `try_map`, `map`, `unmap`；`TlbBatch` 使用对应 raw/no-flush 原语 |
 | 查询 | `translate`, `translate_va`, `is_mapped`, `is_valid` |
 | 权限 | `readable`, `writable`, `executable`, `user_access_ok` |
-| 修改 | `set_ppn`, `set_pte_flags`, `revoke_*`, `clear_access`, `clear_dirty` |
-| CoW | `block_and_ret_mut`, `block_and_ret_mut_no_flush` |
-| TLB | `flush_tlb` |
+| 修改 | `set_ppn`, `set_pte_flags`, `revoke_*`, `clear_access`, `clear_dirty`；用户 PTE 写入经 `TlbBatch` |
+| CoW | `TlbBatch::block_write` 内部调用 `block_and_ret_mut_no_flush` |
+| TLB | `flush_tlb_page`, `flush_tlb`；用户路径由 `TlbBatch` 选择提交范围 |
 
 ## 5. 执行流程
 

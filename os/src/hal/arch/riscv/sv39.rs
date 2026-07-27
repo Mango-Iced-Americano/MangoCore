@@ -262,6 +262,16 @@ impl PageTable for Sv39PageTable {
         ppn: PhysPageNum,
         flags: MapPermission,
     ) -> Result<(), MemoryError> {
+        self.try_map_no_flush(vpn, ppn, flags)?;
+        tlb_invalidate_vpn!(vpn);
+        Ok(())
+    }
+    fn try_map_no_flush(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
         let pte = self.find_pte_create(vpn)?;
         if pte.is_valid() {
             return Err(MemoryError::AlreadyMapped);
@@ -272,7 +282,6 @@ impl PageTable for Sv39PageTable {
             pte_flags |= PTEFlags::G;
         }
         *pte = Sv39PageTableEntry::new(ppn, pte_flags);
-        tlb_invalidate_vpn!(vpn);
         Ok(())
     }
     #[allow(unused)]
@@ -280,10 +289,13 @@ impl PageTable for Sv39PageTable {
     /// # Exceptions
     /// Panics if the `vpn` is NOT mapped (invalid).
     fn unmap(&mut self, vpn: VirtPageNum) {
+        self.unmap_no_flush(vpn);
+        tlb_invalidate_vpn!(vpn);
+    }
+    fn unmap_no_flush(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte_refmut(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = Sv39PageTableEntry::empty();
-        tlb_invalidate_vpn!(vpn);
     }
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` if exists
     /// `None` is returned if nothing is found.
@@ -318,6 +330,9 @@ impl PageTable for Sv39PageTable {
         } else {
             None
         }
+    }
+    fn flush_tlb_page(&self, vpn: VirtPageNum) {
+        tlb_invalidate_vpn!(vpn);
     }
     fn flush_tlb(&self) {
         tlb_invalidate();
@@ -354,18 +369,34 @@ impl PageTable for Sv39PageTable {
         }
     }
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
+        self.set_ppn_no_flush(vpn, ppn)?;
+        tlb_invalidate_vpn!(vpn);
+        Ok(())
+    }
+    fn set_ppn_no_flush(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_ppn(ppn);
-            tlb_invalidate_vpn!(vpn);
             Ok(())
         } else {
             Err(())
         }
     }
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
+        self.set_pte_flags_no_flush(vpn, flags)?;
+        tlb_invalidate_vpn!(vpn);
+        Ok(())
+    }
+    fn set_pte_flags_no_flush(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_permission(flags);
-            tlb_invalidate_vpn!(vpn);
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+    fn set_dirty_bit_no_flush(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
+        if let Some(pte) = self.find_pte_refmut(vpn) {
+            pte.bits |= PTEFlags::D.bits() as usize;
             Ok(())
         } else {
             Err(())

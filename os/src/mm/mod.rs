@@ -6,8 +6,8 @@
 //!
 //! # TLB
 //!
-//! 任何修改 PTE 的路径必须立即刷新对应 TLB，或明确使用
-//! `*_no_flush` 批量接口并在批量结束后调用 `flush_tlb()`。
+//! 用户 PTE 修改统一经 `TlbBatch` 收集并提交；内核页表仍由安全的单页接口
+//! 立即刷新。`*_no_flush` 仅供 batch 内部使用，普通调用方不得直接绕过提交协议。
 //!
 //! # Locking
 //!
@@ -30,6 +30,7 @@ mod page_fault;
 mod page_table;
 mod slab;
 mod sysctl;
+mod tlb_batch;
 mod uaccess;
 mod user_mapper;
 mod vma;
@@ -58,6 +59,7 @@ pub use sysctl::{
     set_min_free_kbytes, set_overcommit_memory, set_overcommit_ratio, set_panic_on_oom,
     total_memory_kbytes,
 };
+pub(crate) use tlb_batch::{TlbBatch, TlbPublication};
 pub use vma::{MapFlags, MapPermission};
 type MmResult<T> = Result<T, MemoryError>;
 

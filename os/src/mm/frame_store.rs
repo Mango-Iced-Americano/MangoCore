@@ -47,15 +47,19 @@ pub(super) enum FrameState {
 }
 
 impl Frame {
+    /// 写入 swap 并返回原驻留 frame。调用方必须先清除 PTE、完成 TLB 提交，
+    /// 才能释放这个 tracker。
     #[cfg(feature = "oom_handler")]
-    pub fn swap_out(&mut self) -> Result<usize, MemoryError> {
+    pub fn swap_out(&mut self) -> Result<Arc<FrameTracker>, MemoryError> {
         match self {
             Frame::InMemory(frame_ref) => {
                 if Arc::strong_count(frame_ref) == 1 {
                     let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
-                    let swap_id = swap_tracker.0;
-                    *self = Frame::SwappedOut(swap_tracker);
-                    Ok(swap_id)
+                    let old = core::mem::replace(self, Frame::SwappedOut(swap_tracker));
+                    let Frame::InMemory(frame) = old else {
+                        unreachable!("swap_out source changed while exclusively borrowed")
+                    };
+                    Ok(frame)
                 } else {
                     Err(MemoryError::SharedPage)
                 }
@@ -64,15 +68,17 @@ impl Frame {
         }
     }
 
-    /// This does not check the frame reference count.
+    /// 强制写入 swap，不检查共享引用数；返回的原驻留 frame 同样必须延迟释放。
     #[cfg(feature = "oom_handler")]
-    pub fn force_swap_out(&mut self) -> Result<usize, MemoryError> {
+    pub fn force_swap_out(&mut self) -> Result<Arc<FrameTracker>, MemoryError> {
         match self {
             Frame::InMemory(frame_ref) => {
                 let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
-                let swap_id = swap_tracker.0;
-                *self = Frame::SwappedOut(swap_tracker);
-                Ok(swap_id)
+                let old = core::mem::replace(self, Frame::SwappedOut(swap_tracker));
+                let Frame::InMemory(frame) = old else {
+                    unreachable!("force_swap_out source changed while exclusively borrowed")
+                };
+                Ok(frame)
             }
             _ => Err(MemoryError::NotInMemory),
         }
@@ -94,17 +100,20 @@ impl Frame {
         }
     }
 
+    /// 压缩驻留页并返回原 frame，供调用方跨越 PTE/TLB 提交边界持有。
     #[cfg(feature = "oom_handler")]
-    pub fn zip(&mut self) -> Result<usize, MemoryError> {
+    pub fn zip(&mut self) -> Result<Arc<FrameTracker>, MemoryError> {
         match self {
             Frame::InMemory(frame_ref) => {
                 if Arc::strong_count(frame_ref) == 1 {
                     if let Ok(zram_tracker) =
                         ZRAM_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())
                     {
-                        let zram_id = zram_tracker.0;
-                        *self = Frame::Compressed(zram_tracker);
-                        Ok(zram_id)
+                        let old = core::mem::replace(self, Frame::Compressed(zram_tracker));
+                        let Frame::InMemory(frame) = old else {
+                            unreachable!("zip source changed while exclusively borrowed")
+                        };
+                        Ok(frame)
                     } else {
                         Err(MemoryError::ZramIsFull)
                     }
@@ -338,6 +347,17 @@ impl VmPageStore {
             }
             None => None,
         }
+    }
+
+    /// 返回指定范围内第一个驻留页，用于无额外分配地逐页解除映射。
+    pub fn first_in_memory_vpn_in_range(
+        &self,
+        start: VirtPageNum,
+        end: VirtPageNum,
+    ) -> Option<VirtPageNum> {
+        self.frames
+            .range(start..end)
+            .find_map(|(vpn, frame)| matches!(frame, Frame::InMemory(_)).then_some(*vpn))
     }
 
     pub(super) fn frame_mut_if_present(

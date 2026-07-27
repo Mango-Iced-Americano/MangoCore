@@ -3,7 +3,7 @@ title: "MM 初始化与内核地址空间"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [mm, init, kernel-space, mapping]
 ---
 
@@ -227,7 +227,8 @@ MM 文档不把寄存器细节放在本页展开；架构相关页表实现和 T
 3. `frame_allocator::init_frame_allocator()` 的起始页来自 `ekernel`，不能覆盖内核镜像。
 4. 动态内核映射失败时必须回滚已映射页。
 5. `KERNEL_SPACE.lock().activate()` 后，后续内核代码依赖页表映射、TLB 和架构 MMU 状态一致。
-6. 修改 PTE 的底层实现必须配套 TLB 刷新；调用者使用 `block_and_ret_mut_no_flush()` 时必须自行在合适位置 flush。
+6. 内核 PTE 的安全接口必须由底层实现配套 TLB 刷新；用户页表的 raw/no-flush
+   原语只能由 `TlbBatch` 调用并统一提交。B16 尚未实现 kernel-global 远端 shootdown。
 
 内核地址空间和用户地址空间的区别决定了调试方向。内核段、物理内存 direct map、MMIO 和 trampoline 属于 `KERNEL_SPACE`；ELF、heap、mmap、用户栈、trap context 属于每个进程自己的 `AddressSpace`。驱动访问 MMIO 失败不应去查用户 VMA；用户态 page fault 也不应从 `KERNEL_SPACE` 的映射表里找原因。
 

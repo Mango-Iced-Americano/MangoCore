@@ -3,8 +3,8 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [mm, pagetable, tlb, sv39, loongarch64]
+last_update: 2026-07-27
+tags: [mm, pagetable, tlb, tlb-batch, sv39, loongarch64]
 ---
 
 # 页表抽象与 TLB 约束
@@ -27,13 +27,18 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 | 方法 | 语义 |
 |------|------|
 | `try_map(vpn, ppn, flags)` | 建立映射，失败返回 `MemoryError` |
+| `try_map_no_flush(vpn, ppn, flags)` | 建立映射但不刷新，只允许 `TlbBatch` 调用 |
 | `map(vpn, ppn, flags)` | 建立映射，失败时由实现处理 |
 | `map_identical(vpn, ppn, flags)` | 建立恒等映射 |
 | `unmap(vpn)` | 删除映射 |
+| `unmap_no_flush(vpn)` | 删除映射但不刷新，只允许 `TlbBatch` 调用 |
 | `translate(vpn)` | VPN 到 PPN |
 | `translate_va(va)` | VA 到 PA，保留页内偏移 |
 | `block_and_ret_mut(vpn)` | 撤销写权限并返回 PPN，带刷新 |
 | `block_and_ret_mut_no_flush(vpn)` | 撤销写权限并返回 PPN，不刷新 |
+| `set_ppn_no_flush()` / `set_pte_flags_no_flush()` | 修改 PPN/权限但不刷新，只允许 `TlbBatch` 调用 |
+| `set_dirty_bit_no_flush(vpn)` | 统一提交 LA64 软件 dirty fault 对 PTE 的修改 |
+| `flush_tlb_page(vpn)` | 刷新本 CPU 的指定虚拟页；架构可保守升级为全量刷新 |
 | `flush_tlb()` | 刷新当前页表相关 TLB |
 | `token()` | 返回架构页表 token |
 | `activate()` | 激活页表 |
@@ -94,16 +99,22 @@ bitflags! {
 
 `MapPermission::from_ph_flags()` 从 ELF program header flags 生成 `R/W/X/U` 权限。
 
-## 5. UserMapper 与 PageMapper
+## 5. UserMapper、TlbBatch 与 PageMapper
 
-`os/src/mm/mapper.rs` 提供通用 `PageMapper`，`os/src/mm/user_mapper.rs` 在其上增加用户页权限检查。
+`os/src/mm/user_mapper.rs` 在 `TlbBatch` 上增加用户页权限检查。
+`os/src/mm/mapper.rs` 中的 `PageMapper` 仍服务于内核页表，不再是用户 PTE
+的写入入口。
 
 ```
 Vma / page_fault
   └── UserMapper
-        └── PageMapper
-              └── PageTable trait
+        └── TlbBatch
+              └── PageTable raw/no-flush methods
                     └── Sv39PageTable / LAFlexPageTable
+
+KernelMapper
+  └── PageMapper
+        └── PageTable safe methods
 ```
 
 `UserMapper::map_user_page()` 要求 flags 包含 `MapPermission::U`：
@@ -120,29 +131,37 @@ fn check_user_flags(flags: MapPermission) -> MmResult<()> {
 
 需要映射 trap context 等非用户页时，代码使用 `map_privileged_user_page()`，它不会强制 `U` 标志。
 
-## 6. TLB 刷新责任
+## 6. TlbBatch 提交责任
 
-页表修改后，硬件可能继续使用旧 TLB 项。TLB 刷新责任分成两类：
+页表修改后，硬件可能继续使用旧 TLB 项。B16 将用户 PTE 写入收口为
+`TlbBatch`，不再由 VMA/缺页路径各自决定何时刷新。
 
-| 方法 | 刷新语义 |
+`TlbPublication` 描述地址空间的发布范围：
+
+| 状态 | B16 语义 |
 |------|----------|
-| `block_and_ret_mut()` | 撤销 W 后由实现刷新 |
-| `block_and_ret_mut_no_flush()` | 撤销 W 但不刷新，调用者必须之后刷新 |
-| `set_pte_flags()` | 修改 flags，具体实现必须保证 PTE 与 TLB 一致 |
-| `set_ppn()` | 修改物理页指向，具体实现必须保证 PTE 与 TLB 一致 |
-| `unmap()` | 删除映射后必须保证旧转换不可继续使用 |
+| `Unpublished` | 页表尚未被任务激活，batch 提交时无需刷新 |
+| `LocalOnly` | 用户任务仍固定 CPU0，batch 刷新当前 CPU |
+| `Published` | 可能被多 CPU 观察；远端 shootdown 尚未实现，构造 batch 即 fail-stop |
 
-在 fork 路径中，`Vma::map_from_existing_page_table()` 为减少刷新次数，使用 `block_and_ret_mut_no_flush()`：
+一次提交的固定顺序是：
 
-```rust
-let ppn = src_page_table.block_and_ret_mut_no_flush(vpn);
-parent_tlb_dirty |= ppn.is_some();
-if parent_tlb_dirty {
-    src_page_table.flush_tlb();
-}
-```
+1. 通过 raw/no-flush 原语修改 PTE，记录受影响 VPN；
+2. 若映射指向的 frame 将失去所有权，把 `Arc<FrameTracker>` 移入
+   `deferred_frames`；
+3. 单一 VPN 请求页级刷新，出现第二个不同 VPN 后升级为本核全量刷新；
+4. 刷新完成后才清空 `deferred_frames`；
+5. 显式 `commit()` 与 `Drop` 共用同一提交逻辑，`?`/提前返回不会漏 flush。
 
-这说明调用者必须在批量撤销父进程写权限后显式 flush，否则父进程可能继续通过旧 TLB 写共享页，破坏 COW。
+延迟队列无法扩容时，`defer_frame()` 会先提交当前小批次，再释放当前
+frame。这只损失批处理效率，不改变“先失效 TLB，后复用物理页”的安全顺序。
+
+在 fork 路径中，父、子页表各自持有一个 batch：父 batch 批量撤销私有可写页的
+W 权限，子 batch 建立共享 PPN 映射。子地址空间尚未发布，可以不刷新；父
+batch 必须提交，否则父进程可能继续通过旧 TLB 写共享页，破坏 CoW。
+
+内核页表路径仍使用 `PageTable` 的安全接口，由架构实现当场刷新；B16 没有
+实现 kernel-global 远端 shootdown。
 
 ## 7. COW 中的页表变化
 
@@ -202,32 +221,41 @@ if crate::task::current_user_token() != token {
 `AddressSpace::release_for_zombie()` 会调用：
 
 ```rust
-self.vmas.clear_no_hole();
+self.with_tlb_batch(|vmas, batch| vmas.unmap_all(batch))
+    .expect("zombie cleanup failed to clear a resident user PTE");
 self.locked_pages.clear();
 self.page_table.release_frames();
 ```
 
-该路径用于僵尸进程释放地址空间资源。等待接口只需要 pid、退出码等元数据，不再需要页表页和 VMA 页帧。
+该路径先撤销所有 resident PTE，由 batch 刷新并释放 VMA frame，最后才释放
+页表页。等待接口只需要 pid、退出码等元数据，不再需要地址空间。
 
 ## 12. 架构相关注意点
 
 | 架构 | 页表/TLB 注意点 |
 |------|-----------------|
-| rv64 | PTE 修改后依赖 `sfence.vma` 类刷新；用户异常入口会把 page fault 转给 `do_page_fault` |
-| la64 | PTE 修改后依赖 LoongArch64 TLB 失效指令；store/page modify fault 成功时可设置 dirty/write 相关状态 |
+| rv64 | LocalOnly 单页提交使用 `sfence.vma va, zero`，多页提交使用本 hart 全量 `sfence.vma` |
+| la64 | ASID 仍由 TCB 持有，页表对象无法安全指定目标 ASID；B16 的用户页提交保守执行本核全部非全局项失效 |
 
 上层文档统一称为 `tlb_invalidate` 或 `flush_tlb()`，不把架构指令混入通用 MM 逻辑。
 
 页表和 VMA 是两份必须保持一致的状态。VMA 说明“这段虚拟地址应该如何被访问”，页表说明“硬件当前如何翻译这个 VPN”。缺页、mprotect、munmap、fork CoW 都会同时影响二者中的至少一份：只改 VMA 不改已存在 PTE，会让硬件继续按旧权限运行；只改 PTE 不改 VMA，下一次 fault 或 proc maps/mincore 会看到错误语义。
 
-TLB 是第三份缓存状态。即使页表内存已经改对，CPU 仍可能使用旧 TLB 项。因此批量撤销 fork 写权限使用 `block_and_ret_mut_no_flush()` 后必须统一 `flush_tlb()`；单页 `set_ppn/set_pte_flags/unmap` 则依赖页表实现内部刷新。新增页表后端时，TLB 契约要和 PTE 修改 API 一起检查。
+TLB 是第三份缓存状态。即使页表内存已经改对，CPU 仍可能使用旧 TLB 项；
+而 unmap/CoW 如果提前释放 frame，旧 TLB 还会把已复用的物理页当成旧映射访问。
+因此用户 PTE 修改必须经过 `TlbBatch`，并把旧 frame 保留到提交之后。
+
+B16 只完成 CPU0 LocalOnly 语义。远端 active CPU mask、generation、IPI/RFENCE、ack
+等待与 ack 前 frame 不复用仍属于 Phase 4；在这些机制完成前，用户任务不得
+跨 CPU 运行。
 
 ## 13. 调试核对点
 
 | 现象 | 重点检查 |
 |------|----------|
-| fork 后父进程写入没有触发 COW | `block_and_ret_mut_no_flush()` 后是否执行 `flush_tlb()` |
-| `mprotect` 后权限仍旧生效 | `set_pte_flags()` 与 TLB 刷新实现 |
+| fork 后父进程写入没有触发 COW | 父 `TlbBatch` 是否记录撤销 W 并成功提交 |
+| `mprotect` 后权限仍旧生效 | `protect_range()` 是否经 batch 修改 PTE，本地刷新是否执行 |
 | 用户指针明明在 VMA 内仍 EFAULT | fault-in 后 `user_access_ok()` 是否失败 |
 | MAP_SHARED 文件写不落到 page cache | 首次读映射是否错误保留 W，绕过 shared write fault |
-| zombie 释放后页表泄露 | `release_for_zombie()` 是否调用 `release_frames()` |
+| unmap 后出现旧页数据或 UAF | 是否先撤销 PTE，再 `defer_frame()`，最后提交 batch |
+| zombie 释放后页表泄露 | `unmap_all()` 提交后是否调用 `release_frames()` |

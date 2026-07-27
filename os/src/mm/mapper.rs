@@ -1,12 +1,13 @@
 //! 页表修改的最小封装层。
 //!
-//! `PageMapper` 只负责把通用 VMA/地址空间逻辑转发到具体架构的
-//! `PageTable` 实现，并统一把页表错误映射成 `MemoryError`。
+//! `PageMapper` 把内核映射操作转发到具体架构的 `PageTable` 实现，
+//! 并统一把页表错误映射成 `MemoryError`。用户 PTE 写入不经过本层，而是
+//! 由 `UserMapper` 通过 `TlbBatch` 提交。
 //!
 //! # TLB
 //!
-//! 任何会修改 PTE 的方法最终都依赖 `PageTable` 实现完成必要的 TLB
-//! 刷新。调用者不应绕过本层直接修改页表项，除非同时维护相同的刷新契约。
+//! 任何会修改内核 PTE 的方法最终都依赖 `PageTable` 实现完成必要的
+//! 本地 TLB 刷新。B16 尚未为本层接入 kernel-global 远端 shootdown。
 
 use super::{MapPermission, MemoryError, MmResult, PageTable, PhysPageNum, VirtPageNum};
 

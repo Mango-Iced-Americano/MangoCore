@@ -289,7 +289,13 @@ impl ProcessControlBlock {
             .and_then(|parent| parent.upgrade())
             .map(|parent| parent.pid)
             .unwrap_or(0);
-        let user_token = vm.lock().token();
+        let user_token = {
+            let mut vm = vm.lock();
+            // PCB 是用户地址空间第一次进入调度可见域的发布点。B16 仍将
+            // 用户任务固定在 CPU0，因此这里只进入 LocalOnly，而不是 SMP Published。
+            vm.publish_local();
+            vm.token()
+        };
         let pcb = Self {
             pid,
             leader_tid,
@@ -490,7 +496,8 @@ impl ProcessControlBlock {
     ///
     /// `execve` 使用该接口提交新 `AddressSpace`。提交时会清空 trap context 槽位缓存、
     /// 更新无锁 user token hint，并刷新当前 CPU 上缓存的当前进程 token。
-    pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
+    pub fn replace_vm(&self, mut vm: AddressSpace<PageTableImpl>) {
+        vm.publish_local();
         let token = vm.token();
         self.trap_context_cache.lock().clear();
         self.inner.lock().vm = Arc::new(Mutex::new(vm));

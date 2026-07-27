@@ -86,7 +86,7 @@ related_docs:
 | 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | PTE 修改只刷新本地 TLB | 远端 CPU 继续使用旧权限、旧物理页 |
+| MM/TLB | 用户 PTE 写入已收口到 `TlbBatch`；CPU0-only 阶段完成本地刷新和 frame 延迟释放 | 远端 active mask、generation、shootdown/ack 未实现，用户 MM 仍不得跨 CPU 运行 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -515,7 +515,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15）
+#### 当前进度（SMP-P2.5-B15/B16）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
@@ -538,8 +538,24 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   2026-07-27 Work Log 与 evidence；
 - 旧 nice-aware `pop_fair_ready()` 仍在全局 `TASK_MANAGER` 下读取 `task.inner`，
   当前没有反向同时持锁路径，但这是 Phase 3 必须消除的已登记技术债；
-- 本批尚未拆分 per-CPU runqueue/current slot，任务 owner 仍固定 CPU0；也尚未开始
-  本地 `TlbBatch` 收口。因此 Phase 2.5 状态为 `partial`，下一包进入本地 TLB batch。
+- B16 将用户页表的 map/unmap、权限、PPN 和 dirty 修改拆为
+  raw/no-flush 原语，并全部收口到 `TlbBatch`；`UserMapper` 只操作 batch，
+  `PageMapper` 保留给内核页表路径；
+- `TlbPublication` 显式区分 `Unpublished/LocalOnly/Published`。尚未发布的页表
+  不刷新，CPU0-only 地址空间在 batch 提交时本地刷新；远端协议完成前
+  `Published` 会在 PTE 写入前 fail-stop，不会把 local flush 误表述为 shootdown；
+- 单一 VPN 修改在 RV64 使用页级 `sfence.vma`，多 VPN 升级为本核全量刷新。
+  LA64 的 ASID 仍归 TCB，页表对象无法安全得知目标 ASID，因此本阶段保守清除
+  本核全部非全局 TLB 项；
+- unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再把旧
+  `FrameTracker` 交给 batch；batch 先 flush，然后释放 deferred frames。错误返回由
+  `Drop` 兜底提交，低内存无法扩容延迟队列时则先结束当前小批次；
+- 双架构 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，新用例通过
+  生产 API 覆盖 map、fault-in、mprotect 降权、munmap 和同 VPN 重新映射。
+  该证据只验收本地提交，不外推远端 TLB 一致性；
+- Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成，
+  `SMP-P2.5-B16=pass`。任务 owner 仍固定 CPU0；下一阶段进入 per-CPU
+  runqueue/current slot，在 Phase 4 远端 shootdown 完成前不解除用户任务 CPU0 affinity。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -579,9 +595,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 #### 实施内容
 
-- 页表 trait 增加明确的 raw/no-flush 内部操作；对已发布页表的公开修改只能通过 TlbBatch；
-- 覆盖 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、filemap、exec、
-  内核栈映射和内核全局映射；
+- 在 B16 已完成的 raw/no-flush + `TlbBatch` 本地边界上增加 MM ID、
+  active CPU mask、generation、目标快照和远端 ack；将 `Published` 从 fail-stop
+  替换为真正的 shootdown 提交；
+- B16 已覆盖用户 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、
+  filemap 和 exec；Phase 4 需将它们升级为远端语义，并收口内核栈映射与
+  内核全局映射；
 - RISC-V 实现 SBI RFENCE range/all flush，并提供 IPI fallback；
 - LoongArch 实现 shootdown slot、generation、ack 和 ASID/epoch；
 - shootdown slot 使用固定数组和原子状态，IPI handler 不分配内存、不获取 MM 锁；
