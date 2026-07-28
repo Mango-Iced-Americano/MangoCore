@@ -267,12 +267,17 @@ pub struct KernelTest {
 因此 `KTEST=all` 不会因 SMP STOP 提前破坏后续 MM/FS 测试，
 `KREPEAT>1` 也不会尝试再次唤醒已经停止的 AP。
 
-B20 的 SMP 组在 `KREPEAT=2` 时为 25 项：12 个普通用例各执行两轮，STOP terminal
+B21 的 SMP 组在 `KREPEAT=2` 时为 27 项：13 个普通用例各执行两轮，STOP terminal
 只执行一次。除既有 online/idle/IPI/timer/current owner 外，还必须看到两轮
 `configured_cpus_enter_scheduler`、`remote_kernel_tasks_run_on_target_cpus` 和
 `blocked_kernel_tasks_wake_on_last_cpu` 通过。后者让每个 AP 任务进入真实
 Completion/WaitQueue，CPU0 在确认所有任务均为 `Blocked` 且离开 current/runqueue 后
 一次批量 complete；恢复任务必须仍由原 AP 的 `Running(cpu)` current 唯一拥有并正常退出。
+
+`kernel_stack_reclaim_waits_for_shootdown` 每轮创建 129 个 CPU1 kernel task，强制越过
+128 项 stack mapping cache；它必须观察所有 AP 的 TLB ack、确认 TCB 强引用消失，并以
+第二轮任务验证回收 slot 的重新映射和执行。shootdown 等待会临时开中断，因此 ktest 在
+退出该用例前显式经过生产 timer 安全点，避免把已静默的 one-shot 泄漏给下一轮 timer 测试。
 
 ### TAP 输出格式
 

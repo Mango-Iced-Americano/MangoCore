@@ -13,6 +13,8 @@ pub mod syscall_id;
 pub mod time;
 pub mod trap;
 
+pub use kern_stack::reclaim_retired_kernel_stacks;
+
 #[cfg(feature = "board_rvqemu")]
 #[path = "../../platform/riscv/qemu.rs"]
 pub mod rv_board;
@@ -36,6 +38,14 @@ pub type PageTableImpl = sv39::Sv39PageTable;
 pub type TrapImpl = riscv::register::scause::Trap;
 pub type InterruptImpl = riscv::register::scause::Interrupt;
 pub type ExceptionImpl = riscv::register::scause::Exception;
+
+/// 清除当前 hart 能观察到的全部内核地址翻译。
+///
+/// 不带地址和 ASID 的 `sfence.vma` 同时覆盖 global 与 non-global 项，适合
+/// kernel-global 动态映射撤销后的保守同步。
+pub fn kernel_tlb_invalidate() {
+    sv39::tlb_invalidate();
+}
 
 pub fn bootstrap_init(cpu_id: usize) {
     if cpu_id != crate::smp::BOOT_CPU_ID {

@@ -210,8 +210,10 @@ exit_current_and_run_next()
 
 CPU0 调度循环回到 idle 后通过 `take_zombie_tasks(64)` 批量取出并 drop。AP 的
 kernel-only 任务切回本地 idle 后，也会在释放 processor 锁后把 TCB 交给同一个受锁
-zombie registry；真正回收仍由 CPU0 执行。focused test 额外保留曾在 AP 使用的 TCB，
-直到终态 STOP 后关机，避免通用 kernel-global unmap shootdown 完成前复用该栈地址。
+zombie registry；真正回收仍由 CPU0 执行。B21 后，TCB 析构只把缓存溢出的内核栈 slot
+登记到固定退休队列；CPU0 下一次 idle 安全点在无普通锁状态下撤销映射、等待全核 TLB
+ack、释放 frame，再归还 slot。曾在 AP 使用的 TCB 不再由测试保留到关机，栈地址可以在
+协议完成后真实复用。
 
 ## 10. 上下文切换
 

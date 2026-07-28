@@ -11,12 +11,16 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
 
-const KSTACK_CACHE_LIMIT: usize = 128;
-
 lazy_static! {
     static ref KSTACK_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
     static ref KSTACK_CACHE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 }
+
+/// 析构上下文可能仍持有进程锁，因此这里只登记待退休 slot；真正的
+/// PTE 修改与跨核等待由无锁调度安全点执行。
+static KSTACK_RETIRE_QUEUE: Mutex<
+    crate::hal::KernelStackRetireQueue<{ super::config::SYSTEM_TASK_LIMIT }>,
+> = Mutex::new(crate::hal::KernelStackRetireQueue::new());
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
@@ -46,21 +50,34 @@ pub fn kstack_alloc() -> KernelStack {
 impl Drop for KernelStack {
     fn drop(&mut self) {
         let mut cache = KSTACK_CACHE.lock();
-        if cache.len() < KSTACK_CACHE_LIMIT {
+        if cache.len() < crate::hal::KERNEL_STACK_CACHE_LIMIT {
             cache.push(self.0);
             crate::task::perf::record_kstack_drop(true);
             return;
         }
         drop(cache);
         crate::task::perf::record_kstack_drop(false);
-        let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
-        let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        KERNEL_SPACE
-            .lock()
-            .remove_area_with_start_vpn(kernel_stack_bottom_va.into())
-            .unwrap();
-        KSTACK_ALLOCATOR.lock().dealloc(self.0)
+        KSTACK_RETIRE_QUEUE.lock().push(self.0);
     }
+}
+
+/// 在未持有普通锁的调度安全点退休已溢出缓存的内核栈。
+pub fn reclaim_retired_kernel_stacks(limit: usize) -> usize {
+    let mut reclaimed = 0;
+    while reclaimed < limit {
+        let next = KSTACK_RETIRE_QUEUE.lock().pop();
+        let Some(kstack_id) = next else {
+            break;
+        };
+        let (kernel_stack_bottom, _) = kernel_stack_position(kstack_id);
+        // `kernel_stack_bottom` 的单位是 byte address；必须先转 VirtAddr 再取 VPN。
+        // 直接 `usize.into()` 会把原始字节地址当作页号，导致查不到登记的映射。
+        let start_vpn = VirtAddr::from(kernel_stack_bottom).floor();
+        crate::mm::remove_kernel_mapping_synchronized(start_vpn).unwrap();
+        KSTACK_ALLOCATOR.lock().dealloc(kstack_id);
+        reclaimed += 1;
+    }
+    reclaimed
 }
 
 impl KernelStack {

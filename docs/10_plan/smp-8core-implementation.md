@@ -86,7 +86,7 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | 用户 PTE 已收口到 `TlbBatch`；新增 kernel stack 可在远程首次使用前做目标全刷新/ack | 通用 active mask、range shootdown、unmap 延迟释放未实现，用户 MM 仍不得跨 CPU 运行 |
+| MM/TLB | 用户 PTE 已收口到 `TlbBatch`；动态 kernel-global 映射支持发布与全 CPU 撤映射/延迟释放 | 用户 MM active mask、generation/range shootdown 与 MM-owned ASID 未实现，用户任务仍不得跨 CPU 运行 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -516,7 +516,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19/B20）
+#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19/B20/B21）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
@@ -606,10 +606,21 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B20 focused 用例让每个 AP 的 kernel-only 任务同时进入真实 Completion/WaitQueue，CPU0
   确认全部 `Blocked` 后一次批量唤醒。RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=2`
   均为 25/25 PASS，双架构 normal build 退出 0，四项源码指纹前后一致；
+- B21 将 kernel-global mapping sync 从“首次远程发布”扩展为安全撤映射。PTE 在
+  `KERNEL_SPACE` 锁内以 no-flush 原语清除，mapping frame 跨锁保留；释放锁后对所有
+  online CPU 做全量失效并等待 ack，最后才释放 frame。handler 固定按
+  request-before-flush-before-ack 执行，撤映射可接受终态 stopped ack，发布路径不可接受；
+- 内核栈析构不再跨进程锁等待 shootdown：缓存溢出的 slot 进入固定退休队列，由 CPU0
+  idle 安全点按“摘映射 → 全核 ack → frame 释放 → slot dealloc”回收。focused test 以
+  两轮 129 个 CPU1 任务强制 cache overflow、TCB 析构和 slot 重用；曾在 AP 使用的 TCB
+  不再保留到关机；
+- B21 最终冻结源码下，RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 27/27 PASS。
+  双架构 `mask=0x003` 初赛门禁也通过：RV64 raw/semantic 312/314，LA64
+  raw/semantic 308/314，失败身份均为既有允许集合；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
   Per-CPU current/idle/RunQueue、scheduler-ready、受控 AP kernel-only 执行与远程阻塞
   唤醒闭环。通用目标选择仍待后续批次；Phase 4 远端 MM shootdown 完成前不解除用户
-  任务 CPU0 affinity，也不回收/复用 AP 使用过的动态栈映射。
+  任务 CPU0 affinity。B21 完成的是共享内核页表撤映射，不外推到用户 MM。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -619,8 +630,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   迁到 Per-CPU，并让可变身份字段改读权威对象；B18 已删除全局 ready queue；
   B19 已让 AP 在 scheduler-ready 后进入精简本地调度循环；B20 已让受控 AP 任务在
   WaitQueue 阻塞后通过锁外 `RESCHEDULE` 回到最近运行 CPU；
-- 每 CPU 使用本地 Processor、RunQueue 和 idle context；B19 的 AP zombie 先交给
-  受锁全局 registry，由 CPU0 回收，Per-CPU 回收队列仍待后续批次；
+- 每 CPU 使用本地 Processor、RunQueue 和 idle context；AP zombie 先交给受锁全局
+  registry，由 CPU0 回收。B21 的固定内核栈退休队列只处理映射/slot 生命周期，不等同于
+  完整的 Per-CPU zombie 回收队列；
 - 本地选择继续保留 FIFO fast path 和现有 nice-aware 选择；
 - 新任务或被唤醒任务的目标 CPU 选择规则固定为：
   - last_cpu 在线、在 affinity 内且负载不超过最小负载 +1 时优先复用；
@@ -655,9 +667,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - 在 B16 已完成的 raw/no-flush + `TlbBatch` 本地边界上增加 MM ID、
   active CPU mask、generation、目标快照和远端 ack；将 `Published` 从 fail-stop
   替换为真正的 shootdown 提交；
-- B16 已覆盖用户 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、
-  filemap 和 exec；Phase 4 需将它们升级为远端语义，并收口内核栈映射与
-  内核全局映射；
+- B16 已覆盖用户 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、filemap 和
+  exec；Phase 4 需将用户路径升级为远端语义。B21 已单独收口动态内核栈与临时 ELF
+  kernel-global 映射的全 CPU 撤销和延迟释放；
 - RISC-V 实现 SBI RFENCE range/all flush，并提供 IPI fallback；
 - LoongArch 实现 shootdown slot、generation、ack 和 ASID/epoch；
 - shootdown slot 使用固定数组和原子状态，IPI handler 不分配内存、不获取 MM 锁；

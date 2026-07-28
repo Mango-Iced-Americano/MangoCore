@@ -376,15 +376,21 @@ impl<T: PageTable> KernelSpace<T> {
         ))
     }
 
-    pub fn remove_area_with_start_vpn(
+    /// 从共享内核页表摘下映射并清除 PTE，但继续持有映射内的全部 frame。
+    ///
+    /// 返回值绝不能在跨核 shootdown 完成前析构。该函数本身只在下方统一的
+    /// `remove_kernel_mapping_synchronized()` 中使用，避免普通调用方绕过协议。
+    fn detach_area_with_start_vpn(
         &mut self,
         start_vpn: VirtPageNum,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<KernelMapping, MemoryError> {
         if let Some(mapping) = self.kernel_mappings.remove_with_start(start_vpn) {
             for vpn in mapping.vpn_range {
-                KernelMapper::new(&mut self.page_table).unmap_page_if_mapped(vpn)?;
+                KernelMapper::new(&mut self.page_table)
+                    .unmap_page_no_flush(vpn)
+                    .expect("tracked kernel mapping lost its PTE before detach");
             }
-            Ok(())
+            Ok(mapping)
         } else {
             Err(MemoryError::AreaNotFound)
         }
@@ -416,6 +422,30 @@ impl<T: PageTable> KernelSpace<T> {
             let _ = KernelMapper::new(&mut self.page_table).unmap_page_if_mapped(vpn);
         }
     }
+}
+
+/// 安全撤销一段所有 CPU 共享的动态内核映射。
+///
+/// 资源释放顺序是本接口的核心契约：PTE 在 `KERNEL_SPACE` 锁内清除；锁释放后
+/// 才等待本地与远端 TLB 同步；保存 frame 强引用的 `retired` 最后才析构。
+/// 因此 shootdown 失败会 fail-stop，而不会把仍可能被旧 TLB 命中的物理页交回
+/// frame allocator。
+pub(crate) fn remove_kernel_mapping_synchronized(
+    start_vpn: VirtPageNum,
+) -> Result<(), MemoryError> {
+    let retired = {
+        let mut kernel_space = KERNEL_SPACE.lock();
+        kernel_space.detach_area_with_start_vpn(start_vpn)?
+    };
+
+    crate::smp::synchronize_kernel_mapping_all().unwrap_or_else(|error| {
+        panic!(
+            "failed to retire kernel mapping at {:?}: {:?}",
+            start_vpn, error
+        )
+    });
+    drop(retired);
+    Ok(())
 }
 
 #[allow(unused)]

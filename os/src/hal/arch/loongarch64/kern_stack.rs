@@ -12,8 +12,6 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
 
-const KSTACK_CACHE_LIMIT: usize = 128;
-
 #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
 static BOARD_FIRST_KSTACK_PROBE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -22,6 +20,12 @@ lazy_static! {
     static ref KSTACK_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
     static ref KSTACK_CACHE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 }
+
+/// TCB 析构可能发生在进程锁保护区内；队列把跨核 shootdown 延后到
+/// 明确的无锁调度安全点，slot 在此之前不会归还分配器。
+static KSTACK_RETIRE_QUEUE: Mutex<
+    crate::hal::KernelStackRetireQueue<{ super::config::SYSTEM_TASK_LIMIT }>,
+> = Mutex::new(crate::hal::KernelStackRetireQueue::new());
 
 /// Return (bottom, top) of a kernel stack in kernel virtual space.
 pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
@@ -117,21 +121,34 @@ impl KernelStack {
 impl Drop for KernelStack {
     fn drop(&mut self) {
         let mut cache = KSTACK_CACHE.lock();
-        if cache.len() < KSTACK_CACHE_LIMIT {
+        if cache.len() < crate::hal::KERNEL_STACK_CACHE_LIMIT {
             cache.push(self.0);
             crate::task::perf::record_kstack_drop(true);
             return;
         }
         drop(cache);
         crate::task::perf::record_kstack_drop(false);
-        let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
-        let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        KERNEL_SPACE
-            .lock()
-            .remove_area_with_start_vpn(kernel_stack_bottom_va.into())
-            .unwrap();
-        KSTACK_ALLOCATOR.lock().dealloc(self.0 + 1)
+        KSTACK_RETIRE_QUEUE.lock().push(self.0);
     }
+}
+
+/// 在调用者不持有普通锁时，完成 PTE 撤销、全 CPU shootdown 和 slot 回收。
+pub fn reclaim_retired_kernel_stacks(limit: usize) -> usize {
+    let mut reclaimed = 0;
+    while reclaimed < limit {
+        let next = KSTACK_RETIRE_QUEUE.lock().pop();
+        let Some(kstack_id) = next else {
+            break;
+        };
+        let (kernel_stack_bottom, _) = kernel_stack_position(kstack_id);
+        // `kernel_stack_bottom` 是字节地址，先显式归一成 VPN，避免 usize 的
+        // `From` 实现把它原样解释成页号。
+        let start_vpn = VirtAddr::from(kernel_stack_bottom).floor();
+        crate::mm::remove_kernel_mapping_synchronized(start_vpn).unwrap();
+        KSTACK_ALLOCATOR.lock().dealloc(kstack_id + 1);
+        reclaimed += 1;
+    }
+    reclaimed
 }
 
 /// 根据线程id计算trap context的地址

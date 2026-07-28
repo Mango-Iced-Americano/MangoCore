@@ -52,6 +52,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | RV64 trap-return 半恢复现场竞态 | 2026-07-28 | GPT/Codex, DeepSeek | 用户 ELF/loader 反汇编、CSR 指令级溯源、双架构 Arc 生命周期复核与 Docker/QEMU 验证 | 统一 `SPP/SIE/SPIE` 返回契约并修复 noreturn Arc 泄漏；RV64 preliminary 312/314、LA64 SMP ktest 10/10 PASS |
 | SMP AP 本地调度闭环 | 2026-07-28 | GPT/Codex, DeepSeek | scheduler-ready、AP 页表激活、远程 kernel stack 发布和双架构 8 核验证 | AP 进入本地 scheduler；定位并修复未安装 CPU-local 页表根导致的首次 dispatch 卡死；双架构 23/23 PASS |
 | SMP 远程阻塞唤醒 | 2026-07-28 | GPT/Codex, DeepSeek | `last_cpu` 语义、Blocking/Blocked 竞态、批量 wake 锁序与 Docker/QEMU 验证 | AP kernel-only 任务经真实 Completion/WaitQueue 阻塞后回原 CPU；双架构 25/25 PASS |
+| SMP kernel-global 撤映射与栈回收 | 2026-07-28 | GPT/Codex, DeepSeek | 全核 TLB sequence/ack、析构延迟回收、双架构 8 核 focused 与初赛回归 | 删除 AP TCB 永久保留 workaround；双架构 27/27 PASS，初赛 RV64 312/314、LA64 308/314，失败集合未扩大 |
 
 ## 4. 详细使用场景
 
@@ -389,6 +390,31 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 25/25 PASS。每轮 7 个 AP 任务经真实
   Completion/WaitQueue 阻塞后回原 CPU，terminal STOP 通过，受测源码无 mutation。
 
+### Case 18: SMP kernel-global 撤映射与内核栈延迟回收
+
+- Evidence: `docs/Work_Log/2026-07-28.md`、
+  `docs/Work_Log/evidence/2026-07-28/smp-b21-kernel-mapping-retirement-summary.md`；原始
+  DeepSeek 请求、模型输出和 Docker/QEMU 日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责协议设计、源码实现、并发推理、失败归因与最终裁决；DeepSeek
+  负责冻结源码只读审查、串行 Docker 验证、初赛日志计分和 failure multiset 独立复核。
+- Problem: 动态 kernel stack 只能在目标 CPU 使用前同步“新增映射”，TCB 析构时却仍会
+  本地撤映射并立即释放 frame/slot。远端 CPU 可能保留旧 TLB，且 `Drop` 不能安全地持 MM
+  锁等待 IPI ack，因此 B19/B20 只能永久保留 AP 测试 TCB。
+- Human action: 将撤映射拆为“锁内清 PTE 并保留 frame → 锁外全核 flush/ack → 释放 frame
+  与 slot”；`KernelStack::drop` 只向固定容量、无堆退休队列提交 slot，CPU0 idle 安全点再
+  批量回收。handler 固定为 request snapshot → full invalidate → Release ack，并区分
+  publish 不接受 STOP 与 unmap 可接受 STOP 的语义。
+- AI adjudication: 采纳 DeepSeek 关于 STOP race、等待时 IRQ 可达性和 LA64 global TLB
+  失效范围的风险提示；拒绝在 MM 同步层直接执行 deferred timer callback，因为这会把
+  timer/scheduler 安全点反向耦合进 MM。也拒绝把首轮 `AreaNotFound` 归因于重复入队，真实
+  根因是把字节地址直接转成 VPN；最终审查中“init ELF 清理发生于 AP 上线前”的描述也与
+  当前启动顺序不符，不作为证明。
+- Verification: RV64/LA64 normal kernel build 均 PASS；两架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 27/27 PASS。新用例连续两轮各创建 129 个 AP
+  kernel-only 任务，真实溢出 128 项 stack cache，验证全部 AP ack、TCB 析构、frame/slot
+  回收及同 VA 再映射。初赛回归为 RV64 312/314、LA64 308/314，均精确匹配既有允许失败
+  集合；它只证明 8 核 online 与 CPU0 普通用户路径未退化，不证明用户 MM、FS 或网络跨核。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -448,6 +474,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b18-runqueue-summary.md` | SMP Per-CPU RunQueue | 记录 DeepSeek 冻结审查与双架构 8 核 Docker 门禁、GPT/Codex 锁序裁决、19/19 PASS 和 AP 调度 NOT RUN 边界 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b19-ap-scheduler-summary.md` | SMP AP 本地调度闭环 | 记录 DeepSeek 对首次 dispatch 卡死的页表根定因、GPT/Codex 映射发布协议裁决、双架构 8 核 23/23 PASS 与用户任务仍固定 CPU0 的边界 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b20-remote-wake-summary.md` | SMP 远程 blocked wake | 记录 `last_cpu`、批量 wake 锁外 IPI、DeepSeek 机械验证与人工裁决、双架构 8 核 25/25 PASS 及用户迁移 NOT RUN 边界 |
+| `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b21-kernel-mapping-retirement-summary.md` | SMP kernel-global 撤映射与栈回收 | 记录全核 TLB sequence/ack、固定退休队列、安全点回收、DeepSeek 建议采纳/拒绝边界、双架构 27/27 与初赛非回归结果 |
 
 ## 9. 交互记录与留痕方式
 

@@ -937,6 +937,8 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 | QEMU 串口超时截断 tee | 用 `docker exec -d ... > /tmp/qemu_out.log` + `sleep` + `docker cp` |
 | `perf_diag` feature 需显式开启 | `EXTRA_FEATURES=perf_diag` 传给 kernel build；`make rv64-run` 不认 |
 | drift_window 输出被自身 write() 污染 | `drift_snapshot()` 的 `write(1, ...)` 被计入 post-snapshot 计数器 |
+| here-doc 判分器被 QEMU 当作串口输入 | QEMU/make run 显式 `</dev/null`，不要与后续 judge 共用 stdin |
+| 直接调用架构 Makefile 丢失统一工具链环境 | 测试 runner 走根 Make facade；不要绕过其派生 `RUSTUP_HOME/CARGO_HOME` 合同 |
 
 ## 测试证据纪律
 

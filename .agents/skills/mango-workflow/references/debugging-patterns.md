@@ -172,6 +172,49 @@
   均已释放，再从另一 CPU 经生产 WaitQueue 批量唤醒；验证它回到预期 CPU、只运行一次，
   并在 terminal STOP 前清空 current/runqueue。
 
+### TLB sequence ack 必须证明“本轮失效动作发生在本轮请求之后”
+
+- **危险顺序**: handler 先 flush，再读取 request sequence 并写 ack。若新请求恰好在旧 flush
+  之后发布，handler 会用旧失效动作确认新 sequence；发送方看到 ack 到齐后释放 frame，
+  目标 CPU 却仍可能保留新请求所针对的旧翻译。
+- **固定顺序**: 发送方先 Release/AcqRel 发布 request，再发布 mailbox reason；handler 先
+  Acquire 快照 request，随后执行架构 TLB invalidate，最后 Release 写 ack。ack 的含义必须是
+  “我在观察到至少该 sequence 后完成了失效”，而不仅是“我最近做过一次 flush”。
+- **合并 reason bit**: 多个请求可以合并为一次 handler，但 handler 应确认自己快照到的最新
+  sequence，发送方用单调比较等待。sequence wrap 必须显式防御，不能静默把 0 当正常轮次。
+- **相关文件**: `os/src/smp.rs`, `os/src/hal/arch/{riscv,loongarch64}/mod.rs`
+
+### 不要在 `Drop` 中等待跨核 ack：析构只提交退休，安全点完成回收
+
+- **危险模式**: 资源析构时直接获取页表锁、发送 IPI、等待远端 ack，再释放 frame。Rust 的
+  隐式 `Drop` 可能发生在任意容器替换或锁保护区内，调用者很难证明全局锁序；若资源还是
+  当前 kernel stack，还会形成栈自毁。
+- **固定模式**: `Drop` 只把资源标识提交到固定容量、无堆、短临界区的退休队列；CPU 已切回
+  idle 栈且未持普通锁的安全点执行“清 PTE 并保留 frame → 释放 MM 锁 → 全核 flush/ack →
+  释放 frame → 归还虚拟 slot”。队列锁不得跨 MM 锁或 ack 等待。
+- **地址类型陷阱**: kernel stack allocator 常返回字节地址，而撤映射接口接收 VPN newtype；
+  必须显式 `VirtAddr::from(byte_addr).floor()`，不要依赖 `usize.into()` 猜测单位。
+- **相关文件**: `os/src/hal/mod.rs`, `os/src/hal/arch/*/kern_stack.rs`,
+  `os/src/mm/kernel_space.rs`
+
+### 临时开 IRQ 的同步等待可能截获 one-shot，回调仍必须留在原安全点
+
+- **现象**: 为避免双向 shootdown 死锁，等待 ack 时临时开放本地 IRQ；focused 协议用例通过，
+  但紧随其后的 timer 用例超时。硬件 timer 已在等待窗口触发，handler 只发布 deferred pending，
+  而特殊 ktest runner 没有经过普通 trap-return 去消费它。
+- **错误修复**: 在 MM/TLB 同步层直接运行 timer callback 或调度器工作。这样会让一个底层
+  内存一致性原语获得跨子系统副作用，也可能在调用者未声明的锁/生命周期上下文切换任务。
+- **正确修复**: 保持 IRQ handler 只发布 pending；生产调用链返回原有 trap/scheduler 安全点。
+  若测试 harness 绕过该路径，测试闭环应显式调用同一个生产安全点入口，而不是复制回调逻辑。
+- **相关文件**: `os/src/smp.rs`, `os/src/task/processor.rs`, `os/src/kernel_tests/smp.rs`
+
+### 委托只读审查必须冻结受测源码
+
+- **现象**: 模型报告本身完整、进程 exit 0，但包装器发现审查前后 source fingerprint 不同。
+- **规则**: 这种报告只能作为风险线索，不能作为当前 patch 的独立验收证据。设计探索可以与
+  实现并行；声称“最终只读审查”时必须冻结源码，记录 HEAD、status hash 和 tracked diff hash，
+  并由主 Agent 对模型结论逐条裁决，不能只转发 `PASS`。
+
 ### RISC-V MTTCG 下不能把 OpenSBI Boot HART 写死为 hart0
 
 - **现象**: `-smp 2` 时内核正常，扩到 4/8 核后只看到 OpenSBI banner，

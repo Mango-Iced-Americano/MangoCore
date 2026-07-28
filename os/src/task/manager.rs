@@ -181,6 +181,14 @@ pub fn has_zombie_queue_tasks_fast() -> bool {
     has_zombie_queue_tasks()
 }
 
+/// 返回专用 zombie 回收队列的无锁近似长度。
+///
+/// 精确取出仍必须经过 `TASK_MANAGER` 锁；该值只用于调度诊断以及等待 idle
+/// 已完成 current→zombie 所有权交接，不能据此直接释放任何 TCB。
+pub(crate) fn zombie_queue_count_fast() -> usize {
+    ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Acquire)
+}
+
 /// 全局等待、回收与定时器 registry。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]

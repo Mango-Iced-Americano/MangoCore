@@ -68,6 +68,14 @@ impl<'a, T: PageTable> KernelMapper<'a, T> {
         self.mapper.unmap_if_mapped(vpn)
     }
 
+    /// 清除单个内核 PTE，但把 TLB 提交责任留给上层同步协议。
+    ///
+    /// 该入口只允许在 `KERNEL_SPACE` 锁内使用；调用者还必须持有被撤映射
+    /// frame，直到所有可能观察该内核页表的 CPU 完成 shootdown ack。
+    pub(super) fn unmap_page_no_flush(&mut self, vpn: VirtPageNum) -> MmResult<()> {
+        self.mapper.unmap_no_flush(vpn)
+    }
+
     /// 清除内核映射的 dirty 位。
     pub(super) fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> MmResult<()> {
         self.mapper.clear_dirty_bit(vpn)

@@ -77,6 +77,18 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
         Ok(true)
     }
 
+    /// 清除一个必须存在的 PTE，不执行本地 TLB 刷新。
+    ///
+    /// 仅供持有延迟释放资源的 batch/shootdown 协议使用；普通映射调用方应
+    /// 继续使用 [`Self::unmap`] 或 [`Self::unmap_if_mapped`]。
+    pub(super) fn unmap_no_flush(&mut self, vpn: VirtPageNum) -> MmResult<()> {
+        if !self.page_table.is_mapped(vpn) {
+            return Err(MemoryError::NotMapped);
+        }
+        self.page_table.unmap_no_flush(vpn);
+        Ok(())
+    }
+
     /// 查询 `vpn` 对应的物理页号。
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         self.page_table.translate(vpn)

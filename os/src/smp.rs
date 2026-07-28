@@ -138,16 +138,17 @@ pub enum StopError {
     },
 }
 
-/// 新增 kernel-global 映射发布到目标 CPU 时可能发生的错误。
+/// kernel-global 映射发布或撤销时可能发生的同步错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KernelTlbSyncError {
     InvalidCpu { cpu_id: usize },
-    OfflineCpu { cpu_id: usize },
-    SendFailed { cpu_id: usize, error: isize },
+    InvalidTargets { targets: usize },
+    UnavailableTargets { targets: usize, available: usize },
     Timeout {
         cpu_id: usize,
         expected: usize,
         observed: usize,
+        send_error: Option<isize>,
     },
 }
 
@@ -307,6 +308,14 @@ pub fn ipi_ping_ack(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id].ipi_ping_ack.load(Ordering::Acquire)
 }
 
+/// 查询目标 CPU 已完成的 kernel-global TLB 同步序号。
+///
+/// 该值只用于诊断和 focused test；资源生命周期必须由同步入口的等待结果
+/// 决定，调用方不能自行比较一次快照后释放 frame。
+pub(crate) fn kernel_tlb_ack(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id].kernel_tlb_ack.load(Ordering::Acquire)
+}
+
 /// 查询 CPU0 已处理的 round-trip 回复序号。
 pub fn round_trip_reply_ack() -> usize {
     PER_CPUS[BOOT_CPU_ID]
@@ -388,10 +397,11 @@ pub fn handle_ipi() {
         local.need_resched.store(true, Ordering::Release);
     }
     if reasons & IpiReason::KERNEL_TLB_SYNC.bits() != 0 {
-        // request 的 Release 发布发生在 doorbell 之前；Acquire 消费 mailbox
-        // 后先完成本核失效，再允许发送方发布依赖该映射的 runnable。
-        crate::hal::tlb_invalidate();
+        // 必须先快照 request，再做失效。若反过来，发送方可能在“失效完成”
+        // 与“读取 request”之间发布新序号，handler 就会错误地用旧 flush
+        // 确认新请求，导致撤映射 frame 在目标仍持有旧 TLB 时提前释放。
         let sequence = local.kernel_tlb_request.load(Ordering::Acquire);
+        crate::hal::kernel_tlb_invalidate();
         local.kernel_tlb_ack.store(sequence, Ordering::Release);
     }
 }
@@ -434,48 +444,140 @@ pub(crate) fn request_reschedule(cpu_id: usize) -> Result<(), isize> {
     send_ipi(cpu_id, IpiReason::RESCHEDULE)
 }
 
-/// 在任务入队前，把新建的 kernel-global 映射同步到目标 CPU。
+/// shootdown 等待期间临时开放本地中断，并在退出时恢复调用者原状态。
 ///
-/// 映射仍由 CPU0 在 `KERNEL_SPACE` 锁内建立；该函数不持有页表或 runqueue
-/// 锁等待。sequence 允许多个并发请求合并为一次本地全刷新，同时保持 ack
-/// 覆盖截至该序号之前发布的全部 PTE 写入。
-pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbSyncError> {
-    if cpu_id >= CONFIGURED_CPU_COUNT {
-        return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
+/// 当前发起者可能同时成为另一轮 shootdown 的目标；若双方都在 IRQ-off
+/// 自旋，就会互相等待 ack。进入本 guard 前不得持有页表、runqueue 或普通锁。
+/// 窗口内到达的 timer IRQ 仍只发布 deferred work；生产调用者随后必须经过
+/// trap-return 或 scheduler timer 安全点，不能在 MM 同步层执行任意 timer callback。
+struct KernelTlbWaitIrqGuard {
+    restore_enabled: bool,
+}
+
+impl KernelTlbWaitIrqGuard {
+    fn enter() -> Self {
+        let restore_enabled = crate::hal::local_irq_save();
+        crate::hal::local_irq_restore(true);
+        Self { restore_enabled }
     }
-    if cpu_id == self::cpu_id() {
-        crate::hal::tlb_invalidate();
+}
+
+impl Drop for KernelTlbWaitIrqGuard {
+    fn drop(&mut self) {
+        let _ = crate::hal::local_irq_save();
+        crate::hal::local_irq_restore(self.restore_enabled);
+    }
+}
+
+/// 把一次共享内核页表修改同步到目标 CPU 集合。
+///
+/// 调用方必须已经释放 `KERNEL_SPACE` 以及其它普通锁，并把被撤映射资源保留到
+/// 本函数成功返回。每个目标先取得独立 request 序号，再统一发布 reason/doorbell；
+/// handler 对 request 的 Acquire 快照发生在 flush 之前，因此 ack 只覆盖真正
+/// 完成失效的序号。
+fn synchronize_kernel_mapping_mask(
+    targets: usize,
+    stopped_is_ack: bool,
+) -> Result<(), KernelTlbSyncError> {
+    let configured = expected_online_mask();
+    if targets == 0 || targets & !configured != 0 {
+        return Err(KernelTlbSyncError::InvalidTargets { targets });
+    }
+    let online = online_cpu_mask();
+    let mut available = online & !stopped_cpu_mask();
+    if targets & !online != 0 || (!stopped_is_ack && targets & !available != 0) {
+        return Err(KernelTlbSyncError::UnavailableTargets { targets, available });
+    }
+
+    // 撤映射时 stopped ack 承诺目标不再访问共享状态，可以等价于 TLB ack；
+    // 新映射发布则不能把“已停止”当成功，否则随后仍会向该 CPU 入队任务。
+    let targets = if stopped_is_ack {
+        targets & available
+    } else {
+        targets
+    };
+    if targets == 0 {
         return Ok(());
     }
-    if online_cpu_mask() & (1usize << cpu_id) == 0 {
-        return Err(KernelTlbSyncError::OfflineCpu { cpu_id });
+
+    let current_bit = 1usize << self::cpu_id();
+    let remote = targets & !current_bit;
+    let mut expected = [0usize; MAX_CPUS];
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if remote & (1usize << cpu_id) == 0 {
+            continue;
+        }
+        expected[cpu_id] = PER_CPUS[cpu_id]
+            .kernel_tlb_request
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        assert_ne!(expected[cpu_id], 0, "kernel TLB sync sequence wrapped");
     }
 
-    let target = &PER_CPUS[cpu_id];
-    let expected = target
-        .kernel_tlb_request
-        .fetch_add(1, Ordering::AcqRel)
-        .wrapping_add(1);
-    assert_ne!(expected, 0, "kernel TLB sync sequence wrapped");
-    send_ipi(cpu_id, IpiReason::KERNEL_TLB_SYNC)
-        .map_err(|error| KernelTlbSyncError::SendFailed { cpu_id, error })?;
+    if targets & current_bit != 0 {
+        crate::hal::kernel_tlb_invalidate();
+    }
+    if remote == 0 {
+        return Ok(());
+    }
+    // 即使某个 doorbell 报错，也先等待已经发布的 mailbox：目标可能由另一
+    // 个 pending interrupt 唤醒；若它同时完成 STOP，stopped ack 本身已经
+    // 承诺不再访问旧翻译，也可替代本轮 TLB ack。
+    let send_error = send_ipi_mask(remote, IpiReason::KERNEL_TLB_SYNC).err();
 
+    let _irq_guard = KernelTlbWaitIrqGuard::enter();
     let deadline = crate::hal::get_time()
         .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
     loop {
-        let observed = target.kernel_tlb_ack.load(Ordering::Acquire);
-        if observed >= expected {
-            return Ok(());
+        let mut missing = None;
+        let stopped = stopped_cpu_mask();
+        available &= !stopped;
+        for cpu_id in 0..CONFIGURED_CPU_COUNT {
+            if remote & (1usize << cpu_id) == 0 {
+                continue;
+            }
+            if stopped & (1usize << cpu_id) != 0 {
+                if stopped_is_ack {
+                    continue;
+                }
+                return Err(KernelTlbSyncError::UnavailableTargets {
+                    targets: remote,
+                    available,
+                });
+            }
+            let observed = PER_CPUS[cpu_id].kernel_tlb_ack.load(Ordering::Acquire);
+            if observed < expected[cpu_id] {
+                missing = Some((cpu_id, observed));
+                break;
+            }
         }
+        let Some((cpu_id, observed)) = missing else {
+            return Ok(());
+        };
         if crate::hal::get_time() >= deadline {
             return Err(KernelTlbSyncError::Timeout {
                 cpu_id,
-                expected,
+                expected: expected[cpu_id],
                 observed,
+                send_error,
             });
         }
         spin_loop();
     }
+}
+
+/// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
+pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbSyncError> {
+    if cpu_id >= CONFIGURED_CPU_COUNT {
+        return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
+    }
+    synchronize_kernel_mapping_mask(1usize << cpu_id, false)
+}
+
+/// 撤销共享内核映射后，使所有仍可能执行内核代码的 CPU 完成失效。
+pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError> {
+    let targets = online_cpu_mask() & !stopped_cpu_mask();
+    synchronize_kernel_mapping_mask(targets, true)
 }
 
 /// 在当前 CPU 的 timer IRQ fast path 发布一批待处理工作。

@@ -128,9 +128,23 @@ B19 为远程 kernel-only 任务的动态内核栈增加了一个受限的映射
 4. CPU0 在不持有页表/runqueue 锁时有界等待 ack；
 5. 只有 ack 完成后才把任务加入目标 runqueue，释放队列锁后再发送 `RESCHEDULE`。
 
-sequence 允许合并同一目标的并发发布请求；ack 覆盖该序号之前的 PTE 写入。该协议
-只保证“新增 kernel stack 在首次远程使用前可见”，不等价于 MM active mask、范围
-shootdown、解除映射后的延迟释放或 LoongArch MM-owned ASID。
+sequence 允许合并同一目标的并发发布请求；ack 覆盖该序号之前的 PTE 写入。
+
+B21 把同一 mailbox/sequence 基础设施扩展为动态 kernel-global 撤映射协议：
+
+1. 在 `KERNEL_SPACE` 锁内清除 PTE，并把含 `FrameTracker` 的映射对象移出集合；
+2. 释放页表锁后，先为所有远端目标发布独立 request 序号，再做本地全量失效并广播 IPI；
+3. handler 必须按“Acquire 快照 request → 全量失效 → Release ack”的顺序执行，禁止用旧
+   flush 确认刚发布的新序号；
+4. 发起者等待时临时开放本地中断，使两个并发 shootdown 发起者能互相处理 IPI；窗口内
+   timer 仍只发布 deferred work，随后由 trap-return 或 scheduler 安全点消费；
+5. 对撤映射而言，已经完成终态 STOP 的 CPU 不会再访问共享状态，其 stopped ack 可替代
+   TLB ack；新增映射发布不能使用这一替代；
+6. 全部目标完成后才析构映射对象、释放 frame，并在内核栈路径最后归还虚拟 slot。
+
+RV64 使用无地址/ASID 参数的 `sfence.vma`，LA64 使用 `invtlb 0`，两者都覆盖当前 CPU
+的全部 global 与 non-global 翻译。该协议只覆盖共享内核页表的动态映射；用户 MM 的
+active mask、generation/range shootdown 与 LoongArch MM-owned ASID 仍未完成。
 
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 

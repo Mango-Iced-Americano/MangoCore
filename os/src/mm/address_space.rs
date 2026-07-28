@@ -21,7 +21,7 @@ use super::vma::*;
 use super::vma_set::VmaSet;
 use super::{
     FrameTracker, PhysAddr, PhysPageNum, TlbBatch, TlbPublication, VPNRange, VirtAddr, VirtPageNum,
-    KERNEL_SPACE, USER_STACK_ABI_ALIGN,
+    USER_STACK_ABI_ALIGN,
 };
 use crate::config::*;
 use crate::fs::vfs;
@@ -1008,12 +1008,13 @@ impl<T: PageTable> AddressSpace<T> {
                         .fetch_add(_interp_ticks, core::sync::atomic::Ordering::Relaxed);
                     interp_entry = Some(interp_info.entry);
                     interp_base = Some(interp_info.base);
-                    KERNEL_SPACE
-                        .lock()
-                        .remove_area_with_start_vpn(
-                            VirtAddr::from(interp_data.as_ptr() as usize).ceil(),
-                        )
-                        .unwrap();
+                    // 解释器文件是临时 kernel-global 映射；即使当前用户任务
+                    // 仍固定在 CPU0，AP 也共享同一内核页表，撤映射必须等待
+                    // 全部在线 CPU 完成 TLB shootdown 后才能释放 backing frame。
+                    super::remove_kernel_mapping_synchronized(
+                        VirtAddr::from(interp_data.as_ptr() as usize).ceil(),
+                    )
+                    .unwrap();
                 }
                 _ => {}
             }

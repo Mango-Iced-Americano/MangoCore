@@ -15,6 +15,8 @@ pub use arch::config;
 pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;
 pub use arch::quiesce_local_timer_interrupt;
+pub use arch::reclaim_retired_kernel_stacks;
+pub use arch::kernel_tlb_invalidate;
 pub use arch::tlb_invalidate;
 #[cfg(feature = "loongarch64")]
 pub use arch::LsxRegs;
@@ -35,6 +37,45 @@ pub use arch::{
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};
+
+/// 动态内核栈保留映射的上限。
+///
+/// 命中缓存时 slot 与物理页映射都不改变，因此无需跨核 TLB shootdown；只有
+/// 缓存溢出、真正清除 PTE 时，才进入同步撤映射协议。
+pub(crate) const KERNEL_STACK_CACHE_LIMIT: usize = 128;
+
+/// 无堆分配的内核栈退休队列。
+///
+/// `KernelStack::drop` 可能运行在低内存或持有进程锁的路径，不能为了登记
+/// shootdown 工作再触发堆分配。容量与架构的系统任务上限一致；超过上限说明
+/// TCB/slot 生命周期已经突破任务配额不变量，直接 fail-stop 比覆盖旧条目安全。
+pub(crate) struct KernelStackRetireQueue<const N: usize> {
+    slots: [usize; N],
+    len: usize,
+}
+
+impl<const N: usize> KernelStackRetireQueue<N> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            slots: [0; N],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, slot: usize) {
+        assert!(self.len < N, "kernel-stack retire queue overflow");
+        self.slots[self.len] = slot;
+        self.len += 1;
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(self.slots[self.len])
+    }
+}
 
 /// 在一个受控闭包内临时开放本 CPU 的全局中断。
 ///

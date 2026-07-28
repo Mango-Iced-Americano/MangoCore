@@ -890,9 +890,7 @@ impl TaskControlBlock {
             AddressSpace::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
         init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
         // 在内核空间中删除ELF区域
-        crate::mm::KERNEL_SPACE
-            .lock()
-            .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
+        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor())
             .unwrap();
         init_task_trace!("04 temporary kernel ELF mapping removed");
 
@@ -1280,9 +1278,9 @@ impl TaskControlBlock {
 
         // 清除临时映射
         let _t_teardown = perf::perf_time_now();
-        crate::mm::KERNEL_SPACE
-            .lock()
-            .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
+        // ELF 内容只在解析期间映射进共享内核页表；清 PTE 后必须等远端
+        // shootdown ack，再让文件映射 frame 回到分配器。
+        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor())
             .unwrap();
         let _td_ticks = perf::perf_time_now().wrapping_sub(_t_teardown);
         perf::EXECVE_TEARDOWN_TICKS.fetch_add(_td_ticks, Ordering::Relaxed);

@@ -145,6 +145,24 @@ B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU
 释放该目标队列，因此循环不会同时持有两个 runqueue。当前该远程能力只对受控
 kernel-only AP 任务完成验证，不代表用户 MM、affinity 或通用迁移已经安全。
 
+### 3.6 B21 内核栈退休与 shootdown 锁序
+
+TCB 最后一个 `Arc` 可能在 `wait`/进程锁保护区内消失，因此 `KernelStack::drop` 不能
+直接取得页表锁或等待远端 CPU。缓存未满时它只把仍保持映射的 slot 放回
+`KSTACK_CACHE`；缓存溢出时只短暂取得固定容量 `KSTACK_RETIRE_QUEUE` 并登记 slot，
+两把锁不嵌套。
+
+CPU0 idle 调度循环在尚未取得 processor、runqueue 或子系统锁时按以下顺序回收：
+
+1. 取得退休队列锁弹出一个 slot，并立即释放队列锁；
+2. 在 `KERNEL_SPACE` 锁内摘下 mapping、清除 PTE，但继续持有其中的 frame；
+3. 释放 `KERNEL_SPACE` 后发送 shootdown，并在不持普通锁时等待 ack；
+4. ack 完成后释放 frame；最后单独取得 slot allocator 锁归还 ID。
+
+等待窗口临时开中断只用于让本 CPU 响应并发 IPI；hard timer 仍遵守 deferred 协议，不能
+在 MM 层直接执行 timer callback。当前退休队列由 CPU0 生命周期路径消费；未来若允许 AP
+并发完成普通进程回收，需要重新审查容量、所有者和批处理策略。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

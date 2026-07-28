@@ -160,8 +160,10 @@ frame。这只损失批处理效率，不改变“先失效 TLB，后复用物�
 W 权限，子 batch 建立共享 PPN 映射。子地址空间尚未发布，可以不刷新；父
 batch 必须提交，否则父进程可能继续通过旧 TLB 写共享页，破坏 CoW。
 
-内核页表路径仍使用 `PageTable` 的安全接口，由架构实现当场刷新；B16 没有
-实现 kernel-global 远端 shootdown。
+用户页表的 `Published` 状态仍因缺少 MM active mask/generation 而 fail-stop。B21 已为
+共享内核页表的动态映射增加单独的远端协议：公开撤映射先以 no-flush 原语清 PTE、保留
+mapping frame，释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收到全部 ack 才释放
+frame。它覆盖内核栈和临时 ELF/interpreter 映射，但不应被表述为用户 MM shootdown 完成。
 
 ## 7. COW 中的页表变化
 

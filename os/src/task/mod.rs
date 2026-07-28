@@ -53,6 +53,7 @@ pub use manager::{
     timer_interrupt_handler, timer_subsystem_init, update_ready_nice, wait_with_timeout,
     wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
+pub(crate) use manager::zombie_queue_count_fast;
 // pub use pid::RecycleAllocator;
 pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
 pub use mount_namespace::{MountNamespace, INIT_MOUNT_NAMESPACE};

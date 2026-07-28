@@ -18,16 +18,14 @@ static AP_TASK_RUNS: [AtomicUsize; crate::smp::MAX_CPUS] =
 static AP_BLOCKED_WAKE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_BLOCKED_WAKE_PHASE: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
+static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
-    /// Phase 4 的 kernel-global shootdown 完成前，不释放曾在 AP 使用过的动态
-    /// kernel stack。终态 STOP 后机器立即关机，因此这里保留到本次 ktest 结束。
-    static ref AP_TASK_RETAINED: Mutex<Vec<Arc<crate::task::TaskControlBlock>>> =
-        Mutex::new(Vec::new());
 }
 
 /// 返回只依赖 Phase 1 启动不变量的测试集合。
@@ -77,6 +75,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::blocked_kernel_tasks_wake_on_last_cpu",
             blocked_kernel_tasks_wake_on_last_cpu,
+        ),
+        KernelTest::new(
+            "smp::kernel_stack_reclaim_waits_for_shootdown",
+            kernel_stack_reclaim_waits_for_shootdown,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -587,9 +589,6 @@ fn remote_kernel_tasks_run_on_target_cpus() -> Result<(), &'static str> {
             return Err("AP runqueue retained a completed kernel task");
         }
     }
-    AP_TASK_RETAINED
-        .lock()
-        .extend(tasks.into_iter().map(|(_, task)| task));
     Ok(())
 }
 
@@ -676,8 +675,100 @@ fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
         return Err("duplicate completion attempted a second wakeup");
     }
     *AP_BLOCKED_WAKE_COMPLETION.lock() = None;
-    AP_TASK_RETAINED
-        .lock()
-        .extend(tasks.into_iter().map(|(_, task)| task));
+    Ok(())
+}
+
+fn record_kstack_reclaim_task() {
+    let cpu = crate::smp::cpu_id();
+    let owner_ok = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(cpu))
+        .unwrap_or(false);
+    if cpu == crate::smp::BOOT_CPU_ID || !owner_ok {
+        AP_KSTACK_RECLAIM_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    AP_KSTACK_RECLAIM_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// 在同一 AP 上执行一轮超过内核栈缓存容量的任务；等 AP current 已清空后，
+/// 由仍在 CPU0 运行的测试任务显式析构这些“其它任务”的 zombie TCB。
+fn run_kstack_reclaim_wave() -> Result<(), &'static str> {
+    let task_count = crate::hal::KERNEL_STACK_CACHE_LIMIT + 1;
+    AP_KSTACK_RECLAIM_RUNS.store(0, Ordering::Release);
+    AP_KSTACK_RECLAIM_ERRORS.store(0, Ordering::Release);
+
+    let mut tasks = Vec::with_capacity(task_count);
+    for _ in 0..task_count {
+        tasks.push(crate::task::spawn_ktest_task_on(
+            1,
+            record_kstack_reclaim_task,
+        ));
+    }
+
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
+    while AP_KSTACK_RECLAIM_RUNS.load(Ordering::Acquire) != task_count
+        || tasks
+            .iter()
+            .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
+        || crate::task::processor::cpu_has_current(1)
+        || crate::task::run_queue_count(1) != 0
+        || crate::task::zombie_queue_count_fast() < task_count
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP kernel-stack reclaim wave did not quiesce");
+        }
+        core::hint::spin_loop();
+    }
+    if AP_KSTACK_RECLAIM_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("kernel-stack reclaim task observed wrong CPU owner");
+    }
+
+    let weak_tasks: Vec<_> = tasks.iter().map(Arc::downgrade).collect();
+    drop(tasks);
+    let zombies = crate::task::take_zombie_tasks(task_count);
+    if zombies.len() != task_count {
+        return Err("zombie queue did not transfer the complete reclaim wave");
+    }
+    drop(zombies);
+    if crate::hal::reclaim_retired_kernel_stacks(usize::MAX) == 0 {
+        return Err("kernel-stack cache overflow did not queue a retirement");
+    }
+    if weak_tasks.iter().any(|task| task.upgrade().is_some()) {
+        return Err("reclaimed kernel task still has a strong TCB owner");
+    }
+    Ok(())
+}
+
+/// 第一轮强制让缓存溢出并撤销至少一个 AP 使用过的 stack mapping；第二轮
+/// 随即耗尽缓存并重新映射回收 slot，验证 shootdown 后的真实复用闭环。
+fn kernel_stack_reclaim_waits_for_shootdown() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("kernel-stack reclaim test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    let stale = crate::task::take_zombie_tasks(usize::MAX);
+    drop(stale);
+    if crate::task::zombie_queue_count_fast() != 0 {
+        return Err("zombie queue was not empty before kernel-stack reclaim test");
+    }
+
+    let mut ack_before = [0usize; crate::smp::MAX_CPUS];
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        ack_before[cpu] = crate::smp::kernel_tlb_ack(cpu);
+    }
+    run_kstack_reclaim_wave()?;
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        if crate::smp::kernel_tlb_ack(cpu) <= ack_before[cpu] {
+            return Err("kernel-stack retirement missed an online AP shootdown");
+        }
+    }
+    run_kstack_reclaim_wave()?;
+    // ktest runner 不会像 syscall 一样返回 trap-return；上面的 shootdown 等待
+    // 会临时开中断，若期间接住 one-shot timer，必须在离开用例前通过生产
+    // 安全点消费 pending 并重新编程，否则下一轮 timer 用例会继承静默状态。
+    crate::task::run_deferred_timer_at_task_safe_point();
     Ok(())
 }

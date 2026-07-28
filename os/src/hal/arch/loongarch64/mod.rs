@@ -32,6 +32,14 @@ pub use sbi::{
 pub use switch::__switch;
 pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
 
+/// 清除当前 core 上包括 global 项在内的全部 TLB 翻译。
+///
+/// 普通 `tlb_invalidate()` 只清 non-global 项；动态内核映射协议不能依赖
+/// 当前 PTE 是否设置 G 位，因此统一使用架构的全量失效操作。
+pub fn kernel_tlb_invalidate() {
+    tlb::tlb_global_invalidate();
+}
+
 use crate::{
     config::{
         CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH, SUC_DMW_VSEG,
@@ -46,8 +54,8 @@ use crate::{
 use self::{time::get_timer_freq_first_time, trap::strampoline};
 pub use board::BLOCK_SZ;
 pub use kern_stack::{
-    kernel_stack_guard_slot, kstack_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid,
-    KernelStack,
+    kernel_stack_guard_slot, kstack_alloc, reclaim_retired_kernel_stacks,
+    trap_cx_bottom_from_tid, ustack_bottom_from_tid, KernelStack,
 };
 pub use register::*;
 mod kern_stack;

@@ -128,6 +128,10 @@ pub fn run_tasks() -> ! {
         // 在获取 processor 或队列锁之前消费 pending，保证 callback 不跨锁，
         // 且已经处于 idle 调度上下文时无需再次 context switch。
         let _ = super::run_deferred_timer_work();
+        // TCB 的最后一个 Arc 可能在持有进程锁时消失；KernelStack::drop 只把
+        // 缓存溢出的 slot 登记到退休队列。此处尚未获取任何调度/子系统锁，
+        // 可以安全等待远端 TLB ack，再释放 frame 并归还 slot。
+        let _ = crate::hal::reclaim_retired_kernel_stacks(16);
         let sched_profile = sched_profile_enabled();
         if sched_profile {
             SCHED_LOOPS.fetch_add(1, SchedOrdering::Relaxed);
