@@ -1,3 +1,4 @@
+pub mod boot_block;
 pub mod dev;
 pub mod eventfd;
 pub mod eventpoll;
@@ -43,6 +44,7 @@ pub use self::fat32::DiskInodeType;
 pub use self::filesystem::{detect_fs, detect_fs_layout, FS_Type};
 pub use crate::drivers::block::BlockDevice;
 
+use crate::bootargs::BootConfig;
 use self::vfs::FileSystem as _;
 use self::vfs::IndexNode;
 use alloc::{string::String, sync::Arc};
@@ -345,11 +347,13 @@ pub fn register_block_device_nodes() {
 /// - x1 → /tools（工具盘）
 ///
 /// 任何设备缺失或挂载失败都只打印 warning，不 panic。
-pub fn mount_boot_block_devices() {
+pub fn mount_boot_block_devices(config: &BootConfig) {
     let root = vfs_root();
 
     // 首次真正触发 BLOCK_DEVICES probe，但此时 VFS_ROOT 已经存在
     let devs = crate::drivers::block::block_devices();
+    // Publish raw devices and partition aliases before resolving root=.
+    crate::fs::boot_block::register_boot_block_devices();
 
     // 注册 /dev/vda（原始根设备，不做 MBR 解析以避免 FAT32 55AA 误判）
     if let Some(ref blk0) = devs[0] {
@@ -359,15 +363,36 @@ pub fn mount_boot_block_devices() {
         );
     }
 
-    // 尝试挂载 x0 → /sdcard
-    match devs[0].as_ref() {
-        Some(dev) => {
-            if mount_block_fs(&root, dev, "sdcard", "official fs (x0)").is_none() {
-                println!("[initramfs] official fs (x0) mount failed, leaving /sdcard empty");
+    // Mount root device from bootargs (default: /dev/vda).
+    let root_dev_name = config.root.strip_prefix("/dev/").unwrap_or(&config.root);
+    match crate::fs::boot_block::resolve_block_device(root_dev_name) {
+        Some(root_dev) => {
+            if mount_block_fs(&root, &root_dev, "sdcard", "root device").is_none() {
+                crate::println!(
+                    "[initramfs] root device '{}' mount failed, leaving /sdcard empty",
+                    config.root
+                );
             }
         }
         None => {
-            println!("[initramfs] official fs (x0) not found, skipping /sdcard mount");
+            crate::println!(
+                "[initramfs] root device '{}' not found in boot-block registry, falling back to devs[0]",
+                config.root
+            );
+            match devs[0].as_ref() {
+                Some(dev) => {
+                    if mount_block_fs(&root, dev, "sdcard", "official fs (x0)").is_none() {
+                        crate::println!(
+                            "[initramfs] official fs (x0) mount failed, leaving /sdcard empty"
+                        );
+                    }
+                }
+                None => {
+                    crate::println!(
+                        "[initramfs] official fs (x0) not found, skipping /sdcard mount"
+                    );
+                }
+            }
         }
     }
 

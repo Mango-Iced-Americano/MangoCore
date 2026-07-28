@@ -19,6 +19,7 @@
 //! 2. Register it in `all_tests()` in this file
 
 pub mod runner;
+pub mod platform;
 
 #[path = "block_device.rs"]
 mod kt_block_device;
@@ -64,6 +65,7 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("ext4_another", kt_ext4_another::tests()),
         ("ext4_another_lifetime", kt_ext4_another_lifetime::tests()),
         ("block_device", kt_block_device::tests()),
+        ("platform", platform::tests()),
     ]
 }
 

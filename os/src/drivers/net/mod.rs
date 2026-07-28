@@ -26,6 +26,18 @@ lazy_static! {
 }
 
 pub fn init_net_device() {
+    #[cfg(feature = "block_virt")]
+    {
+        let platform_info = crate::hal::platform::platform_info();
+        if !platform_info.devices.is_empty() {
+            let device_manager = crate::hal::device::DeviceManager::new(platform_info.devices.clone());
+            if let Some(net_device) = virtio_net::probe_net_from_device_manager(&device_manager) {
+                *NET_DEVICE.lock() = Some(net_device);
+                return;
+            }
+        }
+    }
+
     #[cfg(all(
         target_arch = "loongarch64",
         feature = "board_2k1000",

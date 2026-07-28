@@ -118,8 +118,10 @@ impl BootConfig {
             cfg.init = String::from(init);
         }
 
-        // mango.root=
-        if let Some(root) = parsed.get("mango.root") {
+        // Standard Linux root= takes precedence over the project-specific fallback.
+        if let Some(root) = parsed.get("root") {
+            cfg.root = String::from(root);
+        } else if let Some(root) = parsed.get("mango.root") {
             cfg.root = String::from(root);
         }
 
@@ -322,6 +324,18 @@ mod tests {
     fn test_root_override() {
         let cfg = BootConfig::from_cmdline("mango.root=/dev/sda1");
         assert_eq!(cfg.root, "/dev/sda1");
+    }
+
+    #[test]
+    fn test_standard_root_override() {
+        let cfg = BootConfig::from_cmdline("root=/dev/sdb1");
+        assert_eq!(cfg.root, "/dev/sdb1");
+    }
+
+    #[test]
+    fn test_standard_root_takes_precedence_over_mango_root() {
+        let cfg = BootConfig::from_cmdline("root=/dev/sdb1 mango.root=/dev/sda1");
+        assert_eq!(cfg.root, "/dev/sdb1");
     }
 
     #[test]

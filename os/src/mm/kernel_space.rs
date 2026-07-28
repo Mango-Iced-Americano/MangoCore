@@ -228,6 +228,17 @@ impl<T: PageTable> KernelSpace<T> {
                 MapPermission::R | MapPermission::W | MapPermission::G
             );
         }
+
+        // Map firmware reserved regions (DTB, initrd) as read-only.
+        // These pages are not in the frame allocator but must remain
+        // accessible for post-heap firmware description parsing.
+        for &(base, end) in crate::hal::firmware::firmware_reserved_regions() {
+            kernel_identical_map!(
+                base,
+                end,
+                MapPermission::R | MapPermission::G
+            );
+        }
         kernel_space
     }
 
