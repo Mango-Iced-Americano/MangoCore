@@ -271,6 +271,9 @@ impl TcpSocket {
     /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
     /// 用于 poll 后的批量唤醒，避免无差别唤醒造成的活锁（connect 在 SynSent 被反复唤醒）。
     pub fn wake_if_ready(&self) {
+        // `try_poll()` may reach here from a wait condition closure that holds
+        // one of these queues. Best-effort task wakes avoid re-entering it;
+        // listener notification still happens unconditionally.
         // EventWaitQueue callbacks are edge notifications.  Publish only bits
         // that became ready in this refresh; repeatedly notifying every socket
         // that remains writable would turn EPOLLET back into level-triggered
@@ -284,7 +287,7 @@ impl TcpSocket {
         );
         if !accept_events.is_empty() {
             self.accept_waiters
-                .notify_events_all(accept_events);
+                .try_notify_events_all(accept_events);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
@@ -294,7 +297,7 @@ impl TcpSocket {
         );
         if !connect_events.is_empty() {
             self.connect_waiters
-                .notify_events_all(connect_events);
+                .try_notify_events_all(connect_events);
         }
 
         // recv 等待者：有数据可读、对端关闭或 socket 出错。通知载荷只能
@@ -311,7 +314,7 @@ impl TcpSocket {
         );
         if !recv_events.is_empty() {
             self.recv_waiters
-                .notify_events_at_most(recv_events, 1);
+                .try_notify_events_at_most(recv_events, 1);
         }
 
         // send 等待者：发送缓冲从不可写转为可写，或 socket 关闭/出错。
@@ -325,7 +328,7 @@ impl TcpSocket {
         );
         if !send_events.is_empty() {
             self.send_waiters
-                .notify_events_at_most(send_events, 1);
+                .try_notify_events_at_most(send_events, 1);
         }
     }
 

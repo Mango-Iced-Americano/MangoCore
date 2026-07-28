@@ -1066,7 +1066,7 @@ pub fn wake_raw_waiters() {
         // query the socket and cover every handler rather than only lo.
         if socket.recv_ready() {
             if let Some(wq) = socket.recv_event_queue() {
-                wq.notify_events_at_most(
+                wq.try_notify_events_at_most(
                     EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
                     1,
                 );
@@ -1074,7 +1074,7 @@ pub fn wake_raw_waiters() {
         }
         if socket.send_ready() {
             if let Some(wq) = socket.send_event_queue() {
-                wq.notify_events_at_most(
+                wq.try_notify_events_at_most(
                     EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
                     1,
                 );

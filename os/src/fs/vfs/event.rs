@@ -110,6 +110,28 @@ impl EventWaitQueue {
         self.wait_queue.lock().wake_at_most(limit)
     }
 
+    /// Always notify listeners; wake tasks only when the wait queue is unlocked.
+    ///
+    /// This is safe in wait condition closures: after the condition releases the
+    /// queue lock, `wait_event_impl` evaluates the condition again.
+    pub fn try_notify_events_all(&self, events: EPollEvent) -> usize {
+        self.notify_listeners(events);
+        match self.wait_queue.try_lock() {
+            Some(mut guard) => guard.wake_all(),
+            None => 0,
+        }
+    }
+
+    /// Always notify listeners; wake at most `limit` tasks when the wait queue
+    /// is unlocked. See [`Self::try_notify_events_all`] for safety rationale.
+    pub fn try_notify_events_at_most(&self, events: EPollEvent, limit: usize) -> usize {
+        self.notify_listeners(events);
+        match self.wait_queue.try_lock() {
+            Some(mut guard) => guard.wake_at_most(limit),
+            None => 0,
+        }
+    }
+
     fn notify_listeners(&self, events: EPollEvent) {
         if events.is_empty() {
             return;
