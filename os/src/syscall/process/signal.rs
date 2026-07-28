@@ -153,10 +153,10 @@ impl SignalfdSiginfo {
     }
 }
 
-struct SignalFd {
+pub(crate) struct SignalFd {
     mask: Mutex<Signals>,
     metadata: Metadata,
-    event_queue: Arc<EventWaitQueue>,
+    event_queue: Mutex<Arc<EventWaitQueue>>,
 }
 
 impl core::fmt::Debug for SignalFd {
@@ -175,7 +175,7 @@ impl SignalFd {
                 FileType::File,
                 InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
             ),
-            event_queue,
+            event_queue: Mutex::new(event_queue),
         }
     }
 
@@ -185,6 +185,14 @@ impl SignalFd {
 
     fn pending_mask(&self) -> Signals {
         *self.mask.lock()
+    }
+
+    pub(crate) fn event_queue(&self) -> Arc<EventWaitQueue> {
+        self.event_queue.lock().clone()
+    }
+
+    pub(crate) fn rebind_event_queue(&self, new_queue: Arc<EventWaitQueue>) {
+        *self.event_queue.lock() = new_queue;
     }
 }
 
@@ -251,14 +259,6 @@ impl IndexNode for SignalFd {
 
     fn is_stream(&self) -> bool {
         true
-    }
-
-    fn read_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
-        Some(self.event_queue.wait_queue())
-    }
-
-    fn read_event_queue(&self) -> Option<&EventWaitQueue> {
-        Some(self.event_queue.as_ref())
     }
 
     fn as_any_ref(&self) -> &dyn Any {

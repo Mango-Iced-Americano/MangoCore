@@ -142,7 +142,8 @@ pub enum Endpoint {
 | `bind` | `fn bind(&self, endpoint: &Endpoint) -> SyscallRet` | 绑定到本地端点 |
 | `listen` | `fn listen(&self) -> SyscallRet` | 开始监听 |
 | `connect` | `fn connect(&self, endpoint: &Endpoint) -> SyscallRet` | 发起连接 |
-| `try_connect` | `fn try_connect(&self) -> Result<isize, SyscallErr>` | 非阻塞尝试一次握手检查，返回 `Ok(0)` 表示已建立，`Err(EAGAIN)` 表示需重试 |
+| `try_connect` | `fn try_connect(&self) -> Result<isize, SyscallErr>` | 非阻塞尝试一次握手检查；TCP 实现可推进网络状态 |
+| `try_connect_without_poll` | `fn try_connect_without_poll(&self) -> Result<isize, SyscallErr>` | 等待队列条件闭包专用：只检查状态，不推进网络状态 |
 | `take_error` | `fn take_error(&self) -> Option<SyscallErr>` | 读取并清除 socket 待处理错误（用于 `getsockopt(SO_ERROR)`） |
 | `accept` | `fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet` | 接受新连接 |
 | `shutdown` | `fn shutdown(&self, how: u32) -> GeneralRet<()>` | 关闭读/写/读写通道 |
@@ -175,7 +176,7 @@ pub enum Endpoint {
 
 ### 非阻塞 I/O
 
-不调用 poll、不睡眠、不调度。
+普通 `try_*` 路径可为 TCP 推进网络状态；持有 `WaitQueue` 锁的条件闭包必须使用对应的 `_without_poll` 变体，poll 必须发生在进入等待前。
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
@@ -184,6 +185,8 @@ pub enum Endpoint {
 | `try_recvmsg` | `fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr>` | 用于 recvmsg，返回（字节数，可选的源地址）。默认委托给 try_recv |
 | `try_peek_recvmsg` | `fn try_peek_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr>` | MSG_PEEK 查看但不消费。默认委托给 try_recvmsg（会消费），支持 peek 的 socket 应覆写 |
 | `try_sendmsg` | `fn try_sendmsg(&self, buf: &[u8], dest: Option<Endpoint>, _flags: MsgFlags) -> Result<isize, SyscallErr>` | 用于 sendmsg。dest=None 时使用已连接远端。默认委托给 try_send |
+| `try_recv_without_poll` / `try_send_without_poll` | 与 `try_recv` / `try_send` 相同 | 条件闭包安全的单次状态检查 |
+| `try_recvmsg_without_poll` / `try_peek_recvmsg_without_poll` / `try_sendmsg_without_poll` | 与对应 message 方法相同 | 条件闭包安全的 message 操作 |
 | `send_to` | `fn send_to(&self, _buf: &[u8], _dest: Endpoint) -> SyscallRet` | 发送到指定目标 |
 
 ### 就绪查询
@@ -210,6 +213,8 @@ pub enum Endpoint {
 | `connect_event_queue` | `Option<&EventWaitQueue>` | 连接事件队列（epoll） |
 | `accept_wait_queue` | `Option<&Mutex<WaitQueue>>` | accept 等待队列 |
 | `accept_event_queue` | `Option<&EventWaitQueue>` | accept 事件队列（epoll） |
+
+`EventWaitQueue` 的通知必须使用 `notify_events_all` 或 `notify_events_at_most`。不得以 `try_lock()` 失败为由跳过任务唤醒，否则就绪边沿可能永久丢失。
 
 ### Socket 选项
 

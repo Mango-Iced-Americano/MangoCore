@@ -271,9 +271,6 @@ impl TcpSocket {
     /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
     /// 用于 poll 后的批量唤醒，避免无差别唤醒造成的活锁（connect 在 SynSent 被反复唤醒）。
     pub fn wake_if_ready(&self) {
-        // `try_poll()` may reach here from a wait condition closure that holds
-        // one of these queues. Best-effort task wakes avoid re-entering it;
-        // listener notification still happens unconditionally.
         // EventWaitQueue callbacks are edge notifications.  Publish only bits
         // that became ready in this refresh; repeatedly notifying every socket
         // that remains writable would turn EPOLLET back into level-triggered
@@ -286,8 +283,7 @@ impl TcpSocket {
             became_ready & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
         );
         if !accept_events.is_empty() {
-            self.accept_waiters
-                .try_notify_events_all(accept_events);
+            self.accept_waiters.notify_events_all(accept_events);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
@@ -296,8 +292,7 @@ impl TcpSocket {
                 & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits(),
         );
         if !connect_events.is_empty() {
-            self.connect_waiters
-                .try_notify_events_all(connect_events);
+            self.connect_waiters.notify_events_all(connect_events);
         }
 
         // recv 等待者：有数据可读、对端关闭或 socket 出错。通知载荷只能
@@ -313,8 +308,7 @@ impl TcpSocket {
                     .bits(),
         );
         if !recv_events.is_empty() {
-            self.recv_waiters
-                .try_notify_events_at_most(recv_events, 1);
+            self.recv_waiters.notify_events_at_most(recv_events, 1);
         }
 
         // send 等待者：发送缓冲从不可写转为可写，或 socket 关闭/出错。
@@ -327,8 +321,7 @@ impl TcpSocket {
                     .bits(),
         );
         if !send_events.is_empty() {
-            self.send_waiters
-                .try_notify_events_at_most(send_events, 1);
+            self.send_waiters.notify_events_at_most(send_events, 1);
         }
     }
 
@@ -613,6 +606,10 @@ impl Socket for TcpSocket {
     /// - `EAGAIN`：仍在握手中
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         NET_INTERFACE.try_poll();
+        self.try_connect_without_poll()
+    }
+
+    fn try_connect_without_poll(&self) -> Result<isize, SyscallErr> {
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
@@ -940,6 +937,11 @@ impl Socket for TcpSocket {
                 NET_INTERFACE.try_poll();
             }
         }
+        self.try_recv_without_poll(buf)
+    }
+
+    fn try_recv_without_poll(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        let fast = self.fast_key_established();
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
             #[cfg(feature = "net_perf_diag")]
@@ -1034,6 +1036,11 @@ impl Socket for TcpSocket {
                 NET_INTERFACE.try_poll();
             }
         }
+        self.try_send_without_poll(buf, _flags)
+    }
+
+    fn try_send_without_poll(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
+        let fast = self.fast_key_established();
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
@@ -1043,7 +1050,7 @@ impl Socket for TcpSocket {
             matches!(&*inner, Inner::Connecting(_))
         };
         if is_connecting {
-            let _ = self.try_connect();
+            let _ = self.try_connect_without_poll();
         }
 
         if let Some((route, _ifindex)) = fast {
@@ -1085,6 +1092,29 @@ impl Socket for TcpSocket {
         // Refresh from smoltcp so a later writable transition produces an edge.
         self.update_io_events();
         ret
+    }
+
+    fn try_recvmsg_without_poll(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(isize, Option<Endpoint>), SyscallErr> {
+        self.try_recv_without_poll(buf).map(|n| (n, None))
+    }
+
+    fn try_peek_recvmsg_without_poll(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(isize, Option<Endpoint>), SyscallErr> {
+        self.try_recvmsg_without_poll(buf)
+    }
+
+    fn try_sendmsg_without_poll(
+        &self,
+        buf: &[u8],
+        _dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        self.try_send_without_poll(buf, flags)
     }
 
     fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {

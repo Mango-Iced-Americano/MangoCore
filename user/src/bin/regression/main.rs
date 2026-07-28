@@ -24,6 +24,9 @@ mod regression_eventfd;
 mod regression_epoll;
 mod regression_futex;
 mod regression_timerfd;
+mod regression_ipc_sem;
+mod regression_nanosleep;
+mod regression_futex_requeue;
 
 use user_lib::println;
 
@@ -31,7 +34,7 @@ use user_lib::println;
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0u32;
     let mut failed = 0u32;
-    let total = 16u32;
+    let total = 19u32;
 
     println!("TAP version 13");
     println!("1..{}", total);
@@ -116,6 +119,21 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let r = regression_timerfd::run();
     if r == 0 { passed += 1; println!("ok 16 timerfd"); }
     else { failed += 1; println!("not ok 16 timerfd"); }
+
+    // Test 17: SysV semaphore release wakes a blocking decrement
+    let r = regression_ipc_sem::run();
+    if r == 0 { passed += 1; println!("ok 17 ipc_sem"); }
+    else { failed += 1; println!("not ok 17 ipc_sem"); }
+
+    // Test 18: monotonic nanosleep blocks and interrupted nanosleep reports remaining time
+    let r = regression_nanosleep::run();
+    if r == 0 { passed += 1; println!("ok 18 nanosleep"); }
+    else { failed += 1; println!("not ok 18 nanosleep"); }
+
+    // Test 19: FUTEX_CMP_REQUEUE moves a waiting child before wakeup
+    let r = regression_futex_requeue::run();
+    if r == 0 { passed += 1; println!("ok 19 futex_requeue"); }
+    else { failed += 1; println!("not ok 19 futex_requeue"); }
 
     println!("# results: {} passed, {} failed, {} total", passed, failed, total);
 

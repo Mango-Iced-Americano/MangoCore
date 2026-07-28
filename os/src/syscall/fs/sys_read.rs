@@ -24,6 +24,19 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let is_nonblock = file.is_nonblock();
     if is_nonblock {
         read_into_user(&file, token, buf, count)
+    } else if let Some(signalfd) = file
+        .inode_as_any_ref()
+        .downcast_ref::<crate::syscall::SignalFd>()
+    {
+        let event_queue = signalfd.event_queue();
+        match WaitQueue::wait_until_interruptible(event_queue.wait_queue(), || {
+            let ret = read_into_user(&file, token, buf, count);
+            if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
+        }) {
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
     } else if let Some(wq) = file.inode.read_wait_queue() {
         match WaitQueue::wait_until_interruptible(wq, || {
             let ret = read_into_user(&file, token, buf, count);

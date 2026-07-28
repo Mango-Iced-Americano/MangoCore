@@ -1,4 +1,5 @@
 use super::common::check_addrlen;
+use crate::net::config::NET_INTERFACE;
 use crate::net::socket::UnixEndpoint;
 use crate::net::Endpoint;
 use crate::syscall::utils::wait_io;
@@ -93,7 +94,8 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             log::info!("[sys_connect] nonblock → EINPROGRESS");
             return -(SyscallErr::EINPROGRESS as isize);
         } else {
-            WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_connect() {
+            NET_INTERFACE.poll();
+            WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_connect_without_poll() {
                 Ok(n) => Some(n as isize),
                 Err(SyscallErr::EAGAIN) => None,
                 Err(e) => Some(-(e as isize)),

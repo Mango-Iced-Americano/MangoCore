@@ -124,9 +124,9 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
 
     let mut try_recv = || {
         if is_peek {
-            socket.try_peek_recvmsg(&mut buf)
+            socket.try_peek_recvmsg_without_poll(&mut buf)
         } else {
-            socket.try_recvmsg(&mut buf)
+            socket.try_recvmsg_without_poll(&mut buf)
         }
     };
     // Locking: `socket.recv_wait_queue()` 由 socket 接收路径唤醒（数据到达时
@@ -141,6 +141,7 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 Err(e) => -(e as isize),
             }
         } else {
+            NET_INTERFACE.poll();
             WaitQueue::wait_until_interruptible(wq, || match try_recv() {
                 Ok((n, _)) => Some(n as isize),
                 Err(SyscallErr::EAGAIN) => None,

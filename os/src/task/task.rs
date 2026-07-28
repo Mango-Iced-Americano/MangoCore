@@ -30,7 +30,7 @@ use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::errno::{EFAULT, EISDIR, ENOEXEC, ENOMEM};
-use crate::syscall::{shm_clone_attachments, CloneFlags};
+use crate::syscall::{shm_clone_attachments, CloneFlags, SignalFd};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -1539,6 +1539,21 @@ impl TaskControlBlock {
                 None,
             )
         };
+        if !flags.contains(CloneFlags::CLONE_SIGHAND) {
+            let child_event_queue = process.signal_event_queue();
+            let files = process.files();
+            let fd_count = files.lock().len();
+            for fd in 0..fd_count {
+                let file = match files.lock().get_file(fd) {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
+                let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
+                if let Some(signalfd) = inode.as_any_ref().downcast_ref::<SignalFd>() {
+                    signalfd.rebind_event_queue(child_event_queue.clone());
+                }
+            }
+        }
         // 分配内核栈
         let kstack = kstack_alloc();
         let kstack_top = kstack.get_top();

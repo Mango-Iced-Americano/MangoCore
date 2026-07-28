@@ -73,6 +73,9 @@ const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
+const SYSCALL_SEMGET: usize = 190;
+const SYSCALL_SEMCTL: usize = 191;
+const SYSCALL_SEMOP: usize = 193;
 const SYSCALL_SBRK: usize = 213;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
@@ -471,6 +474,14 @@ pub struct TimeSpec {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
+pub struct SemBuf {
+    pub sem_num: u16,
+    pub sem_op: i16,
+    pub sem_flg: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct TimerFdSpec {
     pub it_interval: TimeSpec,
     pub it_value: TimeSpec,
@@ -507,6 +518,27 @@ pub fn sys_futex(
     syscall6(
         SYSCALL_FUTEX,
         [uaddr as usize, op as usize, val as usize, timeout as usize, uaddr2 as usize, val3 as usize],
+    )
+}
+
+pub fn sys_futex_cmp_requeue(
+    uaddr: *mut u32,
+    wake_count: u32,
+    requeue_count: u32,
+    uaddr2: *mut u32,
+    expected: u32,
+) -> isize {
+    const FUTEX_CMP_REQUEUE: u32 = 4;
+    syscall6(
+        SYSCALL_FUTEX,
+        [
+            uaddr as usize,
+            FUTEX_CMP_REQUEUE as usize,
+            wake_count as usize,
+            requeue_count as usize,
+            uaddr2 as usize,
+            expected as usize,
+        ],
     )
 }
 
@@ -697,6 +729,25 @@ pub fn sys_clock_nanosleep(
         SYSCALL_CLOCK_NANOSLEEP,
         [clock_id, flags as usize, req as usize, rem as usize],
     )
+}
+
+pub fn sys_nanosleep(req: &TimeSpec, rem: &mut TimeSpec) -> isize {
+    syscall(
+        SYSCALL_NANOSLEEP,
+        [req as *const TimeSpec as usize, rem as *mut TimeSpec as usize, 0],
+    )
+}
+
+pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
+    syscall(SYSCALL_SEMGET, [key as usize, nsems, semflg])
+}
+
+pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
+    syscall4(SYSCALL_SEMCTL, [semid as usize, semnum, cmd, arg])
+}
+
+pub fn sys_semop(semid: i32, ops: &[SemBuf]) -> isize {
+    syscall(SYSCALL_SEMOP, [semid as usize, ops.as_ptr() as usize, ops.len()])
 }
 
 // ── mmap / mprotect / munmap wrappers ──────────────────────────────────

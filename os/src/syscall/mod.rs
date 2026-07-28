@@ -29,6 +29,7 @@ pub use process::{
     sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits, sysv_sem_proc_snapshot,
     sysv_shm_proc_snapshot, sysv_shmall, sysv_shmmax, sysv_shmmni, CloneFlags,
 };
+pub(crate) use process::SignalFd;
 use syscall_id::*;
 
 #[cfg(feature = "riscv")]

@@ -219,7 +219,9 @@ poll_once()
 
 **阶段 2f — UDP 分发**：`dispatch_udp_packets()` 从 smoltcp udp::Socket 的接收缓冲区抽干数据，推送到 OS 层 `UdpSocket` 的 `rx_queue`，并唤醒接收等待队列。
 
-**阶段 3 — 全局唤醒**：如果 `poll_once` 推进了协议栈（有数据收发），则调用 `wake_tcp_waiters()` 和 `wake_raw_waiters()`，遍历全局 `TCP_SOCKETS` 和 `RAW_SOCKETS` 列表，唤醒有数据就绪的等待队列。
+**阶段 3 — 全局唤醒**：如果 `poll_once` 推进了协议栈（有数据收发），则调用 `wake_tcp_waiters()` 和 `wake_raw_waiters()`，遍历全局 `TCP_SOCKETS` 和 `RAW_SOCKETS` 列表，可靠唤醒有数据就绪的等待队列。
+
+**WaitQueue 锁序**：网络 syscall 在调用 `wait_until_interruptible` 前先执行 `NET_INTERFACE.poll()`；条件闭包只调用 TCP 的 `_without_poll` 状态检查。poll 可能在阶段 3 重入同一 `EventWaitQueue` 的通知路径，因此不得在条件闭包或其调用链中执行 poll，也不得将通知降级为 best-effort `try_lock()`。
 
 **阶段 4 — accept 唤醒**：无条件调用 `wake_tcp_accept_waiters()`，因为即使 smoltcp 未报告 poll 进展（`progressed == false`），也可能有新的连接请求到达。
 

@@ -4,7 +4,7 @@ module: "fs/special-fds"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-28"
+last_updated: "2026-07-29"
 code_paths:
   - "os/src/fs/eventfd.rs"
   - "os/src/fs/timerfd.rs"
@@ -44,7 +44,7 @@ eventfd、timerfd、pidfd 和 signalfd 是四种通过标准文件描述符接�
 - 支持 `*_NONBLOCK` 和 `*_CLOEXEC` 标志
 - 集成 VFS 框架，通过 `File` / `FdTable` 管理
 
-四种 fd 都通过 `read_wait_queue()` 或 `read_event_queue()` 接入 poll/epoll。signalfd 的队列挂在共享 `sighand`，同一线程组的所有 signalfd 共用该通知点。
+eventfd、timerfd 与 pidfd 通过 `read_wait_queue()` 或 `read_event_queue()` 接入 poll/epoll。signalfd 的通知队列挂在共享 `sighand`；阻塞 `read(2)` 先克隆其队列 `Arc` 再进入 `WaitQueue`，使 fork 后的子进程可安全等待自己的通知点。
 
 ## eventfd -- 事件通知 fd
 

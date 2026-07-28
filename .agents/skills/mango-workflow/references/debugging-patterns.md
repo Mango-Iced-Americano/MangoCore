@@ -463,3 +463,12 @@
 - **修复**: 每次等待创建共享 `Arc<WaiterState>`；释放保护锁后用 CAS 执行 `Idle → Sleeping`，唤醒方先从队列移除 waiter 再写 `Notified`。signal/timeout 先写 `Closed`，从所有队列删除 waiter，最后复查条件。多队列必须注册同一个 waiter，保证第一个通知获胜。
 - **教训**: 调度状态只能描述任务是否可运行，不能承担一次性通知语义；任何“注册 → 解锁 → block”协议都需要独立的原子握手和取消状态。
 - **相关文件**: `os/src/task/manager.rs`
+
+## WaitQueue 条件闭包重入
+
+### 网络 poll 从条件闭包重入 EventWaitQueue
+
+- **根因**: `WaitQueue::wait_until_interruptible()` 的条件闭包会在持有 waitqueue 锁时执行；若闭包调用的 TCP `try_*` 方法再执行 `NET_INTERFACE.try_poll()`，poll 回调会通过 `wake_tcp_waiters()`/`wake_raw_waiters()` 通知同一个 `EventWaitQueue`，对不可重入锁再次加锁而死锁。
+- **修复**: 在进入 `wait_until_interruptible()` 前执行一次 `NET_INTERFACE.poll()`；条件闭包只调用无 poll 的状态检查变体。通知路径始终使用 `notify_events_all`/`notify_events_at_most`，不能以 `try_lock()` 失败跳过唤醒，否则会丢失就绪通知。
+- **教训**: “通知时跳过锁竞争”不是死锁修复；它把确定性死锁替换成数据丢失。对可能触发 wake 回调的操作，应把副作用移出持锁条件闭包，而非削弱回调的交付保证。
+- **相关文件**: `os/src/task/manager.rs`, `os/src/net/socket/inet/stream/mod.rs`, `os/src/fs/vfs/event.rs`

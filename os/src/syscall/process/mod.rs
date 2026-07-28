@@ -60,6 +60,7 @@ pub use signal::{
     sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_signalfd4,
     sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
+pub(crate) use signal::SignalFd;
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,
     sys_clock_settime, sys_get_time, sys_getitimer, sys_getrusage, sys_gettimeofday, sys_nanosleep,

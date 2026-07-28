@@ -248,14 +248,16 @@ fn send_stream_chunked(
         };
         let copied = ubuf.read(&mut kbuf[..accessible]);
 
-        let send_fn =
-            || socket.try_sendmsg(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags);
+        let send_fn = || {
+            socket.try_sendmsg_without_poll(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags)
+        };
 
         // Locking: `socket.send_wait_queue()` 由 socket 发送路径唤醒（发送缓冲区
         // 腾出空间时 smoltcp 调用 `dispatch()` → `wake_one_if()`）。
         // `wait_until_interruptible` 的条件闭包仅调用 `send_fn()`（即 `try_sendmsg()`），
         // 不持有 socket 内部锁或 `NET_INTERFACE` 全局锁，不会导致锁顺序反转。
         let sent: isize = if let Some(wq) = socket.send_wait_queue() {
+            NET_INTERFACE.poll();
             let result = WaitQueue::wait_until_interruptible(wq, || match send_fn() {
                 Ok(n) => Some(n),
                 Err(SyscallErr::EAGAIN) => None,

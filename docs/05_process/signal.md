@@ -31,22 +31,24 @@ syscall 层负责参数和权限校验；task/signal 层负责具体投递、取
 
 `signalfd` 和 `sigtimedwait` 取 pending 时会先看线程队列，再看进程 shared pending。
 
-`SignalFd` 把这一语义暴露成一个可读的 `IndexNode`。结构体只保存 mask 和 metadata，pending 数据仍在 TCB/PCB 的信号队列里：
+`SignalFd` 把这一语义暴露成一个可读的 `IndexNode`。除 mask 和 metadata 外，它保存可重绑定的 `Sighand` 事件队列；pending 数据仍在 TCB/PCB 的信号队列里：
 
 ```rust
 struct SignalFd {
     mask: Mutex<Signals>,
     metadata: Metadata,
+    event_queue: Mutex<Arc<EventWaitQueue>>,
 }
 
 impl SignalFd {
-    fn new(mask: Signals) -> Self {
+    fn new(mask: Signals, event_queue: Arc<EventWaitQueue>) -> Self {
         Self {
             mask: Mutex::new(mask),
             metadata: Metadata::new(
                 FileType::File,
                 InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
             ),
+            event_queue: Mutex::new(event_queue),
         }
     }
 
@@ -57,8 +59,14 @@ impl SignalFd {
     fn pending_mask(&self) -> Signals {
         *self.mask.lock()
     }
+
+    fn rebind_event_queue(&self, new_queue: Arc<EventWaitQueue>) {
+        *self.event_queue.lock() = new_queue;
+    }
 }
 ```
+
+fork/clone 未设置 `CLONE_SIGHAND` 时会创建新的 `Sighand` 与事件队列。fd table 复制完成后，子进程遍历继承的 signalfd 并调用 `rebind_event_queue()`；因此子进程的阻塞 signalfd read 只会由子进程收到的信号唤醒。该路径不改变 VFS 的 `PollWaitQueue`、`EventQueueHandle` 或 `IndexNode` 接口。
 
 线程级 pending 和进程级 pending 的分离对应 Linux 的两个投递目标：`tkill/tgkill` 指向具体线程，所以进入 TCB；`kill(pid)` 指向线程组，所以进入 PCB 的 shared pending，之后由可接收该信号的线程在返回用户态或等待信号时取走。信号 mask 是线程级状态，因此同一个进程里的不同线程可能对 shared pending 信号有不同可接收性。
 
