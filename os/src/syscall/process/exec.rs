@@ -8,7 +8,7 @@ use crate::mm::{UserCString, UserPtr, USER_STACK_ABI_ALIGN};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task_ref, current_user_token, exit_current_and_run_next, is_writable_inode_busy,
+    current_task, current_user_token, exit_current_and_run_next, is_writable_inode_busy,
     AuxvEntry,
 };
 
@@ -105,7 +105,7 @@ fn check_exec_metadata(file: &vfs::File) -> Result<(), isize> {
 fn has_exec_access(metadata: &vfs::Metadata) -> bool {
     let mode = metadata.mode.bits() & 0o777;
     let exec_any = (mode & 0o111) != 0;
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
 
     if inner.fsuid == 0 {
@@ -347,7 +347,7 @@ fn exec_opened_file(
         return EISDIR;
     }
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     show_frame_consumption! {
         "load_elf";
         // Try zero-copy direct loader first; fall back to old kmap-based loader
@@ -358,6 +358,8 @@ fn exec_opened_file(
             other => other,
         };
         if let Err(_errno) = result {
+            // exit 切回 idle 后不会返回本 syscall 栈帧，不能把本地 Arc 留在栈上。
+            drop(task);
             exit_current_and_run_next(127);
         };
     }
@@ -368,7 +370,7 @@ fn exec_opened_file(
 }
 
 fn clone_fd_file(fd: usize) -> Result<Arc<vfs::File>, isize> {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(fd).map_err(|e| -(e as isize))?;
@@ -383,7 +385,7 @@ fn reopen_exec_fd(file: &vfs::File) -> Result<Arc<vfs::File>, isize> {
 }
 
 fn resolve_exec_start_inode(dirfd: usize, path: &str) -> Result<Arc<dyn vfs::IndexNode>, isize> {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if path.starts_with('/') || dirfd == crate::syscall::fs::AT_FDCWD {
         return Ok(task.process.fs().lock().working_inode.inode.clone());
     }
@@ -397,7 +399,7 @@ fn resolve_exec_start_inode(dirfd: usize, path: &str) -> Result<Arc<dyn vfs::Ind
 }
 
 pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *const u8) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {
@@ -435,7 +437,7 @@ pub fn sys_execveat(
     const AT_EMPTY_PATH: u32 = 0x1000;
     const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {

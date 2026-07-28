@@ -14,7 +14,7 @@ use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_euid, current_syscall_name, current_task_ref, current_uid, current_user_token,
+    current_euid, current_syscall_name, current_task, current_uid, current_user_token,
     exit_current_and_run_next, signal::*, ProcessControlBlock, ProcessManager, TaskControlBlock,
 };
 use crate::timer::TimeSpec;
@@ -25,7 +25,7 @@ use log::error;
 use spin::{Mutex, MutexGuard};
 
 fn can_signal_process(target: &ProcessControlBlock) -> bool {
-    let Some(sender) = current_task_ref() else {
+    let Some(sender) = current_task() else {
         return false;
     };
     if sender.pid() == target.pid {
@@ -76,7 +76,7 @@ pub(super) fn pidfd_file_target_pid(file: &File) -> Result<usize, isize> {
 }
 
 fn pidfd_target_pid(pidfd: usize) -> Result<usize, isize> {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(pidfd).map_err(|err| -(err as isize))?;
@@ -199,11 +199,11 @@ impl IndexNode for SignalFd {
         }
 
         let count = core::cmp::min(len, buf.len()) / info_size;
-        let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
+        let task = current_task().ok_or(SyscallErr::ESRCH)?;
         let mask = self.pending_mask();
         let mut written = 0usize;
         for slot in 0..count {
-            let Some(pending) = take_pending_signal_matching(task, mask) else {
+            let Some(pending) = take_pending_signal_matching(&task, mask) else {
                 break;
             };
             let info = SignalfdSiginfo::from_siginfo(pending.siginfo);
@@ -234,8 +234,8 @@ impl IndexNode for SignalFd {
     }
 
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
-        let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
-        if has_pending_signal_matching(task, self.pending_mask()) {
+        let task = current_task().ok_or(SyscallErr::ESRCH)?;
+        if has_pending_signal_matching(&task, self.pending_mask()) {
             Ok((EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits())
         } else {
             Ok(0)
@@ -288,7 +288,7 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
     }
 
     let (token, files_ref) = {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         (current_user_token(), task.process.files())
     };
     let sigmask = match read_signalfd_mask(token, mask, sigsetsize) {
@@ -342,7 +342,7 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if signal.contains(Signals::SIGKILL) {
-        let (sender_tid, sender_pid) = current_task_ref()
+        let (sender_tid, sender_pid) = current_task()
             .map(|task| (task.gettid(), task.pid()))
             .unwrap_or((0, 0));
         log::warn!(
@@ -355,7 +355,7 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     }
     let pid_signed = pid as isize;
     if pid_signed > 0 {
-        if let Some(task_ref) = current_task_ref() {
+        if let Some(task_ref) = current_task() {
             if task_ref.pid() == pid && task_ref.process.live_thread_count() == 1 {
                 send_process_signal_to_current_task(&task_ref.process, signal);
                 return SUCCESS;
@@ -401,7 +401,7 @@ pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
         Err(err) => return -(err as isize),
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let files_ref = task.process.files();
     let mut fd_table = files_ref.lock();
     match fd_table.alloc_fd(file, true) {
@@ -439,7 +439,7 @@ pub fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, flags: usize) -> isize {
         file
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let files_ref = task.process.files();
     let mut fd_table = files_ref.lock();
     match fd_table.alloc_fd(remote_file, true) {
@@ -539,7 +539,7 @@ pub fn sys_tkill(tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if signal.contains(Signals::SIGKILL) {
-        let (sender_tid, sender_pid) = current_task_ref()
+        let (sender_tid, sender_pid) = current_task()
             .map(|task| (task.gettid(), task.pid()))
             .unwrap_or((0, 0));
         log::warn!(
@@ -569,7 +569,7 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if signal.contains(Signals::SIGKILL) {
-        let (sender_tid, sender_pid) = current_task_ref()
+        let (sender_tid, sender_pid) = current_task()
             .map(|task| (task.gettid(), task.pid()))
             .unwrap_or((0, 0));
         log::warn!(
@@ -600,7 +600,7 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
         Err(_) => return EINVAL,
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let queued_siginfo = if info != 0 {
         match UserPtr::<SigInfo>::from_addr(info).read(token) {
@@ -690,7 +690,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     if !valid_rt_sigset_size(sigsetsize) {
         return -(SyscallErr::EINVAL as isize);
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let pending = {
         let inner = task.acquire_inner_lock();
@@ -720,7 +720,7 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> isize {
         Err(_) => return EINVAL,
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let siginfo = match UserPtr::<SigInfo>::from_addr(info).read(current_user_token()) {
         Ok(siginfo) => siginfo,
         Err(_) => return EFAULT,
@@ -774,7 +774,7 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {
 
 pub fn sys_sigreturn() -> isize {
     // mark not processing signal handler
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
 
@@ -788,6 +788,7 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
             drop(inner);
+            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -799,6 +800,7 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
             drop(inner);
+            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -807,6 +809,7 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
             drop(inner);
+            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -815,6 +818,7 @@ pub fn sys_sigreturn() -> isize {
         Err(_) => {
             error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
             drop(inner);
+            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -827,6 +831,7 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] bad LSX context in signal frame, send SIGSEGV");
             drop(inner);
+            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -840,6 +845,7 @@ pub fn sys_sigreturn() -> isize {
     {
         error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
         drop(inner);
+        drop(task);
         exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
     }
     #[cfg(feature = "loongarch64")]

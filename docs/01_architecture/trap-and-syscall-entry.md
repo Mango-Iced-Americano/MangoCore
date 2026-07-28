@@ -88,7 +88,7 @@ pub fn trap_handler() -> ! {
 
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
         let _trap_start = crate::task::perf::perf_time_now();
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
@@ -120,7 +120,7 @@ pub fn trap_handler() -> ! {
     }
 
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
@@ -131,7 +131,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             frame_reserve(3);
@@ -177,7 +177,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
@@ -199,7 +199,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.refresh_real_timer();
         inner.update_process_times_leave_trap(scause.cause());
@@ -247,7 +247,7 @@ pub fn trap_handler() -> ! {
 
     if let Trap::Exception(Exception::Syscall) = cause {
         let _trap_start = crate::task::perf::perf_time_now();
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
@@ -279,7 +279,7 @@ pub fn trap_handler() -> ! {
     }
 
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
@@ -292,7 +292,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::PageModifyFault)
         | Trap::Exception(Exception::PageNonReadableFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
             frame_reserve(3);
@@ -429,7 +429,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_leave_trap(cause);
     }
@@ -543,14 +543,23 @@ RISC-V 返回路径：
 ```
 let task = do_signal();
 set_user_trap_entry();
+trap_cx.kernel_cpu_local = cpu_local_ptr();
+trap_cx.prepare_user_return();
 let trap_cx_ptr = task.trap_cx_user_va();
 let user_satp = current_user_token();
 let restore_va = __restore - __alltraps + TRAMPOLINE;
+drop(task);
 fence.i;
 jr restore_va(a0=trap_cx_ptr, a1=user_satp)
 ```
 
 `set_user_trap_entry()` 把 `stvec` 设置为 `TRAMPOLINE`。恢复汇编由 trampoline 映射执行。
+返回前必须把保存态规范为 `SPP=User、SIE=0、SPIE=1`：`__restore` 写入
+`sstatus` 后还要恢复 `sepc` 和通用寄存器，期间仍处于 S-mode；只有最终 `sret`
+才能从 `SPIE` 原子恢复 `SIE`。若保存态提前携带 `SIE=1`，timer/IPI 可在半恢复
+现场上嵌套进入，进而破坏用户寄存器。该约束来自 RISC-V 特权架构的
+[Supervisor Status 规范](https://docs.riscv.org/reference/isa/priv/supervisor.html)：显式写
+`sstatus` 后必须立即重新评估中断条件，而 `sret` 才执行 `SIE <- SPIE`。
 
 源码实现如下：
 
@@ -559,9 +568,16 @@ jr restore_va(a0=trap_cx_ptr, a1=user_satp)
 pub fn trap_return() -> ! {
     let task = do_signal();
     set_user_trap_entry();
+    {
+        let inner = task.acquire_inner_lock();
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
+        trap_cx.prepare_user_return();
+    }
     let trap_cx_ptr = task.trap_cx_user_va();
     let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    drop(task);
     unsafe {
         asm!(
             "fence.i",
@@ -574,6 +590,11 @@ pub fn trap_return() -> ! {
     }
 }
 ```
+
+syscall 分支自身通过 `current_task()` 持有一个 `Arc<TaskControlBlock>`，也必须在调用
+`trap_return()` 前显式 `drop(task)`。原因是返回汇编标记为 `noreturn`，Rust 不会展开
+调用者栈帧；若依赖作用域自动析构，每次 syscall 都会永久泄漏一个强引用。LA64 的
+syscall 分支遵守同一条生命周期规则。
 
 ### 8.2 LoongArch64 `trap_return()`
 

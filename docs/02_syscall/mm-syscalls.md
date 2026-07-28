@@ -71,7 +71,7 @@ if prot & PROT_WRITE != 0 {
 `sys_sbrk(increment)`：
 
 ```
-task = current_task_ref()
+task = current_task()
 vm = task.process.vm()
 new_addr = vm.lock().sbrk(increment)
 return new_addr
@@ -95,7 +95,7 @@ return new_addr
 
 ```rust
 pub fn sys_brk(brk_addr: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let vm = task.process.vm();
     let mut memory_set = vm.lock();
     let new_addr = if brk_addr == 0 {
@@ -163,7 +163,7 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let (files_ref, vm_ref) = {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         (task.process.files(), task.process.vm())
     };
     let fd_file = if flags & MapFlags::MAP_ANONYMOUS.bits() == 0 {

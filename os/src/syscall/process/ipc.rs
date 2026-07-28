@@ -13,7 +13,7 @@ use crate::mm::{
 use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task_ref, current_user_token,
+    current_task, current_user_token,
     signal::{send_process_signal_info, SigInfo, Signals},
     ProcessManager, WaitQueue, WaitResult,
 };
@@ -837,7 +837,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
         };
     }
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mapped = task.process.vm().lock().shm_mmap(
         attach_addr,
         size,
@@ -878,7 +878,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
 
 pub fn sys_shmdt(shmaddr: usize) -> isize {
     let mut detach = None;
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let pid = task.pid();
     let current_pid = pid as i32;
     {
@@ -1297,19 +1297,19 @@ pub fn shm_clone_attachments(parent_pid: usize, child_pid: usize) -> Result<(), 
 }
 
 fn current_pid_i32() -> i32 {
-    current_task_ref()
+    current_task()
         .map(|task| task.pid() as i32)
         .unwrap_or(0)
 }
 
 fn current_ipc_ids() -> (u32, u32) {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     (inner.euid, inner.egid)
 }
 
 fn current_ipc_ns_id() -> u64 {
-    current_task_ref()
+    current_task()
         .map(|task| task.process.ipc().id)
         .unwrap_or(0)
 }
@@ -2749,7 +2749,7 @@ fn has_mq_permission(inner: &MqQueueInner, requested: u32) -> bool {
 }
 
 fn mq_netlink_socket_from_fd(fd: usize) -> Result<Arc<File>, isize> {
-    let task = current_task_ref().ok_or(EBADF)?;
+    let task = current_task().ok_or(EBADF)?;
     let files = task.process.files();
     let fd_table = files.lock();
     let file = fd_table.get_file(fd).map_err(|err| -(err as isize))?;
@@ -2808,7 +2808,7 @@ fn mq_deliver_notification(notification: MqNotification) {
 }
 
 fn mq_descriptor_from_fd(mqdes: usize) -> Result<(Arc<File>, Arc<MqQueue>), isize> {
-    let task = current_task_ref().ok_or(EBADF)?;
+    let task = current_task().ok_or(EBADF)?;
     let file = {
         let files = task.process.files();
         let fd_table = files.lock();
@@ -2977,7 +2977,7 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
         }
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let ret = match task
         .process
         .files()
@@ -3199,7 +3199,7 @@ pub fn sys_mq_notify(mqdes: usize, sevp: usize) -> isize {
             return errno;
         }
 
-        let owner_pid = current_task_ref().map(|task| task.pid()).unwrap_or(0);
+        let owner_pid = current_task().map(|task| task.pid()).unwrap_or(0);
         match event.sigev_notify {
             SIGEV_NONE => Some(MqNotification::None),
             SIGEV_SIGNAL => {

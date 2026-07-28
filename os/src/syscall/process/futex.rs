@@ -5,7 +5,7 @@ use crate::task::threads::{
     do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
     FutexWaitEntry,
 };
-use crate::task::{current_task_ref, current_user_token, threads, TaskControlBlock};
+use crate::task::{current_task, current_user_token, threads, TaskControlBlock};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -71,8 +71,8 @@ fn futex_key_for(
 }
 
 fn current_futex_key(uaddr: usize, is_private: bool) -> Result<FutexKey, isize> {
-    let task = current_task_ref().unwrap();
-    futex_key_for(task, uaddr, is_private)
+    let task = current_task().unwrap();
+    futex_key_for(&task, uaddr, is_private)
 }
 
 fn read_timeout(timeout: *const TimeSpec, token: usize) -> Result<Option<TimeSpec>, isize> {
@@ -219,7 +219,7 @@ pub fn sys_futex(
                 }
             }
             match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Private(key)) => current_task_ref()
+                Ok(FutexKey::Private(key)) => current_task()
                     .unwrap()
                     .process
                     .futex()
@@ -261,7 +261,7 @@ pub fn sys_futex(
                 Err(errno) => return errno,
             };
             match (key, key2) {
-                (FutexKey::Private(key), FutexKey::Private(key2)) => current_task_ref()
+                (FutexKey::Private(key), FutexKey::Private(key2)) => current_task()
                     .unwrap()
                     .process
                     .futex()

@@ -10,7 +10,7 @@ use crate::fs::{
 };
 use crate::mm::{copy_from_user, UserBufferReader, UserBufferWriter};
 use crate::syscall::errno::*;
-use crate::task::{current_task_ref, current_user_token};
+use crate::task::{current_task, current_user_token};
 use crate::utils::error::SyscallErr;
 
 const BPF_MAP_CREATE: u32 = 0;
@@ -269,7 +269,7 @@ fn write_user_bytes(ptr: u64, data: &[u8]) -> Result<(), isize> {
 }
 
 fn with_bpf_map<R>(fd: u32, f: impl FnOnce(&BpfMapFile) -> Result<R, isize>) -> Result<R, isize> {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let files = task.process.files();
     let fd_table = files.lock();
     let file = fd_table
@@ -298,7 +298,7 @@ fn sys_bpf_map_create(attr_ptr: usize, size: usize) -> isize {
         Err(err) => return -(err as isize),
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let files = task.process.files();
     let ret = match files.lock().alloc_fd(file, true) {
         Ok(fd) => fd as isize,

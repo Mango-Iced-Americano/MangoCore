@@ -502,7 +502,6 @@ impl ProcessControlBlock {
         self.trap_context_cache.lock().clear();
         self.inner.lock().vm = Arc::new(Mutex::new(vm));
         self.user_token_hint.store(token, Ordering::Relaxed);
-        super::processor::refresh_current_user_token_for_process(self.pid, token);
     }
 
     pub fn user_token(&self) -> usize {
@@ -671,7 +670,6 @@ impl ProcessControlBlock {
         }
         self.inner.lock().pgid = pgid;
         self.pgid_hint.store(pgid, Ordering::Relaxed);
-        super::processor::refresh_current_process_group_hints(self.pid, pgid, self.getsid());
         0
     }
 
@@ -685,7 +683,6 @@ impl ProcessControlBlock {
         inner.pgid = sid;
         self.sid_hint.store(sid, Ordering::Relaxed);
         self.pgid_hint.store(sid, Ordering::Relaxed);
-        super::processor::refresh_current_process_group_hints(self.pid, sid, sid);
         0
     }
 

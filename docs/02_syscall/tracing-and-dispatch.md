@@ -3,7 +3,7 @@ title: "分发观测与调试入口"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-27
 tags: [syscall, trace, debug, perf]
 ---
 
@@ -18,7 +18,7 @@ syscall 分发层同时承担观测职责：日志、trace、perf、当前 sysca
 | `os/src/syscall/mod.rs` | syscall entry/return 日志、trace_event、perf 记录 |
 | `os/src/trace.rs` | trace ring buffer、tag 解码、Ctrl+T dump |
 | `os/src/task/perf.rs` | syscall cost、seccomp、trap、TLB、调度等统计 |
-| `os/src/task/processor.rs` | 当前 syscall id 和当前任务快捷缓存 |
+| `os/src/task/processor.rs` | Per-CPU 当前 syscall id 和 current 槽 |
 
 ## 2. syscall entry 观测流程
 
@@ -36,13 +36,15 @@ syscall_info_log_enabled = LOG in {info, debug, trace}
 
 ## 3. 当前 syscall id
 
-`task/processor.rs` 中：
+`CpuTaskState` 中：
 
 ```rust
-static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
+current_syscall_id: AtomicUsize,
 ```
 
-`set_current_syscall_id(Some(id))` 在 `heap_trace` 或 `perf_stats` feature 下把 `id + 1` 写入原子变量；0 表示无记录。`current_syscall_name()` 用它在 OOM/panic 诊断中显示当前 syscall 名称。
+`set_current_syscall_id(Some(id))` 在 `heap_trace` 或 `perf_stats` feature 下把
+`id + 1` 写入本 CPU 的原子变量；0 表示无记录。`current_syscall_name()` 用它在
+OOM/panic 诊断中显示当前 CPU 的 syscall 名称，不会读取其他 CPU 的任务状态。
 
 ## 4. 日志开关
 

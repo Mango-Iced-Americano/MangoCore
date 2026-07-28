@@ -90,17 +90,18 @@ fn do_exit(task: &TaskControlBlock, exit_code: u32) {
 }
 
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
-    let task = current_task_ref().unwrap();
-    do_exit(task, exit_code);
+    let task = current_task().unwrap();
+    do_exit(&task, exit_code);
+    drop(task);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
 }
 ```
 
-`exit_current_and_run_next()` 只借用 `Processor.current` 持有的 TCB，不 clone 一个
-永远不会返回析构的本地 Arc。任务先标记 Zombie 并切回 idle；`__switch` 返回后，
-idle 才从 current slot 取出唯一 Arc 并转入 zombie queue。
+`current_task()` 从本 CPU current 槽克隆一个本地 `Arc`。退出路径在完成
+`do_exit()` 后、进入不返回的 `schedule()` 前显式 drop 这个 clone；current 槽
+仍保留 owner。任务切回 idle 后，idle 才从槽位取出 retained Arc 并转入 zombie queue。
 
 `ProcessControlBlock::finish_exit()` 是最后线程退出后的进程级提交点：
 
@@ -181,8 +182,9 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
 当前任务仍运行在自己的内核栈上，不能立即 drop 最后一个 TCB 引用。退出函数：
 
 ```text
-current_task_ref()（Processor.current 保持 owner）
+current_task()（Processor.current 保持 owner）
 do_exit() -> TaskStatus::Zombie
+drop 本地 current Arc
 schedule(idle)
 idle: clear current -> finish_switch_out() -> zombie queue
 ```
@@ -294,7 +296,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         Some(option) => option,
         None => return EINVAL,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let process = task.process.clone();
     match ProcessManager::wait_child(

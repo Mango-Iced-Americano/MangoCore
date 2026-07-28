@@ -23,7 +23,7 @@ use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
-    current_task_ref, discard_non_actionable_unblocked_signals, has_actionable_signal,
+    discard_non_actionable_unblocked_signals, has_actionable_signal,
     signal::{SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
@@ -1209,8 +1209,8 @@ impl WaitQueue {
                 no_signal && not_timed_out
             });
 
-            let task = current_task_ref().unwrap();
-            wq.lock().finish_wait(task);
+            let task = current_task().unwrap();
+            wq.lock().finish_wait(&task);
             task.wait_io_fallback_active_generation
                 .store(0, AtomicOrdering::Release);
             task.acquire_inner_lock().refresh_real_timer();
@@ -1280,9 +1280,9 @@ impl WaitQueue {
                 no_signal && not_timed_out
             });
 
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut guard = lock.lock();
-            let removed = queue_of(&mut guard).finish_wait(task);
+            let removed = queue_of(&mut guard).finish_wait(&task);
             drop(guard);
             task.acquire_inner_lock().refresh_real_timer();
 
@@ -1389,8 +1389,8 @@ impl WaitQueue {
                 no_signal && not_timed_out && cond().is_none()
             });
 
-            let task = current_task_ref().unwrap();
-            Self::finish_wait_on_queues(queues, task);
+            let task = current_task().unwrap();
+            Self::finish_wait_on_queues(queues, &task);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }

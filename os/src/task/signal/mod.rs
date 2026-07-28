@@ -28,7 +28,7 @@ use crate::task::{
 use alloc::sync::Arc;
 
 use super::task::TaskControlBlock;
-use super::{current_task, current_task_ref, current_user_token};
+use super::{current_task, current_user_token};
 use crate::utils::error::SyscallErr;
 
 mod action;
@@ -330,7 +330,7 @@ impl Debug for SigAction {
 /// * `oldact`: old action
 /// 此函数与RV版本略有不同，但是可以不处理，因为此版本的这个函数鲁棒性更强
 pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigAction) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     match signum {
         0 /* None */ | 9 /* SIGKILL */ | 19 /* SIGSTOP */ | 65.. /* Unsupported */ => {
             warn!("[sigaction] bad signum: {}", signum);
@@ -476,7 +476,7 @@ fn signal_default_dumps_core(signum: u32) -> bool {
 }
 
 fn current_core_dump_enabled() -> bool {
-    current_task_ref()
+    current_task()
         .map(|task| {
             let inner = task.acquire_inner_lock();
             inner.core_limit_cur > 0 && inner.dumpable != 0
@@ -636,8 +636,8 @@ fn wait_for_default_stop_signal() {
             !has_pending_stop_release_signal(task)
         });
 
-        let task = current_task_ref().unwrap();
-        wait_queue.lock().finish_wait(task);
+        let task = current_task().unwrap();
+        wait_queue.lock().finish_wait(&task);
     }
 }
 
@@ -653,10 +653,12 @@ fn signal_should_ptrace_stop(inner: &super::task::TaskControlBlockInner, signal:
     inner.ptrace_traceme && signal != Signals::SIGKILL && signal != Signals::SIGCONT
 }
 
-/// 执行信号处理
-/// 在从内核返回到用户空间前调用
-pub fn do_signal() -> &'static TaskControlBlock {
-    let task = current_task_ref().unwrap();
+/// 执行信号处理，返回仍由本 CPU current 槽拥有的任务。
+///
+/// 调用者会立即进入不返回的用户态恢复汇编，因此必须在跳转前
+/// 显式 `drop` 返回的 `Arc`，不能让它留在永不析构的 trap 栈帧上。
+pub fn do_signal() -> Arc<TaskControlBlock> {
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.pending_oom_kill {
         inner.pending_oom_kill = false;
@@ -667,14 +669,16 @@ pub fn do_signal() -> &'static TaskControlBlock {
             task.pid()
         );
     }
-    while let Some((pending, from_process)) = take_next_pending_signal(task, &mut inner) {
+    while let Some((pending, from_process)) = take_next_pending_signal(&task, &mut inner) {
         let signum = pending.signum();
         let signal = pending.signal;
         let sighand_ref = task.process.sighand();
         let mut sighand = sighand_ref.lock();
         if signal_should_ptrace_stop(&inner, signal) {
             drop(sighand);
+            drop(sighand_ref);
             drop(inner);
+            drop(task);
             stop_current_process_for_signal(signum);
             return do_signal();
         }
@@ -764,6 +768,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
                             error!("[do_signal] Failed to write UserContext to user stack. Send SIGSEGV.");
                             drop(inner);
                             drop(sighand);
+                            drop(sighand_ref);
+                            drop(task);
                             exit_current_with_sigsegv();
                         }
                         if UserPtrMut::from_addr(siginfo_addr)
@@ -775,6 +781,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
                             );
                             drop(inner);
                             drop(sighand);
+                            drop(sighand_ref);
+                            drop(task);
                             exit_current_with_sigsegv();
                         }
                         let trap_cx = inner.get_trap_cx();
@@ -794,9 +802,11 @@ pub fn do_signal() -> &'static TaskControlBlock {
                             Err(_) => {
                                 error!(
                                 "[do_signal] Failed to write sigmask to user stack! Send SIGSEGV."
-                            );
+                                );
                                 drop(inner);
                                 drop(sighand);
+                                drop(sighand_ref);
+                                drop(task);
                                 exit_current_with_sigsegv();
                             }
                         }
@@ -809,9 +819,11 @@ pub fn do_signal() -> &'static TaskControlBlock {
                         {
                             error!(
                             "[do_signal] Failed to write MachineContext to user stack. Send SIGSEGV."
-                        );
+                            );
                             drop(inner);
                             drop(sighand);
+                            drop(sighand_ref);
+                            drop(task);
                             exit_current_with_sigsegv();
                         }
                         #[cfg(feature = "loongarch64")]
@@ -822,6 +834,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
                             error!("[do_signal] Failed to write LSX context to user stack. Send SIGSEGV.");
                             drop(inner);
                             drop(sighand);
+                            drop(sighand_ref);
+                            drop(task);
                             exit_current_with_sigsegv();
                         }
                     }
@@ -838,9 +852,11 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 } else {
                     error!(
                     "[do_signal] User stack will overflow after push trap context! Send SIGSEGV."
-                );
+                    );
                     drop(inner);
                     drop(sighand);
+                    drop(sighand_ref);
+                    drop(task);
                     exit_current_with_sigsegv();
                 }
                 // mask some signals
@@ -887,6 +903,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 }
                 drop(inner);
                 drop(sighand);
+                drop(sighand_ref);
+                drop(task);
                 exit_group_and_run_next(default_signal_wait_status(signal));
             }
             // the current process we are handing is sure to be in RUNNING status, so just ignore SIGCONT
@@ -898,6 +916,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
             Signals::SIGSTOP | Signals::SIGTSTP | Signals::SIGTTIN | Signals::SIGTTOU => {
                 drop(inner);
                 drop(sighand);
+                drop(sighand_ref);
+                drop(task);
                 stop_current_process_for_signal(signum);
                 return do_signal();
             }
@@ -906,6 +926,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 warn!("[do_signal] process terminated due to {:?}", signal);
                 drop(inner);
                 drop(sighand);
+                drop(sighand_ref);
+                drop(task);
                 exit_group_and_run_next(default_signal_wait_status(signal));
             }
         }
@@ -915,7 +937,7 @@ pub fn do_signal() -> &'static TaskControlBlock {
 }
 
 pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let new_stack = match UserPtr::new(ss).read_optional(token) {
         Ok(stack) => stack,
@@ -971,7 +993,7 @@ bitflags! {
 /// In fact, `set` & `oldset` should be 1024 bits `sigset_t`, but we only support 64 signals now.
 /// For the sake of performance, we use `Signals` instead.
 pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset

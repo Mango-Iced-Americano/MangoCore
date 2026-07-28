@@ -162,13 +162,14 @@ task.process.complete_vfork();
 ```
 sys_exit(code)
   └── exit_current_and_run_next(encoded)
-        ├── current_task_ref()（Processor.current 保留 owner）
+        ├── current_task()（Processor.current 保留 owner）
         ├── do_exit(task, encoded)
         │     ├── task.exit_thread_resources()
         │     └── if live_thread_count == 0:
         │           ├── release fcntl locks
         │           ├── shm_detach_process()
         │           └── process.finish_exit()
+        ├── drop 本地 current Arc
         ├── schedule(idle)
         └── idle: finish_switch_out() -> zombie queue
 ```

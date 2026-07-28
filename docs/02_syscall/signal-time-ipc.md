@@ -77,7 +77,7 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
     }
 
     let (token, files_ref) = {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         (current_user_token(), task.process.files())
     };
     let sigmask = match read_signalfd_mask(token, mask, sigsetsize) {
@@ -270,7 +270,7 @@ pub fn sys_timer_create(
         }
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let id = {
         let mut inner = task.acquire_inner_lock();
         if let Some((id, slot)) = inner

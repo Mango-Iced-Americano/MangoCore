@@ -311,7 +311,7 @@ write 0 to clear_child_tid
 2. 线程级退出和进程级退出必须分层处理。
 3. `user_res_slot` 是地址空间内槽位，fork 后独立地址空间可以复用同一 slot。
 4. `CLONE_THREAD` 的 quota 放在线程 TCB，非线程 clone 的 quota 放在 PCB。
-5. `current_task_ref()` 返回短生命周期引用，不能跨调度点保存。
+5. `current_task()` 返回克隆的 `Arc`；进入不返回的 context switch 前必须显式释放。
 6. ABI 保存字段要按实际读写路径描述，不把保存字段扩写成独立子系统。
 
 ## 14. 调试核对点

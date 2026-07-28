@@ -16,11 +16,12 @@ tags: [process, scheduler, task-manager, processor]
 | 文件 | 作用 |
 |------|------|
 | `os/src/task/manager.rs` | `TaskManager`、ready/interruptible/zombie queue、WaitQueue、KernelTimerQueue |
-| `os/src/task/processor.rs` | `Processor`、`run_tasks()`、current task 快速缓存、`schedule()` |
+| `os/src/task/processor.rs` | Per-CPU `CpuTaskState/Processor`、`run_tasks()`、`schedule()` |
 | `os/src/task/mod.rs` | `suspend_current_and_run_next()`、block/exit 调度入口 |
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
-调度器当前仍按 CPU0 单核运行模型组织。ready queue 为主要运行队列；
+调度器当前处于 SMP 过渡阶段：current 槽和 idle context 已按 CPU 拆分，
+但 ready queue 仍是全局容器且普通任务只由 CPU0 取出运行；
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -87,50 +88,40 @@ pub struct Processor {
 | `is_vacant()` | 当前 CPU 是否无任务 |
 | `get_idle_task_cx_ptr()` | 获取 idle context 指针，供 `__switch` 使用 |
 
-`PROCESSOR` 也是全局 `Mutex<Processor>`。
+`Processor` 不再有全局实例。每个 `PerCpu` 内嵌一个 `CpuTaskState`，后者用
+本 CPU 的 `Mutex<Processor>` 保存 current 槽和 idle context。CPU-local
+寄存器选出 `PerCpu` 后，调度路径只能访问所属 CPU 的 `Processor`。
 
-### 4.1 Processor 与 current cache
+### 4.1 CpuTaskState 与 current 槽
 
-`Processor` 定义在 `os/src/task/processor.rs:22`。`current` 持有当前运行任务的强引用，`idle_task_cx` 是 idle 调度上下文。`processor.rs:58` 之后的一组 `CURRENT_*` 原子缓存提供 syscall 热路径查询：
+`CpuTaskState` 的布局为：
 
 ```rust
-static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock>;
-static CURRENT_PID: AtomicUsize;
-static CURRENT_TID: AtomicUsize;
-static CURRENT_PARENT_PID: AtomicUsize;
-static CURRENT_USER_TOKEN: AtomicUsize;
-static CURRENT_UID: AtomicUsize;
-static CURRENT_EUID: AtomicUsize;
-static CURRENT_SUID: AtomicUsize;
-static CURRENT_GID: AtomicUsize;
-static CURRENT_EGID: AtomicUsize;
-static CURRENT_SGID: AtomicUsize;
-static CURRENT_PGID: AtomicUsize;
-static CURRENT_SID: AtomicUsize;
-static CURRENT_SYSCALL_ID: AtomicUsize;
+pub(crate) struct CpuTaskState {
+    processor: Mutex<Processor>,
+    current_pid: AtomicUsize,
+    current_tid: AtomicUsize,
+    current_syscall_id: AtomicUsize,
+}
 ```
 
-这些缓存不是进程状态的唯一来源。真实所有权仍在 TCB/PCB 中；缓存只是在任务切入时发布，在真实切回 idle 后清零。调试 getpid/getuid/uaccess token 异常时，应同时检查 `run_tasks()` 的切入发布和 `finish_current_switch_out()` 的切出清理。
+PID/TID 在 current 槽存续期间不变，因此保留 Per-CPU 无锁快照；syscall ID
+仅用于诊断。父 PID、UID/GID、PGID/SID 和用户页表 token 都可能在任务运行期
+变化，查询时直接读取 TCB/PCB 的权威原子 hint，不再维护需要跨路径刷新的影子缓存。
 
-## 5. current task 快速缓存
+## 5. current task 查询
 
-`processor.rs` 维护一组原子缓存：
+`current_task()` 先由 CPU-local 寄存器定位本 CPU 的 `CpuTaskState`，再在
+`processor` 锁内克隆 current `Arc`，离开函数前释放锁。这样返回值具有真实的
+引用计数生命周期，不再依赖全局裸指针或伪造的 `'static` 引用。
 
-| 缓存 | 用途 |
-|------|------|
-| `CURRENT_TASK_PTR` | syscall 热路径快速得到当前 TCB |
-| `CURRENT_PID/TID/PARENT_PID` | getpid/gettid/getppid |
-| `CURRENT_USER_TOKEN` | uaccess 获取当前用户页表 token |
-| `CURRENT_UID/CURRENT_EUID/CURRENT_SUID/CURRENT_GID/CURRENT_EGID/CURRENT_SGID` | 权限检查热路径 |
-| `CURRENT_PGID/SID` | 进程组、会话查询 |
-| `CURRENT_SYSCALL_ID` | heap_trace/perf_stats 下诊断 OOM syscall |
+panic 诊断不能等待普通锁，也可能发生在 CPU-local 寄存器安装前，因此使用
+`try_current_task()`：先验证寄存器值确实落在 `PER_CPUS` 数组中，再 `try_lock()`。
+CPU-local 不可用或锁正被持有时返回不可用状态，不触发二次 panic。
 
-`run_tasks()` 在切入任务前写入这些缓存；`finish_current_switch_out()` 在
-`__switch` 返回 idle 栈后清零。
-
-`current_task_ref()` 返回 `'static` 引用，但依赖单核和 `PROCESSOR.current` 持有强引用的事实。调用者不能跨调度点保存该引用。
-syscall 受控中断窗口中，timer/IPI hard path 不得解引用这个裸指针；
-只有迁移到 per-CPU current slot 并删除伪造静态生命周期后才能放宽。
+调用者可以在普通函数调用期间持有返回的 `Arc`，但在 `schedule()` 或
+`asm!(noreturn)` 等永不返回边界前必须显式 `drop`。上下文切换不会展开原 Rust
+栈帧，若把本地 `Arc` 带过边界，它的析构函数将永远没有机会运行。
 
 ## 6. run_tasks 主循环阶段
 
@@ -200,8 +191,8 @@ exit_current_and_run_next()
 1. `fetch_task(cpu)` 持有 `TASK_MANAGER` 锁，从 ready queue 取任务。
 2. 同一临界区 CAS `Queued(cpu) -> Running(cpu)`；只有成功者得到任务。
 3. 锁住 task inner，执行 `update_process_times_schedule_in()`。
-4. 写入 current task 原子缓存。
-5. `processor.current = Some(task)`。
+4. 写入本 CPU 不变的 PID/TID 快照。
+5. 在本 CPU `processor` 锁内执行 `current = Some(task)`，随后立即释放锁。
 6. 调用 `__switch(idle_task_cx_ptr, next_task_cx_ptr)`。
 
 任务主动让出或阻塞时，`schedule(task_cx_ptr)` 切回 idle context。
@@ -212,7 +203,7 @@ exit_current_and_run_next()
 不保存 RISC-V `sstatus.SIE` 或 LoongArch `CRMD.IE`。B14 之后，用户
 syscall 可在受控区间带着开中断状态 yield/block。`schedule()` 因此：
 
-1. 在获取 `PROCESSOR` 锁前记住当前任务的中断状态并关闭中断；
+1. 在获取本 CPU processor 锁前记住当前任务的中断状态并关闭中断；
 2. 以 IRQ-off 状态切回 legacy idle scheduler；
 3. 原任务再次被切入时，在 `__switch` 返回后恢复它自己的快照。
 
@@ -263,7 +254,7 @@ idle: clear current -> Blocking(cpu) -> Blocked
 - `sched_state` 是调度状态唯一真值，`task.inner` 不保留影子字段；
 - 一个任务最多属于一个 ready queue 或一个 current slot；interruptible registry
   只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
-- `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit
+- 本 CPU `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit
   都不能在仍使用自身内核栈时提前取走 current Arc；
 - `Queued(cpu)` 退出前必须先从相应队列移除并转为 `Blocked`；直接转 Zombie 会 fail-stop；
 - 必成功的 publish/fetch/switch-out 迁移在所有构建中 fail-stop；只有重复 wake 使用
@@ -302,6 +293,7 @@ idle: clear current -> Blocking(cpu) -> Blocked
 |------|------|
 | 任务不再运行 | 是否停在 interruptible queue，WaitQueue 是否唤醒 |
 | ready queue 中出现 zombie | zombie queue drain 和兜底扫描 |
-| getpid/getuid 返回旧值 | current hint 是否在切换或身份更新时刷新 |
+| getpid/gettid 返回旧值 | 本 CPU current 槽与 PID/TID 快照是否同步发布、清理 |
+| getuid/getpgid/token 返回旧值 | TCB/PCB 权威原子 hint 是否在 setter 中更新 |
 | 非零 nice 任务饿死 | `ready_nonzero_nice_count` 是否更新 |
 | 网络等待无 syscall 时卡住 | 调度循环后台 `try_poll/poll` 是否执行 |

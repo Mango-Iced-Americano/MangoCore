@@ -111,7 +111,7 @@ pub fn commit_limit_kbytes() -> usize {
 
 /// 返回当前任务地址空间已提交用户映射大小，单位 KiB。
 pub fn committed_as_kbytes() -> usize {
-    let vm = match crate::task::current_task_ref() {
+    let vm = match crate::task::current_task() {
         Some(task) => task.process.vm(),
         None => return 0,
     };

@@ -18,7 +18,7 @@ use crate::mm::{copy_from_user, copy_to_user, frame_reserve, FaultAccess, Memory
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
+    current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm, naked_asm};
@@ -211,7 +211,7 @@ pub fn trap_handler() -> ! {
 
     if let Trap::Exception(Exception::Syscall) = cause {
         let _trap_start = crate::task::perf::perf_time_now();
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
@@ -244,11 +244,14 @@ pub fn trap_handler() -> ! {
             let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
             crate::task::perf::record_trap_cost_ticks(_trap_ticks);
         }
+        // trap_return() 通过不返回的恢复汇编离开，当前 Rust 栈帧不会析构；
+        // 提前释放 syscall 分支的临时 Arc，避免每次系统调用累积一个强引用。
+        drop(task);
         trap_return();
     }
 
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
@@ -261,7 +264,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::PageModifyFault)
         | Trap::Exception(Exception::PageNonReadableFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
             // This is where we handle the page fault.
@@ -325,14 +328,14 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::FloatingPointUnavailable)
         | Trap::Exception(Exception::InstructionPrivilegeIllegal) => {
             log::info!("[trap] trigger SIGILL/FPU from exception {:?}", cause);
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGSEGV);
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
@@ -420,7 +423,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_leave_trap(cause);
     }
@@ -504,6 +507,9 @@ pub fn trap_return() -> ! {
     // On LA64, `strampoline` resolves to the kernel-trap stub under the
     // static link. `__restore` is already in the direct-map executable range.
     let restore_va = __restore as usize;
+    // 下方恢复汇编不返回，Rust 不会为 trap 栈帧运行析构。
+    // current 槽仍是任务 owner，因此在跳转前释放这个临时 Arc。
+    drop(task);
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
         println!(

@@ -17,6 +17,8 @@ pub const MAX_CPUS: usize = 8;
 struct PerCpu {
     /// 当前表项对应的 MangoCore 逻辑 CPU 编号，用于校验 CPU-local 指针归属。
     logical_id: usize,
+    /// 本 CPU 独占的 current 槽和 idle 调度上下文。
+    task_state: crate::task::processor::CpuTaskState,
     /// 本 CPU 是否已完成本地初始化；由所属 CPU Release 发布，其他 CPU Acquire 读取。
     online: AtomicBool,
     /// 本 CPU 是否已经切换到独立 idle stack；不表示此刻一定停在 idle 指令中。
@@ -47,6 +49,7 @@ impl PerCpu {
     const fn new(logical_id: usize) -> Self {
         Self {
             logical_id,
+            task_state: crate::task::processor::CpuTaskState::new(),
             online: AtomicBool::new(false),
             idle: AtomicBool::new(false),
             pending_ipi: AtomicU32::new(0),
@@ -514,6 +517,39 @@ pub fn cpu_id() -> usize {
     );
     assert_eq!(PER_CPUS[logical_id].logical_id, logical_id);
     logical_id
+}
+
+/// 尝试根据 CPU-local 寄存器取得本核表项。
+///
+/// panic 可能发生在 `_start` 安装 CPU-local 指针之前，因此诊断路径不能
+/// 直接调用会再次 panic 的 `cpu_id()`。这里只做纯地址校验，不解引用
+/// 未经验证的寄存器值。
+fn try_local_per_cpu() -> Option<&'static PerCpu> {
+    let ptr = crate::hal::cpu_local_ptr();
+    let base = PER_CPUS.as_ptr() as usize;
+    let stride = size_of::<PerCpu>();
+    let offset = ptr.checked_sub(base)?;
+    if offset % stride != 0 {
+        return None;
+    }
+    let logical_id = offset / stride;
+    if logical_id >= CONFIGURED_CPU_COUNT {
+        return None;
+    }
+    let per_cpu = &PER_CPUS[logical_id];
+    (per_cpu.logical_id == logical_id).then_some(per_cpu)
+}
+
+/// 返回本 CPU 的任务调度状态。
+pub(crate) fn local_task_state() -> &'static crate::task::processor::CpuTaskState {
+    &try_local_per_cpu()
+        .expect("CPU-local task state requested before CPU-local initialization")
+        .task_state
+}
+
+/// 不阻塞、不 panic 地尝试返回本 CPU 的任务调度状态。
+pub(crate) fn try_local_task_state() -> Option<&'static crate::task::processor::CpuTaskState> {
+    try_local_per_cpu().map(|per_cpu| &per_cpu.task_state)
 }
 
 const fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> usize {

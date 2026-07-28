@@ -4,7 +4,7 @@ use crate::hal::shutdown;
 use crate::mm::{copy_to_user_array, translated_str};
 use crate::syscall::errno::*;
 use crate::task::{
-    current_euid, current_task_ref, current_user_token, has_ready_task,
+    current_euid, current_task, current_user_token, has_ready_task,
     suspend_current_and_run_next,
 };
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -175,7 +175,7 @@ fn syslog_requires_privilege(action: SyslogAction) -> bool {
 }
 
 fn has_syslog_privilege() -> bool {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     inner.euid == 0 || (inner.cap_effective & ((1u64 << CAP_SYS_ADMIN) | (1u64 << CAP_SYSLOG))) != 0
 }

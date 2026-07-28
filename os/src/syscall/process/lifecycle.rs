@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use crate::mm::{copy_to_user, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task_ref, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
+    current_task, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
     signal::SigInfo, ProcessControlBlock, ProcessManager, Rusage,
 };
 const CAP_SYS_PTRACE: usize = 19;
@@ -45,7 +45,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         Some(option) => option,
         None => return EINVAL,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let process = task.process.clone();
     match ProcessManager::wait_child(
@@ -81,7 +81,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: u32, _ru: *mu
         return EINVAL;
     }
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let process = task.process.clone();
     if idtype != P_PIDFD {
@@ -258,7 +258,7 @@ fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     task.acquire_inner_lock().clear_child_tid = tidptr;
     task.tid.0 as isize
 }
@@ -267,7 +267,7 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
     if len != crate::task::RobustList::HEAD_SIZE {
         return EINVAL;
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     inner.robust_list.head = head;
     //inner.robust_list.len = len;
@@ -275,7 +275,7 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
 }
 
 pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) -> isize {
-    let current = current_task_ref().unwrap();
+    let current = current_task().unwrap();
     let token = current_user_token();
     if pid == 0 {
         let inner = current.acquire_inner_lock();

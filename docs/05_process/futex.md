@@ -237,7 +237,7 @@ pub fn sys_futex(
             }
             match current_futex_key(private_key, is_private) {
                 Ok(FutexKey::Private(key)) => {
-                    current_task_ref().unwrap().process.futex().lock().wake(key, val)
+                    current_task().unwrap().process.futex().lock().wake(key, val)
                 }
                 Ok(FutexKey::Shared(phys_key)) => futex_wake_shared(phys_key, val),
                 Err(errno) => errno,
@@ -276,7 +276,7 @@ pub fn sys_futex(
             };
             match (key, key2) {
                 (FutexKey::Private(key), FutexKey::Private(key2)) => {
-                    current_task_ref()
+                    current_task()
                         .unwrap()
                         .process
                         .futex()
@@ -459,7 +459,7 @@ where
             no_signal && not_timed_out
         });
 
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut guard = lock.lock();
         let removed = queue_of(&mut guard).finish_wait(task);
         drop(guard);

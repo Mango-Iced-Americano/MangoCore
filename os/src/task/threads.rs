@@ -16,7 +16,7 @@ use crate::{
     mm::UserPtr,
     syscall::errno::*,
     task::{
-        block_current_and_run_next_with_lock_checked, current_task, current_task_ref,
+        block_current_and_run_next_with_lock_checked, current_task,
         discard_non_actionable_unblocked_signals, has_actionable_signal, task_manager_counts,
         wait_with_timeout, TaskControlBlock,
     },
@@ -294,7 +294,7 @@ fn try_single_thread_short_timeout(
         return None;
     }
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if task.process.live_thread_count() != 1 {
         return None;
     }
@@ -470,9 +470,9 @@ where
             no_signal && not_timed_out
         });
 
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut guard = lock.lock();
-        let removed = queue_of(&mut guard).finish_wait(task);
+        let removed = queue_of(&mut guard).finish_wait(&task);
         drop(guard);
         task.acquire_inner_lock().refresh_real_timer();
 
@@ -491,7 +491,7 @@ fn do_futex_wait_until(
     deadline: Option<TimeSpec>,
 ) -> isize {
     super::perf::record_futex_wait(false, deadline.is_some());
-    let futex_table = current_task_ref().unwrap().process.futex().clone();
+    let futex_table = current_task().unwrap().process.futex().clone();
 
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
         super::perf::record_futex_wait_result(wait_result);
@@ -552,7 +552,7 @@ pub fn do_futex_waitv(
         return result;
     }
 
-    let futex_table = current_task_ref().unwrap().process.futex().clone();
+    let futex_table = current_task().unwrap().process.futex().clone();
 
     loop {
         if deadline_expired(deadline) {
@@ -592,9 +592,9 @@ pub fn do_futex_waitv(
                 && check_waitv_values(entries, token).is_none()
         });
 
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut guard = futex_table.lock();
-        if let Some(index) = finish_waitv_private(&mut guard, entries, task) {
+        if let Some(index) = finish_waitv_private(&mut guard, entries, &task) {
             task.acquire_inner_lock().refresh_real_timer();
             return index as isize;
         }
@@ -665,9 +665,9 @@ pub fn do_futex_waitv_shared(
                 && check_waitv_values(entries, token).is_none()
         });
 
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut guard = PROCESS_SHARED_FUTEX.lock();
-        if let Some(index) = finish_waitv_shared(&mut guard, entries, task) {
+        if let Some(index) = finish_waitv_shared(&mut guard, entries, &task) {
             task.acquire_inner_lock().refresh_real_timer();
             return index as isize;
         }

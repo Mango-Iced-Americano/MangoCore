@@ -276,7 +276,7 @@ process.complete_vfork()
 
 ```rust
 pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *const u8) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {
@@ -341,7 +341,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         Some(option) => option,
         None => return EINVAL,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let process = task.process.clone();
     match ProcessManager::wait_child(
@@ -420,7 +420,7 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 | `setsid` | 创建新 session |
 | `getsid` | 查询 session |
 
-调度器中的 `CURRENT_PGID`、`CURRENT_SID` 会在相关状态变化后刷新。
+当前任务查询直接读取 PCB 的 PGID/SID 权威原子 hint，不再维护调度器影子缓存。
 
 ## 8. capability、prctl、rlimit、sched
 

@@ -3,7 +3,7 @@ title: "测试体系 (Testing Framework)"
 category: testing
 status: stable
 author: MangoCore Team
-last_update: 2026-07-20
+last_update: 2026-07-28
 tags: [testing, ktest, cargo-test, LTP, regression, tap]
 ---
 
@@ -438,6 +438,19 @@ cd os && make rv64-run
 # 全量自动化
 python3 scripts/run_full_test.py
 ```
+
+### SMP 8 核初赛非回归门禁
+
+SMP 中改变普通用户任务执行路径的 T3 节点，以及 Phase/合并候选，必须在 Docker 内严格
+串行执行 RV64、LA64 的 normal `CORE_NUM=8` + `mask=0x003`。四组 START/END、脚本
+`exit_code=0`、`online_mask=0xff`、无 panic/timeout/source drift 是硬条件；judge 还必须
+识别 314 个计分点，且得分和精确失败集合相对人工接受基线不退化。
+
+当前接受基线为 RV64 312/314、LA64 305/314。不能只比较总分：同分但失败项换位也视为
+未通过；更好结果需稳定证据和人工确认后才向上 ratchet，任何失败都不能反向降低基线。
+纯文档/注释可复用同一代码快照的新鲜结果，局部 helper 按风险使用 focused test。完整触发
+条件、允许失败集合和证据边界见
+[SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
 ### Bug 下沉流程
 

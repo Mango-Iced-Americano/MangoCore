@@ -10,7 +10,7 @@ use super::TrapImpl;
 use crate::config::TRAMPOLINE;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::syscall::syscall;
-use crate::task::{current_task_ref, current_user_token, do_signal, signal::SigInfo, Signals};
+use crate::task::{current_task, current_user_token, do_signal, signal::SigInfo, Signals};
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
 pub use context::{UserContext, UserSignalMask};
@@ -122,7 +122,7 @@ pub fn trap_handler() -> ! {
 
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
         let _trap_start = crate::task::perf::perf_time_now();
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
@@ -155,11 +155,14 @@ pub fn trap_handler() -> ! {
             let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
             crate::task::perf::record_trap_cost_ticks(_trap_ticks);
         }
+        // trap_return() 最终以 noreturn 汇编离开，Rust 不会展开当前栈帧；
+        // 必须在此释放 syscall 分支持有的 Arc，避免每次系统调用泄漏一次引用。
+        drop(task);
         trap_return();
     }
 
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
@@ -170,7 +173,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             // This is where we handle the page fault.
@@ -219,7 +222,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
@@ -239,7 +242,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.refresh_real_timer();
         inner.update_process_times_leave_trap(scause.cause());
@@ -258,11 +261,18 @@ pub fn trap_return() -> ! {
     // the CPU performing this return owns the pointer installed on next trap.
     {
         let inner = task.acquire_inner_lock();
-        inner.get_trap_cx().kernel_cpu_local = crate::hal::cpu_local_ptr();
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
+        // 返回汇编在写 sstatus 后仍需恢复寄存器。这里强制 SIE=0、SPIE=1，
+        // 保证 timer/IPI 只能在最终 SRET 完成现场切换后重新响应。
+        trap_cx.prepare_user_return();
     }
     let trap_cx_ptr = task.trap_cx_user_va();
     let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
+    // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。
+    drop(task);
     unsafe {
         asm!(
             "fence.i",

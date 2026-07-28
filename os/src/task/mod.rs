@@ -1,8 +1,8 @@
 //! 任务、进程和调度子系统入口。
 //!
 //! 统一导出 TCB/PCB、调度队列、PID/TID、信号、namespace、sleep、timer、
-//! WaitQueue 和当前任务访问接口。MangoCore 当前为单核抢占式调度，任务切换
-//! 通过架构相关的 `__switch` 汇编完成。
+//! WaitQueue 和当前任务访问接口。调度上下文已归属于 Per-CPU 状态，
+//! 任务切换通过架构相关的 `__switch` 汇编完成。
 //!
 //! # Locking
 //!
@@ -67,10 +67,11 @@ pub use process::{
 pub use process_manager::ProcessManager;
 pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_task_ref,
-    current_tid, current_trap_cx, current_uid, current_user_token, run_tasks, schedule,
-    set_current_syscall_id, try_current_user_token,
+    current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_tid,
+    current_trap_cx, current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
+    try_current_user_token,
 };
+pub(crate) use processor::try_current_task;
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
     find_task_by_tid,
@@ -85,7 +86,6 @@ pub use task::{
     TaskControlBlock, TaskStatus, UtsNamespace,
 };
 
-pub use self::processor::PROCESSOR;
 #[allow(unused)]
 /// 在当前处理器已有运行任务时主动让出 CPU。
 ///
@@ -94,13 +94,9 @@ pub use self::processor::PROCESSOR;
 /// 若当前处理器处于空闲态则不做任何事；否则将当前任务重新放回 ready
 /// 队列并切回调度器。
 pub fn try_yield() {
-    let lock = PROCESSOR.lock();
-    let mut do_suspend = false;
-    if !lock.is_vacant() {
-        do_suspend = true;
-    }
-    drop(lock);
-    if do_suspend {
+    // `current_task()` 克隆出的临时 Arc 在条件判断后立即释放，
+    // 不得跨越可能不返回的 context switch。
+    if current_task().is_some() {
         suspend_current_and_run_next()
     }
 }
@@ -241,10 +237,11 @@ fn do_exit(task: &TaskControlBlock, exit_code: u32) {
 /// 当前任务会进入 zombie 队列；函数不返回。因为代码仍运行在当前任务的内核栈
 /// 上，最后一个 `Arc<TaskControlBlock>` 必须延迟到切回 idle 后释放。
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
-    // 只借用由 Processor.current 持有的 TCB，不能 clone Arc：退出任务不会再
-    // 返回当前栈帧，跨过最终 schedule 的本地 Arc 将永远无法析构。
-    let task = current_task_ref().unwrap();
-    do_exit(task, exit_code);
+    let task = current_task().unwrap();
+    do_exit(&task, exit_code);
+    // current 槽仍保留强引用直到 idle 完成 switch-out。这个本地 Arc
+    // 必须在切栈前释放，否则退出任务的栈帧永不返回，会泄漏引用计数。
+    drop(task);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
@@ -257,7 +254,7 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 /// 其他线程先从调度队列移除并释放线程级资源，当前线程最后进入 zombie 队列。
 /// 函数不返回，且不能让任何本地 `Arc` 跨过最终的 `schedule()`。
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
 
     // 把 process Arc 的生命周期限制在 schedule() 之前。
     // 此函数返回 !，schedule() 切栈后本地变量永不析构——不能有任何 Arc 跨过它。
@@ -276,7 +273,8 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     for task in exit_list.into_iter() {
         task.exit_thread_resources(exit_code);
     }
-    do_exit(task, exit_code);
+    do_exit(&task, exit_code);
+    drop(task);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
@@ -427,8 +425,9 @@ pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
 /// Ktest 的 live-thread 计数会在 zombie queue 最终 drop TCB 时由 `Drop` 收回。
 /// 纯内核 ktest 不向用户态暴露 rusage，因此这里不重复生产退出路径的 CPU 时间结算。
 pub fn zombify_current_and_run_next() -> ! {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     task.mark_zombie("ktest task exit");
+    drop(task);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable after zombify_current_and_run_next");

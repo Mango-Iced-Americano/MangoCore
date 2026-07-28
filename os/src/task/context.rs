@@ -21,7 +21,7 @@ pub struct TaskContext {
 
 impl TaskContext {
     /// 返回全零上下文，用于占位或初始化后立即覆盖的场景。
-    pub fn zero_init() -> Self {
+    pub const fn zero_init() -> Self {
         Self {
             ra: 0,
             sp: 0,

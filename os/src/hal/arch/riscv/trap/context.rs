@@ -3,7 +3,7 @@
 //! 该文件定义从 trap 入口保存的通用寄存器、状态寄存器和 signal frame 需要的
 //! 用户可见上下文结构。
 
-use riscv::register::sstatus::{self, set_spp, Sstatus, SPP};
+use core::arch::asm;
 
 use crate::task::{SignalStack, Signals};
 
@@ -128,8 +128,8 @@ pub struct TrapContext {
     pub fp: FloatRegs,
     /// A copy of register a0, useful when we need to restart syscall
     pub origin_a0: usize,
-    /// Privilege level of the trap context
-    pub sstatus: Sstatus,
+    /// trap context 保存的 `sstatus` 原始位模式，由返回汇编直接写回 CSR。
+    pub sstatus: usize,
     /// Supervisor Address Translation and Protection
     pub kernel_satp: usize,
     /// The pointer to trap_handler
@@ -140,10 +140,29 @@ pub struct TrapContext {
     pub kernel_cpu_local: usize,
 }
 
-// Trap assembly uses this numeric offset before switching to the kernel stack.
+// trap.S 直接按固定槽位读写这两个字段；布局变化必须在编译期失败。
+const _: () = assert!(core::mem::offset_of!(TrapContext, sstatus) == 66 * 8);
 const _: () = assert!(core::mem::offset_of!(TrapContext, kernel_cpu_local) == 70 * 8);
 
 impl TrapContext {
+    const SSTATUS_SIE: usize = 1 << 1;
+    const SSTATUS_SPIE: usize = 1 << 5;
+    const SSTATUS_SPP: usize = 1 << 8;
+
+    /// 把保存态规范为“由 SRET 原子地返回用户态并重新开中断”。
+    ///
+    /// syscall 执行期间允许本地中断，因此 exec 新建上下文时读到的 live
+    /// `sstatus.SIE` 可能为 1。恢复汇编仍运行在 S-mode；若提前写回该位，
+    /// timer 可在通用寄存器只恢复一半时嵌套进入，破坏用户 `sp` 等现场。
+    pub fn prepare_user_return(&mut self) {
+        // SIE 必须保持关闭，直到最后一条 SRET 从 SPIE 原子恢复它。
+        self.sstatus &= !Self::SSTATUS_SIE;
+        // SPP=User 决定 SRET 的目标特权级。
+        self.sstatus &= !Self::SSTATUS_SPP;
+        // SPIE=1 使用户态重新获得正常的 supervisor interrupt 响应。
+        self.sstatus |= Self::SSTATUS_SPIE;
+    }
+
     pub fn set_sp(&mut self, sp: usize) {
         self.gp.sp = sp;
     }
@@ -154,11 +173,9 @@ impl TrapContext {
         kernel_sp: usize,
         trap_handler: usize,
     ) -> Self {
-        let mut sstatus = sstatus::read();
-        // set CPU privilege to User after trapping back
-        unsafe {
-            set_spp(SPP::User);
-        }
+        let sstatus: usize;
+        // 保存当前 CSR 的其余字段（尤其是浮点状态），随后只规范返回相关位。
+        unsafe { asm!("csrr {value}, sstatus", value = out(reg) sstatus) };
         let mut cx = Self {
             gp: GeneralRegs::default(),
             fp: FloatRegs::default(),
@@ -169,6 +186,7 @@ impl TrapContext {
             kernel_sp,
             kernel_cpu_local: 0,
         };
+        cx.prepare_user_return();
         cx.gp.pc = entry;
         cx.set_sp(sp);
         cx

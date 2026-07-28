@@ -1,17 +1,12 @@
-//! 单核处理器状态和调度主循环。
+//! Per-CPU 处理器状态和调度主循环。
 //!
-//! `PROCESSOR` 保存当前任务和 idle 上下文。热路径通过一组 relaxed atomic
-//! 缓存当前任务身份信息，减少 syscall 入口查询当前任务时获取调度器锁的成本。
+//! 每个 CPU 通过 `PerCpu.task_state` 持有自己的 current 槽和 idle 上下文。
+//! 当前用户任务仍只由 CPU0 调度，但 current 所有权已不再依赖全局单例。
 //!
 //! # Locking
 //!
-//! `PROCESSOR` 锁只保护当前任务槽和 idle 上下文指针。切换到任务前必须释放该锁，
+//! 本 CPU 的 `processor` 锁只保护当前任务槽和 idle 上下文。切换前必须释放该锁，
 //! 否则切回调度器时会形成自锁。
-//!
-//! # Safety
-//!
-//! `CURRENT_TASK_PTR` 只在单核调度器持有 `PROCESSOR.current` 的强引用期间发布。
-//! idle 调度器在任务真正切出后清空该指针。
 
 use super::{
     __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
@@ -23,9 +18,7 @@ use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use core::hint::spin_loop;
-use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use lazy_static::*;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
@@ -36,13 +29,8 @@ const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// 当前 CPU 的调度状态。
-///
-/// # Semantics
-///
-/// 当前只有 CPU0 进入 legacy 调度循环，AP 仍停留在 SMP 服务循环，因此该对象
-/// 暂时代表全局处理器状态；普通任务上 AP 前必须先拆成真正的 per-CPU `Processor`。
-pub struct Processor {
+/// 单个 CPU 独占的调度上下文。
+struct Processor {
     /// 当前正在运行的任务
     current: Option<Arc<TaskControlBlock>>,
     /// 空闲任务的上下文，用于在任务切换时保存和恢复状态
@@ -50,7 +38,7 @@ pub struct Processor {
 }
 
 impl Processor {
-    pub fn new() -> Self {
+    const fn new() -> Self {
         Self {
             // 初始化时处理器为空闲
             current: None,
@@ -78,42 +66,29 @@ impl Processor {
         self.current.as_ref().map(Arc::clone)
     }
 
-    /// 返回当前处理器是否没有运行任务。
-    pub fn is_vacant(&self) -> bool {
-        self.current.is_none()
-    }
 }
 
-/// 当前正在执行的系统调用 ID（用于诊断构建）。
+/// 嵌入 `PerCpu` 的任务调度状态。
 ///
-/// 默认性能构建不维护该字段，避免每次 syscall 入口产生原子写开销。
-/// 诊断构建中 0 表示无记录，实际 syscall id 存为 id + 1。
-static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
-/// 当前任务裸指针只能在 CPU0 的 legacy scheduler 强引用存活期间读取。
-/// syscall 中断窗口内的 timer/IPI fast path 不得解引用它；迁移到 per-CPU
-/// current slot 前，任何新 hard-IRQ 路径也必须继续遵守这个约束。
-static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock> = AtomicPtr::new(ptr::null_mut());
-static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_USER_TOKEN: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_UID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_EUID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_SUID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_GID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_EGID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_SGID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_PGID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_SID: AtomicUsize = AtomicUsize::new(0);
+/// PID/TID 在 current 槽有效期内不变，因此保留无锁快照。身份、进程组和
+/// 页表 token 可在运行期修改，读取时必须访问 TCB/PCB 的权威原子 hint。
+pub(crate) struct CpuTaskState {
+    processor: Mutex<Processor>,
+    current_pid: AtomicUsize,
+    current_tid: AtomicUsize,
+    /// 0 表示无记录，实际 syscall id 存为 id + 1。
+    current_syscall_id: AtomicUsize,
+}
 
-lazy_static! {
-    /// 全局处理器对象。
-    ///
-    /// # Locking
-    ///
-    /// 持锁期间只能更新当前任务槽或读取 idle 上下文指针，不能跨 `__switch`
-    /// 或任何可能阻塞的路径持有该锁。
-    pub static ref PROCESSOR: Mutex<Processor> = Mutex::new(Processor::new());
+impl CpuTaskState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            processor: Mutex::new(Processor::new()),
+            current_pid: AtomicUsize::new(0),
+            current_tid: AtomicUsize::new(0),
+            current_syscall_id: AtomicUsize::new(0),
+        }
+    }
 }
 
 /// 运行调度主循环。
@@ -121,21 +96,22 @@ lazy_static! {
 /// # Semantics
 ///
 /// 循环执行定时唤醒、网络轮询、文件缓存回收、zombie 清理和 ready 队列取任务。
-/// 找到任务后发布当前任务缓存、释放 `PROCESSOR` 锁并切换到任务上下文。
+/// 找到任务后发布本 CPU current 槽、释放 processor 锁并切换到任务上下文。
 ///
 /// # Locking
 ///
-/// 调用 `__switch` 前必须释放 `PROCESSOR` 锁；被切入任务后该函数直到任务主动
+/// 调用 `__switch` 前必须释放本 CPU processor 锁；被切入任务后该函数直到任务主动
 /// `schedule()` 回 idle 才会继续执行。
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
     let cpu = crate::smp::cpu_id();
+    let task_state = crate::smp::local_task_state();
     loop {
         // `schedule()` 保证 idle 总是以 IRQ-off 状态恢复。Phase 2 仍保持这个
         // legacy scheduler 边界；console/net/FS reclaim 完成 IRQ 并发审计前，
         // 不能把整个 housekeeping 循环扩大为开中断区间。
         // schedule() 可能在内核 timer 打断长 syscall 后直接切回 idle。
-        // 在获取 PROCESSOR 或队列锁之前消费 pending，保证 callback 不跨锁，
+        // 在获取 processor 或队列锁之前消费 pending，保证 callback 不跨锁，
         // 且已经处于 idle 调度上下文时无需再次 context switch。
         let _ = super::run_deferred_timer_work();
         let sched_profile = sched_profile_enabled();
@@ -301,7 +277,7 @@ pub fn run_tasks() {
             stage_t0,
         );
         let stage_t0 = sched_profile_start(sched_profile);
-        // 取任务时不持有 PROCESSOR，避免形成 PROCESSOR -> TASK_MANAGER 的
+        // 取任务时不持有 processor，避免形成 processor -> TASK_MANAGER 的
         // 嵌套锁顺序；fetch 成功后再单独发布 current slot。
         let next_task = fetch_task(cpu);
         sched_record_stage(
@@ -334,31 +310,21 @@ pub fn run_tasks() {
             #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             let trace_first_switch = !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
             let stage_t0 = sched_profile_start(sched_profile);
-            let mut processor = PROCESSOR.lock();
-            let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
-            // 独占地访问即将运行的任务的 TCB
+            // 先在不持有 processor 锁时更新任务时间并取得上下文指针。
+            // 这样不会形成 `processor -> task.inner`，为后续跨核信号/退出消除锁序负担。
             let next_task_cx_ptr = {
                 let mut task_inner = task.acquire_inner_lock();
                 task_inner.update_process_times_schedule_in();
                 &task_inner.task_cx as *const TaskContext
             };
-            // 设置当前正在运行的任务
-            CURRENT_TASK_PTR.store(
-                Arc::as_ptr(&task) as *mut TaskControlBlock,
-                Ordering::Relaxed,
-            );
-            CURRENT_PID.store(task.pid(), Ordering::Relaxed);
-            CURRENT_TID.store(task.gettid(), Ordering::Relaxed);
-            CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Relaxed);
-            CURRENT_USER_TOKEN.store(task.process.user_token(), Ordering::Relaxed);
-            CURRENT_UID.store(task.uid() as usize, Ordering::Relaxed);
-            CURRENT_EUID.store(task.euid() as usize, Ordering::Relaxed);
-            CURRENT_SUID.store(task.suid() as usize, Ordering::Relaxed);
-            CURRENT_GID.store(task.gid() as usize, Ordering::Relaxed);
-            CURRENT_EGID.store(task.egid() as usize, Ordering::Relaxed);
-            CURRENT_SGID.store(task.sgid() as usize, Ordering::Relaxed);
-            CURRENT_PGID.store(task.process.getpgid(), Ordering::Relaxed);
-            CURRENT_SID.store(task.process.getsid(), Ordering::Relaxed);
+            let mut processor = task_state.processor.lock();
+            let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+            // 先发布与槽位同生命周期的不变身份，再把 Arc 所有权交给 current。
+            // 当前 CPU 在这段期间关中断，不会有本核读者看到半发布状态。
+            task_state.current_pid.store(task.pid(), Ordering::Relaxed);
+            task_state
+                .current_tid
+                .store(task.gettid(), Ordering::Relaxed);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -388,10 +354,10 @@ pub fn run_tasks() {
                     resume_sp
                 );
             }
-            // Safety: `idle_task_cx_ptr` points into `PROCESSOR.idle_task_cx`
+            // Safety: `idle_task_cx_ptr` points into this CPU's `Processor.idle_task_cx`
             // and `next_task_cx_ptr` points into the selected task's TCB. The
             // processor lock has been dropped, so the switched-in task can later
-            // call `schedule()` without deadlocking on `PROCESSOR`.
+            // call `schedule()` without deadlocking on the local processor lock.
             unsafe {
                 crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
@@ -423,28 +389,19 @@ pub fn run_tasks() {
     }
 }
 
-/// 清空只服务于当前 CPU 热路径的无锁缓存。
-fn clear_current_task_cache() {
-    CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Relaxed);
-    CURRENT_PID.store(0, Ordering::Relaxed);
-    CURRENT_TID.store(0, Ordering::Relaxed);
-    CURRENT_PARENT_PID.store(0, Ordering::Relaxed);
-    CURRENT_USER_TOKEN.store(0, Ordering::Relaxed);
-    CURRENT_UID.store(0, Ordering::Relaxed);
-    CURRENT_EUID.store(0, Ordering::Relaxed);
-    CURRENT_SUID.store(0, Ordering::Relaxed);
-    CURRENT_GID.store(0, Ordering::Relaxed);
-    CURRENT_EGID.store(0, Ordering::Relaxed);
-    CURRENT_SGID.store(0, Ordering::Relaxed);
-    CURRENT_PGID.store(0, Ordering::Relaxed);
-    CURRENT_SID.store(0, Ordering::Relaxed);
+/// 清空与本 CPU current 槽位同生命周期的无锁快照。
+fn clear_current_task_cache(task_state: &CpuTaskState) {
+    task_state.current_pid.store(0, Ordering::Relaxed);
+    task_state.current_tid.store(0, Ordering::Relaxed);
+    task_state.current_syscall_id.store(0, Ordering::Relaxed);
 }
 
 /// 在 idle 栈上收回 current slot，并把上一任务交给调度状态机收尾。
 fn finish_current_switch_out(cpu: usize) {
+    let task_state = crate::smp::local_task_state();
     let task = {
-        let mut processor = PROCESSOR.lock();
-        clear_current_task_cache();
+        let mut processor = task_state.processor.lock();
+        clear_current_task_cache(task_state);
         processor
             .take_current()
             .expect("idle resumed without a current task")
@@ -456,136 +413,94 @@ fn finish_current_switch_out(cpu: usize) {
 ///
 /// # Semantics
 ///
-/// 单核调度器在 `CURRENT_TASK_PTR` 非空期间由 `PROCESSOR.current` 持有强引用。
-/// 本函数直接从 raw pointer 增加强引用计数，避免 syscall 热路径获取调度器锁。
+/// 从本 CPU 的 current 槽位克隆强引用。不再发布裸指针，因此返回的
+/// `Arc` 可以安全跨越普通函数调用，但仍不应跨非返回的 context switch。
 #[inline(always)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
-    if ptr.is_null() {
-        return None;
-    }
-    // Safety: MangoCore is single-core. `PROCESSOR.current` owns a strong
-    // reference while `CURRENT_TASK_PTR` is published, and idle clears the
-    // pointer before removing that owner after the real context switch.
-    unsafe {
-        Arc::increment_strong_count(ptr);
-        Some(Arc::from_raw(ptr))
-    }
+    crate::smp::local_task_state().processor.lock().current()
 }
 
-/// 获取当前正在运行任务的短生命周期引用。
+/// panic 诊断使用的非阻塞 current 读取。
 ///
-/// MangoCore 当前是单核；调度器在 `PROCESSOR.current` 持有 Arc 时同步发布这个指针，
-/// idle 会在任务真正切走后清空它。调用者不能把引用跨调度点保存。
-///
-/// # Safety
-///
-/// 返回类型为 `'static` 是为了适配内核内部调用约定，实际生命周期只到下一次
-/// 调度点。调用者不能缓存该引用或在释放 CPU 后继续使用。
-#[inline(always)]
-pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
-    let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
-    if ptr.is_null() {
-        None
-    } else {
-        // Safety: see the function contract above. The raw pointer is published
-        // only while `PROCESSOR.current` owns the task.
-        Some(unsafe { &*ptr })
-    }
+/// `Err(())` 表示 CPU-local 尚未安装或本 CPU processor 锁已被占用；
+/// `Ok(None)` 才表示已经确认 current 槽为空。
+pub(crate) fn try_current_task() -> Result<Option<Arc<TaskControlBlock>>, ()> {
+    let task_state = crate::smp::try_local_task_state().ok_or(())?;
+    let processor = task_state.processor.try_lock().ok_or(())?;
+    Ok(processor.current())
 }
 
 #[inline(always)]
 pub fn current_pid() -> usize {
-    CURRENT_PID.load(Ordering::Relaxed)
+    crate::smp::try_local_task_state()
+        .map(|state| state.current_pid.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_tid() -> usize {
-    CURRENT_TID.load(Ordering::Relaxed)
+    crate::smp::try_local_task_state()
+        .map(|state| state.current_tid.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_parent_pid() -> usize {
-    CURRENT_PARENT_PID.load(Ordering::Relaxed)
+    current_task()
+        .map(|task| task.process.parent_pid())
+        .unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_pgid() -> usize {
-    CURRENT_PGID.load(Ordering::Relaxed)
+    current_task()
+        .map(|task| task.process.getpgid())
+        .unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_sid() -> usize {
-    CURRENT_SID.load(Ordering::Relaxed)
+    current_task()
+        .map(|task| task.process.getsid())
+        .unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_uid() -> u32 {
-    CURRENT_UID.load(Ordering::Relaxed) as u32
+    current_task().map(|task| task.uid()).unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_euid() -> u32 {
-    CURRENT_EUID.load(Ordering::Relaxed) as u32
+    current_task().map(|task| task.euid()).unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_suid() -> u32 {
-    CURRENT_SUID.load(Ordering::Relaxed) as u32
+    current_task().map(|task| task.suid()).unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_gid() -> u32 {
-    CURRENT_GID.load(Ordering::Relaxed) as u32
+    current_task().map(|task| task.gid()).unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_egid() -> u32 {
-    CURRENT_EGID.load(Ordering::Relaxed) as u32
+    current_task().map(|task| task.egid()).unwrap_or(0)
 }
 
 #[inline(always)]
 pub fn current_sgid() -> u32 {
-    CURRENT_SGID.load(Ordering::Relaxed) as u32
-}
-
-#[inline(always)]
-pub(super) fn refresh_current_identity_hints(
-    tid: usize,
-    uid: u32,
-    euid: u32,
-    suid: u32,
-    gid: u32,
-    egid: u32,
-    sgid: u32,
-) {
-    if CURRENT_TID.load(Ordering::Relaxed) == tid {
-        CURRENT_UID.store(uid as usize, Ordering::Relaxed);
-        CURRENT_EUID.store(euid as usize, Ordering::Relaxed);
-        CURRENT_SUID.store(suid as usize, Ordering::Relaxed);
-        CURRENT_GID.store(gid as usize, Ordering::Relaxed);
-        CURRENT_EGID.store(egid as usize, Ordering::Relaxed);
-        CURRENT_SGID.store(sgid as usize, Ordering::Relaxed);
-    }
-}
-
-#[inline(always)]
-pub(super) fn refresh_current_process_group_hints(pid: usize, pgid: usize, sid: usize) {
-    if CURRENT_PID.load(Ordering::Relaxed) == pid {
-        CURRENT_PGID.store(pgid, Ordering::Relaxed);
-        CURRENT_SID.store(sid, Ordering::Relaxed);
-    }
-}
-
-pub fn refresh_current_user_token_for_process(pid: usize, token: usize) {
-    if CURRENT_PID.load(Ordering::Relaxed) == pid {
-        CURRENT_USER_TOKEN.store(token, Ordering::Relaxed);
-    }
+    current_task().map(|task| task.sgid()).unwrap_or(0)
 }
 
 /// 获取当前系统调用名称（用于 OOM 诊断）。
 pub fn current_syscall_name() -> &'static str {
-    match CURRENT_SYSCALL_ID.load(Ordering::Relaxed) {
+    let Some(task_state) = crate::smp::try_local_task_state() else {
+        return "<none>";
+    };
+    match task_state.current_syscall_id.load(Ordering::Relaxed) {
         0 => "<none>",
         id => crate::syscall::syscall_name(id - 1),
     }
@@ -599,19 +514,18 @@ pub fn current_syscall_name() -> &'static str {
 #[inline(always)]
 pub fn set_current_syscall_id(id: Option<usize>) {
     if cfg!(any(feature = "heap_trace", feature = "perf_stats")) {
-        CURRENT_SYSCALL_ID.store(id.map(|id| id + 1).unwrap_or(0), Ordering::Relaxed);
+        if let Some(task_state) = crate::smp::try_local_task_state() {
+            task_state
+                .current_syscall_id
+                .store(id.map(|id| id + 1).unwrap_or(0), Ordering::Relaxed);
+        }
     }
 }
 
 /// 获取当前任务的用户态页表 token。
 #[inline(always)]
 pub fn try_current_user_token() -> Option<usize> {
-    let token = CURRENT_USER_TOKEN.load(Ordering::Relaxed);
-    if token != 0 {
-        Some(token)
-    } else {
-        current_task_ref().map(|task| task.get_user_token())
-    }
+    current_task().map(|task| task.process.user_token())
 }
 
 /// 获取当前任务的用户态页表 token。
@@ -631,7 +545,7 @@ pub fn current_user_token() -> usize {
 /// 返回的引用来自当前任务 inner 锁保护的数据。调用方只能在立即读写 trap
 /// context 的短路径中使用，不能跨阻塞点保存。
 pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task_ref()
+    current_task()
         .unwrap()
         .acquire_inner_lock()
         .get_trap_cx()
@@ -653,14 +567,18 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // 并从 `schedule()` 返回时，才通过 `local_irq_restore` 还原之前的
     // 中断状态。
     let irq_was_enabled = crate::hal::local_irq_save();
-    // 获取空闲任务的上下文指针
-    let idle_task_cx_ptr = PROCESSOR.lock().get_idle_task_cx_ptr();
+    // idle 上下文必须来自正在执行该任务的同一 CPU；任务迁移只能
+    // 发生在下次 dispatch 之前，不能在一次 context switch 中途更换归属。
+    let idle_task_cx_ptr = crate::smp::local_task_state()
+        .processor
+        .lock()
+        .get_idle_task_cx_ptr();
     if sched_profile_enabled() {
         SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
     }
     // Safety: `switched_task_cx_ptr` is provided by the currently running TCB
-    // and `idle_task_cx_ptr` points into `PROCESSOR.idle_task_cx`. The
-    // `PROCESSOR` lock is not held across the assembly context switch.
+    // and `idle_task_cx_ptr` points into this CPU's idle context. The local
+    // processor lock is not held across the assembly context switch.
     unsafe {
         crate::task::perf::record_context_switch();
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);

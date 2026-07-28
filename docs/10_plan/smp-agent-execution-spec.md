@@ -3,7 +3,7 @@ title: "MangoCore SMP 适配 Agent 执行规范"
 category: plan
 status: stable
 owner: MangoCore Team
-last_updated: 2026-07-25
+last_updated: 2026-07-28
 tags: [smp, agent, workflow, review, safety]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -351,7 +351,52 @@ make rv64-kernel-build-only
 make la64-kernel-build-only
 ~~~
 
-### 8.2 结果分类
+### 8.2 双架构 8 核初赛非回归门禁
+
+该门禁验证 SMP 改动没有破坏比赛 normal 用户路径，固定使用官方 x0 根盘的干净派生副本、
+本架构 x1 工具盘和 `mask=0x003`，严格串行执行 RV64 后 LA64：
+
+| 项目 | 固定值 |
+|---|---|
+| profile | normal |
+| CPU 拓扑 | `CORE_NUM=8`，单 socket、8 core、单 thread |
+| 测试组 | basic-musl、basic-glibc、busybox-musl、busybox-glibc |
+| 架构顺序 | RV64 完整结束后再运行 LA64 |
+
+以下节点必须执行该门禁：改变普通用户任务执行路径的 T3 工作包，包括 current/runqueue、
+trap return 或 syscall 中断窗口、block/wake/signal/exit、用户 MM/PTE/TLB，以及任务可见的
+CPU-local 状态；Phase 退出、合并候选和发布候选也必须执行。纯文档、注释和证据整理属于
+T0，可以复用文档修改前同一代码快照的结果；不进入普通用户路径的私有 helper 可只做
+focused 验证。单架构中间工作包可先跑受影响架构，但阶段/合并门禁仍需补齐双架构。
+
+一次运行必须先通过以下硬条件：
+
+1. 受测源码 HEAD、tracked diff、status 和 untracked-content 指纹前后一致；
+2. 实际命令为 `CORE_NUM=8`，日志包含 `configured=8` 和 `online_mask=0xff`；
+3. 四组均有 START、END 和对应的 `[initproc] done ... exit_code=0`；
+4. recipe 未超时且进程退出 0，不存在 kernel panic、fatal trap、runner failure、
+   死锁或提前结束；
+5. judge 确实识别 314 个计分点。recipe PASS、脚本退出 0 和 judge 得分必须分别报告。
+
+硬条件通过后再执行递增非回归判定。当前人工接受的基线来自 B16 双架构 8 核运行：
+
+| 架构 | 最低分 | 允许的既有失败集合 |
+|---|---:|---|
+| RV64 | 312/314 | busybox-musl、busybox-glibc 各自的 `busybox kill 10` 0/1 |
+| LA64 | 305/314 | basic-musl `test_brk` 1/3；basic-glibc `test_brk` 1/3、`test_pipe` 1/4；两个 busybox 组各自的 `busybox kill 10` 0/1 |
+
+验收要求本次得分不低于基线，失败身份多重集（group + test name）只能是已接受集合的
+子集；同一允许失败项的 `all` 必须不变，`pass` 不得低于表中下限，因此部分改善也可通过。
+只有总分相同但失败项换位同样不通过。更好的单次结果先记为候选改善，只有在证据稳定且由
+人工更新 Work Log 与本表后才向上 ratchet；基线不得因为后续退化而静默降低。
+出现新增失败时只补做能区分故障类别的最小测试，不能机械重跑无关架构或全矩阵。
+
+机械执行、日志初审和失败集合整理可以通过本地 DeepSeek 协作完成，但最终验收者必须独立
+核对 child result、完整串口日志、judge 输出和源码指纹。当前 AP 仍 park 时，该门禁只能证明
+“8 CPU online + CPU0 普通用户路径未回归”，不能证明用户任务跨核调度、远端 TLB shootdown
+或 FS/NET 多核并发安全；这些结论仍由对应 focused/压力测试提供。
+
+### 8.3 结果分类
 
 - PASS：所选验证档位的命令、退出码和关键结束标记可复核；
 - FAIL：已执行并出现编译、panic、超时或断言失败；
@@ -361,7 +406,7 @@ make la64-kernel-build-only
 报告必须写明选用的档位和未运行项。BLOCKED 和 NOT RUN 不得写成“预计通过”；既有失败要说明
 是否与本批相关。
 
-### 8.3 证据归档
+### 8.4 证据归档
 
 证据成本同样分级：
 

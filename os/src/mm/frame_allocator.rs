@@ -17,7 +17,7 @@ use super::{PhysAddr, PhysPageNum};
 use crate::config::{FIRMWARE_RESERVED_REGIONS, MEMORY_REGIONS, PAGE_SIZE};
 use crate::hal::{local_irq_restore, local_irq_save};
 #[cfg(feature = "oom_handler")]
-use crate::task::current_task_ref;
+use crate::task::current_task;
 
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt::{self, Debug, Formatter};
@@ -860,7 +860,7 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
         return Ok(());
     }
     // step 2: 清理当前任务的内存
-    if let Some(task) = current_task_ref() {
+    if let Some(task) = current_task() {
         let vm_ref = task.process.vm();
         let mut maybe_guard = vm_ref.try_lock();
         if let Some(address_space) = maybe_guard.as_mut() {

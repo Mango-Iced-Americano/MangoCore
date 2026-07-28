@@ -244,7 +244,7 @@ where
             no_signal && not_timed_out
         });
 
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         wq.lock().finish_wait(task);
         task.wait_io_fallback_active_generation
             .store(0, AtomicOrdering::Release);
@@ -344,7 +344,7 @@ where
             no_signal && not_timed_out
         });
 
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut guard = lock.lock();
         let removed = queue_of(&mut guard).finish_wait(task);
         drop(guard);

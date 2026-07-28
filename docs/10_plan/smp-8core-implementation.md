@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -343,8 +343,9 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - AP 完成 per-CPU 寄存器、最小 trap/IPI 向量和 idle context 初始化后设置 online bit；timer
   本阶段只写入配置，不使能本地 timer 中断；
 - BSP 使用有界超时等待目标 mask；超时时打印 missing mask 并停止启动；
-- CPU0 继续独占现有全局 PROCESSOR、ready queue 和 run_tasks()；AP 设置 online 后进入只检查
-  release/mailbox 的 park loop，本阶段不得调用现有 run_tasks() 或运行普通任务。
+- CPU0 继续独占 ready queue 和 run_tasks()；AP 设置 online 后进入只检查
+  release/mailbox 的 park loop，本阶段不得调用 run_tasks() 或运行普通任务。
+  全局 PROCESSOR 已在后续 B17 拆为 Per-CPU current/idle 状态。
 
 #### 退出条件
 
@@ -515,7 +516,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15/B16）
+#### 当前进度（SMP-P2.5-B15/B16/B17）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
@@ -553,16 +554,28 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - 双架构 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，新用例通过
   生产 API 覆盖 map、fault-in、mprotect 降权、munmap 和同 VPN 重新映射。
   该证据只验收本地提交，不外推远端 TLB 一致性；
-- Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成，
-  `SMP-P2.5-B16=pass`。任务 owner 仍固定 CPU0；下一阶段进入 per-CPU
-  runqueue/current slot，在 Phase 4 远端 shootdown 完成前不解除用户任务 CPU0 affinity。
+- B17 已删除全局 `PROCESSOR`、`CURRENT_TASK_PTR` 和 `current_task_ref()`；每个
+  `PerCpu` 内嵌 `CpuTaskState`，独占 current `Arc`、idle context、PID/TID 快照和
+  诊断 syscall ID。`current_task()` 只在本 CPU processor 锁内克隆 `Arc`，panic
+  路径通过地址校验与 `try_lock()` 安全降级；
+- 可变的父 PID、身份、进程组和用户页表 token 改读 TCB/PCB 权威原子 hint，不再
+  维护跨路径刷新缓存。dispatch 先读取 `task.inner` 再锁 processor，且 processor
+  锁不跨 `__switch`；所有退出、信号和双架构 trap noreturn 路径在切换前显式
+  释放本地 current `Arc`；
+- B17 双架构 normal build 退出 0；`CORE_NUM=4 KTEST=smp KREPEAT=2` 均为
+  19/19 PASS，online mask 均为 `0xf`。该证据不外推用户任务跨核、远程 enqueue
+  或 MM shootdown；
+- Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成，B17 同时
+  完成 Phase 3 的 Per-CPU current/idle 前置工作。ready queue 和生产任务 owner
+  仍固定 CPU0；下一批 B18 只拆 Per-CPU runqueue，Phase 4 远端 shootdown 完成前
+  不解除用户任务 CPU0 affinity。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
 #### 实施内容
 
-- 删除全局 PROCESSOR、current-task 裸指针和全局 ready queue；把不可变 pid/tid hint 迁到
-  per-CPU，可变身份 hint 按集中更新协议迁移或改读权威对象；
+- B17 已删除全局 PROCESSOR 和 current-task 裸指针，把 pid/tid/syscall 诊断 hint
+  迁到 Per-CPU，并让可变身份字段改读权威对象；B18 删除全局 ready queue；
 - 每 CPU 使用本地 Processor、RunQueue、idle context 和 zombie 回收队列；
 - 本地选择继续保留 FIFO fast path 和现有 nice-aware 选择；
 - 新任务或被唤醒任务的目标 CPU 选择规则固定为：
@@ -693,6 +706,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - 只有 Phase 退出或合并门禁固定执行双架构 build、CORE_NUM=1 回归和该阶段
   CORE_NUM=1/2/4/8 focused 矩阵。
 
+改变普通用户任务执行路径的 T3 节点、Phase 退出和合并候选还必须执行双架构
+`CORE_NUM=8`、`mask=0x003` 初赛非回归门禁。它同时要求启动/组完整性硬条件和
+judge 失败集合相对人工接受基线不扩大；精确基线、豁免和 ratchet 规则以
+`smp-agent-execution-spec.md` §8.2 为准。该门禁是里程碑验收，不替代本批故障模型对应的
+focused test，也不因纯文档收尾重复运行。
+
 所有构建和 QEMU 均在 Docker 内执行。需要双架构时严格串行，避免 nightly override 竞态；
 已经在同一源码状态通过的结果，不因随后只修改文档、注释或证据文件而重复运行。
 
@@ -736,6 +755,9 @@ commit 上已有的新鲜结果，不重复制造等价运行：
   - mmap/CoW/unmap；
   - ext4 并发；
   - TCP/UDP 并发。
+
+其中双架构 CORE_NUM=8、mask 0x003 结果还必须满足执行规范 §8.2 的递增非回归基线；
+“四组完整执行”或 recipe 退出 0 本身不能代替 judge 失败集合判定。
 
 ### 4.4 性能判定
 

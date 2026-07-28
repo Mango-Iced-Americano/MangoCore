@@ -20,7 +20,7 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{AddressSpace, PhysAddr, StepByOne, VirtAddr};
 use crate::fs::iov::IOVec;
 use crate::hal::PageTableImpl;
-use crate::task::current_task_ref;
+use crate::task::current_task;
 use alloc::{string::String, sync::Arc, vec::Vec};
 use spin::Mutex;
 
@@ -586,7 +586,7 @@ fn is_current_user_token(token: usize) -> bool {
 }
 
 fn current_user_vm(token: usize) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>>>, isize> {
-    let task = current_task_ref().ok_or(crate::syscall::errno::EFAULT)?;
+    let task = current_task().ok_or(crate::syscall::errno::EFAULT)?;
     if crate::task::current_user_token() != token {
         return Err(crate::syscall::errno::EFAULT);
     }

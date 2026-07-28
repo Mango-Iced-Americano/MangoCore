@@ -30,6 +30,8 @@
 11. **回复中必须声明门禁状态** — 每个代码工作包完成后，在回复末尾注明 `mango-workflow: loaded/reused, references: <文件名或无>`。
 12. **SMP 适配按完整功能推进** — 默认不设机械行数上限，尽量一次完成一个语义闭合的独立功能；只有多锁、复杂并发或高风险协议才把关键实现控制在约 200 行并申请人工确认。新任务首次修改前完整阅读 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md)；同一连续任务只重读当前 Phase 和相关章节。
 13. **SMP 注释优先中文** — 并发不变量、内存序、锁顺序、BSP/AP 所有权和架构寄存器约束使用中文解释；专有名词、寄存器名和代码引用可保留英文。
+14. **SMP 初赛非回归门禁** — 改变普通用户任务执行路径的 T3 节点、Phase 退出和合并候选，必须按 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁) 串行执行双架构 `CORE_NUM=8`、`mask=0x003`，同时检查硬结束条件和递增失败集合基线；纯文档/注释及不进入用户路径的私有 helper 不机械触发全门禁。
+15. **提交必须单独批准** — 修改、验证和汇报完成后默认保留为未暂存工作树；只有用户明确批准当前批次提交时才可执行 `git add`/`commit`。未经批准不得自行提交、push 或创建 PR，也不得把提交动作外包给 DeepSeek。
 
 ---
 
@@ -138,7 +140,9 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
 
 ### 任务/进程
 
-单核、基于定时器中断的抢占式多任务。调度：`VecDeque<Arc<TaskControlBlock>>` 轮转，默认 nice=0 走 FIFO fast path。
+SMP 过渡期的安全点抢占调度：current 槽与 idle context 已按 CPU 拆分；全局
+`VecDeque<Arc<TaskControlBlock>>` ready queue 和普通任务执行暂时仍固定 CPU0，
+默认 nice=0 走 FIFO fast path。不要据此声称 per-CPU runqueue 或用户任务迁移已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

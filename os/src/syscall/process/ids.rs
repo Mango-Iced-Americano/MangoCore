@@ -8,7 +8,7 @@ use crate::mm::{
 use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sgid, current_sid, current_suid, current_task, current_task_ref, current_tid,
+    current_sgid, current_sid, current_suid, current_task, current_tid,
     current_uid, current_user_token, update_ready_nice, ProcessControlBlock, ProcessManager,
     SeccompFilterInsn, Signals, TaskControlBlock,
 };
@@ -131,7 +131,7 @@ fn ptrace_traceme_target(pid: usize) -> Result<Arc<ProcessControlBlock>, isize> 
 }
 
 pub fn sys_personality(persona: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let old = inner.personality;
     if persona != PERSONALITY_GET && persona != usize::MAX {
@@ -209,7 +209,7 @@ pub fn sys_ioprio_get(which: usize, who: usize) -> isize {
     if which != IOPRIO_WHO_PROCESS {
         return EINVAL;
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if who != 0 && who != task.pid() {
         return ESRCH;
     }
@@ -221,7 +221,7 @@ pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
     if which != IOPRIO_WHO_PROCESS {
         return EINVAL;
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if who != 0 && who != task.pid() {
         return ESRCH;
     }
@@ -237,7 +237,7 @@ pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
 }
 
 pub fn sys_vhangup() -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     if inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TTY_CONFIG)) != 0 {
         SUCCESS
@@ -281,7 +281,7 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     buffer.write_at(FIELD_OFFSET * 4, b"rv64\0");
     #[cfg(feature = "loongarch64")]
     buffer.write_at(FIELD_OFFSET * 4, b"la64\0");
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let uts_ref = task.process.uts();
     let uts = uts_ref.lock();
     buffer.write_at(FIELD_OFFSET * 1, &uts.nodename[..]);
@@ -307,7 +307,7 @@ fn copy_uts_field(name: *const u8, len: usize) -> Result<[u8; 65], isize> {
 }
 
 pub fn sys_sethostname(name: *const u8, len: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if task.euid() != 0 {
         return EPERM;
     }
@@ -321,7 +321,7 @@ pub fn sys_sethostname(name: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if task.euid() != 0 {
         return EPERM;
     }
@@ -387,7 +387,7 @@ pub fn sys_setuid(uid: usize) -> isize {
         Ok(uid) => uid,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 && uid != inner.uid && uid != inner.euid && uid != inner.suid {
         return EPERM;
@@ -418,7 +418,7 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let privileged = inner.euid == 0;
     let old_uid = inner.uid;
@@ -465,7 +465,7 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 {
         for id in [ruid, euid, suid].iter().copied().flatten() {
@@ -514,7 +514,7 @@ pub fn sys_setgid(gid: usize) -> isize {
         Ok(gid) => gid,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 && gid != inner.gid && gid != inner.egid && gid != inner.sgid {
         return EPERM;
@@ -543,7 +543,7 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let privileged = inner.euid == 0;
     let old_gid = inner.gid;
@@ -588,7 +588,7 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 {
         for id in [rgid, egid, sgid].iter().copied().flatten() {
@@ -634,10 +634,10 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
     let fsuid = match parse_optional_id(fsuid) {
         Ok(Some(fsuid)) => fsuid,
         Ok(None) | Err(_) => {
-            return current_task_ref().unwrap().acquire_inner_lock().fsuid as isize
+            return current_task().unwrap().acquire_inner_lock().fsuid as isize
         }
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let old = inner.fsuid;
     if inner.euid == 0 || fsuid == inner.uid || fsuid == inner.euid || fsuid == inner.suid {
@@ -650,10 +650,10 @@ pub fn sys_setfsgid(fsgid: usize) -> isize {
     let fsgid = match parse_optional_id(fsgid) {
         Ok(Some(fsgid)) => fsgid,
         Ok(None) | Err(_) => {
-            return current_task_ref().unwrap().acquire_inner_lock().fsgid as isize
+            return current_task().unwrap().acquire_inner_lock().fsgid as isize
         }
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let old = inner.fsgid;
     if inner.euid == 0 || fsgid == inner.gid || fsgid == inner.egid || fsgid == inner.sgid {
@@ -663,7 +663,7 @@ pub fn sys_setfsgid(fsgid: usize) -> isize {
 }
 
 pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let groups = task.acquire_inner_lock().groups.clone();
     if size == 0 {
         return groups.len() as isize;
@@ -685,7 +685,7 @@ pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
 }
 
 pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if current_euid() != 0 {
         return EPERM;
     }
@@ -826,7 +826,7 @@ pub fn sys_capget(header: *mut CapUserHeader, data: *mut CapUserData) -> isize {
         }
     };
     let (effective, permitted, inheritable) = if header_value.pid == 0 {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let inner = task.acquire_inner_lock();
         (
             inner.cap_effective,
@@ -865,7 +865,7 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
             return EINVAL;
         }
     };
-    let current = current_task_ref().unwrap();
+    let current = current_task().unwrap();
     let current_pid = current.pid() as i32;
     if header_value.pid != 0
         && header_value.pid != current.tid.0 as i32
@@ -1058,7 +1058,7 @@ fn check_process_vm_access(
     if current_process.pid == target_process.pid {
         return Ok(());
     }
-    let current = current_task_ref().unwrap();
+    let current = current_task().unwrap();
     let (uid, euid, suid, gid, egid, sgid, cap_effective) = {
         let inner = current.acquire_inner_lock();
         (
@@ -1139,7 +1139,7 @@ fn sys_process_vm_transfer(
         Some(process) => process,
         None => return ESRCH,
     };
-    let current_process = current_task_ref().unwrap().process.clone();
+    let current_process = current_task().unwrap().process.clone();
     if let Err(errno) = check_process_vm_access(&current_process, &remote_process) {
         return errno;
     }
@@ -1373,7 +1373,7 @@ pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
         return SeccompSyscallAction::Allow;
     }
 
-    let task = match current_task_ref() {
+    let task = match current_task() {
         Some(task) => task,
         None => return SeccompSyscallAction::Allow,
     };
@@ -1396,7 +1396,7 @@ pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
 
 fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
     if mode == SECCOMP_MODE_STRICT {
-        let task = current_task_ref().unwrap();
+        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
             return EINVAL;
@@ -1414,7 +1414,7 @@ fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
         Ok(insns) => insns,
         Err(errno) => return errno,
     };
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
         return EINVAL;
@@ -1434,7 +1434,7 @@ fn sys_prctl_cap_ambient(op: usize, cap: usize, arg4: usize, arg5: usize) -> isi
     if arg4 != 0 || arg5 != 0 {
         return EINVAL;
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     match op {
         PR_CAP_AMBIENT_IS_SET => {
@@ -1476,7 +1476,7 @@ fn sys_prctl_cap_ambient(op: usize, cap: usize, arg4: usize, arg5: usize) -> isi
 }
 
 pub fn sys_prctl(option: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     match option {
         PR_SET_PDEATHSIG => {
             if arg2 > PR_MAX_SIGNAL {
@@ -1622,7 +1622,7 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     if (pid as isize) < 0 || (pgid as isize) < 0 {
         return EINVAL;
     }
-    let current = current_task_ref().unwrap().process.clone();
+    let current = current_task().unwrap().process.clone();
     let process = if pid == 0 {
         current.clone()
     } else {
@@ -1688,7 +1688,7 @@ pub fn sys_getsid(pid: usize) -> isize {
 /// The calling process is the leader of the new session, and its pgid is set to its pid.
 /// 当前进程脱离父进程，从父进程的子进程列表中移除当前进程，当前进程的父进程设置为空。
 pub fn sys_setsid() -> isize {
-    let process = &current_task_ref().unwrap().process;
+    let process = &current_task().unwrap().process;
     if !ProcessManager::find_processes_by_pgid(process.pid).is_empty() {
         return EPERM;
     }
@@ -1894,7 +1894,7 @@ pub fn sys_prlimit(
     new_limit: *const RLimit,
     old_limit: *mut RLimit,
 ) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     if pid != 0 && pid != task.pid() {
         return ESRCH;
     }
@@ -1906,7 +1906,7 @@ pub fn sys_prlimit(
     }
 
     if !old_limit.is_null() {
-        let Some(limit) = current_rlimit_for(task, resource) else {
+        let Some(limit) = current_rlimit_for(&task, resource) else {
             return EINVAL;
         };
         if UserPtrMut::new(old_limit).write(token, &limit).is_err() {
@@ -1926,10 +1926,11 @@ pub fn sys_prlimit(
         if rlimit.rlim_cur > rlimit.rlim_max {
             return EINVAL;
         }
-        let Some(current_limit) = current_rlimit_for(task, resource) else {
+        let Some(current_limit) = current_rlimit_for(&task, resource) else {
             return EINVAL;
         };
-        if rlimit.rlim_max > current_limit.rlim_max && !task_has_capability(task, CAP_SYS_RESOURCE)
+        if rlimit.rlim_max > current_limit.rlim_max
+            && !task_has_capability(&task, CAP_SYS_RESOURCE)
         {
             return EPERM;
         }
@@ -2044,7 +2045,7 @@ fn priority_targets(which: i32, who: i32) -> Result<Vec<Arc<TaskControlBlock>>, 
         }
         PRIO_PGRP => {
             let pgid = if who == 0 {
-                current_task_ref().unwrap().process.getpgid()
+                current_task().unwrap().process.getpgid()
             } else if who < 0 {
                 return Err(ESRCH);
             } else {
@@ -2282,9 +2283,9 @@ fn find_task_for_pid_or_current(pid: usize) -> Result<Arc<TaskControlBlock>, isi
 }
 
 fn find_sched_state_for_pid_or_current(pid: usize) -> Result<SchedState, isize> {
-    if let Some(task) = current_task_ref() {
+    if let Some(task) = current_task() {
         if pid == 0 || pid == task.pid() {
-            return Ok(task_sched_state(task));
+            return Ok(task_sched_state(&task));
         }
     }
     if let Some(task) = ProcessManager::find_task(pid) {
@@ -2311,7 +2312,7 @@ fn valid_sched_priority(policy: usize, priority: i32) -> bool {
 }
 
 fn current_sched_access() -> SchedAccess {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     SchedAccess {
         euid: inner.euid,

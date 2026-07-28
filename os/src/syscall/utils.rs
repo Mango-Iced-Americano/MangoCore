@@ -1,6 +1,6 @@
 use crate::net::config::NET_INTERFACE;
 use crate::task::{
-    current_task_ref, discard_non_actionable_unblocked_signals, has_actionable_signal,
+    current_task, discard_non_actionable_unblocked_signals, has_actionable_signal,
     suspend_current_and_run_next, WaitQueue,
 };
 use crate::utils::error::SyscallErr;
@@ -20,11 +20,11 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                     return v;
                 }
                 suspend_current_and_run_next();
-                let task = current_task_ref().unwrap();
-                if has_actionable_signal(task) {
+                let task = current_task().unwrap();
+                if has_actionable_signal(&task) {
                     return -(SyscallErr::ERESTART as isize);
                 } else {
-                    discard_non_actionable_unblocked_signals(task);
+                    discard_non_actionable_unblocked_signals(&task);
                 }
                 task.acquire_inner_lock().refresh_real_timer();
             }

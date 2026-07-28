@@ -79,6 +79,23 @@ WaitQueue 的 `wake_*` 当前以 `WaitQueue -> TASK_MANAGER` 的单向顺序调�
 在全局队列锁内读取 `sched_vruntime/sched_nice`；当前没有反向同时持锁路径，因此尚未
 形成环，但这是明确登记的既有例外，Phase 3 必须以无锁调度 hint 或出锁快照消除。
 
+### 3.2 B17 Per-CPU current 约束
+
+B17 已把全局 `PROCESSOR` 拆为每个 `PerCpu` 独占的 `CpuTaskState`。本 CPU
+processor 锁只保护 current `Arc` 和 idle context；hard IRQ/IPI 不获取该锁，
+panic 诊断只能使用 `try_lock()`。
+
+- `current_task()` 在锁内只克隆 `Arc`，返回前释放锁；
+- dispatch 先单独取得 `task.inner` 中的 context 指针，再获取 processor 锁发布
+  current，禁止形成 `processor -> task.inner`；
+- processor 锁必须在 `__switch` 前释放，不能跨 context switch；
+- current 槽只能在已回到所属 CPU 的 idle 栈后清空；
+- `schedule()`、退出和架构 `noreturn` 路径前必须释放本地 current `Arc`，因为旧
+  Rust 栈帧不会被展开。
+
+ready/interruptible 容器仍沿用 3.1 的单一 `TASK_MANAGER` 过渡协议；B17 没有
+引入 runqueue 双锁、远程 enqueue 或任务迁移。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

@@ -170,21 +170,20 @@ switch or idle
 
 每轮调用 `threads::compact_shared_futex()`，降低 `PROCESS_SHARED_FUTEX` 中空 WaitQueue key 长期残留的概率。
 
-## 5. 当前任务快捷缓存
+## 5. Per-CPU 当前任务状态
 
-调度器在切换任务前发布当前任务的原子缓存：
+每个 `PerCpu` 内嵌一个 `CpuTaskState`，其中本地 `Processor` 保存 current `Arc`
+和 idle context。`current_task()` 根据 CPU-local 寄存器选择本核槽位，在锁内克隆
+`Arc` 后立即释放锁，不再通过全局裸指针伪造任务生命周期。
 
-| 原子字段 | 内容 |
-|----------|------|
-| `CURRENT_TASK_PTR` | 当前 `TaskControlBlock` 原始指针 |
-| `CURRENT_PID`, `CURRENT_TID`, `CURRENT_PARENT_PID` | PID/TID/父 PID |
-| `CURRENT_USER_TOKEN` | 当前用户页表 token |
-| `CURRENT_UID/EUID/SUID` | UID 相关 hint |
-| `CURRENT_GID/EGID/SGID` | GID 相关 hint |
-| `CURRENT_PGID`, `CURRENT_SID` | 进程组和 session |
-| `CURRENT_SYSCALL_ID` | 诊断构建中的当前 syscall id |
+只有 PID、TID 和诊断用 syscall ID 保留为 Per-CPU 原子快照。父 PID、身份、
+进程组、会话和用户页表 token 可能在任务运行期间改变，因此直接从 TCB/PCB 的
+权威原子 hint 读取。任务真实切回 idle 栈后，`finish_current_switch_out()` 才清空
+本核 current 槽和快照。
 
-`current_task()` 通过 `Arc::increment_strong_count()` 从原始指针快速构造 `Arc`，避免热 syscall 路径获取 `PROCESSOR` 锁。该优化依赖 MangoCore 当前单核模型：调度器在 `PROCESSOR.current` 持有强引用时发布指针，任务真实切回 idle 栈后，`finish_current_switch_out()` 才清空指针并取走 owner。
+panic 路径使用不阻塞的 `try_current_task()`；CPU-local 尚未安装或 processor 锁
+正被占用时只报告不可用。任何本地 current `Arc` 都必须在 `schedule()` 或架构
+`noreturn` 返回路径前显式释放，因为 context switch 不会展开旧 Rust 栈帧。
 
 ## 6. 调度 profiling
 

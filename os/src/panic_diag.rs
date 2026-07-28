@@ -39,8 +39,8 @@ fn print_kernel_memory() {
 fn print_task_info() {
     println!("--- TASK ---");
 
-    if let Some(proc) = crate::task::PROCESSOR.try_lock() {
-        if let Some(task) = proc.current() {
+    match crate::task::try_current_task() {
+        Ok(Some(task)) => {
             println!("pid: {}  tgid: {}", task.pid(), task.tgid());
 
             if let Some(inner) = task.try_inner() {
@@ -52,11 +52,9 @@ fn print_task_info() {
                 println!("task inner: <locked>");
             }
             // parent_pid/exe_path require process.inner lock; skip in panic context
-        } else {
-            println!("no current task");
         }
-    } else {
-        println!("task: <locked>");
+        Ok(None) => println!("no current task"),
+        Err(()) => println!("task: <CPU-local unavailable or locked>"),
     }
 }
 

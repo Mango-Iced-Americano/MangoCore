@@ -234,7 +234,7 @@ pub fn sys_timer_create(
         }
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let id = {
         let mut inner = task.acquire_inner_lock();
         if let Some((id, slot)) = inner

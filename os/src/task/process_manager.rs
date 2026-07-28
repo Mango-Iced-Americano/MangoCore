@@ -11,7 +11,7 @@ use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    current_task_ref, publish_task, quota, registry, signal::send_process_signal,
+    current_task, publish_task, quota, registry, signal::send_process_signal,
     ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
@@ -30,7 +30,7 @@ pub struct ProcessManager;
 impl ProcessManager {
     /// 返回当前任务所属进程。
     pub fn current_process() -> Option<Arc<ProcessControlBlock>> {
-        current_task_ref().map(|task| task.process.clone())
+        current_task().map(|task| task.process.clone())
     }
 
     /// 按 PID 查找进程。
@@ -275,7 +275,7 @@ impl ProcessManager {
 
     /// 向除 init 和当前进程外的所有进程投递信号。
     pub fn send_signal_to_all(signal: Signals) -> isize {
-        let current_pid = current_task_ref().map(|task| task.pid()).unwrap_or(0);
+        let current_pid = current_task().map(|task| task.pid()).unwrap_or(0);
         let mut sent = false;
         for process in Self::all_processes() {
             if process.pid == 1 || process.pid == current_pid {

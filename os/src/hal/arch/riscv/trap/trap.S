@@ -74,6 +74,8 @@ __restore:
     csrw fcsr, t0
     ld t0, 66*8(sp)
     ld t1, 0(sp)
+    # TrapContext 的返回契约是 SIE=0、SPIE=1：写回 sstatus 后仍在 S-mode
+    # 恢复半成品现场，此区间不能响应中断；最终 sret 才会原子地重开中断。
     csrw sstatus, t0
     csrw sepc, t1
     # restore general purpose registers except x0/sp

@@ -120,7 +120,7 @@ RISC-V syscall 分支匹配：
 ```rust
 if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
     let _trap_start = crate::task::perf::perf_time_now();
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let (syscall_id, args) = {
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
@@ -153,7 +153,7 @@ if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
 
 | 步骤 | 代码行为 |
 |------|----------|
-| 获取当前任务 | `current_task_ref().unwrap()` |
+| 获取当前任务 | `current_task().unwrap()` |
 | 进入统计 | `inner.update_process_times_enter_trap()` |
 | 推进 PC | `cx.gp.pc += 4` |
 | 保存重启参数 | `cx.origin_a0 = cx.gp.a0` |

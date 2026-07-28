@@ -460,3 +460,25 @@
 - **修复**: 将 offset 推进推迟到写入成功后执行。读取阶段仅使用 offset 定位，不修改它；写入阶段成功后 `*off += wrote`（其中 `wrote ≤ n`），确保 offset 精确反映已确认写入目标的字节数。
 - **教训**: 任何跨越两个独立 I/O 对象的 syscall（splice、sendfile、copy_file_range）都必须遵循"状态推进在输出确认之后"的原则。对于文件源的显式 offset 参数，推进发生在写入成功之后而非读取成功之后。管道源是破坏性读取（无可回滚机制），需通过容量探测或最小化读取窗口来限制损失。
 - **相关文件**: `os/src/syscall/fs/sys_splice.rs`
+
+## Trap 返回半恢复窗口：不要在写回状态寄存器时提前开中断
+
+- **现象**: 用户程序在动态加载器第一条栈保存指令偶发 fault；用户 PC 完全正确，但
+  `sp` 精确等于 trap-context VA。单核或另一次多核运行可能不复现，容易被误判为
+  boot CPU 映射、ELF 或文件系统波动。
+- **根因**: syscall 内核窗口允许本地中断后，新建 trap context 可能复制 live
+  `sstatus.SIE=1`。返回汇编若先写 `sstatus`、再恢复 `sepc/GPR`，pending timer 会在
+  半恢复的 S-mode 现场上立即嵌套进入；当 `sscratch` 与 `sp` 都指向 trap context 时，
+  嵌套入口会把 trap-context VA 保存进用户 `sp` 槽。
+- **定位方法**:
+  1. 不凭高地址猜测固件/内核归属，先结合 PIE/interpreter 映射基址反汇编真实 ELF。
+  2. 由 fault 指令的栈偏移反推函数入口 `sp`，再与 trap-context/用户栈槽位公式逐值比较。
+  3. 按“CSR 写回 → 硬件中断判定 → 嵌套入口寄存器交换 → 嵌套返回”逐指令模拟，解释
+     为什么 PC 可以正确而 GPR 已被污染。
+- **修复**: 所有用户返回统一设置 `SPP=User、SIE=0、SPIE=1`；恢复 GPR 期间保持
+  S-mode 中断关闭，只由最终 `sret` 执行 `SIE <- SPIE`。状态规范化必须放在统一
+  `trap_return()`，不能只覆盖初始任务或 exec。
+- **附带审计**: 从 Rust 跳入 `asm!(options(noreturn))` 前，所有局部 owned `Arc` 必须
+  显式 `drop`；noreturn 路径不会展开调用者 Rust 栈帧，不能依赖作用域自动析构。
+- **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`,
+  `os/src/hal/arch/riscv/trap/mod.rs`, `os/src/hal/arch/riscv/trap/trap.S`

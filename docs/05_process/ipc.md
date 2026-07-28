@@ -571,7 +571,7 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
         }
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     match task
         .process
         .files()

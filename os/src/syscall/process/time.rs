@@ -3,7 +3,7 @@ use alloc::{sync::Arc, vec::Vec};
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, all_processes, current_task, current_task_ref, current_user_token,
+    add_kernel_timer, all_processes, current_task, current_user_token,
     find_process_by_pid, find_task_by_tid,
     signal::{SigInfo, Signals},
     sleep_relative_interruptible, sleep_until_realtime_interruptible, wake_interruptible,
@@ -176,7 +176,7 @@ pub fn sys_setitimer(
     if which > 2 {
         return EINVAL;
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let new_timer = match UserPtr::new(new_value).read_optional(token) {
         Ok(value) => value,
@@ -256,7 +256,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
         return EFAULT;
     }
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let now = TimeSpec::now();
     let value = {
@@ -303,7 +303,7 @@ pub fn sys_timer_create(clock_id: usize, sevp: *const SigeventHeader, timerid: *
         }
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let id = {
         let mut inner = task.acquire_inner_lock();
         if let Some((id, slot)) = inner
@@ -362,7 +362,7 @@ pub fn sys_timer_settime(
         return EINVAL;
     }
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut register_timer = None;
     {
         let mut inner = task.acquire_inner_lock();
@@ -452,7 +452,7 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
     if curr_value.is_null() {
         return EFAULT;
     }
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let value = {
         let inner = task.acquire_inner_lock();
         let Some(Some(timer)) = inner.posix_timers.get(timer_id) else {
@@ -467,7 +467,7 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
 }
 
 pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     match inner.posix_timers.get(timer_id) {
         Some(Some(timer)) => timer.overrun() as isize,
@@ -476,7 +476,7 @@ pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
 }
 
 pub fn sys_timer_delete(timer_id: usize) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     match inner.posix_timers.get_mut(timer_id) {
         Some(slot @ Some(_)) => {
@@ -755,7 +755,7 @@ fn valid_timex_value(timex: &Timex) -> bool {
 }
 
 fn has_time_adjust_permission() -> bool {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
 }
@@ -964,7 +964,7 @@ fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
     let exists = if clock.per_thread {
         find_task_by_tid(clock.pid).is_some()
     } else {
-        let current = current_task_ref().unwrap();
+        let current = current_task().unwrap();
         find_process_by_pid(clock.pid).is_some()
             || (clock.pid == current.gettid() && find_process_by_pid(current.pid()).is_some())
     };
@@ -979,7 +979,7 @@ fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
     let clock = validate_cpu_clock_id(clk_id)?;
     if clock.per_thread {
         if clock.pid == 0 {
-            let task = current_task_ref().unwrap();
+            let task = current_task().unwrap();
             let inner = task.acquire_inner_lock();
             return Ok(cpu_clock_from_rusage(
                 inner.rusage,
@@ -998,9 +998,9 @@ fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
     }
 
     let process = if clock.pid == 0 {
-        current_task_ref().unwrap().process.clone()
+        current_task().unwrap().process.clone()
     } else {
-        let current = current_task_ref().unwrap();
+        let current = current_task().unwrap();
         if clock.pid == current.gettid() {
             current.process.clone()
         } else {
@@ -1193,7 +1193,7 @@ fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {
 }
 
 pub fn sys_times(buf: *mut Times) -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let (utime, stime) = {
         let inner = task.acquire_inner_lock();
         (
@@ -1222,7 +1222,7 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     const RUSAGE_SELF: isize = 0;
     const RUSAGE_THREAD: isize = 1;
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let rusage = match who {
         RUSAGE_SELF | RUSAGE_THREAD => {

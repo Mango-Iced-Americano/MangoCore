@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-27
+> Coverage: 2026-04-01 to 2026-07-28
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -47,6 +47,9 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | 双架构 SMP idle stack | 2026-07-25 | GPT/Codex, DeepSeek | AP boot→idle 栈切换设计、ABI/内存序复核、双架构 8 核证据归纳 | AP 只在独立 idle stack 上发布 online；RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 3/3 PASS |
 | SMP 调度所有权交接 | 2026-07-27 | GPT/Codex, DeepSeek | task 状态机收敛、切栈后 owner 交接与丢唤醒竞态复核 | 以六态原子状态机替代分散状态写入；双架构 4 核 SMP focused 测试均为 19/19 PASS |
 | SMP 本地 TLB 提交边界 | 2026-07-27 | GPT/Codex, DeepSeek | 用户 PTE 写入收口、frame 延迟释放、LA64 ASID 边界审查和双架构 Docker/QEMU 验证 | 建立 `TlbBatch` LocalOnly 协议；RV64/LA64 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，远端 shootdown 明确 NOT RUN |
+| SMP Per-CPU current 槽 | 2026-07-27 | GPT/Codex, DeepSeek | current owner 拆分、Arc/noreturn 生命周期审查、双架构 Docker/QEMU 验证 | 删除全局 PROCESSOR 与 current 裸指针；双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS |
+| SMP 初赛非回归门禁 | 2026-07-28 | GPT/Codex, DeepSeek | 双架构 8 核 basic+busybox 执行、judge 失败集合比较、验收规则收敛 | 发现 RV64 8 核 307/314 未达到 312 基线；建立硬条件与只升不降的失败集合门禁 |
+| RV64 trap-return 半恢复现场竞态 | 2026-07-28 | GPT/Codex, DeepSeek | 用户 ELF/loader 反汇编、CSR 指令级溯源、双架构 Arc 生命周期复核与 Docker/QEMU 验证 | 统一 `SPP/SIE/SPIE` 返回契约并修复 noreturn Arc 泄漏；RV64 preliminary 312/314、LA64 SMP ktest 10/10 PASS |
 
 ## 4. 详细使用场景
 
@@ -263,6 +266,63 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 建立 `TlbBatch` 和 `Unpublished/LocalOnly/Published` 三态发布边界，收口所有用户 PTE 写入，将失效映射的 frame 延迟到本地 flush 后释放；采纳 LA64 审查项，但拒绝把释放构建的生命周期断言降为 `debug_assert!`。
 - Verification: RV64、LA64 `CORE_NUM=1 KTEST=mm KREPEAT=2` 严格串行，均为 8/8 PASS，受测源码指纹前后一致。该证据只验收 CPU0 LocalOnly 路径；远端 generation/ack、MM-owned ASID 和 kernel-global shootdown 均未运行。
 
+### Case 12: SMP Per-CPU current 所有权与 Arc 生命周期
+
+- Evidence: `docs/Work_Log/2026-07-27.md`。
+- AI roles: GPT/Codex 负责所有权设计、代码实现、生命周期复核与最终裁决；DeepSeek
+  负责冻结源码的只读审查、受限 Docker recipe 执行和结果归纳。
+- Problem: 全局 `PROCESSOR`、current 裸指针和伪造 `'static` 引用无法扩展到多个
+  scheduler CPU；简单改成 `Arc` 后，退出与 trap noreturn 路径又可能因为旧 Rust
+  栈帧不展开而泄漏引用。
+- AI contribution: DeepSeek 首轮构建准确归纳了双架构一致的 22 个迁移错误，但它
+  提议恢复引用适配层。维护者拒绝该建议并逐点显式借用，随后通过人工控制流审查
+  发现了编译器和初轮报告均未指出的 noreturn Arc 泄漏风险。
+- Human action: 将 current/idle 状态嵌入每个 `PerCpu`，删除裸指针和可变身份影子
+  cache，规定 `task.inner -> local processor` 的 dispatch 顺序，并在所有不返回边界
+  前显式释放本地 current `Arc`。
+- Verification: 双架构 normal kernel build 通过；RV64/LA64
+  `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS，四个 recipe 无源码漂移。
+  该结果不外推 per-CPU runqueue、远程 enqueue 或普通用户任务跨核运行。
+
+### Case 13: SMP 双架构 8 核初赛非回归门禁
+
+- Evidence: `docs/Work_Log/2026-07-28.md`；原始 prompt、模型输出和 child job 日志
+  保留在本地忽略的 `cc-codex/`，不上传仓库。
+- AI roles: DeepSeek 负责受限 Docker recipe 执行、完整日志初审和失败集合整理；
+  GPT/Codex 独立核对源码指纹、串口标记、judge JSON，并裁决正式验收规则。
+- Problem: QEMU 正常退出、四个组脚本退出 0 并不表示 judge 无回退；只比较总分还会漏掉
+  “同分但失败项换位”。拓扑不匹配的 required marker 也可能让 runner 状态与内核事实不同。
+- AI contribution: DeepSeek 识别出 B17 RV64 8 核新增的 musl `test_fstat` 和
+  `test_write` 失分，并按要求补做单核判别。它将一次对照推断为确定 SMP 根因、且把
+  固定 `online_mask=0xff` 导致的 child FAIL 误写为 recipe PASS；这些结论经人工复核后
+  均未进入正式判定。
+- Human action: 将门禁拆为启动/marker/退出/源码指纹硬条件与 judge 递增基线；失败按
+  group/test 身份集合与逐项 pass 下限比较，改善需稳定证据和人工确认后才能 ratchet，
+  退化不得降低基线。门禁仅在用户路径 T3 节点和阶段/合并候选触发，避免纯文档重复运行。
+- Verification: 同一冻结 HEAD `bafe04ad` 上，RV64 8 核为 307/314，硬条件通过但
+  非回归失败；LA64 8 核为 308/314，失败集合相对 305 基线缩小；RV64 单核为
+  312/314，未复现两项新增失分。当前证据不能在“8 核相关问题”和“单次波动”之间定因。
+
+### Case 14: RV64 trap-return 半恢复现场竞态
+
+- Evidence: `docs/Work_Log/2026-07-28.md`；DeepSeek 原始任务、输出和 Docker child
+  日志仅保留在本地忽略的 `cc-codex/`，不上传 GitHub。
+- AI roles: GPT/Codex 负责镜像/ELF/汇编/CSR 的指令级溯源、修复与最终裁决；DeepSeek
+  负责独立重复实验、聚焦源码复核和受限 Docker 验证。
+- Problem: RV64 8 核 preliminary 偶发在用户动态加载器 `0x80011c5c` 首条栈保存处
+  fault，用户 `sp` 精确变成 trap-context VA；同时 owned current-task 改造使 syscall
+  分支在 noreturn 返回边界新增一个 TCB `Arc` 泄漏风险。
+- AI contribution: DeepSeek 的一次 8 核重复运行证明任意非零 boot hart 并非必现，
+  但早期将用户虚拟地址误判为 OpenSBI 物理地址、两次只读审查超时，均未被人工采纳。
+  修复后它独立确认统一返回态和双架构 Arc 生命周期，并归纳 RV64 preliminary 与 LA64
+  SMP ktest 结果。
+- Human action: 维护者依据相同用户二进制、动态加载器反汇编、slot-1 地址和 RISC-V
+  `SIE/SPIE/SPP` 语义，确认 `csrw sstatus` 后的半恢复窗口可被 timer 打断；统一返回态为
+  `SPP=User、SIE=0、SPIE=1`，并在双架构 syscall noreturn 边界显式释放临时 Arc。
+- Verification: RV64 `CORE_NUM=8` preliminary 为 312/314，`fstat/write` 全部恢复；
+  LA64 `CORE_NUM=8 KTEST=smp` 为 10/10 PASS。单次 RV64 PASS 只作回归烟测，竞态关闭
+  主要由返回态不变量和官方 CSR 语义证明。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -316,6 +376,9 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-25.md`、`docs/Work_Log/evidence/2026-07-25/smp-b08-*` | 双架构 SMP AP idle stack | 记录 DeepSeek 只读审查、人工裁决、RV64/LA64 8 核 3/3 PASS 和 ELF 反汇编证据 |
 | `docs/Work_Log/2026-07-27.md`、`docs/Work_Log/evidence/2026-07-27/smp-b15-summary.md` | SMP 调度所有权与阻塞唤醒交接 | 记录 DeepSeek 冻结源码审查、人工收敛六态状态机、双架构 4 核 SMP 19/19 PASS 与证据边界 |
 | `docs/Work_Log/2026-07-27.md`、`docs/Work_Log/evidence/2026-07-27/smp-b16-summary.md` | SMP 本地 TLB batch | 记录 DeepSeek 生命周期/冻结 diff 只读审查、GPT/Codex 裁决、双架构 MM ktest 8/8 PASS 与远端 shootdown NOT RUN 边界 |
+| `docs/Work_Log/2026-07-27.md` | SMP Per-CPU current 槽 | 记录 DeepSeek 首轮 RED/最终只读验证、GPT/Codex Arc 生命周期裁决、双架构 4 核 SMP 19/19 PASS 与 B18 边界 |
+| `docs/Work_Log/2026-07-28.md` | SMP 初赛非回归门禁 | 记录 DeepSeek 双架构 8 核执行、RV64 新增失分、单核判别、人工日志复核与递增基线规则 |
+| `docs/Work_Log/2026-07-28.md` | RV64 trap-return 半恢复现场竞态 | 记录提交撤回、DeepSeek 复现实验的采纳边界、ELF/CSR 指令级根因、双架构修复验证和本地 Worker 领取竞态修复 |
 
 ## 9. 交互记录与留痕方式
 

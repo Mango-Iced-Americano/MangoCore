@@ -82,7 +82,7 @@ impl SignalFd {
 
 ```rust
 fn can_signal_process(target: &ProcessControlBlock) -> bool {
-    let Some(sender) = current_task_ref() else {
+    let Some(sender) = current_task() else {
         return false;
     };
     if sender.pid() == target.pid {
@@ -213,7 +213,7 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
         Err(_) => return EINVAL,
     };
 
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let queued_siginfo = if info != 0 {
         match UserPtr::<SigInfo>::from_addr(info).read(token) {
@@ -309,7 +309,7 @@ fn read_at(
     }
 
     let count = core::cmp::min(len, buf.len()) / info_size;
-    let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
+    let task = current_task().ok_or(SyscallErr::ESRCH)?;
     let mask = self.pending_mask();
     let mut written = 0usize;
     for slot in 0..count {
@@ -334,7 +334,7 @@ fn read_at(
 
 ```rust
 fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
-    let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
+    let task = current_task().ok_or(SyscallErr::ESRCH)?;
     if has_pending_signal_matching(task, self.pending_mask()) {
         Ok((EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits())
     } else {
@@ -380,7 +380,7 @@ frame 地址溢出、sigmask、machine context 或 LSX context 读取失败时�
 
 ```rust
 pub fn sys_sigreturn() -> isize {
-    let task = current_task_ref().unwrap();
+    let task = current_task().unwrap();
     let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
 

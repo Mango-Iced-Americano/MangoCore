@@ -16,7 +16,7 @@ tags: [process, task, scheduler, integration]
 | `os/src/task/task.rs` | TCB 字段、线程状态、trap context、clone/exec/exit |
 | `os/src/task/process.rs` | PCB 字段、进程资源、children、finish_exit |
 | `os/src/task/manager.rs` | ready/interruptible/zombie queue、WaitQueue、timer |
-| `os/src/task/processor.rs` | `run_tasks()`、current task、CURRENT_* cache |
+| `os/src/task/processor.rs` | `run_tasks()`、Per-CPU current/idle 状态 |
 | `os/src/task/process_manager.rs` | process registry、pid lookup、wait helper |
 | `os/src/hal/arch/*/switch.*` | `__switch` 上下文切换 |
 
@@ -99,41 +99,28 @@ clone 创建 child 时：
 TaskManager::fetch_task(cpu)
   └── Processor::run_tasks()
         ├── CAS Queued(CPU0) -> Running(CPU0)
-        ├── 写 CURRENT_* hints
-        ├── processor.current = Some(task)
+        ├── 写本 CPU 的 PID/TID 快照
+        ├── local processor.current = Some(task)
         └── __switch(idle, task)
 ```
 
-用户态进入 trap 后，架构 trap handler 通过 `current_task_ref()` 找到 TCB，再通过 `task.process` 访问进程资源。
+用户态进入 trap 后，架构 trap handler 通过 `current_task()` 克隆本 CPU current
+槽中的 TCB `Arc`，再通过 `task.process` 访问进程资源。
 
-## 5. syscall 热路径缓存
+## 5. syscall 当前任务访问
 
-`Processor` 发布的缓存让以下 syscall 不必频繁加锁：
+每个 `PerCpu` 的 `CpuTaskState` 只保存：
 
-| syscall/功能 | 缓存 |
-|--------------|------|
-| `getpid/gettid/getppid` | `CURRENT_PID/TID/PARENT_PID` |
-| `getuid/geteuid/getgid/getegid` 和权限检查 | `CURRENT_UID/CURRENT_EUID/CURRENT_SUID/CURRENT_GID/CURRENT_EGID/CURRENT_SGID` |
-| uaccess | `CURRENT_USER_TOKEN` |
-| `getpgid/getsid` 类路径 | `CURRENT_PGID/SID` |
-| OOM 诊断 | `CURRENT_SYSCALL_ID` |
+| 字段 | 用途 |
+|------|------|
+| `current_pid/current_tid` | current 槽有效期间不变的无锁快照 |
+| `current_syscall_id` | heap/perf 诊断构建中的本 CPU syscall 标识 |
+| `processor.current` | 当前 TCB 的权威 `Arc` owner |
 
-身份或进程组变化时，setter 会刷新当前任务 hint。
-
-这些 hint 由 processor 当前任务切换路径更新，缓存项位于 `processor.rs`：
-
-```rust
-pub static CURRENT_TASK: AtomicPtr<TaskControlBlock> = AtomicPtr::new(core::ptr::null_mut());
-pub static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
-pub static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
-pub static CURRENT_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
-pub static CURRENT_PGID: AtomicUsize = AtomicUsize::new(0);
-pub static CURRENT_SID: AtomicUsize = AtomicUsize::new(0);
-pub static CURRENT_USER_TOKEN: AtomicUsize = AtomicUsize::new(0);
-pub static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
-```
-
-因此 syscall 热路径可以通过 `current_task_ref()` 和原子 hint 取得当前任务、pid/tid、身份和页表 token；这些值只在当前 CPU 上有效，跨调度点保存引用会破坏语义。
+`current_task()` 在本 CPU processor 锁内克隆 `Arc`，随后释放锁；不存在全局
+current 裸指针或伪造 `'static` 引用。父 PID、身份、进程组和页表 token 直接读取
+TCB/PCB 权威 hint，避免 setter 漏刷影子缓存。返回的 `Arc` 不能跨
+`schedule()` 或 `asm!(noreturn)` 保存，否则旧栈帧不会析构它。
 
 ## 6. 主动让出 CPU
 
@@ -302,18 +289,20 @@ match ProcessManager::wait_child(
 | child 发布前不可调度 | 用户指针写入失败需要回滚 |
 | 当前 TCB 最后 Arc 不在当前栈 drop | 需要先切回 idle |
 | WaitQueue 不持强引用 | 避免等待队列阻止 TCB 回收 |
-| current_task_ref 不跨调度点保存 | 当前任务指针会在切换时清零 |
+| current `Arc` 不跨不返回的切换边界 | context switch 不会展开旧 Rust 栈帧 |
 | 持锁阻塞必须使用 checked path | 防丢唤醒 |
 
 这组约束的核心是生命周期分层。TCB 可以先 zombie 并被调度器延迟 drop，PCB 可以继续作为 wait 可见 zombie 存在，PID handle 可以继续防止 pid 复用。调试进程问题时不要只看一个状态位：线程是否还 live、进程是否 zombie、父进程是否已 wait、pid 是否已释放，是四个不同问题。
 
-调度器相关 bug 还要检查 current cache。`CURRENT_TASK`、pid/tid/uid/gid hint 只是热路径缓存，切换时必须设置和清理；跨调度点保存 current task 引用容易读到已经切走或即将退出的任务。
+调度器相关 bug 还要检查 Per-CPU current 槽。PID/TID 快照必须和槽位同步设置、
+清理；身份与页表 token 应读取权威对象。跨不返回的调度边界保存 current `Arc`
+不会产生悬空引用，但会永久泄漏该强引用。
 
 ## 14. 调试核对点
 
 | 现象 | 检查 |
 |------|------|
-| syscall 看到错误当前进程 | CURRENT_* cache 设置/清除 |
+| syscall 看到错误当前进程 | CPU-local 指针、current 槽和 PID/TID 快照 |
 | 任务睡眠后无法唤醒 | WaitQueue 入队顺序与 wake path |
 | exit 后 wait 不回收 | PCB children、ProcessState、child_exit_wait |
 | 多线程 exec 后资源泄露 | other_threads exit 与 queue remove |
