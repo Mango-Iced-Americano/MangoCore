@@ -65,6 +65,16 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
             }
         }
     }
+    if !flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
+        if let Ok(target) = parent.find(&leaf) {
+            if let Ok(metadata) = target.metadata() {
+                let protected = vfs::InodeFlags::S_APPEND | vfs::InodeFlags::S_IMMUTABLE;
+                if metadata.flags.intersects(protected) {
+                    return EPERM;
+                }
+            }
+        }
+    }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
     } else {

@@ -1,0 +1,4 @@
+command: docker exec pxy-mangocore-os-dev-1 sh -c 'cd /app && make -C os ktest-run ARCH=rv64 PROFILE=normal 2>&1' | tee docs/Work_Log/evidence/2026-07-27/ktest-rv64-final.log
+exit_status: 2
+command: docker exec pxy-mangocore-os-dev-1 sh -c 'cd /app && make test ARCH=rv64 PROFILE=regression 2>&1' | tee docs/Work_Log/evidence/2026-07-27/regression-rv64-final.log
+exit_status: 0

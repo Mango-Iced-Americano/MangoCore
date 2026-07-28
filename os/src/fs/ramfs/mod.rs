@@ -747,7 +747,9 @@ impl IndexNode for LockedRamFSInode {
             if is_dir {
                 new_locked.metadata.nlinks += 1;
             }
-            new_locked.children.insert(String::from(new_name), child.clone());
+            new_locked
+                .children
+                .insert(String::from(new_name), child.clone());
             if is_dir {
                 let parent_weak = new_locked.self_ref.clone();
                 drop(new_locked);

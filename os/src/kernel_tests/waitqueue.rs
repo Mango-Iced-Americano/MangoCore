@@ -3,13 +3,13 @@
 //! Multi-task tests (wake_one) require the scheduler to be active
 //! (mango.mode=ktest with the new multi-task harness).
 
+use crate::kernel_tests::runner::KernelTest;
+use crate::task::WaitQueue;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
-use crate::kernel_tests::runner::KernelTest;
-use crate::task::WaitQueue;
 
 /// Returns all waitqueue-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {

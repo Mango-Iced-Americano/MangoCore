@@ -18,7 +18,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use super::vfs::IndexNode;
@@ -35,10 +35,13 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// 后台写回互斥标志（防止并发写回）
 static WRITEBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// 后台写回启动阈值（页数，约 8MB，高于典型 4MB 测试集避免频繁触发）
-const DIRTY_BACKGROUND: usize = 8192;
-/// 写入者节流阈值（页数，约 64MB）
-const DIRTY_THROTTLE: usize = 16384;
+/// Dirty pages must be substantial before a writer is allowed to perform
+/// emergency writeback. Normal writes remain fully buffered.
+const DIRTY_EMERGENCY_MIN_PAGES: usize = 65_536;
+/// Start emergency writeback only when dirty cache consumes at least 75% of
+/// the currently free physical-page budget.
+const DIRTY_EMERGENCY_FREE_RATIO_NUMERATOR: usize = 3;
+const DIRTY_EMERGENCY_FREE_RATIO_DENOMINATOR: usize = 4;
 /// 正常后台写回批次大小
 const WB_BATCH_PAGES: usize = 256;
 /// 节流时的最大写回页数
@@ -93,7 +96,11 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
         return 0;
     }
     let count = seg_end - seg_start;
-    let low_mask: u8 = if count == 8 { u8::MAX } else { (1u8 << count) - 1 };
+    let low_mask: u8 = if count == 8 {
+        u8::MAX
+    } else {
+        (1u8 << count) - 1
+    };
     low_mask << seg_start
 }
 
@@ -104,14 +111,22 @@ pub fn register_page_cache(pc: &Arc<PageCache>) {
 }
 
 pub fn flush_all_page_caches() {
-    PAGE_CACHE_REGISTRY.lock().retain(|weak| {
-        if let Some(pc) = weak.upgrade() {
-            let _ = pc.writeback_all();
-            true
-        } else {
-            false
-        }
-    });
+    let page_caches: Vec<Arc<PageCache>> = {
+        let mut registry = PAGE_CACHE_REGISTRY.lock();
+        let mut page_caches = Vec::new();
+        registry.retain(|weak| match weak.upgrade() {
+            Some(pc) => {
+                page_caches.push(pc);
+                true
+            }
+            None => false,
+        });
+        page_caches
+    };
+
+    for page_cache in page_caches {
+        let _ = page_cache.writeback_all();
+    }
 }
 
 /// Evict clean pages from all registered caches using clock/second-chance.
@@ -388,6 +403,8 @@ impl PageEntry {
 /// PageCache 内部状态
 #[derive(Debug)]
 struct InnerPageCache {
+    /// Write-balance suppression flag, set by write_without_balance
+    suppress_balance: AtomicBool,
     /// 页面映射: page_index → PageEntry
     pages: BTreeSet<usize>,
     /// 脏页索引
@@ -397,6 +414,7 @@ struct InnerPageCache {
 impl InnerPageCache {
     fn new() -> Self {
         InnerPageCache {
+            suppress_balance: AtomicBool::new(false),
             pages: BTreeSet::new(),
             dirty_pages: BTreeSet::new(),
         }
@@ -424,8 +442,8 @@ impl InnerPageCache {
 /// A single page copy instruction collected under entries lock, executed without lock.
 struct ReadCopy {
     entry: Arc<PageEntry>,
-    dst_offset: usize,   // offset into destination buffer
-    page_offset: usize,  // offset within the page
+    dst_offset: usize,  // offset into destination buffer
+    page_offset: usize, // offset within the page
     len: usize,
 }
 
@@ -439,7 +457,14 @@ struct MissRun {
 struct ReadPlan {
     copies: Vec<ReadCopy>,
     miss_runs: Vec<MissRun>,
-    needs_valid_fill: BTreeSet<usize>,  // pages that exist but partially valid
+    needs_valid_fill: BTreeSet<usize>, // pages that exist but partially valid
+}
+
+struct WriteLease {
+    page_index: usize,
+    entry: Arc<PageEntry>,
+    previous_state: PageState,
+    newly_installed: bool,
 }
 
 // ── PageCache ────────────────────────────────────────────────────────────
@@ -448,10 +473,6 @@ struct ReadPlan {
 ///
 /// 为 inode 提供页面级别的缓存，管理内存中的文件数据副本。
 pub struct PageCache {
-    /// Serializes page-state transitions that must be atomic with backend
-    /// writeback/truncate.  In particular, truncate must not race a writeback
-    /// after it has changed Dirty -> Writeback but before backend I/O starts.
-    io_gate: Mutex<()>,
     /// 内部状态
     inner: Mutex<InnerPageCache>,
     /// 缓存后端
@@ -464,19 +485,21 @@ pub struct PageCache {
     unevictable: AtomicBool,
     /// Clock sweep 光标（second-chance eviction）
     clock_hand: AtomicUsize,
+    /// I/O gate: serialises write/truncate/writeback operations on this cache
+    io_gate: Mutex<()>,
 }
 
 impl PageCache {
     /// 创建一个不含 backend 和 inode 关联的空 PageCache，自动注册到全局列表。
     pub fn new() -> Arc<Self> {
         let pc = Arc::new(PageCache {
-            io_gate: Mutex::new(()),
             inner: Mutex::new(InnerPageCache::new()),
             backend: Mutex::new(None),
             inode: Mutex::new(None),
             entries: Mutex::new(Vec::new()),
             unevictable: AtomicBool::new(false),
             clock_hand: AtomicUsize::new(0),
+            io_gate: Mutex::new(()),
         });
         register_page_cache(&pc);
         pc
@@ -655,6 +678,9 @@ impl PageCache {
     ///   - 页面超出旧 EOF → valid_mask=VALID_ALL，不 populate
     ///   - 页面跨越 EOF → 超出部分 valid_mask 标记，populate 后 OR 入
     ///   - 页面完全在文件中 → valid_mask=0，populate 从后端加载
+    ///
+    /// `entries` 仅在查找或发布时持有；帧分配和后端 I/O 均在所有 PageCache 锁外完成。
+    /// 发布时保持 `entries` → `inner` 的锁顺序。
     fn get_or_create_entry(
         &self,
         page_index: usize,
@@ -664,39 +690,32 @@ impl PageCache {
         let init_mask = old_file_size.map_or(0, |s| initial_valid_mask(page_index, s));
         let beyond_eof = init_mask == VALID_ALL;
 
-        let _t_lock = perf::perf_time_now();
-        let mut had_io_miss = false;
-        let mut entries = self.entries.lock();
-
-        // 扩展 entries 数组
-        while entries.len() <= page_index {
-            entries.push(None);
-        }
-
-        if let Some(entry) = &entries[page_index] {
-            let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
-            perf::record_pc_lock_hold(elapsed, false);
+        let (existing, lookup_lock_hold) = {
+            let entries = self.entries.lock();
+            let _t_lookup = perf::perf_time_now();
+            let existing = entries
+                .get(page_index)
+                .and_then(|entry| entry.as_ref().cloned());
+            (existing, perf::perf_time_now().wrapping_sub(_t_lookup))
+        };
+        perf::record_pc_lock_hold(lookup_lock_hold, false);
+        if let Some(entry) = existing {
             entry.mark_referenced();
-            return Ok(entry.clone());
+            return Ok(entry);
         }
 
-        // 分配新帧（frame_alloc 返回零填充页）
-        let _t_falloc = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+        // 分配和 populate 均在 PageCache 锁外进行；失败时不留下缓存元数据。
+        let _t_falloc = perf::perf_time_now();
         let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
-        perf::record_pc_falloc_cycles(
-            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_falloc),
-        );
+        perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
 
-        let entry = if populate && !beyond_eof {
+        let candidate = if populate && !beyond_eof {
             // 正常路径：从后端读取数据
             perf::record_pc_miss();
-            had_io_miss = true;
             let entry = Arc::new(PageEntry::new(frame, PageState::UpToDate));
             if let Some(backend) = self.backend() {
                 let buf = entry.as_slice_mut();
-                if let Err(e) = backend.read_page(page_index, buf) {
-                    return Err(e);
-                }
+                backend.read_page(page_index, buf)?;
             }
             // 页面跨越 EOF：populate 从后端读取文件内的数据，超出部分为零填充
             // 需要 OR 入超出部分的初始 valid_mask
@@ -713,19 +732,28 @@ impl PageCache {
             Arc::new(PageEntry::new(frame, PageState::UpToDate))
         };
 
-        let entry_clone = entry.clone();
-        entries[page_index] = Some(entry);
+        let (winner, publish_lock_hold) = {
+            let mut entries = self.entries.lock();
+            let _t_publish = perf::perf_time_now();
+            while entries.len() <= page_index {
+                entries.push(None);
+            }
 
-        let mut inner = self.inner.lock();
-        inner.pages.insert(page_index);
+            let winner = if let Some(entry) = entries[page_index].as_ref() {
+                entry.clone()
+            } else {
+                entries[page_index] = Some(candidate.clone());
+                let mut inner = self.inner.lock();
+                inner.pages.insert(page_index);
+                candidate
+            };
+            (winner, perf::perf_time_now().wrapping_sub(_t_publish))
+        };
+        perf::record_pc_lock_hold(publish_lock_hold, false);
 
-        // Clock eviction: mark page as recently referenced
-        entry_clone.mark_referenced();
-
-        let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
-        perf::record_pc_lock_hold(elapsed, had_io_miss);
-
-        Ok(entry_clone)
+        // Clock eviction: mark the published or concurrent winner as recently referenced.
+        winner.mark_referenced();
+        Ok(winner)
     }
 
     /// 获取页面用于读取。
@@ -744,65 +772,126 @@ impl PageCache {
     /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
     pub fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
         // 读取路径：始终 populate（old_file_size=None → 全量从后端加载），后续 ensure_fully_valid 补齐空洞
-        self.get_or_create_entry(page_index, true, None)
+        let entry = self.get_or_create_entry(page_index, true, None)?;
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => Ok(entry),
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+            PageState::Error => Err(SyscallErr::EIO),
+        }
     }
 
-    /// 获取页面用于写入（默认行为：部分写时从后端 populate）。
-    ///
-    /// # Locking
-    ///
-    /// 内部获取 `self.entries` → `self.inner`（按序）。标记脏页时更新全局脏页计数。
-    ///
-    /// # Errors
-    ///
-    /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
-    pub fn get_page_for_write(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
-        self.get_page_for_write_populate(page_index, None, false)
-    }
-
-    /// 获取页面用于写入，可选择是否从后端 populate。
-    /// `old_file_size`：旧文件大小。对于 page_index * PAGE_SIZE >= old_file_size
-    /// 的页面（完全超出旧 EOF），跳过 backend read_page 以减少 I/O，
-    /// 帧内存保持零填充，初始 valid_mask=VALID_ALL。
-    /// `full_overwrite`：该页是否被完全覆盖写入（可跳过 populate）。
-    /// - `None` + `false`: 当前 populate 逻辑（部分写入时从后端读取）
-    /// - `Some(size)` + `false`: 页面超出 EOF 时，zero-fill + valid_mask=VALID_ALL
-    /// - `true`: 整页覆写，跳过 populate
-    pub fn get_page_for_write_populate(
+    fn prepare_write_lease(
         &self,
         page_index: usize,
         old_file_size: Option<usize>,
         full_overwrite: bool,
-    ) -> Result<Arc<PageEntry>, SyscallErr> {
-        let beyond_eof = old_file_size
-            .map(|s| page_index * PAGE_SIZE >= s)
-            .unwrap_or(false);
+    ) -> Result<WriteLease, SyscallErr> {
+        let existing = {
+            let entries = self.entries.lock();
+            entries
+                .get(page_index)
+                .and_then(|entry| entry.as_ref().cloned())
+        };
+        if let Some(entry) = existing {
+            return self.acquire_existing_write_lease(page_index, entry);
+        }
+
+        let init_mask = old_file_size.map_or(0, |size| initial_valid_mask(page_index, size));
+        let beyond_eof = init_mask == VALID_ALL;
         let populate = !full_overwrite && !beyond_eof;
-        let entry = self.get_or_create_entry(page_index, populate, old_file_size)?;
-        // Atomic dirty marking: CAS UpToDate→Dirty, or set PG_REDIRTIED if Writeback
-        loop {
-            let raw = entry.state_raw();
-            let st = PageEntry::decode_state(raw);
-            match st {
-                PageState::Dirty => break,
-                PageState::UpToDate => {
-                    match entry.compare_exchange_state(raw, PageState::Dirty as u8) {
-                        Ok(_) => {
-                            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                            self.inner.lock().mark_dirty(page_index);
-                            break;
-                        }
-                        Err(_) => continue,
-                    }
-                }
-                PageState::Writeback => {
-                    entry.set_flag(PG_REDIRTIED);
-                    break;
-                }
-                _ => break,
+
+        let _t_falloc = perf::perf_time_now();
+        let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
+        perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
+        let candidate = Arc::new(PageEntry::new(frame, PageState::Loading));
+        if populate {
+            perf::record_pc_miss();
+            if let Some(backend) = self.backend() {
+                backend.read_page(page_index, candidate.as_slice_mut())?;
             }
         }
-        Ok(entry)
+        if init_mask != 0 {
+            candidate.valid_mask.fetch_or(init_mask, Ordering::Release);
+        }
+
+        let (winner, newly_installed) = {
+            let mut entries = self.entries.lock();
+            while entries.len() <= page_index {
+                entries.push(None);
+            }
+            if let Some(entry) = entries[page_index].as_ref() {
+                (entry.clone(), false)
+            } else {
+                entries[page_index] = Some(candidate.clone());
+                self.inner.lock().pages.insert(page_index);
+                (candidate, true)
+            }
+        };
+
+        if newly_installed {
+            winner.mark_referenced();
+            return Ok(WriteLease {
+                page_index,
+                entry: winner,
+                previous_state: PageState::UpToDate,
+                newly_installed: true,
+            });
+        }
+
+        self.acquire_existing_write_lease(page_index, winner)
+    }
+
+    fn acquire_existing_write_lease(
+        &self,
+        page_index: usize,
+        entry: Arc<PageEntry>,
+    ) -> Result<WriteLease, SyscallErr> {
+        entry.mark_referenced();
+        let raw = entry.state_raw();
+        let previous_state = PageEntry::decode_state(raw);
+        match previous_state {
+            PageState::UpToDate | PageState::Dirty => {
+                if entry
+                    .compare_exchange_state(raw, PageState::Loading as u8)
+                    .is_err()
+                {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                Ok(WriteLease {
+                    page_index,
+                    entry,
+                    previous_state,
+                    newly_installed: false,
+                })
+            }
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+            PageState::Error => Err(SyscallErr::EIO),
+        }
+    }
+
+    fn commit_write_lease(&self, lease: &WriteLease) {
+        if lease.previous_state != PageState::Dirty {
+            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+            self.inner.lock().mark_dirty(lease.page_index);
+        }
+        lease.entry.set_state(PageState::Dirty);
+    }
+
+    fn abort_write_lease(&self, lease: &WriteLease) {
+        if !lease.newly_installed {
+            lease.entry.set_state(lease.previous_state);
+            return;
+        }
+
+        let mut entries = self.entries.lock();
+        let removes_candidate = match entries.get(lease.page_index) {
+            Some(Some(entry)) => Arc::ptr_eq(entry, &lease.entry),
+            _ => false,
+        };
+        if removes_candidate {
+            entries[lease.page_index] = None;
+            self.inner.lock().pages.remove(&lease.page_index);
+        }
     }
 
     /// 获取页帧用于文件映射读（如 `MAP_PRIVATE` file-backed page fault）。
@@ -821,7 +910,7 @@ impl PageCache {
     ///
     /// 内部获取 `self.entries` → `self.inner`（按序）。
     pub fn frame_for_read(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
-        let entry = self.get_or_create_entry(page_index, true, None)?;
+        let entry = self.get_page_for_read(page_index)?;
         // 保证部分写入的页面在映射前所有 segment 均有效
         self.ensure_fully_valid(page_index)?;
         let state = entry.state();
@@ -833,56 +922,32 @@ impl PageCache {
     }
 
     /// 获取页帧用于文件映射写（如 `MAP_SHARED` file-backed page fault）。
-    ///
-    /// # Semantics
-    ///
-    /// 返回 PageCache 中的 `Arc<FrameTracker>`，自动通过 CAS 标记脏页。
-    /// 写回期间被再次标记脏时通过 `PG_REDIRTIED` 标志保证数据不丢失。
-    ///
-    /// # Errors
-    ///
-    /// - `EIO`：页面状态为 `Error`
-    /// - `EAGAIN`：页面状态为 `Loading` 或 `Writeback`
-    ///
-    /// # Locking
-    ///
-    /// 内部获取 `self.entries` → `self.inner`（按序）。修改全局脏页计数。
     pub fn frame_for_write(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
         let entry = self.get_or_create_entry(page_index, true, None)?;
-        // 保证部分写入的页面在映射前所有 segment 均有效
+        match entry.state() {
+            PageState::Loading | PageState::Writeback => return Err(SyscallErr::EAGAIN),
+            PageState::Error => return Err(SyscallErr::EIO),
+            PageState::UpToDate | PageState::Dirty => {}
+        }
         self.ensure_fully_valid(page_index)?;
-        let state = entry.state();
-        if state != PageState::UpToDate && state != PageState::Dirty {
-            return match state {
-                PageState::Error => Err(SyscallErr::EIO),
-                PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
-                _ => Err(SyscallErr::EIO),
-            };
-        }
-        // Atomic dirty marking: CAS UpToDate→Dirty, or set PG_REDIRTIED if Writeback
-        loop {
-            let raw = entry.state_raw();
-            let st = PageEntry::decode_state(raw);
-            match st {
-                PageState::Dirty => break,
-                PageState::UpToDate => {
-                    match entry.compare_exchange_state(raw, PageState::Dirty as u8) {
-                        Ok(_) => {
-                            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                            self.inner.lock().mark_dirty(page_index);
-                            break;
-                        }
-                        Err(_) => continue,
-                    }
+
+        let raw = entry.state_raw();
+        match PageEntry::decode_state(raw) {
+            PageState::Dirty => Ok(entry.page.clone()),
+            PageState::UpToDate => {
+                if entry
+                    .compare_exchange_state(raw, PageState::Dirty as u8)
+                    .is_err()
+                {
+                    return Err(SyscallErr::EAGAIN);
                 }
-                PageState::Writeback => {
-                    entry.set_flag(PG_REDIRTIED);
-                    break;
-                }
-                _ => break,
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                self.inner.lock().mark_dirty(page_index);
+                Ok(entry.page.clone())
             }
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+            PageState::Error => Err(SyscallErr::EIO),
         }
-        Ok(entry.page.clone())
     }
 
     /// 确保页面所有 segment 均已有效（读取缺失的 segment 并合并）。
@@ -900,6 +965,12 @@ impl PageCache {
                 None => return Ok(()),
             }
         };
+
+        match entry.state() {
+            PageState::Loading => return Err(SyscallErr::EAGAIN),
+            PageState::Error => return Err(SyscallErr::EIO),
+            PageState::UpToDate | PageState::Dirty | PageState::Writeback => {}
+        }
 
         if entry.is_fully_valid() {
             return Ok(());
@@ -942,15 +1013,21 @@ impl PageCache {
         buf_len: usize,
         start_page: usize,
         end_page: usize,
-    ) -> ReadPlan {
-        let mut plan = ReadPlan { copies: Vec::new(), miss_runs: Vec::new(), needs_valid_fill: BTreeSet::new() };
+    ) -> Result<ReadPlan, SyscallErr> {
+        let mut plan = ReadPlan {
+            copies: Vec::new(),
+            miss_runs: Vec::new(),
+            needs_valid_fill: BTreeSet::new(),
+        };
         let entries = self.entries.lock();
 
         for page_index in start_page..=end_page {
             let page_start = page_index * PAGE_SIZE;
             let read_start = offset.max(page_start);
             let read_end = (offset + buf_len).min(page_start + PAGE_SIZE);
-            if read_end <= read_start { continue; }
+            if read_end <= read_start {
+                continue;
+            }
             let sub_len = read_end - read_start;
 
             let dst_offset = read_start - offset;
@@ -959,6 +1036,13 @@ impl PageCache {
             // Check entry existence
             if page_index < entries.len() {
                 if let Some(entry) = &entries[page_index] {
+                    match entry.state() {
+                        PageState::Loading | PageState::Writeback => {
+                            return Err(SyscallErr::EAGAIN);
+                        }
+                        PageState::Error => return Err(SyscallErr::EIO),
+                        PageState::UpToDate | PageState::Dirty => {}
+                    }
                     entry.mark_referenced();
                     if entry.is_fully_valid() {
                         plan.copies.push(ReadCopy {
@@ -979,22 +1063,24 @@ impl PageCache {
                 if last.start_page + last.count == page_index {
                     last.count += 1;
                 } else {
-                    plan.miss_runs.push(MissRun { start_page: page_index, count: 1 });
+                    plan.miss_runs.push(MissRun {
+                        start_page: page_index,
+                        count: 1,
+                    });
                 }
             } else {
-                plan.miss_runs.push(MissRun { start_page: page_index, count: 1 });
+                plan.miss_runs.push(MissRun {
+                    start_page: page_index,
+                    count: 1,
+                });
             }
         }
-        plan
+        Ok(plan)
     }
 
     /// Fill contiguous missing page runs using backend.read_pages().
     /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
     fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
-        // Publish-after-I/O must serialize with truncate. Otherwise a read
-        // started before backend truncation could publish stale pages after
-        // truncate already pruned the cache.
-        let _io = self.io_gate.lock();
         let backend = self.backend().ok_or(SyscallErr::EIO)?;
         let backend_npages = backend.npages();
 
@@ -1004,7 +1090,10 @@ impl PageCache {
             for i in 0..run.count {
                 let page_index = run.start_page + i;
                 let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
-                new_entries.push((page_index, Arc::new(PageEntry::new(frame, PageState::UpToDate))));
+                new_entries.push((
+                    page_index,
+                    Arc::new(PageEntry::new(frame, PageState::UpToDate)),
+                ));
             }
 
             // 2. Call read_pages() for contiguous subruns within backend range
@@ -1013,7 +1102,10 @@ impl PageCache {
                 let start = new_entries[i].0;
                 if start >= backend_npages {
                     // Hole past EOF: zero-fill (frame_alloc already zeroed), mark fully valid
-                    new_entries[i].1.valid_mask.store(VALID_ALL, Ordering::Release);
+                    new_entries[i]
+                        .1
+                        .valid_mask
+                        .store(VALID_ALL, Ordering::Release);
                     i += 1;
                     continue;
                 }
@@ -1024,7 +1116,9 @@ impl PageCache {
                     && new_entries[i].0 < backend_npages
                 {
                     // SAFETY: we own the only mutable ref to this frame (not yet published to entries)
-                    unsafe { bufs.push(&mut *(new_entries[i].1.as_slice_mut() as *mut [u8])); }
+                    unsafe {
+                        bufs.push(&mut *(new_entries[i].1.as_slice_mut() as *mut [u8]));
+                    }
                     i += 1;
                 }
                 let n = backend.read_pages(run_start, &mut bufs)?;
@@ -1032,7 +1126,10 @@ impl PageCache {
                 let full_pages = (n / PAGE_SIZE).min(bufs.len());
                 for j in 0..full_pages {
                     let idx = new_entries.len() - bufs.len() + j;
-                    new_entries[idx].1.valid_mask.store(VALID_ALL, Ordering::Release);
+                    new_entries[idx]
+                        .1
+                        .valid_mask
+                        .store(VALID_ALL, Ordering::Release);
                 }
                 // Record miss for perf
                 perf::record_pc_miss();
@@ -1043,7 +1140,9 @@ impl PageCache {
                 let mut entries = self.entries.lock();
                 let mut inner = self.inner.lock();
                 for (page_index, entry) in new_entries {
-                    while entries.len() <= page_index { entries.push(None); }
+                    while entries.len() <= page_index {
+                        entries.push(None);
+                    }
                     if entries[page_index].is_none() {
                         entries[page_index] = Some(entry.clone());
                         inner.pages.insert(page_index);
@@ -1059,10 +1158,10 @@ impl PageCache {
     /// 从指定偏移量读取数据
     /// 两阶段读取：持锁收集拷贝项 → 解锁拷贝数据
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+        let _t0 = perf::perf_time_now();
         let miss_before = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed);
         if buf.is_empty() {
-            let elapsed = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
+            let elapsed = perf::perf_time_now().wrapping_sub(_t0);
             perf::record_pc_read(0, elapsed, elapsed, 0);
             return Ok(0);
         }
@@ -1075,22 +1174,19 @@ impl PageCache {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
-            let _t_lookup = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+            let _t_lookup = perf::perf_time_now();
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
             let had_miss =
                 perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-            let lookup_cycles =
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_lookup);
+            let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
-            let _t_copy = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+            let _t_copy = perf::perf_time_now();
             let src = entry.as_slice();
             buf[..sub_len].copy_from_slice(&src[page_offset..page_offset + sub_len]);
-            let copy_cycles =
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_copy);
+            let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
             perf::record_pc_copy_cycles(copy_cycles);
-            let total_cycles =
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
+            let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
             if had_miss {
                 perf::record_pc_read(1, total_cycles, 0, total_cycles);
             } else {
@@ -1103,27 +1199,25 @@ impl PageCache {
         let mut retried = false;
         let total_len = buf.len();
         loop {
-            let _t_lookup = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            let plan = self.lookup_read_range_fast(offset, total_len, start_page, end_page);
-            let lookup_cycles =
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_lookup);
+            let _t_lookup = perf::perf_time_now();
+            let plan = self.lookup_read_range_fast(offset, total_len, start_page, end_page)?;
+            let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
 
             // Fast path: all pages cached and fully valid
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
-                let _t_copy = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+                let _t_copy = perf::perf_time_now();
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
                     buf[item.dst_offset..item.dst_offset + item.len]
                         .copy_from_slice(&src[item.page_offset..item.page_offset + item.len]);
                 }
-                let copy_cycles =
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t_copy);
+                let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
 
-                let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-                let total_cycles =
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
+                let had_miss =
+                    perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+                let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
                 let pages = end_page - start_page + 1;
                 if had_miss {
                     perf::record_pc_read(pages, total_cycles, 0, total_cycles);
@@ -1171,9 +1265,9 @@ impl PageCache {
                         .copy_from_slice(&src[src_start..src_start + item.sub_len]);
                     dst_offset += item.sub_len;
                 }
-                let had_miss = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-                let total_cycles =
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0);
+                let had_miss =
+                    perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
+                let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
                 let pages = end_page - start_page + 1;
                 if had_miss {
                     perf::record_pc_read(pages, total_cycles, 0, total_cycles);
@@ -1207,42 +1301,71 @@ impl PageCache {
         buf: &[u8],
         old_file_size: Option<usize>,
     ) -> Result<usize, SyscallErr> {
-        let result = {
-            let _io = self.io_gate.lock();
-            self.write_without_balance(offset, buf, old_file_size)
-        };
-        if result.is_ok() {
-            balance_dirty_pages();
-        }
-        result
+        self.write_with_after_copy(offset, buf, old_file_size, |_| {})
     }
 
-    /// Execute an inode-level operation while excluding PageCache writers and
-    /// the complete Dirty -> Writeback -> completion transition.
-    pub(crate) fn with_io_gate<T>(
-        &self,
-        operation: impl FnOnce() -> Result<T, SyscallErr>,
-    ) -> Result<T, SyscallErr> {
-        let _io = self.io_gate.lock();
-        operation()
-    }
-
-    /// PageCache write body for callers that already hold `io_gate` and need
-    /// to publish inode EOF in the same serialization interval.  Dirty-page
-    /// balancing must run only after the caller releases the gate.
-    pub(crate) fn write_without_balance(
+    /// 从指定偏移量写入数据，并在所有数据及有效位发布后执行回调。
+    ///
+    /// `after_copy` 仅在成功写入非空缓冲区后调用一次，且在性能统计和脏页节流之前。
+    pub(crate) fn write_with_after_copy<F>(
         &self,
         offset: usize,
         buf: &[u8],
         old_file_size: Option<usize>,
-    ) -> Result<usize, SyscallErr> {
-        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+        after_copy: F,
+    ) -> Result<usize, SyscallErr>
+    where
+        F: FnOnce(usize),
+    {
+        self.write_with_copy_callbacks(offset, buf, old_file_size, |_| Ok(()), after_copy)
+    }
+
+    /// Test-only seam which runs after Loading publication but before payload bytes are copied.
+    pub(crate) fn write_with_before_copy<F>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: F,
+    ) -> Result<usize, SyscallErr>
+    where
+        F: FnOnce(usize) -> Result<(), SyscallErr>,
+    {
+        self.write_with_copy_callbacks(offset, buf, old_file_size, before_copy, |_| {})
+    }
+
+    fn write_with_copy_callbacks<BeforeCopy, AfterCopy>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: BeforeCopy,
+        after_copy: AfterCopy,
+    ) -> Result<usize, SyscallErr>
+    where
+        BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
+        AfterCopy: FnOnce(usize),
+    {
+        let _guard = self.io_gate.lock();
+        self.write_with_copy_callbacks_locked(offset, buf, old_file_size, before_copy, after_copy)
+    }
+
+    /// Copy data while the caller holds `io_gate`.
+    fn write_with_copy_callbacks_locked<BeforeCopy, AfterCopy>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: BeforeCopy,
+        after_copy: AfterCopy,
+    ) -> Result<usize, SyscallErr>
+    where
+        BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
+        AfterCopy: FnOnce(usize),
+    {
+        let _t0 = perf::perf_time_now();
         if buf.is_empty() {
-            perf::record_pc_write(
-                0,
-                false,
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-            );
+            perf::record_pc_write(0, false, perf::perf_time_now().wrapping_sub(_t0));
             return Ok(0);
         }
 
@@ -1255,24 +1378,30 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry =
-                self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
-            let dst = entry.as_slice_mut();
+            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite)?;
+            if let Err(error) = before_copy(sub_len) {
+                self.abort_write_lease(&lease);
+                return Err(error);
+            }
+            let dst = lease.entry.as_slice_mut();
             dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
-            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            let became_full = lease.entry.mark_valid_and_check_full(page_offset, sub_len);
+            self.commit_write_lease(&lease);
+            after_copy(sub_len);
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
             perf::record_pc_write(
                 1,
                 full_page_overwrite,
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+                perf::perf_time_now().wrapping_sub(_t0),
             );
+            balance_dirty_pages();
             return Ok(sub_len);
         }
 
         struct CopyItem {
-            entry: Arc<PageEntry>,
+            lease: WriteLease,
             page_offset: usize,
             sub_len: usize,
             full_page_overwrite: bool,
@@ -1300,10 +1429,18 @@ impl PageCache {
             if full_page_overwrite {
                 any_full_overwrite = true;
             }
-            let entry =
-                self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            let lease =
+                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        for item in &copies {
+                            self.abort_write_lease(&item.lease);
+                        }
+                        return Err(error);
+                    }
+                };
             copies.push(CopyItem {
-                entry,
+                lease,
                 page_offset,
                 sub_len,
                 full_page_overwrite,
@@ -1312,27 +1449,119 @@ impl PageCache {
         }
 
         // Phase 2: 写入数据（无锁）
+        if let Err(error) = before_copy(total_written) {
+            for item in &copies {
+                self.abort_write_lease(&item.lease);
+            }
+            return Err(error);
+        }
         let mut src_offset = 0;
+        let mut eventually_full = 0usize;
         for item in &copies {
-            let dst = item.entry.as_slice_mut();
+            let dst = item.lease.entry.as_slice_mut();
             let dst_start = item.page_offset;
             dst[dst_start..dst_start + item.sub_len]
                 .copy_from_slice(&buf[src_offset..src_offset + item.sub_len]);
             let became_full = item
+                .lease
                 .entry
                 .mark_valid_and_check_full(item.page_offset, item.sub_len);
             if became_full && !item.full_page_overwrite {
-                perf::record_pc_write_eventually_full();
+                eventually_full += 1;
             }
             src_offset += item.sub_len;
         }
 
+        for item in &copies {
+            self.commit_write_lease(&item.lease);
+        }
+        after_copy(total_written);
+        for _ in 0..eventually_full {
+            perf::record_pc_write_eventually_full();
+        }
         perf::record_pc_write(
             pages,
             any_full_overwrite,
-            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+            perf::perf_time_now().wrapping_sub(_t0),
         );
+        if !self.inner.lock().suppress_balance.load(core::sync::atomic::Ordering::Relaxed) {
+            balance_dirty_pages();
+        }
         Ok(total_written)
+    }
+
+    /// Acquire the I/O gate and execute `f` inside it.
+    pub fn with_io_gate<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let _guard = self.io_gate.lock();
+        f()
+    }
+
+    /// Write data without triggering global dirty-page balancing.
+    pub fn write_without_balance(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner.lock().suppress_balance.store(true, core::sync::atomic::Ordering::Relaxed);
+        let result = self.write_with_copy_callbacks(
+            offset,
+            buf,
+            old_file_size,
+            |_| Ok(()),
+            |_| {},
+        );
+        self.inner.lock().suppress_balance.store(false, core::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    /// Roll back a failed extension: discard dirty pages past `old_size`.
+    pub fn rollback_failed_extension(&self, old_size: usize) {
+        let start_page = (old_size + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
+        let mut entries = self.entries.lock();
+        let mut inner = self.inner.lock();
+        for page_index in start_page..entries.len() {
+            if let Some(ref entry) = entries[page_index] {
+                if entry.state() == PageState::Dirty {
+                    entries[page_index] = None;
+                    inner.pages.remove(&page_index);
+                    inner.dirty_pages.remove(&page_index);
+                }
+            }
+        }
+    }
+
+    /// Truncate with a backend callback, holding the I/O gate.
+    pub fn truncate_with_backend<F>(
+        &self,
+        new_size: usize,
+        backend: F,
+    ) -> Result<(), SyscallErr>
+    where
+        F: FnOnce() -> Result<(), SyscallErr>,
+    {
+        let _guard = self.io_gate.lock();
+        let hole_start_page = (new_size + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
+        let to_remove: Vec<usize> = {
+            let entries = self.entries.lock();
+            (hole_start_page..entries.len()).collect()
+        };
+        {
+            let mut entries = self.entries.lock();
+            let mut inner = self.inner.lock();
+            for page_index in to_remove {
+                if page_index < entries.len() {
+                    entries[page_index] = None;
+                }
+                inner.pages.remove(&page_index);
+                inner.dirty_pages.remove(&page_index);
+            }
+        }
+        backend()?;
+        Ok(())
     }
 
     // ── UserBuffer 读写 ──────────────────────────────────────────────
@@ -1371,14 +1600,17 @@ impl PageCache {
         // Multi-page with batch lookup + retry
         let mut retried = false;
         loop {
-            let plan = self.lookup_read_range_fast(offset, len, start_page, end_page);
+            let plan = self.lookup_read_range_fast(offset, len, start_page, end_page)?;
 
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
                 // All hits: copy to UserBuffer
                 let _t_copy = perf::perf_time_now();
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(item.dst_offset, &src[item.page_offset..item.page_offset + item.len]);
+                    dst.write_at(
+                        item.dst_offset,
+                        &src[item.page_offset..item.page_offset + item.len],
+                    );
                 }
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
@@ -1417,7 +1649,10 @@ impl PageCache {
                 let mut dst_off = 0;
                 for item in &copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(dst_off, &src[item.page_offset..item.page_offset + item.sub_len]);
+                    dst.write_at(
+                        dst_off,
+                        &src[item.page_offset..item.page_offset + item.sub_len],
+                    );
                     dst_off += item.sub_len;
                 }
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
@@ -1448,6 +1683,9 @@ impl PageCache {
         src: &crate::mm::UserBuffer,
         old_file_size: Option<usize>,
     ) -> Result<usize, SyscallErr> {
+        if len > src.len() {
+            return Err(SyscallErr::EFAULT);
+        }
         if len == 0 {
             return Ok(0);
         }
@@ -1461,11 +1699,11 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = len.min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry =
-                self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
-            let dst = entry.as_slice_mut();
+            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite)?;
+            let dst = lease.entry.as_slice_mut();
             src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
-            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            let became_full = lease.entry.mark_valid_and_check_full(page_offset, sub_len);
+            self.commit_write_lease(&lease);
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
@@ -1474,7 +1712,7 @@ impl PageCache {
         }
 
         struct CopyItem {
-            entry: Arc<PageEntry>,
+            lease: WriteLease,
             page_offset: usize,
             sub_len: usize,
             full_page_overwrite: bool,
@@ -1496,10 +1734,18 @@ impl PageCache {
 
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry =
-                self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            let lease =
+                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        for item in &copies {
+                            self.abort_write_lease(&item.lease);
+                        }
+                        return Err(error);
+                    }
+                };
             copies.push(CopyItem {
-                entry,
+                lease,
                 page_offset: write_start - page_start,
                 sub_len,
                 full_page_overwrite,
@@ -1510,10 +1756,11 @@ impl PageCache {
         // Phase 2: copy data from UserBuffer into pages (no locks held)
         let mut src_offset = 0;
         for item in &copies {
-            let dst = item.entry.as_slice_mut();
+            let dst = item.lease.entry.as_slice_mut();
             let dst_start = item.page_offset;
             src.read_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]);
             let became_full = item
+                .lease
                 .entry
                 .mark_valid_and_check_full(item.page_offset, item.sub_len);
             if became_full && !item.full_page_overwrite {
@@ -1522,6 +1769,9 @@ impl PageCache {
             src_offset += item.sub_len;
         }
 
+        for item in &copies {
+            self.commit_write_lease(&item.lease);
+        }
         balance_dirty_pages();
         Ok(total_written)
     }
@@ -1545,11 +1795,6 @@ impl PageCache {
             return Ok(0);
         }
 
-        // Readahead uses the same publish-after-I/O pattern as batch misses.
-        // Order it against truncate so old backend data cannot be published
-        // after cache pruning has completed.
-        let _io = self.io_gate.lock();
-
         let backend = match self.backend() {
             Some(b) => b,
             None => return Ok(0),
@@ -1561,25 +1806,20 @@ impl PageCache {
             index: usize, // absolute page index
             entry: Arc<PageEntry>,
         }
-        let mut pending: Vec<PendingPage> = Vec::new();
-        {
+        let missing_indices: Vec<usize> = {
             let entries = self.entries.lock();
-            for page_index in start_page..start_page + count {
-                // 跳过已缓存的页面
-                if page_index < entries.len() && entries[page_index].is_some() {
-                    continue;
-                }
-                // 分配新帧（frame_alloc 返回零填充页）
-                let frame = match frame_alloc() {
-                    Some(f) => f,
-                    None => return Err(SyscallErr::ENOMEM),
-                };
-                let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
-                pending.push(PendingPage {
-                    index: page_index,
-                    entry,
-                });
-            }
+            (start_page..start_page + count)
+                .filter(|page_index| *page_index >= entries.len() || entries[*page_index].is_none())
+                .collect()
+        };
+        let mut pending: Vec<PendingPage> = Vec::new();
+        for page_index in missing_indices {
+            let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
+            let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
+            pending.push(PendingPage {
+                index: page_index,
+                entry,
+            });
         }
 
         if pending.is_empty() {
@@ -1620,7 +1860,7 @@ impl PageCache {
             }
         }
 
-        // Phase 4: 标记 UpToDate 并插入到 entries
+        // Phase 4: only publish pages whose target slot is still empty.
         {
             let mut entries = self.entries.lock();
             let mut inner = self.inner.lock();
@@ -1629,11 +1869,6 @@ impl PageCache {
                 while entries.len() <= p.index {
                     entries.push(None);
                 }
-                // A fault/direct reader can populate (and even dirty) this
-                // slot while readahead I/O is in flight because those paths
-                // intentionally do not take io_gate.  Never overwrite that
-                // winner: doing so would detach its dirty data while leaving
-                // dirty accounting pointed at this index.
                 if entries[p.index].is_none() {
                     p.entry.set_state(PageState::UpToDate);
                     entries[p.index] = Some(p.entry.clone());
@@ -1677,7 +1912,28 @@ impl PageCache {
 
     /// 将指定页面索引加入脏页集合，并原子递增全局脏页计数。
     pub fn mark_page_dirty(&self, page_index: usize) {
-        self.inner.lock().mark_dirty(page_index);
+        let entry = {
+            let entries = self.entries.lock();
+            entries.get(page_index).and_then(|entry| entry.clone())
+        };
+        let Some(entry) = entry else {
+            return;
+        };
+
+        match entry.state() {
+            PageState::UpToDate => {
+                if entry
+                    .compare_exchange_state(PageState::UpToDate as u8, PageState::Dirty as u8)
+                    .is_ok()
+                {
+                    GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                    self.inner.lock().mark_dirty(page_index);
+                }
+            }
+            PageState::Dirty => self.inner.lock().mark_dirty(page_index),
+            PageState::Writeback => entry.set_flag(PG_REDIRTIED),
+            PageState::Loading | PageState::Error => {}
+        }
     }
 
     /// 从脏页集合移除该索引，并原子递减全局脏页计数（写回完成后调用）。
@@ -1693,24 +1949,23 @@ impl PageCache {
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
-        let _io = self.io_gate.lock();
-        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+        let _guard = self.io_gate.lock();
+        self.writeback_page_locked(page_index)
+    }
+
+    /// Write back one page while the caller holds `io_gate`.
+    pub(crate) fn writeback_page_locked(&self, page_index: usize) -> Result<(), SyscallErr> {
+        let _t0 = perf::perf_time_now();
         let entry = {
             let entries = self.entries.lock();
             if page_index >= entries.len() {
-                perf::record_pc_writeback(
-                    0,
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-                );
+                perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
                 return Ok(());
             }
             match &entries[page_index] {
                 Some(e) => e.clone(),
                 None => {
-                    perf::record_pc_writeback(
-                        0,
-                        perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-                    );
+                    perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
                     return Ok(());
                 }
             }
@@ -1724,27 +1979,14 @@ impl PageCache {
                 self.inner.lock().clear_dirty(page_index);
             }
             Err(_) => {
-                perf::record_pc_writeback(
-                    0,
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-                );
+                perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
                 return Ok(());
             }
         }
 
         let result = if let Some(backend) = self.backend() {
             // 写回前确保所有 segment 有效（填充部分写入的页面空洞）
-            if let Err(error) = self.ensure_fully_valid(page_index) {
-                // Dirty -> Writeback accounting has already been committed.
-                // A populate failure must make the page retryable instead of
-                // leaving it permanently stranded in Writeback.
-                entry.test_and_clear_flag(PG_REDIRTIED);
-                entry.set_state(PageState::Dirty);
-                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                self.inner.lock().mark_dirty(page_index);
-                return Err(error);
-            }
+            self.ensure_fully_valid(page_index)?;
             let data = entry.as_slice();
             let result = backend.write_page(page_index, data);
             match result {
@@ -1783,10 +2025,7 @@ impl PageCache {
             Ok(())
         };
 
-        perf::record_pc_writeback(
-            1,
-            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-        );
+        perf::record_pc_writeback(1, perf::perf_time_now().wrapping_sub(_t0));
         result
     }
 
@@ -1795,9 +2034,8 @@ impl PageCache {
     /// `start..start+count` 范围内只对实际标记为 Dirty 的页面执行写回；
     /// 非 Dirty 的页面被跳过。批次中至少一个页面被写入时，调用
     /// `backend.write_pages()` 批量提交；否则直接返回 Ok。
-    fn writeback_pages_run(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
-        let _io = self.io_gate.lock();
-        let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+    fn writeback_pages_run_locked(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
+        let _t0 = perf::perf_time_now();
 
         // 第一阶段：持有 entries 锁，收集 Dirty 页面，CAS 为 Writeback
         let mut page_slices: Vec<(usize, Arc<PageEntry>)> = Vec::new();
@@ -1832,19 +2070,49 @@ impl PageCache {
             }
         }
 
-        let restore_dirty = |pages: &[(usize, Arc<PageEntry>)]| {
-            let mut inner = self.inner.lock();
-            for (idx, entry) in pages {
-                entry.test_and_clear_flag(PG_REDIRTIED);
-                entry.set_state(PageState::Dirty);
-                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                inner.mark_dirty(*idx);
+        // 写回前确保所有 segment 有效（填充部分写入的页面空洞）
+        for (idx, _) in &page_slices {
+            self.ensure_fully_valid(*idx)?;
+        }
+
+        // 构建连续的 &[u8] 切片（start 即为第一个 Dirty 页的实际索引）
+        // Invariant: 调用者保证该范围内不存在非 Dirty 页空洞，否则需拆分 run。
+        let actual_start = page_slices[0].0;
+        let slices: Vec<&[u8]> = page_slices.iter().map(|(_, e)| e.as_slice()).collect();
+
+        let result = if let Some(backend) = self.backend() {
+            let write_result = backend.write_pages(actual_start, &slices);
+            match write_result {
+                Ok(_) => {
+                    let mut inner = self.inner.lock();
+                    for (idx, entry) in &page_slices {
+                        if entry.test_and_clear_flag(PG_REDIRTIED) {
+                            // Redirtied during writeback → restore to Dirty
+                            entry.set_state(PageState::Dirty);
+                            GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                            inner.mark_dirty(*idx);
+                        } else {
+                            entry.set_state(PageState::UpToDate);
+                        }
+                        GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    // 写回失败：恢复为 Dirty 状态以便重试
+                    let mut inner = self.inner.lock();
+                    for (idx, entry) in &page_slices {
+                        entry.set_state(PageState::Dirty);
+                        GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                        GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
+                        inner.mark_dirty(*idx);
+                    }
+                    Err(e)
+                }
             }
-        };
-        let complete_writeback = |pages: &[(usize, Arc<PageEntry>)]| {
+        } else {
             let mut inner = self.inner.lock();
-            for (idx, entry) in pages {
+            for (idx, entry) in &page_slices {
                 if entry.test_and_clear_flag(PG_REDIRTIED) {
                     entry.set_state(PageState::Dirty);
                     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -1854,60 +2122,24 @@ impl PageCache {
                 }
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
             }
-        };
-
-        // 写回前确保所有 segment 有效（填充部分写入的页面空洞）。
-        // Any populate failure must roll every page out of Writeback state.
-        for (idx, _) in &page_slices {
-            if let Err(error) = self.ensure_fully_valid(*idx) {
-                restore_dirty(&page_slices);
-                return Err(error);
-            }
-        }
-
-        let result = if let Some(backend) = self.backend() {
-            // CAS may have skipped a page that another writer already owns.
-            // Split the pages actually acquired into contiguous sub-runs so
-            // later pages can never be shifted onto an earlier file offset.
-            let mut cursor = 0;
-            let mut result = Ok(());
-            while cursor < page_slices.len() {
-                let mut end = cursor + 1;
-                while end < page_slices.len()
-                    && page_slices[end].0 == page_slices[end - 1].0 + 1
-                {
-                    end += 1;
-                }
-                let run = &page_slices[cursor..end];
-                let slices: Vec<&[u8]> = run
-                    .iter()
-                    .map(|(_, entry)| entry.as_slice())
-                    .collect();
-                match backend.write_pages(run[0].0, &slices) {
-                    Ok(_) => complete_writeback(run),
-                    Err(error) => {
-                        restore_dirty(&page_slices[cursor..]);
-                        result = Err(error);
-                        break;
-                    }
-                }
-                cursor = end;
-            }
-            result
-        } else {
-            complete_writeback(&page_slices);
             Ok(())
         };
 
-        perf::record_pc_writeback(
-            page_slices.len(),
-            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-        );
+        perf::record_pc_writeback(slices.len(), perf::perf_time_now().wrapping_sub(_t0));
         result
     }
 
     /// 收集当前所有脏页索引并按连续 run 分组，逐 run 写回。
     pub fn writeback_all(&self) -> Result<(), SyscallErr> {
+        let _guard = self.io_gate.lock();
+        self.writeback_all_with_io_gate_held()
+    }
+
+    /// Write back all dirty pages while the caller holds `io_gate`.
+    ///
+    /// The ext4 bridge uses this to order data writeback with its inode-size
+    /// commit, so a concurrent resize cannot leave an older size on disk.
+    pub(crate) fn writeback_all_with_io_gate_held(&self) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner.dirty_pages.iter().copied().collect()
@@ -1932,13 +2164,23 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
 
     /// 筛选出 `[start_index, end_index]` 范围内的脏页，按连续 run 分组写回。
     pub fn writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr> {
+        let _guard = self.io_gate.lock();
+        self.writeback_range_locked(start_index, end_index)
+    }
+
+    /// Write back a range while the caller holds `io_gate`.
+    fn writeback_range_locked(
+        &self,
+        start_index: usize,
+        end_index: usize,
+    ) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner
@@ -1967,7 +2209,7 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
@@ -1977,6 +2219,12 @@ impl PageCache {
     /// 用于后台合作式写回：收集连续脏页 run，持锁收集 → 解锁 → I/O。
     /// 达到预算或脏页耗尽时停止。
     pub fn writeback_some_pages(&self, budget: usize) -> usize {
+        let _guard = self.io_gate.lock();
+        self.writeback_some_pages_locked(budget)
+    }
+
+    /// Write back up to `budget` pages while the caller holds `io_gate`.
+    fn writeback_some_pages_locked(&self, budget: usize) -> usize {
         if budget == 0 {
             return 0;
         }
@@ -2007,7 +2255,7 @@ impl PageCache {
             // writeback_pages_run uses CAS — some pages may have been
             // concurrently consumed by another flusher. Tolerate
             // partial progress and continue.
-            let _ = self.writeback_pages_run(run_start, run_end - run_start + 1);
+            let _ = self.writeback_pages_run_locked(run_start, run_end - run_start + 1);
             total += count;
         }
         total
@@ -2017,90 +2265,59 @@ impl PageCache {
 
     /// 截断 page cache 到指定大小
     pub fn truncate(&self, new_size: usize) -> Result<(), SyscallErr> {
-        self.truncate_with_backend(new_size, || Ok(()))
+        let _guard = self.io_gate.lock();
+        self.truncate_with_io_gate_held(new_size)
     }
 
-    /// Atomically order a persistent truncate between PageCache writeback and
-    /// ordinary cached writes.  `persistent` runs only after confirming that
-    /// no page in the discarded range is already in Writeback; cache removal
-    /// is committed only after the backend operation succeeds.
-    pub(crate) fn truncate_with_backend(
+    /// Truncate while the caller holds `io_gate`.
+    pub(crate) fn truncate_with_io_gate_held(&self, new_size: usize) -> Result<(), SyscallErr> {
+        self.truncate_locked(new_size, true)
+    }
+
+    fn truncate_locked(
         &self,
         new_size: usize,
-        persistent: impl FnOnce() -> Result<(), SyscallErr>,
+        mark_zeroed_tail_dirty: bool,
     ) -> Result<(), SyscallErr> {
-        let _io = self.io_gate.lock();
-        let hole_start_page = new_size.div_ceil(PAGE_SIZE);
+        let hole_start_page = (new_size + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
 
-        // Never detach a page while a backend write still owns it: that I/O
-        // could complete after the on-disk truncate and extend the file again.
-        // Callers may retry once the synchronous writeback finishes.
-        {
+        // 收集需要移除的页面索引
+        let to_remove: Vec<usize> = {
             let entries = self.entries.lock();
-            if entries[hole_start_page.min(entries.len())..]
-                .iter()
-                .flatten()
-                .any(|entry| entry.state() == PageState::Writeback)
-            {
-                return Err(SyscallErr::EBUSY);
-            }
-        }
+            (hole_start_page..entries.len()).collect()
+        };
 
-        // No writer/writeback can cross io_gate, so the preflight remains
-        // valid while persistent storage is changed and the cache is pruned.
-        persistent()?;
-
-        let mut entries = self.entries.lock();
-        let mut inner = self.inner.lock();
-
-        for page_index in hole_start_page..entries.len() {
-            if let Some(entry) = entries[page_index].take() {
-                if entry.state() == PageState::Dirty {
-                    GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+        let zeroed_tail = {
+            let mut entries = self.entries.lock();
+            let mut inner = self.inner.lock();
+            for page_index in to_remove {
+                if page_index < entries.len() {
+                    entries[page_index] = None;
                 }
                 inner.pages.remove(&page_index);
                 inner.dirty_pages.remove(&page_index);
             }
-        }
 
-        // Keep a retained cache page coherent with the new EOF.  These bytes
-        // are outside the file and must read as zero after a later extension.
-        let offset_in_page = new_size & (PAGE_SIZE - 1);
-        if offset_in_page > 0 {
-            let tail_page = new_size / PAGE_SIZE;
-            if let Some(Some(entry)) = entries.get(tail_page) {
-                entry.as_slice_mut()[offset_in_page..].fill(0);
+            let tail_start = new_size % PAGE_SIZE;
+            if new_size > 0 && tail_start > 0 {
+                let last_page_idx = (new_size - 1) >> PAGE_SIZE_BITS;
+                if let Some(Some(entry)) = entries.get(last_page_idx) {
+                    entry.as_slice_mut()[tail_start..].fill(0);
+                    Some(last_page_idx)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if mark_zeroed_tail_dirty {
+            if let Some(last_page_idx) = zeroed_tail {
+                self.mark_page_dirty(last_page_idx);
             }
         }
 
         Ok(())
-    }
-
-    /// Roll back cache pages created by a failed file extension.
-    ///
-    /// Unlike normal truncate, this helper only discards pages that are not
-    /// already in writeback.  A failed `PageCache::write()` returns before it
-    /// invokes dirty balancing, so extension-only pages are normally Dirty;
-    /// accounting must be undone when those speculative pages are removed.
-    pub(crate) fn rollback_failed_extension(&self, restored_size: usize) {
-        let first_discard = restored_size.div_ceil(PAGE_SIZE);
-        let mut entries = self.entries.lock();
-        let mut inner = self.inner.lock();
-        for page_index in first_discard..entries.len() {
-            let removable = entries[page_index]
-                .as_ref()
-                .is_some_and(|entry| entry.state() != PageState::Writeback);
-            if !removable {
-                continue;
-            }
-            if let Some(entry) = entries[page_index].take() {
-                if entry.state() == PageState::Dirty {
-                    GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
-                }
-                inner.pages.remove(&page_index);
-                inner.dirty_pages.remove(&page_index);
-            }
-        }
     }
 
     /// 收集所有页面的 FrameTracker，用于内核空间映射
@@ -2157,17 +2374,12 @@ impl PageCache {
 /// 无新内核线程 — 利用现有 reclaim hook 调度。
 pub fn maybe_background_writeback() {
     let dirty = GLOBAL_DIRTY_PAGES.load(Ordering::Relaxed);
-    if dirty < DIRTY_BACKGROUND {
+    if !dirty_memory_pressure_is_critical(dirty) {
         return;
     }
     if WRITEBACK_ACTIVE.swap(true, Ordering::AcqRel) {
         return; // another caller is already flushing
     }
-    let budget = if dirty >= DIRTY_THROTTLE {
-        WB_BG_MAX_PAGES
-    } else {
-        WB_BATCH_PAGES
-    };
     crate::task::perf::record_wb_bg_call();
 
     // Snapshot alive page caches; drop dead weak refs
@@ -2176,7 +2388,7 @@ pub fn maybe_background_writeback() {
     let caches: Vec<Arc<PageCache>> = reg.iter().filter_map(|w| w.upgrade()).collect();
     drop(reg);
 
-    let mut remaining = budget;
+    let mut remaining = WB_BG_MAX_PAGES;
     for pc in &caches {
         if remaining == 0 {
             break;
@@ -2196,36 +2408,18 @@ pub fn maybe_background_writeback() {
 /// - 超过 DIRTY_THROTTLE：写入者帮助完成一批写回
 pub fn balance_dirty_pages() {
     let dirty = GLOBAL_DIRTY_PAGES.load(Ordering::Relaxed);
-    let wb = GLOBAL_WRITEBACK_PAGES.load(Ordering::Relaxed);
-    let total = dirty.saturating_add(wb);
-
-    if total < DIRTY_BACKGROUND {
-        return;
-    }
-
-    if total < DIRTY_THROTTLE {
-        // Below throttle: opportunistic background flush (non-blocking)
+    if dirty_memory_pressure_is_critical(dirty) {
         maybe_background_writeback();
-        return;
     }
+}
 
-    // Above throttle: writer helps with one batch
-    if !WRITEBACK_ACTIVE.swap(true, Ordering::AcqRel) {
-        crate::task::perf::record_wb_throttle_call();
-
-        let mut reg = PAGE_CACHE_REGISTRY.lock();
-        reg.retain(|w| w.strong_count() > 0);
-        let caches: Vec<Arc<PageCache>> = reg.iter().filter_map(|w| w.upgrade()).collect();
-        drop(reg);
-
-        for pc in &caches {
-            let written = pc.writeback_some_pages(WB_BATCH_PAGES);
-            if written > 0 {
-                break;
-            }
-        }
-        WRITEBACK_ACTIVE.store(false, Ordering::Release);
+fn dirty_memory_pressure_is_critical(dirty: usize) -> bool {
+    if dirty < DIRTY_EMERGENCY_MIN_PAGES {
+        return false;
     }
+    let free = crate::mm::unallocated_frames();
+    dirty.saturating_mul(DIRTY_EMERGENCY_FREE_RATIO_DENOMINATOR)
+        >= free.saturating_mul(DIRTY_EMERGENCY_FREE_RATIO_NUMERATOR)
 }
 
 // ── BlockPageCacheBackend ────────────────────────────────────────────────
@@ -2302,7 +2496,8 @@ impl PageCacheBackend for BlockPageCacheBackend {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= PAGE_SIZE);
             self.block_device
-                .read_block(block_id, &mut buf[start..start + self.block_size]);
+                .read_block(block_id, &mut buf[start..start + self.block_size])
+                .map_err(|_| SyscallErr::EIO)?;
         }
 
         Ok(PAGE_SIZE)
@@ -2320,7 +2515,8 @@ impl PageCacheBackend for BlockPageCacheBackend {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= PAGE_SIZE);
             self.block_device
-                .write_block(block_id, &buf[start..start + self.block_size]);
+                .write_block(block_id, &buf[start..start + self.block_size])
+                .map_err(|_| SyscallErr::EIO)?;
         }
 
         Ok(PAGE_SIZE)
@@ -2335,13 +2531,11 @@ impl PageCacheBackend for BlockPageCacheBackend {
 
 /// FAT32 文件系统专用的 PageCache 后端
 ///
-/// Shares the inode's cluster-list storage directly, so dirty pages can still
-/// be written while `FatInode::drop` is running. A `Weak<FatInode>` cannot be
-/// upgraded once the strong count reaches zero, which used to lose final
-/// writeback data during rename/unlink cache eviction.
+/// 通过弱引用访问 FatInode，将页面偏移动态映射为扇区号。
+/// 读/写时临时持有读锁，自动适应 cluster list 变化。
 pub struct FatPageCacheBackend {
     fs: alloc::sync::Arc<crate::fs::fat32::EasyFileSystem>,
-    file_content: alloc::sync::Arc<spin::RwLock<crate::fs::fat32::fat_inode::FileContent>>,
+    inode: alloc::sync::Weak<crate::fs::fat32::FatInode>,
     block_size: usize,
     blocks_per_page: usize,
     sec_per_clus: usize,
@@ -2350,14 +2544,14 @@ pub struct FatPageCacheBackend {
 impl FatPageCacheBackend {
     pub fn new(
         fs: alloc::sync::Arc<crate::fs::fat32::EasyFileSystem>,
-        file_content: alloc::sync::Arc<spin::RwLock<crate::fs::fat32::fat_inode::FileContent>>,
+        inode: &alloc::sync::Weak<crate::fs::fat32::FatInode>,
     ) -> Self {
         let block_size = fs.byts_per_sec as usize;
         let blocks_per_page = crate::config::PAGE_SIZE / block_size;
         let sec_per_clus = fs.sec_per_clus as usize;
         FatPageCacheBackend {
             fs,
-            file_content,
+            inode: inode.clone(),
             block_size,
             blocks_per_page,
             sec_per_clus,
@@ -2365,7 +2559,8 @@ impl FatPageCacheBackend {
     }
 
     fn block_id_for_offset(&self, page_index: usize, block_off: usize) -> Option<usize> {
-        let lock = self.file_content.read();
+        let inode = self.inode.upgrade()?;
+        let lock = inode.file_content.read();
         let clus_list = &lock.clus_list;
         let block_index = page_index * self.blocks_per_page + block_off;
         let cluster_id = block_index / self.sec_per_clus;
@@ -2383,16 +2578,22 @@ impl PageCacheBackend for FatPageCacheBackend {
         if buf.len() < crate::config::PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
+        let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             match self.block_id_for_offset(index, block_off) {
                 Some(sec_id) => {
-                    // The filesystem mount path wraps the device so block_id is expressed
-                    // in BPB_BytsPerSec units, independent of the platform BLOCK_SZ.
+                    // FAT32 sector 是 512 字节，BlockDevice 以 PAGE_SIZE/BLOCK_SZ(4096) 为单位
+                    let blk_id = sec_id / ratio;
+                    let blk_off = (sec_id % ratio) * self.block_size;
+                    let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                     self.fs
                         .block_device
-                        .read_block(sec_id, &mut buf[start..start + self.block_size]);
+                        .read_block(blk_id, &mut blk_buf)
+                        .map_err(|_| SyscallErr::EIO)?;
+                    buf[start..start + self.block_size]
+                        .copy_from_slice(&blk_buf[blk_off..blk_off + self.block_size]);
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -2406,20 +2607,35 @@ impl PageCacheBackend for FatPageCacheBackend {
         if buf.len() < crate::config::PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
+        let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             if let Some(sec_id) = self.block_id_for_offset(index, block_off) {
+                let blk_id = sec_id / ratio;
+                let blk_off = (sec_id % ratio) * self.block_size;
+                let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                 self.fs
                     .block_device
-                    .write_block(sec_id, &buf[start..start + self.block_size]);
+                    .read_block(blk_id, &mut blk_buf)
+                    .map_err(|_| SyscallErr::EIO)?;
+                blk_buf[blk_off..blk_off + self.block_size]
+                    .copy_from_slice(&buf[start..start + self.block_size]);
+                self.fs
+                    .block_device
+                    .write_block(blk_id, &blk_buf)
+                    .map_err(|_| SyscallErr::EIO)?;
             }
         }
         Ok(crate::config::PAGE_SIZE)
     }
 
     fn npages(&self) -> usize {
-        let lock = self.file_content.read();
+        let inode = match self.inode.upgrade() {
+            Some(i) => i,
+            None => return 0,
+        };
+        let lock = inode.file_content.read();
         let total_blocks = lock.clus_list.len() * self.sec_per_clus;
         drop(lock);
         (total_blocks + self.blocks_per_page - 1) / self.blocks_per_page
@@ -2513,11 +2729,18 @@ impl Ext4PageCacheBackend {
                 perf::record_ext4_map_lblock_cost(elapsed);
                 // Cache the full extent range
                 self.map_cache.valid.store(true, Ordering::Relaxed);
-                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
-                self.map_cache.lblock_start.store(ext_first, Ordering::Relaxed);
-                self.map_cache.pblock_start
+                self.map_cache
+                    .inode_num
+                    .store(self.inode_num, Ordering::Relaxed);
+                self.map_cache
+                    .lblock_start
+                    .store(ext_first, Ordering::Relaxed);
+                self.map_cache
+                    .pblock_start
                     .store(pblock - (lblock - ext_first), Ordering::Relaxed);
-                self.map_cache.lblock_count.store(ext_len, Ordering::Relaxed);
+                self.map_cache
+                    .lblock_count
+                    .store(ext_len, Ordering::Relaxed);
                 Some(pblock as usize)
             }
             Err(_) => {
@@ -2526,9 +2749,13 @@ impl Ext4PageCacheBackend {
                 crate::task::perf::record_ext4_map_hole();
                 // Cache the hole (single block only — extent range doesn't cover holes)
                 self.map_cache.valid.store(true, Ordering::Relaxed);
-                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
+                self.map_cache
+                    .inode_num
+                    .store(self.inode_num, Ordering::Relaxed);
                 self.map_cache.lblock_start.store(lblock, Ordering::Relaxed);
-                self.map_cache.pblock_start.store(u32::MAX, Ordering::Relaxed);
+                self.map_cache
+                    .pblock_start
+                    .store(u32::MAX, Ordering::Relaxed);
                 self.map_cache.lblock_count.store(1, Ordering::Relaxed);
                 None
             }
@@ -2548,7 +2775,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             match self.block_id_for_offset(index, block_off) {
                 Some(block_id) => {
                     fs.block_device
-                        .read_block(block_id, &mut buf[start..start + self.block_size]);
+                        .read_block(block_id, &mut buf[start..start + self.block_size])
+                        .map_err(|_| SyscallErr::EIO)?;
                     crate::fs::ext4::counters::inc_counter!(
                         crate::fs::ext4::counters::DATA_BLOCK_READ
                     );
@@ -2575,7 +2803,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             match self.block_id_for_offset(index, block_off) {
                 Some(block_id) => {
                     fs.block_device
-                        .write_block(block_id, &buf[start..start + self.block_size]);
+                        .write_block(block_id, &buf[start..start + self.block_size])
+                        .map_err(|_| SyscallErr::EIO)?;
                     crate::fs::ext4::counters::inc_counter!(
                         crate::fs::ext4::counters::DATA_BLOCK_WRITE
                     );
@@ -2657,7 +2886,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 // pblock 是 512B 单位，需转为 BLOCK_SZ 单位（pblock / blocks_per_page）
                 // staging 按 512B 拼接，因 run 跨整页边界，staging_size 必为 BLOCK_SZ 的整数倍
                 let first_pblock_4k = first_pblock / bpp;
-                blk.write_block(first_pblock_4k, &staging);
+                blk.write_block(first_pblock_4k, &staging)
+                    .map_err(|_| SyscallErr::EIO)?;
 
                 // 更新计数器（等价于逐块调用）
                 for _ in 0..run_len {
@@ -2719,7 +2949,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             }
 
             // 批量写入块设备
-            blk.write_block(first_pblock, &staging);
+            blk.write_block(first_pblock, &staging)
+                .map_err(|_| SyscallErr::EIO)?;
 
             // 更新计数器（等价于逐块调用）
             for _ in 0..run_len {
@@ -2737,11 +2968,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         crate::task::perf::record_ext4_pc_readpages_calls();
         crate::task::perf::record_ext4_pc_readpages_pages(pages.len());
         // 当 blocks_per_page > 1 时，打平所有 lblock，按物理连续分组批量读取
@@ -2793,7 +3020,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 // 批量读取到 staging buffer
                 let staging_size = run_len * block_sz;
                 let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
-                blk.read_block(first_pblock, &mut staging);
+                blk.read_block(first_pblock, &mut staging)
+                    .map_err(|_| SyscallErr::EIO)?;
 
                 // 分散到各页面的对应 block_off 位置
                 for j in 0..run_len {
@@ -2875,7 +3103,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             // 批量读取物理连续块到 staging buffer
             let staging_size = run_len * block_sz;
             let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
-            blk.read_block(first_pblock, &mut staging);
+            blk.read_block(first_pblock, &mut staging)
+                .map_err(|_| SyscallErr::EIO)?;
 
             // 将 staging buffer 中的数据拷贝到各页面
             for j in 0..run_len {

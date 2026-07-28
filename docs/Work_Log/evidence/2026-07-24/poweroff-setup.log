@@ -1,0 +1,36 @@
+tools_disk_sha256 898877273f4a1721d7544195220e197335d40f78ebec4b3ffb2b5fbb9f015635  disk.img
+sdcard_restored_sha256 95973543db6b84a9a5e70f30da466ce292867aff5b689fb14c88dc9406e378b8  sdcard-rv.img
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+[conf-inject] arch=rv64 blk_mode=virt
+[conf-inject] conf=/app/os_test_iozone.conf
+[conf-inject] image=/app/sdcard-rv.img
+e2fsck 1.47.0 (5-Feb-2023)
+Pass 1: Checking inodes, blocks, and sizes
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+/app/sdcard-rv.img: 6437/262144 files (0.0% non-contiguous), 812796/1048576 blocks
+debugfs 1.47.0 (5-Feb-2023)
+debugfs: rm /os_test.conf
+rm: File not found by ext2_lookup while trying to resolve filename
+debugfs: write /app/os_test_iozone.conf /os_test.conf
+Allocated inode: 3213
+debugfs: stat /os_test.conf
+Inode: 3213   Type: regular    Mode:  0664   Flags: 0x80000
+Generation: 0    Version: 0x00000000:00000000
+User:     0   Group:     0   Project:     0   Size: 68
+File ACL: 0
+Links: 1   Blockcount: 8
+Fragment:  Address: 0    Number: 0    Size: 0
+ ctime: 0x6a629257:00000000 -- Thu Jul 23 22:14:47 2026
+ atime: 0x6a629257:00000000 -- Thu Jul 23 22:14:47 2026
+ mtime: 0x6a629257:00000000 -- Thu Jul 23 22:14:47 2026
+crtime: 0x6a629257:00000000 -- Thu Jul 23 22:14:47 2026
+Size of extra inode fields: 32
+Inode checksum: 0x3193a7db
+EXTENTS:
+(0):24384
+[conf-inject] injected /os_test.conf into /app/sdcard-rv.img
+[conf-inject] done

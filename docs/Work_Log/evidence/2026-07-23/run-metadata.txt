@@ -1,0 +1,8 @@
+git-hash: 8cc2751d-dirty
+container-id: fba442b0132ed67fdd5b17f188e8323464b131951a1c6349e52b0082809c711d
+mounts:
+  /home/pxy/projects/MangoCore -> /app
+  /etc/localtime -> /etc/localtime
+qemu-command: docker compose exec -T os-dev bash -c "cd /app/os && timeout 300 make rv64-run 2>&1"
+qemu-log: captured at /tmp/qemu-task1.log (530 lines); selected diagnostics and all obtained throughput values are persisted in baseline-rejection.txt.
+qemu-result: partial; QEMU received SIGTERM during the pwrite/pread phase, so no suite-pass claim is made.

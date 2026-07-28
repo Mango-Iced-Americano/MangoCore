@@ -43,19 +43,24 @@ impl Swap {
         !self.block_ids.is_empty() && self.block_ids.len() >= self.bitmap.len() * 64 * BLK_PER_PG
     }
 
-    fn read_page(block_ids: &[usize], buf: &mut [u8]) {
+    fn read_page(block_ids: &[usize], buf: &mut [u8]) -> Result<(), MemoryError> {
         if block_ids.is_empty() {
-            return;
+            return Ok(());
         }
         assert!(block_ids[0] + BLK_PER_PG - 1 == block_ids[BLK_PER_PG - 1]);
-        BLOCK_DEVICE.read_block(block_ids[0], buf);
+        BLOCK_DEVICE
+            .read_block(block_ids[0], buf)
+            .map_err(|_| MemoryError::BackingStoreFailure)
     }
-    fn write_page(block_ids: &[usize], buf: &[u8]) {
+
+    fn write_page(block_ids: &[usize], buf: &[u8]) -> Result<(), MemoryError> {
         if block_ids.is_empty() {
-            return;
+            return Ok(());
         }
         assert!(block_ids[0] + (BLK_PER_PG - 1) == block_ids[BLK_PER_PG - 1]);
-        BLOCK_DEVICE.write_block(block_ids[0], buf);
+        BLOCK_DEVICE
+            .write_block(block_ids[0], buf)
+            .map_err(|_| MemoryError::BackingStoreFailure)
     }
     fn set_bit(&mut self, pos: usize) {
         self.bitmap[pos / 64] |= 1 << (pos % 64);
@@ -92,7 +97,7 @@ impl Swap {
         let block_ids = self
             .get_block_ids(swap_id)
             .ok_or(MemoryError::BackingStoreFailure)?;
-        Self::read_page(block_ids, buf);
+        Self::read_page(block_ids, buf)?;
         Ok(())
     }
 
@@ -107,7 +112,7 @@ impl Swap {
         let block_ids = self
             .get_block_ids(swap_id)
             .ok_or(MemoryError::BackingStoreFailure)?;
-        Self::write_page(block_ids, buf);
+        Self::write_page(block_ids, buf)?;
         self.set_bit(swap_id);
         Ok(Arc::new(SwapTracker(swap_id)))
     }

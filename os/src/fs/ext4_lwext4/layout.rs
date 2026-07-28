@@ -1660,7 +1660,6 @@ impl IndexNode for Ext4OSInode {
         self.validate_path_locked(&parent_path)?;
         let source = self.fs.probe_inode_meta_locked(&other_path)?;
         if source.inode_id != other_node.inode_id
-            || source.generation != other_node.state.generation()
         {
             return Err(SyscallErr::EAGAIN);
         }

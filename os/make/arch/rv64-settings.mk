@@ -82,8 +82,8 @@ endif
 
 # Binutils from rustup's llvm-tools-preview component. This avoids depending on
 # the cargo-binutils wrapper being preinstalled or downloaded during grading.
-HOST_TRIPLE := $(shell env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustc -vV | sed -n 's/^host: //p')
-LLVM_TOOLS_DIR := $(shell env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin
+HOST_TRIPLE := $(shell rustup run nightly-2026-05-10 rustc -vV | sed -n 's/^host: //p')
+LLVM_TOOLS_DIR := $(shell rustup run nightly-2026-05-10 rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin
 OBJDUMP := $(LLVM_TOOLS_DIR)/rust-objdump --arch-name=riscv64
 OBJCOPY := $(LLVM_TOOLS_DIR)/rust-objcopy --binary-architecture=riscv64
 

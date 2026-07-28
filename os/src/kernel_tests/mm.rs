@@ -1,16 +1,19 @@
 //! L3 tests for the page frame allocator.
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::kernel_tests::runner::KernelTest;
 use crate::mm;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Returns all mm-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
     vec![
         KernelTest::new("mm::alloc_free_one_page", test_alloc_free_one_page),
         KernelTest::new("mm::alloc_contiguous_pages", test_alloc_contiguous_pages),
-        KernelTest::new("mm::alloc_then_free_then_alloc", test_alloc_then_free_then_alloc),
+        KernelTest::new(
+            "mm::alloc_then_free_then_alloc",
+            test_alloc_then_free_then_alloc,
+        ),
     ]
 }
 

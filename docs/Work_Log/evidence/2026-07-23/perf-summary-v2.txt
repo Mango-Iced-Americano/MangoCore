@@ -1,0 +1,30 @@
+another_ext4 perf_diag iozone summary (v2)
+============================================
+
+Status: BLOCKED — no iozone writeback workload reached the instrumented backend.
+
+Instrumentation compiled:
+  - read_page records ext4 PageCache read call/page counters.
+  - write_pages records ext4 PageCache write call/page counters.
+  - prepare_buffered_write_with_data is timed as prepare_cycles.
+  - write_data_only/following phase is timed as commit_cycles.
+
+Iozone throughput:
+  writers: unavailable
+  rewriters: unavailable
+  readers: unavailable
+
+Phase timing:
+  prepare_cycles total: unavailable
+  commit_cycles total: unavailable
+  commit / prepare ratio: unavailable
+
+Blocking evidence:
+  - another_ext4 failed to mount both test disks with EIO.
+  - Runtime config reported mask=0xFFF, not the expected iozone-only diagnostic configuration.
+  - musl iozone failed because ./iozone_testcode.sh was absent (exit 32512).
+
+Required next run precondition:
+  Boot an image where another_ext4 mounts the injected test disk and initproc reports
+  diag=1 with the iozone mask. Then rerun the prescribed command and recalculate the
+  totals and ratio from the emitted [ext4_another] write_pages lines.

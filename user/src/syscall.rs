@@ -16,6 +16,7 @@ const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_FACCESSAT2: usize = 439;
+const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -646,6 +647,13 @@ pub fn sys_faccessat2(dirfd: isize, path: &str, mode: u32, flags: u32) -> isize 
             mode as usize,
             flags as usize,
         ],
+    )
+}
+
+pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32) -> isize {
+    syscall4(
+        SYSCALL_FCHMODAT,
+        [dirfd as usize, path as usize, mode as usize, 0],
     )
 }
 

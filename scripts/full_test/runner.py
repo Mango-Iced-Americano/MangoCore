@@ -64,7 +64,8 @@ def _run_to_file(command: tuple[str, ...], output: Path, timeout: int, *, cwd: P
         stream.write(f"# QEMU CMD: {' '.join(command)}\n".encode())
         stream.flush()
         try:
-            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd) as proc:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd,
+                                  start_new_session=True) as proc:
                 assert proc.stdout is not None
                 for line in iter(proc.stdout.readline, b""):
                     stream.write(line)
@@ -75,6 +76,11 @@ def _run_to_file(command: tuple[str, ...], output: Path, timeout: int, *, cwd: P
             proc.kill()
             proc.wait()
             return ProcessResult(returncode=-1, timed_out=True, output=output)
+        except KeyboardInterrupt:
+            print("\n[interrupted] stopping QEMU...", flush=True)
+            proc.kill()
+            proc.wait()
+            return ProcessResult(returncode=-1, timed_out=False, output=output)
     return ProcessResult(returncode=returncode, timed_out=False, output=output)
 
 

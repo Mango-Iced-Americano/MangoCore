@@ -1,0 +1,4 @@
+container=pxy-mangocore-os-dev-1
+id=fba442b0132ed67fdd5b17f188e8323464b131951a1c6349e52b0082809c711d
+/home/pxy/projects/MangoCore -> /app
+/etc/localtime -> /etc/localtime

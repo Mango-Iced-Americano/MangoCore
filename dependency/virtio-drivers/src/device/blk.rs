@@ -151,6 +151,11 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         }
     }
 
+    /// Returns whether this device negotiated the virtio persistence barrier.
+    pub fn supports_flush(&self) -> bool {
+        self.negotiated_features.contains(BlkFeature::FLUSH)
+    }
+
     /// Gets the device ID.
     ///
     /// The ID is written as ASCII into the given buffer, which must be 20 bytes long, and the used

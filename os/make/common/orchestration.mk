@@ -71,6 +71,7 @@ KREPEAT ?= 1
 KTIMEOUT_MS ?= 5000
 KTRACE ?=
 KTEST_QEMU_TIMEOUT ?= 30
+KTEST_EXT4_IMAGE ?= $(PRODUCT_ROOT)/ktest/clean-ext4.img
 export KTEST_QEMU_TIMEOUT
 
 KTEST_CMDLINE := mango.mode=ktest mango.test=$(KTEST) mango.test.repeat=$(KREPEAT) mango.test.timeout_ms=$(KTIMEOUT_MS) mango.test.failfast=0
@@ -78,3 +79,10 @@ ifneq ($(KTRACE),)
 KTEST_CMDLINE := $(KTEST_CMDLINE) mango.trace=$(KTRACE)
 endif
 export KTEST_CMDLINE
+
+.PHONY: ktest-clean-ext4
+ktest-clean-ext4:
+	@mkdir -p "$(dir $(KTEST_EXT4_IMAGE))"
+	@rm -f "$(KTEST_EXT4_IMAGE)"
+	@truncate -s 128M "$(KTEST_EXT4_IMAGE)"
+	@mkfs.ext4 -q -F "$(KTEST_EXT4_IMAGE)"

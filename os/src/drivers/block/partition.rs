@@ -1,470 +1,294 @@
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 
-use super::BlockDevice;
+use super::{validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult};
 use crate::hal::BLOCK_SZ;
 
-pub const LOGICAL_SECTOR_SIZE: u64 = 512;
+const SECTOR_SIZE: u64 = 512;
+const LBA_PER_BLOCK: u64 = BLOCK_SZ as u64 / SECTOR_SIZE; // 8
 const MBR_SIGNATURE_OFF: usize = 510;
 const MBR_PART_TABLE_OFF: usize = 446;
 const MBR_PART_ENTRY_SIZE: usize = 16;
 const MBR_MAX_PRIMARY: usize = 4;
 
-/// Serializes byte-level read-modify-write transactions across every
-/// partition/size adapter.  Sibling partitions may share one platform block
-/// when an MBR boundary is not aligned to `BLOCK_SZ`; per-filesystem locks do
-/// not protect that shared physical block.
-static PARTITION_RMW_LOCK: Mutex<()> = Mutex::new(());
-
-const _: () = assert!(BLOCK_SZ >= LOGICAL_SECTOR_SIZE as usize);
-const _: () = assert!(BLOCK_SZ % LOGICAL_SECTOR_SIZE as usize == 0);
-
+/// 从 MBR 分区表解析出的分区信息
 #[derive(Debug, Clone)]
 pub struct MbrPartition {
-    pub partno: u8,
+    pub partno: u8, // 1-based
     pub type_code: u8,
-    pub start_lba: u64,
-    pub sectors: u64,
+    pub start_lba: u64, // 512-byte sectors
+    pub sectors: u64,   // 512-byte sectors
 }
 
-impl MbrPartition {
-    pub fn size_bytes(&self) -> u64 {
-        self.sectors.saturating_mul(LOGICAL_SECTOR_SIZE)
-    }
-}
-
+/// MBR 探测结果
 pub enum MbrProbe {
     NoMbr,
     Unsupported,
     Partitions(Vec<MbrPartition>),
 }
 
-fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
-    let bytes = buf.get(offset..offset.checked_add(4)?)?;
-    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
+/// 解析 MBR 分区表。
+/// 读取父设备的 block 0，检查 0x55AA 签名，解析 4 个主分区条目。
+/// 只接受 4096 字节对齐的分区（start_lba % 8 == 0 && sectors % 8 == 0）。
+pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
+    let mut buf = alloc::vec![0u8; BLOCK_SZ];
+    dev.read_block(0, &mut buf)?;
 
-fn partition_in_device(dev: &Arc<dyn BlockDevice>, start_lba: u64, sectors: u64) -> bool {
-    if start_lba == 0 || sectors == 0 {
-        return false;
-    }
-    let Some(end_lba) = start_lba.checked_add(sectors) else {
-        return false;
-    };
-    dev.size_bytes()
-        .map(|bytes| end_lba <= bytes / LOGICAL_SECTOR_SIZE)
-        .unwrap_or(true)
-}
-
-fn checked_device_offset(
-    block_id: usize,
-    block_size: usize,
-    len: usize,
-    size_bytes: Option<u64>,
-) -> u64 {
-    assert!(block_size > 0, "logical block size must not be zero");
-    assert_eq!(
-        len % block_size,
-        0,
-        "I/O length must be a multiple of the logical block size"
-    );
-    let offset = (block_id as u64)
-        .checked_mul(block_size as u64)
-        .expect("block offset overflow");
-    let end = offset.checked_add(len as u64).expect("I/O length overflow");
-    if let Some(size_bytes) = size_bytes {
-        assert!(
-            end <= size_bytes,
-            "block I/O out of bounds: block_id={} block_size={} len={} size={}",
-            block_id,
-            block_size,
-            len,
-            size_bytes
-        );
-    }
-    offset
-}
-
-fn read_parent_bytes(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &mut [u8]) {
-    if buf.is_empty() {
-        return;
-    }
-    if absolute % BLOCK_SZ as u64 == 0 && buf.len() % BLOCK_SZ == 0 {
-        parent.read_block((absolute / BLOCK_SZ as u64) as usize, buf);
-        return;
+    if buf[MBR_SIGNATURE_OFF] != 0x55 || buf[MBR_SIGNATURE_OFF + 1] != 0xAA {
+        return Ok(MbrProbe::NoMbr);
     }
 
-    let mut done = 0usize;
-
-    let head_offset = (absolute % BLOCK_SZ as u64) as usize;
-    if head_offset != 0 {
-        let copy_len = (BLOCK_SZ - head_offset).min(buf.len());
-        let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block((absolute / BLOCK_SZ as u64) as usize, &mut bounce);
-        buf[..copy_len].copy_from_slice(&bounce[head_offset..head_offset + copy_len]);
-        done = copy_len;
-    }
-
-    let middle_len = ((buf.len() - done) / BLOCK_SZ) * BLOCK_SZ;
-    if middle_len != 0 {
-        let parent_block = ((absolute + done as u64) / BLOCK_SZ as u64) as usize;
-        parent.read_block(parent_block, &mut buf[done..done + middle_len]);
-        done += middle_len;
-    }
-
-    if done < buf.len() {
-        let position = absolute + done as u64;
-        let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block((position / BLOCK_SZ as u64) as usize, &mut bounce);
-        let tail_len = buf.len() - done;
-        buf[done..].copy_from_slice(&bounce[..tail_len]);
-    }
-}
-
-/// Write bytes while `PARTITION_RMW_LOCK` is already held.
-fn write_parent_bytes_guarded(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &[u8]) {
-    if buf.is_empty() {
-        return;
-    }
-    if absolute % BLOCK_SZ as u64 == 0 && buf.len() % BLOCK_SZ == 0 {
-        parent.write_block_rmw_guarded((absolute / BLOCK_SZ as u64) as usize, buf);
-        return;
-    }
-
-    let mut done = 0usize;
-
-    let head_offset = (absolute % BLOCK_SZ as u64) as usize;
-    if head_offset != 0 {
-        let copy_len = (BLOCK_SZ - head_offset).min(buf.len());
-        let parent_block = (absolute / BLOCK_SZ as u64) as usize;
-        let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block(parent_block, &mut bounce);
-        bounce[head_offset..head_offset + copy_len].copy_from_slice(&buf[..copy_len]);
-        parent.write_block_rmw_guarded(parent_block, &bounce);
-        done = copy_len;
-    }
-
-    let middle_len = ((buf.len() - done) / BLOCK_SZ) * BLOCK_SZ;
-    if middle_len != 0 {
-        let parent_block = ((absolute + done as u64) / BLOCK_SZ as u64) as usize;
-        parent.write_block_rmw_guarded(parent_block, &buf[done..done + middle_len]);
-        done += middle_len;
-    }
-
-    if done < buf.len() {
-        let position = absolute + done as u64;
-        let parent_block = (position / BLOCK_SZ as u64) as usize;
-        let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block(parent_block, &mut bounce);
-        let tail_len = buf.len() - done;
-        bounce[..tail_len].copy_from_slice(&buf[done..]);
-        parent.write_block_rmw_guarded(parent_block, &bounce);
-    }
-}
-
-/// 解析传统 MBR 中的四个主分区项。
-///
-/// 扩展分区和 GPT 保护分区仅报告为不支持。本层保留分区表中的 512 字节 LBA，
-/// 由 `PartitionBlockDevice` 转换到各平台的 `BLOCK_SZ`，不额外要求起点对齐。
-pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> MbrProbe {
-    let mut sector = vec![0u8; BLOCK_SZ];
-    dev.read_block(0, &mut sector);
-    if sector[MBR_SIGNATURE_OFF] != 0x55 || sector[MBR_SIGNATURE_OFF + 1] != 0xaa {
-        return MbrProbe::NoMbr;
-    }
-
+    let disk_sectors = dev.size_bytes().map(|b| b / SECTOR_SIZE);
     let mut saw_nonempty = false;
-    let mut saw_unsupported = false;
-    let mut saw_protective_gpt = false;
-    let mut partitions = Vec::new();
-    for index in 0..MBR_MAX_PRIMARY {
-        let offset = MBR_PART_TABLE_OFF + index * MBR_PART_ENTRY_SIZE;
-        let entry = &sector[offset..offset + MBR_PART_ENTRY_SIZE];
-        let boot_flag = entry[0];
-        let type_code = entry[4];
-        let start_lba = read_u32_le(entry, 8).unwrap_or(0) as u64;
-        let sectors = read_u32_le(entry, 12).unwrap_or(0) as u64;
+    let mut parts = Vec::new();
+
+    for i in 0..MBR_MAX_PRIMARY {
+        let off = MBR_PART_TABLE_OFF + i * MBR_PART_ENTRY_SIZE;
+        let type_code = buf[off + 4];
+        let start_lba =
+            u32::from_le_bytes([buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11]]) as u64;
+        let sectors =
+            u32::from_le_bytes([buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15]]) as u64;
+
+        // 跳过空条目
         if type_code == 0 || start_lba == 0 || sectors == 0 {
             continue;
         }
         saw_nonempty = true;
 
-        if boot_flag != 0 && boot_flag != 0x80 {
+        // 跳过扩展分区
+        if type_code == 0x05 || type_code == 0x0F || type_code == 0x85 {
             println!(
-                "[mbr] skip partition {}: invalid boot flag {:#04x}",
-                index + 1,
-                boot_flag
-            );
-            saw_unsupported = true;
-            continue;
-        }
-        if type_code == 0xee {
-            println!("[mbr] protective GPT entry found; GPT is not supported yet");
-            saw_unsupported = true;
-            saw_protective_gpt = true;
-            continue;
-        }
-        if matches!(type_code, 0x05 | 0x0f | 0x85) {
-            println!(
-                "[mbr] skip partition {}: extended type {:#04x} is unsupported",
-                index + 1,
+                "[mbr] skip partition {}: extended type {:#x} (unsupported)",
+                i + 1,
                 type_code
             );
-            saw_unsupported = true;
-            continue;
-        }
-        if !partition_in_device(dev, start_lba, sectors) {
-            println!(
-                "[mbr] skip partition {}: out of disk range start={} sectors={}",
-                index + 1,
-                start_lba,
-                sectors
-            );
-            saw_unsupported = true;
             continue;
         }
 
-        partitions.push(MbrPartition {
-            partno: (index + 1) as u8,
+        // 4096 字节对齐检查
+        if start_lba % LBA_PER_BLOCK != 0 || sectors % LBA_PER_BLOCK != 0 {
+            println!(
+                "[mbr] skip partition {}: not 4096-aligned (start_lba={}, sectors={})",
+                i + 1,
+                start_lba,
+                sectors
+            );
+            continue;
+        }
+
+        // 不溢出父设备
+        if let Some(total) = disk_sectors {
+            if start_lba
+                .checked_add(sectors)
+                .map_or(true, |end| end > total)
+            {
+                println!(
+                    "[mbr] skip partition {}: out of disk range (start={}, sectors={}, disk_sectors={})",
+                    i + 1,
+                    start_lba,
+                    sectors,
+                    total
+                );
+                continue;
+            }
+        }
+
+        parts.push(MbrPartition {
+            partno: (i + 1) as u8,
             type_code,
             start_lba,
             sectors,
         });
     }
 
-    if saw_protective_gpt {
-        // A hybrid protective MBR must not be partially interpreted as a normal MBR.
-        MbrProbe::Unsupported
-    } else if !partitions.is_empty() {
-        boot_trace!(
-            "[mbr] valid MBR with {} usable partition(s)",
-            partitions.len()
-        );
-        MbrProbe::Partitions(partitions)
-    } else if saw_nonempty || saw_unsupported {
-        MbrProbe::Unsupported
+    if !parts.is_empty() {
+        Ok(MbrProbe::Partitions(parts))
+    } else if saw_nonempty {
+        Ok(MbrProbe::Unsupported)
     } else {
-        MbrProbe::NoMbr
+        Ok(MbrProbe::NoMbr)
     }
 }
 
-/// MBR 分区的字节偏移视图。
-///
-/// MBR 使用 512 字节 LBA，而 MangoCore 各平台有独立的 `BLOCK_SZ`。未对齐分区
-/// 通过 bounce buffer 访问；自然对齐的分区继续使用整块直接 I/O。
+/// 基于父块设备的偏移视图的分区块设备。
+/// 所有 read_block/write_block 请求都被转换为父设备上的偏移访问。
 pub struct PartitionBlockDevice {
     parent: Arc<dyn BlockDevice>,
-    start_lba: u64,
-    sectors: u64,
-    start_byte: u64,
-    size_bytes: u64,
+    start_block: usize, // 父设备中的 4096 字节块偏移
+    block_count: usize, // 分区包含的 4096 字节块数
+    size_bytes: u64,    // 分区精确字节大小，按 MBR 扇区数 * 512 计算
 }
 
 impl PartitionBlockDevice {
     pub fn new(parent: Arc<dyn BlockDevice>, start_lba: u64, sectors: u64) -> Self {
-        let start_byte = start_lba
-            .checked_mul(LOGICAL_SECTOR_SIZE)
-            .expect("partition start byte overflow");
-        let size_bytes = sectors
-            .checked_mul(LOGICAL_SECTOR_SIZE)
-            .expect("partition size overflow");
-        assert!(size_bytes > 0, "partition must not be empty");
-        if let Some(parent_size) = parent.size_bytes() {
-            assert!(
-                start_byte
-                    .checked_add(size_bytes)
-                    .is_some_and(|end| end <= parent_size),
-                "partition exceeds parent device"
-            );
-        }
+        let start_block = (start_lba / LBA_PER_BLOCK) as usize;
+        let block_count = (sectors / LBA_PER_BLOCK) as usize;
+        let size_bytes = sectors.saturating_mul(SECTOR_SIZE);
         Self {
             parent,
-            start_lba,
-            sectors,
-            start_byte,
+            start_block,
+            block_count,
             size_bytes,
         }
     }
 
-    pub fn start_lba(&self) -> u64 {
-        self.start_lba
+    pub fn start_block(&self) -> usize {
+        self.start_block
     }
 
-    pub fn sectors(&self) -> u64 {
-        self.sectors
+    pub fn block_count(&self) -> usize {
+        self.block_count
     }
 
-    pub fn block_count(&self) -> u64 {
-        self.size_bytes.div_ceil(BLOCK_SZ as u64)
-    }
-
-    fn io_range(&self, block_id: usize, len: usize) -> (u64, usize) {
-        assert_eq!(
-            len % BLOCK_SZ,
-            0,
-            "partition I/O length must use platform blocks"
-        );
-        let relative = (block_id as u64)
-            .checked_mul(BLOCK_SZ as u64)
-            .expect("partition block offset overflow");
-        let end = relative
-            .checked_add(len as u64)
-            .expect("partition I/O length overflow");
-        let padded_size = self
-            .size_bytes
-            .checked_add(BLOCK_SZ as u64 - 1)
-            .expect("partition padded size overflow")
-            / BLOCK_SZ as u64
-            * BLOCK_SZ as u64;
-        assert!(
-            end <= padded_size,
-            "partition block I/O out of bounds: block_id={} len={} size={}",
-            block_id,
-            len,
-            self.size_bytes
-        );
-        let valid_len = self
-            .size_bytes
-            .saturating_sub(relative)
-            .min(len as u64) as usize;
-        let absolute = self
-            .start_byte
-            .checked_add(relative)
-            .expect("partition absolute offset overflow");
-        (absolute, valid_len)
+    fn parent_block_id(&self, block_id: usize, buf_len: usize) -> BlockDeviceResult<usize> {
+        validate_block_buffer_length(buf_len)?;
+        let blocks = buf_len / BLOCK_SZ;
+        let end_block = block_id
+            .checked_add(blocks)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
+        if end_block > self.block_count {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
+        self.start_block
+            .checked_add(block_id)
+            .ok_or(BlockDeviceError::OutOfBounds)
     }
 }
 
-impl BlockDevice for PartitionBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let (absolute, valid_len) = self.io_range(block_id, buf.len());
-        if valid_len != 0 {
-            read_parent_bytes(&self.parent, absolute, &mut buf[..valid_len]);
-        }
-        buf[valid_len..].fill(0);
-    }
+// ── BlockSizeAdapter ────────────────────────────────────────────────────
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let _rmw = PARTITION_RMW_LOCK.lock();
-        self.write_block_rmw_guarded(block_id, buf);
-    }
-
-    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
-        let (absolute, valid_len) = self.io_range(block_id, buf.len());
-        if valid_len != 0 {
-            write_parent_bytes_guarded(&self.parent, absolute, &buf[..valid_len]);
-        }
-    }
-
-    fn size_bytes(&self) -> Option<u64> {
-        Some(self.size_bytes)
-    }
-
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
-        self.parent.flush()
-    }
-}
-
-/// Translate filesystem-native block numbers to the platform `BLOCK_SZ` unit.
+/// Adapts a block device's native block size to a smaller logical block size.
 ///
-/// ext4 block numbers and FAT sector numbers are expressed in their on-disk block size,
-/// which can differ from the 2 KiB block unit used by the 2K1000 SATA wrapper.
+/// The child block size must evenly divide the parent's native block size.
+/// Read-modify-write is used for sub-BLOCK_SZ writes, so this adapter is
+/// suitable for test setup and small I/O but not for performance paths.
 pub struct BlockSizeAdapter {
     parent: Arc<dyn BlockDevice>,
-    logical_block_size: usize,
-    size_bytes: Option<u64>,
+    child_size: usize,
+    child_per_parent: usize,
 }
 
 impl BlockSizeAdapter {
-    pub fn new(parent: Arc<dyn BlockDevice>, logical_block_size: usize) -> Self {
+    pub fn new(parent: Arc<dyn BlockDevice>, child_size: usize) -> Self {
         assert!(
-            logical_block_size.is_power_of_two(),
-            "filesystem block size must be a power of two"
+            child_size > 0 && BLOCK_SZ % child_size == 0,
+            "BlockSizeAdapter: child_size {} must be a positive divisor of BLOCK_SZ {}",
+            child_size,
+            BLOCK_SZ,
         );
-        let size_bytes = parent.size_bytes();
         Self {
             parent,
-            logical_block_size,
-            size_bytes,
+            child_size,
+            child_per_parent: BLOCK_SZ / child_size,
         }
     }
 
-    pub fn logical_block_size(&self) -> usize {
-        self.logical_block_size
-    }
-
-    fn absolute_offset(&self, block_id: usize, len: usize) -> u64 {
-        checked_device_offset(block_id, self.logical_block_size, len, self.size_bytes)
+    fn parent_for_child(&self, child_id: usize) -> (usize, usize) {
+        let parent_block = child_id / self.child_per_parent;
+        let offset_in_parent = (child_id % self.child_per_parent) * self.child_size;
+        (parent_block, offset_in_parent)
     }
 }
 
 impl BlockDevice for BlockSizeAdapter {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let absolute = self.absolute_offset(block_id, buf.len());
-        read_parent_bytes(&self.parent, absolute, buf);
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        if buf.len() != self.child_size {
+            return Err(BlockDeviceError::InvalidBufferLength);
+        }
+        let (parent_block, offset_in_parent) = self.parent_for_child(block_id);
+        let mut tmp = alloc::vec![0u8; BLOCK_SZ];
+        self.parent.read_block(parent_block, &mut tmp)?;
+        buf.copy_from_slice(&tmp[offset_in_parent..offset_in_parent + self.child_size]);
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let _rmw = PARTITION_RMW_LOCK.lock();
-        self.write_block_rmw_guarded(block_id, buf);
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        if buf.len() != self.child_size {
+            return Err(BlockDeviceError::InvalidBufferLength);
+        }
+        let (parent_block, offset_in_parent) = self.parent_for_child(block_id);
+        let mut tmp = alloc::vec![0u8; BLOCK_SZ];
+        self.parent.read_block(parent_block, &mut tmp)?;
+        tmp[offset_in_parent..offset_in_parent + self.child_size].copy_from_slice(buf);
+        self.parent.write_block(parent_block, &tmp)
     }
 
-    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
-        let absolute = self.absolute_offset(block_id, buf.len());
-        write_parent_bytes_guarded(&self.parent, absolute, buf);
-    }
-
-    fn size_bytes(&self) -> Option<u64> {
-        self.size_bytes
-    }
-
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         self.parent.flush()
     }
-}
 
-/// Last-resort physical write barrier for board read-only validation images.
-///
-/// `MountFlags::RDONLY` rejects VFS mutations, while this wrapper also catches internal
-/// filesystem writeback paths that do not pass through `MountFSInode`.
-pub struct ReadOnlyBlockDevice {
-    parent: Arc<dyn BlockDevice>,
-    blocked_writes: AtomicUsize,
-}
-
-impl ReadOnlyBlockDevice {
-    pub fn new(parent: Arc<dyn BlockDevice>) -> Self {
-        Self {
-            parent,
-            blocked_writes: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl BlockDevice for ReadOnlyBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        self.parent.read_block(block_id, buf);
-    }
-
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let count = self.blocked_writes.fetch_add(1, Ordering::Relaxed);
-        if count < 4 {
-            println!(
-                "[block][ro] blocked internal write: block_id={} bytes={}",
-                block_id,
-                buf.len()
-            );
-        }
+    fn supports_reliable_flush(&self) -> bool {
+        self.parent.supports_reliable_flush()
     }
 
     fn size_bytes(&self) -> Option<u64> {
         self.parent.size_bytes()
     }
+}
 
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+// ── ReadOnlyBlockDevice ─────────────────────────────────────────────────
+
+/// Wraps a `BlockDevice` to reject all write operations.
+///
+/// Reads, flush, and metadata queries are forwarded to the inner device.
+pub struct ReadOnlyBlockDevice {
+    inner: Arc<dyn BlockDevice>,
+}
+
+impl ReadOnlyBlockDevice {
+    pub fn new(inner: Arc<dyn BlockDevice>) -> Self {
+        Self { inner }
+    }
+}
+
+impl BlockDevice for ReadOnlyBlockDevice {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        self.inner.read_block(block_id, buf)
+    }
+
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> BlockDeviceResult {
+        Err(BlockDeviceError::DeviceError)
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        self.inner.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.inner.supports_reliable_flush()
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        self.inner.size_bytes()
+    }
+}
+
+// ── PartitionBlockDevice BlockDevice impl ───────────────────────────────
+
+impl BlockDevice for PartitionBlockDevice {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        let parent_block_id = self.parent_block_id(block_id, buf.len())?;
+        self.parent.read_block(parent_block_id, buf)
+    }
+
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        let parent_block_id = self.parent_block_id(block_id, buf.len())?;
+        self.parent.write_block(parent_block_id, buf)
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        if !self.parent.supports_reliable_flush() {
+            return Err(BlockDeviceError::FlushUnsupported);
+        }
         self.parent.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.parent.supports_reliable_flush()
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        Some(self.size_bytes)
     }
 }
