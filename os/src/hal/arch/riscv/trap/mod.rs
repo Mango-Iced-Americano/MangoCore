@@ -10,7 +10,7 @@ use super::TrapImpl;
 use crate::config::TRAMPOLINE;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::syscall::syscall;
-use crate::task::{current_task, current_user_token, do_signal, signal::SigInfo, Signals};
+use crate::task::{current_task, do_signal, signal::SigInfo, Signals};
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
 pub use context::{UserContext, UserSignalMask};
@@ -265,10 +265,12 @@ pub fn trap_return() -> ! {
         trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
         // 返回汇编在写 sstatus 后仍需恢复寄存器。这里强制 SIE=0、SPIE=1，
         // 保证 timer/IPI 只能在最终 SRET 完成现场切换后重新响应。
-        trap_cx.prepare_user_return();
+        trap_cx.prepare_return();
     }
     let trap_cx_ptr = task.trap_cx_user_va();
-    let user_satp = current_user_token();
+    // 先登记本 CPU 可能缓存当前 MM，再取得权威 token。后续页表修改方将以
+    // 该驻留集合为 shootdown 目标，不能继续只读无锁 token hint。
+    let user_satp = task.process.prepare_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
     // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。

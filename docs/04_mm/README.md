@@ -3,15 +3,15 @@ title: "内存管理子系统 (Memory Management)"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
-tags: [mm, vma, mmap, page-fault, pagetable, tlb-batch]
+last_update: 2026-07-28
+tags: [mm, vma, mmap, page-fault, pagetable, tlb-batch, smp]
 ---
 
 # 内存管理子系统
 
 ## 概述
 
-MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `TlbBatch` 统一提交本地 TLB 刷新与 frame 延迟释放。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
+MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `TlbBatch` 统一提交本地 TLB 刷新与 frame 延迟释放。SMP 过渡期已建立每 MM 的 cached CPU/generation 激活状态和全用户 IPI/ack 原语，但 `Published` PTE 的锁外提交尚未接通，用户任务仍固定 CPU0。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
 
 ## 依据范围
 
@@ -43,8 +43,8 @@ MangoCore 的内存管理由物理页分配器、架构页表实现、进程地�
 | page_fault.rs + filemap.rs                                  |
 | lazy anon | file read/write | shared write | CoW             |
 +-------------------------------------------------------------+
-| UserMapper + TlbBatch                                      |
-| user PTE writes | local flush | deferred frame release      |
+| UserMapper + TlbBatch + MmTlbState                         |
+| user PTE writes | local flush | cached CPU/generation       |
 +-------------------------------------------------------------+
 | PageTable trait + PageTableImpl                              |
 | rv64 Sv39PageTable | la64 LAFlexPageTable                    |
@@ -77,6 +77,7 @@ KERNEL_SPACE.lock().activate()
 | `FrameTracker` | `frame_allocator.rs` | 物理页 RAII 包装，drop 时归还页帧 |
 | `PageTable` | `page_table.rs` | 架构无关页表操作 trait |
 | `TlbBatch` | `tlb_batch.rs` | 收集用户 PTE 修改，在刷新 TLB 后释放失效映射的 frame |
+| `MmTlbState` | `tlb_state.rs` | MM ID、单调 cached CPU mask、generation 与 per-CPU observed；为锁外 shootdown 提供激活侧状态 |
 
 ## 功能矩阵
 

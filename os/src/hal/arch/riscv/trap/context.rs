@@ -154,7 +154,7 @@ impl TrapContext {
     /// syscall 执行期间允许本地中断，因此 exec 新建上下文时读到的 live
     /// `sstatus.SIE` 可能为 1。恢复汇编仍运行在 S-mode；若提前写回该位，
     /// timer 可在通用寄存器只恢复一半时嵌套进入，破坏用户 `sp` 等现场。
-    pub fn prepare_user_return(&mut self) {
+    pub fn prepare_return(&mut self) {
         // SIE 必须保持关闭，直到最后一条 SRET 从 SPIE 原子恢复它。
         self.sstatus &= !Self::SSTATUS_SIE;
         // SPP=User 决定 SRET 的目标特权级。
@@ -186,7 +186,7 @@ impl TrapContext {
             kernel_sp,
             kernel_cpu_local: 0,
         };
-        cx.prepare_user_return();
+        cx.prepare_return();
         cx.gp.pc = entry;
         cx.set_sp(sp);
         cx

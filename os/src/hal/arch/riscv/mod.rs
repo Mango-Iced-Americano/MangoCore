@@ -47,6 +47,14 @@ pub fn kernel_tlb_invalidate() {
     sv39::tlb_invalidate();
 }
 
+/// 清除当前 hart 上可能属于任意用户地址空间的翻译。
+///
+/// B22 尚未给 RV64 分配 per-MM ASID，也未传递精确范围，因此使用无操作数
+/// `sfence.vma`。它会连 global 项一起清除，代价偏高但语义严格覆盖用户项。
+pub fn user_tlb_invalidate() {
+    sv39::tlb_invalidate();
+}
+
 pub fn bootstrap_init(cpu_id: usize) {
     if cpu_id != crate::smp::BOOT_CPU_ID {
         // AP 只开放 supervisor software interrupt；Phase 3 可进入本地调度器，

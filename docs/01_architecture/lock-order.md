@@ -163,6 +163,27 @@ CPU0 idle 调度循环在尚未取得 processor、runqueue 或子系统锁时按
 在 MM 层直接执行 timer callback。当前退休队列由 CPU0 生命周期路径消费；未来若允许 AP
 并发完成普通进程回收，需要重新审查容量、所有者和批处理策略。
 
+### 3.7 B22/B23 用户 MM 激活与 shootdown 锁序
+
+B22 的 trap-return 激活登记与 B23 的 PTE 修改侧必须由同一个进程 VM 锁串行化：
+
+1. 激活侧在 VM 锁内先把 CPU 加入单调 `cached_cpus`，再读取 generation；落后时完成
+   本地全用户失效并更新 observed，最后重查 generation；
+2. 修改侧在同一 VM 锁内修改 PTE、推进 generation、快照 cached CPU mask，并把失效
+   frame 从地址空间所有权移交给独立提交对象；
+3. 修改侧释放 VM 锁后，提交对象才执行本地失效、发送 `USER_TLB_SYNC`、等待远端 ack；
+4. 全部目标 ack 后才 drop deferred frame。错误路径也必须保留这一顺序，不能退回
+   “清 PTE 后立即释放”。
+
+禁止在 VM 锁内等待 user-TLB ack。目标 CPU 可能已经关闭本地 IRQ并在 page fault 中等待
+同一 VM 锁；发起者若持锁等它处理 IPI，会形成 `VM lock -> ack -> target VM lock` 环。
+等待者临时开放 IRQ只能解决“两个无锁等待者互相成为 IPI 目标”，不能修复持普通锁等待。
+
+`cached_cpus` 与 `generation` 是不同 Atomic；各自的 Acquire/Release 不自动组成完整的
+join-vs-update 顺序。当前正确性来自共同 VM 锁，不来自对跨原子传递的猜测。若未来要把
+激活或目标快照改成 lockless，必须给出两种竞态次序的正式证明和相应 fence/重试协议，
+不能只把 `generation.fetch_add` 改成更强内存序就宣称完成。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

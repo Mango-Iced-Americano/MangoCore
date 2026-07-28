@@ -3,8 +3,8 @@ title: "页帧、VmPageStore 与页表映射关系"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
-tags: [mm, frame, pagetable, vm-page-store, tlb-batch]
+last_update: 2026-07-28
+tags: [mm, frame, pagetable, vm-page-store, tlb-batch, smp]
 ---
 
 # 页帧、VmPageStore 与页表映射关系
@@ -290,6 +290,10 @@ if let Some(ppn) = src_batch.block_write(vpn) {
 `set_ppn`、`set_user_flags`、`unmap` 等用户 PTE 修改同样经 batch；从 VMA
 移出的 frame 由 `defer_frame()` 保留到 flush 之后。内核页表仍使用带当场刷新的
 `PageTable` 安全接口。
+
+上述“flush 之后”当前只对 `Unpublished/LocalOnly` 完整成立。B22 已提供每 MM 的
+cached CPU/generation 激活状态和远端全用户 IPI/ack 原语，但 `Published` batch 仍
+fail-stop；B23 必须把 deferred frame 移到 VM 锁外，并在全部远端 ack 后才释放。
 
 Frame 和 PTE 的对应关系不是自动维护的。`VmPageStore` 持有 `FrameTracker`，保证物理页生命周期；PTE 持有 PPN，供硬件翻译。正确状态要求两边同时指向同一页：如果 PTE 指向一个没有 `FrameTracker` 引用的页，页可能被 allocator 回收后重用；如果 `VmPageStore` 有 frame 但 PTE 没有映射，页面只 resident，不可被用户直接访问，可能是 lazy/shared anonymous 或被暂时撤销权限的状态。
 

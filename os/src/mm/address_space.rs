@@ -20,8 +20,8 @@ use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
 use super::{
-    FrameTracker, PhysAddr, PhysPageNum, TlbBatch, TlbPublication, VPNRange, VirtAddr, VirtPageNum,
-    USER_STACK_ABI_ALIGN,
+    FrameTracker, MmTlbState, PhysAddr, PhysPageNum, TlbBatch, TlbPublication, VPNRange, VirtAddr,
+    VirtPageNum, USER_STACK_ABI_ALIGN,
 };
 use crate::config::*;
 use crate::fs::vfs;
@@ -87,6 +87,8 @@ pub struct AddressSpace<T: PageTable> {
     locked_pages: BTreeSet<VirtPageNum>,
     /// 页表是否尚未发布、仅限 CPU0，或已经需要远程 shootdown。
     tlb_publication: TlbPublication,
+    /// CLONE_VM 线程共享的 MM 标识、驻留 CPU 集合与 TLB 代际。
+    tlb_state: Arc<MmTlbState>,
 }
 
 impl<T: PageTable> AddressSpace<T> {
@@ -99,6 +101,7 @@ impl<T: PageTable> AddressSpace<T> {
             heap_pt: 0,
             locked_pages: BTreeSet::new(),
             tlb_publication: TlbPublication::Unpublished,
+            tlb_state: MmTlbState::new_shared(),
         }
     }
 
@@ -107,6 +110,19 @@ impl<T: PageTable> AddressSpace<T> {
         if self.tlb_publication == TlbPublication::Unpublished {
             self.tlb_publication = TlbPublication::LocalOnly;
         }
+    }
+
+    /// 在当前 CPU 真正恢复用户态前发布该 MM 的 TLB 可见性。
+    pub(crate) fn activate_on(&mut self, cpu_id: usize) -> usize {
+        let cached = self.tlb_state.attach_cpu(cpu_id);
+        self.tlb_publication = if cached.count_ones() > 1 {
+            // 只要第二个 CPU 曾观察该 MM，之后就永久走远端提交门禁；在没有
+            // switch-out 清除协议前，绝不能因为任务暂时离开 CPU 而降级。
+            TlbPublication::Published
+        } else {
+            TlbPublication::LocalOnly
+        };
+        self.page_table.token()
     }
 
     /// 在一次地址空间锁持有期内执行用户 PTE 修改并提交本地 TLB batch。

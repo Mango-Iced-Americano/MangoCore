@@ -3,8 +3,8 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
-tags: [mm, pagetable, tlb, tlb-batch, sv39, loongarch64]
+last_update: 2026-07-28
+tags: [mm, pagetable, tlb, tlb-batch, sv39, loongarch64, smp]
 ---
 
 # 页表抽象与 TLB 约束
@@ -138,11 +138,11 @@ fn check_user_flags(flags: MapPermission) -> MmResult<()> {
 
 `TlbPublication` 描述地址空间的发布范围：
 
-| 状态 | B16 语义 |
+| 状态 | 当前语义 |
 |------|----------|
 | `Unpublished` | 页表尚未被任务激活，batch 提交时无需刷新 |
-| `LocalOnly` | 用户任务仍固定 CPU0，batch 刷新当前 CPU |
-| `Published` | 可能被多 CPU 观察；远端 shootdown 尚未实现，构造 batch 即 fail-stop |
+| `LocalOnly` | 只有一颗 CPU 曾登记缓存该 MM，batch 刷新当前 CPU |
+| `Published` | 至少两颗 CPU 曾登记缓存该 MM；B23 接通锁外 shootdown 前，构造 batch 即 fail-stop |
 
 一次提交的固定顺序是：
 
@@ -160,9 +160,20 @@ frame。这只损失批处理效率，不改变“先失效 TLB，后复用物�
 W 权限，子 batch 建立共享 PPN 映射。子地址空间尚未发布，可以不刷新；父
 batch 必须提交，否则父进程可能继续通过旧 TLB 写共享页，破坏 CoW。
 
-用户页表的 `Published` 状态仍因缺少 MM active mask/generation 而 fail-stop。B21 已为
-共享内核页表的动态映射增加单独的远端协议：公开撤映射先以 no-flush 原语清 PTE、保留
-mapping frame，释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收到全部 ack 才释放
+B22 为每个地址空间增加共享 `MmTlbState`。用户 trap-return 在 VM 锁内先把当前 CPU
+加入只增不减的 `cached_cpus`，再读取 generation；若 `observed[cpu]` 落后，就在恢复
+页表根前清除本地全部用户/non-global 翻译并重查 generation。集合暂不清 bit，因为离开
+MM 的 CPU 仍可能缓存旧翻译；最多 8 核的保守额外 IPI 比漏掉目标安全。
+
+B22 还提供独立的 user-TLB request/ack 与锁外全用户失效原语，但 `Published` 仍 fail-stop。
+原因是现有 `TlbBatch::commit()` 在外层 VM 锁内运行：若在这里等待远端 ack，目标 CPU
+可能正以 IRQ-off page fault 等待同一锁，形成环形等待。B23 必须在 VM 锁内完成 PTE 写入、
+generation 推进和目标快照，把 deferred frame 移交给提交对象；释放锁后才等待 ack，全部
+完成后释放 frame。激活登记与修改侧快照继续共用 VM 锁，不能仅凭不同原子的
+Acquire/Release 假设二者自动串行。
+
+B21 已为共享内核页表的动态映射增加单独的远端协议：公开撤映射先以 no-flush 原语清 PTE、
+保留 mapping frame，释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收到全部 ack 才释放
 frame。它覆盖内核栈和临时 ELF/interpreter 映射，但不应被表述为用户 MM shootdown 完成。
 
 ## 7. COW 中的页表变化
@@ -236,8 +247,8 @@ self.page_table.release_frames();
 
 | 架构 | 页表/TLB 注意点 |
 |------|-----------------|
-| rv64 | LocalOnly 单页提交使用 `sfence.vma va, zero`，多页提交使用本 hart 全量 `sfence.vma` |
-| la64 | ASID 仍由 TCB 持有，页表对象无法安全指定目标 ASID；B16 的用户页提交保守执行本核全部非全局项失效 |
+| rv64 | LocalOnly 单页提交使用 `sfence.vma va, zero`，多页提交和 B22 user-TLB IPI 使用本 hart 全量 `sfence.vma` |
+| la64 | ASID 仍由 TCB 持有，页表对象无法安全指定目标 ASID；LocalOnly 提交和 B22 user-TLB IPI 保守执行本核全部 `G=0` 项失效（`invtlb 0x3`） |
 
 上层文档统一称为 `tlb_invalidate` 或 `flush_tlb()`，不把架构指令混入通用 MM 逻辑。
 
@@ -247,9 +258,9 @@ TLB 是第三份缓存状态。即使页表内存已经改对，CPU 仍可能使
 而 unmap/CoW 如果提前释放 frame，旧 TLB 还会把已复用的物理页当成旧映射访问。
 因此用户 PTE 修改必须经过 `TlbBatch`，并把旧 frame 保留到提交之后。
 
-B16 只完成 CPU0 LocalOnly 语义。远端 active CPU mask、generation、IPI/RFENCE、ack
-等待与 ack 前 frame 不复用仍属于 Phase 4；在这些机制完成前，用户任务不得
-跨 CPU 运行。
+B16 完成 LocalOnly batch；B22 完成 cached CPU/generation 激活侧和全用户 IPI/ack 原语。
+PTE 修改侧的 generation 推进、锁外等待与 ack 前 frame 不复用仍属于 B23；MM-owned
+ASID/epoch 和 range 优化也尚未完成。在这些门禁通过前，普通用户任务不得跨 CPU 运行。
 
 ## 13. 调试核对点
 

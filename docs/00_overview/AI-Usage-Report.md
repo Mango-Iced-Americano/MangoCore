@@ -53,6 +53,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP AP 本地调度闭环 | 2026-07-28 | GPT/Codex, DeepSeek | scheduler-ready、AP 页表激活、远程 kernel stack 发布和双架构 8 核验证 | AP 进入本地 scheduler；定位并修复未安装 CPU-local 页表根导致的首次 dispatch 卡死；双架构 23/23 PASS |
 | SMP 远程阻塞唤醒 | 2026-07-28 | GPT/Codex, DeepSeek | `last_cpu` 语义、Blocking/Blocked 竞态、批量 wake 锁序与 Docker/QEMU 验证 | AP kernel-only 任务经真实 Completion/WaitQueue 阻塞后回原 CPU；双架构 25/25 PASS |
 | SMP kernel-global 撤映射与栈回收 | 2026-07-28 | GPT/Codex, DeepSeek | 全核 TLB sequence/ack、析构延迟回收、双架构 8 核 focused 与初赛回归 | 删除 AP TCB 永久保留 workaround；双架构 27/27 PASS，初赛 RV64 312/314、LA64 308/314，失败集合未扩大 |
+| SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 2026-07-28 | GPT/Codex, DeepSeek | VM 锁/ack 死锁审查、MM 驻留与 generation 顺序、独立 user-TLB sequence、双架构 Docker/QEMU 验证 | 保持 `Published` fail-stop，完成激活侧和全用户 IPI/ack 原语；双架构 29/29 PASS，初赛失败集合未扩大，完整 PTE shootdown 明确留给 B23 |
 
 ## 4. 详细使用场景
 
@@ -415,6 +416,32 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   回收及同 VA 再映射。初赛回归为 RV64 312/314、LA64 308/314，均精确匹配既有允许失败
   集合；它只证明 8 核 online 与 CPU0 普通用户路径未退化，不证明用户 MM、FS 或网络跨核。
 
+### Case 19: SMP 用户 MM 激活与 user-TLB IPI 基础设施
+
+- Evidence: `docs/Work_Log/2026-07-28.md`、
+  `docs/Work_Log/evidence/2026-07-28/smp-b22-user-tlb-foundation-summary.md`；原始
+  DeepSeek 审查、Docker/QEMU 日志与任务状态只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责源码调用链审计、两阶段协议设计、实现、内存序裁决和证据验收；
+  DeepSeek 负责冻结源码只读设计/最终审查、后台串行 Docker 测试与结果独立归纳。
+- Problem: B16 的 `TlbBatch` 只有 LocalOnly 语义；直接在其 `commit()` 内加入远端等待会
+  持有进程 VM 锁。目标 CPU 可能在 IRQ-off page fault 中等待同一锁，于是形成持锁等 ack
+  与目标等锁的死锁。用户 trap-return 也尚未登记哪些 CPU 可能缓存该 MM。
+- Human action: 先建立每 MM 的单调 cached CPU mask、generation/observed 和 trap-return
+  激活入口；另建独立 user-TLB request/ack 与锁外全用户失效原语。第二颗 CPU 登记后仍把
+  MM 标为 `Published` 并 fail-stop，不在两阶段提交完成前开放 PTE 写入或用户迁移。
+- AI adjudication: 采纳 DeepSeek 对 VM 锁死锁、join-before-generation、独立 sequence 和
+  全量失效的建议；把它提出的跨 Atomic 顺序风险记录为 B23 证明义务，但不采纳“只把
+  generation 改成 AcqRel fetch_add 即可”的简化，因为真正串行边界是激活与修改方共用的
+  VM 锁。LA64 当前 ASID 仍归 TCB，故采用 `invtlb 0x3` 全 non-global 失效而非伪造 MM ASID。
+- Verification: RV64/LA64 normal kernel build 均 PASS；两架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 29/29 PASS，新生产原语的两轮 IPI/ack 用例通过。
+  初赛 RV64 raw 309/semantic 312（`test_pipe` 物理行交错 + 两组 `kill 10`），LA64
+  raw/semantic 308（两组既有 `test_brk` + 两组 `kill 10`），失败集合未扩大。RV64 wrapper
+  因 GPT/Codex 并行更新文档而 fail-closed；人工复核生产源码哈希未变、QEMU exit 0 后接受
+  测试证据，但不改写 wrapper FAIL，也不为机械绿灯重跑。
+  测试没有修改真实用户 PTE，因此 generation race、stale translation、ack 前 frame
+  不复用、MM-owned ASID 和用户跨核执行均明确为 NOT RUN。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -475,6 +502,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b19-ap-scheduler-summary.md` | SMP AP 本地调度闭环 | 记录 DeepSeek 对首次 dispatch 卡死的页表根定因、GPT/Codex 映射发布协议裁决、双架构 8 核 23/23 PASS 与用户任务仍固定 CPU0 的边界 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b20-remote-wake-summary.md` | SMP 远程 blocked wake | 记录 `last_cpu`、批量 wake 锁外 IPI、DeepSeek 机械验证与人工裁决、双架构 8 核 25/25 PASS 及用户迁移 NOT RUN 边界 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b21-kernel-mapping-retirement-summary.md` | SMP kernel-global 撤映射与栈回收 | 记录全核 TLB sequence/ack、固定退休队列、安全点回收、DeepSeek 建议采纳/拒绝边界、双架构 27/27 与初赛非回归结果 |
+| `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b22-user-tlb-foundation-summary.md` | SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 记录 VM 锁死锁边界、单调 cached mask/generation、独立 sequence、DeepSeek 跨原子建议裁决、双架构 29/29 与完整 shootdown NOT RUN 边界 |
 
 ## 9. 交互记录与留痕方式
 

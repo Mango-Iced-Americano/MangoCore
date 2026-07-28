@@ -77,6 +77,10 @@ pub fn tests() -> Vec<KernelTest> {
             blocked_kernel_tasks_wake_on_last_cpu,
         ),
         KernelTest::new(
+            "smp::user_tlb_full_flush_reaches_online_cpus",
+            user_tlb_full_flush_reaches_online_cpus,
+        ),
+        KernelTest::new(
             "smp::kernel_stack_reclaim_waits_for_shootdown",
             kernel_stack_reclaim_waits_for_shootdown,
         ),
@@ -675,6 +679,36 @@ fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
         return Err("duplicate completion attempted a second wakeup");
     }
     *AP_BLOCKED_WAKE_COMPLETION.lock() = None;
+    Ok(())
+}
+
+/// 直接调用生产 user-TLB 同步原语，验证独立 sequence、IPI handler 与 ack 闭环。
+///
+/// 本用例尚未让用户任务迁移，也不伪装 stale-PTE 证明；它只验收 B22 已完成的
+/// 基础设施。真正的 generation race 与 ack 前 frame 生命周期留给锁外 batch 节点。
+fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("user TLB sync test did not run on CPU0");
+    }
+    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
+    let mut ack_before = [0usize; crate::smp::MAX_CPUS];
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        ack_before[cpu] = crate::smp::user_tlb_ack(cpu);
+    }
+
+    crate::smp::synchronize_user_tlb_mask(targets).map_err(|error| {
+        crate::println!("# user TLB full-flush sync failed: {:?}", error);
+        "user TLB full-flush sync failed"
+    })?;
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        if crate::smp::user_tlb_ack(cpu) <= ack_before[cpu] {
+            return Err("an online AP did not acknowledge the user TLB flush");
+        }
+    }
+
+    // 同步等待临时开放过本地 IRQ；ktest 不经过用户 trap-return，因此显式走
+    // 已有任务安全点，避免把恰好到达的 one-shot timer pending 留给下一用例。
+    crate::task::run_deferred_timer_at_task_safe_point();
     Ok(())
 }
 

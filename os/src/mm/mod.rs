@@ -31,6 +31,7 @@ mod page_table;
 mod slab;
 mod sysctl;
 mod tlb_batch;
+mod tlb_state;
 mod uaccess;
 mod user_mapper;
 mod vma;
@@ -61,6 +62,7 @@ pub use sysctl::{
     total_memory_kbytes,
 };
 pub(crate) use tlb_batch::{TlbBatch, TlbPublication};
+pub(crate) use tlb_state::MmTlbState;
 pub use vma::{MapFlags, MapPermission};
 type MmResult<T> = Result<T, MemoryError>;
 

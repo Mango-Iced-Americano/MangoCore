@@ -18,6 +18,7 @@ pub use arch::quiesce_local_timer_interrupt;
 pub use arch::reclaim_retired_kernel_stacks;
 pub use arch::kernel_tlb_invalidate;
 pub use arch::tlb_invalidate;
+pub use arch::user_tlb_invalidate;
 #[cfg(feature = "loongarch64")]
 pub use arch::LsxRegs;
 pub use arch::{

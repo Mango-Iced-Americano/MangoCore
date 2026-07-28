@@ -26,8 +26,8 @@ pub use loongarch64::{
         get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return, LsxRegs,
         MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
     },
-    trap_cx_bottom_from_tid, user_hwcap, ustack_bottom_from_tid, KernelPageTableImpl, KernelStack,
-    PageTableImpl, BLOCK_SZ,
+    trap_cx_bottom_from_tid, user_hwcap, user_tlb_invalidate, ustack_bottom_from_tid,
+    KernelPageTableImpl, KernelStack, PageTableImpl, BLOCK_SZ,
 };
 #[cfg(feature = "riscv")]
 pub mod riscv;
@@ -58,5 +58,5 @@ pub use riscv::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,
         trap_return, UserContext, UserSignalMask,
     },
-    user_hwcap, KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
+    user_hwcap, user_tlb_invalidate, KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
 };

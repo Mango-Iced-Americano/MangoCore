@@ -31,6 +31,10 @@ struct PerCpu {
     kernel_tlb_request: AtomicUsize,
     /// 本 CPU 完成本地 TLB 刷新后发布的对应确认序号。
     kernel_tlb_ack: AtomicUsize,
+    /// 目标 CPU 必须完成的全用户/non-global TLB 失效序号。
+    user_tlb_request: AtomicUsize,
+    /// 本 CPU 完成全用户 TLB 失效后发布的对应确认序号。
+    user_tlb_ack: AtomicUsize,
     /// 尚未处理的 IPI 原因位图；发送方 Release 合并，目标 CPU Acquire 消费。
     pending_ipi: AtomicU32,
     /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
@@ -64,6 +68,8 @@ impl PerCpu {
             need_resched: AtomicBool::new(false),
             kernel_tlb_request: AtomicUsize::new(0),
             kernel_tlb_ack: AtomicUsize::new(0),
+            user_tlb_request: AtomicUsize::new(0),
+            user_tlb_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
             ipi_ping_ack: AtomicUsize::new(0),
             round_trip_reply_pending: AtomicBool::new(false),
@@ -98,6 +104,8 @@ impl IpiReason {
     const RESCHEDULE: Self = Self(1 << 4);
     /// BSP 已修改共享内核页表；目标必须刷新本地 TLB 后发布 ack。
     const KERNEL_TLB_SYNC: Self = Self(1 << 5);
+    /// 某个用户 MM 的 PTE 已修改；目标必须清除本核全部用户翻译后 ack。
+    const USER_TLB_SYNC: Self = Self(1 << 6);
 
     const fn bits(self) -> u32 {
         self.0
@@ -142,6 +150,19 @@ pub enum StopError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KernelTlbSyncError {
     InvalidCpu { cpu_id: usize },
+    InvalidTargets { targets: usize },
+    UnavailableTargets { targets: usize, available: usize },
+    Timeout {
+        cpu_id: usize,
+        expected: usize,
+        observed: usize,
+        send_error: Option<isize>,
+    },
+}
+
+/// 全用户 TLB 同步基础设施可能返回的错误。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UserTlbSyncError {
     InvalidTargets { targets: usize },
     UnavailableTargets { targets: usize, available: usize },
     Timeout {
@@ -316,6 +337,11 @@ pub(crate) fn kernel_tlb_ack(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id].kernel_tlb_ack.load(Ordering::Acquire)
 }
 
+/// 查询目标 CPU 已完成的全用户 TLB 同步序号。
+pub(crate) fn user_tlb_ack(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id].user_tlb_ack.load(Ordering::Acquire)
+}
+
 /// 查询 CPU0 已处理的 round-trip 回复序号。
 pub fn round_trip_reply_ack() -> usize {
     PER_CPUS[BOOT_CPU_ID]
@@ -404,6 +430,13 @@ pub fn handle_ipi() {
         crate::hal::kernel_tlb_invalidate();
         local.kernel_tlb_ack.store(sequence, Ordering::Release);
     }
+    if reasons & IpiReason::USER_TLB_SYNC.bits() != 0 {
+        // 用户协议拥有独立 sequence，不能和并发的 kernel-global 撤映射互相
+        // 覆盖。先读 request 再 flush，确保 ack 对应的失效发生在请求发布之后。
+        let sequence = local.user_tlb_request.load(Ordering::Acquire);
+        crate::hal::user_tlb_invalidate();
+        local.user_tlb_ack.store(sequence, Ordering::Release);
+    }
 }
 
 /// 在 AP idle 栈上执行 hard IPI 延迟下来的有界工作。
@@ -450,11 +483,11 @@ pub(crate) fn request_reschedule(cpu_id: usize) -> Result<(), isize> {
 /// 自旋，就会互相等待 ack。进入本 guard 前不得持有页表、runqueue 或普通锁。
 /// 窗口内到达的 timer IRQ 仍只发布 deferred work；生产调用者随后必须经过
 /// trap-return 或 scheduler timer 安全点，不能在 MM 同步层执行任意 timer callback。
-struct KernelTlbWaitIrqGuard {
+struct TlbWaitIrqGuard {
     restore_enabled: bool,
 }
 
-impl KernelTlbWaitIrqGuard {
+impl TlbWaitIrqGuard {
     fn enter() -> Self {
         let restore_enabled = crate::hal::local_irq_save();
         crate::hal::local_irq_restore(true);
@@ -462,7 +495,7 @@ impl KernelTlbWaitIrqGuard {
     }
 }
 
-impl Drop for KernelTlbWaitIrqGuard {
+impl Drop for TlbWaitIrqGuard {
     fn drop(&mut self) {
         let _ = crate::hal::local_irq_save();
         crate::hal::local_irq_restore(self.restore_enabled);
@@ -525,7 +558,7 @@ fn synchronize_kernel_mapping_mask(
     // 承诺不再访问旧翻译，也可替代本轮 TLB ack。
     let send_error = send_ipi_mask(remote, IpiReason::KERNEL_TLB_SYNC).err();
 
-    let _irq_guard = KernelTlbWaitIrqGuard::enter();
+    let _irq_guard = TlbWaitIrqGuard::enter();
     let deadline = crate::hal::get_time()
         .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
     loop {
@@ -578,6 +611,85 @@ pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbS
 pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError> {
     let targets = online_cpu_mask() & !stopped_cpu_mask();
     synchronize_kernel_mapping_mask(targets, true)
+}
+
+/// 让一组曾缓存用户 MM 的 CPU 完成全用户/non-global TLB 失效。
+///
+/// 这是 B22 提供给下一工作包的锁外提交原语。调用方必须先释放 VM/PTE 及其它
+/// 普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
+/// 每次失效覆盖本核全部用户项，因此 request 合并到较新序号仍同时覆盖旧请求。
+pub(crate) fn synchronize_user_tlb_mask(targets: usize) -> Result<(), UserTlbSyncError> {
+    let configured = expected_online_mask();
+    if targets == 0 || targets & !configured != 0 {
+        return Err(UserTlbSyncError::InvalidTargets { targets });
+    }
+    let online = online_cpu_mask();
+    if targets & !online != 0 {
+        return Err(UserTlbSyncError::UnavailableTargets {
+            targets,
+            available: online & !stopped_cpu_mask(),
+        });
+    }
+
+    // STOP 是不可恢复终态；已 stopped 的 CPU 不会再次使用旧用户翻译，所以其
+    // 停止确认可以替代本轮 TLB ack。MangoCore 尚不支持 CPU hotplug。
+    let live_targets = targets & !stopped_cpu_mask();
+    if live_targets == 0 {
+        return Ok(());
+    }
+    let current_bit = 1usize << self::cpu_id();
+    let remote = live_targets & !current_bit;
+    let mut expected = [0usize; MAX_CPUS];
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if remote & (1usize << cpu_id) == 0 {
+            continue;
+        }
+        expected[cpu_id] = PER_CPUS[cpu_id]
+            .user_tlb_request
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        assert_ne!(expected[cpu_id], 0, "user TLB sync sequence wrapped");
+    }
+
+    if live_targets & current_bit != 0 {
+        crate::hal::user_tlb_invalidate();
+    }
+    if remote == 0 {
+        return Ok(());
+    }
+    let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
+
+    // 等待者本身也可能同时成为另一轮 user/kernel shootdown 的目标。临时开放
+    // 本地中断后双方都能进入只做原子操作的 handler，不会形成 ack 环形等待。
+    let _irq_guard = TlbWaitIrqGuard::enter();
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+    loop {
+        let stopped = stopped_cpu_mask();
+        let mut missing = None;
+        for cpu_id in 0..CONFIGURED_CPU_COUNT {
+            if remote & (1usize << cpu_id) == 0 || stopped & (1usize << cpu_id) != 0 {
+                continue;
+            }
+            let observed = PER_CPUS[cpu_id].user_tlb_ack.load(Ordering::Acquire);
+            if observed < expected[cpu_id] {
+                missing = Some((cpu_id, observed));
+                break;
+            }
+        }
+        let Some((cpu_id, observed)) = missing else {
+            return Ok(());
+        };
+        if crate::hal::get_time() >= deadline {
+            return Err(UserTlbSyncError::Timeout {
+                cpu_id,
+                expected: expected[cpu_id],
+                observed,
+                send_error,
+            });
+        }
+        spin_loop();
+    }
 }
 
 /// 在当前 CPU 的 timer IRQ fast path 发布一批待处理工作。

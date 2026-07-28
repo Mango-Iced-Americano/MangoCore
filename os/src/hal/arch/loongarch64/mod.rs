@@ -40,6 +40,14 @@ pub fn kernel_tlb_invalidate() {
     tlb::tlb_global_invalidate();
 }
 
+/// 清除当前 core 上所有用户/non-global TLB 翻译。
+///
+/// LoongArch `invtlb 0x3` 按 G 位筛选，不读取当前 ASID；因此即使 B22 期间
+/// ASID 仍由 TCB 持有，IPI handler 也能在 idle 或任意任务上下文正确失效。
+pub fn user_tlb_invalidate() {
+    tlb::tlb_invalidate();
+}
+
 use crate::{
     config::{
         CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH, SUC_DMW_VSEG,

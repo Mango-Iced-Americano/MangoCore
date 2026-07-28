@@ -503,7 +503,9 @@ pub fn trap_return() -> ! {
     if asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
-    let user_satp = current_user_token();
+    // 在恢复 PGDL/ASID 前登记本 CPU 对当前 MM 的可见性。当前 ASID 仍归 TCB，
+    // 所以代际落后时用户 MM 激活路径会保守清除全部 non-global 项。
+    let user_satp = task.process.prepare_user_vm();
     // On LA64, `strampoline` resolves to the kernel-trap stub under the
     // static link. `__restore` is already in the direct-map executable range.
     let restore_va = __restore as usize;

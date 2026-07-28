@@ -582,3 +582,23 @@
 - **门禁模式**: raw judge 分数必须原样保留；只有针对已反汇编证明的单个测试定义严格、
   可审计的块级语义解析，才可另算 semantic score。归一化规则必须同时验证完整 token、
   成功标记、END、无错误，并对旧基线和候选版本一致应用，不能通过重复运行挑高分过门禁。
+
+## 用户 MM shootdown：登记、快照与等待必须分成两个同步层次
+
+- **典型漏失竞态**: CPU A 返回用户态时若先读 generation、后加入 cached/active mask，
+  CPU B 可在两步之间推进 generation 并快照旧 mask。A 不在 IPI 目标内，又认为自己已经
+  观察到旧 generation，最终带着 stale TLB 返回用户态。
+- **典型死锁**: PTE 修改方在进程 VM/PTE 锁内等待远端 ack；目标 CPU 已关闭本地 IRQ并在
+  page fault 中等待同一锁。发送方等目标 handler，目标等发送方放锁，开放发送方 IRQ也
+  无法打破这条环。
+- **正确分层**:
+  1. 激活侧与修改侧用同一个 VM 锁串行化“加入 mask”与“推进 generation + 快照目标”；
+  2. 激活侧固定先 join、再读 generation，落后时本地 flush 并重查；
+  3. 修改侧在锁内只改 PTE、推进代际、快照目标并转移 deferred frame 所有权；
+  4. 释放所有普通锁后才发送 IPI、等待 ack，最后释放 frame。
+- **Atomic 误区**: cached mask 与 generation 是不同原子。分别使用 Acquire/Release，甚至只把
+  generation 的 RMW 升级为 AcqRel，都不自动替代共同锁的 join-vs-snapshot 顺序。若改成
+  lockless，必须逐一证明“修改先发生”和“激活先发生”两种次序，并实现相应重试/fence。
+- **测试边界**: 只看 request/ack 增长只能证明 mailbox/IPI 闭环；完整证据还需真实 PTE
+  降权或撤映射、victim 无偶然 trap 全刷窗口、generation race，以及 ack 前 frame 不复用。
+- **相关文件**: `os/src/mm/tlb_state.rs`, `os/src/mm/tlb_batch.rs`, `os/src/smp.rs`

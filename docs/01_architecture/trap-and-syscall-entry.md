@@ -544,9 +544,9 @@ RISC-V 返回路径：
 let task = do_signal();
 set_user_trap_entry();
 trap_cx.kernel_cpu_local = cpu_local_ptr();
-trap_cx.prepare_user_return();
+trap_cx.prepare_return();
 let trap_cx_ptr = task.trap_cx_user_va();
-let user_satp = current_user_token();
+let user_satp = task.process.prepare_user_vm();
 let restore_va = __restore - __alltraps + TRAMPOLINE;
 drop(task);
 fence.i;
@@ -572,10 +572,10 @@ pub fn trap_return() -> ! {
         let inner = task.acquire_inner_lock();
         let trap_cx = inner.get_trap_cx();
         trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
-        trap_cx.prepare_user_return();
+        trap_cx.prepare_return();
     }
     let trap_cx_ptr = task.trap_cx_user_va();
-    let user_satp = current_user_token();
+    let user_satp = task.process.prepare_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     drop(task);
     unsafe {

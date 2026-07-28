@@ -508,6 +508,16 @@ impl ProcessControlBlock {
         self.user_token_hint.load(Ordering::Relaxed)
     }
 
+    /// 返回用户态前登记本 CPU 对当前 MM 的 TLB 可见性，并取得权威页表 token。
+    ///
+    /// trap-return 必须调用本入口，不能只读取无锁 token hint；登记与 generation
+    /// 检查需要和页表修改共用 VM 锁，才能闭合“加入 mask 与修改方快照”的竞态。
+    pub fn prepare_user_vm(&self) -> usize {
+        let vm = self.vm();
+        let token = vm.lock().activate_on(crate::smp::cpu_id());
+        token
+    }
+
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
         self.inner.lock().sighand.clone()
     }
