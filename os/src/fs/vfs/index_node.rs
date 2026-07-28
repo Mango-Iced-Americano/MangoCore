@@ -488,14 +488,6 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         None
     }
 
-    /// 返回由调用上下文解析的读端事件队列（可选）。
-    ///
-    /// 与 `read_event_queue` 不同，这个队列不必由 inode 自身拥有。调用方持有
-    /// 返回的 `Arc`，使其在整个 poll/epoll 等待或订阅期间保持存活。
-    fn read_event_queue_owned(&self) -> Option<Arc<super::event::EventWaitQueue>> {
-        None
-    }
-
     /// 返回写端等待队列（可选）。
     ///
     /// # Semantics

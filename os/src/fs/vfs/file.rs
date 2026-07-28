@@ -705,44 +705,50 @@ impl fmt::Debug for File {
 
 /// 用于 poll/epoll 等待的轻量句柄。
 ///
-/// 持有 inode 或事件队列的 `Arc` 以保证队列在等待期间存活。
+/// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
+/// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
 pub struct PollWaitQueue {
-    _inode: Option<Arc<dyn IndexNode>>,
-    _event_queue: Option<Arc<EventWaitQueue>>,
+    _inode: Arc<dyn IndexNode>,
     queue: *const Mutex<WaitQueue>,
 }
 
 impl PollWaitQueue {
     pub fn queue(&self) -> &Mutex<WaitQueue> {
-        // `PollWaitQueue` keeps the queue owner alive, so the queue pointer
-        // remains valid for this poll wait cycle.
+        // `PollWaitQueue` keeps the inode Arc alive, so the queue reference
+        // returned by `IndexNode` remains valid for this poll wait cycle.
+        // Safety: `self._inode` is an `Arc` that guarantees the `IndexNode`
+        // is alive. The `queue` pointer was obtained from that inode and is
+        // stable for the lifetime of the `Arc`.
         unsafe { &*self.queue }
     }
 }
 
 /// 用于 epoll / eventfd / signalfd / pidfd 的轻量句柄。
 ///
-/// 持有 inode 或事件队列的 `Arc` 以保证队列在订阅期间存活。
-/// 实现 `Send + Sync`：持有的 `Arc` 保证 `queue` 指向的
-/// `EventWaitQueue` 在句柄生命周期内有效。
+/// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
+/// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
+/// 实现 `Send + Sync`：`Arc` 提供线程安全的引用计数，`queue` 指向的
+/// `EventWaitQueue` 由 inode 内部管理，生命周期与 `Arc` 绑定。
 #[derive(Clone)]
 pub struct EventQueueHandle {
-    _inode: Option<Arc<dyn IndexNode>>,
-    _event_queue: Option<Arc<EventWaitQueue>>,
+    _inode: Arc<dyn IndexNode>,
     queue: *const EventWaitQueue,
 }
 
-// Safety: `EventQueueHandle` holds an Arc owning either the inode or the
-// event queue itself. The raw pointer is only used to obtain a shared reference
-// whose lifetime is bounded by the enclosing function scope. No mutation is
-// performed through the pointer. Therefore `Send` and `Sync` are safe.
+// Safety: `EventQueueHandle` holds an `Arc<dyn IndexNode>` which ensures the
+// inode (and thus its `EventWaitQueue`) stays alive. The raw `queue` pointer
+// is only used to obtain a shared reference (via `&*self.queue`) whose lifetime
+// is bounded by the enclosing function scope. No mutation is performed through
+// the pointer. Therefore `Send` and `Sync` are safe to implement.
 unsafe impl Send for EventQueueHandle {}
 unsafe impl Sync for EventQueueHandle {}
 
 impl EventQueueHandle {
     pub fn queue(&self) -> &EventWaitQueue {
-        // `EventQueueHandle` keeps the queue owner alive, so the queue pointer
-        // remains valid for this poll/epoll cycle.
+        // `EventQueueHandle` keeps the inode Arc alive, so the queue reference
+        // returned by `IndexNode` remains valid for this poll/epoll cycle.
+        // Safety: same invariant as `PollWaitQueue` — `_inode` is an `Arc`
+        // guaranteeing the `EventWaitQueue` is alive and the pointer is stable.
         unsafe { &*self.queue }
     }
 }
@@ -1521,66 +1527,46 @@ impl File {
     }
 
     pub fn read_wait_queue(&self) -> Option<PollWaitQueue> {
-        if let Some(queue) = self.inode.read_event_queue_owned() {
-            return Some(PollWaitQueue {
-                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
-                _inode: None,
-                _event_queue: Some(queue),
-            });
-        }
         if let Some(queue) = self.inode.read_event_queue() {
             return Some(PollWaitQueue {
+                _inode: self.inode.clone(),
                 queue: queue.wait_queue() as *const Mutex<WaitQueue>,
-                _inode: Some(self.inode.clone()),
-                _event_queue: None,
             });
         }
         let queue = self.inode.read_wait_queue()? as *const Mutex<WaitQueue>;
         Some(PollWaitQueue {
+            _inode: self.inode.clone(),
             queue,
-            _inode: Some(self.inode.clone()),
-            _event_queue: None,
         })
     }
 
     pub fn write_wait_queue(&self) -> Option<PollWaitQueue> {
         if let Some(queue) = self.inode.write_event_queue() {
             return Some(PollWaitQueue {
+                _inode: self.inode.clone(),
                 queue: queue.wait_queue() as *const Mutex<WaitQueue>,
-                _inode: Some(self.inode.clone()),
-                _event_queue: None,
             });
         }
         let queue = self.inode.write_wait_queue()? as *const Mutex<WaitQueue>;
         Some(PollWaitQueue {
+            _inode: self.inode.clone(),
             queue,
-            _inode: Some(self.inode.clone()),
-            _event_queue: None,
         })
     }
 
     pub fn read_event_queue(&self) -> Option<EventQueueHandle> {
-        if let Some(queue) = self.inode.read_event_queue_owned() {
-            return Some(EventQueueHandle {
-                queue: Arc::as_ptr(&queue),
-                _inode: None,
-                _event_queue: Some(queue),
-            });
-        }
         let queue = self.inode.read_event_queue()? as *const EventWaitQueue;
         Some(EventQueueHandle {
+            _inode: self.inode.clone(),
             queue,
-            _inode: Some(self.inode.clone()),
-            _event_queue: None,
         })
     }
 
     pub fn write_event_queue(&self) -> Option<EventQueueHandle> {
         let queue = self.inode.write_event_queue()? as *const EventWaitQueue;
         Some(EventQueueHandle {
+            _inode: self.inode.clone(),
             queue,
-            _inode: Some(self.inode.clone()),
-            _event_queue: None,
         })
     }
 
