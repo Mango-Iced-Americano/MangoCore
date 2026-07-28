@@ -150,30 +150,28 @@ fn send_thread_signal_info(
     if signal.contains(Signals::SIGCONT) {
         task.process.mark_continued();
     }
-    let mut inner = task.acquire_inner_lock();
-    if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {
-        return Err(EAGAIN);
-    }
-    if let Some(siginfo) = siginfo {
-        inner
-            .sigpending
-            .enqueue(PendingSignal { signal, siginfo })?;
-    } else {
-        inner.sigpending.enqueue_signal_with_sender(
-            signal,
-            SigInfo::SI_TKILL as usize,
-            current_sender_pid(),
-        )?;
-    }
-    if signal.contains(Signals::SIGCONT) {
-        drop(inner);
-        wake_task_if_interruptible(task.clone());
-        return Ok(());
-    }
-    if inner.task_status == TaskStatus::Interruptible
-        && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake)
-    {
-        drop(inner);
+    let should_wake = {
+        let mut inner = task.acquire_inner_lock();
+        if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {
+            return Err(EAGAIN);
+        }
+        if let Some(siginfo) = siginfo {
+            inner
+                .sigpending
+                .enqueue(PendingSignal { signal, siginfo })?;
+        } else {
+            inner.sigpending.enqueue_signal_with_sender(
+                signal,
+                SigInfo::SI_TKILL as usize,
+                current_sender_pid(),
+            )?;
+        }
+        signal.contains(Signals::SIGCONT)
+            || (inner.task_status == TaskStatus::Interruptible
+                && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake))
+    };
+    task.process.notify_signal_waiters();
+    if should_wake {
         wake_task_if_interruptible(task.clone());
     }
     Ok(())

@@ -1,4 +1,5 @@
 use super::common::*;
+use crate::fs::Pipe;
 
 pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
     let task = current_task().unwrap();

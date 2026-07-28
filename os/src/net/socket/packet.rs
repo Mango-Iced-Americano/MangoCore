@@ -299,9 +299,10 @@ pub fn deliver_frame_to_packet_sockets(frame: &[u8], ifindex: u32) {
     for socket in &live_sockets {
         let mut inner = socket.inner.lock();
         inner.rx_queue.push_back(frame.to_vec());
-        if let Some(wq) = socket.recv_event_queue() {
-            wq.notify_events_at_most_if_unlocked(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
-        }
+        drop(inner);
+        socket
+            .recv_waiters
+            .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
     }
 
     if !dead_indices.is_empty() {

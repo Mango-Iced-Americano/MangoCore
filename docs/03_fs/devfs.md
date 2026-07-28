@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-27"
+last_updated: "2026-07-28"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -160,12 +160,12 @@ read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形�
 
 管道由 `make_pipe` 创建一对 `(read_end, write_end)`，共享同一个 `PipeRingBuffer`（64KB 环形缓冲区）。关键行为：
 
-- **读**：从环形缓冲区读取数据。缓冲区为空且写端已关闭返回 EOF（0）；缓冲区为空且写端打开返回 `EAGAIN`；读取后通知写端 `EPOLLOUT`。
+- **读**：从环形缓冲区读取数据。缓冲区为空且写端已关闭返回 EOF（0）；缓冲区为空且写端打开返回 `EAGAIN`；读取后通知写端 `EPOLLOUT`。若释放空间小于 `PIPE_BUF`，唤醒全部写 waiter，避免仅被无法原子写入的 waiter 消耗唤醒令牌。
 - **写**：写入环形缓冲区。读端已关闭发送 SIGPIPE 并返回 `EPIPE`；缓冲区满返回 `EAGAIN`；写入后通知读端 `EPOLLIN`。
 - **poll**：基于环形缓冲区状态和端对关闭情况计算可读/可写/挂起事件位。
 - **ioctl**：`FIONREAD` 用于读取当前缓冲区中可用字节数。
 
-PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）。资源使用支持原子计数器跟踪。
+PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）；满管道扩容后会在释放 ring 锁后唤醒全部写 waiter。被信号或错误中断的 splice 等待若仍有可读数据或可写空间，也会把 reader/writer baton 广播给其余 waiter。资源使用支持原子计数器跟踪。
 
 **Named FIFO**：通过 `fifo_open` 在全局 `FIFO_REGISTRY` 中以 `(dev_id, inode_id)` 标识建立管道端点。支持 `compact_fifo_registry` 周期回收两端已关闭的陈旧条目。
 

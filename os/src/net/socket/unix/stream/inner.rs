@@ -17,6 +17,7 @@ use spin::Mutex;
 
 use crate::net::socket::unix::ring_buffer::RingBuffer;
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::Endpoint;
 
 /// 默认收发缓冲区大小（字节数）
@@ -55,7 +56,6 @@ impl Init {
 /// - `rx`: 本端的接收缓冲区的 consumer 端（对端→本端）
 /// - 每个连接共用两个 RingBuffer，每个方向一个
 /// - 两个 RingBuffer 由 `Arc<Mutex<>>` 共享
-#[derive(Debug)]
 pub struct Connected {
     /// 本端地址
     pub addr: Option<UnixEndpointBound>,
@@ -67,6 +67,23 @@ pub struct Connected {
     pub peer_rx: Arc<Mutex<RingBuffer<u8>>>,
     /// 接收缓冲区（从此缓冲区读取 → 对端写入的数据）
     pub rx: Arc<Mutex<RingBuffer<u8>>>,
+    /// Wait queues owned by this endpoint and its peer. They travel with the
+    /// connection so buffer transitions can wake the endpoint that observes
+    /// the newly published state without a socket-to-socket lock dependency.
+    pub recv_waiters: Arc<EventWaitQueue>,
+    pub send_waiters: Arc<EventWaitQueue>,
+    peer_recv_waiters: Arc<EventWaitQueue>,
+    peer_send_waiters: Arc<EventWaitQueue>,
+}
+
+impl core::fmt::Debug for Connected {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Connected")
+            .field("addr", &self.addr)
+            .field("peer_addr", &self.peer_addr)
+            .field("peer_creds", &self.peer_creds)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Connected {
@@ -75,7 +92,13 @@ impl Connected {
     /// 返回 `(side_a, side_b)`，其中：
     /// - `side_a.peer_rx == side_b.rx`
     /// - `side_a.rx == side_b.peer_rx`
-    pub fn new_pair(buf_size: usize) -> (Self, Self) {
+    pub fn new_pair(
+        buf_size: usize,
+        a_recv_waiters: Arc<EventWaitQueue>,
+        a_send_waiters: Arc<EventWaitQueue>,
+        b_recv_waiters: Arc<EventWaitQueue>,
+        b_send_waiters: Arc<EventWaitQueue>,
+    ) -> (Self, Self) {
         let buf_a = Arc::new(Mutex::new(RingBuffer::new(buf_size)));
         let buf_b = Arc::new(Mutex::new(RingBuffer::new(buf_size)));
         (
@@ -85,6 +108,10 @@ impl Connected {
                 peer_creds: None,
                 peer_rx: buf_b.clone(),
                 rx: buf_a.clone(),
+                recv_waiters: a_recv_waiters.clone(),
+                send_waiters: a_send_waiters.clone(),
+                peer_recv_waiters: b_recv_waiters.clone(),
+                peer_send_waiters: b_send_waiters.clone(),
             },
             Self {
                 addr: None,
@@ -92,6 +119,10 @@ impl Connected {
                 peer_creds: None,
                 peer_rx: buf_a,
                 rx: buf_b,
+                recv_waiters: b_recv_waiters,
+                send_waiters: b_send_waiters,
+                peer_recv_waiters: a_recv_waiters,
+                peer_send_waiters: a_send_waiters,
             },
         )
     }
@@ -106,6 +137,11 @@ impl Connected {
         for i in 0..n {
             buf[i] = rx.pop().unwrap();
         }
+        drop(rx);
+        // The peer's send buffer is this endpoint's receive buffer. Publish
+        // the freed space before waking its blocked writers.
+        self.peer_send_waiters
+            .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
         Some(n)
     }
 
@@ -117,9 +153,14 @@ impl Connected {
             return None;
         }
         let n = buf.len().min(free);
-        for &b in buf {
+        for &b in &buf[..n] {
             peer_rx.push(b);
         }
+        drop(peer_rx);
+        // The peer can observe the newly queued bytes before its readers are
+        // woken; no ring-buffer lock is held across notification.
+        self.peer_recv_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
         Some(n)
     }
 

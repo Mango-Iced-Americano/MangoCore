@@ -226,7 +226,7 @@ impl PtySlave {
         if n > 0 {
             self.inner
                 .master_write_waiters
-                .notify_events_at_most_if_unlocked(
+                .notify_events_at_most(
                     EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
                     1,
                 );
@@ -267,7 +267,7 @@ impl PtySlave {
         if written > 0 {
             self.inner
                 .master_read_waiters
-                .notify_events_at_most_if_unlocked(
+                .notify_events_at_most(
                     EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
                     1,
                 );
@@ -521,7 +521,7 @@ impl PtmxMasterInode {
         }
         let n = { inner.slave_to_master.lock().read(buf) };
         if n > 0 {
-            inner.slave_write_waiters.notify_events_at_most_if_unlocked(
+            inner.slave_write_waiters.notify_events_at_most(
                 EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
                 1,
             );
@@ -543,7 +543,7 @@ impl PtmxMasterInode {
         }
         let n = { inner.master_to_slave.lock().write(buf) };
         if n > 0 {
-            inner.slave_read_waiters.notify_events_at_most_if_unlocked(
+            inner.slave_read_waiters.notify_events_at_most(
                 EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
                 1,
             );

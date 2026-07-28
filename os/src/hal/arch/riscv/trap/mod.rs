@@ -168,6 +168,8 @@ pub fn trap_handler() -> ! {
                     }
                 }
             };
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
@@ -175,6 +177,8 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             let trap_profile_start = crate::task::processor::sched_profile_cycle_start();

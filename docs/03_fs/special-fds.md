@@ -4,7 +4,7 @@ module: "fs/special-fds"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-28"
 code_paths:
   - "os/src/fs/eventfd.rs"
   - "os/src/fs/timerfd.rs"
@@ -44,7 +44,7 @@ eventfd、timerfd、pidfd 和 signalfd 是四种通过标准文件描述符接�
 - 支持 `*_NONBLOCK` 和 `*_CLOEXEC` 标志
 - 集成 VFS 框架，通过 `File` / `FdTable` 管理
 
-注意各 fd 的 epoll/poll 集成程度不同：eventfd、timerfd 完整支持 `poll()` 和 `read_event_queue()`；pidfd 只实现 `poll()`，没有 `read_event_queue()`；signalfd 有 `poll()` 和 `is_stream() -> true`，但没有 `read_event_queue()`。
+四种 fd 都通过 `read_wait_queue()` 或 `read_event_queue()` 接入 poll/epoll。signalfd 的队列挂在共享 `sighand`，同一线程组的所有 signalfd 共用该通知点。
 
 ## eventfd -- 事件通知 fd
 
@@ -177,11 +177,17 @@ pidfd 提供一种不竞态（race-free）的进程引用方式。通过 `pidfd_
 struct PidFd {
     target_pid: usize,
     target: Weak<ProcessControlBlock>,
+    state: Arc<PidFdState>,
     metadata: Metadata,
+}
+
+struct PidFdState {
+    exited: AtomicBool,
+    waiters: EventWaitQueue,
 }
 ```
 
-`PidFd` 使用 `Weak<ProcessControlBlock>` 引用目标进程，不会阻止进程退出。进程退出后 `target.upgrade()` 返回 `None`，之后的操作返回 `ESRCH`。
+同一目标进程的所有 pidfd 共享一个 `Arc<PidFdState>`；PCB 只保存该状态的 `Weak`，不会阻止状态随最后一个 pidfd 释放。pidfd 自身持有强引用，因此目标 PCB 被 reap 后，已打开 pidfd 仍保留退出可读状态；而依赖目标 PCB 的操作在 PID 已释放后返回 `ESRCH`。
 
 ### 创建与使用
 
@@ -192,7 +198,7 @@ pub fn sys_pidfd_getfd(fd: usize, target_fd: usize, flags: usize) -> isize
 ```
 
 - `pidfd_open` 系统调用查找 PID 对应的 `ProcessControlBlock` 并创建 `PidFd` 实例
-- `new_pidfd_file_with_flags` 允许指定 `FileFlags`（如 `O_NONBLOCK`、`O_CLOEXEC`）
+- `new_pidfd_file_with_flags` 允许指定 `FileFlags`（pidfd_open 当前接受 `O_NONBLOCK`）
 - `pidfd_send_signal`：通过 fd 向目标进程发送信号，免去 PID 查询和权限检查的竞态窗口
 - `pidfd_getfd`：获取目标进程指定 fd 的副本
 - `target_pid()`：返回当前有效的目标 PID；进程已释放则返回 `ESRCH`
@@ -203,7 +209,9 @@ pub fn sys_pidfd_getfd(fd: usize, target_fd: usize, flags: usize) -> isize
 
 ### poll 行为
 
-目前 `PidFd` 未实现 `poll()`（使用 `IndexNode` 默认实现返回 0）。进程退出通知通过 `pidfd_poll` 机制实现（`EPOLLIN` 表示子进程已退出并变为 waitable），当前在 todo 清单中。
+`PidFd::poll()` 在目标进程已退出时返回 `EPOLLIN | EPOLLRDNORM`，否则返回 0。`read_wait_queue()` 和 `read_event_queue()` 都引用共享状态的 `EventWaitQueue`，因此 poll、ppoll/select 与 epoll 都能阻塞等待退出。
+
+最后一个线程使 PCB 转为 `Zombie` 后、PID 可能被回收前，退出路径先以 release store 设置 `PidFdState::exited`，再通过 `notify_events_all(EPOLLIN | EPOLLRDNORM)` 唤醒全部 pidfd 等待者。若在 zombie 期间新开 pidfd，创建路径会从 PCB 生命周期状态初始化 `exited`，因而立即可读，不会错过已经发生的退出事件。
 
 ### 实现位置
 
@@ -264,7 +272,7 @@ struct SignalfdSiginfo {
 
 实现与 Linux `struct signalfd_siginfo` 兼容（128 字节），采用 `#[repr(C)]` 布局。
 
-读操作从进程的待处理信号队列中取出与掩码匹配的信号，填充 `SignalfdSiginfo` 并返回。如果待处理队列中无匹配信号，返回 `EAGAIN`。写操作被禁用（返回 `EINVAL`）。
+读操作从进程的待处理信号队列中取出与掩码匹配的信号，填充 `SignalfdSiginfo` 并返回。`read_at()` 在无匹配信号时仍返回 `EAGAIN`；常规阻塞 `read()` 则通过共享队列等待至信号投递后重试。写操作被禁用（返回 `EINVAL`）。
 
 信号取出通过 `take_pending_signal_matching()` 实现，先搜索线程级 `sigpending`，再搜索进程级共享信号队列。
 
@@ -274,7 +282,7 @@ struct SignalfdSiginfo {
 
 ### 实现位置
 
-`SignalFd` 和 `sys_signalfd4` 实现在 `os/src/syscall/process/signal.rs`。与信号系统的集成点包括 `take_pending_signal_matching()`（读）和 `has_pending_signal_matching()`（poll）。
+`SignalFd` 和 `sys_signalfd4` 实现在 `os/src/syscall/process/signal.rs`。与信号系统的集成点包括 `take_pending_signal_matching()`（读）、`has_pending_signal_matching()`（poll）和来自共享 `sighand` 的 `EventWaitQueue`（阻塞 read / epoll 唤醒）。
 
 ## epoll 集成
 

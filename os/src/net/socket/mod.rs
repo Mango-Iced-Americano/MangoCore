@@ -1002,6 +1002,20 @@ pub fn wake_tcp_waiters() {
     }
 }
 
+/// After smoltcp advances, wake UDP writers whose transport buffer regained
+/// capacity. UDP receive delivery wakes readers directly in `dispatch_udp_packets`.
+pub fn wake_udp_waiters() {
+    let sockets: Vec<Arc<UdpSocket>> = UDP_SOCKETS
+        .lock()
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect();
+    for socket in &sockets {
+        socket.wake_send_if_ready();
+    }
+    UDP_SOCKETS.lock().retain(|socket| socket.strong_count() > 0);
+}
+
 /// Unconditional listener-only accept scan. Called after every poll cycle,
 /// regardless of smoltcp progress. Only iterates listening sockets, not
 /// all TCP sockets. Returns count of ready listeners.
@@ -1052,8 +1066,16 @@ pub fn wake_raw_waiters() {
         // query the socket and cover every handler rather than only lo.
         if socket.recv_ready() {
             if let Some(wq) = socket.recv_event_queue() {
-                wq.notify_events_at_most_if_unlocked(
+                wq.notify_events_at_most(
                     EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
+                    1,
+                );
+            }
+        }
+        if socket.send_ready() {
+            if let Some(wq) = socket.send_event_queue() {
+                wq.notify_events_at_most(
+                    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
                     1,
                 );
             }

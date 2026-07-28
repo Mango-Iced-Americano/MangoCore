@@ -849,6 +849,7 @@ impl<'a> NetInterface<'a> {
 
         if progressed {
             crate::net::wake_tcp_waiters();
+            crate::net::wake_udp_waiters();
             crate::net::wake_raw_waiters();
         }
         crate::task::perf::record_net_poll(progressed, false);

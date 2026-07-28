@@ -3,7 +3,7 @@ title: "exit、exit_group、wait4 与 waitid"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-28
 tags: [process, exit, wait, zombie]
 ---
 
@@ -64,13 +64,14 @@ process.finish_exit(task, exit_code)
 1. 完成 vfork。
 2. 把 resident user bytes 更新到 rusage maxrss。
 3. `mark_zombie(exit_code, rusage)`。
-4. 解除 exec inode busy key。
-5. 收养 children。
-6. 判断 auto-reap。
-7. 唤醒 parent 的 `child_exit_wait`。
-8. 按 child `exit_signal` 向 parent live thread 投递信号。
-9. 若 VM 未共享，`release_for_zombie()`。
-10. 关闭所有 fd。
+4. 设置共享 `PidFdState::exited` 并通知 pidfd poll/epoll 等待者。
+5. 解除 exec inode busy key。
+6. 收养 children。
+7. 判断 auto-reap。
+8. 唤醒 parent 的 `child_exit_wait`。
+9. 按 child `exit_signal` 向 parent live thread 投递信号。
+10. 若 VM 未共享，`release_for_zombie()`。
+11. 关闭所有 fd。
 
 线程级退出和进程级退出分开，是为了支持线程组语义。普通线程退出只清理自己的内核栈、trap context、clear_child_tid、robust list 和 live count；只要同一进程还有其他 live thread，PCB 的 fd table、VM、children 和 exit code 都不能进入 zombie。最后一个线程退出时才执行 `finish_exit()`，父进程才能通过 wait 观察到进程退出。
 
@@ -112,6 +113,7 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
     if !self.mark_zombie(exit_code, rusage) {
         return;
     }
+    self.notify_pidfd_exit();
     let parent_process = self.parent();
     let auto_reap = parent_process
         .as_ref()
@@ -176,6 +178,8 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
     self.close_files_on_exit();
 }
 ```
+
+`notify_pidfd_exit()` 仅在 PCB 进入 `Zombie` 后执行：先原子发布 `exited = true`，再调用共享 `EventWaitQueue::notify_events_all(EPOLLIN | EPOLLRDNORM)`。它先从 PCB 的弱引用槽位升级 `Arc<PidFdState>` 并释放 PCB 锁，随后才唤醒等待者，因此不会把 PCB 或 `inner` 锁跨越 wake 路径；PID reaping 发生在该通知之后。
 
 这段代码的顺序决定 wait 可见性：先 `mark_zombie()` 保存 exit status/rusage，再处理 parent wait queue 和 SIGCHLD，最后释放 VM 数据页并关闭 fd。auto-reap 分支会立即 detach child、释放 pid、注销 process 并移除 zombie TCB。
 

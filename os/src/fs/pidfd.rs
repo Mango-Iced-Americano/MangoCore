@@ -1,17 +1,58 @@
 use alloc::sync::{Arc, Weak};
-use core::any::Any;
-use spin::MutexGuard;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use spin::{Mutex, MutexGuard};
 
 use crate::{
     fs::{
         dev::DEV_FS,
         vfs::{
+            event::{EPollEvent, EventWaitQueue},
             File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata,
         },
     },
-    task::ProcessControlBlock,
+    task::{ProcessControlBlock, WaitQueue},
     utils::error::SyscallErr,
 };
+
+/// Stable pidfd readiness state shared by every pidfd for one process.
+///
+/// A pidfd retains this state after its target PCB has been reaped, so exit
+/// readiness remains observable for the descriptor's lifetime.
+pub struct PidFdState {
+    exited: AtomicBool,
+    waiters: EventWaitQueue,
+}
+
+impl PidFdState {
+    pub fn new(exited: bool) -> Self {
+        Self {
+            exited: AtomicBool::new(exited),
+            waiters: EventWaitQueue::new(),
+        }
+    }
+
+    pub fn exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+
+    /// Publish process exit before waking pidfd poll and epoll waiters.
+    pub fn notify_exit(&self) {
+        self.exited.store(true, Ordering::Release);
+        self.waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+    }
+}
+
+impl core::fmt::Debug for PidFdState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PidFdState")
+            .field("exited", &self.exited())
+            .finish()
+    }
+}
 
 /// pidfd inode — 指向进程的文件描述符。
 ///
@@ -21,6 +62,7 @@ use crate::{
 pub struct PidFd {
     target_pid: usize,
     target: Weak<ProcessControlBlock>,
+    state: Arc<PidFdState>,
     metadata: Metadata,
 }
 
@@ -29,6 +71,7 @@ impl PidFd {
         Self {
             target_pid: target.pid,
             target: Arc::downgrade(target),
+            state: target.pidfd_state(),
             metadata: Metadata::new(
                 FileType::File,
                 InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
@@ -69,6 +112,22 @@ impl IndexNode for PidFd {
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(self.metadata.clone())
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        if self.state.exited() {
+            Ok((EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits())
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.state.waiters.wait_queue())
+    }
+
+    fn read_event_queue(&self) -> Option<&EventWaitQueue> {
+        Some(&self.state.waiters)
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {

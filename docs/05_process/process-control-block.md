@@ -3,7 +3,7 @@ title: "ProcessControlBlock 进程级资源"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-07-28
 tags: [process, pcb, fd, namespace, lifecycle]
 ---
 
@@ -17,9 +17,10 @@ tags: [process, pcb, fd, namespace, lifecycle]
 ProcessControlBlock
   ├── pid / leader_tid / pid handle / quota
   ├── threads / live_threads / trap_context_cache
-  ├── child_exit_wait / vfork completion
-  ├── parent-child relation hints
-  ├── inner: Mutex<ProcessInner>
+   ├── child_exit_wait / vfork completion
+   ├── parent-child relation hints
+   ├── pidfd_state: Mutex<Weak<PidFdState>>
+   ├── inner: Mutex<ProcessInner>
   └── signal: Mutex<ProcessSignalState>
 ```
 
@@ -43,6 +44,7 @@ pub struct ProcessControlBlock {
     vfork_done: Completion,
     pub adopted_by_init: AtomicBool,
     pgid_hint/sid_hint/parent_pid_hint/user_token_hint,
+    pidfd_state: Mutex<Weak<PidFdState>>,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
     shared_pending_hint: AtomicU64,
@@ -63,6 +65,7 @@ pub struct ProcessControlBlock {
 | `vfork_done` | vfork 完成通知 |
 | `adopted_by_init` | 是否为 init 收养的孤儿 |
 | `pgid/sid/parent/user_token_hint` | syscall 热路径 hint |
+| `pidfd_state` | 所有指向该进程的 pidfd 共享的弱状态；pidfd 自己持有强引用以跨 reaping 保留退出可读性 |
 | `inner` | 进程资源和生命周期状态 |
 | `signal` | 进程级 shared pending 与 group exit 状态 |
 | `shared_pending_hint` | shared pending 快速位图 |

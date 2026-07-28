@@ -364,6 +364,7 @@ pub fn sys_timer_settime(
 
     let task = current_task_ref().unwrap();
     let mut register_timer = None;
+    let mut should_notify = false;
     {
         let mut inner = task.acquire_inner_lock();
         let deliver_signal = {
@@ -430,7 +431,11 @@ pub fn sys_timer_settime(
             let _ = inner
                 .sigpending
                 .enqueue_signal(deliver_signal, SigInfo::SI_TIMER as usize);
+            should_notify = true;
         }
+    }
+    if should_notify {
+        task.process.notify_signal_waiters();
     }
 
     if let Some((deadline, signal, generation)) = register_timer {
@@ -592,7 +597,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
     for process in all_processes() {
         for task in process.threads() {
             let mut should_wake_task = false;
-            {
+            let should_notify = {
                 let mut inner = task.acquire_inner_lock();
                 let mut deliver_signals = Vec::new();
                 for (timer_id, timer_slot) in inner.posix_timers.iter_mut().enumerate() {
@@ -655,6 +660,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                     }
                 }
 
+                let should_notify = !deliver_signals.is_empty();
                 for signal in deliver_signals {
                     if signal.is_empty() {
                         continue;
@@ -669,6 +675,10 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                         should_wake_task = true;
                     }
                 }
+                should_notify
+            };
+            if should_notify {
+                task.process.notify_signal_waiters();
             }
             if should_wake_task {
                 wake_interruptible(task.clone());

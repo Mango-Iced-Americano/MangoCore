@@ -247,30 +247,35 @@ pub fn trap_handler() -> ! {
                     .saturating_sub(_pf_start),
             );
             match pf_result {
-                Err(error) => match error {
-                    MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
-                        inner.add_signal(Signals::SIGBUS);
+                Err(error) => {
+                    match error {
+                        MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
+                            inner.add_signal(Signals::SIGBUS);
+                        }
+                        MemoryError::NoPermission => {
+                            inner.sigmask.remove(Signals::SIGSEGV);
+                            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
+                        }
+                        MemoryError::BadAddress | MemoryError::NotMapped => {
+                            inner.sigmask.remove(Signals::SIGSEGV);
+                            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        }
+                        MemoryError::OutOfMemory => {
+                            inner.pending_oom_kill = true;
+                        }
+                        other => {
+                            log::warn!(
+                                "[page_fault] unexpected memory error {:?}, send SIGSEGV",
+                                other
+                            );
+                            inner.sigmask.remove(Signals::SIGSEGV);
+                            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        }
                     }
-                    MemoryError::NoPermission => {
-                        inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
-                    }
-                    MemoryError::BadAddress | MemoryError::NotMapped => {
-                        inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
-                    }
-                    MemoryError::OutOfMemory => {
-                        inner.pending_oom_kill = true;
-                    }
-                    other => {
-                        log::warn!(
-                            "[page_fault] unexpected memory error {:?}, send SIGSEGV",
-                            other
-                        );
-                        inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
-                    }
-                },
+                    drop(mset_lock);
+                    drop(inner);
+                    task.process.notify_signal_waiters();
+                }
                 Ok(_) => {
                     //tlb_addr_allow_write(addr.floor(), _paddr.floor()).unwrap();
                     drop(mset_lock);
@@ -296,6 +301,8 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
@@ -303,6 +310,8 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGSEGV);
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Interrupt(Interrupt::Timer) => {
             let trap_profile_start = crate::task::processor::sched_profile_cycle_start();

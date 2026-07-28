@@ -19,8 +19,10 @@ use super::{
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
     TaskControlBlock, TaskStatus, UtsNamespace, WaitQueue, INITPROC,
 };
-use crate::fs::vfs;
-use crate::mm::{AddressSpace, PageTableImpl};
+use crate::{
+    fs::{pidfd::PidFdState, vfs},
+    mm::{AddressSpace, PageTableImpl},
+};
 use crate::signal_type;
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
@@ -74,6 +76,11 @@ pub struct ProcessControlBlock {
     sid_hint: AtomicUsize,
     parent_pid_hint: AtomicUsize,
     user_token_hint: AtomicUsize,
+    /// Weak shared state retained by all pidfds for this process.
+    ///
+    /// The PCB never owns this state strongly: a pidfd keeps it alive across
+    /// process reaping so its exit readiness remains observable.
+    pidfd_state: Mutex<Weak<PidFdState>>,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
     shared_pending_hint: AtomicU64,
@@ -306,6 +313,7 @@ impl ProcessControlBlock {
             sid_hint: AtomicUsize::new(sid),
             parent_pid_hint: AtomicUsize::new(parent_pid_hint),
             user_token_hint: AtomicUsize::new(user_token),
+            pidfd_state: Mutex::new(Weak::new()),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
@@ -504,6 +512,23 @@ impl ProcessControlBlock {
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
         self.inner.lock().sighand.clone()
+    }
+
+    /// Clone the signal notification queue after releasing all process locks.
+    pub fn signal_event_queue(&self) -> Arc<vfs::event::EventWaitQueue> {
+        let sighand = self.sighand();
+        let event_queue = sighand.lock().signal_event_queue();
+        event_queue
+    }
+
+    /// Notify signalfd readers and epoll listeners after a signal is queued.
+    ///
+    /// The queue is cloned before this method reaches the wake path, so no
+    /// process, signal, or sighand lock is held across `wake_all()`.
+    pub fn notify_signal_waiters(&self) {
+        self.signal_event_queue().notify_events_all(
+            vfs::event::EPollEvent::EPOLLIN | vfs::event::EPollEvent::EPOLLRDNORM,
+        );
     }
 
     pub fn futex(&self) -> Arc<Mutex<Futex>> {
@@ -705,6 +730,31 @@ impl ProcessControlBlock {
         self.inner.lock().state == ProcessState::Zombie
     }
 
+    /// Get the shared pidfd state, creating it with the current exit state.
+    ///
+    /// Holding `pidfd_state` while observing `inner.state` closes the race
+    /// between opening a pidfd and the one-time exit notification: either the
+    /// opener installs a live state before exit wakes it, or it observes zombie
+    /// state and creates an already-readable pidfd.
+    pub fn pidfd_state(&self) -> Arc<PidFdState> {
+        let mut weak_state = self.pidfd_state.lock();
+        if let Some(state) = weak_state.upgrade() {
+            return state;
+        }
+
+        let state = Arc::new(PidFdState::new(self.is_zombie()));
+        *weak_state = Arc::downgrade(&state);
+        state
+    }
+
+    /// Mark the shared pidfd state readable after this PCB becomes zombie.
+    fn notify_pidfd_exit(&self) {
+        let state = { self.pidfd_state.lock().upgrade() };
+        if let Some(state) = state {
+            state.notify_exit();
+        }
+    }
+
     #[cfg(feature = "heap_trace")]
     pub fn debug_state(&self) -> ProcessState {
         self.inner.lock().state
@@ -890,6 +940,7 @@ impl ProcessControlBlock {
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
+        self.notify_signal_waiters();
     }
 
     /// 返回进程共享 pending signal 位图。
@@ -1122,6 +1173,7 @@ impl ProcessControlBlock {
         if !self.mark_zombie(exit_code, rusage) {
             return;
         }
+        self.notify_pidfd_exit();
         // 在 mark_zombie 之后重新获取 parent: 虽然单核非抢占内核中
         // mark_zombie（仅持自旋锁）和父进程 finish_exit 之间不存在竞态，
         // 但防御性重读可避免未来引入抢占后 parent 引用变为陈旧。
@@ -1165,12 +1217,18 @@ impl ProcessControlBlock {
                 parent_process.child_exit_wait.lock().wake_all();
                 if !exit_task.exit_signal.is_empty() {
                     if let Some(parent_task) = parent_process.any_live_thread() {
-                        let mut parent_inner = parent_task.acquire_inner_lock();
-                        parent_inner.add_signal(exit_task.exit_signal);
-
-                        if parent_inner.task_status == TaskStatus::Interruptible {
-                            parent_inner.task_status = TaskStatus::Ready;
-                            drop(parent_inner);
+                        let should_wake = {
+                            let mut parent_inner = parent_task.acquire_inner_lock();
+                            parent_inner.add_signal(exit_task.exit_signal);
+                            if parent_inner.task_status == TaskStatus::Interruptible {
+                                parent_inner.task_status = TaskStatus::Ready;
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        parent_task.process.notify_signal_waiters();
+                        if should_wake {
                             wake_interruptible(parent_task);
                         }
                     }

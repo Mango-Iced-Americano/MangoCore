@@ -43,10 +43,10 @@ pub struct UnixStreamSocket {
     /// 发送缓冲区大小
     send_buf_size: AtomicUsize,
     /// 等待队列
-    pub recv_waiters: EventWaitQueue,
-    pub send_waiters: EventWaitQueue,
-    pub connect_waiters: EventWaitQueue,
-    pub accept_waiters: EventWaitQueue,
+    pub recv_waiters: Arc<EventWaitQueue>,
+    pub send_waiters: Arc<EventWaitQueue>,
+    pub connect_waiters: Arc<EventWaitQueue>,
+    pub accept_waiters: Arc<EventWaitQueue>,
 }
 
 impl core::fmt::Debug for UnixStreamSocket {
@@ -65,23 +65,25 @@ impl UnixStreamSocket {
             is_nonblock: AtomicBool::new(is_nonblock),
             recv_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
             send_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
-            recv_waiters: EventWaitQueue::new(),
-            send_waiters: EventWaitQueue::new(),
-            connect_waiters: EventWaitQueue::new(),
-            accept_waiters: EventWaitQueue::new(),
+            recv_waiters: Arc::new(EventWaitQueue::new()),
+            send_waiters: Arc::new(EventWaitQueue::new()),
+            connect_waiters: Arc::new(EventWaitQueue::new()),
+            accept_waiters: Arc::new(EventWaitQueue::new()),
         }
     }
 
     pub fn new_connected(connected: Connected, is_nonblock: bool) -> Self {
+        let recv_waiters = connected.recv_waiters.clone();
+        let send_waiters = connected.send_waiters.clone();
         Self {
             inner: Mutex::new(Inner::Connected(connected)),
             is_nonblock: AtomicBool::new(is_nonblock),
             recv_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
             send_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
-            recv_waiters: EventWaitQueue::new(),
-            send_waiters: EventWaitQueue::new(),
-            connect_waiters: EventWaitQueue::new(),
-            accept_waiters: EventWaitQueue::new(),
+            recv_waiters,
+            send_waiters,
+            connect_waiters: Arc::new(EventWaitQueue::new()),
+            accept_waiters: Arc::new(EventWaitQueue::new()),
         }
     }
 
@@ -203,8 +205,15 @@ impl Socket for UnixStreamSocket {
                     .ok_or(SyscallErr::ECONNREFUSED)?;
 
                 // 2. 创建一对 Connected（client_conn 给本端，server_conn 给 listener）
-                let (mut client_conn, mut server_conn) =
-                    Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
+                let server_recv_waiters = Arc::new(EventWaitQueue::new());
+                let server_send_waiters = Arc::new(EventWaitQueue::new());
+                let (mut client_conn, mut server_conn) = Connected::new_pair(
+                    UNIX_STREAM_DEFAULT_BUF_SIZE,
+                    self.recv_waiters.clone(),
+                    self.send_waiters.clone(),
+                    server_recv_waiters,
+                    server_send_waiters,
+                );
 
                 // 3. 设置对端地址和凭证
                 let peer_creds = crate::task::current_task().map(|t| {
@@ -243,8 +252,15 @@ impl Socket for UnixStreamSocket {
                     .and_then(|w| w.upgrade())
                     .ok_or(SyscallErr::ECONNREFUSED)?;
 
-                let (mut client_conn, mut server_conn) =
-                    Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
+                let server_recv_waiters = Arc::new(EventWaitQueue::new());
+                let server_send_waiters = Arc::new(EventWaitQueue::new());
+                let (mut client_conn, mut server_conn) = Connected::new_pair(
+                    UNIX_STREAM_DEFAULT_BUF_SIZE,
+                    self.recv_waiters.clone(),
+                    self.send_waiters.clone(),
+                    server_recv_waiters,
+                    server_send_waiters,
+                );
                 let peer_creds = crate::task::current_task().map(|t| {
                     let inner = t.acquire_inner_lock();
                     (t.pid() as u32, inner.uid, inner.gid)

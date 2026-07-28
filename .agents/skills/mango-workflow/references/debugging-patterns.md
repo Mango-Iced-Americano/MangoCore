@@ -456,3 +456,10 @@
 - **修复**: 确认 `/sdcard/{musl,glibc}` 存在后，先删除 initramfs 目录的 `.gitkeep`，再 `rmdir` 并创建到 sdcard 的绝对符号链接。
 - **教训**: 需要将 CPIO 占位目录替换为挂载盘路径时，先检查打包后的 CPIO 条目，而不是只检查源码树目录是否“空”。
 - **相关文件**: `user/src/bin/test_runner/bootstrap/layout.rs`, `scripts/build_initramfs.sh`
+
+## WaitQueue 在 block 前覆盖并发唤醒
+
+- **根因**: 用 `TaskStatus` 作为唯一通知载体时，wake 可在条件复查后把任务标为 `Ready`，随后 block 入口又写回 `Interruptible`，从而吞掉通知。
+- **修复**: 每次等待创建共享 `Arc<WaiterState>`；释放保护锁后用 CAS 执行 `Idle → Sleeping`，唤醒方先从队列移除 waiter 再写 `Notified`。signal/timeout 先写 `Closed`，从所有队列删除 waiter，最后复查条件。多队列必须注册同一个 waiter，保证第一个通知获胜。
+- **教训**: 调度状态只能描述任务是否可运行，不能承担一次性通知语义；任何“注册 → 解锁 → block”协议都需要独立的原子握手和取消状态。
+- **相关文件**: `os/src/task/manager.rs`

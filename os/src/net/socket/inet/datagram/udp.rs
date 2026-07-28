@@ -605,6 +605,17 @@ impl Socket for UdpSocket {
 }
 
 impl UdpSocket {
+    /// Poll has advanced smoltcp state; wake a blocked writer only after its
+    /// transmit buffer is observable as writable.
+    pub fn wake_send_if_ready(&self) {
+        if self.send_ready() {
+            self.send_waiters.notify_events_at_most(
+                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
+                1,
+            );
+        }
+    }
+
     pub fn new(ver: IpVersion) -> Self {
         let tx_buf = socket::udp::PacketBuffer::new(
             vec![PacketMetadata::EMPTY; 1024],
@@ -708,11 +719,15 @@ impl UdpSocket {
             return Ok(None);
         };
 
-        let mut peer_inner = peer.inner.lock();
-        if peer_inner.rx_queue.len() >= peer_inner.recvbuf_size {
-            return Err(SyscallErr::EAGAIN);
+        {
+            let mut peer_inner = peer.inner.lock();
+            if peer_inner.rx_queue.len() >= peer_inner.recvbuf_size {
+                return Err(SyscallErr::EAGAIN);
+            }
+            peer_inner.rx_queue.push_back((data.to_vec(), src));
         }
-        peer_inner.rx_queue.push_back((data.to_vec(), src));
+        // Publish the queued packet before waking readers, without holding
+        // the peer socket state lock.
         peer.recv_waiters
             .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
         Ok(Some(data.len() as isize))
@@ -790,8 +805,10 @@ pub fn dispatch_udp_packets(sockets: &mut SocketSet) {
                         if let Some(os_sock) =
                             find_best_match(&os_socks, udp_sock.endpoint(), remote)
                         {
-                            let mut inner = os_sock.inner.lock();
-                            inner.rx_queue.push_back((buf, remote));
+                            {
+                                let mut inner = os_sock.inner.lock();
+                                inner.rx_queue.push_back((buf, remote));
+                            }
                             // 唤醒等待这个 socket 的任务
                             os_sock
                                 .recv_waiters

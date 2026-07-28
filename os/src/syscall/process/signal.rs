@@ -5,7 +5,8 @@ use crate::fs::{
     pidfd::{new_pidfd_file_with_flags, PidFd},
     procfs::LockedProcInode,
     vfs::{
-        event::EPollEvent, File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode,
+        event::{EPollEvent, EventWaitQueue}, File, FileFlags, FilePrivateData, FileSystem,
+        FileType, IndexNode,
         InodeMode, Metadata, MountFSInode,
     },
 };
@@ -155,6 +156,7 @@ impl SignalfdSiginfo {
 struct SignalFd {
     mask: Mutex<Signals>,
     metadata: Metadata,
+    event_queue: Arc<EventWaitQueue>,
 }
 
 impl core::fmt::Debug for SignalFd {
@@ -166,13 +168,14 @@ impl core::fmt::Debug for SignalFd {
 }
 
 impl SignalFd {
-    fn new(mask: Signals) -> Self {
+    fn new(mask: Signals, event_queue: Arc<EventWaitQueue>) -> Self {
         Self {
             mask: Mutex::new(mask),
             metadata: Metadata::new(
                 FileType::File,
                 InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
             ),
+            event_queue,
         }
     }
 
@@ -250,6 +253,14 @@ impl IndexNode for SignalFd {
         true
     }
 
+    fn read_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
+        Some(self.event_queue.wait_queue())
+    }
+
+    fn read_event_queue(&self) -> Option<&EventWaitQueue> {
+        Some(self.event_queue.as_ref())
+    }
+
     fn as_any_ref(&self) -> &dyn Any {
         self
     }
@@ -287,9 +298,13 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
         return EINVAL;
     }
 
-    let (token, files_ref) = {
+    let (token, files_ref, event_queue) = {
         let task = current_task_ref().unwrap();
-        (current_user_token(), task.process.files())
+        (
+            current_user_token(),
+            task.process.files(),
+            task.process.signal_event_queue(),
+        )
     };
     let sigmask = match read_signalfd_mask(token, mask, sigsetsize) {
         Ok(mask) => mask,
@@ -306,7 +321,7 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
             file_flags.insert(FileFlags::O_CLOEXEC);
         }
 
-        let inode = Arc::new(SignalFd::new(sigmask)) as Arc<dyn IndexNode>;
+        let inode = Arc::new(SignalFd::new(sigmask, event_queue)) as Arc<dyn IndexNode>;
         let file = match File::new(inode, file_flags) {
             Ok(file) => file,
             Err(err) => return -(err as isize),

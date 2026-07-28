@@ -3,6 +3,7 @@
 
 pub(crate) use crate::syscall::errno::*;
 pub(crate) use crate::fs::poll::{ppoll, pselect, FdSet, PollFd};
+use crate::fs::dev::pipe::Pipe;
 pub(crate) use crate::fs::vfs::{self, FileFlags, FileType, SeekFrom, SuperBlock};
 pub(crate) use crate::fs::vfs::fcntl::{FcntlCommand, PosixFlock, F_UNLCK};
 pub(crate) use crate::fs::vfs::posix_lock::{init_posix_lock_manager, mgr, posix_lock_get, posix_lock_set, release_posix_for_owner, LockKey, LockOwner};
@@ -1061,7 +1062,10 @@ pub(crate) fn pwrite_start_offset(file: &vfs::File, offset: usize) -> usize {
 
 pub(crate) fn raise_sigxfsz() {
     if let Some(task) = current_task() {
-        task.acquire_inner_lock().add_signal(Signals::SIGXFSZ);
+        {
+            task.acquire_inner_lock().add_signal(Signals::SIGXFSZ);
+        }
+        task.process.notify_signal_waiters();
     }
 }
 
@@ -1103,9 +1107,20 @@ pub(crate) fn splice_read_stream(
                 Some(ret)
             }
         }) {
-            WaitResult::Ready(n) => n,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
-            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+            WaitResult::Ready(n) => {
+                if n < 0 {
+                    pass_pipe_reader_baton(file);
+                }
+                n
+            }
+            WaitResult::Interrupted => {
+                pass_pipe_reader_baton(file);
+                -(SyscallErr::ERESTART as isize)
+            }
+            WaitResult::TimedOut => {
+                pass_pipe_reader_baton(file);
+                -(SyscallErr::EAGAIN as isize)
+            }
         }
     } else {
         read_once()
@@ -1133,9 +1148,20 @@ pub(crate) fn splice_write_stream(file: &vfs::File, buf: &[u8], nonblock: bool) 
                 Some(ret)
             }
         }) {
-            WaitResult::Ready(n) => n,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
-            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+            WaitResult::Ready(n) => {
+                if n < 0 {
+                    pass_pipe_writer_baton(file);
+                }
+                n
+            }
+            WaitResult::Interrupted => {
+                pass_pipe_writer_baton(file);
+                -(SyscallErr::ERESTART as isize)
+            }
+            WaitResult::TimedOut => {
+                pass_pipe_writer_baton(file);
+                -(SyscallErr::EAGAIN as isize)
+            }
         }
     } else {
         write_once()
@@ -1144,6 +1170,18 @@ pub(crate) fn splice_write_stream(file: &vfs::File, buf: &[u8], nonblock: bool) 
         Err(ret)
     } else {
         Ok(ret as usize)
+    }
+}
+
+fn pass_pipe_reader_baton(file: &vfs::File) {
+    if let Some(pipe) = file.inode.as_any_ref().downcast_ref::<Pipe>() {
+        pipe.pass_reader_baton_if_data();
+    }
+}
+
+fn pass_pipe_writer_baton(file: &vfs::File) {
+    if let Some(pipe) = file.inode.as_any_ref().downcast_ref::<Pipe>() {
+        pipe.pass_writer_baton_if_space();
     }
 }
 

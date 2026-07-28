@@ -143,6 +143,8 @@ struct DatagramMessage {
     data: Vec<u8>,
     /// 发送端地址（可选）
     src_addr: Option<UnixEndpointBound>,
+    /// Sender to wake when consuming this message frees queue capacity.
+    sender: Weak<UnixDatagramSocket>,
 }
 
 // ── Inner ────────────────────────────────────────────────────────────
@@ -259,14 +261,20 @@ impl UnixDatagramSocket {
             .lookup(&peer_addr)
             .ok_or(SyscallErr::ECONNREFUSED)?;
 
-        let mut peer_inner = peer_socket.inner.lock();
-        if peer_inner.recv_queue.len() >= peer_inner.recv_queue_capacity {
-            return Err(SyscallErr::EAGAIN);
+        let sender = self.self_ref.lock().clone().ok_or(SyscallErr::EIO)?;
+        {
+            let mut peer_inner = peer_socket.inner.lock();
+            if peer_inner.recv_queue.len() >= peer_inner.recv_queue_capacity {
+                return Err(SyscallErr::EAGAIN);
+            }
+            peer_inner.recv_queue.push_back(DatagramMessage {
+                data: buf.to_vec(),
+                src_addr: local_addr,
+                sender,
+            });
         }
-        peer_inner.recv_queue.push_back(DatagramMessage {
-            data: buf.to_vec(),
-            src_addr: local_addr,
-        });
+        // The receive queue now contains the published message; notify only
+        // after releasing the peer state lock.
         peer_socket
             .recv_waiters
             .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
@@ -469,8 +477,20 @@ impl Socket for UnixDatagramSocket {
     ///
     /// - `EAGAIN`：接收队列为空
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
-        let mut inner = self.inner.lock();
-        inner.try_recv(buf).ok_or(SyscallErr::EAGAIN)
+        let msg = self
+            .inner
+            .lock()
+            .recv_queue
+            .pop_front()
+            .ok_or(SyscallErr::EAGAIN)?;
+        let n = buf.len().min(msg.data.len());
+        buf[..n].copy_from_slice(&msg.data[..n]);
+        if let Some(sender) = msg.sender.upgrade() {
+            sender
+                .send_waiters
+                .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
+        }
+        Ok(n as isize)
     }
 
     /// 非阻塞尝试发送到已连接的对端（不 poll、不睡眠）。
@@ -536,11 +556,16 @@ impl Socket for UnixDatagramSocket {
     }
 
     fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
-        let mut inner = self.inner.lock();
-        if let Some(msg) = inner.recv_queue.pop_front() {
+        let msg = self.inner.lock().recv_queue.pop_front();
+        if let Some(msg) = msg {
             let n = buf.len().min(msg.data.len());
             buf[..n].copy_from_slice(&msg.data[..n]);
             let src_ep = msg.src_addr.map(|addr| Endpoint::Unix(addr.clone().into()));
+            if let Some(sender) = msg.sender.upgrade() {
+                sender
+                    .send_waiters
+                    .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
+            }
             Ok((n as isize, src_ep))
         } else {
             Err(SyscallErr::EAGAIN)

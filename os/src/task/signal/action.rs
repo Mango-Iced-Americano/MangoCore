@@ -8,14 +8,22 @@
 //! 调用方通常通过 `ProcessControlBlock::sighand()` 取得外层 `Mutex`。
 //! 本类型自身不包含同步原语。
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
+use crate::fs::vfs::event::EventWaitQueue;
 use super::SigAction;
 
-#[derive(Clone)]
 /// 进程共享的信号动作表。
 pub struct Sighand {
     actions: Vec<Option<SigAction>>,
+    /// Shared by every signalfd associated with this signal-handler table.
+    signal_event_queue: Arc<EventWaitQueue>,
+}
+
+impl Clone for Sighand {
+    fn clone(&self) -> Self {
+        Self::from_existing(self)
+    }
 }
 
 impl Sighand {
@@ -27,6 +35,7 @@ impl Sighand {
     pub fn new() -> Self {
         Self {
             actions: Vec::new(),
+            signal_event_queue: Arc::new(EventWaitQueue::new()),
         }
     }
 
@@ -34,7 +43,13 @@ impl Sighand {
     pub fn from_existing(other: &Self) -> Self {
         Self {
             actions: other.actions.clone(),
+            signal_event_queue: Arc::new(EventWaitQueue::new()),
         }
+    }
+
+    /// Return the notification point shared by this thread group's signalfds.
+    pub fn signal_event_queue(&self) -> Arc<EventWaitQueue> {
+        self.signal_event_queue.clone()
     }
 
     /// 查询指定信号的显式动作。

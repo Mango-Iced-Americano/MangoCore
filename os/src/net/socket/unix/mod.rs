@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::fs::vfs::{self, FileFlags};
+use crate::fs::vfs::event::EventWaitQueue;
 use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;
@@ -126,8 +127,13 @@ pub fn make_unix_socket_pair(
 ) -> (Arc<dyn Socket>, Arc<dyn Socket>) {
     match socket_type {
         PSOCK::Stream => {
-            let (inner_a, inner_b) =
-                stream::inner::Connected::new_pair(stream::inner::UNIX_STREAM_DEFAULT_BUF_SIZE);
+            let (inner_a, inner_b) = stream::inner::Connected::new_pair(
+                stream::inner::UNIX_STREAM_DEFAULT_BUF_SIZE,
+                Arc::new(EventWaitQueue::new()),
+                Arc::new(EventWaitQueue::new()),
+                Arc::new(EventWaitQueue::new()),
+                Arc::new(EventWaitQueue::new()),
+            );
             let socket_a = Arc::new(stream::UnixStreamSocket::new_connected(
                 inner_a,
                 is_nonblock,

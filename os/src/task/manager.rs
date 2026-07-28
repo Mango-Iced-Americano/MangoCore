@@ -780,11 +780,14 @@ pub fn send_signal_to_interruptible(signal: Signals) -> bool {
     }
     let mut sent = false;
     for task in &tasks {
-        let mut inner = task.acquire_inner_lock();
-        inner.add_signal(signal);
-        if inner.task_status == TaskStatus::Interruptible {
-            inner.task_status = TaskStatus::Ready;
+        {
+            let mut inner = task.acquire_inner_lock();
+            inner.add_signal(signal);
+            if inner.task_status == TaskStatus::Interruptible {
+                inner.task_status = TaskStatus::Ready;
+            }
         }
+        task.process.notify_signal_waiters();
         sent = true;
     }
     enqueue_ready_batch(tasks);
@@ -821,20 +824,96 @@ impl WaitResult {
     }
 }
 
+/// One-shot waiter state shared by every queue a task waits on.
+///
+/// The atomic state is the notification carrier.  Task status still belongs to
+/// the scheduler, but it must not be used to decide whether a wake that raced
+/// with `block_current_and_run_next_*` was observed.
+pub struct WaiterState {
+    task: Weak<TaskControlBlock>,
+    state: AtomicUsize,
+}
+
+impl WaiterState {
+    const IDLE: usize = 0;
+    const SLEEPING: usize = 1;
+    const NOTIFIED: usize = 2;
+    const CLOSED: usize = 3;
+
+    fn new(task: Weak<TaskControlBlock>) -> Self {
+        Self {
+            task,
+            state: AtomicUsize::new(Self::IDLE),
+        }
+    }
+
+    /// Arms the waiter after its queue lock has been released.
+    ///
+    /// A concurrent wake changes `Idle` to `Notified`, so a failed transition
+    /// means the caller must not enter the scheduler sleep path.
+    fn prepare_to_sleep(&self) -> bool {
+        self.state
+            .compare_exchange(
+                Self::IDLE,
+                Self::SLEEPING,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Records one notification.  The first source queue to call this wins.
+    fn notify(&self) -> bool {
+        let mut state = self.state.load(AtomicOrdering::Acquire);
+        loop {
+            match state {
+                Self::IDLE | Self::SLEEPING => match self.state.compare_exchange_weak(
+                    state,
+                    Self::NOTIFIED,
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(next) => state = next,
+                },
+                Self::NOTIFIED | Self::CLOSED => return false,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Prevents future notifications before the waiter is removed from queues.
+    fn close(&self) {
+        self.state.store(Self::CLOSED, AtomicOrdering::Release);
+    }
+
+    fn is_sleeping(&self) -> bool {
+        self.state.load(AtomicOrdering::Acquire) == Self::SLEEPING
+    }
+
+    fn was_notified(&self) -> bool {
+        self.state.load(AtomicOrdering::Acquire) == Self::NOTIFIED
+    }
+
+    fn matches_task(&self, task: &TaskControlBlock) -> bool {
+        Weak::as_ptr(&self.task) == task as *const TaskControlBlock
+    }
+}
+
 /// 弱引用等待队列。
 ///
 /// # Semantics
 ///
-/// 队列只保存 `Weak<TaskControlBlock>`，不会延长任务生命周期。等待者必须先在
-/// 关联对象的锁内检查条件，再调用 `prepare_to_wait()`，最后通过
-/// `block_current_and_run_next_*` 让出 CPU。
+/// 队列只保存 one-shot `WaiterState`，不会延长任务生命周期。等待者必须先在
+/// 关联对象的锁内检查条件，再调用 `prepare_to_wait()`；释放队列锁后由 waiter
+/// 原子地进入 sleeping 状态，最后才通过 `block_current_and_run_next_*` 让出 CPU。
 ///
 /// # Locking
 ///
 /// `wake_*` 会获取被唤醒任务的 `task.inner` 并操作 `TASK_MANAGER`。调用方
 /// 不应在持有同一任务锁或调度器锁时调用唤醒函数。
 pub struct WaitQueue {
-    inner: VecDeque<Weak<TaskControlBlock>>,
+    inner: VecDeque<Arc<WaiterState>>,
 }
 
 #[allow(unused)]
@@ -851,19 +930,19 @@ impl WaitQueue {
     ///
     /// 调用方应已持有保护等待条件的锁，并在之后调用阻塞原语。
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>) {
-        self.inner.push_back(task);
+        self.register_waiter(Arc::new(WaiterState::new(task)));
     }
 
     /// 弹出一个等待者但不唤醒。
     pub fn pop_task(&mut self) -> Option<Weak<TaskControlBlock>> {
-        self.inner.pop_front()
+        self.inner.pop_front().map(|waiter| waiter.task.clone())
     }
 
     /// 判断等待队列是否包含给定任务弱引用。
     pub fn contains(&self, task: &Weak<TaskControlBlock>) -> bool {
         self.inner
             .iter()
-            .any(|task_in_queue| Weak::as_ptr(task_in_queue) == Weak::as_ptr(task))
+            .any(|waiter| Weak::as_ptr(&waiter.task) == Weak::as_ptr(task))
     }
 
     /// 判断等待队列是否为空。
@@ -873,7 +952,8 @@ impl WaitQueue {
     /// 清理所有失效 `Weak` 条目，返回清理数量。
     pub fn compact_stale(&mut self) -> usize {
         let before = self.inner.len();
-        self.inner.retain(|task| task.strong_count() > 0);
+        self.inner
+            .retain(|waiter| waiter.task.strong_count() > 0);
         before - self.inner.len()
     }
     /// 唤醒队列中的所有可唤醒任务。
@@ -899,41 +979,15 @@ impl WaitQueue {
         let mut tasks_to_wake = Vec::with_capacity(limit.min(self.inner.len()));
         let mut remaining = VecDeque::new();
         let mut wake_count = 0usize;
-        // 遍历全部条目以自动 compact 失效 Weak，但只唤醒 ≤limit 个任务。
-        while let Some(task) = self.inner.pop_front() {
-            match task.upgrade() {
-                Some(task) => {
-                    let mut inner = task.acquire_inner_lock();
-                    match inner.task_status {
-                        super::TaskStatus::Interruptible => {
-                            if wake_count < limit {
-                                inner.task_status = super::task::TaskStatus::Ready;
-                                drop(inner);
-                                task.wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                wake_count += 1;
-                                tasks_to_wake.push(task);
-                            } else {
-                                drop(inner);
-                                remaining.push_back(Arc::downgrade(&task));
-                            }
-                        }
-                        super::TaskStatus::Ready => {
-                            if wake_count < limit {
-                                wake_count += 1;
-                                drop(inner);
-                                task.wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                            } else {
-                                drop(inner);
-                                remaining.push_back(Arc::downgrade(&task));
-                            }
-                        }
-                        // Zombie/Running 不应继续停留在等待队列中，直接丢弃。
-                        _ => drop(inner),
-                    }
+        // Remove a waiter before notifying it.  This makes a waiter notification
+        // one-shot even when the same waiter is registered on several queues.
+        while let Some(waiter) = self.inner.pop_front() {
+            if wake_count < limit {
+                if Self::notify_waiter(&waiter, &mut tasks_to_wake) {
+                    wake_count += 1;
                 }
-                None => {}
+            } else if waiter.task.strong_count() > 0 {
+                remaining.push_back(waiter);
             }
         }
         self.inner = remaining;
@@ -941,31 +995,11 @@ impl WaitQueue {
         wake_count
     }
     fn wake_one(&mut self) -> usize {
-        // Single wake is a hot path for futex/event waiters.  It only removes
-        // entries up to the first wakeable task; later stale entries are compacted
-        // by future wake/finish_wait calls or the batch path.
+        let mut tasks_to_wake = Vec::with_capacity(1);
         while let Some(waiter) = self.inner.pop_front() {
-            let task = match waiter.upgrade() {
-                Some(task) => task,
-                None => continue,
-            };
-            let mut inner = task.acquire_inner_lock();
-            match inner.task_status {
-                super::TaskStatus::Interruptible => {
-                    inner.task_status = super::task::TaskStatus::Ready;
-                    drop(inner);
-                    task.wait_timer_generation
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    let _ = TASK_MANAGER.lock().try_wake_interruptible(task);
-                    return 1;
-                }
-                super::TaskStatus::Ready => {
-                    drop(inner);
-                    task.wait_timer_generation
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return 1;
-                }
-                _ => drop(inner),
+            if Self::notify_waiter(&waiter, &mut tasks_to_wake) {
+                enqueue_ready_batch(tasks_to_wake);
+                return 1;
             }
         }
         0
@@ -975,16 +1009,11 @@ impl WaitQueue {
     ///
     /// # Locking
     ///
-    /// 调用方已持有等待队列所属对象的锁；本函数会短暂获取 `task.inner`。
-    pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
-        match task.upgrade() {
-            Some(task) => {
-                let mut task_inner = task.acquire_inner_lock();
-                task_inner.task_status = super::TaskStatus::Interruptible;
-            }
-            None => return,
-        }
-        self.add_task(task);
+    /// 调用方已持有等待队列所属对象的锁。
+    pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) -> Arc<WaiterState> {
+        let waiter = Arc::new(WaiterState::new(task));
+        self.register_waiter(Arc::clone(&waiter));
+        waiter
     }
 
     /// 从等待队列移除任务，并把仍处于 interruptible 的任务恢复为 ready。
@@ -992,29 +1021,16 @@ impl WaitQueue {
     /// 返回值表示该任务是否仍在队列中。若返回 `false`，通常说明它已经被
     /// 正常唤醒路径移除。
     pub fn finish_wait(&mut self, task: &TaskControlBlock) -> bool {
-        let task_ptr = task as *const TaskControlBlock;
-        let removed = if self
-            .inner
-            .back()
-            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
-            .unwrap_or(false)
-        {
-            self.inner.pop_back();
-            true
-        } else if self
-            .inner
-            .front()
-            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
-            .unwrap_or(false)
-        {
-            self.inner.pop_front();
-            true
-        } else {
-            let old_len = self.inner.len();
-            self.inner
-                .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != task_ptr);
-            self.inner.len() != old_len
-        };
+        let mut removed = false;
+        self.inner.retain(|waiter| {
+            if waiter.matches_task(task) {
+                waiter.close();
+                removed = true;
+                false
+            } else {
+                true
+            }
+        });
         let mut task_inner = task.acquire_inner_lock();
         if task_inner.task_status == super::TaskStatus::Interruptible {
             task_inner.task_status = super::TaskStatus::Ready;
@@ -1022,15 +1038,48 @@ impl WaitQueue {
         removed
     }
 
-    /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
-    const WAIT_IO_FALLBACK_MS: usize = 10;
+    fn register_waiter(&mut self, waiter: Arc<WaiterState>) {
+        self.inner.push_back(waiter);
+    }
+
+    fn finish_waiter(&mut self, waiter: &Arc<WaiterState>) -> bool {
+        waiter.close();
+        let before = self.inner.len();
+        self.inner.retain(|entry| !Arc::ptr_eq(entry, waiter));
+        self.inner.len() != before
+    }
+
+    fn notify_waiter(waiter: &WaiterState, tasks_to_wake: &mut Vec<Arc<TaskControlBlock>>) -> bool {
+        if !waiter.notify() {
+            return false;
+        }
+        let Some(task) = waiter.task.upgrade() else {
+            return false;
+        };
+        let should_enqueue = {
+            let mut task_inner = task.acquire_inner_lock();
+            match task_inner.task_status {
+                TaskStatus::Interruptible => {
+                    task_inner.task_status = TaskStatus::Ready;
+                    true
+                }
+                TaskStatus::Ready | TaskStatus::Running => false,
+                TaskStatus::Zombie => return false,
+            }
+        };
+        task.wait_timer_generation
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        if should_enqueue {
+            tasks_to_wake.push(task);
+        }
+        true
+    }
 
     fn wait_event_impl<F>(
         wq: &Mutex<Self>,
         cond: &mut F,
         signal_check: bool,
         deadline: Option<TimeSpec>,
-        fallback_ms: Option<usize>,
     ) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
@@ -1050,24 +1099,30 @@ impl WaitQueue {
             let task = current_task().unwrap();
 
             let mut guard = wq.lock();
-            guard.prepare_to_wait(Arc::downgrade(&task));
+            let waiter = guard.prepare_to_wait(Arc::downgrade(&task));
 
             if let Some(res) = cond() {
-                guard.finish_wait(task.as_ref());
+                guard.finish_waiter(&waiter);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                guard.finish_wait(task.as_ref());
+                guard.finish_waiter(&waiter);
+                if let Some(res) = cond() {
+                    return WaitResult::Ready(res);
+                }
                 return WaitResult::TimedOut;
             }
             if signal_check {
                 // 必须在不持有 task.inner 的情况下检查 actionable signal；
                 // 这里仅持有等待队列锁，`has_actionable_signal` 自行短暂取任务锁。
                 if has_actionable_signal(&task) {
-                    guard.finish_wait(task.as_ref());
+                    guard.finish_waiter(&waiter);
+                    if let Some(res) = cond() {
+                        return WaitResult::Ready(res);
+                    }
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -1075,53 +1130,41 @@ impl WaitQueue {
 
             if let Some(deadline) = deadline {
                 wait_with_timeout(Arc::downgrade(&task), deadline);
-            } else if let Some(ms) = fallback_ms {
-                if !task
-                    .wait_io_timer_pending
-                    .swap(true, AtomicOrdering::Relaxed)
-                {
-                    // I/O fallback timer: arm with fallback_ms set so stale
-                    // fallback timers can be detected and re-armed in run_timer().
-                    // Using add_kernel_timer directly instead of wait_with_timeout
-                    // because wait_with_timeout always sets fallback_ms to None,
-                    // which causes stale fallback timers to be silently dropped
-                    // instead of re-armed, leading to permanent task blockage.
-                    let generation = task
-                        .wait_timer_generation
-                        .fetch_add(1, AtomicOrdering::Relaxed)
-                        .wrapping_add(1);
-                    add_kernel_timer(
-                        TimerAction::WakeTask {
-                            task: Arc::downgrade(&task),
-                            generation,
-                            fallback_ms: Some(ms),
-                        },
-                        TimeSpec::now() + TimeSpec::from_ms(ms),
-                    );
-                }
-                // Record the generation for stale-timer detection.
-                // Always set (even when pending was already true), so that
-                // stale fallback timers know the task is still in a
-                // fallback wait and can re-arm with current generation.
-                let gen = task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                task.wait_io_fallback_active_generation
-                    .store(gen, AtomicOrdering::Release);
             }
+            drop(guard);
+
+            let should_block = waiter.prepare_to_sleep();
             drop(task);
 
-            block_current_and_run_next_with_lock_checked(guard, |task| {
-                let no_signal = !signal_check || !has_actionable_signal(task);
-                let not_timed_out = deadline
-                    .map(|deadline| TimeSpec::now() < deadline)
-                    .unwrap_or(true);
-                no_signal && not_timed_out
-            });
+            if should_block {
+                block_current_and_run_next_with_lock_checked(wq.lock(), |task| {
+                    let no_signal = !signal_check || !has_actionable_signal(task);
+                    let not_timed_out = deadline
+                        .map(|deadline| TimeSpec::now() < deadline)
+                        .unwrap_or(true);
+                    waiter.is_sleeping() && no_signal && not_timed_out
+                });
+            }
 
             let task = current_task_ref().unwrap();
-            wq.lock().finish_wait(task);
-            task.wait_io_fallback_active_generation
-                .store(0, AtomicOrdering::Release);
+            wq.lock().finish_waiter(&waiter);
             task.acquire_inner_lock().refresh_real_timer();
+
+            if let Some(res) = cond() {
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+            if signal_check {
+                if has_actionable_signal(task) {
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(task);
+            }
         }
     }
 
@@ -1155,22 +1198,28 @@ impl WaitQueue {
 
             let task = current_task().unwrap();
 
-            queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+            let waiter = queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
             if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(task.as_ref());
+                queue_of(&mut guard).finish_waiter(&waiter);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                queue_of(&mut guard).finish_wait(task.as_ref());
+                queue_of(&mut guard).finish_waiter(&waiter);
+                if let Some(res) = cond(&mut guard) {
+                    return WaitResult::Ready(res);
+                }
                 return WaitResult::TimedOut;
             }
             if signal_check {
                 // 持有的是调用方传入的对象锁，不能同时长期持有 task.inner。
                 if has_actionable_signal(&task) {
-                    queue_of(&mut guard).finish_wait(task.as_ref());
+                    queue_of(&mut guard).finish_waiter(&waiter);
+                    if let Some(res) = cond(&mut guard) {
+                        return WaitResult::Ready(res);
+                    }
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -1178,33 +1227,55 @@ impl WaitQueue {
             if let Some(deadline) = deadline {
                 wait_with_timeout(Arc::downgrade(&task), deadline);
             }
+            drop(guard);
+
+            let should_block = waiter.prepare_to_sleep();
             drop(task);
 
-            block_current_and_run_next_with_lock_checked(guard, |task| {
-                let no_signal = !signal_check || !has_actionable_signal(task);
-                let not_timed_out = deadline
-                    .map(|deadline| TimeSpec::now() < deadline)
-                    .unwrap_or(true);
-                no_signal && not_timed_out
-            });
+            if should_block {
+                block_current_and_run_next_with_lock_checked(lock.lock(), |task| {
+                    let no_signal = !signal_check || !has_actionable_signal(task);
+                    let not_timed_out = deadline
+                        .map(|deadline| TimeSpec::now() < deadline)
+                        .unwrap_or(true);
+                    waiter.is_sleeping() && no_signal && not_timed_out
+                });
+            }
 
             let task = current_task_ref().unwrap();
             let mut guard = lock.lock();
-            let removed = queue_of(&mut guard).finish_wait(task);
+            let notified = waiter.was_notified();
+            queue_of(&mut guard).finish_waiter(&waiter);
+            let result = if let Some(res) = cond(&mut guard) {
+                Some(WaitResult::Ready(res))
+            } else if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                Some(WaitResult::TimedOut)
+            } else if signal_check && has_actionable_signal(task) {
+                Some(WaitResult::Interrupted)
+            } else if notified {
+                normal_wake_result.map(WaitResult::Ready)
+            } else {
+                None
+            };
             drop(guard);
             task.acquire_inner_lock().refresh_real_timer();
 
-            if !removed {
-                if let Some(res) = normal_wake_result {
-                    return WaitResult::Ready(res);
-                }
+            if let Some(result) = result {
+                return result;
+            }
+            if signal_check {
+                discard_non_actionable_unblocked_signals(task);
             }
         }
     }
 
-    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &TaskControlBlock) {
+    fn finish_wait_on_queues(queues: &[&Mutex<Self>], waiter: &Arc<WaiterState>) {
+        waiter.close();
         for queue in queues {
-            queue.lock().finish_wait(task);
+            queue.lock().finish_waiter(waiter);
         }
     }
 
@@ -1223,34 +1294,30 @@ impl WaitQueue {
         }
 
         if queues.is_empty() {
+            // No wait queues available — block only on signal and condition,
+            // with optional deadline.
             let wait_queue = Mutex::new(WaitQueue::new());
-            loop {
-                let next_deadline = match deadline {
-                    Some(deadline) if TimeSpec::now() >= deadline => return WaitResult::TimedOut,
-                    Some(deadline) => {
-                        let fallback =
-                            TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
-                        if fallback < deadline {
-                            fallback
-                        } else {
-                            deadline
-                        }
-                    }
-                    None => TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
-                };
-                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline)
-                {
-                    WaitResult::Ready(value) => return WaitResult::Ready(value),
-                    WaitResult::Interrupted => return WaitResult::Interrupted,
-                    WaitResult::TimedOut => {
-                        if deadline
-                            .map(|deadline| TimeSpec::now() >= deadline)
-                            .unwrap_or(false)
-                        {
-                            return WaitResult::TimedOut;
+            match deadline {
+                Some(deadline) => {
+                    loop {
+                        match Self::wait_event_interruptible_timeout(
+                            &wait_queue, &mut cond, deadline,
+                        ) {
+                            ret @ (WaitResult::Ready(_) | WaitResult::Interrupted) => return ret,
+                            WaitResult::TimedOut => {
+                                if TimeSpec::now() >= deadline {
+                                    return WaitResult::TimedOut;
+                                }
+                            }
                         }
                     }
                 }
+                None => loop {
+                    match Self::wait_event_interruptible(&wait_queue, &mut cond) {
+                        ret @ (WaitResult::Ready(_) | WaitResult::Interrupted) => return ret,
+                        WaitResult::TimedOut => {}
+                    }
+                },
             }
         }
 
@@ -1263,23 +1330,30 @@ impl WaitQueue {
             }
 
             let task = current_task().unwrap();
+            let waiter = Arc::new(WaiterState::new(Arc::downgrade(&task)));
             for queue in queues {
-                queue.lock().prepare_to_wait(Arc::downgrade(&task));
+                queue.lock().register_waiter(Arc::clone(&waiter));
             }
 
             if let Some(res) = cond() {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &waiter);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &waiter);
+                if let Some(res) = cond() {
+                    return WaitResult::Ready(res);
+                }
                 return WaitResult::TimedOut;
             }
             if has_actionable_signal(&task) {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &waiter);
+                if let Some(res) = cond() {
+                    return WaitResult::Ready(res);
+                }
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -1287,19 +1361,36 @@ impl WaitQueue {
             if let Some(deadline) = deadline {
                 wait_with_timeout(Arc::downgrade(&task), deadline);
             }
+            let should_block = waiter.prepare_to_sleep();
             drop(task);
 
-            block_current_and_run_next_checked(|task| {
-                let no_signal = !has_actionable_signal(task);
-                let not_timed_out = deadline
-                    .map(|deadline| TimeSpec::now() < deadline)
-                    .unwrap_or(true);
-                no_signal && not_timed_out && cond().is_none()
-            });
+            if should_block {
+                block_current_and_run_next_checked(|task| {
+                    let no_signal = !has_actionable_signal(task);
+                    let not_timed_out = deadline
+                        .map(|deadline| TimeSpec::now() < deadline)
+                        .unwrap_or(true);
+                    waiter.is_sleeping() && no_signal && not_timed_out
+                });
+            }
 
             let task = current_task_ref().unwrap();
-            Self::finish_wait_on_queues(queues, task);
+            Self::finish_wait_on_queues(queues, &waiter);
             task.acquire_inner_lock().refresh_real_timer();
+
+            if let Some(res) = cond() {
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+            if has_actionable_signal(task) {
+                return WaitResult::Interrupted;
+            }
+            discard_non_actionable_unblocked_signals(task);
         }
     }
 
@@ -1318,7 +1409,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+        match Self::wait_event_impl(wq, &mut cond, false, None) {
             WaitResult::Ready(value) => value,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
@@ -1337,7 +1428,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
+        Self::wait_event_impl(wq, &mut cond, true, None)
     }
 
     /// I/O 等待（不可中断）。
@@ -1347,7 +1438,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+        match Self::wait_event_impl(wq, &mut cond, false, None) {
             WaitResult::Ready(value) => value,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
@@ -1362,15 +1453,15 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
+        Self::wait_event_impl(wq, &mut cond, true, None)
     }
 
-    /// 可中断等待，不启用 fallback timer。
+    /// 可中断等待直到条件满足或信号到达。
     pub fn wait_event_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, None, None)
+        Self::wait_event_impl(wq, &mut cond, true, None)
     }
 
     /// 不可中断等待直到条件满足或绝对 deadline 到达。
@@ -1378,7 +1469,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, false, Some(deadline), None)
+        Self::wait_event_impl(wq, &mut cond, false, Some(deadline))
     }
 
     /// 可中断等待直到条件满足、信号到达或绝对 deadline 到达。
@@ -1390,7 +1481,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, Some(deadline), None)
+        Self::wait_event_impl(wq, &mut cond, true, Some(deadline))
     }
 
     /// 在调用方对象锁下检查条件并注册可中断等待。
@@ -1475,10 +1566,6 @@ pub enum TimerAction {
     WakeTask {
         task: Weak<TaskControlBlock>,
         generation: usize,
-        /// Some(ms) when this is an I/O fallback timer (1ms safety net);
-        /// None when this is a deadline timer.  Stale fallback timers are
-        /// re-armed with the current generation instead of spurious-waking.
-        fallback_ms: Option<usize>,
     },
     /// 向指定任务投递信号。
     SendSignal {
@@ -1685,87 +1772,12 @@ impl KernelTimerQueue {
             TimerAction::WakeTask {
                 task,
                 generation,
-                fallback_ms,
             } => {
                 let Some(task) = task.upgrade() else {
                     return false;
                 };
                 task.wait_io_timer_pending
                     .store(false, AtomicOrdering::Relaxed);
-
-                if let Some(ms) = fallback_ms {
-                    // I/O fallback timer — check if stale
-                    let active = task
-                        .wait_io_fallback_active_generation
-                        .load(AtomicOrdering::Acquire);
-                    if active == 0 {
-                        return false; // task not in fallback wait, discard
-                    }
-                    if active != generation {
-                        // Stale timer. If task is in a new fallback wait,
-                        // re-arm with current generation instead of waking.
-                        let current = task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                        if active == current {
-                            // Task waiting with new generation but no timer armed
-                            if !task
-                                .wait_io_timer_pending
-                                .swap(true, AtomicOrdering::Relaxed)
-                            {
-                                let new_gen = task
-                                    .wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed)
-                                    + 1;
-                                add_kernel_timer(
-                                    TimerAction::WakeTask {
-                                        task: Arc::downgrade(&task),
-                                        generation: new_gen,
-                                        fallback_ms: Some(ms),
-                                    },
-                                    TimeSpec::now() + TimeSpec::from_ms(ms),
-                                );
-                                task.wait_io_fallback_active_generation
-                                    .store(new_gen, AtomicOrdering::Release);
-                            }
-                        }
-                        return false; // Don't wake — stale timer
-                    }
-                    // active == generation: current fallback, wake normally
-                    //
-                    // But first: check if the task is actually interruptible.
-                    // If not, the timer fired between arm (in wait_event_impl)
-                    // and the task becoming Interruptible (in
-                    // block_current_and_run_next_with_lock_checked).
-                    // Re-arm instead of consuming the timer, or the task
-                    // will sleep forever with no wakeup.
-                    let inner = task.acquire_inner_lock();
-                    if inner.task_status != super::TaskStatus::Interruptible {
-                        drop(inner);
-                        if !task
-                            .wait_io_timer_pending
-                            .swap(true, AtomicOrdering::Relaxed)
-                        {
-                            let new_gen = task
-                                .wait_timer_generation
-                                .fetch_add(1, AtomicOrdering::Relaxed)
-                                + 1;
-                            add_kernel_timer(
-                                TimerAction::WakeTask {
-                                    task: Arc::downgrade(&task),
-                                    generation: new_gen,
-                                    fallback_ms: Some(ms),
-                                },
-                                TimeSpec::now() + TimeSpec::from_ms(ms),
-                            );
-                            task.wait_io_fallback_active_generation
-                                .store(new_gen, AtomicOrdering::Release);
-                        }
-                        return false;
-                    }
-                    drop(inner);
-                    // Task is Interruptible — fall through to normal wake below
-                }
-
-                // Normal wake (deadline or current fallback)
 
                 if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
                     crate::task::perf::record_ktimer_stale_waketask();
@@ -1829,6 +1841,7 @@ impl KernelTimerQueue {
                         should_wake = true;
                     }
                 }
+                task.process.notify_signal_waiters();
                 if should_wake {
                     wake_interruptible(task.clone());
                 }
@@ -1908,6 +1921,9 @@ impl KernelTimerQueue {
                             should_wake = true;
                         }
                     }
+                }
+                if !signal.is_empty() {
+                    task.process.notify_signal_waiters();
                 }
                 if should_wake {
                     wake_interruptible(task.clone());
@@ -2142,7 +2158,6 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         TimerAction::WakeTask {
             task: Arc::downgrade(&task),
             generation,
-            fallback_ms: None,
         },
         timeout,
     );
