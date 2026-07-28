@@ -1,5 +1,11 @@
 use super::NetDevice;
 #[cfg(feature = "block_virt")]
+use crate::hal::device::DeviceManager;
+#[cfg(feature = "block_virt")]
+use alloc::{sync::Arc, vec::Vec};
+#[cfg(not(feature = "block_virt"))]
+use alloc::sync::Arc;
+#[cfg(feature = "block_virt")]
 // 借用 block 里的 VirtioHal！
 use crate::drivers::block::virtio_blk::VirtioHal;
 #[cfg(feature = "block_virt_pci")]
@@ -30,9 +36,16 @@ pub struct VirtIONetWrapper(Mutex<VirtIONet<VirtioHal, PciTransport, QUEUE_SIZE>
 #[cfg(feature = "block_virt")]
 impl VirtIONetWrapper {
     pub fn new() -> Option<Self> {
+        Self::try_new(VIRTIO_NET_BASE)
+    }
+
+    pub fn try_new(base_addr: usize) -> Option<Self> {
+        // SAFETY: [Categories 6 and 13 — aligned access and library contract]
+        // Platform device discovery supplies a mapped, page-aligned VirtIO MMIO
+        // region that remains valid for the kernel lifetime.
         unsafe {
             let transport = MmioTransport::new(
-                NonNull::new_unchecked(VIRTIO_NET_BASE as *mut VirtIOHeader),
+                NonNull::new(base_addr as *mut VirtIOHeader)?,
                 0x1000,
             )
             .ok()?;
@@ -47,6 +60,30 @@ impl VirtIONetWrapper {
             Some(Self(Mutex::new(net)))
         }
     }
+}
+
+/// Probe a VirtIO network device described by the platform device catalogue.
+#[cfg(feature = "block_virt")]
+pub fn probe_net_from_device_manager(dm: &DeviceManager) -> Option<Arc<dyn NetDevice>> {
+    let mut virtio_devices: Vec<_> = dm
+        .find_by_compatible("virtio,mmio")
+        .into_iter()
+        .filter(|device| device.mmio.is_some())
+        .collect();
+    virtio_devices
+        .sort_by_key(|device| device.mmio.map(|(base, _)| base).unwrap_or(usize::MAX));
+
+    for dev_info in virtio_devices {
+        let Some((base_addr, _size)) = dev_info.mmio else {
+            continue;
+        };
+        let Some(net_device) = VirtIONetWrapper::try_new(base_addr) else {
+            continue;
+        };
+        return Some(Arc::new(net_device));
+    }
+
+    None
 }
 
 #[cfg(feature = "block_virt_pci")]

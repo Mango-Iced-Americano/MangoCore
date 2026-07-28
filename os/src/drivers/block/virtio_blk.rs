@@ -1,4 +1,5 @@
 use super::{validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult};
+use crate::hal::device::DeviceManager;
 use crate::mm::{
     frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
     PhysAddr, PhysPageNum, StepByOne, VirtAddr,
@@ -187,6 +188,50 @@ pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
         if device_index == devices.len() {
             break;
         }
+    }
+
+    devices
+}
+
+/// Probe VirtIO block devices described by the platform device catalogue.
+pub fn probe_from_device_manager(dm: &DeviceManager) -> [Option<Arc<dyn BlockDevice>>; 2] {
+    let mut devices: [Option<Arc<dyn BlockDevice>>; 2] = [None, None];
+    let mut device_index = 0;
+
+    let mut virtio_devices: Vec<_> = dm
+        .find_by_compatible("virtio,mmio")
+        .into_iter()
+        .filter(|device| device.mmio.is_some())
+        .collect();
+    virtio_devices
+        .sort_by_key(|device| device.mmio.map(|(base, _)| base).unwrap_or(usize::MAX));
+
+    for dev_info in virtio_devices {
+        if device_index == devices.len() {
+            break;
+        }
+        let Some((base_addr, _size)) = dev_info.mmio else {
+            continue;
+        };
+        let Some(device) = VirtIOBlock::try_new(base_addr) else {
+            continue;
+        };
+
+        if device_index == 0 {
+            virtio_dma_pool::dma_pool_init_once();
+        }
+        println!(
+            "[kernel] block device {}: {} (MMIO {:#x})",
+            device_index,
+            if device_index == 0 {
+                "official fs"
+            } else {
+                "tools disk"
+            },
+            base_addr
+        );
+        devices[device_index] = Some(Arc::new(device));
+        device_index += 1;
     }
 
     devices

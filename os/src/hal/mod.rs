@@ -10,6 +10,11 @@
 //! `invtlb`。
 
 pub mod arch;
+pub mod boot;
+pub mod firmware;
+pub mod platform;
+pub mod device;
+pub use boot::{boot_info, save_boot_info, BootProtocol, RawBootInfo};
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;

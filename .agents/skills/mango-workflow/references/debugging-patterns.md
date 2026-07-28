@@ -22,6 +22,21 @@
 
 ## 启动/Panic 排查
 
+### QEMU DTB 落入 kernel BSS 时，必须在清零前消费启动信息
+
+- **现象**：QEMU 传入的 DTB 地址落在大型内核 BSS（常见于嵌入 initramfs/测试资产）内；`mem_clear()` 后 FDT 解析静默回退，或预先解析后 DTB carveout 与 kernel exclusion 重叠导致 allocator/map panic。
+- **根因**：仅保存 DTB 指针而不在 BSS 清零前读取内容；DTB 页既是 firmware reserved 范围又可能已被 kernel image 覆盖。
+- **修复**：在 `mem_clear()` 前执行无分配的内存区域解析并保存结果；对重叠 exclusion 做区间合并，且不重复映射完全包含于 kernel image 的保留范围。
+- **教训**：启动协议提供的物理 blob 的存活期不能假设晚于内核 BSS 初始化。测试 FDT 路径时使用带真实 ktest block drive 的 profile；无 drive 的裸 QEMU 不能验证依赖 `block_devices()[0]` 的 ext4 测试。
+- **相关文件**：`os/src/main.rs`、`os/src/mm/frame_allocator.rs`、`os/src/mm/kernel_space.rs`
+
+### 固件寄存器参数必须先按启动协议建立信任边界
+
+- **根因**: 将架构入口寄存器（如 `a1`）一律解释为 DTB 指针，只检查非零；`UbootGo` 和 `LoongArchLegacy` 的同一寄存器位置可能是无关的垃圾值，导致早期 volatile 读取或 raw-slice FDT 解析访问错误地址。
+- **修复**: 所有 DTB 消费入口先要求 `matches!(boot_info().protocol, BootProtocol::RiscvFdt)`，再检查指针非零、页对齐、FDT magic 和有界 `totalsize`；FDT 成功后仍保留编译期 firmware carveout，并保留 DTB 自身页面。
+- **教训**: 原始启动参数不是跨平台 ABI。先按协议缩小信任域，再执行指针解引用或物理地址转换；“非零”从来不是可访问性证明。
+- **相关文件**: `os/src/hal/firmware/{mod.rs,fdt.rs}`
+
 ### 内核 panic 定位
 - 启动时加 `LOG=debug make rv64-run` 查看详细日志
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`

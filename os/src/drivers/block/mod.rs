@@ -44,6 +44,15 @@ impl BlockDevice for DummyBlockDevice {
 
 #[cfg(all(feature = "block_virt", not(feature = "block_virt_pci")))]
 fn probe_block_devices() -> [Option<Arc<dyn BlockDevice>>; 2] {
+    let platform_info = crate::hal::platform::platform_info();
+    if !platform_info.devices.is_empty() {
+        let device_manager = crate::hal::device::DeviceManager::new(platform_info.devices.clone());
+        let devices = virtio_blk::probe_from_device_manager(&device_manager);
+        if devices[0].is_some() {
+            return devices;
+        }
+    }
+
     virtio_blk::probe_rv64()
 }
 

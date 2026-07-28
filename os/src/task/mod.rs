@@ -307,12 +307,14 @@ lazy_static! {
     ///
     /// 优先加载 `/init`，缺失时兼容传统镜像里的 `/initproc`。
     pub static ref INITPROC: Arc<TaskControlBlock> = {
-        // 优先使用 /init（initramfs 模式），fallback 到 /initproc（传统模式）
+        let init_path = crate::hal::platform::select_policy().init_path();
+        // 优先使用 /init（initramfs 模式），fallback 到平台默认路径。
         let (_init_path, inode) = match vfs_lookup_absolute("/init") {
             Ok(inode) => ("/init", inode),
             Err(_) => (
-                "/initproc",
-                vfs_lookup_absolute("/initproc").expect("[kernel] no /init or /initproc found"),
+                init_path,
+                vfs_lookup_absolute(init_path)
+                    .unwrap_or_else(|_| panic!("[kernel] no /init or {} found", init_path)),
             ),
         };
         #[cfg(feature = "board_2k1000")]
