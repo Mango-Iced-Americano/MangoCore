@@ -109,7 +109,9 @@ macro_rules! writable_data_inode_mutations {
                     cache.writeback_all_with_io_gate_held()?;
                     fs.inner()
                         .truncate_inode(inode_id, len as u64)
-                        .map_err(|error| super::errno::from_another(error.code()))?;
+                        .map_err(|error| {
+                            super::errno::from_another_op(&error, "truncate_inode(shrink)")
+                        })?;
                     self.lifetime
                         .logical_size
                         .store(len, core::sync::atomic::Ordering::Release);
@@ -122,7 +124,9 @@ macro_rules! writable_data_inode_mutations {
                 cache.with_io_gate(|| {
                     fs.inner()
                         .truncate_inode(inode_id, len as u64)
-                        .map_err(|error| super::errno::from_another(error.code()))?;
+                        .map_err(|error| {
+                            super::errno::from_another_op(&error, "truncate_inode(extend)")
+                        })?;
                     self.lifetime
                         .logical_size
                         .store(len, core::sync::atomic::Ordering::Release);

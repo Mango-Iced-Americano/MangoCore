@@ -34,12 +34,6 @@ disk.img
 disk-la.img
 
 /docs/Work_Log/evidence/*
-!/docs/Work_Log/evidence/2026-07-22/
-/docs/Work_Log/evidence/2026-07-22/*
-!/docs/Work_Log/evidence/2026-07-22/t3-formal-facade-docker.md
-!/docs/Work_Log/evidence/2026-07-22/t3-initramfs-outdir-docker.md
-!/docs/Work_Log/evidence/2026-07-23/
-!/docs/Work_Log/evidence/2026-07-27/
 
 cc-codex/*.clean.img
 
@@ -93,3 +87,5 @@ os.bin
 /judge/qemu.log
 /judge/console_log
 /user/fs/var/tmp/*
+
+*code-workspace

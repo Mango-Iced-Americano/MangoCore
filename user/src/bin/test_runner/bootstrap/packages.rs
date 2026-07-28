@@ -10,6 +10,6 @@ pub fn install_apk_packages(environ: &[*const u8], skip: bool) {
     // APK 3.0.6 needs /lib/apk/db (database) and /var/cache/apk (cache).
     // These were created by the old stage-1 init.rs, removed during PID1 refactor.
     let _ = run_bash_cmd("mkdir -p /lib/apk/db /var/cache/apk /etc/apk; [ -f /etc/apk/world ] || : > /etc/apk/world; test -s /etc/apk/repositories; test -d /etc/apk/keys\0", environ);
-    let command = format!("/tools/bin/apk.static add e2fsprogs && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0");
+    let command = format!("/tools/bin/apk.static add e2fsprogs && ln -sf /sbin/mkfs.ext4 /bin/mkfs.ext4 2>/dev/null; ln -sf /sbin/mke2fs /bin/mke2fs 2>/dev/null; true\0");
     println!("[initproc] apk add e2fsprogs ..."); let _ = run_bash_cmd(&command, environ);
 }

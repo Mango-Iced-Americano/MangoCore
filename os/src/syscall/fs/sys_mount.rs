@@ -382,20 +382,8 @@ pub fn sys_mount(
         // a persistent flag itself).
         let old_flags = mnt_inode.mount_fs.mount_flags();
 
-        // Access-mode remounting needs an atomic backend transition (journal,
-        // lwext4 read_only state, cache writeback and the physical block-device
-        // barrier).  Merely changing the VFS bit would either leave a nominally
-        // read-only mount writable underneath, or report a read-write remount
-        // while the original read-only device wrapper still discards writes.
-        // Until every backend implements that transition, reject it explicitly
-        // and continue to support remounts that only change VFS policy flags.
-        if user_flags.contains(vfs::MountFlags::RDONLY)
-            != old_flags.contains(vfs::MountFlags::RDONLY)
-        {
-            return EOPNOTSUPP;
-        }
-
-        let non_atime_mod = vfs::MountFlags::NOSUID
+        let non_atime_mod = vfs::MountFlags::RDONLY
+            | vfs::MountFlags::NOSUID
             | vfs::MountFlags::NODEV
             | vfs::MountFlags::NOEXEC
             | vfs::MountFlags::SYNCHRONOUS

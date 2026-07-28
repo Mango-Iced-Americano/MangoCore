@@ -7,7 +7,7 @@ use crate::fs::page_cache::PageCacheBackend;
 use crate::task::perf;
 use crate::utils::error::SyscallErr;
 
-use super::errno::from_another;
+use super::errno::{from_another, from_another_op};
 use super::fs::Ext4FileSystem;
 use super::lifetime::{InodeKey, InodeLifetime};
 
@@ -57,7 +57,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                 offset,
                 &mut buffer[..read_len],
             )
-            .map_err(|error| from_another(error.code()))?;
+            .map_err(|error| from_another_op(&error, "read"))?;
         Ok(PAGE_SIZE)
     }
 
@@ -120,7 +120,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             self.fs
                 .inner()
                 .write_data_only(inode_id, start_offset, &staging[..total_bytes])
-                .map_err(|error| from_another(error.code()))?;
+                .map_err(|error| from_another_op(&error, "write_data_only"))?;
         }
         let _t2 = perf::perf_time_now();
         #[cfg(feature = "perf_diag")]

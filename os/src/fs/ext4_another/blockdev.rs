@@ -30,7 +30,14 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         let mut data = Box::new([0; another_ext4::BLOCK_SIZE]);
         self.device
             .read_block(block_index, &mut data[..])
-            .map_err(|error| another_ext4::Ext4Error::new(from_block_device(error)))?;
+            .map_err(|error| {
+                log::error!(
+                    "[ext4_another] READ FAILED: block_id={} mango_error={:?}",
+                    block_id,
+                    error,
+                );
+                another_ext4::Ext4Error::new(from_block_device(error))
+            })?;
         Ok(another_ext4::Block::new(block_id, data))
     }
 
@@ -38,7 +45,14 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         let block_index = Self::block_index(block.id)?;
         self.device
             .write_block(block_index, &block.data[..])
-            .map_err(|error| another_ext4::Ext4Error::new(from_block_device(error)))
+            .map_err(|error| {
+                log::error!(
+                    "[ext4_another] WRITE FAILED: block_id={} mango_error={:?}",
+                    block.id,
+                    error,
+                );
+                another_ext4::Ext4Error::new(from_block_device(error))
+            })
     }
 
     fn read_blocks(&self, start: u64, buf: &mut [u8]) -> Result<(), another_ext4::Ext4Error> {

@@ -16,7 +16,7 @@ pub fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
     println!("[initproc] run_selected_groups start mask=0x{:03X}", cfg.mask);
     for &index in &cfg.order { let (group, script) = TEST_GROUPS[index]; if cfg.mask & (1 << index) == 0 { println!("[initproc] skip {} (mask bit{} not set)", group, index); continue; }
         if group == "ltp" && cfg.ltp_runner == LtpRunner::Inline { if cfg.ltp_libc != LtpLibc::Glibc { run_ltp_binaries(environ, "/musl\0", &cfg.ltp_exclude, &cfg.ltp_include, cfg.ltp_from.as_deref(), cfg.timeouts[index]); } if cfg.ltp_libc != LtpLibc::Musl { run_ltp_binaries(environ, "/glibc\0", &cfg.ltp_exclude, &cfg.ltp_include, cfg.ltp_from.as_deref(), cfg.timeouts[index]); } }
-        else if group == "ltp" && cfg.ltp_runner == LtpRunner::Suite { run_ltp_suite_runner(environ, "/musl/ltp", "musl", cfg.timeouts[index], cfg.conf_source.as_deref()); run_ltp_suite_runner(environ, "/glibc/ltp", "glibc", cfg.timeouts[index], cfg.conf_source.as_deref()); }
+        else if group == "ltp" && cfg.ltp_runner == LtpRunner::Suite { if cfg.ltp_libc != LtpLibc::Glibc { run_ltp_suite_runner(environ, "/musl/ltp", "musl", cfg.timeouts[index], cfg.conf_source.as_deref()); } if cfg.ltp_libc != LtpLibc::Musl { run_ltp_suite_runner(environ, "/glibc/ltp", "glibc", cfg.timeouts[index], cfg.conf_source.as_deref()); } }
         else if group == "cpython" { run_group_in_dir(environ, "/tools/tests/cpython\0", group, script, cfg.timeouts[index]); }
         else { run_group_in_dir(environ, "/musl\0", group, script, cfg.timeouts[index]); run_group_in_dir(environ, "/glibc\0", group, script, cfg.timeouts[index]); }
         sleep(1000); }

@@ -1,4 +1,5 @@
-use crate::fs::vfs::{FileFlags, FilePrivateData, FileType, InodeMode};
+use alloc::sync::Arc;
+use crate::fs::vfs::{FileFlags, FilePrivateData, FileType, IndexNode, InodeMode};
 use crate::utils::error::SyscallErr;
 
 use super::fixtures::open_clean_media;
@@ -80,6 +81,63 @@ pub(super) fn test_writes_and_truncates_persist_across_independent_mounts(
     root.unlink(NAME)
         .map_err(|_| "cleanup unlink failed after persistence check")?;
     root.sync().map_err(|_| "fsync after cleanup unlink failed")
+}
+
+fn populate_depth_one_leading_hole(file: &Arc<dyn IndexNode>) -> Result<(), &'static str> {
+    for lblock in [8usize, 10, 12, 14, 16] {
+        let private = spin::Mutex::new(FilePrivateData::Unused);
+        let written = file
+            .write_at(lblock * another_ext4::BLOCK_SIZE, 1, b"x", private.lock())
+            .map_err(|_| "sparse setup write failed")?;
+        if written != 1 {
+            return Err("sparse setup write was short");
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn test_depth_one_leading_hole_writes() -> Result<(), &'static str> {
+    const NAME: &str = "another-depth-one-leading-hole-write";
+
+    let fs = open_clean_media()?;
+    let root = fs.root_inode();
+    let file = root
+        .create(NAME, FileType::File, InodeMode::S_IRWXUGO)
+        .map_err(|_| "create for leading-hole write test failed")?;
+    populate_depth_one_leading_hole(&file)?;
+
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    let written = file
+        .write_at(0, 1, b"L", private.lock())
+        .map_err(|_| "leading-hole write returned an error")?;
+    if written != 1 {
+        return Err("leading-hole write was short");
+    }
+    file.sync().map_err(|_| "sync after leading-hole write failed")?;
+    root.unlink(NAME)
+        .map_err(|_| "cleanup unlink after leading-hole write failed")?;
+    root.sync()
+        .map_err(|_| "cleanup sync after leading-hole write failed")
+}
+
+pub(super) fn test_depth_one_leading_hole_truncate_succeeds() -> Result<(), &'static str> {
+    const NAME: &str = "another-depth-one-leading-hole-truncate";
+
+    let fs = open_clean_media()?;
+    let root = fs.root_inode();
+    let file = root
+        .create(NAME, FileType::File, InodeMode::S_IRWXUGO)
+        .map_err(|_| "create for leading-hole truncate test failed")?;
+    populate_depth_one_leading_hole(&file)?;
+
+    file.resize(7 * another_ext4::BLOCK_SIZE + 1)
+        .map_err(|_| "leading-hole truncate returned an error")?;
+    file.sync()
+        .map_err(|_| "sync after leading-hole truncate failed")?;
+    root.unlink(NAME)
+        .map_err(|_| "cleanup unlink after leading-hole truncate failed")?;
+    root.sync()
+        .map_err(|_| "cleanup sync after leading-hole truncate failed")
 }
 
 pub(super) fn test_namespace_mutations_persist_across_independent_mounts(

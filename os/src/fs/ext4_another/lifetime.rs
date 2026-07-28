@@ -4,7 +4,7 @@ use core::convert::TryFrom;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::fs::page_cache::PageCache;
+use crate::fs::{page_cache::PageCache, vfs::InodeFlags};
 use crate::utils::error::SyscallErr;
 
 use super::errno::from_another;
@@ -33,6 +33,7 @@ impl InodeKey {
 
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
+    inode_flags: Mutex<InodeFlags>,
     page_cache: Mutex<Option<Weak<PageCache>>>,
     /// Keeps dirty data reachable across independently constructed VFS inodes
     /// until the inode size and data have reached a sync boundary.
@@ -49,6 +50,7 @@ impl InodeLifetime {
     fn new(size: usize) -> Self {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
+            inode_flags: Mutex::new(InodeFlags::empty()),
             page_cache: Mutex::new(None),
             dirty_page_cache: Mutex::new(None),
             reclaim: Mutex::new(None),
@@ -63,6 +65,14 @@ impl InodeLifetime {
             .lock()
             .clone()
             .or_else(|| self.page_cache.lock().as_ref().and_then(Weak::upgrade))
+    }
+
+    pub(crate) fn inode_flags(&self) -> InodeFlags {
+        *self.inode_flags.lock()
+    }
+
+    pub(crate) fn set_inode_flags(&self, flags: InodeFlags) {
+        *self.inode_flags.lock() = flags;
     }
 
     pub(crate) fn install_page_cache(&self, cache: Arc<PageCache>) -> Arc<PageCache> {

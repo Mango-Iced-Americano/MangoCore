@@ -61,6 +61,14 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
                 persistence::test_reopen_before_sync_reads_fresh_pagecache_data,
             ),
             KernelTest::new(
+                "ext4_another::depth_one_leading_hole_writes",
+                persistence::test_depth_one_leading_hole_writes,
+            ),
+            KernelTest::new(
+                "ext4_another::depth_one_leading_hole_truncate_succeeds",
+                persistence::test_depth_one_leading_hole_truncate_succeeds,
+            ),
+            KernelTest::new(
                 "ext4_another::namespace_mutations_persist_across_independent_mounts",
                 persistence::test_namespace_mutations_persist_across_independent_mounts,
             ),
