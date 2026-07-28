@@ -282,7 +282,7 @@ struct SignalfdSiginfo {
 
 ### 实现位置
 
-`SignalFd` 和 `sys_signalfd4` 实现在 `os/src/syscall/process/signal.rs`。与信号系统的集成点包括 `take_pending_signal_matching()`（读）、`has_pending_signal_matching()`（poll）和来自共享 `sighand` 的 `EventWaitQueue`（阻塞 read / epoll 唤醒）。
+`SignalFd` 和 `sys_signalfd4` 实现在 `os/src/syscall/process/signal.rs`。与信号系统的集成点包括 `take_pending_signal_matching()`（读）、`has_pending_signal_matching()`（poll）和从当前进程 `Sighand` 动态解析的 `EventWaitQueue`（阻塞 read / epoll 唤醒）；因此 fork 继承的 signalfd 会等待子进程新建的队列，而不会保留父进程队列。
 
 ## epoll 集成
 
