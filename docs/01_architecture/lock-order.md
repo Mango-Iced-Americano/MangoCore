@@ -110,6 +110,25 @@ B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`
 - 从 runqueue 撤回的 `Arc` 必须先释放队列锁，再执行 drop；
 - B18 仍固定目标为 CPU0，因此本节尚不证明远程 enqueue、迁移或 work stealing 正确。
 
+### 3.4 B19 AP 调度与内核栈发布约束
+
+B19 只为 focused ktest 的 kernel-only 任务开放显式目标 CPU，不改变普通任务的 CPU0
+策略。其跨核发布顺序固定为：
+
+1. CPU0 在 `KERNEL_SPACE` 锁内建立动态 kernel stack 映射并释放锁；
+2. 不持有 MM/PTE/runqueue 锁发送 `KERNEL_TLB_SYNC`，等待目标本地 flush ack；
+3. ack 完成后只锁目标的一个 runqueue，提交 `New -> Queued(cpu)` 并释放锁；
+4. 最后发送 `RESCHEDULE` doorbell，IPI handler 只置位，AP idle 安全点 fetch。
+
+AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 scheduler-ready
+屏障等待且不持锁。AP dispatch 前只锁自己的 runqueue；`dispatch_task()` 先后取得
+`task.inner` 和本地 processor，但两把锁不嵌套，也不跨 `__switch`。任务切回 idle
+后先释放 processor 锁，再把 Zombie 加入受锁的全局 `TASK_MANAGER`，因此没有
+`processor -> TASK_MANAGER` 嵌套。
+
+这个批次没有两个 runqueue 的同时持有、迁移或 work stealing。AP 任务入口也不得
+访问尚未审计的 console、FS、NET、设备和用户 MM；这些能力约束不能用锁本身替代。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

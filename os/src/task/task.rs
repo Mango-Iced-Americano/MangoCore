@@ -124,6 +124,8 @@ pub struct TaskControlBlock {
     pub process: Arc<ProcessControlBlock>,
     /// 内核栈
     pub kstack: KernelStack,
+    /// kernel-only 任务的首次执行入口；普通用户任务始终为 `None`。
+    kernel_entry: Option<fn()>,
     /// 用户栈基址
     pub ustack_base: usize,
     /// Whether this task owns a kernel-managed default user stack area.
@@ -986,6 +988,7 @@ impl TaskControlBlock {
             owns_user_res_slot: true,
             process,
             kstack,
+            kernel_entry: None,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             user_stack_allocated: AtomicBool::new(true),
             thread_live_counted: AtomicBool::new(false),
@@ -1109,12 +1112,13 @@ impl TaskControlBlock {
     ///
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
     /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
-    /// 调用方负责通过 `publish_task()` 将返回的 TCB 发布到 ready 队列。
+    /// 调用方负责把返回的 TCB 发布到选定 CPU 的 runqueue。
     pub fn new_ktest_independent(
         tid: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
         kstack: KernelStack,
         task_cx: TaskContext,
+        kernel_entry: fn(),
     ) -> Arc<Self> {
         Arc::new(Self {
             tid,
@@ -1122,6 +1126,7 @@ impl TaskControlBlock {
             owns_user_res_slot: false,
             process,
             kstack,
+            kernel_entry: Some(kernel_entry),
             ustack_base: 0,
             user_stack_allocated: AtomicBool::new(false),
             thread_live_counted: AtomicBool::new(false),
@@ -1217,6 +1222,11 @@ impl TaskControlBlock {
                 pending_oom_kill: false,
             }),
         })
+    }
+
+    /// 返回 kernel-only 任务自己的不可变入口。
+    pub(crate) fn kernel_entry(&self) -> Option<fn()> {
+        self.kernel_entry
     }
 
     /// 加载ELF文件
@@ -1682,6 +1692,7 @@ impl TaskControlBlock {
             owns_user_res_slot: true,
             process,
             kstack,
+            kernel_entry: None,
             ustack_base: if !stack.is_null() {
                 stack as usize
             } else {

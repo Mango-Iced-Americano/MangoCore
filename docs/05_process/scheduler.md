@@ -15,14 +15,15 @@ tags: [process, scheduler, task-manager, processor]
 
 | 文件 | 作用 |
 |------|------|
-| `os/src/task/run_queue.rs` | Per-CPU `RunQueue`、FIFO/nice-aware 选择和 owner 迁移 |
+| `os/src/task/run_queue.rs` | Per-CPU `RunQueue`、FIFO/nice-aware 选择和 owner 操作 |
 | `os/src/task/manager.rs` | interruptible/zombie/timer registry、WaitQueue、KernelTimerQueue |
 | `os/src/task/processor.rs` | Per-CPU `CpuTaskState/Processor`、`run_tasks()`、`schedule()` |
 | `os/src/task/mod.rs` | `suspend_current_and_run_next()`、block/exit 调度入口 |
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
 调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
-拆分，但新任务/唤醒任务仍固定进入 CPU0，AP 尚未进入调度循环；
+拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；新任务/唤醒任务仍固定
+进入 CPU0，只有 focused ktest 的短 kernel-only 任务可显式远程入队。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -67,11 +68,12 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。B18 只完成容器拆分，生产 owner 仍固定 CPU0。
+调度域。B19 的 AP 队列只接收受控测试任务，生产 owner 仍固定 CPU0。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
-不能直接 push/pop。跨核任务执行和目标选择仍未开放。
+不能直接 push/pop。B19 只通过 `spawn_ktest_task_on()` 验证显式远程执行；生产目标
+选择、blocked wake、affinity、迁移和 work stealing 仍未开放。
 
 ## 4. Processor
 
@@ -130,7 +132,7 @@ CPU-local 不可用或锁正被持有时返回不可用状态，不触发二次 
 
 ## 6. run_tasks 主循环阶段
 
-`run_tasks()` 每轮执行：
+CPU0 的 `run_tasks()` 每轮执行：
 
 ```text
 schedule_tick += 1
@@ -152,6 +154,19 @@ schedule_tick += 1
 这些阶段的顺序也有意义。先处理 console、timeout、net poll 和 reclaim，是为了在选择下一个 ready task 前尽量把外部事件转化为 ready 状态；先 drain zombie queue，是为了让已经退出并切回 idle 的任务尽快释放资源；最后才 `fetch_task()`，避免刚被唤醒的任务还要多等一轮。
 
 调度循环里所有后台动作都必须短小，不应长期持有业务锁。它运行在单核内核的关键路径上，任何长时间操作都会推迟所有用户任务和 timeout wake。因此 PageCache reclaim、网络 poll、shared futex compact 都采用有限预算或降频策略。
+
+AP 走独立的精简分支，只执行：
+
+```text
+短暂开放 IPI → 立即关中断 → 处理 STOP/deferred reason
+  → fetch 本 CPU RunQueue
+  → 共用 dispatch_task()/current/__switch/switch-out
+  → 空队列时在 IRQ-off 窗口重查后执行 wfi/idle
+```
+
+AP 不推进 timer、timeout、console、network、FS reclaim 或 OOM active tracker。远程
+发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait
+之间到达的 doorbell 会保持 pending 并唤醒 CPU，不会丢失 wakeup。
 
 ## 7. 控制台轮询
 
@@ -187,7 +202,10 @@ exit_current_and_run_next()
   └── idle: finish_switch_out() -> zombie queue
 ```
 
-调度循环回到 idle 后通过 `take_zombie_tasks(64)` 批量取出并 drop。另有每 64 tick 兜底扫描 ready/interruptible queue 中异常残留的 zombie。
+CPU0 调度循环回到 idle 后通过 `take_zombie_tasks(64)` 批量取出并 drop。AP 的
+kernel-only 任务切回本地 idle 后，也会在释放 processor 锁后把 TCB 交给同一个受锁
+zombie registry；真正回收仍由 CPU0 执行。focused test 额外保留曾在 AP 使用的 TCB，
+直到终态 STOP 后关机，避免通用 kernel-global unmap shootdown 完成前复用该栈地址。
 
 ## 10. 上下文切换
 
@@ -209,13 +227,13 @@ exit_current_and_run_next()
 syscall 可在受控区间带着开中断状态 yield/block。`schedule()` 因此：
 
 1. 在获取本 CPU processor 锁前记住当前任务的中断状态并关闭中断；
-2. 以 IRQ-off 状态切回 legacy idle scheduler；
+2. 以 IRQ-off 状态切回本 CPU idle scheduler；
 3. 原任务再次被切入时，在 `__switch` 返回后恢复它自己的快照。
 
-legacy `run_tasks()` 当前整个 housekeeping 循环仍保持 IRQ-off，因为 console、
-network poll、FS reclaim 等共享路径尚未完成 IRQ 并发审计。后续 per-CPU
-idle 将使用独立的“关中断—重查工作—架构 wait”协议，不会盲目将这个
-旧循环扩大为开中断区间。
+CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、network poll、FS reclaim
+等共享路径尚未完成 IRQ 并发审计。AP 已采用独立的“关中断—重查工作—架构 wait”
+协议，但 B19 kernel-only 任务运行期间也保持 IRQ-off；STOP/RESCHEDULE 最长延迟到
+该短函数返回或主动 yield，不能据此开放无界通用内核线程。
 
 ## 11. yield 与 block
 

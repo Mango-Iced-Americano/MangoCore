@@ -109,6 +109,14 @@ pub fn init() {
     #[cfg(feature = "heap_trace")]
     heap_trace::enable();
     frame_allocator::init_frame_allocator();
+    activate_kernel_page_table();
+}
+
+/// 在当前 CPU 安装 BSP 已构造完成的内核页表。
+///
+/// BSP 负责唯一一次堆、帧分配器和页表构造；AP 只写本 CPU 的地址翻译控制
+/// 寄存器并刷新本地 TLB，绝不能重复执行 [`init`]。
+pub(crate) fn activate_kernel_page_table() {
     KERNEL_SPACE.lock().activate();
 }
 pub use crate::hal::tlb_invalidate;

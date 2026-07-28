@@ -1,7 +1,7 @@
 //! BSP/AP 最小启动握手与 IPI mailbox。
 //!
-//! Phase 1 建立 CPU-local 状态和独立 idle stack；Phase 2 首个子阶段只让
-//! AP 响应无锁 IPI reason，仍不进入调度器或共享子系统。
+//! Phase 1 建立 CPU-local 状态和独立 idle stack；Phase 2 让 AP 响应无锁
+//! IPI reason；Phase 3 在 BSP 发布 scheduler-ready 后让 AP 进入本地调度循环。
 
 use core::{
     hint::spin_loop,
@@ -23,6 +23,14 @@ struct PerCpu {
     online: AtomicBool,
     /// 本 CPU 是否已经切换到独立 idle stack；不表示此刻一定停在 idle 指令中。
     idle: AtomicBool,
+    /// 本 CPU 是否已经越过 scheduler-ready 屏障并进入自己的调度循环。
+    scheduler_entered: AtomicBool,
+    /// RESCHEDULE IPI 发布的本地调度请求；handler 只置位，安全点负责消费。
+    need_resched: AtomicBool,
+    /// 目标 CPU 必须完成的 kernel-global 映射发布序号。
+    kernel_tlb_request: AtomicUsize,
+    /// 本 CPU 完成本地 TLB 刷新后发布的对应确认序号。
+    kernel_tlb_ack: AtomicUsize,
     /// 尚未处理的 IPI 原因位图；发送方 Release 合并，目标 CPU Acquire 消费。
     pending_ipi: AtomicU32,
     /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
@@ -52,6 +60,10 @@ impl PerCpu {
             task_state: crate::task::processor::CpuTaskState::new(),
             online: AtomicBool::new(false),
             idle: AtomicBool::new(false),
+            scheduler_entered: AtomicBool::new(false),
+            need_resched: AtomicBool::new(false),
+            kernel_tlb_request: AtomicUsize::new(0),
+            kernel_tlb_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
             ipi_ping_ack: AtomicUsize::new(0),
             round_trip_reply_pending: AtomicBool::new(false),
@@ -82,6 +94,10 @@ impl IpiReason {
     const ROUND_TRIP_REPLY: Self = Self(1 << 2);
     /// 请求 AP 在退出 hard IRQ 后停止，不再访问任何共享内核状态。
     const STOP: Self = Self(1 << 3);
+    /// 目标 runqueue 已加入任务；handler 只发布 need-resched。
+    const RESCHEDULE: Self = Self(1 << 4);
+    /// BSP 已修改共享内核页表；目标必须刷新本地 TLB 后发布 ack。
+    const KERNEL_TLB_SYNC: Self = Self(1 << 5);
 
     const fn bits(self) -> u32 {
         self.0
@@ -122,12 +138,28 @@ pub enum StopError {
     },
 }
 
+/// 新增 kernel-global 映射发布到目标 CPU 时可能发生的错误。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KernelTlbSyncError {
+    InvalidCpu { cpu_id: usize },
+    OfflineCpu { cpu_id: usize },
+    SendFailed { cpu_id: usize, error: isize },
+    Timeout {
+        cpu_id: usize,
+        expected: usize,
+        observed: usize,
+    },
+}
+
 // These values must survive CPU0's BSS clear while LA64 APs are already
 // polling them on their private boot stacks.
 #[link_section = ".data.boot"]
 static BOOT_HARDWARE_ID: AtomicUsize = AtomicUsize::new(UNCLAIMED_BOOT_HARDWARE_ID);
 #[link_section = ".data.boot"]
 static BOOT_PHASE: AtomicUsize = AtomicUsize::new(0);
+/// BSP 完成任务所依赖的全局初始化后发布；AP Acquire 后才能进入调度器。
+#[link_section = ".data.boot"]
+static SCHEDULER_RELEASED: AtomicBool = AtomicBool::new(false);
 
 const fn expected_online_mask() -> usize {
     (1usize << CONFIGURED_CPU_COUNT) - 1
@@ -161,6 +193,20 @@ pub fn idle_cpu_mask() -> usize {
     let mut mask = 0usize;
     for cpu_id in 0..CONFIGURED_CPU_COUNT {
         if PER_CPUS[cpu_id].idle.load(Ordering::Acquire) {
+            mask |= 1usize << cpu_id;
+        }
+    }
+    mask
+}
+
+/// 汇总已经进入 per-CPU 调度循环的 CPU。
+pub fn scheduler_cpu_mask() -> usize {
+    let mut mask = 0usize;
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if PER_CPUS[cpu_id]
+            .scheduler_entered
+            .load(Ordering::Acquire)
+        {
             mask |= 1usize << cpu_id;
         }
     }
@@ -337,13 +383,24 @@ pub fn handle_ipi() {
         // 不可返回的 stop 不能发生在 trap frame 上；只向 idle 栈发布请求。
         local.stop_requested.store(true, Ordering::Release);
     }
+    if reasons & IpiReason::RESCHEDULE.bits() != 0 {
+        // runnable 已在发送方释放 runqueue 锁前完成发布；这里只留下无锁提示。
+        local.need_resched.store(true, Ordering::Release);
+    }
+    if reasons & IpiReason::KERNEL_TLB_SYNC.bits() != 0 {
+        // request 的 Release 发布发生在 doorbell 之前；Acquire 消费 mailbox
+        // 后先完成本核失效，再允许发送方发布依赖该映射的 runnable。
+        crate::hal::tlb_invalidate();
+        let sequence = local.kernel_tlb_request.load(Ordering::Acquire);
+        local.kernel_tlb_ack.store(sequence, Ordering::Release);
+    }
 }
 
 /// 在 AP idle 栈上执行 hard IPI 延迟下来的有界工作。
 ///
 /// 调用方已关闭本地全局中断，因此 pending 检查与下一次 wait 之间不存在
 /// handler 插入窗口。函数不获取普通锁，也不进入调度器。
-fn service_secondary_ipi_work() -> bool {
+pub(crate) fn service_secondary_ipi_work() -> bool {
     let cpu_id = self::cpu_id();
     debug_assert_ne!(cpu_id, BOOT_CPU_ID);
     let local = &PER_CPUS[cpu_id];
@@ -357,17 +414,68 @@ fn service_secondary_ipi_work() -> bool {
         crate::hal::secondary_cpu_stop();
     }
 
+    let mut did_work = local.need_resched.swap(false, Ordering::Acquire);
     if !local
         .round_trip_reply_pending
         .swap(false, Ordering::Acquire)
     {
-        return false;
+        return did_work;
     }
 
     if send_ipi(BOOT_CPU_ID, IpiReason::ROUND_TRIP_REPLY).is_err() {
         local.ipi_send_failures.fetch_add(1, Ordering::Release);
     }
-    true
+    did_work = true;
+    did_work
+}
+
+/// 远程 runqueue 发布完成后唤醒目标 CPU。
+pub(crate) fn request_reschedule(cpu_id: usize) -> Result<(), isize> {
+    send_ipi(cpu_id, IpiReason::RESCHEDULE)
+}
+
+/// 在任务入队前，把新建的 kernel-global 映射同步到目标 CPU。
+///
+/// 映射仍由 CPU0 在 `KERNEL_SPACE` 锁内建立；该函数不持有页表或 runqueue
+/// 锁等待。sequence 允许多个并发请求合并为一次本地全刷新，同时保持 ack
+/// 覆盖截至该序号之前发布的全部 PTE 写入。
+pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbSyncError> {
+    if cpu_id >= CONFIGURED_CPU_COUNT {
+        return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
+    }
+    if cpu_id == self::cpu_id() {
+        crate::hal::tlb_invalidate();
+        return Ok(());
+    }
+    if online_cpu_mask() & (1usize << cpu_id) == 0 {
+        return Err(KernelTlbSyncError::OfflineCpu { cpu_id });
+    }
+
+    let target = &PER_CPUS[cpu_id];
+    let expected = target
+        .kernel_tlb_request
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    assert_ne!(expected, 0, "kernel TLB sync sequence wrapped");
+    send_ipi(cpu_id, IpiReason::KERNEL_TLB_SYNC)
+        .map_err(|error| KernelTlbSyncError::SendFailed { cpu_id, error })?;
+
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+    loop {
+        let observed = target.kernel_tlb_ack.load(Ordering::Acquire);
+        if observed >= expected {
+            return Ok(());
+        }
+        if crate::hal::get_time() >= deadline {
+            return Err(KernelTlbSyncError::Timeout {
+                cpu_id,
+                expected,
+                observed,
+            });
+        }
+        spin_loop();
+    }
 }
 
 /// 在当前 CPU 的 timer IRQ fast path 发布一批待处理工作。
@@ -441,6 +549,79 @@ fn mark_cpu_online(cpu_id: usize) {
         "logical CPU {} published online more than once",
         cpu_id
     );
+}
+
+/// 由当前 CPU 在进入调度主循环前唯一一次发布 scheduler-entered ack。
+pub(crate) fn mark_local_scheduler_entered() {
+    let cpu_id = self::cpu_id();
+    assert!(
+        SCHEDULER_RELEASED.load(Ordering::Acquire),
+        "CPU {} entered scheduler before BSP release",
+        cpu_id
+    );
+    assert!(
+        PER_CPUS[cpu_id]
+            .scheduler_entered
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+            .is_ok(),
+        "CPU {} entered scheduler more than once",
+        cpu_id
+    );
+}
+
+/// 返回 BSP 是否已经发布调度器所需的全部全局初始化。
+pub(crate) fn schedulers_released() -> bool {
+    SCHEDULER_RELEASED.load(Ordering::Acquire)
+}
+
+/// 发布 scheduler-ready，并等待所有 AP 进入各自的本地调度循环。
+///
+/// 该函数必须在 VFS、任务 registry 等 kernel-only 任务依赖的全局对象完成
+/// 初始化后调用。普通用户任务仍固定在 CPU0，不能据此解除用户 MM 限制。
+pub fn release_secondary_schedulers() {
+    assert_eq!(self::cpu_id(), BOOT_CPU_ID);
+    let online = online_cpu_mask();
+    let expected = expected_online_mask();
+    assert_eq!(
+        online, expected,
+        "scheduler release requires every configured CPU online"
+    );
+    assert!(
+        SCHEDULER_RELEASED
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+            .is_ok(),
+        "secondary schedulers released more than once"
+    );
+
+    let targets = expected & !(1usize << BOOT_CPU_ID);
+    if targets == 0 {
+        return;
+    }
+    request_reschedule_mask(targets).unwrap_or_else(|error| {
+        panic!("failed to release secondary schedulers: error {}", error)
+    });
+
+    let deadline = crate::hal::get_time().saturating_add(
+        crate::hal::get_clock_freq().saturating_mul(ONLINE_TIMEOUT_SECONDS),
+    );
+    loop {
+        let entered = scheduler_cpu_mask();
+        let missing = targets & !entered;
+        if missing == 0 {
+            return;
+        }
+        if crate::hal::get_time() >= deadline {
+            panic!(
+                "secondary scheduler timeout: targets={:#x} entered={:#x} missing={:#x}",
+                targets, entered, missing
+            );
+        }
+        spin_loop();
+    }
+}
+
+fn request_reschedule_mask(targets: usize) -> Result<(), isize> {
+    send_ipi_mask(targets, IpiReason::RESCHEDULE)
 }
 
 /// Convert the firmware/hardware ID at `_start` into MangoCore's logical ID.
@@ -626,11 +807,17 @@ extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
     mark_cpu_idle(cpu_id);
     mark_cpu_online(cpu_id);
 
-    // AP 仍不进入旧调度器。全局中断关闭后先重查 deferred work，再执行
-    // 架构 wait；局部 IPI mask 保持打开，所以 check→wait 之间到达的 IPI
-    // 会使 wait 返回，恢复全局中断后进入 hard handler，不会丢失唤醒。
+    // BSP 完成 VFS/任务等全局初始化前，AP 继续维护 IPI/STOP 能力但不得
+    // 访问调度器。Acquire 观察到 scheduler-ready 后直接进入共用调度入口。
     loop {
         let irq_was_enabled = crate::hal::local_irq_save();
+        if SCHEDULER_RELEASED.load(Ordering::Acquire) {
+            // 页表根寄存器属于 CPU-local 状态。AP 此前只访问恒等映射的
+            // text/data/idle stack；调度高虚拟地址 kernel stack 前必须安装
+            // BSP 已构造完成的内核页表，并由 activate 完成本地 TLB 刷新。
+            crate::mm::activate_kernel_page_table();
+            crate::task::run_tasks();
+        }
         if !service_secondary_ipi_work() {
             crate::hal::secondary_cpu_wait();
         }

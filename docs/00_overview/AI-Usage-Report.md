@@ -50,6 +50,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP Per-CPU current 槽 | 2026-07-27 | GPT/Codex, DeepSeek | current owner 拆分、Arc/noreturn 生命周期审查、双架构 Docker/QEMU 验证 | 删除全局 PROCESSOR 与 current 裸指针；双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS |
 | SMP 初赛非回归门禁 | 2026-07-28 | GPT/Codex, DeepSeek | 双架构 8 核 basic+busybox 执行、judge 失败集合比较、验收规则收敛 | 发现 RV64 8 核 307/314 未达到 312 基线；建立硬条件与只升不降的失败集合门禁 |
 | RV64 trap-return 半恢复现场竞态 | 2026-07-28 | GPT/Codex, DeepSeek | 用户 ELF/loader 反汇编、CSR 指令级溯源、双架构 Arc 生命周期复核与 Docker/QEMU 验证 | 统一 `SPP/SIE/SPIE` 返回契约并修复 noreturn Arc 泄漏；RV64 preliminary 312/314、LA64 SMP ktest 10/10 PASS |
+| SMP AP 本地调度闭环 | 2026-07-28 | GPT/Codex, DeepSeek | scheduler-ready、AP 页表激活、远程 kernel stack 发布和双架构 8 核验证 | AP 进入本地 scheduler；定位并修复未安装 CPU-local 页表根导致的首次 dispatch 卡死；双架构 23/23 PASS |
 
 ## 4. 详细使用场景
 
@@ -349,6 +350,27 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   DeepSeek 第一轮错误的 syscall 中途抢占推断未被采纳，第二轮按完整 safe-point 调用链
   复核后同意撤回该建议。
 
+### Case 16: SMP AP 本地调度与 kernel stack 发布
+
+- Evidence: `docs/Work_Log/2026-07-28.md`、
+  `docs/Work_Log/evidence/2026-07-28/smp-b19-ap-scheduler-summary.md`；原始 DeepSeek
+  输出和 Docker job 只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责并发协议、实现、官方架构规范核对和最终裁决；DeepSeek
+  负责失败日志的独立只读溯源，以及串行 Docker/QEMU 执行。
+- Problem: Per-CPU RunQueue 已存在，但 AP 没有 scheduler-ready 屏障和本地调度循环；
+  首轮远程任务实验还使全部 AP 在首次 context switch 后静默卡死。
+- AI contribution: DeepSeek 从“首个远程用例失败、后续所有 IPI/STOP 级联失败”定位到
+  AP 从未安装 CPU-local kernel page-table root。早期 IPI 仅访问恒等映射区，不能证明
+  高虚拟地址 kernel stack 可用。它建议在 AP 进入 scheduler 前 activate；该结论经人工
+  调用链复核后采纳。
+- Human action: 增加 scheduler-ready/entered 屏障和 AP 精简 scheduler；将 ktest entry
+  下沉为 TCB 不可变字段；在 AP activate 之外再实现带 sequence/ack 的目标 TLB sync，
+  确保动态 stack 映射先可见、后入队。拒绝仅依赖“AP 冷 TLB”的偶然性，也未提前开放
+  用户任务迁移、共享子系统或通用 shootdown。
+- Verification: 首轮 RV64 为 16/23 RED；修复后 RV64、LA64
+  `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 23/23 PASS，包含两轮 AP scheduler/remote
+  exactly-once 和 terminal STOP，受测源码 before/after 指纹一致。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -406,6 +428,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-28.md` | SMP 初赛非回归门禁 | 记录 DeepSeek 双架构 8 核执行、RV64 新增失分、单核判别、人工日志复核与递增基线规则 |
 | `docs/Work_Log/2026-07-28.md` | RV64 trap-return 半恢复现场竞态 | 记录提交撤回、DeepSeek 复现实验的采纳边界、ELF/CSR 指令级根因、双架构修复验证和本地 Worker 领取竞态修复 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b18-runqueue-summary.md` | SMP Per-CPU RunQueue | 记录 DeepSeek 冻结审查与双架构 8 核 Docker 门禁、GPT/Codex 锁序裁决、19/19 PASS 和 AP 调度 NOT RUN 边界 |
+| `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b19-ap-scheduler-summary.md` | SMP AP 本地调度闭环 | 记录 DeepSeek 对首次 dispatch 卡死的页表根定因、GPT/Codex 映射发布协议裁决、双架构 8 核 23/23 PASS 与用户任务仍固定 CPU0 的边界 |
 
 ## 9. 交互记录与留痕方式
 

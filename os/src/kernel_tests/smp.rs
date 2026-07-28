@@ -12,10 +12,17 @@ const IRQ_PROBE_DISABLED: usize = 1;
 const IRQ_PROBE_ENABLED: usize = 2;
 static IDLE_TO_TASK_IRQ_PROBE: AtomicUsize = AtomicUsize::new(IRQ_PROBE_NOT_RUN);
 static SCHED_STATE_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
+static AP_TASK_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static AP_TASK_RUNS: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
+    /// Phase 4 的 kernel-global shootdown 完成前，不释放曾在 AP 使用过的动态
+    /// kernel stack。终态 STOP 后机器立即关机，因此这里保留到本次 ktest 结束。
+    static ref AP_TASK_RETAINED: Mutex<Vec<Arc<crate::task::TaskControlBlock>>> =
+        Mutex::new(Vec::new());
 }
 
 /// 返回只依赖 Phase 1 启动不变量的测试集合。
@@ -26,8 +33,12 @@ pub fn tests() -> Vec<KernelTest> {
             configured_cpus_are_online,
         ),
         KernelTest::new(
-            "smp::legacy_scheduler_stays_on_boot_cpu",
-            legacy_scheduler_stays_on_boot_cpu,
+            "smp::ktest_runner_stays_on_boot_cpu",
+            ktest_runner_stays_on_boot_cpu,
+        ),
+        KernelTest::new(
+            "smp::configured_cpus_enter_scheduler",
+            configured_cpus_enter_scheduler,
         ),
         KernelTest::new(
             "smp::secondary_cpus_enter_idle_context",
@@ -53,6 +64,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::scheduler_state_has_unique_owner",
             scheduler_state_has_unique_owner,
+        ),
+        KernelTest::new(
+            "smp::remote_kernel_tasks_run_on_target_cpus",
+            remote_kernel_tasks_run_on_target_cpus,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -484,10 +499,87 @@ fn secondary_cpus_enter_idle_context() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Phase 1 只允许 CPU0 进入旧调度器，避免过早暴露未审计的共享状态。
-fn legacy_scheduler_stays_on_boot_cpu() -> Result<(), &'static str> {
+/// 测试 runner 本身仍固定 CPU0，避免 focused test 意外进入用户迁移路径。
+fn ktest_runner_stays_on_boot_cpu() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
-        return Err("legacy scheduler executed the SMP ktest on an AP");
+        return Err("SMP ktest runner executed on an AP");
     }
+    Ok(())
+}
+
+/// BSP 返回 scheduler-ready 发布函数前，所有配置 CPU 都必须进入调度循环。
+fn configured_cpus_enter_scheduler() -> Result<(), &'static str> {
+    let expected = (1usize << crate::smp::configured_cpu_count()) - 1;
+    let entered = crate::smp::scheduler_cpu_mask();
+    if entered != expected {
+        crate::println!(
+            "# SMP scheduler mask mismatch: expected={:#x} entered={:#x}",
+            expected,
+            entered
+        );
+        return Err("configured CPU set did not enter per-CPU schedulers");
+    }
+    Ok(())
+}
+
+fn record_remote_kernel_task_cpu() {
+    let cpu = crate::smp::cpu_id();
+    let status_ok = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(cpu))
+        .unwrap_or(false);
+    if cpu == crate::smp::BOOT_CPU_ID || !status_ok {
+        AP_TASK_ERRORS.fetch_or(1usize << cpu, Ordering::Release);
+    }
+    AP_TASK_RUNS[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// 向每个 AP 的真实 runqueue 发布一个 kernel-only 任务，并验证 target/current 唯一归属。
+fn remote_kernel_tasks_run_on_target_cpus() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("remote enqueue test did not run on CPU0");
+    }
+    AP_TASK_ERRORS.store(0, Ordering::Release);
+    for runs in &AP_TASK_RUNS {
+        runs.store(0, Ordering::Release);
+    }
+
+    let mut tasks = Vec::new();
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        tasks.push((
+            cpu,
+            crate::task::spawn_ktest_task_on(cpu, record_remote_kernel_task_cpu),
+        ));
+    }
+
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    loop {
+        let finished = tasks.iter().all(|(cpu, task)| {
+            AP_TASK_RUNS[*cpu].load(Ordering::Acquire) == 1
+                && task.task_status() == crate::task::TaskStatus::Zombie
+                && !crate::task::processor::cpu_has_current(*cpu)
+        });
+        if finished {
+            break;
+        }
+        if crate::hal::get_time() >= deadline {
+            return Err("remote kernel task did not finish before timeout");
+        }
+        core::hint::spin_loop();
+    }
+
+    if AP_TASK_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("remote kernel task observed wrong CPU/current owner");
+    }
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        if AP_TASK_RUNS[cpu].load(Ordering::Acquire) != 1 {
+            return Err("remote kernel task ran more or less than once");
+        }
+        if crate::task::run_queue_count(cpu) != 0 {
+            return Err("AP runqueue retained a completed kernel task");
+        }
+    }
+    AP_TASK_RETAINED
+        .lock()
+        .extend(tasks.into_iter().map(|(_, task)| task));
     Ok(())
 }

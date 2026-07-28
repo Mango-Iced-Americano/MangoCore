@@ -79,14 +79,14 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack、online 闭环和 STOP/ack 已完成 | AP 已进入可被 IPI 唤醒或永久停止的 idle loop，但尚无调度能力 |
-| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；PerCpu 已承载 IPI/timer 与 task state 基础 | 完整 global/local init 和 AP scheduler-ready 发布仍未接入 |
+| 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 只运行受控 kernel-only 任务，尚无通用生产任务能力 |
+| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI/timer fast path；syscall 受控窗口可跨 yield 恢复；STOP 在 AP idle 栈执行 | 非 syscall 内核区间仍关中断，shootdown 尚未接入 |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU，`current_task()` 返回本 CPU 的 `Arc` 克隆 | AP 尚未运行普通任务，跨核退出/迁移语义仍待实现 |
-| 调度 | runnable 容器已拆为 Per-CPU RunQueue，但所有生产任务仍固定 CPU0 | AP 调度循环、远程 enqueue、目标选择和迁移尚未实现 |
+| 调度 | Per-CPU current/idle/RunQueue 与 AP 精简循环已完成；focused ktest 支持显式远程 enqueue/RESCHEDULE | 生产目标选择、blocked remote wake、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | 用户 PTE 写入已收口到 `TlbBatch`；CPU0-only 阶段完成本地刷新和 frame 延迟释放 | 远端 active mask、generation、shootdown/ack 未实现，用户 MM 仍不得跨 CPU 运行 |
+| MM/TLB | 用户 PTE 已收口到 `TlbBatch`；新增 kernel stack 可在远程首次使用前做目标全刷新/ack | 通用 active mask、range shootdown、unmap 延迟释放未实现，用户 MM 仍不得跨 CPU 运行 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -516,7 +516,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15/B16/B17/B18）
+#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
@@ -582,10 +582,27 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   judge 满分。干净 B17 对照 raw 305/semantic 308，并再次在 glibc 组复现相同片段交错；
   官方镜像的两份 libc pipe 二进制哈希相同。该结论没有引入 TTY 跨 syscall 锁或行缓存
   workaround；
+- B19 增加 scheduler-ready Release/Acquire 屏障。AP 越过屏障后先安装本 CPU 的
+  kernel page-table root 并刷新本地 TLB，再进入共用 `run_tasks()`；BSP 等待全部
+  `scheduler_entered` ack 后才创建远程测试任务；
+- CPU0 保留完整 housekeeping；AP 只运行本地 RunQueue、IPI deferred work 和共用
+  dispatch/switch-out。`RESCHEDULE` hard IRQ 只置 `need_resched`，真正 fetch/switch
+  发生在 idle 安全点；
+- ktest kernel entry 从有竞争的全局“下一入口”改为 TCB 不可变字段。focused test 可显式
+  向每个 AP 发布一个短 kernel-only 任务，并验证 `Queued(cpu) -> Running(cpu) -> Zombie`、
+  current 唯一归属和 exactly-once；普通新任务、blocked wake 和用户任务仍固定 CPU0；
+- 动态 kernel stack 在远程入队前执行受限的 kernel-mapping sync：释放 `KERNEL_SPACE`
+  锁后发送带 sequence 的 IPI，目标本地全 TLB flush 并 ack，发送方确认后才发布 runqueue，
+  再在释放队列锁后发 `RESCHEDULE`。该协议只覆盖新增 stack 的首次使用，不替代 Phase 4
+  的 MM active mask/range shootdown/延迟释放；
+- 首轮 RV64 8 核 focused 测试为 16/23，首个远程任务把全部 AP 卡住，后续 IPI/STOP
+  级联失败。DeepSeek 只读审查与人工调用链复核定位为 AP 从未安装 CPU-local 页表根；
+  修复后 RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 23/23 PASS，源码指纹
+  前后一致；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
-  Per-CPU current/idle/RunQueue 基础。下一批 B19 建立 scheduler-ready 屏障、AP
-  本地调度循环和仅内核任务的远程 enqueue；Phase 4 远端 shootdown 完成前不解除
-  用户任务 CPU0 affinity。
+  Per-CPU current/idle/RunQueue、scheduler-ready 和受控 AP kernel-only 执行闭环。
+  下一批 B20 再建立生产目标选择和远程 wake 的锁外 IPI 交接；Phase 4 远端 MM
+  shootdown 完成前不解除用户任务 CPU0 affinity，也不回收/复用 AP 使用过的动态栈映射。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -593,7 +610,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 - B17 已删除全局 PROCESSOR 和 current-task 裸指针，把 pid/tid/syscall 诊断 hint
   迁到 Per-CPU，并让可变身份字段改读权威对象；B18 已删除全局 ready queue；
-- 每 CPU 使用本地 Processor、RunQueue、idle context 和 zombie 回收队列；
+  B19 已让 AP 在 scheduler-ready 后进入精简本地调度循环；
+- 每 CPU 使用本地 Processor、RunQueue 和 idle context；B19 的 AP zombie 先交给
+  受锁全局 registry，由 CPU0 回收，Per-CPU 回收队列仍待后续批次；
 - 本地选择继续保留 FIFO fast path 和现有 nice-aware 选择；
 - 新任务或被唤醒任务的目标 CPU 选择规则固定为：
   - last_cpu 在线、在 affinity 内且负载不超过最小负载 +1 时优先复用；

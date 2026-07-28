@@ -191,7 +191,7 @@ pub fn bootstrap_init(cpu_id: usize) {
     let local_interrupt = if cpu_id == crate::smp::BOOT_CPU_ID {
         LineBasedInterrupt::TIMER
     } else {
-        // AP 在当前子阶段只允许 IPI，不能提前接入普通 timer callback。
+        // AP 在 Phase 3 仍只允许 IPI，不能提前接入普通 timer callback。
         LineBasedInterrupt::IPI
     };
     ECfg::empty()
@@ -484,7 +484,7 @@ pub fn start_secondary_cpu(_cpu_id: usize, _start_addr: usize) -> Result<(), isi
     Err(-2)
 }
 
-/// Keep an online Phase 1 AP outside interrupts and shared runtime code.
+/// Park an unexpected/unconfigured CPU outside interrupts and shared runtime code.
 pub fn boot_cpu_park() -> ! {
     loop {
         // LoongArch idle/IPI wakeup is introduced in Phase 2.  A spin hint is

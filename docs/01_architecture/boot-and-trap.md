@@ -38,14 +38,17 @@ firmware / QEMU
         → CPU-local bootstrap
         → 切换到 logical CPU 独占的 idle stack
         → 发布 idle，再发布 online
-        → IPI-only idle loop
+        → IPI-only idle loop 等待 scheduler-ready
+        → 安装本 CPU 的内核页表根并刷新本地 TLB
+        → AP 本地调度循环
 ```
 
 当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 已
 打通 BSP→AP 的 IPI mailbox/ack 单播与广播、AP→BSP 请求/回复往返，以及
 CPU0 发起的 AP STOP/ack 终态协议。CPU0 的用户 syscall 已在完整 trap
-frame 内开放受控 timer/IPI 窗口；AP 尚未进入调度器，也不会访问文件系统或网络。
-生产任务执行仍由 CPU0 独占；Per-CPU RunQueue 虽已建立，AP 尚未进入调度循环。
+frame 内开放受控 timer/IPI 窗口。B19 又建立 scheduler-ready 屏障和 AP 本地
+调度循环，但只允许 focused ktest 的短 kernel-only 任务显式进入 AP；AP 不访问
+文件系统、网络、设备或用户 MM。生产任务和 blocked wake 仍由 CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -90,6 +93,19 @@ slave ROM 的启动门铃混淆。2K1000LA 当前仍保持默认单核配置。
 CPU0 与 AP 使用同一个 online 发布协议；重复发布会触发 CAS 不变量失败，
 而不是被静默接受。
 
+online 只证明 CPU-local 启动完成，不等于可以访问调度器。B19 使用第二个屏障：
+
+1. CPU0 完成 VFS、任务 registry 等全局初始化后，以 Release 发布
+   `SCHEDULER_RELEASED`；
+2. AP 用 Acquire 观察该状态，在自己的恒等映射 idle stack 上安装 BSP 已构造的
+   内核页表根；RV64 写本地 `satp`，LA64 写本地 `PGDH`，并完成本地 TLB 刷新；
+3. AP 进入 `run_tasks()` 后以 Release 发布 `scheduler_entered`；
+4. CPU0 以 Acquire 等待全部 configured CPU 的 bit，再允许创建远程测试任务。
+
+页表根寄存器是 CPU-local 硬件状态。CPU0 激活内核页表不能替 AP 完成这一步；
+早期 IPI 能工作只说明恒等映射的 text/data/idle stack 可访问，不能证明高虚拟地址
+kernel stack 已可用。
+
 运行期 PING IPI 使用另一组 Release/Acquire 关系：
 
 1. 发送方用 Release 把 reason 合并进目标 `PerCpu.pending_ipi`；
@@ -102,6 +118,18 @@ CPU0 串行发送，同一目标收到 ack 后才复用 PING bit；后续需要�
 shootdown/STOP 会使用独立 sequence 或 slot，不能把事件次数塞进 reason bit。
 发送某个 doorbell 失败时，发送方仍继续通知本轮其余目标，并保留失败目标
 已经发布的 reason；原子 mailbox 不能安全“回滚”，后续中断仍可消费它。
+
+B19 为远程 kernel-only 任务的动态内核栈增加了一个受限的映射发布协议：
+
+1. CPU0 在 `KERNEL_SPACE` 锁内建立 stack PTE，然后释放页表锁；
+2. CPU0 递增目标 CPU 的 `kernel_tlb_request`，发送 `KERNEL_TLB_SYNC`；
+3. 目标 hard-IRQ handler 执行本地全 TLB 失效，并以 Release 发布相同序号的 ack；
+4. CPU0 在不持有页表/runqueue 锁时有界等待 ack；
+5. 只有 ack 完成后才把任务加入目标 runqueue，释放队列锁后再发送 `RESCHEDULE`。
+
+sequence 允许合并同一目标的并发发布请求；ack 覆盖该序号之前的 PTE 写入。该协议
+只保证“新增 kernel stack 在首次远程使用前可见”，不等价于 MM active mask、范围
+shootdown、解除映射后的延迟释放或 LoongArch MM-owned ASID。
 
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 
@@ -177,12 +205,14 @@ vector 1，再消费 mailbox，避免陈旧 BADV 产生误诊，也避免在尚�
 console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 TICLR、
 发布当前 CPU 的 deferred 状态。
 
-两个架构的 IPI handler 都只执行原子操作：不分配内存、不获取普通锁、不
-打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
+两个架构的 IPI handler 只执行原子操作和有界的本地 TLB 失效：不分配内存、不获取
+普通锁、不打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
 用户态和内核态 trap 共用同一 fast path；AP 仅打开 IPI 线路，timer/external
 interrupt 继续关闭。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
-RESCHEDULE、非 syscall 内核区间和 AP 调度循环属于后续 Phase 2/3 范围。
+`RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle
+安全点。AP 执行 B19 短 kernel-only 函数时仍保持全局 IRQ 关闭，因此 STOP 最长
+延迟到函数返回或主动 yield；通用内核线程必须等可抢占安全点完成后才能开放。
 
 ## Syscall 受控中断窗口
 

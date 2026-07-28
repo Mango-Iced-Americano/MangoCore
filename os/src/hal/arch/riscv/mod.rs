@@ -39,8 +39,8 @@ pub type ExceptionImpl = riscv::register::scause::Exception;
 
 pub fn bootstrap_init(cpu_id: usize) {
     if cpu_id != crate::smp::BOOT_CPU_ID {
-        // AP 在本阶段只开放 supervisor software interrupt；timer、external
-        // interrupt 和旧调度器保持关闭。
+        // AP 只开放 supervisor software interrupt；Phase 3 可进入本地调度器，
+        // 但 timer 和 external interrupt 仍保持关闭。
         trap::init_ipi_only();
     }
 }
@@ -144,7 +144,7 @@ pub fn secondary_cpu_stop() -> ! {
     }
 }
 
-/// Keep an online Phase 1 AP outside the legacy scheduler.
+/// Park an unexpected/unconfigured CPU outside all shared runtime code.
 pub fn boot_cpu_park() -> ! {
     loop {
         // Safety: WFI is only a local processor hint.  AP interrupts remain

@@ -358,10 +358,6 @@ pub fn add_initproc() {
 
 // ── ktest multi-task harness ────────────────────────────────────────
 
-/// Stores the function pointer for the next ktest spawned task.
-/// The trampoline reads this to know which test function to invoke.
-static KTEST_SPAWN_FN: spin::Mutex<fn()> = spin::Mutex::new(|| {});
-
 /// Build a kernel-only PCB for a ktest task without loading `/init`.
 ///
 /// The root VFS and devfs are initialized before ktest enters this path.  The
@@ -413,7 +409,11 @@ fn new_ktest_process(
 /// ktest-spawned task. It invokes the stored function, then exits the
 /// task without process-level cleanup.
 extern "C" fn ktest_trampoline() -> ! {
-    let f = *KTEST_SPAWN_FN.lock();
+    // 入口属于当前 TCB，不再通过全局“下一任务函数”传递；多个 CPU 首次
+    // 切入不同 kernel-only 任务时不会互相覆盖 trampoline 参数。
+    let f = current_task()
+        .and_then(|task| task.kernel_entry())
+        .expect("kernel-only task has no entry function");
     f();
     zombify_current_and_run_next();
 }
@@ -424,22 +424,55 @@ extern "C" fn ktest_trampoline() -> ! {
 /// file descriptors.  It never touches `INITPROC` or parses an init ELF.
 /// It runs `f()` and then calls [`zombify_current_and_run_next`].
 ///
-/// # Panics
-///
-/// Panics if called outside ktest mode (no `current_task()` is running).
+/// 调用前必须完成 VFS 与任务 registry 的全局初始化。
 pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
-    *KTEST_SPAWN_FN.lock() = f;
+    spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, f)
+}
+
+/// 在指定 CPU 创建一个 kernel-only ktest 任务。
+///
+/// 该入口只用于验证 AP 调度闭环，不向普通任务开放 CPU 选择。普通用户任务、
+/// blocked wake 和迁移仍固定 CPU0，直到远端 TLB shootdown 与共享子系统审计完成。
+/// `f` 只能访问原子量、CPU-local/task 调度原语和已明确加锁的 registry；不得
+/// 在 AP 上进入 console、网络、文件系统、设备或用户 MM 路径。
+pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> {
+    assert!(cpu < crate::smp::configured_cpu_count());
+    if cpu != crate::smp::BOOT_CPU_ID {
+        assert!(
+            crate::smp::schedulers_released(),
+            "cannot publish AP task before scheduler-ready"
+        );
+        assert_ne!(
+            crate::smp::online_cpu_mask() & (1usize << cpu),
+            0,
+            "cannot publish task to offline CPU {}",
+            cpu
+        );
+    }
     let tid_handle = tid_alloc();
     let kstack = crate::hal::kstack_alloc();
     let kstack_top = kstack.get_top();
+    if cpu != crate::smp::cpu_id() {
+        // kstack_alloc 只刷新创建者的本地 TLB。目标 CPU 必须在任务可见前
+        // 确认新映射，避免 __switch 刚换到高地址栈就命中旧的无效翻译。
+        crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
+            panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
+        });
+    }
     let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
     let pcb = new_ktest_process(tid_handle.clone(), Some(Arc::downgrade(&KTEST_REAPER)));
-    let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx);
+    let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
     tcb.process.add_thread(&tcb);
     registry::register_process(&tcb.process);
     registry::register_task(&tcb);
     let handle = tcb.clone();
-    publish_task(tcb);
+    run_queue::publish(tcb, cpu);
+    if cpu != crate::smp::cpu_id() {
+        // publish 已经释放目标 runqueue 锁；doorbell 绝不能发生在队列锁内。
+        crate::smp::request_reschedule(cpu).unwrap_or_else(|error| {
+            panic!("failed to wake CPU {} after remote enqueue: {}", cpu, error)
+        });
+    }
     handle
 }
 

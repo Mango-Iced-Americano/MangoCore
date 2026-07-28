@@ -135,6 +135,26 @@
 
 ## QEMU / 测试
 
+### SMP 早期 IPI 正常但首次远程任务后整颗 AP 静默失联
+
+- **现象**: online、idle、BSP→AP PING 和 AP→BSP round-trip 全部通过；一旦 AP 首次
+  context switch 到动态 kernel stack，远程任务超时，后续 PING/STOP 对全部 AP 级联失败，
+  且没有普通 kernel panic 文本。
+- **首个多米诺骨牌**: 先按测试顺序找第一个失败，不要把后续 IPI、STOP 超时拆成多个 bug。
+  若首次 task dispatch 是分界点，优先核对切换前后的 `sp` 地址域、页表根和 trap 栈。
+- **典型根因**: BSP 构造并激活 kernel page table 只写了本 CPU 的 SATP/PGDH；AP 仍靠
+  恒等映射或 DMW 执行 text/data/idle stack，所以早期 IPI 会制造“MMU 已可用”的假象。
+  `__switch` 换到高虚拟地址 stack 后首个压栈失败，kernel trap 又沿坏 `sp` 保存现场，可能
+  形成二次故障循环而无法打印 panic。
+- **修复模式**: 把“共享页表对象已构造”和“每 CPU 页表根已安装”分开建模。AP 在
+  scheduler-ready Acquire 之后、scheduler-entered Release 之前激活本 CPU kernel page
+  table。AP 激活后新增的动态 kernel-global 映射仍需先做目标 TLB flush/ack，再发布依赖
+  该映射的 runnable，不能把冷 TLB 当作正确性前提。
+- **验证**: 除 scheduler mask 和 remote task exactly-once 外，必须继续运行后续 PING 与
+  terminal STOP；否则只能证明任务计数变化，不能证明 AP 已返回稳定 idle 调度循环。
+- **相关文件**: `os/src/mm/mod.rs`, `os/src/smp.rs`, `os/src/task/processor.rs`,
+  `os/src/hal/arch/{riscv,loongarch64}`
+
 ### RISC-V MTTCG 下不能把 OpenSBI Boot HART 写死为 hart0
 
 - **现象**: `-smp 2` 时内核正常，扩到 4/8 核后只看到 OpenSBI banner，

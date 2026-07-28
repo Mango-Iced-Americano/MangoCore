@@ -214,13 +214,14 @@ rust_main()
   → machine_init() → timer_subsystem_init()
   → [fs init, net init, block probe, preload payloads]
   → posix_lock::init()
-  → add_initproc()
-  → [NEW] BootConfig::load()
-  → [NEW] if mode == Ktest: kernel_tests::run_from_bootargs() → shutdown()
-  → run_tasks()  // normal path only
+  → smp::release_secondary_schedulers()
+  → if mode == Ktest: spawn kernel test runner → per-CPU run_tasks() → shutdown()
+  → normal: add_initproc() → per-CPU run_tasks()
 ```
 
-插入点在 `add_initproc()` 之后、`run_tasks()` 之前。此时所有子系统（文件系统、网络、块设备）均已初始化完毕，测试可访问完整内核状态。
+ktest 分支位于 `add_initproc()` 之前，因此不会创建 PID1；进入该分支前文件系统、网络、
+块设备和任务 registry 已初始化，scheduler-ready 已发布。runner 固定 CPU0，SMP focused
+测试可创建受控的 AP kernel-only 任务。
 
 ### 目录结构
 
@@ -231,6 +232,7 @@ os/src/kernel_tests/
 ├── waitqueue.rs      # wake_before_wait_should_not_sleep 等
 ├── timer.rs          # tick_advances, time_spec_ops
 ├── sched.rs          # current_task_exists, ready_queue_has_init
+├── smp.rs            # online/scheduler/IPI/远程 kernel-only 调度/STOP
 ├── mm.rs             # alloc_free_one_page, alloc_contiguous_pages
 └── ext4.rs           # TestMemBlock + ext4 多实例挂载隔离
 ```
@@ -264,6 +266,11 @@ pub struct KernelTest {
 测试及其 repeat，最后才执行 terminal 集合；terminal 不参与 repeat。
 因此 `KTEST=all` 不会因 SMP STOP 提前破坏后续 MM/FS 测试，
 `KREPEAT>1` 也不会尝试再次唤醒已经停止的 AP。
+
+B19 的 SMP 组在 `KREPEAT=2` 时为 23 项：11 个普通用例各执行两轮，STOP terminal
+只执行一次。除既有 online/idle/IPI/timer/current owner 外，还必须看到两轮
+`configured_cpus_enter_scheduler` 和 `remote_kernel_tasks_run_on_target_cpus` 通过；
+远程用例断言每个 AP 的任务恰好执行一次、current 与 `Running(cpu)` 一致、退出后队列为空。
 
 ### TAP 输出格式
 

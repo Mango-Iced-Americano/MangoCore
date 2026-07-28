@@ -15,7 +15,8 @@ MangoCore 的执行实体分为线程级 `TaskControlBlock` 和进程级 `Proces
 
 调度器位于 `task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。每个 CPU
 拥有独立 RunQueue、current 槽和 idle context；全局 TaskManager 只保留
-interruptible/zombie/timer registry。当前生产任务仍固定 CPU0，AP 尚未进入调度循环。
+interruptible/zombie/timer registry。AP 已进入精简本地调度循环，但当前只有 focused
+ktest 的短 kernel-only 任务可显式远程入队；生产任务和 blocked wake 仍固定 CPU0。
 默认 nice 为 0 的本地队列按 FIFO 取任务；存在非零 nice 任务时进入简化公平选择路径。
 
 ## 依据范围

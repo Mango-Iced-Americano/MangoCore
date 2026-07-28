@@ -1,7 +1,8 @@
 //! Per-CPU 处理器状态和调度主循环。
 //!
 //! 每个 CPU 通过 `PerCpu.task_state` 持有自己的 current 槽和 idle 上下文。
-//! 当前用户任务仍只由 CPU0 调度，但 current 所有权已不再依赖全局单例。
+//! CPU0 额外负责全局 housekeeping；AP 只处理本地 runqueue 和 IPI。普通
+//! 用户任务仍只由 CPU0 调度，AP 当前只接收受控的 kernel-only 任务。
 //!
 //! # Locking
 //!
@@ -103,17 +104,22 @@ impl CpuTaskState {
 ///
 /// # Semantics
 ///
-/// 循环执行定时唤醒、网络轮询、文件缓存回收、zombie 清理和 ready 队列取任务。
-/// 找到任务后发布本 CPU current 槽、释放 processor 锁并切换到任务上下文。
+/// CPU0 循环执行全局 housekeeping 与本地取任务；AP 进入不触碰共享子系统的
+/// 精简循环。两者共用同一个 dispatch/current/context-switch 实现。
 ///
 /// # Locking
 ///
 /// 调用 `__switch` 前必须释放本 CPU processor 锁；被切入任务后该函数直到任务主动
 /// `schedule()` 回 idle 才会继续执行。
-pub fn run_tasks() {
-    let mut schedule_tick = 0usize;
+pub fn run_tasks() -> ! {
     let cpu = crate::smp::cpu_id();
     let task_state = crate::smp::local_task_state();
+    crate::smp::mark_local_scheduler_entered();
+    if cpu != crate::smp::BOOT_CPU_ID {
+        run_secondary_scheduler(cpu, task_state);
+    }
+
+    let mut schedule_tick = 0usize;
     loop {
         // `schedule()` 保证 idle 总是以 IRQ-off 状态恢复。Phase 2 仍保持这个
         // legacy scheduler 边界；console/net/FS reclaim 完成 IRQ 并发审计前，
@@ -304,68 +310,7 @@ pub fn run_tasks() {
         }
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
-            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
-            let trace_first_switch = !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
-            let stage_t0 = sched_profile_start(sched_profile);
-            // 先在不持有 processor 锁时更新任务时间并取得上下文指针。
-            // 这样不会形成 `processor -> task.inner`，为后续跨核信号/退出消除锁序负担。
-            let next_task_cx_ptr = {
-                let mut task_inner = task.acquire_inner_lock();
-                task_inner.update_process_times_schedule_in();
-                &task_inner.task_cx as *const TaskContext
-            };
-            let mut processor = task_state.processor.lock();
-            let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
-            // 先发布与槽位同生命周期的不变身份，再把 Arc 所有权交给 current。
-            // 当前 CPU 在这段期间关中断，不会有本核读者看到半发布状态。
-            task_state.current_pid.store(task.pid(), Ordering::Relaxed);
-            task_state
-                .current_tid
-                .store(task.gettid(), Ordering::Relaxed);
-            processor.current = Some(task);
-            // 手动释放处理器
-            drop(processor);
-            sched_record_stage(
-                sched_profile,
-                &SCHED_STAGE_SWITCH_PREP_CALLS,
-                &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
-                &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
-                stage_t0,
-            );
-            if sched_profile {
-                SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
-            }
-            sched_record_loop_cycles(sched_profile, loop_t0);
-            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
-            if trace_first_switch {
-                // 安全性：选中任务仍由 `processor.current` 持有，在 `__switch` 使用
-                // 该上下文前不会发生修改。
-                let (resume_pc, resume_sp) = unsafe { (&*next_task_cx_ptr).bringup_resume_state() };
-                println!(
-                    "[bringup][sched:01] switching idle -> init: pid={} tid={} task_cx={:#x} resume_pc={:#x} expected_pc={:#x} resume_sp={:#x}",
-                    current_pid(),
-                    current_tid(),
-                    next_task_cx_ptr as usize,
-                    resume_pc,
-                    crate::hal::trap_return as usize,
-                    resume_sp
-                );
-            }
-            // Safety: `idle_task_cx_ptr` points into this CPU's `Processor.idle_task_cx`
-            // and `next_task_cx_ptr` points into the selected task's TCB. The
-            // processor lock has been dropped, so the switched-in task can later
-            // call `schedule()` without deadlocking on the local processor lock.
-            unsafe {
-                crate::task::perf::record_context_switch();
-                __switch(idle_task_cx_ptr, next_task_cx_ptr);
-            }
-            // 此时已经运行在 idle 栈上。先撤销 current slot，再根据任务留下的
-            // Running/Blocking/Zombie 状态完成唯一一次容器交接。
-            finish_current_switch_out(cpu);
-            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
-            if trace_first_switch {
-                println!("[bringup][sched:02] first init context returned to idle scheduler");
-            }
+            dispatch_task(cpu, task_state, task, sched_profile, loop_t0);
         } else {
             // 没有就绪的任务 → CPU idle
             let stage_t0 = sched_profile_start(sched_profile);
@@ -383,6 +328,105 @@ pub fn run_tasks() {
             );
             sched_record_loop_cycles(sched_profile, loop_t0);
         }
+    }
+}
+
+/// AP 调度循环只接触本地 runqueue/current、无锁 IPI deferred state，以及
+/// 任务切出后的受锁 zombie 交接。
+///
+/// AP timer 仍关闭；全局 timeout、console、net、FS、futex 和 zombie 回收继续
+/// 由 CPU0 独占。空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的
+/// doorbell 因局部 IPI source 已开启而必定使 wait 返回。
+///
+/// B19 的 AP 任务均为短生命周期 kernel-only 函数。任务执行期间没有 timer
+/// 抢占，因此 STOP 最长会延迟到该函数主动 yield 或返回；通用生产内核线程在
+/// 增加可抢占安全点之前不得复用这个受控入口。
+fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
+    let _ = crate::hal::local_irq_save();
+    loop {
+        // 短暂打开全局 IRQ，使已经 pending 的 IPI 进入 hard handler；随后
+        // 立即关中断，在 idle 栈安全点优先处理 STOP 和 deferred reason。
+        crate::hal::local_irq_restore(true);
+        let irq_was_enabled = crate::hal::local_irq_save();
+        debug_assert!(irq_was_enabled);
+        let _ = crate::smp::service_secondary_ipi_work();
+
+        // kernel-only AP 任务不参与 CPU0 的 OOM active tracker，直接从本地
+        // runqueue claim，避免 AP 为一次 fetch 进入全局 TaskManager。
+        let next_task = super::run_queue::fetch(cpu);
+        super::perf::record_schedule_loop(next_task.is_some());
+        if let Some(task) = next_task {
+            dispatch_task(cpu, task_state, task, false, 0);
+        } else {
+            // 关中断检查到空队列后再 wait；并发发布者先入队后发 IPI，
+            // 所以 check→wait 窗口内到达的 doorbell 不会丢失。
+            crate::hal::secondary_cpu_wait();
+        }
+    }
+}
+
+/// 把已由本地 runqueue claim 的任务发布到 current，并完成一次往返切换。
+///
+/// CPU0 与 AP 必须共用这个入口，避免两套 current 发布顺序逐渐分叉。
+fn dispatch_task(
+    cpu: usize,
+    task_state: &'static CpuTaskState,
+    task: Arc<TaskControlBlock>,
+    sched_profile: bool,
+    loop_t0: u64,
+) {
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    let trace_first_switch = cpu == crate::smp::BOOT_CPU_ID
+        && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
+    let stage_t0 = sched_profile_start(sched_profile);
+    // 先在不持有 processor 锁时更新任务时间并取得上下文指针，避免形成
+    // `processor -> task.inner` 的反向锁序。
+    let next_task_cx_ptr = {
+        let mut task_inner = task.acquire_inner_lock();
+        task_inner.update_process_times_schedule_in();
+        &task_inner.task_cx as *const TaskContext
+    };
+    let mut processor = task_state.processor.lock();
+    let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+    task_state.current_pid.store(task.pid(), Ordering::Relaxed);
+    task_state
+        .current_tid
+        .store(task.gettid(), Ordering::Relaxed);
+    processor.current = Some(task);
+    drop(processor);
+    sched_record_stage(
+        sched_profile,
+        &SCHED_STAGE_SWITCH_PREP_CALLS,
+        &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
+        &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
+        stage_t0,
+    );
+    if sched_profile {
+        SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
+    }
+    sched_record_loop_cycles(sched_profile, loop_t0);
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    if trace_first_switch {
+        let (resume_pc, resume_sp) = unsafe { (&*next_task_cx_ptr).bringup_resume_state() };
+        println!(
+            "[bringup][sched:01] switching idle -> init: pid={} tid={} task_cx={:#x} resume_pc={:#x} expected_pc={:#x} resume_sp={:#x}",
+            current_pid(),
+            current_tid(),
+            next_task_cx_ptr as usize,
+            resume_pc,
+            crate::hal::trap_return as usize,
+            resume_sp
+        );
+    }
+    // 两个上下文都由 current/idle 槽保持存活，且 processor 锁已经释放。
+    unsafe {
+        crate::task::perf::record_context_switch();
+        __switch(idle_task_cx_ptr, next_task_cx_ptr);
+    }
+    finish_current_switch_out(cpu);
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    if trace_first_switch {
+        println!("[bringup][sched:02] first init context returned to idle scheduler");
     }
 }
 
@@ -425,6 +469,15 @@ pub(crate) fn try_current_task() -> Result<Option<Arc<TaskControlBlock>>, ()> {
     let task_state = crate::smp::try_local_task_state().ok_or(())?;
     let processor = task_state.processor.try_lock().ok_or(())?;
     Ok(processor.current())
+}
+
+/// 精确查询指定 CPU 的 current 槽，供 SMP 所有权诊断使用。
+pub(crate) fn cpu_has_current(cpu: usize) -> bool {
+    crate::smp::task_state(cpu)
+        .processor
+        .lock()
+        .current
+        .is_some()
 }
 
 #[inline(always)]
