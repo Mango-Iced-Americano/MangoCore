@@ -7,9 +7,9 @@
 //!
 //! # Two-phase initialization
 //!
-//! 1. **Pre-heap** (`populate_memory_regions`): Populate `MEMORY_BUF` from
-//!    compile-time static configuration before `mm::init()`. FDT memory
-//!    discovery is deferred until a platform requires a dynamic RAM layout.
+//! 1. **Pre-heap** (`populate_memory_regions`): Parse only `/memory` nodes
+//!    from the DTB to populate `MEMORY_BUF`. Called before `mm::init()`.
+//!    Zero-allocation — operates directly on the raw DTB byte slice.
 //!
 //! 2. **Post-heap** (`build_platform_info`): Full FDT parse producing
 //!    `PlatformInfo` with device nodes, cmdline, etc. Called after `mm::init()`.
@@ -17,8 +17,9 @@
 mod fdt;
 mod static_provider;
 
-pub(crate) use fdt::build_platform_info;
+pub use fdt::build_platform_info;
 
+use crate::hal::boot;
 use static_provider::{FIRMWARE_RESERVED_REGIONS_FALLBACK, MEMORY_REGIONS_FALLBACK};
 
 /// Maximum number of DRAM banks supported.
@@ -59,13 +60,26 @@ impl MemoryRegionBuf {
     }
 }
 
-/// Populate MEMORY_BUF from compile-time static configuration.
+/// Only RiscvFdt protocol provides a valid DTB in a1.
+/// All other protocols (UbootGo, LoongArchLegacy, Test) must use static fallback.
+fn has_valid_dtb() -> bool {
+    let bi = boot::boot_info();
+    if bi.dtb_paddr == 0 {
+        return false;
+    }
+    matches!(bi.protocol, crate::hal::boot::BootProtocol::RiscvFdt)
+}
+
+/// Populate MEMORY_BUF from firmware data (FDT) or static fallback.
 ///
 /// Called after `mem_clear()` and `console::log_init()`, before `mm::init()`.
 /// Must NOT allocate — operates on raw bytes.
 pub fn populate_memory_regions() {
+    if has_valid_dtb() && fdt::parse_memory_regions(boot::boot_info().dtb_paddr) {
+        return;
+    }
     populate_from_static();
-    crate::println!("[firmware] Using static memory configuration");
+    crate::println!("[firmware] Using static memory configuration (no DTB or FDT parse failed)");
 }
 
 /// Return the active memory regions as a slice.

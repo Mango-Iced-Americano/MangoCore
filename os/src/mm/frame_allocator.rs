@@ -251,6 +251,20 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
     exclusions.push((kernel_start, kernel_end));
     exclusions.sort_unstable_by_key(|range| range.0);
 
+    // Firmware may place its DTB inside the kernel image's BSS range. Both
+    // ranges describe unavailable pages, so coalesce them before subtraction.
+    let mut merged_len = 0;
+    for index in 0..exclusions.len() {
+        let (start, end) = exclusions[index];
+        if merged_len != 0 && start <= exclusions[merged_len - 1].1 {
+            exclusions[merged_len - 1].1 = exclusions[merged_len - 1].1.max(end);
+        } else {
+            exclusions[merged_len] = (start, end);
+            merged_len += 1;
+        }
+    }
+    exclusions.truncate(merged_len);
+
     let mut previous_exclusion_end = 0usize;
     for &(start, end) in &exclusions {
         assert!(start < end, "empty physical memory exclusion");

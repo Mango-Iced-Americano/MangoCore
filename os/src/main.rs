@@ -91,6 +91,9 @@ fn mem_clear() {
 pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
     crate::hal::boot::save_boot_info();
     bootstrap_init();
+    // QEMU may place the DTB inside the kernel's large BSS image. Parse and
+    // retain the pre-heap memory map before clearing that physical range.
+    crate::hal::firmware::populate_memory_regions();
     mem_clear();
     console::log_init();
     trace::init();
@@ -101,7 +104,6 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
         bi.protocol, bi.hart_id, bi.dtb_paddr
     );
     println!("[kernel] Console initialized.");
-    crate::hal::firmware::populate_memory_regions();
     mm::init();
     println!("[kernel] Hello, world!");
     crate::hal::platform::init_platform_info();
