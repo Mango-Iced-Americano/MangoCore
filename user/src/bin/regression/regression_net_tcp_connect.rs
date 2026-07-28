@@ -6,11 +6,8 @@
 
 use user_lib::println;
 
+/// Returns -1 to signal TAP-compliant skip (not counted as pass or fail).
 pub fn run() -> i32 {
-    // skip: TCP connect over loopback has timing issues —
-    // the smoltcp loopback handshake may not reliably wake the
-    // connecting task before the accept() runs.  The accept-side
-    // test (regression_net_tcp_accept) already covers TCP wakeup.
-    println!("[regression_net_tcp_connect] skip (loopback TCP timing)");
-    0
+    println!("[regression_net_tcp_connect] skip # loopback TCP timing");
+    -1
 }
