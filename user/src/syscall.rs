@@ -32,6 +32,7 @@ const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_SIGNALFD4: usize = 74;
+const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -73,6 +74,10 @@ const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
+const SYSCALL_MSGGET: usize = 186;
+const SYSCALL_MSGCTL: usize = 187;
+const SYSCALL_MSGRCV: usize = 188;
+const SYSCALL_MSGSND: usize = 189;
 const SYSCALL_SEMGET: usize = 190;
 const SYSCALL_SEMCTL: usize = 191;
 const SYSCALL_SEMOP: usize = 193;
@@ -234,6 +239,10 @@ pub fn sys_getrandom(buffer: &mut [u8], flags: u32) -> isize {
 
 pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
     syscall(SYSCALL_WRITE, [fd, buffer.as_ptr() as usize, buffer.len()])
+}
+
+pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
+    syscall(SYSCALL_FCNTL, [fd, cmd as usize, arg])
 }
 
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
@@ -684,6 +693,20 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
     syscall(SYSCALL_FTRUNCATE, [fd, length as usize, 0])
 }
 
+pub fn sys_splice(
+    fd_in: usize,
+    off_in: *mut usize,
+    fd_out: usize,
+    off_out: *mut usize,
+    len: usize,
+    flags: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_SPLICE,
+        [fd_in, off_in as usize, fd_out, off_out as usize, len, flags as usize],
+    )
+}
+
 pub fn sys_sync() -> isize {
     syscall(SYSCALL_SYNC, [0, 0, 0])
 }
@@ -740,6 +763,34 @@ pub fn sys_nanosleep(req: &TimeSpec, rem: &mut TimeSpec) -> isize {
 
 pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
     syscall(SYSCALL_SEMGET, [key as usize, nsems, semflg])
+}
+
+pub fn sys_msgget(key: isize, msgflg: usize) -> isize {
+    syscall(SYSCALL_MSGGET, [key as usize, msgflg, 0])
+}
+
+pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
+    syscall(SYSCALL_MSGCTL, [msqid as usize, cmd, buf])
+}
+
+pub fn sys_msgsnd(msqid: i32, msgp: *const u8, msgsz: usize, msgflg: usize) -> isize {
+    syscall6(
+        SYSCALL_MSGSND,
+        [msqid as usize, msgp as usize, msgsz, msgflg, 0, 0],
+    )
+}
+
+pub fn sys_msgrcv(
+    msqid: i32,
+    msgp: *mut u8,
+    msgsz: usize,
+    msgtyp: isize,
+    msgflg: usize,
+) -> isize {
+    syscall6(
+        SYSCALL_MSGRCV,
+        [msqid as usize, msgp as usize, msgsz, msgtyp as usize, msgflg, 0],
+    )
 }
 
 pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
