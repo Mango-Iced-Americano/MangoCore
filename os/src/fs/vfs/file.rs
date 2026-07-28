@@ -24,7 +24,7 @@ use super::event::EventWaitQueue;
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::config::SYSTEM_FD_LIMIT;
 use crate::mm::UserBuffer;
-use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
+use crate::task::{current_task_ref, register_writable_inode, unregister_writable_inode, WaitQueue};
 
 // ── Globally-unique open file id counter ────────────────────────────────
 
@@ -707,15 +707,23 @@ impl fmt::Debug for File {
 ///
 /// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
 /// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
+///
+/// 当 `_event_queue` 为 `Some` 时，优先通过它访问 `WaitQueue`（动态解析路径，
+/// 如 SignalFd 在 fork 后需要从当前进程获取正确的 EventWaitQueue）。
 pub struct PollWaitQueue {
-    _inode: Arc<dyn IndexNode>,
+    _inode: Option<Arc<dyn IndexNode>>,
+    _event_queue: Option<Arc<EventWaitQueue>>,
     queue: *const Mutex<WaitQueue>,
 }
 
 impl PollWaitQueue {
     pub fn queue(&self) -> &Mutex<WaitQueue> {
-        // `PollWaitQueue` keeps the inode Arc alive, so the queue reference
-        // returned by `IndexNode` remains valid for this poll wait cycle.
+        // Dynamic resolution path: use the owned Arc<EventWaitQueue>.
+        if let Some(ref eq) = self._event_queue {
+            return eq.wait_queue();
+        }
+        // Static path: the raw pointer was obtained from the inode and is
+        // stable for the lifetime of the Arc stored in `_inode`.
         // Safety: `self._inode` is an `Arc` that guarantees the `IndexNode`
         // is alive. The `queue` pointer was obtained from that inode and is
         // stable for the lifetime of the `Arc`.
@@ -729,9 +737,12 @@ impl PollWaitQueue {
 /// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
 /// 实现 `Send + Sync`：`Arc` 提供线程安全的引用计数，`queue` 指向的
 /// `EventWaitQueue` 由 inode 内部管理，生命周期与 `Arc` 绑定。
+///
+/// 当 `_event_queue` 为 `Some` 时，优先通过它访问 `EventWaitQueue`（动态解析路径）。
 #[derive(Clone)]
 pub struct EventQueueHandle {
-    _inode: Arc<dyn IndexNode>,
+    _inode: Option<Arc<dyn IndexNode>>,
+    _event_queue: Option<Arc<EventWaitQueue>>,
     queue: *const EventWaitQueue,
 }
 
@@ -745,8 +756,12 @@ unsafe impl Sync for EventQueueHandle {}
 
 impl EventQueueHandle {
     pub fn queue(&self) -> &EventWaitQueue {
-        // `EventQueueHandle` keeps the inode Arc alive, so the queue reference
-        // returned by `IndexNode` remains valid for this poll/epoll cycle.
+        // Dynamic resolution path: use the owned Arc<EventWaitQueue>.
+        if let Some(ref eq) = self._event_queue {
+            return eq.as_ref();
+        }
+        // Static path: the raw pointer was obtained from the inode and is
+        // stable for the lifetime of the Arc stored in `_inode`.
         // Safety: same invariant as `PollWaitQueue` — `_inode` is an `Arc`
         // guaranteeing the `EventWaitQueue` is alive and the pointer is stable.
         unsafe { &*self.queue }
@@ -1527,15 +1542,26 @@ impl File {
     }
 
     pub fn read_wait_queue(&self) -> Option<PollWaitQueue> {
+        // Dynamic resolution for SignalFd: resolve EventWaitQueue from the
+        // calling process at wait time, so fork() does not mutate shared state.
+        if let Some(queue) = self.resolve_signal_event_queue() {
+            return Some(PollWaitQueue {
+                _inode: None,
+                _event_queue: Some(queue),
+                queue: core::ptr::null(),
+            });
+        }
         if let Some(queue) = self.inode.read_event_queue() {
             return Some(PollWaitQueue {
-                _inode: self.inode.clone(),
+                _inode: Some(self.inode.clone()),
+                _event_queue: None,
                 queue: queue.wait_queue() as *const Mutex<WaitQueue>,
             });
         }
         let queue = self.inode.read_wait_queue()? as *const Mutex<WaitQueue>;
         Some(PollWaitQueue {
-            _inode: self.inode.clone(),
+            _inode: Some(self.inode.clone()),
+            _event_queue: None,
             queue,
         })
     }
@@ -1543,21 +1569,32 @@ impl File {
     pub fn write_wait_queue(&self) -> Option<PollWaitQueue> {
         if let Some(queue) = self.inode.write_event_queue() {
             return Some(PollWaitQueue {
-                _inode: self.inode.clone(),
+                _inode: Some(self.inode.clone()),
+                _event_queue: None,
                 queue: queue.wait_queue() as *const Mutex<WaitQueue>,
             });
         }
         let queue = self.inode.write_wait_queue()? as *const Mutex<WaitQueue>;
         Some(PollWaitQueue {
-            _inode: self.inode.clone(),
+            _inode: Some(self.inode.clone()),
+            _event_queue: None,
             queue,
         })
     }
 
     pub fn read_event_queue(&self) -> Option<EventQueueHandle> {
+        // Dynamic resolution for SignalFd.
+        if let Some(queue) = self.resolve_signal_event_queue() {
+            return Some(EventQueueHandle {
+                _inode: None,
+                _event_queue: Some(queue),
+                queue: core::ptr::null(),
+            });
+        }
         let queue = self.inode.read_event_queue()? as *const EventWaitQueue;
         Some(EventQueueHandle {
-            _inode: self.inode.clone(),
+            _inode: Some(self.inode.clone()),
+            _event_queue: None,
             queue,
         })
     }
@@ -1565,9 +1602,25 @@ impl File {
     pub fn write_event_queue(&self) -> Option<EventQueueHandle> {
         let queue = self.inode.write_event_queue()? as *const EventWaitQueue;
         Some(EventQueueHandle {
-            _inode: self.inode.clone(),
+            _inode: Some(self.inode.clone()),
+            _event_queue: None,
             queue,
         })
+    }
+
+    /// If the inode is a SignalFd, resolve the EventWaitQueue from the calling
+    /// process's sighand. This avoids storing a per-process queue in the shared
+    /// SignalFd inode, which would be corrupted on fork().
+    fn resolve_signal_event_queue(&self) -> Option<Arc<EventWaitQueue>> {
+        if self
+            .inode
+            .as_any_ref()
+            .downcast_ref::<crate::syscall::SignalFd>()
+            .is_some()
+        {
+            return current_task_ref().map(|t| t.process.signal_event_queue());
+        }
+        None
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────

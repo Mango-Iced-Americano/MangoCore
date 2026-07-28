@@ -1111,3 +1111,41 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   应保持 O(n)，orphan chain 的 n 是同时存在的 zero-link open inode 数，不是全盘 inode 数。
 - **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、
   `dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、`dependency/lwext4_rust/src/blockdev.rs`
+
+## Fork 后共享 inode 状态突变
+
+### 问题特征
+
+fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Arc），但 inode 内部存储了 per-process 状态（如 `EventWaitQueue`）。子进程在 fork 后尝试"修正"该状态（如 rebind event queue），实际上突变了父子共享的 inode，导致父进程行为异常。
+
+典型场景：
+- signalfd 存储了进程的 `signal_event_queue`，fork 后子进程通过 `rebind_event_queue()` 将其指向自己的队列，但该操作同时改变了父进程的 signalfd。
+- 任何在 `Arc<dyn IndexNode>` 中存储 per-process 指针/引用的 inode 类型都可能出现此问题。
+
+### 根因
+
+`FdTable::try_clone()` 克隆 `Arc<File>` 而非深拷贝 inode。这是正确的 POSIX 语义（dup'd fd 共享文件状态），但 inode 内部不应存储 per-process 状态。
+
+### 修复模式
+
+**不要突变共享状态。改为在访问时从当前进程动态解析。**
+
+1. Inode 只存储 per-inode 的不可变元数据（mask、flags 等）。
+2. 需要 per-process 状态的访问点（wait queue、event queue）在 `File` 层动态解析：检查 inode 类型，从 `current_task().process` 获取正确状态。
+3. `PollWaitQueue` 和 `EventQueueHandle` 支持两种模式：
+   - 静态模式：持有 `Arc<dyn IndexNode>` + 指向 inode 内部队列的原始指针（传统路径）。
+   - 动态模式：持有 `Option<Arc<EventWaitQueue>>`，通过 Arc 直接访问（无原始指针）。
+4. 移除 fork 路径中所有"修正"共享 inode 状态的代码。
+
+### 教训
+
+- 不要在共享 inode 中存储 per-process 状态。
+- fork 路径中不应突变任何通过 `Arc<File>` 共享的对象。
+- 动态解析（从 current_task 获取）比 fork-time rebind 更安全、更简单。
+
+### 相关文件
+
+- `os/src/fs/vfs/file.rs` — `PollWaitQueue`、`EventQueueHandle`、`File::read_wait_queue/read_event_queue`
+- `os/src/syscall/process/signal.rs` — `SignalFd`
+- `os/src/syscall/fs/sys_read.rs` — signalfd 阻塞读路径
+- `os/src/task/task.rs` — clone 路径（移除了 rebind 循环）

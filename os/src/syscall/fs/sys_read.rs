@@ -24,11 +24,14 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let is_nonblock = file.is_nonblock();
     if is_nonblock {
         read_into_user(&file, token, buf, count)
-    } else if let Some(signalfd) = file
+    } else if file
         .inode_as_any_ref()
         .downcast_ref::<crate::syscall::SignalFd>()
+        .is_some()
     {
-        let event_queue = signalfd.event_queue();
+        // Resolve the EventWaitQueue from the calling process dynamically,
+        // so fork() does not mutate shared SignalFd state.
+        let event_queue = task.process.signal_event_queue();
         match WaitQueue::wait_until_interruptible(event_queue.wait_queue(), || {
             let ret = read_into_user(&file, token, buf, count);
             if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
