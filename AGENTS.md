@@ -141,9 +141,10 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
 ### 任务/进程
 
 SMP 过渡期的安全点抢占调度：current 槽、idle context 和 `RunQueue` 已按 CPU
-拆分，AP 在 scheduler-ready 后安装内核页表并进入本地调度循环。当前只有 focused
-ktest 的短生命周期 kernel-only 任务可显式远程入队；生产新任务、blocked wake 和
-用户任务仍固定 CPU0。不要据此声称用户迁移、通用远程唤醒或 MM TLB shootdown 已完成。
+拆分，AP 在 scheduler-ready 后安装内核页表并进入本地调度循环。focused ktest 的
+短生命周期 kernel-only 任务可显式远程入队，并可在真实 WaitQueue 阻塞后回到最近运行
+CPU；普通新任务和用户任务仍固定 CPU0。不要据此声称用户迁移、affinity、通用内核线程
+生命周期或 MM TLB shootdown 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

@@ -318,14 +318,21 @@ impl TaskManager {
         sub_interruptible_count(removed);
         removed != 0
     }
-    fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
+    fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> (usize, usize) {
         let mut count = 0;
+        let mut targets = 0usize;
         for task in tasks.into_iter().rev() {
-            if self.try_wake_interruptible(task).is_ok() {
-                count += 1;
+            match self.try_wake_interruptible(task) {
+                Ok(target) => {
+                    count += 1;
+                    if let Some(cpu) = target {
+                        targets |= 1usize << cpu;
+                    }
+                }
+                Err(WaitQueueError::AlreadyWaken) => {}
             }
         }
-        count
+        (count, targets)
     }
     /// 从 interruptible registry 中移除一组任务。
     fn remove_interruptible_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
@@ -349,17 +356,11 @@ impl TaskManager {
             .count()
             .min(u16::MAX as usize) as u16
     }
-    /// 将任务从 interruptible registry 移动到目标 CPU 的 runqueue。
-    ///
-    /// # Semantics
-    ///
-    /// `Blocking -> Running` 或 `Blocked -> Queued(CPU0)` 的 CAS 与容器移动
-    /// 均在 `TASK_MANAGER -> CPU0 RunQueue` 固定锁序内完成；重复唤醒不会再次入队。
-    pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) -> bool {
-        crate::task::perf::record_taskq_wake_interruptible();
-        self.try_wake_interruptible(task).is_ok()
-    }
     /// 尝试将任务从 interruptible registry 移动到目标 CPU 的 runqueue。
+    ///
+    /// `Blocking(cpu) -> Running(cpu)` 表示唤醒抢在任务切离 CPU 前发生，不需要
+    /// 发布 runqueue；`Blocked -> Queued(target)` 返回目标 CPU，供外层解锁后
+    /// 发送 RESCHEDULE。重复唤醒不会再次入队。
     ///
     /// # Errors
     ///
@@ -368,10 +369,10 @@ impl TaskManager {
     /// # Locking
     ///
     /// 调用方已持有 `TASK_MANAGER` 锁；不得在外部提前修改调度状态。
-    pub fn try_wake_interruptible(
+    fn try_wake_interruptible(
         &mut self,
         task: Arc<TaskControlBlock>,
-    ) -> Result<(), WaitQueueError> {
+    ) -> Result<Option<usize>, WaitQueueError> {
         loop {
             match task.task_status() {
                 TaskStatus::Blocking(cpu) => {
@@ -392,10 +393,10 @@ impl TaskManager {
                             task.gettid()
                         );
                     }
-                    return Ok(());
+                    return Ok(None);
                 }
                 TaskStatus::Blocked => {
-                    let target_cpu = crate::smp::BOOT_CPU_ID;
+                    let target_cpu = select_wake_cpu(&task);
                     if !self.remove_interruptible(&task) {
                         panic!(
                             "woken Blocked task is absent from interruptible registry: tid={}",
@@ -405,7 +406,7 @@ impl TaskManager {
                     // 固定锁序：TASK_MANAGER -> 一个目标 RunQueue。状态 CAS 与
                     // runnable 容器插入由 runqueue 入口在同一锁域提交。
                     super::run_queue::enqueue_woken(task, target_cpu);
-                    return Ok(());
+                    return Ok(Some(target_cpu));
                 }
                 TaskStatus::Queued(_) | TaskStatus::Running(_) => {
                     crate::task::perf::record_taskq_dup_enqueue();
@@ -430,8 +431,38 @@ impl TaskManager {
     }
 }
 
+/// 优先复用任务最近运行 CPU；当前没有 CPU 热插拔，回退只防御损坏的提示
+/// 或终止阶段已经离线的目标。普通用户任务从未离开 CPU0，因此行为不变。
+fn select_wake_cpu(task: &TaskControlBlock) -> usize {
+    let cpu = task.last_cpu();
+    let bit = (cpu < crate::smp::configured_cpu_count()).then(|| 1usize << cpu);
+    if bit.is_some_and(|bit| {
+        crate::smp::online_cpu_mask() & bit != 0
+            && crate::smp::scheduler_cpu_mask() & bit != 0
+            && crate::smp::stopped_cpu_mask() & bit == 0
+    }) {
+        cpu
+    } else {
+        crate::smp::BOOT_CPU_ID
+    }
+}
+
+/// 在所有调度容器锁释放后敲响远程 doorbell。
+fn notify_wake_targets(targets: usize) {
+    let remote = targets
+        & crate::smp::online_cpu_mask()
+        & !(1usize << crate::smp::cpu_id());
+    if remote != 0 {
+        crate::smp::request_reschedule_mask(remote).unwrap_or_else(|error| {
+            panic!("failed to reschedule woken CPUs {:#x}: {}", remote, error)
+        });
+    }
+}
+
 fn enqueue_ready_batch(tasks: Vec<Arc<TaskControlBlock>>) -> usize {
-    TASK_MANAGER.lock().enqueue_ready_batch(tasks)
+    let (count, targets) = TASK_MANAGER.lock().enqueue_ready_batch(tasks);
+    notify_wake_targets(targets);
+    count
 }
 
 /// 更新 owner runqueue 中任务的 nice 快速路径计数。
@@ -592,7 +623,17 @@ pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
 /// 若任务仍为 `Blocking`，取消本次阻塞；若已为 `Blocked`，则唯一地移入
 /// ready queue。返回值表示本次调用是否实际赢得唤醒权。
 pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
-    TASK_MANAGER.lock().wake_interruptible(task)
+    crate::task::perf::record_taskq_wake_interruptible();
+    let target = TASK_MANAGER.lock().try_wake_interruptible(task);
+    match target {
+        Ok(target) => {
+            if let Some(cpu) = target {
+                notify_wake_targets(1usize << cpu);
+            }
+            true
+        }
+        Err(WaitQueueError::AlreadyWaken) => false,
+    }
 }
 
 /// 从调度队列中移除一组任务。
@@ -809,7 +850,7 @@ impl WaitQueue {
                 super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked => {
                     task.wait_timer_generation
                         .fetch_add(1, AtomicOrdering::Relaxed);
-                    let _ = TASK_MANAGER.lock().try_wake_interruptible(task);
+                    let _ = wake_interruptible(task);
                     return 1;
                 }
                 super::TaskStatus::Queued(_) | super::TaskStatus::Running(_) => {

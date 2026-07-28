@@ -150,6 +150,11 @@ pub struct TaskControlBlock {
     /// 调度状态的唯一真值。状态和 CPU owner 编码在同一个原子字中，避免
     /// `task.inner` 与运行队列分别维护状态而产生短暂漂移。
     sched_state: AtomicUsize,
+    /// 最近一次真正取得该任务的 CPU。
+    ///
+    /// `Blocked` 不拥有 CPU，这个字段只为重新唤醒提供局部性提示，不参与
+    /// runnable/current 唯一所有权判定；真实 owner 始终由 `sched_state` 给出。
+    last_cpu: AtomicUsize,
     // 可共享&可变字段
     /// I/O 等待定时器是否已挂入 KERNEL_TIMER_QUEUE。
     /// 为 true 时，wait_io_core_with_queue 不再添加第二个定时器（Option B），
@@ -691,6 +696,14 @@ impl TaskControlBlock {
     pub fn task_status(&self) -> TaskStatus {
         TaskStatus::decode(self.sched_state.load(Ordering::Acquire))
     }
+    /// 返回最近一次运行 CPU，供 blocked wake 选择原 CPU。
+    pub(crate) fn last_cpu(&self) -> usize {
+        self.last_cpu.load(Ordering::Acquire)
+    }
+    /// 在任务成为本 CPU current 前记录运行位置。
+    pub(crate) fn note_running_cpu(&self, cpu: usize) {
+        self.last_cpu.store(cpu, Ordering::Release);
+    }
     /// 尝试完成一次精确的调度状态迁移。
     ///
     /// AcqRel 同时发布旧 owner 的写入，并让新 owner 观察到此前发布的数据。
@@ -1008,6 +1021,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
+            last_cpu: AtomicUsize::new(usize::MAX),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1146,6 +1160,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
+            last_cpu: AtomicUsize::new(usize::MAX),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1716,6 +1731,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
+            last_cpu: AtomicUsize::new(usize::MAX),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),

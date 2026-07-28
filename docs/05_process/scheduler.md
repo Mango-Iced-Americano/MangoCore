@@ -22,8 +22,9 @@ tags: [process, scheduler, task-manager, processor]
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
 调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
-拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；新任务/唤醒任务仍固定
-进入 CPU0，只有 focused ktest 的短 kernel-only 任务可显式远程入队。
+拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通新任务仍固定
+进入 CPU0，focused ktest 的短 kernel-only 任务可显式远程入队，并能在阻塞后
+由统一 wake 路径回到最近运行 CPU。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -55,6 +56,10 @@ pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new())
 `nr_running`。这里的计数只表示队列成员，不包含 current；后续负载选择必须再计入
 current 槽，不能把它直接解释为完整 CPU load。
 
+TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的运行位置。
+它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current
+归属始终由 `sched_state` 和对应 CPU 的容器共同决定。
+
 ## 3. RunQueue 选择策略
 
 `RunQueue::pop_next()` 有两个路径：
@@ -68,12 +73,13 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。B19 的 AP 队列只接收受控测试任务，生产 owner 仍固定 CPU0。
+调度域。B20 的 AP 队列仍只接收受控 kernel-only 任务；普通生产任务 owner 固定 CPU0。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
-不能直接 push/pop。B19 只通过 `spawn_ktest_task_on()` 验证显式远程执行；生产目标
-选择、blocked wake、affinity、迁移和 work stealing 仍未开放。
+不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
+这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
+通用新任务目标选择、affinity、迁移和 work stealing 仍未开放。
 
 ## 4. Processor
 
@@ -264,10 +270,13 @@ idle: clear current -> Blocking(cpu) -> Blocked
 
 1. 若任务尚未切离 CPU，在 `TASK_MANAGER` 锁内 CAS
    `Blocking(cpu) -> Running(cpu)`，从 registry 移除，但不加入 ready queue。
-2. 若任务已经切离 CPU，持 `TASK_MANAGER` 从 registry 移除，再按固定锁序取得
-   CPU0 的单个 `RunQueue`，提交 `Blocked -> Queued(CPU0)` 并加入队首。
+2. 若任务已经切离 CPU，持 `TASK_MANAGER` 从 registry 移除，优先选择仍 online、
+   已进入 scheduler 且未 STOP 的 `last_cpu`，否则回退 CPU0；随后按固定锁序取得
+   该目标的单个 `RunQueue`，提交 `Blocked -> Queued(target)` 并加入队首。
 3. CAS 失败说明其他路径已经唤醒或任务已不再可唤醒，返回
    `AlreadyWaken`，绝不再次插入队列。
+4. 单个 wake 返回目标 CPU，批量 wake 聚合目标 mask；外层释放 `TASK_MANAGER` 和
+   runqueue 后才发送 `RESCHEDULE`。本地目标不发 IPI，远端 AP 由 doorbell 退出 idle。
 
 `WaitQueue::wake_*()` 只筛选原子状态并把候选交给调度器，不能在外部先写状态。
 `TASK_MANAGER -> 单个 RunQueue` 是唯一允许的嵌套顺序；任何路径都不得反向取锁或
@@ -276,6 +285,7 @@ idle: clear current -> Blocking(cpu) -> Blocked
 ## 12.1 状态与队列不变量
 
 - `sched_state` 是调度状态唯一真值，`task.inner` 不保留影子字段；
+- `last_cpu` 只是无 owner 含义的唤醒提示，不能代替 `Queued/Running(cpu)`；
 - 一个任务最多属于一个 per-CPU runqueue 或一个 current slot；interruptible registry
   只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
 - 本 CPU `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit
@@ -286,6 +296,7 @@ idle: clear current -> Blocking(cpu) -> Blocked
 - runqueue 锁内不获取 `task.inner`；公平选择只读取原子 nice/vruntime hint。
 - publish/fetch/yield 只锁一个 runqueue；Blocked wake 和批量 remove 才按固定顺序
   `TASK_MANAGER -> 单个 RunQueue`，并且锁不跨 context switch、析构或等待点。
+- 远程 wake 的 IPI 只能在 `TASK_MANAGER` 与所有目标 runqueue 都释放后发送。
 
 ## 13. OOM 回收调度协作
 

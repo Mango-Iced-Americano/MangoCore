@@ -267,10 +267,12 @@ pub struct KernelTest {
 因此 `KTEST=all` 不会因 SMP STOP 提前破坏后续 MM/FS 测试，
 `KREPEAT>1` 也不会尝试再次唤醒已经停止的 AP。
 
-B19 的 SMP 组在 `KREPEAT=2` 时为 23 项：11 个普通用例各执行两轮，STOP terminal
+B20 的 SMP 组在 `KREPEAT=2` 时为 25 项：12 个普通用例各执行两轮，STOP terminal
 只执行一次。除既有 online/idle/IPI/timer/current owner 外，还必须看到两轮
-`configured_cpus_enter_scheduler` 和 `remote_kernel_tasks_run_on_target_cpus` 通过；
-远程用例断言每个 AP 的任务恰好执行一次、current 与 `Running(cpu)` 一致、退出后队列为空。
+`configured_cpus_enter_scheduler`、`remote_kernel_tasks_run_on_target_cpus` 和
+`blocked_kernel_tasks_wake_on_last_cpu` 通过。后者让每个 AP 任务进入真实
+Completion/WaitQueue，CPU0 在确认所有任务均为 `Blocked` 且离开 current/runqueue 后
+一次批量 complete；恢复任务必须仍由原 AP 的 `Running(cpu)` current 唯一拥有并正常退出。
 
 ### TAP 输出格式
 

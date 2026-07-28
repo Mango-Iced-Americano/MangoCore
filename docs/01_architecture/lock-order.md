@@ -70,9 +70,9 @@ B15 尚未拆分 per-CPU runqueue 时，ready/interruptible 容器曾由单一
 `TASK_MANAGER` 保护。该实现只用于说明状态机的演进背景，已由 B18 的 3.3 节取代，
 不得再作为新增调用路径的锁序依据。
 
-WaitQueue 的 `wake_*` 当前以 `WaitQueue -> TASK_MANAGER` 的单向顺序调用；反向获取
-不存在，且该路径不获取 `task.inner`。Phase 3 拆分目标 runqueue 时必须把候选任务
-收集与远程入队分段，落实上一节的最终部分序，不能照搬这个全局锁过渡实现。
+WaitQueue 的 `wake_*` 以 `WaitQueue -> TASK_MANAGER -> 单个 RunQueue` 的单向顺序
+调用；反向获取不存在，且该路径不获取 `task.inner`。B20 已把 IPI 通知与容器迁移
+分段：锁内只完成 registry/runqueue 交接，释放全部调度锁后才敲远程 doorbell。
 
 B15 新增的 publish、wake、block 和 switch-out 状态迁移都不在 `TASK_MANAGER`
 内获取 `task.inner`。当时登记的 nice-aware 锁内读取技术债已在 B18 通过原子
@@ -128,6 +128,22 @@ AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 
 
 这个批次没有两个 runqueue 的同时持有、迁移或 work stealing。AP 任务入口也不得
 访问尚未审计的 console、FS、NET、设备和用户 MM；这些能力约束不能用锁本身替代。
+
+### 3.5 B20 远程 blocked wake 约束
+
+B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU；任务真正阻塞后，
+统一 wake 入口按以下顺序重新发布：
+
+1. 持有 `TASK_MANAGER`，确认状态为 `Blocked` 并从 interruptible registry 移除；
+2. 选择仍 online、已进入 scheduler 且未 STOP 的 `last_cpu`，无效时回退 CPU0；
+3. 在 `TASK_MANAGER -> 一个目标 RunQueue` 锁序下提交 `Blocked -> Queued(target)`；
+4. 释放目标 RunQueue，再释放 `TASK_MANAGER`；批量路径只保留目标 CPU bitmask；
+5. 外层排除本 CPU后发送 `RESCHEDULE`，IPI handler 只置 per-CPU 原子提示。
+
+`Blocking(cpu)` 的提前 wake 仍只恢复 `Running(cpu)`，不入 runqueue、不发 IPI；idle
+侧随后把它重新排入本地队列。批量 wake 每次调用 `enqueue_woken()` 都在函数返回前
+释放该目标队列，因此循环不会同时持有两个 runqueue。当前该远程能力只对受控
+kernel-only AP 任务完成验证，不代表用户 MM、affinity 或通用迁移已经安全。
 
 ## 4. 永久禁止的组合
 

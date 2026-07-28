@@ -48,7 +48,8 @@ firmware / QEMU
 CPU0 发起的 AP STOP/ack 终态协议。CPU0 的用户 syscall 已在完整 trap
 frame 内开放受控 timer/IPI 窗口。B19 又建立 scheduler-ready 屏障和 AP 本地
 调度循环，但只允许 focused ktest 的短 kernel-only 任务显式进入 AP；AP 不访问
-文件系统、网络、设备或用户 MM。生产任务和 blocked wake 仍由 CPU0 独占。
+文件系统、网络、设备或用户 MM。B20 允许这些受控任务阻塞后回到最近运行 AP；
+普通新任务和用户任务仍由 CPU0 独占。
 
 ## 启动栈与 BSS 边界
 

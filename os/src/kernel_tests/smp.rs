@@ -15,9 +15,14 @@ static SCHED_STATE_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_TASK_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_TASK_RUNS: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+static AP_BLOCKED_WAKE_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static AP_BLOCKED_WAKE_PHASE: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
+        Mutex::new(None);
+    static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     /// Phase 4 的 kernel-global shootdown 完成前，不释放曾在 AP 使用过的动态
     /// kernel stack。终态 STOP 后机器立即关机，因此这里保留到本次 ktest 结束。
@@ -68,6 +73,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::remote_kernel_tasks_run_on_target_cpus",
             remote_kernel_tasks_run_on_target_cpus,
+        ),
+        KernelTest::new(
+            "smp::blocked_kernel_tasks_wake_on_last_cpu",
+            blocked_kernel_tasks_wake_on_last_cpu,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -578,6 +587,95 @@ fn remote_kernel_tasks_run_on_target_cpus() -> Result<(), &'static str> {
             return Err("AP runqueue retained a completed kernel task");
         }
     }
+    AP_TASK_RETAINED
+        .lock()
+        .extend(tasks.into_iter().map(|(_, task)| task));
+    Ok(())
+}
+
+/// AP 任务走真实 Completion/WaitQueue 阻塞路径；恢复后必须仍由原 CPU 唯一拥有。
+fn wait_for_remote_completion() {
+    let origin = crate::smp::cpu_id();
+    let completion = AP_BLOCKED_WAKE_COMPLETION
+        .lock()
+        .as_ref()
+        .expect("AP blocked-wake completion missing")
+        .clone();
+    AP_BLOCKED_WAKE_PHASE[origin].store(1, Ordering::Release);
+    completion.wait_uninterruptible();
+
+    let resumed = crate::smp::cpu_id();
+    let owner_is_origin = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(origin))
+        .unwrap_or(false);
+    if resumed != origin || !owner_is_origin {
+        AP_BLOCKED_WAKE_ERRORS.fetch_or(1usize << origin, Ordering::Release);
+    }
+    AP_BLOCKED_WAKE_PHASE[origin].store(2, Ordering::Release);
+}
+
+/// 一次 `Completion::complete()` 批量唤醒所有 AP，覆盖生产 batch wake、
+/// `Blocked -> Queued(last_cpu)` 和释放调度锁后广播 RESCHEDULE 的完整链路。
+fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("blocked-wake test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    AP_BLOCKED_WAKE_ERRORS.store(0, Ordering::Release);
+    for phase in &AP_BLOCKED_WAKE_PHASE {
+        phase.store(0, Ordering::Release);
+    }
+    let completion = Arc::new(crate::task::Completion::new());
+    *AP_BLOCKED_WAKE_COMPLETION.lock() = Some(completion.clone());
+
+    let mut tasks = Vec::new();
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        tasks.push((
+            cpu,
+            crate::task::spawn_ktest_task_on(cpu, wait_for_remote_completion),
+        ));
+    }
+
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while !tasks.iter().all(|(cpu, task)| {
+        AP_BLOCKED_WAKE_PHASE[*cpu].load(Ordering::Acquire) == 1
+            && task.task_status() == crate::task::TaskStatus::Blocked
+            && !crate::task::processor::cpu_has_current(*cpu)
+            && crate::task::run_queue_count(*cpu) == 0
+    }) {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP tasks did not fully leave their CPUs before wake");
+        }
+        core::hint::spin_loop();
+    }
+
+    if !completion.complete() {
+        return Err("first completion did not publish wakeup");
+    }
+    let wake_deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while !tasks.iter().all(|(cpu, task)| {
+        AP_BLOCKED_WAKE_PHASE[*cpu].load(Ordering::Acquire) == 2
+            && task.task_status() == crate::task::TaskStatus::Zombie
+            && !crate::task::processor::cpu_has_current(*cpu)
+    }) {
+        if crate::hal::get_time() >= wake_deadline {
+            return Err("remotely woken AP tasks did not finish before timeout");
+        }
+        core::hint::spin_loop();
+    }
+
+    if AP_BLOCKED_WAKE_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("blocked AP task resumed on the wrong CPU or owner");
+    }
+    if completion.complete() {
+        return Err("duplicate completion attempted a second wakeup");
+    }
+    *AP_BLOCKED_WAKE_COMPLETION.lock() = None;
     AP_TASK_RETAINED
         .lock()
         .extend(tasks.into_iter().map(|(_, task)| task));

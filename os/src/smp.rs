@@ -620,7 +620,10 @@ pub fn release_secondary_schedulers() {
     }
 }
 
-fn request_reschedule_mask(targets: usize) -> Result<(), isize> {
+/// 批量通知已经获得 runnable 任务的 CPU。
+///
+/// 调用者必须先释放 runqueue/TASK_MANAGER 锁，再调用本入口敲 doorbell。
+pub(crate) fn request_reschedule_mask(targets: usize) -> Result<(), isize> {
     send_ipi_mask(targets, IpiReason::RESCHEDULE)
 }
 

@@ -16,7 +16,8 @@ MangoCore 的执行实体分为线程级 `TaskControlBlock` 和进程级 `Proces
 调度器位于 `task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。每个 CPU
 拥有独立 RunQueue、current 槽和 idle context；全局 TaskManager 只保留
 interruptible/zombie/timer registry。AP 已进入精简本地调度循环，但当前只有 focused
-ktest 的短 kernel-only 任务可显式远程入队；生产任务和 blocked wake 仍固定 CPU0。
+ktest 的短 kernel-only 任务可显式远程入队，并可在阻塞后由统一 wake 路径重新发布到
+最近运行的 AP；普通新任务和用户任务仍固定 CPU0。
 默认 nice 为 0 的本地队列按 FIFO 取任务；存在非零 nice 任务时进入简化公平选择路径。
 
 ## 依据范围
@@ -72,8 +73,8 @@ ktest 的短 kernel-only 任务可显式远程入队；生产任务和 blocked w
 | 状态 | 枚举 | 说明 |
 |------|------|------|
 | 任务未发布 | `TaskStatus::New` | 已构造但尚未进入调度器 |
-| 任务排队 | `TaskStatus::Queued(cpu)` | 由 CPU `cpu` 的 runqueue 拥有；当前仍固定 CPU0 |
-| 任务运行 | `TaskStatus::Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有；当前仍固定 CPU0 |
+| 任务排队 | `TaskStatus::Queued(cpu)` | 由 CPU `cpu` 的 runqueue 拥有；普通任务当前仍固定 CPU0 |
+| 任务运行 | `TaskStatus::Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有；受控 kernel-only 任务可在 AP 运行 |
 | 任务准备阻塞 | `TaskStatus::Blocking(cpu)` | 已登记到 interruptible registry，但仍由 CPU `cpu` 执行；早到 wake 可取消阻塞 |
 | 任务阻塞 | `TaskStatus::Blocked` | 已切离 CPU，位于 interruptible registry，可被唤醒或信号打断 |
 | 任务僵尸 | `TaskStatus::Zombie` | 线程退出后的回收状态 |

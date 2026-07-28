@@ -83,7 +83,7 @@ related_docs:
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI/timer fast path；syscall 受控窗口可跨 yield 恢复；STOP 在 AP idle 栈执行 | 非 syscall 内核区间仍关中断，shootdown 尚未接入 |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU，`current_task()` 返回本 CPU 的 `Arc` 克隆 | AP 尚未运行普通任务，跨核退出/迁移语义仍待实现 |
-| 调度 | Per-CPU current/idle/RunQueue 与 AP 精简循环已完成；focused ktest 支持显式远程 enqueue/RESCHEDULE | 生产目标选择、blocked remote wake、affinity、迁移和 steal 尚未实现 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | 用户 PTE 已收口到 `TlbBatch`；新增 kernel stack 可在远程首次使用前做目标全刷新/ack | 通用 active mask、range shootdown、unmap 延迟释放未实现，用户 MM 仍不得跨 CPU 运行 |
@@ -516,7 +516,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19）
+#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19/B20）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
@@ -590,7 +590,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   发生在 idle 安全点；
 - ktest kernel entry 从有竞争的全局“下一入口”改为 TCB 不可变字段。focused test 可显式
   向每个 AP 发布一个短 kernel-only 任务，并验证 `Queued(cpu) -> Running(cpu) -> Zombie`、
-  current 唯一归属和 exactly-once；普通新任务、blocked wake 和用户任务仍固定 CPU0；
+  current 唯一归属和 exactly-once；普通新任务和用户任务仍固定 CPU0；
 - 动态 kernel stack 在远程入队前执行受限的 kernel-mapping sync：释放 `KERNEL_SPACE`
   锁后发送带 sequence 的 IPI，目标本地全 TLB flush 并 ack，发送方确认后才发布 runqueue，
   再在释放队列锁后发 `RESCHEDULE`。该协议只覆盖新增 stack 的首次使用，不替代 Phase 4
@@ -599,10 +599,17 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   级联失败。DeepSeek 只读审查与人工调用链复核定位为 AP 从未安装 CPU-local 页表根；
   修复后 RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 23/23 PASS，源码指纹
   前后一致；
+- B20 不扩张六态状态机；TCB 只增加不参与 owner 判定的 `last_cpu` 提示。任务完成
+  `Queued(cpu) -> Running(cpu)` 后发布该提示，真正 `Blocked` 时优先回到仍可调度且未 STOP
+  的原 CPU。单个/批量 wake 都先在 `TASK_MANAGER -> 单个 RunQueue` 下完成唯一入队，
+  再在锁外按聚合 mask 发送 `RESCHEDULE`；普通任务未离开 CPU0，因此既有用户行为不变；
+- B20 focused 用例让每个 AP 的 kernel-only 任务同时进入真实 Completion/WaitQueue，CPU0
+  确认全部 `Blocked` 后一次批量唤醒。RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=2`
+  均为 25/25 PASS，双架构 normal build 退出 0，四项源码指纹前后一致；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
-  Per-CPU current/idle/RunQueue、scheduler-ready 和受控 AP kernel-only 执行闭环。
-  下一批 B20 再建立生产目标选择和远程 wake 的锁外 IPI 交接；Phase 4 远端 MM
-  shootdown 完成前不解除用户任务 CPU0 affinity，也不回收/复用 AP 使用过的动态栈映射。
+  Per-CPU current/idle/RunQueue、scheduler-ready、受控 AP kernel-only 执行与远程阻塞
+  唤醒闭环。通用目标选择仍待后续批次；Phase 4 远端 MM shootdown 完成前不解除用户
+  任务 CPU0 affinity，也不回收/复用 AP 使用过的动态栈映射。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -610,7 +617,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 - B17 已删除全局 PROCESSOR 和 current-task 裸指针，把 pid/tid/syscall 诊断 hint
   迁到 Per-CPU，并让可变身份字段改读权威对象；B18 已删除全局 ready queue；
-  B19 已让 AP 在 scheduler-ready 后进入精简本地调度循环；
+  B19 已让 AP 在 scheduler-ready 后进入精简本地调度循环；B20 已让受控 AP 任务在
+  WaitQueue 阻塞后通过锁外 `RESCHEDULE` 回到最近运行 CPU；
 - 每 CPU 使用本地 Processor、RunQueue 和 idle context；B19 的 AP zombie 先交给
   受锁全局 registry，由 CPU0 回收，Per-CPU 回收队列仍待后续批次；
 - 本地选择继续保留 FIFO fast path 和现有 nice-aware 选择；

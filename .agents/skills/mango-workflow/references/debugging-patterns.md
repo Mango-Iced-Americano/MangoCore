@@ -155,6 +155,23 @@
 - **相关文件**: `os/src/mm/mod.rs`, `os/src/smp.rs`, `os/src/task/processor.rs`,
   `os/src/hal/arch/{riscv,loongarch64}`
 
+### 远程 runnable 已发布但 idle CPU 仍可能睡眠
+
+- **症状**: 状态已经是 `Queued(target)`、目标 runqueue 也能在诊断中看到任务，但 AP 偶发
+  停在 `wfi/idle`；或者为了避免该问题，在持有 runqueue/全局调度锁时直接发送 IPI，
+  使并发锁序和失败回滚变得不可证明。
+- **根因模式**: “容器所有权提交”和“硬件 doorbell”是两个不同阶段。先发 IPI 再入队会让
+  AP 被唤醒、看到空队列后重新睡眠；锁内发 IPI 又会把硬件失败、IPI handler 和调度锁耦合。
+- **固定协议**: 在唯一 owner 锁域内完成状态 CAS 与目标 runqueue 插入；释放目标队列及
+  全局 registry 锁；最后按聚合 CPU mask 发送 `RESCHEDULE`。IPI handler 只写 per-CPU
+  原子 pending/need-resched，真正 fetch 在 idle 安全点发生。批量 wake 循环每次必须在
+  处理下一个目标前释放前一个 runqueue，不能为聚合 mask 同时持有多把队列锁。
+- **idle 对偶条件**: 目标 CPU 必须在关中断窗口检查 runqueue/pending，再执行架构 idle；
+  doorbell 在 check→wait 窗口到达时必须保持 pending 并使 idle 返回。
+- **验收**: 不只做 IPI ping。让远端任务真实 `Blocking -> Blocked`，确认 current 和 runqueue
+  均已释放，再从另一 CPU 经生产 WaitQueue 批量唤醒；验证它回到预期 CPU、只运行一次，
+  并在 terminal STOP 前清空 current/runqueue。
+
 ### RISC-V MTTCG 下不能把 OpenSBI Boot HART 写死为 hart0
 
 - **现象**: `-smp 2` 时内核正常，扩到 4/8 核后只看到 OpenSBI banner，

@@ -2,7 +2,7 @@
 //!
 //! 本模块只管理 `Queued(cpu)` 任务；interruptible/zombie/timer registry 仍由
 //! `TaskManager` 管理。所有入口至多锁定一个 runqueue，且锁内不获取
-//! `task.inner`。当前 B18 仍把新任务和唤醒任务固定到 CPU0。
+//! `task.inner`。普通任务仍首次发布到 CPU0；blocked 任务可以回到最近运行 CPU。
 
 use super::{TaskControlBlock, TaskStatus};
 use alloc::{collections::VecDeque, sync::Arc};
@@ -145,6 +145,9 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         TaskStatus::Running(cpu),
         "fetch ready task",
     );
+    // 从这一刻起任务已由本 CPU current 路径唯一拥有。后续 Running ->
+    // Blocking -> Blocked 的 AcqRel 状态链会把该提示发布给远程唤醒方。
+    task.note_running_cpu(cpu);
     Some(task)
 }
 
