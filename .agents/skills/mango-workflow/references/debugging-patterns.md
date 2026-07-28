@@ -482,3 +482,23 @@
   显式 `drop`；noreturn 路径不会展开调用者 Rust 栈帧，不能依赖作用域自动析构。
 - **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`,
   `os/src/hal/arch/riscv/trap/mod.rs`, `os/src/hal/arch/riscv/trap/trap.S`
+
+## Judge 物理行失分：先还原用户 syscall 分片与内核安全点
+
+- **现象**: 功能测试打印了成功标记且完整退出，但父子/多线程的同一条逻辑输出被拼成
+  `prefix: 64prefix: 0` 或数字落到下一物理行，严格按行 judge 因而失分；不同 libc、架构
+  或重复运行可能换一组触发。
+- **定位方法**:
+  1. 先保留 START/END 之间的原始字节块，不用 judge 解析结果替代串口事实。
+  2. 从实际测试镜像提取带符号二进制，用 `nm/objdump` 核对一个 `printf/puts` 最终发起
+     几次 `write/writev`；不要假定一个 libc 逻辑调用就是一个 syscall。
+  3. 沿 trap fast path、syscall 中断窗口和 scheduler 调用链确认真实 context-switch 点。
+     timer 能打断 syscall 不等于 timer handler 会在 syscall 中途调度。
+  4. 若分片只可能在独立 syscall 返回之间交错，分别验证功能 token、退出码、panic/timeout
+     和测试 END，再判断是功能回归还是物理行解析问题。
+- **避免的 workaround**: 不为迎合 judge 跨 syscall 持 console/TTY 锁，也不在内核静默
+  缓存到换行；前者会跨调度点持锁，后者会延迟 shell prompt、进度条和无换行诊断。终端
+  不保证把多个独立 write 合并为原子逻辑行。
+- **门禁模式**: raw judge 分数必须原样保留；只有针对已反汇编证明的单个测试定义严格、
+  可审计的块级语义解析，才可另算 semantic score。归一化规则必须同时验证完整 token、
+  成功标记、END、无错误，并对旧基线和候选版本一致应用，不能通过重复运行挑高分过门禁。

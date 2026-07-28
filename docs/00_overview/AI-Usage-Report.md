@@ -323,6 +323,32 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   LA64 `CORE_NUM=8 KTEST=smp` 为 10/10 PASS。单次 RV64 PASS 只作回归烟测，竞态关闭
   主要由返回态不变量和官方 CSR 语义证明。
 
+### Case 15: SMP Per-CPU RunQueue 容器拆分
+
+- Evidence: `docs/Work_Log/2026-07-28.md`、
+  `docs/Work_Log/evidence/2026-07-28/smp-b18-runqueue-summary.md`；DeepSeek 原始任务与
+  Docker 日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责锁序设计、实现和证据边界裁决；DeepSeek 负责冻结源码只读
+  复核、双架构 Docker build/QEMU 执行和日志归纳。
+- Problem: runnable 任务仍集中在全局 ready queue，既无法表达物理队列 owner，也让
+  后续远程 enqueue/负载选择只能继续扩大单一全局锁。
+- AI contribution: DeepSeek 确认旧 ready queue 生产调用点已被移除、
+  `TASK_MANAGER -> 单个 RunQueue` 锁序闭合，并执行四项串行门禁。其报告把
+  `nr_running` 与锁内长度描述成已精确逐点验证，人工复核测试源码后将该结论收敛为
+  “当前生产路径上的间接非回归证据”。
+- Human action: 每个 `CpuTaskState` 增加独立 RunQueue 和排队数快照，以原子
+  nice/vruntime hint 消除 `task.inner` 嵌套；生产 target 继续固定 CPU0，未提前引入
+  AP 调度、迁移或 work stealing。
+- Verification: RV64/LA64 `CORE_NUM=8` kernel build 均通过；双架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 19/19 PASS。补充执行的 `mask=0x003` 门禁中，
+  RV64 raw/semantic 均为 312/314；LA64 raw 为 302/314。后续反汇编证明官方
+  `test_pipe` 的 `printf` 会把一个 cpid 逻辑行拆成多个 write syscall，两个失败块也都
+  保留了 0/正 PID 与 pipe write-success 证据。GPT/Codex 据此拒绝无效的 TTY 行锁修正，
+  并把 §8.2 改为 raw/semantic 双账本；B16 与 B18 使用同一归一化规则后，LA64 semantic
+  均为 308/314；干净 B17 对照也以 raw 305/semantic 308 复现 glibc 片段交错。
+  DeepSeek 第一轮错误的 syscall 中途抢占推断未被采纳，第二轮按完整 safe-point 调用链
+  复核后同意撤回该建议。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -379,6 +405,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-27.md` | SMP Per-CPU current 槽 | 记录 DeepSeek 首轮 RED/最终只读验证、GPT/Codex Arc 生命周期裁决、双架构 4 核 SMP 19/19 PASS 与 B18 边界 |
 | `docs/Work_Log/2026-07-28.md` | SMP 初赛非回归门禁 | 记录 DeepSeek 双架构 8 核执行、RV64 新增失分、单核判别、人工日志复核与递增基线规则 |
 | `docs/Work_Log/2026-07-28.md` | RV64 trap-return 半恢复现场竞态 | 记录提交撤回、DeepSeek 复现实验的采纳边界、ELF/CSR 指令级根因、双架构修复验证和本地 Worker 领取竞态修复 |
+| `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b18-runqueue-summary.md` | SMP Per-CPU RunQueue | 记录 DeepSeek 冻结审查与双架构 8 核 Docker 门禁、GPT/Codex 锁序裁决、19/19 PASS 和 AP 调度 NOT RUN 边界 |
 
 ## 9. 交互记录与留痕方式
 

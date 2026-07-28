@@ -547,6 +547,19 @@ pub(crate) fn local_task_state() -> &'static crate::task::processor::CpuTaskStat
         .task_state
 }
 
+/// 返回指定逻辑 CPU 的调度状态。
+///
+/// 远程入队和负载采样通过该入口定位唯一的 per-CPU runqueue；调用方必须
+/// 保证一次只持有一个 runqueue 锁。
+pub(crate) fn task_state(cpu_id: usize) -> &'static crate::task::processor::CpuTaskState {
+    assert!(
+        cpu_id < CONFIGURED_CPU_COUNT,
+        "task state requested for unconfigured CPU {}",
+        cpu_id
+    );
+    &PER_CPUS[cpu_id].task_state
+}
+
 /// 不阻塞、不 panic 地尝试返回本 CPU 的任务调度状态。
 pub(crate) fn try_local_task_state() -> Option<&'static crate::task::processor::CpuTaskState> {
     try_local_per_cpu().map(|per_cpu| &per_cpu.task_state)

@@ -80,10 +80,10 @@ related_docs:
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
 | 启动 | 双架构 8 槽 boot stack、BSP/AP 入口、RV SBI HSM、LA QEMU 启动 mailbox、独立 AP idle stack、online 闭环和 STOP/ack 已完成 | AP 已进入可被 IPI 唤醒或永久停止的 idle loop，但尚无调度能力 |
-| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；运行期 `cpu_id()` 已可校验 | PerCpu 目前只增加最小 IPI reason/ack，完整 global/local init 仍未接入 |
+| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu 锚点，在 CPU-local bootstrap 和 idle stack 切换后发布 idle/online；PerCpu 已承载 IPI/timer 与 task state 基础 | 完整 global/local init 和 AP scheduler-ready 发布仍未接入 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI/timer fast path；syscall 受控窗口可跨 yield 恢复；STOP 在 AP idle 栈执行 | 非 syscall 内核区间仍关中断，shootdown 尚未接入 |
-| current task | 全局 PROCESSOR、current 裸指针、12 个身份 hint 和 syscall 诊断缓存 | 跨核读到其他 CPU 的任务、悬空引用或可变 hint 失配 |
-| 调度 | 全局 VecDeque ready queue | 全局锁争用、重复出队、无法表达 CPU 所有权 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU，`current_task()` 返回本 CPU 的 `Arc` 克隆 | AP 尚未运行普通任务，跨核退出/迁移语义仍待实现 |
+| 调度 | runnable 容器已拆为 Per-CPU RunQueue，但所有生产任务仍固定 CPU0 | AP 调度循环、远程 enqueue、目标选择和迁移尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | 用户 PTE 写入已收口到 `TlbBatch`；CPU0-only 阶段完成本地刷新和 frame 延迟释放 | 远端 active mask、generation、shootdown/ack 未实现，用户 MM 仍不得跨 CPU 运行 |
@@ -343,7 +343,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - AP 完成 per-CPU 寄存器、最小 trap/IPI 向量和 idle context 初始化后设置 online bit；timer
   本阶段只写入配置，不使能本地 timer 中断；
 - BSP 使用有界超时等待目标 mask；超时时打印 missing mask 并停止启动；
-- CPU0 继续独占 ready queue 和 run_tasks()；AP 设置 online 后进入只检查
+- CPU0 继续独占生产任务和 run_tasks()；AP 设置 online 后进入只检查
   release/mailbox 的 park loop，本阶段不得调用 run_tasks() 或运行普通任务。
   全局 PROCESSOR 已在后续 B17 拆为 Per-CPU current/idle 状态。
 
@@ -516,14 +516,14 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15/B16/B17）
+#### 当前进度（SMP-P2.5-B15/B16/B17/B18）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
   或第二真值；
 - publish、fetch、yield、block、wake、timeout、signal 和 exit 已统一经 CAS
-  迁移。当前全局 `TASK_MANAGER` 在同一临界区提交 CAS 与 ready/interruptible
-  容器变更，重复 wake 不会重复入队；
+  迁移。B18 后 runnable 成员关系由 owner CPU 的 RunQueue 持有，
+  `TASK_MANAGER` 只保留 interruptible/zombie/timer registry；重复 wake 不会重复入队；
 - `Processor.current` 保留到真实 context switch 返回 idle 后才清空；idle 的
   `finish_switch_out()` 统一提交 yield、阻塞和 zombie 回收。`Blocking(cpu)` 只表达
   “已经登记睡眠但尚未切离 CPU”的必要窗口，早到 wake 恢复 `Running(cpu)` 且不入队；
@@ -537,8 +537,13 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `scheduler_state_has_unique_owner` 两轮通过、terminal STOP 仅最后执行；双架构
   normal build 退出 0，RV64 WaitQueue 为 4/4 PASS。详细命令、用时和证据边界见
   2026-07-27 Work Log 与 evidence；
-- 旧 nice-aware `pop_fair_ready()` 仍在全局 `TASK_MANAGER` 下读取 `task.inner`，
-  当前没有反向同时持锁路径，但这是 Phase 3 必须消除的已登记技术债；
+- B18 已删除全局 ready queue，为每个 `CpuTaskState` 增加独立 RunQueue 和
+  `nr_running` 排队数快照；本地 FIFO/nice-aware 选择保持原有语义，生产 target
+  仍固定 CPU0，AP 队列保持为空；
+- nice-aware 路径改读 TCB 的原子 nice/vruntime hint，消除了 runqueue 锁与
+  `task.inner` 的嵌套；Blocked wake 和批量 remove 固定采用
+  `TASK_MANAGER -> 单个 RunQueue`，其他调度路径只锁一个本地 RunQueue；
+- OOM 候选按 CPU 和索引逐个克隆，避免低内存路径为 runqueue 快照再次分配；
 - B16 将用户页表的 map/unmap、权限、PPN 和 dirty 修改拆为
   raw/no-flush 原语，并全部收口到 `TlbBatch`；`UserMapper` 只操作 batch，
   `PageMapper` 保留给内核页表路径；
@@ -565,17 +570,29 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B17 双架构 normal build 退出 0；`CORE_NUM=4 KTEST=smp KREPEAT=2` 均为
   19/19 PASS，online mask 均为 `0xf`。该证据不外推用户任务跨核、远程 enqueue
   或 MM shootdown；
-- Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成，B17 同时
-  完成 Phase 3 的 Per-CPU current/idle 前置工作。ready queue 和生产任务 owner
-  仍固定 CPU0；下一批 B18 只拆 Per-CPU runqueue，Phase 4 远端 shootdown 完成前
-  不解除用户任务 CPU0 affinity。
+- B18 在冻结源码指纹下完成双架构 `CORE_NUM=8` normal build 与
+  `KTEST=smp KREPEAT=2`；RV64/LA64 均为 19/19 PASS，online mask 均为 `0xff`。
+  该证据只验收容器拆分和 CPU0 owner 不变量，不外推 AP 调度或远程唤醒；
+- B18 补跑双架构 `CORE_NUM=8 mask=0x003` 后，RV64 312/314 且失败集合与基线一致；
+  LA64 raw 为 302/314，两个 libc 的 `test_pipe` 均因 cpid 物理行交错得到 1/4。
+  最小判别确认官方测试二进制把 `printf("cpid: %d\n")` 拆成多个 write syscall，
+  timer 只会在 syscall 返回后的 trap-return 安全点切换任务；两个原始块均包含恰好两个
+  cpid 前缀、0/正 PID、write-success 和 END。按 §8.2 对 B16/B18 一致应用的语义
+  归一化后，LA64 为 308/314，初赛非回归门禁 PASS；raw 302 仍原样保留，不宣称官方
+  judge 满分。干净 B17 对照 raw 305/semantic 308，并再次在 glibc 组复现相同片段交错；
+  官方镜像的两份 libc pipe 二进制哈希相同。该结论没有引入 TTY 跨 syscall 锁或行缓存
+  workaround；
+- Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
+  Per-CPU current/idle/RunQueue 基础。下一批 B19 建立 scheduler-ready 屏障、AP
+  本地调度循环和仅内核任务的远程 enqueue；Phase 4 远端 shootdown 完成前不解除
+  用户任务 CPU0 affinity。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
 #### 实施内容
 
 - B17 已删除全局 PROCESSOR 和 current-task 裸指针，把 pid/tid/syscall 诊断 hint
-  迁到 Per-CPU，并让可变身份字段改读权威对象；B18 删除全局 ready queue；
+  迁到 Per-CPU，并让可变身份字段改读权威对象；B18 已删除全局 ready queue；
 - 每 CPU 使用本地 Processor、RunQueue、idle context 和 zombie 回收队列；
 - 本地选择继续保留 FIFO fast path 和现有 nice-aware 选择；
 - 新任务或被唤醒任务的目标 CPU 选择规则固定为：

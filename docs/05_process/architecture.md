@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-28
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -21,7 +21,7 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 |------|----------|
 | 线程/进程分层 | TCB 管调度，PCB 管资源和进程关系 |
 | Linux clone 语义 | `CLONE_VM/FILES/FS/SIGHAND/THREAD` 控制资源共享 |
-| 单核可抢占调度 | timer interrupt + ready/interruptible/zombie 队列 |
+| SMP 过渡调度 | Per-CPU RunQueue/current/idle + 全局等待/回收 registry |
 | 阻塞原语统一 | `WaitQueue` 支撑 futex、epoll、eventfd、socket、timer |
 | 进程生命周期可 wait | PCB 维护 children、exit_code、stopped/continued 状态和 wait queue |
 | signal 交付 | trap return 前 `do_signal()` 构造/恢复用户信号帧 |
@@ -43,8 +43,8 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 | TaskControlBlock                                                  |
 | tid kstack trap_cx signal mask status sched clear_child_tid       |
 +-------------------------------------------------------------------+
-| TaskManager + Processor                                           |
-| ready_queue | interruptible_queue | zombie_queue | idle context   |
+| Per-CPU RunQueue + Processor | global TaskManager                 |
+| runnable/current/idle         | interruptible/zombie/timer        |
 +-------------------------------------------------------------------+
 | HAL switch / trap / timer                                         |
 +-------------------------------------------------------------------+
@@ -56,7 +56,8 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 |------|------|
 | `task/task.rs` | TCB、TCB inner、任务创建、clone 构造、exec 装载、线程退出 |
 | `task/process.rs` | PCB、ProcessInner、资源共享、finish_exit、父子关系 |
-| `task/manager.rs` | TaskManager、WaitQueue、KernelTimerQueue |
+| `task/run_queue.rs` | Per-CPU RunQueue 与 runnable owner 迁移 |
+| `task/manager.rs` | TaskManager registry、WaitQueue、KernelTimerQueue |
 | `task/completion.rs` | Completion 单次通知原语 |
 | `task/processor.rs` | Processor、当前任务、`run_tasks()`、`schedule()` |
 | `task/mod.rs` | task 子系统导出、suspend/block/exit 辅助 |
@@ -83,7 +84,8 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 | `kstack` | 内核栈 |
 | `ustack_base` | 用户栈基址 |
 | `exit_signal` | 非线程 clone 的退出信号 |
-| `sched_nice_hint` | ready queue 快路径 hint |
+| `sched_nice_hint` | runqueue 快路径 nice hint |
+| `sched_vruntime_hint` | runqueue 锁内公平选择使用的 vruntime 原子快照 |
 | `sched_state` | 原子调度状态与 CPU owner，调度所有权唯一真值 |
 | `asid` | la64 ASID；rv64 保持 0 |
 | `inner` | TCB 可变状态 |
@@ -161,14 +163,18 @@ New / Blocked --external cleanup--> Zombie
 | `Stopped` | signal/ptrace 停止 |
 | `Zombie` | 进程退出完成，等待 wait 或自动回收 |
 
-### 4.5 TaskManager
+### 4.5 RunQueue 与 TaskManager
 
-| 队列 | 类型 | 说明 |
+| 容器/字段 | 类型 | 说明 |
 |------|------|------|
-| `ready_queue` | `VecDeque<Arc<TaskControlBlock>>` | 可运行任务 |
+| Per-CPU `RunQueue` | `VecDeque<Arc<TaskControlBlock>>` | 对应 `Queued(cpu)` 的可运行任务 |
+| Per-CPU `nr_running` | `AtomicUsize` | 排队任务数近似值，不包含 current |
 | `interruptible_queue` | `VecDeque<Arc<TaskControlBlock>>` | 可中断睡眠任务 |
 | `zombie_queue` | `VecDeque<Arc<TaskControlBlock>>` | 延迟回收任务 |
-| `ready_nonzero_nice_count` | 计数 | ready queue 是否需要公平扫描 |
+| RunQueue `nonzero_nice_count` | 计数 | 本地队列是否需要公平扫描 |
+
+RunQueue 由每个 `CpuTaskState` 独占；TaskManager 只保护后三类全局 registry。
+当前生产 owner 仍固定 CPU0，AP 调度与远程 enqueue 尚未开放。
 
 ### 4.6 WaitQueue
 
@@ -220,19 +226,19 @@ run_tasks()
     idle if no ready task
 ```
 
-`pop_next_ready()`：
+`RunQueue::pop_next()`：
 
 | 条件 | 行为 |
 |------|------|
 | 无非零 nice 任务 | FIFO `pop_front()` |
-| 有非零 nice 任务 | 扫描 ready queue，按 `(sched_vruntime, sched_nice, tid)` 选择 |
+| 有非零 nice 任务 | 扫描本地 runqueue，按原子 `(vruntime_hint, nice_hint, tid)` 选择 |
 
 ### 5.3 让出和阻塞
 
 | 函数 | 流程 |
 |------|------|
-| `suspend_current_and_run_next()` | 当前任务设为 Ready，加入 ready queue，切换 idle |
-| `block_current_and_run_next()` | 当前任务设为 Interruptible，加入 interruptible queue，切换 idle |
+| `suspend_current_and_run_next()` | 当前任务切回 idle 后转为 `Queued(cpu)` 并加入本地 runqueue |
+| `block_current_and_run_next()` | 当前任务先进入 Blocking/interruptible registry，再切换 idle |
 | checked/locked block | 条件重检后阻塞，防止 lost wakeup |
 | `schedule()` | 当前任务上下文切换到 idle |
 
@@ -591,7 +597,7 @@ parent wait
 
 | 边界 | 说明 |
 |------|------|
-| 单核调度 | affinity/sched ABI 字段可保存和回读，真实运行仍由单核 ready queue 驱动 |
+| CPU0-only 执行 | 已有 Per-CPU RunQueue/current/idle，但生产任务仍只在 CPU0 运行 |
 | namespace | net/mnt/ipc namespace 对象可切换，隔离能力以对应 namespace 实现为准 |
 | signal | trap return 前统一交付；`rt_sigreturn` 由 trap 后端特殊处理 |
 | futex PI/WakeOp | `FutexCmd` 枚举存在，未接入的命令分支返回 `EINVAL` |
@@ -604,6 +610,7 @@ parent wait
 |------|------|
 | `os/src/task/task.rs` | TCB、clone、exec、退出资源 |
 | `os/src/task/process.rs` | PCB、finish_exit、父子关系 |
+| `os/src/task/run_queue.rs` | Per-CPU RunQueue、FIFO/nice-aware fetch |
 | `os/src/task/manager.rs` | TaskManager、WaitQueue、Completion、timer |
 | `os/src/task/processor.rs` | run_tasks、schedule、current task |
 | `os/src/task/signal/` | signal 核心 |

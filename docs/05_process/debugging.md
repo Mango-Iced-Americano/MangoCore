@@ -3,7 +3,7 @@ title: "进程与任务调试与测试映射"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-28
 tags: [process, debug, scheduler, signal, futex, test]
 ---
 
@@ -17,7 +17,7 @@ tags: [process, debug, scheduler, signal, futex, test]
 |----|------|----------|
 | 线程 | `TaskControlBlock` | tid、trap context、task status、sigmask/pending、clear_child_tid |
 | 进程 | `ProcessControlBlock` | pid、threads/live count、vm/files/fs/sighand/futex、children、exit_code |
-| 调度 | `TaskManager`, `Processor` | ready queue、interruptible queue、zombie queue、current cache |
+| 调度 | `RunQueue`, `TaskManager`, `Processor` | Per-CPU runnable/current、全局 interruptible/zombie registry |
 | 等待 | `WaitQueue`, `Completion` | waiters、timeout generation、wake path |
 
 `TaskStatus::Zombie` 表示线程退出；`ProcessState::Zombie` 表示最后一个 live thread 退出并完成进程级收尾。两者不能互相替代。
@@ -52,7 +52,7 @@ wait
 
 | 症状 | 首查位置 |
 |------|----------|
-| ready 任务不运行 | `TaskManager::fetch_task()`、ready queue、nice hint |
+| runnable 任务不运行 | `run_queue::fetch()`、owner CPU、nice/vruntime hint |
 | 睡眠任务不醒 | WaitQueue 入队、wake path、timer generation |
 | 当前任务缓存错误 | `run_tasks()` 切入发布、`finish_current_switch_out()` 切栈后清理 |
 | TCB drop 崩溃 | 当前任务是否先切回 idle，再 drain zombie queue |

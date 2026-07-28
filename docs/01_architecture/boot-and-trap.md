@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-26
+last_updated: 2026-07-28
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -44,8 +44,8 @@ firmware / QEMU
 当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 已
 打通 BSP→AP 的 IPI mailbox/ack 单播与广播、AP→BSP 请求/回复往返，以及
 CPU0 发起的 AP STOP/ack 终态协议。CPU0 的用户 syscall 已在完整 trap
-frame 内开放受控 timer/IPI 窗口；AP 尚未进入调度器，也不会访问
-文件系统、网络和旧的单核运行队列，这些共享路径仍由 CPU0 独占。
+frame 内开放受控 timer/IPI 窗口；AP 尚未进入调度器，也不会访问文件系统或网络。
+生产任务执行仍由 CPU0 独占；Per-CPU RunQueue 虽已建立，AP 尚未进入调度循环。
 
 ## 启动栈与 BSS 边界
 

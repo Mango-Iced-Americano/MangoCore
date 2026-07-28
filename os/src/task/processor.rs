@@ -10,9 +10,10 @@
 
 use super::{
     __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
-    take_one_ready_zombie, take_zombie_tasks,
+    take_zombie_tasks,
 };
 use super::{fetch_task, finish_switch_out};
+use super::run_queue::RunQueue;
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
@@ -74,6 +75,11 @@ impl Processor {
 /// 页表 token 可在运行期修改，读取时必须访问 TCB/PCB 的权威原子 hint。
 pub(crate) struct CpuTaskState {
     processor: Mutex<Processor>,
+    /// 本 CPU 唯一拥有的 runnable 容器；跨核代码只能锁定一个目标队列。
+    pub(crate) run_queue: Mutex<RunQueue>,
+    /// 本地排队任务数的无锁近似值，不包含 current。
+    /// 精确成员关系仍以 `run_queue` 锁内的队列为准。
+    pub(crate) nr_running: AtomicUsize,
     current_pid: AtomicUsize,
     current_tid: AtomicUsize,
     /// 0 表示无记录，实际 syscall id 存为 id + 1。
@@ -84,6 +90,8 @@ impl CpuTaskState {
     pub(crate) const fn new() -> Self {
         Self {
             processor: Mutex::new(Processor::new()),
+            run_queue: Mutex::new(RunQueue::new()),
+            nr_running: AtomicUsize::new(0),
             current_pid: AtomicUsize::new(0),
             current_tid: AtomicUsize::new(0),
             current_syscall_id: AtomicUsize::new(0),
@@ -194,7 +202,7 @@ pub fn run_tasks() {
             crate::fs::vfs::drain_one_dying_lifecycle();
         }
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
-        // 这样避免把不可运行的 TCB 塞进 ready_queue 再扫描剔除。
+        // 这样避免把不可运行的 TCB 塞进 runqueue 再扫描剔除。
         let stage_t0 = sched_profile_start(sched_profile);
         if has_zombie_queue_tasks_fast() {
             let zombies = take_zombie_tasks(64);
@@ -215,34 +223,23 @@ pub fn run_tasks() {
         if schedule_tick % 64 == 0 {
             let stage_t0 = sched_profile_start(sched_profile);
             for _ in 0..8 {
-                let a = take_one_ready_zombie();
-                let b = take_one_interruptible_zombie();
-                if a.is_none() && b.is_none() {
+                let zombie = take_one_interruptible_zombie();
+                if zombie.is_none() {
                     break;
                 }
-                drop(a);
-                drop(b);
+                drop(zombie);
             }
-            let (ready_z, int_z, nnice) = {
+            let int_z = {
                 let manager = crate::task::manager::TASK_MANAGER.lock();
-                let mut ready_zombie = 0usize;
                 let mut int_zombie = 0usize;
-                let mut nonzero_nice = 0usize;
-                for t in &manager.ready_queue {
-                    if t.is_zombie() {
-                        ready_zombie += 1;
-                    }
-                    if t.sched_nice_hint.load(Ordering::Relaxed) != 0 {
-                        nonzero_nice += 1;
-                    }
-                }
                 for t in &manager.interruptible_queue {
                     if t.is_zombie() {
                         int_zombie += 1;
                     }
                 }
-                (ready_zombie, int_zombie, nonzero_nice)
+                int_zombie
             };
+            let (_, ready_z, nnice) = super::run_queue::stats(cpu);
             crate::task::perf::record_taskq_queue_lens(
                 crate::task::manager::ready_count_fast() as usize,
                 crate::task::manager::interruptible_count_fast() as usize,

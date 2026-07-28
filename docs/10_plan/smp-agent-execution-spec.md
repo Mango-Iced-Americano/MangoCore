@@ -378,17 +378,38 @@ focused 验证。单架构中间工作包可先跑受影响架构，但阶段/�
    死锁或提前结束；
 5. judge 确实识别 314 个计分点。recipe PASS、脚本退出 0 和 judge 得分必须分别报告。
 
-硬条件通过后再执行递增非回归判定。当前人工接受的基线来自 B16 双架构 8 核运行：
+硬条件通过后再执行递增非回归判定。原始 judge 分数始终保留；门禁只对
+`basic-musl/test_pipe` 和 `basic-glibc/test_pipe` 增加一项确定性的语义归一化。
+官方测试二进制中的 `printf("cpid: %d\n")` 会把字面量、数字和换行拆成多个
+`write` syscall，而每次 syscall 返回都是合法调度安全点；
+[POSIX I/O rationale](https://pubs.opengroup.org/onlinepubs/9799919799/functions/read.html)
+也明确把终端排除在 I/O 原子性保证之外。内核不得为迎合物理行判定而跨 syscall
+持锁或缓存到换行。
 
-| 架构 | 最低分 | 允许的既有失败集合 |
-|---|---:|---|
-| RV64 | 312/314 | busybox-musl、busybox-glibc 各自的 `busybox kill 10` 0/1 |
-| LA64 | 305/314 | basic-musl `test_brk` 1/3；basic-glibc `test_brk` 1/3、`test_pipe` 1/4；两个 busybox 组各自的 `busybox kill 10` 0/1 |
+某个 `test_pipe` 只有同时满足以下条件，才可把 raw pass 归一化为 4/4：
 
-验收要求本次得分不低于基线，失败身份多重集（group + test name）只能是已接受集合的
-子集；同一允许失败项的 `all` 必须不变，`pass` 不得低于表中下限，因此部分改善也可通过。
-只有总分相同但失败项换位同样不通过。更好的单次结果先记为候选改善，只有在证据稳定且由
-人工更新 Work Log 与本表后才向上 ratchet；基线不得因为后续退化而静默降低。
+1. 在对应 START/END 块内恰有两个 `cpid:` 字面量；
+2. 将两个 `cpid:` 替换为空格后，success 之前恰可解析出两个十进制整数，其中一个为 0、
+   另一个大于 0；整数可因调度交错出现在不同物理行；
+3. 块内包含 `Write to pipe successfully.` 和 `END test_pipe`；
+4. 整次运行仍满足上述全部硬条件，且块内没有 `Assert Fatal`、panic、trap 或测试错误。
+
+未满足任一条件时不得归一化。报告必须同时写 raw pass/score、归一化增量和 semantic score；
+归一化只改变门禁比较，不得改写官方 judge 结果，也不得推广到其他测试。该规则依赖当前
+“只在显式安全点调度”的内核语义；以后若引入任意内核位置抢占，必须重新审查。
+
+当前人工接受的基线来自 B16 双架构 8 核运行，并按同一规则重新计算：
+
+| 架构 | raw 参考 | semantic 最低分 | 允许的 semantic 失败集合 |
+|---|---:|---:|---|
+| RV64 | 312/314 | 312/314 | busybox-musl、busybox-glibc 各自的 `busybox kill 10` 0/1 |
+| LA64 | 305/314 | 308/314 | basic-musl、basic-glibc 各自的 `test_brk` 1/3；两个 busybox 组各自的 `busybox kill 10` 0/1 |
+
+验收要求本次 semantic score 不低于基线，归一化后的失败身份多重集
+（group + test name）只能是已接受集合的子集；同一允许失败项的 `all` 必须不变，`pass`
+不得低于表中下限，因此部分改善也可通过。只有总分相同但失败项换位同样不通过。更好的
+单次结果先记为候选改善，只有在证据稳定且由人工更新 Work Log 与本表后才向上 ratchet；
+raw 结果和 semantic 基线都不得因为后续退化而静默降低。
 出现新增失败时只补做能区分故障类别的最小测试，不能机械重跑无关架构或全矩阵。
 
 机械执行、日志初审和失败集合整理可以通过本地 DeepSeek 协作完成，但最终验收者必须独立

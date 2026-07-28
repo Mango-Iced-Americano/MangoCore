@@ -3,7 +3,7 @@ title: "任务、进程与调度器协作路径"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-28
 tags: [process, task, scheduler, integration]
 ---
 
@@ -15,7 +15,8 @@ tags: [process, task, scheduler, integration]
 |------|------|
 | `os/src/task/task.rs` | TCB 字段、线程状态、trap context、clone/exec/exit |
 | `os/src/task/process.rs` | PCB 字段、进程资源、children、finish_exit |
-| `os/src/task/manager.rs` | ready/interruptible/zombie queue、WaitQueue、timer |
+| `os/src/task/run_queue.rs` | Per-CPU runnable 队列和 owner 状态交接 |
+| `os/src/task/manager.rs` | interruptible/zombie/timer registry、WaitQueue |
 | `os/src/task/processor.rs` | `run_tasks()`、Per-CPU current/idle 状态 |
 | `os/src/task/process_manager.rs` | process registry、pid lookup、wait helper |
 | `os/src/hal/arch/*/switch.*` | `__switch` 上下文切换 |
@@ -33,10 +34,12 @@ TaskControlBlock
   ├── 线程状态：sigmask / pending / rusage / timers / rlimit
   └── 指向所属 ProcessControlBlock
 
-TaskManager + Processor
-  ├── ready_queue / interruptible_queue / zombie_queue
-  ├── current task cache
+Per-CPU RunQueue + Processor
+  ├── Queued(cpu) runnable / current Arc / idle context
   └── __switch idle <-> task
+
+Global TaskManager
+  └── interruptible / zombie / timer registry
 ```
 
 这三个对象的职责必须分开理解：PCB 不直接被调度，TCB 不直接持有 fd table，TaskManager 不拥有进程资源。
@@ -64,20 +67,22 @@ pub struct TaskControlBlock {
 }
 ```
 
-调度器只保存 ready/interruptible/zombie 队列和当前 CPU 上正在运行的 task：
+调度层把 runnable owner 与全局等待 registry 分开：
 
 ```rust
 pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
     interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
     zombie_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
-pub struct Processor {
-    current: Option<Arc<TaskControlBlock>>,
-    idle_task_cx: TaskContext,
+pub struct CpuTaskState {
+    processor: Mutex<Processor>,
+    run_queue: Mutex<RunQueue>,
+    nr_running: AtomicUsize,
 }
 ```
+
+当前所有生产任务仍发布到 CPU0；该结构尚不等于 AP 调度和任务迁移已经完成。
 
 ## 3. 创建路径中的协作
 
@@ -89,14 +94,14 @@ clone 创建 child 时：
 4. registry 注册 task/process。
 5. syscall 层写 parent_tid/child_tid/pidfd。
 6. PCB 层把 child 发布为 waitable child。
-7. `publish_task()` 把 `New` child 发布到 ready queue。
+7. `publish_task()` 把 `New` child 发布到 CPU0 runqueue。
 
 发布前失败可回滚；发布后 child 成为系统可见进程或线程。
 
 ## 4. 运行路径中的协作
 
 ```
-TaskManager::fetch_task(cpu)
+RunQueue::fetch(cpu)
   └── Processor::run_tasks()
         ├── CAS Queued(CPU0) -> Running(CPU0)
         ├── 写本 CPU 的 PID/TID 快照
@@ -146,7 +151,8 @@ TCB/PCB 权威 hint，避免 setter 漏刷影子缓存。返回的 `Arc` 不能�
 5. `schedule()` 切回 idle。
 6. idle 在真实切栈后提交 `Blocking(cpu) -> Blocked`。
 7. 早到唤醒执行 `Blocking(cpu) -> Running(cpu)`，晚到唤醒执行
-   `Blocked -> Queued(CPU0)`；两者都由同一个 TaskManager 入口裁决。
+   `Blocked -> Queued(CPU0)`；两者都由同一个 TaskManager 入口裁决，晚到唤醒按
+   `TASK_MANAGER -> CPU0 RunQueue` 的固定锁序完成容器交接。
 
 带锁版本必须先入队、复查条件、再释放锁，避免丢失唤醒。
 
@@ -176,7 +182,7 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 
 这个函数先把 task 原子迁移为 `Blocking(cpu)` 并加入 interruptible registry，
 再复查是否仍应阻塞，然后释放业务锁并切换。复查失败时 wake 只取消阻塞，
-不会把仍使用当前内核栈的任务提前加入 ready queue。
+不会把仍使用当前内核栈的任务提前加入 runqueue。
 WaitQueue 自身只登记 `Weak<TaskControlBlock>`，不会提前写调度状态。
 
 ## 8. 定时器与等待
@@ -190,7 +196,7 @@ WaitQueue 自身只登记 `Weak<TaskControlBlock>`，不会提前写调度状态
 | `wait_io_timer_pending` | TCB |
 | `wait_io_fallback_active_generation` | TCB |
 
-timer 到期只负责把任务唤醒到 ready queue；真正 syscall 返回值由等待模板根据 `WaitResult` 转换。
+timer 到期只负责把任务唤醒到 owner runqueue；真正 syscall 返回值由等待模板根据 `WaitResult` 转换。
 
 ## 9. 信号唤醒
 

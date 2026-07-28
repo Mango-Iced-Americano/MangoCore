@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-28
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -364,10 +364,11 @@ TCB inner 保存：
 | `sched_policy` | POSIX 调度策略回读 |
 | `sched_priority` | 优先级回读 |
 | `sched_reset_on_fork` | fork 时重置调度状态 |
-| `sched_nice` | nice 值，参与简化 ready queue 选择 |
+| `sched_nice` | nice 值，参与简化 runqueue 选择 |
 | `sched_runtime/deadline/period` | sched_attr 保存字段 |
 
-当前真实调度仍是单核 ready queue；FIFO/RR/DEADLINE 等字段用于 syscall 语义、fork reset 和测试回读。
+当前 runnable 容器已拆为 Per-CPU RunQueue，但生产任务仍固定 CPU0；
+FIFO/RR/DEADLINE 等字段用于 syscall 语义、fork reset 和测试回读。
 
 fork 时，如果父设置 reset 或策略为 FIFO/RR，子任务降回 normal，priority/nice/runtime/deadline/period 清零。
 
@@ -432,7 +433,7 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: *const SchedPara
 }
 ```
 
-`sched_setattr()` 额外写入 nice/runtime/deadline/period，并调用 `update_ready_nice()` 调整 ready queue 中的 nice hint：
+`sched_setattr()` 额外写入 nice/runtime/deadline/period，并调用 `update_ready_nice()` 调整 owner runqueue 中的 nice hint：
 
 ```rust
 inner.sched_policy = base_policy;

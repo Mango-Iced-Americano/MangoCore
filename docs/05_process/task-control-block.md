@@ -3,7 +3,7 @@ title: "TaskControlBlock 线程级执行实体"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-28
 tags: [process, task, tcb, thread]
 ---
 
@@ -71,7 +71,8 @@ pub struct TaskControlBlock {
 | `wait_io_timer_pending` | I/O fallback timer 去重标记 |
 | `wait_timer_generation` | wait timeout generation，过滤旧 timer |
 | `wait_io_fallback_active_generation` | fallback wait 活跃 generation |
-| `sched_nice_hint` | ready queue fast path 判断 nice 是否为 0 |
+| `sched_nice_hint` | runqueue fast path 判断 nice 是否为 0 |
+| `sched_vruntime_hint` | runqueue 锁内公平选择使用的 vruntime 原子快照 |
 | `asid` | la64 ASID，rv64 保持 0 |
 
 这些字段里，`sched_nice_hint` 和当前任务身份 hint 直接影响 syscall/调度热路径，避免频繁持有 TCB inner 锁。
@@ -103,7 +104,7 @@ pub struct TaskControlBlock {
 | `sigmask/sigpending/signal_stack` | `task/signal/*`, `syscall/process/signal.rs` | `rt_sigprocmask`, `sigaltstack`, signal delivery, signalfd/sigtimedwait。 |
 | `trap_cx_ppn/task_cx` | `task/task.rs`, `task/processor.rs`, HAL trap return | 上下文切换、返回用户态。 |
 | 外层 `sched_state` | `task/task.rs`, `task/manager.rs`, `task/mod.rs` | 原子调度状态、队列归属和当前 CPU owner。 |
-| `sched_*` | `task/manager.rs`, `syscall/process/ids.rs` | ready queue 选择、`sched_get*`/`sched_set*` 回读。 |
+| `sched_*` | `task/run_queue.rs`, `syscall/process/ids.rs` | runqueue 选择、`sched_get*`/`sched_set*` 回读。 |
 | `rlimit` 字段 | `syscall/process/ids.rs`, `syscall/fs.rs`, `syscall/process/time.rs` | 文件大小、CPU 时间、memlock、nice/rtprio 等限制。 |
 | `clear_child_tid/robust_list` | `task/task.rs::exit_thread_resources()`, `syscall/process/lifecycle.rs` | pthread join/futex robust list 退出协作。 |
 | `rusage/clock/timer` | trap enter/leave、schedule in/out、time syscall | `getrusage`, `times`, itimer/POSIX timer。 |
@@ -154,11 +155,11 @@ Running(cpu) --exit--> Zombie --switch complete--> zombie queue
 New / Blocked --external cleanup--> Zombie
 ```
 
-`TaskManager` 在持有自身锁时同时提交 CAS 与队列容器变更：发布任务时
-`New -> Queued(CPU0)`，取任务时 `Queued(cpu) -> Running(cpu)`，阻塞登记时
-`Running(cpu) -> Blocking(cpu)`。idle 在切栈后提交 `Blocking -> Blocked`；早到
-wake 只恢复 `Blocking -> Running`，晚到 wake 才执行 `Blocked -> Queued(CPU0)`。
-重复 wake 因 CAS 失败而不会重复入队。排队任务退出前必须先从 ready queue 移除并转成
+发布、fetch 和 yield 后重入队由 owner CPU 的 RunQueue 在一个锁域内同时提交状态 CAS
+与容器变更；阻塞登记仍由 `TaskManager` registry 管理。idle 在切栈后提交
+`Blocking -> Blocked`；早到 wake 只恢复 `Blocking -> Running`，晚到 wake 按
+`TASK_MANAGER -> CPU0 RunQueue` 执行 `Blocked -> Queued(CPU0)`。重复 wake 因 CAS
+失败而不会重复入队。排队任务退出前必须先从 owner runqueue 移除并转成
 `Blocked`；直接 `Queued -> Zombie` 会留下悬挂队列节点，因此按所有权错误
 fail-stop。
 
@@ -246,7 +247,7 @@ clone 子任务的 `TrapContext`：
 vruntime += runtime_us * 1024 / nice_weight
 ```
 
-这只用于 ready queue 中非零 nice 任务的选择，不是完整 CFS 实现。
+这只用于 runqueue 中非零 nice 任务的选择，不是完整 CFS 实现。
 
 ## 9. itimer 与 POSIX timer
 

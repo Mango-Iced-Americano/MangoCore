@@ -25,6 +25,7 @@ mod process_manager;
 pub(crate) mod processor;
 pub mod quota;
 mod registry;
+mod run_queue;
 pub mod signal;
 mod sleep;
 mod task;
@@ -48,7 +49,7 @@ pub use manager::{
     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
     remove_zombie_tasks_by_pid, publish_task, run_deferred_timer_at_task_safe_point,
     run_deferred_timer_work, send_signal_to_interruptible, sleep_interruptible,
-    take_one_interruptible_zombie, take_one_ready_zombie, take_zombie_tasks, task_manager_counts,
+    take_one_interruptible_zombie, take_zombie_tasks, task_manager_counts,
     timer_interrupt_handler, timer_subsystem_init, update_ready_nice, wait_with_timeout,
     wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
@@ -86,6 +87,11 @@ pub use task::{
     TaskControlBlock, TaskStatus, UtsNamespace,
 };
 
+/// 返回指定 CPU 的精确 runqueue 长度，供诊断和 SMP focused test 使用。
+pub(crate) fn run_queue_count(cpu: usize) -> usize {
+    run_queue::stats(cpu).0
+}
+
 #[allow(unused)]
 /// 在当前处理器已有运行任务时主动让出 CPU。
 ///
@@ -114,6 +120,10 @@ pub fn suspend_current_and_run_next() {
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.update_process_times_schedule_out();
+    task.sched_vruntime_hint.store(
+        task_inner.sched_vruntime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     drop(task_inner);
     // ---- release current PCB lock
 
@@ -135,6 +145,10 @@ pub(crate) fn block_current_and_run_next() {
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.update_process_times_schedule_out();
+    task.sched_vruntime_hint.store(
+        task_inner.sched_vruntime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     drop(task_inner);
     // ---- release current PCB lock
 
@@ -160,6 +174,10 @@ pub(crate) fn block_current_and_run_next_checked(
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.update_process_times_schedule_out();
+    task.sched_vruntime_hint.store(
+        task_inner.sched_vruntime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     drop(task_inner);
 
     sleep_interruptible(task.clone());
@@ -184,6 +202,10 @@ pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
 
     task_inner.update_process_times_schedule_out();
+    task.sched_vruntime_hint.store(
+        task_inner.sched_vruntime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
 
     drop(task_inner);
     // ---- release current PCB lock
@@ -210,6 +232,10 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.update_process_times_schedule_out();
+    task.sched_vruntime_hint.store(
+        task_inner.sched_vruntime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     drop(task_inner);
 
     sleep_interruptible(task.clone());

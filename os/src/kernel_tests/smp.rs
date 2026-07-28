@@ -396,9 +396,18 @@ fn scheduler_state_has_unique_owner() -> Result<(), &'static str> {
     SCHED_STATE_HELPER_RUNS.store(0, Ordering::Release);
     let completion = Arc::new(crate::task::Completion::new());
     *SCHED_STATE_COMPLETION.lock() = Some(completion.clone());
+    let cpu0_queued_before = crate::task::run_queue_count(crate::smp::BOOT_CPU_ID);
     let helper = crate::task::spawn_ktest_task(complete_scheduler_state_probe);
     if helper.task_status() != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID) {
         return Err("new helper did not acquire the CPU0 ready queue");
+    }
+    if crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != cpu0_queued_before + 1 {
+        return Err("CPU0 runqueue did not gain exactly one helper");
+    }
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        if crate::task::run_queue_count(cpu) != 0 {
+            return Err("parked AP unexpectedly owns a runnable task");
+        }
     }
 
     completion.wait_uninterruptible();
@@ -411,6 +420,9 @@ fn scheduler_state_has_unique_owner() -> Result<(), &'static str> {
     }
     if runner.task_status() != crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
         return Err("woken runner did not reacquire CPU0 ownership");
+    }
+    if crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != cpu0_queued_before {
+        return Err("helper lifecycle changed the baseline CPU0 runqueue length");
     }
 
     // 对已经 Running 的 runner 再发两次 wake；统一入口必须把它们识别为

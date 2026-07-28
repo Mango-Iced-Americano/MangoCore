@@ -1,15 +1,15 @@
 //! 任务调度队列、等待队列和内核定时器。
 //!
-//! 调度器维护 ready/interruptible/zombie 三类任务队列；`WaitQueue` 在文件、
-//! futex、信号和计时器路径中提供条件等待；`KernelTimerQueue` 驱动超时唤醒、
-//! POSIX timer、timerfd sweep 与调度 tick。
+//! runnable 任务由 `PerCpu` 内的 `RunQueue` 管理；本模块保留 interruptible、
+//! zombie 和 timer 等全局 registry。`WaitQueue` 为文件、futex、信号和计时器
+//! 路径提供条件等待；`KernelTimerQueue` 驱动超时唤醒与定时任务。
 //!
 //! # Locking
 //!
-//! `TASK_MANAGER` 保护调度队列，并把调度状态 CAS 与对应容器变更收口在同一
-//! 临界区。任何可能触发 TCB/PCB 析构或用户内存访问的操作都应在释放
-//! `TASK_MANAGER` 后进行。`WaitQueue` 的条件闭包不得反向获取已由调用方持有的
-//! 不可重入锁。
+//! `TASK_MANAGER` 只保护全局 registry。Blocked 唤醒与批量移除按
+//! `TASK_MANAGER -> 单个 RunQueue` 取锁；任何路径都不得反向取锁或同时持有
+//! 两个 runqueue。可能触发 TCB/PCB 析构或用户内存访问的操作必须在释放这些
+//! 锁后执行。
 
 use core::cmp::Ordering;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -93,56 +93,21 @@ impl ActiveTracker {
 }
 
 #[cfg(feature = "oom_handler")]
-/// 全局调度队列状态。
+/// 全局等待与回收 registry。
 pub struct TaskManager {
-    /// 就绪态任务队列。
-    pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     /// 可中断睡眠任务队列。
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
     zombie_queue: VecDeque<Arc<TaskControlBlock>>,
-    ready_nonzero_nice_count: usize,
     /// 任务激活状态跟踪器，用于跟踪任务的激活状态，并在OOM时释放内存
     pub active_tracker: ActiveTracker,
 }
 
 #[cfg(not(feature = "oom_handler"))]
-/// 全局调度队列状态。
+/// 全局等待与回收 registry。
 pub struct TaskManager {
-    /// 就绪态任务队列。
-    pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     /// 可中断睡眠任务队列。
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
     zombie_queue: VecDeque<Arc<TaskControlBlock>>,
-    ready_nonzero_nice_count: usize,
-}
-
-fn sched_pick_key(task: &Arc<TaskControlBlock>) -> (u64, i32, usize) {
-    let inner = task.acquire_inner_lock();
-    (inner.sched_vruntime, inner.sched_nice, task.gettid())
-}
-
-fn task_has_nonzero_nice(task: &Arc<TaskControlBlock>) -> bool {
-    task.sched_nice_hint.load(AtomicOrdering::Relaxed) != 0
-}
-
-fn count_ready_nonzero_nice(queue: &VecDeque<Arc<TaskControlBlock>>) -> usize {
-    queue
-        .iter()
-        .filter(|task| task_has_nonzero_nice(task))
-        .count()
-}
-
-fn pop_fair_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<TaskControlBlock>> {
-    let mut best_index = 0usize;
-    let mut best_key = sched_pick_key(queue.front()?);
-    for (index, task) in queue.iter().enumerate().skip(1) {
-        let key = sched_pick_key(task);
-        if key < best_key {
-            best_index = index;
-            best_key = key;
-        }
-    }
-    queue.remove(best_index)
 }
 
 fn task_ptr_eq(left: &Arc<TaskControlBlock>, right: &Arc<TaskControlBlock>) -> bool {
@@ -164,23 +129,8 @@ fn task_ptr_in(ptrs: &[usize], task: &Arc<TaskControlBlock>) -> bool {
     ptrs.binary_search(&task_ptr(task)).is_ok()
 }
 
-static READY_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static INTERRUPTIBLE_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ZOMBIE_QUEUE_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-fn add_ready_count() {
-    READY_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-}
-
-fn sub_ready_count(count: usize) {
-    if count != 0 {
-        let _ = READY_TASK_COUNT.fetch_update(
-            AtomicOrdering::Relaxed,
-            AtomicOrdering::Relaxed,
-            |value| Some(value.saturating_sub(count)),
-        );
-    }
-}
 
 fn add_interruptible_count() {
     INTERRUPTIBLE_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
@@ -196,11 +146,9 @@ fn sub_interruptible_count(count: usize) {
     }
 }
 
-/// 无锁读取 ready 队列计数的近似值。
+/// 无锁汇总所有 per-CPU runqueue 的近似长度。
 pub(crate) fn ready_count_fast() -> u16 {
-    READY_TASK_COUNT
-        .load(AtomicOrdering::Relaxed)
-        .min(u16::MAX as usize) as u16
+    super::run_queue::total_count_fast().min(u16::MAX as usize) as u16
 }
 
 /// 无锁读取 interruptible 队列计数的近似值。
@@ -233,123 +181,23 @@ pub fn has_zombie_queue_tasks_fast() -> bool {
     has_zombie_queue_tasks()
 }
 
-/// 简化的 nice-aware 调度器。
+/// 全局等待、回收与定时器 registry。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
     /// 构造函数
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
             zombie_queue: VecDeque::new(),
-            ready_nonzero_nice_count: 0,
             active_tracker: ActiveTracker::new(),
         }
     }
     #[cfg(not(feature = "oom_handler"))]
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
             zombie_queue: VecDeque::new(),
-            ready_nonzero_nice_count: 0,
         }
-    }
-    /// 首次发布一个已经构造完成的任务。
-    ///
-    /// # Locking
-    ///
-    /// 调用方已持有 `TASK_MANAGER` 锁；函数不获取任务内部锁。
-    pub fn publish_task(&mut self, task: Arc<TaskControlBlock>) {
-        let target_cpu = crate::smp::BOOT_CPU_ID;
-        // `publish` 只描述 New 任务第一次获得 runqueue owner。yield、wake 和
-        // switch-out 各有自己的专用入口，不能再借这个函数任意改写 Running。
-        task.require_sched_transition(
-            TaskStatus::New,
-            TaskStatus::Queued(target_cpu),
-            "publish new task",
-        );
-        self.enqueue_ready_back(task);
-    }
-    /// 把已经取得 `Queued` owner 的任务放到队尾。
-    fn enqueue_ready_back(&mut self, task: Arc<TaskControlBlock>) {
-        if task_has_nonzero_nice(&task) {
-            self.ready_nonzero_nice_count += 1;
-        }
-        self.ready_queue.push_back(task);
-        crate::task::perf::record_taskq_add_ready();
-        add_ready_count();
-    }
-    /// 把已经取得 `Queued` owner 的唤醒任务放到队首。
-    fn enqueue_ready_front(&mut self, task: Arc<TaskControlBlock>) {
-        if task_has_nonzero_nice(&task) {
-            self.ready_nonzero_nice_count += 1;
-        }
-        self.ready_queue.push_front(task);
-        crate::task::perf::record_taskq_add_ready();
-        add_ready_count();
-    }
-    fn pop_next_ready(&mut self) -> Option<Arc<TaskControlBlock>> {
-        let task = if self.ready_nonzero_nice_count == 0 {
-            crate::task::perf::record_taskq_fetch(false, 0);
-            self.ready_queue.pop_front()
-        } else {
-            let scan_depth = self.ready_queue.len();
-            crate::task::perf::record_taskq_fetch(true, scan_depth);
-            pop_fair_ready(&mut self.ready_queue)
-        }?;
-        sub_ready_count(1);
-        if task_has_nonzero_nice(&task) {
-            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
-        }
-        Some(task)
-    }
-    fn recompute_ready_nice_count(&mut self) {
-        self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
-    }
-    fn note_ready_removed(&mut self, task: &Arc<TaskControlBlock>) {
-        if task_has_nonzero_nice(task) {
-            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
-        }
-    }
-    /// 从就绪队列中逐出一个僵尸任务（零堆分配）。
-    /// 每次调用最多 remove 一个元素，drop 发生在锁外。
-    fn take_one_ready_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
-        if self
-            .ready_queue
-            .front()
-            .map(|task| task.is_zombie())
-            .unwrap_or(false)
-        {
-            let zombie = self.ready_queue.pop_front();
-            if let Some(task) = zombie.as_ref() {
-                self.note_ready_removed(task);
-                sub_ready_count(1);
-            }
-            return zombie;
-        }
-        if self
-            .ready_queue
-            .back()
-            .map(|task| task.is_zombie())
-            .unwrap_or(false)
-        {
-            let zombie = self.ready_queue.pop_back();
-            if let Some(task) = zombie.as_ref() {
-                self.note_ready_removed(task);
-                sub_ready_count(1);
-            }
-            return zombie;
-        }
-        for i in 0..self.ready_queue.len() {
-            if self.ready_queue[i].is_zombie() {
-                let zombie = self.ready_queue.remove(i).unwrap();
-                self.note_ready_removed(&zombie);
-                sub_ready_count(1);
-                return Some(zombie);
-            }
-        }
-        None
     }
     /// 从可中断队列中逐出一个僵尸任务（零堆分配）。
     fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
@@ -387,21 +235,10 @@ impl TaskManager {
         sub_zombie_queue_count(zombies.len());
         zombies
     }
-    /// 从所有调度队列中移除属于指定 pid 的所有 zombie TCB。
+    /// 从全局等待/回收 registry 移除属于指定 pid 的所有 zombie TCB。
     /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
     fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
         let mut zombies = alloc::vec::Vec::new();
-        let old_ready_len = self.ready_queue.len();
-        self.ready_queue.retain(|task| {
-            let is_match = task.is_zombie() && task.process.pid == pid;
-            if is_match {
-                zombies.push(task.clone());
-                false
-            } else {
-                true
-            }
-        });
-        sub_ready_count(old_ready_len - self.ready_queue.len());
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue.retain(|task| {
             let is_match = task.is_zombie() && task.process.pid == pid;
@@ -423,53 +260,7 @@ impl TaskManager {
             }
         });
         sub_zombie_queue_count(old_zombie_len - self.zombie_queue.len());
-        self.recompute_ready_nice_count();
         zombies
-    }
-    fn update_ready_nice(&mut self, task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
-        if (old_nice == 0) == (new_nice == 0) {
-            return;
-        }
-        if !self
-            .ready_queue
-            .iter()
-            .any(|queued| task_ptr_eq(queued, task))
-        {
-            return;
-        }
-        if old_nice == 0 {
-            self.ready_nonzero_nice_count += 1;
-        } else {
-            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
-        }
-    }
-    /// 从就绪队列中取出下一个可运行任务。
-    #[cfg(feature = "oom_handler")]
-    pub fn fetch_task(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
-        while let Some(task) = self.pop_next_ready() {
-            task.require_sched_transition(
-                TaskStatus::Queued(cpu),
-                TaskStatus::Running(cpu),
-                "fetch ready task",
-            );
-            // 标记任务为激活状态
-            self.active_tracker.mark_active(task.tid.0);
-            return Some(task);
-        }
-        None
-    }
-    #[cfg(not(feature = "oom_handler"))]
-    /// 从就绪队列中取出下一个可运行任务。
-    pub fn fetch_task(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
-        while let Some(task) = self.pop_next_ready() {
-            task.require_sched_transition(
-                TaskStatus::Queued(cpu),
-                TaskStatus::Running(cpu),
-                "fetch ready task",
-            );
-            return Some(task);
-        }
-        None
     }
 
     /// 添加一个任务到可中断队列。
@@ -497,37 +288,6 @@ impl TaskManager {
         self.interruptible_queue.push_back(task);
         crate::task::perf::record_taskq_add_interruptible();
         add_interruptible_count();
-    }
-    /// 在 CPU 已经切回 idle 栈后，完成上一任务的所有权交接。
-    ///
-    /// `Processor.current` 会在调用本函数前先清空，因此这里可以安全地把
-    /// `Running` 任务重新交给 runqueue；仍为 `Blocking` 的任务则正式进入
-    /// `Blocked`，而提前收到 wake 的任务已经恢复为 `Running`，会走重新入队分支。
-    pub fn finish_switch_out(&mut self, task: Arc<TaskControlBlock>, cpu: usize) {
-        match task.task_status() {
-            TaskStatus::Running(owner) if owner == cpu => {
-                task.require_sched_transition(
-                    TaskStatus::Running(cpu),
-                    TaskStatus::Queued(cpu),
-                    "finish yielded task switch-out",
-                );
-                self.enqueue_ready_back(task);
-            }
-            TaskStatus::Blocking(owner) if owner == cpu => {
-                task.require_sched_transition(
-                    TaskStatus::Blocking(cpu),
-                    TaskStatus::Blocked,
-                    "finish blocked task switch-out",
-                );
-            }
-            TaskStatus::Zombie => self.enqueue_zombie(task),
-            actual => task.fail_sched_invariant(
-                "finish task switch-out",
-                TaskStatus::Running(cpu),
-                actual,
-                TaskStatus::Queued(cpu),
-            ),
-        }
     }
     /// 从可中断队列中删除一个任务。
     pub fn remove_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
@@ -567,69 +327,39 @@ impl TaskManager {
         }
         count
     }
-    /// 从调度器的 ready / interruptible 队列中移除一组任务。
-    /// 线程组退出和 exec 清理只能通过这个入口调整队列，避免业务层直接扫描队列。
-    pub fn remove_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
+    /// 从 interruptible registry 中移除一组任务。
+    fn remove_interruptible_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
         let ptrs = sorted_task_ptrs(tasks);
-
-        let old_ready_len = self.ready_queue.len();
-        self.ready_queue.retain(|task| {
-            if !task_ptr_in(&ptrs, task) {
-                return true;
-            }
-            if let TaskStatus::Queued(cpu) = task.task_status() {
-                task.require_sched_transition(
-                    TaskStatus::Queued(cpu),
-                    TaskStatus::Blocked,
-                    "remove queued task",
-                );
-            }
-            false
-        });
-        let removed_ready = old_ready_len - self.ready_queue.len();
-        sub_ready_count(removed_ready);
-        self.recompute_ready_nice_count();
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
             .retain(|task| !task_ptr_in(&ptrs, task));
         let removed_interruptible = old_interruptible_len - self.interruptible_queue.len();
         sub_interruptible_count(removed_interruptible);
-
-        removed_ready + removed_interruptible
-    }
-    /// 就绪队列中任务数量
-    pub fn ready_count(&self) -> u16 {
-        self.ready_queue.len() as u16
+        removed_interruptible
     }
     /// 可中断队列中任务数量
     pub fn interruptible_count(&self) -> u16 {
         self.interruptible_queue.len() as u16
     }
-    /// 僵尸任务数量（遍历就绪+可中断队列）
-    pub fn zombie_count(&self) -> u16 {
-        let mut count = 0u16;
-        for t in self
-            .ready_queue
+    /// 可中断 registry 中尚未清理的僵尸任务数量。
+    pub fn interruptible_zombie_count(&self) -> u16 {
+        self.interruptible_queue
             .iter()
-            .chain(self.interruptible_queue.iter())
-        {
-            if t.is_zombie() {
-                count += 1;
-            }
-        }
-        count
+            .filter(|task| task.is_zombie())
+            .count()
+            .min(u16::MAX as usize) as u16
     }
-    /// 将任务从 interruptible 队列移动到 ready 队列。
+    /// 将任务从 interruptible registry 移动到目标 CPU 的 runqueue。
     ///
     /// # Semantics
     ///
     /// `Blocking -> Running` 或 `Blocked -> Queued(CPU0)` 的 CAS 与容器移动
-    /// 均在 `TASK_MANAGER` 锁内完成；重复唤醒不会再次入队。
+    /// 均在 `TASK_MANAGER -> CPU0 RunQueue` 固定锁序内完成；重复唤醒不会再次入队。
     pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) -> bool {
         crate::task::perf::record_taskq_wake_interruptible();
         self.try_wake_interruptible(task).is_ok()
     }
-    /// 尝试将任务从 interruptible 队列移动到 ready 队列。
+    /// 尝试将任务从 interruptible registry 移动到目标 CPU 的 runqueue。
     ///
     /// # Errors
     ///
@@ -666,22 +396,15 @@ impl TaskManager {
                 }
                 TaskStatus::Blocked => {
                     let target_cpu = crate::smp::BOOT_CPU_ID;
-                    if task
-                        .try_sched_transition(
-                            TaskStatus::Blocked,
-                            TaskStatus::Queued(target_cpu),
-                        )
-                        .is_err()
-                    {
-                        continue;
-                    }
                     if !self.remove_interruptible(&task) {
                         panic!(
                             "woken Blocked task is absent from interruptible registry: tid={}",
                             task.gettid()
                         );
                     }
-                    self.enqueue_ready_front(task);
+                    // 固定锁序：TASK_MANAGER -> 一个目标 RunQueue。状态 CAS 与
+                    // runnable 容器插入由 runqueue 入口在同一锁域提交。
+                    super::run_queue::enqueue_woken(task, target_cpu);
                     return Ok(());
                 }
                 TaskStatus::Queued(_) | TaskStatus::Running(_) => {
@@ -693,13 +416,6 @@ impl TaskManager {
                 }
             }
         }
-    }
-    #[allow(unused)]
-    /// 打印 ready 队列中的任务 ID，仅供诊断。
-    pub fn show_ready(&self) {
-        self.ready_queue.iter().for_each(|task| {
-            log::error!("[show_ready] tid: {}, pid: {}", task.tid.0, task.pid());
-        })
     }
     #[allow(unused)]
     /// 打印 interruptible 队列中的任务 ID，仅供诊断。
@@ -718,11 +434,9 @@ fn enqueue_ready_batch(tasks: Vec<Arc<TaskControlBlock>>) -> usize {
     TASK_MANAGER.lock().enqueue_ready_batch(tasks)
 }
 
-/// 更新 ready 队列中任务的 nice 快速路径计数。
+/// 更新 owner runqueue 中任务的 nice 快速路径计数。
 pub fn update_ready_nice(task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
-    TASK_MANAGER
-        .lock()
-        .update_ready_nice(task, old_nice, new_nice);
+    super::run_queue::update_nice(task, old_nice, new_nice);
 }
 
 lazy_static! {
@@ -730,19 +444,49 @@ lazy_static! {
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
-/// 首次发布一个新任务到 ready 队列。
+/// 首次发布一个新任务到 CPU0 runqueue。
 pub fn publish_task(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.lock().publish_task(task)
+    super::run_queue::publish(task, crate::smp::BOOT_CPU_ID)
 }
 
 /// 在 CPU 已切回 idle 栈后完成上一任务的状态和容器交接。
 pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
-    TASK_MANAGER.lock().finish_switch_out(task, cpu);
+    loop {
+        match task.task_status() {
+            TaskStatus::Running(owner) if owner == cpu => {
+                super::run_queue::requeue_running(task, cpu);
+                return;
+            }
+            TaskStatus::Blocking(owner) if owner == cpu => {
+                // wake 可以并发撤销 Blocking。CAS 失败时重新读取：若变回
+                // Running，本 CPU 负责重新入队；若本次赢得 CAS，则保持睡眠。
+                if task
+                    .try_sched_transition(TaskStatus::Blocking(cpu), TaskStatus::Blocked)
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+            TaskStatus::Zombie => {
+                TASK_MANAGER.lock().enqueue_zombie(task);
+                return;
+            }
+            actual => task.fail_sched_invariant(
+                "finish task switch-out",
+                TaskStatus::Running(cpu),
+                actual,
+                TaskStatus::Queued(cpu),
+            ),
+        }
+    }
 }
 
-/// 从 ready 队列取出下一个可运行任务。
+/// 从本 CPU runqueue 取出下一个可运行任务。
 pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().fetch_task(cpu)
+    let task = super::run_queue::fetch(cpu)?;
+    #[cfg(feature = "oom_handler")]
+    TASK_MANAGER.lock().active_tracker.mark_active(task.tid.0);
+    Some(task)
 }
 
 /// 从显式 zombie 队列取出一个任务。
@@ -761,18 +505,12 @@ pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_zombies(limit)
 }
 
-/// 从就绪队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
-/// 调度循环中每轮调用一次，逐步排空。
-pub fn take_one_ready_zombie() -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().take_one_ready_zombie()
-}
-
 /// 从可中断队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
 pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_one_interruptible_zombie()
 }
 
-/// 从 ready、interruptible 和专用 zombie 队列中移除指定 pid 的所有 zombie TCB，
+/// 从 interruptible 和专用 zombie registry 移除指定 pid 的所有 zombie TCB，
 /// 在锁外 drop，避免 TCB::drop() 在持有 TASK_MANAGER 锁时执行析构链。
 pub fn remove_zombie_tasks_by_pid(pid: usize) {
     let zombies = TASK_MANAGER.lock().remove_zombie_tasks_by_pid(pid);
@@ -806,24 +544,28 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
             return Ok(());
         };
     }
-    let ready_len = manager.ready_queue.len();
-    for idx in (0..ready_len).rev() {
-        let task = manager.ready_queue[idx].clone();
-        if !manager.active_tracker.check_active(task.tid.0) {
-            continue;
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        let ready_len = super::run_queue::stats(cpu).0;
+        for index in (0..ready_len).rev() {
+            let Some(task) = super::run_queue::task_at(cpu, index) else {
+                continue;
+            };
+            if !manager.active_tracker.check_active(task.tid.0) {
+                continue;
+            }
+            let released = task.process.vm().lock().do_shallow_clean();
+            log::warn!(
+                "shallow clean on task: tid {}, pid {}, released: {}",
+                task.tid.0,
+                task.pid(),
+                released
+            );
+            manager.active_tracker.mark_inactive(task.tid.0);
+            total_released += released;
+            if total_released >= req {
+                return Ok(());
+            };
         }
-        let released = task.process.vm().lock().do_shallow_clean();
-        log::warn!(
-            "shallow clean on task: tid {}, pid {}, released: {}",
-            task.tid.0,
-            task.pid(),
-            released
-        );
-        manager.active_tracker.mark_inactive(task.tid.0);
-        total_released += released;
-        if total_released >= req {
-            return Ok(());
-        };
     }
     Err(())
 }
@@ -855,7 +597,14 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
 
 /// 从调度队列中移除一组任务。
 pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
-    TASK_MANAGER.lock().remove_tasks(tasks)
+    // 固定 TASK_MANAGER -> 单个 RunQueue 的锁序；循环每次只定位任务当前
+    // owner，绝不同时持有两个 CPU 的队列锁。
+    let mut manager = TASK_MANAGER.lock();
+    let mut removed = manager.remove_interruptible_tasks(tasks);
+    for task in tasks {
+        removed += usize::from(super::run_queue::remove(task));
+    }
+    removed
 }
 
 /// 返回 ready + interruptible 队列计数的近似值。
@@ -865,13 +614,18 @@ pub fn procs_count() -> u16 {
 
 /// 无锁判断 ready 队列是否非空。
 pub fn has_ready_task() -> bool {
-    READY_TASK_COUNT.load(AtomicOrdering::Relaxed) != 0
+    super::run_queue::total_count_fast() != 0
 }
 
 /// 返回 ready/interruptible 队列中的 zombie 任务数量。
 pub fn zombie_count() -> u16 {
     let manager = TASK_MANAGER.lock();
-    manager.zombie_count()
+    let mut count = manager.interruptible_zombie_count();
+    drop(manager);
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        count = count.saturating_add(super::run_queue::stats(cpu).1 as u16);
+    }
+    count
 }
 
 /// 向除 initproc 以外的所有 interruptible 任务投递信号。

@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -64,20 +64,19 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
 7. **lwext4**：跨实例全局锁位于 C 调用外层，保护区内只允许同步块 I/O，禁止
    yield、任务事件等待或调用会反向获取 VFS 高层锁的路径。
 
-### 3.1 B15 过渡期约束
+### 3.1 B15 历史过渡约束
 
-B15 尚未拆分 per-CPU runqueue，所有 ready/interruptible 容器仍由单一
-`TASK_MANAGER` 保护。当前实现因此在这个锁内同时完成调度状态 CAS 与容器移动，
-保证“状态已发布但尚未入队”或“已经出队但仍标为 Queued”不会被其他唤醒路径观察。
+B15 尚未拆分 per-CPU runqueue 时，ready/interruptible 容器曾由单一
+`TASK_MANAGER` 保护。该实现只用于说明状态机的演进背景，已由 B18 的 3.3 节取代，
+不得再作为新增调用路径的锁序依据。
 
 WaitQueue 的 `wake_*` 当前以 `WaitQueue -> TASK_MANAGER` 的单向顺序调用；反向获取
 不存在，且该路径不获取 `task.inner`。Phase 3 拆分目标 runqueue 时必须把候选任务
 收集与远程入队分段，落实上一节的最终部分序，不能照搬这个全局锁过渡实现。
 
-本批新增的 publish、wake、block 和 switch-out 状态迁移都不在 `TASK_MANAGER`
-内获取 `task.inner`。但旧 nice-aware `pop_fair_ready()` 仍通过 `sched_pick_key()`
-在全局队列锁内读取 `sched_vruntime/sched_nice`；当前没有反向同时持锁路径，因此尚未
-形成环，但这是明确登记的既有例外，Phase 3 必须以无锁调度 hint 或出锁快照消除。
+B15 新增的 publish、wake、block 和 switch-out 状态迁移都不在 `TASK_MANAGER`
+内获取 `task.inner`。当时登记的 nice-aware 锁内读取技术债已在 B18 通过原子
+nice/vruntime hint 消除。
 
 ### 3.2 B17 Per-CPU current 约束
 
@@ -93,13 +92,28 @@ panic 诊断只能使用 `try_lock()`。
 - `schedule()`、退出和架构 `noreturn` 路径前必须释放本地 current `Arc`，因为旧
   Rust 栈帧不会被展开。
 
-ready/interruptible 容器仍沿用 3.1 的单一 `TASK_MANAGER` 过渡协议；B17 没有
-引入 runqueue 双锁、远程 enqueue 或任务迁移。
+B17 本身没有引入 runqueue 双锁、远程 enqueue 或任务迁移；其后的 B18 已拆出
+per-CPU RunQueue，但仍保持生产任务 owner 为 CPU0。
+
+### 3.3 B18 Per-CPU RunQueue 约束
+
+B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护
+该 CPU 的 `Queued(cpu)` 成员关系和 nice 快速路径计数；`nr_running` 只是排队任务数的
+无锁近似值，不包含 current，也不替代锁内成员关系。
+
+- publish、fetch、yield 后重新入队只获取一个 owner runqueue；
+- nice-aware 选择只读取 TCB 的原子 nice/vruntime hint，不在 runqueue 锁内获取
+  `task.inner`；
+- Blocked 唤醒先持有 `TASK_MANAGER` 从 interruptible registry 移除任务，再按
+  `TASK_MANAGER -> 单个目标 RunQueue` 提交 `Blocked -> Queued(cpu)`；
+- 批量移除也采用同一方向，并逐个定位 owner；任何时刻不得同时持有两个 runqueue；
+- 从 runqueue 撤回的 `Arc` 必须先释放队列锁，再执行 drop；
+- B18 仍固定目标为 CPU0，因此本节尚不证明远程 enqueue、迁移或 work stealing 正确。
 
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；
-- 新增 task.inner 与任意 runqueue 锁嵌套；上述 legacy nice-aware 例外不得扩散；
+- task.inner 与任意 runqueue 锁嵌套；
 - 普通锁跨 `__switch`、schedule、yield、block、IPI ack 或 shootdown ack；
 - MM/PTE 锁内等待远端 TLB ack；
 - 发 IPI 时仍持有目标 CPU 可能在 handler 后续路径获取的锁；

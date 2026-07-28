@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-28
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -15,35 +15,33 @@ tags: [process, scheduler, task-manager, processor]
 
 | 文件 | 作用 |
 |------|------|
-| `os/src/task/manager.rs` | `TaskManager`、ready/interruptible/zombie queue、WaitQueue、KernelTimerQueue |
+| `os/src/task/run_queue.rs` | Per-CPU `RunQueue`、FIFO/nice-aware 选择和 owner 迁移 |
+| `os/src/task/manager.rs` | interruptible/zombie/timer registry、WaitQueue、KernelTimerQueue |
 | `os/src/task/processor.rs` | Per-CPU `CpuTaskState/Processor`、`run_tasks()`、`schedule()` |
 | `os/src/task/mod.rs` | `suspend_current_and_run_next()`、block/exit 调度入口 |
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
-调度器当前处于 SMP 过渡阶段：current 槽和 idle context 已按 CPU 拆分，
-但 ready queue 仍是全局容器且普通任务只由 CPU0 取出运行；
+调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
+拆分，但新任务/唤醒任务仍固定进入 CPU0，AP 尚未进入调度循环；
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
-## 2. TaskManager
+## 2. TaskManager 与 Per-CPU RunQueue
 
-`TaskManager` 定义在 `os/src/task/manager.rs:85` 或 `manager.rs:97`。启用 `oom_handler` 时多一个 `active_tracker` 字段；普通构建字段如下：
+`TaskManager` 不再拥有 runnable 容器。启用 `oom_handler` 时多一个
+`active_tracker` 字段；普通构建字段如下：
 
 ```rust
 pub struct TaskManager {
-    pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
     zombie_queue: VecDeque<Arc<TaskControlBlock>>,
-    ready_nonzero_nice_count: usize,
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `ready_queue` | `VecDeque<Arc<TaskControlBlock>>`，可运行任务 |
 | `interruptible_queue` | 可中断睡眠任务 |
 | `zombie_queue` | 当前任务退出后等待切栈 drop 的 TCB |
-| `ready_nonzero_nice_count` | ready queue 中非零 nice 任务数量 |
 | `active_tracker` | `oom_handler` 特性下用于 OOM 回收选择 |
 
 全局实例：
@@ -52,23 +50,28 @@ pub struct TaskManager {
 pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 ```
 
-## 3. ready queue 选择策略
+每个 `CpuTaskState` 独占一个 `Mutex<RunQueue>` 和近似队列长度
+`nr_running`。这里的计数只表示队列成员，不包含 current；后续负载选择必须再计入
+current 槽，不能把它直接解释为完整 CPU load。
 
-`pop_next_ready()` 有两个路径：
+## 3. RunQueue 选择策略
+
+`RunQueue::pop_next()` 有两个路径：
 
 | 条件 | 策略 |
 |------|------|
-| `ready_nonzero_nice_count == 0` | FIFO fast path，`pop_front()` |
-| 存在非零 nice | 扫描 ready queue，选 `(sched_vruntime, sched_nice, tid)` 最小任务 |
+| `nonzero_nice_count == 0` | 本 CPU FIFO fast path，`pop_front()` |
+| 存在非零 nice | 扫描本 CPU 队列，选 `(vruntime_hint, nice_hint, tid)` 最小任务 |
 
-nice-aware 路径只在需要时扫描。`sched_nice_hint` 用于快速判断任务是否非零 nice。
+nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_hint` 都是原子
+快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
-这条路径在单核 ready queue 上实现简化公平选择，不维护 Linux CFS 的红黑树 runqueue 或多核负载均衡状态。
+这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
+调度域。B18 只完成容器拆分，生产 owner 仍固定 CPU0。
 
-B15 为后续 per-CPU runqueue 先建立了所有权协议：`TaskStatus::Queued(cpu)`
-明确记录队列 owner，`TaskStatus::Running(cpu)` 明确记录 current owner。当前容器
-仍是全局 `TASK_MANAGER`，因此生产任务的 `cpu` 仍固定为 CPU0；这一步只解决
-“同一 TCB 不能被两个执行位置同时拥有”，尚未实现跨核任务执行。
+B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
+`PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
+不能直接 push/pop。跨核任务执行和目标选择仍未开放。
 
 ## 4. Processor
 
@@ -99,6 +102,8 @@ pub struct Processor {
 ```rust
 pub(crate) struct CpuTaskState {
     processor: Mutex<Processor>,
+    run_queue: Mutex<RunQueue>,
+    nr_running: AtomicUsize,
     current_pid: AtomicUsize,
     current_tid: AtomicUsize,
     current_syscall_id: AtomicUsize,
@@ -134,7 +139,7 @@ schedule_tick += 1
   ├── NET_INTERFACE.try_poll()        每 64 tick
   ├── fs::reclaim::maybe_reclaim_fs_caches()
   ├── drain zombie_queue
-  ├── 每 64 tick 清理旧 ready/interruptible zombie 并记录队列统计
+  ├── 每 64 tick 清理 interruptible zombie 并记录本地/全局队列统计
   ├── compact_shared_futex()
   ├── fetch_task()
   ├── queue sample / perf
@@ -188,8 +193,8 @@ exit_current_and_run_next()
 
 切换到新任务：
 
-1. `fetch_task(cpu)` 持有 `TASK_MANAGER` 锁，从 ready queue 取任务。
-2. 同一临界区 CAS `Queued(cpu) -> Running(cpu)`；只有成功者得到任务。
+1. `fetch_task(cpu)` 只锁本 CPU `RunQueue` 并取出任务。
+2. 同一 runqueue 临界区 CAS `Queued(cpu) -> Running(cpu)`；只有成功者得到任务。
 3. 锁住 task inner，执行 `update_process_times_schedule_in()`。
 4. 写入本 CPU 不变的 PID/TID 快照。
 5. 在本 CPU `processor` 锁内执行 `current = Some(task)`，随后立即释放锁。
@@ -241,27 +246,28 @@ idle: clear current -> Blocking(cpu) -> Blocked
 
 1. 若任务尚未切离 CPU，在 `TASK_MANAGER` 锁内 CAS
    `Blocking(cpu) -> Running(cpu)`，从 registry 移除，但不加入 ready queue。
-2. 若任务已经切离 CPU，CAS `Blocked -> Queued(CPU0)`，从 registry 移除并加入
-   ready queue 队首。
+2. 若任务已经切离 CPU，持 `TASK_MANAGER` 从 registry 移除，再按固定锁序取得
+   CPU0 的单个 `RunQueue`，提交 `Blocked -> Queued(CPU0)` 并加入队首。
 3. CAS 失败说明其他路径已经唤醒或任务已不再可唤醒，返回
    `AlreadyWaken`，绝不再次插入队列。
 
 `WaitQueue::wake_*()` 只筛选原子状态并把候选交给调度器，不能在外部先写状态。
-状态迁移和 ready/interruptible 容器移动必须由同一个 `TASK_MANAGER` 临界区提交。
+`TASK_MANAGER -> 单个 RunQueue` 是唯一允许的嵌套顺序；任何路径都不得反向取锁或
+同时持有两个 runqueue。
 
 ## 12.1 状态与队列不变量
 
 - `sched_state` 是调度状态唯一真值，`task.inner` 不保留影子字段；
-- 一个任务最多属于一个 ready queue 或一个 current slot；interruptible registry
+- 一个任务最多属于一个 per-CPU runqueue 或一个 current slot；interruptible registry
   只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
 - 本 CPU `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit
   都不能在仍使用自身内核栈时提前取走 current Arc；
 - `Queued(cpu)` 退出前必须先从相应队列移除并转为 `Blocked`；直接转 Zombie 会 fail-stop；
 - 必成功的 publish/fetch/switch-out 迁移在所有构建中 fail-stop；只有重复 wake 使用
   允许失败的 CAS 并返回 `AlreadyWaken`；
-- 新增的状态迁移路径不在 `TASK_MANAGER` 内获取 `task.inner`。旧 nice-aware
-  `pop_fair_ready()` 仍会在全局队列锁内读取 `sched_vruntime/sched_nice`，这是 Phase 3
-  拆 per-CPU runqueue 前必须消除的既有锁序技术债。
+- runqueue 锁内不获取 `task.inner`；公平选择只读取原子 nice/vruntime hint。
+- publish/fetch/yield 只锁一个 runqueue；Blocked wake 和批量 remove 才按固定顺序
+  `TASK_MANAGER -> 单个 RunQueue`，并且锁不跨 context switch、析构或等待点。
 
 ## 13. OOM 回收调度协作
 
@@ -292,8 +298,8 @@ idle: clear current -> Blocking(cpu) -> Blocked
 | 现象 | 检查 |
 |------|------|
 | 任务不再运行 | 是否停在 interruptible queue，WaitQueue 是否唤醒 |
-| ready queue 中出现 zombie | zombie queue drain 和兜底扫描 |
+| runqueue 中出现 zombie | 检查是否绕过 `remove()` 直接执行 `Queued -> Zombie` |
 | getpid/gettid 返回旧值 | 本 CPU current 槽与 PID/TID 快照是否同步发布、清理 |
 | getuid/getpgid/token 返回旧值 | TCB/PCB 权威原子 hint 是否在 setter 中更新 |
-| 非零 nice 任务饿死 | `ready_nonzero_nice_count` 是否更新 |
+| 非零 nice 任务饿死 | owner RunQueue 的 `nonzero_nice_count` 与原子 hint 是否更新 |
 | 网络等待无 syscall 时卡住 | 调度循环后台 `try_poll/poll` 是否执行 |

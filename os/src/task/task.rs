@@ -36,7 +36,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use log::warn;
 use spin::{Mutex, MutexGuard};
 
@@ -162,8 +162,10 @@ pub struct TaskControlBlock {
     /// Zero when not in a fallback wait. Used by stale timer callbacks to
     /// re-arm instead of spurious-wake.
     pub wait_io_fallback_active_generation: AtomicUsize,
-    /// Lockless scheduler hint for the common nice=0 ready-queue path.
+    /// 常见 nice=0 runqueue 路径使用的无锁调度提示。
     pub sched_nice_hint: AtomicI32,
+    /// runqueue 选择使用的 vruntime 快照，避免持队列锁再获取 `task.inner`。
+    pub sched_vruntime_hint: AtomicU64,
     /// ASID allocated for this task (la64 only).  For rv64 it stays 0.
     pub asid: core::sync::atomic::AtomicU16,
 }
@@ -1000,6 +1002,7 @@ impl TaskControlBlock {
             wait_timer_generation: AtomicUsize::new(0),
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
+            sched_vruntime_hint: AtomicU64::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             inner: Mutex::new(TaskControlBlockInner {
@@ -1135,6 +1138,7 @@ impl TaskControlBlock {
             wait_timer_generation: AtomicUsize::new(0),
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
+            sched_vruntime_hint: AtomicU64::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             inner: Mutex::new(TaskControlBlockInner {
@@ -1698,6 +1702,7 @@ impl TaskControlBlock {
             wait_timer_generation: AtomicUsize::new(0),
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
+            sched_vruntime_hint: AtomicU64::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             inner: Mutex::new(TaskControlBlockInner {
