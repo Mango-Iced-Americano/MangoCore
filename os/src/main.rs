@@ -128,11 +128,13 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
         fs::initramfs_init();
         if boot_config.mode != crate::bootargs::BootMode::Regression {
             drivers::init_net_device();
-            net::config::init();
             fs::mount_boot_block_devices(&boot_config);
         } else {
-            crate::println!("[kernel] Regression mode — skipping net/block init");
+            crate::println!("[kernel] Regression mode — skipping block init");
         }
+        // Network always initialised: Unix sockets, eventfd, epoll, futex
+        // all depend on NET_INTERFACE being up regardless of NIC presence.
+        net::config::init();
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();

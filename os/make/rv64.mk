@@ -16,9 +16,9 @@ QEMU_COMPETITION_GDB_AFTER_DRIVES = $(QEMU_COMPETITION_AFTER_DRIVES) -S -s
 QEMU_DEVELOPMENT_BEFORE_DRIVES = -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
 QEMU_DEVELOPMENT_AFTER_DRIVES = -m 1024 -smp threads=$(CORE_NUM)
 QEMU_REGRESSION_BEFORE_DRIVES = -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
-QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1
+QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1 $(NET_DEV)
 QEMU_KTEST_BEFORE_DRIVES = $(QEMU_REGRESSION_BEFORE_DRIVES)
-QEMU_KTEST_AFTER_DRIVES = $(QEMU_REGRESSION_AFTER_DRIVES)
+QEMU_KTEST_AFTER_DRIVES = -m 1024 -smp threads=1
 QEMU_KTEST_X0 = $(KTEST_EXT4_IMAGE)
 
 lwext4-rv64: $(LWEXT4_RV_LIB)
@@ -167,8 +167,8 @@ regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
+	@echo "[regression] Launching QEMU (no disks, timeout 120s)..."
+	@timeout --foreground 120 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)

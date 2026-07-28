@@ -16,7 +16,7 @@ QEMU_COMPETITION_GDB_AFTER_DRIVES = -no-reboot -rtc base=utc -S -s
 QEMU_DEVELOPMENT_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
 QEMU_DEVELOPMENT_AFTER_DRIVES = -m 1024 -smp threads=$(CORE_NUM)
 QEMU_REGRESSION_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
-QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1
+QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1 $(NET_DEV)
 # LoongArch QEMU loads the ELF directly.  Unlike RV64, this architecture has
 # no BOOTLOADER value; pairing an empty `-bios` with `-device loader,...`
 # makes QEMU consume the loader device text as a firmware filename.

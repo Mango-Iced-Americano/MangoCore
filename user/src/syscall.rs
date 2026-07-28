@@ -3,6 +3,7 @@
 use core::arch::global_asm;
 
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
@@ -30,6 +31,7 @@ const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_SIGNALFD4: usize = 74;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -42,6 +44,7 @@ const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GRUOP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
@@ -81,6 +84,7 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_PIDFD_OPEN: usize = 434;
 const SYSCALL_STATX: usize = 291;
 // Not standard POSIX sys_call
 const SYSCALL_LS: usize = 500;
@@ -89,6 +93,10 @@ const SYSCALL_CLEAR: usize = 502;
 const SYSCALL_EXT4_COUNTERS: usize = 503;
 const SYSCALL_OPEN: usize = 506; //where?
 const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
+const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
+const SYSCALL_WAITID: usize = 95;
 
 #[cfg(target_arch = "loongarch64")]
 global_asm!(include_str!("syscall.S"));
@@ -197,6 +205,10 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
 
 pub fn sys_pipe(pipe: &mut [i32]) -> isize {
     syscall(SYSCALL_PIPE, [pipe.as_mut_ptr() as usize, 0, 0])
+}
+
+pub fn sys_eventfd(initval: u32, flags: u32) -> isize {
+    syscall(SYSCALL_EVENTFD2, [initval as usize, flags as usize, 0])
 }
 
 pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
@@ -484,6 +496,20 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimerFdSpec) -> isize {
     syscall(SYSCALL_TIMERFD_GETTIME, [fd, curr_value as usize, 0])
 }
 
+pub fn sys_futex(
+    uaddr: *mut u32,
+    op: u32,
+    val: u32,
+    timeout: *const TimeSpec,
+    uaddr2: *mut u32,
+    val3: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_FUTEX,
+        [uaddr as usize, op as usize, val as usize, timeout as usize, uaddr2 as usize, val3 as usize],
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct ITimerSpec {
@@ -697,4 +723,83 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
 
 pub fn sys_read_raw(fd: usize, buf: *mut u8, len: usize) -> isize {
     syscall(SYSCALL_READ, [fd, buf as usize, len])
+}
+
+/// User-visible epoll event layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EpollEvent {
+    pub events: u32,
+    pub data: u64,
+}
+
+/// User-visible `pollfd` layout used by `ppoll`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PollFd {
+    pub fd: u32,
+    pub events: u16,
+    pub revents: u16,
+}
+
+pub fn sys_epoll_create1(flags: usize) -> isize {
+    syscall(SYSCALL_EPOLL_CREATE1, [flags, 0, 0])
+}
+
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollEvent) -> isize {
+    syscall4(SYSCALL_EPOLL_CTL, [epfd, op, fd, event as usize])
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events: *mut EpollEvent,
+    maxevents: isize,
+    timeout: isize,
+) -> isize {
+    syscall6(
+        SYSCALL_EPOLL_PWAIT,
+        [epfd, events as usize, maxevents as usize, timeout as usize, 0, 0],
+    )
+}
+
+pub fn sys_ppoll(fds: &mut [PollFd], timeout: *const TimeSpec) -> isize {
+    syscall4(
+        SYSCALL_PPOLL,
+        [fds.as_mut_ptr() as usize, fds.len(), timeout as usize, 0],
+    )
+}
+
+pub fn sys_signalfd4(fd: isize, mask: *const u64, sigsetsize: usize, flags: usize) -> isize {
+    syscall4(
+        SYSCALL_SIGNALFD4,
+        [fd as usize, mask as usize, sigsetsize, flags],
+    )
+}
+
+pub fn sys_rt_sigprocmask(
+    how: usize,
+    set: *const u64,
+    oldset: *mut u64,
+    sigsetsize: usize,
+) -> isize {
+    syscall4(
+        SYSCALL_SIGPROCMASK,
+        [how, set as usize, oldset as usize, sigsetsize],
+    )
+}
+
+pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
+    syscall(SYSCALL_PIDFD_OPEN, [pid, flags, 0])
+}
+
+pub fn sys_waitid(
+    idtype: usize,
+    id: usize,
+    infop: *mut u8,
+    options: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_WAITID,
+        [idtype, id, infop as usize, options as usize, 0, 0],
+    )
 }

@@ -3,6 +3,13 @@
 //! Multi-task tests (wake_one) require the scheduler to be active
 //! (mango.mode=ktest with the new multi-task harness).
 
+#[path = "waitqueue_blocking.rs"]
+mod blocking;
+#[path = "waitqueue_interrupt.rs"]
+mod interrupt;
+#[path = "waitqueue_wake.rs"]
+mod wake;
+
 use crate::kernel_tests::runner::KernelTest;
 use crate::task::WaitQueue;
 use alloc::vec;
@@ -21,6 +28,29 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new("waitqueue::basic_queue_ops", test_basic_queue_ops),
         KernelTest::new("waitqueue::wake_all_on_empty", test_wake_all_on_empty),
         KernelTest::new("waitqueue::wake_one", test_wake_one),
+        KernelTest::new("waitqueue::basic_block_wake", blocking::test_basic_block_wake),
+        KernelTest::with_timeout(
+            "waitqueue::no_spurious_wake_without_fallback",
+            blocking::test_no_spurious_wake_without_fallback,
+            1000,
+        ),
+        KernelTest::new("waitqueue::lost_wakeup_handshake", blocking::test_lost_wakeup_handshake),
+        KernelTest::new("waitqueue::multi_queue_cleanup", blocking::test_multi_queue_cleanup),
+        KernelTest::with_timeout(
+            "waitqueue::deadline_timeout",
+            blocking::test_deadline_timeout,
+            1000,
+        ),
+        KernelTest::new("waitqueue::stale_waiter_cleanup", blocking::test_stale_waiter_cleanup),
+        KernelTest::new("waitqueue::wake_one_fifo", wake::test_wake_one_fifo),
+        KernelTest::new("waitqueue::wake_all_wakes_all", wake::test_wake_all_wakes_all),
+        KernelTest::with_timeout(
+            "waitqueue::thousand_cycle_stress",
+            wake::test_thousand_cycle_stress,
+            5000,
+        ),
+        KernelTest::new("waitqueue::signal_interrupt", interrupt::test_signal_interrupt),
+        KernelTest::new("waitqueue::signal_wake_race", interrupt::test_signal_wake_race),
     ]
 }
 
