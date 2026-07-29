@@ -3,22 +3,24 @@ title: "内存管理子系统 (Memory Management)"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
-tags: [mm, vma, mmap, page-fault, pagetable, tlb-batch, smp]
+last_update: 2026-07-29
+tags: [mm, vma, mmap, page-fault, pagetable, mmu-gather, smp]
 ---
 
 # 内存管理子系统
 
 ## 概述
 
-MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `TlbBatch` 统一提交本地 TLB 刷新与 frame 延迟释放。SMP 过渡期已建立每 MM 的 cached CPU/generation 激活状态和全用户 IPI/ack 原语，但 `Published` PTE 的锁外提交尚未接通，用户任务仍固定 CPU0。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
+MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `MmuGather` 汇入一次 VM 更新，再由 `AddressSpace` 在解锁后完成 generation、全用户 IPI/ack 和 frame 延迟释放。当前仍使用单调 cached CPU 集合与全量失效，普通用户任务也仍固定 CPU0；range shootdown、MM-owned LoongArch ASID 和用户迁移尚未完成。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
 
 ## 依据范围
 
 | 主题 | 主要源码 |
 |------|----------|
 | MM 初始化与模块边界 | `os/src/mm/mod.rs` |
-| 地址空间 | `os/src/mm/address_space.rs` |
+| 地址空间与进程 VM 锁 | `os/src/mm/address_space.rs` |
+| 用户 PTE 修改收集 | `os/src/mm/user_mapper.rs`, `os/src/mm/mmu_gather.rs` |
+| 跨 CPU TLB 同步 | `os/src/mm/tlb.rs` |
 | VMA | `os/src/mm/vma.rs`, `os/src/mm/vma_set.rs` |
 | mmap/brk syscall 语义 | `os/src/mm/mmap.rs`, `os/src/syscall/process/mm.rs` |
 | 缺页处理 | `os/src/mm/page_fault.rs`, `os/src/mm/filemap.rs` |
@@ -34,6 +36,9 @@ MangoCore 的内存管理由物理页分配器、架构页表实现、进程地�
 | brk, mmap, munmap, mprotect, mremap, mincore, madvise ...   |
 +-------------------------------------------------------------+
 | AddressSpace<T: PageTable>                                  |
+| VM lock + TlbContext                                        |
++-------------------------------------------------------------+
+| AddressSpaceInner<T>                                        |
 | page_table + VmaSet + heap metadata + locked pages          |
 +-------------------------------------------------------------+
 | VmaSet                         | Vma                         |
@@ -43,8 +48,8 @@ MangoCore 的内存管理由物理页分配器、架构页表实现、进程地�
 | page_fault.rs + filemap.rs                                  |
 | lazy anon | file read/write | shared write | CoW             |
 +-------------------------------------------------------------+
-| UserMapper + TlbBatch + MmTlbState                         |
-| user PTE writes | local flush | cached CPU/generation       |
+| UserMapper + MmuGather -> TlbFlush                          |
+| PTE writes | range/frame collection | generation/IPI/ack    |
 +-------------------------------------------------------------+
 | PageTable trait + PageTableImpl                              |
 | rv64 Sv39PageTable | la64 LAFlexPageTable                    |
@@ -70,20 +75,21 @@ KERNEL_SPACE.lock().activate()
 
 | 结构 | 文件 | 作用 |
 |------|------|------|
-| `AddressSpace<T>` | `address_space.rs` | 每进程地址空间，包含页表、VMA 集合、堆边界和 locked page 计数 |
+| `AddressSpace<T>` | `address_space.rs` | 进程共享的 VM 锁和 `TlbContext`；只暴露 `read/write/try_write`，强制解锁后等待 user-TLB ack |
+| `AddressSpaceInner<T>` | `address_space.rs` | VM 锁内的页表、VMA、堆边界、locked page 与本轮 `MmuGather` |
 | `VmaSet` | `vma_set.rs` | 用 `BTreeMap<VirtPageNum, Vma>` 管理 VMA、mmap holes 和用户映射统计 |
 | `Vma` | `vma.rs` | 单段映射，包含权限、文件后端、fork 行为和 `VmPageStore` |
 | `VmPageStore` | `frame_store.rs` | 记录每个 VPN 的物理页状态 |
 | `FrameTracker` | `frame_allocator.rs` | 物理页 RAII 包装，drop 时归还页帧 |
 | `PageTable` | `page_table.rs` | 架构无关页表操作 trait |
-| `TlbBatch` | `tlb_batch.rs` | 收集用户 PTE 修改，在刷新 TLB 后释放失效映射的 frame |
-| `MmTlbState` | `tlb_state.rs` | MM ID、单调 cached CPU mask、generation 与 per-CPU observed；为锁外 shootdown 提供激活侧状态 |
+| `MmuGather` | `mmu_gather.rs` | 在一次 VM 写操作内合并失效范围，并独占尚不能释放的旧 frame |
+| `TlbContext` / `TlbFlush` | `tlb.rs` | 保存 MM 的 cached mask、generation/observed，并在锁外执行 shootdown |
 
 ## 功能矩阵
 
 | 功能 | 实现状态 |
 |------|----------|
-| 用户 ELF 映射 | `AddressSpace::from_elf()` 与 `map_elf()` 映射 LOAD、INTERP、trampoline 和 signal trampoline |
+| 用户 ELF 映射 | `AddressSpaceInner::from_elf()` 与 `map_elf()` 映射 LOAD、INTERP、trampoline 和 signal trampoline |
 | 用户栈 | `insert_user_stack_area()` 建立 `MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK` VMA，只映射初始栈页 |
 | heap | `do_sbrk()` 基于匿名私有固定 mmap 增长，通过 `munmap` 收缩 |
 | mmap | 支持匿名/文件、shared/private、fixed/fixed_noreplace、lazy allocation 和 shared anonymous 预分配 |

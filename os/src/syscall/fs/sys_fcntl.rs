@@ -159,8 +159,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             if (arg & vfs::F_SEAL_WRITE) != 0 {
                 let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
                 let vm_ref = task.process.vm();
-                let memory_set = vm_ref.lock();
-                if memory_set.has_shared_writable_mapping(&inode) {
+                if vm_ref.read(|memory_set| memory_set.has_shared_writable_mapping(&inode)) {
                     return EBUSY;
                 }
             }

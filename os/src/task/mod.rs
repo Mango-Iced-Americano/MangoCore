@@ -33,7 +33,7 @@ pub mod threads;
 
 use crate::fs::{self, vfs_lookup_absolute};
 use crate::hal::__switch;
-use crate::mm::{AddressSpace, PageTableImpl};
+use crate::mm::{AddressSpaceInner, AddressSpace, PageTableImpl};
 use alloc::{
     string::String,
     sync::{Arc, Weak},
@@ -397,7 +397,9 @@ fn new_ktest_process(
         INIT_NET_NAMESPACE.clone(),
         INIT_MOUNT_NAMESPACE.clone(),
         INIT_IPC_NAMESPACE.clone(),
-        Arc::new(spin::Mutex::new(AddressSpace::<PageTableImpl>::new_bare())),
+        Arc::new(AddressSpace::new(
+            AddressSpaceInner::<PageTableImpl>::new_bare(),
+        )),
         Arc::new(spin::Mutex::new(Sighand::new())),
         Arc::new(spin::Mutex::new(threads::Futex::new())),
         Arc::new(spin::Mutex::new(pid::RecycleAllocator::new())),

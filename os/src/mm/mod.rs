@@ -6,12 +6,12 @@
 //!
 //! # TLB
 //!
-//! 用户 PTE 修改统一经 `TlbBatch` 收集并提交；内核页表仍由安全的单页接口
-//! 立即刷新。`*_no_flush` 仅供 batch 内部使用，普通调用方不得直接绕过提交协议。
+//! 用户 PTE 修改由 `UserMapper` 写入，并由 `MmuGather` 收集失效范围与退休 frame；
+//! 地址空间解锁后，`TlbFlush` 才执行本地/远端失效。内核页表仍走独立同步路径。
 //!
 //! # Locking
 //!
-//! 用户地址访问会通过当前任务的 `AddressSpace` 锁 fault-in 页面。
+//! 用户地址访问会通过当前任务的外层 `AddressSpace` 串行化并 fault-in 页面。
 //! 调用方不得在持有同一地址空间锁时再次进入 uaccess 路径。
 
 pub mod address;
@@ -26,12 +26,12 @@ mod kernel_mapper;
 mod kernel_space;
 mod mapper;
 mod mmap;
+mod mmu_gather;
 mod page_fault;
 mod page_table;
 mod slab;
 mod sysctl;
-mod tlb_batch;
-mod tlb_state;
+mod tlb;
 mod uaccess;
 mod user_mapper;
 mod vma;
@@ -42,7 +42,7 @@ pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
 pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
-pub use address_space::{AddressSpace, MemoryError};
+pub use address_space::{AddressSpace, AddressSpaceInner, MemoryError};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
     frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
@@ -52,8 +52,9 @@ pub use frame_store::Frame;
 pub use heap_allocator::{
     heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES,
 };
-pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
 pub(crate) use kernel_space::remove_kernel_mapping_synchronized;
+pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
+pub(crate) use mmu_gather::{FlushRange, MmuGather};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
 pub use sysctl::{
     commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count, min_free_kbytes,
@@ -61,8 +62,7 @@ pub use sysctl::{
     set_min_free_kbytes, set_overcommit_memory, set_overcommit_ratio, set_panic_on_oom,
     total_memory_kbytes,
 };
-pub(crate) use tlb_batch::{TlbBatch, TlbPublication};
-pub(crate) use tlb_state::MmTlbState;
+pub(crate) use tlb::{TlbContext, TlbFlush};
 pub use vma::{MapFlags, MapPermission};
 type MmResult<T> = Result<T, MemoryError>;
 

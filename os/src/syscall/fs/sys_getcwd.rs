@@ -57,10 +57,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     }
     let vm_ref = task.process.vm();
     let write_len = working_dir.len() + 1;
-    if !vm_ref
-        .lock()
-        .contains_valid_buffer(buf, write_len, MapPermission::W)
-    {
+    if !vm_ref.read(|vm| vm.contains_valid_buffer(buf, write_len, MapPermission::W)) {
         return EFAULT;
     }
     let token = task.get_user_token();

@@ -55,6 +55,11 @@ pub fn user_tlb_invalidate() {
     sv39::tlb_invalidate();
 }
 
+/// 清除当前 hart 上指定用户虚拟页的所有 ASID 翻译。
+pub fn user_tlb_invalidate_page(vpn: crate::mm::VirtPageNum) {
+    sv39::tlb_invalidate_addr(usize::from(crate::mm::VirtAddr::from(vpn)));
+}
+
 pub fn bootstrap_init(cpu_id: usize) {
     if cpu_id != crate::smp::BOOT_CPU_ID {
         // AP 只开放 supervisor software interrupt；Phase 3 可进入本地调度器，

@@ -29,7 +29,7 @@ entry.asm
 |------|--------------|--------|
 | 无任何内核输出 | `hal/arch/*/entry.asm` | linker script、QEMU/OpenSBI 参数、`.bss` 清零 |
 | 打印停在 `mm::init()` 前后 | `os/src/main.rs`, `os/src/mm/mod.rs` | heap、frame allocator、`KERNEL_SPACE` 映射 |
-| fs/net 初始化后无 init | `task::add_initproc()` | `/init`、`/initproc`、`AddressSpace::from_elf()` |
+| fs/net 初始化后无 init | `task::add_initproc()` | `/init`、`/initproc`、`AddressSpaceInner::from_elf()` |
 | 用户态第一条 syscall 失败 | `hal/arch/*/trap/mod.rs` | `a7/a0..a5`、PC 前进、`syscall::syscall()` |
 | 缺页后直接 SIGSEGV | `mm/address_space.rs::do_page_fault()` | VMA 查找、growdown、`page_fault.rs` 分类 |
 | timer 不触发抢占 | `hal/arch/*/time.rs`, `task::timer_interrupt_handler()` | timer programming、interrupt enable、调度循环 |

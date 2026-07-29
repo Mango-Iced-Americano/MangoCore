@@ -36,43 +36,44 @@ pub fn sys_riscv_flush_icache(_start: usize, _end: usize, flags: usize) -> isize
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();
     let vm = task.process.vm();
-    let new_addr = vm.lock().sbrk(increment);
+    let new_addr = vm.write(|memory_set| memory_set.sbrk(increment));
     new_addr as isize
 }
 
 pub fn sys_brk(brk_addr: usize) -> isize {
     let task = current_task().unwrap();
     let vm = task.process.vm();
-    let mut memory_set = vm.lock();
-    let new_addr = if brk_addr == 0 {
-        memory_set.sbrk(0)
-    } else {
-        let former_addr = memory_set.sbrk(0);
-        let grow_size = if brk_addr < former_addr {
-            let delta = former_addr - brk_addr;
-            if delta > isize::MAX as usize {
-                warn!(
-                    "[sys_brk] shrink delta too large: brk_addr={:X}, former_addr={:X}",
-                    brk_addr, former_addr
-                );
-                0
-            } else {
-                -(delta as isize)
-            }
+    let new_addr = vm.write(|memory_set| {
+        if brk_addr == 0 {
+            memory_set.sbrk(0)
         } else {
-            let delta = brk_addr - former_addr;
-            if delta > isize::MAX as usize {
-                warn!(
-                    "[sys_brk] grow delta too large: brk_addr={:X}, former_addr={:X}",
-                    brk_addr, former_addr
-                );
-                0
+            let former_addr = memory_set.sbrk(0);
+            let grow_size = if brk_addr < former_addr {
+                let delta = former_addr - brk_addr;
+                if delta > isize::MAX as usize {
+                    warn!(
+                        "[sys_brk] shrink delta too large: brk_addr={:X}, former_addr={:X}",
+                        brk_addr, former_addr
+                    );
+                    0
+                } else {
+                    -(delta as isize)
+                }
             } else {
-                delta as isize
-            }
-        };
-        memory_set.sbrk(grow_size)
-    };
+                let delta = brk_addr - former_addr;
+                if delta > isize::MAX as usize {
+                    warn!(
+                        "[sys_brk] grow delta too large: brk_addr={:X}, former_addr={:X}",
+                        brk_addr, former_addr
+                    );
+                    0
+                } else {
+                    delta as isize
+                }
+            };
+            memory_set.sbrk(grow_size)
+        }
+    });
 
     new_addr as isize
 }
@@ -184,17 +185,18 @@ pub fn sys_mmap(
         }
     };
 
-    let mut memory_set = vm_ref.lock();
-    memory_set.mmap(
-        start,
-        len,
-        prot,
-        flags,
-        offset,
-        map_file,
-        may_write,
-        write_sealed,
-    )
+    vm_ref.write(|memory_set| {
+        memory_set.mmap(
+            start,
+            len,
+            prot,
+            flags,
+            offset,
+            map_file,
+            may_write,
+            write_sealed,
+        )
+    })
 }
 
 /// # Versions
@@ -241,7 +243,7 @@ pub fn sys_memorybarrier(cmd: usize, flags: usize, _cpu_id: usize) -> isize {
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     let task = current_task().unwrap();
-    let result = task.process.vm().lock().munmap(start, len);
+    let result = task.process.vm().write(|vm| vm.munmap(start, len));
     match result {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
@@ -434,7 +436,7 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
         Ok(prot) => prot,
         Err(errno) => return errno,
     };
-    let result = task.process.vm().lock().mprotect(addr, len, prot);
+    let result = task.process.vm().write(|vm| vm.mprotect(addr, len, prot));
     match result {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
@@ -481,7 +483,7 @@ pub fn sys_mlock(addr: usize, len: usize) -> isize {
         let inner = task.acquire_inner_lock();
         inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
     };
-    let locked_len = match task.process.vm().lock().mlock(addr, len) {
+    let locked_len = match task.process.vm().write(|vm| vm.mlock(addr, len)) {
         Ok(locked_len) => locked_len,
         Err(errno) => return errno,
     };
@@ -514,7 +516,11 @@ pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
             inner.memlock_limit_cur,
         )
     };
-    let locked_len = match task.process.vm().lock().mlock_onfault(addr, len) {
+    let locked_len = match task
+        .process
+        .vm()
+        .write(|vm| vm.mlock_onfault(addr, len))
+    {
         Ok(locked_len) => locked_len,
         Err(errno) => return errno,
     };
@@ -531,7 +537,7 @@ pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
 
 pub fn sys_munlock(addr: usize, len: usize) -> isize {
     let task = current_task().unwrap();
-    match task.process.vm().lock().munlock(addr, len) {
+    match task.process.vm().write(|vm| vm.munlock(addr, len)) {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
     }
@@ -556,20 +562,20 @@ pub fn sys_mlockall(flags: usize) -> isize {
         if memlock_limit == 0 {
             return EPERM;
         }
-        let mapped = task.process.vm().lock().user_mapped_bytes();
+        let mapped = task.process.vm().read(|vm| vm.user_mapped_bytes());
         if mapped > memlock_limit {
             return ENOMEM;
         }
     }
     if flags & MCL_CURRENT != 0 {
-        task.process.vm().lock().mlockall_current();
+        task.process.vm().write(|vm| vm.mlockall_current());
     }
     SUCCESS
 }
 
 pub fn sys_munlockall() -> isize {
     let task = current_task().unwrap();
-    task.process.vm().lock().munlockall();
+    task.process.vm().write(|vm| vm.munlockall());
     SUCCESS
 }
 
@@ -611,12 +617,9 @@ pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> isize {
     residency.resize(page_count, 0);
 
     let task = current_task().unwrap();
-    if let Err(errno) =
-        task.process
-            .vm()
-            .lock()
-            .mincore(addr, rounded_len, residency.as_mut_slice())
-    {
+    if let Err(errno) = task.process.vm().read(|vm| {
+        vm.mincore(addr, rounded_len, residency.as_mut_slice())
+    }) {
         return errno;
     }
 
@@ -675,8 +678,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
                 .unwrap()
                 .process
                 .vm()
-                .lock()
-                .madvise(addr, len, advice)
+                .write(|vm| vm.madvise(addr, len, advice))
             {
                 Ok(_) => SUCCESS,
                 Err(errno) => errno,

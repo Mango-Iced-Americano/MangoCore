@@ -10,7 +10,7 @@
 
 use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma, VmaUnmapReason};
-use super::{MemoryError, PageTable, TlbBatch, VirtAddr, VirtPageNum};
+use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
 use crate::syscall::errno::{EACCES, EINVAL, ENOMEM, EPERM};
@@ -307,14 +307,14 @@ impl VmaSet {
 
     pub(super) fn remove_area_with_start<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         start_vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
         if let Some(mut area) = self.vmas.remove(&start_vpn) {
             let start = area.vm_start();
             let end = area.vm_end();
             self.untrack_area(&area);
-            let result = area.unmap(batch, VmaUnmapReason::RemoveArea);
+            let result = area.unmap(mapper, VmaUnmapReason::RemoveArea);
             let _ = self.release_mmap_range(start, end);
             self.debug_assert_invariants();
             result
@@ -403,7 +403,7 @@ impl VmaSet {
 
     pub(super) fn unmap_range<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
         allow_empty: bool,
@@ -432,7 +432,7 @@ impl VmaSet {
             let released_start = target.vm_start();
             let released_end = target.vm_end();
             self.untrack_area(&target);
-            if target.unmap(batch, VmaUnmapReason::Range).is_err() {
+            if target.unmap(mapper, VmaUnmapReason::Range).is_err() {
                 warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
             }
             self.release_mmap_range(released_start, released_end)?;
@@ -447,7 +447,7 @@ impl VmaSet {
 
     pub(super) fn advise_range<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
         advice: usize,
@@ -474,7 +474,7 @@ impl VmaSet {
             if advice == MADV_DONTNEED {
                 let area = self.vmas.get_mut(&area_start).ok_or(ENOMEM)?;
                 if area.map_file.is_none() && area.flags.contains(MapFlags::MAP_PRIVATE) {
-                    area.discard_range(batch, cursor, advise_end)
+                    area.discard_range(mapper, cursor, advise_end)
                         .map_err(|_| EINVAL)?;
                 }
             }
@@ -575,7 +575,7 @@ impl VmaSet {
 
     pub(super) fn protect_range<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
         prot: MapPermission,
@@ -615,7 +615,7 @@ impl VmaSet {
                 end_vpn
             };
             let target_start = self.split_for_range(area_start, cursor, protect_end)?;
-            self.protect_area(batch, target_start, prot)?;
+            self.protect_area(mapper, target_start, prot)?;
             cursor = protect_end;
         }
         self.debug_assert_invariants();
@@ -758,7 +758,7 @@ impl VmaSet {
 
     fn protect_area<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         area_start: VirtPageNum,
         prot: MapPermission,
     ) -> Result<(), isize> {
@@ -770,10 +770,7 @@ impl VmaSet {
         };
         let mut failed_mapped_page = false;
         area.inner.for_each_in_memory_vpn(|vpn| {
-            if UserMapper::new(batch)
-                .set_user_flags(vpn, actual_prot)
-                .is_err()
-            {
+            if mapper.set_user_flags(vpn, actual_prot).is_err() {
                 failed_mapped_page = true;
             }
         });
@@ -787,13 +784,13 @@ impl VmaSet {
     /// 解除并丢弃全部 VMA；用于 exec 旧地址空间和 zombie 最终回收。
     pub(super) fn unmap_all<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
     ) -> Result<(), MemoryError> {
         let old_vmas = core::mem::take(&mut self.vmas);
         self.clear();
         let mut first_error = None;
         for (_, mut area) in old_vmas {
-            if let Err(error) = area.unmap(batch, VmaUnmapReason::RemoveArea) {
+            if let Err(error) = area.unmap(mapper, VmaUnmapReason::RemoveArea) {
                 first_error.get_or_insert(error);
             }
         }

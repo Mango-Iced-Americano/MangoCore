@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-28
+last_updated: 2026-07-29
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -146,22 +146,26 @@ RV64 使用无地址/ASID 参数的 `sfence.vma`，LA64 使用 `invtlb 0`，两�
 的全部 global 与 non-global 翻译。该协议只覆盖共享内核页表的动态映射；用户 MM 的
 range shootdown 与 LoongArch MM-owned ASID 仍未完成。
 
-B22 为用户 MM 增加了独立于 kernel-global 的激活与 IPI 基础设施：
+B22/B23 为用户 MM 增加了独立于 kernel-global 的激活、IPI 与修改侧提交协议：
 
 1. 用户 trap-return 在恢复用户页表根前，取得进程 VM 锁并把当前 CPU 加入该 MM 的
    单调 `cached_cpus`；登记必须先于 generation 读取；
 2. 若本 CPU 的 observed generation 落后，RV64 执行全量 `sfence.vma`，LA64 执行
    `invtlb 0x3` 清除全部 non-global 项，然后重查 generation；
-3. 第二颗 CPU 登记后，地址空间永久标记为 `Published`，在修改侧协议完成前仍禁止
-   `TlbBatch` 写 PTE；普通用户任务因此继续固定 CPU0；
+3. `MmuGather` 在 VM 锁内合并失效范围和退休 frame，并以 cached CPU mask
+   直接决定无需失效、本地失效或远端 shootdown；
 4. `USER_TLB_SYNC` 使用独立 request/ack。handler 按“Acquire request → 本地全用户
    失效 → Release ack”执行，不分配、不获取 VM/PTE 或普通锁；
 5. 锁外等待原语会临时开放本地 IRQ，以便并发 shootdown 发起者互相处理 IPI；调用者
    必须先释放 VM/PTE/runqueue 锁，并保留失效 frame 直到全部 ack。
 
-现有 `TlbBatch::commit()` 仍在外层 VM 锁内，不能直接调用第 5 步，否则目标 CPU 可能在
-IRQ-off page fault 中等待同一 VM 锁并形成死锁。B23 将把 PTE 修改、generation/目标快照
-与“释放锁后的 IPI/ack/frame 释放”拆成明确的两阶段提交。
+B23 通过 `AddressSpace::write()` 把同步边界固化到公开接口：锁内通过
+`UserMapper` 修改 PTE、由 `MmuGather` 合并失效范围和退休 frame，再推进
+generation 并冻结目标；块作用域结束后先解锁，
+再执行本地失效、IPI/ack 等待、observed 推进和 frame 释放。调用方不再能取得可变
+`MutexGuard<AddressSpace>`，因而不能把 VM 锁意外带过 shootdown 等待点。普通用户任务
+仍固定 CPU0；这一限制现在是为了 ASID、uaccess 生命周期和跨核进程语义审计，
+不再是因为用户 PTE 修改缺少远端协议。
 
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 

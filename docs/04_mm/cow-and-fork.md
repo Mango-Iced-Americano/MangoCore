@@ -4,19 +4,19 @@ category: mm
 status: stable
 author: MangoCore Team
 last_update: 2026-07-27
-tags: [mm, fork, cow, clone, tlb-batch]
+tags: [mm, fork, cow, clone, mmu-gather]
 ---
 
 # fork 地址空间复制与 COW
 
 ## 1. 入口链路
 
-fork/clone 的进程地址空间复制由 task/process 层发起，MM 实现入口在 `os/src/mm/address_space.rs::AddressSpace::from_existing_user()`。
+fork/clone 的进程地址空间复制由 task/process 层发起，MM 实现入口在 `os/src/mm/address_space.rs::AddressSpaceInner::from_existing_user()`。
 
 ```
 sys_clone / fork 语义
   └── task clone path
-        └── AddressSpace::from_existing_user(user_space, trap_cx_slot, trap_cx)
+        └── AddressSpaceInner::from_existing_user(user_space, trap_cx_slot, trap_cx)
               ├── AddressSpace::new_bare()
               ├── map_trampoline()
               ├── map_signaltrampoline()
@@ -98,31 +98,31 @@ let protect_parent_for_cow = !is_shared && is_writable;
 
 private writable 是 COW 的核心场景。
 
-`map_from_existing_page_table()` 同时接收父、子两个 `TlbBatch`，核心逻辑如下：
+`map_from_existing_page_table()` 同时接收父、子两个 `UserMapper`，核心逻辑如下：
 
 ```rust
 pub fn map_from_existing_page_table<T: PageTable>(
     &mut self,
-    dst_batch: &mut TlbBatch<'_, T>,
-    src_batch: &mut TlbBatch<'_, T>,
+    dst_mapper: &mut UserMapper<'_, T>,
+    src_mapper: &mut UserMapper<'_, T>,
 ) -> Result<(), MemoryError> {
     // 先根据 shared/private、file-backed 与 writable 计算
     // protect_parent_for_cow 和子 PTE 的 map_perm。
     for vpn in self.inner.vpn_range {
         let ppn = if protect_parent_for_cow {
-            src_batch.block_write(vpn)
+            src_mapper.block_write(vpn)
         } else {
-            src_batch.translate(vpn)
+            src_mapper.translate(vpn)
         };
         if let Some(ppn) = ppn {
-            UserMapper::new(dst_batch).map_user_page(vpn, ppn, map_perm)?;
+            dst_mapper.map_user_page(vpn, ppn, map_perm)?;
         }
     }
     Ok(())
 }
 ```
 
-这段函数有两个权限策略。private writable 映射通过 `src_batch.block_write()`
+这段函数有两个权限策略。private writable 映射通过 `src_mapper.block_write()`
 撤销父 PTE 的 W 权限，并把子 PTE 也映射成无 W；file-backed shared writable
 子 PTE 同样去 W，但目的不是 COW，而是让首次 store 进入 shared dirty 路径。
 
@@ -131,19 +131,20 @@ pub fn map_from_existing_page_table<T: PageTable>(
 private writable fork 时，父页表使用：
 
 ```rust
-let ppn = src_batch.block_write(vpn);
+let ppn = src_mapper.block_write(vpn);
 ```
 
-父 batch 在 `AddressSpace::from_existing_user()` 中统一提交，避免每页撤销 W 都单独
-flush。子页表此时仍为 `Unpublished`，子 batch 可以跳过刷新；父 batch
-则必须在返回前提交，否则父进程可能仍通过旧 TLB 写共享页。
+父侧修改全部记录进父 MM 的 `MmuGather`，由外层 `AddressSpace::write()` 统一
+同步，避免每页撤销 W 都单独 flush。子页表尚未包装成共享 `AddressSpace`，没有
+CPU 能观察；构造完成时可以丢弃其收集记录。父侧必须在返回前完成同步，否则父
+进程可能仍通过旧 TLB 写共享页。
 
 ## 7. 子进程映射建立
 
 对父页表中已有 PPN 的页，子进程安装同一 PPN：
 
 ```rust
-UserMapper::new(dst_batch).map_user_page(vpn, ppn, map_perm)
+dst_mapper.map_user_page(vpn, ppn, map_perm)
 ```
 
 如果父 VMA 中某页仍是 lazy unallocated，没有 PTE，也不会给子进程安装 PTE。子进程后续访问时按自己的 VMA 和 `VmPageStore` 状态触发 lazy alloc 或 map resident page。
@@ -190,10 +191,10 @@ copy_on_write(page_table, vpn)
 ```rust
 pub fn copy_on_write<T: PageTable>(
     &mut self,
-    batch: &mut TlbBatch<'_, T>,
+    mapper: &mut UserMapper<'_, T>,
     vpn: VirtPageNum,
 ) -> Result<PhysPageNum, MemoryError> {
-    let old_frame = match self.cow_source_frame(batch, vpn) {
+    let old_frame = match self.cow_source_frame(mapper, vpn) {
         Ok(frame) => frame,
         Err(err) => {
             warn!(
@@ -209,12 +210,12 @@ pub fn copy_on_write<T: PageTable>(
     // VMA has two strong refs here: the VMA entry and this local handle.
     if Arc::strong_count(&old_frame) <= 2 {
         let old_ppn = old_frame.ppn;
-        UserMapper::new(batch).set_user_flags(vpn, self.map_perm)?;
+        mapper.set_user_flags(vpn, self.map_perm)?;
         Ok(old_ppn)
     } else {
         // do copy in this case
         let old_ppn = old_frame.ppn;
-        if !UserMapper::new(batch).is_mapped(vpn) {
+        if !mapper.is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
         // alloc new frame
@@ -234,7 +235,7 @@ pub fn copy_on_write<T: PageTable>(
                 .expect("COW rollback could not restore the source frame");
             return Err(err);
         }
-        if UserMapper::new(batch).set_ppn(vpn, new_ppn).is_err() {
+        if mapper.set_ppn(vpn, new_ppn).is_err() {
             if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                 drop(new_frame);
             }
@@ -243,28 +244,25 @@ pub fn copy_on_write<T: PageTable>(
                 .expect("COW rollback could not restore the source frame");
             return Err(MemoryError::NotMapped);
         }
-        if UserMapper::new(batch)
-            .set_user_flags(vpn, self.map_perm)
-            .is_err()
-        {
-            UserMapper::new(batch)
+        if mapper.set_user_flags(vpn, self.map_perm).is_err() {
+            mapper
                 .set_ppn(vpn, old_ppn)
                 .expect("COW rollback lost the PTE after replacing its PPN");
             if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
-                batch.defer_frame(new_frame);
+                mapper.retire_frame(new_frame);
             }
             self.inner
                 .alloc_in_memory(vpn, old_frame)
                 .expect("COW rollback could not restore the source frame");
             return Err(MemoryError::NotMapped);
         }
-        batch.defer_frame(old_frame);
+        mapper.retire_frame(old_frame);
         Ok(new_ppn)
     }
 }
 ```
 
-这个分支是 CoW 的性能关键：如果旧 frame 已经只被当前 VMA 持有，写 fault 不需要复制 4 KiB 数据，只要恢复页表权限即可。只有 `Arc::strong_count()` 显示还有其他 VMA/页表路径共享同一个 frame 时，才分配新 frame 并复制旧内容。这样 fork 后父子进程只读大量页面时几乎不付复制成本，而真正写入的页面才被拆开。成功替换 PPN 后，旧 frame 交给 batch 延迟到 TLB 提交后释放；flags 失败的回滚路径同样延迟曾短暂出现在 PTE 中的新 frame。
+这个分支是 CoW 的性能关键：如果旧 frame 已经只被当前 VMA 持有，写 fault 不需要复制 4 KiB 数据，只要恢复页表权限即可。只有 `Arc::strong_count()` 显示还有其他 VMA/页表路径共享同一个 frame 时，才分配新 frame 并复制旧内容。这样 fork 后父子进程只读大量页面时几乎不付复制成本，而真正写入的页面才被拆开。成功替换 PPN 后，旧 frame 交给 `UserMapper::retire_frame()`，由当前 `MmuGather` 保留到 TLB 同步完成；flags 失败的回滚路径同样延迟曾短暂出现在 PTE 中的新 frame。
 
 读 COW bug 时要同时核对三件事：
 

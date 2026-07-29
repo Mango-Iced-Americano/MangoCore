@@ -15,7 +15,7 @@ pub fn pid_smaps_content(
         None => return Err(SyscallErr::ENOENT),
     };
     let vm = process.vm();
-    let copied = vm.lock().proc_smaps_read(offset, len, buf);
+    let copied = vm.read(|vm| vm.proc_smaps_read(offset, len, buf));
     Ok(copied)
 }
 
@@ -25,6 +25,6 @@ pub fn pid_smaps_snapshot(pid: usize) -> Result<String, SyscallErr> {
         None => return Err(SyscallErr::ENOENT),
     };
     let vm = process.vm();
-    let content = vm.lock().proc_smaps_content();
+    let content = vm.read(|vm| vm.proc_smaps_content());
     Ok(content)
 }

@@ -180,7 +180,7 @@ if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
 
 ```
 frame_reserve(3)
-task.process.vm().lock().do_page_fault(addr, access)
+task.process.vm().write(|vm| vm.do_page_fault(addr, access))
 ```
 
 缺页结果映射：

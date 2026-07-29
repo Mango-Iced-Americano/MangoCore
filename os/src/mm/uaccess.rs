@@ -11,7 +11,7 @@
 //!
 //! # Locking
 //!
-//! fault-in 会获取当前进程 `AddressSpace` 锁。调用方不得在已持有同一锁时进入
+//! fault-in 会获取当前进程 `AddressSpaceInner` 锁。调用方不得在已持有同一锁时进入
 //! 本模块的 faulting uaccess 路径。
 
 use core::{marker::PhantomData, ops::IndexMut};
@@ -22,7 +22,6 @@ use crate::fs::iov::IOVec;
 use crate::hal::PageTableImpl;
 use crate::task::current_task;
 use alloc::{string::String, sync::Arc, vec::Vec};
-use spin::Mutex;
 
 /// 单次用户缓冲区翻译上限，防止恶意长度导致内核 OOM。
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
@@ -585,7 +584,7 @@ fn is_current_user_token(token: usize) -> bool {
     crate::task::try_current_user_token() == Some(token)
 }
 
-fn current_user_vm(token: usize) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>>>, isize> {
+fn current_user_vm(token: usize) -> Result<Arc<AddressSpace<PageTableImpl>>, isize> {
     let task = current_task().ok_or(crate::syscall::errno::EFAULT)?;
     if crate::task::current_user_token() != token {
         return Err(crate::syscall::errno::EFAULT);
@@ -596,15 +595,15 @@ fn current_user_vm(token: usize) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>
 // 区分用户触发缺页时的权限：copy_from_user 使用 Read，copy_to_user 使用
 // Write，可变引用使用 ReadWrite。这让缺页处理能正确选择 CoW/权限恢复路径。
 fn fault_in_user_va_with_vm(
-    vm: &Mutex<AddressSpace<PageTableImpl>>,
+    vm: &AddressSpace<PageTableImpl>,
     va: VirtAddr,
     access: FaultAccess,
 ) -> Result<PhysAddr, isize> {
-    vm.lock().fault_in_user_va(va, access)
+    vm.write(|address_space| address_space.fault_in_user_va(va, access))
 }
 
 fn translate_user_va_checked_with_vm(
-    vm: &Mutex<AddressSpace<PageTableImpl>>,
+    vm: &AddressSpace<PageTableImpl>,
     va: VirtAddr,
     access: UserAccess,
 ) -> Result<PhysAddr, isize> {

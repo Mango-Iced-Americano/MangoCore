@@ -48,6 +48,14 @@ pub fn user_tlb_invalidate() {
     tlb::tlb_invalidate();
 }
 
+/// 清除当前 core 上指定 MM 的用户翻译。
+///
+/// B23 期间 ASID 仍由 TCB 持有，调用点不能可靠取得目标 MM 的 ASID，因此这里
+/// 保守清除全部 non-global 项；MM-owned ASID 完成后再改为页级 `invtlb`。
+pub fn user_tlb_invalidate_page(_vpn: crate::mm::VirtPageNum) {
+    tlb::tlb_invalidate();
+}
+
 use crate::{
     config::{
         CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH, SUC_DMW_VSEG,
@@ -62,8 +70,8 @@ use crate::{
 use self::{time::get_timer_freq_first_time, trap::strampoline};
 pub use board::BLOCK_SZ;
 pub use kern_stack::{
-    kernel_stack_guard_slot, kstack_alloc, reclaim_retired_kernel_stacks,
-    trap_cx_bottom_from_tid, ustack_bottom_from_tid, KernelStack,
+    kernel_stack_guard_slot, kstack_alloc, reclaim_retired_kernel_stacks, trap_cx_bottom_from_tid,
+    ustack_bottom_from_tid, KernelStack,
 };
 pub use register::*;
 mod kern_stack;

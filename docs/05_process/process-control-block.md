@@ -102,7 +102,7 @@ pub struct ProcessControlBlock {
 |------|------------|-----------|----------------|
 | `files` | `CLONE_FILES` 共享，否则 clone fd table | 关闭 CLOEXEC fd | 进程退出关闭 fd |
 | `fs` | `CLONE_FS` 共享，否则复制 cwd/root/umask | 保留 | 退出时随 PCB 释放 |
-| `vm` | `CLONE_VM` 共享，否则 `AddressSpace::from_existing_user()` | `replace_vm(new)` | zombie 时可 `release_for_zombie()` |
+| `vm` | `CLONE_VM` 共享，否则由 `AddressSpaceInner::from_existing_user()` 构造新 `AddressSpace` | `replace_vm(new)` | zombie 时可 `write(|vm| vm.release_for_zombie())` |
 | `sighand` | `CLONE_SIGHAND` 共享，否则复制 | exec 后 reset | PCB drop 释放 |
 | `futex` | 共享 VM 时共享，否则新建 private table | exec 后 clear | 退出时处理 robust/clear child tid |
 | `children/parent` | 非 `CLONE_THREAD` child 发布到父进程 | 保留 | wait/auto-reap 消费 |

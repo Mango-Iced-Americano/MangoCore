@@ -559,47 +559,64 @@ pub fn remove_zombie_tasks_by_pid(pid: usize) {
 /// 尝试释放所有任务的内存空间，直到释放`req`页。
 #[cfg(feature = "oom_handler")]
 pub fn do_oom(req: usize) -> Result<(), ()> {
-    let mut manager = match TASK_MANAGER.try_lock() {
-        Some(manager) => manager,
-        None => return Err(()),
-    };
     let mut total_released = 0;
-    let interruptible_len = manager.interruptible_queue.len();
-    for idx in 0..interruptible_len {
-        let task = manager.interruptible_queue[idx].clone();
-        if !manager.active_tracker.check_active(task.tid.0) {
-            continue;
-        }
-        let released = task.process.vm().lock().do_deep_clean();
+
+    loop {
+        // TASK_MANAGER 只负责挑选并标记 victim；Arc 移出后立即释放锁，
+        // 远端 TLB ack 绝不能发生在全局任务管理锁内。
+        let task = {
+            let mut manager = TASK_MANAGER.try_lock().ok_or(())?;
+            let task = manager
+                .interruptible_queue
+                .iter()
+                .find(|task| manager.active_tracker.check_active(task.tid.0))
+                .cloned();
+            if let Some(task) = task.as_ref() {
+                manager.active_tracker.mark_inactive(task.tid.0);
+            }
+            task
+        };
+        let Some(task) = task else {
+            break;
+        };
+        let released = task.process.vm().write(|vm| vm.do_deep_clean());
         log::warn!(
             "deep clean on task: tid {}, pid {}, released: {}",
             task.tid.0,
             task.pid(),
             released
         );
-        manager.active_tracker.mark_inactive(task.tid.0);
         total_released += released;
         if total_released >= req {
             return Ok(());
-        };
+        }
     }
+
     for cpu in 0..crate::smp::configured_cpu_count() {
         let ready_len = super::run_queue::stats(cpu).0;
         for index in (0..ready_len).rev() {
             let Some(task) = super::run_queue::task_at(cpu, index) else {
                 continue;
             };
-            if !manager.active_tracker.check_active(task.tid.0) {
+            let claimed = {
+                let mut manager = TASK_MANAGER.try_lock().ok_or(())?;
+                if manager.active_tracker.check_active(task.tid.0) {
+                    manager.active_tracker.mark_inactive(task.tid.0);
+                    true
+                } else {
+                    false
+                }
+            };
+            if !claimed {
                 continue;
             }
-            let released = task.process.vm().lock().do_shallow_clean();
+            let released = task.process.vm().write(|vm| vm.do_shallow_clean());
             log::warn!(
                 "shallow clean on task: tid {}, pid {}, released: {}",
                 task.tid.0,
                 task.pid(),
                 released
             );
-            manager.active_tracker.mark_inactive(task.tid.0);
             total_released += released;
             if total_released >= req {
                 return Ok(());

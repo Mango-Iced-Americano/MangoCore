@@ -3,7 +3,7 @@ title: "内存管理 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-29
 tags: [syscall, mm, mmap, brk]
 ---
 
@@ -73,7 +73,7 @@ if prot & PROT_WRITE != 0 {
 ```
 task = current_task()
 vm = task.process.vm()
-new_addr = vm.lock().sbrk(increment)
+new_addr = vm.update(|address_space| address_space.sbrk(increment))
 return new_addr
 ```
 
@@ -97,36 +97,21 @@ return new_addr
 pub fn sys_brk(brk_addr: usize) -> isize {
     let task = current_task().unwrap();
     let vm = task.process.vm();
-    let mut memory_set = vm.lock();
-    let new_addr = if brk_addr == 0 {
-        memory_set.sbrk(0)
-    } else {
-        let former_addr = memory_set.sbrk(0);
-        let grow_size = if brk_addr < former_addr {
-            let delta = former_addr - brk_addr;
-            if delta > isize::MAX as usize {
-                warn!(
-                    "[sys_brk] shrink delta too large: brk_addr={:X}, former_addr={:X}",
-                    brk_addr, former_addr
-                );
-                0
-            } else {
-                -(delta as isize)
-            }
+    let new_addr = vm.update(|memory_set| {
+        if brk_addr == 0 {
+            memory_set.sbrk(0)
         } else {
-            let delta = brk_addr - former_addr;
-            if delta > isize::MAX as usize {
-                warn!(
-                    "[sys_brk] grow delta too large: brk_addr={:X}, former_addr={:X}",
-                    brk_addr, former_addr
-                );
-                0
+            let former_addr = memory_set.sbrk(0);
+            let grow_size = if brk_addr < former_addr {
+                let delta = former_addr - brk_addr;
+                if delta > isize::MAX as usize { 0 } else { -(delta as isize) }
             } else {
-                delta as isize
-            }
-        };
-        memory_set.sbrk(grow_size)
-    };
+                let delta = brk_addr - former_addr;
+                if delta > isize::MAX as usize { 0 } else { delta as isize }
+            };
+            memory_set.sbrk(grow_size)
+        }
+    });
 
     new_addr as isize
 }
@@ -290,7 +275,7 @@ memory_set.mmap(start, len, prot, flags, offset, map_file, may_write, write_seal
 `sys_munmap(start, len)` 直接调用当前进程 VM：
 
 ```rust
-task.process.vm().lock().munmap(start, len)
+task.process.vm().write(|vm| vm.munmap(start, len))
 ```
 
 成功返回 0，失败返回 MM 层 errno。
@@ -334,7 +319,7 @@ task.process.vm().lock().munmap(start, len)
 `sys_mprotect(addr, len, prot)` 先复用 `parse_mmap_prot()`，再调用：
 
 ```rust
-task.process.vm().lock().mprotect(addr, len, prot)
+task.process.vm().write(|vm| vm.mprotect(addr, len, prot))
 ```
 
 权限、shared writable、seal、VMA 拆分和 TLB 刷新由 MM 层处理。
@@ -405,7 +390,9 @@ inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
 随后调用：
 
 ```rust
-task.process.vm().lock().mincore(addr, rounded_len, residency.as_mut_slice())
+task.process
+    .vm()
+    .read(|vm| vm.mincore(addr, rounded_len, residency.as_mut_slice()))
 copy_to_user_array(token, residency.as_ptr(), vec as *mut u8, page_count)
 ```
 

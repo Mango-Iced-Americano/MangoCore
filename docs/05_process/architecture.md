@@ -199,7 +199,7 @@ task::add_initproc()
         try /init
         fallback /initproc
     TaskControlBlock::new(elf)
-        AddressSpace::from_elf()
+        AddressSpaceInner::from_elf()
         allocate pid/tid/pgid
         allocate user resources and stack
         build argv/envp
@@ -250,7 +250,7 @@ sys_clone/sys_clone3
     check namespace privilege
     choose VM:
         CLONE_VM -> share
-        else -> AddressSpace::from_existing_user()
+        else -> AddressSpaceInner::from_existing_user()
     choose resources:
         CLONE_FILES -> share files
         CLONE_FS -> share fs
@@ -498,7 +498,7 @@ shell fork/clone
 child execve
   -> sys_execve()
   -> TaskControlBlock::load_elf()
-  -> AddressSpace::from_elf()
+  -> AddressSpaceInner::from_elf()
   -> 替换 VM / fd CLOEXEC / signal 状态
 
 child exit
@@ -517,7 +517,7 @@ parent wait
 | 阶段 | 入口 | 深入对象 |
 |------|------|----------|
 | clone 参数 | `syscall/process/clone.rs` | `TaskControlBlock::sys_clone()` |
-| exec 参数 | `syscall/process/exec.rs` | `TaskControlBlock::load_elf()`、`AddressSpace::from_elf()` |
+| exec 参数 | `syscall/process/exec.rs` | `TaskControlBlock::load_elf()`、`AddressSpaceInner::from_elf()` |
 | exit syscall | `syscall/process/lifecycle.rs` | `do_exit()`、`finish_exit()` |
 | wait syscall | `syscall/process/lifecycle.rs` | PCB children、`child_exit_wait` |
 
@@ -543,7 +543,7 @@ parent wait
 | `sys_execve()` | 路径 exec |
 | `sys_execveat()` | fd/dirfd exec |
 | `TaskControlBlock::load_elf()` | 替换进程执行映像 |
-| `AddressSpace::from_elf()` | 构造 ELF 地址空间 |
+| `AddressSpaceInner::from_elf()` | 构造尚未发布的 ELF 地址空间数据 |
 
 ### 6.3 wait/exit API
 

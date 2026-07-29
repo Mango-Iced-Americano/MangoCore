@@ -139,21 +139,22 @@ fn write_u32_to_task_user(
 
     let bytes = value.to_ne_bytes();
     let vm = task.process.vm();
-    let mut vm = vm.lock();
-    let base = ptr as usize;
-    let page_offset = base & (PAGE_SIZE - 1);
-    if page_offset <= PAGE_SIZE - bytes.len() {
-        let pa = vm.fault_in_user_va(VirtAddr::from(base), FaultAccess::Store)?;
-        let page = pa.floor().get_bytes_array();
-        let offset = pa.page_offset();
-        page[offset..offset + bytes.len()].copy_from_slice(&bytes);
-        return Ok(());
-    }
-    for (offset, byte) in bytes.iter().enumerate() {
-        let pa = vm.fault_in_user_va(VirtAddr::from(base + offset), FaultAccess::Store)?;
-        pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
-    }
-    Ok(())
+    vm.write(|vm| {
+        let base = ptr as usize;
+        let page_offset = base & (PAGE_SIZE - 1);
+        if page_offset <= PAGE_SIZE - bytes.len() {
+            let pa = vm.fault_in_user_va(VirtAddr::from(base), FaultAccess::Store)?;
+            let page = pa.floor().get_bytes_array();
+            let offset = pa.page_offset();
+            page[offset..offset + bytes.len()].copy_from_slice(&bytes);
+            return Ok(());
+        }
+        for (offset, byte) in bytes.iter().enumerate() {
+            let pa = vm.fault_in_user_va(VirtAddr::from(base + offset), FaultAccess::Store)?;
+            pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+        }
+        Ok(())
+    })
 }
 
 fn drop_parent_fd(parent: &Arc<TaskControlBlock>, fd: usize) {

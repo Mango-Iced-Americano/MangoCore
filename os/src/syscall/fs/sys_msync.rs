@@ -13,10 +13,9 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> isize {
     }
     let task = current_task().unwrap();
     let vm_ref = task.process.vm();
-    if let Err(errno) = vm_ref
-        .lock()
-        .validate_msync_range(addr, length, flags.contains(MsyncFlags::MS_INVALIDATE))
-    {
+    if let Err(errno) = vm_ref.read(|vm| {
+        vm.validate_msync_range(addr, length, flags.contains(MsyncFlags::MS_INVALIDATE))
+    }) {
         return errno;
     }
     info!(

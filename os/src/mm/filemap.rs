@@ -12,7 +12,7 @@
 use super::page_fault::FaultContext;
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
-use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, TlbBatch};
+use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
 use crate::utils::error::SyscallErr;
@@ -51,7 +51,7 @@ fn map_pc_error(e: SyscallErr) -> MemoryError {
 
 fn verify_filemap_fault<T: PageTable>(
     area: &Vma,
-    batch: &mut TlbBatch<'_, T>,
+    mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
     expected_ppn: PhysPageNum,
 ) -> Result<PhysAddr, MemoryError> {
@@ -63,9 +63,7 @@ fn verify_filemap_fault<T: PageTable>(
         return Err(MemoryError::NotMapped);
     }
 
-    let mapped_ppn = UserMapper::new(batch)
-        .translate(ctx.vpn)
-        .ok_or(MemoryError::NotMapped)?;
+    let mapped_ppn = mapper.translate(ctx.vpn).ok_or(MemoryError::NotMapped)?;
     if mapped_ppn != expected_ppn {
         log::warn!(
             "[filemap] pte/frame mismatch: vpn={:?}, pte={:?}, expected={:?}",
@@ -87,7 +85,7 @@ fn verify_filemap_fault<T: PageTable>(
 /// 该页后续按匿名私有页处理，不再共享 page cache 帧。
 pub(super) fn filemap_private_fault<T: PageTable>(
     area: &mut Vma,
-    batch: &mut TlbBatch<'_, T>,
+    mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     let _pf_start = crate::task::perf::perf_time_now();
@@ -103,7 +101,7 @@ pub(super) fn filemap_private_fault<T: PageTable>(
         .map_err(map_pc_error)?;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    let allocated_ppn = area.map_one_zeroed_unchecked(batch, ctx.vpn)?;
+    let allocated_ppn = area.map_one_zeroed_unchecked(mapper, ctx.vpn)?;
     let src = cache_frame.ppn.get_bytes_array();
     let dst = allocated_ppn.get_bytes_array();
     let _copy_start = crate::task::perf::perf_time_now();
@@ -117,7 +115,7 @@ pub(super) fn filemap_private_fault<T: PageTable>(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
     );
-    verify_filemap_fault(area, batch, ctx, allocated_ppn)
+    verify_filemap_fault(area, mapper, ctx, allocated_ppn)
 }
 
 /// 处理文件映射页的读/执行 fault。
@@ -128,7 +126,7 @@ pub(super) fn filemap_private_fault<T: PageTable>(
 /// 重新进入 fault 路径并区分 CoW 或共享脏页语义。
 pub(super) fn filemap_read_fault<T: PageTable>(
     area: &mut Vma,
-    batch: &mut TlbBatch<'_, T>,
+    mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     let _pf_start = crate::task::perf::perf_time_now();
@@ -160,7 +158,7 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         .map_err(|_| MemoryError::AlreadyAllocated)?;
 
     let _map_start = crate::task::perf::perf_time_now();
-    if let Err(err) = UserMapper::new(batch).map_user_page(ctx.vpn, cache_ppn, map_perm) {
+    if let Err(err) = mapper.map_user_page(ctx.vpn, cache_ppn, map_perm) {
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);
     }
@@ -172,7 +170,7 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
     );
-    verify_filemap_fault(area, batch, ctx, cache_ppn)
+    verify_filemap_fault(area, mapper, ctx, cache_ppn)
 }
 
 /// 处理 `MAP_SHARED` 文件页的写 fault。
@@ -182,7 +180,7 @@ pub(super) fn filemap_read_fault<T: PageTable>(
 /// 通过 page cache 获取可写帧，确保后端缓存被标记为写路径，再把共享帧映射回用户页表。
 pub(super) fn filemap_shared_write_fault<T: PageTable>(
     area: &mut Vma,
-    batch: &mut TlbBatch<'_, T>,
+    mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     let _pf_start = crate::task::perf::perf_time_now();
@@ -203,7 +201,7 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
         .map_err(|_| MemoryError::AlreadyAllocated)?;
 
     let _map_start = crate::task::perf::perf_time_now();
-    if let Err(err) = UserMapper::new(batch).map_user_page(ctx.vpn, cache_ppn, area.vm_perm()) {
+    if let Err(err) = mapper.map_user_page(ctx.vpn, cache_ppn, area.vm_perm()) {
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);
     }
@@ -215,5 +213,5 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
     );
-    verify_filemap_fault(area, batch, ctx, cache_ppn)
+    verify_filemap_fault(area, mapper, ctx, cache_ppn)
 }

@@ -3,7 +3,8 @@
 use crate::config::PAGE_SIZE;
 use crate::kernel_tests::runner::KernelTest;
 use crate::mm::{
-    self, AddressSpace, FaultAccess, MapPermission, PageTable, PageTableImpl, VirtAddr,
+    self, AddressSpace, AddressSpaceInner, FaultAccess, MapPermission, PageTable, PageTableImpl,
+    VirtAddr,
 };
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,8 +19,8 @@ pub fn tests() -> Vec<KernelTest> {
             test_alloc_then_free_then_alloc,
         ),
         KernelTest::new(
-            "mm::local_tlb_batch_map_protect_unmap",
-            test_local_tlb_batch_map_protect_unmap,
+            "mm::local_mmu_gather_map_protect_unmap",
+            test_local_mmu_gather_map_protect_unmap,
         ),
     ]
 }
@@ -81,77 +82,96 @@ fn test_alloc_then_free_then_alloc() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 通过正式 AddressSpace API 覆盖已发布页表的映射、权限修改和解除映射。
-fn test_local_tlb_batch_map_protect_unmap() -> Result<(), &'static str> {
+/// 通过正式 `AddressSpace::write()` 边界覆盖映射、权限修改和解除映射。
+fn test_local_mmu_gather_map_protect_unmap() -> Result<(), &'static str> {
     const TEST_BASE: usize = 0x40_0000;
     const TEST_LEN: usize = PAGE_SIZE * 2;
 
-    let mut space = AddressSpace::<PageTableImpl>::new_bare();
-    space.publish_local();
-    space.insert_framed_area(
-        VirtAddr::from(TEST_BASE),
-        VirtAddr::from(TEST_BASE + TEST_LEN),
-        MapPermission::R | MapPermission::W | MapPermission::U,
-    );
+    let space = AddressSpace::new(AddressSpaceInner::<PageTableImpl>::new_bare());
+    space.activate_on(crate::smp::cpu_id());
+    space.write(|inner| {
+        inner.insert_framed_area(
+            VirtAddr::from(TEST_BASE),
+            VirtAddr::from(TEST_BASE + TEST_LEN),
+            MapPermission::R | MapPermission::W | MapPermission::U,
+        );
+    });
 
     let first_vpn = VirtAddr::from(TEST_BASE).floor();
     let second_vpn = VirtAddr::from(TEST_BASE + PAGE_SIZE).floor();
-    if space.translate(first_vpn).is_none() || space.translate(second_vpn).is_none() {
-        return Err("batch map did not install both PTEs");
-    }
-    if PageTableImpl::from_token(space.token()).writable(first_vpn) != Some(true) {
-        return Err("new writable mapping has a read-only PTE");
-    }
-    if space
-        .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Store)
-        .is_err()
-    {
-        return Err("writable PTE rejected a store before mprotect");
-    }
+    space.read(|inner| {
+        if inner.translate(first_vpn).is_none() || inner.translate(second_vpn).is_none() {
+            return Err("gathered map did not install both PTEs");
+        }
+        if PageTableImpl::from_token(inner.token()).writable(first_vpn) != Some(true) {
+            return Err("new writable mapping has a read-only PTE");
+        }
+        Ok(())
+    })?;
+    space.write(|inner| {
+        inner
+            .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Store)
+            .map(|_| ())
+            .map_err(|_| "writable PTE rejected a store before mprotect")
+    })?;
 
-    space
-        .mprotect(TEST_BASE, TEST_LEN, MapPermission::R | MapPermission::U)
-        .map_err(|_| "batch mprotect failed")?;
-    if space.contains_valid_buffer(TEST_BASE, TEST_LEN, MapPermission::W) {
-        return Err("mprotect left the VMA writable");
-    }
-    if !space.contains_valid_buffer(TEST_BASE, TEST_LEN, MapPermission::R) {
-        return Err("mprotect removed read permission");
-    }
-    if PageTableImpl::from_token(space.token()).writable(first_vpn) != Some(false) {
-        return Err("mprotect did not clear the PTE write bit");
-    }
-    if space
-        .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Load)
-        .is_err()
-    {
-        return Err("read-only PTE rejected a load after mprotect");
-    }
-    if space
-        .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Store)
-        .is_ok()
-    {
-        return Err("read-only PTE accepted a store after mprotect");
-    }
+    space.write(|inner| {
+        inner
+            .mprotect(TEST_BASE, TEST_LEN, MapPermission::R | MapPermission::U)
+            .map_err(|_| "gathered mprotect failed")
+    })?;
+    space.write(|inner| {
+        if inner.contains_valid_buffer(TEST_BASE, TEST_LEN, MapPermission::W) {
+            return Err("mprotect left the VMA writable");
+        }
+        if !inner.contains_valid_buffer(TEST_BASE, TEST_LEN, MapPermission::R) {
+            return Err("mprotect removed read permission");
+        }
+        if PageTableImpl::from_token(inner.token()).writable(first_vpn) != Some(false) {
+            return Err("mprotect did not clear the PTE write bit");
+        }
+        if inner
+            .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Load)
+            .is_err()
+        {
+            return Err("read-only PTE rejected a load after mprotect");
+        }
+        if inner
+            .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Store)
+            .is_ok()
+        {
+            return Err("read-only PTE accepted a store after mprotect");
+        }
+        Ok(())
+    })?;
 
-    space
-        .munmap(TEST_BASE, TEST_LEN)
-        .map_err(|_| "batch munmap failed")?;
-    if space.translate(first_vpn).is_some() || space.translate(second_vpn).is_some() {
-        return Err("batch munmap left a valid PTE");
-    }
+    space.write(|inner| {
+        inner
+            .munmap(TEST_BASE, TEST_LEN)
+            .map_err(|_| "gathered munmap failed")
+    })?;
+    space.read(|inner| {
+        if inner.translate(first_vpn).is_some() || inner.translate(second_vpn).is_some() {
+            return Err("gathered munmap left a valid PTE");
+        }
+        Ok(())
+    })?;
 
     // 再次使用相同 VPN，验证解除映射并释放 frame 后不会残留页表状态。
-    space.insert_framed_area(
-        VirtAddr::from(TEST_BASE),
-        VirtAddr::from(TEST_BASE + PAGE_SIZE),
-        MapPermission::R | MapPermission::W | MapPermission::U,
-    );
-    space
-        .munmap(TEST_BASE, PAGE_SIZE)
-        .map_err(|_| "single-page batch munmap failed")?;
-    if space.translate(first_vpn).is_some() {
-        return Err("single-page batch left a valid PTE");
+    space.write(|inner| {
+        inner.insert_framed_area(
+            VirtAddr::from(TEST_BASE),
+            VirtAddr::from(TEST_BASE + PAGE_SIZE),
+            MapPermission::R | MapPermission::W | MapPermission::U,
+        );
+    });
+    space.write(|inner| {
+        inner
+            .munmap(TEST_BASE, PAGE_SIZE)
+            .map_err(|_| "single-page gathered munmap failed")
+    })?;
+    if space.read(|inner| inner.translate(first_vpn).is_some()) {
+        return Err("single-page gather left a valid PTE");
     }
     Ok(())
 }

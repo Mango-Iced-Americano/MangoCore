@@ -3,23 +3,29 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
-tags: [mm, address-space, vma, elf, maps, tlb-batch]
+last_update: 2026-07-29
+tags: [mm, address-space, vma, elf, maps, mmu-gather]
 ---
 
 # 地址空间、VMA 与用户映射
 
 ## 1. 总体结构
 
-进程地址空间由 `os/src/mm/address_space.rs:54` 的 `AddressSpace<T>` 表示：
+进程地址空间在同一文件中分成外层共享对象和锁内数据：
 
 ```rust
 pub struct AddressSpace<T: PageTable> {
+    inner: Mutex<AddressSpaceInner<T>>,
+    tlb: TlbContext,
+}
+
+pub struct AddressSpaceInner<T: PageTable> {
     page_table: T,
     vmas: VmaSet,
     heap_bottom: usize,
     heap_pt: usize,
     locked_pages: BTreeSet<VirtPageNum>,
+    mmu_gather: MmuGather,
 }
 ```
 
@@ -27,22 +33,31 @@ pub struct AddressSpace<T: PageTable> {
 
 | 字段 | 说明 |
 |------|------|
-| `page_table` | 当前进程页表 |
-| `vmas` | 用户与少量进程私有内核映射的 VMA 集合 |
-| `heap_bottom` | ELF 加载后 heap 起点 |
-| `heap_pt` | 当前 program break |
+| `AddressSpace.inner` | 串行化同一 MM 的 VMA、PTE 和 CPU 激活登记 |
+| `AddressSpace.tlb` | 与共享 MM 同寿命的 ID、cached CPU mask、generation 与 per-CPU observed |
+| `AddressSpaceInner.page_table` | 当前进程页表 |
+| `AddressSpaceInner.vmas` | 用户与少量进程私有内核映射的 VMA 集合 |
+| `heap_bottom/heap_pt` | ELF 加载后的 heap 起点与当前 program break |
 | `locked_pages` | `mlock/mlock2/mlockall` 标记的页 |
+| `mmu_gather` | 当前一次 `write()` 内的失效范围和待退休 frame；解锁时移交给 `TlbFlush` |
 
-`AddressSpace<T>` 不直接保存文件描述符、进程 ID 或信号状态。这些属于 `ProcessControlBlock`。MM 层只负责地址空间和物理页映射。
+`AddressSpace<T>` 不直接保存文件描述符、进程 ID 或信号状态。这些属于 `ProcessControlBlock`。
+PCB 以 `Arc<AddressSpace<T>>` 持有 VM；读操作经 `read()`，可能改 PTE 的操作经
+`write()/try_write()`。后者在内部释放 VM 锁后才等待 user-TLB ack，调用方无法取得
+可变 guard 并把锁带过远端等待点。
 
-### 1.1 AddressSpace 方法地图
+### 1.1 方法地图
 
 | 方法 | 源码位置 | 作用 |
 |------|----------|------|
-| `new_bare()` | `address_space.rs:69` | 创建空地址空间，初始化页表、VMA 集合和 heap/locked 状态。 |
-| `token()` | `address_space.rs:79` | 返回页表 token，trap return 和 uaccess 通过它定位用户页表。 |
-| `from_elf()` | `address_space.rs:969` | 从 ELF 构造用户地址空间，映射 trampoline、signal trampoline、LOAD 段和 heap 起点。 |
-| `from_existing_user()` | `address_space.rs:991` | fork/非 `CLONE_VM` clone 复制地址空间，配合 VMA CoW。 |
+| `AddressSpace::new()` | `address_space.rs` | 将尚未发布的锁内数据包装为共享 VM，并建立独立 `TlbContext`。 |
+| `AddressSpace::read()` | `address_space.rs` | 在 VM 锁内提供不可变访问，不进入 TLB 修改协议。 |
+| `AddressSpace::write()/try_write()` | `address_space.rs` | 锁内记录修改、`seal()`，解锁后执行 `TlbFlush`。 |
+| `AddressSpace::activate_on()` | `address_space.rs` | 在 VM 锁内登记当前 CPU、追平 generation，并取得页表 token。 |
+| `AddressSpaceInner::new_bare()` | `address_space.rs` | 创建空的页表/VMA 数据。 |
+| `AddressSpaceInner::token()` | `address_space.rs` | 返回页表 token。 |
+| `AddressSpaceInner::from_elf()` | `address_space.rs` | 从 ELF 构造尚未发布的用户地址空间。 |
+| `AddressSpaceInner::from_existing_user()` | `address_space.rs` | fork/非 `CLONE_VM` clone 复制地址空间，配合 VMA CoW。 |
 | `do_page_fault()` | `address_space.rs:631` | trap/uaccess 共用缺页入口。 |
 | `fault_in_user_va()` | `address_space.rs:659` | syscall 用户指针 fault-in 入口，缺页后做权限复核。 |
 | `sbrk()` | `address_space.rs:1090` | 转入 `mmap.rs::do_sbrk()` 调整 program break。 |
@@ -56,10 +71,10 @@ pub struct AddressSpace<T: PageTable> {
 
 ```rust
 pub fn from_existing_user(
-    user_space: &mut AddressSpace<T>,
+    user_space: &mut AddressSpaceInner<T>,
     trap_cx_slot: usize,
     trap_cx: &TrapContext,
-) -> Result<AddressSpace<T>, isize> {
+) -> Result<AddressSpaceInner<T>, isize> {
     let mut address_space = Self::new_bare();
     if should_map_trampoline!() {
         address_space.map_trampoline();
@@ -167,76 +182,27 @@ pub struct Vma {
 ```rust
 pub fn copy_on_write<T: PageTable>(
     &mut self,
-    batch: &mut TlbBatch<'_, T>,
+    mapper: &mut UserMapper<'_, T>,
     vpn: VirtPageNum,
 ) -> Result<PhysPageNum, MemoryError> {
-    let old_frame = match self.cow_source_frame(batch, vpn) {
-        Ok(frame) => frame,
-        Err(err) => {
-            warn!(
-                "[copy_on_write] mapped COW page has no resident frame: vpn={:?}, state={}, area={:?}",
-                vpn,
-                self.inner.frame_state_name(&vpn),
-                self
-            );
-            return Err(err);
-        }
-    };
+    let old_frame = self.cow_source_frame(mapper, vpn)?;
     if Arc::strong_count(&old_frame) <= 2 {
         let old_ppn = old_frame.ppn;
-        UserMapper::new(batch).set_user_flags(vpn, self.map_perm)?;
+        mapper.set_user_flags(vpn, self.map_perm)?;
         Ok(old_ppn)
     } else {
-        let old_ppn = old_frame.ppn;
-        if !UserMapper::new(batch).is_mapped(vpn) {
-            return Err(MemoryError::NotMapped);
-        }
+        // 省略 frame store 与 PTE 的失败回滚。
         let new_frame = unsafe { frame_alloc_uninit().ok_or(MemoryError::OutOfMemory)? };
         let new_ppn = new_frame.ppn;
-        new_ppn
-            .get_bytes_array()
-            .copy_from_slice(old_ppn.get_bytes_array());
-        let old_frame = self
-            .inner
-            .remove_in_memory(&vpn)
-            .ok_or(MemoryError::BadAddress)?;
-        if let Err(err) = self.inner.alloc_in_memory(vpn, new_frame) {
-            self.inner
-                .alloc_in_memory(vpn, old_frame)
-                .expect("COW rollback could not restore the source frame");
-            return Err(err);
-        }
-        if UserMapper::new(batch).set_ppn(vpn, new_ppn).is_err() {
-            if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
-                drop(new_frame);
-            }
-            self.inner
-                .alloc_in_memory(vpn, old_frame)
-                .expect("COW rollback could not restore the source frame");
-            return Err(MemoryError::NotMapped);
-        }
-        if UserMapper::new(batch)
-            .set_user_flags(vpn, self.map_perm)
-            .is_err()
-        {
-            UserMapper::new(batch)
-                .set_ppn(vpn, old_ppn)
-                .expect("COW rollback lost the PTE after replacing its PPN");
-            if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
-                batch.defer_frame(new_frame);
-            }
-            self.inner
-                .alloc_in_memory(vpn, old_frame)
-                .expect("COW rollback could not restore the source frame");
-            return Err(MemoryError::NotMapped);
-        }
-        batch.defer_frame(old_frame);
+        mapper.set_ppn(vpn, new_ppn)?;
+        mapper.set_user_flags(vpn, self.map_perm)?;
+        mapper.retire_frame(old_frame);
         Ok(new_ppn)
     }
 }
 ```
 
-`Arc::strong_count(&old_frame) <= 2` 时，说明除 VMA 内部引用和本地临时引用外没有其他共享者，可以直接恢复写权限；否则分配新 frame、复制旧页数据、替换 `VmPageStore` 和页表 PPN。函数中每个失败分支都回滚 frame store 和 PTE；成功替换的旧 frame，以及曾短暂出现在 PTE 中的回滚新 frame，都延迟到 batch 刷新后释放。
+`Arc::strong_count(&old_frame) <= 2` 时，说明除 VMA 内部引用和本地临时引用外没有其他共享者，可以直接恢复写权限；否则分配新 frame、复制旧页数据、替换 `VmPageStore` 和页表 PPN。示例省略了源码中的失败回滚；成功替换的旧 frame，以及曾短暂出现在 PTE 中的回滚新 frame，都由同一个 `UserMapper` 交给 `MmuGather`，延迟到 TLB 同步完成后释放。
 
 ## 3. VmaSet 管理模型
 
@@ -443,9 +409,9 @@ VirtAddr
 
 ## 5. ELF 地址空间创建
 
-`AddressSpace::from_elf(elf_data)` 创建全新用户地址空间：
+`AddressSpaceInner::from_elf(elf_data)` 创建尚未发布的用户地址空间数据：
 
-1. 调用 `AddressSpace::new_bare()` 创建空页表与空 VMA 集合。
+1. 调用 `AddressSpaceInner::new_bare()` 创建空页表与空 VMA 集合。
 2. 按架构需要映射 trampoline。
 3. 映射 signal trampoline。
 4. 解析 ELF。
@@ -482,7 +448,7 @@ LOAD 段权限来自 `MapPermission::from_ph_flags(ph.flags())`。ELF 类型处�
 
 ## 8. proc maps 输出
 
-`AddressSpace::proc_maps_content()` 遍历用户 VMA，输出类似：
+`AddressSpaceInner::proc_maps_content()` 遍历用户 VMA，输出类似：
 
 ```text
 0000000000010000-0000000000020000 rw-p 00000000 00:00 0
@@ -645,18 +611,22 @@ len > crate::mm::max_map_count().saturating_add(1)
 
 ## 13. 地址空间释放
 
-进程退出后，`AddressSpace::release_for_zombie()` 释放大部分 MM 资源：
+进程退出后，外层 `AddressSpace::write()` 调用
+`AddressSpaceInner::release_for_zombie()` 释放大部分 MM 资源：
 
 ```rust
-self.with_tlb_batch(|vmas, batch| vmas.unmap_all(batch))
+self.with_user_mapper(|vmas, mapper| vmas.unmap_all(mapper))
     .expect("zombie cleanup failed to clear a resident user PTE");
 self.locked_pages.clear();
-self.page_table.release_frames();
+let page_table_frames = self.page_table.take_frames();
+self.mmu_gather.record_full_flush();
+self.mmu_gather.retire_frames(&self.page_table, page_table_frames);
 ```
 
-这一步先撤销 resident PTE，本地 TLB 提交后才释放用户 frame，最后释放
-页表页；不销毁进程等待元数据。僵尸进程仍可被父进程 `wait4/waitid` 收集，
-但不继续占用用户页和页表页。
+这一步先撤销 resident PTE，再移出页表根/中间页所有权。用户 frame 和页表
+frame 由同一个 `MmuGather` 持有，在 `AddressSpace` 解锁并收齐 TLB ack 后
+统一释放；它不销毁进程等待元数据。僵尸进程仍可被父进程
+`wait4/waitid` 收集，但不继续占用用户页和页表页。
 
 `AddressSpace` 的生命周期和 PCB 不完全相同。进程进入 zombie 后，父进程 wait 仍需要 pid、exit code、rusage、children 等 PCB 元数据，但不需要继续保留用户 VMA 和页表页。`release_for_zombie()` 正是把“可 wait 的进程对象”和“已经没必要保留的用户地址空间资源”拆开释放。
 
@@ -679,4 +649,4 @@ self.page_table.release_frames();
 | `/proc/[pid]/maps` 权限错误 | `map_perm` 与 `VmAreaMapping` 是否更新 |
 | 栈缺页返回 EFAULT | `MAP_GROWSDOWN` gap、guard gap、VMA 位置 |
 | 大量 mmap 后 ENOMEM | `max_map_count`、`mmap_holes`、overcommit 三者分别核对 |
-| zombie 进程仍占大量内存 | `release_for_zombie()` 是否执行到 `release_frames()` |
+| zombie 进程仍占大量内存 | `release_for_zombie()` 是否把 `take_frames()` 结果交给 retirement |

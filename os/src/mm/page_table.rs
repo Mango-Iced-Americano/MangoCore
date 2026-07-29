@@ -6,9 +6,12 @@
 //! # TLB
 //!
 //! 默认 PTE 修改接口必须自行刷新受影响的 TLB 条目。名字带 `_no_flush`
-//! 的原始接口只允许 `TlbBatch` 调用，batch 负责在物理页释放前完成刷新。
+//! 的原始接口只允许 `UserMapper` 调用；`MmuGather` 负责把 frame 保留到失效完成。
 
-use super::{MapPermission, MemoryError, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use super::{
+    FrameTracker, MapPermission, MemoryError, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
+};
+use alloc::{sync::Arc, vec::Vec};
 
 /// 用户地址访问方向。
 ///
@@ -59,7 +62,7 @@ pub enum FaultAccess {
 /// # TLB
 ///
 /// 不带 `_no_flush` 的修改接口必须刷新当前 hart/core 上对应的 TLB 条目。
-/// 原始接口不会刷新，只能由 `TlbBatch` 在持有延迟释放帧的前提下使用。
+/// 原始接口不会刷新，只能由 `UserMapper` 在 `MmuGather` 保护下使用。
 pub trait PageTable {
     /// 将 `vpn` 映射到 `ppn`。
     ///
@@ -77,7 +80,7 @@ pub trait PageTable {
         ppn: PhysPageNum,
         flags: MapPermission,
     ) -> Result<(), MemoryError>;
-    /// 建立映射但不刷新 TLB；仅供 `TlbBatch` 使用。
+    /// 建立映射但不刷新 TLB；仅供 `UserMapper` 使用。
     fn try_map_no_flush(
         &mut self,
         vpn: VirtPageNum,
@@ -102,7 +105,7 @@ pub trait PageTable {
     /// 成功清除 PTE 后必须刷新该 VPN 对应的 TLB 条目。
     #[allow(unused)]
     fn unmap(&mut self, vpn: VirtPageNum);
-    /// 清除映射但不刷新 TLB；仅供 `TlbBatch` 使用。
+    /// 清除映射但不刷新 TLB；仅供 `UserMapper` 使用。
     fn unmap_no_flush(&mut self, vpn: VirtPageNum);
     #[inline(always)]
     fn unmap_identical(&mut self, vpn: VirtPageNum) {
@@ -121,7 +124,7 @@ pub trait PageTable {
     /// 成功修改 PTE 后必须立即刷新该 VPN，保证后续写访问重新缺页。
     fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
 
-    /// 撤销写权限并返回 PPN，但不刷新 TLB；仅供 `TlbBatch` 使用。
+    /// 撤销写权限并返回 PPN，但不刷新 TLB；仅供 `UserMapper` 使用。
     fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
 
     /// 刷新当前 CPU 上一个虚拟页对应的 TLB 条目。
@@ -168,7 +171,7 @@ pub trait PageTable {
     ///
     /// 成功修改 PPN 后必须刷新该 VPN。
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()>;
-    /// 修改 PPN 但不刷新 TLB；仅供 `TlbBatch` 使用。
+    /// 修改 PPN 但不刷新 TLB；仅供 `UserMapper` 使用。
     fn set_ppn_no_flush(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()>;
 
     /// 覆盖 `vpn` 的 PTE 权限位。
@@ -177,7 +180,7 @@ pub trait PageTable {
     ///
     /// 成功修改权限后必须刷新该 VPN。
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()>;
-    /// 修改权限但不刷新 TLB；仅供 `TlbBatch` 使用。
+    /// 修改权限但不刷新 TLB；仅供 `UserMapper` 使用。
     fn set_pte_flags_no_flush(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()>;
 
     /// 设置硬件 dirty 位但不刷新 TLB；仅用于统一 LA64 的软件 dirty fault 路径。
@@ -206,9 +209,11 @@ pub trait PageTable {
     {
         Self::new()
     }
-    /// Release all page table frames to the frame allocator.
-    /// Used when a zombie process no longer needs its address space.
-    fn release_frames(&mut self);
+    /// 移出页表自身持有的全部页表页，但暂不释放。
+    ///
+    /// zombie MM 会把这些 frame 和叶子映射 frame 一起交给 TLB retirement；
+    /// 只有远端 ack 完成后，返回的 Vec 才能被销毁。
+    fn take_frames(&mut self) -> Vec<Arc<FrameTracker>>;
     /// 从硬件页表 token 构造页表视图。
     ///
     /// # Semantics

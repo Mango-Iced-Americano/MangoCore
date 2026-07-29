@@ -8,7 +8,7 @@
 //! `MAP_FIXED` 会先解除目标区间已有映射，`MAP_FIXED_NOREPLACE` 遇到重叠返回 `-EEXIST`。
 //! 文件映射偏移必须按页对齐；匿名可写映射参与本内核的 overcommit 检查。
 
-use super::address_space::{AddressSpace, MemoryError};
+use super::address_space::{AddressSpaceInner, MemoryError};
 use super::page_table::PageTable;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::{FrameTracker, VirtAddr};
@@ -59,7 +59,7 @@ fn brk_overlap_blocks(area: &Vma) -> bool {
 }
 
 pub(super) fn do_sbrk<T: PageTable>(
-    address_space: &mut AddressSpace<T>,
+    address_space: &mut AddressSpaceInner<T>,
     increment: isize,
 ) -> usize {
     let old_pt = address_space.heap_pt;
@@ -178,7 +178,7 @@ pub(super) fn do_sbrk<T: PageTable>(
 }
 
 pub(super) fn do_mmap<T: PageTable>(
-    address_space: &mut AddressSpace<T>,
+    address_space: &mut AddressSpaceInner<T>,
     start: usize,
     len: usize,
     prot: MapPermission,
@@ -317,7 +317,7 @@ pub(super) fn do_mmap<T: PageTable>(
 }
 
 pub(super) fn do_shm_mmap<T: PageTable>(
-    address_space: &mut AddressSpace<T>,
+    address_space: &mut AddressSpaceInner<T>,
     start: usize,
     len: usize,
     prot: MapPermission,
@@ -397,7 +397,7 @@ pub(super) fn do_shm_mmap<T: PageTable>(
 }
 
 pub(super) fn do_munmap<T: PageTable>(
-    address_space: &mut AddressSpace<T>,
+    address_space: &mut AddressSpaceInner<T>,
     start: usize,
     len: usize,
 ) -> Result<(), isize> {
@@ -414,7 +414,7 @@ pub(super) fn do_munmap<T: PageTable>(
 }
 
 pub(super) fn do_mprotect<T: PageTable>(
-    address_space: &mut AddressSpace<T>,
+    address_space: &mut AddressSpaceInner<T>,
     addr: usize,
     len: usize,
     prot: MapPermission,

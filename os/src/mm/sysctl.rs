@@ -115,7 +115,7 @@ pub fn committed_as_kbytes() -> usize {
         Some(task) => task.process.vm(),
         None => return 0,
     };
-    let committed = vm.lock().committed_bytes() / 1024;
+    let committed = vm.read(|vm| vm.committed_bytes()) / 1024;
     committed
 }
 

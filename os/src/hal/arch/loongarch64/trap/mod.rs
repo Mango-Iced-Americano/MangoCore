@@ -18,8 +18,8 @@ use crate::mm::{copy_from_user, copy_to_user, frame_reserve, FaultAccess, Memory
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
-    signal::SigInfo, suspend_current_and_run_next, Signals,
+    current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
+    suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
@@ -265,12 +265,10 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::PageNonReadableFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
             let task = current_task().unwrap();
-            let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
             // This is where we handle the page fault.
             frame_reserve(3);
             let vm_ref = task.process.vm();
-            let mut mset_lock = vm_ref.lock();
             let access = match cause {
                 Trap::Exception(Exception::PageInvalidStore)
                 | Trap::Exception(Exception::PageModifyFault) => FaultAccess::Store,
@@ -281,44 +279,53 @@ pub fn trap_handler() -> ! {
             let _pf_start =
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             crate::task::perf::record_page_fault();
-            let pf_result = mset_lock.do_page_fault(addr, access);
+            // 缺页修复与 LA64 software-dirty PTE 更新合并在同一 VM 锁
+            // 持有期；helper 先解锁再完成远端 shootdown。
+            let pf_result = vm_ref.write(|vm| {
+                let result = vm.do_page_fault(addr, access);
+                if result.is_ok()
+                    && matches!(
+                        cause,
+                        Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
+                    )
+                {
+                    vm.set_user_page_dirty(addr.floor()).unwrap();
+                }
+                result
+            });
             crate::task::perf::record_pagefault_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(_pf_start),
             );
             match pf_result {
-                Err(error) => match error {
-                    MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
-                        inner.add_signal(Signals::SIGBUS);
-                    }
-                    MemoryError::NoPermission => {
-                        inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
-                    }
-                    MemoryError::BadAddress | MemoryError::NotMapped => {
-                        inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
-                    }
-                    MemoryError::OutOfMemory => {
-                        inner.pending_oom_kill = true;
-                    }
-                    other => {
-                        log::warn!(
-                            "[page_fault] unexpected memory error {:?}, send SIGSEGV",
-                            other
-                        );
-                        inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
-                    }
-                },
-                Ok(_) => {
-                    if let Trap::Exception(
-                        Exception::PageModifyFault | Exception::PageInvalidStore,
-                    ) = cause
-                    {
-                        mset_lock.set_user_page_dirty(addr.floor()).unwrap();
+                Err(error) => {
+                    let mut inner = task.acquire_inner_lock();
+                    match error {
+                        MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
+                            inner.add_signal(Signals::SIGBUS);
+                        }
+                        MemoryError::NoPermission => {
+                            inner.sigmask.remove(Signals::SIGSEGV);
+                            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
+                        }
+                        MemoryError::BadAddress | MemoryError::NotMapped => {
+                            inner.sigmask.remove(Signals::SIGSEGV);
+                            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        }
+                        MemoryError::OutOfMemory => {
+                            inner.pending_oom_kill = true;
+                        }
+                        other => {
+                            log::warn!(
+                                "[page_fault] unexpected memory error {:?}, send SIGSEGV",
+                                other
+                            );
+                            inner.sigmask.remove(Signals::SIGSEGV);
+                            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        }
                     }
                 }
+                Ok(_) => {}
             };
         }
         Trap::Exception(Exception::InstructionNonDefined)

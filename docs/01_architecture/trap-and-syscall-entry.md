@@ -132,7 +132,6 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
             let task = current_task().unwrap();
-            let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             frame_reserve(3);
             let access = match scause.cause() {
@@ -144,11 +143,12 @@ pub fn trap_handler() -> ! {
             };
             let _pf_start = crate::task::perf::perf_time_now();
             crate::task::perf::record_page_fault();
-            let pf_result = task.process.vm().lock().do_page_fault(addr, access);
+            let pf_result = task.process.vm().write(|vm| vm.do_page_fault(addr, access));
             crate::task::perf::record_pagefault_time_us(
                 crate::task::perf::perf_time_now().saturating_sub(_pf_start),
             );
             if let Err(error) = pf_result {
+                let mut inner = task.acquire_inner_lock();
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
@@ -457,7 +457,7 @@ rv64：
 
 ```rust
 let addr = VirtAddr::from(stval);
-let pf_result = task.process.vm().lock().do_page_fault(addr, access);
+let pf_result = task.process.vm().write(|vm| vm.do_page_fault(addr, access));
 ```
 
 la64：

@@ -19,7 +19,7 @@ sys_mmap / sys_munmap / sys_mprotect / sys_brk
         ├── parse_mmap_prot()
         ├── parse_mmap_flags()
         ├── 文件描述符与权限校验
-        └── process.vm().lock()
+        └── process.vm().write(...)
               └── mm/mmap.rs
                     ├── do_mmap()
                     ├── do_munmap()

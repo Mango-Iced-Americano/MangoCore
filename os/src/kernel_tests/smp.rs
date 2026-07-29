@@ -20,11 +20,16 @@ static AP_BLOCKED_WAKE_PHASE: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
+static AP_USER_TLB_FREE_DURING_WAIT: AtomicUsize = AtomicUsize::new(usize::MAX);
+static AP_USER_TLB_REQUEST_BEFORE: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
+        Mutex::new(None);
+    static ref USER_TLB_RETIRE_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
 }
 
@@ -56,10 +61,7 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::kernel_timer_irq_is_deferred",
             kernel_timer_irq_is_deferred,
         ),
-        KernelTest::new(
-            "smp::ap_to_bsp_ipi_round_trip",
-            ap_to_bsp_ipi_round_trip,
-        ),
+        KernelTest::new("smp::ap_to_bsp_ipi_round_trip", ap_to_bsp_ipi_round_trip),
         KernelTest::new(
             "smp::syscall_irq_window_survives_schedule",
             syscall_irq_window_survives_schedule,
@@ -79,6 +81,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
             user_tlb_full_flush_reaches_online_cpus,
+        ),
+        KernelTest::new(
+            "smp::user_tlb_retirement_waits_for_ack",
+            user_tlb_retirement_waits_for_ack,
         ),
         KernelTest::new(
             "smp::kernel_stack_reclaim_waits_for_shootdown",
@@ -412,8 +418,8 @@ fn scheduler_state_has_unique_owner() -> Result<(), &'static str> {
     // 早到 wake 只撤销阻塞意图，任务必须等切回 idle 后才能重新进入 runqueue。
     let mut saw_blocking = false;
     crate::task::block_current_and_run_next_checked(|task| {
-        saw_blocking = task.task_status()
-            == crate::task::TaskStatus::Blocking(crate::smp::BOOT_CPU_ID);
+        saw_blocking =
+            task.task_status() == crate::task::TaskStatus::Blocking(crate::smp::BOOT_CPU_ID);
         false
     });
     if !saw_blocking {
@@ -477,7 +483,11 @@ fn secondary_cpus_stop_and_ack() -> Result<(), &'static str> {
 
     let targets = crate::smp::online_cpu_mask() & !(1usize << crate::smp::BOOT_CPU_ID);
     if let Err(error) = crate::smp::stop_secondary_cpus() {
-        crate::println!("# SMP STOP failed: targets={:#x} error={:?}", targets, error);
+        crate::println!(
+            "# SMP STOP failed: targets={:#x} error={:?}",
+            targets,
+            error
+        );
         return Err("secondary CPUs did not stop");
     }
 
@@ -492,8 +502,7 @@ fn secondary_cpus_stop_and_ack() -> Result<(), &'static str> {
     }
 
     // 验证生产 shutdown 再次调用同一协议时走幂等快路径。
-    crate::smp::stop_secondary_cpus()
-        .map_err(|_| "repeated STOP was not idempotent")
+    crate::smp::stop_secondary_cpus().map_err(|_| "repeated STOP was not idempotent")
 }
 
 /// AP 只有在切换到独立 idle stack 后才允许发布 online。
@@ -642,8 +651,8 @@ fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
         ));
     }
 
-    let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
     while !tasks.iter().all(|(cpu, task)| {
         AP_BLOCKED_WAKE_PHASE[*cpu].load(Ordering::Acquire) == 1
             && task.task_status() == crate::task::TaskStatus::Blocked
@@ -659,8 +668,8 @@ fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
     if !completion.complete() {
         return Err("first completion did not publish wakeup");
     }
-    let wake_deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    let wake_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
     while !tasks.iter().all(|(cpu, task)| {
         AP_BLOCKED_WAKE_PHASE[*cpu].load(Ordering::Acquire) == 2
             && task.task_status() == crate::task::TaskStatus::Zombie
@@ -712,6 +721,111 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn observe_user_tlb_retirement_window() {
+    let cpu = crate::smp::cpu_id();
+    if cpu != 1 {
+        AP_USER_TLB_RETIRE_PHASE.store(usize::MAX, Ordering::Release);
+        return;
+    }
+    let vm = USER_TLB_RETIRE_VM
+        .lock()
+        .as_ref()
+        .expect("user TLB retirement VM missing")
+        .clone();
+    vm.activate_on(cpu);
+    let request_before = crate::smp::user_tlb_request(cpu);
+    AP_USER_TLB_REQUEST_BEFORE.store(request_before, Ordering::Release);
+    AP_USER_TLB_RETIRE_PHASE.store(1, Ordering::Release);
+
+    // ktest kernel task 默认关中断运行：request 增加后 handler 尚不可能 ack，
+    // 因而这里正好位于“PTE 已清除、远端 flush 未完成”的窗口。
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while crate::smp::user_tlb_request(cpu) == request_before {
+        if crate::hal::get_time() >= deadline {
+            AP_USER_TLB_RETIRE_PHASE.store(usize::MAX, Ordering::Release);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    AP_USER_TLB_FREE_DURING_WAIT.store(crate::mm::unallocated_frames(), Ordering::Release);
+    AP_USER_TLB_RETIRE_PHASE.store(2, Ordering::Release);
+
+    crate::hal::with_local_interrupts_enabled(|| {
+        while AP_USER_TLB_RETIRE_PHASE.load(Ordering::Acquire) != 3 {
+            core::hint::spin_loop();
+        }
+    });
+    AP_USER_TLB_RETIRE_PHASE.store(4, Ordering::Release);
+}
+
+/// 用真实共享地址空间撤映射证明：request 已发布但 AP 尚未 ack 时，
+/// 数据 frame 仍未回到分配器；`write()` 返回后它才完成退休。
+fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    const TEST_BASE: usize = 0x52_0000;
+
+    AP_USER_TLB_RETIRE_PHASE.store(0, Ordering::Release);
+    AP_USER_TLB_FREE_DURING_WAIT.store(usize::MAX, Ordering::Release);
+    let mut space = crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare();
+    space.insert_framed_area(
+        crate::mm::VirtAddr::from(TEST_BASE),
+        crate::mm::VirtAddr::from(TEST_BASE + crate::config::PAGE_SIZE),
+        crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
+    );
+    let vm = Arc::new(crate::mm::AddressSpace::new(space));
+    vm.activate_on(crate::smp::BOOT_CPU_ID);
+    *USER_TLB_RETIRE_VM.lock() = Some(vm.clone());
+    let task = crate::task::spawn_ktest_task_on(1, observe_user_tlb_retirement_window);
+
+    let ready_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while AP_USER_TLB_RETIRE_PHASE.load(Ordering::Acquire) != 1 {
+        if AP_USER_TLB_RETIRE_PHASE.load(Ordering::Acquire) == usize::MAX
+            || crate::hal::get_time() >= ready_deadline
+        {
+            return Err("AP did not enter user TLB retirement window");
+        }
+        core::hint::spin_loop();
+    }
+
+    let free_before = crate::mm::unallocated_frames();
+    let ack_before = crate::smp::user_tlb_ack(1);
+    vm.write(|space| {
+        space
+            .remove_area_with_start_vpn(crate::mm::VirtAddr::from(TEST_BASE).floor())
+            .expect("user TLB retirement test unmap failed");
+    });
+
+    let free_during = AP_USER_TLB_FREE_DURING_WAIT.load(Ordering::Acquire);
+    let free_after = crate::mm::unallocated_frames();
+    let validation_error = if free_during != free_before {
+        Some("user frame was released before remote TLB ack")
+    } else if free_after != free_before.saturating_add(1) {
+        Some("user frame was not released after remote TLB ack")
+    } else if crate::smp::user_tlb_ack(1) <= ack_before
+        || crate::smp::user_tlb_request(1) <= AP_USER_TLB_REQUEST_BEFORE.load(Ordering::Acquire)
+    {
+        Some("user TLB retirement did not complete a new request/ack")
+    } else {
+        None
+    };
+
+    AP_USER_TLB_RETIRE_PHASE.store(3, Ordering::Release);
+    let done_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while task.task_status() != crate::task::TaskStatus::Zombie
+        || AP_USER_TLB_RETIRE_PHASE.load(Ordering::Acquire) != 4
+    {
+        if crate::hal::get_time() >= done_deadline {
+            return Err("AP retirement observer did not finish");
+        }
+        core::hint::spin_loop();
+    }
+    *USER_TLB_RETIRE_VM.lock() = None;
+    crate::task::run_deferred_timer_at_task_safe_point();
+    validation_error.map_or(Ok(()), Err)
+}
+
 fn record_kstack_reclaim_task() {
     let cpu = crate::smp::cpu_id();
     let owner_ok = crate::task::current_task()
@@ -738,8 +852,8 @@ fn run_kstack_reclaim_wave() -> Result<(), &'static str> {
         ));
     }
 
-    let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
     while AP_KSTACK_RECLAIM_RUNS.load(Ordering::Acquire) != task_count
         || tasks
             .iter()

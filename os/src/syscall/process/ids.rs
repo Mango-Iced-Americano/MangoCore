@@ -2,7 +2,7 @@ use crate::config::PAGE_SIZE;
 use crate::fs::iov::IOVec;
 use crate::mm::{
     check_user_range, copy_from_user, copy_from_user_array, copy_to_user, translated_byte_buffer,
-    AddressSpace, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer,
+    AddressSpaceInner, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer,
     UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
@@ -700,11 +700,9 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
             Some(len) => len,
             None => return EFAULT,
         };
-        if !task.process.vm().lock().contains_valid_buffer(
-            list as usize,
-            byte_len,
-            MapPermission::R,
-        ) {
+        if !task.process.vm().read(|vm| {
+            vm.contains_valid_buffer(list as usize, byte_len, MapPermission::R)
+        }) {
             return EFAULT;
         }
         if size > LEGACY_NGROUPS_MAX {
@@ -974,21 +972,22 @@ where
     F: FnMut(&mut [u8]) -> Result<(), isize>,
 {
     let vm_ref = process.vm();
-    let mut vm = vm_ref.lock();
-    let mut total = 0usize;
-    for iov in iovecs {
-        if total >= cap {
-            break;
+    vm_ref.write(|vm| {
+        let mut total = 0usize;
+        for iov in iovecs {
+            if total >= cap {
+                break;
+            }
+            let len = iov.iov_len.min(cap - total);
+            append_process_vm_iov_chunks(vm, iov.iov_base, len, access, &mut f)?;
+            total += len;
         }
-        let len = iov.iov_len.min(cap - total);
-        append_process_vm_iov_chunks(&mut vm, iov.iov_base, len, access, &mut f)?;
-        total += len;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn append_process_vm_iov_chunks<F>(
-    vm: &mut AddressSpace<PageTableImpl>,
+    vm: &mut AddressSpaceInner<PageTableImpl>,
     ptr: *const u8,
     len: usize,
     access: FaultAccess,

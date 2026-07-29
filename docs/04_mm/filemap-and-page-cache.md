@@ -4,7 +4,7 @@ category: mm
 status: stable
 author: MangoCore Team
 last_update: 2026-07-27
-tags: [mm, mmap, filemap, page-cache, tlb-batch]
+tags: [mm, mmap, filemap, page-cache, mmu-gather]
 ---
 
 # 文件映射缺页与 PageCache 交互
@@ -176,7 +176,7 @@ filemap_shared_write_fault()
   ├── 检查 EOF
   ├── pc.frame_for_write(page_index)
   ├── area.inner.alloc_in_memory(ctx.vpn, cache_frame)
-  ├── UserMapper::new(batch).map_user_page(..., area.vm_perm())
+  ├── mapper.map_user_page(..., area.vm_perm())
   └── verify_filemap_fault()
 ```
 
@@ -187,7 +187,7 @@ filemap_shared_write_fault()
 还有一种 shared 写缺页不是“首次映射”，而是“读缺页已映射为只读后首次 store”。该路径在 `page_fault.rs::restore_shared_write()`：
 
 1. 如果是 file-backed shared，先调用 `pc.frame_for_write(page_index)`。
-2. 通过 `UserMapper::new(batch).set_user_flags(ctx.vpn, area.vm_perm())` 恢复 VMA 的 W 权限。
+2. 通过 `mapper.set_user_flags(ctx.vpn, area.vm_perm())` 恢复 VMA 的 W 权限。
 3. 翻译 PPN 并返回 fault 物理地址。
 
 这与 `filemap_shared_write_fault()` 的区别是：前者 PTE 已存在，后者 PTE 不存在。
@@ -197,8 +197,7 @@ filemap_shared_write_fault()
 所有 filemap fault 成功后都会调用 `verify_filemap_fault()`：
 
 ```rust
-let mapped_ppn = UserMapper::new(batch)
-    .translate(ctx.vpn)
+let mapped_ppn = mapper.translate(ctx.vpn)
     .ok_or(MemoryError::NotMapped)?;
 if mapped_ppn != expected_ppn {
     return Err(MemoryError::BackingStoreFailure);

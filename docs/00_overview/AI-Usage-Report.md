@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-28
+> Coverage: 2026-04-01 to 2026-07-29
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -46,7 +46,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 | 双架构 SMP idle stack | 2026-07-25 | GPT/Codex, DeepSeek | AP boot→idle 栈切换设计、ABI/内存序复核、双架构 8 核证据归纳 | AP 只在独立 idle stack 上发布 online；RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 3/3 PASS |
 | SMP 调度所有权交接 | 2026-07-27 | GPT/Codex, DeepSeek | task 状态机收敛、切栈后 owner 交接与丢唤醒竞态复核 | 以六态原子状态机替代分散状态写入；双架构 4 核 SMP focused 测试均为 19/19 PASS |
-| SMP 本地 TLB 提交边界 | 2026-07-27 | GPT/Codex, DeepSeek | 用户 PTE 写入收口、frame 延迟释放、LA64 ASID 边界审查和双架构 Docker/QEMU 验证 | 建立 `TlbBatch` LocalOnly 协议；RV64/LA64 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，远端 shootdown 明确 NOT RUN |
+| SMP 本地 TLB 提交边界 | 2026-07-27 | GPT/Codex, DeepSeek | 用户 PTE 写入收口、frame 延迟释放、LA64 ASID 边界审查和双架构 Docker/QEMU 验证 | 建立 `MmuGather` LocalOnly 协议；RV64/LA64 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，远端 shootdown 明确 NOT RUN |
 | SMP Per-CPU current 槽 | 2026-07-27 | GPT/Codex, DeepSeek | current owner 拆分、Arc/noreturn 生命周期审查、双架构 Docker/QEMU 验证 | 删除全局 PROCESSOR 与 current 裸指针；双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS |
 | SMP 初赛非回归门禁 | 2026-07-28 | GPT/Codex, DeepSeek | 双架构 8 核 basic+busybox 执行、judge 失败集合比较、验收规则收敛 | 发现 RV64 8 核 307/314 未达到 312 基线；建立硬条件与只升不降的失败集合门禁 |
 | RV64 trap-return 半恢复现场竞态 | 2026-07-28 | GPT/Codex, DeepSeek | 用户 ELF/loader 反汇编、CSR 指令级溯源、双架构 Arc 生命周期复核与 Docker/QEMU 验证 | 统一 `SPP/SIE/SPIE` 返回契约并修复 noreturn Arc 泄漏；RV64 preliminary 312/314、LA64 SMP ktest 10/10 PASS |
@@ -54,6 +54,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 远程阻塞唤醒 | 2026-07-28 | GPT/Codex, DeepSeek | `last_cpu` 语义、Blocking/Blocked 竞态、批量 wake 锁序与 Docker/QEMU 验证 | AP kernel-only 任务经真实 Completion/WaitQueue 阻塞后回原 CPU；双架构 25/25 PASS |
 | SMP kernel-global 撤映射与栈回收 | 2026-07-28 | GPT/Codex, DeepSeek | 全核 TLB sequence/ack、析构延迟回收、双架构 8 核 focused 与初赛回归 | 删除 AP TCB 永久保留 workaround；双架构 27/27 PASS，初赛 RV64 312/314、LA64 308/314，失败集合未扩大 |
 | SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 2026-07-28 | GPT/Codex, DeepSeek | VM 锁/ack 死锁审查、MM 驻留与 generation 顺序、独立 user-TLB sequence、双架构 Docker/QEMU 验证 | 保持 `Published` fail-stop，完成激活侧和全用户 IPI/ack 原语；双架构 29/29 PASS，初赛失败集合未扩大，完整 PTE shootdown 明确留给 B23 |
+| SMP 用户 PTE 锁外 shootdown 与接口收敛 | 2026-07-29 | GPT/Codex, DeepSeek | VM 锁外同步、generation/ack 并发审查、frame 退休、MMU 接口重构与双架构 Docker/QEMU 验证 | 用 `AddressSpace`、`MmuGather`、`TlbFlush` 固化 `record_change -> seal -> execute`；真实 unmap 验证 ack 前不释放 frame |
 
 ## 4. 详细使用场景
 
@@ -267,7 +268,7 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - AI roles: GPT/Codex 负责架构契约核对、实现、审查裁决与证据边界；DeepSeek 负责实施前生命周期审计、冻结 diff 只读审查和受限 Docker recipe 结果归纳。
 - Problem: 用户 PTE 修改与 TLB 刷新分散在 VMA、缺页、CoW、OOM 和退出路径，无法统一表达“先失效旧翻译，后释放/复用物理页”，也没有可供后续远端 shootdown 接入的提交边界。
 - AI contribution: DeepSeek 的前置审计指出旧 unmap 顺序的 frame 生命周期风险；冻结审查无 P0/P1，并发现 LA64 旧安全接口仍使用当前 ASID 精确失效的潜在误用点。
-- Human action: 建立 `TlbBatch` 和 `Unpublished/LocalOnly/Published` 三态发布边界，收口所有用户 PTE 写入，将失效映射的 frame 延迟到本地 flush 后释放；采纳 LA64 审查项，但拒绝把释放构建的生命周期断言降为 `debug_assert!`。
+- Human action: 建立 `MmuGather` 和 `Unpublished/LocalOnly/Published` 三态发布边界，收口所有用户 PTE 写入，将失效映射的 frame 延迟到本地 flush 后释放；采纳 LA64 审查项，但拒绝把释放构建的生命周期断言降为 `debug_assert!`。
 - Verification: RV64、LA64 `CORE_NUM=1 KTEST=mm KREPEAT=2` 严格串行，均为 8/8 PASS，受测源码指纹前后一致。该证据只验收 CPU0 LocalOnly 路径；远端 generation/ack、MM-owned ASID 和 kernel-global shootdown 均未运行。
 
 ### Case 12: SMP Per-CPU current 所有权与 Arc 生命周期
@@ -423,7 +424,7 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   DeepSeek 审查、Docker/QEMU 日志与任务状态只保留在本地忽略的 `cc-codex/`。
 - AI roles: GPT/Codex 负责源码调用链审计、两阶段协议设计、实现、内存序裁决和证据验收；
   DeepSeek 负责冻结源码只读设计/最终审查、后台串行 Docker 测试与结果独立归纳。
-- Problem: B16 的 `TlbBatch` 只有 LocalOnly 语义；直接在其 `commit()` 内加入远端等待会
+- Problem: B16 的 `MmuGather` 只有 LocalOnly 语义；直接在其 `commit()` 内加入远端等待会
   持有进程 VM 锁。目标 CPU 可能在 IRQ-off page fault 中等待同一锁，于是形成持锁等 ack
   与目标等锁的死锁。用户 trap-return 也尚未登记哪些 CPU 可能缓存该 MM。
 - Human action: 先建立每 MM 的单调 cached CPU mask、generation/observed 和 trap-return
@@ -441,6 +442,33 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   测试证据，但不改写 wrapper FAIL，也不为机械绿灯重跑。
   测试没有修改真实用户 PTE，因此 generation race、stale translation、ack 前 frame
   不复用、MM-owned ASID 和用户跨核执行均明确为 NOT RUN。
+
+### Case 20: SMP 用户 PTE 两阶段 shootdown 与 frame 退休
+
+- Evidence: `docs/Work_Log/2026-07-29.md`、
+  `docs/Work_Log/evidence/2026-07-29/smp-b23-user-tlb-flush-summary.md`；原始 DeepSeek 审查和
+  Worker 日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计并实现 `AddressSpace`、两阶段提交、锁序调整和最终证据
+  裁决；DeepSeek 只读复核 generation/observed、request/ack 合并、frame 生命周期与
+  trap-return 性能边界。机械构建/QEMU 由本地 Docker Worker 严格串行。
+- Problem: 真实 PTE 修改原先在外层 VM guard 持有期内提交。如果在该位置增加远端等待，
+  目标 CPU 可能正在 IRQ-off page fault 中等待同一 VM 锁；同时 unmap/zombie 若在 ack 前
+  drop 数据页或页表页，会把 stale translation/page walk 变成物理页 UAF。
+- Human action: 用不暴露可变 guard 的 `AddressSpace::write()` 包住所有进程 VM
+  修改；把外层/锁内数据明确为 `AddressSpace`/`AddressSpaceInner`，删除 pending、
+  publication 和多层 commit 原型。`UserMapper` 写 PTE，唯一 `MmuGather` 记录范围与
+  frame，`seal()` 生成锁外 `TlbFlush`，`execute()` 才失效本地 TLB、广播 IPI、等待
+  ack、推进 observed 并释放 frame。另外修正
+  trap/clone/OOM/SysV SHM 锁序，并让迟到且已被 ack 覆盖的 user-TLB reason 不再重复全刷。
+- AI adjudication: 采纳 DeepSeek 对 VM 锁边界、单次 generation 和 ack 后 observed 闭环的
+  核对；纠正其“未 Acquire 新 generation 就不受 PTE 影响”和“不同 MM 共享 observed”的
+  表述，最终正确性依赖共同 VM 锁、handler 的 request-before-flush-before-ack 与 generation
+  重查。也不接受“全刷在 QEMU 上不可测”的无数据推断；当前仅将其视为正确性基线。
+- Verification: 重构期间两架构诊断 build 虽退出 0，但因源码同时变化被 runner
+  fail-closed，不计入验收。最终冻结源码的 RV64/LA64 8 核 SMP focused 均为
+  16/16 PASS；新用例对共享页表执行 unmap，确认 request 已发布但未 ack 时 frame
+  计数不变，ack 后才增加一页。`mask=0x003` 为 RV64 312/314、LA64 308/314，
+  失败集合没有扩大；四项均退出 0、无 timeout/forbidden marker，且源码指纹不变。
 
 ## 6. 质量控制与验证方式
 

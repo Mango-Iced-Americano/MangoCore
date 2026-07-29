@@ -14,8 +14,8 @@ pub use loongarch64::{
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
     console_flush, console_getchar, console_putchar, console_write_bytes, cpu_local_ptr,
-    enter_secondary_idle, install_cpu_local, kstack_alloc, local_irq_restore, local_irq_save,
-    kernel_tlb_invalidate, machine_init, machine_shutdown, prepare_secondary_cpu_stop,
+    enter_secondary_idle, install_cpu_local, kernel_tlb_invalidate, kstack_alloc,
+    local_irq_restore, local_irq_save, machine_init, machine_shutdown, prepare_secondary_cpu_stop,
     reclaim_retired_kernel_stacks, secondary_cpu_stop, secondary_cpu_wait, send_ipi,
     start_secondary_cpu, syscall_id,
     time::{
@@ -26,8 +26,8 @@ pub use loongarch64::{
         get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return, LsxRegs,
         MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
     },
-    trap_cx_bottom_from_tid, user_hwcap, user_tlb_invalidate, ustack_bottom_from_tid,
-    KernelPageTableImpl, KernelStack, PageTableImpl, BLOCK_SZ,
+    trap_cx_bottom_from_tid, user_hwcap, user_tlb_invalidate, user_tlb_invalidate_page,
+    ustack_bottom_from_tid, KernelPageTableImpl, KernelStack, PageTableImpl, BLOCK_SZ,
 };
 #[cfg(feature = "riscv")]
 pub mod riscv;
@@ -40,14 +40,13 @@ pub use riscv::{
     kern_stack::trap_cx_bottom_from_tid,
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
-    kernel_tlb_invalidate, machine_init,
+    kernel_tlb_invalidate, machine_init, prepare_secondary_cpu_stop, reclaim_retired_kernel_stacks,
     rv_board::MMIO,
     sbi::{
         console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
         local_irq_save, machine_shutdown, set_timer,
     },
-    prepare_secondary_cpu_stop, reclaim_retired_kernel_stacks, secondary_cpu_stop,
-    secondary_cpu_wait, send_ipi, start_secondary_cpu,
+    secondary_cpu_stop, secondary_cpu_wait, send_ipi, start_secondary_cpu,
     sv39::tlb_invalidate,
     switch::__switch,
     syscall_id,
@@ -58,5 +57,6 @@ pub use riscv::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,
         trap_return, UserContext, UserSignalMask,
     },
-    user_hwcap, user_tlb_invalidate, KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
+    user_hwcap, user_tlb_invalidate, user_tlb_invalidate_page, KernelPageTableImpl, MachineContext,
+    PageTableImpl, TrapImpl,
 };

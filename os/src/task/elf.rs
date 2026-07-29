@@ -1,7 +1,7 @@
 //! ELF 装载辅助类型。
 //!
 //! 本文件保存用户栈 auxv 条目、ELF 装载结果摘要，以及动态解释器
-//! 的 VFS 查找与内核映射逻辑。真正的 ELF 段解析在 `mm::AddressSpace::from_elf`
+//! 的 VFS 查找与内核映射逻辑。真正的 ELF 段解析在 `mm::AddressSpaceInner::from_elf`
 //! 中完成。
 
 use alloc::boxed::Box;

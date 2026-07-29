@@ -1226,7 +1226,7 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     let token = current_user_token();
     let rusage = match who {
         RUSAGE_SELF | RUSAGE_THREAD => {
-            let resident_kb = task.process.vm().lock().resident_user_bytes() / 1024;
+            let resident_kb = task.process.vm().read(|vm| vm.resident_user_bytes()) / 1024;
             let mut inner = task.acquire_inner_lock();
             inner.rusage.update_maxrss_kb(resident_kb);
             inner.rusage

@@ -174,7 +174,6 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
             let task = current_task().unwrap();
-            let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             // This is where we handle the page fault.
             frame_reserve(3);
@@ -188,12 +187,15 @@ pub fn trap_handler() -> ! {
             let _pf_start =
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             crate::task::perf::record_page_fault();
-            let pf_result = task.process.vm().lock().do_page_fault(addr, access);
+            // VM update 会在解锁后等待远端 TLB ack；task.inner 只能在结果
+            // 返回后获取，否则会把普通锁带过 shootdown 等待点。
+            let pf_result = task.process.vm().write(|vm| vm.do_page_fault(addr, access));
             crate::task::perf::record_pagefault_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(_pf_start),
             );
             if let Err(error) = pf_result {
+                let mut inner = task.acquire_inner_lock();
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);

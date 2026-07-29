@@ -6,19 +6,19 @@
 //! # Semantics
 //!
 //! 匿名私有页支持懒分配和 CoW；`MAP_SHARED` 页不参与 CoW；文件映射的首次 fault
-//! 由 `filemap` 路径填充。用户 PTE 写入必须通过 `UserMapper` 进入 `TlbBatch`，
-//! 不得从 VMA 层直接绕过统一的 TLB 提交和 frame 延迟释放协议。
+//! 由 `filemap` 路径填充。用户 PTE 写入必须通过 `UserMapper`，由它同步更新
+//! `MmuGather`；不得从 VMA 层直接绕过失效记录和 frame 退休协议。
 
 use core::fmt::Debug;
 
 use super::frame_store::{Frame, FrameState, VmPageStore};
 use super::page_table::PageTable;
 use super::user_mapper::UserMapper;
+use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
 use super::{FaultAccess, MemoryError};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
-use super::{TlbBatch, VPNRange};
 use crate::fs::vfs::IndexNode;
 use crate::mm::frame_allocator::frame_alloc_uninit;
 
@@ -146,12 +146,11 @@ impl Vma {
     }
     fn map_page_with_perm<T: PageTable>(
         &self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
         ppn: PhysPageNum,
         perm: MapPermission,
     ) -> Result<(), MemoryError> {
-        let mut mapper = UserMapper::new(batch);
         if perm.contains(MapPermission::U) {
             mapper.map_user_page(vpn, ppn, perm)
         } else {
@@ -160,24 +159,22 @@ impl Vma {
     }
     pub fn clear_stale_pte<T: PageTable>(
         &self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> bool {
         // lazy页不应该保留有效pte
-        matches!(
-            UserMapper::new(batch).unmap_user_page_if_mapped(vpn),
-            Ok(true)
-        )
+        matches!(mapper.unmap_user_page_if_mapped(vpn), Ok(true))
     }
     pub fn map_one<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, (MemoryError, VirtPageNum)> {
-        let is_mapped = UserMapper::new(batch).is_mapped(vpn);
+        let is_mapped = mapper.is_mapped(vpn);
         if !is_mapped {
             //if not mapped
-            self.map_one_unchecked(batch, vpn).map_err(|err| (err, vpn))
+            self.map_one_unchecked(mapper, vpn)
+                .map_err(|err| (err, vpn))
         } else {
             //mapped
             Err((MemoryError::AlreadyMapped, vpn))
@@ -186,13 +183,13 @@ impl Vma {
 
     pub fn map_one_unchecked<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
         let ppn = frame.ppn;
         self.inner.alloc_in_memory(vpn, frame)?;
-        if let Err(err) = self.map_page_with_perm(batch, vpn, ppn, self.map_perm) {
+        if let Err(err) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
         }
@@ -201,13 +198,13 @@ impl Vma {
 
     pub fn map_one_zeroed_unchecked<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
         let ppn = frame.ppn;
         self.inner.alloc_in_memory(vpn, frame)?;
-        if let Err(err) = self.map_page_with_perm(batch, vpn, ppn, self.map_perm) {
+        if let Err(err) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
         }
@@ -226,10 +223,10 @@ impl Vma {
 
     pub(super) fn map_existing_in_memory<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
-        if UserMapper::new(batch).is_mapped(vpn) {
+        if mapper.is_mapped(vpn) {
             return Err(MemoryError::AlreadyMapped);
         }
         let ppn = self
@@ -237,7 +234,7 @@ impl Vma {
             .get_in_memory(&vpn)
             .map(|frame| frame.ppn)
             .ok_or(MemoryError::NotMapped)?;
-        self.map_page_with_perm(batch, vpn, ppn, self.map_perm)?;
+        self.map_page_with_perm(mapper, vpn, ppn, self.map_perm)?;
         Ok(ppn)
     }
     /// Unmap a page in current area.
@@ -247,22 +244,22 @@ impl Vma {
     /// Vpn should be in this map area, but the check is not enforced in this function!
     pub fn unmap_one<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        if !UserMapper::new(batch).is_mapped(vpn) {
+        if !mapper.is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
-        UserMapper::new(batch).unmap_user_page(vpn)?;
+        mapper.unmap_user_page(vpn)?;
         if let Some(frame) = self.inner.remove_in_memory(&vpn) {
-            batch.defer_frame(frame);
+            mapper.retire_frame(frame);
         }
         Ok(())
     }
 
     pub fn discard_range<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
@@ -271,10 +268,10 @@ impl Vma {
         }
         let mut cursor = start_vpn;
         while let Some(vpn) = self.inner.first_in_memory_vpn_in_range(cursor, end_vpn) {
-            let unmapped = UserMapper::new(batch).unmap_user_page_if_mapped(vpn)?;
+            let unmapped = mapper.unmap_user_page_if_mapped(vpn)?;
             if let Some(frame) = self.inner.remove_in_memory(&vpn) {
                 if unmapped {
-                    batch.defer_frame(frame);
+                    mapper.retire_frame(frame);
                 }
             }
             cursor = VirtPageNum(vpn.0.saturating_add(1));
@@ -284,8 +281,8 @@ impl Vma {
 
     pub fn map_from_existing_page_table<T: PageTable>(
         &mut self,
-        dst_batch: &mut TlbBatch<'_, T>,
-        src_batch: &mut TlbBatch<'_, T>,
+        dst_mapper: &mut UserMapper<'_, T>,
+        src_mapper: &mut UserMapper<'_, T>,
     ) -> Result<(), MemoryError> {
         let is_shared = self.flags.contains(MapFlags::MAP_SHARED);
         let is_file_backed = self.map_file.is_some();
@@ -302,12 +299,11 @@ impl Vma {
         let mut mapped_end = self.inner.vpn_range.get_start();
         for vpn in self.inner.vpn_range {
             let ppn = if protect_parent_for_cow {
-                src_batch.block_write(vpn)
+                src_mapper.block_write(vpn)
             } else {
-                src_batch.translate(vpn)
+                src_mapper.translate(vpn)
             };
             if let Some(ppn) = ppn {
-                let mut dst_mapper = UserMapper::new(dst_batch);
                 if !dst_mapper.is_mapped(vpn) {
                     let map_result = if map_perm.contains(MapPermission::U) {
                         dst_mapper.map_user_page(vpn, ppn, map_perm)
@@ -327,7 +323,7 @@ impl Vma {
         }
         if first_error.is_some() {
             for vpn in VPNRange::new(self.inner.vpn_range.get_start(), mapped_end) {
-                let _ = dst_batch.unmap_if_mapped(vpn);
+                let _ = dst_mapper.unmap_user_page_if_mapped(vpn);
             }
         }
         match first_error {
@@ -347,7 +343,7 @@ impl Vma {
 
     pub fn map_from_kernel_area<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         start_vpn_in_kernel_area: VirtPageNum,
     ) -> Result<(), ()> {
         let kernel_space = KERNEL_SPACE.lock();
@@ -358,14 +354,12 @@ impl Vma {
             .try_reserve(vpn_range.get_end().0 - vpn_range.get_start().0)
             .map_err(|_| ())?;
         let rollback =
-            |batch: &mut TlbBatch<'_, T>, this: &mut Vma, mapped_vpns: &[VirtPageNum]| {
+            |mapper: &mut UserMapper<'_, T>, this: &mut Vma, mapped_vpns: &[VirtPageNum]| {
                 for vpn in mapped_vpns.iter().rev() {
-                    let unmapped = UserMapper::new(batch)
-                        .unmap_user_page_if_mapped(*vpn)
-                        .unwrap_or(false);
+                    let unmapped = mapper.unmap_user_page_if_mapped(*vpn).unwrap_or(false);
                     if let Some(frame) = this.inner.remove_in_memory(vpn) {
                         if unmapped {
-                            batch.defer_frame(frame);
+                            mapper.retire_frame(frame);
                         }
                     }
                 }
@@ -373,25 +367,25 @@ impl Vma {
         for vpn in vpn_range {
             if let Some(frame) = kernel_space.mapped_frame(src_vpn) {
                 let ppn = frame.ppn;
-                if !UserMapper::new(batch).is_mapped(vpn) {
+                if !mapper.is_mapped(vpn) {
                     if self.inner.alloc_in_memory(vpn, frame.clone()).is_err() {
-                        rollback(batch, self, &mapped_vpns);
+                        rollback(mapper, self, &mapped_vpns);
                         return Err(());
                     }
-                    if let Err(_) = UserMapper::new(batch).map_user_page(vpn, ppn, self.map_perm) {
+                    if let Err(_) = mapper.map_user_page(vpn, ppn, self.map_perm) {
                         self.inner.remove_in_memory(&vpn);
-                        rollback(batch, self, &mapped_vpns);
+                        rollback(mapper, self, &mapped_vpns);
                         return Err(());
                     }
                     mapped_vpns.push(vpn);
                 } else {
                     error!("[map_from_kernel_area] user vpn already mapped!");
-                    rollback(batch, self, &mapped_vpns);
+                    rollback(mapper, self, &mapped_vpns);
                     return Err(());
                 }
             } else {
                 error!("[map_from_kernel_area] kernel vpn invalid!");
-                rollback(batch, self, &mapped_vpns);
+                rollback(mapper, self, &mapped_vpns);
                 return Err(());
             }
             src_vpn = (src_vpn.0 + 1).into();
@@ -401,7 +395,7 @@ impl Vma {
     /// Unmap resident pages in `self` from `page_table`.
     pub(super) fn unmap<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         reason: VmaUnmapReason,
     ) -> Result<(), MemoryError> {
         let record_anon_private =
@@ -430,7 +424,7 @@ impl Vma {
         let end_vpn = self.vm_end();
         let mut cursor = self.vm_start();
         while let Some(vpn) = self.inner.first_in_memory_vpn_in_range(cursor, end_vpn) {
-            let unmapped = match UserMapper::new(batch).unmap_user_page_if_mapped(vpn) {
+            let unmapped = match mapper.unmap_user_page_if_mapped(vpn) {
                 Ok(unmapped) => unmapped,
                 Err(error) => {
                     if record_anon_private {
@@ -455,7 +449,7 @@ impl Vma {
             }
             if let Some(frame) = self.inner.remove_in_memory(&vpn) {
                 if unmapped {
-                    batch.defer_frame(frame);
+                    mapper.retire_frame(frame);
                 }
             }
             cursor = VirtPageNum(vpn.0.saturating_add(1));
@@ -475,7 +469,7 @@ impl Vma {
     }
     fn cow_source_frame<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<Arc<FrameTracker>, MemoryError> {
         if !self.inner.contains_vpn(vpn) {
@@ -509,13 +503,13 @@ impl Vma {
             match restored {
                 RestoredPage::None => {}
                 RestoredPage::Compressed(ppn) => {
-                    let set_ppn_result = UserMapper::new(batch).set_ppn(vpn, ppn);
+                    let set_ppn_result = mapper.set_ppn(vpn, ppn);
                     self.inner.record_active(vpn)?;
                     self.inner.dec_compressed();
                     set_ppn_result?;
                 }
                 RestoredPage::Swapped(ppn) => {
-                    let set_ppn_result = UserMapper::new(batch).set_ppn(vpn, ppn);
+                    let set_ppn_result = mapper.set_ppn(vpn, ppn);
                     self.inner.record_active(vpn)?;
                     self.inner.dec_swapped();
                     set_ppn_result?;
@@ -530,10 +524,10 @@ impl Vma {
     }
     pub fn copy_on_write<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
-        let old_frame = match self.cow_source_frame(batch, vpn) {
+        let old_frame = match self.cow_source_frame(mapper, vpn) {
             Ok(frame) => frame,
             Err(err) => {
                 warn!(
@@ -549,12 +543,12 @@ impl Vma {
         // VMA has two strong refs here: the VMA entry and this local handle.
         if Arc::strong_count(&old_frame) <= 2 {
             let old_ppn = old_frame.ppn;
-            UserMapper::new(batch).set_user_flags(vpn, self.map_perm)?;
+            mapper.set_user_flags(vpn, self.map_perm)?;
             Ok(old_ppn)
         } else {
             // do copy in this case
             let old_ppn = old_frame.ppn;
-            if !UserMapper::new(batch).is_mapped(vpn) {
+            if !mapper.is_mapped(vpn) {
                 return Err(MemoryError::NotMapped);
             }
             // Safety: 新页会在下面立即用旧页完整覆盖，然后才替换 PTE 暴露给用户。
@@ -574,8 +568,10 @@ impl Vma {
                     .expect("COW rollback could not restore the source frame");
                 return Err(err);
             }
-            if UserMapper::new(batch).set_ppn(vpn, new_ppn).is_err() {
+            if mapper.set_ppn(vpn, new_ppn).is_err() {
                 if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
+                    // `set_ppn` 失败说明新 PPN 从未写进 PTE，任何 CPU 都不可能
+                    // 通过旧翻译访问这个新页，因此这里可以直接归还而无需退休。
                     drop(new_frame);
                 }
                 self.inner
@@ -583,24 +579,21 @@ impl Vma {
                     .expect("COW rollback could not restore the source frame");
                 return Err(MemoryError::NotMapped);
             }
-            if UserMapper::new(batch)
-                .set_user_flags(vpn, self.map_perm)
-                .is_err()
-            {
-                UserMapper::new(batch)
+            if mapper.set_user_flags(vpn, self.map_perm).is_err() {
+                mapper
                     .set_ppn(vpn, old_ppn)
                     .expect("COW rollback lost the PTE after replacing its PPN");
                 if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                     // 新页曾经出现在 PTE 中；即使尚未主动刷新，也必须把它留到
                     // 本批提交后再释放，不能假设硬件一定没有并行填充该表项。
-                    batch.defer_frame(new_frame);
+                    mapper.retire_frame(new_frame);
                 }
                 self.inner
                     .alloc_in_memory(vpn, old_frame)
                     .expect("COW rollback could not restore the source frame");
                 return Err(MemoryError::NotMapped);
             }
-            batch.defer_frame(old_frame);
+            mapper.retire_frame(old_frame);
             Ok(new_ppn)
         }
     }
@@ -646,7 +639,7 @@ impl Vma {
     /// If `new_end` is equal to the current end of area, do nothing and return `Ok(())`.
     pub fn shrink_to<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         new_end: VirtAddr,
     ) -> Result<(), ()> {
         let new_end_vpn: VirtPageNum = new_end.ceil();
@@ -660,7 +653,7 @@ impl Vma {
         }
         let mut has_unmapped_page = false;
         for vpn in VPNRange::new(new_end_vpn, old_end_vpn) {
-            if let Err(_) = self.unmap_one(batch, vpn) {
+            if let Err(_) = self.unmap_one(mapper, vpn) {
                 has_unmapped_page = true;
             }
         }
@@ -677,7 +670,7 @@ impl Vma {
     /// If `new_start` is equal to the current start of area, do nothing and return `Ok(())`.
     pub fn rshrink_to<T: PageTable>(
         &mut self,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         new_start: VirtAddr,
     ) -> Result<(), ()> {
         let new_start_vpn: VirtPageNum = new_start.floor();
@@ -691,7 +684,7 @@ impl Vma {
         }
         let mut has_unmapped_page = false;
         for vpn in VPNRange::new(old_start_vpn, new_start_vpn) {
-            if let Err(_) = self.unmap_one(batch, vpn) {
+            if let Err(_) = self.unmap_one(mapper, vpn) {
                 has_unmapped_page = true;
             }
         }
@@ -748,7 +741,7 @@ impl Vma {
         Ok((second_area, third_area))
     }
     #[cfg(feature = "oom_handler")]
-    pub fn do_oom<T: PageTable>(&mut self, batch: &mut TlbBatch<'_, T>) -> usize {
+    pub fn do_oom<T: PageTable>(&mut self, mapper: &mut UserMapper<'_, T>) -> usize {
         let compressed_before = self.inner.compressed_count();
         let swapped_before = self.inner.swapped_count();
         warn!("[do_oom] active pages: {}", self.inner.active_len());
@@ -770,8 +763,8 @@ impl Vma {
 
             match zip_result {
                 Ok(frame) => {
-                    if UserMapper::new(batch).unmap_user_page(vpn).is_ok() {
-                        batch.defer_frame(frame);
+                    if mapper.unmap_user_page(vpn).is_ok() {
+                        mapper.retire_frame(frame);
                     } else {
                         log::warn!("[do_oom] compressed frame has no mapped pte: vpn={:?}", vpn);
                     }
@@ -799,8 +792,8 @@ impl Vma {
 
             match swap_result {
                 Ok(frame) => {
-                    if UserMapper::new(batch).unmap_user_page(vpn).is_ok() {
-                        batch.defer_frame(frame);
+                    if mapper.unmap_user_page(vpn).is_ok() {
+                        mapper.retire_frame(frame);
                     } else {
                         log::warn!("[do_oom] swapped frame has no mapped pte: vpn={:?}", vpn);
                     }
@@ -829,7 +822,7 @@ impl Vma {
             - swapped_before
     }
     #[cfg(feature = "oom_handler")]
-    pub fn force_swap<T: PageTable>(&mut self, batch: &mut TlbBatch<'_, T>) -> usize {
+    pub fn force_swap<T: PageTable>(&mut self, mapper: &mut UserMapper<'_, T>) -> usize {
         let swapped_before = self.inner.swapped_count();
         warn!("[force_swap] active pages: {}", self.inner.active_len());
         while let Some(vpn) = self.inner.pop_active() {
@@ -850,8 +843,8 @@ impl Vma {
 
             match swap_result {
                 Ok(frame) => {
-                    if UserMapper::new(batch).unmap_user_page(vpn).is_ok() {
-                        batch.defer_frame(frame);
+                    if mapper.unmap_user_page(vpn).is_ok() {
+                        mapper.retire_frame(frame);
                     } else {
                         log::warn!(
                             "[force_swap] swapped frame has no mapped pte: vpn={:?}",

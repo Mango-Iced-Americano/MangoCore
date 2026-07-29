@@ -135,7 +135,7 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
 - **物理内存**：栈式帧分配器，4KB/帧；`frame_store.rs` 跟踪帧状态用于 swap/zram
 - **虚拟内存**：SV39 页表，每进程独立 `MemorySet`；`VmaSet` 管理 VMA；`filemap.rs` 处理 mmap 文件缺页
 - **用户内存访问**：`translated_ref/refmut/byte_buffer`、`copy_from_user`、`translated_str`
-- **关键约束**：MAP_SHARED 页面不参与 CoW；修改 PTE 后必须经 `TlbBatch`；用户 MM 已有单调 cached CPU/generation 和全用户 IPI/ack 基础设施，但锁外提交完成前 `Published` 仍必须 fail-stop；`execve`/`clone` 路径用 `try_reserve` 防 OOM
+- **关键约束**：MAP_SHARED 页面不参与 CoW；用户 PTE 必须经 `UserMapper` 修改并由 `MmuGather` 记录；进程 VM 由 `AddressSpace` 强制“锁内 `record_change`—`seal`—解锁—`TlbFlush::execute`—最后释放 frame”；`execve`/`clone` 路径用 `try_reserve` 防 OOM
 - **OOM 防御**：`alloc()` 三次重试失败后设 `pending_oom_kill`，由 `trap_return()` 安全点发 SIGKILL
 
 ### 任务/进程
@@ -145,7 +145,8 @@ SMP 过渡期的安全点抢占调度：current 槽、idle context 和 `RunQueue
 短生命周期 kernel-only 任务可显式远程入队，并可在真实 WaitQueue 阻塞后回到最近运行
 CPU；动态 kernel-global 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收。普通新任务和
 用户任务仍固定 CPU0；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
-但 PTE 修改侧尚未接入锁外远端提交；不要据此声称用户迁移、affinity、完整用户 MM shootdown 或
+用户 PTE 修改已能在 VM 锁外完成全用户 shootdown 和 frame 延迟释放。当前仍是
+单调历史 CPU mask + 全量失效；不要据此声称用户迁移、affinity、range shootdown 或
 LoongArch MM-owned ASID 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）

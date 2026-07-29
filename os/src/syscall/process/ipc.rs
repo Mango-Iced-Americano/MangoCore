@@ -838,40 +838,43 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
     }
 
     let task = current_task().unwrap();
-    let mapped = task.process.vm().lock().shm_mmap(
-        attach_addr,
-        size,
-        prot,
-        flags,
-        &frames,
-        shmflg & SHM_RDONLY == 0,
-    );
+    let mapped = task.process.vm().write(|vm| {
+        vm.shm_mmap(
+            attach_addr,
+            size,
+            prot,
+            flags,
+            &frames,
+            shmflg & SHM_RDONLY == 0,
+        )
+    });
     if mapped < 0 {
         return mapped;
     }
     let mapped = mapped as usize;
     let pid = task.pid();
     let current_pid = pid as i32;
-    let mut registry = SHM_REGISTRY.lock();
-    if let Some(seg) = registry.segments.get_mut(&shmid) {
-        if seg.ns_id != ns_id {
-            let _ = sys_munmap(mapped, size);
-            return EIDRM;
+    let attach_error = {
+        let mut registry = SHM_REGISTRY.lock();
+        match registry.segments.get_mut(&shmid) {
+            Some(seg) if seg.ns_id != ns_id || seg.removed => Some(EIDRM),
+            Some(seg) => {
+                if seg.attachments.try_reserve(1).is_err() {
+                    Some(ENOMEM)
+                } else {
+                    seg.attachments.push(ShmAttachment { pid, addr: mapped });
+                    seg.lpid = current_pid;
+                    seg.atime = now_sec();
+                    None
+                }
+            }
+            None => Some(EIDRM),
         }
-        if seg.removed {
-            let _ = sys_munmap(mapped, size);
-            return EIDRM;
-        }
-        if seg.attachments.try_reserve(1).is_err() {
-            let _ = sys_munmap(mapped, size);
-            return ENOMEM;
-        }
-        seg.attachments.push(ShmAttachment { pid, addr: mapped });
-        seg.lpid = current_pid;
-        seg.atime = now_sec();
-    } else {
+    };
+    if let Some(errno) = attach_error {
+        // rollback 可能执行远端 TLB shootdown，必须发生在 SHM_REGISTRY 解锁后。
         let _ = sys_munmap(mapped, size);
-        return EIDRM;
+        return errno;
     }
     mapped as isize
 }

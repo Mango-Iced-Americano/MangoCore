@@ -3,8 +3,8 @@ title: "页帧、VmPageStore 与页表映射关系"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
-tags: [mm, frame, pagetable, vm-page-store, tlb-batch, smp]
+last_update: 2026-07-29
+tags: [mm, frame, pagetable, vm-page-store, mmu-gather, smp]
 ---
 
 # 页帧、VmPageStore 与页表映射关系
@@ -269,37 +269,38 @@ COW 复制时同步顺序很重要：
 
 地址空间释放分两层：
 
-1. `vmas.unmap_all(batch)` 先清除 resident PTE，batch 刷新 TLB 后再释放 VMA frame。
-2. `page_table.release_frames()` 随后释放页表自身持有的页表页。
+1. `vmas.unmap_all(mapper)` 先清除 resident PTE，并把 VMA frame 交给当前 `MmuGather`。
+2. `page_table.take_frames()` 移出页表自身持有的根页和中间页，不立即释放。
 
-不能直接 drop VMA frame：本 CPU 的旧 TLB 可能仍持有对应 PPN。仅释放页表页
-也不能 drop 用户页帧引用；两层必须按上述顺序执行。
+不能直接 drop VMA frame：旧 TLB 可能仍持有对应 PPN；页表页本身也可能正被
+远端 page walk 使用。两类 frame 由同一个 `MmuGather` 保留，并在本轮目标 CPU
+全部完成 user-TLB 失效后释放。
 
 ## 14. TLB 同步
 
-页表 PTE 修改必须配套 TLB 失效。用户路径的批量边界是 `TlbBatch`，
-fork 同时使用父、子两个 batch：
+页表 PTE 修改必须配套 TLB 失效。用户路径以 `UserMapper` 执行 PTE 操作，
+以 `MmuGather` 收集失效信息；fork 同时使用父、子两个 mapper：
 
 ```rust
-if let Some(ppn) = src_batch.block_write(vpn) {
-    UserMapper::new(dst_batch).map_user_page(vpn, ppn, map_perm)?;
+if let Some(ppn) = src_mapper.block_write(vpn) {
+    dst_mapper.map_user_page(vpn, ppn, map_perm)?;
 }
-// AddressSpace::from_existing_user() 在遍历后提交两个 batch。
+// 父记录由外层 write() 同步；尚未发布的子记录在包装时丢弃。
 ```
 
-`set_ppn`、`set_user_flags`、`unmap` 等用户 PTE 修改同样经 batch；从 VMA
-移出的 frame 由 `defer_frame()` 保留到 flush 之后。内核页表仍使用带当场刷新的
+`set_ppn`、`set_user_flags`、`unmap` 等用户 PTE 修改同样经 `UserMapper`；从 VMA
+移出的 frame 由 `retire_frame()` 保留到 flush 之后。内核页表仍使用带当场刷新的
 `PageTable` 安全接口。
 
-上述“flush 之后”当前只对 `Unpublished/LocalOnly` 完整成立。B22 已提供每 MM 的
-cached CPU/generation 激活状态和远端全用户 IPI/ack 原语，但 `Published` batch 仍
-fail-stop；B23 必须把 deferred frame 移到 VM 锁外，并在全部远端 ack 后才释放。
+`MmuGather::seal()` 在 VM 锁内冻结失效范围、generation、目标 mask 和 frame
+所有权；`TlbFlush::execute()` 在锁外按 mask 选择无需失效、本地失效或远端
+shootdown。只有对应同步成功后才 drop frame。
 
 Frame 和 PTE 的对应关系不是自动维护的。`VmPageStore` 持有 `FrameTracker`，保证物理页生命周期；PTE 持有 PPN，供硬件翻译。正确状态要求两边同时指向同一页：如果 PTE 指向一个没有 `FrameTracker` 引用的页，页可能被 allocator 回收后重用；如果 `VmPageStore` 有 frame 但 PTE 没有映射，页面只 resident，不可被用户直接访问，可能是 lazy/shared anonymous 或被暂时撤销权限的状态。
 
-释放地址空间也要分两步：先经 batch unmap/flush/drop 用户 frame，再
-release page table 释放页表页。只做前者会泄漏页表页，只做后者会让用户
-frame 的 `Arc` 继续存在。
+释放地址空间也要分两步：先经 mapper 撤销用户 PTE，再用 `take_frames()`
+移出页表页；两类 frame 共用同一个锁外 retirement 完成点。只做前者
+会泄漏页表页，提前 drop 任一类则会造成 stale translation/page-walk 访问已复用物理页。
 
 ## 15. 调试核对点
 

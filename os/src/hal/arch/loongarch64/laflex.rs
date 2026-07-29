@@ -454,8 +454,8 @@ impl PageTable for LAFlexPageTable {
         }
     }
     fn flush_tlb_page(&self, _vpn: VirtPageNum) {
-        // B16 的 ASID 仍归 TCB，而不是归 AddressSpace；修改一个暂未运行的
-        // LocalOnly 地址空间时，当前 CSR.ASID 不一定就是目标 ASID。此处因此
+        // 当前 ASID 仍归 TCB，而不是归共享 AddressSpace；即使目标 mask 只含本核，
+        // 当前 CSR.ASID 也不一定就是被修改 MM 的 ASID。此处因此
         // 清除本核全部非全局项，不能误用只匹配“当前 ASID + VA”的 invtlb 0x5。
         // Phase 4 把 ASID 下沉到 MM 后，才可在这里恢复目标 ASID 的精确页刷新。
         let start = crate::task::perf::perf_time_now();
@@ -646,8 +646,7 @@ impl PageTable for LAFlexPageTable {
         self.unmap(vpn)
     }
 
-    fn release_frames(&mut self) {
-        self.frames.clear();
-        self.frames.shrink_to_fit();
+    fn take_frames(&mut self) -> Vec<Arc<FrameTracker>> {
+        core::mem::take(&mut self.frames)
     }
 }

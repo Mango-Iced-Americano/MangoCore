@@ -197,7 +197,7 @@ fn vma_stats() -> (usize, usize, usize) {
     let mut frames = 0;
     for pcb in crate::task::ProcessManager::all_processes() {
         let vm = pcb.vm();
-        let vc = vm.lock().vma_count();
+        let vc = vm.read(|vm| vm.vma_count());
         frames += alloc::sync::Arc::strong_count(&vm).saturating_sub(1);
         if pcb.is_zombie() {
             zvmas += vc;

@@ -2,7 +2,7 @@
 //!
 //! `PageMapper` 把内核映射操作转发到具体架构的 `PageTable` 实现，
 //! 并统一把页表错误映射成 `MemoryError`。用户 PTE 写入不经过本层，而是
-//! 由 `UserMapper` 通过 `TlbBatch` 提交。
+//! 用户页表不直接使用本适配器，而由 `UserMapper` 写入并记录到 `MmuGather`。
 //!
 //! # TLB
 //!

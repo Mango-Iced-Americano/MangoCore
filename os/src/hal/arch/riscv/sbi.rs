@@ -79,13 +79,7 @@ fn sbi_call_v02(
 
 /// Start one stopped hart at the physical `_start` address.
 pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<(), isize> {
-    let probe = sbi_call_v02(
-        SBI_EXT_BASE,
-        SBI_BASE_PROBE_EXTENSION,
-        SBI_EXT_HSM,
-        0,
-        0,
-    );
+    let probe = sbi_call_v02(SBI_EXT_BASE, SBI_BASE_PROBE_EXTENSION, SBI_EXT_HSM, 0, 0);
     if probe.error != 0 {
         return Err(probe.error);
     }
@@ -93,13 +87,7 @@ pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<()
         return Err(SBI_ERR_NOT_SUPPORTED);
     }
 
-    let result = sbi_call_v02(
-        SBI_EXT_HSM,
-        SBI_HSM_HART_START,
-        hart_id,
-        start_addr,
-        opaque,
-    );
+    let result = sbi_call_v02(SBI_EXT_HSM, SBI_HSM_HART_START, hart_id, start_addr, opaque);
     match result.error {
         0 | SBI_ERR_ALREADY_AVAILABLE => Ok(()),
         error => Err(error),
@@ -108,13 +96,7 @@ pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<()
 
 /// 通过 SBI v0.2 IPI extension 向一个硬件 hart 触发 supervisor software IRQ。
 pub fn send_ipi(hart_id: usize) -> Result<(), isize> {
-    let probe = sbi_call_v02(
-        SBI_EXT_BASE,
-        SBI_BASE_PROBE_EXTENSION,
-        SBI_EXT_IPI,
-        0,
-        0,
-    );
+    let probe = sbi_call_v02(SBI_EXT_BASE, SBI_BASE_PROBE_EXTENSION, SBI_EXT_IPI, 0, 0);
     if probe.error != 0 {
         return Err(probe.error);
     }
@@ -176,9 +158,9 @@ pub fn console_write_bytes(data: &[u8]) {
     {
         // NS16550A UART at fixed QEMU virt MMIO base
         const UART_BASE: usize = 0x1000_0000;
-        const THR: usize = 0x0;   // Transmit Holding Register
-        const LSR: usize = 0x5;   // Line Status Register
-        const THRE: u8 = 1 << 5;  // Transmitter Holding Register Empty
+        const THR: usize = 0x0; // Transmit Holding Register
+        const LSR: usize = 0x5; // Line Status Register
+        const THRE: u8 = 1 << 5; // Transmitter Holding Register Empty
 
         for chunk in data.chunks(16) {
             for &byte in chunk {

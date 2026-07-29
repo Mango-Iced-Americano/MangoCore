@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-28
+last_updated: 2026-07-29
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -86,7 +86,7 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | 用户 PTE 已收口到 `TlbBatch`；动态 kernel-global 映射支持全 CPU 撤映射；用户 MM 已有单调 cached mask、generation/observed 与全用户 IPI/ack 基础设施 | PTE 修改侧尚未接入锁外 shootdown/延迟释放，range 优化与 MM-owned ASID 未实现，用户任务仍不得跨 CPU 运行 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、全用户 IPI/ack 和 frame 退休；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask 和全量失效；range/RFENCE 优化、MM-owned ASID、安全 detach 与用户迁移未完成 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -221,7 +221,7 @@ New / Blocked
 每个地址空间持有：
 
 ~~~rust
-pub struct MmTlbState {
+pub struct TlbContext {
     mm_id: u64,
     active_cpus: AtomicU64,
     generation: AtomicU64,
@@ -232,7 +232,7 @@ pub struct MmTlbState {
 }
 ~~~
 
-所有已发布页表的修改统一经过 <code>TlbBatch</code>：
+所有已发布页表的修改统一经过 <code>MmuGather</code>：
 
 ~~~rust
 pub enum TlbScope {
@@ -240,9 +240,9 @@ pub enum TlbScope {
     KernelGlobal { start: usize, end: usize },
 }
 
-pub struct TlbBatch {
+pub struct MmuGather {
     scope: TlbScope,
-    deferred_frames: Vec<FrameTracker>,
+    retired_frames: Vec<FrameTracker>,
 }
 ~~~
 
@@ -503,7 +503,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   只能是由 transition API 更新的兼容投影，不得继续作为并行真值来源；
 - 盘点 interruptible_queue 的信号枚举、OOM、zombie 清理和统计调用方；先把 runnable 所有权与
   这些 registry 职责分离，CAS 成功后才允许入队，旧全局扫描不得再次把任务重复加入 ready queue；
-- 在没有远程 CPU 使用用户 MM 时先引入本地 TlbBatch facade：复用现有 raw/no-flush 操作与
+- 在没有远程 CPU 使用用户 MM 时先引入本地 MmuGather facade：复用现有 raw/no-flush 操作与
   本地 sfence.vma/invtlb，将所有已发布 PTE 修改机械收口到统一提交入口；
 - 本阶段不实现 remote ack，但接口必须显式区分 unpublished/local-only/published，禁止把
   local-only 实现描述成 shootdown 完成。
@@ -514,9 +514,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   由代码审查和 fail-stop 入口保证，测试不得为触发 panic 直接伪造生产状态；
 - 仓库内不再有绕过 transition API 的 runnable 状态写入；
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
-- 已发布 PTE 修改均通过 local TlbBatch，双架构单核 MM 回归不下降。
+- 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19/B20/B21/B22）
+#### 当前进度（SMP-P2.5-B15/B16/B17/B18/B19/B20/B21/B22/B23）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码
   `New/Queued(cpu)/Running(cpu)/Blocking(cpu)/Blocked/Zombie`，不再保留兼容投影
@@ -544,18 +544,18 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `task.inner` 的嵌套；Blocked wake 和批量 remove 固定采用
   `TASK_MANAGER -> 单个 RunQueue`，其他调度路径只锁一个本地 RunQueue；
 - OOM 候选按 CPU 和索引逐个克隆，避免低内存路径为 runqueue 快照再次分配；
-- B16 将用户页表的 map/unmap、权限、PPN 和 dirty 修改拆为
-  raw/no-flush 原语，并全部收口到 `TlbBatch`；`UserMapper` 只操作 batch，
-  `PageMapper` 保留给内核页表路径；
-- `TlbPublication` 显式区分 `Unpublished/LocalOnly/Published`。尚未发布的页表
-  不刷新，CPU0-only 地址空间在 batch 提交时本地刷新；远端协议完成前
-  `Published` 会在 PTE 写入前 fail-stop，不会把 local flush 误表述为 shootdown；
+- B16 将用户页表的 map/unmap、权限、PPN 和 dirty 修改拆为 raw/no-flush
+  原语；B23 重构后由 `UserMapper` 直接借用页表和 `MmuGather`，每次 PTE 写入后
+  立即 `record_change()`，`PageMapper` 只保留给内核页表路径；
+- B16—B22 曾用 `Unpublished/LocalOnly/Published` 过渡状态阻止不完整远端语义。
+  B23 已删除这套状态，直接按 cached CPU mask 的 0/仅本核/含远端三种情况执行；
 - 单一 VPN 修改在 RV64 使用页级 `sfence.vma`，多 VPN 升级为本核全量刷新。
   LA64 的 ASID 仍归 TCB，页表对象无法安全得知目标 ASID，因此本阶段保守清除
   本核全部非全局 TLB 项；
-- unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再把旧
-  `FrameTracker` 交给 batch；batch 先 flush，然后释放 deferred frames。错误返回由
-  `Drop` 兜底提交，低内存无法扩容延迟队列时则先结束当前小批次；
+- unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
+  `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
+  `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
+  故意泄漏并 fail-stop，不在 VM 锁内提前等待；
 - 双架构 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，新用例通过
   生产 API 覆盖 map、fault-in、mprotect 降权、munmap 和同 VPN 重新映射。
   该证据只验收本地提交，不外推远端 TLB 一致性；
@@ -617,21 +617,39 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B21 最终冻结源码下，RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 27/27 PASS。
   双架构 `mask=0x003` 初赛门禁也通过：RV64 raw/semantic 312/314，LA64
   raw/semantic 308/314，失败身份均为既有允许集合；
-- B22 为每个 `AddressSpace` 增加共享 `MmTlbState`：MM ID、从 1 开始的 generation、
+- B22 为每个 `AddressSpace` 增加共享 `TlbContext`：MM ID、从 1 开始的 generation、
   per-CPU observed 和只增不减的 cached CPU mask。用户 trap-return 在恢复页表根前，
   先在 VM 锁内登记 CPU，再读取 generation；落后时执行本地全用户/non-global 失效并
-  重查代际。第二颗 CPU 登记后地址空间永久升级为 `Published`；在 B23 接通修改侧之前，
-  现有 `TlbBatch` 仍于 PTE 写入前 fail-stop；
+  重查代际。B23 接通修改侧前，第二颗 CPU 登记会触发过渡 fail-stop；该临时状态现已删除；
 - B22 另建独立的 `USER_TLB_SYNC` request/ack，不与 kernel-global sequence 复用。
   RV64 先采用全量 `sfence.vma`，LA64 采用 `invtlb 0x3`；handler 不分配、不取普通锁，
   发起者只可在释放 VM/PTE/runqueue 锁后等待。双架构 8 核 focused 均为 29/29 PASS；
   初赛 RV64 raw 309/semantic 312、LA64 raw/semantic 308，失败集合未扩大。该结果只验收
   激活与 IPI 基础设施及 CPU0 用户路径非回归，不证明 stale PTE、generation race 或
   frame 延迟释放；
+- B23 将共享外层与锁内数据明确命名为 `AddressSpace`/`AddressSpaceInner`，不再向
+  调用方暴露可变 guard。一个 `write()` 内只有一个 `MmuGather`；调用链固定为
+  `record_change -> seal -> execute`，只推进一次 generation 并冻结 cached CPU
+  目标；锁外完成本地失效、远端 IPI/ack 和 observed 单调推进，最后才析构撤映射
+  数据页与页表页；
+- 为封死“持 VM 锁等 ack”，`ProcessInner.vm` 改为 `Arc<AddressSpace<_>>`，
+  mmap/munmap/mprotect、page fault、CoW/fork、exec、OOM、SysV SHM、uaccess 与
+  zombie 清理等调用点全部迁移到 `read/write/try_write`。trap、clone、OOM 和 SHM
+  回滚同时调整锁序，不把 `task.inner`/`TASK_MANAGER`/`SHM_REGISTRY` 带过 shootdown 等待点；
+- trap-return 快路径对已登记 CPU 只读 cached mask，不再每次 `fetch_or`；ack 后
+  立即更新本 MM 的 observed，避免下次返回再全刷。handler 还会在 `ack >= request`
+  时忽略迟到的重复 reason。仍保留 VM 锁 + Acquire load 固定税、全用户失效和
+  只增不减的历史 CPU 集合，不把当前正确性实现宣称为最终性能形态；
+- 生产路径 focused 用例在 CPU1 关中断的 request/ack 窗口撤销真实用户 PTE，
+  证明 frame 在 ack 前未返回分配器、`write()` 返回后才释放。最终冻结源码上
+  RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=1` 均为 16/16 PASS；加上重复窗口的
+  前一轮两次运行，两架构均为 31/31 PASS。双架构 `mask=0x003` 失败身份
+  与 B22 一致：RV64 raw 309/semantic 312，LA64 raw/semantic 308；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
   Per-CPU current/idle/RunQueue、scheduler-ready、受控 AP kernel-only 执行与远程阻塞
   唤醒闭环。通用目标选择仍待后续批次；Phase 4 远端 MM shootdown 完成前不解除用户
-  任务 CPU0 affinity。B21 完成的是共享内核页表撤映射，不外推到用户 MM。
+  任务 CPU0 affinity。B21 完成共享内核页表撤映射，B23 完成用户 MM
+  修改侧的锁外提交；两者仍不等于用户任务迁移与全进程语义已开放。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -675,12 +693,13 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 #### 实施内容
 
-- B22 已在 B16 的 raw/no-flush + `TlbBatch` 本地边界上增加 MM ID、单调 cached CPU
+- B22 已在 B16 的 raw/no-flush 用户 PTE 边界上增加 MM ID、单调 cached CPU
   mask、generation/per-CPU observed、trap-return 激活登记，以及独立的全用户 IPI/ack
-  原语；`Published` 仍保持 fail-stop，不允许半套协议修改 PTE；
-- B23 在同一个 VM 锁临界区内完成 PTE 修改、generation 推进和 cached mask 快照，把
-  deferred frame 移交给锁外提交对象；释放 VM 锁后才执行本地失效、远端 IPI/ack 等待，
-  全部目标完成后释放 frame。禁止直接在现有锁内 `TlbBatch::commit()` 等待 ack；
+  原语；B23 已用 `AddressSpace` + `MmuGather/TlbFlush` 取消发布状态过渡门禁；
+- B23 已在同一个 VM 锁临界区内完成 PTE 修改、失效范围合并、generation 推进和
+  cached mask 快照，把唯一 `MmuGather` 移交给锁外 `TlbFlush`；释放 VM 锁后才执行本地失效、远端 IPI/ack 等待，
+  全部目标完成后释放数据 frame 和页表 frame。调用方无法取得可变 VM guard，
+  从类型形状上禁止在 VM 锁内等待 ack；
 - B16 已覆盖用户 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、filemap 和
   exec；Phase 4 需将用户路径升级为远端语义。B21 已单独收口动态内核栈与临时 ELF
   kernel-global 映射的全 CPU 撤销和延迟释放；

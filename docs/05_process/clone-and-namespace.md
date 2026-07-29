@@ -3,7 +3,7 @@ title: "clone、clone3、unshare 与 namespace"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-29
 tags: [process, clone, namespace, pidfd, vfork]
 ---
 
@@ -315,8 +315,8 @@ fn sys_clone_inner(
 
 | 情况 | 行为 |
 |------|------|
-| `CLONE_VM` | `parent_vm.clone()`，父子共享 `Arc<Mutex<AddressSpace>>` |
-| 非 `CLONE_VM` | `AddressSpace::from_existing_user()`，fork COW 复制 |
+| `CLONE_VM` | `parent_vm.clone()`，父子共享 `Arc<AddressSpace>` |
+| 非 `CLONE_VM` | 在父 VM 的 `write()` 中调用 `AddressSpaceInner::from_existing_user()`，fork COW 复制 |
 
 非共享 VM 复制前调用 `frame_reserve(16)`，减少 fork 路径 OOM 概率。
 
@@ -326,18 +326,18 @@ fn sys_clone_inner(
 
 ```rust
 let share_vm = flags.contains(CloneFlags::CLONE_VM);
+let parent_trap_cx = *parent_inner.get_trap_cx();
+// PTE 复制可能等待 user-TLB ack，不能跨该等待点持 task.inner。
+drop(parent_inner);
 let parent_vm = self.process.vm();
 let memory_set = if share_vm {
     parent_vm.clone()
 } else {
     crate::mm::frame_reserve(16);
-    let parent_trap_cx = *parent_inner.get_trap_cx();
-    let copied = AddressSpace::from_existing_user(
-        &mut parent_vm.lock(),
-        self.user_res_slot,
-        &parent_trap_cx,
-    )?;
-    Arc::new(Mutex::new(copied))
+    let copied = parent_vm.write(|vm| {
+        AddressSpaceInner::from_existing_user(vm, self.user_res_slot, &parent_trap_cx)
+    })?;
+    Arc::new(AddressSpace::new(copied))
 };
 
 let user_res_slot_allocator = if share_vm {
@@ -357,7 +357,7 @@ let user_stack_allocated =
     !share_vm || (stack.is_null() && !flags.contains(CloneFlags::CLONE_VFORK));
 ```
 
-共享 VM 时复用同一个 `Arc<Mutex<AddressSpace>>`，但仍分配独立 `user_res_slot`，因为 trap context 虚拟地址处在同一地址空间中。非共享 VM 时通过 `AddressSpace::from_existing_user()` 复制用户地址空间，并沿用当前线程 slot 号；slot 是地址空间内布局索引，不是全局线程 ID。
+共享 VM 时复用同一个 `Arc<AddressSpace>`，但仍分配独立 `user_res_slot`，因为 trap context 虚拟地址处在同一地址空间中。非共享 VM 时通过 `AddressSpaceInner::from_existing_user()` 构造锁内数据，再包装成新的 `AddressSpace`；它沿用当前线程 slot 号，slot 是地址空间内布局索引，不是全局线程 ID。
 
 ## 6. PCB 创建与资源共享
 

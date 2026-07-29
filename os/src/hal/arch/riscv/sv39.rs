@@ -459,8 +459,7 @@ impl PageTable for Sv39PageTable {
         })
     }
 
-    fn release_frames(&mut self) {
-        self.frames.clear();
-        self.frames.shrink_to_fit();
+    fn take_frames(&mut self) -> Vec<Arc<FrameTracker>> {
+        core::mem::take(&mut self.frames)
     }
 }

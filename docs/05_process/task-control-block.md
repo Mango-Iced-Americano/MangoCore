@@ -170,7 +170,7 @@ fail-stop。
 主要流程：
 
 1. 将 `/init` 或 `/initproc` ELF 映射到内核空间。
-2. `AddressSpace::from_elf()` 创建用户地址空间。
+2. `AddressSpaceInner::from_elf()` 创建用户地址空间数据，再包装成共享 `AddressSpace`。
 3. 从 `KERNEL_SPACE` 删除临时 ELF 映射。
 4. 创建 `RecycleAllocator` 作为用户资源槽位分配器。
 5. `tid_alloc()` 分配 tid，pid/pgid/sid 初始都取该 tid。
@@ -192,7 +192,7 @@ initproc 的默认环境变量包括 `PATH=/:/bin:/sbin:/usr/bin:/tools/bin`、`
 
 | 资源 | `CLONE_*` 影响 |
 |------|----------------|
-| VM | `CLONE_VM` 共享，否则 `AddressSpace::from_existing_user()` |
+| VM | `CLONE_VM` 共享，否则 `AddressSpaceInner::from_existing_user()` 后包装新 `AddressSpace` |
 | user_res_slot_allocator | 共享 VM 时共享，否则 clone allocator |
 | ProcessControlBlock | `CLONE_THREAD` 共享进程，否则创建新 PCB |
 | files | `CLONE_FILES` 共享，否则 clone fd table |

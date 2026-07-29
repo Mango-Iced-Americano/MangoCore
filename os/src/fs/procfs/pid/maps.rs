@@ -14,7 +14,6 @@ pub fn pid_maps_content(
         None => return Err(SyscallErr::ENOENT),
     };
     let vm = process.vm();
-    let vm = vm.lock();
-    let s = vm.proc_maps_content();
+    let s = vm.read(|vm| vm.proc_maps_content());
     proc_read_str(offset, len, buf, &s)
 }

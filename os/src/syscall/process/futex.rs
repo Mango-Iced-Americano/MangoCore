@@ -35,7 +35,7 @@ pub struct FutexWaitV {
 }
 
 fn va_to_phys_key(
-    vm: &crate::mm::AddressSpace<crate::mm::KernelPageTableImpl>,
+    vm: &crate::mm::AddressSpaceInner<crate::mm::KernelPageTableImpl>,
     va: usize,
 ) -> Option<usize> {
     let va = VirtAddr::from(va);
@@ -60,14 +60,15 @@ fn futex_key_for(
     }
 
     let vm_ref = task.process.vm();
-    let vm = vm_ref.lock();
-    if vm.futex_uses_shared_key(VirtAddr::from(uaddr))? {
-        va_to_phys_key(&vm, uaddr)
-            .map(FutexKey::Shared)
-            .ok_or(EFAULT)
-    } else {
-        Ok(FutexKey::Private(uaddr))
-    }
+    vm_ref.read(|vm| {
+        if vm.futex_uses_shared_key(VirtAddr::from(uaddr))? {
+            va_to_phys_key(vm, uaddr)
+                .map(FutexKey::Shared)
+                .ok_or(EFAULT)
+        } else {
+            Ok(FutexKey::Private(uaddr))
+        }
+    })
 }
 
 fn current_futex_key(uaddr: usize, is_private: bool) -> Result<FutexKey, isize> {

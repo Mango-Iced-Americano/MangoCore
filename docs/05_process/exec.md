@@ -3,7 +3,7 @@ title: "execve 与 execveat"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-29
 tags: [process, exec, elf, shebang]
 ---
 
@@ -144,7 +144,7 @@ fallback 顺序：
 1. 目录直接 `EISDIR`。
 2. 如果旧 VM 未被其他 `CLONE_VM` 共享，先 `recycle_data_pages()` 降低内存压力。
 3. 将 ELF 映射到内核空间 `MMAP_BASE`。
-4. `AddressSpace::from_elf()` 构造新地址空间。
+4. `AddressSpaceInner::from_elf()` 构造尚未发布的地址空间数据。
 5. 从 `KERNEL_SPACE` 删除临时 ELF 映射。
 6. 在新 heap 起点附近预映射 64 KiB 用户 heap。
 7. 分配当前线程 user resource 和 trap context。
@@ -177,7 +177,7 @@ pub fn load_elf(
     }
     let current_vm = self.process.vm();
     if Arc::strong_count(&current_vm) <= 2 {
-        current_vm.lock().recycle_data_pages();
+        current_vm.write(|vm| vm.recycle_data_pages());
     }
 
     let elf_data = elf.map_to_kernel_space(MMAP_BASE);
@@ -185,7 +185,7 @@ pub fn load_elf(
         log::error!("[load_elf] ELF file is empty (size=0)");
         return Err(ENOEXEC);
     }
-    let load_result = AddressSpace::from_elf(elf_data);
+    let load_result = AddressSpaceInner::from_elf(elf_data);
 
     crate::mm::KERNEL_SPACE
         .lock()
@@ -245,10 +245,12 @@ pub fn load_elf(
         inner.signal_stack = SignalStack::disabled();
     }
     if Arc::strong_count(&current_vm) > 2 {
-        current_vm.lock().dealloc_user_res_with_stack(
-            self.user_res_slot,
-            self.user_stack_allocated.load(Ordering::Relaxed),
-        );
+        current_vm.write(|vm| {
+            vm.dealloc_user_res_with_stack(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Relaxed),
+            );
+        });
     }
     self.process.replace_exe(elf);
     {

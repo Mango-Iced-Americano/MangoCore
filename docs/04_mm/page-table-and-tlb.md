@@ -3,8 +3,8 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
-tags: [mm, pagetable, tlb, tlb-batch, sv39, loongarch64, smp]
+last_update: 2026-07-29
+tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp]
 ---
 
 # 页表抽象与 TLB 约束
@@ -27,16 +27,16 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 | 方法 | 语义 |
 |------|------|
 | `try_map(vpn, ppn, flags)` | 建立映射，失败返回 `MemoryError` |
-| `try_map_no_flush(vpn, ppn, flags)` | 建立映射但不刷新，只允许 `TlbBatch` 调用 |
+| `try_map_no_flush(vpn, ppn, flags)` | 建立映射但不刷新，只允许 `MmuGather` 调用 |
 | `map(vpn, ppn, flags)` | 建立映射，失败时由实现处理 |
 | `map_identical(vpn, ppn, flags)` | 建立恒等映射 |
 | `unmap(vpn)` | 删除映射 |
-| `unmap_no_flush(vpn)` | 删除映射但不刷新，只允许 `TlbBatch` 调用 |
+| `unmap_no_flush(vpn)` | 删除映射但不刷新，只允许 `MmuGather` 调用 |
 | `translate(vpn)` | VPN 到 PPN |
 | `translate_va(va)` | VA 到 PA，保留页内偏移 |
 | `block_and_ret_mut(vpn)` | 撤销写权限并返回 PPN，带刷新 |
 | `block_and_ret_mut_no_flush(vpn)` | 撤销写权限并返回 PPN，不刷新 |
-| `set_ppn_no_flush()` / `set_pte_flags_no_flush()` | 修改 PPN/权限但不刷新，只允许 `TlbBatch` 调用 |
+| `set_ppn_no_flush()` / `set_pte_flags_no_flush()` | 修改 PPN/权限但不刷新，只允许 `MmuGather` 调用 |
 | `set_dirty_bit_no_flush(vpn)` | 统一提交 LA64 软件 dirty fault 对 PTE 的修改 |
 | `flush_tlb_page(vpn)` | 刷新本 CPU 的指定虚拟页；架构可保守升级为全量刷新 |
 | `flush_tlb()` | 刷新当前页表相关 TLB |
@@ -45,7 +45,7 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 | `set_ppn(vpn, ppn)` | 修改 PTE 指向的物理页 |
 | `set_pte_flags(vpn, flags)` | 修改 PTE flags |
 | `user_access_ok(vpn, access)` | 检查用户态读写权限 |
-| `release_frames()` | 释放页表自身持有的页表页 |
+| `take_frames()` | 移出页表自身持有的页表页，交给 TLB retirement 延迟释放 |
 
 trait 的存在把 VMA 管理、缺页策略和具体 PTE 编码解耦。
 
@@ -99,16 +99,16 @@ bitflags! {
 
 `MapPermission::from_ph_flags()` 从 ELF program header flags 生成 `R/W/X/U` 权限。
 
-## 5. UserMapper、TlbBatch 与 PageMapper
+## 5. UserMapper、MmuGather 与 PageMapper
 
-`os/src/mm/user_mapper.rs` 在 `TlbBatch` 上增加用户页权限检查。
+`os/src/mm/user_mapper.rs` 在 `MmuGather` 上增加用户页权限检查。
 `os/src/mm/mapper.rs` 中的 `PageMapper` 仍服务于内核页表，不再是用户 PTE
 的写入入口。
 
 ```
 Vma / page_fault
   └── UserMapper
-        └── TlbBatch
+        └── MmuGather
               └── PageTable raw/no-flush methods
                     └── Sv39PageTable / LAFlexPageTable
 
@@ -131,50 +131,65 @@ fn check_user_flags(flags: MapPermission) -> MmResult<()> {
 
 需要映射 trap context 等非用户页时，代码使用 `map_privileged_user_page()`，它不会强制 `U` 标志。
 
-## 6. TlbBatch 提交责任
+## 6. 用户页表修改与 TLB 同步
 
-页表修改后，硬件可能继续使用旧 TLB 项。B16 将用户 PTE 写入收口为
-`TlbBatch`，不再由 VMA/缺页路径各自决定何时刷新。
+页表修改后，硬件可能继续使用旧 TLB 项。当前实现把职责分成四个边界清晰的
+对象，不再使用 `Published` 状态、pending 队列或多层 commit 包装：
 
-`TlbPublication` 描述地址空间的发布范围：
+| 对象 | 生命周期与责任 |
+|------|----------------|
+| `AddressSpace` | 共享 MM 的外层对象；持有 VM 锁和长期 `TlbContext` |
+| `UserMapper` | 只在 VM 锁内短暂存在；执行 raw/no-flush PTE 写入并立即调用 `record_change()` |
+| `MmuGather` | 一次 `AddressSpace::write()` 内唯一的失效范围和退休 frame 所有者 |
+| `TlbFlush` | `seal()` 后带出 VM 锁；执行本地/远端失效，收齐 ack 后释放 frame |
 
-| 状态 | 当前语义 |
-|------|----------|
-| `Unpublished` | 页表尚未被任务激活，batch 提交时无需刷新 |
-| `LocalOnly` | 只有一颗 CPU 曾登记缓存该 MM，batch 刷新当前 CPU |
-| `Published` | 至少两颗 CPU 曾登记缓存该 MM；B23 接通锁外 shootdown 前，构造 batch 即 fail-stop |
+调用链固定为：
 
-一次提交的固定顺序是：
+```text
+AddressSpace::write
+  -> lock VM
+  -> UserMapper 修改 PTE
+  -> MmuGather::record_change / retire_frame
+  -> MmuGather::seal(&TlbContext)
+  -> unlock VM
+  -> TlbFlush::execute
+```
 
-1. 通过 raw/no-flush 原语修改 PTE，记录受影响 VPN；
-2. 若映射指向的 frame 将失去所有权，把 `Arc<FrameTracker>` 移入
-   `deferred_frames`；
-3. 单一 VPN 请求页级刷新，出现第二个不同 VPN 后升级为本核全量刷新；
-4. 刷新完成后才清空 `deferred_frames`；
-5. 显式 `commit()` 与 `Drop` 共用同一提交逻辑，`?`/提前返回不会漏 flush。
+`MmuGather` 只保留三个概念：失效范围、写操作开始时的 cached CPU mask 快照，
+以及一份 `retired_frames`。它把同一 VPN 的多次修改合并为单页失效，把多个 VPN
+或页表层级变化合并为全用户失效。没有 PTE 修改时 `seal()` 返回 `None`，因此
+只读或未触页的写作用域不会产生 generation、IPI 或 TLB flush。
 
-延迟队列无法扩容时，`defer_frame()` 会先提交当前小批次，再释放当前
-frame。这只损失批处理效率，不改变“先失效 TLB，后复用物理页”的安全顺序。
+目标范围不再由额外发布状态表示，而直接从 `TlbContext.cached_cpus` 推导：
 
-在 fork 路径中，父、子页表各自持有一个 batch：父 batch 批量撤销私有可写页的
-W 权限，子 batch 建立共享 PPN 映射。子地址空间尚未发布，可以不刷新；父
-batch 必须提交，否则父进程可能继续通过旧 TLB 写共享页，破坏 CoW。
+| cached CPU mask | 执行方式 |
+|-----------------|----------|
+| `0` | 页表尚未被任何 CPU 使用；无需失效，解锁后即可释放退休 frame |
+| 仅当前 CPU | 按 `FlushRange` 执行页级或本地全用户失效 |
+| 含远端 CPU | 使用 user-TLB request/ack 协议；当前版本保守执行目标 CPU 全用户失效 |
 
-B22 为每个地址空间增加共享 `MmTlbState`。用户 trap-return 在 VM 锁内先把当前 CPU
-加入只增不减的 `cached_cpus`，再读取 generation；若 `observed[cpu]` 落后，就在恢复
-页表根前清除本地全部用户/non-global 翻译并重查 generation。集合暂不清 bit，因为离开
-MM 的 CPU 仍可能缓存旧翻译；最多 8 核的保守额外 IPI 比漏掉目标安全。
+固定安全顺序是：PTE write → `record_change()` → `retire_frame()` → `seal()` →
+释放 VM 锁 → flush/ack → drop frame。退休队列扩容失败时，只有 mask 为 0 或
+仅含当前 CPU 才能在锁内证明旧翻译不可访问后同步释放；存在远端观察者时会
+故意泄漏 frame 并 fail-stop，绝不让 panic 展开提前复用物理页。
 
-B22 还提供独立的 user-TLB request/ack 与锁外全用户失效原语，但 `Published` 仍 fail-stop。
-原因是现有 `TlbBatch::commit()` 在外层 VM 锁内运行：若在这里等待远端 ack，目标 CPU
-可能正以 IRQ-off page fault 等待同一锁，形成环形等待。B23 必须在 VM 锁内完成 PTE 写入、
-generation 推进和目标快照，把 deferred frame 移交给提交对象；释放锁后才等待 ack，全部
-完成后释放 frame。激活登记与修改侧快照继续共用 VM 锁，不能仅凭不同原子的
-Acquire/Release 假设二者自动串行。
+`TlbContext` 保存 MM ID、只增不减的 cached CPU mask、generation 和每 CPU
+observed。用户返回前，`activate_on()` 在同一把 VM 锁内先登记 CPU，再比较
+generation；若本 CPU 落后，先清除本地用户翻译再使用页表根。修改侧也在这把锁内
+读取 mask 并推进 generation，因此激活和修改不会互相漏过。
 
-B21 已为共享内核页表的动态映射增加单独的远端协议：公开撤映射先以 no-flush 原语清 PTE、
-保留 mapping frame，释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收到全部 ack 才释放
-frame。它覆盖内核栈和临时 ELF/interpreter 映射，但不应被表述为用户 MM shootdown 完成。
+fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `MmuGather`：父侧批量
+撤销私有可写页的 W 权限，子侧建立共享 PPN。新子 MM 在包装成 `AddressSpace`
+前尚无 CPU 能观察，构造期记录可由 `discard_unpublished()` 清除；父侧记录则由
+外层 `write()` 正常同步，否则父 CPU 可能继续用旧权限写共享页。
+
+当前性能策略有意保守：cached mask 尚未安全清 bit，远端协议也仍按整个用户
+地址空间失效。已经避免的固定成本包括：已登记 CPU 的重复 `fetch_or`、同一 VM
+写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。range/RFENCE、
+MM-owned LoongArch ASID 和安全 CPU detach 留给后续优化。
+
+B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
+释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
 
 ## 7. COW 中的页表变化
 
@@ -229,26 +244,30 @@ if crate::task::current_user_token() != token {
 
 这避免内核在缺页时错误地操作非当前进程地址空间。
 
-## 11. release_frames()
+## 11. take_frames() 与页表页退休
 
-`AddressSpace::release_for_zombie()` 会调用：
+`AddressSpaceInner::release_for_zombie()` 会在外层 `AddressSpace::write()` 中调用：
 
 ```rust
-self.with_tlb_batch(|vmas, batch| vmas.unmap_all(batch))
+self.with_user_mapper(|vmas, mapper| vmas.unmap_all(mapper))
     .expect("zombie cleanup failed to clear a resident user PTE");
 self.locked_pages.clear();
-self.page_table.release_frames();
+let page_table_frames = self.page_table.take_frames();
+self.mmu_gather.record_full_flush();
+self.mmu_gather.retire_frames(&self.page_table, page_table_frames);
 ```
 
-该路径先撤销所有 resident PTE，由 batch 刷新并释放 VMA frame，最后才释放
-页表页。等待接口只需要 pid、退出码等元数据，不再需要地址空间。
+该路径先撤销所有 resident PTE，然后把页表根/中间页也移出所有权。
+叶子数据 frame 和页表 frame 由同一个 `MmuGather` 保留，因为远端硬件可能仍在
+page walk；外层解锁并收齐目标 CPU 的 ack 后才统一释放。等待接口只需要 pid、
+退出码等元数据，不再需要地址空间。
 
 ## 12. 架构相关注意点
 
 | 架构 | 页表/TLB 注意点 |
 |------|-----------------|
-| rv64 | LocalOnly 单页提交使用 `sfence.vma va, zero`，多页提交和 B22 user-TLB IPI 使用本 hart 全量 `sfence.vma` |
-| la64 | ASID 仍由 TCB 持有，页表对象无法安全指定目标 ASID；LocalOnly 提交和 B22 user-TLB IPI 保守执行本核全部 `G=0` 项失效（`invtlb 0x3`） |
+| rv64 | 仅当前 CPU 且只改一个 VPN 时使用 `sfence.vma va, zero`；多页和远端 user-TLB IPI 使用本 hart 全量 `sfence.vma` |
+| la64 | ASID 仍由 TCB 持有，通用 MM 层无法安全指定目标 ASID；页级入口和远端 IPI 当前均保守执行本核全部 `G=0` 项失效（`invtlb 0x3`） |
 
 上层文档统一称为 `tlb_invalidate` 或 `flush_tlb()`，不把架构指令混入通用 MM 逻辑。
 
@@ -256,19 +275,20 @@ self.page_table.release_frames();
 
 TLB 是第三份缓存状态。即使页表内存已经改对，CPU 仍可能使用旧 TLB 项；
 而 unmap/CoW 如果提前释放 frame，旧 TLB 还会把已复用的物理页当成旧映射访问。
-因此用户 PTE 修改必须经过 `TlbBatch`，并把旧 frame 保留到提交之后。
+因此用户 PTE 修改必须经过 `MmuGather`，并把旧 frame 保留到提交之后。
 
-B16 完成 LocalOnly batch；B22 完成 cached CPU/generation 激活侧和全用户 IPI/ack 原语。
-PTE 修改侧的 generation 推进、锁外等待与 ack 前 frame 不复用仍属于 B23；MM-owned
-ASID/epoch 和 range 优化也尚未完成。在这些门禁通过前，普通用户任务不得跨 CPU 运行。
+B16 首次收口用户 PTE 写入，B22 完成 cached CPU/generation 激活侧和全用户 IPI/ack
+原语；B23 将临时的 batch/pending/commit 原型重构为
+`record_change -> seal -> execute`，并完成锁外等待与 ack 前 frame 不复用。
+MM-owned ASID/epoch、range/RFENCE 优化、安全 CPU detach 和普通用户迁移仍未完成。
 
 ## 13. 调试核对点
 
 | 现象 | 重点检查 |
 |------|----------|
-| fork 后父进程写入没有触发 COW | 父 `TlbBatch` 是否记录撤销 W 并成功提交 |
-| `mprotect` 后权限仍旧生效 | `protect_range()` 是否经 batch 修改 PTE，本地刷新是否执行 |
+| fork 后父进程写入没有触发 COW | 父 `MmuGather` 是否记录撤销 W 并成功提交 |
+| `mprotect` 后权限仍旧生效 | `protect_range()` 是否经 `UserMapper` 修改 PTE，`MmuGather` 是否记录该 VPN |
 | 用户指针明明在 VMA 内仍 EFAULT | fault-in 后 `user_access_ok()` 是否失败 |
 | MAP_SHARED 文件写不落到 page cache | 首次读映射是否错误保留 W，绕过 shared write fault |
-| unmap 后出现旧页数据或 UAF | 是否先撤销 PTE，再 `defer_frame()`，最后提交 batch |
-| zombie 释放后页表泄露 | `unmap_all()` 提交后是否调用 `release_frames()` |
+| unmap 后出现旧页数据或 UAF | 是否先撤销 PTE，再 `retire_frame()`，最后执行 `TlbFlush` |
+| zombie 释放后页表泄露 | `unmap_all()` 后是否将 `take_frames()` 结果交给同一轮 retirement |

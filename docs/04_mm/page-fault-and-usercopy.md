@@ -3,8 +3,8 @@ title: "缺页处理与用户内存 fault-in"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
-tags: [mm, page-fault, cow, uaccess, tlb-batch]
+last_update: 2026-07-29
+tags: [mm, page-fault, cow, uaccess, mmu-gather]
 ---
 
 # 缺页处理与用户内存 fault-in
@@ -115,54 +115,54 @@ if area.vm_allows(ctx.access) {
 impl PageFaultHandler {
     fn handle<T: PageTable>(
         area: &mut Vma,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         ctx: FaultContext,
     ) -> Result<PhysAddr, MemoryError> {
         check_area_permission(area, ctx)?;
 
-        match Self::classify(area, batch, ctx)? {
+        match Self::classify(area, mapper, ctx)? {
             // 匿名页首次访问: 分配一个清零物理页。
             FaultAction::LazyAlloc => {
-                map_lazy_zero_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
+                map_lazy_zero_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // 文件映射页首次读取/执行: 直接映射文件页缓存。
-            FaultAction::FileBackedRead => filemap_read_fault(area, batch, ctx),
+            FaultAction::FileBackedRead => filemap_read_fault(area, mapper, ctx),
             // 文件映射页首次写入共享映射: 映射 page cache 帧并标脏。
-            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, batch, ctx),
+            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, mapper, ctx),
             // 文件映射页首次写入私有映射: 分配私有物理页并从文件填充内容。
-            FaultAction::FileBackedWrite => filemap_private_fault(area, batch, ctx),
+            FaultAction::FileBackedWrite => filemap_private_fault(area, mapper, ctx),
             // 压缩匿名页再次访问: 解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {
-                finish_decompress_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
+                finish_decompress_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // 已换出的匿名页再次访问: 从 swap/zram 换入后恢复映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::SwapIn => {
-                finish_swap_in_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
+                finish_swap_in_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // MAP_SHARED 写保护 fault: 恢复共享写权限。
-            FaultAction::SharedWrite => restore_shared_write(area, batch, ctx),
+            FaultAction::SharedWrite => restore_shared_write(area, mapper, ctx),
             // stale lazy PTE: 页表已有项但元数据仍未分配，先清理再修复。
-            FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, batch, ctx),
+            FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, mapper, ctx),
             // 私有已映射页写入: 触发 COW。
-            FaultAction::Cow => copy_private_page(area, batch, ctx),
+            FaultAction::Cow => copy_private_page(area, mapper, ctx),
             // 已映射页读取/执行: 直接翻译物理地址。
-            FaultAction::MappedRead => translate_mapped_page(batch, ctx),
+            FaultAction::MappedRead => translate_mapped_page(mapper, ctx),
             // MAP_SHARED anonymous pages may preallocate shared frames but install
             // user PTEs lazily so mincore can still observe real residency.
             FaultAction::ResidentWithoutPte => {
-                map_existing_resident_page(area, batch, ctx).map(|ppn| ctx.offset_phys(ppn))
+                map_existing_resident_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
         }
     }
 
     fn classify<T: PageTable>(
         area: &mut Vma,
-        batch: &mut TlbBatch<'_, T>,
+        mapper: &mut UserMapper<'_, T>,
         ctx: FaultContext,
     ) -> Result<FaultAction, MemoryError> {
-        if UserMapper::new(batch).is_mapped(ctx.vpn) {
+        if mapper.is_mapped(ctx.vpn) {
             return Ok(match ctx.access {
                 FaultAccess::Load | FaultAccess::Execute => FaultAction::MappedRead,
                 FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
@@ -201,7 +201,7 @@ impl PageFaultHandler {
 匿名未分配页首次访问走 `LazyAlloc`：
 
 ```rust
-let ppn = area.map_one_zeroed_unchecked(batch, ctx.vpn)?;
+let ppn = area.map_one_zeroed_unchecked(mapper, ctx.vpn)?;
 Ok(ctx.offset_phys(ppn))
 ```
 
@@ -209,8 +209,9 @@ Ok(ctx.offset_phys(ppn))
 
 1. `frame_alloc()` 分配清零页。
 2. 在 `VmPageStore` 中记录 `InMemory(frame)`。
-3. 通过 `UserMapper` 向 `TlbBatch` 安装 PTE。
-4. 失败时回滚 `VmPageStore`，batch 在返回前提交本地 TLB。
+3. 通过 `UserMapper` 安装 PTE，并让当前 `MmuGather` 记录该 VPN。
+4. 失败时回滚 `VmPageStore`；成功后由外层 `AddressSpace::write()` 根据 cached
+   CPU mask 选择无失效、本地失效或远端 shootdown。
 
 ## 6. ResidentWithoutPte
 
@@ -286,7 +287,7 @@ if area.vm_kind() == VmAreaKind::FileBacked {
 `StaleLazyPte` 是防御性路径：页表已有有效 PTE，但 VMA 元数据仍认为该页未分配。处理方式：
 
 1. 记录 warn 日志。
-2. `area.clear_stale_pte(batch, ctx.vpn)` 删除旧 PTE。
+2. `area.clear_stale_pte(mapper, ctx.vpn)` 删除旧 PTE，并记录对应失效。
 3. 如果是文件映射，返回 `MemoryError::NotMapped`。
 4. 匿名映射重新分配清零页。
 
@@ -409,7 +410,7 @@ trap 路径和 syscall 路径对错误的最终处理不同：trap 中的用户�
 
 ```rust
 fn translate_user_va_checked_with_vm(
-    vm: &Mutex<AddressSpace<PageTableImpl>>,
+    vm: &AddressSpace<PageTableImpl>,
     va: VirtAddr,
     access: UserAccess,
 ) -> Result<PhysAddr, isize> {

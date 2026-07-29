@@ -20,7 +20,7 @@ use super::{
     TaskControlBlock, UtsNamespace, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
-use crate::mm::{AddressSpace, PageTableImpl};
+use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl};
 use crate::signal_type;
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
@@ -100,7 +100,7 @@ pub struct ProcessInner {
     /// IPC 命名空间（stub，不隔离）。
     ipc: Arc<IpcNamespace>,
     /// 虚拟内存空间。
-    vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
+    vm: Arc<AddressSpace<PageTableImpl>>,
     /// 信号处理函数表。
     sighand: Arc<Mutex<Sighand>>,
     /// private futex 等待表。
@@ -271,7 +271,7 @@ impl ProcessControlBlock {
         net: Arc<NetNamespace>,
         mnt: Arc<MountNamespace>,
         ipc: Arc<IpcNamespace>,
-        vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
+        vm: Arc<AddressSpace<PageTableImpl>>,
         sighand: Arc<Mutex<Sighand>>,
         futex: Arc<Mutex<Futex>>,
         user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
@@ -289,13 +289,9 @@ impl ProcessControlBlock {
             .and_then(|parent| parent.upgrade())
             .map(|parent| parent.pid)
             .unwrap_or(0);
-        let user_token = {
-            let mut vm = vm.lock();
-            // PCB 是用户地址空间第一次进入调度可见域的发布点。B16 仍将
-            // 用户任务固定在 CPU0，因此这里只进入 LocalOnly，而不是 SMP Published。
-            vm.publish_local();
-            vm.token()
-        };
+        // 构造 PCB 只发布页表对象，不代表任何 CPU 已经缓存该 MM；真正的 CPU
+        // 登记统一发生在返回用户态前的 `prepare_user_vm()`。
+        let user_token = vm.read(|vm| vm.token());
         let pcb = Self {
             pid,
             leader_tid,
@@ -486,7 +482,7 @@ impl ProcessControlBlock {
         self.inner.lock().ipc = ipc;
     }
 
-    pub fn vm(&self) -> Arc<Mutex<AddressSpace<PageTableImpl>>> {
+    pub fn vm(&self) -> Arc<AddressSpace<PageTableImpl>> {
         self.inner.lock().vm.clone()
     }
 
@@ -494,13 +490,12 @@ impl ProcessControlBlock {
     ///
     /// # Semantics
     ///
-    /// `execve` 使用该接口提交新 `AddressSpace`。提交时会清空 trap context 槽位缓存、
+    /// `execve` 使用该接口提交新 `AddressSpaceInner`。提交时会清空 trap context 槽位缓存、
     /// 更新无锁 user token hint，并刷新当前 CPU 上缓存的当前进程 token。
-    pub fn replace_vm(&self, mut vm: AddressSpace<PageTableImpl>) {
-        vm.publish_local();
+    pub fn replace_vm(&self, vm: AddressSpaceInner<PageTableImpl>) {
         let token = vm.token();
         self.trap_context_cache.lock().clear();
-        self.inner.lock().vm = Arc::new(Mutex::new(vm));
+        self.inner.lock().vm = Arc::new(AddressSpace::new(vm));
         self.user_token_hint.store(token, Ordering::Relaxed);
     }
 
@@ -514,8 +509,7 @@ impl ProcessControlBlock {
     /// 检查需要和页表修改共用 VM 锁，才能闭合“加入 mask 与修改方快照”的竞态。
     pub fn prepare_user_vm(&self) -> usize {
         let vm = self.vm();
-        let token = vm.lock().activate_on(crate::smp::cpu_id());
-        token
+        vm.activate_on(crate::smp::cpu_id())
     }
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
@@ -1123,7 +1117,7 @@ impl ProcessControlBlock {
     pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         self.complete_vfork();
         let mut rusage = exit_task.acquire_inner_lock().rusage;
-        let resident_kb = self.vm().lock().resident_user_bytes() / 1024;
+        let resident_kb = self.vm().read(|vm| vm.resident_user_bytes()) / 1024;
         rusage.update_maxrss_kb(resident_kb);
         if !self.mark_zombie(exit_code, rusage) {
             return;
@@ -1188,7 +1182,7 @@ impl ProcessControlBlock {
 
         let vm = self.vm();
         if Arc::strong_count(&vm) <= 2 {
-            vm.lock().release_for_zombie();
+            vm.write(|vm| vm.release_for_zombie());
         }
         self.close_files_on_exit();
     }

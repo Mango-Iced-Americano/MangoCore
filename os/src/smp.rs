@@ -342,6 +342,14 @@ pub(crate) fn user_tlb_ack(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id].user_tlb_ack.load(Ordering::Acquire)
 }
 
+/// 查询目标 CPU 已发布但可能尚未确认的全用户 TLB 请求序号。
+///
+/// 仅供诊断与生命周期 focused test 观察“request 已发布、ack 尚未完成”的
+/// 窗口；生产释放路径仍必须调用同步入口，不能自行比较计数器。
+pub(crate) fn user_tlb_request(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id].user_tlb_request.load(Ordering::Acquire)
+}
+
 /// 查询 CPU0 已处理的 round-trip 回复序号。
 pub fn round_trip_reply_ack() -> usize {
     PER_CPUS[BOOT_CPU_ID]
@@ -434,8 +442,13 @@ pub fn handle_ipi() {
         // 用户协议拥有独立 sequence，不能和并发的 kernel-global 撤映射互相
         // 覆盖。先读 request 再 flush，确保 ack 对应的失效发生在请求发布之后。
         let sequence = local.user_tlb_request.load(Ordering::Acquire);
-        crate::hal::user_tlb_invalidate();
-        local.user_tlb_ack.store(sequence, Ordering::Release);
+        if local.user_tlb_ack.load(Ordering::Acquire) < sequence {
+            // 并发发布可能在 handler 清空 mailbox 后留下一个迟到
+            // reason。若较新 sequence 已由上一次全刷确认，再刷一次
+            // 只会增加 TLB refill 成本，不能提供更强的正确性。
+            crate::hal::user_tlb_invalidate();
+            local.user_tlb_ack.store(sequence, Ordering::Release);
+        }
     }
 }
 
@@ -615,8 +628,8 @@ pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError>
 
 /// 让一组曾缓存用户 MM 的 CPU 完成全用户/non-global TLB 失效。
 ///
-/// 这是 B22 提供给下一工作包的锁外提交原语。调用方必须先释放 VM/PTE 及其它
-/// 普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
+/// B23 的 `TlbFlush` 通过该锁外原语完成同步。调用方必须先释放
+/// VM/PTE 及其它普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
 /// 每次失效覆盖本核全部用户项，因此 request 合并到较新序号仍同时覆盖旧请求。
 pub(crate) fn synchronize_user_tlb_mask(targets: usize) -> Result<(), UserTlbSyncError> {
     let configured = expected_online_mask();

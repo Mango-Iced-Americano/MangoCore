@@ -3,7 +3,7 @@ title: "exit、exit_group、wait4 与 waitid"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-29
 tags: [process, exit, wait, zombie]
 ---
 
@@ -109,7 +109,7 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
     self.complete_vfork();
     let mut rusage = exit_task.acquire_inner_lock().rusage;
-    let resident_kb = self.vm().lock().resident_user_bytes() / 1024;
+    let resident_kb = self.vm().read(|vm| vm.resident_user_bytes()) / 1024;
     rusage.update_maxrss_kb(resident_kb);
     if !self.mark_zombie(exit_code, rusage) {
         return;
@@ -169,7 +169,7 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
 
     let vm = self.vm();
     if Arc::strong_count(&vm) <= 2 {
-        vm.lock().release_for_zombie();
+        vm.update(|address_space| address_space.release_for_zombie());
     }
     self.close_files_on_exit();
 }

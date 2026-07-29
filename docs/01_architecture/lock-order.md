@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-28
+last_updated: 2026-07-29
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -55,7 +55,7 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
 2. **调度**：task.inner 与 runqueue 不得嵌套；状态转移 API 是唯一调度状态真值来源。
 3. **迁移/偷取**：任何时刻只持有一个 runqueue 锁；从 victim 取出后释放，再按 CAS
    结果进入目标队列，失败则回滚到合法状态。
-4. **页表失效**：MM/PTE 锁内修改并记录 `TlbBatch`，释放锁后本地 flush、发送
+4. **页表失效**：MM/PTE 锁内修改并记录 `MmuGather`，释放锁后本地 flush、发送
    shootdown、等待 ack；ack 完成后才能释放 frame/页表页/ASID。
 5. **timer 重编程**：timer queue 锁内更新最早 deadline，释放锁后向 CPU0 发送
    `TIMER_REPROGRAM`。
@@ -165,15 +165,21 @@ CPU0 idle 调度循环在尚未取得 processor、runqueue 或子系统锁时按
 
 ### 3.7 B22/B23 用户 MM 激活与 shootdown 锁序
 
-B22 的 trap-return 激活登记与 B23 的 PTE 修改侧必须由同一个进程 VM 锁串行化：
+B22 的 trap-return 激活登记与 B23 的 PTE 修改侧现由同一个
+`AddressSpace` 串行化：
 
 1. 激活侧在 VM 锁内先把 CPU 加入单调 `cached_cpus`，再读取 generation；落后时完成
    本地全用户失效并更新 observed，最后重查 generation；
-2. 修改侧在同一 VM 锁内修改 PTE、推进 generation、快照 cached CPU mask，并把失效
-   frame 从地址空间所有权移交给独立提交对象；
-3. 修改侧释放 VM 锁后，提交对象才执行本地失效、发送 `USER_TLB_SYNC`、等待远端 ack；
-4. 全部目标 ack 后才 drop deferred frame。错误路径也必须保留这一顺序，不能退回
+2. 修改侧在同一 VM 锁内通过 `UserMapper` 修改 PTE，由 `MmuGather` 记录失效范围和
+   退休 frame；`seal()` 推进 generation、校验 cached CPU mask 快照并生成 `TlbFlush`；
+3. 修改侧释放 VM 锁后，`TlbFlush::execute()` 才执行本地失效、发送
+   `USER_TLB_SYNC`、等待远端 ack；
+4. 全部目标 ack 后才 drop retired frame。错误路径也必须保留这一顺序，不能退回
    “清 PTE 后立即释放”。
+
+`read()` 只向闭包提供不可变引用；`write()/try_write()` 在锁内调用
+`MmuGather::seal()` 取得 `TlbFlush`，再由块作用域析构 guard。这个接口不暴露可变
+guard，是“先解锁再等 ack”的类型级门禁，不依赖每个调用点人工记住 `drop()`。
 
 禁止在 VM 锁内等待 user-TLB ack。目标 CPU 可能已经关闭本地 IRQ并在 page fault 中等待
 同一 VM 锁；发起者若持锁等它处理 IPI，会形成 `VM lock -> ack -> target VM lock` 环。

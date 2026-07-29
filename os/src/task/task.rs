@@ -28,7 +28,9 @@ use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
-use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{
+    AddressSpaceInner, FaultAccess, AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE,
+};
 use crate::syscall::errno::{EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
@@ -653,39 +655,40 @@ impl TaskControlBlock {
     ) -> Result<(bool, Option<usize>, usize), isize> {
         let bytes = 0u32.to_ne_bytes();
         let vm = self.process.vm();
-        let mut vm = vm.lock();
-        let base_va = VirtAddr::from(addr);
-        let uses_shared_key = vm.futex_uses_shared_key(base_va)?;
-        let before_key = if uses_shared_key {
-            vm.translate(base_va.floor())
-                .map(|ppn| (ppn.0 << 12) + base_va.page_offset())
-        } else {
-            None
-        };
-
-        if base_va.page_offset() + bytes.len() <= PAGE_SIZE {
-            let pa = vm.fault_in_user_va(base_va, FaultAccess::Store)?;
-            let page_offset = pa.page_offset();
-            let page = pa.floor().get_bytes_array();
-            page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
-            let after_key = if uses_shared_key {
-                (pa.floor().0 << 12) + page_offset
+        vm.write(|vm| {
+            let base_va = VirtAddr::from(addr);
+            let uses_shared_key = vm.futex_uses_shared_key(base_va)?;
+            let before_key = if uses_shared_key {
+                vm.translate(base_va.floor())
+                    .map(|ppn| (ppn.0 << 12) + base_va.page_offset())
             } else {
-                0
+                None
             };
-            return Ok((uses_shared_key, before_key, after_key));
-        }
 
-        let mut after_key = None;
-        for (offset, byte) in bytes.iter().enumerate() {
-            let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
-            let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
-            if uses_shared_key && offset == 0 {
-                after_key = Some((pa.floor().0 << 12) + pa.page_offset());
+            if base_va.page_offset() + bytes.len() <= PAGE_SIZE {
+                let pa = vm.fault_in_user_va(base_va, FaultAccess::Store)?;
+                let page_offset = pa.page_offset();
+                let page = pa.floor().get_bytes_array();
+                page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
+                let after_key = if uses_shared_key {
+                    (pa.floor().0 << 12) + page_offset
+                } else {
+                    0
+                };
+                return Ok((uses_shared_key, before_key, after_key));
             }
-            pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
-        }
-        Ok((uses_shared_key, before_key, after_key.unwrap_or(0)))
+
+            let mut after_key = None;
+            for (offset, byte) in bytes.iter().enumerate() {
+                let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
+                let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
+                if uses_shared_key && offset == 0 {
+                    after_key = Some((pa.floor().0 << 12) + pa.page_offset());
+                }
+                pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+            }
+            Ok((uses_shared_key, before_key, after_key.unwrap_or(0)))
+        })
     }
 
     /// 获取任务内部状态的互斥锁
@@ -846,18 +849,19 @@ impl TaskControlBlock {
         super::perf::record_exit_thread(clear_child_tid != 0, keep_trap_context);
         if self.owns_user_res_slot {
             let vm = self.process.vm();
-            let mut vm = vm.lock();
-            if keep_trap_context {
-                vm.dealloc_user_res_keep_trap(
-                    self.user_res_slot,
-                    self.user_stack_allocated.load(Ordering::Relaxed),
-                );
-            } else {
-                vm.dealloc_user_res_with_stack(
-                    self.user_res_slot,
-                    self.user_stack_allocated.load(Ordering::Relaxed),
-                );
-            }
+            vm.write(|vm| {
+                if keep_trap_context {
+                    vm.dealloc_user_res_keep_trap(
+                        self.user_res_slot,
+                        self.user_stack_allocated.load(Ordering::Relaxed),
+                    );
+                } else {
+                    vm.dealloc_user_res_with_stack(
+                        self.user_res_slot,
+                        self.user_stack_allocated.load(Ordering::Relaxed),
+                    );
+                }
+            });
         }
 
         true
@@ -884,10 +888,10 @@ impl TaskControlBlock {
             panic!("[TCB::new] initproc ELF is empty");
         }
         init_task_trace!("02 init ELF mapped: {} bytes", elf_data.len());
-        // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
+        // 带有ELF程序头/跳板的用户地址空间（AddressSpaceInner）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, _user_heap, elf_info) =
-            AddressSpace::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
+            AddressSpaceInner::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
         init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
         // 在内核空间中删除ELF区域
         crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor())
@@ -985,7 +989,7 @@ impl TaskControlBlock {
             INIT_NET_NAMESPACE.clone(),
             INIT_MOUNT_NAMESPACE.clone(),
             INIT_IPC_NAMESPACE.clone(),
-            Arc::new(Mutex::new(memory_set)),
+            Arc::new(AddressSpace::new(memory_set)),
             Arc::new(Mutex::new(Sighand::new())),
             Arc::new(Mutex::new(Futex::new())),
             user_res_slot_allocator,
@@ -1258,7 +1262,7 @@ impl TaskControlBlock {
         // 构造新地址空间，提交时再让当前进程脱离共享 VM，不能破坏父进程。
         let current_vm = self.process.vm();
         if Arc::strong_count(&current_vm) <= 2 {
-            current_vm.lock().recycle_data_pages();
+            current_vm.write(|vm| vm.recycle_data_pages());
         }
 
         // 将ELF文件映射到内核空间
@@ -1270,9 +1274,9 @@ impl TaskControlBlock {
         }
         let _kmap_ticks = perf::perf_time_now().wrapping_sub(_t_kmap);
         perf::EXECVE_KERNEL_MAP_TICKS.fetch_add(_kmap_ticks, Ordering::Relaxed);
-        // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpace）
+        // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpaceInner）
         let _t_map = perf::perf_time_now();
-        let load_result = AddressSpace::from_elf(elf_data);
+        let load_result = AddressSpaceInner::from_elf(elf_data);
         let _map_ticks = perf::perf_time_now().wrapping_sub(_t_map);
         perf::EXECVE_MAP_ELF_TICKS.fetch_add(_map_ticks, Ordering::Relaxed);
 
@@ -1359,10 +1363,12 @@ impl TaskControlBlock {
             // CLONE_VM/vfork 子进程 exec 后会脱离旧地址空间。这里仅从旧 VM
             // 中移除当前线程的 trap context/默认栈映射，不释放 slot 号本身；
             // 新 VM 仍使用同一个 user_res_slot，避免父 VM 留下孤儿映射。
-            current_vm.lock().dealloc_user_res_with_stack(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
+            current_vm.write(|vm| {
+                vm.dealloc_user_res_with_stack(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                )
+            });
         }
         // 更新可执行文件描述符
         self.process.replace_exe(elf);
@@ -1396,12 +1402,12 @@ impl TaskControlBlock {
         // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页。
         let current_vm = self.process.vm();
         if Arc::strong_count(&current_vm) <= 2 {
-            current_vm.lock().recycle_data_pages();
+            current_vm.write(|vm| vm.recycle_data_pages());
         }
 
         // 直接从 inode 和 PageCache 解析 ELF 并映射到用户地址空间
         let _t_map = perf::perf_time_now();
-        let load_result = AddressSpace::from_elf_inode(elf.clone());
+        let load_result = AddressSpaceInner::from_elf_inode(elf.clone());
         let _map_ticks = perf::perf_time_now().wrapping_sub(_t_map);
         perf::EXECVE_MAP_ELF_TICKS.fetch_add(_map_ticks, Ordering::Relaxed);
         // 零拷贝路径无需 kmap 和 teardown —— 记录零值用于性能对比
@@ -1466,10 +1472,12 @@ impl TaskControlBlock {
             inner.signal_stack = SignalStack::disabled();
         }
         if Arc::strong_count(&current_vm) > 2 {
-            current_vm.lock().dealloc_user_res_with_stack(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
+            current_vm.write(|vm| {
+                vm.dealloc_user_res_with_stack(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                )
+            });
         }
         self.process.replace_exe(elf);
         {
@@ -1530,6 +1538,10 @@ impl TaskControlBlock {
         } else {
             parent_inner.sched_period
         };
+        let parent_trap_cx = *parent_inner.get_trap_cx();
+        // fork/clone 的 PTE 操作可能触发远端 shootdown。先保存所需上下文并
+        // 释放 task.inner，确保后续等待 ack 时不跨普通锁。
+        drop(parent_inner);
         // 复制用户空间（包括陷阱上下文）
         let share_vm = flags.contains(CloneFlags::CLONE_VM);
         let parent_vm = self.process.vm();
@@ -1538,13 +1550,10 @@ impl TaskControlBlock {
         } else {
             // 复制地址空间（进程）
             crate::mm::frame_reserve(16);
-            let parent_trap_cx = *parent_inner.get_trap_cx();
-            let copied = AddressSpace::from_existing_user(
-                &mut parent_vm.lock(),
-                self.user_res_slot,
-                &parent_trap_cx,
-            )?;
-            Arc::new(Mutex::new(copied))
+            let copied = parent_vm.write(|vm| {
+                AddressSpaceInner::from_existing_user(vm, self.user_res_slot, &parent_trap_cx)
+            })?;
+            Arc::new(AddressSpace::new(copied))
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个用户资源槽位分配器。
@@ -1662,41 +1671,45 @@ impl TaskControlBlock {
             if flags.contains(CloneFlags::CLONE_THREAD) {
                 process.take_cached_trap_context_slot(user_res_slot);
             }
-            let mut locked_vm = memory_set.lock();
-            match locked_vm.alloc_user_res_with_trap_ppn(user_res_slot, user_stack_allocated) {
+            let allocation = memory_set.write(|vm| {
+                let result = vm.alloc_user_res_with_trap_ppn(user_res_slot, user_stack_allocated);
+                if result.is_err() {
+                    vm.dealloc_user_res_with_stack(user_res_slot, user_stack_allocated);
+                }
+                result
+            });
+            match allocation {
                 Ok(ppn) => ppn,
                 Err(err) => {
                     warn!(
                         "[sys_clone] failed to allocate trap context: slot={}, va={:#x}, err={:?}",
                         user_res_slot, trap_cx_va, err
                     );
-                    locked_vm.dealloc_user_res_with_stack(user_res_slot, user_stack_allocated);
-                    drop(locked_vm);
                     user_res_slot_allocator.lock().dealloc(user_res_slot);
                     return Err(ENOMEM);
                 }
             }
         } else {
             // fork copied the parent's trap context into the new address space already.
-            match memory_set
-                .lock()
-                .translate(VirtAddr::from(trap_cx_va).into())
-            {
+            match memory_set.read(|vm| vm.translate(VirtAddr::from(trap_cx_va).into())) {
                 Some(ppn) => ppn,
                 None => {
                     warn!(
                         "[sys_clone] trap context is not mapped after fork copy: slot={}, va={:#x}",
                         user_res_slot, trap_cx_va
                     );
-                    memory_set
-                        .lock()
-                        .dealloc_user_res_with_stack(user_res_slot, user_stack_allocated);
+                    memory_set.write(|vm| {
+                        vm.dealloc_user_res_with_stack(user_res_slot, user_stack_allocated)
+                    });
                     user_res_slot_allocator.lock().dealloc(user_res_slot);
                     return Err(ENOMEM);
                 }
             }
         };
 
+        // MM 更新及其远端 ack 已全部结束，现在重新取得父任务快照，构造
+        // 子 TCB 时不会再进入任何 PTE 修改路径。
+        let parent_inner = self.acquire_inner_lock();
         // 创建任务控制块
         let task_control_block = Arc::new(TaskControlBlock {
             // 基础标识信息
@@ -1819,7 +1832,7 @@ impl TaskControlBlock {
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
         // 共享 VM 时新分配的 trap context 为空，需要从父任务当前上下文复制。
         if share_vm {
-            *trap_cx = *parent_inner.get_trap_cx();
+            *trap_cx = parent_trap_cx;
         }
         // we also do not need to prepare parameters on stack, musl has done it for us
         // 处理用户栈指针
@@ -1886,10 +1899,12 @@ impl TaskControlBlock {
     /// Drop resources allocated for a clone that has not been published.
     pub fn cleanup_unpublished_clone(&self, shared_vm: bool) {
         if shared_vm {
-            self.process.vm().lock().dealloc_user_res_with_stack(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
+            self.process.vm().write(|vm| {
+                vm.dealloc_user_res_with_stack(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                )
+            });
         }
     }
 

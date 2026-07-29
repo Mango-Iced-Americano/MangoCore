@@ -96,11 +96,12 @@ pub fn pid_status_content(
     };
     let (vm_rss_kb, vm_lck_kb) = {
         let vm_ref = task.process.vm();
-        let vm = vm_ref.lock();
-        (
-            vm.resident_user_bytes() / 1024,
-            vm.locked_user_bytes() / 1024,
-        )
+        vm_ref.read(|vm| {
+            (
+                vm.resident_user_bytes() / 1024,
+                vm.locked_user_bytes() / 1024,
+            )
+        })
     };
 
     let s = alloc::format!(
