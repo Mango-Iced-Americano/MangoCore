@@ -84,11 +84,13 @@ else
       rv64)
         INIT_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/init"
         BUSYBOX_SRC="$REPO_ROOT/user/tools/riscv64/bin/busybox"
+        BASH_SRC="$REPO_ROOT/user/tools/riscv64/bin/bash"
         REG_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/regression"
         ;;
       la64)
         INIT_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/init"
         BUSYBOX_SRC="$REPO_ROOT/user/tools/loongarch64/bin/busybox"
+        BASH_SRC="$REPO_ROOT/user/tools/loongarch64/bin/bash"
         REG_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/regression"
         ;;
       *)
@@ -135,6 +137,14 @@ else
         echo "[initramfs] installed /busybox and /rescue/sh from $BUSYBOX_SRC"
     else
         echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /busybox and /rescue/sh will be missing"
+    fi
+
+    if [ -f "$BASH_SRC" ]; then
+        mkdir -p "$STAGE/bin"
+        install -m 0755 "$BASH_SRC" "$STAGE/bin/bash"
+        echo "[initramfs] installed /bin/bash from $BASH_SRC"
+    else
+        echo "[initramfs] WARNING: $BASH_SRC not found, /bin/bash will be missing"
     fi
 
     # 5. 安装 /regression（normal initproc 的 mode=regression 路径）

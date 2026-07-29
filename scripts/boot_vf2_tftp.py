@@ -27,15 +27,19 @@ import serial  # pyserial
 
 # ── Paths ────────────────────────────────────────────────────────────
 WORKSPACE = Path(__file__).resolve().parent.parent
-KERNEL_ELF = WORKSPACE / "os" / "target" / "riscv64gc-unknown-none-elf" / "release" / "os"
-TFTP_ROOT = Path("/tmp/opencode/vf2-direct-tftp")
-TFTP_IMAGE_NAME = "kernel-rv"
+KERNEL_ELF = (
+    WORKSPACE / "build" / "rv64" / "release" / "normal" / "kernel"
+    / "riscv64gc-unknown-none-elf" / "release" / "os"
+)
+TFTP_ROOT = Path("/srv/tftp/vf2")
+TFTP_IMAGE_NAME = "kernel-rv.elf"
 
 # ── Network ──────────────────────────────────────────────────────────
-HOST_IP = "192.168.80.10"
-BOARD_IP = "192.168.80.20"
+HOST_IP = "192.168.200.1"
+BOARD_IP = "192.168.200.10"
 NETMASK = "255.255.255.0"
-LOADADDR = "0x40200000"
+VID = "0x40200000"
+LOADADDR = "0x60000000"
 
 # ── Serial ───────────────────────────────────────────────────────────
 SERIAL_CANDIDATES = [
@@ -80,29 +84,20 @@ def detect_serial(explicit: Optional[str]) -> str:
 # ────────────────────────────────────────────────────────────────────
 
 def build_kernel(cmdline: str) -> None:
-    """Build the kernel ELF inside Docker with the given boot command line."""
+    """Build the kernel via the project's Makefile facade inside Docker."""
     print(f"[build] command line: {cmdline}")
     result = subprocess.run(
         [
-            "docker", "run", "--rm", "--network", "host",
-            "-v", f"{os.environ['HOME']}/.cargo/git:/root/.cargo/git",
-            "-v", f"{os.environ['HOME']}/.cargo/registry:/root/.cargo/registry",
-            "-v", f"{WORKSPACE}:/workspace",
-            "-w", "/workspace/os",
-            "zhouzhouyi/os-contest:20260104",
-            "bash", "-c",
-            f"touch ../dependency/lwext4_rust/build.rs && "
-            f"export MANGO_CMDLINE='{cmdline}' && "
-            f"export LWEXT4_LIB_DIR=$(realpath ../dependency/lwext4_rust/c/lwext4) && "
-            f"rustup override set nightly-2025-01-18 && "
-            f"cp src/lang_items.rs.rv src/lang_items.rs && "
-            f"cp src/hal/arch/riscv/linker-vf2.ld src/hal/arch/riscv/linker.ld && "
-            f"cargo build --release --features 'board_vf2 block_virt oom_handler'",
+            "docker", "compose", "exec", "-T", "os-dev",
+            "make", "kernel",
+            "ARCH=rv64", "PROFILE=normal", "BOARD=vf2", "BLK_MODE=virt",
+            f"KERNEL_CMDLINE={cmdline}",
         ],
         check=True,
         timeout=300,
         text=True,
         capture_output=True,
+        cwd=str(WORKSPACE),
     )
     last = result.stderr.strip().split("\n")[-1] if result.stderr.strip() else ""
     print(f"[build] {last}")
@@ -164,14 +159,14 @@ class UBootConsole:
         self.ser.reset_input_buffer()
         self._write(b"\r")
         try:
-            self._read_until(b"=> ", timeout)
+            self._read_until(b"StarFive #", timeout)
             print("[uboot] prompt ready")
         except BootError:
             raise BootError("U-Boot prompt not found — is the board powered on?")
 
     def command(self, cmd: str, timeout: float = 15) -> str:
         self.send_line(cmd)
-        output = self._read_until(b"=> ", timeout)
+        output = self._read_until(b"StarFive #", timeout)
         if "Unknown command" in output:
             raise BootError(f"U-Boot does not support: {cmd}")
         return output
@@ -187,7 +182,7 @@ class UBootConsole:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             data = self.ser.read(self.ser.in_waiting or 1)
-            if data and b"=> " in data:
+            if data and b"StarFive #" in data:
                 # Clear any stale input
                 self._write(b"\x03\r")
                 time.sleep(0.5)
@@ -208,7 +203,7 @@ class UBootConsole:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             data = self.ser.read(self.ser.in_waiting or 1)
-            if data and b"=> " in data:
+            if data and b"StarFive #" in data:
                 self._write(b"\x03\r")
                 time.sleep(0.5)
                 self.wait_prompt()
@@ -256,19 +251,21 @@ def boot_flow(console: UBootConsole, tftp_name: str) -> None:
     if f"host {HOST_IP} is alive" not in result.lower():
         raise BootError(f"ping to {HOST_IP} failed")
 
-    # TFTP download
-    print(f"[uboot] tftpboot {tftp_name}…")
-    result = console.command(f"tftpboot {LOADADDR} {tftp_name}", timeout=60)
+    # TFTP download with explicit server IP (Lupyuen workaround for JH7110 unicast issue)
+    tftp_uri = f"{HOST_IP}:{tftp_name}"
+    print(f"[uboot] tftpboot {tftp_uri}…")
+    result = console.command(f"tftpboot {LOADADDR} {tftp_uri}", timeout=60)
     match = re.search(r"Bytes transferred\s*=\s*(\d+)", result)
     if not match:
         raise BootError(f"TFTP failed; output:\n{result[-500:]}")
     print(f"[uboot] transferred {match.group(1)} bytes")
 
-    # Boot ELF
+    # Boot ELF — load to 0x60000000, bootelf places segments at link address 0x40200000
     print("[uboot] bootelf…")
     console.send_line(f"bootelf {LOADADDR}")
 
-    # Stream serial output until the board shuts down (ktest mode) or user interrupts
+    # Stream serial output until the board reboots (ktest mode) or user interrupts
+    ktest_pattern = re.compile(rb"\[KTEST RESULT: (PASS|FAIL)\]")
     print("[console] streaming; Ctrl-C to return to host…")
     try:
         while True:
@@ -276,6 +273,8 @@ def boot_flow(console: UBootConsole, tftp_name: str) -> None:
             if data:
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
+                if ktest_pattern.search(data):
+                    break
             else:
                 time.sleep(0.05)
     except KeyboardInterrupt:
@@ -297,9 +296,10 @@ def boot_flow_loop(console: UBootConsole, tftp_name: str, max_iterations: int) -
         console.command(f"setenv serverip {HOST_IP}")
         console.command(f"setenv netmask {NETMASK}")
 
-        # TFTP download
-        print(f"[uboot] tftpboot {tftp_name}…")
-        result = console.command(f"tftpboot {LOADADDR} {tftp_name}", timeout=60)
+        # TFTP download with explicit server IP
+        tftp_uri = f"{HOST_IP}:{tftp_name}"
+        print(f"[uboot] tftpboot {tftp_uri}…")
+        result = console.command(f"tftpboot {LOADADDR} {tftp_uri}", timeout=60)
         match = re.search(r"Bytes transferred\s*=\s*(\d+)", result)
         if not match:
             raise BootError(f"TFTP failed; output:\n{result[-500:]}")
