@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "another_ext4"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.9.1",
+ "log",
+ "spin 0.7.1",
+]
+
+[[package]]
 name = "atomic-polyfill"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -144,6 +153,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdt"
+version = "0.2.0-alpha2"
+source = "git+https://github.com/Mango-Iced-Americano/fdt#a75f941561c1afddbd3bc6c891210a448d285ccd"
+
+[[package]]
 name = "hash32"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -259,11 +273,13 @@ dependencies = [
 name = "os"
 version = "0.1.0"
 dependencies = [
+ "another_ext4",
  "bit_field",
  "bitflags 1.3.2",
  "buddy_system_allocator",
  "downcast-rs",
  "embedded-hal",
+ "fdt",
  "isomorphic_drivers",
  "lazy_static",
  "log",

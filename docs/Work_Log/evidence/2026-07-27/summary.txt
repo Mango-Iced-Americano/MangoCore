@@ -1,0 +1,10 @@
+RV64 full build: PASS
+QEMU boot: PASS
+QEMU command exit status: 0
+Focused target cases: link01,link02,link04,link05,link08,dup05,symlink01,symlink02,symlink03,linktest,ftruncate01,mkdir01
+LTP TPASS: 0
+LTP TFAIL: 0
+LTP TBROK: 0
+No-cases warnings: 2
+Target test results: NOT EXECUTED (all configured runtest suites missing)
+Kernel panic markers after boot: 0

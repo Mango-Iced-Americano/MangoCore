@@ -1,0 +1,42 @@
+# iozone v3 raw extraction
+
+Run command:
+docker compose exec -T os-dev bash -c "cd /app/os && timeout 600 make rv64-run 2>&1" > /tmp/qemu-perf-v3.log
+
+Source log:
+- /tmp/qemu-perf-v3.log
+- size: 24507 bytes
+
+## [ext4_another] write_pages
+
+No matching lines were emitted.
+
+## musl iozone diagnostic stats
+
+No `=== stats T4 iozone:musl ===` section was emitted.
+
+## iozone execution and throughput extraction
+
+[initproc] select group=iozone timeout=480s
+/bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+[initproc] done iozone_testcode.sh in /musl exit_code=32512
+[initproc] iozone_testcode.sh in /musl failed (exit_code=32512), retry 1/3 after 2s...
+/bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+[initproc] done iozone_testcode.sh in /musl exit_code=32512
+[initproc] iozone_testcode.sh in /musl failed (exit_code=32512), retry 2/3 after 2s...
+/bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+[initproc] done iozone_testcode.sh in /musl exit_code=32512
+[initproc] iozone_testcode.sh in /musl failed after 3 retries, final exit_code=32512
+[timer] group iozone in /musl took 4s (failed)
+/bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+[initproc] done iozone_testcode.sh in /glibc exit_code=32512
+[initproc] iozone_testcode.sh in /glibc failed (exit_code=32512), retry 1/3 after 2s...
+/bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+[initproc] done iozone_testcode.sh in /glibc exit_code=32512
+[initproc] iozone_testcode.sh in /glibc failed (exit_code=32512), retry 2/3 after 2s...
+/bin/bash: line 1: ./iozone_testcode.sh: No such file or directory
+[initproc] done iozone_testcode.sh in /glibc exit_code=32512
+[initproc] iozone_testcode.sh in /glibc failed after 3 retries, final exit_code=32512
+[timer] group iozone in /glibc took 4s (failed)
+
+No iozone throughput values were emitted because neither libc workload started.

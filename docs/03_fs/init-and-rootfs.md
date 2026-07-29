@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-22
+last_updated: 2026-07-28
 code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/fs/filesystem.rs"
@@ -55,12 +55,14 @@ rust_main()
   |     |
   |     |-- drivers::init_net_device()
   |     |-- net::config::init()
-   |     |-- fs::register_boot_block_devices()  探测块设备并注册 /dev/vd*
+   |     |-- fs::mount_boot_block_devices(&BootConfig)
+   |     |     |-- 发布启动块设备名称注册表和 /dev/vd* 节点
+   |     |     |-- root=/dev/<name> → /sdcard（未命中回退 x0）
+   |     |     |-- x1 → /tools（既有 MBR 分区策略）
   |
    |-- task::add_initproc()            加载 init 进程（fd 0/1/2 使用 /dev/tty）
    |-- task::run_tasks()               进入调度
    |     |-- /sbin/init: 挂载 proc/sys/run/tmp/dev/shm
-   |     |-- /sbin/init: normal 模式挂载 x0→/sdcard、x1→/tools
 ```
 
 ### 2.1 两种启动模式
@@ -70,8 +72,8 @@ rust_main()
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 仅挂载 devfs，并注册 `/dev/tty` 以建立 PID1 的 fd 0/1/2；其余挂载点只是目录。
-4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。
-5. `/sbin/init` 挂载 procfs、sysfs、`/run`、`/dev/shm`，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。
+4. 调用 `mount_boot_block_devices(&BootConfig)`：`boot_block` 子模块发布 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点的名称注册表；内核将 `root=/dev/<name>` 解析为注册表键并挂载到 `/sdcard`，未命中时回退 x0。x1 的 `/tools` 挂载仍优先 `/dev/vdb1`，回退 `/dev/vdb`。
+5. `/sbin/init` 挂载 procfs、sysfs、`/run` 和 `/dev/shm`。
 6. `/tmp` 优先 bind `/sdcard/tmp`；x0 或 bind 失败时挂载 tmpfs。块设备故障只打印 warning，不 panic。
 
 ## 3. VFS_ROOT lazy_static

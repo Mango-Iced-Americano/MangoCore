@@ -127,13 +127,14 @@ else
         exit 1
     fi
 
-    # 4. 安装 /rescue/sh（静态 BusyBox，救援 shell）
+    # 4. 安装根目录 BusyBox 和 /rescue/sh（静态 BusyBox，救援 shell）
     if [ -f "$BUSYBOX_SRC" ]; then
         mkdir -p "$STAGE/rescue"
+        install -m 0755 "$BUSYBOX_SRC" "$STAGE/busybox"
         install -m 0755 "$BUSYBOX_SRC" "$STAGE/rescue/sh"
-        echo "[initramfs] installed /rescue/sh from $BUSYBOX_SRC"
+        echo "[initramfs] installed /busybox and /rescue/sh from $BUSYBOX_SRC"
     else
-        echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /rescue/sh will be missing"
+        echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /busybox and /rescue/sh will be missing"
     fi
 
     # 5. 安装 /regression（normal initproc 的 mode=regression 路径）

@@ -1,7 +1,7 @@
-use super::BlockDevice;
+use super::{validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult};
 use crate::mm::{
-    frames_alloc, frames_alloc_fresh_contiguous, kernel_token, FrameTracker, PageTable,
-    PageTableImpl, PhysAddr, VirtAddr,
+    frame_alloc, frame_dealloc, frames_alloc, frames_alloc_fresh_contiguous, kernel_token,
+    FrameTracker, PageTable, PageTableImpl, PhysAddr, PhysPageNum, StepByOne, VirtAddr,
 };
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -20,10 +20,9 @@ const VIRT_IO_BLOCK_SZ: usize = 512;
 use super::virtio_dma_pool;
 use crate::hal::{
     config::{PAGE_SIZE, PAGE_SIZE_BITS},
-    BLOCK_SZ,
+    local_irq_restore, local_irq_save, BLOCK_SZ,
 };
 use crate::task::perf;
-use crate::utils::error::SyscallErr;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 #[cfg(not(target_arch = "riscv64"))]
@@ -45,8 +44,8 @@ lazy_static! {
 static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 impl BlockDevice for VirtIOBlock {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        assert!(buf.len() % BLOCK_SZ == 0);
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
 
@@ -65,20 +64,25 @@ impl BlockDevice for VirtIOBlock {
 
             *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
 
-            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
-            dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len])
-                .expect("read error");
+            let first_sector = block_id
+                .checked_add(offset / BLOCK_SZ)
+                .and_then(|current_block| current_block.checked_mul(BLOCK_RATIO))
+                .ok_or(BlockDeviceError::OutOfBounds)?;
+            let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
                 virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
             }
 
+            result.map_err(|_| BlockDeviceError::DeviceError)?;
+
             offset += chunk_len;
         }
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        assert!(buf.len() % BLOCK_SZ == 0);
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        validate_block_buffer_length(buf.len())?;
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
 
@@ -97,29 +101,39 @@ impl BlockDevice for VirtIOBlock {
 
             *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
 
-            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
-            dev.write_blocks(first_sector, &buf[offset..offset + chunk_len])
-                .expect("write error");
+            let first_sector = block_id
+                .checked_add(offset / BLOCK_SZ)
+                .and_then(|current_block| current_block.checked_mul(BLOCK_RATIO))
+                .ok_or(BlockDeviceError::OutOfBounds)?;
+            let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
                 virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
             }
 
+            result.map_err(|_| BlockDeviceError::DeviceError)?;
+
             offset += chunk_len;
         }
+        Ok(())
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        let mut dev = self.0.lock();
+        if !dev.supports_flush() {
+            return Err(BlockDeviceError::FlushUnsupported);
+        }
+        dev.flush().map_err(|_| BlockDeviceError::DeviceError)
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.0.lock().supports_flush()
     }
 
     fn size_bytes(&self) -> Option<u64> {
         let sectors = self.0.lock().capacity();
         let bytes = sectors.saturating_mul(512);
         Some(bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
-    }
-
-    fn flush(&self) -> Result<(), SyscallErr> {
-        self.0.lock().flush().map_err(|err| {
-            log::error!("VirtIO PCI block flush failed: {:?}", err);
-            SyscallErr::EIO
-        })
     }
 }
 

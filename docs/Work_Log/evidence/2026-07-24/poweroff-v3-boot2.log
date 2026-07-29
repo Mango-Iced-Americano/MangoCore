@@ -1,0 +1,516 @@
+[conf-inject] done
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART Debug Triggers  : 2 triggers
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[kernel] logger inited, level= Off
+[kernel] Console initialized.
+last 193955 Physical Frames.
+.text [0x80200000, 0x803fc000)
+.rodata [0x803fc000, 0x80432000)
+.data [0x80432000, 0x809fb000)
+.bss [0x809fb000, 0x90a5d000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] PRNG initialized.
+[initramfs] unpacked: files=32 dirs=21 symlinks=1 bytes=2051014
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[ext4] backend: another_ext4
+[kernel] official fs (x0) mounted at sdcard
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[ext4] backend: another_ext4
+[kernel] tools disk (vdb1) mounted at tools
+sinitproc: 80629000, einitproc: 806BC150, sbash: 806BD000, ebash: 807D5378, sbusybox: 807D6000, ebusybox: 80928C28, sosconfig: 80929000, eosconfig: 80929F09
+[init] MangoCore stage-1 boot (initramfs mode)
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+ntpd: setting time to 2026-07-23 23:25:18.915542 (offset -13912489.820402s)
+[init] ntpd time sync ok
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[init] bind /tools/tmp -> /tmp
+[init] bind /tools/bin -> /bin
+[init] bind /tools/sbin -> /sbin
+[init] bind /tools/lib -> /lib
+[init] bind /tools/usr -> /usr
+[init] bind /tools/root -> /root
+[init] bind /tools/tests -> /tests
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0x001 ltp_runner=inline timer_smoke=false ext4_profile=false reclaim_profile=false skip_apk=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["epoll_create02", "atof01", "fptest01", "fptest02"], glibc: ["nice05"]
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+[initproc] attempting bind mount /tools/bin -> /bin...
+[initproc] bind mount tools/bin -> bin
+[initproc] installing busybox applets to /bin ...
+busybox applets already installed, skipping --install
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s failed to open, ret=-2
+[initproc] linking musl/glibc libs to /lib ...
+ln: /usr/lib64: Invalid argument
+ln: /lib/ld-linux-loongarch-lp64d.so.1: Invalid argument
+ln: /glibc/lib/libgcc_s.so.1: Invalid argument
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: Invalid argument
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on test scripts ...
+[initproc] chmod test scripts done, exit=0
+[initproc] apk add e2fsprogs ...
+ERROR: Unable to read database: v2 database format error
+ERROR: Failed to open apk database: v2 database format error
+[initproc] apk add -> exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] run_selected_groups start mask=0x001 order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] select group=basic timeout=60s
+#### OS COMP TEST GROUP START basic-musl ####
+Testing brk :
+========== START test_brk ==========
+Before alloc,heap pos: 4206592
+After alloc,heap pos: 4206656
+Alloc again,heap pos: 4206720
+========== END test_brk ==========
+Testing chdir :
+========== START test_chdir ==========
+chdir ret: 0
+  current working dir : /musl/basic/test_chdir
+========== END test_chdir ==========
+Testing clone :
+========== START test_clone ==========
+  Child says successfully!
+clone process successfully.
+pid:53
+========== END test_clone ==========
+Testing close :
+========== START test_close ==========
+  close 3 success.
+========== END test_close ==========
+Testing dup2 :
+========== START test_dup2 ==========
+  from fd 100
+========== END test_dup2 ==========
+Testing dup :
+========== START test_dup ==========
+  new fd is 3.
+========== END test_dup ==========
+Testing execve :
+========== START test_execve ==========
+  I am test_echo.
+execve success.
+========== END main ==========
+Testing exit :
+========== START test_exit ==========
+exit OK.
+========== END test_exit ==========
+Testing fork :
+========== START test_fork ==========
+  child process.
+  parent process. wstatus:0
+========== END test_fork ==========
+Testing fstat :
+========== START test_fstat ==========
+fstat ret: 0
+fstat: dev: 1, inode: 45, mode: 33188, nlink: 1, size: 52, atime: 1749913918, mtime: 1749913918, ctime: 1749913918
+========== END test_fstat ==========
+Testing getcwd :
+========== START test_getcwd ==========
+getcwd: /musl/basic successfully!
+========== END test_getcwd ==========
+Testing getdents :
+========== START test_getdents ==========
+open fd:3
+getdents fd:488
+getdents success.
+.
+
+========== END test_getdents ==========
+Testing getpid :
+========== START test_getpid ==========
+getpid success.
+pid = 65
+========== END test_getpid ==========
+Testing getppid :
+========== START test_getppid ==========
+  getppid success. ppid : 49
+========== END test_getppid ==========
+Testing gettimeofday :
+========== START test_gettimeofday ==========
+gettimeofday success.
+start:41698066, end:41698136
+interval: 70
+========== END test_gettimeofday ==========
+Testing mkdir_ :
+========== START test_mkdir ==========
+mkdir ret: 0
+  mkdir success.
+========== END test_mkdir ==========
+Testing mmap :
+========== START test_mmap ==========
+file len: 27
+mmap content:   Hello, mmap successfully!
+========== END test_mmap ==========
+Testing mount :
+========== START test_mount ==========
+Mounting dev:/dev/vda2 to ./mnt
+mount return: -22
+
+ --- Assert Fatal ! ---
+Testing munmap :
+========== START test_munmap ==========
+file len: 27
+munmap return: 0
+munmap successfully!
+========== END test_munmap ==========
+Testing openat :
+========== START test_openat ==========
+open dir fd: 3
+openat fd: 4
+openat success.
+========== END test_openat ==========
+Testing open :
+========== START test_open ==========
+Hi, this is a text file.
+syscalls testing success!
+
+========== END test_open ==========
+Testing pipe :
+========== START test_pipe ==========
+cpid: 75
+cpid: 0
+  Write to pipe successfully.
+
+========== END test_pipe ==========
+Testing read :
+========== START test_read ==========
+Hi, this is a text file.
+syscalls testing success!
+
+========== END test_read ==========
+Testing sleep :
+========== START test_sleep ==========
+sleep success.
+========== END test_sleep ==========
+Testing times :
+========== START test_times ==========
+mytimes success
+{tms_utime:1, tms_stime:1, tms_cutime:0, tms_cstime:0}
+========== END test_times ==========
+Testing umount :
+========== START test_umount ==========
+Mounting dev:/dev/vda2 to ./mnt
+mount return: -22
+========== END test_umount ==========
+Testing uname :
+========== START test_uname ==========
+Uname: Linux blossom 5.10.0-1-rv64 #1 SMP blossom 5.10.0-1 (2025-01-10) rv64 
+========== END test_uname ==========
+Testing unlink :
+========== START test_unlink ==========
+  unlink success!
+========== END test_unlink ==========
+Testing wait :
+========== START test_wait ==========
+This is child process
+wait child success.
+wstatus: 0
+========== END test_wait ==========
+Testing waitpid :
+========== START test_waitpid ==========
+This is child process
+waitpid successfully.
+wstatus: 3
+========== END test_waitpid ==========
+Testing write :
+========== START test_write ==========
+Hello operating system contest.
+========== END test_write ==========
+Testing yield :
+========== START test_yield ==========
+  I am child process: 88. iteration 0.
+  I am child process: 89. iteration 1.
+  I am child process: 90. iteration 2.
+  I am child process: 89. iteration 1.
+  I am child process: 90. iteration 2.
+  I am child process: 88. iteration 0.
+  I am child process: 89. iteration 1.
+  I am child process: 90. iteration 2.
+  I am child process: 88. iteration 0.
+  I am child process: 89. iteration 1.
+  I am child process: 90. iteration 2.
+  I am child process: 88. iteration 0.
+  I am child process: 89. iteration 1.
+  I am child process: 90. iteration 2.
+  I am child process: 88. iteration 0.
+========== END test_yield ==========
+#### OS COMP TEST GROUP END basic-musl ####
+[initproc] done basic_testcode.sh in /musl exit_code=0
+[timer] group basic in /musl took 2s
+#### OS COMP TEST GROUP START basic-glibc ####
+Testing brk :
+========== START test_brk ==========
+Before alloc,heap pos: 4206592
+After alloc,heap pos: 4206656
+Alloc again,heap pos: 4206720
+========== END test_brk ==========
+Testing chdir :
+========== START test_chdir ==========
+chdir ret: 0
+  current working dir : /glibc/basic/test_chdir
+========== END test_chdir ==========
+Testing clone :
+========== START test_clone ==========
+  Child says successfully!
+clone process successfully.
+pid:98
+========== END test_clone ==========
+Testing close :
+========== START test_close ==========
+  close 3 success.
+========== END test_close ==========
+Testing dup2 :
+========== START test_dup2 ==========
+  from fd 100
+========== END test_dup2 ==========
+Testing dup :
+========== START test_dup ==========
+  new fd is 3.
+========== END test_dup ==========
+Testing execve :
+========== START test_execve ==========
+  I am test_echo.
+execve success.
+========== END main ==========
+Testing exit :
+========== START test_exit ==========
+exit OK.
+========== END test_exit ==========
+Testing fork :
+========== START test_fork ==========
+  child process.
+  parent process. wstatus:0
+========== END test_fork ==========
+Testing fstat :
+========== START test_fstat ==========
+fstat ret: 0
+fstat: dev: 1, inode: 131106, mode: 33188, nlink: 1, size: 52, atime: 1749913917, mtime: 1749913917, ctime: 1749913917
+========== END test_fstat ==========
+Testing getcwd :
+========== START test_getcwd ==========
+getcwd: /glibc/basic successfully!
+========== END test_getcwd ==========
+Testing getdents :
+========== START test_getdents ==========
+open fd:3
+getdents fd:488
+getdents success.
+.
+
+========== END test_getdents ==========
+Testing getpid :
+========== START test_getpid ==========
+getpid success.
+pid = 110
+========== END test_getpid ==========
+Testing getppid :
+========== START test_getppid ==========
+  getppid success. ppid : 94
+========== END test_getppid ==========
+Testing gettimeofday :
+========== START test_gettimeofday ==========
+gettimeofday success.
+start:41700212, end:41700282
+interval: 70
+========== END test_gettimeofday ==========
+Testing mkdir_ :
+========== START test_mkdir ==========
+mkdir ret: 0
+  mkdir success.
+========== END test_mkdir ==========
+Testing mmap :
+========== START test_mmap ==========
+file len: 27
+mmap content:   Hello, mmap successfully!
+========== END test_mmap ==========
+Testing mount :
+========== START test_mount ==========
+Mounting dev:/dev/vda2 to ./mnt
+mount return: -22
+
+ --- Assert Fatal ! ---
+Testing munmap :
+========== START test_munmap ==========
+file len: 27
+munmap return: 0
+munmap successfully!
+========== END test_munmap ==========
+Testing openat :
+========== START test_openat ==========
+open dir fd: 3
+openat fd: 4
+openat success.
+========== END test_openat ==========
+Testing open :
+========== START test_open ==========
+Hi, this is a text file.
+syscalls testing success!
+
+========== END test_open ==========
+Testing pipe :
+========== START test_pipe ==========
+cpid: 0
+cpid: 120
+  Write to pipe successfully.
+
+========== END test_pipe ==========
+Testing read :
+========== START test_read ==========
+Hi, this is a text file.
+syscalls testing success!
+
+========== END test_read ==========
+Testing sleep :
+========== START test_sleep ==========
+sleep success.
+========== END test_sleep ==========
+Testing times :
+========== START test_times ==========
+mytimes success
+{tms_utime:1, tms_stime:1, tms_cutime:0, tms_cstime:0}
+========== END test_times ==========
+Testing umount :
+========== START test_umount ==========
+Mounting dev:/dev/vda2 to ./mnt
+mount return: -22
+========== END test_umount ==========
+Testing uname :
+========== START test_uname ==========
+Uname: Linux blossom 5.10.0-1-rv64 #1 SMP blossom 5.10.0-1 (2025-01-10) rv64 
+========== END test_uname ==========
+Testing unlink :
+========== START test_unlink ==========
+  unlink success!
+========== END test_unlink ==========
+Testing wait :
+========== START test_wait ==========
+This is child process
+wait child success.
+wstatus: 0
+========== END test_wait ==========
+Testing waitpid :
+========== START test_waitpid ==========
+This is child process
+waitpid successfully.
+wstatus: 3
+========== END test_waitpid ==========
+Testing write :
+========== START test_write ==========
+Hello operating system contest.
+========== END test_write ==========
+Testing yield :
+========== START test_yield ==========
+  I am child process: 133. iteration 0.
+  I am child process: 133. iteration 0.
+  I am child process: 134. iteration 1.
+  I am child process: 135. iteration 2.
+  I am child process: 134. iteration 1.
+  I am child process: 135. iteration 2.
+  I am child process: 133. iteration 0.
+  I am child process: 134. iteration 1.
+  I am child process: 135. iteration 2.
+  I am child process: 133. iteration 0.
+  I am child process: 134. iteration 1.
+  I am child process: 135. iteration 2.
+  I am child process: 133. iteration 0.
+  I am child process: 134. iteration 1.
+  I am child process: 135. iteration 2.
+========== END test_yield ==========
+#### OS COMP TEST GROUP END basic-glibc ####
+[initproc] done basic_testcode.sh in /glibc exit_code=0
+[timer] group basic in /glibc took 2s
+[initproc] sleep 1s before next group
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] skip iozone (mask bit4 not set)
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] skip ltp (mask bit11 not set)
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done

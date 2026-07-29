@@ -22,6 +22,21 @@
 
 ## 启动/Panic 排查
 
+### QEMU DTB 落入 kernel BSS 时，必须在清零前消费启动信息
+
+- **现象**：QEMU 传入的 DTB 地址落在大型内核 BSS（常见于嵌入 initramfs/测试资产）内；`mem_clear()` 后 FDT 解析静默回退，或预先解析后 DTB carveout 与 kernel exclusion 重叠导致 allocator/map panic。
+- **根因**：仅保存 DTB 指针而不在 BSS 清零前读取内容；DTB 页既是 firmware reserved 范围又可能已被 kernel image 覆盖。
+- **修复**：在 `mem_clear()` 前执行无分配的内存区域解析并保存结果；对重叠 exclusion 做区间合并，且不重复映射完全包含于 kernel image 的保留范围。
+- **教训**：启动协议提供的物理 blob 的存活期不能假设晚于内核 BSS 初始化。测试 FDT 路径时使用带真实 ktest block drive 的 profile；无 drive 的裸 QEMU 不能验证依赖 `block_devices()[0]` 的 ext4 测试。
+- **相关文件**：`os/src/main.rs`、`os/src/mm/frame_allocator.rs`、`os/src/mm/kernel_space.rs`
+
+### 固件寄存器参数必须先按启动协议建立信任边界
+
+- **根因**: 将架构入口寄存器（如 `a1`）一律解释为 DTB 指针，只检查非零；`UbootGo` 和 `LoongArchLegacy` 的同一寄存器位置可能是无关的垃圾值，导致早期 volatile 读取或 raw-slice FDT 解析访问错误地址。
+- **修复**: 所有 DTB 消费入口先要求 `matches!(boot_info().protocol, BootProtocol::RiscvFdt)`，再检查指针非零、页对齐、FDT magic 和有界 `totalsize`；FDT 成功后仍保留编译期 firmware carveout，并保留 DTB 自身页面。
+- **教训**: 原始启动参数不是跨平台 ABI。先按协议缩小信任域，再执行指针解引用或物理地址转换；“非零”从来不是可访问性证明。
+- **相关文件**: `os/src/hal/firmware/{mod.rs,fdt.rs}`
+
 ### 内核 panic 定位
 - 启动时加 `LOG=debug make rv64-run` 查看详细日志
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`
@@ -374,6 +389,13 @@
 
 ## 文件系统多路径操作（renameat2）中的验证镜像缺失
 
+## 目录项发布的存在性检查必须与插入共享命名空间锁
+
+- **现象**：VFS 适配层在调用文件系统后端前用 `lookup()` 返回 `EEXIST`，但两个并发创建/硬链接任务都可能在检查时看到名称不存在，随后分别插入相同名称的目录项。
+- **根因**：检查与 `dir_add_entry()` 发布点不在同一个后端 `namespace_lock` 临界区；桥接层的检查只能优化常见失败路径，不能建立后端命名空间不变式。
+- **修复**：在所有后端命名空间操作持有 `namespace_lock` 后、调用 `dir_add_entry()`/`link_inode()` 前使用 `dir_find_entry()` 检查同名项并返回 `EEXIST`。新 inode 路径须将检查放在既有自动释放包装内，确保失败仍释放未发布 inode。
+- **相关文件**：`dependency/another_ext4/src/ext4/low_level.rs`
+
 ### 路径搜索权限检查遗漏（renameat2）
 
 - **现象**: `renameat2` 对 oldpath 做了路径遍历搜索权限检查，但对 newpath 同样路径却没有做，导致非特权进程能通过 newpath 遍历非本用户目录。
@@ -503,3 +525,12 @@
 - **修复**：在 YT8531C extension register 打开 RXC、禁用自动休眠并设置 VF2 RGMII-ID 延迟；用 bit 1 标记 buffer 有效，先写 OWN 和 DMA barrier 再更新 RX tail，使用 2048-byte size field。
 - **教训**：TX/内部 loopback 只能证明 MAC 与 TX DMA 路径，不能替代 PHY 到 MAC 的 RXC 时钟和真实 RX descriptor ABI 验证；实板诊断应同时检查 PHY 时钟、RDES3 ownership/valid 位、tail publication 顺序和 DMA size 编码。
 - **相关文件**：`os/src/drivers/net/gmac_jh7110/phy.rs`、`os/src/drivers/net/gmac_jh7110/ring.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
+## 启动文件系统
+
+### initramfs 占位 `.gitkeep` 阻止目录替换为 sdcard 符号链接
+
+- **根因**: CPIO 中的 `/musl`、`/glibc` 虽然没有运行时库或测试脚本，但保留了 `.gitkeep`，使 `rmdir()` 失败；仅以 `test -e` 判断也会把空目录误当成已正确配置，最终 lmbench 仍在 initramfs 目录找脚本。
+- **修复**: 确认 `/sdcard/{musl,glibc}` 存在后，先删除 initramfs 目录的 `.gitkeep`，再 `rmdir` 并创建到 sdcard 的绝对符号链接。
+- **教训**: 需要将 CPIO 占位目录替换为挂载盘路径时，先检查打包后的 CPIO 条目，而不是只检查源码树目录是否“空”。
+- **相关文件**: `user/src/bin/test_runner/bootstrap/layout.rs`, `scripts/build_initramfs.sh`

@@ -1,0 +1,122 @@
+===== first 60 lines =====
+Welcome to MangoCore Project Aspera🚀
+                                                                            
+  ________    ________    ________    _______     ________    ________      
+ |\   __  \  |\   ____\  |\   __  \  |\  ___ \   |\   __  \  |\   __  \     
+ \ \  \|\  \ \ \  \___|_ \ \  \|\  \ \ \   __/|  \ \  \|\  \ \ \  \|\  \    
+  \ \   __  \ \ \_____  \ \ \   ____\ \ \  \_|/__ \ \   _  _\ \ \   __  \   
+   \ \  \ \  \ \|____|\  \ \ \  \___|  \ \  \_|\ \ \ \  \  \| \ \  \ \  \  
+    \ \__\ \__\  ____\_\  \ \ \__\      \ \_______\ \ \__\ _\  \ \__\ \__\ 
+     \|__|\|__| |\_________\ \|__|       \|_______|  \|__|\|__|  \|__|\|__| 
+                \|_________|                                                
+                                                                            
+                                                                            
+Rust toolchain preflight passed: nightly-2026-05-10
+make -C os "ARCH=rv64" "MODE=release" "PROFILE=normal" "BUILD_ROOT=/app/build" run
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=rv64 -f make/rv64.mk run INITRAMFS_PROFILE=normal
+make[2]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make[3]: Entering directory '/app/user'
+Rust toolchain preflight passed: nightly-2026-05-10
+CARGO_TARGET_DIR="/app/build/rv64/release/normal/user" cargo build --target=riscv64gc-unknown-none-elf --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+  |
+  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: the feature `panic_info_message` has been stable since 1.81.0 and no longer requires an attribute to enable
+ --> src/lib.rs:4:12
+  |
+4 | #![feature(panic_info_message)]
+  |            ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: creating a shared reference to mutable static
+  --> src/lib.rs:85:19
+   |
+85 |             .init(HEAP_SPACE.as_ptr() as usize, USER_HEAP_SIZE);
+   |                   ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+   |
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+   = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: feature `asm_experimental_arch` is declared but not used
+ --> src/lib.rs:3:12
+  |
+3 | #![feature(asm_experimental_arch)]
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+===== last 60 lines =====
+[init] bind mount /tools/lib -> /lib
+[init] bind mount /tools/usr -> /usr
+[init] bind mount /tools/root -> /root: skipped (errno=2)
+[init] PID1 profile=normal runner=/test-runner
+[test-runner] synchronizing clock
+[initproc] config source=/os_test.conf mode=run mask=0x800 timer_smoke=false skip_apk=false
+[initproc] ensuring base directories...
+[initproc] runtime layout ready
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+[initproc] prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] apk add e2fsprogs ...
+7[fetch https://dl-cdn.alpinelinux.org/alpine/edge/main/riscv64/APKINDEX.ta...]8[0KWARNING: updating and opening https://dl-cdn.alpinelinux.org/alpine/edge/main/riscv64/APKINDEX.tar.gz: DNS: transient error (try again later)
+(1/6) Installing libeconf (0.8.3-r0)
+7  0%                                                                           8[0KERROR: libeconf-0.8.3-r0: package mentioned in index not found (try 'apk update')
+7  0%                                                                           8[0K7  2% ██                                                                        8[0K(2/6) Installing libblkid (2.42-r0)
+7  2% ██                                                                        8[0K7  9% ███████                                                                   8[0KERROR: libblkid-2.42-r0: package mentioned in index not found (try 'apk update')
+7  9% ███████                                                                   8[0K7 20% ███████████████                                                           8[0K(3/6) Installing libcom_err (1.47.4-r0)
+7 20% ███████████████                                                           8[0K7 27% ████████████████████                                                      8[0KERROR: libcom_err-1.47.4-r0: package mentioned in index not found (try 'apk update')
+7 27% ████████████████████                                                      8[0K7 28% █████████████████████                                                     8[0K(4/6) Installing e2fsprogs-libs (1.47.4-r0)
+7 28% █████████████████████                                                     8[0K7 35% ██████████████████████████                                                8[0KERROR: e2fsprogs-libs-1.47.4-r0: package mentioned in index not found (try 'apk update')
+7 35% ██████████████████████████                                                8[0K7 58% ██████████████████████████████████████████                                8[0K(5/6) Installing libuuid (2.42-r0)
+7 58% ██████████████████████████████████████████                                8[0K7 64% ████████████████████████████████████████████████                          8[0KERROR: libuuid-2.42-r0: package mentioned in index not found (try 'apk update')
+7 64% ████████████████████████████████████████████████                          8[0K7 66% █████████████████████████████████████████████████                         8[0K(6/6) Installing e2fsprogs (1.47.4-r0)
+7 66% █████████████████████████████████████████████████                         8[0K7 73% ██████████████████████████████████████████████████████                    8[0KERROR: e2fsprogs-1.47.4-r0: package mentioned in index not found (try 'apk update')
+7 73% ██████████████████████████████████████████████████████                    8[0K7 93% ████████████████████████████████████████████████████████████████████      8[0K7100% ██████████████████████████████████████████████████████████████████████████8[0K6 errors; 598 KiB in 1 packages
+[initproc] run_selected_groups start mask=0x800
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] skip iozone (mask bit4 not set)
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+#### OS COMP TEST GROUP START ltp-musl ####
+[ltprunner] warning: suite 'syscalls' not found at /musl/ltp/runtest/syscalls
+[ltprunner] warning: suite 'fs' not found at /musl/ltp/runtest/fs
+[ltprunner] warning: suite 'fs_perms_simple' not found at /musl/ltp/runtest/fs_perms_simple
+[ltprunner] warning: suite 'fs_readonly' not found at /musl/ltp/runtest/fs_readonly
+[ltprunner] warning: suite 'fcntl-locktests' not found at /musl/ltp/runtest/fcntl-locktests
+[ltprunner] warning: no cases found in any suite
+#### OS COMP TEST GROUP END ltp-musl ####
+#### OS COMP TEST GROUP START ltp-glibc ####
+[ltprunner] warning: suite 'syscalls' not found at /glibc/ltp/runtest/syscalls
+[ltprunner] warning: suite 'fs' not found at /glibc/ltp/runtest/fs
+[ltprunner] warning: suite 'fs_perms_simple' not found at /glibc/ltp/runtest/fs_perms_simple
+[ltprunner] warning: suite 'fs_readonly' not found at /glibc/ltp/runtest/fs_readonly
+[ltprunner] warning: suite 'fcntl-locktests' not found at /glibc/ltp/runtest/fcntl-locktests
+[ltprunner] warning: no cases found in any suite
+#### OS COMP TEST GROUP END ltp-glibc ####
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+make[2]: Leaving directory '/app/os'
+make[1]: Leaving directory '/app/os'

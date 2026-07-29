@@ -1,0 +1,80 @@
+make: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=rv64 PROFILE=normal -f make/rv64.mk ktest-run MODE=release LOG= INITRAMFS_PROFILE=normal PRODUCT_ROOT="/app/build/rv64/release/normal" KERNEL_OUTPUT_ROOT="/app/build/rv64/release/normal/kernel" USER_OUTPUT_ROOT="/app/build/rv64/release/normal/user" KTEST_FIXTURE=""
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make[2]: Entering directory '/app/user'
+Rust toolchain preflight passed: nightly-2026-05-10
+CARGO_TARGET_DIR="/app/build/rv64/release/normal/user" cargo build --target=riscv64gc-unknown-none-elf --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+  |
+  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: the feature `panic_info_message` has been stable since 1.81.0 and no longer requires an attribute to enable
+ --> src/lib.rs:4:12
+  |
+4 | #![feature(panic_info_message)]
+  |            ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: creating a shared reference to mutable static
+  --> src/lib.rs:85:19
+   |
+85 |             .init(HEAP_SPACE.as_ptr() as usize, USER_HEAP_SIZE);
+   |                   ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+   |
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+   = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: feature `asm_experimental_arch` is declared but not used
+ --> src/lib.rs:3:12
+[ext4] backend: another_ext4
+[32mok[0m 27 ext4_another::clean_media_supports_metadata_lookup_and_page_reads
+[ext4] backend: another_ext4
+[ext4] backend: another_ext4
+[32mok[0m 28 ext4_another::writes_and_truncates_persist_across_independent_mounts
+[ext4] backend: another_ext4
+[32mok[0m 29 ext4_another::reopen_before_sync_reads_fresh_pagecache_data
+[ext4] backend: another_ext4
+[ext4] backend: another_ext4
+[32mok[0m 30 ext4_another::namespace_mutations_persist_across_independent_mounts
+[ext4] backend: another_ext4
+[ext4] backend: another_ext4
+[32mok[0m 31 ext4_another::metadata_mode_persists_across_independent_mounts
+[32mok[0m 32 ext4_another::fsync_and_syncfs_surface_flush_failures
+[ext4] backend: another_ext4
+[32mok[0m 33 ext4_another::global_sys_sync_persists_across_unwrapped_device_view
+[32mok[0m 34 ext4_another::root_inode_is_canonical_and_does_not_retain_filesystem
+[ext4] backend: another_ext4
+[ext4] backend: another_ext4
+[32mok[0m 35 ext4_another::short_symlink_persists_across_clean_remount
+[ext4] backend: another_ext4
+[ext4] backend: another_ext4
+[32mok[0m 36 ext4_another::long_symlink_persists_across_clean_remount
+[ext4] backend: another_ext4
+[32mok[0m 37 ext4_another::open_dirty_unlink_recreate_does_not_alias_old_inode
+[ext4] backend: another_ext4
+[32mok[0m 38 ext4_another::rename_replacement_preserves_replaced_open_inode
+[ext4] backend: another_ext4
+[32mok[0m 39 ext4_another::persists_non_aligned_eof_extension_across_early_writeback_and_cold_lookup
+[32mok[0m 40 ext4_another::partial_reclaim_still_runs_final_barrier_and_keeps_scoped_error
+[32mok[0m 41 block_device::partition_read_error_propagates
+[32mok[0m 42 block_device::partition_write_error_propagates
+[32mok[0m 43 block_device::partition_flush_error_propagates
+[32mok[0m 44 block_device::partition_rejects_unsupported_flush
+[32m# results: 44 passed, 0 failed, 44 total[0m
+# ktest: tests passed; committing filesystems before shutdown.
+[32m[KTEST RESULT: PASS][0m
+# ktest: all tests and filesystem teardown passed. shutting down.
+make[1]: Leaving directory '/app/os'
+make: Leaving directory '/app/os'

@@ -3,7 +3,8 @@
 # x0 is always the bootstrap/root consumer: a project-built development rootfs
 # or an immutable external competition sdcard.  x1 is always project-owned and
 # contains the tools payload in P1 plus the FAT32 LTP scratch area in P2.
-# Regression and ktest intentionally attach no disks.
+# Regression attaches no disks. KTest attaches a regenerated, clean ext4 x0
+# fixture so filesystem contract tests do not depend on mutable rootfs images.
 IMAGE_ROLE_MANIFEST_VERSION := 2
 IMAGE_ROLE_DRIVE_ORDER := x0 x1
 IMAGE_ROLE_OFFICIAL_X0_MUTABLE := no

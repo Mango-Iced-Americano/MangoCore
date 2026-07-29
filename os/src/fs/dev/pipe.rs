@@ -732,11 +732,7 @@ impl Pipe {
     }
 
     pub(crate) fn peer_read_end(&self) -> Option<Arc<Pipe>> {
-        self.buffer
-            .lock()
-            .read_end
-            .as_ref()
-            .and_then(Weak::upgrade)
+        self.buffer.lock().read_end.as_ref().and_then(Weak::upgrade)
     }
 
     pub(crate) fn peer_write_end(&self) -> Option<Arc<Pipe>> {
@@ -988,7 +984,11 @@ impl PipeRingBuffer {
         let mut total = 0;
         let mut pos = self.head;
         while total < n {
-            let end = if self.tail <= pos { self.capacity } else { self.tail };
+            let end = if self.tail <= pos {
+                self.capacity
+            } else {
+                self.tail
+            };
             let chunk = (n - total).min(end - pos);
             if chunk == 0 {
                 break;
@@ -1003,7 +1003,11 @@ impl PipeRingBuffer {
                 );
             }
             total += chunk;
-            pos = if pos + chunk == self.capacity { 0 } else { pos + chunk };
+            pos = if pos + chunk == self.capacity {
+                0
+            } else {
+                pos + chunk
+            };
         }
         total
     }
@@ -1263,13 +1267,33 @@ pub fn compact_fifo_registry() -> usize {
 
 // ── Public accessors for /sys/kernel/stats/pipe ──────────────────────
 
-pub fn pipe_read_calls() -> u64  { PIPE_READ_CALLS.load(Ordering::Relaxed) }
-pub fn pipe_write_calls() -> u64 { PIPE_WRITE_CALLS.load(Ordering::Relaxed) }
-pub fn pipe_read_bytes() -> u64  { PIPE_READ_BYTES.load(Ordering::Relaxed) }
-pub fn pipe_write_bytes() -> u64 { PIPE_WRITE_BYTES.load(Ordering::Relaxed) }
-pub fn pipe_read_cycles() -> u64  { PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed) }
-pub fn pipe_write_cycles() -> u64 { PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed) }
-pub fn pipe_read_cycles_max() -> u64  { PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed) }
-pub fn pipe_write_cycles_max() -> u64 { PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed) }
-pub fn pipe_read_eagain() -> u64  { PIPE_READ_EAGAIN.load(Ordering::Relaxed) }
-pub fn pipe_write_eagain() -> u64 { PIPE_WRITE_EAGAIN.load(Ordering::Relaxed) }
+pub fn pipe_read_calls() -> u64 {
+    PIPE_READ_CALLS.load(Ordering::Relaxed)
+}
+pub fn pipe_write_calls() -> u64 {
+    PIPE_WRITE_CALLS.load(Ordering::Relaxed)
+}
+pub fn pipe_read_bytes() -> u64 {
+    PIPE_READ_BYTES.load(Ordering::Relaxed)
+}
+pub fn pipe_write_bytes() -> u64 {
+    PIPE_WRITE_BYTES.load(Ordering::Relaxed)
+}
+pub fn pipe_read_cycles() -> u64 {
+    PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed)
+}
+pub fn pipe_write_cycles() -> u64 {
+    PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed)
+}
+pub fn pipe_read_cycles_max() -> u64 {
+    PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed)
+}
+pub fn pipe_write_cycles_max() -> u64 {
+    PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed)
+}
+pub fn pipe_read_eagain() -> u64 {
+    PIPE_READ_EAGAIN.load(Ordering::Relaxed)
+}
+pub fn pipe_write_eagain() -> u64 {
+    PIPE_WRITE_EAGAIN.load(Ordering::Relaxed)
+}

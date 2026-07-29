@@ -14,8 +14,8 @@
 //! `*_uninit` 接口返回未清零的物理页，仅能用于立即完全覆盖整页内容的路径。
 
 use super::{PhysAddr, PhysPageNum};
-use crate::config::{FIRMWARE_RESERVED_REGIONS, MEMORY_REGIONS, PAGE_SIZE};
-use crate::hal::{local_irq_restore, local_irq_save};
+use crate::config::PAGE_SIZE;
+use crate::hal::{firmware, local_irq_restore, local_irq_save};
 #[cfg(feature = "oom_handler")]
 use crate::task::current_task_ref;
 
@@ -245,10 +245,25 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
     let kernel_end = ekernel as usize;
     let mut previous_end = 0usize;
 
-    let mut exclusions = Vec::with_capacity(FIRMWARE_RESERVED_REGIONS.len() + 1);
-    exclusions.extend_from_slice(FIRMWARE_RESERVED_REGIONS);
+    let firmware_reserved_regions = firmware::firmware_reserved_regions();
+    let mut exclusions = Vec::with_capacity(firmware_reserved_regions.len() + 1);
+    exclusions.extend_from_slice(firmware_reserved_regions);
     exclusions.push((kernel_start, kernel_end));
     exclusions.sort_unstable_by_key(|range| range.0);
+
+    // Firmware may place its DTB inside the kernel image's BSS range. Both
+    // ranges describe unavailable pages, so coalesce them before subtraction.
+    let mut merged_len = 0;
+    for index in 0..exclusions.len() {
+        let (start, end) = exclusions[index];
+        if merged_len != 0 && start <= exclusions[merged_len - 1].1 {
+            exclusions[merged_len - 1].1 = exclusions[merged_len - 1].1.max(end);
+        } else {
+            exclusions[merged_len] = (start, end);
+            merged_len += 1;
+        }
+    }
+    exclusions.truncate(merged_len);
 
     let mut previous_exclusion_end = 0usize;
     for &(start, end) in &exclusions {
@@ -262,7 +277,7 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
         previous_exclusion_end = end;
     }
 
-    for &(region_start, region_end) in MEMORY_REGIONS {
+    for &(region_start, region_end) in firmware::memory_regions() {
         assert!(region_start < region_end, "empty physical memory region");
         assert!(
             region_start >= previous_end,
@@ -304,7 +319,7 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
 
 /// Return whether a physical byte address belongs to a declared DRAM bank.
 pub fn is_ram_phys_addr(addr: usize) -> bool {
-    MEMORY_REGIONS
+    firmware::memory_regions()
         .iter()
         .any(|&(start, end)| start <= addr && addr < end)
 }
@@ -313,7 +328,7 @@ pub fn is_ram_phys_addr(addr: usize) -> bool {
 pub fn is_allocatable_ram_phys_addr(addr: usize) -> bool {
     addr >= PAGE_SIZE
         && is_ram_phys_addr(addr)
-        && !FIRMWARE_RESERVED_REGIONS
+        && !firmware::firmware_reserved_regions()
             .iter()
             .any(|&(start, end)| start <= addr && addr < end)
 }
@@ -336,7 +351,7 @@ impl StackFrameAllocator {
         self.reclaimed_regions.clear();
         self.recycled.clear();
         self.fresh_region = 0;
-        self.regions.reserve(MEMORY_REGIONS.len());
+        self.regions.reserve(firmware::memory_regions().len());
 
         let mut total_frames = 0usize;
         for_each_usable_frame_region(|start, end| {
@@ -582,13 +597,13 @@ impl StackFrameAllocator {
             .0
             .checked_mul(PAGE_SIZE)
             .ok_or("reclaimed frame end overflows")?;
-        if !MEMORY_REGIONS
+        if !firmware::memory_regions()
             .iter()
             .any(|&(region_start, region_end)| region_start <= start_addr && end_addr <= region_end)
         {
             return Err("reclaimed frame range is not inside one DRAM region");
         }
-        if FIRMWARE_RESERVED_REGIONS
+        if firmware::firmware_reserved_regions()
             .iter()
             .any(|&(reserved_start, reserved_end)| {
                 start_addr < reserved_end && reserved_start < end_addr

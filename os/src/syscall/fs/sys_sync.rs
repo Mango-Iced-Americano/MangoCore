@@ -10,5 +10,7 @@ pub fn sys_sync() -> isize {
     for fs in &live {
         fs.flush_metadata_cache();
     }
+    #[cfg(feature = "ext4_another_backend")]
+    crate::fs::ext4_another::sync_all_instances();
     SUCCESS
 }

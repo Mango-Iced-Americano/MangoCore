@@ -600,7 +600,9 @@ impl FdTable {
     }
 
     pub fn insert_at(&mut self, file: Arc<File>, pos: usize) -> Result<usize, isize> {
-        let (fd, _old) = self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))?;
+        let (fd, _old) = self
+            .alloc_fd_at(pos, file, false)
+            .map_err(|e| -(e as isize))?;
         Ok(fd)
     }
 
@@ -1970,7 +1972,10 @@ impl Drop for File {
 /// Track mount-level writer count for MS_REMOUNT EBUSY check.
 /// `add`: true for open, false for close.
 fn track_mount_writer(inode: &Arc<dyn IndexNode>, add: bool) {
-    if let Some(mnt) = inode.as_any_ref().downcast_ref::<super::mount::MountFSInode>() {
+    if let Some(mnt) = inode
+        .as_any_ref()
+        .downcast_ref::<super::mount::MountFSInode>()
+    {
         if add {
             mnt.mount_fs.inc_writers();
         } else {

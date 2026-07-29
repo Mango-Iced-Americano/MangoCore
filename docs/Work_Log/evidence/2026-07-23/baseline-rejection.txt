@@ -1,0 +1,41 @@
+another_ext4 iozone rejection baseline
+Captured: 2026-07-23 08:43:36--08:45:25 UTC
+Command: docker compose exec -T os-dev bash -c "cd /app/os && timeout 300 make rv64-run 2>&1"
+Kernel configuration: prebuilt rv64, EXTRA_FEATURES=perf_diag, LOG=error
+Injected config:
+  mode=run
+  mask=0x010
+  diag=1
+  ext4_profile=false
+  reclaim_profile=false
+
+Raw diagnostic lines:
+  [114.465] tid 153 pid 153: [ext4_diag] plan_reject:before_eof lblock=0 persistent=256 count=256
+  [114.466] tid 153 pid 153: [ext4_diag] fallback:no_journal_range lblock=0 count=256
+  [ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=197221320 commit_cycles=21785608 direct=false
+
+Rejection counters (grep count):
+  plan_reject:out_of_bounds=0
+  plan_reject:before_eof=1
+  plan_reject:append_shape=0
+  direct_reject:plan_unsupported=0
+  direct_reject:enospc=0
+  fallback:no_journal_range=1
+  fallback:no_direct_range=0
+
+write_pages direct mode (grep count):
+  direct=true=0
+  direct=false=1
+
+Iozone throughput (kB/sec; 4 processes):
+  write/read: children initial writers=2231.20, parent initial writers=2152.07; children rewriters=2197.53, parent rewriters=2152.78; children readers=7859.11, parent readers=7278.29; children re-readers=8023.83, parent re-readers=7344.38
+  random-read: children initial writers=2209.64, parent initial writers=2118.15; children rewriters=2214.52, parent rewriters=2167.27; children random readers=5733.36, parent random readers=5426.36; children random writers=2010.73, parent random writers=1961.14
+  read-backwards: children initial writers=2241.16, parent initial writers=2176.89; children rewriters=2181.99, parent rewriters=2134.59; children reverse readers=5813.72, parent reverse readers=5500.34
+  stride-read: children initial writers=2189.59, parent initial writers=2121.25; children rewriters=2214.27, parent rewriters=2167.21; children stride readers=5722.04, parent stride readers=5415.83
+  fwrite/fread: children fwriters=2131.76, parent fwriters=1984.83; children freaders=5196.96, parent freaders=4982.08
+
+Run boundary:
+  The automatic measurement was interrupted by fsync I/O error.
+  The pwrite/pread phase began but ended with `iozone.DUMMY.0: I/O error`,
+  `iozone.DUMMY.3: I/O error`, and QEMU termination at 125.802 seconds.
+  This is a partial iozone baseline, not a completed suite result.

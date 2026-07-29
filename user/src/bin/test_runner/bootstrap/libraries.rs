@@ -33,6 +33,8 @@ pub fn link_libraries(environ: &[*const u8]) {
         [ -e ./libtls_get_new-dtv_dso.so ] || ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
         for f in /musl/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
         for f in /glibc/lib/*.so*; do bn=\"\x24(basename \"\x24f\")\"; case \"\x24bn\" in libgcc_s.so.1) continue;; esac; [ -e \"/lib/\x24bn\" ] || ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        # LA64 musl cyclictest uses sched_getparam ENOSYS stub; glibc binary works on both arches
+        ln -sf /glibc/cyclictest /musl/cyclictest; \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);

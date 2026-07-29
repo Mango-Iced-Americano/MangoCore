@@ -1,0 +1,676 @@
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk comp
+make[1]: Entering directory '/app/os'
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART Debug Triggers  : 2 triggers
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[kernel] logger inited, level= Error
+[kernel] Console initialized.
+last 193932 Physical Frames.
+.text [0x80200000, 0x8040b000)
+.rodata [0x8040b000, 0x80447000)
+.data [0x80447000, 0x80a10000)
+.bss [0x80a10000, 0x90a74000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] PRNG initialized.
+[initramfs] unpacked: files=32 dirs=21 symlinks=1 bytes=2051014
+[kernel] perf_diag features: perf_stats=true perf_diag=true
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[ext4] backend: another_ext4
+[kernel] official fs (x0) mounted at sdcard
+[mbr] no MBR on tools disk, mounting raw /dev/vdb as /tools
+[kernel] mount_block_fs: tools disk (raw vdb) — no filesystem detected on block device
+[initramfs] tools disk (raw vdb) mount failed, leaving /tools empty
+sinitproc: 8063E000, einitproc: 806D1150, sbash: 806D2000, ebash: 807EA378, sbusybox: 807EB000, ebusybox: 8093DC28, sosconfig: 8093E000, eosconfig: 8093EF09
+[init] MangoCore stage-1 boot (initramfs mode)
+[init] ntpd pid=2 timed out after 3000ms, killing
+[init] ntpd attempt 0 failed (status=9)
+ntpd: setting time to 2026-07-23 18:10:22.702171 (offset -13931386.726816s)
+[init] ntpd time sync ok
+[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...
+[31m[9.471] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/tmp' failed: -2
+[0m[init] bind /tools/tmp -> /tmp: skipped (errno=2)
+[31m[9.475] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/bin' failed: -2
+[0m[init] bind /tools/bin -> /bin: skipped (errno=2)
+[31m[9.477] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/sbin' failed: -2
+[0m[init] bind /tools/sbin -> /sbin: skipped (errno=2)
+[31m[9.479] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/lib' failed: -2
+[0m[init] bind /tools/lib -> /lib: skipped (errno=2)
+[31m[9.480] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/usr' failed: -2
+[0m[init] bind /tools/usr -> /usr: skipped (errno=2)
+[31m[9.482] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/root' failed: -2
+[0m[init] bind /tools/root -> /root: skipped (errno=2)
+[31m[9.485] tid 1 pid 1: [do_bind_mount] vfs_lookup source '/tools/tests' failed: -2
+[0m[init] bind /tools/tests -> /tests: skipped (errno=2)
+[init] bind /sdcard/musl -> /musl
+[init] bind /sdcard/glibc -> /glibc
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0x010 ltp_runner=inline timer_smoke=false ext4_profile=false reclaim_profile=false skip_apk=false
+[initproc] LTP exclude list: ["rt_sigtimedwait01", "timer_create01", "timer_create02", "memfd_create03", "memfd_create04", "eventfd06", "fork13", "fork14", "futex_wake04", "sysinfo03", "madvise06", "madvise07", "madvise08", "madvise09", "madvise11", "msgctl05", "msgstress01", "rt_tgsigqueueinfo01", "signal06", "semctl08", "kill13", "timerfd04", "timerfd_settime02"]
+[initproc] LTP exclude musl: ["clone04", "profil01", "sigtimedwait01", "sigwaitinfo01", "nice04"], glibc: []
+[initproc] LTP exclude arch musl: ["epoll_create02", "atof01", "fptest01", "fptest02"], glibc: ["nice05"]
+[initproc] ensuring base directories...
+base dirs already exist, skipping mkdir
+/bin/bash: line 1: chmod: command not found
+[initproc] attempting bind mount /tools/bin -> /bin...
+[31m[9.710] tid 1 pid 1: [do_bind_mount] vfs_lookup source 'tools/bin' failed: -2
+[0m[initproc] bind mount tools/bin -> bin: skipped (errno=2)
+[initproc] installing busybox applets to /bin ...
+[initproc] busybox --install -s /bin -> exit=0
+[initproc] preparing /etc account/network files ...
+[initproc] minimal account files done, exit=0
+[initproc] install libgcc_s failed to open, ret=-2
+[initproc] linking musl/glibc libs to /lib ...
+ln: /glibc/lib/libgcc_s.so.1: Invalid argument
+[initproc] lib linking done, exit=0
+prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+ln: /musl/cyclictest: Invalid argument
+[initproc] cyclictest musl compatibility done, exit=0
+[initproc] fixing +x permissions on test scripts ...
+[initproc] chmod test scripts done, exit=0
+[initproc] apk add e2fsprogs ...
+/bin/bash: line 1: /tools/bin/apk.static: No such file or directory
+[initproc] apk add -> exit=0
+BIN_BASH_OK
+[initproc] post-prepare /bin/bash check exit=0 has_bin_bash=true
+[initproc] run_selected_groups start mask=0x010 order=["basic", "busybox", "lua", "lmbench", "iozone", "libcbench", "netperf", "iperf", "libctest", "cyclictest", "ltp", "cpython", "unixbench"]
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+[initproc] skip lmbench (mask bit8 not set)
+[initproc] select group=iozone timeout=480s
+#### OS COMP TEST GROUP START iozone-musl ####
+iozone automatic measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:10:25 2026
+
+	Auto Mode
+	Record Size 1 kB
+	File size set to 4096 kB
+	Command line used: ./iozone -a -r 1k -s 4m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+                                                                    random    random      bkwd     record     stride                                        
+              kB  reclen    write    rewrite      read    reread      read     write      read    rewrite       read    fwrite  frewrite     fread   freread
+            4096       1[31m[15.777] tid 67 pid 67: another_ext4: fsync writeback inode 3215 failed: EIO
+[0mfsync: I/O error
+
+iozone: interrupted
+
+exiting iozone
+
+iozone throughput write/read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:10:29 2026
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 1 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[19.499] tid 71 pid 71: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[19.540] tid 72 pid 72: another_ext4: fsync writeback inode 3218 failed: EIO
+[0m[31m[19.549] tid 73 pid 73: another_ext4: fsync writeback inode 3219 failed: EIO
+[0m[31m[19.555] tid 70 pid 70: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m
+	Children see throughput for  4 initial writers 	=    2216.17 kB/sec
+	Parent sees throughput for  4 initial writers 	=    2124.07 kB/sec
+	Min throughput per process 			=     543.40 kB/sec 
+	Max throughput per process 			=     566.23 kB/sec
+	Avg throughput per process 			=     554.04 kB/sec
+	Min xfer 					=     992.00 kB
+[31m[19.643] tid 69 pid 69: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[23.810] tid 75 pid 75: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[23.815] tid 76 pid 76: another_ext4: fsync writeback inode 3218 failed: EIO
+[0m[31m[23.824] tid 77 pid 77: another_ext4: fsync writeback inode 3219 failed: EIO
+[0m[31m[23.836] tid 74 pid 74: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m
+	Children see throughput for  4 rewriters 	=    2280.20 kB/sec
+	Parent sees throughput for  4 rewriters 	=    2229.68 kB/sec
+	Min throughput per process 			=     555.97 kB/sec 
+	Max throughput per process 			=     579.35 kB/sec
+	Avg throughput per process 			=     570.05 kB/sec
+	Min xfer 					=    1000.00 kB
+[31m[23.879] tid 69 pid 69: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[26.788] tid 78 pid 78: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[26.796] tid 79 pid 79: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[26.805] tid 80 pid 80: another_ext4: fsync writeback inode 3218 failed: EIO
+[0m[31m[26.810] tid 81 pid 81: another_ext4: fsync writeback inode 3219 failed: EIO
+[0m
+	Children see throughput for  4 readers 		=    7831.36 kB/sec
+	Parent sees throughput for  4 readers 		=    7209.57 kB/sec
+	Min throughput per process 			=    1827.26 kB/sec 
+	Max throughput per process 			=    2091.12 kB/sec
+	Avg throughput per process 			=    1957.84 kB/sec
+	Min xfer 					=     949.00 kB
+[31m[26.841] tid 69 pid 69: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[29.724] tid 83 pid 83: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[29.728] tid 84 pid 84: another_ext4: fsync writeback inode 3218 failed: EIO
+[0m[31m[29.737] tid 85 pid 85: another_ext4: fsync writeback inode 3219 failed: EIO
+[0m[31m[29.749] tid 82 pid 82: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m
+	Children see throughput for 4 re-readers 	=    8018.16 kB/sec
+	Parent sees throughput for 4 re-readers 	=    7441.97 kB/sec
+	Min throughput per process 			=    1944.19 kB/sec 
+	Max throughput per process 			=    2098.81 kB/sec
+	Avg throughput per process 			=    2004.54 kB/sec
+	Min xfer 					=     947.00 kB
+[31m[29.776] tid 69 pid 69: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+iozone throughput random-read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:10:50 2026
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 2 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[40.617] tid 93 pid 93: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[40.636] tid 95 pid 95: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[40.666] tid 92 pid 92: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[40.670] tid 94 pid 94: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m
+	Children see throughput for  4 initial writers 	=    2320.44 kB/sec
+	Parent sees throughput for  4 initial writers 	=    2229.98 kB/sec
+	Min throughput per process 			=     566.29 kB/sec 
+	Max throughput per process 			=     592.42 kB/sec
+	Avg throughput per process 			=     580.11 kB/sec
+	Min xfer 					=     995.00 kB
+[31m[40.725] tid 91 pid 91: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[44.930] tid 97 pid 97: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[44.934] tid 98 pid 98: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[44.943] tid 99 pid 99: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[44.951] tid 96 pid 96: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for  4 rewriters 	=    2234.65 kB/sec
+	Parent sees throughput for  4 rewriters 	=    2186.65 kB/sec
+	Min throughput per process 			=     556.00 kB/sec 
+	Max throughput per process 			=     566.62 kB/sec
+	Avg throughput per process 			=     558.66 kB/sec
+	Min xfer 					=    1001.00 kB
+[31m[44.994] tid 91 pid 91: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[47.017] tid 91 pid 91: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[50.170] tid 100 pid 100: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[50.175] tid 101 pid 101: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[50.184] tid 102 pid 102: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[50.198] tid 103 pid 103: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m
+	Children see throughput for 4 random readers 	=    5346.76 kB/sec
+	Parent sees throughput for 4 random readers 	=    5075.09 kB/sec
+	Min throughput per process 			=    1326.78 kB/sec 
+	Max throughput per process 			=    1341.60 kB/sec
+	Avg throughput per process 			=    1336.69 kB/sec
+	Min xfer 					=    1011.00 kB
+[31m[50.227] tid 91 pid 91: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[52.251] tid 91 pid 91: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[56.717] tid 107 pid 107: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[56.733] tid 105 pid 105: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[56.741] tid 106 pid 106: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[56.771] tid 104 pid 104: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for 4 random writers 	=    1955.02 kB/sec
+	Parent sees throughput for 4 random writers 	=    1890.72 kB/sec
+	Min throughput per process 			=     480.74 kB/sec 
+	Max throughput per process 			=     499.98 kB/sec
+	Avg throughput per process 			=     488.76 kB/sec
+	Min xfer 					=    1001.00 kB
+[31m[56.838] tid 91 pid 91: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+iozone throughput read-backwards measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:11:17 2026
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 3 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[67.473] tid 115 pid 115: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[67.482] tid 117 pid 117: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[67.495] tid 116 pid 116: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[67.505] tid 114 pid 114: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for  4 initial writers 	=    2261.35 kB/sec
+	Parent sees throughput for  4 initial writers 	=    2204.71 kB/sec
+	Min throughput per process 			=     557.11 kB/sec 
+	Max throughput per process 			=     571.56 kB/sec
+	Avg throughput per process 			=     565.34 kB/sec
+	Min xfer 					=    1014.00 kB
+[31m[67.549] tid 113 pid 113: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[71.710] tid 119 pid 119: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[71.714] tid 120 pid 120: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[71.723] tid 121 pid 121: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[71.731] tid 118 pid 118: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for  4 rewriters 	=    2277.74 kB/sec
+	Parent sees throughput for  4 rewriters 	=    2228.22 kB/sec
+	Min throughput per process 			=     561.19 kB/sec 
+	Max throughput per process 			=     579.32 kB/sec
+	Avg throughput per process 			=     569.43 kB/sec
+	Min xfer 					=     995.00 kB
+[31m[71.771] tid 113 pid 113: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[73.794] tid 113 pid 113: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[76.866] tid 122 pid 122: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[76.871] tid 123 pid 123: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[76.879] tid 124 pid 124: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[76.892] tid 125 pid 125: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m
+	Children see throughput for 4 reverse readers 	=    5919.96 kB/sec
+	Parent sees throughput for 4 reverse readers 	=    5604.97 kB/sec
+	Min throughput per process 			=    1467.01 kB/sec 
+	Max throughput per process 			=    1489.16 kB/sec
+	Avg throughput per process 			=    1479.99 kB/sec
+	Min xfer 					=    1006.00 kB
+[31m[76.921] tid 113 pid 113: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+iozone throughput stride-read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:11:37 2026
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 5 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000080 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[87.470] tid 133 pid 133: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[87.482] tid 134 pid 134: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[87.502] tid 135 pid 135: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[87.511] tid 132 pid 132: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for  4 initial writers 	=    2344.48 kB/sec
+	Parent sees throughput for  4 initial writers 	=    2278.65 kB/sec
+	Min throughput per process 			=     574.05 kB/sec 
+	Max throughput per process 			=     594.33 kB/sec
+	Avg throughput per process 			=     586.12 kB/sec
+	Min xfer 					=    1006.00 kB
+[31m[87.556] tid 131 pid 131: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[91.734] tid 139 pid 139: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[91.739] tid 136 pid 136: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[91.748] tid 137 pid 137: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[91.756] tid 138 pid 138: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m
+	Children see throughput for  4 rewriters 	=    2263.81 kB/sec
+	Parent sees throughput for  4 rewriters 	=    2214.11 kB/sec
+	Min throughput per process 			=     554.18 kB/sec 
+	Max throughput per process 			=     579.63 kB/sec
+	Avg throughput per process 			=     565.95 kB/sec
+	Min xfer 					=     998.00 kB
+[31m[92.087] tid 131 pid 131: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[94.110] tid 131 pid 131: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[97.180] tid 140 pid 140: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[97.185] tid 141 pid 141: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[97.194] tid 142 pid 142: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[97.202] tid 143 pid 143: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m
+	Children see throughput for 4 stride readers 	=    5996.68 kB/sec
+	Parent sees throughput for 4 stride readers 	=    5663.38 kB/sec
+	Min throughput per process 			=    1495.16 kB/sec 
+	Max throughput per process 			=    1503.12 kB/sec
+	Avg throughput per process 			=    1499.17 kB/sec
+	Min xfer 					=    1019.00 kB
+[31m[97.235] tid 131 pid 131: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+iozone throughput fwrite/fread measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:11:57 2026
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 6 -i 7 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[108.027] tid 152 pid 152: another_ext4: fsync writeback inode 3216 failed: EIO
+[0mfsync: I/O error
+[31m[108.045] tid 150 pid 150: another_ext4: fsync writeback inode 3214 failed: EIO
+[0mfsync: I/O error
+[31m[108.057] tid 153 pid 153: another_ext4: fsync writeback inode 3217 failed: EIO
+[0mfsync: I/O error
+[31m[108.071] tid 151 pid 151: another_ext4: fsync writeback inode 3215 failed: EIO
+[0mfsync: I/O error
+
+	Children see throughput for  4 fwriters 	=    2189.79 kB/sec
+	Parent sees throughput for  4 fwriters 		=    2137.67 kB/sec
+	Min throughput per process 			=     539.90 kB/sec 
+	Max throughput per process 			=     555.67 kB/sec
+	Avg throughput per process 			=     547.45 kB/sec
+	Min xfer 					=    1024.00 kB
+[31m[108.110] tid 149 pid 149: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[110.188] tid 154 pid 154: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[110.278] tid 155 pid 155: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[110.380] tid 156 pid 156: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[110.492] tid 157 pid 157: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m
+	Children see throughput for  4 freaders 	=    5450.99 kB/sec
+	Parent sees throughput for  4 freaders 		=    5203.47 kB/sec
+	Min throughput per process 			=    1333.95 kB/sec 
+	Max throughput per process 			=    1405.66 kB/sec
+	Avg throughput per process 			=    1362.75 kB/sec
+	Min xfer 					=    1024.00 kB
+[31m[111.309] tid 149 pid 149: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+iozone throughput pwrite/pread measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:12:12 2026
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 9 -i 10 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[124.429] tid 166 pid 166: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[124.457] tid 165 pid 165: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[124.486] tid 167 pid 167: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[124.496] tid 164 pid 164: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for 4 pwrite writers 	=    2250.99 kB/sec
+	Parent sees throughput for 4 pwrite writers 	=    2154.03 kB/sec
+	Min throughput per process 			=     544.69 kB/sec 
+	Max throughput per process 			=     580.13 kB/sec
+	Avg throughput per process 			=     562.75 kB/sec
+	Min xfer 					=     980.00 kB
+[31m[124.718] tid 163 pid 163: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[126.742] tid 163 pid 163: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[129.637] tid 168 pid 168: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m[31m[129.642] tid 169 pid 169: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[129.651] tid 170 pid 170: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[129.664] tid 171 pid 171: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m
+	Children see throughput for 4 pread readers 	=    8301.98 kB/sec
+	Parent sees throughput for 4 pread readers 	=    7686.23 kB/sec
+	Min throughput per process 			=    2054.98 kB/sec 
+	Max throughput per process 			=    2097.81 kB/sec
+	Avg throughput per process 			=    2075.50 kB/sec
+	Min xfer 					=     994.00 kB
+[31m[129.692] tid 163 pid 163: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+iozone throughtput pwritev/preadv measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Thu Jul 23 18:12:30 2026
+
+	Selected test not available on the version.
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 11 -i 12 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[31m[140.468] tid 179 pid 179: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[140.475] tid 180 pid 180: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[140.489] tid 181 pid 181: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[140.528] tid 178 pid 178: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for  4 initial writers 	=    2244.69 kB/sec
+	Parent sees throughput for  4 initial writers 	=    2158.41 kB/sec
+	Min throughput per process 			=     549.84 kB/sec 
+	Max throughput per process 			=     567.16 kB/sec
+	Avg throughput per process 			=     561.17 kB/sec
+	Min xfer 					=    1012.00 kB
+[31m[140.807] tid 177 pid 177: another_ext4: global sync failed for filesystem 1: EIO
+[0m[31m[161.457] tid 183 pid 183: another_ext4: fsync writeback inode 3215 failed: EIO
+[0m[31m[161.462] tid 184 pid 184: another_ext4: fsync writeback inode 3216 failed: EIO
+[0m[31m[161.471] tid 185 pid 185: another_ext4: fsync writeback inode 3217 failed: EIO
+[0m[31m[161.476] tid 182 pid 182: another_ext4: fsync writeback inode 3214 failed: EIO
+[0m
+	Children see throughput for  4 rewriters 	=     220.36 kB/sec
+	Parent sees throughput for  4 rewriters 	=     219.84 kB/sec
+	Min throughput per process 			=      53.52 kB/sec 
+	Max throughput per process 			=      56.12 kB/sec
+	Avg throughput per process 			=      55.09 kB/sec
+	Min xfer 					=     978.00 kB
+[31m[161.524] tid 177 pid 177: another_ext4: global sync failed for filesystem 1: EIO
+[0m
+
+
+iozone test complete.
+#### OS COMP TEST GROUP END iozone-musl ####
+[initproc] done iozone_testcode.sh in /musl exit_code=0
+[timer] group iozone in /musl took 156s
+[initproc] sleep 1s before next group
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] skip ltp (mask bit11 not set)
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+[ext4-ab] workload-success run_id=ext4-barrier-clean backend=another failures=0 perf_samples=1
+make[1]: Leaving directory '/app/os'

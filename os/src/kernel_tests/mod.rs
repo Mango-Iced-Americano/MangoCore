@@ -19,24 +19,33 @@
 //! 2. Register it in `all_tests()` in this file
 
 pub mod runner;
+pub mod platform;
 
-#[path = "waitqueue.rs"]
-mod kt_waitqueue;
-#[path = "timer.rs"]
-mod kt_timer;
-#[path = "sched.rs"]
-mod kt_sched;
-#[path = "mm.rs"]
-mod kt_mm;
+#[path = "block_device.rs"]
+mod kt_block_device;
 #[path = "ext4.rs"]
 mod kt_ext4;
 #[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
 #[path = "gmac.rs"]
 mod kt_gmac;
+#[path = "ext4_another/mod.rs"]
+mod kt_ext4_another;
+#[path = "ext4_another_lifetime.rs"]
+mod kt_ext4_another_lifetime;
+#[path = "mm.rs"]
+mod kt_mm;
+#[path = "page_cache/mod.rs"]
+mod kt_page_cache;
+#[path = "sched.rs"]
+mod kt_sched;
+#[path = "timer.rs"]
+mod kt_timer;
+#[path = "waitqueue.rs"]
+mod kt_waitqueue;
 
-use runner::KernelTest;
 use alloc::vec;
 use alloc::vec::Vec;
+use runner::KernelTest;
 use spin::Mutex;
 
 /// Global storage for ktest boot config.
@@ -54,9 +63,14 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("timer", kt_timer::tests()),
         ("sched", kt_sched::tests()),
         ("mm", kt_mm::tests()),
+        ("page_cache", kt_page_cache::tests()),
         ("ext4", kt_ext4::tests()),
         #[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
         ("gmac", kt_gmac::tests()),
+        ("ext4_another", kt_ext4_another::tests()),
+        ("ext4_another_lifetime", kt_ext4_another_lifetime::tests()),
+        ("block_device", kt_block_device::tests()),
+        ("platform", platform::tests()),
     ]
 }
 
@@ -93,13 +107,17 @@ pub fn run_from_bootargs_in_task(config: &crate::bootargs::BootConfig) {
     if results.failed > 0 {
         crate::println!(
             "\x1b[31m# results: {} passed, {} failed, {} total\x1b[0m",
-            results.passed, results.failed, results.total,
+            results.passed,
+            results.failed,
+            results.total,
         );
         crate::println!("\x1b[31m[KTEST RESULT: FAIL]\x1b[0m");
     } else {
         crate::println!(
             "\x1b[32m# results: {} passed, {} failed, {} total\x1b[0m",
-            results.passed, results.failed, results.total,
+            results.passed,
+            results.failed,
+            results.total,
         );
         crate::println!("\x1b[32m[KTEST RESULT: PASS]\x1b[0m");
     }

@@ -1,0 +1,3 @@
+docker exec pxy-mangocore-os-dev-1 sh -c 'cd /app && make toolchain-preflight && make kernel ARCH=rv64 PROFILE=normal && make kernel ARCH=la64 PROFILE=normal'
+docker exec pxy-mangocore-os-dev-1 sh -c 'cd /app && make -C os ktest-run ARCH=rv64 PROFILE=normal 2>&1' | tee /tmp/ktest-fix.log
+exit status: 0

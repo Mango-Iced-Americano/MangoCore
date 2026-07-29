@@ -1,0 +1,102 @@
+=== Regression RV64: first 50 lines ===
+Rust toolchain preflight passed: nightly-2026-05-10
+make -C os "ARCH=rv64" "MODE=release" "PROFILE=regression" "BUILD_ROOT=/app/build" test
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=rv64 -f make/rv64.mk regression-run MODE=release PRODUCT_ROOT="/app/build/rv64/release/regression" KERNEL_OUTPUT_ROOT="/app/build/rv64/release/regression/kernel"
+make[2]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+[regression] Building kernel with regression initramfs...
+make[3]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make[4]: Entering directory '/app/user'
+Rust toolchain preflight passed: nightly-2026-05-10
+CARGO_TARGET_DIR="/app/build/rv64/release/regression/user" cargo build --target=riscv64gc-unknown-none-elf --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+  |
+  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: the feature `panic_info_message` has been stable since 1.81.0 and no longer requires an attribute to enable
+ --> src/lib.rs:4:12
+  |
+4 | #![feature(panic_info_message)]
+  |            ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: creating a shared reference to mutable static
+  --> src/lib.rs:85:19
+   |
+85 |             .init(HEAP_SPACE.as_ptr() as usize, USER_HEAP_SIZE);
+   |                   ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+   |
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+   = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: feature `asm_experimental_arch` is declared but not used
+ --> src/lib.rs:3:12
+  |
+3 | #![feature(asm_experimental_arch)]
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+=== Regression RV64: last 50 lines ===
+[regression_timer_realtime_jump] PASS
+ok 3 timer_realtime_jump
+[regression_rename_long_name] start
+  creating file with 255 byte name
+  255-byte file created OK
+  rename(255-byte → short) returned 0
+  attempting file with 256 byte name
+  openat(256-byte name) returned -36 — name rejected, OK
+  rename(short → 4096-byte) returned 0 (must not panic)
+[regression_rename_long_name] PASS
+ok 4 rename_long_name
+[regression_lwext4_trunc_hole] start: 8 pages, cold-reopen sparse-hole + batch read_pages + post-write persist
+  phase 1: wrote 8 pages 0xa0..0xa7
+  phase 1: synced and closed
+  phase 2: truncated to 123 bytes inside page 0
+  phase 2: synced and closed
+  phase 3: extended back to 8 pages (cold reopen)
+  phase 3a: retained partial-block prefix: 123 bytes all 0xa0 OK
+  phase 3a: truncated same-block tail: 3973 bytes all 0x00 OK
+  phase 3b: page-1 single (read_page): 4096 bytes all 0x00 OK
+  phase 3c: pages-1-2 batch (read_pages): 8192 bytes all 0x00 OK
+  phase 3d: wrote marker 0xbb to page 3
+  phase 3: synced and closed
+  phase 4a: page-3 marker persist: 4096 bytes all 0xbb OK
+  phase 4b: page-2 adj hole: 4096 bytes all 0x00 OK
+  phase 4c: page-4 adj hole: 4096 bytes all 0x00 OK
+  phase 4d: retained prefix intact: 123 bytes all 0xa0 OK
+  phase 4d: truncated tail remains zero: 3973 bytes all 0x00 OK
+  phase 4: verified, closed
+  phase 5a: sparse gap page 0: 4096 bytes all 0x00 OK
+  phase 5b: sparse gap page 1: 4096 bytes all 0x00 OK
+  phase 5c: sparse gap page 2: 4096 bytes all 0x00 OK
+  phase 5d: new-block zero prefix: 123 bytes all 0x00 OK
+  phase 5e: sparse marker: 17 bytes all 0xcc OK
+  phase 5f: new-block zero suffix after extend: 3956 bytes all 0x00 OK
+  phase 6a: leading extent survives hole truncate: 1 bytes all 0xdd OK
+  phase 6b: retained sparse range stays zero: 8191 bytes all 0x00 OK
+  phase 6c: data survives after-last no-op: 1 bytes all 0xdd OK
+  phase 6: inter-extent hole and after-last truncate paths OK
+  cleanup: test file removed
+[regression_lwext4_trunc_hole] PASS
+ok 5 lwext4_truncate_hole
+[regression_clone_vm_second_slot] start
+[regression_clone_vm_second_slot] PASS
+ok 6 clone_vm_second_slot
+# results: 6 passed, 0 failed, 6 total
+[L4 REGRESSION RESULT: PASS]
+=== REGRESSION PASS ===
+make[2]: Leaving directory '/app/os'
+make[1]: Leaving directory '/app/os'

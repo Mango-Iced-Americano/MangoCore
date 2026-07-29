@@ -142,10 +142,12 @@ impl FatInode {
         if let Some(ref pc) = *cache_opt {
             return pc.clone();
         }
-        let backend = Arc::new(FatPageCacheBackend::new(
-            self.fs.clone(),
-            self.file_content.clone(),
-        ));
+        let inode = self
+            .self_weak
+            .lock()
+            .as_ref()
+            .map_or_else(|| unreachable!(), Clone::clone);
+        let backend = Arc::new(FatPageCacheBackend::new(self.fs.clone(), &inode));
         let pc = NewPageCache::new();
         pc.set_backend(backend);
         *cache_opt = Some(pc.clone());

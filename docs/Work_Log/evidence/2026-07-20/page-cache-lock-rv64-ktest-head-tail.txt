@@ -1,0 +1,80 @@
+info: override toolchain for '/app/os' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk ktest-run MODE=release LOG=
+make[1]: Entering directory '/app/os'
+make[2]: Entering directory '/app/user'
+info: override toolchain for '/app/user' set to 'nightly-2025-01-18-x86_64-unknown-linux-gnu'
+(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add riscv64gc-unknown-none-elf
+riscv64gc-unknown-none-elf (installed)
+rustup component add rust-src
+info: component 'rust-src' is up to date
+rustup component add llvm-tools-preview
+info: component 'llvm-tools' for target 'x86_64-unknown-linux-gnu' is up to date
+cargo build --target=riscv64gc-unknown-none-elf --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+   Compiling user_lib v0.1.0 (/app/user)
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: the feature `panic_info_message` has been stable since 1.81.0 and no longer requires an attribute to enable
+ --> src/lib.rs:4:12
+  |
+4 | #![feature(panic_info_message)]
+  |            ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: creating a shared reference to mutable static is discouraged
+  --> src/lib.rs:83:19
+   |
+83 |             .init(HEAP_SPACE.as_ptr() as usize, USER_HEAP_SIZE);
+   |                   ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+   |
+[kernel] Console initialized.
+last 193982 Physical Frames.
+.text [0x80200000, 0x803e7000)
+.rodata [0x803e7000, 0x8041c000)
+.data [0x8041c000, 0x809e0000)
+.bss [0x809e0000, 0x90a42000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] PRNG initialized.
+[initramfs] unpacked: files=32 dirs=21 symlinks=1 bytes=2051014
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] VirtIO net device not found, skipping network init
+[kernel] No net device, using null device (loopback only)
+[kernel] net interface initialized (loopback only, no NIC)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[kernel] official fs (x0) mounted at sdcard
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[kernel] mount_block_fs: ext4 mount failed: EIO
+[initramfs] tools disk (vdb1) mount failed, leaving /tools empty
+sinitproc: 80613000, einitproc: 806A1AB8, sbash: 806A2000, ebash: 807BA378, sbusybox: 807BB000, ebusybox: 8090DC28, sosconfig: 8090E000, eosconfig: 8090EF09
+[kernel] Entering kernel test mode (ktest) — tests: ["page_cache"], repeat: 1
+TAP version 13
+# arch: riscv64
+# mode: ktest
+# repeat: 1
+# timeout_ms: 5000
+# failfast: false
+1..1
+[32mok[0m 1 page_cache::read_page_reenters_same_cache
+[32m# results: 1 passed, 0 failed, 1 total[0m
+[32m[KTEST RESULT: PASS][0m
+# ktest: all tests passed. shutting down.
+make[1]: Leaving directory '/app/os'

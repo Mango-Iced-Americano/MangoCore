@@ -2,7 +2,7 @@
 title: "系统架构 (System Architecture)"
 category: architecture
 status: draft
-last_update: 2026-07-23
+last_update: 2026-07-28
 tags: [architecture, boot, hal, kernel]
 ---
 
@@ -14,11 +14,11 @@ MangoCore 是支持 RISC-V 64 与 LoongArch64 的 `#![no_std]` 裸机内核。HA
 
 ```text
 QEMU → OpenSBI/firmware → arch entry → rust_main()
-  → bootstrap_init → mem_clear → console/trace → mm → machine/timer
-  → random::init → bootargs::load
+  → bootstrap_init → mem_clear → console/trace → mm → PlatformInfo → machine/timer
+  → random::init → bootargs::load + select_policy configuration
   → initramfs CPIO → VFS_ROOT → devfs + /dev/tty bootstrap
   → normal: net init + register_boot_block_devices
-  → add_initproc → /init → /sbin/init (PID1) → test-runner → run_tasks
+  → add_initproc → /init (fallback: policy init path) → /sbin/init (PID1) → test-runner → run_tasks
 ```
 
 `initramfs` 是唯一生产启动根。内核解包 CPIO、建立 `VFS_ROOT` 并只准备 devfs/tty 与挂载点；它不会选择或挂载外部磁盘。normal 模式随后仅发现并注册块设备，PID1 决定挂载策略。regression 与 ktest 不附加外部磁盘；ktest 直接建立内核测试任务而不加载用户态 PID1。
@@ -29,7 +29,8 @@ QEMU → OpenSBI/firmware → arch entry → rust_main()
 
 | 主题 | 源码 |
 |---|---|
-| Rust 启动入口 | `os/src/main.rs` |
+| Rust 启动入口 | `os/src/main.rs`（唯一的共享启动编排，读取平台策略配置） |
+| 平台配置 | `os/src/hal/platform/{mod.rs,qemu_riscv,qemu_la,vf2}.rs`（名称、init 回退路径、默认 root 设备） |
 | initramfs/VFS bootstrap | `os/src/fs/{mod.rs,initramfs.rs,boot_block.rs}` |
 | PID1 与 runner | `user/src/bin/{init.rs,initd.rs,test_runner.rs}` |
 | 调度入口 | `os/src/task/{mod.rs,processor.rs}` |

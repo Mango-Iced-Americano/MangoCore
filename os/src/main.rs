@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(linkage)]
+#![feature(lint_reasons)]
 #![feature(asm_const)]
 #![feature(naked_functions)]
 #![feature(asm_experimental_arch)]
@@ -52,8 +53,8 @@ mod timer;
 mod trace;
 mod utils;
 
-use crate::hal::bootstrap_init;
-use crate::hal::machine_init;
+use crate::hal::{bootstrap_init, machine_init};
+
 #[cfg(all(feature = "loongarch64", feature = "board_2k1000"))]
 core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
 #[cfg(feature = "riscv")]
@@ -87,17 +88,25 @@ fn mem_clear() {
 }
 
 #[no_mangle]
-pub fn rust_main() -> ! {
+pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
+    crate::hal::boot::save_boot_info();
     bootstrap_init();
+    // QEMU may place the DTB inside the kernel's large BSS image. Parse and
+    // retain the pre-heap memory map before clearing that physical range.
+    crate::hal::firmware::populate_memory_regions();
     mem_clear();
     console::log_init();
     trace::init();
+    let _ = (hart_id, dtb_paddr);
+    let bi = crate::hal::boot::boot_info();
+    println!(
+        "[kernel] Boot protocol: {:?}, hart_id={}, dtb_paddr={:#x}",
+        bi.protocol, bi.hart_id, bi.dtb_paddr
+    );
     println!("[kernel] Console initialized.");
     mm::init();
     println!("[kernel] Hello, world!");
-    // note that remap_test is currently NOT supported by LA64, for the whole kernel space is RW!
-    // #[cfg(feature = "riscv")]
-    // mm::remap_test();
+    crate::hal::platform::init_platform_info();
 
     machine_init();
     crate::task::timer_subsystem_init();
@@ -106,24 +115,21 @@ pub fn rust_main() -> ! {
         Err(e) => println!("[kernel] PRNG init warning: {:?}", e),
     }
 
-    // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
-    let boot_config = crate::bootargs::load();
+    let policy = crate::hal::platform::select_policy();
+    let mut boot_config = crate::bootargs::load();
+    let cmdline = crate::bootargs::Cmdline::parse(crate::bootargs::get_cmdline());
+    if cmdline.get("root").is_none() && cmdline.get("mango.root").is_none() {
+        boot_config.root = policy.default_root_device().into();
+    }
 
-    // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
-        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs bootstrap
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
-
-        // Regression 模式：跳过网卡和块设备初始化（纯 initramfs，无外部磁盘）
         if boot_config.mode != crate::bootargs::BootMode::Regression {
             drivers::init_net_device();
             net::config::init();
-
-            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
-            // PID1 owns the later x0/x1 mount policy.
-            fs::register_boot_block_devices();
+            fs::mount_boot_block_devices(&boot_config);
         } else {
             crate::println!("[kernel] Regression mode — skipping net/block init");
         }
@@ -131,31 +137,17 @@ pub fn rust_main() -> ! {
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
 
-    // ── Kernel self-test mode (mango.mode=ktest) ──
-    // When ktest runs with the scheduler active, we spawn the test runner
-    // as a kernel task and enter run_tasks().  The runner and any spawned
-    // test helpers are the only tasks — initproc is *not* added.
     if boot_config.mode == crate::bootargs::BootMode::Ktest {
         crate::println!(
             "[kernel] Entering kernel test mode (ktest) — tests: {:?}, repeat: {}",
-            boot_config.tests,
-            boot_config.repeat,
+            boot_config.tests, boot_config.repeat,
         );
-        // Store the config so the fn()-only trampoline can access it.
         *crate::kernel_tests::KTEST_BOOT_CONFIG.lock() = Some(boot_config);
-        // Spawn the test runner as a kernel task.  It will run all
-        // selected tests, then call hal::shutdown().
-        // Spawned test helpers (wakers, additional waiters) run and exit
-        // within the scheduler before the runner finishes.
         crate::task::spawn_ktest_task(crate::kernel_tests::run_ktest_entry);
-        // Enter scheduler — ktest runner runs as a scheduled task.
         task::run_tasks();
     }
 
-    // ── Normal boot ──
     task::add_initproc();
-    // note that in run_tasks(), there is yet *another* pre_start_init(),
-    // which is used to turn on interrupts in some archs like LoongArch.
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }

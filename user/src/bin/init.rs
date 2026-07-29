@@ -2,19 +2,19 @@
 #![no_main]
 
 extern crate alloc;
-use alloc::format;
 use core::sync::atomic::{AtomicBool, Ordering};
-use user_lib::syscall::{sys_mkdirat, sys_mount};
 use user_lib::{
-    exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
+    exec, exit, fork, getpid, kill, open, println, read, shutdown, sigaction, sleep,
     waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
 };
+
+#[path = "init/mounts.rs"]
+mod mounts;
 
 const PID1: isize = 1;
 const RUNNER: &str = "/test-runner\0";
 const RESCUE_SHELL: &str = "/rescue/sh\0";
 const SIGACTION_RESTART: usize = 0x10000000;
-const MS_BIND: usize = 4096;
 static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -52,81 +52,6 @@ fn reap_orphans() {
     let mut status = 0;
     while waitpid_wnohang(-1, &mut status) > 0 {}
     CHILD_EVENT.store(false, Ordering::Release);
-}
-
-fn prepare_pseudo_fs_framework() {
-    const AT_FDCWD: isize = -100;
-    for path in [
-        "/dev\0",
-        "/proc\0",
-        "/sys\0",
-        "/run\0",
-        "/tmp\0",
-        "/dev/shm\0",
-    ] {
-        let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
-    }
-    println!("[init] pseudo-fs mount framework ready");
-}
-
-fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
-    let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
-    if result < 0 {
-        println!(
-            "[init] mount {} at {} failed: {}",
-            fstype.trim_end_matches('\0'),
-            target.trim_end_matches('\0'),
-            result
-        );
-        return false;
-    }
-    true
-}
-
-fn mount_pseudo_filesystems() {
-    let _ = try_mount("none\0", "/proc\0", "proc\0");
-    let _ = try_mount("none\0", "/sys\0", "sysfs\0");
-    let _ = try_mount("none\0", "/run\0", "tmpfs\0");
-    let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
-}
-
-fn mount_disk(source: &'static str, target: &'static str) -> bool {
-    try_mount(source, target, "ext4\0") || try_mount(source, target, "fat32\0")
-}
-
-fn try_bind_mount(source: &str, target: &str) {
-    let src = alloc::format!("{}\0", source);
-    let tgt = alloc::format!("{}\0", target);
-    let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
-    if ret == 0 {
-        println!("[init] bind mount {} -> {}", source, target);
-    } else {
-        println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
-    }
-}
-
-fn bind_tools_and_sdcard(tools_ok: bool, disk_ok: bool) {
-    // Tools disk: bind-mount key directories to root so writes persist across reboots.
-    if tools_ok {
-        for (src, dst) in [
-            ("/tools/bin", "/bin"),
-            ("/tools/sbin", "/sbin"),
-            ("/tools/lib", "/lib"),
-            ("/tools/usr", "/usr"),
-            ("/tools/root", "/root"),
-        ] {
-            try_bind_mount(src, dst);
-        }
-    }
-    // sdcard: bind-mount musl/glibc runtime directories.
-    if disk_ok {
-        for (src, dst) in [
-            ("/sdcard/musl", "/musl"),
-            ("/sdcard/glibc", "/glibc"),
-        ] {
-            try_bind_mount(src, dst);
-        }
-    }
 }
 
 fn boot_profile() -> &'static str {
@@ -203,55 +128,17 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         return 1;
     }
     install_signal_handlers();
-    prepare_pseudo_fs_framework();
-    mount_pseudo_filesystems();
+    mounts::prepare_pseudo_fs_framework();
+    mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
     if profile != "regression" {
-        let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
-        let tools_ok = mount_disk("/dev/vdb1\0", "/tools\0")
-            || mount_disk("/dev/vdb\0", "/tools\0");
-        // /tmp: prefer ext4-backed /tmp if a block device is available
-        if disk_ok {
-            const AT_FDCWD: isize = -100;
-            let _ = sys_mkdirat(AT_FDCWD, "/sdcard/tmp\0", 0o1777);
-            let result = sys_mount(
-                "/sdcard/tmp\0".as_ptr(),
-                "/tmp\0".as_ptr(),
-                core::ptr::null(),
-                MS_BIND,
-                0,
-            );
-            if result < 0 {
-                println!("[init] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs", result);
-                let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
-            } else {
-                println!("[init] /tmp is bind-mounted from ext4 /sdcard/tmp");
-            }
-        } else {
-            let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
-        }
-        if tools_ok {
-            let result = sys_mount(
-                "/tools/etc\0".as_ptr(),
-                "/etc\0".as_ptr(),
-                core::ptr::null(),
-                MS_BIND,
-                0,
-            );
-            if result < 0 {
-                println!(
-                    "[init] bind-mount /tools/etc → /etc failed: {}, keeping initramfs /etc",
-                    result
-                );
-            } else {
-                println!("[init] /etc is bind-mounted from tools disk");
-            }
-        }
-        // Bind-mount tools and sdcard subdirectories so writes persist.
-        bind_tools_and_sdcard(tools_ok, disk_ok);
+        // mount_boot_block_devices() already owns the x0 → /sdcard and x1 →
+        // /tools mount policy. PID1 must not mount them again: a second mount
+        // returns EBUSY and prevents the bootstrap from seeing the kernel mount.
+        mounts::setup_persistent_mounts();
     } else {
         // No block device in regression mode
-        let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+        mounts::mount_tmpfs("/tmp\0");
     }
     let environ = runner_environment(profile);
     println!(

@@ -18,6 +18,10 @@ const CAP_SYSLOG: usize = 34;
 static SYSLOG_READ_ALL_CLEARED: AtomicBool = AtomicBool::new(false);
 
 pub fn sys_shutdown() -> isize {
+    #[cfg(feature = "ext4_another_backend")]
+    {
+        crate::fs::ext4_another::shutdown_all_instances();
+    }
     info!("[sys_shutdown] flushing page caches and ext4 metadata...");
     flush_all_page_caches();
     info!("[sys_shutdown] flushing all ext4 instances...");

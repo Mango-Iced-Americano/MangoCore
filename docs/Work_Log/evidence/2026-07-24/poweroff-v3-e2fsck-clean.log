@@ -1,0 +1,19 @@
+e2fsck 1.47.0 (5-Feb-2023)
+Warning: skipping journal recovery because doing a read-only filesystem check.
+Pass 1: Checking inodes, blocks, and sizes
+Deleted inode 3223 has zero dtime.  Fix? no
+
+Inodes that were part of a corrupted orphan linked list found.  Fix? no
+
+Inode 3229 was part of the orphaned inode list.  IGNORED.
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+Inode bitmap differences:  -3223 -3229
+Fix? no
+
+
+/app/sdcard-rv.img: ********** WARNING: Filesystem still has errors **********
+
+/app/sdcard-rv.img: 6454/262144 files (0.0% non-contiguous), 812805/1048576 blocks

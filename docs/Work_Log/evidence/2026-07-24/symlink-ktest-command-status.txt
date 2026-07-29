@@ -1,0 +1,3 @@
+command: docker exec pxy-mangocore-os-dev-1 bash -c "cd /app/os && ... make -e -f make/rv64.mk ktest-run KTEST_CMDLINE=..."
+exit_status: 0
+note: the requested command was first attempted verbatim but its shared sdcard-rv.img was write-locked by an unrelated run_full_test.py QEMU process; final passing run used a private decompressed image with make -e SDCARD_RV override.

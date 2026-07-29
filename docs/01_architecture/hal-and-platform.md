@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-07-28
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -50,8 +50,21 @@ os/src/hal/
 │       ├── time.rs
 │       ├── tlb.rs
 │       └── trap/
+├── boot/
+│   └── mod.rs
+├── firmware/
+│   ├── mod.rs
+│   ├── fdt.rs
+│   └── static_provider.rs
 ├── configs/
+├── device/
+│   ├── mod.rs
+│   └── manager.rs
 └── platform/
+    ├── mod.rs
+    ├── info.rs
+    ├── riscv/
+    └── loongarch64/
 ```
 
 `configs/` 存放平台配置 toml，`platform/` 存放板级常量；实际内核代码通过架构后端 re-export 使用这些常量。
@@ -66,6 +79,10 @@ os/src/hal/
 | 配置 | `config` | 架构配置模块 |
 | 栈 | `kstack_alloc`, `KernelStack`, `trap_cx_bottom_from_tid`, `ustack_bottom_from_tid` | 内核栈和用户栈/trap context 地址计算 |
 | 启动 | `bootstrap_init`, `machine_init` | 早期机器初始化和运行期机器初始化 |
+| 启动协议 | `boot_info`, `save_boot_info`, `BootProtocol`, `RawBootInfo` | 在架构入口保存 firmware 的 hart ID 与 DTB 物理地址；控制台就绪后供内核读取 |
+| 固件内存 | `firmware::populate_memory_regions`, `memory_regions`, `firmware_reserved_regions` | `mm::init()` 前零分配填充 FDT 或静态回退 DRAM/保留区切片；完整 FDT 解析留在 post-heap 阶段 |
+| 平台信息 | `platform::{init_platform_info, platform_info, platform_cmdline, PlatformInfo, DeviceInfo, DeviceKind, FirmwareKind}` | `mm::init()` 后一次性构造的 owned 平台快照：优先解析 FDT，失败时静态回退；`/chosen/bootargs` 优先于编译期 `MANGO_CMDLINE` 与内建默认值 |
+| 设备查询 | `device::DeviceManager` | 取得 `Vec<DeviceInfo>` 的所有权，提供兼容串、类型、MMIO、块设备和串口的只读查询；设备初始化后不支持变更 |
 | 用户 ABI | `user_hwcap` | 生成当前架构可安全暴露给 ELF `AT_HWCAP` 的能力位 |
 | console | `console_flush`, `console_getchar`, `console_putchar` | 字符输出输入 |
 | 中断 | `local_irq_save`, `local_irq_restore` | 保存/恢复本地中断状态 |
@@ -82,6 +99,10 @@ os/src/hal/
 
 ```rust
 pub mod arch;
+pub mod boot;
+pub mod firmware;
+pub mod platform;
+pub mod device;
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
@@ -288,6 +309,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | 路径 | 内容 |
 |------|------|
 | `os/src/hal/mod.rs` | 公共导出、`IO_CHUNK_SIZE`、`MAX_RW_COUNT` |
+| `os/src/hal/platform/{mod.rs,info.rs}` | post-heap owned `PlatformInfo`、设备分类和静态回退构造器 |
 | `os/src/hal/arch/mod.rs` | feature 选择和后端 re-export |
 | `os/src/hal/arch/riscv/mod.rs` | rv64 后端模块、类型别名、初始化 |
 | `os/src/hal/arch/riscv/sv39.rs` | SV39 页表和 `sfence.vma` |

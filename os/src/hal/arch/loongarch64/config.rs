@@ -116,7 +116,7 @@ pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE | LA_START;
 #[cfg(feature = "board_laqemu")]
 pub const MEMORY_START: usize = 0x0000_0000_8000_0000;
 // `MEMORY_START` remains the kernel load bank base. It is not the lowest DRAM
-// address on 2K1000LA; callers that need all RAM must iterate MEMORY_REGIONS.
+// address on 2K1000LA; callers that need all RAM must iterate firmware regions.
 #[cfg(feature = "board_2k1000")]
 pub const MEMORY_START: usize = 0x0000_0000_9000_0000;
 #[cfg(feature = "board_laqemu")]
@@ -130,16 +130,16 @@ pub const MEMORY_END: usize = 0x0000_0001_0000_0000;
 /// never be converted into allocatable frames. U-Boot enters MangoCore through
 /// a DMW alias, but these are the raw physical addresses used in PTEs and DMA.
 #[cfg(feature = "board_laqemu")]
-pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
+pub const MEMORY_REGIONS_FALLBACK: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
 #[cfg(feature = "board_2k1000")]
-pub const MEMORY_REGIONS: &[(usize, usize)] =
+pub const MEMORY_REGIONS_FALLBACK: &[(usize, usize)] =
     &[(0x0000_0000, 0x1000_0000), (0x9000_0000, MEMORY_END)];
 
 /// DRAM ranges still owned by firmware or active devices after `bootm`.
 #[cfg(feature = "board_laqemu")]
-pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[];
+pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] = &[];
 #[cfg(feature = "board_2k1000")]
-pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[
+pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] = &[
     // U-Boot LMB/stack, the active DVO framebuffer, CPU1's U-Boot park loop,
     // and BPI/SMBIOS data. This can be split and reclaimed only after those
     // owners have been explicitly quiesced or copied.
@@ -155,7 +155,9 @@ pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[
 pub const USABLE_MEMORY_SIZE: usize = MEMORY_SIZE;
 #[cfg(feature = "board_2k1000")]
 pub const USABLE_MEMORY_SIZE: usize =
-    MEMORY_SIZE - (FIRMWARE_RESERVED_REGIONS[0].1 - FIRMWARE_RESERVED_REGIONS[0].0) - PAGE_SIZE;
+    MEMORY_SIZE
+        - (FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 - FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0)
+        - PAGE_SIZE;
 
 pub const SV39_SPACE: usize = 1 << 39;
 pub const USR_SPACE_LEN: usize = SV39_SPACE >> 2;
@@ -217,11 +219,11 @@ const _: () = {
 const _: () = {
     assert!(MEMORY_SIZE == 0x1000_0000 + 0x7000_0000);
     assert!(MEMORY_END == 0x1_0000_0000);
-    assert!(MEMORY_REGIONS[0].1 <= MEMORY_REGIONS[1].0);
-    assert!(FIRMWARE_RESERVED_REGIONS[0].0 % PAGE_SIZE == 0);
-    assert!(FIRMWARE_RESERVED_REGIONS[0].1 % PAGE_SIZE == 0);
-    assert!(MEMORY_REGIONS[0].0 <= FIRMWARE_RESERVED_REGIONS[0].0);
-    assert!(FIRMWARE_RESERVED_REGIONS[0].1 <= MEMORY_REGIONS[0].1);
+    assert!(MEMORY_REGIONS_FALLBACK[0].1 <= MEMORY_REGIONS_FALLBACK[1].0);
+    assert!(FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0 % PAGE_SIZE == 0);
+    assert!(FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 % PAGE_SIZE == 0);
+    assert!(MEMORY_REGIONS_FALLBACK[0].0 <= FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0);
+    assert!(FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 <= MEMORY_REGIONS_FALLBACK[0].1);
     assert!(USABLE_MEMORY_SIZE == 0x7cbf_3000);
     assert!(KERNEL_STACK_TOP == 0xFFFF_FFFF_FFFE_F000);
     assert!(KERNEL_STACK_BOTTOM == 0xFFFF_FFFF_F7BE_F000);

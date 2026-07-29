@@ -22,6 +22,7 @@ QEMU_REGRESSION_AFTER_DRIVES = -m 1024 -smp threads=1
 # makes QEMU consume the loader device text as a firmware filename.
 QEMU_KTEST_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
 QEMU_KTEST_AFTER_DRIVES = -m 1024 -smp threads=1
+QEMU_KTEST_X0 = $(KTEST_EXT4_IMAGE)
 
 BOARD_2K1000_ARTIFACT_ROOT ?= $(PRODUCT_ROOT)/board/2k1000
 BOARD_2K1000_TEST_CONFIG ?= $(abspath ../os_test.conf)
@@ -179,7 +180,7 @@ ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
 		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
-ktest-run: toolchain-preflight ktest-build-only
+ktest-run: toolchain-preflight ktest-build-only ktest-clean-ext4
 	@if [ "x$(KTEST_FIXTURE)" = "xborrows-initproc" ]; then \
 		echo "[ktest-fixture] borrows-initproc: checking ktest is independent of INITPROC.process..."; \
 		ktest_refs=$$(grep -n 'INITPROC\.process' ../os/src/task/mod.rs ../os/src/task/task.rs 2>/dev/null | grep -i 'spawn_ktest\|new_ktest\|ktest_trampoline\|zombify_ktest\|KTEST'); \

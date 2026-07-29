@@ -228,6 +228,22 @@ impl<T: PageTable> KernelSpace<T> {
                 MapPermission::R | MapPermission::W | MapPermission::G
             );
         }
+
+        // Map firmware reserved regions (DTB, initrd) as read-only.
+        // These pages are not in the frame allocator but must remain
+        // accessible for post-heap firmware description parsing.
+        for &(base, end) in crate::hal::firmware::firmware_reserved_regions() {
+            // QEMU can place the DTB entirely inside the kernel BSS. That
+            // range is already mapped above with kernel write permissions.
+            if stext as usize <= base && end <= ekernel as usize {
+                continue;
+            }
+            kernel_identical_map!(
+                base,
+                end,
+                MapPermission::R | MapPermission::G
+            );
+        }
         kernel_space
     }
 

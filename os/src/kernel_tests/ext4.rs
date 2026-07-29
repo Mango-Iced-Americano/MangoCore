@@ -5,8 +5,10 @@
 
 #[path = "ext4/block_device.rs"]
 mod block_device;
+#[cfg(feature = "ext4_lwext4_backend")]
 #[path = "ext4/byte_bridge.rs"]
 mod byte_bridge;
+#[cfg(feature = "ext4_lwext4_backend")]
 #[path = "ext4/mounted_filesystem.rs"]
 mod mounted_filesystem;
 
@@ -17,7 +19,7 @@ use crate::kernel_tests::runner::KernelTest;
 
 /// Returns the topology-independent ext4-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
-    vec![
+    let mut tests = vec![
         KernelTest::new(
             "ext4::memblk_read_write",
             block_device::test_memblk_read_write,
@@ -26,10 +28,10 @@ pub fn tests() -> Vec<KernelTest> {
             "ext4::memblk_isolation",
             block_device::test_memblk_isolation,
         ),
-        KernelTest::new(
-            "ext4::open_unformatted_returns_err",
-            block_device::test_open_unformatted_returns_err,
-        ),
+    ];
+    #[cfg(feature = "ext4_lwext4_backend")]
+    tests.extend([
+        KernelTest::new("ext4::open_unformatted_returns_err", block_device::test_open_unformatted_returns_err),
         KernelTest::new(
             "ext4::lw_path_isolation",
             mounted_filesystem::test_lw_path_isolation,
@@ -46,5 +48,6 @@ pub fn tests() -> Vec<KernelTest> {
             "ext4::lwext4_flush_forwarding",
             byte_bridge::test_lwext4_flush_forwarding,
         ),
-    ]
+    ]);
+    tests
 }
