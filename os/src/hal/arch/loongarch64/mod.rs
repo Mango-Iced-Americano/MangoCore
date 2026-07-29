@@ -56,6 +56,14 @@ pub fn user_tlb_invalidate_page(_vpn: crate::mm::VirtPageNum) {
     tlb::tlb_invalidate();
 }
 
+/// LA64 暂无无锁范围 payload；在 MM-owned ASID 完成前由上层退回全量 IPI。
+pub fn remote_user_tlb_invalidate_page(
+    _targets: usize,
+    _vpn: crate::mm::VirtPageNum,
+) -> Result<bool, isize> {
+    Ok(false)
+}
+
 use crate::{
     config::{
         CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH, SUC_DMW_VSEG,

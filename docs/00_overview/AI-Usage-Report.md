@@ -55,6 +55,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP kernel-global 撤映射与栈回收 | 2026-07-28 | GPT/Codex, DeepSeek | 全核 TLB sequence/ack、析构延迟回收、双架构 8 核 focused 与初赛回归 | 删除 AP TCB 永久保留 workaround；双架构 27/27 PASS，初赛 RV64 312/314、LA64 308/314，失败集合未扩大 |
 | SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 2026-07-28 | GPT/Codex, DeepSeek | VM 锁/ack 死锁审查、MM 驻留与 generation 顺序、独立 user-TLB sequence、双架构 Docker/QEMU 验证 | 保持 `Published` fail-stop，完成激活侧和全用户 IPI/ack 原语；双架构 29/29 PASS，初赛失败集合未扩大，完整 PTE shootdown 明确留给 B23 |
 | SMP 用户 PTE 锁外 shootdown 与接口收敛 | 2026-07-29 | GPT/Codex, DeepSeek | VM 锁外同步、generation/ack 并发审查、frame 退休、MMU 接口重构与双架构 Docker/QEMU 验证 | 用 `AddressSpace`、`MmuGather`、`TlbFlush` 固化 `record_change -> seal -> execute`；真实 unmap 验证 ack 前不释放 frame |
+| SMP RV64 页级 RFENCE 与 IPI fallback | 2026-07-29 | GPT/Codex, DeepSeek | SBI 官方 ABI、Linux/DragonOS TLB 分层对照、hart mask 映射审查与双架构 Docker/QEMU 验证 | 不增加 MM 提交类型；RV64 单页走同步 RFENCE，full/LA64 保留全用户 IPI/ack，双架构 8 核 focused 17/17 PASS |
 
 ## 4. 详细使用场景
 
@@ -470,6 +471,28 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   计数不变，ack 后才增加一页。`mask=0x003` 为 RV64 312/314、LA64 308/314，
   失败集合没有扩大；四项均退出 0、无 timeout/forbidden marker，且源码指纹不变。
 
+### Case 21: SMP RV64 页级 RFENCE 与软件 IPI fallback
+
+- Evidence: `docs/Work_Log/2026-07-29.md`、
+  `docs/Work_Log/evidence/2026-07-29/smp-b24-rfence-summary.md`；模型原始分析与 Docker
+  子任务日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 SBI 官方规范、Linux RISC-V `flush_tlb_range` 和 DragonOS
+  `MmuGather/TLB` 分层，负责接口设计、实现、并发裁决和证据边界；DeepSeek 自主选择双架构
+  build/focused ktest，读取日志并复核 ABI、fallback 与 frame 生命周期。
+- Problem: B23 已能区分 `Page/Full`，但只要目标含远端 CPU 就丢弃该信息并全刷用户 TLB。
+  直接给软件 IPI 增加单个共享 range payload 会在多个发起者并发时发生覆盖或错误合并。
+- Human action: 保持 `MmuGather -> TlbFlush` 主链不变；SMP 同步层仅接受可选单页提示。
+  RV64 把逻辑 CPU mask 转成物理 hart mask，调用同步 SBI `REMOTE_SFENCE_VMA`；固件缺失时
+  明确回退已有全用户 IPI/ack。LA64 与 full flush 继续走该 fallback，不新增 slot 或 commit。
+- AI adjudication: 接受 DeepSeek 对四项门禁均 PASS 的事实，但纠正它把“全 8 核 mask +
+  boot hart=4”描述为动态证明逆映射的过度结论；全量 mask 恰好仍为 `0xff`，最终测试改为
+  逻辑 CPU0/1 子集后再冻结。没有采纳立即实现 LA64 range slot 或 ASID，因为二者需要独立
+  生命周期和并发证明。
+- Verification: 初轮 RV64/LA64 normal build 与 8 核 SMP focused 均 PASS。最终把测试
+  收紧为逻辑 CPU0/1 后重新冻结：RV64 boot hart=5，逻辑 `0b11` 转为物理 `0b100001`，
+  17/17 PASS 且页级用例不增加 software request；LA64 17/17 PASS 并增加 request/ack。
+  两项均 exit 0、无 timeout/forbidden marker、源码指纹不变；双页 Full 退休窗口均通过。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -531,6 +554,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b20-remote-wake-summary.md` | SMP 远程 blocked wake | 记录 `last_cpu`、批量 wake 锁外 IPI、DeepSeek 机械验证与人工裁决、双架构 8 核 25/25 PASS 及用户迁移 NOT RUN 边界 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b21-kernel-mapping-retirement-summary.md` | SMP kernel-global 撤映射与栈回收 | 记录全核 TLB sequence/ack、固定退休队列、安全点回收、DeepSeek 建议采纳/拒绝边界、双架构 27/27 与初赛非回归结果 |
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b22-user-tlb-foundation-summary.md` | SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 记录 VM 锁死锁边界、单调 cached mask/generation、独立 sequence、DeepSeek 跨原子建议裁决、双架构 29/29 与完整 shootdown NOT RUN 边界 |
+| `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b23-user-tlb-flush-summary.md` | SMP 用户 PTE shootdown 与 MMU 接口收敛 | 记录锁内收集/锁外同步、frame 退休、DeepSeek 只读复核、双架构 focused 与初赛非回归证据 |
+| `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b24-rfence-summary.md` | SMP RV64 页级 RFENCE 与 IPI fallback | 记录 SBI/Linux/DragonOS 对照、逻辑/物理 hart mask、DeepSeek 门禁与人工证据边界裁决 |
 
 ## 9. 交互记录与留痕方式
 

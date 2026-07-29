@@ -4,7 +4,10 @@
 
 #![allow(unused)]
 
-use core::arch::asm;
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use riscv::register::sstatus;
 
 const SBI_SET_TIMER: usize = 0;
@@ -23,8 +26,13 @@ const SBI_EXT_HSM: usize = 0x48534d;
 const SBI_HSM_HART_START: usize = 0;
 const SBI_EXT_IPI: usize = 0x735049;
 const SBI_IPI_SEND: usize = 0;
+const SBI_EXT_RFENCE: usize = 0x52464e43;
+const SBI_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
 const SBI_ERR_NOT_SUPPORTED: isize = -2;
 const SBI_ERR_ALREADY_AVAILABLE: isize = -6;
+
+/// CPU0 在 AP 上线前探测并发布；运行期只读，避免每次 shootdown 多做一次 ecall。
+static RFENCE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug)]
 struct SbiRet {
@@ -58,10 +66,11 @@ fn sbi_call_v02(
     arg0: usize,
     arg1: usize,
     arg2: usize,
+    arg3: usize,
 ) -> SbiRet {
     let error: isize;
     let value: usize;
-    // Safety: the SBI v0.2 ABI assigns a0-a2 to arguments, a6/a7 to
+    // Safety: the SBI v0.2 ABI assigns a0-a3 to arguments, a6/a7 to
     // function/extension IDs, and returns error/value in a0/a1.  No Rust
     // reference crosses the privilege boundary.
     unsafe {
@@ -70,6 +79,7 @@ fn sbi_call_v02(
             inlateout("x10") arg0 => error,
             inlateout("x11") arg1 => value,
             in("x12") arg2,
+            in("x13") arg3,
             in("x16") function,
             in("x17") extension,
         );
@@ -77,17 +87,36 @@ fn sbi_call_v02(
     SbiRet { error, value }
 }
 
+fn probe_extension(extension: usize) -> Result<bool, isize> {
+    let result = sbi_call_v02(SBI_EXT_BASE, SBI_BASE_PROBE_EXTENSION, extension, 0, 0, 0);
+    if result.error == 0 {
+        Ok(result.value != 0)
+    } else {
+        Err(result.error)
+    }
+}
+
+/// 在 CPU0 上一次性探测 RFENCE，返回值供启动日志说明实际后端。
+pub fn init_rfence() -> Result<bool, isize> {
+    let available = probe_extension(SBI_EXT_RFENCE)?;
+    RFENCE_AVAILABLE.store(available, Ordering::Release);
+    Ok(available)
+}
+
 /// Start one stopped hart at the physical `_start` address.
 pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<(), isize> {
-    let probe = sbi_call_v02(SBI_EXT_BASE, SBI_BASE_PROBE_EXTENSION, SBI_EXT_HSM, 0, 0);
-    if probe.error != 0 {
-        return Err(probe.error);
-    }
-    if probe.value == 0 {
+    if !probe_extension(SBI_EXT_HSM)? {
         return Err(SBI_ERR_NOT_SUPPORTED);
     }
 
-    let result = sbi_call_v02(SBI_EXT_HSM, SBI_HSM_HART_START, hart_id, start_addr, opaque);
+    let result = sbi_call_v02(
+        SBI_EXT_HSM,
+        SBI_HSM_HART_START,
+        hart_id,
+        start_addr,
+        opaque,
+        0,
+    );
     match result.error {
         0 | SBI_ERR_ALREADY_AVAILABLE => Ok(()),
         error => Err(error),
@@ -96,21 +125,46 @@ pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<()
 
 /// 通过 SBI v0.2 IPI extension 向一个硬件 hart 触发 supervisor software IRQ。
 pub fn send_ipi(hart_id: usize) -> Result<(), isize> {
-    let probe = sbi_call_v02(SBI_EXT_BASE, SBI_BASE_PROBE_EXTENSION, SBI_EXT_IPI, 0, 0);
-    if probe.error != 0 {
-        return Err(probe.error);
-    }
-    if probe.value == 0 {
+    if !probe_extension(SBI_EXT_IPI)? {
         return Err(SBI_ERR_NOT_SUPPORTED);
     }
 
     // 令 hart_mask_base 等于目标 hart ID，mask bit0 就精确表示该 hart，
     // 不依赖 MangoCore logical ID 与 OpenSBI hart ID 是否相同。
-    let result = sbi_call_v02(SBI_EXT_IPI, SBI_IPI_SEND, 1, hart_id, 0);
+    let result = sbi_call_v02(SBI_EXT_IPI, SBI_IPI_SEND, 1, hart_id, 0, 0);
     if result.error == 0 {
         Ok(())
     } else {
         Err(result.error)
+    }
+}
+
+/// 让一组硬件 hart 同步失效 `[start, start + size)` 的所有 ASID 翻译。
+///
+/// 返回 `Ok(false)` 表示固件没有 RFENCE，调用方必须改走软件 IPI fallback；
+/// `Ok(true)` 表示 SBI 调用已经同步完成，退休 frame 此后才可以释放。
+pub fn remote_sfence_vma(hart_mask: usize, start: usize, size: usize) -> Result<bool, isize> {
+    if !RFENCE_AVAILABLE.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+
+    // QEMU 配置的 hart ID 均小于 MAX_CPUS，因此以 0 为 base 的一个 XLEN mask
+    // 能精确表示全部目标，不依赖逻辑 CPU0 实际对应哪个 cold-boot hart。
+    let result = sbi_call_v02(
+        SBI_EXT_RFENCE,
+        SBI_RFENCE_REMOTE_SFENCE_VMA,
+        hart_mask,
+        0,
+        start,
+        size,
+    );
+    match result.error {
+        0 => Ok(true),
+        SBI_ERR_NOT_SUPPORTED => {
+            RFENCE_AVAILABLE.store(false, Ordering::Release);
+            Ok(false)
+        }
+        error => Err(error),
     }
 }
 

@@ -165,6 +165,7 @@ pub(crate) enum KernelTlbSyncError {
 pub(crate) enum UserTlbSyncError {
     InvalidTargets { targets: usize },
     UnavailableTargets { targets: usize, available: usize },
+    Firmware { error: isize },
     Timeout {
         cpu_id: usize,
         expected: usize,
@@ -626,12 +627,16 @@ pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError>
     synchronize_kernel_mapping_mask(targets, true)
 }
 
-/// 让一组曾缓存用户 MM 的 CPU 完成全用户/non-global TLB 失效。
+/// 让一组曾缓存用户 MM 的 CPU 同步完成用户 TLB 失效。
 ///
-/// B23 的 `TlbFlush` 通过该锁外原语完成同步。调用方必须先释放
+/// `page=Some(vpn)` 时 RV64 优先使用 SBI RFENCE；固件不支持或 `page=None`
+/// 时保守退回全用户/non-global IPI。调用方必须先释放
 /// VM/PTE 及其它普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
-/// 每次失效覆盖本核全部用户项，因此 request 合并到较新序号仍同时覆盖旧请求。
-pub(crate) fn synchronize_user_tlb_mask(targets: usize) -> Result<(), UserTlbSyncError> {
+/// software fallback 每次覆盖本核全部用户项，因此 request 合并到较新序号仍覆盖旧请求。
+pub(crate) fn synchronize_user_tlb(
+    targets: usize,
+    page: Option<crate::mm::VirtPageNum>,
+) -> Result<(), UserTlbSyncError> {
     let configured = expected_online_mask();
     if targets == 0 || targets & !configured != 0 {
         return Err(UserTlbSyncError::InvalidTargets { targets });
@@ -652,6 +657,25 @@ pub(crate) fn synchronize_user_tlb_mask(targets: usize) -> Result<(), UserTlbSyn
     }
     let current_bit = 1usize << self::cpu_id();
     let remote = live_targets & !current_bit;
+
+    if remote == 0 {
+        match page {
+            Some(vpn) => crate::hal::user_tlb_invalidate_page(vpn),
+            None => crate::hal::user_tlb_invalidate(),
+        }
+        return Ok(());
+    }
+
+    // RFENCE 直接接受硬件 hart mask，且调用返回就代表目标已完成失效；它没有
+    // 可被并发发起者覆盖的共享 payload。LA64 返回 false，继续走下面的全量 IPI。
+    if let Some(vpn) = page {
+        match crate::hal::remote_user_tlb_invalidate_page(live_targets, vpn) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(UserTlbSyncError::Firmware { error }),
+        }
+    }
+
     let mut expected = [0usize; MAX_CPUS];
     for cpu_id in 0..CONFIGURED_CPU_COUNT {
         if remote & (1usize << cpu_id) == 0 {
@@ -666,9 +690,6 @@ pub(crate) fn synchronize_user_tlb_mask(targets: usize) -> Result<(), UserTlbSyn
 
     if live_targets & current_bit != 0 {
         crate::hal::user_tlb_invalidate();
-    }
-    if remote == 0 {
-        return Ok(());
     }
     let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
 
@@ -994,6 +1015,31 @@ const fn logical_to_hardware_id(logical_id: usize, boot_hardware_id: usize) -> u
     } else {
         logical_id
     }
+}
+
+/// 把 MangoCore 逻辑 CPU 位图转换为固件使用的物理 hart 位图。
+///
+/// cold-boot hart 始终映射成逻辑 CPU0，因此不能把两个位图直接等同；RFENCE
+/// 和 IPI 都必须经过与启动阶段相同的逆映射。
+pub(crate) fn logical_to_hardware_mask(logical_mask: usize) -> usize {
+    assert_eq!(
+        logical_mask & !expected_online_mask(),
+        0,
+        "logical CPU mask contains an unconfigured CPU"
+    );
+    let boot_hardware_id = BOOT_HARDWARE_ID.load(Ordering::Acquire);
+    assert_ne!(
+        boot_hardware_id, UNCLAIMED_BOOT_HARDWARE_ID,
+        "hardware mask requested before boot CPU registration"
+    );
+
+    let mut hardware_mask = 0usize;
+    for logical_id in 0..CONFIGURED_CPU_COUNT {
+        if logical_mask & (1usize << logical_id) != 0 {
+            hardware_mask |= 1usize << logical_to_hardware_id(logical_id, boot_hardware_id);
+        }
+    }
+    hardware_mask
 }
 
 /// Entry for every non-boot CPU.

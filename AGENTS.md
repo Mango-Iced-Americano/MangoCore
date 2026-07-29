@@ -216,6 +216,14 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `try_xxx` | 一次非阻塞尝试，返回 `Result` | `try_recv`、`try_send` |
 | `socket_xxx` | socket 专用，避免与 `File` 冲突 | `socket_r_ready` |
 
+### 可维护性与成熟实现对照
+
+- 审查发现命名相近、调用链过深、职责重复或文件拆分难以理解时，先对照 Linux、
+  DragonOS 等成熟内核的对应主线，再决定重命名或重构；协议与 ABI 优先查官方规范。
+- 借鉴的是职责边界、生命周期和行业通用术语，不机械复制与 MangoCore 不匹配的层次。
+- 一个生产语义只保留一个主调用链；新增类型、文件或 wrapper 必须能说明独立所有权或
+  并发边界，不能只为转发参数。汇报时说明参考对象、采纳内容和未采纳原因。
+
 ### 返回值编码
 
 | 层 | 成功 | 错误 |

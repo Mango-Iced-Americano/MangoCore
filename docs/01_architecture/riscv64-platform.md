@@ -65,24 +65,30 @@ RISC-V 后端在 `mod.rs` 中定义：
 pub fn machine_init() {
     trap::init();
     trap::enable_timer_interrupt();
+    trap::enable_ipi_interrupt();
+    // 多核时一次性探测 SBI RFENCE；缺失则保留软件 IPI fallback。
     // First timer deadline is set by timer_subsystem_init() after boot.
 }
 
-pub fn bootstrap_init() {}
+pub fn bootstrap_init(cpu_id: usize) { /* AP 只初始化 IPI */ }
 ```
 
 ### 3.1 `bootstrap_init()`
 
-rv64 的 `bootstrap_init()` 是空实现。该事实说明 `rust_main()` 进入后，rv64 不在这一阶段额外配置异常入口或页表 walk；相关配置放在后续 `machine_init()`、`mm::init()` 和 OpenSBI 环境中完成。
+rv64 的 `bootstrap_init()` 在 CPU0 上不重复做全局工作；AP 只安装本地 trap 并开放
+supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力由 CPU0 的全局
+初始化及后续 AP 启动阶段共同建立。
 
 ### 3.2 `machine_init()`
 
-`machine_init()` 做两件事：
+`machine_init()` 完成以下工作：
 
 | 调用 | 文件 | 行为 |
 |------|------|------|
 | `trap::init()` | `trap/mod.rs` | 调用 `set_kernel_trap_entry()`，设置 `stvec` 为 kernel trap |
 | `trap::enable_timer_interrupt()` | `trap/mod.rs` | `sie::set_stimer()` 打开 supervisor timer interrupt |
+| `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
+| `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
 
 第一次 timer deadline 没有在 `machine_init()` 中设置。注释说明它由启动后的 `timer_subsystem_init()` 和 timer 编程路径负责。
 

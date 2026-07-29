@@ -17,6 +17,7 @@ pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;
 pub use arch::quiesce_local_timer_interrupt;
 pub use arch::reclaim_retired_kernel_stacks;
+pub use arch::remote_user_tlb_invalidate_page;
 pub use arch::tlb_invalidate;
 pub use arch::user_tlb_invalidate;
 pub use arch::user_tlb_invalidate_page;

@@ -153,12 +153,16 @@ pub const MAX_RW_COUNT: usize =
 pub fn machine_init() {
     trap::init();
     trap::enable_timer_interrupt();
+    trap::enable_ipi_interrupt();
+    // CORE_NUM > 1 时探测 SBI RFENCE。
 }
 
-pub fn bootstrap_init() {}
+pub fn bootstrap_init(cpu_id: usize) { /* AP: IPI-only */ }
 ```
 
-rv64 的 `machine_init()` 只安装 trap 并打开 supervisor timer interrupt。第一次 timer deadline 由 `task::timer_subsystem_init()` 之后的 timer 编程路径设置。
+rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 timer/IPI，并在多核配置下探测 SBI
+RFENCE；缺失或探测失败时明确打印软件 IPI fallback。第一次 timer deadline 仍由
+`task::timer_subsystem_init()` 之后的 timer 编程路径设置。
 
 ### 5.3 Trap 路径
 

@@ -86,7 +86,7 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、全用户 IPI/ack 和 frame 退休；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask 和全量失效；range/RFENCE 优化、MM-owned ASID、安全 detach 与用户迁移未完成 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；RV64 单页远端修改使用 SBI RFENCE，full/LA64 使用全用户 IPI/ack；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、MM-owned ASID、安全 detach 与用户迁移未完成 |
 | LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -645,6 +645,14 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=1` 均为 16/16 PASS；加上重复窗口的
   前一轮两次运行，两架构均为 31/31 PASS。双架构 `mask=0x003` 失败身份
   与 B22 一致：RV64 raw 309/semantic 312，LA64 raw/semantic 308；
+- B24 沿用同一 `MmuGather -> TlbFlush` 主链，只把已有 `FlushRange::Page` 作为提示传给
+  SMP 同步层。RV64 启动时通过 SBI BASE extension 一次性探测 RFENCE，单页远端失效把
+  逻辑 CPU mask 转成物理 hart mask 后调用 `REMOTE_SFENCE_VMA`；固件不支持时明确打印并
+  退回全用户 IPI/ack。LA64 与 full flush 不引入范围 payload，继续走可合并的全量 fallback；
+- RFENCE 路径没有 MangoCore 共享范围槽，因而不同 CPU 并发发起时不会互相覆盖 payload；
+  OpenSBI 在调用返回前完成本地/远端 fence。focused 用例分别覆盖 RV64 页级 RFENCE、
+  LA64 页级 fallback，以及双页 `Full` 的 ack 前 frame 不释放窗口；最终非平凡 CPU0/1
+  mask 复测中 RV64 boot hart=5、LA64 boot hardware ID=0，两架构均为 17/17 PASS；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
   Per-CPU current/idle/RunQueue、scheduler-ready、受控 AP kernel-only 执行与远程阻塞
   唤醒闭环。通用目标选择仍待后续批次；Phase 4 远端 MM shootdown 完成前不解除用户
@@ -703,7 +711,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B16 已覆盖用户 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、filemap 和
   exec；Phase 4 需将用户路径升级为远端语义。B21 已单独收口动态内核栈与临时 ELF
   kernel-global 映射的全 CPU 撤销和延迟释放；
-- RISC-V 实现 SBI RFENCE range/all flush，并提供 IPI fallback；
+- RISC-V 单页 SBI RFENCE 与 IPI fallback 已由 B24 接通；后续补连续 range/all 的策略与计数；
 - LoongArch 实现 shootdown slot、generation、ack 和 ASID/epoch；
 - shootdown slot 使用固定数组和原子状态，IPI handler 不分配内存、不获取 MM 锁；
 - 被解除映射的 frame、页表页和内核栈必须延迟到全部目标 ack 后释放；

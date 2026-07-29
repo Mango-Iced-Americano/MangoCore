@@ -83,6 +83,10 @@ pub fn tests() -> Vec<KernelTest> {
             user_tlb_full_flush_reaches_online_cpus,
         ),
         KernelTest::new(
+            "smp::user_tlb_page_sync_uses_arch_backend",
+            user_tlb_page_sync_uses_arch_backend,
+        ),
+        KernelTest::new(
             "smp::user_tlb_retirement_waits_for_ack",
             user_tlb_retirement_waits_for_ack,
         ),
@@ -705,7 +709,7 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
         ack_before[cpu] = crate::smp::user_tlb_ack(cpu);
     }
 
-    crate::smp::synchronize_user_tlb_mask(targets).map_err(|error| {
+    crate::smp::synchronize_user_tlb(targets, None).map_err(|error| {
         crate::println!("# user TLB full-flush sync failed: {:?}", error);
         "user TLB full-flush sync failed"
     })?;
@@ -717,6 +721,39 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
 
     // 同步等待临时开放过本地 IRQ；ktest 不经过用户 trap-return，因此显式走
     // 已有任务安全点，避免把恰好到达的 one-shot timer pending 留给下一用例。
+    crate::task::run_deferred_timer_at_task_safe_point();
+    Ok(())
+}
+
+/// 页级同步在 RV64 应由 RFENCE 直接完成；LA64 则使用既有全量 IPI fallback。
+fn user_tlb_page_sync_uses_arch_backend() -> Result<(), &'static str> {
+    let mut targets = 1usize << crate::smp::BOOT_CPU_ID;
+    if crate::smp::configured_cpu_count() > 1 {
+        // 只选择逻辑 CPU0/1；当 cold-boot hart 非 0 时，物理 mask 不再碰巧等于
+        // 逻辑 mask，从而让 focused 运行真正经过逆映射分支。
+        targets |= 1usize << 1;
+    }
+    targets &= crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
+    let request_before = if crate::smp::configured_cpu_count() > 1 {
+        crate::smp::user_tlb_request(1)
+    } else {
+        0
+    };
+
+    crate::smp::synchronize_user_tlb(targets, Some(crate::mm::VirtAddr::from(0x51_0000).floor()))
+        .map_err(|error| {
+        crate::println!("# user TLB page sync failed: {:?}", error);
+        "user TLB page sync failed"
+    })?;
+
+    #[cfg(feature = "riscv")]
+    if crate::smp::configured_cpu_count() > 1 && crate::smp::user_tlb_request(1) != request_before {
+        return Err("RV64 page sync unexpectedly used the IPI fallback");
+    }
+    #[cfg(feature = "loongarch64")]
+    if crate::smp::configured_cpu_count() > 1 && crate::smp::user_tlb_request(1) <= request_before {
+        return Err("LA64 page sync did not use the IPI fallback");
+    }
     crate::task::run_deferred_timer_at_task_safe_point();
     Ok(())
 }
@@ -769,9 +806,11 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
     AP_USER_TLB_RETIRE_PHASE.store(0, Ordering::Release);
     AP_USER_TLB_FREE_DURING_WAIT.store(usize::MAX, Ordering::Release);
     let mut space = crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare();
+    // 两个不同 VPN 会让 MmuGather 升级为 Full，确保本用例仍专门验证软件
+    // IPI 的可观测 ack 窗口；单页 RFENCE 由前一用例独立覆盖。
     space.insert_framed_area(
         crate::mm::VirtAddr::from(TEST_BASE),
-        crate::mm::VirtAddr::from(TEST_BASE + crate::config::PAGE_SIZE),
+        crate::mm::VirtAddr::from(TEST_BASE + 2 * crate::config::PAGE_SIZE),
         crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
     );
     let vm = Arc::new(crate::mm::AddressSpace::new(space));
@@ -801,8 +840,8 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
     let free_after = crate::mm::unallocated_frames();
     let validation_error = if free_during != free_before {
         Some("user frame was released before remote TLB ack")
-    } else if free_after != free_before.saturating_add(1) {
-        Some("user frame was not released after remote TLB ack")
+    } else if free_after != free_before.saturating_add(2) {
+        Some("user frames were not released after remote TLB ack")
     } else if crate::smp::user_tlb_ack(1) <= ack_before
         || crate::smp::user_tlb_request(1) <= AP_USER_TLB_REQUEST_BEFORE.load(Ordering::Acquire)
     {

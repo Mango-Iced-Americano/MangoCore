@@ -126,8 +126,12 @@ impl<'a> TlbFlush<'a> {
                 }
                 Ok(())
             } else {
-                // 当前远端协议按 MM 全量失效；range 精化留给后续 RFENCE/ASID 工作。
-                crate::smp::synchronize_user_tlb_mask(self.targets)
+                let page = match self.gather.range() {
+                    FlushRange::None => panic!("TLB flush has no recorded PTE change"),
+                    FlushRange::Page(vpn) => Some(vpn),
+                    FlushRange::Full => None,
+                };
+                crate::smp::synchronize_user_tlb(self.targets, page)
             };
 
             if let Err(error) = result {

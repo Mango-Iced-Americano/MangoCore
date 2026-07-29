@@ -166,7 +166,8 @@ AddressSpace::write
 |-----------------|----------|
 | `0` | 页表尚未被任何 CPU 使用；无需失效，解锁后即可释放退休 frame |
 | 仅当前 CPU | 按 `FlushRange` 执行页级或本地全用户失效 |
-| 含远端 CPU | 使用 user-TLB request/ack 协议；当前版本保守执行目标 CPU 全用户失效 |
+| 含远端 CPU、单一 VPN | RV64 通过同步 SBI RFENCE 执行页级失效；RFENCE 缺失或 LA64 使用全用户 IPI/ack fallback |
+| 含远端 CPU、多 VPN/页表层级变化 | 使用 user-TLB request/ack，在目标 CPU 执行全用户失效 |
 
 固定安全顺序是：PTE write → `record_change()` → `retire_frame()` → `seal()` →
 释放 VM 锁 → flush/ack → drop frame。退休队列扩容失败时，只有 mask 为 0 或
@@ -183,10 +184,12 @@ fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `Mmu
 前尚无 CPU 能观察，构造期记录可由 `discard_unpublished()` 清除；父侧记录则由
 外层 `write()` 正常同步，否则父 CPU 可能继续用旧权限写共享页。
 
-当前性能策略有意保守：cached mask 尚未安全清 bit，远端协议也仍按整个用户
-地址空间失效。已经避免的固定成本包括：已登记 CPU 的重复 `fetch_or`、同一 VM
-写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。range/RFENCE、
-MM-owned LoongArch ASID 和安全 CPU detach 留给后续优化。
+当前性能策略仍然保守：cached mask 尚未安全清 bit，多页修改和 LA64 远端协议仍按整个
+用户地址空间失效。RV64 单页修改已经把 `FlushRange::Page` 直接交给 SBI RFENCE，固件
+以物理 hart mask 同步完成 `[va, va + PAGE_SIZE)` 后才允许释放 frame；缺少 RFENCE 时启动
+日志会明确说明并退回软件 IPI。已经避免的固定成本还包括：已登记 CPU 的重复
+`fetch_or`、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
+range、MM-owned LoongArch ASID 和安全 CPU detach 留给后续工作。
 
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。

@@ -26,6 +26,16 @@ pub fn machine_init() {
     trap::init();
     trap::enable_timer_interrupt();
     trap::enable_ipi_interrupt();
+    if crate::smp::configured_cpu_count() > 1 {
+        match sbi::init_rfence() {
+            Ok(true) => crate::println!("[smp] SBI RFENCE enabled for user page shootdown"),
+            Ok(false) => crate::println!("[smp] SBI RFENCE unavailable; using IPI fallback"),
+            Err(error) => crate::println!(
+                "[smp] SBI RFENCE probe failed ({}); using IPI fallback",
+                error
+            ),
+        }
+    }
     // First timer deadline is set by timer_subsystem_init() after boot.
 }
 
@@ -58,6 +68,18 @@ pub fn user_tlb_invalidate() {
 /// 清除当前 hart 上指定用户虚拟页的所有 ASID 翻译。
 pub fn user_tlb_invalidate_page(vpn: crate::mm::VirtPageNum) {
     sv39::tlb_invalidate_addr(usize::from(crate::mm::VirtAddr::from(vpn)));
+}
+
+/// 通过 SBI RFENCE 同步失效一组逻辑 CPU 上的指定用户页。
+///
+/// `Ok(false)` 只表示固件缺少 RFENCE；上层仍须执行软件 IPI 全量 fallback。
+pub fn remote_user_tlb_invalidate_page(
+    targets: usize,
+    vpn: crate::mm::VirtPageNum,
+) -> Result<bool, isize> {
+    let hart_mask = crate::smp::logical_to_hardware_mask(targets);
+    let start = usize::from(crate::mm::VirtAddr::from(vpn));
+    sbi::remote_sfence_vma(hart_mask, start, crate::config::PAGE_SIZE)
 }
 
 pub fn bootstrap_init(cpu_id: usize) {
