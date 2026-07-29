@@ -1171,9 +1171,7 @@ impl File {
         };
         self.check_memfd_write_seals(offset, len)?;
 
-        let n = self
-            .inode
-            .write_at(offset, len, buf, self.private_data.lock())?;
+        let n = self.write_with_flags(offset, buf, flags)?;
 
         if n > 0 {
             if !is_stream {
@@ -1204,9 +1202,7 @@ impl File {
             offset
         };
         self.check_memfd_write_seals(offset, buf.len())?;
-        let n = self
-            .inode
-            .write_at(offset, buf.len(), buf, self.private_data.lock())?;
+        let n = self.write_with_flags(offset, buf, flags)?;
         if n > 0 {
             self.touch_modified();
         }
@@ -1315,7 +1311,7 @@ impl File {
         };
         self.check_memfd_write_seals(offset, len)?;
 
-        match self.inode.write_at_user(offset, len, src) {
+        match self.write_user_with_flags(offset, src, flags) {
             Ok(n) => {
                 if n > 0 {
                     if !is_stream {
@@ -1382,7 +1378,7 @@ impl File {
         };
         self.check_memfd_write_seals(offset, len)?;
 
-        match self.inode.write_at_user(offset, len, src) {
+        match self.write_user_with_flags(offset, src, flags) {
             Ok(n) => {
                 if n > 0 {
                     self.touch_modified();
@@ -1670,13 +1666,69 @@ impl File {
     }
 
     fn touch_modified(&self) {
-        let Ok(mut metadata) = self.inode.metadata() else {
-            return;
-        };
-        let now = crate::timer::TimeSpec::now();
-        metadata.mtime = now;
-        metadata.ctime = now;
-        let _ = self.inode.set_metadata(&metadata);
+        self.inode.touch_modified();
+    }
+
+    fn write_with_flags(
+        &self,
+        offset: usize,
+        buffer: &[u8],
+        flags: FileFlags,
+    ) -> Result<usize, SyscallErr> {
+        if flags.intersects(FileFlags::O_SYNC | FileFlags::O_DSYNC) {
+            return match self.inode.write_sync(offset, buffer) {
+                Err(SyscallErr::ENOSYS) => {
+                    let written = self.inode.write_at(
+                        offset,
+                        buffer.len(),
+                        buffer,
+                        self.private_data.lock(),
+                    )?;
+                    self.inode.sync()?;
+                    Ok(written)
+                }
+                result => result,
+            };
+        }
+        if flags.contains(FileFlags::O_DIRECT) {
+            return match self.inode.write_direct(
+                offset,
+                buffer.len(),
+                buffer,
+                self.private_data.lock(),
+            ) {
+                Err(SyscallErr::ENOSYS) => self.inode.write_at(
+                    offset,
+                    buffer.len(),
+                    buffer,
+                    self.private_data.lock(),
+                ),
+                result => result,
+            };
+        }
+        self.inode
+            .write_at(offset, buffer.len(), buffer, self.private_data.lock())
+    }
+
+    fn write_user_with_flags(
+        &self,
+        offset: usize,
+        source: &UserBuffer,
+        flags: FileFlags,
+    ) -> Result<usize, SyscallErr> {
+        if !flags.intersects(FileFlags::O_SYNC | FileFlags::O_DSYNC | FileFlags::O_DIRECT) {
+            return self.inode.write_at_user(offset, source.len(), source);
+        }
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve(source.len())
+            .map_err(|_| SyscallErr::ENOMEM)?;
+        // Safety: the successful reservation guarantees capacity for the source.
+        unsafe {
+            buffer.set_len(source.len());
+        }
+        let copied = source.read_at(0, &mut buffer);
+        self.write_with_flags(offset, &buffer[..copied], flags)
     }
 
     pub fn offset(&self) -> usize {

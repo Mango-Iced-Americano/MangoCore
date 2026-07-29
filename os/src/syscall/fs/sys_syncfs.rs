@@ -28,7 +28,10 @@ pub fn sys_syncfs(fd: usize) -> isize {
     }
 
     // Preserve the existing legacy paths outside the another_ext4 backend.
-    crate::fs::flush_all_page_caches();
+    if let Err(error) = crate::fs::flush_all_page_caches() {
+        log::error!("sys_syncfs: flush_all_page_caches failed: {:?}", error);
+        return -(error as isize);
+    }
     if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
         ext4.flush_metadata_cache();
     }

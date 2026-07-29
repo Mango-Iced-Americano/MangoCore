@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-28
+> Coverage: 2026-04-01 to 2026-07-30
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -44,6 +44,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
 | Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 | Firmware DTB safety gate | 2026-07-28 | Oracle, Sisyphus | 固件启动参数信任边界、FDT 保留区与 2K1000 编译验证 | Oracle 指出非 RISC-V FDT 协议的 `a1` 可能为垃圾值；修复协议门控、DTB 边界校验和保留区，并在 Docker 中完成三个目标编译 |
+| another_ext4 小 pwrite 写合并及回退 | 2026-07-30 | Oracle, Sisyphus, GPT-5.6-terra | 评估顺序子页写合并、dirty PageCache pin 与 PageCache radix 目录 | 实验代码已回退到 mutexed 页面目录和逐次 dirty-cache 保留；以 Docker 双架构构建、RV64 ktest、四格 lint、5 轮 QEMU 基准和双架构 LTP 记录最终状态，不将结果表述为吞吐提升 |
 
 ## 4. 详细使用场景
 
@@ -233,6 +234,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: root `run` 保留一次直接 prerequisite，移除递归 setup 调用，并以 target-scoped `.NOTPARALLEL` 保持 `validate-run → print-logo → toolchain-preflight` 顺序。
 - Verification: normal-run、toolchain、source-purity、layering 与 root facade contracts 均通过；RV64/LA64 dry-run 各有一次 logo、一次 root preflight 与一次 OS dispatch；无效 `-j8` 输入无 setup 或 arch-run 输出。
 
+### Case 9: another_ext4 小 pwrite 写合并实验及回退
+
+- Evidence: `docs/Work_Log/2026-07-30.md`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: 评估 1 KiB 顺序 pwrite 的小写合并、dirty-cache retain 热路径和 PageCache 原子 radix 目录；该组合没有成为最终实现。
+- AI contribution: Oracle 给出一页上限顺序写合并、原子 pin 及目录并发优化建议；GPT-5.6-terra 协助执行回退、证据归档和双架构验证。
+- Human action: 删除 inode lifetime 缓冲、write-through/flush 边界、一次性 pin 和原子 radix 目录；恢复安全的 `PageEntries` mutexed 向量目录与逐次 dirty-cache 保留，同时保留 UserBuffer 直连、时间戳缓存及其他已批准优化。
+- Verification: Docker 内 RV64→LA64 串行 kernel build、RV64 ktest、四格 lint、两架构各 5 轮 QEMU 基准及 LTP 输出归档于 `docs/Work_Log/evidence/2026-07-30/`；不将该实验或回退后的基准表述为吞吐提升。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -267,6 +277,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `fd735048` | Judge docs | `Ultraworked with Sisyphus`; `Co-authored-by: Sisyphus` | 新增 Technical Report 和 Engineering Casebook |
 | 2026-06-29 | `81a24d2a` | Documentation fact-check | `Oracle-reviewed fixes`; `Co-authored-by: Sisyphus` | 修复多处文档事实问题 |
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
+| 2026-07-30 | 工作树（未提交） | another_ext4 pwrite write combining | Oracle P0/P1 建议；`docs/Work_Log/2026-07-30.md` | 双架构 build、RV64 ktest 与 lint 通过；iozone 测试资产缺失 |
 
 ## 8. Work_Log 证据表
 
@@ -284,6 +295,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-21.md`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-artifact-binding-supplement-20260721T063550+0800/` | LA64 mmap arena 边界与 trap-context 窗口 | 记录旧范围导致的非固定 mmap RED、最终 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)` 修正、固定映射拒绝规则、RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`、真实 `/regression` ELF 绑定及 Oracle 最终验收 |
 | `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 | `docs/Work_Log/2026-07-28.md` | Firmware DTB safety gate | 记录 Oracle 识别的 DTB 协议边界、FDT carveout/DTB 页保留与 2K1000 三目标 Docker 编译验证 |
+| `docs/Work_Log/2026-07-30.md` | another_ext4 小 pwrite 写合并 | 记录 Oracle P0/P1 建议、写缓冲和 atomic dirty-cache pin 实现、双架构/ktest/lint 验证及 iozone 测试资产限制 |
 
 ## 9. 交互记录与留痕方式
 

@@ -1,6 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
+use core::convert::TryFrom;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
@@ -12,7 +13,7 @@ use crate::utils::error::SyscallErr;
 use super::blockdev::MangoBlockDevice;
 use super::errno::from_another;
 use super::inode::Ext4Inode;
-use super::lifetime::{InodeKey, InodeLifetime};
+use super::lifetime::{CachedTimestamps, InodeKey, InodeLifetime};
 
 static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -75,6 +76,30 @@ impl Ext4FileSystem {
         self.inner()
             .flush_device()
             .map_err(|error| from_another(error.code()))
+    }
+
+    /// Persist a lifetime's dirty mtime and ctime in one inode mutation.
+    pub(crate) fn commit_lifetime_timestamps(
+        &self,
+        inode_id: u32,
+        lifetime: &InodeLifetime,
+    ) -> Result<Option<CachedTimestamps>, SyscallErr> {
+        let Some(timestamps) = lifetime.dirty_timestamps() else {
+            return Ok(None);
+        };
+        let mtime = u32::try_from(timestamps.mtime().tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        let ctime = u32::try_from(timestamps.ctime().tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        self.inner()
+            .setattr(
+                inode_id,
+                another_ext4::SetAttr {
+                    mtime: Some(mtime),
+                    ctime: Some(ctime),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| from_another(error.code()))?;
+        Ok(Some(timestamps))
     }
 }
 

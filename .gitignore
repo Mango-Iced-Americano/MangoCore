@@ -34,6 +34,8 @@ disk.img
 disk-la.img
 
 /docs/Work_Log/evidence/*
+!/docs/Work_Log/evidence/2026-07-30/
+!/docs/Work_Log/evidence/2026-07-30/**
 
 cc-codex/*.clean.img
 

@@ -85,7 +85,9 @@ impl Ext4Inode {
         let file_type = map_file_type(attr.ftype);
         let size = usize::try_from(attr.size).map_err(|_| SyscallErr::EFBIG)?;
         let key = InodeKey::new(fs.fs_id(), inode_id, attr.generation);
-        let lifetime = fs.lifetime(key, size);
+        let mtime = TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?);
+        let ctime = TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?);
+        let lifetime = fs.lifetime(key, size, mtime, ctime);
         Ok(Arc::new_cyclic(|self_ref| Self {
             owner,
             key,
@@ -287,8 +289,18 @@ impl IndexNode for Ext4Inode {
             blk_size: another_ext4::BLOCK_SIZE,
             blocks: usize::try_from(attr.blocks).map_err(|_| SyscallErr::EFBIG)?,
             atime: TimeSpec::from_s(usize::try_from(attr.atime).map_err(|_| SyscallErr::EFBIG)?),
-            mtime: TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?),
-            ctime: TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?),
+            mtime: match self.lifetime.cached_mtime() {
+                Some(mtime) => mtime,
+                None => TimeSpec::from_s(
+                    usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?,
+                ),
+            },
+            ctime: match self.lifetime.cached_ctime() {
+                Some(ctime) => ctime,
+                None => TimeSpec::from_s(
+                    usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?,
+                ),
+            },
             file_type,
             mode: InodeMode::from(file_type) | permissions,
             flags: self.lifetime.inode_flags(),
@@ -327,6 +339,10 @@ impl IndexNode for Ext4Inode {
             .map_err(|error| from_another(error.code()))
     }
 
+    fn touch_modified(&self) {
+        self.lifetime.cache_modified_time(TimeSpec::now());
+    }
+
     fn fs(&self) -> Arc<dyn FileSystem> {
         match self.fs_arc() {
             Ok(fs) => fs,
@@ -343,6 +359,10 @@ impl IndexNode for Ext4Inode {
             return None;
         }
         self.fs_arc().ok().map(|fs| self.regular_page_cache(&fs))
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        self.file_type == FileType::File
     }
 
     fn as_any_ref(&self) -> &dyn Any {

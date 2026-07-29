@@ -47,7 +47,7 @@ pub(super) fn test_global_flush_releases_registry_before_writeback() -> Result<(
         .write(0, &[WRITE_BYTE; PAGE_SIZE], Some(0))
         .map_err(|_| "PageCache setup write failed")?;
 
-    flush_all_page_caches();
+    flush_all_page_caches().map_err(|_| "global page-cache writeback failed")?;
 
     if !backend.reentered.load(Ordering::SeqCst) {
         return Err("writeback backend did not re-enter the PageCache registry query");

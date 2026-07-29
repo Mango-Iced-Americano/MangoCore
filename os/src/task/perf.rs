@@ -23,6 +23,34 @@ pub const STATS_PROFILE_ALL: usize =
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 
+/// Read the architecture cycle counter without enabling the diagnostics framework.
+#[inline(always)]
+pub fn perf_time_now_unconditional() -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let cycles: usize;
+        // SAFETY: [Category 13 — library/unsafe contract]. `rdcycle` only reads
+        // the current hart's cycle CSR into a compiler-allocated general register;
+        // it neither accesses memory nor changes processor state.
+        unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) };
+        cycles
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let mut lo: usize;
+        let mut hi: usize;
+        // SAFETY: [Category 13 — library/unsafe contract]. `rdtime.d` only reads
+        // the stable timer into compiler-allocated general registers and does not
+        // access memory or modify control state.
+        unsafe { core::arch::asm!("rdtime.d {},{}", out(reg) lo, out(reg) hi) };
+        lo
+    }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    {
+        0
+    }
+}
+
 pub const BOOT_STAGE_ENTRY: usize = 0;
 pub const BOOT_STAGE_CONSOLE: usize = 1;
 pub const BOOT_STAGE_MM: usize = 2;

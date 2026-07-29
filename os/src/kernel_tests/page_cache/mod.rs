@@ -11,6 +11,7 @@ mod read_reentry;
 mod user_write;
 mod write_copy;
 mod write_fixture;
+mod writeback_retry;
 
 /// Returns PageCache regressions in their established execution order.
 pub fn tests() -> Vec<KernelTest> {
@@ -30,6 +31,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "page_cache::write_user_rejects_short_source_without_mutation",
             user_write::test_write_user_rejects_short_source_without_mutation,
+        ),
+        KernelTest::new(
+            "page_cache::writeback_retries_transient_eagain",
+            writeback_retry::test_writeback_retries_transient_eagain,
         ),
         KernelTest::with_timeout(
             "page_cache::global_flush_releases_registry_before_writeback",

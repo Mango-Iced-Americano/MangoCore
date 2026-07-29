@@ -17,14 +17,16 @@ const CAP_SYS_ADMIN: usize = 21;
 const CAP_SYSLOG: usize = 34;
 static SYSLOG_READ_ALL_CLEARED: AtomicBool = AtomicBool::new(false);
 
-pub fn sys_shutdown() -> isize {
+fn sync_filesystems_before_power_cycle() {
     #[cfg(feature = "ext4_another_backend")]
     {
         crate::fs::ext4_another::shutdown_all_instances();
     }
-    info!("[sys_shutdown] flushing page caches and ext4 metadata...");
-    flush_all_page_caches();
-    info!("[sys_shutdown] flushing all ext4 instances...");
+    info!("[power-cycle] flushing page caches...");
+    if let Err(e) = flush_all_page_caches() {
+        log::error!("[power-cycle] flush_all_page_caches failed: {:?}", e);
+    }
+    info!("[power-cycle] flushing ext4 metadata...");
     let mut guard = EXT4_REGISTRY.lock();
     let live: alloc::vec::Vec<_> = guard.iter().filter_map(|w| w.upgrade()).collect();
     guard.retain(|w| w.strong_count() > 0);
@@ -32,14 +34,13 @@ pub fn sys_shutdown() -> isize {
     for ext4fs in &live {
         ext4fs.flush_metadata_cache();
     }
-    info!("[sys_shutdown] ext4 metadata cache flushed");
-    info!("[sys_shutdown] committing and detaching filesystem backends...");
     if let Err(error) = crate::fs::vfs::mount::shutdown_all_backends() {
-        log::error!(
-            "[sys_shutdown] one or more filesystem backends failed to shut down: {:?}",
-            error
-        );
+        log::error!("[power-cycle] shutdown_all_backends failed: {:?}", error);
     }
+}
+
+pub fn sys_shutdown() -> isize {
+    sync_filesystems_before_power_cycle();
     info!("[sys_shutdown] halting");
     shutdown()
 }
@@ -93,6 +94,14 @@ pub fn sys_reboot(magic: usize, magic2: usize, cmd: usize, _arg: usize) -> isize
 
     if current_euid() != 0 {
         return EPERM;
+    }
+
+    if matches!(
+        cmd,
+        LINUX_REBOOT_CMD_RESTART | LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF
+    ) {
+        sync_filesystems_before_power_cycle();
+        shutdown();
     }
 
     SUCCESS

@@ -33,7 +33,10 @@ pub fn main(argc: usize, argv: &[&str]) -> i32 {
     bootstrap::layout::prepare_layout(&environ);
     bootstrap::libraries::link_libraries(&environ);
     bootstrap::libraries::install_embedded_libgcc_s();
-    bootstrap::packages::install_apk_packages(&environ, cfg.skip_apk);
+    if !bootstrap::packages::install_apk_packages(&environ, cfg.skip_apk) {
+        println!("[initproc] aborting test runner: APK package installation failed");
+        return 1;
+    }
     HAS_BIN_BASH.store(process::run_bash_cmd("test -x /bin/bash\0", &environ) == 0, Ordering::Relaxed);
     if cfg.timer_smoke && !smoke::timerfd::run_timerfd_smoke() { shutdown(); return 1; }
     match cfg.mode {

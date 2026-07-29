@@ -939,12 +939,11 @@ impl IndexNode for Ext4OSInode {
         // Regular files: always use PageCache (lazily created on first I/O)
         if self.file_type == FileType::File {
             let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
-            let result = pc.with_io_gate(|| {
+            let result = (|| {
                 let old_size = self.logical_size_or_refresh()?;
-                // Publish EOF in the same PageCache serialization interval as
-                // the data copy.  Background writeback therefore cannot see
-                // a new page with an old EOF, and truncate cannot interleave
-                // between EOF publication and dirty-page creation.
+                // Publish the speculative EOF before the per-page write lease.
+                // A failed write conditionally restores it only when no later
+                // writer has published a newer end offset.
                 let requested_end =
                     offset.checked_add(actual).ok_or(SyscallErr::EFBIG)?;
                 let expected_new_end = requested_end.max(old_size);
@@ -993,10 +992,8 @@ impl IndexNode for Ext4OSInode {
                     self.note_logical_size(committed_end);
                 }
                 Ok(n)
-            });
+            })();
             if result.is_ok() {
-                // Never run global writeback while holding this PageCache's
-                // io_gate: it may select the same cache and would deadlock.
                 crate::fs::page_cache::balance_dirty_pages();
             }
             return result;
@@ -1560,7 +1557,7 @@ impl IndexNode for Ext4OSInode {
         if self.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
-        // All aliases share this registry PageCache.  Its io_gate covers the
+// All aliases share this registry PageCache. Its per-page state transitions cover
         // complete backend truncate + cache prune + EOF publication, while
         // writeback holds the same gate across Dirty -> Writeback -> I/O.
         // This prevents an old dirty page from extending the file again and
