@@ -12,6 +12,7 @@ pub(super) fn tests() -> Vec<KernelTest> {
         KernelTest::new("gmac::rx_mac_config_ok", rx_mac_config_ok),
         KernelTest::new("gmac::rx_frames_received", rx_frames_received),
         KernelTest::new("gmac::rx_writeback", rx_writeback),
+        KernelTest::new("gmac::platform_clock_reset_state", platform_clock_reset_state),
     ]
 }
 
@@ -37,11 +38,20 @@ fn tx_own_cleared() -> Result<(), &'static str> {
 
 fn tx_healthy() -> Result<(), &'static str> {
     match gmac_ktest_result() {
-        Some(result) if result.tx_own_cleared && result.dma_status & (1 << 2) == 0 => Ok(()),
-        Some(result) if result.dma_status & (1 << 2) != 0 => {
-            Err("TX underrun (TBU) — TX DMA buffer issue")
+        Some(result) if result.tx_submitted && result.tx_own_cleared => {
+            // DMA_STATUS is diagnostic-only. TBU (bit 2) after a successful
+            // single-descriptor DMA fetch is normal queue-tail exhaustion,
+            // not a TX data-path failure — the ARP frame reached the wire.
+            if result.dma_status & (1 << 2) != 0 {
+                crate::println!(
+                    "  diag: DMA_STATUS={:#010x} (TBU=1 — benign tail exhaustion)",
+                    result.dma_status,
+                );
+            }
+            Ok(())
         }
-        _ => Err("GMAC init-time ARP probe did not run"),
+        Some(_) => Err("TX descriptor OWN did not clear within 100ms"),
+        None => Err("GMAC init-time ARP probe did not run"),
     }
 }
 
@@ -63,7 +73,7 @@ fn rx_mac_config_ok() -> Result<(), &'static str> {
 
 fn rx_frames_received() -> Result<(), &'static str> {
     match gmac_ktest_result() {
-        Some(result) if result.gmac_debug != 0 => Ok(()),
+        Some(result) if result.rx_descriptor_valid => Ok(()),
         Some(result) => {
             crate::println!(
                 "  diag: DMA_STATUS={:#010x} CUR_DESC={:#010x} GMAC_DEBUG={:#010x} RXQ_CTRL0={:#010x}",
@@ -73,7 +83,7 @@ fn rx_frames_received() -> Result<(), &'static str> {
                 result.rxq_ctrl0
             );
             crate::println!(
-                "  phy: valid={} A001={:#06x} A010={:#06x} A012={:#06x} EXT_000c={:#06x} AON_RX={:#010x} RX_INV={:#010x} TX_MUX={:#010x}",
+                "  phy: valid={} A001={:#06x} A010={:#06x} A012={:#06x} EXT_000c={:#06x} AON_RX={:#010x} RX_INV={:#010x} TX_CLK={:#010x}",
                 result.phy_diagnostics_valid,
                 result.phy_chip_config,
                 result.phy_pad_drive_strength,
@@ -83,7 +93,7 @@ fn rx_frames_received() -> Result<(), &'static str> {
                 result.aon_gmac0_rx_inv,
                 result.aon_gmac0_tx
             );
-            Err("GMAC_DEBUG=0 — MAC received zero frames. PHY may not be driving RGMII.")
+            Err("RX descriptor invalid: expected OWN clear, no RX error, FIRST/LAST, and frame length 14..=DMA_BUFFER_SIZE")
         }
         None => Err("GMAC init-time ARP probe did not run"),
     }
@@ -104,7 +114,7 @@ fn rx_writeback() -> Result<(), &'static str> {
                 result.dma_rx_ctrl
             );
             crate::println!(
-                "  PHY diag: valid={} A001={:#06x} A010={:#06x} A012={:#06x} EXT_000c={:#06x} AON_RX={:#010x} RX_INV={:#010x} TX_MUX={:#010x}",
+                "  PHY diag: valid={} A001={:#06x} A010={:#06x} A012={:#06x} EXT_000c={:#06x} AON_RX={:#010x} RX_INV={:#010x} TX_CLK={:#010x}",
                 result.phy_diagnostics_valid,
                 result.phy_chip_config,
                 result.phy_pad_drive_strength,
@@ -118,4 +128,31 @@ fn rx_writeback() -> Result<(), &'static str> {
         }
         None => Err("GMAC init-time ARP probe did not run"),
     }
+}
+
+fn platform_clock_reset_state() -> Result<(), &'static str> {
+    let result = result()?;
+    if result.aon_gmac0_ahb & (1 << 31) == 0
+        || result.aon_gmac0_axi & (1 << 31) == 0
+        || result.aon_gmac0_tx != 0x8100_0000
+        || result.aon_gmac0_tx_inv != 0x4000_0000
+        || result.sys_gmac0_ptp != 0x8000_000a
+        || result.sys_gmac0_gtx != 0x8000_0008
+        || result.sys_gmac0_gtxclk != 0x8000_0020
+        || result.aon_gmac0_reset != 0x0000_00e0
+    {
+        crate::println!(
+            "  platform clocks: AON_AHB={:#010x} AON_AXI={:#010x} AON_TX={:#010x} AON_TXI={:#010x} SYS_PTP={:#010x} SYS_GTX={:#010x} SYS_GTXCLK={:#010x} AON_RESET={:#010x}",
+            result.aon_gmac0_ahb,
+            result.aon_gmac0_axi,
+            result.aon_gmac0_tx,
+            result.aon_gmac0_tx_inv,
+            result.sys_gmac0_ptp,
+            result.sys_gmac0_gtx,
+            result.sys_gmac0_gtxclk,
+            result.aon_gmac0_reset,
+        );
+        return Err("VF2 GMAC0 platform clock/reset state does not match the verified bring-up sequence");
+    }
+    Ok(())
 }

@@ -10,6 +10,7 @@ pub(crate) struct GmacKtestResult {
     pub(crate) tx_submitted: bool,
     pub(crate) tx_own_cleared: bool,
     pub(crate) rx_writeback: bool,
+    pub(crate) rx_descriptor_valid: bool,
     pub(crate) dma_status: u32,
     pub(crate) cur_rx_desc: u32,
     pub(crate) mac_config: u32,
@@ -22,9 +23,16 @@ pub(crate) struct GmacKtestResult {
     pub(crate) phy_pad_drive_strength: u16,
     pub(crate) phy_synce_config: u16,
     pub(crate) phy_clock_gating: u16,
+    pub(crate) aon_gmac0_ahb: u32,
+    pub(crate) aon_gmac0_axi: u32,
     pub(crate) aon_gmac0_rx: u32,
     pub(crate) aon_gmac0_rx_inv: u32,
     pub(crate) aon_gmac0_tx: u32,
+    pub(crate) aon_gmac0_tx_inv: u32,
+    pub(crate) aon_gmac0_reset: u32,
+    pub(crate) sys_gmac0_ptp: u32,
+    pub(crate) sys_gmac0_gtx: u32,
+    pub(crate) sys_gmac0_gtxclk: u32,
 }
 
 static GMAC_KTEST_RESULT: Mutex<Option<GmacKtestResult>> = Mutex::new(None);
@@ -38,6 +46,7 @@ pub(super) fn run(driver: &GmacJh7110) {
         tx_submitted: result.tx_submitted,
         tx_own_cleared: result.tx_own_cleared,
         rx_writeback: result.rx_writeback,
+        rx_descriptor_valid: result.rx_descriptor_valid,
         dma_status: result.dma_status,
         cur_rx_desc: result.cur_rx_desc,
         mac_config: result.mac_config,
@@ -50,9 +59,16 @@ pub(super) fn run(driver: &GmacJh7110) {
         phy_pad_drive_strength: phy_diagnostics.map_or(0, |value| value.pad_drive_strength),
         phy_synce_config: phy_diagnostics.map_or(0, |value| value.synce_config),
         phy_clock_gating: phy_diagnostics.map_or(0, |value| value.clock_gating),
+        aon_gmac0_ahb: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_AHB),
+        aon_gmac0_axi: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_AXI),
         aon_gmac0_rx: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_RX),
         aon_gmac0_rx_inv: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_RX_INV),
-        aon_gmac0_tx: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_TX_MUX),
+        aon_gmac0_tx: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_TX),
+        aon_gmac0_tx_inv: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_GMAC0_TX_INV),
+        aon_gmac0_reset: mmio::read_mmio(mmio::AON_CRG_BASE, mmio::AON_CRG_RESET),
+        sys_gmac0_ptp: mmio::read_mmio(mmio::SYS_CRG_BASE, mmio::SYS_CRG_GMAC0_PTP),
+        sys_gmac0_gtx: mmio::read_mmio(mmio::SYS_CRG_BASE, mmio::SYS_CRG_GMAC0_GTX),
+        sys_gmac0_gtxclk: mmio::read_mmio(mmio::SYS_CRG_BASE, mmio::SYS_CRG_GMAC0_GTXCLK),
     };
     drop(inner);
     *GMAC_KTEST_RESULT.lock() = Some(result);
