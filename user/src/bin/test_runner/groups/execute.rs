@@ -15,10 +15,9 @@ pub fn run_group_in_dir(environ: &[*const u8], dir: &str, group: &str, script: &
 pub fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
     println!("[initproc] run_selected_groups start mask=0x{:03X}", cfg.mask);
     for &index in &cfg.order { let (group, script) = TEST_GROUPS[index]; if cfg.mask & (1 << index) == 0 { println!("[initproc] skip {} (mask bit{} not set)", group, index); continue; }
-        // ltp_include non-empty always triggers inline binary mode,
-        // regardless of ltp_runner setting. This ensures the include filter
-        // (e.g. ltp_include=pipe13) works with both "script" and "inline".
-        if group == "ltp" && (!cfg.ltp_include.is_empty() || cfg.ltp_runner == LtpRunner::Inline) {
+        // ltp_include 通过 ltprunner（suite 模式）处理 runtest 用例名过滤；
+        // inline 模式只扫描实际二进制文件名，不解析 runtest 文件。
+        if group == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
             if cfg.ltp_libc != LtpLibc::Glibc { run_ltp_binaries(environ, "/musl\0", &cfg.ltp_exclude, &cfg.ltp_include, cfg.ltp_from.as_deref(), cfg.timeouts[index]); }
             if cfg.ltp_libc != LtpLibc::Musl { run_ltp_binaries(environ, "/glibc\0", &cfg.ltp_exclude, &cfg.ltp_include, cfg.ltp_from.as_deref(), cfg.timeouts[index]); }
         }
