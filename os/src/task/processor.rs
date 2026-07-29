@@ -31,6 +31,8 @@ use spin::Mutex;
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
 const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
+#[cfg(feature = "board_vf2")]
+const BOARD_VF2_CONSOLE_DRAIN_BUDGET: usize = 32;
 
 #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
@@ -136,15 +138,38 @@ pub fn run_tasks() {
         // 2. Other input → stash, then feed the TTY line discipline.  The
         //    production path owns both task and epoll readiness notification.
         //
-        // On rv64 this is an SBI ecall, so do not pay it on every context
-        // switch. Blocked readers are covered by the scheduler's periodic
-        // console poll and the existing wait-IO fallback timer.
-        #[cfg(target_arch = "riscv64")]
+        // On non-VF2 rv64 console access goes through SBI ecall (expensive),
+        // so throttle to every 64th loop.  VF2 uses direct UART MMIO and
+        // must poll every loop to prevent FIFO overflow before the first
+        // poll.  Non-RV64 (LA64) also polls every loop.
+        #[cfg(all(target_arch = "riscv64", not(feature = "board_vf2")))]
         let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
-        #[cfg(not(target_arch = "riscv64"))]
+        #[cfg(any(not(target_arch = "riscv64"), feature = "board_vf2"))]
         let should_poll_console = true;
         if should_poll_console {
             let stage_t0 = sched_profile_start(sched_profile);
+            #[cfg(feature = "board_vf2")]
+            {
+                let mut stashed = false;
+                for _ in 0..BOARD_VF2_CONSOLE_DRAIN_BUDGET {
+                    let ch = crate::hal::console_getchar();
+                    if ch == usize::MAX {
+                        break;
+                    }
+                    let ch = ch as u8;
+                    if crate::trace::check_magic_key(ch, "schedule") {
+                        // check_magic_key → dump_from → shutdown, never returns.
+                    } else {
+                        crate::trace::stash_char(ch);
+                        stashed = true;
+                    }
+                }
+                if stashed {
+                    crate::fs::dev::tty::Teletype::receive_stashed();
+                }
+            }
+            #[cfg(not(feature = "board_vf2"))]
+            {
             let ch = crate::hal::console_getchar() as u8;
             if ch != 0xFF {
                 if crate::trace::check_magic_key(ch, "schedule") {
@@ -153,6 +178,7 @@ pub fn run_tasks() {
                     crate::trace::stash_char(ch);
                     crate::fs::dev::tty::Teletype::receive_stashed();
                 }
+            }
             }
             sched_record_stage(
                 sched_profile,
