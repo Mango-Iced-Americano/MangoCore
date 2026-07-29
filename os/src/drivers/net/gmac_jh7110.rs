@@ -46,13 +46,12 @@ pub struct GmacJh7110(Mutex<GmacJh7110Inner>);
 pub(crate) use ktest::{gmac_ktest_result, GmacKtestResult};
 
 fn enable_gmac0_clocks_and_release_resets() {
-    // GMAC0 GTX clock: PLL2 1GHz / 8 = 125MHz for RGMII 1000M.
-    // Preserve the clock source select (bit 4) from U-Boot.
-    let gtxclk = read_mmio(SYS_CRG_BASE, SYS_CRG_GMAC0_GTXCLK);
+    write_mmio(SYS_CRG_BASE, SYS_CRG_GMAC0_PTP, GMAC0_PTP_CLOCK_CONFIG);
+    write_mmio(SYS_CRG_BASE, SYS_CRG_GMAC0_GTX, GMAC0_GTX_CLOCK_CONFIG);
     write_mmio(
         SYS_CRG_BASE,
         SYS_CRG_GMAC0_GTXCLK,
-        (gtxclk & !0xfu32) | 8u32 | CLOCK_ENABLE,
+        GMAC0_GTXCLK_CLOCK_CONFIG,
     );
     write_mmio(
         AON_CRG_BASE,
@@ -64,11 +63,8 @@ fn enable_gmac0_clocks_and_release_resets() {
         AON_CRG_GMAC0_AXI,
         read_mmio(AON_CRG_BASE, AON_CRG_GMAC0_AXI) | CLOCK_ENABLE,
     );
-    write_mmio(
-        AON_CRG_BASE,
-        AON_CRG_GMAC0_TX,
-        read_mmio(AON_CRG_BASE, AON_CRG_GMAC0_TX) | CLOCK_ENABLE,
-    );
+    write_mmio(AON_CRG_BASE, AON_CRG_GMAC0_TX, GMAC0_TX_CLOCK_CONFIG);
+    write_mmio(AON_CRG_BASE, AON_CRG_GMAC0_TX_INV, GMAC0_TX_CLOCK_INVERT);
     // RX clock gate (0x10): power on the RX clock domain.
     write_mmio(
         AON_CRG_BASE,
@@ -88,18 +84,24 @@ fn enable_gmac0_clocks_and_release_resets() {
         AON_CRG_GMAC0_RX_INV,
         read_mmio(AON_CRG_BASE, AON_CRG_GMAC0_RX_INV) & !(1 << 30),
     );
-    write_mmio(
-        AON_CRG_BASE,
-        AON_CRG_RESET,
-        read_mmio(AON_CRG_BASE, AON_CRG_RESET)
-            & !(AON_CRG_RESET_GMAC0_AXI | AON_CRG_RESET_GMAC0_AHB),
-    );
+    for reset_state in GMAC0_RESET_SEQUENCE {
+        write_mmio(AON_CRG_BASE, AON_CRG_RESET, reset_state);
+        wait_for_gmac0_reset_settle();
+    }
     let phy_interface = read_mmio(AON_SYSCON_BASE, AON_SYSCON_GMAC0_PHY_INTF);
     write_mmio(
         AON_SYSCON_BASE,
         AON_SYSCON_GMAC0_PHY_INTF,
         (phy_interface & !AON_SYSCON_GMAC0_PHY_INTF_MASK) | AON_SYSCON_GMAC0_PHY_INTF_RGMII,
     );
+}
+
+fn wait_for_gmac0_reset_settle() {
+    const RESET_SETTLE_MS: usize = 100;
+    let start = crate::timer::get_time_ms();
+    while crate::timer::get_time_ms().wrapping_sub(start) < RESET_SETTLE_MS {
+        core::hint::spin_loop();
+    }
 }
 
 fn reset_dma() -> Result<(), GmacJh7110Error> {

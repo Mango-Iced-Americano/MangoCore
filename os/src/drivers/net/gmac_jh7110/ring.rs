@@ -4,7 +4,9 @@ use crate::mm::{frame_alloc, FrameTracker};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::mmio::{dma_barrier, read_reg, write_reg, DMA_CH0_RX_END, DMA_CH0_TX_END};
+use super::mmio::{
+    clean_dma_range, dma_barrier, read_reg, write_reg, DMA_CH0_RX_END, DMA_CH0_TX_END,
+};
 use super::{dma_address, GmacJh7110Error};
 
 pub(super) const RX_DESC_COUNT: usize = 64;
@@ -49,6 +51,7 @@ pub(super) struct RingKtestResult {
     pub(super) tx_submitted: bool,
     pub(super) tx_own_cleared: bool,
     pub(super) rx_writeback: bool,
+    pub(super) rx_descriptor_valid: bool,
     pub(super) dma_status: u32,
     pub(super) cur_rx_desc: u32,
     pub(super) mac_config: u32,
@@ -114,10 +117,11 @@ impl DmaRings {
 
     fn initialize(&self) -> Result<(), GmacJh7110Error> {
         for index in 0..RX_DESC_COUNT {
-            let buf = dma_address(&self.rx_frames[index])? as u32;
+            let buffer = dma_address(&self.rx_frames[index])?;
+            clean_dma_range(buffer, DMA_BUFFER_SIZE);
             // DWMAC5 normal (16-byte) RX descriptor: des0/des1 = buffer address, des2 = buffer size.
             let value = DmaDesc {
-                des0: buf,
+                des0: buffer as u32,
                 des1: 0,
                 des2: DMA_BUFFER_SIZE as u32 & BUF_SIZE_MASK,
                 des3: DESC_OWN | BUF1_VALID,
@@ -127,6 +131,10 @@ impl DmaRings {
         for index in 0..TX_DESC_COUNT {
             unsafe { core::ptr::write_volatile(self.tx_descriptor(index), core::mem::zeroed()) };
         }
+        clean_dma_range(
+            self.descriptor_base,
+            (RX_DESC_COUNT + TX_DESC_COUNT) * DESC_SIZE,
+        );
         dma_barrier();
         Ok(())
     }
@@ -135,6 +143,7 @@ impl DmaRings {
         for _ in 0..RX_DESC_COUNT {
             let index = self.rx_index;
             let descriptor = self.rx_descriptor(index);
+            clean_dma_range(descriptor as usize, DESC_SIZE);
             dma_barrier();
             let des3 = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3)) };
             if des3 & DESC_OWN != 0 {
@@ -152,6 +161,7 @@ impl DmaRings {
                 Err(_) => return None,
             };
             if valid && length > 0 {
+                clean_dma_range(buffer, length);
                 dma_barrier();
                 unsafe { core::ptr::copy_nonoverlapping(buffer as *const u8, output.as_mut_ptr(), length) };
             }
@@ -164,6 +174,7 @@ impl DmaRings {
                 core::ptr::write_volatile(core::ptr::addr_of_mut!((*descriptor).des2), DMA_BUFFER_SIZE as u32 & BUF_SIZE_MASK);
             }
             dma_barrier();
+            clean_dma_range(buffer, DMA_BUFFER_SIZE);
             self.rx_index = (index + 1) % RX_DESC_COUNT;
             unsafe {
                 core::ptr::write_volatile(
@@ -171,6 +182,7 @@ impl DmaRings {
                     DESC_OWN | BUF1_VALID,
                 );
             }
+            clean_dma_range(descriptor as usize, DESC_SIZE);
             dma_barrier();
             write_reg(DMA_CH0_RX_END, descriptor as u32);
             if valid {
@@ -186,6 +198,7 @@ impl DmaRings {
         }
         let index = self.tx_index;
         let descriptor = self.tx_descriptor(index);
+        clean_dma_range(descriptor as usize, DESC_SIZE);
         dma_barrier();
         if unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3)) } & DESC_OWN != 0 {
             return None;
@@ -213,6 +226,7 @@ impl DmaRings {
                 length as u32 & BUF_SIZE_MASK,
             );
         }
+        clean_dma_range(buffer, length);
         dma_barrier();
         unsafe {
             core::ptr::write_volatile(
@@ -220,6 +234,7 @@ impl DmaRings {
                 DESC_OWN | TX_FIRST | TX_LAST | (length as u32 & RX_FRAME_LEN_MASK),
             );
         }
+        clean_dma_range(descriptor as usize, DESC_SIZE);
         dma_barrier();
         self.tx_index = (index + 1) % TX_DESC_COUNT;
         write_reg(DMA_CH0_TX_END, self.tx_descriptor(self.tx_index) as u32);
@@ -233,8 +248,9 @@ impl DmaRings {
                 let start = get_time();
                 let timeout = (get_clock_freq() / 10).max(1);
                 loop {
-                    dma_barrier();
                     let descriptor = self.tx_descriptor(index);
+                    clean_dma_range(descriptor as usize, DESC_SIZE);
+                    dma_barrier();
                     let des3 = unsafe {
                         core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3))
                     };
@@ -250,14 +266,43 @@ impl DmaRings {
             None => false,
         };
 
-        dma_barrier();
-        let rx_writeback = (0..RX_DESC_COUNT).any(|index| {
-            let descriptor = self.rx_descriptor(index);
-            let des3 = unsafe {
-                core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3))
-            };
-            des3 & DESC_OWN == 0
-        });
+        let (rx_writeback, rx_descriptor_valid) = if tx_own_cleared {
+            let start = get_time();
+            let timeout = (get_clock_freq() / 10).max(1);
+            let mut rx_writeback = false;
+            loop {
+                let mut rx_descriptor_valid = false;
+                for index in 0..RX_DESC_COUNT {
+                    let descriptor = self.rx_descriptor(index);
+                    clean_dma_range(descriptor as usize, DESC_SIZE);
+                    dma_barrier();
+                    let des3 = unsafe {
+                        core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3))
+                    };
+                    let frame_length = (des3 & RX_FRAME_LEN_MASK) as usize;
+                    let observed_writeback = des3 & DESC_OWN == 0;
+                    let observed_descriptor_valid = observed_writeback
+                        && des3 & RX_ERROR == 0
+                        && des3 & RX_FIRST != 0
+                        && des3 & RX_LAST != 0
+                        && (14..=DMA_BUFFER_SIZE).contains(&frame_length);
+                    rx_writeback |= observed_writeback;
+                    if observed_descriptor_valid {
+                        rx_descriptor_valid = true;
+                        break;
+                    }
+                }
+                if rx_descriptor_valid {
+                    break (rx_writeback, true);
+                }
+                if get_time().wrapping_sub(start) >= timeout {
+                    break (rx_writeback, false);
+                }
+                core::hint::spin_loop();
+            }
+        } else {
+            (false, false)
+        };
         let rxq_ctrl0 = read_reg(0x00a0);
         let mtl_rxq_op = read_reg(0x0d30);
         let dma_rx_ctrl = read_reg(0x1108);
@@ -270,6 +315,7 @@ impl DmaRings {
             tx_submitted: tx_index.is_some(),
             tx_own_cleared,
             rx_writeback,
+            rx_descriptor_valid,
             dma_status,
             cur_rx_desc,
             mac_config,
