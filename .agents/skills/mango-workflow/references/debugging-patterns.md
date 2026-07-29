@@ -42,6 +42,14 @@
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`
 - panic 输出包含 syscall 上下文、内存状态、任务信息（`panic_diag.rs`）
 
+### 早期启动 MMIO 恒等映射必须包含 post-heap 前使用的编译期外设范围
+
+- **现象**: VF2 实板在早期启动阶段访问 L2CC 缓存控制器 MMIO 地址 `0x02010200` 时触发 `StorePageFault`；该地址在 FDT/PlatformInfo 初始化前使用，但不在编译期 identity MMIO 映射表范围内。
+- **根因**: 早期启动代码（FDT 初始化前、堆分配器就绪前）依赖编译期 identity MMIO 映射表访问外设寄存器。L2CC 缓存控制器地址 `0x0201_0000..0x0201_1000` 未被纳入该表，导致 volatile 写操作触发了对未映射物理地址的 StorePageFault。
+- **修复**: 在 VF2 板级 identity MMIO 映射表中添加 `0x0201_0000..0x0201_1000` 范围的恒等映射，确保 post-heap FDT/PlatformInfo 初始化前的 L2CC 访问有有效页表项。
+- **教训**: 任何在堆分配器就绪前（即 post-heap FDT 枚举前）需要访问的 MMIO 外设，其地址范围必须显式加入编译期 identity MMIO 映射表。仅依赖 FDT/PlatformInfo 动态映射的地址在早期启动阶段不可访问。此类问题表现为早期 boot 路径中的 `StorePageFault` 而非设备探测失败。
+- **相关文件**: `os/src/hal/platform/riscv/vf2.rs`、`os/src/mm/kernel_space.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
 ## 内存问题
 
 ### 物理地址异常（如 0xb0000000）
@@ -534,3 +542,13 @@
 - **修复**: 确认 `/sdcard/{musl,glibc}` 存在后，先删除 initramfs 目录的 `.gitkeep`，再 `rmdir` 并创建到 sdcard 的绝对符号链接。
 - **教训**: 需要将 CPIO 占位目录替换为挂载盘路径时，先检查打包后的 CPIO 条目，而不是只检查源码树目录是否“空”。
 - **相关文件**: `user/src/bin/test_runner/bootstrap/layout.rs`, `scripts/build_initramfs.sh`
+
+## 固件 ABI / Hypercall
+
+### 内联汇编调用约定中未初始化的寄存器被固件解释
+
+- **现象**：VF2 串口输入产生 OpenSBI `ext=0x2 func=0xf4240`。`console_getchar()` 调用 legacy `sbi_call(which=2)`，但 a6 (x16) 寄存器未被显式初始化，包含来自调用者寄存器池的垃圾值 `0xf4240`（= 1_000_000）。
+- **根因**：Legacy SBI ABI（EID < 0x10）规范上不使用 a6 传递 FID，但 OpenSBI 实现仍读取 a6 并输出 `func=<a6>` 日志。`sbi_call()` 的 `asm!` 只设置了 a0-a2 和 a7，遗漏了 a6。
+- **修复**：在 `sbi_call()` 的 `asm!` 操作数中添加 `in("x16") 0usize`，确保每次 legacy ecall 时 a6 被显式零初始化。
+- **教训**：调用固件/超管理器 ABI（ecall/hcall/svc）时，**所有**参数寄存器必须被显式初始化，即使规范将某些寄存器标注为"该调用类型未使用"。固件实现可能读取并记录这些寄存器的值，或将其纳入行为判断（如 OpenSBI 输出日志含 func=）。同一文件中的 `reboot()` 已正确初始化 a6=0（SRST 现代扩展需要 FID），恰好留下了对比。
+- **相关文件**: `os/src/hal/arch/riscv/sbi.rs`
