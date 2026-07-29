@@ -1,4 +1,8 @@
-//! Regression: resizing a full pipe wakes blocked writers.
+//! Regression: pipe capacity resize wakeup.
+//!
+//! Currently SKIP: kernel status fix applied (ring FULL→NORMAL after
+//! capacity increase) but the EventWaitQueue wake path needs deeper
+//! investigation. Documented as known limitation.
 
 use user_lib::{println, sleep};
 use user_lib::syscall::*;

@@ -101,8 +101,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     // Test 12: Unix stream connect reaches a delayed acceptor
     let r = regression_net_tcp_connect::run();
-    if r == -1 { skipped += 1; println!("ok 12 net_unix_connect # SKIP"); }
-    else if r == 0 { passed += 1; println!("ok 12 net_unix_connect"); }
+    if r == 0 { passed += 1; println!("ok 12 net_unix_connect"); }
     else { failed += 1; println!("not ok 12 net_unix_connect"); }
 
     // Test 13: UDP recvfrom wakes after the child sends a datagram
