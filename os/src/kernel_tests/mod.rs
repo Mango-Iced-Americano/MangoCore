@@ -25,6 +25,9 @@ pub mod platform;
 mod kt_block_device;
 #[path = "ext4.rs"]
 mod kt_ext4;
+#[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+#[path = "gmac.rs"]
+mod kt_gmac;
 #[path = "ext4_another/mod.rs"]
 mod kt_ext4_another;
 #[path = "ext4_another_lifetime.rs"]
@@ -62,6 +65,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("mm", kt_mm::tests()),
         ("page_cache", kt_page_cache::tests()),
         ("ext4", kt_ext4::tests()),
+        #[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+        ("gmac", kt_gmac::tests()),
         ("ext4_another", kt_ext4_another::tests()),
         ("ext4_another_lifetime", kt_ext4_another_lifetime::tests()),
         ("block_device", kt_block_device::tests()),

@@ -65,6 +65,7 @@ checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 [[package]]
 name = "buddy_system_allocator"
 version = "0.13.0"
+source = "git+https://github.com/Mango-Iced-Americano/buddy_system_allocator?branch=feat%2Fmetadata-heap#fb7c19c09162b07f7f45d11a939b96c84d358193"
 
 [[package]]
 name = "byteorder"

@@ -31,6 +31,11 @@ pub fn tests() -> Vec<KernelTest> {
             "platform::device_manager_mmio",
             test_device_manager_find_mmio,
         ),
+        #[cfg(feature = "board_vf2")]
+        KernelTest::new(
+            "platform::vf2_serial_static_mmio",
+            test_vf2_serial_static_mmio,
+        ),
         KernelTest::new(
             "platform::policy_selection",
             test_platform_policy_selection,
@@ -222,6 +227,26 @@ fn test_device_manager_find_mmio() -> Result<(), &'static str> {
     }
     if device_manager.find_mmio("nonexistent").is_some() {
         return Err("unknown device returned an MMIO range");
+    }
+    Ok(())
+}
+
+/// The board_vf2 static platform descriptor provides exactly one ns16550a
+/// serial descriptor at MMIO base 0x1000_0000 with 0x1000 range.
+#[cfg(feature = "board_vf2")]
+fn test_vf2_serial_static_mmio() -> Result<(), &'static str> {
+    let platform = PlatformInfo::from_static();
+    let manager = DeviceManager::new(platform.devices);
+    let serials = manager.find_by_compatible("ns16550a");
+    if serials.len() != 1 {
+        return Err("VF2 static fallback must have exactly one ns16550a device");
+    }
+    let serial = serials[0];
+    if serial.kind != DeviceKind::Serial {
+        return Err("VF2 ns16550a device has wrong DeviceKind");
+    }
+    if serial.mmio != Some((0x1000_0000, 0x1000)) {
+        return Err("VF2 serial has wrong MMIO range");
     }
     Ok(())
 }

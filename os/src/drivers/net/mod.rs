@@ -4,6 +4,8 @@
     any(feature = "gmac_probe", feature = "gmac_2k1000")
 ))]
 pub mod gmac_2k1000;
+#[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+pub mod gmac_jh7110;
 pub mod veth;
 #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
 pub mod virtio_net;
@@ -26,7 +28,7 @@ lazy_static! {
 }
 
 pub fn init_net_device() {
-    #[cfg(feature = "block_virt")]
+    #[cfg(all(feature = "block_virt", not(feature = "board_vf2")))]
     {
         let platform_info = crate::hal::platform::platform_info();
         if !platform_info.devices.is_empty() {
@@ -49,12 +51,22 @@ pub fn init_net_device() {
             Err(error) => println!("[gmac] initialization failed: {:?}", error),
         }
     }
+    #[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+    {
+        match gmac_jh7110::GmacJh7110::new() {
+            Ok(net_dev) => *NET_DEVICE.lock() = Some(Arc::new(net_dev)),
+            Err(error) => println!("[gmac-jh7110] init failed: {:?}", error),
+        }
+    }
     #[cfg(all(
         any(feature = "block_virt", feature = "block_virt_pci"),
-        not(all(
-            target_arch = "loongarch64",
-            feature = "board_2k1000",
-            feature = "gmac_2k1000"
+        not(any(
+            all(
+                target_arch = "loongarch64",
+                feature = "board_2k1000",
+                feature = "gmac_2k1000"
+            ),
+            all(target_arch = "riscv64", feature = "board_vf2")
         ))
     ))]
     {

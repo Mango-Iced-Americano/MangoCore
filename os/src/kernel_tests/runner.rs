@@ -229,17 +229,16 @@ fn shutdown_success() -> ! {
     match crate::fs::vfs::mount::shutdown_all_backends() {
         Ok(()) => {
             crate::println!("{}[KTEST RESULT: PASS]{}", COLOR_GREEN, COLOR_RESET);
-            crate::println!("# ktest: all tests and filesystem teardown passed. shutting down.");
         }
         Err(error) => {
             crate::println!("# ktest: filesystem shutdown failed: {:?}", error);
             crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
         }
     }
-    for _ in 0..1000 {
+    for _ in 0..100000 {
         core::hint::spin_loop();
     }
-    hal::shutdown();
+    ktest_exit();
 }
 
 fn shutdown_failure() -> ! {
@@ -249,9 +248,24 @@ fn shutdown_failure() -> ! {
         crate::println!("# ktest: filesystem shutdown failed: {:?}", error);
     }
     crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
-    crate::println!("# ktest: shutting down.");
-    for _ in 0..1000 {
+    for _ in 0..100000 {
         core::hint::spin_loop();
     }
-    hal::shutdown();
+    ktest_exit();
+}
+
+/// On real hardware (VF2): cold-reboot via SBI SRST so the board returns to
+/// U-Boot and can be re-deployed without manual power-cycling.
+/// On QEMU / other platforms: shut down.
+fn ktest_exit() -> ! {
+    #[cfg(feature = "board_vf2")]
+    {
+        crate::println!("# ktest: rebooting.");
+        crate::hal::reboot();
+    }
+    #[cfg(not(feature = "board_vf2"))]
+    {
+        crate::println!("# ktest: shutting down.");
+        crate::hal::shutdown();
+    }
 }

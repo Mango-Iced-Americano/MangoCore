@@ -14,7 +14,7 @@ pub use loongarch64::{
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
     console_flush, console_getchar, console_putchar, console_write_bytes, kstack_alloc,
-    local_irq_restore, local_irq_save, machine_init, shutdown, syscall_id,
+    local_irq_restore, local_irq_save, machine_init, reboot, shutdown, syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     tlb_invalidate,
     trap::{
@@ -38,7 +38,7 @@ pub use riscv::{
     rv_board::MMIO,
     sbi::{
         console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
-        local_irq_save, set_timer, shutdown,
+        local_irq_save, reboot, set_timer, shutdown,
     },
     sv39::tlb_invalidate,
     switch::__switch,

@@ -42,6 +42,14 @@
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`
 - panic 输出包含 syscall 上下文、内存状态、任务信息（`panic_diag.rs`）
 
+### 早期启动 MMIO 恒等映射必须包含 post-heap 前使用的编译期外设范围
+
+- **现象**: VF2 实板在早期启动阶段访问 L2CC 缓存控制器 MMIO 地址 `0x02010200` 时触发 `StorePageFault`；该地址在 FDT/PlatformInfo 初始化前使用，但不在编译期 identity MMIO 映射表范围内。
+- **根因**: 早期启动代码（FDT 初始化前、堆分配器就绪前）依赖编译期 identity MMIO 映射表访问外设寄存器。L2CC 缓存控制器地址 `0x0201_0000..0x0201_1000` 未被纳入该表，导致 volatile 写操作触发了对未映射物理地址的 StorePageFault。
+- **修复**: 在 VF2 板级 identity MMIO 映射表中添加 `0x0201_0000..0x0201_1000` 范围的恒等映射，确保 post-heap FDT/PlatformInfo 初始化前的 L2CC 访问有有效页表项。
+- **教训**: 任何在堆分配器就绪前（即 post-heap FDT 枚举前）需要访问的 MMIO 外设，其地址范围必须显式加入编译期 identity MMIO 映射表。仅依赖 FDT/PlatformInfo 动态映射的地址在早期启动阶段不可访问。此类问题表现为早期 boot 路径中的 `StorePageFault` 而非设备探测失败。
+- **相关文件**: `os/src/hal/platform/riscv/vf2.rs`、`os/src/mm/kernel_space.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
 ## 内存问题
 
 ### 物理地址异常（如 0xb0000000）
@@ -448,6 +456,84 @@
 - **教训**: 任何跨越两个独立 I/O 对象的 syscall（splice、sendfile、copy_file_range）都必须遵循"状态推进在输出确认之后"的原则。对于文件源的显式 offset 参数，推进发生在写入成功之后而非读取成功之后。管道源是破坏性读取（无可回滚机制），需通过容量探测或最小化读取窗口来限制损失。
 - **相关文件**: `os/src/syscall/fs/sys_splice.rs`
 
+## FFI 挂载与测试门禁的交易性
+
+### C 全局注册表的失败路径必须逆序回滚
+
+- **现象**: Rust wrapper 在“设备注册成功、mount/journal/writeback 后续步骤失败”时直接
+  `Drop`，C 层全局表仍保留指针；后续重试可报重名/无 slot，更严重时访问已释放内存。
+- **根因**: 挂载是多步跨语言交易，但 wrapper 只有一个笼统的 mounted bool，C 内部函数也没有
+  在每个 error label 撤销 block cache、block device 和 mountpoint slot。
+- **修复**: 显式记录 `device_registered → fs_mounted → journal_started →
+  writeback_enabled`，每次成功后才推进状态，失败时逆序撤销；只有全部从 C 表
+  脱钩后才释放 Rust/C 共享内存。若卸载失败，宁可有界泄漏并报错，也不制造 UAF。
+- **教训**: 任何“注册→初始化→启动子系统”的 FFI API 都应当作交易审计；不能仅检查
+  happy path 或依赖 Rust `Drop` 自动修复 C 全局状态。
+- **相关文件**: `dependency/lwext4_rust/src/blockdev.rs`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4.c`
+
+### 回归进程全过不等于门禁完成
+
+- **现象**: TAP 已打印 `N passed, 0 failed`，但 QEMU 一直不退出，Makefile 最终只看到 timeout；
+  或测试使用了违反 syscall 前置条件的输入，把正确 errno 误报为内核回归。
+- **根因**: PID1 直接 `exec` 测试程序后不再有 supervisor 可以 wait、输出机器可读最终标记并
+  关机；同时用例注释的“partial range”没有区分“起点对齐”与“长度可非对齐”。
+- **修复**: 保留 PID1 supervisor，fork/exec 子进程、wait 下载状态、打印唯一 PASS/FAIL 标记后
+  shutdown；Makefile 同时检查程序退出与标记。syscall 用例先对照 ABI 前置条件，再选边界值。
+- **教训**: 门禁必须验证“用例运行→结果聚合→可机器识别的终态→可观测退出”整条链；
+  不能将某段日志看似全绿当成门禁通过。
+- **相关文件**: `user/src/bin/regression_init.rs`、
+  `user/src/bin/regression/regression_mmap_edge_cases.rs`
+
+### U-Boot 串口完整但内核长行确定性缺字时检查 THRE 握手
+
+- **现象**: 同一串口和波特率下，U-Boot 的 TFTP、CRC 和命令输出完整；内核接管 UART 后，短行只剩片段，长行稳定缺少大量字符。重复复位后缺字模式近似一致，使硬件探针实际运行却无法取得可信 PASS 证据。
+- **根因**: NS16550A 的 `Write<u8>` 实现未读取 `LSR.THRE` 就直接覆盖 THR，并无条件返回成功；上层 `console_putchar()` 又忽略返回值。CPU 连续 MMIO 写入快于 UART 移出字符时，发送保持寄存器被覆盖。
+- **修复**: `Write<u8>` 仅在 THRE 就绪时写 THR，否则返回 `WouldBlock`；上层发送函数循环重试到成功。保留整条 `print` 的 irq-save 序列化，不能用重复打印 marker 或降低日志量掩盖底层发送违规。
+- **验收**: 以修改前同一只读实板探针作为 RED，对照修改后原始串口日志必须完整包含型号、容量、重复读取结果和最终 PASS；同时顺序完成双架构编译。U-Boot 输出正常只能证明主机接收链路和波特率正确，不能替代内核 UART 握手验证。
+- **相关文件**: `os/src/drivers/serial/ns16550a.rs`, `os/src/hal/arch/loongarch64/sbi.rs`, `os/src/console.rs`
+
+### journal 掉电恢复必须在可证明的持久化窗口外部截断
+
+- **现象**：正常卸载、冷重启和离线 fsck 都通过，但无法证明事务 commit 已落盘、home block
+  未 checkpoint 时的恢复正确性；随机关 QEMU 又难以复现，失败镜像也不可比较。
+- **方法**：在 journal 内设置默认关闭、单次触发的测试钩子。钩子只能停在 records/commit block
+  已写并 flush、journal start pointer 也已写并 flush、home checkpoint 尚未开始的位置；串口先打印
+  唯一 marker，再由宿主 timeout/kill QEMU，不能让内核自己正常 shutdown。
+- **门禁**：首启制造掉电后保留原镜像；次启必须复用同一镜像，验证 replay 后的语义状态、可写性
+  与完整 teardown；关机后再执行只读 `e2fsck -f -n`。正常 remount 或只看 journal start 清零不能替代
+  这个两阶段实验。
+- **教训**：故障点必须同时证明“恢复记录已经 durable”和“home 状态尚未 durable”；太早只是丢事务，
+  太晚只是正常 checkpoint，两者都会产生误导性的绿色结果。日志需记录 fixture feature、block size、
+  镜像 hash 与两次启动身份。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
+  `os/src/kernel_tests/ext4.rs`、`os/make/rv64.mk`、`os/make/la64.mk`
+
+### 精确 wait 与通用 reaper 不能竞争同一个子进程
+
+- **现象**：子命令已经明确报错，supervisor 却打印 ready/PASS；随后真正入口因准备未完成而失败。
+- **根因**：精确 `waitpid(pid, WNOHANG)` 之前调用 `waitpid(-1, WNOHANG)`，通用 reaper 可能先回收目标 pid 并丢弃状态。精确 wait 随后得到 `ECHILD`，若 status 还以 0 初始化，就会把失败伪装成成功。
+- **修复**：目标子进程 outstanding 时只做精确 wait；通用 orphan 回收放到目标状态已取得之后。status 以 `127 << 8` fail closed，任何精确 wait 错误都保留非零状态并记录 errno。
+- **教训**：一个 child 的退出状态只能有一个 owner。凡是同时存在 supervisor wait 和全局 reaper，都要明确所有权，不能把 `ret < 0` 与“已成功取得状态”合并处理。
+- **相关文件**：`user/src/bin/initproc.rs`
+
+### 成熟 ext4 卷迁移不能只用全新 fixture 验证
+
+- **现象**：全新 QEMU ext4 上嵌套 symlink 创建/删除都通过，真实旧卷却出现同名目录项、dentry type 与 inode mode 冲突、`ln`/`chroot` 失败；应用门禁甚至可能先 PASS，下一次小文件写入却覆盖无关 Python 源码。
+- **根因**：旧驱动可能留下重复同名目录项、不可靠 file type，以及“inode/extent 仍引用数据块、块位图却标为空闲”的跨层不一致。全新 fixture 没有历史状态；新驱动按位图合法分配时会复用仍被旧文件引用的块。底层 symlink API 若不是 create-exclusive，还会继续覆盖并隐藏目录问题。
+- **定位**：在全盘备份副本上用 `debugfs ls/stat/testi/testb/blocks` 同时审计目录项、inode 和位图，不能只看文件可读。整文件摘要门禁若在一次小写入后变化，要比较异常文件内容与探针 payload；命中就先按跨文件块复用处理，而不是把新摘要加入版本白名单。
+- **修复**：路径遍历复用本来就要加载的 child inode，并始终以真实 inode mode 校验类型；适配层补 symlink `EEXIST`，迁移器只删除 readlink 可证明的旧 symlink。更重要的是，成熟旧卷在新后端第一次写入前必须离线 `e2fsck -fy` 到收敛，再以 `e2fsck -fn` 复检 clean；无法安全修复时从逻辑文件备份重建新卷。
+- **验收**：至少包含“fresh fixture 语义测试 + 旧卷只读结构/位图审计 + offline-fsck-clean 前置条件 + 同一修复卷首次写入 + 冷启动复用 + 最终离线 fsck + 关键文件摘要”。在线 raw 快照的 fsck 结果不能直接外推为当前实盘状态，但只要该副本能复现 live extent 被标 free 并发生串写，就已经足以否决在该副本上直接迁移；生产卷必须取得自身的离线证据。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/initproc.rs`、`scripts/board/patch_ddgs_redirect.py`
+
+### JH7110 DWMAC5 TX 正常但 RX descriptor 零 write-back
+
+- **现象**：VF2 上 TX DMA 能清 OWN、MAC 内部 loopback 可通过，但物理 RX descriptor 始终没有 write-back。
+- **根因**：YT8531C 默认门控 MAC 侧 RXC；同时 DWMAC5 增强 RX 描述符的 `RDES3.BUFFER1_VALID_ADDR` 是 bit 1，DMA tail pointer 作为 restart 通知必须晚于 OWN 发布，且通道 RX buffer size 必须与实际 buffer 长度一致。
+- **修复**：在 YT8531C extension register 打开 RXC、禁用自动休眠并设置 VF2 RGMII-ID 延迟；用 bit 1 标记 buffer 有效，先写 OWN 和 DMA barrier 再更新 RX tail，使用 2048-byte size field。
+- **教训**：TX/内部 loopback 只能证明 MAC 与 TX DMA 路径，不能替代 PHY 到 MAC 的 RXC 时钟和真实 RX descriptor ABI 验证；实板诊断应同时检查 PHY 时钟、RDES3 ownership/valid 位、tail publication 顺序和 DMA size 编码。
+- **相关文件**：`os/src/drivers/net/gmac_jh7110/phy.rs`、`os/src/drivers/net/gmac_jh7110/ring.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
 ## 启动文件系统
 
 ### initramfs 占位 `.gitkeep` 阻止目录替换为 sdcard 符号链接
@@ -472,3 +558,12 @@
 - **修复**: 在进入 `wait_until_interruptible()` 前执行一次 `NET_INTERFACE.poll()`；条件闭包只调用无 poll 的状态检查变体。通知路径始终使用 `notify_events_all`/`notify_events_at_most`，不能以 `try_lock()` 失败跳过唤醒，否则会丢失就绪通知。
 - **教训**: “通知时跳过锁竞争”不是死锁修复；它把确定性死锁替换成数据丢失。对可能触发 wake 回调的操作，应把副作用移出持锁条件闭包，而非削弱回调的交付保证。
 - **相关文件**: `os/src/task/manager.rs`, `os/src/net/socket/inet/stream/mod.rs`, `os/src/fs/vfs/event.rs`
+## 固件 ABI / Hypercall
+
+### 内联汇编调用约定中未初始化的寄存器被固件解释
+
+- **现象**：VF2 串口输入产生 OpenSBI `ext=0x2 func=0xf4240`。`console_getchar()` 调用 legacy `sbi_call(which=2)`，但 a6 (x16) 寄存器未被显式初始化，包含来自调用者寄存器池的垃圾值 `0xf4240`（= 1_000_000）。
+- **根因**：Legacy SBI ABI（EID < 0x10）规范上不使用 a6 传递 FID，但 OpenSBI 实现仍读取 a6 并输出 `func=<a6>` 日志。`sbi_call()` 的 `asm!` 只设置了 a0-a2 和 a7，遗漏了 a6。
+- **修复**：在 `sbi_call()` 的 `asm!` 操作数中添加 `in("x16") 0usize`，确保每次 legacy ecall 时 a6 被显式零初始化。
+- **教训**：调用固件/超管理器 ABI（ecall/hcall/svc）时，**所有**参数寄存器必须被显式初始化，即使规范将某些寄存器标注为"该调用类型未使用"。固件实现可能读取并记录这些寄存器的值，或将其纳入行为判断（如 OpenSBI 输出日志含 func=）。同一文件中的 `reboot()` 已正确初始化 a6=0（SRST 现代扩展需要 FID），恰好留下了对比。
+- **相关文件**: `os/src/hal/arch/riscv/sbi.rs`

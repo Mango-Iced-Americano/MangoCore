@@ -20,6 +20,7 @@ pub use arch::config;
 pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;
 pub use arch::shutdown;
+pub use arch::reboot;
 pub use arch::tlb_invalidate;
 #[cfg(feature = "loongarch64")]
 pub use arch::LsxRegs;

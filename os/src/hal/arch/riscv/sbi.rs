@@ -2,8 +2,6 @@
 //!
 //! 提供 timer、console、shutdown 和本地中断开关等机器环境接口。
 
-#![allow(unused)]
-
 use core::arch::asm;
 use riscv::register::sstatus;
 
@@ -16,19 +14,22 @@ const SBI_REMOTE_FENCE_I: usize = 5;
 const SBI_REMOTE_SFENCE_VMA: usize = 6;
 const SBI_REMOTE_SFENCE_VMA_ASID: usize = 7;
 const SBI_SHUTDOWN: usize = 8;
+const SBI_SRST: usize = 0x5352_5354;
 
 #[inline(always)]
 /// `ecall` wrapper to switch trap into S level.
 fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
     let mut ret;
-    // Safety: OpenSBI defines the ecall ABI. Arguments are passed in a0-a2/a7
-    // and the return value is read from a0; no Rust references cross the call.
+    // Safety: OpenSBI defines the ecall ABI. Arguments are passed in a0-a2,
+    // legacy function ID is zeroed in a6, and `which` (EID) goes in a7.
+    // The return value is read from a0; no Rust references cross the call.
     unsafe {
         asm!(
             "ecall",
             inlateout("x10") arg0 => ret,
             in("x11") arg1,
             in("x12") arg2,
+            in("x16") 0usize,
             in("x17") which,
         );
     }
@@ -45,8 +46,42 @@ pub fn console_putchar(c: usize) {
     sbi_call(SBI_CONSOLE_PUTCHAR, c, 0, 0);
 }
 
+/// VF2 JH7110 DW APB UART: 32-bit wide registers at shifted (×4) offsets.
+///
+/// MMIO addresses (physical, fixed in VF2 memory map):
+/// - RBR (read):   0x1000_0000  — receive buffer register, low byte holds data
+/// - LSR (read):   0x1000_0014 — line status register, bit 0 = Data Ready (DR)
+///
+/// Safety: these addresses are fixed per the JH7110 datasheet and are
+/// mapped as strongly-ordered device memory by OpenSBI. Only the low u8
+/// of RBR is consumed after DR is confirmed set. No read from RBR without
+/// DR guard.
+#[cfg(feature = "board_vf2")]
+fn vf2_console_getchar() -> usize {
+    // Safety: fixed VF2 UART MMIO at 0x1000_0000; volatile, device-memory semantics.
+    unsafe {
+        const LSR_ADDR: *const u32 = 0x1000_0014 as *const u32;
+        const RBR_ADDR: *const u32 = 0x1000_0000 as *const u32;
+        const DR: u32 = 0x01;
+
+        let lsr = core::ptr::read_volatile(LSR_ADDR);
+        if lsr & DR == 0 {
+            return !0; // usize::MAX — no data available
+        }
+        let rbr = core::ptr::read_volatile(RBR_ADDR);
+        (rbr & 0xFF) as usize
+    }
+}
+
 pub fn console_getchar() -> usize {
-    sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0)
+    #[cfg(feature = "board_vf2")]
+    {
+        vf2_console_getchar()
+    }
+    #[cfg(not(feature = "board_vf2"))]
+    {
+        sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0)
+    }
 }
 
 pub fn console_flush() {}
@@ -109,4 +144,26 @@ pub fn console_write_bytes(data: &[u8]) {
 pub fn shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
     panic!("It should shutdown!");
+}
+
+/// Cold reboot via SBI SRST extension (EID 0x53525354, FID 0).
+/// Falls back to shutdown if SRST is not supported by the firmware.
+///
+/// Uses dedicated inline asm because SRST is a modern SBI extension that
+/// requires the function ID (FID=0) in `a6`, which the legacy `sbi_call`
+/// helper does not set.
+pub fn reboot() -> ! {
+    // Safety: SBI SRST ecall with EID=0x53525354 in a7, FID=0 in a6,
+    // reset_type=1 (cold) in a0. No Rust references cross the call.
+    unsafe {
+        asm!(
+            "ecall",
+            in("x10") 1usize,              // a0 = reset_type (1 = cold reboot)
+            in("x11") 0usize,              // a1 = reset_reason
+            in("x16") 0usize,              // a6 = FID 0 (system_reset)
+            in("x17") SBI_SRST,            // a7 = EID
+        );
+    }
+    // If SRST not supported, fall back to shutdown.
+    shutdown();
 }
