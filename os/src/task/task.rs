@@ -175,8 +175,6 @@ pub struct TaskControlBlock {
     pub sched_nice_hint: AtomicI32,
     /// runqueue 选择使用的 vruntime 快照，避免持队列锁再获取 `task.inner`。
     pub sched_vruntime_hint: AtomicU64,
-    /// ASID allocated for this task (la64 only).  For rv64 it stays 0.
-    pub asid: core::sync::atomic::AtomicU16,
 }
 
 /// 任务控制块内部状态
@@ -1021,7 +1019,6 @@ impl TaskControlBlock {
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             sched_vruntime_hint: AtomicU64::new(0),
-            asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             inner: Mutex::new(TaskControlBlockInner {
@@ -1160,7 +1157,6 @@ impl TaskControlBlock {
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             sched_vruntime_hint: AtomicU64::new(0),
-            asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             inner: Mutex::new(TaskControlBlockInner {
@@ -1740,7 +1736,6 @@ impl TaskControlBlock {
             wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
             sched_vruntime_hint: AtomicU64::new(0),
-            asid: core::sync::atomic::AtomicU16::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             inner: Mutex::new(TaskControlBlockInner {
@@ -2000,12 +1995,6 @@ impl Drop for TaskControlBlock {
                 .user_res_slot_allocator()
                 .lock()
                 .dealloc(self.user_res_slot);
-        }
-        // Free ASID if one was allocated (la64 only; no-op on rv64)
-        let asid = self.asid.load(core::sync::atomic::Ordering::Relaxed);
-        if asid != 0 {
-            #[cfg(target_arch = "loongarch64")]
-            crate::hal::arch::loongarch64::tlb::asid_free(asid);
         }
     }
 }

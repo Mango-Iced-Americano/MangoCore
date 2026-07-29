@@ -144,7 +144,7 @@ B21 把同一 mailbox/sequence 基础设施扩展为动态 kernel-global 撤映�
 
 RV64 使用无地址/ASID 参数的 `sfence.vma`，LA64 使用 `invtlb 0`，两者都覆盖当前 CPU
 的全部 global 与 non-global 翻译。该协议只覆盖共享内核页表的动态映射；用户 MM 的
-range shootdown 与 LoongArch MM-owned ASID 仍未完成。
+range shootdown 由下面的独立协议处理。
 
 B22/B23 为用户 MM 增加了独立于 kernel-global 的激活、IPI 与修改侧提交协议：
 
@@ -164,8 +164,14 @@ B23 通过 `AddressSpace::write()` 把同步边界固化到公开接口：锁内
 generation 并冻结目标；块作用域结束后先解锁，
 再执行本地失效、IPI/ack 等待、observed 推进和 frame 释放。调用方不再能取得可变
 `MutexGuard<AddressSpace>`，因而不能把 VM 锁意外带过 shootdown 等待点。普通用户任务
-仍固定 CPU0；这一限制现在是为了 ASID、uaccess 生命周期和跨核进程语义审计，
+仍固定 CPU0；这一限制现在是为了 uaccess 生命周期、共享子系统和跨核进程语义审计，
 不再是因为用户 PTE 修改缺少远端协议。
+
+B24/B25 分别补齐两个架构后端：RV64 单页远端失效优先使用同步 SBI RFENCE，固件
+不支持时回退既有全用户 IPI/ack；LA64 把 ASID 从 TCB 下沉到每 MM 的 `TlbContext`，
+编号只在全 CPU non-global flush/ack 后跨 epoch 复用。用户 trap-return 通过
+`activate_user_vm()` 一次取得页表根与 ASID，LA64 普通 context switch 不再固定全刷。
+LA64 精确 ASID+VPN payload、连续 range 和 cached CPU detach 仍待后续阶段。
 
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 

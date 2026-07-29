@@ -30,7 +30,7 @@ pub use sbi::{
     local_irq_save, machine_shutdown,
 };
 pub use switch::__switch;
-pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
+pub use tlb::{set_asid, tlb_global_invalidate, tlb_invalidate};
 
 /// 清除当前 core 上包括 global 项在内的全部 TLB 翻译。
 ///
@@ -42,21 +42,22 @@ pub fn kernel_tlb_invalidate() {
 
 /// 清除当前 core 上所有用户/non-global TLB 翻译。
 ///
-/// LoongArch `invtlb 0x3` 按 G 位筛选，不读取当前 ASID；因此即使 B22 期间
-/// ASID 仍由 TCB 持有，IPI handler 也能在 idle 或任意任务上下文正确失效。
+/// LoongArch `invtlb 0x3` 按 G 位筛选，不读取当前 ASID；因此 IPI handler
+/// 可以在 idle 或任意任务上下文清除本核全部用户翻译。
 pub fn user_tlb_invalidate() {
     tlb::tlb_invalidate();
 }
 
 /// 清除当前 core 上指定 MM 的用户翻译。
 ///
-/// B23 期间 ASID 仍由 TCB 持有，调用点不能可靠取得目标 MM 的 ASID，因此这里
-/// 保守清除全部 non-global 项；MM-owned ASID 完成后再改为页级 `invtlb`。
+/// B25 已把 ASID 归入 MM，但当前通用 HAL 入口尚未携带目标 ASID；调用者也可能
+/// 正在修改其它进程的 MM。因此这里仍保守清除全部 non-global 项，不能误用
+/// CSR 中恰好属于当前任务的 ASID。
 pub fn user_tlb_invalidate_page(_vpn: crate::mm::VirtPageNum) {
     tlb::tlb_invalidate();
 }
 
-/// LA64 暂无无锁范围 payload；在 MM-owned ASID 完成前由上层退回全量 IPI。
+/// LA64 暂无携带目标 ASID/范围的无锁 payload，由上层退回全量 IPI。
 pub fn remote_user_tlb_invalidate_page(
     _targets: usize,
     _vpn: crate::mm::VirtPageNum,
@@ -179,6 +180,8 @@ pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
     get_timer_freq_first_time();
+    let user_asids = tlb::init_asid_allocator();
+    boot_trace!("[machine_init] user ASIDs: {}", user_asids);
     #[cfg(any(not(feature = "board_2k1000"), feature = "board_bringup_trace"))]
     {
         let cfg1 = CPUCfg1::read();

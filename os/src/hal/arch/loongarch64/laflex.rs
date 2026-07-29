@@ -227,8 +227,8 @@ impl LAFlexPageTable {
             // 防止复用的栈或程序虚拟地址保留其他任务留下的非全局旧表项。
             tlb_global_invalidate();
         } else {
-            // ASID 在 Phase 4 前仍由 TCB 持有，页表对象无法知道目标 ASID。
-            // 即使调用的是旧安全接口，也必须保守清除本核全部非全局项。
+            // MM-owned ASID 位于外层 AddressSpace::TlbContext；裸页表对象没有
+            // 该所有权信息，因此旧安全接口仍必须保守清除本核全部 non-global 项。
             tlb_invalidate();
         }
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
@@ -454,10 +454,9 @@ impl PageTable for LAFlexPageTable {
         }
     }
     fn flush_tlb_page(&self, _vpn: VirtPageNum) {
-        // 当前 ASID 仍归 TCB，而不是归共享 AddressSpace；即使目标 mask 只含本核，
-        // 当前 CSR.ASID 也不一定就是被修改 MM 的 ASID。此处因此
-        // 清除本核全部非全局项，不能误用只匹配“当前 ASID + VA”的 invtlb 0x5。
-        // Phase 4 把 ASID 下沉到 MM 后，才可在这里恢复目标 ASID 的精确页刷新。
+        // 当前 CSR.ASID 不一定属于被修改的页表；裸 PageTable 接口也没有携带
+        // 外层 MM-owned ASID。此处因此清除本核全部 non-global 项，不能误用
+        // 只匹配“当前 ASID + VA”的 invtlb 0x5。
         let start = crate::task::perf::perf_time_now();
         tlb_invalidate();
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
@@ -585,29 +584,15 @@ impl PageTable for LAFlexPageTable {
             crate::task::perf::record_tlb_activate_cycles(elapsed);
             super::register::PGDH::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         } else {
-            // 1. Flush old process's non-global TLB entries (current ASID)
+            // 普通用户返回由 AddressSpace 同时提供 PGDL 与 MM-owned ASID，不经过
+            // PageTable::activate。保留这个低层入口时只能使用 ASID 0，并在切换前
+            // 保守清空 non-global 项，避免一个无所有权信息的页表冒用其它 MM 的 ASID。
             let start = crate::task::perf::perf_time_now();
             super::tlb::tlb_invalidate();
             let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
             crate::task::perf::record_tlb_activate_cycles(elapsed);
             crate::task::perf::record_tlb_activate();
-            // 2. Allocate ASID for the incoming process if needed
-            if let Some(task) = crate::task::current_task() {
-                let mut asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
-                if asid == 0 {
-                    asid = super::tlb::asid_alloc();
-                    task.asid.store(asid, core::sync::atomic::Ordering::Relaxed);
-                }
-                // ASID 分配耗尽时回退到 ASID 0；上方完整的非全局表项刷新用于保持
-                // 回退地址空间之间的隔离。
-                let active_asid = if asid == super::tlb::ASID_NONE {
-                    super::tlb::KERN_ASID
-                } else {
-                    asid
-                };
-                super::tlb::set_asid(active_asid);
-            }
-            // 4. Set user page table base
+            super::tlb::set_asid(super::tlb::KERN_ASID);
             super::register::PGDL::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         }
     }

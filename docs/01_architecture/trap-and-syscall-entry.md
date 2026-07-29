@@ -3,8 +3,8 @@ title: "陷阱与 syscall 入口 (Trap and Syscall Entry)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [architecture, trap, syscall, interrupt]
+last_update: 2026-07-29
+tags: [architecture, trap, syscall, interrupt, smp, asid]
 ---
 
 # 陷阱与 syscall 入口
@@ -546,11 +546,11 @@ set_user_trap_entry();
 trap_cx.kernel_cpu_local = cpu_local_ptr();
 trap_cx.prepare_return();
 let trap_cx_ptr = task.trap_cx_user_va();
-let user_satp = task.process.prepare_user_vm();
+let user_vm = task.process.activate_user_vm();
 let restore_va = __restore - __alltraps + TRAMPOLINE;
 drop(task);
 fence.i;
-jr restore_va(a0=trap_cx_ptr, a1=user_satp)
+jr restore_va(a0=trap_cx_ptr, a1=user_vm.token)
 ```
 
 `set_user_trap_entry()` 把 `stvec` 设置为 `TRAMPOLINE`。恢复汇编由 trampoline 映射执行。
@@ -575,7 +575,7 @@ pub fn trap_return() -> ! {
         trap_cx.prepare_return();
     }
     let trap_cx_ptr = task.trap_cx_user_va();
-    let user_satp = task.process.prepare_user_vm();
+    let user_vm = task.process.activate_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     drop(task);
     unsafe {
@@ -584,7 +584,7 @@ pub fn trap_return() -> ! {
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
-            in("a1") user_satp,
+            in("a1") user_vm.token,
             options(noreturn)
         );
     }
@@ -607,7 +607,9 @@ la64 返回路径包含：
 | `PrMd` 设置 | `pplv=3`、`pie=true`，准备回到用户态 |
 | 传参 | trap context、用户 token、ASID 传给 `__restore` |
 
-ASID 来自当前任务的 la64 字段；fork/clone 创建任务时由 la64 路径分配。
+页表根与 ASID 由同一个 `AddressSpace::activate_on()` 快照返回。ASID 属于共享 MM，
+不再属于 TCB；因此 `CLONE_VM` 创建的线程天然使用同一个硬件标签。若 ASID 空间耗尽，
+激活路径会先释放 VM 锁，完成全 CPU flush/ack 与 epoch 换代，再重试取得新快照。
 
 源码实现如下：
 
@@ -615,27 +617,27 @@ ASID 来自当前任务的 la64 字段；fork/clone 创建任务时由 la64 路�
 pub fn trap_return() -> ! {
     let task = do_signal();
     set_user_trap_entry();
-    let trap_cx = task.acquire_inner_lock().get_trap_cx();
-    let trap_cx_ptr = trap_cx as *const TrapContext as usize;
-    trap_cx.sstatus.set_pplv(3).set_pie(true);
-    let asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
-    if asid != 0 {
+    let trap_cx_ptr = {
+        let inner = task.acquire_inner_lock();
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
+        trap_cx.sstatus.set_pplv(3).set_pie(true);
+        trap_cx as *const TrapContext as usize
+    };
+    let user_vm = task.process.activate_user_vm();
+    if user_vm.asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
-    let user_satp = current_user_token();
-    let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    let restore_va = __restore as usize;
+    drop(task);
     unsafe {
         asm!(
             "ibar 0",
-            "move $ra, {0}",
-            "move $a0, {1}",
-            "move $a1, {2}",
-            "move $a2, {3}",
-            "jr $ra",
-            in(reg) restore_va,
-            in(reg) trap_cx_ptr,
-            in(reg) user_satp,
-            in(reg) asid as usize,
+            "jr {restore}",
+            restore = in(reg) restore_va,
+            in("$a0") trap_cx_ptr,
+            in("$a1") user_vm.token,
+            in("$a2") user_vm.asid as usize,
             options(noreturn)
         );
     }
@@ -644,7 +646,14 @@ pub fn trap_return() -> ! {
 
 LA64 将普通 `TRAMPOLINE`、`TRAP_CONTEXT_BASE` 与用户可执行的
 `SIGNAL_TRAMPOLINE` 分为连续三页：普通恢复页仅映射 `R|X`，信号页映射
-`R|X|U`。因此切换用户 PGDL 后，`__restore` 从普通别名执行而不会复用信号别名。
+`R|X|U`。静态链接下的 `strampoline` 是用户 trap 入口 stub，而 `__restore`
+本身位于内核 direct-map 可执行区，因此返回路径直接跳转到 `__restore` 地址。
+三个恢复参数必须直接绑定 `$a0/$a1/$a2`，不能声明成泛型输入后再在 asm 模板内
+顺序搬运；编译器不会分析模板内部的寄存器覆盖，可能让后一个输入复用已经被前一条
+`move` 改写的参数寄存器。该 ABI 桥接修改后要检查 release ELF，而不只看 Rust 源码。
+
+从取得 `UserVmContext` 到最终 `ertn` 的窗口保持本地 IRQ 关闭。这一点也是 ASID epoch
+协议的一部分：CPU 不会先处理 rollover IPI 并 ack，再用已经取得的旧快照返回用户态。
 
 ## 9. 与 syscall 分发层的边界
 

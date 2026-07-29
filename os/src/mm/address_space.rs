@@ -85,6 +85,15 @@ pub struct AddressSpace<T: PageTable> {
     tlb: TlbContext,
 }
 
+/// 返回用户态时必须成对安装的页表根与硬件 ASID。
+///
+/// RV64 当前的 `asid` 固定为 0；LA64 使用 MM-owned ASID。把二者放在同一个
+/// 快照中，避免 exec 与并发线程切换时分别从两个地址空间读取状态。
+pub(crate) struct UserVmContext {
+    pub(crate) token: usize,
+    pub(crate) asid: u16,
+}
+
 impl<T: PageTable> AddressSpace<T> {
     pub fn new(mut inner: AddressSpaceInner<T>) -> Self {
         // ELF/clone 构造期没有 CPU 能观察该页表，构造时积累的失效记录可直接结束。
@@ -134,11 +143,29 @@ impl<T: PageTable> AddressSpace<T> {
         Some(result)
     }
 
-    /// 返回用户态前登记当前 CPU，并在同一把 VM 锁内取得页表 token。
-    pub(crate) fn activate_on(&self, cpu_id: usize) -> usize {
-        let inner = self.inner.lock();
-        self.tlb.activate_cpu(cpu_id);
-        inner.page_table.token()
+    /// 返回用户态前登记当前 CPU，并取得同一 MM 的页表根与 ASID。
+    pub(crate) fn activate_on(&self, cpu_id: usize) -> UserVmContext {
+        loop {
+            let context = {
+                let inner = self.inner.lock();
+                self.tlb.assign_asid().map(|asid| {
+                    self.tlb.activate_cpu(cpu_id);
+                    UserVmContext {
+                        token: inner.page_table.token(),
+                        asid,
+                    }
+                })
+            };
+            if let Some(context) = context {
+                return context;
+            }
+
+            // ASID rollover 会等待全 CPU TLB ack，绝不能把 VM 锁带入该等待点。
+            #[cfg(target_arch = "loongarch64")]
+            crate::hal::arch::loongarch64::tlb::rollover_asids();
+            #[cfg(not(target_arch = "loongarch64"))]
+            unreachable!("RV64 ASID assignment cannot request rollover");
+        }
     }
 }
 

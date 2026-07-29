@@ -272,7 +272,7 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = task.trap_cx_user_va();
     // 先登记本 CPU 可能缓存当前 MM，再取得权威 token。后续页表修改方将以
     // 该驻留集合为 shootdown 目标，不能继续只读无锁 token hint。
-    let user_satp = task.process.prepare_user_vm();
+    let user_vm = task.process.activate_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
     // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。
@@ -283,7 +283,7 @@ pub fn trap_return() -> ! {
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
-            in("a1") user_satp,
+            in("a1") user_vm.token,
             options(noreturn)
         );
     }

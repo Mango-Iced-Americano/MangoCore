@@ -86,8 +86,8 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；RV64 单页远端修改使用 SBI RFENCE，full/LA64 使用全用户 IPI/ack；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、MM-owned ASID、安全 detach 与用户迁移未完成 |
-| LoongArch ASID | ASID 随 TCB 分配和释放 | 同一 MM 多线程不一致、跨核复用污染 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；RV64 单页远端修改使用 SBI RFENCE；LA64 使用 MM-owned ASID 与 flush-before-reuse epoch；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、LA64 精确 ASID+VA payload、安全 detach 与用户迁移未完成 |
+| LoongArch ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代 | 单页 shootdown 尚未携带目标 ASID，当前仍保守清除全部 non-global 项 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
 | ABI | getcpu 固定返回 0、affinity 仅 bit0、membarrier 空操作 | 用户空间看不到真实 SMP 语义 |
@@ -550,8 +550,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B16—B22 曾用 `Unpublished/LocalOnly/Published` 过渡状态阻止不完整远端语义。
   B23 已删除这套状态，直接按 cached CPU mask 的 0/仅本核/含远端三种情况执行；
 - 单一 VPN 修改在 RV64 使用页级 `sfence.vma`，多 VPN 升级为本核全量刷新。
-  LA64 的 ASID 仍归 TCB，页表对象无法安全得知目标 ASID，因此本阶段保守清除
-  本核全部非全局 TLB 项；
+  LA64 的 ASID 已在 B25 下沉到外层 `TlbContext`，但裸页表对象和当前 page-sync
+  接口仍没有目标 ASID，因此保守清除本核全部非全局 TLB 项；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
@@ -712,7 +712,13 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   exec；Phase 4 需将用户路径升级为远端语义。B21 已单独收口动态内核栈与临时 ELF
   kernel-global 映射的全 CPU 撤销和延迟释放；
 - RISC-V 单页 SBI RFENCE 与 IPI fallback 已由 B24 接通；后续补连续 range/all 的策略与计数；
-- LoongArch 实现 shootdown slot、generation、ack 和 ASID/epoch；
+- B25 已删除 TCB-owned ASID，把 versioned ASID 下沉到 `TlbContext`；同一 epoch 内不立即
+  复用编号，耗尽时先通过既有 user-TLB request/ack 清除全部 online CPU，再推进 epoch。
+  `trap_return -> activate_user_vm -> AddressSpace::activate_on` 一次取得页表根/ASID 快照，
+  LA64 普通 context switch 不再固定全刷 non-global TLB。首轮 LA64 初赛进一步暴露并修复
+  trap-return 泛型 asm 输入覆盖：固定 ABI 参数现直接绑定 `$a0/$a1/$a2`，release ELF 已
+  反汇编确认；双架构 8 核初赛分别为 RV64 312/314、LA64 308/314，失败集合未扩大；
+- LoongArch 下一步实现携带目标 ASID/VPN 的固定 shootdown slot；
 - shootdown slot 使用固定数组和原子状态，IPI handler 不分配内存、不获取 MM 锁；
 - 被解除映射的 frame、页表页和内核栈必须延迟到全部目标 ack 后释放；
 - membarrier：

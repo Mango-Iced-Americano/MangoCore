@@ -258,6 +258,23 @@
 - **教训**: bare-metal assembly entry symbols经 Rust FFI 取地址时，必须核对最终 ELF 符号和反汇编。若首个用户任务已被 scheduler 选中却没有用户输出，优先比较计算出的跳转地址与 `llvm-nm`/`llvm-objdump` 中的 `__restore`。
 - **相关文件**: `os/src/hal/arch/loongarch64/trap/mod.rs`, `os/src/hal/arch/loongarch64/trap/trap.S`
 
+### 内联汇编用泛型输入搬运 ABI 参数时发生寄存器自覆盖
+
+- **现象**: Rust 源码按顺序把多个 `in(reg)` 输入 `move` 到 `$a0/$a1/$a2`，debug
+  阅读看似正确，优化后二进制却把 trap context 当成 ASID 传入恢复入口；用户态随即出现
+  极低坏地址的 store/fetch fault，而不经过该返回路径的内核 focused 测试仍可全部通过。
+- **根因**: 编译器只知道所有泛型输入在汇编开始时可读，不知道模板内部前一条 `move`
+  会覆盖后续输入。它可以让某个后续输入复用 `$a0/$a1/$a2`，于是模板尚未读取该输入，
+  其物理寄存器就已被前一条指令改写。
+- **修复**: 固定 ABI 参数直接使用 `in("$a0")`、`in("$a1")`、`in("$a2")` 等显式
+  寄存器约束；跳转目标使用独立泛型输入。构建 release ELF 后必须检查最终反汇编，确认
+  参数准备顺序和物理寄存器，而不能只检查 Rust/汇编模板。
+- **教训**: `asm!` 的数据流边界由 operand constraint 表达，不会自动分析模板内的
+  指令依赖。凡是“多个泛型输入 → 固定 ABI 寄存器 → noreturn 跳转”的桥接代码，都应
+  优先直接绑定 ABI 寄存器，并把优化后二进制反汇编纳入验证。
+- **相关文件**: `os/src/hal/arch/loongarch64/trap/mod.rs`,
+  `os/src/hal/arch/loongarch64/trap/trap.S`
+
 ### 候选 LoongArch toolchain 在 GNU ld 遇到 `R_LARCH_CALL36` (`0x6e`)
 
 - **现象**: 容器 GNU ld 2.41 链接包含 `R_LARCH_CALL36` 的 LoongArch 对象时报告 `unsupported relocation type 0x6e`；Cargo 的 `linker = "loongarch64-linux-gnu-gcc"` 会把该限制带入 OS 与 user 两条构建路径。
@@ -601,4 +618,5 @@
   lockless，必须逐一证明“修改先发生”和“激活先发生”两种次序，并实现相应重试/fence。
 - **测试边界**: 只看 request/ack 增长只能证明 mailbox/IPI 闭环；完整证据还需真实 PTE
   降权或撤映射、victim 无偶然 trap 全刷窗口、generation race，以及 ack 前 frame 不复用。
-- **相关文件**: `os/src/mm/tlb_state.rs`, `os/src/mm/tlb_batch.rs`, `os/src/smp.rs`
+- **相关文件**: `os/src/mm/address_space.rs`, `os/src/mm/tlb.rs`,
+  `os/src/mm/page_table.rs`, `os/src/smp.rs`

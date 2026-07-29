@@ -20,7 +20,7 @@ use super::{
     TaskControlBlock, UtsNamespace, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
-use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl};
+use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
 use crate::signal_type;
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
@@ -290,7 +290,7 @@ impl ProcessControlBlock {
             .map(|parent| parent.pid)
             .unwrap_or(0);
         // 构造 PCB 只发布页表对象，不代表任何 CPU 已经缓存该 MM；真正的 CPU
-        // 登记统一发生在返回用户态前的 `prepare_user_vm()`。
+        // 登记统一发生在返回用户态前的 `activate_user_vm()`。
         let user_token = vm.read(|vm| vm.token());
         let pcb = Self {
             pid,
@@ -503,11 +503,11 @@ impl ProcessControlBlock {
         self.user_token_hint.load(Ordering::Relaxed)
     }
 
-    /// 返回用户态前登记本 CPU 对当前 MM 的 TLB 可见性，并取得权威页表 token。
+    /// 返回用户态前登记本 CPU 对当前 MM 的可见性，并取得权威页表根/ASID 快照。
     ///
     /// trap-return 必须调用本入口，不能只读取无锁 token hint；登记与 generation
     /// 检查需要和页表修改共用 VM 锁，才能闭合“加入 mask 与修改方快照”的竞态。
-    pub fn prepare_user_vm(&self) -> usize {
+    pub(crate) fn activate_user_vm(&self) -> UserVmContext {
         let vm = self.vm();
         vm.activate_on(crate::smp::cpu_id())
     }

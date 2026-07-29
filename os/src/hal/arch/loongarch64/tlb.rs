@@ -7,53 +7,154 @@ use super::{ASId, TLBEHi, TLBIdx, TLBEL, TLBELO0, TLBELO1};
 use crate::config::PAGE_SIZE_BITS;
 use crate::mm::{PhysPageNum, VirtPageNum};
 use core::arch::asm;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// Kernel ASID — never assigned to user processes.
 pub const KERN_ASID: u16 = 0;
 /// First user-available ASID.
 const USER_ASID_BASE: u16 = 1;
-/// Maximum user ASIDs (exclusive).
-const USER_ASID_MAX: u16 = 256;
-/// Sentinel for "no ASID assigned".
-pub const ASID_NONE: u16 = u16::MAX;
+/// CSR.ASID 中硬件 ASID 字段固定占低 10 位；高位只由软件保存 epoch。
+const ASID_CONTEXT_BITS: u32 = 10;
+const ASID_CONTEXT_MASK: u64 = (1u64 << ASID_CONTEXT_BITS) - 1;
 
-/// Simple bitmap ASID allocator.  ASIDs recycle when exhausted.
-static ASID_BITMAP: Mutex<[u64; 4]> = Mutex::new([0u64; 4]);
-static ASID_NEXT_HINT: AtomicU16 = AtomicU16::new(USER_ASID_BASE);
-
-/// Allocate a free user ASID.  Returns `ASID_NONE` if exhausted.
-pub fn asid_alloc() -> u16 {
-    let mut map = ASID_BITMAP.lock();
-    let start = ASID_NEXT_HINT.load(Ordering::Relaxed);
-    for offset in 0..(USER_ASID_MAX - USER_ASID_BASE) {
-        let id =
-            USER_ASID_BASE + ((start - USER_ASID_BASE + offset) % (USER_ASID_MAX - USER_ASID_BASE));
-        let word = (id as usize) / 64;
-        let bit = (id as usize) % 64;
-        if map[word] & (1u64 << bit) == 0 {
-            map[word] |= 1u64 << bit;
-            ASID_NEXT_HINT.store(
-                id.wrapping_add(1)
-                    .min(USER_ASID_MAX - 1)
-                    .max(USER_ASID_BASE),
-                Ordering::Relaxed,
-            );
-            return id;
-        }
-    }
-    ASID_NONE
+/// 全局 ASID 分配状态。
+///
+/// 同一 epoch 内只递增 `next`，MM 销毁时不立即复用编号。这样 ASID 的复用点
+/// 只有 rollover，而 rollover 会先同步清空全部 CPU 的 non-global TLB。
+struct AsidAllocator {
+    epoch: u64,
+    next: u16,
+    max: u16,
 }
 
-/// Free a user ASID so it can be reused.
-pub fn asid_free(id: u16) {
-    if id >= USER_ASID_BASE && id < USER_ASID_MAX {
-        let mut map = ASID_BITMAP.lock();
-        let word = (id as usize) / 64;
-        let bit = (id as usize) % 64;
-        map[word] &= !(1u64 << bit);
+static ASID_ALLOCATOR: Mutex<AsidAllocator> = Mutex::new(AsidAllocator {
+    epoch: 1,
+    next: USER_ASID_BASE,
+    max: 0,
+});
+static ASID_ROLLOVER: AtomicBool = AtomicBool::new(false);
+static ASID_ROLLOVERS: AtomicUsize = AtomicUsize::new(0);
+
+/// CPU0 根据 CSR.ASID.ASIDBITS 初始化硬件可用编号范围。
+pub fn init_asid_allocator() -> usize {
+    let width = ASId::read().get_asid_width();
+    assert!(
+        (1..=ASID_CONTEXT_BITS as usize).contains(&width),
+        "unsupported LoongArch ASID width {}",
+        width
+    );
+    let max = ((1usize << width) - 1) as u16;
+    let mut allocator = ASID_ALLOCATOR.lock();
+    assert_eq!(allocator.max, 0, "ASID allocator initialized twice");
+    allocator.max = max;
+    max as usize
+}
+
+/// 为一个 MM 返回当前 epoch 内的 ASID context；耗尽或换代中返回 `None`。
+///
+/// `current` 的低 10 位是硬件 ASID，其余位是软件 epoch。调用方在同一 MM 的
+/// VM 锁内调用，因此同一地址空间不会并发消耗多个编号。
+pub fn try_assign_asid(current: u64) -> Option<u64> {
+    let mut allocator = ASID_ALLOCATOR.lock();
+    assert_ne!(
+        allocator.max, 0,
+        "ASID allocator used before initialization"
+    );
+    if ASID_ROLLOVER.load(Ordering::Acquire) {
+        return None;
     }
+
+    let current_epoch = current >> ASID_CONTEXT_BITS;
+    let current_asid = (current & ASID_CONTEXT_MASK) as u16;
+    if current_epoch == allocator.epoch
+        && current_asid >= USER_ASID_BASE
+        && current_asid <= allocator.max
+    {
+        return Some(current);
+    }
+    if allocator.next > allocator.max {
+        return None;
+    }
+
+    let asid = allocator.next;
+    allocator.next += 1;
+    Some((allocator.epoch << ASID_CONTEXT_BITS) | u64::from(asid))
+}
+
+/// 从软件 ASID context 中取出写入 CSR.ASID 的硬件编号。
+pub const fn hardware_asid(context: u64) -> u16 {
+    (context & ASID_CONTEXT_MASK) as u16
+}
+
+/// ASID 空间耗尽时执行一次全 CPU flush，再发布新 epoch。
+///
+/// 调用点不得持有 VM、runqueue 或其它普通锁。等待者临时开放本地中断，保证
+/// rollover leader 发来的 TLB IPI 能被处理，不会形成双方等待 ack 的死锁。
+pub fn rollover_asids() {
+    {
+        let allocator = ASID_ALLOCATOR.lock();
+        if allocator.next <= allocator.max {
+            return;
+        }
+    }
+
+    if ASID_ROLLOVER
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let irq_was_enabled = crate::hal::local_irq_save();
+        crate::hal::local_irq_restore(true);
+        while ASID_ROLLOVER.load(Ordering::Acquire) {
+            spin_loop();
+        }
+        let _ = crate::hal::local_irq_save();
+        crate::hal::local_irq_restore(irq_was_enabled);
+        return;
+    }
+
+    // CAS 前的容量判断可能与上一轮完成交错；成为 leader 后必须再次确认。
+    let old_epoch = {
+        let allocator = ASID_ALLOCATOR.lock();
+        if allocator.next <= allocator.max {
+            ASID_ROLLOVER.store(false, Ordering::Release);
+            return;
+        }
+        allocator.epoch
+    };
+
+    let targets = crate::smp::online_cpu_mask();
+    if let Err(error) = crate::smp::synchronize_user_tlb(targets, None) {
+        panic!("ASID rollover TLB flush failed: {:?}", error);
+    }
+
+    {
+        let mut allocator = ASID_ALLOCATOR.lock();
+        assert_eq!(
+            allocator.epoch, old_epoch,
+            "ASID epoch changed by two leaders"
+        );
+        let new_epoch = old_epoch
+            .checked_add(1)
+            .expect("LoongArch ASID epoch exhausted");
+        assert!(
+            new_epoch <= (u64::MAX >> ASID_CONTEXT_BITS),
+            "LoongArch ASID context encoding exhausted"
+        );
+        allocator.epoch = new_epoch;
+        allocator.next = USER_ASID_BASE;
+    }
+    ASID_ROLLOVERS.fetch_add(1, Ordering::Relaxed);
+    ASID_ROLLOVER.store(false, Ordering::Release);
+}
+
+pub fn asid_capacity() -> usize {
+    ASID_ALLOCATOR.lock().max as usize
+}
+
+pub fn asid_rollover_count() -> usize {
+    ASID_ROLLOVERS.load(Ordering::Acquire)
 }
 
 /// Set Address Space ID of current core.

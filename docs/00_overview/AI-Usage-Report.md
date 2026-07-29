@@ -56,6 +56,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 2026-07-28 | GPT/Codex, DeepSeek | VM 锁/ack 死锁审查、MM 驻留与 generation 顺序、独立 user-TLB sequence、双架构 Docker/QEMU 验证 | 保持 `Published` fail-stop，完成激活侧和全用户 IPI/ack 原语；双架构 29/29 PASS，初赛失败集合未扩大，完整 PTE shootdown 明确留给 B23 |
 | SMP 用户 PTE 锁外 shootdown 与接口收敛 | 2026-07-29 | GPT/Codex, DeepSeek | VM 锁外同步、generation/ack 并发审查、frame 退休、MMU 接口重构与双架构 Docker/QEMU 验证 | 用 `AddressSpace`、`MmuGather`、`TlbFlush` 固化 `record_change -> seal -> execute`；真实 unmap 验证 ack 前不释放 frame |
 | SMP RV64 页级 RFENCE 与 IPI fallback | 2026-07-29 | GPT/Codex, DeepSeek | SBI 官方 ABI、Linux/DragonOS TLB 分层对照、hart mask 映射审查与双架构 Docker/QEMU 验证 | 不增加 MM 提交类型；RV64 单页走同步 RFENCE，full/LA64 保留全用户 IPI/ack，双架构 8 核 focused 17/17 PASS |
+| SMP LoongArch MM-owned ASID/epoch | 2026-07-29 | GPT/Codex, DeepSeek | 官方 CSR/INVTLB 与 Linux versioned ASID 对照、rollover 并发审查、release ELF 反汇编和双架构 Docker/QEMU 验证 | 删除 TCB ASID；定位并修复 LA64 trap-return asm 输入自覆盖；双架构 8 核 focused 19/19，初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -492,6 +493,32 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   收紧为逻辑 CPU0/1 后重新冻结：RV64 boot hart=5，逻辑 `0b11` 转为物理 `0b100001`，
   17/17 PASS 且页级用例不增加 software request；LA64 17/17 PASS 并增加 request/ack。
   两项均 exit 0、无 timeout/forbidden marker、源码指纹不变；双页 Full 退休窗口均通过。
+
+### Case 22: SMP LoongArch MM-owned ASID 与 epoch rollover
+
+- Evidence: `docs/Work_Log/2026-07-29.md`、
+  `docs/Work_Log/evidence/2026-07-29/smp-b25-la64-asid-summary.md`；DeepSeek prompt、模型输出与
+  完整 child logs 按协作边界只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 查阅 LoongArch 官方手册与 Linux LoongArch `mmu_context`，负责所有权
+  模型、rollover 并发协议、实现、release ELF 指令级定因和最终裁决；DeepSeek 在只读冻结
+  工作树上执行 build、8 核 focused/初赛，汇总动态证据并指出 IRQ 配对与 VM 锁边界。
+- Problem: 旧 ASID 由 TCB 分配并在 drop 时立即回收，同一共享 MM 的线程可能使用不同
+  标签，且其它 CPU 的 stale translation 尚未清除时编号即可复用。恢复汇编只能靠每次
+  context switch 全量 `invtlb` 兜底。
+- Human action: 把 versioned `asid_context` 放进每 MM 的 `TlbContext`；同一 epoch 内编号
+  单调分配，耗尽时发布 rollover gate、同步全 CPU user-TLB flush/ack、最后推进 epoch。
+  `UserVmContext` 只承担一次用户返回所需的页表根/ASID快照，没有增加第二套 commit 链。
+- AI adjudication: 独立复核 leader/waiter 的中断恢复和
+  `VM unlock -> rollover -> retry` 锁序，以及 IRQ-off trap-return 窗口与远端 ack 的先后关系。
+  首轮 LA64 初赛在用户态入口 RED 后，没有恢复每次 context switch 全刷；最终 ELF 反汇编
+  证明泛型 `in(reg)` 与连续 `move` 发生输入自覆盖，随后改为显式 `$a0/$a1/$a2` ABI 约束。
+  DeepSeek 把一次 wrapper mutation 误归因于构建产物，Codex 根据时间和 diff 指纹纠正为
+  自身并行编辑 tracked workflow 文档，并拒绝把该轮作为冻结证据。
+- Verification: RV64/LA64 normal build 均 exit 0；双架构 `CORE_NUM=8 KTEST=smp` 均
+  19/19 PASS。LA64 动态读取 `ASIDBITS=10`，跨 CPU 共享 MM 使用同一非零 ASID，自然耗尽
+  1023 个用户编号后恰好发生一次 rollover，并观测到远端 request 增加。真实用户路径回归
+  为 RV64 312/314、LA64 308/314，四组完整且失败集合未扩大；修复后的 LA64 日志不再出现
+  `PageInvalidStore/PageInvalidFetch`、panic 或 timeout。
 
 ## 6. 质量控制与验证方式
 

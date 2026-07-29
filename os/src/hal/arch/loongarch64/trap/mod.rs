@@ -8,7 +8,6 @@ mod mem_access;
 use self::context::GeneralRegs;
 
 use super::register::{self, Exception, Interrupt, Trap, ERA};
-use super::tlb::{ASID_NONE, KERN_ASID};
 use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
 use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd};
@@ -499,20 +498,12 @@ pub fn trap_return() -> ! {
             trap_cx.gp.sp,
         )
     };
-    let allocated_asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
-    // ASID_NONE 是软件分配失败哨兵，不是硬件 ASID。这里使用保留的内核 ASID 0；
-    // 地址空间激活路径会执行保守刷新，以保持回退地址空间之间的隔离。
-    let asid = if allocated_asid == ASID_NONE {
-        KERN_ASID
-    } else {
-        allocated_asid
-    };
-    if asid != 0 {
+    // 页表根、ASID 和 CPU 驻留登记必须来自同一个 AddressSpace 快照；不能再从
+    // TCB 单独读取 ASID，否则 CLONE_VM 线程会破坏共享 MM 的标签一致性。
+    let user_vm = task.process.activate_user_vm();
+    if user_vm.asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
-    // 在恢复 PGDL/ASID 前登记本 CPU 对当前 MM 的可见性。当前 ASID 仍归 TCB，
-    // 所以代际落后时用户 MM 激活路径会保守清除全部 non-global 项。
-    let user_satp = task.process.prepare_user_vm();
     // On LA64, `strampoline` resolves to the kernel-trap stub under the
     // static link. `__restore` is already in the direct-map executable range.
     let restore_va = __restore as usize;
@@ -526,23 +517,23 @@ pub fn trap_return() -> ! {
             _trap_pc,
             _trap_sp,
             trap_cx_ptr,
-            user_satp,
-            asid,
+            user_vm.token,
+            user_vm.asid,
             restore_va
         );
     }
     unsafe {
+        // trap context、页表根和 ASID 是 `__restore` 的固定 ABI 参数，必须直接绑定
+        // 到 $a0/$a1/$a2。若先把多个 `in(reg)` 输入逐个 move 到参数寄存器，LLVM
+        // 可以让后面的输入复用前面的目标寄存器；前一条 move 随后会覆盖尚未读取的
+        // 输入，最终把错误的 ASID 交给汇编恢复入口。
         asm!(
             "ibar 0",
-            "move $ra, {0}",
-            "move $a0, {1}",
-            "move $a1, {2}",
-            "move $a2, {3}",
-            "jr $ra",
-            in(reg) restore_va,
-            in(reg) trap_cx_ptr,
-            in(reg) user_satp,
-            in(reg) asid as usize,
+            "jr {restore}",
+            restore = in(reg) restore_va,
+            in("$a0") trap_cx_ptr,
+            in("$a1") user_vm.token,
+            in("$a2") user_vm.asid as usize,
             options(noreturn)
         );
     }

@@ -3,8 +3,8 @@ title: "TaskControlBlock 线程级执行实体"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
-tags: [process, task, tcb, thread]
+last_update: 2026-07-29
+tags: [process, task, tcb, thread, smp]
 ---
 
 # TaskControlBlock 线程级执行实体
@@ -50,7 +50,6 @@ pub struct TaskControlBlock {
     pub wait_timer_generation: AtomicUsize,
     pub wait_io_fallback_active_generation: AtomicUsize,
     pub sched_nice_hint: AtomicI32,
-    pub asid: AtomicU16,
 }
 ```
 
@@ -73,9 +72,10 @@ pub struct TaskControlBlock {
 | `wait_io_fallback_active_generation` | fallback wait 活跃 generation |
 | `sched_nice_hint` | runqueue fast path 判断 nice 是否为 0 |
 | `sched_vruntime_hint` | runqueue 锁内公平选择使用的 vruntime 原子快照 |
-| `asid` | la64 ASID，rv64 保持 0 |
 
 这些字段里，`sched_nice_hint` 和当前任务身份 hint 直接影响 syscall/调度热路径，避免频繁持有 TCB inner 锁。
+LA64 ASID 不属于线程字段：它由 `AddressSpace` 的 `TlbContext` 持有，同一 MM 的线程
+共享一个 versioned ASID，并在用户返回时与页表根一起激活。
 
 ## 3. TCB inner 字段分组
 
@@ -302,7 +302,6 @@ write 0 to clear_child_tid
 2. 从 task registry 注销 tid。
 3. 从所属进程线程表移除。
 4. 释放 `user_res_slot_allocator` 中的 slot。
-5. la64 下释放 ASID。
 
 当前任务退出时不能在自己的内核栈上释放最后一个 `Arc<TaskControlBlock>`，所以 `exit_current_and_run_next()` 先加入 zombie queue，切回 idle 后由调度循环 drop。
 
@@ -323,4 +322,4 @@ write 0 to clear_child_tid
 | 线程退出后 futex wait 卡住 | `clear_child_tid` 写 0 和 futex wake 路径 |
 | exec 后旧线程仍运行 | `load_elf()` 是否杀掉同线程组其他线程并从队列移除 |
 | wait 观察不到进程 zombie | 是否只有线程 zombie，进程 live thread count 是否为 0 |
-| la64 ASID 泄漏 | TCB drop 是否执行到 asid_free |
+| la64 线程切换后地址空间串线 | 同一 PCB 的 `AddressSpace` 是否返回同一个 ASID；rollover 是否先完成全 CPU flush/ack |

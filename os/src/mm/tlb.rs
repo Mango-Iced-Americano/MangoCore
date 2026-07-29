@@ -5,6 +5,8 @@
 //! 等待永远不发生在地址空间锁内。
 
 use super::{FlushRange, MmuGather};
+#[cfg(target_arch = "loongarch64")]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_MM_ID: AtomicUsize = AtomicUsize::new(1);
@@ -15,6 +17,9 @@ pub(crate) struct TlbContext {
     cached_cpus: AtomicUsize,
     generation: AtomicUsize,
     observed: [AtomicUsize; crate::smp::MAX_CPUS],
+    /// LoongArch 软件 epoch 与硬件 ASID 的原子组合；0 表示尚未分配。
+    #[cfg(target_arch = "loongarch64")]
+    asid_context: AtomicU64,
 }
 
 /// 一次已经脱离 VM 锁的 TLB 失效工作。
@@ -39,7 +44,26 @@ impl TlbContext {
             // 从 1 开始，使新 MM 第一次返回用户态时必定执行一次明确失效。
             generation: AtomicUsize::new(1),
             observed: [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS],
+            #[cfg(target_arch = "loongarch64")]
+            asid_context: AtomicU64::new(0),
         }
+    }
+
+    /// 返回当前 MM 的硬件 ASID；`None` 表示必须先在无普通锁状态完成 rollover。
+    #[cfg(target_arch = "loongarch64")]
+    pub(crate) fn assign_asid(&self) -> Option<u16> {
+        let current = self.asid_context.load(Ordering::Acquire);
+        let assigned = crate::hal::arch::loongarch64::tlb::try_assign_asid(current)?;
+        if assigned != current {
+            self.asid_context.store(assigned, Ordering::Release);
+        }
+        Some(crate::hal::arch::loongarch64::tlb::hardware_asid(assigned))
+    }
+
+    /// RV64 尚未使用 SATP.ASID；返回 0 让上层维持统一的用户 VM 上下文接口。
+    #[cfg(not(target_arch = "loongarch64"))]
+    pub(crate) fn assign_asid(&self) -> Option<u16> {
+        Some(0)
     }
 
     /// 返回曾经缓存过该 MM 的 CPU；未实现安全 detach 前该集合只增不减。

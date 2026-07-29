@@ -129,8 +129,8 @@ pub trait PageTable {
 
     /// 刷新当前 CPU 上一个虚拟页对应的 TLB 条目。
     ///
-    /// 架构若暂时无法定位目标地址空间（例如 B16 的 LA64 ASID 仍归 TCB），
-    /// 可以保守地清除本核全部非全局项，但不能缩小到错误的当前 ASID。
+    /// 架构若无法从裸页表对象定位外层地址空间 ASID，可以保守地清除本核全部
+    /// non-global 项，但不能缩小到错误的当前 ASID。
     fn flush_tlb_page(&self, vpn: VirtPageNum);
 
     /// 刷新当前页表相关的 TLB 状态。

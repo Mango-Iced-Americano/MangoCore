@@ -23,6 +23,8 @@ static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_FREE_DURING_WAIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static AP_USER_TLB_REQUEST_BEFORE: AtomicUsize = AtomicUsize::new(0);
+static AP_SHARED_MM_ASID: AtomicUsize = AtomicUsize::new(0);
+static AP_SHARED_MM_ASID_READY: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -30,6 +32,8 @@ lazy_static! {
     static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     static ref USER_TLB_RETIRE_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
+        Mutex::new(None);
+    static ref SHARED_ASID_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
 }
 
@@ -82,6 +86,11 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::user_tlb_full_flush_reaches_online_cpus",
             user_tlb_full_flush_reaches_online_cpus,
         ),
+        KernelTest::new("smp::address_space_owns_asid", address_space_owns_asid),
+        KernelTest::new(
+            "smp::loongarch_asid_rollover_flushes_before_reuse",
+            loongarch_asid_rollover_flushes_before_reuse,
+        ),
         KernelTest::new(
             "smp::user_tlb_page_sync_uses_arch_backend",
             user_tlb_page_sync_uses_arch_backend,
@@ -99,6 +108,103 @@ pub fn tests() -> Vec<KernelTest> {
             secondary_cpus_stop_and_ack,
         ),
     ]
+}
+
+fn read_shared_mm_asid_on_ap() {
+    let vm = SHARED_ASID_VM
+        .lock()
+        .as_ref()
+        .expect("shared-ASID test VM missing")
+        .clone();
+    let context = vm.activate_on(crate::smp::cpu_id());
+    AP_SHARED_MM_ASID.store(context.asid as usize, Ordering::Release);
+    AP_SHARED_MM_ASID_READY.store(1, Ordering::Release);
+}
+
+/// 同一 AddressSpace 在不同 CPU 上必须取得同一个 ASID；ASID 不再属于 TCB。
+fn address_space_owns_asid() -> Result<(), &'static str> {
+    let vm = Arc::new(crate::mm::AddressSpace::new(
+        crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
+    ));
+    let local = vm.activate_on(crate::smp::BOOT_CPU_ID);
+    #[cfg(target_arch = "loongarch64")]
+    if local.asid == 0 {
+        return Err("LoongArch user MM received reserved ASID 0");
+    }
+    #[cfg(not(target_arch = "loongarch64"))]
+    if local.asid != 0 {
+        return Err("RV64 unexpectedly received a software ASID");
+    }
+
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    AP_SHARED_MM_ASID.store(0, Ordering::Release);
+    AP_SHARED_MM_ASID_READY.store(0, Ordering::Release);
+    *SHARED_ASID_VM.lock() = Some(vm);
+    let task = crate::task::spawn_ktest_task_on(1, read_shared_mm_asid_on_ap);
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while AP_SHARED_MM_ASID_READY.load(Ordering::Acquire) == 0
+        || task.task_status() != crate::task::TaskStatus::Zombie
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP did not activate the shared MM before timeout");
+        }
+        core::hint::spin_loop();
+    }
+    *SHARED_ASID_VM.lock() = None;
+    if AP_SHARED_MM_ASID.load(Ordering::Acquire) != local.asid as usize {
+        return Err("one AddressSpace received different ASIDs on two CPUs");
+    }
+    Ok(())
+}
+
+/// 自然耗尽硬件 ASID，验证编号只能在全 CPU flush/ack 完成并换代后复用。
+fn loongarch_asid_rollover_flushes_before_reuse() -> Result<(), &'static str> {
+    #[cfg(not(target_arch = "loongarch64"))]
+    return Ok(());
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let rollovers_before = crate::hal::arch::loongarch64::tlb::asid_rollover_count();
+        let remote_request_before = if crate::smp::configured_cpu_count() > 1 {
+            crate::smp::user_tlb_request(1)
+        } else {
+            0
+        };
+        let first_vm = Arc::new(crate::mm::AddressSpace::new(
+            crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
+        ));
+        if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
+            return Err("first rollover test MM received ASID 0");
+        }
+
+        let capacity = crate::hal::arch::loongarch64::tlb::asid_capacity();
+        for _ in 0..=capacity {
+            let vm = crate::mm::AddressSpace::new(crate::mm::AddressSpaceInner::<
+                crate::hal::PageTableImpl,
+            >::new_bare());
+            if vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
+                return Err("rollover allocated reserved ASID 0");
+            }
+            if crate::hal::arch::loongarch64::tlb::asid_rollover_count() > rollovers_before {
+                break;
+            }
+        }
+
+        if crate::hal::arch::loongarch64::tlb::asid_rollover_count() != rollovers_before + 1 {
+            return Err("ASID exhaustion did not complete exactly one epoch rollover");
+        }
+        if crate::smp::configured_cpu_count() > 1
+            && crate::smp::user_tlb_request(1) <= remote_request_before
+        {
+            return Err("ASID rollover reused IDs without a remote TLB flush");
+        }
+        if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
+            return Err("old MM did not receive a current-epoch ASID after rollover");
+        }
+        Ok(())
+    }
 }
 
 /// 启动函数返回后，配置拓扑中的每个 CPU 都必须已经发布 online。

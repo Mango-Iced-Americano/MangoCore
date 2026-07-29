@@ -43,6 +43,7 @@ disk-la.img
 /docs/Work_Log/evidence/2026-07-29/*
 !/docs/Work_Log/evidence/2026-07-29/smp-b23-user-tlb-flush-summary.md
 !/docs/Work_Log/evidence/2026-07-29/smp-b24-rfence-summary.md
+!/docs/Work_Log/evidence/2026-07-29/smp-b25-la64-asid-summary.md
 
 cc-codex/*.clean.img
 

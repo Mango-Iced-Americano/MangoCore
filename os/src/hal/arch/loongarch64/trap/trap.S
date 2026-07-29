@@ -116,7 +116,7 @@ __alltraps:
 __restore:
     # a0: *TrapContext in user space(Constant),
     # a1: user space token
-    # a2: ASID (0 if not allocated)
+    # a2: 当前 AddressSpace 在本 epoch 内持有的硬件 ASID
 
     slli.d $a1, $a1, 12
     csrrd  $t0, CSR_PGDL
@@ -124,15 +124,15 @@ __restore:
     # CSR_ASID[9:0] 是当前 ASID；第 [23:16] 位描述硬件实现的 ASID 位宽，绝不能
     # 将其按位或到进程 ASID 值中。
     bstrpick.d $t1, $t1, 9, 0
-    # PGDL 相同不代表地址空间上下文相同：两个任务可能共享页表根但使用不同 ASID。
-    # 任一字段变化时都必须重写这一对寄存器。
+    # PGDL 和 ASID 是同一个 MM 上下文的两个组成部分；任一字段变化时都必须成对更新。
     bne    $t0, $a1, 2f
     beq    $t1, $a2, 1f
 2:
-    # 保持 PGDL 与 ASID 同步，两次写寄存器之间不能插入分支。
+    # 保持 PGDL 与 ASID 同步，两次写寄存器之间不能插入分支。这里不再按 context
+    # switch 全量 invtlb：同一 ASID 只属于一个 MM，编号复用前由 epoch rollover
+    # 对全部 online CPU 完成 non-global flush。
     csrwr  $a1, CSR_PGDL
     csrwr  $a2, CSR_ASID
-    invtlb 0x3, $zero, $zero
 1:
     move $sp, $a0
     csrwr  $a0, CSR_SAVE

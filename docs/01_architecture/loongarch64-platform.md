@@ -3,8 +3,8 @@ title: "LoongArch64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-21
-tags: [architecture, loongarch64, hal]
+last_update: 2026-07-29
+tags: [architecture, loongarch64, hal, smp, asid, tlb]
 ---
 
 # LoongArch64 平台后端
@@ -137,24 +137,49 @@ page walk 寄存器配置来自 `bootstrap_init()`：
 
 ## 6. ASID 与 TLB
 
-`mod.rs` 从 `tlb.rs` 导出：
+`mod.rs` 从 `tlb.rs` 导出低层 CSR/TLB 操作：
 
 ```rust
-pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
+pub use tlb::{set_asid, tlb_global_invalidate, tlb_invalidate};
 ```
 
-`tlb.rs` 还提供 page 级辅助：
+ASID 分配属于 MM 激活协议，不再作为 task 创建/析构时调用的公开接口。相关入口为：
 
 | 函数 | 作用 |
 |------|------|
-| `asid_alloc()` / `asid_free()` | 分配和释放 ASID |
+| `init_asid_allocator()` | CPU0 从 `CSR.ASID.ASIDBITS` 读取硬件宽度并初始化编号范围 |
+| `try_assign_asid(context)` | 在当前 epoch 内为 MM 取得或复用 ASID context；耗尽时返回 `None` |
+| `rollover_asids()` | 全 CPU flush/ack 后推进 epoch，允许硬件编号重新分配 |
+| `hardware_asid(context)` | 只取低 10 位硬件 ASID，绝不把软件 epoch 写入 CSR |
 | `set_asid()` | 设置当前地址空间 ASID |
-| `tlb_invalidate()` | 刷新当前 TLB |
+| `tlb_invalidate()` | 清除当前 CPU 的全部 non-global TLB 项 |
 | `tlb_invalidate_page(vpn)` | 刷新指定虚拟页 |
 | `tlb_invalidate_global_page(vpn)` | 刷新 global page |
 | `tlb_global_invalidate()` | 全局刷新 |
 
-`TaskControlBlock` 在 la64 架构下持有 ASID 字段。返回用户态时，`trap_return()` 把 ASID 传给恢复汇编。
+`AddressSpace` 的 `TlbContext` 持有一个原子 `asid_context`：低 10 位是
+`CSR.ASID[9:0]` 的硬件编号，高位是软件 epoch。同一地址空间的所有线程和 CPU 读取
+同一个 context；TCB 不再持有或释放 ASID。一个 epoch 内只单调分配编号，MM 析构时
+不立即回收。编号耗尽后，唯一 rollover leader 先通过 user-TLB IPI/ack 清空全部 online
+CPU 的 non-global 项，收到全部确认后才发布新 epoch；这保证旧编号不会在 stale TLB
+仍可命中时复用。
+
+返回用户态时，`ProcessControlBlock::activate_user_vm()` 在同一个 `AddressSpace` 上取得
+页表根和硬件 ASID 快照。`__restore` 比较并成对写入 `CSR.PGDL/CSR.ASID`，普通 context
+switch 不再固定执行全量 `invtlb`。这与
+[LoongArch 架构手册的 ASID/INVTLB 定义](https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html)
+以及 [Linux LoongArch versioned ASID](https://codebrowser.dev/linux/linux/arch/loongarch/include/asm/mmu_context.h.html)
+的原则一致：编号复用前统一换代失效，而不是每次切换地址空间都全刷。
+
+Rust 到 `__restore` 的 ABI 桥接直接把 trap context、token、ASID 约束到
+`$a0/$a1/$a2`，跳转地址使用独立寄存器。禁止用多个泛型 `in(reg)` 再顺序 `move` 到
+参数寄存器：LLVM 可以让后续输入复用这些寄存器，模板内的前序写入会在消费前覆盖它。
+从快照取得到 `ertn` 保持本地 IRQ 关闭，保证 rollover IPI 的 flush/ack 不会越过旧快照
+的实际用户态恢复。
+
+当前精度仍有限：通用 page shootdown 尚未携带目标 MM 的 ASID，因而 LA64 单页本地
+失效与远端 fallback 暂时使用 `invtlb 0x3` 清除全部 non-global 项。后续固定 slot
+payload 会把目标 ASID 与 VPN 一起交给 IPI handler，再使用 `invtlb 0x5` 精确失效。
 
 ## 7. Trap 分支
 
@@ -265,7 +290,12 @@ trap_cx_bottom_from_tid(tid) = TRAP_CONTEXT_BASE + (tid - 1) * PAGE_SIZE
 
 2026-07-21 的最终双架构 regression 已验证 mmap 边界和第二个槽位：RV64 和 LA64 均完成 TAP `1..6`，包含 `ok 2 mmap_edge_cases` 和 `ok 6 clone_vm_second_slot`，LA64 分类器为 `STATE=PASS STATUS=0`。最终证据目录为 `docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`。该 focused regression 不代表 full LTP 或 basic 全量覆盖。
 
-LoongArch64 后端比 rv64 多两个需要重点理解的机制：ASID 和硬件 dirty/page-modify 语义。任务创建或 clone 后会分配/继承 ASID，返回用户态时 token 和 ASID 一起传给恢复汇编；页被写入时可能先触发 page modify，trap 后端通过 `LAFlexPageTable::set_dirty_bit()` 补 dirty bit，再让用户指令重试。这些机制使 la64 的“同一个虚拟地址”是否命中旧 TLB，不仅取决于页表内容，也取决于 ASID 和 invalidate 是否正确。
+LoongArch64 后端比 rv64 多两个需要重点理解的机制：ASID 和硬件 dirty/page-modify
+语义。ASID 在地址空间第一次激活时分配，同一 MM 的线程共享；返回用户态时页表根和
+ASID 作为一个快照传给恢复汇编。页被写入时可能先触发 page modify，trap 后端通过
+`LAFlexPageTable::set_dirty_bit()` 补 dirty bit，再让用户指令重试。这些机制使 la64 的
+“同一个虚拟地址”是否命中旧 TLB，不仅取决于页表内容，也取决于 MM-owned ASID、epoch
+和 invalidate 是否正确。
 
 非对齐访存模拟是 la64 的另一个架构特有路径。`AddressNotAligned` 分支读取用户 PC 处指令，解析访问宽度和方向，通过 uaccess 读写目标地址，然后手动推进 PC。调试该路径时必须同时确认三点：指令解码成功、用户内存访问返回正确 errno、模拟成功后 PC 推进 4 字节。
 
@@ -275,7 +305,7 @@ LoongArch64 后端比 rv64 多两个需要重点理解的机制：ASID 和硬件
 |------|------|--------|
 | la64 启动早期卡住 | `mod.rs::bootstrap_init()` | core id、DMW/page walk、TLB refill entry |
 | 缺页后仍反复写 fault | `trap/mod.rs`, `laflex.rs` | `set_dirty_bit()` 和 TLB 刷新 |
-| ASID 异常 | `tlb.rs`, task 创建路径 | `asid_alloc()`、返回用户态传参 |
+| ASID 异常 | `tlb.rs`, `mm/tlb.rs`, `address_space.rs`, trap return | `asid_context` epoch、rollover flush/ack、页表根/ASID 快照 |
 | 非对齐访存 panic | `trap/mem_access.rs` | 指令解析、访问宽度、PC 推进 |
 | timer 不触发 | `time.rs`, `trap/mod.rs` | timer frequency、`TIClr`、interrupt vector |
 

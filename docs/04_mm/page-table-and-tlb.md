@@ -187,9 +187,11 @@ fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `Mmu
 当前性能策略仍然保守：cached mask 尚未安全清 bit，多页修改和 LA64 远端协议仍按整个
 用户地址空间失效。RV64 单页修改已经把 `FlushRange::Page` 直接交给 SBI RFENCE，固件
 以物理 hart mask 同步完成 `[va, va + PAGE_SIZE)` 后才允许释放 frame；缺少 RFENCE 时启动
-日志会明确说明并退回软件 IPI。已经避免的固定成本还包括：已登记 CPU 的重复
+日志会明确说明并退回软件 IPI。LA64 已使用 MM-owned ASID，普通 context switch 不再
+固定执行 `invtlb 0x3`；但通用 shootdown 接口尚未携带目标 ASID，单页 PTE 修改仍保守
+清除目标 CPU 的全部 non-global 项。已经避免的固定成本还包括：已登记 CPU 的重复
 `fetch_or`、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
-range、MM-owned LoongArch ASID 和安全 CPU detach 留给后续工作。
+range、LA64 ASID+VA payload 和安全 CPU detach 留给后续工作。
 
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
@@ -270,7 +272,19 @@ page walk；外层解锁并收齐目标 CPU 的 ack 后才统一释放。等待�
 | 架构 | 页表/TLB 注意点 |
 |------|-----------------|
 | rv64 | 仅当前 CPU 且只改一个 VPN 时使用 `sfence.vma va, zero`；多页和远端 user-TLB IPI 使用本 hart 全量 `sfence.vma` |
-| la64 | ASID 仍由 TCB 持有，通用 MM 层无法安全指定目标 ASID；页级入口和远端 IPI 当前均保守执行本核全部 `G=0` 项失效（`invtlb 0x3`） |
+| la64 | ASID 由 `AddressSpace` 的 `TlbContext` 持有；页级入口尚未携带目标 ASID，因此本地与远端 fallback 当前仍保守执行本核全部 `G=0` 项失效（`invtlb 0x3`） |
+
+LA64 把软件 epoch 和硬件 ASID 编码在一个 `asid_context` 中：低 10 位对应
+`CSR.ASID[9:0]`，高位只供软件判断编号是否属于当前 epoch。同一 epoch 内的编号单调分配，
+MM 销毁不立即归还；耗尽时由一个 leader 先通过既有 user-TLB request/ack 清除全部 online
+CPU 的 non-global 项，收到全部 ack 后才推进 epoch 并允许编号复用。等待 rollover 的 CPU
+不持 VM 锁，并临时开放本地中断，因此仍能响应 leader 的 TLB IPI。
+
+用户返回路径调用 `ProcessControlBlock::activate_user_vm()`，一次取得同一个
+`AddressSpace` 的页表根和 ASID 快照。LA64 `__restore` 只在这对值变化时成对写入
+`CSR.PGDL/CSR.ASID`，不再在每次任务切换时全刷 TLB。该组织遵循 LoongArch 官方
+ASID/INVTLB 语义以及 Linux LoongArch 的 versioned ASID 做法：失效发生在 ASID 换代，
+而不是发生在每次 context switch。
 
 上层文档统一称为 `tlb_invalidate` 或 `flush_tlb()`，不把架构指令混入通用 MM 逻辑。
 
@@ -282,8 +296,9 @@ TLB 是第三份缓存状态。即使页表内存已经改对，CPU 仍可能使
 
 B16 首次收口用户 PTE 写入，B22 完成 cached CPU/generation 激活侧和全用户 IPI/ack
 原语；B23 将临时的 batch/pending/commit 原型重构为
-`record_change -> seal -> execute`，并完成锁外等待与 ack 前 frame 不复用。
-MM-owned ASID/epoch、range/RFENCE 优化、安全 CPU detach 和普通用户迁移仍未完成。
+`record_change -> seal -> execute`，并完成锁外等待与 ack 前 frame 不复用；B24 接通
+RV64 单页 RFENCE；B25 完成 LA64 MM-owned ASID 与全 CPU flush-before-reuse epoch
+协议。连续 range、LA64 精确 ASID+VA shootdown、安全 CPU detach 和普通用户迁移仍未完成。
 
 ## 13. 调试核对点
 
