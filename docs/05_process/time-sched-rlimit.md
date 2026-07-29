@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-29
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -284,47 +284,15 @@ pub fn sys_timer_create(
 6. 如果信号可唤醒 Interruptible 任务，转 Ready 并唤醒。
 7. 周期 timer 重新加入 kernel timer queue。
 
-到期处理在 `KernelTimerQueue::run_timer()` 中根据 `TimerAction` 分支执行。`WakeTask` 分支体现了 generation 过滤和 fallback timer 重挂逻辑：
+到期处理在 `KernelTimerQueue::run_timer()` 中根据 `TimerAction` 分支执行。`WakeTask` 分支清除已挂 timer 标记，并用 generation 过滤陈旧的 deadline timer：
 
 ```rust
 pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
     match timer.action {
-        TimerAction::WakeTask { task, generation, fallback_ms } => {
+        TimerAction::WakeTask { task, generation } => {
             let Some(task) = task.upgrade() else { return false };
             task.wait_io_timer_pending
                 .store(false, AtomicOrdering::Relaxed);
-
-            if let Some(ms) = fallback_ms {
-                let active = task
-                    .wait_io_fallback_active_generation
-                    .load(AtomicOrdering::Acquire);
-                if active == 0 {
-                    return false;
-                }
-                if active != generation {
-                    let current =
-                        task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                    if active == current {
-                        if !task.wait_io_timer_pending.swap(true, AtomicOrdering::Relaxed) {
-                            let new_gen = task
-                                .wait_timer_generation
-                                .fetch_add(1, AtomicOrdering::Relaxed)
-                                + 1;
-                            add_kernel_timer(
-                                TimerAction::WakeTask {
-                                    task: Arc::downgrade(&task),
-                                    generation: new_gen,
-                                    fallback_ms: Some(ms),
-                                },
-                                TimeSpec::now() + TimeSpec::from_ms(ms),
-                            );
-                            task.wait_io_fallback_active_generation
-                                .store(new_gen, AtomicOrdering::Release);
-                        }
-                    }
-                    return false;
-                }
-            }
 
             if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
                 crate::task::perf::record_ktimer_stale_waketask();
@@ -345,7 +313,7 @@ pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         }
 ```
 
-这段代码只展示 `WakeTask` 分支；`SendSignal`、`PosixTimerSignal` 和 `TimerFdSweep` 在同一个 match 中处理。
+这段代码只展示 `WakeTask` 分支；`SendSignal`、`PosixTimerSignal` 和 `TimerFdSweep` 在同一个 match 中处理。只有带 deadline 的等待会注册 `WakeTask` timer；无限期等待由 Waiter/Waker 的 one-shot 通知握手显式唤醒，不再依赖周期性定时器。
 
 ## 8. realtime clock 调整
 

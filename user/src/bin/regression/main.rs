@@ -30,6 +30,7 @@ mod regression_ipc_sem;
 mod regression_nanosleep;
 mod regression_futex_requeue;
 mod regression_ipc_msg;
+mod regression_child_wait;
 
 use user_lib::println;
 
@@ -38,7 +39,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0u32;
     let mut failed = 0u32;
     let mut skipped = 0u32;
-    let total = 22u32;
+    let total = 23u32;
 
     println!("TAP version 13");
     println!("1..{}", total);
@@ -144,16 +145,21 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if r == 0 { passed += 1; println!("ok 20 futex_requeue"); }
     else { failed += 1; println!("not ok 20 futex_requeue"); }
 
-    // Test 21: SysV message queue send wakes a blocked receiver in either process direction
+    // Test 21: SysV message queues wake blocked receivers and full-queue senders
     let r = regression_ipc_msg::run();
     if r == 0 { passed += 1; println!("ok 21 ipc_msg"); }
     else { failed += 1; println!("not ok 21 ipc_msg"); }
 
-    // Test 22: pipe capacity resize wakes writers and splice wakes readers
+    // Test 22: waitpid blocks until a delayed child exit notification
+    let r = regression_child_wait::run();
+    if r == 0 { passed += 1; println!("ok 22 child_wait"); }
+    else { failed += 1; println!("not ok 22 child_wait"); }
+
+    // Test 23: pipe capacity resize wakes writers and splice wakes readers
     let r = regression_pipe_resize::run();
-    if r == -1 { skipped += 1; println!("ok 22 pipe_resize # SKIP known kernel bug: resize wakeup"); }
-    else if r == 0 { passed += 1; println!("ok 22 pipe_resize"); }
-    else { failed += 1; println!("not ok 22 pipe_resize"); }
+    if r == -1 { skipped += 1; println!("ok 23 pipe_resize # SKIP known kernel bug: resize wakeup"); }
+    else if r == 0 { passed += 1; println!("ok 23 pipe_resize"); }
+    else { failed += 1; println!("not ok 23 pipe_resize"); }
 
     println!("# results: {} passed, {} failed, {} skipped, {} total", passed, failed, skipped, total);
 

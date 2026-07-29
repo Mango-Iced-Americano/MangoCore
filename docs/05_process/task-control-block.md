@@ -3,7 +3,7 @@ title: "TaskControlBlock 线程级执行实体"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-29
 tags: [process, task, tcb, thread]
 ---
 
@@ -48,7 +48,6 @@ pub struct TaskControlBlock {
     inner: Mutex<TaskControlBlockInner>,
     pub wait_io_timer_pending: AtomicBool,
     pub wait_timer_generation: AtomicUsize,
-    pub wait_io_fallback_active_generation: AtomicUsize,
     pub sched_nice_hint: AtomicI32,
     pub asid: AtomicU16,
 }
@@ -67,13 +66,14 @@ pub struct TaskControlBlock {
 | `uid/euid/suid/gid/egid/sgid_hint` | 当前身份热路径缓存 |
 | `exit_signal` | 非 `CLONE_THREAD` child 退出时投递给父进程的信号 |
 | `_thread_quota` | `CLONE_THREAD` 线程级 quota guard |
-| `wait_io_timer_pending` | I/O fallback timer 去重标记 |
-| `wait_timer_generation` | wait timeout generation，过滤旧 timer |
-| `wait_io_fallback_active_generation` | fallback wait 活跃 generation |
+| `wait_io_timer_pending` | 已注册 deadline 唤醒 timer 的去重标记 |
+| `wait_timer_generation` | 等待 timeout generation，过滤旧 deadline timer |
 | `sched_nice_hint` | ready queue fast path 判断 nice 是否为 0 |
 | `asid` | la64 ASID，rv64 保持 0 |
 
 这些字段里，`sched_nice_hint` 和当前任务身份 hint 直接影响 syscall/调度热路径，避免频繁持有 TCB inner 锁。
+
+无 deadline 的等待不注册 timer：Waiter/Waker 的 one-shot 通知握手在显式唤醒、信号或条件满足时完成状态转换，因此支持无限期等待而不需要定时器兜底。
 
 ## 3. TCB inner 字段分组
 

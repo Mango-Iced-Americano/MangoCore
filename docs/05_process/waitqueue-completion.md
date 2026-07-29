@@ -3,7 +3,7 @@ title: "WaitQueue、KernelTimerQueue 与 Completion"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-29
 tags: [process, waitqueue, completion, timer]
 ---
 
@@ -30,7 +30,7 @@ pub struct WaitQueue {
 }
 ```
 
-每个 `WaiterState` 持有 task 的 `Weak<TaskControlBlock>` 和一个原子状态字；队列持有 waiter 的 `Arc`，但不延长 task 生命周期。失效 task 的 waiter 仍可由 `compact_stale()` 清除。
+每个 `WaiterState`（Waiter）持有 task 的 `Weak<TaskControlBlock>` 和一个原子状态字；队列持有 waiter 的 `Arc`，但不延长 task 生命周期。唤醒路径（Waker）通过该状态字发布一次性通知，失效 task 的 waiter 仍可由 `compact_stale()` 清除。
 
 等待协议使用四态 one-shot 握手：
 
@@ -207,7 +207,7 @@ impl KernelTimerQueue {
 
 `TimerAction::WakeTask` 会比较 `task.wait_timer_generation`。不匹配表示旧 timer：
 
-旧 generation 的 deadline timer 会直接丢弃。这避免旧 timeout 唤醒新等待；无 deadline 的等待不再依赖轮询 fallback。
+旧 generation 的 deadline timer 会直接丢弃。这避免旧 timeout 唤醒新等待；无 deadline 的等待由 Waiter/Waker one-shot 握手支持无限期阻塞，直至显式唤醒、信号或条件满足。
 
 ## 12. Completion
 

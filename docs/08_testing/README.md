@@ -299,7 +299,7 @@ TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elap
 | `timer::time_spec_ops` | `timer.rs` | TimeSpec 构造精度、进位加法、减法钳位、跨单位等价、偏序、is_zero |
 | `timer::now_monotonic` | `timer.rs` | 两次 `now()` 验证单调不倒退 |
 | `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回正确值 |
-| `waitqueue::basic_block_wake` / `no_spurious_wake_without_fallback` | `waitqueue_blocking.rs` | 条件驱动的阻塞/唤醒，以及 200ms 内不会因旧 10ms fallback 自发返回 |
+| `waitqueue::basic_block_wake` / `no_spurious_wake_without_fallback` | `waitqueue_blocking.rs` | 条件驱动的阻塞/唤醒，以及无显式唤醒、信号或 deadline 时 200ms 内持续阻塞 |
 | `waitqueue::multi_queue_cleanup` / `deadline_timeout` / `stale_waiter_cleanup` | `waitqueue_blocking.rs` | 双队列清理、deadline 及失效 weak waiter |
 | `waitqueue::wake_one_fifo` / `wake_all_wakes_all` / `thousand_cycle_stress` | `waitqueue_wake.rs` | FIFO 单唤醒、广播和 1000 次无丢失/重复入队压力 |
 | `waitqueue::signal_interrupt` / `signal_wake_race` | `waitqueue_interrupt.rs` | 信号中断与 Ready 优先于同时到达信号的 race 语义 |
