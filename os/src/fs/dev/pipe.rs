@@ -956,6 +956,13 @@ impl PipeRingBuffer {
             return Err(SyscallErr::EBUSY);
         }
         self.capacity = new_capacity;
+        // After capacity increase, a formerly FULL ring may now
+        // have free space and must transition to NORMAL so that
+        // subsequent writes can proceed and blocked writers are
+        // correctly woken by set_pipe_capacity_compat().
+        if self.status == RingBufferStatus::FULL && self.get_free_size() > 0 {
+            self.status = RingBufferStatus::NORMAL;
+        }
         Ok(self.capacity)
     }
     #[inline]
