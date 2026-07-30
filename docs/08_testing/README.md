@@ -266,6 +266,13 @@ B37 不增加 TAP 项，而是把 `spawn_ktest_task_on()` 的最终发布改走�
 并继续要求任务只在声明 CPU 运行一次。启动期第 2 项同时证明无 current 的 ktest runner 仍
 显式进入 CPU0。该组合能反证固定 CPU0 发布和启动期空候选，但不代表默认 mask 已放宽。
 
+B38 插入第 15 项 `smp::running_affinity_waits_for_owner_handoff`，总数变为 24。CPU1 上的
+kernel-only 任务先验证“新 mask 仍包含 owner”只原地更新，再由 CPU0 发起排除 owner 的远程
+affinity 请求；远程写侧必须等待 CPU1 在生产安全点完成 `Running(1) -> Queued(0)`，之后
+任务只在 CPU0 恢复一次并退出。终态 STOP 顺延为第 24 项并通过，证明用例没有遗留 current、
+runqueue 或 pending 请求。该项覆盖单个请求者与稳定 Running owner；多写者竞争和
+`Blocking` 瞬态重试目前只做源码/锁序审计，不能由 24/24 外推为动态压力覆盖。
+
 ### 目录结构
 
 ```
@@ -517,7 +524,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32/B33/B34/B35/B36/B37 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33/B34/B35/B36/B37/B38 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -540,10 +547,14 @@ B35 插入新的第 13 项后，当前列表中的 B34 probe 顺延为第 21 项
 直接发起远程 TID syscall。
 B36 插入第 14 项后，B34 probe/STOP 分别顺延为第 22/23 项；验收必须看到
 `queued_affinity_moves_between_runqueues` 在双架构直接 PASS，并核对 holder 释放后源队列无残留、
-subject 只在 CPU0 执行一次。该证据只闭合稳定 Queued 写侧；Running/Blocking 必须继续标为
-未支持，不能用 23/23 外推完整远程 affinity。
+subject 只在 CPU0 执行一次。该证据只闭合稳定 Queued 写侧；B38 之前的 23/23 不能外推
+Running/Blocking 已支持。
 B37 保持 23 项；除第 2/11 项外，还必须核对双架构初赛中 fork/clone 与四组 busybox 的
 精确失败集合未扩大。负载计数是无锁放置提示，不能仅凭一次队列分布声称达到均衡。
+B38 插入第 15 项后，B34 probe/STOP 分别顺延为第 23/24 项；验收必须看到新项在双架构
+直接 PASS，并核对宽 mask 更新不切换 owner、窄 mask 请求返回前源 CPU 已释放 owner、任务最终
+只在 CPU0 恢复一次。当前动态证据没有并发两个远程写者，也没有确定性命中
+`Running -> Blocking` 的交界；这两项必须保留为后续压力测试边界。
 
 ### Bug 下沉流程
 

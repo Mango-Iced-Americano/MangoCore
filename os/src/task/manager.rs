@@ -27,6 +27,7 @@ use super::{
     signal::{SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
+use super::task::{RemoteAffinityRequest, RemoteAffinityState};
 use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -273,6 +274,9 @@ impl TaskManager {
 
     /// 添加一个任务到可中断队列。
     pub fn begin_interruptible_sleep(&mut self, task: Arc<TaskControlBlock>) {
+        // 固定锁序：TASK_MANAGER -> remote_affinity_request。请求槽与
+        // Running -> Blocking 在同一临界区完成，远程写侧不会错过 block。
+        let mut request_slot = task.remote_affinity_request.lock();
         let current = task.task_status();
         let TaskStatus::Running(cpu) = current else {
             task.fail_sched_invariant(
@@ -293,9 +297,16 @@ impl TaskManager {
         // Blocking 表示“已登记睡眠意图但仍在 CPU 上”。只有真正切回 idle 后
         // 才能提交为 Blocked，从而关闭登记与 context switch 之间的丢唤醒窗口。
         task.require_sched_transition(current, TaskStatus::Blocking(cpu), "block current task");
-        self.interruptible_queue.push_back(task);
+        self.interruptible_queue.push_back(task.clone());
         crate::task::perf::record_taskq_add_interruptible();
         add_interruptible_count();
+        let canceled = request_slot.take();
+        drop(request_slot);
+        // complete() 只是原子发布，不唤醒 waitqueue，因此可在
+        // TASK_MANAGER 仍持有时通知请求方按 Blocking/Blocked 新状态重试。
+        if let Some(request) = canceled {
+            request.complete(RemoteAffinityState::Retry);
+        }
     }
     /// 从可中断队列中删除一个任务。
     pub fn remove_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
@@ -528,8 +539,33 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
     loop {
         match task.task_status() {
             TaskStatus::Running(owner) if owner == cpu => {
-                let target = task.take_migration_target().unwrap_or(cpu);
-                super::run_queue::requeue_after_switch(task, cpu, target);
+                // current 槽已在 idle 栈清空，但 Running(owner) 仍是唯一
+                // 权威状态。持请求槽锁直到新 runqueue owner 提交，防止
+                // 远程请求落在“检查旧 Running”与“提交 Queued”之间。
+                let mut request_slot = task.remote_affinity_request.lock();
+                let request = request_slot.take();
+                let target = if let Some(request) = request.as_ref() {
+                    assert!(
+                        !task.has_migration_target(),
+                        "remote affinity raced with local migration: tid={}",
+                        task.gettid()
+                    );
+                    task.store_cpus_allowed(
+                        request.mask(),
+                        TaskStatus::Running(cpu),
+                        "apply remote running affinity",
+                    );
+                    request.target_cpu()
+                } else {
+                    task.take_migration_target().unwrap_or(cpu)
+                };
+                super::run_queue::requeue_after_switch(task.clone(), cpu, target);
+                if let Some(request) = request {
+                    // 只有 Running -> Queued(target) 已成功后才返回 Applied；
+                    // 请求方因而不会在任务仍占有旧 CPU 时提前返回。
+                    request.complete(RemoteAffinityState::Applied);
+                }
+                drop(request_slot);
                 // requeue_after_switch 已释放目标队列锁；远程 doorbell 只能
                 // 在任务对目标 CPU 可见之后发送。
                 if target != cpu {
@@ -731,12 +767,22 @@ fn update_blocked_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> bool {
     true
 }
 
-/// 更新非 current 任务 affinity；当前支持稳定 Blocked 与 Queued。
+/// 更新非 current 任务 affinity，并等待非法 Running owner 真正交接。
 ///
-/// Blocked 由 `TASK_MANAGER` 与 wake 串行化；Queued 由 owner runqueue 与 fetch
-/// 串行化，必要时经过短暂 `Migrating` 搬队。两条路径都在锁释放后才发送
-/// RESCHEDULE。远程 Running/Blocking 仍由后续的 CPU 停止协议处理。
+/// Blocked 与 Queued 分别由现有 registry/runqueue 锁线性化。Running 任务
+/// 若仍允许 owner CPU，可在请求槽锁内直接更新；若已排除 owner，
+/// 则登记请求、发 RESCHEDULE，并协作式让出 CPU，直到源 idle 完成
+/// `Running(source) -> Queued(target)`。`Blocking` 只是短暂过渡态，等待其
+/// 回到 Running 或稳定进入 Blocked 后复用上述路径。
 pub(crate) fn set_remote_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> bool {
+    let caller = current_task().expect("remote affinity update requires a schedulable caller");
+    assert!(
+        !Arc::ptr_eq(&caller, task),
+        "current task must use set_current_affinity"
+    );
+    drop(caller);
+    let runnable = task.runnable_affinity(mask, "update remote affinity");
+
     loop {
         match task.task_status() {
             TaskStatus::Blocked => {
@@ -762,7 +808,85 @@ pub(crate) fn set_remote_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> 
                     Err(_) => return false,
                 }
             }
-            _ => return false,
+            TaskStatus::Blocking(_) => {
+                // begin_interruptible_sleep 会在 TASK_MANAGER 与请求槽锁下
+                // 决定旧请求重试；这里不猜测最终是 wake 还是 Blocked。
+                crate::task::suspend_current_and_run_next();
+            }
+            TaskStatus::Running(owner) => {
+                let target = (mask & (1usize << owner) == 0)
+                    .then(|| super::run_queue::select_runnable_cpu(runnable, None));
+                // 排除 owner 时才需要预先发布目标内核栈映射。不能持
+                // 请求槽锁等待 TLB ack；同步期间的状态变化由下方锁内复核处理。
+                if let Some(target) = target {
+                    crate::smp::synchronize_kernel_mapping(target).unwrap_or_else(|error| {
+                        panic!(
+                            "failed to synchronize remote task {} stack to CPU {}: {:?}",
+                            task.gettid(),
+                            target,
+                            error
+                        )
+                    });
+                }
+
+                let mut request_slot = task.remote_affinity_request.lock();
+                if let Some(request) = request_slot.as_ref().cloned() {
+                    drop(request_slot);
+                    while request.state() == RemoteAffinityState::Pending {
+                        crate::task::suspend_current_and_run_next();
+                    }
+                    continue;
+                }
+                if task.has_migration_target() {
+                    drop(request_slot);
+                    crate::smp::request_reschedule(owner).unwrap_or_else(|error| {
+                        panic!(
+                            "failed to finish task {} migration on CPU {}: {}",
+                            task.gettid(),
+                            owner,
+                            error
+                        )
+                    });
+                    crate::task::suspend_current_and_run_next();
+                    continue;
+                }
+                if task.task_status() != TaskStatus::Running(owner) {
+                    drop(request_slot);
+                    continue;
+                }
+
+                let Some(target) = target else {
+                    task.store_cpus_allowed(
+                        mask,
+                        TaskStatus::Running(owner),
+                        "update allowed remote running affinity",
+                    );
+                    return true;
+                };
+                let request = Arc::new(RemoteAffinityRequest::new(mask, target));
+                *request_slot = Some(request.clone());
+                drop(request_slot);
+                // mailbox 的 Release 发布先于 doorbell；owner 只在任务安全点
+                // 切回 idle，不在 IPI handler 里直接 context switch。
+                crate::smp::request_reschedule(owner).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to request task {} affinity handoff from CPU {}: {}",
+                        task.gettid(),
+                        owner,
+                        error
+                    )
+                });
+                loop {
+                    match request.state() {
+                        RemoteAffinityState::Pending => {
+                            crate::task::suspend_current_and_run_next();
+                        }
+                        RemoteAffinityState::Applied => return true,
+                        RemoteAffinityState::Retry => break,
+                    }
+                }
+            }
+            TaskStatus::New | TaskStatus::Zombie => return false,
         }
     }
 }

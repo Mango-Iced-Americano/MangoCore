@@ -115,6 +115,65 @@ use super::net_namespace::INIT_NET_NAMESPACE;
 /// 没有待处理的协作式迁移请求。
 const NO_MIGRATION_TARGET: usize = usize::MAX;
 
+#[repr(usize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// 远程 affinity 请求的完成状态。
+pub(crate) enum RemoteAffinityState {
+    Pending = 0,
+    Applied = 1,
+    Retry = 2,
+}
+
+/// 运行中任务由 owner CPU 在切栈后执行的 affinity 请求。
+///
+/// mask 和 target 在装入 TCB 请求槽前已完全构造；`state` 只用来让
+/// 请求方区分“owner 已交接”和“遇到状态竞争，应重试”。
+pub(crate) struct RemoteAffinityRequest {
+    mask: usize,
+    target_cpu: usize,
+    state: AtomicUsize,
+}
+
+impl RemoteAffinityRequest {
+    pub(crate) fn new(mask: usize, target_cpu: usize) -> Self {
+        Self {
+            mask,
+            target_cpu,
+            state: AtomicUsize::new(RemoteAffinityState::Pending as usize),
+        }
+    }
+
+    pub(crate) fn mask(&self) -> usize {
+        self.mask
+    }
+
+    pub(crate) fn target_cpu(&self) -> usize {
+        self.target_cpu
+    }
+
+    pub(crate) fn state(&self) -> RemoteAffinityState {
+        match self.state.load(Ordering::Acquire) {
+            value if value == RemoteAffinityState::Pending as usize => RemoteAffinityState::Pending,
+            value if value == RemoteAffinityState::Applied as usize => RemoteAffinityState::Applied,
+            value if value == RemoteAffinityState::Retry as usize => RemoteAffinityState::Retry,
+            value => panic!("invalid remote affinity state: {}", value),
+        }
+    }
+
+    /// 以 Release 发布 owner 交接结果；一个请求只能完成一次。
+    pub(crate) fn complete(&self, state: RemoteAffinityState) {
+        assert_ne!(state, RemoteAffinityState::Pending);
+        if let Err(previous) = self.state.compare_exchange(
+            RemoteAffinityState::Pending as usize,
+            state as usize,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            panic!("remote affinity request completed twice: {}", previous);
+        }
+    }
+}
+
 /// 任务控制块
 pub struct TaskControlBlock {
     // 不可变字段
@@ -173,6 +232,11 @@ pub struct TaskControlBlock {
     /// `sched_state` 决定。请求在源 CPU 的 idle 栈上被原子取走；仅登记请求
     /// 不改变 owner，任务必须随后真正进入调度切换。
     migration_target: AtomicUsize,
+    /// 串行化远程 Running affinity 请求与本地 block/exit/自迁移。
+    ///
+    /// 该锁只保护一个短小请求槽，禁止跨 IPI、TLB 同步、context
+    /// switch 或其它等待点持有。
+    pub(super) remote_affinity_request: Mutex<Option<Arc<RemoteAffinityRequest>>>,
     // 可共享&可变字段
     /// I/O 等待定时器是否已挂入 KERNEL_TIMER_QUEUE。
     /// 为 true 时，wait_io_core_with_queue 不再添加第二个定时器（Option B），
@@ -729,7 +793,7 @@ impl TaskControlBlock {
     }
 
     /// 校验运行期 affinity，并返回当前真正可调度的 CPU 子集。
-    fn runnable_affinity(&self, mask: usize, operation: &'static str) -> usize {
+    pub(crate) fn runnable_affinity(&self, mask: usize, operation: &'static str) -> usize {
         let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
         assert_ne!(mask, 0, "{} cannot publish an empty mask", operation);
         assert_eq!(
@@ -813,34 +877,46 @@ impl TaskControlBlock {
             core::ptr::eq(Arc::as_ptr(&current), self),
             "only the current task may update runtime affinity"
         );
+        let target_cpu = (mask & (1usize << source_cpu) == 0)
+            .then(|| super::run_queue::select_runnable_cpu(runnable, None));
+
+        // 目标栈映射必须先完成；在此之前既不发布新 mask，也不发布迁移目标，
+        // 远端 CPU 因而不可能提前取得该任务。
+        if let Some(target_cpu) = target_cpu {
+            crate::smp::synchronize_kernel_mapping(target_cpu).unwrap_or_else(|error| {
+                panic!(
+                    "failed to synchronize task {} kernel stack to CPU {}: {:?}",
+                    self.gettid(),
+                    target_cpu,
+                    error
+                )
+            });
+        }
+        // 远程写侧与 current 自写侧可以并发。后取得请求槽锁的本地
+        // syscall 线性化在后：它撤销旧远程请求，再发布自己的 mask/target。
+        let mut request_slot = self.remote_affinity_request.lock();
+        assert_eq!(
+            self.task_status(),
+            TaskStatus::Running(source_cpu),
+            "current affinity owner changed before publication"
+        );
         assert_eq!(
             self.migration_target.load(Ordering::Acquire),
             NO_MIGRATION_TARGET,
             "runtime affinity update raced with a pending migration"
         );
-
-        if mask & (1usize << source_cpu) != 0 {
-            self.cpus_allowed.store(mask, Ordering::Release);
-            return false;
-        }
-
-        let target_cpu = super::run_queue::select_runnable_cpu(runnable, None);
-
-        // 目标栈映射必须先完成；在此之前既不发布新 mask，也不发布迁移目标，
-        // 远端 CPU 因而不可能提前取得该任务。
-        crate::smp::synchronize_kernel_mapping(target_cpu).unwrap_or_else(|error| {
-            panic!(
-                "failed to synchronize task {} kernel stack to CPU {}: {:?}",
-                self.gettid(),
-                target_cpu,
-                error
-            )
-        });
+        let superseded = request_slot.take();
         // Release mask 在 Release target 之前；源 idle 以 Acquire 取走 target
         // 后，require_cpu_allowed() 必然能看到与该目标配套的新 mask。
         self.cpus_allowed.store(mask, Ordering::Release);
-        self.publish_migration_target(target_cpu);
-        true
+        if let Some(target_cpu) = target_cpu {
+            self.publish_migration_target(target_cpu);
+        }
+        drop(request_slot);
+        if let Some(request) = superseded {
+            request.complete(RemoteAffinityState::Retry);
+        }
+        target_cpu.is_some()
     }
 
     /// 在 interruptible registry 已经稳定拥有 Blocked 任务时更新其 affinity。
@@ -864,6 +940,10 @@ impl TaskControlBlock {
                 previous
             );
         }
+    }
+    /// 请求槽锁保护下检查是否已有本地协作式迁移。
+    pub(crate) fn has_migration_target(&self) -> bool {
+        self.migration_target.load(Ordering::Acquire) != NO_MIGRATION_TARGET
     }
     /// 在调度所有权改变前验证目标 CPU。
     pub(crate) fn require_cpu_allowed(&self, cpu: usize, operation: &'static str) {
@@ -926,7 +1006,24 @@ impl TaskControlBlock {
                 error
             )
         });
+        // 迁移目标与远程 affinity 请求共享同一个串行化域，不能让
+        // idle 收尾同时看到两个不同的目标。本地 current 写侧后获锁，因而可线性化在后。
+        let mut request_slot = self.remote_affinity_request.lock();
+        match self.task_status() {
+            TaskStatus::New => {}
+            TaskStatus::Running(source_cpu) if source_cpu == crate::smp::cpu_id() => {}
+            status => panic!(
+                "migration owner changed before publication: tid={}, status={:?}",
+                self.gettid(),
+                status
+            ),
+        }
+        let superseded = request_slot.take();
         self.publish_migration_target(target_cpu);
+        drop(request_slot);
+        if let Some(request) = superseded {
+            request.complete(RemoteAffinityState::Retry);
+        }
     }
     /// 取走一次性迁移请求；只能在任务已经切回源 CPU idle 栈后调用。
     pub(crate) fn take_migration_target(&self) -> Option<usize> {
@@ -998,8 +1095,11 @@ impl TaskControlBlock {
     /// `Queued` 必须先由运行队列移除并变成 `Blocked`；直接从 Queued 结束会让
     /// 队列中残留一个终态 TCB，因此这里将其视为所有权错误。
     pub(crate) fn mark_zombie(&self, operation: &'static str) -> bool {
+        // 终态与远程 Running affinity 必须在同一请求槽上串行化：
+        // 一旦 Zombie 先发布，远程写侧只能收到 Retry，不能再安装迁移请求。
+        let mut request_slot = self.remote_affinity_request.lock();
         let current = self.task_status();
-        match current {
+        let changed = match current {
             TaskStatus::New | TaskStatus::Blocked | TaskStatus::Running(_) => {
                 self.require_sched_transition(current, TaskStatus::Zombie, operation);
                 true
@@ -1007,7 +1107,13 @@ impl TaskControlBlock {
             TaskStatus::Zombie => false,
             TaskStatus::Queued(_) | TaskStatus::Migrating | TaskStatus::Blocking(_) => self
                 .fail_sched_invariant(operation, TaskStatus::Blocked, current, TaskStatus::Zombie),
+        };
+        let canceled = request_slot.take();
+        drop(request_slot);
+        if let Some(request) = canceled {
+            request.complete(RemoteAffinityState::Retry);
         }
+        changed
     }
     pub fn account_seccomp_enabled(&self) {
         if !self.seccomp_counted.swap(true, Ordering::Relaxed) {
@@ -1249,6 +1355,7 @@ impl TaskControlBlock {
             last_cpu: AtomicUsize::new(usize::MAX),
             cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
             migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
+            remote_affinity_request: Mutex::new(None),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1390,6 +1497,7 @@ impl TaskControlBlock {
             last_cpu: AtomicUsize::new(usize::MAX),
             cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
             migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
+            remote_affinity_request: Mutex::new(None),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1973,6 +2081,7 @@ impl TaskControlBlock {
             // exec 则复用同一 TCB，自然保留该值。
             cpus_allowed: AtomicUsize::new(self.cpus_allowed()),
             migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
+            remote_affinity_request: Mutex::new(None),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),

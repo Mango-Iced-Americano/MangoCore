@@ -295,6 +295,11 @@ static QUEUED_AFFINITY_HOLDER_RELEASE: AtomicUsize = AtomicUsize::new(0);
 static QUEUED_AFFINITY_RUNS: AtomicUsize = AtomicUsize::new(0);
 static QUEUED_AFFINITY_RUN_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static QUEUED_AFFINITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static RUNNING_AFFINITY_READY: AtomicUsize = AtomicUsize::new(0);
+static RUNNING_AFFINITY_STOP: AtomicUsize = AtomicUsize::new(0);
+static RUNNING_AFFINITY_RUNS: AtomicUsize = AtomicUsize::new(0);
+static RUNNING_AFFINITY_RUN_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static RUNNING_AFFINITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
@@ -379,6 +384,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::queued_affinity_moves_between_runqueues",
             queued_affinity_moves_between_runqueues,
+        ),
+        KernelTest::new(
+            "smp::running_affinity_waits_for_owner_handoff",
+            running_affinity_waits_for_owner_handoff,
         ),
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
@@ -1570,6 +1579,130 @@ fn queued_affinity_moves_between_runqueues() -> Result<(), &'static str> {
         || crate::task::run_queue_count(SOURCE_CPU) != source_before
     {
         return Err("queued-affinity task observed an invalid CPU/IRQ owner");
+    }
+    result
+}
+
+/// 在 CPU1 上持续运行，仅在生产安全点消费 RESCHEDULE。
+fn wait_for_running_affinity_handoff() {
+    let initially_enabled = crate::hal::local_irq_save();
+    if initially_enabled {
+        RUNNING_AFFINITY_ERRORS.fetch_or(1, Ordering::Release);
+    }
+    crate::hal::local_irq_restore(true);
+    RUNNING_AFFINITY_READY.store(1, Ordering::Release);
+
+    while crate::smp::cpu_id() == 1 && RUNNING_AFFINITY_STOP.load(Ordering::Acquire) == 0 {
+        // IPI handler 只发布 need-resched；任务必须在现场完整、
+        // 不持业务锁的这个安全点主动切回 idle。
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+
+    let cpu = crate::smp::cpu_id();
+    let owns_current = crate::task::current_task()
+        .map(|task| {
+            task.task_status() == crate::task::TaskStatus::Running(cpu)
+                && task.cpus_allowed() == 1usize << crate::smp::BOOT_CPU_ID
+        })
+        .unwrap_or(false);
+    if RUNNING_AFFINITY_STOP.load(Ordering::Acquire) == 0
+        && (cpu != crate::smp::BOOT_CPU_ID || !owns_current)
+    {
+        RUNNING_AFFINITY_ERRORS.fetch_or(2, Ordering::Release);
+    }
+    RUNNING_AFFINITY_RUN_CPU.store(cpu, Ordering::Release);
+    RUNNING_AFFINITY_RUNS.fetch_add(1, Ordering::Release);
+    if !crate::hal::local_irq_save() {
+        RUNNING_AFFINITY_ERRORS.fetch_or(4, Ordering::Release);
+    }
+}
+
+/// 远程 Running 任务的 mask 仍包含 owner 时只更新约束；排除 owner
+/// 时，调用方必须等到源 idle 完成唯一 owner 交接才能返回。
+fn running_affinity_waits_for_owner_handoff() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("running-affinity test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    RUNNING_AFFINITY_READY.store(0, Ordering::Release);
+    RUNNING_AFFINITY_STOP.store(0, Ordering::Release);
+    RUNNING_AFFINITY_RUNS.store(0, Ordering::Release);
+    RUNNING_AFFINITY_RUN_CPU.store(usize::MAX, Ordering::Release);
+    RUNNING_AFFINITY_ERRORS.store(0, Ordering::Release);
+    let task = crate::task::spawn_ktest_task_on(1, wait_for_running_affinity_handoff);
+    let result = (|| {
+        let ready_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while RUNNING_AFFINITY_READY.load(Ordering::Acquire) == 0
+            || task.task_status() != crate::task::TaskStatus::Running(1)
+        {
+            if crate::hal::get_time() >= ready_deadline {
+                return Err("CPU1 affinity subject did not become current");
+            }
+            core::hint::spin_loop();
+        }
+
+        let wide_mask = (1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1);
+        if !crate::task::set_remote_affinity(&task, wide_mask)
+            || task.task_status() != crate::task::TaskStatus::Running(1)
+            || task.cpus_allowed() != wide_mask
+        {
+            return Err("allowed Running affinity update changed the owner");
+        }
+
+        let cpu0_mask = 1usize << crate::smp::BOOT_CPU_ID;
+        if !crate::task::set_remote_affinity(&task, cpu0_mask) {
+            return Err("remote Running affinity request was rejected");
+        }
+        if task.task_status() == crate::task::TaskStatus::Running(1)
+            || task.cpus_allowed() != cpu0_mask
+            || crate::task::processor::cpu_has_current(1)
+            || crate::task::run_queue_count(1) != 0
+        {
+            return Err("remote affinity returned before the old owner handed off");
+        }
+
+        let exit_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while task.task_status() != crate::task::TaskStatus::Zombie {
+            if crate::hal::get_time() >= exit_deadline {
+                return Err("migrated Running task did not exit on CPU0");
+            }
+            crate::task::suspend_current_and_run_next();
+        }
+        if RUNNING_AFFINITY_RUNS.load(Ordering::Acquire) != 1
+            || RUNNING_AFFINITY_RUN_CPU.load(Ordering::Acquire) != crate::smp::BOOT_CPU_ID
+            || RUNNING_AFFINITY_ERRORS.load(Ordering::Acquire) != 0
+        {
+            return Err("remote Running task did not resume exactly once on CPU0");
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        // 失败也要收回 subject，否则一个仍在 CPU1 自旋或留在
+        // CPU0 runqueue 的 TCB 会污染后续 TLB/STOP 用例。
+        RUNNING_AFFINITY_STOP.store(1, Ordering::Release);
+        let _ = crate::smp::request_reschedule(1);
+        let cleanup_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while task.task_status() != crate::task::TaskStatus::Zombie {
+            if crate::hal::get_time() >= cleanup_deadline {
+                return Err("running-affinity subject cleanup timed out");
+            }
+            if matches!(
+                task.task_status(),
+                crate::task::TaskStatus::Queued(cpu) if cpu == crate::smp::BOOT_CPU_ID
+            ) {
+                crate::task::suspend_current_and_run_next();
+            } else {
+                core::hint::spin_loop();
+            }
+        }
     }
     result
 }

@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-30
+last_update: 2026-07-31
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -34,7 +34,9 @@ Running owner 迁到最低负载的合法 CPU。B35 继续闭合非 current 的�
 registry 锁内更新 mask，后续 wake 直接按新允许集发布，不需要迁移 owner。B36 又闭合稳定
 Queued 状态：owner 仍合法时只更新 mask，排除 owner 时经短暂 `Migrating` 搬到新的单一
 runqueue。B37 又让 clone/fork 继承的 mask 决定新任务的合法候选，并以调用 CPU 或
-`last_cpu` 作为 locality 提示；远程 Running/Blocking 仍未实现。
+`last_cpu` 作为 locality 提示。B38 不扩张状态机，用 per-task 请求槽让远程
+Running owner 在安全点真正交出 current；Blocking 则等待其稳定为 Running 或
+Blocked 后复用对应协议。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。B33 又让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
@@ -77,6 +79,10 @@ TCB 的 `migration_target` 也不是 owner。它只是一项一次性请求：�
 idle 栈后才被取走，并决定本次 `Running(source) -> Queued(target)` 的目标；仅登记请求
 不会修改 owner，调用者还必须进入真实的调度切换。
 
+TCB 的 `remote_affinity_request` 是另一个受锁的单槽，只串行化“远程排除
+Running owner”与本地 block/exit/自迁移。槽中 mask/target 是不变请求，
+`Pending/Applied/Retry` 是请求结果，不是 TaskStatus，也不表示新 owner。
+
 TCB 的 `cpus_allowed` 是逻辑 CPU 位图，表达任务可以取得哪些 CPU 的 owner。
 它与 `sched_state` 职责不同：前者是允许集合，后者仍是当前 owner 唯一真值。创建路径
 在 `New` 状态写入初值；B34 允许 current `Running(cpu)` 在 syscall 安全点更新。运行期
@@ -89,8 +95,9 @@ B35 对稳定 Blocked 使用另一条更短的协议：Blocked 没有 current/ru
 
 B36 对稳定 Queued 使用 owner runqueue 作为 placement 锁。只有新 mask 排除 owner 时才进入
 `Migrating`；该状态表示 TCB 已离开源队列、尚未进入目标队列，唯一 owner 是同步迁移调用方，
-不是某个 CPU。mask 在这段无容器窗口发布，再由目标 runqueue 接管。远程 Running/Blocking
-仍未实现，因为它们还需要让另一个 CPU 的 current 在安全点停止并确认。
+不是某个 CPU。mask 在这段无容器窗口发布，再由目标 runqueue 接管。
+B38 的 Running 路径不借用 `Migrating`：任务切回 idle 前仍是 `Running(source)`，
+切栈后直接由目标 runqueue 提交为 `Queued(target)`。
 
 ## 3. RunQueue 选择策略
 
@@ -115,8 +122,8 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
 稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；B37 已统一
-新任务与 wake 的 locality/负载选择，远程 Running/Blocking 强制迁移、默认全核 mask 和
-work stealing 仍未开放。
+新任务与 wake 的 locality/负载选择，B38 已让远程 Running/Blocking 走 owner
+安全点交接。默认全核 mask 和 work stealing 仍未开放。
 
 ### 3.1 首次发布与精确目标入口
 
@@ -135,9 +142,9 @@ CPU 合法且负载不超过最小值 `+1` 时保留 locality，否则选择
    `New -> Queued(cpu)` 并加入唯一目标队列；
 4. 该函数返回时 runqueue 锁已经释放，随后才发送 `RESCHEDULE` doorbell。
 
-这个接口只允许调用者明确指定目标，并未实现负载选择。普通 `publish_task()` 仍把
-新任务交给 CPU0；因此 B28 证明“指定 CPU 可以安全执行一个用户任务”，不证明默认
-用户任务已经多核化。
+`publish_task_on()` 本身仍是精确目标提交原语，不做负载选择；普通
+`publish_task()` 已在 B37 按 affinity/locality/近似负载选择目标，然后调用该原语。
+普通任务的默认 mask 仍是 bit0，因此“放置器已通用化”不等于“默认用户任务已全核化”。
 
 ### 3.2 显式 yield 后迁移
 
@@ -217,9 +224,29 @@ B36 在目标精确处于 `Queued(source)` 时执行：
 ack 并破坏锁依赖。`update_nice()` 若在 hint 写入后读到旧 owner，会先重算旧队列派生计数，再
 按最新状态追到新 owner，避免 `nonzero_nice_count` 漂移。
 
-远程 Running/Blocking 仍明确返回 `EOPNOTSUPP`。这些状态仍占有另一个 CPU 的 current，
-需要停止请求、安全点确认和完成通知，不能仅写原子 mask，也不能借用 Blocked 或 Migrating
-伪装 current 已经切离。
+#### 远程 Running/Blocking owner 交接
+
+B38 对远程 Running 任务分两种情况：
+
+1. 新 mask 仍包含 owner：在 `remote_affinity_request` 锁内复核精确
+   `Running(owner)`、无旧请求且无 `migration_target`，然后 Release 发布 mask；
+   任务可继续执行，不制造无意义切换。
+2. 新 mask 排除 owner：锁外选择合法 target 并完成 kernel-stack TLB 同步；
+   锁内再次复核 owner，安装不变的 mask/target 请求；解锁后发
+   RESCHEDULE，请求方协作式 yield。源 CPU 切回 idle 后持请求槽锁，发布新
+   mask，只锁一个 target runqueue 提交 `Running(source) -> Queued(target)`，
+   然后才将请求标记为 Applied。
+
+`Blocking(owner)` 是登记阻塞到真正切栈之间的短窗口，远程写侧不为它
+新建状态，而是让出 CPU 并等待其回到 Running 或稳定进入 Blocked。
+`begin_interruptible_sleep()` 按 `TASK_MANAGER -> remote_affinity_request` 锁序撤销
+旧请求并发布 Retry；current 自写侧和 Zombie 转换也取得同一请求槽，
+避免遗留永远 Pending 的请求。
+
+请求槽锁与 target runqueue 在 idle 收尾中会以
+`remote_affinity_request -> 单个 RunQueue` 嵌套，以关闭“请求槽复核”与“owner 提交”
+之间的窗口。不存在 RunQueue 反向取请求槽的路径；该锁也不跨 IPI、
+TLB ack、context switch 或请求方等待点。
 
 ## 4. Processor
 

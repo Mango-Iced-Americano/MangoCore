@@ -156,7 +156,7 @@ B35 复用同一 `TASK_MANAGER` 锁串行化稳定 Blocked 线程的 affinity �
 同时确认精确 `Blocked` 状态和同一 TCB 指针仍在 registry，随后 Release 发布 mask；wake 取得
 同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为 exit/exec 摘除 registry 后、标记
 Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
-Running/Blocking 修改仍未实现。
+Running/Blocking 修改在 B35 当时尚未实现，后续由 B38 的请求槽协议闭合。
 
 ### 3.6 B36 稳定 Queued affinity 搬队约束
 
@@ -189,6 +189,39 @@ B37 把新任务发布、Blocked wake 和 current 自迁移的目标选择收敛
   因此可在既有 `TASK_MANAGER -> 单个 RunQueue` 顺序中使用；
 - BSP 在 scheduler-ready mask 发布前创建 init/ktest runner 时显式放到 CPU0，
   这是启动时序例外，不是普通任务的隐式回退。
+
+### 3.6.2 B38 远程 Running/Blocking affinity 锁序
+
+B38 不增加调度状态，而是在 TCB 中增加受锁的单个
+`remote_affinity_request` 槽。该槽不是 owner 容器；任务切回 idle 前仍保持
+`Running(source)`，切栈后才直接交给 `Queued(target)`。固定锁序为：
+
+```text
+task.inner -> remote_affinity_request -> 单个 RunQueue
+TASK_MANAGER -> remote_affinity_request -> 单个 RunQueue
+```
+
+具体约束：
+
+- `exit_thread_resources()` 可在持有 `task.inner` 时调用 `mark_zombie()`，因此
+  `task.inner -> remote_affinity_request` 是显式锁序；不存在请求槽反向获取
+  `task.inner` 的路径；
+- `begin_interruptible_sleep()` 由外层持有 `TASK_MANAGER`，再获取请求槽，
+  在同一临界区完成 `Running -> Blocking` 和旧请求 Retry；
+- 源 idle 的 `finish_switch_out()` 持有请求槽，再由
+  `requeue_after_switch()` 短暂取得一个 target runqueue；直到
+  `Running(source) -> Queued(target)` 完成后才发布 Applied；
+- runqueue 入口不获取请求槽，因此没有 `RunQueue -> remote_affinity_request`
+  的反向路径；
+- target kernel-stack TLB 同步必须在获取请求槽前完成；IPI 发送、
+  请求方协作式 yield 和 context switch 也都发生在解锁后；
+- `RemoteAffinityRequest::complete()` 只做单次 CAS 和 Release 发布，不获取
+  WaitQueue/`TASK_MANAGER`，所以可在上述短临界区中调用；请求方用 Acquire
+  读取 Applied/Retry。
+
+远程写侧看到 `Blocking` 时不取上述任何锁，而是协作式让出 CPU，
+等待状态稳定为 Running、Blocked 或 Zombie 后重试。两个并发写侧会通过
+单槽串行化，但 B38 focused 只动态验证单请求方；多写侧压力仍是后续门禁。
 
 ### 3.7 B21 内核栈退休与 shootdown 锁序
 

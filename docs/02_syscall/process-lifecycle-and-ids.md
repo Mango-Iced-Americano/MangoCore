@@ -3,7 +3,7 @@ title: "进程生命周期与身份 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-31
 tags: [syscall, process, clone, exec, ids]
 ---
 
@@ -459,8 +459,11 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 `sched_getaffinity()` 已按 TID 返回 TCB 的真实 `cpus_allowed`，成功值为复制字节数。B34 的
 `sched_setaffinity()` 已支持 current 线程改 mask 与必要自迁移；B35 又支持非 current 的稳定
 Blocked 线程在 registry 锁内改 mask，并由后续 wake 按新 mask 选点；B36 再支持稳定
-Queued 线程在 owner runqueue 内更新 mask，必要时经短暂 `Migrating` 搬到合法 CPU。远程
-Running/Blocking 仍返回 `EOPNOTSUPP`，因此这还不是完整 Linux affinity 语义。
+Queued 线程在 owner runqueue 内更新 mask，必要时经短暂 `Migrating` 搬到合法 CPU。B37
+让新任务与 wake 按 affinity、在线状态、局部性和近似负载选择 owner；B38 再让远程
+Running 线程通过请求—安全点—完成协议真正交接 owner，Blocking 短窗口则等待稳定后重试。
+普通任务默认 mask 仍是 bit0，已离开可管理容器的任务仍可能返回 `EOPNOTSUPP`，因此这还不是
+完整 Linux affinity 语义。
 
 ## 9. 错误码边界
 

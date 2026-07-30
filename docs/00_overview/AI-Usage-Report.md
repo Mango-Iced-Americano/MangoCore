@@ -68,6 +68,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 远程 Blocked 线程 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Blocked/registry 双重所有权审计、wake 线性化、冻结只读复核与双架构回归 | 稳定 Blocked 线程可在 wake 前改 mask 并重定向到新 CPU；Running/Blocking/Queued 仍未支持；双架构 focused 22/22、初赛基线不退化 |
 | SMP 远程 Queued 线程 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS queued-migrating 对照、单 rq owner 交接、三轮冻结审查与双架构回归 | 稳定 Queued 线程可在不持双 rq 锁时迁移；Running/Blocking 仍未支持；双架构 focused 23/23、初赛基线不退化 |
 | SMP affinity-aware 新任务放置 | 2026-07-31 | GPT/Codex, DeepSeek | 继承 mask 与首次发布冲突审计、无锁 per-CPU 负载提示、双架构 8 核冻结验证 | 新建和唤醒任务统一按 affinity/在线状态/局部性/负载选择 CPU；双架构 focused 23/23，初赛 RV64 312/314、LA64 308/314 |
+| SMP 远程 Running/Blocking affinity | 2026-07-31 | GPT/Codex, DeepSeek | owner 安全点请求/完成协议、锁序反例审查、双架构 8 核冻结验证 | 远程写侧等待运行 owner 完成交接；不新增调度状态；双架构 focused 24/24，初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -779,6 +780,33 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   8 核 focused SMP 23/23；`smp-b37-preliminary-validation` 通过双架构初赛回归，
   RV64 312/314、LA64 308/314，失败仅为既有 busybox kill10 和 LA64 test_brk。
 
+### Case 34: SMP 远程 Running/Blocking affinity
+
+- Evidence: `docs/Work_Log/2026-07-31.md`、
+  `docs/Work_Log/evidence/2026-07-31/smp-b38-running-affinity-summary.md`；DeepSeek prompt、child
+  manifest 与 Docker/QEMU 原始日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责状态机边界、请求生命周期、锁序、实现、测试设计和最终事实裁决；
+  DeepSeek 负责冻结 diff 只读复核、Docker 串行构建/测试及日志初步归纳，不修改源码、不提交、
+  不 push。
+- Problem: 远程写侧若直接把 Running task 的 mask 改成排除 owner，会立即破坏
+  `Running(cpu) => mask contains cpu`；若仅发 IPI 就返回，又无法保证 syscall 返回时迁移已经
+  生效。`Blocking(cpu)` 还是 owner 正从 current 切出的短暂窗口，不能被当作稳定 Blocked。
+- Human action: 保留原调度状态机，为每个 TCB 增加至多一个远程 affinity 请求。请求者在锁内
+  复核 owner 并安装 mask/target，锁外发 RESCHEDULE 后协作式等待；owner 在既有
+  `finish_switch_out()` 安全点持请求槽、只锁目标 runqueue，提交 owner 交接后用原子 CAS 完成。
+  阻塞或退出路径把尚未消费的请求标为 Retry，调用方再按稳定状态选择 Running、Queued 或
+  Blocked 协议。真实嵌套关系是 `task.inner/TASK_MANAGER -> request slot -> 单个 RunQueue`，
+  不存在反向 runqueue→request 路径。
+- AI adjudication: 首轮验证发现 `manager.rs` 经模块重导出引用私有类型导致双架构编译失败；
+  GPT/Codex 改为 sibling module 直接导入，避免扩大公开 API。最终报告又错误声称 owner 在取得
+  runqueue 前释放请求锁，并低报 TAP 数；人工以源码与原始日志纠正，不采纳该描述。一次误用
+  `cargo fmt -- <files>` 触发全 crate 格式化后已完整撤回，最终 diff 不含无关机械改写。
+- Verification: 冻结源码 diff SHA-256 为
+  `4875482b6e06f089eb1c3060a6c20259c902a66a6e44c19ca746c6b42c44b465`。RV64/LA64
+  kernel build 均 exit 0；双架构 `CORE_NUM=8 KTEST=smp` 均为 24/24，新第 15 项和终态 STOP
+  均通过。初赛为 RV64 312/314、LA64 308/314，精确失败集合未扩大。动态证据覆盖单请求者
+  Running owner；并发多写者及确定性的 Blocking 交界仍标为未动态运行。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -854,6 +882,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b35-blocked-affinity-summary.md` | SMP 远程 Blocked 线程 affinity | 记录状态/registry 双重确认、与 wake 共锁线性化、DeepSeek 冻结审查裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b36-queued-affinity-summary.md` | SMP 远程 Queued 线程 affinity | 记录 `Migrating` 唯一 owner、单 rq 搬队、nice/exit 竞态裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b37-affinity-placement-summary.md` | SMP affinity-aware 新任务放置 | 记录继承 mask 与固定 CPU0 发布冲突、无锁负载提示边界、DeepSeek 冻结审查裁决及双架构 8 核门禁 |
+| `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b38-running-affinity-summary.md` | SMP 远程 Running/Blocking affinity | 记录单槽请求、owner 安全点完成、真实锁序、DeepSeek 结论纠错及双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 
