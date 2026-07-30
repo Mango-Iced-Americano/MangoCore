@@ -54,6 +54,9 @@ CPU0 独占。B29 将同一探针改为先在 CPU0 起跑，再在 syscall 内�
 恢复；这动态覆盖了跨 CPU 恢复 `schedule()`、trap current owner 和 MM 激活。B30 在这条
 既有闭环上让 getcpu 返回连续逻辑 CPU：探针在 yield 前后分别验证 0 和 1，但没有改变普通
 任务固定 CPU0 的发布策略。
+B31/B32 又为该受控迁移建立 per-thread `cpus_allowed` 并返回真实 affinity；B33 不再依赖
+显式 yield，而是让 CPU1 的生产 `RESCHEDULE` IPI 在 CPU0 用户 trap-return 安全点触发
+同一 owner 交接。普通任务默认 affinity 和运行期 mask 仍未开放。
 
 ## 启动栈与 BSS 边界
 
@@ -265,8 +268,9 @@ console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 T
 interrupt 继续关闭。B28 用户探针只在 syscall 受控窗口暂时打开全局中断，因而
 可以响应已经启用的 IPI line，但不会接收 timer/设备中断。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
-`RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle
-安全点。AP 执行 B19 短 kernel-only 函数时仍保持全局 IRQ 关闭，因此 STOP 最长
+`RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle，或
+运行中用户任务的 trap-return 安全点。AP 执行 B19 短 kernel-only 函数时仍保持全局 IRQ
+关闭，因此 STOP/RESCHEDULE 最长
 延迟到函数返回或主动 yield；通用内核线程必须等可抢占安全点完成后才能开放。
 
 ## Syscall 受控中断窗口
@@ -318,16 +322,16 @@ poll 或 schedule；性能统计也只做原子计数，原有周期性快照打
 deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 timer 和
 调度 tick 都使用绝对 deadline，而不是按中断次数推进。
 
-`trap_return()` 在信号投递前消费 pending，使 timer callback 新产生的信号
-可以在同一轮返回中处理；`run_tasks()` 则在取得 Processor/ready queue 锁前
-消费 pending。安全点以 Acquire 取走 pending，在关中断状态下完成旧 timer
-工作并按完整队列重新编程 one-shot；只有全部工作结束后才决定是否在这个
-显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback；B29 用户探针的
-跨核 yield 是显式安全点，不依赖 AP timer 抢占。
+`trap_return()` 在信号投递前进入统一的 `run_task_safe_point()`；`run_tasks()` 则在取得
+Processor/runqueue 锁前消费 timer pending。统一安全点保持 IRQ-off，先以 Acquire 取走
+timer pending 并完成 callback/one-shot 重编程，再取走本 CPU 的 `need_resched`，最后对
+两类请求最多调度一次。B33 因而能在完整用户 trap frame 上响应远端 RESCHEDULE，同时
+保持 hard IRQ 不直接切换。AP 仍为 IPI-only，不运行普通 timer callback；B29 的显式
+yield 是历史迁移门禁，B33 用户探针的实际迁移不再依赖 yield 或 AP timer。
 
 该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。普通长 syscall
-现在可在任务 yield/block 之前、之后响应 timer/IPI；后续 TLB shootdown
-还需在这个窗口上增加具体 reason/ack 协议，不需再为“长 syscall 能否被
+现在可在任务 yield/block 之前、之后响应 timer/IPI；B23—B27 的 TLB shootdown
+reason/ack 已复用这个窗口，B33 又接入 RESCHEDULE，不需要为“长 syscall 能否被
 打断”另建一套 trap 路径。
 
 ## 构建与验证
@@ -368,3 +372,7 @@ TCB 强引用都已收口；
 B30 沿用同一测试名，但用户探针必须自行验证 getcpu 在迁移前返回逻辑 CPU0、迁移后返回
 逻辑 CPU1，并把任一失败编码为非零 exit status。这里的逻辑编号来自 PerCpu/scheduler 映射，
 不能用可能非零的 RISC-V 启动 hart ID 替代。
+B33 将当前测试名更新为 `smp::user_task_reschedules_from_ipi`：CPU1 helper 必须在首次
+CPU0 getcpu 后发送真实 RESCHEDULE，CPU0 的安全点消费计数必须增长，probe 不执行显式
+yield 且最终仍在 CPU1 观察 getcpu=1、affinity=`0b11`、exit(0)。只看到迁移或计数之一
+都不足以证明 IPI 返回安全点闭环。

@@ -251,9 +251,9 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
-    // trap frame 已完整、当前任务锁均已释放；这是 timer callback 和安全抢占
-    // 可以运行的第一个统一边界。新产生的信号随后由 do_signal() 同轮处理。
-    crate::task::run_deferred_timer_at_task_safe_point();
+    // trap frame 已完整、当前任务锁均已释放；timer callback 与 RESCHEDULE
+    // 只能在这个统一边界让出 CPU，不能从 hard IRQ 直接切换任务。
+    crate::task::run_task_safe_point();
     let task = do_signal();
     set_user_trap_entry();
     // Refresh after signal/exec context changes and on every future migration:

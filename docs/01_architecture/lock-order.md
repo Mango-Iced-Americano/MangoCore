@@ -118,7 +118,8 @@ B19 只为 focused ktest 的 kernel-only 任务开放显式目标 CPU，不改�
 1. CPU0 在 `KERNEL_SPACE` 锁内建立动态 kernel stack 映射并释放锁；
 2. 不持有 MM/PTE/runqueue 锁发送 `KERNEL_TLB_SYNC`，等待目标本地 flush ack；
 3. ack 完成后只锁目标的一个 runqueue，提交 `New -> Queued(cpu)` 并释放锁；
-4. 最后发送 `RESCHEDULE` doorbell，IPI handler 只置位，AP idle 安全点 fetch。
+4. 最后发送 `RESCHEDULE` doorbell，IPI handler 只置位；AP idle 或运行中用户任务的
+   trap-return 安全点随后消费，不在 hard IRQ 内 fetch。
 
 AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 scheduler-ready
 屏障等待且不持锁。AP dispatch 前只锁自己的 runqueue；`dispatch_task()` 先后取得
@@ -140,7 +141,8 @@ B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU
    `last_cpu`，无效时选交集的最低编号 CPU；
 3. 在 `TASK_MANAGER -> 一个目标 RunQueue` 锁序下提交 `Blocked -> Queued(target)`；
 4. 释放目标 RunQueue，再释放 `TASK_MANAGER`；批量路径只保留目标 CPU bitmask；
-5. 外层排除本 CPU后发送 `RESCHEDULE`，IPI handler 只置 per-CPU 原子提示。
+5. 外层排除本 CPU 后发送 `RESCHEDULE`，IPI handler 只置 per-CPU 原子提示；目标在 AP
+   idle 或用户 trap-return 安全点消费。
 
 `Blocking(cpu)` 的提前 wake 仍只恢复 `Running(cpu)`，不入 runqueue、不发 IPI；idle
 侧随后把它重新排入本地队列。批量 wake 每次调用 `enqueue_woken()` 都在函数返回前

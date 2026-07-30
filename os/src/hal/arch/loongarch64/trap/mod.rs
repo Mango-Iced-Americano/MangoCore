@@ -473,9 +473,9 @@ pub fn trap_return() -> ! {
     if trace_first_return {
         println!("[bringup][user:01] first task reached trap_return");
     }
-    // 当前任务的 trap frame 已完整且业务锁已经释放；timer callback 和安全
-    // 抢占只允许在这里运行，不能发生在任意内核 timer IRQ 位置。
-    crate::task::run_deferred_timer_at_task_safe_point();
+    // 当前任务的 trap frame 已完整且业务锁已经释放；timer callback 与
+    // RESCHEDULE 只允许在这里让出 CPU，不能从任意 hard IRQ 位置切换。
+    crate::task::run_task_safe_point();
     let task = do_signal();
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {

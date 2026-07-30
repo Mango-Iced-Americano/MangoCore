@@ -152,15 +152,17 @@ wait/reap。B29 进一步让同一个探针先在 CPU0 运行，并在真实 `sc
 `cpus_allowed`：普通任务为 bit0，定向 kernel-only ktest 任务仅含目标 CPU 位，迁移探针为
 CPU0/CPU1。Publish、yield requeue 和 blocked wake 都必须先验证目标在 mask 内。B32 已让
 raw `sched_getaffinity()` 按 TID 返回这份 per-thread mask；成功值是复制的 8 字节，不是 libc
-包装后的 0。该例外不改变默认策略：普通新任务和用户任务仍固定 CPU0，运行期
-`sched_setaffinity()` 仍未开放。动态 kernel-global
+包装后的 0。B33 已把 timer 与 `RESCHEDULE` 合并到唯一 `run_task_safe_point()`：hard IPI
+仍只置位，运行中用户任务在双架构 trap-return 的 IRQ-off 边界最多切换一次；focused probe
+不再用显式 yield，而由 CPU1 IPI 驱动 CPU0→CPU1 owner 交接。该例外不改变默认策略：普通
+新任务和用户任务仍固定 CPU0，运行期 `sched_setaffinity()` 仍未开放。动态 kernel-global
 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29/B30/B31/B32 的一次受控迁移、真实 CPU/affinity 查询和初始 mask 约束外推为通用用户迁移、
-运行期 affinity、连续 range 或安全
+B29/B30/B31/B32/B33 的受控迁移、真实 CPU/affinity 查询、初始 mask 约束和用户返回
+RESCHEDULE 外推为通用用户迁移、运行期 affinity、任意内核点抢占、连续 range 或安全
 CPU detach 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）

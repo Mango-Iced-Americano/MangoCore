@@ -1,6 +1,10 @@
 //! SMP 启动阶段的 focused ktest。
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -12,7 +16,6 @@ use crate::kernel_tests::runner::KernelTest;
 const USER_PROBE_GETCPU: usize = 168;
 const USER_PROBE_GETPID: usize = 172;
 const USER_PROBE_GETAFFINITY: usize = 123;
-const USER_PROBE_YIELD: usize = 124;
 const USER_PROBE_EXIT: usize = 93;
 
 #[cfg(target_arch = "riscv64")]
@@ -47,15 +50,27 @@ __smp_user_probe_start:
     addi a2, zero, 0
     addi a7, zero, {getcpu}
     ecall
+    .global __smp_user_probe_resched_ready
+__smp_user_probe_resched_ready:
     bnez a0, .Lsmp_probe_fail
     lw t0, 8(sp)
     bnez t0, .Lsmp_probe_fail
 
-    addi a7, zero, {yield_syscall}
+    # AP 只会在上面的 CPU0 getcpu 已完成后发送 RESCHEDULE。若返回安全点
+    # 没有消费请求，本循环会一直停在 CPU0，最终由内核测试超时报错。
+.Lsmp_probe_wait_cpu1:
+    addi a0, sp, 8
+    addi a1, zero, 0
+    addi a2, zero, 0
+    addi a7, zero, {getcpu}
     ecall
     bnez a0, .Lsmp_probe_fail
+    lw t0, 8(sp)
+    beqz t0, .Lsmp_probe_wait_cpu1
+    addi t1, zero, 1
+    bne t0, t1, .Lsmp_probe_fail
 
-    # 迁移后 pid=0 仍须返回同一线程的 0b11，并报告逻辑 CPU 1。
+    # IPI 驱动迁移后，pid=0 仍须返回同一线程的 0b11。
     sd zero, 0(sp)
     addi a0, zero, 0
     addi a1, zero, 8
@@ -66,16 +81,6 @@ __smp_user_probe_start:
     bne a0, t1, .Lsmp_probe_fail
     ld t0, 0(sp)
     addi t1, zero, 3
-    bne t0, t1, .Lsmp_probe_fail
-
-    addi a0, sp, 8
-    addi a1, zero, 0
-    addi a2, zero, 0
-    addi a7, zero, {getcpu}
-    ecall
-    bnez a0, .Lsmp_probe_fail
-    lw t0, 8(sp)
-    addi t1, zero, 1
     bne t0, t1, .Lsmp_probe_fail
 
     addi a0, s0, 0
@@ -93,7 +98,6 @@ __smp_user_probe_end:
     getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
     getaffinity = const USER_PROBE_GETAFFINITY,
-    yield_syscall = const USER_PROBE_YIELD,
     exit_syscall = const USER_PROBE_EXIT,
 );
 
@@ -132,6 +136,8 @@ __smp_user_probe_start:
     move $a2, $zero
     addi.d $a7, $zero, {getcpu}
     syscall 0
+    .global __smp_user_probe_resched_ready
+__smp_user_probe_resched_ready:
     beqz $a0, 3f
     b .Lsmp_probe_fail
 3:
@@ -139,13 +145,24 @@ __smp_user_probe_start:
     beqz $t0, 4f
     b .Lsmp_probe_fail
 4:
-    addi.d $a7, $zero, {yield_syscall}
+    # AP 只会在上面的 CPU0 getcpu 已完成后发送 RESCHEDULE。若返回安全点
+    # 没有消费请求，本循环会一直停在 CPU0，最终由内核测试超时报错。
+.Lsmp_probe_wait_cpu1:
+    addi.d $a0, $sp, 8
+    move $a1, $zero
+    move $a2, $zero
+    addi.d $a7, $zero, {getcpu}
     syscall 0
-    beqz $a0, .Lsmp_probe_after_yield
+    beqz $a0, 5f
     b .Lsmp_probe_fail
-
-    # 迁移后 pid=0 仍须返回同一线程的 0b11，并报告逻辑 CPU 1。
-.Lsmp_probe_after_yield:
+5:
+    ld.w $t0, $sp, 8
+    beqz $t0, .Lsmp_probe_wait_cpu1
+    addi.d $t1, $zero, 1
+    beq $t0, $t1, 6f
+    b .Lsmp_probe_fail
+6:
+    # IPI 驱动迁移后，pid=0 仍须返回同一线程的 0b11。
     st.d $zero, $sp, 0
     move $a0, $zero
     addi.d $a1, $zero, 8
@@ -153,24 +170,11 @@ __smp_user_probe_start:
     addi.d $a7, $zero, {getaffinity}
     syscall 0
     addi.d $t1, $zero, 8
-    beq $a0, $t1, 5f
-    b .Lsmp_probe_fail
-5:
-    ld.d $t0, $sp, 0
-    addi.d $t1, $zero, 3
-    beq $t0, $t1, 6f
-    b .Lsmp_probe_fail
-6:
-    addi.d $a0, $sp, 8
-    move $a1, $zero
-    move $a2, $zero
-    addi.d $a7, $zero, {getcpu}
-    syscall 0
-    beqz $a0, 7f
+    beq $a0, $t1, 7f
     b .Lsmp_probe_fail
 7:
-    ld.w $t0, $sp, 8
-    addi.d $t1, $zero, 1
+    ld.d $t0, $sp, 0
+    addi.d $t1, $zero, 3
     beq $t0, $t1, 8f
     b .Lsmp_probe_fail
 8:
@@ -189,13 +193,13 @@ __smp_user_probe_end:
     getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
     getaffinity = const USER_PROBE_GETAFFINITY,
-    yield_syscall = const USER_PROBE_YIELD,
     exit_syscall = const USER_PROBE_EXIT,
 );
 
 extern "C" {
     static __smp_user_probe_start: u8;
     static __smp_user_probe_end: u8;
+    static __smp_user_probe_resched_ready: u8;
 }
 
 const IRQ_PROBE_NOT_RUN: usize = 0;
@@ -220,6 +224,12 @@ static PAGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
 static PAGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
 static PAGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
 static PAGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
+const USER_RESCHED_WAITING: usize = 0;
+const USER_RESCHED_SENT: usize = 1;
+const USER_RESCHED_TARGET_LOST: usize = 2;
+const USER_RESCHED_TIMEOUT: usize = 3;
+const USER_RESCHED_SEND_FAILED: usize = 4;
+static USER_RESCHED_RESULT: AtomicUsize = AtomicUsize::new(USER_RESCHED_WAITING);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -229,6 +239,9 @@ lazy_static! {
     static ref USER_TLB_RETIRE_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
     static ref SHARED_TLB_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
+        Mutex::new(None);
+    /// CPU1 helper 只在测试期间持有 Weak，不延长用户 TCB 生命周期。
+    static ref USER_RESCHED_TARGET: Mutex<Option<(Weak<crate::task::TaskControlBlock>, usize)>> =
         Mutex::new(None);
 }
 
@@ -303,8 +316,8 @@ pub fn tests() -> Vec<KernelTest> {
             kernel_stack_reclaim_waits_for_shootdown,
         ),
         KernelTest::new(
-            "smp::user_task_migrates_on_yield",
-            user_task_migrates_on_yield,
+            "smp::user_task_reschedules_from_ipi",
+            user_task_reschedules_from_ipi,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -324,11 +337,23 @@ fn user_probe_program() -> &'static [u8] {
     }
 }
 
+/// 返回“CPU0 首次完成 getcpu”标签在 probe 内的偏移。
+fn user_probe_resched_offset() -> usize {
+    let start = core::ptr::addr_of!(__smp_user_probe_start) as usize;
+    let end = core::ptr::addr_of!(__smp_user_probe_end) as usize;
+    let ready = core::ptr::addr_of!(__smp_user_probe_resched_ready) as usize;
+    assert!(
+        (start..end).contains(&ready),
+        "user reschedule label is outside the probe section"
+    );
+    ready - start
+}
+
 /// 构造完整用户 TCB，再把极小 probe 放入新的匿名映射。
 ///
 /// `/init` 只在 CPU0 上作为现有用户 ABI/stack/trap-context 脚手架被解析；
 /// 它的入口不会执行，fd 也会在任务对 AP 可见前关闭。
-fn build_user_probe_task() -> Result<Arc<crate::task::TaskControlBlock>, &'static str> {
+fn build_user_probe_task() -> Result<(Arc<crate::task::TaskControlBlock>, usize), &'static str> {
     let inode = crate::fs::vfs_lookup_absolute("/init")
         .or_else(|_| crate::fs::vfs_lookup_absolute("/initproc"))
         .map_err(|_| "ktest initramfs has no user ELF scaffold")?;
@@ -381,11 +406,46 @@ fn build_user_probe_task() -> Result<Arc<crate::task::TaskControlBlock>, &'stati
         Ok(entry)
     })?;
     task.acquire_inner_lock().get_trap_cx().gp.pc = entry;
-    Ok(task)
+    Ok((task, entry + user_probe_resched_offset()))
 }
 
-/// 用户任务先在 CPU0 运行，再于显式 yield 安全点迁移到 CPU1。
-fn user_task_migrates_on_yield() -> Result<(), &'static str> {
+/// CPU1 等到用户任务确实完成 CPU0 getcpu 后，才发送生产 RESCHEDULE IPI。
+fn request_user_reschedule_from_ap() {
+    let Some((weak_task, ready_pc)) = USER_RESCHED_TARGET.lock().take() else {
+        USER_RESCHED_RESULT.store(USER_RESCHED_TARGET_LOST, Ordering::Release);
+        return;
+    };
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    loop {
+        let Some(task) = weak_task.upgrade() else {
+            USER_RESCHED_RESULT.store(USER_RESCHED_TARGET_LOST, Ordering::Release);
+            return;
+        };
+        if task.task_status() == crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
+            // inner 锁只保护一次 PC 快照，不跨 IPI 发送或等待点。
+            let pc = task.acquire_inner_lock().get_trap_cx().gp.pc;
+            if pc >= ready_pc {
+                drop(task);
+                let result = if crate::smp::request_reschedule(crate::smp::BOOT_CPU_ID).is_ok() {
+                    USER_RESCHED_SENT
+                } else {
+                    USER_RESCHED_SEND_FAILED
+                };
+                USER_RESCHED_RESULT.store(result, Ordering::Release);
+                return;
+            }
+        }
+        if crate::hal::get_time() >= deadline {
+            USER_RESCHED_RESULT.store(USER_RESCHED_TIMEOUT, Ordering::Release);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// 用户任务先在 CPU0 运行，再由远端 RESCHEDULE 在返回安全点迁移到 CPU1。
+fn user_task_reschedules_from_ipi() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
         return Err("AP user probe setup did not run on CPU0");
     }
@@ -403,7 +463,7 @@ fn user_task_migrates_on_yield() -> Result<(), &'static str> {
     let parent_task = crate::task::current_task().ok_or("ktest runner has no current task")?;
     let parent = parent_task.process.clone();
     drop(parent_task);
-    let task = build_user_probe_task()?;
+    let (task, ready_pc) = build_user_probe_task()?;
     let process = task.process.clone();
     let pid = task.pid();
     parent
@@ -416,13 +476,26 @@ fn user_task_migrates_on_yield() -> Result<(), &'static str> {
         return Err("ordinary user task did not start with CPU0-only affinity");
     }
     // New 状态由测试独占；显式放行 CPU0/CPU1 后才能登记一次性目标。
-    // 任务仍先进入 CPU0，只有它执行 yield、切回 CPU0 idle 栈后请求才会
-    // 被消费。若 publish/migration 任一路径绕过 mask，runqueue 会直接报错。
+    // migration_target 本身不触发切换；只有 CPU0 返回安全点消费 AP 发来的
+    // RESCHEDULE，任务切回 idle 后才会把唯一 owner 交给 CPU1。
     task.set_initial_cpus_allowed((1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1));
     task.request_migration(1);
+    // 先消费前序用例可能留下的合并提示，再采样本轮基线。此时 helper 尚未
+    // 创建、用户任务也未发布，因此后续 CPU0 计数增量只能来自本轮远端 IPI。
+    crate::task::run_task_safe_point();
+    let reschedule_before = crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID);
+    USER_RESCHED_RESULT.store(USER_RESCHED_WAITING, Ordering::Relaxed);
+    let previous = USER_RESCHED_TARGET
+        .lock()
+        .replace((Arc::downgrade(&task), ready_pc));
+    if previous.is_some() {
+        return Err("stale user reschedule target remained before probe");
+    }
+    let helper = crate::task::spawn_ktest_task_on(1, request_user_reschedule_from_ap);
+    let weak_helper = Arc::downgrade(&helper);
     crate::task::publish_task_on(task.clone(), crate::smp::BOOT_CPU_ID);
-    // runner 在 CPU0 让出一次：FIFO 先运行 probe；probe 的 sched_yield
-    // 再把 runner 留在 CPU0，并将自身唯一交给 CPU1。
+    // runner 在 CPU0 让出一次；此后用户 probe 没有显式 yield，迁移只能由
+    // helper 的远端 IPI 经 trap-return 安全点触发。
     crate::task::suspend_current_and_run_next();
 
     // CPU1 退出时会撤销已经在 CPU0/CPU1 激活过的 MM。runner 若在这里
@@ -434,18 +507,29 @@ fn user_task_migrates_on_yield() -> Result<(), &'static str> {
             crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
         while !process.is_zombie()
             || task.task_status() != crate::task::TaskStatus::Zombie
+            || helper.task_status() != crate::task::TaskStatus::Zombie
             || crate::task::processor::cpu_has_current(1)
             || crate::task::run_queue_count(1) != 0
             || crate::task::zombie_queue_count_fast() == 0
         {
             if crate::hal::get_time() >= deadline {
-                return Err("migrated user probe did not quiesce before timeout");
+                return Err("IPI-rescheduled user probe did not quiesce before timeout");
             }
             core::hint::spin_loop();
         }
         Ok(())
     })?;
 
+    match USER_RESCHED_RESULT.load(Ordering::Acquire) {
+        USER_RESCHED_SENT => {}
+        USER_RESCHED_TARGET_LOST => return Err("AP lost the user reschedule target"),
+        USER_RESCHED_TIMEOUT => return Err("AP did not observe the CPU0 user trap"),
+        USER_RESCHED_SEND_FAILED => return Err("AP failed to send RESCHEDULE to CPU0"),
+        _ => return Err("AP did not finish the user reschedule request"),
+    }
+    if crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID) <= reschedule_before {
+        return Err("CPU0 did not consume the remote RESCHEDULE at a task safe point");
+    }
     if task.last_cpu() != 1 {
         return Err("user probe did not resume on its migration target");
     }
@@ -464,10 +548,17 @@ fn user_task_migrates_on_yield() -> Result<(), &'static str> {
         return Err("AP user probe syscall result or exit status was invalid");
     }
 
+    // wait_child 只回收用户进程；helper 是独立 ktest TCB，显式清空 zombie
+    // owner 后才能验证两个任务都没有隐藏的强引用。
+    drop(crate::task::take_zombie_tasks(usize::MAX));
     drop(process);
     drop(task);
+    drop(helper);
     if weak_task.upgrade().is_some() {
         return Err("reaped AP user probe retained a strong TCB owner");
+    }
+    if weak_helper.upgrade().is_some() {
+        return Err("reschedule helper retained a strong TCB owner");
     }
     Ok(())
 }
@@ -717,7 +808,7 @@ fn deferred_timer_round(expected_tid: usize) -> Result<(), &'static str> {
 
     // 生产安全点可能因为 quantum 到期主动调度；恢复运行后必须仍是同一测试
     // 任务，且 pending 已被完整消费。
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     if crate::smp::local_timer_pending() {
         return Err("timer safe point left pending work behind");
     }
@@ -745,7 +836,7 @@ fn ap_to_bsp_ipi_round_trip() -> Result<(), &'static str> {
     let result = round_trip_all_aps();
     // 受控窗口内可能同时收到 timer hard IRQ；用 B11 的生产安全点收尾，
     // 避免把 quiesced one-shot 留给后续测试或 shutdown。
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     crate::hal::local_irq_restore(original_irq_state);
     result
 }
@@ -854,7 +945,7 @@ fn syscall_irq_window_survives_schedule() -> Result<(), &'static str> {
     // helper 正常返回后必须恢复入口快照。先关中断再消费窗口内
     // 可能发布的 timer pending，避免把 one-shot 状态泄漏给下一用例。
     let restored_irq_state = crate::hal::local_irq_save();
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     crate::hal::local_irq_restore(original_irq_state);
 
     result?;
@@ -1208,7 +1299,7 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
 
     // 同步等待临时开放过本地 IRQ；ktest 不经过用户 trap-return，因此显式走
     // 已有任务安全点，避免把恰好到达的 one-shot timer pending 留给下一用例。
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
@@ -1244,7 +1335,7 @@ fn user_tlb_page_sync_uses_arch_backend() -> Result<(), &'static str> {
     if crate::smp::configured_cpu_count() > 1 && crate::smp::user_tlb_request(1) != request_before {
         return Err("page sync unexpectedly degraded to a full user-TLB flush");
     }
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
@@ -1330,7 +1421,7 @@ fn concurrent_page_shootdowns_keep_payloads_separate() -> Result<(), &'static st
             return Err("concurrent page shootdown degraded to full user-TLB flush");
         }
     }
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
@@ -1437,7 +1528,7 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
         core::hint::spin_loop();
     }
     *USER_TLB_RETIRE_VM.lock() = None;
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     validation_error.map_or(Ok(()), Err)
 }
 
@@ -1532,6 +1623,6 @@ fn kernel_stack_reclaim_waits_for_shootdown() -> Result<(), &'static str> {
     // ktest runner 不会像 syscall 一样返回 trap-return；上面的 shootdown 等待
     // 会临时开中断，若期间接住 one-shot timer，必须在离开用例前通过生产
     // 安全点消费 pending 并重新编程，否则下一轮 timer 用例会继承静默状态。
-    crate::task::run_deferred_timer_at_task_safe_point();
+    crate::task::run_task_safe_point();
     Ok(())
 }

@@ -48,8 +48,8 @@ pub(crate) use manager::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, publish_task,
-    remove_tasks_from_queues, remove_zombie_tasks_by_pid, run_deferred_timer_at_task_safe_point,
-    run_deferred_timer_work, send_signal_to_interruptible, sleep_interruptible,
+    remove_tasks_from_queues, remove_zombie_tasks_by_pid, run_deferred_timer_work,
+    run_task_safe_point, send_signal_to_interruptible, sleep_interruptible,
     take_one_interruptible_zombie, take_zombie_tasks, task_manager_counts, timer_interrupt_handler,
     timer_subsystem_init, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
     TimerAction, WaitQueue, WaitResult,

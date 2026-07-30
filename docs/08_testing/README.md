@@ -235,6 +235,11 @@ B32 继续复用第 20 项，但 user probe 现在还在迁移前用正 ID、迁
 调用 raw `sched_getaffinity`；两次都必须返回 8 并写出 `0b11`，否则进程 exit(1)。
 probe 是单线程 leader，正 ID 同时等于 PID/TID，所以非 leader TID 的严格查找需要结合
 `ProcessManager::find_task(tid)` 源码审计，不能只靠 TAP 总数声称覆盖。
+B33 将该项改名为 `smp::user_task_reschedules_from_ipi`，并从 probe 中删除显式 yield。
+CPU1 helper 在首次 CPU0 getcpu 后向 CPU0 发送生产 RESCHEDULE；用例同时要求 CPU0
+安全点消费计数增长、同一 TCB 在 CPU1 返回用户态、getcpu 观察 0→1、两次 affinity
+仍为 `0b11`，以及 helper/user TCB 都完成回收。只看到 21/21 或 `last_cpu=1` 不足以
+证明远端 IPI 是切换原因。
 
 ### 目录结构
 
@@ -487,7 +492,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -498,6 +503,9 @@ B31 另外要求 TAP 中的第 11/12/20 项均明确 PASS；这三项是正向�
 不得写成“已穷举所有违规 placement”。最终判定还要结合三个 runqueue 入口的
 fail-stop 源码审计与冻结源码指纹。B32 还要求第 20 项进程 exit status 间接确认两次
 raw 返回值和 mask 自检；严格 TID 查找必须单独检查 syscall 没有使用 PID fallback helper。
+B33 起第 20 项名称变为 `smp::user_task_reschedules_from_ipi`；必须同时核对 helper 发送、
+CPU0 消费计数、probe 自身 getcpu/affinity/exit 和最终 Weak 回收。旧 B29—B32 证据中的
+历史测试名保持不变，不能倒写成当时已经完成 IPI 驱动安全点。
 
 ### Bug 下沉流程
 

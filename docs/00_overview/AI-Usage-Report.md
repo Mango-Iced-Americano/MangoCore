@@ -63,6 +63,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 用户可见逻辑 CPU 查询 | 2026-07-30 | GPT/Codex, DeepSeek | Linux getcpu ABI、双架构用户探针、冻结 Docker/QEMU 验证与模型结论复核 | getcpu 迁移前后返回逻辑 CPU 0/1；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
 | SMP TCB affinity 调度约束 | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS 数据模型对照、三条 runqueue placement 审计、冻结双架构验证 | `cpus_allowed` 约束首次发布、yield requeue 和 blocked wake；保留 CPU0 默认，运行期 affinity 未开放 |
 | SMP 线程 affinity 只读 ABI | 2026-07-30 | GPT/Codex, DeepSeek | Linux raw sched_getaffinity ABI、TID/锁序审查、双架构用户探针与初赛回归 | raw syscall 返回真实 per-thread mask 与 8 字节长度；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
+| SMP 用户返回 RESCHEDULE 安全点 | 2026-07-30 | GPT/Codex, DeepSeek | Linux 返回用户态 need-resched 顺序、IRQ/内存序审查、IPI 驱动用户迁移与双架构冻结验证 | hard IRQ 只置位，统一任务安全点合并 timer/IPI 并最多切换一次；双架构 focused 21/21，初赛失败集合未扩大 |
 
 ## 4. 详细使用场景
 
@@ -665,6 +666,29 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   blocked wake 和 yield 迁移；`mask=0x003` 初赛 RV64 312/314、LA64 308/314，四组 END、
   `online_mask=0xff`、精确失败集合和源码前后指纹均已核对。
 
+### Case 29: SMP 用户返回 RESCHEDULE 安全点
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b33-user-return-reschedule-summary.md`；原始 prompt、
+  DeepSeek 报告和四份 Docker/QEMU 日志只保存于本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计统一安全点、IRQ/内存序和反假通过用户 probe，独立核对 Linux
+  上游、源码指纹、TAP 与 judge JSON；DeepSeek 负责冻结只读审查、通过 allowlist runner
+  串行执行四项测试并汇总。提交仍由 GPT 在用户批准后执行。
+- Problem: 远端 RESCHEDULE 只能唤醒 AP idle；运行中的用户任务即使在 syscall 窗口收到
+  IPI，也只留下 `need_resched`，返回用户态前不会消费。直接实现动态 affinity 会使被 mask
+  排除的 Running owner 缺少及时切出机制。
+- Human action: 抽出唯一 `take_reschedule_request()`，由 AP idle 和用户返回共享；
+  `run_task_safe_point()` 在 IRQ-off 窗口依次完成 deferred timer、Acquire 消费 IPI，再对
+  两者最多调度一次。双架构 trap-return 在 `do_signal()` 前调用。focused probe 删除显式
+  yield，由 CPU1 发送生产 IPI，并组合验证消费计数、getcpu 0→1、affinity、退出和回收。
+- AI adjudication: 首次审查因 Codex 冻结期间继续编辑而 fail-closed，不作为模型证据；
+  重试未发现 blocker。人工补上旧 pending 的基线清理，并纠正模型两处事实错误：
+  `reschedule_count` 是 B33 新增字段；Linux 当前返回用户态循环先处理 need-resched、再处理
+  signal work。最终结论以冻结源码的四份真实测试结果为准。
+- Verification: RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 21/21 PASS，第 20 项明确为
+  `smp::user_task_reschedules_from_ipi`；`mask=0x003` 初赛分别为 312/314、308/314，四组
+  END、runner done、精确接受失败集合、无 mutation 和源码前后指纹均已独立核对。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -734,6 +758,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b29-yield-migration-summary.md` | SMP 用户任务显式 yield 迁移 | 记录一次性目标、单 runqueue owner 交接、首轮 shootdown ack RED、DeepSeek 误判裁决、双架构最终 21/21 与初赛非回归 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b30-getcpu-summary.md` | SMP 真实逻辑 CPU 查询 | 记录 getcpu ABI、迁移前后 0/1 反假通过、DeepSeek 结论纠错与双架构门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b31-cpus-allowed-summary.md` | SMP TCB affinity 调度约束 | 记录 `cpus_allowed` 构造/继承、三条 placement 硬约束、既有锁序、DeepSeek 只读审查与双架构 8 核门禁 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b32-getaffinity-summary.md` | SMP 线程 affinity 只读 ABI | 记录 Linux raw 返回值/TID 语义、锁外 uaccess、双架构 probe 与冻结初赛门禁 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b33-user-return-reschedule-summary.md` | SMP 用户返回 RESCHEDULE 安全点 | 记录 IRQ-off 合并入口、Release/Acquire、IPI 驱动迁移、模型结论纠错与双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

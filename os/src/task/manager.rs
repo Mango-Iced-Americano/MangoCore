@@ -2184,11 +2184,19 @@ pub fn run_deferred_timer_work() -> bool {
     need_resched || woke_task
 }
 
-/// 返回用户态前的 timer 安全点；调度只允许发生在这个显式边界。
-pub fn run_deferred_timer_at_task_safe_point() {
-    if run_deferred_timer_work() {
+/// 在任务现场完整、业务锁均已释放的安全点合并调度请求。
+///
+/// timer 与 RESCHEDULE IPI 可能同时要求让出 CPU；先完成 timer callback，再以
+/// Acquire 取走本 CPU 的 IPI 提示，最后最多调度一次。整个判定窗口保持
+/// IRQ-off，因而消费后到真正切换前不会有本地 handler 插入并丢失新请求。
+pub fn run_task_safe_point() {
+    let irq_was_enabled = crate::hal::local_irq_save();
+    let timer_resched = run_deferred_timer_work();
+    let ipi_resched = crate::smp::take_reschedule_request();
+    if timer_resched || ipi_resched {
         crate::task::suspend_current_and_run_next();
     }
+    crate::hal::local_irq_restore(irq_was_enabled);
 }
 
 /// 唤醒已过期的 legacy timeout/kernel timer。

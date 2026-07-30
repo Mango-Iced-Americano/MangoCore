@@ -31,7 +31,9 @@ tags: [process, scheduler, task-manager, processor]
 `sched_getaffinity()` 已返回该 per-thread mask。运行期 mask 修改、排除当前 owner 后的
 强制迁移和普通用户任务负载选择仍未实现。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
-延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
+延后到 trap-return/scheduler 安全点。B33 又让远端 RESCHEDULE 在用户 trap-return
+消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
+yield/block/exit 仍直接进入切换边界。
 
 ## 2. TaskManager 与 Per-CPU RunQueue
 
@@ -227,8 +229,8 @@ AP 走独立的精简分支，只执行：
 ```
 
 AP 不推进 timer、timeout、console、network、FS reclaim 或 OOM active tracker。B28
-用户探针只在 syscall 窗口响应 IPI，并通过显式 yield 进入安全点，不依赖 AP timer。
-远程
+用户探针只在 syscall 窗口响应 IPI；B29 曾通过显式 yield 进入安全点，B33 已验证运行中
+用户任务可以由远端 RESCHEDULE 在 trap-return 主动切出，不依赖 AP timer。远程
 发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait
 之间到达的 doorbell 会保持 pending 并唤醒 CPU，不会丢失 wakeup。
 
@@ -302,6 +304,20 @@ CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、network poll、
 等共享路径尚未完成 IRQ 并发审计。AP 已采用独立的“关中断—重查工作—架构 wait”
 协议，但 B19 kernel-only 任务运行期间也保持 IRQ-off；STOP/RESCHEDULE 最长延迟到
 该短函数返回或主动 yield，不能据此开放无界通用内核线程。
+
+用户返回侧使用唯一的 `run_task_safe_point()`：
+
+```text
+保存入口 IRQ 状态并关中断
+  → 完成 deferred timer 工作
+  → Acquire 取走本 CPU RESCHEDULE 提示
+  → timer || IPI 时最多 suspend 一次
+  → 任务恢复后还原入口 IRQ 状态
+```
+
+`take_reschedule_request()` 只消费 PerCpu 提示，不取调度锁；真正
+`Running(cpu) -> Queued(target)` 仍在任务切回 idle 栈、current 清空后由既有 switch-out
+路径完成。这样没有新增调度状态，也没有让 hard IRQ 直接进入 runqueue/context switch。
 
 ## 11. yield 与 block
 

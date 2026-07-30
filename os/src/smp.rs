@@ -27,6 +27,8 @@ struct PerCpu {
     scheduler_entered: AtomicBool,
     /// RESCHEDULE IPI 发布的本地调度请求；handler 只置位，安全点负责消费。
     need_resched: AtomicBool,
+    /// 本 CPU 在安全点实际消费的 RESCHEDULE 次数，供调度诊断与回归测试使用。
+    reschedule_count: AtomicUsize,
     /// 目标 CPU 必须完成的 kernel-global 映射发布序号。
     kernel_tlb_request: AtomicUsize,
     /// 本 CPU 完成本地 TLB 刷新后发布的对应确认序号。
@@ -66,6 +68,7 @@ impl PerCpu {
             idle: AtomicBool::new(false),
             scheduler_entered: AtomicBool::new(false),
             need_resched: AtomicBool::new(false),
+            reschedule_count: AtomicUsize::new(0),
             kernel_tlb_request: AtomicUsize::new(0),
             kernel_tlb_ack: AtomicUsize::new(0),
             user_tlb_request: AtomicUsize::new(0),
@@ -553,7 +556,7 @@ pub(crate) fn service_secondary_ipi_work() -> bool {
         crate::hal::secondary_cpu_stop();
     }
 
-    let mut did_work = local.need_resched.swap(false, Ordering::Acquire);
+    let mut did_work = take_reschedule_request();
     if !local
         .round_trip_reply_pending
         .swap(false, Ordering::Acquire)
@@ -566,6 +569,27 @@ pub(crate) fn service_secondary_ipi_work() -> bool {
     }
     did_work = true;
     did_work
+}
+
+/// 在当前 CPU 的关中断安全点取走一次可合并的调度请求。
+///
+/// hard IPI 以 Release 发布 `need_resched`，这里的 Acquire 使后续调度观察到
+/// handler 之前的 mailbox 处理。调用方必须已经保存完整任务现场，或正运行在
+/// idle 栈；函数只消费提示，不获取 runqueue 锁，也不直接切换任务。
+pub(crate) fn take_reschedule_request() -> bool {
+    let local = &PER_CPUS[self::cpu_id()];
+    if !local.need_resched.swap(false, Ordering::Acquire) {
+        return false;
+    }
+    local.reschedule_count.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// 查询指定 CPU 已在安全点消费的 RESCHEDULE 次数。
+pub(crate) fn reschedule_count(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id]
+        .reschedule_count
+        .load(Ordering::Relaxed)
 }
 
 /// 远程 runqueue 发布完成后唤醒目标 CPU。

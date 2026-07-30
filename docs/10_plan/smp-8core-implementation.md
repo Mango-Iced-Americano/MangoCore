@@ -82,11 +82,11 @@ related_docs:
 |---|---|---|
 | 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
-| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成 getpid/yield/exit | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B29 已验证同一 TCB 从 CPU0 current 经 yield 交给 CPU1、退出和 CPU0 回收 | 普通用户任务默认仍固定 CPU0，通用迁移与进程组停止语义待实现 |
-| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布、一次性 yield 迁移已完成受控验证；B31 已用 per-thread `cpus_allowed` 约束首次发布、yield requeue 和 blocked wake | 当前 mask 只在 New 状态设置且发布后不变；通用负载选择、运行期 affinity、queued/blocked 迁移和 steal 尚未实现 |
+| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成；B33 的 trap-return 安全点可消费远端 RESCHEDULE | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1、退出和 CPU0 回收 | 普通用户任务默认仍固定 CPU0，通用迁移与进程组停止语义待实现 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE | 当前 mask 只在 New 状态设置且发布后不变；通用负载选择、运行期 affinity、queued/blocked 迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
-| timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
+| timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作与 RESCHEDULE 已在统一任务安全点合并 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活并在退出时完成双 CPU shootdown | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
@@ -486,8 +486,9 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B14 的双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 17/17 PASS。
   新测试在窗口内 yield，证明 idle→新任务为 IRQ-off、原任务恢复
   为 IRQ-on，然后完成真实 AP→BSP IPI reply；
-- 通用交叉发送、并发 reason、10,000 次 ping-pong 和 RESCHEDULE 仍未完成，
-  Phase 2 状态保持 `partial`。
+- B33 已让运行中用户任务在 trap-return 安全点消费 RESCHEDULE；handler 仍只置位，
+  与 timer 请求合并后最多调度一次。通用交叉发送、并发 reason 和 10,000 次 ping-pong
+  仍未完成，Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
 timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。
@@ -673,7 +674,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   迁到 Per-CPU，并让可变身份字段改读权威对象；B18 已删除全局 ready queue；
   B19 已让 AP 在 scheduler-ready 后进入精简本地调度循环；B20 已让受控 AP 任务在
   WaitQueue 阻塞后通过锁外 `RESCHEDULE` 回到最近运行 CPU；B31 已为 TCB 增加
-  初始不变的 `cpus_allowed`，三条 runnable owner 交接路径都拒绝越过 mask；
+  初始不变的 `cpus_allowed`，三条 runnable owner 交接路径都拒绝越过 mask；B33 已让
+  运行中用户任务在 trap-return 安全点消费远端 RESCHEDULE，而不从 hard IRQ 直接切换；
 - 每 CPU 使用本地 Processor、RunQueue 和 idle context；AP zombie 先交给受锁全局
   registry，由 CPU0 回收。B21 的固定内核栈退休队列只处理映射/slot 生命周期，不等同于
   完整的 Per-CPU zombie 回收队列；
@@ -690,7 +692,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - affinity 变化后，正在运行的非法 CPU 设置 migration_pending 和 need_resched；
   已排队任务在出队时重新定向，避免跨队列双锁迁移；
 - 安全抢占点仅包括：
-  - 返回用户态之前；
+  - 返回用户态之前（B33 已接入 timer/RESCHEDULE 合并入口）；
   - 显式 yield；
   - block/exit；
   - idle 调度循环；
@@ -781,6 +783,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   raw syscall 复制一个 `usize` 并返回 8。查询不持 registry/runqueue 锁进入 uaccess；
   双架构 probe 在 CPU0/CPU1 迁移前后均读到 `0b11`。它没有改变 mask 或 owner，
   也不替代后续 `sched_setaffinity` 的迁移串行化。
+- B33 把 `RESCHEDULE` 从 AP idle 唤醒提示扩展为运行中用户任务的真实安全点请求。
+  `run_task_safe_point()` 在 IRQ-off 窗口先完成 deferred timer，再 Acquire 消费本 CPU
+  IPI 提示，并对两者最多调度一次；双架构 trap-return 对称调用。focused probe 删除
+  显式 yield，由 CPU1 helper 向 CPU0 发送生产 IPI，并同时验证消费计数、getcpu 0→1、
+  affinity `0b11`、exit/reap 和 Weak 释放。该闭环为后续排除 Running owner 提供切出机制，
+  但没有解决 Queued/Blocked 的运行期 mask 串行化。
 
 #### 退出条件
 
