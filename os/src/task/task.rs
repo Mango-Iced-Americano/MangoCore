@@ -162,9 +162,9 @@ pub struct TaskControlBlock {
     last_cpu: AtomicUsize,
     /// 允许任务取得调度所有权的逻辑 CPU 位图。
     ///
-    /// 当前只允许创建路径在 `New` 状态修改它；`New -> Queued` 发布后保持
-    /// 不变。后续接入 `sched_setaffinity` 时，必须把 mask 更新和对应的
-    /// Running/Queued/Blocked 迁移放进同一个新协议，不能只写这个原子值。
+    /// 创建路径由 `New -> Queued` 状态交接首次发布；运行期只允许 current
+    /// 线程在 syscall 安全点修改。若新 mask 排除当前 CPU，写入必须先于
+    /// `migration_target` 发布，并立刻进入调度，不能只改 mask 后继续执行。
     cpus_allowed: AtomicUsize,
     /// 下一次协作式 yield 完成切栈后要进入的 CPU。
     ///
@@ -722,9 +722,9 @@ impl TaskControlBlock {
     }
     /// 返回任务当前允许运行的逻辑 CPU 位图。
     pub(crate) fn cpus_allowed(&self) -> usize {
-        // 首次发布后不再修改 mask；真正的跨 CPU 可见性由 runqueue 锁和
-        // `New -> Queued` 的 AcqRel 状态交接提供，因此这里无需额外屏障。
-        self.cpus_allowed.load(Ordering::Relaxed)
+        // Acquire 同时覆盖两种发布方式：首次发布依赖调度状态的 AcqRel
+        // 交接；运行期更新则直接与 set_current_affinity() 的 Release 配对。
+        self.cpus_allowed.load(Ordering::Acquire)
     }
     /// 判断目标 CPU 是否属于任务的允许集合。
     pub(crate) fn is_cpu_allowed(&self, cpu: usize) -> bool {
@@ -752,6 +752,89 @@ impl TaskControlBlock {
             mask
         );
         self.cpus_allowed.store(mask, Ordering::Relaxed);
+    }
+
+    /// 修改 current 线程的运行期 affinity，并登记必要的自迁移。
+    ///
+    /// 返回 true 表示新 mask 已排除当前 CPU；调用者必须立即在同一个 syscall
+    /// 安全点切回 idle。此接口不处理远程 Running、Queued 或 Blocked 任务，
+    /// 因而不需要新增 task/rq 锁或迁移中间状态。
+    pub(crate) fn set_current_affinity(&self, mask: usize) -> bool {
+        let source_cpu = crate::smp::cpu_id();
+        let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
+        assert_ne!(mask, 0, "task CPU affinity cannot be empty");
+        assert_eq!(
+            mask & !configured_mask,
+            0,
+            "runtime CPU affinity {:#x} contains unconfigured CPUs",
+            mask
+        );
+        assert_eq!(
+            self.task_status(),
+            TaskStatus::Running(source_cpu),
+            "runtime affinity update requires the local Running task"
+        );
+        let current = super::processor::current_task()
+            .expect("runtime affinity update without a local current task");
+        assert!(
+            core::ptr::eq(Arc::as_ptr(&current), self),
+            "only the current task may update runtime affinity"
+        );
+        assert_eq!(
+            self.migration_target.load(Ordering::Acquire),
+            NO_MIGRATION_TARGET,
+            "runtime affinity update raced with a pending migration"
+        );
+
+        if mask & (1usize << source_cpu) != 0 {
+            self.cpus_allowed.store(mask, Ordering::Release);
+            return false;
+        }
+
+        let runnable = mask
+            & crate::smp::online_cpu_mask()
+            & crate::smp::scheduler_cpu_mask()
+            & !crate::smp::stopped_cpu_mask();
+        let target_cpu = (0..crate::smp::configured_cpu_count())
+            .filter(|cpu| runnable & (1usize << cpu) != 0)
+            .min_by_key(|cpu| {
+                // nr_running 不包含 current；把 current 槽计入近似负载，
+                // 避免把正在执行内核任务的 CPU 误判成空闲 CPU。
+                let current = usize::from(super::processor::cpu_has_current(*cpu));
+                (super::run_queue::nr_running(*cpu) + current, *cpu)
+            })
+            .expect("runtime affinity has no online scheduler CPU");
+
+        // 目标栈映射必须先完成；在此之前既不发布新 mask，也不发布迁移目标，
+        // 远端 CPU 因而不可能提前取得该任务。
+        crate::smp::synchronize_kernel_mapping(target_cpu).unwrap_or_else(|error| {
+            panic!(
+                "failed to synchronize task {} kernel stack to CPU {}: {:?}",
+                self.gettid(),
+                target_cpu,
+                error
+            )
+        });
+        // Release mask 在 Release target 之前；源 idle 以 Acquire 取走 target
+        // 后，require_cpu_allowed() 必然能看到与该目标配套的新 mask。
+        self.cpus_allowed.store(mask, Ordering::Release);
+        self.publish_migration_target(target_cpu);
+        true
+    }
+
+    fn publish_migration_target(&self, target_cpu: usize) {
+        if let Err(previous) = self.migration_target.compare_exchange(
+            NO_MIGRATION_TARGET,
+            target_cpu,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            panic!(
+                "task {} already has migration target CPU {}",
+                self.gettid(),
+                previous
+            );
+        }
     }
     /// 在调度所有权改变前验证目标 CPU。
     pub(crate) fn require_cpu_allowed(&self, cpu: usize, operation: &'static str) {
@@ -814,18 +897,7 @@ impl TaskControlBlock {
                 error
             )
         });
-        if let Err(previous) = self.migration_target.compare_exchange(
-            NO_MIGRATION_TARGET,
-            target_cpu,
-            Ordering::Release,
-            Ordering::Acquire,
-        ) {
-            panic!(
-                "task {} already has migration target CPU {}",
-                self.gettid(),
-                previous
-            );
-        }
+        self.publish_migration_target(target_cpu);
     }
     /// 取走一次性迁移请求；只能在任务已经切回源 CPU idle 栈后调用。
     pub(crate) fn take_migration_target(&self) -> Option<usize> {

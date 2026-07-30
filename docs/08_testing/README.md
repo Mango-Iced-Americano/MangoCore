@@ -240,6 +240,12 @@ CPU1 helper 在首次 CPU0 getcpu 后向 CPU0 发送生产 RESCHEDULE；用例�
 安全点消费计数增长、同一 TCB 在 CPU1 返回用户态、getcpu 观察 0→1、两次 affinity
 仍为 `0b11`，以及 helper/user TCB 都完成回收。只看到 21/21 或 `last_cpu=1` 不足以
 证明远端 IPI 是切换原因。
+B34 再把该项改名为 `smp::user_task_reschedules_and_sets_affinity`。probe 到达 CPU1 后调用
+raw `sched_setaffinity(0, 8, bit0)`；syscall 返回后必须由 getcpu 直接观察到 CPU0，再由
+getaffinity 读到 bit0。三段断言分别拒绝“B33 IPI 未迁移”“只改 mask 未迁移”和“迁移但
+未持久发布 mask”的假阳性。CPU0 runner 的等待循环必须调用既有任务安全点，否则只开中断
+只能接收 need_resched、不能按照安全点抢占模型让出 CPU；全局 zombie 队列会被 idle drain，
+不得把“队列保持非空”当作任务已经退出的稳定条件。
 
 ### 目录结构
 
@@ -492,7 +498,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32/B33 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33/B34 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -506,6 +512,9 @@ raw 返回值和 mask 自检；严格 TID 查找必须单独检查 syscall 没�
 B33 起第 20 项名称变为 `smp::user_task_reschedules_from_ipi`；必须同时核对 helper 发送、
 CPU0 消费计数、probe 自身 getcpu/affinity/exit 和最终 Weak 回收。旧 B29—B32 证据中的
 历史测试名保持不变，不能倒写成当时已经完成 IPI 驱动安全点。
+B34 起第 20 项名称变为 `smp::user_task_reschedules_and_sets_affinity`；除 B33 证据外，还必须
+核对 setaffinity 后 getcpu=0、getaffinity=bit0、最终 `last_cpu=0`。远程 TID、短/长 mask
+错误路径和 Queued/Blocked 写侧未被该正向 probe 覆盖，必须在报告中保留边界。
 
 ### Bug 下沉流程
 

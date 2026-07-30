@@ -64,6 +64,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP TCB affinity 调度约束 | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS 数据模型对照、三条 runqueue placement 审计、冻结双架构验证 | `cpus_allowed` 约束首次发布、yield requeue 和 blocked wake；保留 CPU0 默认，运行期 affinity 未开放 |
 | SMP 线程 affinity 只读 ABI | 2026-07-30 | GPT/Codex, DeepSeek | Linux raw sched_getaffinity ABI、TID/锁序审查、双架构用户探针与初赛回归 | raw syscall 返回真实 per-thread mask 与 8 字节长度；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
 | SMP 用户返回 RESCHEDULE 安全点 | 2026-07-30 | GPT/Codex, DeepSeek | Linux 返回用户态 need-resched 顺序、IRQ/内存序审查、IPI 驱动用户迁移与双架构冻结验证 | hard IRQ 只置位，统一任务安全点合并 timer/IPI 并最多切换一次；双架构 focused 21/21，初赛失败集合未扩大 |
+| SMP 当前线程运行期 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS 写侧对照、current-only 协议、冻结首错诊断与双架构回归 | `sched_setaffinity` 可让 current 从 CPU1 自迁回 CPU0；不新增状态/锁，远程 TID 保持显式未支持；双架构 focused 21/21、初赛基线不退化 |
 
 ## 4. 详细使用场景
 
@@ -689,6 +690,28 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `smp::user_task_reschedules_from_ipi`；`mask=0x003` 初赛分别为 312/314、308/314，四组
   END、runner done、精确接受失败集合、无 mutation 和源码前后指纹均已独立核对。
 
+### Case 30: SMP 当前线程运行期 affinity
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b34-self-affinity-summary.md`；DeepSeek prompt、child
+  manifest 与原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 Linux/DragonOS 冻结 current-only 边界，设计 mask/target 内存序、
+  实现 syscall 与双架构反假通过 probe，并独立裁决测试失败；DeepSeek 负责只读反例审查、
+  受限 Docker 执行和结果汇总，不修改源码、不提交、不 push。
+- Problem: 一次完成远程 Running、Queued 和 Blocked affinity 会立即要求新的 task/rq 串行化
+  和队列间迁移协议，复杂度过高；旧 syscall 又只接受 bit0 并不真实修改 TCB。需要先交付一个
+  不破坏六态所有权机的独立生产闭环。
+- Human action: 仅允许 `pid=0` 或严格 current TID。写侧确认 `Running(source)` 与本地 current，
+  先同步目标内核栈，再 Release 发布 mask/target，并立即在 syscall 安全点调度；源 idle 仍只锁
+  一个目标 runqueue。目标放置比较 `nr_running + current`，远程 TID 返回 `EOPNOTSUPP`。
+- AI adjudication: 首轮真实 RV64 timeout 暴露测试 runner 只开中断却不进入安全点；加入生产
+  安全点后任务已完成迁移/退出，但旧等待器仍要求瞬态 zombie 队列保持非空。诊断模型把
+  `zombies=0` 误判成计数器 bug；GPT/Codex 通过 `run_tasks()` 每轮 `take_zombie_tasks(64)` 的
+  源码证据确认这是正常 drain，删除过时条件并移除临时快照。最终只接受冻结源码重跑结果。
+- Verification: 最终任务 `smp-b34-self-affinity-validation-004` 串行完成四项；RV64/LA64 focused
+  均为 21/21，第 20 项为 `smp::user_task_reschedules_and_sets_affinity`；初赛分别 312/314、
+  308/314，精确失败集合、exit code、forbidden marker、timeout、mutation 与源码指纹均核对。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -760,6 +783,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b31-cpus-allowed-summary.md` | SMP TCB affinity 调度约束 | 记录 `cpus_allowed` 构造/继承、三条 placement 硬约束、既有锁序、DeepSeek 只读审查与双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b32-getaffinity-summary.md` | SMP 线程 affinity 只读 ABI | 记录 Linux raw 返回值/TID 语义、锁外 uaccess、双架构 probe 与冻结初赛门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b33-user-return-reschedule-summary.md` | SMP 用户返回 RESCHEDULE 安全点 | 记录 IRQ-off 合并入口、Release/Acquire、IPI 驱动迁移、模型结论纠错与双架构 8 核门禁 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b34-self-affinity-summary.md` | SMP 当前线程运行期 affinity | 记录 current-only 阶段边界、mask/target 发布、测试等待器首错、DeepSeek 误判裁决与双架构冻结门禁 |
 
 ## 9. 交互记录与留痕方式
 

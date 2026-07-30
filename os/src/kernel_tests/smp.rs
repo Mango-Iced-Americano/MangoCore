@@ -15,6 +15,7 @@ use crate::kernel_tests::runner::KernelTest;
 // probe 只依赖 CPU/task 基础 syscall，不在 AP 上进入 FS、net 或设备路径。
 const USER_PROBE_GETCPU: usize = 168;
 const USER_PROBE_GETPID: usize = 172;
+const USER_PROBE_SETAFFINITY: usize = 122;
 const USER_PROBE_GETAFFINITY: usize = 123;
 const USER_PROBE_EXIT: usize = 93;
 
@@ -83,6 +84,39 @@ __smp_user_probe_resched_ready:
     addi t1, zero, 3
     bne t0, t1, .Lsmp_probe_fail
 
+    # 从 CPU1 把当前线程收紧到 CPU0。syscall 若只改 mask 而没有在安全点
+    # 完成迁移，下面的 getcpu 仍会读到 1，从而拒绝假阳性。
+    addi t0, zero, 1
+    sd t0, 0(sp)
+    addi a0, zero, 0
+    addi a1, zero, 8
+    addi a2, sp, 0
+    addi a7, zero, {setaffinity}
+    ecall
+    bnez a0, .Lsmp_probe_fail
+
+    addi a0, sp, 8
+    addi a1, zero, 0
+    addi a2, zero, 0
+    addi a7, zero, {getcpu}
+    ecall
+    bnez a0, .Lsmp_probe_fail
+    lw t0, 8(sp)
+    bnez t0, .Lsmp_probe_fail
+
+    # syscall 返回后，持久 affinity 也必须只剩 CPU0。
+    sd zero, 0(sp)
+    addi a0, zero, 0
+    addi a1, zero, 8
+    addi a2, sp, 0
+    addi a7, zero, {getaffinity}
+    ecall
+    addi t1, zero, 8
+    bne a0, t1, .Lsmp_probe_fail
+    ld t0, 0(sp)
+    addi t1, zero, 1
+    bne t0, t1, .Lsmp_probe_fail
+
     addi a0, s0, 0
     j .Lsmp_probe_exit
 .Lsmp_probe_fail:
@@ -97,6 +131,7 @@ __smp_user_probe_end:
 "#,
     getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
+    setaffinity = const USER_PROBE_SETAFFINITY,
     getaffinity = const USER_PROBE_GETAFFINITY,
     exit_syscall = const USER_PROBE_EXIT,
 );
@@ -178,6 +213,45 @@ __smp_user_probe_resched_ready:
     beq $t0, $t1, 8f
     b .Lsmp_probe_fail
 8:
+    # 从 CPU1 把当前线程收紧到 CPU0。返回位置与最终 mask 分别验证
+    # “发生了迁移”和“affinity 已持久发布”。
+    addi.d $t0, $zero, 1
+    st.d $t0, $sp, 0
+    move $a0, $zero
+    addi.d $a1, $zero, 8
+    move $a2, $sp
+    addi.d $a7, $zero, {setaffinity}
+    syscall 0
+    beqz $a0, .Lsmp_probe_setaff_ok
+    b .Lsmp_probe_fail
+.Lsmp_probe_setaff_ok:
+    addi.d $a0, $sp, 8
+    move $a1, $zero
+    move $a2, $zero
+    addi.d $a7, $zero, {getcpu}
+    syscall 0
+    beqz $a0, .Lsmp_probe_getcpu0_ok
+    b .Lsmp_probe_fail
+.Lsmp_probe_getcpu0_ok:
+    ld.w $t0, $sp, 8
+    beqz $t0, .Lsmp_probe_cpu0_ok
+    b .Lsmp_probe_fail
+.Lsmp_probe_cpu0_ok:
+    st.d $zero, $sp, 0
+    move $a0, $zero
+    addi.d $a1, $zero, 8
+    move $a2, $sp
+    addi.d $a7, $zero, {getaffinity}
+    syscall 0
+    addi.d $t1, $zero, 8
+    beq $a0, $t1, .Lsmp_probe_getaffinity0_ok
+    b .Lsmp_probe_fail
+.Lsmp_probe_getaffinity0_ok:
+    ld.d $t0, $sp, 0
+    addi.d $t1, $zero, 1
+    beq $t0, $t1, .Lsmp_probe_affinity0_ok
+    b .Lsmp_probe_fail
+.Lsmp_probe_affinity0_ok:
     move $a0, $s0
     b .Lsmp_probe_exit
 .Lsmp_probe_fail:
@@ -192,6 +266,7 @@ __smp_user_probe_end:
 "#,
     getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
+    setaffinity = const USER_PROBE_SETAFFINITY,
     getaffinity = const USER_PROBE_GETAFFINITY,
     exit_syscall = const USER_PROBE_EXIT,
 );
@@ -316,8 +391,8 @@ pub fn tests() -> Vec<KernelTest> {
             kernel_stack_reclaim_waits_for_shootdown,
         ),
         KernelTest::new(
-            "smp::user_task_reschedules_from_ipi",
-            user_task_reschedules_from_ipi,
+            "smp::user_task_reschedules_and_sets_affinity",
+            user_task_reschedules_and_sets_affinity,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -444,8 +519,8 @@ fn request_user_reschedule_from_ap() {
     }
 }
 
-/// 用户任务先在 CPU0 运行，再由远端 RESCHEDULE 在返回安全点迁移到 CPU1。
-fn user_task_reschedules_from_ipi() -> Result<(), &'static str> {
+/// 用户任务先由远端 RESCHEDULE 从 CPU0 到 CPU1，再用 syscall 自迁回 CPU0。
+fn user_task_reschedules_and_sets_affinity() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
         return Err("AP user probe setup did not run on CPU0");
     }
@@ -505,16 +580,21 @@ fn user_task_reschedules_from_ipi() -> Result<(), &'static str> {
     crate::hal::with_local_interrupts_enabled(|| {
         let deadline =
             crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        // Zombie 状态和 CPU1 的 current/runqueue 为空才是稳定的 owner 证据；
+        // 全局 zombie 队列会被 CPU0 idle 及时回收，不能要求它保持非空。
         while !process.is_zombie()
             || task.task_status() != crate::task::TaskStatus::Zombie
             || helper.task_status() != crate::task::TaskStatus::Zombie
             || crate::task::processor::cpu_has_current(1)
             || crate::task::run_queue_count(1) != 0
-            || crate::task::zombie_queue_count_fast() == 0
         {
             if crate::hal::get_time() >= deadline {
                 return Err("IPI-rescheduled user probe did not quiesce before timeout");
             }
+            // B34 会把 probe 从 CPU1 重新排到当前 runner 所在的 CPU0。
+            // 这里只开中断仍不足以让出 CPU：IPI handler 按安全点抢占约定
+            // 只能发布 need_resched，必须由当前内核任务显式消费后再调度。
+            crate::task::run_task_safe_point();
             core::hint::spin_loop();
         }
         Ok(())
@@ -530,8 +610,10 @@ fn user_task_reschedules_from_ipi() -> Result<(), &'static str> {
     if crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID) <= reschedule_before {
         return Err("CPU0 did not consume the remote RESCHEDULE at a task safe point");
     }
-    if task.last_cpu() != 1 {
-        return Err("user probe did not resume on its migration target");
+    // probe 内部已验证自己确实先到过 CPU1；最终回到 CPU0 则只能来自
+    // sched_setaffinity(0, bit0) 的自迁移安全点。
+    if task.last_cpu() != crate::smp::BOOT_CPU_ID {
+        return Err("user probe did not return to its new affinity CPU");
     }
     let reaped = crate::task::ProcessManager::wait_child(
         &parent,

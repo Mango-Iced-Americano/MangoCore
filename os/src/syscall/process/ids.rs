@@ -9,8 +9,8 @@ use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
     current_sgid, current_sid, current_suid, current_task, current_tid,
-    current_uid, current_user_token, update_ready_nice, ProcessControlBlock, ProcessManager,
-    SeccompFilterInsn, Signals, TaskControlBlock,
+    current_uid, current_user_token, suspend_current_and_run_next, update_ready_nice,
+    ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -2531,30 +2531,72 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> 
     if signed_pid_invalid(pid) {
         return EINVAL;
     }
-    let task = match find_task_for_pid_or_current(pid) {
-        Ok(task) => task,
-        Err(errno) => return errno,
-    };
-    if mask.is_null() {
-        return EFAULT;
-    }
     if cpusetsize == 0 {
         return EINVAL;
     }
-    let buffers =
-        match translated_byte_buffer(current_user_token(), mask, cpusetsize, UserAccess::Read) {
-            Ok(buffers) => buffers,
-            Err(errno) => return errno,
-        };
-    let user = UserBuffer::new(buffers);
-    let mut first = [0u8; 1];
-    user.read(&mut first);
-    if first[0] & 1 == 0 {
+    if mask.is_null() {
+        return EFAULT;
+    }
+    let kernel_mask_bytes = size_of::<usize>();
+    // Linux 会先清零内核 mask，再复制 min(cpusetsize, kernel_mask_bytes)
+    // 个字节：短 mask 的 bit0/bit1 仍合法，超长缓冲区则只消费低 word。
+    let copy_len = cpusetsize.min(kernel_mask_bytes);
+    let mut mask_bytes = [0u8; size_of::<usize>()];
+    if let Err(errno) = copy_from_user_array(
+        current_user_token(),
+        mask,
+        mask_bytes.as_mut_ptr(),
+        copy_len,
+    ) {
+        return errno;
+    }
+    let requested = usize::from_ne_bytes(mask_bytes);
+    let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
+    // 和 Linux 的 possible/cpuset 求交语义一致：用户缓冲区中的更高 CPU 位
+    // 被忽略；只有配置内完全没有可用 CPU 才是 EINVAL。
+    let allowed = requested & configured_mask;
+    if allowed == 0 {
         return EINVAL;
     }
+
+    // affinity 是 per-thread 属性：正 pid 必须严格按 TID 查找，不能沿用
+    // find_task_for_pid_or_current() 的进程 PID fallback。
+    let task = if pid == 0 {
+        current_task()
+    } else {
+        ProcessManager::find_task(pid)
+    };
+    let Some(task) = task else {
+        return ESRCH;
+    };
     let access = current_sched_access();
     if !access.has_sys_nice && !sched_same_owner(access, &task) {
         return EPERM;
+    }
+
+    let Some(caller) = current_task() else {
+        return ESRCH;
+    };
+    if !Arc::ptr_eq(&caller, &task) {
+        // 完整远程 TID 更新需要稳定 task/rq 归属并搬运 Queued 任务；B34
+        // 不伪装成功，也不复用 Blocked 充当迁移中间态。
+        return EOPNOTSUPP;
+    }
+    drop(caller);
+
+    let runnable = allowed
+        & crate::smp::online_cpu_mask()
+        & crate::smp::scheduler_cpu_mask()
+        & !crate::smp::stopped_cpu_mask();
+    if runnable == 0 {
+        return EINVAL;
+    }
+    let must_migrate = task.set_current_affinity(allowed);
+    drop(task);
+    if must_migrate {
+        // syscall 本身就是安全点：此处没有业务锁和多余 TCB Arc。系统调用
+        // 会在目标 CPU 恢复同一内核栈后继续，并最终把 SUCCESS 写回用户上下文。
+        suspend_current_and_run_next();
     }
     SUCCESS
 }

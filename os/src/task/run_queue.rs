@@ -219,8 +219,13 @@ pub(crate) fn stats(cpu: usize) -> (usize, usize, usize) {
 /// 返回所有 per-CPU runqueue 的无锁近似总长度。
 pub(crate) fn total_count_fast() -> usize {
     (0..crate::smp::configured_cpu_count())
-        .map(|cpu| state(cpu).nr_running.load(Ordering::Relaxed))
+        .map(nr_running)
         .sum()
+}
+
+/// 返回目标 CPU 的无锁近似排队数，供不持锁的放置策略比较负载。
+pub(crate) fn nr_running(cpu: usize) -> usize {
+    state(cpu).nr_running.load(Ordering::Relaxed)
 }
 
 /// OOM 路径按索引克隆一个候选，避免低内存时为队列快照再次分配。
