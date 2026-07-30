@@ -84,7 +84,7 @@ related_docs:
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成；B33 的 trap-return 安全点可消费远端 RESCHEDULE | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1、退出和 CPU0 回收 | 普通用户任务默认仍固定 CPU0，通用迁移与进程组停止语义待实现 |
-| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE，B34 完成 current 写侧，B35/B36 分别完成远程稳定 Blocked/Queued 写侧 | 远程 Running/Blocking affinity、通用新任务负载选择和 steal 尚未实现 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE，B34 完成 current 写侧，B35/B36 分别完成远程稳定 Blocked/Queued 写侧，B37 完成 affinity-aware 新任务与 wake 选点 | 远程 Running/Blocking affinity、默认全核 mask 和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作与 RESCHEDULE 已在统一任务安全点合并 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活并在退出时完成双 CPU shootdown | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B36）
+#### 当前进度（SMP-P2.5-B15 至 B37）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -684,7 +684,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   新 mask 排除 owner 时复用同一安全点和单目标 runqueue 迁移，不从 hard IRQ 直接切换；
   B35 允许远程稳定 Blocked 线程在 `TASK_MANAGER` 锁内修改 mask，后续 wake 按新允许集选点；
   B36 允许远程稳定 Queued 线程在 owner runqueue 内更新 mask，排除 owner 时经短暂
-  `Migrating` 搬到目标队列；
+  `Migrating` 搬到目标队列；B37 让普通新任务按继承 mask、locality 与近似负载选择首次 owner；
 - 每 CPU 使用本地 Processor、RunQueue 和 idle context；AP zombie 先交给受锁全局
   registry，由 CPU0 回收。B21 的固定内核栈退休队列只处理映射/slot 生命周期，不等同于
   完整的 Per-CPU zombie 回收队列；
@@ -695,8 +695,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B31 已完成 affinity 内核 mask 与唤醒合法性筛选；B34 已为 current 线程实现按
   `nr_running + current` 最小值选择合法迁移目标；B35 已让远程稳定 Blocked 线程复用
   registry/wake 锁序发布新 mask；B36 已让稳定 Queued 线程复用同一负载快照选择目标，并在
-  不同时持有两个 runqueue 的前提下搬队。因普通任务仍 CPU0-only，last_cpu `+1` 通用放置、
-  默认全核 mask 和远程 Running/Blocking 改 mask 仍是后续项；
+  不同时持有两个 runqueue 的前提下搬队。B37 将这些规则收口为通用选择器：新任务优先当前
+  CPU，wake 优先 `last_cpu`，只有 preferred 负载不超过最小值 `+1` 才保留 locality；负载按
+  `nr_running + current_present` 的无锁快照估算。普通任务初始 mask 仍 CPU0-only，默认全核
+  mask 和远程 Running/Blocking 改 mask 仍是后续项；
 - 远程入队后，如果目标 CPU idle 或任务优先级需要尽快运行，发送 RESCHEDULE IPI；
 - Phase 3a 先只实现 per-CPU queue、目标选择和远程 enqueue；work stealing 默认关闭；
 - Phase 3b 在 3a 唯一运行和远程唤醒门禁通过后再开启 steal：idle CPU 只从一个选定 victim
@@ -824,6 +826,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   focused 第 14 项用 CPU1 holder 稳定制造 Queued 目标，依次验证不搬队更新和 bit0 搬队；
   双架构 8 核均为 23/23，初赛保持 RV64 312/314、LA64 308/314。远程 Running/Blocking 和
   用户态并发远程 TID 压力仍未覆盖。
+- B37 修复 clone/fork 继承非 CPU0 mask 后仍由 `publish_task()` 固定投递 CPU0 的错误。启动期
+  无 current 的 init/ktest runner 保留显式 CPU0 分支；普通发布、Blocked wake、current/Queued
+  affinity 共同使用 affinity/online/scheduler/STOP 过滤和 locality `+1` 规则。Per-CPU
+  `current_present` 只作负载提示，不改变 current owner 真值。定向 AP ktest 改走通用发布后，
+  双架构 8 核 focused 仍为 23/23；初赛保持 RV64 312/314、LA64 308/314，fork/clone/busybox
+  没有新增失败。远程 Running/Blocking 与默认全核 mask 仍未实现。
 
 #### 退出条件
 

@@ -162,16 +162,20 @@ TCB 指针登记在 interruptible registry 中，才在 `TASK_MANAGER` 锁内发
 在同一锁域读取 mask 并重新选 CPU，因此无需搬运 current/runqueue owner。B36 继续支持稳定
 `Queued(owner)`：保留 owner 的 mask 在该 runqueue 锁内直接发布；排除 owner 时先同步目标
 内核栈映射，再以短暂 `Migrating` 串行化“源队列摘除—mask 发布—目标队列插入”，全程不同时
-持有两把 runqueue 锁，锁外才发送 RESCHEDULE。远程 `Running/Blocking` 仍明确返回
+持有两把 runqueue 锁，锁外才发送 RESCHEDULE。B37 又让普通 `publish_task()` 按继承的
+affinity 与 `nr_running + current_present` 选择首次 owner；启动期无 current 的 init/ktest
+runner 仍显式进入 CPU0，定向 ktest 的单 bit mask 则通过同一入口精确到达 AP。远程
+`Running/Blocking` 仍明确返回
 `EOPNOTSUPP`。
-该能力不改变默认策略：普通新任务和用户任务仍固定 CPU0。动态 kernel-global
+该能力不改变默认 mask：普通新任务和用户任务仍从 CPU0-only 开始。动态 kernel-global
 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29/B30/B31/B32/B33/B34/B35/B36 的受控迁移、真实 CPU/affinity 查询、current 自迁移、稳定
-Blocked/Queued 写侧和用户返回 RESCHEDULE 外推为通用用户迁移、完整远程 affinity、任意内核点
+B29/B30/B31/B32/B33/B34/B35/B36/B37 的受控迁移、真实 CPU/affinity 查询、current 自迁移、稳定
+Blocked/Queued 写侧、affinity-aware 首次放置和用户返回 RESCHEDULE 外推为默认全核调度、
+完整远程 affinity、任意内核点
 抢占、连续 range 或安全 CPU detach 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）

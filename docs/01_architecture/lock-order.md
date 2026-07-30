@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-30
+last_updated: 2026-07-31
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -108,7 +108,8 @@ B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`
   `TASK_MANAGER -> 单个目标 RunQueue` 提交 `Blocked -> Queued(cpu)`；
 - 批量移除也采用同一方向，并逐个定位 owner；任何时刻不得同时持有两个 runqueue；
 - 从 runqueue 撤回的 `Arc` 必须先释放队列锁，再执行 drop；
-- B18 仍固定目标为 CPU0，因此本节尚不证明远程 enqueue、迁移或 work stealing 正确。
+- B18 当时仍固定目标为 CPU0；B37 已用 affinity-aware 通用放置取代该历史限制，
+  但远程 enqueue 的唯一 owner 仍由 runqueue 锁和任务状态确立。
 
 ### 3.4 B19 AP 调度与内核栈发布约束
 
@@ -137,8 +138,9 @@ B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU
 顺序重新发布：
 
 1. 持有 `TASK_MANAGER`，确认状态为 `Blocked` 并从 interruptible registry 移除；
-2. 计算 `cpus_allowed & online & scheduler & !stopped`，优先选择仍在交集中的
-   `last_cpu`，无效时选交集的最低编号 CPU；
+2. 计算 `cpus_allowed & online & scheduler & !stopped`，对候选 CPU 的
+   `nr_running + current_present` 做无锁负载估算；`last_cpu` 合法且不高于最小负载 `+1`
+   时优先保留局部性，否则选最小负载，同负载选最低 CPU 编号；
 3. 在 `TASK_MANAGER -> 一个目标 RunQueue` 锁序下提交 `Blocked -> Queued(target)`；
 4. 释放目标 RunQueue，再释放 `TASK_MANAGER`；批量路径只保留目标 CPU bitmask；
 5. 外层排除本 CPU 后发送 `RESCHEDULE`，IPI handler 只置 per-CPU 原子提示；目标在 AP
@@ -172,6 +174,21 @@ B36 不为 queued 搬队同时锁定源/目标 runqueue。顺序固定为：
 旧 owner 时，必须先在旧队列锁内校准派生计数，再按最新状态重新定位。`Queued(cpu)` 状态下
 若同一 TCB 不在该 owner 队列，且该队列锁仍由检查方持有，应 fail-stop；不能把真实容器损坏
 误判为迁移，因为迁移回该 CPU 同样必须先取得这把锁。
+
+### 3.6.1 B37 affinity-aware 通用放置约束
+
+B37 把新任务发布、Blocked wake 和 current 自迁移的目标选择收敛到同一函数。
+选择器只依赖 per-CPU 原子提示，不依赖 processor 锁：
+
+- `nr_running` 只近似表示已排队数，`current_present` 只近似表示 current 槽非空；
+- 两个值只影响放置质量，不证明任务 owner，也不取代目标 runqueue 锁内的
+  affinity/状态复核；
+- `current_present` 在 current 槽安装后 Release 置位，在 idle 栈取回 current 后
+  Release 清位；读侧用 Acquire 取样；
+- 选择器不获取 `TASK_MANAGER`、processor 或 runqueue 锁，不等待 IPI/TLB ack，
+  因此可在既有 `TASK_MANAGER -> 单个 RunQueue` 顺序中使用；
+- BSP 在 scheduler-ready mask 发布前创建 init/ktest runner 时显式放到 CPU0，
+  这是启动时序例外，不是普通任务的隐式回退。
 
 ### 3.7 B21 内核栈退休与 shootdown 锁序
 

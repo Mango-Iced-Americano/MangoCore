@@ -439,27 +439,11 @@ impl TaskManager {
 /// 从任务允许且可调度的 CPU 中优先复用最近运行位置。
 ///
 /// Blocked 不拥有 runqueue；本函数在取得目标队列锁前完成选择，因此不会
-/// 同时持有两个 runqueue。若最近 CPU 已不可用，就从 `cpus_allowed` 与当前
-/// online/scheduler mask 的交集中选最低编号 CPU，而不是无条件回退 CPU0。
+/// 同时持有两个 runqueue。最近 CPU 负载没有明显偏高时保留 locality，
+/// 否则转向允许集合中的最低负载 CPU。
 fn select_wake_cpu(task: &TaskControlBlock) -> usize {
-    let runnable = task.cpus_allowed()
-        & crate::smp::online_cpu_mask()
-        & crate::smp::scheduler_cpu_mask()
-        & !crate::smp::stopped_cpu_mask();
-    assert_ne!(
-        runnable,
-        0,
-        "blocked task has no allowed online CPU: tid={} allowed={:#x}",
-        task.gettid(),
-        task.cpus_allowed()
-    );
-
     let last_cpu = task.last_cpu();
-    if last_cpu < usize::BITS as usize && runnable & (1usize << last_cpu) != 0 {
-        last_cpu
-    } else {
-        runnable.trailing_zeros() as usize
-    }
+    super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(last_cpu))
 }
 
 /// 在所有调度容器锁释放后敲响远程 doorbell。
@@ -520,9 +504,23 @@ pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
     }
 }
 
-/// 普通新任务仍默认首次发布到 CPU0。
+/// 按任务 affinity 和当前负载发布普通新任务。
+///
+/// clone/fork 已继承父线程 mask，不能再无条件投递 CPU0。调用 CPU 仅作为
+/// locality 提示；若它不在 mask 中或明显过载，选择器会返回其它合法 CPU。
 pub fn publish_task(task: Arc<TaskControlBlock>) {
-    publish_task_on(task, crate::smp::BOOT_CPU_ID)
+    // 启动期的 init/ktest runner 在 CPU0 首次进入 run_tasks() 前发布，此时
+    // 本 CPU 还没有 current，scheduler-entered mask 也尚未包含 bit0。
+    // 这条一次性 bootstrap 路径保持显式 CPU0；普通 clone 均有 current。
+    if super::processor::current_task().is_none() {
+        publish_task_on(task, crate::smp::BOOT_CPU_ID);
+        return;
+    }
+    let target = super::run_queue::select_runnable_cpu(
+        task.cpus_allowed(),
+        Some(crate::smp::cpu_id()),
+    );
+    publish_task_on(task, target)
 }
 
 /// 在 CPU 已切回 idle 栈后完成上一任务的状态和容器交接。

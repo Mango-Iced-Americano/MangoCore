@@ -22,8 +22,9 @@ tags: [process, scheduler, task-manager, processor]
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
 调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
-拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通新任务仍固定
-进入 CPU0，focused ktest 的短 kernel-only 任务可显式远程入队，并能在阻塞后
+拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通任务的初始 mask 仍为
+CPU0-only，但首次发布已按任务 affinity 和近似负载选点。focused ktest 的短 kernel-only
+任务可通过同一通用入口远程入队，并能在阻塞后
 由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
 发布到 CPU1，验证真实 trap/yield/exit；B29 再让同一探针先在 CPU0 运行，并在真实
 `sched_yield` 安全点唯一交给 CPU1。B31 已为每个 TCB 增加 `cpus_allowed`，所有入队
@@ -32,7 +33,8 @@ B34 又完成当前线程的运行期写侧：新 mask 排除本 CPU 时，sysca
 Running owner 迁到最低负载的合法 CPU。B35 继续闭合非 current 的稳定 Blocked 状态：
 registry 锁内更新 mask，后续 wake 直接按新允许集发布，不需要迁移 owner。B36 又闭合稳定
 Queued 状态：owner 仍合法时只更新 mask，排除 owner 时经短暂 `Migrating` 搬到新的单一
-runqueue。远程 Running/Blocking 和普通用户任务负载选择仍未实现。
+runqueue。B37 又让 clone/fork 继承的 mask 决定新任务的合法候选，并以调用 CPU 或
+`last_cpu` 作为 locality 提示；远程 Running/Blocking 仍未实现。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。B33 又让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
@@ -62,9 +64,10 @@ pub struct TaskManager {
 pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 ```
 
-每个 `CpuTaskState` 独占一个 `Mutex<RunQueue>` 和近似队列长度
-`nr_running`。这里的计数只表示队列成员，不包含 current；后续负载选择必须再计入
-current 槽，不能把它直接解释为完整 CPU load。
+每个 `CpuTaskState` 独占一个 `Mutex<RunQueue>`、近似队列长度 `nr_running` 和无锁
+`current_present` 提示。前者只表示队列成员，后者由 current 槽安装/清空路径以
+Release 更新；B37 用两者之和估算放置负载。它们都不参与 owner 正确性判断，瞬时误差
+最多造成次优选点。
 
 TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的运行位置。
 它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current
@@ -102,19 +105,26 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。AP 队列只接收显式受控任务：B19/B20 的 kernel-only 任务、B28 的单个
-无共享 I/O 用户探针，以及 B29 在 yield 后迁入的同一探针；普通生产任务
-`cpus_allowed` 和首次 owner 都固定 CPU0。
+调度域。普通任务仍从 CPU0-only mask 起步；显式设置过 affinity 的父线程 clone/fork
+时，子任务会继承该 mask，并由 B37 的通用选择器取得合法首次 owner。受控 ktest 任务也
+走同一入口，单 bit mask 仍保证它精确到达指定 AP。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
 不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
-稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；通用新任务
-目标选择、远程 Running/Blocking 强制迁移和 work stealing 仍未开放。
+稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；B37 已统一
+新任务与 wake 的 locality/负载选择，远程 Running/Blocking 强制迁移、默认全核 mask 和
+work stealing 仍未开放。
 
-### 3.1 首次发布到指定 CPU
+### 3.1 首次发布与精确目标入口
+
+`publish_task(task)` 是普通新任务入口。启动期尚无 current 的 init/ktest runner 显式发布到
+CPU0；其余调用从 `cpus_allowed & online & scheduler & !stopped` 中选择目标：preferred
+CPU 合法且负载不超过最小值 `+1` 时保留 locality，否则选择
+`nr_running + current_present` 最小、CPU ID 最小的候选。clone/fork 因而不会再把继承了
+非 CPU0 mask 的子任务错误投递到 CPU0。
 
 `publish_task_on(task, cpu)` 是首次发布的统一生产入口，kernel-only ktest 和 B28
 用户探针不再各自复制远程入队协议。顺序固定为：

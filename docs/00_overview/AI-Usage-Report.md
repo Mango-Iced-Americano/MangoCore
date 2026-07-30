@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-30
+> Coverage: 2026-04-01 to 2026-07-31
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -67,6 +67,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 当前线程运行期 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS 写侧对照、current-only 协议、冻结首错诊断与双架构回归 | `sched_setaffinity` 可让 current 从 CPU1 自迁回 CPU0；不新增状态/锁，远程 TID 保持显式未支持；双架构 focused 21/21、初赛基线不退化 |
 | SMP 远程 Blocked 线程 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Blocked/registry 双重所有权审计、wake 线性化、冻结只读复核与双架构回归 | 稳定 Blocked 线程可在 wake 前改 mask 并重定向到新 CPU；Running/Blocking/Queued 仍未支持；双架构 focused 22/22、初赛基线不退化 |
 | SMP 远程 Queued 线程 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS queued-migrating 对照、单 rq owner 交接、三轮冻结审查与双架构回归 | 稳定 Queued 线程可在不持双 rq 锁时迁移；Running/Blocking 仍未支持；双架构 focused 23/23、初赛基线不退化 |
+| SMP affinity-aware 新任务放置 | 2026-07-31 | GPT/Codex, DeepSeek | 继承 mask 与首次发布冲突审计、无锁 per-CPU 负载提示、双架构 8 核冻结验证 | 新建和唤醒任务统一按 affinity/在线状态/局部性/负载选择 CPU；双架构 focused 23/23，初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -756,6 +757,28 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   均为 23/23，第 12/13/14/22/23 项覆盖旧 wake、Blocked/Queued affinity、用户 probe 和 STOP；
   初赛分别 312/314、308/314，精确失败集合未扩大。
 
+### Case 33: SMP affinity-aware 新任务放置
+
+- Evidence: `docs/Work_Log/2026-07-31.md`、
+  `docs/Work_Log/evidence/2026-07-31/smp-b37-affinity-placement-summary.md`；DeepSeek 原始 prompt、
+  child manifest 与 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 定位首次发布与继承 mask 冲突，设计无锁放置提示、
+  实现、证据复核和文档；DeepSeek 做冻结只读反例审查、受限 Docker 串行验证和
+  日志初步归纳，不修改源码、不提交、不 push。
+- Problem: `fork`/`clone` 后的子线程继承父线程 mask，但旧 `publish_task()` 始终向
+  CPU0 发布；当 mask 已排除 CPU0 时会直接触发 affinity owner 断言。另一方面，
+  在 `TASK_MANAGER` 内取 processor 锁会扩大锁序和死锁风险。
+- Human action: 用 `cpus_allowed & online & scheduler & !stopped` 确立候选集，再用
+  `nr_running + current_present` 作放置质量提示；合法的偏好 CPU 在最小负载 `+1`
+  内时保留局部性。提示不承担 owner 正确性，最终状态仍由单个 runqueue 锁内提交。
+  scheduler-ready 前的 BSP init/ktest runner 是明确 CPU0 启动例外。
+- AI adjudication: 首轮审查提示了启动 mask 空集与锁序风险，均被纳入；
+  两个 wrapper 因工作树指纹在任务期间变化或旧容器挂载而 fail-closed，不当作代码失败；
+  最终只采信指向正确 worktree 且源码指纹不变的冻结任务。
+- Verification: `smp-b37-placement-validation-002` 串行通过 RV64/LA64 kernel build 与
+  8 核 focused SMP 23/23；`smp-b37-preliminary-validation` 通过双架构初赛回归，
+  RV64 312/314、LA64 308/314，失败仅为既有 busybox kill10 和 LA64 test_brk。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -830,6 +853,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b34-self-affinity-summary.md` | SMP 当前线程运行期 affinity | 记录 current-only 阶段边界、mask/target 发布、测试等待器首错、DeepSeek 误判裁决与双架构冻结门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b35-blocked-affinity-summary.md` | SMP 远程 Blocked 线程 affinity | 记录状态/registry 双重确认、与 wake 共锁线性化、DeepSeek 冻结审查裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b36-queued-affinity-summary.md` | SMP 远程 Queued 线程 affinity | 记录 `Migrating` 唯一 owner、单 rq 搬队、nice/exit 竞态裁决及双架构 8 核门禁 |
+| `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b37-affinity-placement-summary.md` | SMP affinity-aware 新任务放置 | 记录继承 mask 与固定 CPU0 发布冲突、无锁负载提示边界、DeepSeek 冻结审查裁决及双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

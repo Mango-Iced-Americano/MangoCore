@@ -824,15 +824,7 @@ impl TaskControlBlock {
             return false;
         }
 
-        let target_cpu = (0..crate::smp::configured_cpu_count())
-            .filter(|cpu| runnable & (1usize << cpu) != 0)
-            .min_by_key(|cpu| {
-                // nr_running 不包含 current；把 current 槽计入近似负载，
-                // 避免把正在执行内核任务的 CPU 误判成空闲 CPU。
-                let current = usize::from(super::processor::cpu_has_current(*cpu));
-                (super::run_queue::nr_running(*cpu) + current, *cpu)
-            })
-            .expect("runtime affinity has no online scheduler CPU");
+        let target_cpu = super::run_queue::select_runnable_cpu(runnable, None);
 
         // 目标栈映射必须先完成；在此之前既不发布新 mask，也不发布迁移目标，
         // 远端 CPU 因而不可能提前取得该任务。

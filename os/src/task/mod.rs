@@ -439,7 +439,7 @@ pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
 /// `publish_task_on()` 单独发布，B29 还只在显式 yield 安全点做一次受控迁移；
 /// 本入口会把任务的初始 `cpus_allowed` 收紧到指定 CPU，防止后续 wake 或
 /// owner 交接绕过测试声明的 placement。
-/// 普通用户任务仍默认首次发布到 CPU0。`f` 只能访问原子量、CPU-local/task
+/// 普通用户任务的初始 mask 仍默认为 CPU0。`f` 只能访问原子量、CPU-local/task
 /// 调度原语和已明确加锁的 registry；不得在 AP 上进入 console、网络、文件系统、
 /// 设备或用户 MM 路径。
 pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> {
@@ -457,7 +457,9 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     registry::register_process(&tcb.process);
     registry::register_task(&tcb);
     let handle = tcb.clone();
-    publish_task_on(tcb, cpu);
+    // 单 bit mask 保证仍精确到达指定 CPU，同时让所有 AP focused 用例
+    // 覆盖普通任务使用的 affinity-aware 初始放置入口。
+    publish_task(tcb);
     handle
 }
 

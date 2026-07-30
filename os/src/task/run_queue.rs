@@ -113,6 +113,37 @@ fn sub_running(cpu: usize, count: usize) {
     }
 }
 
+/// 从允许集合中选择一个当前可调度的 CPU。
+///
+/// `preferred` 只表达 locality，不拥有任务。它合法且负载不超过最小值 `+1`
+/// 时保留原 CPU；否则选择近似负载最小、编号最小的 CPU。所有计数都是无锁
+/// 快照，只影响放置质量，真正 owner 仍由后续 runqueue 临界区提交。
+pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+    let online = crate::smp::online_cpu_mask();
+    let schedulers = crate::smp::scheduler_cpu_mask();
+    let stopped = crate::smp::stopped_cpu_mask();
+    let runnable = allowed & online & schedulers & !stopped;
+    assert_ne!(
+        runnable, 0,
+        "task has no runnable CPU: allowed={:#x} online={:#x} schedulers={:#x} stopped={:#x}",
+        allowed, online, schedulers, stopped
+    );
+
+    let load = |cpu| nr_running(cpu) + super::processor::cpu_current_count(cpu);
+    let minimum = (0..crate::smp::configured_cpu_count())
+        .filter(|cpu| runnable & (1usize << cpu) != 0)
+        .min_by_key(|cpu| (load(*cpu), *cpu))
+        .expect("runnable CPU mask is empty");
+
+    preferred
+        .filter(|cpu| {
+            *cpu < crate::smp::configured_cpu_count()
+                && runnable & (1usize << *cpu) != 0
+                && load(*cpu) <= load(minimum).saturating_add(1)
+        })
+        .unwrap_or(minimum)
+}
+
 /// 首次把构造完成的任务发布到目标 CPU。
 pub(crate) fn publish(task: Arc<TaskControlBlock>, cpu: usize) {
     // 先验证 placement，再取得目标队列锁；失败不会留下半发布的状态或容器项。
@@ -197,17 +228,7 @@ pub(crate) fn set_queued_affinity(
         };
 
         let target_cpu = if mask & (1usize << source_cpu) == 0 {
-            let runnable = mask
-                & crate::smp::online_cpu_mask()
-                & crate::smp::scheduler_cpu_mask()
-                & !crate::smp::stopped_cpu_mask();
-            let target = (0..crate::smp::configured_cpu_count())
-                .filter(|cpu| runnable & (1usize << cpu) != 0)
-                .min_by_key(|cpu| {
-                    let current = usize::from(super::processor::cpu_has_current(*cpu));
-                    (nr_running(*cpu) + current, *cpu)
-                })
-                .expect("queued affinity has no online scheduler CPU");
+            let target = select_runnable_cpu(mask, None);
 
             // 必须在取得源 rq 锁、更不能在进入 Migrating 后等待 shootdown；
             // 同步失败时任务仍完整地留在原队列和旧 mask 下。

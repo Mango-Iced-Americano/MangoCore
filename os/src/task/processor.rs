@@ -21,7 +21,7 @@ use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
@@ -81,6 +81,8 @@ pub(crate) struct CpuTaskState {
     /// 本地排队任务数的无锁近似值，不包含 current。
     /// 精确成员关系仍以 `run_queue` 锁内的队列为准。
     pub(crate) nr_running: AtomicUsize,
+    /// 本 CPU 是否持有 current；仅供放置策略估算负载。
+    current_present: AtomicBool,
     current_pid: AtomicUsize,
     current_tid: AtomicUsize,
     /// 0 表示无记录，实际 syscall id 存为 id + 1。
@@ -93,6 +95,7 @@ impl CpuTaskState {
             processor: Mutex::new(Processor::new()),
             run_queue: Mutex::new(RunQueue::new()),
             nr_running: AtomicUsize::new(0),
+            current_present: AtomicBool::new(false),
             current_pid: AtomicUsize::new(0),
             current_tid: AtomicUsize::new(0),
             current_syscall_id: AtomicUsize::new(0),
@@ -398,6 +401,9 @@ fn dispatch_task(
         .current_tid
         .store(task.gettid(), Ordering::Relaxed);
     processor.current = Some(task);
+    // 先写入权威 current 槽再发布负载提示；提示的瞬时误差只影响放置质量，
+    // 不参与 owner 正确性判断。
+    task_state.current_present.store(true, Ordering::Release);
     drop(processor);
     sched_record_stage(
         sched_profile,
@@ -448,9 +454,11 @@ fn finish_current_switch_out(cpu: usize) {
     let task = {
         let mut processor = task_state.processor.lock();
         clear_current_task_cache(task_state);
-        processor
+        let task = processor
             .take_current()
-            .expect("idle resumed without a current task")
+            .expect("idle resumed without a current task");
+        task_state.current_present.store(false, Ordering::Release);
+        task
     };
     finish_switch_out(task, cpu);
 }
@@ -483,6 +491,15 @@ pub(crate) fn cpu_has_current(cpu: usize) -> bool {
         .lock()
         .current
         .is_some()
+}
+
+/// 返回指定 CPU 的无锁 current 计数，供放置策略计算近似负载。
+pub(crate) fn cpu_current_count(cpu: usize) -> usize {
+    usize::from(
+        crate::smp::task_state(cpu)
+            .current_present
+            .load(Ordering::Acquire),
+    )
 }
 
 /// 取得触发本次用户 trap 的 current 任务，并验证 CPU 所有权。
@@ -667,7 +684,7 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
 }
 
 // ── sched debug profile counters ────────────────────────────────────────
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as SchedOrdering};
+use core::sync::atomic::{AtomicU64, Ordering as SchedOrdering};
 
 static SCHED_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static SCHED_LOOPS: AtomicU64 = AtomicU64::new(0);
