@@ -80,14 +80,14 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B28 的单个用户探针不代表通用生产任务能力 |
+| 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成 getpid/yield/exit | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；受控用户探针已验证 CPU1 current、退出和 CPU0 回收 | 普通用户任务仍固定 CPU0，跨核迁移与进程组停止语义待实现 |
-| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用目标选择、affinity、迁移和 steal 尚未实现 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B29 已验证同一 TCB 从 CPU0 current 经 yield 交给 CPU1、退出和 CPU0 回收 | 普通用户任务默认仍固定 CPU0，通用迁移与进程组停止语义待实现 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布、回到 `last_cpu` 的 blocked wake，以及一次性 yield 迁移已完成受控验证 | 通用目标选择、affinity、queued/blocked 迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与用户迁移未完成 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活并在退出时完成双 CPU shootdown | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -757,6 +757,15 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   它没有制造并发 PTE 修改，因此不得表述为 generation race 或远端页级 shootdown 的新证据，
   也不代表同一用户任务已在 CPU0 与 CPU1 间迁移。AP timer、外部设备中断及 FS/net/driver
   仍关闭，普通用户任务继续首次发布到 CPU0。
+- B29 已补上“同一 TCB 真迁移”的最小生产闭环。TCB 只增加一次性 `migration_target`，且
+  只允许 New 任务独占持有者或本地 current 请求；目标 kernel stack 先同步，再发布请求。
+  源 current 在 idle 栈清空后，`requeue_after_switch()` 只锁目标队列，完成
+  `Running(source) -> Queued(target)`，锁外再发 `RESCHEDULE`。没有新增 `TaskStatus`，也不
+  同时持有两个 runqueue。
+- B29 ktest 把探针先发布到 CPU0，真实 getpid/yield 后在 CPU1 从原 syscall 栈恢复并退出。
+  首轮双架构 RED 暴露 CPU0 runner 关中断自旋会阻塞 CPU1 的退出期 user-TLB shootdown；
+  等待区改用既有受控中断窗口后，双架构 21/21 PASS。该证据覆盖 cached mask `0x3` 的退出
+  shootdown，但仍不覆盖并发 PTE writer、普通任务 affinity、blocked/queued 迁移或共享 I/O。
 
 #### 退出条件
 

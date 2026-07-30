@@ -435,10 +435,11 @@ pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
 
 /// 在指定 CPU 创建一个 kernel-only ktest 任务。
 ///
-/// 该入口只用于验证 AP 调度闭环，不向普通任务开放 CPU 选择。B28 的用户探针
-/// 通过通用 `publish_task_on()` 单独发布；普通用户任务、blocked wake 和迁移仍
-/// 固定 CPU0。`f` 只能访问原子量、CPU-local/task 调度原语和已明确加锁的
-/// registry；不得在 AP 上进入 console、网络、文件系统、设备或用户 MM 路径。
+/// 该入口只用于验证 AP 调度闭环，不向普通任务开放 CPU 选择。用户探针通过
+/// `publish_task_on()` 单独发布，B29 还只在显式 yield 安全点做一次受控迁移；
+/// 普通用户任务仍默认首次发布到 CPU0。`f` 只能访问原子量、CPU-local/task
+/// 调度原语和已明确加锁的 registry；不得在 AP 上进入 console、网络、文件系统、
+/// 设备或用户 MM 路径。
 pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> {
     let tid_handle = tid_alloc();
     let kstack = crate::hal::kstack_alloc();

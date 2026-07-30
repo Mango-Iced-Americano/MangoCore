@@ -111,16 +111,23 @@ pub(crate) fn publish(task: Arc<TaskControlBlock>, cpu: usize) {
     add_running(cpu);
 }
 
-/// 把已经切回 idle 的运行任务重新交给本地 runqueue。
-pub(crate) fn requeue_running(task: Arc<TaskControlBlock>, cpu: usize) {
-    let mut queue = state(cpu).run_queue.lock();
+/// 把已经切回源 idle 栈的运行任务交给目标 runqueue。
+///
+/// 源 current 已在调用前清空，因此这里只锁目标队列就能完成唯一所有权交接；
+/// `source_cpu != target_cpu` 时即为一次协作式迁移。
+pub(crate) fn requeue_after_switch(
+    task: Arc<TaskControlBlock>,
+    source_cpu: usize,
+    target_cpu: usize,
+) {
+    let mut queue = state(target_cpu).run_queue.lock();
     task.require_sched_transition(
-        TaskStatus::Running(cpu),
-        TaskStatus::Queued(cpu),
-        "finish yielded task switch-out",
+        TaskStatus::Running(source_cpu),
+        TaskStatus::Queued(target_cpu),
+        "requeue task after switch-out",
     );
     queue.push_back(task);
-    add_running(cpu);
+    add_running(target_cpu);
 }
 
 /// 唤醒方在持有 interruptible registry 锁时提交 Blocked -> Queued。

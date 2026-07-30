@@ -2,8 +2,8 @@
 //!
 //! 每个 CPU 通过 `PerCpu.task_state` 持有自己的 current 槽和 idle 上下文。
 //! CPU0 额外负责全局 housekeeping；AP 只处理本地 runqueue 和 IPI。普通
-//! 用户任务仍只由 CPU0 调度；AP 只接收受控的 kernel-only 任务，以及 SMP
-//! ktest 显式发布的无共享 I/O 用户探针。
+//! 用户任务仍默认发布到 CPU0；AP 只接收受控的 kernel-only 任务，以及 SMP
+//! ktest 显式发布或在 yield 安全点迁入的无共享 I/O 用户探针。
 //!
 //! # Locking
 //!
@@ -342,9 +342,10 @@ pub fn run_tasks() -> ! {
 /// 由 CPU0 独占。空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的
 /// doorbell 因局部 IPI source 已开启而必定使 wait 返回。
 ///
-/// AP 生产任务仍限于 B19 的短生命周期 kernel-only 函数；B28 只额外运行一个
-/// 不访问共享 I/O 的用户探针，并借 syscall 窗口响应 IPI。AP timer 仍关闭，
-/// 所以通用生产任务在补齐抢占安全点和共享子系统审计前不得复用这个入口。
+/// AP 生产任务仍限于 B19 的短生命周期 kernel-only 函数；B29 只额外接收一个
+/// 从 CPU0 yield 迁入、且不访问共享 I/O 的用户探针，并借 syscall 窗口响应 IPI。
+/// AP timer 仍关闭，所以通用生产任务在补齐抢占安全点和共享子系统审计前不得
+/// 复用这个入口。
 fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
     let _ = crate::hal::local_irq_save();
     loop {

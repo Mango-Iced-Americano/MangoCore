@@ -25,7 +25,8 @@ tags: [process, scheduler, task-manager, processor]
 拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通新任务仍固定
 进入 CPU0，focused ktest 的短 kernel-only 任务可显式远程入队，并能在阻塞后
 由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
-发布到 CPU1，验证真实 trap/yield/exit；这不是普通用户任务的目标选择策略。
+发布到 CPU1，验证真实 trap/yield/exit；B29 再让同一探针先在 CPU0 运行，并在真实
+`sched_yield` 安全点唯一交给 CPU1。这仍不是普通用户任务的目标选择策略。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -61,6 +62,10 @@ TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的
 它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current
 归属始终由 `sched_state` 和对应 CPU 的容器共同决定。
 
+TCB 的 `migration_target` 也不是 owner。它只是一项一次性请求：任务真正切回源 CPU
+idle 栈后才被取走，并决定本次 `Running(source) -> Queued(target)` 的目标；仅登记请求
+不会修改 owner，调用者还必须进入真实的调度切换。
+
 ## 3. RunQueue 选择策略
 
 `RunQueue::pop_next()` 有两个路径：
@@ -74,14 +79,14 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。AP 队列只接收显式受控任务：B19/B20 的 kernel-only 任务和 B28 的单个
-无共享 I/O 用户探针；普通生产任务 owner 固定 CPU0。
+调度域。AP 队列只接收显式受控任务：B19/B20 的 kernel-only 任务、B28 的单个
+无共享 I/O 用户探针，以及 B29 在 yield 后迁入的同一探针；普通生产任务 owner 固定 CPU0。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
 不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
-通用新任务目标选择、affinity、迁移和 work stealing 仍未开放。
+通用新任务目标选择、远程强制迁移、affinity 和 work stealing 仍未开放。
 
 ### 3.1 首次发布到指定 CPU
 
@@ -96,6 +101,28 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 这个接口只允许调用者明确指定目标，并未实现负载选择。普通 `publish_task()` 仍把
 新任务交给 CPU0；因此 B28 证明“指定 CPU 可以安全执行一个用户任务”，不证明默认
 用户任务已经多核化。
+
+### 3.2 显式 yield 后迁移
+
+`TaskControlBlock::request_migration(target)` 当前只接受两类调用者：尚未发布的 `New`
+任务独占持有者，或本 CPU 的 current Running 任务。入口先验证目标 CPU 已 online 且进入
+scheduler，再同步目标的 kernel-stack TLB，最后才 Release 发布一次性目标。
+
+任务调用 `schedule()` 后仍保持 `Running(source)`，直到源 idle 栈恢复并清空 source
+current。`finish_switch_out()` 此时取走目标，并调用：
+
+```text
+requeue_after_switch(task, source, target)
+    lock target runqueue
+    Running(source) -> Queued(target)
+    enqueue target
+    unlock
+    if remote: RESCHEDULE IPI
+```
+
+因此整个迁移只锁目标 runqueue，不需要 `Migrating` 状态，也没有同时锁源/目标队列。
+目标 CPU fetch 时再执行 `Queued(target) -> Running(target)` 并更新 `last_cpu`。若任务真正
+进入 Blocked 或 Zombie，未消费请求会被丢弃；本节点不改变 blocked wake 的目标语义。
 
 ## 4. Processor
 
@@ -315,6 +342,8 @@ idle: clear current -> Blocking(cpu) -> Blocked
 - `Queued(cpu)` 退出前必须先从相应队列移除并转为 `Blocked`；直接转 Zombie 会 fail-stop；
 - 必成功的 publish/fetch/switch-out 迁移在所有构建中 fail-stop；只有重复 wake 使用
   允许失败的 CAS 并返回 `AlreadyWaken`；
+- yield 迁移只能在源 current 已于 idle 栈清空后交给目标队列；`migration_target` 不能直接
+  修改 owner，也不能由任意远程 CPU 写入；
 - runqueue 锁内不获取 `task.inner`；公平选择只读取原子 nice/vruntime hint。
 - publish/fetch/yield 只锁一个 runqueue；Blocked wake 和批量 remove 才按固定顺序
   `TASK_MANAGER -> 单个 RunQueue`，并且锁不跨 context switch、析构或等待点。

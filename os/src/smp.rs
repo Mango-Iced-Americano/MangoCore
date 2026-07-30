@@ -942,7 +942,8 @@ pub(crate) fn schedulers_released() -> bool {
 /// 发布 scheduler-ready，并等待所有 AP 进入各自的本地调度循环。
 ///
 /// 该函数必须在 VFS、任务 registry 等 kernel-only 任务依赖的全局对象完成
-/// 初始化后调用。普通用户任务仍固定在 CPU0，不能据此解除用户 MM 限制。
+/// 初始化后调用。普通用户任务仍默认首次发布到 CPU0；B29 的受控迁移不能据此
+/// 外推为已经解除用户 MM 与共享子系统限制。
 pub fn release_secondary_schedulers() {
     assert_eq!(self::cpu_id(), BOOT_CPU_ID);
     let online = online_cpu_mask();

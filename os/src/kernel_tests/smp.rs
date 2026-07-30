@@ -175,8 +175,8 @@ pub fn tests() -> Vec<KernelTest> {
             kernel_stack_reclaim_waits_for_shootdown,
         ),
         KernelTest::new(
-            "smp::ap_user_syscall_round_trip",
-            ap_user_syscall_round_trip,
+            "smp::user_task_migrates_on_yield",
+            user_task_migrates_on_yield,
         ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
@@ -256,8 +256,8 @@ fn build_user_probe_task() -> Result<Arc<crate::task::TaskControlBlock>, &'stati
     Ok(task)
 }
 
-/// CPU0 发布真实用户任务到 CPU1，验证两次返回用户态、一次退出 trap 和完整回收。
-fn ap_user_syscall_round_trip() -> Result<(), &'static str> {
+/// 用户任务先在 CPU0 运行，再于显式 yield 安全点迁移到 CPU1。
+fn user_task_migrates_on_yield() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
         return Err("AP user probe setup did not run on CPU0");
     }
@@ -284,23 +284,37 @@ fn ap_user_syscall_round_trip() -> Result<(), &'static str> {
     process.set_parent(Some(Arc::downgrade(&parent)));
 
     let weak_task = Arc::downgrade(&task);
-    crate::task::publish_task_on(task.clone(), 1);
-    let deadline =
-        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
-    while !process.is_zombie()
-        || task.task_status() != crate::task::TaskStatus::Zombie
-        || crate::task::processor::cpu_has_current(1)
-        || crate::task::run_queue_count(1) != 0
-        || crate::task::zombie_queue_count_fast() == 0
-    {
-        if crate::hal::get_time() >= deadline {
-            return Err("AP user probe did not quiesce before timeout");
+    // New 状态由测试独占，可在首次发布前安全登记一次性目标。任务仍先进入
+    // CPU0：只有它执行 yield、切回 CPU0 idle 栈后，请求才会被消费。
+    task.request_migration(1);
+    crate::task::publish_task_on(task.clone(), crate::smp::BOOT_CPU_ID);
+    // runner 在 CPU0 让出一次：FIFO 先运行 probe；probe 的 sched_yield
+    // 再把 runner 留在 CPU0，并将自身唯一交给 CPU1。
+    crate::task::suspend_current_and_run_next();
+
+    // CPU1 退出时会撤销已经在 CPU0/CPU1 激活过的 MM。runner 若在这里
+    // 关中断自旋，CPU0 就无法确认来自 CPU1 的 user-TLB shootdown，双方
+    // 会一直等到协议超时。受控窗口只让 CPU0 处理 timer/IPI；不在窗口内
+    // 获取普通锁，也不改变生产调度状态。
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        while !process.is_zombie()
+            || task.task_status() != crate::task::TaskStatus::Zombie
+            || crate::task::processor::cpu_has_current(1)
+            || crate::task::run_queue_count(1) != 0
+            || crate::task::zombie_queue_count_fast() == 0
+        {
+            if crate::hal::get_time() >= deadline {
+                return Err("migrated user probe did not quiesce before timeout");
+            }
+            core::hint::spin_loop();
         }
-        core::hint::spin_loop();
-    }
+        Ok(())
+    })?;
 
     if task.last_cpu() != 1 {
-        return Err("user probe did not run on its target AP");
+        return Err("user probe did not resume on its migration target");
     }
     let reaped = crate::task::ProcessManager::wait_child(
         &parent,

@@ -112,6 +112,9 @@ impl UtsNamespace {
 
 use super::net_namespace::INIT_NET_NAMESPACE;
 
+/// 没有待处理的协作式迁移请求。
+const NO_MIGRATION_TARGET: usize = usize::MAX;
+
 /// 任务控制块
 pub struct TaskControlBlock {
     // 不可变字段
@@ -157,6 +160,12 @@ pub struct TaskControlBlock {
     /// `Blocked` 不拥有 CPU，这个字段只为重新唤醒提供局部性提示，不参与
     /// runnable/current 唯一所有权判定；真实 owner 始终由 `sched_state` 给出。
     last_cpu: AtomicUsize,
+    /// 下一次协作式 yield 完成切栈后要进入的 CPU。
+    ///
+    /// 该字段只是一次性请求，绝不表示当前 owner；当前 owner 仍只由
+    /// `sched_state` 决定。请求在源 CPU 的 idle 栈上被原子取走；仅登记请求
+    /// 不改变 owner，任务必须随后真正进入调度切换。
+    migration_target: AtomicUsize,
     // 可共享&可变字段
     /// I/O 等待定时器是否已挂入 KERNEL_TIMER_QUEUE。
     /// 为 true 时，wait_io_core_with_queue 不再添加第二个定时器（Option B），
@@ -705,6 +714,73 @@ impl TaskControlBlock {
     pub(crate) fn note_running_cpu(&self, cpu: usize) {
         self.last_cpu.store(cpu, Ordering::Release);
     }
+    /// 请求任务在下一次协作式 yield 后迁移到目标 CPU。
+    ///
+    /// 为避免远程请求与阻塞/退出状态竞争，本阶段只允许尚未发布的 `New`
+    /// 任务，或正在调用本函数的 current 任务设置请求。目标内核栈映射先完成
+    /// TLB 同步，再用 Release 发布请求，idle 收尾侧不会看到未同步的目标。
+    pub(crate) fn request_migration(&self, target_cpu: usize) {
+        assert!(target_cpu < crate::smp::configured_cpu_count());
+        let target_bit = 1usize << target_cpu;
+        assert_ne!(
+            crate::smp::online_cpu_mask() & target_bit,
+            0,
+            "cannot migrate task to offline CPU {}",
+            target_cpu
+        );
+        assert_ne!(
+            crate::smp::scheduler_cpu_mask() & target_bit,
+            0,
+            "cannot migrate task before CPU {} enters scheduler",
+            target_cpu
+        );
+
+        match self.task_status() {
+            TaskStatus::New => {}
+            TaskStatus::Running(source_cpu) if source_cpu == crate::smp::cpu_id() => {
+                let current = super::processor::current_task()
+                    .expect("running task requested migration without local current");
+                assert!(
+                    core::ptr::eq(Arc::as_ptr(&current), self),
+                    "only the current task may request its own migration"
+                );
+                assert_ne!(source_cpu, target_cpu, "migration target equals source CPU");
+            }
+            status => panic!(
+                "migration request requires New or local Running task: tid={}, status={:?}",
+                self.gettid(),
+                status
+            ),
+        }
+
+        crate::smp::synchronize_kernel_mapping(target_cpu).unwrap_or_else(|error| {
+            panic!(
+                "failed to synchronize task {} kernel stack to CPU {}: {:?}",
+                self.gettid(),
+                target_cpu,
+                error
+            )
+        });
+        if let Err(previous) = self.migration_target.compare_exchange(
+            NO_MIGRATION_TARGET,
+            target_cpu,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            panic!(
+                "task {} already has migration target CPU {}",
+                self.gettid(),
+                previous
+            );
+        }
+    }
+    /// 取走一次性迁移请求；只能在任务已经切回源 CPU idle 栈后调用。
+    pub(crate) fn take_migration_target(&self) -> Option<usize> {
+        let target = self
+            .migration_target
+            .swap(NO_MIGRATION_TARGET, Ordering::Acquire);
+        (target != NO_MIGRATION_TARGET).then_some(target)
+    }
     /// 尝试完成一次精确的调度状态迁移。
     ///
     /// AcqRel 同时发布旧 owner 的写入，并让新 owner 观察到此前发布的数据。
@@ -1021,6 +1097,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
+            migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1159,6 +1236,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
+            migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1738,6 +1816,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
+            migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),
@@ -2002,8 +2081,8 @@ impl Drop for TaskControlBlock {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 /// 任务的调度所有权状态。
 ///
-/// `Queued(cpu)` 和 `Running(cpu)` 直接携带 owner，后续拆分 per-CPU runqueue
-/// 时不需要再次替换状态表示；当前用户任务的 owner 恒为 CPU0。
+/// `Queued(cpu)` 和 `Running(cpu)` 直接携带 owner。协作式迁移仍使用这两个
+/// 状态表达唯一所有权，不额外引入中间状态。
 pub enum TaskStatus {
     New,
     Queued(usize),

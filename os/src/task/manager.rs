@@ -437,7 +437,8 @@ impl TaskManager {
 }
 
 /// 优先复用任务最近运行 CPU；当前没有 CPU 热插拔，回退只防御损坏的提示
-/// 或终止阶段已经离线的目标。普通用户任务从未离开 CPU0，因此行为不变。
+/// 或终止阶段已经离线的目标。B29 迁移探针阻塞时也会遵循这个统一规则；
+/// 普通生产任务的首次发布策略不变。
 fn select_wake_cpu(task: &TaskControlBlock) -> usize {
     let cpu = task.last_cpu();
     let bit = (cpu < crate::smp::configured_cpu_count()).then(|| 1usize << cpu);
@@ -520,7 +521,18 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
     loop {
         match task.task_status() {
             TaskStatus::Running(owner) if owner == cpu => {
-                super::run_queue::requeue_running(task, cpu);
+                let target = task.take_migration_target().unwrap_or(cpu);
+                super::run_queue::requeue_after_switch(task, cpu, target);
+                // requeue_after_switch 已释放目标队列锁；远程 doorbell 只能
+                // 在任务对目标 CPU 可见之后发送。
+                if target != cpu {
+                    crate::smp::request_reschedule(target).unwrap_or_else(|error| {
+                        panic!(
+                            "failed to wake CPU {} after task migration: {}",
+                            target, error
+                        )
+                    });
+                }
                 return;
             }
             TaskStatus::Blocking(owner) if owner == cpu => {
@@ -530,10 +542,15 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
                     .try_sched_transition(TaskStatus::Blocking(cpu), TaskStatus::Blocked)
                     .is_ok()
                 {
+                    // B29 不把阻塞语义扩成迁移协议；任务真正睡眠时取消尚未
+                    // 消费的 yield 请求，后续 wake 仍按 last_cpu 选择目标。
+                    let _ = task.take_migration_target();
                     return;
                 }
             }
             TaskStatus::Zombie => {
+                // 终态任务不会再次 yield，不能把一次性请求带入回收路径。
+                let _ = task.take_migration_target();
                 TASK_MANAGER.lock().enqueue_zombie(task);
                 return;
             }

@@ -305,8 +305,9 @@ B16 首次收口用户 PTE 写入，B22 完成 cached CPU/generation 激活侧�
 `record_change -> seal -> execute`，并完成锁外等待与 ack 前 frame 不复用；B24 接通
 RV64 单页 RFENCE；B25 完成 LA64 MM-owned ASID 与全 CPU flush-before-reuse epoch
 协议；B26 以每发起 CPU 固定 slot 完成 LA64 ASID+VPN 远端失效；B27 完成 RV64
-ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和条件式 trap 切根。连续 range、安全
-CPU detach 和普通用户迁移仍未完成。
+ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和条件式 trap 切根；B29 又验证了同一
+用户任务可在 `sched_yield` 安全点携带同一 MM 从 CPU0 迁移至 CPU1。连续 range、安全
+CPU detach、默认亲和性和通用用户迁移仍未完成。
 
 ## 13. 调试核对点
 

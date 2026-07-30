@@ -3,7 +3,7 @@ title: "进程与任务子系统 (Process and Task Subsystem)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-30
 tags: [process, task, scheduler, signal, futex]
 ---
 
@@ -15,9 +15,10 @@ MangoCore 的执行实体分为线程级 `TaskControlBlock` 和进程级 `Proces
 
 调度器位于 `task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。每个 CPU
 拥有独立 RunQueue、current 槽和 idle context；全局 TaskManager 只保留
-interruptible/zombie/timer registry。AP 已进入精简本地调度循环，但当前只有 focused
-ktest 的短 kernel-only 任务可显式远程入队，并可在阻塞后由统一 wake 路径重新发布到
-最近运行的 AP；普通新任务和用户任务仍固定 CPU0。
+interruptible/zombie/timer registry。AP 已进入精简本地调度循环；focused ktest 的短
+kernel-only 任务可显式远程入队，并可在阻塞后由统一 wake 路径重新发布到最近运行的 AP。
+B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；普通新任务和用户任务仍
+默认首次发布到 CPU0，通用 affinity、负载均衡和迁移尚未开放。
 默认 nice 为 0 的本地队列按 FIFO 取任务；存在非零 nice 任务时进入简化公平选择路径。
 
 ## 依据范围

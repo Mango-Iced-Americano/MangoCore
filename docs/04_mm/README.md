@@ -3,7 +3,7 @@ title: "内存管理子系统 (Memory Management)"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-30
 tags: [mm, vma, mmap, page-fault, pagetable, mmu-gather, smp]
 ---
 
@@ -11,7 +11,7 @@ tags: [mm, vma, mmap, page-fault, pagetable, mmu-gather, smp]
 
 ## 概述
 
-MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `MmuGather` 汇入一次 VM 更新，再由 `AddressSpace` 在解锁后完成 generation、全用户 IPI/ack 和 frame 延迟释放。当前仍使用单调 cached CPU 集合与全量失效，普通用户任务也仍固定 CPU0；range shootdown、MM-owned LoongArch ASID 和用户迁移尚未完成。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
+MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `MmuGather` 汇入一次 VM 更新，再由 `AddressSpace` 在解锁后完成 generation、远端 IPI/ack 和 frame 延迟释放。RV64 与 LA64 均使用 MM-owned ASID，并支持按 ASID+VPN 精确失效单页；多页范围目前仍退化为该 MM 的全量失效。cached CPU 集合仍是单调累积模型，B29 只打通了同一用户任务在 `sched_yield` 安全点上的受控迁移，默认亲和性、负载均衡和通用迁移尚未开放。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
 
 ## 依据范围
 

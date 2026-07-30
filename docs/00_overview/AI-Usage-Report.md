@@ -596,6 +596,30 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   owner helper、RW→RX 和测试确定性收敛，按风险不重复整套初赛。仓库 lint 继续因既有
   baseline 漂移而 RED，未刷新基线。
 
+### Case 26: SMP 用户任务显式 yield 安全点迁移
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b29-yield-migration-summary.md`；原始 DeepSeek prompt、
+  报告和 Docker/QEMU 日志继续只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计一次性迁移请求、调度所有权交接和 focused 用例，并独立裁决日志；
+  DeepSeek 负责冻结 patch 只读审查、双架构 focused/初赛执行和结果归纳。提交仍由 GPT 在用户
+  明确批准后执行。
+- Problem: B28 的用户探针从第一次 dispatch 起就在 CPU1，不能证明同一内核栈、trap frame
+  和 MM 在 syscall 内 yield 后可跨 CPU 恢复。直接增加 `Migrating` 状态或同时锁两个 runqueue
+  会扩大状态机并破坏既有锁序。
+- Human action: TCB 增加不具有 owner 语义的一次性 `migration_target`；请求先同步目标内核栈
+  TLB，再 Release 发布。源任务真正切回 idle 栈并清空 current 后，只锁目标 runqueue 完成
+  `Running(source) -> Queued(target)`，锁外发送 IPI。Blocking/Zombie 丢弃未消费请求，未把
+  本节点扩成完整 affinity。
+- AI adjudication: DeepSeek 的冻结 diff 审查没有阻断问题；GPT/Codex 接受内存序收紧，拒绝
+  跳过 kernel-stack TLB 同步。首轮测试报告误称 panic 发生在构造期；根据 shootdown 等待集合
+  排除了 current，而 missing CPU 为 0，GPT/Codex 反推出发起者是 CPU1，定位为迁移后退出时
+  CPU0 runner 关中断无法 ack。最终双架构 PASS 验证该判断。
+- Verification: 最终 RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 21/21 PASS，
+  `smp::user_task_migrates_on_yield` 明确通过，online mask 均为 `0xff`。同一生产 diff 的
+  `mask=0x003` 初赛分别为 312/314、308/314，四组 END 完整、失败集合未扩大。没有把模型
+  文本、进程退出 0 或总用例数单独当作 PASS。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -662,6 +686,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b26-precise-shootdown-summary.md` | SMP LoongArch ASID+VPN 精准 shootdown | 记录固定 per-CPU slot、页对硬件粒度、DeepSeek 冻结验证与人工证据边界修正 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b27-rv64-asid-summary.md` | SMP RV64 MM-owned ASID 与页级 RFENCE FID 2 | 记录 ASIDLEN 探测、flush-before-reuse、trap-return IRQ-off 交接、DeepSeek 只读审查与双架构 Docker/QEMU 门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b28-ap-user-summary.md` | SMP 受控 AP 用户态闭环 | 记录远程首次发布顺序、trap owner/noreturn Arc、RW→RX 探针、双架构 21/21 与初赛非回归边界 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b29-yield-migration-summary.md` | SMP 用户任务显式 yield 迁移 | 记录一次性目标、单 runqueue owner 交接、首轮 shootdown ack RED、DeepSeek 误判裁决、双架构最终 21/21 与初赛非回归 |
 
 ## 9. 交互记录与留痕方式
 

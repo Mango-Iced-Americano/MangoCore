@@ -50,7 +50,8 @@ frame 内开放受控 timer/IPI 窗口。B19 又建立 scheduler-ready 屏障和
 调度循环，B20 允许受控 kernel-only 任务阻塞后回到最近运行 AP。B28 再增加一个
 严格受限的用户探针：CPU0 构造并发布，CPU1 进入真实用户态执行 getpid/yield/exit，
 CPU0 负责观察与回收。它不访问文件系统、网络或设备；普通新任务和用户任务仍由
-CPU0 独占。
+CPU0 独占。B29 将同一探针改为先在 CPU0 起跑，再在 syscall 内真实 yield 后从 CPU1
+恢复；这动态覆盖了跨 CPU 恢复 `schedule()`、trap current owner 和 MM 激活。
 
 ## 启动栈与 BSS 边界
 
@@ -280,7 +281,10 @@ IRQ-off 状态下短暂持有 `task.inner`，只用于取参数和更新入口�
 因此入口在调用 syscall 前显式 drop；只有返回型 syscall 才重新调用
 `current_trap_task()`。后一次调用会重新读取 CPU ID，既避免引用泄漏，也为未来
 “syscall 内 yield 后在另一 CPU 恢复”保留正确 owner 校验语义。B28 动态覆盖两次
-返回用户态和一次非返回 exit trap，不把 exit 描述成一次完整往返。
+返回用户态和一次非返回 exit trap，不把 exit 描述成一次完整往返。B29 已把此前的
+“未来”变成受控现实：yield 前 trap 属于 CPU0，`schedule()` 在 CPU1 返回后，syscall
+handler 重新取得 `Running(1)` current，随后由 CPU1 的 `trap_return()` 重写 CPU-local
+指针并激活同一 MM。
 
 `TaskContext` 与双架构 `__switch` 只保存 callee-saved GPR，不保存
 `sstatus.SIE` 或 `CRMD.IE`。因此 `schedule()` 把中断状态作为任务的
@@ -316,8 +320,8 @@ deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 ti
 可以在同一轮返回中处理；`run_tasks()` 则在取得 Processor/ready queue 锁前
 消费 pending。安全点以 Acquire 取走 pending，在关中断状态下完成旧 timer
 工作并按完整队列重新编程 one-shot；只有全部工作结束后才决定是否在这个
-显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback；B28 用户探针的
-yield 是显式安全点，不依赖 AP timer 抢占。
+显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback；B29 用户探针的
+跨核 yield 是显式安全点，不依赖 AP timer 抢占。
 
 该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。普通长 syscall
 现在可在任务 yield/block 之前、之后响应 timer/IPI；后续 TLB shootdown
@@ -355,6 +359,7 @@ AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。
 B14 还必须在窗口内真实 yield：新任务首次从 idle 切入时观测
 IRQ-off，原任务恢复后观测 IRQ-on，并在恢复后完成一次真实
 AP→BSP IPI reply。
-B28 还要求双架构 8 核日志实际出现 `smp::ap_user_syscall_round_trip`，并验证
-CPU1 执行、CPU0 wait/reap、退出后的 current/runqueue/zombie 与 TCB 强引用都已收口；
+B29 要求双架构 8 核日志实际出现 `smp::user_task_migrates_on_yield`，并验证
+CPU0 起跑、yield 后 CPU1 续跑、CPU0 wait/reap、退出后的 current/runqueue/zombie 与
+TCB 强引用都已收口；
 仅看到测试总数或 QEMU 退出 0 不足以判定通过。

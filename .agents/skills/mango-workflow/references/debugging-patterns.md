@@ -608,6 +608,12 @@
 - **典型死锁**: PTE 修改方在进程 VM/PTE 锁内等待远端 ack；目标 CPU 已关闭本地 IRQ并在
   page fault 中等待同一锁。发送方等目标 handler，目标等发送方放锁，开放发送方 IRQ也
   无法打破这条环。
+- **测试等待者陷阱**: 即使发送方已经释放全部 VM 锁，曾缓存该 MM 的 CPU 若在 kernel
+  test/诊断代码中关中断自旋，也无法处理 shootdown IPI。测试等待区应使用既有受控中断
+  窗口或周期进入 scheduler 安全点，不能靠延长 timeout、缩小 target mask 或跳过回收过关。
+- **日志判读**: timeout 中的 `cpu_id/missing` 通常是未 ack 的目标，不是发起者。若实现先从
+  targets 排除 current，再等待 remote，可由 missing CPU 反推出发起 CPU；先核对这条集合
+  运算，再判断失败发生在迁移前还是迁移后，避免把退出期 shootdown 误报成构造期失败。
 - **正确分层**:
   1. 激活侧与修改侧用同一个 VM 锁串行化“加入 mask”与“推进 generation + 快照目标”；
   2. 激活侧固定先 join、再读 generation，落后时本地 flush 并重查；

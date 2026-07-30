@@ -222,7 +222,8 @@ rust_main()
 ktest 分支位于 `add_initproc()` 之前，因此不会创建 PID1；进入该分支前文件系统、网络、
 块设备和任务 registry 已初始化，scheduler-ready 已发布。runner 固定 CPU0，SMP focused
 测试可创建受控的 AP kernel-only 任务。B28 另有一个 hermetic 用户探针：CPU0 构造并
-发布到 CPU1，依次触发 getpid、yield 和非返回 exit，再由 CPU0 wait/reap；它不进入
+发布到 CPU1，依次触发 getpid、yield 和非返回 exit，再由 CPU0 wait/reap。B29 将该用例
+升级为先发布 CPU0、在真实 yield 后迁移到 CPU1，并覆盖两个 CPU 的 MM shootdown；它不进入
 FS/net/driver，也不表示普通用户任务已开放多核调度。
 
 ### 目录结构
@@ -476,9 +477,11 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28 这类首次改变用户 trap CPU 的节点先执行双架构初赛门禁，再在最终小范围收敛后重复
-双架构 SMP focused。验收必须在 TAP 中直接看到 `smp::ap_user_syscall_round_trip`，不能
-只依据 21/21 总数；exit 是非返回 trap，日志/文档不得把它描述为第三次完整往返。
+B28/B29 这类改变用户 trap CPU 或 current owner 的节点先执行双架构初赛门禁，再在最终
+小范围收敛后重复双架构 SMP focused。B29 验收必须在 TAP 中直接看到
+`smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
+shootdown missing CPU 与发起 CPU。exit 是非返回 trap，日志/文档不得把它描述为第三次
+完整往返。
 
 ### Bug 下沉流程
 
