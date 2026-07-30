@@ -1358,6 +1358,7 @@ impl File {
 
     /// 从 UserBuffer 写入文件指定位置（不推进 offset）。
     pub fn pwrite_user(&self, offset: usize, src: &UserBuffer) -> Result<usize, SyscallErr> {
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         if self.mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
@@ -1365,6 +1366,7 @@ impl File {
             return Err(SyscallErr::ESPIPE);
         }
         let flags = self.flags();
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
         let len = src.len();
         if len == 0 {
             return Ok(0);
@@ -1376,13 +1378,21 @@ impl File {
         } else {
             offset
         };
+        let seals_start = crate::task::perf::perf_memory_io_time_now();
         self.check_memfd_write_seals(offset, len)?;
+        let seals_end = crate::task::perf::perf_memory_io_time_now();
 
         match self.write_user_with_flags(offset, src, flags) {
             Ok(n) => {
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     self.touch_modified();
+                    crate::task::perf::record_pwrite_vfs_touch(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_pwrite_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_pwrite_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(SyscallErr::ENOSYS) => {
@@ -1401,8 +1411,14 @@ impl File {
                     self.private_data.lock(),
                 )?;
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     self.touch_modified();
+                    crate::task::perf::record_pwrite_vfs_touch(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_pwrite_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_pwrite_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(e) => Err(e),

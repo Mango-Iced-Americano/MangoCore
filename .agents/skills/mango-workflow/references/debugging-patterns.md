@@ -98,6 +98,20 @@
 
 ## 性能问题
 
+### 新增诊断计数器必须进入 reset 窗口
+
+- **现象**：相邻诊断组的同一计数器看似精确翻倍，但其调用计数已被正确清零，导致按当前组调用次数计算的平均值失真。
+- **根因**：新增 `AtomicUsize` 只接入 recorder 与 sysfs 导出，遗漏 `perf::reset_all_counters()`，所以 initproc 的每组 reset 不会清空该原子值。
+- **修复**：同一个改动中同时完成“声明 → recorder/no-op → sysfs 导出 → reset”；用连续两个诊断窗口确认第二个窗口不含第一个窗口的累计值。
+- **相关文件**：`os/src/task/perf.rs`、`os/src/fs/sysfs/files/diag.rs`
+
+### deferred journal 被 direct metadata barrier 提前提交
+
+- **根因**：另一个 ext4 的普通数据回写若进入 `lock_direct_metadata_mutation()`，该 guard 为了让 direct writer 看到稳定元数据会先 `flush_deferred_journal()`。小 append 或已映射覆盖若落入该路径，会把原本可合并的 deferred JBD2 transaction 在每个 writeback run 提前提交。
+- **修复**：将单页 append 也纳入 journal append path；对所有块已映射的覆盖写，在 transactional/inode mutation guards 持有期间写数据块，并复用已映射数据写核心，不进入 direct metadata domain。保留 hole/allocation 路径的 direct barrier，以及 fsync/sync 时的明确 journal commit。
+- **教训**：优化 deferred transaction 时不要只检查 `defer_or_commit()` 阈值；还要沿所有 fallback/数据写路径检查是否跨入会强制 flush 的一致性域。数据块在 metadata 提交前必须已完成写入，且 fsync 仍必须显式提交 deferred journal。
+- **相关文件**：`dependency/another_ext4/src/ext4/{low_level,data_write,mod}.rs`
+
 ### la64 大量 page fault 慢
 - 检查陷阱入口是否有不必要的 `invtlb`
 - 检查页帧清零是否用了高效的 64-bit store 而非 byte-wise

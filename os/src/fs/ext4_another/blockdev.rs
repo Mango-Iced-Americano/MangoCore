@@ -90,4 +90,8 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
     fn supports_reliable_flush(&self) -> bool {
         self.device.supports_reliable_flush()
     }
+
+    fn record_journal_commit(&self, bytes: usize) {
+        crate::task::perf::record_journal_commit(bytes);
+    }
 }

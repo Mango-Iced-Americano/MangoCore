@@ -2165,6 +2165,9 @@ impl PageCache {
         };
 
         perf::record_pc_writeback(slices.len(), perf::perf_time_now().wrapping_sub(_t0));
+        if result.is_ok() {
+            perf::record_writeback_batch(slices.len());
+        }
         result
     }
 

@@ -968,15 +968,21 @@ pub(crate) fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count
                 accessible = want.min(crate::config::PAGE_SIZE);
             }
 
+            let t0 = crate::task::perf::perf_memory_io_time_now();
             let ubuf = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
                 Ok(r) => r.into_user_buffer(),
                 Err(errno) => return if total > 0 { total as isize } else { errno },
             };
+            let t1 = crate::task::perf::perf_memory_io_time_now();
 
             let n = match file.pwrite_user(file_off, &ubuf) {
                 Ok(n) => n,
                 Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
             };
+            let t2 = crate::task::perf::perf_memory_io_time_now();
+            crate::task::perf::record_pwrite_uaccess(t1.wrapping_sub(t0));
+            crate::task::perf::record_pwrite_file(t2.wrapping_sub(t1));
+            crate::task::perf::record_pwrite_total_count();
             total += n;
             if n == 0 || n < accessible { break; }
             if let Some(task) = current_task() {
@@ -1013,6 +1019,7 @@ pub(crate) fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
+        let t0 = crate::task::perf::perf_memory_io_time_now();
         let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
             Ok(r) => r,
             Err(errno) => return if total > 0 { total as isize } else { errno },
@@ -1021,6 +1028,7 @@ pub(crate) fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count
             Ok(n) => n,
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
+        let t1 = crate::task::perf::perf_memory_io_time_now();
 
         let n = match file.pwrite(file_off, &kbuf[..copied]) {
             Ok(n) => n,
@@ -1029,6 +1037,10 @@ pub(crate) fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count
                 return if total > 0 { total as isize } else { ret };
             }
         };
+        let t2 = crate::task::perf::perf_memory_io_time_now();
+        crate::task::perf::record_pwrite_uaccess(t1.wrapping_sub(t0));
+        crate::task::perf::record_pwrite_file(t2.wrapping_sub(t1));
+        crate::task::perf::record_pwrite_total_count();
         total += n;
         if n == 0 || n < copied { break; }
         if let Some(task) = current_task() {

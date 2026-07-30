@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-07-16
+last_update: 2026-07-30
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -74,7 +74,7 @@ cat /sys/kernel/stats/features
 | `taskq` | ro | 调度队列指标（15 项） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
-| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时 |
+| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时，以及 UserBuffer `pwrite` 边界周期 |
 | `anon_unmap` | ro | private anonymous VMA 释放次数、页数、精确 retain 扫描步数和耗时 |
 | `net` | ro | poll、RX/TX/drop 与 exec/openat/read/mmap 运行时归因 |
 | `resource` | ro | 资源 gauge（内存/Task/Socket/Pipe/PageCache/Dentry 等） |
@@ -203,6 +203,11 @@ echo 1 > /sys/kernel/tracing/clear
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
 | `sata_flush_{reqs,ticks_total}` | counter | SATA cache flush 次数与累计耗时 |
+| `journal_commit_{count,bytes}` | counter | 成功完成的 another_ext4 journal transaction 数及其 journal payload 字节数（descriptor/data/revoke + commit block） |
+| `device_flush_count` | counter | 实际提交到 VirtIO 块设备的 flush 请求数 |
+| `virtio_write_{requests,bytes}` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的写请求数及字节数 |
+| `virtio_read_requests` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的读请求数 |
+| `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 
 #### anonymous private VMA release
 
@@ -263,7 +268,9 @@ echo 1 > /sys/kernel/tracing/clear
 
 ## Initproc 集成
 
-在 `os_test.conf` 中设置 `diag=1`，每组测试每个 libc 完成时自动打印 stats：
+在 `os_test.conf` 中设置 `diag=1`，runner 会在每个脚本组开始前选择
+`memory_io` profile、reset 并开启统计；脚本结束后先关闭统计，再打印 blockio
+快照。因此每个 libc 的 I/O 组都有独立的可比较计数窗口：
 
 ```ini
 mask=0xFFF
@@ -272,16 +279,20 @@ diag=1
 
 输出格式:
 ```
-[initproc] [diag] === stats T0 basic:musl ===
-ready_len_max=4
+[initproc] [diag] === stats iozone-musl ===
+journal_commit_count=126
+device_flush_count=830
+virtio_write_requests=80093
+virtio_write_bytes=400502784
+writeback_page_count=18361
 ...
-[initproc] [diag] === stats T0 basic:musl end ===
+[initproc] [diag] === stats iozone-musl end ===
 ```
 
 ### 工作流程
 
-1. 每组测试开始前，initproc 自动执行 `echo 1 > /sys/kernel/stats/stats_on` 和 `echo 1 > /sys/kernel/stats/reset`
-2. 测试运行完毕后，initproc 按启用 profile 读取对应 stats 文件；手工性能窗口还应保存前后快照，而不是只保存结束绝对值
+1. 每组测试开始前，initproc 自动执行 `stats_on=0`、选择 `memory_io`、`reset` 和 `stats_on=1`
+2. 测试运行完毕后，initproc 先关闭统计再读取 `blockio`；手工性能窗口还应保存前后快照，而不是只保存结束绝对值
 3. 分别针对 musl 和 glibc 各输出一次快照
 
 ## 竞赛构建

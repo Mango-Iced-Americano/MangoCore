@@ -1042,6 +1042,91 @@ fn stats_blockio_content(
     );
     let _ = writeln!(
         s,
+        "journal_commit_count={}",
+        read_counter(&crate::task::perf::JOURNAL_COMMIT_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "journal_commit_bytes={}",
+        read_counter(&crate::task::perf::JOURNAL_COMMIT_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "device_flush_count={}",
+        read_counter(&crate::task::perf::DEVICE_FLUSH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_write_requests={}",
+        read_counter(&crate::task::perf::VIRTIO_WRITE_REQUESTS)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_write_bytes={}",
+        read_counter(&crate::task::perf::VIRTIO_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_read_requests={}",
+        read_counter(&crate::task::perf::VIRTIO_READ_REQUESTS)
+    );
+    let _ = writeln!(
+        s,
+        "writeback_batch_count={}",
+        read_counter(&crate::task::perf::WRITEBACK_BATCH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "writeback_page_count={}",
+        read_counter(&crate::task::perf::WRITEBACK_PAGE_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_uaccess_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_UACCESS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_file_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_FILE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_ext4_setup_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_EXT4_SETUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_ext4_post_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_EXT4_POST_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_total_count={}",
+        read_counter(&crate::task::perf::PWRITE_TOTAL_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_vfs_mode_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_VFS_MODE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_vfs_seals_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_VFS_SEALS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_vfs_touch_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_VFS_TOUCH_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_mount_writable_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_MOUNT_WRITABLE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
         "sata_read_reqs={}",
         read_counter(&crate::task::perf::SATA_READ_REQS)
     );

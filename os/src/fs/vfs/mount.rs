@@ -1106,7 +1106,12 @@ impl IndexNode for MountFSInode {
         len: usize,
         src: &crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        self.ensure_mount_writable()?;
+        let writable_start = crate::task::perf::perf_memory_io_time_now();
+        let writable = self.ensure_mount_writable();
+        crate::task::perf::record_pwrite_mount_writable(
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(writable_start),
+        );
+        writable?;
         self.inner_inode.write_at_user(offset, len, src)
     }
 
@@ -1511,6 +1516,10 @@ impl IndexNode for MountFSInode {
 
     fn metadata(&self) -> Result<super::Metadata, SyscallErr> {
         self.inner_inode.metadata()
+    }
+
+    fn touch_modified(&self) {
+        self.inner_inode.touch_modified();
     }
 
     fn set_metadata(&self, metadata: &super::Metadata) -> Result<(), SyscallErr> {

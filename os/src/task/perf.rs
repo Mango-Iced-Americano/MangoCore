@@ -325,6 +325,17 @@ mod enabled {
     pub static PC_WRITEBACK_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_FALLOC_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: UserBuffer pwrite boundary attribution ──
+    pub static PWRITE_UACCESS_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_FILE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_EXT4_SETUP_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_EXT4_POST_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_TOTAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_VFS_MODE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_VFS_SEALS_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_VFS_TOUCH_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PWRITE_MOUNT_WRITABLE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
     // ── P0: Writeback Throttling ──
     pub static WB_BG_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static WB_THROTTLE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -335,6 +346,16 @@ mod enabled {
     pub static BLK_VREAD_SECS: AtomicUsize = AtomicUsize::new(0);
     pub static BLK_VWRITE_REQS: AtomicUsize = AtomicUsize::new(0);
     pub static BLK_VWRITE_SECS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── I/O amplification ──
+    pub static JOURNAL_COMMIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static JOURNAL_COMMIT_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static DEVICE_FLUSH_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_WRITE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_WRITE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_READ_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+    pub static WRITEBACK_BATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static WRITEBACK_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: 2K1000LA SATA/AHCI ──
     pub static SATA_READ_REQS: AtomicUsize = AtomicUsize::new(0);
@@ -953,6 +974,69 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_pwrite_uaccess(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_UACCESS_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_file(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_FILE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_ext4_setup(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_EXT4_SETUP_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_ext4_post(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_EXT4_POST_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_total_count() {
+        if memory_io_stats_enabled() {
+            PWRITE_TOTAL_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_vfs_mode(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_VFS_MODE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_vfs_seals(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_VFS_SEALS_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_vfs_touch(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_VFS_TOUCH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite_mount_writable(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PWRITE_MOUNT_WRITABLE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
     pub fn record_wb_bg_call() {
         if !memory_io_stats_enabled() {
             return;
@@ -994,6 +1078,49 @@ mod enabled {
         }
         BLK_VWRITE_REQS.fetch_add(1, Ordering::Relaxed);
         BLK_VWRITE_SECS.fetch_add(sectors, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_journal_commit(bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        JOURNAL_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
+        JOURNAL_COMMIT_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_device_flush() {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        DEVICE_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_write(bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VIRTIO_WRITE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        VIRTIO_WRITE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_read() {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VIRTIO_READ_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_writeback_batch(pages: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        WRITEBACK_BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        WRITEBACK_PAGE_COUNT.fetch_add(pages, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -1367,6 +1494,15 @@ mod enabled {
         PC_WRITEBACK_PAGES.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CYCLES_TOTAL.store(0, Ordering::Relaxed);
         PC_FALLOC_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        PWRITE_UACCESS_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_FILE_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_EXT4_SETUP_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_EXT4_POST_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_TOTAL_COUNT.store(0, Ordering::Relaxed);
+        PWRITE_VFS_MODE_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_VFS_SEALS_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_VFS_TOUCH_CYCLES.store(0, Ordering::Relaxed);
+        PWRITE_MOUNT_WRITABLE_CYCLES.store(0, Ordering::Relaxed);
         // Writeback Throttling (P0)
         WB_BG_CALLS.store(0, Ordering::Relaxed);
         WB_THROTTLE_CALLS.store(0, Ordering::Relaxed);
@@ -1376,6 +1512,14 @@ mod enabled {
         BLK_VREAD_SECS.store(0, Ordering::Relaxed);
         BLK_VWRITE_REQS.store(0, Ordering::Relaxed);
         BLK_VWRITE_SECS.store(0, Ordering::Relaxed);
+        JOURNAL_COMMIT_COUNT.store(0, Ordering::Relaxed);
+        JOURNAL_COMMIT_BYTES.store(0, Ordering::Relaxed);
+        DEVICE_FLUSH_COUNT.store(0, Ordering::Relaxed);
+        VIRTIO_WRITE_REQUESTS.store(0, Ordering::Relaxed);
+        VIRTIO_WRITE_BYTES.store(0, Ordering::Relaxed);
+        VIRTIO_READ_REQUESTS.store(0, Ordering::Relaxed);
+        WRITEBACK_BATCH_COUNT.store(0, Ordering::Relaxed);
+        WRITEBACK_PAGE_COUNT.store(0, Ordering::Relaxed);
         SATA_READ_REQS.store(0, Ordering::Relaxed);
         SATA_READ_BYTES.store(0, Ordering::Relaxed);
         SATA_READ_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -1521,6 +1665,11 @@ mod enabled {
     #[inline(always)]
     pub fn perf_time_now() -> usize {
         perf_time_now_for(super::STATS_PROFILE_CORE)
+    }
+
+    #[inline(always)]
+    pub fn perf_memory_io_time_now() -> usize {
+        perf_time_now_for(super::STATS_PROFILE_MEMORY_IO)
     }
 
     #[inline(always)]
@@ -2178,6 +2327,12 @@ pub fn perf_time_now() -> usize {
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn perf_memory_io_time_now() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn perf_time_now_for(_profile: usize) -> usize {
     0
 }
@@ -2371,6 +2526,33 @@ pub fn record_pc_miss() {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_pc_falloc_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_uaccess(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_file(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_ext4_setup(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_ext4_post(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_total_count() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_vfs_mode(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_vfs_seals(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_vfs_touch(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pwrite_mount_writable(_cycles: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2391,6 +2573,21 @@ pub fn record_blk_vread(_sectors: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_blk_vwrite(_sectors: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_journal_commit(_bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_device_flush() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_write(_bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_read() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_writeback_batch(_pages: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_sata_read(_bytes: usize, _ticks: usize) {}
@@ -2799,6 +2996,33 @@ pub static PC_WRITEBACK_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_FALLOC_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_UACCESS_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_FILE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_EXT4_SETUP_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_EXT4_POST_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_TOTAL_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_VFS_MODE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_VFS_SEALS_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_VFS_TOUCH_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PWRITE_MOUNT_WRITABLE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Writeback Throttling stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -2822,6 +3046,30 @@ pub static BLK_VWRITE_REQS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static BLK_VWRITE_SECS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_COMMIT_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_COMMIT_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static DEVICE_FLUSH_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_WRITE_REQUESTS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_WRITE_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_READ_REQUESTS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WRITEBACK_BATCH_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WRITEBACK_PAGE_COUNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(not(feature = "perf_stats"))]
