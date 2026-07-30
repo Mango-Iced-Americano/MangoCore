@@ -48,7 +48,9 @@ pub fn pid_status_content(
     ) = {
         let inner = task.acquire_inner_lock();
         let state = match task.task_status() {
-            crate::task::TaskStatus::New | crate::task::TaskStatus::Queued(_) => "R (running)",
+            crate::task::TaskStatus::New
+            | crate::task::TaskStatus::Queued(_)
+            | crate::task::TaskStatus::Migrating => "R (running)",
             crate::task::TaskStatus::Running(_) => "R (running)",
             crate::task::TaskStatus::Blocking(_) | crate::task::TaskStatus::Blocked => {
                 "S (sleeping)"

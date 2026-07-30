@@ -154,9 +154,26 @@ B35 复用同一 `TASK_MANAGER` 锁串行化稳定 Blocked 线程的 affinity �
 同时确认精确 `Blocked` 状态和同一 TCB 指针仍在 registry，随后 Release 发布 mask；wake 取得
 同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为 exit/exec 摘除 registry 后、标记
 Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
-Running/Blocking/Queued 修改和通用迁移仍未实现。
+Running/Blocking 修改仍未实现。
 
-### 3.6 B21 内核栈退休与 shootdown 锁序
+### 3.6 B36 稳定 Queued affinity 搬队约束
+
+B36 不为 queued 搬队同时锁定源/目标 runqueue。顺序固定为：
+
+1. 不持调度锁选择合法目标，并完成目标 kernel-stack TLB 同步；
+2. 只锁 source，复核 `Queued(source)` 和精确 TCB 成员关系，提交
+   `Queued(source) -> Migrating` 后摘除节点、释放 source；
+3. `Migrating` 的同步调用方 Release 发布新 mask；
+4. 只锁 target，提交 `Migrating -> Queued(target)` 并插入节点、释放 target；
+5. 所有队列锁释放后才发送 RESCHEDULE。
+
+`Migrating` 后禁止获取 `TASK_MANAGER`、等待 IPI/TLB ack 或进入析构；因此持
+`TASK_MANAGER` 的 exit/exec remove 即使短暂等待搬队完成，也不存在反向依赖。nice 更新读到
+旧 owner 时，必须先在旧队列锁内校准派生计数，再按最新状态重新定位。`Queued(cpu)` 状态下
+若同一 TCB 不在该 owner 队列，且该队列锁仍由检查方持有，应 fail-stop；不能把真实容器损坏
+误判为迁移，因为迁移回该 CPU 同样必须先取得这把锁。
+
+### 3.7 B21 内核栈退休与 shootdown 锁序
 
 TCB 最后一个 `Arc` 可能在 `wait`/进程锁保护区内消失，因此 `KernelStack::drop` 不能
 直接取得页表锁或等待远端 CPU。缓存未满时它只把仍保持映射的 slot 放回
@@ -174,7 +191,7 @@ CPU0 idle 调度循环在尚未取得 processor、runqueue 或子系统锁时按
 在 MM 层直接执行 timer callback。当前退休队列由 CPU0 生命周期路径消费；未来若允许 AP
 并发完成普通进程回收，需要重新审查容量、所有者和批处理策略。
 
-### 3.7 B22/B23 用户 MM 激活与 shootdown 锁序
+### 3.8 B22/B23 用户 MM 激活与 shootdown 锁序
 
 B22 的 trap-return 激活登记与 B23 的 PTE 修改侧现由同一个
 `AddressSpace` 串行化：

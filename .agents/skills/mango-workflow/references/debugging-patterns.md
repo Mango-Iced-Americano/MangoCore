@@ -172,6 +172,22 @@
   均已释放，再从另一 CPU 经生产 WaitQueue 批量唤醒；验证它回到预期 CPU、只运行一次，
   并在 terminal STOP 前清空 current/runqueue。
 
+### 跨 runqueue 搬运必须显式建模“无容器 owner”窗口
+
+- **危险模式**: 在源队列锁内摘除任务，释放源锁后直接去锁目标队列，但状态仍写成
+  `Queued(source)` 或提前写成 `Queued(target)`。前者会让并发 fetch/remove 去错误队列，
+  后者会让观察者看到目标 owner 却找不到容器节点；同时持有两把 rq 锁虽能隐藏窗口，却会
+  扩大锁序和死锁面。
+- **固定协议**: 先在无调度锁区完成所有可能等待的准备（如目标 kernel-stack TLB 同步）；
+  source 锁内把 `Queued(source)` 交给一个不携带 CPU 的 `Migrating` owner 并摘除；释放 source；
+  由唯一迁移调用方发布 placement 字段；target 锁内完成 `Migrating -> Queued(target)` 和插入。
+  doorbell 必须在 target 解锁后发送。
+- **观察者规则**: affinity/remove/nice 更新遇到 `Migrating` 只能在不持普通锁时重试；wake 将其
+  视为已经 runnable；终态转换必须 fail-stop。若检查方仍持有 CPU A 的 rq 锁，任务不可能在
+  同一窗口“迁走又迁回 A”，因为回迁本身必须先取得这把锁；模型报告中的竞态时间线必须逐步
+  对照实际 `drop(lock)` 位置，不能只按函数意图裁决。
+- **相关文件**: `os/src/task/run_queue.rs`, `os/src/task/task.rs`, `os/src/task/manager.rs`
+
 ### TLB sequence ack 必须证明“本轮失效动作发生在本轮请求之后”
 
 - **危险顺序**: handler 先 flush，再读取 request sequence 并写 ack。若新请求恰好在旧 flush

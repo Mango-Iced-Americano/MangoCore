@@ -290,6 +290,11 @@ static AP_BLOCKED_WAKE_PHASE: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 static AP_BLOCKED_WAKE_EXPECTED: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(usize::MAX) }; crate::smp::MAX_CPUS];
+static QUEUED_AFFINITY_HOLDER_READY: AtomicUsize = AtomicUsize::new(0);
+static QUEUED_AFFINITY_HOLDER_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static QUEUED_AFFINITY_RUNS: AtomicUsize = AtomicUsize::new(0);
+static QUEUED_AFFINITY_RUN_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static QUEUED_AFFINITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
@@ -370,6 +375,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::blocked_affinity_redirects_wake",
             blocked_affinity_redirects_wake,
+        ),
+        KernelTest::new(
+            "smp::queued_affinity_moves_between_runqueues",
+            queued_affinity_moves_between_runqueues,
         ),
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
@@ -1396,7 +1405,7 @@ fn blocked_affinity_redirects_wake() -> Result<(), &'static str> {
     }
 
     let cpu0_mask = 1usize << crate::smp::BOOT_CPU_ID;
-    if !crate::task::update_blocked_affinity(&task, cpu0_mask) {
+    if !crate::task::set_remote_affinity(&task, cpu0_mask) {
         return Err("stable Blocked task rejected affinity update");
     }
     if task.cpus_allowed() != cpu0_mask {
@@ -1420,6 +1429,149 @@ fn blocked_affinity_redirects_wake() -> Result<(), &'static str> {
         return Err("old CPU retained the affinity-redirected task");
     }
     Ok(())
+}
+
+/// 占据 CPU1 current，同时开放硬中断以响应后续 kernel-stack TLB 同步。
+/// RESCHEDULE IPI 只置位，不会从这个任意内核位置直接切换任务。
+fn hold_affinity_source_cpu() {
+    let initially_enabled = crate::hal::local_irq_save();
+    if initially_enabled {
+        QUEUED_AFFINITY_ERRORS.fetch_or(1, Ordering::Release);
+    }
+    crate::hal::local_irq_restore(true);
+    QUEUED_AFFINITY_HOLDER_READY.store(1, Ordering::Release);
+    while QUEUED_AFFINITY_HOLDER_RELEASE.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if !crate::hal::local_irq_save() {
+        QUEUED_AFFINITY_ERRORS.fetch_or(2, Ordering::Release);
+    }
+}
+
+fn record_queued_affinity_cpu() {
+    let cpu = crate::smp::cpu_id();
+    let owns_current = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(cpu))
+        .unwrap_or(false);
+    if !owns_current {
+        QUEUED_AFFINITY_ERRORS.fetch_or(4, Ordering::Release);
+    }
+    QUEUED_AFFINITY_RUN_CPU.store(cpu, Ordering::Release);
+    QUEUED_AFFINITY_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// CPU1 被 holder 占据时，第二个任务会稳定留在 Queued(1)。先扩展 mask 证明
+/// owner 合法时不搬队，再收紧为 bit0，验证生产路径完成唯一的跨 rq 所有权交接。
+fn queued_affinity_moves_between_runqueues() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("queued-affinity test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    const SOURCE_CPU: usize = 1;
+    QUEUED_AFFINITY_HOLDER_READY.store(0, Ordering::Release);
+    QUEUED_AFFINITY_HOLDER_RELEASE.store(0, Ordering::Release);
+    QUEUED_AFFINITY_RUNS.store(0, Ordering::Release);
+    QUEUED_AFFINITY_RUN_CPU.store(usize::MAX, Ordering::Release);
+    QUEUED_AFFINITY_ERRORS.store(0, Ordering::Release);
+
+    let source_before = crate::task::run_queue_count(SOURCE_CPU);
+    let target_before = crate::task::run_queue_count(crate::smp::BOOT_CPU_ID);
+    let holder = crate::task::spawn_ktest_task_on(SOURCE_CPU, hold_affinity_source_cpu);
+    let ready_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while QUEUED_AFFINITY_HOLDER_READY.load(Ordering::Acquire) == 0
+        || holder.task_status() != crate::task::TaskStatus::Running(SOURCE_CPU)
+    {
+        if crate::hal::get_time() >= ready_deadline {
+            QUEUED_AFFINITY_HOLDER_RELEASE.store(1, Ordering::Release);
+            let cleanup_deadline = crate::hal::get_time()
+                .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+            while holder.task_status() != crate::task::TaskStatus::Zombie
+                && crate::hal::get_time() < cleanup_deadline
+            {
+                core::hint::spin_loop();
+            }
+            return Err("CPU1 holder did not become current");
+        }
+        core::hint::spin_loop();
+    }
+
+    let task = crate::task::spawn_ktest_task_on(SOURCE_CPU, record_queued_affinity_cpu);
+    let result = (|| {
+        if task.task_status() != crate::task::TaskStatus::Queued(SOURCE_CPU)
+            || crate::task::run_queue_count(SOURCE_CPU) != source_before + 1
+        {
+            return Err("target task did not remain Queued on CPU1");
+        }
+
+        let wide_mask = (1usize << SOURCE_CPU) | (1usize << crate::smp::BOOT_CPU_ID);
+        if !crate::task::set_remote_affinity(&task, wide_mask)
+            || task.task_status() != crate::task::TaskStatus::Queued(SOURCE_CPU)
+            || task.cpus_allowed() != wide_mask
+            || crate::task::run_queue_count(SOURCE_CPU) != source_before + 1
+        {
+            return Err("queued affinity moved despite retaining its owner CPU");
+        }
+
+        let cpu0_mask = 1usize << crate::smp::BOOT_CPU_ID;
+        if !crate::task::set_remote_affinity(&task, cpu0_mask)
+            || task.task_status()
+                != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
+            || task.cpus_allowed() != cpu0_mask
+            || crate::task::run_queue_count(SOURCE_CPU) != source_before
+            || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != target_before + 1
+        {
+            return Err("queued affinity did not transfer the unique runqueue owner");
+        }
+
+        // 目标就是当前 CPU，任务会稳定留在队首；runner 让出后它必须恰好
+        // 执行一次并在 CPU0 退出，再把执行权还给 runner。
+        crate::task::suspend_current_and_run_next();
+        if task.task_status() != crate::task::TaskStatus::Zombie
+            || task.last_cpu() != crate::smp::BOOT_CPU_ID
+            || QUEUED_AFFINITY_RUNS.load(Ordering::Acquire) != 1
+            || QUEUED_AFFINITY_RUN_CPU.load(Ordering::Acquire) != crate::smp::BOOT_CPU_ID
+            || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != target_before
+        {
+            return Err("migrated queued task did not run exactly once on CPU0");
+        }
+        Ok(())
+    })();
+
+    // 无论主断言是否成功，都释放 holder，避免一个失败用例污染后续 AP 测试。
+    QUEUED_AFFINITY_HOLDER_RELEASE.store(1, Ordering::Release);
+    let cleanup_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while holder.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(SOURCE_CPU)
+    {
+        if crate::hal::get_time() >= cleanup_deadline {
+            return Err("CPU1 holder did not exit during queued-affinity cleanup");
+        }
+        core::hint::spin_loop();
+    }
+    // 失败可能发生在搬队之前或刚刚搬到 CPU0 之后；两种情况下都把 subject
+    // 排空，确保返回错误时不会给后续用例遗留 runnable TCB。
+    if task.task_status() == crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID) {
+        crate::task::suspend_current_and_run_next();
+    }
+    let task_cleanup_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while task.task_status() != crate::task::TaskStatus::Zombie {
+        if crate::hal::get_time() >= task_cleanup_deadline {
+            return Err("queued-affinity subject did not exit during cleanup");
+        }
+        core::hint::spin_loop();
+    }
+    if QUEUED_AFFINITY_ERRORS.load(Ordering::Acquire) != 0
+        || crate::task::run_queue_count(SOURCE_CPU) != source_before
+    {
+        return Err("queued-affinity task observed an invalid CPU/IRQ owner");
+    }
+    result
 }
 
 /// 直接调用生产 user-TLB 同步原语，验证独立 sequence、IPI handler 与 ack 闭环。

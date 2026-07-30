@@ -30,8 +30,9 @@ tags: [process, scheduler, task-manager, processor]
 路径都将它作为硬约束；B32 的只读 `sched_getaffinity()` 已返回该 per-thread mask。
 B34 又完成当前线程的运行期写侧：新 mask 排除本 CPU 时，syscall 会在同一安全点把
 Running owner 迁到最低负载的合法 CPU。B35 继续闭合非 current 的稳定 Blocked 状态：
-registry 锁内更新 mask，后续 wake 直接按新允许集发布，不需要迁移 owner。远程
-Running/Blocking/Queued 和普通用户任务负载选择仍未实现。
+registry 锁内更新 mask，后续 wake 直接按新允许集发布，不需要迁移 owner。B36 又闭合稳定
+Queued 状态：owner 仍合法时只更新 mask，排除 owner 时经短暂 `Migrating` 搬到新的单一
+runqueue。远程 Running/Blocking 和普通用户任务负载选择仍未实现。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。B33 又让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
@@ -81,8 +82,12 @@ TCB 的 `cpus_allowed` 是逻辑 CPU 位图，表达任务可以取得哪些 CPU
 
 B35 对稳定 Blocked 使用另一条更短的协议：Blocked 没有 current/runqueue owner，写侧只需
 在 `TASK_MANAGER` 锁内同时确认状态和 registry 成员关系，再发布 mask。wake 取得同一锁后
-读取新值并选择队列。该协议没有扩展到远程 Running/Blocking/Queued，也没有引入第二套
-task/rq 串行化层。
+读取新值并选择队列。
+
+B36 对稳定 Queued 使用 owner runqueue 作为 placement 锁。只有新 mask 排除 owner 时才进入
+`Migrating`；该状态表示 TCB 已离开源队列、尚未进入目标队列，唯一 owner 是同步迁移调用方，
+不是某个 CPU。mask 在这段无容器窗口发布，再由目标 runqueue 接管。远程 Running/Blocking
+仍未实现，因为它们还需要让另一个 CPU 的 current 在安全点停止并确认。
 
 ## 3. RunQueue 选择策略
 
@@ -106,8 +111,8 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
-稳定 Blocked 线程也可在 wake 前更新 mask；通用新任务目标选择、远程 runnable 强制迁移和
-work stealing 仍未开放。
+稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；通用新任务
+目标选择、远程 Running/Blocking 强制迁移和 work stealing 仍未开放。
 
 ### 3.1 首次发布到指定 CPU
 
@@ -182,9 +187,29 @@ B35 只在目标没有 current/runqueue owner 时开放远程写侧：
 状态改为 Zombie；仅检查状态会对正在退出的线程伪装成功。并发 wake 与写侧由同一锁线性化：
 写侧先拿锁则 wake 使用新 mask，wake 先拿锁则目标已变 Queued，写侧返回 `EOPNOTSUPP`。
 
-远程 Running/Blocking/Queued 仍明确返回 `EOPNOTSUPP`。这些状态存在 current 或 runqueue
-owner，需要类似 Linux/DragonOS 的 task-placement/rq 串行化和显式 owner 交接，不能仅写
-原子 mask，也不能借用 Blocked 伪装队列间迁移状态。
+#### 远程稳定 Queued 迁移
+
+B36 在目标精确处于 `Queued(source)` 时执行：
+
+1. 若新 mask 仍包含 source，取得 source runqueue 后同时确认状态和同一 TCB 成员关系，
+   在锁内 Release 发布 mask，不改变队列或 `nr_running`；
+2. 若新 mask 排除 source，先在不持调度锁时选择最低负载合法 CPU，并同步目标 kernel-stack
+   映射；同步失败前任务仍完整留在旧 mask 和源队列；
+3. 取得 source runqueue，复核成员后提交 `Queued(source) -> Migrating`，摘除节点和源计数，
+   然后释放源锁；
+4. `Migrating` 的唯一 owner 发布新 mask，再取得 target runqueue，提交
+   `Migrating -> Queued(target)`、插入节点和目标计数；
+5. 释放目标锁后才发送 RESCHEDULE。若另一 affinity、fetch 或 exit/exec 先改变 owner，入口
+   依据最新状态重试或明确失败，不能在失败返回前部分写入 mask。
+
+这条路径从不同时持有两个 runqueue，也不增加 per-task 锁、IPI reason 或第二套迁移容器。
+目标栈 TLB 同步必须发生在进入 `Migrating` 前；否则 exit/remove 等待迁移时可能间接等待 IPI
+ack 并破坏锁依赖。`update_nice()` 若在 hint 写入后读到旧 owner，会先重算旧队列派生计数，再
+按最新状态追到新 owner，避免 `nonzero_nice_count` 漂移。
+
+远程 Running/Blocking 仍明确返回 `EOPNOTSUPP`。这些状态仍占有另一个 CPU 的 current，
+需要停止请求、安全点确认和完成通知，不能仅写原子 mask，也不能借用 Blocked 或 Migrating
+伪装 current 已经切离。
 
 ## 4. Processor
 
@@ -414,6 +439,8 @@ idle: clear current -> Blocking(cpu) -> Blocked
 - `last_cpu` 只是无 owner 含义的唤醒提示，不能代替 `Queued/Running(cpu)`；
 - `cpus_allowed` 只是 owner 允许集合；任何 `Queued(cpu)` 和 `Running(cpu)` 中的
   `cpu` 都必须属于该集合；
+- `Migrating` 只允许出现在 queued 跨队列搬运的短窗口；此时 TCB 不在任何 runqueue/current，
+  且迁移调用方不得等待 IPI、获取 `TASK_MANAGER` 或释放最后一个 `Arc`；
 - 一个任务最多属于一个 per-CPU runqueue 或一个 current slot；interruptible registry
   只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
 - 本 CPU `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit
@@ -424,7 +451,7 @@ idle: clear current -> Blocking(cpu) -> Blocked
 - yield 迁移只能在源 current 已于 idle 栈清空后交给目标队列；`migration_target` 不能直接
   修改 owner，也不能由任意远程 CPU 写入；
 - runqueue 锁内不获取 `task.inner`；公平选择只读取原子 nice/vruntime hint。
-- publish/fetch/yield 只锁一个 runqueue；Blocked wake 和批量 remove 才按固定顺序
+- publish/fetch/yield/Queued affinity 任何时刻只锁一个 runqueue；Blocked wake 和批量 remove 按固定顺序
   `TASK_MANAGER -> 单个 RunQueue`，并且锁不跨 context switch、析构或等待点。
 - 远程 wake 的 IPI 只能在 `TASK_MANAGER` 与所有目标 runqueue 都释放后发送。
 

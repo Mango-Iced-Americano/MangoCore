@@ -106,7 +106,7 @@ pub fn pid_stat_content(
         'Z'
     } else if let Some(task) = process.any_live_thread() {
         match task.task_status() {
-            TaskStatus::New | TaskStatus::Queued(_) => 'R',
+            TaskStatus::New | TaskStatus::Queued(_) | TaskStatus::Migrating => 'R',
             TaskStatus::Running(_) => 'R',
             TaskStatus::Blocking(_) | TaskStatus::Blocked => 'S',
             TaskStatus::Zombie => 'Z',
@@ -137,7 +137,7 @@ pub fn task_stat_content(
         None => return Err(SyscallErr::ENOENT),
     };
     let state_char = match task.task_status() {
-        TaskStatus::New | TaskStatus::Queued(_) => 'R',
+        TaskStatus::New | TaskStatus::Queued(_) | TaskStatus::Migrating => 'R',
         TaskStatus::Running(_) => 'R',
         TaskStatus::Blocking(_) | TaskStatus::Blocked => 'S',
         TaskStatus::Zombie => 'Z',

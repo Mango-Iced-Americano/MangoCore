@@ -43,7 +43,7 @@ pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
-pub(crate) use manager::{publish_task_on, update_blocked_affinity};
+pub(crate) use manager::{publish_task_on, set_remote_affinity};
 pub(crate) use manager::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,

@@ -724,13 +724,52 @@ impl TaskControlBlock {
     /// 返回任务当前允许运行的逻辑 CPU 位图。
     pub(crate) fn cpus_allowed(&self) -> usize {
         // Acquire 同时覆盖两种发布方式：首次发布依赖调度状态的 AcqRel
-        // 交接；运行期更新则直接与 set_current_affinity() 的 Release 配对。
+        // 交接；运行期更新则与各 owner 路径的 Release 写入配对。
         self.cpus_allowed.load(Ordering::Acquire)
+    }
+
+    /// 校验运行期 affinity，并返回当前真正可调度的 CPU 子集。
+    fn runnable_affinity(&self, mask: usize, operation: &'static str) -> usize {
+        let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
+        assert_ne!(mask, 0, "{} cannot publish an empty mask", operation);
+        assert_eq!(
+            mask & !configured_mask,
+            0,
+            "{} mask {:#x} contains unconfigured CPUs",
+            operation,
+            mask
+        );
+        let runnable = mask
+            & crate::smp::online_cpu_mask()
+            & crate::smp::scheduler_cpu_mask()
+            & !crate::smp::stopped_cpu_mask();
+        assert_ne!(runnable, 0, "{} has no online scheduler CPU", operation);
+        runnable
+    }
+
+    /// 在调用方已经取得调度所有权后发布新的 affinity。
+    ///
+    /// `expected` 把 mask 写入绑定到一个精确状态：Blocked 写侧持有
+    /// `TASK_MANAGER`，Queued 写侧持有 owner runqueue，Migrating 写侧则是
+    /// 唯一迁移调用方。Release 保证后续 owner 的 Acquire 状态交接能看到 mask。
+    pub(crate) fn store_cpus_allowed(
+        &self,
+        mask: usize,
+        expected: TaskStatus,
+        operation: &'static str,
+    ) {
+        self.runnable_affinity(mask, operation);
+        assert_eq!(
+            self.task_status(),
+            expected,
+            "{} lost task ownership",
+            operation
+        );
+        self.cpus_allowed.store(mask, Ordering::Release);
     }
     /// 判断目标 CPU 是否属于任务的允许集合。
     pub(crate) fn is_cpu_allowed(&self, cpu: usize) -> bool {
-        cpu < crate::smp::configured_cpu_count()
-            && self.cpus_allowed() & (1usize << cpu) != 0
+        cpu < crate::smp::configured_cpu_count() && self.cpus_allowed() & (1usize << cpu) != 0
     }
     /// 在任务首次发布前设置其允许 CPU 集合。
     ///
@@ -758,18 +797,11 @@ impl TaskControlBlock {
     /// 修改 current 线程的运行期 affinity，并登记必要的自迁移。
     ///
     /// 返回 true 表示新 mask 已排除当前 CPU；调用者必须立即在同一个 syscall
-    /// 安全点切回 idle。此接口不处理远程 Running、Queued 或 Blocked 任务，
-    /// 因而不需要新增 task/rq 锁或迁移中间状态。
+    /// 安全点切回 idle。此接口只处理 current；远程 Blocked/Queued 分别由
+    /// registry/runqueue 入口处理，不能复用 current 的一次性迁移请求。
     pub(crate) fn set_current_affinity(&self, mask: usize) -> bool {
         let source_cpu = crate::smp::cpu_id();
-        let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
-        assert_ne!(mask, 0, "task CPU affinity cannot be empty");
-        assert_eq!(
-            mask & !configured_mask,
-            0,
-            "runtime CPU affinity {:#x} contains unconfigured CPUs",
-            mask
-        );
+        let runnable = self.runnable_affinity(mask, "update current affinity");
         assert_eq!(
             self.task_status(),
             TaskStatus::Running(source_cpu),
@@ -792,10 +824,6 @@ impl TaskControlBlock {
             return false;
         }
 
-        let runnable = mask
-            & crate::smp::online_cpu_mask()
-            & crate::smp::scheduler_cpu_mask()
-            & !crate::smp::stopped_cpu_mask();
         let target_cpu = (0..crate::smp::configured_cpu_count())
             .filter(|cpu| runnable & (1usize << cpu) != 0)
             .min_by_key(|cpu| {
@@ -828,28 +856,7 @@ impl TaskControlBlock {
     /// 调用方必须持有 `TASK_MANAGER`，并已确认同一个 TCB 仍在 registry 中；
     /// 这样后续 wake 才不可能越过本次写入、按旧 mask 发布到 runqueue。
     pub(crate) fn set_blocked_affinity(&self, mask: usize) {
-        let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
-        assert_ne!(mask, 0, "task CPU affinity cannot be empty");
-        assert_eq!(
-            mask & !configured_mask,
-            0,
-            "blocked task affinity {:#x} contains unconfigured CPUs",
-            mask
-        );
-        assert_eq!(
-            self.task_status(),
-            TaskStatus::Blocked,
-            "blocked affinity update requires a stable Blocked task"
-        );
-        let runnable = mask
-            & crate::smp::online_cpu_mask()
-            & crate::smp::scheduler_cpu_mask()
-            & !crate::smp::stopped_cpu_mask();
-        assert_ne!(
-            runnable, 0,
-            "blocked task affinity has no online scheduler CPU"
-        );
-        self.cpus_allowed.store(mask, Ordering::Release);
+        self.store_cpus_allowed(mask, TaskStatus::Blocked, "update blocked affinity");
     }
 
     fn publish_migration_target(&self, target_cpu: usize) {
@@ -1006,12 +1013,8 @@ impl TaskControlBlock {
                 true
             }
             TaskStatus::Zombie => false,
-            TaskStatus::Queued(_) | TaskStatus::Blocking(_) => self.fail_sched_invariant(
-                operation,
-                TaskStatus::Blocked,
-                current,
-                TaskStatus::Zombie,
-            ),
+            TaskStatus::Queued(_) | TaskStatus::Migrating | TaskStatus::Blocking(_) => self
+                .fail_sched_invariant(operation, TaskStatus::Blocked, current, TaskStatus::Zombie),
         }
     }
     pub fn account_seccomp_enabled(&self) {
@@ -1569,8 +1572,8 @@ impl TaskControlBlock {
             .into_iter()
             .filter(|task| task.tid.0 != self.tid.0)
             .collect();
-        // 先在 TASK_MANAGER 锁内把 Queued owner 收回为 Blocked，随后才允许
-        // 线程资源路径把它推进到 Zombie；反序会留下“队列仍拥有终态 TCB”。
+        // 在 TASK_MANAGER -> 单个 RunQueue 的固定锁序下收回调度容器所有权，
+        // 随后才允许线程资源路径把任务推进到 Zombie。
         super::remove_tasks_from_queues(&other_threads);
         for task in &other_threads {
             // execve 会杀掉同线程组的其他线程，但保留当前 process。
@@ -2242,8 +2245,9 @@ impl Drop for TaskControlBlock {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 /// 任务的调度所有权状态。
 ///
-/// `Queued(cpu)` 和 `Running(cpu)` 直接携带 owner。协作式迁移仍使用这两个
-/// 状态表达唯一所有权，不额外引入中间状态。
+/// `Queued(cpu)` 和 `Running(cpu)` 直接携带 owner。`Migrating` 只覆盖 queued
+/// 任务已经离开源队列、尚未进入目标队列的短窗口；此时唯一 owner 是迁移调用方，
+/// 状态本身不携带 CPU，避免把尚未取得任务的目标误写成 owner。
 pub enum TaskStatus {
     New,
     Queued(usize),
@@ -2254,6 +2258,7 @@ pub enum TaskStatus {
     /// context switch 完成后，才会把仍处于此状态的任务提交为 `Blocked`。
     Blocking(usize),
     Blocked,
+    Migrating,
     Zombie,
 }
 
@@ -2268,6 +2273,7 @@ impl TaskStatus {
     const RUNNING_TAG: usize = 3;
     const BLOCKING_TAG: usize = 4;
     const ZOMBIE_TAG: usize = 5;
+    const MIGRATING_TAG: usize = 6;
 
     const fn encode(self) -> usize {
         match self {
@@ -2277,6 +2283,7 @@ impl TaskStatus {
             Self::Running(cpu) => (cpu << Self::TAG_BITS) | Self::RUNNING_TAG,
             Self::Blocking(cpu) => (cpu << Self::TAG_BITS) | Self::BLOCKING_TAG,
             Self::Zombie => Self::ZOMBIE_TAG,
+            Self::Migrating => Self::MIGRATING_TAG,
         }
     }
 
@@ -2288,6 +2295,7 @@ impl TaskStatus {
             Self::RUNNING_TAG => Self::Running(raw >> Self::TAG_BITS),
             Self::BLOCKING_TAG => Self::Blocking(raw >> Self::TAG_BITS),
             Self::ZOMBIE_TAG => Self::Zombie,
+            Self::MIGRATING_TAG => Self::Migrating,
             tag => panic!("invalid scheduler state tag: {}", tag),
         }
     }

@@ -254,6 +254,13 @@ CPU0 恢复并退出，旧 CPU1 不得残留 owner。B34 的用户探针因此�
 B34 历史证据中的第 20 项编号保持原样。该用例动态覆盖 manager/wake 协议，远程 raw syscall
 的 TID 查找、权限和用户指针路径仍以 B34 用户 probe 与源码审计组合验收。
 
+B36 再插入第 14 项 `smp::queued_affinity_moves_between_runqueues`，总数变为 23。CPU1 holder
+开放中断以响应 kernel-stack TLB 同步，但不经过调度安全点；第二个任务因此稳定保持
+`Queued(1)`。用例先把 mask 扩为 bit0|bit1，证明 owner 仍合法时不会搬队；再收紧为 bit0，
+核对源/目标队列长度、mask、`Queued(0)` 和最终恰好一次 CPU0 执行。B34 用户 probe 顺延为
+第 22 项，terminal STOP 为第 23 项。该项直接调用生产 manager/runqueue 入口，尚未从用户态
+并发发起两个远程 TID syscall，也不覆盖远程 Running/Blocking 停止协议。
+
 ### 目录结构
 
 ```
@@ -505,7 +512,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32/B33/B34/B35 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33/B34/B35/B36 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -525,7 +532,11 @@ B34 起第 20 项名称变为 `smp::user_task_reschedules_and_sets_affinity`；�
 B35 插入新的第 13 项后，当前列表中的 B34 probe 顺延为第 21 项；验收必须同时看到旧
 `blocked_kernel_tasks_wake_on_last_cpu`、新 `blocked_affinity_redirects_wake`、B34 probe 与
 终态 STOP 全部 PASS。新用例证明稳定 Blocked 的 mask 会改变真实 wake 目标，但没有从用户态
-直接发起远程 TID syscall；Running/Blocking/Queued 写侧必须继续标为未支持。
+直接发起远程 TID syscall。
+B36 插入第 14 项后，B34 probe/STOP 分别顺延为第 22/23 项；验收必须看到
+`queued_affinity_moves_between_runqueues` 在双架构直接 PASS，并核对 holder 释放后源队列无残留、
+subject 只在 CPU0 执行一次。该证据只闭合稳定 Queued 写侧；Running/Blocking 必须继续标为
+未支持，不能用 23/23 外推完整远程 affinity。
 
 ### Bug 下沉流程
 

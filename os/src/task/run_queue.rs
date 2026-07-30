@@ -1,13 +1,13 @@
 //! Per-CPU runnable 队列及其唯一所有权操作。
 //!
-//! 本模块只管理 `Queued(cpu)` 任务；interruptible/zombie/timer registry 仍由
-//! `TaskManager` 管理。所有入口至多锁定一个 runqueue，且锁内不获取
-//! `task.inner`。每个入队入口还必须验证目标属于任务的 `cpus_allowed`；普通任务
-//! 仍首次发布到 CPU0，blocked 任务只能回到仍被允许的 CPU。
+//! 本模块管理 `Queued(cpu)` 容器及 queued 任务的跨队列搬迁；
+//! interruptible/zombie/timer registry 仍由 `TaskManager` 管理。搬迁通过短暂的
+//! `Migrating` 交还唯一所有权，所有入口至多锁定一个 runqueue，且锁内不获取
+//! `task.inner`。每个入队入口还必须验证目标属于任务的 `cpus_allowed`。
 
 use super::{TaskControlBlock, TaskStatus};
 use alloc::{collections::VecDeque, sync::Arc};
-use core::sync::atomic::Ordering;
+use core::{hint::spin_loop, sync::atomic::Ordering};
 
 /// 单个 CPU 独占的 runnable 容器。
 pub(crate) struct RunQueue {
@@ -67,6 +67,15 @@ impl RunQueue {
         }?;
         self.note_removed(&task);
         Some(task)
+    }
+
+    fn remove_at(&mut self, index: usize) -> Arc<TaskControlBlock> {
+        let task = self
+            .tasks
+            .remove(index)
+            .expect("located runqueue entry vanished");
+        self.note_removed(&task);
+        task
     }
 
     fn recompute_nice_count(&mut self) {
@@ -166,30 +175,150 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     Some(task)
 }
 
+/// 在 owner runqueue 内更新 queued 任务 affinity，必要时搬到另一 CPU。
+///
+/// 返回 `Ok(Some(cpu))` 表示调用者需在所有队列锁释放后通知目标 CPU；
+/// `Ok(None)` 表示旧 owner 仍合法、只更新了 mask；`Err(status)` 表示任务已被
+/// fetch、阻塞或退出。两个并发写侧通过 `Migrating` 重试并按实际完成顺序线性化。
+pub(crate) fn set_queued_affinity(
+    task: &Arc<TaskControlBlock>,
+    mask: usize,
+) -> Result<Option<usize>, TaskStatus> {
+    loop {
+        let source_cpu = match task.task_status() {
+            TaskStatus::Queued(cpu) => cpu,
+            TaskStatus::Migrating => {
+                // 迁移方进入该状态前已完成所有 TLB 等待，之后不会获取
+                // TASK_MANAGER；这里只等待两个短 runqueue 临界区之间的交接。
+                spin_loop();
+                continue;
+            }
+            status => return Err(status),
+        };
+
+        let target_cpu = if mask & (1usize << source_cpu) == 0 {
+            let runnable = mask
+                & crate::smp::online_cpu_mask()
+                & crate::smp::scheduler_cpu_mask()
+                & !crate::smp::stopped_cpu_mask();
+            let target = (0..crate::smp::configured_cpu_count())
+                .filter(|cpu| runnable & (1usize << cpu) != 0)
+                .min_by_key(|cpu| {
+                    let current = usize::from(super::processor::cpu_has_current(*cpu));
+                    (nr_running(*cpu) + current, *cpu)
+                })
+                .expect("queued affinity has no online scheduler CPU");
+
+            // 必须在取得源 rq 锁、更不能在进入 Migrating 后等待 shootdown；
+            // 同步失败时任务仍完整地留在原队列和旧 mask 下。
+            crate::smp::synchronize_kernel_mapping(target).unwrap_or_else(|error| {
+                panic!(
+                    "failed to synchronize queued task {} stack to CPU {}: {:?}",
+                    task.gettid(),
+                    target,
+                    error
+                )
+            });
+            Some(target)
+        } else {
+            None
+        };
+
+        let mut source = state(source_cpu).run_queue.lock();
+        let Some(index) = source
+            .tasks
+            .iter()
+            .position(|queued| Arc::ptr_eq(queued, task))
+        else {
+            let actual = task.task_status();
+            drop(source);
+            match actual {
+                TaskStatus::Migrating | TaskStatus::Queued(_) => continue,
+                status => return Err(status),
+            }
+        };
+
+        let Some(target_cpu) = target_cpu else {
+            task.store_cpus_allowed(
+                mask,
+                TaskStatus::Queued(source_cpu),
+                "update queued affinity",
+            );
+            return Ok(None);
+        };
+
+        // 状态先从源 owner 交给迁移调用方，再摘除容器；源 rq 锁使 fetch
+        // 无法观察中间步骤。离开本临界区后任务不属于任何 rq/current。
+        task.require_sched_transition(
+            TaskStatus::Queued(source_cpu),
+            TaskStatus::Migrating,
+            "detach queued task for affinity",
+        );
+        let moved = source.remove_at(index);
+        sub_running(source_cpu, 1);
+        drop(source);
+
+        // mask 在无 CPU owner 的窗口发布。目标状态的 AcqRel 交接保证 fetch
+        // 在取得任务前看见它，且旧 owner 已经无法再次选择该 TCB。
+        task.store_cpus_allowed(mask, TaskStatus::Migrating, "move queued affinity");
+        task.require_cpu_allowed(target_cpu, "move queued task for affinity");
+
+        let mut target = state(target_cpu).run_queue.lock();
+        task.require_sched_transition(
+            TaskStatus::Migrating,
+            TaskStatus::Queued(target_cpu),
+            "attach queued task after affinity",
+        );
+        target.push_back(moved);
+        add_running(target_cpu);
+        return Ok(Some(target_cpu));
+    }
+}
+
 /// 从其 owner runqueue 撤回任务，并交给调用方推进退出流程。
 pub(crate) fn remove(task: &Arc<TaskControlBlock>) -> bool {
-    let TaskStatus::Queued(cpu) = task.task_status() else {
-        return false;
-    };
-    let mut queue = state(cpu).run_queue.lock();
-    let Some(index) = queue.tasks.iter().position(|queued| Arc::ptr_eq(queued, task)) else {
-        if task.task_status() == TaskStatus::Queued(cpu) {
-            panic!("Queued task is absent from owner runqueue: tid={} cpu={}", task.gettid(), cpu);
-        }
-        return false;
-    };
-    task.require_sched_transition(
-        TaskStatus::Queued(cpu),
-        TaskStatus::Blocked,
-        "remove queued task",
-    );
-    let removed = queue.tasks.remove(index).expect("located runqueue entry vanished");
-    queue.note_removed(&removed);
-    // TCB 析构可能继续释放内核栈或进程资源，不能发生在 runqueue 锁内。
-    drop(queue);
-    sub_running(cpu, 1);
-    drop(removed);
-    true
+    loop {
+        let cpu = match task.task_status() {
+            TaskStatus::Queued(cpu) => cpu,
+            TaskStatus::Migrating => {
+                // exit/exec 可能持有 TASK_MANAGER。迁移路径在发布 Migrating
+                // 后绝不获取该锁或等待 IPI ack，所以这里不存在锁依赖环。
+                spin_loop();
+                continue;
+            }
+            _ => return false,
+        };
+        let mut queue = state(cpu).run_queue.lock();
+        let Some(index) = queue
+            .tasks
+            .iter()
+            .position(|queued| Arc::ptr_eq(queued, task))
+        else {
+            let actual = task.task_status();
+            drop(queue);
+            match actual {
+                TaskStatus::Migrating => continue,
+                TaskStatus::Queued(owner) if owner != cpu => continue,
+                TaskStatus::Queued(_) => panic!(
+                    "Queued task is absent from owner runqueue: tid={} cpu={}",
+                    task.gettid(),
+                    cpu
+                ),
+                _ => return false,
+            }
+        };
+        task.require_sched_transition(
+            TaskStatus::Queued(cpu),
+            TaskStatus::Blocked,
+            "remove queued task",
+        );
+        let removed = queue.remove_at(index);
+        // TCB 析构可能继续释放内核栈或进程资源，不能发生在 runqueue 锁内。
+        drop(queue);
+        sub_running(cpu, 1);
+        drop(removed);
+        return true;
+    }
 }
 
 /// nice hint 已更新后，修正 owner runqueue 的选择快速路径计数。
@@ -197,16 +326,40 @@ pub(crate) fn update_nice(task: &Arc<TaskControlBlock>, old_nice: i32, new_nice:
     if (old_nice == 0) == (new_nice == 0) {
         return;
     }
-    let TaskStatus::Queued(cpu) = task.task_status() else {
-        return;
-    };
-    let mut queue = state(cpu).run_queue.lock();
-    if !queue.tasks.iter().any(|queued| Arc::ptr_eq(queued, task)) {
-        return;
+    loop {
+        let cpu = match task.task_status() {
+            TaskStatus::Queued(cpu) => cpu,
+            TaskStatus::Migrating => {
+                // affinity 搬队窗口不携带 owner；等目标队列接管后再校准。
+                spin_loop();
+                continue;
+            }
+            _ => return,
+        };
+        let mut queue = state(cpu).run_queue.lock();
+        if queue.tasks.iter().any(|queued| Arc::ptr_eq(queued, task)) {
+            // hint 的写入发生在取得 runqueue 锁之前；任务也可能恰在期间入队。
+            // 重新计算可同时覆盖“已在队列中改 nice”和“用新 hint 刚入队”。
+            queue.recompute_nice_count();
+            return;
+        }
+
+        // fetch 或 affinity 搬队可能先摘走任务。先校准读到的旧 owner，修复
+        // remove_at() 按新 hint 扣减旧计数的竞态，再按最新状态重新定位。
+        queue.recompute_nice_count();
+        let actual = task.task_status();
+        drop(queue);
+        match actual {
+            TaskStatus::Migrating => spin_loop(),
+            TaskStatus::Queued(owner) if owner != cpu => {}
+            TaskStatus::Queued(_) => panic!(
+                "Queued task is absent while updating nice: tid={} cpu={}",
+                task.gettid(),
+                cpu
+            ),
+            _ => return,
+        }
     }
-    // hint 的写入发生在取得 runqueue 锁之前；任务也可能恰在期间入队。
-    // 重新计算可同时覆盖“已在队列中改 nice”和“用新 hint 刚入队”两种时序。
-    queue.recompute_nice_count();
 }
 
 /// 返回指定 CPU 的精确队列统计，供诊断与 focused test 使用。

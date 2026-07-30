@@ -413,7 +413,7 @@ impl TaskManager {
                     super::run_queue::enqueue_woken(task, target_cpu);
                     return Ok(Some(target_cpu));
                 }
-                TaskStatus::Queued(_) | TaskStatus::Running(_) => {
+                TaskStatus::Queued(_) | TaskStatus::Migrating | TaskStatus::Running(_) => {
                     crate::task::perf::record_taskq_dup_enqueue();
                     return Err(WaitQueueError::AlreadyWaken);
                 }
@@ -719,7 +719,7 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
 /// `Blocked` 也可能是退出路径从 runqueue 摘除后的短暂状态，所以不能只看
 /// 原子状态。registry 成员关系和状态必须在同一个 `TASK_MANAGER` 临界区内
 /// 同时成立；同一把锁也串行化后续 wake 对 `cpus_allowed` 的读取和入队。
-pub(crate) fn update_blocked_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> bool {
+fn update_blocked_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> bool {
     let manager = TASK_MANAGER.lock();
     if task.task_status() != TaskStatus::Blocked
         || !manager
@@ -733,10 +733,47 @@ pub(crate) fn update_blocked_affinity(task: &Arc<TaskControlBlock>, mask: usize)
     true
 }
 
+/// 更新非 current 任务 affinity；当前支持稳定 Blocked 与 Queued。
+///
+/// Blocked 由 `TASK_MANAGER` 与 wake 串行化；Queued 由 owner runqueue 与 fetch
+/// 串行化，必要时经过短暂 `Migrating` 搬队。两条路径都在锁释放后才发送
+/// RESCHEDULE。远程 Running/Blocking 仍由后续的 CPU 停止协议处理。
+pub(crate) fn set_remote_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> bool {
+    loop {
+        match task.task_status() {
+            TaskStatus::Blocked => {
+                if update_blocked_affinity(task, mask) {
+                    return true;
+                }
+                // wake 可能先取得 TASK_MANAGER 并发布到 runqueue；若状态确实
+                // 已变化就按新 owner 重试。若仍为 Blocked，它已被退出路径从
+                // runnable 容器摘除且不在 registry 中，不再接受 affinity 更新。
+                if task.task_status() == TaskStatus::Blocked {
+                    return false;
+                }
+            }
+            TaskStatus::Queued(_) | TaskStatus::Migrating => {
+                match super::run_queue::set_queued_affinity(task, mask) {
+                    Ok(target) => {
+                        if let Some(cpu) = target {
+                            notify_wake_targets(1usize << cpu);
+                        }
+                        return true;
+                    }
+                    Err(TaskStatus::Blocked | TaskStatus::Queued(_) | TaskStatus::Migrating) => {}
+                    Err(_) => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// 从调度队列中移除一组任务。
 pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
-    // 固定 TASK_MANAGER -> 单个 RunQueue 的锁序；循环每次只定位任务当前
-    // owner，绝不同时持有两个 CPU 的队列锁。
+    // 固定 TASK_MANAGER -> 单个 RunQueue 的锁序，避免从 rq 摘除后扩大无锁的
+    // Blocked 退出窗口。Migrating 后不会反向取得 TASK_MANAGER 或等待 IPI ack，
+    // 因此 remove() 即使重定位 owner，也只等待两个短 runqueue 临界区。
     let mut manager = TASK_MANAGER.lock();
     let mut removed = manager.remove_interruptible_tasks(tasks);
     for task in tasks {
@@ -915,7 +952,9 @@ impl WaitQueue {
                             remaining.push_back(Arc::downgrade(&task));
                         }
                     }
-                    super::TaskStatus::Queued(_) | super::TaskStatus::Running(_) => {
+                    super::TaskStatus::Queued(_)
+                    | super::TaskStatus::Migrating
+                    | super::TaskStatus::Running(_) => {
                         if wake_count < limit {
                             wake_count += 1;
                             task.wait_timer_generation
@@ -950,7 +989,9 @@ impl WaitQueue {
                     let _ = wake_interruptible(task);
                     return 1;
                 }
-                super::TaskStatus::Queued(_) | super::TaskStatus::Running(_) => {
+                super::TaskStatus::Queued(_)
+                | super::TaskStatus::Migrating
+                | super::TaskStatus::Running(_) => {
                     task.wait_timer_generation
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return 1;

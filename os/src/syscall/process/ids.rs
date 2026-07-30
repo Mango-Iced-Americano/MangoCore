@@ -2587,10 +2587,9 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> 
 
     if !Arc::ptr_eq(&caller, &task) {
         drop(caller);
-        // Blocked 没有 current/runqueue owner；现有 TASK_MANAGER 锁可以把
-        // mask 更新与 wake 串行化。其它远程状态仍需要各自的 owner 交接协议，
-        // 这里明确拒绝，不能只写 mask 后留下非法 Running/Queued owner。
-        return if crate::task::update_blocked_affinity(&task, allowed) {
+        // Blocked 由 interruptible registry 串行化，Queued 由 owner runqueue
+        // 串行化并在必要时搬队。远程 Running/Blocking 尚无停止协议，仍明确拒绝。
+        return if crate::task::set_remote_affinity(&task, allowed) {
             SUCCESS
         } else {
             EOPNOTSUPP
