@@ -144,8 +144,9 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
 SMP 过渡期的安全点抢占调度：current 槽、idle context 和 `RunQueue` 已按 CPU
 拆分，AP 在 scheduler-ready 后安装内核页表并进入本地调度循环。focused ktest 的
 短生命周期 kernel-only 任务可显式远程入队，并可在真实 WaitQueue 阻塞后回到最近运行
-CPU；动态 kernel-global 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收。普通新任务和
-用户任务仍固定 CPU0；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
+CPU；B28 还让一个无共享 I/O 的受控用户探针在 CPU1 完成 getpid/yield/exit，再由 CPU0
+wait/reap。该例外不改变默认策略：普通新任务和用户任务仍固定 CPU0。动态 kernel-global
+映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标

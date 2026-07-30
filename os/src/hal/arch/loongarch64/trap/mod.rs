@@ -17,8 +17,8 @@ use crate::mm::{copy_from_user, copy_to_user, frame_reserve, FaultAccess, Memory
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
-    suspend_current_and_run_next, Signals,
+    current_task, current_trap_cx, current_trap_task, current_user_token, do_signal,
+    do_wake_expired, signal::SigInfo, suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
@@ -191,15 +191,8 @@ pub fn trap_handler() -> ! {
     // Any diagnostic failure below must use the kernel trap vector rather than
     // re-entering the user trampoline with a kernel stack in `sp`.
     set_kernel_trap_entry();
-    // User r21 has already been saved.  This validation proves the assembly
-    // reinstalled a configured PerCpu pointer before Rust consumes CPU state.
-    let cpu_id = crate::smp::cpu_id();
-    assert_eq!(
-        cpu_id,
-        crate::smp::BOOT_CPU_ID,
-        "Phase 1 user task trapped on non-boot CPU {}",
-        cpu_id
-    );
+    // 用户 r21 已保存，汇编已恢复本 CPU 的 PerCpu 指针；下方取得
+    // current 时会同时校验 `Running(cpu)`，不再把用户 trap 限制在 CPU0。
     if PrMd::read().get_pplv() == 0 {
         panic!();
     }
@@ -210,7 +203,7 @@ pub fn trap_handler() -> ! {
 
     if let Trap::Exception(Exception::Syscall) = cause {
         let _trap_start = crate::task::perf::perf_time_now();
-        let task = current_task().unwrap();
+        let task = current_trap_task();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
@@ -224,12 +217,16 @@ pub fn trap_handler() -> ! {
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
             )
         };
+        // exit(2) 不会返回到本 Rust 栈帧。在进入 syscall 前释放临时 Arc，
+        // 避免退出任务永久留住 TCB 和它的内核栈。
+        drop(task);
         // trap frame、kernel EENTRY 和 CPU-local r21 都已完整建立，且
         // task.inner 已释放。只在真正执行 syscall 时开放 timer/IPI，
         // 写回 trap context 前 helper 会恢复为关中断。
         let result = crate::hal::with_local_interrupts_enabled(|| syscall(syscall_id, args));
         // The trap context may be replaced by execve or restored by sigreturn,
         // so fetch it again after syscall returns.
+        let task = current_trap_task();
         {
             let mut inner = task.acquire_inner_lock();
             let cx = inner.get_trap_cx();
@@ -250,7 +247,7 @@ pub fn trap_handler() -> ! {
     }
 
     {
-        let task = current_task().unwrap();
+        let task = current_trap_task();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }

@@ -59,6 +59,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP LoongArch MM-owned ASID/epoch | 2026-07-29 | GPT/Codex, DeepSeek | 官方 CSR/INVTLB 与 Linux versioned ASID 对照、rollover 并发审查、release ELF 反汇编和双架构 Docker/QEMU 验证 | 删除 TCB ASID；定位并修复 LA64 trap-return asm 输入自覆盖；双架构 8 核 focused 19/19，初赛 RV64 312/314、LA64 308/314 |
 | SMP LoongArch ASID+VPN 精准 shootdown | 2026-07-29 | GPT/Codex, DeepSeek | 官方 `invtlb 0x5`、Linux 页对粒度对照、固定原子槽并发审查和双架构 Docker/QEMU 验证 | 锁内冻结 ASID/VPN、锁外 IPI/ack；8 核并发 payload 隔离，双架构 focused 20/20 PASS |
 | SMP RV64 MM-owned ASID | 2026-07-30 | GPT/Codex, DeepSeek | SATP ASID 探测、rollover 时序、SBI RFENCE FID 2 与 trap 汇编审查 | 建立 versioned ASID 与 flush-before-reuse；页级失效按 VA+ASID 执行，ASIDLEN=0 保留全刷兼容路径 |
+| SMP 受控 AP 用户态闭环 | 2026-07-30 | GPT/Codex, DeepSeek | 用户 trap CPU 所有权、远程首次发布、noreturn Arc 生命周期和双架构 8 核验证 | CPU1 实际执行 getpid/yield/exit，CPU0 完成 wait/reap；普通用户调度和共享 I/O 仍未开放 |
 
 ## 4. 详细使用场景
 
@@ -568,6 +569,33 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   的 a4 ASID。仓库 lint baseline 漂移，且脚本遗留临时 stub，因此仓库级状态如实记为
   `partial`，未用 capture-baseline 掩盖 RED。
 
+### Case 25: SMP 受控 AP 用户态 syscall/退出闭环
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b28-ap-user-summary.md`；设计审查、模型报告和原始
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计并实现远程首次发布、trap owner 校验、用户探针与生命周期收口，
+  独立核对源码哈希和日志；DeepSeek 先只读审查最小边界，再通过受限 Docker gateway
+  串行执行双架构 focused/初赛，并复核最终收敛 diff。提交仍由 GPT 在用户批准后执行。
+- Problem: B27 已完成双架构 ASID/TLB 基础设施，但用户 trap handler 仍硬编码 CPU0，
+  也没有真实用户任务证明 AP 的页表/ASID、CPU-local 寄存器、yield 恢复和退出回收能连成
+  闭环。进一步审查还发现，若 trap handler 的临时 TCB `Arc` 跨过非返回 exit syscall，
+  Rust 栈帧永不析构会导致 TCB 与内核栈永久存活。
+- Human action: 抽出唯一 `publish_task_on()`，固定“内核栈映射同步 → runqueue 发布 →
+  锁外 doorbell”；以 `current_trap_task()` 一次取得 current 并验证 `Running(cpu)`，返回型
+  syscall 后重新读取 CPU，非返回 syscall 前主动 drop Arc。ktest 内嵌两架构最小用户指令，
+  在 RW 匿名页装载后经正式 mprotect 收紧为 RX；CPU1 执行 getpid、yield 和 exit，CPU0
+  验证 zombie、wait/reap 与 Weak 释放。
+- AI adjudication: 没有采纳 DeepSeek 增加独立 `/test_ap_user` ELF 和测试专用生产发布 API
+  的建议，因为会扩大构建面并复制协议；也纠正了“exit 完成第三次往返”和“B28 已动态证明
+  generation race/远端 PTE shootdown”的过度表述。正确边界是两次返回用户态、一次非返回
+  exit trap，以及 CPU0 创建/AP 执行/CPU0 回收，而非同一任务跨核迁移。
+- Verification: 最终代码指纹下 RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 21/21 PASS，
+  `smp::ap_user_syscall_round_trip` 明确为第 20 项且通过，online mask 均为 `0xff`。功能实现
+  首轮的双架构 `mask=0x003` 仍为 RV64 312/314、LA64 308/314，失败集合未扩大；最终只做
+  owner helper、RW→RX 和测试确定性收敛，按风险不重复整套初赛。仓库 lint 继续因既有
+  baseline 漂移而 RED，未刷新基线。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -633,6 +661,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b24-rfence-summary.md` | SMP RV64 页级 RFENCE 与 IPI fallback | 记录 SBI/Linux/DragonOS 对照、逻辑/物理 hart mask、DeepSeek 门禁与人工证据边界裁决 |
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b26-precise-shootdown-summary.md` | SMP LoongArch ASID+VPN 精准 shootdown | 记录固定 per-CPU slot、页对硬件粒度、DeepSeek 冻结验证与人工证据边界修正 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b27-rv64-asid-summary.md` | SMP RV64 MM-owned ASID 与页级 RFENCE FID 2 | 记录 ASIDLEN 探测、flush-before-reuse、trap-return IRQ-off 交接、DeepSeek 只读审查与双架构 Docker/QEMU 门禁 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b28-ap-user-summary.md` | SMP 受控 AP 用户态闭环 | 记录远程首次发布顺序、trap owner/noreturn Arc、RW→RX 探针、双架构 21/21 与初赛非回归边界 |
 
 ## 9. 交互记录与留痕方式
 

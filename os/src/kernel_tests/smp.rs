@@ -7,6 +7,69 @@ use spin::Mutex;
 
 use crate::kernel_tests::runner::KernelTest;
 
+// 这三个编号是 RV64/LA64 共用的 Linux generic syscall ABI。
+// probe 只依赖 getpid/yield/exit，不在 AP 上进入 FS、net 或设备路径。
+const USER_PROBE_GETPID: usize = 172;
+const USER_PROBE_YIELD: usize = 124;
+const USER_PROBE_EXIT: usize = 93;
+
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.smp_user_probe, "a"
+    .balign 4
+    .global __smp_user_probe_start
+    .global __smp_user_probe_end
+__smp_user_probe_start:
+    addi a7, zero, {getpid}
+    ecall
+    sltiu s0, a0, 1
+    addi a7, zero, {yield_syscall}
+    ecall
+    addi a0, s0, 0
+    addi a7, zero, {exit_syscall}
+    ecall
+1:
+    j 1b
+__smp_user_probe_end:
+    .popsection
+"#,
+    getpid = const USER_PROBE_GETPID,
+    yield_syscall = const USER_PROBE_YIELD,
+    exit_syscall = const USER_PROBE_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.smp_user_probe, "a"
+    .balign 4
+    .global __smp_user_probe_start
+    .global __smp_user_probe_end
+__smp_user_probe_start:
+    addi.d $a7, $zero, {getpid}
+    syscall 0
+    sltui $s0, $a0, 1
+    addi.d $a7, $zero, {yield_syscall}
+    syscall 0
+    move $a0, $s0
+    addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+1:
+    b 1b
+__smp_user_probe_end:
+    .popsection
+"#,
+    getpid = const USER_PROBE_GETPID,
+    yield_syscall = const USER_PROBE_YIELD,
+    exit_syscall = const USER_PROBE_EXIT,
+);
+
+extern "C" {
+    static __smp_user_probe_start: u8;
+    static __smp_user_probe_end: u8;
+}
+
 const IRQ_PROBE_NOT_RUN: usize = 0;
 const IRQ_PROBE_DISABLED: usize = 1;
 const IRQ_PROBE_ENABLED: usize = 2;
@@ -111,11 +174,155 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::kernel_stack_reclaim_waits_for_shootdown",
             kernel_stack_reclaim_waits_for_shootdown,
         ),
+        KernelTest::new(
+            "smp::ap_user_syscall_round_trip",
+            ap_user_syscall_round_trip,
+        ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
             secondary_cpus_stop_and_ack,
         ),
     ]
+}
+
+/// 取得链接进内核的双架构用户 probe 指令流。
+fn user_probe_program() -> &'static [u8] {
+    // Safety: 两个符号由上方同一个汇编 section 定义，end 紧跟在
+    // probe 末尾；链接后地址稳定，且返回切片只读。
+    unsafe {
+        let start = core::ptr::addr_of!(__smp_user_probe_start) as usize;
+        let end = core::ptr::addr_of!(__smp_user_probe_end) as usize;
+        core::slice::from_raw_parts(start as *const u8, end - start)
+    }
+}
+
+/// 构造完整用户 TCB，再把极小 probe 放入新的匿名映射。
+///
+/// `/init` 只在 CPU0 上作为现有用户 ABI/stack/trap-context 脚手架被解析；
+/// 它的入口不会执行，fd 也会在任务对 AP 可见前关闭。
+fn build_user_probe_task() -> Result<Arc<crate::task::TaskControlBlock>, &'static str> {
+    let inode = crate::fs::vfs_lookup_absolute("/init")
+        .or_else(|_| crate::fs::vfs_lookup_absolute("/initproc"))
+        .map_err(|_| "ktest initramfs has no user ELF scaffold")?;
+    let elf = crate::fs::vfs::File::new(inode, crate::fs::vfs::FileFlags::O_RDONLY)
+        .map_err(|_| "failed to open user ELF scaffold")?;
+    let task = crate::task::TaskControlBlock::new(elf);
+    task.process.close_files_on_exit();
+
+    let program = user_probe_program();
+    if program.is_empty() || program.len() > crate::config::PAGE_SIZE {
+        return Err("user probe does not fit in one page");
+    }
+    let entry = task.process.vm().write(|space| {
+        let entry = space.mmap(
+            0,
+            crate::config::PAGE_SIZE,
+            crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
+            crate::mm::MapFlags::MAP_PRIVATE | crate::mm::MapFlags::MAP_ANONYMOUS,
+            0,
+            None,
+            true,
+            false,
+        );
+        if entry < 0 {
+            return Err("failed to reserve anonymous user probe page");
+        }
+        let entry = entry as usize;
+        let pa = space
+            .fault_in_user_va(
+                crate::mm::VirtAddr::from(entry),
+                crate::mm::FaultAccess::Store,
+            )
+            .map_err(|_| "failed to populate anonymous user probe page")?;
+        let offset = pa.page_offset();
+        if offset + program.len() > crate::config::PAGE_SIZE {
+            return Err("user probe crossed its mapped page");
+        }
+        pa.floor().get_bytes_array()[offset..offset + program.len()].copy_from_slice(program);
+        // 只在装载指令时开放写权限；任务发布前收紧为 RX，避免测试把 W+X
+        // 映射带到 AP，也顺带覆盖正式的 mprotect/PTE 提交流程。
+        space
+            .mprotect(
+                entry,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R
+                    | crate::mm::MapPermission::X
+                    | crate::mm::MapPermission::U,
+            )
+            .map_err(|_| "failed to protect user probe code page")?;
+        Ok(entry)
+    })?;
+    task.acquire_inner_lock().get_trap_cx().gp.pc = entry;
+    Ok(task)
+}
+
+/// CPU0 发布真实用户任务到 CPU1，验证两次返回用户态、一次退出 trap 和完整回收。
+fn ap_user_syscall_round_trip() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("AP user probe setup did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    // 前一项 ktest 已经结束；先清空它留下的 TCB，随后出现的 zombie 才能
+    // 确定来自本 probe，而不是依赖整个测试套件的隐式执行顺序。
+    drop(crate::task::take_zombie_tasks(usize::MAX));
+    if crate::task::zombie_queue_count_fast() != 0 {
+        return Err("stale zombie task remained before AP user probe");
+    }
+
+    let parent_task = crate::task::current_task().ok_or("ktest runner has no current task")?;
+    let parent = parent_task.process.clone();
+    drop(parent_task);
+    let task = build_user_probe_task()?;
+    let process = task.process.clone();
+    let pid = task.pid();
+    parent
+        .add_child(process.clone())
+        .map_err(|_| "failed to attach user probe to ktest runner")?;
+    process.set_parent(Some(Arc::downgrade(&parent)));
+
+    let weak_task = Arc::downgrade(&task);
+    crate::task::publish_task_on(task.clone(), 1);
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    while !process.is_zombie()
+        || task.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(1)
+        || crate::task::run_queue_count(1) != 0
+        || crate::task::zombie_queue_count_fast() == 0
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP user probe did not quiesce before timeout");
+        }
+        core::hint::spin_loop();
+    }
+
+    if task.last_cpu() != 1 {
+        return Err("user probe did not run on its target AP");
+    }
+    let reaped = crate::task::ProcessManager::wait_child(
+        &parent,
+        pid as isize,
+        true,
+        true,
+        false,
+        false,
+        false,
+    )
+    .map_err(|_| "ktest parent could not reap AP user probe")?
+    .ok_or("AP user probe was not waitable")?;
+    if reaped.pid != pid || reaped.status != 0 || process.exit_code() != 0 {
+        return Err("AP user probe syscall result or exit status was invalid");
+    }
+
+    drop(process);
+    drop(task);
+    if weak_task.upgrade().is_some() {
+        return Err("reaped AP user probe retained a strong TCB owner");
+    }
+    Ok(())
 }
 
 fn read_shared_mm_asid_on_ap() {

@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-30
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -24,7 +24,8 @@ tags: [process, scheduler, task-manager, processor]
 调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
 拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通新任务仍固定
 进入 CPU0，focused ktest 的短 kernel-only 任务可显式远程入队，并能在阻塞后
-由统一 wake 路径回到最近运行 CPU。
+由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
+发布到 CPU1，验证真实 trap/yield/exit；这不是普通用户任务的目标选择策略。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -73,13 +74,28 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。B20 的 AP 队列仍只接收受控 kernel-only 任务；普通生产任务 owner 固定 CPU0。
+调度域。AP 队列只接收显式受控任务：B19/B20 的 kernel-only 任务和 B28 的单个
+无共享 I/O 用户探针；普通生产任务 owner 固定 CPU0。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
 不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
 通用新任务目标选择、affinity、迁移和 work stealing 仍未开放。
+
+### 3.1 首次发布到指定 CPU
+
+`publish_task_on(task, cpu)` 是首次发布的统一生产入口，kernel-only ktest 和 B28
+用户探针不再各自复制远程入队协议。顺序固定为：
+
+1. 验证目标 CPU 已 configured、online，AP 还必须越过 scheduler-ready；
+2. 若目标是远端 CPU，先完成动态内核栈映射的 TLB 同步；
+3. 通过 `run_queue::publish()` 提交 `New -> Queued(cpu)` 并加入唯一目标队列；
+4. 该函数返回时 runqueue 锁已经释放，随后才发送 `RESCHEDULE` doorbell。
+
+这个接口只允许调用者明确指定目标，并未实现负载选择。普通 `publish_task()` 仍把
+新任务交给 CPU0；因此 B28 证明“指定 CPU 可以安全执行一个用户任务”，不证明默认
+用户任务已经多核化。
 
 ## 4. Processor
 
@@ -170,7 +186,9 @@ AP 走独立的精简分支，只执行：
   → 空队列时在 IRQ-off 窗口重查后执行 wfi/idle
 ```
 
-AP 不推进 timer、timeout、console、network、FS reclaim 或 OOM active tracker。远程
+AP 不推进 timer、timeout、console、network、FS reclaim 或 OOM active tracker。B28
+用户探针只在 syscall 窗口响应 IPI，并通过显式 yield 进入安全点，不依赖 AP timer。
+远程
 发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait
 之间到达的 doorbell 会保持 pending 并唤醒 CPU，不会丢失 wakeup。
 
@@ -209,8 +227,10 @@ exit_current_and_run_next()
 ```
 
 CPU0 调度循环回到 idle 后通过 `take_zombie_tasks(64)` 批量取出并 drop。AP 的
-kernel-only 任务切回本地 idle 后，也会在释放 processor 锁后把 TCB 交给同一个受锁
-zombie registry；真正回收仍由 CPU0 执行。B21 后，TCB 析构只把缓存溢出的内核栈 slot
+受控任务切回本地 idle 后，也会在释放 processor 锁后把 TCB 交给同一个受锁
+zombie registry；真正回收仍由 CPU0 执行。B28 的用户探针还走过 PCB zombie、父进程
+`wait_child()` 和最后一个 TCB 强引用释放，防止非返回 exit 的 trap 栈帧泄漏 `Arc`。
+B21 后，TCB 析构只把缓存溢出的内核栈 slot
 登记到固定退休队列；CPU0 下一次 idle 安全点在无普通锁状态下撤销映射、等待全核 TLB
 ack、释放 frame，再归还 slot。曾在 AP 使用的 TCB 不再由测试保留到关机，栈地址可以在
 协议完成后真实复用。

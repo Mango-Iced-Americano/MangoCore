@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -47,9 +47,10 @@ firmware / QEMU
 打通 BSP→AP 的 IPI mailbox/ack 单播与广播、AP→BSP 请求/回复往返，以及
 CPU0 发起的 AP STOP/ack 终态协议。CPU0 的用户 syscall 已在完整 trap
 frame 内开放受控 timer/IPI 窗口。B19 又建立 scheduler-ready 屏障和 AP 本地
-调度循环，但只允许 focused ktest 的短 kernel-only 任务显式进入 AP；AP 不访问
-文件系统、网络、设备或用户 MM。B20 允许这些受控任务阻塞后回到最近运行 AP；
-普通新任务和用户任务仍由 CPU0 独占。
+调度循环，B20 允许受控 kernel-only 任务阻塞后回到最近运行 AP。B28 再增加一个
+严格受限的用户探针：CPU0 构造并发布，CPU1 进入真实用户态执行 getpid/yield/exit，
+CPU0 负责观察与回收。它不访问文件系统、网络或设备；普通新任务和用户任务仍由
+CPU0 独占。
 
 ## 启动栈与 BSS 边界
 
@@ -174,6 +175,13 @@ SBI RFENCE FID 2；有 ASID 时 trap 切根不再固定全刷，ASIDLEN=0 时保
 LA64 通过固定 per-CPU slot 传递 ASID/VPN 并执行 `invtlb 0x5`。连续 range 和 cached
 CPU detach 仍待后续阶段。
 
+B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
+再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入
+Rust 后由 `current_trap_task()` 克隆本 CPU current，并在锁外校验状态必须为
+`Running(cpu)`；它取代旧的 CPU0-only 断言，但没有改变普通任务的目标选择。
+每次返回用户态仍由执行返回的 CPU 重写 trap context 中的 `tp/$r21` 锚点并激活该
+MM 的页表根与 ASID。
+
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 
 1. AP hard-IRQ handler 只以 Release 发布 `round_trip_reply_pending`；
@@ -251,7 +259,8 @@ console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 T
 两个架构的 IPI handler 只执行原子操作和有界的本地 TLB 失效：不分配内存、不获取
 普通锁、不打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
 用户态和内核态 trap 共用同一 fast path；AP 仅打开 IPI 线路，timer/external
-interrupt 继续关闭。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
+interrupt 继续关闭。B28 用户探针只在 syscall 受控窗口暂时打开全局中断，因而
+可以响应已经启用的 IPI line，但不会接收 timer/设备中断。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
 `RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle
 安全点。AP 执行 B19 短 kernel-only 函数时仍保持全局 IRQ 关闭，因此 STOP 最长
@@ -265,6 +274,13 @@ IRQ-off 状态下短暂持有 `task.inner`，只用于取参数和更新入口�
 释放锁后才通过 `with_local_interrupts_enabled()` 执行真正的
 `syscall()`。闭包返回后先关闭中断，才重新获取 trap context 写回
 结果、处理信号并返回用户态。
+
+这里不能让 trap handler 的临时 `Arc<TaskControlBlock>` 跨过 `syscall()`：
+`exit/exit_group` 会切回 idle 且永不返回当前 Rust 栈帧，局部变量不会自动析构。
+因此入口在调用 syscall 前显式 drop；只有返回型 syscall 才重新调用
+`current_trap_task()`。后一次调用会重新读取 CPU ID，既避免引用泄漏，也为未来
+“syscall 内 yield 后在另一 CPU 恢复”保留正确 owner 校验语义。B28 动态覆盖两次
+返回用户态和一次非返回 exit trap，不把 exit 描述成一次完整往返。
 
 `TaskContext` 与双架构 `__switch` 只保存 callee-saved GPR，不保存
 `sstatus.SIE` 或 `CRMD.IE`。因此 `schedule()` 把中断状态作为任务的
@@ -300,7 +316,8 @@ deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 ti
 可以在同一轮返回中处理；`run_tasks()` 则在取得 Processor/ready queue 锁前
 消费 pending。安全点以 Acquire 取走 pending，在关中断状态下完成旧 timer
 工作并按完整队列重新编程 one-shot；只有全部工作结束后才决定是否在这个
-显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback。
+显式边界让出 CPU。AP 仍为 IPI-only，不运行普通 timer callback；B28 用户探针的
+yield 是显式安全点，不依赖 AP timer 抢占。
 
 该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。普通长 syscall
 现在可在任务 yield/block 之前、之后响应 timer/IPI；后续 TLB shootdown
@@ -338,3 +355,6 @@ AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。
 B14 还必须在窗口内真实 yield：新任务首次从 idle 切入时观测
 IRQ-off，原任务恢复后观测 IRQ-on，并在恢复后完成一次真实
 AP→BSP IPI reply。
+B28 还要求双架构 8 核日志实际出现 `smp::ap_user_syscall_round_trip`，并验证
+CPU1 执行、CPU0 wait/reap、退出后的 current/runqueue/zombie 与 TCB 强引用都已收口；
+仅看到测试总数或 QEMU 退出 0 不足以判定通过。

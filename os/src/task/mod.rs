@@ -33,7 +33,7 @@ pub mod threads;
 
 use crate::fs::{self, vfs_lookup_absolute};
 use crate::hal::__switch;
-use crate::mm::{AddressSpaceInner, AddressSpace, PageTableImpl};
+use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl};
 use alloc::{
     string::String,
     sync::{Arc, Weak},
@@ -43,17 +43,18 @@ pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
-use manager::{fetch_task, finish_switch_out};
+pub(crate) use manager::publish_task_on;
+pub(crate) use manager::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
-    has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
-    remove_zombie_tasks_by_pid, publish_task, run_deferred_timer_at_task_safe_point,
+    has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, publish_task,
+    remove_tasks_from_queues, remove_zombie_tasks_by_pid, run_deferred_timer_at_task_safe_point,
     run_deferred_timer_work, send_signal_to_interruptible, sleep_interruptible,
-    take_one_interruptible_zombie, take_zombie_tasks, task_manager_counts,
-    timer_interrupt_handler, timer_subsystem_init, update_ready_nice, wait_with_timeout,
-    wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
+    take_one_interruptible_zombie, take_zombie_tasks, task_manager_counts, timer_interrupt_handler,
+    timer_subsystem_init, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
+    TimerAction, WaitQueue, WaitResult,
 };
-pub(crate) use manager::zombie_queue_count_fast;
+use manager::{fetch_task, finish_switch_out};
 // pub use pid::RecycleAllocator;
 pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
 pub use mount_namespace::{MountNamespace, INIT_MOUNT_NAMESPACE};
@@ -73,7 +74,7 @@ pub use processor::{
     current_trap_cx, current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
     try_current_user_token,
 };
-pub(crate) use processor::try_current_task;
+pub(crate) use processor::{current_trap_task, try_current_task};
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
     find_task_by_tid,
@@ -434,34 +435,14 @@ pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
 
 /// 在指定 CPU 创建一个 kernel-only ktest 任务。
 ///
-/// 该入口只用于验证 AP 调度闭环，不向普通任务开放 CPU 选择。普通用户任务、
-/// blocked wake 和迁移仍固定 CPU0，直到远端 TLB shootdown 与共享子系统审计完成。
-/// `f` 只能访问原子量、CPU-local/task 调度原语和已明确加锁的 registry；不得
-/// 在 AP 上进入 console、网络、文件系统、设备或用户 MM 路径。
+/// 该入口只用于验证 AP 调度闭环，不向普通任务开放 CPU 选择。B28 的用户探针
+/// 通过通用 `publish_task_on()` 单独发布；普通用户任务、blocked wake 和迁移仍
+/// 固定 CPU0。`f` 只能访问原子量、CPU-local/task 调度原语和已明确加锁的
+/// registry；不得在 AP 上进入 console、网络、文件系统、设备或用户 MM 路径。
 pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> {
-    assert!(cpu < crate::smp::configured_cpu_count());
-    if cpu != crate::smp::BOOT_CPU_ID {
-        assert!(
-            crate::smp::schedulers_released(),
-            "cannot publish AP task before scheduler-ready"
-        );
-        assert_ne!(
-            crate::smp::online_cpu_mask() & (1usize << cpu),
-            0,
-            "cannot publish task to offline CPU {}",
-            cpu
-        );
-    }
     let tid_handle = tid_alloc();
     let kstack = crate::hal::kstack_alloc();
     let kstack_top = kstack.get_top();
-    if cpu != crate::smp::cpu_id() {
-        // kstack_alloc 只刷新创建者的本地 TLB。目标 CPU 必须在任务可见前
-        // 确认新映射，避免 __switch 刚换到高地址栈就命中旧的无效翻译。
-        crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
-            panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
-        });
-    }
     let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
     let pcb = new_ktest_process(tid_handle.clone(), Some(Arc::downgrade(&KTEST_REAPER)));
     let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
@@ -469,13 +450,7 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     registry::register_process(&tcb.process);
     registry::register_task(&tcb);
     let handle = tcb.clone();
-    run_queue::publish(tcb, cpu);
-    if cpu != crate::smp::cpu_id() {
-        // publish 已经释放目标 runqueue 锁；doorbell 绝不能发生在队列锁内。
-        crate::smp::request_reschedule(cpu).unwrap_or_else(|error| {
-            panic!("failed to wake CPU {} after remote enqueue: {}", cpu, error)
-        });
-    }
+    publish_task_on(tcb, cpu);
     handle
 }
 

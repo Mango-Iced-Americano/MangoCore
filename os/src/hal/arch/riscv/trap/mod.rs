@@ -10,7 +10,7 @@ use super::TrapImpl;
 use crate::config::TRAMPOLINE;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::syscall::syscall;
-use crate::task::{current_task, do_signal, signal::SigInfo, Signals};
+use crate::task::{current_task, current_trap_task, do_signal, signal::SigInfo, Signals};
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
 pub use context::{UserContext, UserSignalMask};
@@ -108,21 +108,14 @@ pub fn trap_handler() -> ! {
     // Any diagnostic failure below must use the kernel trap vector rather than
     // re-entering the user trampoline with a kernel stack in `sp`.
     set_kernel_trap_entry();
-    // User x4/tp has already been saved.  This validation proves the assembly
-    // reinstalled a configured PerCpu pointer before Rust consumes CPU state.
-    let cpu_id = crate::smp::cpu_id();
-    assert_eq!(
-        cpu_id,
-        crate::smp::BOOT_CPU_ID,
-        "Phase 1 user task trapped on non-boot CPU {}",
-        cpu_id
-    );
+    // 用户 x4/tp 已保存，汇编已恢复本 CPU 的 PerCpu 指针；下方取得
+    // current 时会同时校验 `Running(cpu)`，不再把用户 trap 限制在 CPU0。
     let scause = scause::read();
     let stval = stval::read();
 
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
         let _trap_start = crate::task::perf::perf_time_now();
-        let task = current_task().unwrap();
+        let task = current_trap_task();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
@@ -135,12 +128,16 @@ pub fn trap_handler() -> ! {
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
             )
         };
+        // exit(2) 不会返回到本 Rust 栈帧。在进入 syscall 前释放临时 Arc，
+        // 避免退出任务永久留住 TCB 和它的内核栈。
+        drop(task);
         // trap frame、kernel stvec 和 CPU-local tp 都已完整建立，且
         // task.inner 已释放。只在真正执行 syscall 时开放 timer/IPI，
         // 写回 trap context 前 helper 会恢复为关中断。
         let result = crate::hal::with_local_interrupts_enabled(|| syscall(syscall_id, args));
         // The trap context may be replaced by execve or restored by sigreturn,
         // so fetch it again after syscall returns.
+        let task = current_trap_task();
         {
             let mut inner = task.acquire_inner_lock();
             let cx = inner.get_trap_cx();
@@ -162,7 +159,7 @@ pub fn trap_handler() -> ! {
     }
 
     {
-        let task = current_task().unwrap();
+        let task = current_trap_task();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }

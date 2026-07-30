@@ -2,20 +2,21 @@
 //!
 //! 每个 CPU 通过 `PerCpu.task_state` 持有自己的 current 槽和 idle 上下文。
 //! CPU0 额外负责全局 housekeeping；AP 只处理本地 runqueue 和 IPI。普通
-//! 用户任务仍只由 CPU0 调度，AP 当前只接收受控的 kernel-only 任务。
+//! 用户任务仍只由 CPU0 调度；AP 只接收受控的 kernel-only 任务，以及 SMP
+//! ktest 显式发布的无共享 I/O 用户探针。
 //!
 //! # Locking
 //!
 //! 本 CPU 的 `processor` 锁只保护当前任务槽和 idle 上下文。切换前必须释放该锁，
 //! 否则切回调度器时会形成自锁。
 
+use super::run_queue::RunQueue;
 use super::{
     __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
     take_zombie_tasks,
 };
 use super::{fetch_task, finish_switch_out};
-use super::run_queue::RunQueue;
-use super::{TaskContext, TaskControlBlock};
+use super::{TaskContext, TaskControlBlock, TaskStatus};
 use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
@@ -67,7 +68,6 @@ impl Processor {
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
-
 }
 
 /// 嵌入 `PerCpu` 的任务调度状态。
@@ -342,9 +342,9 @@ pub fn run_tasks() -> ! {
 /// 由 CPU0 独占。空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的
 /// doorbell 因局部 IPI source 已开启而必定使 wait 返回。
 ///
-/// B19 的 AP 任务均为短生命周期 kernel-only 函数。任务执行期间没有 timer
-/// 抢占，因此 STOP 最长会延迟到该函数主动 yield 或返回；通用生产内核线程在
-/// 增加可抢占安全点之前不得复用这个受控入口。
+/// AP 生产任务仍限于 B19 的短生命周期 kernel-only 函数；B28 只额外运行一个
+/// 不访问共享 I/O 的用户探针，并借 syscall 窗口响应 IPI。AP timer 仍关闭，
+/// 所以通用生产任务在补齐抢占安全点和共享子系统审计前不得复用这个入口。
 fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
     let _ = crate::hal::local_irq_save();
     loop {
@@ -380,8 +380,8 @@ fn dispatch_task(
     loop_t0: u64,
 ) {
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
-    let trace_first_switch = cpu == crate::smp::BOOT_CPU_ID
-        && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
+    let trace_first_switch =
+        cpu == crate::smp::BOOT_CPU_ID && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
     let stage_t0 = sched_profile_start(sched_profile);
     // 先在不持有 processor 锁时更新任务时间并取得上下文指针，避免形成
     // `processor -> task.inner` 的反向锁序。
@@ -482,6 +482,32 @@ pub(crate) fn cpu_has_current(cpu: usize) -> bool {
         .lock()
         .current
         .is_some()
+}
+
+/// 取得触发本次用户 trap 的 current 任务，并验证 CPU 所有权。
+///
+/// current 的 `Arc` 只在 processor 锁内克隆；状态检查在锁外读取原子值，
+/// 因此不会把 current 锁带入 syscall、缺页或任务切换路径。每次调用都重新
+/// 读取 CPU ID，使未来任务在 syscall 内 yield 后迁移时也校验恢复它的 CPU。
+pub(crate) fn current_trap_task() -> Arc<TaskControlBlock> {
+    let cpu = crate::smp::cpu_id();
+    assert_ne!(
+        crate::smp::online_cpu_mask() & (1usize << cpu),
+        0,
+        "user trap arrived on offline CPU {}",
+        cpu
+    );
+    let task = current_task()
+        .unwrap_or_else(|| panic!("user trap arrived without current task on CPU {}", cpu));
+    match task.task_status() {
+        TaskStatus::Running(owner) if owner == cpu => task,
+        status => panic!(
+            "user trap owner mismatch: cpu={}, tid={}, status={:?}",
+            cpu,
+            task.gettid(),
+            status
+        ),
+    }
 }
 
 #[inline(always)]
@@ -599,10 +625,7 @@ pub fn current_user_token() -> usize {
 /// 返回的引用来自当前任务 inner 锁保护的数据。调用方只能在立即读写 trap
 /// context 的短路径中使用，不能跨阻塞点保存。
 pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task()
-        .unwrap()
-        .acquire_inner_lock()
-        .get_trap_cx()
+    current_task().unwrap().acquire_inner_lock().get_trap_cx()
 }
 
 /// 从当前任务切换回 idle 调度上下文。

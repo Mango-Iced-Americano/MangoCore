@@ -80,11 +80,11 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 只运行受控 kernel-only 任务，尚无通用生产任务能力 |
+| 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B28 的单个用户探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
-| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；用户/内核 trap 共用无锁 IPI/timer fast path；syscall 受控窗口可跨 yield 恢复；STOP 在 AP idle 栈执行 | 非 syscall 内核区间仍关中断，shootdown 尚未接入 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU，`current_task()` 返回本 CPU 的 `Arc` 克隆 | AP 尚未运行普通任务，跨核退出/迁移语义仍待实现 |
-| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
+| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成 getpid/yield/exit | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；受控用户探针已验证 CPU1 current、退出和 CPU0 回收 | 普通用户任务仍固定 CPU0，跨核迁移与进程组停止语义待实现 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与用户迁移未完成 |
@@ -745,11 +745,18 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - 完成 MM 专项测试后，才允许受控用户测试任务跨 CPU 运行。该测试必须是 hermetic 的
   CPU/MM-only workload，使用匿名或启动前预载内存；除串行化结果输出外，不进入尚未审计的
   文件系统、网络、VirtIO 或设备并发路径。
-- B28 计划先打通受控 AP 用户 trap 闭环，而不是立即开放普通任务迁移：删除 trap handler
-  中过时的 CPU0-only 断言，校验 CPU-local trap context，并用显式测试入口完成
-  `CPU0 -> AP -> CPU0` 的协作式用户任务交接。AP timer 和外部设备中断仍保持关闭，测试只覆盖
-  syscall/yield、MM 激活、generation catch-up 与远端页级 shootdown；默认用户 affinity 继续
-  固定在 CPU0，直至 uaccess 和共享子系统审计完成。
+- B28 已打通受控 AP 用户 trap 闭环，而没有开放普通任务迁移。`publish_task_on()` 统一
+  “远端内核栈映射同步 → runqueue 发布 → 锁外 doorbell”；双架构 trap handler 删除旧
+  CPU0-only 断言，通过 `current_trap_task()` 一次取得 current 并校验 `Running(cpu)`。
+  ktest 在 CPU0 构造只使用匿名代码页的用户任务，发布到 CPU1；探针依次执行 getpid、yield
+  和非返回的 exit，CPU0 再观察 zombie、wait/reap 并确认 TCB 最后一个强引用已释放。
+- 探针代码只在装载期映射 RW，发布前经正式 mprotect/PTE 提交流程收紧为 RX。syscall 前
+  必须释放 trap handler 的临时 TCB `Arc`，因为 exit 不会回到该 Rust 栈帧；返回型 syscall
+  则重新读取当前 CPU 和 current，避免未来迁移后沿用旧 owner。
+- B28 动态证明的是 CPU1 用户 trap/return、MM/ASID 激活、协作式 yield、退出和 CPU0 回收。
+  它没有制造并发 PTE 修改，因此不得表述为 generation race 或远端页级 shootdown 的新证据，
+  也不代表同一用户任务已在 CPU0 与 CPU1 间迁移。AP timer、外部设备中断及 FS/net/driver
+  仍关闭，普通用户任务继续首次发布到 CPU0。
 
 #### 退出条件
 

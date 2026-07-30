@@ -3,7 +3,7 @@ title: "测试体系 (Testing Framework)"
 category: testing
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-30
 tags: [testing, ktest, cargo-test, LTP, regression, tap]
 ---
 
@@ -221,7 +221,9 @@ rust_main()
 
 ktest 分支位于 `add_initproc()` 之前，因此不会创建 PID1；进入该分支前文件系统、网络、
 块设备和任务 registry 已初始化，scheduler-ready 已发布。runner 固定 CPU0，SMP focused
-测试可创建受控的 AP kernel-only 任务。
+测试可创建受控的 AP kernel-only 任务。B28 另有一个 hermetic 用户探针：CPU0 构造并
+发布到 CPU1，依次触发 getpid、yield 和非返回 exit，再由 CPU0 wait/reap；它不进入
+FS/net/driver，也不表示普通用户任务已开放多核调度。
 
 ### 目录结构
 
@@ -232,7 +234,7 @@ os/src/kernel_tests/
 ├── waitqueue.rs      # wake_before_wait_should_not_sleep 等
 ├── timer.rs          # tick_advances, time_spec_ops
 ├── sched.rs          # current_task_exists, ready_queue_has_init
-├── smp.rs            # online/scheduler/IPI/远程 kernel-only 调度/STOP
+├── smp.rs            # online/IPI/AP 调度、受控用户 trap/exit、TLB/ASID、STOP
 ├── mm.rs             # alloc_free_one_page, alloc_contiguous_pages
 └── ext4.rs           # TestMemBlock + ext4 多实例挂载隔离
 ```
@@ -473,6 +475,10 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 可复用同一代码快照的新鲜结果，局部 helper 按风险使用 focused test。完整触发条件、归一化
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
+
+B28 这类首次改变用户 trap CPU 的节点先执行双架构初赛门禁，再在最终小范围收敛后重复
+双架构 SMP focused。验收必须在 TAP 中直接看到 `smp::ap_user_syscall_round_trip`，不能
+只依据 21/21 总数；exit 是非返回 trap，日志/文档不得把它描述为第三次完整往返。
 
 ### Bug 下沉流程
 

@@ -387,10 +387,7 @@ impl TaskManager {
                     // 任务尚未切离 CPU：撤销阻塞意图即可，不能把仍在运行的
                     // kernel stack 提前放进 ready queue。
                     if task
-                        .try_sched_transition(
-                            TaskStatus::Blocking(cpu),
-                            TaskStatus::Running(cpu),
-                        )
+                        .try_sched_transition(TaskStatus::Blocking(cpu), TaskStatus::Running(cpu))
                         .is_err()
                     {
                         continue;
@@ -457,9 +454,7 @@ fn select_wake_cpu(task: &TaskControlBlock) -> usize {
 
 /// 在所有调度容器锁释放后敲响远程 doorbell。
 fn notify_wake_targets(targets: usize) {
-    let remote = targets
-        & crate::smp::online_cpu_mask()
-        & !(1usize << crate::smp::cpu_id());
+    let remote = targets & crate::smp::online_cpu_mask() & !(1usize << crate::smp::cpu_id());
     if remote != 0 {
         crate::smp::request_reschedule_mask(remote).unwrap_or_else(|error| {
             panic!("failed to reschedule woken CPUs {:#x}: {}", remote, error)
@@ -483,9 +478,41 @@ lazy_static! {
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
-/// 首次发布一个新任务到 CPU0 runqueue。
+/// 首次发布一个新任务到指定 CPU。
+///
+/// 内核栈映射必须在 runqueue 可见之前同步到目标 CPU；
+/// 远程 doorbell 则必须在 runqueue 锁释放后发送。
+pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
+    assert!(cpu < crate::smp::configured_cpu_count());
+    if cpu != crate::smp::BOOT_CPU_ID {
+        assert!(
+            crate::smp::schedulers_released(),
+            "cannot publish AP task before scheduler-ready"
+        );
+    }
+    assert_ne!(
+        crate::smp::online_cpu_mask() & (1usize << cpu),
+        0,
+        "cannot publish task to offline CPU {}",
+        cpu
+    );
+
+    if cpu != crate::smp::cpu_id() {
+        crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
+            panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
+        });
+    }
+    super::run_queue::publish(task, cpu);
+    if cpu != crate::smp::cpu_id() {
+        crate::smp::request_reschedule(cpu).unwrap_or_else(|error| {
+            panic!("failed to wake CPU {} after remote enqueue: {}", cpu, error)
+        });
+    }
+}
+
+/// 普通新任务仍默认首次发布到 CPU0。
 pub fn publish_task(task: Arc<TaskControlBlock>) {
-    super::run_queue::publish(task, crate::smp::BOOT_CPU_ID)
+    publish_task_on(task, crate::smp::BOOT_CPU_ID)
 }
 
 /// 在 CPU 已切回 idle 栈后完成上一任务的状态和容器交接。
