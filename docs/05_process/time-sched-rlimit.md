@@ -382,10 +382,15 @@ B31 已建立内核权威的 `cpus_allowed`：普通任务初始为 bit0，clone
 mask，exec 保留原 TCB 的 mask；定向 ktest 任务和受控迁移探针可在首次发布前设置
 更窄或 CPU0/CPU1 允许集。首次发布、yield requeue 与 blocked wake 都拒绝越过该 mask。
 
-用户 ABI 仍需分阶段接入：`sched_getaffinity()` 目前还没有读取这份真实 mask，
-`sched_setaffinity()` 也没有 Running/Queued/Blocked 迁移协议。普通生产任务因此仍固定
-CPU0。B30 的 hermetic 用户探针只在显式 yield 迁移前后验证 getcpu 返回 `0 -> 1`，
-不能据此宣称完整 affinity 已实现。
+B32 已让 raw `sched_getaffinity()` 读取这份真实 mask。`pid=0` 查询调用线程，正数只按
+TID 查找；当前 8 核 mask 占一个 `usize`，`cpusetsize` 必须至少为 8 且按 8 字节粒度
+对齐，成功返回实际复制的 8 字节而不是 libc wrapper 的 0。查询先释放 task registry
+锁，再进行可能 fault-in 的用户拷贝，不跨 uaccess 持有调度锁。
+
+`sched_setaffinity()` 仍没有 Running/Queued/Blocked 的运行期迁移协议，普通生产任务
+因此继续固定 CPU0。B32 的 hermetic 用户探针在显式 yield 前后同时验证 mask 保持
+`0b11` 和 getcpu 返回 `0 -> 1`；它只覆盖单线程 leader，严格 TID 查找还依赖生产源码
+审计，不能据此宣称完整动态 affinity 已实现。
 
 fork 时，如果父设置 reset 或策略为 FIFO/RR，子任务降回 normal，priority/nice/runtime/deadline/period 清零。
 

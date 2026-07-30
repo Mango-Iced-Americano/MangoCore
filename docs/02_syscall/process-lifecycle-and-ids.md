@@ -455,7 +455,9 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 | `sched_get_priority_max`, `sched_get_priority_min`, `sched_rr_get_interval` |
 | `sched_setattr`, `sched_getattr` |
 
-调度实现仍是 MangoCore 单核任务队列；这些 syscall 提供 Linux ABI 可见字段、nice/priority 兼容和 affinity 掩码处理。
+调度器已使用 Per-CPU RunQueue，但普通生产任务暂时仍为 CPU0-only。B32 的 raw
+`sched_getaffinity()` 已按 TID 返回 TCB 的真实 `cpus_allowed`，成功值为复制字节数；
+`sched_setaffinity()` 仍只有旧兼容校验，尚未实现运行期 mask 更新和迁移协议。
 
 ## 9. 错误码边界
 

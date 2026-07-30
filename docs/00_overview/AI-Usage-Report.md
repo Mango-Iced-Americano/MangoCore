@@ -62,6 +62,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 受控 AP 用户态闭环 | 2026-07-30 | GPT/Codex, DeepSeek | 用户 trap CPU 所有权、远程首次发布、noreturn Arc 生命周期和双架构 8 核验证 | CPU1 实际执行 getpid/yield/exit，CPU0 完成 wait/reap；普通用户调度和共享 I/O 仍未开放 |
 | SMP 用户可见逻辑 CPU 查询 | 2026-07-30 | GPT/Codex, DeepSeek | Linux getcpu ABI、双架构用户探针、冻结 Docker/QEMU 验证与模型结论复核 | getcpu 迁移前后返回逻辑 CPU 0/1；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
 | SMP TCB affinity 调度约束 | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS 数据模型对照、三条 runqueue placement 审计、冻结双架构验证 | `cpus_allowed` 约束首次发布、yield requeue 和 blocked wake；保留 CPU0 默认，运行期 affinity 未开放 |
+| SMP 线程 affinity 只读 ABI | 2026-07-30 | GPT/Codex, DeepSeek | Linux raw sched_getaffinity ABI、TID/锁序审查、双架构用户探针与初赛回归 | raw syscall 返回真实 per-thread mask 与 8 字节长度；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 

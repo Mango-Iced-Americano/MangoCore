@@ -72,7 +72,7 @@ tags: [syscall, table, reference]
 | 140-152 | `setpriority`, `getpriority`, `setregid`, `setgid`, `setreuid`, `setuid`, `setresuid`, `getresuid`, `setresgid`, `getresgid`, `setfsuid`, `setfsgid` | `syscall/process/ids.rs` |
 | 154-162 | `setpgid`, `getpgid`, `getsid`, `setsid`, `getgroups`, `setgroups`, `uname`, `sethostname`, `setdomainname` | `ids.rs`, `misc.rs` |
 | 172-179 | `getpid`, `getppid`, `getuid`, `geteuid`, `getgid`, `getegid`, `gettid`, `sysinfo` | `ids.rs`, `misc.rs` |
-| 118-127, 274-275 | `sched_setparam`, `sched_setscheduler`, `sched_getscheduler`, `sched_getparam`, `sched_setaffinity`, `sched_getaffinity`, `sched_yield`, `sched_get_priority_max`, `sched_get_priority_min`, `sched_rr_get_interval`, `sched_setattr`, `sched_getattr` | `syscall/process/misc.rs`, scheduler helpers |
+| 118-127, 274-275 | `sched_setparam`, `sched_setscheduler`, `sched_getscheduler`, `sched_getparam`, `sched_setaffinity`, `sched_getaffinity`, `sched_yield`, `sched_get_priority_max`, `sched_get_priority_min`, `sched_rr_get_interval`, `sched_setattr`, `sched_getattr` | `syscall/process/ids.rs`, scheduler helpers |
 | 163-164, 261 | `getrlimit`, `setrlimit`, `prlimit` | `syscall/process/misc.rs` |
 
 ## 内存管理

@@ -27,8 +27,9 @@ tags: [process, scheduler, task-manager, processor]
 由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
 发布到 CPU1，验证真实 trap/yield/exit；B29 再让同一探针先在 CPU0 运行，并在真实
 `sched_yield` 安全点唯一交给 CPU1。B31 已为每个 TCB 增加初始不变的
-`cpus_allowed`，所有入队路径都将它作为硬约束；这仍不是普通用户任务的
-运行期 affinity 或负载选择策略。
+`cpus_allowed`，所有入队路径都将它作为硬约束；B32 的只读
+`sched_getaffinity()` 已返回该 per-thread mask。运行期 mask 修改、排除当前 owner 后的
+强制迁移和普通用户任务负载选择仍未实现。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -71,7 +72,8 @@ idle 栈后才被取走，并决定本次 `Running(source) -> Queued(target)` �
 TCB 的 `cpus_allowed` 是逻辑 CPU 位图，表达任务可以取得哪些 CPU 的 owner。
 它与 `sched_state` 职责不同：前者是允许集合，后者仍是当前 owner 唯一真值。当前
 mask 只能由创建路径在 `New` 状态写入，首次发布后不变；运行期修改必须等待
-后续与 Running/Queued/Blocked 迁移串行化的独立协议。
+后续与 Running/Queued/Blocked 迁移串行化的独立协议。B32 只提供原子只读快照，
+没有把一次 syscall 查询包装成写侧同步协议。
 
 ## 3. RunQueue 选择策略
 

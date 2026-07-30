@@ -2159,24 +2159,36 @@ pub fn sys_getcpu(cpu: *mut u32, node: *mut u32, _tcache: usize) -> isize {
     SUCCESS
 }
 
-/// set pointer to thread ID
-/// This feature is currently NOT supported and is implemented as a stub,
-
+/// 返回目标线程当前允许使用的逻辑 CPU 位图。
+///
+/// 这是 raw syscall 接口：成功值是实际写入用户缓冲区的字节数，而不是
+/// libc 包装后的 0。MangoCore v1 最多支持 8 核，内核 mask 固定占一个
+/// `usize`；更大的用户缓冲区仍只写这一个 word。
 pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> isize {
-    //qemu上目前只有单核，对于所有进程都只能对mask0bit置位
-    if mask.is_null() {
-        return EFAULT;
-    }
-    if cpusetsize < core::mem::size_of::<usize>() {
+    let mask_bytes = size_of::<usize>();
+    // Linux raw ABI 要求缓冲区能容纳内核 mask，并按 unsigned long 对齐。
+    if cpusetsize < mask_bytes || cpusetsize % mask_bytes != 0 {
         return EINVAL;
     }
-    if pid != 0 && ProcessManager::find_task(pid).is_none() {
+    // affinity 是线程属性：0 表示调用线程，正数按 TID 查找，不能退化为
+    // “同进程任一线程”或用 PID 命中当前线程。
+    let task = if pid == 0 {
+        current_task()
+    } else {
+        ProcessManager::find_task(pid)
+    };
+    let Some(task) = task else {
         return ESRCH;
-    }
-    let token = current_user_token();
-    match UserPtrMut::from_addr(mask as usize).write(token, &(1 as usize)) {
-        Ok(()) => core::mem::size_of::<usize>() as isize,
-        Err(_) => EFAULT,
+    };
+
+    // 先取得 Arc 和原子 mask，再访问调用者地址空间；这里不持 registry、
+    // task 或 runqueue 锁，也不会把锁跨越可能缺页的用户拷贝。
+    let allowed = task.cpus_allowed();
+    match UserPtrMut::<usize>::from_addr(mask as usize)
+        .write(current_user_token(), &allowed)
+    {
+        Ok(()) => mask_bytes as isize,
+        Err(errno) => errno,
     }
 }
 

@@ -11,6 +11,7 @@ use crate::kernel_tests::runner::KernelTest;
 // probe 只依赖 CPU/task 基础 syscall，不在 AP 上进入 FS、net 或设备路径。
 const USER_PROBE_GETCPU: usize = 168;
 const USER_PROBE_GETPID: usize = 172;
+const USER_PROBE_GETAFFINITY: usize = 123;
 const USER_PROBE_YIELD: usize = 124;
 const USER_PROBE_EXIT: usize = 93;
 
@@ -24,31 +25,56 @@ core::arch::global_asm!(
 __smp_user_probe_start:
     addi a7, zero, {getpid}
     ecall
+    addi s1, a0, 0
     sltiu s0, a0, 1
 
-    # 用户栈预留 16 字节并保持 ABI 对齐；getcpu 只写低 4 字节。
+    # 低 8 字节保存 affinity word，高 8 字节供 getcpu 使用。
     addi sp, sp, -16
-    addi a0, sp, 0
+    sd zero, 0(sp)
+    addi a0, s1, 0
+    addi a1, zero, 8
+    addi a2, sp, 0
+    addi a7, zero, {getaffinity}
+    ecall
+    addi t1, zero, 8
+    bne a0, t1, .Lsmp_probe_fail
+    ld t0, 0(sp)
+    addi t1, zero, 3
+    bne t0, t1, .Lsmp_probe_fail
+
+    addi a0, sp, 8
     addi a1, zero, 0
     addi a2, zero, 0
     addi a7, zero, {getcpu}
     ecall
     bnez a0, .Lsmp_probe_fail
-    lw t0, 0(sp)
+    lw t0, 8(sp)
     bnez t0, .Lsmp_probe_fail
 
     addi a7, zero, {yield_syscall}
     ecall
     bnez a0, .Lsmp_probe_fail
 
-    # 同一 syscall 栈已迁到 CPU1；再次查询必须看到逻辑 CPU 1。
-    addi a0, sp, 0
+    # 迁移后 pid=0 仍须返回同一线程的 0b11，并报告逻辑 CPU 1。
+    sd zero, 0(sp)
+    addi a0, zero, 0
+    addi a1, zero, 8
+    addi a2, sp, 0
+    addi a7, zero, {getaffinity}
+    ecall
+    addi t1, zero, 8
+    bne a0, t1, .Lsmp_probe_fail
+    ld t0, 0(sp)
+    addi t1, zero, 3
+    bne t0, t1, .Lsmp_probe_fail
+
+    addi a0, sp, 8
     addi a1, zero, 0
     addi a2, zero, 0
     addi a7, zero, {getcpu}
     ecall
     bnez a0, .Lsmp_probe_fail
-    lw t0, 0(sp)
+    lw t0, 8(sp)
     addi t1, zero, 1
     bne t0, t1, .Lsmp_probe_fail
 
@@ -66,6 +92,7 @@ __smp_user_probe_end:
 "#,
     getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
+    getaffinity = const USER_PROBE_GETAFFINITY,
     yield_syscall = const USER_PROBE_YIELD,
     exit_syscall = const USER_PROBE_EXIT,
 );
@@ -80,30 +107,27 @@ core::arch::global_asm!(
 __smp_user_probe_start:
     addi.d $a7, $zero, {getpid}
     syscall 0
+    move $s1, $a0
     sltui $s0, $a0, 1
 
-    # 用户栈预留 16 字节并保持 ABI 对齐；getcpu 只写低 4 字节。
+    # 低 8 字节保存 affinity word，高 8 字节供 getcpu 使用。
     addi.d $sp, $sp, -16
-    move $a0, $sp
-    move $a1, $zero
-    move $a2, $zero
-    addi.d $a7, $zero, {getcpu}
+    st.d $zero, $sp, 0
+    move $a0, $s1
+    addi.d $a1, $zero, 8
+    move $a2, $sp
+    addi.d $a7, $zero, {getaffinity}
     syscall 0
-    beqz $a0, 1f
+    addi.d $t1, $zero, 8
+    beq $a0, $t1, 1f
     b .Lsmp_probe_fail
 1:
-    ld.w $t0, $sp, 0
-    beqz $t0, 2f
+    ld.d $t0, $sp, 0
+    addi.d $t1, $zero, 3
+    beq $t0, $t1, 2f
     b .Lsmp_probe_fail
 2:
-    addi.d $a7, $zero, {yield_syscall}
-    syscall 0
-    beqz $a0, .Lsmp_probe_after_yield
-    b .Lsmp_probe_fail
-
-    # 同一 syscall 栈已迁到 CPU1；再次查询必须看到逻辑 CPU 1。
-.Lsmp_probe_after_yield:
-    move $a0, $sp
+    addi.d $a0, $sp, 8
     move $a1, $zero
     move $a2, $zero
     addi.d $a7, $zero, {getcpu}
@@ -111,11 +135,45 @@ __smp_user_probe_start:
     beqz $a0, 3f
     b .Lsmp_probe_fail
 3:
-    ld.w $t0, $sp, 0
-    addi.d $t1, $zero, 1
-    beq $t0, $t1, 4f
+    ld.w $t0, $sp, 8
+    beqz $t0, 4f
     b .Lsmp_probe_fail
 4:
+    addi.d $a7, $zero, {yield_syscall}
+    syscall 0
+    beqz $a0, .Lsmp_probe_after_yield
+    b .Lsmp_probe_fail
+
+    # 迁移后 pid=0 仍须返回同一线程的 0b11，并报告逻辑 CPU 1。
+.Lsmp_probe_after_yield:
+    st.d $zero, $sp, 0
+    move $a0, $zero
+    addi.d $a1, $zero, 8
+    move $a2, $sp
+    addi.d $a7, $zero, {getaffinity}
+    syscall 0
+    addi.d $t1, $zero, 8
+    beq $a0, $t1, 5f
+    b .Lsmp_probe_fail
+5:
+    ld.d $t0, $sp, 0
+    addi.d $t1, $zero, 3
+    beq $t0, $t1, 6f
+    b .Lsmp_probe_fail
+6:
+    addi.d $a0, $sp, 8
+    move $a1, $zero
+    move $a2, $zero
+    addi.d $a7, $zero, {getcpu}
+    syscall 0
+    beqz $a0, 7f
+    b .Lsmp_probe_fail
+7:
+    ld.w $t0, $sp, 8
+    addi.d $t1, $zero, 1
+    beq $t0, $t1, 8f
+    b .Lsmp_probe_fail
+8:
     move $a0, $s0
     b .Lsmp_probe_exit
 .Lsmp_probe_fail:
@@ -130,6 +188,7 @@ __smp_user_probe_end:
 "#,
     getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
+    getaffinity = const USER_PROBE_GETAFFINITY,
     yield_syscall = const USER_PROBE_YIELD,
     exit_syscall = const USER_PROBE_EXIT,
 );

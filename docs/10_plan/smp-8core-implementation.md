@@ -91,7 +91,7 @@ related_docs:
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`，普通任务当前仍为 bit0 | `sched_getaffinity` 尚未读取该 mask，`sched_setaffinity` 和 membarrier 运行期语义仍不完整 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask | `sched_setaffinity`、membarrier 和默认全核 affinity 仍不完整；普通任务当前仍为 bit0 |
 
 ### 2.2 总体结构
 
@@ -777,6 +777,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   clone 继承父 mask，exec 保留原 mask；定向 ktest 任务收紧为单 CPU，用户迁移探针
   显式允许 CPU0/CPU1。`publish`、yield requeue 和 blocked wake 在进入目标队列前
   都验证该 mask。当前只允许 New-only 初始写入，不宣称运行期 affinity 已完成。
+- B32 把只读 ABI 接到这份权威位图：`pid=0` 读取调用线程，正数严格按 TID 查找，
+  raw syscall 复制一个 `usize` 并返回 8。查询不持 registry/runqueue 锁进入 uaccess；
+  双架构 probe 在 CPU0/CPU1 迁移前后均读到 `0b11`。它没有改变 mask 或 owner，
+  也不替代后续 `sched_setaffinity` 的迁移串行化。
 
 #### 退出条件
 
