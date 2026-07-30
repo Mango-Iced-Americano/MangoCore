@@ -456,8 +456,10 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 | `sched_setattr`, `sched_getattr` |
 
 调度器已使用 Per-CPU RunQueue，但普通生产任务暂时仍为 CPU0-only。B32 的 raw
-`sched_getaffinity()` 已按 TID 返回 TCB 的真实 `cpus_allowed`，成功值为复制字节数；
-`sched_setaffinity()` 仍只有旧兼容校验，尚未实现运行期 mask 更新和迁移协议。
+`sched_getaffinity()` 已按 TID 返回 TCB 的真实 `cpus_allowed`，成功值为复制字节数。B34 的
+`sched_setaffinity()` 已支持 current 线程改 mask 与必要自迁移；B35 又支持非 current 的稳定
+Blocked 线程在 registry 锁内改 mask，并由后续 wake 按新 mask 选点。远程
+Running/Blocking/Queued 仍返回 `EOPNOTSUPP`，因此这不是完整 Linux affinity 语义。
 
 ## 9. 错误码边界
 

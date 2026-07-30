@@ -714,6 +714,25 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
     }
 }
 
+/// 修改仍由 interruptible registry 持有的 Blocked 任务 affinity。
+///
+/// `Blocked` 也可能是退出路径从 runqueue 摘除后的短暂状态，所以不能只看
+/// 原子状态。registry 成员关系和状态必须在同一个 `TASK_MANAGER` 临界区内
+/// 同时成立；同一把锁也串行化后续 wake 对 `cpus_allowed` 的读取和入队。
+pub(crate) fn update_blocked_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> bool {
+    let manager = TASK_MANAGER.lock();
+    if task.task_status() != TaskStatus::Blocked
+        || !manager
+            .interruptible_queue
+            .iter()
+            .any(|blocked| task_ptr_eq(blocked, task))
+    {
+        return false;
+    }
+    task.set_blocked_affinity(mask);
+    true
+}
+
 /// 从调度队列中移除一组任务。
 pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
     // 固定 TASK_MANAGER -> 单个 RunQueue 的锁序；循环每次只定位任务当前

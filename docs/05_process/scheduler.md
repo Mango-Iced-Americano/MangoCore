@@ -29,8 +29,9 @@ tags: [process, scheduler, task-manager, processor]
 `sched_yield` 安全点唯一交给 CPU1。B31 已为每个 TCB 增加 `cpus_allowed`，所有入队
 路径都将它作为硬约束；B32 的只读 `sched_getaffinity()` 已返回该 per-thread mask。
 B34 又完成当前线程的运行期写侧：新 mask 排除本 CPU 时，syscall 会在同一安全点把
-Running owner 迁到最低负载的合法 CPU。远程 TID、Queued/Blocked 任务改 mask 和普通
-用户任务负载选择仍未实现。
+Running owner 迁到最低负载的合法 CPU。B35 继续闭合非 current 的稳定 Blocked 状态：
+registry 锁内更新 mask，后续 wake 直接按新允许集发布，不需要迁移 owner。远程
+Running/Blocking/Queued 和普通用户任务负载选择仍未实现。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。B33 又让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
@@ -76,8 +77,12 @@ TCB 的 `cpus_allowed` 是逻辑 CPU 位图，表达任务可以取得哪些 CPU
 它与 `sched_state` 职责不同：前者是允许集合，后者仍是当前 owner 唯一真值。创建路径
 在 `New` 状态写入初值；B34 允许 current `Running(cpu)` 在 syscall 安全点更新。运行期
 读写以 Release/Acquire 配对；若新 mask 排除当前 CPU，写侧必须先同步目标内核栈映射，
-再发布 mask 和一次性 `migration_target`，随后立即调度。非 current TID 仍不允许修改，
-因此本节点没有引入远程 task/rq 串行化协议。
+再发布 mask 和一次性 `migration_target`，随后立即调度。
+
+B35 对稳定 Blocked 使用另一条更短的协议：Blocked 没有 current/runqueue owner，写侧只需
+在 `TASK_MANAGER` 锁内同时确认状态和 registry 成员关系，再发布 mask。wake 取得同一锁后
+读取新值并选择队列。该协议没有扩展到远程 Running/Blocking/Queued，也没有引入第二套
+task/rq 串行化层。
 
 ## 3. RunQueue 选择策略
 
@@ -100,8 +105,9 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
 不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
-内核初始 affinity 约束已生效，current 线程也可在 syscall 中收紧或扩展自己的 mask；
-通用新任务目标选择、远程 TID 强制迁移和 work stealing 仍未开放。
+内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
+稳定 Blocked 线程也可在 wake 前更新 mask；通用新任务目标选择、远程 runnable 强制迁移和
+work stealing 仍未开放。
 
 ### 3.1 首次发布到指定 CPU
 
@@ -141,7 +147,9 @@ requeue_after_switch(task, source, target)
 目标 CPU fetch 时再执行 `Queued(target) -> Running(target)` 并更新 `last_cpu`。若任务真正
 进入 Blocked 或 Zombie，未消费请求会被丢弃；本节点不改变 blocked wake 的目标语义。
 
-### 3.3 当前线程运行期 affinity
+### 3.3 运行期 affinity
+
+#### Current 线程自迁移
 
 `sched_setaffinity(0, ...)` 或严格等于 current TID 的调用走 B34 自迁移协议：
 
@@ -159,9 +167,24 @@ requeue_after_switch(task, source, target)
    `Running(source) -> Queued(target)`，锁外发送 RESCHEDULE；syscall 在目标 CPU 恢复后
    才向用户态返回成功。
 
-当前远程 TID 明确返回 `EOPNOTSUPP`。这是阶段边界，不是完整 Linux affinity 语义；
-Queued/Blocked/远程 Running 任务需要先建立稳定的 task/rq 归属串行化，不能仅写原子 mask，
-也不能借用 `Blocked` 伪装队列间迁移状态。
+#### 远程稳定 Blocked 更新
+
+B35 只在目标没有 current/runqueue owner 时开放远程写侧：
+
+1. syscall 完成用户拷贝、configured/runnable mask、严格 TID 和权限校验；
+2. `update_blocked_affinity()` 取得 `TASK_MANAGER`，同时确认状态精确为 `Blocked`，且
+   interruptible registry 中仍存在同一 TCB 指针；
+3. TCB 在该锁内以 Release 写入 mask，然后释放锁；不获取 runqueue、不发送 IPI；
+4. 后续 wake 取得同一 `TASK_MANAGER`，以 Acquire 读取 mask，优先复用仍合法的 `last_cpu`，
+   否则选允许集中的最低编号 CPU，再走既有 `Blocked -> Queued(target)` 入口。
+
+状态和成员关系必须一起检查：exit/exec 会先从 registry 摘除任务，稍后才把短暂的 Blocked
+状态改为 Zombie；仅检查状态会对正在退出的线程伪装成功。并发 wake 与写侧由同一锁线性化：
+写侧先拿锁则 wake 使用新 mask，wake 先拿锁则目标已变 Queued，写侧返回 `EOPNOTSUPP`。
+
+远程 Running/Blocking/Queued 仍明确返回 `EOPNOTSUPP`。这些状态存在 current 或 runqueue
+owner，需要类似 Linux/DragonOS 的 task-placement/rq 串行化和显式 owner 交接，不能仅写
+原子 mask，也不能借用 Blocked 伪装队列间迁移状态。
 
 ## 4. Processor
 

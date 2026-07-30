@@ -57,7 +57,8 @@ CPU0 独占。B29 将同一探针改为先在 CPU0 起跑，再在 syscall 内�
 B31/B32 又为该受控迁移建立 per-thread `cpus_allowed` 并返回真实 affinity；B33 不再依赖
 显式 yield，而是让 CPU1 的生产 `RESCHEDULE` IPI 在 CPU0 用户 trap-return 安全点触发
 同一 owner 交接。B34 允许 current 线程在 syscall 安全点修改运行期 mask，并在排除 source
-时自迁到合法 CPU；远程 TID 和 Queued/Blocked 写侧仍未开放，普通任务默认 affinity 仍为 bit0。
+时自迁到合法 CPU；B35 允许远程稳定 Blocked 线程在 registry 锁内修改 mask，并让后续 wake
+按新允许集重新选点。远程 Running/Blocking/Queued 写侧仍未开放，普通任务默认 affinity 仍为 bit0。
 
 ## 启动栈与 BSS 边界
 

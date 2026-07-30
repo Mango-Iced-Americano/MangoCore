@@ -2577,13 +2577,6 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> 
     let Some(caller) = current_task() else {
         return ESRCH;
     };
-    if !Arc::ptr_eq(&caller, &task) {
-        // 完整远程 TID 更新需要稳定 task/rq 归属并搬运 Queued 任务；B34
-        // 不伪装成功，也不复用 Blocked 充当迁移中间态。
-        return EOPNOTSUPP;
-    }
-    drop(caller);
-
     let runnable = allowed
         & crate::smp::online_cpu_mask()
         & crate::smp::scheduler_cpu_mask()
@@ -2591,6 +2584,20 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> 
     if runnable == 0 {
         return EINVAL;
     }
+
+    if !Arc::ptr_eq(&caller, &task) {
+        drop(caller);
+        // Blocked 没有 current/runqueue owner；现有 TASK_MANAGER 锁可以把
+        // mask 更新与 wake 串行化。其它远程状态仍需要各自的 owner 交接协议，
+        // 这里明确拒绝，不能只写 mask 后留下非法 Running/Queued owner。
+        return if crate::task::update_blocked_affinity(&task, allowed) {
+            SUCCESS
+        } else {
+            EOPNOTSUPP
+        };
+    }
+    drop(caller);
+
     let must_migrate = task.set_current_affinity(allowed);
     drop(task);
     if must_migrate {

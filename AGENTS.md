@@ -157,16 +157,19 @@ raw `sched_getaffinity()` 按 TID 返回这份 per-thread mask；成功值是复
 不再用显式 yield，而由 CPU1 IPI 驱动 CPU0→CPU1 owner 交接。B34 已开放 current 线程的
 运行期 `sched_setaffinity()`：短 mask 按 Linux 低字节语义读取；新 mask 排除 source 时先同步
 目标内核栈映射，Release 发布 mask/target，再在 syscall 安全点立即切回 idle，由单个目标
-runqueue 完成 owner 交接。远程 TID 明确返回 `EOPNOTSUPP`，Queued/Blocked 写侧仍未实现。
+runqueue 完成 owner 交接。B35 又开放了远程稳定 `Blocked` 线程的写侧：只有目标仍以同一
+TCB 指针登记在 interruptible registry 中，才在 `TASK_MANAGER` 锁内发布新 mask；后续 wake
+在同一锁域读取 mask 并重新选 CPU，因此无需搬运 current/runqueue owner。远程
+`Running/Blocking/Queued` 仍明确返回 `EOPNOTSUPP`。
 该能力不改变默认策略：普通新任务和用户任务仍固定 CPU0。动态 kernel-global
 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29/B30/B31/B32/B33/B34 的受控迁移、真实 CPU/affinity 查询、current 自迁移和用户返回
-RESCHEDULE 外推为通用用户迁移、远程 affinity、任意内核点抢占、连续 range 或安全 CPU
-detach 已完成。
+B29/B30/B31/B32/B33/B34/B35 的受控迁移、真实 CPU/affinity 查询、current 自迁移、稳定
+Blocked 写侧和用户返回 RESCHEDULE 外推为通用用户迁移、完整远程 affinity、任意内核点
+抢占、连续 range 或安全 CPU detach 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

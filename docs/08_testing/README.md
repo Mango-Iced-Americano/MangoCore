@@ -247,6 +247,13 @@ getaffinity 读到 bit0。三段断言分别拒绝“B33 IPI 未迁移”“只�
 只能接收 need_resched、不能按照安全点抢占模型让出 CPU；全局 zombie 队列会被 idle drain，
 不得把“队列保持非空”当作任务已经退出的稳定条件。
 
+B35 新增当前列表第 13 项 `smp::blocked_affinity_redirects_wake`，总数变为 22。用例把 kernel-only
+任务先定向到 CPU1，经真实 Completion/WaitQueue 进入稳定 Blocked，并同时确认 CPU1 current
+与 runqueue 已释放；CPU0 再通过生产入口把 mask 改为 bit0，随后 Completion wake。任务必须在
+CPU0 恢复并退出，旧 CPU1 不得残留 owner。B34 的用户探针因此在当前列表顺延为第 21 项；
+B34 历史证据中的第 20 项编号保持原样。该用例动态覆盖 manager/wake 协议，远程 raw syscall
+的 TID 查找、权限和用户指针路径仍以 B34 用户 probe 与源码审计组合验收。
+
 ### 目录结构
 
 ```
@@ -498,7 +505,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32/B33/B34 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33/B34/B35 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -515,6 +522,10 @@ CPU0 消费计数、probe 自身 getcpu/affinity/exit 和最终 Weak 回收。�
 B34 起第 20 项名称变为 `smp::user_task_reschedules_and_sets_affinity`；除 B33 证据外，还必须
 核对 setaffinity 后 getcpu=0、getaffinity=bit0、最终 `last_cpu=0`。远程 TID、短/长 mask
 错误路径和 Queued/Blocked 写侧未被该正向 probe 覆盖，必须在报告中保留边界。
+B35 插入新的第 13 项后，当前列表中的 B34 probe 顺延为第 21 项；验收必须同时看到旧
+`blocked_kernel_tasks_wake_on_last_cpu`、新 `blocked_affinity_redirects_wake`、B34 probe 与
+终态 STOP 全部 PASS。新用例证明稳定 Blocked 的 mask 会改变真实 wake 目标，但没有从用户态
+直接发起远程 TID syscall；Running/Blocking/Queued 写侧必须继续标为未支持。
 
 ### Bug 下沉流程
 

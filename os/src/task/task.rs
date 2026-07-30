@@ -162,9 +162,10 @@ pub struct TaskControlBlock {
     last_cpu: AtomicUsize,
     /// 允许任务取得调度所有权的逻辑 CPU 位图。
     ///
-    /// 创建路径由 `New -> Queued` 状态交接首次发布；运行期只允许 current
-    /// 线程在 syscall 安全点修改。若新 mask 排除当前 CPU，写入必须先于
-    /// `migration_target` 发布，并立刻进入调度，不能只改 mask 后继续执行。
+    /// 创建路径由 `New -> Queued` 状态交接首次发布。运行期 current 线程在
+    /// syscall 安全点修改；稳定 Blocked 线程则只能在 interruptible registry
+    /// 锁内修改。若新 mask 排除当前 CPU，写入必须先于 `migration_target`
+    /// 发布，并立刻进入调度，不能只改 mask 后继续执行。
     cpus_allowed: AtomicUsize,
     /// 下一次协作式 yield 完成切栈后要进入的 CPU。
     ///
@@ -820,6 +821,35 @@ impl TaskControlBlock {
         self.cpus_allowed.store(mask, Ordering::Release);
         self.publish_migration_target(target_cpu);
         true
+    }
+
+    /// 在 interruptible registry 已经稳定拥有 Blocked 任务时更新其 affinity。
+    ///
+    /// 调用方必须持有 `TASK_MANAGER`，并已确认同一个 TCB 仍在 registry 中；
+    /// 这样后续 wake 才不可能越过本次写入、按旧 mask 发布到 runqueue。
+    pub(crate) fn set_blocked_affinity(&self, mask: usize) {
+        let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
+        assert_ne!(mask, 0, "task CPU affinity cannot be empty");
+        assert_eq!(
+            mask & !configured_mask,
+            0,
+            "blocked task affinity {:#x} contains unconfigured CPUs",
+            mask
+        );
+        assert_eq!(
+            self.task_status(),
+            TaskStatus::Blocked,
+            "blocked affinity update requires a stable Blocked task"
+        );
+        let runnable = mask
+            & crate::smp::online_cpu_mask()
+            & crate::smp::scheduler_cpu_mask()
+            & !crate::smp::stopped_cpu_mask();
+        assert_ne!(
+            runnable, 0,
+            "blocked task affinity has no online scheduler CPU"
+        );
+        self.cpus_allowed.store(mask, Ordering::Release);
     }
 
     fn publish_migration_target(&self, target_cpu: usize) {

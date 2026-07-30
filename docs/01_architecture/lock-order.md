@@ -147,9 +147,14 @@ B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU
 `Blocking(cpu)` 的提前 wake 仍只恢复 `Running(cpu)`，不入 runqueue、不发 IPI；idle
 侧随后把它重新排入本地队列。批量 wake 每次调用 `enqueue_woken()` 都在函数返回前
 释放该目标队列，因此循环不会同时持有两个 runqueue。当前该远程能力只对受控
-kernel-only AP 任务完成验证。初始 affinity 已作为入队硬约束，但运行期 affinity
-当前只开放本地 current 写侧：它不持 task.inner/runqueue 锁完成目标选择和内核栈同步，
-发布 mask/target 后立即进入既有安全点；远程 TID、Queued/Blocked 修改和通用迁移仍未实现。
+kernel-only AP 任务完成验证。初始 affinity 已作为入队硬约束，B34 的本地 current 写侧
+不持 task.inner/runqueue 锁完成目标选择和内核栈同步，发布 mask/target 后立即进入既有安全点。
+
+B35 复用同一 `TASK_MANAGER` 锁串行化稳定 Blocked 线程的 affinity 与 wake：写侧必须在锁内
+同时确认精确 `Blocked` 状态和同一 TCB 指针仍在 registry，随后 Release 发布 mask；wake 取得
+同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为 exit/exec 摘除 registry 后、标记
+Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
+Running/Blocking/Queued 修改和通用迁移仍未实现。
 
 ### 3.6 B21 内核栈退休与 shootdown 锁序
 

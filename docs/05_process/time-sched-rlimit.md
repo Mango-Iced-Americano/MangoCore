@@ -387,10 +387,11 @@ TID 查找；当前 8 核 mask 占一个 `usize`，`cpusetsize` 必须至少为 
 对齐，成功返回实际复制的 8 字节而不是 libc wrapper 的 0。查询先释放 task registry
 锁，再进行可能 fault-in 的用户拷贝，不跨 uaccess 持有调度锁。
 
-`sched_setaffinity()` 仍没有 Running/Queued/Blocked 的运行期迁移协议，普通生产任务
-因此继续固定 CPU0。B32 的 hermetic 用户探针在显式 yield 前后同时验证 mask 保持
-`0b11` 和 getcpu 返回 `0 -> 1`；它只覆盖单线程 leader，严格 TID 查找还依赖生产源码
-审计，不能据此宣称完整动态 affinity 已实现。
+B34 的 `sched_setaffinity()` 已支持 current 线程改 mask 与必要自迁移；B35 支持远程稳定
+Blocked 线程改 mask。后者只有在目标仍以同一 TCB 指针登记于 interruptible registry 时才
+成功，mask 更新和 wake 由同一 `TASK_MANAGER` 锁串行化。远程 Running/Blocking/Queued
+仍没有运行期迁移协议，普通生产任务因此继续固定 CPU0。现有 hermetic 用户探针覆盖 current
+路径；B35 focused 用例覆盖生产 Blocked→wake 重定向，但尚未从用户态端到端覆盖远程 TID。
 
 fork 时，如果父设置 reset 或策略为 FIFO/RR，子任务降回 normal，priority/nice/runtime/deadline/period 清零。
 

@@ -288,6 +288,8 @@ static AP_TASK_RUNS: [AtomicUsize; crate::smp::MAX_CPUS] =
 static AP_BLOCKED_WAKE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_BLOCKED_WAKE_PHASE: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+static AP_BLOCKED_WAKE_EXPECTED: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(usize::MAX) }; crate::smp::MAX_CPUS];
 static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
@@ -364,6 +366,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::blocked_kernel_tasks_wake_on_last_cpu",
             blocked_kernel_tasks_wake_on_last_cpu,
+        ),
+        KernelTest::new(
+            "smp::blocked_affinity_redirects_wake",
+            blocked_affinity_redirects_wake,
         ),
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
@@ -1272,6 +1278,7 @@ fn remote_kernel_tasks_run_on_target_cpus() -> Result<(), &'static str> {
 /// AP 任务走真实 Completion/WaitQueue 阻塞路径；恢复后必须仍由原 CPU 唯一拥有。
 fn wait_for_remote_completion() {
     let origin = crate::smp::cpu_id();
+    let expected = AP_BLOCKED_WAKE_EXPECTED[origin].load(Ordering::Acquire);
     let completion = AP_BLOCKED_WAKE_COMPLETION
         .lock()
         .as_ref()
@@ -1281,10 +1288,10 @@ fn wait_for_remote_completion() {
     completion.wait_uninterruptible();
 
     let resumed = crate::smp::cpu_id();
-    let owner_is_origin = crate::task::current_task()
-        .map(|task| task.task_status() == crate::task::TaskStatus::Running(origin))
+    let owner_is_expected = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(expected))
         .unwrap_or(false);
-    if resumed != origin || !owner_is_origin {
+    if resumed != expected || !owner_is_expected {
         AP_BLOCKED_WAKE_ERRORS.fetch_or(1usize << origin, Ordering::Release);
     }
     AP_BLOCKED_WAKE_PHASE[origin].store(2, Ordering::Release);
@@ -1303,6 +1310,9 @@ fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
     AP_BLOCKED_WAKE_ERRORS.store(0, Ordering::Release);
     for phase in &AP_BLOCKED_WAKE_PHASE {
         phase.store(0, Ordering::Release);
+    }
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        AP_BLOCKED_WAKE_EXPECTED[cpu].store(cpu, Ordering::Release);
     }
     let completion = Arc::new(crate::task::Completion::new());
     *AP_BLOCKED_WAKE_COMPLETION.lock() = Some(completion.clone());
@@ -1352,6 +1362,63 @@ fn blocked_kernel_tasks_wake_on_last_cpu() -> Result<(), &'static str> {
         return Err("duplicate completion attempted a second wakeup");
     }
     *AP_BLOCKED_WAKE_COMPLETION.lock() = None;
+    Ok(())
+}
+
+/// CPU1 任务完全阻塞后由 CPU0 修改 affinity；生产 wake 必须忽略旧 last_cpu，
+/// 把唯一 owner 交给新 mask 中的 CPU0。
+fn blocked_affinity_redirects_wake() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("blocked-affinity test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    AP_BLOCKED_WAKE_ERRORS.store(0, Ordering::Release);
+    AP_BLOCKED_WAKE_PHASE[1].store(0, Ordering::Release);
+    AP_BLOCKED_WAKE_EXPECTED[1].store(crate::smp::BOOT_CPU_ID, Ordering::Release);
+    let completion = Arc::new(crate::task::Completion::new());
+    *AP_BLOCKED_WAKE_COMPLETION.lock() = Some(completion.clone());
+    let task = crate::task::spawn_ktest_task_on(1, wait_for_remote_completion);
+
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while AP_BLOCKED_WAKE_PHASE[1].load(Ordering::Acquire) != 1
+        || task.task_status() != crate::task::TaskStatus::Blocked
+        || crate::task::processor::cpu_has_current(1)
+        || crate::task::run_queue_count(1) != 0
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("CPU1 task did not become stably Blocked");
+        }
+        core::hint::spin_loop();
+    }
+
+    let cpu0_mask = 1usize << crate::smp::BOOT_CPU_ID;
+    if !crate::task::update_blocked_affinity(&task, cpu0_mask) {
+        return Err("stable Blocked task rejected affinity update");
+    }
+    if task.cpus_allowed() != cpu0_mask {
+        return Err("Blocked task did not publish the new affinity mask");
+    }
+    if !completion.complete() {
+        return Err("Blocked task completion did not publish wakeup");
+    }
+
+    // 本次目标就是当前 CPU，wake 不需要 IPI；runner 主动让出后，队首任务
+    // 必须在 CPU0 恢复、退出，再把执行权还给 runner。
+    crate::task::suspend_current_and_run_next();
+    *AP_BLOCKED_WAKE_COMPLETION.lock() = None;
+    if AP_BLOCKED_WAKE_PHASE[1].load(Ordering::Acquire) != 2
+        || task.task_status() != crate::task::TaskStatus::Zombie
+        || AP_BLOCKED_WAKE_ERRORS.load(Ordering::Acquire) != 0
+    {
+        return Err("Blocked task did not resume exactly on its new allowed CPU");
+    }
+    if crate::task::run_queue_count(1) != 0 || crate::task::processor::cpu_has_current(1) {
+        return Err("old CPU retained the affinity-redirected task");
+    }
     Ok(())
 }
 
