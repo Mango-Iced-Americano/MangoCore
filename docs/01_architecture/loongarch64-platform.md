@@ -153,7 +153,7 @@ ASID 分配属于 MM 激活协议，不再作为 task 创建/析构时调用的�
 | `hardware_asid(context)` | 只取低 10 位硬件 ASID，绝不把软件 epoch 写入 CSR |
 | `set_asid()` | 设置当前地址空间 ASID |
 | `tlb_invalidate()` | 清除当前 CPU 的全部 non-global TLB 项 |
-| `tlb_invalidate_page(vpn)` | 刷新指定虚拟页 |
+| `tlb_invalidate_user_page(asid, vpn)` | 按目标 MM 的 ASID 刷新指定虚拟页所在的硬件页对 |
 | `tlb_invalidate_global_page(vpn)` | 刷新 global page |
 | `tlb_global_invalidate()` | 全局刷新 |
 
@@ -177,9 +177,13 @@ Rust 到 `__restore` 的 ABI 桥接直接把 trap context、token、ASID 约束�
 从快照取得到 `ertn` 保持本地 IRQ 关闭，保证 rollover IPI 的 flush/ack 不会越过旧快照
 的实际用户态恢复。
 
-当前精度仍有限：通用 page shootdown 尚未携带目标 MM 的 ASID，因而 LA64 单页本地
-失效与远端 fallback 暂时使用 `invtlb 0x3` 清除全部 non-global 项。后续固定 slot
-payload 会把目标 ASID 与 VPN 一起交给 IPI handler，再使用 `invtlb 0x5` 精确失效。
+单页 shootdown 在持有 VM 锁时把目标 MM 的硬件 ASID 与 VPN 冻结进同一个 `TlbFlush`
+快照；解锁后，每个发起 CPU 使用自己的固定原子 slot 发布这组 payload。IPI handler
+扫描全部 slot，以 `invtlb 0x5` 完成 `G=0 + ASID + VA` 失效后才设置 slot 内 ack，期间
+不分配内存，也不获取 MM 锁。多个 CPU 即使共用同一个 reason bit，其 payload 也不会
+相互覆盖。LoongArch 普通 TLB entry 同时表示相邻偶/奇页，故 VA 必须对齐到
+`2 * PAGE_SIZE`；这里的“页级精准”是指限定目标 MM/ASID 与目标硬件页对，并非只清除
+一个 4 KiB 页。
 
 ## 7. Trap 分支
 

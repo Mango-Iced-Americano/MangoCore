@@ -86,8 +86,8 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；RV64 单页远端修改使用 SBI RFENCE；LA64 使用 MM-owned ASID 与 flush-before-reuse epoch；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、LA64 精确 ASID+VA payload、安全 detach 与用户迁移未完成 |
-| LoongArch ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代 | 单页 shootdown 尚未携带目标 ASID，当前仍保守清除全部 non-global 项 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；RV64 单页远端修改优先使用 SBI RFENCE；LA64 使用 MM-owned ASID、flush-before-reuse epoch 和每发起 CPU 固定 ASID/VPN slot；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、RV64 MM-owned ASID、安全 detach 与用户迁移未完成 |
+| LoongArch ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；页级失效按 ASID + 硬件相邻页对执行 `invtlb 0x5` | 连续 range 尚未实现；多 VPN 仍升级为全 non-global 失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
 | ABI | getcpu 固定返回 0、affinity 仅 bit0、membarrier 空操作 | 用户空间看不到真实 SMP 语义 |
@@ -550,8 +550,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B16—B22 曾用 `Unpublished/LocalOnly/Published` 过渡状态阻止不完整远端语义。
   B23 已删除这套状态，直接按 cached CPU mask 的 0/仅本核/含远端三种情况执行；
 - 单一 VPN 修改在 RV64 使用页级 `sfence.vma`，多 VPN 升级为本核全量刷新。
-  LA64 的 ASID 已在 B25 下沉到外层 `TlbContext`，但裸页表对象和当前 page-sync
-  接口仍没有目标 ASID，因此保守清除本核全部非全局 TLB 项；
+  LA64 的 ASID 已在 B25 下沉到外层 `TlbContext`；B26 在 VM 锁内与 VPN 一起冻结，
+  本地及远端目标均按 ASID + 对齐硬件页对执行 `invtlb 0x5`；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
@@ -648,11 +648,16 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B24 沿用同一 `MmuGather -> TlbFlush` 主链，只把已有 `FlushRange::Page` 作为提示传给
   SMP 同步层。RV64 启动时通过 SBI BASE extension 一次性探测 RFENCE，单页远端失效把
   逻辑 CPU mask 转成物理 hart mask 后调用 `REMOTE_SFENCE_VMA`；固件不支持时明确打印并
-  退回全用户 IPI/ack。LA64 与 full flush 不引入范围 payload，继续走可合并的全量 fallback；
+  改走软件 slot。B24 当时 LA64 与 full flush 仍走全量 fallback，LA64 页级路径已由 B26 取代；
 - RFENCE 路径没有 MangoCore 共享范围槽，因而不同 CPU 并发发起时不会互相覆盖 payload；
   OpenSBI 在调用返回前完成本地/远端 fence。focused 用例分别覆盖 RV64 页级 RFENCE、
-  LA64 页级 fallback，以及双页 `Full` 的 ack 前 frame 不释放窗口；最终非平凡 CPU0/1
+  当时的 LA64 页级 fallback，以及双页 `Full` 的 ack 前 frame 不释放窗口；最终非平凡 CPU0/1
   mask 复测中 RV64 boot hart=5、LA64 boot hardware ID=0，两架构均为 17/17 PASS；
+- B26 不增加第二条 MM 提交链：`MmuGather::seal()` 在原有 VM 锁内把 MM-owned ASID 与
+  `FlushRange::Page` 冻结进 `TlbFlush`；锁外由每发起 CPU 固定原子 slot 发布 ASID/VPN，
+  handler 扫描所有 slot、执行精准失效并 ack。slot 超时不复用，防止迟到 doorbell 与后续
+  payload 发生 ABA 错配；8 个 CPU 并发发布不同 VPN 的用例证明 reason 合并不会覆盖 payload，
+  双架构 8 核 focused 均为 20/20 PASS；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
   Per-CPU current/idle/RunQueue、scheduler-ready、受控 AP kernel-only 执行与远程阻塞
   唤醒闭环。通用目标选择仍待后续批次；Phase 4 远端 MM shootdown 完成前不解除用户
@@ -718,8 +723,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   LA64 普通 context switch 不再固定全刷 non-global TLB。首轮 LA64 初赛进一步暴露并修复
   trap-return 泛型 asm 输入覆盖：固定 ABI 参数现直接绑定 `$a0/$a1/$a2`，release ELF 已
   反汇编确认；双架构 8 核初赛分别为 RV64 312/314、LA64 308/314，失败集合未扩大；
-- LoongArch 下一步实现携带目标 ASID/VPN 的固定 shootdown slot；
-- shootdown slot 使用固定数组和原子状态，IPI handler 不分配内存、不获取 MM 锁；
+- B26 已实现携带目标 ASID/VPN 的固定 shootdown slot：每个发起 CPU 独占一个槽，
+  多个发起者共享 reason bit 时 handler 扫描全部槽；IPI handler 不分配内存、不获取 MM 锁；
+- LoongArch 目标 CPU 使用 `invtlb 0x5` 限定 `G=0 + ASID + VA`；由于普通 TLB entry
+  覆盖相邻偶/奇页，VA 按 `2 * PAGE_SIZE` 对齐，这是该架构可提供的最小粒度；
+- RISC-V 仍统一使用 ASID 0，B27 再实现 MM-owned SATP ASID 与按 ASID 的 SBI RFENCE；
 - 被解除映射的 frame、页表页和内核栈必须延迟到全部目标 ack 后释放；
 - membarrier：
   - GLOBAL 面向所有在线 CPU；

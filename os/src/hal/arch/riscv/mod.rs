@@ -66,7 +66,10 @@ pub fn user_tlb_invalidate() {
 }
 
 /// 清除当前 hart 上指定用户虚拟页的所有 ASID 翻译。
-pub fn user_tlb_invalidate_page(vpn: crate::mm::VirtPageNum) {
+///
+/// B27 前 `asid` 必须为 0；`sfence.vma va, zero` 仍按地址精确、按 ASID 全量。
+pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
+    debug_assert_eq!(asid, 0);
     sv39::tlb_invalidate_addr(usize::from(crate::mm::VirtAddr::from(vpn)));
 }
 
@@ -75,8 +78,10 @@ pub fn user_tlb_invalidate_page(vpn: crate::mm::VirtPageNum) {
 /// `Ok(false)` 只表示固件缺少 RFENCE；上层仍须执行软件 IPI 全量 fallback。
 pub fn remote_user_tlb_invalidate_page(
     targets: usize,
+    asid: u16,
     vpn: crate::mm::VirtPageNum,
 ) -> Result<bool, isize> {
+    debug_assert_eq!(asid, 0);
     let hart_mask = crate::smp::logical_to_hardware_mask(targets);
     let start = usize::from(crate::mm::VirtAddr::from(vpn));
     sbi::remote_sfence_vma(hart_mask, start, crate::config::PAGE_SIZE)

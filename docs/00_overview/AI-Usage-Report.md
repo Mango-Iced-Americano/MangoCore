@@ -57,6 +57,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 用户 PTE 锁外 shootdown 与接口收敛 | 2026-07-29 | GPT/Codex, DeepSeek | VM 锁外同步、generation/ack 并发审查、frame 退休、MMU 接口重构与双架构 Docker/QEMU 验证 | 用 `AddressSpace`、`MmuGather`、`TlbFlush` 固化 `record_change -> seal -> execute`；真实 unmap 验证 ack 前不释放 frame |
 | SMP RV64 页级 RFENCE 与 IPI fallback | 2026-07-29 | GPT/Codex, DeepSeek | SBI 官方 ABI、Linux/DragonOS TLB 分层对照、hart mask 映射审查与双架构 Docker/QEMU 验证 | 不增加 MM 提交类型；RV64 单页走同步 RFENCE，full/LA64 保留全用户 IPI/ack，双架构 8 核 focused 17/17 PASS |
 | SMP LoongArch MM-owned ASID/epoch | 2026-07-29 | GPT/Codex, DeepSeek | 官方 CSR/INVTLB 与 Linux versioned ASID 对照、rollover 并发审查、release ELF 反汇编和双架构 Docker/QEMU 验证 | 删除 TCB ASID；定位并修复 LA64 trap-return asm 输入自覆盖；双架构 8 核 focused 19/19，初赛 RV64 312/314、LA64 308/314 |
+| SMP LoongArch ASID+VPN 精准 shootdown | 2026-07-29 | GPT/Codex, DeepSeek | 官方 `invtlb 0x5`、Linux 页对粒度对照、固定原子槽并发审查和双架构 Docker/QEMU 验证 | 锁内冻结 ASID/VPN、锁外 IPI/ack；8 核并发 payload 隔离，双架构 focused 20/20 PASS |
 
 ## 4. 详细使用场景
 
@@ -520,6 +521,28 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   为 RV64 312/314、LA64 308/314，四组完整且失败集合未扩大；修复后的 LA64 日志不再出现
   `PageInvalidStore/PageInvalidFetch`、panic 或 timeout。
 
+### Case 23: SMP LoongArch ASID+VPN 精准 shootdown
+
+- Evidence: `docs/Work_Log/2026-07-29.md`、
+  `docs/Work_Log/evidence/2026-07-29/smp-b26-precise-shootdown-summary.md`；DeepSeek prompt、
+  完整输出和原始 Docker 日志仍只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 LoongArch 官方 `INVTLB` 与 Linux LoongArch 页级刷新实现，负责
+  slot 生命周期、内存序、超时 fail-stop、实现和最终裁决；DeepSeek 只读审查冻结 diff，
+  自主执行串行双架构 build/8 核 focused，并归纳锁序、frame 退休和动态结果。
+- Problem: B25 已有 MM-owned ASID，但单页 PTE 修改在 LA64 仍清除全部 non-global TLB；
+  若只增加一个全局 ASID/VPN payload，多个 CPU 同时发起时又会因 reason bit 合并而覆盖。
+- Human action: 在既有 `MmuGather::seal()` 内冻结 ASID 与 VPN；每个发起 CPU 使用一个固定
+  原子 slot，IPI handler 扫描全部 slot，执行 `invtlb 0x5` 后才 ack。timeout 时不复用槽，
+  避免迟到 doorbell 形成 ABA；退休 frame 继续由唯一 `TlbFlush` 在 ack 后释放。
+- AI adjudication: 采纳 DeepSeek 对 VM 锁外等待、无锁 handler 和 STOP 分支的审查；纠正其
+  将并发用例概括为“不同 ASID/VPN”的表述——实际为同一 MM/ASID 下不同 VPN，验证 slot
+  payload 隔离。ASID 跨 CPU 所有权与 rollover 由独立测试覆盖。LA64 的“精准”也限定为
+  ASID + 硬件相邻页对，不声称只失效一个 4 KiB 页。
+- Verification: RV64、LA64 normal build 串行 exit 0；两架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=1` 均为 20/20 PASS，online mask `0xff`，页级后端与
+  8 核并发 slot 用例均通过，full-request 计数不增长。四项无 timeout/forbidden marker，
+  冻结源码前后指纹一致。该证据不覆盖连续 range、RV64 MM-owned ASID 或普通用户迁移。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -583,6 +606,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-28.md`、`docs/Work_Log/evidence/2026-07-28/smp-b22-user-tlb-foundation-summary.md` | SMP 用户 MM 激活与 user-TLB IPI 基础设施 | 记录 VM 锁死锁边界、单调 cached mask/generation、独立 sequence、DeepSeek 跨原子建议裁决、双架构 29/29 与完整 shootdown NOT RUN 边界 |
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b23-user-tlb-flush-summary.md` | SMP 用户 PTE shootdown 与 MMU 接口收敛 | 记录锁内收集/锁外同步、frame 退休、DeepSeek 只读复核、双架构 focused 与初赛非回归证据 |
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b24-rfence-summary.md` | SMP RV64 页级 RFENCE 与 IPI fallback | 记录 SBI/Linux/DragonOS 对照、逻辑/物理 hart mask、DeepSeek 门禁与人工证据边界裁决 |
+| `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b26-precise-shootdown-summary.md` | SMP LoongArch ASID+VPN 精准 shootdown | 记录固定 per-CPU slot、页对硬件粒度、DeepSeek 冻结验证与人工证据边界修正 |
 
 ## 9. 交互记录与留痕方式
 

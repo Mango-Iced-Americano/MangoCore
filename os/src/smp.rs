@@ -84,6 +84,73 @@ impl PerCpu {
     }
 }
 
+/// 一次远端“ASID + 单页”失效的无锁共享槽。
+///
+/// 每个发起 CPU 固定拥有一个槽；当前安全点抢占模型保证同一 CPU 最多等待
+/// 一轮同步。`claimed` 仍显式防御未来重入，重入时上层退回全用户 flush。
+/// handler 只读原子字段并写 ack，不分配内存，也不获取任何普通锁。
+struct UserTlbPageSlot {
+    claimed: AtomicBool,
+    targets: AtomicUsize,
+    acknowledged: AtomicUsize,
+    asid: AtomicUsize,
+    vpn: AtomicUsize,
+}
+
+impl UserTlbPageSlot {
+    const fn new() -> Self {
+        Self {
+            claimed: AtomicBool::new(false),
+            targets: AtomicUsize::new(0),
+            acknowledged: AtomicUsize::new(0),
+            asid: AtomicUsize::new(0),
+            vpn: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_claim(&self) -> bool {
+        self.claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// 以 `targets` 的 Release store 作为整份 payload 的发布点。
+    fn publish(&self, targets: usize, asid: u16, vpn: crate::mm::VirtPageNum) {
+        debug_assert_ne!(targets, 0);
+        self.acknowledged.store(0, Ordering::Relaxed);
+        self.asid.store(asid as usize, Ordering::Relaxed);
+        self.vpn.store(vpn.0, Ordering::Relaxed);
+        self.targets.store(targets, Ordering::Release);
+    }
+
+    /// 当前 CPU 在 hard IRQ 中处理属于自己的 payload，并在指令完成后 ack。
+    fn service(&self, cpu_id: usize) {
+        let cpu_bit = 1usize << cpu_id;
+        if self.targets.load(Ordering::Acquire) & cpu_bit == 0
+            || self.acknowledged.load(Ordering::Acquire) & cpu_bit != 0
+        {
+            return;
+        }
+        let asid = self.asid.load(Ordering::Relaxed) as u16;
+        let vpn = crate::mm::VirtPageNum::from(self.vpn.load(Ordering::Relaxed));
+        crate::hal::user_tlb_invalidate_page(asid, vpn);
+        self.acknowledged.fetch_or(cpu_bit, Ordering::Release);
+    }
+
+    fn acknowledged(&self) -> usize {
+        self.acknowledged.load(Ordering::Acquire)
+    }
+
+    /// 只有发起者确认全部 live target 已 ack 后才能复用该槽。
+    fn release(&self) {
+        self.targets.store(0, Ordering::Release);
+        self.claimed.store(false, Ordering::Release);
+    }
+}
+
+static USER_TLB_PAGE_SLOTS: [UserTlbPageSlot; MAX_CPUS] =
+    [const { UserTlbPageSlot::new() }; MAX_CPUS];
+
 /// 可以合并进 per-CPU mailbox 的幂等 IPI 原因。
 ///
 /// reason bit 只表示“至少处理一次”，不能表示事件次数；需要计数的协议必须
@@ -106,6 +173,8 @@ impl IpiReason {
     const KERNEL_TLB_SYNC: Self = Self(1 << 5);
     /// 某个用户 MM 的 PTE 已修改；目标必须清除本核全部用户翻译后 ack。
     const USER_TLB_SYNC: Self = Self(1 << 6);
+    /// 固定槽中已发布目标 MM 的 ASID/VPN；目标必须精确失效后设置槽内 ack。
+    const USER_TLB_PAGE_SYNC: Self = Self(1 << 7);
 
     const fn bits(self) -> u32 {
         self.0
@@ -170,6 +239,11 @@ pub(crate) enum UserTlbSyncError {
         cpu_id: usize,
         expected: usize,
         observed: usize,
+        send_error: Option<isize>,
+    },
+    PageTimeout {
+        missing: usize,
+        acknowledged: usize,
         send_error: Option<isize>,
     },
 }
@@ -451,6 +525,14 @@ pub fn handle_ipi() {
             local.user_tlb_ack.store(sequence, Ordering::Release);
         }
     }
+    if reasons & IpiReason::USER_TLB_PAGE_SYNC.bits() != 0 {
+        // 多个发起者可以共享同一个 reason bit；扫描固定的每 CPU 槽即可一次
+        // 消费全部已发布 payload。每个槽自己的 target/ack 防止相互覆盖。
+        let cpu_id = self::cpu_id();
+        for slot in &USER_TLB_PAGE_SLOTS {
+            slot.service(cpu_id);
+        }
+    }
 }
 
 /// 在 AP idle 栈上执行 hard IPI 延迟下来的有界工作。
@@ -629,12 +711,14 @@ pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError>
 
 /// 让一组曾缓存用户 MM 的 CPU 同步完成用户 TLB 失效。
 ///
-/// `page=Some(vpn)` 时 RV64 优先使用 SBI RFENCE；固件不支持或 `page=None`
-/// 时保守退回全用户/non-global IPI。调用方必须先释放
+/// `page=Some(vpn)` 时先尝试架构固件，再用固定槽传递 `asid + vpn`；槽被
+/// 同 CPU 的意外重入占用时才保守退回全用户/non-global IPI。`page=None`
+/// 始终执行全用户失效。调用方必须先释放
 /// VM/PTE 及其它普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
-/// software fallback 每次覆盖本核全部用户项，因此 request 合并到较新序号仍覆盖旧请求。
+/// 精确请求由每 CPU 槽隔离，全量 fallback 则可安全合并到较新的 sequence。
 pub(crate) fn synchronize_user_tlb(
     targets: usize,
+    asid: u16,
     page: Option<crate::mm::VirtPageNum>,
 ) -> Result<(), UserTlbSyncError> {
     let configured = expected_online_mask();
@@ -660,7 +744,7 @@ pub(crate) fn synchronize_user_tlb(
 
     if remote == 0 {
         match page {
-            Some(vpn) => crate::hal::user_tlb_invalidate_page(vpn),
+            Some(vpn) => crate::hal::user_tlb_invalidate_page(asid, vpn),
             None => crate::hal::user_tlb_invalidate(),
         }
         return Ok(());
@@ -669,10 +753,43 @@ pub(crate) fn synchronize_user_tlb(
     // RFENCE 直接接受硬件 hart mask，且调用返回就代表目标已完成失效；它没有
     // 可被并发发起者覆盖的共享 payload。LA64 返回 false，继续走下面的全量 IPI。
     if let Some(vpn) = page {
-        match crate::hal::remote_user_tlb_invalidate_page(live_targets, vpn) {
+        match crate::hal::remote_user_tlb_invalidate_page(live_targets, asid, vpn) {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) => return Err(UserTlbSyncError::Firmware { error }),
+        }
+
+        // 每个 CPU 只会同步等待一轮 shootdown，因此优先使用自己的固定槽。
+        // CAS 失败说明出现了重入或上一轮 fail-stop 残留；全刷比覆盖 payload 安全。
+        let slot = &USER_TLB_PAGE_SLOTS[self::cpu_id()];
+        if slot.try_claim() {
+            slot.publish(remote, asid, vpn);
+            if live_targets & current_bit != 0 {
+                crate::hal::user_tlb_invalidate_page(asid, vpn);
+            }
+            let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_PAGE_SYNC).err();
+            let _irq_guard = TlbWaitIrqGuard::enter();
+            let deadline = crate::hal::get_time().saturating_add(
+                crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
+            );
+            loop {
+                let acknowledged = slot.acknowledged();
+                let missing = remote & !stopped_cpu_mask() & !acknowledged;
+                if missing == 0 {
+                    slot.release();
+                    return Ok(());
+                }
+                if crate::hal::get_time() >= deadline {
+                    // 不释放槽：迟到的目标只能看到本轮原 payload，不能把 stale
+                    // doorbell 错配到后续请求。正常 TlbFlush 会在返回错误后 fail-stop。
+                    return Err(UserTlbSyncError::PageTimeout {
+                        missing,
+                        acknowledged,
+                        send_error,
+                    });
+                }
+                spin_loop();
+            }
         }
     }
 

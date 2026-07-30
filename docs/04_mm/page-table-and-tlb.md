@@ -166,7 +166,7 @@ AddressSpace::write
 |-----------------|----------|
 | `0` | 页表尚未被任何 CPU 使用；无需失效，解锁后即可释放退休 frame |
 | 仅当前 CPU | 按 `FlushRange` 执行页级或本地全用户失效 |
-| 含远端 CPU、单一 VPN | RV64 通过同步 SBI RFENCE 执行页级失效；RFENCE 缺失或 LA64 使用全用户 IPI/ack fallback |
+| 含远端 CPU、单一 VPN | RV64 优先使用同步 SBI RFENCE，缺失时使用固定 slot；LA64 使用固定 slot 携带 ASID/VPN，目标精确执行页级失效 |
 | 含远端 CPU、多 VPN/页表层级变化 | 使用 user-TLB request/ack，在目标 CPU 执行全用户失效 |
 
 固定安全顺序是：PTE write → `record_change()` → `retire_frame()` → `seal()` →
@@ -184,14 +184,16 @@ fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `Mmu
 前尚无 CPU 能观察，构造期记录可由 `discard_unpublished()` 清除；父侧记录则由
 外层 `write()` 正常同步，否则父 CPU 可能继续用旧权限写共享页。
 
-当前性能策略仍然保守：cached mask 尚未安全清 bit，多页修改和 LA64 远端协议仍按整个
-用户地址空间失效。RV64 单页修改已经把 `FlushRange::Page` 直接交给 SBI RFENCE，固件
+当前性能策略仍然保守：cached mask 尚未安全清 bit，多页修改仍按整个用户地址空间失效。
+RV64 单页修改已经把 `FlushRange::Page` 直接交给 SBI RFENCE，固件
 以物理 hart mask 同步完成 `[va, va + PAGE_SIZE)` 后才允许释放 frame；缺少 RFENCE 时启动
-日志会明确说明并退回软件 IPI。LA64 已使用 MM-owned ASID，普通 context switch 不再
-固定执行 `invtlb 0x3`；但通用 shootdown 接口尚未携带目标 ASID，单页 PTE 修改仍保守
-清除目标 CPU 的全部 non-global 项。已经避免的固定成本还包括：已登记 CPU 的重复
+日志会明确说明并改走固定 slot。LA64 已使用 MM-owned ASID，普通 context switch 不再
+固定执行 `invtlb 0x3`；单页 PTE 修改把同一 VM 锁内冻结的 ASID/VPN 发布到每发起 CPU
+独占的原子槽，目标 CPU 执行 `invtlb 0x5` 后才 ack。LoongArch 一个普通 TLB entry 同时
+覆盖相邻偶/奇 4 KiB 页，因此其最小硬件粒度是对齐后的 8 KiB 页对，而不是单个 4 KiB 页。
+已经避免的固定成本还包括：已登记 CPU 的重复
 `fetch_or`、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
-range、LA64 ASID+VA payload 和安全 CPU detach 留给后续工作。
+range、RV64 MM-owned ASID 和安全 CPU detach 留给后续工作。
 
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
@@ -271,8 +273,8 @@ page walk；外层解锁并收齐目标 CPU 的 ack 后才统一释放。等待�
 
 | 架构 | 页表/TLB 注意点 |
 |------|-----------------|
-| rv64 | 仅当前 CPU 且只改一个 VPN 时使用 `sfence.vma va, zero`；多页和远端 user-TLB IPI 使用本 hart 全量 `sfence.vma` |
-| la64 | ASID 由 `AddressSpace` 的 `TlbContext` 持有；页级入口尚未携带目标 ASID，因此本地与远端 fallback 当前仍保守执行本核全部 `G=0` 项失效（`invtlb 0x3`） |
+| rv64 | 当前统一使用 ASID 0；单页本地失效使用 `sfence.vma va, zero`，远端优先使用 SBI RFENCE，固件缺失时使用固定 slot；多页使用全用户失效 |
+| la64 | ASID 由 `AddressSpace` 的 `TlbContext` 持有；页级本地/远端失效使用目标 ASID + 对齐页对执行 `invtlb 0x5`，多页与 rollover 使用全 non-global 失效 |
 
 LA64 把软件 epoch 和硬件 ASID 编码在一个 `asid_context` 中：低 10 位对应
 `CSR.ASID[9:0]`，高位只供软件判断编号是否属于当前 epoch。同一 epoch 内的编号单调分配，
@@ -298,7 +300,8 @@ B16 首次收口用户 PTE 写入，B22 完成 cached CPU/generation 激活侧�
 原语；B23 将临时的 batch/pending/commit 原型重构为
 `record_change -> seal -> execute`，并完成锁外等待与 ack 前 frame 不复用；B24 接通
 RV64 单页 RFENCE；B25 完成 LA64 MM-owned ASID 与全 CPU flush-before-reuse epoch
-协议。连续 range、LA64 精确 ASID+VA shootdown、安全 CPU detach 和普通用户迁移仍未完成。
+协议；B26 以每发起 CPU 固定 slot 完成 ASID+VPN 远端失效。连续 range、RV64 MM-owned
+ASID、安全 CPU detach 和普通用户迁移仍未完成。
 
 ## 13. 调试核对点
 

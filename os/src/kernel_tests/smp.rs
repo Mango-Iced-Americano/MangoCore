@@ -25,6 +25,10 @@ static AP_USER_TLB_FREE_DURING_WAIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static AP_USER_TLB_REQUEST_BEFORE: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID_READY: AtomicUsize = AtomicUsize::new(0);
+static PAGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
+static PAGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
+static PAGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
+static PAGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -33,7 +37,7 @@ lazy_static! {
         Mutex::new(None);
     static ref USER_TLB_RETIRE_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
-    static ref SHARED_ASID_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
+    static ref SHARED_TLB_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
 }
 
@@ -96,6 +100,10 @@ pub fn tests() -> Vec<KernelTest> {
             user_tlb_page_sync_uses_arch_backend,
         ),
         KernelTest::new(
+            "smp::concurrent_page_shootdowns_keep_payloads_separate",
+            concurrent_page_shootdowns_keep_payloads_separate,
+        ),
+        KernelTest::new(
             "smp::user_tlb_retirement_waits_for_ack",
             user_tlb_retirement_waits_for_ack,
         ),
@@ -111,7 +119,7 @@ pub fn tests() -> Vec<KernelTest> {
 }
 
 fn read_shared_mm_asid_on_ap() {
-    let vm = SHARED_ASID_VM
+    let vm = SHARED_TLB_VM
         .lock()
         .as_ref()
         .expect("shared-ASID test VM missing")
@@ -141,7 +149,7 @@ fn address_space_owns_asid() -> Result<(), &'static str> {
     }
     AP_SHARED_MM_ASID.store(0, Ordering::Release);
     AP_SHARED_MM_ASID_READY.store(0, Ordering::Release);
-    *SHARED_ASID_VM.lock() = Some(vm);
+    *SHARED_TLB_VM.lock() = Some(vm);
     let task = crate::task::spawn_ktest_task_on(1, read_shared_mm_asid_on_ap);
     let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
     while AP_SHARED_MM_ASID_READY.load(Ordering::Acquire) == 0
@@ -152,7 +160,7 @@ fn address_space_owns_asid() -> Result<(), &'static str> {
         }
         core::hint::spin_loop();
     }
-    *SHARED_ASID_VM.lock() = None;
+    *SHARED_TLB_VM.lock() = None;
     if AP_SHARED_MM_ASID.load(Ordering::Acquire) != local.asid as usize {
         return Err("one AddressSpace received different ASIDs on two CPUs");
     }
@@ -815,7 +823,7 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
         ack_before[cpu] = crate::smp::user_tlb_ack(cpu);
     }
 
-    crate::smp::synchronize_user_tlb(targets, None).map_err(|error| {
+    crate::smp::synchronize_user_tlb(targets, 0, None).map_err(|error| {
         crate::println!("# user TLB full-flush sync failed: {:?}", error);
         "user TLB full-flush sync failed"
     })?;
@@ -831,8 +839,12 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 页级同步在 RV64 应由 RFENCE 直接完成；LA64 则使用既有全量 IPI fallback。
+/// 页级同步在 RV64 由 RFENCE 完成，在 LA64 由固定槽传递目标 ASID/VPN。
 fn user_tlb_page_sync_uses_arch_backend() -> Result<(), &'static str> {
+    let vm = crate::mm::AddressSpace::new(
+        crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
+    );
+    let asid = vm.activate_on(crate::smp::BOOT_CPU_ID).asid;
     let mut targets = 1usize << crate::smp::BOOT_CPU_ID;
     if crate::smp::configured_cpu_count() > 1 {
         // 只选择逻辑 CPU0/1；当 cold-boot hart 非 0 时，物理 mask 不再碰巧等于
@@ -846,19 +858,108 @@ fn user_tlb_page_sync_uses_arch_backend() -> Result<(), &'static str> {
         0
     };
 
-    crate::smp::synchronize_user_tlb(targets, Some(crate::mm::VirtAddr::from(0x51_0000).floor()))
-        .map_err(|error| {
+    crate::smp::synchronize_user_tlb(
+        targets,
+        asid,
+        Some(crate::mm::VirtAddr::from(0x51_0000).floor()),
+    )
+    .map_err(|error| {
         crate::println!("# user TLB page sync failed: {:?}", error);
         "user TLB page sync failed"
     })?;
 
-    #[cfg(feature = "riscv")]
     if crate::smp::configured_cpu_count() > 1 && crate::smp::user_tlb_request(1) != request_before {
-        return Err("RV64 page sync unexpectedly used the IPI fallback");
+        return Err("page sync unexpectedly degraded to a full user-TLB flush");
     }
-    #[cfg(feature = "loongarch64")]
-    if crate::smp::configured_cpu_count() > 1 && crate::smp::user_tlb_request(1) <= request_before {
-        return Err("LA64 page sync did not use the IPI fallback");
+    crate::task::run_deferred_timer_at_task_safe_point();
+    Ok(())
+}
+
+fn run_concurrent_page_shootdown() {
+    let cpu_id = crate::smp::cpu_id();
+    let vm = SHARED_TLB_VM
+        .lock()
+        .as_ref()
+        .expect("concurrent page-shootdown VM missing")
+        .clone();
+    let asid = vm.activate_on(cpu_id).asid;
+    PAGE_SYNC_READY.fetch_add(1, Ordering::Release);
+    while PAGE_SYNC_START.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+
+    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
+    // 每个发起者选择不同的 LoongArch 双页 TLB entry，避免硬件对齐后碰巧合并。
+    let vpn = crate::mm::VirtAddr::from(
+        0x54_0000 + cpu_id * 2 * crate::config::PAGE_SIZE,
+    )
+    .floor();
+    if crate::smp::synchronize_user_tlb(targets, asid, Some(vpn)).is_err() {
+        PAGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    PAGE_SYNC_DONE.fetch_add(1, Ordering::Release);
+}
+
+/// 所有 CPU 同时发布不同 ASID/VPN payload，证明固定槽不会被 reason 合并覆盖。
+fn concurrent_page_shootdowns_keep_payloads_separate() -> Result<(), &'static str> {
+    PAGE_SYNC_START.store(0, Ordering::Release);
+    PAGE_SYNC_READY.store(0, Ordering::Release);
+    PAGE_SYNC_DONE.store(0, Ordering::Release);
+    PAGE_SYNC_ERRORS.store(0, Ordering::Release);
+
+    let vm = Arc::new(crate::mm::AddressSpace::new(
+        crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
+    ));
+    let local_asid = vm.activate_on(crate::smp::BOOT_CPU_ID).asid;
+    *SHARED_TLB_VM.lock() = Some(vm);
+
+    let mut full_requests = [0usize; crate::smp::MAX_CPUS];
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        full_requests[cpu_id] = crate::smp::user_tlb_request(cpu_id);
+    }
+    let mut tasks = Vec::new();
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        tasks.push(crate::task::spawn_ktest_task_on(
+            cpu_id,
+            run_concurrent_page_shootdown,
+        ));
+    }
+
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while PAGE_SYNC_READY.load(Ordering::Acquire) != tasks.len() {
+        if crate::hal::get_time() >= deadline {
+            return Err("APs did not enter the concurrent page-shootdown barrier");
+        }
+        core::hint::spin_loop();
+    }
+
+    PAGE_SYNC_START.store(1, Ordering::Release);
+    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
+    let local_vpn = crate::mm::VirtAddr::from(0x53_0000).floor();
+    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_vpn))
+        .map_err(|_| "CPU0 concurrent page shootdown failed")?;
+
+    let completion_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    while PAGE_SYNC_DONE.load(Ordering::Acquire) != tasks.len()
+        || tasks
+            .iter()
+            .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
+    {
+        if crate::hal::get_time() >= completion_deadline {
+            return Err("concurrent page shootdowns did not finish before timeout");
+        }
+        core::hint::spin_loop();
+    }
+    *SHARED_TLB_VM.lock() = None;
+
+    if PAGE_SYNC_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("an AP page shootdown returned an error");
+    }
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        if crate::smp::user_tlb_request(cpu_id) != full_requests[cpu_id] {
+            return Err("concurrent page shootdown degraded to full user-TLB flush");
+        }
     }
     crate::task::run_deferred_timer_at_task_safe_point();
     Ok(())

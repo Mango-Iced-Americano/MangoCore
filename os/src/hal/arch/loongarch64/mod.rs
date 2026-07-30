@@ -48,18 +48,19 @@ pub fn user_tlb_invalidate() {
     tlb::tlb_invalidate();
 }
 
-/// 清除当前 core 上指定 MM 的用户翻译。
+/// 按目标 MM 的 ASID 与虚拟页清除本 core 上的用户翻译。
 ///
-/// B25 已把 ASID 归入 MM，但当前通用 HAL 入口尚未携带目标 ASID；调用者也可能
-/// 正在修改其它进程的 MM。因此这里仍保守清除全部 non-global 项，不能误用
-/// CSR 中恰好属于当前任务的 ASID。
-pub fn user_tlb_invalidate_page(_vpn: crate::mm::VirtPageNum) {
-    tlb::tlb_invalidate();
+/// `asid` 来自地址空间锁内冻结的 MM-owned context，不能替换成当前 CSR.ASID：
+/// shootdown 可能由正在运行另一个进程的 CPU 发起或处理。
+pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
+    assert_ne!(asid, tlb::KERN_ASID, "precise user TLB flush used ASID 0");
+    tlb::tlb_invalidate_user_page(asid, vpn);
 }
 
-/// LA64 暂无携带目标 ASID/范围的无锁 payload，由上层退回全量 IPI。
+/// LA64 没有固件 RFENCE；上层继续使用固定 shootdown slot 传递 ASID/VA。
 pub fn remote_user_tlb_invalidate_page(
     _targets: usize,
+    _asid: u16,
     _vpn: crate::mm::VirtPageNum,
 ) -> Result<bool, isize> {
     Ok(false)

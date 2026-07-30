@@ -30,6 +30,8 @@ pub(crate) struct TlbFlush<'a> {
     context: &'a TlbContext,
     generation: Option<usize>,
     targets: usize,
+    /// 与本轮 PTE 修改在同一 VM 锁内冻结的硬件 ASID。
+    asid: u16,
     gather: MmuGather,
     executed: bool,
 }
@@ -69,6 +71,28 @@ impl TlbContext {
     /// 返回曾经缓存过该 MM 的 CPU；未实现安全 detach 前该集合只增不减。
     pub(crate) fn cached_cpu_mask(&self) -> usize {
         self.cached_cpus.load(Ordering::Acquire)
+    }
+
+    /// 取得本轮页级失效必须使用的硬件 ASID。
+    ///
+    /// 有缓存者意味着该 MM 至少完成过一次 `activate_on()`，因此 LA64 必须
+    /// 已拥有非零 ASID。调用者在 VM 锁内取值，使 ASID 与本轮 VPN 成为同一快照。
+    #[cfg(target_arch = "loongarch64")]
+    pub(crate) fn flush_asid(&self, targets: usize) -> u16 {
+        if targets == 0 {
+            return 0;
+        }
+        let asid = crate::hal::arch::loongarch64::tlb::hardware_asid(
+            self.asid_context.load(Ordering::Acquire),
+        );
+        assert_ne!(asid, 0, "cached LoongArch MM has no hardware ASID");
+        asid
+    }
+
+    /// RV64 在 B27 前仍使用 ASID 0；页级 `sfence.vma` 会匹配全部 ASID。
+    #[cfg(not(target_arch = "loongarch64"))]
+    pub(crate) const fn flush_asid(&self, _targets: usize) -> u16 {
+        0
     }
 
     /// 登记当前 CPU，并保证它在使用页表根之前观察到最新代际。
@@ -127,12 +151,14 @@ impl<'a> TlbFlush<'a> {
         context: &'a TlbContext,
         generation: Option<usize>,
         targets: usize,
+        asid: u16,
         gather: MmuGather,
     ) -> Self {
         Self {
             context,
             generation,
             targets,
+            asid,
             gather,
             executed: false,
         }
@@ -145,7 +171,9 @@ impl<'a> TlbFlush<'a> {
             let result = if self.targets == current_bit {
                 match self.gather.range() {
                     FlushRange::None => panic!("TLB flush has no recorded PTE change"),
-                    FlushRange::Page(vpn) => crate::hal::user_tlb_invalidate_page(vpn),
+                    FlushRange::Page(vpn) => {
+                        crate::hal::user_tlb_invalidate_page(self.asid, vpn)
+                    }
                     FlushRange::Full => crate::hal::user_tlb_invalidate(),
                 }
                 Ok(())
@@ -155,7 +183,7 @@ impl<'a> TlbFlush<'a> {
                     FlushRange::Page(vpn) => Some(vpn),
                     FlushRange::Full => None,
                 };
-                crate::smp::synchronize_user_tlb(self.targets, page)
+                crate::smp::synchronize_user_tlb(self.targets, self.asid, page)
             };
 
             if let Err(error) = result {

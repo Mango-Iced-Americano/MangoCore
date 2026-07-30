@@ -125,7 +125,7 @@ pub fn rollover_asids() {
     };
 
     let targets = crate::smp::online_cpu_mask();
-    if let Err(error) = crate::smp::synchronize_user_tlb(targets, None) {
+    if let Err(error) = crate::smp::synchronize_user_tlb(targets, KERN_ASID, None) {
         panic!("ASID rollover TLB flush failed: {:?}", error);
     }
 
@@ -196,10 +196,11 @@ pub fn tlb_invalidate() {
     crate::task::perf::record_tlb_full();
 }
 #[inline(always)]
-pub fn tlb_invalidate_page(vpn: VirtPageNum) {
-    // INVTLB_ADDR_GFALSE_AND_ASID requires the target ASID in rj.
+pub fn tlb_invalidate_user_page(asid: u16, vpn: VirtPageNum) {
+    // LoongArch 的一个普通 TLB entry 同时保存相邻的偶/奇页，因此官方和
+    // Linux 都把 VA 对齐到 2 * PAGE_SIZE；这是硬件能提供的最小失效粒度。
     let vaddr = (vpn.0 & !1) << PAGE_SIZE_BITS;
-    let asid = current_asid() as usize;
+    let asid = asid as usize;
     // Safety: `invtlb 0x5` treats `asid` and `vaddr` as architectural operands
     // for invalidation only; `vaddr` is not dereferenced.
     unsafe {

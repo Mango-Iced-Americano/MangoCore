@@ -135,6 +135,9 @@ impl MmuGather {
             targets, self.cached_cpus_at_begin,
             "TLB target mask changed while the address-space lock was held"
         );
+        // ASID 必须和 `range` 在同一个 VM 锁持有期冻结；解锁后可能发生
+        // 全局 ASID rollover，不能再从 MM 中临时拼装另一份失效上下文。
+        let asid = context.flush_asid(targets);
         let gather = core::mem::replace(self, Self::new());
         let generation = if targets == 0 {
             None
@@ -147,7 +150,7 @@ impl MmuGather {
                 }
             }
         };
-        Some(TlbFlush::new(context, generation, targets, gather))
+        Some(TlbFlush::new(context, generation, targets, asid, gather))
     }
 
     /// 丢弃尚未装入共享 `AddressSpace` 的构造期记录。
