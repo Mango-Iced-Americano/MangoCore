@@ -51,7 +51,9 @@ frame 内开放受控 timer/IPI 窗口。B19 又建立 scheduler-ready 屏障和
 严格受限的用户探针：CPU0 构造并发布，CPU1 进入真实用户态执行 getpid/yield/exit，
 CPU0 负责观察与回收。它不访问文件系统、网络或设备；普通新任务和用户任务仍由
 CPU0 独占。B29 将同一探针改为先在 CPU0 起跑，再在 syscall 内真实 yield 后从 CPU1
-恢复；这动态覆盖了跨 CPU 恢复 `schedule()`、trap current owner 和 MM 激活。
+恢复；这动态覆盖了跨 CPU 恢复 `schedule()`、trap current owner 和 MM 激活。B30 在这条
+既有闭环上让 getcpu 返回连续逻辑 CPU：探针在 yield 前后分别验证 0 和 1，但没有改变普通
+任务固定 CPU0 的发布策略。
 
 ## 启动栈与 BSS 边界
 
@@ -363,3 +365,6 @@ B29 要求双架构 8 核日志实际出现 `smp::user_task_migrates_on_yield`�
 CPU0 起跑、yield 后 CPU1 续跑、CPU0 wait/reap、退出后的 current/runqueue/zombie 与
 TCB 强引用都已收口；
 仅看到测试总数或 QEMU 退出 0 不足以判定通过。
+B30 沿用同一测试名，但用户探针必须自行验证 getcpu 在迁移前返回逻辑 CPU0、迁移后返回
+逻辑 CPU1，并把任一失败编码为非零 exit status。这里的逻辑编号来自 PerCpu/scheduler 映射，
+不能用可能非零的 RISC-V 启动 hart ID 替代。

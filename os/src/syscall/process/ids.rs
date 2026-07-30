@@ -2140,11 +2140,17 @@ pub fn sys_setpriority(which: usize, who: usize, prio: usize) -> isize {
 
 pub fn sys_getcpu(cpu: *mut u32, node: *mut u32, _tcache: usize) -> isize {
     let token = current_user_token();
+    // `cpu_id()` 返回内核调度器使用的连续逻辑 CPU 编号，而不是 RV hart ID
+    // 或 LA64 物理 CoreID。先快照一次，保证两个可选输出描述同一次调用；
+    // 本函数不持锁、不等待，也不会主动进入调度点。
+    let current_cpu = crate::smp::cpu_id() as u32;
     if !cpu.is_null() {
-        if let Err(errno) = UserPtrMut::new(cpu).write(token, &0u32) {
+        if let Err(errno) = UserPtrMut::new(cpu).write(token, &current_cpu) {
             return errno;
         }
     }
+    // MangoCore v1 没有 NUMA 拓扑，全部 CPU 都属于 node 0。NULL 输出按
+    // Linux getcpu ABI 忽略；第三个 tcache 参数也保持兼容性忽略。
     if !node.is_null() {
         if let Err(errno) = UserPtrMut::new(node).write(token, &0u32) {
             return errno;

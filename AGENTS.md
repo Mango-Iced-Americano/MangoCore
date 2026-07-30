@@ -147,14 +147,16 @@ SMP 过渡期的安全点抢占调度：current 槽、idle context 和 `RunQueue
 CPU；B28 还让一个无共享 I/O 的受控用户探针在 CPU1 完成 getpid/yield/exit，再由 CPU0
 wait/reap。B29 进一步让同一个探针先在 CPU0 运行，并在真实 `sched_yield` 切回 idle 栈后
 唯一迁移到 CPU1；一次性 `migration_target` 不是 owner，状态仍只走
-`Running(0) -> Queued(1) -> Running(1)`。该例外不改变默认策略：普通新任务和用户任务仍
-固定 CPU0。动态 kernel-global
+`Running(0) -> Queued(1) -> Running(1)`。B30 又让 `getcpu()` 返回当前连续逻辑 CPU；探针
+在迁移前后分别验证 0/1，node 在当前无 NUMA 拓扑下返回 0。该例外不改变默认策略：普通
+新任务和用户任务仍固定 CPU0，affinity 仍未开放。动态 kernel-global
 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29 的一次受控迁移外推为通用用户迁移、affinity、连续 range 或安全 CPU detach 已完成。
+B29/B30 的一次受控迁移和真实 CPU 查询外推为通用用户迁移、affinity、连续 range 或安全
+CPU detach 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

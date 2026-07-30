@@ -50,6 +50,7 @@ disk-la.img
 !/docs/Work_Log/evidence/2026-07-30/smp-b27-rv64-asid-summary.md
 !/docs/Work_Log/evidence/2026-07-30/smp-b28-ap-user-summary.md
 !/docs/Work_Log/evidence/2026-07-30/smp-b29-yield-migration-summary.md
+!/docs/Work_Log/evidence/2026-07-30/smp-b30-getcpu-summary.md
 
 cc-codex/*.clean.img
 

@@ -91,7 +91,7 @@ related_docs:
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | getcpu 固定返回 0、affinity 仅 bit0、membarrier 空操作 | 用户空间看不到真实 SMP 语义 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU，单 NUMA node 返回 0；affinity 仍仅 bit0，membarrier 仍为空操作 | CPU 查询已真实，任务约束与跨核屏障语义仍不完整 |
 
 ### 2.2 总体结构
 
@@ -766,6 +766,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   首轮双架构 RED 暴露 CPU0 runner 关中断自旋会阻塞 CPU1 的退出期 user-TLB shootdown；
   等待区改用既有受控中断窗口后，双架构 21/21 PASS。该证据覆盖 cached mask `0x3` 的退出
   shootdown，但仍不覆盖并发 PTE writer、普通任务 affinity、blocked/queued 迁移或共享 I/O。
+- B30 把用户可见 CPU 查询接到既有逻辑 `cpu_id()`：一次 syscall 只采样一次 CPU，node 在
+  当前无 NUMA 拓扑下返回 0，NULL 输出和 tcache 按 Linux ABI 处理。B29 探针现于 yield 前后
+  分别断言 CPU0/CPU1，固定返回 0、未迁移或错误起跑都会 exit(1)。这只完善查询语义，不改变
+  默认 CPU0 affinity，也不允许普通用户任务进入尚未审计的 AP 共享子系统路径。
 
 #### 退出条件
 

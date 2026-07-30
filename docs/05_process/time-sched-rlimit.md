@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-30
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -369,6 +369,17 @@ TCB inner 保存：
 
 当前 runnable 容器已拆为 Per-CPU RunQueue，但生产任务仍固定 CPU0；
 FIFO/RR/DEADLINE 等字段用于 syscall 语义、fork reset 和测试回读。
+
+### 9.1 当前 CPU 查询与 affinity 边界
+
+`getcpu()` 已返回调用瞬间的连续逻辑 CPU 编号。该编号来自 `smp::cpu_id()`，用于索引
+PerCpu 和 scheduler mask，不等同于 RISC-V hart ID 或 LoongArch CoreID。syscall 在写用户
+指针前只采样一次 CPU；`cpu`/`node` 为 NULL 时分别忽略，第三个 tcache 参数忽略。当前没有
+NUMA，node 固定返回 0。
+
+这项查询能力不改变调度策略：`sched_getaffinity()`/`sched_setaffinity()` 仍处于 CPU0 占位
+阶段，普通生产任务也仍固定 CPU0。B30 只由 hermetic 用户探针在显式 yield 迁移前后动态
+验证 getcpu 返回 `0 -> 1`，不能据此宣称完整 affinity 已实现。
 
 fork 时，如果父设置 reset 或策略为 FIFO/RR，子任务降回 normal，priority/nice/runtime/deadline/period 清零。
 

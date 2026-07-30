@@ -7,8 +7,9 @@ use spin::Mutex;
 
 use crate::kernel_tests::runner::KernelTest;
 
-// 这三个编号是 RV64/LA64 共用的 Linux generic syscall ABI。
-// probe 只依赖 getpid/yield/exit，不在 AP 上进入 FS、net 或设备路径。
+// 这些编号是 RV64/LA64 共用的 Linux generic syscall ABI。
+// probe 只依赖 CPU/task 基础 syscall，不在 AP 上进入 FS、net 或设备路径。
+const USER_PROBE_GETCPU: usize = 168;
 const USER_PROBE_GETPID: usize = 172;
 const USER_PROBE_YIELD: usize = 124;
 const USER_PROBE_EXIT: usize = 93;
@@ -24,16 +25,46 @@ __smp_user_probe_start:
     addi a7, zero, {getpid}
     ecall
     sltiu s0, a0, 1
+
+    # 用户栈预留 16 字节并保持 ABI 对齐；getcpu 只写低 4 字节。
+    addi sp, sp, -16
+    addi a0, sp, 0
+    addi a1, zero, 0
+    addi a2, zero, 0
+    addi a7, zero, {getcpu}
+    ecall
+    bnez a0, .Lsmp_probe_fail
+    lw t0, 0(sp)
+    bnez t0, .Lsmp_probe_fail
+
     addi a7, zero, {yield_syscall}
     ecall
+    bnez a0, .Lsmp_probe_fail
+
+    # 同一 syscall 栈已迁到 CPU1；再次查询必须看到逻辑 CPU 1。
+    addi a0, sp, 0
+    addi a1, zero, 0
+    addi a2, zero, 0
+    addi a7, zero, {getcpu}
+    ecall
+    bnez a0, .Lsmp_probe_fail
+    lw t0, 0(sp)
+    addi t1, zero, 1
+    bne t0, t1, .Lsmp_probe_fail
+
     addi a0, s0, 0
+    j .Lsmp_probe_exit
+.Lsmp_probe_fail:
+    addi a0, zero, 1
+.Lsmp_probe_exit:
     addi a7, zero, {exit_syscall}
     ecall
-1:
-    j 1b
+.Lsmp_probe_hang:
+    j .Lsmp_probe_hang
 __smp_user_probe_end:
     .popsection
 "#,
+    getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
     yield_syscall = const USER_PROBE_YIELD,
     exit_syscall = const USER_PROBE_EXIT,
@@ -50,16 +81,54 @@ __smp_user_probe_start:
     addi.d $a7, $zero, {getpid}
     syscall 0
     sltui $s0, $a0, 1
+
+    # 用户栈预留 16 字节并保持 ABI 对齐；getcpu 只写低 4 字节。
+    addi.d $sp, $sp, -16
+    move $a0, $sp
+    move $a1, $zero
+    move $a2, $zero
+    addi.d $a7, $zero, {getcpu}
+    syscall 0
+    beqz $a0, 1f
+    b .Lsmp_probe_fail
+1:
+    ld.w $t0, $sp, 0
+    beqz $t0, 2f
+    b .Lsmp_probe_fail
+2:
     addi.d $a7, $zero, {yield_syscall}
     syscall 0
+    beqz $a0, .Lsmp_probe_after_yield
+    b .Lsmp_probe_fail
+
+    # 同一 syscall 栈已迁到 CPU1；再次查询必须看到逻辑 CPU 1。
+.Lsmp_probe_after_yield:
+    move $a0, $sp
+    move $a1, $zero
+    move $a2, $zero
+    addi.d $a7, $zero, {getcpu}
+    syscall 0
+    beqz $a0, 3f
+    b .Lsmp_probe_fail
+3:
+    ld.w $t0, $sp, 0
+    addi.d $t1, $zero, 1
+    beq $t0, $t1, 4f
+    b .Lsmp_probe_fail
+4:
     move $a0, $s0
+    b .Lsmp_probe_exit
+.Lsmp_probe_fail:
+    addi.d $a0, $zero, 1
+.Lsmp_probe_exit:
     addi.d $a7, $zero, {exit_syscall}
     syscall 0
-1:
-    b 1b
+.Lsmp_probe_hang:
+    b .Lsmp_probe_hang
 __smp_user_probe_end:
     .popsection
 "#,
+    getcpu = const USER_PROBE_GETCPU,
     getpid = const USER_PROBE_GETPID,
     yield_syscall = const USER_PROBE_YIELD,
     exit_syscall = const USER_PROBE_EXIT,

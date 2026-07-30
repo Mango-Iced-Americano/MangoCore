@@ -60,6 +60,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP LoongArch ASID+VPN 精准 shootdown | 2026-07-29 | GPT/Codex, DeepSeek | 官方 `invtlb 0x5`、Linux 页对粒度对照、固定原子槽并发审查和双架构 Docker/QEMU 验证 | 锁内冻结 ASID/VPN、锁外 IPI/ack；8 核并发 payload 隔离，双架构 focused 20/20 PASS |
 | SMP RV64 MM-owned ASID | 2026-07-30 | GPT/Codex, DeepSeek | SATP ASID 探测、rollover 时序、SBI RFENCE FID 2 与 trap 汇编审查 | 建立 versioned ASID 与 flush-before-reuse；页级失效按 VA+ASID 执行，ASIDLEN=0 保留全刷兼容路径 |
 | SMP 受控 AP 用户态闭环 | 2026-07-30 | GPT/Codex, DeepSeek | 用户 trap CPU 所有权、远程首次发布、noreturn Arc 生命周期和双架构 8 核验证 | CPU1 实际执行 getpid/yield/exit，CPU0 完成 wait/reap；普通用户调度和共享 I/O 仍未开放 |
+| SMP 用户可见逻辑 CPU 查询 | 2026-07-30 | GPT/Codex, DeepSeek | Linux getcpu ABI、双架构用户探针、冻结 Docker/QEMU 验证与模型结论复核 | getcpu 迁移前后返回逻辑 CPU 0/1；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -619,6 +620,26 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `smp::user_task_migrates_on_yield` 明确通过，online mask 均为 `0xff`。同一生产 diff 的
   `mask=0x003` 初赛分别为 312/314、308/314，四组 END 完整、失败集合未扩大。没有把模型
   文本、进程退出 0 或总用例数单独当作 PASS。
+
+### Case 27: SMP `getcpu()` 真实逻辑 CPU
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b30-getcpu-summary.md`；原始 prompt、只读报告和四份
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 Linux ABI 设计逻辑 CPU 快照和双架构反假通过探针，并独立读取
+  child result、TAP 与 judge JSON；DeepSeek 负责冻结 patch 只读审查、串行执行双架构
+  focused/初赛门禁和提供汇总。DeepSeek 不修改源码、不提交、不 push。
+- Problem: 旧 `getcpu()` 永远写 0，即使 B29 已把同一用户任务迁到 CPU1，用户态也无法观察
+  真实 CPU。直接开始 affinity 会让普通任务过早进入尚未审计的 FS/net/driver AP 路径。
+- Human action: syscall 只快照一次 `smp::cpu_id()`，返回 scheduler 使用的连续逻辑编号；无
+  NUMA 时 node 保持 0。B29 探针在真实 yield 前后分别断言 0/1，任何 syscall 错误、固定 0、
+  未迁移或错误起跑都会 exit(1)。没有修改 runqueue、TCB 或默认 CPU0 发布策略。
+- AI adjudication: 采纳 DeepSeek 的 yield 返回值显式检查；纠正其把 LoongArch `ld.w` 写成
+  零扩展的错误（实际为符号扩展，0/1 不受影响）。最终报告还漏掉 LA64 两套 `test_brk`
+  各少 2 分；GPT/Codex 根据原始 judge JSON 恢复精确失败集合，没有照抄模型摘要。
+- Verification: RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 21/21 PASS，新探针明确为第 20 项；
+  `mask=0x003` 初赛分别为 312/314、308/314，四组 END、`online_mask=0xff`、源码前后指纹和
+  精确接受失败集合均完成核对。测试未遗留用户工具桩、临时源码或调试字段。
 
 ## 6. 质量控制与验证方式
 
