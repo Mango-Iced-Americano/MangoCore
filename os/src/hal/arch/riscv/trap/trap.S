@@ -55,17 +55,27 @@ __alltraps:
     ld tp, 70*8(sp)
     # move to kernel_sp
     ld sp, 69*8(sp)
-    # switch to kernel space
+    # 先保存旧用户 SATP 的 ASID。非零 ASID 能把用户与固定的内核 ASID 0 隔离，
+    # 因此切根本身无需全刷；ASIDLEN=0 的兼容路径仍必须在每次切根后全刷。
+    csrr t2, satp
+    slli t2, t2, 4
+    srli t2, t2, 48
     csrw satp, t0
+    bnez t2, .Lkernel_satp_ready
     sfence.vma
+.Lkernel_satp_ready:
     # jump to trap_handler
     jr t1
 
 __restore:
-    # a0: *TrapContext in user space(Constant); a1: user space token
-    # switch to user space
+    # a0: 用户 TrapContext；a1: 已编码 MM-owned ASID 的用户 SATP。
+    # 从 SATP 自身提取 ASID，避免再增加一套容易错位的恢复参数 ABI。
+    slli t0, a1, 4
+    srli t0, t0, 48
     csrw satp, a1
+    bnez t0, .Luser_satp_ready
     sfence.vma
+.Luser_satp_ready:
     csrw sscratch, a0
     mv sp, a0
     # now sp points to TrapContext in user space, start restoring based on it

@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -69,6 +69,7 @@ related_docs:
 - 任一 TCB 不可能同时处于两个运行队列或两个 CPU 的 current 槽；
 - 所有已发布页表的 PTE 修改均经过统一 TLB shootdown 协议；
 - LoongArch ASID 不再由单个 TCB 持有或未经跨核失效直接复用；
+- RISC-V ASID 由 MM 持有，且复用前已经过全 CPU 失效；
 - 所有以“当前为单核”为依据的 unsafe Send/Sync 和 static mut 均已消除或重新证明；
 - 双架构 8 核连续压力测试无 panic、死锁、任务丢失、重复执行或 stale TLB；
 - 单核测试结果不低于 SMP 改造前基线。
@@ -86,8 +87,8 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式远程 enqueue 和回到 `last_cpu` 的 blocked wake 已完成受控验证 | 通用新任务目标选择、affinity、迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；RV64 单页远端修改优先使用 SBI RFENCE；LA64 使用 MM-owned ASID、flush-before-reuse epoch 和每发起 CPU 固定 ASID/VPN slot；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、RV64 MM-owned ASID、安全 detach 与用户迁移未完成 |
-| LoongArch ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；页级失效按 ASID + 硬件相邻页对执行 `invtlb 0x5` | 连续 range 尚未实现；多 VPN 仍升级为全 non-global 失效 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；动态 kernel-global 撤映射有独立协议 | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与用户迁移未完成 |
+| 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
 | ABI | getcpu 固定返回 0、affinity 仅 bit0、membarrier 空操作 | 用户空间看不到真实 SMP 语义 |
@@ -727,20 +728,28 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   多个发起者共享 reason bit 时 handler 扫描全部槽；IPI handler 不分配内存、不获取 MM 锁；
 - LoongArch 目标 CPU 使用 `invtlb 0x5` 限定 `G=0 + ASID + VA`；由于普通 TLB entry
   覆盖相邻偶/奇页，VA 按 `2 * PAGE_SIZE` 对齐，这是该架构可提供的最小粒度；
-- RISC-V 仍统一使用 ASID 0，B27 再实现 MM-owned SATP ASID 与按 ASID 的 SBI RFENCE；
+- B27 已实现 RISC-V `SATP.ASID` 容量探测、MM-owned versioned ASID、本地
+  `sfence.vma va, asid` 和 SBI RFENCE FID 2；QEMU virt 实测提供 65535 个用户编号；
+- RV64 trap 入口/返回从编码后的 SATP 提取 ASID，仅 ASIDLEN=0 兼容路径固定全刷；
+  rollover ack 与 trap-return IRQ-off 边界共同保证旧 epoch SATP 不会在 ack 后重新安装；
 - 被解除映射的 frame、页表页和内核栈必须延迟到全部目标 ack 后释放；
 - membarrier：
   - GLOBAL 面向所有在线 CPU；
   - PRIVATE_EXPEDITED 面向当前进程 MM 的 active CPU；
   - 使用同一 IPI/ack 基础设施和完整内存屏障；
-- RISC-V 现有 trap 入口/返回执行全量 sfence.vma，stale-TLB 用例必须建立“victim 无 trap
-  观察窗口”或测试态暂停 victim timer，并记录窗口前后 trap count；普通用户循环不能单独证明
-  远端 shootdown，因为周期 timer trap 可能偶然清掉旧项；
+- RISC-V 非零 ASID 的 trap 入口/返回不再固定执行全量 `sfence.vma`；stale-TLB 用例仍需
+  记录 victim trap 窗口，并同时核对目标 ASID/VPN、shootdown sequence 与 ack，避免把
+  timer 或其它全刷误当成精准后端证据；
 - TLB 用例同时校验 shootdown sequence/ack 和 ack 前 frame 不复用；LoongArch 作为不被
   trap 自动全刷掩盖的强暴露平台，必须单独保留证据；
 - 完成 MM 专项测试后，才允许受控用户测试任务跨 CPU 运行。该测试必须是 hermetic 的
   CPU/MM-only workload，使用匿名或启动前预载内存；除串行化结果输出外，不进入尚未审计的
   文件系统、网络、VirtIO 或设备并发路径。
+- B28 计划先打通受控 AP 用户 trap 闭环，而不是立即开放普通任务迁移：删除 trap handler
+  中过时的 CPU0-only 断言，校验 CPU-local trap context，并用显式测试入口完成
+  `CPU0 -> AP -> CPU0` 的协作式用户任务交接。AP timer 和外部设备中断仍保持关闭，测试只覆盖
+  syscall/yield、MM 激活、generation catch-up 与远端页级 shootdown；默认用户 affinity 继续
+  固定在 CPU0，直至 uaccess 和共享子系统审计完成。
 
 #### 退出条件
 
@@ -748,7 +757,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - LoongArch 强制 ASID rollover 后无跨进程数据污染；
 - shootdown 期间即使目标 CPU 正在执行长 syscall 也能及时 ack；
 - frame 释放计数证明不存在 ack 前复用；
-- RISC-V victim 观察窗口 trap count 不变，结果不能由 trap.S 的全量 sfence.vma 偶然制造。
+- RISC-V victim 观察窗口、目标 ASID/VPN 与 sequence/ack 证据一致，结果不能由其它全刷偶然制造。
 
 ### Phase 5：共享子系统与进程语义审计
 

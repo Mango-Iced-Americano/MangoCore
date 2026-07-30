@@ -637,3 +637,18 @@
   同时保留真实 PTE 撤映射与 ack 前 frame 不复用测试。仅观察 IPI reason 次数不能证明
   payload 隔离。
 - **相关文件**: `os/src/smp.rs`, `os/src/mm/mmu_gather.rs`, `os/src/mm/tlb.rs`
+
+## ASID rollover：flush ack 之后禁止重新安装旧地址空间快照
+
+- **隐蔽竞态**: rollover leader 向所有 CPU 发出全量 TLB 失效并收到 ack 后，才能换代和
+  复用 ASID。但如果目标 CPU 在 ack 前已经读取旧页表根/ASID，ack 后又从 trap-return
+  安装这份旧快照，那么“TLB 已清空”仍不足以保证旧 ASID 不再被使用。
+- **闭环条件**: ack 不只要证明硬件失效完成，还要划定地址空间切换的交接边界。用户返回
+  必须从取得 MM context 到最终安装寄存器期间保持本地中断关闭；这样目标 CPU 要么先返回
+  旧用户态、随后被 pending IPI 拉回内核并 ack，要么先处理 IPI，之后重新取得当前 epoch
+  的 context，不能形成“先 ack、后安装旧 context”。
+- **审查方法**: 按 `读取 context -> IPI handler -> ack -> 写页表根/ASID -> 用户访问`
+  枚举时序，而不是只检查 allocator 的锁和原子序。反汇编确认返回汇编没有提前开中断，
+  并用断言固定 Rust 到汇编交接点的 IRQ-off 前置条件。
+- **相关文件**: `os/src/mm/address_space.rs`, `os/src/hal/arch/*/trap/`,
+  `os/src/hal/arch/*/{sv39,tlb}.rs`

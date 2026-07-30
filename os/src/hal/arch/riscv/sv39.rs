@@ -1,7 +1,7 @@
 //! RISC-V SV39 页表实现。
 //!
-//! 实现 `PageTable` trait，负责三级页表遍历、PTE 权限转换、页表激活和
-//! `sfence.vma` TLB 刷新。
+//! 实现 `PageTable` trait，负责三级页表遍历、PTE 权限转换和页表激活；同时管理
+//! MM-owned SATP ASID、epoch rollover 与 `sfence.vma` TLB 失效。
 
 use crate::mm::{
     address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess,
@@ -9,7 +9,207 @@ use crate::mm::{
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
 use core::arch::asm;
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use riscv::register::satp;
+use spin::Mutex;
+
+/// 内核固定使用 ASID 0；用户地址空间只从 1 开始分配。
+pub const KERN_ASID: u16 = 0;
+const USER_ASID_BASE: u32 = 1;
+const SATP_ASID_SHIFT: usize = 44;
+const SATP_ASID_BITS: u32 = 16;
+const SATP_ASID_MASK: usize = (1usize << SATP_ASID_BITS) - 1;
+const ASID_CONTEXT_MASK: u64 = (1u64 << SATP_ASID_BITS) - 1;
+
+/// 一个 epoch 内只递增编号；只有全 CPU TLB flush 完成后才允许从 1 复用。
+struct AsidAllocator {
+    initialized: bool,
+    epoch: u64,
+    /// 使用 u32，才能表达 16-bit ASID 空间耗尽后的 65536 游标。
+    next: u32,
+    max: u32,
+}
+
+static ASID_ALLOCATOR: Mutex<AsidAllocator> = Mutex::new(AsidAllocator {
+    initialized: false,
+    epoch: 1,
+    next: USER_ASID_BASE,
+    max: 0,
+});
+static ASID_ROLLOVER: AtomicBool = AtomicBool::new(false);
+static ASID_ROLLOVERS: AtomicUsize = AtomicUsize::new(0);
+
+/// 在 BSP 已启用 Sv39 后探测 SATP 实际实现的 ASID 位数。
+fn probe_asid_width() -> usize {
+    let original: usize;
+    // Safety: 这里只读取当前 hart 的 SATP，不改变地址翻译。
+    unsafe { asm!("csrr {value}, satp", value = out(reg) original, options(nostack)) };
+    assert_eq!(
+        original >> 60,
+        8,
+        "RISC-V ASID probe requires an active Sv39 page table"
+    );
+
+    let candidate = original | (SATP_ASID_MASK << SATP_ASID_SHIFT);
+    let observed: usize;
+    // Safety: 保持 MODE 与 PPN 不变，只用 WARL 语义探测 ASID 字段。恢复原值后
+    // 全刷一次，清除探测编号可能留下的翻译；此时用户任务尚未启动。
+    unsafe {
+        asm!(
+            "csrw satp, {candidate}",
+            "csrr {observed}, satp",
+            "csrw satp, {original}",
+            "sfence.vma",
+            candidate = in(reg) candidate,
+            original = in(reg) original,
+            observed = out(reg) observed,
+            options(nostack)
+        )
+    };
+
+    let implemented = ((observed >> SATP_ASID_SHIFT) & SATP_ASID_MASK) as u16;
+    let width = implemented.count_ones() as usize;
+    let contiguous = if width == SATP_ASID_BITS as usize {
+        u16::MAX
+    } else {
+        ((1u32 << width) - 1) as u16
+    };
+    assert_eq!(
+        implemented, contiguous,
+        "RISC-V SATP exposes a non-contiguous ASID mask"
+    );
+    width
+}
+
+/// 初始化硬件 ASID 容量；返回可分配给用户 MM 的编号数量。
+pub fn init_asid_allocator() -> usize {
+    let width = probe_asid_width();
+    let max = if width == 0 {
+        0
+    } else {
+        ((1u32 << width) - 1).min(u16::MAX as u32)
+    };
+    let mut allocator = ASID_ALLOCATOR.lock();
+    assert!(
+        !allocator.initialized,
+        "RISC-V ASID allocator initialized twice"
+    );
+    allocator.initialized = true;
+    allocator.max = max;
+    max as usize
+}
+
+/// 为一个 MM 取得当前 epoch 的 ASID context；换代中或耗尽时返回 `None`。
+pub fn try_assign_asid(current: u64) -> Option<u64> {
+    let mut allocator = ASID_ALLOCATOR.lock();
+    assert!(
+        allocator.initialized,
+        "RISC-V ASID allocator used before init"
+    );
+    if allocator.max == 0 {
+        // ASIDLEN=0 的实现继续使用旧的 ASID 0 + 每次 SATP 切换全刷路径。
+        return Some(0);
+    }
+    if ASID_ROLLOVER.load(Ordering::Acquire) {
+        return None;
+    }
+
+    let current_epoch = current >> SATP_ASID_BITS;
+    let current_asid = (current & ASID_CONTEXT_MASK) as u32;
+    if current_epoch == allocator.epoch
+        && current_asid >= USER_ASID_BASE
+        && current_asid <= allocator.max
+    {
+        return Some(current);
+    }
+    if allocator.next > allocator.max {
+        return None;
+    }
+
+    let asid = allocator.next;
+    allocator.next += 1;
+    Some((allocator.epoch << SATP_ASID_BITS) | u64::from(asid))
+}
+
+/// 从软件 context 中提取写入 SATP 的硬件 ASID。
+pub const fn hardware_asid(context: u64) -> u16 {
+    (context & ASID_CONTEXT_MASK) as u16
+}
+
+/// ASID 耗尽后先把所有在线 CPU 拉回内核并完成全刷，再发布新 epoch。
+pub fn rollover_asids() {
+    {
+        let allocator = ASID_ALLOCATOR.lock();
+        if allocator.max == 0 || allocator.next <= allocator.max {
+            return;
+        }
+    }
+
+    if ASID_ROLLOVER
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // 等待者必须能处理 leader 发来的 TLB IPI，否则两个 CPU 会互等 ack。
+        let irq_was_enabled = crate::hal::local_irq_save();
+        crate::hal::local_irq_restore(true);
+        while ASID_ROLLOVER.load(Ordering::Acquire) {
+            spin_loop();
+        }
+        let _ = crate::hal::local_irq_save();
+        crate::hal::local_irq_restore(irq_was_enabled);
+        return;
+    }
+
+    let old_epoch = {
+        let allocator = ASID_ALLOCATOR.lock();
+        if allocator.next <= allocator.max {
+            ASID_ROLLOVER.store(false, Ordering::Release);
+            return;
+        }
+        allocator.epoch
+    };
+
+    // 软件 IPI 的 ack 同时证明目标 CPU 已离开旧用户 SATP；它再次返回用户态
+    // 前会经过 activate_on()，因此新 epoch 发布后不会继续使用旧 context。
+    if let Err(error) =
+        crate::smp::synchronize_user_tlb(crate::smp::online_cpu_mask(), KERN_ASID, None)
+    {
+        panic!("RISC-V ASID rollover TLB flush failed: {:?}", error);
+    }
+
+    {
+        let mut allocator = ASID_ALLOCATOR.lock();
+        assert_eq!(
+            allocator.epoch, old_epoch,
+            "two RISC-V ASID rollover leaders"
+        );
+        let new_epoch = old_epoch
+            .checked_add(1)
+            .expect("RISC-V ASID epoch exhausted");
+        assert!(
+            new_epoch <= (u64::MAX >> SATP_ASID_BITS),
+            "RISC-V ASID context encoding exhausted"
+        );
+        allocator.epoch = new_epoch;
+        allocator.next = USER_ASID_BASE;
+    }
+    ASID_ROLLOVERS.fetch_add(1, Ordering::Relaxed);
+    ASID_ROLLOVER.store(false, Ordering::Release);
+}
+
+pub fn asid_capacity() -> usize {
+    ASID_ALLOCATOR.lock().max as usize
+}
+
+pub fn asid_rollover_count() -> usize {
+    ASID_ROLLOVERS.load(Ordering::Acquire)
+}
+
+/// 在保留页表根和 Sv39 MODE 的同时，把 MM-owned ASID 编入 SATP。
+pub const fn satp_with_asid(page_table_token: usize, asid: u16) -> usize {
+    (page_table_token & !(SATP_ASID_MASK << SATP_ASID_SHIFT)) | ((asid as usize) << SATP_ASID_SHIFT)
+}
 
 /// 将 vpn 转换为字节地址后做单页 TLB 刷新
 macro_rules! tlb_invalidate_vpn {
@@ -41,6 +241,26 @@ pub fn tlb_invalidate_addr(vaddr: usize) {
     // operand; it does not dereference the address.
     unsafe {
         asm!("sfence.vma {}, zero", in(reg) vaddr);
+    }
+    let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+    crate::task::perf::record_tlb_page_flush_cycles(elapsed);
+    crate::task::perf::record_tlb_page();
+}
+
+/// 只失效指定用户地址空间中的一个虚拟页，不触碰 global 映射。
+#[inline(always)]
+pub fn tlb_invalidate_addr_asid(vaddr: usize, asid: u16) {
+    let start = crate::task::perf::perf_time_now();
+    let asid = asid as usize;
+    // Safety: VA 与 ASID 都只是 `sfence.vma` 的筛选操作数，不会被解引用。
+    // 即使 ASIDLEN=0，也必须让 rs2 使用普通寄存器而不是 x0；用户 PTE 均非 global。
+    unsafe {
+        asm!(
+            "sfence.vma {vaddr}, {asid}",
+            vaddr = in(reg) vaddr,
+            asid = in(reg) asid,
+            options(nostack)
+        );
     }
     let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
     crate::task::perf::record_tlb_page_flush_cycles(elapsed);
@@ -422,9 +642,13 @@ impl PageTable for Sv39PageTable {
     }
     fn activate(&self) {
         let satp = self.token();
-        // Safety: `satp` is built from this page table's root PPN. After writing
-        // SATP, a full `sfence.vma` is required before subsequent translations
-        // use the new page table.
+        debug_assert_eq!(
+            (satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK,
+            KERN_ASID as usize,
+            "kernel page table must use reserved ASID 0"
+        );
+        // Safety: satp 由当前页表根 PPN 构造。该低层入口只用于安装内核页表，
+        // 写入后全量刷新，确保后续地址翻译不会沿用旧页表根的缓存。
         unsafe {
             satp::write(satp);
             let start = crate::task::perf::perf_time_now();

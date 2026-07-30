@@ -5,7 +5,6 @@
 //! 等待永远不发生在地址空间锁内。
 
 use super::{FlushRange, MmuGather};
-#[cfg(target_arch = "loongarch64")]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -17,8 +16,7 @@ pub(crate) struct TlbContext {
     cached_cpus: AtomicUsize,
     generation: AtomicUsize,
     observed: [AtomicUsize; crate::smp::MAX_CPUS],
-    /// LoongArch 软件 epoch 与硬件 ASID 的原子组合；0 表示尚未分配。
-    #[cfg(target_arch = "loongarch64")]
+    /// 架构软件 epoch 与硬件 ASID 的原子组合；0 表示尚未分配或无 ASID。
     asid_context: AtomicU64,
 }
 
@@ -46,7 +44,6 @@ impl TlbContext {
             // 从 1 开始，使新 MM 第一次返回用户态时必定执行一次明确失效。
             generation: AtomicUsize::new(1),
             observed: [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS],
-            #[cfg(target_arch = "loongarch64")]
             asid_context: AtomicU64::new(0),
         }
     }
@@ -62,10 +59,15 @@ impl TlbContext {
         Some(crate::hal::arch::loongarch64::tlb::hardware_asid(assigned))
     }
 
-    /// RV64 尚未使用 SATP.ASID；返回 0 让上层维持统一的用户 VM 上下文接口。
-    #[cfg(not(target_arch = "loongarch64"))]
+    /// RISC-V 从 SATP.ASID 分配 MM-owned context；ASIDLEN=0 时安全退化为 0。
+    #[cfg(target_arch = "riscv64")]
     pub(crate) fn assign_asid(&self) -> Option<u16> {
-        Some(0)
+        let current = self.asid_context.load(Ordering::Acquire);
+        let assigned = crate::hal::arch::riscv::sv39::try_assign_asid(current)?;
+        if assigned != current {
+            self.asid_context.store(assigned, Ordering::Release);
+        }
+        Some(crate::hal::arch::riscv::sv39::hardware_asid(assigned))
     }
 
     /// 返回曾经缓存过该 MM 的 CPU；未实现安全 detach 前该集合只增不减。
@@ -89,10 +91,19 @@ impl TlbContext {
         asid
     }
 
-    /// RV64 在 B27 前仍使用 ASID 0；页级 `sfence.vma` 会匹配全部 ASID。
-    #[cfg(not(target_arch = "loongarch64"))]
-    pub(crate) const fn flush_asid(&self, _targets: usize) -> u16 {
-        0
+    /// 返回与本轮 RV64 PTE 修改一起冻结的硬件 ASID。
+    #[cfg(target_arch = "riscv64")]
+    pub(crate) fn flush_asid(&self, targets: usize) -> u16 {
+        if targets == 0 {
+            return 0;
+        }
+        let asid =
+            crate::hal::arch::riscv::sv39::hardware_asid(self.asid_context.load(Ordering::Acquire));
+        assert!(
+            asid != 0 || crate::hal::arch::riscv::sv39::asid_capacity() == 0,
+            "cached RISC-V MM has no hardware ASID"
+        );
+        asid
     }
 
     /// 登记当前 CPU，并保证它在使用页表根之前观察到最新代际。
@@ -171,9 +182,7 @@ impl<'a> TlbFlush<'a> {
             let result = if self.targets == current_bit {
                 match self.gather.range() {
                     FlushRange::None => panic!("TLB flush has no recorded PTE change"),
-                    FlushRange::Page(vpn) => {
-                        crate::hal::user_tlb_invalidate_page(self.asid, vpn)
-                    }
+                    FlushRange::Page(vpn) => crate::hal::user_tlb_invalidate_page(self.asid, vpn),
                     FlushRange::Full => crate::hal::user_tlb_invalidate(),
                 }
                 Ok(())

@@ -308,7 +308,7 @@ SMP 实施默认从冻结基线创建独立 branch/worktree。人工审核后只
 - shootdown 等待路径自身能响应 IPI；
 - LoongArch ASID 属于 MM，epoch rollover 做全核失效；
 - RISC-V RFENCE 和 IPI fallback 提供相同上层语义。
-- RISC-V stale 测试记录 victim 无 trap 窗口和 trap count，不能依赖 trap.S 的全量 sfence.vma；
+- RISC-V stale 测试仍记录 victim trap 窗口；B27 后非零 ASID 的 trap 切根不再固定全刷，测试还必须证明目标 ASID/VPN 与 shootdown sequence 匹配；
 - Phase 4 跨核用户测试保持 CPU/MM-only，不进入 Phase 5 才审计的共享子系统。
 
 ### 7.5 共享子系统

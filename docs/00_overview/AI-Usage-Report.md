@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-29
+> Coverage: 2026-04-01 to 2026-07-30
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -58,6 +58,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP RV64 页级 RFENCE 与 IPI fallback | 2026-07-29 | GPT/Codex, DeepSeek | SBI 官方 ABI、Linux/DragonOS TLB 分层对照、hart mask 映射审查与双架构 Docker/QEMU 验证 | 不增加 MM 提交类型；RV64 单页走同步 RFENCE，full/LA64 保留全用户 IPI/ack，双架构 8 核 focused 17/17 PASS |
 | SMP LoongArch MM-owned ASID/epoch | 2026-07-29 | GPT/Codex, DeepSeek | 官方 CSR/INVTLB 与 Linux versioned ASID 对照、rollover 并发审查、release ELF 反汇编和双架构 Docker/QEMU 验证 | 删除 TCB ASID；定位并修复 LA64 trap-return asm 输入自覆盖；双架构 8 核 focused 19/19，初赛 RV64 312/314、LA64 308/314 |
 | SMP LoongArch ASID+VPN 精准 shootdown | 2026-07-29 | GPT/Codex, DeepSeek | 官方 `invtlb 0x5`、Linux 页对粒度对照、固定原子槽并发审查和双架构 Docker/QEMU 验证 | 锁内冻结 ASID/VPN、锁外 IPI/ack；8 核并发 payload 隔离，双架构 focused 20/20 PASS |
+| SMP RV64 MM-owned ASID | 2026-07-30 | GPT/Codex, DeepSeek | SATP ASID 探测、rollover 时序、SBI RFENCE FID 2 与 trap 汇编审查 | 建立 versioned ASID 与 flush-before-reuse；页级失效按 VA+ASID 执行，ASIDLEN=0 保留全刷兼容路径 |
 
 ## 4. 详细使用场景
 
@@ -543,6 +544,30 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   8 核并发 slot 用例均通过，full-request 计数不增长。四项无 timeout/forbidden marker，
   冻结源码前后指纹一致。该证据不覆盖连续 range、RV64 MM-owned ASID 或普通用户迁移。
 
+### Case 24: SMP RISC-V MM-owned ASID 与按 ASID 页级 RFENCE
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b27-rv64-asid-summary.md`；DeepSeek 的 prompt、
+  原始输出和 Docker 日志仍只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 RISC-V privileged specification、SBI RFENCE specification 与
+  Linux RISC-V ASID/TLB 实现，负责 allocator、trap 交接时序、实现和最终裁决；DeepSeek
+  只读审查设计并归纳串行双架构 Docker/QEMU 结果，不拥有 commit/push 权限。
+- Problem: RV64 之前固定使用 ASID 0，用户/内核 SATP 切换必须全量 `sfence.vma`；页级
+  RFENCE 也无法限定到目标 MM。直接增加 allocator 仍不够：rollover ack 后若 trap-return
+  重新安装提前读取的旧 SATP，旧 epoch 仍可能再次运行。
+- Human action: BSP 通过 SATP WARL 语义探测 ASIDLEN；每 MM 的既有 `TlbContext` 保存
+  versioned ASID，同一 epoch 内不复用，耗尽后先完成全 CPU flush/ack。用户 SATP 编入
+  MM-owned ASID，本地页失效使用 `sfence.vma va, asid`，远端使用 SBI RFENCE FID 2；
+  `trap_return` 到 `sret` 保持 IRQ-off，关闭 ack 后重装旧 context 的竞态。
+- AI adjudication: 采纳 DeepSeek 对 FID 2 第五参数、SATP 编码和公共 `asid_context` 的
+  审查；补充其未指出的旧快照竞态，并保留 ASIDLEN=0 的 switch-time 全刷路径。没有为
+  RV64 新增第二套 MM commit 类型，也没有把测试计数器塞入生产对象。
+- Verification: 最终源码的 RV64 8 核 SMP focused 为 20/20 PASS；双架构 preliminary
+  recipe 均完成 normal build 与四组 `mask=0x003`，RV64 312/314、LA64 308/314，失败
+  集合未扩大或换位。最终 ELF 确认条件式 trap fence、双操作数 `sfence.vma` 和 FID 2
+  的 a4 ASID。仓库 lint baseline 漂移，且脚本遗留临时 stub，因此仓库级状态如实记为
+  `partial`，未用 capture-baseline 掩盖 RED。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -607,6 +632,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b23-user-tlb-flush-summary.md` | SMP 用户 PTE shootdown 与 MMU 接口收敛 | 记录锁内收集/锁外同步、frame 退休、DeepSeek 只读复核、双架构 focused 与初赛非回归证据 |
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b24-rfence-summary.md` | SMP RV64 页级 RFENCE 与 IPI fallback | 记录 SBI/Linux/DragonOS 对照、逻辑/物理 hart mask、DeepSeek 门禁与人工证据边界裁决 |
 | `docs/Work_Log/2026-07-29.md`、`docs/Work_Log/evidence/2026-07-29/smp-b26-precise-shootdown-summary.md` | SMP LoongArch ASID+VPN 精准 shootdown | 记录固定 per-CPU slot、页对硬件粒度、DeepSeek 冻结验证与人工证据边界修正 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b27-rv64-asid-summary.md` | SMP RV64 MM-owned ASID 与页级 RFENCE FID 2 | 记录 ASIDLEN 探测、flush-before-reuse、trap-return IRQ-off 交接、DeepSeek 只读审查与双架构 Docker/QEMU 门禁 |
 
 ## 9. 交互记录与留痕方式
 

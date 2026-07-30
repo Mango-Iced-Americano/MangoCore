@@ -136,7 +136,7 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
 - **虚拟内存**：SV39 页表，每进程独立 `MemorySet`；`VmaSet` 管理 VMA；`filemap.rs` 处理 mmap 文件缺页
 - **用户内存访问**：`translated_ref/refmut/byte_buffer`、`copy_from_user`、`translated_str`
 - **关键约束**：MAP_SHARED 页面不参与 CoW；用户 PTE 必须经 `UserMapper` 修改并由 `MmuGather` 记录；进程 VM 由 `AddressSpace` 强制“锁内 `record_change`—`seal`—解锁—`TlbFlush::execute`—最后释放 frame”；`execve`/`clone` 路径用 `try_reserve` 防 OOM
-- **LoongArch ASID**：ASID 由每 MM 的 `TlbContext` 持有，同一 epoch 内不立即复用；编号耗尽时必须先完成全 CPU user-TLB flush/ack 再换代。TCB 不得重新持有或释放 ASID
+- **双架构 ASID**：ASID 由每 MM 的 `TlbContext` 持有，同一 epoch 内不立即复用；RV64 从 `SATP.ASID` 探测容量，LA64 从 `CSR.ASID` 读取容量，编号耗尽时都必须先完成全 CPU user-TLB flush/ack 再换代。TCB 不得重新持有或释放 ASID
 - **OOM 防御**：`alloc()` 三次重试失败后设 `pending_oom_kill`，由 `trap_return()` 安全点发 SIGKILL
 
 ### 任务/进程
@@ -147,10 +147,10 @@ SMP 过渡期的安全点抢占调度：current 槽、idle context 和 `RunQueue
 CPU；动态 kernel-global 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收。普通新任务和
 用户任务仍固定 CPU0；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
-MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；LA64 单页 shootdown
-通过每发起 CPU 固定原子槽传递目标 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。
-当前仍是单调历史 CPU mask，RV64 仍使用 ASID 0；不要据此声称用户迁移、affinity、
-连续 range、RV64 MM-owned ASID 或安全 CPU detach 已完成。
+MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
+`sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
+ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要据此
+声称用户迁移、affinity、连续 range 或安全 CPU detach 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

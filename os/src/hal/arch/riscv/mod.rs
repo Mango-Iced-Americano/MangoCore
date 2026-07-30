@@ -26,6 +26,12 @@ pub fn machine_init() {
     trap::init();
     trap::enable_timer_interrupt();
     trap::enable_ipi_interrupt();
+    let user_asids = sv39::init_asid_allocator();
+    if user_asids == 0 {
+        crate::println!("[mm] RISC-V SATP.ASID unavailable; using switch-time TLB flushes");
+    } else {
+        crate::println!("[mm] RISC-V ASID allocator: {} user IDs", user_asids);
+    }
     if crate::smp::configured_cpu_count() > 1 {
         match sbi::init_rfence() {
             Ok(true) => crate::println!("[smp] SBI RFENCE enabled for user page shootdown"),
@@ -59,18 +65,15 @@ pub fn kernel_tlb_invalidate() {
 
 /// 清除当前 hart 上可能属于任意用户地址空间的翻译。
 ///
-/// B22 尚未给 RV64 分配 per-MM ASID，也未传递精确范围，因此使用无操作数
-/// `sfence.vma`。它会连 global 项一起清除，代价偏高但语义严格覆盖用户项。
+/// 全 MM 同步和 ASID rollover 仍需要无操作数 `sfence.vma`；它也会清除 global
+/// 项，因此只用于明确要求全刷的慢路径。
 pub fn user_tlb_invalidate() {
     sv39::tlb_invalidate();
 }
 
-/// 清除当前 hart 上指定用户虚拟页的所有 ASID 翻译。
-///
-/// B27 前 `asid` 必须为 0；`sfence.vma va, zero` 仍按地址精确、按 ASID 全量。
+/// 清除当前 hart 上指定 MM、指定用户虚拟页的 non-global 翻译。
 pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
-    debug_assert_eq!(asid, 0);
-    sv39::tlb_invalidate_addr(usize::from(crate::mm::VirtAddr::from(vpn)));
+    sv39::tlb_invalidate_addr_asid(usize::from(crate::mm::VirtAddr::from(vpn)), asid);
 }
 
 /// 通过 SBI RFENCE 同步失效一组逻辑 CPU 上的指定用户页。
@@ -81,10 +84,9 @@ pub fn remote_user_tlb_invalidate_page(
     asid: u16,
     vpn: crate::mm::VirtPageNum,
 ) -> Result<bool, isize> {
-    debug_assert_eq!(asid, 0);
     let hart_mask = crate::smp::logical_to_hardware_mask(targets);
     let start = usize::from(crate::mm::VirtAddr::from(vpn));
-    sbi::remote_sfence_vma(hart_mask, start, crate::config::PAGE_SIZE)
+    sbi::remote_sfence_vma_asid(hart_mask, start, crate::config::PAGE_SIZE, asid)
 }
 
 pub fn bootstrap_init(cpu_id: usize) {

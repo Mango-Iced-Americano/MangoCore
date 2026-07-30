@@ -270,9 +270,16 @@ pub fn trap_return() -> ! {
         trap_cx.prepare_return();
     }
     let trap_cx_ptr = task.trap_cx_user_va();
+    // rollover 的远端 ack 表示目标 CPU 已进入内核。这里到 SRET 必须持续关中断，
+    // 防止 CPU 先 ack、再带着旧 epoch 的 SATP 返回用户态。
+    assert!(
+        !sstatus::read().sie(),
+        "RISC-V trap_return requires local interrupts disabled"
+    );
     // 先登记本 CPU 可能缓存当前 MM，再取得权威 token。后续页表修改方将以
     // 该驻留集合为 shootdown 目标，不能继续只读无锁 token hint。
     let user_vm = task.process.activate_user_vm();
+    let user_satp = super::sv39::satp_with_asid(user_vm.token, user_vm.asid);
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
     // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。
@@ -283,7 +290,7 @@ pub fn trap_return() -> ! {
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
-            in("a1") user_vm.token,
+            in("a1") user_satp,
             options(noreturn)
         );
     }

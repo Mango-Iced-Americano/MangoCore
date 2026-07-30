@@ -92,8 +92,8 @@ pub fn tests() -> Vec<KernelTest> {
         ),
         KernelTest::new("smp::address_space_owns_asid", address_space_owns_asid),
         KernelTest::new(
-            "smp::loongarch_asid_rollover_flushes_before_reuse",
-            loongarch_asid_rollover_flushes_before_reuse,
+            "smp::asid_rollover_flushes_before_reuse",
+            asid_rollover_flushes_before_reuse,
         ),
         KernelTest::new(
             "smp::user_tlb_page_sync_uses_arch_backend",
@@ -139,9 +139,15 @@ fn address_space_owns_asid() -> Result<(), &'static str> {
     if local.asid == 0 {
         return Err("LoongArch user MM received reserved ASID 0");
     }
-    #[cfg(not(target_arch = "loongarch64"))]
-    if local.asid != 0 {
-        return Err("RV64 unexpectedly received a software ASID");
+    #[cfg(target_arch = "riscv64")]
+    {
+        let capacity = crate::hal::arch::riscv::sv39::asid_capacity();
+        if capacity > 0 && local.asid == 0 {
+            return Err("RISC-V user MM received reserved ASID 0");
+        }
+        if capacity == 0 && local.asid != 0 {
+            return Err("ASIDLEN=0 RISC-V platform received a nonzero ASID");
+        }
     }
 
     if crate::smp::configured_cpu_count() == 1 {
@@ -167,52 +173,65 @@ fn address_space_owns_asid() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 自然耗尽硬件 ASID，验证编号只能在全 CPU flush/ack 完成并换代后复用。
-fn loongarch_asid_rollover_flushes_before_reuse() -> Result<(), &'static str> {
-    #[cfg(not(target_arch = "loongarch64"))]
-    return Ok(());
+/// 耗尽架构 ASID，验证编号只能在全 CPU flush/ack 完成并换代后复用。
+fn asid_rollover_flushes_before_reuse() -> Result<(), &'static str> {
+    #[cfg(target_arch = "loongarch64")]
+    let capacity = crate::hal::arch::loongarch64::tlb::asid_capacity();
+    #[cfg(target_arch = "riscv64")]
+    let capacity = crate::hal::arch::riscv::sv39::asid_capacity();
+    if capacity == 0 {
+        // RISC-V 规范允许 ASIDLEN=0；该平台由 switch-time 全刷保证隔离。
+        return Ok(());
+    }
 
     #[cfg(target_arch = "loongarch64")]
-    {
-        let rollovers_before = crate::hal::arch::loongarch64::tlb::asid_rollover_count();
-        let remote_request_before = if crate::smp::configured_cpu_count() > 1 {
-            crate::smp::user_tlb_request(1)
-        } else {
-            0
-        };
-        let first_vm = Arc::new(crate::mm::AddressSpace::new(
-            crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-        ));
-        if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
-            return Err("first rollover test MM received ASID 0");
-        }
-
-        let capacity = crate::hal::arch::loongarch64::tlb::asid_capacity();
-        for _ in 0..=capacity {
-            let vm = crate::mm::AddressSpace::new(crate::mm::AddressSpaceInner::<
-                crate::hal::PageTableImpl,
-            >::new_bare());
-            if vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
-                return Err("rollover allocated reserved ASID 0");
-            }
-            if crate::hal::arch::loongarch64::tlb::asid_rollover_count() > rollovers_before {
-                break;
-            }
-        }
-
-        if crate::hal::arch::loongarch64::tlb::asid_rollover_count() != rollovers_before + 1 {
-            return Err("ASID exhaustion did not complete exactly one epoch rollover");
-        }
-        if crate::smp::configured_cpu_count() > 1
-            && crate::smp::user_tlb_request(1) <= remote_request_before
-        {
-            return Err("ASID rollover reused IDs without a remote TLB flush");
-        }
-        if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
-            return Err("old MM did not receive a current-epoch ASID after rollover");
-        }
-        Ok(())
+    let rollovers_before = crate::hal::arch::loongarch64::tlb::asid_rollover_count();
+    #[cfg(target_arch = "riscv64")]
+    let rollovers_before = crate::hal::arch::riscv::sv39::asid_rollover_count();
+    let remote_request_before = if crate::smp::configured_cpu_count() > 1 {
+        crate::smp::user_tlb_request(1)
+    } else {
+        0
+    };
+    let first_vm = Arc::new(crate::mm::AddressSpace::new(
+        crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
+    ));
+    if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
+        return Err("first rollover test MM received ASID 0");
     }
+
+    // 直接驱动生产 allocator，避免 RV64 为 65535 个编号反复分配并清零页表根。
+    // 首尾仍通过真实 AddressSpace 激活，覆盖 MM-owned context 的换代路径。
+    for _ in 0..=capacity {
+        #[cfg(target_arch = "loongarch64")]
+        let assignment = crate::hal::arch::loongarch64::tlb::try_assign_asid(0);
+        #[cfg(target_arch = "riscv64")]
+        let assignment = crate::hal::arch::riscv::sv39::try_assign_asid(0);
+        if assignment.is_none() {
+            #[cfg(target_arch = "loongarch64")]
+            crate::hal::arch::loongarch64::tlb::rollover_asids();
+            #[cfg(target_arch = "riscv64")]
+            crate::hal::arch::riscv::sv39::rollover_asids();
+            break;
+        }
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    let rollovers_after = crate::hal::arch::loongarch64::tlb::asid_rollover_count();
+    #[cfg(target_arch = "riscv64")]
+    let rollovers_after = crate::hal::arch::riscv::sv39::asid_rollover_count();
+    if rollovers_after != rollovers_before + 1 {
+        return Err("ASID exhaustion did not complete exactly one epoch rollover");
+    }
+    if crate::smp::configured_cpu_count() > 1
+        && crate::smp::user_tlb_request(1) <= remote_request_before
+    {
+        return Err("ASID rollover reused IDs without a remote TLB flush");
+    }
+    if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
+        return Err("old MM did not receive a current-epoch ASID after rollover");
+    }
+    Ok(())
 }
 
 /// 启动函数返回后，配置拓扑中的每个 CPU 都必须已经发布 online。
@@ -890,10 +909,7 @@ fn run_concurrent_page_shootdown() {
 
     let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
     // 每个发起者选择不同的 LoongArch 双页 TLB entry，避免硬件对齐后碰巧合并。
-    let vpn = crate::mm::VirtAddr::from(
-        0x54_0000 + cpu_id * 2 * crate::config::PAGE_SIZE,
-    )
-    .floor();
+    let vpn = crate::mm::VirtAddr::from(0x54_0000 + cpu_id * 2 * crate::config::PAGE_SIZE).floor();
     if crate::smp::synchronize_user_tlb(targets, asid, Some(vpn)).is_err() {
         PAGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
     }
@@ -939,8 +955,7 @@ fn concurrent_page_shootdowns_keep_payloads_separate() -> Result<(), &'static st
     crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_vpn))
         .map_err(|_| "CPU0 concurrent page shootdown failed")?;
 
-    let completion_deadline =
-        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    let completion_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
     while PAGE_SYNC_DONE.load(Ordering::Acquire) != tasks.len()
         || tasks
             .iter()

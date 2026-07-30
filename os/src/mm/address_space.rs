@@ -87,8 +87,8 @@ pub struct AddressSpace<T: PageTable> {
 
 /// 返回用户态时必须成对安装的页表根与硬件 ASID。
 ///
-/// RV64 当前的 `asid` 固定为 0；LA64 使用 MM-owned ASID。把二者放在同一个
-/// 快照中，避免 exec 与并发线程切换时分别从两个地址空间读取状态。
+/// 两种架构都使用 MM-owned ASID；无硬件 ASID 的 RV64 平台安全退化为 0。
+/// 页表根与编号放在同一个快照中，避免 exec 与并发线程切换时读到不同 MM。
 pub(crate) struct UserVmContext {
     pub(crate) token: usize,
     pub(crate) asid: u16,
@@ -163,8 +163,8 @@ impl<T: PageTable> AddressSpace<T> {
             // ASID rollover 会等待全 CPU TLB ack，绝不能把 VM 锁带入该等待点。
             #[cfg(target_arch = "loongarch64")]
             crate::hal::arch::loongarch64::tlb::rollover_asids();
-            #[cfg(not(target_arch = "loongarch64"))]
-            unreachable!("RV64 ASID assignment cannot request rollover");
+            #[cfg(target_arch = "riscv64")]
+            crate::hal::arch::riscv::sv39::rollover_asids();
         }
     }
 }

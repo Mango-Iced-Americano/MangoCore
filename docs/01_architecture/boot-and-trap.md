@@ -167,11 +167,12 @@ generation 并冻结目标；块作用域结束后先解锁，
 仍固定 CPU0；这一限制现在是为了 uaccess 生命周期、共享子系统和跨核进程语义审计，
 不再是因为用户 PTE 修改缺少远端协议。
 
-B24/B25 分别补齐两个架构后端：RV64 单页远端失效优先使用同步 SBI RFENCE，固件
-不支持时回退既有全用户 IPI/ack；LA64 把 ASID 从 TCB 下沉到每 MM 的 `TlbContext`，
-编号只在全 CPU non-global flush/ack 后跨 epoch 复用。用户 trap-return 通过
-`activate_user_vm()` 一次取得页表根与 ASID，LA64 普通 context switch 不再固定全刷。
-LA64 精确 ASID+VPN payload、连续 range 和 cached CPU detach 仍待后续阶段。
+B24—B27 已补齐双架构页级后端与 ASID 生命周期：用户 trap-return 通过
+`activate_user_vm()` 一次取得页表根与 MM-owned ASID，编号只在全 CPU flush/ack 后跨
+epoch 复用。RV64 探测 `SATP.ASID`，本地执行 `sfence.vma va, asid`，远端优先使用
+SBI RFENCE FID 2；有 ASID 时 trap 切根不再固定全刷，ASIDLEN=0 时保留兼容路径。
+LA64 通过固定 per-CPU slot 传递 ASID/VPN 并执行 `invtlb 0x5`。连续 range 和 cached
+CPU detach 仍待后续阶段。
 
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 
