@@ -26,7 +26,9 @@ tags: [process, scheduler, task-manager, processor]
 进入 CPU0，focused ktest 的短 kernel-only 任务可显式远程入队，并能在阻塞后
 由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
 发布到 CPU1，验证真实 trap/yield/exit；B29 再让同一探针先在 CPU0 运行，并在真实
-`sched_yield` 安全点唯一交给 CPU1。这仍不是普通用户任务的目标选择策略。
+`sched_yield` 安全点唯一交给 CPU1。B31 已为每个 TCB 增加初始不变的
+`cpus_allowed`，所有入队路径都将它作为硬约束；这仍不是普通用户任务的
+运行期 affinity 或负载选择策略。
 timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
 延后到 trap-return/scheduler 安全点。显式 yield/block/exit 仍直接进入切换边界。
 
@@ -66,6 +68,11 @@ TCB 的 `migration_target` 也不是 owner。它只是一项一次性请求：�
 idle 栈后才被取走，并决定本次 `Running(source) -> Queued(target)` 的目标；仅登记请求
 不会修改 owner，调用者还必须进入真实的调度切换。
 
+TCB 的 `cpus_allowed` 是逻辑 CPU 位图，表达任务可以取得哪些 CPU 的 owner。
+它与 `sched_state` 职责不同：前者是允许集合，后者仍是当前 owner 唯一真值。当前
+mask 只能由创建路径在 `New` 状态写入，首次发布后不变；运行期修改必须等待
+后续与 Running/Queued/Blocked 迁移串行化的独立协议。
+
 ## 3. RunQueue 选择策略
 
 `RunQueue::pop_next()` 有两个路径：
@@ -80,13 +87,15 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
 调度域。AP 队列只接收显式受控任务：B19/B20 的 kernel-only 任务、B28 的单个
-无共享 I/O 用户探针，以及 B29 在 yield 后迁入的同一探针；普通生产任务 owner 固定 CPU0。
+无共享 I/O 用户探针，以及 B29 在 yield 后迁入的同一探针；普通生产任务
+`cpus_allowed` 和首次 owner 都固定 CPU0。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
 不能直接 push/pop。B19 通过 `spawn_ktest_task_on()` 验证显式远程执行；B20 又让
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
-通用新任务目标选择、远程强制迁移、affinity 和 work stealing 仍未开放。
+内核初始 affinity 约束已生效；通用新任务目标选择、运行期 affinity 修改、远程
+强制迁移和 work stealing 仍未开放。
 
 ### 3.1 首次发布到指定 CPU
 
@@ -95,7 +104,8 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 
 1. 验证目标 CPU 已 configured、online，AP 还必须越过 scheduler-ready；
 2. 若目标是远端 CPU，先完成动态内核栈映射的 TLB 同步；
-3. 通过 `run_queue::publish()` 提交 `New -> Queued(cpu)` 并加入唯一目标队列；
+3. `run_queue::publish()` 先确认目标位于 `cpus_allowed`，再提交
+   `New -> Queued(cpu)` 并加入唯一目标队列；
 4. 该函数返回时 runqueue 锁已经释放，随后才发送 `RESCHEDULE` doorbell。
 
 这个接口只允许调用者明确指定目标，并未实现负载选择。普通 `publish_task()` 仍把
@@ -105,8 +115,9 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 ### 3.2 显式 yield 后迁移
 
 `TaskControlBlock::request_migration(target)` 当前只接受两类调用者：尚未发布的 `New`
-任务独占持有者，或本 CPU 的 current Running 任务。入口先验证目标 CPU 已 online 且进入
-scheduler，再同步目标的 kernel-stack TLB，最后才 Release 发布一次性目标。
+任务创建路径，或本 CPU 的 current Running 任务。入口先验证目标属于
+`cpus_allowed`、已 online 且进入 scheduler，再同步目标的 kernel-stack TLB，最后才
+Release 发布一次性目标。
 
 任务调用 `schedule()` 后仍保持 `Running(source)`，直到源 idle 栈恢复并清空 source
 current。`finish_switch_out()` 此时取走目标，并调用：
@@ -319,8 +330,9 @@ idle: clear current -> Blocking(cpu) -> Blocked
 
 1. 若任务尚未切离 CPU，在 `TASK_MANAGER` 锁内 CAS
    `Blocking(cpu) -> Running(cpu)`，从 registry 移除，但不加入 ready queue。
-2. 若任务已经切离 CPU，持 `TASK_MANAGER` 从 registry 移除，优先选择仍 online、
-   已进入 scheduler 且未 STOP 的 `last_cpu`，否则回退 CPU0；随后按固定锁序取得
+2. 若任务已经切离 CPU，持 `TASK_MANAGER` 从 registry 移除，在 `cpus_allowed`、
+   online、scheduler-ready 且未 STOP 的交集中优先选择 `last_cpu`，否则选交集
+   最低位；随后按固定锁序取得
    该目标的单个 `RunQueue`，提交 `Blocked -> Queued(target)` 并加入队首。
 3. CAS 失败说明其他路径已经唤醒或任务已不再可唤醒，返回
    `AlreadyWaken`，绝不再次插入队列。
@@ -335,6 +347,8 @@ idle: clear current -> Blocking(cpu) -> Blocked
 
 - `sched_state` 是调度状态唯一真值，`task.inner` 不保留影子字段；
 - `last_cpu` 只是无 owner 含义的唤醒提示，不能代替 `Queued/Running(cpu)`；
+- `cpus_allowed` 只是 owner 允许集合；任何 `Queued(cpu)` 和 `Running(cpu)` 中的
+  `cpu` 都必须属于该集合；
 - 一个任务最多属于一个 per-CPU runqueue 或一个 current slot；interruptible registry
   只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
 - 本 CPU `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit

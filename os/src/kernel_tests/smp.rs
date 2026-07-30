@@ -353,8 +353,13 @@ fn user_task_migrates_on_yield() -> Result<(), &'static str> {
     process.set_parent(Some(Arc::downgrade(&parent)));
 
     let weak_task = Arc::downgrade(&task);
-    // New 状态由测试独占，可在首次发布前安全登记一次性目标。任务仍先进入
-    // CPU0：只有它执行 yield、切回 CPU0 idle 栈后，请求才会被消费。
+    if task.cpus_allowed() != 1usize << crate::smp::BOOT_CPU_ID {
+        return Err("ordinary user task did not start with CPU0-only affinity");
+    }
+    // New 状态由测试独占；显式放行 CPU0/CPU1 后才能登记一次性目标。
+    // 任务仍先进入 CPU0，只有它执行 yield、切回 CPU0 idle 栈后请求才会
+    // 被消费。若 publish/migration 任一路径绕过 mask，runqueue 会直接报错。
+    task.set_initial_cpus_allowed((1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1));
     task.request_migration(1);
     crate::task::publish_task_on(task.clone(), crate::smp::BOOT_CPU_ID);
     // runner 在 CPU0 让出一次：FIFO 先运行 probe；probe 的 sched_yield

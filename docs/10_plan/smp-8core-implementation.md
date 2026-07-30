@@ -84,14 +84,14 @@ related_docs:
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成 getpid/yield/exit | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B29 已验证同一 TCB 从 CPU0 current 经 yield 交给 CPU1、退出和 CPU0 回收 | 普通用户任务默认仍固定 CPU0，通用迁移与进程组停止语义待实现 |
-| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布、回到 `last_cpu` 的 blocked wake，以及一次性 yield 迁移已完成受控验证 | 通用目标选择、affinity、queued/blocked 迁移和 steal 尚未实现 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布、一次性 yield 迁移已完成受控验证；B31 已用 per-thread `cpus_allowed` 约束首次发布、yield requeue 和 blocked wake | 当前 mask 只在 New 状态设置且发布后不变；通用负载选择、运行期 affinity、queued/blocked 迁移和 steal 尚未实现 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作已移至 trap-return/scheduler 安全点 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活并在退出时完成双 CPU shootdown | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU，单 NUMA node 返回 0；affinity 仍仅 bit0，membarrier 仍为空操作 | CPU 查询已真实，任务约束与跨核屏障语义仍不完整 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`，普通任务当前仍为 bit0 | `sched_getaffinity` 尚未读取该 mask，`sched_setaffinity` 和 membarrier 运行期语义仍不完整 |
 
 ### 2.2 总体结构
 
@@ -672,7 +672,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B17 已删除全局 PROCESSOR 和 current-task 裸指针，把 pid/tid/syscall 诊断 hint
   迁到 Per-CPU，并让可变身份字段改读权威对象；B18 已删除全局 ready queue；
   B19 已让 AP 在 scheduler-ready 后进入精简本地调度循环；B20 已让受控 AP 任务在
-  WaitQueue 阻塞后通过锁外 `RESCHEDULE` 回到最近运行 CPU；
+  WaitQueue 阻塞后通过锁外 `RESCHEDULE` 回到最近运行 CPU；B31 已为 TCB 增加
+  初始不变的 `cpus_allowed`，三条 runnable owner 交接路径都拒绝越过 mask；
 - 每 CPU 使用本地 Processor、RunQueue 和 idle context；AP zombie 先交给受锁全局
   registry，由 CPU0 回收。B21 的固定内核栈退休队列只处理映射/slot 生命周期，不等同于
   完整的 Per-CPU zombie 回收队列；
@@ -680,6 +681,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - 新任务或被唤醒任务的目标 CPU 选择规则固定为：
   - last_cpu 在线、在 affinity 内且负载不超过最小负载 +1 时优先复用；
   - 否则选择 affinity 内 nr_running 最小的 CPU；
+- B31 当前已完成 affinity 内核 mask 与唤醒合法性筛选；因普通任务仍 CPU0-only，
+  负载 `+1` 选择、默认全核 mask 和运行期改 mask 仍是本阶段后续项；
 - 远程入队后，如果目标 CPU idle 或任务优先级需要尽快运行，发送 RESCHEDULE IPI；
 - Phase 3a 先只实现 per-CPU queue、目标选择和远程 enqueue；work stealing 默认关闭；
 - Phase 3b 在 3a 唯一运行和远程唤醒门禁通过后再开启 steal：idle CPU 只从一个选定 victim
@@ -770,6 +773,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   当前无 NUMA 拓扑下返回 0，NULL 输出和 tcache 按 Linux ABI 处理。B29 探针现于 yield 前后
   分别断言 CPU0/CPU1，固定返回 0、未迁移或错误起跑都会 exit(1)。这只完善查询语义，不改变
   默认 CPU0 affinity，也不允许普通用户任务进入尚未审计的 AP 共享子系统路径。
+- B31 把 affinity 从文档假设变为 TCB 内的真实位图。普通任务初始为 CPU0-only，
+  clone 继承父 mask，exec 保留原 mask；定向 ktest 任务收紧为单 CPU，用户迁移探针
+  显式允许 CPU0/CPU1。`publish`、yield requeue 和 blocked wake 在进入目标队列前
+  都验证该 mask。当前只允许 New-only 初始写入，不宣称运行期 affinity 已完成。
 
 #### 退出条件
 

@@ -437,16 +437,22 @@ pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
 ///
 /// 该入口只用于验证 AP 调度闭环，不向普通任务开放 CPU 选择。用户探针通过
 /// `publish_task_on()` 单独发布，B29 还只在显式 yield 安全点做一次受控迁移；
+/// 本入口会把任务的初始 `cpus_allowed` 收紧到指定 CPU，防止后续 wake 或
+/// owner 交接绕过测试声明的 placement。
 /// 普通用户任务仍默认首次发布到 CPU0。`f` 只能访问原子量、CPU-local/task
 /// 调度原语和已明确加锁的 registry；不得在 AP 上进入 console、网络、文件系统、
 /// 设备或用户 MM 路径。
 pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> {
+    assert!(cpu < crate::smp::configured_cpu_count());
     let tid_handle = tid_alloc();
     let kstack = crate::hal::kstack_alloc();
     let kstack_top = kstack.get_top();
     let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
     let pcb = new_ktest_process(tid_handle.clone(), Some(Arc::downgrade(&KTEST_REAPER)));
     let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
+    // TCB 尚未注册或发布，创建者独占 New 状态；从此任务的首次入队和
+    // 阻塞唤醒都只能选择调用方指定的 CPU。
+    tcb.set_initial_cpus_allowed(1usize << cpu);
     tcb.process.add_thread(&tcb);
     registry::register_process(&tcb.process);
     registry::register_task(&tcb);

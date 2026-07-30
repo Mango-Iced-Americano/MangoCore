@@ -61,6 +61,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP RV64 MM-owned ASID | 2026-07-30 | GPT/Codex, DeepSeek | SATP ASID 探测、rollover 时序、SBI RFENCE FID 2 与 trap 汇编审查 | 建立 versioned ASID 与 flush-before-reuse；页级失效按 VA+ASID 执行，ASIDLEN=0 保留全刷兼容路径 |
 | SMP 受控 AP 用户态闭环 | 2026-07-30 | GPT/Codex, DeepSeek | 用户 trap CPU 所有权、远程首次发布、noreturn Arc 生命周期和双架构 8 核验证 | CPU1 实际执行 getpid/yield/exit，CPU0 完成 wait/reap；普通用户调度和共享 I/O 仍未开放 |
 | SMP 用户可见逻辑 CPU 查询 | 2026-07-30 | GPT/Codex, DeepSeek | Linux getcpu ABI、双架构用户探针、冻结 Docker/QEMU 验证与模型结论复核 | getcpu 迁移前后返回逻辑 CPU 0/1；双架构 focused 21/21，初赛 RV64 312/314、LA64 308/314 |
+| SMP TCB affinity 调度约束 | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS 数据模型对照、三条 runqueue placement 审计、冻结双架构验证 | `cpus_allowed` 约束首次发布、yield requeue 和 blocked wake；保留 CPU0 默认，运行期 affinity 未开放 |
 
 ## 4. 详细使用场景
 
@@ -641,6 +642,28 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `mask=0x003` 初赛分别为 312/314、308/314，四组 END、`online_mask=0xff`、源码前后指纹和
   精确接受失败集合均完成核对。测试未遗留用户工具桩、临时源码或调试字段。
 
+### Case 28: SMP TCB `cpus_allowed` 与 placement 约束
+
+- Evidence: `docs/Work_Log/2026-07-30.md`、
+  `docs/Work_Log/evidence/2026-07-30/smp-b31-cpus-allowed-summary.md`；原始审查 prompt、模型输出和
+  四份 Docker/QEMU 日志只保存于本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 Linux/DragonOS 选择数据模型，独立审计构造、继承、内存序、
+  runqueue 锁序和原始 TAP/judge JSON；DeepSeek 负责冻结 diff 只读审查、串行执行四项
+  Docker/QEMU 门禁和归纳结果，不修改源码、不提交、不 push。
+- Problem: 调度器已能显式把任务发布/迁移到 AP，但 TCB 之前没有权威 CPU 允许集。
+  错误目标只会在更后面以 owner 异常暴露，blocked wake 在 `last_cpu` 失效后也只能回退 CPU0。
+- Human action: TCB 增加初始不变的 `cpus_allowed`；普通任务 CPU0-only，clone 继承，
+  exec 保留，定向 ktest 任务收紧为单 CPU。Publish、yield requeue 和 blocked wake 在改变
+  owner 前都 fail-stop 检查 mask；wake 在 allowed/online/scheduler/non-stopped 交集中优先
+  `last_cpu`。没有新增调度状态或锁。
+- AI adjudication: 采纳 DeepSeek 把 ktest 构造器收紧为 `pub(crate)` 的建议；纠正其
+  “New 意味着创建者独占整个 TCB”的过强描述，准确契约是创建路径独占 mask 写入
+  与首次发布时序。同时拒绝“测试没有任何盲区”的绝对表述，并从原始 JSON
+  恢复 RV64 失 2 分、LA64 失 6 分的准确报告。
+- Verification: 双架构 8 核 SMP focused 均为 21/21 PASS，第 11/12/20 项分别覆盖定向发布、
+  blocked wake 和 yield 迁移；`mask=0x003` 初赛 RV64 312/314、LA64 308/314，四组 END、
+  `online_mask=0xff`、精确失败集合和源码前后指纹均已核对。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -708,6 +731,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b27-rv64-asid-summary.md` | SMP RV64 MM-owned ASID 与页级 RFENCE FID 2 | 记录 ASIDLEN 探测、flush-before-reuse、trap-return IRQ-off 交接、DeepSeek 只读审查与双架构 Docker/QEMU 门禁 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b28-ap-user-summary.md` | SMP 受控 AP 用户态闭环 | 记录远程首次发布顺序、trap owner/noreturn Arc、RW→RX 探针、双架构 21/21 与初赛非回归边界 |
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b29-yield-migration-summary.md` | SMP 用户任务显式 yield 迁移 | 记录一次性目标、单 runqueue owner 交接、首轮 shootdown ack RED、DeepSeek 误判裁决、双架构最终 21/21 与初赛非回归 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b30-getcpu-summary.md` | SMP 真实逻辑 CPU 查询 | 记录 getcpu ABI、迁移前后 0/1 反假通过、DeepSeek 结论纠错与双架构门禁 |
+| `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b31-cpus-allowed-summary.md` | SMP TCB affinity 调度约束 | 记录 `cpus_allowed` 构造/继承、三条 placement 硬约束、既有锁序、DeepSeek 只读审查与双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

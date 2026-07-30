@@ -227,6 +227,10 @@ ktest 分支位于 `add_initproc()` 之前，因此不会创建 PID1；进入该
 FS/net/driver，也不表示普通用户任务已开放多核调度。B30 又在同一探针内调用真实 getcpu：
 yield 前必须写出逻辑 CPU0，yield 返回后必须写出逻辑 CPU1。任一 syscall 错误、固定返回 0、
 未迁移或错误起跑都会转换为 exit(1)，因此不能只依赖 runner 观察的 `last_cpu` 间接判定。
+B31 不增加新的 TAP 名称，而是让现有三个生产路径用例同时验证
+`cpus_allowed`：`remote_kernel_tasks_run_on_target_cpus` 覆盖定向首次发布，
+`blocked_kernel_tasks_wake_on_last_cpu` 覆盖唤醒重新入队，
+`user_task_migrates_on_yield` 覆盖 CPU0/CPU1 mask 下的 owner 交接。
 
 ### 目录结构
 
@@ -479,12 +483,16 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30 这类改变用户 trap CPU、current owner 或用户可见 CPU 编号的节点先执行双架构
+B28/B29/B30/B31 这类改变用户 trap CPU、current owner、用户可见 CPU 编号或
+入队允许集的节点先执行双架构
 初赛门禁，再在最终小范围收敛后重复双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
 shootdown missing CPU 与发起 CPU。exit 是非返回 trap，日志/文档不得把它描述为第三次
 完整往返。B30 还要求 probe 自身检查 getcpu 的 `0 -> 1`，并通过被回收进程的 exit status
 传递结果；仅由内核测试线程读取 `last_cpu == 1` 不能证明 syscall 没有继续固定返回 0。
+B31 另外要求 TAP 中的第 11/12/20 项均明确 PASS；这三项是正向路径证据，
+不得写成“已穷举所有违规 placement”。最终判定还要结合三个 runqueue 入口的
+fail-stop 源码审计与冻结源码指纹。
 
 ### Bug 下沉流程
 

@@ -160,6 +160,12 @@ pub struct TaskControlBlock {
     /// `Blocked` 不拥有 CPU，这个字段只为重新唤醒提供局部性提示，不参与
     /// runnable/current 唯一所有权判定；真实 owner 始终由 `sched_state` 给出。
     last_cpu: AtomicUsize,
+    /// 允许任务取得调度所有权的逻辑 CPU 位图。
+    ///
+    /// 当前只允许创建路径在 `New` 状态修改它；`New -> Queued` 发布后保持
+    /// 不变。后续接入 `sched_setaffinity` 时，必须把 mask 更新和对应的
+    /// Running/Queued/Blocked 迁移放进同一个新协议，不能只写这个原子值。
+    cpus_allowed: AtomicUsize,
     /// 下一次协作式 yield 完成切栈后要进入的 CPU。
     ///
     /// 该字段只是一次性请求，绝不表示当前 owner；当前 owner 仍只由
@@ -714,6 +720,50 @@ impl TaskControlBlock {
     pub(crate) fn note_running_cpu(&self, cpu: usize) {
         self.last_cpu.store(cpu, Ordering::Release);
     }
+    /// 返回任务当前允许运行的逻辑 CPU 位图。
+    pub(crate) fn cpus_allowed(&self) -> usize {
+        // 首次发布后不再修改 mask；真正的跨 CPU 可见性由 runqueue 锁和
+        // `New -> Queued` 的 AcqRel 状态交接提供，因此这里无需额外屏障。
+        self.cpus_allowed.load(Ordering::Relaxed)
+    }
+    /// 判断目标 CPU 是否属于任务的允许集合。
+    pub(crate) fn is_cpu_allowed(&self, cpu: usize) -> bool {
+        cpu < crate::smp::configured_cpu_count()
+            && self.cpus_allowed() & (1usize << cpu) != 0
+    }
+    /// 在任务首次发布前设置其允许 CPU 集合。
+    ///
+    /// 调用方必须独占 mask 写入权和首次发布权，不得与
+    /// `New -> Queued/Zombie` 并发。TCB 可以已登记弱引用，但尚未进入
+    /// current/runqueue；`New` 检查是误用防御，不是并发串行化手段。
+    /// mask 随后由 runqueue 状态交接发布；这不是运行期 affinity 接口。
+    pub(crate) fn set_initial_cpus_allowed(&self, mask: usize) {
+        assert_eq!(
+            self.task_status(),
+            TaskStatus::New,
+            "initial CPU affinity can only be set for a New task"
+        );
+        let configured_mask = (1usize << crate::smp::configured_cpu_count()) - 1;
+        assert_ne!(mask, 0, "task CPU affinity cannot be empty");
+        assert_eq!(
+            mask & !configured_mask,
+            0,
+            "task CPU affinity {:#x} contains unconfigured CPUs",
+            mask
+        );
+        self.cpus_allowed.store(mask, Ordering::Relaxed);
+    }
+    /// 在调度所有权改变前验证目标 CPU。
+    pub(crate) fn require_cpu_allowed(&self, cpu: usize, operation: &'static str) {
+        assert!(
+            self.is_cpu_allowed(cpu),
+            "{} selected disallowed CPU: tid={} cpu={} allowed={:#x}",
+            operation,
+            self.gettid(),
+            cpu,
+            self.cpus_allowed()
+        );
+    }
     /// 请求任务在下一次协作式 yield 后迁移到目标 CPU。
     ///
     /// 为避免远程请求与阻塞/退出状态竞争，本阶段只允许尚未发布的 `New`
@@ -721,6 +771,9 @@ impl TaskControlBlock {
     /// TLB 同步，再用 Release 发布请求，idle 收尾侧不会看到未同步的目标。
     pub(crate) fn request_migration(&self, target_cpu: usize) {
         assert!(target_cpu < crate::smp::configured_cpu_count());
+        // 请求只表达未来目标，不改变 owner；在同步目标内核栈之前先拒绝
+        // 越过 `cpus_allowed` 的请求，避免留下无意义的远端 TLB 工作。
+        self.require_cpu_allowed(target_cpu, "request task migration");
         let target_bit = 1usize << target_cpu;
         assert_ne!(
             crate::smp::online_cpu_mask() & target_bit,
@@ -1097,6 +1150,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
+            cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
             migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
@@ -1202,8 +1256,9 @@ impl TaskControlBlock {
     ///
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
     /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
-    /// 调用方负责把返回的 TCB 发布到选定 CPU 的 runqueue。
-    pub fn new_ktest_independent(
+    /// 调用方负责在注册和发布前设置精确的 `cpus_allowed`，再把 TCB 放入
+    /// 选定 CPU 的 runqueue；当前唯一入口是 `spawn_ktest_task_on()`。
+    pub(crate) fn new_ktest_independent(
         tid: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
         kstack: KernelStack,
@@ -1236,6 +1291,7 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
+            cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
             migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
@@ -1816,6 +1872,9 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
+            // Linux affinity 是 per-thread 属性；fork 子线程/进程继承父 mask，
+            // exec 则复用同一 TCB，自然保留该值。
+            cpus_allowed: AtomicUsize::new(self.cpus_allowed()),
             migration_target: AtomicUsize::new(NO_MIGRATION_TARGET),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone

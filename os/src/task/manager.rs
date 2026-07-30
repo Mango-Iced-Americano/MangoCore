@@ -436,20 +436,29 @@ impl TaskManager {
     }
 }
 
-/// 优先复用任务最近运行 CPU；当前没有 CPU 热插拔，回退只防御损坏的提示
-/// 或终止阶段已经离线的目标。B29 迁移探针阻塞时也会遵循这个统一规则；
-/// 普通生产任务的首次发布策略不变。
+/// 从任务允许且可调度的 CPU 中优先复用最近运行位置。
+///
+/// Blocked 不拥有 runqueue；本函数在取得目标队列锁前完成选择，因此不会
+/// 同时持有两个 runqueue。若最近 CPU 已不可用，就从 `cpus_allowed` 与当前
+/// online/scheduler mask 的交集中选最低编号 CPU，而不是无条件回退 CPU0。
 fn select_wake_cpu(task: &TaskControlBlock) -> usize {
-    let cpu = task.last_cpu();
-    let bit = (cpu < crate::smp::configured_cpu_count()).then(|| 1usize << cpu);
-    if bit.is_some_and(|bit| {
-        crate::smp::online_cpu_mask() & bit != 0
-            && crate::smp::scheduler_cpu_mask() & bit != 0
-            && crate::smp::stopped_cpu_mask() & bit == 0
-    }) {
-        cpu
+    let runnable = task.cpus_allowed()
+        & crate::smp::online_cpu_mask()
+        & crate::smp::scheduler_cpu_mask()
+        & !crate::smp::stopped_cpu_mask();
+    assert_ne!(
+        runnable,
+        0,
+        "blocked task has no allowed online CPU: tid={} allowed={:#x}",
+        task.gettid(),
+        task.cpus_allowed()
+    );
+
+    let last_cpu = task.last_cpu();
+    if last_cpu < usize::BITS as usize && runnable & (1usize << last_cpu) != 0 {
+        last_cpu
     } else {
-        crate::smp::BOOT_CPU_ID
+        runnable.trailing_zeros() as usize
     }
 }
 

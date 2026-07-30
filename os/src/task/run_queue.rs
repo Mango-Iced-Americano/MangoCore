@@ -2,7 +2,8 @@
 //!
 //! 本模块只管理 `Queued(cpu)` 任务；interruptible/zombie/timer registry 仍由
 //! `TaskManager` 管理。所有入口至多锁定一个 runqueue，且锁内不获取
-//! `task.inner`。普通任务仍首次发布到 CPU0；blocked 任务可以回到最近运行 CPU。
+//! `task.inner`。每个入队入口还必须验证目标属于任务的 `cpus_allowed`；普通任务
+//! 仍首次发布到 CPU0，blocked 任务只能回到仍被允许的 CPU。
 
 use super::{TaskControlBlock, TaskStatus};
 use alloc::{collections::VecDeque, sync::Arc};
@@ -105,6 +106,8 @@ fn sub_running(cpu: usize, count: usize) {
 
 /// 首次把构造完成的任务发布到目标 CPU。
 pub(crate) fn publish(task: Arc<TaskControlBlock>, cpu: usize) {
+    // 先验证 placement，再取得目标队列锁；失败不会留下半发布的状态或容器项。
+    task.require_cpu_allowed(cpu, "publish new task");
     let mut queue = state(cpu).run_queue.lock();
     task.require_sched_transition(TaskStatus::New, TaskStatus::Queued(cpu), "publish new task");
     queue.push_back(task);
@@ -120,6 +123,9 @@ pub(crate) fn requeue_after_switch(
     source_cpu: usize,
     target_cpu: usize,
 ) {
+    // 请求登记与实际切出之间可能隔着任意用户执行时间。当前 mask 发布后
+    // 不变，但仍在最终 owner 交接处复核，给后续动态 affinity 留下硬边界。
+    task.require_cpu_allowed(target_cpu, "requeue task after switch-out");
     let mut queue = state(target_cpu).run_queue.lock();
     task.require_sched_transition(
         TaskStatus::Running(source_cpu),
@@ -132,6 +138,8 @@ pub(crate) fn requeue_after_switch(
 
 /// 唤醒方在持有 interruptible registry 锁时提交 Blocked -> Queued。
 pub(crate) fn enqueue_woken(task: Arc<TaskControlBlock>, cpu: usize) {
+    // Blocked 不拥有 CPU；唤醒方选出的新 owner 必须满足任务允许集合。
+    task.require_cpu_allowed(cpu, "wake blocked task");
     let mut queue = state(cpu).run_queue.lock();
     task.require_sched_transition(
         TaskStatus::Blocked,

@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -131,11 +131,13 @@ AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 
 
 ### 3.5 B20 远程 blocked wake 约束
 
-B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU；任务真正阻塞后，
-统一 wake 入口按以下顺序重新发布：
+B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU；B31 又用
+`cpus_allowed` 约束哪些 CPU 可以取得 owner。任务真正阻塞后，统一 wake 入口按以下
+顺序重新发布：
 
 1. 持有 `TASK_MANAGER`，确认状态为 `Blocked` 并从 interruptible registry 移除；
-2. 选择仍 online、已进入 scheduler 且未 STOP 的 `last_cpu`，无效时回退 CPU0；
+2. 计算 `cpus_allowed & online & scheduler & !stopped`，优先选择仍在交集中的
+   `last_cpu`，无效时选交集的最低编号 CPU；
 3. 在 `TASK_MANAGER -> 一个目标 RunQueue` 锁序下提交 `Blocked -> Queued(target)`；
 4. 释放目标 RunQueue，再释放 `TASK_MANAGER`；批量路径只保留目标 CPU bitmask；
 5. 外层排除本 CPU后发送 `RESCHEDULE`，IPI handler 只置 per-CPU 原子提示。
@@ -143,7 +145,8 @@ B20 不新增调度状态。`last_cpu` 只记录最近一次成功 fetch 的 CPU
 `Blocking(cpu)` 的提前 wake 仍只恢复 `Running(cpu)`，不入 runqueue、不发 IPI；idle
 侧随后把它重新排入本地队列。批量 wake 每次调用 `enqueue_woken()` 都在函数返回前
 释放该目标队列，因此循环不会同时持有两个 runqueue。当前该远程能力只对受控
-kernel-only AP 任务完成验证，不代表用户 MM、affinity 或通用迁移已经安全。
+kernel-only AP 任务完成验证。初始 affinity 已作为入队硬约束，但运行期 affinity
+修改和通用迁移仍未实现。
 
 ### 3.6 B21 内核栈退休与 shootdown 锁序
 

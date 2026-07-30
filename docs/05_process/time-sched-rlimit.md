@@ -367,7 +367,8 @@ TCB inner 保存：
 | `sched_nice` | nice 值，参与简化 runqueue 选择 |
 | `sched_runtime/deadline/period` | sched_attr 保存字段 |
 
-当前 runnable 容器已拆为 Per-CPU RunQueue，但生产任务仍固定 CPU0；
+当前 runnable 容器已拆为 Per-CPU RunQueue。每个 TCB 已持有 per-thread
+`cpus_allowed`，但生产任务的初始 mask 仍只有 CPU0；
 FIFO/RR/DEADLINE 等字段用于 syscall 语义、fork reset 和测试回读。
 
 ### 9.1 当前 CPU 查询与 affinity 边界
@@ -377,9 +378,14 @@ PerCpu 和 scheduler mask，不等同于 RISC-V hart ID 或 LoongArch CoreID。s
 指针前只采样一次 CPU；`cpu`/`node` 为 NULL 时分别忽略，第三个 tcache 参数忽略。当前没有
 NUMA，node 固定返回 0。
 
-这项查询能力不改变调度策略：`sched_getaffinity()`/`sched_setaffinity()` 仍处于 CPU0 占位
-阶段，普通生产任务也仍固定 CPU0。B30 只由 hermetic 用户探针在显式 yield 迁移前后动态
-验证 getcpu 返回 `0 -> 1`，不能据此宣称完整 affinity 已实现。
+B31 已建立内核权威的 `cpus_allowed`：普通任务初始为 bit0，clone 继承父线程
+mask，exec 保留原 TCB 的 mask；定向 ktest 任务和受控迁移探针可在首次发布前设置
+更窄或 CPU0/CPU1 允许集。首次发布、yield requeue 与 blocked wake 都拒绝越过该 mask。
+
+用户 ABI 仍需分阶段接入：`sched_getaffinity()` 目前还没有读取这份真实 mask，
+`sched_setaffinity()` 也没有 Running/Queued/Blocked 迁移协议。普通生产任务因此仍固定
+CPU0。B30 的 hermetic 用户探针只在显式 yield 迁移前后验证 getcpu 返回 `0 -> 1`，
+不能据此宣称完整 affinity 已实现。
 
 fork 时，如果父设置 reset 或策略为 FIFO/RR，子任务降回 normal，priority/nice/runtime/deadline/period 清零。
 
