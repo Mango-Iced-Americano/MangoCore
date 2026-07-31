@@ -44,17 +44,18 @@ pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
 pub(crate) use manager::{
-    publish_task_on, set_remote_affinity, try_publish_task, try_publish_task_on,
+    publish_task_on, request_sibling_exit, set_remote_affinity, try_publish_task,
+    try_publish_task_on,
 };
 pub(crate) use manager::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
     has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, publish_task,
-    remove_tasks_from_queues, remove_zombie_tasks_by_pid, run_deferred_timer_work,
-    run_task_safe_point, send_signal_to_interruptible, sleep_interruptible,
-    take_one_interruptible_zombie, take_zombie_tasks, task_manager_counts, timer_interrupt_handler,
-    timer_cpu_init, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
-    TimerAction, WaitQueue, WaitResult,
+    remove_zombie_tasks_by_pid, run_deferred_timer_work, run_task_safe_point,
+    send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
+    take_zombie_tasks, task_manager_counts, timer_interrupt_handler, timer_cpu_init,
+    update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue,
+    WaitResult,
 };
 use manager::{fetch_task, finish_switch_out};
 // pub use pid::RecycleAllocator;
@@ -69,6 +70,7 @@ pub use process::{
     is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
     unregister_writable_inode, ProcessControlBlock, ProcessState,
 };
+pub(crate) use process_manager::CloneScheduleOutcome;
 pub use process_manager::ProcessManager;
 pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
@@ -258,12 +260,20 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 fn finish_current_exit(task: Arc<TaskControlBlock>, exit_code: u32) -> ! {
     let _ = crate::hal::local_irq_save();
     crate::hal::with_local_interrupts_enabled(|| {
-        // 与并发 exit_group 竞争的普通 exit 也必须复用线程组统一退出码。
-        let exit_code = task.process.group_exit_code().unwrap_or(exit_code);
-        if task.exit_thread_resources(exit_code) {
+        // 第一次读取让本线程的 clear_child_tid 等清理尽早使用统一退出码。
+        // 它不是最终线性化点：另一个 live sibling 仍可能随后发布 group exit。
+        let thread_exit_code = task.process.group_exit_code().unwrap_or(exit_code);
+        if task.exit_thread_resources(thread_exit_code) {
+            // live token 已经归零后，不再有其它线程能新发起 group exit；此处
+            // Acquire 复读才决定 wait 可见的进程退出码。remove_thread() 的
+            // AcqRel 退出链保证我们也能观察 sibling 先前发布的统一退出码。
+            let process_exit_code = task
+                .process
+                .group_exit_code()
+                .unwrap_or(thread_exit_code);
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(&task, exit_code);
+            task.process.finish_exit(&task, process_exit_code);
         }
         // noreturn schedule 不会析构当前 Rust 栈；本地 clone 必须提前释放。
         drop(task);
@@ -294,7 +304,7 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     let task = current_task().unwrap();
     let (exit_code, threads) = task.process.begin_group_exit(exit_code);
-    manager::wake_group_exit_threads(&threads, task.gettid());
+    request_sibling_exit(&threads, task.gettid());
     // noreturn schedule 不会析构当前 Rust 栈；所有 sibling Arc 必须在这里释放。
     drop(threads);
     finish_current_exit(task, exit_code)

@@ -158,8 +158,8 @@ kernel-only AP 任务完成验证。初始 affinity 已作为入队硬约束，B
 
 B35 复用同一 `TASK_MANAGER` 锁串行化稳定 Blocked 线程的 affinity 与 wake：写侧必须在锁内
 同时确认精确 `Blocked` 状态和同一 TCB 指针仍在 registry，随后 Release 发布 mask；wake 取得
-同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为 exit/exec 摘除 registry 后、标记
-Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
+同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为线程退出清理摘除 registry 后、
+标记 Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
 Running/Blocking 修改在 B35 当时尚未实现，后续由 B38 的请求槽协议闭合。
 
 ### 3.6 B36 稳定 Queued affinity 搬队约束
@@ -173,8 +173,8 @@ B36 不为 queued 搬队同时锁定源/目标 runqueue。顺序固定为：
 4. 只锁 target，提交 `Migrating -> Queued(target)` 并插入节点、释放 target；
 5. 所有队列锁释放后才发送 RESCHEDULE。
 
-`Migrating` 后禁止获取 `TASK_MANAGER`、等待 IPI/TLB ack 或进入析构；因此持
-`TASK_MANAGER` 的 exit/exec remove 即使短暂等待搬队完成，也不存在反向依赖。nice 更新读到
+`Migrating` 后禁止获取 `TASK_MANAGER`、等待 IPI/TLB ack 或进入析构；因此退出清理
+即使在 `TASK_MANAGER` 内短暂等待搬队完成，也不存在反向依赖。nice 更新读到
 旧 owner 时，必须先在旧队列锁内校准派生计数，再按最新状态重新定位。`Queued(cpu)` 状态下
 若同一 TCB 不在该 owner 队列，且该队列锁仍由检查方持有，应 fail-stop；不能把真实容器损坏
 误判为迁移，因为迁移回该 CPU 同样必须先取得这把锁。
@@ -274,11 +274,44 @@ thread_group：发布退出码 + 克隆 live 成员 Arc
   -> 解锁后聚合发送 RESCHEDULE
 ```
 
-`sleep_interruptible()` 的登记后复查只读原子退出码，不取得 thread-group 锁，因此不会
-形成 `thread_group <-> TASK_MANAGER` 环。退出线程在没有上述锁时完成 user-memory/TLB
+`sleep_interruptible()` 的登记后复查只读原子 group-exit/exec 快照，不取得
+thread-group 锁，因此不会形成 `thread_group <-> TASK_MANAGER` 环。退出线程在没有上述锁时完成 user-memory/TLB
 清理，最后以 AcqRel live-thread 递减发布 ack；观察到 1→0 的唯一线程才执行 PCB/MM
 收尾。任何 ack、IPI 或 context switch 等待点都不持有 thread-group、task.inner、
 TASK_MANAGER 或 runqueue 锁。
+
+### 3.6.5 B41 exec 会话与 Completion
+
+exec 的临时门禁固定采用：
+
+```text
+构造未发布的新 AddressSpace
+  -> thread_group：安装 ExecSession + 克隆 live sibling Arc
+  -> 解锁
+  -> 逐 sibling 投递 SIGKILL/wake/RESCHEDULE
+  -> 释放快照 Arc
+  -> Completion 等待（不持任何内核锁）
+  -> owner 独占旧 MM 后安装新映像
+  -> thread_group：清除 ExecSession 并重新开放 clone
+```
+
+关键约束：
+
+- `publish_thread()` 只在持有 `thread_group` 时同时检查永久 group exit 和临时 exec，
+  因此成员登记、`New -> Queued` 与关门操作具有单一线性化顺序；
+- `remove_thread()` 在用户资源撤销和 TLB flush/ack 完成后才以 AcqRel 递减 live
+  count；只有权威计数变为 1 才完成 exec Completion，不能用成员快照为空代替；
+- `remove_thread()` 可在 `thread_group` 内克隆 Completion，但必须解锁后
+  `complete()`，因为唤醒会进入 WaitQueue/RunQueue；
+- exec owner 的等待、IPI/TLB ack 和 context switch 都不持有 `thread_group`、
+  `TASK_MANAGER`、task.inner 或 runqueue；
+- WaitQueue 在自身条件锁内识别生命周期停止请求，先摘除 waiter 再返回
+  `Interrupted`；调用层释放 syscall 栈上的 `Arc` 后才进入安全点；
+- vfork child 已经 publish 后，父线程被生命周期请求中止只能返回 `StopCaller`，
+  不能调用 unpublished cleanup。
+
+永久 group exit 可以在 exec owner 等待期间发布。安全点优先消费永久退出码；owner
+醒来后放弃新映像并清除临时会话，但永久发布门仍保持关闭。
 
 ### 3.7 B21 内核栈退休与 shootdown 锁序
 

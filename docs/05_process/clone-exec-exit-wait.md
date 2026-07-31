@@ -91,8 +91,9 @@ new_tid as isize
 
 在 `publish_clone_child()` 成功前，失败路径仍可清理 pidfd 和共享 VM 中的 user resource；成功后 child 已经进入父进程 children 或作为线程共享同一 PCB。
 对于 `CLONE_THREAD`，最后的 scheduler 发布还必须取得进程 `thread_group` 门禁：
-成员登记与 `New -> Queued(cpu)` 同时提交；若并发 group exit 已关闭门禁，则返回
-`EAGAIN` 并走上述 unpublished cleanup。
+成员登记与 `New -> Queued(cpu)` 同时提交；若并发 group exit 或多线程 exec 已关闭
+门禁，则返回 `EAGAIN` 并走上述 unpublished cleanup。快速原子检查只避免无意义的
+远端内核栈同步，锁内复核才是关闭 late-clone 窗口的线性化点。
 
 ## 4. fork 与线程 clone 差异
 
@@ -131,12 +132,13 @@ sys_execveat()
 
 1. 构造新 `AddressSpace`。
 2. 准备用户 heap、栈、auxv。
-3. 设置新 trap context。
-4. 杀掉同线程组其他线程。
-5. 如果旧 VM 共享，清理旧 VM 中当前线程资源。
+3. 建立临时 exec 会话并关闭线程首次发布门。
+4. 请求 sibling 在各自 CPU 安全点退出，等待 live count 收缩为 owner 一人。
+5. 设置新 trap context；如果旧 VM 被外部 PCB 共享，清理其中的当前线程资源。
 6. 替换 exe、关闭 CLOEXEC fd、替换 VM、重置信号处理、清 futex。
+7. 结束临时会话并重新开放线程发布。
 
-exec 的提交点集中在 `TaskControlBlock::load_elf()` 末尾：
+exec 的不可回滚提交点集中在 `TaskControlBlock::install_exec_image()` 后半段：
 
 ```rust
 self.process.replace_exe(elf);
@@ -148,10 +150,13 @@ self.process.replace_exe(elf);
 self.process.replace_vm(memory_set);
 self.process.sighand().lock().reset();
 self.process.futex().lock().clear();
+exec.finish();
 Ok(())
 ```
 
 这些操作发生前，ELF 映射、用户栈、auxv 和 trap context 都已经在临时 `memory_set` 中构造完成。
+旧 VM 仍一直保留到 exec 门禁关闭且 sibling 的线程级清理全部 ack；同 PCB 线程不各自持有
+长期 VM `Arc`，所以不能用 `Arc::strong_count()` 证明已经独占地址空间。
 
 ## 6. exec 与 vfork
 
@@ -162,6 +167,10 @@ task.process.complete_vfork();
 ```
 
 如果 child exit，则 `finish_exit()` 开头也会 complete。父线程等待的是 PCB 中的 `Completion`，不是 WaitQueue。
+
+Completion 忽略普通用户信号，但会被永久 group exit 或另一线程的 exec 中断。因为 vfork
+child 已在等待前完成首次发布，父线程收到生命周期停止请求时必须返回 `StopCaller`，释放
+syscall 栈上的 parent/child `Arc` 后进入统一任务安全点；不能误走 unpublished cleanup。
 
 ## 7. exit 的跨层路径
 
@@ -186,8 +195,10 @@ sys_exit(code)
 观察到 1→0 的线程独占进程级退出。完整协议见
 [exit、exit_group、wait4 与 waitid](exit-wait.md#6-exit_group_and_run_next)。
 
-当前多线程 exec 仍使用旧的 sibling 摘队/清理路径，尚未复用 B40 的 owner stop/ack；
-在普通任务默认全核前必须由 B41 单独改为临时 stop + completion。
+多线程 exec 由 B41 使用独立的临时 stop/completion 会话：与永久 group exit 复用
+owner 自清理和任务安全点，但不复用永久退出码。owner 等待 authoritative live count
+降为 1 后才替换 MM；期间 concurrent exec 和 late `CLONE_THREAD` 首次发布均被拒绝。
+若永久 group exit 同时到来，则它覆盖临时 exec，新映像不会提交。
 
 因此普通线程退出不会关闭 fd、释放 VM 或唤醒父进程 wait；只有 live thread count 归零时才进入 PCB 的 `finish_exit()`。
 

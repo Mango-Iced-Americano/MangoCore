@@ -116,21 +116,6 @@ fn task_ptr_eq(left: &Arc<TaskControlBlock>, right: &Arc<TaskControlBlock>) -> b
     Arc::as_ptr(left) == Arc::as_ptr(right)
 }
 
-fn task_ptr(task: &Arc<TaskControlBlock>) -> usize {
-    Arc::as_ptr(task) as usize
-}
-
-fn sorted_task_ptrs(tasks: &[Arc<TaskControlBlock>]) -> Vec<usize> {
-    let mut ptrs: Vec<usize> = tasks.iter().map(task_ptr).collect();
-    ptrs.sort_unstable();
-    ptrs.dedup();
-    ptrs
-}
-
-fn task_ptr_in(ptrs: &[usize], task: &Arc<TaskControlBlock>) -> bool {
-    ptrs.binary_search(&task_ptr(task)).is_ok()
-}
-
 static INTERRUPTIBLE_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ZOMBIE_QUEUE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -354,16 +339,6 @@ impl TaskManager {
         }
         (count, targets)
     }
-    /// 从 interruptible registry 中移除一组任务。
-    fn remove_interruptible_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
-        let ptrs = sorted_task_ptrs(tasks);
-        let old_interruptible_len = self.interruptible_queue.len();
-        self.interruptible_queue
-            .retain(|task| !task_ptr_in(&ptrs, task));
-        let removed_interruptible = old_interruptible_len - self.interruptible_queue.len();
-        sub_interruptible_count(removed_interruptible);
-        removed_interruptible
-    }
     /// 可中断队列中任务数量
     pub fn interruptible_count(&self) -> u16 {
         self.interruptible_queue.len() as u16
@@ -495,9 +470,9 @@ pub(crate) fn try_publish_task_on(
 ) -> Result<(), isize> {
     assert!(cpu < crate::smp::configured_cpu_count());
     let process = task.process.clone();
-    // 这是避免无意义远端内核栈同步的快速拒绝；真正关闭 late-clone 竞争窗口
-    // 的仍是下面 publish_thread() 在成员锁内执行的最终检查。
-    if process.is_group_exiting() {
+    // 这是避免无意义远端内核栈同步的快速拒绝；真正关闭 group-exit/exec
+    // late-clone 竞争窗口的仍是 publish_thread() 在成员锁内执行的最终检查。
+    if process.thread_publish_blocked() {
         return Err(EAGAIN);
     }
     if cpu != crate::smp::BOOT_CPU_ID {
@@ -564,7 +539,7 @@ pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize>
 pub fn publish_task(task: Arc<TaskControlBlock>) {
     try_publish_task(task).unwrap_or_else(|errno| {
         panic!(
-            "unexpected group-exit gate while publishing kernel task: errno={}",
+            "unexpected thread-group gate while publishing kernel task: errno={}",
             errno
         )
     });
@@ -764,9 +739,9 @@ pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
     TASK_MANAGER
         .lock()
         .begin_interruptible_sleep(task.clone());
-    // group exit 可能恰好在停止方看到 Running 之后、这里登记 Blocking 之前
-    // 发布。登记完成后复查原子门禁，保证这类任务不会带着 SIGKILL 永久睡下。
-    if task.process.is_group_exiting() {
+    // group exit/exec 可能恰好在停止方看到 Running 之后、这里登记 Blocking
+    // 之前发布。登记完成后复查无锁门禁，保证目标线程不会永久睡下。
+    if task.process.thread_must_exit(task.gettid()) {
         let _ = wake_interruptible(task);
     }
 }
@@ -791,14 +766,13 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
     }
 }
 
-/// 让已进入 group exit 的 sibling 尽快到达自己的退出安全点。
+/// 让 group exit 或 exec 选中的 sibling 尽快到达自己的退出安全点。
 ///
 /// 这里结合 Linux `zap_other_threads` 的通知语义与 DragonOS 的 owner 自清理原则：
 /// 只投递不可屏蔽的 SIGKILL、唤醒睡眠者并 kick 运行 CPU；线程级资源必须由
 /// 目标线程自己释放。
-/// group-exit 门禁保证 live 成员不会处于 `New`，因此不会遗漏“已登记但未入队”
-/// 的 clone。
-pub(crate) fn wake_group_exit_threads(tasks: &[Arc<TaskControlBlock>], current_tid: usize) {
+/// 线程组门禁保证 live 成员不会处于 `New`，因此不会遗漏“已登记但未入队”的 clone。
+pub(crate) fn request_sibling_exit(tasks: &[Arc<TaskControlBlock>], current_tid: usize) {
     let mut targets = 0usize;
     for task in tasks {
         if task.gettid() == current_tid || task.is_zombie() {
@@ -825,10 +799,12 @@ pub(crate) fn wake_group_exit_threads(tasks: &[Arc<TaskControlBlock>], current_t
             }
             // queued affinity 搬迁者会自行通知最终目标；广播确保源/目标任一
             // 正在运行调度循环时都能及时重新检查 group-exit 状态。
+            // Migrating 没有稳定 owner；向全部在线 CPU 发 kick，让目标在完成
+            // 单队列交接后的第一个安全点观察线程组停止请求。
             TaskStatus::Migrating => targets |= crate::smp::online_cpu_mask(),
             TaskStatus::Zombie => {}
             TaskStatus::New => panic!(
-                "live group-exit target was never published: tid={}",
+                "live sibling-exit target was never published: tid={}",
                 task.gettid()
             ),
         }
@@ -986,19 +962,6 @@ pub(crate) fn set_remote_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> 
             TaskStatus::New | TaskStatus::Zombie => return false,
         }
     }
-}
-
-/// 从调度队列中移除一组任务。
-pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
-    // 固定 TASK_MANAGER -> 单个 RunQueue 的锁序，避免从 rq 摘除后扩大无锁的
-    // Blocked 退出窗口。Migrating 后不会反向取得 TASK_MANAGER 或等待 IPI ack，
-    // 因此 remove() 即使重定位 owner，也只等待两个短 runqueue 临界区。
-    let mut manager = TASK_MANAGER.lock();
-    let mut removed = manager.remove_interruptible_tasks(tasks);
-    for task in tasks {
-        removed += usize::from(super::run_queue::remove(task));
-    }
-    removed
 }
 
 /// 返回 ready + interruptible 队列计数的近似值。
@@ -1307,6 +1270,12 @@ impl WaitQueue {
                 guard.finish_wait(task.as_ref());
                 return WaitResult::TimedOut;
             }
+            // 普通“不可中断”等待仍忽略用户信号，但不能阻止线程组生命周期
+            // 前进。返回 Interrupted 让上层先正常析构 syscall 栈上的 Arc。
+            if task.process.thread_must_exit(task.gettid()) {
+                guard.finish_wait(task.as_ref());
+                return WaitResult::Interrupted;
+            }
             if signal_check {
                 // 必须在不持有 task.inner 的情况下检查 actionable signal；
                 // 这里仅持有等待队列锁，`has_actionable_signal` 自行短暂取任务锁。
@@ -1410,6 +1379,10 @@ impl WaitQueue {
             {
                 queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::TimedOut;
+            }
+            if task.process.thread_must_exit(task.gettid()) {
+                queue_of(&mut guard).finish_wait(task.as_ref());
+                return WaitResult::Interrupted;
             }
             if signal_check {
                 // 持有的是调用方传入的对象锁，不能同时长期持有 task.inner。
@@ -1521,6 +1494,10 @@ impl WaitQueue {
             {
                 Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::TimedOut;
+            }
+            if task.process.thread_must_exit(task.gettid()) {
+                Self::finish_wait_on_queues(queues, task.as_ref());
+                return WaitResult::Interrupted;
             }
             if has_actionable_signal(&task) {
                 Self::finish_wait_on_queues(queues, task.as_ref());
@@ -2467,11 +2444,19 @@ pub fn run_deferred_timer_work() -> bool {
 /// IRQ-off，因而消费后到真正切换前不会有本地 handler 插入并丢失新请求。
 pub fn run_task_safe_point() {
     let irq_was_enabled = crate::hal::local_irq_save();
-    let group_exit_code = current_task().and_then(|task| task.process.group_exit_code());
-    if let Some(exit_code) = group_exit_code {
+    let stop = current_task().map(|task| {
+        (
+            task.process.group_exit_code(),
+            task.process.thread_must_exit(task.gettid()),
+        )
+    });
+    if let Some((Some(exit_code), _)) = stop {
         // exit 入口统一负责建立可响应 IPI 的清理窗口；安全点不再复制一套
         // “入口 IRQ 是否开启”的分支。
         super::exit_current_and_run_next(exit_code);
+    }
+    if matches!(stop, Some((None, true))) {
+        super::exit_current_and_run_next(Signals::SIGKILL.to_signum().unwrap() as u32);
     }
     let timer_resched = run_deferred_timer_work();
     let ipi_resched = crate::smp::take_reschedule_request();

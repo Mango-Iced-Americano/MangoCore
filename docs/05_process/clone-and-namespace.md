@@ -603,18 +603,24 @@ pub fn schedule_clone_child(
     parent: &Arc<TaskControlBlock>,
     child: Arc<TaskControlBlock>,
     flags: CloneFlags,
-) {
+) -> Result<CloneScheduleOutcome, isize> {
     if flags.contains(CloneFlags::CLONE_VFORK) {
         child.process.set_vfork_parent(parent);
-        publish_task(child.clone());
-        child.process.wait_vfork_done_uninterruptible();
+        try_publish_task(child.clone())?;
+        if child.process.wait_vfork_done_killable() == WaitResult::Interrupted {
+            return Ok(CloneScheduleOutcome::StopCaller);
+        }
     } else {
-        publish_task(child);
+        try_publish_task(child)?;
     }
+    Ok(CloneScheduleOutcome::Published)
 }
 ```
 
 `CLONE_THREAD` 不加入 children，因此不会作为独立 waitable child；`CLONE_VFORK` 在 child 入队后让父线程等待 child 的 `Completion`，等待点不可中断。
+这里的“不可中断”只针对普通信号；永久 group exit 或另一线程的 exec 可以请求父线程
+退出。由于 child 已发布，该分支返回 `StopCaller`，调用者释放本地 `Arc` 后进入安全点，
+不得执行 unpublished cleanup。
 
 ## 14. 调试核对点
 

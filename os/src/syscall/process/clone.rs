@@ -10,7 +10,7 @@ use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
     current_euid, current_task, current_user_token, signal::Signals, IpcNamespace, MountNamespace,
-    ProcessManager, TaskControlBlock,
+    CloneScheduleOutcome, ProcessManager, TaskControlBlock,
 };
 use crate::utils::error::SyscallErr;
 use log::warn;
@@ -296,12 +296,23 @@ fn sys_clone_inner(
         child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
         return errno;
     }
-    if let Err(errno) = ProcessManager::schedule_clone_child(&parent, child.clone(), flags) {
-        if let Some(pidfd) = allocated_pidfd {
-            drop_parent_fd(&parent, pidfd);
+    match ProcessManager::schedule_clone_child(&parent, child.clone(), flags) {
+        Err(errno) => {
+            if let Some(pidfd) = allocated_pidfd {
+                drop_parent_fd(&parent, pidfd);
+            }
+            child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+            return errno;
         }
-        child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
-        return errno;
+        Ok(CloneScheduleOutcome::StopCaller) => {
+            // vfork child 已经发布，不能再按 unpublished 路径撤销它。先释放
+            // syscall 栈上的 current/child Arc，再由统一安全点完成本线程退出。
+            drop(child);
+            drop(parent);
+            crate::task::run_task_safe_point();
+            unreachable!("thread-group stop request disappeared after vfork wake");
+        }
+        Ok(CloneScheduleOutcome::Published) => {}
     }
     new_tid as isize
 }

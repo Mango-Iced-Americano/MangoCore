@@ -44,7 +44,7 @@ wait
 | clone 成功但 wait 不到 | `publish_clone_child()` 是否执行，parent children 是否有 child |
 | child 运行参数错 | child trap context 返回值、TLS、child stack |
 | exec 失败后进程损坏 | 是否在可失败构造完成前替换旧 VM |
-| 多线程 exec 后 sibling 仍运行 | sibling exit resources 和队列移除 |
+| 多线程 exec 后 sibling 仍运行 | ExecSession 门禁、owner 安全点退出与 live count ack |
 | exit 后 zombie 堆积 | wait/auto-reap、pid release、zombie queue drain |
 | wait 阻塞不醒 | `child_exit_wait.wake_all()` 和 wait 条件复查 |
 

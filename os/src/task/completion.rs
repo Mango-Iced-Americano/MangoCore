@@ -72,17 +72,17 @@ impl Completion {
         )
     }
 
-    /// 不可中断地等待完成事件。
+    /// 等待完成事件，但允许线程组退出或多线程 exec 终止当前线程。
     ///
     /// # Semantics
     ///
-    /// 不检查信号，也没有 deadline，只会在 `complete()` 后返回。`vfork`
-    /// 父路径使用该接口，避免父进程因可处理信号在内核中自旋而阻止子进程运行。
-    pub fn wait_uninterruptible(&self) {
-        let _ = WaitQueue::wait_event_locked(
+    /// 普通信号不会中断等待；返回 `Interrupted` 只表示当前线程已被 group exit
+    /// 或另一线程的 exec 选中，调用方必须释放栈上的 `Arc` 后进入任务安全点。
+    pub fn wait_killable(&self) -> super::WaitResult {
+        WaitQueue::wait_event_locked(
             &self.inner,
             |inner| &mut inner.wait_queue,
             |inner| inner.done.then_some(0),
-        );
+        )
     }
 }

@@ -45,6 +45,9 @@ yield/block/exit 仍直接进入切换边界。
 B40 在同一安全点增加永久 group-exit 检查：只读取进程级原子退出码，命中后由
 当前 owner 在本 CPU 清理并发布 live-token ack；请求 CPU 不再摘除或销毁远端
 Running TCB。首次 clone 发布也与线程成员登记共用 group-exit 门禁。
+B41 继续让多线程 exec 复用这个 owner 自清理安全点，但使用可恢复的临时 exec
+会话和 Completion：owner 等到 sibling 清理完旧用户映射并把 live count 降为 1
+后才替换 MM，随后重新开放线程创建。
 
 ## 2. TaskManager 与 Per-CPU RunQueue
 
@@ -266,13 +269,27 @@ B40 沿用已有六态调度状态，不增加 `Exiting/WakePending` 等第二�
 4. 最后一个 ack 执行进程级 `finish_exit()`，其他 CPU 不会远程释放其内核栈或 MM 资源。
 
 `sleep_interruptible()` 在 `TASK_MANAGER` 内提交 `Running -> Blocking` 后，释放锁并复查
-原子 group-exit 码。若停止方恰好先看到 Running、任务随后才登记 Blocking，这次复查会
-撤销睡眠；若退出发布更晚，停止方会看到 Blocking/Blocked 并执行 wake。两种次序至少
-有一方负责唤醒，且没有把 thread-group 锁与 `TASK_MANAGER` 嵌套。
+线程组停止快照。若停止方恰好先看到 Running、任务随后才登记 Blocking，这次复查会
+撤销睡眠；若退出/exec 发布更晚，停止方会看到 Blocking/Blocked 并执行 wake。两种次序
+至少有一方负责唤醒，且没有把 thread-group 锁与 `TASK_MANAGER` 嵌套。
 
 永久 group exit 不由发起者同步等待 completion：每个线程的 live token 就是 ack，
-最后一个 ack 自然拥有 PCB/MM 收尾权。多线程 exec 需要“停止后继续当前进程”，不能直接
-复用永久退出码；该临时 stop/completion 属于 B41。
+最后一个 ack 自然拥有 PCB/MM 收尾权。
+
+### 3.5 多线程 exec 临时停止
+
+B41 不增加 `TaskStatus`，也不让 exec owner 从远端 runqueue 摘除 sibling：
+
+1. owner 在线程组锁内安装唯一 `ExecSession`，同时关闭 `CLONE_THREAD` 首次发布；
+2. sibling 收到 SIGKILL/wake/RESCHEDULE，在所属 CPU 的 `run_task_safe_point()` 自行退出；
+3. 每个 sibling 完成用户映射撤销和 TLB shootdown 后才递减 live token；
+4. 计数变成 1 时 `Completion` 唤醒 owner，owner 此时才安装新 trap context 和 MM；
+5. 安装完成后清除临时会话，线程发布门重新开放。
+
+普通用户信号不能取消这个等待，否则已停止一部分 sibling 后无法回滚旧线程组；永久
+group exit 可以覆盖 exec。所有 WaitQueue/Completion 等待路径都会识别线程组生命周期
+停止请求，从等待队列中摘除自己并返回调用层释放栈上 `Arc`，避免 Blocked sibling 让
+exec owner 永久等待。
 
 ## 4. Processor
 

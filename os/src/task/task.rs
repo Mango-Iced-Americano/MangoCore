@@ -31,7 +31,7 @@ use crate::mm::PageTableImpl;
 use crate::mm::{
     AddressSpaceInner, FaultAccess, AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
-use crate::syscall::errno::{EFAULT, EISDIR, ENOEXEC, ENOMEM};
+use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use alloc::string::String;
@@ -1582,6 +1582,63 @@ impl TaskControlBlock {
         self.kernel_entry
     }
 
+    /// 停止同线程组 sibling，并一次性安装已经完整构造的新执行映像。
+    ///
+    /// 所有可能失败的 ELF 解析和用户栈构造都在调用本函数前完成；从
+    /// `begin_exec()` 起关闭 clone 门，直到旧 MM 已无人执行、共享进程状态全部
+    /// 替换完成才重新开放。远端线程始终在自己的 CPU 安全点释放资源。
+    fn install_exec_image(
+        &self,
+        elf: Arc<vfs::File>,
+        old_vm: Arc<AddressSpace<PageTableImpl>>,
+        old_stack_allocated: bool,
+        new_vm: AddressSpaceInner<PageTableImpl>,
+        new_trap_ppn: PhysPageNum,
+        new_trap_cx: TrapContext,
+    ) -> Result<(), isize> {
+        let (exec, siblings) = self.process.begin_exec(self.gettid())?;
+        super::request_sibling_exit(&siblings, self.gettid());
+        // noreturn sibling 调度不会析构 owner 的 syscall 栈；等待前主动释放快照 Arc。
+        drop(siblings);
+        exec.wait();
+
+        // 永久 group exit 可以覆盖临时 exec。此时旧映像仍未提交，先重开临时门；
+        // 永久退出门仍保持关闭，上层随后走统一的当前线程退出路径。
+        if self.process.is_group_exiting() {
+            exec.finish();
+            return Err(EAGAIN);
+        }
+
+        {
+            let mut inner = self.acquire_inner_lock();
+            inner.trap_cx_ppn = new_trap_ppn;
+            *inner.get_trap_cx() = new_trap_cx;
+            inner.clear_child_tid = 0;
+            inner.robust_list = RobustList::default();
+            inner.signal_stack = SignalStack::disabled();
+        }
+        self.user_stack_allocated.store(true, Ordering::Relaxed);
+
+        if Arc::strong_count(&old_vm) > 2 {
+            // 其它 PCB 仍共享旧 VM（如 CLONE_VM/vfork）时，只撤销本线程旧槽；
+            // 同一 PCB 的 sibling 已在 completion 前分别撤销自己的用户资源。
+            old_vm.write(|vm| {
+                vm.dealloc_user_res_with_stack(self.user_res_slot, old_stack_allocated)
+            });
+        }
+        self.process.replace_exe(elf);
+        {
+            let files_ref = self.process.files();
+            let mut fd_table = files_ref.lock();
+            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
+        }
+        self.process.replace_vm(new_vm);
+        self.process.sighand().lock().reset();
+        self.process.futex().lock().clear();
+        exec.finish();
+        Ok(())
+    }
+
     /// 加载ELF文件
     pub fn load_elf(
         &self,
@@ -1592,14 +1649,11 @@ impl TaskControlBlock {
         if elf.is_dir() {
             return Err(EISDIR);
         }
-        // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页，
-        // 避免新旧内存集同时存在导致双倍内存压力触发 OOM。
-        // 如果旧 VM 被共享（典型是 CLONE_VM | CLONE_VFORK），exec 必须先
-        // 构造新地址空间，提交时再让当前进程脱离共享 VM，不能破坏父进程。
+        // 旧 VM 必须完整保留到 exec gate 关闭且 sibling 全部确认退出。
+        // 同一 PCB 的线程不会各自长期持有 VM Arc，因此 Arc 计数不能证明没有
+        // 并发线程；在 gate 建立前提前 recycle 会与 late CLONE_THREAD 竞争。
         let current_vm = self.process.vm();
-        if Arc::strong_count(&current_vm) <= 2 {
-            current_vm.write(|vm| vm.recycle_data_pages());
-        }
+        let old_stack_allocated = self.user_stack_allocated.load(Ordering::Relaxed);
 
         // 将ELF文件映射到内核空间
         let _t_kmap = perf::perf_time_now();
@@ -1645,7 +1699,6 @@ impl TaskControlBlock {
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
             .map_err(|_| ENOMEM)?;
-        self.user_stack_allocated.store(true, Ordering::Relaxed);
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
@@ -1667,61 +1720,14 @@ impl TaskControlBlock {
             // 陷阱处理函数地址
             trap_handler as usize,
         );
-        let other_threads: Vec<_> = self
-            .process
-            .threads()
-            .into_iter()
-            .filter(|task| task.tid.0 != self.tid.0)
-            .collect();
-        // 在 TASK_MANAGER -> 单个 RunQueue 的固定锁序下收回调度容器所有权，
-        // 随后才允许线程资源路径把任务推进到 Zombie。
-        super::remove_tasks_from_queues(&other_threads);
-        for task in &other_threads {
-            // execve 会杀掉同线程组的其他线程，但保留当前 process。
-            task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
-        }
-
-        {
-            // **** 保持当前PCB锁
-            let mut inner = self.acquire_inner_lock();
-            // 更新陷阱上下文的物理页号
-            inner.trap_cx_ppn = trap_cx_ppn;
-            // 更新任务上下文
-            *inner.get_trap_cx() = trap_cx;
-            // 重置clear_child_tid
-            inner.clear_child_tid = 0;
-            // 重置robust_list
-            inner.robust_list = RobustList::default();
-            // execve disables the alternate signal stack.
-            inner.signal_stack = SignalStack::disabled();
-        }
-        if Arc::strong_count(&current_vm) > 2 {
-            // CLONE_VM/vfork 子进程 exec 后会脱离旧地址空间。这里仅从旧 VM
-            // 中移除当前线程的 trap context/默认栈映射，不释放 slot 号本身；
-            // 新 VM 仍使用同一个 user_res_slot，避免父 VM 留下孤儿映射。
-            current_vm.write(|vm| {
-                vm.dealloc_user_res_with_stack(
-                    self.user_res_slot,
-                    self.user_stack_allocated.load(Ordering::Relaxed),
-                )
-            });
-        }
-        // 更新可执行文件描述符
-        self.process.replace_exe(elf);
-        // 清理资源 — 关闭所有 CLOEXEC 文件描述符
-        {
-            let files_ref = self.process.files();
-            let mut fd_table = files_ref.lock();
-            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
-        }
-        // 替换内存映射
-        self.process.replace_vm(memory_set);
-        // 清空信号处理函数表
-        self.process.sighand().lock().reset();
-        // 清空futex
-        self.process.futex().lock().clear();
-        Ok(())
-        // **** 释放当前PCB锁
+        self.install_exec_image(
+            elf,
+            current_vm,
+            old_stack_allocated,
+            memory_set,
+            trap_cx_ppn,
+            trap_cx,
+        )
     }
 
     /// 加载ELF文件（零拷贝路径：直接通过 PageCache 映射，无需内核空间临时映射）。
@@ -1735,11 +1741,10 @@ impl TaskControlBlock {
         if elf.is_dir() {
             return Err(EISDIR);
         }
-        // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页。
+        // 即使当前看起来只有一个 live thread，也不能在建立 exec gate 前回收
+        // 旧 VM；late CLONE_THREAD 可能在检查后发布并继续执行旧映像。
         let current_vm = self.process.vm();
-        if Arc::strong_count(&current_vm) <= 2 {
-            current_vm.write(|vm| vm.recycle_data_pages());
-        }
+        let old_stack_allocated = self.user_stack_allocated.load(Ordering::Relaxed);
 
         // 直接从 inode 和 PageCache 解析 ELF 并映射到用户地址空间
         let _t_map = perf::perf_time_now();
@@ -1770,7 +1775,6 @@ impl TaskControlBlock {
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
             .map_err(|_| ENOMEM)?;
-        self.user_stack_allocated.store(true, Ordering::Relaxed);
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
@@ -1788,43 +1792,14 @@ impl TaskControlBlock {
             self.kstack.get_top(),
             trap_handler as usize,
         );
-        let other_threads: Vec<_> = self
-            .process
-            .threads()
-            .into_iter()
-            .filter(|task| task.tid.0 != self.tid.0)
-            .collect();
-        super::remove_tasks_from_queues(&other_threads);
-        for task in &other_threads {
-            task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
-        }
-
-        {
-            let mut inner = self.acquire_inner_lock();
-            inner.trap_cx_ppn = trap_cx_ppn;
-            *inner.get_trap_cx() = trap_cx;
-            inner.clear_child_tid = 0;
-            inner.robust_list = RobustList::default();
-            inner.signal_stack = SignalStack::disabled();
-        }
-        if Arc::strong_count(&current_vm) > 2 {
-            current_vm.write(|vm| {
-                vm.dealloc_user_res_with_stack(
-                    self.user_res_slot,
-                    self.user_stack_allocated.load(Ordering::Relaxed),
-                )
-            });
-        }
-        self.process.replace_exe(elf);
-        {
-            let files_ref = self.process.files();
-            let mut fd_table = files_ref.lock();
-            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
-        }
-        self.process.replace_vm(memory_set);
-        self.process.sighand().lock().reset();
-        self.process.futex().lock().clear();
-        Ok(())
+        self.install_exec_image(
+            elf,
+            current_vm,
+            old_stack_allocated,
+            memory_set,
+            trap_cx_ppn,
+            trap_cx,
+        )
     }
 
     /// 创建新的任务控制块

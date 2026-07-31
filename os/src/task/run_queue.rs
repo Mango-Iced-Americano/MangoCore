@@ -296,52 +296,6 @@ pub(crate) fn set_queued_affinity(
     }
 }
 
-/// 从其 owner runqueue 撤回任务，并交给调用方推进退出流程。
-pub(crate) fn remove(task: &Arc<TaskControlBlock>) -> bool {
-    loop {
-        let cpu = match task.task_status() {
-            TaskStatus::Queued(cpu) => cpu,
-            TaskStatus::Migrating => {
-                // exit/exec 可能持有 TASK_MANAGER。迁移路径在发布 Migrating
-                // 后绝不获取该锁或等待 IPI ack，所以这里不存在锁依赖环。
-                spin_loop();
-                continue;
-            }
-            _ => return false,
-        };
-        let mut queue = state(cpu).run_queue.lock();
-        let Some(index) = queue
-            .tasks
-            .iter()
-            .position(|queued| Arc::ptr_eq(queued, task))
-        else {
-            let actual = task.task_status();
-            drop(queue);
-            match actual {
-                TaskStatus::Migrating => continue,
-                TaskStatus::Queued(owner) if owner != cpu => continue,
-                TaskStatus::Queued(_) => panic!(
-                    "Queued task is absent from owner runqueue: tid={} cpu={}",
-                    task.gettid(),
-                    cpu
-                ),
-                _ => return false,
-            }
-        };
-        task.require_sched_transition(
-            TaskStatus::Queued(cpu),
-            TaskStatus::Blocked,
-            "remove queued task",
-        );
-        let removed = queue.remove_at(index);
-        // TCB 析构可能继续释放内核栈或进程资源，不能发生在 runqueue 锁内。
-        drop(queue);
-        sub_running(cpu, 1);
-        drop(removed);
-        return true;
-    }
-}
-
 /// nice hint 已更新后，修正 owner runqueue 的选择快速路径计数。
 pub(crate) fn update_nice(task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
     if (old_nice == 0) == (new_nice == 0) {

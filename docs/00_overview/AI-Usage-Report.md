@@ -69,6 +69,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 远程 Queued 线程 affinity | 2026-07-30 | GPT/Codex, DeepSeek | Linux/DragonOS queued-migrating 对照、单 rq owner 交接、三轮冻结审查与双架构回归 | 稳定 Queued 线程可在不持双 rq 锁时迁移；Running/Blocking 仍未支持；双架构 focused 23/23、初赛基线不退化 |
 | SMP affinity-aware 新任务放置 | 2026-07-31 | GPT/Codex, DeepSeek | 继承 mask 与首次发布冲突审计、无锁 per-CPU 负载提示、双架构 8 核冻结验证 | 新建和唤醒任务统一按 affinity/在线状态/局部性/负载选择 CPU；双架构 focused 23/23，初赛 RV64 312/314、LA64 308/314 |
 | SMP 远程 Running/Blocking affinity | 2026-07-31 | GPT/Codex, DeepSeek | owner 安全点请求/完成协议、锁序反例审查、双架构 8 核冻结验证 | 远程写侧等待运行 owner 完成交接；不新增调度状态；双架构 focused 24/24，初赛 RV64 312/314、LA64 308/314 |
+| SMP Per-CPU 调度 tick | 2026-07-31 | GPT/Codex, DeepSeek | 双架构 timer 官方规范、CPU0 全局 callback 边界、无 syscall 用户抢占与冻结验证 | 每 CPU 100 Hz quantum，hard IRQ 只发布 deferred 请求；双架构 focused 25/25，初赛基线不退化 |
+| SMP 线程组退出与多线程 exec | 2026-07-31 | GPT/Codex, DeepSeek | Linux/DragonOS 生命周期对照、owner 自清理、clone 门禁、live ack、等待点退栈与双架构 8 核门禁 | B40 永久 group exit 与 B41 临时 exec 会话均不远程析构 Running sibling；focused 由 26/26 增至 27/27，初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -841,6 +843,34 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   指纹均为 `eec8bfde6f0b626296b7002bb83eb6b079b7f12e597e77d248c16d7e43bafbd6`，
   before/after 一致。
 
+### Case 36: SMP 线程组退出与多线程 exec
+
+- Evidence: `docs/Work_Log/2026-07-31.md`、
+  `docs/Work_Log/evidence/2026-07-31/smp-b40-group-exit-summary.md` 和
+  `docs/Work_Log/evidence/2026-07-31/smp-b41-exec-summary.md`；DeepSeek prompt、manifest
+  与原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 Linux `do_group_exit()/de_thread()` 与 DragonOS 当前线程退出
+  原则，设计线程组门禁、live-token 线性化、等待点退栈、实现与最终事实裁决；DeepSeek
+  负责冻结 diff 的反例审查、受限 Docker 串行执行和原始日志归纳，不修改源码、不提交、不 push。
+- Problem: 旧 exit/exec 会由发起 CPU 从远端 runqueue 摘除 sibling 并直接释放其用户映射
+  和 TCB；目标 CPU 可能仍运行在这些资源上。多线程 exec 还不能在 sibling 离开旧 MM 前
+  替换地址空间，late clone 也不能漏出停止快照。
+- Human action: B40 让永久 group exit 在线程组锁内固定退出码、关闭首次发布并发送
+  SIGKILL/wake/RESCHEDULE，所有 sibling 在 owner CPU 安全点自清理。B41 在同一锁域增加
+  可恢复 `ExecSession + Completion`，拒绝 concurrent exec/late thread publish；live count
+  只在用户资源撤销和 TLB ack 后递减到 1，owner 才安装新映像并重新开门。永久 group exit
+  优先覆盖 exec，WaitQueue/Completion/vfork 会因生命周期停止请求安全退栈。
+- AI adjudication: B40 初轮冻结暴露 `then_some` 参数提前求值造成零值下溢，人工终止旧任务
+  后修正；B41 验证包装器因模型误重复提交 RV64 preliminary 而 fail-closed，前五个冻结
+  child 仍逐项有效，GPT/Codex 另起只允许一次 LA64 preliminary 的补测闭合门禁。模型报告
+  中关于是否存在 `exec.wait()` 和是否可跳过 LA 回归的错误均未采纳。
+- Verification: B40 已提交为 `f1797a85`。B41 冻结生产 diff SHA-256 为
+  `dff2949af9e355cc1c5382f869e26068d014307e28de1872dc2507a457949d55`；双架构
+  kernel build exit 0，RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 27/27，新增
+  `exec_stops_remote_sibling` 与终态 STOP 明确通过。初赛 `mask=0x003` 为 RV64
+  312/314、LA64 308/314，精确失败集合与既有基线一致，clone/fork/exec/exit/wait
+  项满分；所有有效 child 均无源码 mutation。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -918,6 +948,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b37-affinity-placement-summary.md` | SMP affinity-aware 新任务放置 | 记录继承 mask 与固定 CPU0 发布冲突、无锁负载提示边界、DeepSeek 冻结审查裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b38-running-affinity-summary.md` | SMP 远程 Running/Blocking affinity | 记录单槽请求、owner 安全点完成、真实锁序、DeepSeek 结论纠错及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b39-percpu-timer-summary.md` | SMP Per-CPU 调度 tick | 记录本地 quantum/CPU0 全局 callback 边界、官方规范对照、DeepSeek RED/冻结验证裁决及双架构 8 核门禁 |
+| `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b40-group-exit-summary.md` | SMP 跨 CPU 线程组退出 | 记录永久 gate、owner 自清理、live-token ack、DeepSeek 反例审查及双架构 26/26/初赛门禁 |
+| `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b41-exec-summary.md` | SMP 多线程 exec | 记录临时 ExecSession、late clone 门禁、旧 MM 生命周期、等待点退栈、包装器 fail-closed 裁决及双架构 27/27/初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

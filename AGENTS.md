@@ -183,19 +183,23 @@ B40 已把永久 `exit_group` 改为 owner 自清理：第一个调用者在线�
 完成用户资源/TLB 清理后递减 live token，最后一个 ack 独占 PCB/MM 收尾。首次 clone 的
 成员登记与 `New -> Queued(cpu)` 在同一 `thread_group -> 单个 RunQueue` 临界区提交，
 门禁关闭时返回 `EAGAIN`。`sleep_interruptible()` 登记 Blocking 后必须复查退出原子码；
-退出清理统一在可响应 IPI 的受控中断窗口内进行。多线程 exec 仍待 B41，禁止继续用请求
-CPU 直接清理远端 Running sibling。
+退出清理统一在可响应 IPI 的受控中断窗口内进行。
+B41 已把多线程 exec 改为临时 `ExecSession + Completion`：同一线程组锁拒绝
+concurrent exec 和 late `CLONE_THREAD` 发布，owner 只通知 sibling 在所属 CPU
+安全点自清理；live count 在用户映射撤销/TLB ack 后降为 1，owner 才替换 MM 并重新
+开放 clone。永久 group exit 优先覆盖临时 exec；WaitQueue/Completion/vfork 等待必须
+允许生命周期停止请求安全退栈。禁止恢复由请求 CPU 直接清理远端 Running sibling 的旧路径。
 动态 kernel-global 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户
 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40 的受控迁移、真实 CPU/affinity 查询、
+B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
-RESCHEDULE/本地 timer 抢占、永久 group-exit 不得外推为以下能力已完成：
-默认全核调度、多线程 exec 安全、多写侧压力验收、任意内核点抢占、连续 range
-或安全 CPU detach。
+RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下
+能力已完成：默认全核调度、非 leader exec 的完整 Linux TID/TGID 身份接管、
+共享子系统全核审计、多写侧压力验收、任意内核点抢占、连续 range 或安全 CPU detach。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

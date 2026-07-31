@@ -56,9 +56,10 @@ pub struct ProcessControlBlock {
 | `leader_tid` | 线程组主线程 tid |
 | `_pid_handle` | 保持 pid/tgid 到 wait 回收前不复用 |
 | `process_quota` | 进程级 clone quota guard |
-| `thread_group` | 线程成员弱引用、首次发布与 group-exit 快照的共同锁域 |
+| `thread_group` | 成员弱引用、首次发布、group exit 与临时 exec 会话的共同锁域 |
 | `group_exit_code` | 0 表示正常；其余值编码为统一退出码 `+1`，供安全点无锁读取 |
 | `live_threads` | 当前计入 live 的线程数 |
+| `exec_owner_tid` | active exec owner 的无锁快照；`usize::MAX` 表示无临时会话 |
 | `trap_context_cache` | 可复用 trap context slot，限制 256 |
 | `child_exit_wait` | 父进程 wait4/waitid 等待队列 |
 | `vfork_parent` | `CLONE_VFORK` 父线程弱引用 |
@@ -206,8 +207,9 @@ PCB 提供资源 getter 和 unshare/setter：
 ```
 
 这把锁只包住首次发布的短临界区；远端内核栈同步发生在取锁前，IPI doorbell
-发生在解锁后。group exit 使用同一锁先发布非零退出码、再形成 live 成员快照，
-从而与 late clone 线性化。
+发生在解锁后。group exit 使用同一锁先发布非零退出码、再形成 live 成员快照；
+多线程 exec 使用同一锁安装 `ExecSession`、保存 owner 和 Completion。两者都与
+late clone 线性化，且 group exit 可以覆盖临时 exec。
 
 `remove_thread()` 在 `exit_thread_resources()` 的最后消费 live token，并在列表过于
 稀疏时 compact：
@@ -227,6 +229,11 @@ AcqRel `fetch_sub` 能观察此前 sibling 已完成的用户内存/TLB 清理�
 调试“进程为什么没有 zombie”时看 live count；调试“信号为什么找不到线程”时看
 members weak 是否仍可升级。
 
+active exec 期间，`remove_thread()` 看到 live count 降为 1 时会克隆
+`ExecState.siblings_done`，释放线程组锁后才 `complete()`。因此 owner 的确认条件是
+权威计数，而不是开始时快照为空；Completion 唤醒也不会反向嵌套 WaitQueue/runqueue
+与线程组锁。
+
 ## 8. trap context cache
 
 线程退出时，`exit_thread_resources()` 会尝试：
@@ -240,6 +247,7 @@ process.try_cache_trap_context_slot(user_res_slot)
 | 条件 | 结果 |
 |------|------|
 | 进程正在 group exit | 不缓存 |
+| 当前存在 exec 会话 | 不缓存 |
 | live thread count <= 1 | 不缓存 |
 | cache 长度 >= 256 | 不缓存 |
 | slot 已在 cache 中 | 不缓存 |
@@ -297,7 +305,9 @@ PCB 保存：
 | `vfork_parent` | 正在等待的父线程 |
 | `vfork_done` | `Completion` |
 
-`complete_vfork()` 会清空 parent 并完成 completion。exec 成功和 exit 都会调用它；父线程通过 `wait_vfork_done_uninterruptible()` 等待。
+`complete_vfork()` 会清空 parent 并完成 completion。exec 成功和 exit 都会调用它；
+父线程通过 `wait_vfork_done_killable()` 等待。普通信号不打断等待，线程组生命周期
+停止请求会返回 `Interrupted`，由 clone 调用层释放已发布 child 的本地引用后进入安全点。
 
 ## 13. 子进程收养
 
@@ -350,4 +360,4 @@ PID 不在进程进入 zombie 时立即复用。PCB 持有 `_pid_handle`，直�
 | wait 不唤醒父进程 | `child_exit_wait.wake_all()`、auto-reap、parent 指针 |
 | vfork 父进程永久阻塞 | `complete_vfork()` 是否在 exec/exit 调用 |
 | PID 过早复用 | `_pid_handle` 是否在 wait 前释放 |
-| 多线程 exec 后旧 VM 残留 | `replace_vm()` 和其他线程退出路径 |
+| 多线程 exec 后旧 VM 残留 | ExecSession、live count ack、外部共享 VM 槽撤销 |

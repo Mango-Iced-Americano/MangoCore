@@ -219,12 +219,13 @@ exec 成功后：
 |------|------|
 | TCB | 新 trap context、清 clear_child_tid、重置 robust list、禁用 alt signal stack |
 | PCB | replace exe、replace VM、mark execed、set exe path |
-| TaskManager | 移除同线程组其他线程 |
+| ExecSession | 临时关闭 clone，等待 sibling 在 owner CPU 清理并发布 live ack |
 | fd table | 关闭 CLOEXEC fd |
 | sighand/futex | reset/clear |
 | Completion | complete vfork |
 
-当前任务继续运行，其他线程被线程级退出。
+当前任务继续运行，其他线程在各自任务安全点完成线程级退出。exec owner 不远程摘除
+runqueue 节点或释放 TCB；只有 live count 降为 1 后才安装新 MM。
 
 ## 11. exit 路径中的协作
 
@@ -311,5 +312,5 @@ match ProcessManager::wait_child(
 | syscall 看到错误当前进程 | CPU-local 指针、current 槽和 PID/TID 快照 |
 | 任务睡眠后无法唤醒 | WaitQueue 入队顺序与 wake path |
 | exit 后 wait 不回收 | PCB children、ProcessState、child_exit_wait |
-| 多线程 exec 后资源泄露 | other_threads exit 与 queue remove |
+| 多线程 exec 后资源泄露/死锁 | ExecSession 门禁、live count ack 与等待点生命周期退出 |
 | vfork 互锁 | Completion complete 和父等待路径 |

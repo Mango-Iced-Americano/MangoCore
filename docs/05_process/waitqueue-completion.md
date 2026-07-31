@@ -495,12 +495,12 @@ impl Completion {
         )
     }
 
-    pub fn wait_uninterruptible(&self) {
-        let _ = WaitQueue::wait_event_locked(
+    pub fn wait_killable(&self) -> super::WaitResult {
+        WaitQueue::wait_event_locked(
             &self.inner,
             |inner| &mut inner.wait_queue,
             |inner| inner.done.then_some(0),
-        );
+        )
     }
 }
 ```
@@ -509,9 +509,12 @@ impl Completion {
 |------|------|
 | `new()` | 初始未完成 |
 | `complete()` | 标记完成并唤醒等待者 |
-| `wait_uninterruptible()` | 不可中断等待完成 |
+| `wait_killable()` | 忽略普通信号；线程组退出/exec 停止请求可中断 |
 
-vfork 子进程 exec 成功或 exit 时调用 `ProcessControlBlock::complete_vfork()`，父线程等待 `vfork_done`。
+vfork 子进程 exec 成功或 exit 时调用 `ProcessControlBlock::complete_vfork()`，父线程等待
+`vfork_done`。B41 的 exec owner 也用独立 Completion 等待 sibling 完成用户映射和 TLB
+清理。生命周期中断返回 `Interrupted` 前，WaitQueue 必须先摘除 waiter；调用层随后释放
+syscall 栈上的 `Arc` 并进入任务安全点。
 
 ## 14. 使用者地图
 
@@ -522,11 +525,14 @@ vfork 子进程 exec 成功或 exit 时调用 `ProcessControlBlock::complete_vfo
 | eventfd/epoll/timerfd | 文件系统事件队列 |
 | socket/file I/O | 各自 wait queue 或通用 wait wrapper |
 | nanosleep/clock_nanosleep | kernel timer + sleep helper |
-| vfork | Completion |
+| vfork / 多线程 exec | Completion |
 
 WaitQueue 的正确使用模式是“检查条件、入队、释放相关锁、切换、被唤醒后复查条件”。只在入队前检查一次条件会丢唤醒；持业务锁睡眠会阻塞唤醒方；唤醒后不复查条件会把虚假唤醒当成成功。`*_locked` 变体就是为了解决条件检查和业务锁释放之间的竞态。
 
-Completion 比 WaitQueue 更窄：它只表达一次性事件已经发生，典型场景是 vfork 子进程 exec/exit 后释放父线程。Completion 不承载复杂条件，也不区分多个资源状态；如果等待条件依赖队列长度、fd readiness 或 signal mask，应使用 WaitQueue。
+Completion 比 WaitQueue 更窄：它只表达一次性事件已经发生，典型场景是 vfork 子进程
+exec/exit 后释放父线程，或多线程 exec 的 sibling live count 收缩为 1。Completion 不承载
+复杂条件，也不区分多个资源状态；如果等待条件依赖队列长度、fd readiness 或 signal mask，
+应使用 WaitQueue。
 
 ## 15. 调试核对点
 

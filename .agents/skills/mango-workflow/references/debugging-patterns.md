@@ -692,8 +692,20 @@
   `clear_child_tid/futex -> 用户资源与 PTE 清理 -> TLB shootdown` 之后，以 release 语义发布；
   观察到最后一个 ack 的线程才有权收尾进程共享资源。否则“计数为零”只证明收到请求，不证明
   远端已经停止使用 MM/PCB。
-- **边界**: 永久 `exit_group` 不必同步等待所有 sibling，因为调用者自身也必须退出；多线程
-  `exec` 是“暂时停住其他线程、调用者继续运行”，需要独立 completion/stop 协议，不能把永久
-  退出 gate 原样复用。任何路径都不得跨 IPI/TLB ack、context switch 或其他等待点持普通锁。
+- **临时 exec 协议**: 多线程 `exec` 是“暂时停住其他线程、owner 继续运行”，必须有独立
+  `ExecSession + Completion`。它可以复用 owner 安全点和 live token，但不能把永久退出码
+  当作临时 gate；安装新映像后还要重新开放线程发布。永久 group exit 到来时应覆盖临时 exec。
+- **不要把快照或 Arc 计数当成 ack**: 开始时 sibling 快照为空，不代表另一个线程已经完成
+  live-token 递减；同一 PCB 的线程也不会各自长期持有 VM `Arc`，所以
+  `Arc::strong_count()` 不能证明独占旧地址空间。只有位于用户映射/TLB 清理之后的权威
+  live count 降为 1，才能唤醒 exec owner 替换 MM。
+- **等待点必须响应生命周期停止**: 普通“不可中断”等待可忽略用户信号，但不能永远阻塞
+  group exit/exec。WaitQueue 应在条件锁内识别生命周期请求，先摘除 waiter，再返回调用层
+  释放 syscall 栈上的 `Arc` 并进入安全点。vfork child 已 publish 后，父线程被中止不能走
+  unpublished cleanup，应返回显式 `StopCaller`。
+- **最终退出码要在 live-zero 后复读**: 普通 exit 在线程清理前读取的 group-exit 码仍可能
+  与另一 sibling 随后发布永久退出竞争。最后一个 live token 消费者应在计数归零后再次
+  Acquire 读取；此时已没有 live 成员能首次发布，才可决定 wait 可见的进程退出码。
+- **边界**: 任何路径都不得跨 IPI/TLB ack、context switch、Completion 或其他等待点持普通锁。
 - **相关文件**: `os/src/task/process.rs`, `os/src/task/manager.rs`,
   `os/src/task/task.rs`, `os/src/task/mod.rs`

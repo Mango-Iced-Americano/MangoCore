@@ -24,6 +24,14 @@ pub(crate) struct WaitChildResult {
     pub status: u32,
 }
 
+/// clone 完成首次发布后的调用方状态。
+pub(crate) enum CloneScheduleOutcome {
+    /// child 已发布，父线程可以正常返回用户态。
+    Published,
+    /// child 已发布，但 vfork 父线程收到线程组停止请求，必须在释放本地 Arc 后退出。
+    StopCaller,
+}
+
 /// 进程管理静态门面。
 pub struct ProcessManager;
 
@@ -79,21 +87,26 @@ impl ProcessManager {
     /// 将已 publish 的子进程加入调度器并进入就绪队列。
     /// 成功返回后 child 已存活；`Err` 表示线程组门禁拒绝了首次发布，
     /// 调用方仍必须走 unpublished cleanup。
-    /// vfork 等待使用不可中断 completion —— 若用 Interrupted 循环重试，
-    /// 父进程在有 actionable signal 时会在内核自旋，子进程无法被调度。
+    /// vfork 等待忽略普通信号，但允许 group exit/exec 终止父线程。此时 child
+    /// 已经发布，调用方只能返回 `StopCaller`，不能走 unpublished cleanup。
     pub fn schedule_clone_child(
         parent: &Arc<TaskControlBlock>,
         child: Arc<TaskControlBlock>,
         flags: CloneFlags,
-    ) -> Result<(), isize> {
+    ) -> Result<CloneScheduleOutcome, isize> {
         if flags.contains(CloneFlags::CLONE_VFORK) {
             child.process.set_vfork_parent(parent);
             try_publish_task(child.clone())?;
-            child.process.wait_vfork_done_uninterruptible();
+            if matches!(
+                child.process.wait_vfork_done_killable(),
+                WaitResult::Interrupted
+            ) {
+                return Ok(CloneScheduleOutcome::StopCaller);
+            }
         } else {
             try_publish_task(child)?;
         }
-        Ok(())
+        Ok(CloneScheduleOutcome::Published)
     }
 
     pub(crate) fn wait_child(

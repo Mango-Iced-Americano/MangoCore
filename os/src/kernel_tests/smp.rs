@@ -362,11 +362,22 @@ static GROUP_EXIT_BLOCKED_READY: AtomicUsize = AtomicUsize::new(0);
 static GROUP_EXIT_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
 static GROUP_EXIT_REMOTE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static GROUP_EXIT_LATE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static EXEC_START: AtomicUsize = AtomicUsize::new(0);
+static EXEC_GATE_CHECKED: AtomicUsize = AtomicUsize::new(0);
+static EXEC_OWNER_PHASE: AtomicUsize = AtomicUsize::new(0);
+static EXEC_BLOCKED_READY: AtomicUsize = AtomicUsize::new(0);
+static EXEC_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
+static EXEC_REMOTE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static EXEC_LATE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static EXEC_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
+        Mutex::new(None);
+    /// B41 用未完成事件把 sibling 固定在真实 killable wait 路径。
+    static ref EXEC_BLOCKED_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     static ref USER_TLB_RETIRE_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
@@ -474,6 +485,7 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::group_exit_stops_remote_sibling",
             group_exit_stops_remote_sibling,
         ),
+        KernelTest::new("smp::exec_stops_remote_sibling", exec_stops_remote_sibling),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
             secondary_cpus_stop_and_ack,
@@ -504,7 +516,7 @@ fn timer_probe_program() -> &'static [u8] {
 
 /// 构造一个尚未登记线程组、尚未进入 runqueue 的 kernel-only sibling。
 ///
-/// 测试故意把构造和发布分开，才能验证 group-exit 门禁对 late clone 的拒绝。
+/// 测试故意把构造和发布分开，才能验证 group-exit/exec 门禁对 late clone 的拒绝。
 fn build_ktest_sibling(
     process: Arc<crate::task::ProcessControlBlock>,
     cpu: usize,
@@ -646,10 +658,188 @@ fn group_exit_stops_remote_sibling() -> Result<(), &'static str> {
     if !process.is_zombie() {
         return Err("last group-exit ack did not finish process cleanup");
     }
+    if process.exit_code() != 42 << 8 {
+        return Err("last group-exit ack replaced the shared exit code");
+    }
     if late.task_status() != crate::task::TaskStatus::New
         || GROUP_EXIT_LATE_RUNS.load(Ordering::Acquire) != 0
     {
         return Err("late clone crossed the group-exit publication gate");
+    }
+    Ok(())
+}
+
+fn exec_owner() {
+    crate::hal::local_irq_restore(true);
+    EXEC_OWNER_PHASE.store(1, Ordering::Release);
+    while EXEC_START.load(Ordering::Acquire) == 0 {
+        crate::task::run_task_safe_point();
+    }
+
+    let task = crate::task::current_task().expect("exec ktest owner missing");
+    let (exec, siblings) = match task.process.begin_exec(task.gettid()) {
+        Ok(session) => session,
+        Err(_) => {
+            EXEC_ERRORS.fetch_add(1, Ordering::Release);
+            EXEC_OWNER_PHASE.store(3, Ordering::Release);
+            return;
+        }
+    };
+    crate::task::request_sibling_exit(&siblings, task.gettid());
+    drop(siblings);
+    EXEC_OWNER_PHASE.store(2, Ordering::Release);
+
+    // 保持 exec gate 打开一个确定窗口，让 CPU0 runner 验证 late clone 必须失败。
+    while EXEC_GATE_CHECKED.load(Ordering::Acquire) == 0 {
+        crate::task::run_task_safe_point();
+    }
+    exec.wait();
+    if task.process.live_thread_count() != 1 {
+        EXEC_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    exec.finish();
+    if task.process.thread_publish_blocked() {
+        EXEC_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    EXEC_OWNER_PHASE.store(3, Ordering::Release);
+}
+
+fn exec_remote_sibling() {
+    crate::hal::local_irq_restore(true);
+    EXEC_REMOTE_CPU.store(crate::smp::cpu_id(), Ordering::Release);
+    EXEC_REMOTE_READY.store(1, Ordering::Release);
+    loop {
+        // 只经过生产安全点观察 exec owner，不调用测试专用退出入口。
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+}
+
+fn exec_blocked_sibling() {
+    crate::hal::local_irq_restore(true);
+    let completion = EXEC_BLOCKED_COMPLETION
+        .lock()
+        .as_ref()
+        .expect("exec blocked completion missing")
+        .clone();
+    EXEC_BLOCKED_READY.store(1, Ordering::Release);
+    let result = completion.wait_killable();
+    drop(completion);
+    if !matches!(result, crate::task::WaitResult::Interrupted) {
+        EXEC_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    // killable wait 只负责正常展开等待栈；真正的 Zombie/TLB 清理由生产安全点完成。
+    crate::task::run_task_safe_point();
+    EXEC_ERRORS.fetch_add(1, Ordering::Release);
+    crate::task::exit_current_and_run_next(1);
+}
+
+fn exec_late_thread() {
+    EXEC_LATE_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// 验证多线程 exec 临时门禁、远端 owner 自清理和最后 sibling completion。
+fn exec_stops_remote_sibling() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    EXEC_START.store(0, Ordering::Relaxed);
+    EXEC_GATE_CHECKED.store(0, Ordering::Relaxed);
+    EXEC_OWNER_PHASE.store(0, Ordering::Relaxed);
+    EXEC_BLOCKED_READY.store(0, Ordering::Relaxed);
+    EXEC_REMOTE_READY.store(0, Ordering::Relaxed);
+    EXEC_REMOTE_CPU.store(usize::MAX, Ordering::Relaxed);
+    EXEC_LATE_RUNS.store(0, Ordering::Relaxed);
+    EXEC_ERRORS.store(0, Ordering::Relaxed);
+    let previous = EXEC_BLOCKED_COMPLETION
+        .lock()
+        .replace(Arc::new(crate::task::Completion::new()));
+    assert!(previous.is_none(), "stale exec blocked completion");
+
+    let owner = crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, exec_owner);
+    let process = owner.process.clone();
+    let blocked = build_ktest_sibling(process.clone(), 1, exec_blocked_sibling);
+    crate::task::try_publish_task_on(blocked.clone(), 1)
+        .map_err(|_| "failed to publish blocked exec sibling")?;
+    let remote = build_ktest_sibling(process.clone(), 1, exec_remote_sibling);
+    crate::task::try_publish_task_on(remote.clone(), 1)
+        .map_err(|_| "failed to publish remote exec sibling")?;
+    let late = build_ktest_sibling(process.clone(), 1, exec_late_thread);
+
+    let mut timed_out = false;
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
+        while EXEC_OWNER_PHASE.load(Ordering::Acquire) != 1
+            || EXEC_BLOCKED_READY.load(Ordering::Acquire) == 0
+            || EXEC_REMOTE_READY.load(Ordering::Acquire) == 0
+        {
+            if crate::hal::get_time() >= deadline {
+                timed_out = true;
+                return;
+            }
+            crate::task::run_task_safe_point();
+        }
+
+        EXEC_START.store(1, Ordering::Release);
+        while EXEC_OWNER_PHASE.load(Ordering::Acquire) != 2 {
+            if EXEC_OWNER_PHASE.load(Ordering::Acquire) == 3 || crate::hal::get_time() >= deadline {
+                timed_out = true;
+                break;
+            }
+            crate::task::run_task_safe_point();
+        }
+
+        if !timed_out {
+            match crate::task::try_publish_task_on(late.clone(), 1) {
+                Err(errno) if errno == crate::syscall::errno::EAGAIN => {}
+                _ => {
+                    EXEC_ERRORS.fetch_add(1, Ordering::Release);
+                }
+            }
+        }
+        EXEC_GATE_CHECKED.store(1, Ordering::Release);
+
+        while !timed_out
+            && (EXEC_OWNER_PHASE.load(Ordering::Acquire) != 3
+                || owner.task_status() != crate::task::TaskStatus::Zombie
+                || blocked.task_status() != crate::task::TaskStatus::Zombie
+                || remote.task_status() != crate::task::TaskStatus::Zombie)
+        {
+            if crate::hal::get_time() >= deadline {
+                timed_out = true;
+                break;
+            }
+            crate::task::run_task_safe_point();
+        }
+    });
+
+    if timed_out {
+        if let Some(completion) = EXEC_BLOCKED_COMPLETION.lock().take() {
+            completion.complete();
+        }
+        return Err("cross-CPU exec stop/completion timed out");
+    }
+    assert!(
+        EXEC_BLOCKED_COMPLETION.lock().take().is_some(),
+        "exec blocked completion disappeared"
+    );
+    if EXEC_ERRORS.load(Ordering::Acquire) != 0
+        || process.thread_publish_blocked()
+        || process.live_thread_count() != 1
+    {
+        return Err("exec session did not close after sibling acknowledgements");
+    }
+    if EXEC_REMOTE_CPU.load(Ordering::Acquire) != 1
+        || remote.last_cpu() != 1
+        || blocked.last_cpu() != 1
+    {
+        return Err("exec siblings did not clean themselves on CPU1");
+    }
+    if late.task_status() != crate::task::TaskStatus::New
+        || EXEC_LATE_RUNS.load(Ordering::Acquire) != 0
+    {
+        return Err("late clone crossed the exec publication gate");
     }
     Ok(())
 }
@@ -1544,7 +1734,12 @@ fn scheduler_state_has_unique_owner() -> Result<(), &'static str> {
         }
     }
 
-    completion.wait_uninterruptible();
+    if !matches!(
+        completion.wait_killable(),
+        crate::task::WaitResult::Ready(_)
+    ) {
+        return Err("scheduler-state completion was interrupted");
+    }
     *SCHED_STATE_COMPLETION.lock() = None;
     if SCHED_STATE_HELPER_RUNS.load(Ordering::Acquire) != 1 {
         return Err("scheduler-state helper did not run exactly once");
@@ -1713,7 +1908,13 @@ fn wait_for_remote_completion() {
         .expect("AP blocked-wake completion missing")
         .clone();
     AP_BLOCKED_WAKE_PHASE[origin].store(1, Ordering::Release);
-    completion.wait_uninterruptible();
+    if !matches!(
+        completion.wait_killable(),
+        crate::task::WaitResult::Ready(_)
+    ) {
+        AP_BLOCKED_WAKE_ERRORS.fetch_or(1usize << origin, Ordering::Release);
+        return;
+    }
 
     let resumed = crate::smp::cpu_id();
     let owner_is_expected = crate::task::current_task()

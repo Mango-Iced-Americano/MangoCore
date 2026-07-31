@@ -142,154 +142,57 @@ fallback 顺序：
 `TaskControlBlock::load_elf(elf, argv_vec, envp_vec)`：
 
 1. 目录直接 `EISDIR`。
-2. 如果旧 VM 未被其他 `CLONE_VM` 共享，先 `recycle_data_pages()` 降低内存压力。
-3. 将 ELF 映射到内核空间 `MMAP_BASE`。
-4. `AddressSpaceInner::from_elf()` 构造尚未发布的地址空间数据。
-5. 从 `KERNEL_SPACE` 删除临时 ELF 映射。
-6. 在新 heap 起点附近预映射 64 KiB 用户 heap。
-7. 分配当前线程 user resource 和 trap context。
-8. `create_elf_tables()` 写 argv/envp/auxv。
-9. 构造新 trap context。
-10. 杀掉同线程组其他线程，并从调度队列移除。
-11. 更新当前 TCB trap context、清 `clear_child_tid`、重置 robust list、禁用 alt signal stack。
-12. 如果旧 VM 共享，移除当前线程在旧 VM 中的 trap context/默认栈映射。
-13. `replace_exe()`。
-14. 关闭所有 CLOEXEC fd。
-15. `replace_vm(memory_set)`。
-16. reset sighand。
-17. clear futex table。
+2. 保留旧 `AddressSpace`，但不提前回收其用户页。
+3. 将 ELF 临时映射到内核空间，由 `AddressSpaceInner::from_elf()` 构造未发布的新地址空间。
+4. 准备新 heap、用户栈、argv/envp/auxv、user resource 和 trap context。
+5. 调用 `install_exec_image()` 建立临时 exec 会话，关闭同 PCB 的 clone 发布门。
+6. 请求 sibling 在各自 owner CPU 的任务安全点退出，并等待 live-thread 计数收缩为 1。
+7. 若永久 group exit 已覆盖本次 exec，则放弃尚未提交的新映像，转入统一退出路径。
+8. 更新当前 TCB trap context、清 `clear_child_tid`、重置 robust list、禁用 alt signal stack。
+9. 必要时从外部共享的旧 VM 撤销当前线程的 user-resource 映射。
+10. 替换 exe、关闭 CLOEXEC fd、替换 VM、reset sighand、clear futex。
+11. 重新开放线程发布门。
 
-这个顺序把“可失败的构造”和“不可轻易回滚的替换”尽量分开。ELF 映射、新地址空间、用户资源、argv/envp/auxv 和 trap context 都先在临时对象上完成；只有这些步骤成功后，才杀 sibling 线程、关闭 CLOEXEC fd、替换 VM、重置 sighand 和 futex。这样 exec 失败可以返回 errno，原进程映像仍尽量保持可继续运行。
+这个顺序把“可失败的构造”和“不可回滚的提交”分开。ELF 解析、新地址空间和初始用户栈
+全部在旧映像仍可运行时完成；只有构造成功后才关闭线程发布门并停止 sibling。旧 VM 不能
+在门禁建立前按 `Arc::strong_count()` 提前回收，因为同一 PCB 的线程不会为 VM 各自持有
+长期 `Arc`，引用计数不能证明没有并发线程或 late clone。
 
 `load_elf()` 保留当前 TCB/PCB，不创建新进程。exec 改变的是执行映像：VM、trap context、exe inode、部分 signal/futex/fd 状态；PID、父子关系、进程组、会话和大多数进程身份不因 exec 改变。这一点解释了为什么 shell fork 后 child exec，父进程 wait 的仍是同一个 child pid。
 
-`TaskControlBlock::load_elf()` 的核心实现如下。源码先在临时 `AddressSpace` 中完成 ELF、heap、用户栈、auxv 和 trap context 构造；成功后才提交到当前进程：
-
-```rust
-pub fn load_elf(
-    &self,
-    elf: Arc<vfs::File>,
-    argv_vec: &Vec<String>,
-    envp_vec: &Vec<String>,
-) -> Result<(), isize> {
-    if elf.is_dir() {
-        return Err(EISDIR);
-    }
-    let current_vm = self.process.vm();
-    if Arc::strong_count(&current_vm) <= 2 {
-        current_vm.write(|vm| vm.recycle_data_pages());
-    }
-
-    let elf_data = elf.map_to_kernel_space(MMAP_BASE);
-    if elf_data.is_empty() {
-        log::error!("[load_elf] ELF file is empty (size=0)");
-        return Err(ENOEXEC);
-    }
-    let load_result = AddressSpaceInner::from_elf(elf_data);
-
-    crate::mm::KERNEL_SPACE
-        .lock()
-        .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
-        .unwrap();
-
-    let (mut memory_set, program_break, elf_info) = match load_result {
-        Ok(result) => result,
-        Err(e) => return Err(e),
-    };
-
-    use crate::mm::{MapPermission, VirtAddr};
-    let page_size = 0x1000;
-    let heap_start = align_up(program_break, page_size);
-    let heap_end = heap_start + 0x20000;
-    memory_set.insert_framed_area(
-        VirtAddr::from(heap_start),
-        VirtAddr::from(heap_end),
-        MapPermission::R | MapPermission::W | MapPermission::U,
-    );
-
-    let trap_cx_ppn = memory_set
-        .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
-        .map_err(|_| ENOMEM)?;
-    self.user_stack_allocated.store(true, Ordering::Relaxed);
-    let user_sp =
-        memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
-    let trap_cx = TrapContext::app_init_context(
-        if let Some(interp_entry) = elf_info.interp_entry {
-            interp_entry
-        } else {
-            elf_info.entry
-        },
-        user_sp,
-        KERNEL_SPACE.lock().token(),
-        self.kstack.get_top(),
-        trap_handler as usize,
-    );
-
-    let other_threads: Vec<_> = self
-        .process
-        .threads()
-        .into_iter()
-        .filter(|task| task.tid.0 != self.tid.0)
-        .collect();
-    for task in &other_threads {
-        task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
-    }
-    super::remove_tasks_from_queues(&other_threads);
-
-    {
-        let mut inner = self.acquire_inner_lock();
-        inner.trap_cx_ppn = trap_cx_ppn;
-        *inner.get_trap_cx() = trap_cx;
-        inner.clear_child_tid = 0;
-        inner.robust_list = RobustList::default();
-        inner.signal_stack = SignalStack::disabled();
-    }
-    if Arc::strong_count(&current_vm) > 2 {
-        current_vm.write(|vm| {
-            vm.dealloc_user_res_with_stack(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
-        });
-    }
-    self.process.replace_exe(elf);
-    {
-        let files_ref = self.process.files();
-        let mut fd_table = files_ref.lock();
-        crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
-    }
-    self.process.replace_vm(memory_set);
-    self.process.sighand().lock().reset();
-    self.process.futex().lock().clear();
-    Ok(())
-}
-```
-
-这段实现的提交点从 `other_threads` 退出开始。在此之前，失败以 `Err(errno)` 返回给 exec 上层；之后当前执行映像已经开始切换，不能再按原进程映像完整回滚。
-
 ## 9. 多线程 exec 语义
 
-exec 成功后保留当前任务和当前 PCB，但杀掉同线程组其他线程：
+exec 成功后保留发起线程和当前 PCB，但 sibling 必须自行退出：
 
 ```text
-other_threads = process.threads().filter(tid != current)
-for task in other_threads:
-    task.exit_thread_resources(SIGKILL)
-remove_tasks_from_queues(other_threads)
+begin_exec(owner_tid)
+  -> 在线程组锁内安装 ExecSession，并关闭 clone 发布门
+  -> 取得当时所有 live sibling 的 Arc 快照
+request_sibling_exit()
+  -> SIGKILL + wake + RESCHEDULE
+  -> sibling 在所属 CPU 的 run_task_safe_point() 自行清理
+  -> remove_thread() 在用户映射撤销和 TLB ack 后递减 live token
+wait()
+  -> live_threads == 1 时 Completion 唤醒 owner
+install new image
+finish()
+  -> 清除临时会话并重新开放 clone
 ```
 
 这不是 `exit_group()`；进程仍继续运行，只是线程组收缩到执行 exec 的线程。
-
-> **B41 前置限制：** 上述代码仍是当前实现的旧路径，不是 SMP 安全协议。
-> `exit_thread_resources()` 不能由 exec 发起 CPU 代替远端 `Running` sibling 执行；
-> `remove_tasks_from_queues()` 也不能证明远端 current 已切离旧 MM。B41 必须先请求
-> sibling 在各自 owner 安全点停止并发布 completion，exec 发起者收到全部 ack 后，
-> 才能替换地址空间和继续执行。B40 的永久 group-exit gate 不能直接复用，因为 exec
-> 发起线程必须存活并重新开放线程创建。
+永久 group exit 优先于临时 exec：owner 在等待返回后若观察到 group-exit 码，就先结束
+临时会话而不提交新 VM，随后由统一安全点退出。门禁还会拒绝并发 exec 和尚未首次发布的
+`CLONE_THREAD`，避免新 sibling 落在停止快照之外。
 
 ## 10. VM 共享场景
 
-如果旧 VM 被共享，例如 `CLONE_VM | CLONE_VFORK`，exec 不能先破坏父 VM。代码先构造新地址空间，提交时再：
+`live_threads == 1` 是替换旧地址空间的权威条件，不能用 sibling 快照是否为空或 VM
+引用计数代替。该计数只在 sibling 已完成 clear-child-tid、robust-list、用户映射撤销和
+TLB shootdown 后递减，因此 Completion 返回意味着没有同 PCB 线程仍执行旧用户映像。
+
+如果旧 VM 还被另一个 PCB 共享，例如 `CLONE_VM | CLONE_VFORK`，exec 也不能破坏对方 VM。
+代码在提交时只撤销当前线程留在旧 VM 中的 trap context/默认栈映射，再让当前 PCB
+`replace_vm(new_memory_set)`；旧 VM 由其他 PCB 的 `Arc` 保持存活。
 
 ```text
 current_vm.dealloc_user_res_with_stack(current_slot, current_user_stack_allocated)

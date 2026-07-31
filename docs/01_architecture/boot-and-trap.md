@@ -64,6 +64,9 @@ B38 又通过单槽请求完成远程 Running/Blocking owner 交接。B39 为所
 B40 让永久 group exit 复用同一个任务安全点：进程退出码用原子快照发布，
 远端 sibling 只在所属 CPU 上清理并以 live token ack；clone 的成员登记与首次
 runqueue 发布由同一线程组门禁线性化。
+B41 又把多线程 exec 接到同一安全点：临时 exec owner 关闭 clone 门并等待，
+sibling 在自己的 CPU 完成旧用户映射/TLB 清理后 ack；只有 live count 收缩为
+owner 一人时才替换地址空间。
 
 ## 启动栈与 BSS 边界
 
@@ -316,6 +319,11 @@ syscall 的 IRQ-on 窗口还是 fatal signal 的 IRQ-off trap-return：先统一
 再通过 `with_local_interrupts_enabled()` 执行 clear_child_tid、用户映射撤销和
 TLB shootdown，最后由不返回的 `schedule()` 接管 IRQ-off idle。这样目标 CPU
 等待远端 TLB ack 时仍能处理本地 IPI。
+
+B41 的安全点先检查永久 group exit，再检查“当前线程是否是另一线程 exec 的
+sibling”。前者决定统一进程退出码，必须覆盖后者的私有 SIGKILL。Completion 和
+WaitQueue 只因这两类生命周期停止请求返回 `Interrupted`，普通信号仍按原语自身
+规则处理；调用层先释放 syscall 栈上的 `Arc`，再回到同一个安全点完成 owner 自清理。
 
 这是安全点抢占而不是任意内核指令抢占：timer hard IRQ 仍只发布
 pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打断点

@@ -18,7 +18,7 @@ use super::{
     signal::{sigchld_requests_auto_reap, PendingSignal, Sighand, SignalQueue, Signals},
     threads::Futex,
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
-    TaskControlBlock, UtsNamespace, WaitQueue, INITPROC,
+    TaskControlBlock, UtsNamespace, WaitQueue, WaitResult, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
@@ -66,6 +66,10 @@ pub struct ProcessControlBlock {
     group_exit_code: AtomicU64,
     /// 当前被计入存活线程数的线程数量。
     live_threads: AtomicUsize,
+    /// 正在执行多线程 exec 的 owner tid；`usize::MAX` 表示没有临时 exec 会话。
+    ///
+    /// 线程组锁保存权威会话，本字段只供 syscall 返回等高频安全点无锁判断。
+    exec_owner_tid: AtomicUsize,
     /// 保留 trap context 页映射、可被复用的用户资源槽位。
     trap_context_cache: Mutex<Vec<usize>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
@@ -163,13 +167,63 @@ pub struct ProcessSignalState {
 ///
 /// 首次发布的最终检查和 group-exit 提交都在持有这把锁时读取/写入
 /// `group_exit_code`。因此退出方要么先关闭发布门禁，要么一定能在成员快照中
-/// 看到已经进入 runqueue 的线程；普通安全点只读取原子快照，不取得本锁。
+/// 看到已经进入 runqueue 的线程；group exit 与 exec 临时会话也由本锁串行化。
+/// 普通安全点只读取原子快照，不取得本锁。
 struct ThreadGroupState {
     members: Vec<Weak<TaskControlBlock>>,
+    /// exec 只临时关闭 clone 发布门；owner 安装新映像后会重新开放。
+    exec: Option<ExecState>,
+}
+
+struct ExecState {
+    owner_tid: usize,
+    siblings_done: Arc<Completion>,
+}
+
+/// 多线程 exec 的临时停止会话。
+///
+/// owner 等待所有 sibling 在各自 CPU 完成线程级清理后，才能安装新地址空间；
+/// `finish()` 只有在 live 计数收缩为 owner 一人时才重新开放 clone。
+#[must_use = "exec session must wait for siblings and be finished"]
+pub(crate) struct ExecSession {
+    process: Arc<ProcessControlBlock>,
+    owner_tid: usize,
+    siblings_done: Arc<Completion>,
 }
 
 type InodeBusyKey = (usize, vfs::InodeId);
 const TRAP_CONTEXT_CACHE_LIMIT: usize = 256;
+const NO_EXEC_OWNER: usize = usize::MAX;
+
+impl ExecSession {
+    pub(crate) fn wait(&self) {
+        // 普通信号不能取消 exec；永久 group exit 可以让 owner 提前结束等待，
+        // install_exec_image() 会在提交新映像前识别并放弃本次 exec。
+        let _ = self.siblings_done.wait_killable();
+    }
+
+    pub(crate) fn finish(self) {
+        let mut group = self.process.thread_group.lock();
+        let live = self.process.live_thread_count();
+        assert!(
+            live == 1 || self.process.is_group_exiting(),
+            "exec gate reopened before sibling cleanup completed: live={}",
+            live
+        );
+        let state = group.exec.as_ref().expect("missing active exec session");
+        assert!(
+            state.owner_tid == self.owner_tid
+                && Arc::ptr_eq(&state.siblings_done, &self.siblings_done),
+            "stale exec session tried to reopen the thread group"
+        );
+        group.exec = None;
+        // 在同一锁域内先清除权威会话，再发布无锁快照。后续 publish_thread()
+        // 取得本锁后才能放入新线程，不会看到“门已开、owner 仍旧”的中间态。
+        self.process
+            .exec_owner_tid
+            .store(NO_EXEC_OWNER, Ordering::Release);
+    }
+}
 
 lazy_static! {
     static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> = Mutex::new(BTreeMap::new());
@@ -311,9 +365,11 @@ impl ProcessControlBlock {
             process_quota: Mutex::new(Some(process_quota)),
             thread_group: Mutex::new(ThreadGroupState {
                 members: Vec::new(),
+                exec: None,
             }),
             group_exit_code: AtomicU64::new(0),
             live_threads: AtomicUsize::new(0),
+            exec_owner_tid: AtomicUsize::new(NO_EXEC_OWNER),
             trap_context_cache: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),
@@ -581,15 +637,15 @@ impl ProcessControlBlock {
     /// 在线程组门禁内提交“成员登记 + 首次调度发布”。
     ///
     /// `publish` 只能取得一个 runqueue 的短锁并完成 `New -> Queued(cpu)`，不得
-    /// 等待 IPI/TLB ack。这样 group exit 要么先关闭门禁并拒绝本线程，要么在
-    /// 本线程已经进入成员表和 runqueue 后取得锁并把它纳入停止快照。
+    /// 等待 IPI/TLB ack。这样 group exit/exec 要么先关闭门禁并拒绝本线程，
+    /// 要么在本线程已经进入成员表和 runqueue 后取得锁并把它纳入停止快照。
     pub(crate) fn publish_thread(
         &self,
         task: &Arc<TaskControlBlock>,
         publish: impl FnOnce(),
     ) -> bool {
         let mut group = self.thread_group.lock();
-        if self.group_exit_code.load(Ordering::Acquire) != 0 {
+        if self.group_exit_code.load(Ordering::Acquire) != 0 || group.exec.is_some() {
             return false;
         }
         assert!(
@@ -617,23 +673,28 @@ impl ProcessControlBlock {
         }
         let previous = self.live_threads.fetch_sub(1, Ordering::AcqRel);
         assert_ne!(previous, 0, "live-thread count underflow");
-        self.compact_threads_if_sparse();
-        Some(previous - 1)
-    }
-
-    fn compact_threads_if_sparse(&self) {
-        let live = self.live_thread_count();
-        let mut group = self.thread_group.lock();
-        let compact_threshold = live.saturating_mul(4).saturating_add(128);
-        if group.members.len() <= compact_threshold {
-            return;
+        let remaining = previous - 1;
+        let siblings_done = {
+            let mut group = self.thread_group.lock();
+            let compact_threshold = remaining.saturating_mul(4).saturating_add(128);
+            if group.members.len() > compact_threshold {
+                group.members.retain(|thread| {
+                    thread
+                        .upgrade()
+                        .map(|task| task.thread_live_counted.load(Ordering::Acquire))
+                        .unwrap_or(false)
+                });
+            }
+            // live token 在全部用户资源和 TLB 清理后才递减。计数到 1 表示只剩
+            // exec owner，可在释放线程组锁后唤醒它安装新地址空间。
+            (remaining == 1)
+                .then(|| group.exec.as_ref().map(|state| state.siblings_done.clone()))
+                .flatten()
+        };
+        if let Some(siblings_done) = siblings_done {
+            siblings_done.complete();
         }
-        group.members.retain(|thread| {
-            thread
-                .upgrade()
-                .map(|task| task.thread_live_counted.load(Ordering::Acquire))
-                .unwrap_or(false)
-        });
+        Some(remaining)
     }
 
     /// 返回当前仍计为 live 的线程列表，并清理失效弱引用。
@@ -682,11 +743,14 @@ impl ProcessControlBlock {
     ///
     /// # Semantics
     ///
-    /// group exit 或当前线程已经是最后一个 live 成员时拒绝缓存，避免即将
-    /// 完成进程级退出的地址空间继续保留用户资源页。
+    /// group exit、exec sibling 清理或当前线程已经是最后一个 live 成员时拒绝
+    /// 缓存，避免即将被替换/释放的地址空间继续保留用户资源页。
     pub fn try_cache_trap_context_slot(&self, slot: usize) -> bool {
         // exit ack 现在位于线程资源清理末尾，调用本函数时当前线程仍计入 live。
-        if self.is_group_exiting() || self.live_thread_count() <= 1 {
+        // 与 begin_exec()/begin_group_exit() 共用线程组锁，关闭“检查通过后才发布
+        // exec、随后把 trap 页缓存进外部共享旧 VM”的窗口。
+        let group = self.thread_group.lock();
+        if self.is_group_exiting() || group.exec.is_some() || self.live_thread_count() <= 1 {
             super::perf::record_trap_cache_store(false);
             return false;
         }
@@ -978,6 +1042,83 @@ impl ProcessControlBlock {
         pending
     }
 
+    /// 临时关闭 clone 发布门，并取得多线程 exec 需要停止的 sibling 快照。
+    ///
+    /// 新映像尚未安装；调用者只能请求 sibling 在各自 CPU 自行退出，然后等待
+    /// `ExecSession`。group exit 或另一场 exec 已经关闭门禁时返回 `EAGAIN`。
+    pub(crate) fn begin_exec(
+        self: &Arc<Self>,
+        owner_tid: usize,
+    ) -> Result<(ExecSession, Vec<Arc<TaskControlBlock>>), isize> {
+        let siblings_done = Arc::new(Completion::new());
+        let mut siblings = Vec::new();
+        let mut group = self.thread_group.lock();
+        if self.group_exit_code.load(Ordering::Relaxed) != 0 || group.exec.is_some() {
+            return Err(crate::syscall::errno::EAGAIN);
+        }
+        siblings
+            .try_reserve(group.members.len())
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+
+        let mut owner_is_live = false;
+        group.members.retain(|thread| {
+            if let Some(task) = thread.upgrade() {
+                if task.thread_live_counted.load(Ordering::Acquire) {
+                    if task.gettid() == owner_tid {
+                        owner_is_live = true;
+                    } else {
+                        siblings.push(task);
+                    }
+                    return true;
+                }
+            }
+            false
+        });
+        assert!(
+            owner_is_live,
+            "exec owner is not a live thread-group member"
+        );
+
+        group.exec = Some(ExecState {
+            owner_tid,
+            siblings_done: siblings_done.clone(),
+        });
+        // 权威会话已经在成员锁内建立，再用 Release 发布安全点快照。
+        self.exec_owner_tid.store(owner_tid, Ordering::Release);
+        drop(group);
+
+        // 不能只凭快照为空判定完成：退出线程可能已经清除自己的 live token，
+        // 但尚未递减进程计数。只有权威计数为 1 才能确认 owner 独占旧地址空间；
+        // 否则退出线程会在 remove_thread() 把计数降到 1 后完成该事件。
+        if self.live_thread_count() == 1 {
+            siblings_done.complete();
+        }
+        Ok((
+            ExecSession {
+                process: self.clone(),
+                owner_tid,
+                siblings_done,
+            },
+            siblings,
+        ))
+    }
+
+    /// 当前 tid 是否是 active exec 必须停止的 sibling。
+    pub(crate) fn exec_stops_thread(&self, tid: usize) -> bool {
+        let owner = self.exec_owner_tid.load(Ordering::Acquire);
+        owner != NO_EXEC_OWNER && owner != tid
+    }
+
+    /// 当前线程是否必须因永久 group exit 或另一线程的 exec 而退出。
+    pub(crate) fn thread_must_exit(&self, tid: usize) -> bool {
+        self.is_group_exiting() || self.exec_stops_thread(tid)
+    }
+
+    /// clone 首次发布是否已被永久退出或临时 exec 门禁关闭。
+    pub(crate) fn thread_publish_blocked(&self) -> bool {
+        self.is_group_exiting() || self.exec_owner_tid.load(Ordering::Acquire) != NO_EXEC_OWNER
+    }
+
     /// 原子关闭新线程发布门禁，并取得需要停止的 live-thread 快照。
     ///
     /// 第一个调用者决定统一退出码；后续并发 fatal signal/exit_group 复用它。
@@ -1086,9 +1227,9 @@ impl ProcessControlBlock {
         self.vfork_done.complete();
     }
 
-    /// 不可中断地等待 vfork 子进程完成 exec 或 exit。
-    pub fn wait_vfork_done_uninterruptible(&self) {
-        self.vfork_done.wait_uninterruptible()
+    /// 等待 vfork 子进程完成；线程组停止请求可以提前中止父线程等待。
+    pub fn wait_vfork_done_killable(&self) -> WaitResult {
+        self.vfork_done.wait_killable()
     }
 
     /// 取走所有子进程列表。

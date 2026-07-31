@@ -204,13 +204,19 @@ idle: clear current -> finish_switch_out() -> zombie queue
 5. 唯一观察到 `remaining == 0` 的线程执行 `finish_exit()`，因此 PCB/MM 共享资源
    不会在其他 CPU 仍使用时提前释放。
 
+`finish_current_exit()` 在本线程清理前读取一次 group-exit 码，供线程级清理使用；
+但最终进程退出码要在 live token 已归零后再次 Acquire 读取。第一次读取仍可能与另一
+sibling 随后发布 group exit 竞争；归零后已没有 live 成员能再首次发布，因此第二次
+读取才是 wait 可见退出码的线性化点。
+
 clone 的最终发布同样取得 `thread_group` 锁，在锁内提交“成员登记 +
 `New -> Queued(cpu)`”。因此 clone 要么先成为退出快照中的 live 成员，要么在退出门禁
 已经关闭后返回 `EAGAIN`；不存在“快照之后、首次入队之前”的孤儿线程。
 
 这里刻意不让发起者同步等待所有 ack。永久 group exit 没有后续 MM 替换动作，最后一个
 ack 自然拥有进程级清理权，可以避免两个并发退出发起者互相等待。B41 的多线程 exec
-仍需要单独的临时 stop/completion，因为 exec 发起者必须在替换 MM 前确认 sibling 已停。
+使用单独的临时 `ExecSession + Completion`：发起者必须等 live count 收缩为 1 才替换
+MM，完成后重新开放 clone；永久 group exit 可以覆盖该临时会话。
 
 ## 7. 子进程收养与 auto-reap
 
