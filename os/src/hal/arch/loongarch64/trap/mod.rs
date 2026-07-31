@@ -17,8 +17,8 @@ use crate::mm::{copy_from_user, copy_to_user, frame_reserve, FaultAccess, Memory
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_trap_cx, current_trap_task, current_user_token, do_signal,
-    do_wake_expired, signal::SigInfo, suspend_current_and_run_next, Signals,
+    current_task, current_trap_task, do_signal, do_wake_expired, signal::SigInfo,
+    suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
@@ -206,7 +206,7 @@ pub fn trap_handler() -> ! {
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             ERA::read().next_ins().write();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
@@ -228,7 +228,7 @@ pub fn trap_handler() -> ! {
         let task = current_trap_task();
         {
             let mut inner = task.acquire_inner_lock();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             // sigreturn(139) already restored the full trap context (including a0).
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
@@ -353,9 +353,12 @@ pub fn trap_handler() -> ! {
         }
         Trap::Exception(Exception::AddressNotAligned) => {
             let unaligned_start = crate::task::perf::perf_time_now();
-            let cx = current_trap_cx();
-            let token = current_user_token();
-            let pc = cx.gp.pc;
+            let task = current_trap_task();
+            let token = task.process.user_token();
+            let pc = {
+                let mut inner = task.acquire_inner_lock();
+                inner.trap_context_mut().gp.pc
+            };
             let mut i = 0;
             copy_from_user(token, pc as *const u32, addr_of_mut!(i)).unwrap();
             let ins = Instruction::from(i);
@@ -369,51 +372,66 @@ pub fn trap_handler() -> ! {
             let sz = op.get_size();
             let is_store = op.is_store();
             let is_float = op.is_float_op();
-            let is_aligned: bool = addr % sz == 0;
-            if !is_aligned {
-                assert!([2, 4, 8].contains(&sz));
-                if is_store {
-                    let mut rd = if !is_float {
-                        cx.gp[ins.get_rd_num()]
+            assert!([2, 4, 8].contains(&sz));
+            if addr % sz == 0 {
+                panic!(
+                    "Failed to emulate aligned instruction. Bad Instruction: {}, PC:{}",
+                    i, pc
+                );
+            }
+            let register = ins.get_rd_num();
+            let loaded = if is_store {
+                // 只在短临界区读取源寄存器；逐字节用户访存不能跨 task.inner 持锁。
+                let mut value = {
+                    let mut inner = task.acquire_inner_lock();
+                    let cx = inner.trap_context_mut();
+                    assert_eq!(cx.gp.pc, pc, "unaligned trap PC changed before emulation");
+                    if is_float {
+                        cx.fp.f[register]
                     } else {
-                        cx.fp.f[ins.get_rd_num()]
-                    };
-                    for i in 0..sz {
-                        let seg = rd as u8;
-                        copy_to_user(token, addr_of!(seg), (addr + i) as *mut u8).unwrap();
-                        rd >>= 8;
+                        cx.gp[register]
                     }
-                } else {
-                    let mut rd = 0;
-                    for i in (0..sz).rev() {
-                        rd <<= 8;
-                        let mut read_byte: u8 = 0;
-                        copy_from_user(token, (i + addr) as *const u8, addr_of_mut!((read_byte)))
-                            .unwrap();
-                        rd |= read_byte as usize;
+                };
+                for offset in 0..sz {
+                    let byte = value as u8;
+                    copy_to_user(token, addr_of!(byte), (addr + offset) as *mut u8).unwrap();
+                    value >>= 8;
+                }
+                None
+            } else {
+                let mut value = 0;
+                for offset in (0..sz).rev() {
+                    value <<= 8;
+                    let mut byte = 0u8;
+                    copy_from_user(token, (addr + offset) as *const u8, addr_of_mut!(byte))
+                        .unwrap();
+                    value |= byte as usize;
+                }
+                if !op.is_unsigned_ld() {
+                    match sz {
+                        2 => value = (value as u16) as i16 as isize as usize,
+                        4 => value = (value as u32) as i32 as isize as usize,
+                        8 => {}
+                        _ => unreachable!(),
                     }
-                    if !op.is_unsigned_ld() {
-                        match sz {
-                            2 => rd = (rd as u16) as i16 as isize as usize,
-                            4 => rd = (rd as u32) as i32 as isize as usize,
-                            8 => {}
-                            _ => unreachable!(),
-                        }
-                    }
-                    if !is_float {
-                        cx.gp[ins.get_rd_num()] = rd;
+                }
+                Some(value)
+            };
+
+            {
+                let mut inner = task.acquire_inner_lock();
+                let cx = inner.trap_context_mut();
+                // 当前 TCB 只能由本 CPU 运行；若 PC 变化，说明有路径越过 owner/inner
+                // 协议修改了 trap frame，继续覆盖会隐藏更严重的 SMP 所有权错误。
+                assert_eq!(cx.gp.pc, pc, "unaligned trap PC changed during emulation");
+                if let Some(value) = loaded {
+                    if is_float {
+                        cx.fp.f[register] = value;
                     } else {
-                        cx.fp.f[ins.get_rd_num()] = rd;
+                        cx.gp[register] = value;
                     }
                 }
                 cx.gp.pc += 4;
-            }
-            if cx.gp.pc == pc {
-                panic!(
-                    "Failed to execute the command. Bad Instruction: {}, PC:{}",
-                    unsafe { *(cx.gp.pc as *const u32) },
-                    pc
-                );
             }
             crate::task::perf::record_user_unaligned_trap(unaligned_start, is_store, sz, is_float);
         }
@@ -482,8 +500,8 @@ pub fn trap_return() -> ! {
     }
     set_user_trap_entry();
     let (trap_cx_ptr, _trap_pc, _trap_sp) = {
-        let inner = task.acquire_inner_lock();
-        let trap_cx = inner.get_trap_cx();
+        let mut inner = task.acquire_inner_lock();
+        let trap_cx = inner.trap_context_mut();
         // Refresh after signal/exec context changes and on every future migration:
         // the CPU performing this return owns the pointer installed on next trap.
         trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();

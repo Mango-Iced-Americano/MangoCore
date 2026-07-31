@@ -778,7 +778,7 @@ pub fn sys_sigreturn() -> isize {
     let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
 
-    let sp = inner.get_trap_cx().gp.sp;
+    let sp = inner.trap_context_mut().gp.sp;
     // restore sigmask & trap context
     let ucontext_addr = match sp
         .checked_add(size_of::<SigInfo>())
@@ -835,7 +835,7 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
+    let trap_cx_ptr = inner.trap_context_mut() as *mut TrapContext;
     if copy_from_user(
         token,
         mcontext_addr as *mut MachineContext,
@@ -850,7 +850,7 @@ pub fn sys_sigreturn() -> isize {
     }
     #[cfg(feature = "loongarch64")]
     {
-        let trap_cx = inner.get_trap_cx();
+        let trap_cx = inner.trap_context_mut();
         trap_cx.lsx = restored_lsx;
         // LoongArch FPRs alias the low 64 bits of LSX registers. The signal
         // ABI exposes both snapshots, and the existing scalar mcontext has
@@ -861,5 +861,5 @@ pub fn sys_sigreturn() -> isize {
         }
     }
     inner.sigmask = restored_sigmask;
-    inner.get_trap_cx().gp.a0 as isize // return a0: not modify any of trap_cx
+    inner.trap_context_mut().gp.a0 as isize // return a0: not modify any of trap_cx
 }

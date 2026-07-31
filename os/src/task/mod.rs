@@ -75,7 +75,7 @@ pub use process_manager::ProcessManager;
 pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
     current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_tid,
-    current_trap_cx, current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
+    current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
     try_current_user_token,
 };
 pub(crate) use processor::{current_trap_task, try_current_task};

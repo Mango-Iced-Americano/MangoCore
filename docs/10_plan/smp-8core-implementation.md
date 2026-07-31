@@ -83,7 +83,7 @@ related_docs:
 | 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE，B34 完成 current 写侧，B35/B36 分别完成远程稳定 Blocked/Queued 写侧，B37 完成 affinity-aware 新任务与 wake 选点，B38 完成远程 Running/Blocking owner 交接 | 默认全核 mask、steal 与多写者 affinity 压力验证尚未完成 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B44）
+#### 当前进度（SMP-P2.5-B15 至 B45）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -699,6 +699,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `AddressSpace`。GLOBAL 面向全部 online CPU；PRIVATE 在 VM 锁内冻结历史 cached
   CPU mask，解锁后执行独立的 full-fence IPI/request/ack。与快照并发首次进入 MM 的
   CPU 在同一 VM 锁后执行本地 full fence，因此两种竞态次序都不会漏 barrier。
+  双架构 8 核 focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
+- B45 把 trap context 可变入口收紧为
+  `TaskControlBlockInner::trap_context_mut(&mut self)`，删除从临时 inner guard
+  返回 `&'static mut TrapContext` 的 current helper。clone/init 显式缩短 guard，
+  LA64 未对齐模拟改为锁内快照、锁外用户访存、锁内校验提交，不新增 wrapper 或状态机。
   双架构 8 核 focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
 
 ### Phase 3：Per-CPU 调度器与时间系统

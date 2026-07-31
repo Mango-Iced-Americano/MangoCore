@@ -388,7 +388,7 @@ pub fn sys_sigreturn() -> isize {
     let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
 
-    let sp = inner.get_trap_cx().gp.sp;
+    let sp = inner.trap_context_mut().gp.sp;
     let ucontext_addr = match sp
         .checked_add(size_of::<SigInfo>())
         .and_then(|addr| addr.checked_add(0x7))
@@ -440,7 +440,7 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
+    let trap_cx_ptr = inner.trap_context_mut() as *mut TrapContext;
     if copy_from_user(
         token,
         mcontext_addr as *mut MachineContext,
@@ -454,18 +454,23 @@ pub fn sys_sigreturn() -> isize {
     }
     #[cfg(feature = "loongarch64")]
     {
-        let trap_cx = inner.get_trap_cx();
+        let trap_cx = inner.trap_context_mut();
         trap_cx.lsx = restored_lsx;
         for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
             vector[0] = *scalar as u64;
         }
     }
     inner.sigmask = restored_sigmask;
-    inner.get_trap_cx().gp.a0 as isize
+    inner.trap_context_mut().gp.a0 as isize
 }
 ```
 
-该函数直接操作当前 TCB 的 trap context，因此必须持有 `task.inner`。所有用户地址计算都使用 `checked_add()`，任一溢出都会走 `SIGSEGV` 退出。trap 返回汇编在 LSX 已启用时只恢复完整向量快照，不会随后再用 `FLD.D` 覆盖其低 lane；未启用 LSX 时才走纯标量 FPR 恢复路径。
+`trap_context_mut()` 把可变引用生命周期绑定到 `task.inner` guard，不能再把 trap frame
+伪装成可逃逸的 `'static mut`。当前 `sys_sigreturn()` 仍跨用户 frame 读取持有该锁；
+这是后续信号锁序节点需要拆除的已知边界，不能把本次生命周期收紧理解为已经消除了全部
+faultable uaccess 持锁。所有用户地址计算都使用 `checked_add()`，任一溢出都会走
+`SIGSEGV` 退出。trap 返回汇编在 LSX 已启用时只恢复完整向量快照，不会随后再用
+`FLD.D` 覆盖其低 lane；未启用 LSX 时才走纯标量 FPR 恢复路径。
 
 ## 13. stopped/continued 与 wait
 

@@ -589,6 +589,10 @@ QUERY、未注册 `EPERM` 和幂等注册；随后让同 PCB helper 在 CPU1 激
 PRIVATE_EXPEDITED 必须只给该远端 request 增加一次并等待对应 ack。GLOBAL 必须给所有
 AP 各增加一次 request 并完成 ack。`KREPEAT=2` 时终态 STOP 只执行一次，所以总 TAP
 项为 59；helper 每轮必须恢复 Zombie 并回收，不能把上一轮残留当作下一轮 ack。
+B45 不增加 TAP 项：编译器负责验证 trap context 借用不能逃出 `task.inner`，现有 30 项
+focused 与初赛回归覆盖 syscall、signal、clone/exec 和双架构 trap-return 主路径。普通
+basic/busybox 不保证触发 LA64 `AddressNotAligned`，因此 30/30 不能被描述为已经覆盖
+整数/浮点未对齐模拟；后续若修改该模拟语义，应增加专门用户探针。
 
 ### Bug 下沉流程
 

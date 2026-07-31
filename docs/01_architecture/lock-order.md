@@ -404,6 +404,27 @@ barrier，不会被错误遗漏。IPI handler 只读取本 CPU request、执行 
 发布 ack，不分配、不取普通锁。等待复用通用 `IpiWaitIrqGuard`，调用方不得持有 VM、
 runqueue、task.inner 或其它普通锁。
 
+### 3.10 B45 trap context 借用边界
+
+trap context 页由对应 TCB 拥有，Rust 可变访问只能通过
+`TaskControlBlockInner::trap_context_mut(&mut self)` 完成。返回引用的生命周期绑定到
+`task.inner` guard；禁止把直映区指针包装成 `'static mut`，也禁止 current-task helper
+从临时 guard 中返回引用。
+
+LoongArch 用户未对齐访存固定分为：
+
+```text
+task.inner：快照 PC/store 源寄存器
+  -> 解锁
+  -> 用户指令和数据 copyin/copyout
+  -> task.inner：校验 PC、提交 load 结果并推进 PC
+```
+
+用户访存可能缺页并进入 MM/TLB 同步，不能跨越它持有 `task.inner`。trap return 最后把
+用户 trap context 地址交给汇编是明确的 owner 边界：Rust guard 已释放，当前任务仍由本
+CPU current 槽独占，汇编立即恢复并离开内核。`sys_sigreturn()` 仍跨用户 frame 读取持锁，
+属于下一信号锁序节点的已知问题，不在 B45 中伪装解决。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

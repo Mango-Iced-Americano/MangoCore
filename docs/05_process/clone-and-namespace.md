@@ -3,7 +3,7 @@ title: "clone、clone3、unshare 与 namespace"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [process, clone, namespace, pidfd, vfork]
 ---
 
@@ -326,7 +326,7 @@ fn sys_clone_inner(
 
 ```rust
 let share_vm = flags.contains(CloneFlags::CLONE_VM);
-let parent_trap_cx = *parent_inner.get_trap_cx();
+let parent_trap_cx = *parent_inner.trap_context_mut();
 // PTE 复制可能等待 user-TLB ack，不能跨该等待点持 task.inner。
 drop(parent_inner);
 let parent_vm = self.process.vm();

@@ -584,8 +584,11 @@ impl Debug for Rusage {
 }
 
 impl TaskControlBlockInner {
-    /// 获取陷阱上下文
-    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
+    /// 在 TCB inner 独占借用期间访问陷阱上下文。
+    ///
+    /// trap context 物理页由当前 TCB 独占；返回生命周期必须绑定到 `&mut self`，
+    /// 不能把底层直映区产生的引用伪装成可越过 inner guard 的 `'static mut`。
+    pub fn trap_context_mut(&mut self) -> &mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
     /// 添加信号
@@ -1442,20 +1445,24 @@ impl TaskControlBlock {
         registry::register_task(&task_control_block);
         init_task_trace!("10 task registered in process and task registries");
         // 准备用户空间的陷阱上下文
-        let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
-        // 初始化陷阱上下文
-        *trap_cx = TrapContext::app_init_context(
-            elf_info.entry,
-            init_sp,
-            KERNEL_SPACE.lock().token(),
-            kstack_top,
-            trap_handler as usize,
-        );
-        init_task_trace!(
-            "11 initial trap context ready: pc={:#x} sp={:#x}",
-            trap_cx.gp.pc,
-            trap_cx.gp.sp
-        );
+        let kernel_token = KERNEL_SPACE.lock().token();
+        {
+            let mut inner = task_control_block.acquire_inner_lock();
+            let trap_cx = inner.trap_context_mut();
+            // 初始化陷阱上下文
+            *trap_cx = TrapContext::app_init_context(
+                elf_info.entry,
+                init_sp,
+                kernel_token,
+                kstack_top,
+                trap_handler as usize,
+            );
+            init_task_trace!(
+                "11 initial trap context ready: pc={:#x} sp={:#x}",
+                trap_cx.gp.pc,
+                trap_cx.gp.sp
+            );
+        }
         task_control_block
     }
 
@@ -1629,7 +1636,7 @@ impl TaskControlBlock {
         {
             let mut inner = self.acquire_inner_lock();
             inner.trap_cx_ppn = new_trap_ppn;
-            *inner.get_trap_cx() = new_trap_cx;
+            *inner.trap_context_mut() = new_trap_cx;
             inner.clear_child_tid = 0;
             inner.robust_list = RobustList::default();
             inner.signal_stack = SignalStack::disabled();
@@ -1849,7 +1856,7 @@ impl TaskControlBlock {
         let quota = TaskQuotaGuard::try_acquire()?;
 
         // ---- 保持父PCB锁
-        let parent_inner = self.acquire_inner_lock();
+        let mut parent_inner = self.acquire_inner_lock();
         // 当前调度器不实现真实 RT 调度，FIFO/RR 只作为 syscall 兼容状态。
         // fork 时将子任务降回 normal，可避免测试进程间泄漏伪 RT 状态。
         let reset_sched_on_fork = parent_inner.sched_reset_on_fork
@@ -1885,7 +1892,7 @@ impl TaskControlBlock {
         } else {
             parent_inner.sched_period
         };
-        let parent_trap_cx = *parent_inner.get_trap_cx();
+        let parent_trap_cx = *parent_inner.trap_context_mut();
         // fork/clone 的 PTE 操作可能触发远端 shootdown。先保存所需上下文并
         // 释放 task.inner，确保后续等待 ack 时不跨普通锁。
         drop(parent_inner);
@@ -2178,26 +2185,29 @@ impl TaskControlBlock {
             }),
         });
         // 初始化陷阱上下文
-        let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
-        // 共享 VM 时新分配的 trap context 为空，需要从父任务当前上下文复制。
-        if share_vm {
-            *trap_cx = parent_trap_cx;
+        {
+            let mut inner = task_control_block.acquire_inner_lock();
+            let trap_cx = inner.trap_context_mut();
+            // 共享 VM 时新分配的 trap context 为空，需要从父任务当前上下文复制。
+            if share_vm {
+                *trap_cx = parent_trap_cx;
+            }
+            // we also do not need to prepare parameters on stack, musl has done it for us
+            // 处理用户栈指针
+            if !stack.is_null() {
+                trap_cx.gp.sp = stack as usize;
+            }
+            // 设置线程寄存器
+            if flags.contains(CloneFlags::CLONE_SETTLS) {
+                // thread local storage
+                // 线程局部存储
+                trap_cx.gp.tp = tls;
+            }
+            // 对于子进程，fork返回0
+            trap_cx.gp.a0 = 0;
+            // 修改陷阱上下文中的内核栈指针
+            trap_cx.kernel_sp = kstack_top;
         }
-        // we also do not need to prepare parameters on stack, musl has done it for us
-        // 处理用户栈指针
-        if !stack.is_null() {
-            trap_cx.gp.sp = stack as usize;
-        }
-        // 设置线程寄存器
-        if flags.contains(CloneFlags::CLONE_SETTLS) {
-            // thread local storage
-            // 线程局部存储
-            trap_cx.gp.tp = tls;
-        }
-        // 对于子进程，fork返回0
-        trap_cx.gp.a0 = 0;
-        // 修改陷阱上下文中的内核栈指针
-        trap_cx.kernel_sp = kstack_top;
         if !flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_NEWIPC) {
             shm_clone_attachments(self.pid(), task_control_block.pid())?;
         }

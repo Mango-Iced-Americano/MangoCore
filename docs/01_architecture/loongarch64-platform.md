@@ -3,7 +3,7 @@ title: "LoongArch64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [architecture, loongarch64, hal, smp, asid, tlb]
 ---
 
@@ -247,18 +247,21 @@ crate::task::timer_interrupt_handler();
 `Exception::AddressNotAligned` 分支执行以下流程：
 
 ```
-current_trap_cx()
-current_user_token()
+current_task() 持有当前 TCB
+task.inner：快照 pc 以及 store 源寄存器
+释放 task.inner
 copy_from_user(token, pc, &mut instruction)
 Instruction::from(instruction).get_op_code()
 addr = BadV::read().get_vaddr()
 根据 load/store 和宽度逐字节 copy_from_user/copy_to_user
 符号扩展 load 结果
-写回通用寄存器或浮点寄存器
-cx.gp.pc += 4
+task.inner：确认 pc 未变，写回 load 结果并推进 pc
 ```
 
-模拟路径只接受大小为 2、4、8 的访问。若无法解码操作码或 PC 没有推进，会 panic 输出诊断。
+模拟路径只接受大小为 2、4、8 的访问。用户访存可能触发缺页或 TLB shootdown，因此不得
+跨这些操作持有 `task.inner`。重新加锁后会先确认 PC 仍等于入口快照；若不相等，说明有路径
+越过 current-owner/inner 协议修改了同一个 trap frame，内核会立即报错而不是静默覆盖。
+当前通用测试不保证触发该硬件异常，整数/浮点未对齐指令仍需要专门用户态用例补充覆盖。
 
 ## 9. 返回用户态
 

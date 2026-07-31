@@ -17,7 +17,6 @@ use super::{
 };
 use super::{fetch_task, finish_switch_out};
 use super::{TaskContext, TaskControlBlock, TaskStatus};
-use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use core::hint::spin_loop;
@@ -660,16 +659,6 @@ pub fn try_current_user_token() -> Option<usize> {
 #[inline(always)]
 pub fn current_user_token() -> usize {
     try_current_user_token().unwrap()
-}
-
-/// 获取当前任务的陷阱上下文。
-///
-/// # Locking
-///
-/// 返回的引用来自当前任务 inner 锁保护的数据。调用方只能在立即读写 trap
-/// context 的短路径中使用，不能跨阻塞点保存。
-pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task().unwrap().acquire_inner_lock().get_trap_cx()
 }
 
 /// 从当前任务切换回 idle 调度上下文。

@@ -689,7 +689,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 continue;
             }
             if act.handler != SigHandler::SIG_DFL {
-                let trap_cx = inner.get_trap_cx();
+                let trap_cx = inner.trap_context_mut();
                 let a0_isize = trap_cx.gp.a0 as isize;
                 // if this syscall wants to restart
                 if a0_isize == -(SyscallErr::ERESTART as isize) {
@@ -707,7 +707,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                         trap_cx.gp.a0 = EINTR as usize;
                     }
                 }
-                let current_sp = inner.get_trap_cx().gp.sp;
+                let current_sp = inner.trap_context_mut().gp.sp;
                 let alt_stack = inner.signal_stack;
                 let use_alt_stack = act.flags.contains(SigActionFlags::SA_ONSTACK)
                     && !alt_stack.is_disabled()
@@ -741,10 +741,10 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                     // 这里按值复制当前 trap context 的机器寄存器快照，用于构造
                     // 用户态 `ucontext_t`，不会保留指向 trap frame 的引用。
                     let mcontext = unsafe {
-                        *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>()
+                        *(inner.trap_context_mut() as *const TrapContext).cast::<MachineContext>()
                     };
                     #[cfg(feature = "loongarch64")]
-                    let lsx = inner.get_trap_cx().lsx;
+                    let lsx = inner.trap_context_mut().lsx;
                     let mut frame_stack = if use_alt_stack {
                         alt_stack.with_runtime_flags(sig_sp)
                     } else {
@@ -785,7 +785,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                             drop(task);
                             exit_current_with_sigsegv();
                         }
-                        let trap_cx = inner.get_trap_cx();
+                        let trap_cx = inner.trap_context_mut();
                         trap_cx.gp.a2 = ucontext_addr; // a2 <- *UserContext
                         trap_cx.gp.a1 = siginfo_addr; // a1 <- *SigInfo
                                                       // In this case, signal handler only have one parameter (a0 <- signum), so only copy something necessary
@@ -839,7 +839,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                             exit_current_with_sigsegv();
                         }
                     }
-                    let trap_cx = inner.get_trap_cx();
+                    let trap_cx = inner.trap_context_mut();
                     trap_cx.gp.a0 = signum; // a0 <- signum
                     trap_cx.set_sp(sig_sp); // update sp, because we've pushed something into stack
                     trap_cx.gp.ra =
@@ -888,7 +888,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                         println!(
                                 "[kernel] {:?} in application, instruction addr = {:#x}, bad instruction = {:#x}, core dumped.",
                                 scause,
-                                inner.get_trap_cx().gp.pc,
+                                inner.trap_context_mut().gp.pc,
                                 stval,
                             );
                     } else {
@@ -897,7 +897,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                                 "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
                                 scause,
                                 stval,
-                                inner.get_trap_cx().gp.pc,
+                                inner.trap_context_mut().gp.pc,
                             );
                     }
                 }
@@ -944,7 +944,7 @@ pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
         Err(errno) => return errno,
     };
     let mut inner = task.acquire_inner_lock();
-    let current_sp = inner.get_trap_cx().gp.sp;
+    let current_sp = inner.trap_context_mut().gp.sp;
     let old_stack = inner.signal_stack.with_runtime_flags(current_sp);
 
     if !old_ss.is_null() {

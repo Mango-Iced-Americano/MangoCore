@@ -120,7 +120,7 @@ pub fn trap_handler() -> ! {
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
             let syscall_id = cx.gp.a7;
@@ -141,7 +141,7 @@ pub fn trap_handler() -> ! {
         let task = current_trap_task();
         {
             let mut inner = task.acquire_inner_lock();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             // sigreturn(139) already restored the full trap context (including a0).
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
@@ -260,8 +260,8 @@ pub fn trap_return() -> ! {
     // Refresh after signal/exec context changes and on every future migration:
     // the CPU performing this return owns the pointer installed on next trap.
     {
-        let inner = task.acquire_inner_lock();
-        let trap_cx = inner.get_trap_cx();
+        let mut inner = task.acquire_inner_lock();
+        let trap_cx = inner.trap_context_mut();
         trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
         // 返回汇编在写 sstatus 后仍需恢复寄存器。这里强制 SIE=0、SPIE=1，
         // 保证 timer/IPI 只能在最终 SRET 完成现场切换后重新响应。

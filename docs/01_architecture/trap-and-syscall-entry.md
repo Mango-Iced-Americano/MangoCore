@@ -3,7 +3,7 @@ title: "陷阱与 syscall 入口 (Trap and Syscall Entry)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [architecture, trap, syscall, interrupt, smp, asid]
 ---
 
@@ -92,7 +92,7 @@ pub fn trap_handler() -> ! {
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
             let syscall_id = cx.gp.a7;
@@ -106,7 +106,7 @@ pub fn trap_handler() -> ! {
         // so fetch it again after syscall returns.
         {
             let mut inner = task.acquire_inner_lock();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             // sigreturn(139) already restored the full trap context (including a0).
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
@@ -251,7 +251,7 @@ pub fn trap_handler() -> ! {
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             ERA::read().next_ins().write();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
@@ -266,7 +266,7 @@ pub fn trap_handler() -> ! {
         // so fetch it again after syscall returns.
         {
             let mut inner = task.acquire_inner_lock();
-            let cx = inner.get_trap_cx();
+            let cx = inner.trap_context_mut();
             // sigreturn(139) already restored the full trap context (including a0).
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
@@ -356,65 +356,31 @@ pub fn trap_handler() -> ! {
             read_bp();
         }
         Trap::Exception(Exception::AddressNotAligned) => {
-            let cx = current_trap_cx();
+            let task = current_task().unwrap();
             let token = current_user_token();
-            let pc = cx.gp.pc;
-            let mut i = 0;
-            copy_from_user(token, pc as *const u32, addr_of_mut!(i)).unwrap();
-            let ins = Instruction::from(i);
-            let op = ins.get_op_code();
-            if op.is_err() {
-                panic!("Unsupported OpCode! Instruction: {:?} ", ins);
-            }
-            let op = op.unwrap();
+            let pc = task.acquire_inner_lock().trap_context_mut().gp.pc;
+            let mut instruction = 0;
+            copy_from_user(token, pc as *const u32, addr_of_mut!(instruction)).unwrap();
+            let ins = Instruction::from(instruction);
+            let op = ins.get_op_code().expect("unsupported unaligned opcode");
             let addr = BadV::read().get_vaddr();
-            //debug!("{:#x}: {:?}, {:#x}", pc, op, addr);
             let sz = op.get_size();
-            let is_aligned: bool = addr % sz == 0;
-            if !is_aligned {
-                assert!([2, 4, 8].contains(&sz));
-                if op.is_store() {
-                    let mut rd = if !op.is_float_op() {
-                        cx.gp[ins.get_rd_num()]
-                    } else {
-                        cx.fp.f[ins.get_rd_num()]
-                    };
-                    for i in 0..sz {
-                        let seg = rd as u8;
-                        copy_to_user(token, addr_of!(seg), (addr + i) as *mut u8).unwrap();
-                        rd >>= 8;
-                    }
-                } else {
-                    let mut rd = 0;
-                    for i in (0..sz).rev() {
-                        rd <<= 8;
-                        let mut read_byte: u8 = 0;
-                        copy_from_user(token, (i + addr) as *const u8, addr_of_mut!((read_byte)))
-                            .unwrap();
-                        rd |= read_byte as usize;
-                    }
-                    if !op.is_unsigned_ld() {
-                        match sz {
-                            2 => rd = (rd as u16) as i16 as isize as usize,
-                            4 => rd = (rd as u32) as i32 as isize as usize,
-                            8 => rd = rd,
-                            _ => unreachable!(),
-                        }
-                    }
-                    if !op.is_float_op() {
-                        cx.gp[ins.get_rd_num()] = rd;
-                    } else {
-                        cx.fp.f[ins.get_rd_num()] = rd;
-                    }
-                }
+            assert!(addr % sz != 0 && [2, 4, 8].contains(&sz));
+
+            // store 源寄存器在锁内按值快照；逐字节用户访存不持 task.inner。
+            let store_value = if op.is_store() {
+                Some(snapshot_store_register(&task, &ins, op))
+            } else {
+                None
+            };
+            let loaded = emulate_unaligned_user_access(token, addr, sz, op, store_value);
+
+            {
+                let mut inner = task.acquire_inner_lock();
+                let cx = inner.trap_context_mut();
+                assert_eq!(cx.gp.pc, pc);
+                commit_unaligned_load(cx, &ins, op, loaded);
                 cx.gp.pc += 4;
-            }
-            if cx.gp.pc == pc {
-                panic!(
-                    "Failed to execute the command. Bad Instruction: {}, PC:{}",
-                    unsafe { *(cx.gp.pc as *const u32) },
-                    pc
-                );
             }
         }
         Trap::Interrupt(Interrupt::IPI)
@@ -436,6 +402,10 @@ pub fn trap_handler() -> ! {
     trap_return();
 }
 ```
+
+上面的两个辅助名字用于省略逐字节编解码细节，不是生产 API。实际实现遵守同一三段式边界：
+锁内快照、锁外用户访存、重新加锁校验并提交。这样缺页和 TLB shootdown 不会发生在
+`task.inner` 临界区内，也不会让 trap context 引用越过 guard。
 
 la64 的核心差异集中在三处：syscall 分支同时推进 `ERA` 和 `cx.gp.pc`；store/page modify 类缺页成功后补写 dirty bit；timer interrupt 分支通过 `TIClr` 清除硬件中断状态后再进入 task timer handler。完整函数还包含 `SIGILL`、`SIGSEGV`、breakpoint 和非对齐访存模拟分支。
 
@@ -569,8 +539,8 @@ pub fn trap_return() -> ! {
     let task = do_signal();
     set_user_trap_entry();
     {
-        let inner = task.acquire_inner_lock();
-        let trap_cx = inner.get_trap_cx();
+        let mut inner = task.acquire_inner_lock();
+        let trap_cx = inner.trap_context_mut();
         trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
         trap_cx.prepare_return();
     }
@@ -618,8 +588,8 @@ pub fn trap_return() -> ! {
     let task = do_signal();
     set_user_trap_entry();
     let trap_cx_ptr = {
-        let inner = task.acquire_inner_lock();
-        let trap_cx = inner.get_trap_cx();
+        let mut inner = task.acquire_inner_lock();
+        let trap_cx = inner.trap_context_mut();
         trap_cx.kernel_cpu_local = crate::hal::cpu_local_ptr();
         trap_cx.sstatus.set_pplv(3).set_pie(true);
         trap_cx as *const TrapContext as usize

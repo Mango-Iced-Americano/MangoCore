@@ -132,7 +132,7 @@ if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
     let (syscall_id, args) = {
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
-        let cx = inner.get_trap_cx();
+        let cx = inner.trap_context_mut();
         cx.gp.pc += 4;
         cx.origin_a0 = cx.gp.a0; // 保存重启参数
         let syscall_id = cx.gp.a7;
@@ -144,7 +144,7 @@ if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
     let result = syscall(syscall_id, args);
     {
         let mut inner = task.acquire_inner_lock();
-        let cx = inner.get_trap_cx();
+        let cx = inner.trap_context_mut();
         if syscall_id != 139 {
             cx.gp.a0 = result as usize;
         }

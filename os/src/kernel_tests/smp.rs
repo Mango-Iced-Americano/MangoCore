@@ -1118,7 +1118,7 @@ fn build_user_task(
             .map_err(|_| "failed to protect user probe code page")?;
         Ok(entry)
     })?;
-    task.acquire_inner_lock().get_trap_cx().gp.pc = entry;
+    task.acquire_inner_lock().trap_context_mut().gp.pc = entry;
     Ok((task, entry))
 }
 
@@ -1328,7 +1328,7 @@ fn request_user_reschedule_from_ap() {
         };
         if task.task_status() == crate::task::TaskStatus::Running(crate::smp::BOOT_CPU_ID) {
             // inner 锁只保护一次 PC 快照，不跨 IPI 发送或等待点。
-            let pc = task.acquire_inner_lock().get_trap_cx().gp.pc;
+            let pc = task.acquire_inner_lock().trap_context_mut().gp.pc;
             if pc >= ready_pc {
                 drop(task);
                 let result = if crate::smp::request_reschedule(crate::smp::BOOT_CPU_ID).is_ok() {

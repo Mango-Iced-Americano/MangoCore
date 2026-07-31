@@ -230,6 +230,12 @@ clone 子任务的 `TrapContext`：
 
 父进程返回值由 syscall 层返回 child tid。
 
+`TaskControlBlockInner::trap_context_mut(&mut self)` 是 Rust 层唯一的 trap context
+可变访问入口。它返回的引用只能活在当前 `task.inner` guard 内；禁止恢复曾经存在的
+`&'static mut TrapContext` 或从临时 guard 返回引用的 current-task helper。需要在
+用户访存、PTE 更新、IPI ack 等等待边界两侧访问 trap frame 时，应先在锁内按值快照所需
+字段，解锁完成操作，再重新加锁校验并提交。
+
 ## 8. 调度时间统计
 
 `TaskControlBlockInner` 在 trap 和 schedule 处维护 CPU 时间：
