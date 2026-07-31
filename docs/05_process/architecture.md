@@ -294,8 +294,9 @@ TaskControlBlock::load_elf()
     build new AddressSpace
     map ELF/interpreter/heap/user stack
     terminate sibling threads
-    close CLOEXEC fds
-    reset sighand/futex
+    isolate shared fd table/sighand
+    close CLOEXEC fds and reset signal actions
+    replace private futex table
     clear thread exit state
     complete vfork parent
 ```

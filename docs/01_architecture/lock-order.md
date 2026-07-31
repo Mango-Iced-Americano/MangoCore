@@ -309,6 +309,11 @@ exec 的临时门禁固定采用：
   `Interrupted`；调用层释放 syscall 栈上的 `Arc` 后才进入安全点；
 - vfork child 已经 publish 后，父线程被生命周期请求中止只能返回 `StopCaller`，
   不能调用 unpublished cleanup。
+- `reset_exec_resources()` 只在 live count 为 1 后运行。它在 `process.inner` 内读取
+  fd table/sighand 的共享状态和快照，释放锁后再复制、关闭 CLOEXEC 与重置信号；
+  重新取得锁只用于安装最终对象；
+- 被替换的 futex table 必须先移出 `ProcessInner`，释放 `process.inner` 后再析构。
+  WaitQueue 析构可能释放任务引用，禁止让这条析构链在进程锁内执行。
 
 永久 group exit 可以在 exec owner 等待期间发布。安全点优先消费永久退出码；owner
 醒来后放弃新映像并清除临时会话，但永久发布门仍保持关闭。

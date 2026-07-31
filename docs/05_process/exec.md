@@ -148,10 +148,11 @@ fallback 顺序：
 5. 调用 `install_exec_image()` 建立临时 exec 会话，关闭同 PCB 的 clone 发布门。
 6. 请求 sibling 在各自 owner CPU 的任务安全点退出，并等待 live-thread 计数收缩为 1。
 7. 若永久 group exit 已覆盖本次 exec，则放弃尚未提交的新映像，转入统一退出路径。
-8. 更新当前 TCB trap context、清 `clear_child_tid`、重置 robust list、禁用 alt signal stack。
-9. 必要时从外部共享的旧 VM 撤销当前线程的 user-resource 映射。
-10. 替换 exe、关闭 CLOEXEC fd、替换 VM、reset sighand、clear futex。
-11. 重新开放线程发布门。
+8. 调用 `reset_exec_resources()`：必要时复制跨 PCB 共享的 fd table/sighand，
+   再关闭 CLOEXEC、重置信号动作，并为新映像换上新的 private futex table。
+9. 更新当前 TCB trap context、清 `clear_child_tid`、重置 robust list、禁用 alt signal stack。
+10. 必要时从外部共享的旧 VM 撤销当前线程的 user-resource 映射。
+11. 替换 exe 和 VM，再重新开放线程发布门。
 
 这个顺序把“可失败的构造”和“不可回滚的提交”分开。ELF 解析、新地址空间和初始用户栈
 全部在旧映像仍可运行时完成；只有构造成功后才关闭线程发布门并停止 sibling。旧 VM 不能
@@ -207,12 +208,16 @@ exec 成功后：
 
 | 资源 | 行为 |
 |------|------|
-| fd table | 关闭 `O_CLOEXEC` fd，并释放 fcntl locks |
-| sighand | `reset()`，恢复默认 signal action |
-| futex | `clear()`，清空 private futex table |
+| fd table | 引用唯一时原地关闭 `O_CLOEXEC` fd；被其它 PCB 共享时先复制，再只修改当前 PCB 的副本 |
+| sighand | 引用唯一时原地重置；被其它 PCB 共享时先复制；用户 handler 恢复默认，显式 `SIG_IGN` 保留 |
+| futex | 无条件换成新的 private table；旧表属于旧地址空间，且可能仍被其它 PCB 使用 |
 | alt signal stack | disabled |
 | robust list | reset |
 | clear_child_tid | 清 0 |
+
+`Arc::strong_count()` 必须在取得临时 `Arc` 副本之前读取，否则辅助函数自己的 clone
+会把唯一对象误判为共享对象。旧 futex 的析构可能沿 WaitQueue 释放任务引用，因此代码
+先把它移出 `ProcessInner`，释放 `process.inner` 锁后再 drop，避免析构链回入进程锁。
 
 ## 12. vfork 完成
 
@@ -243,5 +248,5 @@ exit_current_and_run_next(127);
 | 脚本不能执行 | shebang 前 128 字节、解释器 ELF、shell fallback |
 | exec 大参数返回 E2BIG | 字符串总量和最终栈占用两层限制 |
 | exec 后旧 fd 未关闭 | `close_cloexec_and_release_fcntl_locks()` |
-| exec 后 signal handler 仍旧 | `sighand.reset()` |
+| exec 后 signal handler 仍旧 | `reset_exec_resources()` 是否调用 `sighand.reset_for_exec()` |
 | vfork 父线程卡住 | `complete_vfork()` 是否在成功路径调用 |

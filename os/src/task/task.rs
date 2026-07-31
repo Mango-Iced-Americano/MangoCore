@@ -1609,6 +1609,14 @@ impl TaskControlBlock {
             return Err(EAGAIN);
         }
 
+        // Linux 在 de-thread 之后先解除跨 PCB 资源共享，再修改 CLOEXEC、sighand
+        // 和 private futex。此处已经越过可回滚点；OOM 会结束当前进程，不能让
+        // 已被停止的 sibling 恢复到旧映像。
+        if let Err(error) = self.process.reset_exec_resources() {
+            exec.finish();
+            return Err(-(error as isize));
+        }
+
         {
             let mut inner = self.acquire_inner_lock();
             inner.trap_cx_ppn = new_trap_ppn;
@@ -1627,14 +1635,7 @@ impl TaskControlBlock {
             });
         }
         self.process.replace_exe(elf);
-        {
-            let files_ref = self.process.files();
-            let mut fd_table = files_ref.lock();
-            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
-        }
         self.process.replace_vm(new_vm);
-        self.process.sighand().lock().reset();
-        self.process.futex().lock().clear();
         exec.finish();
         Ok(())
     }

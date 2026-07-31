@@ -134,22 +134,16 @@ sys_execveat()
 2. 准备用户 heap、栈、auxv。
 3. 建立临时 exec 会话并关闭线程首次发布门。
 4. 请求 sibling 在各自 CPU 安全点退出，等待 live count 收缩为 owner 一人。
-5. 设置新 trap context；如果旧 VM 被外部 PCB 共享，清理其中的当前线程资源。
-6. 替换 exe、关闭 CLOEXEC fd、替换 VM、重置信号处理、清 futex。
-7. 结束临时会话并重新开放线程发布。
+5. 隔离跨 PCB 共享的 fd table/sighand，关闭当前副本的 CLOEXEC fd，并换新 private futex table。
+6. 设置新 trap context；如果旧 VM 被外部 PCB 共享，清理其中的当前线程资源。
+7. 替换 exe 和 VM，结束临时会话并重新开放线程发布。
 
 exec 的不可回滚提交点集中在 `TaskControlBlock::install_exec_image()` 后半段：
 
 ```rust
+self.process.reset_exec_resources()?;
 self.process.replace_exe(elf);
-{
-    let files_ref = self.process.files();
-    let mut fd_table = files_ref.lock();
-    crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
-}
 self.process.replace_vm(memory_set);
-self.process.sighand().lock().reset();
-self.process.futex().lock().clear();
 exec.finish();
 Ok(())
 ```
@@ -157,6 +151,8 @@ Ok(())
 这些操作发生前，ELF 映射、用户栈、auxv 和 trap context 都已经在临时 `memory_set` 中构造完成。
 旧 VM 仍一直保留到 exec 门禁关闭且 sibling 的线程级清理全部 ack；同 PCB 线程不各自持有
 长期 VM `Arc`，所以不能用 `Arc::strong_count()` 证明已经独占地址空间。
+fd table/sighand 则可能因 `CLONE_FILES/CLONE_SIGHAND` 被其它 PCB 长期持有，所以提交阶段
+必须在复制临时 `Arc` 前判断是否共享，并只修改当前 PCB 最终安装的对象。
 
 ## 6. exec 与 vfork
 

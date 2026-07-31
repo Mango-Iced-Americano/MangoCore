@@ -103,15 +103,20 @@ pub struct ProcessControlBlock {
 
 | 资源 | clone 影响 | exec 影响 | exit/wait 影响 |
 |------|------------|-----------|----------------|
-| `files` | `CLONE_FILES` 共享，否则 clone fd table | 关闭 CLOEXEC fd | 进程退出关闭 fd |
+| `files` | `CLONE_FILES` 共享，否则 clone fd table | 共享时先复制，再关闭当前 PCB 副本的 CLOEXEC fd | 进程退出关闭 fd |
 | `fs` | `CLONE_FS` 共享，否则复制 cwd/root/umask | 保留 | 退出时随 PCB 释放 |
 | `vm` | `CLONE_VM` 共享，否则由 `AddressSpaceInner::from_existing_user()` 构造新 `AddressSpace` | `replace_vm(new)` | zombie 时可 `write(|vm| vm.release_for_zombie())` |
-| `sighand` | `CLONE_SIGHAND` 共享，否则复制 | exec 后 reset | PCB drop 释放 |
-| `futex` | 共享 VM 时共享，否则新建 private table | exec 后 clear | 退出时处理 robust/clear child tid |
+| `sighand` | `CLONE_SIGHAND` 共享，否则复制 | 共享时先复制；清用户 handler，保留 `SIG_IGN` | PCB drop 释放 |
+| `futex` | 共享 VM 时共享，否则新建 private table | 换成新 private table，不清空可能被其它 PCB 使用的旧表 | 退出时处理 robust/clear child tid |
 | `children/parent` | 非 `CLONE_THREAD` child 发布到父进程 | 保留 | wait/auto-reap 消费 |
 | `ipc/net/mnt/uts` | namespace flag 决定共享或新建 | 保留 | PCB 释放时 drop 引用 |
 
 这张表是读 clone/exec/exit 的主线：clone 决定资源从哪里来，exec 决定哪些资源被替换或重置，exit/wait 决定资源何时释放和用户何时可观察退出状态。
+
+`reset_exec_resources()` 只能在线程组通过 `ExecSession` 收缩到一个 live thread 后调用。
+它先在 `process.inner` 内判断 fd table/sighand 是否仍跨 PCB 共享并取得快照，再在锁外完成
+可能分配内存的复制与 CLOEXEC/signal 重置；提交新对象时只短持 `process.inner`。旧 futex
+也在锁外析构，避免 WaitQueue 的任务引用析构链回入进程锁。
 
 ## 4. ProcessState
 

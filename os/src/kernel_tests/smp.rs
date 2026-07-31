@@ -486,6 +486,10 @@ pub fn tests() -> Vec<KernelTest> {
             group_exit_stops_remote_sibling,
         ),
         KernelTest::new("smp::exec_stops_remote_sibling", exec_stops_remote_sibling),
+        KernelTest::new(
+            "smp::exec_does_not_mutate_shared_resources",
+            exec_does_not_mutate_shared_resources,
+        ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
             secondary_cpus_stop_and_ack,
@@ -840,6 +844,47 @@ fn exec_stops_remote_sibling() -> Result<(), &'static str> {
         || EXEC_LATE_RUNS.load(Ordering::Acquire) != 0
     {
         return Err("late clone crossed the exec publication gate");
+    }
+    Ok(())
+}
+
+/// 验证 exec 只重置当前 PCB 的资源，不修改由其它 PCB 持有的旧共享对象。
+fn exec_does_not_mutate_shared_resources() -> Result<(), &'static str> {
+    let task = crate::task::current_task().ok_or("exec resource test has no current task")?;
+    let process = &task.process;
+    let old_files = process.files();
+    let old_sighand = process.sighand();
+    let old_futex = process.futex();
+
+    let executable = process.exe().lock().clone();
+    let cloexec_fd = old_files
+        .lock()
+        .alloc_fd(executable, true)
+        .map_err(|_| "failed to allocate CLOEXEC probe fd")?;
+    let mut action = crate::task::SigAction::new();
+    action.flags = crate::task::SigActionFlags::SA_RESTART;
+    old_sighand.lock().set(10, Some(action));
+
+    process
+        .reset_exec_resources()
+        .map_err(|_| "failed to reset exec resources")?;
+
+    let new_files = process.files();
+    let new_sighand = process.sighand();
+    let new_futex = process.futex();
+    if Arc::ptr_eq(&old_files, &new_files)
+        || Arc::ptr_eq(&old_sighand, &new_sighand)
+        || Arc::ptr_eq(&old_futex, &new_futex)
+    {
+        return Err("exec kept a resource shared with another PCB");
+    }
+    if old_files.lock().get_file(cloexec_fd).is_err()
+        || new_files.lock().get_file(cloexec_fd).is_ok()
+    {
+        return Err("CLOEXEC close leaked into the old shared fd table");
+    }
+    if old_sighand.lock().get(10).is_none() || new_sighand.lock().get(10).is_some() {
+        return Err("exec signal reset leaked into the old shared sighand");
     }
     Ok(())
 }

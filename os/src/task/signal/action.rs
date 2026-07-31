@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use super::SigAction;
+use super::{SigAction, SigHandler};
 
 #[derive(Clone)]
 /// 进程共享的信号动作表。
@@ -60,12 +60,17 @@ impl Sighand {
         self.actions[idx] = action;
     }
 
-    /// 将所有显式动作恢复为默认动作。
+    /// 按 `execve` 语义重置信号动作。
     ///
-    /// `execve` 使用该接口实现 Linux 语义：用户自定义 handler 不跨 exec 保留。
-    pub fn reset(&mut self) {
+    /// 用户 handler 不跨 exec 保留，但显式 `SIG_IGN` 必须继续生效。
+    pub fn reset_for_exec(&mut self) {
         for action in self.actions.iter_mut() {
-            *action = None;
+            if action
+                .as_ref()
+                .is_some_and(|action| action.handler != SigHandler::SIG_IGN)
+            {
+                *action = None;
+            }
         }
     }
 }

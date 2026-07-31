@@ -589,6 +589,57 @@ impl ProcessControlBlock {
         self.inner.lock().futex.clone()
     }
 
+    /// 为已经进入提交阶段的 `execve` 隔离并重置进程资源。
+    ///
+    /// 调用前必须先通过 [`ExecSession`] 停止同线程组的其他线程。其它 PCB 仍可能
+    /// 通过 `CLONE_FILES`、`CLONE_SIGHAND` 或 `CLONE_VM` 持有旧对象，因此只有
+    /// 引用唯一时才能原地修改；共享对象必须先复制或替换，不能污染其它进程。
+    pub(crate) fn reset_exec_resources(&self) -> Result<(), SyscallErr> {
+        assert_eq!(
+            self.live_thread_count(),
+            1,
+            "exec resources reset while sibling threads are still live"
+        );
+
+        let (files_shared, sighand_shared, old_files, old_sighand) = {
+            let inner = self.inner.lock();
+            (
+                Arc::strong_count(&inner.files) > 1,
+                Arc::strong_count(&inner.sighand) > 1,
+                inner.files.clone(),
+                inner.sighand.clone(),
+            )
+        };
+
+        let files = if files_shared {
+            Arc::new(Mutex::new(old_files.lock().try_clone()?))
+        } else {
+            old_files
+        };
+        crate::syscall::fs::close_cloexec_and_release_fcntl_locks(
+            self.pid,
+            &mut files.lock(),
+        );
+
+        let sighand = if sighand_shared {
+            Arc::new(Mutex::new(Sighand::from_existing(&old_sighand.lock())))
+        } else {
+            old_sighand
+        };
+        sighand.lock().reset_for_exec();
+
+        let mut inner = self.inner.lock();
+        inner.files = files;
+        inner.sighand = sighand;
+        // private futex key 属于旧地址空间；新映像不能继承或清空共享 PCB 的等待表。
+        let old_futex =
+            core::mem::replace(&mut inner.futex, Arc::new(Mutex::new(Futex::new())));
+        drop(inner);
+        // WaitQueue 的析构可能释放任务引用，不能把这条析构链放在 process.inner 锁内。
+        drop(old_futex);
+        Ok(())
+    }
+
     pub fn user_res_slot_allocator(&self) -> Arc<Mutex<RecycleAllocator>> {
         self.inner.lock().user_res_slot_allocator.clone()
     }
