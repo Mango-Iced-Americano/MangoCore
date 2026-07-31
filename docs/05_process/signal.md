@@ -347,15 +347,37 @@ fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
 }
 ```
 
-## 10. sigaction 与 sigprocmask
+## 10. sigaction、sigprocmask 与 sigaltstack
 
 `sys_sigaction(signum, act, oldact, sigsetsize)` 要求 `sigsetsize == size_of::<u64>()`。
 
 `sigaction()` 对 `signum = 0`、`SIGKILL(9)`、`SIGSTOP(19)` 以及 `signum >= 65` 返回 `EINVAL`。其中 `signum = 0` 不作为 handler 查询入口处理；如果只需要权限或存在性检查，应使用 `kill(pid, 0)` 的信号发送语义。
 
 `sys_sigprocmask(how, set, oldset, sigsetsize)` 要求 `sigsetsize >= size_of::<u64>()`。
+用户指针固定按低 64 位 mask 读写，不能直接暴露内部 `Signals` 的 Rust 布局；这在
+LoongArch 内部 signal bitset 宽于用户 ABI 时尤其重要。
 
 信号 mask 会去掉不可屏蔽信号集合 `Signals::CAN_NOT_BE_MASKED`。
+
+这三个带“新值/旧值”指针的 syscall 统一遵循 read/commit/write：
+
+```text
+锁外读取可选新值
+  -> 短持 sighand 或 task.inner：快照旧值、校验并提交新值
+  -> 解锁
+  -> 锁外向用户写回旧值
+```
+
+`sigaction` 的 disposition 属于进程共享状态，因此旧 action 的快照和新 action 的替换
+必须在同一个 `sighand` 临界区内线性化；`sigprocmask` 和 altstack 属于当前线程，使用
+`task.inner`。输入读取失败或新值校验失败时不提交状态；新值已经提交后，旧值 copyout
+失败只返回 `EFAULT`，不回滚已发布状态。输入和输出指针相同时也必须先完成输入读取，
+否则旧值 copyout 会覆盖尚未读取的新值。
+
+Linux v6.6 的 `rt_sigprocmask` 和 `sigaltstack` wrapper 都只在内部操作成功后 copyout
+旧值；因此非法 `how`、非法 altstack flags、当前已在 altstack 或栈空间不足时，返回
+对应错误且不写旧值。不要把内部 helper 已经生成旧值误解为 syscall 错误路径仍会
+copyout。
 
 ## 11. sigpending、sigtimedwait、sigsuspend
 

@@ -71,7 +71,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 远程 Running/Blocking affinity | 2026-07-31 | GPT/Codex, DeepSeek | owner 安全点请求/完成协议、锁序反例审查、双架构 8 核冻结验证 | 远程写侧等待运行 owner 完成交接；不新增调度状态；双架构 focused 24/24，初赛 RV64 312/314、LA64 308/314 |
 | SMP Per-CPU 调度 tick | 2026-07-31 | GPT/Codex, DeepSeek | 双架构 timer 官方规范、CPU0 全局 callback 边界、无 syscall 用户抢占与冻结验证 | 每 CPU 100 Hz quantum，hard IRQ 只发布 deferred 请求；双架构 focused 25/25，初赛基线不退化 |
 | SMP 线程组退出与多线程 exec | 2026-07-31 | GPT/Codex, DeepSeek | Linux/DragonOS 生命周期对照、owner 自清理、clone 门禁、live ack、等待点退栈与双架构 8 核门禁 | B40 永久 group exit 与 B41 临时 exec 会话均不远程析构 Running sibling；focused 由 26/26 增至 27/27，初赛 RV64 312/314、LA64 308/314 |
-| SMP trap context 与 signal frame 锁边界 | 2026-07-31 | GPT/Codex, DeepSeek | Linux RV64/LA64 signal ABI 对照、current owner 与 uaccess 锁序审查、冻结双架构 8 核门禁 | B45—B47 删除可逃逸 trap 引用，并让 signal frame 读写位于 task 锁外；初赛 RV64 312/314、LA64 308/314 |
+| SMP trap context 与 signal 用户访存锁边界 | 2026-07-31 | GPT/Codex, DeepSeek | Linux signal ABI 对照、current owner 与 uaccess 锁序审查、冻结双架构 8 核门禁 | B45—B48 删除可逃逸 trap 引用，并让 signal frame 及状态 syscall 的用户访存位于普通锁外；初赛 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -872,9 +872,9 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   312/314、LA64 308/314，精确失败集合与既有基线一致，clone/fork/exec/exit/wait
   项满分；所有有效 child 均无源码 mutation。
 
-### Case 37: SMP trap context 与 signal frame 锁边界
+### Case 37: SMP trap context 与 signal 用户访存锁边界
 
-- Evidence: `docs/Work_Log/2026-07-31.md` 及同日 B45—B47 evidence；DeepSeek prompt、
+- Evidence: `docs/Work_Log/2026-07-31.md` 及同日 B45—B48 evidence；DeepSeek prompt、
   manifest 与原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
 - AI roles: GPT/Codex 对照 Linux v6.6 通用及 RV64/LA64 signal 路径，设计 current-owner
   借用边界、实现和最终事实裁决；DeepSeek 负责冻结只读设计审查、受限 Docker 串行验证
@@ -883,14 +883,19 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   sigreturn 和 handler frame 投递又跨 faultable 用户访存持有普通任务锁。
 - Human action: B45 将 trap 可变借用绑定到 inner guard；B46 以“锁内快照、锁外读取、
   锁内提交”恢复 frame；B47 对称地在锁外写完整 `SigInfo + UserContext`，成功后才发布
-  handler PC/mask。三步都复用 current owner 不变量，没有新增 generation 或状态机。
+  handler PC/mask；B48 又把 `sigaction/sigprocmask/sigaltstack` 的输入读取和旧值写回
+  移到普通锁外，并把 sigmask 用户 ABI 固定为低 64 位。四步都复用 current owner
+  不变量，没有新增 generation、事务对象或状态机。
 - AI adjudication: DeepSeek 的 B47 结论遗漏 LA64 两项 `test_brk` partial failure，并
-  误把普通 PID1 SIGCHLD 路径描述成动态覆盖所有 signal flag；GPT/Codex 根据原始 judge
-  JSON 和 action 源码将结论收窄为非 `SA_SIGINFO` 正常 frame 往返。
+  误把普通 PID1 SIGCHLD 路径描述成动态覆盖所有 signal flag；B48 又误判 Linux 会在
+  `rt_sigprocmask`/`sigaltstack` 内部操作失败后继续 copyout 旧值。GPT/Codex 分别根据
+  原始 judge JSON、action 源码和 Linux v6.6 syscall wrapper 修正，没有采纳错误结论。
 - Verification: B45/B46 已提交为 `12b54ce0`/`95538a23`；B47 冻结生产源码 diff
   SHA-256 为 `0cda317e4a5f7ed640136135e57634c9cc16555a0d5aa3fc3da86e6ed5b255bb`。
   B47 双架构 `CORE_NUM=8 mask=0x003` 为 RV64 312/314、LA64 308/314，精确失败集合与
-  B46 一致，两个 child 均无源码 mutation。
+  B46 一致。B48 冻结生产源码 diff SHA-256 为
+  `33a8f1ccbf41278a8132b928542d928ca0c485ce3ee7f6fa6bd079ee971f7644`，同一门禁仍为
+  RV64 312/314、LA64 308/314；四个 B47/B48 child 均无源码 mutation。
 
 ## 6. 质量控制与验证方式
 
@@ -971,7 +976,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b39-percpu-timer-summary.md` | SMP Per-CPU 调度 tick | 记录本地 quantum/CPU0 全局 callback 边界、官方规范对照、DeepSeek RED/冻结验证裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b40-group-exit-summary.md` | SMP 跨 CPU 线程组退出 | 记录永久 gate、owner 自清理、live-token ack、DeepSeek 反例审查及双架构 26/26/初赛门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b41-exec-summary.md` | SMP 多线程 exec | 记录临时 ExecSession、late clone 门禁、旧 MM 生命周期、等待点退栈、包装器 fail-closed 裁决及双架构 27/27/初赛门禁 |
-| `docs/Work_Log/2026-07-31.md`、同日 B45—B47 evidence | SMP trap context 与 signal frame 锁边界 | 记录 trap 借用收口、signal frame 锁外读写、Linux ABI 对照、DeepSeek 结论纠错及双架构 8 核初赛门禁 |
+| `docs/Work_Log/2026-07-31.md`、同日 B45—B48 evidence | SMP trap context 与 signal 用户访存锁边界 | 记录 trap 借用收口、signal frame 与状态 syscall 的锁外用户访存、Linux ABI 对照、DeepSeek 结论纠错及双架构 8 核初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

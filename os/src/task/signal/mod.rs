@@ -24,8 +24,8 @@ use crate::task::{
 };
 use alloc::sync::Arc;
 
+use super::current_task;
 use super::task::TaskControlBlock;
-use super::{current_task, current_user_token};
 use crate::utils::error::SyscallErr;
 
 mod action;
@@ -317,60 +317,54 @@ impl Debug for SigAction {
     }
 }
 
-/// Change the action taken by a process on receipt of a specific signal.
-/// (See signal(7) for  an  overview of signals.)
-/// # Fields in Structure of `act` & `oldact`
+/// 查询或替换进程共享的 signal disposition。
 ///
-/// # Arguments
-/// * `signum`: specifies the signal and can be any valid signal except `SIGKILL` and `SIGSTOP`.
-/// * `act`: new action
-/// * `oldact`: old action
-/// 此函数与RV版本略有不同，但是可以不处理，因为此版本的这个函数鲁棒性更强
+/// `act == NULL` 只查询，`oldact == NULL` 不返回旧值。`SIGKILL` 和 `SIGSTOP`
+/// 的 disposition 不可修改。
 pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigAction) -> isize {
     let task = current_task().unwrap();
-    match signum {
-        0 /* None */ | 9 /* SIGKILL */ | 19 /* SIGSTOP */ | 65.. /* Unsupported */ => {
-            warn!("[sigaction] bad signum: {}", signum);
-            EINVAL
-        }
-        signum => {
-            let token = current_user_token();
-            if !oldact.is_null() {
-                let sighand_ref = task.process.sighand();
-                let sighand = sighand_ref.lock();
-                let suc = if let Some(sigact) = sighand.get(signum) {
-                    UserPtrMut::new(oldact).write(token, &UserSigAction::from_kernel(*sigact))
-                } else {
-                    UserPtrMut::new(oldact)
-                        .write(token, &UserSigAction::from_kernel(SigAction::new()))
-                };
-                if suc.is_err() {
-                    log::error!("[sigaction] Error on copy_to_user(_,{:?},_)", oldact);
-                    return EFAULT;
-                }
-            }
-            if let Some(mut sigact) = match UserPtr::new(act).read_optional(token) {
-                Ok(sigact) => sigact.map(UserSigAction::into_kernel),
-                Err(_) => {
-                    log::error!("[sigaction] Failed to copy sigact {:?} from user.", act);
-                    return EFAULT;
-                }
-            } {
-                sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
-                let sighand_ref = task.process.sighand();
-                let mut sighand = sighand_ref.lock();
-                if sigact.handler == SigHandler::SIG_IGN {
-                    // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
-                    sighand.set(signum, Some(sigact));
-                } else if sigact.handler == SigHandler::SIG_DFL && sigact.flags.is_empty() {
-                    sighand.set(signum, None);
-                } else {
-                    sighand.set(signum, Some(sigact));
-                }
-            }
-            SUCCESS
-        }
+    if matches!(signum, 0 | 9 | 19 | 65..) {
+        warn!("[sigaction] bad signum: {}", signum);
+        return EINVAL;
     }
+
+    let token = task.process.user_token();
+    // Linux 先读取新 action，再在 sighand 锁内同时快照旧值并提交新值。
+    // 这样用户缺页不会阻塞同进程其他线程的 signal disposition 操作。
+    let new_action = match UserPtr::new(act).read_optional(token) {
+        Ok(action) => action.map(UserSigAction::into_kernel),
+        Err(_) => {
+            log::error!("[sigaction] Failed to copy sigact {:?} from user.", act);
+            return EFAULT;
+        }
+    };
+    let old_action = {
+        let sighand_ref = task.process.sighand();
+        let mut sighand = sighand_ref.lock();
+        let old_action =
+            UserSigAction::from_kernel(sighand.get(signum).copied().unwrap_or_else(SigAction::new));
+        if let Some(mut action) = new_action {
+            action.mask.remove(Signals::CAN_NOT_BE_MASKED);
+            if action.handler == SigHandler::SIG_IGN {
+                // 显式保存 SIG_IGN，不能把它和默认动作混为一谈。
+                sighand.set(signum, Some(action));
+            } else if action.handler == SigHandler::SIG_DFL && action.flags.is_empty() {
+                sighand.set(signum, None);
+            } else {
+                sighand.set(signum, Some(action));
+            }
+        }
+        old_action
+    };
+    // 新 action 已经提交；旧值写回失败只返回 EFAULT，不回滚共享 sighand。
+    if !oldact.is_null() && UserPtrMut::new(oldact).write(token, &old_action).is_err() {
+        log::error!(
+            "[sigaction] Failed to copy old action {:?} to user.",
+            oldact
+        );
+        return EFAULT;
+    }
+    SUCCESS
 }
 
 pub fn sigchld_requests_auto_reap(sighand: &Sighand) -> bool {
@@ -896,46 +890,46 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
 
 pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let token = task.process.user_token();
     let new_stack = match UserPtr::new(ss).read_optional(token) {
         Ok(stack) => stack,
         Err(errno) => return errno,
     };
-    let mut inner = task.acquire_inner_lock();
-    let current_sp = inner.trap_context_mut().gp.sp;
-    let old_stack = inner.signal_stack.with_runtime_flags(current_sp);
+    let old_stack = {
+        let mut inner = task.acquire_inner_lock();
+        let current_sp = inner.trap_context_mut().gp.sp;
+        let old_stack = inner.signal_stack.with_runtime_flags(current_sp);
 
-    if !old_ss.is_null() {
-        if UserPtrMut::new(old_ss).write(token, &old_stack).is_err() {
-            return crate::syscall::errno::EFAULT;
+        if let Some(mut stack) = new_stack {
+            let flags = SignalStackFlags::from_bits_truncate(stack.flags);
+            let allowed = SignalStackFlags::DISABLE | SignalStackFlags::AUTODISARM;
+            if stack.flags & !allowed.bits != 0 || flags.contains(SignalStackFlags::ONSTACK) {
+                return EINVAL;
+            }
+            if inner.signal_stack.contains_sp(current_sp) {
+                return EPERM;
+            }
+            if flags.contains(SignalStackFlags::DISABLE) {
+                inner.signal_stack = SignalStack::disabled();
+            } else {
+                if stack.size < SignalStack::MIN_SIZE || stack.sp.checked_add(stack.size).is_none()
+                {
+                    return ENOMEM;
+                }
+                stack.flags &= allowed.bits;
+                stack.flags &= !SignalStackFlags::DISABLE.bits;
+                stack.flags &= !SignalStackFlags::ONSTACK.bits;
+                inner.signal_stack = stack;
+            }
         }
-    }
+        old_stack
+    };
 
-    if let Some(mut stack) = new_stack {
-        let flags = SignalStackFlags::from_bits_truncate(stack.flags);
-        let allowed = SignalStackFlags::DISABLE | SignalStackFlags::AUTODISARM;
-        if stack.flags & !allowed.bits != 0 || flags.contains(SignalStackFlags::ONSTACK) {
-            return crate::syscall::errno::EINVAL;
-        }
-        if inner.signal_stack.contains_sp(current_sp) {
-            return crate::syscall::errno::EPERM;
-        }
-        if flags.contains(SignalStackFlags::DISABLE) {
-            inner.signal_stack = SignalStack::disabled();
-        } else {
-            if stack.size < SignalStack::MIN_SIZE {
-                return crate::syscall::errno::ENOMEM;
-            }
-            if stack.sp.checked_add(stack.size).is_none() {
-                return crate::syscall::errno::ENOMEM;
-            }
-            stack.flags &= allowed.bits;
-            stack.flags &= !SignalStackFlags::DISABLE.bits;
-            stack.flags &= !SignalStackFlags::ONSTACK.bits;
-            inner.signal_stack = stack;
-        }
+    // signal stack 已在短临界区内提交；copyout 可能缺页，必须位于 task 锁外。
+    if !old_ss.is_null() && UserPtrMut::new(old_ss).write(token, &old_stack).is_err() {
+        return EFAULT;
     }
-    crate::syscall::errno::SUCCESS
+    SUCCESS
 }
 
 bitflags! {
@@ -948,47 +942,35 @@ bitflags! {
 
 /// fetch and/or change the signal mask of the calling thread.
 /// # Warning
-/// In fact, `set` & `oldset` should be 1024 bits `sigset_t`, but we only support 64 signals now.
-/// For the sake of performance, we use `Signals` instead.
-pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize {
+/// 用户 ABI 只读写当前内核支持的低 64 位 signal mask；内核中的 `Signals`
+/// 可以更宽，不能直接按其 Rust 布局执行 uaccess。
+pub fn sigprocmask(how: u32, set: *const u64, oldset: *mut u64) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
-    let mut inner = task.acquire_inner_lock();
-    // If oldset is non-NULL, the previous value of the signal mask is stored in oldset
-    if oldset as usize != 0 {
+    let token = task.process.user_token();
+    let new_set = match UserPtr::new(set).read_optional(token) {
+        Ok(bits) => bits.map(|bits| Signals::from_bits_truncate(bits as signal_type!())),
+        Err(errno) => return errno,
+    };
+    let old_bits = {
+        let mut inner = task.acquire_inner_lock();
         let old_bits = inner.sigmask.bits() as u64;
-        match UserPtrMut::new(oldset as *mut u64).write(token, &old_bits) {
-            Ok(()) => {}
-            Err(errno) => return errno,
+        if let Some(signal_set) = new_set {
+            match SigMaskHow::from_bits(how) {
+                Some(SigMaskHow::SIG_BLOCK) => inner.sigmask.insert(signal_set),
+                Some(SigMaskHow::SIG_UNBLOCK) => inner.sigmask.remove(signal_set),
+                Some(SigMaskHow::SIG_SETMASK) => inner.sigmask = signal_set,
+                _ => return EINVAL,
+            }
+            inner.sigmask.remove(Signals::CAN_NOT_BE_MASKED);
         }
-    }
-    // If set is NULL, then the signal mask is unchanged
-    if set as usize != 0 {
-        let how = SigMaskHow::from_bits(how);
-        let signal_set = match UserPtr::new(set as *const u64).read(token) {
-            Ok(bits) => Signals::from_bits_truncate(bits as signal_type!()),
-            Err(errno) => return errno,
-        };
-        match how {
-            // add the signals not yet blocked in the given set to the mask
-            Some(SigMaskHow::SIG_BLOCK) => {
-                inner.sigmask.insert(signal_set);
-            }
-            // remove the blocked signals in the set from the sigmask
-            // NOTE: unblocking a signal not blocked is allowed
-            Some(SigMaskHow::SIG_UNBLOCK) => {
-                inner.sigmask.remove(signal_set);
-            }
-            // set the signal mask to what we see
-            Some(SigMaskHow::SIG_SETMASK) => {
-                inner.sigmask = signal_set;
-            }
-            // `how` was invalid
-            _ => return EINVAL,
-        };
-        // unblock SIGILL & SIGSEGV, otherwise infinite loop may occurred
-        // unblock SIGKILL & SIGSTOP, they can't be masked according to standard
-        inner.sigmask.remove(Signals::CAN_NOT_BE_MASKED);
+        old_bits
+    };
+
+    // 与 Linux 一致：新 mask 已提交后，oldset copyout 失败不回滚线程 mask。
+    if !oldset.is_null() {
+        if let Err(errno) = UserPtrMut::new(oldset).write(token, &old_bits) {
+            return errno;
+        }
     }
     SUCCESS
 }

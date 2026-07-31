@@ -465,6 +465,35 @@ task.inner + sighand：取 pending、复制 action、复位 SA_RESETHAND
 追加 pending；exec、group-exit 和 affinity 请求在 owner 的安全点生效。因此该锁外
 写入不需要新增 trap generation 或投递状态机。
 
+### 3.13 B48 signal syscall 用户访存锁序
+
+`sigaction()` 的 disposition 是进程共享状态，固定顺序为：
+
+```text
+UserPtr 读取可选新 action
+  -> sighand：快照旧 action、提交新 action
+  -> 解锁
+  -> UserPtrMut 写回旧 action
+```
+
+`sigprocmask()` 和 `sigaltstack()` 修改当前线程状态，固定顺序为：
+
+```text
+UserPtr 读取可选新值
+  -> task.inner：快照旧值、校验并提交新值
+  -> 解锁
+  -> UserPtrMut 写回旧值
+```
+
+任一 `UserPtr`/`UserPtrMut` 访问都可能缺页、触发 CoW 或等待 TLB shootdown，不能位于
+`sighand` 或 `task.inner` 临界区内。共享 action 的快照和替换必须位于同一个
+`sighand` 临界区；线程 mask/altstack 则由 current owner 与 `task.inner` 共同保证
+一致性，不新增事务对象或状态机。
+
+这不是可回滚事务：输入失败或校验失败发生在提交前；提交成功后的旧值 copyout 若返回
+`EFAULT`，已提交状态保持不变。输入、输出指针别名时必须保持“先完整读、后写旧值”的
+顺序。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

@@ -671,7 +671,7 @@ pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize, sigsetsize: usize) -
     if !valid_rt_sigset_size(sigsetsize) {
         return EINVAL;
     }
-    sigprocmask(how, set as *const Signals, oldset as *mut Signals)
+    sigprocmask(how, set as *const u64, oldset as *mut u64)
 }
 
 fn valid_rt_sigset_size(sigsetsize: usize) -> bool {

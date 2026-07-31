@@ -602,6 +602,11 @@ RV64 312/314、LA64 308/314，精确失败集合不变。PID1 的 SIGCHLD action
 `SA_RESTART`、不带 `SA_SIGINFO`，因此动态证据直接覆盖“非 `SA_SIGINFO` handler 也写
 完整 rt frame”的正常投递与返回；它不证明 `SA_SIGINFO`、`SA_ONSTACK`、
 `SA_NODEFER`、`SA_RESETHAND`、syscall restart 命中和错误分支分别被动态触发。
+B48 仍不增加临时 TAP 或测试专用字段。冻结源码上的双架构 8 核初赛为 RV64
+312/314、LA64 308/314，精确失败集合与 B47 一致。normal 启动和 libc signal 路径会
+经过常用 `rt_sigaction` 注册，因此能证明共享 disposition 的正常查询/替换路径没有
+回归；该矩阵没有专门构造输入输出指针别名、EFAULT、非法 `how`、altstack 校验错误或
+同一 signum 的并发替换，不能把源码锁序审查外推成这些边界均已动态覆盖。
 
 ### Bug 下沉流程
 
