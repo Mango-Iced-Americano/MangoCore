@@ -574,6 +574,16 @@ B40 在终态 STOP 前插入第 25 项 `smp::group_exit_stops_remote_sibling`，
 并验证 group-exit 后的 late sibling 保持 `New` 且首次发布返回 `EAGAIN`。它不使用
 测试专用远端清理入口，也不声称确定性命中了 `Running -> Blocking` 的每一个指令级交错；
 该交界还必须结合 `sleep_interruptible()` 登记后复查的源码证明。
+B41 在 STOP 前加入 `smp::exec_stops_remote_sibling`，总数变为 27。它要求非 leader
+owner 等待 CPU1 sibling 在自己的安全点清理并发布 live ack，再安装新 MM；不得把远程摘队
+或代替 sibling 释放资源当作通过。B42 再加入
+`smp::exec_does_not_mutate_shared_resources`，总数变为 28，直接持有跨 PCB 共享对象，
+验证 exec 只修改当前 PCB 最终安装的 fd table/sighand/futex。
+B43 加入 `smp::exec_owner_becomes_group_leader`，总数变为 29。用例必须同时核对 owner
+接管稳定 PID、`gettid()==getpid()`、task registry 与 Per-CPU current TID 更新、旧 leader
+接管旧 TID handle，以及旧 leader 迟到 Drop 不会删除新 leader 的 PID 注册项。runner 在
+owner 切到 zombie idle 栈前必须显式释放 syscall 栈上的临时 `Arc`；否则 noreturn context
+switch 不会展开 Rust 栈，TCB 泄漏会造成假失败。
 
 ### Bug 下沉流程
 

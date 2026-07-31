@@ -230,7 +230,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             };
             match oe.type_ {
                 vfs::F_OWNER_TID => match find_task_by_tid(oe.pid as usize) {
-                    Some(t) => file.set_owner_target(vfs::FileOwnerTarget::Tid(t.tid.0), oe.pid),
+                    Some(t) => file.set_owner_target(vfs::FileOwnerTarget::Tid(t.gettid()), oe.pid),
                     None => return -(SyscallErr::ESRCH as isize),
                 },
                 vfs::F_OWNER_PID => {

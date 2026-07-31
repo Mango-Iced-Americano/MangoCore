@@ -38,12 +38,7 @@ pub fn register_task(task: &Arc<TaskControlBlock>) {
     TASK_REGISTRY
         .lock()
         .tasks
-        .insert(task.tid.0, Arc::downgrade(task));
-}
-
-/// 无条件移除指定 TID 的任务注册项。
-pub fn unregister_task(tid: usize) {
-    TASK_REGISTRY.lock().tasks.remove(&tid);
+        .insert(task.gettid(), Arc::downgrade(task));
 }
 
 /// 仅当注册项仍指向同一个 TCB 时移除任务。
@@ -52,18 +47,70 @@ pub fn unregister_task(tid: usize) {
 ///
 /// 该函数用于 Drop 路径，避免旧 TCB 析构时误删已经复用同一 TID 的新任务。
 pub fn unregister_task_if_match(task: &TaskControlBlock) {
+    let tid = task.gettid();
     let mut registry = TASK_REGISTRY.lock();
     let remove = match registry
         .tasks
-        .get(&task.tid.0)
+        .get(&tid)
         .and_then(|entry| entry.upgrade())
     {
         Some(registered) => core::ptr::eq(Arc::as_ptr(&registered), task as *const _),
         None => true,
     };
     if remove {
-        registry.tasks.remove(&task.tid.0);
+        registry.tasks.remove(&tid);
     }
+}
+
+/// 让非 leader exec 调用者接管进程 PID，并同步重键任务注册表。
+///
+/// 如果旧 leader TCB 尚在 zombie queue 中，它接管调用者的旧 TID handle；
+/// 如果已经析构，旧 handle 会在注册表锁外释放。这样任意时刻都只有一个 TCB
+/// 拥有进程 PID，迟到的旧 TCB 析构也不会删除新 leader 的注册项。
+pub(crate) fn exchange_exec_tids(owner: &TaskControlBlock) {
+    let old_tid = owner.gettid();
+    let leader_handle = owner.process.pid_handle();
+    let leader_tid = leader_handle.0;
+    assert_ne!(old_tid, leader_tid, "leader exec must not exchange its TID");
+
+    let (former_leader, displaced_handle) = {
+        let mut registry = TASK_REGISTRY.lock();
+        let owner_ref = registry
+            .tasks
+            .get(&old_tid)
+            .and_then(Weak::upgrade)
+            .expect("exec owner is missing from task registry");
+        assert!(
+            core::ptr::eq(Arc::as_ptr(&owner_ref), owner as *const _),
+            "exec owner TID points to another task"
+        );
+
+        let former_leader = registry.tasks.get(&leader_tid).and_then(Weak::upgrade);
+        if let Some(task) = former_leader.as_ref() {
+            assert!(
+                Arc::ptr_eq(&task.process, &owner.process),
+                "process PID points to another process task"
+            );
+            assert!(task.is_zombie(), "exec replaced a live group leader");
+        }
+
+        let old_owner_handle = owner.replace_tid(old_tid, leader_handle);
+        let displaced_handle = if let Some(task) = former_leader.as_ref() {
+            task.replace_tid(leader_tid, old_owner_handle)
+        } else {
+            old_owner_handle
+        };
+
+        registry.tasks.remove(&old_tid);
+        registry
+            .tasks
+            .insert(leader_tid, Arc::downgrade(&owner_ref));
+        (former_leader, displaced_handle)
+    };
+
+    // Arc/TidHandle 的析构可能回入 registry 或 TID allocator，必须位于锁外。
+    drop(former_leader);
+    drop(displaced_handle);
 }
 
 /// 注册一个进程的 PID 到 PCB 弱引用映射。

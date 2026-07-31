@@ -133,7 +133,6 @@ New / Blocked --external cleanup--> Zombie
 | 字段 | 说明 |
 |------|------|
 | `pid` | 用户可见 PID |
-| `leader_tid` | 线程组 leader TID |
 | `threads` | 线程列表 |
 | `live_threads` | 活跃线程计数 |
 | `trap_context_cache` | 可复用用户资源槽位 |
@@ -298,10 +297,16 @@ TaskControlBlock::load_elf()
     close CLOEXEC fds and reset signal actions
     replace private futex table
     clear thread exit state
+    finish exec session
+    let non-leader caller take process PID/TGID
     complete vfork parent
 ```
 
 `execveat` 支持 `AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`。
+
+PCB 不保存独立的 `leader_tid` 真值：线程组 leader 是当前
+`task.gettid() == process.pid` 的 TCB。非 leader exec 在 sibling 全部退出且新映像
+提交后交换现有 TID handle，并同步 registry 与 Per-CPU current hint；进程 PID 本身不变。
 
 ### 5.6 exit
 

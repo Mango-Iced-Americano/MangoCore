@@ -866,7 +866,7 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
     let current = current_task().unwrap();
     let current_pid = current.pid() as i32;
     if header_value.pid != 0
-        && header_value.pid != current.tid.0 as i32
+        && header_value.pid != current.gettid() as i32
         && header_value.pid != current_pid
     {
         return match find_task_for_cap_pid(header_value.pid) {

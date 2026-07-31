@@ -152,14 +152,19 @@ fallback 顺序：
    再关闭 CLOEXEC、重置信号动作，并为新映像换上新的 private futex table。
 9. 更新当前 TCB trap context、清 `clear_child_tid`、重置 robust list、禁用 alt signal stack。
 10. 必要时从外部共享的旧 VM 撤销当前线程的 user-resource 映射。
-11. 替换 exe 和 VM，再重新开放线程发布门。
+11. 替换 exe 和 VM，结束临时会话并重新开放线程发布门。
+12. 若调用者原本不是 leader，接管进程 PID/TGID 并同步 task registry 与本 CPU current TID。
 
 这个顺序把“可失败的构造”和“不可回滚的提交”分开。ELF 解析、新地址空间和初始用户栈
 全部在旧映像仍可运行时完成；只有构造成功后才关闭线程发布门并停止 sibling。旧 VM 不能
 在门禁建立前按 `Arc::strong_count()` 提前回收，因为同一 PCB 的线程不会为 VM 各自持有
 长期 `Arc`，引用计数不能证明没有并发线程或 late clone。
 
-`load_elf()` 保留当前 TCB/PCB，不创建新进程。exec 改变的是执行映像：VM、trap context、exe inode、部分 signal/futex/fd 状态；PID、父子关系、进程组、会话和大多数进程身份不因 exec 改变。这一点解释了为什么 shell fork 后 child exec，父进程 wait 的仍是同一个 child pid。
+`load_elf()` 保留当前 TCB/PCB，不创建新进程。exec 改变的是执行映像：VM、trap context、
+exe inode、部分 signal/futex/fd 状态；进程 PID、父子关系、进程组、会话和大多数进程
+身份不变。这一点解释了为什么 shell fork 后 child exec，父进程 wait 的仍是同一个 child
+pid。线程身份有一个 Linux 兼容例外：若调用者不是线程组 leader，成功提交后该 TCB
+接管稳定的进程 PID，因此新的唯一线程满足 `gettid() == getpid()`。
 
 ## 9. 多线程 exec 语义
 
@@ -178,12 +183,21 @@ wait()
 install new image
 finish()
   -> 清除临时会话并重新开放 clone
+become_group_leader()
+  -> 非 leader owner 接管 PID handle
+  -> task registry 从旧 TID 重键为 PID
+  -> 同步 Per-CPU current TID、OOM 索引、exit signal 与 thread quota
 ```
 
 这不是 `exit_group()`；进程仍继续运行，只是线程组收缩到执行 exec 的线程。
 永久 group exit 优先于临时 exec：owner 在等待返回后若观察到 group-exit 码，就先结束
 临时会话而不提交新 VM，随后由统一安全点退出。门禁还会拒绝并发 exec 和尚未首次发布的
 `CLONE_THREAD`，避免新 sibling 落在停止快照之外。
+
+身份接管放在 `ExecSession::finish()` 之后：此时 live count 已经证明 owner 是同 PCB
+唯一线程，不再需要改写线程组成员关系。registry 重键仍是一个独立短临界区，锁内不执行
+TCB 或 TID handle 析构；Per-CPU 与 OOM 派生索引只在解锁后更新。旧 leader 即使仍由
+zombie queue 持有，迟到析构也无法删除新 leader 的 PID 注册项。
 
 ## 10. VM 共享场景
 

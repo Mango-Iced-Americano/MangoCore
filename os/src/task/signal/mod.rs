@@ -665,7 +665,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
         inner.add_signal(Signals::SIGKILL);
         warn!(
             "[OOM killer] tid {} pid {} marked for OOM kill, sending SIGKILL",
-            task.tid.0,
+            task.gettid(),
             task.pid()
         );
     }

@@ -543,6 +543,31 @@ pub fn current_tid() -> usize {
         .unwrap_or(0)
 }
 
+/// 当前 exec 任务接管进程 PID 后，同步本 CPU 的无锁诊断快照。
+///
+/// 身份重键不经过 context switch，因此不能等到下一次 dispatch 才更新。调用者
+/// 必须是本 CPU current，且不能持有 registry、线程组或任务管理锁。
+pub(crate) fn update_current_tid(task: &TaskControlBlock, old_tid: usize) {
+    let task_state = crate::smp::local_task_state();
+    let processor = task_state.processor.lock();
+    let current = processor
+        .current
+        .as_ref()
+        .expect("exec identity changed without a current task");
+    assert!(
+        core::ptr::eq(Arc::as_ptr(current), task as *const _),
+        "exec identity changed a non-current task"
+    );
+    assert_eq!(
+        task_state.current_tid.load(Ordering::Relaxed),
+        old_tid,
+        "per-CPU current TID diverged before exec identity change"
+    );
+    task_state
+        .current_tid
+        .store(task.gettid(), Ordering::Relaxed);
+}
+
 #[inline(always)]
 pub fn current_parent_pid() -> usize {
     current_task()

@@ -48,10 +48,8 @@ pub enum ProcessState {
 pub struct ProcessControlBlock {
     /// 用户可见进程 ID，即 getpid() 返回值。
     pub pid: usize,
-    /// 线程组主线程 tid。
-    pub leader_tid: usize,
     /// 保持进程 pid/tgid 在 zombie 被 wait 回收前不被复用。
-    _pid_handle: Arc<TidHandle>,
+    pid_handle: Arc<TidHandle>,
     /// 进程生命周期 quota。clone()/fork() 成功时申请。
     /// wait_child / auto-reap / orphan-zombie-reap 时调用 release_process_quota_once()
     /// 立即释放；PCB Drop 作为兜底。
@@ -323,7 +321,6 @@ impl ProcessControlBlock {
     /// 只短暂读取 `exe` 和 `vm` 锁，不会进入等待点。
     pub fn new(
         pid: usize,
-        leader_tid: usize,
         pid_handle: Arc<TidHandle>,
         process_quota: TaskQuotaGuard,
         pgid: usize,
@@ -360,8 +357,7 @@ impl ProcessControlBlock {
         let user_token = vm.read(|vm| vm.token());
         let pcb = Self {
             pid,
-            leader_tid,
-            _pid_handle: pid_handle,
+            pid_handle,
             process_quota: Mutex::new(Some(process_quota)),
             thread_group: Mutex::new(ThreadGroupState {
                 members: Vec::new(),
@@ -431,12 +427,17 @@ impl ProcessControlBlock {
 
     /// 释放进程 PID/TGID。
     pub fn release_pid(&self) {
-        self._pid_handle.release();
+        self.pid_handle.release();
     }
 
     /// 返回 PID 是否已经释放。
     pub fn pid_released(&self) -> bool {
-        self._pid_handle.is_released()
+        self.pid_handle.is_released()
+    }
+
+    /// 克隆 PID/TGID 的分配器句柄，供非 leader exec 接管身份。
+    pub(crate) fn pid_handle(&self) -> Arc<TidHandle> {
+        self.pid_handle.clone()
     }
 
     pub fn exe(&self) -> Arc<Mutex<Arc<vfs::File>>> {
@@ -1429,10 +1430,11 @@ impl ProcessControlBlock {
                 parent_process.child_exit_wait.lock().wake_all();
             } else {
                 parent_process.child_exit_wait.lock().wake_all();
-                if !exit_task.exit_signal.is_empty() {
+                let exit_signal = exit_task.exit_signal();
+                if !exit_signal.is_empty() {
                     if let Some(parent_task) = parent_process.any_live_thread() {
                         let mut parent_inner = parent_task.acquire_inner_lock();
-                        parent_inner.add_signal(exit_task.exit_signal);
+                        parent_inner.add_signal(exit_signal);
                         drop(parent_inner);
                         let _ = wake_interruptible(parent_task);
                     }

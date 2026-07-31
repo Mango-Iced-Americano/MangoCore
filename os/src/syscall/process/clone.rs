@@ -236,7 +236,7 @@ fn sys_clone_inner(
         Some(task) => task,
         None => return ENOMEM,
     };
-    let new_tid = child.tid.0;
+    let new_tid = child.gettid();
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
         match UserPtrMut::new(ptid).write(current_user_token(), &(new_tid as u32)) {
             Ok(()) => {}

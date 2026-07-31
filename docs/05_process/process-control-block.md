@@ -15,7 +15,7 @@ tags: [process, pcb, fd, namespace, lifecycle]
 
 ```
 ProcessControlBlock
-  ├── pid / leader_tid / pid handle / quota
+  ├── pid / pid handle / quota
   ├── thread_group / group_exit_code / live_threads / trap_context_cache
   ├── child_exit_wait / vfork completion
   ├── parent-child relation hints
@@ -32,8 +32,7 @@ TCB 是调度实体，PCB 是资源容器和进程生命周期实体。
 ```rust
 pub struct ProcessControlBlock {
     pub pid: usize,
-    pub leader_tid: usize,
-    _pid_handle: Arc<TidHandle>,
+    pid_handle: Arc<TidHandle>,
     process_quota: Mutex<Option<TaskQuotaGuard>>,
     thread_group: Mutex<ThreadGroupState>,
     group_exit_code: AtomicU64,
@@ -53,8 +52,7 @@ pub struct ProcessControlBlock {
 | 字段 | 说明 |
 |------|------|
 | `pid` | 用户可见进程 ID |
-| `leader_tid` | 线程组主线程 tid |
-| `_pid_handle` | 保持 pid/tgid 到 wait 回收前不复用 |
+| `pid_handle` | 保持 pid/tgid 到 wait 回收前不复用；非 leader exec 时转交给当前 TCB |
 | `process_quota` | 进程级 clone quota guard |
 | `thread_group` | 成员弱引用、首次发布、group exit 与临时 exec 会话的共同锁域 |
 | `group_exit_code` | 0 表示正常；其余值编码为统一退出码 `+1`，供安全点无锁读取 |
@@ -117,6 +115,22 @@ pub struct ProcessControlBlock {
 它先在 `process.inner` 内判断 fd table/sighand 是否仍跨 PCB 共享并取得快照，再在锁外完成
 可能分配内存的复制与 CLOEXEC/signal 重置；提交新对象时只短持 `process.inner`。旧 futex
 也在锁外析构，避免 WaitQueue 的任务引用析构链回入进程锁。
+
+### 3.2 PID/TID 与动态线程组 leader
+
+PCB 的 `pid` 是进程整个生命周期内稳定的 TGID；线程组 leader 不是 PCB 中另一份
+`leader_tid` 真值，而是当前满足 `task.gettid() == process.pid` 的 TCB。普通 clone
+创建进程时，两者天然相等。若非 leader 线程成功 exec：
+
+1. exec 会话先等待其它 live sibling（包括旧 leader）完成线程级退出；
+2. 当前 TCB 接管 PCB 的 `pid_handle`，旧 leader 若尚未析构则接管调用者的旧 TID handle；
+3. task registry 在同一临界区从旧 TID 重键到 PID；
+4. Per-CPU current TID 和 OOM 活跃索引在 registry 解锁后同步；
+5. 当前 TCB 的 `exit_signal` 恢复为 `SIGCHLD`，额外 thread quota 被释放。
+
+这样 `getpid()` 始终返回稳定 PID，而成功 exec 的唯一线程满足
+`gettid() == getpid()`。旧 leader 的迟到析构使用“键和值同时匹配”删除 registry，
+不会误删已经接管 PID 的新 leader。
 
 ## 4. ProcessState
 
@@ -346,7 +360,7 @@ close_files_on_exit()
 
 ## 15. PID 生命周期
 
-PID 不在进程进入 zombie 时立即复用。PCB 持有 `_pid_handle`，直到：
+PID 不在进程进入 zombie 时立即复用。PCB 持有 `pid_handle`，直到：
 
 | 路径 | 释放 |
 |------|------|
@@ -364,5 +378,6 @@ PID 不在进程进入 zombie 时立即复用。PCB 持有 `_pid_handle`，直�
 | exec 文件被写打开仍成功 exec | `WRITE_INODE_REFS` 和 `is_writable_inode_busy()` |
 | wait 不唤醒父进程 | `child_exit_wait.wake_all()`、auto-reap、parent 指针 |
 | vfork 父进程永久阻塞 | `complete_vfork()` 是否在 exec/exit 调用 |
-| PID 过早复用 | `_pid_handle` 是否在 wait 前释放 |
+| PID 过早复用 | `pid_handle` 是否在 wait 前释放 |
+| 非 leader exec 后 gettid 与 getpid 不同 | `become_group_leader()`、registry 重键和 Per-CPU TID 同步 |
 | 多线程 exec 后旧 VM 残留 | ExecSession、live count ack、外部共享 VM 槽撤销 |

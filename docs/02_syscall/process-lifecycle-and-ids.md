@@ -270,7 +270,9 @@ process.set_exe_path(abs_path)
 process.complete_vfork()
 ```
 
-`load_elf()` 内部完成地址空间替换、CLOEXEC fd 关闭、信号/futex 状态重置和同进程其他线程清理。
+`load_elf()` 内部完成地址空间替换、CLOEXEC fd 关闭、信号/futex 状态重置和同进程其他
+线程清理。若由非 leader 发起，提交后当前 TCB 还会接管稳定的 PID/TGID，使
+`gettid() == getpid()`；task registry 与 Per-CPU current TID 同步更新。
 
 `sys_execve()` 本身只负责读取路径和参数，随后进入 `exec_opened_file()`：
 

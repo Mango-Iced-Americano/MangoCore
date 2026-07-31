@@ -381,7 +381,6 @@ fn new_ktest_process(
 
     Arc::new(ProcessControlBlock::new(
         pid,
-        tid_handle.0,
         tid_handle,
         quota::TaskQuotaGuard::acquire_for_init(),
         pid,
@@ -452,11 +451,10 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
     let pcb = new_ktest_process(tid_handle.clone(), Some(Arc::downgrade(&KTEST_REAPER)));
     let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
-    // TCB 尚未注册或发布，创建者独占 New 状态；从此任务的首次入队和
-    // 阻塞唤醒都只能选择调用方指定的 CPU。
+    // TCB 已按 TID 登记，但尚未加入线程组或 runqueue，创建者仍独占 New 状态；
+    // 从此任务的首次入队和阻塞唤醒都只能选择调用方指定的 CPU。
     tcb.set_initial_cpus_allowed(1usize << cpu);
     registry::register_process(&tcb.process);
-    registry::register_task(&tcb);
     let handle = tcb.clone();
     // 单 bit mask 保证仍精确到达指定 CPU，同时让所有 AP focused 用例
     // 覆盖普通任务使用的 affinity-aware 初始放置入口。

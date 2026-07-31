@@ -370,6 +370,10 @@ static EXEC_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
 static EXEC_REMOTE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static EXEC_LATE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static EXEC_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static EXEC_IDENTITY_LEADER_READY: AtomicUsize = AtomicUsize::new(0);
+static EXEC_IDENTITY_PHASE: AtomicUsize = AtomicUsize::new(0);
+static EXEC_IDENTITY_CHECKED: AtomicUsize = AtomicUsize::new(0);
+static EXEC_IDENTITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -490,6 +494,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::exec_does_not_mutate_shared_resources",
             exec_does_not_mutate_shared_resources,
         ),
+        KernelTest::new(
+            "smp::exec_owner_becomes_group_leader",
+            exec_owner_becomes_group_leader,
+        ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
             secondary_cpus_stop_and_ack,
@@ -518,7 +526,7 @@ fn timer_probe_program() -> &'static [u8] {
     }
 }
 
-/// 构造一个尚未登记线程组、尚未进入 runqueue 的 kernel-only sibling。
+/// 构造一个已登记 TID、但尚未加入线程组和 runqueue 的 kernel-only sibling。
 ///
 /// 测试故意把构造和发布分开，才能验证 group-exit/exec 门禁对 late clone 的拒绝。
 fn build_ktest_sibling(
@@ -885,6 +893,152 @@ fn exec_does_not_mutate_shared_resources() -> Result<(), &'static str> {
     }
     if old_sighand.lock().get(10).is_none() || new_sighand.lock().get(10).is_some() {
         return Err("exec signal reset leaked into the old shared sighand");
+    }
+    Ok(())
+}
+
+fn exec_identity_leader() {
+    crate::hal::local_irq_restore(true);
+    EXEC_IDENTITY_LEADER_READY.store(1, Ordering::Release);
+    loop {
+        // 非 leader owner 会通过正式 exec 安全点请求本线程退出。
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+}
+
+fn exec_identity_owner() {
+    crate::hal::local_irq_restore(true);
+    while EXEC_IDENTITY_LEADER_READY.load(Ordering::Acquire) == 0 {
+        crate::task::run_task_safe_point();
+    }
+
+    let task = crate::task::current_task().expect("exec identity owner missing");
+    let old_tid = task.gettid();
+    let (exec, siblings) = match task.process.begin_exec(old_tid) {
+        Ok(session) => session,
+        Err(_) => {
+            EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+            EXEC_IDENTITY_PHASE.store(2, Ordering::Release);
+            // noreturn 调度不会展开当前 Rust 栈，必须先释放本地 current clone。
+            drop(task);
+            crate::task::zombify_current_and_run_next();
+        }
+    };
+    crate::task::request_sibling_exit(&siblings, old_tid);
+    drop(siblings);
+    exec.wait();
+    if task.process.live_thread_count() != 1 {
+        EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    exec.finish();
+    task.become_group_leader();
+
+    if task.gettid() != task.pid()
+        || crate::task::current_tid() != task.pid()
+        || task.exit_signal() != crate::task::Signals::SIGCHLD
+    {
+        EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    let registry_matches = crate::task::find_task_by_tid(task.pid())
+        .map(|registered| Arc::ptr_eq(&registered, &task))
+        .unwrap_or(false);
+    if !registry_matches || crate::task::find_task_by_tid(old_tid).is_some() {
+        EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+    }
+
+    // 保持 owner 为 Running，让 CPU0 runner 能验证旧 leader 延迟析构不会删新 PID 键。
+    EXEC_IDENTITY_PHASE.store(1, Ordering::Release);
+    while EXEC_IDENTITY_CHECKED.load(Ordering::Acquire) == 0 {
+        crate::task::run_task_safe_point();
+    }
+    EXEC_IDENTITY_PHASE.store(2, Ordering::Release);
+    // build_ktest_sibling() 直接把本函数作为裸 context 入口，没有外层
+    // ktest_trampoline；验证完成后必须显式切走，不能从无返回地址的入口返回。
+    // noreturn 切换也不会析构本栈上的 task Arc，因此必须先显式释放。
+    drop(task);
+    crate::task::zombify_current_and_run_next();
+}
+
+/// 验证非 leader exec 接管 PID、registry 与 Per-CPU current TID。
+fn exec_owner_becomes_group_leader() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    EXEC_IDENTITY_LEADER_READY.store(0, Ordering::Relaxed);
+    EXEC_IDENTITY_PHASE.store(0, Ordering::Relaxed);
+    EXEC_IDENTITY_CHECKED.store(0, Ordering::Relaxed);
+    EXEC_IDENTITY_ERRORS.store(0, Ordering::Relaxed);
+
+    let leader = crate::task::spawn_ktest_task_on(1, exec_identity_leader);
+    let leader_weak = Arc::downgrade(&leader);
+    let process = leader.process.clone();
+    let owner = build_ktest_sibling(process.clone(), 0, exec_identity_owner);
+    let owner_weak = Arc::downgrade(&owner);
+    let old_owner_tid = owner.gettid();
+    crate::task::try_publish_task_on(owner.clone(), 0)
+        .map_err(|_| "failed to publish non-leader exec owner")?;
+
+    let mut timed_out = false;
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
+        while EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 1 {
+            if EXEC_IDENTITY_PHASE.load(Ordering::Acquire) == 2
+                || crate::hal::get_time() >= deadline
+            {
+                timed_out = true;
+                return;
+            }
+            crate::task::run_task_safe_point();
+        }
+
+        if owner.gettid() != process.pid || leader.gettid() != old_owner_tid {
+            EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+        }
+        drop(leader);
+        // 等到旧 leader 的最后一个强引用真正消失，证明后续 registry 检查
+        // 覆盖的是迟到 Drop，而不只是“可能已经回收”的时序猜测。
+        while leader_weak.upgrade().is_some() {
+            drop(crate::task::take_zombie_tasks(64));
+            if crate::hal::get_time() >= deadline {
+                timed_out = true;
+                break;
+            }
+            crate::task::run_task_safe_point();
+        }
+        let pid_still_points_to_owner = crate::task::find_task_by_tid(process.pid)
+            .map(|registered| Arc::ptr_eq(&registered, &owner))
+            .unwrap_or(false);
+        if !pid_still_points_to_owner
+            || crate::task::find_task_by_tid(old_owner_tid).is_some()
+        {
+            EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+        }
+
+        EXEC_IDENTITY_CHECKED.store(1, Ordering::Release);
+        while EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 2
+            || owner.task_status() != crate::task::TaskStatus::Zombie
+        {
+            if crate::hal::get_time() >= deadline {
+                timed_out = true;
+                break;
+            }
+            crate::task::run_task_safe_point();
+        }
+    });
+
+    if timed_out {
+        EXEC_IDENTITY_CHECKED.store(1, Ordering::Release);
+        return Err("non-leader exec identity exchange timed out");
+    }
+    if EXEC_IDENTITY_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("non-leader exec identity exchange broke a TID invariant");
+    }
+    drop(owner);
+    drop(crate::task::take_zombie_tasks(64));
+    if owner_weak.upgrade().is_some() {
+        return Err("exec owner retained a strong TCB reference after test");
     }
     Ok(())
 }

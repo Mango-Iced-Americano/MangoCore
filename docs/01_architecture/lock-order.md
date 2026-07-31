@@ -318,6 +318,31 @@ exec 的临时门禁固定采用：
 永久 group exit 可以在 exec owner 等待期间发布。安全点优先消费永久退出码；owner
 醒来后放弃新映像并清除临时会话，但永久发布门仍保持关闭。
 
+### 3.6.6 B43 exec 身份接管
+
+非 leader exec 的身份更新固定采用：
+
+```text
+exec.finish()：释放 thread_group 锁并重新开放 clone
+  -> task registry：校验 owner/旧 leader，交换 TidHandle，重键 weak entry
+  -> 解锁
+  -> 析构旧 leader 临时 Arc 和被替换的 TidHandle
+  -> Per-CPU current TID
+  -> OOM active tracker
+  -> 释放 owner 的额外 thread quota
+```
+
+关键约束：
+
+- live count 已在安装新映像前收缩为 1，因此 `exec.finish()` 后不再存在可与身份接管并发
+  发布的同 PCB sibling；身份交换不需要嵌套 `thread_group` 和 task registry；
+- registry 锁内可以短持单个 TCB 的 `tid_handle` 锁，但不得析构 TCB、`TidHandle`，
+  也不得取得 processor、`TASK_MANAGER` 或 runqueue 锁；
+- `TaskControlBlock::Drop` 只在“TID 键仍指向当前 TCB”时删除 registry 项。旧 leader
+  迟到析构时即使数值已经交换，也不能删除新 leader 的 PID 项；
+- processor current hint 与 OOM tracker 是 TID 派生索引，只能在 registry 事务完成
+  后更新；这段路径不包含 context switch、IPI ack 或其它等待点。
+
 ### 3.7 B21 内核栈退休与 shootdown 锁序
 
 TCB 最后一个 `Arc` 可能在 `wait`/进程锁保护区内消失，因此 `KernelStack::drop` 不能

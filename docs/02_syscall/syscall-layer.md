@@ -573,6 +573,7 @@ TaskControlBlock::load_elf()
     unshare fd table/sighand when needed
     close CLOEXEC fds and reset signal actions
     replace private futex table
+    let a non-leader caller take the process PID/TGID
     complete vfork
 ```
 

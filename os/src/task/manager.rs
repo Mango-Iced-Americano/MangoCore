@@ -416,7 +416,7 @@ impl TaskManager {
         self.interruptible_queue.iter().for_each(|task| {
             log::error!(
                 "[show_interruptible] tid: {}, pid: {}",
-                task.tid.0,
+                task.gettid(),
                 task.pid()
             );
         })
@@ -622,8 +622,23 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
 pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     let task = super::run_queue::fetch(cpu)?;
     #[cfg(feature = "oom_handler")]
-    TASK_MANAGER.lock().active_tracker.mark_active(task.tid.0);
+    TASK_MANAGER
+        .lock()
+        .active_tracker
+        .mark_active(task.gettid());
     Some(task)
+}
+
+/// TID 身份交换后同步 OOM 活跃位图；未启用 OOM handler 时为空操作。
+pub(crate) fn rekey_active_tid(old_tid: usize, new_tid: usize) {
+    #[cfg(feature = "oom_handler")]
+    {
+        let mut manager = TASK_MANAGER.lock();
+        manager.active_tracker.mark_inactive(old_tid);
+        manager.active_tracker.mark_active(new_tid);
+    }
+    #[cfg(not(feature = "oom_handler"))]
+    let _ = (old_tid, new_tid);
 }
 
 /// 从显式 zombie 队列取出一个任务。
@@ -667,10 +682,10 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
             let task = manager
                 .interruptible_queue
                 .iter()
-                .find(|task| manager.active_tracker.check_active(task.tid.0))
+                .find(|task| manager.active_tracker.check_active(task.gettid()))
                 .cloned();
             if let Some(task) = task.as_ref() {
-                manager.active_tracker.mark_inactive(task.tid.0);
+                manager.active_tracker.mark_inactive(task.gettid());
             }
             task
         };
@@ -680,7 +695,7 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
         let released = task.process.vm().write(|vm| vm.do_deep_clean());
         log::warn!(
             "deep clean on task: tid {}, pid {}, released: {}",
-            task.tid.0,
+            task.gettid(),
             task.pid(),
             released
         );
@@ -698,8 +713,8 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
             };
             let claimed = {
                 let mut manager = TASK_MANAGER.try_lock().ok_or(())?;
-                if manager.active_tracker.check_active(task.tid.0) {
-                    manager.active_tracker.mark_inactive(task.tid.0);
+                if manager.active_tracker.check_active(task.gettid()) {
+                    manager.active_tracker.mark_inactive(task.gettid());
                     true
                 } else {
                     false
@@ -711,7 +726,7 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
             let released = task.process.vm().write(|vm| vm.do_shallow_clean());
             log::warn!(
                 "shallow clean on task: tid {}, pid {}, released: {}",
-                task.tid.0,
+                task.gettid(),
                 task.pid(),
                 released
             );

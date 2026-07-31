@@ -95,7 +95,7 @@ impl Log for Logger {
                 "[{}.{:03}] tid {} pid {}: {}",
                 sec,
                 msec,
-                task.tid.0,
+                task.gettid(),
                 task.pid(),
                 record.args()
             ),

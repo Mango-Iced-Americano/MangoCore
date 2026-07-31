@@ -260,7 +260,7 @@ fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
     task.acquire_inner_lock().clear_child_tid = tidptr;
-    task.tid.0 as isize
+    task.gettid() as isize
 }
 
 pub fn sys_set_robust_list(head: usize, len: usize) -> isize {

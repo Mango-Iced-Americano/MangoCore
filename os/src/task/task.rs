@@ -176,9 +176,16 @@ impl RemoteAffinityRequest {
 
 /// 任务控制块
 pub struct TaskControlBlock {
+    /// 用户可见线程 ID，即 `gettid()` 返回值。
+    ///
+    /// 普通生命周期内保持不变；非 leader 线程成功 exec 后会接管进程 PID。
+    /// 高频读取只访问该原子值，不为安全点引入身份锁。
+    tid: AtomicUsize,
+    /// 当前 TID 的分配器所有权句柄。
+    ///
+    /// 只有 exec 身份接管会替换它；数值真值仍是上面的 `tid`。
+    tid_handle: Mutex<Arc<TidHandle>>,
     // 不可变字段
-    /// 用户可见线程 ID，即 gettid() 返回值
-    pub tid: Arc<TidHandle>,
     /// 同一地址空间内 trap context / 默认用户栈的资源槽位
     pub user_res_slot: usize,
     /// Whether this task owns its user_res_slot. ktest tasks set this false
@@ -204,10 +211,12 @@ pub struct TaskControlBlock {
     gid_hint: AtomicUsize,
     egid_hint: AtomicUsize,
     sgid_hint: AtomicUsize,
-    /// 退出信号
-    pub exit_signal: Signals,
-    /// CLONE_THREAD 线程的 quota。非线程 clone 的 quota 在 PCB 上。
-    _thread_quota: Option<TaskQuotaGuard>,
+    /// 进程最终退出时通知父进程的信号。
+    ///
+    /// 非 leader exec 接管线程组后必须恢复为 SIGCHLD。
+    exit_signal: Mutex<Signals>,
+    /// CLONE_THREAD 额外占用的 quota；成为唯一 leader 后立即释放。
+    thread_quota: Mutex<Option<TaskQuotaGuard>>,
     // 可变字段
     /// 任务内部状态，使用互斥锁保护
     inner: Mutex<TaskControlBlockInner>,
@@ -1301,7 +1310,6 @@ impl TaskControlBlock {
 
         let process = Arc::new(ProcessControlBlock::new(
             pid,
-            tid_handle.0,
             tid_handle.clone(),
             process_quota,
             pgid,
@@ -1329,7 +1337,8 @@ impl TaskControlBlock {
 
         // 创建任务控制块
         let task_control_block = Arc::new(Self {
-            tid: tid_handle,
+            tid: AtomicUsize::new(tid_handle.0),
+            tid_handle: Mutex::new(tid_handle),
             user_res_slot,
             owns_user_res_slot: true,
             process,
@@ -1345,8 +1354,8 @@ impl TaskControlBlock {
             gid_hint: AtomicUsize::new(0),
             egid_hint: AtomicUsize::new(0),
             sgid_hint: AtomicUsize::new(0),
-            exit_signal: Signals::empty(),
-            _thread_quota: None,
+            exit_signal: Mutex::new(Signals::empty()),
+            thread_quota: Mutex::new(None),
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             wait_io_fallback_active_generation: AtomicUsize::new(0),
@@ -1459,19 +1468,20 @@ impl TaskControlBlock {
     /// # Semantics
     ///
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
-    /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
-    /// 调用方负责在注册和发布前设置精确的 `cpus_allowed`，再把 TCB 放入
-    /// 选定 CPU 的 runqueue。普通入口是 `spawn_ktest_task_on()`；SMP 生命周期
-    /// 用例可暂不发布 sibling，以验证 group-exit 的最终发布门禁。
+    /// 它只建立内核执行上下文，并立即登记 TID 弱引用；调用方仍负责在加入
+    /// 线程组和 runqueue 前设置精确的 `cpus_allowed`。普通入口是
+    /// `spawn_ktest_task_on()`；SMP 生命周期用例可暂不发布 sibling，
+    /// 以验证 group-exit 的最终发布门禁。
     pub(crate) fn new_ktest_independent(
-        tid: Arc<TidHandle>,
+        tid_handle: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
         kstack: KernelStack,
         task_cx: TaskContext,
         kernel_entry: fn(),
     ) -> Arc<Self> {
-        Arc::new(Self {
-            tid,
+        let task = Arc::new(Self {
+            tid: AtomicUsize::new(tid_handle.0),
+            tid_handle: Mutex::new(tid_handle),
             user_res_slot: 0,
             owns_user_res_slot: false,
             process,
@@ -1487,8 +1497,8 @@ impl TaskControlBlock {
             gid_hint: AtomicUsize::new(0),
             egid_hint: AtomicUsize::new(0),
             sgid_hint: AtomicUsize::new(0),
-            exit_signal: Signals::empty(),
-            _thread_quota: None,
+            exit_signal: Mutex::new(Signals::empty()),
+            thread_quota: Mutex::new(None),
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             wait_io_fallback_active_generation: AtomicUsize::new(0),
@@ -1574,7 +1584,11 @@ impl TaskControlBlock {
                 posix_timers: Vec::new(),
                 pending_oom_kill: false,
             }),
-        })
+        });
+        // 与生产 clone 路径保持同一生命周期不变量：TCB 一旦构造完成，
+        // 按 TID 查询就必须可见；调度发布失败只影响线程组/runqueue 归属。
+        registry::register_task(&task);
+        task
     }
 
     /// 返回 kernel-only 任务自己的不可变入口。
@@ -1637,7 +1651,33 @@ impl TaskControlBlock {
         self.process.replace_exe(elf);
         self.process.replace_vm(new_vm);
         exec.finish();
+        self.become_group_leader();
         Ok(())
+    }
+
+    /// 非 leader exec 成功后接管进程 PID/TGID。
+    ///
+    /// ExecSession 已经结束，当前线程是唯一 live 成员；这里不再修改线程组状态，
+    /// 只事务性更新 TCB/registry，再刷新两个由 TID 派生的本地索引。
+    pub(crate) fn become_group_leader(&self) {
+        let old_tid = self.gettid();
+        let leader_tid = self.pid();
+        // Linux exec 总是把新线程组 leader 的父进程退出通知恢复为 SIGCHLD。
+        *self.exit_signal.lock() = Signals::SIGCHLD;
+        if old_tid == leader_tid {
+            return;
+        }
+        registry::exchange_exec_tids(self);
+        super::processor::update_current_tid(self, old_tid);
+        super::manager::rekey_active_tid(old_tid, leader_tid);
+        // 当前 TCB 不再是“额外线程”；进程本身的 quota 仍由 PCB 持有。
+        let thread_quota = self.thread_quota.lock().take();
+        drop(thread_quota);
+    }
+
+    /// 返回进程最终退出时由本线程发送给父进程的信号。
+    pub(crate) fn exit_signal(&self) -> Signals {
+        *self.exit_signal.lock()
     }
 
     /// 加载ELF文件
@@ -1951,7 +1991,6 @@ impl TaskControlBlock {
             (
                 Arc::new(ProcessControlBlock::new(
                     tid_handle.0,
-                    tid_handle.0,
                     tid_handle.clone(),
                     quota,
                     self.process.getpgid(),
@@ -2025,7 +2064,8 @@ impl TaskControlBlock {
         // 创建任务控制块
         let task_control_block = Arc::new(TaskControlBlock {
             // 基础标识信息
-            tid: tid_handle,
+            tid: AtomicUsize::new(tid_handle.0),
+            tid_handle: Mutex::new(tid_handle),
             user_res_slot,
             owns_user_res_slot: true,
             process,
@@ -2045,8 +2085,8 @@ impl TaskControlBlock {
             gid_hint: AtomicUsize::new(parent_inner.gid as usize),
             egid_hint: AtomicUsize::new(parent_inner.egid as usize),
             sgid_hint: AtomicUsize::new(parent_inner.sgid as usize),
-            exit_signal,
-            _thread_quota: thread_quota,
+            exit_signal: Mutex::new(exit_signal),
+            thread_quota: Mutex::new(thread_quota),
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             wait_io_fallback_active_generation: AtomicUsize::new(0),
@@ -2225,7 +2265,27 @@ impl TaskControlBlock {
 
     /// 获取用户可见线程 ID。
     pub fn gettid(&self) -> usize {
-        self.tid.0
+        self.tid.load(Ordering::Acquire)
+    }
+
+    /// 用新的分配器句柄替换 TID，并返回旧句柄。
+    ///
+    /// 只允许 task registry 在非 leader exec 的重键事务中调用。registry 锁让
+    /// 按 TID 查找看不到半完成状态，Release 写则让无锁诊断读者最终观察到新值。
+    pub(super) fn replace_tid(
+        &self,
+        expected_tid: usize,
+        new_handle: Arc<TidHandle>,
+    ) -> Arc<TidHandle> {
+        assert_eq!(self.gettid(), expected_tid, "unexpected TID before exec swap");
+        let mut handle = self.tid_handle.lock();
+        assert_eq!(
+            handle.0, expected_tid,
+            "TID value and allocator handle diverged"
+        );
+        let old_handle = core::mem::replace(&mut *handle, new_handle);
+        self.tid.store(handle.0, Ordering::Release);
+        old_handle
     }
 
     /// 获取用户可见进程 ID。
@@ -2308,7 +2368,7 @@ impl Drop for TaskControlBlock {
     /// 当任务控制块被销毁时，释放用户资源槽位
     fn drop(&mut self) {
         self.unaccount_seccomp_enabled();
-        registry::unregister_task(self.tid.0);
+        registry::unregister_task_if_match(self);
         self.process.remove_thread(self);
         if self.owns_user_res_slot {
             self.process

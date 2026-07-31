@@ -137,6 +137,7 @@ sys_execveat()
 5. 隔离跨 PCB 共享的 fd table/sighand，关闭当前副本的 CLOEXEC fd，并换新 private futex table。
 6. 设置新 trap context；如果旧 VM 被外部 PCB 共享，清理其中的当前线程资源。
 7. 替换 exe 和 VM，结束临时会话并重新开放线程发布。
+8. 非 leader owner 接管进程 PID，原子重键 task registry，并同步本 CPU current TID。
 
 exec 的不可回滚提交点集中在 `TaskControlBlock::install_exec_image()` 后半段：
 
@@ -145,6 +146,7 @@ self.process.reset_exec_resources()?;
 self.process.replace_exe(elf);
 self.process.replace_vm(memory_set);
 exec.finish();
+self.become_group_leader();
 Ok(())
 ```
 
@@ -153,6 +155,9 @@ Ok(())
 长期 VM `Arc`，所以不能用 `Arc::strong_count()` 证明已经独占地址空间。
 fd table/sighand 则可能因 `CLONE_FILES/CLONE_SIGHAND` 被其它 PCB 长期持有，所以提交阶段
 必须在复制临时 `Arc` 前判断是否共享，并只修改当前 PCB 最终安装的对象。
+`become_group_leader()` 不创建新 PID，也不维护第二份 leader 字段；它交换既有
+`TidHandle` 所有权，使成功 exec 后的唯一 TCB 满足 `gettid() == getpid()`。旧 leader
+的迟到 Drop 只能删除仍指向自身的 registry 项，不能删除已经接管 PID 的 owner。
 
 ## 6. exec 与 vfork
 
