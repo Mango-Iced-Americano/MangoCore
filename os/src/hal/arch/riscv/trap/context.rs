@@ -113,10 +113,6 @@ impl UserContext {
             mcontext,
         }
     }
-
-    pub fn encode_sigmask(sigmask: Signals) -> UserSignalMask {
-        UserSignalMask::from_signals(sigmask)
-    }
 }
 
 #[repr(C)]

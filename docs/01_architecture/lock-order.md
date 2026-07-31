@@ -442,8 +442,28 @@ frame。因此锁外 user read 不要求再增加 trap generation 或第二套�
 
 信号 ABI 上下文只能通过架构 `machine_context()`/`set_machine_context()` 做字段复制，
 禁止把 `TrapContext` 裸指针 cast 成 `MachineContext`。错误路径进入 noreturn 退出前必须
-先释放当前函数额外持有的 task `Arc`。`do_signal()` 构造用户 frame 的写侧锁序仍由
-B47 独立处理。
+先释放当前函数额外持有的 task `Arc`。
+
+### 3.12 B47 signal frame 投递锁序
+
+自定义 handler 的 frame 投递固定分为：
+
+```text
+task.inner + sighand：取 pending、复制 action、复位 SA_RESETHAND
+  -> 释放 sighand
+  -> task.inner：快照返回上下文、mask 与 frame 布局
+  -> 释放 task.inner
+  -> UserPtrMut 写完整 SigInfo + UserContext
+  -> task.inner：提交 handler 用户寄存器与 mask
+```
+
+用户 frame 写入可能缺页、CoW 或等待 TLB shootdown，因此该段不得持有 `task.inner`、
+`sighand` 或其他普通内核锁。写成功前不发布 handler PC；写失败时直接退出，不需要回滚
+半提交的 live trap context。
+
+当前任务仍由本 CPU current 槽唯一执行，只有 owner 会写 live trap frame。远端信号只
+追加 pending；exec、group-exit 和 affinity 请求在 owner 的安全点生效。因此该锁外
+写入不需要新增 trap generation 或投递状态机。
 
 ## 4. 永久禁止的组合
 

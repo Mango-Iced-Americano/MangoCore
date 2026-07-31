@@ -6,13 +6,13 @@
 //!
 //! # Locking
 //!
-//! `do_signal()` 在当前任务即将返回用户态时运行。它会短暂持有 `task.inner`
-//! 和 `sighand` 锁；在停止进程、退出进程或重新进入调度前必须显式 drop 这些锁。
+//! `do_signal()` 只在选择 pending signal、读取 action 和提交 trap context 时
+//! 短暂持锁。向用户栈写 signal frame 前必须释放 `task.inner` 和 `sighand`，
+//! 在停止进程、退出进程或重新进入调度前也必须显式释放这些锁。
 
 use crate::hal::{get_bad_addr, get_bad_instruction, get_exception_cause, UserContext};
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
-use core::mem::size_of;
 use log::{error, warn};
 
 use crate::config::*;
@@ -485,6 +485,20 @@ fn exit_current_with_sigsegv() -> ! {
     exit_current_and_run_next(default_signal_wait_status(Signals::SIGSEGV));
 }
 
+/// 把完整的 rt signal frame 写入用户栈。
+///
+/// 调用方必须先释放任务锁；只有两个对象都写成功后，才能提交 handler 入口。
+fn write_user_signal_frame(
+    token: usize,
+    ucontext_addr: usize,
+    siginfo_addr: usize,
+    user_context: &UserContext,
+    siginfo: &SigInfo,
+) -> Result<(), isize> {
+    UserPtrMut::from_addr(siginfo_addr).write(token, siginfo)?;
+    UserPtrMut::from_addr(ucontext_addr).write(token, user_context)
+}
+
 /// Signals whose SIG_DFL action is to ignore the signal.
 /// These signals should NOT cause EINTR in pselect/ppoll/wait/etc.
 pub(super) const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
@@ -525,19 +539,17 @@ fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bo
 fn take_next_pending_signal(
     task: &TaskControlBlock,
     inner: &mut super::task::TaskControlBlockInner,
-) -> Option<(PendingSignal, bool)> {
+) -> Option<PendingSignal> {
     let thread_pending = inner.sigpending.pending().difference(inner.sigmask);
     if let Some(pending) = inner.sigpending.dequeue_matching(thread_pending) {
-        return Some((pending, false));
+        return Some(pending);
     }
 
     let shared_pending = task.process.shared_pending_hint().difference(inner.sigmask);
     if shared_pending.is_empty() {
         return None;
     }
-    task.process
-        .take_shared_matching(shared_pending)
-        .map(|pending| (pending, true))
+    task.process.take_shared_matching(shared_pending)
 }
 
 pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
@@ -666,7 +678,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
             task.pid()
         );
     }
-    while let Some((pending, from_process)) = take_next_pending_signal(&task, &mut inner) {
+    while let Some(pending) = take_next_pending_signal(&task, &mut inner) {
         let signum = pending.signum();
         let signal = pending.signal;
         let sighand_ref = task.process.sighand();
@@ -686,25 +698,37 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 continue;
             }
             if act.handler != SigHandler::SIG_DFL {
-                let trap_cx = inner.trap_context_mut();
-                let a0_isize = trap_cx.gp.a0 as isize;
+                // Linux 在取得 action 后、释放 sighand 锁前完成一次性 handler
+                // 的复位，避免另一个线程再次观察到旧 handler。
+                if act.flags.contains(SigActionFlags::SA_RESETHAND) {
+                    let mut reset_action = act;
+                    reset_action.handler = SigHandler::SIG_DFL;
+                    sighand.set(signum, Some(reset_action));
+                }
+                drop(sighand);
+                drop(sighand_ref);
+
+                // 所有可能失败的用户态写入都基于本地快照完成。写成功前不改
+                // live trap context，失败时可直接按 SIGSEGV 退出当前进程。
+                let mut return_context = *inner.trap_context_mut();
+                let a0_isize = return_context.gp.a0 as isize;
                 // if this syscall wants to restart
                 if a0_isize == -(SyscallErr::ERESTART as isize) {
                     // and if `SA_RESTART` is set
                     if act.flags.contains(SigActionFlags::SA_RESTART)
-                        && trap_cx.gp.a7 != SYSCALL_SIGTIMEDWAIT
-                        && trap_cx.gp.a7 != SYSCALL_RT_SIGSUSPEND
+                        && return_context.gp.a7 != SYSCALL_SIGTIMEDWAIT
+                        && return_context.gp.a7 != SYSCALL_RT_SIGSUSPEND
                     {
                         // back to `ecall`
-                        trap_cx.gp.pc -= 4;
+                        return_context.gp.pc -= 4;
                         // restore syscall parameter `a0`
-                        trap_cx.gp.a0 = trap_cx.origin_a0;
+                        return_context.gp.a0 = return_context.origin_a0;
                     } else {
                         // will return EINTR after sigreturn
-                        trap_cx.gp.a0 = EINTR as usize;
+                        return_context.gp.a0 = EINTR as usize;
                     }
                 }
-                let current_sp = inner.trap_context_mut().gp.sp;
+                let current_sp = return_context.gp.sp;
                 let alt_stack = inner.signal_stack;
                 let use_alt_stack = act.flags.contains(SigActionFlags::SA_ONSTACK)
                     && !alt_stack.is_disabled()
@@ -727,144 +751,85 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 } else {
                     (current_sp, normal_stack_bottom)
                 };
-                // check if we have enough space on selected user stack
-                if let Some((ucontext_addr, siginfo_addr, sig_sp, sig_size)) =
+                let Some((ucontext_addr, siginfo_addr, sig_sp, sig_size)) =
                     signal_frame_layout(frame_base_sp, stack_bottom)
-                {
-                    let token = current_user_token();
-                    let saved_sigmask = inner.sigmask_to_restore.take().unwrap_or(inner.sigmask);
-                    // 按值快照用户寄存器，用于构造 `ucontext_t`；架构方法不会把
-                    // kernel_sp、页表 token 等内核私有 trap 元数据暴露给用户。
-                    let mcontext = inner.trap_context_mut().machine_context();
-                    #[cfg(feature = "loongarch64")]
-                    let lsx = inner.trap_context_mut().lsx;
-                    let mut frame_stack = if use_alt_stack {
-                        alt_stack.with_runtime_flags(sig_sp)
-                    } else {
-                        SignalStack::new(sig_sp, sig_size)
-                    };
-                    if use_alt_stack {
-                        frame_stack.flags = SignalStackFlags::ONSTACK.bits;
-                    }
-                    // In this case, signal hander have three parameters
-                    if act.flags.contains(SigActionFlags::SA_SIGINFO) {
-                        #[cfg(feature = "loongarch64")]
-                        let user_context =
-                            UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext, lsx);
-                        #[cfg(feature = "riscv")]
-                        let user_context =
-                            UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext);
-                        if UserPtrMut::from_addr(ucontext_addr)
-                            .write(token, &user_context) // push UserContext into user stack
-                            .is_err()
-                        {
-                            error!("[do_signal] Failed to write UserContext to user stack. Send SIGSEGV.");
-                            drop(inner);
-                            drop(sighand);
-                            drop(sighand_ref);
-                            drop(task);
-                            exit_current_with_sigsegv();
-                        }
-                        if UserPtrMut::from_addr(siginfo_addr)
-                            .write(token, &pending.siginfo) // push SigInfo into user stack
-                            .is_err()
-                        {
-                            error!(
-                                "[do_signal] Failed to write SigInfo to user stack. Send SIGSEGV."
-                            );
-                            drop(inner);
-                            drop(sighand);
-                            drop(sighand_ref);
-                            drop(task);
-                            exit_current_with_sigsegv();
-                        }
-                        let trap_cx = inner.trap_context_mut();
-                        trap_cx.gp.a2 = ucontext_addr; // a2 <- *UserContext
-                        trap_cx.gp.a1 = siginfo_addr; // a1 <- *SigInfo
-                                                      // In this case, signal handler only have one parameter (a0 <- signum), so only copy something necessary
-                                                      // To simplify the implementation of sigreturn, here we keep the same layout as above...
-                    } else {
-                        // push sigmask into user stack
-                        let user_sigmask = UserContext::encode_sigmask(saved_sigmask);
-                        match UserPtrMut::from_addr(
-                            ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>(),
-                        )
-                        .write(token, &user_sigmask)
-                        {
-                            Ok(()) => {}
-                            Err(_) => {
-                                error!(
-                                "[do_signal] Failed to write sigmask to user stack! Send SIGSEGV."
-                                );
-                                drop(inner);
-                                drop(sighand);
-                                drop(sighand_ref);
-                                drop(task);
-                                exit_current_with_sigsegv();
-                            }
-                        }
-
-                        if UserPtrMut::from_addr(
-                            ucontext_addr + UserContext::MCONTEXT_OFFSET,
-                        )
-                        .write(token, &mcontext) // push MachineContext into user stack
-                        .is_err()
-                        {
-                            error!(
-                            "[do_signal] Failed to write MachineContext to user stack. Send SIGSEGV."
-                            );
-                            drop(inner);
-                            drop(sighand);
-                            drop(sighand_ref);
-                            drop(task);
-                            exit_current_with_sigsegv();
-                        }
-                        #[cfg(feature = "loongarch64")]
-                        if UserPtrMut::from_addr(ucontext_addr + UserContext::LSX_OFFSET)
-                            .write(token, &lsx)
-                            .is_err()
-                        {
-                            error!("[do_signal] Failed to write LSX context to user stack. Send SIGSEGV.");
-                            drop(inner);
-                            drop(sighand);
-                            drop(sighand_ref);
-                            drop(task);
-                            exit_current_with_sigsegv();
-                        }
-                    }
-                    let trap_cx = inner.trap_context_mut();
-                    trap_cx.gp.a0 = signum; // a0 <- signum
-                    trap_cx.set_sp(sig_sp); // update sp, because we've pushed something into stack
-                    trap_cx.gp.ra =
-                        if act.flags.contains(SigActionFlags::SA_RESTORER) && act.restorer != 0 {
-                            act.restorer // legacy, signal trampoline provided by C library's wrapper function
-                        } else {
-                            SIGNAL_TRAMPOLINE // ra <- __call_sigreturn, when handler ret, we will go to __call_sigreturn
-                        };
-                    trap_cx.gp.pc = act.handler.addr().unwrap(); // restore pc with addr of handler
-                } else {
-                    error!(
-                    "[do_signal] User stack will overflow after push trap context! Send SIGSEGV."
-                    );
+                else {
+                    error!("[do_signal] User stack has no room for signal frame. Send SIGSEGV.");
                     drop(inner);
-                    drop(sighand);
-                    drop(sighand_ref);
+                    drop(task);
+                    exit_current_with_sigsegv();
+                };
+
+                let current_sigmask = inner.sigmask;
+                // sigsuspend 的旧 mask 只在 frame 成功提交后清除；用户写失败时
+                // 保持 live task 状态不变，由 SIGSEGV 退出路径统一收尾。
+                let saved_sigmask = inner.sigmask_to_restore.unwrap_or(current_sigmask);
+                let handler_sigmask = current_sigmask
+                    | if act.flags.contains(SigActionFlags::SA_NODEFER) {
+                        act.mask - Signals::CAN_NOT_BE_MASKED
+                    } else {
+                        (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
+                    };
+                let mcontext = return_context.machine_context();
+                #[cfg(feature = "loongarch64")]
+                let lsx = return_context.lsx;
+                let mut frame_stack = if use_alt_stack {
+                    alt_stack.with_runtime_flags(sig_sp)
+                } else {
+                    SignalStack::new(sig_sp, sig_size)
+                };
+                if use_alt_stack {
+                    frame_stack.flags = SignalStackFlags::ONSTACK.bits;
+                }
+
+                #[cfg(feature = "loongarch64")]
+                let user_context =
+                    UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext, lsx);
+                #[cfg(feature = "riscv")]
+                let user_context = UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext);
+                let handler_pc = act.handler.addr().unwrap();
+                let handler_ra =
+                    if act.flags.contains(SigActionFlags::SA_RESTORER) && act.restorer != 0 {
+                        act.restorer
+                    } else {
+                        SIGNAL_TRAMPOLINE
+                    };
+                let token = task.process.user_token();
+                drop(inner);
+
+                if let Err(errno) = write_user_signal_frame(
+                    token,
+                    ucontext_addr,
+                    siginfo_addr,
+                    &user_context,
+                    &pending.siginfo,
+                ) {
+                    error!(
+                        "[do_signal] Failed to write user signal frame: {}. Send SIGSEGV.",
+                        errno
+                    );
                     drop(task);
                     exit_current_with_sigsegv();
                 }
-                // mask some signals
-                inner.sigmask |= if act.flags.contains(SigActionFlags::SA_NODEFER) {
-                    act.mask - Signals::CAN_NOT_BE_MASKED
-                } else {
-                    (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
-                };
-                if act.flags.contains(SigActionFlags::SA_RESETHAND) {
-                    let mut reset_action = act;
-                    reset_action.handler = SigHandler::SIG_DFL;
-                    sighand.set(signum, Some(reset_action));
+
+                // 用户 frame 已完整可见，此时才原子化地发布 handler 入口。
+                let mut inner = task.acquire_inner_lock();
+                let trap_cx = inner.trap_context_mut();
+                trap_cx.set_machine_context(mcontext);
+                #[cfg(feature = "loongarch64")]
+                {
+                    trap_cx.lsx = lsx;
                 }
-                // go back to `trap_return`
-                drop(sighand);
+                trap_cx.gp.a0 = signum;
+                // Linux rt frame 始终提供 siginfo/ucontext 地址；未声明
+                // SA_SIGINFO 的单参数 handler 会自然忽略额外参数寄存器。
+                trap_cx.gp.a1 = siginfo_addr;
+                trap_cx.gp.a2 = ucontext_addr;
+                trap_cx.set_sp(sig_sp);
+                trap_cx.gp.ra = handler_ra;
+                trap_cx.gp.pc = handler_pc;
+                inner.sigmask_to_restore = None;
+                inner.sigmask = handler_sigmask;
                 drop(inner);
                 return task;
             }

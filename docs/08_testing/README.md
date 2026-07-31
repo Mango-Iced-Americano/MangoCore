@@ -597,6 +597,11 @@ B46 同样不增加临时 TAP：focused 30 项不直接触发 `rt_sigreturn`，�
 `CORE_NUM=8 mask=0x003`。normal PID1 安装 `SIGCHLD` handler，子进程回收会反复经过真实
 signal-frame 往返；RV64 保持 312/314，LA64 保持 308/314。该门禁证明正常 frame 主路径
 无回归，但没有故意破坏 frame 来动态覆盖每一个 SIGSEGV 拒绝分支。
+B47 继续复用该真实路径，不增加临时 TAP 或测试专用生产字段。双架构 8 核初赛仍为
+RV64 312/314、LA64 308/314，精确失败集合不变。PID1 的 SIGCHLD action 带
+`SA_RESTART`、不带 `SA_SIGINFO`，因此动态证据直接覆盖“非 `SA_SIGINFO` handler 也写
+完整 rt frame”的正常投递与返回；它不证明 `SA_SIGINFO`、`SA_ONSTACK`、
+`SA_NODEFER`、`SA_RESETHAND`、syscall restart 命中和错误分支分别被动态触发。
 
 ### Bug 下沉流程
 

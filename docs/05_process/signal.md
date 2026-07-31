@@ -367,7 +367,30 @@ fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
 
 等待路径使用 WaitQueue/调度器的可中断睡眠，信号到达会唤醒 Interruptible 任务。
 
-## 12. sigreturn
+## 12. 用户 handler frame 与 sigreturn
+
+### 12.1 handler frame 投递
+
+`do_signal()` 选择自定义 handler 时遵循 snapshot/write/commit：
+
+1. 在 `task.inner -> sighand` 锁序内取出 pending signal、复制 action；若带
+   `SA_RESETHAND`，在释放 `sighand` 前把 handler 复位为默认动作。
+2. 释放 `sighand`，在 `task.inner` 内按值快照返回寄存器、signal stack、sigmask 和
+   `sigmask_to_restore`，并计算 handler 期间使用的新 mask。
+3. 释放 `task.inner`，向用户栈写入完整 `SigInfo + UserContext`。
+4. 两个用户对象全部写成功后，重新短持 `task.inner`，只提交用户机器寄存器、
+   handler 参数、用户 SP/PC/RA 和 signal mask。
+
+用户栈写入可能缺页并进入 MM/TLB 同步，不能跨它持有普通任务锁。写入失败时 live trap
+context 和 mask 尚未切换到 handler，当前任务按 `SIGSEGV` 退出；不会出现“PC 已指向
+handler，但 frame 只写了一半”的可执行状态。
+
+双架构都使用同一份完整 rt frame，不再为未设置 `SA_SIGINFO` 的 handler 单独拼接
+sigmask 和 machine context。`a0` 为信号号，`a1/a2` 始终指向 `SigInfo/UserContext`；
+单参数 handler 会按 ABI 自然忽略额外参数。这与 Linux RV64/LA64 的 rt signal frame
+入口约定一致，也让投递与 `sigreturn` 始终使用同一种布局。
+
+### 12.2 sigreturn 恢复
 
 `sys_sigreturn()` 从用户 signal frame 恢复：
 
@@ -413,8 +436,9 @@ task.inner {
 syscall 栈的 noreturn 退出路径。
 
 trap 返回汇编在 LSX 已启用时只恢复完整向量快照，不会随后再用 `FLD.D` 覆盖其低 lane；
-未启用 LSX 时才走纯标量 FPR 恢复路径。信号投递侧 `do_signal()` 的用户栈写入锁序属于
-后续独立节点，不能据此把恢复侧重构描述为信号子系统全部完成。
+未启用 LSX 时才走纯标量 FPR 恢复路径。B47 后，投递和恢复两侧都不再跨 faultable
+uaccess 持有 `task.inner`；`SA_SIGINFO`、altstack、`SA_NODEFER`、`SA_RESETHAND` 和各类
+错误分支仍需分别区分源码审查与动态覆盖，不能仅凭普通 SIGCHLD 往返声称全部运行过。
 
 ## 13. stopped/continued 与 wait
 
