@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -16,8 +16,8 @@ tags: [process, scheduler, task-manager, processor]
 | 文件 | 作用 |
 |------|------|
 | `os/src/task/run_queue.rs` | Per-CPU `RunQueue`、FIFO/nice-aware 选择和 owner 操作 |
-| `os/src/task/manager.rs` | interruptible/zombie/timer registry、WaitQueue、KernelTimerQueue |
-| `os/src/task/processor.rs` | Per-CPU `CpuTaskState/Processor`、`run_tasks()`、`schedule()` |
+| `os/src/task/manager.rs` | interruptible/timer registry、WaitQueue、KernelTimerQueue |
+| `os/src/task/processor.rs` | Per-CPU current/runqueue/zombie 状态、`run_tasks()`、`schedule()` |
 | `os/src/task/mod.rs` | `suspend_current_and_run_next()`、block/exit 调度入口 |
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
@@ -57,14 +57,12 @@ B41 继续让多线程 exec 复用这个 owner 自清理安全点，但使用可
 ```rust
 pub struct TaskManager {
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
-    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
 | `interruptible_queue` | 可中断睡眠任务 |
-| `zombie_queue` | 当前任务退出后等待切栈 drop 的 TCB |
 | `active_tracker` | `oom_handler` 特性下用于 OOM 回收选择 |
 
 全局实例：
@@ -73,10 +71,12 @@ pub struct TaskManager {
 pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 ```
 
-每个 `CpuTaskState` 独占一个 `Mutex<RunQueue>`、近似队列长度 `nr_running` 和无锁
-`current_present` 提示。前者只表示队列成员，后者由 current 槽安装/清空路径以
+每个 `CpuTaskState` 独占 `Processor`、`RunQueue` 和 `local_zombies`，并保留
+`nr_running` / `current_present` / `nr_zombies` 原子提示。`nr_running` 只表示队列
+成员，`current_present` 由 current 槽安装/清空路径以
 Release 更新；B37 用两者之和估算放置负载。它们都不参与 owner 正确性判断，瞬时误差
-最多造成次优选点。
+最多造成次优选点。`nr_zombies` 只用于空队列快路径和诊断，真实
+Arc 归属由对应 CPU 的 `local_zombies` 锁保护。
 
 TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的运行位置。
 它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current
@@ -356,7 +356,7 @@ schedule_tick += 1
   ├── do_wake_expired()
   ├── NET_INTERFACE.try_poll()        每 64 tick
   ├── fs::reclaim::maybe_reclaim_fs_caches()
-  ├── drain zombie_queue
+  ├── drain 本 CPU local_zombies
   ├── 每 64 tick 清理 interruptible zombie 并记录本地/全局队列统计
   ├── compact_shared_futex()
   ├── fetch_task()
@@ -367,15 +367,18 @@ schedule_tick += 1
 
 调度循环承担了若干后台维护职责，不能把它理解成单纯的 “while fetch ready task”。
 
-这些阶段的顺序也有意义。先处理 console、timeout、net poll 和 reclaim，是为了在选择下一个 ready task 前尽量把外部事件转化为 ready 状态；先 drain zombie queue，是为了让已经退出并切回 idle 的任务尽快释放资源；最后才 `fetch_task()`，避免刚被唤醒的任务还要多等一轮。
+这些阶段的顺序也有意义。先处理 console、timeout、net poll 和 reclaim，是为了在选择下一个 ready task 前尽量把外部事件转化为 ready 状态；先 drain 本 CPU local zombies，是为了让已经退出并切回 idle 的任务尽快释放资源；最后才 `fetch_task()`，避免刚被唤醒的任务还要多等一轮。
 
-调度循环里所有后台动作都必须短小，不应长期持有业务锁。它运行在单核内核的关键路径上，任何长时间操作都会推迟所有用户任务和 timeout wake。因此 PageCache reclaim、网络 poll、shared futex compact 都采用有限预算或降频策略。
+调度循环里所有后台动作都必须短小，不应长期持有业务锁。CPU0 仍是
+全局 housekeeping 关键路径，长时间操作会推迟 CPU0 用户任务和 timeout wake。
+因此 PageCache reclaim、网络 poll、shared futex compact 都采用有限预算或降频策略。
 
 AP 走独立的精简分支，只执行：
 
 ```text
 短暂开放 IPI/timer → 立即关中断 → 处理 STOP/deferred reason
   → 推进本 CPU sched tick 并重编程本地 one-shot
+  → drain 本 CPU local_zombies
   → fetch 本 CPU RunQueue
   → 共用 dispatch_task()/current/__switch/switch-out
   → 空队列时在 IRQ-off 窗口重查后执行 wfi/idle
@@ -429,7 +432,7 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 网络 syscall 自己也会 poll；调度循环中的 poll 是后台兜底，避免没有 socket syscall 时网络状态完全不推进。
 
-## 9. zombie queue
+## 9. Per-CPU zombie 回收
 
 当前任务退出时仍运行在自己的内核栈上，不能立即 drop 最后一个 `Arc<TaskControlBlock>`。退出路径会：
 
@@ -438,15 +441,20 @@ exit_current_and_run_next()
   ├── finish_current_exit()
   ├── TaskStatus = Zombie（Processor.current 仍持有 Arc）
   ├── schedule(idle)
-  └── idle: finish_switch_out() -> zombie queue
+  └── idle: finish_switch_out() -> owner CPU local_zombies
 ```
 
-CPU0 调度循环回到 idle 后通过 `take_zombie_tasks(64)` 批量取出并 drop。AP 的
-受控任务切回本地 idle 后，也会在释放 processor 锁后把 TCB 交给同一个受锁
-zombie registry；真正回收仍由 CPU0 执行。B28 的用户探针还走过 PCB zombie、父进程
-`wait_child()` 和最后一个 TCB 强引用释放，防止非返回 exit 的 trap 栈帧泄漏 `Arc`。
-B21 后，TCB 析构只把缓存溢出的内核栈 slot
-登记到固定退休队列；CPU0 下一次 idle 安全点在无普通锁状态下撤销映射、等待全核 TLB
+`finish_current_switch_out()` 先在 idle 栈清空 current 槽并释放 processor 锁，再把
+`Zombie` TCB 交给退出 CPU 的 `local_zombies`。CPU0 和 AP 都在自己的 idle 循环、
+下一次 dispatch 之前取出并 drop，因此 AP 退出不再竞争全局 `TASK_MANAGER`。
+
+父进程 wait/auto-reap 需要按 pid 同步清理时，先单独摘取 interruptible zombie，
+再按 CPU 依次扫描本地回收队列；任一时刻只持有一把容器锁，承接 Vec
+的扩容和 TCB 析构都在锁外。PCB 的 wait-visible zombie 状态与这个 TCB
+对象寿命队列仍是两层独立语义。
+
+B21 后，TCB 析构只把缓存溢出的内核栈 slot 登记到固定退休队列；
+CPU0 下一次 idle 安全点在无普通锁状态下撤销映射、等待全核 TLB
 ack、释放 frame，再归还 slot。曾在 AP 使用的 TCB 不再由测试保留到关机，栈地址可以在
 协议完成后真实复用。
 

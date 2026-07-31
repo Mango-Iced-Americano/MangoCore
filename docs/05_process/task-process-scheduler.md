@@ -3,7 +3,7 @@ title: "任务、进程与调度器协作路径"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-08-01
 tags: [process, task, scheduler, integration]
 ---
 
@@ -16,8 +16,8 @@ tags: [process, task, scheduler, integration]
 | `os/src/task/task.rs` | TCB 字段、线程状态、trap context、clone/exec/exit |
 | `os/src/task/process.rs` | PCB 字段、进程资源、children、finish_exit |
 | `os/src/task/run_queue.rs` | Per-CPU runnable 队列和 owner 状态交接 |
-| `os/src/task/manager.rs` | interruptible/zombie/timer registry、WaitQueue |
-| `os/src/task/processor.rs` | `run_tasks()`、Per-CPU current/idle 状态 |
+| `os/src/task/manager.rs` | interruptible/timer registry、WaitQueue |
+| `os/src/task/processor.rs` | `run_tasks()`、Per-CPU current/idle/runqueue/zombie 状态 |
 | `os/src/task/process_manager.rs` | process registry、pid lookup、wait helper |
 | `os/src/hal/arch/*/switch.*` | `__switch` 上下文切换 |
 
@@ -35,11 +35,11 @@ TaskControlBlock
   └── 指向所属 ProcessControlBlock
 
 Per-CPU RunQueue + Processor
-  ├── Queued(cpu) runnable / current Arc / idle context
+  ├── Queued(cpu) runnable / current Arc / idle context / local zombies
   └── __switch idle <-> task
 
 Global TaskManager
-  └── interruptible / zombie / timer registry
+  └── interruptible / timer registry
 ```
 
 这三个对象的职责必须分开理解：PCB 不直接被调度，TCB 不直接持有 fd table，TaskManager 不拥有进程资源。
@@ -72,17 +72,20 @@ pub struct TaskControlBlock {
 ```rust
 pub struct TaskManager {
     interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
-    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
 pub struct CpuTaskState {
     processor: Mutex<Processor>,
     run_queue: Mutex<RunQueue>,
     nr_running: AtomicUsize,
+    local_zombies: Mutex<VecDeque<Arc<TaskControlBlock>>>,
+    nr_zombies: AtomicUsize,
 }
 ```
 
-当前所有生产任务仍发布到 CPU0；该结构尚不等于 AP 调度和任务迁移已经完成。
+普通用户任务默认仍限制在 CPU0，但 AP 已能执行受控内核/用户任务、
+远程唤醒和迁移。退出 TCB 的调度 Arc 不再进入全局 registry，而是由退出
+CPU 切回 idle 栈后本地回收。
 
 ## 3. 创建路径中的协作
 
@@ -245,7 +248,7 @@ runqueue 节点或释放 TCB；只有 live count 降为 1 后才安装新 MM。�
 | 对象 | 行为 |
 |------|------|
 | PCB | mark process Zombie、收养 children、关闭 fd、释放 VM |
-| TaskManager | 当前 TCB 入 zombie queue |
+| owner CPU Processor | 切回 idle 后把当前 TCB 交给本地 zombie 回收队列 |
 | parent PCB | child_exit_wait wake |
 | registry | wait/auto-reap 时注销 |
 

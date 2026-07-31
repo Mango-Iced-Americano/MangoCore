@@ -3,7 +3,7 @@ title: "exit、exit_group、wait4 与 waitid"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [process, exit, wait, zombie]
 ---
 
@@ -18,6 +18,7 @@ tags: [process, exit, wait, zombie]
 | `os/src/task/task.rs` | `exit_thread_resources()` |
 | `os/src/task/process.rs` | `finish_exit()`、zombie、children、vfork、auto-reap |
 | `os/src/task/process_manager.rs` | wait child 查找与回收 |
+| `os/src/task/processor.rs` | Per-CPU current 与 zombie Arc 的切栈后回收 |
 
 ## 2. exit code 编码
 
@@ -99,8 +100,9 @@ fn finish_current_exit(task: Arc<TaskControlBlock>, exit_code: u32) -> ! {
 `schedule()` 会在切回 idle 前重新接管 IRQ-off CPU。
 
 `current_task()` 从本 CPU current 槽克隆一个本地 `Arc`。退出路径在完成
-`finish_current_exit()` 清理完成后、进入不返回的 `schedule()` 前显式 drop 这个 clone；current 槽
-仍保留 owner。任务切回 idle 后，idle 才从槽位取出 retained Arc 并转入 zombie queue。
+`finish_current_exit()` 清理后、进入不返回的 `schedule()` 前显式 drop 这个 clone；
+current 槽仍保留 owner。任务切回 idle 后，idle 才从槽位取出 retained Arc，
+并转入退出 CPU 自己的 `local_zombies`。
 
 `ProcessControlBlock::finish_exit()` 是最后线程退出后的进程级提交点：
 
@@ -185,10 +187,13 @@ current_task()（Processor.current 保持 owner）
 finish_current_exit() -> TaskStatus::Zombie
 drop 本地 current Arc
 schedule(idle)
-idle: clear current -> finish_switch_out() -> zombie queue
+idle: clear current -> finish_switch_out() -> local_zombies(owner_cpu)
 ```
 
-调度循环之后从 zombie queue 取出并 drop TCB。
+同一 CPU 的 idle 循环在下一次 dispatch 前从本地队列取出并 drop TCB。
+这使 AP 不再等待 CPU0 代为回收，同时保证最后一个调度 Arc 不会在任务
+仍使用自身内核栈时析构。父进程 wait 所观察的 PCB zombie 状态不依赖
+这个队列；按 pid 强制清理只负责移除尚在容器中的 TCB 强引用。
 
 ## 6. exit_group_and_run_next
 

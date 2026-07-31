@@ -1,7 +1,7 @@
 //! Per-CPU 处理器状态和调度主循环。
 //!
 //! 每个 CPU 通过 `PerCpu.task_state` 持有自己的 current 槽和 idle 上下文。
-//! CPU0 额外负责全局 housekeeping；AP 只处理本地 runqueue 和 IPI。普通
+//! CPU0 额外负责全局 housekeeping；AP 只处理本地调度状态和 IPI。普通
 //! 用户任务仍默认发布到 CPU0；AP 只接收受控的 kernel-only 任务，以及 SMP
 //! ktest 显式发布或在 yield 安全点迁入的无共享 I/O 用户探针。
 //!
@@ -11,14 +11,11 @@
 //! 否则切回调度器时会形成自锁。
 
 use super::run_queue::RunQueue;
-use super::{
-    __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
-    take_zombie_tasks,
-};
+use super::{__switch, do_wake_expired, take_one_interruptible_zombie};
 use super::{fetch_task, finish_switch_out};
 use super::{TaskContext, TaskControlBlock, TaskStatus};
 use crate::net::config::NET_INTERFACE;
-use alloc::sync::Arc;
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
@@ -80,6 +77,10 @@ pub(crate) struct CpuTaskState {
     /// 本地排队任务数的无锁近似值，不包含 current。
     /// 精确成员关系仍以 `run_queue` 锁内的队列为准。
     pub(crate) nr_running: AtomicUsize,
+    /// 已切回本 CPU idle 栈、等待本地释放最后调度 Arc 的终态任务。
+    local_zombies: Mutex<VecDeque<Arc<TaskControlBlock>>>,
+    /// `local_zombies` 的无锁精确计数；只用于避免空队列热路径取锁和诊断。
+    nr_zombies: AtomicUsize,
     /// 本 CPU 是否持有 current；仅供放置策略估算负载。
     current_present: AtomicBool,
     current_pid: AtomicUsize,
@@ -94,12 +95,116 @@ impl CpuTaskState {
             processor: Mutex::new(Processor::new()),
             run_queue: Mutex::new(RunQueue::new()),
             nr_running: AtomicUsize::new(0),
+            local_zombies: Mutex::new(VecDeque::new()),
+            nr_zombies: AtomicUsize::new(0),
             current_present: AtomicBool::new(false),
             current_pid: AtomicUsize::new(0),
             current_tid: AtomicUsize::new(0),
             current_syscall_id: AtomicUsize::new(0),
         }
     }
+}
+
+/// 在退出 CPU 的 idle 栈上接收终态任务的最后一个调度 owner。
+pub(crate) fn enqueue_zombie(cpu: usize, task: Arc<TaskControlBlock>) {
+    assert_eq!(
+        task.task_status(),
+        TaskStatus::Zombie,
+        "only terminal tasks may enter a local zombie queue"
+    );
+    let state = crate::smp::task_state(cpu);
+    let mut queue = state.local_zombies.lock();
+    queue.push_back(task);
+    state.nr_zombies.fetch_add(1, Ordering::Release);
+    drop(queue);
+    super::perf::record_zombie_enqueue();
+}
+
+fn take_local_zombies(cpu: usize, limit: usize) -> Vec<Arc<TaskControlBlock>> {
+    let state = crate::smp::task_state(cpu);
+    // 先按原子计数在锁外分配承接容器。并发入队可能使真实长度
+    // 更大，本轮只取快照中已发布的数量，剩余任务由下一轮回收。
+    let capacity = limit.min(state.nr_zombies.load(Ordering::Acquire));
+    if capacity == 0 {
+        return Vec::new();
+    }
+    let mut zombies = Vec::with_capacity(capacity);
+    let mut queue = state.local_zombies.lock();
+    let count = capacity.min(queue.len());
+    for _ in 0..count {
+        zombies.push(
+            queue
+                .pop_front()
+                .expect("local zombie count diverged from its queue"),
+        );
+    }
+    let previous = state.nr_zombies.fetch_sub(count, Ordering::AcqRel);
+    assert!(previous >= count, "local zombie count underflow");
+    zombies
+}
+
+/// 返回全部 Per-CPU zombie 队列的无锁近似总数。
+pub(crate) fn zombie_queue_count_fast() -> usize {
+    (0..crate::smp::configured_cpu_count())
+        .map(|cpu| {
+            crate::smp::task_state(cpu)
+                .nr_zombies
+                .load(Ordering::Acquire)
+        })
+        .sum()
+}
+
+/// 无锁判断是否仍有 CPU-local zombie Arc 等待回收。
+pub fn has_zombie_queue_tasks_fast() -> bool {
+    zombie_queue_count_fast() != 0
+}
+
+/// 跨 CPU 依次取出 zombie；任一时刻只持有一个本地回收队列锁。
+pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
+    let mut zombies = Vec::with_capacity(limit.min(zombie_queue_count_fast()));
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        let remaining = limit.saturating_sub(zombies.len());
+        if remaining == 0 {
+            break;
+        }
+        zombies.extend(take_local_zombies(cpu, remaining));
+    }
+    zombies
+}
+
+/// 从所有本地回收队列移除指定进程的 TCB，并把析构责任交给调用方。
+pub(crate) fn remove_zombie_tasks_by_pid(pid: usize) -> Vec<Arc<TaskControlBlock>> {
+    let mut zombies = Vec::with_capacity(zombie_queue_count_fast());
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        let state = crate::smp::task_state(cpu);
+        loop {
+            // 锁内只从容器摘取一个 Arc；Vec 扩容和最终析构均在锁外。
+            let zombie = {
+                let mut queue = state.local_zombies.lock();
+                let Some(index) = queue.iter().position(|task| task.process.pid == pid) else {
+                    break;
+                };
+                let task = queue.remove(index).expect("located local zombie vanished");
+                let previous = state.nr_zombies.fetch_sub(1, Ordering::AcqRel);
+                assert!(previous != 0, "local zombie count underflow");
+                task
+            };
+            zombies.push(zombie);
+        }
+    }
+    zombies
+}
+
+/// 只由本 CPU idle 循环调用；TCB 的最后一个调度 Arc 在这里安全释放。
+fn drain_local_zombies(cpu: usize, limit: usize) -> usize {
+    let zombies = take_local_zombies(cpu, limit);
+    let drained = zombies.len();
+    drop(zombies);
+    if drained != 0 {
+        super::perf::record_zombie_drain(drained);
+        super::perf::record_zombie_drain_full(0, 1, drained);
+    }
+    drained
 }
 
 /// 运行调度主循环。
@@ -216,13 +321,7 @@ pub fn run_tasks() -> ! {
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
         // 这样避免把不可运行的 TCB 塞进 runqueue 再扫描剔除。
         let stage_t0 = sched_profile_start(sched_profile);
-        if has_zombie_queue_tasks_fast() {
-            let zombies = take_zombie_tasks(64);
-            let drained_zombies = zombies.len();
-            drop(zombies);
-            super::perf::record_zombie_drain(drained_zombies);
-            crate::task::perf::record_zombie_drain_full(0, 1, drained_zombies);
-        }
+        let _ = drain_local_zombies(cpu, 64);
         sched_record_stage(
             sched_profile,
             &SCHED_STAGE_ZOMBIE_QUEUE_CALLS,
@@ -337,12 +436,12 @@ pub fn run_tasks() -> ! {
     }
 }
 
-/// AP 调度循环只接触本地 runqueue/current、无锁 IPI deferred state，以及
-/// 任务切出后的受锁 zombie 交接。
+/// AP 调度循环只接触本地 runqueue/current/zombie、无锁 IPI deferred state。
 ///
-/// AP timer 只驱动本地调度 tick；全局 timeout、console、net、FS、futex 和
-/// zombie 回收继续由 CPU0 独占。空队列检查与 wait 都在 IRQ-off 窗口内，
-/// 远程 enqueue 后的 doorbell 或本地 tick 都必定使 wait 返回。
+/// AP timer 只驱动本地调度 tick；全局 timeout、console、net、FS 和 futex
+/// housekeeping 继续由 CPU0 独占。每 CPU 只回收自己已经切回 idle 的 zombie。
+/// 空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的 doorbell 或本地 tick
+/// 都必定使 wait 返回。
 ///
 /// AP 上的 timer callback 不会进入共享子系统；普通用户任务仍需等待共享 FS/net/
 /// driver 审计完成后再解除默认 CPU0 affinity。
@@ -358,6 +457,9 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         // timer hard IRQ 与 IPI 一样只发布无锁状态；在 idle 栈、尚未取得
         // runqueue/processor 锁时推进本地 tick 并重编程 one-shot。
         let _ = super::run_deferred_timer_work();
+        // 上一任务已经切回本 CPU idle 栈；只在这里释放本地 zombie Arc，
+        // 避免 AP 退出路径再竞争全局 TaskManager 或等待 CPU0 代为回收。
+        let _ = drain_local_zombies(cpu, 64);
 
         // kernel-only AP 任务不参与 CPU0 的 OOM active tracker。优先取本地
         // 任务；本地为空时只向一个 victim 窃取一个 affinity 允许的任务。

@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -13,7 +13,11 @@ tags: [process, task, scheduler, signal, futex, ipc]
 
 MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `ProcessControlBlock`。TCB 是调度实体，持有内核栈、trap context、线程信号状态、调度字段和退出清理信息；PCB 是资源容器，持有地址空间、fd table、文件系统状态、namespace、sighand、futex 表、子进程关系和进程生命周期状态。
 
-调度器是单核实现，核心位于 `task/manager.rs` 和 `task/processor.rs`。系统调用层通过 `syscall/process/*` 进入 clone、exec、exit/wait、signal、futex、IPC、time、ids、rlimit 和 sched 兼容路径。
+调度器采用 Per-CPU current/idle/RunQueue 和安全点抢占，核心位于
+`task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。普通用户任务在共享
+子系统审计完成前仍默认限制在 CPU0，但受控任务已能在 AP 运行、
+唤醒、迁移和退出。系统调用层通过 `syscall/process/*` 进入 clone、exec、
+exit/wait、signal、futex、IPC、time、ids、rlimit 和 sched 兼容路径。
 
 ## 2. 设计目标
 
@@ -21,7 +25,7 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 |------|----------|
 | 线程/进程分层 | TCB 管调度，PCB 管资源和进程关系 |
 | Linux clone 语义 | `CLONE_VM/FILES/FS/SIGHAND/THREAD` 控制资源共享 |
-| SMP 过渡调度 | Per-CPU RunQueue/current/idle + 全局等待/回收 registry |
+| SMP 过渡调度 | Per-CPU RunQueue/current/idle/zombie + 全局等待 registry |
 | 阻塞原语统一 | `WaitQueue` 支撑 futex、epoll、eventfd、socket、timer |
 | 进程生命周期可 wait | PCB 维护 children、exit_code、stopped/continued 状态和 wait queue |
 | signal 交付 | trap return 前 `do_signal()` 构造/恢复用户信号帧 |
@@ -44,7 +48,7 @@ MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `Proces
 | tid kstack trap_cx signal mask status sched clear_child_tid       |
 +-------------------------------------------------------------------+
 | Per-CPU RunQueue + Processor | global TaskManager                 |
-| runnable/current/idle         | interruptible/zombie/timer        |
+| runnable/current/idle/zombie  | interruptible/timer               |
 +-------------------------------------------------------------------+
 | HAL switch / trap / timer                                         |
 +-------------------------------------------------------------------+
@@ -112,7 +116,7 @@ Running(cpu) --begin sleep--> Blocking(cpu)
 Blocking(cpu) --early wake--> Running(cpu)
 Blocking(cpu) --switch complete--> Blocked
 Blocked --wake--> Queued(cpu)
-Running(cpu) --exit--> Zombie --switch complete--> zombie queue
+Running(cpu) --exit--> Zombie --switch complete--> local_zombies(cpu)
 New / Blocked --external cleanup--> Zombie
 ```
 
@@ -126,7 +130,8 @@ New / Blocked --external cleanup--> Zombie
 | `Zombie` | 线程退出，等待回收 |
 
 状态存放在 TCB 外层 `AtomicUsize`，状态 tag 与 CPU owner 一次 CAS 更新；
-`task.inner` 不保存第二份状态。B15 时队列仍为全局容器，owner 固定为 CPU0。
+`task.inner` 不保存第二份状态。`Queued/Running/Blocking` 携带真实 CPU owner，
+`Migrating` 只表示已离开源队列、尚未交给目标 owner 的短窗口。
 
 ### 4.3 ProcessControlBlock
 
@@ -168,12 +173,14 @@ New / Blocked --external cleanup--> Zombie
 |------|------|------|
 | Per-CPU `RunQueue` | `VecDeque<Arc<TaskControlBlock>>` | 对应 `Queued(cpu)` 的可运行任务 |
 | Per-CPU `nr_running` | `AtomicUsize` | 排队任务数近似值，不包含 current |
+| Per-CPU `local_zombies` | `VecDeque<Arc<TaskControlBlock>>` | 已切回本 CPU idle 栈的终态 TCB |
+| Per-CPU `nr_zombies` | `AtomicUsize` | 空队列快路径和诊断计数 |
 | `interruptible_queue` | `VecDeque<Arc<TaskControlBlock>>` | 可中断睡眠任务 |
-| `zombie_queue` | `VecDeque<Arc<TaskControlBlock>>` | 延迟回收任务 |
 | RunQueue `nonzero_nice_count` | 计数 | 本地队列是否需要公平扫描 |
 
-RunQueue 由每个 `CpuTaskState` 独占；TaskManager 只保护后三类全局 registry。
-当前生产 owner 仍固定 CPU0，AP 调度与远程 enqueue 尚未开放。
+RunQueue 和 local_zombies 由每个 `CpuTaskState` 独占；TaskManager 只保护
+interruptible 与 timer 全局 registry。远程 enqueue/wake/affinity 已开放给受控
+任务，普通用户任务的初始 affinity 仍为 CPU0-only。
 
 ### 4.6 WaitQueue
 
@@ -214,7 +221,7 @@ run_tasks()
     do_wake_expired()
     NET_INTERFACE.try_poll() periodically
     fs::reclaim::maybe_reclaim_fs_caches()
-    drain zombie queue
+    drain local zombies
     cleanup stale zombies
     compact shared futex
     fetch ready task
@@ -437,7 +444,7 @@ loop {
     do_wake_expired();
     NET_INTERFACE.try_poll() periodically;
     fs::reclaim::maybe_reclaim_fs_caches();
-    drain zombie queue;
+    drain local zombies;
     cleanup stale zombies;
     compact shared futex;
     if let Some(task) = fetch_task() {
@@ -458,7 +465,7 @@ loop {
 | `do_wake_expired()` 保留 legacy sweep | 一些早期等待路径仍依赖调度循环扫描 timeout。 |
 | 网络 poll 周期执行 | socket 阻塞路径之外，网络状态机也能被后台推进。 |
 | PageCache reclaim 在调度循环调用 | 没有独立写回线程时，调度循环提供合作式回收入口。 |
-| zombie queue 在 idle 后 drain | 退出任务切走后再 drop，避免释放仍在使用的内核栈。 |
+| local zombies 在 owner CPU idle 上 drain | 退出任务切走后再 drop，避免释放仍在使用的内核栈。 |
 | `fetch_task()` 才真正选择用户任务 | 维护动作做完后才进入 ready queue 选择。 |
 
 这也是为什么 `run_tasks()` 是进程、网络、文件系统和 timer 的共同枢纽，不只是一个队列 pop 函数。
@@ -607,7 +614,7 @@ parent wait
 
 | 边界 | 说明 |
 |------|------|
-| CPU0-only 执行 | 已有 Per-CPU RunQueue/current/idle，但生产任务仍只在 CPU0 运行 |
+| 默认 CPU0-only | AP 可运行受控任务；FS/net/driver 并发审计前，普通用户任务初始 mask 仍为 bit0 |
 | namespace | net/mnt/ipc namespace 对象可切换，隔离能力以对应 namespace 实现为准 |
 | signal | trap return 前统一交付；`rt_sigreturn` 由 trap 后端特殊处理 |
 | futex PI/WakeOp | `FutexCmd` 枚举存在，未接入的命令分支返回 `EINVAL` |

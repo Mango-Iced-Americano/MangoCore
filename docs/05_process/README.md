@@ -3,7 +3,7 @@ title: "进程与任务子系统 (Process and Task Subsystem)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-30
+last_update: 2026-08-01
 tags: [process, task, scheduler, signal, futex]
 ---
 
@@ -15,7 +15,8 @@ MangoCore 的执行实体分为线程级 `TaskControlBlock` 和进程级 `Proces
 
 调度器位于 `task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。每个 CPU
 拥有独立 RunQueue、current 槽和 idle context；全局 TaskManager 只保留
-interruptible/zombie/timer registry。AP 已进入精简本地调度循环；focused ktest 的短
+interruptible/timer registry，切离 current 的退出 TCB 则进入 owner CPU 的本地 zombie
+队列并由该 CPU 的 idle 栈析构。AP 已进入精简本地调度循环；focused ktest 的短
 kernel-only 任务可显式远程入队，并可在阻塞后由统一 wake 路径重新发布到最近运行的 AP。
 B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；普通新任务和用户任务仍
 默认首次发布到 CPU0，通用 affinity、负载均衡和迁移尚未开放。
@@ -51,7 +52,7 @@ B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；�
 | tid kstack trap context signal mask task status sched state |
 +-------------------------------------------------------------+
 | Per-CPU RunQueue + Processor | global TaskManager           |
-| runnable/current/idle        | wait/zombie/timer registry   |
+| runnable/current/idle/zombie | wait/timer registry          |
 +-------------------------------------------------------------+
 | HAL switch/trap/timer                                       |
 +-------------------------------------------------------------+
@@ -64,8 +65,8 @@ B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；�
 | `TaskControlBlock` | 线程 | 调度实体、内核栈、trap context、线程信号 mask/pending、TLS/clear_child_tid、调度字段 |
 | `ProcessControlBlock` | 进程 | 地址空间、fd table、cwd/root、命名空间、信号处理表、futex 表、子进程关系和 wait 队列 |
 | `RunQueue` | 每 CPU | `Queued(cpu)` 成员关系、FIFO/nice-aware fetch |
-| `TaskManager` | 全局 registry | interruptible/zombie/timer 管理和唤醒协调 |
-| `Processor` | 每 CPU | 当前任务、idle task context、调度主循环 |
+| `TaskManager` | 全局 registry | interruptible/timer 管理和唤醒协调 |
+| `Processor` | 每 CPU | 当前任务、idle task context、本地 zombie 回收和调度主循环 |
 | `WaitQueue` | 阻塞原语 | futex、epoll、eventfd、timer 等等待路径复用 |
 | `Completion` | 单次完成通知 | `CLONE_VFORK` 等一次性等待场景 |
 

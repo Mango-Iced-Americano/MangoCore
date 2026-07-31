@@ -2,12 +2,12 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-31
+> Coverage: 2026-04-01 to 2026-08-01
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
 
-MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
+MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
 
 本项目声明：
 
@@ -73,6 +73,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP 线程组退出与多线程 exec | 2026-07-31 | GPT/Codex, DeepSeek | Linux/DragonOS 生命周期对照、owner 自清理、clone 门禁、live ack、等待点退栈与双架构 8 核门禁 | B40 永久 group exit 与 B41 临时 exec 会话均不远程析构 Running sibling；focused 由 26/26 增至 27/27，初赛 RV64 312/314、LA64 308/314 |
 | SMP trap context 与 signal 用户访存锁边界 | 2026-07-31 | GPT/Codex, DeepSeek | Linux signal ABI 对照、current owner 与 uaccess 锁序审查、冻结双架构 8 核门禁 | B45—B48 删除可逃逸 trap 引用，并让 signal frame 及状态 syscall 的用户访存位于普通锁外；初赛 RV64 312/314、LA64 308/314 |
 | SMP 空闲核 work stealing | 2026-07-31 | GPT/Codex, DeepSeek | 单 runqueue owner、迁移竞态、锁外 TLB 与确定性 focused 测试审查 | 复用 `Migrating` 完成 victim→thief 交接；双架构 8 核 focused 31/31，初赛失败集合未扩大 |
+| SMP Per-CPU zombie 回收 | 2026-08-01 | GPT/Codex, DeepSeek | idle 栈 Arc 寿命、跨 CPU reap 锁边界、栈映射退休与双架构验证 | 删除全局 zombie 队列，退出 CPU 在本地 idle 回收 TCB；双架构 8 核 focused 32/32，初赛基线不退化 |
 
 ## 4. 详细使用场景
 
@@ -919,6 +920,30 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp` 均为 31/31。生产逻辑冻结后的初赛仍为 RV64 312/314、LA64
   308/314，失败身份不变；有效 child 均无源码 mutation、panic 或 timeout。
 
+### Case 39: SMP Per-CPU zombie 回收
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b50-local-zombie-summary.md`；DeepSeek prompt、manifest
+  与原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计 Per-CPU Arc owner、跨 CPU reap 和可区分旧实现的
+  focused 用例，完成实现与最终裁决；DeepSeek 只读审查并通过受限网关
+  串行执行双架构 focused/初赛回归，不修改源码、不提交、不 push。
+- Problem: AP 退出后的 TCB 仍进入全局 `TASK_MANAGER.zombie_queue`，最后由
+  CPU0 代为析构；这与 Per-CPU current/runqueue 所有权不对称，并让 AP 退出
+  竞争全局锁。
+- Human action: `finish_switch_out()` 在退出 CPU 的 idle 栈把最后调度 Arc 交给
+  `CpuTaskState.local_zombies`，同 CPU 在下一次 dispatch 前 drop；按 pid 回收逐队
+  扫描，不嵌套 `TASK_MANAGER`/本地队列锁，不在容器锁内扩容承接 Vec
+  或执行 TCB 析构链。
+- AI adjudication: DeepSeek 给出 `ACCEPT`，但误称 AP 直接执行 kernel-stack 退休
+  shootdown，且漏报 LA64 两个 `test_brk` partial failure；GPT/Codex 以调度源码
+  和 child 原始 judge JSON 纠正。固定容量 zombie 容器建议也未采纳，因其
+  未定义安全的溢出协议。
+- Verification: 冻结 tracked diff SHA-256 为
+  `9c7d88145430f9e6435f32b1e2ef428fa1b70aa6b10f23007c496dc6314d0a03`；RV64/LA64
+  `CORE_NUM=8 KTEST=smp` 均为 32/32。初赛仍为 RV64 312/314、LA64 308/314，
+  精确失败集合不变；四个 child 均无源码 mutation、panic 或 timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1000,6 +1025,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b41-exec-summary.md` | SMP 多线程 exec | 记录临时 ExecSession、late clone 门禁、旧 MM 生命周期、等待点退栈、包装器 fail-closed 裁决及双架构 27/27/初赛门禁 |
 | `docs/Work_Log/2026-07-31.md`、同日 B45—B48 evidence | SMP trap context 与 signal 用户访存锁边界 | 记录 trap 借用收口、signal frame 与状态 syscall 的锁外用户访存、Linux ABI 对照、DeepSeek 结论纠错及双架构 8 核初赛门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b49-work-steal-summary.md` | SMP 空闲核 work stealing | 记录单 victim owner 交接、锁外 kernel-TLB、冻结任务 fail-closed 裁决和双架构 31/31/初赛门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b50-local-zombie-summary.md` | SMP Per-CPU zombie 回收 | 记录 idle 栈 Arc 交接、跨 CPU reap 锁边界、模型结论纠错及双架构 32/32/初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

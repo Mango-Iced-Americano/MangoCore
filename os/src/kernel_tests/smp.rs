@@ -337,6 +337,9 @@ static RUNNING_AFFINITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static STEAL_RUNS: AtomicUsize = AtomicUsize::new(0);
 static STEAL_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static STEAL_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static LOCAL_ZOMBIE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static LOCAL_ZOMBIE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LOCAL_ZOMBIE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
@@ -462,6 +465,10 @@ pub fn tests() -> Vec<KernelTest> {
             running_affinity_waits_for_owner_handoff,
         ),
         KernelTest::new("smp::idle_cpu_steals_one_task", idle_cpu_steals_one_task),
+        KernelTest::new(
+            "smp::zombie_reclaims_on_owner_idle",
+            zombie_reclaims_on_owner_idle,
+        ),
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
             user_tlb_full_flush_reaches_online_cpus,
@@ -2714,6 +2721,70 @@ fn idle_cpu_steals_one_task() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn record_local_zombie_task() {
+    let cpu = crate::smp::cpu_id();
+    let owner_ok = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(cpu))
+        .unwrap_or(false);
+    if cpu != 1 || !owner_ok {
+        LOCAL_ZOMBIE_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    LOCAL_ZOMBIE_CPU.store(cpu, Ordering::Release);
+    LOCAL_ZOMBIE_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// CPU0 runner 始终保持 current，不主动进入 idle 或调用跨 CPU take 接口；因此
+/// CPU1 任务的最后一个调度 Arc 只有在 CPU1 自己的 idle 循环回收后才会消失。
+fn zombie_reclaims_on_owner_idle() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("local-zombie test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    drop(crate::task::take_zombie_tasks(usize::MAX));
+    if crate::task::zombie_queue_count_fast() != 0 {
+        return Err("stale zombie remained before local reclaim test");
+    }
+    LOCAL_ZOMBIE_RUNS.store(0, Ordering::Release);
+    LOCAL_ZOMBIE_CPU.store(usize::MAX, Ordering::Release);
+    LOCAL_ZOMBIE_ERRORS.store(0, Ordering::Release);
+
+    let task = crate::task::spawn_ktest_task_on(1, record_local_zombie_task);
+    let weak = Arc::downgrade(&task);
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while task.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(1)
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("CPU1 zombie did not leave its current slot");
+        }
+        core::hint::spin_loop();
+    }
+    if LOCAL_ZOMBIE_RUNS.load(Ordering::Acquire) != 1
+        || LOCAL_ZOMBIE_CPU.load(Ordering::Acquire) != 1
+        || LOCAL_ZOMBIE_ERRORS.load(Ordering::Acquire) != 0
+    {
+        return Err("local-zombie subject observed an invalid owner");
+    }
+
+    drop(task);
+    let reclaim_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while weak.upgrade().is_some() {
+        if crate::hal::get_time() >= reclaim_deadline {
+            return Err("CPU1 did not reclaim its own zombie Arc");
+        }
+        core::hint::spin_loop();
+    }
+    if crate::task::zombie_queue_count_fast() != 0 {
+        return Err("local zombie queue retained the reclaimed task");
+    }
+    Ok(())
+}
+
 /// 直接调用生产 user-TLB 同步原语，验证独立 sequence、IPI handler 与 ack 闭环。
 ///
 /// 本用例尚未让用户任务迁移，也不伪装 stale-PTE 证明；它只验收 B22 已完成的
@@ -3007,7 +3078,6 @@ fn run_kstack_reclaim_wave() -> Result<(), &'static str> {
             .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
         || crate::task::processor::cpu_has_current(1)
         || crate::task::run_queue_count(1) != 0
-        || crate::task::zombie_queue_count_fast() < task_count
     {
         if crate::hal::get_time() >= deadline {
             return Err("AP kernel-stack reclaim wave did not quiesce");
@@ -3020,16 +3090,18 @@ fn run_kstack_reclaim_wave() -> Result<(), &'static str> {
 
     let weak_tasks: Vec<_> = tasks.iter().map(Arc::downgrade).collect();
     drop(tasks);
-    let zombies = crate::task::take_zombie_tasks(task_count);
-    if zombies.len() != task_count {
-        return Err("zombie queue did not transfer the complete reclaim wave");
+    // CPU1 已在自己的 idle 栈释放调度 Arc；等待最后一个测试 Arc 消失后，
+    // KernelStack::drop 才会把缓存溢出的映射登记到退休队列。
+    let reclaim_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while weak_tasks.iter().any(|task| task.upgrade().is_some()) {
+        if crate::hal::get_time() >= reclaim_deadline {
+            return Err("owner CPU did not drain the kernel-stack zombie wave");
+        }
+        core::hint::spin_loop();
     }
-    drop(zombies);
     if crate::hal::reclaim_retired_kernel_stacks(usize::MAX) == 0 {
         return Err("kernel-stack cache overflow did not queue a retirement");
-    }
-    if weak_tasks.iter().any(|task| task.upgrade().is_some()) {
-        return Err("reclaimed kernel task still has a strong TCB owner");
     }
     Ok(())
 }

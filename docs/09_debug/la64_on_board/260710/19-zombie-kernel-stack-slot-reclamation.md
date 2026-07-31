@@ -3,7 +3,7 @@ title: "2K1000LA zombie TCB 滞留与 1024 个内核栈 slot 耗尽复盘"
 category: debug
 status: resolved-with-known-limits
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-08-01
 tags: [postmortem, la64, 2k1000la, task, zombie, kernel-stack, resource-leak, ltp]
 code_paths:
   - "os/src/task/manager.rs"
@@ -27,6 +27,12 @@ evidence_records:
 ---
 
 # 2K1000LA zombie TCB 滞留与 1024 个内核栈 slot 耗尽复盘
+
+> **当前实现注记（2026-08-01）：** 本文为历史故障复盘，下文的全局
+> `zombie_queue` 代码和三队列模型对应当时的修复。SMP B50 已将这个强 Arc
+> 容器改为 Per-CPU `local_zombies`；按 pid 回收依次扫描全部 CPU 队列，
+> 仍遵循“锁内摘取、锁外析构”。这不改变本文对“PCB zombie 语义”与
+> “TCB/内核栈对象寿命”必须分层的根因结论。
 
 ## 0. 一句话结论
 

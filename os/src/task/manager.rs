@@ -1,7 +1,8 @@
 //! 任务调度队列、等待队列和内核定时器。
 //!
 //! runnable 任务由 `PerCpu` 内的 `RunQueue` 管理；本模块保留 interruptible、
-//! zombie 和 timer 等全局 registry。`WaitQueue` 为文件、futex、信号和计时器
+//! timer 等全局 registry。终态任务由退出 CPU 的 idle 回收队列持有；`WaitQueue`
+//! 为文件、futex、信号和计时器
 //! 路径提供条件等待；`KernelTimerQueue` 驱动超时唤醒与定时任务。
 //!
 //! # Locking
@@ -95,21 +96,19 @@ impl ActiveTracker {
 }
 
 #[cfg(feature = "oom_handler")]
-/// 全局等待与回收 registry。
+/// 全局等待与 OOM registry。
 pub struct TaskManager {
     /// 可中断睡眠任务队列。
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
-    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     /// 任务激活状态跟踪器，用于跟踪任务的激活状态，并在OOM时释放内存
     pub active_tracker: ActiveTracker,
 }
 
 #[cfg(not(feature = "oom_handler"))]
-/// 全局等待与回收 registry。
+/// 全局等待 registry。
 pub struct TaskManager {
     /// 可中断睡眠任务队列。
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
-    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
 fn task_ptr_eq(left: &Arc<TaskControlBlock>, right: &Arc<TaskControlBlock>) -> bool {
@@ -117,7 +116,6 @@ fn task_ptr_eq(left: &Arc<TaskControlBlock>, right: &Arc<TaskControlBlock>) -> b
 }
 
 static INTERRUPTIBLE_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
-static ZOMBIE_QUEUE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn add_interruptible_count() {
     INTERRUPTIBLE_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
@@ -145,45 +143,13 @@ pub(crate) fn interruptible_count_fast() -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
-fn add_zombie_queue_count() {
-    ZOMBIE_QUEUE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-}
-
-fn sub_zombie_queue_count(count: usize) {
-    if count != 0 {
-        let _ = ZOMBIE_QUEUE_COUNT.fetch_update(
-            AtomicOrdering::Relaxed,
-            AtomicOrdering::Relaxed,
-            |value| Some(value.saturating_sub(count)),
-        );
-    }
-}
-
-fn has_zombie_queue_tasks() -> bool {
-    ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Relaxed) != 0
-}
-
-/// 无锁判断显式 zombie 队列是否可能非空。
-pub fn has_zombie_queue_tasks_fast() -> bool {
-    has_zombie_queue_tasks()
-}
-
-/// 返回专用 zombie 回收队列的无锁近似长度。
-///
-/// 精确取出仍必须经过 `TASK_MANAGER` 锁；该值只用于调度诊断以及等待 idle
-/// 已完成 current→zombie 所有权交接，不能据此直接释放任何 TCB。
-pub(crate) fn zombie_queue_count_fast() -> usize {
-    ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Acquire)
-}
-
-/// 全局等待、回收与定时器 registry。
+/// 全局等待与定时器 registry。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
     /// 构造函数
     pub fn new() -> Self {
         Self {
             interruptible_queue: VecDeque::new(),
-            zombie_queue: VecDeque::new(),
             active_tracker: ActiveTracker::new(),
         }
     }
@@ -191,7 +157,6 @@ impl TaskManager {
     pub fn new() -> Self {
         Self {
             interruptible_queue: VecDeque::new(),
-            zombie_queue: VecDeque::new(),
         }
     }
     /// 从可中断队列中逐出一个僵尸任务（零堆分配）。
@@ -207,55 +172,18 @@ impl TaskManager {
         }
         None
     }
-    fn enqueue_zombie(&mut self, task: Arc<TaskControlBlock>) {
-        super::perf::record_zombie_enqueue();
-        self.zombie_queue.push_back(task);
-        add_zombie_queue_count();
-    }
-    fn take_one_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
-        let zombie = self.zombie_queue.pop_front();
+    /// 从全局等待 registry 摘取一个属于指定 pid 的 zombie TCB。
+    /// 返回的 Arc 在 `TASK_MANAGER` 锁外收集和析构。
+    fn take_interruptible_zombie_by_pid(&mut self, pid: usize) -> Option<Arc<TaskControlBlock>> {
+        let index = self
+            .interruptible_queue
+            .iter()
+            .position(|task| task.is_zombie() && task.process.pid == pid)?;
+        let zombie = self.interruptible_queue.remove(index);
         if zombie.is_some() {
-            sub_zombie_queue_count(1);
+            sub_interruptible_count(1);
         }
         zombie
-    }
-    fn take_zombies(&mut self, limit: usize) -> Vec<Arc<TaskControlBlock>> {
-        let mut zombies = Vec::with_capacity(limit.min(self.zombie_queue.len()));
-        while zombies.len() < limit {
-            let Some(task) = self.zombie_queue.pop_front() else {
-                break;
-            };
-            zombies.push(task);
-        }
-        sub_zombie_queue_count(zombies.len());
-        zombies
-    }
-    /// 从全局等待/回收 registry 移除属于指定 pid 的所有 zombie TCB。
-    /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
-    fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
-        let mut zombies = alloc::vec::Vec::new();
-        let old_interruptible_len = self.interruptible_queue.len();
-        self.interruptible_queue.retain(|task| {
-            let is_match = task.is_zombie() && task.process.pid == pid;
-            if is_match {
-                zombies.push(task.clone());
-                false
-            } else {
-                true
-            }
-        });
-        sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
-        let old_zombie_len = self.zombie_queue.len();
-        self.zombie_queue.retain(|task| {
-            if task.process.pid == pid {
-                zombies.push(task.clone());
-                false
-            } else {
-                true
-            }
-        });
-        sub_zombie_queue_count(old_zombie_len - self.zombie_queue.len());
-        zombies
     }
 
     /// 添加一个任务到可中断队列。
@@ -605,7 +533,9 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
             TaskStatus::Zombie => {
                 // 终态任务不会再次 yield，不能把一次性请求带入回收路径。
                 let _ = task.take_migration_target();
-                TASK_MANAGER.lock().enqueue_zombie(task);
+                // 当前代码已运行在退出 CPU 的 idle 栈；把最后一个调度 owner
+                // 交给本 CPU 回收队列，不再跨核竞争全局 TaskManager。
+                super::processor::enqueue_zombie(cpu, task);
                 return;
             }
             actual => task.fail_sched_invariant(
@@ -641,31 +571,27 @@ pub(crate) fn rekey_active_tid(old_tid: usize, new_tid: usize) {
     let _ = (old_tid, new_tid);
 }
 
-/// 从显式 zombie 队列取出一个任务。
-pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
-    if !has_zombie_queue_tasks() {
-        return None;
-    }
-    TASK_MANAGER.lock().take_one_zombie()
-}
-
-/// 从显式 zombie 队列批量取出任务。
-pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
-    if limit == 0 || !has_zombie_queue_tasks() {
-        return Vec::new();
-    }
-    TASK_MANAGER.lock().take_zombies(limit)
-}
-
 /// 从可中断队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
 pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_one_interruptible_zombie()
 }
 
-/// 从 interruptible 和专用 zombie registry 移除指定 pid 的所有 zombie TCB，
-/// 在锁外 drop，避免 TCB::drop() 在持有 TASK_MANAGER 锁时执行析构链。
+/// 从 interruptible registry 和全部 Per-CPU 回收队列移除指定 pid 的 zombie TCB，
+/// 在锁外 drop，避免 TCB::drop() 在持有任何容器锁时执行析构链。
 pub fn remove_zombie_tasks_by_pid(pid: usize) {
-    let zombies = TASK_MANAGER.lock().remove_zombie_tasks_by_pid(pid);
+    let mut zombies = Vec::new();
+    // interruptible registry 与 CPU-local 回收队列是两类互斥的终态
+    // owner：zombie TCB 不会从前者搬到后者。因此可以分两阶段
+    // 扫描，无需为了一个不存在的搬运窗口同时持有两类锁。
+    loop {
+        let Some(zombie) = TASK_MANAGER.lock().take_interruptible_zombie_by_pid(pid) else {
+            break;
+        };
+        zombies.push(zombie);
+    }
+    // 不嵌套持有 TASK_MANAGER 与任一 CPU-local zombie 锁；收集到的 Arc
+    // 及 Vec 扩容都在所有容器锁释放后发生。
+    zombies.extend(super::processor::remove_zombie_tasks_by_pid(pid));
     drop(zombies);
 }
 
@@ -989,7 +915,7 @@ pub fn has_ready_task() -> bool {
     super::run_queue::total_count_fast() != 0
 }
 
-/// 返回 ready/interruptible 队列中的 zombie 任务数量。
+/// 返回 interruptible、runqueue 与 Per-CPU 回收队列中的 zombie 任务数量。
 pub fn zombie_count() -> u16 {
     let manager = TASK_MANAGER.lock();
     let mut count = manager.interruptible_zombie_count();
@@ -997,7 +923,9 @@ pub fn zombie_count() -> u16 {
     for cpu in 0..crate::smp::configured_cpu_count() {
         count = count.saturating_add(super::run_queue::stats(cpu).1 as u16);
     }
-    count
+    count.saturating_add(
+        super::processor::zombie_queue_count_fast().min(u16::MAX as usize) as u16,
+    )
 }
 
 /// 向除 initproc 以外的所有 interruptible 任务投递信号。

@@ -1,9 +1,10 @@
 //! Per-CPU runnable 队列及其唯一所有权操作。
 //!
 //! 本模块管理 `Queued(cpu)` 容器及 queued 任务的跨队列搬迁；
-//! interruptible/zombie/timer registry 仍由 `TaskManager` 管理。搬迁通过短暂的
-//! `Migrating` 交还唯一所有权，所有入口至多锁定一个 runqueue，且锁内不获取
-//! `task.inner`。每个入队入口还必须验证目标属于任务的 `cpus_allowed`。
+//! interruptible/timer registry 仍由 `TaskManager` 管理，退出任务则交给 owner CPU
+//! 的本地 zombie 队列。搬迁通过短暂的 `Migrating` 交还唯一所有权，所有入口至多
+//! 锁定一个 runqueue，且锁内不获取 `task.inner`。每个入队入口还必须验证目标属于
+//! 任务的 `cpus_allowed`。
 
 use super::{TaskControlBlock, TaskStatus};
 use alloc::{collections::VecDeque, sync::Arc};

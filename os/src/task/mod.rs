@@ -47,15 +47,14 @@ pub(crate) use manager::{
     publish_task_on, request_sibling_exit, set_remote_affinity, try_publish_task,
     try_publish_task_on,
 };
-pub(crate) use manager::zombie_queue_count_fast;
+pub(crate) use processor::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
-    has_zombie_queue_tasks_fast, kernel_timer_queue_len, procs_count, publish_task,
-    remove_zombie_tasks_by_pid, run_deferred_timer_work, run_task_safe_point,
+    kernel_timer_queue_len, procs_count, publish_task, remove_zombie_tasks_by_pid,
+    run_deferred_timer_work, run_task_safe_point,
     send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
-    take_zombie_tasks, task_manager_counts, timer_interrupt_handler, timer_cpu_init,
-    update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue,
-    WaitResult,
+    task_manager_counts, timer_interrupt_handler, timer_cpu_init, update_ready_nice,
+    wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 use manager::{fetch_task, finish_switch_out};
 // pub use pid::RecycleAllocator;
@@ -75,8 +74,8 @@ pub use process_manager::ProcessManager;
 pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
     current_sgid, current_sid, current_suid, current_syscall_name, current_task, current_tid,
-    current_uid, current_user_token, run_tasks, schedule, set_current_syscall_id,
-    try_current_user_token,
+    current_uid, current_user_token, has_zombie_queue_tasks_fast, run_tasks, schedule,
+    set_current_syscall_id, take_zombie_tasks, try_current_user_token,
 };
 pub(crate) use processor::{current_trap_task, try_current_task};
 pub use registry::{
