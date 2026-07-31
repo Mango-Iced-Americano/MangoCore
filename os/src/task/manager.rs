@@ -19,6 +19,7 @@ use crate::config::SYSTEM_TASK_LIMIT;
 use alloc::vec::Vec;
 
 use crate::hal::{local_irq_restore, local_irq_save};
+use crate::syscall::errno::EAGAIN;
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
@@ -483,12 +484,22 @@ lazy_static! {
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
-/// 首次发布一个新任务到指定 CPU。
+/// 尝试把一个新任务发布到指定 CPU。
 ///
 /// 内核栈映射必须在 runqueue 可见之前同步到目标 CPU；
-/// 远程 doorbell 则必须在 runqueue 锁释放后发送。
-pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
+/// 线程组成员登记与 `New -> Queued(cpu)` 在同一个 group-exit 门禁内提交，
+/// 远程 doorbell 则必须在门禁和 runqueue 锁都释放后发送。
+pub(crate) fn try_publish_task_on(
+    task: Arc<TaskControlBlock>,
+    cpu: usize,
+) -> Result<(), isize> {
     assert!(cpu < crate::smp::configured_cpu_count());
+    let process = task.process.clone();
+    // 这是避免无意义远端内核栈同步的快速拒绝；真正关闭 late-clone 竞争窗口
+    // 的仍是下面 publish_thread() 在成员锁内执行的最终检查。
+    if process.is_group_exiting() {
+        return Err(EAGAIN);
+    }
     if cpu != crate::smp::BOOT_CPU_ID {
         assert!(
             crate::smp::schedulers_released(),
@@ -507,31 +518,56 @@ pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
             panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
         });
     }
-    super::run_queue::publish(task, cpu);
+    let published = process.publish_thread(&task, || {
+        super::run_queue::publish(task.clone(), cpu)
+    });
+    if !published {
+        return Err(EAGAIN);
+    }
     if cpu != crate::smp::cpu_id() {
         crate::smp::request_reschedule(cpu).unwrap_or_else(|error| {
             panic!("failed to wake CPU {} after remote enqueue: {}", cpu, error)
         });
     }
+    Ok(())
 }
 
-/// 按任务 affinity 和当前负载发布普通新任务。
+/// 启动和 ktest 使用的不可失败发布入口。
+pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
+    try_publish_task_on(task, cpu).unwrap_or_else(|errno| {
+        panic!(
+            "unexpected group-exit gate while publishing bootstrap task: errno={}",
+            errno
+        )
+    });
+}
+
+/// 按任务 affinity 和当前负载尝试发布普通新任务。
 ///
 /// clone/fork 已继承父线程 mask，不能再无条件投递 CPU0。调用 CPU 仅作为
 /// locality 提示；若它不在 mask 中或明显过载，选择器会返回其它合法 CPU。
-pub fn publish_task(task: Arc<TaskControlBlock>) {
+pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize> {
     // 启动期的 init/ktest runner 在 CPU0 首次进入 run_tasks() 前发布，此时
     // 本 CPU 还没有 current，scheduler-entered mask 也尚未包含 bit0。
     // 这条一次性 bootstrap 路径保持显式 CPU0；普通 clone 均有 current。
     if super::processor::current_task().is_none() {
-        publish_task_on(task, crate::smp::BOOT_CPU_ID);
-        return;
+        return try_publish_task_on(task, crate::smp::BOOT_CPU_ID);
     }
     let target = super::run_queue::select_runnable_cpu(
         task.cpus_allowed(),
         Some(crate::smp::cpu_id()),
     );
-    publish_task_on(task, target)
+    try_publish_task_on(task, target)
+}
+
+/// 启动和内核内部任务使用的不可失败 affinity-aware 发布入口。
+pub fn publish_task(task: Arc<TaskControlBlock>) {
+    try_publish_task(task).unwrap_or_else(|errno| {
+        panic!(
+            "unexpected group-exit gate while publishing kernel task: errno={}",
+            errno
+        )
+    });
 }
 
 /// 在 CPU 已切回 idle 栈后完成上一任务的状态和容器交接。
@@ -725,7 +761,14 @@ pub fn do_oom() {}
 /// `Running(cpu) -> Blocking(cpu)` 与加入 interruptible registry 在同一个
 /// `TASK_MANAGER` 临界区完成；真正的 `Blocked` 由 idle 侧在切栈后提交。
 pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.lock().begin_interruptible_sleep(task);
+    TASK_MANAGER
+        .lock()
+        .begin_interruptible_sleep(task.clone());
+    // group exit 可能恰好在停止方看到 Running 之后、这里登记 Blocking 之前
+    // 发布。登记完成后复查原子门禁，保证这类任务不会带着 SIGKILL 永久睡下。
+    if task.process.is_group_exiting() {
+        let _ = wake_interruptible(task);
+    }
 }
 
 /// 唤醒 interruptible 任务并加入 ready 队列。
@@ -746,6 +789,60 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) -> bool {
         }
         Err(WaitQueueError::AlreadyWaken) => false,
     }
+}
+
+/// 让已进入 group exit 的 sibling 尽快到达自己的退出安全点。
+///
+/// 这里结合 Linux `zap_other_threads` 的通知语义与 DragonOS 的 owner 自清理原则：
+/// 只投递不可屏蔽的 SIGKILL、唤醒睡眠者并 kick 运行 CPU；线程级资源必须由
+/// 目标线程自己释放。
+/// group-exit 门禁保证 live 成员不会处于 `New`，因此不会遗漏“已登记但未入队”
+/// 的 clone。
+pub(crate) fn wake_group_exit_threads(tasks: &[Arc<TaskControlBlock>], current_tid: usize) {
+    let mut targets = 0usize;
+    for task in tasks {
+        if task.gettid() == current_tid || task.is_zombie() {
+            continue;
+        }
+
+        {
+            let mut inner = task.acquire_inner_lock();
+            if !task.is_zombie() {
+                inner.add_signal(Signals::SIGKILL);
+            }
+        }
+
+        match task.task_status() {
+            TaskStatus::Blocking(cpu) => {
+                targets |= 1usize << cpu;
+                let _ = wake_interruptible(task.clone());
+            }
+            TaskStatus::Blocked => {
+                let _ = wake_interruptible(task.clone());
+            }
+            TaskStatus::Queued(cpu) | TaskStatus::Running(cpu) => {
+                targets |= 1usize << cpu;
+            }
+            // queued affinity 搬迁者会自行通知最终目标；广播确保源/目标任一
+            // 正在运行调度循环时都能及时重新检查 group-exit 状态。
+            TaskStatus::Migrating => targets |= crate::smp::online_cpu_mask(),
+            TaskStatus::Zombie => {}
+            TaskStatus::New => panic!(
+                "live group-exit target was never published: tid={}",
+                task.gettid()
+            ),
+        }
+
+        // wake 可能把 Blocked 发布到与 last_cpu 不同的目标，再读一次权威 owner。
+        match task.task_status() {
+            TaskStatus::Queued(cpu) | TaskStatus::Running(cpu) | TaskStatus::Blocking(cpu) => {
+                targets |= 1usize << cpu;
+            }
+            TaskStatus::Migrating => targets |= crate::smp::online_cpu_mask(),
+            _ => {}
+        }
+    }
+    notify_wake_targets(targets);
 }
 
 /// 修改仍由 interruptible registry 持有的 Blocked 任务 affinity。
@@ -2370,6 +2467,12 @@ pub fn run_deferred_timer_work() -> bool {
 /// IRQ-off，因而消费后到真正切换前不会有本地 handler 插入并丢失新请求。
 pub fn run_task_safe_point() {
     let irq_was_enabled = crate::hal::local_irq_save();
+    let group_exit_code = current_task().and_then(|task| task.process.group_exit_code());
+    if let Some(exit_code) = group_exit_code {
+        // exit 入口统一负责建立可响应 IPI 的清理窗口；安全点不再复制一套
+        // “入口 IRQ 是否开启”的分支。
+        super::exit_current_and_run_next(exit_code);
+    }
     let timer_resched = run_deferred_timer_work();
     let ipi_resched = crate::smp::take_reschedule_request();
     if timer_resched || ipi_resched {

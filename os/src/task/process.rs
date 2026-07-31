@@ -7,8 +7,9 @@
 //! # Locking
 //!
 //! `ProcessControlBlock::inner` 保护进程结构性状态，`signal` 单独保护进程共享
-//! pending signal 和 group-exit 状态。涉及调度队列、父子关系和资源析构时，
-//! 遵循“锁内移动 Arc/记录状态，锁外执行唤醒或析构”的顺序。
+//! pending signal，`thread_group` 则把线程成员关系与 group-exit 发布门禁放在
+//! 同一锁域。涉及调度队列、父子关系和资源析构时，遵循“锁内移动 Arc/记录状态，
+//! 锁外执行唤醒或析构”的顺序。
 
 use super::{
     pid::{RecycleAllocator, TidHandle},
@@ -55,8 +56,14 @@ pub struct ProcessControlBlock {
     /// wait_child / auto-reap / orphan-zombie-reap 时调用 release_process_quota_once()
     /// 立即释放；PCB Drop 作为兜底。
     process_quota: Mutex<Option<TaskQuotaGuard>>,
-    /// 属于该进程的线程列表。
-    pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
+    /// 线程成员关系与首次发布门禁。
+    thread_group: Mutex<ThreadGroupState>,
+    /// 统一 group-exit 退出码的无锁快照。
+    ///
+    /// 0 表示尚未退出，其余值为 `exit_code + 1`。编码到 u64 后，u32 的全部
+    /// 退出码都可表示；任务安全点只需一次 Acquire load，不必在每次 syscall
+    /// 返回时争用线程组锁。
+    group_exit_code: AtomicU64,
     /// 当前被计入存活线程数的线程数量。
     live_threads: AtomicUsize,
     /// 保留 trap context 页映射、可被复用的用户资源槽位。
@@ -150,10 +157,15 @@ pub struct ProcessInner {
 pub struct ProcessSignalState {
     /// kill(pid) / killpg() 这类进程级投递产生的共享 pending signal。
     pub shared_pending: SignalQueue,
-    /// exit_group() 设置的线程组退出码。
-    pub group_exit_code: Option<u32>,
-    /// 线程组是否已经进入 group exit。
-    pub group_exiting: bool,
+}
+
+/// 由 `process.thread_group` 保护的线程成员表。
+///
+/// 首次发布的最终检查和 group-exit 提交都在持有这把锁时读取/写入
+/// `group_exit_code`。因此退出方要么先关闭发布门禁，要么一定能在成员快照中
+/// 看到已经进入 runqueue 的线程；普通安全点只读取原子快照，不取得本锁。
+struct ThreadGroupState {
+    members: Vec<Weak<TaskControlBlock>>,
 }
 
 type InodeBusyKey = (usize, vfs::InodeId);
@@ -297,7 +309,10 @@ impl ProcessControlBlock {
             leader_tid,
             _pid_handle: pid_handle,
             process_quota: Mutex::new(Some(process_quota)),
-            threads: Mutex::new(Vec::new()),
+            thread_group: Mutex::new(ThreadGroupState {
+                members: Vec::new(),
+            }),
+            group_exit_code: AtomicU64::new(0),
             live_threads: AtomicUsize::new(0),
             trap_context_cache: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
@@ -346,8 +361,6 @@ impl ProcessControlBlock {
             }),
             signal: Mutex::new(ProcessSignalState {
                 shared_pending: SignalQueue::empty(),
-                group_exit_code: None,
-                group_exiting: false,
             }),
             shared_pending_hint: AtomicU64::new(0),
         };
@@ -565,54 +578,71 @@ impl ProcessControlBlock {
         inner.sched_period = period;
     }
 
-    /// 把线程加入本进程线程列表，并计入 live-thread 计数。
-    pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {
-        self.threads.lock().push(Arc::downgrade(task));
-        if !task.thread_live_counted.swap(true, Ordering::Relaxed) {
-            self.live_threads.fetch_add(1, Ordering::Relaxed);
+    /// 在线程组门禁内提交“成员登记 + 首次调度发布”。
+    ///
+    /// `publish` 只能取得一个 runqueue 的短锁并完成 `New -> Queued(cpu)`，不得
+    /// 等待 IPI/TLB ack。这样 group exit 要么先关闭门禁并拒绝本线程，要么在
+    /// 本线程已经进入成员表和 runqueue 后取得锁并把它纳入停止快照。
+    pub(crate) fn publish_thread(
+        &self,
+        task: &Arc<TaskControlBlock>,
+        publish: impl FnOnce(),
+    ) -> bool {
+        let mut group = self.thread_group.lock();
+        if self.group_exit_code.load(Ordering::Acquire) != 0 {
+            return false;
         }
+        assert!(
+            !task.thread_live_counted.load(Ordering::Acquire),
+            "thread published twice: tid={}",
+            task.gettid()
+        );
+        group.members.push(Arc::downgrade(task));
+        task.thread_live_counted.store(true, Ordering::Release);
+        self.live_threads.fetch_add(1, Ordering::Relaxed);
+        publish();
+        true
     }
 
-    /// 将线程从 live-thread 计数中移除。
+    /// 在线程完成全部线程级清理后发布退出 ack。
     ///
     /// # Semantics
     ///
-    /// 返回值表示本次调用是否实际递减了 live-thread 计数。线程弱引用表会在稀疏时压缩。
-    pub fn remove_thread(&self, task: &TaskControlBlock) -> bool {
-        let removed = if task.thread_live_counted.swap(false, Ordering::Relaxed) {
-            self.live_threads.fetch_sub(1, Ordering::Relaxed);
-            true
-        } else {
-            false
-        };
-        if removed {
-            self.compact_threads_if_sparse();
+    /// 返回 `Some(remaining)` 表示本次调用消费了该线程唯一的 live token；
+    /// `remaining == 0` 的线程独占进程级退出收尾。AcqRel RMW 组成退出链，
+    /// 保证最后一个线程开始释放共享 PCB/MM 前能观察到所有 sibling 的清理。
+    pub fn remove_thread(&self, task: &TaskControlBlock) -> Option<usize> {
+        if !task.thread_live_counted.swap(false, Ordering::AcqRel) {
+            return None;
         }
-        removed
+        let previous = self.live_threads.fetch_sub(1, Ordering::AcqRel);
+        assert_ne!(previous, 0, "live-thread count underflow");
+        self.compact_threads_if_sparse();
+        Some(previous - 1)
     }
 
     fn compact_threads_if_sparse(&self) {
         let live = self.live_thread_count();
-        let mut threads = self.threads.lock();
+        let mut group = self.thread_group.lock();
         let compact_threshold = live.saturating_mul(4).saturating_add(128);
-        if threads.len() <= compact_threshold {
+        if group.members.len() <= compact_threshold {
             return;
         }
-        threads.retain(|thread| {
+        group.members.retain(|thread| {
             thread
                 .upgrade()
-                .map(|task| task.thread_live_counted.load(Ordering::Relaxed))
+                .map(|task| task.thread_live_counted.load(Ordering::Acquire))
                 .unwrap_or(false)
         });
     }
 
     /// 返回当前仍计为 live 的线程列表，并清理失效弱引用。
     pub fn threads(&self) -> Vec<Arc<TaskControlBlock>> {
-        let mut threads = self.threads.lock();
+        let mut group = self.thread_group.lock();
         let mut live_threads = Vec::new();
-        threads.retain(|thread| {
+        group.members.retain(|thread| {
             if let Some(task) = thread.upgrade() {
-                if task.thread_live_counted.load(Ordering::Relaxed) {
+                if task.thread_live_counted.load(Ordering::Acquire) {
                     live_threads.push(task);
                     true
                 } else {
@@ -632,16 +662,31 @@ impl ProcessControlBlock {
 
     /// 返回 live-thread 计数。
     pub fn live_thread_count(&self) -> usize {
-        self.live_threads.load(Ordering::Relaxed)
+        self.live_threads.load(Ordering::Acquire)
+    }
+
+    /// 返回成员弱引用槽位数和当前可升级槽位数，仅供内核统计。
+    pub fn thread_slot_stats(&self) -> (usize, usize) {
+        let group = self.thread_group.lock();
+        (
+            group.members.len(),
+            group
+                .members
+                .iter()
+                .filter(|thread| thread.upgrade().is_some())
+                .count(),
+        )
     }
 
     /// 尝试缓存一个 trap context 槽位以便线程复用。
     ///
     /// # Semantics
     ///
-    /// group exit 或无线程存活时拒绝缓存，避免已退出进程继续保留用户资源页。
+    /// group exit 或当前线程已经是最后一个 live 成员时拒绝缓存，避免即将
+    /// 完成进程级退出的地址空间继续保留用户资源页。
     pub fn try_cache_trap_context_slot(&self, slot: usize) -> bool {
-        if self.is_group_exiting() || self.live_thread_count() == 0 {
+        // exit ack 现在位于线程资源清理末尾，调用本函数时当前线程仍计入 live。
+        if self.is_group_exiting() || self.live_thread_count() <= 1 {
             super::perf::record_trap_cache_store(false);
             return false;
         }
@@ -933,21 +978,50 @@ impl ProcessControlBlock {
         pending
     }
 
-    /// 请求线程组退出。
-    pub fn request_group_exit(&self, exit_code: u32) {
-        let mut state = self.signal.lock();
-        state.group_exiting = true;
-        state.group_exit_code = Some(exit_code);
+    /// 原子关闭新线程发布门禁，并取得需要停止的 live-thread 快照。
+    ///
+    /// 第一个调用者决定统一退出码；后续并发 fatal signal/exit_group 复用它。
+    pub fn begin_group_exit(&self, exit_code: u32) -> (u32, Vec<Arc<TaskControlBlock>>) {
+        let mut group = self.thread_group.lock();
+        let encoded = self.group_exit_code.load(Ordering::Relaxed);
+        let exit_code = if encoded == 0 {
+            // 在成员锁内先 Release 发布门禁，再形成 live 成员快照。发布方取得
+            // 同一把锁后一定会观察到非零值，不能落到本次快照之后。
+            self.group_exit_code
+                .store(u64::from(exit_code) + 1, Ordering::Release);
+            exit_code
+        } else {
+            (encoded - 1) as u32
+        };
+        let mut live_threads = Vec::new();
+        group.members.retain(|thread| {
+            if let Some(task) = thread.upgrade() {
+                if task.thread_live_counted.load(Ordering::Acquire) {
+                    live_threads.push(task);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        });
+        (exit_code, live_threads)
     }
 
     /// 返回线程组是否正在退出。
     pub fn is_group_exiting(&self) -> bool {
-        self.signal.lock().group_exiting
+        self.group_exit_code.load(Ordering::Acquire) != 0
     }
 
     /// 返回线程组退出码。
     pub fn group_exit_code(&self) -> Option<u32> {
-        self.signal.lock().group_exit_code
+        let encoded = self.group_exit_code.load(Ordering::Acquire);
+        if encoded == 0 {
+            None
+        } else {
+            Some((encoded - 1) as u32)
+        }
     }
 
     /// 添加 waitable 子进程。

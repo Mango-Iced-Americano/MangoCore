@@ -42,6 +42,9 @@ per-CPU pending，真正的 tick 推进和是否切换延后到 trap-return/sche
 全局 kernel timer/timeout/timerfd/net poll 继续由 CPU0 独占。B33 已让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
 yield/block/exit 仍直接进入切换边界。
+B40 在同一安全点增加永久 group-exit 检查：只读取进程级原子退出码，命中后由
+当前 owner 在本 CPU 清理并发布 live-token ack；请求 CPU 不再摘除或销毁远端
+Running TCB。首次 clone 发布也与线程成员登记共用 group-exit 门禁。
 
 ## 2. TaskManager 与 Per-CPU RunQueue
 
@@ -138,14 +141,17 @@ CPU 合法且负载不超过最小值 `+1` 时保留 locality，否则选择
 用户探针不再各自复制远程入队协议。顺序固定为：
 
 1. 验证目标 CPU 已 configured、online，AP 还必须越过 scheduler-ready；
-2. 若目标是远端 CPU，先完成动态内核栈映射的 TLB 同步；
-3. `run_queue::publish()` 先确认目标位于 `cpus_allowed`，再提交
-   `New -> Queued(cpu)` 并加入唯一目标队列；
-4. 该函数返回时 runqueue 锁已经释放，随后才发送 `RESCHEDULE` doorbell。
+2. 快速检查进程没有进入 group exit；若目标是远端 CPU，再完成动态内核栈映射
+   的 TLB 同步；
+3. 取得 `process.thread_group` 锁并再次检查退出码，在同一门禁内登记成员、
+   live token，并只取一个目标 runqueue 提交 `New -> Queued(cpu)`；
+4. 释放 thread-group/runqueue 锁后，才发送 `RESCHEDULE` doorbell。
 
 `publish_task_on()` 本身仍是精确目标提交原语，不做负载选择；普通
 `publish_task()` 已在 B37 按 affinity/locality/近似负载选择目标，然后调用该原语。
 普通任务的默认 mask 仍是 bit0，因此“放置器已通用化”不等于“默认用户任务已全核化”。
+普通 clone 使用可失败的 `try_publish_task_on()`：最终门禁已关闭时返回 `EAGAIN`，
+并由 syscall 层清理尚未发布的用户资源；启动/ktest wrapper 仍把拒绝视为不变量错误。
 
 ### 3.2 显式 yield 后迁移
 
@@ -248,6 +254,25 @@ B38 对远程 Running 任务分两种情况：
 `remote_affinity_request -> 单个 RunQueue` 嵌套，以关闭“请求槽复核”与“owner 提交”
 之间的窗口。不存在 RunQueue 反向取请求槽的路径；该锁也不跨 IPI、
 TLB ack、context switch 或请求方等待点。
+
+### 3.4 跨 CPU group exit
+
+B40 沿用已有六态调度状态，不增加 `Exiting/WakePending` 等第二状态机：
+
+1. 第一个退出者在线程组锁内固定退出码、关闭 clone 发布门禁并取得 live 成员快照；
+2. sibling 获得私有 `SIGKILL`；Blocking/Blocked 复用 interruptible wake，
+   Queued/Running owner 只收到 RESCHEDULE；
+3. 每个 owner 在自己的任务安全点执行线程级清理，最后递减 live token；
+4. 最后一个 ack 执行进程级 `finish_exit()`，其他 CPU 不会远程释放其内核栈或 MM 资源。
+
+`sleep_interruptible()` 在 `TASK_MANAGER` 内提交 `Running -> Blocking` 后，释放锁并复查
+原子 group-exit 码。若停止方恰好先看到 Running、任务随后才登记 Blocking，这次复查会
+撤销睡眠；若退出发布更晚，停止方会看到 Blocking/Blocked 并执行 wake。两种次序至少
+有一方负责唤醒，且没有把 thread-group 锁与 `TASK_MANAGER` 嵌套。
+
+永久 group exit 不由发起者同步等待 completion：每个线程的 live token 就是 ack，
+最后一个 ack 自然拥有 PCB/MM 收尾权。多线程 exec 需要“停止后继续当前进程”，不能直接
+复用永久退出码；该临时 stop/completion 属于 B41。
 
 ## 4. Processor
 
@@ -393,7 +418,7 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 ```text
 exit_current_and_run_next()
-  ├── do_exit()
+  ├── finish_current_exit()
   ├── TaskStatus = Zombie（Processor.current 仍持有 Arc）
   ├── schedule(idle)
   └── idle: finish_switch_out() -> zombie queue

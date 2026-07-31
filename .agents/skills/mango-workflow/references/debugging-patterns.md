@@ -674,3 +674,26 @@
   并用断言固定 Rust 到汇编交接点的 IRQ-off 前置条件。
 - **相关文件**: `os/src/mm/address_space.rs`, `os/src/hal/arch/*/trap/`,
   `os/src/hal/arch/*/{sv39,tlb}.rs`
+
+## 跨 CPU 线程组终止：停止请求、owner 自清理与最后 ack
+
+- **危险做法**: 发起 `exit_group` 的 CPU 从远端 runqueue/current 槽移除 sibling 后，直接替它
+  释放用户映射、内核栈或最后一个 TCB 引用。远端 CPU 可能仍在这些资源上执行，形成确定性的
+  use-after-free；“已经发出 reschedule IPI”不等于目标已经离开资源。
+- **永久退出协议**: 线程组成员表和“是否允许发布新线程”的 gate 必须由同一把锁保护。
+  第一个退出者在该锁内发布最终退出码并快照成员；锁外再给 sibling 排队不可忽略的终止信号，
+  唤醒 Blocked 线程并向 Running/Queued owner 发送 reschedule。目标线程只在自己的安全点进入
+  本地退出路径，发起者不远程执行资源清理。
+- **阻塞交界竞态**: 仅按一次 `Running/Blocked` 快照发送 wake 会漏掉
+  `看到 Running -> 目标登记 Blocking -> 目标真正睡眠`。阻塞侧必须在完成 wait registry 和
+  `Running -> Blocking` 登记、释放 manager 锁后，重新读取永久退出状态；命中时把自己重新
+  唤醒。这样停止请求无论在线性化点前后发生，都有一侧负责推进。
+- **ack 的含义**: live-thread 计数不能在线程刚被标记退出时递减。它必须位于
+  `clear_child_tid/futex -> 用户资源与 PTE 清理 -> TLB shootdown` 之后，以 release 语义发布；
+  观察到最后一个 ack 的线程才有权收尾进程共享资源。否则“计数为零”只证明收到请求，不证明
+  远端已经停止使用 MM/PCB。
+- **边界**: 永久 `exit_group` 不必同步等待所有 sibling，因为调用者自身也必须退出；多线程
+  `exec` 是“暂时停住其他线程、调用者继续运行”，需要独立 completion/stop 协议，不能把永久
+  退出 gate 原样复用。任何路径都不得跨 IPI/TLB ack、context switch 或其他等待点持普通锁。
+- **相关文件**: `os/src/task/process.rs`, `os/src/task/manager.rs`,
+  `os/src/task/task.rs`, `os/src/task/mod.rs`

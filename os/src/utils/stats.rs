@@ -135,10 +135,9 @@ fn proc_object_stats() -> (
         if z {
             zpcb_refs += pr;
         }
-        let threads = pcb.threads.lock();
-        tcb_slots += threads.len();
-        tcb_live += threads.iter().filter(|t| t.upgrade().is_some()).count();
-        drop(threads);
+        let (slots, live) = pcb.thread_slot_stats();
+        tcb_slots += slots;
+        tcb_live += live;
         let vm = pcb.vm();
         let vr = alloc::sync::Arc::strong_count(&vm).saturating_sub(1);
         as_refs += vr;

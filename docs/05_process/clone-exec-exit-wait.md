@@ -3,7 +3,7 @@ title: "clone、exec、exit、wait 生命周期总路径"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-07-31
 tags: [process, lifecycle, clone, exec, wait]
 ---
 
@@ -82,11 +82,17 @@ if let Err(errno) = ProcessManager::publish_clone_child(&parent, child.clone(), 
     child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
     return errno;
 }
-ProcessManager::schedule_clone_child(&parent, child, flags);
+if let Err(errno) = ProcessManager::schedule_clone_child(&parent, child.clone(), flags) {
+    child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+    return errno;
+}
 new_tid as isize
 ```
 
 在 `publish_clone_child()` 成功前，失败路径仍可清理 pidfd 和共享 VM 中的 user resource；成功后 child 已经进入父进程 children 或作为线程共享同一 PCB。
+对于 `CLONE_THREAD`，最后的 scheduler 发布还必须取得进程 `thread_group` 门禁：
+成员登记与 `New -> Queued(cpu)` 同时提交；若并发 group exit 已关闭门禁，则返回
+`EAGAIN` 并走上述 unpublished cleanup。
 
 ## 4. fork 与线程 clone 差异
 
@@ -163,9 +169,10 @@ task.process.complete_vfork();
 sys_exit(code)
   └── exit_current_and_run_next(encoded)
         ├── current_task()（Processor.current 保留 owner）
-        ├── do_exit(task, encoded)
+        ├── finish_current_exit(task, encoded)
+        │     ├── 统一建立可响应 IPI 的 IRQ-on 清理窗口
         │     ├── task.exit_thread_resources()
-        │     └── if live_thread_count == 0:
+        │     └── if 本线程消费最后一个 live token:
         │           ├── release fcntl locks
         │           ├── shm_detach_process()
         │           └── process.finish_exit()
@@ -174,21 +181,13 @@ sys_exit(code)
         └── idle: finish_switch_out() -> zombie queue
 ```
 
-`exit_group()` 先把同进程其他线程全部做线程级退出，再处理当前线程和进程级退出。
+`exit_group()` 不再由当前 CPU 清理 sibling。第一个调用者关闭 clone 门禁、固定退出码，
+再投递 SIGKILL/wake/RESCHEDULE；每个 sibling 在自己的安全点清理，最后递减 live token。
+观察到 1→0 的线程独占进程级退出。完整协议见
+[exit、exit_group、wait4 与 waitid](exit-wait.md#6-exit_group_and_run_next)。
 
-最后线程判断和进程级退出触发点在 `do_exit()`：
-
-```rust
-fn do_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
-    if task.exit_thread_resources(exit_code) {
-        if task.process.live_thread_count() == 0 {
-            crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
-            crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(task.as_ref(), exit_code);
-        }
-    }
-}
-```
+当前多线程 exec 仍使用旧的 sibling 摘队/清理路径，尚未复用 B40 的 owner stop/ack；
+在普通任务默认全核前必须由 B41 单独改为临时 stop + completion。
 
 因此普通线程退出不会关闭 fd、释放 VM 或唤醒父进程 wait；只有 live thread count 归零时才进入 PCB 的 `finish_exit()`。
 

@@ -74,7 +74,8 @@ impl IpcNamespace {
 
 shm VMA 通过 MM 的 `shm_mmap()` 映射一组预分配 `FrameTracker`。`SHM_RDONLY` 决定映射权限，`SHM_REMAP` 允许覆盖，`SHM_RND` 按 SHMLBA 对齐。
 
-进程退出时 `task/mod.rs::do_exit()` 在最后线程退出阶段调用 `shm_detach_process(pid)`，释放该 pid 的 attachment。
+进程退出时 `task/mod.rs::finish_current_exit()` 只在当前线程消费最后一个 live token 后调用
+`shm_detach_process(pid)`，释放该 pid 的 attachment。
 
 shared memory 段和 attachment 的核心结构如下：
 

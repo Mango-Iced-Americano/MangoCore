@@ -83,7 +83,7 @@ related_docs:
 | 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出 | 普通用户任务默认仍固定 CPU0，通用进程组停止语义待实现 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40 已完成永久 group-exit 的 owner 自清理与最后 ack 收尾 | 普通用户任务默认仍固定 CPU0；多线程 exec 的临时 stop/completion 待 B41 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE，B34 完成 current 写侧，B35/B36 分别完成远程稳定 Blocked/Queued 写侧，B37 完成 affinity-aware 新任务与 wake 选点，B38 完成远程 Running/Blocking owner 交接 | 默认全核 mask、steal 与多写者 affinity 压力验证尚未完成 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B39）
+#### 当前进度（SMP-P2.5-B15 至 B40）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -670,6 +670,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   用户执行、远程阻塞唤醒和每 CPU 调度 tick。普通任务默认全核 affinity、steal 及共享
   子系统并发门禁仍待后续批次。B21 完成共享内核页表撤映射，B23 完成用户 MM 修改侧的
   锁外提交；两者仍不等于全进程语义已开放。
+- B40 不扩张 `TaskStatus`：进程用一个 `AtomicU64` 编码永久 group-exit 退出码，
+  `thread_group` 锁把 clone 成员登记与首次 runqueue 发布线性化。退出方只投递
+  SIGKILL/wake/RESCHEDULE；Running/Blocked sibling 在自己的安全点清理，并在
+  clear_child_tid、用户资源和 TLB 提交完成后递减 live token。最后一个 ack 才执行
+  `finish_exit()`。双架构 8 核 focused 均为 26/26，初赛保持 RV64 312/314、
+  LA64 308/314；多线程 exec 仍是 B41 边界。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -889,9 +895,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   signal、epoll/eventfd 和 pidfd；
 - 删除所有仅以“当前单核”为安全依据的 unsafe Send/Sync；确需保留时必须写明真实共享所有权、锁和中断约束；
 - exit_group、多线程 exec 和致命信号采用跨核停止协议：
-  - queued sibling 原子标记退出并由出队路径丢弃；
-  - running sibling 收到 reschedule IPI，在安全点退出并 ack；
-  - 发起者等待全部 sibling 停止后才能替换 MM 或释放进程共享资源；
+  - B40 的永久 exit_group/致命信号已关闭 clone 门禁，向 queued/running/blocked
+    sibling 投递 SIGKILL、wake 与 reschedule，并由各 owner 在安全点退出；
+  - live token 在用户资源/TLB 清理后发布 ack，最后一个 ack 释放进程共享资源；
+  - 永久退出无需发起者同步等待；B41 的多线程 exec 必须另建临时 stop/completion，
+    发起者等全部 sibling 停止后才能替换 MM；
 - 完成用户可见 CPU 语义：
   - getcpu() 返回当前 CPU；
   - sched_getaffinity() 返回真实 mask；

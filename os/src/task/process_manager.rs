@@ -11,7 +11,7 @@ use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    current_task, publish_task, quota, registry, signal::send_process_signal,
+    current_task, quota, registry, signal::send_process_signal, try_publish_task,
     ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
@@ -77,21 +77,23 @@ impl ProcessManager {
     }
 
     /// 将已 publish 的子进程加入调度器并进入就绪队列。
-    /// 调用之后 child 已存活，不可再走 unpublished cleanup 回滚。
+    /// 成功返回后 child 已存活；`Err` 表示线程组门禁拒绝了首次发布，
+    /// 调用方仍必须走 unpublished cleanup。
     /// vfork 等待使用不可中断 completion —— 若用 Interrupted 循环重试，
     /// 父进程在有 actionable signal 时会在内核自旋，子进程无法被调度。
     pub fn schedule_clone_child(
         parent: &Arc<TaskControlBlock>,
         child: Arc<TaskControlBlock>,
         flags: CloneFlags,
-    ) {
+    ) -> Result<(), isize> {
         if flags.contains(CloneFlags::CLONE_VFORK) {
             child.process.set_vfork_parent(parent);
-            publish_task(child.clone());
+            try_publish_task(child.clone())?;
             child.process.wait_vfork_done_uninterruptible();
         } else {
-            publish_task(child);
+            try_publish_task(child)?;
         }
+        Ok(())
     }
 
     pub(crate) fn wait_child(

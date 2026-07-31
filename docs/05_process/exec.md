@@ -3,7 +3,7 @@ title: "execve 与 execveat"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [process, exec, elf, shebang]
 ---
 
@@ -279,6 +279,13 @@ remove_tasks_from_queues(other_threads)
 ```
 
 这不是 `exit_group()`；进程仍继续运行，只是线程组收缩到执行 exec 的线程。
+
+> **B41 前置限制：** 上述代码仍是当前实现的旧路径，不是 SMP 安全协议。
+> `exit_thread_resources()` 不能由 exec 发起 CPU 代替远端 `Running` sibling 执行；
+> `remove_tasks_from_queues()` 也不能证明远端 current 已切离旧 MM。B41 必须先请求
+> sibling 在各自 owner 安全点停止并发布 completion，exec 发起者收到全部 ack 后，
+> 才能替换地址空间和继续执行。B40 的永久 group-exit gate 不能直接复用，因为 exec
+> 发起线程必须存活并重新开放线程创建。
 
 ## 10. VM 共享场景
 

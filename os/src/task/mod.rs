@@ -43,7 +43,9 @@ pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
-pub(crate) use manager::{publish_task_on, set_remote_affinity};
+pub(crate) use manager::{
+    publish_task_on, set_remote_affinity, try_publish_task, try_publish_task_on,
+};
 pub(crate) use manager::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
@@ -248,14 +250,27 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     schedule(task_cx_ptr);
 }
 
-fn do_exit(task: &TaskControlBlock, exit_code: u32) {
-    if task.exit_thread_resources(exit_code) {
-        if task.process.live_thread_count() == 0 {
+/// 在可响应本地 IPI 的窗口内完成当前线程清理并切回 idle。
+///
+/// fatal signal 从 trap-return 的 IRQ-off 边界进入，普通 syscall exit 则从
+/// IRQ-on 窗口进入。这里先统一关闭，再用受控窗口开放中断；这样 user-memory
+/// 清理和 TLB shootdown 等待都不会阻塞本 CPU 对其它 shootdown 的 ack。
+fn finish_current_exit(task: Arc<TaskControlBlock>, exit_code: u32) -> ! {
+    let _ = crate::hal::local_irq_save();
+    crate::hal::with_local_interrupts_enabled(|| {
+        // 与并发 exit_group 竞争的普通 exit 也必须复用线程组统一退出码。
+        let exit_code = task.process.group_exit_code().unwrap_or(exit_code);
+        if task.exit_thread_resources(exit_code) {
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(task, exit_code);
+            task.process.finish_exit(&task, exit_code);
         }
-    }
+        // noreturn schedule 不会析构当前 Rust 栈；本地 clone 必须提前释放。
+        drop(task);
+        let mut _unused = TaskContext::zero_init();
+        schedule(&mut _unused as *mut _);
+        panic!("Unreachable");
+    })
 }
 
 /// 退出当前线程并切回调度器。
@@ -266,46 +281,23 @@ fn do_exit(task: &TaskControlBlock, exit_code: u32) {
 /// 上，最后一个 `Arc<TaskControlBlock>` 必须延迟到切回 idle 后释放。
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
     let task = current_task().unwrap();
-    do_exit(&task, exit_code);
-    // current 槽仍保留强引用直到 idle 完成 switch-out。这个本地 Arc
-    // 必须在切栈前释放，否则退出任务的栈帧永不返回，会泄漏引用计数。
-    drop(task);
-    let mut _unused = TaskContext::zero_init();
-    schedule(&mut _unused as *mut _);
-    panic!("Unreachable");
+    finish_current_exit(task, exit_code)
 }
 
 /// 请求整个线程组退出，并退出当前线程。
 ///
 /// # Semantics
 ///
-/// 其他线程先从调度队列移除并释放线程级资源，当前线程最后进入 zombie 队列。
-/// 函数不返回，且不能让任何本地 `Arc` 跨过最终的 `schedule()`。
+/// 第一个调用者原子关闭 clone 发布门禁并固定退出码；每个 sibling 收到
+/// SIGKILL/RESCHEDULE 后只在自己的安全点释放资源。最后一个 live token 的
+/// 持有者完成进程级清理，任何 CPU 都不会远程释放仍在使用的内核栈或用户资源。
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     let task = current_task().unwrap();
-
-    // 把 process Arc 的生命周期限制在 schedule() 之前。
-    // 此函数返回 !，schedule() 切栈后本地变量永不析构——不能有任何 Arc 跨过它。
-    let exit_list: Vec<_> = {
-        let process = task.process.clone();
-        process.request_group_exit(exit_code);
-        process
-            .threads()
-            .into_iter()
-            .filter(|thread| thread.tid.0 != task.tid.0)
-            .collect()
-    }; // process Arcs 在此 drop
-
-    manager::remove_tasks_from_queues(&exit_list);
-
-    for task in exit_list.into_iter() {
-        task.exit_thread_resources(exit_code);
-    }
-    do_exit(&task, exit_code);
-    drop(task);
-    let mut _unused = TaskContext::zero_init();
-    schedule(&mut _unused as *mut _);
-    panic!("Unreachable");
+    let (exit_code, threads) = task.process.begin_group_exit(exit_code);
+    manager::wake_group_exit_threads(&threads, task.gettid());
+    // noreturn schedule 不会析构当前 Rust 栈；所有 sibling Arc 必须在这里释放。
+    drop(threads);
+    finish_current_exit(task, exit_code)
 }
 
 lazy_static! {
@@ -453,7 +445,6 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     // TCB 尚未注册或发布，创建者独占 New 状态；从此任务的首次入队和
     // 阻塞唤醒都只能选择调用方指定的 CPU。
     tcb.set_initial_cpus_allowed(1usize << cpu);
-    tcb.process.add_thread(&tcb);
     registry::register_process(&tcb.process);
     registry::register_task(&tcb);
     let handle = tcb.clone();

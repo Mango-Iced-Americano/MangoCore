@@ -3,7 +3,7 @@ title: "信号、pidfd 与 signalfd"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-07-31
 tags: [process, signal, pidfd, signalfd]
 ---
 
@@ -17,7 +17,7 @@ tags: [process, signal, pidfd, signalfd]
 |------|------|
 | `os/src/task/signal/` | 信号 action、pending queue、投递、frame、wait |
 | `os/src/syscall/process/signal.rs` | signal/pidfd/signalfd syscall |
-| `os/src/task/process.rs` | 进程级 shared pending、group exit、stopped/continued |
+| `os/src/task/process.rs` | 进程级 shared pending、线程组退出门禁、stopped/continued |
 | `os/src/task/task.rs` | 线程级 sigmask/pending/signal stack |
 
 syscall 层负责参数和权限校验；task/signal 层负责具体投递、取 pending、构造/恢复 signal frame。
@@ -30,6 +30,10 @@ syscall 层负责参数和权限校验；task/signal 层负责具体投递、取
 | 进程级 | `ProcessSignalState::shared_pending` | `kill(pid)`、`killpg`、`pidfd_send_signal` |
 
 `signalfd` 和 `sigtimedwait` 取 pending 时会先看线程队列，再看进程 shared pending。
+
+B40 后 group-exit 状态不再放在 `ProcessSignalState` 内。fatal signal 的默认动作进入
+`exit_group_and_run_next()`，由进程级原子退出码通知所有 sibling；私有 SIGKILL 负责
+打断睡眠，真正的线程资源清理仍由各 CPU 的任务安全点执行。
 
 `SignalFd` 把这一语义暴露成一个可读的 `IndexNode`。结构体只保存 mask 和 metadata，pending 数据仍在 TCB/PCB 的信号队列里：
 

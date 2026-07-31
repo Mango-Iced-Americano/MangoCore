@@ -3,7 +3,7 @@ title: "exit、exit_group、wait4 与 waitid"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [process, exit, wait, zombie]
 ---
 
@@ -14,7 +14,7 @@ tags: [process, exit, wait, zombie]
 | 文件 | 内容 |
 |------|------|
 | `os/src/syscall/process/lifecycle.rs` | `sys_exit`, `sys_exit_group`, `sys_wait4`, `sys_waitid`, robust list syscall |
-| `os/src/task/mod.rs` | `exit_current_and_run_next`, `exit_group_and_run_next`, `do_exit` |
+| `os/src/task/mod.rs` | `exit_current_and_run_next`, `exit_group_and_run_next`, `finish_current_exit` |
 | `os/src/task/task.rs` | `exit_thread_resources()` |
 | `os/src/task/process.rs` | `finish_exit()`、zombie、children、vfork、auto-reap |
 | `os/src/task/process_manager.rs` | wait child 查找与回收 |
@@ -32,7 +32,7 @@ wait 可见的正常退出状态为低 8 位退出码左移 8 位。
 
 ## 3. 线程级退出
 
-`do_exit(task, exit_code)` 先调用：
+`finish_current_exit(task, exit_code)` 先调用：
 
 ```rust
 task.exit_thread_resources(exit_code)
@@ -42,16 +42,16 @@ task.exit_thread_resources(exit_code)
 
 1. TCB 状态置 `Zombie`。
 2. 结算系统时间。
-3. 清理 `clear_child_tid` 和 robust list。
-4. 从进程 live thread count 移除。
-5. 清零用户 `clear_child_tid` 并唤醒 futex。
-6. 释放或缓存 trap context / 默认用户栈映射。
+3. 从 TCB 取走 `clear_child_tid` 并清理 robust list。
+4. 清零用户 `clear_child_tid` 并唤醒 futex。
+5. 释放或缓存 trap context / 默认用户栈映射，并完成相应 TLB shootdown。
+6. 最后递减进程 live-thread 计数，作为本线程已不再使用共享 MM/PCB 的退出 ack。
 
 如果进程还有其他 live thread，进程不会进入 `ProcessState::Zombie`。
 
 ## 4. 进程级退出
 
-当 `live_thread_count() == 0`：
+`exit_thread_resources()` 只有在本线程消费了最后一个 live token 时才返回 `true`：
 
 ```rust
 release_fcntl_locks_for_pid(pid)
@@ -76,31 +76,30 @@ process.finish_exit(task, exit_code)
 
 `finish_exit()` 不直接 drop PCB，而是把它变成 wait 可见的 zombie。这样父进程可以读取 exit status 和 rusage；PCB 中也保留 stopped/continued 相关字段，但完整状态上报仍受 wait option 支持范围限制。若父进程忽略 SIGCHLD 或目标是被 init 收养的 auto-reap 子进程，才走自动回收分支。
 
-线程级退出和最后线程判断在 `task/mod.rs::do_exit()` 中完成：
+线程级退出和最后线程判断在 `task/mod.rs::finish_current_exit()` 中完成：
 
 ```rust
-fn do_exit(task: &TaskControlBlock, exit_code: u32) {
-    if task.exit_thread_resources(exit_code) {
-        if task.process.live_thread_count() == 0 {
+fn finish_current_exit(task: Arc<TaskControlBlock>, exit_code: u32) -> ! {
+    local_irq_save();
+    with_local_interrupts_enabled(|| {
+        let exit_code = task.process.group_exit_code().unwrap_or(exit_code);
+        if task.exit_thread_resources(exit_code) {
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(task, exit_code);
+            task.process.finish_exit(&task, exit_code);
         }
-    }
-}
-
-pub fn exit_current_and_run_next(exit_code: u32) -> ! {
-    let task = current_task().unwrap();
-    do_exit(&task, exit_code);
-    drop(task);
-    let mut _unused = TaskContext::zero_init();
-    schedule(&mut _unused as *mut _);
-    panic!("Unreachable");
+        drop(task);
+        schedule(...);
+    })
 }
 ```
 
+退出清理可能访问用户内存并等待 TLB ack，所以统一入口不依赖调用者原来的 IRQ
+状态：先关中断建立完整边界，再在受控 IRQ-on 窗口内清理；不返回的
+`schedule()` 会在切回 idle 前重新接管 IRQ-off CPU。
+
 `current_task()` 从本 CPU current 槽克隆一个本地 `Arc`。退出路径在完成
-`do_exit()` 后、进入不返回的 `schedule()` 前显式 drop 这个 clone；current 槽
+`finish_current_exit()` 清理完成后、进入不返回的 `schedule()` 前显式 drop 这个 clone；current 槽
 仍保留 owner。任务切回 idle 后，idle 才从槽位取出 retained Arc 并转入 zombie queue。
 
 `ProcessControlBlock::finish_exit()` 是最后线程退出后的进程级提交点：
@@ -183,7 +182,7 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
 
 ```text
 current_task()（Processor.current 保持 owner）
-do_exit() -> TaskStatus::Zombie
+finish_current_exit() -> TaskStatus::Zombie
 drop 本地 current Arc
 schedule(idle)
 idle: clear current -> finish_switch_out() -> zombie queue
@@ -195,15 +194,23 @@ idle: clear current -> finish_switch_out() -> zombie queue
 
 `exit_group()`：
 
-1. 取出当前 task。
-2. `process.request_group_exit(exit_code)`。
-3. 收集同进程其他线程。
-4. 从调度队列移除其他线程。
-5. 对其他线程调用 `exit_thread_resources(exit_code)`。
-6. 当前线程走 `do_exit()`。
-7. 当前 task 放入 zombie queue 并切回 idle。
+1. 当前 CPU 在 `thread_group` 锁内调用 `begin_group_exit()`：第一个调用者固定统一
+   退出码，以 Release 发布永久退出门禁，并取得当时全部 live 成员快照。
+2. 对 sibling 投递不可屏蔽的私有 `SIGKILL`；`Blocked/Blocking` 任务走统一 wake，
+   `Queued/Running` owner 收到 `RESCHEDULE`。
+3. 发起者释放成员快照，不等待、不远程清理其他 TCB，然后只清理自己并切回 idle。
+4. 每个 sibling 在自己的 trap-return/任务安全点观察原子退出码，在所属 CPU 上清理
+   `clear_child_tid`、用户资源和 TLB，再递减 live token 作为 ack。
+5. 唯一观察到 `remaining == 0` 的线程执行 `finish_exit()`，因此 PCB/MM 共享资源
+   不会在其他 CPU 仍使用时提前释放。
 
-`ProcessSignalState` 中的 `group_exiting/group_exit_code` 让信号路径和线程路径能看到线程组退出状态。
+clone 的最终发布同样取得 `thread_group` 锁，在锁内提交“成员登记 +
+`New -> Queued(cpu)`”。因此 clone 要么先成为退出快照中的 live 成员，要么在退出门禁
+已经关闭后返回 `EAGAIN`；不存在“快照之后、首次入队之前”的孤儿线程。
+
+这里刻意不让发起者同步等待所有 ack。永久 group exit 没有后续 MM 替换动作，最后一个
+ack 自然拥有进程级清理权，可以避免两个并发退出发起者互相等待。B41 的多线程 exec
+仍需要单独的临时 stop/completion，因为 exec 发起者必须在替换 MM 前确认 sibling 已停。
 
 ## 7. 子进程收养与 auto-reap
 

@@ -356,6 +356,12 @@ static TIMER_HOLDER_RELEASE: AtomicUsize = AtomicUsize::new(0);
 static TIMER_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
 static TIMER_HELPER_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static TIMER_PROBE_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static GROUP_EXIT_START: AtomicUsize = AtomicUsize::new(0);
+static GROUP_EXIT_LEADER_READY: AtomicUsize = AtomicUsize::new(0);
+static GROUP_EXIT_BLOCKED_READY: AtomicUsize = AtomicUsize::new(0);
+static GROUP_EXIT_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
+static GROUP_EXIT_REMOTE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static GROUP_EXIT_LATE_RUNS: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -464,6 +470,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::user_task_reschedules_and_sets_affinity",
             user_task_reschedules_and_sets_affinity,
         ),
+        KernelTest::new(
+            "smp::group_exit_stops_remote_sibling",
+            group_exit_stops_remote_sibling,
+        ),
         KernelTest::terminal(
             "smp::secondary_cpus_stop_and_ack",
             secondary_cpus_stop_and_ack,
@@ -490,6 +500,158 @@ fn timer_probe_program() -> &'static [u8] {
         let end = core::ptr::addr_of!(__smp_timer_probe_end) as usize;
         core::slice::from_raw_parts(start as *const u8, end - start)
     }
+}
+
+/// 构造一个尚未登记线程组、尚未进入 runqueue 的 kernel-only sibling。
+///
+/// 测试故意把构造和发布分开，才能验证 group-exit 门禁对 late clone 的拒绝。
+fn build_ktest_sibling(
+    process: Arc<crate::task::ProcessControlBlock>,
+    cpu: usize,
+    entry: fn(),
+) -> Arc<crate::task::TaskControlBlock> {
+    let tid = crate::task::tid_alloc();
+    let kstack = crate::hal::kstack_alloc();
+    let task_cx =
+        crate::task::TaskContext::goto_address(entry as usize, kstack.get_top());
+    let task = crate::task::TaskControlBlock::new_ktest_independent(
+        tid, process, kstack, task_cx, entry,
+    );
+    task.set_initial_cpus_allowed(1usize << cpu);
+    task
+}
+
+fn group_exit_leader() {
+    crate::hal::local_irq_restore(true);
+    GROUP_EXIT_LEADER_READY.store(1, Ordering::Release);
+    while GROUP_EXIT_START.load(Ordering::Acquire) == 0 {
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+    crate::task::exit_group_and_run_next(42 << 8);
+}
+
+fn group_exit_remote() {
+    crate::hal::local_irq_restore(true);
+    GROUP_EXIT_REMOTE_CPU.store(crate::smp::cpu_id(), Ordering::Release);
+    GROUP_EXIT_REMOTE_READY.store(1, Ordering::Release);
+    loop {
+        // 远端只在正式任务安全点观察 group-exit，不调用任何测试专用清理入口。
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+}
+
+fn group_exit_blocked() {
+    crate::hal::local_irq_restore(true);
+    GROUP_EXIT_BLOCKED_READY.store(1, Ordering::Release);
+    crate::task::block_current_and_run_next();
+    loop {
+        // group-exit 与 Running -> Blocking 交界由生产 sleep 复查负责；
+        // 被唤醒后仍只经统一任务安全点完成本线程清理。
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+}
+
+fn group_exit_late_thread() {
+    GROUP_EXIT_LATE_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// 验证跨 CPU group-exit 与 clone 最终发布门禁。
+fn group_exit_stops_remote_sibling() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    GROUP_EXIT_START.store(0, Ordering::Relaxed);
+    GROUP_EXIT_LEADER_READY.store(0, Ordering::Relaxed);
+    GROUP_EXIT_BLOCKED_READY.store(0, Ordering::Relaxed);
+    GROUP_EXIT_REMOTE_READY.store(0, Ordering::Relaxed);
+    GROUP_EXIT_REMOTE_CPU.store(usize::MAX, Ordering::Relaxed);
+    GROUP_EXIT_LATE_RUNS.store(0, Ordering::Relaxed);
+
+    let leader = crate::task::spawn_ktest_task_on(
+        crate::smp::BOOT_CPU_ID,
+        group_exit_leader,
+    );
+    let process = leader.process.clone();
+    let blocked = build_ktest_sibling(process.clone(), 1, group_exit_blocked);
+    crate::task::try_publish_task_on(blocked.clone(), 1)
+        .map_err(|_| "failed to publish blocked group-exit sibling")?;
+    let remote = build_ktest_sibling(process.clone(), 1, group_exit_remote);
+    crate::task::try_publish_task_on(remote.clone(), 1)
+        .map_err(|_| "failed to publish remote group-exit sibling")?;
+    let late = build_ktest_sibling(process.clone(), 1, group_exit_late_thread);
+
+    let mut ready_timed_out = false;
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        while GROUP_EXIT_LEADER_READY.load(Ordering::Acquire) == 0
+            || GROUP_EXIT_BLOCKED_READY.load(Ordering::Acquire) == 0
+            || GROUP_EXIT_REMOTE_READY.load(Ordering::Acquire) == 0
+        {
+            if crate::hal::get_time() >= deadline {
+                ready_timed_out = true;
+                break;
+            }
+            crate::task::run_task_safe_point();
+            core::hint::spin_loop();
+        }
+    });
+    if ready_timed_out {
+        return Err("group-exit siblings did not start on both CPUs");
+    }
+
+    GROUP_EXIT_START.store(1, Ordering::Release);
+    let mut exit_timed_out = false;
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        while !process.is_group_exiting() {
+            if crate::hal::get_time() >= deadline {
+                exit_timed_out = true;
+                return;
+            }
+            crate::task::run_task_safe_point();
+        }
+
+        match crate::task::try_publish_task_on(late.clone(), 1) {
+            Err(errno) if errno == crate::syscall::errno::EAGAIN => {}
+            _ => exit_timed_out = true,
+        }
+        while process.live_thread_count() != 0
+            || leader.task_status() != crate::task::TaskStatus::Zombie
+            || blocked.task_status() != crate::task::TaskStatus::Zombie
+            || remote.task_status() != crate::task::TaskStatus::Zombie
+        {
+            if crate::hal::get_time() >= deadline {
+                exit_timed_out = true;
+                break;
+            }
+            crate::task::run_task_safe_point();
+            core::hint::spin_loop();
+        }
+    });
+
+    if exit_timed_out {
+        return Err("cross-CPU group exit or late-clone gate timed out");
+    }
+    if GROUP_EXIT_REMOTE_CPU.load(Ordering::Acquire) != 1
+        || remote.last_cpu() != 1
+        || blocked.last_cpu() != 1
+    {
+        return Err("group-exit siblings did not acknowledge on CPU1");
+    }
+    if !process.is_zombie() {
+        return Err("last group-exit ack did not finish process cleanup");
+    }
+    if late.task_status() != crate::task::TaskStatus::New
+        || GROUP_EXIT_LATE_RUNS.load(Ordering::Acquire) != 0
+    {
+        return Err("late clone crossed the group-exit publication gate");
+    }
+    Ok(())
 }
 
 /// 返回“CPU0 首次完成 getcpu”标签在 probe 内的偏移。

@@ -3,7 +3,7 @@ title: "ProcessControlBlock 进程级资源"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-07-31
 tags: [process, pcb, fd, namespace, lifecycle]
 ---
 
@@ -16,7 +16,7 @@ tags: [process, pcb, fd, namespace, lifecycle]
 ```
 ProcessControlBlock
   ├── pid / leader_tid / pid handle / quota
-  ├── threads / live_threads / trap_context_cache
+  ├── thread_group / group_exit_code / live_threads / trap_context_cache
   ├── child_exit_wait / vfork completion
   ├── parent-child relation hints
   ├── inner: Mutex<ProcessInner>
@@ -35,7 +35,8 @@ pub struct ProcessControlBlock {
     pub leader_tid: usize,
     _pid_handle: Arc<TidHandle>,
     process_quota: Mutex<Option<TaskQuotaGuard>>,
-    pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
+    thread_group: Mutex<ThreadGroupState>,
+    group_exit_code: AtomicU64,
     live_threads: AtomicUsize,
     trap_context_cache: Mutex<Vec<usize>>,
     pub child_exit_wait: Mutex<WaitQueue>,
@@ -55,7 +56,8 @@ pub struct ProcessControlBlock {
 | `leader_tid` | 线程组主线程 tid |
 | `_pid_handle` | 保持 pid/tgid 到 wait 回收前不复用 |
 | `process_quota` | 进程级 clone quota guard |
-| `threads` | 属于该进程的线程弱引用列表 |
+| `thread_group` | 线程成员弱引用、首次发布与 group-exit 快照的共同锁域 |
+| `group_exit_code` | 0 表示正常；其余值编码为统一退出码 `+1`，供安全点无锁读取 |
 | `live_threads` | 当前计入 live 的线程数 |
 | `trap_context_cache` | 可复用 trap context slot，限制 256 |
 | `child_exit_wait` | 父进程 wait4/waitid 等待队列 |
@@ -64,7 +66,7 @@ pub struct ProcessControlBlock {
 | `adopted_by_init` | 是否为 init 收养的孤儿 |
 | `pgid/sid/parent/user_token_hint` | syscall 热路径 hint |
 | `inner` | 进程资源和生命周期状态 |
-| `signal` | 进程级 shared pending 与 group exit 状态 |
+| `signal` | 进程级 shared pending |
 | `shared_pending_hint` | shared pending 快速位图 |
 
 ## 3. ProcessInner
@@ -192,12 +194,26 @@ PCB 提供资源 getter 和 unshare/setter：
 
 ## 7. 线程表和 live count
 
-`add_thread()` 会把 TCB 的弱引用加入 `threads`，并在 `thread_live_counted` 原子位未置位时增加 `live_threads`。
-
-`remove_thread()` 做相反操作，并在列表过于稀疏时 compact：
+新线程不再在 TCB 构造期间单独调用 `add_thread()`。`publish_thread()` 在
+`thread_group` 锁内完成：
 
 ```text
-threads.len() > live * 4 + 128
+检查 group_exit_code == 0
+  -> members 加入 Weak<TCB>
+  -> 设置 thread_live_counted
+  -> live_threads + 1
+  -> 单个 runqueue 提交 New -> Queued(cpu)
+```
+
+这把锁只包住首次发布的短临界区；远端内核栈同步发生在取锁前，IPI doorbell
+发生在解锁后。group exit 使用同一锁先发布非零退出码、再形成 live 成员快照，
+从而与 late clone 线性化。
+
+`remove_thread()` 在 `exit_thread_resources()` 的最后消费 live token，并在列表过于
+稀疏时 compact：
+
+```text
+members.len() > live * 4 + 128
   -> retain live weak refs
 ```
 
@@ -205,7 +221,11 @@ threads.len() > live * 4 + 128
 
 线程表使用 weak 引用是为了避免 PCB 和 TCB 互相强持有造成无法释放：TCB 外层持有 `Arc<ProcessControlBlock>`，如果 PCB 再强持有所有 TCB，线程退出后就无法自然 drop。需要遍历 live 线程时，代码临时升级 weak；升级失败说明线程对象已经释放，可以顺手清理。
 
-`live_threads` 和 `threads` 不是同一件事。`live_threads` 是生命周期计数，决定最后一个线程退出时是否进入进程级 `finish_exit()`；`threads` 是可遍历集合，供 signal、exec 杀 sibling、procfs 和 wait 唤醒查找任务对象。调试“进程为什么没有 zombie”时看 live count；调试“信号为什么找不到线程”时看 threads weak 是否已失效。
+`live_threads` 和成员弱引用不是同一件事。前者是退出 ack 计数；最后一个
+AcqRel `fetch_sub` 能观察此前 sibling 已完成的用户内存/TLB 清理，并独占
+`finish_exit()`。后者是可遍历集合，供 signal、exec、procfs 和 wait 查找任务对象。
+调试“进程为什么没有 zombie”时看 live count；调试“信号为什么找不到线程”时看
+members weak 是否仍可升级。
 
 ## 8. trap context cache
 
@@ -220,7 +240,7 @@ process.try_cache_trap_context_slot(user_res_slot)
 | 条件 | 结果 |
 |------|------|
 | 进程正在 group exit | 不缓存 |
-| live thread count 为 0 | 不缓存 |
+| live thread count <= 1 | 不缓存 |
 | cache 长度 >= 256 | 不缓存 |
 | slot 已在 cache 中 | 不缓存 |
 | 其他 | 保存 slot |
@@ -255,15 +275,18 @@ PCB 保存 `pgid` 和 `sid`，同时维护原子 hint：
 
 ## 11. 进程级 shared pending
 
-`ProcessSignalState`：
+`ProcessSignalState` 只保存进程共享 pending：
 
 | 字段 | 说明 |
 |------|------|
 | `shared_pending` | `kill(pid)` / `killpg()` 等进程级投递队列 |
-| `group_exit_code` | `exit_group()` 的线程组退出码 |
-| `group_exiting` | 是否进入 group exit |
 
 线程级 pending 在 TCB inner 中，进程级 pending 在 PCB signal state 中。取信号时先看线程 pending，再看 shared pending。
+
+group-exit 不再混入 signal 锁。`group_exit_code: AtomicU64` 是安全点热路径的权威
+快照，`thread_group` 锁只负责把第一次非零发布与成员/runqueue 发布排序。编码采用
+`0 = not exiting`、`stored = u32 exit_code + 1`，既保留全部退出码，又避免额外
+`group_exiting` 布尔第二真值。
 
 ## 12. vfork completion
 

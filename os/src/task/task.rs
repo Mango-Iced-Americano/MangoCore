@@ -1137,7 +1137,8 @@ impl TaskControlBlock {
     /// 释放线程级资源，并把当前线程标记为 zombie。
     ///
     /// 这里不处理父子进程、进程 zombie、fd/vm 整体回收等进程级生命周期，
-    /// 那些属于 ProcessControlBlock 的退出收尾。
+    /// 那些属于 ProcessControlBlock 的退出收尾。返回 true 仅表示本线程在
+    /// 完成全部清理后消费了最后一个 live token，应由调用者执行进程级收尾。
     pub(crate) fn exit_thread_resources(&self, exit_code: u32) -> bool {
         let clear_child_tid = {
             let mut inner = self.acquire_inner_lock();
@@ -1153,8 +1154,6 @@ impl TaskControlBlock {
             inner.robust_list = RobustList::default();
             clear_child_tid
         };
-
-        self.process.remove_thread(self);
 
         if clear_child_tid != 0 {
             match self.write_clear_child_tid_word(clear_child_tid) {
@@ -1194,7 +1193,9 @@ impl TaskControlBlock {
             });
         }
 
-        true
+        // live token 就是 sibling stop ack，必须最后发布。若提前递减，另一 CPU
+        // 可能在本线程仍访问 clear_child_tid/VM 时释放共享地址空间。
+        matches!(self.process.remove_thread(self), Some(0))
     }
 
     /// 创建 initproc 的首个任务。
@@ -1432,7 +1433,6 @@ impl TaskControlBlock {
                 pending_oom_kill: false,
             }),
         });
-        task_control_block.process.add_thread(&task_control_block);
         registry::register_process(&task_control_block.process);
         registry::register_task(&task_control_block);
         init_task_trace!("10 task registered in process and task registries");
@@ -1461,7 +1461,8 @@ impl TaskControlBlock {
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
     /// 只分配内核栈并通过 `task_cx` 设置首次切入地址。
     /// 调用方负责在注册和发布前设置精确的 `cpus_allowed`，再把 TCB 放入
-    /// 选定 CPU 的 runqueue；当前唯一入口是 `spawn_ktest_task_on()`。
+    /// 选定 CPU 的 runqueue。普通入口是 `spawn_ktest_task_on()`；SMP 生命周期
+    /// 用例可暂不发布 sibling，以验证 group-exit 的最终发布门禁。
     pub(crate) fn new_ktest_independent(
         tid: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
@@ -2194,7 +2195,6 @@ impl TaskControlBlock {
         if parent_inner.seccomp_mode != 0 {
             task_control_block.account_seccomp_enabled();
         }
-        task_control_block.process.add_thread(&task_control_block);
         if !flags.contains(CloneFlags::CLONE_THREAD) {
             task_control_block.process.set_sched_state(
                 child_sched_policy,

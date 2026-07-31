@@ -1009,24 +1009,21 @@ fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
     };
     let mut cpu_us = 0usize;
     let mut saw_thread = false;
-    for weak in process.threads.lock().iter() {
-        if let Some(task) = weak.upgrade() {
-            let inner = task.acquire_inner_lock();
-            let rusage = inner.rusage;
-            let task_utime = rusage.ru_utime.to_us();
-            let task_stime = rusage.ru_stime.to_us();
-            let task_us = match clock.which {
-                CPUCLOCK_PROF => task_utime.saturating_add(task_stime),
-                CPUCLOCK_SCHED => scale_sched_cpu_clock_us(
-                    task_utime.saturating_add(task_stime),
-                    inner.sched_nice,
-                ),
-                CPUCLOCK_VIRT => task_utime,
-                _ => return Err(EINVAL),
-            };
-            cpu_us = cpu_us.saturating_add(task_us);
-            saw_thread = true;
-        }
+    for task in process.threads() {
+        let inner = task.acquire_inner_lock();
+        let rusage = inner.rusage;
+        let task_utime = rusage.ru_utime.to_us();
+        let task_stime = rusage.ru_stime.to_us();
+        let task_us = match clock.which {
+            CPUCLOCK_PROF => task_utime.saturating_add(task_stime),
+            CPUCLOCK_SCHED => {
+                scale_sched_cpu_clock_us(task_utime.saturating_add(task_stime), inner.sched_nice)
+            }
+            CPUCLOCK_VIRT => task_utime,
+            _ => return Err(EINVAL),
+        };
+        cpu_us = cpu_us.saturating_add(task_us);
+        saw_thread = true;
     }
     if !saw_thread {
         return Err(EINVAL);

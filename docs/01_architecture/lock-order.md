@@ -64,6 +64,9 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
    panic 路径不等待该锁，直接走原始 UART/SBI fallback。
 7. **lwext4**：跨实例全局锁位于 C 调用外层，保护区内只允许同步块 I/O，禁止
    yield、任务事件等待或调用会反向获取 VFS 高层锁的路径。
+8. **线程组退出**：首次发布允许 `thread_group -> 单个 RunQueue` 的短嵌套；
+   group-exit 快照释放 `thread_group` 后才取得 task/registry 锁、唤醒或发送 IPI。
+   不存在 RunQueue 反向获取 thread-group 锁的路径。
 
 ### 3.1 B15 历史过渡约束
 
@@ -248,6 +251,34 @@ CPU0 是全局 kernel timer queue 的唯一执行者：
 用于尽快打断用户/内核执行。多个请求可以合并，因为 queue 保存权威绝对 deadline，安全点
 每次都重新读取最早项。该协议不提供任意内核点抢占：长 syscall 中到达的 timer/IPI 仍等到
 既有任务安全点才执行 callback 或切换。
+
+### 3.6.4 B40 group-exit 门禁与 stop ack
+
+首次发布固定采用：
+
+```text
+远端内核栈同步
+  -> thread_group
+       -> 一个目标 RunQueue：成员登记 + New -> Queued(cpu)
+  -> 解锁
+  -> RESCHEDULE IPI
+```
+
+group-exit 固定采用：
+
+```text
+thread_group：发布退出码 + 克隆 live 成员 Arc
+  -> 解锁
+  -> 逐任务短持 task.inner 投递 SIGKILL
+  -> TASK_MANAGER/单个 RunQueue 唤醒 Blocked
+  -> 解锁后聚合发送 RESCHEDULE
+```
+
+`sleep_interruptible()` 的登记后复查只读原子退出码，不取得 thread-group 锁，因此不会
+形成 `thread_group <-> TASK_MANAGER` 环。退出线程在没有上述锁时完成 user-memory/TLB
+清理，最后以 AcqRel live-thread 递减发布 ack；观察到 1→0 的唯一线程才执行 PCB/MM
+收尾。任何 ack、IPI 或 context switch 等待点都不持有 thread-group、task.inner、
+TASK_MANAGER 或 runqueue 锁。
 
 ### 3.7 B21 内核栈退休与 shootdown 锁序
 

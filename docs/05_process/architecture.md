@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-31
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -306,23 +306,27 @@ TaskControlBlock::load_elf()
 
 ```
 sys_exit
-    do_exit(current, code)
+    exit_current_and_run_next(code)
+      finish_current_exit(current, code)
         exit_thread_resources()
-        if live_thread_count == 0:
+        if 消费最后一个 live token:
             release process resources
             finish_exit()
-        exit_current_and_run_next()
+        schedule(idle)
 ```
 
-`exit_group` 会请求组退出，移除其他线程队列项，释放其他线程资源后退出当前线程。
+`exit_group` 会原子关闭新线程发布门禁并固定退出码，向 sibling 投递
+SIGKILL/wake/RESCHEDULE。每个线程只在自己的 CPU 安全点释放线程资源并递减 live token；
+最后一个 ack 才释放进程级资源，发起 CPU 不再远程清理 Running sibling。
 
 `exit_thread_resources()`：
 
 | 项 | 行为 |
 |----|------|
 | 状态 | 设置 `Zombie` |
-| live count | 从进程 live thread 计数移除 |
 | clear_child_tid | 写 0，唤醒 futex |
+| 用户资源 | 撤销 trap context/默认栈映射并完成 TLB 提交 |
+| live count | 上述清理完成后递减，作为 stop ack |
 | robust_list | 清理 |
 | user slot | 缓存或释放 trap context slot |
 
@@ -503,7 +507,7 @@ child execve
 
 child exit
   -> sys_exit_group() 或 sys_exit()
-  -> do_exit()
+  -> finish_current_exit()
   -> ProcessControlBlock::finish_exit()
 
 parent wait
@@ -518,7 +522,7 @@ parent wait
 |------|------|----------|
 | clone 参数 | `syscall/process/clone.rs` | `TaskControlBlock::sys_clone()` |
 | exec 参数 | `syscall/process/exec.rs` | `TaskControlBlock::load_elf()`、`AddressSpaceInner::from_elf()` |
-| exit syscall | `syscall/process/lifecycle.rs` | `do_exit()`、`finish_exit()` |
+| exit syscall | `syscall/process/lifecycle.rs` | `finish_current_exit()`、`finish_exit()` |
 | wait syscall | `syscall/process/lifecycle.rs` | PCB children、`child_exit_wait` |
 
 这条路径也是 LTP、busybox shell、pthread 和 libc 进程测试共同覆盖的主线。
@@ -551,7 +555,7 @@ parent wait
 |-----|------|
 | `sys_exit()` | 当前线程退出 |
 | `sys_exit_group()` | 线程组退出 |
-| `do_exit()` | 线程/进程退出主路径 |
+| `finish_current_exit()` | 当前 owner 的线程清理与调度切离主路径 |
 | `ProcessControlBlock::finish_exit()` | 进程级退出完成 |
 | `sys_wait4()` | wait4 |
 | `sys_waitid()` | waitid |

@@ -177,16 +177,25 @@ timer/timeout/timerfd/net poll，AP 只推进本地 quantum。AP 插入更早的
 必须先释放 timer queue 锁，再发送 `TIMER_REPROGRAM` 请求 CPU0 重编程；每个 CPU
 都必须先写 deadline、编程 one-shot timer，最后才开放本地 timer interrupt。计数器可由
 AP 原子累加，但会读取 FS/net 并打印 console 的格式化性能快照仍限定在 CPU0。
-该能力不改变默认 mask：普通新任务和用户任务仍从 CPU0-only 开始。动态 kernel-global
-映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
+该能力不改变默认 mask：普通新任务和用户任务仍从 CPU0-only 开始。
+B40 已把永久 `exit_group` 改为 owner 自清理：第一个调用者在线程组门禁内固定退出码、
+关闭 clone 首次发布，随后只发送 SIGKILL/wake/RESCHEDULE；每个 sibling 在自己的安全点
+完成用户资源/TLB 清理后递减 live token，最后一个 ack 独占 PCB/MM 收尾。首次 clone 的
+成员登记与 `New -> Queued(cpu)` 在同一 `thread_group -> 单个 RunQueue` 临界区提交，
+门禁关闭时返回 `EAGAIN`。`sleep_interruptible()` 登记 Blocking 后必须复查退出原子码；
+退出清理统一在可响应 IPI 的受控中断窗口内进行。多线程 exec 仍待 B41，禁止继续用请求
+CPU 直接清理远端 Running sibling。
+动态 kernel-global 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户
+trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39 的受控迁移、真实 CPU/affinity 查询、
+B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
-RESCHEDULE/本地 timer 抢占不得外推为默认全核调度、多写侧压力已验收、任意内核点
-抢占、连续 range 或安全 CPU detach 已完成。
+RESCHEDULE/本地 timer 抢占、永久 group-exit 不得外推为以下能力已完成：
+默认全核调度、多线程 exec 安全、多写侧压力验收、任意内核点抢占、连续 range
+或安全 CPU detach。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

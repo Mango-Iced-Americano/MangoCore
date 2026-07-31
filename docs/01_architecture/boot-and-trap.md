@@ -61,6 +61,9 @@ B31/B32 又为该受控迁移建立 per-thread `cpus_allowed` 并返回真实 af
 按新允许集重新选点；B36 允许稳定 Queued 线程经短暂 `Migrating` 搬到合法 runqueue。
 B38 又通过单槽请求完成远程 Running/Blocking owner 交接。B39 为所有在线 CPU 开放
 独立 100Hz 调度 tick；普通任务默认 affinity 仍为 bit0。
+B40 让永久 group exit 复用同一个任务安全点：进程退出码用原子快照发布，
+远端 sibling 只在所属 CPU 上清理并以 live token ack；clone 的成员登记与首次
+runqueue 发布由同一线程组门禁线性化。
 
 ## 启动栈与 BSS 边界
 
@@ -308,6 +311,12 @@ handler 重新取得 `Running(1)` current，随后由 CPU1 的 `trap_return()` �
    `schedule()` 仍会在永久切离前把 CPU 关中断；
 5. panic handler 在任何 console/锁诊断和 STOP 之前立即关闭本地中断。
 
+B40 把所有线程退出收口到 `finish_current_exit()`。该入口不猜测调用者来自
+syscall 的 IRQ-on 窗口还是 fatal signal 的 IRQ-off trap-return：先统一关中断，
+再通过 `with_local_interrupts_enabled()` 执行 clear_child_tid、用户映射撤销和
+TLB shootdown，最后由不返回的 `schedule()` 接管 IRQ-off idle。这样目标 CPU
+等待远端 TLB ack 时仍能处理本地 IPI。
+
 这是安全点抢占而不是任意内核指令抢占：timer hard IRQ 仍只发布
 pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打断点
 切换任务或获取普通锁。
@@ -329,7 +338,8 @@ deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 ti
 `trap_return()` 在信号投递前进入统一的 `run_task_safe_point()`；各 CPU 的
 `run_tasks()` 则在取得
 Processor/runqueue 锁前消费 timer pending。统一安全点保持 IRQ-off，先以 Acquire 取走
-timer pending 并完成本地 tick/one-shot 重编程，再取走本 CPU 的 `need_resched`，最后对
+group-exit 原子码；命中时当前 owner 直接进入本地退出清理。普通路径再取走 timer
+pending 并完成本地 tick/one-shot 重编程，再取走本 CPU 的 `need_resched`，最后对
 两类请求最多调度一次。B33 因而能在完整用户 trap frame 上响应远端 RESCHEDULE，同时
 保持 hard IRQ 不直接切换。B39 让 CPU0 的硬件 deadline 取“本地 tick/最早全局 timer”
 的较小值，AP 只按本地 tick 编程；timeout、timerfd、网络 poll 和 kernel timer callback

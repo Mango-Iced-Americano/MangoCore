@@ -533,7 +533,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -568,6 +568,12 @@ B39 插入第 8 项后总数为 25；验收必须在双架构 8 核 TAP 中直�
 `user_timer_preempts_on_secondary_cpu` PASS、`online_mask=0xff` 和终态 STOP PASS。只看到
 timer IRQ 计数增长不够，因为它不能证明用户 task 真正交出 current；只看到 helper 运行也
 不够，因为入队 IPI 必须在用户进入前被 holder/idle 路径排除为抢占来源。
+B40 在终态 STOP 前插入第 25 项 `smp::group_exit_stops_remote_sibling`，总数变为 26。
+双架构 8 核必须直接看到该项与第 26 项 STOP 都 PASS。新项验证 CPU1 Running sibling
+和稳定 Blocked sibling 都由 owner CPU 自行进入 Zombie、最后 live ack 完成进程收尾，
+并验证 group-exit 后的 late sibling 保持 `New` 且首次发布返回 `EAGAIN`。它不使用
+测试专用远端清理入口，也不声称确定性命中了 `Running -> Blocking` 的每一个指令级交错；
+该交界还必须结合 `sleep_interruptible()` 登记后复查的源码证明。
 
 ### Bug 下沉流程
 
