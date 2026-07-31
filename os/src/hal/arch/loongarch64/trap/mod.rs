@@ -153,9 +153,8 @@ fn set_user_trap_entry() {
 }
 
 pub fn enable_timer_interrupt() {
-    // Only enable the interrupt vector — the actual timer deadline is
-    // programmed later by timer_subsystem_init() → program_timer_delta().
-    ECfg::empty()
+    // 保留已经开放的 IPI 位；AP 必须同时接收调度 tick 与远程调度请求。
+    ECfg::read()
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
 }

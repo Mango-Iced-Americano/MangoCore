@@ -280,7 +280,7 @@ machine_init()
 
 ↓
 
-task::timer_subsystem_init()
+task::timer_cpu_init()
 
 ↓
 

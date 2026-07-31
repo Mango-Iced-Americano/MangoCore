@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-15
+last_update: 2026-07-31
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -152,17 +152,17 @@ pub const MAX_RW_COUNT: usize =
 ```rust
 pub fn machine_init() {
     trap::init();
-    trap::enable_timer_interrupt();
     trap::enable_ipi_interrupt();
     // CORE_NUM > 1 时探测 SBI RFENCE。
 }
 
 pub fn bootstrap_init(cpu_id: usize) { /* AP: IPI-only */ }
+pub fn enable_local_timer_interrupt() { /* deadline 写入后开放 STIE */ }
 ```
 
-rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 timer/IPI，并在多核配置下探测 SBI
-RFENCE；缺失或探测失败时明确打印软件 IPI fallback。第一次 timer deadline 仍由
-`task::timer_subsystem_init()` 之后的 timer 编程路径设置。
+rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 IPI，并在多核配置下探测 SBI
+RFENCE；缺失或探测失败时明确打印软件 IPI fallback。CPU0 和 AP 都由
+`task::timer_cpu_init()` 先写未来 deadline，再通过 HAL 开放本地 timer source。
 
 ### 5.3 Trap 路径
 
@@ -199,8 +199,8 @@ la64 的早期初始化较重：
 
 | 配置项 | 代码行为 |
 |--------|----------|
-| CPU 核 | 非 0 号核进入死循环 |
-| interrupt vector | `ECfg` 设置 timer line-based interrupt |
+| CPU 核 | CPU0 继续全局初始化；AP 在独立栈完成本地初始化并等待 scheduler-ready |
+| interrupt vector | CPU0 早期保持关闭；AP 先只开放 IPI，timer 在 deadline 建立后加入 |
 | FPU/SIMD | 按 CPUCFG2 打开 scalar FPU 和 LSX；LASX 在扩展上下文保存完成前保持关闭 |
 | timer | `TIClr` 清 timer，`TCfg` 关闭早期 timer |
 | paging | `CrMd` 打开 paging，关闭中断 |
@@ -232,10 +232,14 @@ trap::init()
 get_timer_freq_first_time()
 打印 CPUCFG 0..6 与 0x10..0x14
 打印 Misc/RVACfg/MMAP_BASE
-trap::enable_timer_interrupt()
+QEMU: configure_local_ipi() + trap::enable_ipi_interrupt()
 ```
 
-`trap::enable_timer_interrupt()` 设置 timer 中断向量。实际 timer deadline 仍由 timer 子系统编程。
+`task::timer_cpu_init()` 随后先把 one-shot 编程到本 CPU 的未来调度 deadline，再调用
+`enable_local_timer_interrupt()`。LA64 使用 `ECfg::read()` 加入 TIMER 位，因此不会覆盖
+AP 已经开放的 IPI 位；`TCFG.InitVal` 只按架构要求向上对齐到 4 的倍数，不改变
+stable-counter 的频率域。CPU0 探测到的 `CLOCK_FREQ` 通过 Release store 发布，AP 以
+Acquire load 读取；它不再是依赖单核时序的 `static mut`。
 
 ### 6.4 Trap 路径
 

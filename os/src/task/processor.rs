@@ -341,14 +341,12 @@ pub fn run_tasks() -> ! {
 /// AP 调度循环只接触本地 runqueue/current、无锁 IPI deferred state，以及
 /// 任务切出后的受锁 zombie 交接。
 ///
-/// AP timer 仍关闭；全局 timeout、console、net、FS、futex 和 zombie 回收继续
-/// 由 CPU0 独占。空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的
-/// doorbell 因局部 IPI source 已开启而必定使 wait 返回。
+/// AP timer 只驱动本地调度 tick；全局 timeout、console、net、FS、futex 和
+/// zombie 回收继续由 CPU0 独占。空队列检查与 wait 都在 IRQ-off 窗口内，
+/// 远程 enqueue 后的 doorbell 或本地 tick 都必定使 wait 返回。
 ///
-/// AP 生产任务仍限于 B19 的短生命周期 kernel-only 函数；B29 只额外接收一个
-/// 从 CPU0 yield 迁入、且不访问共享 I/O 的用户探针，并借 syscall 窗口响应 IPI。
-/// AP timer 仍关闭，所以通用生产任务在补齐抢占安全点和共享子系统审计前不得
-/// 复用这个入口。
+/// AP 上的 timer callback 不会进入共享子系统；普通用户任务仍需等待共享 FS/net/
+/// driver 审计完成后再解除默认 CPU0 affinity。
 fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
     let _ = crate::hal::local_irq_save();
     loop {
@@ -358,6 +356,9 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         let irq_was_enabled = crate::hal::local_irq_save();
         debug_assert!(irq_was_enabled);
         let _ = crate::smp::service_secondary_ipi_work();
+        // timer hard IRQ 与 IPI 一样只发布无锁状态；在 idle 栈、尚未取得
+        // runqueue/processor 锁时推进本地 tick 并重编程 one-shot。
+        let _ = super::run_deferred_timer_work();
 
         // kernel-only AP 任务不参与 CPU0 的 OOM active tracker，直接从本地
         // runqueue claim，避免 AP 为一次 fetch 进入全局 TaskManager。

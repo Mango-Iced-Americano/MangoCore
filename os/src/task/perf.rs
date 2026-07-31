@@ -1531,6 +1531,11 @@ mod enabled {
     }
 
     fn print_snapshot(reason: &str) {
+        // 聚合计数器可由任意 CPU 原子更新，但格式化快照还会读取 FS/net
+        // 全局状态并输出 console；这些共享路径完成 SMP 审计前只允许 CPU0 进入。
+        if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+            return;
+        }
         let (fr_total, fr_fresh, fr_recycled, fr_ratio) = crate::mm::frame_frag_diag();
         crate::println!(
             "[perf] {} clone={} thread={} share_vm={} stack_alloc={} exit={} clear_tid={} keep_trap={} trap_store={} trap_skip={} trap_hit={} trap_miss={} kstack_hit={} kstack_miss={} kstack_store={} kstack_drop={} zombie_enq={} zombie_drain={} sched={} fetch={} idle={} timer={} fut_wait={} fut_wait_shared={} fut_wait_deadline={} fut_ready={} fut_timeout={} fut_intr={} fut_wake={} fut_wake_shared={} fut_wake_hit={} sc_clone={} sc_futex={} sc_mmap={} sc_munmap={} sc_mprotect={} sc_settid={} sc_robust={} sc_exit={} sc_yield={} tlb={} tlb_full={} tlb_page={} tlb_act={} tlb_glob={} frame_alloc={} frame_free={} pgfault={} vfs={} fr_total={} fr_fresh={} fr_recycled={} fr_ratio={:.4} last_sys={} last_ret={}",
@@ -1819,7 +1824,10 @@ mod enabled {
         } else {
             SCHEDULE_IDLE.fetch_add(1, Ordering::Relaxed);
         }
-        if load(&CLONE_TOTAL) >= 4500 && n % PRINT_EVERY_SCHEDULES == 0 {
+        if crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID
+            && load(&CLONE_TOTAL) >= 4500
+            && n % PRINT_EVERY_SCHEDULES == 0
+        {
             print_snapshot("sched");
         }
     }
@@ -1835,7 +1843,10 @@ mod enabled {
 
     /// 在 timer deferred 安全点按原有节奏输出诊断快照。
     pub fn record_deferred_timer_snapshot() {
-        if !stats_enabled() || load(&CLONE_TOTAL) < 4500 {
+        if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID
+            || !stats_enabled()
+            || load(&CLONE_TOTAL) < 4500
+        {
             return;
         }
         let epoch = load(&TIMER_INTERRUPTS) / 1024;

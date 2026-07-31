@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-22
+last_updated: 2026-07-31
 code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/fs/filesystem.rs"
@@ -43,7 +43,7 @@ related_docs:
 rust_main()
   |
   |-- mm::init()                       物理内存和页表就绪
-  |-- timer_subsystem_init()           定时器子系统初始化
+  |-- timer_cpu_init()                 初始化本 CPU 调度 tick
   |
   |-- [initramfs 特性启用]
   |     |-- fs::initramfs_init()       触发 VFS_ROOT lazy_static

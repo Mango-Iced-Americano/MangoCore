@@ -238,7 +238,9 @@ pub const DISK_IMAGE_BASE: usize = MEMORY_END;
 // 256
 pub const BUFFER_CACHE_NUM: usize = 256 * 1024 * 1024 / 2048 * 4 / 2048;
 
-pub static mut CLOCK_FREQ: usize = 0;
+/// CPU0 在释放 AP 前发布的 stable-counter 频率；运行期只读。
+pub static CLOCK_FREQ: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 use core::arch::asm;
 

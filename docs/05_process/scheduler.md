@@ -37,8 +37,9 @@ runqueue。B37 又让 clone/fork 继承的 mask 决定新任务的合法候选�
 `last_cpu` 作为 locality 提示。B38 不扩张状态机，用 per-task 请求槽让远程
 Running owner 在安全点真正交出 current；Blocking 则等待其稳定为 Running 或
 Blocked 后复用对应协议。
-timer hard IRQ 只发布 per-CPU pending，真正的 timeout 处理和是否切换
-延后到 trap-return/scheduler 安全点。B33 又让远端 RESCHEDULE 在用户 trap-return
+B39 又给每个在线 CPU 建立独立 100Hz 绝对调度 tick；timer hard IRQ 仍只发布
+per-CPU pending，真正的 tick 推进和是否切换延后到 trap-return/scheduler 安全点。
+全局 kernel timer/timeout/timerfd/net poll 继续由 CPU0 独占。B33 已让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
 yield/block/exit 仍直接进入切换边界。
 
@@ -331,17 +332,38 @@ schedule_tick += 1
 AP 走独立的精简分支，只执行：
 
 ```text
-短暂开放 IPI → 立即关中断 → 处理 STOP/deferred reason
+短暂开放 IPI/timer → 立即关中断 → 处理 STOP/deferred reason
+  → 推进本 CPU sched tick 并重编程本地 one-shot
   → fetch 本 CPU RunQueue
   → 共用 dispatch_task()/current/__switch/switch-out
   → 空队列时在 IRQ-off 窗口重查后执行 wfi/idle
 ```
 
-AP 不推进 timer、timeout、console、network、FS reclaim 或 OOM active tracker。B28
-用户探针只在 syscall 窗口响应 IPI；B29 曾通过显式 yield 进入安全点，B33 已验证运行中
-用户任务可以由远端 RESCHEDULE 在 trap-return 主动切出，不依赖 AP timer。远程
+AP 只推进本地调度 tick，不执行全局 timeout、kernel timer callback、console、network、
+FS reclaim 或 OOM active tracker。B39 的无 syscall 用户忙循环已证明 CPU1 timer 可以在
+trap-return 安全点把 current 交给同核 helper。远程
 发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait
-之间到达的 doorbell 会保持 pending 并唤醒 CPU，不会丢失 wakeup。
+之间到达的 doorbell 或 timer pending 会唤醒 CPU，不会丢失 wakeup。
+
+### 6.1 Per-CPU tick 与 CPU0 全局 timer
+
+`PerCpu.sched_tick_deadline_ns` 是所属 CPU 的绝对纳秒 deadline。安全点只推进一次到期
+quantum；若因关中断落后一周期以上，直接从当前时间建立下一周期，不循环追赶旧 tick。
+
+本地 one-shot 的选择规则是：
+
+| CPU | 下一硬件 deadline |
+|------|-------------------|
+| CPU0 | `min(本地 sched tick, 全局 KernelTimerQueue 最早项)` |
+| AP | 本地 sched tick |
+
+任意 AP 插入新的最早全局 timer 时，不会错误地重编程自己的硬件 timer，而是在释放 queue
+锁后向 CPU0 发布 `TIMER_REPROGRAM`。CPU0 的安全点再读取权威队列；hard IPI 不取锁、不执行
+callback。该设计仍是安全点抢占，timer 打断长 syscall 时只记录 pending，任务切换和 callback
+要等 syscall 返回或其它明确安全点。
+
+调度/timer 性能计数仍可在所有 CPU 上用 relaxed atomic 聚合；会继续读取 FS/net 全局状态并
+打印 console 的格式化快照仅由 CPU0 触发。该限制避免 AP 本地 tick 绕过共享子系统门禁。
 
 ## 7. 控制台轮询
 

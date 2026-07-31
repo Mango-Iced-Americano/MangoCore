@@ -119,7 +119,7 @@ fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
     // mm::remap_test();
 
     machine_init();
-    crate::task::timer_subsystem_init();
+    crate::task::timer_cpu_init();
     match random::init() {
         Ok(()) => println!("[kernel] PRNG initialized."),
         Err(e) => println!("[kernel] PRNG init warning: {:?}", e),

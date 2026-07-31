@@ -807,6 +807,40 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   均通过。初赛为 RV64 312/314、LA64 308/314，精确失败集合未扩大。动态证据覆盖单请求者
   Running owner；并发多写者及确定性的 Blocking 交界仍标为未动态运行。
 
+### Case 35: SMP Per-CPU 调度 tick 与 CPU0 全局 timer owner
+
+- Evidence: `docs/Work_Log/2026-07-31.md`、
+  `docs/Work_Log/evidence/2026-07-31/smp-b39-percpu-timer-summary.md`；DeepSeek prompt、child
+  manifest 与 Docker/QEMU 原始日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责对照双架构官方 timer 规范，划分本地 quantum 与全局 callback
+  所有权、实现、测试证明设计和最终事实裁决；DeepSeek 负责设计反例提示、冻结源码下的
+  Docker 串行构建/测试与日志归纳，不修改源码、不提交、不 push。
+- Problem: 旧实现只有 CPU0 开 timer，且所有 CPU 共用一个调度 deadline。普通任务若放宽
+  到 AP，一个不执行 syscall/yield 的 CPU-bound 用户任务就无法被切出；直接让每个 AP 执行
+  旧 timer deferred work，又会重复消费 timeout、timerfd 和网络 poll 等全局状态。
+- Human action: 每个 `PerCpu` 保存独立 100 Hz 绝对 deadline；所有 CPU 的 hard IRQ 都只发布
+  deferred 标志，安全点只推进本 CPU quantum。CPU0 额外串行消费全局 timer queue、timeout、
+  timerfd 和 net poll，并按本地 tick 与全局最早 deadline 的较小值编程 one-shot timer。
+  AP 插入更早全局 timer 时先释放 queue 锁，再通过独立 `TIMER_REPROGRAM` reason 请求 CPU0。
+  两架构均采用“先发布/编程 deadline，再开放中断源”，LoongArch 开 timer 时保留 ECFG 中
+  已经开放的 IPI bit；LA64 stable-counter 频率改为 CPU0 Release 发布、各 CPU Acquire
+  读取的原子值，删除本路径最后一个依赖单核读写时序的 `static mut`。
+- AI adjudication: 设计审查任务因 Codex 同期继续编辑 tracked diff 被包装器 fail-closed，
+  其 stdout 仅作为反例线索；DeepSeek 提醒同时检查 timer 与 reprogram 两种 pending、隔离
+  AP 的全局 callback、覆盖 AP idle 安全点，三项均被纳入。它建议复用 `RESCHEDULE` bit，
+  GPT/Codex 拒绝：纯 deadline 重编程不应伪造任务切换请求。首轮六项验证均在编译期暴露
+  `hal::arch` 中间层漏重导出；补齐双架构两个 re-export 后重新冻结并完整验证，失败批次
+  不计作通过证据。原子频率复检后 DeepSeek 建议直接提交；人工继续沿 AP deferred 调用链
+  发现性能快照会读取 FS/net 并打印 console，因此拒绝提前收口，把格式化快照限制到 CPU0。
+- Verification: 生产源码 diff SHA-256 为
+  `3d3670bfc12e1702d0256dd9d12c23666a9a74ea40fc257901e36b10af2431e6`。RV64/LA64
+  kernel build 均 exit 0；双架构 `CORE_NUM=8 KTEST=smp` 均为 25/25，新增第 8 项使用
+  CPU1 无 syscall/yield 用户死循环证明真实本地 timer 能切出任务，online mask 均为
+  `0xff`。初赛为 RV64 312/314、LA64 308/314，精确失败集合未扩大。人工收口原子频率和
+  CPU0-only 快照后，最终冻结又通过双架构 build 与 LA64 25/25；该三项完整 tracked diff
+  指纹均为 `eec8bfde6f0b626296b7002bb83eb6b079b7f12e597e77d248c16d7e43bafbd6`，
+  before/after 一致。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -883,6 +917,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md`、`docs/Work_Log/evidence/2026-07-30/smp-b36-queued-affinity-summary.md` | SMP 远程 Queued 线程 affinity | 记录 `Migrating` 唯一 owner、单 rq 搬队、nice/exit 竞态裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b37-affinity-placement-summary.md` | SMP affinity-aware 新任务放置 | 记录继承 mask 与固定 CPU0 发布冲突、无锁负载提示边界、DeepSeek 冻结审查裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b38-running-affinity-summary.md` | SMP 远程 Running/Blocking affinity | 记录单槽请求、owner 安全点完成、真实锁序、DeepSeek 结论纠错及双架构 8 核门禁 |
+| `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b39-percpu-timer-summary.md` | SMP Per-CPU 调度 tick | 记录本地 quantum/CPU0 全局 callback 边界、官方规范对照、DeepSeek RED/冻结验证裁决及双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

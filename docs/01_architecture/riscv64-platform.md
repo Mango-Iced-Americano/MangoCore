@@ -3,7 +3,7 @@ title: "RISC-V 64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-31
 tags: [architecture, riscv64, hal]
 ---
 
@@ -64,13 +64,13 @@ RISC-V 后端在 `mod.rs` 中定义：
 ```rust
 pub fn machine_init() {
     trap::init();
-    trap::enable_timer_interrupt();
     trap::enable_ipi_interrupt();
     // 多核时一次性探测 SBI RFENCE；缺失则保留软件 IPI fallback。
-    // First timer deadline is set by timer_subsystem_init() after boot.
+    // 每个 CPU 的首个 timer deadline 由 timer_cpu_init() 设置。
 }
 
 pub fn bootstrap_init(cpu_id: usize) { /* AP 只初始化 IPI */ }
+pub fn enable_local_timer_interrupt() { /* deadline 写入后开放 STIE */ }
 ```
 
 ### 3.1 `bootstrap_init()`
@@ -90,7 +90,9 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 | `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
 | `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
 
-第一次 timer deadline 没有在 `machine_init()` 中设置。注释说明它由启动后的 `timer_subsystem_init()` 和 timer 编程路径负责。
+第一次 timer deadline 没有在 `machine_init()` 中设置。每个 CPU 都先由
+`timer_cpu_init()` 写入首个绝对 deadline，再开放本地 timer interrupt，避免在 deadline
+尚未发布时收到无法归属的中断。
 
 ## 4. Trap 后端
 

@@ -3,7 +3,7 @@ title: "测试体系 (Testing Framework)"
 category: testing
 status: stable
 author: MangoCore Team
-last_update: 2026-07-30
+last_update: 2026-07-31
 tags: [testing, ktest, cargo-test, LTP, regression, tap]
 ---
 
@@ -211,10 +211,11 @@ L3 是测试体系的核心创新。测试代码**编译进内核**，但只在 
 rust_main()
   → bootstrap_init() → mem_clear() → console::log_init()
   → trace::init() → mm::init()
-  → machine_init() → timer_subsystem_init()
+  → machine_init() → timer_cpu_init(CPU0) → bring_up_secondary_cpus()
   → [fs init, net init, block probe, preload payloads]
   → posix_lock::init()
   → smp::release_secondary_schedulers()
+  → AP: activate kernel page table → timer_cpu_init(AP) → run_tasks()
   → if mode == Ktest: spawn kernel test runner → per-CPU run_tasks() → shutdown()
   → normal: add_initproc() → per-CPU run_tasks()
 ```
@@ -272,6 +273,14 @@ affinity 请求；远程写侧必须等待 CPU1 在生产安全点完成 `Runnin
 任务只在 CPU0 恢复一次并退出。终态 STOP 顺延为第 24 项并通过，证明用例没有遗留 current、
 runqueue 或 pending 请求。该项覆盖单个请求者与稳定 Running owner；多写者竞争和
 `Blocking` 瞬态重试目前只做源码/锁序审计，不能由 24/24 外推为动态压力覆盖。
+
+B39 在原 timer 用例之后插入第 8 项 `smp::user_timer_preempts_on_secondary_cpu`，总数变为
+25。测试先用一个 CPU1 kernel holder 占住 current，再按 FIFO 顺序预排“无 syscall/yield 的
+用户忙循环”和同核 helper；远程入队 IPI 必须在 holder 退出后的 idle 安全点先被消费。用户
+任务进入 PLV3/U-mode 后，只有 CPU1 本地 timer 能让 helper 运行。helper 观察用户 TCB 已回到
+`Queued(1)` 后注入 SIGKILL，测试同时要求 CPU1 timer IRQ/deferred 计数增长、进程可 wait/reap、
+runqueue/current 清空和 TCB Weak 失效。超时清理才允许发送 RESCHEDULE IPI，因此清理路径不能
+制造成功假象。该项证明用户态安全点抢占，不表示任意内核指令位置可抢占。
 
 ### 目录结构
 
@@ -524,7 +533,7 @@ LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 wri
 前提、允许失败集合和证据边界见
 [SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
 
-B28/B29/B30/B31/B32/B33/B34/B35/B36/B37/B38 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
+B28/B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
 affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
 双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
 `smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
@@ -555,6 +564,10 @@ B38 插入第 15 项后，B34 probe/STOP 分别顺延为第 23/24 项；验收�
 直接 PASS，并核对宽 mask 更新不切换 owner、窄 mask 请求返回前源 CPU 已释放 owner、任务最终
 只在 CPU0 恢复一次。当前动态证据没有并发两个远程写者，也没有确定性命中
 `Running -> Blocking` 的交界；这两项必须保留为后续压力测试边界。
+B39 插入第 8 项后总数为 25；验收必须在双架构 8 核 TAP 中直接看到
+`user_timer_preempts_on_secondary_cpu` PASS、`online_mask=0xff` 和终态 STOP PASS。只看到
+timer IRQ 计数增长不够，因为它不能证明用户 task 真正交出 current；只看到 helper 运行也
+不够，因为入队 IPI 必须在用户进入前被 holder/idle 路径排除为抢占来源。
 
 ### Bug 下沉流程
 

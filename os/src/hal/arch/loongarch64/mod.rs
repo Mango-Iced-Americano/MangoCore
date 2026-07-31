@@ -210,7 +210,6 @@ pub fn machine_init() {
         boot_trace!("{:?}", RVACfg::read());
         boot_trace!("[machine_init] MMAP_BASE: {:#x}", MMAP_BASE);
     }
-    trap::enable_timer_interrupt();
     #[cfg(feature = "board_laqemu")]
     {
         // CPU0 需要接收 AP 的运行期回复；先清/开放 IOCSR vector，再把
@@ -222,17 +221,20 @@ pub fn machine_init() {
 pub fn pre_start_init() {
     EEntry::empty().set_exception_entry(strampoline as usize);
 }
+
+/// 在 deadline 已经写入后开放当前 core 的本地 timer interrupt。
+pub fn enable_local_timer_interrupt() {
+    trap::enable_timer_interrupt();
+}
+
 #[no_mangle]
 pub fn bootstrap_init(cpu_id: usize) {
-    let local_interrupt = if cpu_id == crate::smp::BOOT_CPU_ID {
-        LineBasedInterrupt::TIMER
-    } else {
-        // AP 在 Phase 3 仍只允许 IPI，不能提前接入普通 timer callback。
-        LineBasedInterrupt::IPI
-    };
-    ECfg::empty()
-        .set_line_based_interrupt_vector(local_interrupt)
-        .write();
+    let mut local_interrupts = ECfg::empty();
+    if cpu_id != crate::smp::BOOT_CPU_ID {
+        // AP 先只开放 IPI；建立首个本地 deadline 后再加入 TIMER 位。
+        local_interrupts.set_line_based_interrupt_vector(LineBasedInterrupt::IPI);
+    }
+    local_interrupts.write();
     let cfg2 = read_cpucfg(2);
     EUEn::read()
         .set_float_point_stat(cfg2 & CPUCFG2_FP != 0)

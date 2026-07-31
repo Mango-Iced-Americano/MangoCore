@@ -28,8 +28,9 @@ related_docs:
 - 是否同时增加 `preempt_depth` 由实现模型统一决定，不能把 `irq_depth` 当成正确性的替代品；
 - guard 不得跨 context switch、yield、睡眠或远端 ack 等待点。
 
-`IrqSaveSpinLock` 的双架构实现、嵌套恢复测试和 panic 诊断通过前，不得开放 AP 的普通 timer
-中断，也不得让多个 CPU 并发使用 console 等 IRQ 可达共享对象。
+B39 已在不取得任何普通锁的 hard-IRQ fast path 上开放 AP 本地 timer；deferred AP 分支只
+推进 CPU-local tick。`IrqSaveSpinLock` 的完整门禁仍约束 console、设备和其它 IRQ 可达共享
+对象，不能因 timer 已开放而外推这些子系统已经多核安全。
 
 ## 2. 上下文能力
 
@@ -58,7 +59,7 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
 4. **页表失效**：MM/PTE 锁内修改并记录 `MmuGather`，释放锁后本地 flush、发送
    shootdown、等待 ack；ack 完成后才能释放 frame/页表页/ASID。
 5. **timer 重编程**：timer queue 锁内更新最早 deadline，释放锁后向 CPU0 发送
-   `TIMER_REPROGRAM`。
+   `TIMER_REPROGRAM`；IPI handler 只保留原子请求，不能读取 timer queue。
 6. **console**：全局 irq-save console 锁是叶子锁；持有时不得获取其他锁。
    panic 路径不等待该锁，直接走原始 UART/SBI fallback。
 7. **lwext4**：跨实例全局锁位于 C 调用外层，保护区内只允许同步块 I/O，禁止
@@ -222,6 +223,31 @@ TASK_MANAGER -> remote_affinity_request -> 单个 RunQueue
 远程写侧看到 `Blocking` 时不取上述任何锁，而是协作式让出 CPU，
 等待状态稳定为 Running、Blocked 或 Zombie 后重试。两个并发写侧会通过
 单槽串行化，但 B38 focused 只动态验证单请求方；多写侧压力仍是后续门禁。
+
+### 3.6.3 B39 Per-CPU tick 与全局 timer owner
+
+每个 `PerCpu` 独占 `sched_tick_deadline_ns`，只有所属 CPU 在关中断安全点推进。硬件
+timer 到期时只静默本地 one-shot、置 `timer_pending` 并返回；hard IRQ 不取得
+`KERNEL_TIMER_QUEUE`、runqueue、task 或网络锁。
+
+CPU0 是全局 kernel timer queue 的唯一执行者：
+
+1. 任意 CPU 在 queue 锁内插入动作并计算它是否成为最早 deadline；
+2. 释放 queue 锁后，CPU0 可直接重编程本地硬件；AP 则先 Release 置
+   `timer_reprogram_requested`，再发送 `TIMER_REPROGRAM`；
+3. CPU0 安全点 Acquire 消费 timer/reprogram 标志，短暂取得 queue 锁弹出到期项后立即解锁；
+4. callback、timeout/timerfd 和网络 poll 均在锁外执行，最后按最新 queue deadline 与
+   CPU0 本地 tick 的较小值重编程；
+5. AP deferred 分支不取得全局 timer queue，只推进本地 tick 并重编程自己的 one-shot。
+
+性能计数器可以由 AP 原子累加，但格式化快照会读取 FS/net 全局诊断状态并输出 console，
+因此 `print_snapshot` 及 timer/scheduler 周期快照在共享子系统完成 SMP 审计前只允许 CPU0
+执行。不能因计数器本身是 atomic，就把整个诊断调用链视为 IRQ-safe 或 SMP-safe。
+
+直接发布 reprogram 标志是为了覆盖 CPU0 以 IRQ-off 状态轮询 idle 的窗口；IPI doorbell
+用于尽快打断用户/内核执行。多个请求可以合并，因为 queue 保存权威绝对 deadline，安全点
+每次都重新读取最早项。该协议不提供任意内核点抢占：长 syscall 中到达的 timer/IPI 仍等到
+既有任务安全点才执行 callback 或切换。
 
 ### 3.7 B21 内核栈退休与 shootdown 锁序
 

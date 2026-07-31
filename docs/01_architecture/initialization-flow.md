@@ -2,7 +2,7 @@
 title: "初始化流程 (Initialization Flow)"
 category: architecture
 status: draft
-last_update: 2026-07-23
+last_update: 2026-07-31
 tags: [architecture, boot, init]
 ---
 
@@ -14,10 +14,15 @@ tags: [architecture, boot, init]
 
 ```text
 bootstrap_init → mem_clear → console::log_init → trace::init → mm::init
-→ machine_init → timer_subsystem_init → random::init → bootargs::load
+→ machine_init → timer_cpu_init(CPU0) → random::init → bring_up_secondary_cpus
+→ bootargs::load
 → initramfs_init (CPIO → VFS_ROOT → devfs/tty)
 → normal only: init_net_device → net::config::init → register_boot_block_devices
 ```
+
+AP 在 BSP 发布 scheduler-ready 后安装内核页表根，调用同一个
+`timer_cpu_init()` 建立自己的绝对调度 tick，随后进入本地 `run_tasks()`。CPU0 的本地
+timer 同时驱动全局 kernel timer；AP 的 timer 只负责本核调度抢占。
 
 `initramfs_init()` 在 RamFS 中解包 newc CPIO，创建 PID1 所需目录并挂载最小 devfs。`register_boot_block_devices()` 只发现设备并注册 `/dev/vd*`；它不挂载 x0/x1。
 

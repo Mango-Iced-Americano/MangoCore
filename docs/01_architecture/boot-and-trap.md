@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-30
+last_updated: 2026-07-31
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -59,7 +59,8 @@ B31/B32 又为该受控迁移建立 per-thread `cpus_allowed` 并返回真实 af
 同一 owner 交接。B34 允许 current 线程在 syscall 安全点修改运行期 mask，并在排除 source
 时自迁到合法 CPU；B35 允许远程稳定 Blocked 线程在 registry 锁内修改 mask，并让后续 wake
 按新允许集重新选点；B36 允许稳定 Queued 线程经短暂 `Migrating` 搬到合法 runqueue。
-远程 Running/Blocking 写侧仍未开放，普通任务默认 affinity 仍为 bit0。
+B38 又通过单槽请求完成远程 Running/Blocking owner 交接。B39 为所有在线 CPU 开放
+独立 100Hz 调度 tick；普通任务默认 affinity 仍为 bit0。
 
 ## 启动栈与 BSS 边界
 
@@ -267,9 +268,9 @@ console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 T
 
 两个架构的 IPI handler 只执行原子操作和有界的本地 TLB 失效：不分配内存、不获取
 普通锁、不打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
-用户态和内核态 trap 共用同一 fast path；AP 仅打开 IPI 线路，timer/external
-interrupt 继续关闭。B28 用户探针只在 syscall 受控窗口暂时打开全局中断，因而
-可以响应已经启用的 IPI line，但不会接收 timer/设备中断。AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
+用户态和内核态 trap 共用同一 fast path；B39 后 AP 同时打开 IPI 与本地 timer，
+external interrupt 继续关闭。AP 的 timer 只发布本地调度工作，不执行全局 callback。
+AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
 `RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle，或
 运行中用户任务的 trap-return 安全点。AP 执行 B19 短 kernel-only 函数时仍保持全局 IRQ
@@ -313,7 +314,7 @@ pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打
 
 ## Timer hard/deferred 边界
 
-CPU0 的两种 timer trap 来源共用同一 hard-IRQ fast path：
+每个在线 CPU 的用户/内核 timer trap 共用同一 hard-IRQ fast path：
 
 1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 清除 level-triggered
    TICLR，非周期 TCFG 保持停止；
@@ -325,12 +326,19 @@ poll 或 schedule；性能统计也只做原子计数，原有周期性快照打
 deferred 阶段。多个 IRQ 可以合并成一个 pending bit，因为软件 timer 和
 调度 tick 都使用绝对 deadline，而不是按中断次数推进。
 
-`trap_return()` 在信号投递前进入统一的 `run_task_safe_point()`；`run_tasks()` 则在取得
+`trap_return()` 在信号投递前进入统一的 `run_task_safe_point()`；各 CPU 的
+`run_tasks()` 则在取得
 Processor/runqueue 锁前消费 timer pending。统一安全点保持 IRQ-off，先以 Acquire 取走
-timer pending 并完成 callback/one-shot 重编程，再取走本 CPU 的 `need_resched`，最后对
+timer pending 并完成本地 tick/one-shot 重编程，再取走本 CPU 的 `need_resched`，最后对
 两类请求最多调度一次。B33 因而能在完整用户 trap frame 上响应远端 RESCHEDULE，同时
-保持 hard IRQ 不直接切换。AP 仍为 IPI-only，不运行普通 timer callback；B29 的显式
-yield 是历史迁移门禁，B33 用户探针的实际迁移不再依赖 yield 或 AP timer。
+保持 hard IRQ 不直接切换。B39 让 CPU0 的硬件 deadline 取“本地 tick/最早全局 timer”
+的较小值，AP 只按本地 tick 编程；timeout、timerfd、网络 poll 和 kernel timer callback
+仍只能在 CPU0 的 deferred 分支执行。
+
+AP 若插入新的最早全局 timer，会先在队列锁内发布 deadline，解锁后设置 CPU0 的
+`timer_reprogram_requested`，再发送 `TIMER_REPROGRAM` IPI。CPU0 即使正运行 IRQ-off idle
+循环也能直接观察该标志；IPI handler 不读取 timer queue。安全点抢占模型仍允许长 syscall
+把 callback 推迟到返回边界，但请求不会丢失，CPU0 的周期 tick 也提供有界兜底重查。
 
 该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。普通长 syscall
 现在可在任务 yield/block 之前、之后响应 timer/IPI；B23—B27 的 TLB shootdown

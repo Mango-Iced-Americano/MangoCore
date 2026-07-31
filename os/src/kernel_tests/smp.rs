@@ -271,10 +271,44 @@ __smp_user_probe_end:
     exit_syscall = const USER_PROBE_EXIT,
 );
 
+// 该用户程序没有 syscall、yield 或数据 load/store；进入后只能由硬件中断返回内核。
+// 测试把同 CPU helper 排在它之后，因此 helper 能运行就直接证明了 timer 抢占。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.smp_timer_probe, "a"
+    .balign 4
+    .global __smp_timer_probe_start
+    .global __smp_timer_probe_end
+__smp_timer_probe_start:
+1:
+    j 1b
+__smp_timer_probe_end:
+    .popsection
+"#
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.smp_timer_probe, "a"
+    .balign 4
+    .global __smp_timer_probe_start
+    .global __smp_timer_probe_end
+__smp_timer_probe_start:
+1:
+    b 1b
+__smp_timer_probe_end:
+    .popsection
+"#
+);
+
 extern "C" {
     static __smp_user_probe_start: u8;
     static __smp_user_probe_end: u8;
     static __smp_user_probe_resched_ready: u8;
+    static __smp_timer_probe_start: u8;
+    static __smp_timer_probe_end: u8;
 }
 
 const IRQ_PROBE_NOT_RUN: usize = 0;
@@ -317,6 +351,11 @@ const USER_RESCHED_TARGET_LOST: usize = 2;
 const USER_RESCHED_TIMEOUT: usize = 3;
 const USER_RESCHED_SEND_FAILED: usize = 4;
 static USER_RESCHED_RESULT: AtomicUsize = AtomicUsize::new(USER_RESCHED_WAITING);
+static TIMER_HOLDER_READY: AtomicUsize = AtomicUsize::new(0);
+static TIMER_HOLDER_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static TIMER_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
+static TIMER_HELPER_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static TIMER_PROBE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -329,6 +368,9 @@ lazy_static! {
         Mutex::new(None);
     /// CPU1 helper 只在测试期间持有 Weak，不延长用户 TCB 生命周期。
     static ref USER_RESCHED_TARGET: Mutex<Option<(Weak<crate::task::TaskControlBlock>, usize)>> =
+        Mutex::new(None);
+    /// helper 只持有 Weak；用户进程的可回收性仍由 wait/reap 验证。
+    static ref TIMER_PROBE_TARGET: Mutex<Option<Weak<crate::task::TaskControlBlock>>> =
         Mutex::new(None);
 }
 
@@ -359,6 +401,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::kernel_timer_irq_is_deferred",
             kernel_timer_irq_is_deferred,
+        ),
+        KernelTest::new(
+            "smp::user_timer_preempts_on_secondary_cpu",
+            user_timer_preempts_on_secondary_cpu,
         ),
         KernelTest::new("smp::ap_to_bsp_ipi_round_trip", ap_to_bsp_ipi_round_trip),
         KernelTest::new(
@@ -436,6 +482,16 @@ fn user_probe_program() -> &'static [u8] {
     }
 }
 
+/// 取得完全不进入内核的用户态忙循环。
+fn timer_probe_program() -> &'static [u8] {
+    // Safety: start/end 由同一个只读汇编 section 定义，且 end 紧跟程序末尾。
+    unsafe {
+        let start = core::ptr::addr_of!(__smp_timer_probe_start) as usize;
+        let end = core::ptr::addr_of!(__smp_timer_probe_end) as usize;
+        core::slice::from_raw_parts(start as *const u8, end - start)
+    }
+}
+
 /// 返回“CPU0 首次完成 getcpu”标签在 probe 内的偏移。
 fn user_probe_resched_offset() -> usize {
     let start = core::ptr::addr_of!(__smp_user_probe_start) as usize;
@@ -448,11 +504,13 @@ fn user_probe_resched_offset() -> usize {
     ready - start
 }
 
-/// 构造完整用户 TCB，再把极小 probe 放入新的匿名映射。
+/// 构造完整用户 TCB，再把指定的极小程序放入新的匿名映射。
 ///
 /// `/init` 只在 CPU0 上作为现有用户 ABI/stack/trap-context 脚手架被解析；
 /// 它的入口不会执行，fd 也会在任务对 AP 可见前关闭。
-fn build_user_probe_task() -> Result<(Arc<crate::task::TaskControlBlock>, usize), &'static str> {
+fn build_user_task(
+    program: &'static [u8],
+) -> Result<(Arc<crate::task::TaskControlBlock>, usize), &'static str> {
     let inode = crate::fs::vfs_lookup_absolute("/init")
         .or_else(|_| crate::fs::vfs_lookup_absolute("/initproc"))
         .map_err(|_| "ktest initramfs has no user ELF scaffold")?;
@@ -461,7 +519,6 @@ fn build_user_probe_task() -> Result<(Arc<crate::task::TaskControlBlock>, usize)
     let task = crate::task::TaskControlBlock::new(elf);
     task.process.close_files_on_exit();
 
-    let program = user_probe_program();
     if program.is_empty() || program.len() > crate::config::PAGE_SIZE {
         return Err("user probe does not fit in one page");
     }
@@ -505,7 +562,198 @@ fn build_user_probe_task() -> Result<(Arc<crate::task::TaskControlBlock>, usize)
         Ok(entry)
     })?;
     task.acquire_inner_lock().get_trap_cx().gp.pc = entry;
+    Ok((task, entry))
+}
+
+fn build_user_probe_task() -> Result<(Arc<crate::task::TaskControlBlock>, usize), &'static str> {
+    let (task, entry) = build_user_task(user_probe_program())?;
     Ok((task, entry + user_probe_resched_offset()))
+}
+
+/// 占住 CPU1，保证用户忙循环和 helper 能按确定的 FIFO 顺序预先排队。
+fn hold_timer_probe_cpu() {
+    let initially_enabled = crate::hal::local_irq_save();
+    if initially_enabled {
+        TIMER_PROBE_ERRORS.fetch_or(1, Ordering::Release);
+    }
+    crate::hal::local_irq_restore(true);
+    TIMER_HOLDER_READY.store(1, Ordering::Release);
+    while TIMER_HOLDER_RELEASE.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if !crate::hal::local_irq_save() {
+        TIMER_PROBE_ERRORS.fetch_or(2, Ordering::Release);
+    }
+}
+
+/// 该 helper 只有在用户忙循环被本地 timer 抢占后才可能取得 CPU1。
+fn stop_timer_probe() {
+    let cpu = crate::smp::cpu_id();
+    TIMER_HELPER_CPU.store(cpu, Ordering::Release);
+    let Some(task) = TIMER_PROBE_TARGET.lock().take().and_then(|task| task.upgrade()) else {
+        TIMER_PROBE_ERRORS.fetch_or(4, Ordering::Release);
+        return;
+    };
+    if cpu != 1 || task.task_status() != crate::task::TaskStatus::Queued(1) {
+        TIMER_PROBE_ERRORS.fetch_or(8, Ordering::Release);
+    }
+    task.acquire_inner_lock()
+        .add_signal(crate::task::Signals::SIGKILL);
+    TIMER_HELPER_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// CPU1 的用户态忙循环不执行 syscall/yield；只有本地调度 tick 能让 helper 运行。
+fn user_timer_preempts_on_secondary_cpu() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("user timer preemption test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    TIMER_HOLDER_READY.store(0, Ordering::Release);
+    TIMER_HOLDER_RELEASE.store(0, Ordering::Release);
+    TIMER_HELPER_RUNS.store(0, Ordering::Release);
+    TIMER_HELPER_CPU.store(usize::MAX, Ordering::Release);
+    TIMER_PROBE_ERRORS.store(0, Ordering::Release);
+    if TIMER_PROBE_TARGET.lock().is_some() {
+        return Err("stale timer probe target remained before test");
+    }
+
+    let (task, _) = build_user_task(timer_probe_program())?;
+    task.set_initial_cpus_allowed(1usize << 1);
+
+    let timer_irq_before = crate::smp::timer_irq_count(1);
+    let timer_deferred_before = crate::smp::timer_deferred_count(1);
+    let holder = crate::task::spawn_ktest_task_on(1, hold_timer_probe_cpu);
+    let ready_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while TIMER_HOLDER_READY.load(Ordering::Acquire) == 0
+        || holder.task_status() != crate::task::TaskStatus::Running(1)
+    {
+        if crate::hal::get_time() >= ready_deadline {
+            TIMER_HOLDER_RELEASE.store(1, Ordering::Release);
+            return Err("CPU1 timer holder did not become current");
+        }
+        core::hint::spin_loop();
+    }
+
+    let parent_task = crate::task::current_task().ok_or("ktest runner has no current task")?;
+    let parent = parent_task.process.clone();
+    drop(parent_task);
+    let process = task.process.clone();
+    let pid = task.pid();
+    if parent.add_child(process.clone()).is_err() {
+        TIMER_HOLDER_RELEASE.store(1, Ordering::Release);
+        return Err("failed to attach timer probe to ktest runner");
+    }
+    process.set_parent(Some(Arc::downgrade(&parent)));
+
+    let previous_target = TIMER_PROBE_TARGET.lock().replace(Arc::downgrade(&task));
+    assert!(
+        previous_target.is_none(),
+        "timer probe target changed during setup"
+    );
+    // holder 仍占有 current，因此两个远程入队 IPI 会先被 idle 安全点消费；
+    // FIFO 保证用户任务先运行，helper 不会借入队 IPI 制造抢占假阳性。
+    crate::task::publish_task_on(task.clone(), 1);
+    let helper = crate::task::spawn_ktest_task_on(1, stop_timer_probe);
+    let weak_task = Arc::downgrade(&task);
+    let weak_helper = Arc::downgrade(&helper);
+    let weak_holder = Arc::downgrade(&holder);
+    TIMER_HOLDER_RELEASE.store(1, Ordering::Release);
+
+    let mut timed_out = false;
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        while !process.is_zombie()
+            || task.task_status() != crate::task::TaskStatus::Zombie
+            || helper.task_status() != crate::task::TaskStatus::Zombie
+            || holder.task_status() != crate::task::TaskStatus::Zombie
+            || crate::task::processor::cpu_has_current(1)
+            || crate::task::run_queue_count(1) != 0
+        {
+            if crate::hal::get_time() >= deadline {
+                timed_out = true;
+                break;
+            }
+            // CPU0 只处理自身 timer 与来自 CPU1 的 TLB ack；不向 CPU1 发送
+            // 调度 IPI，因此成功路径的唯一抢占来源仍是 CPU1 本地 timer。
+            crate::task::run_task_safe_point();
+            core::hint::spin_loop();
+        }
+    });
+
+    if timed_out {
+        // 失败路径才允许 IPI 介入，以便结束无限用户循环，不污染后续用例。
+        task.acquire_inner_lock()
+            .add_signal(crate::task::Signals::SIGKILL);
+        let _ = crate::smp::request_reschedule(1);
+        let cleanup_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while (!process.is_zombie()
+            || task.task_status() != crate::task::TaskStatus::Zombie
+            || helper.task_status() != crate::task::TaskStatus::Zombie
+            || holder.task_status() != crate::task::TaskStatus::Zombie
+            || crate::task::processor::cpu_has_current(1)
+            || crate::task::run_queue_count(1) != 0)
+            && crate::hal::get_time() < cleanup_deadline
+        {
+            crate::hal::with_local_interrupts_enabled(core::hint::spin_loop);
+        }
+        if !process.is_zombie() || crate::task::processor::cpu_has_current(1) {
+            return Err("timer probe cleanup did not quiesce CPU1");
+        }
+    }
+
+    let evidence_ok = TIMER_HELPER_RUNS.load(Ordering::Acquire) == 1
+        && TIMER_HELPER_CPU.load(Ordering::Acquire) == 1
+        && TIMER_PROBE_ERRORS.load(Ordering::Acquire) == 0
+        && crate::smp::timer_irq_count(1) > timer_irq_before
+        && crate::smp::timer_deferred_count(1) > timer_deferred_before;
+    if !timed_out
+        && (!evidence_ok
+            || task.last_cpu() != 1
+            || crate::task::run_queue_count(1) != 0)
+    {
+        // 先完成统一 reap/drop，再向 runner 报告证据缺失，避免失败污染后续用例。
+        TIMER_PROBE_ERRORS.fetch_or(16, Ordering::Release);
+    }
+
+    let reaped = crate::task::ProcessManager::wait_child(
+        &parent,
+        pid as isize,
+        true,
+        true,
+        false,
+        false,
+        false,
+    )
+    .map_err(|_| "ktest parent could not reap timer probe")?
+    .ok_or("timer probe was not waitable")?;
+    if reaped.pid != pid {
+        return Err("timer probe reaped the wrong child");
+    }
+    drop(crate::task::take_zombie_tasks(usize::MAX));
+    drop(process);
+    drop(task);
+    drop(helper);
+    drop(holder);
+    let _ = TIMER_PROBE_TARGET.lock().take();
+    if weak_task.upgrade().is_some()
+        || weak_helper.upgrade().is_some()
+        || weak_holder.upgrade().is_some()
+    {
+        return Err("timer preemption probe retained a strong TCB owner");
+    }
+    if timed_out {
+        return Err("CPU1 user busy loop was not preempted by its local timer");
+    }
+    if TIMER_PROBE_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("CPU1 timer preemption evidence was incomplete");
+    }
+    Ok(())
 }
 
 /// CPU1 等到用户任务确实完成 CPU0 getcpu 后，才发送生产 RESCHEDULE IPI。

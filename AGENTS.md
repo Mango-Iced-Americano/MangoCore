@@ -171,15 +171,21 @@ Running owner 时在 per-task 请求槽锁内直接发布；排除 owner 时先�
 切回 idle，完成 `Running(source) -> Queued(target)` 后才发布 Applied；
 Blocking 窗口等待回到 Running 或进入 Blocked 后重试。请求槽锁不得跨 IPI、
 TLB ack、context switch 或其它等待点。
+B39 把全局调度 deadline 拆为每 CPU 独立的 100 Hz 绝对 deadline。hard timer IRQ
+仍只发布 deferred 标志，真正调度只发生在既有安全点；CPU0 额外独占全局
+timer/timeout/timerfd/net poll，AP 只推进本地 quantum。AP 插入更早的全局 timer 时，
+必须先释放 timer queue 锁，再发送 `TIMER_REPROGRAM` 请求 CPU0 重编程；每个 CPU
+都必须先写 deadline、编程 one-shot timer，最后才开放本地 timer interrupt。计数器可由
+AP 原子累加，但会读取 FS/net 并打印 console 的格式化性能快照仍限定在 CPU0。
 该能力不改变默认 mask：普通新任务和用户任务仍从 CPU0-only 开始。动态 kernel-global
 映射已支持全 CPU 撤映射 ack 和内核栈延迟回收；用户 trap-return 已登记 MM cached CPU 并追赶本地 generation，
 用户 PTE 修改已能在 VM 锁外完成 shootdown 和 frame 延迟释放；LoongArch 已使用
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；RV64 单页 shootdown 使用
 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定原子槽传递目标
 ASID/VPN，按硬件相邻偶/奇页对执行 `invtlb 0x5`。当前仍是单调历史 CPU mask；不要把
-B29/B30/B31/B32/B33/B34/B35/B36/B37/B38 的受控迁移、真实 CPU/affinity 查询、
+B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
-RESCHEDULE 外推为默认全核调度、多写侧压力已验收、任意内核点
+RESCHEDULE/本地 timer 抢占不得外推为默认全核调度、多写侧压力已验收、任意内核点
 抢占、连续 range 或安全 CPU detach 已完成。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）

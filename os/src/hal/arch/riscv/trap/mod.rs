@@ -94,7 +94,8 @@ fn handle_timer_interrupt() {
 pub fn init_ipi_only() {
     set_kernel_trap_entry();
     // Safety: AP 尚未 online，无发送者；先清全部局部 enable 和旧 SSIP，
-    // 再单独打开 SSIE，避免 timer/external IRQ 混入本工作包。
+    // 再单独打开 SSIE。timer 会在调度器发布首个 deadline 后另行开放，
+    // external IRQ 在当前阶段继续保持关闭。
     unsafe {
         asm!("csrw sie, zero", "csrci sip, 2");
         sie::set_ssoft();

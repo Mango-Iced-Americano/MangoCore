@@ -51,7 +51,7 @@ pub use manager::{
     remove_tasks_from_queues, remove_zombie_tasks_by_pid, run_deferred_timer_work,
     run_task_safe_point, send_signal_to_interruptible, sleep_interruptible,
     take_one_interruptible_zombie, take_zombie_tasks, task_manager_counts, timer_interrupt_handler,
-    timer_subsystem_init, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
+    timer_cpu_init, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
     TimerAction, WaitQueue, WaitResult,
 };
 use manager::{fetch_task, finish_switch_out};

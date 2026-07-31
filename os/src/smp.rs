@@ -6,7 +6,7 @@
 use core::{
     hint::spin_loop,
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 pub const BOOT_CPU_ID: usize = 0;
@@ -53,6 +53,10 @@ struct PerCpu {
     stopped: AtomicBool,
     /// 本 CPU 是否有尚未在安全点处理的 timer 工作；多个 IRQ 可以合并。
     timer_pending: AtomicBool,
+    /// 本 CPU 下一次调度 tick 的绝对纳秒 deadline，只由所属 CPU 推进。
+    sched_tick_deadline_ns: AtomicU64,
+    /// AP 发布了更早的全局 timer；CPU0 在安全点读取队列并重编程本地硬件。
+    timer_reprogram_requested: AtomicBool,
     /// 本 CPU 进入 timer 硬中断 fast path 的次数，仅用于诊断和 focused test。
     timer_irq_count: AtomicUsize,
     /// 本 CPU 在任务或 idle 安全点完成 timer 工作的批次数。
@@ -81,6 +85,8 @@ impl PerCpu {
             stop_requested: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             timer_pending: AtomicBool::new(false),
+            sched_tick_deadline_ns: AtomicU64::new(0),
+            timer_reprogram_requested: AtomicBool::new(false),
             timer_irq_count: AtomicUsize::new(0),
             timer_deferred_count: AtomicUsize::new(0),
         }
@@ -178,6 +184,8 @@ impl IpiReason {
     const USER_TLB_SYNC: Self = Self(1 << 6);
     /// 固定槽中已发布目标 MM 的 ASID/VPN；目标必须精确失效后设置槽内 ack。
     const USER_TLB_PAGE_SYNC: Self = Self(1 << 7);
+    /// 全局 timer 队列出现更早 deadline；CPU0 在安全点重编程本地 timer。
+    const TIMER_REPROGRAM: Self = Self(1 << 8);
 
     const fn bits(self) -> u32 {
         self.0
@@ -507,6 +515,13 @@ pub fn handle_ipi() {
     if reasons & IpiReason::RESCHEDULE.bits() != 0 {
         // runnable 已在发送方释放 runqueue 锁前完成发布；这里只留下无锁提示。
         local.need_resched.store(true, Ordering::Release);
+    }
+    if reasons & IpiReason::TIMER_REPROGRAM.bits() != 0 {
+        // 发送方已经先发布标志；handler 再次置位使纯 mailbox 消费也保持幂等。
+        // 读取全局 timer 队列需要普通锁，必须留到 CPU0 的任务/idle 安全点。
+        local
+            .timer_reprogram_requested
+            .store(true, Ordering::Release);
     }
     if reasons & IpiReason::KERNEL_TLB_SYNC.bits() != 0 {
         // 必须先快照 request，再做失效。若反过来，发送方可能在“失效完成”
@@ -879,6 +894,85 @@ pub fn publish_local_timer_interrupt() {
     local.timer_pending.store(true, Ordering::Release);
 }
 
+/// 为当前 CPU 建立第一个绝对调度 tick。
+///
+/// timer source 在本函数之后才会开放；CAS 把重复初始化直接变成启动错误，
+/// 避免两套代码各自覆盖 deadline，制造难以复现的 tick 漂移。
+pub(crate) fn init_local_sched_tick(deadline_ns: u64) {
+    assert_ne!(deadline_ns, 0, "scheduler tick deadline cannot be zero");
+    let local = &PER_CPUS[self::cpu_id()];
+    assert!(
+        local
+            .sched_tick_deadline_ns
+            .compare_exchange(0, deadline_ns, Ordering::Release, Ordering::Relaxed)
+            .is_ok(),
+        "CPU {} initialized its scheduler tick twice",
+        self::cpu_id()
+    );
+}
+
+/// 返回当前 CPU 下一次调度 tick 的绝对纳秒 deadline。
+pub(crate) fn local_sched_tick_deadline() -> u64 {
+    PER_CPUS[self::cpu_id()]
+        .sched_tick_deadline_ns
+        .load(Ordering::Acquire)
+}
+
+/// 若本地调度 tick 已到期，则按绝对时间推进到下一周期。
+///
+/// 中断可能被内核临界区推迟，因此不能简单执行 `deadline += period` 多次补账；
+/// 落后一周期以上时直接从当前时间开始下一周期，避免安全点陷入追赶风暴。
+pub(crate) fn advance_local_sched_tick(now_ns: u64, period_ns: u64) -> bool {
+    let local = &PER_CPUS[self::cpu_id()];
+    let deadline = local.sched_tick_deadline_ns.load(Ordering::Acquire);
+    assert_ne!(deadline, 0, "local scheduler tick is not initialized");
+    if now_ns < deadline {
+        return false;
+    }
+
+    let next = deadline.saturating_add(period_ns);
+    let next = if now_ns >= next {
+        now_ns.saturating_add(period_ns)
+    } else {
+        next
+    };
+    local
+        .sched_tick_deadline_ns
+        .store(next, Ordering::Release);
+    true
+}
+
+/// AP 通知 CPU0：全局 timer 队列出现了更早的 deadline。
+///
+/// 标志先于 doorbell 发布，因此 CPU0 即使正以 IRQ-off 状态运行 idle 循环，
+/// 也能直接在下一轮安全点看到请求。IPI 发送失败不会丢 timer：CPU0 自己的
+/// 周期 tick 最迟会在一个调度周期内重新扫描全局队列。
+pub(crate) fn request_timer_reprogram() {
+    let sender = self::cpu_id();
+    assert_ne!(
+        sender, BOOT_CPU_ID,
+        "CPU0 must reprogram its timer without a self IPI"
+    );
+    PER_CPUS[BOOT_CPU_ID]
+        .timer_reprogram_requested
+        .store(true, Ordering::Release);
+    if send_ipi(BOOT_CPU_ID, IpiReason::TIMER_REPROGRAM).is_err() {
+        PER_CPUS[sender]
+            .ipi_send_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// CPU0 在关中断安全点消费一次可合并的 timer 重编程请求。
+pub(crate) fn take_timer_reprogram_request() -> bool {
+    if self::cpu_id() != BOOT_CPU_ID {
+        return false;
+    }
+    PER_CPUS[BOOT_CPU_ID]
+        .timer_reprogram_requested
+        .swap(false, Ordering::Acquire)
+}
+
 /// 查询当前 CPU 是否仍有 deferred timer 工作。
 pub fn local_timer_pending() -> bool {
     PER_CPUS[self::cpu_id()]
@@ -1234,6 +1328,9 @@ extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
             // text/data/idle stack；调度高虚拟地址 kernel stack 前必须安装
             // BSP 已构造完成的内核页表，并由 activate 完成本地 TLB 刷新。
             crate::mm::activate_kernel_page_table();
+            // 先建立未来 deadline，再开放本地 timer source。此后 AP 只处理
+            // 自己的调度 tick，全局 timer callback 仍由 CPU0 独占。
+            crate::task::timer_cpu_init();
             crate::task::run_tasks();
         }
         if !service_secondary_ipi_work() {

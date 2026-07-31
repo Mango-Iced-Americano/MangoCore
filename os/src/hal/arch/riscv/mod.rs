@@ -24,7 +24,6 @@ pub mod rv_board;
 
 pub fn machine_init() {
     trap::init();
-    trap::enable_timer_interrupt();
     trap::enable_ipi_interrupt();
     let user_asids = sv39::init_asid_allocator();
     if user_asids == 0 {
@@ -42,12 +41,17 @@ pub fn machine_init() {
             ),
         }
     }
-    // First timer deadline is set by timer_subsystem_init() after boot.
+    // 当前 CPU 的第一个 deadline 会在开放 STIE 前由 timer_cpu_init() 写入。
 }
 
 use time::set_next_trigger;
 
 pub use trap::context::MachineContext;
+
+/// 在 deadline 已经写入后开放当前 hart 的 supervisor timer interrupt。
+pub fn enable_local_timer_interrupt() {
+    trap::enable_timer_interrupt();
+}
 
 pub type KernelPageTableImpl = sv39::Sv39PageTable;
 pub type PageTableImpl = sv39::Sv39PageTable;
@@ -91,8 +95,8 @@ pub fn remote_user_tlb_invalidate_page(
 
 pub fn bootstrap_init(cpu_id: usize) {
     if cpu_id != crate::smp::BOOT_CPU_ID {
-        // AP 只开放 supervisor software interrupt；Phase 3 可进入本地调度器，
-        // 但 timer 和 external interrupt 仍保持关闭。
+        // AP 先只开放 software interrupt；本地调度器建立首个 deadline 后
+        // 才单独加入 timer source，external interrupt 仍保持关闭。
         trap::init_ipi_only();
     }
 }

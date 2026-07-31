@@ -2198,45 +2198,38 @@ static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 static TIMEOUT_WAITQUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 static KERNEL_TIMER_QUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 
-// ── High-res / sched tick state ──
-static NEXT_SCHED_TICK_NS: AtomicU64 = AtomicU64::new(0);
+// 每 CPU 使用同一周期，但各自维护绝对 deadline，避免多核共同推进一个 tick。
 const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
 
-fn program_next_event(next_timer_ns: u64) {
+/// 按当前 CPU 的职责重编程本地 one-shot timer。
+///
+/// AP 只考虑自己的调度 tick；CPU0 额外承担全局 timer queue，并选择两者中
+/// 更早的 deadline。调用方必须已经关闭本地中断，且不能持有 timer queue 锁。
+fn rearm_local_timer() {
     let now_ns = crate::timer::now_ns();
-    let next_sched_ns = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
-    let next_timer_ns = if next_timer_ns == 0 {
-        u64::MAX
-    } else {
-        next_timer_ns
-    };
-
-    let next_ns = next_timer_ns.min(next_sched_ns.max(now_ns.saturating_add(1)));
+    let mut next_ns = crate::smp::local_sched_tick_deadline();
+    if crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID {
+        let global_deadline = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
+        if global_deadline != 0 {
+            next_ns = next_ns.min(global_deadline);
+        }
+    }
+    next_ns = next_ns.max(now_ns.saturating_add(1));
     let delta_ns = next_ns.saturating_sub(now_ns).max(1);
     let delta_ticks = crate::timer::ns_to_ticks_ceil(delta_ns);
-
     crate::hal::program_timer_delta(delta_ticks);
 }
 
-/// 重编程硬件 timer，使其在下一次调度 tick 或最早 kernel timer deadline 触发。
+/// 初始化当前 CPU 的本地调度 timer。
 ///
-/// # Locking
-///
-/// 调用方必须已经关闭本地 timer interrupt，因为本函数会读取
-/// `KERNEL_TIMER_QUEUE` 并与 timer interrupt 路径共享状态。
-fn reprogram_timer_irqoff() {
-    let next_timer_ns = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
-    program_next_event(next_timer_ns);
-}
-
-/// 初始化内核定时器子系统。
-///
-/// 设置第一个调度 tick，并把硬件 timer 编程到首个事件。
-pub fn timer_subsystem_init() {
+/// 必须先发布未来 deadline、写入硬件 compare，再开放 timer source；否则旧的
+/// pending 电平可能在调度状态尚未就绪时进入 trap。
+pub fn timer_cpu_init() {
     let flags = local_irq_save();
     let now_ns = crate::timer::now_ns();
-    NEXT_SCHED_TICK_NS.store(now_ns + SCHED_TICK_NS, AtomicOrdering::Relaxed);
-    reprogram_timer_irqoff();
+    crate::smp::init_local_sched_tick(now_ns.saturating_add(SCHED_TICK_NS));
+    rearm_local_timer();
+    crate::hal::enable_local_timer_interrupt();
     local_irq_restore(flags);
 }
 
@@ -2247,14 +2240,23 @@ pub fn timer_subsystem_init() {
 /// 函数会短暂关闭本地中断并持有 `KERNEL_TIMER_QUEUE` 锁；callback 不在此处执行。
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
     let flags = local_irq_save();
-    let new_is_earliest = KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
+    let (new_is_earliest, timer_len) = {
+        let mut queue = KERNEL_TIMER_QUEUE.lock();
+        let new_is_earliest = queue.add_action(action, deadline);
+        (new_is_earliest, queue.len())
+    };
     crate::task::perf::record_ktimer_add();
-    let timer_len = { KERNEL_TIMER_QUEUE.lock().len() };
     crate::task::perf::record_ktimer_len(timer_len);
-    if new_is_earliest && !crate::smp::local_timer_pending() {
-        // hard IRQ 已把 one-shot 静默时，安全点即将按完整队列重新编程；
-        // 此处只发布更早的软件 deadline，避免长 syscall 中反复触发到期 IRQ。
-        reprogram_timer_irqoff();
+    if new_is_earliest {
+        if crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID {
+            if !crate::smp::local_timer_pending() {
+                // hard IRQ 已把 one-shot 静默时，当前安全点会按完整队列重编程。
+                rearm_local_timer();
+            }
+        } else {
+            // 全局队列由 CPU0 驱动；AP 不能错误地把自己的 timer 指向该 deadline。
+            crate::smp::request_timer_reprogram();
+        }
     }
     local_irq_restore(flags);
 }
@@ -2304,7 +2306,9 @@ pub fn timer_interrupt_handler() {
 /// 让出 CPU；idle scheduler 调用时已经处于调度上下文，可以忽略该返回值。
 pub fn run_deferred_timer_work() -> bool {
     let irq_flags = local_irq_save();
-    if !crate::smp::take_local_timer_pending() {
+    let timer_fired = crate::smp::take_local_timer_pending();
+    let reprogram_requested = crate::smp::take_timer_reprogram_request();
+    if !timer_fired && !reprogram_requested {
         local_irq_restore(irq_flags);
         return false;
     }
@@ -2312,54 +2316,47 @@ pub fn run_deferred_timer_work() -> bool {
     let handler_profile_start = crate::task::processor::sched_profile_cycle_start();
     let now = crate::timer::TimeSpec::now();
     let now_ns = now.to_ns_saturating();
+    let is_boot_cpu = crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID;
 
-    // 1. Expired kernel timers
-    let expired_timers = { KERNEL_TIMER_QUEUE.lock().pop_expired(now) };
     let mut woke_task = false;
-    for timer in expired_timers {
-        if KernelTimerQueue::run_timer(timer, now) {
+    if is_boot_cpu {
+        // 全局 callback 只由 CPU0 执行。AP 即使产生调度 tick，也不能进入
+        // timeout、timerfd、网络或其他尚未完成 SMP 审计的共享路径。
+        let expired_timers = { KERNEL_TIMER_QUEUE.lock().pop_expired(now) };
+        for timer in expired_timers {
+            if KernelTimerQueue::run_timer(timer, now) {
+                woke_task = true;
+            }
+        }
+
+        // legacy timeout queue 没有独立硬件 deadline，仍由 CPU0 的本地 tick 扫描。
+        if TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed) {
+            let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
+            if !timeout_queue.is_empty() {
+                timeout_queue.wake_expired(now);
+            } else {
+                TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+            }
+        }
+
+        if crate::fs::timerfd::timerfd_registry_maybe_nonempty()
+            && !crate::fs::timerfd::timerfd_registry_is_empty()
+            && crate::fs::timerfd::wake_expired_timerfds(now) > 0
+        {
             woke_task = true;
         }
     }
 
-    // Also handle timeout-waitqueue expiry (kept for compatibility)
-    if TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed) {
-        let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
-        if !timeout_queue.is_empty() {
-            timeout_queue.wake_expired(now);
-        } else {
-            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
-        }
-    }
-
-    // timerfd
-    if crate::fs::timerfd::timerfd_registry_maybe_nonempty()
-        && !crate::fs::timerfd::timerfd_registry_is_empty()
-    {
-        if crate::fs::timerfd::wake_expired_timerfds(now) > 0 {
-            woke_task = true;
-        }
-    }
-
-    // 2. Sched tick
-    let mut need_resched = false;
-    let mut next_tick = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
-    if now_ns >= next_tick {
-        // Advance tick, but don't let it fall behind by more than one period.
-        next_tick = next_tick.saturating_add(SCHED_TICK_NS);
-        if now_ns >= next_tick {
-            next_tick = now_ns.saturating_add(SCHED_TICK_NS);
-        }
-        NEXT_SCHED_TICK_NS.store(next_tick, AtomicOrdering::Relaxed);
-
-        // Periodic housekeeping — only once per sched tick
+    // 每个 CPU 独立推进自己的调度 tick；只有 CPU0 顺带执行全局网络 poll。
+    let need_resched = crate::smp::advance_local_sched_tick(now_ns, SCHED_TICK_NS);
+    if need_resched && is_boot_cpu {
         crate::net::config::NET_INTERFACE.try_poll_irq();
-        need_resched = true;
     }
 
-    // 3. Re-program hardware
-    reprogram_timer_irqoff();
-    crate::smp::complete_local_timer_deferred();
+    rearm_local_timer();
+    if timer_fired {
+        crate::smp::complete_local_timer_deferred();
+    }
     crate::task::processor::record_sched_timer_handler_cycles(handler_profile_start);
     crate::task::perf::record_deferred_timer_snapshot();
     local_irq_restore(irq_flags);

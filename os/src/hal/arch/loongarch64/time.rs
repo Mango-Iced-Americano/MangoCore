@@ -2,7 +2,7 @@
 //!
 //! 读取 stable counter，并通过 timer CSR 设置下一次时钟中断。
 
-use core::arch::asm;
+use core::{arch::asm, sync::atomic::Ordering};
 
 use crate::config;
 
@@ -23,9 +23,9 @@ pub fn get_time() -> usize {
     counter
 }
 
-/// Program a one-shot timer to fire after `delta_ticks` timer counter ticks.
-/// The hardware timer counts down at CLOCK_FREQ / 4, so delta_ticks is in
-/// those units.  HW requires init_val to be a multiple of 4.
+/// Program a one-shot timer to fire after `delta_ticks` stable-counter ticks.
+/// TCFG.InitVal requires the low two bits to be zero, so round up to a
+/// multiple of four without changing the counter's frequency domain.
 #[inline]
 pub fn program_timer_delta(delta_ticks: u64) {
     let profile_start = crate::task::processor::sched_profile_cycle_start();
@@ -48,9 +48,8 @@ pub fn quiesce_local_timer_interrupt() {
 
 #[inline(always)]
 pub fn get_clock_freq() -> usize {
-    // Safety: `CLOCK_FREQ` is initialized during early machine init before
-    // normal timer users run; reads are word-sized and single-core.
-    unsafe { super::config::CLOCK_FREQ }
+    // CPU0 的 Release store 发生在 AP 启动 Release 之前；运行期不再改写。
+    super::config::CLOCK_FREQ.load(Ordering::Acquire)
 }
 pub fn get_timer_freq_first_time() {
     // 获取时钟晶振频率
@@ -67,7 +66,6 @@ pub fn get_timer_freq_first_time() {
         "[get_timer_freq_first_time] clk freq: {}(from CPUCFG)",
         cc_freq
     );
-    // Safety: early boot initializes `CLOCK_FREQ` before concurrent timer users
-    // exist.
-    unsafe { super::config::CLOCK_FREQ = cc_freq as usize }
+    // machine_init 只能由 CPU0 执行；Release 把频率发布给后续进入 timer_cpu_init 的 AP。
+    super::config::CLOCK_FREQ.store(cc_freq as usize, Ordering::Release);
 }

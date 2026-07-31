@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-30
+last_updated: 2026-07-31
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -81,12 +81,12 @@ related_docs:
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
 | 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
-| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根和本地 trap/IPI 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
-| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；syscall 受控窗口已在 CPU1 实际完成；B33 的 trap-return 安全点可消费远端 RESCHEDULE | 非 syscall 内核区间仍关中断，AP timer/外设 IRQ 仍关闭 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1、退出和 CPU0 回收 | 普通用户任务默认仍固定 CPU0，通用迁移与进程组停止语义待实现 |
+| 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
+| trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出 | 普通用户任务默认仍固定 CPU0，通用进程组停止语义待实现 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE，B34 完成 current 写侧，B35/B36 分别完成远程稳定 Blocked/Queued 写侧，B37 完成 affinity-aware 新任务与 wake 选点，B38 完成远程 Running/Blocking owner 交接 | 默认全核 mask、steal 与多写者 affinity 压力验证尚未完成 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
-| timer | CPU0 hard IRQ 只发布 per-CPU pending；旧 timer 工作与 RESCHEDULE 已在统一任务安全点合并 | 调度 tick 和全局 timer owner 尚未 per-CPU/CPU0 化，AP timer 仍关闭 |
+| timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活并在退出时完成双 CPU shootdown | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B38）
+#### 当前进度（SMP-P2.5-B15 至 B39）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -666,10 +666,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   payload 发生 ABA 错配；8 个 CPU 并发发布不同 VPN 的用例证明 reason 合并不会覆盖 payload，
   双架构 8 核 focused 均为 20/20 PASS；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
-  Per-CPU current/idle/RunQueue、scheduler-ready、受控 AP kernel-only 执行与远程阻塞
-  唤醒闭环。通用目标选择仍待后续批次；Phase 4 远端 MM shootdown 完成前不解除用户
-  任务 CPU0 affinity。B21 完成共享内核页表撤映射，B23 完成用户 MM
-  修改侧的锁外提交；两者仍不等于用户任务迁移与全进程语义已开放。
+  Per-CPU current/idle/RunQueue、scheduler-ready、affinity-aware 目标选择、受控 AP
+  用户执行、远程阻塞唤醒和每 CPU 调度 tick。普通任务默认全核 affinity、steal 及共享
+  子系统并发门禁仍待后续批次。B21 完成共享内核页表撤映射，B23 完成用户 MM 修改侧的
+  锁外提交；两者仍不等于全进程语义已开放。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 
@@ -686,6 +686,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   B36 允许远程稳定 Queued 线程在 owner runqueue 内更新 mask，排除 owner 时经短暂
   `Migrating` 搬到目标队列；B37 让普通新任务按继承 mask、locality 与近似负载选择首次 owner；
   B38 让远程 Running/Blocking 线程通过单槽请求等待 owner 在既有安全点完成交接；
+  B39 又让每个在线 CPU 拥有独立调度 tick，同时继续由 CPU0 串行执行全局 timer 工作；
 - 每 CPU 使用本地 Processor、RunQueue 和 idle context；AP zombie 先交给受锁全局
   registry，由 CPU0 回收。B21 的固定内核栈退休队列只处理映射/slot 生命周期，不等同于
   完整的 Per-CPU zombie 回收队列；
@@ -714,9 +715,16 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   - 显式 yield；
   - block/exit；
   - idle 调度循环；
-- timer interrupt 不直接切换任务，只推进本 CPU 100 Hz quantum 并设置 need_resched；
-- CPU0 独占全局 timeout、timerfd、console input、网络后台 poll、文件系统 reclaim 和周期性 housekeeping；
-- 非 CPU0 插入更早全局 timer 后，释放 timer queue 锁，再向 CPU0 发送 TIMER_REPROGRAM；
+- B39 的 timer interrupt 不直接切换任务，只发布本 CPU deferred timer；任务安全点推进该
+  CPU 的 100 Hz 绝对 deadline 并设置 `need_resched`。各 CPU 首先发布 deadline、编程
+  one-shot timer，最后才开放中断源；
+- CPU0 独占全局 timeout、timerfd、console input、网络后台 poll、文件系统 reclaim 和
+  周期性 housekeeping；AP timer 只产生本地调度 quantum，不执行这些全局 callback；
+- 非 CPU0 插入更早全局 timer 时，先释放 timer queue 锁，再用独立
+  `TIMER_REPROGRAM` reason 请求 CPU0 按“本地 tick 与全局最早 deadline 的较小值”重编程；
+- B39 focused 用真实 CPU1 用户死循环证明：没有 syscall、yield、数据 load/store 和远程
+  `RESCHEDULE` 的帮助，本地 timer 仍能在返回用户态安全点切出该任务并运行后继 helper。
+  双架构 8 核均为 25/25，初赛失败集合没有扩大；
 - zombie TCB 在退出 CPU 的 idle 栈上回收，禁止在仍使用自身内核栈时释放最后一个 Arc。
 
 #### 退出条件
@@ -724,7 +732,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - Phase 3a 的 CPU-bound 内核任务能通过目标选择和远程 enqueue 分布到全部在线 CPU；
 - 同一任务从不并发运行，重复 wake 不会重复入队；
 - affinity、迁移、阻塞和远程唤醒压力测试通过；Phase 3b 另行验证 steal 并保持可关闭；
-- 当前阶段普通用户任务仍默认固定 CPU0，避免在 TLB shootdown 完成前跨核运行。
+- 当前阶段普通用户任务仍默认固定 CPU0；定向用例可在已完成 MM shootdown 的边界内运行于 AP，
+  默认放宽还必须先通过共享子系统并发审计。
 
 ### Phase 4：TLB shootdown、ASID 与用户 MM
 
@@ -778,8 +787,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   则重新读取当前 CPU 和 current，避免未来迁移后沿用旧 owner。
 - B28 动态证明的是 CPU1 用户 trap/return、MM/ASID 激活、协作式 yield、退出和 CPU0 回收。
   它没有制造并发 PTE 修改，因此不得表述为 generation race 或远端页级 shootdown 的新证据，
-  也不代表同一用户任务已在 CPU0 与 CPU1 间迁移。AP timer、外部设备中断及 FS/net/driver
-  仍关闭，普通用户任务继续首次发布到 CPU0。
+  也不代表同一用户任务已在 CPU0 与 CPU1 间迁移。B28 当时 AP timer、外部设备中断及
+  FS/net/driver 仍关闭；B39 后 AP 已开放本地调度 timer，但外设与共享子系统边界不变，
+  普通用户任务仍默认首次发布到 CPU0。
 - B29 已补上“同一 TCB 真迁移”的最小生产闭环。TCB 只增加一次性 `migration_target`，且
   只允许 New 任务独占持有者或本地 current 请求；目标 kernel stack 先同步，再发布请求。
   源 current 在 idle 栈清空后，`requeue_after_switch()` 只锁目标队列，完成
@@ -844,6 +854,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   Zombie，则取消为 Retry，调用方按新状态重新走稳定路径。双架构 8 核 focused 均为 24/24，
   初赛保持 RV64 312/314、LA64 308/314。动态用例覆盖单请求者 Running 交接；多写者竞争和
   `Blocking` 瞬态只完成静态锁序审计，默认全核 mask 仍未开放。
+- B39 删除全局调度 tick deadline，改由每个 `PerCpu` 保存自己的下一次 100 Hz 绝对
+  deadline。CPU0 重编程本地 tick 与全局 timer queue 最早期限的较小值，AP 只推进自己的
+  quantum；AP 插入更早全局 timer 时在释放 queue 锁后向 CPU0 发送
+  `TIMER_REPROGRAM`。双架构都遵守“先编程 deadline、后开放中断源”，LoongArch 开 timer
+  时保留已经开放的 IPI bit。双架构 8 核 focused 均为 25/25，新增无 syscall 用户循环用例
+  明确证明 CPU1 的真实 timer 抢占；初赛保持 RV64 312/314、LA64 308/314。
 
 #### 退出条件
 

@@ -3,7 +3,7 @@ title: "MM 初始化与内核地址空间"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [mm, init, kernel-space, mapping, smp]
 ---
 
@@ -18,7 +18,7 @@ console::log_init();
 trace::init();
 mm::init();
 machine_init();
-task::timer_subsystem_init();
+task::timer_cpu_init();
 ```
 
 因此，内核堆、物理页分配器和内核页表必须在设备初始化、文件系统挂载和 `initproc` 加载之前可用。
@@ -72,7 +72,7 @@ rust_main()
   │     ├── frame_allocator::init_frame_allocator()
   │     └── KERNEL_SPACE.lock().activate()
   ├── machine_init()
-  ├── task::timer_subsystem_init()
+  ├── task::timer_cpu_init()
   ├── drivers / fs / net
   ├── task::add_initproc()
   └── task::run_tasks()
