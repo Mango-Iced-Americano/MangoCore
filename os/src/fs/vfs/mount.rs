@@ -755,7 +755,8 @@ impl MountFSInode {
 
     /// 检查挂载是否可写
     fn ensure_mount_writable(&self) -> Result<(), SyscallErr> {
-        if self.mount_fs.mount_flags().contains(MountFlags::RDONLY) {
+        if self.mount_fs.mount_flags.load(Ordering::Acquire) & MountFlags::RDONLY.bits() != 0
+        {
             return Err(SyscallErr::EROFS);
         }
         Ok(())
@@ -1759,7 +1760,7 @@ pub struct MountFS {
     /// DragonOS 存 Arc 而非 Weak——循环由 umount 时 take() 打破。
     self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
     /// 挂载标志
-    mount_flags: Mutex<MountFlags>,
+    mount_flags: AtomicU32,
     /// 挂载源
     mount_source: Mutex<Option<String>>,
     /// 挂载目标路径
@@ -1797,7 +1798,7 @@ impl MountFS {
             mountpoints: Mutex::new(BTreeMap::new()),
             path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
-            mount_flags: Mutex::new(mount_flags),
+            mount_flags: AtomicU32::new(mount_flags.bits()),
             mount_source: Mutex::new(None),
             mount_path: Mutex::new(None),
             propagation: MountPropagation::new_private(),
@@ -1827,7 +1828,7 @@ impl MountFS {
             mountpoints: Mutex::new(BTreeMap::new()),
             path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
-            mount_flags: Mutex::new(mount_flags),
+            mount_flags: AtomicU32::new(mount_flags.bits()),
             mount_source: Mutex::new(None),
             mount_path: Mutex::new(None),
             propagation: MountPropagation::new_private(),
@@ -2239,11 +2240,11 @@ impl MountFS {
     }
 
     pub fn mount_flags(&self) -> MountFlags {
-        *self.mount_flags.lock()
+        MountFlags::from_bits_truncate(self.mount_flags.load(Ordering::Acquire))
     }
 
     pub fn set_mount_flags(&self, flags: MountFlags) {
-        *self.mount_flags.lock() = flags;
+        self.mount_flags.store(flags.bits(), Ordering::Release);
     }
 
     pub fn has_writers(&self) -> bool {

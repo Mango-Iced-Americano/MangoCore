@@ -18,7 +18,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
 use super::vfs::IndexNode;
@@ -96,13 +96,13 @@ const VALID_SEG_SHIFT: usize = 9;
 /// 每页的 segment 数量（4096 / 512 = 8）
 const VALID_SEG_COUNT: usize = PAGE_SIZE >> VALID_SEG_SHIFT;
 /// 所有 segment 均有效的掩码（8 segments = 0xFF）
-const VALID_ALL: u8 = 0xFF;
+const VALID_ALL: u32 = 0xFF;
 
 /// 根据页面在文件中的位置计算初始 valid_mask。
 /// 页面超出旧 EOF → VALID_ALL（零填充即有效数据）；
 /// 页面跨越 EOF → 仅超出部分为有效零填充；
 /// 页面在旧文件内 → 0（数据尚未从后端加载）。
-fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u8 {
+fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u32 {
     let page_start = page_index * PAGE_SIZE;
     if page_start >= old_file_size {
         return VALID_ALL; // entirely beyond EOF → all zeros = valid
@@ -118,7 +118,7 @@ fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u8 {
 
 /// 计算 [page_offset, page_offset+len) 区间覆盖的 segment 位掩码
 /// 部分覆盖的 segment 也会被标记为有效
-fn mask_for_range(page_offset: usize, len: usize) -> u8 {
+fn mask_for_range(page_offset: usize, len: usize) -> u32 {
     if len == 0 {
         return 0;
     }
@@ -129,10 +129,10 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
         return 0;
     }
     let count = seg_end - seg_start;
-    let low_mask: u8 = if count == 8 {
-        u8::MAX
+    let low_mask: u32 = if count == 8 {
+        VALID_ALL
     } else {
-        (1u8 << count) - 1
+        (1u32 << count) - 1
     };
     low_mask << seg_start
 }
@@ -306,14 +306,14 @@ pub trait PageCacheBackend: Send + Sync {
 // ── PageEntry flags ──────────────────────────────────────────────────────
 
 /// PageEntry flags are orthogonal, mirroring the Linux page flags model.
-const PG_LOCKED: u8 = 1 << 0;
-const PG_UPTODATE: u8 = 1 << 1;
-const PG_DIRTY: u8 = 1 << 2;
-const PG_WRITEBACK: u8 = 1 << 3;
-const PG_ERROR: u8 = 1 << 4;
-pub const PG_REFERENCED: u8 = 1 << 5;
+const PG_LOCKED: u32 = 1 << 0;
+const PG_UPTODATE: u32 = 1 << 1;
+const PG_DIRTY: u32 = 1 << 2;
+const PG_WRITEBACK: u32 = 1 << 3;
+const PG_ERROR: u32 = 1 << 4;
+pub const PG_REFERENCED: u32 = 1 << 5;
 /// 页面在写回期间被再次标记为脏（写回完成后应恢复为 Dirty）
-pub const PG_REDIRTIED: u8 = 1 << 6;
+pub const PG_REDIRTIED: u32 = 1 << 6;
 
 // ── PageEntry ────────────────────────────────────────────────────────────
 
@@ -323,28 +323,30 @@ struct PageEntry {
     /// 物理页面
     page: Arc<FrameTracker>,
     /// Packed page state and flags.  State is derived from the orthogonal bits.
-    flags: AtomicU8,
+    flags: AtomicU32,
     /// 部分写入有效性位掩码：每 bit 对应 512B segment，1=已写入/有效
     /// 初始值取决于创建方式：populate → VALID_ALL，zero-fill → 0
-    valid_mask: AtomicU8,
+    valid_mask: AtomicU32,
 }
+
+const _: () = assert!(core::mem::size_of::<PageEntry>() == 16);
 
 impl PageEntry {
     fn new(page: Arc<FrameTracker>, state: PageState) -> Self {
         PageEntry {
             page,
-            flags: AtomicU8::new(Self::flags_for_state(state)),
-            valid_mask: AtomicU8::new(VALID_ALL),
+            flags: AtomicU32::new(Self::flags_for_state(state)),
+            valid_mask: AtomicU32::new(VALID_ALL),
         }
     }
 
     /// 创建一个带指定 valid_mask 的页面条目（跳过后端读取）
     /// 用于页面超出旧 EOF 的场景：valid_mask=VALID_ALL 表示全零页即有效
-    fn new_with_valid_mask(page: Arc<FrameTracker>, valid_mask: u8) -> Self {
+    fn new_with_valid_mask(page: Arc<FrameTracker>, valid_mask: u32) -> Self {
         PageEntry {
             page,
-            flags: AtomicU8::new(PG_UPTODATE),
-            valid_mask: AtomicU8::new(valid_mask),
+            flags: AtomicU32::new(PG_UPTODATE),
+            valid_mask: AtomicU32::new(valid_mask),
         }
     }
 
@@ -356,7 +358,7 @@ impl PageEntry {
         self.flags.store(Self::flags_for_state(state), Ordering::Release);
     }
 
-    const fn flags_for_state(state: PageState) -> u8 {
+    const fn flags_for_state(state: PageState) -> u32 {
         match state {
             PageState::Loading => PG_LOCKED,
             PageState::UpToDate => PG_UPTODATE,
@@ -366,7 +368,7 @@ impl PageEntry {
         }
     }
 
-    fn decode_state(flags: u8) -> PageState {
+    fn decode_state(flags: u32) -> PageState {
         if flags & PG_ERROR != 0 {
             PageState::Error
         } else if flags & PG_LOCKED != 0 && flags & PG_UPTODATE == 0 {
@@ -380,31 +382,31 @@ impl PageEntry {
         }
     }
 
-    fn flags(&self) -> u8 {
+    fn flags(&self) -> u32 {
         self.flags.load(Ordering::Acquire)
     }
 
-    fn compare_exchange_flags(&self, old: u8, new: u8) -> Result<u8, u8> {
+    fn compare_exchange_flags(&self, old: u32, new: u32) -> Result<u32, u32> {
         self.flags
             .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
     }
 
     // ── Page flags ──────────────────────────────────────────────────
 
-    fn set_flag(&self, flag: u8) {
+    fn set_flag(&self, flag: u32) {
         self.flags.fetch_or(flag, Ordering::Release);
     }
 
-    fn clear_flag(&self, flag: u8) {
+    fn clear_flag(&self, flag: u32) {
         self.flags.fetch_and(!flag, Ordering::Release);
     }
 
-    fn test_flag(&self, flag: u8) -> bool {
+    fn test_flag(&self, flag: u32) -> bool {
         (self.flags.load(Ordering::Acquire) & flag) != 0
     }
 
     /// Test-and-clear a flag atomically. Returns true if the flag was set.
-    fn test_and_clear_flag(&self, flag: u8) -> bool {
+    fn test_and_clear_flag(&self, flag: u32) -> bool {
         let old = self.flags.fetch_and(!flag, Ordering::AcqRel);
         (old & flag) != 0
     }
@@ -506,6 +508,10 @@ impl PageEntry {
         let mask = mask_for_range(page_offset, len);
         if mask == 0 {
             return self.is_fully_valid();
+        }
+        // valid_mask only gains bits, so a fully covered range cannot transition again.
+        if self.valid_mask.load(Ordering::Relaxed) & mask == mask {
+            return false;
         }
         let old = self.valid_mask.fetch_or(mask, Ordering::Release);
         (old | mask) == VALID_ALL
@@ -625,6 +631,14 @@ struct WriteLease {
     entry: Arc<PageEntry>,
     was_dirty: bool,
     newly_installed: bool,
+}
+
+#[derive(Default)]
+struct WriteStageCycles {
+    lookup: usize,
+    lease: usize,
+    copy: usize,
+    commit: usize,
 }
 
 // ── PageCache ────────────────────────────────────────────────────────────
@@ -912,52 +926,71 @@ impl PageCache {
         page_index: usize,
         old_file_size: Option<usize>,
         full_overwrite: bool,
+        stages: Option<&mut WriteStageCycles>,
     ) -> Result<WriteLease, SyscallErr> {
+        let mut stages = stages;
+        let lookup_start = stages.as_ref().map(|_| perf::perf_memory_io_time_now());
         let existing = self.entries.get(page_index);
-        if let Some(entry) = existing {
-            return self.acquire_existing_write_lease(page_index, entry);
+        if let (Some(stages), Some(start)) = (stages.as_deref_mut(), lookup_start) {
+            stages.lookup = stages
+                .lookup
+                .wrapping_add(perf::perf_memory_io_time_now().wrapping_sub(start));
         }
 
-        let init_mask = old_file_size.map_or(0, |size| initial_valid_mask(page_index, size));
-        let beyond_eof = init_mask == VALID_ALL;
-        let populate = !full_overwrite && !beyond_eof;
-
-        let _t_falloc = perf::perf_time_now();
-        let frame = if full_overwrite {
-            // Safety: the caller copies exactly PAGE_SIZE bytes into this new Loading entry
-            // before commit_write_lease can publish it as readable. On an error,
-            // abort_write_lease removes the entry before any reader can observe its contents.
-            unsafe { frame_alloc_uninit() }
-        } else {
-            frame_alloc()
-        }
-        .ok_or(SyscallErr::ENOMEM)?;
-        perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
-        let candidate = Arc::new(PageEntry::new(frame, PageState::Loading));
-        if populate {
-            perf::record_pc_miss();
-            if let Some(backend) = self.backend() {
-                backend.read_page(page_index, candidate.as_slice_mut())?;
+        let lease_start = stages.as_ref().map(|_| perf::perf_memory_io_time_now());
+        let result = (|| {
+            if let Some(entry) = existing {
+                return self.acquire_existing_write_lease(page_index, entry);
             }
-        }
-        if init_mask != 0 {
-            candidate.valid_mask.fetch_or(init_mask, Ordering::Release);
+
+            let init_mask = old_file_size.map_or(0, |size| initial_valid_mask(page_index, size));
+            let beyond_eof = init_mask == VALID_ALL;
+            let populate = !full_overwrite && !beyond_eof;
+
+            let _t_falloc = perf::perf_time_now();
+            let frame = if full_overwrite {
+                // Safety: the caller copies exactly PAGE_SIZE bytes into this new Loading entry
+                // before commit_write_lease can publish it as readable. On an error,
+                // abort_write_lease removes the entry before any reader can observe its contents.
+                unsafe { frame_alloc_uninit() }
+            } else {
+                frame_alloc()
+            }
+            .ok_or(SyscallErr::ENOMEM)?;
+            perf::record_pc_falloc_cycles(perf::perf_time_now().wrapping_sub(_t_falloc));
+            let candidate = Arc::new(PageEntry::new(frame, PageState::Loading));
+            if populate {
+                perf::record_pc_miss();
+                if let Some(backend) = self.backend() {
+                    backend.read_page(page_index, candidate.as_slice_mut())?;
+                }
+            }
+            if init_mask != 0 {
+                candidate.valid_mask.fetch_or(init_mask, Ordering::Release);
+            }
+
+            let winner = self.entries.insert_if_absent(page_index, candidate.clone());
+            let newly_installed = Arc::ptr_eq(&winner, &candidate);
+
+            if newly_installed {
+                winner.mark_referenced();
+                return Ok(WriteLease {
+                    page_index,
+                    entry: winner,
+                    was_dirty: false,
+                    newly_installed: true,
+                });
+            }
+
+            self.acquire_existing_write_lease(page_index, winner)
+        })();
+        if let (Some(stages), Some(start)) = (stages.as_deref_mut(), lease_start) {
+            stages.lease = stages
+                .lease
+                .wrapping_add(perf::perf_memory_io_time_now().wrapping_sub(start));
         }
 
-        let winner = self.entries.insert_if_absent(page_index, candidate.clone());
-        let newly_installed = Arc::ptr_eq(&winner, &candidate);
-
-        if newly_installed {
-            winner.mark_referenced();
-            return Ok(WriteLease {
-                page_index,
-                entry: winner,
-                was_dirty: false,
-                newly_installed: true,
-            });
-        }
-
-        self.acquire_existing_write_lease(page_index, winner)
+        result
     }
 
     fn acquire_existing_write_lease(
@@ -1454,7 +1487,7 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite)?;
+            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite, None)?;
             if let Err(error) = before_copy(sub_len) {
                 self.abort_write_lease(&lease);
                 return Err(error);
@@ -1506,7 +1539,7 @@ impl PageCache {
                 any_full_overwrite = true;
             }
             let lease =
-                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite, None) {
                     Ok(lease) => lease,
                     Err(error) => {
                         for item in &copies {
@@ -1746,6 +1779,8 @@ impl PageCache {
             return Ok(0);
         }
 
+        let write_start = perf::perf_memory_io_time_now();
+        let mut stages = WriteStageCycles::default();
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + len - 1) >> PAGE_SIZE_BITS;
 
@@ -1755,14 +1790,29 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = len.min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite)?;
+            let lease = self.prepare_write_lease(
+                start_page,
+                old_file_size,
+                full_page_overwrite,
+                Some(&mut stages),
+            )?;
+            let copy_start = perf::perf_memory_io_time_now();
             let dst = lease.entry.as_slice_mut();
             src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
             let became_full = lease.entry.mark_valid_and_check_full(page_offset, sub_len);
+            stages.copy = stages
+                .copy
+                .wrapping_add(perf::perf_memory_io_time_now().wrapping_sub(copy_start));
+            let commit_start = perf::perf_memory_io_time_now();
             self.commit_write_lease(&lease);
+            stages.commit = stages
+                .commit
+                .wrapping_add(perf::perf_memory_io_time_now().wrapping_sub(commit_start));
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
+            perf::record_pc_write(1, full_page_overwrite, perf::perf_memory_io_time_now().wrapping_sub(write_start));
+            perf::record_pc_write_stages(stages.lookup, stages.lease, stages.copy, stages.commit);
             balance_dirty_pages_for_write(sub_len);
             return Ok(sub_len);
         }
@@ -1791,7 +1841,7 @@ impl PageCache {
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
             let lease =
-                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite) {
+                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite, Some(&mut stages)) {
                     Ok(lease) => lease,
                     Err(error) => {
                         for item in &copies {
@@ -1810,6 +1860,7 @@ impl PageCache {
         }
 
         // Phase 2: copy data from UserBuffer into pages (no locks held)
+        let copy_start = perf::perf_memory_io_time_now();
         let mut src_offset = 0;
         for item in &copies {
             let dst = item.lease.entry.as_slice_mut();
@@ -1824,10 +1875,23 @@ impl PageCache {
             }
             src_offset += item.sub_len;
         }
+        stages.copy = stages
+            .copy
+            .wrapping_add(perf::perf_memory_io_time_now().wrapping_sub(copy_start));
 
+        let commit_start = perf::perf_memory_io_time_now();
         for item in &copies {
             self.commit_write_lease(&item.lease);
         }
+        stages.commit = stages
+            .commit
+            .wrapping_add(perf::perf_memory_io_time_now().wrapping_sub(commit_start));
+        perf::record_pc_write(
+            copies.len(),
+            copies.iter().all(|item| item.full_page_overwrite),
+            perf::perf_memory_io_time_now().wrapping_sub(write_start),
+        );
+        perf::record_pc_write_stages(stages.lookup, stages.lease, stages.copy, stages.commit);
         balance_dirty_pages_for_write(total_written);
         Ok(total_written)
     }
@@ -2060,7 +2124,11 @@ impl PageCache {
         for attempt in 0..WRITEBACK_RETRY_LIMIT {
             match backend.write_page(page_index, page) {
                 Err(SyscallErr::EAGAIN) if attempt + 1 < WRITEBACK_RETRY_LIMIT => {
-                    crate::task::suspend_current_and_run_next();
+                    if crate::task::current_task_ref().is_some() {
+                        crate::task::suspend_current_and_run_next();
+                    } else {
+                        core::hint::spin_loop();
+                    }
                 }
                 result => return result,
             }
@@ -2077,7 +2145,11 @@ impl PageCache {
         for attempt in 0..WRITEBACK_RETRY_LIMIT {
             match backend.write_pages(start_index, pages) {
                 Err(SyscallErr::EAGAIN) if attempt + 1 < WRITEBACK_RETRY_LIMIT => {
-                    crate::task::suspend_current_and_run_next();
+                    if crate::task::current_task_ref().is_some() {
+                        crate::task::suspend_current_and_run_next();
+                    } else {
+                        core::hint::spin_loop();
+                    }
                 }
                 result => return result,
             }
@@ -2179,7 +2251,11 @@ impl PageCache {
                 if !self.has_transient_pages(0, usize::MAX) {
                     return Ok(());
                 }
-                crate::task::suspend_current_and_run_next();
+                if crate::task::current_task_ref().is_some() {
+                    crate::task::suspend_current_and_run_next();
+                } else {
+                    core::hint::spin_loop();
+                }
                 continue;
             }
 
@@ -2202,7 +2278,11 @@ impl PageCache {
             }
 
             if attempt + 1 < WRITEBACK_RETRY_LIMIT {
-                crate::task::suspend_current_and_run_next();
+                if crate::task::current_task_ref().is_some() {
+                    crate::task::suspend_current_and_run_next();
+                } else {
+                    core::hint::spin_loop();
+                }
             }
         }
         Err(SyscallErr::EAGAIN)
@@ -2220,7 +2300,11 @@ impl PageCache {
                 if !self.has_transient_pages(start_index, end_index) {
                     return Ok(());
                 }
-                crate::task::suspend_current_and_run_next();
+                if crate::task::current_task_ref().is_some() {
+                    crate::task::suspend_current_and_run_next();
+                } else {
+                    core::hint::spin_loop();
+                }
                 continue;
             }
 
@@ -2243,7 +2327,11 @@ impl PageCache {
             }
 
             if attempt + 1 < WRITEBACK_RETRY_LIMIT {
-                crate::task::suspend_current_and_run_next();
+                if crate::task::current_task_ref().is_some() {
+                    crate::task::suspend_current_and_run_next();
+                } else {
+                    core::hint::spin_loop();
+                }
             }
         }
         Err(SyscallErr::EAGAIN)

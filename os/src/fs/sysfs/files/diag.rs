@@ -1127,6 +1127,26 @@ fn stats_blockio_content(
     );
     let _ = writeln!(
         s,
+        "pc_write_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_lease_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_LEASE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_commit_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_COMMIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
         "sata_read_reqs={}",
         read_counter(&crate::task::perf::SATA_READ_REQS)
     );

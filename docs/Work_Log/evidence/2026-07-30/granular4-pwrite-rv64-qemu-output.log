@@ -1,0 +1,1292 @@
+make: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make -f make/rv64.mk derived-comp
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART Debug Triggers  : 2 triggers
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[kernel] logger inited, level= Off
+[kernel] Boot protocol: RiscvFdt, hart_id=0, dtb_paddr=0xbfe00000
+[kernel] Console initialized.
+[memory] 194400 usable physical frames across 2 region(s)
+[memory] region0: [0x9089e000, 0xbfe00000) frames=193890
+[memory] region1: [0xbfe02000, 0xc0000000) frames=510
+.text [0x80200000, 0x80439000)
+.rodata [0x80439000, 0x80474000)
+.data [0x80474000, 0x80839000)
+.bss [0x80839000, 0x9089e000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory region
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Hello, world!
+[kernel] PRNG init warning: Entropy(DeviceUnavailable)
+[memory] reclaimed linker frames: [0x80474000, 0x80837000) frames=963
+[initramfs] unpacked: files=39 dirs=23 symlinks=1 bytes=3939303
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)
+[kernel] block device 0: official fs (MMIO 0x10001000)
+[kernel] block device 1: tools disk (MMIO 0x10002000)
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[ext4] backend: another_ext4
+[kernel] root device mounted at sdcard
+[mbr] registered /dev/vdb1 (type=0x83, size=2048M)
+[mbr] registered /dev/vdb2 (type=0xc, size=1280M)
+[ext4] backend: another_ext4
+[kernel] tools disk (vdb1) mounted at tools
+[kernel] net interface initialized (RoutingDevice: lo + eth)
+[init] pseudo-fs mount framework ready
+[kernel] perf_diag features: perf_stats=true perf_diag=true
+[init] /tmp is bind-mounted from ext4 /sdcard/tmp
+[init] /etc is bind-mounted from tools disk
+[init] bind mount /tools/bin -> /bin
+[init] bind mount /tools/sbin -> /sbin
+[init] bind mount /tools/lib -> /lib
+[init] bind mount /tools/usr -> /usr
+[init] bind mount /tools/root -> /root: skipped (errno=2)
+[init] PID1 profile=normal runner=/test-runner
+[test-runner] synchronizing clock
+[initproc] config source=/sdcard/os_test.conf mode=run mask=0x110 timer_smoke=false skip_apk=true
+[initproc] ensuring base directories...
+[initproc] runtime layout ready
+[initproc] linking musl/glibc libs to /lib ...
+[initproc] lib linking done, exit=0
+[initproc] prepare lmbench compatibility ...
+[initproc] lmbench compatibility done, exit=0
+[initproc] install libgcc_s: already exists, skipping
+[initproc] skip_apk=true: skipping install_apk_packages
+[initproc] run_selected_groups start mask=0x110
+[initproc] skip basic (mask bit0 not set)
+[initproc] skip busybox (mask bit1 not set)
+[initproc] skip lua (mask bit2 not set)
+#### OS COMP TEST GROUP START lmbench-musl ####
+#### OS COMP TEST GROUP START lmbench-musl ####
+latency measurements
+Simple syscall: 37.2069 microseconds
+Simple read: 87.4179 microseconds
+Simple write: 41.8730 microseconds
+Simple stat: 226.5600 microseconds
+Simple fstat: 95.6167 microseconds
+Simple open/close: 264.6000 microseconds
+Select on 100 fd's: 199.7000 microseconds
+Signal handler installation: 103.6964 microseconds
+Signal handler overhead: 146.5806 microseconds
+Protection fault: 37.8932 microseconds
+Pipe latency: 629.3370 microseconds
+Process fork+exit: 6319.0000 microseconds
+Process fork+execve: 12399.0000 microseconds
+[ext4_another] write_pages ino=3223 pages=1 total_bytes=51 prepare_cycles=0 commit_cycles=0 direct=false
+Process fork+/bin/sh -c: 306136.0000 microseconds
+File /var/tmp/XXX write bandwidth:19286 KB/sec
+Pagefaults on /var/tmp/XXX: 111.9336 microseconds
+0.524288 644
+file system latency
+0k	12	2370	2060
+1k	10	1745	2067
+4k	10	1730	2033
+10k	8	1535	1981
+Bandwidth measurements
+Pipe bandwidth: 37.37 MB/sec
+0.524288 83.94
+0.524288 85.99
+0.524288 4151.41
+0.524288 29.71
+context switch overhead
+
+"size=32k ovr=221.41
+2 125.16
+4 116.91
+8 113.34
+16 163.72
+24 174.43
+32 111.09
+64 115.91
+96 115.61
+#### OS COMP TEST GROUP END lmbench-musl ####
+[initproc] [diag] === stats lmbench-musl ===
+blk_vread_reqs=198
+blk_vread_secs=5592
+blk_vwrite_reqs=151
+blk_vwrite_secs=1288
+journal_commit_count=3
+journal_commit_bytes=65536
+device_flush_count=124
+virtio_write_requests=151
+virtio_write_bytes=659456
+virtio_read_requests=229
+writeback_batch_count=1
+writeback_page_count=1
+pwrite_uaccess_cycles=0
+pwrite_file_cycles=0
+pwrite_ext4_setup_cycles=317882
+pwrite_ext4_post_cycles=336926
+pwrite_total_count=0
+sata_read_reqs=0
+sata_read_bytes=0
+sata_read_ticks_total=0
+sata_read_ticks_max=0
+sata_write_reqs=0
+sata_write_bytes=0
+sata_write_ticks_total=0
+sata_write_ticks_max=0
+sata_flush_reqs=0
+sata_flush_ticks_total=0
+[initproc] [diag] === stats lmbench-musl end ===
+#### OS COMP TEST GROUP END lmbench-musl ####
+[initproc] done lmbench_testcode.sh in /musl exit_code=0
+#### OS COMP TEST GROUP START lmbench-glibc ####
+#### OS COMP TEST GROUP START lmbench-glibc ####
+latency measurements
+Simple syscall: 37.8904 microseconds
+Simple read: 94.9811 microseconds
+Simple write: 42.6742 microseconds
+Simple stat: 222.2000 microseconds
+Simple fstat: 104.8750 microseconds
+Simple open/close: 264.0909 microseconds
+Select on 100 fd's: 198.3333 microseconds
+Signal handler installation: 101.0508 microseconds
+Signal handler overhead: 143.5806 microseconds
+Protection fault: 39.5517 microseconds
+Pipe latency: 630.5027 microseconds
+Process fork+exit: 7670.0000 microseconds
+Process fork+execve: 12601.0000 microseconds
+[ext4_another] write_pages ino=3225 pages=1 total_bytes=51 prepare_cycles=0 commit_cycles=0 direct=false
+Process fork+/bin/sh -c: 299470.0000 microseconds
+File /var/tmp/XXX write bandwidth:44828 KB/sec
+Pagefaults on /var/tmp/XXX: 112.4336 microseconds
+0.524288 650
+file system latency
+0k	12	2261	2233
+1k	10	1715	2054
+4k	10	1749	2152
+10k	9	1619	1988
+Bandwidth measurements
+Pipe bandwidth: 38.62 MB/sec
+0.524288 89.39
+0.524288 87.07
+0.524288 2509.00
+0.524288 35.08
+context switch overhead
+
+"size=32k ovr=228.81
+2 119.32
+4 117.63
+8 114.07
+16 116.44
+24 119.86
+32 174.66
+64 168.60
+96 109.20
+#### OS COMP TEST GROUP END lmbench-glibc ####
+[initproc] [diag] === stats lmbench-glibc ===
+blk_vread_reqs=189
+blk_vread_secs=7008
+blk_vwrite_reqs=151
+blk_vwrite_secs=1288
+journal_commit_count=3
+journal_commit_bytes=65536
+device_flush_count=124
+virtio_write_requests=151
+virtio_write_bytes=659456
+virtio_read_requests=230
+writeback_batch_count=1
+writeback_page_count=1
+pwrite_uaccess_cycles=0
+pwrite_file_cycles=0
+pwrite_ext4_setup_cycles=13348
+pwrite_ext4_post_cycles=2520
+pwrite_total_count=0
+sata_read_reqs=0
+sata_read_bytes=0
+sata_read_ticks_total=0
+sata_read_ticks_max=0
+sata_write_reqs=0
+sata_write_bytes=0
+sata_write_ticks_total=0
+sata_write_ticks_max=0
+sata_flush_reqs=0
+sata_flush_ticks_total=0
+[initproc] [diag] === stats lmbench-glibc end ===
+#### OS COMP TEST GROUP END lmbench-glibc ####
+[initproc] done lmbench_testcode.sh in /glibc exit_code=0
+#### OS COMP TEST GROUP START iozone-musl ####
+#### OS COMP TEST GROUP START iozone-musl ####
+iozone automatic measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:02:46 2027
+
+	Auto Mode
+	Record Size 1 kB
+	File size set to 4096 kB
+	Command line used: ./iozone -a -r 1k -s 4m
+	Output is in kBytes/sec
+	Time Resolution = 0.000080 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+                                                                    random    random      bkwd     record     stride                                        
+              kB  reclen    write    rewrite      read    reread      read     write      read    rewrite       read    fwrite  frewrite     fread   freread
+            4096       1[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+      2217      2036      7107      7439[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+      4785      1998      4671[ext4_another] write_pages ino=3220 pages=1 total_bytes=4096 prepare_cycles=0 commit_cycles=0 direct=true
+       2057       5486[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+      2232      2256      4706      4702
+
+iozone test complete.
+iozone throughput write/read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:03:08 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 1 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000080 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3226 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3224 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2256.69 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1704.36 kB/sec
+	Min throughput per process 			=     539.23 kB/sec 
+	Max throughput per process 			=     592.47 kB/sec
+	Avg throughput per process 			=     564.17 kB/sec
+	Min xfer 					=     987.00 kB
+[ext4_another] write_pages ino=3224 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=247 total_bytes=1011712 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3226 pages=249 total_bytes=1019904 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=254 total_bytes=1040384 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2267.60 kB/sec
+	Parent sees throughput for  4 rewriters 	=    1998.52 kB/sec
+	Min throughput per process 			=     541.44 kB/sec 
+	Max throughput per process 			=     606.49 kB/sec
+	Avg throughput per process 			=     566.90 kB/sec
+	Min xfer 					=     984.00 kB
+
+	Children see throughput for  4 readers 		=    7537.55 kB/sec
+	Parent sees throughput for  4 readers 		=    6673.75 kB/sec
+	Min throughput per process 			=    1786.73 kB/sec 
+	Max throughput per process 			=    1960.54 kB/sec
+	Avg throughput per process 			=    1884.39 kB/sec
+	Min xfer 					=     979.00 kB
+
+	Children see throughput for 4 re-readers 	=    7612.85 kB/sec
+	Parent sees throughput for 4 re-readers 	=    6760.93 kB/sec
+	Min throughput per process 			=    1881.26 kB/sec 
+	Max throughput per process 			=    1942.34 kB/sec
+	Avg throughput per process 			=    1903.21 kB/sec
+	Min xfer 					=    1008.00 kB
+
+
+
+iozone test complete.
+iozone throughput random-read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:03:31 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 2 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000080 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2256.40 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1738.26 kB/sec
+	Min throughput per process 			=     525.19 kB/sec 
+	Max throughput per process 			=     606.24 kB/sec
+	Avg throughput per process 			=     564.10 kB/sec
+	Min xfer 					=     968.00 kB
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=245 total_bytes=1003520 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=252 total_bytes=1032192 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2255.06 kB/sec
+	Parent sees throughput for  4 rewriters 	=    1945.98 kB/sec
+	Min throughput per process 			=     532.14 kB/sec 
+	Max throughput per process 			=     606.79 kB/sec
+	Avg throughput per process 			=     563.76 kB/sec
+	Min xfer 					=     977.00 kB
+
+	Children see throughput for 4 random readers 	=    5567.45 kB/sec
+	Parent sees throughput for 4 random readers 	=    4862.66 kB/sec
+	Min throughput per process 			=    1289.88 kB/sec 
+	Max throughput per process 			=    1487.92 kB/sec
+	Avg throughput per process 			=    1391.86 kB/sec
+	Min xfer 					=     949.00 kB
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for 4 random writers 	=    2084.66 kB/sec
+	Parent sees throughput for 4 random writers 	=    1744.87 kB/sec
+	Min throughput per process 			=     498.64 kB/sec 
+	Max throughput per process 			=     542.24 kB/sec
+	Avg throughput per process 			=     521.16 kB/sec
+	Min xfer 					=     985.00 kB
+
+
+
+iozone test complete.
+iozone throughput read-backwards measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:03:59 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 3 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000080 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2203.91 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1745.47 kB/sec
+	Min throughput per process 			=     514.23 kB/sec 
+	Max throughput per process 			=     579.26 kB/sec
+	Avg throughput per process 			=     550.98 kB/sec
+	Min xfer 					=    1000.00 kB
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=252 total_bytes=1032192 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=246 total_bytes=1007616 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=252 total_bytes=1032192 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2310.97 kB/sec
+	Parent sees throughput for  4 rewriters 	=    1972.12 kB/sec
+	Min throughput per process 			=     550.36 kB/sec 
+	Max throughput per process 			=     606.26 kB/sec
+	Avg throughput per process 			=     577.74 kB/sec
+	Min xfer 					=     982.00 kB
+
+	Children see throughput for 4 reverse readers 	=    4678.27 kB/sec
+	Parent sees throughput for 4 reverse readers 	=    1502.72 kB/sec
+	Min throughput per process 			=     794.92 kB/sec 
+	Max throughput per process 			=    1485.32 kB/sec
+	Avg throughput per process 			=    1169.57 kB/sec
+	Min xfer 					=     969.00 kB
+
+
+
+iozone test complete.
+iozone throughput stride-read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:04:28 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 5 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000085 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    1994.96 kB/sec
+	Parent sees throughput for  4 initial writers 	=     751.38 kB/sec
+	Min throughput per process 			=     377.80 kB/sec 
+	Max throughput per process 			=     621.47 kB/sec
+	Avg throughput per process 			=     498.74 kB/sec
+	Min xfer 					=     967.00 kB
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=252 total_bytes=1032192 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=245 total_bytes=1003520 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=255 total_bytes=1044480 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2160.27 kB/sec
+	Parent sees throughput for  4 rewriters 	=    1044.86 kB/sec
+	Min throughput per process 			=     394.77 kB/sec 
+	Max throughput per process 			=     610.39 kB/sec
+	Avg throughput per process 			=     540.07 kB/sec
+	Min xfer 					=     976.00 kB
+
+	Children see throughput for 4 stride readers 	=    5566.51 kB/sec
+	Parent sees throughput for 4 stride readers 	=    4691.01 kB/sec
+	Min throughput per process 			=    1305.89 kB/sec 
+	Max throughput per process 			=    1488.95 kB/sec
+	Avg throughput per process 			=    1391.63 kB/sec
+	Min xfer 					=     982.00 kB
+
+
+
+iozone test complete.
+iozone throughput fwrite/fread measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:04:55 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 6 -i 7 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 fwriters 	=    2115.90 kB/sec
+	Parent sees throughput for  4 fwriters 		=    1683.57 kB/sec
+	Min throughput per process 			=     454.28 kB/sec 
+	Max throughput per process 			=     592.83 kB/sec
+	Avg throughput per process 			=     528.98 kB/sec
+	Min xfer 					=    1024.00 kB
+
+	Children see throughput for  4 freaders 	=    5104.97 kB/sec
+	Parent sees throughput for  4 freaders 		=    4711.73 kB/sec
+	Min throughput per process 			=    1222.27 kB/sec 
+	Max throughput per process 			=    1331.19 kB/sec
+	Avg throughput per process 			=    1276.24 kB/sec
+	Min xfer 					=    1024.00 kB
+
+
+
+iozone test complete.
+iozone throughput pwrite/pread measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:05:10 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 9 -i 10 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000080 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for 4 pwrite writers 	=    2154.17 kB/sec
+	Parent sees throughput for 4 pwrite writers 	=    1624.52 kB/sec
+	Min throughput per process 			=     481.72 kB/sec 
+	Max throughput per process 			=     593.60 kB/sec
+	Avg throughput per process 			=     538.54 kB/sec
+	Min xfer 					=     985.00 kB
+
+	Children see throughput for 4 pread readers 	=    8092.43 kB/sec
+	Parent sees throughput for 4 pread readers 	=    7054.87 kB/sec
+	Min throughput per process 			=    1887.78 kB/sec 
+	Max throughput per process 			=    2119.21 kB/sec
+	Avg throughput per process 			=    2023.11 kB/sec
+	Min xfer 					=     981.00 kB
+
+
+
+iozone test complete.
+iozone throughtput pwritev/preadv measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:05:29 2027
+
+	Selected test not available on the version.
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 11 -i 12 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000079 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2228.90 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1774.15 kB/sec
+	Min throughput per process 			=     516.67 kB/sec 
+	Max throughput per process 			=     592.26 kB/sec
+	Avg throughput per process 			=     557.23 kB/sec
+	Min xfer 					=     947.00 kB
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3223 pages=254 total_bytes=1040384 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=247 total_bytes=1011712 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3222 pages=251 total_bytes=1028096 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2315.62 kB/sec
+	Parent sees throughput for  4 rewriters 	=    2023.45 kB/sec
+	Min throughput per process 			=     547.68 kB/sec 
+	Max throughput per process 			=     607.76 kB/sec
+	Avg throughput per process 			=     578.91 kB/sec
+	Min xfer 					=     987.00 kB
+
+
+
+iozone test complete.
+#### OS COMP TEST GROUP END iozone-musl ####
+[initproc] [diag] === stats iozone-musl ===
+blk_vread_reqs=80323
+blk_vread_secs=644408
+blk_vwrite_reqs=79051
+blk_vwrite_secs=782520
+journal_commit_count=148
+journal_commit_bytes=3121152
+device_flush_count=918
+virtio_write_requests=80131
+virtio_write_bytes=400650240
+virtio_read_requests=80337
+writeback_batch_count=77
+writeback_page_count=18354
+pwrite_uaccess_cycles=146044070
+pwrite_file_cycles=4156446654
+pwrite_ext4_setup_cycles=829353538
+pwrite_ext4_post_cycles=77785596
+pwrite_total_count=4096
+sata_read_reqs=0
+sata_read_bytes=0
+sata_read_ticks_total=0
+sata_read_ticks_max=0
+sata_write_reqs=0
+sata_write_bytes=0
+sata_write_ticks_total=0
+sata_write_ticks_max=0
+sata_flush_reqs=0
+sata_flush_ticks_total=0
+[initproc] [diag] === stats iozone-musl end ===
+#### OS COMP TEST GROUP END iozone-musl ####
+[initproc] done iozone_testcode.sh in /musl exit_code=0
+#### OS COMP TEST GROUP START iozone-glibc ####
+#### OS COMP TEST GROUP START iozone-glibc ####
+iozone automatic measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:05:45 2027
+
+	Auto Mode
+	Record Size 1 kB
+	File size set to 4096 kB
+	Command line used: ./iozone -a -r 1k -s 4m
+	Output is in kBytes/sec
+	Time Resolution = 0.000081 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+                                                                    random    random      bkwd     record     stride                                        
+              kB  reclen    write    rewrite      read    reread      read     write      read    rewrite       read    fwrite  frewrite     fread   freread
+            4096       1[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+      2293      2367      6855      6574[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+      5095      2135      5144[ext4_another] write_pages ino=3220 pages=1 total_bytes=4096 prepare_cycles=0 commit_cycles=0 direct=true
+       2050       5633[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3220 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+      2207      2279      6444      6481
+
+iozone test complete.
+iozone throughput write/read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:06:08 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 1 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000081 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3219 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2242.95 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1835.81 kB/sec
+	Min throughput per process 			=     525.57 kB/sec 
+	Max throughput per process 			=     593.86 kB/sec
+	Avg throughput per process 			=     560.74 kB/sec
+	Min xfer 					=     969.00 kB
+[ext4_another] write_pages ino=3219 pages=251 total_bytes=1028096 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=246 total_bytes=1007616 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2267.26 kB/sec
+	Parent sees throughput for  4 rewriters 	=    1992.37 kB/sec
+	Min throughput per process 			=     539.52 kB/sec 
+	Max throughput per process 			=     592.22 kB/sec
+	Avg throughput per process 			=     566.81 kB/sec
+	Min xfer 					=     983.00 kB
+
+	Children see throughput for  4 readers 		=    7699.40 kB/sec
+	Parent sees throughput for  4 readers 		=    6802.46 kB/sec
+	Min throughput per process 			=    1896.18 kB/sec 
+	Max throughput per process 			=    1941.38 kB/sec
+	Avg throughput per process 			=    1924.85 kB/sec
+	Min xfer 					=    1000.00 kB
+
+	Children see throughput for 4 re-readers 	=    7557.94 kB/sec
+	Parent sees throughput for 4 re-readers 	=    6537.76 kB/sec
+	Min throughput per process 			=    1862.37 kB/sec 
+	Max throughput per process 			=    1942.81 kB/sec
+	Avg throughput per process 			=    1889.48 kB/sec
+	Min xfer 					=    1003.00 kB
+
+
+
+iozone test complete.
+iozone throughput random-read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:06:33 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 2 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000082 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    1842.18 kB/sec
+	Parent sees throughput for  4 initial writers 	=     828.56 kB/sec
+	Min throughput per process 			=     315.41 kB/sec 
+	Max throughput per process 			=     579.10 kB/sec
+	Avg throughput per process 			=     460.55 kB/sec
+	Min xfer 					=     980.00 kB
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=237 total_bytes=970752 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=251 total_bytes=1028096 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=254 total_bytes=1040384 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    1856.36 kB/sec
+	Parent sees throughput for  4 rewriters 	=     940.87 kB/sec
+	Min throughput per process 			=     311.97 kB/sec 
+	Max throughput per process 			=     601.58 kB/sec
+	Avg throughput per process 			=     464.09 kB/sec
+	Min xfer 					=     946.00 kB
+
+	Children see throughput for 4 random readers 	=    4187.36 kB/sec
+	Parent sees throughput for 4 random readers 	=    2090.31 kB/sec
+	Min throughput per process 			=     793.05 kB/sec 
+	Max throughput per process 			=    1490.33 kB/sec
+	Avg throughput per process 			=    1046.84 kB/sec
+	Min xfer 					=     983.00 kB
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for 4 random writers 	=    1869.02 kB/sec
+	Parent sees throughput for 4 random writers 	=     991.08 kB/sec
+	Min throughput per process 			=     406.94 kB/sec 
+	Max throughput per process 			=     534.31 kB/sec
+	Avg throughput per process 			=     467.25 kB/sec
+	Min xfer 					=     982.00 kB
+
+
+
+iozone test complete.
+iozone throughput read-backwards measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:07:10 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 3 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000082 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2249.30 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1785.25 kB/sec
+	Min throughput per process 			=     517.41 kB/sec 
+	Max throughput per process 			=     603.31 kB/sec
+	Avg throughput per process 			=     562.32 kB/sec
+	Min xfer 					=     978.00 kB
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=248 total_bytes=1015808 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=252 total_bytes=1032192 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2291.06 kB/sec
+	Parent sees throughput for  4 rewriters 	=    2022.63 kB/sec
+	Min throughput per process 			=     549.62 kB/sec 
+	Max throughput per process 			=     607.12 kB/sec
+	Avg throughput per process 			=     572.76 kB/sec
+	Min xfer 					=     991.00 kB
+
+	Children see throughput for 4 reverse readers 	=    5601.14 kB/sec
+	Parent sees throughput for 4 reverse readers 	=    4854.40 kB/sec
+	Min throughput per process 			=    1302.43 kB/sec 
+	Max throughput per process 			=    1490.36 kB/sec
+	Avg throughput per process 			=    1400.28 kB/sec
+	Min xfer 					=     990.00 kB
+
+
+
+iozone test complete.
+iozone throughput stride-read measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:07:32 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 0 -i 5 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000082 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2327.06 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1840.69 kB/sec
+	Min throughput per process 			=     550.51 kB/sec 
+	Max throughput per process 			=     608.82 kB/sec
+	Avg throughput per process 			=     581.76 kB/sec
+	Min xfer 					=     986.00 kB
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=254 total_bytes=1040384 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=246 total_bytes=1007616 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=251 total_bytes=1028096 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2161.12 kB/sec
+	Parent sees throughput for  4 rewriters 	=    1878.68 kB/sec
+	Min throughput per process 			=     509.82 kB/sec 
+	Max throughput per process 			=     566.60 kB/sec
+	Avg throughput per process 			=     540.28 kB/sec
+	Min xfer 					=     981.00 kB
+
+	Children see throughput for 4 stride readers 	=    5794.39 kB/sec
+	Parent sees throughput for 4 stride readers 	=    5248.91 kB/sec
+	Min throughput per process 			=    1379.55 kB/sec 
+	Max throughput per process 			=    1498.03 kB/sec
+	Avg throughput per process 			=    1448.60 kB/sec
+	Min xfer 					=     995.00 kB
+
+
+
+iozone test complete.
+iozone throughput fwrite/fread measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:07:56 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 6 -i 7 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000082 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 fwriters 	=    1996.95 kB/sec
+	Parent sees throughput for  4 fwriters 		=    1654.49 kB/sec
+	Min throughput per process 			=     442.28 kB/sec 
+	Max throughput per process 			=     580.87 kB/sec
+	Avg throughput per process 			=     499.24 kB/sec
+	Min xfer 					=    1024.00 kB
+
+	Children see throughput for  4 freaders 	=    7404.71 kB/sec
+	Parent sees throughput for  4 freaders 		=    6715.83 kB/sec
+	Min throughput per process 			=    1746.26 kB/sec 
+	Max throughput per process 			=    1946.79 kB/sec
+	Avg throughput per process 			=    1851.18 kB/sec
+	Min xfer 					=    1024.00 kB
+
+
+
+iozone test complete.
+iozone throughput pwrite/pread measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:08:14 2027
+
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 9 -i 10 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000081 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for 4 pwrite writers 	=    2325.00 kB/sec
+	Parent sees throughput for 4 pwrite writers 	=    1778.24 kB/sec
+	Min throughput per process 			=     549.83 kB/sec 
+	Max throughput per process 			=     606.87 kB/sec
+	Avg throughput per process 			=     581.25 kB/sec
+	Min xfer 					=     986.00 kB
+
+	Children see throughput for 4 pread readers 	=    7989.53 kB/sec
+	Parent sees throughput for 4 pread readers 	=    6873.66 kB/sec
+	Min throughput per process 			=    1884.71 kB/sec 
+	Max throughput per process 			=    2101.09 kB/sec
+	Avg throughput per process 			=    1997.38 kB/sec
+	Min xfer 					=     968.00 kB
+
+
+
+iozone test complete.
+iozone throughtput pwritev/preadv measurements
+	Iozone: Performance Test of File I/O
+	        Version $Revision: 3.506 $
+		Compiled for 64 bit mode.
+		Build: linux 
+
+	Contributors:William Norcott, Don Capps, Isom Crawford, Kirby Collins
+	             Al Slater, Scott Rhine, Mike Wisner, Ken Goss
+	             Steve Landherr, Brad Smith, Mark Kelly, Dr. Alain CYR,
+	             Randy Dunlap, Mark Montague, Dan Million, Gavin Brebner,
+	             Jean-Marc Zucconi, Jeff Blomberg, Benny Halevy, Dave Boone,
+	             Erik Habbinga, Kris Strecker, Walter Wong, Joshua Root,
+	             Fabrice Bacchella, Zhenghua Xue, Qin Li, Darren Sawyer,
+	             Vangel Bojaxhi, Ben England, Vikentsi Lapa,
+	             Alexey Skidanov, Sudhir Kumar.
+
+	Run began: Fri Jan  1 00:08:34 2027
+
+	Selected test not available on the version.
+	Record Size 1 kB
+	File size set to 1024 kB
+	Command line used: ./iozone -t 4 -i 11 -i 12 -r 1k -s 1m
+	Output is in kBytes/sec
+	Time Resolution = 0.000082 seconds.
+	Processor cache size set to 1024 kBytes.
+	Processor cache line size set to 32 bytes.
+	File stride size set to 17 * record size.
+	Throughput test with 4 processes
+	Each process writes a 1024 kByte file in 1 kByte records
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 initial writers 	=    2172.30 kB/sec
+	Parent sees throughput for  4 initial writers 	=    1567.85 kB/sec
+	Min throughput per process 			=     452.73 kB/sec 
+	Max throughput per process 			=     637.55 kB/sec
+	Avg throughput per process 			=     543.08 kB/sec
+	Min xfer 					=     961.00 kB
+[ext4_another] write_pages ino=3218 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=168 pages=244 total_bytes=999424 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3217 pages=256 total_bytes=1048576 prepare_cycles=0 commit_cycles=0 direct=true
+[ext4_another] write_pages ino=3216 pages=255 total_bytes=1044480 prepare_cycles=0 commit_cycles=0 direct=true
+
+	Children see throughput for  4 rewriters 	=    2292.15 kB/sec
+	Parent sees throughput for  4 rewriters 	=     969.80 kB/sec
+	Min throughput per process 			=     410.34 kB/sec 
+	Max throughput per process 			=     653.06 kB/sec
+	Avg throughput per process 			=     573.04 kB/sec
+	Min xfer 					=     975.00 kB
+
+
+
+iozone test complete.
+#### OS COMP TEST GROUP END iozone-glibc ####
+[initproc] [diag] === stats iozone-glibc ===
+blk_vread_reqs=81000
+blk_vread_secs=648704
+blk_vwrite_reqs=78955
+blk_vwrite_secs=781408
+journal_commit_count=138
+journal_commit_bytes=2854912
+device_flush_count=886
+virtio_write_requests=80034
+virtio_write_bytes=400080896
+virtio_read_requests=81004
+writeback_batch_count=73
+writeback_page_count=18350
+pwrite_uaccess_cycles=149238306
+pwrite_file_cycles=3656707528
+pwrite_ext4_setup_cycles=819508356
+pwrite_ext4_post_cycles=79979462
+pwrite_total_count=4096
+sata_read_reqs=0
+sata_read_bytes=0
+sata_read_ticks_total=0
+sata_read_ticks_max=0
+sata_write_reqs=0
+sata_write_bytes=0
+sata_write_ticks_total=0
+sata_write_ticks_max=0
+sata_flush_reqs=0
+sata_flush_ticks_total=0
+[initproc] [diag] === stats iozone-glibc end ===
+#### OS COMP TEST GROUP END iozone-glibc ####
+[initproc] done iozone_testcode.sh in /glibc exit_code=0
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] skip ltp (mask bit11 not set)
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+make[1]: Leaving directory '/app/os'
+make: Leaving directory '/app/os'

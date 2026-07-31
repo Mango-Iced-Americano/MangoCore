@@ -320,6 +320,10 @@ mod enabled {
     pub static PC_WRITE_OVERWRITE: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_EVENTUALLY_FULL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_LOOKUP_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_LEASE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_COPY_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_COMMIT_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -940,6 +944,17 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_pc_write_stages(lookup: usize, lease: usize, copy: usize, commit: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PC_WRITE_LOOKUP_CYCLES.fetch_add(lookup, Ordering::Relaxed);
+        PC_WRITE_LEASE_CYCLES.fetch_add(lease, Ordering::Relaxed);
+        PC_WRITE_COPY_CYCLES.fetch_add(copy, Ordering::Relaxed);
+        PC_WRITE_COMMIT_CYCLES.fetch_add(commit, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn record_pc_write_eventually_full() {
         if !memory_io_stats_enabled() {
             return;
@@ -1490,6 +1505,10 @@ mod enabled {
         PC_WRITE_OVERWRITE.store(0, Ordering::Relaxed);
         PC_WRITE_EVENTUALLY_FULL.store(0, Ordering::Relaxed);
         PC_WRITE_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        PC_WRITE_LOOKUP_CYCLES.store(0, Ordering::Relaxed);
+        PC_WRITE_LEASE_CYCLES.store(0, Ordering::Relaxed);
+        PC_WRITE_COPY_CYCLES.store(0, Ordering::Relaxed);
+        PC_WRITE_COMMIT_CYCLES.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CALLS.store(0, Ordering::Relaxed);
         PC_WRITEBACK_PAGES.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CYCLES_TOTAL.store(0, Ordering::Relaxed);
@@ -2516,6 +2535,9 @@ pub fn record_pc_lookup_cycles(_cycles: usize) {}
 pub fn record_pc_write(_pages: usize, _full_overwrite: bool, _cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_pc_write_stages(_lookup: usize, _lease: usize, _copy: usize, _commit: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_pc_write_eventually_full() {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2983,6 +3005,18 @@ pub static PC_WRITE_EVENTUALLY_FULL: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_WRITE_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_LOOKUP_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_LEASE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_COPY_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_COMMIT_CYCLES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_WRITEBACK_CALLS: core::sync::atomic::AtomicUsize =

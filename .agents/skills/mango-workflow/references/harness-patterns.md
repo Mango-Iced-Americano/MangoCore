@@ -139,6 +139,13 @@ diag=1
 - **教训**: 单核 QEMU TCG 对 `spin::Mutex<T>` 中的 T 大小非常敏感。大结构改变 inline layout → 影响锁操作的内存足迹 → 宏观性能回退。永远不要扩大全局热路径 struct。
 - **相关文件**: `os/src/net/config.rs` (NetInterfaceInner), `os/src/net/socket/inet/stream/mod.rs`
 
+### RV64 热路径位图应避免字节原子 RMW
+
+- **根因**: RV64 缺少原生 byte AMO；`AtomicU8::fetch_or` 在 QEMU TCG 中会退化为掩码 LR/SC。对只增不减的页 valid-mask，每次 1KiB pwrite 都执行该 RMW 会累积为明显开销。
+- **修复**: 将独立的热路径状态位图升级为 `AtomicU32`，仍只使用低位掩码；先用 Relaxed load 检查目标位是否已全置位，若是直接返回，只有可能改变状态时才执行 word `fetch_or`。升级相邻字段时用 `size_of` 断言锁定热对象布局。
+- **教训**: 优化 QEMU TCG 下的高频原子位图时，先确认目标架构的原子指令宽度；无论数据逻辑只需一个字节，也不应让实现回退为字节 LR/SC。快路径仅可用于单调状态（只置位、从不清位），否则必须保留 RMW/CAS。
+- **相关文件**: `os/src/fs/page_cache.rs`
+
 ### 单核无抢占环境 lock splitting 无并发收益（perf/net 教训）
 
 - **根因**: perf/net 分支引入 per-stack locks + WaitQueue 重构 + cooperative poll → -50% netperf RR。单核环境下没有真正的并发，锁拆分的额外 atomic 操作是纯 overhead。

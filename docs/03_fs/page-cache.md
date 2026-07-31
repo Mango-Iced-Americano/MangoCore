@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-30"
+last_updated: "2026-07-31"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -41,7 +41,7 @@ PageCache 不感知具体文件系统格式，通过 `PageCacheBackend` trait �
 
 ## PageState 状态机
 
-每个缓存页面由 `PageEntry` 管理。对外的 `PageState` 仍是诊断视图，但内部以一个 `AtomicU8` 保存正交的 `PG_*` 位：锁、最新、脏、写回、错误、引用和写回期间重脏。
+每个缓存页面由 `PageEntry` 管理。对外的 `PageState` 仍是诊断视图，但内部以一个 `AtomicU32` 保存正交的 `PG_*` 位：锁、最新、脏、写回、错误、引用和写回期间重脏。RV64 可将该字级原子操作映射为原生 AMO。
 
 ```text
 Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpToDate
@@ -59,13 +59,15 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 
 写入通过 CAS 添加 `PG_LOCKED | PG_REFERENCED`，复制完成后以一次原子更新发布 `PG_UPTODATE | PG_DIRTY` 并清除锁；不会再把既有脏页往返转换为 `Loading`。写回只认领 `PG_DIRTY && !PG_LOCKED` 的页，认领时清除脏位并设置 `PG_WRITEBACK | PG_LOCKED`。如果写回期间页面被再次写入，`PG_REDIRTIED` 会使完成路径恢复 `PG_DIRTY`，而不是错误地发布为 UpToDate。
 
+启用 `perf_diag` 的 `memory_io` profile 时，`write_user` 额外将 PageEntries 查找、写 lease、用户缓冲复制和 Dirty 发布的累计周期导出到 `/sys/kernel/stats/blockio`。这些是诊断计数，不参与状态转换或锁定协议。
+
 ## PageEntry 与 partial-write 跟踪
 
-`PageEntry` 将每页按 512B segment 划分为 8 个扇区（`VALID_SEG_COUNT = 8`），通过 `valid_mask: AtomicU8` 位掩码跟踪哪些 segment 已写入有效数据：
+`PageEntry` 将每页按 512B segment 划分为 8 个扇区（`VALID_SEG_COUNT = 8`），通过 `valid_mask: AtomicU32` 的低 8 位掩码跟踪哪些 segment 已写入有效数据：
 
 - 页面刚 populate 时，`valid_mask = VALID_ALL`（全部有效）
 - 整页覆写时，写路径直接标记所有 segment 有效
-- 部分写入时，`mark_valid_and_check_full` 逐步累积 `valid_mask`
+- 部分写入时，`mark_valid_and_check_full` 逐步累积 `valid_mask`；目标位已全置位时先以 Relaxed load 返回，不执行冗余的原子 OR
 - `ensure_fully_valid` 读取后端数据填充无效 segment（快速路径：已满则直接返回）
 
 这一设计解决了稀疏文件（sparse file）中超出旧 EOF 页面的零填充问题：当写入位置超出旧 EOF 时，`get_or_create_entry` 不触发后端 read_page，而是 `frame_alloc` 零填充页并设置 `valid_mask = VALID_ALL`。新建页若对应一次完整 4KB 覆写，写路径改用 `frame_alloc_uninit()`；该页保持 `Loading`，直至完整拷贝完成并提交，因此不会将未初始化内容暴露给读取者。其余部分覆盖和零填充场景继续使用清零分配。
@@ -81,8 +83,8 @@ another_ext4 的 `truncate_inode()` 会在缩容时按 extent 尾部释放新 EO
 ```rust
 struct PageEntry {
     page: Arc<FrameTracker>,     // 物理页面
-    flags: AtomicU8,             // PG_LOCKED/UPTODATE/DIRTY/WRITEBACK/... 
-    valid_mask: AtomicU8,        // 512B segment 有效性位图
+    flags: AtomicU32,            // PG_LOCKED/UPTODATE/DIRTY/WRITEBACK/... 
+    valid_mask: AtomicU32,       // 低 8 位：512B segment 有效性位图
 }
 ```
 

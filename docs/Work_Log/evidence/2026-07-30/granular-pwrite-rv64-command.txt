@@ -1,0 +1,3 @@
+docker compose exec -T os-dev sh -lc "cd /app && make kernel ARCH=rv64 PROFILE=normal" => 0
+docker compose exec -T os-dev sh -lc "cd /app && make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.conf" => 0
+docker compose exec -T os-dev sh -lc "cd /app && make -C os rv64-derived-run" => 0

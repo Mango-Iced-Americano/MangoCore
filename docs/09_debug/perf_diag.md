@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-07-30
+last_update: 2026-07-31
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -74,7 +74,7 @@ cat /sys/kernel/stats/features
 | `taskq` | ro | 调度队列指标（15 项） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
-| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时，以及 UserBuffer `pwrite` 边界周期 |
+| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时，以及 UserBuffer `pwrite` 边界和 PageCache 写入阶段周期 |
 | `anon_unmap` | ro | private anonymous VMA 释放次数、页数、精确 retain 扫描步数和耗时 |
 | `net` | ro | poll、RX/TX/drop 与 exec/openat/read/mmap 运行时归因 |
 | `resource` | ro | 资源 gauge（内存/Task/Socket/Pipe/PageCache/Dentry 等） |
@@ -208,6 +208,7 @@ echo 1 > /sys/kernel/tracing/clear
 | `virtio_write_{requests,bytes}` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的写请求数及字节数 |
 | `virtio_read_requests` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的读请求数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
+| `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
 
 #### anonymous private VMA release
 

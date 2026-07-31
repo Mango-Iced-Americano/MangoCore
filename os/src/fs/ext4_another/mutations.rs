@@ -9,7 +9,6 @@ macro_rules! writable_data_inode_mutations {
         ) -> Result<usize, crate::utils::error::SyscallErr> {
             drop(data);
             let t0 = crate::task::perf::perf_memory_io_time_now();
-            let fs = self.fs_arc()?;
             match self.file_type {
                 crate::fs::vfs::FileType::Dir => {
                     return Err(crate::utils::error::SyscallErr::EISDIR)
@@ -28,7 +27,7 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            let cache = self.regular_page_cache(&fs);
+            let cache = self.regular_page_cache()?;
             let t1 = crate::task::perf::perf_memory_io_time_now();
             let written = cache.write_with_after_copy(offset, &buffer[..actual], Some(old_size), |_| {
                 let post_start = crate::task::perf::perf_memory_io_time_now();
@@ -38,7 +37,7 @@ macro_rules! writable_data_inode_mutations {
                 self.lifetime
                     .size_generation
                     .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-                self.lifetime.retain_dirty_page_cache(&cache);
+                self.lifetime.retain_dirty_page_cache(cache);
                 crate::task::perf::record_pwrite_ext4_post(
                     crate::task::perf::perf_memory_io_time_now().wrapping_sub(post_start),
                 );
@@ -54,7 +53,6 @@ macro_rules! writable_data_inode_mutations {
             source: &crate::mm::UserBuffer,
         ) -> Result<usize, crate::utils::error::SyscallErr> {
             let t0 = crate::task::perf::perf_memory_io_time_now();
-            let fs = self.fs_arc()?;
             match self.file_type {
                 crate::fs::vfs::FileType::Dir => {
                     return Err(crate::utils::error::SyscallErr::EISDIR)
@@ -66,7 +64,7 @@ macro_rules! writable_data_inode_mutations {
             if actual == 0 {
                 return Ok(0);
             }
-            let cache = self.regular_page_cache(&fs);
+            let cache = self.regular_page_cache()?;
             let old_size = self
                 .lifetime
                 .logical_size
@@ -83,7 +81,7 @@ macro_rules! writable_data_inode_mutations {
             self.lifetime
                 .size_generation
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-            self.lifetime.retain_dirty_page_cache(&cache);
+            self.lifetime.retain_dirty_page_cache(cache);
             let t3 = crate::task::perf::perf_memory_io_time_now();
             crate::task::perf::record_pwrite_ext4_setup(t1.wrapping_sub(t0));
             crate::task::perf::record_pwrite_ext4_post(t3.wrapping_sub(t2));
@@ -98,7 +96,6 @@ macro_rules! writable_data_inode_mutations {
             data: spin::MutexGuard<crate::fs::vfs::FilePrivateData>,
         ) -> Result<usize, crate::utils::error::SyscallErr> {
             drop(data);
-            let _fs = self.fs_arc()?;
             match self.file_type {
                 crate::fs::vfs::FileType::Dir => {
                     return Err(crate::utils::error::SyscallErr::EISDIR)
@@ -127,7 +124,6 @@ macro_rules! writable_data_inode_mutations {
         }
 
         fn resize(&self, len: usize) -> Result<(), crate::utils::error::SyscallErr> {
-            let fs = self.fs_arc()?;
             match self.file_type {
                 crate::fs::vfs::FileType::Dir => {
                     return Err(crate::utils::error::SyscallErr::EISDIR)
@@ -135,7 +131,8 @@ macro_rules! writable_data_inode_mutations {
                 crate::fs::vfs::FileType::File => {}
                 _ => return Err(crate::utils::error::SyscallErr::EINVAL),
             }
-            let cache = self.regular_page_cache(&fs);
+            let cache = self.regular_page_cache()?;
+            let fs = self.fs_arc()?;
             let inode_id = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let old_size = self
