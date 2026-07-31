@@ -248,6 +248,23 @@ impl Debug for TrapContext {
     }
 }
 impl TrapContext {
+    /// 按值取得信号 ABI 需要保存的用户寄存器。
+    ///
+    /// 通过字段复制表达 `TrapContext -> MachineContext`，避免调用方依赖两种
+    /// 结构当前恰好具有相同前缀布局。
+    pub fn machine_context(&self) -> MachineContext {
+        MachineContext {
+            gp: self.gp,
+            fp: self.fp,
+        }
+    }
+
+    /// 恢复信号 ABI 中的用户寄存器，不覆盖内核私有 trap 元数据。
+    pub fn set_machine_context(&mut self, context: MachineContext) {
+        self.gp = context.gp;
+        self.fp = context.fp;
+    }
+
     pub fn set_sp(&mut self, sp: usize) {
         self.gp.sp = sp;
     }

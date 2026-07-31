@@ -236,6 +236,12 @@ clone 子任务的 `TrapContext`：
 用户访存、PTE 更新、IPI ack 等等待边界两侧访问 trap frame 时，应先在锁内按值快照所需
 字段，解锁完成操作，再重新加锁校验并提交。
 
+信号 ABI 只保存用户通用寄存器和浮点寄存器。双架构统一通过
+`TrapContext::machine_context()` 按值取得这部分状态，并通过
+`set_machine_context()` 恢复；禁止依赖 `TrapContext`/`MachineContext` 的前缀布局做
+裸指针强转。这样恢复信号 frame 时不会覆盖 `kernel_sp`、内核页表 token、trap handler
+或 CPU-local 指针。
+
 ## 8. 调度时间统计
 
 `TaskControlBlockInner` 在 trap 和 schedule 处维护 CPU 时间：

@@ -371,106 +371,50 @@ fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
 
 `sys_sigreturn()` 从用户 signal frame 恢复：
 
-1. 根据当前 `sp` 计算 ucontext 和 sigmask 地址，再通过架构 `UserContext` 的编译期 offset 定位 machine context。
-2. 从用户 frame 读取 `UserSignalMask`。
-3. 拷贝 `MachineContext` 回 trap context。
-4. LoongArch 额外从 `UserContext::LSX_OFFSET` 读取 32 个 128-bit LSX 寄存器，再把 machine context 中标量 FPR 的低 64-bit lane 合并进去。FPR 与 LSX 物理别名，用户 handler 对标量上下文的修改具有优先级。
-5. 恢复 sigmask。
-6. 返回 trap context 中保存的 `a0`。
+1. 短持 `task.inner`，只快照当前用户 `sp`。
+2. 释放锁后计算 ucontext、sigmask 和 machine context 地址。
+3. 通过 `UserPtr::read()` 把 `UserSignalMask`、`MachineContext` 和架构扩展状态全部读入局部值。
+4. 全部读取成功后重新短持 `task.inner`，一次提交用户寄存器和 sigmask。
+5. LoongArch 先安装完整 LSX，再把 machine context 中标量 FPR 的低 64-bit lane
+   合并进去。FPR 与 LSX 物理别名，用户 handler 对标量上下文的修改具有优先级。
+6. 返回恢复后的 `a0`。
 
 frame 地址溢出、sigmask、machine context 或 LSX context 读取失败时，当前任务以 `SIGSEGV` 退出。`signal_frame_layout()` 使用 `max(align_of::<UserContext>(), USER_STACK_ABI_ALIGN)` 对齐 ucontext，并将传给用户 handler 的 `sp` 按 16 字节对齐；这样既满足 LoongArch LSX context 的自然对齐，也保持 rv64/la64 用户函数入口 ABI。
 
-`sys_sigreturn()` 不重新解释用户 handler 的返回值，而是恢复 machine context 后返回 trap context 中的 `a0`：
+恢复路径遵循 snapshot/read/commit：
 
-```rust
-pub fn sys_sigreturn() -> isize {
-    let task = current_task().unwrap();
-    let token = current_user_token();
-    let mut inner = task.acquire_inner_lock();
+```text
+task.inner {
+    sp = trap_context.sp
+}
 
-    let sp = inner.trap_context_mut().gp.sp;
-    let ucontext_addr = match sp
-        .checked_add(size_of::<SigInfo>())
-        .and_then(|addr| addr.checked_add(0x7))
-    {
-        Some(addr) => addr & !0x7,
-        None => {
-            error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
-            drop(inner);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
-    };
-    let sigmask_addr = match ucontext_addr
-        .checked_add(2 * size_of::<usize>())
-        .and_then(|addr| addr.checked_add(size_of::<SignalStack>()))
-    {
-        Some(addr) => addr,
-        None => {
-            error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
-            drop(inner);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
-    };
-    let mcontext_addr = match ucontext_addr
-        .checked_add(crate::hal::UserContext::MCONTEXT_OFFSET)
-    {
-        Some(addr) => addr,
-        None => {
-            error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
-            drop(inner);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
-    };
-    let restored_sigmask = match UserPtr::<UserSignalMask>::from_addr(sigmask_addr).read(token) {
-        Ok(sigmask) => sigmask.to_signals() - Signals::CAN_NOT_BE_MASKED,
-        Err(_) => {
-            error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
-            drop(inner);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
-    };
-    #[cfg(feature = "loongarch64")]
-    let restored_lsx = match ucontext_addr
-        .checked_add(crate::hal::UserContext::LSX_OFFSET)
-        .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
-    {
-        Some(lsx) => lsx,
-        None => {
-            drop(inner);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
-    };
-    let trap_cx_ptr = inner.trap_context_mut() as *mut TrapContext;
-    if copy_from_user(
-        token,
-        mcontext_addr as *mut MachineContext,
-        trap_cx_ptr.cast::<MachineContext>(),
-    )
-    .is_err()
-    {
-        error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
-        drop(inner);
-        exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-    }
-    #[cfg(feature = "loongarch64")]
-    {
-        let trap_cx = inner.trap_context_mut();
-        trap_cx.lsx = restored_lsx;
-        for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
-            vector[0] = *scalar as u64;
-        }
-    }
-    inner.sigmask = restored_sigmask;
-    inner.trap_context_mut().gp.a0 as isize
+restored_sigmask   = UserPtr(sigmask_addr).read(token)
+restored_mcontext  = UserPtr(mcontext_addr).read(token)
+restored_extension = UserPtr(extension_addr).read(token)  # LA64
+
+task.inner {
+    trap_context.set_machine_context(restored_mcontext)
+    restore restored_extension
+    sigmask = restored_sigmask
 }
 ```
 
-`trap_context_mut()` 把可变引用生命周期绑定到 `task.inner` guard，不能再把 trap frame
-伪装成可逃逸的 `'static mut`。当前 `sys_sigreturn()` 仍跨用户 frame 读取持有该锁；
-这是后续信号锁序节点需要拆除的已知边界，不能把本次生命周期收紧理解为已经消除了全部
-faultable uaccess 持锁。所有用户地址计算都使用 `checked_add()`，任一溢出都会走
-`SIGSEGV` 退出。trap 返回汇编在 LSX 已启用时只恢复完整向量快照，不会随后再用
-`FLD.D` 覆盖其低 lane；未启用 LSX 时才走纯标量 FPR 恢复路径。
+上例只表达锁边界；实际代码对每次地址加法和每个用户读取分别检查。用户 frame
+读取可能缺页并进入 MM/TLB 路径，因此不能跨它持有 `task.inner`。当前线程在 syscall
+期间仍是 live trap frame 的唯一执行 owner；远端信号只追加 pending，exec、group-exit
+和 affinity 请求要到 owner 的返回安全点才生效，所以锁外读取不会与远端 trap-frame
+写者竞争。
+
+`TrapContext::machine_context()` 和 `set_machine_context()` 通过字段复制转换信号 ABI
+上下文，不依赖 `TrapContext` 与 `MachineContext` 恰好拥有相同内存前缀，也不会把
+`kernel_sp`、页表 token 或 CPU-local 指针暴露给用户。全部用户读取成功后才进入一次
+提交临界区，错误路径不会留下半恢复的寄存器或 sigmask。所有地址计算都使用
+`checked_add()`；退出 helper 会先释放当前函数持有的额外 task `Arc`，再进入不展开
+syscall 栈的 noreturn 退出路径。
+
+trap 返回汇编在 LSX 已启用时只恢复完整向量快照，不会随后再用 `FLD.D` 覆盖其低 lane；
+未启用 LSX 时才走纯标量 FPR 恢复路径。信号投递侧 `do_signal()` 的用户栈写入锁序属于
+后续独立节点，不能据此把恢复侧重构描述为信号子系统全部完成。
 
 ## 13. stopped/continued 与 wait
 

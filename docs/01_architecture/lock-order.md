@@ -422,8 +422,28 @@ task.inner：快照 PC/store 源寄存器
 
 用户访存可能缺页并进入 MM/TLB 同步，不能跨越它持有 `task.inner`。trap return 最后把
 用户 trap context 地址交给汇编是明确的 owner 边界：Rust guard 已释放，当前任务仍由本
-CPU current 槽独占，汇编立即恢复并离开内核。`sys_sigreturn()` 仍跨用户 frame 读取持锁，
-属于下一信号锁序节点的已知问题，不在 B45 中伪装解决。
+CPU current 槽独占，汇编立即恢复并离开内核。
+
+### 3.11 B46 sigreturn 恢复锁序
+
+`sys_sigreturn()` 固定分为三段：
+
+```text
+task.inner：快照用户 SP
+  -> 解锁
+  -> UserPtr 读取 sigmask / machine context / 架构扩展
+  -> task.inner：一次提交用户寄存器与 sigmask
+```
+
+当前线程在 syscall 内仍是 live trap frame 的唯一执行 owner。远端信号只追加 pending；
+exec、group-exit 和 affinity 请求由 owner 在返回安全点消费，不会越过锁改写 trap
+frame。因此锁外 user read 不要求再增加 trap generation 或第二套状态机。全部读取成功
+后才提交，畸形 frame 不会留下部分恢复状态。
+
+信号 ABI 上下文只能通过架构 `machine_context()`/`set_machine_context()` 做字段复制，
+禁止把 `TrapContext` 裸指针 cast 成 `MachineContext`。错误路径进入 noreturn 退出前必须
+先释放当前函数额外持有的 task `Arc`。`do_signal()` 构造用户 frame 的写侧锁序仍由
+B47 独立处理。
 
 ## 4. 永久禁止的组合
 

@@ -9,10 +9,7 @@
 //! `do_signal()` 在当前任务即将返回用户态时运行。它会短暂持有 `task.inner`
 //! 和 `sighand` 锁；在停止进程、退出进程或重新进入调度前必须显式 drop 这些锁。
 
-use crate::hal::{
-    get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, TrapContext,
-    UserContext,
-};
+use crate::hal::{get_bad_addr, get_bad_instruction, get_exception_cause, UserContext};
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
@@ -736,13 +733,9 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 {
                     let token = current_user_token();
                     let saved_sigmask = inner.sigmask_to_restore.take().unwrap_or(inner.sigmask);
-                    // Safety: `TrapContext` 的起始布局与 `MachineContext` 保持一致，
-                    // 架构相关 trap context 定义以通用寄存器/PC 等机器上下文为前缀。
-                    // 这里按值复制当前 trap context 的机器寄存器快照，用于构造
-                    // 用户态 `ucontext_t`，不会保留指向 trap frame 的引用。
-                    let mcontext = unsafe {
-                        *(inner.trap_context_mut() as *const TrapContext).cast::<MachineContext>()
-                    };
+                    // 按值快照用户寄存器，用于构造 `ucontext_t`；架构方法不会把
+                    // kernel_sp、页表 token 等内核私有 trap 元数据暴露给用户。
+                    let mcontext = inner.trap_context_mut().machine_context();
                     #[cfg(feature = "loongarch64")]
                     let lsx = inner.trap_context_mut().lsx;
                     let mut frame_stack = if use_alt_stack {

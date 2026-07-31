@@ -593,6 +593,10 @@ B45 不增加 TAP 项：编译器负责验证 trap context 借用不能逃出 `t
 focused 与初赛回归覆盖 syscall、signal、clone/exec 和双架构 trap-return 主路径。普通
 basic/busybox 不保证触发 LA64 `AddressNotAligned`，因此 30/30 不能被描述为已经覆盖
 整数/浮点未对齐模拟；后续若修改该模拟语义，应增加专门用户探针。
+B46 同样不增加临时 TAP：focused 30 项不直接触发 `rt_sigreturn`，因此验收选用双架构
+`CORE_NUM=8 mask=0x003`。normal PID1 安装 `SIGCHLD` handler，子进程回收会反复经过真实
+signal-frame 往返；RV64 保持 312/314，LA64 保持 308/314。该门禁证明正常 frame 主路径
+无回归，但没有故意破坏 frame 来动态覆盖每一个 SIGSEGV 拒绝分支。
 
 ### Bug 下沉流程
 

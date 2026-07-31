@@ -9,8 +9,8 @@ use crate::fs::{
         InodeMode, Metadata, MountFSInode,
     },
 };
-use crate::hal::{MachineContext, TrapContext, UserSignalMask};
-use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
+use crate::hal::{MachineContext, UserSignalMask};
+use crate::mm::{UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
@@ -772,55 +772,44 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {
     sigaltstack(ss as *const SignalStack, old_ss as *mut SignalStack)
 }
 
-pub fn sys_sigreturn() -> isize {
-    // mark not processing signal handler
-    let task = current_task().unwrap();
-    let token = current_user_token();
-    let mut inner = task.acquire_inner_lock();
+fn reject_sigreturn_frame(task: Arc<TaskControlBlock>, reason: &str) -> ! {
+    error!("[sys_sigreturn] {}, send SIGSEGV", reason);
+    // 退出路径不会展开当前 syscall 栈，必须先释放这里持有的额外强引用。
+    drop(task);
+    exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32)
+}
 
-    let sp = inner.trap_context_mut().gp.sp;
-    // restore sigmask & trap context
+pub fn sys_sigreturn() -> isize {
+    let task = current_task().unwrap();
+    let token = task.process.user_token();
+    let sp = {
+        let mut inner = task.acquire_inner_lock();
+        inner.trap_context_mut().gp.sp
+    };
+
+    // 当前线程在 syscall 内仍是 trap frame 的唯一执行 owner。远端信号只追加
+    // pending，exec/group-exit/affinity 请求都要等本线程到返回安全点才会生效。
     let ucontext_addr = match sp
         .checked_add(size_of::<SigInfo>())
         .and_then(|addr| addr.checked_add(0x7))
     {
         Some(addr) => addr & !0x7,
-        None => {
-            error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
-            drop(inner);
-            drop(task);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
+        None => reject_sigreturn_frame(task, "invalid signal frame address"),
     };
     let sigmask_addr = match ucontext_addr
         .checked_add(2 * size_of::<usize>())
         .and_then(|addr| addr.checked_add(size_of::<SignalStack>()))
     {
         Some(addr) => addr,
-        None => {
-            error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
-            drop(inner);
-            drop(task);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
+        None => reject_sigreturn_frame(task, "invalid sigmask address"),
     };
     let mcontext_addr = match ucontext_addr.checked_add(crate::hal::UserContext::MCONTEXT_OFFSET) {
         Some(addr) => addr,
-        None => {
-            error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
-            drop(inner);
-            drop(task);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
+        None => reject_sigreturn_frame(task, "invalid machine context address"),
     };
     let restored_sigmask = match UserPtr::<UserSignalMask>::from_addr(sigmask_addr).read(token) {
         Ok(sigmask) => sigmask.to_signals() - Signals::CAN_NOT_BE_MASKED,
-        Err(_) => {
-            error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
-            drop(inner);
-            drop(task);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
+        Err(_) => reject_sigreturn_frame(task, "bad sigmask in signal frame"),
     };
     #[cfg(feature = "loongarch64")]
     let restored_lsx = match ucontext_addr
@@ -828,38 +817,32 @@ pub fn sys_sigreturn() -> isize {
         .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
     {
         Some(lsx) => lsx,
-        None => {
-            error!("[sys_sigreturn] bad LSX context in signal frame, send SIGSEGV");
-            drop(inner);
-            drop(task);
-            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-        }
+        None => reject_sigreturn_frame(task, "bad LSX context in signal frame"),
     };
-    let trap_cx_ptr = inner.trap_context_mut() as *mut TrapContext;
-    if copy_from_user(
-        token,
-        mcontext_addr as *mut MachineContext,
-        trap_cx_ptr.cast::<MachineContext>(),
-    )
-    .is_err()
-    {
-        error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
-        drop(inner);
-        drop(task);
-        exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
-    }
-    #[cfg(feature = "loongarch64")]
-    {
+    let restored_mcontext = match UserPtr::<MachineContext>::from_addr(mcontext_addr).read(token) {
+        Ok(context) => context,
+        Err(_) => reject_sigreturn_frame(task, "bad machine context in signal frame"),
+    };
+
+    // 用户读取可能缺页并进入 MM/TLB 路径；全部成功后才短持 inner 一次性提交，
+    // 因而错误路径不会留下只恢复了一半的寄存器或信号掩码。
+    let mut inner = task.acquire_inner_lock();
+    let restored_a0 = {
         let trap_cx = inner.trap_context_mut();
-        trap_cx.lsx = restored_lsx;
-        // LoongArch FPRs alias the low 64 bits of LSX registers. The signal
-        // ABI exposes both snapshots, and the existing scalar mcontext has
-        // precedence when a handler edits it. Merge that low lane before the
-        // trap return path restores the complete LSX register file.
-        for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
-            vector[0] = *scalar as u64;
+        trap_cx.set_machine_context(restored_mcontext);
+        #[cfg(feature = "loongarch64")]
+        {
+            trap_cx.lsx = restored_lsx;
+            // LoongArch FPRs alias the low 64 bits of LSX registers. The signal
+            // ABI exposes both snapshots, and the existing scalar mcontext has
+            // precedence when a handler edits it. Merge that low lane before the
+            // trap return path restores the complete LSX register file.
+            for (vector, scalar) in trap_cx.lsx.v.iter_mut().zip(trap_cx.fp.f.iter()) {
+                vector[0] = *scalar as u64;
+            }
         }
-    }
+        trap_cx.gp.a0 as isize
+    };
     inner.sigmask = restored_sigmask;
-    inner.trap_context_mut().gp.a0 as isize // return a0: not modify any of trap_cx
+    restored_a0
 }
