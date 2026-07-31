@@ -72,6 +72,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | SMP Per-CPU 调度 tick | 2026-07-31 | GPT/Codex, DeepSeek | 双架构 timer 官方规范、CPU0 全局 callback 边界、无 syscall 用户抢占与冻结验证 | 每 CPU 100 Hz quantum，hard IRQ 只发布 deferred 请求；双架构 focused 25/25，初赛基线不退化 |
 | SMP 线程组退出与多线程 exec | 2026-07-31 | GPT/Codex, DeepSeek | Linux/DragonOS 生命周期对照、owner 自清理、clone 门禁、live ack、等待点退栈与双架构 8 核门禁 | B40 永久 group exit 与 B41 临时 exec 会话均不远程析构 Running sibling；focused 由 26/26 增至 27/27，初赛 RV64 312/314、LA64 308/314 |
 | SMP trap context 与 signal 用户访存锁边界 | 2026-07-31 | GPT/Codex, DeepSeek | Linux signal ABI 对照、current owner 与 uaccess 锁序审查、冻结双架构 8 核门禁 | B45—B48 删除可逃逸 trap 引用，并让 signal frame 及状态 syscall 的用户访存位于普通锁外；初赛 RV64 312/314、LA64 308/314 |
+| SMP 空闲核 work stealing | 2026-07-31 | GPT/Codex, DeepSeek | 单 runqueue owner、迁移竞态、锁外 TLB 与确定性 focused 测试审查 | 复用 `Migrating` 完成 victim→thief 交接；双架构 8 核 focused 31/31，初赛失败集合未扩大 |
 
 ## 4. 详细使用场景
 
@@ -897,6 +898,27 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `33a8f1ccbf41278a8132b928542d928ca0c485ce3ee7f6fa6bd079ee971f7644`，同一门禁仍为
   RV64 312/314、LA64 308/314；四个 B47/B48 child 均无源码 mutation。
 
+### Case 38: SMP 空闲核 work stealing
+
+- Evidence: `docs/Work_Log/2026-07-31.md`、
+  `docs/Work_Log/evidence/2026-07-31/smp-b49-work-steal-summary.md`；DeepSeek prompt、manifest
+  与原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计 victim 选择、单 owner 交接、显式迁移排除和确定性测试，负责
+  实现与最终裁决；DeepSeek 只读审查并通过受限网关串行运行双架构 Docker/QEMU，不修改
+  源码、不提交、不 push。
+- Problem: 本地 runqueue 为空的 CPU 不能分担其它 CPU 的 backlog；直接跨队列搬运又容易
+  同时持双锁、在锁内等待 kernel-TLB 同步，或与 queued affinity 写侧争夺同一 TCB。
+- Human action: steal 先在 victim 锁内克隆候选，锁外同步本地 kernel mapping，重锁复核
+  成员/状态/mask/migration target，再复用 `Queued -> Migrating -> Running` 交接。focused
+  测试先固定 CPU0 队列，再扩 affinity，消除发布后检查与 AP timer 的竞态。
+- AI adjudication: 首轮冻结期间补安全条件触发父任务 fail-closed，其模型 ACCEPT 未采信；
+  最终冻结审查确认锁和状态不变量。模型建议立即开放默认全核 affinity 被否决，原因是共享
+  FS/net/driver 尚未通过 Phase 5 审计。
+- Verification: 最终 tracked diff SHA-256 为
+  `6e9895ec1f28e873f67b2d2425e1ca550930db52f321b12dc2e8ef5c01a9f390`；RV64/LA64
+  `CORE_NUM=8 KTEST=smp` 均为 31/31。生产逻辑冻结后的初赛仍为 RV64 312/314、LA64
+  308/314，失败身份不变；有效 child 均无源码 mutation、panic 或 timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -977,6 +999,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b40-group-exit-summary.md` | SMP 跨 CPU 线程组退出 | 记录永久 gate、owner 自清理、live-token ack、DeepSeek 反例审查及双架构 26/26/初赛门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b41-exec-summary.md` | SMP 多线程 exec | 记录临时 ExecSession、late clone 门禁、旧 MM 生命周期、等待点退栈、包装器 fail-closed 裁决及双架构 27/27/初赛门禁 |
 | `docs/Work_Log/2026-07-31.md`、同日 B45—B48 evidence | SMP trap context 与 signal 用户访存锁边界 | 记录 trap 借用收口、signal frame 与状态 syscall 的锁外用户访存、Linux ABI 对照、DeepSeek 结论纠错及双架构 8 核初赛门禁 |
+| `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b49-work-steal-summary.md` | SMP 空闲核 work stealing | 记录单 victim owner 交接、锁外 kernel-TLB、冻结任务 fail-closed 裁决和双架构 31/31/初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

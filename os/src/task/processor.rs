@@ -359,9 +359,9 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         // runqueue/processor 锁时推进本地 tick 并重编程 one-shot。
         let _ = super::run_deferred_timer_work();
 
-        // kernel-only AP 任务不参与 CPU0 的 OOM active tracker，直接从本地
-        // runqueue claim，避免 AP 为一次 fetch 进入全局 TaskManager。
-        let next_task = super::run_queue::fetch(cpu);
+        // kernel-only AP 任务不参与 CPU0 的 OOM active tracker。优先取本地
+        // 任务；本地为空时只向一个 victim 窃取一个 affinity 允许的任务。
+        let next_task = super::run_queue::fetch(cpu).or_else(|| super::run_queue::steal(cpu));
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
             dispatch_task(cpu, task_state, task, false, 0);

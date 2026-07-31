@@ -206,6 +206,83 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     Some(task)
 }
 
+/// 本地队列为空时，从一个远端 victim 取得至多一个允许迁移的任务。
+///
+/// victim 按排队数选择；多个 CPU 同时窃取时，真正的所有权仍由 victim
+/// runqueue 锁和 `Queued -> Migrating` 状态交接决定。候选栈映射的本地 TLB
+/// 同步可能等待，因此先在锁内克隆候选、锁外同步，再回到同一队列复核。
+pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
+    let runnable_cpus = crate::smp::online_cpu_mask()
+        & crate::smp::scheduler_cpu_mask()
+        & !crate::smp::stopped_cpu_mask()
+        & !(1usize << cpu);
+    let mut remaining = runnable_cpus;
+    let (victim, candidate) = loop {
+        // 先按无锁近似负载选择；若该队列只有 pinned 任务，就排除它并选择
+        // 下一个 victim，避免一个繁忙的 pinned 队列永久遮住其它可迁移任务。
+        let victim = (0..crate::smp::configured_cpu_count())
+            .filter(|candidate| remaining & (1usize << candidate) != 0)
+            .max_by_key(|candidate| nr_running(*candidate))?;
+        if nr_running(victim) == 0 {
+            return None;
+        }
+        // 从队尾选择，尽量不与 victim 即将从队首 fetch 的任务竞争。
+        let candidate = state(victim)
+            .run_queue
+            .lock()
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.is_cpu_allowed(cpu) && !task.has_migration_target())
+            .cloned();
+        if let Some(candidate) = candidate {
+            break (victim, candidate);
+        }
+        remaining &= !(1usize << victim);
+    };
+
+    // 新建内核栈只保证发布 CPU 已看见映射；窃取 CPU 必须在接管前刷新本地
+    // kernel-global TLB。等待期间任务仍完整留在 victim 队列。
+    crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
+        panic!(
+            "failed to synchronize stolen task {} stack on CPU {}: {:?}",
+            candidate.gettid(),
+            cpu,
+            error
+        )
+    });
+
+    let mut queue = state(victim).run_queue.lock();
+    let index = queue
+        .tasks
+        .iter()
+        .position(|task| Arc::ptr_eq(task, &candidate))?;
+    if candidate.task_status() != TaskStatus::Queued(victim)
+        || !candidate.is_cpu_allowed(cpu)
+        || candidate.has_migration_target()
+    {
+        return None;
+    }
+    candidate.require_sched_transition(
+        TaskStatus::Queued(victim),
+        TaskStatus::Migrating,
+        "detach task for work stealing",
+    );
+    let task = queue.remove_at(index);
+    sub_running(victim, 1);
+    drop(queue);
+
+    // Migrating 窗口由当前窃取调用方独占；此处直接交给本 CPU current 路径，
+    // 无需先插入目标队列再重新 fetch。
+    task.require_sched_transition(
+        TaskStatus::Migrating,
+        TaskStatus::Running(cpu),
+        "claim stolen task",
+    );
+    task.note_running_cpu(cpu);
+    Some(task)
+}
+
 /// 在 owner runqueue 内更新 queued 任务 affinity，必要时搬到另一 CPU。
 ///
 /// 返回 `Ok(Some(cpu))` 表示调用者需在所有队列锁释放后通知目标 CPU；

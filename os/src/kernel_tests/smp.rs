@@ -334,6 +334,9 @@ static RUNNING_AFFINITY_STOP: AtomicUsize = AtomicUsize::new(0);
 static RUNNING_AFFINITY_RUNS: AtomicUsize = AtomicUsize::new(0);
 static RUNNING_AFFINITY_RUN_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static RUNNING_AFFINITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static STEAL_RUNS: AtomicUsize = AtomicUsize::new(0);
+static STEAL_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static STEAL_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_RUNS: AtomicUsize = AtomicUsize::new(0);
 static AP_KSTACK_RECLAIM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_USER_TLB_RETIRE_PHASE: AtomicUsize = AtomicUsize::new(0);
@@ -458,6 +461,7 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::running_affinity_waits_for_owner_handoff",
             running_affinity_waits_for_owner_handoff,
         ),
+        KernelTest::new("smp::idle_cpu_steals_one_task", idle_cpu_steals_one_task),
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
             user_tlb_full_flush_reaches_online_cpus,
@@ -2650,6 +2654,64 @@ fn running_affinity_waits_for_owner_handoff() -> Result<(), &'static str> {
         }
     }
     result
+}
+
+fn record_stolen_task() {
+    let cpu = crate::smp::cpu_id();
+    let owner_ok = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(cpu))
+        .unwrap_or(false);
+    if cpu != 1 || !owner_ok {
+        STEAL_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    STEAL_CPU.store(cpu, Ordering::Release);
+    STEAL_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// CPU0 runner 占据本地 current，并把 subject 明确留在 CPU0 队列；mask 只允许
+/// CPU0/CPU1，因此唯一空闲且合法的 CPU1 必须通过生产 steal 路径取得它。
+fn idle_cpu_steals_one_task() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("work-stealing test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    STEAL_RUNS.store(0, Ordering::Release);
+    STEAL_CPU.store(usize::MAX, Ordering::Release);
+    STEAL_ERRORS.store(0, Ordering::Release);
+    let queue_before = crate::task::run_queue_count(crate::smp::BOOT_CPU_ID);
+    // 先用 bit0 把 subject 稳定留在 CPU0 队列，避免“发布后检查”与 AP
+    // timer 唤醒竞争；确认 victim 后再通过生产 affinity 写侧允许 CPU1。
+    let task = crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, record_stolen_task);
+    if task.task_status()
+        != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
+        || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before + 1
+    {
+        return Err("work-stealing subject was not queued on the victim CPU");
+    }
+    let wide_mask = (1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1);
+    if !crate::task::set_remote_affinity(&task, wide_mask) {
+        return Err("work-stealing subject affinity could not be widened");
+    }
+
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while task.task_status() != crate::task::TaskStatus::Zombie {
+        if crate::hal::get_time() >= deadline {
+            return Err("idle CPU did not steal the queued task");
+        }
+        core::hint::spin_loop();
+    }
+    if STEAL_RUNS.load(Ordering::Acquire) != 1
+        || STEAL_CPU.load(Ordering::Acquire) != 1
+        || STEAL_ERRORS.load(Ordering::Acquire) != 0
+        || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before
+    {
+        return Err("stolen task did not keep a unique CPU/runqueue owner");
+    }
+    Ok(())
 }
 
 /// 直接调用生产 user-TLB 同步原语，验证独立 sequence、IPI handler 与 ack 闭环。
