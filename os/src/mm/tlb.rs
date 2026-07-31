@@ -5,8 +5,7 @@
 //! 等待永远不发生在地址空间锁内。
 
 use super::{FlushRange, MmuGather};
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 
 static NEXT_MM_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -106,14 +105,23 @@ impl TlbContext {
         asid
     }
 
-    /// 登记当前 CPU，并保证它在使用页表根之前观察到最新代际。
+    /// 登记当前 CPU，并在使用页表根前完成首次 membarrier fence 与 TLB 代际追赶。
+    ///
+    /// 两项工作必须和 AddressSpace 的目标快照共用同一 VM 锁；拆开会重新引入
+    /// “快照遗漏新 CPU，而新 CPU 又未执行完整屏障”的窗口。
     pub(crate) fn activate_cpu(&self, cpu_id: usize) {
         assert!(cpu_id < crate::smp::configured_cpu_count());
         let cpu_bit = 1usize << cpu_id;
         let cached = self.cached_cpus.load(Ordering::Acquire);
         if cached & cpu_bit == 0 {
             // 激活与修改都持有同一把地址空间锁；首次登记不会漏过修改方快照。
-            self.cached_cpus.fetch_or(cpu_bit, Ordering::AcqRel);
+            let previous = self.cached_cpus.fetch_or(cpu_bit, Ordering::AcqRel);
+            if previous & cpu_bit == 0 {
+                // 若本 CPU 在 PRIVATE_EXPEDITED 取目标快照后才首次进入该 MM，
+                // VM 锁与这道 full fence 共同替代一次远端 IPI，保证返回用户态
+                // 前经过 membarrier 所要求的有序点。
+                fence(Ordering::SeqCst);
+            }
         }
 
         loop {

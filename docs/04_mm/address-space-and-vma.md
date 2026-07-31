@@ -3,8 +3,8 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
-tags: [mm, address-space, vma, elf, maps, mmu-gather]
+last_update: 2026-07-31
+tags: [mm, address-space, vma, elf, maps, mmu-gather, membarrier]
 ---
 
 # 地址空间、VMA 与用户映射
@@ -17,6 +17,7 @@ tags: [mm, address-space, vma, elf, maps, mmu-gather]
 pub struct AddressSpace<T: PageTable> {
     inner: Mutex<AddressSpaceInner<T>>,
     tlb: TlbContext,
+    private_expedited_registered: AtomicBool,
 }
 
 pub struct AddressSpaceInner<T: PageTable> {
@@ -35,6 +36,7 @@ pub struct AddressSpaceInner<T: PageTable> {
 |------|------|
 | `AddressSpace.inner` | 串行化同一 MM 的 VMA、PTE 和 CPU 激活登记 |
 | `AddressSpace.tlb` | 与共享 MM 同寿命的 ID、cached CPU mask、generation 与 per-CPU observed |
+| `AddressSpace.private_expedited_registered` | MM-owned PRIVATE_EXPEDITED 注册状态 |
 | `AddressSpaceInner.page_table` | 当前进程页表 |
 | `AddressSpaceInner.vmas` | 用户与少量进程私有内核映射的 VMA 集合 |
 | `heap_bottom/heap_pt` | ELF 加载后的 heap 起点与当前 program break |
@@ -53,7 +55,9 @@ PCB 以 `Arc<AddressSpace<T>>` 持有 VM；读操作经 `read()`，可能改 PTE
 | `AddressSpace::new()` | `address_space.rs` | 将尚未发布的锁内数据包装为共享 VM，并建立独立 `TlbContext`。 |
 | `AddressSpace::read()` | `address_space.rs` | 在 VM 锁内提供不可变访问，不进入 TLB 修改协议。 |
 | `AddressSpace::write()/try_write()` | `address_space.rs` | 锁内记录修改、`seal()`，解锁后执行 `TlbFlush`。 |
-| `AddressSpace::activate_on()` | `address_space.rs` | 在 VM 锁内登记当前 CPU、追平 generation，并取得页表 token。 |
+| `AddressSpace::activate_on()` | `address_space.rs` | 在 VM 锁内登记当前 CPU、完成首次 membarrier fence、追平 generation，并取得页表 token。 |
+| `register_private_expedited()` | `address_space.rs` | 为共享 MM 注册 PRIVATE_EXPEDITED。 |
+| `private_expedited_targets()` | `address_space.rs` | 在 VM 锁内冻结历史 CPU mask；未注册时返回 `None`。 |
 | `AddressSpaceInner::new_bare()` | `address_space.rs` | 创建空的页表/VMA 数据。 |
 | `AddressSpaceInner::token()` | `address_space.rs` | 返回页表 token。 |
 | `AddressSpaceInner::from_elf()` | `address_space.rs` | 从 ELF 构造尚未发布的用户地址空间。 |

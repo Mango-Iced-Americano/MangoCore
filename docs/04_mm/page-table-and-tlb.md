@@ -3,8 +3,8 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
-tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp]
+last_update: 2026-07-31
+tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp, membarrier]
 ---
 
 # 页表抽象与 TLB 约束
@@ -178,6 +178,11 @@ AddressSpace::write
 observed。用户返回前，`activate_on()` 在同一把 VM 锁内先登记 CPU，再比较
 generation；若本 CPU 落后，先清除本地用户翻译再使用页表根。修改侧也在这把锁内
 读取 mask 并推进 generation，因此激活和修改不会互相漏过。
+
+B44 复用同一个历史 cached mask 选择 PRIVATE_EXPEDITED membarrier 目标，但不把
+membarrier 塞进 TLB generation 或 `MmuGather`。快照与首次 CPU 登记仍由 VM 锁排序：
+快照前登记者收到远端 fence，快照后首次登记者在使用 MM 前执行本地 full fence。
+目标 mask 只增不减会产生保守的额外 IPI，但不会漏掉已经使用过该 MM 的 CPU。
 
 fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `MmuGather`：父侧批量
 撤销私有可写页的 W 权限，子侧建立共享 PPN。新子 MM 在包装成 `AddressSpace`

@@ -3,7 +3,7 @@ title: "内存管理 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [syscall, mm, mmap, brk]
 ---
 
@@ -438,11 +438,17 @@ copy_to_user_array(token, residency.as_ptr(), vec as *mut u8, page_count)
 | cmd | 行为 |
 |-----|------|
 | `MEMBARRIER_CMD_QUERY` | 返回 supported bitmask |
-| `MEMBARRIER_CMD_GLOBAL` | 成功 |
-| `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED` | 设置当前任务 `membarrier_private_expedited_registered = true` |
-| `MEMBARRIER_CMD_PRIVATE_EXPEDITED` | 已注册返回成功，否则 `EPERM` |
+| `MEMBARRIER_CMD_GLOBAL` | 让所有 online CPU 完成一次 full fence，并等待 IPI ack |
+| `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED` | 在当前 `AddressSpace` 注册 PRIVATE_EXPEDITED |
+| `MEMBARRIER_CMD_PRIVATE_EXPEDITED` | 同步曾缓存当前 MM 的 CPU；未注册返回 `EPERM` |
 
 flags 必须为 0，否则 `EINVAL`。
+
+注册状态属于共享 MM，而不是某个 TCB：`CLONE_VM` 线程天然共享，fork 和 exec
+创建的新 `AddressSpace` 从未注册状态开始。PRIVATE_EXPEDITED 先在 VM 锁内冻结
+历史 CPU mask，再解锁执行 `pre-fence -> IPI/fence/ack -> post-fence`；因此不会把
+VM 锁带入远端等待。与快照并发首次进入该 MM 的 CPU 在同一 VM 锁内登记后执行
+full fence，补上未被目标 mask 捕获的竞态次序。
 
 ## 12. 跨进程 VM
 

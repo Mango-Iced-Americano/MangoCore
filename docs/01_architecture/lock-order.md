@@ -388,6 +388,22 @@ join-vs-update 顺序。当前正确性来自共同 VM 锁，不来自对跨原�
 激活或目标快照改成 lockless，必须给出两种竞态次序的正式证明和相应 fence/重试协议，
 不能只把 `generation.fetch_add` 改成更强内存序就宣称完成。
 
+### 3.9 B44 membarrier 锁序
+
+PRIVATE_EXPEDITED 的注册状态属于 `AddressSpace`。目标选择和 CPU 首次激活沿用
+B22/B23 的 VM 锁，而远端同步固定发生在解锁后：
+
+```text
+lock VM -> snapshot cached CPU mask -> unlock VM
+        -> pre full fence -> publish request -> IPI/fence/ack -> post full fence
+```
+
+快照先于新 CPU 激活时，新 CPU 在同一 VM 锁之后执行首次 full fence；激活先于快照时，
+该 CPU 已进入 mask 并收到 IPI。历史 mask 不清 bit，所以离开 MM 的 CPU 最多产生额外
+barrier，不会被错误遗漏。IPI handler 只读取本 CPU request、执行 fence 并 Release
+发布 ack，不分配、不取普通锁。等待复用通用 `IpiWaitIrqGuard`，调用方不得持有 VM、
+runqueue、task.inner 或其它普通锁。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

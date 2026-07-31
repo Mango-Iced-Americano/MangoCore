@@ -87,11 +87,11 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33 让运行中用户任务在返回安全点消费 RESCHEDULE，B34 完成 current 写侧，B35/B36 分别完成远程稳定 Blocked/Queued 写侧，B37 完成 affinity-aware 新任务与 wake 选点，B38 完成远程 Running/Blocking owner 交接 | 默认全核 mask、steal 与多写者 affinity 压力验证尚未完成 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活并在退出时完成双 CPU shootdown | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活；B44 复用历史 mask 完成 PRIVATE_EXPEDITED 目标快照 | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID | `membarrier` 和默认全核 affinity 仍不完整；普通任务当前仍为 bit0 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0 |
 
 ### 2.2 总体结构
 
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B43）
+#### 当前进度（SMP-P2.5-B15 至 B44）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -695,6 +695,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   hint、OOM active tracker、`exit_signal` 与 thread quota 随后更新。旧 leader 的迟到
   Drop 只能条件删除仍指向自身的条目，不会误删新 leader。双架构 8 核 focused 均为
   29/29；初赛保持 RV64 312/314、LA64 308/314。
+- B44 删除 TCB 上的兼容注册字段，把 PRIVATE_EXPEDITED 注册状态放入共享
+  `AddressSpace`。GLOBAL 面向全部 online CPU；PRIVATE 在 VM 锁内冻结历史 cached
+  CPU mask，解锁后执行独立的 full-fence IPI/request/ack。与快照并发首次进入 MM 的
+  CPU 在同一 VM 锁后执行本地 full fence，因此两种竞态次序都不会漏 barrier。
+  双架构 8 核 focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
 
 ### Phase 3：Per-CPU 调度器与时间系统
 

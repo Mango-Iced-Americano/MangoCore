@@ -3,7 +3,7 @@ title: "TaskControlBlock 线程级执行实体"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-07-31
 tags: [process, task, tcb, thread, smp]
 ---
 
@@ -86,7 +86,7 @@ LA64 ASID 不属于线程字段：它由 `AddressSpace` 的 `TlbContext` 持有�
 | 信号 | `sigmask`, `sigmask_to_restore`, `sigpending`, `signal_wait_mask`, `signal_stack` |
 | 上下文 | `trap_cx_ppn`, `task_cx` |
 | 调度兼容 | `sched_policy`, `sched_priority`, `sched_reset_on_fork`, `sched_nice`, `sched_vruntime`, `sched_runtime`, `sched_deadline`, `sched_period` |
-| I/O 优先级与 membarrier | `ioprio_class`, `ioprio_prio`, `membarrier_private_expedited_registered` |
+| I/O 优先级 | `ioprio_class`, `ioprio_prio` |
 | rlimit | `rtprio`, `nice`, `sigpending`, `stack`, `memlock`, `fsize`, `nproc`, `cpu`, `core` |
 | 进程属性兼容 | `personality`, `pdeath_signal`, `dumpable`, `task_comm`, `timer_slack` |
 | ptrace/seccomp | `ptrace_traceme`, `seccomp_mode`, `seccomp_filter` |
@@ -96,6 +96,8 @@ LA64 ASID 不属于线程字段：它由 `AddressSpace` 的 `TlbContext` 持有�
 | OOM | `pending_oom_kill` |
 
 其中一部分字段用于 syscall 回读、权限分支或 fork 继承规则；真实参与调度、权限检查和 ptrace 行为的路径在对应章节单独列出。
+PRIVATE_EXPEDITED membarrier 注册不再属于 TCB inner；B44 将它放入共享
+`AddressSpace`，使同 MM 线程共享而 fork/exec 新 MM 不继承。
 
 ### 3.1 inner 字段读写路径
 

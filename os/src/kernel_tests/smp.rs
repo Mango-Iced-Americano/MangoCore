@@ -374,6 +374,8 @@ static EXEC_IDENTITY_LEADER_READY: AtomicUsize = AtomicUsize::new(0);
 static EXEC_IDENTITY_PHASE: AtomicUsize = AtomicUsize::new(0);
 static EXEC_IDENTITY_CHECKED: AtomicUsize = AtomicUsize::new(0);
 static EXEC_IDENTITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static MEMBARRIER_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
+static MEMBARRIER_REMOTE_RELEASE: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -476,6 +478,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::user_tlb_retirement_waits_for_ack",
             user_tlb_retirement_waits_for_ack,
+        ),
+        KernelTest::new(
+            "smp::membarrier_reaches_mm_cpus",
+            membarrier_reaches_mm_cpus,
         ),
         KernelTest::new(
             "smp::kernel_stack_reclaim_waits_for_shootdown",
@@ -1661,6 +1667,135 @@ fn bsp_broadcasts_ipi_to_all_aps() -> Result<(), &'static str> {
             }
             core::hint::spin_loop();
         }
+    }
+    Ok(())
+}
+
+fn membarrier_remote_mm_helper() {
+    crate::hal::local_irq_restore(true);
+    let task = crate::task::current_task().expect("membarrier helper has no current task");
+    let _context = task.process.vm().activate_on(crate::smp::cpu_id());
+    MEMBARRIER_REMOTE_READY.store(1, Ordering::Release);
+    while MEMBARRIER_REMOTE_RELEASE.load(Ordering::Acquire) == 0 {
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    }
+    // 裸入口和 noreturn 调度都不会展开 Rust 栈，必须主动释放 current clone。
+    drop(task);
+    crate::task::zombify_current_and_run_next();
+}
+
+/// 验证 MM-owned 注册状态以及 PRIVATE/GLOBAL 的真实 IPI/ack。
+fn membarrier_reaches_mm_cpus() -> Result<(), &'static str> {
+    const SYSCALL_MEMBARRIER: usize = 283;
+    const CMD_QUERY: usize = 0;
+    const CMD_GLOBAL: usize = 1 << 0;
+    const CMD_PRIVATE_EXPEDITED: usize = 1 << 3;
+    const CMD_REGISTER_PRIVATE_EXPEDITED: usize = 1 << 4;
+    const SUPPORTED: isize =
+        (CMD_GLOBAL | CMD_PRIVATE_EXPEDITED | CMD_REGISTER_PRIVATE_EXPEDITED) as isize;
+    let call = |cmd| crate::syscall::syscall(SYSCALL_MEMBARRIER, [cmd, 0, 0, 0, 0, 0]);
+
+    if call(CMD_QUERY) != SUPPORTED {
+        return Err("membarrier query did not report the implemented commands");
+    }
+    let fresh = crate::mm::AddressSpace::new(crate::mm::AddressSpaceInner::<
+        crate::hal::PageTableImpl,
+    >::new_bare());
+    if fresh.private_expedited_targets().is_some() {
+        return Err("new address space inherited membarrier registration");
+    }
+    let current = crate::task::current_task().unwrap();
+    let process = current.process.clone();
+    let was_unregistered = process.vm().private_expedited_targets().is_none();
+    drop(current);
+    // KREPEAT 会复用 ktest runner 的 MM；只有首轮尚未注册时检查 EPERM。
+    if was_unregistered && call(CMD_PRIVATE_EXPEDITED) != crate::syscall::errno::EPERM {
+        return Err("private expedited membarrier succeeded before registration");
+    }
+    if call(CMD_REGISTER_PRIVATE_EXPEDITED) != 0 {
+        return Err("private expedited membarrier registration failed");
+    }
+
+    MEMBARRIER_REMOTE_READY.store(0, Ordering::Relaxed);
+    MEMBARRIER_REMOTE_RELEASE.store(0, Ordering::Relaxed);
+    let remote = if crate::smp::configured_cpu_count() > 1 {
+        let task = build_ktest_sibling(process, 1, membarrier_remote_mm_helper);
+        crate::task::try_publish_task_on(task.clone(), 1)
+            .map_err(|_| "failed to publish membarrier MM helper")?;
+        Some(task)
+    } else {
+        None
+    };
+
+    let mut timed_out = false;
+    let mut private_failed = false;
+    let mut private_request_before = 0;
+    let mut global_request_before = [0usize; crate::smp::MAX_CPUS];
+    crate::hal::with_local_interrupts_enabled(|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        if remote.is_some() {
+            while MEMBARRIER_REMOTE_READY.load(Ordering::Acquire) == 0 {
+                if crate::hal::get_time() >= deadline {
+                    timed_out = true;
+                    break;
+                }
+                crate::task::run_task_safe_point();
+            }
+            private_request_before = crate::smp::memory_barrier_request(1);
+        }
+
+        if !timed_out && call(CMD_PRIVATE_EXPEDITED) != 0 {
+            private_failed = true;
+        }
+        if remote.is_some() && !timed_out {
+            let request = crate::smp::memory_barrier_request(1);
+            if request != private_request_before + 1
+                || crate::smp::memory_barrier_ack(1) < request
+            {
+                private_failed = true;
+            }
+        }
+
+        for cpu_id in 1..crate::smp::configured_cpu_count() {
+            global_request_before[cpu_id] = crate::smp::memory_barrier_request(cpu_id);
+        }
+        if !timed_out && call(CMD_GLOBAL) != 0 {
+            private_failed = true;
+        }
+        for cpu_id in 1..crate::smp::configured_cpu_count() {
+            if !timed_out {
+                let request = crate::smp::memory_barrier_request(cpu_id);
+                if request != global_request_before[cpu_id] + 1
+                    || crate::smp::memory_barrier_ack(cpu_id) < request
+                {
+                    private_failed = true;
+                }
+            }
+        }
+
+        MEMBARRIER_REMOTE_RELEASE.store(1, Ordering::Release);
+        if let Some(task) = remote.as_ref() {
+            let cleanup_deadline =
+                crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+            while task.task_status() != crate::task::TaskStatus::Zombie {
+                if crate::hal::get_time() >= cleanup_deadline {
+                    timed_out = true;
+                    break;
+                }
+                crate::task::run_task_safe_point();
+            }
+        }
+    });
+    drop(remote);
+    drop(crate::task::take_zombie_tasks(64));
+
+    if timed_out {
+        return Err("membarrier MM helper timed out");
+    }
+    if private_failed {
+        return Err("membarrier did not complete the expected CPU acknowledgements");
     }
     Ok(())
 }

@@ -218,27 +218,38 @@ pub fn sys_memorybarrier(cmd: usize, flags: usize, _cpu_id: usize) -> isize {
 
     match cmd {
         MEMBARRIER_CMD_QUERY => MEMBARRIER_SUPPORTED_CMDS as isize,
-        MEMBARRIER_CMD_GLOBAL => SUCCESS,
+        MEMBARRIER_CMD_GLOBAL => run_memory_barrier(crate::smp::online_cpu_mask()),
         MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
             current_task()
                 .unwrap()
-                .acquire_inner_lock()
-                .membarrier_private_expedited_registered = true;
+                .process
+                .vm()
+                .register_private_expedited();
             SUCCESS
         }
         MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
-            if current_task()
-                .unwrap()
-                .acquire_inner_lock()
-                .membarrier_private_expedited_registered
-            {
-                SUCCESS
-            } else {
-                EPERM
+            let vm = current_task().unwrap().process.vm();
+            match vm.private_expedited_targets() {
+                Some(targets) => run_memory_barrier(targets),
+                None => EPERM,
             }
         }
         _ => EINVAL,
     }
+}
+
+/// 执行已经完成 ABI 校验的 membarrier。
+///
+/// advertised 命令不能在运行期静默降级；若 IPI/ack 基础设施无法兑现完整
+/// 内存序承诺，继续运行会让用户同步算法得到错误结果，因此明确 fail-stop。
+fn run_memory_barrier(targets: usize) -> isize {
+    if let Err(error) = crate::smp::synchronize_memory(targets) {
+        panic!(
+            "membarrier synchronization failed: targets={:#x} error={:?}",
+            targets, error
+        );
+    }
+    SUCCESS
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {

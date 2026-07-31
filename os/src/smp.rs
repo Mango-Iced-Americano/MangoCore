@@ -6,7 +6,7 @@
 use core::{
     hint::spin_loop,
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 pub const BOOT_CPU_ID: usize = 0;
@@ -37,6 +37,10 @@ struct PerCpu {
     user_tlb_request: AtomicUsize,
     /// 本 CPU 完成全用户 TLB 失效后发布的对应确认序号。
     user_tlb_ack: AtomicUsize,
+    /// 本 CPU 必须执行的 membarrier 完整内存屏障序号。
+    memory_barrier_request: AtomicUsize,
+    /// 本 CPU 执行完整内存屏障后发布的对应确认序号。
+    memory_barrier_ack: AtomicUsize,
     /// 尚未处理的 IPI 原因位图；发送方 Release 合并，目标 CPU Acquire 消费。
     pending_ipi: AtomicU32,
     /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
@@ -77,6 +81,8 @@ impl PerCpu {
             kernel_tlb_ack: AtomicUsize::new(0),
             user_tlb_request: AtomicUsize::new(0),
             user_tlb_ack: AtomicUsize::new(0),
+            memory_barrier_request: AtomicUsize::new(0),
+            memory_barrier_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
             ipi_ping_ack: AtomicUsize::new(0),
             round_trip_reply_pending: AtomicBool::new(false),
@@ -186,6 +192,8 @@ impl IpiReason {
     const USER_TLB_PAGE_SYNC: Self = Self(1 << 7);
     /// 全局 timer 队列出现更早 deadline；CPU0 在安全点重编程本地 timer。
     const TIMER_REPROGRAM: Self = Self(1 << 8);
+    /// 目标 CPU 必须执行完整内存屏障后发布 ack。
+    const MEMORY_BARRIER: Self = Self(1 << 9);
 
     const fn bits(self) -> u32 {
         self.0
@@ -255,6 +263,24 @@ pub(crate) enum UserTlbSyncError {
     PageTimeout {
         missing: usize,
         acknowledged: usize,
+        send_error: Option<isize>,
+    },
+}
+
+/// 跨 CPU 完整内存屏障协议可能返回的错误。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryBarrierError {
+    InvalidTargets {
+        targets: usize,
+    },
+    UnavailableTargets {
+        targets: usize,
+        available: usize,
+    },
+    Timeout {
+        cpu_id: usize,
+        expected: usize,
+        observed: usize,
         send_error: Option<isize>,
     },
 }
@@ -436,6 +462,18 @@ pub(crate) fn user_tlb_request(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id].user_tlb_request.load(Ordering::Acquire)
 }
 
+/// 查询目标 CPU 已完成的跨核完整内存屏障序号。
+pub(crate) fn memory_barrier_ack(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id].memory_barrier_ack.load(Ordering::Acquire)
+}
+
+/// 查询目标 CPU 已发布的跨核完整内存屏障序号。
+pub(crate) fn memory_barrier_request(cpu_id: usize) -> usize {
+    PER_CPUS[cpu_id]
+        .memory_barrier_request
+        .load(Ordering::Acquire)
+}
+
 /// 查询 CPU0 已处理的 round-trip 回复序号。
 pub fn round_trip_reply_ack() -> usize {
     PER_CPUS[BOOT_CPU_ID]
@@ -522,6 +560,14 @@ pub fn handle_ipi() {
         local
             .timer_reprogram_requested
             .store(true, Ordering::Release);
+    }
+    if reasons & IpiReason::MEMORY_BARRIER.bits() != 0 {
+        let sequence = local.memory_barrier_request.load(Ordering::Acquire);
+        if local.memory_barrier_ack.load(Ordering::Acquire) < sequence {
+            // 目标必须先经过完整硬件屏障，再允许发送方从 ack 等待中返回。
+            fence(Ordering::SeqCst);
+            local.memory_barrier_ack.store(sequence, Ordering::Release);
+        }
     }
     if reasons & IpiReason::KERNEL_TLB_SYNC.bits() != 0 {
         // 必须先快照 request，再做失效。若反过来，发送方可能在“失效完成”
@@ -612,17 +658,17 @@ pub(crate) fn request_reschedule(cpu_id: usize) -> Result<(), isize> {
     send_ipi(cpu_id, IpiReason::RESCHEDULE)
 }
 
-/// shootdown 等待期间临时开放本地中断，并在退出时恢复调用者原状态。
+/// IPI ack 等待期间临时开放本地中断，并在退出时恢复调用者原状态。
 ///
-/// 当前发起者可能同时成为另一轮 shootdown 的目标；若双方都在 IRQ-off
+/// 当前发起者可能同时成为另一轮同步的目标；若双方都在 IRQ-off
 /// 自旋，就会互相等待 ack。进入本 guard 前不得持有页表、runqueue 或普通锁。
 /// 窗口内到达的 timer IRQ 仍只发布 deferred work；生产调用者随后必须经过
 /// trap-return 或 scheduler timer 安全点，不能在 MM 同步层执行任意 timer callback。
-struct TlbWaitIrqGuard {
+struct IpiWaitIrqGuard {
     restore_enabled: bool,
 }
 
-impl TlbWaitIrqGuard {
+impl IpiWaitIrqGuard {
     fn enter() -> Self {
         let restore_enabled = crate::hal::local_irq_save();
         crate::hal::local_irq_restore(true);
@@ -630,11 +676,88 @@ impl TlbWaitIrqGuard {
     }
 }
 
-impl Drop for TlbWaitIrqGuard {
+impl Drop for IpiWaitIrqGuard {
     fn drop(&mut self) {
         let _ = crate::hal::local_irq_save();
         crate::hal::local_irq_restore(self.restore_enabled);
     }
+}
+
+/// 让目标 CPU 在本次调用期间各自经过一次完整内存屏障。
+///
+/// 调用方不得持有 VM、runqueue 或其它普通锁。目标若在等待期间完成 STOP，
+/// 其不可恢复的停止确认可替代 barrier ack；MangoCore 不支持 CPU hotplug。
+pub(crate) fn synchronize_memory(targets: usize) -> Result<(), MemoryBarrierError> {
+    let current_bit = 1usize << self::cpu_id();
+    let targets = targets | current_bit;
+    let configured = expected_online_mask();
+    if targets & !configured != 0 {
+        return Err(MemoryBarrierError::InvalidTargets { targets });
+    }
+    let online = online_cpu_mask();
+    if targets & !online != 0 {
+        return Err(MemoryBarrierError::UnavailableTargets {
+            targets,
+            available: online & !stopped_cpu_mask(),
+        });
+    }
+
+    let live_targets = targets & !stopped_cpu_mask();
+    let remote = live_targets & !current_bit;
+    let mut expected = [0usize; MAX_CPUS];
+
+    // 先约束调用者在 syscall 入口前的用户内存访问，再发布远端 request。
+    fence(Ordering::SeqCst);
+    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        if remote & (1usize << cpu_id) == 0 {
+            continue;
+        }
+        expected[cpu_id] = PER_CPUS[cpu_id]
+            .memory_barrier_request
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        assert_ne!(
+            expected[cpu_id], 0,
+            "memory barrier synchronization sequence wrapped"
+        );
+    }
+
+    if remote != 0 {
+        let send_error = send_ipi_mask(remote, IpiReason::MEMORY_BARRIER).err();
+        let _irq_guard = IpiWaitIrqGuard::enter();
+        let deadline = crate::hal::get_time()
+            .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+        loop {
+            let stopped = stopped_cpu_mask();
+            let mut missing = None;
+            for cpu_id in 0..CONFIGURED_CPU_COUNT {
+                if remote & (1usize << cpu_id) == 0 || stopped & (1usize << cpu_id) != 0 {
+                    continue;
+                }
+                let observed = PER_CPUS[cpu_id].memory_barrier_ack.load(Ordering::Acquire);
+                if observed < expected[cpu_id] {
+                    missing = Some((cpu_id, observed));
+                    break;
+                }
+            }
+            let Some((cpu_id, observed)) = missing else {
+                break;
+            };
+            if crate::hal::get_time() >= deadline {
+                return Err(MemoryBarrierError::Timeout {
+                    cpu_id,
+                    expected: expected[cpu_id],
+                    observed,
+                    send_error,
+                });
+            }
+            spin_loop();
+        }
+    }
+
+    // ack 的 Acquire 与这道屏障共同约束 syscall 返回后的用户内存访问。
+    fence(Ordering::SeqCst);
+    Ok(())
 }
 
 /// 把一次共享内核页表修改同步到目标 CPU 集合。
@@ -693,7 +816,7 @@ fn synchronize_kernel_mapping_mask(
     // 承诺不再访问旧翻译，也可替代本轮 TLB ack。
     let send_error = send_ipi_mask(remote, IpiReason::KERNEL_TLB_SYNC).err();
 
-    let _irq_guard = TlbWaitIrqGuard::enter();
+    let _irq_guard = IpiWaitIrqGuard::enter();
     let deadline = crate::hal::get_time()
         .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
     loop {
@@ -807,7 +930,7 @@ pub(crate) fn synchronize_user_tlb(
                 crate::hal::user_tlb_invalidate_page(asid, vpn);
             }
             let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_PAGE_SYNC).err();
-            let _irq_guard = TlbWaitIrqGuard::enter();
+            let _irq_guard = IpiWaitIrqGuard::enter();
             let deadline = crate::hal::get_time().saturating_add(
                 crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
             );
@@ -851,7 +974,7 @@ pub(crate) fn synchronize_user_tlb(
 
     // 等待者本身也可能同时成为另一轮 user/kernel shootdown 的目标。临时开放
     // 本地中断后双方都能进入只做原子操作的 handler，不会形成 ack 环形等待。
-    let _irq_guard = TlbWaitIrqGuard::enter();
+    let _irq_guard = IpiWaitIrqGuard::enter();
     let deadline = crate::hal::get_time()
         .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
     loop {

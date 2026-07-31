@@ -584,6 +584,11 @@ B43 加入 `smp::exec_owner_becomes_group_leader`，总数变为 29。用例必�
 接管旧 TID handle，以及旧 leader 迟到 Drop 不会删除新 leader 的 PID 注册项。runner 在
 owner 切到 zombie idle 栈前必须显式释放 syscall 栈上的临时 `Arc`；否则 noreturn context
 switch 不会展开 Rust 栈，TCB 泄漏会造成假失败。
+B44 加入 `smp::membarrier_reaches_mm_cpus`，总数变为 30。用例从 syscall 分发入口检查
+QUERY、未注册 `EPERM` 和幂等注册；随后让同 PCB helper 在 CPU1 激活同一 MM，
+PRIVATE_EXPEDITED 必须只给该远端 request 增加一次并等待对应 ack。GLOBAL 必须给所有
+AP 各增加一次 request 并完成 ack。`KREPEAT=2` 时终态 STOP 只执行一次，所以总 TAP
+项为 59；helper 每轮必须恢复 Zombie 并回收，不能把上一轮残留当作下一轮 ack。
 
 ### Bug 下沉流程
 

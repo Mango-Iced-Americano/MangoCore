@@ -42,6 +42,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::fmt::Write;
+use core::sync::atomic::{fence, AtomicBool, Ordering};
 use log::{debug, error, warn};
 use spin::Mutex;
 
@@ -83,6 +84,11 @@ pub struct AddressSpace<T: PageTable> {
     inner: Mutex<AddressSpaceInner<T>>,
     /// MM ID、历史缓存 CPU 与 generation；其生命周期和共享地址空间完全一致。
     tlb: TlbContext,
+    /// 当前 MM 是否注册过 PRIVATE_EXPEDITED membarrier。
+    ///
+    /// 注册是地址空间属性：CLONE_VM 必须共享，fork/exec 的新 AddressSpace
+    /// 则从未注册状态开始。
+    private_expedited_registered: AtomicBool,
 }
 
 /// 返回用户态时必须成对安装的页表根与硬件 ASID。
@@ -101,6 +107,7 @@ impl<T: PageTable> AddressSpace<T> {
         Self {
             inner: Mutex::new(inner),
             tlb: TlbContext::new(),
+            private_expedited_registered: AtomicBool::new(false),
         }
     }
 
@@ -166,6 +173,27 @@ impl<T: PageTable> AddressSpace<T> {
             #[cfg(target_arch = "riscv64")]
             crate::hal::arch::riscv::sv39::rollover_asids();
         }
+    }
+
+    /// 注册当前地址空间使用 PRIVATE_EXPEDITED membarrier。
+    pub(crate) fn register_private_expedited(&self) {
+        self.private_expedited_registered
+            .store(true, Ordering::Release);
+        // 注册只发生一次；完整屏障保证后续用户访问不会越过注册 syscall，
+        // Acquire 观察到该状态的其它线程也能安全开始 PRIVATE_EXPEDITED。
+        fence(Ordering::SeqCst);
+    }
+
+    /// 冻结 PRIVATE_EXPEDITED 的目标 CPU；未注册时返回 `None`。
+    ///
+    /// 激活路径也持有 `inner`，因此锁内快照与首次 CPU 登记具有明确先后：
+    /// 先登记者进入历史 mask，后登记者会在首次使用 MM 前执行完整 fence。
+    pub(crate) fn private_expedited_targets(&self) -> Option<usize> {
+        if !self.private_expedited_registered.load(Ordering::Acquire) {
+            return None;
+        }
+        let _inner = self.inner.lock();
+        Some(self.tlb.cached_cpu_mask() | (1usize << crate::smp::cpu_id()))
     }
 }
 
