@@ -355,7 +355,8 @@ impl PageEntry {
     }
 
     fn set_state(&self, state: PageState) {
-        self.flags.store(Self::flags_for_state(state), Ordering::Release);
+        self.flags
+            .store(Self::flags_for_state(state), Ordering::Release);
     }
 
     const fn flags_for_state(state: PageState) -> u32 {
@@ -472,7 +473,11 @@ impl PageEntry {
 
     fn complete_writeback(&self) -> bool {
         let redirtied = self.test_and_clear_flag(PG_REDIRTIED);
-        let add = if redirtied { PG_DIRTY } else { PG_UPTODATE | PG_REFERENCED };
+        let add = if redirtied {
+            PG_DIRTY
+        } else {
+            PG_UPTODATE | PG_REFERENCED
+        };
         self.flags
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                 Some((old | add) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
@@ -555,7 +560,10 @@ impl PageEntries {
     }
 
     fn get(&self, index: usize) -> Option<Arc<PageEntry>> {
-        self.entries.read().get(index).and_then(|entry| entry.clone())
+        self.entries
+            .read()
+            .get(index)
+            .and_then(|entry| entry.clone())
     }
 
     fn insert_if_absent(&self, index: usize, candidate: Arc<PageEntry>) -> Arc<PageEntry> {
@@ -575,7 +583,10 @@ impl PageEntries {
     fn remove_if(&self, index: usize, expected: &Arc<PageEntry>) -> Option<Arc<PageEntry>> {
         let mut entries = self.entries.write();
         let entry = entries.get_mut(index)?;
-        if entry.as_ref().is_some_and(|current| Arc::ptr_eq(current, expected)) {
+        if entry
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
             entry.take()
         } else {
             None
@@ -583,7 +594,11 @@ impl PageEntries {
     }
 
     fn live_count(&self) -> usize {
-        self.entries.read().iter().filter(|entry| entry.is_some()).count()
+        self.entries
+            .read()
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count()
     }
 
     fn snapshot(&self) -> Vec<(usize, Arc<PageEntry>)> {
@@ -619,10 +634,11 @@ struct MissRun {
     count: usize,
 }
 
-/// Result of scanning the full read range under one entries lock.
+/// Result of scanning a read range under bounded entries locks.
 struct ReadPlan {
     copies: Vec<ReadCopy>,
     miss_runs: Vec<MissRun>,
+    // Pages are scanned once in ascending order, so this remains sorted and unique.
     needs_valid_fill: BTreeSet<usize>, // pages that exist but partially valid
 }
 
@@ -1127,8 +1143,8 @@ impl PageCache {
 
     // ── Batch read helpers ───────────────────────────────────────────
 
-    /// Scan [start_page..=end_page] through independently locked page slots.
-    /// HIT: mark_referenced, check is_fully_valid(), push ReadCopy.
+    /// Scan [start_page..=end_page] through bounded batches of directory slots.
+    /// HIT: mark referenced, check is_fully_valid(), push ReadCopy.
     /// MISS: record in miss_runs (coalesced into contiguous runs).
     /// PARTIAL: if entry exists but !is_fully_valid(), push to needs_valid_fill.
     fn lookup_read_range_fast(
@@ -1138,15 +1154,17 @@ impl PageCache {
         start_page: usize,
         end_page: usize,
     ) -> Result<ReadPlan, SyscallErr> {
+        let end = offset.checked_add(buf_len).ok_or(SyscallErr::EFBIG)?;
+        let page_count = end_page - start_page + 1;
         let mut plan = ReadPlan {
-            copies: Vec::new(),
-            miss_runs: Vec::new(),
+            copies: Vec::with_capacity(page_count),
+            miss_runs: Vec::with_capacity(page_count),
             needs_valid_fill: BTreeSet::new(),
         };
         for page_index in start_page..=end_page {
             let page_start = page_index * PAGE_SIZE;
             let read_start = offset.max(page_start);
-            let read_end = (offset + buf_len).min(page_start + PAGE_SIZE);
+            let read_end = end.min(page_start.saturating_add(PAGE_SIZE));
             if read_end <= read_start {
                 continue;
             }
@@ -1157,27 +1175,27 @@ impl PageCache {
 
             // Check entry existence
             if let Some(entry) = self.entries.get(page_index) {
-                    match entry.state() {
-                        PageState::Loading | PageState::Writeback => {
-                            return Err(SyscallErr::EAGAIN);
-                        }
-                        PageState::Error => return Err(SyscallErr::EIO),
-                        PageState::UpToDate | PageState::Dirty => {}
+                match entry.state() {
+                    PageState::Loading | PageState::Writeback => {
+                        return Err(SyscallErr::EAGAIN);
                     }
-                    entry.mark_referenced();
-                    if entry.is_fully_valid() {
-                        plan.copies.push(ReadCopy {
-                            entry,
-                            dst_offset,
-                            page_offset,
-                            len: sub_len,
-                        });
-                        continue;
-                    } else {
-                        plan.needs_valid_fill.insert(page_index);
-                        continue;
-                    }
+                    PageState::Error => return Err(SyscallErr::EIO),
+                    PageState::UpToDate | PageState::Dirty => {}
                 }
+                entry.mark_referenced();
+                if entry.is_fully_valid() {
+                    plan.copies.push(ReadCopy {
+                        entry,
+                        dst_offset,
+                        page_offset,
+                        len: sub_len,
+                    });
+                    continue;
+                }
+                plan.needs_valid_fill.insert(page_index);
+                continue;
+            }
+
             // Miss: page not in cache — coalesce into contiguous runs
             if let Some(last) = plan.miss_runs.last_mut() {
                 if last.start_page + last.count == page_index {
@@ -1268,10 +1286,10 @@ impl PageCache {
     /// 从指定偏移量读取数据
     /// 两阶段读取：持锁收集拷贝项 → 解锁拷贝数据
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        let _t0 = perf::perf_time_now();
+        let _t0 = perf::perf_memory_io_time_now();
         let miss_before = perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed);
         if buf.is_empty() {
-            let elapsed = perf::perf_time_now().wrapping_sub(_t0);
+            let elapsed = perf::perf_memory_io_time_now().wrapping_sub(_t0);
             perf::record_pc_read(0, elapsed, elapsed, 0);
             return Ok(0);
         }
@@ -1284,19 +1302,19 @@ impl PageCache {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
-            let _t_lookup = perf::perf_time_now();
+            let _t_lookup = perf::perf_memory_io_time_now();
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
             let had_miss =
                 perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-            let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
+            let lookup_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
-            let _t_copy = perf::perf_time_now();
+            let _t_copy = perf::perf_memory_io_time_now();
             let src = entry.as_slice();
             buf[..sub_len].copy_from_slice(&src[page_offset..page_offset + sub_len]);
-            let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+            let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
             perf::record_pc_copy_cycles(copy_cycles);
-            let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
+            let total_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t0);
             if had_miss {
                 perf::record_pc_read(1, total_cycles, 0, total_cycles);
             } else {
@@ -1309,25 +1327,25 @@ impl PageCache {
         let mut retried = false;
         let total_len = buf.len();
         loop {
-            let _t_lookup = perf::perf_time_now();
+            let _t_lookup = perf::perf_memory_io_time_now();
             let plan = self.lookup_read_range_fast(offset, total_len, start_page, end_page)?;
-            let lookup_cycles = perf::perf_time_now().wrapping_sub(_t_lookup);
+            let lookup_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_lookup);
             perf::record_pc_lookup_cycles(lookup_cycles);
 
             // Fast path: all pages cached and fully valid
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
-                let _t_copy = perf::perf_time_now();
+                let _t_copy = perf::perf_memory_io_time_now();
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
                     buf[item.dst_offset..item.dst_offset + item.len]
                         .copy_from_slice(&src[item.page_offset..item.page_offset + item.len]);
                 }
-                let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
+                let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
 
                 let had_miss =
                     perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-                let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
+                let total_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t0);
                 let pages = end_page - start_page + 1;
                 if had_miss {
                     perf::record_pc_read(pages, total_cycles, 0, total_cycles);
@@ -1377,7 +1395,7 @@ impl PageCache {
                 }
                 let had_miss =
                     perf::PC_READ_MISS.load(core::sync::atomic::Ordering::Relaxed) > miss_before;
-                let total_cycles = perf::perf_time_now().wrapping_sub(_t0);
+                let total_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t0);
                 let pages = end_page - start_page + 1;
                 if had_miss {
                     perf::record_pc_read(pages, total_cycles, 0, total_cycles);
@@ -1487,7 +1505,8 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let lease = self.prepare_write_lease(start_page, old_file_size, full_page_overwrite, None)?;
+            let lease =
+                self.prepare_write_lease(start_page, old_file_size, full_page_overwrite, None)?;
             if let Err(error) = before_copy(sub_len) {
                 self.abort_write_lease(&lease);
                 return Err(error);
@@ -1523,7 +1542,7 @@ impl PageCache {
 
         for page_index in start_page..=end_page {
             let page_start = page_index << PAGE_SIZE_BITS;
-            let page_end = page_start + PAGE_SIZE;
+            let page_end = page_start.saturating_add(PAGE_SIZE);
             let write_start = core::cmp::max(offset, page_start);
             let write_end = core::cmp::min(offset + buf.len(), page_end);
             let sub_len = write_end.saturating_sub(write_start);
@@ -1538,16 +1557,20 @@ impl PageCache {
             if full_page_overwrite {
                 any_full_overwrite = true;
             }
-            let lease =
-                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite, None) {
-                    Ok(lease) => lease,
-                    Err(error) => {
-                        for item in &copies {
-                            self.abort_write_lease(&item.lease);
-                        }
-                        return Err(error);
+            let lease = match self.prepare_write_lease(
+                page_index,
+                old_file_size,
+                full_page_overwrite,
+                None,
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    for item in &copies {
+                        self.abort_write_lease(&item.lease);
                     }
-                };
+                    return Err(error);
+                }
+            };
             copies.push(CopyItem {
                 lease,
                 page_offset,
@@ -1607,13 +1630,7 @@ impl PageCache {
         old_file_size: Option<usize>,
     ) -> Result<usize, SyscallErr> {
         self.suppress_balance.store(true, Ordering::Relaxed);
-        let result = self.write_with_copy_callbacks(
-            offset,
-            buf,
-            old_file_size,
-            |_| Ok(()),
-            |_| {},
-        );
+        let result = self.write_with_copy_callbacks(offset, buf, old_file_size, |_| Ok(()), |_| {});
         self.suppress_balance.store(false, Ordering::Relaxed);
         result
     }
@@ -1632,15 +1649,12 @@ impl PageCache {
     }
 
     /// Truncate with a backend callback.
-    pub fn truncate_with_backend<F>(
-        &self,
-        new_size: usize,
-        backend: F,
-    ) -> Result<(), SyscallErr>
+    pub fn truncate_with_backend<F>(&self, new_size: usize, backend: F) -> Result<(), SyscallErr>
     where
         F: FnOnce() -> Result<(), SyscallErr>,
     {
-        let hole_start_page = (new_size + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
+        let hole_start_page =
+            (new_size + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
         for (page_index, entry) in self.entries.snapshot() {
             if page_index >= hole_start_page {
                 if entry.clear_dirty() {
@@ -1664,45 +1678,65 @@ impl PageCache {
         len: usize,
         dst: &mut crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
+        if len > dst.len() {
+            return Err(SyscallErr::EFAULT);
+        }
         if len == 0 {
             return Ok(0);
         }
 
+        let end = offset.checked_add(len).ok_or(SyscallErr::EFBIG)?;
         let start_page = offset >> PAGE_SIZE_BITS;
-        let end_page = (offset + len - 1) >> PAGE_SIZE_BITS;
+        let end_page = (end - 1) >> PAGE_SIZE_BITS;
 
         // Single-page fast path: bypass Vec<CopyItem> construction
         if start_page == end_page {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = len.min(PAGE_SIZE - page_offset);
+            let _t_lookup = perf::perf_memory_io_time_now();
             let entry = self.get_page_for_read(start_page)?;
+            let lookup_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_lookup);
+            perf::record_pc_read_lookup_cycles(lookup_cycles);
+            let _t_valid_fill = perf::perf_memory_io_time_now();
             self.ensure_fully_valid(start_page)?;
-            let _t_copy = perf::perf_time_now();
+            let valid_fill_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_valid_fill);
+            perf::record_pc_read_valid_fill_cycles(valid_fill_cycles);
             let src = entry.as_slice();
-            dst.write_at(0, &src[page_offset..page_offset + sub_len]);
-            let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
-            perf::record_pc_copy_cycles(copy_cycles);
+            let _t_copy = perf::perf_memory_io_time_now();
+            let copied = dst.write_at(0, &src[page_offset..page_offset + sub_len]);
+            let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
+            perf::record_pc_read_copy_cycles(copy_cycles);
+            if copied != sub_len {
+                return Err(SyscallErr::EFAULT);
+            }
+            perf::record_pc_read_user(1);
             return Ok(sub_len);
         }
 
         // Multi-page with batch lookup + retry
         let mut retried = false;
         loop {
+            let _t_lookup = perf::perf_memory_io_time_now();
             let plan = self.lookup_read_range_fast(offset, len, start_page, end_page)?;
+            let lookup_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_lookup);
+            perf::record_pc_read_lookup_cycles(lookup_cycles);
 
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
                 // All hits: copy to UserBuffer
-                let _t_copy = perf::perf_time_now();
+                let mut cursor = dst.write_cursor();
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(
-                        item.dst_offset,
-                        &src[item.page_offset..item.page_offset + item.len],
-                    );
+                    let _t_copy = perf::perf_memory_io_time_now();
+                    let copied = cursor
+                        .write_from(&src[item.page_offset..item.page_offset + item.len]);
+                    let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
+                    perf::record_pc_read_copy_cycles(copy_cycles);
+                    if copied != item.len {
+                        return Err(SyscallErr::EFAULT);
+                    }
                 }
-                let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
-                perf::record_pc_copy_cycles(copy_cycles);
+                perf::record_pc_read_user(plan.copies.len());
                 return Ok(plan.copies.iter().map(|c| c.len).sum());
             }
 
@@ -1717,45 +1751,60 @@ impl PageCache {
                 let mut copies: Vec<CopyItem> = Vec::new();
                 for page_index in start_page..=end_page {
                     let page_start = page_index << PAGE_SIZE_BITS;
-                    let page_end = page_start + PAGE_SIZE;
+                    let page_end = page_start.saturating_add(PAGE_SIZE);
                     let read_start = core::cmp::max(offset, page_start);
-                    let read_end = core::cmp::min(offset + len, page_end);
+                    let read_end = core::cmp::min(end, page_end);
                     let sub_len = read_end.saturating_sub(read_start);
 
                     if sub_len == 0 {
                         continue;
                     }
 
+                    let _t_lookup = perf::perf_memory_io_time_now();
                     let entry = self.get_page_for_read(page_index)?;
+                    let lookup_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_lookup);
+                    perf::record_pc_read_lookup_cycles(lookup_cycles);
+                    let _t_valid_fill = perf::perf_memory_io_time_now();
                     self.ensure_fully_valid(page_index)?;
+                    let valid_fill_cycles =
+                        perf::perf_memory_io_time_now().wrapping_sub(_t_valid_fill);
+                    perf::record_pc_read_valid_fill_cycles(valid_fill_cycles);
                     copies.push(CopyItem {
                         entry,
                         page_offset: read_start - page_start,
                         sub_len,
                     });
                 }
-                let _t_copy = perf::perf_time_now();
-                let mut dst_off = 0;
+                let mut cursor = dst.write_cursor();
                 for item in &copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(
-                        dst_off,
-                        &src[item.page_offset..item.page_offset + item.sub_len],
-                    );
-                    dst_off += item.sub_len;
+                    let _t_copy = perf::perf_memory_io_time_now();
+                    let copied = cursor
+                        .write_from(&src[item.page_offset..item.page_offset + item.sub_len]);
+                    let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
+                    perf::record_pc_read_copy_cycles(copy_cycles);
+                    if copied != item.sub_len {
+                        return Err(SyscallErr::EFAULT);
+                    }
                 }
-                let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
-                perf::record_pc_copy_cycles(copy_cycles);
+                perf::record_pc_read_user(copies.len());
                 return Ok(copies.iter().map(|c| c.sub_len).sum());
             }
 
             if !plan.needs_valid_fill.is_empty() {
                 for &page_index in &plan.needs_valid_fill {
+                    let _t_valid_fill = perf::perf_memory_io_time_now();
                     self.ensure_fully_valid(page_index)?;
+                    let valid_fill_cycles =
+                        perf::perf_memory_io_time_now().wrapping_sub(_t_valid_fill);
+                    perf::record_pc_read_valid_fill_cycles(valid_fill_cycles);
                 }
             }
             if !plan.miss_runs.is_empty() {
+                let _t_miss_fill = perf::perf_memory_io_time_now();
                 self.fill_miss_runs(&plan.miss_runs)?;
+                let miss_fill_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_miss_fill);
+                perf::record_pc_read_miss_fill_cycles(miss_fill_cycles);
             }
             retried = true;
         }
@@ -1811,7 +1860,11 @@ impl PageCache {
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
-            perf::record_pc_write(1, full_page_overwrite, perf::perf_memory_io_time_now().wrapping_sub(write_start));
+            perf::record_pc_write(
+                1,
+                full_page_overwrite,
+                perf::perf_memory_io_time_now().wrapping_sub(write_start),
+            );
             perf::record_pc_write_stages(stages.lookup, stages.lease, stages.copy, stages.commit);
             balance_dirty_pages_for_write(sub_len);
             return Ok(sub_len);
@@ -1840,16 +1893,20 @@ impl PageCache {
 
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let lease =
-                match self.prepare_write_lease(page_index, old_file_size, full_page_overwrite, Some(&mut stages)) {
-                    Ok(lease) => lease,
-                    Err(error) => {
-                        for item in &copies {
-                            self.abort_write_lease(&item.lease);
-                        }
-                        return Err(error);
+            let lease = match self.prepare_write_lease(
+                page_index,
+                old_file_size,
+                full_page_overwrite,
+                Some(&mut stages),
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    for item in &copies {
+                        self.abort_write_lease(&item.lease);
                     }
-                };
+                    return Err(error);
+                }
+            };
             copies.push(CopyItem {
                 lease,
                 page_offset: write_start - page_start,
@@ -2071,17 +2128,21 @@ impl PageCache {
         // Atomically claim a cleanable dirty page. The page remains locked until
         // the backend result publishes either UpToDate or a redirtied retry.
         if entry.claim_writeback() {
-                GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
-                GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
+            GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+            GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
         } else {
-                perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
-                return Ok(());
+            perf::record_pc_writeback(0, perf::perf_time_now().wrapping_sub(_t0));
+            return Ok(());
         }
 
         let result = if let Some(backend) = self.backend() {
             // 写回前确保所有 segment 有效（填充部分写入的页面空洞）
             let write_result = match self.ensure_fully_valid(page_index) {
-                Ok(()) => self.writeback_backend_page_with_retry(backend.as_ref(), page_index, entry.as_slice()),
+                Ok(()) => self.writeback_backend_page_with_retry(
+                    backend.as_ref(),
+                    page_index,
+                    entry.as_slice(),
+                ),
                 Err(error) => Err(error),
             };
             match write_result {
@@ -2204,7 +2265,8 @@ impl PageCache {
         let slices: Vec<&[u8]> = page_slices.iter().map(|(_, e)| e.as_slice()).collect();
 
         let result = if let Some(backend) = self.backend() {
-            let write_result = self.writeback_backend_pages_with_retry(backend.as_ref(), actual_start, &slices);
+            let write_result =
+                self.writeback_backend_pages_with_retry(backend.as_ref(), actual_start, &slices);
             match write_result {
                 Ok(_) => {
                     for (_, entry) in &page_slices {
@@ -2448,10 +2510,7 @@ impl PageCache {
             .into_iter()
             .filter(|(index, _)| *index >= start_index && *index < end_index)
             .collect();
-        if entries
-            .iter()
-            .any(|(_, entry)| entry.is_dirty())
-        {
+        if entries.iter().any(|(_, entry)| entry.is_dirty()) {
             return Err(SyscallErr::EBUSY);
         }
         for (page_index, entry) in entries {

@@ -863,6 +863,16 @@ pub struct UserBuffer {
     pub len: usize,
 }
 
+/// Stateful writer for consecutively produced UserBuffer chunks.
+///
+/// PageCache reads yield pages in logical order, so this cursor retains the
+/// current segment and offset instead of restarting a segment scan per page.
+pub struct UserBufferWriteCursor<'a> {
+    buffer: &'a mut UserBuffer,
+    segment_index: usize,
+    segment_offset: usize,
+}
+
 impl UserBuffer {
     pub fn new(buffers: Vec<&'static mut [u8]>) -> Self {
         let len = buffers.iter().map(|buffer| buffer.len()).sum();
@@ -895,6 +905,15 @@ impl UserBuffer {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Returns a writer positioned at the beginning of this buffer.
+    pub fn write_cursor(&mut self) -> UserBufferWriteCursor<'_> {
+        UserBufferWriteCursor {
+            buffer: self,
+            segment_index: 0,
+            segment_offset: 0,
+        }
     }
 
     pub fn read(&self, dst: &mut [u8]) -> usize {
@@ -1121,6 +1140,50 @@ impl UserBuffer {
                 filled
             }
         }
+    }
+}
+
+impl<'a> UserBufferWriteCursor<'a> {
+    /// Copies a consecutively produced source chunk into the next buffer range.
+    pub fn write_from(&mut self, src: &[u8]) -> usize {
+        let mut segment_index = self.segment_index;
+        let mut segment_offset = self.segment_offset;
+        let mut written = 0usize;
+
+        match &mut self.buffer.segments {
+            UserBufferSegments::Empty => {}
+            UserBufferSegments::Single(buffer) => {
+                let copied = buffer.len().saturating_sub(segment_offset).min(src.len());
+                buffer[segment_offset..segment_offset + copied].copy_from_slice(&src[..copied]);
+                segment_offset += copied;
+                written = copied;
+            }
+            UserBufferSegments::Multi(buffers) => {
+                while segment_index < buffers.len() && written < src.len() {
+                    let buffer = &mut buffers[segment_index];
+                    if segment_offset == buffer.len() {
+                        segment_index += 1;
+                        segment_offset = 0;
+                        continue;
+                    }
+
+                    let copied = (buffer.len() - segment_offset).min(src.len() - written);
+                    buffer[segment_offset..segment_offset + copied]
+                        .copy_from_slice(&src[written..written + copied]);
+                    written += copied;
+                    segment_offset += copied;
+
+                    if segment_offset == buffer.len() {
+                        segment_index += 1;
+                        segment_offset = 0;
+                    }
+                }
+            }
+        }
+
+        self.segment_index = segment_index;
+        self.segment_offset = segment_offset;
+        written
     }
 }
 

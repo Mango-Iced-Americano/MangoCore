@@ -186,6 +186,56 @@ impl IndexNode for Ext4Inode {
         }
     }
 
+    fn read_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        match self.file_type {
+            FileType::File => {
+                let logical_size_start = crate::task::perf::perf_memory_io_time_now();
+                let logical_size = self.lifetime.logical_size.load(Ordering::Acquire);
+                let actual = len
+                    .min(dst.len())
+                    .min(logical_size.saturating_sub(offset));
+                if actual == 0 {
+                    return Ok(0);
+                }
+                let logical_size_end = crate::task::perf::perf_memory_io_time_now();
+                let page_cache_start = logical_size_end;
+                let end = offset.checked_add(actual).ok_or(SyscallErr::EFBIG)?;
+                if offset >> crate::config::PAGE_SIZE_BITS
+                    != (end - 1) >> crate::config::PAGE_SIZE_BITS
+                {
+                    return Err(SyscallErr::ENOSYS);
+                }
+                let page_cache = self.regular_page_cache()?;
+                let page_cache_end = crate::task::perf::perf_memory_io_time_now();
+                let result = page_cache
+                    .read_user(offset, actual, dst)
+                    .map_err(|_| SyscallErr::EIO);
+                if result.is_ok() {
+                    crate::task::perf::record_pread_ext4_logical_size(
+                        logical_size_end.wrapping_sub(logical_size_start),
+                    );
+                    crate::task::perf::record_pread_ext4_page_cache(
+                        page_cache_end.wrapping_sub(page_cache_start),
+                    );
+                }
+                result
+            }
+            FileType::SymLink => Err(SyscallErr::ENOSYS),
+            FileType::Dir => Err(SyscallErr::EISDIR),
+            FileType::CharDevice
+            | FileType::BlockDevice
+            | FileType::Socket
+            | FileType::Pipe
+            | FileType::FramebufferDevice
+            | FileType::KvmDevice => Err(SyscallErr::EINVAL),
+        }
+    }
+
     super::mutations::writable_data_inode_mutations!();
     super::namespace::writable_namespace_inode_mutations!();
 

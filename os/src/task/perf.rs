@@ -309,10 +309,16 @@ mod enabled {
     // ── P0: PageCache I/O ──
     pub static PC_READ_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_READ_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_USER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_USER_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_READ_MISS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_READ_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_READ_HIT_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_READ_MISS_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_LOOKUP_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_MISS_FILL_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_VALID_FILL_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_COPY_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_COPY_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_LOOKUP_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -339,6 +345,14 @@ mod enabled {
     pub static PWRITE_VFS_SEALS_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PWRITE_VFS_TOUCH_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PWRITE_MOUNT_WRITABLE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: UserBuffer read boundary attribution ──
+    pub static PREAD_UACCESS_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PREAD_FILE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PREAD_EXT4_LOGICAL_SIZE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PREAD_EXT4_PAGE_CACHE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PREAD_TOTAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static PREAD_VFS_MODE_CYCLES: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: Writeback Throttling ──
     pub static WB_BG_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -915,6 +929,47 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_pc_read_user(pages: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PC_READ_USER_CALLS.fetch_add(1, Ordering::Relaxed);
+        PC_READ_USER_PAGES.fetch_add(pages, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_read_lookup_cycles(cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PC_READ_LOOKUP_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_read_miss_fill_cycles(cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PC_READ_MISS_FILL_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_read_valid_fill_cycles(cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PC_READ_VALID_FILL_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_read_copy_cycles(cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PC_READ_COPY_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn record_pc_copy_cycles(cycles: usize) {
         if !memory_io_stats_enabled() {
             return;
@@ -1048,6 +1103,48 @@ mod enabled {
     pub fn record_pwrite_mount_writable(cycles: usize) {
         if memory_io_stats_enabled() {
             PWRITE_MOUNT_WRITABLE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pread_uaccess(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PREAD_UACCESS_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pread_file(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PREAD_FILE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pread_ext4_logical_size(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PREAD_EXT4_LOGICAL_SIZE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pread_ext4_page_cache(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PREAD_EXT4_PAGE_CACHE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pread_total_count() {
+        if memory_io_stats_enabled() {
+            PREAD_TOTAL_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pread_vfs_mode(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PREAD_VFS_MODE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
         }
     }
 
@@ -1494,10 +1591,16 @@ mod enabled {
         // PageCache I/O (P0)
         PC_READ_CALLS.store(0, Ordering::Relaxed);
         PC_READ_PAGES.store(0, Ordering::Relaxed);
+        PC_READ_USER_CALLS.store(0, Ordering::Relaxed);
+        PC_READ_USER_PAGES.store(0, Ordering::Relaxed);
         PC_READ_MISS.store(0, Ordering::Relaxed);
         PC_READ_CYCLES_TOTAL.store(0, Ordering::Relaxed);
         PC_READ_HIT_CYCLES.store(0, Ordering::Relaxed);
         PC_READ_MISS_CYCLES.store(0, Ordering::Relaxed);
+        PC_READ_LOOKUP_CYCLES.store(0, Ordering::Relaxed);
+        PC_READ_MISS_FILL_CYCLES.store(0, Ordering::Relaxed);
+        PC_READ_VALID_FILL_CYCLES.store(0, Ordering::Relaxed);
+        PC_READ_COPY_CYCLES.store(0, Ordering::Relaxed);
         PC_COPY_CYCLES.store(0, Ordering::Relaxed);
         PC_LOOKUP_CYCLES.store(0, Ordering::Relaxed);
         PC_WRITE_CALLS.store(0, Ordering::Relaxed);
@@ -1522,6 +1625,12 @@ mod enabled {
         PWRITE_VFS_SEALS_CYCLES.store(0, Ordering::Relaxed);
         PWRITE_VFS_TOUCH_CYCLES.store(0, Ordering::Relaxed);
         PWRITE_MOUNT_WRITABLE_CYCLES.store(0, Ordering::Relaxed);
+        PREAD_UACCESS_CYCLES.store(0, Ordering::Relaxed);
+        PREAD_FILE_CYCLES.store(0, Ordering::Relaxed);
+        PREAD_EXT4_LOGICAL_SIZE_CYCLES.store(0, Ordering::Relaxed);
+        PREAD_EXT4_PAGE_CACHE_CYCLES.store(0, Ordering::Relaxed);
+        PREAD_TOTAL_COUNT.store(0, Ordering::Relaxed);
+        PREAD_VFS_MODE_CYCLES.store(0, Ordering::Relaxed);
         // Writeback Throttling (P0)
         WB_BG_CALLS.store(0, Ordering::Relaxed);
         WB_THROTTLE_CALLS.store(0, Ordering::Relaxed);
@@ -2526,6 +2635,21 @@ pub fn record_anon_unmap(
 pub fn record_pc_read(_pages: usize, _cycles: usize, _hit_cycles: usize, _miss_cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_pc_read_user(_pages: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_read_lookup_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_read_miss_fill_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_read_valid_fill_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_read_copy_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_pc_copy_cycles(_cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2575,6 +2699,25 @@ pub fn record_pwrite_vfs_touch(_cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_pwrite_mount_writable(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pread_uaccess(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pread_file(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pread_ext4_logical_size(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pread_ext4_page_cache(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pread_total_count() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pread_vfs_mode(_cycles: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2975,6 +3118,12 @@ pub static PC_READ_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_READ_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_USER_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_USER_PAGES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
 pub static PC_READ_MISS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_READ_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
@@ -2984,6 +3133,18 @@ pub static PC_READ_HIT_CYCLES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_READ_MISS_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_LOOKUP_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_MISS_FILL_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_VALID_FILL_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_COPY_CYCLES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_COPY_CYCLES: core::sync::atomic::AtomicUsize =
@@ -3056,6 +3217,24 @@ pub static PWRITE_VFS_TOUCH_CYCLES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PWRITE_MOUNT_WRITABLE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PREAD_UACCESS_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PREAD_FILE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PREAD_EXT4_LOGICAL_SIZE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PREAD_EXT4_PAGE_CACHE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PREAD_TOTAL_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PREAD_VFS_MODE_CYCLES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 // ── Writeback Throttling stubs ──
