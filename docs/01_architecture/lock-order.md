@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-07-31
+last_updated: 2026-08-01
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -361,7 +361,7 @@ CPU0 idle 调度循环在尚未取得 processor、runqueue 或子系统锁时按
 在 MM 层直接执行 timer callback。当前退休队列由 CPU0 生命周期路径消费；未来若允许 AP
 并发完成普通进程回收，需要重新审查容量、所有者和批处理策略。
 
-### 3.8 B22/B23/B51/B52 用户 MM 驻留与 shootdown 锁序
+### 3.8 B22/B23/B51/B52/B53 用户 MM 驻留与 shootdown 锁序
 
 B22 的 trap-return 激活登记、B23 的 PTE 修改侧和 B51 的切离登记由同一个
 `AddressSpace` 串行化：
@@ -372,7 +372,9 @@ B22 的 trap-return 激活登记、B23 的 PTE 修改侧和 B51 的切离登记�
    退休 frame；`seal()` 推进 generation、校验 active CPU mask 快照并生成 `TlbFlush`；
 3. 修改侧释放 VM 锁后，`TlbFlush::execute()` 才执行本地失效、发送 IPI/RFENCE、
    等待远端 ack；B52 的固定 slot 只携带 ASID、起始 VPN 和不超过 64 的页数，handler
-   扫描固定 8 个槽且不获取普通锁，跨度更大时仍走 `USER_TLB_SYNC` 全刷；
+   扫描固定 8 个槽且不获取普通锁。B53 为生产 range 请求再携带同步借用期内有效的
+   MM context/generation，handler 固定按“精准失效 → observed → ack”发布；跨度更大时
+   仍走 `USER_TLB_SYNC` 全刷并由发送方在同步返回后记账；
 4. 任务已经切回 idle 栈后，切离侧在改变 current/runqueue owner 前执行完整屏障，
    再在 VM 锁内清除本 CPU active bit；
 5. 全部目标 ack 后才 drop retired frame。错误路径也必须保留这一顺序，不能退回
@@ -387,7 +389,8 @@ guard，是“先解锁再等 ack”的类型级门禁，不依赖每个调用�
 等待者临时开放 IRQ只能解决“两个无锁等待者互相成为 IPI 目标”，不能修复持普通锁等待。
 
 `active_cpus` 与 `generation` 是不同 Atomic；各自的 Acquire/Release 不自动组成完整的
-join/leave-vs-update 顺序。当前正确性来自共同 VM 锁，不来自对跨原子传递的猜测。
+join/leave-vs-update 顺序。fixed slot 中 observed-before-ack 只消除 handler 返回时的重复
+补刷，不替代这把锁的 enter/leave-vs-update 线性化。当前正确性来自共同 VM 锁，不来自对跨原子传递的猜测。
 若 writer 在 leave 前取快照，它会包含该 CPU 并等待 ack；若 leave 先完成，writer
 不再发送 IPI，但仍推进 generation，CPU 下次 enter 时必须补刷。若未来要把激活、切离
 或目标快照改成 lockless，必须重新证明这两种次序，不能只增强某一个 Atomic 的内存序。
@@ -395,7 +398,7 @@ join/leave-vs-update 顺序。当前正确性来自共同 VM 锁，不来自对�
 ### 3.9 B44 membarrier 锁序
 
 PRIVATE_EXPEDITED 的注册状态属于 `AddressSpace`。目标选择和 CPU enter/leave 沿用
-B22/B23/B51/B52 的 VM 锁，而远端同步固定发生在解锁后：
+B22/B23/B51/B52/B53 的 VM 锁，而远端同步固定发生在解锁后：
 
 ```text
 lock VM -> snapshot active CPU mask -> unlock VM

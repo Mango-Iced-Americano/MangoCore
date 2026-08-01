@@ -76,6 +76,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP Per-CPU zombie 回收 | 2026-08-01 | GPT/Codex, DeepSeek | idle 栈 Arc 寿命、跨 CPU reap 锁边界、栈映射退休与双架构验证 | 删除全局 zombie 队列，退出 CPU 在本地 idle 回收 TCB；双架构 8 核 focused 32/32，初赛基线不退化 |
 | SMP 精确 active MM 驻留 | 2026-08-01 | GPT/Codex, DeepSeek | writer/enter/leave 竞态、调度切离屏障、generation 追赶与双架构冻结验证 | 历史 cached mask 收紧为精确 active mask；双架构 KREPEAT=2 focused 65/65，初赛失败集合不变 |
 | SMP 有界连续 TLB shootdown | 2026-08-01 | GPT/Codex, DeepSeek | SBI/INVTLB 官方语义、固定区间槽并发审查、双架构 8 核 focused 与初赛门禁 | 不增加提交层；最多 64 页精准失效，65 页回退全刷并保持 ack 前 frame 不释放；双架构 focused 33/33 |
+| SMP 真实用户访存 stale-TLB 证明 | 2026-08-01 | GPT/Codex, DeepSeek | 用户汇编 victim、真实 CoW PPN 替换、handler observed/ack 时序与假阳性排除 | 双架构 8 核 KREPEAT=2 均 67/67；精准 handler 在 ack 前推进 generation，不再由 trap-return 偶然全刷掩盖 |
 
 ## 4. 详细使用场景
 
@@ -995,6 +996,31 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp` 均为 33/33。初赛仍为 RV64 312/314、LA64 308/314；六个
   child 均 exit 0、`online_mask=0xff`（QEMU 项）、无源码 mutation、panic 或 timeout。
 
+### Case 42: SMP 真实用户访存 stale-TLB 证明
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b53-stale-tlb-user-access-summary.md`；DeepSeek
+  prompt、manifest 和原始 Docker/QEMU 日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计真实 CoW 用户 victim、fixed-slot MM 生命周期、timer 隔离和失败
+  清理并裁决原始日志；DeepSeek 先只读审查设计，再通过受限 Docker 网关执行冻结验证和首错
+  分析，不修改或提交源码。
+- Problem: B52 的 request/ack、range payload 和 frame-retirement 用例仍可能在精准 handler
+  损坏时被下一次 trap-return generation catch-up 全刷掩盖；计数器增长不能证明 CPU 真正停止
+  使用旧 PPN。
+- Implemented change: CPU1 用户汇编先持续读取保留的旧 frame，CPU0 经正式 private CoW
+  更新 PTE，等待区间 shootdown 后才向新 frame 写 canary。软件 handler 在失效后、ack 前
+  发布目标 CPU observed generation；测试静默 timer，并用 FIFO restore helper 拒绝意外调度。
+  RV64 RFENCE 和 full-flush 不携带 fixed-slot MM 指针，仍在同步返回后由发送方统一记账。
+- AI adjudication: 拒绝为测试新增 `replace_user_frame_with()` 生产 API，复用现有 CoW 主链；
+  也纠正了模型把 `cpu_tlb_is_current()==false` 当作无 trap 证据的错误。首轮 focused 暴露
+  `FlushRange::Full` 误带精准 generation 的断言，保留断言并在参数构造分支修根因；模型把
+  已通过的 #25 误报为失败，最终按原始 TAP 顺序记为下一 full-retirement 用例启动前 panic。
+- Verification: 最终可执行 tracked diff SHA-256 为
+  `bb213434751e37a470d1dffe70c776c9d66aec5bdec456a237db2e71335aa396`；双架构 normal
+  build exit 0，`CORE_NUM=8 KTEST=smp KREPEAT=2` 均 67/67、`online_mask=0xff`，无
+  mutation、panic、timeout 或 fatal。首轮同功能快照的初赛保持 RV64 312/314、LA64
+  308/314；最终一处分支修正按风险只复跑 build/focused，证据边界已明确记录。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1079,6 +1105,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b50-local-zombie-summary.md` | SMP Per-CPU zombie 回收 | 记录 idle 栈 Arc 交接、跨 CPU reap 锁边界、模型结论纠错及双架构 32/32/初赛门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b51-active-mm-summary.md` | SMP 精确 active MM 驻留 | 记录 writer/enter/leave 共同 VM 锁、切离屏障、零目标 generation 和双架构 focused/初赛证据 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b52-range-shootdown-summary.md` | SMP 有界连续用户 TLB shootdown | 记录 64 页 IRQ 上限、双架构 range 后端、固定槽 payload 隔离、65 页全刷与初赛非回归 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b53-stale-tlb-user-access-summary.md` | SMP 真实用户访存 stale-TLB 证明 | 记录真实 CoW 用户 victim、handler observed-before-ack、假阳性隔离、DeepSeek 首错纠正与双架构 67/67 |
 
 ## 9. 交互记录与留痕方式
 

@@ -173,7 +173,7 @@ pub fn rollover_asids() {
     // 软件 IPI 的 ack 同时证明目标 CPU 已离开旧用户 SATP；它再次返回用户态
     // 前会经过 activate_on()，因此新 epoch 发布后不会继续使用旧 context。
     if let Err(error) =
-        crate::smp::synchronize_user_tlb(crate::smp::online_cpu_mask(), KERN_ASID, None)
+        crate::smp::synchronize_user_tlb(crate::smp::online_cpu_mask(), KERN_ASID, None, None)
     {
         panic!("RISC-V ASID rollover TLB flush failed: {:?}", error);
     }

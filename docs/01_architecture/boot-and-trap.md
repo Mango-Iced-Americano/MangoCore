@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-31
+last_updated: 2026-08-01
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -198,6 +198,9 @@ epoch 复用。RV64 探测 `SATP.ASID`，本地执行 `sfence.vma va, asid`，�
 SBI RFENCE FID 2；有 ASID 时 trap 切根不再固定全刷，ASIDLEN=0 时保留兼容路径。
 LA64 通过固定 per-CPU slot 传递 ASID/range 并执行 `invtlb 0x5`。B51 已完成安全
 CPU detach；B52 已把双架构精准后端扩展到最多 64 页的连续区间，更大跨度仍全刷。
+B53 规定软件 range handler 在硬件失效后、slot ack 前推进目标 CPU 的 observed
+generation，避免本次 IPI 返回用户态时再由激活路径全刷。真实用户 CoW 探针在静默 timer
+窗口内验证了这一顺序，而不只观察 request/ack 计数器。
 
 B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
 再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入

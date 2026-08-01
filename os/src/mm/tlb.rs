@@ -178,12 +178,17 @@ impl TlbContext {
             .map(|previous| previous + 1)
     }
 
-    /// ack 已证明目标 CPU 完成失效，单调发布它们观察到的代际。
-    fn acknowledge(&self, generation: usize, targets: usize) {
+    /// 指定 CPU 已完成本代失效；单调发布它真正观察到的 MM generation。
+    pub(crate) fn mark_cpu_observed(&self, generation: usize, cpu_id: usize) {
+        assert!(cpu_id < crate::smp::configured_cpu_count());
+        self.observed[cpu_id].fetch_max(generation, Ordering::Release);
+    }
+
+    fn mark_targets_observed(&self, generation: usize, targets: usize) {
         for cpu_id in 0..crate::smp::configured_cpu_count() {
             if targets & (1usize << cpu_id) != 0 {
                 // 同一 MM 的两代修改可能并发等待；旧一代晚完成时不能覆盖新值。
-                self.observed[cpu_id].fetch_max(generation, Ordering::Release);
+                self.mark_cpu_observed(generation, cpu_id);
             }
         }
     }
@@ -227,12 +232,21 @@ impl<'a> TlbFlush<'a> {
                 }
                 Ok(())
             } else {
-                let range = match self.gather.range() {
+                let (range, mm_generation) = match self.gather.range() {
                     FlushRange::None => panic!("TLB flush has no recorded PTE change"),
-                    FlushRange::Range(range) => Some(range),
-                    FlushRange::Full => None,
+                    // 只有 fixed range slot 会在目标 handler 内发布 observed；全刷仍由
+                    // 发送方在同步返回后统一记账，不能携带精准槽专用的 MM 元数据。
+                    FlushRange::Range(range) => {
+                        (Some(range), Some((self.context, self.generation)))
+                    }
+                    FlushRange::Full => (None, None),
                 };
-                crate::smp::synchronize_user_tlb(self.targets, self.asid, range)
+                crate::smp::synchronize_user_tlb(
+                    self.targets,
+                    self.asid,
+                    range,
+                    mm_generation,
+                )
             };
 
             if let Err(error) = result {
@@ -243,7 +257,8 @@ impl<'a> TlbFlush<'a> {
                     self.context.mm_id, self.generation, self.targets, error
                 );
             }
-            self.context.acknowledge(self.generation, self.targets);
+            self.context
+                .mark_targets_observed(self.generation, self.targets);
         }
 
         self.executed = true;

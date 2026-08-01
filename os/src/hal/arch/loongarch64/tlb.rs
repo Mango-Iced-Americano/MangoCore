@@ -125,7 +125,7 @@ pub fn rollover_asids() {
     };
 
     let targets = crate::smp::online_cpu_mask();
-    if let Err(error) = crate::smp::synchronize_user_tlb(targets, KERN_ASID, None) {
+    if let Err(error) = crate::smp::synchronize_user_tlb(targets, KERN_ASID, None, None) {
         panic!("ASID rollover TLB flush failed: {:?}", error);
     }
 

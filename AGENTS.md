@@ -195,11 +195,13 @@ trap-return 已登记精确 active MM 驻留并追赶本地 generation，调度�
 MM-owned versioned ASID，并在全 CPU flush/ack 后才复用编号；最多 64 页的连续区间在
 RV64 使用逐页 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发起 CPU 固定
 原子槽传递 ASID、起始 VPN 和页数，按硬件相邻偶/奇页对执行 `invtlb 0x5`；更大跨度全刷。
+B53 已让软件精准 handler 在失效后、ack 前发布 observed generation，并用 CPU1 持续用户
+load + CPU0 真实 CoW PPN 替换证明双架构旧翻译被直接消除，而不是由 trap-return 偶然全刷。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下
 能力已完成：默认全核调度、非 leader exec 的完整 Linux TID/TGID 身份接管、
-共享子系统全核审计、多写侧及真实 stale-PTE 压力验收、任意内核点抢占。
+共享子系统全核审计、多写侧及 `mprotect/munmap` stale 权限/有效位压力、任意内核点抢占。
 
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）

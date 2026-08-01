@@ -3,7 +3,7 @@ title: "LoongArch64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [architecture, loongarch64, hal, smp, asid, tlb]
 ---
 
@@ -181,7 +181,9 @@ Rust 到 `__restore` 的 ABI 桥接直接把 trap context、token、ASID 约束�
 有界 shootdown 在持有 VM 锁时把目标 MM 的硬件 ASID、起始 VPN 和页数冻结进同一个
 `TlbFlush` 快照；解锁后，每个发起 CPU 使用自己的固定原子 slot 发布这组 payload。
 IPI handler 扫描全部 slot，以 `invtlb 0x5` 完成 `G=0 + ASID + VA` 失效后才设置槽内
-ack，期间不分配内存，也不获取 MM 锁。多个 CPU 即使共用同一个 reason bit，其 payload
+observed generation 和 ack，期间不分配内存，也不获取 MM 锁。发起者持有同步等待期内
+有效的 MM 借用；只有 ack 后才释放槽，timeout 则 fail-stop 且不复用。多个 CPU 即使
+共用同一个 reason bit，其 payload
 也不会相互覆盖。LoongArch 普通 TLB entry 同时表示相邻偶/奇页，故起点向下对齐到偶数
 VPN，之后每两页执行一次；这里的“区间精准”是指限定目标 MM/ASID 与覆盖该区间的硬件
 页对，并非每个 4 KiB 页都对应独立硬件 entry。区间最多 64 个逻辑页，更大跨度由上层

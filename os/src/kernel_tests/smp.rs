@@ -5,7 +5,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -303,12 +303,93 @@ __smp_timer_probe_end:
 "#
 );
 
+// 用户探针只做普通访存，不通过 syscall/yield 重新进入内核。a0/a1 分别是
+// 待换页与进度页，a2/a3 是 old/new canary；因此完成标记能证明 CPU1 的
+// 第二次 load 已经越过真实 PPN 替换，而不是内核代替用户读取页表。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.smp_stale_tlb_probe, "a"
+    .balign 4
+    .global __smp_stale_tlb_probe_start
+    .global __smp_stale_tlb_probe_end
+__smp_stale_tlb_probe_start:
+    ld t0, 0(a0)
+    bne t0, a2, .Lstale_tlb_fail
+    fence rw, rw
+    addi t1, zero, 1
+    sd t1, 0(a1)
+.Lstale_tlb_wait:
+    ld t0, 0(a0)
+    beq t0, a2, .Lstale_tlb_wait
+    bne t0, a3, .Lstale_tlb_fail
+    fence rw, rw
+    addi t1, zero, 2
+    sd t1, 0(a1)
+    addi a0, zero, 0
+    j .Lstale_tlb_exit
+.Lstale_tlb_fail:
+    fence rw, rw
+    addi t1, zero, 3
+    sd t1, 0(a1)
+    addi a0, zero, 1
+.Lstale_tlb_exit:
+    addi a7, zero, {exit_syscall}
+    ecall
+.Lstale_tlb_hang:
+    j .Lstale_tlb_hang
+__smp_stale_tlb_probe_end:
+    .popsection
+"#,
+    exit_syscall = const USER_PROBE_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.smp_stale_tlb_probe, "a"
+    .balign 4
+    .global __smp_stale_tlb_probe_start
+    .global __smp_stale_tlb_probe_end
+__smp_stale_tlb_probe_start:
+    ld.d $t0, $a0, 0
+    bne $t0, $a2, .Lstale_tlb_fail
+    dbar 0
+    addi.d $t1, $zero, 1
+    st.d $t1, $a1, 0
+.Lstale_tlb_wait:
+    ld.d $t0, $a0, 0
+    beq $t0, $a2, .Lstale_tlb_wait
+    bne $t0, $a3, .Lstale_tlb_fail
+    dbar 0
+    addi.d $t1, $zero, 2
+    st.d $t1, $a1, 0
+    move $a0, $zero
+    b .Lstale_tlb_exit
+.Lstale_tlb_fail:
+    dbar 0
+    addi.d $t1, $zero, 3
+    st.d $t1, $a1, 0
+    addi.d $a0, $zero, 1
+.Lstale_tlb_exit:
+    addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+.Lstale_tlb_hang:
+    b .Lstale_tlb_hang
+__smp_stale_tlb_probe_end:
+    .popsection
+"#,
+    exit_syscall = const USER_PROBE_EXIT,
+);
+
 extern "C" {
     static __smp_user_probe_start: u8;
     static __smp_user_probe_end: u8;
     static __smp_user_probe_resched_ready: u8;
     static __smp_timer_probe_start: u8;
     static __smp_timer_probe_end: u8;
+    static __smp_stale_tlb_probe_start: u8;
+    static __smp_stale_tlb_probe_end: u8;
 }
 
 const IRQ_PROBE_NOT_RUN: usize = 0;
@@ -365,6 +446,11 @@ static TIMER_HOLDER_RELEASE: AtomicUsize = AtomicUsize::new(0);
 static TIMER_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
 static TIMER_HELPER_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static TIMER_PROBE_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static STALE_TLB_HOLDER_READY: AtomicUsize = AtomicUsize::new(0);
+static STALE_TLB_HOLDER_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static STALE_TLB_TIMER_RESTORED: AtomicUsize = AtomicUsize::new(0);
+static STALE_TLB_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static STALE_TLB_PROGRESS_PTR: AtomicUsize = AtomicUsize::new(0);
 static GROUP_EXIT_START: AtomicUsize = AtomicUsize::new(0);
 static GROUP_EXIT_LEADER_READY: AtomicUsize = AtomicUsize::new(0);
 static GROUP_EXIT_BLOCKED_READY: AtomicUsize = AtomicUsize::new(0);
@@ -492,6 +578,10 @@ pub fn tests() -> Vec<KernelTest> {
             user_tlb_range_sync_uses_arch_backend,
         ),
         KernelTest::new(
+            "smp::remote_user_load_observes_cow_after_range_shootdown",
+            remote_user_load_observes_cow_after_range_shootdown,
+        ),
+        KernelTest::new(
             "smp::concurrent_range_shootdowns_keep_payloads_separate",
             concurrent_range_shootdowns_keep_payloads_separate,
         ),
@@ -548,6 +638,16 @@ fn timer_probe_program() -> &'static [u8] {
     unsafe {
         let start = core::ptr::addr_of!(__smp_timer_probe_start) as usize;
         let end = core::ptr::addr_of!(__smp_timer_probe_end) as usize;
+        core::slice::from_raw_parts(start as *const u8, end - start)
+    }
+}
+
+/// 取得只以普通 load 验证远端旧翻译是否失效的用户程序。
+fn stale_tlb_probe_program() -> &'static [u8] {
+    // Safety: start/end 由同一个只读汇编 section 定义，end 紧跟程序末尾。
+    unsafe {
+        let start = core::ptr::addr_of!(__smp_stale_tlb_probe_start) as usize;
+        let end = core::ptr::addr_of!(__smp_stale_tlb_probe_end) as usize;
         core::slice::from_raw_parts(start as *const u8, end - start)
     }
 }
@@ -2935,7 +3035,7 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
         ack_before[cpu] = crate::smp::user_tlb_ack(cpu);
     }
 
-    crate::smp::synchronize_user_tlb(targets, 0, None).map_err(|error| {
+    crate::smp::synchronize_user_tlb(targets, 0, None, None).map_err(|error| {
         crate::println!("# user TLB full-flush sync failed: {:?}", error);
         "user TLB full-flush sync failed"
     })?;
@@ -2949,6 +3049,372 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
     // 已有任务安全点，避免把恰好到达的 one-shot timer pending 留给下一用例。
     crate::task::run_task_safe_point();
     Ok(())
+}
+
+const STALE_TLB_OLD_VALUE: u64 = 0x1357_2468_89ab_cdef;
+const STALE_TLB_NEW_VALUE: u64 = 0xfedc_ba98_7654_3210;
+
+/// 返回物理页首字的内核直映地址，不构造会和用户访存重叠的 Rust 引用。
+fn stale_tlb_word_ptr(ppn: crate::mm::PhysPageNum) -> *mut u64 {
+    (ppn.start_addr().0 | crate::config::MEMORY_HIGH_BASE) as *mut u64
+}
+
+fn read_stale_tlb_word(address: usize) -> u64 {
+    assert_ne!(address, 0, "stale-TLB progress pointer is missing");
+    assert_eq!(address & (core::mem::align_of::<u64>() - 1), 0);
+    // Safety: 测试在整个访问期间持有对应 FrameTracker；用户侧是另一特权级
+    // 的硬件访存，不受 Rust 引用模型管理，因此这里只保留瞬时 volatile 访问。
+    unsafe { core::ptr::read_volatile(address as *const u64) }
+}
+
+fn write_stale_tlb_word(address: usize, value: u64) {
+    assert_ne!(address, 0, "stale-TLB data pointer is missing");
+    assert_eq!(address & (core::mem::align_of::<u64>() - 1), 0);
+    // Safety: 同 read_stale_tlb_word；调用方持有 frame，且只写页内首个 u64。
+    unsafe { core::ptr::write_volatile(address as *mut u64, value) };
+    fence(Ordering::SeqCst);
+}
+
+/// CPU1 在用户探针前关闭本地 timer，但保留 IPI 响应能力。
+fn hold_stale_tlb_probe_cpu() {
+    let initially_enabled = crate::hal::local_irq_save();
+    if initially_enabled || crate::smp::cpu_id() != 1 {
+        STALE_TLB_ERRORS.fetch_or(1, Ordering::Release);
+    }
+
+    crate::hal::quiesce_local_timer_interrupt();
+    if crate::smp::local_timer_pending() {
+        // 旧 tick 必须在证明窗口前完成软件记账；处理函数短暂重编程后再次
+        // quiesce，确保用户 probe 不会借 generation catch-up 全量刷 TLB。
+        let _ = crate::task::run_deferred_timer_work();
+        crate::hal::quiesce_local_timer_interrupt();
+    }
+    crate::hal::local_irq_restore(true);
+    STALE_TLB_HOLDER_READY.store(1, Ordering::Release);
+    while STALE_TLB_HOLDER_RELEASE.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if !crate::hal::local_irq_save() {
+        STALE_TLB_ERRORS.fetch_or(2, Ordering::Release);
+    }
+}
+
+/// FIFO 中排在用户探针之后；只有探针已给出结果，才允许恢复 CPU1 timer。
+fn restore_stale_tlb_probe_timer() {
+    if crate::smp::cpu_id() != 1 {
+        STALE_TLB_ERRORS.fetch_or(4, Ordering::Release);
+    }
+    let progress = STALE_TLB_PROGRESS_PTR.load(Ordering::Acquire);
+    if progress == 0 || !matches!(read_stale_tlb_word(progress), 2 | 3) {
+        // 成功路径若在结果发布前运行到这里，说明发生了意外调度，全刷可能
+        // 污染 stale-TLB 证据。失败清理路径也保留该位用于诊断。
+        STALE_TLB_ERRORS.fetch_or(8, Ordering::Release);
+    }
+
+    let irq_flags = crate::hal::local_irq_save();
+    let delta = crate::timer::ns_to_ticks_ceil(10_000_000).max(1);
+    crate::hal::program_timer_delta(delta);
+    crate::hal::enable_local_timer_interrupt();
+    STALE_TLB_TIMER_RESTORED.store(1, Ordering::Release);
+    crate::hal::local_irq_restore(irq_flags);
+}
+
+/// CPU1 先以用户 load 填充旧翻译，CPU0 再通过真实 CoW 更新同一 PTE。
+/// 探针只有在精确 shootdown 后读到新物理页的 canary 才能正常退出。
+fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("stale-TLB user probe did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+
+    STALE_TLB_HOLDER_READY.store(0, Ordering::Release);
+    STALE_TLB_HOLDER_RELEASE.store(0, Ordering::Release);
+    STALE_TLB_TIMER_RESTORED.store(0, Ordering::Release);
+    STALE_TLB_ERRORS.store(0, Ordering::Release);
+    STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
+
+    let old_frame = crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB old frame")?;
+    let progress_frame =
+        crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB progress frame")?;
+    let old_word = stale_tlb_word_ptr(old_frame.ppn) as usize;
+    let progress_word = stale_tlb_word_ptr(progress_frame.ppn) as usize;
+    write_stale_tlb_word(old_word, STALE_TLB_OLD_VALUE);
+    write_stale_tlb_word(progress_word, 0);
+
+    let (task, _) = build_user_task(stale_tlb_probe_program())?;
+    let vm = task.process.vm();
+    let (target_addr, progress_addr) = vm.write(|space| {
+        let target = space.shm_mmap(
+            0,
+            crate::config::PAGE_SIZE,
+            crate::mm::MapPermission::R
+                | crate::mm::MapPermission::W
+                | crate::mm::MapPermission::U,
+            crate::mm::MapFlags::MAP_PRIVATE | crate::mm::MapFlags::MAP_ANONYMOUS,
+            &[old_frame.clone()],
+            true,
+        );
+        if target < 0 {
+            return Err("failed to map stale-TLB target frame");
+        }
+        let progress = space.shm_mmap(
+            0,
+            crate::config::PAGE_SIZE,
+            crate::mm::MapPermission::R
+                | crate::mm::MapPermission::W
+                | crate::mm::MapPermission::U,
+            crate::mm::MapFlags::MAP_SHARED | crate::mm::MapFlags::MAP_ANONYMOUS,
+            &[progress_frame.clone()],
+            true,
+        );
+        if progress < 0 {
+            return Err("failed to map stale-TLB progress frame");
+        }
+        // 私有可写 VMA 的实际 PTE 去掉 W；后续 Store fault 才会进入正式 CoW。
+        space
+            .mprotect(
+                target as usize,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R
+                    | crate::mm::MapPermission::W
+                    | crate::mm::MapPermission::U,
+            )
+            .map_err(|_| "failed to arm stale-TLB COW mapping")?;
+        Ok((target as usize, progress as usize))
+    })?;
+    if progress_addr == target_addr || progress_addr == 0 {
+        return Err("stale-TLB mappings are not distinct user pages");
+    }
+    {
+        let mut inner = task.acquire_inner_lock();
+        let cx = inner.trap_context_mut();
+        cx.gp.a0 = target_addr;
+        cx.gp.a1 = progress_addr;
+        cx.gp.a2 = STALE_TLB_OLD_VALUE as usize;
+        cx.gp.a3 = STALE_TLB_NEW_VALUE as usize;
+    }
+    task.set_initial_cpus_allowed(1usize << 1);
+    STALE_TLB_PROGRESS_PTR.store(progress_word, Ordering::Release);
+    let parent_task = crate::task::current_task().ok_or("ktest runner has no current task")?;
+    let parent = parent_task.process.clone();
+    drop(parent_task);
+    let process = task.process.clone();
+    let pid = task.pid();
+
+    let holder = crate::task::spawn_ktest_task_on(1, hold_stale_tlb_probe_cpu);
+    let holder_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while STALE_TLB_HOLDER_READY.load(Ordering::Acquire) == 0
+        || holder.task_status() != crate::task::TaskStatus::Running(1)
+    {
+        if crate::hal::get_time() >= holder_deadline {
+            write_stale_tlb_word(progress_word, 3);
+            let restore =
+                crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
+            STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
+            let cleanup_deadline = crate::hal::get_time()
+                .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+            while (holder.task_status() != crate::task::TaskStatus::Zombie
+                || restore.task_status() != crate::task::TaskStatus::Zombie)
+                && crate::hal::get_time() < cleanup_deadline
+            {
+                core::hint::spin_loop();
+            }
+            if holder.task_status() == crate::task::TaskStatus::Zombie
+                && restore.task_status() == crate::task::TaskStatus::Zombie
+            {
+                STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
+            } else {
+                // 活 helper 仍可能读取该直映地址；失败路径宁可泄漏一页，也不能
+                // 返回后把物理页交给分配器造成 UAF。
+                core::mem::forget(progress_frame);
+            }
+            return Err("CPU1 did not quiesce its timer for stale-TLB probe");
+        }
+        core::hint::spin_loop();
+    }
+
+    if parent.add_child(process.clone()).is_err() {
+        write_stale_tlb_word(progress_word, 3);
+        let restore = crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
+        STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
+        let cleanup_deadline = crate::hal::get_time()
+            .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while (holder.task_status() != crate::task::TaskStatus::Zombie
+            || restore.task_status() != crate::task::TaskStatus::Zombie)
+            && crate::hal::get_time() < cleanup_deadline
+        {
+            core::hint::spin_loop();
+        }
+        if holder.task_status() == crate::task::TaskStatus::Zombie
+            && restore.task_status() == crate::task::TaskStatus::Zombie
+        {
+            STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
+        } else {
+            core::mem::forget(progress_frame);
+        }
+        return Err("failed to attach stale-TLB probe to ktest runner");
+    }
+    process.set_parent(Some(Arc::downgrade(&parent)));
+
+    crate::task::publish_task_on(task.clone(), 1);
+    let restore = crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
+    let weak_task = Arc::downgrade(&task);
+    let weak_holder = Arc::downgrade(&holder);
+    let weak_restore = Arc::downgrade(&restore);
+    STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
+
+    let mut validation_error = None;
+    let ready_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    loop {
+        let progress = read_stale_tlb_word(progress_word);
+        if progress == 1 {
+            // 与用户 probe 在 ready store 前的架构 fence 配对：看到 1 后，
+            // CPU0 才允许发布 PTE 修改和 shootdown。
+            fence(Ordering::SeqCst);
+            break;
+        }
+        if progress == 3 || process.is_zombie() {
+            validation_error = Some("user probe rejected the initial stale-TLB canary");
+            break;
+        }
+        if crate::hal::get_time() >= ready_deadline {
+            validation_error = Some("user probe did not warm the old TLB entry");
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    let full_request_before = crate::smp::user_tlb_request(1);
+    let mut new_ppn = None;
+    if validation_error.is_none() {
+        if task.task_status() != crate::task::TaskStatus::Running(1)
+            || vm.active_cpu_mask() != 1usize << 1
+            || STALE_TLB_TIMER_RESTORED.load(Ordering::Acquire) != 0
+        {
+            validation_error = Some("stale-TLB probe lost exclusive CPU1/MM residency");
+        } else {
+            let target = crate::mm::VirtAddr::from(target_addr);
+            let before = vm.read(|space| space.translate(target.floor()));
+            let cow = vm.write(|space| {
+                space.do_page_fault(target, crate::mm::FaultAccess::Store)?;
+                space
+                    .translate(target.floor())
+                    .ok_or(crate::mm::MemoryError::NotMapped)
+            });
+            match (before, cow) {
+                (Some(before), Ok(after)) if before == old_frame.ppn && after != before => {
+                    new_ppn = Some(after);
+                    // PTE 与远端失效已经在 AddressSpace::write() 返回前完成；此时
+                    // 才改新页 canary，旧翻译若未失效就会永久停留在 OLD_VALUE。
+                    write_stale_tlb_word(
+                        stale_tlb_word_ptr(after) as usize,
+                        STALE_TLB_NEW_VALUE,
+                    );
+                }
+                _ => validation_error = Some("production COW did not replace the target PPN"),
+            }
+        }
+    }
+
+    if validation_error.is_none() {
+        let result_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        loop {
+            match read_stale_tlb_word(progress_word) {
+                2 => break,
+                3 => {
+                    validation_error = Some("user probe read an unexpected post-COW canary");
+                    break;
+                }
+                _ if crate::hal::get_time() >= result_deadline => {
+                    validation_error = Some("CPU1 user load remained on the stale physical page");
+                    break;
+                }
+                _ => core::hint::spin_loop(),
+            }
+        }
+    }
+    if crate::smp::user_tlb_request(1) != full_request_before {
+        validation_error.get_or_insert("one-page COW degraded to a full user-TLB flush");
+    }
+    if new_ppn.is_some() && !vm.cpu_tlb_is_current(1) {
+        validation_error.get_or_insert("range handler did not publish the observed MM generation");
+    }
+
+    if validation_error.is_none() && !process.is_zombie() {
+        let exit_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+        while !process.is_zombie() && crate::hal::get_time() < exit_deadline {
+            core::hint::spin_loop();
+        }
+    }
+    if !process.is_zombie() {
+        task.acquire_inner_lock()
+            .add_signal(crate::task::Signals::SIGKILL);
+        let _ = crate::smp::request_reschedule(1);
+    }
+    let cleanup_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    while !process.is_zombie()
+        || task.task_status() != crate::task::TaskStatus::Zombie
+        || holder.task_status() != crate::task::TaskStatus::Zombie
+        || restore.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(1)
+        || crate::task::run_queue_count(1) != 0
+    {
+        if crate::hal::get_time() >= cleanup_deadline {
+            // 用户任务若仍在执行，可能继续通过旧 TLB 访问 source/progress。
+            // 测试已经失败，此处保留外部 owner，禁止返回后复用这两页。
+            core::mem::forget(old_frame);
+            core::mem::forget(progress_frame);
+            return Err("stale-TLB probe cleanup did not quiesce CPU1");
+        }
+        crate::hal::with_local_interrupts_enabled(core::hint::spin_loop);
+    }
+    STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
+
+    let reaped = crate::task::ProcessManager::wait_child(
+        &parent,
+        pid as isize,
+        true,
+        true,
+        false,
+        false,
+        false,
+    )
+    .map_err(|_| "ktest parent could not reap stale-TLB probe")?
+    .ok_or("stale-TLB probe was not waitable")?;
+    if reaped.pid != pid {
+        validation_error.get_or_insert("stale-TLB probe reaped the wrong child");
+    }
+    if validation_error.is_none() && reaped.status != 0 {
+        validation_error = Some("stale-TLB user probe exited with failure");
+    }
+    if STALE_TLB_ERRORS.load(Ordering::Acquire) != 0
+        || STALE_TLB_TIMER_RESTORED.load(Ordering::Acquire) != 1
+    {
+        validation_error.get_or_insert("stale-TLB timer isolation evidence was incomplete");
+    }
+    if read_stale_tlb_word(old_word) != STALE_TLB_OLD_VALUE {
+        validation_error.get_or_insert("COW modified the retained source frame");
+    }
+
+    drop(crate::task::take_zombie_tasks(usize::MAX));
+    drop(process);
+    drop(task);
+    drop(holder);
+    drop(restore);
+    if weak_task.upgrade().is_some()
+        || weak_holder.upgrade().is_some()
+        || weak_restore.upgrade().is_some()
+    {
+        validation_error.get_or_insert("stale-TLB probe retained a strong TCB owner");
+    }
+    validation_error.map_or(Ok(()), Err)
 }
 
 /// 连续区间在 RV64 由 RFENCE 完成，在 LA64 由固定槽传递 ASID/区间。
@@ -2972,7 +3438,7 @@ fn user_tlb_range_sync_uses_arch_backend() -> Result<(), &'static str> {
 
     let start = crate::mm::VirtAddr::from(0x51_0000).floor();
     let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
-    crate::smp::synchronize_user_tlb(targets, asid, Some(range))
+    crate::smp::synchronize_user_tlb(targets, asid, Some(range), None)
     .map_err(|error| {
         crate::println!("# user TLB range sync failed: {:?}", error);
         "user TLB range sync failed"
@@ -3005,7 +3471,7 @@ fn run_concurrent_range_shootdown() {
     )
     .floor();
     let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
-    if crate::smp::synchronize_user_tlb(targets, asid, Some(range)).is_err() {
+    if crate::smp::synchronize_user_tlb(targets, asid, Some(range), None).is_err() {
         RANGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
     }
     RANGE_SYNC_DONE.fetch_add(1, Ordering::Release);
@@ -3051,7 +3517,7 @@ fn concurrent_range_shootdowns_keep_payloads_separate() -> Result<(), &'static s
         local_start,
         crate::mm::VirtPageNum(local_start.0 + 3),
     );
-    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_range))
+    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_range), None)
         .map_err(|_| "CPU0 concurrent range shootdown failed")?;
 
     let completion_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());

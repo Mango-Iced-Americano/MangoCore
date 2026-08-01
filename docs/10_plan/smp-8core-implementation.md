@@ -87,8 +87,8 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B51 由调度器维护精确 active MM 驻留，切离后不再收到无意义 shootdown，零目标修改仍以 generation 约束下次进入；PRIVATE_EXPEDITED 复用同一 active mask | 真实用户 stale-PTE 压力证明与通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
-| 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover 和区间后端已有 focused 证据；仍需真实用户访存压力覆盖 stale translation |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53 又用 CPU1 持续用户 load + CPU0 真实 CoW PPN 替换证明精准 handler 生效，并让软件 handler 在 ack 前发布 observed，避免 trap-return 重复全刷；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | `mprotect/munmap` 权限/有效位压力与通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
+| 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端和真实 CoW stale-translation 已有 focused 证据；仍需权限/有效位与高并发压力 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
 | ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0 |
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B52）
+#### 当前进度（SMP-P2.5-B15 至 B53）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -561,6 +561,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B52 把单 VPN 扩展为最多 64 页的连续半开区间；`MmuGather` 合并区间内的稀疏修改，
   跨度过大或页表层级变化才升级为全刷。RV64 本地逐页执行 `sfence.vma va, asid`，
   远端使用 SBI RFENCE start/size/ASID；LA64 从偶数 VPN 起每两页执行一次 `invtlb 0x5`；
+- B53 让 fixed range handler 在真实精准失效后、ack 前发布目标 CPU observed generation，
+  防止 IPI 返回路径再做一次全用户补刷。CPU1 用户探针先填充旧 PPN 翻译，CPU0 经正式
+  CoW/PTE/MmuGather/TlbFlush 替换物理页；timer 静默窗口内后续普通 load 必须读到新页
+  canary。双架构 `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 67/67；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
@@ -673,6 +677,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   最坏情况下也只扫描 8 个槽并执行有界条数的硬件指令；65 页 focused 用例确认会进入
   全刷 sequence，且 frame 仍在 ack 后才释放。冻结源码下双架构 8 核 focused 均为
   33/33，初赛保持 RV64 312/314、LA64 308/314；
+- B53 给 range slot 增加同步借用期内的 MM generation，handler 固定按
+  `invalidate -> mark observed -> ack` 发布；RV64 RFENCE 与 full-flush 不使用该指针，
+  仍由同步返回后的发送方统一记账。真实用户 CoW stale-TLB 用例拒绝 timer、调度和 full
+  fallback 假阳性，双架构两轮共 134 个 TAP 全部通过；
 - Phase 2.5 的 task ownership 与本地 TLB batch 两项退场条件已完成；Phase 3 已完成
   Per-CPU current/idle/RunQueue/zombie 回收、scheduler-ready、affinity-aware 目标选择、
   受控 AP 用户执行、远程阻塞唤醒、每 CPU 调度 tick 和基础 steal。普通任务
@@ -838,7 +846,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   反汇编确认；双架构 8 核初赛分别为 RV64 312/314、LA64 308/314，失败集合未扩大；
 - B26 已实现携带目标 ASID/VPN 的固定 shootdown slot；B52 将 payload 扩为
   ASID、起始 VPN 和页数。每个发起 CPU 独占一个槽，多个发起者共享 reason bit 时 handler
-  扫描全部槽；IPI handler 不分配内存、不获取 MM 锁，页数由 64 页上限约束；
+  扫描全部槽；B53 又让生产 MM 的 slot 携带同步等待期内有效的 context/generation，handler
+  在失效后、ack 前单调推进 observed。IPI handler 不分配内存、不获取 MM 锁，页数由
+  64 页上限约束；
 - LoongArch 目标 CPU 使用 `invtlb 0x5` 限定 `G=0 + ASID + VA`；由于普通 TLB entry
   覆盖相邻偶/奇页，区间起点向下对齐并按 `2 * PAGE_SIZE` 步进，这是该架构可提供的最小粒度；
 - B27 已实现 RISC-V `SATP.ASID` 容量探测、MM-owned versioned ASID、本地
@@ -850,9 +860,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   - GLOBAL 面向所有在线 CPU；
   - PRIVATE_EXPEDITED 面向当前进程 MM 的 active CPU；
   - 使用同一 IPI/ack 基础设施和完整内存屏障；
-- RISC-V 非零 ASID 的 trap 入口/返回不再固定执行全量 `sfence.vma`；stale-TLB 用例仍需
-  记录 victim trap 窗口，并同时核对目标 ASID/VPN、shootdown sequence 与 ack，避免把
-  timer 或其它全刷误当成精准后端证据；
+- RISC-V 非零 ASID 的 trap 入口/返回不再固定执行全量 `sfence.vma`；B53 已通过 timer
+  静默、FIFO restore helper、full request 不变和 handler observed 四项联合条件，证明
+  CPU1 真实用户 load 在 CoW 后离开旧 PPN，而不是被其它 trap 全刷掩盖；
 - TLB 用例同时校验 shootdown sequence/ack 和 ack 前 frame 不复用；LoongArch 作为不被
   trap 自动全刷掩盖的强暴露平台，必须单独保留证据；
 - 完成 MM 专项测试后，才允许受控用户测试任务跨 CPU 运行。该测试必须是 hermetic 的

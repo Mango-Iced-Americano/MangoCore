@@ -6,7 +6,9 @@
 use core::{
     hint::spin_loop,
     mem::size_of,
-    sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{
+        fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+    },
 };
 
 pub const BOOT_CPU_ID: usize = 0;
@@ -116,6 +118,9 @@ struct UserTlbRangeSlot {
     asid: AtomicUsize,
     start_vpn: AtomicUsize,
     page_count: AtomicUsize,
+    /// 指向同步等待期间保证存活的 MM TLB 状态；null 表示裸同步测试。
+    context: AtomicPtr<crate::mm::TlbContext>,
+    generation: AtomicUsize,
 }
 
 impl UserTlbRangeSlot {
@@ -127,6 +132,8 @@ impl UserTlbRangeSlot {
             asid: AtomicUsize::new(0),
             start_vpn: AtomicUsize::new(0),
             page_count: AtomicUsize::new(0),
+            context: AtomicPtr::new(core::ptr::null_mut()),
+            generation: AtomicUsize::new(0),
         }
     }
 
@@ -137,7 +144,13 @@ impl UserTlbRangeSlot {
     }
 
     /// 以 `targets` 的 Release store 作为整份 payload 的发布点。
-    fn publish(&self, targets: usize, asid: u16, range: crate::mm::VPNRange) {
+    fn publish(
+        &self,
+        targets: usize,
+        asid: u16,
+        range: crate::mm::VPNRange,
+        mm_generation: Option<(&crate::mm::TlbContext, usize)>,
+    ) {
         debug_assert_ne!(targets, 0);
         let page_count = range.get_end().0 - range.get_start().0;
         debug_assert!((1..=MAX_USER_TLB_RANGE_PAGES).contains(&page_count));
@@ -146,6 +159,11 @@ impl UserTlbRangeSlot {
         self.start_vpn
             .store(range.get_start().0, Ordering::Relaxed);
         self.page_count.store(page_count, Ordering::Relaxed);
+        let (context, generation) = mm_generation
+            .map(|(context, generation)| (context as *const _ as *mut _, generation))
+            .unwrap_or((core::ptr::null_mut(), 0));
+        self.context.store(context, Ordering::Relaxed);
+        self.generation.store(generation, Ordering::Relaxed);
         self.targets.store(targets, Ordering::Release);
     }
 
@@ -165,6 +183,14 @@ impl UserTlbRangeSlot {
             .expect("published user TLB range overflowed");
         let range = crate::mm::VPNRange::new(start.into(), end.into());
         crate::hal::user_tlb_invalidate_range(asid, range);
+        let context = self.context.load(Ordering::Relaxed);
+        if !context.is_null() {
+            let generation = self.generation.load(Ordering::Relaxed);
+            // Safety: 发起者持有借用 `TlbContext` 的 `TlbFlush`，并且只有在
+            // 观察到下方 ack 后才会返回或释放槽。因此 handler 完成本次访问前，
+            // `context` 必定仍然存活；fail-stop 超时路径也不会复用该槽。
+            unsafe { &*context }.mark_cpu_observed(generation, cpu_id);
+        }
         self.acknowledged.fetch_or(cpu_bit, Ordering::Release);
     }
 
@@ -891,8 +917,9 @@ pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError>
 /// 让调用方选定的 CPU 集合同步完成用户 TLB 失效。
 ///
 /// `range=Some(vpns)` 时先尝试架构固件，再用固定槽传递
-/// `asid + start + page_count`；槽被同 CPU 的意外重入占用时才保守
-/// 退回全用户/non-global IPI。`range=None`
+/// `asid + start + page_count`；生产 MM 同时传入 `mm_generation`，软件 handler
+/// 会在失效后、ack 前发布本核 observed generation，避免返回用户态时重复全刷。
+/// 槽被同 CPU 的意外重入占用时才保守退回全用户/non-global IPI。`range=None`
 /// 始终执行全用户失效。调用方必须先释放
 /// VM/PTE 及其它普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
 /// 精确请求由每 CPU 槽隔离，全量 fallback 则可安全合并到较新的 sequence。
@@ -900,7 +927,12 @@ pub(crate) fn synchronize_user_tlb(
     targets: usize,
     asid: u16,
     range: Option<crate::mm::VPNRange>,
+    mm_generation: Option<(&crate::mm::TlbContext, usize)>,
 ) -> Result<(), UserTlbSyncError> {
+    assert!(
+        mm_generation.is_none() || range.is_some(),
+        "MM generation is only meaningful for a precise user TLB range"
+    );
     if let Some(range) = range {
         let start_vpn = range.get_start().0;
         let end_vpn = range.get_end().0;
@@ -954,9 +986,12 @@ pub(crate) fn synchronize_user_tlb(
         // CAS 失败说明出现了重入或上一轮 fail-stop 残留；全刷比覆盖 payload 安全。
         let slot = &USER_TLB_RANGE_SLOTS[self::cpu_id()];
         if slot.try_claim() {
-            slot.publish(remote, asid, range);
+            slot.publish(remote, asid, range, mm_generation);
             if live_targets & current_bit != 0 {
                 crate::hal::user_tlb_invalidate_range(asid, range);
+                if let Some((context, generation)) = mm_generation {
+                    context.mark_cpu_observed(generation, self::cpu_id());
+                }
             }
             let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
             let _irq_guard = IpiWaitIrqGuard::enter();

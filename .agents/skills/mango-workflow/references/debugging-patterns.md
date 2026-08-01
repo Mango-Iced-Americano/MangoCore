@@ -738,3 +738,25 @@
 - **边界**: 任何路径都不得跨 IPI/TLB ack、context switch、Completion 或其他等待点持普通锁。
 - **相关文件**: `os/src/task/process.rs`, `os/src/task/manager.rs`,
   `os/src/task/task.rs`, `os/src/task/mod.rs`
+
+## 精准 TLB shootdown：必须拒绝 trap-return 全刷造成的假阳性
+
+- **计数器证据的边界**: request/ack 只能证明 mailbox、doorbell 和等待闭环完成，不能证明
+  handler 真的失效了目标 ASID/VPN。验证 stale translation 时，victim 必须先用真实用户
+  load/store 填充旧翻译，再让修改方经过生产 PTE 主链改变 PPN、权限或有效位。
+- **常见假阳性**: IPI handler 若只做精准失效和 ack、却不推进该 MM 的 observed generation，
+  目标从中断返回用户态时会进入 `activate_cpu()` generation catch-up，再做一次本地全刷。
+  即使精准硬件指令完全无效，用户也会看到新映射，测试因此错误 PASS，生产路径还多付一次
+  全刷成本。
+- **正确发布顺序**: 对同步 fixed slot，发起者保证 MM 在 ack 前存活；handler 应执行
+  `precise invalidate -> mark observed generation -> ack`。payload 先写，最后以 Release
+  发布 targets；handler Acquire targets，observed 的发布必须先于 ack。timeout 若采用
+  fail-stop，旧槽不得复用；若要恢复，必须加入 sequence/epoch 和可证明的所有权回收。
+- **排除其它补刷来源**: 在 victim 窗口静默本地 timer，只保留 shootdown IPI；把 timer
+  restore helper 排在用户 probe 后，并让 helper 在结果出现前被调度时主动判失败。同时检查
+  full-flush request 未增长和 observed 已由 handler 推进，不能只靠低概率 KREPEAT。
+- **物理页复用陷阱**: 验证 PPN 替换时额外持有旧 frame，并在 shootdown 返回后才写新 frame
+  canary。这样坏 handler 会持续读取确定的 OLD，而不是因为旧 frame 被分配器复用而偶然读到
+  NEW。与用户硬件访存并行的内核直映访问使用瞬时 raw/volatile pointer，避免构造重叠的
+  Rust `&mut` 引用。
+- **相关文件**: `os/src/smp.rs`, `os/src/mm/tlb.rs`, `os/src/kernel_tests/smp.rs`

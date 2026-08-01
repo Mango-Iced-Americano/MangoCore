@@ -197,7 +197,10 @@ fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `Mmu
 同步完成整个 `[start, end)` 后才允许释放 frame。固件缺少 RFENCE 时明确改走固定 slot。
 有硬件 ASID 时，用户/内核 SATP 切换不再固定全刷；ASIDLEN=0 平台保留兼容全刷。
 LA64 把同一 VM 锁内冻结的 ASID、起始 VPN 和页数发布到每发起 CPU 独占的原子槽，
-目标 CPU 从向下对齐的偶数 VPN 开始每两页执行一次 `invtlb 0x5`，完成后才 ack。LoongArch 一个普通 TLB entry 同时
+目标 CPU 从向下对齐的偶数 VPN 开始每两页执行一次 `invtlb 0x5`。软件 fixed slot 还携带
+同步等待期内保证存活的 MM generation：handler 必须先完成精准失效，再单调发布本 CPU
+observed generation，最后才 ack。否则 IPI 返回用户态时的 generation catch-up 会再做一次
+全量失效，既损失性能，也可能把坏的精准后端掩盖成测试 PASS。LoongArch 一个普通 TLB entry 同时
 覆盖相邻偶/奇 4 KiB 页，因此其最小硬件粒度是对齐后的 8 KiB 页对，而不是单个 4 KiB 页。
 已经避免的固定成本还包括：同一 MM 连续返回时的重复 active-bit 写入、已经切离 CPU 的
 远端 IPI、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
@@ -317,8 +320,10 @@ ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和条件式 trap 切根�
 用户任务可在 `sched_yield` 安全点携带同一 MM 从 CPU0 迁移至 CPU1。B51 将历史
 cached CPU 集合替换为调度器维护的 active mask，并用零目标 generation 追赶闭合安全
 detach。B52 将 `FlushRange::Page` 泛化为最多 64 页的半开 `Range`，RV64 直接把
-start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 slot；默认亲和性、
-通用用户迁移和不依赖计数器的 stale-PTE 用户访存压力证明仍未完成。
+start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 slot。B53 让 CPU1
+用户探针先填充旧 PPN 翻译，再由 CPU0 通过真实私有 CoW 替换 PTE；timer 静默窗口内只有
+精准 handler 能使后续普通用户 load 读到新页 canary，双架构 8 核两轮均通过。默认亲和性、
+通用用户迁移以及 `mprotect/munmap` 权限/有效位的扩展压力仍未完成。
 
 ## 13. 调试核对点
 

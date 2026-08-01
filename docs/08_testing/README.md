@@ -3,7 +3,7 @@ title: "测试体系 (Testing Framework)"
 category: testing
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [testing, ktest, cargo-test, LTP, regression, tap]
 ---
 
@@ -338,11 +338,17 @@ Completion/WaitQueue，CPU0 在确认所有任务均为 `Blocked` 且离开 curr
 第二轮任务验证回收 slot 的重新映射和执行。shootdown 等待会临时开中断，因此 ktest 在
 退出该用例前显式经过生产 timer 安全点，避免把已静默的 one-shot 泄漏给下一轮 timer 测试。
 
-`user_tlb_full_flush_reaches_online_cpus` 直接调用生产 `synchronize_user_tlb_mask()`，要求
+`user_tlb_full_flush_reaches_online_cpus` 直接调用生产 `synchronize_user_tlb()`，要求
 每颗在线 AP 的独立 user-TLB ack sequence 增长。它验收 reason/mailbox、架构本地全用户
 失效入口和 ack 等待闭环；用例末尾同样经过 timer 安全点。该用例没有修改真实用户 PTE，
 因此不能用于声称 generation race、stale translation、ack 前 frame 不复用或用户迁移
-已经完成；这些属于 B23 的 MM focused 测试。
+已经完成；frame retirement 由 B23 后续用例覆盖。
+
+B53 的 `remote_user_load_observes_cow_after_range_shootdown` 才是 stale PPN 的直接证据：
+CPU1 用户探针先持续 load 旧页，CPU0 通过生产 CoW 修改 PTE，随后用户 load 必须读到新
+frame canary。用例会静默 CPU1 timer，并把 restore helper 排在 probe 后；helper 若在结果
+前运行、full-user request 增长或 handler 未推进 observed，均判失败。该用例只证明 CoW
+PPN 替换，不应外推到尚未覆盖的 `mprotect/munmap` 权限/有效位压力。
 
 ### TAP 输出格式
 
