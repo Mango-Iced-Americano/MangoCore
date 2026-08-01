@@ -200,6 +200,9 @@ load + CPU0 真实 CoW PPN 替换证明双架构旧翻译被直接消除，而�
 B54 已将 LoongArch 恒等映射的软件 dirty 表改为原子 bitset，且把 slab 的 unsafe trait
 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；内部 page/list/cache 不再声明
 `Send/Sync`。这不代表 MM 审计完成，uaccess 的可逃逸 `'static mut` 用户引用仍待独立收口。
+B55 已让正常 console 输出统一经过“本地 irq-save → 全局 OUTPUT_LOCK → 架构 writer”；
+panic handler 必须先调用 `console::enter_panic()`，后续输出绕过 OUTPUT_LOCK 与 LA64 UART
+Mutex。新增 console 调用不得形成 UART/业务锁到 OUTPUT_LOCK 的反向顺序。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

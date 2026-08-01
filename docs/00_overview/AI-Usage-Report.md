@@ -1044,6 +1044,30 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   build exit 0，`CORE_NUM=8 KTEST=smp` 均 34/34、`online_mask=0xff`。初赛保持 RV64
   312/314、LA64 308/314，精确失败集合不变；六个 child 均无 mutation、panic 或 timeout。
 
+### Case 44: SMP console 串行化与 panic 无锁输出
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b55-console-summary.md`；DeepSeek 的 task、manifest、
+  分析和原始 Docker/QEMU 日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 SBI legacy console 阻塞语义、Linux panic 期间不等待 console
+  owner 的原则，设计正常/崩溃双路径、实现并裁决 raw/semantic 分数；DeepSeek 只读审查
+  锁序并运行四项最小 Docker 门禁，不修改或提交源码。
+- Problem: 旧 `console::print()` 只关闭本地中断，两个 CPU 仍可同时写 UART；panic 若发生
+  在普通 output/UART 锁持有区，继续走相同路径会自死锁。LA64 的 UART Mutex 重构还丢失了
+  等待 THR ready 的旧语义，可能静默丢字符。
+- Implemented change: 正常输出固定为 irq-save → `OUTPUT_LOCK` → HAL writer，logger 颜色、
+  正文和 reset 合并成一次临界区；LA64 一次锁住整 slice 并逐字节等 THR。panic handler
+  先 Release 发布单向 `PANICKING`，等待者 Acquire 检测后放弃普通锁，双架构 raw writer
+  均不取得内核 console 锁，LA64 还绕过 UART Mutex。
+- AI adjudication: DeepSeek 正确确认双路径闭合，但把 RV64 `test_pipe=1/4` 泛称为 pipe
+  偶发失败。GPT/Codex 按项目既有 §8.2 规则复核原始块：`cpid: 112cpid: 0` 恰含正 PID、
+  0、write-success 和 END，是测试程序三次 write 在 syscall 安全点合法交错造成的 judge
+  物理行假阴性；保留 raw 309，同时记 semantic 312，不重跑刷绿，也不修改 TTY 作 workaround。
+- Verification: 冻结 tracked diff SHA-256 为
+  `84a9f21f8a6e784696c3d0e2dc52d9efdc4d4b5ac47033d218c0616c450c2ee9`；RV64/LA64
+  `CORE_NUM=8 KTEST=smp` 均 34/34。RV64 初赛 raw 309/semantic 312，LA64 raw/semantic
+  308；四个 child 均 exit 0、无 mutation、panic、fatal 或 timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1130,6 +1154,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b52-range-shootdown-summary.md` | SMP 有界连续用户 TLB shootdown | 记录 64 页 IRQ 上限、双架构 range 后端、固定槽 payload 隔离、65 页全刷与初赛非回归 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b53-stale-tlb-user-access-summary.md` | SMP 真实用户访存 stale-TLB 证明 | 记录真实 CoW 用户 victim、handler observed-before-ack、假阳性隔离、DeepSeek 首错纠正与双架构 67/67 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b54-mm-single-core-assumptions-summary.md` | SMP MM/HAL 单核安全假设收口 | 记录 LA dirty 原子位图、slab 最小 Send 证明、静态状态审计边界与 DeepSeek 双架构 8 核门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b55-console-summary.md` | SMP console 串行化与 panic raw fallback | 记录 irq-save 全局叶子锁、LA64 UART ready 修复、panic 无锁分支及 RV64 raw/semantic 双账本裁决 |
 
 ## 9. 交互记录与留痕方式
 

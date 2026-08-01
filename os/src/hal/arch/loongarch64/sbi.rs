@@ -13,8 +13,15 @@ use super::register::CrMd;
 
 static UART: Mutex<Ns16550a> = Mutex::new(Ns16550a { base: UART_BASE });
 
+fn write_byte(uart: &mut Ns16550a, byte: u8) {
+    // NS16550 `write()` 在 THR 未就绪时返回 WouldBlock；丢弃这个结果会静默丢字符。
+    while uart.write(byte).is_err() {
+        core::hint::spin_loop();
+    }
+}
+
 pub fn console_putchar(c: usize) {
-    UART.lock().write(c as u8);
+    write_byte(&mut UART.lock(), c as u8);
 }
 
 pub fn console_flush() {
@@ -49,14 +56,20 @@ pub fn local_irq_restore(was_enabled: bool) {
     }
 }
 
-/// Write a byte slice to the console.
-///
-/// LoongArch64 already writes directly to UART MMIO (no SBI ecall overhead),
-/// so the benefit is marginal compared to rv64.  Same per-character loop as
-/// [`console_putchar`], but inlined to avoid the static-method call overhead.
+/// 持有一次 UART 锁写完整个字节切片，每个字节都等待 THR ready。
 pub fn console_write_bytes(data: &[u8]) {
+    let mut uart = UART.lock();
     for &b in data {
-        console_putchar(b as usize);
+        write_byte(&mut uart, b);
+    }
+}
+
+/// panic 时绕过全局 UART 锁。局部句柄只保存 MMIO base，不拥有可别名的内存状态；
+/// 即使另一个 CPU 停在普通输出区，也能尽力打印首个 panic 现场。
+pub fn panic_console_write(data: &[u8]) {
+    let mut uart = Ns16550a { base: UART_BASE };
+    for &b in data {
+        write_byte(&mut uart, b);
     }
 }
 

@@ -1,36 +1,78 @@
-use crate::hal::{console_write_bytes, local_irq_restore, local_irq_save};
+use crate::hal::{console_write_bytes, local_irq_restore, local_irq_save, panic_console_write};
 use crate::task::current_task;
 use crate::timer::get_time_ms;
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::{self, Level, LevelFilter, Log, Metadata, Record};
+use spin::Mutex;
 
-// la64: console_putchar 直接写 UART，无 SBI 序列化保护，因此需要 irq-save
-// 临界区确保整条 print 输出原子。rv64 虽 SBI ecall 有单字符原子性，但全局
-// 关中断可避免多个 print 调用之间的交错，且不会死锁（无持锁等待）。
-struct KernelOutput;
+// 关本地中断只防止同 CPU 重入；全局锁负责跨 CPU 串行化完整的一次输出。
+// panic 会永久切换到 raw 路径，因此即使崩溃点正持有此锁也不会自死锁。
+static OUTPUT_LOCK: Mutex<()> = Mutex::new(());
+static PANICKING: AtomicBool = AtomicBool::new(false);
+
+struct KernelOutput {
+    raw: bool,
+}
 
 impl Write for KernelOutput {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        console_write_bytes(s.as_bytes());
+        if self.raw {
+            panic_console_write(s.as_bytes());
+        } else {
+            console_write_bytes(s.as_bytes());
+        }
         Ok(())
     }
 }
 
-/// Write raw bytes to console atomically (interrupts disabled).
-///
-/// Unlike [`print!`]/[`println!`], this takes raw bytes (not a format string)
-/// and handles its own interrupt save/restore.  Used by [`Teletype::write_at`]
-/// to bypass the per-character SBI ecall bottleneck.
-pub fn write_bytes_atomic(data: &[u8]) {
+/// 执行一次完整 console 输出；闭包参数表示是否已经进入无锁 panic 路径。
+/// 正常闭包运行在 console 叶子锁内，只能调用 HAL writer，不能再获取业务锁。
+fn with_output(f: impl FnOnce(bool)) {
+    if PANICKING.load(Ordering::Acquire) {
+        f(true);
+        return;
+    }
+
     let irq_state = local_irq_save();
-    console_write_bytes(data);
+    let guard = loop {
+        if let Some(guard) = OUTPUT_LOCK.try_lock() {
+            break guard;
+        }
+        // 其它 CPU 可能在我们等待期间 panic。此时不能继续等一个可能永不释放的锁。
+        if PANICKING.load(Ordering::Acquire) {
+            local_irq_restore(irq_state);
+            f(true);
+            return;
+        }
+        core::hint::spin_loop();
+    };
+    f(false);
+    drop(guard);
     local_irq_restore(irq_state);
 }
 
+/// 进入不可逆的 panic 输出模式，后续打印不再等待任何内核 console 锁。
+pub fn enter_panic() {
+    PANICKING.store(true, Ordering::Release);
+}
+
+/// 正常模式下以 irq-save 全局临界区原子写入原始字节。
+///
+/// 与 [`print!`]/[`println!`] 不同，本接口接收已经准备好的字节切片，供
+/// [`Teletype::write_at`] 绕开逐字符 SBI 开销；panic 模式则直接使用无锁后端。
+pub fn write_bytes_atomic(data: &[u8]) {
+    with_output(|raw| {
+        if raw {
+            panic_console_write(data);
+        } else {
+            console_write_bytes(data);
+        }
+    });
+}
+
 pub fn print(args: fmt::Arguments) {
-    let irq_state = local_irq_save();
-    KernelOutput.write_fmt(args).unwrap();
-    local_irq_restore(irq_state);
+    with_output(|raw| KernelOutput { raw }.write_fmt(args).unwrap());
 }
 
 #[macro_export]
@@ -89,19 +131,25 @@ impl Log for Logger {
         let sec = ms / 1000;
         let msec = ms % 1000;
 
-        print!("\x1b[{}m", level_to_color_code(record.level()));
+        let color = level_to_color_code(record.level());
         match current_task() {
             Some(task) => println!(
-                "[{}.{:03}] tid {} pid {}: {}",
+                "\x1b[{}m[{}.{:03}] tid {} pid {}: {}\x1b[0m",
+                color,
                 sec,
                 msec,
                 task.gettid(),
                 task.pid(),
                 record.args()
             ),
-            None => println!("[{}.{:03}] kernel: {}", sec, msec, record.args()),
+            None => println!(
+                "\x1b[{}m[{}.{:03}] kernel: {}\x1b[0m",
+                color,
+                sec,
+                msec,
+                record.args()
+            ),
         }
-        print!("\x1b[0m")
     }
 
     fn flush(&self) {}

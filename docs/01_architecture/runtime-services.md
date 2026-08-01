@@ -3,7 +3,7 @@ title: "运行期服务 (Runtime Services)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-08-01
 tags: [architecture, runtime, trace, timer]
 ---
 
@@ -28,20 +28,27 @@ tags: [architecture, runtime, trace, timer]
 
 ### 2.1 输出路径
 
-`console.rs` 的 `KernelOutput` 实现 `core::fmt::Write`：
+`console.rs` 的 `KernelOutput` 实现 `core::fmt::Write`。正常输出顺序固定为：
 
-```rust
-for c in s.chars() {
-    console_putchar(c as usize);
-    i += 1;
-    if i >= 4 {
-        console_flush();
-        i = 0;
-    }
-}
+```text
+local_irq_save
+  -> OUTPUT_LOCK
+     -> HAL console_write_bytes
+        -> LA64 UART Mutex（RV64 无第二层 Rust 锁）
+     <-
+  <- OUTPUT_LOCK
+local_irq_restore
 ```
 
-输出每 4 个字符 flush 一次，最后不足 4 个字符也 flush。`console::print()` 在输出前后调用 `local_irq_save()` 和 `local_irq_restore()`，使一条 `print!` 输出在 la64 UART 路径和 rv64 SBI 路径上都避免交错。
+关本地中断只防止同 CPU 重入，`OUTPUT_LOCK` 才负责跨 CPU 串行化一次完整的
+`print!` 或 TTY write。logger 把颜色前缀、正文和 reset 合并成一次 `println!`，避免三个
+独立临界区之间被其它 CPU 插入。LA64 对整个字节切片只取得一次 UART 锁，并在每个字节前
+等待 NS16550 THR ready；RV64 QEMU 继续使用直接 MMIO 批量路径。
+
+panic handler 在第一次输出前执行 `console::enter_panic()`。该单向原子状态使等待
+`OUTPUT_LOCK` 的 CPU 放弃可能永不释放的 owner；panic 输出直接调用 HAL raw writer，
+不取得 `OUTPUT_LOCK` 或 LA64 UART Mutex。raw writer 仍可能等待真实 UART/SBI 发送就绪，
+“无锁”不等于“硬件非阻塞”。
 
 ### 2.2 日志初始化
 
@@ -241,7 +248,8 @@ trap 后端收到 timer interrupt 后进入 `task::timer_interrupt_handler()`。
 | `panic_diag` | panic 诊断输出 |
 | `SYSCALL_SHUTDOWN` | MangoCore 非标准系统调用，进入系统关机路径 |
 
-`console::print()` 在 panic/日志路径中仍通过 irq-save 输出，降低日志交错概率。
+普通日志通过 irq-save 全局锁输出；panic 先关闭本地中断，再永久切换到不等待内核
+console/UART 锁的 raw 路径。panic 诊断因此可以在普通输出临界区自身发生崩溃时继续打印。
 
 ## 10. 调试入口
 

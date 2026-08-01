@@ -8,6 +8,9 @@ fn panic(info: &PanicInfo) -> ! {
     // syscall 受控窗口内可能开着本地中断进入 panic。必须在
     // console 输出、锁诊断和跨核 STOP 之前立即关闭，避免递归 trap。
     let _ = crate::hal::local_irq_save();
+    // panic 可能发生在普通 console/UART 锁的持有区；先切换到无锁 raw 输出，
+    // 后续 panic_diag 中的所有 println! 才不会等待已经失去 owner 的锁。
+    crate::console::enter_panic();
     match info.location() {
         Some(location) => {
             println!(

@@ -16,6 +16,7 @@ pub use loongarch64::{
     console_flush, console_getchar, console_putchar, console_write_bytes, cpu_local_ptr,
     enable_local_timer_interrupt, enter_secondary_idle, install_cpu_local, kernel_tlb_invalidate,
     kstack_alloc, local_irq_restore, local_irq_save, machine_init, machine_shutdown,
+    panic_console_write,
     prepare_secondary_cpu_stop, reclaim_retired_kernel_stacks, remote_user_tlb_invalidate_range,
     secondary_cpu_stop, secondary_cpu_wait, send_ipi, start_secondary_cpu, syscall_id,
     time::{
@@ -46,7 +47,7 @@ pub use riscv::{
     rv_board::MMIO,
     sbi::{
         console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
-        local_irq_save, machine_shutdown, set_timer,
+        local_irq_save, machine_shutdown, panic_console_write, set_timer,
     },
     secondary_cpu_stop, secondary_cpu_wait, send_ipi, start_secondary_cpu,
     sv39::tlb_invalidate,

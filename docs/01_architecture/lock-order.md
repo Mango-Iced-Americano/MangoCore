@@ -60,8 +60,11 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
    shootdown、等待 ack；ack 完成后才能释放 frame/页表页/ASID。
 5. **timer 重编程**：timer queue 锁内更新最早 deadline，释放锁后向 CPU0 发送
    `TIMER_REPROGRAM`；IPI handler 只保留原子请求，不能读取 timer queue。
-6. **console**：全局 irq-save console 锁是叶子锁；持有时不得获取其他锁。
-   panic 路径不等待该锁，直接走原始 UART/SBI fallback。
+6. **console**：B55 后正常顺序固定为
+   `local IRQ-off -> OUTPUT_LOCK -> LA64 UART Mutex`（RV64 无 UART Mutex）。
+   `OUTPUT_LOCK` 是业务层叶子锁；格式化参数应在进入 `print()` 前求值，持有时不得获取
+   task/MM/VFS 等业务锁。panic 先 Release 发布单向状态，等待者 Acquire 观察后放弃
+   `OUTPUT_LOCK`，直接走不取得两把 Rust 锁的原始 UART/SBI fallback。
 7. **lwext4**：跨实例全局锁位于 C 调用外层，保护区内只允许同步块 I/O，禁止
    yield、任务事件等待或调用会反向获取 VFS 高层锁的路径。
 8. **线程组退出**：首次发布允许 `thread_group -> 单个 RunQueue` 的短嵌套；

@@ -253,6 +253,11 @@ pub fn console_write_bytes(data: &[u8]) {
     }
 }
 
+/// panic 输出不经过内核 console 锁；底层 MMIO/SBI 调用本身不持有 Rust 锁。
+pub fn panic_console_write(data: &[u8]) {
+    console_write_bytes(data);
+}
+
 pub fn machine_shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
     // 固件若异常返回，也不能再次进入 panic → shutdown 递归；保持本地

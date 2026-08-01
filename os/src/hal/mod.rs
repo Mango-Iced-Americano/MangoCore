@@ -30,7 +30,9 @@ pub use arch::{
     machine_init, prepare_secondary_cpu_stop, secondary_cpu_stop, secondary_cpu_wait, send_ipi,
     start_secondary_cpu, user_hwcap,
 };
-pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
+pub use arch::{
+    console_flush, console_getchar, console_putchar, console_write_bytes, panic_console_write,
+};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
 pub use arch::{local_irq_restore, local_irq_save};

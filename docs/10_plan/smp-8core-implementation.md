@@ -83,6 +83,7 @@ related_docs:
 | 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
+| console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -331,6 +332,14 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - hard IRQ/IPI 路径不获取普通业务锁，锁序文档与代码中的新增关系一致；
 - panic fallback 的单核持锁注入测试证明其不等待 console 锁。
 
+#### 当前进度（B55）
+
+- 正常 console 已实现 `local IRQ-off -> OUTPUT_LOCK -> 架构 writer`，双架构 8 核启动和
+  focused 输出无 marker 破坏；LA64 的第二层 UART Mutex 只在 OUTPUT_LOCK 之后取得。
+- panic handler 已在任何格式化前发布单向 raw mode，源码调用链不取得 OUTPUT_LOCK 或
+  LA64 UART Mutex。为避免保留生产测试 hook，“持锁后主动 panic”的动态注入仍为 NOT RUN，
+  因而本阶段不能把该条退出条件写成动态完成。
+
 ### Phase 1：BSP/AP 启动与 Per-CPU 基础
 
 #### 实施内容
@@ -524,7 +533,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B54）
+#### 当前进度（SMP-P2.5-B15 至 B55）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -570,6 +579,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   原子 bitset，防止同 word 的并发置位/清位丢更新；slab 删除内部 page/list/cache 和顶层
   allocator 的过宽 `Sync`，只保留全局堆 `Mutex` 类型边界真正要求的
   `SlabAllocator: Send`。双架构 8 核 focused 均 34/34，初赛失败集合保持不变；
+- B55 补齐早期计划中未真正落地的 console 边界：正常路径采用 irq-save 全局叶子锁，
+  logger 一条记录只取锁一次；panic mode 让所有后续格式化输出绕过普通 console 锁和
+  LA64 UART Mutex。双架构 focused 均 34/34；初赛 RV64 raw 309/semantic 312、LA64
+  raw/semantic 308，RV64 差额是既有 `test_pipe` 多 write 物理行粘连；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
@@ -970,7 +983,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 #### 实施内容
 
-- 复核 Phase 0.5 已落地的 console irq-safe 锁和 panic raw fallback，不在本阶段首次补救；
+- B55 已补齐 Phase 0.5 当时只写入文档、未真正跨 CPU 串行化的 console irq-safe 锁和
+  panic raw fallback；后续共享子系统只能复用该边界，不能再直接写 UART；
 - TIME_SOURCE、CLOCK_FREQ、timer 计数、LoongArch DIRTY、UART 和诊断缓冲改为原子、
   受锁对象或 per-CPU 状态；
 - VirtIO 队列在 v1 中继续单队列串行化；DMA reservation 改为 per-CPU，

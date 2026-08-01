@@ -776,3 +776,20 @@
   每个删除项则说明为何不再需要，而不是用“现在多核了”替代类型推理。
 - **相关文件**: `os/src/mm/slab.rs`, `os/src/mm/heap_allocator.rs`,
   `os/src/hal/arch/loongarch64/laflex.rs`
+
+## 多核 console：正常 irq-save 叶子锁与 panic 单向逃生路径
+
+- **本地 irq-off 不等于跨 CPU 串行化**: 关中断只能防止同一 CPU 被 IRQ 打断后再次进入
+  console；多个 CPU 仍会并发写设备。正常输出需要一把全局叶子锁，固定顺序为
+  `local IRQ-off -> console lock -> 可选的底层 UART lock`，释放顺序相反。
+- **panic 不能等待普通 owner**: 崩溃可能发生在 console/UART 锁持有区，或者 panic CPU
+  已经停止持锁的其它 CPU。用单向原子状态先发布 panic，再让锁等待循环主动放弃；raw writer
+  必须绕过所有 Rust console/UART 锁。它可以等待硬件 ready，不能把“无锁”误写成“非阻塞”。
+- **格式化临界区**: 颜色前缀、正文和 reset 属于同一日志记录时，应在一次 `print` 中输出，
+  避免三次独立加锁仍被别核插入。格式参数尽量在进入叶子锁前求值，writer 内不得反向取得
+  task、MM、VFS 或其它业务锁。
+- **不要用 TTY workaround 修 judge 物理行**: 用户程序若用多个 write syscall 拼一行，
+  不同进程在 syscall 安全点合法交错不属于单次 console 临界区破坏。先按既有 raw/semantic
+  规则复核完整块，不能跨 syscall 持锁或缓存到换行来伪造终端原子性。
+- **相关文件**: `os/src/console.rs`, `os/src/lang_items.rs`,
+  `os/src/hal/arch/{riscv,loongarch64}/sbi.rs`, `docs/01_architecture/lock-order.md`

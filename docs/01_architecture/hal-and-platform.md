@@ -67,7 +67,7 @@ os/src/hal/
 | 栈 | `kstack_alloc`, `KernelStack`, `trap_cx_bottom_from_tid`, `ustack_bottom_from_tid` | 内核栈和用户栈/trap context 地址计算 |
 | 启动 | `bootstrap_init`, `machine_init` | 早期机器初始化和运行期机器初始化 |
 | 用户 ABI | `user_hwcap` | 生成当前架构可安全暴露给 ELF `AT_HWCAP` 的能力位 |
-| console | `console_flush`, `console_getchar`, `console_putchar` | 字符输出输入 |
+| console | `console_write_bytes`, `panic_console_write`, `console_getchar` | 正常批量输出、panic 无锁输出和字符输入 |
 | 中断 | `local_irq_save`, `local_irq_restore` | 保存/恢复本地中断状态 |
 | trap 查询 | `get_bad_addr`, `get_bad_instruction`, `get_exception_cause` | fault address、fault instruction、异常原因 |
 | 时间 | `get_clock_freq`, `get_time`, `program_timer_delta` | 读取时钟、获取时间、设置 timer delta |
