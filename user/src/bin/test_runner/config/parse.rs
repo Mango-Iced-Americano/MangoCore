@@ -30,7 +30,7 @@ fn apply(data: &[u8], cfg: &mut RuntimeConfig) {
             b"ltp_include" => if let Some(list) = parse_list(value) { cfg.ltp_include = list; },
             b"ltp_from" => cfg.ltp_from = core::str::from_utf8(value).ok().filter(|v| !v.is_empty()).map(String::from),
             b"ltp_libc" => match value { b"musl" => cfg.ltp_libc = LtpLibc::Musl, b"glibc" => cfg.ltp_libc = LtpLibc::Glibc, _ => {} },
-            b"ltp_runner" => match value { b"script" => cfg.ltp_runner = LtpRunner::Script, b"suite" => cfg.ltp_runner = LtpRunner::Suite, _ => {} },
+            b"ltp_runner" => match value { b"inline" => cfg.ltp_runner = LtpRunner::Inline, b"script" => cfg.ltp_runner = LtpRunner::Script, b"suite" => cfg.ltp_runner = LtpRunner::Suite, _ => {} },
             b"diag" => cfg.diag = matches!(value, b"1" | b"true"), b"timer_smoke" => cfg.timer_smoke = matches!(value, b"1" | b"true"),
             b"skip_apk" => cfg.skip_apk = matches!(value, b"1" | b"true"),
             b"drift_pre_mask" => if let Some(mask) = parse_mask(value) { cfg.drift_pre_mask = mask; },
