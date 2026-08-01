@@ -1389,9 +1389,8 @@ impl ProcessControlBlock {
         if !self.mark_zombie(exit_code, rusage) {
             return;
         }
-        // 在 mark_zombie 之后重新获取 parent: 虽然单核非抢占内核中
-        // mark_zombie（仅持自旋锁）和父进程 finish_exit 之间不存在竞态，
-        // 但防御性重读可避免未来引入抢占后 parent 引用变为陈旧。
+        // 在 mark_zombie 之后重新获取 parent：其它 CPU 可能同时完成 reparent，
+        // 因此不能沿用进入 finish_exit() 前取得的父进程快照。
         let parent_process = self.parent();
         let auto_reap = parent_process
             .as_ref()

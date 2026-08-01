@@ -282,7 +282,8 @@ pub struct TaskControlBlockInner {
     pub trap_cx_ppn: PhysPageNum,
     /// 任务上下文
     pub task_cx: TaskContext,
-    /// POSIX 调度策略兼容字段。当前调度器仍是单核轮转，这里用于 syscall 语义回读。
+    /// POSIX 调度策略兼容字段。Per-CPU 调度器仍采用 FIFO/nice-aware 选择，
+    /// 本字段只用于 syscall 语义回读，不决定真实调度类。
     pub sched_policy: usize,
     /// POSIX 调度优先级兼容字段。
     pub sched_priority: i32,

@@ -1021,6 +1021,29 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   mutation、panic、timeout 或 fatal。首轮同功能快照的初赛保持 RV64 312/314、LA64
   308/314；最终一处分支修正按风险只复跑 build/focused，证据边界已明确记录。
 
+### Case 43: SMP MM/HAL 单核安全假设收口
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b54-mm-single-core-assumptions-summary.md`；DeepSeek
+  的 task、manifest、分析和原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 审计真实共享所有权、实现原子位图并裁决 unsafe trait 最小边界；
+  DeepSeek 只读复核位计算、内存序和类型约束，并通过受限网关串行执行六项 Docker 门禁，
+  不修改、提交或上传源码。
+- Problem: LoongArch 恒等映射 dirty 状态仍是跨 CPU 读写的 `static mut [bool]`，同一 word
+  并发更新既有 Rust 数据竞争也可能丢 bit；slab 又把内部 raw-pointer 容器全部声明为
+  `Send + Sync`，其安全说明仍依赖“当前单核”。
+- Implemented change: dirty side table 改为 `AtomicUsize` bitset，以 relaxed 原子 RMW
+  只保证位操作完整性，映射生命周期继续由 `KERNEL_SPACE` 锁管理。slab 删除八个内部/顶层
+  `Send/Sync` 声明，只保留全局堆 `Mutex` 类型约束所需、且由独占 page 所有权证明的
+  `SlabAllocator: Send`。
+- AI adjudication: 任务模板错误要求 `KREPEAT=1` 得到 67/67；GPT/Codex 和 DeepSeek 均按
+  原始 TAP 纠正为每架构 34/34，67/67 是 B53 两轮累积值。其余 `static mut` 未机械删除：
+  堆后备区、heap_trace 缓冲和 idle/boot 栈分别已有唯一移交、全局锁或 CPU 独占槽证明。
+- Verification: 冻结 tracked diff SHA-256 为
+  `575e9d0241b690774770c080ab3f0fa639d2079d37a059e22551829beaa530eb`；双架构 normal
+  build exit 0，`CORE_NUM=8 KTEST=smp` 均 34/34、`online_mask=0xff`。初赛保持 RV64
+  312/314、LA64 308/314，精确失败集合不变；六个 child 均无 mutation、panic 或 timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1106,6 +1129,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b51-active-mm-summary.md` | SMP 精确 active MM 驻留 | 记录 writer/enter/leave 共同 VM 锁、切离屏障、零目标 generation 和双架构 focused/初赛证据 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b52-range-shootdown-summary.md` | SMP 有界连续用户 TLB shootdown | 记录 64 页 IRQ 上限、双架构 range 后端、固定槽 payload 隔离、65 页全刷与初赛非回归 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b53-stale-tlb-user-access-summary.md` | SMP 真实用户访存 stale-TLB 证明 | 记录真实 CoW 用户 victim、handler observed-before-ack、假阳性隔离、DeepSeek 首错纠正与双架构 67/67 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b54-mm-single-core-assumptions-summary.md` | SMP MM/HAL 单核安全假设收口 | 记录 LA dirty 原子位图、slab 最小 Send 证明、静态状态审计边界与 DeepSeek 双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

@@ -15,19 +15,27 @@ use crate::{
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
-// Identity-mapped kernel pages use their physical VPN as the software dirty
-// index. Size the table by the highest DRAM end, not by the sum of disjoint
-// banks; this covers 2K1000LA's 4 GiB physical ceiling without treating its
-// MMIO hole as allocatable memory.
-const DIRTY_LEN: usize = MEMORY_END / PAGE_SIZE;
-static mut DIRTY: [bool; DIRTY_LEN] = [false; DIRTY_LEN];
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+// 恒等映射没有普通叶子 PTE，因此用物理页号索引的软件位图保存 dirty 状态。
+// 位图按最高 DRAM 末端定长，既覆盖 2K1000LA 的 4 GiB 物理地址上限，也不会
+// 把中间 MMIO hole 误认为可分配内存。原子 word 允许不同 CPU 修改不同或相同页，
+// 同时避免 `static mut [bool]` 在并发读写时产生 Rust 数据竞争。
+const IDENTITY_DIRTY_BITS: usize = MEMORY_END / PAGE_SIZE;
+const IDENTITY_DIRTY_WORDS: usize = IDENTITY_DIRTY_BITS.div_ceil(usize::BITS as usize);
+static IDENTITY_DIRTY: [AtomicUsize; IDENTITY_DIRTY_WORDS] =
+    [const { AtomicUsize::new(0) }; IDENTITY_DIRTY_WORDS];
 use super::register::MemoryAccessType;
 
-fn dirty_index(vpn: VirtPageNum) -> Option<usize> {
+fn identity_dirty_bit(vpn: VirtPageNum) -> Option<(usize, usize)> {
     // vpn.0 已经移除了 PAGE_SIZE_BITS。若在这里使用 VA_MASK，会多保留 VPN 中
     // 不存在的 12 位，并破坏高地址折叠结果。
     let idx = vpn.0 & VPN_MASK;
-    (idx < DIRTY_LEN).then_some(idx)
+    (idx < IDENTITY_DIRTY_BITS).then(|| {
+        let word = idx / usize::BITS as usize;
+        let mask = 1usize << (idx % usize::BITS as usize);
+        (word, mask)
+    })
 }
 
 bitflags! {
@@ -529,12 +537,10 @@ impl PageTable for LAFlexPageTable {
     }
     fn set_dirty_bit_no_flush(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if self.is_ident_map(vpn) {
-            if let Some(idx) = dirty_index(vpn) {
-                // Safety: `dirty_index` 已校验全局位图下标；B16 尚未允许
-                // 多 CPU 并发修改该内核恒等映射状态。
-                unsafe {
-                    DIRTY[idx] = true;
-                }
+            if let Some((word, mask)) = identity_dirty_bit(vpn) {
+                // dirty 位不发布其它数据；映射生命周期仍由 KERNEL_SPACE 锁管理，
+                // 因此这里只需要保证同一 word 的并发 read-modify-write 不丢位。
+                IDENTITY_DIRTY[word].fetch_or(mask, Ordering::Relaxed);
                 return Ok(());
             }
             return Err(());
@@ -557,12 +563,8 @@ impl PageTable for LAFlexPageTable {
     }
     fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if self.is_ident_map(vpn) {
-            if let Some(idx) = dirty_index(vpn) {
-                // Safety: `dirty_index` bounds-checks the index into the global
-                // bitmap, and MangoCore is currently single-core.
-                unsafe {
-                    DIRTY[idx] = false;
-                }
+            if let Some((word, mask)) = identity_dirty_bit(vpn) {
+                IDENTITY_DIRTY[word].fetch_and(!mask, Ordering::Relaxed);
                 self.invalidate_page(vpn);
                 return Ok(());
             }
@@ -601,9 +603,8 @@ impl PageTable for LAFlexPageTable {
     }
     fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
         if self.is_ident_map(vpn) {
-            // Safety: `dirty_index` returns `None` when `vpn` is outside the
-            // bitmap-covered range.
-            dirty_index(vpn).map(|idx| unsafe { DIRTY[idx] })
+            identity_dirty_bit(vpn)
+                .map(|(word, mask)| IDENTITY_DIRTY[word].load(Ordering::Relaxed) & mask != 0)
         } else {
             self.find_pte(vpn).map(|pte| pte.is_dirty())
         }

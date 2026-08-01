@@ -1,7 +1,7 @@
 //! 可中断睡眠辅助。
 //!
 //! 本模块为 `nanosleep`/`clock_nanosleep` 等路径提供基于 `WaitQueue` 的睡眠。
-//! 单核 QEMU 上短尾部使用自旋补偿，以减少定时器唤醒后返回用户态的过早超时。
+//! QEMU 的短尾部使用自旋补偿，以减少定时器唤醒后返回用户态的过早超时。
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 

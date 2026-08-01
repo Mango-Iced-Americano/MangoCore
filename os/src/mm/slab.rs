@@ -96,18 +96,6 @@ pub struct SlabPage {
     bitmap: [usize; SLAB_BITMAP_WORDS],
 }
 
-// Safety: All types below are only accessed behind the global heap mutex
-// on a single-core kernel. The raw-pointer fields in SlabPage (prev/next)
-// do not break Send/Sync because access is serialised by the lock.
-unsafe impl Send for SlabPage {}
-unsafe impl Sync for SlabPage {}
-unsafe impl Send for SlabList {}
-unsafe impl Sync for SlabList {}
-unsafe impl Send for SlabCache {}
-unsafe impl Sync for SlabCache {}
-unsafe impl Send for SlabAllocator {}
-unsafe impl Sync for SlabAllocator {}
-
 impl SlabPage {
     /// Offset from page start where the SlabPage metadata lives.
     const fn meta_offset() -> usize {
@@ -517,6 +505,13 @@ pub struct SlabAllocator {
     /// Equivalent to summing self.caches[].user_bytes().
     slab_user_bytes_total: usize,
 }
+
+// Safety: `SlabAllocator` 只由 `KernelHeapInner` 持有，所有公开操作都要求
+// `&mut self`，调用者必须先取得全局堆 `Mutex`。链表裸指针只指向同一分配器
+// 独占的 slab page；把整个分配器移动到另一个 CPU 不会移动这些 page，且任何
+// 解引用仍受同一把锁串行化。因此顶层分配器可以 Send，但没有理由把内部 page、
+// list、cache 或分配器本身声明为 Sync。
+unsafe impl Send for SlabAllocator {}
 
 impl SlabAllocator {
     pub const fn empty() -> Self {

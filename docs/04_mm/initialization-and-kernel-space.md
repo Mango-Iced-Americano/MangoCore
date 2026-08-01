@@ -3,7 +3,7 @@ title: "MM 初始化与内核地址空间"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [mm, init, kernel-space, mapping, smp]
 ---
 
@@ -97,6 +97,13 @@ KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
 ```
 
 `KernelAllocator` 组合了 slab 分配器（9 个 size class: 8~2048 bytes）和 `MetadataHeap<32, 12>` buddy allocator。小对象走 slab，大对象直接走 buddy。分配失败时仍支持 OOM recovery 路径。
+
+SMP 下仍只有一个全局堆，但并发访问由 `KernelAllocator.inner` 的 `Mutex` 串行化。
+`KernelHeapInner` 独占 buddy 与 `SlabAllocator`，所有 slab 操作都要求 `&mut self`；因此
+只需要证明顶层 `SlabAllocator: Send`，使其能够被全局 `Mutex` 持有。内部
+`SlabPage`、`SlabList`、`SlabCache` 和分配器本身均不声明 `Sync`，避免把“运行期有锁”
+错误扩大成“任意共享引用都可跨 CPU 并发访问”的类型授权。`HEAP_SPACE` 则只在单次启动
+初始化时以裸地址交给该分配器，之后不再通过静态数组名称访问。
 
 ### 4.1 分配失败路径
 

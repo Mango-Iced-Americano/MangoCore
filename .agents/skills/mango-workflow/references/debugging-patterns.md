@@ -760,3 +760,19 @@
   NEW。与用户硬件访存并行的内核直映访问使用瞬时 raw/volatile pointer，避免构造重叠的
   Rust `&mut` 引用。
 - **相关文件**: `os/src/smp.rs`, `os/src/mm/tlb.rs`, `os/src/kernel_tests/smp.rs`
+
+## 收口单核 unsafe 假设：区分运行期串行化与类型授权
+
+- **不要按关键字机械改写**: `static mut` 可能表示真正的并发共享状态，也可能只是启动期唯一
+  移交的后备区或按 CPU 切分的静态栈。先写出“谁在何时取得所有权、运行期还有谁访问”，
+  再决定改成 atomic、锁内对象、Per-CPU 槽，还是保留并补全证明。
+- **布尔 side table 的并发模式**: 多 CPU 只需独立 set/clear/read bit、且对象生命周期另有锁
+  保护时，可用 `AtomicUsize` bitset。set/clear 必须用 `fetch_or/fetch_and`，不能 load-modify-store，
+  否则同 word 的相邻 bit 会丢更新；Relaxed 只承担位操作原子性，不应被描述成发布映射内容。
+- **Send 与 Sync 不是“有锁”的同义词**: `Mutex<T>` 通常要求 `T: Send`，并不要求内部每一层
+  raw-pointer 容器都实现 `Send + Sync`。把最窄的顶层 owner 声明为 Send，并证明移动 owner
+  不移动其指向对象、所有解引用仍在同一锁下；没有跨 CPU 共享 `&T` 的需求就不要声明 Sync。
+- **审查输出**: 每个保留的 unsafe impl 都应说明真实 owner、保护锁、可移动性和禁止的并发访问；
+  每个删除项则说明为何不再需要，而不是用“现在多核了”替代类型推理。
+- **相关文件**: `os/src/mm/slab.rs`, `os/src/mm/heap_allocator.rs`,
+  `os/src/hal/arch/loongarch64/laflex.rs`

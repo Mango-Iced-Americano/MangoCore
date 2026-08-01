@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -240,6 +240,12 @@ QEMU: configure_local_ipi() + trap::enable_ipi_interrupt()
 AP 已经开放的 IPI 位；`TCFG.InitVal` 只按架构要求向上对齐到 4 的倍数，不改变
 stable-counter 的频率域。CPU0 探测到的 `CLOCK_FREQ` 通过 Release store 发布，AP 以
 Acquire load 读取；它不再是依赖单核时序的 `static mut`。
+
+LoongArch 恒等映射没有普通叶子 PTE，`LAFlexPageTable` 因此用按物理 VPN 索引的软件
+dirty 位图补充状态。该表使用 `AtomicUsize` word：置位采用 `fetch_or`，清位采用
+`fetch_and`，读取采用原子 load，避免不同 CPU 修改同一 word 时覆盖相邻页的 bit。
+这些操作只保证 dirty bit 本身无数据竞争；映射的创建、撤销和生命周期仍由
+`KERNEL_SPACE` 锁管理，所以无需用 dirty 原子发布页表内容。
 
 ### 6.4 Trap 路径
 

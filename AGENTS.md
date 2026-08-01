@@ -197,6 +197,9 @@ RV64 使用逐页 `sfence.vma va, asid` 与 SBI RFENCE FID 2，LA64 通过每发
 原子槽传递 ASID、起始 VPN 和页数，按硬件相邻偶/奇页对执行 `invtlb 0x5`；更大跨度全刷。
 B53 已让软件精准 handler 在失效后、ack 前发布 observed generation，并用 CPU1 持续用户
 load + CPU0 真实 CoW PPN 替换证明双架构旧翻译被直接消除，而不是由 trap-return 偶然全刷。
+B54 已将 LoongArch 恒等映射的软件 dirty 表改为原子 bitset，且把 slab 的 unsafe trait
+授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；内部 page/list/cache 不再声明
+`Send/Sync`。这不代表 MM 审计完成，uaccess 的可逃逸 `'static mut` 用户引用仍待独立收口。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下
