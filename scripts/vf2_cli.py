@@ -247,13 +247,13 @@ def cmd_boot(args):
             return 1
         print("\nTransferred %d bytes. Booting..." % size)
 
-        # Send booti, then drop the echoed command + prompt so the final
-        # "StarFive #" (auto-reboot) is not confused with the pre-boot prompt.
+        # Send booti and capture immediately. Earlier this drained for
+        # 0.8s after booti, which swallowed the kernel's early serial
+        # output ([kernel] Hello, [dw_mshc] probe) — exactly the lines
+        # needed to verify the SD driver on the real board.
         ser.reset_input_buffer()
         ser.write((BOOT_CMD + "\r").encode())
         ser.flush()
-        time.sleep(0.5)
-        drain(ser, quiet=0.3)
 
         seen = {m: False for m in KERNEL_MARKERS}
         rebooted = False
