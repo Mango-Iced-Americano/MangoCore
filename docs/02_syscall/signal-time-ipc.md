@@ -3,7 +3,7 @@ title: "信号、时间与 IPC syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-01
 tags: [syscall, signal, time, ipc]
 ---
 
@@ -371,6 +371,12 @@ timerfd 是 VFS `File` 对象，可被 poll/epoll 观察。
 receiver 不能领取同一条消息。`MSG_COPY` 不执行摘取，只在锁内复制稳定的内核快照。普通
 接收的用户 copy 若失败，消息不会放回队列；这与 Linux 先取得消息所有权、再执行用户 copy
 的语义一致。
+
+message queue 的 `/proc/sys/kernel/msg_next_id` 是一次性 requested ID，不是自动分配器的
+cursor。自动 ID 另用单调 cursor，并跳过所有已发布历史；requested ID 即使已经删除也不能
+再次发布。发布前先为历史预留容量并登记，之后才把队列插入 registry；`IPC_RMID` 只删除和
+唤醒，不创建 tombstone。这样跨 WaitQueue 等待的旧 `msqid` 不会发生数值 ABA：醒来时对象
+不存在返回 `EIDRM`，不会误操作删除后创建的同号队列。该 v1 约束只覆盖 message queue。
 
 ## 12. POSIX message queue
 

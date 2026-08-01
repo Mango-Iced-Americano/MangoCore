@@ -82,6 +82,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP VA-backed UserBuffer | 2026-08-01 | GPT/Codex, DeepSeek | Linux iov_iter/pipe 对照、调用点与 partial 语义审查、双架构 8 核初赛门禁 | 删除锁外物理页 slice；连续/scatter buffer 只保存 VA，实际 copy 重验 PTE，初赛保持 RV64 312/314、LA64 308/314 |
 | SMP IPC registry 锁外用户访问 | 2026-08-01 | GPT/Codex, DeepSeek | Linux SysV/POSIX IPC 对照、registry/uaccess 锁序审查、空跑配方纠错与双架构 8 核门禁 | semaphore 写侧两阶段重验、mq_open 原子名称发布；定向 LTP 36/36，初赛失败集合未扩大 |
 | SMP SysV 消息唯一摘取 | 2026-08-01 | GPT/Codex, DeepSeek | Linux `msgrcv` 所有权对照、两 receiver 交错审查、双架构 8 核定向 LTP 与初赛门禁 | 普通接收在 registry 锁内 move 消息，删除事后 serial 流程；定向 LTP 44/44，初赛失败集合未扩大 |
+| SMP SysV message queue ID 防 ABA | 2026-08-01 | GPT/Codex, DeepSeek | Linux index+sequence 与 LTP `msgget04/05`、`msgrcv06` 对照，requested/auto 边界审查和双架构 8 核门禁 | 发布前登记 ID 历史、运行期不复用，删除路径不分配；精确 RMID→同号重建动态竞态保留 NOT RUN 边界 |
 
 ## 4. 详细使用场景
 
@@ -1264,6 +1265,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b59-va-userbuffer-summary.md` | SMP VA-backed UserBuffer | 记录物理 slice 删除、partial/exact、pipe nofault、resolve-first 与双架构 8 核初赛门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b60-ipc-uaccess-summary.md` | SMP IPC registry 锁外用户访问 | 记录 semaphore/mq_open 两阶段协议、DeepSeek 空跑根因纠错、双架构定向 LTP 36/36 与初赛门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b61-msgrcv-claim-summary.md` | SMP SysV 消息唯一摘取 | 记录旧两锁重复领取窗口、锁内 move 线性化、Linux/LTP 覆盖边界及双架构 8 核门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b62-msgid-aba-summary.md` | SMP SysV message queue ID 防 ABA | 记录旧最小空洞复用交错、发布历史不变量、Linux/LTP 对照、隔离 Docker/DeepSeek 验证及精确动态场景 NOT RUN 边界 |
 
 ## 9. 交互记录与留痕方式
 

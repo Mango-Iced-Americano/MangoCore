@@ -224,6 +224,27 @@ MSG_REGISTRY 锁内选择消息
 `msgrcv` 所有权交接一致。该规则只证明单条消息不会被重复领取；IPC ID 复用、WaitQueue
 对象删除竞态和精确的双 receiver 动态压力仍需后续独立审计。
 
+#### B62 SysV message queue 对象身份
+
+阻塞的 `msgsnd/msgrcv` 会释放 `MSG_REGISTRY` 并等待，因此数值 `msqid` 必须在整个等待
+区间保持身份稳定。若 `IPC_RMID` 后立即把最小空洞分给新队列，旧 waiter 醒来可能把新对象
+误认为原对象。B62 的发布协议固定为：
+
+```text
+MSG_REGISTRY 锁内选择 requested ID 或自动 cursor
+  -> 确认该 ID 从未发布且当前未占用
+  -> 为 published_ids 预留容量并登记历史
+  -> 插入 queues，完成对象发布
+
+IPC_RMID：从 queues 删除 -> wake_all；删除路径不分配
+```
+
+自动 cursor 必须跳过显式 requested ID 留下的稀疏历史，整数耗尽返回 `ENOSPC`；请求值
+无效、已占用或曾发布时只回退自动分配，不能重新使用旧身份。`was_removed(id)` 由“已经
+发布且当前不存在”定义，因此旧 waiter 只能观察 `EIDRM`。v1 采用线性 `Vec` 历史换取简单
+的可失败预留；若以后改为 index+generation allocator，仍必须保持“先登记身份、后发布
+对象”和“删除不分配”两个不变量。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护

@@ -852,5 +852,11 @@
   锁内完成选择与 move/remove，把内核所有权唯一交给一个调用者，再锁外做 faultable uaccess；
   非破坏的 peek/`MSG_COPY` 才允许只复制快照。用户 copy 失败是否回滚必须服从 ABI，不能为
   “避免丢数据”擅自改变 Linux 的消费语义。
+- **可等待对象的数值 ID 必须排除 ABA**: syscall 若会释放 registry 锁并按 ID 等待，删除后
+  立即复用空洞会让旧 waiter 命中新对象。简单内核可以在本次启动期间永久记录所有发布 ID；
+  requested ID 与自动 cursor 要分离，自动路径也必须跳过 requested 留下的稀疏历史。历史
+  容量必须在对象插入前预留并登记，避免对象已发布而身份记录失败；删除路径只移除并唤醒，
+  不得临时分配 tombstone。长期高 churn 再迁移 index+generation，但不能只扩大整数或依赖
+  当前对象表查重。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
   `os/src/syscall/process/ipc.rs`, `docs/01_architecture/lock-order.md`

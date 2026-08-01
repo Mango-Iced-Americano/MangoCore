@@ -354,35 +354,54 @@ impl MsgQueue {
 }
 
 struct MsgRegistry {
+    // `/proc/sys/kernel/msg_next_id` 写入的一次性期望 ID；下次分配尝试会消费并恢复为 -1。
     next_id: i32,
+    // 自动分配只向前推进；`None` 表示正 ID 空间已经耗尽。
+    next_auto_id: Option<i32>,
     queues: BTreeMap<i32, MsgQueue>,
     wait_queue: WaitQueue,
-    removed_ids: Vec<i32>,
+    // 在对象发布前记录完整历史，使删除路径无需分配 tombstone，也不会发生 ID ABA。
+    published_ids: Vec<i32>,
 }
 
 impl MsgRegistry {
     fn new() -> Self {
         Self {
             next_id: -1,
+            next_auto_id: Some(1),
             queues: BTreeMap::new(),
             wait_queue: WaitQueue::new(),
-            removed_ids: Vec::new(),
+            published_ids: Vec::new(),
         }
     }
 
-    fn alloc_id(&mut self) -> i32 {
-        if self.next_id >= 0 {
-            let requested = self.next_id;
-            self.next_id = -1;
-            if !self.queues.contains_key(&requested) {
-                return requested;
+    /// 分配一个在本次内核运行期间从未发布过的消息队列 ID。
+    fn alloc_id(&mut self) -> Result<i32, isize> {
+        let requested = self.next_id;
+        self.next_id = -1;
+
+        let mut from_auto = false;
+        let id = if requested >= 0
+            && !self.published_ids.contains(&requested)
+            && !self.queues.contains_key(&requested)
+        {
+            requested
+        } else {
+            from_auto = true;
+            let mut candidate = self.next_auto_id.ok_or(ENOSPC)?;
+            while self.published_ids.contains(&candidate) || self.queues.contains_key(&candidate) {
+                candidate = candidate.checked_add(1).ok_or(ENOSPC)?;
             }
+            candidate
+        };
+
+        // 历史必须先具备容量再发布对象；否则删除时可能因 OOM 丢失身份记录并重新产生 ABA。
+        self.published_ids.try_reserve(1).map_err(|_| ENOMEM)?;
+        if from_auto {
+            self.next_auto_id = id.checked_add(1);
         }
-        let mut id = 1;
-        while self.queues.contains_key(&id) {
-            id = id.saturating_add(1).max(1);
-        }
-        id
+        self.published_ids.push(id);
+        Ok(id)
     }
 
     fn find_by_key(&self, key: isize) -> Option<i32> {
@@ -415,16 +434,9 @@ impl MsgRegistry {
         true
     }
 
-    fn mark_removed(&mut self, id: i32) {
-        if !self.removed_ids.contains(&id) {
-            if self.removed_ids.try_reserve(1).is_ok() {
-                self.removed_ids.push(id);
-            }
-        }
-    }
-
     fn was_removed(&self, id: i32) -> bool {
-        self.removed_ids.contains(&id)
+        // 活对象已经由调用方优先查表；这个谓词同时保留独立调用时的准确含义。
+        self.published_ids.contains(&id) && !self.queues.contains_key(&id)
     }
 }
 
@@ -2126,7 +2138,10 @@ pub fn sys_msgget(key: isize, msgflg: usize) -> isize {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
-    let id = registry.alloc_id();
+    let id = match registry.alloc_id() {
+        Ok(id) => id,
+        Err(errno) => return errno,
+    };
     registry
         .queues
         .insert(id, MsgQueue::new(key, msgflg & 0o777, uid, gid));
@@ -2238,9 +2253,9 @@ fn receive_message(
     msgflg: usize,
 ) -> Result<(isize, Vec<u8>, usize), isize> {
     let mut registry = MSG_REGISTRY.lock();
-    let was_removed = registry.was_removed(msqid);
+    let already_removed = registry.was_removed(msqid);
     let Some(queue) = registry.queues.get_mut(&msqid) else {
-        if was_removed {
+        if already_removed {
             return Err(EIDRM);
         }
         return Err(EINVAL);
@@ -2332,7 +2347,6 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
                 return EPERM;
             }
             registry.queues.remove(&msqid);
-            registry.mark_removed(msqid);
             registry.wait_queue.wake_all();
             SUCCESS
         }

@@ -3,7 +3,7 @@ title: "SysV IPC、POSIX MQ 与 IPC Namespace"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-01
 tags: [process, ipc, sysv, mq]
 ---
 
@@ -213,7 +213,9 @@ let mapped = task
 | `lspid/lrpid` | 最近 send/receive pid |
 | `stime/rtime/ctime` | 时间戳 |
 
-`MsgRegistry` 维护 `next_id`、queues、wait_queue 和 removed_ids。
+`MsgRegistry` 将 `/proc/sys/kernel/msg_next_id` 的一次性请求与自动 ID cursor 分开，并在对象
+发布前把 ID 记入 `published_ids`。因此普通分配与显式请求都不会复用已删除 ID，阻塞中的
+旧 `msgsnd/msgrcv` 醒来后只能得到 `EIDRM`，不会误操作同号新队列。
 
 message queue 的队列与 registry 定义为：
 
@@ -237,11 +239,18 @@ struct MsgQueue {
 
 struct MsgRegistry {
     next_id: i32,
+    next_auto_id: Option<i32>,
     queues: BTreeMap<i32, MsgQueue>,
     wait_queue: WaitQueue,
-    removed_ids: Vec<i32>,
+    published_ids: Vec<i32>,
 }
 ```
+
+`published_ids` 在队列插入 `queues` 之前预留容量并登记。这样 `IPC_RMID` 只需移除队列和
+唤醒 waiter，不在删除路径临时分配 tombstone；自动 cursor 遇到显式请求曾发布的 ID 时会
+继续向前，`i32` 空间耗尽则由 `msgget` 返回 `ENOSPC`。v1 保留 `Vec` 的线性查询以换取
+简单、可失败的预留语义；若未来出现长期高 churn，再单独迁移为 generation allocator，
+不把这项性能结构混入当前并发正确性修复。
 
 `msgsnd` 在队列满时返回 `None`，由 WaitQueue 模板决定阻塞或 `EAGAIN`：
 
@@ -411,7 +420,7 @@ struct SemSet {
 }
 
 struct SemRegistry {
-    next_id: i32,
+    next_id: Option<i32>,
     sets: BTreeMap<i32, SemSet>,
     wait_queue: WaitQueue,
     removed_ids: Vec<i32>,

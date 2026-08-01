@@ -218,8 +218,12 @@ sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解�
 重验/提交”；任何 IPC registry 或队列锁内都不得进入 faultable uaccess。B61 又将普通
 `msgrcv` 的消息选择、摘取和统计更新合并到同一个 `MSG_REGISTRY` 临界区，摘取后再锁外
 写用户 buffer；`MSG_COPY` 只生成非破坏快照。不得恢复“锁内观察、解锁、事后按序号删除”
-的两阶段领取方式，否则两个 CPU 可能成功返回同一条消息。FS/Net/Driver 的完整共享状态
-审计仍由对应负责人继续，不能由这条 IPC 结论外推。
+的两阶段领取方式，否则两个 CPU 可能成功返回同一条消息。B62 又把 message queue 的一次性
+requested ID 与自动 cursor 分离，并在对象插入 registry 前登记发布历史；本次内核运行中
+发布过的 ID 不再复用，`IPC_RMID` 只删除对象并唤醒 waiter，不能在删除路径临时分配
+tombstone。旧 waiter 醒来后必须通过历史得到 `EIDRM`，不能命中同号新对象。该规则目前只
+覆盖 message queue，不能直接外推到 semaphore/shared memory。FS/Net/Driver 的完整共享
+状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下
