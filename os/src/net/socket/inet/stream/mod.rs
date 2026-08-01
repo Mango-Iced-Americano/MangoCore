@@ -1094,10 +1094,22 @@ impl Socket for TcpSocket {
             record_tcp_recv_perf(buf.len(), &ret);
             return ret;
         }
-        let inner = self.inner.lock();
         let _ = flags;
-        let ret = inner.recv_to_user(buf, 0, buf.len()).map(|n| n as isize);
-        drop(inner);
+        // 先在 socket 锁域内接收到 kernel buffer，释放锁后再进入 faultable uaccess。
+        // 这避免形成 socket -> VM 的嵌套锁序。
+        let total = buf.len().min(crate::hal::IO_CHUNK_SIZE);
+        if total == 0 {
+            return Ok(0);
+        }
+        let mut tmp = alloc::vec![0u8; total];
+        let ret = self.try_recv(&mut tmp).and_then(|n| {
+            if n <= 0 {
+                return Ok(n);
+            }
+            buf.write_from(&tmp[..n as usize])
+                .map(|copied| copied as isize)
+                .map_err(|_| SyscallErr::EFAULT)
+        });
         // sys_read/readv use this direct UserBuffer path.  In particular,
         // Tokio's TcpStream reads land here, and Tokio clears its userspace
         // readiness after a short read.  Mirror the actual post-read socket
@@ -1131,7 +1143,9 @@ impl Socket for TcpSocket {
             return ret;
         }
         let mut tmp = alloc::vec![0u8; total];
-        let n = buf.read_at(0, &mut tmp);
+        let n = buf
+            .read_into_at(0, &mut tmp)
+            .map_err(|_| SyscallErr::EFAULT)?;
         let inner = self.inner.lock();
         let ret = inner.try_send(&tmp[..n]);
         drop(inner);

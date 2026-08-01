@@ -117,7 +117,7 @@ pub fn sys_getsockopt(
             let info_bytes = unsafe {
                 core::slice::from_raw_parts(&info as *const TcpInfo as *const u8, info_len)
             };
-            if buf.write_from(info_bytes).is_err()
+            if buf.write_all(info_bytes).is_err()
                 || optlen_ptr.write(token, &(info_len as u32)).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);
@@ -130,7 +130,7 @@ pub fn sys_getsockopt(
                     Ok(writer) => writer,
                     Err(_) => return -(SyscallErr::EFAULT as isize),
                 };
-            if optval_buf.write_from(congestion.as_bytes()).is_err()
+            if optval_buf.write_all(congestion.as_bytes()).is_err()
                 || optlen_ptr.write(token, &(congestion.len() as u32)).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);
@@ -216,8 +216,7 @@ pub fn sys_getsockopt(
             let bytes = unsafe {
                 core::slice::from_raw_parts(&timeout as *const TimeVal as *const u8, len)
             };
-            if writer.write_from(bytes).is_err() || optlen_ptr.write(token, &(len as u32)).is_err()
-            {
+            if writer.write_all(bytes).is_err() || optlen_ptr.write(token, &(len as u32)).is_err() {
                 return -(SyscallErr::EFAULT as isize);
             }
         }

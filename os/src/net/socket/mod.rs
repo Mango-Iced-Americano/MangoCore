@@ -321,7 +321,7 @@ impl Endpoint {
                 // nl_groups[8..12] = 0
                 let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, 12)
                     .map_err(|_| SyscallErr::EFAULT)?;
-                user_buf.write_from(&buf).map_err(|_| SyscallErr::EFAULT)?;
+                user_buf.write_all(&buf).map_err(|_| SyscallErr::EFAULT)?;
                 addrlen_ptr
                     .write(token, &12u32)
                     .map_err(|_| SyscallErr::EFAULT)?;
@@ -352,7 +352,7 @@ impl Endpoint {
                 buf[12..20].copy_from_slice(&pep.addr);
                 let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, 20)
                     .map_err(|_| SyscallErr::EFAULT)?;
-                user_buf.write_from(&buf).map_err(|_| SyscallErr::EFAULT)?;
+                user_buf.write_all(&buf).map_err(|_| SyscallErr::EFAULT)?;
                 addrlen_ptr
                     .write(token, &20u32)
                     .map_err(|_| SyscallErr::EFAULT)?;
@@ -381,7 +381,7 @@ impl Endpoint {
                 let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, write_len)
                     .map_err(|_| SyscallErr::EFAULT)?;
                 user_buf
-                    .write_from(&AF_UNSPEC.to_ne_bytes())
+                    .write_all(&AF_UNSPEC.to_ne_bytes())
                     .map_err(|_| SyscallErr::EFAULT)?;
                 // 回写 addrlen
                 addrlen_ptr
@@ -512,7 +512,10 @@ pub trait Socket: Send + Sync {
         let mut scratch = [0u8; 4096];
         let n = self.try_recv(&mut scratch[..available])?;
         if n > 0 {
-            buf.write_at(0, &scratch[..n as usize]);
+            return buf
+                .write_from_at(0, &scratch[..n as usize])
+                .map(|copied| copied as isize)
+                .map_err(|_| SyscallErr::EFAULT);
         }
         let _ = flags;
         Ok(n)
@@ -529,7 +532,9 @@ pub trait Socket: Send + Sync {
             return self.try_send(&[], flags);
         }
         let mut scratch = alloc::vec![0u8; total];
-        let n = buf.read(&mut scratch);
+        let n = buf
+            .read_into(&mut scratch)
+            .map_err(|_| SyscallErr::EFAULT)?;
         self.try_send(&scratch[..n], flags)
     }
 
@@ -546,7 +551,9 @@ pub trait Socket: Send + Sync {
                 return self.try_sendmsg(&[], Some(d), flags);
             }
             let mut scratch = alloc::vec![0u8; total];
-            let n = buf.read(&mut scratch);
+            let n = buf
+                .read_into(&mut scratch)
+                .map_err(|_| SyscallErr::EFAULT)?;
             self.try_sendmsg(&scratch[..n], Some(d), flags)
         } else {
             self.try_send_user(buf, flags)

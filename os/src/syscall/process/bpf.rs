@@ -264,7 +264,7 @@ fn write_user_bytes(ptr: u64, data: &[u8]) -> Result<(), isize> {
         return Err(EFAULT);
     }
     let mut writer = UserBufferWriter::new(current_user_token(), ptr as *mut u8, data.len())?;
-    writer.write_from(data)?;
+    writer.write_all(data)?;
     Ok(())
 }
 

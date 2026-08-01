@@ -258,7 +258,7 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
             let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, len)
                 .map_err(|_| SyscallErr::EFAULT)?;
             user_buf
-                .write_from(&out[..len])
+                .write_all(&out[..len])
                 .map_err(|_| SyscallErr::EFAULT)?;
             addrlen_ptr
                 .write(token, &16u32)
@@ -270,7 +270,7 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
             let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, len)
                 .map_err(|_| SyscallErr::EFAULT)?;
             user_buf
-                .write_from(&out[..len])
+                .write_all(&out[..len])
                 .map_err(|_| SyscallErr::EFAULT)?;
             addrlen_ptr
                 .write(token, &24u32)

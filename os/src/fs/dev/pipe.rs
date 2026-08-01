@@ -383,8 +383,11 @@ impl IndexNode for Pipe {
                 pipe_finish_read(profile_start, &result);
                 return result;
             }
-            // Direct ring→UserBuffer copy, segment by segment
+            // ring 锁必须覆盖“复制多少、消费多少”的状态变更，否则两个 reader
+            // 可能消费同一段数据。UserBuffer 已在锁外 fault-in；锁内只走 nofault
+            // 复制，映射一旦并发变化就返回，不让 spin lock 跨越 fault 等待点。
             let mut total = 0usize;
+            let mut copy_failed = false;
             let dst_len = dst.len();
             while total < dst_len && ring.status != RingBufferStatus::EMPTY {
                 let seg_start = ring.head;
@@ -398,7 +401,13 @@ impl IndexNode for Pipe {
                     break;
                 }
                 let seg_bytes = &ring.arr[seg_start..seg_start + seg_len];
-                let n = dst.write_at(total, seg_bytes);
+                let n = match dst.write_from_at_nofault(total, seg_bytes) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        copy_failed = true;
+                        break;
+                    }
+                };
                 ring.head = if seg_start + n == ring.capacity {
                     0
                 } else {
@@ -415,7 +424,12 @@ impl IndexNode for Pipe {
                 }
             }
             pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
-            (Ok(total), write_end)
+            let result = if copy_failed && total == 0 {
+                Err(SyscallErr::EFAULT)
+            } else {
+                Ok(total)
+            };
+            (result, write_end)
         };
         if let Ok(_n) = &result {
             if let Some(write_end) = write_end {
@@ -525,8 +539,10 @@ impl IndexNode for Pipe {
                 pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
                 (Err(SyscallErr::EAGAIN), read_end)
             } else {
-                // Direct UserBuffer→ring copy, segment by segment.
+                // ring 锁同时保护 PIPE_BUF 原子写与 tail 推进。这里同样只走
+                // nofault 复制，避免 spin lock 内调页、CoW 或等待后端 I/O。
                 let mut total = 0usize;
+                let mut copy_failed = false;
                 let src_len = src.len();
                 while total < src_len && ring.status != RingBufferStatus::FULL {
                     let seg_start = ring.tail;
@@ -543,8 +559,16 @@ impl IndexNode for Pipe {
                     if seg_len == 0 {
                         break;
                     }
-                    // Read directly from UserBuffer into ring buffer
-                    let n = src.read_at(total, &mut ring.arr[seg_start..seg_start + seg_len]);
+                    // 每次只推进实际复制的字节；后续页失败时保留已经完成的前缀。
+                    let n = match src
+                        .read_into_at_nofault(total, &mut ring.arr[seg_start..seg_start + seg_len])
+                    {
+                        Ok(n) => n,
+                        Err(_) => {
+                            copy_failed = true;
+                            break;
+                        }
+                    };
                     if n == 0 {
                         break;
                     }
@@ -564,7 +588,12 @@ impl IndexNode for Pipe {
                     }
                 }
                 pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
-                (Ok(total), read_end)
+                let result = if copy_failed && total == 0 {
+                    Err(SyscallErr::EFAULT)
+                } else {
+                    Ok(total)
+                };
+                (result, read_end)
             }
         };
         if matches!(result, Err(SyscallErr::EPIPE)) {

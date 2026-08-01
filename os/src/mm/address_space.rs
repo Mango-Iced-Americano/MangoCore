@@ -886,9 +886,28 @@ impl<T: PageTable> AddressSpaceInner<T> {
         addr: VirtAddr,
         access: FaultAccess,
     ) -> Result<PhysAddr, isize> {
+        // uaccess 不是硬件真的发生了一次 page fault。映射和权限都已满足时直接
+        // 返回，避免每次 copy-to-user 都误走 Cow/SharedWrite 并提交无效 TLB 刷新。
+        if let Ok(pa) = self.resolve_user_va_inner(addr, access) {
+            return Ok(pa);
+        }
+
         super::frame_reserve(3);
         self.do_page_fault(addr, access)
             .and_then(|_| self.validate_user_fault_result(addr, access))
+            .map_err(memory_error_to_errno)
+    }
+
+    /// 只检查当前 PTE，不触发缺页处理。
+    ///
+    /// 该入口供持有不可睡眠锁的 uaccess 路径使用：调用方必须先在锁外 fault-in，
+    /// 锁内若发现映射或权限已变化就直接失败，不能再次进入可能等待的 fault handler。
+    pub(crate) fn resolve_user_va(
+        &self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, isize> {
+        self.resolve_user_va_inner(addr, access)
             .map_err(memory_error_to_errno)
     }
 
@@ -922,6 +941,24 @@ impl<T: PageTable> AddressSpaceInner<T> {
         addr: VirtAddr,
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
+        match self.resolve_user_va_inner(addr, access) {
+            Err(MemoryError::NoPermission) => {
+                warn!(
+                    "[fault_in] user va {:#x} failed post-fault permission check: {:?}",
+                    addr.0, access
+                );
+                Err(MemoryError::NoPermission)
+            }
+            result => result,
+        }
+    }
+
+    /// 无副作用地解析现有用户 PTE，供 uaccess fast path 与 nofault copy 共用。
+    fn resolve_user_va_inner(
+        &self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
         let pa = self
             .page_table
@@ -945,15 +982,7 @@ impl<T: PageTable> AddressSpaceInner<T> {
             }
         };
 
-        if !ok {
-            warn!(
-                "[fault_in] user va {:#x} failed post-fault permission check: {:?}",
-                addr.0, access
-            );
-            return Err(MemoryError::NoPermission);
-        }
-
-        Ok(pa)
+        ok.then_some(pa).ok_or(MemoryError::NoPermission)
     }
     #[cfg(feature = "loongarch64")]
     #[cfg(feature = "oom_handler")]

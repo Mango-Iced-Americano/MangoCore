@@ -112,7 +112,7 @@ pub fn sys_setsockopt(
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
             let mut filter_bytes = [0u8; 32];
-            if reader.read_into(&mut filter_bytes).is_err() {
+            if reader.read_exact(&mut filter_bytes).is_err() {
                 return -(SyscallErr::EFAULT as isize);
             }
             let mut filter = [0u32; 8];
@@ -215,7 +215,7 @@ pub fn sys_setsockopt(
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
             let mut name_buf = [0u8; 16];
-            if reader.read_into(&mut name_buf[..copy_len]).is_err() {
+            if reader.read_exact(&mut name_buf[..copy_len]).is_err() {
                 return -(SyscallErr::EFAULT as isize);
             }
             let name_end = name_buf.iter().position(|&b| b == 0).unwrap_or(copy_len);

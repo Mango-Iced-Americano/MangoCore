@@ -1362,10 +1362,12 @@ impl PageCache {
             self.ensure_fully_valid(start_page)?;
             let _t_copy = perf::perf_time_now();
             let src = entry.as_slice();
-            dst.write_at(0, &src[page_offset..page_offset + sub_len]);
+            let copied = dst
+                .write_from_at(0, &src[page_offset..page_offset + sub_len])
+                .map_err(|_| SyscallErr::EFAULT)?;
             let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
             perf::record_pc_copy_cycles(copy_cycles);
-            return Ok(sub_len);
+            return Ok(copied);
         }
 
         // Multi-page with batch lookup + retry
@@ -1376,13 +1378,25 @@ impl PageCache {
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
                 // All hits: copy to UserBuffer
                 let _t_copy = perf::perf_time_now();
+                let mut copied = 0usize;
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(item.dst_offset, &src[item.page_offset..item.page_offset + item.len]);
+                    let n = match dst.write_from_at(
+                        item.dst_offset,
+                        &src[item.page_offset..item.page_offset + item.len],
+                    ) {
+                        Ok(n) => n,
+                        Err(_) if copied != 0 => break,
+                        Err(_) => return Err(SyscallErr::EFAULT),
+                    };
+                    copied += n;
+                    if n < item.len {
+                        break;
+                    }
                 }
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
-                return Ok(plan.copies.iter().map(|c| c.len).sum());
+                return Ok(copied);
             }
 
             if retried {
@@ -1417,12 +1431,22 @@ impl PageCache {
                 let mut dst_off = 0;
                 for item in &copies {
                     let src = item.entry.as_slice();
-                    dst.write_at(dst_off, &src[item.page_offset..item.page_offset + item.sub_len]);
-                    dst_off += item.sub_len;
+                    let n = match dst.write_from_at(
+                        dst_off,
+                        &src[item.page_offset..item.page_offset + item.sub_len],
+                    ) {
+                        Ok(n) => n,
+                        Err(_) if dst_off != 0 => break,
+                        Err(_) => return Err(SyscallErr::EFAULT),
+                    };
+                    dst_off += n;
+                    if n < item.sub_len {
+                        break;
+                    }
                 }
                 let copy_cycles = perf::perf_time_now().wrapping_sub(_t_copy);
                 perf::record_pc_copy_cycles(copy_cycles);
-                return Ok(copies.iter().map(|c| c.sub_len).sum());
+                return Ok(dst_off);
             }
 
             if !plan.needs_valid_fill.is_empty() {
@@ -1464,13 +1488,15 @@ impl PageCache {
             let entry =
                 self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
             let dst = entry.as_slice_mut();
-            src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
-            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
-            if became_full && !full_page_overwrite {
+            let copied = src
+                .read_into_at(0, &mut dst[page_offset..page_offset + sub_len])
+                .map_err(|_| SyscallErr::EFAULT)?;
+            let became_full = entry.mark_valid_and_check_full(page_offset, copied);
+            if became_full && !full_page_overwrite && copied == sub_len {
                 perf::record_pc_write_eventually_full();
             }
             balance_dirty_pages();
-            return Ok(sub_len);
+            return Ok(copied);
         }
 
         struct CopyItem {
@@ -1504,7 +1530,6 @@ impl PageCache {
                 sub_len,
                 full_page_overwrite,
             });
-            total_written += sub_len;
         }
 
         // Phase 2: copy data from UserBuffer into pages (no locks held)
@@ -1512,14 +1537,26 @@ impl PageCache {
         for item in &copies {
             let dst = item.entry.as_slice_mut();
             let dst_start = item.page_offset;
-            src.read_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]);
+            let copied =
+                match src.read_into_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]) {
+                    Ok(copied) => copied,
+                    Err(_) if src_offset != 0 => break,
+                    Err(_) => return Err(SyscallErr::EFAULT),
+                };
+            if copied == 0 {
+                break;
+            }
             let became_full = item
                 .entry
-                .mark_valid_and_check_full(item.page_offset, item.sub_len);
-            if became_full && !item.full_page_overwrite {
+                .mark_valid_and_check_full(item.page_offset, copied);
+            if became_full && !item.full_page_overwrite && copied == item.sub_len {
                 perf::record_pc_write_eventually_full();
             }
-            src_offset += item.sub_len;
+            src_offset += copied;
+            total_written += copied;
+            if copied < item.sub_len {
+                break;
+            }
         }
 
         balance_dirty_pages();

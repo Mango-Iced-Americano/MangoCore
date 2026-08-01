@@ -159,12 +159,12 @@ let veth_iface: &VethInterface =
 
 ### 用户指针访问
 
-使用 `copy_from/to_user`、`UserPtr`、`translated_byte_buffer` 等接口时，如果操作涉及跨页访问
-或不安全假设，应注释说明边界检查与部分完成语义。固定对象 copy 已在逐页 VM 锁内完成
-fault、权限检查和实际访问；字符串也必须先复制到内核 scratch 再扫描。
-`fault_in_user_range()` 只是副作用前预检查，不能代替实际 copy。`UserBuffer`/
-`translated_byte_buffer` 仍是待收口的锁外物理页视图，调用方不能用“已经翻译”替代
-生命周期和并发映射证明。
+使用 `copy_from/to_user`、`UserPtr`、`UserBuffer` 等接口时，如果操作涉及跨页访问或不安全
+假设，应注释说明边界检查与 partial/exact 语义。固定对象、字符串和 buffer copy 都逐页在
+VM 锁内完成 PTE 解析、权限检查和实际访问；字符串必须先复制到内核 scratch 再扫描。
+`fault_in_user_range()` 只是副作用前预检查，不能代替实际 copy。`UserBuffer` 只保存 VA
+区间，调用方仍不能用“已经预 fault”替代并发映射证明；在自旋锁内使用 nofault helper 时，
+必须额外注释为何允许映射变化立即失败。
 
 ### 内联汇编
 

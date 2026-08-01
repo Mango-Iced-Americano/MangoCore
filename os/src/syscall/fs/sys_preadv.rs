@@ -106,7 +106,13 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
                     return if done > 0 { done as isize } else { errno };
                 }
             };
-            let c = ubuf.write_at(0, &kbuf[copied..copied + chunk]);
+            let c = match ubuf.write_from_at(0, &kbuf[copied..copied + chunk]) {
+                Ok(c) => c,
+                Err(errno) => {
+                    done += copied;
+                    return if done > 0 { done as isize } else { errno };
+                }
+            };
             copied += c;
             if c < chunk { break; }
         }

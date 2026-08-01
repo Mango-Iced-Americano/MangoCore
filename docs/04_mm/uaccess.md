@@ -4,51 +4,56 @@ category: mm
 status: stable
 author: MangoCore Team
 last_update: 2026-08-01
-tags: [mm, uaccess, user-pointer, iovec]
+tags: [mm, uaccess, user-pointer, iovec, smp]
 ---
 
 # 用户地址访问与 UserBuffer
 
-## 1. 源码位置
+## 1. 设计目标
 
-用户地址访问封装位于 `os/src/mm/uaccess.rs`。它为 syscall 层提供安全的用户指针读取、写入、字符串读取和 iovec 翻译。
+`os/src/mm/uaccess.rs` 是 syscall 与用户地址空间之间的唯一常规复制边界。B57—B59
+完成后，所有生产 uaccess 对象只保存用户虚拟地址或内核所有的数据，不再向调用方返回
+PA、direct-map pointer、`&'static T` 或 `&'static mut [u8]`。
+
+核心约束如下：
+
+1. faulting uaccess 只能访问当前任务的 user token；
+2. 每个用户页都在当前 `AddressSpace` 锁内解析 PTE、检查权限并立即复制；
+3. PA 和 raw pointer 只在该锁的 closure 内短暂存在；
+4. 构造 `UserBuffer` 时的预 fault 不会固定映射，实际复制仍会重新校验；
+5. VM 锁释放后才执行 `MmuGather` 产生的 TLB flush、远端 ack 或其它等待；
+6. 跨页与 scatter I/O 允许部分完成，固定格式对象使用 exact helper。
+
+## 2. 源码与接口
 
 | 源码 | 作用 |
 |------|------|
-| `os/src/mm/uaccess.rs` | 用户指针封装、buffer/iovec 翻译、copy_from/to_user |
-| `os/src/mm/address_space.rs` | `fault_in_user_va()` 和后置权限校验 |
-| `os/src/mm/page_fault.rs` | fault-in 触发后的缺页动作分类 |
-| `os/src/syscall/fs.rs` | read/write/readv/writev 对用户 buffer 的使用 |
-| `os/src/syscall/process/mm.rs` | process_vm_readv/writev、mmap 相关用户结构 |
+| `os/src/mm/uaccess.rs` | 用户指针、字符串、buffer/iovec 与 copy helper |
+| `os/src/mm/address_space.rs` | 已有 PTE 解析、fault-in 和权限后验检查 |
+| `os/src/mm/page_fault.rs` | lazy page、CoW、shared-write 等 fault 动作 |
 
-主要导出：
+主要导出如下：
 
 | 类型/函数 | 用途 |
 |-----------|------|
-| `UserPtr<T>` | 只读用户对象指针 |
-| `UserPtrMut<T>` | 可写用户对象指针 |
-| `UserSlice<T>` | 用户数组 |
-| `UserCString` | 用户 C 字符串 |
-| `UserBufferReader` | 从用户 buffer 读取 |
-| `UserBufferWriter` | 向用户 buffer 写入 |
-| `UserIoVec` | 读取并管理用户 iovec |
-| `translated_byte_buffer()` | 跨页用户 buffer 翻译 |
-| `translated_str()` | 读取 NUL 结尾字符串 |
-| `copy_from_user/copy_to_user` | 在 VM 映射同步下完成对象/数组拷贝 |
-| `fault_in_user_range()` | 外部副作用前的用户区间预 fault，不替代真正 copy |
-| `user_accessible_len()` | 非 faulting 可访问长度探测 |
+| `UserPtr<T>` / `UserPtrMut<T>` | 固定对象的只读/可写用户指针 |
+| `UserSlice<T>` | 固定类型数组 |
+| `UserCString` / `translated_str()` | NUL 结尾字符串的内核快照 |
+| `UserBufferReader` / `UserBufferWriter` | 连续用户 buffer 的读写封装 |
+| `UserIoVec` | 读取 iovec 描述符并构造 scatter `UserBuffer` |
+| `copy_from_user` / `copy_to_user` | 固定对象的 exact copy |
+| `fault_in_user_range()` | 外部副作用前的预 fault，不替代实际 copy |
+| `user_accessible_len()` | 不触发 fault 的已有映射前缀探测 |
 
-## 2. 核心约束
+旧 `translated_byte_buffer()`、`translate_user_buffer_checked()`、单页 slice fast path 和
+`Vec<&'static mut [u8]>` 已删除。
 
-`uaccess` 的核心安全约束有四条：
+## 3. 地址、token 与长度
 
-1. 地址范围必须在 `USER_VA_END` 以下。
-2. faulting 用户访问只允许当前任务的 user token。
-3. 翻译过程会触发缺页，并在成功后检查 PTE 权限。
-4. 标量、数组和字符串 copy 的权限检查、物理地址取得和实际访问
-   必须处于同一次 VM 锁持有期。
+`check_user_range(ptr, len)` 只检查整数溢出和 `[ptr, ptr + len)` 是否位于
+`USER_VA_END` 以下，不读取页表。真正的 R/W 权限由实际复制时的 PTE 检查决定。
 
-`current_user_vm(token)` 明确检查：
+faulting 入口通过 `current_user_vm(token)` 要求 token 属于当前任务：
 
 ```rust
 if crate::task::current_user_token() != token {
@@ -56,258 +61,180 @@ if crate::task::current_user_token() != token {
 }
 ```
 
-因此，faulting uaccess 不支持对任意非当前进程地址空间执行。
+因此跨进程访问不能复用普通 uaccess，必须使用有独立权限和目标 VM 生命周期协议的
+`process_vm_readv/writev` 路径。
 
-## 3. 长度限制
+| 限制 | 值 | 失败语义 |
+|------|----|----------|
+| 单次用户 buffer | 8 MiB | `EFAULT` |
+| iovec 数量 | 1024 | `EINVAL` |
+| iovec 总长度 | 不超过 `isize::MAX` | `EINVAL` |
 
-文件内定义：
+8 MiB 上限限制一次 fault/copy 工作量；B59 后连续 buffer 不再为了逐页表示分配 `Vec`。
 
-```rust
-const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
-const MAX_IOVEC_COUNT: usize = 1024;
-```
+## 4. PTE resolve-first
 
-含义：
-
-| 限制 | 错误 |
-|------|------|
-| 单次用户 buffer 翻译超过 8 MiB | `EFAULT` |
-| iovec 数量超过 1024 | `EINVAL` |
-| iovec 总长度溢出或超过 `isize::MAX` | `EINVAL` |
-
-这些限制用于防止 syscall 通过巨大用户 buffer 诱导内核分配大量 `Vec<&mut [u8]>` 元数据。
-
-## 4. 非 faulting 探测
-
-`user_accessible_len(token, ptr, len, access)` 只检查已有 PTE：
+`AddressSpaceInner::fault_in_user_va()` 先调用无副作用的内部 resolver：
 
 ```text
-user_accessible_len()
-  ├── checked ptr + len
-  ├── uaccess_user_range_ok()
-  ├── token 必须属于当前任务
-  ├── PageTableImpl::from_token(token)
-  └── 逐页 user_access_ok()
+resolve_user_va_inner(va, access)
+  ├── translate_va
+  ├── 验证 PA 属于可用 DRAM
+  └── 验证 U + R/W/X 权限
 ```
 
-它不会：
+若已有 PTE 满足权限，函数直接返回 PA；只有未映射或写权限尚未建立时才进入 page-fault
+handler。这一点很重要：uaccess 是软件发起的复制，不是硬件真的报告了一次 fault。若每次
+copy-to-user 都无条件进入 handler，已映射的 private/shared 页面可能被误判为 CoW 或
+SharedWrite，并产生无意义的 PTE 修改和 TLB shootdown。
 
-| 不做的事 |
-|----------|
-| 分配匿名页 |
-| 触发文件 mmap 读页 |
-| 触发 COW |
-| 触发 MAP_GROWSDOWN |
-| 修改页表 |
+`resolve_user_va()` 是同一 resolver 的 nofault 包装，只接受当前已有且权限满足的 PTE，
+不会分配页面、触发 CoW 或等待缺页 I/O。
 
-该接口适合非阻塞 I/O 或分段 I/O 中预估当前可访问长度。
+## 5. 固定对象与字符串
 
-## 5. faulting 翻译
-
-`translate_user_va_checked_with_vm()` 是 faulting 翻译核心：
-
-```rust
-match access {
-    UserAccess::Read => fault_in_user_va_with_vm(vm, va, FaultAccess::Load),
-    UserAccess::Write => fault_in_user_va_with_vm(vm, va, FaultAccess::Store),
-    UserAccess::ReadWrite => {
-        fault_in_user_va_with_vm(vm, va, FaultAccess::Load)?;
-        fault_in_user_va_with_vm(vm, va, FaultAccess::Store)
-    }
-}
-```
-
-这意味着：
-
-| UserAccess | 缺页动作 |
-|------------|----------|
-| `Read` | 可触发 lazy alloc、文件读缺页、执行读权限检查 |
-| `Write` | 可触发 COW、shared write、匿名写缺页 |
-| `ReadWrite` | 先读后写，确保同一对象两种权限均可用 |
-
-## 6. 跨页 buffer 翻译
-
-`translate_user_buffer_checked()` 将用户 buffer 切成多个物理页切片：
+固定对象、数组和字符串最终都进入逐页 copy：
 
 ```text
-translate_user_buffer_checked(token, ptr, len, access)
-  ├── len <= MAX_BUFFER_SIZE
-  ├── len == 0 -> empty Vec
-  ├── ptr 非 null
-  ├── check_user_range()
-  ├── current_user_vm(token)
-  └── while start < end:
-        ├── translate_user_va_checked_with_vm()
-        ├── 计算当前页可覆盖范围
-        └── push ppn.get_bytes_array()[offset..end]
+检查范围并取得当前 AddressSpace Arc
+  -> 计算本页 chunk
+  -> 取得 VM 写锁
+       -> resolve 已有 PTE，必要时 fault-in
+       -> 权限与物理范围后验检查
+       -> direct-map raw copy
+  -> 释放 VM 锁
+  -> 在锁外完成可能的 TLB flush/ack
+  -> 下一页
 ```
 
-返回值是 `Vec<&'static mut [u8]>`。这些切片指向已经 fault-in 并通过权限检查的物理页。
+raw pointer 不会逃逸 closure，因此同一页上的 fork/CoW、`mprotect` 和 `munmap` 只能发生
+在该 chunk 复制之前或之后。跨页 copy 不提供事务原子性：后续页失效时，前面的页可能已经
+完成。
 
-这里的 `'static mut` 是尚待消除的历史接口，不是多核安全保证。翻译 helper 返回后已经释放
-VM 锁，另一 CPU 可以执行 fork/CoW、`mprotect` 或 `munmap`，使切片指向旧页或不再满足原
-权限；Rust 引用本身还携带独占性假设。因此调用方即使只在一次 syscall 内短期使用，也不能
-据此证明与并发地址空间修改安全。B57 只收口固定大小 copy；这些 buffer 接口属于 B58 范围。
+`translated_str()` 每页复制到 4 KiB 内核 scratch，释放 VM 锁后才扫描 NUL、扩容
+`String`。parser 永远只消费内核所有快照，不读取用户物理页 slice。
 
-跨页翻译还有一个重要语义：它会逐页 fault-in。前半部分已经成功翻译、后半部分遇到坏地址时，helper 返回错误；具体 syscall 需要决定是否允许部分完成。文件读写路径通过先探测关键地址和按 chunk 复制，尽量避免已经消费文件数据后才发现用户 buffer 后半段不可写。
+## 6. VA-backed UserBuffer
 
-## 7. 单页 fast path
-
-`UserBufferReader::new()` 和 `UserBufferWriter::new()` 优先尝试单页 fast path：
-
-```rust
-translate_single_page_user_bytes(token, ptr, len, UserAccess::Read)
-```
-
-如果 buffer 完全落在同一页且权限满足，就构造 `UserBuffer::single(slice)`；否则退回跨页 `translated_byte_buffer()`。
-
-这减少了常见小 read/write 的 `Vec` 分配。
-
-该 fast path 同样返回物理页切片，尚不具备 B57 固定大小 copy 的 VM 同步保证。不能把“单页”
-误解为“不会被并发重映射”。
-
-## 8. UserPtr 和 UserPtrMut
-
-`UserPtr<T>`：
-
-| 方法 | 行为 |
-|------|------|
-| `is_null()` | 判断空指针 |
-| `addr()` | 返回地址 |
-| `read(token)` | 空指针返回 `EFAULT`，否则读对象 |
-| `read_optional(token)` | 空指针返回 `Ok(None)` |
-
-`UserPtrMut<T>` 额外支持：
-
-| 方法 | 行为 |
-|------|------|
-| `write(token, value)` | 空指针返回 `EFAULT`，否则写对象 |
-| `write_optional(token, value)` | value 为 None 时允许不写 |
-
-这些类型用于 syscall 参数中结构体、长度、返回值指针等固定大小对象。
-
-## 9. 固定大小 copy 的 SMP 边界
-
-B57 删除了 `translated_ref<T>()`、`translated_refmut<T>()` 和
-`translated_ref_write<T>()`。旧接口先翻译用户 VA、释放 VM 锁，再返回可逃逸的 Rust 引用；
-“对象不跨页”只能解决表示问题，不能阻止另一 CPU 在引用使用前修改映射。
-
-现在 `copy_from_user()`、`copy_to_user()` 及其 array 版本统一经过 `copy_user_bytes()`：
+`UserBuffer` 只保存：
 
 ```text
-检查用户范围并取得当前 AddressSpace Arc
-  -> 按用户页计算 chunk
-  -> AddressSpace::write（取得 VM 锁）
-       -> fault_in_user_va（缺页 + 权限后验检查）
-       -> 取得 direct-map raw pointer
-       -> 在锁内立即复制当前 chunk
-  -> 解锁后执行本轮 MmuGather/TLB flush
-  -> 处理下一页
+token
+UserRanges
+  ├── Contiguous(UserRange { start_va, len })
+  └── Scatter(Vec<UserRange>)
+logical_len
+UserAccess
 ```
 
-这样同一页上的 fork/CoW、`mprotect`、`munmap` 与 copy 形成明确先后关系。raw pointer 不会
-跨 closure 泄漏，也不伪造 `&'static mut T` 的永久独占性。
+普通 read/write 使用一个 `Contiguous` 区间，不为小 I/O 分配逐页元数据；readv/writev
+按非空 iovec 保存一个逻辑 VA 区间。两种表示都不会保存 PA、frame、direct-map pointer
+或 Rust slice。
 
-跨页 copy 不承诺事务原子性：另一 CPU 可以在两个 chunk 之间修改后续页；若后续 fault 或
-权限检查失败，helper 返回 `EFAULT`，前面页的字节可能已经完成复制。调用方不得把
-`Result::Err` 理解为“一个字节都没动”。
+构造过程会预 fault 整个描述区间，用于保持既有 ABI 的“先验证用户输出，再执行外部
+副作用”排序，但这不是 pin。另一 CPU 可在构造后立即改变映射，所以每次 `read_into()`、
+`write_from()`、`fill_at()` 或 `clear()` 仍逐页重新获取 VM 锁并解析当前 PTE。
 
-## 10. translated_str 的 SMP 边界
+## 7. partial 与 exact 语义
 
-`translated_str(token, ptr)` 从用户空间读取 NUL 结尾字符串：
+流式接口返回 `Result<usize, isize>`：
 
-1. 从 `ptr` 开始逐页进入 `copy_user_bytes()`。
-2. 在 VM 锁内 fault-in、做权限后验并复制到 4 KiB 内核 scratch。
-3. 释放 VM 锁后扫描 NUL、执行 ASCII 快路径或按字节追加，不把堆分配带入锁内。
-4. 长度达到 `MAX_BUFFER_SIZE`、地址递增溢出或后续页失效时返回 `EFAULT`。
+| 情况 | 返回 |
+|------|------|
+| 第一个字节前即失败 | `Err(errno)` |
+| 已复制一段前缀后，后续页失败 | `Ok(copied_prefix)` |
+| 全部完成 | `Ok(requested_len)` |
 
-这条路径不再返回或消费锁外物理页 slice。每页 scratch 会在下一页前覆盖，
-字符串结果始终由内核 `String` 所有。
+主要 partial 接口包括：
 
-该函数用于路径名、exec 参数、环境变量、socket 选项中字符串等。
+- `read_into()` / `read_into_at()`；
+- `write_from()` / `write_from_at()`；
+- `fill_at()` / `clear()`。
 
-## 11. UserIoVec
+文件、pipe、socket 和 PageCache 必须用实际复制字节数推进 offset、有效范围或返回值，
+不能把请求长度当成已经完成的长度。
 
-`UserIoVec::read_user_iovecs(token, iov, iovcnt, total_cap)`：
+固定格式对象不接受部分成功：
+
+- `UserBufferReader::read_exact()`；
+- `UserBufferWriter::write_all()`。
+
+这两个 wrapper 只有在复制长度等于请求长度时才返回成功，否则返回 `EFAULT`。选择 partial
+还是 exact 由 syscall ABI 决定，不能在底层统一抹平。
+
+## 8. UserIoVec
+
+`UserIoVec::read_user_iovecs()` 先用 fixed-copy 读取用户 iovec 数组，检查计数、长度溢出和
+总长度，然后保留描述符的内核副本。
+
+构造 reader/writer buffer 时：
+
+1. 按 `total_cap` 截断逻辑总长；
+2. 每个非空 iovec 形成一个 `UserRange`；
+3. 对每个范围做构造期预 fault；
+4. 实际 scatter copy 再按逻辑 offset 逐页校验当前映射。
+
+因此 iovec 边界与页边界是两个不同层次：前者定义用户可见的逻辑序列，后者只影响实际
+copy 的锁粒度。
+
+## 9. nofault 锁内例外
+
+普通规则是“释放业务锁，再做 faultable uaccess”。pipe 的 ring buffer 当前由
+`spin::Mutex` 保护，复制期间必须保持 head/tail 与数据一致，又不能在该自旋锁内进入可能
+等待的 fault handler。B59 为此保留两个 crate-private 入口：
+
+- `read_into_at_nofault()`；
+- `write_from_at_nofault()`。
+
+pipe 在锁外构造 `UserBuffer` 并预 fault；进入 ring 锁后，nofault copy 只调用
+`resolve_user_va()` 检查现有 PTE。若并发 `munmap/mprotect` 改变了映射，复制立即按 partial
+规则返回，而不是在自旋锁内 fault、分配或等待。
+
+nofault 不是普通 I/O 的优化开关。新增调用点必须同时证明：
+
+1. 锁外已经完成必要的 fault-in；
+2. 锁内状态不能拆成“复制到内核临时 buffer—解锁—用户 copy”；
+3. PTE 变化时允许立即失败或部分完成；
+4. 入口保持 crate-private，不向任意业务代码扩散。
+
+## 10. 锁序与副作用
+
+常规调用顺序为：
 
 ```text
-read_user_iovecs()
-  ├── iovcnt <= MAX_IOVEC_COUNT
-  ├── Vec<IOVec>::try_reserve(iovcnt)
-  ├── copy_from_user_array()
-  ├── 计算 total_len
-  └── 保存 token/iovecs/total_len/total_cap
+克隆稳定的 file/socket/task owner
+  -> 释放 fd table、task.inner、file-private/socket 等普通锁
+  -> faultable user copy
+  -> 再进入业务操作或发布结果
 ```
 
-后续可构造：
+需要同时满足以下规则：
 
-| 方法 | 用途 |
-|------|------|
-| `reader_buffer()` | 将所有 iovec 翻译为读 buffer |
-| `writer_buffer()` | 将所有 iovec 翻译为写 buffer |
-| `reader_buffer_at(offset, len)` | 从逻辑偏移构造读 buffer |
-| `writer_buffer_at(offset, len)` | 从逻辑偏移构造写 buffer |
-| `accessible_len_at(offset, len, access)` | 非 faulting 探测指定逻辑范围 |
+- 不跨 WaitQueue、磁盘 I/O、socket poll 或远端 TLB ack 保存用户页翻译结果；
+- 需要解析的变长对象先复制成内核快照；
+- stateful 操作若先推进 offset，后续 exact copy 失败时必须回滚，或改为先复制到内核；
+- 预 fault 只服务副作用排序，不能作为后续不再校验的理由；
+- SysV IPC 等 registry 调用链仍需单独审计是否跨普通锁进入 faultable uaccess。
 
-`total_cap` 用于限制本次实际构造的 buffer 长度，例如 readv/writev 与 socket I/O 的分段处理。
+## 11. 非 faulting 探测
 
-## 12. UserBuffer
+`user_accessible_len()` 只遍历现有 PTE，返回从起点开始连续满足权限的字节数。它不会：
 
-`UserBuffer` 支持 Empty、Single 和 Multi 三种内部表示。它提供：
+- 分配 lazy page；
+- 触发文件 mmap 读页；
+- 处理 CoW；
+- 扩展 `MAP_GROWSDOWN`；
+- 修改 PTE 或刷新 TLB。
 
-| 方法 | 语义 |
-|------|------|
-| `len()` | 逻辑总长度 |
-| `read(dst)` | 从用户 buffer 读到内核 dst |
-| `write(src)` | 从内核 src 写到用户 buffer |
-| `read_at/write_at` | 从逻辑偏移开始拷贝 |
-| `clear/fill_at` | 清零或填充逻辑区间 |
+该接口适合非阻塞/分段 I/O 的可访问前缀估算，但结果同样是瞬时快照，实际 copy 仍需重验。
 
-跨页时，逻辑连续 buffer 被拆成多段物理页切片；read/write 会按顺序复制。
-旧 Index/IndexMut/IntoIterator 实现没有生产调用方，B58 已删除，避免继续扩大可逃逸视图的 API 面。
+## 12. 审查清单
 
-这仍是未完成的 SMP 边界：`UserBuffer` 构造完成后 VM 锁已释放，所以 FS/网络层的
-后续 read/write 仍可与并发 CoW、mprotect 或 munmap 竞争。B58 只把其他原始绕过路径
-收回这一个核心；下一节点需改为 VA-backed 区间，并让实际 read/write 逐页在 VM 锁内完成。
-
-## 13. 与 syscall 层的配合
-
-典型使用方式：
-
-| syscall 场景 | uaccess 接口 |
-|--------------|--------------|
-| `read(fd, buf, count)` | `UserBufferWriter` 或 `translated_byte_buffer(..., Write)` |
-| `write(fd, buf, count)` | `UserBufferReader` 或 `translated_byte_buffer(..., Read)` |
-| `openat(path)` | `UserCString::read()` |
-| `statx(buf)` | `UserPtrMut<T>::write()` |
-| `readv/writev` | `UserIoVec` |
-| `nanosleep(rem)` | `UserPtrMut<T>::write_optional()` |
-
-syscall 层不应直接把用户地址 cast 成内核引用。进入 faultable copy 前还应释放 fd table、
-task inner、file-private 等普通锁；`ioctl` 的固定对象路径已经遵循这一边界。该要求是调用方
-锁序约束，不由 `copy_user_bytes()` 自动保证；SysV IPC 等既有路径仍需在后续共享子系统审计
-中逐项核对。
-
-## 14. 错误码边界
-
-| 场景 | 错误 |
-|------|------|
-| 用户对象指针为 null | `EFAULT` |
-| optional 指针为 null 且无写入值 | 成功 |
-| buffer 超过 8 MiB | `EFAULT` |
-| iovcnt 超过 1024 | `EINVAL` |
-| iovec 总长溢出 | `EINVAL` |
-| token 不是当前任务 token | `EFAULT` |
-| fault-in 后权限不满足 | `EFAULT` |
-| 跨页 copy 的后续页失效 | `EFAULT`，此前 chunk 可能已经完成 |
-
-## 15. 调试核对点
-
-| 现象 | 检查 |
-|------|------|
-| read 写用户 buffer 返回 EFAULT | 传入 access 是否应为 `Write` |
-| write 读取用户 buffer 触发 COW | 用户 buffer 所在页是否私有可写且被错误当成 write access |
-| readv/writev 处理过长 iovec | `MAX_IOVEC_COUNT` 与 `total_cap` |
-| 路径读取卡住或越界 | `translated_str` 的 NUL 和 8 MiB 上限 |
-| 非阻塞路径意外分配页 | 是否错误使用 faulting 翻译而非 `user_accessible_len()` |
-| 多核 fork/unmap 与标量 copy 竞态 | 检查实际复制是否仍位于同一次 `AddressSpace::write` closure |
+- [ ] 用户地址只由 uaccess helper 访问，没有直接解引用；
+- [ ] helper 不返回 PA、direct-map pointer 或用户页 Rust 引用；
+- [ ] partial 调用方按实际字节数更新状态；
+- [ ] fixed ABI 使用 exact helper；
+- [ ] faultable copy 前已释放普通业务锁；
+- [ ] 必须锁内复制的路径使用受限 nofault helper，并接受映射变化失败；
+- [ ] 预 fault 后的实际 copy 仍重新验证；
+- [ ] PTE 修改产生的 flush/ack 位于 VM 锁外。

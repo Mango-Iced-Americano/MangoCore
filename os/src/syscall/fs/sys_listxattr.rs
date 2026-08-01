@@ -28,8 +28,8 @@ pub fn sys_listxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
                 Ok(w) => w,
                 Err(e) => return e,
             };
-            match writer.write_from(&kernel_buf[..len]) {
-                Ok(_) => len as isize,
+            match writer.write_all(&kernel_buf[..len]) {
+                Ok(()) => len as isize,
                 Err(e) => e,
             }
         }

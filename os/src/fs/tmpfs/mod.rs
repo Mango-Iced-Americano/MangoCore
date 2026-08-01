@@ -403,8 +403,15 @@ impl IndexNode for LockedTmpFSInode {
         let pc = pc.clone();
         drop(inode);
         // Pre-fill with zeros so holes return zero
-        dst.fill_at(0, read_len, 0);
-        pc.read_user(offset, read_len, dst)
+        let zeroed = dst
+            .fill_at(0, read_len, 0)
+            .map_err(|_| SyscallErr::EFAULT)?;
+        if zeroed == 0 {
+            return Ok(0);
+        }
+        // hole 先置零、已有页再覆盖。若并发映射变化只允许复制前缀，仍必须让
+        // page cache 覆盖该前缀中的真实文件数据，不能把临时零值当作读取结果。
+        pc.read_user(offset, zeroed, dst)
     }
 
     fn write_at(
@@ -461,6 +468,23 @@ impl IndexNode for LockedTmpFSInode {
             return Ok(0);
         }
 
+        // 保留 EISDIR 在用户数据复制之前的错误优先级；file type 在 inode 生命周期内不变。
+        if self.0.lock().metadata.file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
+        }
+
+        // 用户页复制必须发生在 inode 锁外：缺页处理可能进入文件系统，反向获取
+        // inode 锁会形成 VM -> FS / FS -> VM 环。tmpfs 用一次 kernel bounce 保持
+        // truncate/resize 的原有串行区间不变。
+        let copy_len = len.min(src.len());
+        let mut kbuf = Vec::new();
+        kbuf.try_reserve(copy_len).map_err(|_| SyscallErr::ENOMEM)?;
+        kbuf.resize(copy_len, 0);
+        let copied = src.read_into(&mut kbuf).map_err(|_| SyscallErr::EFAULT)?;
+        if copied == 0 {
+            return Ok(0);
+        }
+
         let mut inode: MutexGuard<TmpFSInode> = self.0.lock();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
@@ -469,17 +493,18 @@ impl IndexNode for LockedTmpFSInode {
         let pc = inode.page_cache.as_ref().ok_or(SyscallErr::EIO)?;
         let pc = pc.clone();
 
-        let new_size = offset.checked_add(len).ok_or(SyscallErr::EINVAL)?;
+        let requested_end = offset.checked_add(copied).ok_or(SyscallErr::EINVAL)?;
 
         // 检查空间配额
-        if new_size > inode.file_size {
-            let delta = (new_size - inode.file_size) as u64;
+        if requested_end > inode.file_size {
+            let delta = (requested_end - inode.file_size) as u64;
             let fs = inode.fs.upgrade().ok_or(SyscallErr::EIO)?;
             fs.check_space(delta)?;
         }
 
-        // Hold inode lock through write + size update to avoid race with truncate/resize
-        let n = pc.write_user(offset, len, src, None)?;
+        // inode 锁仍覆盖数据写入和 size 更新，保持与 truncate/resize 的串行语义。
+        let n = pc.write(offset, &kbuf[..copied], Some(inode.file_size))?;
+        let new_size = offset.checked_add(n).ok_or(SyscallErr::EINVAL)?;
 
         // 更新文件大小
         if new_size > inode.file_size {

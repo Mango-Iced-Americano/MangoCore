@@ -133,9 +133,8 @@ panic 中“读取统计”同样可能隐藏阻塞锁。B56 将 allocator 诊�
 - `sys_ioctl()` 先从 fd table 克隆 file `Arc`，再释放 table；块设备 ioctl 也在 uaccess 前
   释放不参与操作的 file-private guard。
 
-该约束尚未覆盖 `UserBuffer` 和 `translated_byte_buffer()`；它们的可逃逸物理页视图
-必须在后续节点单独重构。B57 只迁移了本次删除 API 的 ioctl 调用点，
-SysV IPC 等既有 fixed-copy 调用链是否跨 registry 锁仍须在 B58/共享子系统审计中逐项处理；
+该约束在 B59 已扩展到 `UserBuffer` 和 iovec，但 B57 只迁移了当时删除 API 的 ioctl 调用点。
+SysV IPC 等既有 fixed-copy 调用链是否跨 registry 锁仍须在后续 task/process 审计中逐项处理；
 不能把 helper 内部映射安全外推为所有调用方锁序均已合格。
 
 #### B58 用户页视图绕过路径收口
@@ -152,8 +151,34 @@ B58 不再让字符串和 sockaddr 解析器消费锁外物理页 slice：
 - 阻塞 recv 在等待期间只保存内核 buffer，唤醒后再 copy-to-user，不得跨
   WaitQueue 保存用户页视图。
 
-旧 `UserBuffer` 仍在构造时 fault-in，然后在 FS/网络层无 VM 锁访问物理页；B58 只先将
-所有绕过路径收回该单一核心，不宣称整个 buffer I/O 已完成 SMP 收口。
+旧 `UserBuffer` 在构造时 fault-in、随后锁外访问物理页的剩余边界已由 B59 取代。
+
+#### B59 VA-backed UserBuffer 边界
+
+B59 删除 `translated_byte_buffer()`、`translate_user_buffer_checked()` 和物理页 slice 表示。
+`UserBuffer` 只保存 token、访问方向与连续/scatter 用户 VA 区间，实际传输固定按以下顺序：
+
+```text
+锁外预 fault（只服务 ABI 排序）
+  -> 每页取得 AddressSpace VM 锁
+       -> resolve 当前 PTE，必要时 fault-in
+       -> 权限后验检查 + direct-map raw copy
+  -> 释放 VM 锁
+  -> 下一页或锁外 TLB flush/ack
+```
+
+- FS/网络等普通路径必须先释放 inode/socket/file-private 锁，再进入 faultable copy；
+- tmpfs 写入先在锁外复制到内核 bounce buffer，再取得 inode 锁；
+- TCP 接收先在 socket 锁内写入内核 buffer，释放锁后才 copy-to-user；
+- 流式接口首字节失败返回 errno，已有进度返回完成前缀；固定结构使用 exact helper；
+- pipe ring 当前使用 `spin::Mutex`，不能在其内进入 fault handler。它只允许调用
+  crate-private nofault helper：构造时已在锁外 fault-in，锁内只解析已有 PTE；并发
+  `munmap/mprotect` 导致映射变化时立即部分完成或 `EFAULT`，不得持锁等待；
+- `fault_in_user_va()` 必须先解析已经满足权限的 PTE，避免正常 copy 重复进入
+  CoW/SharedWrite 并提交无效 TLB 刷新。
+
+B59 只适配完成重构所必需的 FS/Net 调用点，不代表这些共享子系统已通过完整 SMP 并发审计。
+Driver 未在本批改动；其余 FS/Net/Driver 审计由对应负责人后续完成。
 
 ### 3.3 B18 Per-CPU RunQueue 约束
 

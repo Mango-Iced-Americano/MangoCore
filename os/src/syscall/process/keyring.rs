@@ -362,7 +362,7 @@ fn write_key_bytes(buf: usize, buflen: usize, data: &[u8]) -> Result<isize, isiz
     let copy_len = buflen.min(data.len());
     if copy_len != 0 {
         let mut writer = UserBufferWriter::new(current_user_token(), buf as *mut u8, copy_len)?;
-        writer.write_from(&data[..copy_len])?;
+        writer.write_all(&data[..copy_len])?;
     }
     Ok(data.len() as isize)
 }

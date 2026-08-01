@@ -193,7 +193,7 @@ sys_sendto 入口
   ├─ PSOCK::Stream → try_send (无需目标地址)
   ├─ PSOCK::Raw → try_sendmsg (同 Datagram)
   └─ 阻塞路径: copy_from_user_array() → kernel_buf → WaitQueue
-     非阻塞 fast path: UserBufferReader → try_send_user/try_sendmsg_user
+     非阻塞 fast path: VA-backed UserBufferReader → try_send_user/try_sendmsg_user
 ```
 
 关键细节：
@@ -201,7 +201,7 @@ sys_sendto 入口
 - **地址快照**：Datagram/Raw 的 `dest_addr` 先通过 `read_sockaddr()` 复制到内核，
   再解析 `Endpoint`；不再存在伪造跨页连续 slice 的宏。
 - **数据寿命**：阻塞路径使用内核中转 buffer，不跨 WaitQueue 保存用户页视图；
-  非阻塞 fast path 仍经由旧 `UserBuffer`，属于下一个 SMP uaccess 节点。
+  非阻塞 fast path 的 `UserBuffer` 只保存 VA 区间，实际 send 逐页在 VM 锁内重验。
 - **自动绑定**：对于未绑定的 DGRAM socket，在发送前自动绑定 `0.0.0.0:0`。
 - **长度上限**：单次 sendto 最大 64MB，防止整数溢出和内核内存耗尽。
 
@@ -540,7 +540,9 @@ copy_to_user_array(token, kernel_buf.as_ptr(), buf as *mut u8, result)?;
 ```
 
 这种模式让业务锁或 WaitQueue 只持有内核所有数据，真正用户拷贝仍逐页在
-VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；跨页不连续性不再由宏隐藏。
+VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；B59 又删除锁外物理页 slice，
+连续与 scatter buffer 只保存用户 VA 区间。TCP recv 在 socket 锁内只写内核 buffer，
+释放 socket 锁后才 copy-to-user。
 
 ---
 

@@ -41,7 +41,7 @@ impl IndexNode for Zero {
         len: usize,
         dst: &mut crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        let n = dst.fill_at(0, len, 0);
+        let n = dst.fill_at(0, len, 0).map_err(|_| SyscallErr::EFAULT)?;
         Ok(n)
     }
 

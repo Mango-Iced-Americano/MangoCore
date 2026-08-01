@@ -79,6 +79,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP 真实用户访存 stale-TLB 证明 | 2026-08-01 | GPT/Codex, DeepSeek | 用户汇编 victim、真实 CoW PPN 替换、handler observed/ack 时序与假阳性排除 | 双架构 8 核 KREPEAT=2 均 67/67；精准 handler 在 ack 前推进 generation，不再由 trap-return 偶然全刷掩盖 |
 | SMP fixed-size uaccess 映射同步 | 2026-08-01 | GPT/Codex, DeepSeek | Rust alias 规则、Linux uaccess/pinning 语义、translate/use 竞态和锁序审查 | 删除 `translated_ref*`；标量/数组 copy 在逐页 VM 锁内完成，双架构 focused 34/34，初赛失败集合不变 |
 | SMP uaccess 原始视图绕过路径收口 | 2026-08-01 | GPT/Codex, DeepSeek | UserBuffer 调用面审计、Linux `getrandom` 部分返回对照、双架构 8 核初赛门禁 | 删除 `trans_ref!`/`trans_refmut!`；字符串、sockaddr 与若干 ABI 路径改为内核快照/VM 锁内 copy，初赛保持 RV64 312/314、LA64 308/314 |
+| SMP VA-backed UserBuffer | 2026-08-01 | GPT/Codex, DeepSeek | Linux iov_iter/pipe 对照、调用点与 partial 语义审查、双架构 8 核初赛门禁 | 删除锁外物理页 slice；连续/scatter buffer 只保存 VA，实际 copy 重验 PTE，初赛保持 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -1142,6 +1143,32 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   kernel build，exit 0、无 mutation、panic、fatal 或 timeout。普通 `UserBuffer` 还未改为
   VA-backed，因此 FS/网络直连 buffer 的定向并发竞态明确为 NOT RUN/未验收。
 
+### Case 48: SMP VA-backed UserBuffer
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b59-va-userbuffer-summary.md`；DeepSeek 调用面审查、
+  runner manifest 与 Docker/QEMU 原始日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责数据模型、partial/exact ABI、锁序和 resolve-first 性能边界，
+  并对照 Linux `iov_iter`/`uio`/pipe 实现；DeepSeek 只读复核调用点，串行执行最终源码的
+  双架构 8 核 preliminary，并汇总原始 judge 结果。
+- Problem: 旧 `UserBuffer` 在构造时把用户 VA 翻译为 PA-backed
+  `&'static mut [u8]`，释放 VM 锁后由 FS/Net 使用。并发 CoW、`mprotect` 或 `munmap`
+  可使该 slice 指向旧页或不再满足权限；逐页 slice 还让连续 fast path 和 iovec 表示复杂化。
+- Implemented change: 连续 buffer 只保存一个 VA range，scatter buffer 每个非空 iovec
+  保存一个 range；实际传输逐页取得 VM 锁并重验 PTE。流式接口返回完成前缀，固定格式使用
+  exact wrapper；PageCache/offset 只按实际字节推进。pipe 在 ring 自旋锁内使用受限 nofault
+  copy，TCP recv 与 tmpfs 写入则先建立内核所有 buffer、释放业务锁后再进入 faultable copy。
+  `fault_in_user_va()` 增加 resolve-first，避免已满足权限的 PTE 重复进入 CoW/SharedWrite。
+- AI adjudication: 纠正 DeepSeek 审查中对部分调用方向和外层 trait 的事实误判；首次冻结构建
+  因实现仍在变化而作废，不作为 PASS 证据。格式化工具产生的整文件噪声通过“格式化 clean
+  HEAD—反向应用纯格式 patch—与完整格式化快照零差异”机械剥离，保留语义修改。最终报告
+  对既有 `kill 10`/`test_brk` 原因的猜测没有日志证明，只采纳失败集合与 B58 精确一致。
+- Verification: 最终受测源码 tracked diff SHA-256 为
+  `cd4e4520895a7292b715689e6585f2d968b456bac99390bbef5037a4b565f1b3`；RV64/LA64
+  `CORE_NUM=8 mask=0x003` 分别为 312/314 与 308/314，两个 recipe 均包含最终源码编译，
+  exit 0、无 mutation、panic、fatal 或 timeout。并发 fork/unmap 与活跃 copy 的定向动态
+  竞态为 NOT RUN；当前证据由 VM 锁域静态证明与覆盖主要调用点的初赛回归共同组成。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1232,6 +1259,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b56-panic-diagnostics-summary.md` | SMP panic 诊断传递锁收口 | 记录 allocator `try_*` 降级、逐 CPU 原子/active-MM 快照、模型建议裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b57-uaccess-copy-summary.md` | SMP fixed-size uaccess 映射同步 | 记录 translate/use 竞态、VM 锁内 raw copy、危险引用删除、模型初赛误报纠正及双架构 8 核门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b58-uaccess-bypass-summary.md` | SMP uaccess 原始视图绕过路径收口 | 记录字符串/sockaddr 内核快照、预 fault 边界、模型建议纠错及双架构 8 核初赛门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b59-va-userbuffer-summary.md` | SMP VA-backed UserBuffer | 记录物理 slice 删除、partial/exact、pipe nofault、resolve-first 与双架构 8 核初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

@@ -156,6 +156,7 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         return ret;
     }
     let nbytes = ret as usize;
+    let mut delivered = nbytes;
 
     let copy_len = nbytes.min(buf.len());
     if copy_len > 0 {
@@ -163,7 +164,11 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             Ok(buffer) => buffer,
             Err(errno) => return errno,
         };
-        write_buf.write(&buf[..copy_len]);
+        delivered = match write_buf.write_from(&buf[..copy_len]) {
+            Ok(copied) if copied == copy_len => nbytes,
+            Ok(copied) => copied,
+            Err(errno) => return errno,
+        };
     }
 
     let truncated = nbytes > buf.len();
@@ -194,5 +199,5 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         return -(SyscallErr::EFAULT as isize);
     }
 
-    nbytes as isize
+    delivered as isize
 }

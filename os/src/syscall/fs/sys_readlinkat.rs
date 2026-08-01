@@ -57,7 +57,7 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
             Ok(w) => w,
             Err(_) => return EFAULT,
         };
-        if writer.write_from(target.as_bytes()).is_err() {
+        if writer.write_all(&target.as_bytes()[..len]).is_err() {
             return EFAULT;
         }
         return len as isize;
@@ -133,7 +133,7 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         Ok(writer) => writer,
         Err(_) => return EFAULT,
     };
-    if user_buf.write_from(&bytes[..len]).is_err() {
+    if user_buf.write_all(&bytes[..len]).is_err() {
         log::error!("[sys_readlinkat] Failed to copy to {:?}", buf);
         return EFAULT;
     }

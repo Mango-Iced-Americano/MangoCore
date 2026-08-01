@@ -13,14 +13,14 @@
 //!
 //! fault-in 会获取当前进程 `AddressSpaceInner` 锁。调用方不得在已持有同一锁时进入
 //! 本模块的 faulting uaccess 路径。
-//! 标量、数组和字符串 copy 在每个用户页的 VM 锁内完成权限检查与实际
-//! 访问，避免 PTE 翻译完成后被另一 CPU 并发 unmap、降权或 CoW。旧 `UserBuffer`
-//! 尚未提供同等保证，调用方不得把其中的物理页切片长期保存或跨地址空间变更使用。
+//! 标量、数组、字符串和 `UserBuffer` copy 都在每个用户页的 VM 锁内完成权限
+//! 检查与实际访问，避免 PTE 翻译完成后被另一 CPU 并发 unmap、降权或 CoW。
+//! `UserBuffer` 只保存虚拟地址区间，不保存物理页、direct-map 指针或 Rust slice。
 
 use core::marker::PhantomData;
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
-use super::{AddressSpace, PhysAddr, StepByOne, VirtAddr};
+use super::{AddressSpace, VirtAddr};
 use crate::fs::iov::IOVec;
 use crate::hal::PageTableImpl;
 use crate::task::current_task;
@@ -300,11 +300,7 @@ impl UserBufferReader {
     ///
     /// 用户地址非法、超出上限或缺页处理失败时返回负 errno。
     pub fn new(token: usize, ptr: *const u8, len: usize) -> Result<Self, isize> {
-        // Try single-page fast path first; fall back to Vec of page slices
-        let buffer = match translate_single_page_user_bytes(token, ptr, len, UserAccess::Read)? {
-            Some(slice) => UserBuffer::single(slice),
-            None => UserBuffer::new(translated_byte_buffer(token, ptr, len, UserAccess::Read)?),
-        };
+        let buffer = UserBuffer::from_range(token, ptr as usize, len, UserAccess::Read)?;
         Ok(Self { buffer })
     }
 
@@ -319,17 +315,29 @@ impl UserBufferReader {
         let mut dst = Vec::new();
         dst.try_reserve(self.buffer.len())
             .map_err(|_| crate::syscall::errno::ENOMEM)?;
-        // Safety: `try_reserve` has reserved `buffer.len()` bytes and `u8` has
-        // no drop glue. `UserBuffer::read` below initializes the whole slice.
-        unsafe {
-            dst.set_len(self.buffer.len());
+        // 先初始化为 0，避免并发映射变化导致部分 copy 时留下未初始化尾部。
+        dst.resize(self.buffer.len(), 0);
+        let copied = self.buffer.read_into(&mut dst)?;
+        if copied != self.buffer.len() {
+            return Err(crate::syscall::errno::EFAULT);
         }
-        self.buffer.read(&mut dst);
         Ok(dst)
     }
 
     pub fn read_into(&self, dst: &mut [u8]) -> Result<usize, isize> {
-        Ok(self.buffer.read(dst))
+        self.buffer.read_into(dst)
+    }
+
+    /// 完整读取固定格式对象；部分完成对这类调用仍属于 `EFAULT`。
+    pub fn read_exact(&self, dst: &mut [u8]) -> Result<(), isize> {
+        if dst.len() > self.buffer.len() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        if self.buffer.read_into(dst)? == dst.len() {
+            Ok(())
+        } else {
+            Err(crate::syscall::errno::EFAULT)
+        }
     }
 }
 
@@ -344,20 +352,7 @@ impl UserBufferWriter {
     ///
     /// 用户地址非法、超出上限或缺页处理失败时返回负 errno。
     pub fn new(token: usize, ptr: *mut u8, len: usize) -> Result<Self, isize> {
-        let buffer = match translate_single_page_user_bytes(
-            token,
-            ptr as *const u8,
-            len,
-            UserAccess::Write,
-        )? {
-            Some(slice) => UserBuffer::single(slice),
-            None => UserBuffer::new(translated_byte_buffer(
-                token,
-                ptr as *const u8,
-                len,
-                UserAccess::Write,
-            )?),
-        };
+        let buffer = UserBuffer::from_range(token, ptr as usize, len, UserAccess::Write)?;
         Ok(Self { buffer })
     }
 
@@ -366,7 +361,19 @@ impl UserBufferWriter {
     }
 
     pub fn write_from(&mut self, src: &[u8]) -> Result<usize, isize> {
-        Ok(self.buffer.write(src))
+        self.buffer.write_from(src)
+    }
+
+    /// 完整写回固定格式对象；不会把部分 copy 伪装成全量成功。
+    pub fn write_all(&mut self, src: &[u8]) -> Result<(), isize> {
+        if src.len() > self.buffer.len() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        if self.buffer.write_from(src)? == src.len() {
+            Ok(())
+        } else {
+            Err(crate::syscall::errno::EFAULT)
+        }
     }
 }
 
@@ -436,7 +443,10 @@ impl UserIoVec {
     }
 
     fn build_user_buffer(&self, access: UserAccess) -> Result<UserBuffer, isize> {
-        let mut buffers = Vec::with_capacity(32);
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve(self.iovecs.len())
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
         let mut total_len = 0usize;
         for iovec in self.iovecs.iter() {
             if total_len >= self.total_cap {
@@ -446,16 +456,15 @@ impl UserIoVec {
             if iov_len == 0 {
                 continue;
             }
-            translated_byte_buffer_append_to_existing_vec(
-                &mut buffers,
-                self.token,
-                iovec.iov_base,
-                iov_len,
-                access,
-            )?;
+            let start = iovec.iov_base as usize;
+            check_user_range(start, iov_len)?;
+            ranges.push(UserRange {
+                start,
+                len: iov_len,
+            });
             total_len += iov_len;
         }
-        Ok(UserBuffer::new(buffers))
+        UserBuffer::from_ranges(self.token, ranges, total_len, access)
     }
 
     /// Return how many logical bytes starting at `offset` are accessible in user memory.
@@ -521,8 +530,11 @@ impl UserIoVec {
         len: usize,
         access: UserAccess,
     ) -> Result<UserBuffer, isize> {
-        let mut buffers = Vec::with_capacity(32);
-        let mut remaining = len;
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve(self.iovecs.len())
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        let mut remaining = len.min(self.capped_len().saturating_sub(offset));
         let mut logical_off = 0usize;
         for iovec in self.iovecs.iter() {
             let iov_end = match logical_off.checked_add(iovec.iov_len) {
@@ -540,24 +552,19 @@ impl UserIoVec {
                 continue;
             }
             let base = iovec.iov_base as usize;
-            let ptr = match base.checked_add(inner_off) {
-                Some(v) => v,
-                None => break,
-            };
-            translated_byte_buffer_append_to_existing_vec(
-                &mut buffers,
-                self.token,
-                ptr as *const u8,
-                take,
-                access,
-            )?;
+            let start = base
+                .checked_add(inner_off)
+                .ok_or(crate::syscall::errno::EFAULT)?;
+            check_user_range(start, take)?;
+            ranges.push(UserRange { start, len: take });
             logical_off = iov_end;
             remaining = remaining.saturating_sub(take);
             if remaining == 0 {
                 break;
             }
         }
-        Ok(UserBuffer::new(buffers))
+        let total_len = len.min(self.capped_len().saturating_sub(offset)) - remaining;
+        UserBuffer::from_ranges(self.token, ranges, total_len, access)
     }
 }
 
@@ -597,19 +604,28 @@ fn current_user_vm(token: usize) -> Result<Arc<AddressSpace<PageTableImpl>>, isi
 
 /// 用户内存复制方向。
 ///
-/// 枚举中只保存 kernel raw pointer；用户物理地址必须在持有 VM 锁时重新 fault-in
-/// 并取得，不能跨越 closure 泄漏。
+/// 枚举中只保存 kernel raw pointer；用户物理地址必须在持有 VM 锁时重新解析，
+/// 不能跨越 closure 泄漏。
 #[derive(Clone, Copy)]
 enum UserCopy {
     FromUser { dst: *mut u8 },
     ToUser { src: *const u8 },
+    FillUser { value: u8 },
+}
+
+#[derive(Clone, Copy)]
+enum UserCopyMode {
+    /// 普通路径允许按需调入页面或处理 CoW。
+    FaultIn,
+    /// 不可睡眠锁内只接受仍然有效的 PTE，不进入 fault handler。
+    NoFault,
 }
 
 impl UserCopy {
     fn fault_access(self) -> FaultAccess {
         match self {
             Self::FromUser { .. } => FaultAccess::Load,
-            Self::ToUser { .. } => FaultAccess::Store,
+            Self::ToUser { .. } | Self::FillUser { .. } => FaultAccess::Store,
         }
     }
 
@@ -617,161 +633,108 @@ impl UserCopy {
     ///
     /// # Safety
     ///
-    /// `user_ptr` 必须来自当前 closure 内 `fault_in_user_va()` 返回的 PA；枚举中的
+    /// `user_ptr` 必须来自当前 closure 内 uaccess 校验返回的 PA；枚举中的
     /// kernel pointer 必须对 `[offset, offset + len)` 保持有效。
     unsafe fn copy_chunk(self, user_ptr: *mut u8, offset: usize, len: usize) {
         match self {
             Self::FromUser { dst } => core::ptr::copy(user_ptr, dst.add(offset), len),
             Self::ToUser { src } => core::ptr::copy(src.add(offset), user_ptr, len),
+            Self::FillUser { value } => core::ptr::write_bytes(user_ptr, value, len),
         }
     }
 }
 
-/// 逐页执行 fault、权限后验检查和复制。
+struct UserCopyFault {
+    copied: usize,
+    errno: isize,
+}
+
+/// 逐页执行地址解析、权限后验检查和复制。
 ///
 /// 每个 chunk 的 direct-map 访问都发生在对应 `AddressSpace::write` closure 内，
 /// 因而同一页上的 fork/CoW、mprotect 和 munmap 只能发生在复制之前或之后。跨页
-/// 复制允许并发地址空间修改插入；若后续页失效，调用方收到 `EFAULT`，前页可能已经
-/// 完成复制，这与 faultable uaccess 的部分完成语义一致。
+/// 复制允许并发地址空间修改插入；若后续页失效，精确复制返回 `EFAULT`，流式复制则
+/// 返回已经完成的前缀，这与 faultable uaccess 的部分完成语义一致。
 fn copy_user_bytes(
     token: usize,
     user_addr: usize,
     len: usize,
     direction: UserCopy,
 ) -> Result<(), isize> {
+    match copy_user_bytes_progress(token, user_addr, len, direction, UserCopyMode::FaultIn) {
+        Ok(copied) if copied == len => Ok(()),
+        Ok(_) => Err(crate::syscall::errno::EFAULT),
+        Err(error) => Err(error.errno),
+    }
+}
+
+/// 与 `copy_user_bytes()` 使用同一锁域，但保留失败前已经完成的字节数。
+fn copy_user_bytes_progress(
+    token: usize,
+    user_addr: usize,
+    len: usize,
+    direction: UserCopy,
+    mode: UserCopyMode,
+) -> Result<usize, UserCopyFault> {
     if len == 0 {
-        return Ok(());
+        return Ok(0);
     }
     if len > MAX_BUFFER_SIZE || user_addr == 0 {
-        return Err(crate::syscall::errno::EFAULT);
+        return Err(UserCopyFault {
+            copied: 0,
+            errno: crate::syscall::errno::EFAULT,
+        });
     }
-    let end = check_user_range(user_addr, len)?;
-    let vm = current_user_vm(token)?;
+    let end =
+        check_user_range(user_addr, len).map_err(|errno| UserCopyFault { copied: 0, errno })?;
+    let vm = current_user_vm(token).map_err(|errno| UserCopyFault { copied: 0, errno })?;
     let mut copied = 0usize;
 
     while copied < len {
         let va = VirtAddr::from(user_addr + copied);
         let chunk_len = (crate::config::PAGE_SIZE - va.page_offset()).min(end - va.0);
-        vm.write(|address_space| -> Result<(), isize> {
-            // 必须使用 uaccess 专用入口：它在 fault 后再次核对 U/R/W 权限和物理范围。
-            let pa = address_space.fault_in_user_va(va, direction.fault_access())?;
+        let result = vm.write(|address_space| -> Result<(), isize> {
+            // 两种模式最终都在同一 VM 锁内核对 U/R/W 权限和物理范围；区别只是
+            // `NoFault` 发现 PTE 已变化时立即失败，不在外层 spin lock 内等待。
+            let pa = match mode {
+                UserCopyMode::FaultIn => {
+                    address_space.fault_in_user_va(va, direction.fault_access())?
+                }
+                UserCopyMode::NoFault => {
+                    address_space.resolve_user_va(va, direction.fault_access())?
+                }
+            };
             // Safety: VM 锁让 PTE 与 frame 在整个 copy_chunk 期间保持稳定；PA 已由
-            // fault_in_user_va 验证，chunk 也被限制在当前物理页内。
+            // uaccess 解析入口验证，chunk 也被限制在当前物理页内。
             unsafe {
                 direction.copy_chunk(pa.direct_map_ptr(), copied, chunk_len);
             }
             Ok(())
-        })?;
+        });
+        if let Err(errno) = result {
+            return Err(UserCopyFault { copied, errno });
+        }
         copied += chunk_len;
     }
-    Ok(())
+    Ok(copied)
 }
 
-// 区分用户触发缺页时的权限：copy_from_user 使用 Read，copy_to_user 使用
-// Write；仍需双向权限的旧 buffer 路径使用 ReadWrite。
-fn fault_in_user_va_with_vm(
+/// 在同一个 VM 临界区内完成所需方向的 fault-in。
+fn fault_user_access_with_vm(
     vm: &AddressSpace<PageTableImpl>,
     va: VirtAddr,
-    access: FaultAccess,
-) -> Result<PhysAddr, isize> {
-    vm.write(|address_space| address_space.fault_in_user_va(va, access))
-}
-
-fn translate_user_va_checked_with_vm(
-    vm: &AddressSpace<PageTableImpl>,
-    va: VirtAddr,
-    access: UserAccess,
-) -> Result<PhysAddr, isize> {
-    check_user_range(va.0, 1)?;
-
-    match access {
-        UserAccess::Read => fault_in_user_va_with_vm(vm, va, FaultAccess::Load),
-        UserAccess::Write => fault_in_user_va_with_vm(vm, va, FaultAccess::Store),
-        UserAccess::ReadWrite => {
-            fault_in_user_va_with_vm(vm, va, FaultAccess::Load)?;
-            fault_in_user_va_with_vm(vm, va, FaultAccess::Store)
-        }
-    }
-}
-
-/// 将当前任务的用户虚拟地址翻译为物理地址。
-///
-/// # Semantics
-///
-/// 只接受当前任务的页表 token。访问前会按 `access` 触发缺页处理，成功后返回
-/// 对应物理地址。
-pub fn translate_user_va_checked(
-    token: usize,
-    va: VirtAddr,
-    access: UserAccess,
-) -> Result<PhysAddr, isize> {
-    let vm = current_user_vm(token)?;
-    translate_user_va_checked_with_vm(&vm, va, access)
-}
-
-/// 将用户缓冲区按页拆成内核可访问的字节切片。
-///
-/// # Semantics
-///
-/// 每个页片都会按 `access` fault-in。返回的切片指向直接映射物理内存，只能在
-/// 当前 syscall 路径内短期使用。
-pub fn translate_user_buffer_checked(
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-    access: UserAccess,
-) -> Result<Vec<&'static mut [u8]>, isize> {
-    if len > MAX_BUFFER_SIZE {
-        log::warn!("[kernel] translate_user_buffer_checked: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
-        return Err(crate::syscall::errno::EFAULT);
-    }
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    if ptr.is_null() {
-        return Err(crate::syscall::errno::EFAULT);
-    }
-    let mut start = ptr as usize;
-    let end = check_user_range(start, len)?;
-    let vm = current_user_vm(token)?;
-    let mut v = Vec::with_capacity(32);
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let pa = translate_user_va_checked_with_vm(&vm, start_va, access)?;
-        let ppn = pa.floor();
-        let mut next_vpn = start_va.floor();
-        next_vpn.step();
-        let mut end_va: VirtAddr = next_vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.page_offset() == 0 {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
-        } else {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
-        }
-        start = end_va.into();
-    }
-    Ok(v)
-}
-
-/// 将翻译后的用户页片追加到已有 vector。
-pub fn translated_byte_buffer_append_to_existing_vec(
-    existing_vec: &mut Vec<&'static mut [u8]>,
-    token: usize,
-    ptr: *const u8,
-    len: usize,
     access: UserAccess,
 ) -> Result<(), isize> {
-    existing_vec.extend(translate_user_buffer_checked(token, ptr, len, access)?);
-    Ok(())
-}
-
-pub fn translated_byte_buffer(
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-    access: UserAccess,
-) -> Result<Vec<&'static mut [u8]>, isize> {
-    translate_user_buffer_checked(token, ptr, len, access)
+    check_user_range(va.0, 1)?;
+    vm.write(|address_space| {
+        if access.needs_read() {
+            address_space.fault_in_user_va(va, FaultAccess::Load)?;
+        }
+        if access.needs_write() {
+            address_space.fault_in_user_va(va, FaultAccess::Store)?;
+        }
+        Ok(())
+    })
 }
 
 /// Fault-in 并验证一段当前任务用户地址，但不返回物理页视图。
@@ -796,7 +759,7 @@ pub fn fault_in_user_range(
 
     while cur < end {
         let va = VirtAddr::from(cur);
-        translate_user_va_checked_with_vm(&vm, va, access)?;
+        fault_user_access_with_vm(&vm, va, access)?;
         cur = va
             .floor()
             .start_addr()
@@ -888,311 +851,267 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     Ok(string)
 }
 
-// 用户缓冲区可能跨页；这里保留分段形式，避免把大用户缓冲区复制到连续内核内存。
-enum UserBufferSegments {
-    Empty,
-    Single(&'static mut [u8]),
-    Multi(Vec<&'static mut [u8]>),
+#[derive(Clone, Copy)]
+struct UserRange {
+    start: usize,
+    len: usize,
 }
 
-/// 已翻译的用户缓冲区。
+enum UserRanges {
+    /// 普通 read/write 只保存一个区间，不为快路径额外分配 `Vec`。
+    Contiguous(UserRange),
+    /// readv/writev 保存 iovec 的逻辑区间，不再展开为逐物理页切片。
+    Scatter(Vec<UserRange>),
+}
+
+impl UserRanges {
+    fn as_slice(&self) -> &[UserRange] {
+        match self {
+            Self::Contiguous(range) => core::slice::from_ref(range),
+            Self::Scatter(ranges) => ranges,
+        }
+    }
+}
+
+/// 描述当前地址空间中一段或多段用户虚拟地址。
 ///
-/// # Semantics
-///
-/// 缓冲区由一个或多个页内切片组成，读写方法返回实际复制字节数。该对象借用
-/// 当前地址空间中已 fault-in 的物理页，不能跨调度点长期保存。
+/// 构造阶段只负责提前 fault-in；对象不会保存 PA、direct-map pointer 或 Rust slice。
+/// 每次实际复制都会重新取得 VM 锁并校验 PTE，因此可与并发 CoW、mprotect 和 munmap
+/// 排序。跨页失败遵循“首字节失败返回 errno，已有进度则返回字节数”的规则。
 pub struct UserBuffer {
-    segments: UserBufferSegments,
-    pub len: usize,
+    token: usize,
+    ranges: UserRanges,
+    len: usize,
+    access: UserAccess,
 }
 
 impl UserBuffer {
-    pub fn new(buffers: Vec<&'static mut [u8]>) -> Self {
-        let len = buffers.iter().map(|buffer| buffer.len()).sum();
-        if buffers.len() == 0 {
-            return Self {
-                segments: UserBufferSegments::Empty,
-                len,
-            };
-        }
-        if buffers.len() == 1 {
-            let single = buffers.into_iter().next().unwrap();
-            return Self {
-                segments: UserBufferSegments::Single(single),
-                len,
-            };
-        }
-        Self {
-            segments: UserBufferSegments::Multi(buffers),
+    fn from_range(
+        token: usize,
+        start: usize,
+        len: usize,
+        access: UserAccess,
+    ) -> Result<Self, isize> {
+        fault_in_user_range(token, start as *const u8, len, access)?;
+        Ok(Self {
+            token,
+            ranges: UserRanges::Contiguous(UserRange { start, len }),
             len,
-        }
+            access,
+        })
     }
 
-    pub(crate) fn single(slice: &'static mut [u8]) -> Self {
-        let len = slice.len();
-        Self {
-            segments: UserBufferSegments::Single(slice),
-            len,
+    fn from_ranges(
+        token: usize,
+        ranges: Vec<UserRange>,
+        expected_len: usize,
+        access: UserAccess,
+    ) -> Result<Self, isize> {
+        let mut actual_len = 0usize;
+        for range in &ranges {
+            actual_len = actual_len
+                .checked_add(range.len)
+                .ok_or(crate::syscall::errno::EFAULT)?;
+            fault_in_user_range(token, range.start as *const u8, range.len, access)?;
         }
+        if actual_len != expected_len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        Ok(Self {
+            token,
+            ranges: UserRanges::Scatter(ranges),
+            len: actual_len,
+            access,
+        })
     }
 
     pub fn len(&self) -> usize {
         self.len
     }
 
-    pub fn read(&self, dst: &mut [u8]) -> usize {
-        match &self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let n = buf.len().min(dst.len());
-                // Safety: both slices are valid for `n` bytes and may overlap
-                // conservatively handled by `copy`.
-                unsafe {
-                    core::ptr::copy(buf.as_ptr(), dst.as_mut_ptr(), n);
-                }
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let mut start = 0;
-                let dst_len = dst.len();
-                for buffer in buffers.iter() {
-                    let end = start + buffer.len();
-                    if end > dst_len {
-                        let n = dst_len - start;
-                        // Safety: `start < dst_len` and `n` is capped by the
-                        // remaining destination length.
-                        unsafe {
-                            core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n);
-                        }
-                        return dst_len;
-                    } else {
-                        let n = buffer.len();
-                        // Safety: the logical cursor guarantees the destination
-                        // range `[start, start + n)` is within `dst`.
-                        unsafe {
-                            core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n);
-                        }
-                    }
-                    start = end;
-                }
-                self.len
-            }
-        }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
-    pub fn write(&mut self, src: &[u8]) -> usize {
-        match &mut self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let n = buf.len().min(src.len());
-                // Safety: both slices are valid for `n` bytes and may overlap
-                // conservatively handled by `copy`.
-                unsafe {
-                    core::ptr::copy(src.as_ptr(), buf.as_mut_ptr(), n);
-                }
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let mut start = 0;
-                let src_len = src.len();
-                for buffer in buffers.iter_mut() {
-                    let end = start + buffer.len();
-                    if end > src_len {
-                        let n = src_len - start;
-                        // Safety: `start < src_len` and `n` is capped by the
-                        // remaining source length.
-                        unsafe {
-                            core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n);
-                        }
-                        return src_len;
-                    } else {
-                        let n = buffer.len();
-                        // Safety: the logical cursor guarantees the source range
-                        // `[start, start + n)` is within `src`.
-                        unsafe {
-                            core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n);
-                        }
-                    }
-                    start = end;
-                }
-                self.len
-            }
-        }
+    /// 从用户缓冲区读取到内核 slice。
+    pub fn read_into(&self, dst: &mut [u8]) -> Result<usize, isize> {
+        self.read_into_at(0, dst)
     }
 
-    pub fn read_at(&self, offset: usize, dst: &mut [u8]) -> usize {
-        if offset >= self.len {
-            return 0;
-        }
-        match &self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let start = offset;
-                let n = (buf.len() - start).min(dst.len());
-                // Safety: `offset < self.len`, and `n` is capped by both the
-                // source segment and destination slice lengths.
-                unsafe {
-                    core::ptr::copy(buf.as_ptr().add(start), dst.as_mut_ptr(), n);
-                }
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let mut read_bytes = 0usize;
-                let mut dst_start = 0usize;
-                let copy_limit = dst.len().saturating_add(offset);
-                for buffer in buffers.iter() {
-                    let dst_end = dst_start + buffer.len();
-                    let copy_dst_start = dst_start.max(offset);
-                    let copy_dst_end = dst_end.min(copy_limit);
-                    if copy_dst_start >= copy_dst_end {
-                        dst_start = dst_end;
-                        continue;
-                    }
-                    let copy_src_start = copy_dst_start - offset;
-                    let copy_src_end = copy_dst_end - offset;
-                    let copy_buffer_start = copy_dst_start - dst_start;
-                    let copy_buffer_end = copy_dst_end - dst_start;
-                    let n = copy_src_end - copy_src_start;
-                    // Safety: the computed subranges are intersections of the
-                    // requested logical range with valid source/destination slices.
-                    unsafe {
-                        core::ptr::copy(
-                            buffer.as_ptr().add(copy_buffer_start),
-                            dst.as_mut_ptr().add(copy_src_start),
-                            n,
-                        );
-                    }
-                    read_bytes += copy_dst_end - copy_dst_start;
-                    dst_start = dst_end;
-                }
-                read_bytes
-            }
-        }
+    /// 从逻辑 `offset` 开始读取到内核 slice。
+    pub fn read_into_at(&self, offset: usize, dst: &mut [u8]) -> Result<usize, isize> {
+        self.read_into_at_mode(offset, dst, UserCopyMode::FaultIn)
     }
 
-    pub fn write_at(&mut self, offset: usize, src: &[u8]) -> usize {
-        if offset >= self.len {
-            return 0;
-        }
-        match &mut self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let start = offset;
-                let n = (buf.len() - start).min(src.len());
-                // Safety: `offset < self.len`, and `n` is capped by both the
-                // destination segment and source slice lengths.
-                unsafe {
-                    core::ptr::copy(src.as_ptr(), buf.as_mut_ptr().add(start), n);
-                }
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let mut write_bytes = 0usize;
-                let mut dst_start = 0usize;
-                let copy_limit = src.len().saturating_add(offset);
-                for buffer in buffers.iter_mut() {
-                    let dst_end = dst_start + buffer.len();
-                    let copy_dst_start = dst_start.max(offset);
-                    let copy_dst_end = dst_end.min(copy_limit);
-                    if copy_dst_start >= copy_dst_end {
-                        dst_start = dst_end;
-                        continue;
-                    }
-                    let copy_src_start = copy_dst_start - offset;
-                    let copy_src_end = copy_dst_end - offset;
-                    let copy_buffer_start = copy_dst_start - dst_start;
-                    let copy_buffer_end = copy_dst_end - dst_start;
-                    let n = copy_src_end - copy_src_start;
-                    // Safety: the computed subranges are intersections of the
-                    // requested logical range with valid source/destination slices.
-                    unsafe {
-                        core::ptr::copy(
-                            src.as_ptr().add(copy_src_start),
-                            buffer.as_mut_ptr().add(copy_buffer_start),
-                            n,
-                        );
-                    }
-                    write_bytes += copy_dst_end - copy_dst_start;
-                    dst_start = dst_end;
-                }
-                write_bytes
-            }
-        }
+    /// 只复制仍保持映射的前缀，不触发缺页处理。
+    ///
+    /// 仅供已经在锁外完成 fault-in、但锁内不能等待的实现使用。
+    pub(crate) fn read_into_at_nofault(
+        &self,
+        offset: usize,
+        dst: &mut [u8],
+    ) -> Result<usize, isize> {
+        self.read_into_at_mode(offset, dst, UserCopyMode::NoFault)
     }
 
-    pub fn clear(&mut self) {
-        match &mut self.segments {
-            UserBufferSegments::Empty => {}
-            UserBufferSegments::Single(buf) => buf.fill(0),
-            UserBufferSegments::Multi(buffers) => buffers.iter_mut().for_each(|buffer| {
-                buffer.fill(0);
-            }),
+    fn read_into_at_mode(
+        &self,
+        offset: usize,
+        dst: &mut [u8],
+        mode: UserCopyMode,
+    ) -> Result<usize, isize> {
+        let len = dst.len().min(self.len.saturating_sub(offset));
+        if len == 0 {
+            return Ok(0);
         }
+        if !self.access.needs_read() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        self.transfer(
+            offset,
+            len,
+            BufferCopy::FromUser {
+                dst: dst.as_mut_ptr(),
+            },
+            mode,
+        )
     }
 
-    pub fn fill_at(&mut self, offset: usize, len: usize, value: u8) -> usize {
+    /// 将内核 slice 写入用户缓冲区。
+    pub fn write_from(&mut self, src: &[u8]) -> Result<usize, isize> {
+        self.write_from_at(0, src)
+    }
+
+    /// 将内核 slice 写入从逻辑 `offset` 开始的用户缓冲区。
+    pub fn write_from_at(&mut self, offset: usize, src: &[u8]) -> Result<usize, isize> {
+        let len = src.len().min(self.len.saturating_sub(offset));
+        if len == 0 {
+            return Ok(0);
+        }
+        if !self.access.needs_write() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        self.transfer(
+            offset,
+            len,
+            BufferCopy::ToUser { src: src.as_ptr() },
+            UserCopyMode::FaultIn,
+        )
+    }
+
+    /// 将内核数据写入仍保持映射的用户前缀，不触发缺页处理。
+    pub(crate) fn write_from_at_nofault(
+        &mut self,
+        offset: usize,
+        src: &[u8],
+    ) -> Result<usize, isize> {
+        let len = src.len().min(self.len.saturating_sub(offset));
+        if len == 0 {
+            return Ok(0);
+        }
+        if !self.access.needs_write() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        self.transfer(
+            offset,
+            len,
+            BufferCopy::ToUser { src: src.as_ptr() },
+            UserCopyMode::NoFault,
+        )
+    }
+
+    /// 用固定字节填充逻辑区间；常用于 `/dev/zero` 与 sparse hole。
+    pub fn fill_at(&mut self, offset: usize, len: usize, value: u8) -> Result<usize, isize> {
+        let len = len.min(self.len.saturating_sub(offset));
+        if len == 0 {
+            return Ok(0);
+        }
+        if !self.access.needs_write() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        self.transfer(
+            offset,
+            len,
+            BufferCopy::FillUser { value },
+            UserCopyMode::FaultIn,
+        )
+    }
+
+    pub fn clear(&mut self) -> Result<usize, isize> {
+        self.fill_at(0, self.len, 0)
+    }
+
+    fn transfer(
+        &self,
+        offset: usize,
+        len: usize,
+        copy: BufferCopy,
+        mode: UserCopyMode,
+    ) -> Result<usize, isize> {
         if len == 0 || offset >= self.len {
-            return 0;
+            return Ok(0);
         }
-        match &mut self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let start = offset;
-                let n = (buf.len() - start).min(len);
-                buf[start..start + n].fill(value);
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let limit = offset.saturating_add(len).min(self.len);
-                let mut logical = 0usize;
-                let mut filled = 0usize;
-                for buffer in buffers.iter_mut() {
-                    let next = logical + buffer.len();
-                    let start = logical.max(offset);
-                    let end = next.min(limit);
-                    if start < end {
-                        let b0 = start - logical;
-                        let b1 = end - logical;
-                        buffer[b0..b1].fill(value);
-                        filled += end - start;
-                    }
-                    logical = next;
-                    if logical >= limit {
-                        break;
+
+        let limit = offset.saturating_add(len).min(self.len);
+        let mut logical = 0usize;
+        let mut copied = 0usize;
+        for range in self.ranges.as_slice() {
+            let next = logical + range.len;
+            let start = logical.max(offset);
+            let end = next.min(limit);
+            if start < end {
+                let range_offset = start - logical;
+                let user_addr = range
+                    .start
+                    .checked_add(range_offset)
+                    .ok_or(crate::syscall::errno::EFAULT)?;
+                let chunk_len = end - start;
+                // Safety: `copied + chunk_len <= len`，而调用者提供的 kernel slice
+                // 至少有 `len` 字节；这里只移动 kernel pointer，不解引用用户指针。
+                let chunk_copy = unsafe { copy.at(copied) };
+                match copy_user_bytes_progress(self.token, user_addr, chunk_len, chunk_copy, mode) {
+                    Ok(done) => copied += done,
+                    Err(error) => {
+                        copied += error.copied;
+                        return if copied == 0 {
+                            Err(error.errno)
+                        } else {
+                            Ok(copied)
+                        };
                     }
                 }
-                filled
+            }
+            logical = next;
+            if logical >= limit {
+                break;
             }
         }
+        Ok(copied)
     }
 }
 
-pub fn translate_single_page_user_bytes(
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-    access: UserAccess,
-) -> Result<Option<&'static mut [u8]>, isize> {
-    if len == 0 {
-        return Ok(None);
-    }
-    if ptr.is_null() {
-        return Err(crate::syscall::errno::EFAULT);
-    }
+#[derive(Clone, Copy)]
+enum BufferCopy {
+    FromUser { dst: *mut u8 },
+    ToUser { src: *const u8 },
+    FillUser { value: u8 },
+}
 
-    let start = ptr as usize;
-    let end = check_user_range(start, len)?;
-    let start_va = VirtAddr::from(start);
-    let last_va = VirtAddr::from(end - 1);
-    if start_va.floor() != last_va.floor() {
-        return Ok(None);
+impl BufferCopy {
+    /// # Safety
+    ///
+    /// `offset` 必须仍位于构造该方向时传入的 kernel slice 内。
+    unsafe fn at(self, offset: usize) -> UserCopy {
+        match self {
+            Self::FromUser { dst } => UserCopy::FromUser {
+                dst: dst.add(offset),
+            },
+            Self::ToUser { src } => UserCopy::ToUser {
+                src: src.add(offset),
+            },
+            Self::FillUser { value } => UserCopy::FillUser { value },
+        }
     }
-
-    let pa = translate_user_va_checked(token, start_va, access)?;
-    let page_offset = start_va.page_offset();
-    Ok(Some(
-        &mut pa.floor().get_bytes_array()[page_offset..page_offset + len],
-    ))
 }
 
 /// Copy `*src: T` to kernel space.

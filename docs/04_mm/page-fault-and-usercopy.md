@@ -3,7 +3,7 @@ title: "缺页处理与用户内存 fault-in"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-08-01
 tags: [mm, page-fault, cow, uaccess, mmu-gather]
 ---
 
@@ -27,11 +27,13 @@ arch trap handler
 用户内存访问函数也使用同一套缺页处理，但入口是 `uaccess.rs`：
 
 ```
-copy_from_user / translated_byte_buffer / translated_str
-  └── translate_user_va_checked_with_vm()
-        └── fault_in_user_va()
-              ├── do_page_fault()
-              └── validate_user_fault_result()
+copy_from_user / translated_str / UserBuffer copy
+  └── copy_user_bytes_progress()
+        └── AddressSpace VM lock
+              └── fault_in_user_va()
+                    ├── resolve_user_va_inner() fast path
+                    ├── do_page_fault() when needed
+                    └── validate_user_fault_result()
 ```
 
 两者区别是：trap fault 成功后只要求缺页处理返回物理地址；uaccess fault-in 成功后还会再次检查用户 PTE 权限。
@@ -395,81 +397,31 @@ trap 路径和 syscall 路径对错误的最终处理不同：trap 中的用户�
 
 ## 14. 用户 copy 与缺页
 
-`uaccess` 不只是查页表。旧 `translated_byte_buffer()` 的翻译流程为：
+`uaccess` 不只是查页表。`read(fd, buf, len)` 写用户缓冲区时可以触发匿名页 lazy
+allocation 或 CoW；但已有 PTE 满足 U/R/W 权限时，不应把软件 copy 伪装成新的硬件 fault。
 
-1. 检查长度不超过 `MAX_BUFFER_SIZE`。
-2. 检查指针非空和用户地址范围。
-3. 获取当前任务 VM，并验证 token 是当前任务 token。
-4. 按页调用 `translate_user_va_checked_with_vm()`。
-5. 每页 fault-in。
-6. 返回物理页对应的 `&'static mut [u8]` 切片。
+B59 后，`fault_in_user_va()` 先无副作用解析当前 PTE：成功就直接返回 PA；只有缺页或写权限
+尚未建立才进入 page-fault handler。这样避免重复 CoW/SharedWrite、无效 PTE 修改和多余
+TLB shootdown。
 
-这意味着 `read(fd, buf, len)` 写用户缓冲区时可以触发匿名页 lazy allocation 或 COW。
+固定对象、数组、字符串、连续 buffer 与 iovec 最终都逐页执行：
 
-B57/B58 后，固定对象、数组和字符串不再消费上述锁外 slice：它们在每页
-`AddressSpace::write` 临界区内完成 fault、权限后验和实际 copy。该流程目前仍用于
-旧 `UserBuffer`/iovec 直连 I/O，因此本节是“剩余兼容路径”，不是新 syscall 应选择的 API。
-
-用户 buffer 翻译路径的核心函数如下：
-
-```rust
-fn translate_user_va_checked_with_vm(
-    vm: &AddressSpace<PageTableImpl>,
-    va: VirtAddr,
-    access: UserAccess,
-) -> Result<PhysAddr, isize> {
-    check_user_range(va.0, 1)?;
-
-    match access {
-        UserAccess::Read => fault_in_user_va_with_vm(vm, va, FaultAccess::Load),
-        UserAccess::Write => fault_in_user_va_with_vm(vm, va, FaultAccess::Store),
-        UserAccess::ReadWrite => {
-            fault_in_user_va_with_vm(vm, va, FaultAccess::Load)?;
-            fault_in_user_va_with_vm(vm, va, FaultAccess::Store)
-        }
-    }
-}
-
-pub fn translate_user_buffer_checked(
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-    access: UserAccess,
-) -> Result<Vec<&'static mut [u8]>, isize> {
-    if len > MAX_BUFFER_SIZE {
-        log::warn!("[kernel] translate_user_buffer_checked: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
-        return Err(crate::syscall::errno::EFAULT);
-    }
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    if ptr.is_null() {
-        return Err(crate::syscall::errno::EFAULT);
-    }
-    let mut start = ptr as usize;
-    let end = check_user_range(start, len)?;
-    let vm = current_user_vm(token)?;
-    let mut v = Vec::with_capacity(32);
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let pa = translate_user_va_checked_with_vm(&vm, start_va, access)?;
-        let ppn = pa.floor();
-        let mut next_vpn = start_va.floor();
-        next_vpn.step();
-        let mut end_va: VirtAddr = next_vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.page_offset() == 0 {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
-        } else {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
-        }
-        start = end_va.into();
-    }
-    Ok(v)
-}
+```text
+检查用户范围与当前 token
+  -> 取得 AddressSpace VM 锁
+       -> resolve 当前 PTE，必要时 fault-in
+       -> 验证 U/R/W 与物理范围
+       -> 在锁内通过 direct-map raw pointer 复制本页 chunk
+  -> 释放 VM 锁
+  -> 锁外完成 TLB flush/ack
 ```
 
-`translate_user_buffer_checked()` 按页切分用户 buffer，每页都通过 `translate_user_va_checked_with_vm()` 触发 fault-in 和权限校验。返回的切片直接指向物理页数组，因此调用者必须保证 token 对应当前任务 VM，不能跨进程随意复用。
+`UserBuffer` 构造时只保存 VA 区间并预 fault，不保存 PA、frame 或 Rust slice。预 fault
+不能 pin 映射，所以每次实际 copy 都重新走上述流程。跨页或 scatter copy 的后续页失败时，
+流式接口返回已完成的前缀；固定格式对象由 exact wrapper 将短 copy 转为 `EFAULT`。
+
+pipe 是受限例外：ring 自旋锁内不能进入 fault handler，因此它在锁外预 fault，锁内只通过
+`resolve_user_va()` 接受仍有效的 PTE。映射变化会立即失败或部分完成，不会在自旋锁内等待。
 
 ## 15. 调试核对点
 

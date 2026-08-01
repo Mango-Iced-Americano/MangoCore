@@ -151,7 +151,7 @@ fn resolve_dest(msg: &MsgHdr, token: usize, _socket: &crate::net::Socket) -> Opt
         Err(_) => return None,
     };
     let mut addr_buf = [0u8; 128];
-    if addr_reader.read_into(&mut addr_buf[..copy_len]).is_err() {
+    if addr_reader.read_exact(&mut addr_buf[..copy_len]).is_err() {
         return None;
     }
     Endpoint::from_sockaddr(&addr_buf[..copy_len]).ok()
@@ -224,8 +224,7 @@ fn send_stream_chunked(
         return -(SyscallErr::ENOBUFS as isize);
     }
     // Safety: `try_reserve(chunk_cap)` succeeded above, ensuring capacity.
-    // `set_len` marks the buffer as initialized — it will be fully overwritten
-    // by `ubuf.read()` below before any read, so uninitialized access is impossible.
+    // `set_len` marks the buffer as initialized；随后只把 uaccess 实际完成的前缀交给 socket。
     unsafe {
         kbuf.set_len(chunk_cap);
     }
@@ -246,7 +245,10 @@ fn send_stream_chunked(
             Ok(b) => b,
             Err(errno) => return if done > 0 { done as isize } else { errno },
         };
-        let copied = ubuf.read(&mut kbuf[..accessible]);
+        let copied = match ubuf.read_into(&mut kbuf[..accessible]) {
+            Ok(copied) => copied,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
 
         let send_fn =
             || socket.try_sendmsg(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags);
@@ -329,8 +331,7 @@ fn send_single_shot(
         return -(SyscallErr::ENOBUFS as isize);
     }
     // Safety: `try_reserve(total_len)` succeeded above, ensuring capacity.
-    // `set_len` marks the buffer as initialized — it is fully overwritten
-    // by `ubuf.read()` before any consumer, so uninitialized bytes are never observed.
+    // `set_len` marks the buffer as initialized；单个 datagram 只有完整复制后才发送。
     unsafe {
         kbuf.set_len(total_len);
     }
@@ -339,10 +340,14 @@ fn send_single_shot(
         Ok(b) => b,
         Err(errno) => return errno,
     };
-    ubuf.read(&mut kbuf);
+    let copied = match ubuf.read_into(&mut kbuf) {
+        Ok(copied) if copied == total_len => copied,
+        Ok(_) => return -(SyscallErr::EFAULT as isize),
+        Err(errno) => return errno,
+    };
 
     wait_io(
-        || socket.try_sendmsg(&kbuf, dest.clone(), msg_flags),
+        || socket.try_sendmsg(&kbuf[..copied], dest.clone(), msg_flags),
         is_nonblock,
     )
 }

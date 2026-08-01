@@ -111,15 +111,16 @@ MangoCore 的 syscall 层由架构 trap 后端、`syscall/mod.rs` 扁平分发�
 | `copy_from_user` / `get_from_user` | 在当前 MM 的逐页写锁内校验并读取固定对象/数组 |
 | `copy_to_user` | 在当前 MM 的逐页写锁内处理 CoW、校验并写入固定对象/数组 |
 | `translated_str` | 逐页在 VM 锁内复制到内核 scratch，再扫描 NUL，上限 8 MiB |
-| `translated_byte_buffer` | 将用户 buffer 切成内核可访问片段；尚待消除可逃逸物理页切片 |
+| `UserBufferReader` / `UserBufferWriter` | 保存 VA 区间，实际传输逐页在 VM 锁内重验；区分 partial 与 exact |
 | `UserPtr` / `UserPtrMut` | 用户指针包装 |
-| `UserIoVec` | iovec 读取，数量上限 1024 |
+| `UserIoVec` | iovec 内核快照与 scatter VA 区间，数量上限 1024 |
 | `fault_in_user_va` | 缺页并校验页表权限 |
 | `fault_in_user_range` | 外部副作用前的预 fault；真正拷贝仍必须再验证 |
 
 `check_user_range()` 只做范围和溢出检查；是否可读写由 fault-in 和页表权限决定。
-固定对象 copy 的实际内存访问必须和 fault-in 位于同一次 VM 锁持有期；syscall 不得在持有
-fd table、task inner 或其它普通业务锁时进入可能 fault 的 uaccess。
+固定对象和 buffer copy 的实际内存访问必须和 PTE 解析位于同一次 VM 锁持有期；syscall
+不得在持有 fd table、task inner 或其它普通业务锁时进入可能 fault 的 uaccess。流式路径按
+实际完成字节数返回，固定格式使用 `read_exact()`/`write_all()`。
 
 ### 4.4 seccomp action
 
@@ -681,12 +682,13 @@ return ret
 | 风险 | 处理方式 |
 |------|----------|
 | 地址不在用户范围 | `check_user_range()` 和 `fault_in_user_va()` 返回 `EFAULT`。 |
-| 地址跨页 | `translated_byte_buffer()` 和 iovec 路径把 buffer 切成片段。 |
+| 地址跨页 | uaccess 逐页锁定 VM 并复制当前 chunk；`UserBuffer` 只保留逻辑 VA 区间。 |
 | PTE 尚未建立 | uaccess 触发 `AddressSpace::fault_in_user_va()`，按访问类型补页。 |
 | 权限不满足 | fault 后再次用 `user_access_ok()` 验证 R/W/X 权限。 |
 | 字符串无 NUL | `translated_str()` 有扫描上限，超过限制返回错误而不是无限扫描。 |
 
-因此，syscall 代码中看到 `*const u8` 或 `usize` 用户地址时，应继续追到 `uaccess.rs` 或具体 helper，而不是把它理解为内核地址。
+因此，syscall 代码中看到 `*const u8` 或 `usize` 用户地址时，应继续追到 `uaccess.rs` 或具体
+helper，而不是把它理解为内核地址。预 fault 不会 pin 映射，实际 copy 仍须重新验证。
 
 ### 6.9 `sys_getrandom`
 

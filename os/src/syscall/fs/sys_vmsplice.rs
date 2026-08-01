@@ -36,7 +36,11 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
         Err(errno) => return errno,
     };
     let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
-    user_buf.read(&mut kernel_buf);
+    let copied = match user_buf.read_into(&mut kernel_buf) {
+        Ok(copied) => copied,
+        Err(errno) => return errno,
+    };
+    kernel_buf.truncate(copied);
 
     let mut try_write = || match file.write(&kernel_buf) {
         Ok(n) => n as isize,

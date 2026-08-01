@@ -718,8 +718,14 @@ pub(crate) fn read_zero_into_user(token: usize, buf: usize, count: usize) -> isi
             Ok(writer) => writer.into_user_buffer(),
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
-        user_buf.clear();
-        total += accessible;
+        let cleared = match user_buf.clear() {
+            Ok(cleared) => cleared,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        total += cleared;
+        if cleared < accessible {
+            break;
+        }
 
         if let Some(task) = current_task() {
             if crate::task::has_actionable_signal(&task) {

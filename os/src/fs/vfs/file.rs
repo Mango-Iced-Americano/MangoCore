@@ -1232,10 +1232,13 @@ impl File {
                     .inode
                     .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
                 if n > 0 {
-                    dst.write_at(0, &kbuf[..n]);
+                    let copied = dst
+                        .write_from_at(0, &kbuf[..n])
+                        .map_err(|_| SyscallErr::EFAULT)?;
                     if !is_stream {
-                        self.offset.fetch_add(n, Ordering::SeqCst);
+                        self.offset.fetch_add(copied, Ordering::SeqCst);
                     }
+                    return Ok(copied);
                 }
                 Ok(n)
             }
@@ -1270,7 +1273,9 @@ impl File {
                     .inode
                     .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
                 if n > 0 {
-                    dst.write_at(0, &kbuf[..n]);
+                    return dst
+                        .write_from_at(0, &kbuf[..n])
+                        .map_err(|_| SyscallErr::EFAULT);
                 }
                 Ok(n)
             }
@@ -1320,7 +1325,9 @@ impl File {
                 unsafe {
                     kbuf.set_len(len);
                 }
-                let copied = src.read_at(0, &mut kbuf);
+                let copied = src
+                    .read_into_at(0, &mut kbuf)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 let n = self.inode.write_at(
                     offset,
                     copied,
@@ -1380,7 +1387,9 @@ impl File {
                 unsafe {
                     kbuf.set_len(len);
                 }
-                let copied = src.read_at(0, &mut kbuf);
+                let copied = src
+                    .read_into_at(0, &mut kbuf)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 let n = self.inode.write_at(
                     offset,
                     copied,

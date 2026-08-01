@@ -828,6 +828,18 @@
   这同时避免把 heap allocator 带入 VM 临界区。
 - **不跨等待点保存用户视图**: 阻塞 I/O 先把数据收入内核所有 buffer，或在唤醒后才
   执行用户 copy。WaitQueue、socket poll 或磁盘 I/O 期间不保存 VA 翻译得到的 PA/slice。
+- **buffer 描述应保存 VA，不保存翻译结果**: 连续 buffer 保存一个 `{start, len}`，scatter
+  I/O 保存每个 iovec 的逻辑 VA 区间。构造阶段可以预 fault，但对象中不得保留 PA、frame、
+  direct-map pointer 或 Rust slice；实际 copy 每页重新取得 VM 锁并解析当前 PTE。
+- **partial iterator 与 exact wrapper 分层**: read/write/pipe/socket 等流式接口遵循“首字节
+  失败返回 errno，已有进度返回完成前缀”；固定 ABI 结构再由 `read_exact`/`write_all` 把短
+  copy 转为 `EFAULT`。PageCache 有效范围和文件 offset 必须使用实际完成字节数更新。
+- **自旋锁内只能 nofault**: 若 ring/index 状态要求复制期间持 `spin::Mutex`，先在锁外
+  fault-in，锁内只接受仍满足权限的现有 PTE。并发 remap 时立即失败或部分完成，不能在
+  自旋锁内触发 CoW、分配、文件缺页或等待。nofault helper 应保持最小可见性，避免扩散。
+- **软件 uaccess 要先 resolve**: `fault_in_user_va()` 不能假设每次调用都对应真实硬件 fault。
+  PTE 已映射且权限满足时应直接返回；否则每次 copy-to-user 都可能误走 Cow/SharedWrite，
+  重复修改 PTE 并制造无意义的 TLB shootdown。
 - **锁序审计**: faultable uaccess 前先释放 fd table、task inner、file-private、socket 等普通
   业务锁。若旧调用链要求持锁复制，先快照/克隆稳定 owner，再释放锁进入 uaccess。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,

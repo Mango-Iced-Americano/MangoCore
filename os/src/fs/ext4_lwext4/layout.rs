@@ -834,8 +834,7 @@ impl IndexNode for Ext4OSInode {
                 let dummy = spin::Mutex::new(FilePrivateData::Unused);
                 let guard = dummy.lock();
                 let n = self.read_at(offset, actual_len, &mut kbuf, guard)?;
-                dst.write(&kbuf[..n]);
-                Ok(n)
+                dst.write_from(&kbuf[..n]).map_err(|_| SyscallErr::EFAULT)
             }
             FileType::File => {
                 let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
@@ -860,7 +859,7 @@ impl IndexNode for Ext4OSInode {
     ) -> Result<usize, SyscallErr> {
         let actual_len = len.min(src.len());
         let mut kbuf = alloc::vec![0u8; actual_len];
-        let n = src.read(&mut kbuf);
+        let n = src.read_into(&mut kbuf).map_err(|_| SyscallErr::EFAULT)?;
         let actual = len.min(n);
         let dummy = spin::Mutex::new(FilePrivateData::Unused);
         let guard = dummy.lock();

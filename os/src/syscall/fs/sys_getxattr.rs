@@ -41,8 +41,8 @@ pub fn sys_getxattr(
                 Ok(w) => w,
                 Err(e) => return e,
             };
-            match writer.write_from(&kernel_buf[..len]) {
-                Ok(_) => len as isize,
+            match writer.write_all(&kernel_buf[..len]) {
+                Ok(()) => len as isize,
                 Err(e) => e,
             }
         }

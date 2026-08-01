@@ -101,7 +101,10 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
             Ok(b) => b,
             Err(errno) => return if done > 0 { done as isize } else { errno },
         };
-        let copied = ubuf.read(&mut kbuf[..accessible]);
+        let copied = match ubuf.read_into(&mut kbuf[..accessible]) {
+            Ok(copied) => copied,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
 
         let n = match file.write(&kbuf[..copied.min(accessible)]) {
             Ok(n) => n,

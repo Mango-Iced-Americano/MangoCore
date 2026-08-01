@@ -68,7 +68,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     let mut cwd = Vec::with_capacity(write_len);
     cwd.extend_from_slice(working_dir.as_bytes());
     cwd.push(0);
-    if let Err(errno) = user_buf.write_from(&cwd) {
+    if let Err(errno) = user_buf.write_all(&cwd) {
         return errno;
     }
     write_len as isize
