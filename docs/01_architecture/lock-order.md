@@ -133,10 +133,27 @@ panic 中“读取统计”同样可能隐藏阻塞锁。B56 将 allocator 诊�
 - `sys_ioctl()` 先从 fd table 克隆 file `Arc`，再释放 table；块设备 ioctl 也在 uaccess 前
   释放不参与操作的 file-private guard。
 
-该约束尚未覆盖 `UserBuffer`、`translated_byte_buffer()` 与 `translated_str()`；它们的
-可逃逸物理页视图必须在后续节点单独重构。B57 只迁移了本次删除 API 的 ioctl 调用点，
+该约束尚未覆盖 `UserBuffer` 和 `translated_byte_buffer()`；它们的可逃逸物理页视图
+必须在后续节点单独重构。B57 只迁移了本次删除 API 的 ioctl 调用点，
 SysV IPC 等既有 fixed-copy 调用链是否跨 registry 锁仍须在 B58/共享子系统审计中逐项处理；
 不能把 helper 内部映射安全外推为所有调用方锁序均已合格。
+
+#### B58 用户页视图绕过路径收口
+
+B58 不再让字符串和 sockaddr 解析器消费锁外物理页 slice：
+
+- `translated_str()` 每页在 VM 锁内复制到 4 KiB 内核 scratch，释放锁后才扫描 NUL
+  并扩容 `String`；堆分配器不进入 VM 临界区；
+- `bind/connect/sendto` 通过 `read_sockaddr()` 得到最多 512 字节的内核所有
+  `Vec<u8>`，`Endpoint` 只解析这份快照；
+- `trans_ref!`/`trans_refmut!` 以及未使用的 raw-pointer sockaddr 解析入口已删除；
+- `fault_in_user_range()` 只用于在 clone3/getrandom/mincore 的外部副作用前提前检查。
+  预检查后另一 CPU 仍可改变映射，因此真正读写必须再走 `copy_from/to_user`；
+- 阻塞 recv 在等待期间只保存内核 buffer，唤醒后再 copy-to-user，不得跨
+  WaitQueue 保存用户页视图。
+
+旧 `UserBuffer` 仍在构造时 fault-in，然后在 FS/网络层无 VM 锁访问物理页；B58 只先将
+所有绕过路径收回该单一核心，不宣称整个 buffer I/O 已完成 SMP 收口。
 
 ### 3.3 B18 Per-CPU RunQueue 约束
 

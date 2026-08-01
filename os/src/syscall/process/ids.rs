@@ -1,9 +1,9 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::iov::IOVec;
 use crate::mm::{
-    check_user_range, copy_from_user, copy_from_user_array, copy_to_user, translated_byte_buffer,
-    AddressSpaceInner, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer,
-    UserPtr, UserPtrMut, VirtAddr,
+    check_user_range, copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array,
+    AddressSpaceInner, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserPtr, UserPtrMut,
+    VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
@@ -18,8 +18,8 @@ use core::{mem::size_of, ptr};
 use log::warn;
 use num_enum::FromPrimitive;
 
-#[allow(unused)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct UTSName {
     sysname: [u8; 65],
     nodename: [u8; 65],
@@ -263,30 +263,39 @@ pub struct CapUserData {
 
 pub fn sys_uname(buf: *mut u8) -> isize {
     let token = current_user_token();
-    let mut buffer = UserBuffer::new(
-        match translated_byte_buffer(token, buf, size_of::<UTSName>(), UserAccess::Write) {
-            Ok(buffer) => buffer,
-            Err(errno) => return errno,
-        },
-    );
-    // A little stupid but still efficient.
-    const FIELD_OFFSET: usize = 65;
-    buffer.write_at(0, b"Linux\0");
-    #[cfg(feature = "riscv")]
-    buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-rv64\0");
-    #[cfg(feature = "loongarch64")]
-    buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-la64\0");
-    buffer.write_at(FIELD_OFFSET * 3, b"#1 SMP blossom 5.10.0-1 (2025-01-10)\0");
-    #[cfg(feature = "riscv")]
-    buffer.write_at(FIELD_OFFSET * 4, b"rv64\0");
-    #[cfg(feature = "loongarch64")]
-    buffer.write_at(FIELD_OFFSET * 4, b"la64\0");
-    let task = current_task().unwrap();
-    let uts_ref = task.process.uts();
-    let uts = uts_ref.lock();
-    buffer.write_at(FIELD_OFFSET * 1, &uts.nodename[..]);
-    buffer.write_at(FIELD_OFFSET * 5, &uts.domainname[..]);
-    SUCCESS
+    let (nodename, domainname) = {
+        let task = current_task().unwrap();
+        let uts_ref = task.process.uts();
+        let uts = uts_ref.lock();
+        (uts.nodename, uts.domainname)
+    };
+
+    fn field(value: &[u8]) -> [u8; 65] {
+        let mut field = [0u8; 65];
+        let len = value.len().min(field.len() - 1);
+        field[..len].copy_from_slice(&value[..len]);
+        field
+    }
+
+    let info = UTSName {
+        sysname: field(b"Linux"),
+        nodename,
+        #[cfg(feature = "riscv")]
+        release: field(b"5.10.0-1-rv64"),
+        #[cfg(feature = "loongarch64")]
+        release: field(b"5.10.0-1-la64"),
+        version: field(b"#1 SMP blossom 5.10.0-1 (2025-01-10)"),
+        #[cfg(feature = "riscv")]
+        machine: field(b"rv64"),
+        #[cfg(feature = "loongarch64")]
+        machine: field(b"la64"),
+        domainname,
+    };
+
+    match copy_to_user(token, &info, buf.cast::<UTSName>()) {
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
 }
 
 fn copy_uts_field(name: *const u8, len: usize) -> Result<[u8; 65], isize> {
@@ -902,14 +911,8 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
 
 fn read_prctl_comm_from_user(ptr: usize) -> Result<[u8; PR_TASK_COMM_LEN], isize> {
     let token = current_user_token();
-    let buffer = UserBuffer::new(translated_byte_buffer(
-        token,
-        ptr as *const u8,
-        PR_TASK_COMM_LEN,
-        UserAccess::Read,
-    )?);
     let mut comm = [0u8; PR_TASK_COMM_LEN];
-    buffer.read(&mut comm);
+    copy_from_user_array(token, ptr as *const u8, comm.as_mut_ptr(), comm.len())?;
     if let Some(nul_pos) = comm.iter().position(|&ch| ch == 0) {
         for byte in &mut comm[nul_pos..] {
             *byte = 0;
@@ -921,18 +924,15 @@ fn read_prctl_comm_from_user(ptr: usize) -> Result<[u8; PR_TASK_COMM_LEN], isize
 }
 
 fn write_prctl_comm_to_user(ptr: usize, comm: &[u8; PR_TASK_COMM_LEN]) -> isize {
-    let token = current_user_token();
-    let mut buffer = match translated_byte_buffer(
-        token,
-        ptr as *const u8,
-        PR_TASK_COMM_LEN,
-        UserAccess::Write,
+    match copy_to_user_array(
+        current_user_token(),
+        comm.as_ptr(),
+        ptr as *mut u8,
+        comm.len(),
     ) {
-        Ok(buffer) => UserBuffer::new(buffer),
-        Err(errno) => return errno,
-    };
-    buffer.write(comm);
-    SUCCESS
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
 }
 
 fn read_process_vm_iovecs(iov: *const IOVec, iovcnt: usize) -> Result<Vec<IOVec>, isize> {

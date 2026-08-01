@@ -90,7 +90,7 @@ related_docs:
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53 又用 CPU1 持续用户 load + CPU0 真实 CoW PPN 替换证明精准 handler 生效，并让软件 handler 在 ack 前发布 observed，避免 trap-return 重复全刷；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | `mprotect/munmap` 权限/有效位压力与通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
-| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57 删除 fixed-size `translated_ref*`，让标量/数组 copy 在 VM 锁内完成 fault、权限检查与实际访问 | `UserBuffer`、`translated_byte_buffer` 和 `translated_str` 仍会暴露锁外物理页视图；其它共享子系统的 unsafe/static 状态仍需逐项按所有权审计 |
+| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57 删除 fixed-size `translated_ref*`；B58 让字符串与 sockaddr 等绕过路径改为 VM 锁内 copy，并删除 `trans_ref!`/`trans_refmut!` | 旧 `UserBuffer`/`translated_byte_buffer` 仍会暴露锁外物理页视图；其它共享子系统的 unsafe/static 状态仍需逐项按所有权审计 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端和真实 CoW stale-translation 已有 focused 证据；仍需权限/有效位与高并发压力 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -593,8 +593,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B57 删除固定对象路径会逃逸的 `translated_ref*`。`copy_from/to_user` 及 array 版本逐页在
   同一次 VM 锁持有期内执行 fault、权限后验检查和 direct-map raw copy，并让 ioctl 在
   faultable uaccess 前释放 fd table/file-private 锁。双架构 8 核 focused 均 34/34，初赛
-  保持 RV64 312/314、LA64 308/314；跨页 copy 仍允许部分完成，`UserBuffer` 与字符串路径
-  留给 B58，SysV IPC 等 fixed-copy 调用方的 registry 锁序也仍待审计，不能据此宣称整个
+  保持 RV64 312/314、LA64 308/314；跨页 copy 仍允许部分完成；
+- B58 删除 `trans_ref!`/`trans_refmut!` 和未使用的 raw sockaddr 解析入口；字符串逐页
+  在 VM 锁内复制到内核 scratch，clone3/uname/prctl/mremap/mincore/getrandom 改走统一
+  copy helper，bind/connect/sendto 先复制内核地址快照再解析。双架构 8 核初赛保持
+  RV64 312/314、LA64 308/314，无 panic/timeout。旧 `UserBuffer` 与 SysV IPC 等
+  fixed-copy 调用方的 registry 锁序仍待审计，不能据此宣称整个
   uaccess 已完成 SMP 收口；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
@@ -1016,8 +1020,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
     缓冲和 Per-CPU 静态栈保留 `static mut`，但分别由启动期唯一移交、全局锁和 CPU 独占槽
     证明，不以“看见关键字”作为机械删除依据；
   - B57 已删除 fixed-size `translated_ref*`，并把标量/数组的实际 copy 纳入逐页 VM 锁；
-    `UserBuffer`、`translated_byte_buffer()` 和 `translated_str()` 仍返回或消费锁外物理页视图，
-    作为 B58 独立高风险节点继续收口；
+  - B58 已收口字符串、sockaddr 与若干 fixed ABI 的原始物理视图绕过路径；
+    `UserBuffer`/`translated_byte_buffer()` 仍保留锁外物理页切片，下一节点需原子替换为
+    VA-backed + `Result` 复制语义；
 - exit_group、多线程 exec 和致命信号采用跨核停止协议：
   - B40 的永久 exit_group/致命信号已关闭 clone 门禁，向 queued/running/blocked
     sibling 投递 SIGKILL、wake 与 reschedule，并由各 owner 在安全点退出；

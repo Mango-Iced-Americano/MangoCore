@@ -110,11 +110,12 @@ MangoCore 的 syscall 层由架构 trap 后端、`syscall/mod.rs` 扁平分发�
 |-----|------|
 | `copy_from_user` / `get_from_user` | 在当前 MM 的逐页写锁内校验并读取固定对象/数组 |
 | `copy_to_user` | 在当前 MM 的逐页写锁内处理 CoW、校验并写入固定对象/数组 |
-| `translated_str` | 读取 NUL 结尾字符串，扫描上限 8 MiB |
+| `translated_str` | 逐页在 VM 锁内复制到内核 scratch，再扫描 NUL，上限 8 MiB |
 | `translated_byte_buffer` | 将用户 buffer 切成内核可访问片段；尚待消除可逃逸物理页切片 |
 | `UserPtr` / `UserPtrMut` | 用户指针包装 |
 | `UserIoVec` | iovec 读取，数量上限 1024 |
 | `fault_in_user_va` | 缺页并校验页表权限 |
+| `fault_in_user_range` | 外部副作用前的预 fault；真正拷贝仍必须再验证 |
 
 `check_user_range()` 只做范围和溢出检查；是否可读写由 fault-in 和页表权限决定。
 固定对象 copy 的实际内存访问必须和 fault-in 位于同一次 VM 锁持有期；syscall 不得在持有
@@ -703,9 +704,12 @@ flag 语义如下：
 | `GRND_INSECURE` | 可使用未认证启动状态，但不提高随机池 ready 状态 |
 
 未知位以及 `GRND_RANDOM | GRND_INSECURE` 返回 `EINVAL`。实现先用
-`translated_byte_buffer(..., UserAccess::Write)` fault-in 并校验整段用户输出区，
-再以 256 字节内核临时块分段生成和复制；临时块在返回前清零。零长度请求不解引用
-用户指针，直接返回 0。完整熵源和健康检查设计见 `docs/07_driver/random.md`。
+`fault_in_user_range(..., Write)` 在生成随机数这一外部副作用前预检查整段输出区，
+随后以 256 字节内核临时块生成，并通过 `copy_to_user_array` 再次校验并写回。
+预 fault 不是 pin：另一 CPU 可在两步之间改映射，所以后者不能省略。大于
+256 字节的请求在已写入若干 chunk 后失败时返回已完成字节数；这与 Linux
+`getrandom(2)` 的部分返回模型一致。临时块在返回前清零；零长度请求不解引用用户指针。
+完整熵源和健康检查设计见 `docs/07_driver/random.md`。
 
 ## 7. 阻塞、重启与等待队列
 

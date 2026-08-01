@@ -307,28 +307,6 @@ pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
     }
 }
 
-/// 从用户空间 sockaddr 缓冲区解析出 IpEndpoint。
-///
-/// # Safety
-///
-/// 调用方必须保证 `ptr` 指向至少 `len` 字节的合法可读用户空间内存。
-/// 此函数内部通过 `unsafe { core::slice::from_raw_parts(ptr, len as usize) }`
-/// 将原始指针解释为字节切片。如果 `ptr` 无效或 `len` 超出实际用户缓冲区
-/// 范围，会导致未定义行为。调用方应在传入前通过 `trans_ref!` 或
-/// `UserBufferReader` 验证地址范围。
-pub fn read_sockaddr(ptr: *const u8, len: u32) -> GeneralRet<IpEndpoint> {
-    if len < 2 {
-        return Err(SyscallErr::EINVAL);
-    }
-    // Safety: 调用方保证 `ptr`/`len` 有效（见 `# Safety` 文档）。
-    // `from_raw_parts` 仅在 `len` 不超出实际分配时安全。
-    let buf = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
-    match listen_endpoint(buf) {
-        Ok(listen_endpoint) => Ok(to_endpoint(listen_endpoint)),
-        Err(e) => Err(e),
-    }
-}
-
 /// 将端点信息写回用户空间 sockaddr 缓冲区，并更新 addrlen。
 pub fn write_sockaddr(endpoint: IpEndpoint, addr: *mut u8, addrlen: *mut u32) -> SyscallRet {
     // 直接复用已有的 fill_with_endpoint

@@ -312,15 +312,22 @@ copy_on_write()
 ### 5.9 uaccess
 
 ```
-translated_byte_buffer()
-    check range
+copy_from_user() / copy_to_user() / translated_str()
+    check range and current token
     for each page:
-        fault_in_user_va()
-        check PTE permission
-        return page slice
+        lock current AddressSpace
+        fault_in_user_va() + permission post-check
+        copy through direct-map raw pointer
+        unlock before allocation/parsing/next page
+
+legacy UserBuffer
+    translate pages once and retain page slices
+    // 仍待改成 VA-backed 区间，不是 SMP 安全边界
 ```
 
-单个对象访问不允许跨页；字符串扫描和 buffer 翻译有 8 MiB 上限，iovec 数量上限为 1024。
+标量、数组和字符串都允许跨页，并逐页在 VM 锁内复制。字符串扫描和
+buffer 翻译有 8 MiB 上限，iovec 数量上限为 1024。`fault_in_user_range()` 只用于副作用
+前预检查，真正访问仍会再验证当前映射。
 
 ### 5.10 `AddressSpace::do_page_fault()` 源码路径
 

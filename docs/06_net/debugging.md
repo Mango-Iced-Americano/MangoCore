@@ -377,20 +377,25 @@ pub fn poll(&self) {
 
 **现象**：`kernel page fault at 0x7f....` — 访问用户缓冲区时触发。
 
-**根因**：`sys_recvfrom`/`sys_sendto` 传入的用户地址未通过 `translated_ref`/`translated_byte_buffer` 验证就被直接解引用。
+**根因**：网络路径把用户裸指针当作内核切片，或在一次翻译后跨越等待点保存物理页视图。
 
 **修复**：所有用户态缓冲区访问必须使用安全接口：
 
 ```rust
-// 正确：使用 translated_byte_buffer
-let mut user_buf = crate::mm::page_table::translated_byte_buffer(token, buf, len);
+// 读取用户 payload：先分配内核 buffer，再在 VM 锁内复制。
+let mut kernel_buf = alloc::vec![0u8; len];
+crate::mm::copy_from_user_array(token, buf, kernel_buf.as_mut_ptr(), len)?;
 
-// 正确：使用 copy_from_user
-let kernel_buf = crate::mm::copy_from_user(token, buf, len)?;
+// 解析 sockaddr：使用 common::read_sockaddr() 的内核所有快照。
+let sockaddr = read_sockaddr(addr, addrlen)?;
+let endpoint = Endpoint::from_sockaddr(&sockaddr)?;
 
 // 错误：直接解引用裸指针
 // let ptr = buf as *const u8; // 不安全！
 ```
+
+`fault_in_user_range()` 只适合在生成随机数、分配 fd 等外部副作用前预检查；
+它不会 pin 页，真正读写时仍必须调用 copy helper。
 
 **相关文件**：
 - `os/src/net/syscall/sendto.rs`

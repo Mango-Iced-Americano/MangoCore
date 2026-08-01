@@ -42,8 +42,9 @@
 ### 1. P0/P1: user-copy 没有完整权限检查
 
 > 状态更新（2026-08-01）：以下是历史 RED 代码证据。权限后验检查已完成；B57 又删除
-> `translated_ref*` 并让固定对象/数组在逐页 VM 锁内复制。当前剩余风险是
-> `translated_byte_buffer`/`UserBuffer`/`translated_str` 的锁外物理页视图。
+> `translated_ref*` 并让固定对象/数组在逐页 VM 锁内复制。B58 又删除 `trans_ref!`/
+> `trans_refmut!`，并收口字符串与 sockaddr 绕过路径。当前剩余风险是
+> `translated_byte_buffer`/`UserBuffer` 的锁外物理页视图。
 
 代码证据：
 

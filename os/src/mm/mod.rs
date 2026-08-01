@@ -83,6 +83,7 @@ pub use uaccess::{
     copy_to_user,
     copy_to_user_array,
     copy_to_user_string,
+    fault_in_user_range,
     get_from_user,
     translate_user_va_checked,
     translated_byte_buffer,
@@ -98,7 +99,6 @@ pub use uaccess::{
     UserPtr,
     UserPtrMut,
     UserSlice,
-    // UserBufferIterator,
 };
 
 /// 初始化内核堆、物理页帧分配器并激活内核页表。

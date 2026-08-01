@@ -1,10 +1,10 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
 use crate::fs::pidfd::new_pidfd_file;
 use crate::fs::vfs::MountFSInode;
 use crate::mm::{
-    translated_byte_buffer, FaultAccess, UserAccess, UserBuffer, UserPtrMut, VirtAddr,
+    copy_from_user_array, fault_in_user_range, FaultAccess, UserAccess, UserPtrMut, VirtAddr,
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
@@ -98,30 +98,25 @@ fn read_clone3_args(uargs: *const u8, size: usize, token: usize) -> Result<Clone
     }
 
     let copy_len = size.min(SUPPORTED_SIZE);
-    let user = UserBuffer::new(translated_byte_buffer(
-        token,
-        uargs,
-        copy_len,
-        UserAccess::Read,
-    )?);
     let mut args = CloneArgs::default();
     let dst = unsafe {
         core::slice::from_raw_parts_mut((&mut args as *mut CloneArgs).cast::<u8>(), copy_len)
     };
-    user.read(dst);
+    copy_from_user_array(token, uargs, dst.as_mut_ptr(), copy_len)?;
 
     if size > SUPPORTED_SIZE {
         let extra_len = size - SUPPORTED_SIZE;
-        let extra = UserBuffer::new(translated_byte_buffer(
+        let mut extra = Vec::new();
+        extra.try_reserve_exact(extra_len).map_err(|_| ENOMEM)?;
+        extra.resize(extra_len, 0u8);
+        copy_from_user_array(
             token,
             unsafe { uargs.add(SUPPORTED_SIZE) },
+            extra.as_mut_ptr(),
             extra_len,
-            UserAccess::Read,
-        )?);
-        for idx in 0..extra.len() {
-            if extra[idx] != 0 {
-                return Err(E2BIG);
-            }
+        )?;
+        if extra.iter().any(|byte| *byte != 0) {
+            return Err(E2BIG);
         }
     }
 
@@ -417,7 +412,7 @@ pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
         return EINVAL;
     }
     if flags & CloneFlags::CLONE_PIDFD.bits() != 0
-        && translated_byte_buffer(
+        && fault_in_user_range(
             token,
             args.pidfd as *const u8,
             core::mem::size_of::<u32>(),

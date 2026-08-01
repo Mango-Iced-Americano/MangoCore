@@ -199,7 +199,8 @@ B53 已让软件精准 handler 在失效后、ack 前发布 observed generation�
 load + CPU0 真实 CoW PPN 替换证明双架构旧翻译被直接消除，而不是由 trap-return 偶然全刷。
 B54 已将 LoongArch 恒等映射的软件 dirty 表改为原子 bitset，且把 slab 的 unsafe trait
 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；内部 page/list/cache 不再声明
-`Send/Sync`。这不代表 MM 审计完成，uaccess 的可逃逸 `'static mut` 用户引用仍待独立收口。
+`Send/Sync`。这不代表 MM 审计完成，旧 `UserBuffer` 的可逃逸 `'static mut`
+用户页视图仍待独立收口。
 B55 已让正常 console 输出统一经过“本地 irq-save → 全局 OUTPUT_LOCK → 架构 writer”；
 panic handler 必须先调用 `console::enter_panic()`，后续输出绕过 OUTPUT_LOCK 与 LA64 UART
 Mutex。新增 console 调用不得形成 UART/业务锁到 OUTPUT_LOCK 的反向顺序。
@@ -207,9 +208,12 @@ B56 进一步规定 panic 诊断不得调用阻塞统计接口：allocator/curre
 `try_*`，锁忙时打印降级信息；逐 CPU 原子快照仅供诊断，不能用于调度或释放决策。
 B57 已删除固定对象路径的 `translated_ref*`：标量/数组 copy 必须在同一次 VM 锁持有期内
 完成 fault、权限后验检查和 raw copy，不能返回或保存指向用户物理页的 Rust 引用。进入
-faultable uaccess 前必须释放 fd table、task inner 与 file-private 等普通锁。`UserBuffer` 和
-`translated_str` 仍是后续审计范围；SysV IPC 等既有 fixed-copy 调用方的 registry 锁序也未
-全量验收，不得把 B57 的 helper 内部映射安全外推为整个 uaccess 调用图已经完成。
+faultable uaccess 前必须释放 fd table、task inner 与 file-private 等普通锁。B58 已让
+`translated_str` 逐页在 VM 锁内复制，删除 `trans_ref!`/`trans_refmut!` 与未使用的
+sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解析。预 fault 只用于
+ABI 副作用排序，不代替真正 copy 时的再验证。`UserBuffer`/`UserIoVec` 仍保留锁外
+物理页视图；SysV IPC 等 fixed-copy 调用方的 registry 锁序也未全量验收，不得把
+helper 内部映射安全外推为整个 uaccess 调用图已经完成。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

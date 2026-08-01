@@ -13,11 +13,11 @@
 //!
 //! fault-in 会获取当前进程 `AddressSpaceInner` 锁。调用方不得在已持有同一锁时进入
 //! 本模块的 faulting uaccess 路径。
-//! 标量和数组 copy 在每个用户页的 VM 锁内完成权限检查与实际访问，避免 PTE
-//! 翻译完成后被另一 CPU 并发 unmap、降权或 CoW。`UserBuffer` 与字符串翻译尚未
-//! 提供同等保证，调用方不得把其中的物理页切片长期保存或跨地址空间变更使用。
+//! 标量、数组和字符串 copy 在每个用户页的 VM 锁内完成权限检查与实际
+//! 访问，避免 PTE 翻译完成后被另一 CPU 并发 unmap、降权或 CoW。旧 `UserBuffer`
+//! 尚未提供同等保证，调用方不得把其中的物理页切片长期保存或跨地址空间变更使用。
 
-use core::{marker::PhantomData, ops::IndexMut};
+use core::marker::PhantomData;
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{AddressSpace, PhysAddr, StepByOne, VirtAddr};
@@ -774,13 +774,38 @@ pub fn translated_byte_buffer(
     translate_user_buffer_checked(token, ptr, len, access)
 }
 
-// TODO(uaccess-cleanup): 审计并迁移或删除对齐辅助函数。
-// Exit condition: 仓库中没有调用方，且不再需要按右对齐字节数处理用户对象。
-pub fn get_right_aligned_bytes<T>(ptr: *const T) -> usize {
-    let ptr = ptr as usize;
-    let align = core::mem::align_of::<T>();
-    let mask = align - 1;
-    (align - (ptr & mask)) & mask
+/// Fault-in 并验证一段当前任务用户地址，但不返回物理页视图。
+///
+/// 该接口只用于必须在产生外部副作用前提前验证输出区间的 ABI。真正读写时仍须再次走
+/// `copy_from/to_user`，因为另一个 CPU 可在预校验完成后立刻修改映射。
+pub fn fault_in_user_range(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> Result<(), isize> {
+    if len == 0 {
+        return Ok(());
+    }
+    if len > MAX_BUFFER_SIZE || ptr.is_null() {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    let mut cur = ptr as usize;
+    let end = check_user_range(cur, len)?;
+    let vm = current_user_vm(token)?;
+
+    while cur < end {
+        let va = VirtAddr::from(cur);
+        translate_user_va_checked_with_vm(&vm, va, access)?;
+        cur = va
+            .floor()
+            .start_addr()
+            .0
+            .checked_add(crate::config::PAGE_SIZE)
+            .ok_or(crate::syscall::errno::EFAULT)?
+            .min(end);
+    }
+    Ok(())
 }
 
 fn append_user_cstr_bytes(dst: &mut String, bytes: &[u8], max_len: usize) -> Result<(), isize> {
@@ -817,17 +842,21 @@ fn append_user_cstr_bytes(dst: &mut String, bytes: &[u8], max_len: usize) -> Res
 /// 逐页读取直到遇到 NUL，最大长度为 `MAX_BUFFER_SIZE`。非 ASCII 字节按原有
 /// 字节值映射到 `char`，用于兼容现有路径。
 pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
+    if ptr.is_null() {
+        return Err(crate::syscall::errno::EFAULT);
+    }
     let mut string = String::new();
     let mut cur = ptr as usize;
     let max_len = MAX_BUFFER_SIZE;
-    let vm = current_user_vm(token)?;
+    // 物理页内容先在 VM 锁内复制到内核 scratch，NUL 扫描和 String 扩容都在锁外完成。
+    // 这样既不泄漏 direct-map slice，也不把 heap allocator 带入 VM 临界区。
+    let mut scratch = [0u8; crate::config::PAGE_SIZE];
     loop {
         if string.len() >= max_len {
             return Err(crate::syscall::errno::EFAULT);
         }
 
         let va = VirtAddr::from(cur);
-        let pa = translate_user_va_checked_with_vm(&vm, va, UserAccess::Read)?;
         let page_offset = va.page_offset();
         let page_len = (crate::config::PAGE_SIZE - page_offset).min(
             crate::config::USER_VA_END
@@ -838,7 +867,15 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
             return Err(crate::syscall::errno::EFAULT);
         }
 
-        let bytes = &pa.floor().get_bytes_array()[page_offset..page_offset + page_len];
+        copy_user_bytes(
+            token,
+            cur,
+            page_len,
+            UserCopy::FromUser {
+                dst: scratch.as_mut_ptr(),
+            },
+        )?;
+        let bytes = &scratch[..page_len];
         if let Some(nul_pos) = bytes.iter().position(|&ch| ch == 0) {
             append_user_cstr_bytes(&mut string, &bytes[..nul_pos], max_len)?;
             break;
@@ -1127,106 +1164,6 @@ impl UserBuffer {
                 filled
             }
         }
-    }
-}
-
-impl core::ops::Index<usize> for UserBuffer {
-    type Output = u8;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        assert!(index < self.len);
-        match &self.segments {
-            UserBufferSegments::Empty => unreachable!(),
-            UserBufferSegments::Single(buf) => &buf[index],
-            UserBufferSegments::Multi(buffers) => {
-                let mut left = index;
-                for buffer in buffers {
-                    if left < buffer.len() {
-                        return &buffer[left];
-                    }
-                    left -= buffer.len();
-                }
-                unreachable!();
-            }
-        }
-    }
-}
-
-impl IndexMut<usize> for UserBuffer {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        assert!(index < self.len);
-        match &mut self.segments {
-            UserBufferSegments::Empty => unreachable!(),
-            UserBufferSegments::Single(buf) => &mut buf[index],
-            UserBufferSegments::Multi(buffers) => {
-                let mut left = index;
-                for buffer in buffers {
-                    if left < buffer.len() {
-                        return &mut buffer[left];
-                    }
-                    left -= buffer.len();
-                }
-                unreachable!();
-            }
-        }
-    }
-}
-
-impl IntoIterator for UserBuffer {
-    type Item = *mut u8;
-    type IntoIter = UserBufferIterator;
-    fn into_iter(self) -> Self::IntoIter {
-        match self.segments {
-            UserBufferSegments::Empty => UserBufferIterator {
-                buffers: Vec::new(),
-                current_buffer: 0,
-                current_idx: 0,
-            },
-            UserBufferSegments::Single(buf) => {
-                let mut v = alloc::vec::Vec::new();
-                v.push(buf);
-                UserBufferIterator {
-                    buffers: v,
-                    current_buffer: 0,
-                    current_idx: 0,
-                }
-            }
-            UserBufferSegments::Multi(buffers) => UserBufferIterator {
-                buffers,
-                current_buffer: 0,
-                current_idx: 0,
-            },
-        }
-    }
-}
-
-/// Iterator to a UserBuffer returning u8
-pub struct UserBufferIterator {
-    buffers: Vec<&'static mut [u8]>,
-    current_buffer: usize,
-    current_idx: usize,
-}
-
-impl Iterator for UserBufferIterator {
-    type Item = *mut u8;
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.current_buffer < self.buffers.len()
-            && self.buffers[self.current_buffer].is_empty()
-        {
-            self.current_buffer += 1;
-            self.current_idx = 0;
-        }
-        if self.current_buffer >= self.buffers.len() {
-            return None;
-        }
-        let r = &mut self.buffers[self.current_buffer][self.current_idx] as *mut _;
-        if self.current_idx + 1 == self.buffers[self.current_buffer].len() {
-            self.current_idx = 0;
-            self.current_buffer += 1;
-        } else {
-            self.current_idx += 1;
-        }
-        Some(r)
     }
 }
 

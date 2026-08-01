@@ -1,6 +1,6 @@
 use log::info;
 
-use crate::mm::{copy_from_user_array, UserBufferReader};
+use crate::mm::{copy_from_user_array, fault_in_user_range, UserAccess, UserBufferReader};
 use crate::net::config::NET_INTERFACE;
 use crate::net::{Endpoint, PSOCK};
 use crate::syscall::utils::wait_io;
@@ -9,7 +9,7 @@ use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
 use smoltcp::wire::{IpAddress, IpEndpoint};
 
-use super::common::MsgFlags;
+use super::common::{read_sockaddr, MsgFlags};
 
 /// 发送数据到指定目标地址。
 ///
@@ -71,7 +71,16 @@ pub fn sys_sendto(
             PSOCK::Stream => {
                 // POSIX: sendto on a SOCK_STREAM ignores dest_addr,
                 // but we still validate the pointer for EFAULT.
-                let _ = crate::trans_ref!(dest_addr, addrlen);
+                if fault_in_user_range(
+                    token,
+                    dest_addr as *const u8,
+                    addrlen as usize,
+                    UserAccess::Read,
+                )
+                .is_err()
+                {
+                    return -(SyscallErr::EFAULT as isize);
+                }
             }
             PSOCK::Datagram => {
                 // AF_UNIX sockaddr_un may be shorter than sockaddr_in; parse by family later.
@@ -98,8 +107,11 @@ pub fn sys_sendto(
                 let _ = socket.bind(&auto_bind);
             }
             let dest_endpoint = if dest_addr != 0 {
-                let dest_buf = crate::trans_ref!(dest_addr, addrlen);
-                match Endpoint::from_sockaddr(dest_buf) {
+                let dest_buf = match read_sockaddr(dest_addr, addrlen) {
+                    Ok(buf) => buf,
+                    Err(e) => return -(e as isize),
+                };
+                match Endpoint::from_sockaddr(&dest_buf) {
                     Ok(ep) => Some(ep),
                     Err(e) => return -(e as isize),
                 }
@@ -202,8 +214,11 @@ pub fn sys_sendto(
         PSOCK::Raw => {
             info!("[sys_sendto] socket is raw");
             let dest_endpoint = if dest_addr != 0 {
-                let dest_buf = crate::trans_ref!(dest_addr, addrlen);
-                match Endpoint::from_sockaddr(dest_buf) {
+                let dest_buf = match read_sockaddr(dest_addr, addrlen) {
+                    Ok(buf) => buf,
+                    Err(e) => return -(e as isize),
+                };
+                match Endpoint::from_sockaddr(&dest_buf) {
                     Ok(ep) => Some(ep),
                     Err(e) => return -(e as isize),
                 }

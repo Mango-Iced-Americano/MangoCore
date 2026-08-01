@@ -131,7 +131,7 @@ pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
         return EINVAL;
     }
     if flags & CloneFlags::CLONE_PIDFD.bits() != 0
-        && translated_byte_buffer(
+        && fault_in_user_range(
             token,
             args.pidfd as *const u8,
             core::mem::size_of::<u32>(),

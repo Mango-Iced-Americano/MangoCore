@@ -299,7 +299,7 @@ pub fn syscall_name(id: usize) -> &'static str {
 }
 use crate::{
     fs::poll::FdSet,
-    mm::{translated_byte_buffer, UserAccess, UserBuffer},
+    mm::{copy_to_user_array, fault_in_user_range, UserAccess},
     syscall::errno::Errno,
     task::{current_user_token, exit_current_and_run_next, exit_group_and_run_next, Rusage},
     timer::{ITimerVal, TimeSpec, TimeVal, Times},
@@ -1052,16 +1052,10 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
         return 0;
     }
 
-    let buffers = match translated_byte_buffer(
-        current_user_token(),
-        buf as *const u8,
-        buflen,
-        UserAccess::Write,
-    ) {
-        Ok(buffers) => buffers,
-        Err(errno) => return errno,
-    };
-    let mut user = UserBuffer::new(buffers);
+    let token = current_user_token();
+    if let Err(errno) = fault_in_user_range(token, buf as *const u8, buflen, UserAccess::Write) {
+        return errno;
+    }
     let mut offset = 0usize;
     let mut chunk = [0u8; 256];
     while offset < buflen {
@@ -1073,9 +1067,29 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
         };
         if result.is_err() {
             crate::random::wipe_sensitive(&mut chunk);
-            return errno::EAGAIN;
+            return if offset == 0 {
+                errno::EAGAIN
+            } else {
+                offset as isize
+            };
         }
-        user.write_at(offset, &chunk[..copy_len]);
+        let user_addr = match buf.checked_add(offset) {
+            Some(addr) => addr,
+            None => {
+                crate::random::wipe_sensitive(&mut chunk);
+                return if offset == 0 {
+                    errno::EFAULT
+                } else {
+                    offset as isize
+                };
+            }
+        };
+        if let Err(errno) =
+            copy_to_user_array(token, chunk.as_ptr(), user_addr as *mut u8, copy_len)
+        {
+            crate::random::wipe_sensitive(&mut chunk);
+            return if offset == 0 { errno } else { offset as isize };
+        }
         offset += copy_len;
     }
     crate::random::wipe_sensitive(&mut chunk);

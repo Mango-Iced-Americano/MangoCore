@@ -78,6 +78,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP 有界连续 TLB shootdown | 2026-08-01 | GPT/Codex, DeepSeek | SBI/INVTLB 官方语义、固定区间槽并发审查、双架构 8 核 focused 与初赛门禁 | 不增加提交层；最多 64 页精准失效，65 页回退全刷并保持 ack 前 frame 不释放；双架构 focused 33/33 |
 | SMP 真实用户访存 stale-TLB 证明 | 2026-08-01 | GPT/Codex, DeepSeek | 用户汇编 victim、真实 CoW PPN 替换、handler observed/ack 时序与假阳性排除 | 双架构 8 核 KREPEAT=2 均 67/67；精准 handler 在 ack 前推进 generation，不再由 trap-return 偶然全刷掩盖 |
 | SMP fixed-size uaccess 映射同步 | 2026-08-01 | GPT/Codex, DeepSeek | Rust alias 规则、Linux uaccess/pinning 语义、translate/use 竞态和锁序审查 | 删除 `translated_ref*`；标量/数组 copy 在逐页 VM 锁内完成，双架构 focused 34/34，初赛失败集合不变 |
+| SMP uaccess 原始视图绕过路径收口 | 2026-08-01 | GPT/Codex, DeepSeek | UserBuffer 调用面审计、Linux `getrandom` 部分返回对照、双架构 8 核初赛门禁 | 删除 `trans_ref!`/`trans_refmut!`；字符串、sockaddr 与若干 ABI 路径改为内核快照/VM 锁内 copy，初赛保持 RV64 312/314、LA64 308/314 |
 
 ## 4. 详细使用场景
 
@@ -1116,6 +1117,31 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   不变；四项采纳证据均 exit 0、无 mutation、panic、fatal 或 timeout。并发 fork/munmap 与
   fixed copy 的定向动态竞态为 NOT RUN；`UserBuffer`/字符串锁外物理视图明确留给 B58。
 
+### Case 47: SMP uaccess 原始视图绕过路径收口
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b58-uaccess-bypass-summary.md`；DeepSeek 的调用面
+  审查、Docker runner manifest 和原始日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设定“先收回所有绕过路径，再原子替换 UserBuffer”的分层，
+  实现源码并核对 Linux `getrandom` 部分返回语义；DeepSeek 只读统计 UserBuffer
+  调用面，并通过受限网关串行执行双架构 Docker/QEMU 门禁。
+- Problem: `trans_ref!` 在检查多页后仍伪造以首页物理地址为起点的连续 slice；
+  `translated_str` 和未使用的 sockaddr parser 也在 VM 锁外消费物理页视图。这些
+  路径绕过 B57 的锁内 copy 边界。
+- Implemented change: 字符串每页在 VM 锁内复制到 4 KiB scratch，锁外扫描/扩容；
+  clone3、uname/prctl、mremap/mincore 和 getrandom 改走 copy helper；bind/connect/sendto
+  先拷贝最多 512 字节的内核 sockaddr 快照再解析。删除两个宏、未使用的
+  raw parser 以及 UserBuffer 的 Index/IndexMut/iterator 死 API。
+- AI adjudication: 没有采纳 DeepSeek 先引入未使用并行 VA 结构的建议，也纠正了其
+  对 clone3 Index 调用、TCP self-connected 锁域和迁移顺序的误判。最终回归报告对
+  `kill 10`/`test_brk` 根因的描述没有日志支持，项目证据只记录“精确失败集合
+  与 B57 一致”。
+- Verification: 冻结代码 diff SHA-256 为
+  `ffe33257bdf0831793e37aede2e97f954570f046d0112c9af49259fdc75d3711`；RV64/LA64
+  `CORE_NUM=8 mask=0x003` 分别为 312/314 与 308/314，两项都包含最终双架构
+  kernel build，exit 0、无 mutation、panic、fatal 或 timeout。普通 `UserBuffer` 还未改为
+  VA-backed，因此 FS/网络直连 buffer 的定向并发竞态明确为 NOT RUN/未验收。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1205,6 +1231,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b55-console-summary.md` | SMP console 串行化与 panic raw fallback | 记录 irq-save 全局叶子锁、LA64 UART ready 修复、panic 无锁分支及 RV64 raw/semantic 双账本裁决 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b56-panic-diagnostics-summary.md` | SMP panic 诊断传递锁收口 | 记录 allocator `try_*` 降级、逐 CPU 原子/active-MM 快照、模型建议裁决及双架构 8 核门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b57-uaccess-copy-summary.md` | SMP fixed-size uaccess 映射同步 | 记录 translate/use 竞态、VM 锁内 raw copy、危险引用删除、模型初赛误报纠正及双架构 8 核门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b58-uaccess-bypass-summary.md` | SMP uaccess 原始视图绕过路径收口 | 记录字符串/sockaddr 内核快照、预 fault 边界、模型建议纠错及双架构 8 核初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

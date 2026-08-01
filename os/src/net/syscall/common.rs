@@ -1,4 +1,7 @@
+use crate::mm::copy_from_user_array;
+use crate::task::current_user_token;
 use crate::utils::error::SyscallErr;
+use alloc::vec::Vec;
 
 /// Maximum address length for sockaddr — normally very small, 512 is extremely generous
 pub const MAX_ADDR_LEN: usize = 512;
@@ -108,4 +111,32 @@ pub fn check_addrlen(addrlen: u32) -> Result<(), SyscallErr> {
     } else {
         Ok(())
     }
+}
+
+/// 将当前任务的 sockaddr 复制到内核所有的连续缓冲区。
+///
+/// Endpoint 解析不得持有用户物理页 slice；512 字节上限也避免把不可信长度直接用于大分配。
+pub fn read_sockaddr(addr: usize, addrlen: u32) -> Result<Vec<u8>, SyscallErr> {
+    check_addrlen(addrlen)?;
+    let len = addrlen as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if addr == 0 {
+        return Err(SyscallErr::EFAULT);
+    }
+
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| SyscallErr::ENOMEM)?;
+    bytes.resize(len, 0);
+    copy_from_user_array(
+        current_user_token(),
+        addr as *const u8,
+        bytes.as_mut_ptr(),
+        len,
+    )
+    .map_err(|_| SyscallErr::EFAULT)?;
+    Ok(bytes)
 }

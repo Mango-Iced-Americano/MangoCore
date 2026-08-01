@@ -74,8 +74,9 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize
 
 处理流程：
 
-1. 通过 `check_addrlen(addrlen)` 校验地址长度（不超过 `MAX_ADDR_LEN=512`）。
-2. 使用 `trans_ref!(addr, addrlen)` 读取用户空间地址数据。
+1. 通过 `read_sockaddr(addr, addrlen)` 校验地址长度（不超过
+   `MAX_ADDR_LEN=512`），并在 VM 锁内复制到内核所有的 `Vec<u8>`。
+2. 在内核快照上调用 `Endpoint::from_sockaddr()`，解析器不保存用户页视图。
 3. 调用 `Endpoint::from_sockaddr(addr_buf)` 解析地址类型：
    - **IP 地址**：检查 `is_local_bind_addr`（回环或本机地址）；特权端口（小于 1024）检查 `CAP_NET_BIND_SERVICE`。
    - **Unix 地址**（Path/Abstract/Unnamed）：处理路径解析（相对路径通过 CWD 转绝对路径）、抽象命名空间注册（`ABSTRACT_TABLE`）、文件系统 socket 文件创建（`PATH_TABLE`）。
@@ -122,7 +123,7 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize
 
 处理流程：
 
-1. 校验 `addrlen`（不超过 `MAX_ADDR_LEN`），通过 `trans_ref!` 读取用户地址。
+1. 通过 `read_sockaddr()` 校验 `addrlen` 并将用户 sockaddr 复制为内核快照。
 2. 使用 `Endpoint::from_sockaddr` 解析地址。
 3. **Unix 路径处理**：相对路径通过 CWD inode 转为绝对路径。
 4. **首次连接尝试**：调用 `socket.connect(&endpoint)`。如果返回 `EAGAIN`（TCP 握手未完成），进入等待。
@@ -185,20 +186,22 @@ pub fn sys_sendto(
 sys_sendto 入口
   ├─ 截断 len 到 64MB 上限
   ├─ MsgFlags::validate_for_send() 校验 flags
-  ├─ copy_from_user_array() → kernel_buf (内核中转)
   ├─ get_socket!(sockfd) 解析 fd
   ├─ 确定 is_nonblock (fd 标志 || MSG_DONTWAIT)
-  ├─ 校验 dest_addr/addrlen（按 socket 类型）
+  ├─ read_sockaddr() → 内核地址快照（Stream 只预 fault）
   ├─ PSOCK::Datagram → 自动绑定 + 解析 dest_endpoint + try_sendmsg
   ├─ PSOCK::Stream → try_send (无需目标地址)
   ├─ PSOCK::Raw → try_sendmsg (同 Datagram)
-  └─ 阻塞路径: WaitQueue::wait_until_interruptible
-     非阻塞路径: NET_INTERFACE.try_poll() → try_send/try_sendmsg
+  └─ 阻塞路径: copy_from_user_array() → kernel_buf → WaitQueue
+     非阻塞 fast path: UserBufferReader → try_send_user/try_sendmsg_user
 ```
 
 关键细节：
 
-- **内核中转 buffer**：使用 `copy_from_user_array` 将用户数据拷贝到内核分配的 `Vec<u8>`，避免 `trans_ref!` 在跨页边界返回不连续内存的 bug。
+- **地址快照**：Datagram/Raw 的 `dest_addr` 先通过 `read_sockaddr()` 复制到内核，
+  再解析 `Endpoint`；不再存在伪造跨页连续 slice 的宏。
+- **数据寿命**：阻塞路径使用内核中转 buffer，不跨 WaitQueue 保存用户页视图；
+  非阻塞 fast path 仍经由旧 `UserBuffer`，属于下一个 SMP uaccess 节点。
 - **自动绑定**：对于未绑定的 DGRAM socket，在发送前自动绑定 `0.0.0.0:0`。
 - **长度上限**：单次 sendto 最大 64MB，防止整数溢出和内核内存耗尽。
 
@@ -536,9 +539,8 @@ copy_from_user_array(token, buf as *const u8, kernel_buf.as_mut_ptr(), len)?;
 copy_to_user_array(token, kernel_buf.as_ptr(), buf as *mut u8, result)?;
 ```
 
-这种模式避免了两类问题：
-- `trans_ref!` 返回单页切片导致跨页数据读取错误。
-- `trans_refmut!` 跨页时写入非连续物理内存。
+这种模式让业务锁或 WaitQueue 只持有内核所有数据，真正用户拷贝仍逐页在
+VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；跨页不连续性不再由宏隐藏。
 
 ---
 
@@ -640,6 +642,6 @@ copy_to_user_array(token, kernel_buf.as_ptr(), buf as *mut u8, result)?;
 | `os/src/net/syscall/getpeername.rs` | `sys_getpeername` |
 | `os/src/net/syscall/shutdown.rs` | `sys_sock_shutdown` |
 | `os/src/net/syscall/socketpair.rs` | `sys_socketpair` |
-| `os/src/net/syscall/common.rs` | `MsgFlags`、`check_addrlen`、`is_known_sockopt_level` |
+| `os/src/net/syscall/common.rs` | `MsgFlags`、`check_addrlen`、`read_sockaddr`、`is_known_sockopt_level` |
 | `os/src/syscall/utils.rs` | `wait_io`、`wait_io_core`、`wait_io_with_queue` |
-| `os/src/syscall/syscall_macro.rs` | `get_socket!`、`trans_ref!`、`trans_refmut!` |
+| `os/src/syscall/syscall_macro.rs` | `get_socket!` |

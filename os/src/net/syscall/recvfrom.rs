@@ -21,9 +21,8 @@ use super::common::MsgFlags;
 /// - 非阻塞 `Stream` fast path：使用 `UserBufferWriter` 零拷贝接收，
 ///   在 `try_recv` 前调用 `NET_INTERFACE.try_poll()` 推进 TCP 状态机。
 ///   缺少此 poll 会导致非阻塞 recv 循环饿死定时器中断。
-/// - 阻塞模式与 Datagram/Raw：复制到内核 `Vec<u8>` buf 中转
-///   （`HACK(uaccess-contiguity)`：绕过 `trans_refmut!` 跨页连续性的已知 bug，
-///   详见函数体内 HACK 注释）。
+/// - 阻塞模式与 Datagram/Raw：先接收到内核 `Vec<u8>`，完成等待后再通过
+///   `copy_to_user_array` 写回，避免跨越等待点保存用户页视图。
 /// - `src_addr`/`addrlen`：接收前验证 `*addrlen` 值（负值或过小 → `-EINVAL`），
 ///   接收后通过 `Endpoint::fill_sockaddr()` 写回用户空间。
 ///
@@ -38,7 +37,6 @@ use super::common::MsgFlags;
 /// # Linux Compatibility
 ///
 /// TCP (`SOCK_STREAM`) 下 `recvfrom` 行为等同于 `recv` —— 忽略 `src_addr`/`addrlen`。
-/// 内核 buf 中转方案是绕过 `trans_refmut!` 跨页 bug 的 workaround。
 pub fn sys_recvfrom(
     sockfd: u32,
     buf: usize,
@@ -101,13 +99,8 @@ pub fn sys_recvfrom(
         return n;
     }
 
-    // HACK(uaccess-contiguity): 使用 kernel buffer 中转，避免 `trans_refmut!` 跨页时
-    // 返回非连续物理内存的 bug。`trans_refmut!` 验证了所有用户页，但只返回第一页的
-    // 切片指针，超出第一页边界的数据会写到错误地址。
-    // Reference: `trans_refmut!` macro in `os/src/mm/uaccess.rs` — maps each page
-    //   independently but returns only the first page's virtual address.
-    // Remove when: `UserBufferWriter` supports scatter-gather writes across
-    //   non-contiguous physical pages, allowing zero-copy recv even for cross-page buffers.
+    // 阻塞 recv 会跨越 wait queue 等待点，因此数据先落到内核所有的 buffer。
+    // 唤醒后再走统一 uaccess copy，不让用户映射的生命期与 socket 等待耦合。
     let (result, kernel_buf) = {
         let mut kernel_buf = alloc::vec![0u8; len_usize];
 

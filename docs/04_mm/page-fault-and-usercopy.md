@@ -395,7 +395,7 @@ trap 路径和 syscall 路径对错误的最终处理不同：trap 中的用户�
 
 ## 14. 用户 copy 与缺页
 
-`uaccess` 不只是查页表。以 `translated_byte_buffer()` 为例：
+`uaccess` 不只是查页表。旧 `translated_byte_buffer()` 的翻译流程为：
 
 1. 检查长度不超过 `MAX_BUFFER_SIZE`。
 2. 检查指针非空和用户地址范围。
@@ -405,6 +405,10 @@ trap 路径和 syscall 路径对错误的最终处理不同：trap 中的用户�
 6. 返回物理页对应的 `&'static mut [u8]` 切片。
 
 这意味着 `read(fd, buf, len)` 写用户缓冲区时可以触发匿名页 lazy allocation 或 COW。
+
+B57/B58 后，固定对象、数组和字符串不再消费上述锁外 slice：它们在每页
+`AddressSpace::write` 临界区内完成 fault、权限后验和实际 copy。该流程目前仍用于
+旧 `UserBuffer`/iovec 直连 I/O，因此本节是“剩余兼容路径”，不是新 syscall 应选择的 API。
 
 用户 buffer 翻译路径的核心函数如下：
 

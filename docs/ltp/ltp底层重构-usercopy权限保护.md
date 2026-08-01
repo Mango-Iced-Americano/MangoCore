@@ -2,7 +2,8 @@
 
 > 历史说明（2026-08-01）：本文记录首次补齐 user-copy 权限语义时的实现。
 > B57 已删除 `translated_ref*`，固定对象/数组改为逐页 VM 锁内 copy；
-> `translated_byte_buffer`/`UserBuffer` 的锁外物理页视图仍待 B58 收口。以下旧接口名仅用于
+> B58 已收口字符串、sockaddr 与原始宏绕过路径；`translated_byte_buffer`/`UserBuffer`
+> 的锁外物理页视图仍待后续节点收口。以下旧接口名仅用于
 > 解释当时的迁移过程，不代表当前推荐 API。
 
 ## 1. 背景

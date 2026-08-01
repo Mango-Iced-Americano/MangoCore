@@ -1,4 +1,4 @@
-use super::common::check_addrlen;
+use super::common::read_sockaddr;
 use crate::net::socket::UnixEndpoint;
 use crate::net::Endpoint;
 use crate::syscall::utils::wait_io;
@@ -34,12 +34,11 @@ use alloc::format;
 /// 非阻塞 `connect` 在握手未完成时返回 `-EINPROGRESS`（而非 `-EAGAIN`），
 /// 与 Linux 6.6 一致。
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
-    match check_addrlen(addrlen) {
-        Ok(_) => {}
+    let addr_buf = match read_sockaddr(addr, addrlen) {
+        Ok(buf) => buf,
         Err(e) => return -(e as isize),
-    }
-    let addr_buf = crate::trans_ref!(addr, addrlen);
-    let endpoint = match Endpoint::from_sockaddr(addr_buf) {
+    };
+    let endpoint = match Endpoint::from_sockaddr(&addr_buf) {
         Ok(ep) => ep,
         Err(e) => return -(e as isize),
     };

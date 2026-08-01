@@ -1,6 +1,9 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs;
-use crate::mm::{copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess};
+use crate::mm::{
+    copy_from_user_array, copy_to_user_array, fault_in_user_range, MapFlags, MapPermission,
+    UserAccess,
+};
 use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token};
 use alloc::vec::Vec;
@@ -287,18 +290,19 @@ fn ranges_overlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) ->
 fn copy_current_user_range(src: usize, dst: usize, len: usize) -> Result<(), isize> {
     let token = current_user_token();
     let mut copied = 0usize;
+    let mut scratch = [0u8; PAGE_SIZE];
     while copied < len {
         let chunk_len = (len - copied).min(PAGE_SIZE);
         let src_addr = src.checked_add(copied).ok_or(EFAULT)?;
         let dst_addr = dst.checked_add(copied).ok_or(EFAULT)?;
-        let src_buf =
-            translated_byte_buffer(token, src_addr as *const u8, chunk_len, UserAccess::Read)?;
-        let mut dst_buf =
-            translated_byte_buffer(token, dst_addr as *const u8, chunk_len, UserAccess::Write)?;
-        if src_buf.len() != 1 || dst_buf.len() != 1 {
-            return Err(EFAULT);
-        }
-        dst_buf[0].copy_from_slice(src_buf[0]);
+        // 两次 copy 分别在对应用户页的 VM 锁内完成；scratch 让源 PA 不跨解锁点泄漏。
+        copy_from_user_array(
+            token,
+            src_addr as *const u8,
+            scratch.as_mut_ptr(),
+            chunk_len,
+        )?;
+        copy_to_user_array(token, scratch.as_ptr(), dst_addr as *mut u8, chunk_len)?;
         copied += chunk_len;
     }
     Ok(())
@@ -610,7 +614,7 @@ pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> isize {
     }
 
     let page_count = rounded_len / PAGE_SIZE;
-    if translated_byte_buffer(
+    if fault_in_user_range(
         current_user_token(),
         vec as *const u8,
         page_count,

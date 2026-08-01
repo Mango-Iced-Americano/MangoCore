@@ -75,7 +75,8 @@ pub const IO_CHUNK_SIZE: usize = {
 
 ### 暂不在此范围内
 
-- `sendto`/`recvfrom` 的 `trans_ref`/`trans_refmut` 路径
+- `sendto`/`recvfrom` 的用户地址路径（原计划暂缓，B58 已删除
+  `trans_ref`/`trans_refmut` 并改为内核快照）
 - `Arc<FrameTracker>` + `Arc<PageEntry>` slab 分配器（单独优化）
 
 ## 验证清单

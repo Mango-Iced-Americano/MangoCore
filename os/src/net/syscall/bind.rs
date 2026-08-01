@@ -1,4 +1,4 @@
-use super::common::check_addrlen;
+use super::common::read_sockaddr;
 use crate::get_socket;
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
 use crate::net::socket::unix::PATH_TABLE;
@@ -65,14 +65,13 @@ fn ipv4_endpoint_from_unspec_sockaddr(addr_buf: &[u8]) -> Option<Endpoint> {
 /// 特权端口检查使用 `CAP_NET_BIND_SERVICE` 而非传统的 `uid==0` 检查 ——
 /// 两者的行为等价于 Linux 6.6。
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
-    match check_addrlen(addrlen) {
-        Ok(_) => {}
+    let addr_buf = match read_sockaddr(addr, addrlen) {
+        Ok(buf) => buf,
         Err(e) => return -(e as isize),
-    }
-    let addr_buf = crate::trans_ref!(addr, addrlen);
-    let endpoint = match Endpoint::from_sockaddr(addr_buf) {
+    };
+    let endpoint = match Endpoint::from_sockaddr(&addr_buf) {
         Ok(Endpoint::Unspecified) => {
-            ipv4_endpoint_from_unspec_sockaddr(addr_buf).unwrap_or(Endpoint::Unspecified)
+            ipv4_endpoint_from_unspec_sockaddr(&addr_buf).unwrap_or(Endpoint::Unspecified)
         }
         Ok(ep) => ep,
         Err(e) => return -(e as isize),

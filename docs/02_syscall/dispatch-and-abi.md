@@ -261,12 +261,13 @@ SYSCALL_CLONE => sys_clone(
 | `UserPtr<T>` | 只读用户对象；NULL 返回 `EFAULT` |
 | `UserPtrMut<T>` | 可读写用户对象；写入用 `copy_to_user` |
 | `UserSlice<T>` | 数组读写；字节长度超过 8 MiB 返回 `EFAULT` |
-| `UserCString` | NUL 结尾字符串读取 |
+| `UserCString` | NUL 结尾字符串；逐页在 VM 锁内复制到内核 scratch |
 | `UserBufferReader` | 用户 buffer 读入内核；优先单页 fast path |
 | `UserBufferWriter` | 内核数据写入用户 buffer |
 | `UserIoVec` | 读取 iovec，`MAX_IOVEC_COUNT = 1024` |
 | `translated_byte_buffer` | 将用户 buffer 按页切成内核可访问片段 |
 | `copy_from_user` / `copy_to_user` | 对用户地址进行 fault-in 后复制 |
+| `fault_in_user_range` | 副作用前预检查区间；不保证后续映射不变 |
 
 `MAX_BUFFER_SIZE = 8 MiB`，用于限制单次用户 buffer 翻译，避免内核因用户传入巨大长度而 OOM。
 

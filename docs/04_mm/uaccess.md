@@ -35,6 +35,7 @@ tags: [mm, uaccess, user-pointer, iovec]
 | `translated_byte_buffer()` | 跨页用户 buffer 翻译 |
 | `translated_str()` | 读取 NUL 结尾字符串 |
 | `copy_from_user/copy_to_user` | 在 VM 映射同步下完成对象/数组拷贝 |
+| `fault_in_user_range()` | 外部副作用前的用户区间预 fault，不替代真正 copy |
 | `user_accessible_len()` | 非 faulting 可访问长度探测 |
 
 ## 2. 核心约束
@@ -44,7 +45,8 @@ tags: [mm, uaccess, user-pointer, iovec]
 1. 地址范围必须在 `USER_VA_END` 以下。
 2. faulting 用户访问只允许当前任务的 user token。
 3. 翻译过程会触发缺页，并在成功后检查 PTE 权限。
-4. 固定大小 copy 的权限检查、物理地址取得和实际访问必须处于同一次 VM 锁持有期。
+4. 标量、数组和字符串 copy 的权限检查、物理地址取得和实际访问
+   必须处于同一次 VM 锁持有期。
 
 `current_user_vm(token)` 明确检查：
 
@@ -210,16 +212,17 @@ B57 删除了 `translated_ref<T>()`、`translated_refmut<T>()` 和
 权限检查失败，helper 返回 `EFAULT`，前面页的字节可能已经完成复制。调用方不得把
 `Result::Err` 理解为“一个字节都没动”。
 
-## 10. translated_str
+## 10. translated_str 的 SMP 边界
 
 `translated_str(token, ptr)` 从用户空间读取 NUL 结尾字符串：
 
-1. 从 `ptr` 开始逐页 fault-in。
-2. 每页扫描 `0` 字节。
-3. ASCII 快路径批量追加。
-4. 非 ASCII 按字节转 `char` 追加。
-5. 长度达到 `MAX_BUFFER_SIZE` 返回 `EFAULT`。
-6. 地址递增溢出返回 `EFAULT`。
+1. 从 `ptr` 开始逐页进入 `copy_user_bytes()`。
+2. 在 VM 锁内 fault-in、做权限后验并复制到 4 KiB 内核 scratch。
+3. 释放 VM 锁后扫描 NUL、执行 ASCII 快路径或按字节追加，不把堆分配带入锁内。
+4. 长度达到 `MAX_BUFFER_SIZE`、地址递增溢出或后续页失效时返回 `EFAULT`。
+
+这条路径不再返回或消费锁外物理页 slice。每页 scratch 会在下一页前覆盖，
+字符串结果始终由内核 `String` 所有。
 
 该函数用于路径名、exec 参数、环境变量、socket 选项中字符串等。
 
@@ -257,9 +260,15 @@ read_user_iovecs()
 | `len()` | 逻辑总长度 |
 | `read(dst)` | 从用户 buffer 读到内核 dst |
 | `write(src)` | 从内核 src 写到用户 buffer |
-| iterator | 逐片段遍历 |
+| `read_at/write_at` | 从逻辑偏移开始拷贝 |
+| `clear/fill_at` | 清零或填充逻辑区间 |
 
 跨页时，逻辑连续 buffer 被拆成多段物理页切片；read/write 会按顺序复制。
+旧 Index/IndexMut/IntoIterator 实现没有生产调用方，B58 已删除，避免继续扩大可逃逸视图的 API 面。
+
+这仍是未完成的 SMP 边界：`UserBuffer` 构造完成后 VM 锁已释放，所以 FS/网络层的
+后续 read/write 仍可与并发 CoW、mprotect 或 munmap 竞争。B58 只把其他原始绕过路径
+收回这一个核心；下一节点需改为 VA-backed 区间，并让实际 read/write 逐页在 VM 锁内完成。
 
 ## 13. 与 syscall 层的配合
 

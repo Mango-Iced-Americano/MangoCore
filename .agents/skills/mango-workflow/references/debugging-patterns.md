@@ -820,6 +820,14 @@
   raw pointer，并由真正的 VM/对象锁提供排他关系。
 - **跨页语义**: 为避免长时间持有 VM 锁，大 copy 可以逐页串行化；后续页失败时此前 chunk
   可能已经完成。调用方和文档必须显式接受部分完成，不能把 `Err(EFAULT)` 解释为全量回滚。
+- **预 fault 不是 pin**: `fault_in_user_range()` 可以在分配 fd、生成随机数等外部副作用前
+  提前报错，但另一 CPU 可在预检查后立即改映射。真正读写仍必须走锁内 copy；
+  不得把预检查结果转换为裸 slice 或引用。
+- **解析器只消费内核快照**: pathname/sockaddr/变长结构的 parser 不应接收用户物理页
+  slice。先在 VM 锁内复制到有上限的内核 buffer，释放锁后再扫描、分配和解析；
+  这同时避免把 heap allocator 带入 VM 临界区。
+- **不跨等待点保存用户视图**: 阻塞 I/O 先把数据收入内核所有 buffer，或在唤醒后才
+  执行用户 copy。WaitQueue、socket poll 或磁盘 I/O 期间不保存 VA 翻译得到的 PA/slice。
 - **锁序审计**: faultable uaccess 前先释放 fd table、task inner、file-private、socket 等普通
   业务锁。若旧调用链要求持锁复制，先快照/克隆稳定 owner，再释放锁进入 uaccess。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
