@@ -30,7 +30,7 @@ use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
-const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
+const RV64_CONSOLE_POLL_INTERVAL: usize = 1;
 
 #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =

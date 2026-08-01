@@ -514,7 +514,7 @@ fn walk_nodes(fdt: &FallibleFdt<'_>, devices: &mut Vec<DeviceInfo>) {
 fn classify_device(compatible: &[String]) -> DeviceKind {
     for entry in compatible {
         match entry.as_str() {
-            "ns16550a" | "ns16550" => return DeviceKind::Serial,
+            "ns16550a" | "ns16550" | "snps,dw-apb-uart" => return DeviceKind::Serial,
             // virtio,mmio is a transport, not a device type. The actual type
             // is determined when the block and network drivers probe it.
             "virtio,mmio" => return DeviceKind::Other,
