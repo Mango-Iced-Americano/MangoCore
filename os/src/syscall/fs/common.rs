@@ -552,29 +552,6 @@ pub(crate) fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<A
 }
 
 #[inline]
-pub(crate) fn writable_len_for_read(token: usize, user_addr: usize, want: usize) -> Result<usize, isize> {
-    let accessible = crate::mm::user_accessible_len(
-        token,
-        user_addr as *const u8,
-        want,
-        crate::mm::UserAccess::Write,
-    );
-    if accessible != 0 {
-        return Ok(accessible);
-    }
-    // Fault-in before consuming file data: lazy page succeeds, bad pointer
-    // fails without advancing the file offset.
-    UserBufferWriter::new(token, user_addr as *mut u8, 1).map(|_| ())?;
-    let accessible = crate::mm::user_accessible_len(
-        token,
-        user_addr as *const u8,
-        want,
-        crate::mm::UserAccess::Write,
-    );
-    Ok(accessible.max(1).min(want))
-}
-
-#[inline]
 pub(crate) fn iov_writable_len_for_read(
     user_iov: &UserIoVec,
     offset: usize,
@@ -610,20 +587,26 @@ pub(crate) fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: 
                 Some(v) => v,
                 None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
             };
-            let accessible = match writable_len_for_read(token, user_addr, want) {
-                Ok(n) => n,
+            let t0 = crate::task::perf::perf_memory_io_time_now();
+            let (writer, accessible) = match UserBufferWriter::new_writable_prefix(
+                token,
+                user_addr as *mut u8,
+                want,
+            ) {
+                Ok(prefix) => prefix,
                 Err(errno) => return if total > 0 { total as isize } else { errno },
             };
-
-            let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
-                Ok(w) => w.into_user_buffer(),
-                Err(errno) => return if total > 0 { total as isize } else { errno },
-            };
+            let mut ubuf = writer.into_user_buffer();
+            let t1 = crate::task::perf::perf_memory_io_time_now();
 
             let n = match file.read_user(&mut ubuf) {
                 Ok(n) => n,
                 Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
             };
+            let t2 = crate::task::perf::perf_memory_io_time_now();
+            crate::task::perf::record_pread_uaccess(t1.wrapping_sub(t0));
+            crate::task::perf::record_pread_file(t2.wrapping_sub(t1));
+            crate::task::perf::record_pread_total_count();
             if n == 0 { break; }
             total += n;
             if n < accessible { break; }
@@ -649,8 +632,12 @@ pub(crate) fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: 
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
-        let accessible = match writable_len_for_read(token, user_addr, want) {
-            Ok(n) => n,
+        let (mut writer, accessible) = match UserBufferWriter::new_writable_prefix(
+            token,
+            user_addr as *mut u8,
+            want,
+        ) {
+            Ok(prefix) => prefix,
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
 
@@ -665,29 +652,10 @@ pub(crate) fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: 
             break;
         }
 
-        let mut copied = 0usize;
-        while copied < n {
-            let this_addr = user_addr.saturating_add(copied);
-            let page_remain =
-                crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
-            let chunk = (n - copied).min(page_remain.max(1));
-            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
-                Ok(w) => w,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
-                Ok(c) => c,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            copied += c;
-            if c < chunk { break; }
-        }
+        let copied = match writer.write_from(&kbuf[..n]) {
+            Ok(copied) => copied,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
 
         total += copied;
         if copied < n { break; }
@@ -711,14 +679,15 @@ pub(crate) fn read_zero_into_user(token: usize, buf: usize, count: usize) -> isi
             Some(v) => v,
             None => return if total > 0 { total as isize } else { EFAULT },
         };
-        let accessible = match writable_len_for_read(token, user_addr, want) {
-            Ok(n) => n,
+        let (writer, accessible) = match UserBufferWriter::new_writable_prefix(
+            token,
+            user_addr as *mut u8,
+            want,
+        ) {
+            Ok(prefix) => prefix,
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
-        let mut user_buf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
-            Ok(writer) => writer.into_user_buffer(),
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
+        let mut user_buf = writer.into_user_buffer();
         user_buf.clear();
         total += accessible;
 
@@ -752,20 +721,26 @@ pub(crate) fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count:
                 Some(v) => v,
                 None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
             };
-            let accessible = match writable_len_for_read(token, user_addr, want) {
-                Ok(n) => n,
+            let t0 = crate::task::perf::perf_memory_io_time_now();
+            let (writer, accessible) = match UserBufferWriter::new_writable_prefix(
+                token,
+                user_addr as *mut u8,
+                want,
+            ) {
+                Ok(prefix) => prefix,
                 Err(errno) => return if total > 0 { total as isize } else { errno },
             };
-
-            let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
-                Ok(w) => w.into_user_buffer(),
-                Err(errno) => return if total > 0 { total as isize } else { errno },
-            };
+            let mut ubuf = writer.into_user_buffer();
+            let t1 = crate::task::perf::perf_memory_io_time_now();
 
             let n = match file.pread_user(file_off, &mut ubuf) {
                 Ok(n) => n,
                 Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
             };
+            let t2 = crate::task::perf::perf_memory_io_time_now();
+            crate::task::perf::record_pread_uaccess(t1.wrapping_sub(t0));
+            crate::task::perf::record_pread_file(t2.wrapping_sub(t1));
+            crate::task::perf::record_pread_total_count();
             if n == 0 { break; }
             total += n;
             if n < accessible { break; }
@@ -794,8 +769,12 @@ pub(crate) fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count:
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
-        let accessible = match writable_len_for_read(token, user_addr, want) {
-            Ok(n) => n,
+        let (mut writer, accessible) = match UserBufferWriter::new_writable_prefix(
+            token,
+            user_addr as *mut u8,
+            want,
+        ) {
+            Ok(prefix) => prefix,
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
 
@@ -808,29 +787,10 @@ pub(crate) fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count:
         };
         if n == 0 { break; }
 
-        let mut copied = 0usize;
-        while copied < n {
-            let this_addr = user_addr.saturating_add(copied);
-            let page_remain =
-                crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
-            let chunk = (n - copied).min(page_remain.max(1));
-            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
-                Ok(w) => w,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
-                Ok(c) => c,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            copied += c;
-            if c < chunk { break; }
-        }
+        let copied = match writer.write_from(&kbuf[..n]) {
+            Ok(copied) => copied,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
 
         total += copied;
         if copied < n { break; }

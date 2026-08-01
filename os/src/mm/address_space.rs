@@ -684,10 +684,50 @@ impl<T: PageTable> AddressSpace<T> {
         addr: VirtAddr,
         access: FaultAccess,
     ) -> Result<PhysAddr, isize> {
+        if let Some(user_access) = match access {
+            FaultAccess::Load => Some(UserAccess::Read),
+            FaultAccess::Store => Some(UserAccess::Write),
+            FaultAccess::Execute => None,
+        } {
+            if let Some(pa) = self.mapped_user_va(addr, user_access)? {
+                return Ok(pa);
+            }
+        }
+
         super::frame_reserve(3);
         self.do_page_fault(addr, access)
             .and_then(|_| self.validate_user_fault_result(addr, access))
             .map_err(memory_error_to_errno)
+    }
+
+    /// Return an already-mapped user physical address without faulting it in.
+    ///
+    /// The PTE must already satisfy every requested user permission.  A miss
+    /// deliberately falls through to the fault path so lazy mappings, CoW,
+    /// shared-write permission restoration, and guard pages retain their
+    /// existing semantics.
+    pub(crate) fn mapped_user_va(
+        &self,
+        addr: VirtAddr,
+        access: UserAccess,
+    ) -> Result<Option<PhysAddr>, isize> {
+        let vpn = addr.floor();
+        if !self
+            .page_table
+            .user_access_ok(vpn, access)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+
+        let pa = self
+            .page_table
+            .translate_va(addr)
+            .ok_or(crate::syscall::errno::EFAULT)?;
+        if !super::is_allocatable_ram_phys_addr(pa.0) {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        Ok(Some(pa))
     }
 
     pub fn fault_in_trap_va(

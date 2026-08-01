@@ -359,6 +359,80 @@ impl UserBufferWriter {
         Ok(Self { buffer })
     }
 
+    /// Build the writable prefix of a user range with one address-space lock.
+    ///
+    /// Already writable pages are collected without faulting.  At the first
+    /// unavailable page, an empty prefix may fault it in; a nonempty prefix is
+    /// returned immediately so callers can complete a POSIX partial read
+    /// before retrying the next chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns a negative errno when the first requested page cannot become a
+    /// writable user mapping.
+    pub fn new_writable_prefix(
+        token: usize,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<(Self, usize), isize> {
+        if len == 0 {
+            return Ok((
+                Self {
+                    buffer: UserBuffer::new(Vec::new()),
+                },
+                0,
+            ));
+        }
+        if len > MAX_BUFFER_SIZE {
+            log::warn!("[kernel] UserBufferWriter::new_writable_prefix: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        if ptr.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+
+        let start = ptr as usize;
+        let end = check_user_range(start, len)?;
+        let vm = current_user_vm(token)?;
+        let (buffers, accessible) = {
+            let mut vm = vm.lock();
+            let mut buffers = Vec::with_capacity(32);
+            let mut current = start;
+
+            while current < end {
+                let va = VirtAddr::from(current);
+                let pa = match vm.mapped_user_va(va, UserAccess::Write)? {
+                    Some(pa) => pa,
+                    None if !buffers.is_empty() => break,
+                    None => vm.fault_in_user_va(va, FaultAccess::Store)?,
+                };
+                let page_end = va
+                    .floor()
+                    .start_addr()
+                    .0
+                    .checked_add(crate::config::PAGE_SIZE)
+                    .ok_or(crate::syscall::errno::EFAULT)?
+                    .min(end);
+                let page_offset = va.page_offset();
+                let page_len = page_end - current;
+                let ppn = pa.floor();
+                buffers.push(
+                    &mut ppn.get_bytes_array()[page_offset..page_offset + page_len],
+                );
+                current = page_end;
+            }
+
+            (buffers, current - start)
+        };
+
+        Ok((
+            Self {
+                buffer: UserBuffer::new(buffers),
+            },
+            accessible,
+        ))
+    }
+
     pub fn into_user_buffer(self) -> UserBuffer {
         self.buffer
     }
