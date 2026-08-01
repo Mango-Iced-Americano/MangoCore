@@ -1,10 +1,13 @@
 //! Panic diagnostic dump — prints kernel state at panic time.
 //! Called from panic_handler in both lang_items variants.
 
+use core::sync::atomic::Ordering;
+
 pub fn dump_panic_context() {
     print_syscall_context();
     print_kernel_memory();
     print_task_info();
+    print_cpu_states();
     print_backtrace();
 }
 
@@ -16,28 +19,40 @@ fn print_syscall_context() {
 fn print_kernel_memory() {
     println!("--- KERNEL MEMORY ---");
 
-    let (free, total, _au, _aa, _w) = crate::mm::heap_stats();
-    println!(
-        "heap: {}/{} bytes free ({:.1}% used)",
-        free,
-        total,
-        if total > 0 {
-            (total - free) as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        }
-    );
+    if let Some((free, total, _au, _aa, _w)) = crate::mm::try_heap_stats() {
+        println!(
+            "heap: {}/{} bytes free ({:.1}% used)",
+            free,
+            total,
+            if total > 0 {
+                (total - free) as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+    } else {
+        // 精确统计需要 allocator 锁；panic 中宁可报告原子 charge，也不能等待。
+        println!(
+            "heap: <locked>; charged={} peak={} capacity={}",
+            crate::mm::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed),
+            crate::mm::KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed),
+            crate::hal::KERNEL_HEAP_SIZE
+        );
+    }
 
-    let free_frames = crate::mm::unallocated_frames();
-    let free_bytes = free_frames * crate::config::PAGE_SIZE;
-    println!(
-        "physical frames: {} free ({} bytes, {} pages)",
-        free_frames, free_bytes, free_frames
-    );
+    if let Some(free_frames) = crate::mm::try_unallocated_frames() {
+        let free_bytes = free_frames * crate::config::PAGE_SIZE;
+        println!(
+            "physical frames: {} free ({} bytes, {} pages)",
+            free_frames, free_bytes, free_frames
+        );
+    } else {
+        println!("physical frames: <locked>");
+    }
 }
 
 fn print_task_info() {
-    println!("--- TASK ---");
+    println!("--- LOCAL TASK ---");
 
     match crate::task::try_current_task() {
         Ok(Some(task)) => {
@@ -55,6 +70,50 @@ fn print_task_info() {
         }
         Ok(None) => println!("no current task"),
         Err(()) => println!("task: <CPU-local unavailable or locked>"),
+    }
+}
+
+fn print_cpu_states() {
+    println!("--- PER-CPU (best effort; active_mm=0 means none unless busy=1) ---");
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        let state = crate::smp::cpu_diagnostics(cpu_id);
+        println!(
+            "cpu{} boot: online={} idle_ctx={} scheduler={} stop_req={} stopped={}",
+            state.cpu_id,
+            state.online,
+            state.idle_context_ready,
+            state.scheduler_entered,
+            state.stop_requested,
+            state.stopped
+        );
+        println!(
+            "cpu{} task: current={} pid={} tid={} syscall={:?} queued={} zombies={} active_mm={} busy={}",
+            state.cpu_id,
+            state.task.current_present,
+            state.task.current_pid,
+            state.task.current_tid,
+            state.task.current_syscall_id,
+            state.task.nr_running,
+            state.task.nr_zombies,
+            state.task.active_mm_id,
+            state.task.active_mm_lock_busy
+        );
+        println!(
+            "cpu{} work: ipi={:#x} resched={}/{} timer={}/{}/{} ktlb={}/{} utlb={}/{} barrier={}/{}",
+            state.cpu_id,
+            state.pending_ipi,
+            state.need_resched,
+            state.reschedule_count,
+            state.timer_pending,
+            state.timer_irq_count,
+            state.timer_deferred_count,
+            state.kernel_tlb_request,
+            state.kernel_tlb_ack,
+            state.user_tlb_request,
+            state.user_tlb_ack,
+            state.memory_barrier_request,
+            state.memory_barrier_ack
+        );
     }
 }
 

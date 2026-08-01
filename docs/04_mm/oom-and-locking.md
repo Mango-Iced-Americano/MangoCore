@@ -361,6 +361,10 @@ OOM 相关代码要分清“承诺量”“驻留量”和“可回收量”。`
 
 锁顺序同样是 OOM 路径的风险点。回收可能触碰 VMA、PageCache、frame store 和调度状态，不能在持有业务锁时进入可能等待或分配的路径。文档中的“锁 -> clone Arc -> 释放锁 -> 操作”规则，在 mmap、filemap、PageCache reclaim 和 wait queue 交互处都适用。
 
+panic 诊断是更严格的不可等待上下文。`heap_stats()` 与 `unallocated_frames()` 保留给普通
+调用者的阻塞语义；`panic_diag` 只能使用 `try_heap_stats()` / `try_unallocated_frames()`，
+锁忙时退化输出，禁止在 allocator 临界区 panic 后递归等待同一把锁。
+
 ## 16. 调试核对点
 
 | 现象 | 检查 |

@@ -192,6 +192,11 @@ panic 路径使用不阻塞的 `try_current_task()`；CPU-local 尚未安装或 
 正被占用时只报告不可用。任何本地 current `Arc` 都必须在 `schedule()` 或架构
 `noreturn` 返回路径前显式释放，因为 context switch 不会展开旧 Rust 栈帧。
 
+B56 的 `CpuDiagnostics` 逐核汇总 online/scheduler/STOP、current PID/TID、runqueue 与
+zombie 计数、active MM ID、pending IPI、timer 和 TLB/barrier request/ack。任务侧字段是
+原子 hint；active MM 只尝试取得 `active_user_vm` 槽锁，锁忙时输出 `busy=1`。这些值来自
+不同时间点，只用于事后诊断，不能替代 current/runqueue/MM 锁内的所有权判断。
+
 ## 6. 调度 profiling
 
 `processor.rs` 内部有调度 debug profile 计数：
@@ -250,6 +255,11 @@ trap 后端收到 timer interrupt 后进入 `task::timer_interrupt_handler()`。
 
 普通日志通过 irq-save 全局锁输出；panic 先关闭本地中断，再永久切换到不等待内核
 console/UART 锁的 raw 路径。panic 诊断因此可以在普通输出临界区自身发生崩溃时继续打印。
+
+panic 诊断也不得通过“只读统计”间接等待普通锁。堆和帧分配器分别提供
+`try_heap_stats()` / `try_unallocated_frames()`：锁可用时打印精确值，锁忙时立即退化为
+原子 heap charge 或 `<locked>`。本地任务使用 `try_current_task()` / `task.try_inner()`，逐
+CPU 状态只读原子字段和一次 active-MM `try_lock()`；整条诊断链不分配，也不等待普通锁。
 
 ## 10. 调试入口
 

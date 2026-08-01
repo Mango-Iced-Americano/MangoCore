@@ -47,6 +47,11 @@ impl TlbContext {
         }
     }
 
+    /// 返回地址空间生命周期内唯一且非零的诊断编号。
+    pub(crate) fn id(&self) -> usize {
+        self.mm_id
+    }
+
     /// 返回当前 MM 的硬件 ASID；`None` 表示必须先在无普通锁状态完成 rollover。
     #[cfg(target_arch = "loongarch64")]
     pub(crate) fn assign_asid(&self) -> Option<u16> {

@@ -84,6 +84,7 @@ related_docs:
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
 | console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
+| panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照 | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入 |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -332,13 +333,16 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - hard IRQ/IPI 路径不获取普通业务锁，锁序文档与代码中的新增关系一致；
 - panic fallback 的单核持锁注入测试证明其不等待 console 锁。
 
-#### 当前进度（B55）
+#### 当前进度（B56）
 
 - 正常 console 已实现 `local IRQ-off -> OUTPUT_LOCK -> 架构 writer`，双架构 8 核启动和
   focused 输出无 marker 破坏；LA64 的第二层 UART Mutex 只在 OUTPUT_LOCK 之后取得。
 - panic handler 已在任何格式化前发布单向 raw mode，源码调用链不取得 OUTPUT_LOCK 或
   LA64 UART Mutex。为避免保留生产测试 hook，“持锁后主动 panic”的动态注入仍为 NOT RUN，
   因而本阶段不能把该条退出条件写成动态完成。
+- B56 又清除了 panic_diag 对 heap mutex 和 frame allocator rwlock 的阻塞读取；锁忙时
+  立即退化。逐 CPU 诊断已覆盖 current/queue/active MM/pending work/TLB ack，且不被生产
+  正确性路径消费。双架构 8 核 focused 均为 34/34。
 
 ### Phase 1：BSP/AP 启动与 Per-CPU 基础
 
@@ -583,6 +587,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   logger 一条记录只取锁一次；panic mode 让所有后续格式化输出绕过普通 console 锁和
   LA64 UART Mutex。双架构 focused 均 34/34；初赛 RV64 raw 309/semantic 312、LA64
   raw/semantic 308，RV64 差额是既有 `test_pipe` 多 write 物理行粘连；
+- B56 把 panic 诊断本身也纳入不可等待边界：heap/frame 统计改走 `try_*`，current/task/MM
+  锁忙均显式降级；逐 CPU 输出已有 current TID、队列、active MM、pending IPI、timer 与
+  TLB/barrier 进度。没有伪造尚不存在的 IRQ/preempt depth，也没有增加生产测试 hook；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
@@ -1042,7 +1049,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   - timer interrupt、reschedule；
 - Phase 2.5/3 已用于正确性门禁的无效状态转换和重复入队断言继续保留；Phase 6 只补充
   汇总、导出和低开销 release 计数，不能把首次发现竞态的能力拖到稳定化阶段；
-- panic 时输出所有 CPU 的 current TID、runqueue、IRQ/preempt depth、active MM 和 pending IPI；
+- panic 已输出所有 CPU 的 current TID、runqueue、active MM 和 pending IPI；IRQ/preempt
+  depth 必须等内核建立权威嵌套计数后再接入，不能只为格式完整增加无语义字段；
 - 同步更新启动/trap、调度器、页表/TLB、测试文档和根 AGENTS.md 中的“单核”描述；
 - 每个阶段形成独立、可回退提交，不把启动、调度和 TLB 改动压成一次大提交。
 

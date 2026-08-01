@@ -347,6 +347,10 @@ panic 诊断不能等待普通锁，也可能发生在 CPU-local 寄存器安装
 `try_current_task()`：先验证寄存器值确实落在 `PER_CPUS` 数组中，再 `try_lock()`。
 CPU-local 不可用或锁正被持有时返回不可用状态，不触发二次 panic。
 
+B56 的 `CpuTaskDiagnostics` 另外读取 current PID/TID、排队数和 zombie 数的原子 hint；
+`active_user_vm` 只做一次 `try_lock()` 并复制稳定 MM ID。它和外层 `CpuDiagnostics` 都是
+best-effort 输出，不能替代 processor/runqueue 锁或调度状态机的 owner 判定。
+
 调用者可以在普通函数调用期间持有返回的 `Arc`，但在 `schedule()` 或
 `asm!(noreturn)` 等永不返回边界前必须显式 `drop`。上下文切换不会展开原 Rust
 栈帧，若把本地 `Arc` 带过边界，它的析构函数将永远没有机会运行。

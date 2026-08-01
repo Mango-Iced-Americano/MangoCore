@@ -261,6 +261,16 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 /// `allocated_user` 包含 slab 用户字节 + MetadataHeap 直接分配的用户字节。
 pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
     let inner = HEAP_ALLOCATOR.inner.lock();
+    heap_stats_locked(&inner)
+}
+
+/// panic 等不可等待上下文使用的堆统计；锁忙时立即返回 `None`。
+pub fn try_heap_stats() -> Option<(usize, usize, usize, usize, usize)> {
+    let inner = HEAP_ALLOCATOR.inner.try_lock()?;
+    Some(heap_stats_locked(&inner))
+}
+
+fn heap_stats_locked(inner: &KernelHeapInner) -> (usize, usize, usize, usize, usize) {
     let total = inner.heap.stats_total_bytes();
     let alloc_actual = inner.heap.stats_alloc_actual();
     let buddy_user = inner.heap.stats_alloc_user();

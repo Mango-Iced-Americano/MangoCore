@@ -27,6 +27,7 @@ code_paths:
 | `frame_reclaim_linker_range()` | 在最后一次读取后显式回收链接器内嵌载荷的完整页 |
 | `frame_dealloc(ppn)` | 释放指定物理页号 |
 | `unallocated_frames()` | 返回当前未分配页帧数量 |
+| `try_unallocated_frames()` | panic 中尝试读取余量；写锁忙时立即返回 `None` |
 | `frag_diagnostic()` | 输出碎片化诊断数据 |
 | `frame_reserve(pages)` | 在 OOM handler 特性下尝试预留页 |
 
@@ -233,6 +234,10 @@ frame_alloc()
 | `committed_as_kbytes()` | sysctl | 当前进程地址空间承诺量 |
 
 物理页分配器和内核堆是两套资源。`FrameTracker` 管 4 KiB 物理页，主要服务页表、用户页、PageCache 和 DMA；heap allocator 管内核对象内存，服务 `Arc`、`Vec`、`BTreeMap` 等元数据。出现 `ENOMEM` 时必须判断失败点在哪一层：frame 充足但 `Vec::try_reserve()` 失败是堆问题，heap 充足但 `frame_alloc()` 返回 None 是物理页问题。
+
+普通诊断允许使用上述阻塞统计；panic 路径必须改用 `try_unallocated_frames()` 和
+`try_heap_stats()`。锁忙本身就是有价值的崩溃现场信息，此时打印 `<locked>` 或原子 heap
+charge，不能为了取得一个更精确数字再次等待可能永不释放的 allocator owner。
 
 `FrameTracker` 的 RAII 语义是防止双重释放和悬空物理页的核心。VMA、PageCache、shared anonymous frame 都通过 `Arc<FrameTracker>` 共享页帧；只有最后一个引用 drop 时，页帧才回到 allocator。调试“页被提前复用”时优先检查是否有裸 PPN 绕开 `FrameTracker` 生命周期。
 

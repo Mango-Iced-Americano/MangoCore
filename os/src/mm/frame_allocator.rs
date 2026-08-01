@@ -1055,6 +1055,11 @@ pub fn unallocated_frames() -> usize {
     FRAME_ALLOCATOR.read().unallocated_frames()
 }
 
+/// panic 等不可等待上下文使用的空闲帧统计；写锁忙时立即返回 `None`。
+pub fn try_unallocated_frames() -> Option<usize> {
+    Some(FRAME_ALLOCATOR.try_read()?.unallocated_frames())
+}
+
 /// 诊断帧分配器碎片化 `(total_free, fresh, recycled, recycled_ratio)`。
 pub fn frame_frag_diag() -> (usize, usize, usize, f64) {
     FRAME_ALLOCATOR.read().frag_diagnostic()

@@ -47,11 +47,13 @@ pub use address_space::{AddressSpace, AddressSpaceInner, MemoryError};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
     frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
-    is_allocatable_ram_phys_addr, is_ram_phys_addr, unallocated_frames, FrameTracker,
+    is_allocatable_ram_phys_addr, is_ram_phys_addr, try_unallocated_frames, unallocated_frames,
+    FrameTracker,
 };
 pub use frame_store::Frame;
 pub use heap_allocator::{
-    heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES,
+    heap_free_histogram, heap_stats, try_heap_stats, KERNEL_HEAP_CURRENT_BYTES,
+    KERNEL_HEAP_MAX_BYTES,
 };
 pub(crate) use kernel_space::remove_kernel_mapping_synchronized;
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};

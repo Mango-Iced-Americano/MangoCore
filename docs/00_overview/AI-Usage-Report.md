@@ -1068,6 +1068,27 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp` 均 34/34。RV64 初赛 raw 309/semantic 312，LA64 raw/semantic
   308；四个 child 均 exit 0、无 mutation、panic、fatal 或 timeout。
 
+### Case 45: SMP panic 诊断传递锁收口
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b56-panic-diagnostics-summary.md`；DeepSeek 原始审查、
+  manifest 与 Docker/QEMU 日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责完整调用链推理、模块边界、active-MM 诊断价值和最终实现；DeepSeek
+  先独立只读审查，再通过受限网关选择并运行双架构 8 核 focused 门禁。
+- Problem: B55 已让 console raw 路径不等锁，但 `panic_diag` 随后调用的 `heap_stats()` 与
+  `unallocated_frames()` 仍分别无界等待 mutex/rwlock。崩溃恰在 allocator 临界区时，根因
+  尚未打印就会再次自锁；单核 current 输出也不足以诊断 AP 的 TLB/IPI 状态。
+- Implemented change: allocator 模块增加保留普通语义的 `try_*` 统计；锁忙时输出原子 charge
+  或 locked。task/SMP 两层只读现有原子 hint，active MM 只 try-lock 后复制稳定 ID；panic
+  输出全部 CPU 的 current、队列、IPI/timer/TLB/barrier，不新增热路径测试字段。
+- AI adjudication: 采纳 DeepSeek 对两条 P0 锁链和最小 focused 门禁的判断；拒绝其直接访问
+  allocator 私有字段的建议。也拒绝省略 active MM，因为 exec/TLB 问题中同一 PID 可先后对应
+  两个 MM；同时不为尚不存在的 IRQ/preempt depth 伪造计数。
+- Verification: 冻结代码 diff SHA-256 为
+  `9238ddcf17be091512e50aae643d4dfaedea6f64770b789c4bf66c1f08608adf`；RV64/LA64
+  `CORE_NUM=8 KTEST=smp` 均 34/34、`online_mask=0xff`，两个 child 均 exit 0、无 mutation、
+  panic、fatal 或 timeout。持 allocator 锁主动 panic 未注入生产 hook，明确记为 NOT RUN。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1155,6 +1176,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b53-stale-tlb-user-access-summary.md` | SMP 真实用户访存 stale-TLB 证明 | 记录真实 CoW 用户 victim、handler observed-before-ack、假阳性隔离、DeepSeek 首错纠正与双架构 67/67 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b54-mm-single-core-assumptions-summary.md` | SMP MM/HAL 单核安全假设收口 | 记录 LA dirty 原子位图、slab 最小 Send 证明、静态状态审计边界与 DeepSeek 双架构 8 核门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b55-console-summary.md` | SMP console 串行化与 panic raw fallback | 记录 irq-save 全局叶子锁、LA64 UART ready 修复、panic 无锁分支及 RV64 raw/semantic 双账本裁决 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b56-panic-diagnostics-summary.md` | SMP panic 诊断传递锁收口 | 记录 allocator `try_*` 降级、逐 CPU 原子/active-MM 快照、模型建议裁决及双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

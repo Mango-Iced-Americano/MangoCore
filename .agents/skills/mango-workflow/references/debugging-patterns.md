@@ -793,3 +793,16 @@
   规则复核完整块，不能跨 syscall 持锁或缓存到换行来伪造终端原子性。
 - **相关文件**: `os/src/console.rs`, `os/src/lang_items.rs`,
   `os/src/hal/arch/{riscv,loongarch64}/sbi.rs`, `docs/01_architecture/lock-order.md`
+
+## Panic 诊断中的“只读统计”也必须做传递锁审计
+
+- **根因**: 诊断函数表面只读取 heap/free-frame 数量，但下层 `heap_stats()` 和
+  `unallocated_frames()` 分别取得 spin mutex 与 rwlock。panic 若发生在同一锁内，或其它 CPU
+  持锁后停止，诊断会在打印根因前永久自旋。
+- **修复**: 保留普通调用者的阻塞统计接口，另提供 `try_*` 入口。锁忙时输出原子 charge 或
+  `<locked>`；逐 CPU 快照只读现有原子 hint，确需读取 active MM 时仅 `try_lock()` 后复制
+  稳定 ID，失败明确标记 unknown。
+- **教训**: panic-safe 必须审计完整调用链，不能把“只读”和“无锁”等同。输出字段也不能反向
+  驱动生产正确性；跨字段快照应标为 best-effort，不为补齐表格临时增加热路径原子状态。
+- **相关文件**: `os/src/panic_diag.rs`, `os/src/mm/{heap_allocator,frame_allocator}.rs`,
+  `os/src/{smp,task/processor}.rs`

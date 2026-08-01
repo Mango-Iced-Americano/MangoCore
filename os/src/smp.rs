@@ -106,6 +106,29 @@ impl PerCpu {
     }
 }
 
+/// 不依赖普通锁的单 CPU 诊断状态；各字段是 best-effort 快照。
+pub(crate) struct CpuDiagnostics {
+    pub(crate) cpu_id: usize,
+    pub(crate) online: bool,
+    pub(crate) idle_context_ready: bool,
+    pub(crate) scheduler_entered: bool,
+    pub(crate) stop_requested: bool,
+    pub(crate) stopped: bool,
+    pub(crate) need_resched: bool,
+    pub(crate) pending_ipi: u32,
+    pub(crate) timer_pending: bool,
+    pub(crate) reschedule_count: usize,
+    pub(crate) timer_irq_count: usize,
+    pub(crate) timer_deferred_count: usize,
+    pub(crate) kernel_tlb_request: usize,
+    pub(crate) kernel_tlb_ack: usize,
+    pub(crate) user_tlb_request: usize,
+    pub(crate) user_tlb_ack: usize,
+    pub(crate) memory_barrier_request: usize,
+    pub(crate) memory_barrier_ack: usize,
+    pub(crate) task: crate::task::processor::CpuTaskDiagnostics,
+}
+
 /// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
 ///
 /// 每个发起 CPU 固定拥有一个槽；当前安全点抢占模型保证同一 CPU 最多等待
@@ -399,6 +422,36 @@ pub fn stopped_cpu_mask() -> usize {
         }
     }
     mask
+}
+
+/// 读取 panic/STOP 路径可安全打印的指定 CPU 状态。
+///
+/// 该函数不等待任何普通锁；任务侧唯一的锁访问是 `active_user_vm.try_lock()`。
+/// 远端 CPU 可能继续改变状态，因此结果只用于诊断，不能参与调度或资源释放决策。
+pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
+    assert!(cpu_id < CONFIGURED_CPU_COUNT);
+    let cpu = &PER_CPUS[cpu_id];
+    CpuDiagnostics {
+        cpu_id,
+        online: cpu.online.load(Ordering::Acquire),
+        idle_context_ready: cpu.idle.load(Ordering::Acquire),
+        scheduler_entered: cpu.scheduler_entered.load(Ordering::Acquire),
+        stop_requested: cpu.stop_requested.load(Ordering::Acquire),
+        stopped: cpu.stopped.load(Ordering::Acquire),
+        need_resched: cpu.need_resched.load(Ordering::Acquire),
+        pending_ipi: cpu.pending_ipi.load(Ordering::Acquire),
+        timer_pending: cpu.timer_pending.load(Ordering::Acquire),
+        reschedule_count: cpu.reschedule_count.load(Ordering::Relaxed),
+        timer_irq_count: cpu.timer_irq_count.load(Ordering::Relaxed),
+        timer_deferred_count: cpu.timer_deferred_count.load(Ordering::Relaxed),
+        kernel_tlb_request: cpu.kernel_tlb_request.load(Ordering::Acquire),
+        kernel_tlb_ack: cpu.kernel_tlb_ack.load(Ordering::Acquire),
+        user_tlb_request: cpu.user_tlb_request.load(Ordering::Acquire),
+        user_tlb_ack: cpu.user_tlb_ack.load(Ordering::Acquire),
+        memory_barrier_request: cpu.memory_barrier_request.load(Ordering::Acquire),
+        memory_barrier_ack: cpu.memory_barrier_ack.load(Ordering::Acquire),
+        task: cpu.task_state.read_diagnostics(),
+    }
 }
 
 /// 向一组 online CPU 发布同一个幂等 reason，再逐个触发硬件 doorbell。

@@ -102,6 +102,18 @@ panic 诊断只能使用 `try_lock()`。
 B17 本身没有引入 runqueue 双锁、远程 enqueue 或任务迁移；其后的 B18 已拆出
 per-CPU RunQueue，但仍保持生产任务 owner 为 CPU0。
 
+#### B56 panic 诊断边界
+
+panic 中“读取统计”同样可能隐藏阻塞锁。B56 将 allocator 诊断收敛为：
+
+- heap mutex 只由 `try_heap_stats()` 尝试一次；失败后只读原子 charge/peak；
+- frame allocator rwlock 只由 `try_unallocated_frames()` 尝试一次；失败打印 locked；
+- processor、task.inner 与 active-MM 槽只允许 `try_lock()`，runqueue 不取锁而读取计数 hint；
+- per-CPU IPI/timer/TLB/barrier 字段只作 best-effort 快照，不参与 owner 或资源释放判定。
+
+因此 panic 调用链不得新增普通 `.lock()`/`.read()`，也不得为了补齐 IRQ/preempt 等尚未
+建立的不变量而增加仅服务诊断的热路径状态。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护

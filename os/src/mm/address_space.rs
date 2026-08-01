@@ -111,6 +111,11 @@ impl<T: PageTable> AddressSpace<T> {
         }
     }
 
+    /// 返回不需要取得 VM 锁的稳定 MM 诊断编号。
+    pub(crate) fn mm_id(&self) -> usize {
+        self.tlb.id()
+    }
+
     /// 在 VM 锁内读取地址空间；闭包不能修改 VMA 或 PTE。
     pub fn read<R>(&self, operation: impl FnOnce(&AddressSpaceInner<T>) -> R) -> R {
         let inner = self.inner.lock();

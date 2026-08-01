@@ -94,6 +94,21 @@ pub(crate) struct CpuTaskState {
     current_syscall_id: AtomicUsize,
 }
 
+/// panic/STOP 等不可等待上下文可读取的任务侧诊断快照。
+///
+/// 原子字段只提供某一时刻的 best-effort 观察，不能替代 current/runqueue
+/// 锁内的不变量判断。`active_mm_lock_busy` 为真时，`active_mm_id` 必须视为未知。
+pub(crate) struct CpuTaskDiagnostics {
+    pub(crate) current_present: bool,
+    pub(crate) current_pid: usize,
+    pub(crate) current_tid: usize,
+    pub(crate) current_syscall_id: Option<usize>,
+    pub(crate) nr_running: usize,
+    pub(crate) nr_zombies: usize,
+    pub(crate) active_mm_id: usize,
+    pub(crate) active_mm_lock_busy: bool,
+}
+
 impl CpuTaskState {
     pub(crate) const fn new() -> Self {
         Self {
@@ -107,6 +122,33 @@ impl CpuTaskState {
             current_pid: AtomicUsize::new(0),
             current_tid: AtomicUsize::new(0),
             current_syscall_id: AtomicUsize::new(0),
+        }
+    }
+
+    /// 不等待 processor、runqueue 或地址空间锁地读取诊断信息。
+    /// `active_user_vm` 只做一次 `try_lock()`，失败即把 MM 标记为未知。
+    pub(crate) fn read_diagnostics(&self) -> CpuTaskDiagnostics {
+        let (active_mm_id, active_mm_lock_busy) = match self.active_user_vm.try_lock() {
+            Some(active) => (
+                active.as_ref().map(|vm| vm.mm_id()).unwrap_or(0),
+                false,
+            ),
+            None => (0, true),
+        };
+        CpuTaskDiagnostics {
+            // PID/TID 在 current_present 的 Release 发布前写入；Acquire 后读取即可
+            // 获得一份诊断 hint。远端 CPU 仍可能继续切换，所以不承诺跨字段原子性。
+            current_present: self.current_present.load(Ordering::Acquire),
+            current_pid: self.current_pid.load(Ordering::Relaxed),
+            current_tid: self.current_tid.load(Ordering::Relaxed),
+            current_syscall_id: self
+                .current_syscall_id
+                .load(Ordering::Relaxed)
+                .checked_sub(1),
+            nr_running: self.nr_running.load(Ordering::Relaxed),
+            nr_zombies: self.nr_zombies.load(Ordering::Acquire),
+            active_mm_id,
+            active_mm_lock_busy,
         }
     }
 }

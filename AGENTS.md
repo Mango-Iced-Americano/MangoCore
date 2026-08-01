@@ -203,6 +203,8 @@ B54 已将 LoongArch 恒等映射的软件 dirty 表改为原子 bitset，且把
 B55 已让正常 console 输出统一经过“本地 irq-save → 全局 OUTPUT_LOCK → 架构 writer”；
 panic handler 必须先调用 `console::enter_panic()`，后续输出绕过 OUTPUT_LOCK 与 LA64 UART
 Mutex。新增 console 调用不得形成 UART/业务锁到 OUTPUT_LOCK 的反向顺序。
+B56 进一步规定 panic 诊断不得调用阻塞统计接口：allocator/current/task/active-MM 只能走
+`try_*`，锁忙时打印降级信息；逐 CPU 原子快照仅供诊断，不能用于调度或释放决策。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下
