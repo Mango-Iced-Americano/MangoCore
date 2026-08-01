@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-31"
+last_updated: "2026-08-01"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -116,9 +116,11 @@ Phase 1（按页目录查找）: 收集
     copies.push(CopyItem { entry, offset, len })
 
 Phase 2（无锁）: 拷贝
-  for each item in copies:
-    copy_from_slice(src, dst)   // 或 UserBuffer::write_at
+   for each item in copies:
+     copy_from_slice(src, dst)   // 多页 UserBuffer 使用一次顺序 cursor
 ```
+
+`read_user()` 的多页分支在 Phase 2 前创建一次 `UserBufferWriteCursor`，按 `ReadCopy` 的页序依次调用 `write_from()`。因此跨页数据和用户 buffer segment 都只单调前进一次；它不为每个源页重新从第一个目标 segment 扫描。单页分支仍使用直接 `write_at(0, ...)` 快路径。
 
 ### 写路径（write / write_user）
 

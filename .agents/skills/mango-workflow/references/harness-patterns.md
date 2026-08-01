@@ -326,6 +326,20 @@ diag=1
 - **教训**: 带 miss 的 I/O 路径不能只看均值；必须同时有 miss_rate 和 hit/miss 各自耗时才能判断瓶颈是"快路径太慢"还是"慢路径太多"
 - **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
 
+### 计时 API 必须匹配诊断 profile
+
+- **根因**: PageCache 读路径的 recorder 由 `memory_io` profile 启用，但采样边界调用 `perf_time_now()`，后者只在 core profile 激活时读取时钟。于是 calls/pages 增长而 read total/lookup/copy 周期全为零；写路径使用 memory-I/O API 所以不受影响。
+- **修复**: 同一诊断域的“采样起点”和“采样终点”必须都调用对应 profile 的时间 API；`memory_io` 域使用 `perf_memory_io_time_now()`，不能混用 core-only `perf_time_now()`。
+- **验证**: 选择目标 sysfs profile 跑真实 workload，并同时确认调用计数与阶段周期非零；若 read-user 专属桶仍为零，先按实际调用路径区分 `read()` kbuf 与 `read_user()`，不要把未覆盖路径误诊为 profile 失败。
+- **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
+
+### 性能 A/B 前必须验证 workload 真正覆盖目标路径（pages/call 比值）
+
+- **根因**: 用 `-r 1k`（1 KiB 记录）跑 PageCache 读路径优化验证时，`pc_read_pages / pc_read_calls ≈ 1.0`，实际走的全是单页 fast path；多页 batch-lookup 优化代码根本没被执行。据此宣称的"多页 lookup 降 50%"是建立在未覆盖路径上的错误结论。
+- **修复**: 基准前先读计数器确认路径覆盖：`pc_read_pages/pc_read_calls > 1`（如 ≥1 MiB record / 16 MiB 文件得到 ~61 pages/call）才真正命中多页路径。A/B 结果按窗口归一（cycles/page、cycles/call），并配对比较（lookup 5/5 对全变差、区间不重叠才算"变差"）。
+- **教训**: 任何路径级优化（batch-lock、scan_range、reference_and_load_flags）都必须先证明 workload 遍历了目标代码段；单页 fast path 的优化收益不能外推为多页路径结论。iozone `-i 0 -i 1 -r 1k` 是热读回归探针，不用于验证多页路径本身。
+- **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`, `iozone-AB-testcode.sh`
+
 ## 网络栈
 
 ### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
@@ -684,6 +698,14 @@ diag=1
 - **修复**: 所有通用 build/all 包装目标显式传递 `EXTRA_FEATURES="$(EXTRA_FEATURES)"`；诊断构建完成后读取 `/sys/kernel/stats/features`，并用计数器非零自检确认 feature 真正生效。
 - **教训**: A/B 构建不能只比较命令行和退出码。应把“构建变量 → 最终 cargo feature → 目标运行时接口”串成三段证据链，否则探针税结论没有意义。
 - **相关文件**: `os/Makefile`, `scripts/diag_smoke_test.sh`
+
+## A/B rerun 前必须核对两侧内核构建指纹一致（后续构建会静默覆盖内核）
+
+- **现象**: 首次 5+5 验收双侧公平（各日志均含 `perf_diag features: perf_stats=true perf_diag=true`），但随后补跑的 rerun 数据出现不对称：rerun-baseline 从 `/tmp/read-batch-baseline/os` 运行（内核含 perf_stats），rerun-candidate 却从 `/app/os` 运行（内核被 12:02 未带 `EXTRA_FEATURES` 的 counter 构建覆盖，已无 perf_stats）。用不对称 rerun 推导 candidate 对比结论会失真。
+- **根因**: `/app` 与工作树是同一份产物目录；后续任意一次不带 `EXTRA_FEATURES` 的内核构建都会覆盖 `kernel-rv`，而 rerun 脚本从 `/app/os` 直接启动，拿到的是被覆盖后的内核。
+- **修复**: 每次 rerun/补测前，`md5sum $(PRODUCT_ROOT)/kernel/kernel-rv` + `strings kernel-rv | grep -c "perf_diag features"` 核对两侧指纹与首次验收一致（基线 `2e2632af`=7 匹配，无 feature 内核=0，`perf_stats` 单 feature 内核=0，`perf_diag` 内核=1）。`EXTRA_FEATURES=perf_stats` 单独不足，`/sys/kernel/stats` 由 `#[cfg(feature="perf_diag")]` 门控（`os/src/fs/sysfs/files/mod.rs`），需传 `EXTRA_FEATURES=perf_diag`（`Cargo.toml` 中 `perf_diag=["perf_stats"]`）。
+- **教训**: 跨时段补测不是同一实验。验收数据与 rerun 数据必须各自校验构建指纹，不能混用；"有 perf_diag 字符串"比"能构建成功"更接近真实运行特征。
+- **相关文件**: `os/src/fs/sysfs/files/mod.rs`, `os/make/rv64.mk`
 
 ## 诊断开关税低不等于诊断构建与生产构建结构等价
 
@@ -1156,3 +1178,10 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - `os/src/syscall/process/signal.rs` — `SignalFd`
 - `os/src/syscall/fs/sys_read.rs` — signalfd 阻塞读路径
 - `os/src/task/task.rs` — clone 路径（移除了 rebind 循环）
+
+## 顺序生产者不能重复从分段目标起点扫描
+
+- **根因**：PageCache 按文件页升序产出连续数据，但每一页调用带逻辑 offset 的 `UserBuffer::write_at()` 时，Multi 分支都会从第一个 segment 重新寻找目标位置。页数与用户 segment 数同阶时，复制阶段退化为 O(pages × segments)。
+- **修复**：保留随机访问 `write_at()` 的语义；为严格顺序的生产者提供独立 cursor，保存 segment index 和 segment 内偏移，每个 chunk 只向前推进。调用方在整次多页请求前创建 cursor，整次请求只扫描目标 segments 一次。
+- **验收**：同时覆盖首尾非页对齐、源页边界与用户 segment 边界错位、空/短 segment、短目标和单 segment；性能 A/B 必须将每日志的 hot pass 聚合后做同编号配对，且 baseline/candidate 除被测开关外使用相同源码与构建输入。
+- **相关文件**：`os/src/mm/uaccess.rs`、`os/src/fs/page_cache.rs`、`os/src/fs/ext4_another/inode.rs`、`os/src/kernel_tests/page_cache/user_read.rs`

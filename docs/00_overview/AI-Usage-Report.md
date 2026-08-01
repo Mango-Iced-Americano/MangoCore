@@ -2,12 +2,12 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-30
+> Coverage: 2026-04-01 to 2026-08-01
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
 
-MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
+MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
 
 本项目声明：
 
@@ -243,6 +243,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 删除 inode lifetime 缓冲、write-through/flush 边界、一次性 pin 和原子 radix 目录；恢复安全的 `PageEntries` mutexed 向量目录与逐次 dirty-cache 保留，同时保留 UserBuffer 直连、时间戳缓存及其他已批准优化。
 - Verification: Docker 内 RV64→LA64 串行 kernel build、RV64 ktest、四格 lint、两架构各 5 轮 QEMU 基准及 LTP 输出归档于 `docs/Work_Log/evidence/2026-07-30/`；不将该实验或回退后的基准表述为吞吐提升。
 
+### Case 10: read_at_user 多页回归的部分回退与事实校正
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: 单页 `read_at_user` 直连收益存在，但多页 `PageCache::read_user` 对每个缓存页重复从 UserBuffer 首 segment 扫描，原始 5+5 报告还将不存在于日志的 126–131k 数值误写为 +16% 验收通过。
+- AI contribution: Oracle 将多页复杂度定位为 O(pages × segments)，要求保留单页直连、跨文件页回退既有 kbuf 路径，并以状态化顺序 cursor 修复 PageCache 多页复制；同时要求按每日志四次 hot pass 做 N 对 N 比较。
+- Human action: 实现跨页 `ENOSYS` fallback、`UserBufferWriteCursor` 与边界 ktest，撤回原始错误结论，并以同一源码的临时 `ENOSYS` baseline 执行严格交错 QEMU 5+5。
+- Verification: Docker RV64→LA64 build、lint、双架构 71/71 ktest 均通过；受控 A/B 的 1KiB read/reread 中位数为 +7.33%/+6.32%，256KiB 为 +0.41%/+0.09%，不再系统性回归。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -278,6 +287,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `81a24d2a` | Documentation fact-check | `Oracle-reviewed fixes`; `Co-authored-by: Sisyphus` | 修复多处文档事实问题 |
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
 | 2026-07-30 | 工作树（未提交） | another_ext4 pwrite write combining | Oracle P0/P1 建议；`docs/Work_Log/2026-07-30.md` | 双架构 build、RV64 ktest 与 lint 通过；iozone 测试资产缺失 |
+| 2026-08-01 | 工作树（未提交） | read_at_user 多页回归 | Oracle 根因与回退/游标方案；`docs/Work_Log/2026-08-01.md` | 受控 QEMU 5+5 取消 256KiB 系统性回归，并纠正原始 +16% 误报 |
 
 ## 8. Work_Log 证据表
 
@@ -296,6 +306,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 | `docs/Work_Log/2026-07-28.md` | Firmware DTB safety gate | 记录 Oracle 识别的 DTB 协议边界、FDT carveout/DTB 页保留与 2K1000 三目标 Docker 编译验证 |
 | `docs/Work_Log/2026-07-30.md` | another_ext4 小 pwrite 写合并 | 记录 Oracle P0/P1 建议、写缓冲和 atomic dirty-cache pin 实现、双架构/ktest/lint 验证及 iozone 测试资产限制 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*` | read_at_user 多页回归 | 记录 Oracle 的 O(pages × segments) 根因、部分回退/顺序 cursor 方案、原始 +16% 纠正和受控 5+5 验证 |
 
 ## 9. 交互记录与留痕方式
 
