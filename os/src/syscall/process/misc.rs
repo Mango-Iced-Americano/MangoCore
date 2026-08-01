@@ -1,6 +1,6 @@
 use crate::fs::ext4::ext4fs::EXT4_REGISTRY;
 use crate::fs::flush_all_page_caches;
-use crate::hal::shutdown;
+use crate::hal::finish_test_run;
 use crate::mm::{copy_to_user_array, translated_str};
 use crate::syscall::errno::*;
 use crate::task::{
@@ -40,8 +40,7 @@ pub fn sys_shutdown() -> isize {
             error
         );
     }
-    info!("[sys_shutdown] halting");
-    shutdown()
+    finish_test_run()
 }
 
 pub fn sys_reboot(magic: usize, magic2: usize, cmd: usize, _arg: usize) -> isize {

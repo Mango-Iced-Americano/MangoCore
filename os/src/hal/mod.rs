@@ -39,6 +39,15 @@ pub use arch::{
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, TICKS_PER_SEC};
 
+pub fn finish_test_run() -> ! {
+    if platform::is_real_board() {
+        crate::println!("[exit] rebooting to firmware (real board)");
+        reboot()
+    }
+    crate::println!("[exit] shutting down (emulator or unknown platform)");
+    shutdown()
+}
+
 /// Per-chunk bounce buffer size for I/O operations.
 /// Computed as KERNEL_HEAP_SIZE / 128, bounded to [64KiB, 256KiB].
 /// For 32MiB heap → 256KiB chunk.

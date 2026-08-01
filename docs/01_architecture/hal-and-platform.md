@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -20,7 +20,7 @@ tags: [architecture, hal, riscv64, loongarch64]
 | 上下文切换 | `task::processor` 调度循环 |
 | TLB 刷新 | 页表 unmap、权限修改、CoW、缺页修复 |
 | timer | task timer、nanosleep、futex timeout、调度 tick |
-| console/shutdown | 日志、panic、系统关机 syscall |
+| console/reboot/shutdown | 日志、panic、测试结束后的平台退出 |
 
 HAL 的核心文件是 `hal/mod.rs` 和 `hal/arch/mod.rs`。前者向内核其他模块统一导出接口，后者按编译 feature 选择 `riscv` 或 `loongarch64` 后端。
 
@@ -35,6 +35,7 @@ os/src/hal/
 │   │   ├── mod.rs
 │   │   ├── config.rs
 │   │   ├── kern_stack.rs
+│   │   ├── reset.rs
 │   │   ├── sbi.rs
 │   │   ├── sv39.rs
 │   │   ├── switch.{rs,S}
@@ -93,7 +94,7 @@ os/src/hal/
 | trap 类型 | `TrapContext`, `MachineContext`, `UserContext`, `UserSignalMask`, `TrapImpl` | task/signal/syscall 共享的上下文类型 |
 | TLB | `tlb_invalidate` | 架构后端提供的 TLB 刷新入口；la64 另在后端内部导出 global/page 级辅助 |
 | 平台常量 | `BLOCK_SZ`, `BUFFER_CACHE_NUM`, `KERNEL_HEAP_SIZE`, `MEMORY_END`, `MMIO`, `TICKS_PER_SEC` | 块大小、缓存数、堆大小、物理内存末尾、MMIO 表和 tick 频率 |
-| 关机 | `shutdown` | 平台退出/关机 |
+| 平台退出 | `reboot`, `shutdown` | 实板重启或 QEMU/未知平台关机 |
 
 `hal/mod.rs` 还定义两个与 I/O 路径直接相关的常量：
 
@@ -106,6 +107,7 @@ pub mod device;
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
+pub use arch::reboot;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 pub use arch::{bootstrap_init, machine_init, user_hwcap};
@@ -216,13 +218,27 @@ RV64 PCI 不依赖固定的 QEMU 地址布局。预堆阶段的 `parse_node_reso
 |------|------|
 | `config.rs` | 地址布局、页大小、内核堆、内核栈、平台常量 |
 | `kern_stack.rs` | 内核栈分配和 trap context 地址计算 |
+| `reset.rs` | 实板 watchdog 重启路由与非实板 SBI reboot fallback |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表实现和 `sfence.vma` TLB 刷新 |
 | `switch.rs`/`switch.S` | 任务上下文切换 |
 | `time.rs` | `get_time()`、`get_clock_freq()`、`program_timer_delta()` |
 | `trap/` | trap context、汇编入口、syscall/缺页/timer 分发 |
 
-### 6.2 初始化
+### 6.2 重启路由
+
+`hal::finish_test_run()` 保持“实板重启、QEMU/未知平台关机”的策略。RV64 的
+`hal::reboot()` 由 `riscv::reset::reboot()` 导出：`platform::is_real_board()` 为真时，
+`jh7110_watchdog_reboot()` 关闭本地中断，依次恢复 JH7110 WDT 时钟与 reset，限时等待
+reset status，然后解锁、加载计数器并以 `RESEN|INTEN` 启动 watchdog。该路径不依赖
+OpenSBI SRST，因此不受 U-Boot 已关闭 I2C5 的影响。其他平台仍调用 `sbi::reboot()`；
+LA64 继续使用自己的后端重启实现。
+
+watchdog 和 SYSCRG 的直接 MMIO 访问依赖完整 VF2 FDT 的非 RAM `reg` 范围。预堆
+`parse_node_resources()` 记录这些范围，`KernelSpace` 在设备驱动使用前恒等映射它们。
+QEMU 的 `is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走 `shutdown()`。
+
+### 6.3 初始化
 
 `hal/arch/riscv/mod.rs` 中：
 

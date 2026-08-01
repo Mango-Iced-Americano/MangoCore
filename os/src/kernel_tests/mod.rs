@@ -20,8 +20,10 @@
 
 pub mod runner;
 pub mod platform;
-mod platform_fdt_fixture;
+pub(crate) mod platform_fdt_fixture;
 mod platform_fdt_snapshot;
+#[cfg(target_arch = "riscv64")]
+mod dw_mshc;
 mod platform_resources;
 
 #[path = "block_device.rs"]
@@ -78,6 +80,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("block_publication", kt_block_publication::tests()),
         ("platform", platform::tests()),
         ("platform_fdt_snapshot", platform_fdt_snapshot::tests()),
+        #[cfg(target_arch = "riscv64")]
+        ("dw_mshc", dw_mshc::tests()),
         ("platform_resources", platform_resources::tests()),
     ]
 }

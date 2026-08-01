@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod kern_stack;
+pub mod reset;
 pub mod sbi;
 pub mod sv39;
 pub mod switch;

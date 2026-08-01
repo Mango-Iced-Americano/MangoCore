@@ -255,6 +255,5 @@ fn shutdown_failure() -> ! {
 }
 
 fn ktest_exit() -> ! {
-    crate::println!("# ktest: shutting down.");
-    crate::hal::shutdown();
+    hal::finish_test_run();
 }

@@ -2,7 +2,9 @@ mod block_dev;
 mod descriptor;
 pub mod partition;
 mod sata_blk;
-#[cfg(feature = "block_virt")]
+#[cfg(target_arch = "riscv64")]
+pub mod dw_mshc;
+#[cfg(any(feature = "block_virt", target_arch = "riscv64"))]
 pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
 pub mod virtio_blk_pci;
@@ -13,12 +15,6 @@ pub use descriptor::{
     BlockDeviceDescriptor, BlockDeviceName, BlockDeviceNameError, BlockDeviceNode,
     BlockDeviceNumber, BlockDeviceRole,
 };
-#[cfg(feature = "block_sata")]
-type BlockDeviceImpl = sata_blk::SataBlock;
-#[cfg(feature = "block_virt")]
-type BlockDeviceImpl = virtio_blk::VirtIOBlock;
-#[cfg(feature = "block_virt_pci")]
-type BlockDeviceImpl = virtio_blk_pci::VirtIOBlock;
 
 use crate::hal::BLOCK_SZ;
 use alloc::string::String;
@@ -49,24 +45,31 @@ impl BlockDevice for DummyBlockDevice {
     }
 }
 
-#[cfg(all(feature = "block_virt", not(feature = "block_virt_pci")))]
 fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
-    let platform_info = crate::hal::platform::platform_info();
-    let device_manager = crate::hal::device::DeviceManager::new(platform_info.devices.clone());
-    virtio_blk::probe_from_device_manager(&device_manager)
+    let mut devices = Vec::new();
+    #[cfg(feature = "block_virt_pci")]
+    devices.extend(virtio_blk_pci::probe_la64());
+    #[cfg(any(
+        target_arch = "riscv64",
+        all(feature = "block_virt", not(feature = "block_virt_pci"))
+    ))]
+    {
+        let platform_info = crate::hal::platform::platform_info();
+        let device_manager = crate::hal::device::DeviceManager::new(platform_info.devices.clone());
+        #[cfg(any(
+            target_arch = "riscv64",
+            all(feature = "block_virt", not(feature = "block_virt_pci"))
+        ))]
+        devices.extend(virtio_blk::probe_from_device_manager(&device_manager));
+        #[cfg(target_arch = "riscv64")]
+        devices.extend(dw_mshc::probe_from_device_manager(&device_manager));
+    }
+    #[cfg(feature = "block_sata")]
+    devices.push(Arc::new(sata_blk::SataBlock::new()));
+    devices
 }
 
-#[cfg(feature = "block_virt_pci")]
-fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
-    virtio_blk_pci::probe_la64()
-}
-
-#[cfg(not(any(feature = "block_virt", feature = "block_virt_pci")))]
-fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
-    vec![Arc::new(BlockDeviceImpl::new())]
-}
-
-fn virtio_block_name(index: usize) -> Option<String> {
+fn block_device_name(index: usize) -> Option<String> {
     let mut remainder = index;
     let mut suffix = Vec::new();
     loop {
@@ -94,7 +97,7 @@ fn block_device_role(index: usize) -> BlockDeviceRole {
 fn describe_block_devices(devices: Vec<Arc<dyn BlockDevice>>) -> Vec<BlockDeviceDescriptor> {
     let mut descriptors = Vec::new();
     for (index, device) in devices.into_iter().enumerate() {
-        let Some(name) = virtio_block_name(index) else {
+        let Some(name) = block_device_name(index) else {
             println!("[kernel] block device {}: name generation failed, skipping", index);
             continue;
         };

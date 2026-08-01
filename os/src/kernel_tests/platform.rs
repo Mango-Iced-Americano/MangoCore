@@ -27,6 +27,10 @@ pub fn tests() -> Vec<KernelTest> {
             test_device_manager_find_mmio,
         ),
         KernelTest::new("platform::runtime_root_policy", test_runtime_root_policy),
+        KernelTest::new(
+            "platform::classifies_visionfive_models",
+            test_classifies_visionfive_models,
+        ),
     ]
 }
 
@@ -202,6 +206,21 @@ fn test_runtime_root_policy() -> Result<(), &'static str> {
     };
     if initramfs_platform.default_root() != "initramfs" {
         return Err("unrecognized FDT devices must retain the initramfs root");
+    }
+    Ok(())
+}
+
+fn test_classifies_visionfive_models() -> Result<(), &'static str> {
+    // Given: the VF2 U-Boot model spelling and QEMU's virt machine model.
+    // When: the platform classifier evaluates their model strings.
+    // Then: only the physical VisionFive model requests a firmware reboot.
+    if !crate::hal::platform::is_visionfive_model("StarFive VisionFive V2")
+        || !crate::hal::platform::is_visionfive_model("starfive,visionfive-v2")
+    {
+        return Err("VisionFive model was not recognized as a real board");
+    }
+    if crate::hal::platform::is_visionfive_model("riscv-virtio,qemu") {
+        return Err("QEMU virt model was incorrectly recognized as a real board");
     }
     Ok(())
 }

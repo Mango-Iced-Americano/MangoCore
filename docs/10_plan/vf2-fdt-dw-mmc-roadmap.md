@@ -314,13 +314,14 @@ fn virtio_block_name(index: usize) -> Option<String> {
 | 块设备描述符 | `os/src/drivers/block/descriptor.rs` — `BlockDeviceDescriptor`、`BlockDeviceNode` |
 | 块设备 trait | `os/src/drivers/block/block_dev.rs` — `BlockDevice` |
 | 块设备探测 | `os/src/drivers/block/mod.rs` — `probe_block_devices()`, `describe_block_devices()` |
+| DW MSHC 驱动 | `os/src/drivers/block/dw_mshc.rs`、`dw_mshc/{jh7110,mmio,sd}.rs` — RV64 常编译；从 `DeviceManager::find_enabled_by_compatible("snps,dw-mshc")` 发现已启用节点后才访问 MMC MMIO |
 | Boot registry | `os/src/fs/boot_block.rs` — `register_boot_block_devices()`, `mount_boot_block_devices()` |
 | devfs 发布 | `os/src/fs/dev/block.rs` — `BlockDevInode::from_descriptor()` |
 | JH7110 GMAC 驱动参考 | `os/src/drivers/net/gmac_jh7110.rs` — 时钟/复位地址模式 |
 | JH7110 MMIO 常量 | `os/src/drivers/net/gmac_jh7110/mmio.rs` — `SYS_CRG_BASE`, `AON_CRG_BASE`, `read_mmio()` |
 | VF2 board 配置 | `os/src/hal/platform/riscv/vf2.rs` — `CLOCK_FREQ`, VF2 identity MMIO 映射 |
 | 静态设备目录 | `os/src/hal/platform/fallback.rs` — `vf2_devices()` 最小 UART 目录 |
-| 当前已实现 ktest | `os/src/kernel_tests/platform.rs`, `platform_resources.rs`, `platform_fdt_snapshot.rs`, `block_publication.rs` |
+| 当前已实现 ktest | `os/src/kernel_tests/platform.rs`, `platform_resources.rs`, `platform_fdt_snapshot.rs`, `block_publication.rs`；DW MSHC 测试由 `kernel_tests/dw_mshc.rs` 注册，并以 `drivers/block/dw_mshc/ktest.rs` 的 `vf2_mmc_snapshot()` 夹具验证，无需 QEMU MMC 节点 |
 
 ### 官方参考
 

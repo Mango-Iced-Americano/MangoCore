@@ -35,9 +35,10 @@ pub use riscv::{
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
     machine_init,
+    reset::reboot,
     sbi::{
         configure_runtime_console, console_flush, console_getchar, console_putchar,
-        console_write_bytes, local_irq_restore, local_irq_save, reboot, set_timer, shutdown,
+        console_write_bytes, local_irq_restore, local_irq_save, set_timer, shutdown,
     },
     sv39::tlb_invalidate,
     switch::__switch,

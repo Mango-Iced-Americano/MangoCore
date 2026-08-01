@@ -81,6 +81,34 @@ pub fn platform_cmdline() -> Option<&'static str> {
     }
 }
 
+/// Returns whether firmware identified a physical StarFive VisionFive board.
+///
+/// The platform snapshot is initialized before any supported caller reaches
+/// its exit path.
+pub fn is_real_board() -> bool {
+    #[cfg(target_arch = "riscv64")]
+    {
+        platform_info()
+            .model
+            .as_deref()
+            .is_some_and(is_visionfive_model)
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        false
+    }
+}
+
+pub(crate) fn is_visionfive_model(model: &str) -> bool {
+    let mut has_starfive = false;
+    let mut has_visionfive = false;
+    for part in model.split(|character: char| !character.is_ascii_alphanumeric()) {
+        has_starfive |= part.eq_ignore_ascii_case("starfive");
+        has_visionfive |= part.eq_ignore_ascii_case("visionfive");
+    }
+    has_starfive && has_visionfive
+}
+
 /// Default path to the user-space init binary when `/init` is absent.
 pub const fn default_init_path() -> &'static str {
     "/initproc"

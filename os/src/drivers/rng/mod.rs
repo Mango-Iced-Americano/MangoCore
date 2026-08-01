@@ -71,7 +71,6 @@ pub fn fill_entropy(dst: &mut [u8]) -> Result<EntropySource, EntropyError> {
 
 #[cfg(target_arch = "riscv64")]
 pub fn fill_entropy(dst: &mut [u8]) -> Result<EntropySource, EntropyError> {
-    #[cfg(feature = "block_virt")]
     use crate::drivers::block::virtio_blk::VirtioHal;
     #[cfg(feature = "block_virt_pci")]
     use crate::drivers::block::virtio_blk_pci::VirtioHal;

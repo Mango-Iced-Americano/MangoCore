@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-28
+> Coverage: 2026-04-01 to 2026-08-01
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -44,6 +44,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
 | Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
 | Firmware DTB safety gate | 2026-07-28 | Oracle, Sisyphus | 固件启动参数信任边界、FDT 保留区与 2K1000 编译验证 | Oracle 指出非 RISC-V FDT 协议的 `a1` 可能为垃圾值；修复协议门控、DTB 边界校验和保留区，并在 Docker 中完成三个目标编译 |
+| VisionFive 2 watchdog reboot | 2026-08-01 | Oracle, GPT-5.6-terra | OpenSBI SRST 固件依赖审查、JH7110 reset 序列与 QEMU 回归验证 | Oracle 定位 U-Boot 关闭 I2C5 后 OpenSBI PMIC cold reboot 会永久挂起；实现内核直接 watchdog reset，保留 QEMU shutdown |
 
 ## 4. 详细使用场景
 
@@ -233,6 +234,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: root `run` 保留一次直接 prerequisite，移除递归 setup 调用，并以 target-scoped `.NOTPARALLEL` 保持 `validate-run → print-logo → toolchain-preflight` 顺序。
 - Verification: normal-run、toolchain、source-purity、layering 与 root facade contracts 均通过；RV64/LA64 dry-run 各有一次 logo、一次 root preflight 与一次 OS dispatch；无效 `-j8` 输入无 setup 或 arch-run 输出。
 
+### Case 9: VisionFive 2 firmware-independent reboot
+
+- Evidence: `docs/Work_Log/2026-08-01.md`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: VF2 上 OpenSBI 的 SRST cold reboot 依赖 AXP15060 PMIC I2C；U-Boot 在内核交接前关闭 I2C5 时，固件读取 PMIC 电源寄存器失败并永久挂起。
+- AI contribution: Oracle 给出 JH7110 SYSCRG/WDT 时钟、reset、解锁、两阶段 watchdog 复位序列，并要求实板直连 MMIO、QEMU 保留 SBI/shutdown 行为。
+- Human action: 在 RV64 HAL 增加 platform-gated watchdog reboot route，并复核 pre-heap FDT 非 RAM `reg` 映射与导出层。
+- Verification: Docker 中串行 RV64/LA64 kernel build、RV64 regression（`[L4 REGRESSION RESULT: PASS]`）和 `KTEST=platform`（7/7）通过；QEMU 均打印 shutdown 标记。未部署实板，未将 QEMU 结果外推为实板复位验证。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -284,6 +294,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-21.md`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-arena-red-20260721T053537+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-final-20260721T060040+0800/`、`docs/Work_Log/evidence/2026-07-21/la64-mmap-boundary-artifact-binding-supplement-20260721T063550+0800/` | LA64 mmap arena 边界与 trap-context 窗口 | 记录旧范围导致的非固定 mmap RED、最终 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)` 修正、固定映射拒绝规则、RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`、真实 `/regression` ELF 绑定及 Oracle 最终验收 |
 | `docs/Work_Log/2026-07-22.md` | Canonical normal run facade | 记录 Oracle 发现 root logo/preflight 重复调用、target-scoped `.NOTPARALLEL` 修复、dry-run once-only 与 `-j8` invalid-input contracts |
 | `docs/Work_Log/2026-07-28.md` | Firmware DTB safety gate | 记录 Oracle 识别的 DTB 协议边界、FDT carveout/DTB 页保留与 2K1000 三目标 Docker 编译验证 |
+| `docs/Work_Log/2026-08-01.md` | VisionFive 2 watchdog reboot | 记录 Oracle 固件依赖根因、JH7110 watchdog 序列、双架构构建与 QEMU shutdown 回归验证 |
 
 ## 9. 交互记录与留痕方式
 
