@@ -14,6 +14,8 @@ use super::run_queue::RunQueue;
 use super::{__switch, do_wake_expired, take_one_interruptible_zombie};
 use super::{fetch_task, finish_switch_out};
 use super::{TaskContext, TaskControlBlock, TaskStatus};
+use crate::hal::PageTableImpl;
+use crate::mm::{AddressSpace, UserVmContext};
 use crate::net::config::NET_INTERFACE;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::hint::spin_loop;
@@ -81,6 +83,9 @@ pub(crate) struct CpuTaskState {
     local_zombies: Mutex<VecDeque<Arc<TaskControlBlock>>>,
     /// `local_zombies` 的无锁精确计数；只用于避免空队列热路径取锁和诊断。
     nr_zombies: AtomicUsize,
+    /// 当前 CPU 仍可直接返回的用户地址空间；Arc 固定精确的旧 MM，避免 exec
+    /// 替换 `process.vm` 后无法清除旧 MM 的 active bit。
+    active_user_vm: Mutex<Option<Arc<AddressSpace<PageTableImpl>>>>,
     /// 本 CPU 是否持有 current；仅供放置策略估算负载。
     current_present: AtomicBool,
     current_pid: AtomicUsize,
@@ -97,11 +102,53 @@ impl CpuTaskState {
             nr_running: AtomicUsize::new(0),
             local_zombies: Mutex::new(VecDeque::new()),
             nr_zombies: AtomicUsize::new(0),
+            active_user_vm: Mutex::new(None),
             current_present: AtomicBool::new(false),
             current_pid: AtomicUsize::new(0),
             current_tid: AtomicUsize::new(0),
             current_syscall_id: AtomicUsize::new(0),
         }
+    }
+}
+
+/// 在返回用户态前切换本 CPU 的活跃地址空间。
+///
+/// 名称与 Linux `switch_mm()` 对齐。槽锁只用于交换 Arc，不跨 VM 锁、ASID
+/// rollover 或 IPI 等待；旧 MM 先 leave，新 MM 再以 generation 协议进入。
+pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmContext {
+    let cpu = crate::smp::cpu_id();
+    let state = crate::smp::local_task_state();
+    let (same_mm, previous) = {
+        let mut active = state.active_user_vm.lock();
+        let same_mm = active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &vm));
+        (same_mm, if same_mm { None } else { active.take() })
+    };
+
+    if same_mm {
+        return vm.activate_on(cpu);
+    }
+    if let Some(previous) = previous {
+        previous.deactivate_on(cpu);
+    }
+
+    let context = vm.activate_on(cpu);
+    let mut active = state.active_user_vm.lock();
+    assert!(active.is_none(), "active user MM changed during switch");
+    *active = Some(vm);
+    context
+}
+
+/// 在 idle 栈上切离本 CPU 的用户地址空间。
+///
+/// `deactivate_on()` 内的完整屏障和 active-bit 清除发生在 current owner
+/// 改变之前；之后该任务若再次运行，必须重新经过 `switch_user_vm()`。
+fn leave_user_vm(cpu: usize) {
+    debug_assert_eq!(cpu, crate::smp::cpu_id());
+    let active = crate::smp::task_state(cpu).active_user_vm.lock().take();
+    if let Some(active) = active {
+        active.deactivate_on(cpu);
     }
 }
 
@@ -553,6 +600,9 @@ fn clear_current_task_cache(task_state: &CpuTaskState) {
 /// 在 idle 栈上收回 current slot，并把上一任务交给调度状态机收尾。
 fn finish_current_switch_out(cpu: usize) {
     let task_state = crate::smp::local_task_state();
+    // 已经运行在 idle 栈，但 current 仍指向旧任务。先完成 MM 切离屏障，
+    // 再改变 current/runqueue owner，使 membarrier 与 PTE 快照不会漏掉它。
+    leave_user_vm(cpu);
     let task = {
         let mut processor = task_state.processor.lock();
         clear_current_task_cache(task_state);

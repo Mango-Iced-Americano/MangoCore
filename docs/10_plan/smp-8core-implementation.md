@@ -87,7 +87,7 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B29 已让同一 MM 先后在 CPU0/CPU1 激活；B44 复用历史 mask 完成 PRIVATE_EXPEDITED 目标快照 | 当前仍使用单调历史 CPU mask；连续 range、安全 detach 与通用用户迁移未完成 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；RV64 以 `sfence.vma va, asid`/SBI RFENCE FID 2 精确到单页，LA64 以固定 ASID/VPN slot 精确到硬件页对；B51 由调度器维护精确 active MM 驻留，切离后不再收到无意义 shootdown，零目标修改仍以 generation 约束下次进入；PRIVATE_EXPEDITED 复用同一 active mask | 连续 range 与通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS | 连续 range 尚未实现；多 VPN 仍升级为全用户失效 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -523,7 +523,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B50）
+#### 当前进度（SMP-P2.5-B15 至 B51）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -556,7 +556,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   原语；B23 重构后由 `UserMapper` 直接借用页表和 `MmuGather`，每次 PTE 写入后
   立即 `record_change()`，`PageMapper` 只保留给内核页表路径；
 - B16—B22 曾用 `Unpublished/LocalOnly/Published` 过渡状态阻止不完整远端语义。
-  B23 已删除这套状态，直接按 cached CPU mask 的 0/仅本核/含远端三种情况执行；
+  B23 删除这套状态后按当时的 cached CPU mask 执行；B51 已将其替换为调度器维护的
+  active CPU mask，并保证零目标修改也推进 generation；
 - 单一 VPN 修改在 RV64 使用页级 `sfence.vma`，多 VPN 升级为本核全量刷新。
   LA64 的 ASID 已在 B25 下沉到外层 `TlbContext`；B26 在 VM 锁内与 VPN 一起冻结，
   本地及远端目标均按 ASID + 对齐硬件页对执行 `invtlb 0x5`；
@@ -626,7 +627,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   双架构 `mask=0x003` 初赛门禁也通过：RV64 raw/semantic 312/314，LA64
   raw/semantic 308/314，失败身份均为既有允许集合；
 - B22 为每个 `AddressSpace` 增加共享 `TlbContext`：MM ID、从 1 开始的 generation、
-  per-CPU observed 和只增不减的 cached CPU mask。用户 trap-return 在恢复页表根前，
+  per-CPU observed 和当时只增不减的 cached CPU mask。用户 trap-return 在恢复页表根前，
   先在 VM 锁内登记 CPU，再读取 generation；落后时执行本地全用户/non-global 失效并
   重查代际。B23 接通修改侧前，第二颗 CPU 登记会触发过渡 fail-stop；该临时状态现已删除；
 - B22 另建独立的 `USER_TLB_SYNC` request/ack，不与 kernel-global sequence 复用。
@@ -637,17 +638,17 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   frame 延迟释放；
 - B23 将共享外层与锁内数据明确命名为 `AddressSpace`/`AddressSpaceInner`，不再向
   调用方暴露可变 guard。一个 `write()` 内只有一个 `MmuGather`；调用链固定为
-  `record_change -> seal -> execute`，只推进一次 generation 并冻结 cached CPU
+  `record_change -> seal -> execute`，只推进一次 generation 并冻结 CPU 目标
   目标；锁外完成本地失效、远端 IPI/ack 和 observed 单调推进，最后才析构撤映射
   数据页与页表页；
 - 为封死“持 VM 锁等 ack”，`ProcessInner.vm` 改为 `Arc<AddressSpace<_>>`，
   mmap/munmap/mprotect、page fault、CoW/fork、exec、OOM、SysV SHM、uaccess 与
   zombie 清理等调用点全部迁移到 `read/write/try_write`。trap、clone、OOM 和 SHM
   回滚同时调整锁序，不把 `task.inner`/`TASK_MANAGER`/`SHM_REGISTRY` 带过 shootdown 等待点；
-- trap-return 快路径对已登记 CPU 只读 cached mask，不再每次 `fetch_or`；ack 后
+- B23 的 trap-return 快路径对已登记 CPU 不再每次 `fetch_or`；ack 后
   立即更新本 MM 的 observed，避免下次返回再全刷。handler 还会在 `ack >= request`
-  时忽略迟到的重复 reason。仍保留 VM 锁 + Acquire load 固定税、全用户失效和
-  只增不减的历史 CPU 集合，不把当前正确性实现宣称为最终性能形态；
+  时忽略迟到的重复 reason。B51 保留 VM 锁 + Acquire load 的正确性边界，但删除了
+  只增不减的历史集合；多页全用户失效仍是当前主要性能保守项；
 - 生产路径 focused 用例在 CPU1 关中断的 request/ack 窗口撤销真实用户 PTE，
   证明 frame 在 ack 前未返回分配器、`write()` 返回后才释放。最终冻结源码上
   RV64/LA64 `CORE_NUM=8 KTEST=smp KREPEAT=1` 均为 16/16 PASS；加上重复窗口的
@@ -698,10 +699,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   Drop 只能条件删除仍指向自身的条目，不会误删新 leader。双架构 8 核 focused 均为
   29/29；初赛保持 RV64 312/314、LA64 308/314。
 - B44 删除 TCB 上的兼容注册字段，把 PRIVATE_EXPEDITED 注册状态放入共享
-  `AddressSpace`。GLOBAL 面向全部 online CPU；PRIVATE 在 VM 锁内冻结历史 cached
-  CPU mask，解锁后执行独立的 full-fence IPI/request/ack。与快照并发首次进入 MM 的
-  CPU 在同一 VM 锁后执行本地 full fence，因此两种竞态次序都不会漏 barrier。
-  双架构 8 核 focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
+  `AddressSpace`。GLOBAL 面向全部 online CPU；PRIVATE 当时在 VM 锁内冻结历史
+  cached CPU mask，解锁后执行独立的 full-fence IPI/request/ack。B51 已将目标改为
+  active mask，并用 enter/leave full fence 覆盖不在快照中的 CPU。B44 双架构 8 核
+  focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
 - B45 把 trap context 可变入口收紧为
   `TaskControlBlockInner::trap_context_mut(&mut self)`，删除从临时 inner guard
   返回 `&'static mut TrapContext` 的 current helper。clone/init 显式缩短 guard，
@@ -784,7 +785,13 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   双架构 8 核均为 25/25，初赛失败集合没有扩大；
 - B50 已落实 zombie TCB 在退出 CPU 的 idle 栈上回收；任务仍使用自身
   内核栈时不会释放最后一个调度 Arc。按 pid 的 reap 跨 CPU 逐队扫描，不同时
-  持有两个队列锁，Arc 析构发生在所有容器锁之外。
+  持有两个队列锁，Arc 析构发生在所有容器锁之外；
+- B51 让 `CpuTaskState.active_user_vm` 固定当前 CPU 的精确旧 MM。idle 栈在改变
+  current owner 前执行 `leave_user_vm()`，trap-return 通过 `switch_user_vm()` 重新进入；
+  槽锁不跨 VM 锁、ASID rollover 或 IPI 等待。该边界同时服务 TLB target 与
+  PRIVATE_EXPEDITED membarrier，不增加新的任务状态。冻结生产/测试 diff 后，双架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 65/65；初赛 `mask=0x003` 保持 RV64
+  312/314、LA64 308/314，失败身份与 B50 基线一致。
 
 #### 退出条件
 
@@ -801,13 +808,17 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 #### 实施内容
 
-- B22 已在 B16 的 raw/no-flush 用户 PTE 边界上增加 MM ID、单调 cached CPU
-  mask、generation/per-CPU observed、trap-return 激活登记，以及独立的全用户 IPI/ack
-  原语；B23 已用 `AddressSpace` + `MmuGather/TlbFlush` 取消发布状态过渡门禁；
+- B22 已在 B16 的 raw/no-flush 用户 PTE 边界上增加 MM ID、generation/per-CPU
+  observed、CPU 激活登记，以及独立的全用户 IPI/ack 原语；B23 已用 `AddressSpace` +
+  `MmuGather/TlbFlush` 取消发布状态过渡门禁；B51 又把历史 cached mask 替换为精确
+  active mask，并接入调度 switch-out；
 - B23 已在同一个 VM 锁临界区内完成 PTE 修改、失效范围合并、generation 推进和
-  cached mask 快照，把唯一 `MmuGather` 移交给锁外 `TlbFlush`；释放 VM 锁后才执行本地失效、远端 IPI/ack 等待，
+  CPU mask 快照，把唯一 `MmuGather` 移交给锁外 `TlbFlush`；释放 VM 锁后才执行本地失效、远端 IPI/ack 等待，
   全部目标完成后释放数据 frame 和页表 frame。调用方无法取得可变 VM guard，
   从类型形状上禁止在 VM 锁内等待 ack；
+- B51 规定零 active target 的 PTE 修改也必须推进 generation。已经切离的 CPU 可保留
+  旧 ASID 翻译，但在下次进入前会因 observed 落后而本地全刷；因此零目标提交无需 IPI，
+  又不会在 stale translation 可重新使用前释放 frame；
 - B16 已覆盖用户 unmap、mprotect、CoW、MAP_SHARED 写缺页、匿名缺页、filemap 和
   exec；Phase 4 需将用户路径升级为远端语义。B21 已单独收口动态内核栈与临时 ELF
   kernel-global 映射的全 CPU 撤销和延迟释放；

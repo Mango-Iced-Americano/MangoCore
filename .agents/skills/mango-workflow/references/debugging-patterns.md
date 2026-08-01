@@ -200,6 +200,31 @@
   sequence，发送方用单调比较等待。sequence wrap 必须显式防御，不能静默把 0 当正常轮次。
 - **相关文件**: `os/src/smp.rs`, `os/src/hal/arch/{riscv,loongarch64}/mod.rs`
 
+### 精确 MM 驻留测试不能把远端 IPI 次数当成唯一成功条件
+
+- **现象**: 历史 CPU mask 改为 active mask 后，TLB/membarrier 协议本身正确，但原测试偶发
+  报告“目标 CPU 没有收到 request”。不同架构通过与否还可能仅由 timer 时序决定。
+- **根因模式**: helper 在观察窗口调用调度安全点后可以合法切离 MM。切离侧 full fence、
+  active bit 清除和再次进入时的 generation catch-up 已经兑现协议，此时修改方不再向它发
+  IPI；继续断言 request 必须增长，实际是在测试旧的历史 mask 行为。
+- **验证模式**: 若要专门覆盖远端 IPI 分支，让 helper 保持本地中断开启但不要主动调度，
+  使 IPI handler 能运行而 MM residency 保持稳定；若要覆盖切离分支，则显式等待
+  `Blocked + active bit 清除`，在零目标窗口修改 PTE，并验证无 IPI、generation 落后及
+  wake 后本地补刷。不要放宽 timeout 或接受任意一个结果掩盖竞态。
+- **相关文件**: `os/src/kernel_tests/smp.rs`, `os/src/mm/tlb.rs`,
+  `os/src/task/processor.rs`
+
+### 测试不能用线程级终态推断进程级收尾已经完成
+
+- **现象**: 重复并发测试中，`live_threads == 0` 且所有 TCB 已是 `Zombie`，但紧接着断言
+  PCB `Zombie` 偶发失败；双架构在同一个 repeat 位置出现相同现象。
+- **根因模式**: 最后线程先释放 live token、发布 TCB 终态，随后才由 owner 调用进程级
+  `finish_exit()`。这些是有意分层的发布点，中间窗口不是生产退出失败。
+- **验证模式**: 完成等待必须包含测试真正要断言的最终条件，例如 PCB `is_zombie()`；不要
+  只增加轮询时间，也不要在尚未等待最终发布点时修改生产退出顺序。
+- **相关文件**: `os/src/task/task.rs`, `os/src/task/process.rs`,
+  `os/src/kernel_tests/smp.rs`
+
 ### 不要在 `Drop` 中等待跨核 ack：析构只提交退休，安全点完成回收
 
 - **危险模式**: 资源析构时直接获取页表锁、发送 IPI、等待远端 ack，再释放 frame。Rust 的

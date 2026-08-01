@@ -25,7 +25,7 @@ pub(crate) enum FlushRange {
 /// 目标 CPU 完成失效后才会清空它。
 pub(crate) struct MmuGather {
     range: FlushRange,
-    cached_cpus_at_begin: usize,
+    active_cpus_at_begin: usize,
     retired_frames: Vec<Arc<FrameTracker>>,
 }
 
@@ -33,15 +33,15 @@ impl MmuGather {
     pub(crate) const fn new() -> Self {
         Self {
             range: FlushRange::None,
-            cached_cpus_at_begin: 0,
+            active_cpus_at_begin: 0,
             retired_frames: Vec::new(),
         }
     }
 
-    /// 开始一次持锁写操作，并记住本轮可能缓存该 MM 的 CPU。
+    /// 开始一次持锁写操作，并记住本轮仍可直接返回该 MM 的 CPU。
     ///
     /// CPU 激活也受同一把地址空间锁保护，所以这个 mask 在 `seal()` 前不会变化。
-    pub(crate) fn begin(&mut self, cached_cpu_mask: usize) {
+    pub(crate) fn begin(&mut self, active_cpu_mask: usize) {
         assert_eq!(
             self.range,
             FlushRange::None,
@@ -51,7 +51,7 @@ impl MmuGather {
             self.retired_frames.is_empty(),
             "previous MMU gather still owns retired frames"
         );
-        self.cached_cpus_at_begin = cached_cpu_mask;
+        self.active_cpus_at_begin = active_cpu_mask;
     }
 
     /// 记录一个被新建、删除或修改权限/PPN 的用户 PTE。
@@ -81,10 +81,10 @@ impl MmuGather {
         }
 
         self.handle_retire_oom(page_table);
-        if self.cached_cpus_at_begin == 0
-            || self.cached_cpus_at_begin == 1usize << crate::smp::cpu_id()
+        if self.active_cpus_at_begin == 0
+            || self.active_cpus_at_begin == 1usize << crate::smp::cpu_id()
         {
-            // 无远端观察者时，handle_retire_oom 已经证明旧翻译不可再访问该页。
+            // 没有活跃远端 CPU 时，handle_retire_oom 已证明旧翻译不可再访问该页。
             drop(frame);
         } else {
             core::mem::forget(frame);
@@ -109,8 +109,8 @@ impl MmuGather {
         }
 
         self.handle_retire_oom(page_table);
-        if self.cached_cpus_at_begin == 0
-            || self.cached_cpus_at_begin == 1usize << crate::smp::cpu_id()
+        if self.active_cpus_at_begin == 0
+            || self.active_cpus_at_begin == 1usize << crate::smp::cpu_id()
         {
             drop(frames);
         } else {
@@ -126,28 +126,26 @@ impl MmuGather {
                 self.retired_frames.is_empty(),
                 "retired frame without a recorded PTE change"
             );
-            self.cached_cpus_at_begin = 0;
+            self.active_cpus_at_begin = 0;
             return None;
         }
 
-        let targets = context.cached_cpu_mask();
+        let targets = context.active_cpu_mask();
         assert_eq!(
-            targets, self.cached_cpus_at_begin,
+            targets, self.active_cpus_at_begin,
             "TLB target mask changed while the address-space lock was held"
         );
         // ASID 必须和 `range` 在同一个 VM 锁持有期冻结；解锁后可能发生
         // 全局 ASID rollover，不能再从 MM 中临时拼装另一份失效上下文。
         let asid = context.flush_asid(targets);
         let gather = core::mem::replace(self, Self::new());
-        let generation = if targets == 0 {
-            None
-        } else {
-            match context.advance_generation() {
-                Some(generation) => Some(generation),
-                None => {
-                    core::mem::forget(gather);
-                    panic!("MM TLB generation exhausted");
-                }
+        // 即使当前没有活跃 CPU，也必须推进 generation：已经切离的 CPU
+        // 仍可能缓存旧 ASID 翻译，它在下次进入前要据此执行本地补刷。
+        let generation = match context.advance_generation() {
+            Some(generation) => generation,
+            None => {
+                core::mem::forget(gather);
+                panic!("MM TLB generation exhausted");
             }
         };
         Some(TlbFlush::new(context, generation, targets, asid, gather))
@@ -155,11 +153,11 @@ impl MmuGather {
 
     /// 丢弃尚未装入共享 `AddressSpace` 的构造期记录。
     ///
-    /// 此时没有 CPU 能缓存该页表，因而旧 frame 可以直接释放，映射变化也无需失效。
+    /// 地址空间尚未发布，旧 frame 可以直接释放，构造期记录也无需失效。
     pub(crate) fn discard_unpublished(&mut self) {
         assert_eq!(
-            self.cached_cpus_at_begin, 0,
-            "detached address space unexpectedly has cached CPUs"
+            self.active_cpus_at_begin, 0,
+            "unpublished address space unexpectedly has active CPUs"
         );
         self.range = FlushRange::None;
         self.retired_frames.clear();
@@ -185,19 +183,21 @@ impl MmuGather {
     /// `range` 覆盖本轮已经入队的全部 frame：保持 `Page(vpn)` 说明所有修改都发生在
     /// 同一个 VPN；只要出现第二个 VPN，`record_change()` 就会把范围升级为 `Full`。
     /// 因此下面的一次页级或全量本地失效足以覆盖清空的整个退休队列。
+    ///
+    /// 应急释放后仍要保留 `range` 交给 `seal()`。本地 flush 只保护当前活跃 CPU；
+    /// 已经切离的 CPU 仍可能保留旧 ASID 翻译，必须靠本轮 generation 推进约束下次进入。
     fn handle_retire_oom<T: PageTable>(&mut self, page_table: &T) {
-        if self.cached_cpus_at_begin == 0 {
+        if self.active_cpus_at_begin == 0 {
             self.retired_frames.clear();
             return;
         }
 
-        if self.cached_cpus_at_begin == 1usize << crate::smp::cpu_id() {
+        if self.active_cpus_at_begin == 1usize << crate::smp::cpu_id() {
             match self.range {
                 FlushRange::None => unreachable!("retirement validates the flush range first"),
                 FlushRange::Page(vpn) => page_table.flush_tlb_page(vpn),
                 FlushRange::Full => page_table.flush_tlb(),
             }
-            self.range = FlushRange::None;
             self.retired_frames.clear();
             return;
         }

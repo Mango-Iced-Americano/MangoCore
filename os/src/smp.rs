@@ -871,7 +871,7 @@ pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError>
     synchronize_kernel_mapping_mask(targets, true)
 }
 
-/// 让一组曾缓存用户 MM 的 CPU 同步完成用户 TLB 失效。
+/// 让调用方选定的 CPU 集合同步完成用户 TLB 失效。
 ///
 /// `page=Some(vpn)` 时先尝试架构固件，再用固定槽传递 `asid + vpn`；槽被
 /// 同 CPU 的意外重入占用时才保守退回全用户/non-global IPI。`page=None`

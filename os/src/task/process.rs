@@ -352,8 +352,8 @@ impl ProcessControlBlock {
             .and_then(|parent| parent.upgrade())
             .map(|parent| parent.pid)
             .unwrap_or(0);
-        // 构造 PCB 只发布页表对象，不代表任何 CPU 已经缓存该 MM；真正的 CPU
-        // 登记统一发生在返回用户态前的 `activate_user_vm()`。
+        // 构造 PCB 只发布页表对象，不代表任何 CPU 已经进入该 MM；真正的 CPU
+        // 驻留登记统一发生在返回用户态前的 `activate_user_vm()`。
         let user_token = vm.read(|vm| vm.token());
         let pcb = Self {
             pid,
@@ -579,7 +579,7 @@ impl ProcessControlBlock {
     /// 检查需要和页表修改共用 VM 锁，才能闭合“加入 mask 与修改方快照”的竞态。
     pub(crate) fn activate_user_vm(&self) -> UserVmContext {
         let vm = self.vm();
-        vm.activate_on(crate::smp::cpu_id())
+        super::processor::switch_user_vm(vm)
     }
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {

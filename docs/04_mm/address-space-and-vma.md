@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [mm, address-space, vma, elf, maps, mmu-gather, membarrier]
 ---
 
@@ -35,7 +35,7 @@ pub struct AddressSpaceInner<T: PageTable> {
 | 字段 | 说明 |
 |------|------|
 | `AddressSpace.inner` | 串行化同一 MM 的 VMA、PTE 和 CPU 激活登记 |
-| `AddressSpace.tlb` | 与共享 MM 同寿命的 ID、cached CPU mask、generation 与 per-CPU observed |
+| `AddressSpace.tlb` | 与共享 MM 同寿命的 ID、active CPU mask、generation 与 per-CPU observed |
 | `AddressSpace.private_expedited_registered` | MM-owned PRIVATE_EXPEDITED 注册状态 |
 | `AddressSpaceInner.page_table` | 当前进程页表 |
 | `AddressSpaceInner.vmas` | 用户与少量进程私有内核映射的 VMA 集合 |
@@ -56,8 +56,9 @@ PCB 以 `Arc<AddressSpace<T>>` 持有 VM；读操作经 `read()`，可能改 PTE
 | `AddressSpace::read()` | `address_space.rs` | 在 VM 锁内提供不可变访问，不进入 TLB 修改协议。 |
 | `AddressSpace::write()/try_write()` | `address_space.rs` | 锁内记录修改、`seal()`，解锁后执行 `TlbFlush`。 |
 | `AddressSpace::activate_on()` | `address_space.rs` | 在 VM 锁内登记当前 CPU、完成首次 membarrier fence、追平 generation，并取得页表 token。 |
+| `AddressSpace::deactivate_on()` | `address_space.rs` | 在 idle 栈上以完整屏障切离当前 CPU，并在 VM 锁内清除 active bit。 |
 | `register_private_expedited()` | `address_space.rs` | 为共享 MM 注册 PRIVATE_EXPEDITED。 |
-| `private_expedited_targets()` | `address_space.rs` | 在 VM 锁内冻结历史 CPU mask；未注册时返回 `None`。 |
+| `private_expedited_targets()` | `address_space.rs` | 在 VM 锁内冻结当前 active CPU mask；未注册时返回 `None`。 |
 | `AddressSpaceInner::new_bare()` | `address_space.rs` | 创建空的页表/VMA 数据。 |
 | `AddressSpaceInner::token()` | `address_space.rs` | 返回页表 token。 |
 | `AddressSpaceInner::from_elf()` | `address_space.rs` | 从 ELF 构造尚未发布的用户地址空间。 |
@@ -70,6 +71,18 @@ PCB 以 `Arc<AddressSpace<T>>` 持有 VM；读操作经 `read()`，可能改 PTE
 | `mprotect()` | `address_space.rs:1142` | 修改 VMA/PTE 权限。 |
 
 阅读地址空间代码时，先区分入口来自哪里：`execve` 和 initproc 创建走 `from_elf()`，fork 走 `from_existing_user()`，用户触页走 `do_page_fault()`，syscall 用户指针走 `fault_in_user_va()`，显式内存 syscall 走 `mmap()/munmap()/mprotect()/sbrk()`。
+
+### 1.2 CPU 驻留与 generation
+
+`activate_on()`/`deactivate_on()` 只允许由目标 CPU 自己调用，并与 PTE writer 共用
+`AddressSpace.inner`。每 CPU 的调度状态保存精确的旧 `AddressSpace` Arc：trap-return
+切换 MM 时先从旧 MM leave，再进入新 MM；任务真正切回 idle 栈时也会 leave。这个 Arc
+不能改成重新读取 `process.vm()`，因为 exec 可能已经把 PCB 中的指针替换为新 MM。
+
+writer 在锁内冻结 active mask。mask 为空只表示当前没有 CPU 可直接返回该 MM，不表示
+硬件里绝无旧 ASID 翻译，因此 PTE 修改仍推进 generation；下次 `activate_on()` 发现
+observed 落后时先做本地全用户失效，再取得页表根。零目标提交释放退休 frame 时，即使
+另一个 CPU 已经并发开始进入，它也会在使用页表根前先观察新 generation 并完成补刷。
 
 `from_existing_user()` 是 fork/非 `CLONE_VM` clone 复制地址空间的核心函数：
 

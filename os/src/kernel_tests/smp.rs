@@ -351,6 +351,9 @@ static PAGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
 static PAGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
 static PAGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
 static PAGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_MM_START: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_MM_PHASE: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_MM_ERRORS: AtomicUsize = AtomicUsize::new(0);
 const USER_RESCHED_WAITING: usize = 0;
 const USER_RESCHED_SENT: usize = 1;
 const USER_RESCHED_TARGET_LOST: usize = 2;
@@ -394,6 +397,8 @@ lazy_static! {
     static ref USER_TLB_RETIRE_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
         Mutex::new(None);
     static ref SHARED_TLB_VM: Mutex<Option<Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>>> =
+        Mutex::new(None);
+    static ref ACTIVE_MM_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     /// CPU1 helper 只在测试期间持有 Weak，不延长用户 TCB 生命周期。
     static ref USER_RESCHED_TARGET: Mutex<Option<(Weak<crate::task::TaskControlBlock>, usize)>> =
@@ -468,6 +473,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::zombie_reclaims_on_owner_idle",
             zombie_reclaims_on_owner_idle,
+        ),
+        KernelTest::new(
+            "smp::inactive_mm_catches_up_on_wake",
+            inactive_mm_catches_up_on_wake,
         ),
         KernelTest::new(
             "smp::user_tlb_full_flush_reaches_online_cpus",
@@ -661,7 +670,10 @@ fn group_exit_stops_remote_sibling() -> Result<(), &'static str> {
             Err(errno) if errno == crate::syscall::errno::EAGAIN => {}
             _ => exit_timed_out = true,
         }
+        // 最后线程先发布 live token=0 和 TCB Zombie，随后才执行进程级
+        // finish_exit()。三者必须一起成为完成条件，不能把中间窗口误报成失败。
         while process.live_thread_count() != 0
+            || !process.is_zombie()
             || leader.task_status() != crate::task::TaskStatus::Zombie
             || blocked.task_status() != crate::task::TaskStatus::Zombie
             || remote.task_status() != crate::task::TaskStatus::Zombie
@@ -1685,10 +1697,12 @@ fn bsp_broadcasts_ipi_to_all_aps() -> Result<(), &'static str> {
 fn membarrier_remote_mm_helper() {
     crate::hal::local_irq_restore(true);
     let task = crate::task::current_task().expect("membarrier helper has no current task");
-    let _context = task.process.vm().activate_on(crate::smp::cpu_id());
+    let _context = task.process.activate_user_vm();
     MEMBARRIER_REMOTE_READY.store(1, Ordering::Release);
+    // 本用例专门验证“目标仍在当前 MM 中运行”时的远端 IPI/ack，不能在观察
+    // 窗口主动进入调度安全点。timer/IPI 仍可打断本循环，membarrier handler
+    // 因而可以正常执行完整屏障；调度请求留到 helper 退出时统一消费。
     while MEMBARRIER_REMOTE_RELEASE.load(Ordering::Acquire) == 0 {
-        crate::task::run_task_safe_point();
         core::hint::spin_loop();
     }
     // 裸入口和 noreturn 调度都不会展开 Rust 栈，必须主动释放 current clone。
@@ -2783,6 +2797,128 @@ fn zombie_reclaims_on_owner_idle() -> Result<(), &'static str> {
         return Err("local zombie queue retained the reclaimed task");
     }
     Ok(())
+}
+
+fn block_with_active_mm() {
+    while ACTIVE_MM_START.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+
+    let cpu = crate::smp::cpu_id();
+    let task = crate::task::current_task().expect("active-MM helper has no current task");
+    let vm = task.process.vm();
+    let _context = task.process.activate_user_vm();
+    if cpu != 1 || vm.active_cpu_mask() != 1usize << cpu {
+        ACTIVE_MM_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    ACTIVE_MM_PHASE.store(1, Ordering::Release);
+
+    let completion = ACTIVE_MM_COMPLETION
+        .lock()
+        .as_ref()
+        .expect("active-MM completion missing")
+        .clone();
+    if !matches!(
+        completion.wait_killable(),
+        crate::task::WaitResult::Ready(_)
+    ) {
+        ACTIVE_MM_ERRORS.fetch_add(1, Ordering::Release);
+    }
+
+    // 阻塞切栈已经从 active mask 摘除 CPU1；再次进入必须观察 CPU0
+    // 在空 mask 窗口推进的 generation，并在返回前完成本地失效。
+    let _context = task.process.activate_user_vm();
+    if vm.active_cpu_mask() != 1usize << cpu || !vm.cpu_tlb_is_current(cpu) {
+        ACTIVE_MM_ERRORS.fetch_add(1, Ordering::Release);
+    }
+    ACTIVE_MM_PHASE.store(2, Ordering::Release);
+    drop(vm);
+    drop(task);
+    crate::task::zombify_current_and_run_next();
+}
+
+/// CPU1 阻塞后必须从 MM active mask 中消失。CPU0 在该窗口撤映射时不向
+/// CPU1 发 shootdown，但仍推进 generation；CPU1 被唤醒后通过正式激活路径补刷。
+fn inactive_mm_catches_up_on_wake() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("active-MM test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    const TEST_BASE: usize = 0x55_0000;
+
+    ACTIVE_MM_START.store(0, Ordering::Release);
+    ACTIVE_MM_PHASE.store(0, Ordering::Release);
+    ACTIVE_MM_ERRORS.store(0, Ordering::Release);
+    let completion = Arc::new(crate::task::Completion::new());
+    *ACTIVE_MM_COMPLETION.lock() = Some(completion.clone());
+    let task = crate::task::spawn_ktest_task_on(1, block_with_active_mm);
+    let vm = task.process.vm();
+
+    // 先在无人活跃时建立映射。第一次 activate 同样必须追上这一代修改。
+    vm.write(|space| {
+        space.insert_framed_area(
+            crate::mm::VirtAddr::from(TEST_BASE),
+            crate::mm::VirtAddr::from(TEST_BASE + crate::config::PAGE_SIZE),
+            crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
+        );
+    });
+    ACTIVE_MM_START.store(1, Ordering::Release);
+
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while ACTIVE_MM_PHASE.load(Ordering::Acquire) != 1
+        || task.task_status() != crate::task::TaskStatus::Blocked
+    {
+        if crate::hal::get_time() >= deadline {
+            completion.complete();
+            return Err("CPU1 did not block after activating its MM");
+        }
+        core::hint::spin_loop();
+    }
+
+    let request_before = crate::smp::user_tlb_request(1);
+    let mut validation_error = None;
+    if vm.active_cpu_mask() != 0 {
+        validation_error = Some("blocked CPU remained in the MM active mask");
+    } else if !vm.cpu_tlb_is_current(1) {
+        validation_error = Some("CPU1 was stale before the inactive MM update");
+    } else {
+        vm.write(|space| {
+            space
+                .remove_area_with_start_vpn(crate::mm::VirtAddr::from(TEST_BASE).floor())
+                .expect("inactive-MM test unmap failed");
+        });
+        if crate::smp::user_tlb_request(1) != request_before {
+            validation_error = Some("inactive CPU received an unnecessary TLB shootdown");
+        } else if vm.cpu_tlb_is_current(1) {
+            validation_error = Some("inactive CPU incorrectly observed the new TLB generation");
+        }
+    }
+
+    completion.complete();
+    let finish_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while ACTIVE_MM_PHASE.load(Ordering::Acquire) != 2
+        || task.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(1)
+    {
+        if crate::hal::get_time() >= finish_deadline {
+            validation_error.get_or_insert("CPU1 did not reactivate and exit after wake");
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if ACTIVE_MM_ERRORS.load(Ordering::Acquire) != 0 {
+        validation_error.get_or_insert("CPU1 observed an invalid active-MM transition");
+    }
+    if vm.active_cpu_mask() != 0 {
+        validation_error.get_or_insert("exited CPU remained in the MM active mask");
+    }
+
+    *ACTIVE_MM_COMPLETION.lock() = None;
+    validation_error.map_or(Ok(()), Err)
 }
 
 /// 直接调用生产 user-TLB 同步原语，验证独立 sequence、IPI handler 与 ack 闭环。

@@ -944,6 +944,31 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp` 均为 32/32。初赛仍为 RV64 312/314、LA64 308/314，
   精确失败集合不变；四个 child 均无源码 mutation、panic 或 timeout。
 
+### Case 40: SMP 精确 active MM 驻留与安全切离
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b51-active-mm-summary.md`；DeepSeek prompt、manifest
+  与原始 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 Linux 的 `switch_mm/leave_mm` 与 membarrier 调度屏障语义，
+  设计 writer/enter/leave 的共同 VM 锁线性化点、实现并裁决测试结果；DeepSeek 只读审查
+  锁序，并通过受限网关串行执行双架构构建、focused 与初赛测试，不修改、提交或上传源码。
+- Problem: B22 的 `cached_cpus` 只增不减，已经切离 MM 的 CPU 会永久成为 shootdown 和
+  PRIVATE_EXPEDITED 目标；直接清 bit 又会在 PTE writer、调度切离和重新进入之间遗漏失效，
+  尤其不能把 `targets=0` 错当成硬件中不存在旧 ASID 翻译。
+- Implemented change: 每 CPU 保存当前用户 MM 的精确 Arc；idle 栈在改变 current owner 前
+  执行 leave full fence 并清 active bit，trap-return 通过 `switch_user_vm()` 进入新 MM。
+  PTE 修改即使没有 active target 也推进 generation，使旧翻译只能在下次进入前补刷后使用。
+  exec 后依靠 Per-CPU Arc 清理旧 MM，而不是重新读取已替换的 `process.vm`。
+- AI adjudication: 首轮 RV64 membarrier RED 是 helper 主动安全点切离后仍要求历史 IPI 的
+  测试假设；随后双架构第二轮 group-exit RED 是测试先观察 TCB/live-token、未等待 PCB
+  `finish_exit()`。GPT/Codex 分别固定测试分支和最终完成条件，没有修改生产协议或放宽超时。
+  DeepSeek 还把 active=0 误述为“没有旧 TLB”，并把每架构已经包含两轮的 65 个 TAP 点再次
+  乘以 repeat 报成 260；最终证据按原始日志纠正为双架构合计 130 个检查点。
+- Verification: 最终冻结 tracked diff SHA-256 为
+  `c0e54db406bce69031947d152b5502b615f26f747cb647a690256e9ffd5be1e8`；RV64/LA64
+  `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 65/65。初赛保持 RV64 312/314、LA64
+  308/314，精确失败集合与 B50 一致；四个最终 child 均无源码 mutation、panic 或 timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：

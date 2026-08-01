@@ -1,6 +1,6 @@
 //! 用户地址空间的跨 CPU TLB 同步状态。
 //!
-//! [`TlbContext`] 由共享地址空间持有，记录缓存过该 MM 的 CPU 与代际；
+//! [`TlbContext`] 由共享地址空间持有，记录正在使用该 MM 的 CPU 与代际；
 //! [`TlbFlush`] 则是从 VM 锁中带出的单次执行对象。两者的边界保证 IPI/ack
 //! 等待永远不发生在地址空间锁内。
 
@@ -12,7 +12,7 @@ static NEXT_MM_ID: AtomicUsize = AtomicUsize::new(1);
 /// 一个共享地址空间的长期 TLB 代际状态。
 pub(crate) struct TlbContext {
     mm_id: usize,
-    cached_cpus: AtomicUsize,
+    active_cpus: AtomicUsize,
     generation: AtomicUsize,
     observed: [AtomicUsize; crate::smp::MAX_CPUS],
     /// 架构软件 epoch 与硬件 ASID 的原子组合；0 表示尚未分配或无 ASID。
@@ -25,7 +25,7 @@ pub(crate) struct TlbContext {
 /// 全部完成后才释放它们。对象被丢弃或同步失败时会故意泄漏 frame 并 fail-stop。
 pub(crate) struct TlbFlush<'a> {
     context: &'a TlbContext,
-    generation: Option<usize>,
+    generation: usize,
     targets: usize,
     /// 与本轮 PTE 修改在同一 VM 锁内冻结的硬件 ASID。
     asid: u16,
@@ -39,7 +39,7 @@ impl TlbContext {
         assert_ne!(mm_id, 0, "MM identifier space exhausted");
         Self {
             mm_id,
-            cached_cpus: AtomicUsize::new(0),
+            active_cpus: AtomicUsize::new(0),
             // 从 1 开始，使新 MM 第一次返回用户态时必定执行一次明确失效。
             generation: AtomicUsize::new(1),
             observed: [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS],
@@ -69,14 +69,24 @@ impl TlbContext {
         Some(crate::hal::arch::riscv::sv39::hardware_asid(assigned))
     }
 
-    /// 返回曾经缓存过该 MM 的 CPU；未实现安全 detach 前该集合只增不减。
-    pub(crate) fn cached_cpu_mask(&self) -> usize {
-        self.cached_cpus.load(Ordering::Acquire)
+    /// 返回当前仍可能直接返回该 MM 用户态的 CPU。
+    pub(crate) fn active_cpu_mask(&self) -> usize {
+        self.active_cpus.load(Ordering::Acquire)
+    }
+
+    /// 仅供诊断判断指定 CPU 是否已经观察到当前代际。
+    ///
+    /// 调用方仍需通过 `AddressSpace` 锁冻结 generation；这个布尔值不能代替
+    /// 激活协议，也不能作为提前释放 frame 的依据。
+    pub(crate) fn cpu_is_current(&self, cpu_id: usize) -> bool {
+        assert!(cpu_id < crate::smp::configured_cpu_count());
+        self.observed[cpu_id].load(Ordering::Acquire)
+            >= self.generation.load(Ordering::Acquire)
     }
 
     /// 取得本轮页级失效必须使用的硬件 ASID。
     ///
-    /// 有缓存者意味着该 MM 至少完成过一次 `activate_on()`，因此 LA64 必须
+    /// 有活跃 CPU 意味着该 MM 至少完成过一次 `activate_on()`，因此 LA64 必须
     /// 已拥有非零 ASID。调用者在 VM 锁内取值，使 ASID 与本轮 VPN 成为同一快照。
     #[cfg(target_arch = "loongarch64")]
     pub(crate) fn flush_asid(&self, targets: usize) -> u16 {
@@ -86,7 +96,7 @@ impl TlbContext {
         let asid = crate::hal::arch::loongarch64::tlb::hardware_asid(
             self.asid_context.load(Ordering::Acquire),
         );
-        assert_ne!(asid, 0, "cached LoongArch MM has no hardware ASID");
+        assert_ne!(asid, 0, "active LoongArch MM has no hardware ASID");
         asid
     }
 
@@ -100,7 +110,7 @@ impl TlbContext {
             crate::hal::arch::riscv::sv39::hardware_asid(self.asid_context.load(Ordering::Acquire));
         assert!(
             asid != 0 || crate::hal::arch::riscv::sv39::asid_capacity() == 0,
-            "cached RISC-V MM has no hardware ASID"
+            "active RISC-V MM has no hardware ASID"
         );
         asid
     }
@@ -112,10 +122,10 @@ impl TlbContext {
     pub(crate) fn activate_cpu(&self, cpu_id: usize) {
         assert!(cpu_id < crate::smp::configured_cpu_count());
         let cpu_bit = 1usize << cpu_id;
-        let cached = self.cached_cpus.load(Ordering::Acquire);
-        if cached & cpu_bit == 0 {
-            // 激活与修改都持有同一把地址空间锁；首次登记不会漏过修改方快照。
-            let previous = self.cached_cpus.fetch_or(cpu_bit, Ordering::AcqRel);
+        let active = self.active_cpus.load(Ordering::Acquire);
+        if active & cpu_bit == 0 {
+            // 激活与修改都持有同一把地址空间锁；登记不会漏过修改方快照。
+            let previous = self.active_cpus.fetch_or(cpu_bit, Ordering::AcqRel);
             if previous & cpu_bit == 0 {
                 // 若本 CPU 在 PRIVATE_EXPEDITED 取目标快照后才首次进入该 MM，
                 // VM 锁与这道 full fence 共同替代一次远端 IPI，保证返回用户态
@@ -136,6 +146,26 @@ impl TlbContext {
                 return;
             }
         }
+    }
+
+    /// 当前 CPU 已切回 idle，清除它直接返回该 MM 的资格。
+    ///
+    /// 完整屏障必须先于 active bit 的 Release 清除。这样在同一 VM 锁后快照到
+    /// bit 已清除的 membarrier/PTE writer，可以把本次切离当作有序点；后续
+    /// 再次进入则必须经过 `activate_cpu()` 的 generation 追赶。
+    pub(crate) fn deactivate_cpu(&self, cpu_id: usize) {
+        assert!(cpu_id < crate::smp::configured_cpu_count());
+        let cpu_bit = 1usize << cpu_id;
+        if self.active_cpus.load(Ordering::Acquire) & cpu_bit == 0 {
+            return;
+        }
+        fence(Ordering::SeqCst);
+        let previous = self.active_cpus.fetch_and(!cpu_bit, Ordering::AcqRel);
+        assert_ne!(
+            previous & cpu_bit,
+            0,
+            "active MM CPU bit disappeared while holding its address-space lock"
+        );
     }
 
     /// 为一次已经记录到 PTE 的修改分配新代际。
@@ -168,7 +198,7 @@ impl Default for TlbContext {
 impl<'a> TlbFlush<'a> {
     pub(super) fn new(
         context: &'a TlbContext,
-        generation: Option<usize>,
+        generation: usize,
         targets: usize,
         asid: u16,
         gather: MmuGather,
@@ -185,7 +215,7 @@ impl<'a> TlbFlush<'a> {
 
     /// 在不持普通锁的上下文完成失效，并在最后释放退休 frame。
     pub(crate) fn execute(mut self) {
-        if let Some(generation) = self.generation {
+        if self.targets != 0 {
             let current_bit = 1usize << crate::smp::cpu_id();
             let result = if self.targets == current_bit {
                 match self.gather.range() {
@@ -208,10 +238,10 @@ impl<'a> TlbFlush<'a> {
                 self.executed = true;
                 panic!(
                     "user TLB shootdown failed: mm={} generation={} targets={:#x} error={:?}",
-                    self.context.mm_id, generation, self.targets, error
+                    self.context.mm_id, self.generation, self.targets, error
                 );
             }
-            self.context.acknowledge(generation, self.targets);
+            self.context.acknowledge(self.generation, self.targets);
         }
 
         self.executed = true;
@@ -227,7 +257,7 @@ impl Drop for TlbFlush<'_> {
         }
         self.gather.leak_retired_frames();
         panic!(
-            "unexecuted user TLB flush: mm={} generation={:?} targets={:#x}",
+            "unexecuted user TLB flush: mm={} generation={} targets={:#x}",
             self.context.mm_id, self.generation, self.targets
         );
     }

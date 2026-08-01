@@ -3,7 +3,7 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-01
 tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp, membarrier]
 ---
 
@@ -155,16 +155,16 @@ AddressSpace::write
   -> TlbFlush::execute
 ```
 
-`MmuGather` 只保留三个概念：失效范围、写操作开始时的 cached CPU mask 快照，
+`MmuGather` 只保留三个概念：失效范围、写操作开始时的 active CPU mask 快照，
 以及一份 `retired_frames`。它把同一 VPN 的多次修改合并为单页失效，把多个 VPN
 或页表层级变化合并为全用户失效。没有 PTE 修改时 `seal()` 返回 `None`，因此
 只读或未触页的写作用域不会产生 generation、IPI 或 TLB flush。
 
-目标范围不再由额外发布状态表示，而直接从 `TlbContext.cached_cpus` 推导：
+目标范围不再由额外发布状态表示，而直接从 `TlbContext.active_cpus` 推导：
 
-| cached CPU mask | 执行方式 |
+| active CPU mask | 执行方式 |
 |-----------------|----------|
-| `0` | 页表尚未被任何 CPU 使用；无需失效，解锁后即可释放退休 frame |
+| `0` | 当前没有 CPU 可直接返回该 MM；不发 IPI，但仍推进 generation 后释放退休 frame |
 | 仅当前 CPU | 按 `FlushRange` 执行页级或本地全用户失效 |
 | 含远端 CPU、单一 VPN | RV64 使用目标 MM 的 ASID 调用同步 SBI RFENCE FID 2，缺失时使用固定 slot；LA64 使用固定 slot 携带 ASID/VPN，目标精确执行页级失效 |
 | 含远端 CPU、多 VPN/页表层级变化 | 使用 user-TLB request/ack，在目标 CPU 执行全用户失效 |
@@ -174,32 +174,33 @@ AddressSpace::write
 仅含当前 CPU 才能在锁内证明旧翻译不可访问后同步释放；存在远端观察者时会
 故意泄漏 frame 并 fail-stop，绝不让 panic 展开提前复用物理页。
 
-`TlbContext` 保存 MM ID、只增不减的 cached CPU mask、generation 和每 CPU
-observed。用户返回前，`activate_on()` 在同一把 VM 锁内先登记 CPU，再比较
-generation；若本 CPU 落后，先清除本地用户翻译再使用页表根。修改侧也在这把锁内
-读取 mask 并推进 generation，因此激活和修改不会互相漏过。
+`TlbContext` 保存 MM ID、精确 active CPU mask、generation 和每 CPU observed。
+用户返回前，`activate_on()` 在同一把 VM 锁内先登记 CPU，再比较 generation；若本 CPU
+落后，先清除本地用户翻译再使用页表根。任务已经切回 idle 栈后，`deactivate_on()`
+在改变 current owner 前执行完整屏障并清除 bit。修改侧也在这把锁内读取 mask 并推进
+generation，因此 enter、leave 和修改不会互相漏过。
 
-B44 复用同一个历史 cached mask 选择 PRIVATE_EXPEDITED membarrier 目标，但不把
-membarrier 塞进 TLB generation 或 `MmuGather`。快照与首次 CPU 登记仍由 VM 锁排序：
-快照前登记者收到远端 fence，快照后首次登记者在使用 MM 前执行本地 full fence。
-目标 mask 只增不减会产生保守的额外 IPI，但不会漏掉已经使用过该 MM 的 CPU。
+B44/B51 复用同一个 active mask 选择 PRIVATE_EXPEDITED membarrier 目标，但不把
+membarrier 塞进 TLB generation 或 `MmuGather`。快照与 CPU enter/leave 由 VM 锁排序：
+快照前进入且尚未离开者收到远端 fence，快照后进入者在使用 MM 前执行本地 full fence，
+快照前已离开者由 leave full fence 提供有序点。
 
 fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `MmuGather`：父侧批量
 撤销私有可写页的 W 权限，子侧建立共享 PPN。新子 MM 在包装成 `AddressSpace`
 前尚无 CPU 能观察，构造期记录可由 `discard_unpublished()` 清除；父侧记录则由
 外层 `write()` 正常同步，否则父 CPU 可能继续用旧权限写共享页。
 
-当前性能策略仍然保守：cached mask 尚未安全清 bit，多页修改仍按整个用户地址空间失效。
-RV64 在启动时探测 `SATP.ASID` 容量，用户 MM 使用 versioned ASID；单页修改在本地执行
+当前 active mask 已能在安全切离点清 bit，剩余的主要保守项是多页修改仍按整个用户
+地址空间失效。RV64 在启动时探测 `SATP.ASID` 容量，用户 MM 使用 versioned ASID；单页修改在本地执行
 `sfence.vma va, asid`，远端以物理 hart mask 调用 SBI RFENCE FID 2，同步完成
 `[va, va + PAGE_SIZE)` 后才允许释放 frame。固件缺少 RFENCE 时明确改走固定 slot。
 有硬件 ASID 时，用户/内核 SATP 切换不再固定全刷；ASIDLEN=0 平台保留兼容全刷。
 LA64 单页 PTE 修改把同一 VM 锁内冻结的 ASID/VPN 发布到每发起 CPU 独占的原子槽，
 目标 CPU 执行 `invtlb 0x5` 后才 ack。LoongArch 一个普通 TLB entry 同时
 覆盖相邻偶/奇 4 KiB 页，因此其最小硬件粒度是对齐后的 8 KiB 页对，而不是单个 4 KiB 页。
-已经避免的固定成本还包括：已登记 CPU 的重复
-`fetch_or`、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
-range 和安全 CPU detach 留给后续工作。
+已经避免的固定成本还包括：同一 MM 连续返回时的重复 active-bit 写入、已经切离 CPU 的
+远端 IPI、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
+range 留给后续工作。
 
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
@@ -311,8 +312,9 @@ B16 首次收口用户 PTE 写入，B22 完成 cached CPU/generation 激活侧�
 RV64 单页 RFENCE；B25 完成 LA64 MM-owned ASID 与全 CPU flush-before-reuse epoch
 协议；B26 以每发起 CPU 固定 slot 完成 LA64 ASID+VPN 远端失效；B27 完成 RV64
 ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和条件式 trap 切根；B29 又验证了同一
-用户任务可在 `sched_yield` 安全点携带同一 MM 从 CPU0 迁移至 CPU1。连续 range、安全
-CPU detach、默认亲和性和通用用户迁移仍未完成。
+用户任务可在 `sched_yield` 安全点携带同一 MM 从 CPU0 迁移至 CPU1。B51 将历史
+cached CPU 集合替换为调度器维护的 active mask，并用零目标 generation 追赶闭合安全
+detach。连续 range、默认亲和性和通用用户迁移仍未完成。
 
 ## 13. 调试核对点
 

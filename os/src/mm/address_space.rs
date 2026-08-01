@@ -82,7 +82,7 @@ pub enum MemoryError {
 /// 带过 shootdown 等待点。
 pub struct AddressSpace<T: PageTable> {
     inner: Mutex<AddressSpaceInner<T>>,
-    /// MM ID、历史缓存 CPU 与 generation；其生命周期和共享地址空间完全一致。
+    /// MM ID、活跃 CPU 与 generation；其生命周期和共享地址空间完全一致。
     tlb: TlbContext,
     /// 当前 MM 是否注册过 PRIVATE_EXPEDITED membarrier。
     ///
@@ -121,7 +121,7 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn write<R>(&self, operation: impl FnOnce(&mut AddressSpaceInner<T>) -> R) -> R {
         let (result, flush) = {
             let mut inner = self.inner.lock();
-            inner.mmu_gather.begin(self.tlb.cached_cpu_mask());
+            inner.mmu_gather.begin(self.tlb.active_cpu_mask());
             let result = operation(&mut inner);
             let flush = inner.mmu_gather.seal(&self.tlb);
             (result, flush)
@@ -139,7 +139,7 @@ impl<T: PageTable> AddressSpace<T> {
     ) -> Option<R> {
         let (result, flush) = {
             let mut inner = self.inner.try_lock()?;
-            inner.mmu_gather.begin(self.tlb.cached_cpu_mask());
+            inner.mmu_gather.begin(self.tlb.active_cpu_mask());
             let result = operation(&mut inner);
             let flush = inner.mmu_gather.seal(&self.tlb);
             (result, flush)
@@ -152,6 +152,11 @@ impl<T: PageTable> AddressSpace<T> {
 
     /// 返回用户态前登记当前 CPU，并取得同一 MM 的页表根与 ASID。
     pub(crate) fn activate_on(&self, cpu_id: usize) -> UserVmContext {
+        assert_eq!(
+            cpu_id,
+            crate::smp::cpu_id(),
+            "user MM must be activated by its local CPU"
+        );
         loop {
             let context = {
                 let inner = self.inner.lock();
@@ -175,6 +180,32 @@ impl<T: PageTable> AddressSpace<T> {
         }
     }
 
+    /// CPU 已切回 idle，撤销其无需重新校验 generation 就返回本 MM 的资格。
+    ///
+    /// 与 `activate_on()` 一样，本操作持有地址空间锁，从而和 PTE writer 的
+    /// target 快照形成全序；锁内不发送 IPI，也不等待远端确认。
+    pub(crate) fn deactivate_on(&self, cpu_id: usize) {
+        assert_eq!(
+            cpu_id,
+            crate::smp::cpu_id(),
+            "user MM must be deactivated by its local CPU"
+        );
+        let _inner = self.inner.lock();
+        self.tlb.deactivate_cpu(cpu_id);
+    }
+
+    /// 返回当前活跃 CPU 快照，供调度诊断与 SMP 一致性检查使用。
+    pub(crate) fn active_cpu_mask(&self) -> usize {
+        let _inner = self.inner.lock();
+        self.tlb.active_cpu_mask()
+    }
+
+    /// 诊断指定 CPU 的 observed generation 是否已经追上当前 MM generation。
+    pub(crate) fn cpu_tlb_is_current(&self, cpu_id: usize) -> bool {
+        let _inner = self.inner.lock();
+        self.tlb.cpu_is_current(cpu_id)
+    }
+
     /// 注册当前地址空间使用 PRIVATE_EXPEDITED membarrier。
     pub(crate) fn register_private_expedited(&self) {
         self.private_expedited_registered
@@ -186,14 +217,14 @@ impl<T: PageTable> AddressSpace<T> {
 
     /// 冻结 PRIVATE_EXPEDITED 的目标 CPU；未注册时返回 `None`。
     ///
-    /// 激活路径也持有 `inner`，因此锁内快照与首次 CPU 登记具有明确先后：
-    /// 先登记者进入历史 mask，后登记者会在首次使用 MM 前执行完整 fence。
+    /// 激活/切离路径也持有 `inner`，因此锁内快照与 active mask 变化具有明确
+    /// 先后：先进入者收到 IPI，后进入者在使用 MM 前执行完整 fence。
     pub(crate) fn private_expedited_targets(&self) -> Option<usize> {
         if !self.private_expedited_registered.load(Ordering::Acquire) {
             return None;
         }
         let _inner = self.inner.lock();
-        Some(self.tlb.cached_cpu_mask() | (1usize << crate::smp::cpu_id()))
+        Some(self.tlb.active_cpu_mask() | (1usize << crate::smp::cpu_id()))
     }
 }
 

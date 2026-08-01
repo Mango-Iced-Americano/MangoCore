@@ -48,6 +48,10 @@ Running TCB。首次 clone 发布也与线程成员登记共用 group-exit 门�
 B41 继续让多线程 exec 复用这个 owner 自清理安全点，但使用可恢复的临时 exec
 会话和 Completion：owner 等到 sibling 清理完旧用户映射并把 live count 降为 1
 后才替换 MM，随后重新开放线程创建。
+B51 在每个 `CpuTaskState` 中增加当前活跃用户 MM 的 Arc。用户 trap-return 通过
+`switch_user_vm()` 安装它；任务真正切回 idle 栈后，调度器在改变 current owner 前
+调用 `leave_user_vm()`，让 MM 的 active CPU mask 精确反映仍可直接返回用户态的 CPU。
+槽锁只交换 Arc，不跨 VM 锁、ASID rollover 或 IPI 等待。
 
 ## 2. TaskManager 与 Per-CPU RunQueue
 
@@ -71,8 +75,9 @@ pub struct TaskManager {
 pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 ```
 
-每个 `CpuTaskState` 独占 `Processor`、`RunQueue` 和 `local_zombies`，并保留
-`nr_running` / `current_present` / `nr_zombies` 原子提示。`nr_running` 只表示队列
+每个 `CpuTaskState` 独占 `Processor`、`RunQueue`、`local_zombies` 和
+`active_user_vm`，并保留 `nr_running` / `current_present` / `nr_zombies` 原子提示。
+`active_user_vm` 的 Arc 固定精确旧 MM，供 exec 后切离；`nr_running` 只表示队列
 成员，`current_present` 由 current 槽安装/清空路径以
 Release 更新；B37 用两者之和估算放置负载。它们都不参与 owner 正确性判断，瞬时误差
 最多造成次优选点。`nr_zombies` 只用于空队列快路径和诊断，真实
@@ -444,8 +449,9 @@ exit_current_and_run_next()
   └── idle: finish_switch_out() -> owner CPU local_zombies
 ```
 
-`finish_current_switch_out()` 先在 idle 栈清空 current 槽并释放 processor 锁，再把
-`Zombie` TCB 交给退出 CPU 的 `local_zombies`。CPU0 和 AP 都在自己的 idle 循环、
+`finish_current_switch_out()` 已经位于 idle 栈。它先让旧 current 的用户 MM leave，
+再清空 current 槽并释放 processor 锁，最后把 `Zombie` TCB 交给退出 CPU 的
+`local_zombies`。CPU0 和 AP 都在自己的 idle 循环、
 下一次 dispatch 之前取出并 drop，因此 AP 退出不再竞争全局 `TASK_MANAGER`。
 
 父进程 wait/auto-reap 需要按 pid 同步清理时，先单独摘取 interruptible zombie，
@@ -470,6 +476,9 @@ ack、释放 frame，再归还 slot。曾在 AP 使用的 TCB 不再由测试保
 6. 调用 `__switch(idle_task_cx_ptr, next_task_cx_ptr)`。
 
 任务主动让出或阻塞时，`schedule(task_cx_ptr)` 切回 idle context。
+idle 恢复后固定执行：`leave_user_vm()` → 清除 current → `finish_switch_out()`。
+只有再次到达用户 trap-return 的任务才会重新 enter MM 并检查 generation；内核线程
+不会伪造 active bit。
 
 ### 10.1 中断状态不属于 `TaskContext`
 

@@ -163,18 +163,26 @@ RV64 使用无地址/ASID 参数的 `sfence.vma`，LA64 使用 `invtlb 0`，两�
 的全部 global 与 non-global 翻译。该协议只覆盖共享内核页表的动态映射；用户 MM 的
 range shootdown 由下面的独立协议处理。
 
-B22/B23 为用户 MM 增加了独立于 kernel-global 的激活、IPI 与修改侧提交协议：
+B22/B23 为用户 MM 增加了独立于 kernel-global 的激活、IPI 与修改侧提交协议，
+B51 又把保守的历史集合收紧为精确驻留集合：
 
 1. 用户 trap-return 在恢复用户页表根前，取得进程 VM 锁并把当前 CPU 加入该 MM 的
-   单调 `cached_cpus`；登记必须先于 generation 读取；
+   `active_cpus`；登记必须先于 generation 读取；
 2. 若本 CPU 的 observed generation 落后，RV64 执行全量 `sfence.vma`，LA64 执行
    `invtlb 0x3` 清除全部 non-global 项，然后重查 generation；
-3. `MmuGather` 在 VM 锁内合并失效范围和退休 frame，并以 cached CPU mask
+3. `MmuGather` 在 VM 锁内合并失效范围和退休 frame，并以 active CPU mask
    直接决定无需失效、本地失效或远端 shootdown；
 4. `USER_TLB_SYNC` 使用独立 request/ack。handler 按“Acquire request → 本地全用户
    失效 → Release ack”执行，不分配、不获取 VM/PTE 或普通锁；
 5. 锁外等待原语会临时开放本地 IRQ，以便并发 shootdown 发起者互相处理 IPI；调用者
    必须先释放 VM/PTE/runqueue 锁，并保留失效 frame 直到全部 ack。
+
+B51 让每个 `CpuTaskState` 用一个 `Arc<AddressSpace>` 记住本 CPU 当前仍可直接返回的
+用户 MM。任务切回 idle 栈后、改变 current owner 前，`leave_user_vm()` 在同一 VM 锁内
+执行完整屏障并清除 active bit；再次运行必须重新经过 generation 检查。PTE writer 若在
+active mask 为空时修改映射，不发送无意义 IPI，但仍推进 generation，保证保留旧 ASID
+翻译的 CPU 下次进入前先本地补刷。Per-CPU Arc 同时固定 exec 前的旧 MM，避免
+`process.vm` 已替换后误清新地址空间的 bit。
 
 B23 通过 `AddressSpace::write()` 把同步边界固化到公开接口：锁内通过
 `UserMapper` 修改 PTE、由 `MmuGather` 合并失效范围和退休 frame，再推进
@@ -188,8 +196,8 @@ B24—B27 已补齐双架构页级后端与 ASID 生命周期：用户 trap-retu
 `activate_user_vm()` 一次取得页表根与 MM-owned ASID，编号只在全 CPU flush/ack 后跨
 epoch 复用。RV64 探测 `SATP.ASID`，本地执行 `sfence.vma va, asid`，远端优先使用
 SBI RFENCE FID 2；有 ASID 时 trap 切根不再固定全刷，ASIDLEN=0 时保留兼容路径。
-LA64 通过固定 per-CPU slot 传递 ASID/VPN 并执行 `invtlb 0x5`。连续 range 和 cached
-CPU detach 仍待后续阶段。
+LA64 通过固定 per-CPU slot 传递 ASID/VPN 并执行 `invtlb 0x5`。B51 已完成安全
+CPU detach；连续 range 仍待后续阶段。
 
 B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
 再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入
