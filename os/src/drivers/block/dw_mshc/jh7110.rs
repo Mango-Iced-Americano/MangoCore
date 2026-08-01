@@ -52,15 +52,20 @@ pub(crate) fn enable_clocks_and_release_reset(reset_id: u32) -> Result<(), DwMsh
     if reset_id != 65 {
         return Err(DwMshcError::UnsupportedController);
     }
+    // Gate both SDIO1 clocks on. Use read-modify-write so U-Boot's already
+    // programmed dividers survive; Linux (clk-starfive-jh7110-gen.c) treats
+    // the sdcard clock as a gdiv and only touches the enable bit here.
     update(SYS_CRG_BASE, SDIO1_AHB_CLOCK, |value| value | CLOCK_ENABLE);
-    write(SYS_CRG_BASE, SDIO1_SDCARD_CLOCK, CLOCK_ENABLE | 3);
-    update(SYS_CRG_BASE, RESET_ASSERT2, |value| value & !SDIO1_RESET_BIT);
-    // Poll RESET_STATUS2 until the status bit reads 1 (reset released). Per
-    // U-Boot (drivers/reset/reset-jh7110.c) and Linux
+    update(SYS_CRG_BASE, SDIO1_SDCARD_CLOCK, |value| value | CLOCK_ENABLE);
+    // Deassert the SDIO1 reset (RESET_ASSERT2 bit1 clear) and poll
+    // RESET_STATUS2 until the status bit reads 1 (reset released). Per U-Boot
+    // (drivers/reset/reset-jh7110.c) and Linux
     // (drivers/reset/starfive/reset-starfive-jh7110.c), the status bit is 0
     // while the reset is asserted and 1 once released, so we must wait for
-    // bit == 1; the previous `!= 0` polarity always timed out.
-    let deadline = timer::get_time_ms().saturating_add(1);
+    // bit == 1; the previous `!= 0` polarity always timed out. U-Boot polls
+    // this for up to 10000 iterations, so allow far more than 1 ms here.
+    update(SYS_CRG_BASE, RESET_ASSERT2, |value| value & !SDIO1_RESET_BIT);
+    let deadline = timer::get_time_ms().saturating_add(100);
     while read(SYS_CRG_BASE, RESET_STATUS2) & SDIO1_RESET_BIT == 0 {
         if timer::get_time_ms() >= deadline {
             return Err(DwMshcError::ClockResetTimeout);

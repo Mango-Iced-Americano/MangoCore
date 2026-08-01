@@ -8,6 +8,7 @@ use super::DwMshcError;
 const CTRL: usize = 0x00;
 const PWREN: usize = 0x04;
 const CLKDIV: usize = 0x08;
+const CLKSRC: usize = 0x0c;
 const CLKENA: usize = 0x10;
 const TMOUT: usize = 0x14;
 const CTYPE: usize = 0x18;
@@ -22,18 +23,23 @@ const RINTSTS: usize = 0x44;
 const STATUS: usize = 0x48;
 const FIFOTH: usize = 0x4c;
 const VERID: usize = 0x6c;
+const BMOD: usize = 0x80;
+const IDINTEN: usize = 0x90;
 const DATA_LEGACY: usize = 0x100;
 const DATA_NEW: usize = 0x200;
+const BMOD_RESET: u32 = 1;
 const CTRL_RESET: u32 = 0x7;
 const CTRL_INT_ENABLE: u32 = 1 << 4;
 const CMD_RESP_EXP: u32 = 1 << 6;
 const CMD_RESP_LONG: u32 = 1 << 7;
 const CMD_RESP_CRC: u32 = 1 << 8;
 const CMD_DATA_EXP: u32 = 1 << 9;
+const CMD_DAT_WR: u32 = 1 << 10;
 const CMD_STOP: u32 = 1 << 14;
 const CMD_INIT: u32 = 1 << 15;
 const CMD_UPDATE_CLOCK: u32 = 1 << 21;
 const CMD_PRV_DAT_WAIT: u32 = 1 << 13;
+const CMD_USE_HOLD_REG: u32 = 1 << 29;
 const CMD_START: u32 = 1 << 31;
 const CLKENA_ENABLE_LOW_POWER: u32 = 0x10001;
 const STATUS_BUSY: u32 = 1 << 9;
@@ -42,6 +48,7 @@ const INT_RESP_ERR: u32 = 1 << 1;
 const INT_CMD_DONE: u32 = 1 << 2;
 const INT_DATA_OVER: u32 = 1 << 3;
 const INT_RXDR: u32 = 1 << 5;
+const INT_TXDR: u32 = 1 << 4;
 const INT_RCRC: u32 = 1 << 6;
 const INT_DCRC: u32 = 1 << 7;
 const INT_RTO: u32 = 1 << 8;
@@ -80,8 +87,8 @@ impl DwMshcHost {
     }
 
     pub(crate) fn initialize(&mut self) -> Result<(), DwMshcError> {
-        let version = self.read(VERID);
-        if version == 0 || version == u32::MAX { return Err(DwMshcError::UnsupportedController); }
+        let version = self.read(VERID) & 0xffff;
+        if version == 0 || version == 0xffff { return Err(DwMshcError::UnsupportedController); }
         self.data_offset = if version < 0x240a { DATA_LEGACY } else { DATA_NEW };
         self.write(PWREN, 1);
         delay_ms(1);
@@ -92,7 +99,10 @@ impl DwMshcHost {
         self.write(RINTSTS, ALL_INTERRUPTS);
         self.write(TMOUT, u32::MAX);
         self.write(CTYPE, 0);
-        self.write(FIFOTH, (1 << 16) | 1);
+        self.write(BMOD, BMOD_RESET);
+        self.write(IDINTEN, 0);
+        let fifo_half = self.fifo_depth / 2;
+        self.write(FIFOTH, (0x2 << 28) | ((fifo_half - 1) << 16) | fifo_half);
         self.set_card_clock(63)
     }
 
@@ -100,6 +110,7 @@ impl DwMshcHost {
 
     pub(crate) fn set_card_clock(&mut self, divider: u32) -> Result<(), DwMshcError> {
         self.write(CLKENA, 0);
+        self.write(CLKSRC, 0);
         self.update_clock()?;
         self.write(CLKDIV, divider);
         self.update_clock()?;
@@ -112,7 +123,9 @@ impl DwMshcHost {
         self.write(RINTSTS, ALL_INTERRUPTS);
         self.write(CMDARG, argument);
         io_fence();
-        let flags = command_word(index, response, false, init) | if busy { CMD_PRV_DAT_WAIT } else { 0 } | if init { CMD_STOP | CMD_INIT } else { 0 };
+        let flags = command_word(index, response, false, init)
+            | CMD_USE_HOLD_REG
+            | if index == 12 { CMD_STOP } else { CMD_PRV_DAT_WAIT };
         self.write(CMD, CMD_START | flags);
         self.wait_clear(CMD, CMD_START, 500, DwMshcError::CommandTimeout(index))?;
         let status = self.wait_command_status(index)?;
@@ -144,7 +157,7 @@ impl DwMshcHost {
         self.write(BLKSIZ, 512); self.write(BYTCNT, 512); self.write(RINTSTS, ALL_INTERRUPTS);
         self.wait_idle(500)?;
         self.write(CMDARG, argument); io_fence();
-        self.write(CMD, CMD_START | command_word(17, Response::R1, true, false) | CMD_PRV_DAT_WAIT);
+        self.write(CMD, CMD_START | command_word(17, Response::R1, true, false) | CMD_USE_HOLD_REG | CMD_PRV_DAT_WAIT);
         let mut copied = 0;
         let deadline = timer::get_time_ms().saturating_add(500);
         loop {
@@ -168,6 +181,64 @@ impl DwMshcHost {
         }
     }
 
+    pub(crate) fn write_sector(&mut self, card: &SdCardInfo, sector: u64, data: &[u8]) -> Result<(), DwMshcError> {
+        if data.len() != 512 { return Err(DwMshcError::ShortTransfer); }
+        let argument = if card.high_capacity { u32::try_from(sector).map_err(|_| DwMshcError::OutOfRange)? } else { sector.checked_mul(512).and_then(|value| u32::try_from(value).ok()).ok_or(DwMshcError::OutOfRange)? };
+        for attempt in 0..=2 {
+            match self.write_sector_once(argument, data) {
+                Ok(()) => return self.wait_card_ready(card),
+                Err(error) if attempt < 2 && retryable(error) => { self.recover_data_path(); }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(DwMshcError::ShortTransfer)
+    }
+
+    fn write_sector_once(&mut self, argument: u32, data: &[u8]) -> Result<(), DwMshcError> {
+        self.write(CTRL, self.read(CTRL) | (1 << 1));
+        self.wait_clear(CTRL, 1 << 1, 500, DwMshcError::CoreResetTimeout)?;
+        self.write(BLKSIZ, 512); self.write(BYTCNT, 512); self.write(RINTSTS, ALL_INTERRUPTS);
+        self.wait_idle(500)?;
+        self.write(CMDARG, argument); io_fence();
+        self.write(CMD, CMD_START | command_word(24, Response::R1, true, false) | CMD_DAT_WR | CMD_USE_HOLD_REG | CMD_PRV_DAT_WAIT);
+        let command_status = self.wait_command_status(24)?;
+        let response = self.read(RESP0);
+        self.write(RINTSTS, command_status);
+        check_card_status(24, response)?;
+        let mut pushed = 0;
+        let deadline = timer::get_time_ms().saturating_add(500);
+        loop {
+            let status = self.read(RINTSTS);
+            if let Some(error) = data_error(status) { self.write(RINTSTS, status); return Err(error); }
+            let words = (self.fifo_depth as usize).saturating_sub(((self.read(STATUS) >> 17) & 0x1fff) as usize);
+            for _ in 0..words {
+                if pushed >= 512 { break; }
+                let count = (512 - pushed).min(4);
+                let mut bytes = [0u8; 4];
+                bytes[..count].copy_from_slice(&data[pushed..pushed + count]);
+                self.write(self.data_offset, u32::from_le_bytes(bytes));
+                pushed += count;
+            }
+            if status & (INT_TXDR | INT_CMD_DONE) != 0 { self.write(RINTSTS, status & (INT_TXDR | INT_CMD_DONE)); }
+            if status & INT_DATA_OVER != 0 {
+                self.write(RINTSTS, status & INT_DATA_OVER);
+                return if pushed == 512 { Ok(()) } else { Err(DwMshcError::ShortTransfer) };
+            }
+            if timer::get_time_ms() >= deadline { return Err(DwMshcError::DataTimeout); }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn wait_card_ready(&mut self, card: &SdCardInfo) -> Result<(), DwMshcError> {
+        let deadline = timer::get_time_ms().saturating_add(500);
+        loop {
+            let response = self.command(13, (card.rca as u32) << 16, Response::R1, false, false)?;
+            if response[0] & (1 << 8) != 0 { return Ok(()); }
+            if timer::get_time_ms() >= deadline { return Err(DwMshcError::DataTimeout); }
+            core::hint::spin_loop();
+        }
+    }
+
     fn update_clock(&mut self) -> Result<(), DwMshcError> {
         self.write(RINTSTS, ALL_INTERRUPTS);
         self.write(CMD, CMD_START | CMD_UPDATE_CLOCK | CMD_PRV_DAT_WAIT);
@@ -175,6 +246,17 @@ impl DwMshcHost {
         let status = self.read(RINTSTS);
         self.write(RINTSTS, status);
         if status & INT_HLE != 0 { Err(DwMshcError::HardwareLocked) } else { Ok(()) }
+    }
+
+    pub(crate) fn dump_registers(&self) {
+        crate::println!(
+            "[dw_mshc] registers: CTRL={:#010x} CLKENA={:#010x} STATUS={:#010x} RINTSTS={:#010x}",
+            self.read(CTRL), self.read(CLKENA), self.read(STATUS), self.read(RINTSTS),
+        );
+        crate::println!(
+            "[dw_mshc] registers: CLKDIV={:#010x} CLKSRC={:#010x} FIFOTH={:#010x} VERID={:#010x}",
+            self.read(CLKDIV), self.read(CLKSRC), self.read(FIFOTH), self.read(VERID),
+        );
     }
 
     fn recover_data_path(&mut self) { let _ = self.command(12, 0, Response::R1b, false, true); self.write(CTRL, self.read(CTRL) | (1 << 1)); self.write(RINTSTS, ALL_INTERRUPTS); }
