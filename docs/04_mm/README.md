@@ -11,7 +11,7 @@ tags: [mm, vma, mmap, page-fault, pagetable, mmu-gather, smp, membarrier]
 
 ## 概述
 
-MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `MmuGather` 汇入一次 VM 更新，再由 `AddressSpace` 在解锁后完成 generation、远端 IPI/ack 和 frame 延迟释放。RV64 与 LA64 均使用 MM-owned ASID，并支持按 ASID+VPN 精确失效单页；多页范围目前仍退化为该 MM 的全量失效。B51 以后，`AddressSpace` 的 active CPU mask 只包含当前仍可直接返回该 MM 的 CPU，调度切离会清 bit，零目标 PTE 修改仍推进 generation；`PRIVATE_EXPEDITED` 也复用这份精确驻留集合。B29 只打通了同一用户任务在 `sched_yield` 安全点上的受控迁移，普通用户任务仍在共享子系统审计前保持 CPU0-only。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
+MangoCore 的内存管理由物理页分配器、架构页表实现、进程地址空间、VMA 集合、缺页处理、文件映射和用户内存访问组成。架构无关代码通过 `PageTable` trait 操作页表；用户 PTE 写入经 `MmuGather` 汇入一次 VM 更新，再由 `AddressSpace` 在解锁后完成 generation、远端 IPI/ack 和 frame 延迟释放。RV64 与 LA64 均使用 MM-owned ASID，并支持最多 64 页的连续 ASID+VPN 区间精准失效；更大跨度或页表层级变化才退化为该 MM 的全量失效。B51 以后，`AddressSpace` 的 active CPU mask 只包含当前仍可直接返回该 MM 的 CPU，调度切离会清 bit，零目标 PTE 修改仍推进 generation；`PRIVATE_EXPEDITED` 也复用这份精确驻留集合。B29 只打通了同一用户任务在 `sched_yield` 安全点上的受控迁移，普通用户任务仍在共享子系统审计前保持 CPU0-only。具体页表实现由 HAL 提供，rv64 使用 SV39，la64 使用 LoongArch64 后端的 flexible page table。
 
 ## 依据范围
 

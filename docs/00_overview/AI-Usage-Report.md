@@ -74,6 +74,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP trap context 与 signal 用户访存锁边界 | 2026-07-31 | GPT/Codex, DeepSeek | Linux signal ABI 对照、current owner 与 uaccess 锁序审查、冻结双架构 8 核门禁 | B45—B48 删除可逃逸 trap 引用，并让 signal frame 及状态 syscall 的用户访存位于普通锁外；初赛 RV64 312/314、LA64 308/314 |
 | SMP 空闲核 work stealing | 2026-07-31 | GPT/Codex, DeepSeek | 单 runqueue owner、迁移竞态、锁外 TLB 与确定性 focused 测试审查 | 复用 `Migrating` 完成 victim→thief 交接；双架构 8 核 focused 31/31，初赛失败集合未扩大 |
 | SMP Per-CPU zombie 回收 | 2026-08-01 | GPT/Codex, DeepSeek | idle 栈 Arc 寿命、跨 CPU reap 锁边界、栈映射退休与双架构验证 | 删除全局 zombie 队列，退出 CPU 在本地 idle 回收 TCB；双架构 8 核 focused 32/32，初赛基线不退化 |
+| SMP 精确 active MM 驻留 | 2026-08-01 | GPT/Codex, DeepSeek | writer/enter/leave 竞态、调度切离屏障、generation 追赶与双架构冻结验证 | 历史 cached mask 收紧为精确 active mask；双架构 KREPEAT=2 focused 65/65，初赛失败集合不变 |
+| SMP 有界连续 TLB shootdown | 2026-08-01 | GPT/Codex, DeepSeek | SBI/INVTLB 官方语义、固定区间槽并发审查、双架构 8 核 focused 与初赛门禁 | 不增加提交层；最多 64 页精准失效，65 页回退全刷并保持 ack 前 frame 不释放；双架构 focused 33/33 |
 
 ## 4. 详细使用场景
 
@@ -969,6 +971,30 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 65/65。初赛保持 RV64 312/314、LA64
   308/314，精确失败集合与 B50 一致；四个最终 child 均无源码 mutation、panic 或 timeout。
 
+### Case 41: SMP 有界连续用户 TLB shootdown
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b52-range-shootdown-summary.md`；只读审查 prompt、
+  manifest 和原始 Docker/QEMU 日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 SBI RFENCE、LoongArch INVTLB 和 Linux RISC-V range 策略，
+  设计 64 页 IRQ 上限、实现双架构后端并人工裁决原始日志；DeepSeek 只读审查范围合并、
+  固定槽内存序和 frame 生命周期，再通过受限网关串行执行六项 Docker 门禁，不修改或提交源码。
+- Problem: B24/B26 只能精准处理单个 VPN；同一 `munmap/mprotect/CoW` 写操作一旦修改第二页，
+  `MmuGather` 就升级为整个用户地址空间全刷。直接发布动态 VPN 列表又会让 hard-IRQ 分配、
+  无界遍历或引入另一套复杂 batch。
+- Implemented change: `FlushRange::Range` 保存最小包围半开区间，最多 64 页；稀疏空洞允许
+  多刷，超过上限和页表层级变化进入 `Full`。RV64 把物理 hart mask、字节 start/size 和
+  ASID 交给 SBI，LA64 固定槽发布 ASID/start/count 并按偶/奇硬件页对步进。主链仍是
+  `record_change -> seal -> execute`，同步完成后才释放退休 frame。
+- AI adjudication: 接受只读审查对溢出、Release/Acquire、奇数边界和 timeout 不复用槽的
+  PASS 结论；模型建议追加 KREPEAT=10 未采纳，因为当前差异已由并发 8 槽、3 页区间、
+  65 页全刷和初赛门禁覆盖。模型摘要未给出 LA64 basic 精确计数，GPT/Codex 从完整 judge
+  表核对为 308/314，并保留两套 `test_brk` 与两套 `busybox kill 10` 的既有失败身份。
+- Verification: 冻结 tracked diff SHA-256 为
+  `1d8909e1a37843be5673affe6fe6b0952076a54f0acb9ba9f7a2a687047a2c43`；双架构
+  `CORE_NUM=8 KTEST=smp` 均为 33/33。初赛仍为 RV64 312/314、LA64 308/314；六个
+  child 均 exit 0、`online_mask=0xff`（QEMU 项）、无源码 mutation、panic 或 timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1051,6 +1077,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-31.md`、同日 B45—B48 evidence | SMP trap context 与 signal 用户访存锁边界 | 记录 trap 借用收口、signal frame 与状态 syscall 的锁外用户访存、Linux ABI 对照、DeepSeek 结论纠错及双架构 8 核初赛门禁 |
 | `docs/Work_Log/2026-07-31.md`、`docs/Work_Log/evidence/2026-07-31/smp-b49-work-steal-summary.md` | SMP 空闲核 work stealing | 记录单 victim owner 交接、锁外 kernel-TLB、冻结任务 fail-closed 裁决和双架构 31/31/初赛门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b50-local-zombie-summary.md` | SMP Per-CPU zombie 回收 | 记录 idle 栈 Arc 交接、跨 CPU reap 锁边界、模型结论纠错及双架构 32/32/初赛门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b51-active-mm-summary.md` | SMP 精确 active MM 驻留 | 记录 writer/enter/leave 共同 VM 锁、切离屏障、零目标 generation 和双架构 focused/初赛证据 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b52-range-shootdown-summary.md` | SMP 有界连续用户 TLB shootdown | 记录 64 页 IRQ 上限、双架构 range 后端、固定槽 payload 隔离、65 页全刷与初赛非回归 |
 
 ## 9. 交互记录与留痕方式
 

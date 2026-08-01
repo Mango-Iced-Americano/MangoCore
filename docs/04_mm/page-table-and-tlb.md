@@ -156,8 +156,9 @@ AddressSpace::write
 ```
 
 `MmuGather` 只保留三个概念：失效范围、写操作开始时的 active CPU mask 快照，
-以及一份 `retired_frames`。它把同一 VPN 的多次修改合并为单页失效，把多个 VPN
-或页表层级变化合并为全用户失效。没有 PTE 修改时 `seal()` 返回 `None`，因此
+以及一份 `retired_frames`。它把本轮修改过的 VPN 合并为最小连续半开区间；跨度不超过
+64 页时按区间精确失效，中间未修改的少量空洞也一并保守失效。跨度超过 64 页或页表
+层级本身发生变化时才升级为全用户失效。没有 PTE 修改时 `seal()` 返回 `None`，因此
 只读或未触页的写作用域不会产生 generation、IPI 或 TLB flush。
 
 目标范围不再由额外发布状态表示，而直接从 `TlbContext.active_cpus` 推导：
@@ -165,9 +166,9 @@ AddressSpace::write
 | active CPU mask | 执行方式 |
 |-----------------|----------|
 | `0` | 当前没有 CPU 可直接返回该 MM；不发 IPI，但仍推进 generation 后释放退休 frame |
-| 仅当前 CPU | 按 `FlushRange` 执行页级或本地全用户失效 |
-| 含远端 CPU、单一 VPN | RV64 使用目标 MM 的 ASID 调用同步 SBI RFENCE FID 2，缺失时使用固定 slot；LA64 使用固定 slot 携带 ASID/VPN，目标精确执行页级失效 |
-| 含远端 CPU、多 VPN/页表层级变化 | 使用 user-TLB request/ack，在目标 CPU 执行全用户失效 |
+| 仅当前 CPU | 按 `FlushRange` 执行有界区间或本地全用户失效 |
+| 含远端 CPU、跨度不超过 64 页 | RV64 使用目标 MM 的 ASID 调用同步 SBI RFENCE FID 2，缺失时使用固定 slot；LA64 使用固定 slot 携带 ASID、起始 VPN 和页数 |
+| 含远端 CPU、跨度超过 64 页或页表层级变化 | 使用 user-TLB request/ack，在目标 CPU 执行全用户失效 |
 
 固定安全顺序是：PTE write → `record_change()` → `retire_frame()` → `seal()` →
 释放 VM 锁 → flush/ack → drop frame。退休队列扩容失败时，只有 mask 为 0 或
@@ -190,17 +191,18 @@ fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `Mmu
 前尚无 CPU 能观察，构造期记录可由 `discard_unpublished()` 清除；父侧记录则由
 外层 `write()` 正常同步，否则父 CPU 可能继续用旧权限写共享页。
 
-当前 active mask 已能在安全切离点清 bit，剩余的主要保守项是多页修改仍按整个用户
-地址空间失效。RV64 在启动时探测 `SATP.ASID` 容量，用户 MM 使用 versioned ASID；单页修改在本地执行
-`sfence.vma va, asid`，远端以物理 hart mask 调用 SBI RFENCE FID 2，同步完成
-`[va, va + PAGE_SIZE)` 后才允许释放 frame。固件缺少 RFENCE 时明确改走固定 slot。
+当前 active mask 已能在安全切离点清 bit，连续 64 页以内的修改也不再按整个用户
+地址空间失效。RV64 在启动时探测 `SATP.ASID` 容量，用户 MM 使用 versioned ASID；本地对
+区间内每页执行 `sfence.vma va, asid`，远端以物理 hart mask 调用 SBI RFENCE FID 2，
+同步完成整个 `[start, end)` 后才允许释放 frame。固件缺少 RFENCE 时明确改走固定 slot。
 有硬件 ASID 时，用户/内核 SATP 切换不再固定全刷；ASIDLEN=0 平台保留兼容全刷。
-LA64 单页 PTE 修改把同一 VM 锁内冻结的 ASID/VPN 发布到每发起 CPU 独占的原子槽，
-目标 CPU 执行 `invtlb 0x5` 后才 ack。LoongArch 一个普通 TLB entry 同时
+LA64 把同一 VM 锁内冻结的 ASID、起始 VPN 和页数发布到每发起 CPU 独占的原子槽，
+目标 CPU 从向下对齐的偶数 VPN 开始每两页执行一次 `invtlb 0x5`，完成后才 ack。LoongArch 一个普通 TLB entry 同时
 覆盖相邻偶/奇 4 KiB 页，因此其最小硬件粒度是对齐后的 8 KiB 页对，而不是单个 4 KiB 页。
 已经避免的固定成本还包括：同一 MM 连续返回时的重复 active-bit 写入、已经切离 CPU 的
 远端 IPI、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
-range 留给后续工作。
+区间内的稀疏修改会多失效中间少量页面；跨度超过 64 页仍全刷，以限制 hard-IRQ handler
+的最坏工作量。
 
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
@@ -280,8 +282,8 @@ page walk；外层解锁并收齐目标 CPU 的 ack 后才统一释放。等待�
 
 | 架构 | 页表/TLB 注意点 |
 |------|-----------------|
-| rv64 | MM-owned ASID 编入 `SATP[59:44]`；单页本地失效使用 `sfence.vma va, asid`，远端使用 SBI RFENCE FID 2，固件缺失时使用固定 slot；多页与 rollover 使用全用户失效 |
-| la64 | ASID 由 `AddressSpace` 的 `TlbContext` 持有；页级本地/远端失效使用目标 ASID + 对齐页对执行 `invtlb 0x5`，多页与 rollover 使用全 non-global 失效 |
+| rv64 | MM-owned ASID 编入 `SATP[59:44]`；最多 64 页的本地区间逐页执行 `sfence.vma va, asid`，远端使用 SBI RFENCE FID 2，固件缺失时使用固定 slot；更大跨度与 rollover 使用全用户失效 |
+| la64 | ASID 由 `AddressSpace` 的 `TlbContext` 持有；最多 64 页的本地/远端区间按目标 ASID + 对齐页对执行 `invtlb 0x5`，更大跨度与 rollover 使用全 non-global 失效 |
 
 两种架构都把软件 epoch 和硬件 ASID 编码在每 MM 的 `asid_context` 中。RV64 的低
 16 位对应 `SATP.ASID`，BSP 通过 WARL 写全 1/读回探测 ASIDLEN；QEMU virt 实测提供
@@ -314,7 +316,9 @@ RV64 单页 RFENCE；B25 完成 LA64 MM-owned ASID 与全 CPU flush-before-reuse
 ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和条件式 trap 切根；B29 又验证了同一
 用户任务可在 `sched_yield` 安全点携带同一 MM 从 CPU0 迁移至 CPU1。B51 将历史
 cached CPU 集合替换为调度器维护的 active mask，并用零目标 generation 追赶闭合安全
-detach。连续 range、默认亲和性和通用用户迁移仍未完成。
+detach。B52 将 `FlushRange::Page` 泛化为最多 64 页的半开 `Range`，RV64 直接把
+start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 slot；默认亲和性、
+通用用户迁移和不依赖计数器的 stale-PTE 用户访存压力证明仍未完成。
 
 ## 13. 调试核对点
 

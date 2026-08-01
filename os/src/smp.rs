@@ -11,6 +11,11 @@ use core::{
 
 pub const BOOT_CPU_ID: usize = 0;
 pub const MAX_CPUS: usize = 8;
+/// 精确 shootdown 在 hard IRQ 中可执行的最大连续页数。
+///
+/// 超过该跨度时上层改用全用户 TLB 失效，从而为软件 IPI
+/// handler 提供确定的工作量上界。
+pub(crate) const MAX_USER_TLB_RANGE_PAGES: usize = 64;
 
 /// Phase 1 的 CPU-local 锚点；后续批次只扩展表项，不移动现有地址。
 #[repr(C, align(64))]
@@ -99,27 +104,29 @@ impl PerCpu {
     }
 }
 
-/// 一次远端“ASID + 单页”失效的无锁共享槽。
+/// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
 ///
 /// 每个发起 CPU 固定拥有一个槽；当前安全点抢占模型保证同一 CPU 最多等待
 /// 一轮同步。`claimed` 仍显式防御未来重入，重入时上层退回全用户 flush。
 /// handler 只读原子字段并写 ack，不分配内存，也不获取任何普通锁。
-struct UserTlbPageSlot {
+struct UserTlbRangeSlot {
     claimed: AtomicBool,
     targets: AtomicUsize,
     acknowledged: AtomicUsize,
     asid: AtomicUsize,
-    vpn: AtomicUsize,
+    start_vpn: AtomicUsize,
+    page_count: AtomicUsize,
 }
 
-impl UserTlbPageSlot {
+impl UserTlbRangeSlot {
     const fn new() -> Self {
         Self {
             claimed: AtomicBool::new(false),
             targets: AtomicUsize::new(0),
             acknowledged: AtomicUsize::new(0),
             asid: AtomicUsize::new(0),
-            vpn: AtomicUsize::new(0),
+            start_vpn: AtomicUsize::new(0),
+            page_count: AtomicUsize::new(0),
         }
     }
 
@@ -130,11 +137,15 @@ impl UserTlbPageSlot {
     }
 
     /// 以 `targets` 的 Release store 作为整份 payload 的发布点。
-    fn publish(&self, targets: usize, asid: u16, vpn: crate::mm::VirtPageNum) {
+    fn publish(&self, targets: usize, asid: u16, range: crate::mm::VPNRange) {
         debug_assert_ne!(targets, 0);
+        let page_count = range.get_end().0 - range.get_start().0;
+        debug_assert!((1..=MAX_USER_TLB_RANGE_PAGES).contains(&page_count));
         self.acknowledged.store(0, Ordering::Relaxed);
         self.asid.store(asid as usize, Ordering::Relaxed);
-        self.vpn.store(vpn.0, Ordering::Relaxed);
+        self.start_vpn
+            .store(range.get_start().0, Ordering::Relaxed);
+        self.page_count.store(page_count, Ordering::Relaxed);
         self.targets.store(targets, Ordering::Release);
     }
 
@@ -147,8 +158,13 @@ impl UserTlbPageSlot {
             return;
         }
         let asid = self.asid.load(Ordering::Relaxed) as u16;
-        let vpn = crate::mm::VirtPageNum::from(self.vpn.load(Ordering::Relaxed));
-        crate::hal::user_tlb_invalidate_page(asid, vpn);
+        let start = self.start_vpn.load(Ordering::Relaxed);
+        let page_count = self.page_count.load(Ordering::Relaxed);
+        let end = start
+            .checked_add(page_count)
+            .expect("published user TLB range overflowed");
+        let range = crate::mm::VPNRange::new(start.into(), end.into());
+        crate::hal::user_tlb_invalidate_range(asid, range);
         self.acknowledged.fetch_or(cpu_bit, Ordering::Release);
     }
 
@@ -163,8 +179,8 @@ impl UserTlbPageSlot {
     }
 }
 
-static USER_TLB_PAGE_SLOTS: [UserTlbPageSlot; MAX_CPUS] =
-    [const { UserTlbPageSlot::new() }; MAX_CPUS];
+static USER_TLB_RANGE_SLOTS: [UserTlbRangeSlot; MAX_CPUS] =
+    [const { UserTlbRangeSlot::new() }; MAX_CPUS];
 
 /// 可以合并进 per-CPU mailbox 的幂等 IPI 原因。
 ///
@@ -188,8 +204,8 @@ impl IpiReason {
     const KERNEL_TLB_SYNC: Self = Self(1 << 5);
     /// 某个用户 MM 的 PTE 已修改；目标必须清除本核全部用户翻译后 ack。
     const USER_TLB_SYNC: Self = Self(1 << 6);
-    /// 固定槽中已发布目标 MM 的 ASID/VPN；目标必须精确失效后设置槽内 ack。
-    const USER_TLB_PAGE_SYNC: Self = Self(1 << 7);
+    /// 固定槽中已发布目标 MM 的 ASID/VPN 区间；目标精确失效后 ack。
+    const USER_TLB_RANGE_SYNC: Self = Self(1 << 7);
     /// 全局 timer 队列出现更早 deadline；CPU0 在安全点重编程本地 timer。
     const TIMER_REPROGRAM: Self = Self(1 << 8);
     /// 目标 CPU 必须执行完整内存屏障后发布 ack。
@@ -253,6 +269,7 @@ pub(crate) enum KernelTlbSyncError {
 pub(crate) enum UserTlbSyncError {
     InvalidTargets { targets: usize },
     UnavailableTargets { targets: usize, available: usize },
+    InvalidRange { start_vpn: usize, end_vpn: usize },
     Firmware { error: isize },
     Timeout {
         cpu_id: usize,
@@ -260,7 +277,7 @@ pub(crate) enum UserTlbSyncError {
         observed: usize,
         send_error: Option<isize>,
     },
-    PageTimeout {
+    RangeTimeout {
         missing: usize,
         acknowledged: usize,
         send_error: Option<isize>,
@@ -589,11 +606,11 @@ pub fn handle_ipi() {
             local.user_tlb_ack.store(sequence, Ordering::Release);
         }
     }
-    if reasons & IpiReason::USER_TLB_PAGE_SYNC.bits() != 0 {
+    if reasons & IpiReason::USER_TLB_RANGE_SYNC.bits() != 0 {
         // 多个发起者可以共享同一个 reason bit；扫描固定的每 CPU 槽即可一次
         // 消费全部已发布 payload。每个槽自己的 target/ack 防止相互覆盖。
         let cpu_id = self::cpu_id();
-        for slot in &USER_TLB_PAGE_SLOTS {
+        for slot in &USER_TLB_RANGE_SLOTS {
             slot.service(cpu_id);
         }
     }
@@ -873,16 +890,28 @@ pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError>
 
 /// 让调用方选定的 CPU 集合同步完成用户 TLB 失效。
 ///
-/// `page=Some(vpn)` 时先尝试架构固件，再用固定槽传递 `asid + vpn`；槽被
-/// 同 CPU 的意外重入占用时才保守退回全用户/non-global IPI。`page=None`
+/// `range=Some(vpns)` 时先尝试架构固件，再用固定槽传递
+/// `asid + start + page_count`；槽被同 CPU 的意外重入占用时才保守
+/// 退回全用户/non-global IPI。`range=None`
 /// 始终执行全用户失效。调用方必须先释放
 /// VM/PTE 及其它普通锁，并把撤映射 frame 保留到本函数成功返回。不同 MM 可以并发调用：
 /// 精确请求由每 CPU 槽隔离，全量 fallback 则可安全合并到较新的 sequence。
 pub(crate) fn synchronize_user_tlb(
     targets: usize,
     asid: u16,
-    page: Option<crate::mm::VirtPageNum>,
+    range: Option<crate::mm::VPNRange>,
 ) -> Result<(), UserTlbSyncError> {
+    if let Some(range) = range {
+        let start_vpn = range.get_start().0;
+        let end_vpn = range.get_end().0;
+        let page_count = end_vpn.saturating_sub(start_vpn);
+        if page_count == 0 || page_count > MAX_USER_TLB_RANGE_PAGES {
+            return Err(UserTlbSyncError::InvalidRange {
+                start_vpn,
+                end_vpn,
+            });
+        }
+    }
     let configured = expected_online_mask();
     if targets == 0 || targets & !configured != 0 {
         return Err(UserTlbSyncError::InvalidTargets { targets });
@@ -905,17 +934,17 @@ pub(crate) fn synchronize_user_tlb(
     let remote = live_targets & !current_bit;
 
     if remote == 0 {
-        match page {
-            Some(vpn) => crate::hal::user_tlb_invalidate_page(asid, vpn),
+        match range {
+            Some(range) => crate::hal::user_tlb_invalidate_range(asid, range),
             None => crate::hal::user_tlb_invalidate(),
         }
         return Ok(());
     }
 
     // RFENCE 直接接受硬件 hart mask，且调用返回就代表目标已完成失效；它没有
-    // 可被并发发起者覆盖的共享 payload。LA64 返回 false，继续走下面的全量 IPI。
-    if let Some(vpn) = page {
-        match crate::hal::remote_user_tlb_invalidate_page(live_targets, asid, vpn) {
+    // 可被并发发起者覆盖的共享 payload。LA64 返回 false，继续走固定区间槽。
+    if let Some(range) = range {
+        match crate::hal::remote_user_tlb_invalidate_range(live_targets, asid, range) {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) => return Err(UserTlbSyncError::Firmware { error }),
@@ -923,13 +952,13 @@ pub(crate) fn synchronize_user_tlb(
 
         // 每个 CPU 只会同步等待一轮 shootdown，因此优先使用自己的固定槽。
         // CAS 失败说明出现了重入或上一轮 fail-stop 残留；全刷比覆盖 payload 安全。
-        let slot = &USER_TLB_PAGE_SLOTS[self::cpu_id()];
+        let slot = &USER_TLB_RANGE_SLOTS[self::cpu_id()];
         if slot.try_claim() {
-            slot.publish(remote, asid, vpn);
+            slot.publish(remote, asid, range);
             if live_targets & current_bit != 0 {
-                crate::hal::user_tlb_invalidate_page(asid, vpn);
+                crate::hal::user_tlb_invalidate_range(asid, range);
             }
-            let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_PAGE_SYNC).err();
+            let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
             let _irq_guard = IpiWaitIrqGuard::enter();
             let deadline = crate::hal::get_time().saturating_add(
                 crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
@@ -944,7 +973,7 @@ pub(crate) fn synchronize_user_tlb(
                 if crate::hal::get_time() >= deadline {
                     // 不释放槽：迟到的目标只能看到本轮原 payload，不能把 stale
                     // doorbell 错配到后续请求。正常 TlbFlush 会在返回错误后 fail-stop。
-                    return Err(UserTlbSyncError::PageTimeout {
+                    return Err(UserTlbSyncError::RangeTimeout {
                         missing,
                         acknowledged,
                         send_error,

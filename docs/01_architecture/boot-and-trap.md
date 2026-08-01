@@ -196,8 +196,8 @@ B24—B27 已补齐双架构页级后端与 ASID 生命周期：用户 trap-retu
 `activate_user_vm()` 一次取得页表根与 MM-owned ASID，编号只在全 CPU flush/ack 后跨
 epoch 复用。RV64 探测 `SATP.ASID`，本地执行 `sfence.vma va, asid`，远端优先使用
 SBI RFENCE FID 2；有 ASID 时 trap 切根不再固定全刷，ASIDLEN=0 时保留兼容路径。
-LA64 通过固定 per-CPU slot 传递 ASID/VPN 并执行 `invtlb 0x5`。B51 已完成安全
-CPU detach；连续 range 仍待后续阶段。
+LA64 通过固定 per-CPU slot 传递 ASID/range 并执行 `invtlb 0x5`。B51 已完成安全
+CPU detach；B52 已把双架构精准后端扩展到最多 64 页的连续区间，更大跨度仍全刷。
 
 B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
 再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入

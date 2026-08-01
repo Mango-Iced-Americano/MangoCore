@@ -347,10 +347,10 @@ static AP_USER_TLB_FREE_DURING_WAIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static AP_USER_TLB_REQUEST_BEFORE: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID_READY: AtomicUsize = AtomicUsize::new(0);
-static PAGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
-static PAGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
-static PAGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
-static PAGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static RANGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
+static RANGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
+static RANGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
+static RANGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_START: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_PHASE: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_ERRORS: AtomicUsize = AtomicUsize::new(0);
@@ -488,12 +488,12 @@ pub fn tests() -> Vec<KernelTest> {
             asid_rollover_flushes_before_reuse,
         ),
         KernelTest::new(
-            "smp::user_tlb_page_sync_uses_arch_backend",
-            user_tlb_page_sync_uses_arch_backend,
+            "smp::user_tlb_range_sync_uses_arch_backend",
+            user_tlb_range_sync_uses_arch_backend,
         ),
         KernelTest::new(
-            "smp::concurrent_page_shootdowns_keep_payloads_separate",
-            concurrent_page_shootdowns_keep_payloads_separate,
+            "smp::concurrent_range_shootdowns_keep_payloads_separate",
+            concurrent_range_shootdowns_keep_payloads_separate,
         ),
         KernelTest::new(
             "smp::user_tlb_retirement_waits_for_ack",
@@ -2951,8 +2951,8 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 页级同步在 RV64 由 RFENCE 完成，在 LA64 由固定槽传递目标 ASID/VPN。
-fn user_tlb_page_sync_uses_arch_backend() -> Result<(), &'static str> {
+/// 连续区间在 RV64 由 RFENCE 完成，在 LA64 由固定槽传递 ASID/区间。
+fn user_tlb_range_sync_uses_arch_backend() -> Result<(), &'static str> {
     let vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
     );
@@ -2970,51 +2970,53 @@ fn user_tlb_page_sync_uses_arch_backend() -> Result<(), &'static str> {
         0
     };
 
-    crate::smp::synchronize_user_tlb(
-        targets,
-        asid,
-        Some(crate::mm::VirtAddr::from(0x51_0000).floor()),
-    )
+    let start = crate::mm::VirtAddr::from(0x51_0000).floor();
+    let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
+    crate::smp::synchronize_user_tlb(targets, asid, Some(range))
     .map_err(|error| {
-        crate::println!("# user TLB page sync failed: {:?}", error);
-        "user TLB page sync failed"
+        crate::println!("# user TLB range sync failed: {:?}", error);
+        "user TLB range sync failed"
     })?;
 
     if crate::smp::configured_cpu_count() > 1 && crate::smp::user_tlb_request(1) != request_before {
-        return Err("page sync unexpectedly degraded to a full user-TLB flush");
+        return Err("range sync unexpectedly degraded to a full user-TLB flush");
     }
     crate::task::run_task_safe_point();
     Ok(())
 }
 
-fn run_concurrent_page_shootdown() {
+fn run_concurrent_range_shootdown() {
     let cpu_id = crate::smp::cpu_id();
     let vm = SHARED_TLB_VM
         .lock()
         .as_ref()
-        .expect("concurrent page-shootdown VM missing")
+        .expect("concurrent range-shootdown VM missing")
         .clone();
     let asid = vm.activate_on(cpu_id).asid;
-    PAGE_SYNC_READY.fetch_add(1, Ordering::Release);
-    while PAGE_SYNC_START.load(Ordering::Acquire) == 0 {
+    RANGE_SYNC_READY.fetch_add(1, Ordering::Release);
+    while RANGE_SYNC_START.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
 
     let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
-    // 每个发起者选择不同的 LoongArch 双页 TLB entry，避免硬件对齐后碰巧合并。
-    let vpn = crate::mm::VirtAddr::from(0x54_0000 + cpu_id * 2 * crate::config::PAGE_SIZE).floor();
-    if crate::smp::synchronize_user_tlb(targets, asid, Some(vpn)).is_err() {
-        PAGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
+    // 每个发起者使用独立的三页区间，让并发槽同时承载不同 payload。
+    let start = crate::mm::VirtAddr::from(
+        0x54_0000 + cpu_id * 4 * crate::config::PAGE_SIZE,
+    )
+    .floor();
+    let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
+    if crate::smp::synchronize_user_tlb(targets, asid, Some(range)).is_err() {
+        RANGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
     }
-    PAGE_SYNC_DONE.fetch_add(1, Ordering::Release);
+    RANGE_SYNC_DONE.fetch_add(1, Ordering::Release);
 }
 
-/// 所有 CPU 同时发布不同 ASID/VPN payload，证明固定槽不会被 reason 合并覆盖。
-fn concurrent_page_shootdowns_keep_payloads_separate() -> Result<(), &'static str> {
-    PAGE_SYNC_START.store(0, Ordering::Release);
-    PAGE_SYNC_READY.store(0, Ordering::Release);
-    PAGE_SYNC_DONE.store(0, Ordering::Release);
-    PAGE_SYNC_ERRORS.store(0, Ordering::Release);
+/// 所有 CPU 同时发布不同 ASID/区间 payload，证明固定槽不会被 reason 合并覆盖。
+fn concurrent_range_shootdowns_keep_payloads_separate() -> Result<(), &'static str> {
+    RANGE_SYNC_START.store(0, Ordering::Release);
+    RANGE_SYNC_READY.store(0, Ordering::Release);
+    RANGE_SYNC_DONE.store(0, Ordering::Release);
+    RANGE_SYNC_ERRORS.store(0, Ordering::Release);
 
     let vm = Arc::new(crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
@@ -3030,43 +3032,47 @@ fn concurrent_page_shootdowns_keep_payloads_separate() -> Result<(), &'static st
     for cpu_id in 1..crate::smp::configured_cpu_count() {
         tasks.push(crate::task::spawn_ktest_task_on(
             cpu_id,
-            run_concurrent_page_shootdown,
+            run_concurrent_range_shootdown,
         ));
     }
 
     let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while PAGE_SYNC_READY.load(Ordering::Acquire) != tasks.len() {
+    while RANGE_SYNC_READY.load(Ordering::Acquire) != tasks.len() {
         if crate::hal::get_time() >= deadline {
-            return Err("APs did not enter the concurrent page-shootdown barrier");
+            return Err("APs did not enter the concurrent range-shootdown barrier");
         }
         core::hint::spin_loop();
     }
 
-    PAGE_SYNC_START.store(1, Ordering::Release);
+    RANGE_SYNC_START.store(1, Ordering::Release);
     let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
-    let local_vpn = crate::mm::VirtAddr::from(0x53_0000).floor();
-    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_vpn))
-        .map_err(|_| "CPU0 concurrent page shootdown failed")?;
+    let local_start = crate::mm::VirtAddr::from(0x53_0000).floor();
+    let local_range = crate::mm::VPNRange::new(
+        local_start,
+        crate::mm::VirtPageNum(local_start.0 + 3),
+    );
+    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_range))
+        .map_err(|_| "CPU0 concurrent range shootdown failed")?;
 
     let completion_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while PAGE_SYNC_DONE.load(Ordering::Acquire) != tasks.len()
+    while RANGE_SYNC_DONE.load(Ordering::Acquire) != tasks.len()
         || tasks
             .iter()
             .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
     {
         if crate::hal::get_time() >= completion_deadline {
-            return Err("concurrent page shootdowns did not finish before timeout");
+            return Err("concurrent range shootdowns did not finish before timeout");
         }
         core::hint::spin_loop();
     }
     *SHARED_TLB_VM.lock() = None;
 
-    if PAGE_SYNC_ERRORS.load(Ordering::Acquire) != 0 {
-        return Err("an AP page shootdown returned an error");
+    if RANGE_SYNC_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("an AP range shootdown returned an error");
     }
     for cpu_id in 0..crate::smp::configured_cpu_count() {
         if crate::smp::user_tlb_request(cpu_id) != full_requests[cpu_id] {
-            return Err("concurrent page shootdown degraded to full user-TLB flush");
+            return Err("concurrent range shootdown degraded to full user-TLB flush");
         }
     }
     crate::task::run_task_safe_point();
@@ -3117,15 +3123,16 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
         return Ok(());
     }
     const TEST_BASE: usize = 0x52_0000;
+    const TEST_PAGES: usize = crate::smp::MAX_USER_TLB_RANGE_PAGES + 1;
 
     AP_USER_TLB_RETIRE_PHASE.store(0, Ordering::Release);
     AP_USER_TLB_FREE_DURING_WAIT.store(usize::MAX, Ordering::Release);
     let mut space = crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare();
-    // 两个不同 VPN 会让 MmuGather 升级为 Full，确保本用例仍专门验证软件
-    // IPI 的可观测 ack 窗口；单页 RFENCE 由前一用例独立覆盖。
+    // 比精确区间上限多一页，主动进入全刷 sequence/IPI 路径；
+    // 上一用例已独立验证有界区间不会退化为全刷。
     space.insert_framed_area(
         crate::mm::VirtAddr::from(TEST_BASE),
-        crate::mm::VirtAddr::from(TEST_BASE + 2 * crate::config::PAGE_SIZE),
+        crate::mm::VirtAddr::from(TEST_BASE + TEST_PAGES * crate::config::PAGE_SIZE),
         crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
     );
     let vm = Arc::new(crate::mm::AddressSpace::new(space));
@@ -3155,7 +3162,7 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
     let free_after = crate::mm::unallocated_frames();
     let validation_error = if free_during != free_before {
         Some("user frame was released before remote TLB ack")
-    } else if free_after != free_before.saturating_add(2) {
+    } else if free_after != free_before.saturating_add(TEST_PAGES) {
         Some("user frames were not released after remote TLB ack")
     } else if crate::smp::user_tlb_ack(1) <= ack_before
         || crate::smp::user_tlb_request(1) <= AP_USER_TLB_REQUEST_BEFORE.load(Ordering::Acquire)

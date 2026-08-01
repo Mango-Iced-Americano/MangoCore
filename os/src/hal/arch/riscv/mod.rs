@@ -80,17 +80,32 @@ pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
     sv39::tlb_invalidate_addr_asid(usize::from(crate::mm::VirtAddr::from(vpn)), asid);
 }
 
-/// 通过 SBI RFENCE 同步失效一组逻辑 CPU 上的指定用户页。
+/// 清除当前 hart 上指定 MM 的有界用户页区间。
+pub fn user_tlb_invalidate_range(asid: u16, range: crate::mm::VPNRange) {
+    debug_assert!(
+        range.get_end().0 - range.get_start().0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES
+    );
+    for vpn in range {
+        user_tlb_invalidate_page(asid, vpn);
+    }
+}
+
+/// 通过 SBI RFENCE 同步失效一组逻辑 CPU 上的指定用户页区间。
 ///
-/// `Ok(false)` 只表示固件缺少 RFENCE；上层仍须执行软件 IPI 全量 fallback。
-pub fn remote_user_tlb_invalidate_page(
+/// `Ok(false)` 只表示固件缺少 RFENCE；上层仍须执行软件 IPI fallback。
+pub fn remote_user_tlb_invalidate_range(
     targets: usize,
     asid: u16,
-    vpn: crate::mm::VirtPageNum,
+    range: crate::mm::VPNRange,
 ) -> Result<bool, isize> {
     let hart_mask = crate::smp::logical_to_hardware_mask(targets);
-    let start = usize::from(crate::mm::VirtAddr::from(vpn));
-    sbi::remote_sfence_vma_asid(hart_mask, start, crate::config::PAGE_SIZE, asid)
+    let pages = range.get_end().0 - range.get_start().0;
+    debug_assert!((1..=crate::smp::MAX_USER_TLB_RANGE_PAGES).contains(&pages));
+    let start = usize::from(crate::mm::VirtAddr::from(range.get_start()));
+    let size = pages
+        .checked_mul(crate::config::PAGE_SIZE)
+        .expect("bounded user TLB range size overflowed");
+    sbi::remote_sfence_vma_asid(hart_mask, start, size, asid)
 }
 
 pub fn bootstrap_init(cpu_id: usize) {

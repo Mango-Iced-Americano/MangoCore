@@ -349,7 +349,7 @@ impl StepByOne for PhysPageNum {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 /// 表示一个范围区间
 pub struct SimpleRange<T>
 where

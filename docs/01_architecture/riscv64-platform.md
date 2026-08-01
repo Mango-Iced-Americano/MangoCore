@@ -258,6 +258,7 @@ asm!(
 | `tlb_invalidate()` | 执行全局 `sfence.vma` |
 | `tlb_invalidate_addr(vaddr)` | 对单个虚拟地址执行 `sfence.vma vaddr` |
 | `tlb_invalidate_addr_asid(vaddr, asid)` | 只失效指定 MM 的用户虚拟页 |
+| `user_tlb_invalidate_range(asid, range)` | 对最多 64 页的连续区间逐页执行 ASID 定向失效 |
 | `try_assign_asid()` / `rollover_asids()` | 分配 MM-owned ASID，并在全 CPU flush 后换代 |
 | `sfence_vma!` | 宏形式刷新指定虚拟页 |
 
@@ -273,14 +274,15 @@ asm!(
 | timer | 设置 timer |
 | shutdown | QEMU/OpenSBI 退出 |
 | local irq save/restore | 本地中断状态保存恢复 |
-| RFENCE FID 2 | 按 hart mask、VA range 与 ASID 同步远端页失效 |
+| RFENCE FID 2 | 按 hart mask、字节 start/size 与 ASID 同步远端区间失效；跨度超过 64 页由上层改走全刷 |
 
 上层代码通过 `hal/mod.rs` 的 re-export 使用这些能力，不直接引用 `sbi.rs`。
 
 RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建立 trap 和页表”。启动后 `entry.asm` 进入 Rust，`machine_init()` 安装 trap 并打开 timer；syscall 和 page fault 都从 `trap/mod.rs` 分派；页表修改落到 `sv39.rs`，TLB 刷新最终是 `sfence.vma`。因此 rv64 上遇到用户态异常时，先看 `scause/stval/sepc` 对应分支，再看架构无关层返回的 errno 或 signal。
 
 RV64 现在会探测 `SATP.ASID` 的实际位数，并让一个 MM 在所有 hart 使用同一 versioned
-ASID；ASIDLEN=0 的平台自动退化到 switch-time 全刷。它仍没有 LA64 的用户非对齐访存
+ASID；ASIDLEN=0 的平台自动退化到 switch-time 全刷。有界区间由同一 `MmuGather` 主链
+冻结，RFENCE 不可用时改走每发起 CPU 固定 slot，不建立第二套 MM 提交结构。它仍没有 LA64 的用户非对齐访存
 模拟路径；未对齐兼容必须在 syscall/uaccess 或测试适配层显式处理，不能指望 trap 后端
 解码并模拟 load/store。
 

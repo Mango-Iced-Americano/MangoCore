@@ -213,6 +213,18 @@ pub fn tlb_invalidate_user_page(asid: u16, vpn: VirtPageNum) {
     }
     crate::task::perf::record_tlb_page();
 }
+/// 按硬件可表达的双页粒度失效一个半开 VPN 区间。
+#[inline]
+pub fn tlb_invalidate_user_range(asid: u16, range: crate::mm::VPNRange) {
+    // 偶数 VPN 和紧邻的奇数 VPN 共用一个 TLB entry；先向下对齐，
+    // 每次跨两页，避免对同一 entry 重复执行 `invtlb 0x5`。
+    let mut vpn = range.get_start().0 & !1;
+    let end = range.get_end().0;
+    while vpn < end {
+        tlb_invalidate_user_page(asid, VirtPageNum(vpn));
+        vpn += 2;
+    }
+}
 #[inline(always)]
 pub fn tlb_invalidate_global_page(vpn: VirtPageNum) {
     // INVTLB_ADDR_GTRUE_OR_ASID with ASID 0 covers global kernel mappings.

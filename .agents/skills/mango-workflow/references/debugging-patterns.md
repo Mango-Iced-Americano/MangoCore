@@ -671,18 +671,22 @@
 ## 幂等 IPI reason 携带不可合并 payload：使用每发起 CPU 固定槽
 
 - **风险**: per-CPU mailbox 通常用 `fetch_or(reason)` 合并 IPI reason。它只能表达“至少有
-  一项工作”，不能携带事件次数；若所有发起者共用一个 ASID/VA payload，后发布者会覆盖
-  前一请求，目标 CPU 即使处理了 reason 也可能失效错误地址。
+  一项工作”，不能携带事件次数；若所有发起者共用一个 ASID/VA 或 ASID/range payload，
+  后发布者会覆盖前一请求，目标 CPU 即使处理了 reason 也可能失效错误地址。
 - **适用模式**: 当每个 CPU 同时最多同步等待一个请求时，为每个发起 CPU分配一个固定
   原子槽。发起者先 CAS claim，写入 payload/ack 初值，最后用 Release store 发布 targets；
   handler 收到一个合并 reason 后扫描全部槽，以 Acquire 读取 targets，完成硬件操作后再
   Release 写 ack。这样 reason 可以合并，payload 不会合并或覆盖。
+- **有界 payload**: hard-IRQ 中处理连续区间时，只发布固定宽度的
+  `ASID + start + page_count`，并在发布前校验非空和最大页数。跨度超过上限直接回退全刷，
+  不把动态 VPN 列表、堆分配或无界循环带入 handler。稀疏修改可合并为包围区间，多刷少量页
+  通常比再引入多段 slot 状态更容易证明；阈值必须作为 IRQ 工作量边界记录并覆盖临界测试。
 - **复用边界**: 只有全部 live target ack 后才能清 targets 并释放槽。timeout 后若系统将
   fail-stop，不要提前复用槽；保留旧 payload 可防止迟到 doorbell 把旧事件错配到新请求。
   若未来允许从 timeout 恢复，则必须引入 sequence/epoch，而不能只清一个 claimed bit。
 - **测试**: 让全部 CPU 同时发布不同 payload，并断言每项都完成且没有退回全量 fallback；
-  同时保留真实 PTE 撤映射与 ack 前 frame 不复用测试。仅观察 IPI reason 次数不能证明
-  payload 隔离。
+  分别覆盖“小于等于上限的区间”和“上限加一页的全刷”，同时保留真实 PTE 撤映射与 ack 前
+  frame 不复用测试。仅观察 IPI reason 次数不能证明 payload 隔离或硬件 stale entry 已消失。
 - **相关文件**: `os/src/smp.rs`, `os/src/mm/mmu_gather.rs`, `os/src/mm/tlb.rs`
 
 ## ASID rollover：flush ack 之后禁止重新安装旧地址空间快照

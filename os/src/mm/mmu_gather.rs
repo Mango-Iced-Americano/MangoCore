@@ -4,7 +4,7 @@
 //! 它不发送 IPI，也不等待远端 CPU；这些可能阻塞的动作由锁外的
 //! [`TlbFlush`](super::TlbFlush) 执行。
 
-use super::{FrameTracker, PageTable, TlbContext, TlbFlush, VirtPageNum};
+use super::{FrameTracker, PageTable, TlbContext, TlbFlush, VPNRange, VirtPageNum};
 use alloc::{sync::Arc, vec::Vec};
 
 /// 本轮 PTE 修改需要失效的最小范围。
@@ -12,9 +12,9 @@ use alloc::{sync::Arc, vec::Vec};
 pub(crate) enum FlushRange {
     /// 本轮没有修改任何 PTE。
     None,
-    /// 只修改了同一个虚拟页；RV64 可以使用页级失效。
-    Page(VirtPageNum),
-    /// 修改了多个虚拟页，或撤销了页表层级本身。
+    /// 需要精确失效的有界半开 VPN 区间。
+    Range(VPNRange),
+    /// 修改跨度过大，或撤销了页表层级本身。
     Full,
 }
 
@@ -56,10 +56,24 @@ impl MmuGather {
 
     /// 记录一个被新建、删除或修改权限/PPN 的用户 PTE。
     pub(crate) fn record_change(&mut self, vpn: VirtPageNum) {
+        let Some(next_vpn) = vpn.0.checked_add(1).map(VirtPageNum) else {
+            self.range = FlushRange::Full;
+            return;
+        };
         self.range = match self.range {
-            FlushRange::None => FlushRange::Page(vpn),
-            FlushRange::Page(first) if first == vpn => FlushRange::Page(first),
-            FlushRange::Page(_) | FlushRange::Full => FlushRange::Full,
+            FlushRange::None => FlushRange::Range(VPNRange::new(vpn, next_vpn)),
+            FlushRange::Range(range) => {
+                // 中间没有改动的页也可以一并失效；用多刷少量页
+                // 换取单一连续 payload，避免在 IPI handler 中遍历动态列表。
+                let start = core::cmp::min(range.get_start(), vpn);
+                let end = core::cmp::max(range.get_end(), next_vpn);
+                if end.0 - start.0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES {
+                    FlushRange::Range(VPNRange::new(start, end))
+                } else {
+                    FlushRange::Full
+                }
+            }
+            FlushRange::Full => FlushRange::Full,
         };
     }
 
@@ -180,9 +194,8 @@ impl MmuGather {
 
     /// 退休队列扩容失败时，只允许在没有远端观察者的情况下同步释放。
     ///
-    /// `range` 覆盖本轮已经入队的全部 frame：保持 `Page(vpn)` 说明所有修改都发生在
-    /// 同一个 VPN；只要出现第二个 VPN，`record_change()` 就会把范围升级为 `Full`。
-    /// 因此下面的一次页级或全量本地失效足以覆盖清空的整个退休队列。
+    /// `range` 覆盖本轮已经入队的全部 frame。有界区间逐页
+    /// 失效，跨度超过上限时全刷，因此两条路径都覆盖整个退休队列。
     ///
     /// 应急释放后仍要保留 `range` 交给 `seal()`。本地 flush 只保护当前活跃 CPU；
     /// 已经切离的 CPU 仍可能保留旧 ASID 翻译，必须靠本轮 generation 推进约束下次进入。
@@ -195,7 +208,11 @@ impl MmuGather {
         if self.active_cpus_at_begin == 1usize << crate::smp::cpu_id() {
             match self.range {
                 FlushRange::None => unreachable!("retirement validates the flush range first"),
-                FlushRange::Page(vpn) => page_table.flush_tlb_page(vpn),
+                FlushRange::Range(range) => {
+                    for vpn in range {
+                        page_table.flush_tlb_page(vpn);
+                    }
+                }
                 FlushRange::Full => page_table.flush_tlb(),
             }
             self.retired_frames.clear();

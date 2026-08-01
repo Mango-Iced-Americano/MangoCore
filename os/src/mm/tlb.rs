@@ -220,17 +220,19 @@ impl<'a> TlbFlush<'a> {
             let result = if self.targets == current_bit {
                 match self.gather.range() {
                     FlushRange::None => panic!("TLB flush has no recorded PTE change"),
-                    FlushRange::Page(vpn) => crate::hal::user_tlb_invalidate_page(self.asid, vpn),
+                    FlushRange::Range(range) => {
+                        crate::hal::user_tlb_invalidate_range(self.asid, range)
+                    }
                     FlushRange::Full => crate::hal::user_tlb_invalidate(),
                 }
                 Ok(())
             } else {
-                let page = match self.gather.range() {
+                let range = match self.gather.range() {
                     FlushRange::None => panic!("TLB flush has no recorded PTE change"),
-                    FlushRange::Page(vpn) => Some(vpn),
+                    FlushRange::Range(range) => Some(range),
                     FlushRange::Full => None,
                 };
-                crate::smp::synchronize_user_tlb(self.targets, self.asid, page)
+                crate::smp::synchronize_user_tlb(self.targets, self.asid, range)
             };
 
             if let Err(error) = result {

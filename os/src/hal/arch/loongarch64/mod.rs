@@ -57,11 +57,20 @@ pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
     tlb::tlb_invalidate_user_page(asid, vpn);
 }
 
-/// LA64 没有固件 RFENCE；上层继续使用固定 shootdown slot 传递 ASID/VA。
-pub fn remote_user_tlb_invalidate_page(
+/// 按 LoongArch 硬件的相邻偶/奇页 entry 粒度失效有界区间。
+pub fn user_tlb_invalidate_range(asid: u16, range: crate::mm::VPNRange) {
+    assert_ne!(asid, tlb::KERN_ASID, "precise user TLB flush used ASID 0");
+    debug_assert!(
+        range.get_end().0 - range.get_start().0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES
+    );
+    tlb::tlb_invalidate_user_range(asid, range);
+}
+
+/// LA64 没有固件 RFENCE；上层继续使用固定 shootdown slot 传递 ASID/VA 区间。
+pub fn remote_user_tlb_invalidate_range(
     _targets: usize,
     _asid: u16,
-    _vpn: crate::mm::VirtPageNum,
+    _range: crate::mm::VPNRange,
 ) -> Result<bool, isize> {
     Ok(false)
 }

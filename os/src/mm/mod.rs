@@ -40,7 +40,7 @@ mod vma_set;
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
 pub use address::PPNRange;
-use address::VPNRange;
+pub(crate) use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub(crate) use address_space::UserVmContext;
 pub use address_space::{AddressSpace, AddressSpaceInner, MemoryError};

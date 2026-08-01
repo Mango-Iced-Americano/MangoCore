@@ -361,7 +361,7 @@ CPU0 idle 调度循环在尚未取得 processor、runqueue 或子系统锁时按
 在 MM 层直接执行 timer callback。当前退休队列由 CPU0 生命周期路径消费；未来若允许 AP
 并发完成普通进程回收，需要重新审查容量、所有者和批处理策略。
 
-### 3.8 B22/B23/B51 用户 MM 驻留与 shootdown 锁序
+### 3.8 B22/B23/B51/B52 用户 MM 驻留与 shootdown 锁序
 
 B22 的 trap-return 激活登记、B23 的 PTE 修改侧和 B51 的切离登记由同一个
 `AddressSpace` 串行化：
@@ -370,8 +370,9 @@ B22 的 trap-return 激活登记、B23 的 PTE 修改侧和 B51 的切离登记�
    本地全用户失效并更新 observed，最后重查 generation；
 2. 修改侧在同一 VM 锁内通过 `UserMapper` 修改 PTE，由 `MmuGather` 记录失效范围和
    退休 frame；`seal()` 推进 generation、校验 active CPU mask 快照并生成 `TlbFlush`；
-3. 修改侧释放 VM 锁后，`TlbFlush::execute()` 才执行本地失效、发送
-   `USER_TLB_SYNC`、等待远端 ack；
+3. 修改侧释放 VM 锁后，`TlbFlush::execute()` 才执行本地失效、发送 IPI/RFENCE、
+   等待远端 ack；B52 的固定 slot 只携带 ASID、起始 VPN 和不超过 64 的页数，handler
+   扫描固定 8 个槽且不获取普通锁，跨度更大时仍走 `USER_TLB_SYNC` 全刷；
 4. 任务已经切回 idle 栈后，切离侧在改变 current/runqueue owner 前执行完整屏障，
    再在 VM 锁内清除本 CPU active bit；
 5. 全部目标 ack 后才 drop retired frame。错误路径也必须保留这一顺序，不能退回
@@ -394,7 +395,7 @@ join/leave-vs-update 顺序。当前正确性来自共同 VM 锁，不来自对�
 ### 3.9 B44 membarrier 锁序
 
 PRIVATE_EXPEDITED 的注册状态属于 `AddressSpace`。目标选择和 CPU enter/leave 沿用
-B22/B23/B51 的 VM 锁，而远端同步固定发生在解锁后：
+B22/B23/B51/B52 的 VM 锁，而远端同步固定发生在解锁后：
 
 ```text
 lock VM -> snapshot active CPU mask -> unlock VM
