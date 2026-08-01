@@ -30,10 +30,12 @@ fn discovers_sdio1_only() -> Result<(), &'static str> {
 }
 
 fn encodes_commands() -> Result<(), &'static str> {
-    if command_word(0x3f, Response::R1, false, false) & 0x1f != 0x1f { return Err("command index escaped low five bits"); }
+    if command_word(0x3f, Response::R1, false, false) & 0x3f != 0x3f { return Err("command index escaped low six bits"); }
+    if command_word(55, Response::R1, false, false) & 0x3f != 0x37 { return Err("CMD55 index truncated to SET_BLOCK_COUNT"); }
     if command_word(17, Response::R1, true, false) != 17 | (1 << 6) | (1 << 8) | (1 << 9) { return Err("R1 data command encoding changed"); }
     if command_word(2, Response::R2, false, false) & ((1 << 6) | (1 << 7) | (1 << 8)) != (1 << 6) | (1 << 7) | (1 << 8) { return Err("R2 encoding changed"); }
-    if command_word(41, Response::R3, false, false) != 9 | (1 << 6) { return Err("R3 encoding changed"); }
+    if command_word(41, Response::R3, false, false) != 41 | (1 << 6) { return Err("R3 encoding changed"); }
+    if command_word(24, Response::R1, true, false) & (1 << 10) != 0 { return Err("command_word must not set DAT_WR; write path ORs it explicitly"); }
     if data_error(1 << 7) != Some(DwMshcError::DataCrc) || data_error(1 << 11) != Some(DwMshcError::FifoRun) { return Err("data error mapping changed"); }
     Ok(())
 }

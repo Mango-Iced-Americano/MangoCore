@@ -10,13 +10,23 @@ pub(crate) struct SdCardInfo {
 }
 
 pub(crate) fn initialize_card(host: &mut DwMshcHost) -> Result<SdCardInfo, DwMshcError> {
+    // U-Boot mmc_go_idle: udelay(1000) before CMD0; card needs time to stabilize
+    // its clock/state after power-up before it can accept the reset command.
+    wait_ms(1);
     host.command(0, 0, Response::None, true, false)?;
+    // U-Boot mmc_go_idle: udelay(2000) after CMD0; card needs ~74+ clock cycles
+    // after reset before it can reliably answer the next command (CMD8/ACMD41).
+    wait_ms(2);
     let v2 = match host.command(8, 0x1aa, Response::R7, false, false) {
         Ok(response) if response[0] & 0xfff == 0x1aa => true,
         Ok(_) => return Err(DwMshcError::UnsupportedCard),
         Err(DwMshcError::CommandTimeout(8)) => false,
         Err(error) => return Err(error),
     };
+    // Give the card time after the interface-conditions handshake before the
+    // first CMD55 of the ACMD41 probing loop (U-Boot's per-iteration overhead
+    // provides this implicitly; make it explicit on the first iteration).
+    wait_ms(1);
     let mut ocr = 0;
     for _ in 0..100 {
         host.command(55, 0, Response::R1, false, false)?;
@@ -61,7 +71,7 @@ pub(crate) fn csd_capacity_sectors(csd: [u32; 4]) -> Result<u64, DwMshcError> {
 }
 
 pub(crate) const fn command_word(index: u8, response: Response, data: bool, init: bool) -> u32 {
-    (index as u32 & 0x1f) | response.command_bits() | if data { 1 << 9 } else { 0 } | if init { 1 << 15 } else { 0 }
+    (index as u32 & 0x3f) | response.command_bits() | if data { 1 << 9 } else { 0 } | if init { 1 << 15 } else { 0 }
 }
 
 const fn bits(csd: [u32; 4], high: u8, low: u8) -> u32 {
@@ -75,9 +85,13 @@ const fn bits(csd: [u32; 4], high: u8, low: u8) -> u32 {
     value
 }
 
-fn wait_10ms() {
-    let deadline = crate::timer::get_time_ms().saturating_add(10);
+fn wait_ms(ms: usize) {
+    let deadline = crate::timer::get_time_ms().saturating_add(ms);
     while crate::timer::get_time_ms() < deadline {
         core::hint::spin_loop();
     }
+}
+
+fn wait_10ms() {
+    wait_ms(10);
 }
