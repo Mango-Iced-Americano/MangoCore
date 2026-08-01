@@ -575,3 +575,11 @@
 - **修复**：在 `sbi_call()` 的 `asm!` 操作数中添加 `in("x16") 0usize`，确保每次 legacy ecall 时 a6 被显式零初始化。
 - **教训**：调用固件/超管理器 ABI（ecall/hcall/svc）时，**所有**参数寄存器必须被显式初始化，即使规范将某些寄存器标注为"该调用类型未使用"。固件实现可能读取并记录这些寄存器的值，或将其纳入行为判断（如 OpenSBI 输出日志含 func=）。同一文件中的 `reboot()` 已正确初始化 a6=0（SRST 现代扩展需要 FID），恰好留下了对比。
 - **相关文件**: `os/src/hal/arch/riscv/sbi.rs`
+
+## SD/MMC 初始化：reset 后缺延时导致后续命令 INT_RTO
+
+- **现象**: dw-mshc 驱动在实板上 CMD8 已正确应答 `0x1aa`（接口条件握手成功），但紧随其后的 CMD55（ACMD41 探测循环首条命令）触发 INT_RTO（响应超时）。CMD0 → CMD8 → CMD55 无任何延时连续发出。
+- **根因**: 卡在上电/复位后需要时间稳定时钟与状态（SD 规范要求约 74+ 时钟周期），且 CMD0 复位后到能可靠应答命令之间需要额外时间。U-Boot `mmc_go_idle()` 在 CMD0 前 `udelay(1000)`、CMD0 后 `udelay(2000)`；本驱动缺失这些延时。
+- **修复**: `initialize_card()` 在 CMD0 前 `wait_ms(1)`、CMD0 后 `wait_ms(2)`，并在 CMD8 成功后、首次 CMD55 前 `wait_ms(1)`；新增 `wait_ms(ms)` 帮助函数（`crate::timer::get_time_ms()` 截止时间自旋循环），`wait_10ms()` 委托之。
+- **教训**: 硬件初始化命令序列（reset/if-cond/op-cond）之间必须保留电源/复位稳定窗口，不能依赖命令本身往返耗时。参考 U-Boot/Linux 的 `mmc_go_idle`/`mmc_send_op_cond` 时序。另注意本项目 `crate::timer::get_time_ms()` 返回 **`usize`** 而非 `u64`，`saturating_add` 传 `usize` 即可，传 `as u64` 会 E0308。
+- **相关文件**: `os/src/drivers/block/dw_mshc/sd.rs`

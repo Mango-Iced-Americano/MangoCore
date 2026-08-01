@@ -1149,3 +1149,13 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - `os/src/syscall/process/signal.rs` — `SignalFd`
 - `os/src/syscall/fs/sys_read.rs` — signalfd 阻塞读路径
 - `os/src/task/task.rs` — clone 路径（移除了 rebind 循环）
+
+## 驱动/硬件寄存器
+
+### 寄存器命令索引位宽掩码过窄，高位命令被截断
+
+- **现象**: VF2 实板 SD 卡初始化在 ACMD41 探测循环中 CMD55 恒超时（`CommandTimeout(55)`），但 CMD8 正常应答 0x1aa，mask=0x001 的 basic 冒烟通过，掩盖了故障。
+- **根因**: DesignWare MMC 的 CMD 寄存器命令索引字段是 bit[5:0]（6 bit，0-63），但 `command_word()` 用 `& 0x1f`（5 bit）编码。CMD55=0x37 被截断为 0x17=23（SET_BLOCK_COUNT），卡收不到真正的 CMD55；CMD41=0x29 同样被截断为 9。CMD8=0x08、CMD17=0x11、CMD24=0x18 均 < 32 不受影响。
+- **修复**: 掩码改为 `& 0x3f`；ktest 中同一 bug 的硬编码期望值（`command_word(41, R3) != 9 | ...` 里的 `9` 就是 `41 & 0x1f`）也要一并修正，否则断言在修复后失败。
+- **教训**: 写硬件寄存器字段时以寄存器数据手册（或参考固件如 U-Boot）的位宽为准，不要想当然用"够用"的窄掩码。验证时如果测试把 bug 的截断结果当作"正确编码"硬编码进断言，修复生产代码后测试会先于硬件暴露错误——先检查测试断言是否复制了同一个 bug（此处 `41`→`9` 与 `0x3f`→`0x1f` 都是 5-bit 截断的痕迹）。
+- **相关文件**: `os/src/drivers/block/dw_mshc/sd.rs`、`os/src/drivers/block/dw_mshc/ktest.rs`
