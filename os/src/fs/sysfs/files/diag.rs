@@ -903,6 +903,16 @@ fn stats_pagecache_content(
     );
     let _ = writeln!(
         s,
+        "pc_read_user_calls={}",
+        read_counter(&crate::task::perf::PC_READ_USER_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_user_pages={}",
+        read_counter(&crate::task::perf::PC_READ_USER_PAGES)
+    );
+    let _ = writeln!(
+        s,
         "pc_read_miss={}",
         read_counter(&crate::task::perf::PC_READ_MISS)
     );
@@ -920,6 +930,26 @@ fn stats_pagecache_content(
         s,
         "pc_read_miss_cycles={}",
         read_counter(&crate::task::perf::PC_READ_MISS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss_fill_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_MISS_FILL_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_valid_fill_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_VALID_FILL_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_COPY_CYCLES)
     );
     let _ = writeln!(
         s,
@@ -1127,6 +1157,36 @@ fn stats_blockio_content(
     );
     let _ = writeln!(
         s,
+        "pread_uaccess_cycles={}",
+        read_counter(&crate::task::perf::PREAD_UACCESS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_file_cycles={}",
+        read_counter(&crate::task::perf::PREAD_FILE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_ext4_logical_size_cycles={}",
+        read_counter(&crate::task::perf::PREAD_EXT4_LOGICAL_SIZE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_ext4_page_cache_cycles={}",
+        read_counter(&crate::task::perf::PREAD_EXT4_PAGE_CACHE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_total_count={}",
+        read_counter(&crate::task::perf::PREAD_TOTAL_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "pread_vfs_mode_cycles={}",
+        read_counter(&crate::task::perf::PREAD_VFS_MODE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
         "pc_write_lookup_cycles={}",
         read_counter(&crate::task::perf::PC_WRITE_LOOKUP_CYCLES)
     );
@@ -1144,6 +1204,76 @@ fn stats_blockio_content(
         s,
         "pc_write_commit_cycles={}",
         read_counter(&crate::task::perf::PC_WRITE_COMMIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_calls={}",
+        read_counter(&crate::task::perf::PC_READ_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_pages={}",
+        read_counter(&crate::task::perf::PC_READ_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_user_calls={}",
+        read_counter(&crate::task::perf::PC_READ_USER_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_user_pages={}",
+        read_counter(&crate::task::perf::PC_READ_USER_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss={}",
+        read_counter(&crate::task::perf::PC_READ_MISS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_hit_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_HIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_MISS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss_fill_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_MISS_FILL_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_valid_fill_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_VALID_FILL_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_cycles_total={}",
+        read_counter(&crate::task::perf::PC_READ_CYCLES_TOTAL)
     );
     let _ = writeln!(
         s,

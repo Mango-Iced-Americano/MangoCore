@@ -1213,6 +1213,7 @@ impl File {
 
     /// 从文件当前位置读取到 UserBuffer（直连版本，省去 kbuf 中转）。
     pub fn read_user(&self, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         self.readable()?;
         let len = dst.len();
         if len == 0 {
@@ -1225,12 +1226,14 @@ impl File {
         } else {
             self.offset.load(Ordering::SeqCst)
         };
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
 
         match self.inode.read_at_user(offset, len, dst) {
             Ok(n) => {
                 if n > 0 && !is_stream {
                     self.offset.fetch_add(n, Ordering::SeqCst);
                 }
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
                 Ok(n)
             }
             Err(SyscallErr::ENOSYS) => {
@@ -1250,6 +1253,7 @@ impl File {
                         self.offset.fetch_add(n, Ordering::SeqCst);
                     }
                 }
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
                 Ok(n)
             }
             Err(e) => Err(e),
@@ -1258,6 +1262,7 @@ impl File {
 
     /// 从指定位置读取到 UserBuffer（不推进 offset）。
     pub fn pread_user(&self, offset: usize, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         if self.mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
@@ -1268,9 +1273,13 @@ impl File {
         if len == 0 {
             return Ok(0);
         }
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
 
         match self.inode.read_at_user(offset, len, dst) {
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
+                Ok(n)
+            }
             Err(SyscallErr::ENOSYS) => {
                 let mut kbuf = Vec::new();
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
@@ -1285,6 +1294,7 @@ impl File {
                 if n > 0 {
                     dst.write_at(0, &kbuf[..n]);
                 }
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
                 Ok(n)
             }
             Err(e) => Err(e),
