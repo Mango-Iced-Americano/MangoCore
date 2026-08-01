@@ -9,6 +9,8 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    // file 是 Arc；faultable uaccess 前释放 fd table，避免把全进程描述符锁带入 VM fault。
+    drop(fd_table);
     if is_path_fd(&file) {
         return EBADF;
     }
@@ -26,9 +28,8 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
         };
         let remaining = (md.size as usize).saturating_sub(file.offset());
         let val = remaining.min(i32::MAX as usize) as i32;
-        match crate::mm::translated_refmut(token, arg as *mut i32) {
-            Ok(r) => *r = val,
-            Err(_) => return EFAULT,
+        if crate::mm::copy_to_user(token, &val, arg as *mut i32).is_err() {
+            return EFAULT;
         }
         return 0;
     }
@@ -38,8 +39,8 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
         if arg_ptr.is_null() {
             return EFAULT;
         }
-        let value = match crate::mm::translated_ref(token, arg_ptr) {
-            Ok(r) => *r,
+        let value = match crate::mm::get_from_user(token, arg_ptr) {
+            Ok(value) => value,
             Err(_) => return EFAULT,
         };
         file.set_nonblock(value != 0);

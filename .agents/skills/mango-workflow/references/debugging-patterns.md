@@ -806,3 +806,21 @@
   驱动生产正确性；跨字段快照应标为 best-effort，不为补齐表格临时增加热路径原子状态。
 - **相关文件**: `os/src/panic_diag.rs`, `os/src/mm/{heap_allocator,frame_allocator}.rs`,
   `os/src/{smp,task/processor}.rs`
+
+## SMP uaccess：frame 存活不能替代用户映射同步
+
+- **危险模式**: 先在 VM 锁内把用户 VA 翻译成 PA 或 `&'static mut [u8]`，释放锁后再复制。
+  另一 CPU 可在间隙执行 fork/CoW、`mprotect` 或 `munmap`；即使持有 frame `Arc` 防止物理页
+  释放，原 VA 的 PPN、权限和 CoW 归属也可能已经改变。
+- **修复边界**: fixed-size copy 应按页取得 VM 锁，在同一临界区执行 fault、PTE 权限后验检查、
+  取得 direct-map raw pointer 和实际 copy。raw pointer 不得逃逸 closure；锁外再执行
+  `MmuGather` 产生的 TLB flush/ack，避免跨等待点持 VM 锁。
+- **Rust 引用不是同步原语**: 不要把内核直映地址转成可逃逸的 `&'static mut T`。延长 lifetime
+  既不能固定映射，也可能违反 `&mut` 独占 alias 规则；需要瞬时访问时使用带完整 Safety 证明的
+  raw pointer，并由真正的 VM/对象锁提供排他关系。
+- **跨页语义**: 为避免长时间持有 VM 锁，大 copy 可以逐页串行化；后续页失败时此前 chunk
+  可能已经完成。调用方和文档必须显式接受部分完成，不能把 `Err(EFAULT)` 解释为全量回滚。
+- **锁序审计**: faultable uaccess 前先释放 fd table、task inner、file-private、socket 等普通
+  业务锁。若旧调用链要求持锁复制，先快照/克隆稳定 owner，再释放锁进入 uaccess。
+- **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
+  `docs/01_architecture/lock-order.md`

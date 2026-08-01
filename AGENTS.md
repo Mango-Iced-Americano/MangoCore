@@ -134,7 +134,7 @@ QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
 
 - **物理内存**：栈式帧分配器，4KB/帧；`frame_store.rs` 跟踪帧状态用于 swap/zram
 - **虚拟内存**：SV39 页表，每进程独立 `MemorySet`；`VmaSet` 管理 VMA；`filemap.rs` 处理 mmap 文件缺页
-- **用户内存访问**：`translated_ref/refmut/byte_buffer`、`copy_from_user`、`translated_str`
+- **用户内存访问**：`UserPtr/UserPtrMut`、`copy_from/to_user`、`UserBuffer`、`translated_str`
 - **关键约束**：MAP_SHARED 页面不参与 CoW；用户 PTE 必须经 `UserMapper` 修改并由 `MmuGather` 记录；进程 VM 由 `AddressSpace` 强制“锁内 `record_change`—`seal`—解锁—`TlbFlush::execute`—最后释放 frame”；`execve`/`clone` 路径用 `try_reserve` 防 OOM
 - **双架构 ASID**：ASID 由每 MM 的 `TlbContext` 持有，同一 epoch 内不立即复用；RV64 从 `SATP.ASID` 探测容量，LA64 从 `CSR.ASID` 读取容量，编号耗尽时都必须先完成全 CPU user-TLB flush/ack 再换代。TCB 不得重新持有或释放 ASID
 - **OOM 防御**：`alloc()` 三次重试失败后设 `pending_oom_kill`，由 `trap_return()` 安全点发 SIGKILL
@@ -205,6 +205,11 @@ panic handler 必须先调用 `console::enter_panic()`，后续输出绕过 OUTP
 Mutex。新增 console 调用不得形成 UART/业务锁到 OUTPUT_LOCK 的反向顺序。
 B56 进一步规定 panic 诊断不得调用阻塞统计接口：allocator/current/task/active-MM 只能走
 `try_*`，锁忙时打印降级信息；逐 CPU 原子快照仅供诊断，不能用于调度或释放决策。
+B57 已删除固定对象路径的 `translated_ref*`：标量/数组 copy 必须在同一次 VM 锁持有期内
+完成 fault、权限后验检查和 raw copy，不能返回或保存指向用户物理页的 Rust 引用。进入
+faultable uaccess 前必须释放 fd table、task inner 与 file-private 等普通锁。`UserBuffer` 和
+`translated_str` 仍是后续审计范围；SysV IPC 等既有 fixed-copy 调用方的 registry 锁序也未
+全量验收，不得把 B57 的 helper 内部映射安全外推为整个 uaccess 调用图已经完成。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

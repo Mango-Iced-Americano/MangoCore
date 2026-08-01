@@ -3,7 +3,7 @@ title: "用户地址访问与 UserBuffer"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-01
 tags: [mm, uaccess, user-pointer, iovec]
 ---
 
@@ -34,16 +34,17 @@ tags: [mm, uaccess, user-pointer, iovec]
 | `UserIoVec` | 读取并管理用户 iovec |
 | `translated_byte_buffer()` | 跨页用户 buffer 翻译 |
 | `translated_str()` | 读取 NUL 结尾字符串 |
-| `copy_from_user/copy_to_user` | 对象/数组拷贝基础函数 |
+| `copy_from_user/copy_to_user` | 在 VM 映射同步下完成对象/数组拷贝 |
 | `user_accessible_len()` | 非 faulting 可访问长度探测 |
 
 ## 2. 核心约束
 
-`uaccess` 的核心安全约束有三条：
+`uaccess` 的核心安全约束有四条：
 
 1. 地址范围必须在 `USER_VA_END` 以下。
 2. faulting 用户访问只允许当前任务的 user token。
 3. 翻译过程会触发缺页，并在成功后检查 PTE 权限。
+4. 固定大小 copy 的权限检查、物理地址取得和实际访问必须处于同一次 VM 锁持有期。
 
 `current_user_vm(token)` 明确检查：
 
@@ -141,7 +142,10 @@ translate_user_buffer_checked(token, ptr, len, access)
 
 返回值是 `Vec<&'static mut [u8]>`。这些切片指向已经 fault-in 并通过权限检查的物理页。
 
-这里返回 `'static` 切片并不表示用户页永久有效，而是内核通过物理页直接映射获得了可访问内存视图；调用者必须把它当作一次 syscall 内部的临时借用使用。uaccess 的安全边界依赖当前单核内核和调用路径不跨越会释放/重映射这些用户页的操作。长时间保存这些切片、把它们放入异步结构，都会破坏这个约定。
+这里的 `'static mut` 是尚待消除的历史接口，不是多核安全保证。翻译 helper 返回后已经释放
+VM 锁，另一 CPU 可以执行 fork/CoW、`mprotect` 或 `munmap`，使切片指向旧页或不再满足原
+权限；Rust 引用本身还携带独占性假设。因此调用方即使只在一次 syscall 内短期使用，也不能
+据此证明与并发地址空间修改安全。B57 只收口固定大小 copy；这些 buffer 接口属于 B58 范围。
 
 跨页翻译还有一个重要语义：它会逐页 fault-in。前半部分已经成功翻译、后半部分遇到坏地址时，helper 返回错误；具体 syscall 需要决定是否允许部分完成。文件读写路径通过先探测关键地址和按 chunk 复制，尽量避免已经消费文件数据后才发现用户 buffer 后半段不可写。
 
@@ -156,6 +160,9 @@ translate_single_page_user_bytes(token, ptr, len, UserAccess::Read)
 如果 buffer 完全落在同一页且权限满足，就构造 `UserBuffer::single(slice)`；否则退回跨页 `translated_byte_buffer()`。
 
 这减少了常见小 read/write 的 `Vec` 分配。
+
+该 fast path 同样返回物理页切片，尚不具备 B57 固定大小 copy 的 VM 同步保证。不能把“单页”
+误解为“不会被并发重映射”。
 
 ## 8. UserPtr 和 UserPtrMut
 
@@ -177,25 +184,31 @@ translate_single_page_user_bytes(token, ptr, len, UserAccess::Read)
 
 这些类型用于 syscall 参数中结构体、长度、返回值指针等固定大小对象。
 
-## 9. translated_ref 系列
+## 9. 固定大小 copy 的 SMP 边界
 
-`translated_ref<T>()`、`translated_refmut<T>()`、`translated_ref_write<T>()` 要求对象不能跨页：
+B57 删除了 `translated_ref<T>()`、`translated_refmut<T>()` 和
+`translated_ref_write<T>()`。旧接口先翻译用户 VA、释放 VM 锁，再返回可逃逸的 Rust 引用；
+“对象不跨页”只能解决表示问题，不能阻止另一 CPU 在引用使用前修改映射。
 
-```rust
-if va.floor() != last.floor() {
-    return Err(EFAULT);
-}
+现在 `copy_from_user()`、`copy_to_user()` 及其 array 版本统一经过 `copy_user_bytes()`：
+
+```text
+检查用户范围并取得当前 AddressSpace Arc
+  -> 按用户页计算 chunk
+  -> AddressSpace::write（取得 VM 锁）
+       -> fault_in_user_va（缺页 + 权限后验检查）
+       -> 取得 direct-map raw pointer
+       -> 在锁内立即复制当前 chunk
+  -> 解锁后执行本轮 MmuGather/TLB flush
+  -> 处理下一页
 ```
 
-原因是它们返回单个 Rust 引用，不能自然表示跨页对象。跨页数据必须使用 byte buffer 或 array copy 接口。
+这样同一页上的 fork/CoW、`mprotect`、`munmap` 与 copy 形成明确先后关系。raw pointer 不会
+跨 closure 泄漏，也不伪造 `&'static mut T` 的永久独占性。
 
-权限对应：
-
-| 函数 | UserAccess |
-|------|------------|
-| `translated_ref` | `Read` |
-| `translated_refmut` | `ReadWrite` |
-| `translated_ref_write` | `Write` |
+跨页 copy 不承诺事务原子性：另一 CPU 可以在两个 chunk 之间修改后续页；若后续 fault 或
+权限检查失败，helper 返回 `EFAULT`，前面页的字节可能已经完成复制。调用方不得把
+`Result::Err` 理解为“一个字节都没动”。
 
 ## 10. translated_str
 
@@ -261,7 +274,10 @@ read_user_iovecs()
 | `readv/writev` | `UserIoVec` |
 | `nanosleep(rem)` | `UserPtrMut<T>::write_optional()` |
 
-syscall 层不应直接把用户地址 cast 成内核引用。
+syscall 层不应直接把用户地址 cast 成内核引用。进入 faultable copy 前还应释放 fd table、
+task inner、file-private 等普通锁；`ioctl` 的固定对象路径已经遵循这一边界。该要求是调用方
+锁序约束，不由 `copy_user_bytes()` 自动保证；SysV IPC 等既有路径仍需在后续共享子系统审计
+中逐项核对。
 
 ## 14. 错误码边界
 
@@ -273,8 +289,8 @@ syscall 层不应直接把用户地址 cast 成内核引用。
 | iovcnt 超过 1024 | `EINVAL` |
 | iovec 总长溢出 | `EINVAL` |
 | token 不是当前任务 token | `EFAULT` |
-| 对象跨页但使用 `translated_ref*` | `EFAULT` |
 | fault-in 后权限不满足 | `EFAULT` |
+| 跨页 copy 的后续页失效 | `EFAULT`，此前 chunk 可能已经完成 |
 
 ## 15. 调试核对点
 
@@ -285,3 +301,4 @@ syscall 层不应直接把用户地址 cast 成内核引用。
 | readv/writev 处理过长 iovec | `MAX_IOVEC_COUNT` 与 `total_cap` |
 | 路径读取卡住或越界 | `translated_str` 的 NUL 和 8 MiB 上限 |
 | 非阻塞路径意外分配页 | 是否错误使用 faulting 翻译而非 `user_accessible_len()` |
+| 多核 fork/unmap 与标量 copy 竞态 | 检查实际复制是否仍位于同一次 `AddressSpace::write` closure |

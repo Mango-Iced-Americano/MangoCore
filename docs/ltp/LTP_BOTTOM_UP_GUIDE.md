@@ -41,6 +41,10 @@
 
 ### 1. P0/P1: user-copy 没有完整权限检查
 
+> 状态更新（2026-08-01）：以下是历史 RED 代码证据。权限后验检查已完成；B57 又删除
+> `translated_ref*` 并让固定对象/数组在逐页 VM 锁内复制。当前剩余风险是
+> `translated_byte_buffer`/`UserBuffer`/`translated_str` 的锁外物理页视图。
+
 代码证据：
 
 - `os/src/mm/page_table.rs:116` 的 `translated_byte_buffer` 只通过 `page_table.translate(vpn)` 检查页是否存在，然后返回 `&mut [u8]`。
@@ -382,7 +386,8 @@
 
 ### P1: 用户内存访问与 Page Fault
 
-这是最底层的 LTP 地基。`copy_from_user`、`copy_to_user`、`translated_ref`、`translated_refmut`、`translated_byte_buffer` 必须有统一语义。
+这是最底层的 LTP 地基。当前 `copy_from_user`、`copy_to_user`、`UserPtr`、`UserBuffer`、
+`translated_byte_buffer` 必须维持统一的方向、缺页和部分完成语义。
 
 需要人工先确定：
 

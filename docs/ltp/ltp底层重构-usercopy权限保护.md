@@ -1,5 +1,10 @@
 # User-Copy 权限检查重构与回归测试报告
 
+> 历史说明（2026-08-01）：本文记录首次补齐 user-copy 权限语义时的实现。
+> B57 已删除 `translated_ref*`，固定对象/数组改为逐页 VM 锁内 copy；
+> `translated_byte_buffer`/`UserBuffer` 的锁外物理页视图仍待 B58 收口。以下旧接口名仅用于
+> 解释当时的迁移过程，不代表当前推荐 API。
+
 ## 1. 背景
 
 本次重构针对 MangoCore 内核 user-copy 路径的权限语义问题。原实现中，很多用户指针访问最终都会走到 `translated_byte_buffer`、`translated_refmut`、`copy_to_user` 等 helper。这些 helper 的核心行为是把用户虚拟地址翻译成物理地址，然后通过内核可访问的物理页切片或引用完成读写。
@@ -149,9 +154,9 @@ translate_user_buffer_checked(token, ptr, len, access) -> Result<Vec<&'static mu
 
 它按页拆分用户 buffer，并且每一页都通过 `translate_user_va_checked` 检查真实访问方向。`translated_byte_buffer` 和 `translated_byte_buffer_append_to_existing_vec` 都增加了 `access: UserAccess` 参数，不再保留旧签名，强制所有调用点显式选择方向。
 
-### 4.7 translated_ref / translated_refmut / translated_ref_write
+### 4.7 translated_ref / translated_refmut / translated_ref_write（历史实现）
 
-本次整理后的语义：
+当时整理后的语义：
 
 | helper | 权限 | 用途 |
 | --- | --- | --- |
@@ -159,11 +164,14 @@ translate_user_buffer_checked(token, ptr, len, access) -> Result<Vec<&'static mu
 | `translated_refmut<T>` | `ReadWrite` | 需要读旧值并写回的用户对象 |
 | `translated_ref_write<T>` | `Write` | 纯输出对象 |
 
-`translated_ref<T>` 和 `translated_refmut<T>` 会检查完整 `T` 的范围。当前实现对跨页 `T` 直接返回 `EFAULT`，跨页批量数据使用 `translated_byte_buffer`/`copy_from_user`/`copy_to_user` 处理。
+这些接口当时会检查完整 `T` 的范围，并对跨页 `T` 返回 `EFAULT`。B57 证明该限制仍不能
+解决 SMP 下 translate/unlock/use 竞态，现已由 `copy_from/to_user` 取代。
 
 ### 4.8 copy_to_user 改为纯写
 
-旧版 `copy_to_user` 在单页对象上会走 `translated_refmut`。这会把纯输出误表达成“读写”。本次改为内部统一走 `translated_byte_buffer(..., UserAccess::Write)`，因此只要求用户页可写，不再要求可读。
+更早版本的 `copy_to_user` 在单页对象上会走 `translated_refmut`，把纯输出误表达成“读写”；
+本文对应版本曾统一走 `translated_byte_buffer(..., UserAccess::Write)`。B57 又进一步改为
+`copy_user_bytes(..., Store)`，权限语义不变，但检查与实际 copy 处于同一 VM 锁持有期。
 
 同理：
 

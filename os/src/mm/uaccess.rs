@@ -13,6 +13,9 @@
 //!
 //! fault-in 会获取当前进程 `AddressSpaceInner` 锁。调用方不得在已持有同一锁时进入
 //! 本模块的 faulting uaccess 路径。
+//! 标量和数组 copy 在每个用户页的 VM 锁内完成权限检查与实际访问，避免 PTE
+//! 翻译完成后被另一 CPU 并发 unmap、降权或 CoW。`UserBuffer` 与字符串翻译尚未
+//! 提供同等保证，调用方不得把其中的物理页切片长期保存或跨地址空间变更使用。
 
 use core::{marker::PhantomData, ops::IndexMut};
 
@@ -592,8 +595,80 @@ fn current_user_vm(token: usize) -> Result<Arc<AddressSpace<PageTableImpl>>, isi
     Ok(task.process.vm())
 }
 
+/// 用户内存复制方向。
+///
+/// 枚举中只保存 kernel raw pointer；用户物理地址必须在持有 VM 锁时重新 fault-in
+/// 并取得，不能跨越 closure 泄漏。
+#[derive(Clone, Copy)]
+enum UserCopy {
+    FromUser { dst: *mut u8 },
+    ToUser { src: *const u8 },
+}
+
+impl UserCopy {
+    fn fault_access(self) -> FaultAccess {
+        match self {
+            Self::FromUser { .. } => FaultAccess::Load,
+            Self::ToUser { .. } => FaultAccess::Store,
+        }
+    }
+
+    /// 在 VM 锁保护的已验证物理页内完成一个 chunk 的复制。
+    ///
+    /// # Safety
+    ///
+    /// `user_ptr` 必须来自当前 closure 内 `fault_in_user_va()` 返回的 PA；枚举中的
+    /// kernel pointer 必须对 `[offset, offset + len)` 保持有效。
+    unsafe fn copy_chunk(self, user_ptr: *mut u8, offset: usize, len: usize) {
+        match self {
+            Self::FromUser { dst } => core::ptr::copy(user_ptr, dst.add(offset), len),
+            Self::ToUser { src } => core::ptr::copy(src.add(offset), user_ptr, len),
+        }
+    }
+}
+
+/// 逐页执行 fault、权限后验检查和复制。
+///
+/// 每个 chunk 的 direct-map 访问都发生在对应 `AddressSpace::write` closure 内，
+/// 因而同一页上的 fork/CoW、mprotect 和 munmap 只能发生在复制之前或之后。跨页
+/// 复制允许并发地址空间修改插入；若后续页失效，调用方收到 `EFAULT`，前页可能已经
+/// 完成复制，这与 faultable uaccess 的部分完成语义一致。
+fn copy_user_bytes(
+    token: usize,
+    user_addr: usize,
+    len: usize,
+    direction: UserCopy,
+) -> Result<(), isize> {
+    if len == 0 {
+        return Ok(());
+    }
+    if len > MAX_BUFFER_SIZE || user_addr == 0 {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    let end = check_user_range(user_addr, len)?;
+    let vm = current_user_vm(token)?;
+    let mut copied = 0usize;
+
+    while copied < len {
+        let va = VirtAddr::from(user_addr + copied);
+        let chunk_len = (crate::config::PAGE_SIZE - va.page_offset()).min(end - va.0);
+        vm.write(|address_space| -> Result<(), isize> {
+            // 必须使用 uaccess 专用入口：它在 fault 后再次核对 U/R/W 权限和物理范围。
+            let pa = address_space.fault_in_user_va(va, direction.fault_access())?;
+            // Safety: VM 锁让 PTE 与 frame 在整个 copy_chunk 期间保持稳定；PA 已由
+            // fault_in_user_va 验证，chunk 也被限制在当前物理页内。
+            unsafe {
+                direction.copy_chunk(pa.direct_map_ptr(), copied, chunk_len);
+            }
+            Ok(())
+        })?;
+        copied += chunk_len;
+    }
+    Ok(())
+}
+
 // 区分用户触发缺页时的权限：copy_from_user 使用 Read，copy_to_user 使用
-// Write，可变引用使用 ReadWrite。这让缺页处理能正确选择 CoW/权限恢复路径。
+// Write；仍需双向权限的旧 buffer 路径使用 ReadWrite。
 fn fault_in_user_va_with_vm(
     vm: &AddressSpace<PageTableImpl>,
     va: VirtAddr,
@@ -774,74 +849,6 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
             .ok_or(crate::syscall::errno::EFAULT)?;
     }
     Ok(string)
-}
-
-/// 获取单页内只读用户对象引用。
-///
-/// # Semantics
-///
-/// 对象必须完整落在同一用户页内；跨页对象返回 `-EFAULT`，调用方应改用
-/// `copy_from_user`。
-pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isize> {
-    let size = core::mem::size_of::<T>();
-    let va = VirtAddr::from(ptr as usize);
-    check_user_range(va.0, size)?;
-    if size > 0 {
-        let last = VirtAddr::from(
-            va.0.checked_add(size - 1)
-                .ok_or(crate::syscall::errno::EFAULT)?,
-        );
-        if va.floor() != last.floor() {
-            return Err(crate::syscall::errno::EFAULT);
-        }
-    }
-    let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
-    Ok(pa.get_ref())
-}
-
-/// 获取单页内可读写用户对象引用。
-///
-/// # Semantics
-///
-/// 对象必须完整落在同一用户页内；跨页对象返回 `-EFAULT`，调用方应改用
-/// `copy_from_user`/`copy_to_user`。
-pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
-    let size = core::mem::size_of::<T>();
-    let va = VirtAddr::from(ptr as usize);
-    check_user_range(va.0, size)?;
-    if size > 0 {
-        let last = VirtAddr::from(
-            va.0.checked_add(size - 1)
-                .ok_or(crate::syscall::errno::EFAULT)?,
-        );
-        if va.floor() != last.floor() {
-            return Err(crate::syscall::errno::EFAULT);
-        }
-    }
-    let pa = translate_user_va_checked(token, va, UserAccess::ReadWrite)?;
-    Ok(pa.get_mut())
-}
-
-/// 获取单页内只写用户对象引用。
-///
-/// # Semantics
-///
-/// 该接口只 fault-in 写权限，不要求源页可读。
-pub fn translated_ref_write<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
-    let size = core::mem::size_of::<T>();
-    let va = VirtAddr::from(ptr as usize);
-    check_user_range(va.0, size)?;
-    if size > 0 {
-        let last = VirtAddr::from(
-            va.0.checked_add(size - 1)
-                .ok_or(crate::syscall::errno::EFAULT)?,
-        );
-        if va.floor() != last.floor() {
-            return Err(crate::syscall::errno::EFAULT);
-        }
-    }
-    let pa = translate_user_va_checked(token, va, UserAccess::Write)?;
-    Ok(pa.get_mut())
 }
 
 // 用户缓冲区可能跨页；这里保留分段形式，避免把大用户缓冲区复制到连续内核内存。
@@ -1251,44 +1258,6 @@ pub fn translate_single_page_user_bytes(
     ))
 }
 
-fn copy_single_page_from_user(
-    token: usize,
-    src: *const u8,
-    dst: *mut u8,
-    len: usize,
-) -> Result<bool, isize> {
-    if let Some(user_bytes) = translate_single_page_user_bytes(token, src, len, UserAccess::Read)? {
-        // Safety: `user_bytes` is valid for `len` bytes after translation, and
-        // callers of copy_from_user provide a writable kernel `dst`.
-        unsafe {
-            core::ptr::copy_nonoverlapping(user_bytes.as_ptr(), dst, len);
-        }
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-fn copy_single_page_to_user(
-    token: usize,
-    src: *const u8,
-    dst: *mut u8,
-    len: usize,
-) -> Result<bool, isize> {
-    if let Some(user_bytes) =
-        translate_single_page_user_bytes(token, dst as *const u8, len, UserAccess::Write)?
-    {
-        // Safety: `user_bytes` is valid writable user memory for `len` bytes,
-        // and callers of copy_to_user provide a readable kernel `src`.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, user_bytes.as_mut_ptr(), len);
-        }
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
 /// Copy `*src: T` to kernel space.
 /// `src` is a pointer in user space, `dst` is a pointer in kernel space.
 ///
@@ -1305,19 +1274,14 @@ pub fn copy_from_user<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
-    if copy_single_page_from_user(token, src as *const u8, dst as *mut u8, size)? {
-        return Ok(());
-    }
-    UserBuffer::new(translated_byte_buffer(
+    copy_user_bytes(
         token,
-        src as *const u8,
+        src as usize,
         size,
-        UserAccess::Read,
-    )?)
-    // Safety: the caller-provided kernel `dst` is valid for `size` bytes by the
-    // function contract; `UserBuffer::read` writes at most that many bytes.
-    .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
-    Ok(())
+        UserCopy::FromUser {
+            dst: dst as *mut u8,
+        },
+    )
 }
 
 /// Copy array `*src: [T;len]` to kernel space.
@@ -1338,19 +1302,14 @@ pub fn copy_from_user_array<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
-    if copy_single_page_from_user(token, src as *const u8, dst as *mut u8, size)? {
-        return Ok(());
-    }
-    UserBuffer::new(translated_byte_buffer(
+    copy_user_bytes(
         token,
-        src as *const u8,
+        src as usize,
         size,
-        UserAccess::Read,
-    )?)
-    // Safety: the caller-provided kernel `dst` is valid for `size` bytes by the
-    // function contract; `UserBuffer::read` writes at most that many bytes.
-    .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
-    Ok(())
+        UserCopy::FromUser {
+            dst: dst as *mut u8,
+        },
+    )
 }
 
 /// Copy `*src: T` to user space.
@@ -1369,19 +1328,14 @@ pub fn copy_to_user<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
-    if copy_single_page_to_user(token, src as *const u8, dst as *mut u8, size)? {
-        return Ok(());
-    }
-    UserBuffer::new(translated_byte_buffer(
+    copy_user_bytes(
         token,
-        dst as *const u8,
+        dst as usize,
         size,
-        UserAccess::Write,
-    )?)
-    // Safety: the caller-provided kernel `src` is valid for `size` bytes by the
-    // function contract; `UserBuffer::write` reads at most that many bytes.
-    .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
-    Ok(())
+        UserCopy::ToUser {
+            src: src as *const u8,
+        },
+    )
 }
 
 /// Copy `*src: T` to kernel space.
@@ -1428,19 +1382,14 @@ pub fn copy_to_user_array<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
-    if copy_single_page_to_user(token, src as *const u8, dst as *mut u8, size)? {
-        return Ok(());
-    }
-    UserBuffer::new(translated_byte_buffer(
+    copy_user_bytes(
         token,
-        dst as *const u8,
+        dst as usize,
         size,
-        UserAccess::Write,
-    )?)
-    // Safety: the caller-provided kernel `src` is valid for `size` bytes by the
-    // function contract; `UserBuffer::write` reads at most that many bytes.
-    .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
-    Ok(())
+        UserCopy::ToUser {
+            src: src as *const u8,
+        },
+    )
 }
 
 /// Automatically add `'\0'` in the end,
@@ -1452,22 +1401,11 @@ pub fn copy_to_user_string(token: usize, src: &str, dst: *mut u8) -> Result<(), 
         .len()
         .checked_add(1)
         .ok_or(crate::syscall::errno::EFAULT)?;
-    if let Some(user_bytes) =
-        translate_single_page_user_bytes(token, dst as *const u8, size, UserAccess::Write)?
-    {
-        user_bytes[..src.len()].copy_from_slice(src.as_bytes());
-        user_bytes[src.len()] = 0;
-        return Ok(());
+    if size > MAX_BUFFER_SIZE {
+        return Err(crate::syscall::errno::EFAULT);
     }
-    let mut user_buf = UserBuffer::new(translated_byte_buffer(
-        token,
-        dst as *const u8,
-        size,
-        UserAccess::Write,
-    )?);
-    // Safety: `src.as_ptr()` is valid for `src.len()` bytes for the lifetime of
-    // this call.
-    user_buf.write(unsafe { core::slice::from_raw_parts(src.as_ptr(), src.len()) });
-    user_buf.write_at(src.len(), b"\0");
-    Ok(())
+    copy_to_user_array(token, src.as_ptr(), dst, src.len())?;
+    let nul = 0u8;
+    // Safety: `size = src.len() + 1` 已检查溢出，因此末尾地址计算不会回绕。
+    copy_to_user(token, &nul, unsafe { dst.add(src.len()) })
 }

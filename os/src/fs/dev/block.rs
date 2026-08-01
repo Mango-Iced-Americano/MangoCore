@@ -184,33 +184,27 @@ impl IndexNode for BlockDevInode {
         &self,
         cmd: u32,
         data: usize,
-        _private_data: MutexGuard<FilePrivateData>,
+        private_data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        // 块设备 ioctl 不读取 file-private 状态；faultable uaccess 前先释放普通锁。
+        drop(private_data);
         match cmd {
             BLKGETSIZE64 => {
                 let size = self.inner.size_bytes().ok_or(SyscallErr::ENOTTY)?;
                 let token = crate::task::current_task()
                     .ok_or(SyscallErr::ENOTTY)?
                     .get_user_token();
-                match crate::mm::translated_refmut(token, data as *mut u64) {
-                    Ok(r) => {
-                        *r = size;
-                        Ok(0)
-                    }
-                    Err(_) => Err(SyscallErr::EFAULT),
-                }
+                crate::mm::copy_to_user(token, &size, data as *mut u64)
+                    .map(|_| 0)
+                    .map_err(|_| SyscallErr::EFAULT)
             }
             BLKSSZGET => {
                 let token = crate::task::current_task()
                     .ok_or(SyscallErr::ENOTTY)?
                     .get_user_token();
-                match crate::mm::translated_refmut(token, data as *mut i32) {
-                    Ok(r) => {
-                        *r = DEV_LOGICAL_SECTOR_SIZE;
-                        Ok(0)
-                    }
-                    Err(_) => Err(SyscallErr::EFAULT),
-                }
+                crate::mm::copy_to_user(token, &DEV_LOGICAL_SECTOR_SIZE, data as *mut i32)
+                    .map(|_| 0)
+                    .map_err(|_| SyscallErr::EFAULT)
             }
             _ => Err(SyscallErr::ENOTTY),
         }

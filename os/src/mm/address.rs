@@ -222,6 +222,15 @@ impl PhysAddr {
         self.0 | MEMORY_HIGH_BASE
     }
 
+    /// 返回该物理地址在内核直映区中的 raw byte pointer。
+    ///
+    /// 创建 raw pointer 本身不会建立 Rust 引用的独占性假设；解引用前，调用方仍须
+    /// 证明物理范围有效，并用所属子系统的锁或其它同步协议保护实际访问。
+    #[inline(always)]
+    pub(crate) fn direct_map_ptr(&self) -> *mut u8 {
+        self.direct_map_addr() as *mut u8
+    }
+
     /// 通过内核直映区获取 `T` 的共享引用。
     ///
     /// # Safety

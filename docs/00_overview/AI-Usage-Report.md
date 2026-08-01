@@ -77,6 +77,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP 精确 active MM 驻留 | 2026-08-01 | GPT/Codex, DeepSeek | writer/enter/leave 竞态、调度切离屏障、generation 追赶与双架构冻结验证 | 历史 cached mask 收紧为精确 active mask；双架构 KREPEAT=2 focused 65/65，初赛失败集合不变 |
 | SMP 有界连续 TLB shootdown | 2026-08-01 | GPT/Codex, DeepSeek | SBI/INVTLB 官方语义、固定区间槽并发审查、双架构 8 核 focused 与初赛门禁 | 不增加提交层；最多 64 页精准失效，65 页回退全刷并保持 ack 前 frame 不释放；双架构 focused 33/33 |
 | SMP 真实用户访存 stale-TLB 证明 | 2026-08-01 | GPT/Codex, DeepSeek | 用户汇编 victim、真实 CoW PPN 替换、handler observed/ack 时序与假阳性排除 | 双架构 8 核 KREPEAT=2 均 67/67；精准 handler 在 ack 前推进 generation，不再由 trap-return 偶然全刷掩盖 |
+| SMP fixed-size uaccess 映射同步 | 2026-08-01 | GPT/Codex, DeepSeek | Rust alias 规则、Linux uaccess/pinning 语义、translate/use 竞态和锁序审查 | 删除 `translated_ref*`；标量/数组 copy 在逐页 VM 锁内完成，双架构 focused 34/34，初赛失败集合不变 |
 
 ## 4. 详细使用场景
 
@@ -1089,6 +1090,32 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 KTEST=smp` 均 34/34、`online_mask=0xff`，两个 child 均 exit 0、无 mutation、
   panic、fatal 或 timeout。持 allocator 锁主动 panic 未注入生产 hook，明确记为 NOT RUN。
 
+### Case 46: SMP fixed-size uaccess 映射同步
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、
+  `docs/Work_Log/evidence/2026-08-01/smp-b57-uaccess-copy-summary.md`；DeepSeek 的设计审查、
+  失败尝试、manifest 与原始 Docker/QEMU 日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 对照 Rust Reference 的引用 alias 约束、Linux Rust `UserSlice` 和
+  `pin_user_pages` 文档，确定映射同步与 Rust 引用是两个独立问题并实现最终方案；DeepSeek
+  只读审查 translate/unlock/use 竞态和 B57/B58 边界，再通过受限 Docker 网关运行门禁。
+- Problem: 旧 `translated_ref*` 与 scalar copy fast path 在 VM 锁外返回或使用
+  `&'static mut` 物理页视图。另一 CPU 可在翻译与使用之间 fork/CoW、`mprotect` 或
+  `munmap`；保留 frame 引用只能延长物理页寿命，不能维持原 VA→PPN 与权限关系。
+- Implemented change: 删除三个 `translated_ref*` API 和旧单页 copy fallback；固定对象/数组
+  统一逐页取得 VM 锁，在同一 closure 内执行 fault、权限后验检查和 raw direct-map copy，
+  解锁后才执行可能产生的 TLB flush。ioctl 在 faultable copy 前释放 fd table 与无关的
+  file-private guard；跨页后续失败保留明确的部分完成语义。
+- AI adjudication: 拒绝“仅 pin frame 即可”的建议，也没有把 copy helper 塞进地址空间模块；
+  `address.rs` 只提供不声明引用独占性的 raw direct-map primitive。DeepSeek 最终报告错误地把
+  初赛描述成全部通过，GPT/Codex 从原始 judge JSON 纠正为 RV64 312/314、LA64 308/314。
+  一次 LA64 focused 33/34 在同指纹复跑时未复现，只登记为 TLB timer-isolation 敏感点，
+  不宣称由 B57 修复。
+- Verification: 冻结 source diff SHA-256 为
+  `e2d2c106b4ab176646811116b67b01102c1ba5cde08cf21acbcfef151d6830f4`；RV64/LA64
+  `CORE_NUM=8 KTEST=smp` 均 34/34。初赛仍为 RV64 312/314、LA64 308/314，精确失败集合
+  不变；四项采纳证据均 exit 0、无 mutation、panic、fatal 或 timeout。并发 fork/munmap 与
+  fixed copy 的定向动态竞态为 NOT RUN；`UserBuffer`/字符串锁外物理视图明确留给 B58。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1177,6 +1204,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b54-mm-single-core-assumptions-summary.md` | SMP MM/HAL 单核安全假设收口 | 记录 LA dirty 原子位图、slab 最小 Send 证明、静态状态审计边界与 DeepSeek 双架构 8 核门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b55-console-summary.md` | SMP console 串行化与 panic raw fallback | 记录 irq-save 全局叶子锁、LA64 UART ready 修复、panic 无锁分支及 RV64 raw/semantic 双账本裁决 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b56-panic-diagnostics-summary.md` | SMP panic 诊断传递锁收口 | 记录 allocator `try_*` 降级、逐 CPU 原子/active-MM 快照、模型建议裁决及双架构 8 核门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b57-uaccess-copy-summary.md` | SMP fixed-size uaccess 映射同步 | 记录 translate/use 竞态、VM 锁内 raw copy、危险引用删除、模型初赛误报纠正及双架构 8 核门禁 |
 
 ## 9. 交互记录与留痕方式
 

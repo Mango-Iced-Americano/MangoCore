@@ -159,7 +159,10 @@ let veth_iface: &VethInterface =
 
 ### 用户指针访问
 
-使用 `translated_ref`、`copy_from_user`、`translated_byte_buffer` 等函数时，如果操作涉及跨页访问或不安全假设，应注释说明边界检查的方式。这些函数本身已包含安全检查（`check_user_range`、缺页处理），调用方仅在打破常规使用模式时需要注释。
+使用 `copy_from/to_user`、`UserPtr`、`translated_byte_buffer` 等接口时，如果操作涉及跨页访问
+或不安全假设，应注释说明边界检查与部分完成语义。固定对象 copy 已在逐页 VM 锁内完成
+fault、权限检查和实际访问；`UserBuffer`/`translated_byte_buffer` 仍是待收口的锁外物理页
+视图，调用方不能用“已经翻译”替代生命周期和并发映射证明。
 
 ### 内联汇编
 
@@ -439,5 +442,4 @@ PR 审查时，注释相关的检查项如下：
 2. **需改写的**：口语化注释、无退出条件的 TODO → 按本标准格式改写
 3. **需补充的**：缺少 Safety/Locking/Linux Compatibility 说明的关键函数 → 按本标准补充
 4. **需跟踪的**：短期内无法清理的 TODO → 在 `docs/Work_Log.md` 或 issue 中登记跟踪
-
 

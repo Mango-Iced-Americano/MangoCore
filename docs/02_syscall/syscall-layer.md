@@ -108,15 +108,17 @@ MangoCore 的 syscall 层由架构 trap 后端、`syscall/mod.rs` 扁平分发�
 
 | API | 语义 |
 |-----|------|
-| `translated_ref` | 翻译一个只读用户对象，不允许跨页 |
-| `translated_refmut` | 翻译一个可写用户对象，不允许跨页 |
+| `copy_from_user` / `get_from_user` | 在当前 MM 的逐页写锁内校验并读取固定对象/数组 |
+| `copy_to_user` | 在当前 MM 的逐页写锁内处理 CoW、校验并写入固定对象/数组 |
 | `translated_str` | 读取 NUL 结尾字符串，扫描上限 8 MiB |
-| `translated_byte_buffer` | 将用户 buffer 切成内核可访问片段 |
+| `translated_byte_buffer` | 将用户 buffer 切成内核可访问片段；尚待消除可逃逸物理页切片 |
 | `UserPtr` / `UserPtrMut` | 用户指针包装 |
 | `UserIoVec` | iovec 读取，数量上限 1024 |
 | `fault_in_user_va` | 缺页并校验页表权限 |
 
 `check_user_range()` 只做范围和溢出检查；是否可读写由 fault-in 和页表权限决定。
+固定对象 copy 的实际内存访问必须和 fault-in 位于同一次 VM 锁持有期；syscall 不得在持有
+fd table、task inner 或其它普通业务锁时进入可能 fault 的 uaccess。
 
 ### 4.4 seccomp action
 

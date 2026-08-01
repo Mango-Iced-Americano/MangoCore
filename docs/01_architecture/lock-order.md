@@ -114,6 +114,30 @@ panic 中“读取统计”同样可能隐藏阻塞锁。B56 将 allocator 诊�
 因此 panic 调用链不得新增普通 `.lock()`/`.read()`，也不得为了补齐 IRQ/preempt 等尚未
 建立的不变量而增加仅服务诊断的热路径状态。
 
+#### B57 固定大小 uaccess 边界
+
+固定对象和数组 copy 会 fault，并取得当前地址空间的 VM 写锁。B57 固定以下顺序：
+
+```text
+释放 fd table / task.inner / file-private 等普通锁
+  -> AddressSpace VM lock
+       -> fault-in + PTE 权限后验检查
+       -> direct-map raw pointer copy
+  -> 释放 VM lock
+  -> 如有 PTE 修改，在锁外执行 TLB flush / 远端 ack
+```
+
+- 用户 PA 与 raw pointer 只能在同一个 `AddressSpace::write` closure 内取得并使用；
+- 不得从 fixed-size helper 返回 `&'static T`、`&'static mut T` 或保存物理页切片；
+- 跨页 copy 每页独立持锁，允许部分完成，不能要求 VM 锁跨越整个大数组；
+- `sys_ioctl()` 先从 fd table 克隆 file `Arc`，再释放 table；块设备 ioctl 也在 uaccess 前
+  释放不参与操作的 file-private guard。
+
+该约束尚未覆盖 `UserBuffer`、`translated_byte_buffer()` 与 `translated_str()`；它们的
+可逃逸物理页视图必须在后续节点单独重构。B57 只迁移了本次删除 API 的 ioctl 调用点，
+SysV IPC 等既有 fixed-copy 调用链是否跨 registry 锁仍须在 B58/共享子系统审计中逐项处理；
+不能把 helper 内部映射安全外推为所有调用方锁序均已合格。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护

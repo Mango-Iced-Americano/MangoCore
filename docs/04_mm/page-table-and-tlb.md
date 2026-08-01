@@ -67,7 +67,7 @@ trait 的存在把 VMA 管理、缺页策略和具体 PTE 编码解耦。
 |------|------|
 | `Read` | 读用户内存 |
 | `Write` | 写用户内存 |
-| `ReadWrite` | 需要同一对象可读可写，如 `translated_refmut` |
+| `ReadWrite` | 旧 buffer 翻译中需要同时验证读写权限的兼容模式 |
 
 `uaccess.rs` 会把 `UserAccess::Read` 转成 `FaultAccess::Load`，把 `UserAccess::Write` 转成 `FaultAccess::Store`。`ReadWrite` 会先 fault-in load，再 fault-in store。
 
