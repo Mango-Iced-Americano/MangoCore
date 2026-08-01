@@ -3,6 +3,7 @@
 //! 提供 timer、console、shutdown 和本地中断开关等机器环境接口。
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use riscv::register::sstatus;
 
 const SBI_SET_TIMER: usize = 0;
@@ -15,6 +16,10 @@ const SBI_REMOTE_SFENCE_VMA: usize = 6;
 const SBI_REMOTE_SFENCE_VMA_ASID: usize = 7;
 const SBI_SHUTDOWN: usize = 8;
 const SBI_SRST: usize = 0x5352_5354;
+
+static CONSOLE_BASE: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_SIZE: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_REGISTER_SHIFT: AtomicUsize = AtomicUsize::new(0);
 
 #[inline(always)]
 /// `ecall` wrapper to switch trap into S level.
@@ -46,42 +51,36 @@ pub fn console_putchar(c: usize) {
     sbi_call(SBI_CONSOLE_PUTCHAR, c, 0, 0);
 }
 
-/// VF2 JH7110 DW APB UART: 32-bit wide registers at shifted (×4) offsets.
-///
-/// MMIO addresses (physical, fixed in VF2 memory map):
-/// - RBR (read):   0x1000_0000  — receive buffer register, low byte holds data
-/// - LSR (read):   0x1000_0014 — line status register, bit 0 = Data Ready (DR)
-///
-/// Safety: these addresses are fixed per the JH7110 datasheet and are
-/// mapped as strongly-ordered device memory by OpenSBI. Only the low u8
-/// of RBR is consumed after DR is confirmed set. No read from RBR without
-/// DR guard.
-#[cfg(feature = "board_vf2")]
-fn vf2_console_getchar() -> usize {
-    // Safety: fixed VF2 UART MMIO at 0x1000_0000; volatile, device-memory semantics.
-    unsafe {
-        const LSR_ADDR: *const u32 = 0x1000_0014 as *const u32;
-        const RBR_ADDR: *const u32 = 0x1000_0000 as *const u32;
-        const DR: u32 = 0x01;
-
-        let lsr = core::ptr::read_volatile(LSR_ADDR);
-        if lsr & DR == 0 {
-            return !0; // usize::MAX — no data available
-        }
-        let rbr = core::ptr::read_volatile(RBR_ADDR);
-        (rbr & 0xFF) as usize
-    }
+/// Publish the serial console that the FDT selected after its MMIO range is mapped.
+pub fn configure_runtime_console() {
+    let Some(console) = crate::hal::platform::platform_info().console else {
+        return;
+    };
+    CONSOLE_REGISTER_SHIFT.store(console.register_shift, Ordering::Release);
+    CONSOLE_SIZE.store(console.range.size, Ordering::Release);
+    CONSOLE_BASE.store(console.range.base, Ordering::Release);
 }
 
 pub fn console_getchar() -> usize {
-    #[cfg(feature = "board_vf2")]
-    {
-        vf2_console_getchar()
+    let base = CONSOLE_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0);
     }
-    #[cfg(not(feature = "board_vf2"))]
-    {
-        sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0)
+    let shift = CONSOLE_REGISTER_SHIFT.load(Ordering::Acquire);
+    let size = CONSOLE_SIZE.load(Ordering::Acquire);
+    let lsr_offset = 5usize << shift;
+    if size <= lsr_offset {
+        return usize::MAX;
     }
+    // SAFETY: FDT validation recorded an enabled serial `reg` range, KernelSpace
+    // identity-mapped that range, and the checked offsets stay inside it.
+    let status = unsafe { core::ptr::read_volatile((base + lsr_offset) as *const u8) };
+    if status & 1 == 0 {
+        return usize::MAX;
+    }
+    // SAFETY: the data register is at offset zero of the same validated range;
+    // the line-status read above established that a byte is available.
+    unsafe { core::ptr::read_volatile(base as *const u8) as usize }
 }
 
 pub fn console_flush() {}
@@ -102,42 +101,32 @@ pub fn local_irq_restore(was_enabled: bool) {
     }
 }
 
-/// Write a byte slice to the console, batching for efficiency.
-///
-/// On rvqemu (feature `board_rvqemu`): writes directly to NS16550A UART MMIO
-/// at `0x1000_0000`, using THRE handshake and batching up to 16 bytes per
-/// FIFO drain round. This bypasses SBI ecall overhead (~3μs per call).
-///
-/// On other riscv platforms: per-character fallback via [`console_putchar`].
 pub fn console_write_bytes(data: &[u8]) {
-    #[cfg(feature = "board_rvqemu")]
-    {
-        // NS16550A UART at fixed QEMU virt MMIO base
-        const UART_BASE: usize = 0x1000_0000;
-        const THR: usize = 0x0;   // Transmit Holding Register
-        const LSR: usize = 0x5;   // Line Status Register
-        const THRE: u8 = 1 << 5;  // Transmitter Holding Register Empty
-
-        for chunk in data.chunks(16) {
-            for &byte in chunk {
-                // Wait until THR is empty (previous char transmitted / FIFO drained)
-                loop {
-                    // Safety: UART_BASE is a known-good MMIO region on QEMU virt.
-                    let lsr = unsafe { core::ptr::read_volatile((UART_BASE + LSR) as *const u8) };
-                    if lsr & THRE != 0 {
-                        break;
-                    }
-                }
-                // Safety: same UART MMIO region, write-only.
-                unsafe { core::ptr::write_volatile((UART_BASE + THR) as *mut u8, byte) };
-            }
-        }
-    }
-    #[cfg(not(feature = "board_rvqemu"))]
-    {
+    let base = CONSOLE_BASE.load(Ordering::Acquire);
+    if base == 0 {
         for &b in data {
             console_putchar(b as usize);
         }
+        return;
+    }
+    let shift = CONSOLE_REGISTER_SHIFT.load(Ordering::Acquire);
+    let size = CONSOLE_SIZE.load(Ordering::Acquire);
+    let lsr_offset = 5usize << shift;
+    if size <= lsr_offset {
+        return;
+    }
+    for &byte in data {
+        loop {
+            // SAFETY: FDT validation recorded an enabled serial `reg` range,
+            // KernelSpace identity-mapped it, and the LSR offset is in bounds.
+            let status = unsafe { core::ptr::read_volatile((base + lsr_offset) as *const u8) };
+            if status & (1 << 5) != 0 {
+                break;
+            }
+        }
+        // SAFETY: offset zero is the transmit register in the validated serial
+        // range and the THRE handshake above permits the volatile write.
+        unsafe { core::ptr::write_volatile(base as *mut u8, byte) };
     }
 }
 

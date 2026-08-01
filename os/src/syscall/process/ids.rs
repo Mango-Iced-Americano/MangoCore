@@ -1737,7 +1737,7 @@ pub fn sys_sysinfo(info: *mut Sysinfo) -> isize {
                 procs as usize * LINUX_SYSINFO_LOADS_SCALE / SEC_5_MIN,
                 procs as usize * LINUX_SYSINFO_LOADS_SCALE / SEC_15_MIN,
             ],
-            totalram: crate::config::USABLE_MEMORY_SIZE,
+        totalram: crate::hal::firmware::usable_memory_size(),
             freeram: crate::mm::unallocated_frames() * PAGE_SIZE,
             sharedram: UNIMPLEMENT,
             bufferram: UNIMPLEMENT,

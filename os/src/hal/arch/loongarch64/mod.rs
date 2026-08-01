@@ -3,10 +3,10 @@
 //! 汇总平台配置、CSR 寄存器包装、LAFlex 页表、trap、SBI 兼容层、时间源和上下文切换。
 
 // 平台常量不可混用，尤其是 QEMU 与 2K1000 使用不同的 UART 地址和 MMIO 访问路径。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 #[path = "../../platform/loongarch64/qemu.rs"]
 pub mod board;
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 #[path = "../../platform/loongarch64/2k1000.rs"]
 pub mod board;
 pub mod config;
@@ -16,7 +16,7 @@ mod mem_reg_macro;
 mod acpi;
 // boot.rs 定义 QEMU 的 `_start`。实板必须从 U-Boot 继承的 DMW 地址环境切换出去，
 // 因而使用 entry.asm。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 mod boot;
 mod sbi;
 pub mod switch;
@@ -138,7 +138,7 @@ pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
     get_timer_freq_first_time();
-    #[cfg(any(not(feature = "board_2k1000"), feature = "board_bringup_trace"))]
+    #[cfg(any(feature = "boot_la_qemu", feature = "bringup_trace"))]
     {
         let cfg1 = CPUCfg1::read();
         boot_trace!(

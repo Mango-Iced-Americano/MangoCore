@@ -50,7 +50,7 @@ pub use frame_store::Frame;
 pub use heap_allocator::{
     heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES,
 };
-pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
+pub use kernel_space::{kernel_program_base, kernel_token, KernelSpace, KERNEL_SPACE};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
 pub use sysctl::{
     commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count, min_free_kbytes,

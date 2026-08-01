@@ -95,7 +95,7 @@ if [ "$2" = "laqemu" ]; then
     cp ./busybox-la ${U_FS_DIR}/fs/bin/busybox
 fi
 
-if [ "$2" = "rvqemu" ]; then
+if [ "$2" = "rv64" ]; then
     cp ./bash-rv ${U_FS_DIR}/fs/bin/bash
     cp ./busybox-rv ${U_FS_DIR}/fs/bin/busybox
     cp ../1.txt ${U_FS_DIR}/fs/ 2>/dev/null || true

@@ -1,14 +1,13 @@
 //! Platform abstraction layer.
 //!
 //! Defines the owned `PlatformInfo` model that the kernel consumes
-//! after firmware handoff, plus the `PlatformPolicy` trait for
-//! board-specific configuration.
+//! after firmware handoff and the boot-profile defaults that remain
+//! meaningful without a device description.
 
 use core::cell::UnsafeCell;
 
 pub mod info;
-mod fallback;
-pub use info::{DeviceInfo, DeviceKind, FirmwareKind, PlatformInfo};
+pub use info::{ConsoleInfo, DeviceInfo, DeviceKind, FirmwareKind, PlatformInfo};
 
 /// Global platform information singleton.
 ///
@@ -27,15 +26,19 @@ static PLATFORM_INFO: PlatformInfoCell = PlatformInfoCell(UnsafeCell::new(None))
 
 /// Initialize the platform information singleton.
 ///
-/// Called once after `mm::init()`. Tries FDT first, falls back to static.
+/// Called once after `mm::init()`.
 ///
 /// # Panics
 ///
 /// Panics if called more than once.
 pub fn init_platform_info() {
-    let boot_info = crate::hal::boot::boot_info();
-    let platform_info = crate::hal::firmware::build_platform_info(boot_info.dtb_paddr)
-        .unwrap_or_else(PlatformInfo::from_static);
+    let platform_info = match crate::hal::firmware::build_platform_info() {
+        Some(platform_info) => platform_info,
+        #[cfg(not(target_arch = "riscv64"))]
+        None => PlatformInfo::from_static(),
+        #[cfg(target_arch = "riscv64")]
+        None => panic!("RV64 boot requires a retained valid FDT platform description"),
+    };
 
     // SAFETY: [Categories 1 and 2 — aliasing and data races] This is the only
     // mutable access, performed during single-threaded boot before any reader
@@ -78,68 +81,7 @@ pub fn platform_cmdline() -> Option<&'static str> {
     }
 }
 
-/// Platform-specific configuration provided by the compile-time selected policy.
-///
-/// Each platform (QEMU RV64, QEMU LA64, VisionFive 2, etc.) provides its own
-/// implementation. The kernel boot sequence reads these values — it is NOT
-/// delegated to the policy.
-pub trait PlatformPolicy {
-    /// Human-readable platform name.
-    fn name(&self) -> &'static str;
-
-    /// Default path to the user-space init binary.
-    ///
-    /// The kernel tries `/init` first, then falls back to this path.
-    /// QEMU platforms default to `/initproc`; VF2 may use a board-specific init.
-    fn init_path(&self) -> &'static str {
-        "/initproc"
-    }
-
-    /// Default root device path (e.g. `/dev/vda`, `/dev/mmcblk0`).
-    ///
-    /// Used as the default when bootargs does not specify `root=` or `mango.root=`.
-    fn default_root_device(&self) -> &'static str {
-        "/dev/vda"
-    }
+/// Default path to the user-space init binary when `/init` is absent.
+pub const fn default_init_path() -> &'static str {
+    "/initproc"
 }
-
-/// Return the compile-time selected platform policy.
-///
-/// Feature flags determine which implementation is returned.
-pub fn select_policy() -> &'static dyn PlatformPolicy {
-    #[cfg(feature = "board_rvqemu")]
-    {
-        return &qemu_riscv::QemuRiscvPolicy;
-    }
-    #[cfg(feature = "board_vf2")]
-    {
-        return &vf2::VisionFive2Policy;
-    }
-    #[cfg(feature = "board_laqemu")]
-    {
-        return &qemu_la::QemuLaPolicy;
-    }
-    #[cfg(feature = "board_2k1000")]
-    {
-        return &qemu_la::QemuLaPolicy;
-    }
-    #[cfg(not(any(
-        feature = "board_rvqemu",
-        feature = "board_vf2",
-        feature = "board_laqemu",
-        feature = "board_2k1000",
-    )))]
-    {
-        compile_error!("no platform board feature selected");
-    }
-}
-
-// Sub-modules for each platform policy.
-#[cfg(feature = "board_rvqemu")]
-mod qemu_riscv;
-#[cfg(feature = "board_vf2")]
-mod vf2;
-#[cfg(feature = "board_laqemu")]
-mod qemu_la;
-#[cfg(feature = "board_2k1000")]
-mod qemu_la;

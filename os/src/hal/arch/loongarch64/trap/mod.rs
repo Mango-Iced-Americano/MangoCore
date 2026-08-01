@@ -27,7 +27,7 @@ use crate::task::{
 use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
-#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+#[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TRAP_RETURN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -447,15 +447,15 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     let trace_first_return =
         !BOARD_FIRST_TRAP_RETURN.swap(true, core::sync::atomic::Ordering::Relaxed);
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:01] first task reached trap_return");
     }
     let task = do_signal();
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:02] initial signal check complete");
     }
@@ -478,7 +478,7 @@ pub fn trap_return() -> ! {
     // On LA64, `strampoline` resolves to the kernel-trap stub under the
     // static link. `__restore` is already in the direct-map executable range.
     let restore_va = __restore as usize;
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!(
             "[bringup][user:03] entering PLV3: pc={:#x} sp={:#x} trap_cx={:#x} token={:#x} asid={} restore={:#x}",

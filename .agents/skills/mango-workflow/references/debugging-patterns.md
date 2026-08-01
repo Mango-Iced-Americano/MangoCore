@@ -50,6 +50,14 @@
 - **教训**: 任何在堆分配器就绪前（即 post-heap FDT 枚举前）需要访问的 MMIO 外设，其地址范围必须显式加入编译期 identity MMIO 映射表。仅依赖 FDT/PlatformInfo 动态映射的地址在早期启动阶段不可访问。此类问题表现为早期 boot 路径中的 `StorePageFault` 而非设备探测失败。
 - **相关文件**: `os/src/hal/platform/riscv/vf2.rs`、`os/src/mm/kernel_space.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
 
+### PCI host 的 `ranges` 与 `reg` 必须在预堆阶段同时映射
+
+- **现象**: RV64 用 `BLK_MODE=virt_pci` 启动时，PCI config access 或 VirtIO BAR access 触发 page fault；仅把固定 ECAM 地址加到板级 MMIO 常量会使 QEMU 特例可用，但仍无法适配 FDT 描述的不同 host。
+- **根因**: PCI host 的 `reg` 描述 ECAM，而可分配的 BAR memory window 在 `ranges`。若 pre-heap parser 只收集节点 `reg`，`PlatformInfo` 虽能在 post-heap 解析出 PCI host，驱动实际访问 BAR 时仍没有内核页表映射。
+- **修复**: pre-heap 解析 `pci-host-ecam-generic`/`pci-host-cam-generic` 的 `ranges`，只接受 memory space 的完整固定长度 entry，并验证非零长度、地址转换和加法不溢出后写入 early MMIO buffer；post-heap 再由同一 FDT 数据构造驱动用的 `PciHost`。缺失或畸形 host 才允许显式 warning fallback，不能用固定 QEMU 地址替代有效 FDT。
+- **教训**: FDT 资源的“发现”和“可访问”是两个阶段的契约。任何在 post-heap discovery 后立即被驱动解引用的总线资源，都必须在内核页表建立前从 FDT 的全部资源属性（而非只 `reg`）获得映射。
+- **相关文件**: `os/src/hal/firmware/fdt.rs`、`os/src/hal/platform/info.rs`、`os/src/drivers/block/virtio_blk_pci.rs`
+
 ## 内存问题
 
 ### 物理地址异常（如 0xb0000000）

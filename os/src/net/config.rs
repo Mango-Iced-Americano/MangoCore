@@ -414,7 +414,7 @@ impl<'a> NetInterfaceInner<'a> {
             let mut runtime_dhcp_handle = None;
 
             #[cfg(all(
-                feature = "board_2k1000",
+                feature = "boot_la_uboot_dmw",
                 feature = "gmac_2k1000",
                 not(feature = "gmac_dhcp")
             ))]
@@ -425,7 +425,7 @@ impl<'a> NetInterfaceInner<'a> {
                 println!("[net] eth0 static address 192.168.9.20/24");
             }
 
-            #[cfg(all(feature = "board_2k1000", feature = "gmac_dhcp"))]
+            #[cfg(all(feature = "boot_la_uboot_dmw", feature = "gmac_dhcp"))]
             if has_real_nic {
                 let mut dhcp_socket = dhcpv4::Socket::new();
                 dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
@@ -439,7 +439,7 @@ impl<'a> NetInterfaceInner<'a> {
                 println!("[net] eth0 DHCP client started");
             }
 
-            #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
+            #[cfg(not(all(feature = "boot_la_uboot_dmw", feature = "gmac_2k1000")))]
             if has_real_nic {
                 // DHCP probe
                 let mut dhcp_socket = dhcpv4::Socket::new();

@@ -31,10 +31,8 @@ use spin::Mutex;
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
 const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
-#[cfg(feature = "board_vf2")]
-const BOARD_VF2_CONSOLE_DRAIN_BUDGET: usize = 32;
 
-#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+#[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -138,38 +136,12 @@ pub fn run_tasks() {
         // 2. Other input → stash, then feed the TTY line discipline.  The
         //    production path owns both task and epoll readiness notification.
         //
-        // On non-VF2 rv64 console access goes through SBI ecall (expensive),
-        // so throttle to every 64th loop.  VF2 uses direct UART MMIO and
-        // must poll every loop to prevent FIFO overflow before the first
-        // poll.  Non-RV64 (LA64) also polls every loop.
-        #[cfg(all(target_arch = "riscv64", not(feature = "board_vf2")))]
+        #[cfg(target_arch = "riscv64")]
         let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
-        #[cfg(any(not(target_arch = "riscv64"), feature = "board_vf2"))]
+        #[cfg(not(target_arch = "riscv64"))]
         let should_poll_console = true;
         if should_poll_console {
             let stage_t0 = sched_profile_start(sched_profile);
-            #[cfg(feature = "board_vf2")]
-            {
-                let mut stashed = false;
-                for _ in 0..BOARD_VF2_CONSOLE_DRAIN_BUDGET {
-                    let ch = crate::hal::console_getchar();
-                    if ch == usize::MAX {
-                        break;
-                    }
-                    let ch = ch as u8;
-                    if crate::trace::check_magic_key(ch, "schedule") {
-                        // check_magic_key → dump_from → shutdown, never returns.
-                    } else {
-                        crate::trace::stash_char(ch);
-                        stashed = true;
-                    }
-                }
-                if stashed {
-                    crate::fs::dev::tty::Teletype::receive_stashed();
-                }
-            }
-            #[cfg(not(feature = "board_vf2"))]
-            {
             let ch = crate::hal::console_getchar() as u8;
             if ch != 0xFF {
                 if crate::trace::check_magic_key(ch, "schedule") {
@@ -178,7 +150,6 @@ pub fn run_tasks() {
                     crate::trace::stash_char(ch);
                     crate::fs::dev::tty::Teletype::receive_stashed();
                 }
-            }
             }
             sched_record_stage(
                 sched_profile,
@@ -343,7 +314,7 @@ pub fn run_tasks() {
         }
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
-            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
             let trace_first_switch = !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
             let stage_t0 = sched_profile_start(sched_profile);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -397,7 +368,7 @@ pub fn run_tasks() {
                 SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
             }
             sched_record_loop_cycles(sched_profile, loop_t0);
-            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
             if trace_first_switch {
                 // 安全性：选中任务仍由 `processor.current` 持有，在 `__switch` 使用
                 // 该上下文前不会发生修改。
@@ -420,7 +391,7 @@ pub fn run_tasks() {
                 crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
-            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+            #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
             if trace_first_switch {
                 println!("[bringup][sched:02] first init context returned to idle scheduler");
             }

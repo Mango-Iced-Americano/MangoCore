@@ -75,8 +75,7 @@ else
     # 1. 复制 common skeleton
     cp -a "$REPO_ROOT/os/initramfs/common/." "$STAGE/"
 
-    # 1b. 生成 /etc/resolv.conf（DNS_SERVER 环境变量可配置，默认 10.0.2.3 适配 QEMU user 网）
-    DNS_SERVER="${DNS_SERVER:-10.0.2.3}"
+    DNS_SERVER="${DNS_SERVER:-8.8.8.8}"
     printf 'nameserver %s\n' "$DNS_SERVER" > "$STAGE/etc/resolv.conf"
 
     # 2. 确定架构相关的路径

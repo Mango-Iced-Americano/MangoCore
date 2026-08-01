@@ -28,7 +28,7 @@ const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 #[cfg(not(target_arch = "riscv64"))]
 const PCI_ECAM_BASE: usize = 0x2000_0000; // loongarch64 qemu
 #[cfg(target_arch = "riscv64")]
-const PCI_ECAM_BASE: usize = 0x3000_0000; // riscv64 qemu
+const RV64_PCI_ECAM_FALLBACK_BASE: usize = 0x3000_0000;
 const VIRT_PCI_BASE: usize = 0x4000_0000;
 const VIRT_PCI_SIZE: usize = 0x0002_0000;
 
@@ -167,6 +167,25 @@ const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
+#[cfg(target_arch = "riscv64")]
+fn pci_ecam_base() -> usize {
+    match crate::hal::platform::platform_info().pci_host() {
+        Some(host) => host.ecam_base,
+        None => {
+            println!(
+                "[PCI] WARNING: no usable FDT PCI host; falling back to ECAM {:#x}",
+                RV64_PCI_ECAM_FALLBACK_BASE
+            );
+            RV64_PCI_ECAM_FALLBACK_BASE
+        }
+    }
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+const fn pci_ecam_base() -> usize {
+    PCI_ECAM_BASE
+}
+
 pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
     enumerate_all_virtio_pci(device_type)
         .into_iter()
@@ -177,7 +196,7 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
 pub fn enumerate_all_virtio_pci(
     device_type: DeviceType,
 ) -> alloc::vec::Vec<(DeviceFunction, PciTransport)> {
-    let mmconfig_base = PCI_ECAM_BASE as *mut u8;
+    let mmconfig_base = pci_ecam_base() as *mut u8;
     println!("[PCI] ECAM base: {:#x}", mmconfig_base as usize);
 
     let mmio_cam = unsafe { MmioCam::new(mmconfig_base, Cam::Ecam) };
@@ -286,41 +305,25 @@ impl VirtIOBlock {
     }
 }
 
-pub fn probe_la64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
+pub fn probe_la64() -> Vec<Arc<dyn super::BlockDevice>> {
     use alloc::sync::Arc;
     let transports = enumerate_all_virtio_pci(DeviceType::Block);
-    let mut result: [Option<Arc<dyn super::BlockDevice>>; 2] = [None, None];
+    let mut result = Vec::new();
 
-    for (i, (df, transport)) in transports.into_iter().enumerate() {
-        if i >= 2 {
-            println!(
-                "[kernel] block device {} ({:?}): skipping (max 2 devices)",
-                i, df
-            );
-            break;
-        }
+    for (index, (df, transport)) in transports.into_iter().enumerate() {
         match VirtIOBlk::<VirtioHal, PciTransport>::new(transport) {
             Ok(blk) => {
-                if i == 0 {
+                if result.is_empty() {
                     virtio_dma_pool::dma_pool_init_once();
                 }
-                let label = if i == 0 { "official fs" } else { "tools disk" };
-                result[i] =
-                    Some(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
-                println!("[kernel] block device {}: {} ({:?})", i, label, df);
+                result.push(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
+                println!("[kernel] discovered VirtIO PCI block device {} ({:?})", index, df);
             }
-            Err(_e) => {
-                if i == 0 {
-                    panic!(
-                        "[kernel] FATAL: failed to initialize block device 0 ({:?})",
-                        df
-                    );
-                } else {
-                    println!(
-                        "[kernel] block device {} ({:?}): initialization failed, skipping",
-                        i, df
-                    );
-                }
+            Err(_) => {
+                println!(
+                    "[kernel] VirtIO PCI block device {} ({:?}): initialization failed, skipping",
+                    index, df
+                );
             }
         }
     }

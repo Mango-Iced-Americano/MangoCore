@@ -28,7 +28,7 @@ pub fn config_content(
 
     // ── Memory ──
     let _ = writeln!(s, "CONFIG_PAGE_SIZE={}", crate::config::PAGE_SIZE);
-    let _ = writeln!(s, "CONFIG_MEMORY_SIZE={}", crate::config::MEMORY_SIZE);
+    let _ = writeln!(s, "CONFIG_MEMORY_SIZE={}", crate::hal::firmware::usable_memory_size());
     let _ = writeln!(
         s,
         "CONFIG_KERNEL_HEAP_SIZE={}",

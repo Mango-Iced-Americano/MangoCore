@@ -3,14 +3,12 @@ use alloc::sync::Arc;
 use core::fmt;
 use spin::{Mutex, MutexGuard};
 
-use crate::drivers::block::BlockDevice;
+use crate::drivers::block::{BlockDevice, BlockDeviceDescriptor};
 use crate::fs::vfs::file_system::FileSystem;
 use crate::fs::vfs::{FilePrivateData, FileType, IndexNode, Metadata};
 use crate::hal::BLOCK_SZ;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
-
-const VIRTIO_BLK_MAJOR: u64 = 254;
 
 const BLKGETSIZE64: u32 = 0x8008_1272;
 const BLKSSZGET: u32 = 0x1268;
@@ -24,21 +22,14 @@ pub struct BlockDevInode {
 }
 
 impl BlockDevInode {
-    pub fn new(inner: Arc<dyn BlockDevice>, minor: u64, label: String) -> Arc<Self> {
-        Self::new_with_read_only(inner, minor, label, false)
-    }
-
-    pub fn new_with_read_only(
-        inner: Arc<dyn BlockDevice>,
-        minor: u64,
-        label: String,
-        read_only: bool,
-    ) -> Arc<Self> {
+    pub fn from_descriptor(descriptor: &BlockDeviceDescriptor) -> Arc<Self> {
+        let node = descriptor.node();
+        let number = node.number();
         Arc::new(Self {
-            inner,
-            raw_dev: crate::fs::dev::mkdev(VIRTIO_BLK_MAJOR, minor),
-            label,
-            read_only,
+            inner: descriptor.device().clone(),
+            raw_dev: crate::fs::dev::mkdev(number.major(), number.minor()),
+            label: String::from(node.name().as_str()),
+            read_only: false,
         })
     }
 

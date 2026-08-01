@@ -31,6 +31,17 @@ pub use hal::config;
 extern crate alloc;
 extern crate core;
 
+#[cfg(all(
+    target_arch = "loongarch64",
+    not(any(feature = "boot_la_qemu", feature = "boot_la_uboot_dmw"))
+))]
+compile_error!("LA64 requires a LoongArch boot profile");
+#[cfg(all(
+    target_arch = "loongarch64",
+    all(feature = "boot_la_qemu", feature = "boot_la_uboot_dmw")
+))]
+compile_error!("LoongArch boot profiles are mutually exclusive");
+
 #[macro_use]
 extern crate bitflags;
 
@@ -55,9 +66,11 @@ mod utils;
 
 use crate::hal::{bootstrap_init, machine_init};
 
-#[cfg(all(feature = "loongarch64", feature = "board_2k1000"))]
+#[cfg(all(feature = "loongarch64", feature = "boot_la_uboot_dmw"))]
 core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
-#[cfg(feature = "riscv")]
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(include_str!("hal/arch/riscv/image_header.S"));
+#[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
 // ── Initramfs root cpio (small boot root filesystem) ──
@@ -72,17 +85,10 @@ fn mem_clear() {
         fn sbss();
         fn ebss();
     }
-    #[cfg(feature = "zero_init")]
     unsafe {
-        core::slice::from_raw_parts_mut(
-            sbss as usize as *mut u8,
-            crate::config::MEMORY_END - sbss as usize,
-        )
-        .fill(0);
-    }
-    #[cfg(not(feature = "zero_init"))]
-    unsafe {
-        core::slice::from_raw_parts_mut(sbss as usize as *mut u8, ebss as usize - sbss as usize)
+        let start = sbss as *const () as usize;
+        let end = ebss as *const () as usize;
+        core::slice::from_raw_parts_mut(start as *mut u8, end - start)
             .fill(0);
     }
 }
@@ -107,6 +113,8 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
     mm::init();
     println!("[kernel] Hello, world!");
     crate::hal::platform::init_platform_info();
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::configure_runtime_console();
 
     machine_init();
     crate::task::timer_subsystem_init();
@@ -115,11 +123,10 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
         Err(e) => println!("[kernel] PRNG init warning: {:?}", e),
     }
 
-    let policy = crate::hal::platform::select_policy();
     let mut boot_config = crate::bootargs::load();
     let cmdline = crate::bootargs::Cmdline::parse(crate::bootargs::get_cmdline());
     if cmdline.get("root").is_none() && cmdline.get("mango.root").is_none() {
-        boot_config.root = policy.default_root_device().into();
+        boot_config.root = crate::hal::platform::platform_info().default_root().into();
     }
 
     #[cfg(feature = "initramfs")]

@@ -4,4 +4,4 @@
 //! Devices are immutable after platform initialization.
 
 mod manager;
-pub use manager::DeviceManager;
+pub use manager::{DeviceManager, DeviceQueryError};

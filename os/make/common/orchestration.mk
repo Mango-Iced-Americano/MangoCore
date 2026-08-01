@@ -55,8 +55,8 @@ ALPINE_MIRROR := https://dl-cdn.alpinelinux.org/alpine/edge/main
 INITRAMFS_DIR_RV := ../fs-img-dir/initramfs-rv.cpio
 INITRAMFS_DIR_LA := ../fs-img-dir/initramfs-la.cpio
 
-# DNS 服务器：QEMU user 网用 10.0.2.3，真机/其他环境可覆写
-DNS_SERVER ?= 10.0.2.3
+# DNS 服务器：默认使用公网 DNS；QEMU SLIRP 或受限网络可显式覆写。
+DNS_SERVER ?= 8.8.8.8
 
 # ============================================================
 # L3 Kernel self-test (mango.mode=ktest)

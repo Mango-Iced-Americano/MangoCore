@@ -169,7 +169,7 @@ $(QEMU_TAR_PATH):
 
 clean:
 	$(MAKE) -C os "BUILD_ROOT=$(BUILD_ROOT)" clean
-	rm -f "$(COMPAT_OUTPUT_DIR)/kernel-rv" \
+	rm -f "$(COMPAT_OUTPUT_DIR)/Image" \
 		"$(COMPAT_OUTPUT_DIR)/kernel-la" \
 		"$(COMPAT_OUTPUT_DIR)/disk.img" \
 		"$(COMPAT_OUTPUT_DIR)/disk-la.img"

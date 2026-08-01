@@ -28,21 +28,21 @@ endef
 
 arch-build: prepare-cargo-config
 	$(call validate-formal-inputs)
-	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) $(if $(filter la64,$(ARCH)),BLK_MODE=$(LA64_BLK_MODE))
 
 kernel: prepare-cargo-config
 	$(call validate-formal-inputs)
-	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk build MODE=$(MODE) LOG=$(LOG) KERNEL_OUTPUT_ROOT="$(KERNEL_OUTPUT_ROOT)" INITRAMFS_PROFILE=$(PROFILE) $(if $(filter la64,$(ARCH)),BLK_MODE=$(LA64_BLK_MODE))
 
 user: prepare-cargo-config
 	$(call validate-formal-inputs)
 	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
-	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk user MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk user MODE=$(MODE) LOG=$(LOG) $(if $(filter la64,$(ARCH)),BLK_MODE=$(LA64_BLK_MODE))
 
 image: prepare-cargo-config
 	$(call validate-formal-inputs)
 	$(if $(filter normal,$(PROFILE)),,$(error PROFILE must be normal))
-	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk fs-img MODE=$(MODE) LOG=$(LOG) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE))
+	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk fs-img MODE=$(MODE) LOG=$(LOG) $(if $(filter la64,$(ARCH)),BLK_MODE=$(LA64_BLK_MODE))
 
 toolchain-preflight:
 	@if [ "$(CANONICAL_BUILD_FIXTURE)" = "second-stage-failure" ]; then :; else sh ../scripts/rustup-preflight.sh; fi
@@ -75,19 +75,19 @@ endif
 publish-compatibility:
 	@echo "[publish-compatibility] publishing both completed architecture products"
 	@mkdir -p "$(COMPAT_OUTPUT_DIR)"
-	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/kernel-rv" "$(COMPAT_OUTPUT_DIR)/kernel-rv"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/Image" "$(COMPAT_OUTPUT_DIR)/Image"
 	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
 	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"
 	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"
 
 rv64-kernel-build-only: prepare-cargo-config
-	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk build BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
+	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk build MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"
 
 rv64-debug: toolchain-preflight
 	make -f make/rv64.mk debug BLK_MODE=${BLK_MODE} MODE=debug
 
 rv64-only: prepare-cargo-config
-	make -f make/rv64.mk all BLK_MODE=${BLK_MODE}
+	make -f make/rv64.mk all
 
 rv64-run-only: toolchain-preflight
 	make -f make/rv64.mk runsimple
@@ -156,7 +156,7 @@ test: prepare-cargo-config
 
 check: prepare-cargo-config
 	$(call validate-formal-inputs)
-	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk check MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) BLK_MODE=$(if $(filter la64,$(ARCH)),$(LA64_BLK_MODE),$(BLK_MODE)) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
+	$(MAKE) ARCH=$(ARCH) PROFILE=$(PROFILE) -f make/$(ARCH).mk check MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) $(if $(filter la64,$(ARCH)),BLK_MODE=$(LA64_BLK_MODE)) PRODUCT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/$(ARCH)/$(MODE)/$(PROFILE)/user"
 
 lint: prepare-cargo-config
 	$(call validate-formal-inputs)
@@ -243,7 +243,7 @@ bugscan: check-fast rv64-ktest
 .PHONY: check-fast
 check-fast: toolchain-preflight
 	@echo "[check-fast] Running cargo check..."
-	cargo check --features "board_rvqemu block_virt" 2>&1 | tail -1
+	$(MAKE) ARCH=rv64 PROFILE=normal -f make/rv64.mk check MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=normal
 
 # ─────────────────────────────────────────────────────────
 #  Aggregate targets — serial execution (architecture-specific source state)

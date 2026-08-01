@@ -254,18 +254,7 @@ fn shutdown_failure() -> ! {
     ktest_exit();
 }
 
-/// On real hardware (VF2): cold-reboot via SBI SRST so the board returns to
-/// U-Boot and can be re-deployed without manual power-cycling.
-/// On QEMU / other platforms: shut down.
 fn ktest_exit() -> ! {
-    #[cfg(feature = "board_vf2")]
-    {
-        crate::println!("# ktest: rebooting.");
-        crate::hal::reboot();
-    }
-    #[cfg(not(feature = "board_vf2"))]
-    {
-        crate::println!("# ktest: shutting down.");
-        crate::hal::shutdown();
-    }
+    crate::println!("# ktest: shutting down.");
+    crate::hal::shutdown();
 }

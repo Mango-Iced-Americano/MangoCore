@@ -70,7 +70,7 @@ impl Default for BootConfig {
             failfast: false,
             trace_groups: Vec::new(),
             init: String::from("/init"),
-            root: String::from("/dev/vda"),
+            root: String::from("initramfs"),
         }
     }
 }
@@ -212,8 +212,12 @@ mod tests {
 
     #[test]
     fn test_default_boot_mode_normal() {
+        // Given: no explicit root or platform-derived root.
         let cfg = BootConfig::from_cmdline("");
+        // When: the architecture-neutral command line is parsed.
+        // Then: the embedded initramfs remains the safe root default.
         assert_eq!(cfg.mode, BootMode::Normal);
+        assert_eq!(cfg.root, "initramfs");
     }
 
     #[test]

@@ -23,13 +23,6 @@ const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 // Multi-page DMA uses the pool for contiguity; fallback to BLOCK_SZ when pool
 // is exhausted.  See virtio_dma_pool.rs.
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
-#[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
-const VIRTIO_MMIO_BASE: usize = 0x10001000;
-const VIRTIO_MMIO_STRIDE: usize = 0x1000;
-/// QEMU virt exposes these MMIO slots in the kernel page table. Devices may
-/// occupy any of them, so only probe the mapped slots rather than a raw range.
-const VIRTIO_MMIO_PROBE_SLOTS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7];
 
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
 
@@ -145,11 +138,6 @@ impl BlockDevice for VirtIOBlock {
 }
 
 impl VirtIOBlock {
-    #[allow(unused)]
-    pub fn new() -> Self {
-        Self::try_new(VIRTIO0).expect("VirtIOBlock::new: no device at VIRTIO0")
-    }
-
     pub fn try_new(base_addr: usize) -> Option<Self> {
         let transport = unsafe {
             MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?
@@ -159,79 +147,31 @@ impl VirtIOBlock {
     }
 }
 
-pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
-    use alloc::sync::Arc;
-    let mut devices = [None, None];
-    let mut device_index = 0;
-
-    for slot in VIRTIO_MMIO_PROBE_SLOTS {
-        let base_addr = VIRTIO_MMIO_BASE + slot * VIRTIO_MMIO_STRIDE;
-        let Some(device) = VirtIOBlock::try_new(base_addr) else {
-            continue;
-        };
-
-        if device_index == 0 {
-            virtio_dma_pool::dma_pool_init_once();
-        }
-        println!(
-            "[kernel] block device {}: {} (MMIO {:#x})",
-            device_index,
-            if device_index == 0 {
-                "official fs"
-            } else {
-                "tools disk"
-            },
-            base_addr
-        );
-        devices[device_index] = Some(Arc::new(device) as Arc<dyn super::BlockDevice>);
-        device_index += 1;
-        if device_index == devices.len() {
-            break;
-        }
-    }
-
-    devices
-}
-
-/// Probe VirtIO block devices described by the platform device catalogue.
-pub fn probe_from_device_manager(dm: &DeviceManager) -> [Option<Arc<dyn BlockDevice>>; 2] {
-    let mut devices: [Option<Arc<dyn BlockDevice>>; 2] = [None, None];
-    let mut device_index = 0;
+pub fn probe_from_device_manager(dm: &DeviceManager) -> Vec<Arc<dyn BlockDevice>> {
+    let mut devices = Vec::new();
 
     let mut virtio_devices: Vec<_> = dm
-        .find_by_compatible("virtio,mmio")
+        .find_enabled_by_compatible("virtio,mmio")
         .into_iter()
-        .filter(|device| device.mmio.is_some())
+        .filter(|device| device.mmio_range(0).is_some())
         .collect();
     virtio_devices
-        .sort_by_key(|device| device.mmio.map(|(base, _)| base).unwrap_or(usize::MAX));
+        .sort_by_key(|device| device.mmio_range(0).map(|range| range.base).unwrap_or(usize::MAX));
 
     for dev_info in virtio_devices {
-        if device_index == devices.len() {
-            break;
-        }
-        let Some((base_addr, _size)) = dev_info.mmio else {
+        let Some(range) = dev_info.mmio_range(0) else {
             continue;
         };
+        let base_addr = range.base;
         let Some(device) = VirtIOBlock::try_new(base_addr) else {
             continue;
         };
 
-        if device_index == 0 {
+        if devices.is_empty() {
             virtio_dma_pool::dma_pool_init_once();
         }
-        println!(
-            "[kernel] block device {}: {} (MMIO {:#x})",
-            device_index,
-            if device_index == 0 {
-                "official fs"
-            } else {
-                "tools disk"
-            },
-            base_addr
-        );
-        devices[device_index] = Some(Arc::new(device));
-        device_index += 1;
+        println!("[kernel] discovered VirtIO block device (MMIO {:#x})", base_addr);
+        devices.push(Arc::new(device) as Arc<dyn BlockDevice>);
     }
 
     devices

@@ -1,19 +1,14 @@
 //! L3 tests for the platform information model.
 
-use crate::hal::device::DeviceManager;
-use crate::hal::platform::info::{DeviceInfo, DeviceKind, FirmwareKind, PlatformInfo};
+use crate::hal::device::{DeviceManager, DeviceQueryError};
+use crate::hal::platform::info::{DeviceInfo, DeviceKind, FirmwareKind, MmioRange, PlatformInfo};
 use crate::kernel_tests::runner::KernelTest;
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 /// Returns all platform information tests.
 pub fn tests() -> Vec<KernelTest> {
     vec![
-        KernelTest::new(
-            "platform::info_static_fallback",
-            test_platform_info_static_fallback,
-        ),
         KernelTest::new(
             "platform::device_kind_matching",
             test_device_info_kind_matching,
@@ -31,70 +26,22 @@ pub fn tests() -> Vec<KernelTest> {
             "platform::device_manager_mmio",
             test_device_manager_find_mmio,
         ),
-        #[cfg(feature = "board_vf2")]
-        KernelTest::new(
-            "platform::vf2_serial_static_mmio",
-            test_vf2_serial_static_mmio,
-        ),
-        KernelTest::new(
-            "platform::policy_selection",
-            test_platform_policy_selection,
-        ),
+        KernelTest::new("platform::runtime_root_policy", test_runtime_root_policy),
     ]
 }
 
-/// Static construction produces the active board's fallback platform snapshot.
-fn test_platform_info_static_fallback() -> Result<(), &'static str> {
-    let platform = PlatformInfo::from_static();
-
-    if !platform.is_static_fallback() {
-        return Err("static fallback must report Static");
-    }
-    if platform.firmware != FirmwareKind::Static {
-        return Err("static fallback has wrong firmware kind");
-    }
-    if platform.boot.protocol != crate::hal::boot::boot_info().protocol {
-        return Err("static fallback did not copy the boot handoff");
-    }
-    if platform.cmdline != crate::bootargs::get_cmdline() {
-        return Err("static fallback has wrong command line");
-    }
-    if platform.model.is_some() {
-        return Err("static fallback has a model");
-    }
-    #[cfg(feature = "board_rvqemu")]
-    if platform.devices.len() != 12 {
-        return Err("RISC-V QEMU static fallback has wrong device count");
-    }
-    #[cfg(feature = "board_laqemu")]
-    if platform.devices.len() != 1 {
-        return Err("LoongArch QEMU static fallback has wrong device count");
-    }
-    #[cfg(feature = "board_vf2")]
-    if platform.devices.len() != 1 {
-        return Err("VisionFive 2 static fallback has wrong device count");
-    }
-    #[cfg(feature = "board_rvqemu")]
-    if !platform.devices.iter().any(|device| {
-        device.mmio == Some((0x1000_8000, 0x1000)) && device.kind == DeviceKind::VirtioNet
-    }) {
-        return Err("RISC-V QEMU static fallback is missing the virtio-net slot");
-    }
-    Ok(())
-}
-
-/// Device kinds discriminate statically described VirtIO and serial devices.
+/// Device kinds discriminate isolated VirtIO and serial test fixtures.
 fn test_device_info_kind_matching() -> Result<(), &'static str> {
-    let block = DeviceInfo {
-        compatible: vec![String::from("virtio,mmio")],
-        mmio: Some((0x1000_1000, 0x1000)),
-        kind: DeviceKind::VirtioBlock,
-    };
-    let serial = DeviceInfo {
-        compatible: vec![String::from("ns16550a")],
-        mmio: Some((0x1000_0000, 0x1000)),
-        kind: DeviceKind::Serial,
-    };
+    let block = DeviceInfo::static_device(
+        &["virtio,mmio"],
+        vec![MmioRange::new(0x1000_1000, 0x1000)],
+        DeviceKind::VirtioBlock,
+    );
+    let serial = DeviceInfo::static_device(
+        &["ns16550a"],
+        vec![MmioRange::new(0x1000_0000, 0x1000)],
+        DeviceKind::Serial,
+    );
 
     if block.kind != DeviceKind::VirtioBlock {
         return Err("virtio block device has wrong kind");
@@ -123,13 +70,9 @@ fn test_device_info_kind_matching() -> Result<(), &'static str> {
 
 /// A non-MMIO device such as a CPU node has no register range.
 fn test_device_info_no_mmio() -> Result<(), &'static str> {
-    let cpu = DeviceInfo {
-        compatible: vec![String::from("riscv")],
-        mmio: None,
-        kind: DeviceKind::Other,
-    };
+    let cpu = DeviceInfo::static_device(&["riscv"], vec![], DeviceKind::Other);
 
-    if cpu.mmio.is_some() {
+    if cpu.mmio_range(0).is_some() {
         return Err("non-MMIO device has a register range");
     }
     Ok(())
@@ -138,21 +81,21 @@ fn test_device_info_no_mmio() -> Result<(), &'static str> {
 /// Device manager compatible lookup is exact and returns no result when absent.
 fn test_device_manager_find_by_compatible() -> Result<(), &'static str> {
     let devices = vec![
-        DeviceInfo {
-            compatible: vec![String::from("virtio,mmio")],
-            mmio: Some((0x1000_1000, 0x1000)),
-            kind: DeviceKind::VirtioBlock,
-        },
-        DeviceInfo {
-            compatible: vec![String::from("ns16550a")],
-            mmio: Some((0x1000_0000, 0x1000)),
-            kind: DeviceKind::Serial,
-        },
+        DeviceInfo::static_device(
+            &["virtio,mmio"],
+            vec![MmioRange::new(0x1000_1000, 0x1000)],
+            DeviceKind::VirtioBlock,
+        ),
+        DeviceInfo::static_device(
+            &["ns16550a"],
+            vec![MmioRange::new(0x1000_0000, 0x1000)],
+            DeviceKind::Serial,
+        ),
     ];
     let device_manager = DeviceManager::new(devices);
 
     let virtio = device_manager.find_by_compatible("virtio,mmio");
-    if virtio.len() != 1 || virtio[0].mmio != Some((0x1000_1000, 0x1000)) {
+    if virtio.len() != 1 || virtio[0].mmio_range(0) != Some(MmioRange::new(0x1000_1000, 0x1000)) {
         return Err("compatible lookup did not return the VirtIO device");
     }
     if device_manager.find_by_compatible("ns16550a").len() != 1 {
@@ -173,21 +116,21 @@ fn test_device_manager_find_by_compatible() -> Result<(), &'static str> {
 /// Device manager kind lookup finds block devices and the serial console.
 fn test_device_manager_find_by_kind() -> Result<(), &'static str> {
     let devices = vec![
-        DeviceInfo {
-            compatible: vec![String::from("virtio,mmio")],
-            mmio: Some((0x1000_1000, 0x1000)),
-            kind: DeviceKind::VirtioBlock,
-        },
-        DeviceInfo {
-            compatible: vec![String::from("virtio,mmio")],
-            mmio: Some((0x1000_2000, 0x1000)),
-            kind: DeviceKind::VirtioBlock,
-        },
-        DeviceInfo {
-            compatible: vec![String::from("ns16550a")],
-            mmio: Some((0x1000_0000, 0x1000)),
-            kind: DeviceKind::Serial,
-        },
+        DeviceInfo::static_device(
+            &["virtio,mmio"],
+            vec![MmioRange::new(0x1000_1000, 0x1000)],
+            DeviceKind::VirtioBlock,
+        ),
+        DeviceInfo::static_device(
+            &["virtio,mmio"],
+            vec![MmioRange::new(0x1000_2000, 0x1000)],
+            DeviceKind::VirtioBlock,
+        ),
+        DeviceInfo::static_device(
+            &["ns16550a"],
+            vec![MmioRange::new(0x1000_0000, 0x1000)],
+            DeviceKind::Serial,
+        ),
     ];
     let device_manager = DeviceManager::new(devices);
 
@@ -198,7 +141,7 @@ fn test_device_manager_find_by_kind() -> Result<(), &'static str> {
         return Err("kind lookup did not return the serial device");
     }
     match device_manager.find_console() {
-        Some(console) if console.mmio == Some((0x1000_0000, 0x1000)) => Ok(()),
+        Some(console) if console.mmio_range(0) == Some(MmioRange::new(0x1000_0000, 0x1000)) => Ok(()),
         _ => Err("console lookup did not return the serial device"),
     }
 }
@@ -206,20 +149,16 @@ fn test_device_manager_find_by_kind() -> Result<(), &'static str> {
 /// Device manager returns MMIO only when the matched device provides it.
 fn test_device_manager_find_mmio() -> Result<(), &'static str> {
     let devices = vec![
-        DeviceInfo {
-            compatible: vec![String::from("ns16550a")],
-            mmio: Some((0x1000_0000, 0x1000)),
-            kind: DeviceKind::Serial,
-        },
-        DeviceInfo {
-            compatible: vec![String::from("riscv")],
-            mmio: None,
-            kind: DeviceKind::Other,
-        },
+        DeviceInfo::static_device(
+            &["ns16550a"],
+            vec![MmioRange::new(0x1000_0000, 0x1000)],
+            DeviceKind::Serial,
+        ),
+        DeviceInfo::static_device(&["riscv"], vec![], DeviceKind::Other),
     ];
     let device_manager = DeviceManager::new(devices);
 
-    if device_manager.find_mmio("ns16550a") != Some((0x1000_0000, 0x1000)) {
+    if device_manager.find_mmio("ns16550a") != Some(MmioRange::new(0x1000_0000, 0x1000)) {
         return Err("MMIO lookup returned an incorrect serial range");
     }
     if device_manager.find_mmio("riscv").is_some() {
@@ -231,37 +170,38 @@ fn test_device_manager_find_mmio() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The board_vf2 static platform descriptor provides exactly one ns16550a
-/// serial descriptor at MMIO base 0x1000_0000 with 0x1000 range.
-#[cfg(feature = "board_vf2")]
-fn test_vf2_serial_static_mmio() -> Result<(), &'static str> {
-    let platform = PlatformInfo::from_static();
-    let manager = DeviceManager::new(platform.devices);
-    let serials = manager.find_by_compatible("ns16550a");
-    if serials.len() != 1 {
-        return Err("VF2 static fallback must have exactly one ns16550a device");
+fn test_runtime_root_policy() -> Result<(), &'static str> {
+    if crate::hal::platform::default_init_path() != "/initproc" {
+        return Err("runtime platform has wrong default init path");
     }
-    let serial = serials[0];
-    if serial.kind != DeviceKind::Serial {
-        return Err("VF2 ns16550a device has wrong DeviceKind");
+    let devices = vec![DeviceInfo::static_device(
+        &["virtio,mmio"],
+        vec![MmioRange::new(0x1000_1000, 0x1000)],
+        DeviceKind::Other,
+    )];
+    let platform = PlatformInfo {
+        firmware: FirmwareKind::Fdt,
+        boot: *crate::hal::boot::boot_info(),
+        model: None,
+        cmdline: alloc::string::String::new(),
+        devices,
+        console: None,
+        pci_host: None,
+    };
+    if platform.default_root() != "/dev/vda" {
+        return Err("enabled virtio FDT transport did not select /dev/vda");
     }
-    if serial.mmio != Some((0x1000_0000, 0x1000)) {
-        return Err("VF2 serial has wrong MMIO range");
+    let initramfs_platform = PlatformInfo {
+        firmware: FirmwareKind::Fdt,
+        boot: *crate::hal::boot::boot_info(),
+        model: None,
+        cmdline: alloc::string::String::new(),
+        devices: Vec::new(),
+        console: None,
+        pci_host: None,
+    };
+    if initramfs_platform.default_root() != "initramfs" {
+        return Err("unrecognized FDT devices must retain the initramfs root");
     }
-    Ok(())
-}
-
-/// The compile-time board feature selects the corresponding boot policy.
-fn test_platform_policy_selection() -> Result<(), &'static str> {
-    let policy = crate::hal::platform::select_policy();
-    let name = policy.name();
-
-    #[cfg(feature = "board_rvqemu")]
-    assert_eq!(name, "qemu-riscv64");
-    #[cfg(feature = "board_vf2")]
-    assert_eq!(name, "visionfive2");
-    #[cfg(feature = "board_laqemu")]
-    assert_eq!(name, "qemu-loongarch64");
-
     Ok(())
 }

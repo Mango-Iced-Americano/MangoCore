@@ -56,14 +56,12 @@ overall=0
 case "$arch" in
     rv64)
         target="riscv64gc-unknown-none-elf"
-        board="rvqemu"
         # initramfs is the canonical boot root for lint builds.
-        features="board_${board},block_virt,oom_handler,initramfs"
+        features="riscv,block_virt,oom_handler,initramfs"
         ;;
     la64)
         target="loongarch64-unknown-linux-gnu"
-        board="laqemu"
-        features="board_${board},block_virt_pci,oom_handler,initramfs"
+        features="boot_la_qemu,block_virt_pci,oom_handler,initramfs"
         ;;
 esac
 

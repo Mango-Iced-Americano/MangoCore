@@ -82,7 +82,7 @@ perf_diag = ["perf_stats"]
 ext4_lwext4_backend = ["dep:lwext4_rust"]
 ext4_legacy_backend = []
 ext4_another_backend = ["dep:another_ext4"]
-board_bringup_trace = []
+bringup_trace = []
 gmac_probe = []
 gmac_2k1000 = []
 gmac_dhcp = []
@@ -91,17 +91,11 @@ net_ack_immediate = []
 initramfs = []
 preload_payloads = []
 
-# LoongArch Boards:
 loongarch64 = []
-board_2k1000 = ["oom_handler", "loongarch64"]
-board_laqemu = ["oom_handler", "loongarch64"]
-# Riscv Board:
 riscv = []
-board_rvqemu = ["oom_handler", "riscv"]
-board_vf2 = ["oom_handler", "riscv"]
-# END of LoongArch Boards.
+boot_la_qemu = ["oom_handler", "loongarch64"]
+boot_la_uboot_dmw = ["oom_handler", "loongarch64"]
 
-# default = ["board_laqemu", "block_sata"]
 default = ["initramfs", "ext4_another_backend"]
 
 [profile.dev]

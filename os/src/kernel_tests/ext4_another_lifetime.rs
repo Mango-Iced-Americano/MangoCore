@@ -40,9 +40,10 @@ pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
 
 #[cfg(feature = "ext4_another_backend")]
 fn open_clean_media() -> Result<Arc<dyn FileSystem>, &'static str> {
-    let device = crate::drivers::block::block_devices()[0]
-        .clone()
-        .ok_or("ktest requires a clean ext4 block device in slot 0")?;
+    let device = crate::drivers::block::block_device_by_role(
+        crate::drivers::block::BlockDeviceRole::Root,
+    )
+    .ok_or("ktest requires a clean ext4 root block device")?;
     crate::fs::ext4_backend::open(device).map_err(|_| "clean ext4 image did not mount")
 }
 

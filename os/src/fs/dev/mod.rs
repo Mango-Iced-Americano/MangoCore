@@ -22,6 +22,7 @@ use crate::fs::vfs::{
     generate_inode_id, FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode,
     Metadata,
 };
+use crate::drivers::block::BlockDeviceDescriptor;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -120,6 +121,34 @@ impl DevFS {
     /// 注册设备 inode（直接插入 children map）
     pub fn add_dev(&self, name: &str, dev: Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
         self.root_inode.add_dev(name, dev)
+    }
+
+    pub fn add_block_devices(
+        &self,
+        descriptors: &[BlockDeviceDescriptor],
+    ) -> Result<(), SyscallErr> {
+        let mut root = self.root_inode.0.lock();
+        if root.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            let name = descriptor.node().name().as_str();
+            if root.children.contains_key(name) {
+                return Err(SyscallErr::EEXIST);
+            }
+            if descriptors[..index]
+                .iter()
+                .any(|prior| prior.node().name().as_str() == name)
+            {
+                return Err(SyscallErr::EEXIST);
+            }
+        }
+        for descriptor in descriptors {
+            let name = String::from(descriptor.node().name().as_str());
+            let inode = crate::fs::dev::block::BlockDevInode::from_descriptor(descriptor);
+            root.children.insert(name, inode);
+        }
+        Ok(())
     }
 
     /// 注册设备目录，例如 Linux 常见的 /dev/misc。

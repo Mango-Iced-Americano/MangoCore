@@ -1,11 +1,14 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
-BASE_ADDRESS = 0x80200000;
-
 SECTIONS
 {
-    . = BASE_ADDRESS;
+    KERNEL_LINK_VADDR = 0xffffffc000200000;
+    . = KERNEL_LINK_VADDR;
     skernel = .;
+
+    .image_header : {
+        KEEP(*(.image_header))
+    }
 
     stext = .;
     .text : {
@@ -41,6 +44,7 @@ SECTIONS
     sbss_with_stack = .;
     .bss : {
         *(.bss.stack)
+        *(.bss.bootstrap_page_table)
         sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)

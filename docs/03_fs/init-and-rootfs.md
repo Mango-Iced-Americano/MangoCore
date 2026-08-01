@@ -4,9 +4,11 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-28
+last_updated: 2026-07-29
 code_paths:
   - "os/src/fs/mod.rs"
+  - "os/src/fs/boot_block.rs"
+  - "os/src/drivers/block/descriptor.rs"
   - "os/src/fs/filesystem.rs"
   - "os/src/fs/initramfs.rs"
 entry_points:
@@ -56,9 +58,9 @@ rust_main()
   |     |-- drivers::init_net_device()
   |     |-- net::config::init()
    |     |-- fs::mount_boot_block_devices(&BootConfig)
-   |     |     |-- 发布启动块设备名称注册表和 /dev/vd* 节点
-   |     |     |-- root=/dev/<name> → /sdcard（未命中回退 x0）
-   |     |     |-- x1 → /tools（既有 MBR 分区策略）
+   |     |     |-- 发布驱动描述符对应的启动注册表和 /dev 节点
+   |     |     |-- root=/dev/<name> → /sdcard（未命中回退 Root 角色）
+   |     |     |-- Tools 角色设备的 MBR P1 → /tools
   |
    |-- task::add_initproc()            加载 init 进程（fd 0/1/2 使用 /dev/tty）
    |-- task::run_tasks()               进入调度
@@ -72,7 +74,7 @@ rust_main()
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 仅挂载 devfs，并注册 `/dev/tty` 以建立 PID1 的 fd 0/1/2；其余挂载点只是目录。
-4. 调用 `mount_boot_block_devices(&BootConfig)`：`boot_block` 子模块发布 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点的名称注册表；内核将 `root=/dev/<name>` 解析为注册表键并挂载到 `/sdcard`，未命中时回退 x0。x1 的 `/tools` 挂载仍优先 `/dev/vdb1`，回退 `/dev/vdb`。
+4. 调用 `mount_boot_block_devices(&BootConfig)`：`boot_block` 子模块先验证驱动提供的 `BlockDeviceDescriptor`，再将名称与主次设备号发布到 DevFS 和启动注册表。内核将 `root=/dev/<name>` 解析为注册表键并挂载到 `/sdcard`，未命中时回退 Root 角色；Tools 角色设备若有 MBR，则将 P1 挂载到 `/tools`。当前 QEMU 描述符仍为 `vda`（Root）和 `vdb`（Tools），但挂载层不依赖它们的 slot 或设备类型。
 5. `/sbin/init` 挂载 procfs、sysfs、`/run` 和 `/dev/shm`。
 6. `/tmp` 优先 bind `/sdcard/tmp`；x0 或 bind 失败时挂载 tmpfs。块设备故障只打印 warning，不 panic。
 
@@ -163,7 +165,7 @@ pub fn vfs_root() -> Arc<MountFS> {
 ## 8. 关键设计点
 
 - **VFS_ROOT 初始化顺序**：必须发生在 `mm::init()` 之后（需要堆分配器），且在 `task::add_initproc()` 之前（init 进程需要根文件系统）。
-- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA；initramfs 路径在网络初始化后只发现/注册（`register_boot_block_devices`），不得在内核中选择或挂载 x0/x1。
+- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA；initramfs 路径在网络初始化后只发现/注册（`register_boot_block_devices`），由驱动描述符定义节点和角色，启动挂载不依赖 x0/x1 槽位。
 - **不可递归触发 VFS_ROOT**：initramfs 解包期间（`unpack_newc`）严禁调用 `vfs_root()`，必须使用传入的 `root` 参数，否则引发递归 lazy_static 初始化死锁。
 - **块设备故障不 panic**：无论是根文件系统未识别还是 tools 盘缺失，均 fallback 到 ramfs 或打印 warning 继续执行。这对调试和 CI 环境至关重要。
 - **MountFS 包装统一入口**：无论底层是磁盘文件系统（ext4/FAT32）还是伪文件系统（ramfs），全部包装为 `MountFS`，使路径解析、子挂载管理、挂载传播通过统一的 MountFS 层处理。

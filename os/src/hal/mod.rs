@@ -26,6 +26,8 @@ pub use arch::tlb_invalidate;
 pub use arch::LsxRegs;
 pub use arch::{bootstrap_init, machine_init, user_hwcap};
 pub use arch::{console_flush, console_getchar, console_putchar, console_write_bytes};
+#[cfg(target_arch = "riscv64")]
+pub use arch::configure_runtime_console;
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
 pub use arch::{local_irq_restore, local_irq_save};
@@ -35,8 +37,7 @@ pub use arch::{
     KernelPageTableImpl, KernelStack, MachineContext, PageTableImpl, TrapContext, TrapImpl,
     UserContext, UserSignalMask,
 };
-pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
-pub use arch::{MMIO, TICKS_PER_SEC};
+pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, TICKS_PER_SEC};
 
 /// Per-chunk bounce buffer size for I/O operations.
 /// Computed as KERNEL_HEAP_SIZE / 128, bounded to [64KiB, 256KiB].

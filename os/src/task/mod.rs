@@ -307,8 +307,8 @@ lazy_static! {
     ///
     /// 优先加载 `/init`，缺失时兼容传统镜像里的 `/initproc`。
     pub static ref INITPROC: Arc<TaskControlBlock> = {
-        let init_path = crate::hal::platform::select_policy().init_path();
-        // 优先使用 /init（initramfs 模式），fallback 到平台默认路径。
+        let init_path = crate::hal::platform::default_init_path();
+        // 优先使用 /init（initramfs 模式），fallback 到 boot-profile 默认路径。
         let (_init_path, inode) = match vfs_lookup_absolute("/init") {
             Ok(inode) => ("/init", inode),
             Err(_) => (
@@ -317,13 +317,13 @@ lazy_static! {
                     .unwrap_or_else(|_| panic!("[kernel] no /init or {} found", init_path)),
             ),
         };
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(feature = "boot_la_uboot_dmw")]
         boot_trace!("[bringup][init:01] selected userspace entry {}", _init_path);
         let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(feature = "boot_la_uboot_dmw")]
         boot_trace!("[bringup][init:02] entry file opened; building initial task");
         let task = TaskControlBlock::new(elf);
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(feature = "boot_la_uboot_dmw")]
         boot_trace!(
             "[bringup][init:03] initial task built: pid={} tid={}",
             task.pid(),
@@ -347,10 +347,10 @@ lazy_static! {
 
 /// 将 init 进程加入 ready 队列。
 pub fn add_initproc() {
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(feature = "boot_la_uboot_dmw")]
     boot_trace!("[bringup][init:04] enqueue initial task");
     add_task(INITPROC.clone());
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(feature = "boot_la_uboot_dmw")]
     boot_trace!("[bringup][init:05] initial task is on ready queue");
 }
 

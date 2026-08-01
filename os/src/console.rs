@@ -53,8 +53,8 @@ macro_rules! println {
 macro_rules! boot_trace {
     ($fmt: literal $(, $($arg: tt)+)?) => {{
         #[cfg(any(
-            not(feature = "board_2k1000"),
-            feature = "board_bringup_trace"
+            not(feature = "boot_la_uboot_dmw"),
+            feature = "bringup_trace"
         ))]
         $crate::println!($fmt $(, $($arg)+)?);
     }}

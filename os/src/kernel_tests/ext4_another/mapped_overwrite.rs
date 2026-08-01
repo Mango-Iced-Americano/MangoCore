@@ -157,9 +157,10 @@ pub(super) fn test_extending_write_retains_allocation() -> Result<(), &'static s
 pub(super) fn test_pure_overwrite_performs_no_allocation() -> Result<(), &'static str> {
     const NAME: &str = "another-mapped-overwrite-no-allocation";
 
-    let inner = crate::drivers::block::block_devices()[0]
-        .clone()
-        .ok_or("ktest requires a clean ext4 block device in slot 0")?;
+    let inner = crate::drivers::block::block_device_by_role(
+        crate::drivers::block::BlockDeviceRole::Root,
+    )
+    .ok_or("ktest requires a clean ext4 root block device")?;
     let device = Arc::new(RecordingBlockDevice::new(inner));
     let fs = Ext4FileSystem::open(device.clone())
         .map_err(|_| "mapped-overwrite recording mount failed")?;

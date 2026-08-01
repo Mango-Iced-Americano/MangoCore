@@ -3,9 +3,9 @@
 //! 该模块按 feature 选择 RISC-V 或 LoongArch64 后端，并向 `hal/mod.rs`
 //! 提供统一的启动、页表、陷阱、时间、控制台和上下文切换接口。
 
-#[cfg(feature = "loongarch64")]
+#[cfg(target_arch = "loongarch64")]
 pub mod loongarch64;
-#[cfg(feature = "loongarch64")]
+#[cfg(target_arch = "loongarch64")]
 pub use loongarch64::{
     __switch, board,
     board::MMIO,
@@ -24,21 +24,20 @@ pub use loongarch64::{
     trap_cx_bottom_from_tid, user_hwcap, ustack_bottom_from_tid, KernelPageTableImpl, KernelStack,
     PageTableImpl, BLOCK_SZ,
 };
-#[cfg(feature = "riscv")]
+#[cfg(target_arch = "riscv64")]
 pub mod riscv;
-#[cfg(feature = "riscv")]
+#[cfg(target_arch = "riscv64")]
 pub use riscv::{
     bootstrap_init, config,
-    config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END},
+    config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE},
     kern_stack::kstack_alloc,
     kern_stack::trap_cx_bottom_from_tid,
     kern_stack::ustack_bottom_from_tid,
     kern_stack::KernelStack,
     machine_init,
-    rv_board::MMIO,
     sbi::{
-        console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
-        local_irq_save, reboot, set_timer, shutdown,
+        configure_runtime_console, console_flush, console_getchar, console_putchar,
+        console_write_bytes, local_irq_restore, local_irq_save, reboot, set_timer, shutdown,
     },
     sv39::tlb_invalidate,
     switch::__switch,

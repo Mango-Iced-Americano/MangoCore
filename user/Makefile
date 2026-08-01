@@ -1,3 +1,4 @@
+ARCH ?= rv64
 TARGET := riscv64gc-unknown-none-elf
 MODE := debug
 COMP ?= yes
@@ -6,19 +7,10 @@ USER_OUTPUT_ROOT ?= target
 export RUSTUP_AUTO_INSTALL := 0
 unexport RUSTUP_TOOLCHAIN
 
-ifeq ($(BOARD), 2k1000)
+ifeq ($(ARCH),la64)
 	TARGET := loongarch64-unknown-linux-gnu
-endif
-ifeq ($(BOARD), laqemu)
-	TARGET := loongarch64-unknown-linux-gnu
-endif
-ifeq ($(BOARD), rvqemu)
-	TARGET := riscv64gc-unknown-none-elf
-endif
-
-ARCH=${shell echo ${TARGET}|cut -d- -f1 |grep -o "^[a-zA-Z]\+[[:digit:]]*"}
-ifeq ($(ARCH), loongarch64)
-	BOARD ?= laqemu
+else ifneq ($(ARCH),rv64)
+	$(error ARCH must be rv64 or la64)
 endif
 
 build: rust-user

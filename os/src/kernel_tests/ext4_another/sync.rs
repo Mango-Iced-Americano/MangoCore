@@ -6,9 +6,10 @@ use crate::utils::error::SyscallErr;
 use super::fixtures::{BarrierBlockDevice, FlushFailsAfterMountDevice};
 
 pub(super) fn test_fsync_and_syncfs_surface_flush_failures() -> Result<(), &'static str> {
-    let device = crate::drivers::block::block_devices()[0]
-        .clone()
-        .ok_or("ktest requires a clean ext4 block device in slot 0")?;
+    let device = crate::drivers::block::block_device_by_role(
+        crate::drivers::block::BlockDeviceRole::Root,
+    )
+    .ok_or("ktest requires a clean ext4 root block device")?;
     if !device.supports_reliable_flush() {
         return Err("ktest fixture device lacks reliable flush support");
     }
@@ -32,9 +33,10 @@ pub(super) fn test_global_sys_sync_persists_across_unwrapped_device_view(
     const DATA: &[u8] = b"global-sync";
     const NAME: &str = "another-global-sync-rerun-safe";
 
-    let committed_device = crate::drivers::block::block_devices()[0]
-        .clone()
-        .ok_or("ktest requires a clean ext4 block device in slot 0")?;
+    let committed_device = crate::drivers::block::block_device_by_role(
+        crate::drivers::block::BlockDeviceRole::Root,
+    )
+    .ok_or("ktest requires a clean ext4 root block device")?;
     if !committed_device.supports_reliable_flush() {
         return Err("ktest fixture device lacks reliable flush support");
     }

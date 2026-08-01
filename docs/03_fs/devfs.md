@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-28"
+last_updated: "2026-07-29"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -24,6 +24,7 @@ entry_points:
   - "DEV_FS"
   - "DevFS"
   - "add_dev"
+  - "add_block_devices"
   - "add_dir"
   - "LockedDevFSInode"
 arch:
@@ -82,7 +83,7 @@ lazy_static! {
 }
 ```
 
-`DEV_FS` 是全局共享的单例，在 `mount_common_filesystems` 中通过 `DEV_FS.add_dev` 注册静态设备，在 `mount_boot_block_devices` 中注册块设备分区节点。
+`DEV_FS` 是全局共享的单例，在 `mount_common_filesystems` 中通过 `DEV_FS.add_dev` 注册静态设备。`mount_boot_block_devices` 则将驱动探测得到的 `BlockDeviceDescriptor` 批量发布；DevFS 不推断设备类型、名称或主次设备号。
 
 ## 设备注册
 
@@ -104,6 +105,10 @@ devfs.add_dev("null", Arc::new(Null) as Arc<dyn IndexNode>)
 let misc_dir = devfs.add_dir("misc", InodeMode::from_bits_truncate(0o755))?;
 misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 ```
+
+### add_block_devices
+
+启动块设备以 `BlockDeviceDescriptor` 批量注册。描述符由具体驱动提供节点名称、主次设备号、角色与 `Arc<dyn BlockDevice>`；DevFS 只在插入前检查名称冲突，并由 `BlockDevInode::from_descriptor()` 保留该元数据。这样 virtio 可以发布 `vda`/`vdb`，而 MMC、SATA 或未来控制器可发布各自的 Linux 风格节点，不需要 DevFS 增加平台分支。
 
 ### IndexNode for LockedDevFSInode
 
@@ -198,7 +203,7 @@ Pty 系统由 `PtyManager` 管理，每对 PTY 包含一个 master（`PtmxMaster
 
 ### BlockDevInode（块设备节点）
 
-BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主设备号固定为 254（VIRTIO_BLK_MAJOR）。
+BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。节点名称和主次设备号来自 `BlockDeviceDescriptor`，而不是固定为 VirtIO 的 major 254。
 
 **读**：按 BLOCK_SZ 块对齐分片读取，通过 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0。
 
@@ -209,8 +214,7 @@ BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主�
 - `BLKGETSIZE64`：获取设备字节大小
 - `BLKSSZGET`：获取逻辑扇区大小（固定返回 512）
 
-**动态注册路径**：`mount_boot_block_devices` 先注册原始设备，再对未识别为裸
-ext4/FAT32 的设备解析 MBR 主分区。QEMU 使用：
+**动态注册路径**：`mount_boot_block_devices` 先验证并发布原始描述符，再对 Tools 角色设备解析 MBR 主分区并以动态 minor 发布分区节点。当前 QEMU 使用：
 
 ```
 /dev/vda       (原始根设备, minor=0)

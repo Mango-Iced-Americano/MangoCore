@@ -7,24 +7,23 @@ PRODUCT_ROOT ?= $(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)
 KERNEL_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/kernel
 USER_OUTPUT_ROOT ?= $(PRODUCT_ROOT)/user
 KERNEL_ELF := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/os
-KERNEL_BIN := $(KERNEL_ELF).bin
+KERNEL_IMAGE := $(KERNEL_OUTPUT_ROOT)/Image
 DISASM_TMP := $(KERNEL_OUTPUT_ROOT)/$(TARGET)/$(MODE)/asm
 BLK_MODE ?= virt
-# QEMU device types based on transport
+
 ifeq ($(BLK_MODE),virt_pci)
-  BLK_DEV_x0 = -device virtio-blk-pci,drive=x0
-  BLK_DEV_x1 = -device virtio-blk-pci,drive=x1
-  NET_DEV     = -device virtio-net-pci,netdev=net -netdev user,id=net
+BLK_DEV_x0 = -device virtio-blk-pci,drive=x0
+BLK_DEV_x1 = -device virtio-blk-pci,drive=x1
+NET_DEV = -device virtio-net-pci,netdev=net -netdev user,id=net
 else
-  BLK_DEV_x0 = -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-  BLK_DEV_x1 = -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
-  NET_DEV     = -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net
+BLK_DEV_x0 = -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+BLK_DEV_x1 = -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+NET_DEV = -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net
 endif
 FS_MODE ?= ext4
 IMAGE_ROLE_RV64_PRODUCT_ROOT := $(PRODUCT_ROOT)
 CORE_NUM := 1
 LOG ?= off
-KERNEL_RV := $(PRODUCT_ROOT)/kernel/kernel-rv
 KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
 SDCARD_RV := $(IMAGE_ROLE_RV64_COMPETITION_X0)
 
@@ -43,41 +42,14 @@ LWEXT4_RV_INPUTS := $(shell find "$(LWEXT4_DIR)" -type f ! -path "$(LWEXT4_DIR)/
                     $(LWEXT4_CMAKE) \
                     ../dependency/lwext4_rust/c/ulibc.c
 
-ifeq ($(BOARD), vf2)
-ROOTFS_IMG := /dev/sdc
-else
 ROOTFS_IMG := $(IMAGE_ROLE_RV64_DEVELOPMENT_X0)
-endif
 
 APPS := ../user/src/bin/*
-
-# BOARD
-BOARD ?= rvqemu
-# xein TODO: 下面代码因sbi版本改变确定无用后需要进行缩减
-SBI ?= opensbi-1.0
-ifeq ($(BOARD), rvqemu)
-	ifeq ($(SBI), rustsbi)
-		BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
-	else ifeq ($(SBI), default)
-		BOOTLOADER := default
-	else
-		BOOTLOADER := ../bootloader/fw_payload.bin
-	endif
-else ifeq ($(BOARD), vf2)
-	BOOTLOADER := ../bootloader/rustsbi-$(BOARD).bin
-endif
 
 ifndef LOG
 	LOG_OPTION := "log_off"
 else
 	LOG_OPTION := "log_${LOG}"
-endif
-
-# KERNEL ENTRY
-ifeq ($(BOARD), rvqemu)
-	KERNEL_ENTRY_PA := 0x80200000
-else ifeq ($(BOARD), vf2)
-	KERNEL_ENTRY_PA := 0x40200000
 endif
 
 # Binutils from rustup's llvm-tools-preview component. This avoids depending on

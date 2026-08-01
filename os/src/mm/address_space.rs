@@ -27,6 +27,7 @@ use crate::fs::PageCache;
 use crate::fs::vfs;
 use crate::fs::vfs_lookup_absolute;
 use crate::fs::vfs::IndexNode;
+use crate::hal::boot::kernel_linked_to_phys;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
@@ -824,7 +825,7 @@ impl<T: PageTable> AddressSpace<T> {
         UserMapper::new(&mut self.page_table)
             .map_privileged_user_page(
                 VirtAddr::from(TRAMPOLINE).into(),
-                PhysAddr::from(strampoline as usize).into(),
+                PhysAddr::from(kernel_linked_to_phys(strampoline as *const () as usize)).into(),
                 MapPermission::R | MapPermission::X,
             )
             .unwrap();
@@ -835,7 +836,8 @@ impl<T: PageTable> AddressSpace<T> {
         UserMapper::new(&mut self.page_table)
             .map_user_page(
                 VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
-                PhysAddr::from(ssignaltrampoline as usize).into(),
+                PhysAddr::from(kernel_linked_to_phys(ssignaltrampoline as *const () as usize))
+                    .into(),
                 MapPermission::R | MapPermission::X | MapPermission::U,
             )
             .unwrap();

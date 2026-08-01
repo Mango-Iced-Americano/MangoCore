@@ -23,8 +23,6 @@ use virtio_drivers::transport::{pci::PciTransport, DeviceType};
 // 网卡需要额外的缓冲区大小，通常 2048 足够容纳以太网最大帧
 const NET_BUF_SIZE: usize = 2048;
 
-#[cfg(feature = "block_virt")]
-const VIRTIO_NET_BASE: usize = 0x10008000;
 // 网卡接收队列的大小
 const QUEUE_SIZE: usize = 16;
 
@@ -35,10 +33,6 @@ pub struct VirtIONetWrapper(Mutex<VirtIONet<VirtioHal, PciTransport, QUEUE_SIZE>
 
 #[cfg(feature = "block_virt")]
 impl VirtIONetWrapper {
-    pub fn new() -> Option<Self> {
-        Self::try_new(VIRTIO_NET_BASE)
-    }
-
     pub fn try_new(base_addr: usize) -> Option<Self> {
         // SAFETY: [Categories 6 and 13 — aligned access and library contract]
         // Platform device discovery supplies a mapped, page-aligned VirtIO MMIO
@@ -66,17 +60,18 @@ impl VirtIONetWrapper {
 #[cfg(feature = "block_virt")]
 pub fn probe_net_from_device_manager(dm: &DeviceManager) -> Option<Arc<dyn NetDevice>> {
     let mut virtio_devices: Vec<_> = dm
-        .find_by_compatible("virtio,mmio")
+        .find_enabled_by_compatible("virtio,mmio")
         .into_iter()
-        .filter(|device| device.mmio.is_some())
+        .filter(|device| device.mmio_range(0).is_some())
         .collect();
     virtio_devices
-        .sort_by_key(|device| device.mmio.map(|(base, _)| base).unwrap_or(usize::MAX));
+        .sort_by_key(|device| device.mmio_range(0).map(|range| range.base).unwrap_or(usize::MAX));
 
     for dev_info in virtio_devices {
-        let Some((base_addr, _size)) = dev_info.mmio else {
+        let Some(range) = dev_info.mmio_range(0) else {
             continue;
         };
+        let base_addr = range.base;
         let Some(net_device) = VirtIONetWrapper::try_new(base_addr) else {
             continue;
         };

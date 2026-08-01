@@ -1,0 +1,3 @@
+container: 79040401ef8a
+mount: /root/projects/MangoCore -> /app
+mount: /etc/localtime -> /etc/localtime

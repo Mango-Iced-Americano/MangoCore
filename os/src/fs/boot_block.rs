@@ -1,111 +1,263 @@
-//! Boot block device registry.
-//!
-//! Maps device names (e.g. "vda", "vdb", "mmcblk0") to block devices.
-//! Future drivers (MMC, NVMe) register here via `register_boot_block()`.
-//!
-//! This module deliberately does not mount filesystems. The kernel discovers
-//! hardware and exposes `/dev` nodes before PID1 owns mount policy.
-
 use super::BlockDevice;
 use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
-use alloc::{collections::BTreeMap, string::String, sync::Arc};
+use crate::drivers::block::{
+    BlockDeviceDescriptor, BlockDeviceNode, BlockDeviceNumber, BlockDeviceRole,
+};
+use alloc::{collections::{BTreeMap, BTreeSet}, string::String, sync::Arc, vec::Vec};
+use lazy_static::*;
 use spin::Mutex;
 
-/// Global boot-block device registry.
-/// Maps device names (e.g. "vda", "mmcblk0") to block devices.
-static BOOT_BLOCK_REGISTRY: Mutex<Option<BTreeMap<String, Arc<dyn BlockDevice>>>> = Mutex::new(None);
-
-/// Initialize the boot-block registry (called once during boot-block mount).
-fn ensure_registry() -> &'static Mutex<Option<BTreeMap<String, Arc<dyn BlockDevice>>>> {
-    let mut guard = BOOT_BLOCK_REGISTRY.lock();
-    if guard.is_none() {
-        *guard = Some(BTreeMap::new());
-    }
-    drop(guard);
-    &BOOT_BLOCK_REGISTRY
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootBlockRegistryError {
+    DuplicateName,
+    DuplicateDeviceNumber,
+    DuplicateRole,
 }
 
-/// Register a block device by name.
-pub fn register_boot_block(name: &str, dev: Arc<dyn BlockDevice>) {
-    let registry = ensure_registry();
-    let mut guard = registry.lock();
-    if let Some(map) = guard.as_mut() {
-        map.insert(String::from(name), dev);
-    }
+#[derive(Debug)]
+pub enum BootBlockPublishError {
+    Registry(BootBlockRegistryError),
+    Devfs(crate::utils::error::SyscallErr),
 }
 
-/// Resolve a block device by its /dev name.
-/// Returns None if the device is not registered.
-pub fn resolve_block_device(name: &str) -> Option<Arc<dyn BlockDevice>> {
-    let registry = ensure_registry();
-    let guard = registry.lock();
-    guard.as_ref()?.get(name).cloned()
+struct RegisteredBlockDevice {
+    device: Arc<dyn BlockDevice>,
 }
 
-/// Probe boot devices and register raw and partition devfs nodes.
-pub(crate) fn register_boot_block_devices() {
-    let devs = crate::drivers::block::block_devices();
-    let sdcard = devs[0].clone();
+pub struct BootBlockRegistry {
+    devices: BTreeMap<String, RegisteredBlockDevice>,
+    numbers: BTreeSet<BlockDeviceNumber>,
+    roles: BTreeMap<BlockDeviceRole, Arc<dyn BlockDevice>>,
+}
 
-    if let Some(blk0) = sdcard.as_ref() {
-        let _ = crate::fs::dev::DEV_FS.add_dev(
-            "vda",
-            crate::fs::dev::block::BlockDevInode::new(blk0.clone(), 0, String::from("vda")),
-        );
-        register_boot_block("vda", blk0.clone());
+impl BootBlockRegistry {
+    pub fn new() -> Self {
+        Self {
+            devices: BTreeMap::new(),
+            numbers: BTreeSet::new(),
+            roles: BTreeMap::new(),
+        }
     }
 
-    match devs[1].as_ref() {
-        None => {}
-        Some(raw_vdb) => {
-            let raw_vdb = raw_vdb.clone();
-            let _ = crate::fs::dev::DEV_FS.add_dev(
-                "vdb",
-                crate::fs::dev::block::BlockDevInode::new(raw_vdb.clone(), 1, String::from("vdb")),
-            );
-            register_boot_block("vdb", raw_vdb.clone());
+    fn role_is_unique(role: BlockDeviceRole) -> bool {
+        matches!(role, BlockDeviceRole::Root | BlockDeviceRole::Tools)
+    }
 
-            match probe_mbr(&raw_vdb) {
-                Ok(MbrProbe::NoMbr) => {}
-                Ok(MbrProbe::Unsupported) => {}
-                Ok(MbrProbe::Partitions(parts)) => {
-                    for part in parts {
-                        let part_dev = Arc::new(PartitionBlockDevice::new(
-                            raw_vdb.clone(),
-                            part.start_lba,
-                            part.sectors,
-                        )) as Arc<dyn BlockDevice>;
-                        let name = alloc::format!("vdb{}", part.partno);
-                        let _ = crate::fs::dev::DEV_FS.add_dev(
-                            &name,
-                            crate::fs::dev::block::BlockDevInode::new(
-                                part_dev.clone(),
-                                1 + part.partno as u64,
-                                name.clone(),
-                            ),
-                        );
-                        register_boot_block(&name, part_dev.clone());
-                        println!(
-                            "[mbr] registered /dev/{} (type={:#x}, size={}M)",
-                            name,
-                            part.type_code,
-                            part.sectors * 512 / (1024 * 1024)
-                        );
-
-                        let alias = alloc::format!("vda{}", part.partno);
-                        let _ = crate::fs::dev::DEV_FS.add_dev(
-                            &alias,
-                            crate::fs::dev::block::BlockDevInode::new(
-                                part_dev.clone(),
-                                100 + part.partno as u64,
-                                alias.clone(),
-                            ),
-                        );
-                        register_boot_block(&alias, part_dev.clone());
-                    }
-                }
-                Err(_) => {}
+    pub fn validate_all(
+        &self,
+        descriptors: &[BlockDeviceDescriptor],
+    ) -> Result<(), BootBlockRegistryError> {
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            let node = descriptor.node();
+            if self.devices.contains_key(node.name().as_str()) {
+                return Err(BootBlockRegistryError::DuplicateName);
             }
+            if self.numbers.contains(&node.number()) {
+                return Err(BootBlockRegistryError::DuplicateDeviceNumber);
+            }
+            if Self::role_is_unique(descriptor.role()) && self.roles.contains_key(&descriptor.role()) {
+                return Err(BootBlockRegistryError::DuplicateRole);
+            }
+            for prior in &descriptors[..index] {
+                if prior.node().name() == node.name() {
+                    return Err(BootBlockRegistryError::DuplicateName);
+                }
+                if prior.node().number() == node.number() {
+                    return Err(BootBlockRegistryError::DuplicateDeviceNumber);
+                }
+                if Self::role_is_unique(descriptor.role()) && prior.role() == descriptor.role() {
+                    return Err(BootBlockRegistryError::DuplicateRole);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn register_all(
+        &mut self,
+        descriptors: &[BlockDeviceDescriptor],
+    ) -> Result<(), BootBlockRegistryError> {
+        self.validate_all(descriptors)?;
+        for descriptor in descriptors {
+            let node = descriptor.node();
+            self.numbers.insert(node.number());
+            self.devices.insert(
+                String::from(node.name().as_str()),
+                RegisteredBlockDevice {
+                    device: descriptor.device().clone(),
+                },
+            );
+            if Self::role_is_unique(descriptor.role()) {
+                self.roles.insert(descriptor.role(), descriptor.device().clone());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolve(&self, name: &str) -> Option<Arc<dyn BlockDevice>> {
+        self.devices.get(name).map(|device| device.device.clone())
+    }
+
+    pub fn resolve_role(&self, role: BlockDeviceRole) -> Option<Arc<dyn BlockDevice>> {
+        self.roles.get(&role).cloned()
+    }
+
+    fn replace_role_device(&mut self, role: BlockDeviceRole, device: Arc<dyn BlockDevice>) {
+        self.roles.insert(role, device);
+    }
+}
+
+lazy_static! {
+    static ref BOOT_BLOCK_REGISTRY: Mutex<BootBlockRegistry> = Mutex::new(BootBlockRegistry::new());
+}
+
+pub fn resolve_block_device(name: &str) -> Option<Arc<dyn BlockDevice>> {
+    BOOT_BLOCK_REGISTRY.lock().resolve(name)
+}
+
+pub fn resolve_role_block_device(role: BlockDeviceRole) -> Option<Arc<dyn BlockDevice>> {
+    BOOT_BLOCK_REGISTRY.lock().resolve_role(role)
+}
+
+pub fn publish_block_descriptors(
+    descriptors: &[BlockDeviceDescriptor],
+) -> Result<(), BootBlockPublishError> {
+    BOOT_BLOCK_REGISTRY
+        .lock()
+        .validate_all(descriptors)
+        .map_err(BootBlockPublishError::Registry)?;
+    crate::fs::dev::DEV_FS
+        .add_block_devices(descriptors)
+        .map_err(BootBlockPublishError::Devfs)?;
+    BOOT_BLOCK_REGISTRY
+        .lock()
+        .register_all(descriptors)
+        .map_err(BootBlockPublishError::Registry)
+}
+
+fn partition_name(name: &str, partno: u32) -> String {
+    match name.as_bytes().last() {
+        Some(byte) if byte.is_ascii_digit() => alloc::format!("{}p{}", name, partno),
+        _ => alloc::format!("{}{}", name, partno),
+    }
+}
+
+struct BlockMinorAllocator {
+    allocated: BTreeSet<BlockDeviceNumber>,
+}
+
+impl BlockMinorAllocator {
+    fn from_descriptors(descriptors: &[BlockDeviceDescriptor]) -> Self {
+        Self {
+            allocated: descriptors
+                .iter()
+                .map(|descriptor| descriptor.node().number())
+                .collect(),
+        }
+    }
+
+    fn allocate(&mut self, major: u64) -> Option<BlockDeviceNumber> {
+        let mut minor = 0;
+        loop {
+            let number = BlockDeviceNumber::new(major, minor);
+            if self.allocated.insert(number) {
+                return Some(number);
+            }
+            minor = minor.checked_add(1)?;
+        }
+    }
+}
+
+fn boot_descriptors() -> (Vec<BlockDeviceDescriptor>, Option<Arc<dyn BlockDevice>>) {
+    let mut descriptors = crate::drivers::block::block_devices().to_vec();
+    let mut allocator = BlockMinorAllocator::from_descriptors(&descriptors);
+    let mut tools_mount = None;
+    let raw_devices = descriptors.clone();
+
+    for raw_device in raw_devices {
+        if raw_device.role() != BlockDeviceRole::Tools {
+            continue;
+        }
+        let parts = match probe_mbr(raw_device.device()) {
+            Ok(MbrProbe::Partitions(parts)) => parts,
+            Ok(MbrProbe::NoMbr | MbrProbe::Unsupported) | Err(_) => continue,
+        };
+        for part in parts {
+            let Some(number) = allocator.allocate(raw_device.node().number().major()) else {
+                println!("[mbr] no free minor for {}", raw_device.node().name().as_str());
+                break;
+            };
+            let name = partition_name(
+                raw_device.node().name().as_str(),
+                u32::from(part.partno),
+            );
+            let node = match BlockDeviceNode::new(&name, number) {
+                Ok(node) => node,
+                Err(_) => {
+                    println!("[mbr] invalid partition name {}", name);
+                    continue;
+                }
+            };
+            let device = Arc::new(PartitionBlockDevice::new(
+                raw_device.device().clone(),
+                part.start_lba,
+                part.sectors,
+            )) as Arc<dyn BlockDevice>;
+            if part.partno == 1 {
+                tools_mount = Some(device.clone());
+            }
+            descriptors.push(BlockDeviceDescriptor::new(node, device, BlockDeviceRole::Data));
+        }
+    }
+    (descriptors, tools_mount)
+}
+
+pub(crate) fn register_boot_block_devices() -> Result<(), BootBlockPublishError> {
+    let (descriptors, tools_mount) = boot_descriptors();
+    publish_block_descriptors(&descriptors)?;
+    if let Some(tools_mount) = tools_mount {
+        BOOT_BLOCK_REGISTRY
+            .lock()
+            .replace_role_device(BlockDeviceRole::Tools, tools_mount);
+    }
+    Ok(())
+}
+
+pub fn mount_tools_disk() {
+    let Some(tools_device) = resolve_role_block_device(BlockDeviceRole::Tools) else {
+        println!("[kernel] no tools disk found, skipping /tools mount");
+        return;
+    };
+    let root = super::vfs_root();
+    let _ = super::mount_block_fs(&root, &tools_device, "tools", "tools disk");
+}
+
+pub fn mount_boot_block_devices(config: &crate::bootargs::BootConfig) {
+    if let Err(error) = register_boot_block_devices() {
+        println!("[kernel] block publication failed: {:?}", error);
+        return;
+    }
+
+    if config.root == "initramfs" {
+        mount_tools_disk();
+        return;
+    }
+
+    let root = super::vfs_root();
+    let root_name = config.root.strip_prefix("/dev/").unwrap_or(&config.root);
+    let root_device = resolve_block_device(root_name);
+    match root_device {
+        Some(device) => {
+            if super::mount_block_fs(&root, &device, "sdcard", "root device").is_none() {
+                println!("[initramfs] root device '{}' mount failed", config.root);
+            }
+        }
+        None => println!("[initramfs] root device '{}' not found", config.root),
+    }
+
+    if let Some(tools_device) = resolve_role_block_device(BlockDeviceRole::Tools) {
+        if super::mount_block_fs(&root, &tools_device, "tools", "tools disk").is_none() {
+            println!("[initramfs] tools disk mount failed");
         }
     }
 }

@@ -21,14 +21,16 @@ use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, IpcNamespace, MountNamespace,
     NetNamespace, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE,
 };
-use crate::config::{MMAP_BASE, PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
+use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
 use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
-use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{
+    kernel_program_base, AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE,
+};
 use crate::syscall::errno::{EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
@@ -773,14 +775,14 @@ impl TaskControlBlock {
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
         macro_rules! init_task_trace {
             ($($arg:tt)*) => {
-                #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+                #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
                 println!("[bringup][tcb] {}", format_args!($($arg)*));
             };
         }
 
         // 将ELF文件映射到内核空间
         init_task_trace!("01 map init ELF into kernel space");
-        let elf_data = elf.map_to_kernel_space(MMAP_BASE);
+        let elf_data = elf.map_to_kernel_space(kernel_program_base());
         if elf_data.is_empty() {
             panic!("[TCB::new] initproc ELF is empty");
         }
@@ -793,7 +795,7 @@ impl TaskControlBlock {
         // 在内核空间中删除ELF区域
         crate::mm::KERNEL_SPACE
             .lock()
-            .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
+            .remove_area_with_start_vpn(VirtAddr::from(kernel_program_base()).floor())
             .unwrap();
         init_task_trace!("04 temporary kernel ELF mapping removed");
 
@@ -1152,7 +1154,7 @@ impl TaskControlBlock {
 
         // 将ELF文件映射到内核空间
         let _t_kmap = perf::perf_time_now();
-        let elf_data = elf.map_to_kernel_space(MMAP_BASE);
+        let elf_data = elf.map_to_kernel_space(kernel_program_base());
         if elf_data.is_empty() {
             log::error!("[load_elf] ELF file is empty (size=0)");
             return Err(ENOEXEC);
@@ -1169,7 +1171,7 @@ impl TaskControlBlock {
         let _t_teardown = perf::perf_time_now();
         crate::mm::KERNEL_SPACE
             .lock()
-            .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
+            .remove_area_with_start_vpn(VirtAddr::from(kernel_program_base()).floor())
             .unwrap();
         let _td_ticks = perf::perf_time_now().wrapping_sub(_t_teardown);
         perf::EXECVE_TEARDOWN_TICKS.fetch_add(_td_ticks, Ordering::Relaxed);

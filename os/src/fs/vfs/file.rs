@@ -1787,7 +1787,7 @@ impl File {
                 }
                 // pread directly into each frame, avoiding a monolithic heap Vec
                 let mut offset = 0;
-                for tracker in &trackers {
+                for (index, tracker) in trackers.iter().enumerate() {
                     let dst = tracker.ppn.get_bytes_array();
                     let chunk = (size - offset).min(PAGE_SIZE);
                     let n = self
@@ -1814,8 +1814,8 @@ impl File {
             alloc_and_pread(size, need_pages)
         };
 
-        KERNEL_SPACE
-            .lock()
+        let mut kernel_space = KERNEL_SPACE.lock();
+        kernel_space
             .insert_program_area(
                 crate::mm::VirtAddr::from(base).try_into().unwrap(),
                 MapPermission::R | MapPermission::W,

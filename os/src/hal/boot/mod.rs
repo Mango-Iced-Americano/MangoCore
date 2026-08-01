@@ -13,8 +13,6 @@
 pub enum BootProtocol {
     /// Standard RISC-V SBI boot: a0=hartid, a1=dtb_paddr.
     RiscvFdt,
-    /// U-Boot `go` command on VisionFive2 — a1 is NOT a DTB pointer.
-    UbootGo,
     /// LoongArch64 QEMU direct boot or legacy U-Boot handoff.
     LoongArchLegacy,
     /// Kernel self-test or regression mode (no firmware).
@@ -28,6 +26,10 @@ pub struct RawBootInfo {
     pub hart_id: usize,
     /// Physical address of the DTB (Flattened Device Tree) blob, or 0 if none.
     pub dtb_paddr: usize,
+    /// Physical address of the entry instruction reached from firmware.
+    pub entry_paddr: usize,
+    /// Physical address of the first byte of the relative Image.
+    pub image_paddr: usize,
 }
 
 // These #[no_mangle] statics are written by entry.asm BEFORE rust_main().
@@ -41,6 +43,14 @@ pub static mut RAW_HART_ID: usize = 0;
 #[link_section = ".data.boot"]
 pub static mut RAW_DTB_PADDR: usize = 0;
 
+#[no_mangle]
+#[link_section = ".data.boot"]
+pub static mut RAW_ENTRY_PADDR: usize = 0;
+
+#[no_mangle]
+#[link_section = ".data.boot"]
+pub static mut RAW_IMAGE_PADDR: usize = 0;
+
 /// Call this as the VERY FIRST line of rust_main().
 /// Detects the boot protocol from feature flags and saves the raw register values.
 pub fn save_boot_info() {
@@ -50,6 +60,10 @@ pub fn save_boot_info() {
     let hart_id = unsafe { RAW_HART_ID };
     // SAFETY: Same single-threaded entry handoff as RAW_HART_ID above.
     let dtb_paddr = unsafe { RAW_DTB_PADDR };
+    // SAFETY: Same single-threaded entry handoff as RAW_HART_ID above.
+    let entry_paddr = unsafe { RAW_ENTRY_PADDR };
+    // SAFETY: Same single-threaded entry handoff as RAW_HART_ID above.
+    let image_paddr = unsafe { RAW_IMAGE_PADDR };
     // SAFETY: save_boot_info() is invoked once before any concurrent execution;
     // boot_info() only exposes an immutable reference after this initialization.
     unsafe {
@@ -57,6 +71,8 @@ pub fn save_boot_info() {
             protocol,
             hart_id,
             dtb_paddr,
+            entry_paddr,
+            image_paddr,
         });
     }
 }
@@ -73,25 +89,34 @@ pub fn boot_info() -> &'static RawBootInfo {
     }
 }
 
+/// Translate an RV64 kernel-linked virtual address to its runtime physical
+/// address. Other architectures retain their existing identity layout.
+pub fn kernel_linked_to_phys(linked_vaddr: usize) -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        linked_vaddr - crate::config::KERNEL_LINK_VADDR + boot_info().image_paddr
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        linked_vaddr
+    }
+}
+
 // Internal storage.
 #[link_section = ".data.boot"]
 static mut SAVED_BOOT_INFO: Option<RawBootInfo> = None;
 
-/// Determine protocol at compile time from feature flags.
+/// Determine protocol from the target ABI.
 fn detect_protocol() -> BootProtocol {
-    #[cfg(all(feature = "riscv", feature = "board_vf2"))]
-    {
-        return BootProtocol::UbootGo;
-    }
-    #[cfg(all(feature = "riscv", not(feature = "board_vf2")))]
+    #[cfg(target_arch = "riscv64")]
     {
         return BootProtocol::RiscvFdt;
     }
-    #[cfg(feature = "loongarch64")]
+    #[cfg(target_arch = "loongarch64")]
     {
         return BootProtocol::LoongArchLegacy;
     }
-    #[cfg(not(any(feature = "riscv", feature = "loongarch64")))]
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
     {
         BootProtocol::Test
     }

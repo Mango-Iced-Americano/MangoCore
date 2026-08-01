@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-28
+last_update: 2026-07-31
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -141,7 +141,63 @@ pub const MAX_RW_COUNT: usize =
 
 这组导出构成 HAL 对上层的稳定命名面。MM 层通过 `PageTableImpl` 和 `tlb_invalidate` 操作页表；task 层通过 `KernelStack`、`TrapContext`、`__switch`、`trap_return` 完成调度与返回用户态；syscall/trap 层通过 `get_bad_addr()`、`get_exception_cause()`、`program_timer_delta()` 接入异常和时钟。`IO_CHUNK_SIZE` 用于限制 I/O bounce buffer 的单块大小；`MAX_RW_COUNT` 对齐 Linux 可见的单次读写上限。
 
-## 4. 架构选择
+## 4. Firmware 两阶段初始化与 FDT 快照
+
+`os/src/hal/firmware/` 抽象了硬件发现来源：Flattened Device Tree (FDT)、ACPI 表或编译期静态配置。当前仅 FDT (RISC-V QEMU) 和静态回退（UbootGo、LoongArchLegacy、Test）在生产中使用。
+
+### 4.1 问题背景
+
+当前 RV64 QEMU ktest 环境下 OpenSBI 将 DTB 放置在物理地址 `0x82200000`，该地址在旧版内核布局中与 BSS 段重叠。`rust_main()` 中的 `mem_clear()` 将 BSS 清零时擦除了 DTB 数据，导致 post-heap `build_platform_info()` 读到的 FDT 头部全为零，回退到静态 fallback。注意这是当前 ktest 观测结果，不代表所有 QEMU/OpenSBI 版本或实板的固定放置规律。
+
+### 4.2 两阶段设计
+
+| 阶段 | 函数 | 调用时机 | 能力 | 行为 |
+|------|------|----------|------|------|
+| **Phase 1 — 预堆快照** | `populate_memory_regions()` | `bootstrap_init()` 后，`mem_clear()` 前 | 零分配，仅操作原始字节 | 验证 DTB magic，`ptr::copy` 到 `.data.boot` 段静态缓冲区；解析 `/memory` 节点填充 `MEMORY_BUF` |
+| **Phase 2 — 后堆解析** | `build_platform_info()` | `mm::init()` 后，通过 `init_platform_info()` | 可分配 (alloc) | 从 `.data.boot` 快照构造 `fdt::Fdt`，枚举全部设备节点，生成 `PlatformInfo` |
+
+### 4.3 快照数据结构
+
+```rust
+/// 最大保留的 FDT 大小（2 MiB，当前已验证上限）。
+const MAX_FDT_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024;
+
+/// 固定容量的 FDT 字节缓冲区，标注在 .data.boot 段。
+/// .data.boot 位于 .data 段内，BSS clear (mem_clear) 不会触及。
+#[link_section = ".data.boot"]
+static mut FDT_SNAPSHOT: FdtSnapshot = FdtSnapshot::new();
+
+struct FdtSnapshot {
+    bytes: [u8; MAX_FDT_SNAPSHOT_SIZE],
+    len: usize,  // 非零表示快照已发布，此后只读
+}
+```
+
+### 4.4 协议门禁
+
+只有 `BootProtocol::RiscvFdt` 通过 `has_valid_dtb()` 门禁，进入快照路径。其他协议直接使用静态 fallback：
+
+| 协议 | 来源 | 快照路径 | post-heap 数据来源 |
+|------|------|----------|-------------------|
+| `RiscvFdt` | QEMU RISC-V (a1 传 DTB paddr) | `capture_fdt_snapshot()` → `.data.boot` | `fdt_snapshot()` 返回的 `&[u8]` |
+| `UbootGo` | VF2 实板 (U-Boot `go` 命令) | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
+| `LoongArchLegacy` | LA64 QEMU | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
+| `Test` | ktest 单元测试 | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
+
+### 4.5 关键约束
+
+1. **快照从不回头读原始 firmware 地址** — `build_platform_info()` 只使用 `fdt_snapshot()` 返回的 `&[u8]`，不接触原始 DTB 物理地址。
+2. **`.data.boot` 标注的符号必须位于 `.data` 段内、BSS 段之前** — link 脚本布局确保所有 `#[link_section = ".data.boot"]` 符号落在 `.data` section 中，`readelf -sW` 可验证快照符号在 `sdata` 后、`edata` 前、`sbss` 前。
+3. **`len` 即最终写入标记** — 单线程 early boot 在完整 `ptr::copy` 后才写入 `len`；任何非零 `len` 阻止二次捕获。
+4. **仅 RV64 QEMU 受此影响** — LA64 使用 `LoongArchLegacy` 协议，不传递 DTB；VF2 的 `UbootGo` 同样不走快照。
+
+### 4.6 RV64 PCI host 与 early MMIO 映射
+
+RV64 PCI 不依赖固定的 QEMU 地址布局。预堆阶段的 `parse_node_resources()` 除了处理每个节点的 `reg`，还识别 `pci-host-ecam-generic`/`pci-host-cam-generic` 节点的 `ranges` 属性。对于 QEMU 使用的 28-byte PCI range entry，它只接收 non-prefetchable 或 prefetchable 的 32/64-bit memory space：父总线的物理基址与非零长度进入 `MEMORY_BUF.mmio`。因此内核页表会在设备枚举前同时映射 host bridge 的 ECAM `reg` 和 PCI BAR MMIO window；I/O space 不会被当作可映射内存。
+
+后堆阶段的 `resolve_pci_host()` 只接受 enabled 且资源有效的 host，使用其首个 `reg` 作为 ECAM，并从第一个有效 memory `ranges` entry 构造 `PlatformInfo::pci_host()` 返回的 `PciHost { ecam_base, ecam_size, mmio_base, mmio_size }`。RV64 VirtIO PCI driver 据此获取 ECAM 基址；如果 FDT 没有可用 host，才打印 warning 并使用 `RV64_PCI_ECAM_FALLBACK_BASE`。LA64 保持静态 `PCI_ECAM_BASE` 路径，未通过此 FDT 接口改变。
+
+## 5. 架构选择
 
 `hal/arch/mod.rs` 使用 feature 选择后端：
 
@@ -152,9 +208,9 @@ pub const MAX_RW_COUNT: usize =
 
 两套后端都导出同名的 `bootstrap_init()`、`machine_init()`、`trap_handler()`、`trap_return()`、`PageTableImpl`、`TrapContext`、`KernelStack` 等接口。架构无关层只依赖这些统一名字。
 
-## 5. RISC-V 后端
+## 6. RISC-V 后端
 
-### 5.1 模块地图
+### 6.1 模块地图
 
 | 模块 | 作用 |
 |------|------|
@@ -166,7 +222,7 @@ pub const MAX_RW_COUNT: usize =
 | `time.rs` | `get_time()`、`get_clock_freq()`、`program_timer_delta()` |
 | `trap/` | trap context、汇编入口、syscall/缺页/timer 分发 |
 
-### 5.2 初始化
+### 6.2 初始化
 
 `hal/arch/riscv/mod.rs` 中：
 
@@ -181,7 +237,7 @@ pub fn bootstrap_init() {}
 
 rv64 的 `machine_init()` 只安装 trap 并打开 supervisor timer interrupt。第一次 timer deadline 由 `task::timer_subsystem_init()` 之后的 timer 编程路径设置。
 
-### 5.3 Trap 路径
+### 6.3 Trap 路径
 
 RISC-V trap 后端负责：
 
@@ -195,9 +251,9 @@ RISC-V trap 后端负责：
 
 `trap_return()` 调用 `do_signal()` 后设置用户 trap entry 为 trampoline，跳转到 `__restore`，传入 trap context 虚拟地址和用户页表 token，并执行 `fence.i`。
 
-## 6. LoongArch64 后端
+## 7. LoongArch64 后端
 
-### 6.1 模块地图
+### 7.1 模块地图
 
 | 模块 | 作用 |
 |------|------|
@@ -210,7 +266,7 @@ RISC-V trap 后端负责：
 | `trap/` | trap context、异常分发、非对齐访存模拟、返回用户态 |
 | `acpi.rs`, `boot.rs`, `sbi.rs` | la64 平台相关辅助 |
 
-### 6.2 `bootstrap_init()`
+### 7.2 `bootstrap_init()`
 
 la64 的早期初始化较重：
 
@@ -240,7 +296,7 @@ HWCAP 表示“用户态可安全使用”的能力，不只是裸硬件能力�
 路径恢复。因此 CPUCFG2 报告 LSX 且这条上下文链完整时，才可打开 `EUEN.SXE` 并发布
 `HWCAP_LSX`。LASX 和 LBT 仍未进入上下文，对应 EUEN/HWCAP 继续关闭。
 
-### 6.3 `machine_init()`
+### 7.3 `machine_init()`
 
 la64 `machine_init()` 做运行期配置：
 
@@ -254,7 +310,7 @@ trap::enable_timer_interrupt()
 
 `trap::enable_timer_interrupt()` 设置 timer 中断向量。实际 timer deadline 仍由 timer 子系统编程。
 
-### 6.4 Trap 路径
+### 7.4 Trap 路径
 
 la64 trap 后端覆盖：
 
@@ -270,7 +326,7 @@ la64 trap 后端覆盖：
 
 `trap_return()` 调用 `do_signal()`，设置 exception entry 为 `strampoline`，配置 `pplv=3` 与 `pie=true`，把 trap context、用户页表 token 和 ASID 交给恢复汇编。
 
-## 7. HAL 与上层的接口契约
+## 8. HAL 与上层的接口契约
 
 | 契约 | 依据 | 影响 |
 |------|------|------|
@@ -284,7 +340,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 
 读 HAL 相关 bug 时，应先确认失败发生在契约哪一侧：如果 `sys_read` 参数已经错，问题在 trap ABI；如果参数正确但文件语义错，问题在 syscall/fs；如果 `mprotect` 后仍可写，问题可能在页表/TLB；如果 signal handler 没进，先看 `trap_return()` 是否执行 `do_signal()`，再看 signal 模块是否有 pending。
 
-## 8. 调试入口
+## 9. 调试入口
 
 | 问题 | 首选文件 | 断点/检查点 |
 |------|----------|-------------|
@@ -294,7 +350,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | la64 dirty bit 问题 | `hal/arch/loongarch64/trap/mod.rs`, `laflex.rs` | page modify 成功后的 `set_dirty_bit()` |
 | TLB 陈旧 | `hal/arch/riscv/sv39.rs`, `hal/arch/loongarch64/tlb.rs` | invalidate 调用点 |
 
-## 9. 测试映射
+## 10. 测试映射
 
 | 测试目标 | 覆盖接口 | 推荐验证 |
 |----------|----------|----------|
@@ -304,12 +360,12 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | 缺页处理 | trap + MM | mmap、fork、exec、page fault 用例 |
 | timer interrupt | HAL time + task timer | nanosleep、futex timeout、timer 系统调用 |
 
-## 10. 源文件索引
+## 11. 源文件索引
 
 | 路径 | 内容 |
 |------|------|
 | `os/src/hal/mod.rs` | 公共导出、`IO_CHUNK_SIZE`、`MAX_RW_COUNT` |
-| `os/src/hal/platform/{mod.rs,info.rs}` | post-heap owned `PlatformInfo`、设备分类和静态回退构造器 |
+| `os/src/hal/platform/{mod.rs,info.rs}` | post-heap owned `PlatformInfo`、设备分类、`PciHost` 固件资源和静态回退构造器 |
 | `os/src/hal/arch/mod.rs` | feature 选择和后端 re-export |
 | `os/src/hal/arch/riscv/mod.rs` | rv64 后端模块、类型别名、初始化 |
 | `os/src/hal/arch/riscv/sv39.rs` | SV39 页表和 `sfence.vma` |
@@ -319,3 +375,5 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | `os/src/hal/arch/loongarch64/tlb.rs` | la64 ASID/TLB |
 | `os/src/hal/arch/loongarch64/trap/mod.rs` | la64 trap/syscall/page fault/timer/unaligned access |
 | `os/src/hal/platform/` | 板级常量 |
+| `os/src/hal/firmware/mod.rs` | 两阶段初始化编排、`FdtSnapshot` 结构体、`MAX_FDT_SNAPSHOT_SIZE`、`#[link_section = ".data.boot"]` 静态缓冲区 |
+| `os/src/hal/firmware/fdt.rs` | `capture_fdt_snapshot()`（pre-BSS 快照）、PCI `ranges` early mapping、`build_platform_info()`（post-heap 从快照解构）、`read_totalsize()` 验证 DTB magic |

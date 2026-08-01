@@ -241,8 +241,8 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
         fn ekernel();
     }
 
-    let kernel_start = skernel as usize;
-    let kernel_end = ekernel as usize;
+    let kernel_start = crate::hal::boot::kernel_linked_to_phys(skernel as *const () as usize);
+    let kernel_end = crate::hal::boot::kernel_linked_to_phys(ekernel as *const () as usize);
     let mut previous_end = 0usize;
 
     let firmware_reserved_regions = firmware::firmware_reserved_regions();
@@ -799,8 +799,8 @@ lazy_static! {
 
 #[cfg(all(
     feature = "loongarch64",
-    feature = "board_2k1000",
-    feature = "board_bringup_trace"
+    feature = "boot_la_uboot_dmw",
+    feature = "bringup_trace"
 ))]
 fn probe_board_memory_word(pa: usize) {
     let ptr = pa as *mut u64;
@@ -836,8 +836,8 @@ fn probe_board_memory_word(pa: usize) {
 
 #[cfg(all(
     feature = "loongarch64",
-    feature = "board_2k1000",
-    feature = "board_bringup_trace"
+    feature = "boot_la_uboot_dmw",
+    feature = "bringup_trace"
 ))]
 fn probe_board_memory_regions() {
     for_each_usable_frame_region(|start, end| {
@@ -855,8 +855,8 @@ fn probe_board_memory_regions() {
 pub fn init_frame_allocator() {
     #[cfg(all(
         feature = "loongarch64",
-        feature = "board_2k1000",
-        feature = "board_bringup_trace"
+        feature = "boot_la_uboot_dmw",
+        feature = "bringup_trace"
     ))]
     probe_board_memory_regions();
     FRAME_ALLOCATOR.write().init();

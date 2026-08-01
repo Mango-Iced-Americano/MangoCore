@@ -100,24 +100,15 @@ fn main() {
     let cmdline = std::env::var("MANGO_CMDLINE")
         .unwrap_or_else(|_| String::from("mango.mode=normal"));
 
-    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("riscv64") {
-        let linker_script = match (
-            std::env::var_os("CARGO_FEATURE_BOARD_RVQEMU").is_some(),
-            std::env::var_os("CARGO_FEATURE_BOARD_VF2").is_some(),
-        ) {
-            (true, false) => {
-                println!("cargo:rerun-if-changed=src/hal/arch/riscv/linker-rvqemu.ld");
-                "src/hal/arch/riscv/linker-rvqemu.ld"
-            }
-            (false, true) => {
-                println!("cargo:rerun-if-changed=src/hal/arch/riscv/linker-vf2.ld");
-                "src/hal/arch/riscv/linker-vf2.ld"
-            }
-            (false, false) => panic!("RV64 build requires exactly one board feature"),
-            (true, true) => panic!("RV64 build requires exactly one board feature"),
-        };
-
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
+        .expect("Cargo must provide the target architecture to the build script");
+    if target_arch == "riscv64" {
+        let linker_script = "src/hal/arch/riscv/linker.ld";
+        println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
+    } else if target_arch == "loongarch64" {
+    } else {
+        panic!("unsupported kernel target architecture: {target_arch}");
     }
 
     // Safety: no newlines allowed in bootargs (would break parsing)

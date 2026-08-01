@@ -37,6 +37,7 @@ mod timestamp;
 pub mod vfs;
 
 pub use self::dev::pipe::*;
+pub use boot_block::{mount_boot_block_devices, mount_tools_disk};
 
 pub use self::layout::*;
 
@@ -44,7 +45,6 @@ pub use self::fat32::DiskInodeType;
 pub use self::filesystem::{detect_fs, detect_fs_layout, FS_Type};
 pub use crate::drivers::block::BlockDevice;
 
-use crate::bootargs::BootConfig;
 use self::vfs::FileSystem as _;
 use self::vfs::IndexNode;
 use alloc::{string::String, sync::Arc};
@@ -316,169 +316,9 @@ pub fn mount_block_fs(
     Some(mfs)
 }
 
-/// 尝试挂载工具盘（BLOCK_DEVICES[1]）到 /tools。
-/// 设备不存在或挂载失败时不 panic，打印日志并优雅跳过。
-pub fn mount_tools_disk() {
-    let tools_dev = match crate::drivers::BLOCK_DEVICES[1].as_ref() {
-        Some(dev) => dev,
-        None => {
-            println!("[kernel] no tools disk (x1) found, skipping /tools mount");
-            return;
-        }
-    };
-    let root = vfs_root();
-    mount_block_fs(&root, tools_dev, "tools", "tools disk");
-}
-
 /// 返回新的 VFS 根（MountFS 实例）的共享引用。
 pub fn vfs_root() -> Arc<self::vfs::MountFS> {
     VFS_ROOT.clone()
-}
-
-/// 注册 /dev/vda 和 /dev/vdb 块设备节点到当前 devfs。
-/// 无需单独调用 — 由 mount_boot_block_devices 间接调用。
-pub fn register_block_device_nodes() {
-    // 保留空函数体供未来 devfs 重构使用；当前块设备节点已在
-    // mount_common_filesystems 中注册（使用 block_devices() 安全探测）。
-}
-
-/// 在 initramfs 模式下，首次触发 BLOCK_DEVICES 探测，并尝试挂载块设备：
-/// - x0 → /sdcard（官方 fs）
-/// - x1 → /tools（工具盘）
-///
-/// 任何设备缺失或挂载失败都只打印 warning，不 panic。
-pub fn mount_boot_block_devices(config: &BootConfig) {
-    let root = vfs_root();
-
-    // 首次真正触发 BLOCK_DEVICES probe，但此时 VFS_ROOT 已经存在
-    let devs = crate::drivers::block::block_devices();
-    // Publish raw devices and partition aliases before resolving root=.
-    crate::fs::boot_block::register_boot_block_devices();
-
-    // 注册 /dev/vda（原始根设备，不做 MBR 解析以避免 FAT32 55AA 误判）
-    if let Some(ref blk0) = devs[0] {
-        let _ = crate::fs::dev::DEV_FS.add_dev(
-            "vda",
-            crate::fs::dev::block::BlockDevInode::new(blk0.clone(), 0, String::from("vda")),
-        );
-    }
-
-    // Mount root device from bootargs (default: /dev/vda).
-    let root_dev_name = config.root.strip_prefix("/dev/").unwrap_or(&config.root);
-    match crate::fs::boot_block::resolve_block_device(root_dev_name) {
-        Some(root_dev) => {
-            if mount_block_fs(&root, &root_dev, "sdcard", "root device").is_none() {
-                crate::println!(
-                    "[initramfs] root device '{}' mount failed, leaving /sdcard empty",
-                    config.root
-                );
-            }
-        }
-        None => {
-            crate::println!(
-                "[initramfs] root device '{}' not found in boot-block registry, falling back to devs[0]",
-                config.root
-            );
-            match devs[0].as_ref() {
-                Some(dev) => {
-                    if mount_block_fs(&root, dev, "sdcard", "official fs (x0)").is_none() {
-                        crate::println!(
-                            "[initramfs] official fs (x0) mount failed, leaving /sdcard empty"
-                        );
-                    }
-                }
-                None => {
-                    crate::println!(
-                        "[initramfs] official fs (x0) not found, skipping /sdcard mount"
-                    );
-                }
-            }
-        }
-    }
-
-    // 注册 /dev/vdb（原始工具盘）+ MBR 分区解析 + 分区设备注册 + 挂载
-    match devs[1].as_ref() {
-        Some(raw_vdb) => {
-            let _ = crate::fs::dev::DEV_FS.add_dev(
-                "vdb",
-                crate::fs::dev::block::BlockDevInode::new(raw_vdb.clone(), 1, String::from("vdb")),
-            );
-
-            use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
-
-            match probe_mbr(raw_vdb) {
-                Ok(MbrProbe::Partitions(parts)) => {
-                    let mut vdb1_dev: Option<Arc<dyn BlockDevice>> = None;
-
-                    for p in &parts {
-                        let part_dev = Arc::new(PartitionBlockDevice::new(
-                            raw_vdb.clone(),
-                            p.start_lba,
-                            p.sectors,
-                        )) as Arc<dyn BlockDevice>;
-
-                        let name = alloc::format!("vdb{}", p.partno);
-                        let minor = 1 + p.partno as u64; // vdb1→2, vdb2→3
-                        let inode = crate::fs::dev::block::BlockDevInode::new(
-                            part_dev.clone(),
-                            minor,
-                            name.clone(),
-                        );
-                        let _ = crate::fs::dev::DEV_FS.add_dev(&name, inode);
-                        println!(
-                            "[mbr] registered /dev/{} (type={:#x}, size={}M)",
-                            name,
-                            p.type_code,
-                            p.sectors * 512 / (1024 * 1024)
-                        );
-
-                        let alias = alloc::format!("vda{}", p.partno);
-                        let alias_minor = 100 + p.partno as u64;
-                        let alias_inode = crate::fs::dev::block::BlockDevInode::new(
-                            part_dev.clone(),
-                            alias_minor,
-                            alias.clone(),
-                        );
-                        let _ = crate::fs::dev::DEV_FS.add_dev(&alias, alias_inode);
-
-                        if p.partno == 1 {
-                            vdb1_dev = Some(part_dev);
-                        }
-                    }
-
-                    // 从 vdb1 挂载 /tools
-                    match vdb1_dev {
-                        Some(ref dev) => {
-                            if mount_block_fs(&root, dev, "tools", "tools disk (vdb1)").is_none() {
-                                println!("[initramfs] tools disk (vdb1) mount failed, leaving /tools empty");
-                            }
-                        }
-                        None => {
-                            println!("[mbr] no partition 1 found, /tools not mounted");
-                        }
-                    }
-                }
-                Ok(MbrProbe::NoMbr) => {
-                    // 无 MBR → 旧镜像兼容：从原始 /dev/vdb 挂载
-                    println!("[mbr] no MBR on tools disk, mounting raw /dev/vdb as /tools");
-                    if mount_block_fs(&root, raw_vdb, "tools", "tools disk (raw vdb)").is_none() {
-                        println!(
-                            "[initramfs] tools disk (raw vdb) mount failed, leaving /tools empty"
-                        );
-                    }
-                }
-                Ok(MbrProbe::Unsupported) => {
-                    println!("[mbr] tools disk MBR present but no supported partitions, /tools not mounted");
-                }
-                Err(error) => {
-                    println!("[mbr] failed to read tools disk MBR: {:?}", error);
-                }
-            }
-        }
-        None => {
-            println!("[initramfs] tools disk (x1) not found, skipping /tools mount");
-        }
-    }
 }
 
 /// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。

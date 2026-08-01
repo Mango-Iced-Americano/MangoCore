@@ -86,17 +86,9 @@ pub fn unpack_embedded(root: &Arc<MountFS>) -> Result<InitramfsStats, InitramfsE
         core::slice::from_raw_parts(start as *const u8, end - start)
     });
 
-    assert_eq!(
-        start % crate::config::PAGE_SIZE,
-        0,
-        "embedded initramfs start is not page-aligned"
-    );
-    let start_ppn = crate::mm::PhysAddr::from(start).floor();
-    let end_ppn = crate::mm::PhysAddr::from(end).floor();
-    // Safety: unpack_newc has returned, no archive-derived reference escapes,
-    // and the partial final linker page is excluded by rounding end down.
-    unsafe { crate::mm::frame_reclaim_linker_range(start_ppn, end_ppn) }
-        .unwrap_or_else(|reason| panic!("failed to reclaim embedded initramfs pages: {}", reason));
+    // The generated archive is part of the live kernel image rather than an
+    // independently reserved allocation. Its final page can share writable
+    // kernel data, so it must remain excluded from the frame allocator.
     result
 }
 

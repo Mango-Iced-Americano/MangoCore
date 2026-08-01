@@ -166,7 +166,7 @@ impl FileSystem for RamFS {
             (self.max_pages, self.max_pages.saturating_sub(used_pages))
         } else {
             (
-                crate::config::USABLE_MEMORY_SIZE / PAGE_SIZE,
+        crate::hal::firmware::usable_memory_size() / PAGE_SIZE,
                 crate::mm::unallocated_frames(),
             )
         };

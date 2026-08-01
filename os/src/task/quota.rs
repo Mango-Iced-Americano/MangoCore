@@ -12,6 +12,14 @@ use crate::syscall::errno::EAGAIN;
 static TASK_QUOTA_USED: AtomicUsize = AtomicUsize::new(0);
 static TASK_QUOTA_SOFT_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// 硬上限：由 FDT 派生的可用 RAM 大小对编译期上限做运行时钳制。
+fn task_limit() -> usize {
+    let ram = crate::hal::firmware::usable_memory_size();
+    let stack = crate::config::KERNEL_STACK_SIZE;
+    let ram_limit = ram / (stack * 4);
+    SYSTEM_TASK_LIMIT.min(ram_limit.max(512))
+}
+
 #[must_use]
 /// 已占用任务 quota 的 RAII 句柄。
 ///
@@ -30,12 +38,13 @@ impl TaskQuotaGuard {
     ///
     /// 达到 `SYSTEM_TASK_LIMIT` 时返回 `-EAGAIN`。
     pub(crate) fn try_acquire() -> Result<Self, isize> {
+        let limit = task_limit();
         let mut current = TASK_QUOTA_USED.load(Ordering::Relaxed);
         loop {
-            if current >= SYSTEM_TASK_LIMIT {
+            if current >= limit {
                 println!(
                     "[task_quota] HARD LIMIT hit: used={}/{} returning EAGAIN",
-                    current, SYSTEM_TASK_LIMIT
+                    current, limit
                 );
                 return Err(EAGAIN);
             }

@@ -1,0 +1,5 @@
+os_test.conf sha256: f92b83ed13bd28eec1c0903a8a3441f9c6c4cc252f4eda13226ca7b15a6a9218
+
+The RV64 regression target selects its self-contained regression initramfs and
+does not consume the os_test.conf mask. The checksum is retained as the build
+configuration identity required by the evidence policy.

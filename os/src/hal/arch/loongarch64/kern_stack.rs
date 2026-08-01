@@ -14,7 +14,7 @@ use spin::Mutex;
 
 const KSTACK_CACHE_LIMIT: usize = 128;
 
-#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+#[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_KSTACK_PROBE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -73,7 +73,7 @@ pub fn kstack_alloc() -> KernelStack {
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
     );
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if !BOARD_FIRST_KSTACK_PROBE.swap(true, core::sync::atomic::Ordering::Relaxed) {
         // 在启动栈仍有效时访问第一个新映射栈，从而在 `__switch` 使用新栈指针前，
         // 同时验证开发板规范虚拟地址窗口和 PGDH/PTE 映射。
