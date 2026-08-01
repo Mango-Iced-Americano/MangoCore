@@ -205,6 +205,25 @@ registry 锁内验证对象、权限并快照固定长度
 B60 的结论只覆盖 `syscall/process/ipc.rs` 的 registry/queue 与用户访问锁序；不覆盖
 FS/Net/Driver，也不宣称所有 IPC 阻塞领取协议已完成多核语义审计。
 
+#### B61 SysV 消息的唯一摘取
+
+普通 `msgrcv` 不能把“选择消息”和“删除消息”拆成两个 `MSG_REGISTRY` 临界区。旧实现允许
+两个 CPU 在第一段同时复制同一条消息，随后只有一个删除成功，但两个 syscall 都向用户返回
+成功。B61 固定为：
+
+```text
+MSG_REGISTRY 锁内选择消息
+  -> 普通接收：VecDeque::remove(idx)，同步更新 cbytes/lrpid/rtime 并唤醒等待者
+  -> MSG_COPY：复制内核快照但不修改队列
+  -> 释放 MSG_REGISTRY
+  -> copy_to_user
+```
+
+普通分支的 `remove(idx)` 是领取线性化点，返回的 `Vec<u8>` 已由当前 CPU 独占，不再需要
+消息 serial 或第二次删除。锁外用户 copy 失败时消息仍保持已消费状态，这与 Linux 的
+`msgrcv` 所有权交接一致。该规则只证明单条消息不会被重复领取；IPC ID 复用、WaitQueue
+对象删除竞态和精确的双 receiver 动态压力仍需后续独立审计。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护

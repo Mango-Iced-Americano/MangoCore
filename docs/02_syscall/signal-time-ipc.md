@@ -366,6 +366,12 @@ timerfd 是 VFS `File` 对象，可被 poll/epoll 观察。
 数组，再锁内重验并提交。GETALL/SETALL 按 Linux ABI 忽略 `semnum`。这一顺序既避免缺页
 或 TLB shootdown 时占住 IPC 全局锁，也保留既有的参数错误优先级。
 
+普通 `msgrcv` 在一个 `MSG_REGISTRY` 临界区内完成消息选择和 `VecDeque::remove`，并同时
+更新队列字节数、最近接收 PID/时间以及 sender wake；随后才在锁外写用户 buffer。因此并发
+receiver 不能领取同一条消息。`MSG_COPY` 不执行摘取，只在锁内复制稳定的内核快照。普通
+接收的用户 copy 若失败，消息不会放回队列；这与 Linux 先取得消息所有权、再执行用户 copy
+的语义一致。
+
 ## 12. POSIX message queue
 
 POSIX MQ 入口：

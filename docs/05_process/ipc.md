@@ -210,7 +210,6 @@ let mapped = task
 | `qbytes` | 队列最大字节数 |
 | `messages` | `VecDeque<Message>` |
 | `cbytes` | 当前字节数 |
-| `next_serial` | 消息序号 |
 | `lspid/lrpid` | 最近 send/receive pid |
 | `stime/rtime/ctime` | 时间戳 |
 
@@ -229,7 +228,6 @@ struct MsgQueue {
     qbytes: usize,
     messages: VecDeque<Message>,
     cbytes: usize,
-    next_serial: u64,
     lspid: i32,
     lrpid: i32,
     stime: usize,
@@ -268,8 +266,6 @@ fn try_msgsnd_locked(
             return None;
         }
 
-        let serial = queue.next_serial;
-        queue.next_serial = queue.next_serial.saturating_add(1).max(1);
         if queue.messages.try_reserve(1).is_err() {
             return Some(ENOMEM);
         }
@@ -278,11 +274,7 @@ fn try_msgsnd_locked(
             return Some(ENOMEM);
         }
         payload.extend_from_slice(data);
-        queue.messages.push_back(Message {
-            serial,
-            mtype,
-            data: payload,
-        });
+        queue.messages.push_back(Message { mtype, data: payload });
         queue.cbytes = queue.cbytes.saturating_add(data.len());
         queue.lspid = current_pid_i32();
         queue.stime = now_sec();
@@ -329,7 +321,9 @@ match WaitQueue::wait_event_interruptible_locked(
 
 队列为空且无 `IPC_NOWAIT` 时，通过 WaitQueue 阻塞等待。
 
-接收路径先在锁内复制要返回的消息数据，真正写用户内存在锁外进行，随后再按 serial 删除消息：
+普通接收的线性化点是 `MSG_REGISTRY` 锁内的 `VecDeque::remove(idx)`：消息、`cbytes`、
+`lrpid/rtime` 和 sender wake 在同一临界区完成，因此两个 CPU 不可能同时领取同一条消息。
+`MSG_COPY` 例外地只复制内核快照，不改变队列。两种分支都在解锁后写用户 buffer：
 
 ```rust
 pub fn sys_msgrcv(
@@ -350,13 +344,10 @@ pub fn sys_msgrcv(
     }
 
     loop {
-        match prepare_msgrcv(msqid, msgsz, msgtyp, msgflg) {
-            Ok((serial, mtype, data, copy_len, copy_only)) => {
+        match receive_message(msqid, msgsz, msgtyp, msgflg) {
+            Ok((mtype, data, copy_len)) => {
                 if let Err(errno) = write_msg_to_user(msgp, mtype, &data, copy_len) {
                     return errno;
-                }
-                if !copy_only {
-                    remove_received_message(msqid, serial, copy_len);
                 }
                 return copy_len as isize;
             }
@@ -375,7 +366,8 @@ pub fn sys_msgrcv(
 }
 ```
 
-这个顺序避免了持 `MSG_REGISTRY` 锁写用户 buffer；如果写用户内存失败，消息不会被删除。
+这个顺序避免持 `MSG_REGISTRY` 锁写用户 buffer。普通接收一旦在锁内摘取即已消费；后续
+用户 copy 即使返回 `EFAULT` 也不回滚消息，与 Linux `msgrcv` 的所有权交接一致。
 
 ## 6. SysV semaphore
 

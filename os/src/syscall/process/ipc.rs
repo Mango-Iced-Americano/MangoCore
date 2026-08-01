@@ -291,9 +291,7 @@ struct LinuxShmUsageInfo {
     swap_successes: usize,
 }
 
-#[derive(Clone)]
 struct Message {
-    serial: u64,
     mtype: isize,
     data: Vec<u8>,
 }
@@ -308,7 +306,6 @@ struct MsgQueue {
     qbytes: usize,
     messages: VecDeque<Message>,
     cbytes: usize,
-    next_serial: u64,
     lspid: i32,
     lrpid: i32,
     stime: usize,
@@ -329,7 +326,6 @@ impl MsgQueue {
             qbytes: sysv_msgmnb(),
             messages: VecDeque::new(),
             cbytes: 0,
-            next_serial: 1,
             lspid: 0,
             lrpid: 0,
             stime: 0,
@@ -2160,8 +2156,6 @@ fn try_msgsnd_locked(
             return None;
         }
 
-        let serial = queue.next_serial;
-        queue.next_serial = queue.next_serial.saturating_add(1).max(1);
         if queue.messages.try_reserve(1).is_err() {
             return Some(ENOMEM);
         }
@@ -2171,7 +2165,6 @@ fn try_msgsnd_locked(
         }
         payload.extend_from_slice(data);
         queue.messages.push_back(Message {
-            serial,
             mtype,
             data: payload,
         });
@@ -2235,15 +2228,19 @@ fn msg_recv_wait_condition(
     }
 }
 
-fn prepare_msgrcv(
+/// 在 registry 锁内唯一确定本次接收的数据，返回后再安全地访问用户页。
+///
+/// 普通接收会直接把消息移出队列；只有 `MSG_COPY` 保留原消息并复制内核快照。
+fn receive_message(
     msqid: i32,
     msgsz: usize,
     msgtyp: isize,
     msgflg: usize,
-) -> Result<(u64, isize, Vec<u8>, usize, bool), isize> {
-    let registry = MSG_REGISTRY.lock();
-    let Some(queue) = registry.queues.get(&msqid) else {
-        if registry.was_removed(msqid) {
+) -> Result<(isize, Vec<u8>, usize), isize> {
+    let mut registry = MSG_REGISTRY.lock();
+    let was_removed = registry.was_removed(msqid);
+    let Some(queue) = registry.queues.get_mut(&msqid) else {
+        if was_removed {
             return Err(EIDRM);
         }
         return Err(EINVAL);
@@ -2262,39 +2259,20 @@ fn prepare_msgrcv(
     }
 
     let copy_len = message.data.len().min(msgsz);
-    let mut data = Vec::new();
-    data.try_reserve_exact(copy_len).map_err(|_| ENOMEM)?;
-    data.extend_from_slice(&message.data[..copy_len]);
-    Ok((
-        message.serial,
-        message.mtype,
-        data,
-        copy_len,
-        msgflg & MSG_COPY != 0,
-    ))
-}
+    if msgflg & MSG_COPY != 0 {
+        let mut data = Vec::new();
+        data.try_reserve_exact(copy_len).map_err(|_| ENOMEM)?;
+        data.extend_from_slice(&message.data[..copy_len]);
+        return Ok((message.mtype, data, copy_len));
+    }
 
-fn remove_received_message(msqid: i32, serial: u64, copy_len: usize) {
-    let mut registry = MSG_REGISTRY.lock();
-    let mut wake_waiters = false;
-    {
-        let Some(queue) = registry.queues.get_mut(&msqid) else {
-            return;
-        };
-        if let Some(idx) = queue.messages.iter().position(|msg| msg.serial == serial) {
-            if let Some(message) = queue.messages.remove(idx) {
-                queue.cbytes = queue.cbytes.saturating_sub(message.data.len());
-                queue.lrpid = current_pid_i32();
-                queue.rtime = now_sec();
-                wake_waiters = true;
-            }
-        } else if copy_len != 0 {
-            queue.rtime = now_sec();
-        }
-    }
-    if wake_waiters {
-        registry.wait_queue.wake_all();
-    }
+    // 摘取就是普通接收的线性化点；另一 CPU 此后不可能再取得同一条消息。
+    let message = queue.messages.remove(idx).ok_or(EAGAIN)?;
+    queue.cbytes = queue.cbytes.saturating_sub(message.data.len());
+    queue.lrpid = current_pid_i32();
+    queue.rtime = now_sec();
+    registry.wait_queue.wake_all();
+    Ok((message.mtype, message.data, copy_len))
 }
 
 fn wait_for_msg_recv(msqid: i32, msgtyp: isize, msgflg: usize) -> isize {
@@ -2321,13 +2299,10 @@ pub fn sys_msgrcv(msqid: i32, msgp: usize, msgsz: usize, msgtyp: isize, msgflg: 
     }
 
     loop {
-        match prepare_msgrcv(msqid, msgsz, msgtyp, msgflg) {
-            Ok((serial, mtype, data, copy_len, copy_only)) => {
+        match receive_message(msqid, msgsz, msgtyp, msgflg) {
+            Ok((mtype, data, copy_len)) => {
                 if let Err(errno) = write_msg_to_user(msgp, mtype, &data, copy_len) {
                     return errno;
-                }
-                if !copy_only {
-                    remove_received_message(msqid, serial, copy_len);
                 }
                 return copy_len as isize;
             }

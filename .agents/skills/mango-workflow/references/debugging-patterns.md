@@ -847,5 +847,10 @@
   同一身份、权限和长度，再一次提交。对象若依赖“不复用 ID”排除 ABA，分配器耗尽时必须
   明确失败，不能用饱和计数反复返回同一 ID。名称创建还要在第二段锁内重新处理 `O_EXCL`
   和容量，使发布点对并发创建保持原子。
+- **破坏性读取必须在 owner 锁内完成唯一领取**: 若读取会消费队列元素，不能先在锁内 clone、
+  解锁 copy、再重锁按 serial 删除。两个 CPU 可同时 clone 同一元素并都返回成功。应在 owner
+  锁内完成选择与 move/remove，把内核所有权唯一交给一个调用者，再锁外做 faultable uaccess；
+  非破坏的 peek/`MSG_COPY` 才允许只复制快照。用户 copy 失败是否回滚必须服从 ABI，不能为
+  “避免丢数据”擅自改变 Linux 的消费语义。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
   `os/src/syscall/process/ipc.rs`, `docs/01_architecture/lock-order.md`
