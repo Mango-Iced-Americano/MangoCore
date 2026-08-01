@@ -842,5 +842,10 @@
   重复修改 PTE 并制造无意义的 TLB shootdown。
 - **锁序审计**: faultable uaccess 前先释放 fd table、task inner、file-private、socket 等普通
   业务锁。若旧调用链要求持锁复制，先快照/克隆稳定 owner，再释放锁进入 uaccess。
+- **写侧用两阶段校验，不要提前碰用户指针**: 若 errno 顺序要求先判断对象身份、权限或固定
+  长度，第一段在 registry 锁内只验证并快照；解锁后分配和 copy；第二段重锁确认对象仍是
+  同一身份、权限和长度，再一次提交。对象若依赖“不复用 ID”排除 ABA，分配器耗尽时必须
+  明确失败，不能用饱和计数反复返回同一 ID。名称创建还要在第二段锁内重新处理 `O_EXCL`
+  和容量，使发布点对并发创建保持原子。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
-  `docs/01_architecture/lock-order.md`
+  `os/src/syscall/process/ipc.rs`, `docs/01_architecture/lock-order.md`

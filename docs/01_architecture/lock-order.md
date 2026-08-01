@@ -180,6 +180,31 @@ B59 删除 `translated_byte_buffer()`、`translate_user_buffer_checked()` 和物
 B59 只适配完成重构所必需的 FS/Net 调用点，不代表这些共享子系统已通过完整 SMP 并发审计。
 Driver 未在本批改动；其余 FS/Net/Driver 审计由对应负责人后续完成。
 
+#### B60 IPC registry 与 faultable uaccess
+
+SysV semaphore 和 POSIX mqueue 的全局表锁保护对象身份与共享状态，不能覆盖用户页访问。
+需要先验证对象、再读取用户数据的写命令固定采用：
+
+```text
+registry 锁内验证对象、权限并快照固定长度
+  -> 释放 registry 锁
+  -> 分配内核缓冲并 copy_from/to_user
+  -> registry 锁内重验对象、权限与固定长度
+  -> 一次提交共享状态
+```
+
+- `semctl(GETALL)` 在锁内生成内核快照，释放锁后才写用户数组；
+- `semctl(SETVAL/SETALL)` 保留“坏 semid/权限优先于用户指针错误”的首轮校验，copy 后再
+  重验；semaphore ID 单调且耗尽后返回 `ENOSPC`，不通过饱和计数复用 ID；
+- `GETALL/SETALL` 操作整个集合，按 Linux ABI 忽略 `semnum`；
+- `mq_open(O_CREAT)` 仅在首轮确认名称不存在后锁外读取 attr；第二次锁以名称表为
+  线性化点，重新处理 `O_EXCL`、容量和同名并发创建；
+- `Arc<MqQueue>` 固定对象生命周期，权限检查在名称表解锁后单独取得 queue inner；创建
+  回滚只允许删除 `Arc::ptr_eq` 的本次对象，不能误删 unlink 后重建的同名队列。
+
+B60 的结论只覆盖 `syscall/process/ipc.rs` 的 registry/queue 与用户访问锁序；不覆盖
+FS/Net/Driver，也不宣称所有 IPC 阻塞领取协议已完成多核语义审计。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护

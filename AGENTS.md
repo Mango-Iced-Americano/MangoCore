@@ -213,9 +213,10 @@ sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解�
 `translated_byte_buffer` 及锁外物理页 slice：`UserBuffer`/`UserIoVec` 只保存 token 与
 逻辑 VA 区间，实际 copy 每页重新取得 VM 锁并验证 PTE。流式 I/O 返回已完成前缀，固定
 格式用 `read_exact`/`write_all`；pipe 在 ring 自旋锁内只能使用已预 fault 的 nofault copy。
-预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。SysV IPC 等 fixed-copy
-调用方的 registry 锁序仍未全量验收，不得把 helper 内部映射安全外推为整个 uaccess
-调用图已经完成。
+预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。B60 已让 SysV semaphore
+`GETALL/SETVAL/SETALL` 和 POSIX `mq_open(O_CREAT)` 采用“锁内验证 → 锁外 copy → 锁内
+重验/提交”；任何 IPC registry 或队列锁内都不得进入 faultable uaccess。FS/Net/Driver 的
+完整共享状态审计仍由对应负责人继续，不能由这条 IPC 结论外推。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

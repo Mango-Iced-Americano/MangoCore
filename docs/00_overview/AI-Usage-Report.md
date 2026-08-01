@@ -80,6 +80,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP fixed-size uaccess 映射同步 | 2026-08-01 | GPT/Codex, DeepSeek | Rust alias 规则、Linux uaccess/pinning 语义、translate/use 竞态和锁序审查 | 删除 `translated_ref*`；标量/数组 copy 在逐页 VM 锁内完成，双架构 focused 34/34，初赛失败集合不变 |
 | SMP uaccess 原始视图绕过路径收口 | 2026-08-01 | GPT/Codex, DeepSeek | UserBuffer 调用面审计、Linux `getrandom` 部分返回对照、双架构 8 核初赛门禁 | 删除 `trans_ref!`/`trans_refmut!`；字符串、sockaddr 与若干 ABI 路径改为内核快照/VM 锁内 copy，初赛保持 RV64 312/314、LA64 308/314 |
 | SMP VA-backed UserBuffer | 2026-08-01 | GPT/Codex, DeepSeek | Linux iov_iter/pipe 对照、调用点与 partial 语义审查、双架构 8 核初赛门禁 | 删除锁外物理页 slice；连续/scatter buffer 只保存 VA，实际 copy 重验 PTE，初赛保持 RV64 312/314、LA64 308/314 |
+| SMP IPC registry 锁外用户访问 | 2026-08-01 | GPT/Codex, DeepSeek | Linux SysV/POSIX IPC 对照、registry/uaccess 锁序审查、空跑配方纠错与双架构 8 核门禁 | semaphore 写侧两阶段重验、mq_open 原子名称发布；定向 LTP 36/36，初赛失败集合未扩大 |
 
 ## 4. 详细使用场景
 
@@ -1260,6 +1261,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b57-uaccess-copy-summary.md` | SMP fixed-size uaccess 映射同步 | 记录 translate/use 竞态、VM 锁内 raw copy、危险引用删除、模型初赛误报纠正及双架构 8 核门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b58-uaccess-bypass-summary.md` | SMP uaccess 原始视图绕过路径收口 | 记录字符串/sockaddr 内核快照、预 fault 边界、模型建议纠错及双架构 8 核初赛门禁 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b59-va-userbuffer-summary.md` | SMP VA-backed UserBuffer | 记录物理 slice 删除、partial/exact、pipe nofault、resolve-first 与双架构 8 核初赛门禁 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b60-ipc-uaccess-summary.md` | SMP IPC registry 锁外用户访问 | 记录 semaphore/mq_open 两阶段协议、DeepSeek 空跑根因纠错、双架构定向 LTP 36/36 与初赛门禁 |
 
 ## 9. 交互记录与留痕方式
 

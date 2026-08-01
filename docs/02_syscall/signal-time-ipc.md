@@ -361,6 +361,11 @@ timerfd 是 VFS `File` 对象，可被 poll/epoll 观察。
 
 进程持有 IPC namespace。`clone/unshare/setns` 可创建或切换 IPC namespace；SysV IPC 对象表和限制值由该 namespace 维护。
 
+`semctl(GETALL/SETVAL/SETALL)` 不在 `SEM_REGISTRY` 锁内访问用户页。GETALL 先在锁内
+快照数值，再锁外写回；SETVAL/SETALL 先验证 semid、权限和集合长度，锁外解析参数或读取
+数组，再锁内重验并提交。GETALL/SETALL 按 Linux ABI 忽略 `semnum`。这一顺序既避免缺页
+或 TLB shootdown 时占住 IPC 全局锁，也保留既有的参数错误优先级。
+
 ## 12. POSIX message queue
 
 POSIX MQ 入口：
@@ -375,6 +380,10 @@ POSIX MQ 入口：
 | `mq_notify` | `sys_mq_notify(mqdes, sevp)` |
 
 `syscall/mod.rs` 还导出 POSIX MQ 和 SysV IPC 限制的 getter/setter，用于 proc/sysctl 风格状态。
+
+`mq_open(O_CREAT)` 采用两阶段名称表查找：已有队列直接克隆 `Arc` 且不读取 attr；确需
+创建时在 `MQ_REGISTRY` 锁外复制 attr，再重新加锁原子处理同名创建和 `O_EXCL`。名称表锁
+释放后才检查 queue inner 权限，因此不会形成 `MQ_REGISTRY -> MqQueue.inner -> VM` 链。
 
 ## 13. 错误码边界
 

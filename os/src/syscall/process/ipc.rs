@@ -7,8 +7,8 @@ use crate::fs::{
     },
 };
 use crate::mm::{
-    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, translated_str,
-    frames_alloc_any, FrameTracker, MapFlags, MapPermission,
+    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, frames_alloc_any,
+    translated_str, FrameTracker, MapFlags, MapPermission,
 };
 use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;
@@ -496,7 +496,7 @@ impl SemSet {
 }
 
 struct SemRegistry {
-    next_id: i32,
+    next_id: Option<i32>,
     sets: BTreeMap<i32, SemSet>,
     wait_queue: WaitQueue,
     removed_ids: Vec<i32>,
@@ -505,17 +505,18 @@ struct SemRegistry {
 impl SemRegistry {
     fn new() -> Self {
         Self {
-            next_id: 1,
+            next_id: Some(1),
             sets: BTreeMap::new(),
             wait_queue: WaitQueue::new(),
             removed_ids: Vec::new(),
         }
     }
 
-    fn alloc_id(&mut self) -> i32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1).max(1);
-        id
+    fn alloc_id(&mut self) -> Option<i32> {
+        let id = self.next_id?;
+        // 不复用已发布的 ID；耗尽时明确失败，避免饱和加法覆盖仍在表中的对象。
+        self.next_id = id.checked_add(1);
+        Some(id)
     }
 
     fn find_by_key(&self, key: isize) -> Option<(i32, &SemSet)> {
@@ -1300,9 +1301,7 @@ pub fn shm_clone_attachments(parent_pid: usize, child_pid: usize) -> Result<(), 
 }
 
 fn current_pid_i32() -> i32 {
-    current_task()
-        .map(|task| task.pid() as i32)
-        .unwrap_or(0)
+    current_task().map(|task| task.pid() as i32).unwrap_or(0)
 }
 
 fn current_ipc_ids() -> (u32, u32) {
@@ -1414,7 +1413,7 @@ fn seminfo_snapshot(registry: &SemRegistry, runtime: bool) -> LinuxSemInfo {
     }
 }
 
-fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
+fn decode_semctl_setval_arg(arg: usize) -> Result<i32, isize> {
     if arg <= SEMVMX as usize {
         return Ok(arg as i32);
     }
@@ -1427,6 +1426,7 @@ fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
         }
         if arg > i32::MAX as usize {
             let mut value = 0i32;
+            // 只有可读且值合法时才按兼容指针解释；失败继续走原有标量 ERANGE 语义。
             if copy_from_user(
                 current_user_token(),
                 arg as *const i32,
@@ -1442,6 +1442,137 @@ fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
     }
 
     Err(ERANGE)
+}
+
+fn semctl_getall(semid: i32, arg: usize) -> isize {
+    let semaphore_count = {
+        let registry = SEM_REGISTRY.lock();
+        let Some(set) = registry.sets.get(&semid) else {
+            return EINVAL;
+        };
+        if !has_sem_permission(set, SEM_R) {
+            return EACCES;
+        }
+        set.semaphores.len()
+    };
+
+    let mut values = Vec::new();
+    if values.try_reserve_exact(semaphore_count).is_err() {
+        return ENOMEM;
+    }
+    {
+        let registry = SEM_REGISTRY.lock();
+        let Some(set) = registry.sets.get(&semid) else {
+            return EINVAL;
+        };
+        if set.semaphores.len() != semaphore_count {
+            return EINVAL;
+        }
+        if !has_sem_permission(set, SEM_R) {
+            return EACCES;
+        }
+        values.extend(set.semaphores.iter().map(|sem| sem.value as u16));
+    }
+
+    // 分配和用户 copy 都可能进入其它锁域，不能夹着 IPC 全局锁执行。
+    match copy_to_user_array(
+        current_user_token(),
+        values.as_ptr(),
+        arg as *mut u16,
+        values.len(),
+    ) {
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+fn semctl_setval(semid: i32, semnum: usize, arg: usize) -> isize {
+    {
+        let registry = SEM_REGISTRY.lock();
+        let Some(set) = registry.sets.get(&semid) else {
+            return EINVAL;
+        };
+        if semnum >= set.semaphores.len() {
+            return EINVAL;
+        }
+        if !can_modify_sem_set(set) {
+            return EPERM;
+        }
+    }
+
+    // LoongArch 兼容 ABI 可能把 arg 解释成用户指针，必须在 registry 锁外读取。
+    let value = match decode_semctl_setval_arg(arg) {
+        Ok(value) => value,
+        Err(errno) => return errno,
+    };
+
+    let mut registry = SEM_REGISTRY.lock();
+    let Some(set) = registry.sets.get_mut(&semid) else {
+        return EINVAL;
+    };
+    // copy 期间 IPC_RMID/IPC_SET 可以并发发生，因此提交前必须重验对象和权限。
+    if semnum >= set.semaphores.len() {
+        return EINVAL;
+    }
+    if !can_modify_sem_set(set) {
+        return EPERM;
+    }
+    let sem = &mut set.semaphores[semnum];
+    sem.value = value;
+    sem.last_pid = current_pid_i32();
+    set.ctime = now_sec();
+    registry.wait_queue.wake_all();
+    SUCCESS
+}
+
+fn semctl_setall(semid: i32, arg: usize) -> isize {
+    let semaphore_count = {
+        let registry = SEM_REGISTRY.lock();
+        let Some(set) = registry.sets.get(&semid) else {
+            return EINVAL;
+        };
+        if !can_modify_sem_set(set) {
+            return EPERM;
+        }
+        set.semaphores.len()
+    };
+
+    let mut values = Vec::new();
+    if values.try_reserve_exact(semaphore_count).is_err() {
+        return ENOMEM;
+    }
+    values.resize(semaphore_count, 0u16);
+    if let Err(errno) = copy_from_user_array(
+        current_user_token(),
+        arg as *const u16,
+        values.as_mut_ptr(),
+        values.len(),
+    ) {
+        return errno;
+    }
+    if values.iter().any(|value| *value as i32 > SEMVMX) {
+        return ERANGE;
+    }
+
+    let mut registry = SEM_REGISTRY.lock();
+    let Some(set) = registry.sets.get_mut(&semid) else {
+        return EINVAL;
+    };
+    // 当前 ID 单调分配且集合长度不变；长度与权限重验即可拒绝 copy 期间的失效对象。
+    if set.semaphores.len() != semaphore_count {
+        return EINVAL;
+    }
+    if !can_modify_sem_set(set) {
+        return EPERM;
+    }
+    let pid = current_pid_i32();
+    for (sem, value) in set.semaphores.iter_mut().zip(values.iter()) {
+        sem.value = *value as i32;
+        sem.last_pid = pid;
+    }
+    set.ctime = now_sec();
+    registry.wait_queue.wake_all();
+    SUCCESS
 }
 
 pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
@@ -1475,7 +1606,9 @@ pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
-    let id = registry.alloc_id();
+    let Some(id) = registry.alloc_id() else {
+        return ENOSPC;
+    };
     let set = match SemSet::new(key, nsems, semflg & 0o777, uid, gid) {
         Ok(set) => set,
         Err(errno) => return errno,
@@ -1538,6 +1671,10 @@ pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
             };
         }
         IPC_STAT | SEM_STAT | SEM_STAT_ANY => return semctl_copy_stat(semid, cmd, arg),
+        // GETALL/SETALL 操作整个集合，Linux ABI 明确忽略 semnum。
+        GETALL => return semctl_getall(semid, arg),
+        SETVAL => return semctl_setval(semid, semnum, arg),
+        SETALL => return semctl_setall(semid, arg),
         IPC_RMID => {
             let mut registry = SEM_REGISTRY.lock();
             let Some(set) = registry.sets.get(&semid) else {
@@ -1591,8 +1728,7 @@ pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
         return EINVAL;
     }
 
-    let mut wake_waiters = false;
-    let result = match cmd {
+    match cmd {
         GETPID => set.semaphores[semnum].last_pid as isize,
         GETVAL => {
             if !has_sem_permission(set, SEM_R) {
@@ -1602,75 +1738,8 @@ pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
         }
         GETNCNT => set.semaphores[semnum].ncnt as isize,
         GETZCNT => set.semaphores[semnum].zcnt as isize,
-        GETALL => {
-            if !has_sem_permission(set, SEM_R) {
-                return EACCES;
-            }
-            let mut values = Vec::new();
-            if values.try_reserve_exact(set.semaphores.len()).is_err() {
-                return ENOMEM;
-            }
-            values.extend(set.semaphores.iter().map(|sem| sem.value as u16));
-            match copy_to_user_array(
-                current_user_token(),
-                values.as_ptr(),
-                arg as *mut u16,
-                values.len(),
-            ) {
-                Ok(()) => SUCCESS,
-                Err(errno) => errno,
-            }
-        }
-        SETVAL => {
-            if !can_modify_sem_set(set) {
-                return EPERM;
-            }
-            let value = match semctl_setval_value(arg) {
-                Ok(value) => value,
-                Err(errno) => return errno,
-            };
-            let sem = &mut set.semaphores[semnum];
-            sem.value = value;
-            sem.last_pid = current_pid_i32();
-            set.ctime = now_sec();
-            wake_waiters = true;
-            SUCCESS
-        }
-        SETALL => {
-            if !can_modify_sem_set(set) {
-                return EPERM;
-            }
-            let mut values = Vec::new();
-            if values.try_reserve_exact(set.semaphores.len()).is_err() {
-                return ENOMEM;
-            }
-            values.resize(set.semaphores.len(), 0u16);
-            if let Err(errno) = copy_from_user_array(
-                current_user_token(),
-                arg as *const u16,
-                values.as_mut_ptr(),
-                values.len(),
-            ) {
-                return errno;
-            }
-            if values.iter().any(|value| *value as i32 > SEMVMX) {
-                return ERANGE;
-            }
-            let pid = current_pid_i32();
-            for (sem, value) in set.semaphores.iter_mut().zip(values.iter()) {
-                sem.value = *value as i32;
-                sem.last_pid = pid;
-            }
-            set.ctime = now_sec();
-            wake_waiters = true;
-            SUCCESS
-        }
         _ => EINVAL,
-    };
-    if wake_waiters {
-        registry.wait_queue.wake_all();
     }
-    result
 }
 
 enum SemApplyResult {
@@ -2827,6 +2896,19 @@ fn mq_descriptor_from_fd(mqdes: usize) -> Result<(Arc<File>, Arc<MqQueue>), isiz
     Ok((file, queue))
 }
 
+fn rollback_mq_create(name: &str, queue: &Arc<MqQueue>) {
+    let mut registry = MQ_REGISTRY.lock();
+    let remove = registry
+        .queues
+        .get(name)
+        .map(|registered| Arc::ptr_eq(registered, queue))
+        .unwrap_or(false);
+    // 创建后的 fd 分配可能失败；只回滚本次对象，不能误删 unlink 后重建的同名队列。
+    if remove {
+        registry.queues.remove(name);
+    }
+}
+
 fn mq_timeout_deadline(timeout: usize) -> Result<Option<TimeSpec>, isize> {
     if timeout == 0 {
         return Ok(None);
@@ -2926,7 +3008,7 @@ fn mq_wait_receive_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
     }
 }
 
-pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isize {
+pub fn sys_mq_open(name: *const u8, oflag: u32, mode: u32, attr: usize) -> isize {
     let name = match mq_name_from_user(name) {
         Ok(name) => name,
         Err(errno) => return errno,
@@ -2938,16 +3020,13 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
 
     let mut created = false;
     let queues_max = posix_mq_queues_max();
-    let queue = {
-        let mut registry = MQ_REGISTRY.lock();
+    let existing = {
+        let registry = MQ_REGISTRY.lock();
         if let Some(queue) = registry.queues.get(&name) {
             if (oflag & (MQ_O_CREAT | MQ_O_EXCL)) == (MQ_O_CREAT | MQ_O_EXCL) {
                 return EEXIST;
             }
-            if !has_mq_permission(&queue.inner.lock(), mq_requested_access(oflag)) {
-                return EACCES;
-            }
-            queue.clone()
+            Some(queue.clone())
         } else {
             if (oflag & MQ_O_CREAT) == 0 {
                 return ENOENT;
@@ -2955,17 +3034,41 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
             if registry.queues.len() >= queues_max {
                 return ENOSPC;
             }
-            let attr = match mq_attr_from_user(attr) {
-                Ok(attr) => attr,
-                Err(errno) => return errno,
-            };
-            let (uid, gid) = current_ipc_ids();
-            let queue = Arc::new(MqQueue::new(attr, _mode, uid, gid));
-            registry.queues.insert(name.clone(), queue.clone());
-            created = true;
-            queue
+            None
         }
     };
+
+    let queue = if let Some(queue) = existing {
+        queue
+    } else {
+        // attr 属于用户页；锁外读取后再竞争发布，避免缺页时占住全局名称表。
+        let attr = match mq_attr_from_user(attr) {
+            Ok(attr) => attr,
+            Err(errno) => return errno,
+        };
+        let (uid, gid) = current_ipc_ids();
+        let candidate = Arc::new(MqQueue::new(attr, mode, uid, gid));
+        let mut registry = MQ_REGISTRY.lock();
+        if let Some(queue) = registry.queues.get(&name) {
+            // copy attr 期间另一 CPU 可能完成同名创建，按 O_EXCL 语义重新判定。
+            if (oflag & (MQ_O_CREAT | MQ_O_EXCL)) == (MQ_O_CREAT | MQ_O_EXCL) {
+                return EEXIST;
+            }
+            queue.clone()
+        } else {
+            if registry.queues.len() >= queues_max {
+                return ENOSPC;
+            }
+            registry.queues.insert(name.clone(), candidate.clone());
+            created = true;
+            candidate
+        }
+    };
+
+    // queue 由 Arc 固定生命周期，权限检查无需与全局名称表嵌套持锁。
+    if !created && !has_mq_permission(&queue.inner.lock(), mq_requested_access(oflag)) {
+        return EACCES;
+    }
 
     let inode = Arc::new(MqDescriptor {
         queue: queue.clone(),
@@ -2974,7 +3077,7 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
         Ok(file) => file,
         Err(err) => {
             if created {
-                MQ_REGISTRY.lock().queues.remove(&name);
+                rollback_mq_create(&name, &queue);
             }
             return -(err as isize);
         }
@@ -2990,7 +3093,7 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
         Ok(fd) => fd as isize,
         Err(err) => {
             if created {
-                MQ_REGISTRY.lock().queues.remove(&name);
+                rollback_mq_create(&name, &queue);
             }
             -(err as isize)
         }
