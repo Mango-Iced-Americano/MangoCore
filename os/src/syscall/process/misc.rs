@@ -94,6 +94,15 @@ pub fn sys_reboot(magic: usize, magic2: usize, cmd: usize, _arg: usize) -> isize
         return EPERM;
     }
 
+    if matches!(
+        cmd,
+        LINUX_REBOOT_CMD_RESTART
+            | LINUX_REBOOT_CMD_RESTART2
+            | LINUX_REBOOT_CMD_POWER_OFF
+    ) {
+        finish_test_run()
+    }
+
     SUCCESS
 }
 
