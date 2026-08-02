@@ -563,12 +563,25 @@ fn resolve_console(devices: &[DeviceInfo]) -> Option<ConsoleInfo> {
         Ok(value) => usize::try_from(be_u32(value, 0)?).ok()?,
         Err(_) => 0,
     };
-    if register_shift > 3 || range.size <= (5usize << register_shift) {
+    let register_io_width = match serial.raw_property("reg-io-width") {
+        Ok(value) => usize::try_from(be_u32(value, 0)?).ok()?,
+        Err(_) => 1,
+    };
+    let irq = match serial.raw_property("interrupts") {
+        Ok(value) => usize::try_from(be_u32(value, 0)?).ok(),
+        Err(_) => None,
+    };
+    let Some(lsr_end) = (5usize << register_shift).checked_add(register_io_width) else {
+        return None;
+    };
+    if register_shift > 3 || !matches!(register_io_width, 1 | 4) || range.size < lsr_end {
         return None;
     }
     Some(ConsoleInfo {
         range,
         register_shift,
+        register_io_width,
+        irq,
     })
 }
 
