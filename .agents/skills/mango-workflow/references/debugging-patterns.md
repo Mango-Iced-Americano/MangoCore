@@ -203,6 +203,14 @@
 
 ## QEMU / 测试
 
+### ktest group 必须经 `KTEST=` 传给 Make，外部 `MANGO_CMDLINE` 会被覆盖
+
+- **现象**：执行 `MANGO_CMDLINE="mango.mode=ktest mango.test=waitqueue" make rv64-ktest` 后，QEMU 仍显示 `tests: ["all"]`，随后进入无关测试并可能被其既有失败阻断。
+- **根因**：`make/common/orchestration.mk` 从 `KTEST` 构造 `KTEST_CMDLINE`，而 `make/{rv64,la64}.mk` 的 `ktest-build-only` 在 cargo 调用处显式设置 `MANGO_CMDLINE="$(KTEST_CMDLINE)"`，覆盖父环境变量。
+- **修复**：使用 `make rv64-ktest PROFILE=normal KTEST=waitqueue`（LA64 同理）；需要重复/超时控制时配合 `KREPEAT`/`KTIMEOUT_MS`。
+- **教训**：当 Make recipe 在子命令行显式重设环境变量时，外部环境注入不是可靠配置入口。先追踪最终 cargo/QEMU recipe，再选择其公开 Make 变量。
+- **相关文件**：`os/make/common/orchestration.mk`、`os/make/{rv64,la64}.mk`、`os/src/kernel_tests/mod.rs`
+
 ### LA64 首次用户态恢复跳入 kernel trap stub
 
 - **现象**: competition 启动在 PID1 已入 ready queue、`trap_return()` 已执行后静默空转，始终没有 `[initd]` 首行。

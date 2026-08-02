@@ -155,13 +155,11 @@ TTY line discipline。环或 TTY 输入空间耗尽时会计数并暂时屏蔽 U
 整个 `Teletype`，而不是每个 open/read；多个并发 reader 的完整 Linux N_TTY 语义尚未
 实现。
 
-**控制字符**：`ISIG` 下的 VINTR（默认 Ctrl-C）会按 `NOFLSH` 决定是否清空输入，并在
-释放 TTY 内部锁后向前台进程组投递 SIGINT，避免持 TTY 锁扫描全局 task/process 表。
-没有可用 foreground pgid 时仍保留调度器场景的 interruptible-task fallback。
+**控制字符与作业控制**：`ISIG` 下的 VINTR（默认 Ctrl-C）和 VQUIT（默认 Ctrl-\）分别向有效的 foreground pgrp 投递 SIGINT 和 SIGQUIT。TTY 必须有 controlling session，且 foreground pgrp 必须存在并属于该 session；不满足时字符只被 line discipline 消费，绝不广播给 current task 或全部 interruptible waiter。未设置 `NOFLSH` 时，处理控制字符会同时清空输入和有界输出队列；写路径在串口 drain 前先通过该队列串行化输出。
 
 **写**：将 UTF-8 字符串直接输出到串口（`print!`）。
 
-**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
+**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCSPGRP` 拒绝 0、不存在的 pgrp、跨 session 的 pgrp，且要求调用者处于 controlling session；`TIOCGPGRP` 只报告已设置的 foreground pgrp，不再伪造调用者 pgid。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
 
 ### Pipe（匿名管道）
 
