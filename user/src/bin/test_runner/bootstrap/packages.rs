@@ -5,6 +5,14 @@ pub fn install_apk_packages(environ: &[*const u8], skip: bool) -> bool {
         println!("[initproc] skip_apk=true: skipping install_apk_packages");
         return true;
     }
+    if run_bash_cmd("test -x /tools/sbin/mkfs.ext4\0", environ) == 0 {
+        if run_bash_cmd("/sbin/mkfs.ext4 -V\0", environ) != 0 {
+            println!("[initproc] ERROR: preinstalled mkfs.ext4 is not runnable");
+            return false;
+        }
+        println!("[initproc] using preinstalled e2fsprogs from /tools");
+        return true;
+    }
     if run_bash_cmd("test -x /sbin/mkfs.ext4\0", environ) == 0
         && run_bash_cmd("test -f /lib/apk/db/installed\0", environ) == 0
         && run_bash_cmd("grep -q e2fsprogs /lib/apk/db/installed\0", environ) == 0
