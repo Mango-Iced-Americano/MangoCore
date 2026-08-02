@@ -236,7 +236,7 @@ impl ProcessManager {
         // stop 唤醒。条件闭包必须可重复执行，且返回 `ECHILD` 作为 Ready 值。
         match WaitQueue::wait_event_interruptible(&process.child_exit_wait, || try_reap_child()) {
             WaitResult::Ready(value) => decode(value),
-            WaitResult::Interrupted => Err(ERESTART),
+            WaitResult::Interrupted => Err(EINTR),
             WaitResult::TimedOut => Ok(None),
         }
     }

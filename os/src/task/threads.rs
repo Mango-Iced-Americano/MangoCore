@@ -205,7 +205,7 @@ fn requeue_waiters(
 fn futex_wait_result_to_errno(wait_result: WaitResult) -> isize {
     match wait_result {
         WaitResult::Ready(value) => value,
-        WaitResult::Interrupted => EINTR,
+        WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
         WaitResult::TimedOut => ETIMEDOUT,
     }
 }
@@ -577,7 +577,7 @@ pub fn do_futex_waitv(
         }
         if has_actionable_signal(&task) {
             finish_waitv_private(&mut guard, entries, task.as_ref());
-            return EINTR;
+            return crate::task::RestartKind::RestartSys.syscall_result();
         }
         discard_non_actionable_unblocked_signals(&task);
 
@@ -650,7 +650,7 @@ pub fn do_futex_waitv_shared(
         }
         if has_actionable_signal(&task) {
             finish_waitv_shared(&mut guard, entries, task.as_ref());
-            return EINTR;
+            return crate::task::RestartKind::RestartSys.syscall_result();
         }
         discard_non_actionable_unblocked_signals(&task);
 

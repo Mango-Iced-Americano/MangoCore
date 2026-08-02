@@ -435,6 +435,7 @@ pub fn sys_timer_settime(
         }
     }
     if should_notify {
+        task.set_signal_pending();
         task.process.notify_signal_waiters();
     }
 
@@ -678,6 +679,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                 should_notify
             };
             if should_notify {
+                task.set_signal_pending();
                 task.process.notify_signal_waiters();
             }
             if should_wake_task {
