@@ -179,8 +179,6 @@ pub const ELIBMAX: isize = -82;
 pub const ELIBEXEC: isize = -83;
 /// Illegal byte sequence
 pub const EILSEQ: isize = -84;
-/// Interrupted system call should be restarted
-pub const ERESTART: isize = -85;
 /// Streams pipe error
 pub const ESTRPIPE: isize = -86;
 /// Too many users
@@ -366,7 +364,6 @@ pub enum Errno {
     ELIBMAX = -82,
     ELIBEXEC = -83,
     EILSEQ = -84,
-    ERESTART = -85,
     ESTRPIPE = -86,
     EUSERS = -87,
     ENOTSOCK = -88,

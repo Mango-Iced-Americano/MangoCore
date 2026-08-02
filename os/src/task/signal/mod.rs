@@ -147,8 +147,38 @@ bitflags! {
     }
 }
 
-const SYSCALL_SIGTIMEDWAIT: usize = 137;
-const SYSCALL_RT_SIGSUSPEND: usize = 133;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(isize)]
+pub enum RestartKind {
+    RestartSys = -512,
+    RestartNoIntr = -513,
+    RestartNoHand = -514,
+    RestartBlock = -516,
+}
+
+impl RestartKind {
+    pub const fn syscall_result(self) -> isize {
+        self as isize
+    }
+
+    fn from_syscall_result(result: isize) -> Option<Self> {
+        match result {
+            -512 => Some(Self::RestartSys),
+            -513 => Some(Self::RestartNoIntr),
+            -514 => Some(Self::RestartNoHand),
+            -516 => Some(Self::RestartBlock),
+            _ => None,
+        }
+    }
+
+    fn restarts_for(self, action: SigActionFlags) -> bool {
+        match self {
+            Self::RestartSys | Self::RestartBlock => action.contains(SigActionFlags::SA_RESTART),
+            Self::RestartNoIntr => true,
+            Self::RestartNoHand => false,
+        }
+    }
+}
 
 impl Signals {
     // SIGKILL | SIGSTOP
@@ -370,6 +400,8 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
                 } else {
                     sighand.set(signum, Some(sigact));
                 }
+                drop(sighand);
+                task.process.refresh_signal_pending_for_threads();
             }
             SUCCESS
         }
@@ -525,22 +557,26 @@ fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bo
     }
 }
 
-fn take_next_pending_signal(
-    task: &TaskControlBlock,
-    inner: &mut super::task::TaskControlBlockInner,
-) -> Option<(PendingSignal, bool)> {
-    let thread_pending = inner.sigpending.pending().difference(inner.sigmask);
-    if let Some(pending) = inner.sigpending.dequeue_matching(thread_pending) {
-        return Some((pending, false));
+fn take_next_pending_signal(task: &TaskControlBlock) -> Option<PendingSignal> {
+    let thread_pending = {
+        let mut inner = task.acquire_inner_lock();
+        let pending = inner.sigpending.pending().difference(inner.sigmask);
+        let next = inner.sigpending.dequeue_matching(pending);
+        task.recalculate_signal_pending_with_inner(&inner);
+        next
+    };
+    if thread_pending.is_some() {
+        return thread_pending;
     }
 
-    let shared_pending = task.process.shared_pending_hint().difference(inner.sigmask);
+    let shared_pending = {
+        let inner = task.acquire_inner_lock();
+        task.process.shared_pending_hint().difference(inner.sigmask)
+    };
     if shared_pending.is_empty() {
         return None;
     }
-    task.process
-        .take_shared_matching(shared_pending)
-        .map(|pending| (pending, true))
+    task.process.take_shared_matching(shared_pending)
 }
 
 pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
@@ -584,6 +620,7 @@ pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
             }
         }
     }
+    task.recalculate_signal_pending();
 }
 
 /// Check whether any pending-unblocked signal has an actionable disposition.
@@ -657,17 +694,21 @@ fn signal_should_ptrace_stop(inner: &super::task::TaskControlBlockInner, signal:
 /// 在从内核返回到用户空间前调用
 pub fn do_signal() -> &'static TaskControlBlock {
     let task = current_task_ref().unwrap();
-    let mut inner = task.acquire_inner_lock();
-    if inner.pending_oom_kill {
-        inner.pending_oom_kill = false;
-        inner.add_signal(Signals::SIGKILL);
-        warn!(
-            "[OOM killer] tid {} pid {} marked for OOM kill, sending SIGKILL",
-            task.tid.0,
-            task.pid()
-        );
+    {
+        let mut inner = task.acquire_inner_lock();
+        if inner.pending_oom_kill {
+            inner.pending_oom_kill = false;
+            inner.add_signal(Signals::SIGKILL);
+            task.set_signal_pending();
+            warn!(
+                "[OOM killer] tid {} pid {} marked for OOM kill, sending SIGKILL",
+                task.tid.0,
+                task.pid()
+            );
+        }
     }
-    while let Some((pending, from_process)) = take_next_pending_signal(task, &mut inner) {
+    while let Some(pending) = take_next_pending_signal(task) {
+        let mut inner = task.acquire_inner_lock();
         let signum = pending.signum();
         let signal = pending.signal;
         let sighand_ref = task.process.sighand();
@@ -687,19 +728,11 @@ pub fn do_signal() -> &'static TaskControlBlock {
             if act.handler != SigHandler::SIG_DFL {
                 let trap_cx = inner.get_trap_cx();
                 let a0_isize = trap_cx.gp.a0 as isize;
-                // if this syscall wants to restart
-                if a0_isize == -(SyscallErr::ERESTART as isize) {
-                    // and if `SA_RESTART` is set
-                    if act.flags.contains(SigActionFlags::SA_RESTART)
-                        && trap_cx.gp.a7 != SYSCALL_SIGTIMEDWAIT
-                        && trap_cx.gp.a7 != SYSCALL_RT_SIGSUSPEND
-                    {
-                        // back to `ecall`
+                if let Some(restart) = RestartKind::from_syscall_result(a0_isize) {
+                    if restart.restarts_for(act.flags) {
                         trap_cx.gp.pc -= 4;
-                        // restore syscall parameter `a0`
                         trap_cx.gp.a0 = trap_cx.origin_a0;
                     } else {
-                        // will return EINTR after sigreturn
                         trap_cx.gp.a0 = EINTR as usize;
                     }
                 }
@@ -847,14 +880,18 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 } else {
                     (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
                 };
-                if act.flags.contains(SigActionFlags::SA_RESETHAND) {
-                    let mut reset_action = act;
-                    reset_action.handler = SigHandler::SIG_DFL;
-                    sighand.set(signum, Some(reset_action));
+                let reset_action = act.flags.contains(SigActionFlags::SA_RESETHAND);
+                if reset_action {
+                    let mut action = act;
+                    action.handler = SigHandler::SIG_DFL;
+                    sighand.set(signum, Some(action));
                 }
-                // go back to `trap_return`
+                task.recalculate_signal_pending_with_inner(&inner);
                 drop(sighand);
                 drop(inner);
+                if reset_action {
+                    task.process.refresh_signal_pending_for_threads();
+                }
                 return task;
             }
         }
@@ -908,7 +945,13 @@ pub fn do_signal() -> &'static TaskControlBlock {
             }
         }
     }
-    drop(inner);
+    let mut inner = task.acquire_inner_lock();
+    if RestartKind::from_syscall_result(inner.get_trap_cx().gp.a0 as isize).is_some() {
+        let trap_cx = inner.get_trap_cx();
+        trap_cx.gp.pc -= 4;
+        trap_cx.gp.a0 = trap_cx.origin_a0;
+    }
+    task.recalculate_signal_pending_with_inner(&inner);
     task
 }
 
@@ -1007,6 +1050,7 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
         // unblock SIGILL & SIGSEGV, otherwise infinite loop may occurred
         // unblock SIGKILL & SIGSTOP, they can't be masked according to standard
         inner.sigmask.remove(Signals::CAN_NOT_BE_MASKED);
+        task.recalculate_signal_pending_with_inner(&inner);
     }
     SUCCESS
 }

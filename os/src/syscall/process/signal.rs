@@ -267,12 +267,14 @@ fn read_signalfd_mask(token: usize, mask: usize, sigsetsize: usize) -> Result<Si
 }
 
 fn take_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> Option<PendingSignal> {
-    {
+    let thread_pending = {
         let mut inner = task.acquire_inner_lock();
         let matching = inner.sigpending.pending() & set;
-        if let Some(pending) = inner.sigpending.dequeue_matching(matching) {
-            return Some(pending);
-        }
+        inner.sigpending.dequeue_matching(matching)
+    };
+    if thread_pending.is_some() {
+        task.recalculate_signal_pending();
+        return thread_pending;
     }
     task.process.take_shared_matching(set)
 }
@@ -858,5 +860,6 @@ pub fn sys_sigreturn() -> isize {
         }
     }
     inner.sigmask = restored_sigmask;
+    task.recalculate_signal_pending_with_inner(&inner);
     inner.get_trap_cx().gp.a0 as isize // return a0: not modify any of trap_cx
 }

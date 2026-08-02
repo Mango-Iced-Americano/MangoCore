@@ -101,7 +101,6 @@ pub enum SyscallErr {
     ELIBMAX = 82,
     ELIBEXEC = 83,
     EILSEQ = 84,
-    ERESTART = 85,
     ESTRPIPE = 86,
     EUSERS = 87,
     ENOTSOCK = 88,

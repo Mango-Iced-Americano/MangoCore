@@ -35,24 +35,33 @@ fn read_optional_user_timespec(
 }
 
 fn take_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> Option<PendingSignal> {
-    {
+    let thread_pending = {
         let mut inner = task.acquire_inner_lock();
         let matching = inner.sigpending.pending() & set;
-        if let Some(pending) = inner.sigpending.dequeue_matching(matching) {
-            return Some(pending);
-        }
+        inner.sigpending.dequeue_matching(matching)
+    };
+    if thread_pending.is_some() {
+        task.recalculate_signal_pending();
+        return thread_pending;
     }
     // `task.inner` 已释放后再访问进程共享 pending 队列，避免嵌套获取任务锁。
     task.process.take_shared_matching(set)
 }
 
 fn remove_one_pending_signal(task: &TaskControlBlock, signal: Signals) {
-    let mut inner = task.acquire_inner_lock();
-    if inner.sigpending.contains(signal) {
-        inner.sigpending.remove_signal(signal);
+    let removed_thread = {
+        let mut inner = task.acquire_inner_lock();
+        if inner.sigpending.contains(signal) {
+            inner.sigpending.remove_signal(signal);
+            true
+        } else {
+            false
+        }
+    };
+    if removed_thread {
+        task.recalculate_signal_pending();
         return;
     }
-    drop(inner);
     // 信号默认忽略时，需要同时清理共享 pending；不能持有 task.inner。
     task.process.take_shared_signal(signal);
 }
@@ -104,7 +113,7 @@ fn take_sigtimedwait_interrupt(task: &TaskControlBlock, wait_set: Signals) -> bo
 /// # Semantics
 ///
 /// 成功的 `sigsuspend` 按 Linux 语义不会正常返回；被信号打断时返回
-/// `-ERESTART`，由 syscall 返回路径转换为 `-EINTR`。旧 mask 保存在
+/// `-EINTR`。旧 mask 保存在
 /// `sigmask_to_restore`，由 `sigreturn` 恢复。
 ///
 /// # Errors
@@ -122,12 +131,13 @@ pub fn sigsuspend(set: *const Signals) -> isize {
         let old_mask = inner.sigmask;
         inner.sigmask = new_mask;
         inner.sigmask_to_restore = Some(old_mask);
+        task.recalculate_signal_pending_with_inner(&inner);
     }
 
     let wait_queue = spin::Mutex::new(WaitQueue::new());
     match WaitQueue::wait_event_interruptible(&wait_queue, || None::<isize>) {
         WaitResult::Ready(value) => value,
-        WaitResult::Interrupted => ERESTART,
+        WaitResult::Interrupted => EINTR,
         WaitResult::TimedOut => EAGAIN,
     }
 }
@@ -137,7 +147,7 @@ pub fn sigsuspend(set: *const Signals) -> isize {
 /// # Semantics
 ///
 /// 成功时返回信号编号，并在 `info` 非空时写回 `SigInfo`。若等待集合外出现
-/// 可处理信号，返回 `-ERESTART` 交由 syscall 返回路径转为 `-EINTR` 或重启。
+/// 可处理信号，返回 `-EINTR`。
 ///
 /// # Errors
 ///
@@ -188,7 +198,7 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
             return Some(pending.signum() as isize);
         }
         if take_sigtimedwait_interrupt(task, set) {
-            return Some(ERESTART);
+            return Some(EINTR);
         }
         None
     };
@@ -205,7 +215,7 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
     }
     match wait_result {
         WaitResult::Ready(value) => value,
-        WaitResult::Interrupted => ERESTART,
+        WaitResult::Interrupted => EINTR,
         WaitResult::TimedOut => EAGAIN,
     }
 }
