@@ -130,6 +130,8 @@ pub fn run_tasks() {
         }
         let loop_t0 = sched_profile_start(sched_profile);
         schedule_tick = schedule_tick.wrapping_add(1);
+        #[cfg(target_arch = "riscv64")]
+        crate::hal::arch::riscv::plic::report_unhandled_irq();
         // Read one character from UART per iteration. Handle in priority order:
         // 1. Magic key (Ctrl+T) → trace dump + shutdown
         // 2. Other input → stash, then feed the TTY line discipline.  The
@@ -170,9 +172,13 @@ pub fn run_tasks() {
             &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
             stage_t0,
         );
-        if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
+        let net_interrupt_pending = NET_INTERFACE.take_rx_interrupt();
+        if net_interrupt_pending || schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
             let stage_t0 = sched_profile_start(sched_profile);
-            NET_INTERFACE.try_poll();
+            let polled = NET_INTERFACE.try_poll();
+            if net_interrupt_pending && !polled {
+                NET_INTERFACE.notify_rx_interrupt();
+            }
             sched_record_stage(
                 sched_profile,
                 &SCHED_STAGE_NET_POLL_CALLS,
@@ -398,7 +404,12 @@ pub fn run_tasks() {
             // 没有就绪的任务 → CPU idle
             drop(processor);
             let stage_t0 = sched_profile_start(sched_profile);
-            if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
+            let net_interrupt_pending = NET_INTERFACE.take_rx_interrupt();
+            if net_interrupt_pending {
+                if !NET_INTERFACE.try_poll() {
+                    NET_INTERFACE.notify_rx_interrupt();
+                }
+            } else if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
                 NET_INTERFACE.poll();
             } else {
                 spin_loop();
