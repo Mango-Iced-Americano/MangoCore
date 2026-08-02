@@ -2206,8 +2206,8 @@ pub fn timer_interrupt_handler() {
         }
         NEXT_SCHED_TICK_NS.store(next_tick, AtomicOrdering::Relaxed);
 
-        // Periodic housekeeping — only once per sched tick
-        crate::net::config::NET_INTERFACE.try_poll_irq();
+        // Full network polling may transmit and wait for VirtIO completion.
+        // Keep it in `run_tasks`, where interrupts can service that completion.
         need_resched = true;
     }
 

@@ -441,7 +441,9 @@ impl<'a> NetInterfaceInner<'a> {
 
             #[cfg(not(all(feature = "boot_la_uboot_dmw", feature = "gmac_2k1000")))]
             if has_real_nic {
-                // DHCP probe
+                // Defer DHCP probing until the scheduler is running. Polling a
+                // virtio device during early boot can wait indefinitely before
+                // PID1 has a chance to start.
                 let mut dhcp_socket = dhcpv4::Socket::new();
                 dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
                     discover_timeout: Duration::from_secs(2),
@@ -450,41 +452,7 @@ impl<'a> NetInterfaceInner<'a> {
                     min_renew_timeout: Duration::from_secs(60),
                     ..dhcpv4::RetryConfig::default()
                 });
-                let dhcp_handle = eth_sockets.add(dhcp_socket);
-                let deadline =
-                    Instant::from_millis(current_time_duration().as_millis() as i64 + 5000);
-
-                loop {
-                    let timestamp =
-                        Instant::from_millis(current_time_duration().as_millis() as i64);
-                    *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
-                    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
-
-                    let event = eth_sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
-                    match event {
-                        Some(dhcpv4::Event::Configured(cfg)) => {
-                            net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
-                            net_core::set_default_gateway(cfg.router);
-                            let dns_servers: Vec<_> = cfg.dns_servers.iter().copied().collect();
-                            net_core::set_dns_servers(&dns_servers);
-                            log::info!(
-                                "[net::config] DHCP: got IP {:?} gateway {:?} DNS {:?}",
-                                cfg.address,
-                                cfg.router,
-                                dns_servers
-                            );
-                            break;
-                        }
-                        Some(dhcpv4::Event::Deconfigured) => {}
-                        None => {}
-                    }
-
-                    if timestamp >= deadline {
-                        log::info!("[net::config] DHCP timeout, continuing without IP");
-                        break;
-                    }
-                }
-                eth_sockets.remove(dhcp_handle);
+                runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
             }
 
             // Source IP from net_core (DHCP result)
