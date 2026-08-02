@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod kern_stack;
+pub mod plic;
 pub mod reset;
 pub mod sbi;
 pub mod sv39;
@@ -14,7 +15,9 @@ pub mod trap;
 
 pub fn machine_init() {
     trap::init();
+    plic::init();
     trap::enable_timer_interrupt();
+    trap::enable_external_interrupt();
     // First timer deadline is set by timer_subsystem_init() after boot.
 }
 

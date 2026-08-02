@@ -10,7 +10,6 @@ use super::TrapImpl;
 use crate::config::TRAMPOLINE;
 use crate::hal::arch::riscv::time::set_next_trigger;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
-use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
     current_task_ref, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
@@ -69,6 +68,14 @@ fn set_user_trap_entry() {
 pub fn enable_timer_interrupt() {
     unsafe {
         sie::set_stimer();
+    }
+}
+
+pub fn enable_external_interrupt() {
+    // SAFETY: enabling SEIE only permits supervisor external traps; sources
+    // remain masked in the PLIC until a driver registers a bounded callback.
+    unsafe {
+        sie::set_sext();
     }
 }
 
@@ -198,6 +205,9 @@ pub fn trap_handler() -> ! {
             }
             crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
             crate::task::timer_interrupt_handler();
+        }
+        Trap::Interrupt(Interrupt::SupervisorExternal) => {
+            crate::hal::arch::riscv::plic::handle_external_interrupt();
         }
         _ => {
             panic!(
