@@ -10,10 +10,10 @@ tools-user-rv:
 tools-user-la:
 	@$(MAKE) --no-print-directory ARCH=la64 PROFILE=normal USER_OUTPUT_ROOT="$(abspath ../user/target)" user
 
-tools-disk-rv: tools-user-rv tools-alpine-rv maybe-tools-cpython-rv
+tools-disk-rv: tools-user-rv tools-alpine-rv tools-apk-rv maybe-tools-cpython-rv
 	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
 
-tools-disk-la: tools-user-la tools-alpine-la maybe-tools-cpython-la
+tools-disk-la: tools-user-la tools-alpine-la tools-apk-la maybe-tools-cpython-la
 	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
 
 tools-disk: tools-disk-rv tools-disk-la
@@ -102,10 +102,11 @@ tools-alpine-la:
 		test -n "$$apk"; \
 		curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o "/tmp/alpine-la/$$apk"; \
 		tar -xzf "/tmp/alpine-la/$$apk" -C /tmp/alpine-la 2>/dev/null; \
-		cp /tmp/alpine-la/lib/ld-musl-loongarch-lp64d.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.so; \
-		cp /tmp/alpine-la/lib/libc.musl-loongarch-lp64d.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.musl-loongarch64.so.1
+		cp /tmp/alpine-la/lib/ld-musl-loongarch64.so.1 $(CURDIR)/../user/tools/loongarch64/lib/ld-musl-loongarch64.so.1; \
+		cp /tmp/alpine-la/lib/ld-musl-loongarch64.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.so; \
+		cp /tmp/alpine-la/lib/libc.musl-loongarch64.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.musl-loongarch64.so.1
 	@for binary in $(CURDIR)/../user/tools/loongarch64/sbin/mke2fs $(CURDIR)/../user/tools/loongarch64/sbin/mkfs.ext4; do \
-		patchelf --set-interpreter /tools/lib/ld-musl-loongarch-lp64d.so.1 --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
+		patchelf --set-interpreter /tools/lib/ld-musl-loongarch64.so.1 --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
 	done
 	@rm -rf /tmp/alpine-la
 	@echo "[alpine] loongarch64 done."
