@@ -197,6 +197,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 | RAW 套接字 | 已完成 | IPPROTO_RAW，SOCK_RAW |
 | Unix 流套接字 | 已完成 | SOCK_STREAM，抽象 + 文件系统命名空间 |
 | Unix 数据报套接字 | 已完成 | SOCK_DGRAM |
+| Unix SEQPACKET socketpair | 兼容模式 | SOCK_SEQPACKET 复用 Unix stream 双向字节流；尚无 MSG_EOR/记录边界 |
 | Netlink 套接字 | 部分完成 | NETLINK_ROUTE：GETLINK、GETADDR、GETROUTE |
 | Packet 套接字（AF_PACKET） | 已完成 | SOCK_RAW + SOCK_DGRAM 模式 |
 | DHCP | 已完成 | 启动时同步探测，基于 smoltcp |
