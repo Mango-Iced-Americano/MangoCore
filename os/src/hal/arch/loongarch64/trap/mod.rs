@@ -207,6 +207,7 @@ pub fn trap_handler() -> ! {
             let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
             crate::task::perf::record_trap_cost_ticks(_trap_ticks);
         }
+        task.recalculate_signal_pending();
         trap_return();
     }
 
@@ -406,6 +407,7 @@ pub fn trap_handler() -> ! {
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_leave_trap(cause);
     }
+    current_task_ref().unwrap().recalculate_signal_pending();
     trap_return();
 }
 
@@ -449,7 +451,12 @@ pub fn trap_return() -> ! {
     if trace_first_return {
         println!("[bringup][user:01] first task reached trap_return");
     }
-    let task = do_signal();
+    let task = current_task_ref().unwrap();
+    let task = if task.signal_pending_fast() {
+        do_signal()
+    } else {
+        task
+    };
     #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:02] initial signal check complete");

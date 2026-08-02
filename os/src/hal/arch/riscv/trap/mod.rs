@@ -223,12 +223,18 @@ pub fn trap_handler() -> ! {
         inner.refresh_real_timer();
         inner.update_process_times_leave_trap(scause.cause());
     }
+    current_task_ref().unwrap().recalculate_signal_pending();
     trap_return();
 }
 
 #[no_mangle]
 pub fn trap_return() -> ! {
-    let task = do_signal();
+    let task = current_task_ref().unwrap();
+    let task = if task.signal_pending_fast() {
+        do_signal()
+    } else {
+        task
+    };
     let pagefault_return_start = if crate::task::perf::take_pagefault_return_pending() {
         crate::task::perf::perf_memory_io_time_now()
     } else {
