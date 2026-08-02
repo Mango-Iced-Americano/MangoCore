@@ -503,6 +503,20 @@ diag=1
 - **教训**: `times03` 这类用例同时覆盖 harness 速度、CPU accounting 和 tick 换算，不要直接跳过；先看 `tms_utime/stime/cutime/cstime` 哪一项异常，再区分“测试超时窗口不足”和“内核记账缺失”。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/task/task.rs`, `os/src/task/mod.rs`, `os/src/task/processor.rs`, `os/src/syscall/process/time.rs`
 
+## 冻结测试输入也包括 ignored runner 与 recipe
+
+- **现象**: 生产源码指纹在测试前后完全一致，但长时间 Bash runner 在执行后半段时报变量文本
+  被截断或 `unbound variable`；同一轮还混入了与本节点无关的大内存用例，造成伪失败。
+- **根因**: 冻结清单只覆盖 tracked production source，没有覆盖 `.gitignore` 下的本地脚本、
+  recipe 和 task 文件。Bash 可能延迟读取尚未执行的脚本内容，运行中编辑文件不仅会改变后续
+  命令，还可能因长度/偏移变化破坏未读行。
+- **修复**: job 启动前把所有 runner、recipe、任务描述和判定脚本复制或哈希到 job artifact，
+  执行期间禁止原地修改；需要修配方时取消旧 job，生成新 job ID 后完整复跑。focused 集合只
+  放直接覆盖本节点语义的用例，资源规模或完全不同指标的用例单独归类。
+- **教训**: `mutation_detected=false` 只证明其 manifest 覆盖的文件未变，不能证明整个测试输入
+  冻结。验收前必须同时检查生产源码指纹、runner 输入指纹、原始退出码和真实用例集合。
+- **相关文件**: `cc-codex/bin/cc-agent-test.py`, `cc-codex/protocol/test-recipes.json`
+
 ## SysV IPC STAT_ANY 的 full id 与 index 兼容
 
 - **根因**: Linux `SHM_STAT/SHM_STAT_ANY`、`SEM_STAT_ANY`、`MSG_STAT_ANY` 的实现会用 `ipc_obtain_object_idr()` 按 full id 映射到底层 idr 槽位；LTP 可能先用真实 shmid/semid/msqid 探测支持情况。若内核只把入参解释成“当前表的第 n 个元素”，在 id 单调递增或删除后有空洞时会返回 `EINVAL`，表现为 `kernel doesn't support *_STAT_ANY`。

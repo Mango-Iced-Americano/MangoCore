@@ -464,8 +464,14 @@ B73 将 FSIZE、STACK、CORE、NPROC、MEMLOCK、SIGPENDING、NICE 和 RTPRIO �
 B74 将 CPU pair 也迁入 PCB，并以线程本地 1ms 批次向 PCB 原子累计运行时间。trap 与
 schedule-out 热路径只发布到期提示，`SIGXCPU`/`SIGKILL` 在用户返回安全点加入进程共享 pending；
 soft limit 命中后推进一秒，hard limit 优先。线程 clone 共享限制和累计，普通 fork 只继承
-限制并从零计时，exec 保留原 PCB。`getrusage(RUSAGE_SELF)`、`times()` 和 process CPU clock
-对 user/system 分项的线程组查询仍由后续节点补齐。
+限制并从零计时，exec 保留原 PCB。
+
+B75 在同一 PCB 记账中增加 user/system 分项，并保留独立 total 作为 CPU limit 的权威阈值源。
+`getrusage(RUSAGE_SELF)`、`times()` 和 process CPU clock 现在返回线程组累计；thread CPU
+clock 与 `RUSAGE_THREAD` 仍只读取指定 TCB。退出前强制冲刷本地尾数，最后线程保存组级 zombie
+快照，因而已退出 sibling 的时间不会丢失。内部 wait/reap 已持有这份组级数据；`wait4` 和 raw
+`waitid` 向用户写回 child rusage 仍由 B76 补齐。POSIX CPU timer 仍沿用旧的 wall-time owner，
+不能从查询修正外推为 timer 语义已完成。
 
 NOFILE 仍由 fd table 持有，等待与 `CLONE_FILES` 的跨进程生命周期分离。因此当前只剩这一项
 rlimit owner 例外，不能把 fd-table 限制外推为完整进程属性。

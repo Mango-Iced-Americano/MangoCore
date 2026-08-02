@@ -265,6 +265,9 @@ B74 将 CPU limit 与线程组累计一起迁入 PCB：TCB 只保留最多 1ms �
 `task.inner` 后才原子冲刷；trap/schedule-out 热路径只发布到期提示，真正的 rlimit 判定和
 进程共享信号投递必须在用户返回安全点完成。重设限额不得清除并发发布的 pending，更新下一
 阈值后必须复查累计值；NOFILE 仍是唯一待解耦的 owner 例外。
+B75 将 PCB CPU 记账拆为 user/system 分项，同时保留 total 作为限额判定的唯一权威值；不能
+用两次独立分项读取临时合成阈值。当前进程查询先冲刷本线程已结算尾数，线程退出必须在发布
+最后一个 live token 前冲刷，最终 zombie 只保存线程组快照。`task.inner` 不得与 PCB 操作嵌套。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

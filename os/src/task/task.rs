@@ -20,6 +20,7 @@ use super::TaskContext;
 use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, IpcNamespace, MountNamespace,
     NetNamespace, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE,
+    PROCESS_CPU_ACCOUNT_BATCH_US,
 };
 use crate::config::{MMAP_BASE, PAGE_SIZE};
 use crate::fs::vfs;
@@ -45,9 +46,6 @@ use spin::{Mutex, MutexGuard};
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
 static ACTIVE_SECCOMP_TASKS: AtomicUsize = AtomicUsize::new(0);
-/// 线程本地累计到该粒度后才冲刷 PCB，避免 syscall 密集型多线程在同一
-/// `runtime_us` cache line 上进行每次 trap 的原子争用。
-const GROUP_CPU_ACCOUNT_BATCH_US: usize = 1_000;
 
 #[inline(always)]
 pub fn any_seccomp_enabled() -> bool {
@@ -295,8 +293,10 @@ pub struct TaskControlBlockInner {
     /// ABI-visible only; it does not affect actual I/O scheduling.
     pub ioprio_class: usize,
     pub ioprio_prio: usize,
-    /// 尚未批量冲刷到 PCB 的本线程 CPU 微秒数；只在 `task.inner` 下访问。
-    group_cpu_unflushed_us: usize,
+    /// 尚未批量冲刷到 PCB 的本线程用户态 CPU 微秒数。
+    group_user_unflushed_us: usize,
+    /// 尚未批量冲刷到 PCB 的本线程内核态 CPU 微秒数。
+    group_system_unflushed_us: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
@@ -505,6 +505,14 @@ impl Rusage {
         }
     }
 
+    /// 从线程组原子计数构造只含 CPU 时间的快照。
+    pub(crate) fn from_cpu_us(user_us: u64, system_us: u64) -> Self {
+        let mut usage = Self::new();
+        usage.ru_utime = TimeVal::from_us(user_us.min(usize::MAX as u64) as usize);
+        usage.ru_stime = TimeVal::from_us(system_us.min(usize::MAX as u64) as usize);
+        usage
+    }
+
     pub fn add_cpu(&mut self, other: Rusage) {
         self.ru_utime = self.ru_utime + other.ru_utime;
         self.ru_stime = self.ru_stime + other.ru_stime;
@@ -582,9 +590,7 @@ impl TaskControlBlockInner {
         }
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
-        self.group_cpu_unflushed_us = self
-            .group_cpu_unflushed_us
-            .saturating_add(diff.to_us());
+        self.group_user_unflushed_us = self.group_user_unflushed_us.saturating_add(diff.to_us());
         self.sched_vruntime = self
             .sched_vruntime
             .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
@@ -594,7 +600,7 @@ impl TaskControlBlockInner {
         self.update_itimer_prof_if_exists(diff);
     }
     /// 在离开陷阱时更新进程时间
-    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) -> usize {
+    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) -> (usize, usize) {
         let now = TimeVal::now();
         self.account_system_time_until(now);
         self.clock.last_enter_u_mode = now;
@@ -602,7 +608,7 @@ impl TaskControlBlockInner {
     }
 
     /// 任务在内核态主动让出 CPU 前，先结算本次内核态运行时间。
-    pub fn update_process_times_schedule_out(&mut self) -> usize {
+    pub fn update_process_times_schedule_out(&mut self) -> (usize, usize) {
         self.account_system_time_until(TimeVal::now());
         // block/exit 后可能很久不再返回用户态，必须在切走前冲刷全部尾数。
         self.take_group_cpu_delta(true)
@@ -619,19 +625,24 @@ impl TaskControlBlockInner {
             return;
         }
         self.rusage.ru_stime = self.rusage.ru_stime + diff;
-        self.group_cpu_unflushed_us = self
-            .group_cpu_unflushed_us
-            .saturating_add(diff.to_us());
+        self.group_system_unflushed_us =
+            self.group_system_unflushed_us.saturating_add(diff.to_us());
         self.update_itimer_prof_if_exists(diff);
         self.clock.last_enter_s_mode = now;
     }
 
     /// 领取准备冲刷到线程组计数器的 CPU 时间。
-    fn take_group_cpu_delta(&mut self, force: bool) -> usize {
-        if !force && self.group_cpu_unflushed_us < GROUP_CPU_ACCOUNT_BATCH_US {
-            return 0;
+    fn take_group_cpu_delta(&mut self, force: bool) -> (usize, usize) {
+        let total_us = self
+            .group_user_unflushed_us
+            .saturating_add(self.group_system_unflushed_us);
+        if !force && total_us < PROCESS_CPU_ACCOUNT_BATCH_US {
+            return (0, 0);
         }
-        core::mem::take(&mut self.group_cpu_unflushed_us)
+        (
+            core::mem::take(&mut self.group_user_unflushed_us),
+            core::mem::take(&mut self.group_system_unflushed_us),
+        )
     }
     /// 更新实时定时器
     pub fn update_itimer_real_if_exists(&mut self, diff: TimeVal) {
@@ -690,6 +701,19 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    /// 把本线程已经结算的 CPU 时间尾数立即并入进程账户。
+    ///
+    /// 进程级 CPU 时间查询不能等到下一次 trap 返回或调度切出，否则当前
+    /// 线程刚在 trap 入口结算的用户态区间仍滞留在 TCB 中。先在 inner 锁
+    /// 下领取尾数，再释放锁更新 PCB 原子计数，保持既有锁顺序。
+    pub(crate) fn flush_cpu_time(&self) {
+        let (user_us, system_us) = {
+            let mut inner = self.acquire_inner_lock();
+            inner.take_group_cpu_delta(true)
+        };
+        self.process.account_cpu_time(user_us, system_us);
+    }
+
     fn write_clear_child_tid_word(
         &self,
         addr: usize,
@@ -1110,23 +1134,23 @@ impl TaskControlBlock {
     /// 那些属于 ProcessControlBlock 的退出收尾。返回 true 仅表示本线程在
     /// 完成全部清理后消费了最后一个 live token，应由调用者执行进程级收尾。
     pub(crate) fn exit_thread_resources(&self, exit_code: u32) -> bool {
-        let (clear_child_tid, cpu_delta) = {
+        let (clear_child_tid, user_us, system_us) = {
             let mut inner = self.acquire_inner_lock();
             if self.is_zombie() {
                 return false;
             }
-            let cpu_delta = inner.update_process_times_schedule_out();
+            let (user_us, system_us) = inner.update_process_times_schedule_out();
             if !self.mark_zombie("exit") {
                 return false;
             }
             let clear_child_tid = inner.clear_child_tid;
             inner.clear_child_tid = 0;
             inner.robust_list = RobustList::default();
-            (clear_child_tid, cpu_delta)
+            (clear_child_tid, user_us, system_us)
         };
         // 退出会永久离开该 TCB，强制冲刷最后一段 CPU 时间；这里只触碰
         // PCB 原子计数器，不把 task.inner 带入进程信号或 rlimit 锁。
-        self.process.account_cpu_runtime(cpu_delta);
+        self.process.account_cpu_time(user_us, system_us);
 
         if clear_child_tid != 0 {
             match self.write_clear_child_tid_word(clear_child_tid) {
@@ -1351,7 +1375,8 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
-                group_cpu_unflushed_us: 0,
+                group_user_unflushed_us: 0,
+                group_system_unflushed_us: 0,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1479,7 +1504,8 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
-                group_cpu_unflushed_us: 0,
+                group_user_unflushed_us: 0,
+                group_system_unflushed_us: 0,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -2069,7 +2095,8 @@ impl TaskControlBlock {
                 sched_period: child_sched_period,
                 ioprio_class: parent_inner.ioprio_class,
                 ioprio_prio: parent_inner.ioprio_prio,
-                group_cpu_unflushed_us: 0,
+                group_user_unflushed_us: 0,
+                group_system_unflushed_us: 0,
                 personality: parent_inner.personality,
                 pdeath_signal: 0,
                 dumpable: parent_inner.dumpable,

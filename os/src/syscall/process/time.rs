@@ -952,23 +952,14 @@ fn decode_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
     })
 }
 
-fn scale_sched_cpu_clock_us(us: usize, nice: i32) -> usize {
-    let nice = nice.clamp(-20, 19);
-    if nice < 0 {
-        us.saturating_mul((20 - nice) as usize) / 20
-    } else if nice > 0 {
-        us.saturating_mul(20) / (20 + nice as usize)
-    } else {
-        us
-    }
-}
-
-fn cpu_clock_from_rusage(rusage: Rusage, which: i32, nice: i32) -> TimeSpec {
+fn cpu_clock_from_rusage(rusage: Rusage, which: i32) -> TimeSpec {
     let utime = rusage.ru_utime.to_us();
     let stime = rusage.ru_stime.to_us();
     let us = match which {
         CPUCLOCK_PROF => utime.saturating_add(stime),
-        CPUCLOCK_SCHED => scale_sched_cpu_clock_us(utime.saturating_add(stime), nice),
+        // MangoCore 尚未维护独立 sum_exec_runtime；当前可用的等价近似是未按
+        // nice 加权的真实 user + system 时间，不能把 vruntime 暴露为 CPU clock。
+        CPUCLOCK_SCHED => utime.saturating_add(stime),
         CPUCLOCK_VIRT => utime,
         _ => 0,
     };
@@ -1000,54 +991,33 @@ fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
         if clock.pid == 0 {
             let task = current_task().unwrap();
             let inner = task.acquire_inner_lock();
-            return Ok(cpu_clock_from_rusage(
-                inner.rusage,
-                clock.which,
-                inner.sched_nice,
-            ));
+            return Ok(cpu_clock_from_rusage(inner.rusage, clock.which));
         } else {
             let task = find_task_by_tid(clock.pid).ok_or(EINVAL)?;
             let inner = task.acquire_inner_lock();
-            return Ok(cpu_clock_from_rusage(
-                inner.rusage,
-                clock.which,
-                inner.sched_nice,
-            ));
+            return Ok(cpu_clock_from_rusage(inner.rusage, clock.which));
         }
     }
 
     let process = if clock.pid == 0 {
-        current_task().unwrap().process.clone()
+        let current = current_task().unwrap();
+        current.flush_cpu_time();
+        current.process.clone()
     } else {
         let current = current_task().unwrap();
         if clock.pid == current.gettid() {
+            current.flush_cpu_time();
             current.process.clone()
         } else {
             find_process_by_pid(clock.pid).ok_or(EINVAL)?
         }
     };
-    let mut cpu_us = 0usize;
-    let mut saw_thread = false;
-    for task in process.threads() {
-        let inner = task.acquire_inner_lock();
-        let rusage = inner.rusage;
-        let task_utime = rusage.ru_utime.to_us();
-        let task_stime = rusage.ru_stime.to_us();
-        let task_us = match clock.which {
-            CPUCLOCK_PROF => task_utime.saturating_add(task_stime),
-            CPUCLOCK_SCHED => {
-                scale_sched_cpu_clock_us(task_utime.saturating_add(task_stime), inner.sched_nice)
-            }
-            CPUCLOCK_VIRT => task_utime,
-            _ => return Err(EINVAL),
-        };
-        cpu_us = cpu_us.saturating_add(task_us);
-        saw_thread = true;
-    }
-    if !saw_thread {
+    if process.live_thread_count() == 0 {
         return Err(EINVAL);
     }
-    Ok(TimeSpec::from_us(cpu_us))
+    // PCB 账户同时保留已退出 sibling 的时间，避免扫描 live TCB 时在退出窗口
+    // 丢失累计；查询也不再依次获取多个 task.inner。
+    Ok(cpu_clock_from_rusage(process.cpu_rusage(), clock.which))
 }
 
 pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
@@ -1056,12 +1026,20 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
             current_timespec()
         }
         CLOCK_MONOTONIC
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID
         | CLOCK_MONOTONIC_RAW
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
         | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
+        CLOCK_PROCESS_CPUTIME_ID => {
+            let task = current_task().unwrap();
+            task.flush_cpu_time();
+            cpu_clock_from_rusage(task.process.cpu_rusage(), CPUCLOCK_PROF)
+        }
+        CLOCK_THREAD_CPUTIME_ID => {
+            let task = current_task().unwrap();
+            let inner = task.acquire_inner_lock();
+            cpu_clock_from_rusage(inner.rusage, CPUCLOCK_PROF)
+        }
         _ => match cpu_clock_timespec(clk_id) {
             Ok(timespec) => timespec,
             Err(errno) => return errno,
@@ -1089,17 +1067,19 @@ pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
             // sched tick granularity
             10_000_000 // 10 ms
         }
-        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // CPU accounting currently approximates to ~1 us
-            1_000
-        }
+        // 进程账户按 1ms 批量冲刷；返回真实可保证的精度，不能继续宣称 1us。
+        CLOCK_PROCESS_CPUTIME_ID => crate::task::PROCESS_CPU_ACCOUNT_BATCH_US * 1_000,
+        CLOCK_THREAD_CPUTIME_ID => 1_000,
         _ => {
-            if let Err(errno) = validate_cpu_clock_id(clk_id) {
-                return errno;
+            let clock = match validate_cpu_clock_id(clk_id) {
+                Ok(clock) => clock,
+                Err(errno) => return errno,
+            };
+            if clock.per_thread {
+                1_000
+            } else {
+                crate::task::PROCESS_CPU_ACCOUNT_BATCH_US * 1_000
             }
-            // default: hardware counter resolution
-            let freq = crate::timer::clock_freq();
-            ((1_000_000_000u128 + freq as u128 - 1) / freq as u128) as usize
         }
     };
     if !tp.is_null() {
@@ -1210,18 +1190,13 @@ fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {
 
 pub fn sys_times(buf: *mut Times) -> isize {
     let task = current_task().unwrap();
-    let (utime, stime) = {
-        let inner = task.acquire_inner_lock();
-        (
-            timeval_to_user_ticks(inner.rusage.ru_utime),
-            timeval_to_user_ticks(inner.rusage.ru_stime),
-        )
-    };
+    task.flush_cpu_time();
+    let process_rusage = task.process.cpu_rusage();
     let child_rusage = task.process.child_rusage();
     let token = current_user_token();
     let times = Times {
-        tms_utime: utime,
-        tms_stime: stime,
+        tms_utime: timeval_to_user_ticks(process_rusage.ru_utime),
+        tms_stime: timeval_to_user_ticks(process_rusage.ru_stime),
         tms_cutime: timeval_to_user_ticks(child_rusage.ru_utime),
         tms_cstime: timeval_to_user_ticks(child_rusage.ru_stime),
     };
@@ -1241,7 +1216,14 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let rusage = match who {
-        RUSAGE_SELF | RUSAGE_THREAD => {
+        RUSAGE_SELF => {
+            let resident_kb = task.process.vm().read(|vm| vm.resident_user_bytes()) / 1024;
+            task.flush_cpu_time();
+            let mut usage = task.process.cpu_rusage();
+            usage.update_maxrss_kb(resident_kb);
+            usage
+        }
+        RUSAGE_THREAD => {
             let resident_kb = task.process.vm().read(|vm| vm.resident_user_bytes()) / 1024;
             let mut inner = task.acquire_inner_lock();
             inner.rusage.update_maxrss_kb(resident_kb);

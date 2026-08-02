@@ -107,10 +107,16 @@ impl Default for ProcessLimits {
 
 /// 线程组 CPU 限额的无锁热路径状态。
 ///
-/// `runtime_us` 只接收各线程批量冲刷的增量；`next_expiry_us` 是 rlimit
-/// owner 发布的最近阈值。真正修改 soft limit 和生成信号只在用户返回
-/// 安全点完成，trap 记账路径不获取 PCB mutex，也不做 seqlock 自旋。
+/// `user_us`/`system_us` 供 ABI 查询，`runtime_us` 作为单一权威总量判定
+/// CPU limit；`next_expiry_us` 是 rlimit owner 发布的最近阈值。真正修改
+/// soft limit 和生成信号只在用户返回安全点完成，trap 记账路径不获取
+/// PCB mutex，也不做 seqlock 自旋。
 struct ProcessCpuAccount {
+    /// 已冲刷的线程组用户态 CPU 时间。
+    user_us: AtomicU64,
+    /// 已冲刷的线程组内核态 CPU 时间。
+    system_us: AtomicU64,
+    /// user + system 的权威饱和总量，专供限额到期判断。
     runtime_us: AtomicU64,
     next_expiry_us: AtomicU64,
     expiry_pending: AtomicBool,
@@ -133,10 +139,21 @@ impl ProcessCpuAccount {
 
     fn new(limit: LimitPair) -> Self {
         Self {
+            user_us: AtomicU64::new(0),
+            system_us: AtomicU64::new(0),
             runtime_us: AtomicU64::new(0),
             next_expiry_us: AtomicU64::new(Self::next_expiry(limit)),
             expiry_pending: AtomicBool::new(false),
         }
+    }
+
+    fn add_saturating(counter: &AtomicU64, delta: u64) -> u64 {
+        let previous = counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_add(delta))
+            })
+            .unwrap();
+        previous.saturating_add(delta)
     }
 }
 
@@ -241,7 +258,7 @@ pub struct ProcessInner {
     pub continued_pending: bool,
     /// PTRACE_ATTACH tracer pid. This does not change process parentage.
     pub ptrace_tracer_pid: Option<usize>,
-    /// 进程退出时记录的 leader CPU 时间快照。
+    /// 进程退出时记录的线程组资源快照。
     pub rusage: Rusage,
     /// 已由 wait/waitid 回收的子进程 CPU 时间累计。
     pub child_rusage: Rusage,
@@ -421,27 +438,41 @@ impl ProcessControlBlock {
 
     /// 把一个线程的已结算 CPU 时间批量计入线程组。
     ///
-    /// 调用点可能仍持有当前线程的 inner 锁，因此这里只能做原子操作，不能
-    /// 获取 rlimit/signal 锁或直接投递信号。
-    pub(crate) fn account_cpu_runtime(&self, delta_us: usize) {
+    /// 调用方先在 `task.inner` 下领取批次并释放锁；本方法仍严格只做原子操作，
+    /// 不能获取 rlimit/signal 锁或直接投递信号。
+    pub(crate) fn account_cpu_time(&self, user_us: usize, system_us: usize) {
+        let delta_us = user_us.saturating_add(system_us) as u64;
         if delta_us == 0 {
             return;
         }
-        let delta_us = delta_us as u64;
-        let previous = self
-            .cpu_account
-            .runtime_us
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |runtime| {
-                Some(runtime.saturating_add(delta_us))
-            })
-            .unwrap();
-        let runtime = previous.saturating_add(delta_us);
+        if user_us != 0 {
+            ProcessCpuAccount::add_saturating(&self.cpu_account.user_us, user_us as u64);
+        }
+        if system_us != 0 {
+            ProcessCpuAccount::add_saturating(&self.cpu_account.system_us, system_us as u64);
+        }
+        // 分项先更新，总量再参与限额判断。若本批触发到期，随后对 pending
+        // 的 Release 发布会把这两个分项一并带到安全点；三个计数都只单调增加。
+        let runtime = ProcessCpuAccount::add_saturating(&self.cpu_account.runtime_us, delta_us);
         let next = self.cpu_account.next_expiry_us.load(Ordering::Acquire);
         if next != u64::MAX && runtime >= next {
             self.cpu_account
                 .expiry_pending
                 .store(true, Ordering::Release);
         }
+    }
+
+    /// 返回已冲刷的线程组 user/system CPU 时间。
+    ///
+    /// 活进程快照允许分别观察到并发批次的新值或旧值，和 Linux 的 SMP
+    /// `getrusage` 采样约定一致；已结算的本地尾数最多为 1ms，当前仍在运行
+    /// 的 CPU 区间会在下一 trap/tick 结算。最后一个线程完成 AcqRel
+    /// live-token 退出链后，本快照包含所有强制冲刷。
+    pub(crate) fn cpu_rusage(&self) -> Rusage {
+        Rusage::from_cpu_us(
+            self.cpu_account.user_us.load(Ordering::Acquire),
+            self.cpu_account.system_us.load(Ordering::Acquire),
+        )
     }
 
     /// 在 rlimit owner 已更新 CPU pair 后发布新的无锁到期阈值。
@@ -1611,7 +1642,9 @@ impl ProcessControlBlock {
     /// 以及进程资源关闭。
     pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         self.complete_vfork();
-        let mut rusage = exit_task.acquire_inner_lock().rusage;
+        // 最后一条 live token 只会在每个 sibling 强制冲刷后归零，因此 zombie
+        // 快照必须取 PCB 总量，不能再退回“最后退出线程的 TCB rusage”。
+        let mut rusage = self.cpu_rusage();
         let resident_kb = self.vm().read(|vm| vm.resident_user_bytes()) / 1024;
         rusage.update_maxrss_kb(resident_kb);
         if !self.mark_zombie(exit_code, rusage) {

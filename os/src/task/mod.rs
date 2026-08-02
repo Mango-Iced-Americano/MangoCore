@@ -31,6 +31,12 @@ mod sleep;
 mod task;
 pub mod threads;
 
+/// 线程 CPU 时间冲刷到 PCB 的最大本地批量。
+///
+/// 进程级查询据此声明 1ms 精度；schedule-out 和 exit 不受该阈值限制，会强制
+/// 冲刷尚未达到批量的尾数。
+pub(crate) const PROCESS_CPU_ACCOUNT_BATCH_US: usize = 1_000;
+
 use crate::fs::{self, vfs_lookup_absolute};
 use crate::hal::__switch;
 use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl};
@@ -120,13 +126,13 @@ pub fn try_yield() {
 fn prepare_current_switch(task: &Arc<TaskControlBlock>) -> *mut TaskContext {
     let mut inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut inner.task_cx as *mut TaskContext;
-    let cpu_delta = inner.update_process_times_schedule_out();
+    let (user_us, system_us) = inner.update_process_times_schedule_out();
     task.sched_vruntime_hint.store(
         inner.sched_vruntime,
         core::sync::atomic::Ordering::Relaxed,
     );
     drop(inner);
-    task.process.account_cpu_runtime(cpu_delta);
+    task.process.account_cpu_time(user_us, system_us);
     task_cx_ptr
 }
 

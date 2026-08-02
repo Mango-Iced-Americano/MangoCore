@@ -911,6 +911,30 @@ task.inner：结算 user/system 时间 + 领取本地批次
 1ms × live-thread 数；退出和 schedule-out 会强制冲刷尾数。这个上界和精确多线程越限交错
 尚未由专项用例动态证明，不能把普通 8 核运行外推为该证明。
 
+### 3.20 B75 线程组 CPU 时间查询与退出快照
+
+线程组 CPU 时间使用三个 PCB 原子量：user/system 是 ABI 可见分项，total 是
+`RLIMIT_CPU` 唯一的阈值判定源。total 不是由两次分项读取临时相加得到，否则并发 flush 会让
+一次限额判定跨越两个不同快照。TCB 仍在自己的 `task.inner` 内结算本地尾数，但只能在释放锁后
+发布到 PCB：
+
+```text
+task.inner：结算并领取 (user_us, system_us)
+  -> unlock task.inner
+  -> PCB user/system 原子加法
+  -> PCB total 原子加法 + RLIMIT_CPU 阈值判定
+```
+
+查询当前进程时，调用线程先用同一路径强制发布已经结算的本地尾数，再读取 PCB 分项；其它正在
+运行的 sibling 允许处于至多一个批次的近似窗口，这与无全局停核的 SMP 资源查询语义一致。
+线程退出则必须在 `live_threads.fetch_sub(AcqRel)` 前强制冲刷；最后一个线程通过该 release
+chain 观察所有 sibling 的先前冲刷，并把 PCB 线程组快照保存到 zombie。父进程后续累加不再
+依赖“最后退出线程”的私有 `Rusage`。
+
+这里没有新增 mutex 锁边：`task.inner` guard 在 PCB 原子操作前释放，进程查询也只在完成当前
+TCB 冲刷后访问 PCB。精确的跨 CPU 同时查询仍是近似快照，不能为追求瞬时一致而停核或同时获取
+多个 TCB 锁。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

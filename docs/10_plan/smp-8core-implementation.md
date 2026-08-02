@@ -685,6 +685,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   build、每套 libc 9/9 rlimit focused 和初赛非回归均通过，初赛保持 RV64 312/314、LA64
   308/314；精确双线程合计越限、批量尾数上界和信号交错仍为 NOT RUN，进程 CPU 时间查询分项
   及 NOFILE 生命周期留待后续；
+- B75 将 PCB CPU 记账拆为 user/system ABI 分项，并保留单调 total 作为 `RLIMIT_CPU` 的
+  唯一判定源。`getrusage(RUSAGE_SELF)`、`times()` 和 process CPU clock 已返回线程组累计，
+  thread 查询仍使用 TCB；退出线程在发布 live token 前强制冲刷，最终 zombie 保存组级快照。
+  双架构 8 核 build、每套 libc 9/9 CPU-time focused 和初赛非回归均通过，初赛保持 RV64
+  312/314、LA64 308/314。跨 CPU 精确合计/并发快照仍为 NOT RUN；child rusage 用户 copyout、
+  POSIX CPU timer 和 NOFILE 生命周期留待后续；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

@@ -960,6 +960,12 @@
   阈值时不能无条件清 pending，否则会覆盖并发越线事件；慢路径发布下一阈值后还要复查累计值，
   闭合“处理旧阈值期间跨过新阈值”的窗口。批量降低争用的同时必须明确最大观测滞后，并在
   schedule-out/exit 强制冲刷尾数。
+- **ABI 分项与策略总量分工**: user/system 这类分别对外报告的累计量可用独立原子维护，但
+  限额或状态机只能依赖一个权威 total，不能跨两次分项读取拼出判定样本。读取当前进程前先
+  强制发布调用线程已经结算的本地尾数；其它 CPU 的活跃 sibling 只提供有界近似快照。
+- **退出发布顺序决定组快照完整性**: 每个线程必须先把本地尾数发布到进程累计，再以 release
+  语义递减 live token；最后线程通过 acquire/release chain 保存进程级 zombie 快照。不能把
+  最后退出 TCB 的私有用量误当成整个线程组，也不能在发布 live token 后再补记账。
 - **相关文件**: `os/src/syscall/process/lifecycle.rs`,
   `os/src/syscall/process/time.rs`, `os/src/syscall/process/ids.rs`,
   `os/src/task/process.rs`, `docs/01_architecture/lock-order.md`
