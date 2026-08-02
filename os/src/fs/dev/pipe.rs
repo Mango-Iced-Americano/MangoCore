@@ -265,7 +265,8 @@ const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
 pub(crate) fn send_sigpipe_to_current() {
     if let Some(task) = current_task() {
         {
-            task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
+    task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
+    task.set_signal_pending();
         }
         task.process.notify_signal_waiters();
     }
