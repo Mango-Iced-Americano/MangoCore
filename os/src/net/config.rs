@@ -15,6 +15,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "net_perf_diag")]
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use smoltcp::{
@@ -30,14 +31,15 @@ use smoltcp::{
 /// # Locking
 ///
 /// 内部使用 `Mutex<Option<NetInterfaceInner>>` 保护。`init()` 完成后 `inner` 始终为
-/// `Some(…)`。`try_poll_irq()` 通过 `try_lock()` 实现无 spin 的中断路径，
-/// 并把需要其他子系统锁的 DHCP 租约提交延迟到任务上下文。
+/// `Some(…)`。硬件 IRQ 仅设置独立 pending 位，调度器在任务上下文轮询并提交
+/// 需要其他子系统锁的 DHCP 租约。
 ///
 /// # Ownership
 ///
 /// `DeviceStack` 仅存储在 `NetInterfaceInner::stacks` 中。`add_veth_stack()`
 /// / `remove_veth_stack()` 管理 veth 设备的全局注册，调用者负责传入正确的 `Arc<dyn Iface>`。
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
+static NET_RX_INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "net_perf_diag")]
 const NET_PERF_REPORT_INTERVAL_SECS: usize = 2;
@@ -169,8 +171,8 @@ pub fn init() {
 ///
 /// # Locking
 ///
-/// 所有公开方法获取 `self.inner` 锁。`try_poll_irq()` 使用 `try_lock()` 避免在
-/// 中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，不能从持锁路径中重入。
+/// 所有公开轮询方法获取 `self.inner` 锁。IRQ 回调只发布 pending 位，
+/// `poll_once()` 在持锁期间遍历所有 stack，不能从持锁路径中重入。
 ///
 /// # Ownership
 ///
@@ -497,6 +499,18 @@ impl<'a> NetInterfaceInner<'a> {
 }
 
 impl<'a> NetInterface<'a> {
+    /// Publish receive work from a hardware IRQ without entering smoltcp.
+    #[inline(always)]
+    pub fn notify_rx_interrupt(&self) {
+        NET_RX_INTERRUPT_PENDING.store(true, Ordering::Release);
+    }
+
+    /// Consume the receive-work notification in scheduler task context.
+    #[inline(always)]
+    pub fn take_rx_interrupt(&self) -> bool {
+        NET_RX_INTERRUPT_PENDING.swap(false, Ordering::AcqRel)
+    }
+
     pub fn init(&self) {
         self._init();
     }
@@ -724,43 +738,6 @@ impl<'a> NetInterface<'a> {
         }
     }
 
-    /// Interrupt-safe non-blocking poll.
-    ///
-    /// smoltcp may consume a DHCP event here, but publishing that lease needs
-    /// device-list and router locks. The event is retained in DeviceStack and
-    /// committed by the next task-context poll.
-    pub fn try_poll_irq(&self) -> bool {
-        let guard = self.inner.try_lock();
-        match guard {
-            Some(inner) if inner.is_some() => {
-                drop(inner);
-                #[cfg(feature = "net_perf_diag")]
-                let poll_start = crate::hal::get_time();
-                let progressed = self.poll_once(false);
-                crate::task::perf::record_net_poll(progressed, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(
-                    false,
-                    progressed,
-                    false,
-                    crate::hal::get_time().wrapping_sub(poll_start),
-                );
-                true
-            }
-            Some(_) => {
-                crate::task::perf::record_net_poll(false, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(false, false, false, 0);
-                false
-            }
-            None => {
-                crate::task::perf::record_net_poll(false, true);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(false, false, true, 0);
-                false
-            }
-        }
-    }
     /// Non-blocking poll ONLY the specified stack (by ifindex).
     /// Skips remove-list draining and accept scanning — those are handled by
     /// the periodic full poll in the idle loop.
