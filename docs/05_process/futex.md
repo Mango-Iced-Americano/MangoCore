@@ -98,24 +98,32 @@ struct FutexWaiter {
 
 ## 5. WAIT 的注册协议
 
-wait 必须同时避免“值已变化却睡下”和“wake 发生后仍返回 timeout”。当前顺序为：
+wait 必须同时避免“值已变化却睡下”和“在不可睡眠的 table 锁内触发缺页”。B66 将注册
+拆成可重试的两层协议：
 
 ```text
-获取 FutexTable 锁并第一次检查用户 word
-  -> 释放锁
-  -> 分配 FutexWaiter
-  -> 再次获取 FutexTable 锁
-  -> 第二次检查 deadline / word / signal
+锁外 faultable 读取用户 word 并比较 expected
+  -> 锁外解析当前 private/shared key
+  -> 锁外分配 FutexWaiter，并提前克隆当前 VM
+  -> 获取 FutexTable 锁
+  -> AddressSpace::try_read() 尝试取得 VM 锁
+  -> 校验 shared backing、当前 PTE/读权限，并 nofault 读取 u32
+  -> 检查 deadline / signal
   -> enqueue(waiter)
-  -> 第三次检查用户 word
   -> 释放锁并阻塞
 ```
 
-入队后的最后一次 word 检查覆盖检查与发布之间的窗口。注册完成后不再读取原 futex word：
-waiter 可能已被 requeue 到另一个 key，此时原地址的值不再能证明本次等待是否被唤醒。
+最后一次值比较与 enqueue 位于同一个 `FutexTable` 临界区：若用户态状态写与 wake 已先
+发生，等待方随后会在锁内观察到变化后的 word；若状态写发生在 locked compare 之后，waker
+只能在 waiter 发布后取得 table 锁并找到它。因此不再需要入队后的第三次读取。注册完成后
+也不能读取原 futex word：waiter 可能已被 requeue 到另一个 key，此时原地址不再是本次注册
+的权威状态。
 
-当前三次检查仍调用 faultable `UserPtr::read()`，且其中两次位于 table 自旋锁内。这是 B66
-要收口的锁序边界；B65 只替换 shared key 身份，不把锁内用户访问误写成已经解决。
+`AddressSpace::try_read()` 是非阻塞锁边：VM 锁忙、PTE/权限变化或 shared backing 身份
+变化都只产生内部 `FutexWaitOutcome::Retry`。该结果只可能在 waiter 发布前返回；syscall
+必须先释放 table 锁，再从锁外 faultable 读取和 key 解析重新开始，不能把 `Retry` 暴露为
+用户 errno。普通 WAIT 的相对 timeout 在第一次尝试前转换为固定绝对 deadline，重试不会
+延长用户请求的等待时间。
 
 恢复后，等待方在同一 table 锁下按以下优先级裁决：
 
@@ -192,8 +200,11 @@ syscall 只能通过 `FutexWaitSpec::private()` 或 `::shared()` 构造条目。
 保留 backing，table 入队时把它交给对应队列的单份 pin；这样 waitv 不会只携带可复用的整数
 身份。
 
-所有条目在同一张 table 锁下注册。任一 waiter 被 wake 后，内核按数组顺序撤销全部注册，
-并返回最后一个已经被唤醒的下标。使用“最后一个”是当前 Linux
+用户描述符数组只在 syscall 入口快照一次，避免内部重试改变本次请求的地址、期望值或 flags。
+每次 `Retry` 都在锁外重新读取全部 futex word、重算全部当前 key，然后在一次
+`AddressSpace::try_read()` 与同一张 table 锁下完成全组 nofault 比较和 waiter 发布。
+waiter 数组在取得 table 锁前分配，锁内不分配内存。任一 waiter 被 wake 后，内核按数组
+顺序撤销全部注册，并返回最后一个已经被唤醒的下标。使用“最后一个”是当前 Linux
 `futex_unqueue_multiple()` 的明确语义；并发唤醒多个 key 时不能擅自改成第一个。
 
 timeout 返回 `ETIMEDOUT`，信号返回 `EINTR`，任一初始值不匹配返回 `EAGAIN`。private 与
@@ -231,11 +242,14 @@ shared 条目不能混在同一次 waitv 中。
 5. 注册后的恢复路径不重读最初 futex word。
 6. table 锁是 wait/wake/requeue/cleanup 的唯一线性化点。
 7. 每个非空 shared queue 必须持有与 `QueueKey` 对应的 backing pin，删除空队列才可释放。
-8. VMA/PTE 解析与 futex table 操作分为两个不重叠阶段。
+8. faultable 用户访问、首次 key 解析和所有分配不得持有 futex table 锁。
+9. table 锁内只能通过 VM `try_lock` 做 nofault 复查；失败必须释放 table 后从外层重试，
+   禁止在 `FutexTable -> AddressSpace` 边上等待。
+10. 值比较和 waiter 发布必须处于同一个 table 临界区，不得恢复入队后的第三次用户读取。
 
 ## 11. 已验证与剩余边界
 
-B65 的双架构 8 核 focused LTP 每架构执行 musl、glibc 各 13 次：20 PASS、6 SKIP。
+B66 的双架构 8 核 focused LTP 每架构执行 musl、glibc 各 13 次：20 PASS、6 SKIP。
 六个 SKIP 是 `futex_waitv01/02/03` 在两套 libc 下因内核报告 Linux 5.10、用例要求 5.16
 而跳过，不代表 waitv 动态通过。双架构 `CORE_NUM=8` kernel build 同样通过。
 
@@ -248,10 +262,15 @@ B65 的双架构 8 核 focused LTP 每架构执行 musl、glibc 各 13 次：20 
 - `force_swap_out()` 或 truncate 绕过/替换原 backing 后，旧 waiter 与新 backing 可能不再
   命中。这是 false-negative 边界，不是 B65 已消除的 PPN false-positive；
 - 普通 swap/zram/page-cache 回收会因 pin 延后回收，尚未做内存压力量化；
-- table 自旋锁内 faultable 用户读取的锁序与时延。
+- 精确的“最后比较与并发 wake”动态竞态尚未用专门 ktest 放大；当前结论来自锁协议静态证明
+  和 focused LTP；
+- VM 锁长期繁忙时的连续 `Retry` 尚未做 livelock/性能压力；
+- nofault 比较完成后若用户线程并发 unmap/remap，该行为属于比较线性化点之后的映射变更；
+  仍需结合用户映射生命周期规则做专项动态验证，不能把一次 PTE 校验外推成永久 pin。
 
 设计对照：Linux 当前的
 [`futex_q`](https://github.com/torvalds/linux/blob/master/kernel/futex/futex.h)、
+[`futex_wait_setup()`](https://github.com/torvalds/linux/blob/master/kernel/futex/waitwake.c)、
 [`futex_requeue`](https://github.com/torvalds/linux/blob/master/kernel/futex/requeue.c) 和
 [`futex_unqueue_multiple`](https://github.com/torvalds/linux/blob/master/kernel/futex/waitwake.c)。
 

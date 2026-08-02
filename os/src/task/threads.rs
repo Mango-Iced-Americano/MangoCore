@@ -13,7 +13,8 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{
-    mm::{FrameTracker, UserPtr},
+    hal::PageTableImpl,
+    mm::{AddressSpace, FaultAccess, FrameTracker, UserPtr, VirtAddr},
     syscall::errno::*,
     task::{
         block_current_and_run_next_with_lock_checked, current_task,
@@ -323,6 +324,15 @@ pub struct FutexWaitSpec {
     val: u32,
 }
 
+/// 一次 wait 注册尝试的结果。
+///
+/// `Retry` 只在 waiter 尚未发布时返回，syscall 层必须先在锁外重新读取
+/// 用户 word 并重算 shared key，不能把它直接暴露成用户可见 errno。
+pub enum FutexWaitOutcome {
+    Complete(isize),
+    Retry,
+}
+
 impl FutexWaitSpec {
     pub fn private(futex_word: UserPtr<u32>, user_va: usize, val: u32) -> Self {
         Self {
@@ -372,15 +382,50 @@ fn futex_wait_result_to_errno(wait_result: WaitResult) -> isize {
     }
 }
 
-fn check_waitv_values(entries: &[FutexWaitSpec], token: usize) -> Option<isize> {
-    for entry in entries {
-        match entry.futex_word.read(token) {
-            Ok(value) if value == entry.val => {}
-            Ok(_) => return Some(EAGAIN),
-            Err(errno) => return Some(errno),
+enum FutexWordCheck {
+    Matches,
+    Mismatch,
+    Retry,
+}
+
+/// 在 futex table 锁内对所有 word 做无缺页复查。
+///
+/// VM 锁只能 try-lock：锁忙、PTE 变化或 shared backing 已改变都返回
+/// `Retry`，由上层先释放 table 锁，再走 faultable 读取和 key 重算。
+fn check_words_nofault(
+    vm: &AddressSpace<PageTableImpl>,
+    entries: &[FutexWaitSpec],
+) -> FutexWordCheck {
+    vm.try_read(|address_space| {
+        for entry in entries {
+            if let Some(expected) = entry.shared_backing.as_ref() {
+                let current = match address_space
+                    .futex_shared_backing(VirtAddr::from(entry.futex_word.addr()))
+                {
+                    Ok(Some(backing)) => backing,
+                    _ => return FutexWordCheck::Retry,
+                };
+                if !Arc::ptr_eq(expected, &current) {
+                    return FutexWordCheck::Retry;
+                }
+            }
+
+            let pa = match address_space
+                .resolve_user_va(VirtAddr::from(entry.futex_word.addr()), FaultAccess::Load)
+            {
+                Ok(pa) => pa,
+                Err(_) => return FutexWordCheck::Retry,
+            };
+            // Safety: syscall 层已验证 u32 对齐；VM try-read guard 保证
+            // PTE 与 frame 在这次硬件宽度读取期间不会被并发撤销。
+            let value = unsafe { pa.direct_map_ptr().cast::<u32>().read_volatile() };
+            if value != entry.val {
+                return FutexWordCheck::Mismatch;
+            }
         }
-    }
-    None
+        FutexWordCheck::Matches
+    })
+    .unwrap_or(FutexWordCheck::Retry)
 }
 
 fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
@@ -495,45 +540,35 @@ fn futex_wait_tail_spin(
     }
 }
 
-fn futex_wait_event_interruptible_timeout_locked<F>(
+fn futex_wait_event_interruptible_timeout_locked(
     lock: &spin::Mutex<FutexTable>,
-    queue_key: QueueKey,
-    shared_backing: Option<&Arc<FrameTracker>>,
-    mut check_word: F,
+    vm: &AddressSpace<PageTableImpl>,
+    entry: &FutexWaitSpec,
     deadline: Option<TimeSpec>,
-) -> WaitResult
-where
-    F: FnMut() -> Option<isize>,
-{
-    // 先做一次无分配快速检查；随后会在 table 锁内再检查并入队。
-    {
-        let _table = lock.lock();
-        if let Some(res) = check_word() {
-            return WaitResult::Ready(res);
-        }
-    }
-
+) -> Result<WaitResult, ()> {
     let task = current_task().unwrap();
-    let waiter = Arc::new(FutexWaiter::new(Arc::downgrade(&task), queue_key));
+    let waiter = Arc::new(FutexWaiter::new(Arc::downgrade(&task), entry.queue_key));
     let mut table = lock.lock();
 
     if deadline_expired(deadline) {
-        return WaitResult::TimedOut;
+        return Ok(WaitResult::TimedOut);
     }
-    if let Some(res) = check_word() {
-        return WaitResult::Ready(res);
+    match check_words_nofault(vm, core::slice::from_ref(entry)) {
+        FutexWordCheck::Matches => {}
+        FutexWordCheck::Mismatch => return Ok(WaitResult::Ready(EAGAIN)),
+        FutexWordCheck::Retry => return Err(()),
     }
     if has_actionable_signal(&task) {
-        return WaitResult::Interrupted;
+        return Ok(WaitResult::Interrupted);
     }
 
-    table.enqueue(queue_key, waiter.clone(), shared_backing);
-    // 再检查一次覆盖“快速检查 -> 注册”窗口。从此以后不再
-    // 读原 futex word；requeue 后真实 wake 只由 waiter 判定。
-    if let Some(res) = check_word() {
-        table.remove_wait(&waiter);
-        return WaitResult::Ready(res);
-    }
+    // 最后一次值比较与 waiter 发布由同一把 table 锁串行化。
+    // wake 要么先完成并让上面的比较看到新值，要么在解锁后看到 waiter。
+    table.enqueue(
+        entry.queue_key,
+        waiter.clone(),
+        entry.shared_backing.as_ref(),
+    );
     discard_non_actionable_unblocked_signals(&task);
     drop(table);
     drop(task);
@@ -543,15 +578,15 @@ where
         let mut table = lock.lock();
 
         if waiter.was_woken() {
-            return WaitResult::Ready(SUCCESS);
+            return Ok(WaitResult::Ready(SUCCESS));
         }
         if deadline_expired(deadline) {
             table.remove_wait(&waiter);
-            return WaitResult::TimedOut;
+            return Ok(WaitResult::TimedOut);
         }
         if has_actionable_signal(&task) {
             table.remove_wait(&waiter);
-            return WaitResult::Interrupted;
+            return Ok(WaitResult::Interrupted);
         }
         discard_non_actionable_unblocked_signals(&task);
 
@@ -559,7 +594,7 @@ where
         if let Some(real_deadline) = deadline {
             if block_deadline == Some(real_deadline) {
                 drop(table);
-                return futex_wait_tail_spin(lock, &waiter, &task, real_deadline);
+                return Ok(futex_wait_tail_spin(lock, &waiter, &task, real_deadline));
             }
         }
         if let Some(block_deadline) = block_deadline {
@@ -580,73 +615,50 @@ where
     }
 }
 
-// Futex wait 只读用户 word
-fn do_futex_wait_until(
-    futex_word: UserPtr<u32>,
-    token: usize,
-    futex_key: usize,
-    val: u32,
-    deadline: Option<TimeSpec>,
-) -> isize {
-    super::perf::record_futex_wait(false, deadline.is_some());
-    let futex_table = current_task().unwrap().process.futex().clone();
-
-    if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
-        super::perf::record_futex_wait_result(wait_result);
-        return futex_wait_result_to_errno(wait_result);
-    }
-
-    let wait_result = futex_wait_event_interruptible_timeout_locked(
-        &futex_table,
-        QueueKey::private(futex_key),
-        None,
-        || match futex_word.read(token) {
-            Ok(value) if value == val => None,
-            Ok(_) => Some(EAGAIN),
-            Err(errno) => Some(errno),
-        },
-        deadline,
-    );
-    super::perf::record_futex_wait_result(wait_result);
-
-    futex_wait_result_to_errno(wait_result)
+/// 把 FUTEX_WAIT 的相对 timeout 固定为本次 syscall 的绝对 deadline。
+/// retry 必须复用该值，不能重新起算并意外延长等待。
+pub fn futex_wait_deadline(timeout: Option<TimeSpec>) -> Option<TimeSpec> {
+    timeout.map(futex_relative_deadline)
 }
 
-// Futex wait 只读用户 word，timeout 参数为相对时间。
+/// 尝试在进程私有表中注册一次 futex wait。
+///
+/// `deadline` 已是绝对时间；调用者在 `Retry` 后须重新 fault-in 并解析 key。
 pub fn do_futex_wait(
     futex_word: UserPtr<u32>,
     token: usize,
     futex_key: usize,
     val: u32,
-    timeout: Option<TimeSpec>,
-) -> isize {
-    do_futex_wait_until(
-        futex_word,
-        token,
-        futex_key,
-        val,
-        timeout.map(futex_relative_deadline),
-    )
+    deadline: Option<TimeSpec>,
+) -> FutexWaitOutcome {
+    super::perf::record_futex_wait(false, deadline.is_some());
+
+    if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        super::perf::record_futex_wait_result(wait_result);
+        return FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result));
+    }
+
+    let task = current_task().unwrap();
+    let futex_table = task.process.futex().clone();
+    let vm = task.process.vm();
+    drop(task);
+    let entry = FutexWaitSpec::private(futex_word, futex_key, val);
+    let wait_result =
+        match futex_wait_event_interruptible_timeout_locked(&futex_table, &vm, &entry, deadline) {
+            Ok(result) => result,
+            Err(()) => return FutexWaitOutcome::Retry,
+        };
+    super::perf::record_futex_wait_result(wait_result);
+
+    FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result))
 }
 
-// FUTEX_WAIT_BITSET 的 timeout 参数为绝对时间。
-pub fn do_futex_wait_bitset(
-    futex_word: UserPtr<u32>,
-    token: usize,
-    futex_key: usize,
-    val: u32,
-    deadline: Option<TimeSpec>,
-) -> isize {
-    do_futex_wait_until(futex_word, token, futex_key, val, deadline)
-}
-
-pub fn do_futex_waitv(
-    entries: &[FutexWaitSpec],
-    token: usize,
-    deadline: Option<TimeSpec>,
-) -> isize {
-    let futex_table = current_task().unwrap().process.futex().clone();
-    futex_waitv_locked(&futex_table, entries, token, deadline)
+pub fn do_futex_waitv(entries: &[FutexWaitSpec], deadline: Option<TimeSpec>) -> FutexWaitOutcome {
+    let task = current_task().unwrap();
+    let futex_table = task.process.futex().clone();
+    let vm = task.process.vm();
+    drop(task);
+    futex_waitv_locked(&futex_table, &vm, entries, deadline)
 }
 
 fn last_woken_index(waiters: &[Arc<FutexWaiter>]) -> Option<usize> {
@@ -667,19 +679,15 @@ fn remove_waitv(table: &mut FutexTable, waiters: &[Arc<FutexWaiter>]) {
 /// wake 也只消费真正被移除的那个注册项，返回值仍是原始数组下标。
 fn futex_waitv_locked(
     lock: &spin::Mutex<FutexTable>,
+    vm: &AddressSpace<PageTableImpl>,
     entries: &[FutexWaitSpec],
-    user_token: usize,
     deadline: Option<TimeSpec>,
-) -> isize {
-    if let Some(result) = check_waitv_values(entries, user_token) {
-        return result;
-    }
-
+) -> FutexWaitOutcome {
     let task = current_task().unwrap();
     let task_weak = Arc::downgrade(&task);
     let mut waiters = Vec::new();
     if waiters.try_reserve(entries.len()).is_err() {
-        return ENOMEM;
+        return FutexWaitOutcome::Complete(ENOMEM);
     }
     for entry in entries {
         waiters.push(Arc::new(FutexWaiter::new(
@@ -690,13 +698,15 @@ fn futex_waitv_locked(
 
     let mut table = lock.lock();
     if deadline_expired(deadline) {
-        return ETIMEDOUT;
+        return FutexWaitOutcome::Complete(ETIMEDOUT);
     }
-    if let Some(result) = check_waitv_values(entries, user_token) {
-        return result;
+    match check_words_nofault(vm, entries) {
+        FutexWordCheck::Matches => {}
+        FutexWordCheck::Mismatch => return FutexWaitOutcome::Complete(EAGAIN),
+        FutexWordCheck::Retry => return FutexWaitOutcome::Retry,
     }
     if has_actionable_signal(&task) {
-        return EINTR;
+        return FutexWaitOutcome::Complete(EINTR);
     }
     for (entry, waiter) in entries.iter().zip(waiters.iter()) {
         table.enqueue(
@@ -705,12 +715,8 @@ fn futex_waitv_locked(
             entry.shared_backing.as_ref(),
         );
     }
-    // 与单 futex wait 一样，注册后只再检查一次用户 word。
-    // 后续 requeue 可能改变 key，因此恢复时只信任 waiter.woken。
-    if let Some(result) = check_waitv_values(entries, user_token) {
-        remove_waitv(&mut table, &waiters);
-        return result;
-    }
+    // 值比较与全部 waiter 发布处在同一 table 临界区；此后 requeue
+    // 可能改变 key，恢复路径只读取各 registration 的权威状态。
     discard_non_actionable_unblocked_signals(&task);
     drop(table);
     drop(task);
@@ -720,15 +726,15 @@ fn futex_waitv_locked(
         let mut table = lock.lock();
         if let Some(index) = last_woken_index(&waiters) {
             remove_waitv(&mut table, &waiters);
-            return index as isize;
+            return FutexWaitOutcome::Complete(index as isize);
         }
         if deadline_expired(deadline) {
             remove_waitv(&mut table, &waiters);
-            return ETIMEDOUT;
+            return FutexWaitOutcome::Complete(ETIMEDOUT);
         }
         if has_actionable_signal(&task) {
             remove_waitv(&mut table, &waiters);
-            return EINTR;
+            return FutexWaitOutcome::Complete(EINTR);
         }
         discard_non_actionable_unblocked_signals(&task);
 
@@ -775,74 +781,56 @@ pub fn futex_requeue_shared(
 
 pub fn do_futex_waitv_shared(
     entries: &[FutexWaitSpec],
-    token: usize,
     deadline: Option<TimeSpec>,
-) -> isize {
+) -> FutexWaitOutcome {
+    let task = current_task().unwrap();
+    let vm = task.process.vm();
+    drop(task);
     PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
-    let result = futex_waitv_locked(&PROCESS_SHARED_FUTEX, entries, token, deadline);
+    let result = futex_waitv_locked(&PROCESS_SHARED_FUTEX, &vm, entries, deadline);
     let shared = PROCESS_SHARED_FUTEX.lock();
     refresh_shared_futex_nonempty(&shared);
     result
 }
 
 /// Process-shared futex wait — 使用全局 backing 身份表。
-fn do_futex_wait_shared_until(
+pub fn do_futex_wait_shared(
     futex_word: UserPtr<u32>,
     token: usize,
     val: u32,
     deadline: Option<TimeSpec>,
     key: SharedFutexKey,
-) -> isize {
+) -> FutexWaitOutcome {
     super::perf::record_futex_wait(true, deadline.is_some());
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
         super::perf::record_futex_wait_result(wait_result);
-        return futex_wait_result_to_errno(wait_result);
+        return FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result));
     }
 
+    let task = current_task().unwrap();
+    let vm = task.process.vm();
+    drop(task);
+    let entry = FutexWaitSpec::shared(futex_word, key, val);
     PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
-    let wait_result = futex_wait_event_interruptible_timeout_locked(
+    let wait_result = match futex_wait_event_interruptible_timeout_locked(
         &PROCESS_SHARED_FUTEX,
-        key.queue_key(),
-        Some(&key.backing),
-        || match futex_word.read(token) {
-            Ok(value) if value == val => None,
-            Ok(_) => Some(EAGAIN),
-            Err(errno) => Some(errno),
-        },
+        &vm,
+        &entry,
         deadline,
-    );
+    ) {
+        Ok(result) => result,
+        Err(()) => {
+            let shared = PROCESS_SHARED_FUTEX.lock();
+            refresh_shared_futex_nonempty(&shared);
+            return FutexWaitOutcome::Retry;
+        }
+    };
     let shared = PROCESS_SHARED_FUTEX.lock();
     refresh_shared_futex_nonempty(&shared);
     drop(shared);
     super::perf::record_futex_wait_result(wait_result);
 
-    futex_wait_result_to_errno(wait_result)
-}
-
-pub fn do_futex_wait_shared(
-    futex_word: UserPtr<u32>,
-    token: usize,
-    val: u32,
-    timeout: Option<TimeSpec>,
-    key: SharedFutexKey,
-) -> isize {
-    do_futex_wait_shared_until(
-        futex_word,
-        token,
-        val,
-        timeout.map(futex_relative_deadline),
-        key,
-    )
-}
-
-pub fn do_futex_wait_bitset_shared(
-    futex_word: UserPtr<u32>,
-    token: usize,
-    val: u32,
-    deadline: Option<TimeSpec>,
-    key: SharedFutexKey,
-) -> isize {
-    do_futex_wait_shared_until(futex_word, token, val, deadline, key)
+    FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result))
 }
 
 impl FutexTable {

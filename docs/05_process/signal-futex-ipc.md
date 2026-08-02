@@ -147,6 +147,22 @@ timeout: remove(current key, exact waiter) -> ETIMEDOUT
 因此 requeue 导致 source membership 消失时不会被误判为正常 wake；只有 `woken == true`
 才能产生 futex 成功返回。注册完成后也不再重读最初 futex word。
 
+注册前的用户读取和 key 解析可能缺页，因此必须位于 table 锁外。最后一次比较使用以下
+非阻塞协议关闭 lost-wake 窗口：
+
+```text
+锁外 faultable 读取 + 当前 key
+  -> 锁外分配 waiter、克隆 VM
+  -> FutexTable 锁
+       -> VM try_read：backing/PTE/权限/u32 nofault 复查
+       -> match 时立即 enqueue
+  -> 解锁并阻塞
+```
+
+VM 锁忙或映射变化只在尚未发布 waiter 时产生内部 Retry；调用方释放 table 后从锁外完整
+重试。它不是用户错误码。比较与 enqueue 共享 table 线性化点，所以不能再加“入队后第三次
+读 word”；该读取既会重新引入 faultable-uaccess 锁序，也会在 requeue 后读取错误的权威对象。
+
 ## 6. IPC 与 WaitQueue
 
 SysV message queue、semaphore 和 POSIX MQ 在资源不可用时使用 WaitQueue：
@@ -215,7 +231,9 @@ non-private futex
 
 因此同一虚拟地址不一定是 shared futex；只有实际 shared VMA 才进入全局表。每个非空
 shared queue 持有一份 backing `Arc`，避免旧队列因物理页号复用错误命中新页；VMA/PTE
-校验在 VM 锁内完成，实际 table 操作在 VM 锁释放后进行。
+首次 key 解析在 VM 锁内完成并在解锁后进入 table。等待注册的最终 nofault 比较允许
+`FutexTable -> AddressSpace::try_read` 这一条条件式非阻塞边；try-lock 失败必须先释放
+table 再重试，不能把它当作普通可等待的反向锁序。
 
 ## 9. clear_child_tid 与 futex
 

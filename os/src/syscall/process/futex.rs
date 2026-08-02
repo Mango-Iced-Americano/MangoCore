@@ -1,8 +1,8 @@
 use crate::mm::{UserPtr, VirtAddr};
 use crate::syscall::errno::*;
 use crate::task::threads::{
-    do_futex_wait, do_futex_wait_bitset, do_futex_wait_bitset_shared, do_futex_wait_shared,
-    do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
+    do_futex_wait, do_futex_wait_shared, do_futex_waitv, do_futex_waitv_shared,
+    futex_requeue_shared, futex_wait_deadline, futex_wake_shared, FutexCmd, FutexWaitOutcome,
     FutexWaitSpec, SharedFutexKey,
 };
 use crate::task::{current_task, current_user_token, threads, TaskControlBlock};
@@ -64,6 +64,39 @@ fn futex_key_for(
 fn current_futex_key(uaddr: usize, is_private: bool) -> Result<FutexKey, isize> {
     let task = current_task().unwrap();
     futex_key_for(&task, uaddr, is_private)
+}
+
+/// 完成一次 WAIT/WAIT_BITSET 的 fault-in、key 解析和原子注册。
+///
+/// table 锁内 nofault 复查失败时，必须从锁外用户读取重新开始；这样
+/// shared 映射若被并发替换，也会重算 backing key 而不是沿用旧身份。
+fn futex_wait(
+    futex_word: UserPtr<u32>,
+    token: usize,
+    user_va: usize,
+    is_private: bool,
+    expected: u32,
+    deadline: Option<TimeSpec>,
+) -> isize {
+    loop {
+        match futex_word.read(token) {
+            Ok(value) if value == expected => {}
+            Ok(_) => return EAGAIN,
+            Err(errno) => return errno,
+        }
+
+        let outcome = match current_futex_key(user_va, is_private) {
+            Ok(FutexKey::Private(key)) => do_futex_wait(futex_word, token, key, expected, deadline),
+            Ok(FutexKey::Shared(key)) => {
+                do_futex_wait_shared(futex_word, token, expected, deadline, key)
+            }
+            Err(errno) => return errno,
+        };
+        match outcome {
+            FutexWaitOutcome::Complete(result) => return result,
+            FutexWaitOutcome::Retry => continue,
+        }
+    }
 }
 
 fn read_timeout(timeout: *const TimeSpec, token: usize) -> Result<Option<TimeSpec>, isize> {
@@ -161,18 +194,8 @@ pub fn sys_futex(
                 Ok(timeout) => timeout,
                 Err(errno) => return errno,
             };
-            if !is_private {
-                if let Err(errno) = futex_word.read(token) {
-                    return errno;
-                }
-            }
-            match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Shared(key)) => {
-                    do_futex_wait_shared(futex_word, token, val, timeout, key)
-                }
-                Ok(FutexKey::Private(key)) => do_futex_wait(futex_word, token, key, val, timeout),
-                Err(errno) => errno,
-            }
+            let deadline = futex_wait_deadline(timeout);
+            futex_wait(futex_word, token, private_key, is_private, val, deadline)
         }
         FutexCmd::WaitBitset => {
             if val3 == 0 {
@@ -182,20 +205,7 @@ pub fn sys_futex(
                 Ok(deadline) => deadline,
                 Err(errno) => return errno,
             };
-            if !is_private {
-                if let Err(errno) = futex_word.read(token) {
-                    return errno;
-                }
-            }
-            match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Shared(key)) => {
-                    do_futex_wait_bitset_shared(futex_word, token, val, deadline, key)
-                }
-                Ok(FutexKey::Private(key)) => {
-                    do_futex_wait_bitset(futex_word, token, key, val, deadline)
-                }
-                Err(errno) => errno,
-            }
+            futex_wait(futex_word, token, private_key, is_private, val, deadline)
         }
         FutexCmd::Wake | FutexCmd::WakeBitset => {
             if val > i32::MAX as u32 {
@@ -289,12 +299,13 @@ pub fn sys_futex_waitv(
         Err(errno) => return errno,
     };
 
-    let mut entries = Vec::new();
-    if entries.try_reserve(nr_futexes).is_err() {
+    // 用户 waitv 数组只在 syscall 入口快照一次；内部 retry 只重读
+    // futex word 和 backing key，不接受并发改写描述符改变本次请求。
+    let mut requests = Vec::new();
+    if requests.try_reserve(nr_futexes).is_err() {
         return ENOMEM;
     }
     let mut requested_private = None;
-    let mut private_table = None;
 
     for index in 0..nr_futexes {
         let waiter_addr = match (waiters as usize).checked_add(index * size_of::<FutexWaitV>()) {
@@ -319,10 +330,6 @@ pub fn sys_futex_waitv(
         if (waiter.uaddr as usize) & (core::mem::align_of::<u32>() - 1) != 0 {
             return EINVAL;
         }
-        let futex_word = UserPtr::<u32>::from_addr(waiter.uaddr as usize);
-        if let Err(errno) = futex_word.read(token) {
-            return errno;
-        }
 
         let is_private = (waiter.flags & FutexOption::PRIVATE.bits()) != 0;
         match requested_private {
@@ -330,32 +337,53 @@ pub fn sys_futex_waitv(
             None => requested_private = Some(is_private),
             _ => {}
         }
-
-        let (uses_private_table, wait_spec) =
-            match current_futex_key(waiter.uaddr as usize, is_private) {
-                Ok(FutexKey::Private(key)) => (
-                    true,
-                    FutexWaitSpec::private(futex_word, key, waiter.val as u32),
-                ),
-                Ok(FutexKey::Shared(key)) => (
-                    false,
-                    FutexWaitSpec::shared(futex_word, key, waiter.val as u32),
-                ),
-                Err(errno) => return errno,
-            };
-        match private_table {
-            Some(private) if private != uses_private_table => return EINVAL,
-            None => private_table = Some(uses_private_table),
-            _ => {}
-        };
-        entries.push(wait_spec);
+        requests.push(waiter);
     }
 
-    let use_private_table = private_table.unwrap_or(true);
+    let mut entries = Vec::new();
+    if entries.try_reserve(nr_futexes).is_err() {
+        return ENOMEM;
+    }
+    loop {
+        entries.clear();
+        let mut private_table = None;
+        for waiter in requests.iter() {
+            let futex_word = UserPtr::<u32>::from_addr(waiter.uaddr as usize);
+            match futex_word.read(token) {
+                Ok(value) if value == waiter.val as u32 => {}
+                Ok(_) => return EAGAIN,
+                Err(errno) => return errno,
+            }
 
-    if use_private_table {
-        do_futex_waitv(&entries, token, deadline)
-    } else {
-        do_futex_waitv_shared(&entries, token, deadline)
+            let is_private = (waiter.flags & FutexOption::PRIVATE.bits()) != 0;
+            let (uses_private_table, entry) =
+                match current_futex_key(waiter.uaddr as usize, is_private) {
+                    Ok(FutexKey::Private(key)) => (
+                        true,
+                        FutexWaitSpec::private(futex_word, key, waiter.val as u32),
+                    ),
+                    Ok(FutexKey::Shared(key)) => (
+                        false,
+                        FutexWaitSpec::shared(futex_word, key, waiter.val as u32),
+                    ),
+                    Err(errno) => return errno,
+                };
+            match private_table {
+                Some(private) if private != uses_private_table => return EINVAL,
+                None => private_table = Some(uses_private_table),
+                _ => {}
+            }
+            entries.push(entry);
+        }
+
+        let outcome = if private_table.unwrap_or(true) {
+            do_futex_waitv(&entries, deadline)
+        } else {
+            do_futex_waitv_shared(&entries, deadline)
+        };
+        match outcome {
+            FutexWaitOutcome::Complete(result) => return result,
+            FutexWaitOutcome::Retry => continue,
+        }
     }
 }

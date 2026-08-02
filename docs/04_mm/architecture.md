@@ -443,6 +443,7 @@ sys_mmap()
 | API | 说明 |
 |-----|------|
 | `token()` | 页表 token |
+| `try_read()` | 非阻塞尝试取得 VM 读临界区；供已持有外层自旋锁的 nofault 复查，失败后必须先释放外层锁 |
 | `vma_count()` | VMA 数量 |
 | `committed_bytes()` | 提交内存统计 |
 | `has_shared_writable_mapping()` | 检查 inode 是否存在 shared writable mapping |

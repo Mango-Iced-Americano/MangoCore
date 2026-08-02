@@ -902,3 +902,25 @@
   不把静态生命周期证明或普通 LTP 通过冒充动态竞态覆盖。
 - **相关文件**: `os/src/mm/address_space.rs`, `os/src/task/threads.rs`,
   `os/src/syscall/process/futex.rs`, `docs/05_process/futex.md`
+
+## Futex lost-wake：锁外 fault-in，锁内 nofault 比较并发布
+
+- **危险二选一**: 最后一次值比较若在 queue 锁外，waker 可在“比较通过、尚未入队”的窗口
+  改值并 wake，等待方随后永久睡下；若直接在自旋锁内调用通用 uaccess，又可能进入 VM 锁、
+  CoW/文件缺页、分配或等待，破坏不可睡眠锁约束。
+- **固定协议**: 先在锁外做 faultable 用户读取和 key 解析，提前分配 waiter、clone VM owner；
+  再取得 queue/table 锁，只用 VM `try_lock` 解析现有 PTE、校验权限并做一个硬件宽度的
+  nofault 读取。值匹配时在同一 table 临界区发布 waiter；不匹配返回 `EAGAIN`。
+- **nofault 不只是不调用 fault handler**: 若 helper 在外层自旋锁内阻塞等待 VM 锁，它仍然
+  不是可接受的 nofault 路径。该边只能是条件式非阻塞 `table -> VM try_lock`；锁忙、PTE
+  变化或 shared backing 身份不一致都在 waiter 发布前返回内部 Retry，释放 table 后完整
+  重做 faultable 读取和 key 解析。
+- **重试边界**: Retry 不是 errno。shared key 必须重新解析，不能沿用可能已被 remap 的旧
+  backing；waitv 每次 Retry 要重读所有 word 并重建所有 key，而描述符数组只在 syscall 入口
+  快照一次。相对 timeout 先固定为绝对 deadline，否则竞争会无限延长等待。
+- **不要第三次读取**: 比较与 enqueue 已共享线性化锁后，入队后再读一次既无必要，又重新
+  引入 faultable 锁序；requeue 后原 word 也不再是 registration 的权威状态。
+- **证据边界**: 普通 futex LTP 能发现功能退化，不能替代“最后比较/并发 wake”、持续 VM
+  lock contention 或比较后 remap 的精确交错。没有专项并发 harness 时应记为 NOT RUN。
+- **相关文件**: `os/src/mm/address_space.rs`, `os/src/task/threads.rs`,
+  `os/src/syscall/process/futex.rs`, `docs/01_architecture/lock-order.md`

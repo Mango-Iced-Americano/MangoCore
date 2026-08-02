@@ -289,8 +289,8 @@ cleanup: waiter.key -> exact Arc remove
 - `block_current_and_run_next_with_lock_checked()` 只在提交阻塞状态时接管并释放 table guard，
   任何路径都不得跨 context switch 持有该锁。
 
-B64 的 requeue 身份证明不覆盖 shared backing 生命周期，也不覆盖锁内用户访问；前者由
-B65 收口，后者仍留给 B66。
+B64 的 requeue 身份证明不覆盖 shared backing 生命周期，也不覆盖锁内用户访问；前者已由
+B65 收口，后者已由 B66 的 locked nofault 注册协议收口。
 
 #### B65 shared futex backing 身份与 pin
 
@@ -317,8 +317,39 @@ shared futex 不能用 raw PPN 充当长期 key。旧页被释放后，分配器
 
 该协议排除了 raw PPN 复用造成的 false-positive。`force_swap_out()`、truncate 或其它强制
 替换 backing 的路径仍可能让旧 waiter 与换入后的新对象形成 false-negative；普通回收则会
-被 pin 延后。用户 word 的 faultable 读取目前仍可能发生在 table 自旋锁内，二者都不能由
-B65 的身份生命周期证明外推为已解决。
+被 pin 延后。该身份生命周期结论不能外推为强制换出已经正确。
+
+#### B66 futex 锁内 nofault 注册
+
+futex 的最后一次值比较必须和 waiter 发布共用 table 锁，才能关闭 lost-wake 窗口；但
+`UserPtr::read()` 可能取得 VM 锁、处理缺页和分配内存，不能发生在自旋锁内。B66 固定为：
+
+```text
+锁外 faultable 读取并比较 word
+  -> 锁外解析当前 key
+  -> 锁外分配 waiter、克隆 VM Arc
+  -> FutexTable 锁
+       -> AddressSpace VM try_lock
+       -> shared backing + PTE/权限 + u32 nofault 复查
+       -> 同一 table 临界区 enqueue
+  -> 解锁并阻塞
+```
+
+- `FutexTable -> AddressSpace` 是**条件式非阻塞边**，不是普通嵌套锁顺序：只允许一次
+  `try_lock`，失败立即释放 table，再从 syscall 外层重新 fault-in 和解析 key；
+- VM `Arc` 在 table 锁外从 PCB clone，table 临界区不获取 `process.inner`；
+- locked nofault 检查不能只比较 PPN。shared 条目同时要求当前 backing 与预解析 backing
+  `Arc::ptr_eq`，并再次验证 VMA resident frame、PTE 和读权限；
+- `Retry` 只允许在任何 waiter 发布前返回，不是用户可见 errno；普通 WAIT 的相对 timeout
+  只转换一次绝对 deadline，重试不得重新计时；
+- waitv 描述符只快照一次，但每次 Retry 都重读全部 word、重算全部 key；waiter 数组必须在
+  table 锁外分配，全组 nofault 比较成功后才在同一临界区发布；
+- 不允许入队后再做第三次用户读取。wake 若先完成状态写，锁内比较会观察到新值；wait 若先
+  比较并发布，wake 取得同一 table 锁后会找到 waiter。
+
+这条例外只解决“最后比较 + enqueue”的原子性与 faultable-uaccess 锁序。nofault 比较之后
+发生的并发 unmap/remap、`force_swap_out()`/truncate backing 替换，以及 VM 锁长期繁忙时的
+重试公平性仍是独立边界，不能写成 B66 已动态证明。
 
 ### 3.3 B18 Per-CPU RunQueue 约束
 

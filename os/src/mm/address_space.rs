@@ -122,6 +122,15 @@ impl<T: PageTable> AddressSpace<T> {
         operation(&inner)
     }
 
+    /// 尝试在 VM 锁内读取地址空间；锁忙时立即返回。
+    ///
+    /// 该入口供已经持有其它不可睡眠锁的短临界区使用。调用者必须在
+    /// `None` 时先释放外层锁，再决定重试，禁止在外层锁内自旋等待 VM。
+    pub fn try_read<R>(&self, operation: impl FnOnce(&AddressSpaceInner<T>) -> R) -> Option<R> {
+        let inner = self.inner.try_lock()?;
+        Some(operation(&inner))
+    }
+
     /// 在 VM 锁内修改地址空间，并在解锁后完成本轮 TLB 同步。
     pub fn write<R>(&self, operation: impl FnOnce(&mut AddressSpaceInner<T>) -> R) -> R {
         let (result, flush) = {
