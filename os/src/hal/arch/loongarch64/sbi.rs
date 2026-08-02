@@ -11,7 +11,7 @@ use core::arch::asm;
 use super::board::UART_BASE;
 use super::register::CrMd;
 
-static UART: Mutex<Ns16550a> = Mutex::new(Ns16550a { base: UART_BASE });
+static UART: Mutex<Ns16550a> = Mutex::new(Ns16550a::new(UART_BASE, 0x100, 0, 1));
 
 pub fn console_putchar(c: usize) {
     UART.lock().write(c as u8);

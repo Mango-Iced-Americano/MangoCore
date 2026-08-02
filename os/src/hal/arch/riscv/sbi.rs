@@ -3,8 +3,13 @@
 //! 提供 timer、console、shutdown 和本地中断开关等机器环境接口。
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use riscv::register::sstatus;
+
+use crate::drivers::serial::ns16550a::{
+    Ns16550a, LSR_BREAK, LSR_FRAMING, LSR_OVERRUN, LSR_PARITY,
+};
+use mango_kernel_core::uart_rx_ring::ByteRing;
 
 const SBI_SET_TIMER: usize = 0;
 const SBI_CONSOLE_PUTCHAR: usize = 1;
@@ -20,6 +25,21 @@ const SBI_SRST: usize = 0x5352_5354;
 static CONSOLE_BASE: AtomicUsize = AtomicUsize::new(0);
 static CONSOLE_SIZE: AtomicUsize = AtomicUsize::new(0);
 static CONSOLE_REGISTER_SHIFT: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_REGISTER_IO_WIDTH: AtomicUsize = AtomicUsize::new(1);
+static CONSOLE_IRQ: AtomicUsize = AtomicUsize::new(0);
+const CONSOLE_RX_DRAIN_LIMIT: usize = 64;
+const CONSOLE_RX_RING_CAPACITY: usize = 512;
+const CONSOLE_RX_REPORT_INTERVAL_MS: usize = 1_000;
+static CONSOLE_RX_RING: ByteRing<CONSOLE_RX_RING_CAPACITY> = ByteRing::new();
+static CONSOLE_RX_INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
+static CONSOLE_RX_THROTTLED: AtomicBool = AtomicBool::new(false);
+static CONSOLE_RX_RING_OVERRUNS: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_RX_TTY_OVERRUNS: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_RX_LSR_OVERRUNS: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_RX_PARITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_RX_FRAMING_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_RX_BREAKS: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_RX_LAST_REPORT_MS: AtomicUsize = AtomicUsize::new(0);
 
 #[inline(always)]
 /// `ecall` wrapper to switch trap into S level.
@@ -56,31 +76,194 @@ pub fn configure_runtime_console() {
     let Some(console) = crate::hal::platform::platform_info().console else {
         return;
     };
+    CONSOLE_IRQ.store(console.irq.unwrap_or(0), Ordering::Release);
+    CONSOLE_REGISTER_IO_WIDTH.store(console.register_io_width, Ordering::Release);
     CONSOLE_REGISTER_SHIFT.store(console.register_shift, Ordering::Release);
     CONSOLE_SIZE.store(console.range.size, Ordering::Release);
     CONSOLE_BASE.store(console.range.base, Ordering::Release);
 }
 
-pub fn console_getchar() -> usize {
+fn runtime_console() -> Option<Ns16550a> {
     let base = CONSOLE_BASE.load(Ordering::Acquire);
-    if base == 0 {
-        return sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0);
+    (base != 0).then(|| {
+        Ns16550a::new(
+            base,
+            CONSOLE_SIZE.load(Ordering::Acquire),
+            CONSOLE_REGISTER_SHIFT.load(Ordering::Acquire),
+            CONSOLE_REGISTER_IO_WIDTH.load(Ordering::Acquire),
+        )
+    })
+}
+
+fn record_line_status_errors(status: u8) {
+    if status & LSR_OVERRUN != 0 {
+        CONSOLE_RX_LSR_OVERRUNS.fetch_add(1, Ordering::Relaxed);
     }
-    let shift = CONSOLE_REGISTER_SHIFT.load(Ordering::Acquire);
-    let size = CONSOLE_SIZE.load(Ordering::Acquire);
-    let lsr_offset = 5usize << shift;
-    if size <= lsr_offset {
-        return usize::MAX;
+    if status & LSR_PARITY != 0 {
+        CONSOLE_RX_PARITY_ERRORS.fetch_add(1, Ordering::Relaxed);
     }
-    // SAFETY: FDT validation recorded an enabled serial `reg` range, KernelSpace
-    // identity-mapped that range, and the checked offsets stay inside it.
-    let status = unsafe { core::ptr::read_volatile((base + lsr_offset) as *const u8) };
-    if status & 1 == 0 {
-        return usize::MAX;
+    if status & LSR_FRAMING != 0 {
+        CONSOLE_RX_FRAMING_ERRORS.fetch_add(1, Ordering::Relaxed);
     }
-    // SAFETY: the data register is at offset zero of the same validated range;
-    // the line-status read above established that a byte is available.
-    unsafe { core::ptr::read_volatile(base as *const u8) as usize }
+    if status & LSR_BREAK != 0 {
+        CONSOLE_RX_BREAKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn throttle_runtime_console_rx(uart: Ns16550a) {
+    CONSOLE_RX_THROTTLED.store(true, Ordering::Release);
+    let _ = uart.disable_receive_interrupts();
+}
+
+fn drain_runtime_uart_fifo() -> bool {
+    let Some(uart) = runtime_console() else {
+        return false;
+    };
+    let _ = uart.read_interrupt_identification();
+    let mut received = false;
+    uart.drain_rx(CONSOLE_RX_DRAIN_LIMIT, |byte, status| {
+        received = true;
+        record_line_status_errors(status);
+        if CONSOLE_RX_RING.push(byte) {
+            true
+        } else {
+            CONSOLE_RX_RING_OVERRUNS.fetch_add(1, Ordering::Relaxed);
+            throttle_runtime_console_rx(uart);
+            false
+        }
+    });
+    if received {
+        CONSOLE_RX_INTERRUPT_PENDING.store(true, Ordering::Release);
+    }
+    received
+}
+
+fn drain_legacy_console() -> bool {
+    let mut received = false;
+    for _ in 0..CONSOLE_RX_DRAIN_LIMIT {
+        let byte = sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0);
+        if byte == usize::MAX {
+            break;
+        }
+        received = true;
+        if !CONSOLE_RX_RING.push(byte as u8) {
+            CONSOLE_RX_RING_OVERRUNS.fetch_add(1, Ordering::Relaxed);
+            break;
+        }
+    }
+    if received {
+        CONSOLE_RX_INTERRUPT_PENDING.store(true, Ordering::Release);
+    }
+    received
+}
+
+/// Register the console RX callback only after the PLIC context is initialized.
+pub fn init_runtime_console_rx() {
+    let irq = CONSOLE_IRQ.load(Ordering::Acquire);
+    let Some(uart) = runtime_console() else {
+        return;
+    };
+    if irq == 0 || !crate::hal::arch::riscv::plic::register_handler(irq, console_rx_interrupt) {
+        return;
+    }
+    if uart.enable_receive_interrupts() {
+        let _ = drain_runtime_uart_fifo();
+    }
+}
+
+/// PLIC callback: consume bounded hardware FIFO work and publish it for the
+/// scheduler. It must not take locks or call the line discipline.
+fn console_rx_interrupt() {
+    let _ = drain_runtime_uart_fifo();
+}
+
+/// Bounded polling fallback for missing/masked IRQs and sub-trigger FIFO data.
+pub fn poll_runtime_console_rx() -> bool {
+    let irq_state = local_irq_save();
+    let received = if runtime_console().is_some() {
+        drain_runtime_uart_fifo()
+    } else {
+        drain_legacy_console()
+    };
+    local_irq_restore(irq_state);
+    received
+}
+
+/// Consume the IRQ wake flag in task context.
+pub fn take_runtime_console_rx_interrupt() -> bool {
+    CONSOLE_RX_INTERRUPT_PENDING.swap(false, Ordering::AcqRel)
+}
+
+/// Drain producer-buffer bytes in scheduler context. Returning false from the
+/// consumer retains later bytes and applies UART backpressure.
+pub fn drain_runtime_console_rx(mut consume: impl FnMut(u8) -> bool) -> usize {
+    let mut drained = 0;
+    while let Some(byte) = CONSOLE_RX_RING.pop() {
+        drained += 1;
+        if !consume(byte) {
+            if let Some(uart) = runtime_console() {
+                throttle_runtime_console_rx(uart);
+            }
+            CONSOLE_RX_INTERRUPT_PENDING.store(true, Ordering::Release);
+            break;
+        }
+    }
+    drained
+}
+
+/// Account a TTY hard-limit drop in task context and stop UART interrupts until
+/// the scheduler observes consumer capacity again.
+pub fn note_tty_input_overrun() {
+    CONSOLE_RX_TTY_OVERRUNS.fetch_add(1, Ordering::Relaxed);
+    if let Some(uart) = runtime_console() {
+        throttle_runtime_console_rx(uart);
+    }
+}
+
+/// Re-enable RX only after the TTY and producer ring both have room.
+pub fn resume_runtime_console_rx(tty_has_space: bool) {
+    if !tty_has_space || !CONSOLE_RX_RING.has_space() || !CONSOLE_RX_THROTTLED.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(uart) = runtime_console() else {
+        return;
+    };
+    if uart.enable_receive_interrupts() {
+        CONSOLE_RX_THROTTLED.store(false, Ordering::Release);
+    }
+}
+
+/// Emit rate-limited RX error accounting only from scheduler context.
+pub fn report_runtime_console_rx_overruns() {
+    let now = crate::timer::get_time_ms();
+    let last = CONSOLE_RX_LAST_REPORT_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < CONSOLE_RX_REPORT_INTERVAL_MS {
+        return;
+    }
+    let ring = CONSOLE_RX_RING_OVERRUNS.swap(0, Ordering::Relaxed);
+    let tty = CONSOLE_RX_TTY_OVERRUNS.swap(0, Ordering::Relaxed);
+    let lsr = CONSOLE_RX_LSR_OVERRUNS.swap(0, Ordering::Relaxed);
+    let parity = CONSOLE_RX_PARITY_ERRORS.swap(0, Ordering::Relaxed);
+    let framing = CONSOLE_RX_FRAMING_ERRORS.swap(0, Ordering::Relaxed);
+    let breaks = CONSOLE_RX_BREAKS.swap(0, Ordering::Relaxed);
+    if ring + tty + lsr + parity + framing + breaks == 0 {
+        return;
+    }
+    CONSOLE_RX_LAST_REPORT_MS.store(now, Ordering::Relaxed);
+    log::warn!(
+        "[uart-rx] ring_overruns={} tty_overruns={} lsr_overruns={} parity={} framing={} breaks={}",
+        ring,
+        tty,
+        lsr,
+        parity,
+        framing,
+        breaks
+    );
+}
+
+pub fn console_getchar() -> usize {
+    let _ = poll_runtime_console_rx();
+    CONSOLE_RX_RING.pop().map(usize::from).unwrap_or(usize::MAX)
 }
 
 pub fn console_flush() {}
@@ -102,31 +285,14 @@ pub fn local_irq_restore(was_enabled: bool) {
 }
 
 pub fn console_write_bytes(data: &[u8]) {
-    let base = CONSOLE_BASE.load(Ordering::Acquire);
-    if base == 0 {
+    let Some(uart) = runtime_console() else {
         for &b in data {
             console_putchar(b as usize);
         }
         return;
-    }
-    let shift = CONSOLE_REGISTER_SHIFT.load(Ordering::Acquire);
-    let size = CONSOLE_SIZE.load(Ordering::Acquire);
-    let lsr_offset = 5usize << shift;
-    if size <= lsr_offset {
-        return;
-    }
+    };
     for &byte in data {
-        loop {
-            // SAFETY: FDT validation recorded an enabled serial `reg` range,
-            // KernelSpace identity-mapped it, and the LSR offset is in bounds.
-            let status = unsafe { core::ptr::read_volatile((base + lsr_offset) as *const u8) };
-            if status & (1 << 5) != 0 {
-                break;
-            }
-        }
-        // SAFETY: offset zero is the transmit register in the validated serial
-        // range and the THRE handshake above permits the volatile write.
-        unsafe { core::ptr::write_volatile(base as *mut u8, byte) };
+        while !uart.try_write(byte) {}
     }
 }
 

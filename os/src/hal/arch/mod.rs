@@ -39,6 +39,7 @@ pub use riscv::{
     sbi::{
         configure_runtime_console, console_flush, console_getchar, console_putchar,
         console_write_bytes, local_irq_restore, local_irq_save, set_timer, shutdown,
+        init_runtime_console_rx,
     },
     sv39::tlb_invalidate,
     switch::__switch,
