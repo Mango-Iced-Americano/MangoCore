@@ -39,6 +39,9 @@ pub(super) const DMA_CH0_CUR_TX_DESC: usize = 0x1144;
 pub(super) const DMA_CH0_CUR_RX_DESC: usize = 0x114c;
 pub(super) const DMA_CH0_STATUS: usize = 0x1160;
 
+pub(super) const DMA_CH_INTR_NIE: u32 = 1 << 15;
+pub(super) const DMA_CH_INTR_RIE: u32 = 1 << 6;
+
 pub(super) const SYS_CRG_GMAC0_GTX: usize = 0x01b0;
 pub(super) const SYS_CRG_GMAC0_PTP: usize = 0x01b4;
 pub(super) const SYS_CRG_GMAC0_GTXCLK: usize = 0x01bc;

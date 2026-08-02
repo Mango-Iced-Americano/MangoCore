@@ -13,6 +13,7 @@ use super::NetDevice;
 use crate::hal::{get_clock_freq, get_time};
 use crate::mm::{FrameTracker, PhysAddr};
 use alloc::sync::Arc;
+use core::convert::TryInto;
 use spin::Mutex;
 
 use mmio::*;
@@ -21,6 +22,7 @@ use ring::DmaRings;
 
 const EEPROM_MAC: [u8; 6] = [0x6c, 0xcf, 0x39, 0x00, 0x56, 0xd2];
 const DWMAC_CORE_5_20: u32 = 0x52;
+const GMAC0_PLIC_IRQ: usize = 7;
 
 #[derive(Debug)]
 pub(crate) enum GmacJh7110Error {
@@ -41,7 +43,10 @@ struct GmacJh7110Inner {
 }
 
 // allow: SIZE_OK — the hardware bring-up state machine is intentionally kept together.
-pub struct GmacJh7110(Mutex<GmacJh7110Inner>);
+pub struct GmacJh7110 {
+    inner: Mutex<GmacJh7110Inner>,
+    irq: usize,
+}
 
 pub(crate) use ktest::{gmac_ktest_result, GmacKtestResult};
 
@@ -176,7 +181,7 @@ fn configure_dma(rings: &DmaRings) {
     write_reg(DMA_CH0_RX_RING_LEN, (ring::RX_DESC_COUNT - 1) as u32);
     write_reg(DMA_CH0_TX_END, rings.tx_descriptor_base() as u32);
     write_reg(DMA_CH0_RX_END, rings.rx_descriptor_end() as u32);
-    write_reg(DMA_CH0_INTR_ENA, 0);
+    write_reg(DMA_CH0_INTR_ENA, DMA_CH_INTR_NIE | DMA_CH_INTR_RIE);
     write_reg(DMA_CH0_STATUS, u32::MAX);
 }
 
@@ -260,13 +265,16 @@ impl GmacJh7110 {
             version, phy_id, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         );
 
-        let driver = Self(Mutex::new(GmacJh7110Inner {
-            base: GMAC0_BASE,
-            mac,
-            rings,
-            link,
-            last_link_poll: get_time(),
-        }));
+        let driver = Self {
+            inner: Mutex::new(GmacJh7110Inner {
+                base: GMAC0_BASE,
+                mac,
+                rings,
+                link,
+                last_link_poll: get_time(),
+            }),
+            irq: gmac0_interrupt(),
+        };
         if crate::bootargs::load().mode == crate::bootargs::BootMode::Ktest {
             ktest::run(&driver);
         }
@@ -276,13 +284,13 @@ impl GmacJh7110 {
 
 impl NetDevice for GmacJh7110 {
     fn receive(&self, buf: &mut [u8]) -> Option<usize> {
-        let mut inner = self.0.lock();
+        let mut inner = self.inner.lock();
         inner.poll_link();
         inner.rings.receive(buf)
     }
 
     fn transmit(&self, buf: &[u8]) {
-        let mut inner = self.0.lock();
+        let mut inner = self.inner.lock();
         inner.poll_link();
         if inner.link.up {
             let _ = inner.rings.transmit(buf);
@@ -290,6 +298,38 @@ impl NetDevice for GmacJh7110 {
     }
 
     fn mac_address(&self) -> [u8; 6] {
-        self.0.lock().mac
+        self.inner.lock().mac
     }
+
+    fn interrupt(&self) -> Option<(usize, fn())> {
+        Some((self.irq, gmac_jh7110_irq))
+    }
+}
+
+fn gmac0_interrupt() -> usize {
+    crate::hal::platform::platform_info()
+        .devices
+        .iter()
+        .find(|device| {
+            device
+                .compatible
+                .iter()
+                .any(|compatible| compatible == "starfive,jh7110-eqos-5.20")
+                && device.mmio_range(0).is_some_and(|range| range.base == GMAC0_BASE)
+        })
+        .and_then(|device| device.raw_property("interrupts").ok())
+        .and_then(|interrupts| interrupts.get(..4))
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .map(|irq| irq as usize)
+        .filter(|irq| *irq != 0)
+        .unwrap_or(GMAC0_PLIC_IRQ)
+}
+
+fn gmac_jh7110_irq() {
+    let status = read_reg(DMA_CH0_STATUS);
+    if status != 0 {
+        write_reg(DMA_CH0_STATUS, status);
+    }
+    crate::net::config::NET_INTERFACE.notify_rx_interrupt();
 }
