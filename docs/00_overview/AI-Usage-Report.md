@@ -85,6 +85,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP SysV message queue ID 防 ABA | 2026-08-01 | GPT/Codex, DeepSeek | Linux index+sequence 与 LTP `msgget04/05`、`msgrcv06` 对照，requested/auto 边界审查和双架构 8 核门禁 | 发布前登记 ID 历史、运行期不复用，删除路径不分配；精确 RMID→同号重建动态竞态保留 NOT RUN 边界 |
 | SMP SysV semaphore/shared-memory ID 生命周期 | 2026-08-02 | GPT/Codex, DeepSeek | Linux SysV IPC 删除语义、LTP `semop03`、两阶段 `shmat` 身份与双架构 8 核门禁 | 删除 OOM-prone semaphore tombstone，等待后缺失直接返回 `EIDRM`；SHM ID checked 单调耗尽；focused 52/52，初赛失败集合不变 |
 | SMP futex requeue waiter 身份 | 2026-08-02 | GPT/Codex, DeepSeek | Linux `futex_q`/requeue/waitv 对照、Arc 身份与锁序审查、双架构 8 核 futex LTP | 专用 waiter 跟随 requeue 更新 current key，真实 wake 独立发布；每架构 20 PASS + 6 版本 SKIP，shared key ABA 保留后续 |
+| SMP shared futex 稳定 backing key | 2026-08-02 | GPT/Codex, DeepSeek | Linux futex key 生命周期、三类 shared mapping 的 Arc 所有权、锁序与双架构 8 核 futex LTP | backing identity + 队列级 pin 排除 raw PPN 错误命中；每架构 20 PASS + 6 版本 SKIP，强制换出 false-negative 与锁内 uaccess 保留后续 |
 
 ## 4. 详细使用场景
 
@@ -1270,6 +1271,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/smp-b62-msgid-aba-summary.md` | SMP SysV message queue ID 防 ABA | 记录旧最小空洞复用交错、发布历史不变量、Linux/LTP 对照、隔离 Docker/DeepSeek 验证及精确动态场景 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b63-sysvipc-id-summary.md` | SMP SysV semaphore/shared-memory ID 生命周期 | 记录 semaphore 删除语义的最小证明、SHM 回绕覆盖风险、DeepSeek recipe 误选纠正、双架构 focused/初赛门禁及耗尽场景 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b64-futex-requeue-summary.md` | SMP futex requeue waiter 身份 | 记录 source membership 误判、专用 Arc waiter/current key、Linux waitv 最后下标语义、DeepSeek 计数纠错与双架构 8 核 focused 证据 |
+| `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b65-shared-futex-key-summary.md` | SMP shared futex 稳定 backing key | 记录 raw PPN ABA 根因、三类 shared mapping 身份证明、队列级 pin、DeepSeek 推断纠错与双架构 8 核 focused 证据 |
 
 ## 9. 交互记录与留痕方式
 

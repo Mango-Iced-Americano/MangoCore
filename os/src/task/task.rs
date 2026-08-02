@@ -9,13 +9,13 @@
 //! `has_actionable_signal()` 前必须释放 `task.inner`，避免信号处理和调度唤醒路径
 //! 形成锁顺序反转。
 
+use super::perf;
 use super::pid::RecycleAllocator;
 use super::process::ProcessControlBlock;
 use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
-use super::perf;
-use super::threads::{futex_wake_shared, FutexTable};
+use super::threads::{futex_wake_shared, FutexTable, SharedFutexKey};
 use super::TaskContext;
 use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, IpcNamespace, MountNamespace,
@@ -29,7 +29,7 @@ use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{
-    AddressSpaceInner, FaultAccess, AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE,
+    AddressSpace, AddressSpaceInner, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
 use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
@@ -740,15 +740,19 @@ impl TaskControlBlock {
     fn write_clear_child_tid_word(
         &self,
         addr: usize,
-    ) -> Result<(bool, Option<usize>, usize), isize> {
+    ) -> Result<(Option<SharedFutexKey>, Option<SharedFutexKey>), isize> {
         let bytes = 0u32.to_ne_bytes();
         let vm = self.process.vm();
         vm.write(|vm| {
             let base_va = VirtAddr::from(addr);
-            let uses_shared_key = vm.futex_uses_shared_key(base_va)?;
+            let uses_shared_key = vm.futex_mapping_is_shared(base_va)?;
             let before_key = if uses_shared_key {
-                vm.translate(base_va.floor())
-                    .map(|ppn| (ppn.0 << 12) + base_va.page_offset())
+                // clear_child_tid 可指向尚未 fault-in 的 shared 页。此时
+                // 没有旧队列可唤醒，故只在 backing 已存在时记录它。
+                vm.futex_shared_backing(base_va)
+                    .ok()
+                    .flatten()
+                    .map(|backing| SharedFutexKey::new(backing, base_va.page_offset()))
             } else {
                 None
             };
@@ -759,23 +763,26 @@ impl TaskControlBlock {
                 let page = pa.floor().get_bytes_array();
                 page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
                 let after_key = if uses_shared_key {
-                    (pa.floor().0 << 12) + page_offset
+                    let backing = vm.futex_shared_backing(base_va)?.ok_or(EFAULT)?;
+                    Some(SharedFutexKey::new(backing, page_offset))
                 } else {
-                    0
+                    None
                 };
-                return Ok((uses_shared_key, before_key, after_key));
+                return Ok((before_key, after_key));
             }
 
-            let mut after_key = None;
             for (offset, byte) in bytes.iter().enumerate() {
                 let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
                 let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
-                if uses_shared_key && offset == 0 {
-                    after_key = Some((pa.floor().0 << 12) + pa.page_offset());
-                }
                 pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
             }
-            Ok((uses_shared_key, before_key, after_key.unwrap_or(0)))
+            let after_key = if uses_shared_key {
+                let backing = vm.futex_shared_backing(base_va)?.ok_or(EFAULT)?;
+                Some(SharedFutexKey::new(backing, base_va.page_offset()))
+            } else {
+                None
+            };
+            Ok((before_key, after_key))
         })
     }
 
@@ -1167,14 +1174,16 @@ impl TaskControlBlock {
 
         if clear_child_tid != 0 {
             match self.write_clear_child_tid_word(clear_child_tid) {
-                Ok((uses_shared_key, before_key, after_key)) => {
+                Ok((before_key, after_key)) => {
                     self.process.futex().lock().wake(clear_child_tid, 1);
-                    if uses_shared_key {
-                        if let Some(before_key) = before_key {
-                            futex_wake_shared(before_key, 1);
-                        }
-                        if before_key != Some(after_key) {
-                            futex_wake_shared(after_key, 1);
+                    if let Some(key) = before_key.clone() {
+                        futex_wake_shared(key, 1);
+                    }
+                    // fault-in 期间映射可能换了 backing；仅在身份不同时
+                    // 再唤醒新队列，避免对同一 word 重复扫描全局表。
+                    if after_key != before_key {
+                        if let Some(key) = after_key {
+                            futex_wake_shared(key, 1);
                         }
                     }
                 }
@@ -1232,11 +1241,11 @@ impl TaskControlBlock {
         // 带有ELF程序头/跳板的用户地址空间（AddressSpaceInner）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, _user_heap, elf_info) =
-            AddressSpaceInner::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
+            AddressSpaceInner::<PageTableImpl>::from_elf(elf_data)
+                .expect("initproc ELF is invalid");
         init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
         // 在内核空间中删除ELF区域
-        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor())
-            .unwrap();
+        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor()).unwrap();
         init_task_trace!("04 temporary kernel ELF mapping removed");
 
         // 获取用户资源槽位分配器
@@ -1718,8 +1727,7 @@ impl TaskControlBlock {
         let _t_teardown = perf::perf_time_now();
         // ELF 内容只在解析期间映射进共享内核页表；清 PTE 后必须等远端
         // shootdown ack，再让文件映射 frame 回到分配器。
-        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor())
-            .unwrap();
+        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor()).unwrap();
         let _td_ticks = perf::perf_time_now().wrapping_sub(_t_teardown);
         perf::EXECVE_TEARDOWN_TICKS.fetch_add(_td_ticks, Ordering::Relaxed);
 
@@ -2281,7 +2289,11 @@ impl TaskControlBlock {
         expected_tid: usize,
         new_handle: Arc<TidHandle>,
     ) -> Arc<TidHandle> {
-        assert_eq!(self.gettid(), expected_tid, "unexpected TID before exec swap");
+        assert_eq!(
+            self.gettid(),
+            expected_tid,
+            "unexpected TID before exec swap"
+        );
         let mut handle = self.tid_handle.lock();
         assert_eq!(
             handle.0, expected_tid,

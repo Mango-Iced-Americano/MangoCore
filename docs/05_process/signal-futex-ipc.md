@@ -208,12 +208,14 @@ futex shared key 依赖 MM：
 
 ```text
 non-private futex
-  └── AddressSpace::futex_uses_shared_key(addr)
-        ├── VMA 是 MAP_SHARED -> phys key
+  └── AddressSpace::futex_shared_backing(addr)
+        ├── VMA 是 MAP_SHARED -> backing Arc identity + page offset
         └── 否则 -> private key
 ```
 
-因此同一虚拟地址不一定是 shared futex；只有实际 shared VMA 才跨进程使用全局物理 key。
+因此同一虚拟地址不一定是 shared futex；只有实际 shared VMA 才进入全局表。每个非空
+shared queue 持有一份 backing `Arc`，避免旧队列因物理页号复用错误命中新页；VMA/PTE
+校验在 VM 锁内完成，实际 table 操作在 VM 锁释放后进行。
 
 ## 9. clear_child_tid 与 futex
 
@@ -222,6 +224,7 @@ non-private futex
 1. TCB 退出写 0 到用户 `clear_child_tid`。
 2. 唤醒进程 private futex table。
 3. 如果地址属于 shared VMA，唤醒全局 shared futex table。
+4. 若写 0 fault 前后 backing 身份变化，分别尝试旧、新 shared key。
 
 这条路径不经过 syscall futex wait 的参数解析，但使用相同 `FutexTable::wake()` 机制。
 

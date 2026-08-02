@@ -881,3 +881,24 @@
   同时 wake。未构造精确交错时标为 NOT RUN，用锁内时序做静态证明但不冒充动态覆盖。
 - **相关文件**: `os/src/task/threads.rs`, `os/src/task/manager.rs`,
   `docs/05_process/futex.md`, `docs/01_architecture/lock-order.md`
+
+## 共享等待键：可复用物理编号不能充当长期对象身份
+
+- **危险模式**: process-shared futex 或其它跨进程等待表把 raw PPN + offset 当成长期 key。
+  原 backing 释放后，同一 PPN 可分配给无关页；旧 waiter 会错误命中新对象，形成 ABA
+  false-positive。扩大 PPN 字段或在 wake 时再次翻译都不能证明对象连续性。
+- **稳定身份与 pin**: key 应引用共享映射真正共用的分配对象身份；等待表只需为每个非空 key
+  保留一份 owner pin，不必每个 waiter 都持有。空队列从 map 删除时释放 pin，requeue 则必须
+  先固定并验证目标 backing，再更新 waiter current key，最后发布到目标队列。
+- **逐映射类证明**: file-backed `MAP_SHARED`、anonymous shared fork 与 SysV SHM 必须分别确认
+  两侧 VMA clone 的是同一个 backing `Arc`。相同文件页的多次 mmap 还要核对 PageCache 是否
+  返回同一对象，不能只因为 PPN 相同就推断 identity 相同。
+- **VM/table 两阶段**: 在同一 VM 锁内定位 VMA、clone resident backing 并校验 PTE 指向同一
+  PPN；随后释放 VM 锁，再进入全局等待表。跨阶段传递拥有所有权的 Arc，而不是裸指针或
+  PA；不得建立 `AddressSpace -> wait table` 的嵌套锁序。
+- **准确描述剩余风险**: pin 能排除回收复用造成的 false-positive，但强制 swap/truncate 若
+  绕过 pin 或换成新 backing，可能形成旧 waiter 不再命中的 false-negative。普通 swap/zram/
+  page-cache 回收还会因 pin 延迟而增加内存压力。没有构造精确复用交错时应标为 NOT RUN，
+  不把静态生命周期证明或普通 LTP 通过冒充动态竞态覆盖。
+- **相关文件**: `os/src/mm/address_space.rs`, `os/src/task/threads.rs`,
+  `os/src/syscall/process/futex.rs`, `docs/05_process/futex.md`

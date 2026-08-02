@@ -229,8 +229,11 @@ message queue 的 requested/auto ID。B63 对 semaphore 采用更小的不变量
 拆为专用 waiter：requeue 必须先更新 current key 再发布到目标队列，wake 必须先发布
 `woken` 再让任务 runnable，timeout/signal/waitv 按 current key 与 Arc 身份精确撤销；不得
 再用“已离开 source 队列”推断正常 wake，也不得在注册后重读原 futex word 判定结果。
-shared futex 的 raw PPN key ABA 与 table 锁内 faultable uaccess 仍待后续处理。FS/Net/Driver
-的完整共享状态审计仍由对应负责人继续。
+B65 又把 shared futex key 改为 backing `Arc` 身份与页内偏移：`AddressSpace` 在同一 VM 锁
+内验证 VMA resident frame 与 PTE，释放 VM 锁后才进入 futex table；每个非空 shared queue
+持有一份 backing pin，空队列删除才释放，禁止恢复 raw PPN 长期 key。该证明排除 PPN 复用
+造成的错误命中，但 `force_swap_out`/truncate 后的新 backing 漏匹配与 table 锁内 faultable
+uaccess 仍待后续处理。FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

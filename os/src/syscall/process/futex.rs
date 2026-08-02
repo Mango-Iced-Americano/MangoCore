@@ -3,7 +3,7 @@ use crate::syscall::errno::*;
 use crate::task::threads::{
     do_futex_wait, do_futex_wait_bitset, do_futex_wait_bitset_shared, do_futex_wait_shared,
     do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
-    FutexWaitSpec,
+    FutexWaitSpec, SharedFutexKey,
 };
 use crate::task::{current_task, current_user_token, threads, TaskControlBlock};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
@@ -34,20 +34,9 @@ pub struct FutexWaitV {
     __reserved: u32,
 }
 
-fn va_to_phys_key(
-    vm: &crate::mm::AddressSpaceInner<crate::mm::KernelPageTableImpl>,
-    va: usize,
-) -> Option<usize> {
-    let va = VirtAddr::from(va);
-    let vpn = va.floor();
-    let offset = va.page_offset();
-    vm.translate(vpn).map(|ppn| (ppn.0 << 12) + offset)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FutexKey {
     Private(usize),
-    Shared(usize),
+    Shared(SharedFutexKey),
 }
 
 fn futex_key_for(
@@ -61,12 +50,13 @@ fn futex_key_for(
 
     let vm_ref = task.process.vm();
     vm_ref.read(|vm| {
-        if vm.futex_uses_shared_key(VirtAddr::from(uaddr))? {
-            va_to_phys_key(vm, uaddr)
-                .map(FutexKey::Shared)
-                .ok_or(EFAULT)
-        } else {
-            Ok(FutexKey::Private(uaddr))
+        let addr = VirtAddr::from(uaddr);
+        match vm.futex_shared_backing(addr)? {
+            Some(backing) => Ok(FutexKey::Shared(SharedFutexKey::new(
+                backing,
+                addr.page_offset(),
+            ))),
+            None => Ok(FutexKey::Private(uaddr)),
         }
     })
 }
@@ -177,8 +167,8 @@ pub fn sys_futex(
                 }
             }
             match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Shared(phys_key)) => {
-                    do_futex_wait_shared(futex_word, token, val, timeout, phys_key)
+                Ok(FutexKey::Shared(key)) => {
+                    do_futex_wait_shared(futex_word, token, val, timeout, key)
                 }
                 Ok(FutexKey::Private(key)) => do_futex_wait(futex_word, token, key, val, timeout),
                 Err(errno) => errno,
@@ -198,8 +188,8 @@ pub fn sys_futex(
                 }
             }
             match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Shared(phys_key)) => {
-                    do_futex_wait_bitset_shared(futex_word, token, val, deadline, phys_key)
+                Ok(FutexKey::Shared(key)) => {
+                    do_futex_wait_bitset_shared(futex_word, token, val, deadline, key)
                 }
                 Ok(FutexKey::Private(key)) => {
                     do_futex_wait_bitset(futex_word, token, key, val, deadline)
@@ -226,7 +216,7 @@ pub fn sys_futex(
                     .futex()
                     .lock()
                     .wake(key, val),
-                Ok(FutexKey::Shared(phys_key)) => futex_wake_shared(phys_key, val),
+                Ok(FutexKey::Shared(key)) => futex_wake_shared(key, val),
                 Err(errno) => errno,
             }
         }
@@ -341,10 +331,16 @@ pub fn sys_futex_waitv(
             _ => {}
         }
 
-        let (uses_private_table, futex_key) =
+        let (uses_private_table, wait_spec) =
             match current_futex_key(waiter.uaddr as usize, is_private) {
-                Ok(FutexKey::Private(key)) => (true, key),
-                Ok(FutexKey::Shared(key)) => (false, key),
+                Ok(FutexKey::Private(key)) => (
+                    true,
+                    FutexWaitSpec::private(futex_word, key, waiter.val as u32),
+                ),
+                Ok(FutexKey::Shared(key)) => (
+                    false,
+                    FutexWaitSpec::shared(futex_word, key, waiter.val as u32),
+                ),
                 Err(errno) => return errno,
             };
         match private_table {
@@ -352,12 +348,7 @@ pub fn sys_futex_waitv(
             None => private_table = Some(uses_private_table),
             _ => {}
         };
-
-        entries.push(FutexWaitSpec {
-            futex_word,
-            futex_key,
-            val: waiter.val as u32,
-        });
+        entries.push(wait_spec);
     }
 
     let use_private_table = private_table.unwrap_or(true);

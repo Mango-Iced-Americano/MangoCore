@@ -289,9 +289,36 @@ cleanup: waiter.key -> exact Arc remove
 - `block_current_and_run_next_with_lock_checked()` 只在提交阻塞状态时接管并释放 table guard，
   任何路径都不得跨 context switch 持有该锁。
 
-B64 仍保留两个明确边界：shared key 使用 raw PPN + offset，存在释放复用 ABA；用户 word
-读取仍可能在 futex table 自旋锁内触发 faultable uaccess。两项都不能因本节 requeue 证明
-而视为已解决。
+B64 的 requeue 身份证明不覆盖 shared backing 生命周期，也不覆盖锁内用户访问；前者由
+B65 收口，后者仍留给 B66。
+
+#### B65 shared futex backing 身份与 pin
+
+shared futex 不能用 raw PPN 充当长期 key。旧页被释放后，分配器可能把同一 PPN 交给无关
+新页，使新进程错误命中旧等待队列。B65 改用共享映射实际持有的 `Arc<FrameTracker>` 对象
+身份与页内偏移：
+
+```text
+持 AddressSpace VM 锁
+  -> 确认 VMA 为 MAP_SHARED
+  -> clone resident backing Arc
+  -> 校验 backing.ppn == PTE.ppn
+释放 VM 锁
+  -> 获取 FutexTable 锁
+  -> 以 (Arc identity, page offset) 查找或发布队列
+```
+
+- `FutexQueue` 为每个非空 shared key 保留一份 backing pin；队列为空并从 map 删除后才 drop；
+- requeue 先建立/验证目标 pin，再更新 waiter current key，最后把 waiter 发布到目标队列；
+- waiter 的 backing identity 与 word offset 分存两个原子字段，但它们从不构成无锁二元组；
+  `queue_key_locked()`/`move_to_locked()` 的调用者必须持有同一 `FutexTable` 外层锁；
+- `clear_child_tid` 在 VM 锁内取得 fault 前后稳定 key，退出 VM 临界区后才依次执行 wake；
+- `AddressSpace` 与 `FutexTable` 没有嵌套锁序；`Arc` 是跨阶段的稳定所有权载体。
+
+该协议排除了 raw PPN 复用造成的 false-positive。`force_swap_out()`、truncate 或其它强制
+替换 backing 的路径仍可能让旧 waiter 与换入后的新对象形成 false-negative；普通回收则会
+被 pin 延后。用户 word 的 faultable 读取目前仍可能发生在 table 自旋锁内，二者都不能由
+B65 的身份生命周期证明外推为已解决。
 
 ### 3.3 B18 Per-CPU RunQueue 约束
 

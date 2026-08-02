@@ -1293,15 +1293,38 @@ impl<T: PageTable> AddressSpaceInner<T> {
         mapper.set_dirty(vpn)
     }
 
-    /// Return whether a non-private futex at `addr` must use the global shared key table.
+    /// 判断未携带 `FUTEX_PRIVATE_FLAG` 的地址是否真实共享。
     ///
-    /// Linux uses an mm/address key for private mappings even when userspace does not pass
-    /// FUTEX_PRIVATE_FLAG; only mappings that are actually shared need an object/page based key.
-    pub fn futex_uses_shared_key(&self, addr: VirtAddr) -> Result<bool, isize> {
+    /// 与 Linux 一致，普通私有 VMA 仍使用当前进程的虚拟地址键；
+    /// 只有真正的 shared VMA 才需要进入全局 backing 身份表。
+    pub fn futex_mapping_is_shared(&self, addr: VirtAddr) -> Result<bool, isize> {
         let vpn = addr.floor();
         let start = self.vmas.find_user_vma_key(vpn).ok_or(EFAULT)?;
         let area = self.vmas.get_by_start(start).ok_or(EFAULT)?;
         Ok(area.vm_mapping_type() == VmAreaMapping::Shared)
+    }
+
+    /// 返回 shared futex 当前映射的稳定 backing。
+    ///
+    /// 返回 `None` 表示该 VMA 应使用进程私有表；shared VMA 必须
+    /// 同时存在 resident frame 和一致的 PTE。克隆出的 `Arc` 允许调用者
+    /// 在释放 VM 锁后仍然阻止该 backing 被回收和重用。
+    pub fn futex_shared_backing(&self, addr: VirtAddr) -> Result<Option<Arc<FrameTracker>>, isize> {
+        let vpn = addr.floor();
+        let start = self.vmas.find_user_vma_key(vpn).ok_or(EFAULT)?;
+        let area = self.vmas.get_by_start(start).ok_or(EFAULT)?;
+        if area.vm_mapping_type() != VmAreaMapping::Shared {
+            return Ok(None);
+        }
+
+        let backing = area.inner.get_in_memory(&vpn).cloned().ok_or(EFAULT)?;
+        let mapped_ppn = self.translate(vpn).ok_or(EFAULT)?;
+        if backing.ppn != mapped_ppn {
+            // VMA backing 与硬件可见 PTE 不一致时，不得把 waiter
+            // 发布到任意一侧的队列，否则会制造丢失唤醒。
+            return Err(EFAULT);
+        }
+        Ok(Some(backing))
     }
 
     pub fn recycle_data_pages(&mut self) {

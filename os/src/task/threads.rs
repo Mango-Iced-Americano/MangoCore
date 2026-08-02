@@ -13,7 +13,7 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{
-    mm::UserPtr,
+    mm::{FrameTracker, UserPtr},
     syscall::errno::*,
     task::{
         block_current_and_run_next_with_lock_checked, current_task,
@@ -89,11 +89,66 @@ pub enum FutexCmd {
 }
 
 lazy_static! {
-    /// 进程间共享 futex 的全局等待表，key = 物理地址。
+    /// 进程间共享 futex 的全局等待表。
     pub static ref PROCESS_SHARED_FUTEX: spin::Mutex<FutexTable> =
         spin::Mutex::new(FutexTable::new());
 }
 static PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY: AtomicBool = AtomicBool::new(false);
+
+/// 一个 process-shared futex word 的稳定内核身份。
+///
+/// 仅保存 PPN 会在原页回收、同一 PPN 分配给新页后发生 ABA，
+/// 使无关的新页错误命中旧等待队列。该类型用 `Arc` 保持原
+/// backing 存活；同一页内再用字节偏移区分不同 futex word。
+#[derive(Clone)]
+pub struct SharedFutexKey {
+    backing: Arc<FrameTracker>,
+    page_offset: usize,
+}
+
+impl SharedFutexKey {
+    pub fn new(backing: Arc<FrameTracker>, page_offset: usize) -> Self {
+        debug_assert!(page_offset < crate::config::PAGE_SIZE);
+        Self {
+            backing,
+            page_offset,
+        }
+    }
+
+    fn queue_key(&self) -> QueueKey {
+        QueueKey {
+            backing_identity: Arc::as_ptr(&self.backing) as usize,
+            word_offset: self.page_offset,
+        }
+    }
+}
+
+impl PartialEq for SharedFutexKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.page_offset == other.page_offset && Arc::ptr_eq(&self.backing, &other.backing)
+    }
+}
+
+impl Eq for SharedFutexKey {}
+
+/// `FutexTable` 内部的有序查找键。
+///
+/// 私有 futex 已由每进程 `FutexTable` 隔离，因此用
+/// `(0, user_va)`；共享 futex 用 `(Arc 对象身份, 页内偏移)`。
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct QueueKey {
+    backing_identity: usize,
+    word_offset: usize,
+}
+
+impl QueueKey {
+    fn private(user_va: usize) -> Self {
+        Self {
+            backing_identity: 0,
+            word_offset: user_va,
+        }
+    }
+}
 
 /// 一次 futex 等待的稳定注册项。
 ///
@@ -106,25 +161,38 @@ static PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY: AtomicBool = AtomicBool::new(false);
 /// 都有独立身份，不能只依赖 TCB 指针判断究竟是哪一项被唤醒。
 struct FutexWaiter {
     task: Weak<TaskControlBlock>,
-    key: AtomicUsize,
+    current_backing_identity: AtomicUsize,
+    current_word_offset: AtomicUsize,
     woken: AtomicBool,
 }
 
 impl FutexWaiter {
-    fn new(task: Weak<TaskControlBlock>, key: usize) -> Self {
+    fn new(task: Weak<TaskControlBlock>, key: QueueKey) -> Self {
         Self {
             task,
-            key: AtomicUsize::new(key),
+            current_backing_identity: AtomicUsize::new(key.backing_identity),
+            current_word_offset: AtomicUsize::new(key.word_offset),
             woken: AtomicBool::new(false),
         }
     }
 
-    fn key(&self) -> usize {
-        self.key.load(Ordering::Acquire)
+    /// 读取 waiter 当前所属队列。
+    ///
+    /// 调用者必须持有所属 `FutexTable` 的外层锁。两个原子字段
+    /// 只是为了使 waiter 可安全共享，不表示它们可以无锁原子更新。
+    fn queue_key_locked(&self) -> QueueKey {
+        QueueKey {
+            backing_identity: self.current_backing_identity.load(Ordering::Relaxed),
+            word_offset: self.current_word_offset.load(Ordering::Relaxed),
+        }
     }
 
-    fn move_to(&self, key: usize) {
-        self.key.store(key, Ordering::Release);
+    /// 在同一把 `FutexTable` 锁下更新 requeue 后的归属。
+    fn move_to_locked(&self, key: QueueKey) {
+        self.current_backing_identity
+            .store(key.backing_identity, Ordering::Relaxed);
+        self.current_word_offset
+            .store(key.word_offset, Ordering::Relaxed);
     }
 
     fn mark_woken(&self) {
@@ -138,13 +206,25 @@ impl FutexWaiter {
 
 struct FutexQueue {
     waiters: VecDeque<Arc<FutexWaiter>>,
+    /// 只有 shared 队列需要 pin backing；私有队列为 `None`。
+    /// 每个非空 key 仅保留一份 `Arc`，而不是每个 waiter 一份。
+    backing_pin: Option<Arc<FrameTracker>>,
 }
 
 impl FutexQueue {
-    fn new() -> Self {
+    fn new(backing_pin: Option<Arc<FrameTracker>>) -> Self {
         Self {
             waiters: VecDeque::new(),
+            backing_pin,
         }
+    }
+
+    fn assert_same_backing(&self, backing: Option<&Arc<FrameTracker>>) {
+        debug_assert!(match (&self.backing_pin, backing) {
+            (None, None) => true,
+            (Some(queued), Some(requested)) => Arc::ptr_eq(queued, requested),
+            _ => false,
+        });
     }
 
     fn is_empty(&self) -> bool {
@@ -210,7 +290,7 @@ impl FutexQueue {
     }
 
     /// 搬运完整注册项，并在目标队列可见前更新 waiter 的归属 key。
-    fn requeue_to(&mut self, target: &mut Self, target_key: usize, limit: usize) -> usize {
+    fn requeue_to(&mut self, target: &mut Self, target_key: QueueKey, limit: usize) -> usize {
         let mut moved = 0usize;
         while moved < limit {
             let Some(waiter) = self.waiters.pop_front() else {
@@ -219,7 +299,7 @@ impl FutexQueue {
             if waiter.task.strong_count() == 0 {
                 continue;
             }
-            waiter.move_to(target_key);
+            waiter.move_to_locked(target_key);
             target.waiters.push_back(waiter);
             moved += 1;
         }
@@ -232,15 +312,36 @@ impl FutexQueue {
 /// 表锁同时是 wait 注册、wake 移除、requeue 搬运和 timeout/signal
 /// 撤销的唯一线性化点。
 pub struct FutexTable {
-    queues: BTreeMap<usize, FutexQueue>,
+    queues: BTreeMap<QueueKey, FutexQueue>,
 }
 
 /// 从一个用户 `futex_waitv` 条目解析出的内核等待条件。
-#[derive(Clone, Copy)]
 pub struct FutexWaitSpec {
-    pub futex_word: UserPtr<u32>,
-    pub futex_key: usize,
-    pub val: u32,
+    futex_word: UserPtr<u32>,
+    queue_key: QueueKey,
+    shared_backing: Option<Arc<FrameTracker>>,
+    val: u32,
+}
+
+impl FutexWaitSpec {
+    pub fn private(futex_word: UserPtr<u32>, user_va: usize, val: u32) -> Self {
+        Self {
+            futex_word,
+            queue_key: QueueKey::private(user_va),
+            shared_backing: None,
+            val,
+        }
+    }
+
+    pub fn shared(futex_word: UserPtr<u32>, key: SharedFutexKey, val: u32) -> Self {
+        let queue_key = key.queue_key();
+        Self {
+            futex_word,
+            queue_key,
+            shared_backing: Some(key.backing),
+            val,
+        }
+    }
 }
 
 fn refresh_shared_futex_nonempty(table: &FutexTable) {
@@ -396,7 +497,8 @@ fn futex_wait_tail_spin(
 
 fn futex_wait_event_interruptible_timeout_locked<F>(
     lock: &spin::Mutex<FutexTable>,
-    futex_key: usize,
+    queue_key: QueueKey,
+    shared_backing: Option<&Arc<FrameTracker>>,
     mut check_word: F,
     deadline: Option<TimeSpec>,
 ) -> WaitResult
@@ -412,7 +514,7 @@ where
     }
 
     let task = current_task().unwrap();
-    let waiter = Arc::new(FutexWaiter::new(Arc::downgrade(&task), futex_key));
+    let waiter = Arc::new(FutexWaiter::new(Arc::downgrade(&task), queue_key));
     let mut table = lock.lock();
 
     if deadline_expired(deadline) {
@@ -425,7 +527,7 @@ where
         return WaitResult::Interrupted;
     }
 
-    table.enqueue(futex_key, waiter.clone());
+    table.enqueue(queue_key, waiter.clone(), shared_backing);
     // 再检查一次覆盖“快速检查 -> 注册”窗口。从此以后不再
     // 读原 futex word；requeue 后真实 wake 只由 waiter 判定。
     if let Some(res) = check_word() {
@@ -496,7 +598,8 @@ fn do_futex_wait_until(
 
     let wait_result = futex_wait_event_interruptible_timeout_locked(
         &futex_table,
-        futex_key,
+        QueueKey::private(futex_key),
+        None,
         || match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(_) => Some(EAGAIN),
@@ -581,7 +684,7 @@ fn futex_waitv_locked(
     for entry in entries {
         waiters.push(Arc::new(FutexWaiter::new(
             task_weak.clone(),
-            entry.futex_key,
+            entry.queue_key,
         )));
     }
 
@@ -596,7 +699,11 @@ fn futex_waitv_locked(
         return EINTR;
     }
     for (entry, waiter) in entries.iter().zip(waiters.iter()) {
-        table.enqueue(entry.futex_key, waiter.clone());
+        table.enqueue(
+            entry.queue_key,
+            waiter.clone(),
+            entry.shared_backing.as_ref(),
+        );
     }
     // 与单 futex wait 一样，注册后只再检查一次用户 word。
     // 后续 requeue 可能改变 key，因此恢复时只信任 waiter.woken。
@@ -639,18 +746,29 @@ fn futex_waitv_locked(
     }
 }
 
-/// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
-pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
+/// 唤醒等待在全局 process-shared futex 上的最多 `val` 个任务。
+pub fn futex_wake_shared(key: SharedFutexKey, val: u32) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    let woke = shared.wake_waiters(phys_key, val);
+    let woke = shared.wake_waiters(key.queue_key(), val);
     refresh_shared_futex_nonempty(&shared);
     super::perf::record_futex_wake(true, woke);
     woke
 }
 
-pub fn futex_requeue_shared(phys_key: usize, phys_key_2: usize, val: u32, val2: usize) -> isize {
+pub fn futex_requeue_shared(
+    source: SharedFutexKey,
+    target: SharedFutexKey,
+    val: u32,
+    val2: usize,
+) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    let ret = shared.requeue_waiters(phys_key, phys_key_2, val, val2);
+    let ret = shared.requeue_waiters(
+        source.queue_key(),
+        target.queue_key(),
+        Some(&target.backing),
+        val,
+        val2,
+    );
     refresh_shared_futex_nonempty(&shared);
     ret
 }
@@ -667,13 +785,13 @@ pub fn do_futex_waitv_shared(
     result
 }
 
-/// Process-shared futex wait — 使用全局物理地址表
+/// Process-shared futex wait — 使用全局 backing 身份表。
 fn do_futex_wait_shared_until(
     futex_word: UserPtr<u32>,
     token: usize,
     val: u32,
     deadline: Option<TimeSpec>,
-    phys_key: usize,
+    key: SharedFutexKey,
 ) -> isize {
     super::perf::record_futex_wait(true, deadline.is_some());
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
@@ -684,7 +802,8 @@ fn do_futex_wait_shared_until(
     PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
     let wait_result = futex_wait_event_interruptible_timeout_locked(
         &PROCESS_SHARED_FUTEX,
-        phys_key,
+        key.queue_key(),
+        Some(&key.backing),
         || match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(_) => Some(EAGAIN),
@@ -705,14 +824,14 @@ pub fn do_futex_wait_shared(
     token: usize,
     val: u32,
     timeout: Option<TimeSpec>,
-    phys_key: usize,
+    key: SharedFutexKey,
 ) -> isize {
     do_futex_wait_shared_until(
         futex_word,
         token,
         val,
         timeout.map(futex_relative_deadline),
-        phys_key,
+        key,
     )
 }
 
@@ -721,9 +840,9 @@ pub fn do_futex_wait_bitset_shared(
     token: usize,
     val: u32,
     deadline: Option<TimeSpec>,
-    phys_key: usize,
+    key: SharedFutexKey,
 ) -> isize {
-    do_futex_wait_shared_until(futex_word, token, val, deadline, phys_key)
+    do_futex_wait_shared_until(futex_word, token, val, deadline, key)
 }
 
 impl FutexTable {
@@ -738,18 +857,28 @@ impl FutexTable {
         self.queues.is_empty()
     }
 
-    fn queue(&mut self, key: usize) -> &mut FutexQueue {
-        self.queues.entry(key).or_insert_with(FutexQueue::new)
+    fn queue(&mut self, key: QueueKey, backing_pin: Option<&Arc<FrameTracker>>) -> &mut FutexQueue {
+        let queue = self
+            .queues
+            .entry(key)
+            .or_insert_with(|| FutexQueue::new(backing_pin.cloned()));
+        queue.assert_same_backing(backing_pin);
+        queue
     }
 
-    fn enqueue(&mut self, key: usize, waiter: Arc<FutexWaiter>) {
-        debug_assert_eq!(waiter.key(), key);
-        self.queue(key).enqueue(waiter);
+    fn enqueue(
+        &mut self,
+        key: QueueKey,
+        waiter: Arc<FutexWaiter>,
+        backing_pin: Option<&Arc<FrameTracker>>,
+    ) {
+        debug_assert_eq!(waiter.queue_key_locked(), key);
+        self.queue(key, backing_pin).enqueue(waiter);
     }
 
     /// 按等待身份的当前 key 精确撤销，requeue 后也不会回到原队列。
     fn remove_wait(&mut self, waiter: &Arc<FutexWaiter>) -> bool {
-        let key = waiter.key();
+        let key = waiter.queue_key_locked();
         let removed = self
             .queues
             .get_mut(&key)
@@ -759,7 +888,7 @@ impl FutexTable {
         removed
     }
 
-    fn remove_empty(&mut self, key: usize) {
+    fn remove_empty(&mut self, key: QueueKey) {
         if self
             .queues
             .get(&key)
@@ -777,7 +906,7 @@ impl FutexTable {
         });
     }
 
-    fn wake_waiters(&mut self, key: usize, val: u32) -> isize {
+    fn wake_waiters(&mut self, key: QueueKey, val: u32) -> isize {
         let Some(mut queue) = self.queues.remove(&key) else {
             return 0;
         };
@@ -790,8 +919,9 @@ impl FutexTable {
 
     fn requeue_waiters(
         &mut self,
-        source: usize,
-        target: usize,
+        source: QueueKey,
+        target: QueueKey,
+        target_backing: Option<&Arc<FrameTracker>>,
         wake: u32,
         move_count: usize,
     ) -> isize {
@@ -807,7 +937,11 @@ impl FutexTable {
         let Some(mut source_queue) = self.queues.remove(&source) else {
             return wake_count;
         };
-        let mut target_queue = self.queues.remove(&target).unwrap_or_else(FutexQueue::new);
+        let mut target_queue = self
+            .queues
+            .remove(&target)
+            .unwrap_or_else(|| FutexQueue::new(target_backing.cloned()));
+        target_queue.assert_same_backing(target_backing);
         let moved = source_queue.requeue_to(&mut target_queue, target, move_count);
         if !source_queue.is_empty() {
             self.queues.insert(source, source_queue);
@@ -820,7 +954,7 @@ impl FutexTable {
 
     /// 唤醒指定 key 上的最多 `val` 个等待项。
     pub fn wake(&mut self, futex_key: usize, val: u32) -> isize {
-        let woke = self.wake_waiters(futex_key, val);
+        let woke = self.wake_waiters(QueueKey::private(futex_key), val);
         super::perf::record_futex_wake(false, woke);
         woke
     }
@@ -833,6 +967,12 @@ impl FutexTable {
         val: u32,
         val2: usize,
     ) -> isize {
-        self.requeue_waiters(futex_key, futex_key_2, val, val2)
+        self.requeue_waiters(
+            QueueKey::private(futex_key),
+            QueueKey::private(futex_key_2),
+            None,
+            val,
+            val2,
+        )
     }
 }

@@ -447,7 +447,8 @@ sys_mmap()
 | `committed_bytes()` | 提交内存统计 |
 | `has_shared_writable_mapping()` | 检查 inode 是否存在 shared writable mapping |
 | `proc_maps_string()` / smaps | procfs maps/smaps 输出 |
-| `futex_uses_shared_key()` | futex shared key 判定 |
+| `futex_mapping_is_shared()` | 判断地址是否位于真实 shared VMA |
+| `futex_shared_backing()` | 在 VM 锁内校验 VMA/PTE 并克隆稳定 futex backing |
 
 ### 6.3 VMA API
 
