@@ -4,11 +4,13 @@ module: os/src/net/adapter.rs
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: "2026-07-28"
+last_updated: "2026-08-02"
 code_paths:
   - "os/src/net/adapter.rs"
   - "os/src/drivers/net/mod.rs"
   - "os/src/drivers/net/virtio_net.rs"
+  - "os/src/drivers/net/gmac_jh7110.rs"
+  - "os/src/hal/arch/riscv/plic.rs"
   - "os/src/drivers/net/veth.rs"
 entry_points:
   - "IfaceDevice"
@@ -58,9 +60,9 @@ related_docs:
 |  SmoltcpDeviceAdapter   |  Loopback (smoltcp)  |  VethDriver    |
 |  (wraps Arc<dyn NetDevice>)                    |  (wraps Veth)  |
 +------------------------------------------------------------------+
-|       NetDevice trait (receive / transmit / mac_address)        |
+| NetDevice trait (receive / transmit / mac_address / interrupt) |
 +------------------------------------------------------------------+
-|  VirtIONetWrapper  |  NullNetDevice    |  (future drivers)       |
+|  VirtIONetWrapper  | JH7110 GMAC | NullNetDevice | future drivers |
 +------------------------------------------------------------------+
 ```
 
@@ -70,8 +72,9 @@ related_docs:
 |----|------|------|
 | `IfaceDevice` | `os/src/net/adapter.rs` | 顶层枚举，向 smoltcp Interface 暴露统一的 `Device` impl |
 | `SmoltcpDeviceAdapter` | `os/src/net/adapter.rs` | 将 `NetDevice` 包装为 smoltcp `Device`，实现 token 模式的转换 |
-| `NetDevice` trait | `os/src/drivers/net/mod.rs` | 内核驱动的标准接口，简洁的 `receive`/`transmit`/`mac_address` |
+| `NetDevice` trait | `os/src/drivers/net/mod.rs` | 内核驱动的标准接口，提供 `receive`/`transmit`/`mac_address` 和 IRQ 回调 |
 | `VirtIONetWrapper` | `os/src/drivers/net/virtio_net.rs` | virtio-net 设备的具体驱动实现（MMIO 和 PCI 两种传输层） |
+| `GmacJh7110` | `os/src/drivers/net/gmac_jh7110.rs` | VF2 JH7110 GMAC0 驱动；其 DMA RX 中断走 PLIC 回调 |
 | `NullNetDevice` | `os/src/net/adapter.rs` | 无物理网卡时的空设备，`transmit` 静默丢包 |
 | `VethDriver` | `os/src/drivers/net/veth.rs` | 虚拟以太网对的 smoltcp `Device` 实现 |
 
@@ -160,10 +163,13 @@ pub trait NetDevice: Send + Sync {
     fn receive(&self, buf: &mut [u8]) -> Option<usize>;
     fn transmit(&self, buf: &[u8]);
     fn mac_address(&self) -> [u8; 6];
+    fn interrupt(&self) -> Option<(usize, fn())> {
+        None
+    }
 }
 ```
 
-这是内核驱动层的最小接口，远比 smoltcp 的 `Device` trait 简单。三个方法分别对应收包、发包和 MAC 地址查询。
+这是内核驱动层的最小接口，远比 smoltcp 的 `Device` trait 简单。前三个方法分别对应收包、发包和 MAC 地址查询；默认返回 `None` 的 `interrupt()` 让无 IRQ 的设备保持兼容。RV64 设备发布时会把返回的 `(PLIC source ID, callback)` 注册到 PLIC：驱动回调只确认自己的硬件中断并标记网络 RX pending，不能在此回调中调用 smoltcp。
 
 ### `NullNetDevice`
 
@@ -190,6 +196,12 @@ pub struct RoutingDevice {
 ### 数据接收
 
 ```
+
+在 RV64 PLIC 平台上，硬件接收就绪先触发 `NetDevice::interrupt()`；virtio-net 读取并
+确认 MMIO ISR 状态，JH7110 GMAC 确认 DMA RX 状态，两者随后只调用
+`notify_rx_interrupt()`。调度器消费 pending 位后，才按上图进入
+`SmoltcpDeviceAdapter::receive()`。这样 `receive()` 继续是任务上下文的数据拉取接口，
+而 IRQ 只是无锁、可合并的唤醒通知。
 IfaceDevice::receive(timestamp)
   -> match device variant:
        Lo  -> Loopback::receive(timestamp) -> (LoRxToken, LoTxToken)
@@ -243,6 +255,7 @@ trait Device {
 |------|---------|-------------------|------|
 | 环回设备 (Lo) | smoltcp Loopback 内部 | 隐式覆盖于全部 socket 测试 | stable |
 | virtio-net 收发 (Eth) | VirtIONetWrapper 的 receive/transmit | iperf, netperf, socket01 | stable |
+| RV64 接收 IRQ | PLIC → `NetDevice::interrupt()` → pending → scheduler poll | RV64 编译 + regression 启动 | not_run（regression 无 NIC） |
 | veth 对收发 | VethDriver/Veth 的内存队列 | ip link add veth 系统测试 | stable |
 | NullNetDevice 空设备 | 无网卡时的启动路径 | 手动验证 | stable |
 | RoutingDevice | 多设备软件路由（已弃用） | 历史测试，逐步移除 | deprecated |

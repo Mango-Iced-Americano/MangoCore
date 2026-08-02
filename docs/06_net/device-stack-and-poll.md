@@ -4,9 +4,11 @@ module: "config.rs"
 category: net
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-15"
+last_updated: "2026-08-02"
 code_paths:
   - "os/src/net/config.rs"
+  - "os/src/task/processor.rs"
+  - "os/src/drivers/net/mod.rs"
   - "os/src/net/socket/inet/stream/mod.rs"
   - "os/src/net/socket/inet/stream/inner.rs"
 entry_points:
@@ -45,7 +47,7 @@ related_docs:
 整个模块围绕三个设计目标展开：
 
 - **每设备独立协议栈**：每个网络设备（lo、eth0、veth）拥有独立的 smoltcp `Interface` 和 `SocketSet`，互不干扰。
-- **单核友好轮询**：在单核环境下通过定时器中断和系统调用路径驱动协议栈，使用 `try_lock` 防止重入死锁。
+- **单核友好轮询**：RV64 网卡 IRQ 只通知任务上下文轮询；定时器和系统调用路径保留轮询 fallback，使用 `try_lock` 防止重入死锁。
 - **双层 socket 句柄**：`RouteSocketHandle` 将用户态 socket 与底层 smoltcp `SocketHandle` 解耦，支持跨设备栈迁移。
 
 ---
@@ -159,12 +161,33 @@ pub fn try_poll(&self) -> bool {
 
 **`try_poll()` 使用 `try_lock()` 而非 `lock()`，这是防止死锁的关键设计。**
 
-在单核环境下，场景如下：一个 syscall 处理函数（如 `sys_sendto`）持有 `NET_INTERFACE.inner` 锁并调用 `poll_once()`。如果在 `poll_once()` 执行期间触发了定时器中断，中断处理函数若调用 `poll()` 会尝试获取同一把锁，导致死锁。
+在单核环境下，场景如下：一个 syscall 处理函数（如 `sys_sendto`）持有 `NET_INTERFACE.inner` 锁并调用 `poll_once()`。如果在 `poll_once()` 执行期间触发中断，而中断处理函数调用 `poll()`，它会尝试获取同一把锁并导致死锁。
 
-`try_poll()` 在锁已被持有时不等待不重试，直接返回 `false`，用于普通任务
-上下文。定时器中断使用 `try_poll_irq()`：它可以推进 smoltcp，但只把 DHCP
-事件保存在 DeviceStack，下一次任务上下文轮询才提交设备地址、路由和 DNS，
-避免中断代码自旋等待 device_list/router 锁。
+`try_poll()` 在锁已被持有时不等待不重试，直接返回 `false`，用于普通任务上下文。
+中断上下文不再调用 smoltcp：RV64 PLIC 回调只设定接收 pending 位，调度器在任务
+上下文取走该位后调用常规 `poll()`。这既避免重入 `NET_INTERFACE`，也避免中断路径
+触及 DHCP、device_list 或 router 锁。
+
+### RV64 接收中断唤醒
+
+RV64 物理网卡的接收路径在“中断通知”和“协议栈推进”之间明确分层：
+
+```
+virtio-net / JH7110 GMAC DMA RX interrupt
+  -> PLIC claim -> 驱动 NetDevice::interrupt()
+  -> 硬件状态 acknowledge + notify_rx_interrupt()
+  -> NET_RX_INTERRUPT_PENDING
+  -> task::processor 取走 pending 位
+  -> NET_INTERFACE.poll() -> smoltcp Interface::poll()
+```
+
+PLIC ISR 只完成 claim/complete、驱动级 acknowledge 和原子 pending 通知；它不获取
+`NET_INTERFACE` 锁、不运行 smoltcp、也不唤醒或调度任务。`processor` 消费 pending 后
+才在正常任务上下文执行 `NET_INTERFACE.poll()`。该标记是合并通知而非每包计数：多个
+IRQ 可以合并为一次 poll，随后由 smoltcp/驱动 drain 已就绪 RX 队列。
+
+周期性轮询仍保留，作为丢失通知、非 PLIC 平台和 LA64 路径的 fallback；因此这项改动
+缩短 RX 唤醒延迟，但不把协议栈正确性依赖于某一次外部中断。
 
 ### `try_poll_stack()` — 单栈非阻塞轮询
 
@@ -374,6 +397,7 @@ pub fn route_check(dest: IpAddress) -> Result<(), SyscallErr>
 | 特性 | 测试覆盖 | 状态 |
 |------|----------|------|
 | `poll()` 定时器驱动 | 集成测试（QEMU 运行基础网络） | pass |
+| RV64 virtio-net IRQ 通知 | PLIC ISR → pending 位 → 任务上下文 poll | RV64 编译 + regression 启动 | not_run（regression 无 NIC） |
 | `try_poll()` 非阻塞路径 | 隐式覆盖（syscall 路径调用） | pass |
 | `add_routed_socket` / `remove_routed` | TCP/UDP socket 生命周期测试 | pass |
 | `rebind_routed_udp` | UDP 跨接口迁移 | not_run |
