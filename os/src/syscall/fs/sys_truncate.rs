@@ -51,10 +51,7 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
         return EISDIR;
     }
     // Check RLIMIT_FSIZE
-    let fsize_limit = {
-        let inner = task.acquire_inner_lock();
-        inner.fsize_limit_cur
-    };
+    let fsize_limit = task.process.fsize_limit();
     if (length as usize) > fsize_limit {
         return EFBIG;
     }

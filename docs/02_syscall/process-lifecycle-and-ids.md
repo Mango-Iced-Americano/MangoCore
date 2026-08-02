@@ -454,8 +454,16 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 B72 固定了 `prlimit` 的事务顺序：先把完整新值从用户态复制到内核，再在当前资源 owner 锁内
 一次完成旧 pair 快照、hard-limit 权限复核和新 pair 提交，释放锁后才向用户写回旧值。因此
 `new_limit == old_limit` 的别名用法仍返回提交前状态，旧值写回 `EFAULT` 也不会回滚已经发布的
-新限制。当前 NOFILE 仍由 fd table 持有，其他已实现限制仍由 TCB 持有；这两个 owner 只是迁移
-前的事实边界，尚不能外推为完整的线程组共享 rlimit 语义。
+新限制。
+
+B73 将 FSIZE、STACK、CORE、NPROC、MEMLOCK、SIGPENDING、NICE 和 RTPRIO 迁入 PCB 的
+`ProcessLimits`。同一线程组直接共享 PCB；普通 fork 在父 owner 锁内复制完整限制集合并给子
+进程建立独立 owner；exec 复用 PCB，因此保留限制。文件、VM、signal 和 scheduler 消费者都
+只在 rlimit 锁内复制一个 soft limit，释放后才进入各自子系统。
+
+CPU 仍保留在 TCB，等待线程组 CPU 时间核算一并迁移；NOFILE 仍由 fd table 持有，等待与
+`CLONE_FILES` 的跨进程生命周期分离。因而 B73 已完成普通限制的线程组共享，但不宣称这两项
+例外已经具备完整 Linux 语义。
 
 ### 8.4 scheduler ABI
 

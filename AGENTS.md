@@ -258,6 +258,9 @@ B72 进一步规定 `prlimit` 的事务边界：先 copyin 完整新值，再在
 soft/hard pair 快照、hard-limit 权限复核和新 pair 提交，释放锁后才 copyout 旧值；reply
 `EFAULT` 不回滚。NOFILE 的两个字段必须在同一次 fd-table 临界区更新。当前 TCB/FdTable
 owner 只是迁移中状态，不得据此声称线程组 rlimit 语义已经完成。
+B73 将普通 rlimit 的唯一 owner 迁入 PCB：线程 clone 共享，fork 在 owner 锁内复制完整快照，
+exec 保留；消费者必须先复制标量并释放 rlimit 锁，再进入 task、VM、signal 或 FS 路径。CPU
+和 NOFILE 分别等待组级计时与 `CLONE_FILES` 生命周期解耦，不得把这两个例外伪装成已完成。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

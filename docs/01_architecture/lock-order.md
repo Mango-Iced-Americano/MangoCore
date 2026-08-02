@@ -862,6 +862,27 @@ NOFILE 当前由 fd table 持有，两个 setter 必须位于同一次 `files.lo
 CPU accounting，以及 `CLONE_FILES` 跨进程共享时 NOFILE 与 fd table 生命周期的分离仍须后续
 节点处理。
 
+### 3.18 B73 进程级 rlimit owner
+
+除 CPU 和 NOFILE 外，已实现的 rlimit 统一由 `ProcessControlBlock::rlimits` 持有。这样
+`CLONE_THREAD` 自然共享同一个 owner，普通 fork 在父进程 rlimit 锁内复制完整快照后创建独立
+owner，exec 因复用 PCB 而保留限制：
+
+```text
+thread clone -> clone PCB Arc -> share rlimits
+fork        -> rlimits lock -> copy ProcessLimits -> unlock -> construct child PCB
+exec        -> reuse PCB -> preserve rlimits
+consumer    -> rlimits lock -> copy one soft limit -> unlock -> task / VM / FS lock
+```
+
+`prlimit()` 仍在一次 owner 临界区内完成旧 pair 快照、权限复核与新 pair 提交；普通消费者只
+复制所需标量，不能把 rlimit guard 带进 `task.inner`、VM、signal queue 或文件操作。因此本批
+没有新增嵌套锁边，只改变共享对象的归属。
+
+CPU 暂时仍由 TCB 持有，因为将字段移入 PCB 而不同时实现线程组运行时间累加，会制造错误的
+组限额语义；NOFILE 暂时仍由 fd table 持有，因为它必须先与 `CLONE_FILES` 的跨进程共享生命
+周期解耦。这两个例外必须在独立节点中处理，不能把 B73 外推成全部 rlimit 已完成。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

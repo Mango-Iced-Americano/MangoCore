@@ -498,12 +498,13 @@ pub fn sys_mlock(addr: usize, len: usize) -> isize {
         let inner = task.acquire_inner_lock();
         inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
     };
+    // rlimit 是进程 owner；先快照再进入 VM 写侧，禁止把普通锁跨过 MM 操作。
+    let memlock_limit = task.process.memlock_limit();
     let locked_len = match task.process.vm().write(|vm| vm.mlock(addr, len)) {
         Ok(locked_len) => locked_len,
         Err(errno) => return errno,
     };
     if !privileged {
-        let memlock_limit = task.acquire_inner_lock().memlock_limit_cur;
         if memlock_limit == 0 {
             return EPERM;
         }
@@ -524,13 +525,11 @@ pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
     }
 
     let task = current_task().unwrap();
-    let (privileged, memlock_limit) = {
+    let privileged = {
         let inner = task.acquire_inner_lock();
-        (
-            inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0,
-            inner.memlock_limit_cur,
-        )
+        inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
     };
+    let memlock_limit = task.process.memlock_limit();
     let locked_len = match task
         .process
         .vm()
@@ -566,13 +565,11 @@ pub fn sys_mlockall(flags: usize) -> isize {
         return EINVAL;
     }
     let task = current_task().unwrap();
-    let (privileged, memlock_limit) = {
+    let privileged = {
         let inner = task.acquire_inner_lock();
-        (
-            inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0,
-            inner.memlock_limit_cur,
-        )
+        inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
     };
+    let memlock_limit = task.process.memlock_limit();
     if !privileged && flags & MCL_CURRENT != 0 {
         if memlock_limit == 0 {
             return EPERM;

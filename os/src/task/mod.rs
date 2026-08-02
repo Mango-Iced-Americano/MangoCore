@@ -69,6 +69,7 @@ pub use process::{
     is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
     unregister_writable_inode, ProcessControlBlock, ProcessState,
 };
+pub(crate) use process::{LimitPair, ProcessLimits};
 pub(crate) use process_manager::CloneScheduleOutcome;
 pub use process_manager::ProcessManager;
 pub use processor::{
@@ -404,6 +405,7 @@ fn new_ktest_process(
         Arc::new(spin::Mutex::new(Sighand::new())),
         Arc::new(spin::Mutex::new(threads::FutexTable::new())),
         Arc::new(spin::Mutex::new(pid::RecycleAllocator::new())),
+        ProcessLimits::default(),
     ))
 }
 

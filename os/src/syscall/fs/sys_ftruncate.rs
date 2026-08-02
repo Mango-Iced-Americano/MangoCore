@@ -30,10 +30,7 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         file.inode.clone()
     };
     // RLIMIT_FSIZE check
-    let fsize_limit = {
-        let inner = task.acquire_inner_lock();
-        inner.fsize_limit_cur
-    };
+    let fsize_limit = task.process.fsize_limit();
     if (length as usize) > fsize_limit {
         return EFBIG;
     }

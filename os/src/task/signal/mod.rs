@@ -469,8 +469,10 @@ fn signal_default_dumps_core(signum: u32) -> bool {
 fn current_core_dump_enabled() -> bool {
     current_task()
         .map(|task| {
+            // 两个 owner 分别快照，rlimit 锁不跨入线程私有 dumpable 状态。
+            let core_limit = task.process.core_limit();
             let inner = task.acquire_inner_lock();
-            inner.core_limit_cur > 0 && inner.dumpable != 0
+            core_limit > 0 && inner.dumpable != 0
         })
         .unwrap_or(false)
 }

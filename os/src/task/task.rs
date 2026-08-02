@@ -1,7 +1,7 @@
 //! 线程控制块与 clone/exec 资源管理。
 //!
 //! `TaskControlBlock` 是调度实体，保存内核栈、trap context 槽位、线程私有信号、
-//! rlimit/身份/调度兼容状态等；`ProcessControlBlock` 保存线程组共享资源。
+//! 身份/调度兼容状态等；`ProcessControlBlock` 保存 rlimit 和其他线程组共享资源。
 //!
 //! # Locking
 //!
@@ -11,7 +11,7 @@
 
 use super::perf;
 use super::pid::RecycleAllocator;
-use super::process::ProcessControlBlock;
+use super::process::{ProcessControlBlock, ProcessLimits};
 use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
@@ -21,7 +21,7 @@ use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, IpcNamespace, MountNamespace,
     NetNamespace, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE,
 };
-use crate::config::{MMAP_BASE, PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
+use crate::config::{MMAP_BASE, PAGE_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
 use crate::hal::TrapImpl;
@@ -300,34 +300,10 @@ pub struct TaskControlBlockInner {
     /// ABI-visible only; it does not affect actual I/O scheduling.
     pub ioprio_class: usize,
     pub ioprio_prio: usize,
-    /// RLIMIT_RTPRIO 兼容字段，供非 root 实时调度权限检查使用。
-    pub rtprio_limit_cur: usize,
-    pub rtprio_limit_max: usize,
-    /// RLIMIT_NICE 兼容字段，供 LTP 权限类用例回读。
-    pub nice_limit_cur: usize,
-    pub nice_limit_max: usize,
-    /// RLIMIT_SIGPENDING 兼容字段，用于实时信号 pending 队列限额语义。
-    pub sigpending_limit_cur: usize,
-    pub sigpending_limit_max: usize,
-    /// RLIMIT_STACK 兼容字段。当前用户栈仍按固定槽位映射，这里只保存 ABI 可见限制。
-    pub stack_limit_cur: usize,
-    pub stack_limit_max: usize,
-    /// RLIMIT_MEMLOCK 兼容字段，供 mlock/mlockall 权限和限额类用例使用。
-    pub memlock_limit_cur: usize,
-    pub memlock_limit_max: usize,
-    /// RLIMIT_FSIZE 兼容字段，用于限制普通文件写入长度。
-    pub fsize_limit_cur: usize,
-    pub fsize_limit_max: usize,
-    /// RLIMIT_NPROC 兼容字段，当前仅保存 ABI 可见状态。
-    pub nproc_limit_cur: usize,
-    pub nproc_limit_max: usize,
     /// RLIMIT_CPU 兼容字段。单位为秒，usize::MAX 表示 unlimited。
     pub cpu_limit_cur: usize,
     pub cpu_limit_max: usize,
     pub cpu_limit_sigxcpu_sent: bool,
-    /// RLIMIT_CORE 兼容字段。MangoCore 不生成 core 文件，但 wait status 需要按该值暴露 WCOREDUMP。
-    pub core_limit_cur: usize,
-    pub core_limit_max: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
@@ -1342,6 +1318,7 @@ impl TaskControlBlock {
             Arc::new(Mutex::new(Sighand::new())),
             Arc::new(Mutex::new(FutexTable::new())),
             user_res_slot_allocator,
+            ProcessLimits::default(),
         ));
         init_task_trace!("09 process control block created");
 
@@ -1394,25 +1371,9 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
-                rtprio_limit_cur: 0,
-                rtprio_limit_max: 0,
-                nice_limit_cur: usize::MAX,
-                nice_limit_max: usize::MAX,
-                sigpending_limit_cur: usize::MAX,
-                sigpending_limit_max: usize::MAX,
-                stack_limit_cur: USER_STACK_SIZE,
-                stack_limit_max: USER_STACK_SIZE,
-                memlock_limit_cur: usize::MAX,
-                memlock_limit_max: usize::MAX,
-                fsize_limit_cur: usize::MAX,
-                fsize_limit_max: usize::MAX,
-                nproc_limit_cur: SYSTEM_TASK_LIMIT,
-                nproc_limit_max: SYSTEM_TASK_LIMIT,
                 cpu_limit_cur: usize::MAX,
                 cpu_limit_max: usize::MAX,
                 cpu_limit_sigxcpu_sent: false,
-                core_limit_cur: 0,
-                core_limit_max: usize::MAX,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1540,25 +1501,9 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
-                rtprio_limit_cur: 0,
-                rtprio_limit_max: 0,
-                nice_limit_cur: usize::MAX,
-                nice_limit_max: usize::MAX,
-                sigpending_limit_cur: usize::MAX,
-                sigpending_limit_max: usize::MAX,
-                stack_limit_cur: USER_STACK_SIZE,
-                stack_limit_max: USER_STACK_SIZE,
-                memlock_limit_cur: usize::MAX,
-                memlock_limit_max: usize::MAX,
-                fsize_limit_cur: usize::MAX,
-                fsize_limit_max: usize::MAX,
-                nproc_limit_cur: SYSTEM_TASK_LIMIT,
-                nproc_limit_max: SYSTEM_TASK_LIMIT,
                 cpu_limit_cur: usize::MAX,
                 cpu_limit_max: usize::MAX,
                 cpu_limit_sigxcpu_sent: false,
-                core_limit_cur: 0,
-                core_limit_max: usize::MAX,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1946,6 +1891,9 @@ impl TaskControlBlock {
         let (process, thread_quota) = if flags.contains(CloneFlags::CLONE_THREAD) {
             (self.process.clone(), Some(quota))
         } else {
+            // 新进程继承父线程组的一致 rlimit 快照。锁在复制后立即释放，
+            // 后续 files/fs/sighand 构造不会与 rlimit owner 形成嵌套。
+            let child_rlimits = self.process.rlimits_snapshot();
             let parent_process = if flags.contains(CloneFlags::CLONE_PARENT) {
                 self.process.parent()
             } else {
@@ -2019,6 +1967,7 @@ impl TaskControlBlock {
                     sighand,
                     futex,
                     user_res_slot_allocator.clone(),
+                    child_rlimits,
                 )),
                 None,
             )
@@ -2144,25 +2093,9 @@ impl TaskControlBlock {
                 sched_period: child_sched_period,
                 ioprio_class: parent_inner.ioprio_class,
                 ioprio_prio: parent_inner.ioprio_prio,
-                rtprio_limit_cur: parent_inner.rtprio_limit_cur,
-                rtprio_limit_max: parent_inner.rtprio_limit_max,
-                nice_limit_cur: parent_inner.nice_limit_cur,
-                nice_limit_max: parent_inner.nice_limit_max,
-                sigpending_limit_cur: parent_inner.sigpending_limit_cur,
-                sigpending_limit_max: parent_inner.sigpending_limit_max,
-                stack_limit_cur: parent_inner.stack_limit_cur,
-                stack_limit_max: parent_inner.stack_limit_max,
-                memlock_limit_cur: parent_inner.memlock_limit_cur,
-                memlock_limit_max: parent_inner.memlock_limit_max,
-                fsize_limit_cur: parent_inner.fsize_limit_cur,
-                fsize_limit_max: parent_inner.fsize_limit_max,
-                nproc_limit_cur: parent_inner.nproc_limit_cur,
-                nproc_limit_max: parent_inner.nproc_limit_max,
                 cpu_limit_cur: parent_inner.cpu_limit_cur,
                 cpu_limit_max: parent_inner.cpu_limit_max,
                 cpu_limit_sigxcpu_sent: false,
-                core_limit_cur: parent_inner.core_limit_cur,
-                core_limit_max: parent_inner.core_limit_max,
                 personality: parent_inner.personality,
                 pdeath_signal: 0,
                 dumpable: parent_inner.dumpable,

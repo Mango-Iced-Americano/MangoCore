@@ -9,7 +9,7 @@ use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
     current_sgid, current_sid, current_suid, current_task, current_tid,
-    current_uid, current_user_token, suspend_current_and_run_next, update_ready_nice,
+    current_uid, current_user_token, suspend_current_and_run_next, update_ready_nice, LimitPair,
     ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
@@ -1766,6 +1766,15 @@ pub struct RLimit {
     rlim_max: usize, /* Hard limit (ceiling for rlim_cur) */
 }
 
+impl From<LimitPair> for RLimit {
+    fn from(limit: LimitPair) -> Self {
+        Self {
+            rlim_cur: limit.soft,
+            rlim_max: limit.hard,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive)]
 #[repr(u32)]
 pub enum Resource {
@@ -1804,75 +1813,41 @@ fn current_rlimit_for(task: &TaskControlBlock, resource: Resource) -> Option<RLi
                 rlim_max: inner.cpu_limit_max,
             }
         }
+        Resource::NOFILE => {
+            let files_ref = task.process.files();
+            let files = files_ref.lock();
+            RLimit {
+                rlim_cur: files.get_soft_limit(),
+                rlim_max: files.get_hard_limit(),
+            }
+        }
         Resource::DATA
         | Resource::RSS
         | Resource::AS
         | Resource::LOCKS
         | Resource::MSGQUEUE
         | Resource::RTTIME => unlimited,
-        Resource::FSIZE => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.fsize_limit_cur,
-                rlim_max: inner.fsize_limit_max,
-            }
-        }
-        Resource::SIGPENDING => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.sigpending_limit_cur,
-                rlim_max: inner.sigpending_limit_max,
-            }
-        }
-        Resource::NICE => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.nice_limit_cur,
-                rlim_max: inner.nice_limit_max,
-            }
-        }
-        Resource::RTPRIO => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.rtprio_limit_cur,
-                rlim_max: inner.rtprio_limit_max,
-            }
-        }
-        Resource::CORE => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.core_limit_cur,
-                rlim_max: inner.core_limit_max,
-            }
-        }
-        Resource::STACK => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.stack_limit_cur,
-                rlim_max: inner.stack_limit_max,
-            }
-        }
-        Resource::MEMLOCK => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.memlock_limit_cur,
-                rlim_max: inner.memlock_limit_max,
-            }
-        }
-        Resource::NPROC => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.nproc_limit_cur,
-                rlim_max: inner.nproc_limit_max,
-            }
-        }
-        Resource::NOFILE => {
-            let files_ref = task.process.files();
-            let lock = files_ref.lock();
-            RLimit {
-                rlim_cur: lock.get_soft_limit(),
-                rlim_max: lock.get_hard_limit(),
-            }
+        Resource::FSIZE
+        | Resource::STACK
+        | Resource::CORE
+        | Resource::NPROC
+        | Resource::MEMLOCK
+        | Resource::SIGPENDING
+        | Resource::NICE
+        | Resource::RTPRIO => {
+            let limits = task.process.rlimits();
+            let pair = match resource {
+                Resource::FSIZE => limits.fsize,
+                Resource::STACK => limits.stack,
+                Resource::CORE => limits.core,
+                Resource::NPROC => limits.nproc,
+                Resource::MEMLOCK => limits.memlock,
+                Resource::SIGPENDING => limits.sigpending,
+                Resource::NICE => limits.nice,
+                Resource::RTPRIO => limits.rtprio,
+                _ => unreachable!(),
+            };
+            pair.into()
         }
         Resource::NLIMITS | Resource::ILLEAGAL => return None,
     };
@@ -1898,9 +1873,8 @@ enum RLimitNotice {
 
 /// 在资源的当前 owner 锁内完成旧值快照、权限复核和新值提交。
 ///
-/// 这里暂时保留既有 owner：NOFILE 属于 fd table，其余已实现限制仍属于 TCB。
-/// 后续把全部 rlimit 迁移到进程级对象时，只需替换本函数的 owner，不得退回
-/// “读旧值和写新值分成两个锁周期”的形式。
+/// 普通限制属于 PCB；CPU 和 NOFILE 仍是明确的迁移例外。三个 owner 互不嵌套，
+/// 且任何路径都不得退回“读旧值和写新值分成两个锁周期”的形式。
 fn update_rlimit(
     task: &TaskControlBlock,
     resource: Resource,
@@ -1926,114 +1900,71 @@ fn update_rlimit(
         });
     }
 
-    let unlimited = RLimit {
-        rlim_cur: usize::MAX,
-        rlim_max: usize::MAX,
-    };
-    let mut inner = task.acquire_inner_lock();
-    let previous = match resource {
-        Resource::CPU => RLimit {
+    if resource == Resource::CPU {
+        let mut inner = task.acquire_inner_lock();
+        let previous = RLimit {
             rlim_cur: inner.cpu_limit_cur,
             rlim_max: inner.cpu_limit_max,
-        },
-        Resource::FSIZE => RLimit {
-            rlim_cur: inner.fsize_limit_cur,
-            rlim_max: inner.fsize_limit_max,
-        },
-        Resource::STACK => RLimit {
-            rlim_cur: inner.stack_limit_cur,
-            rlim_max: inner.stack_limit_max,
-        },
-        Resource::CORE => RLimit {
-            rlim_cur: inner.core_limit_cur,
-            rlim_max: inner.core_limit_max,
-        },
-        Resource::NPROC => RLimit {
-            rlim_cur: inner.nproc_limit_cur,
-            rlim_max: inner.nproc_limit_max,
-        },
-        Resource::MEMLOCK => RLimit {
-            rlim_cur: inner.memlock_limit_cur,
-            rlim_max: inner.memlock_limit_max,
-        },
-        Resource::SIGPENDING => RLimit {
-            rlim_cur: inner.sigpending_limit_cur,
-            rlim_max: inner.sigpending_limit_max,
-        },
-        Resource::NICE => RLimit {
-            rlim_cur: inner.nice_limit_cur,
-            rlim_max: inner.nice_limit_max,
-        },
-        Resource::RTPRIO => RLimit {
-            rlim_cur: inner.rtprio_limit_cur,
-            rlim_max: inner.rtprio_limit_max,
-        },
+        };
+        if requested.rlim_max > previous.rlim_max && !can_raise_hard_limit {
+            return Err(EPERM);
+        }
+        inner.cpu_limit_cur = requested.rlim_cur;
+        inner.cpu_limit_max = requested.rlim_max;
+        inner.cpu_limit_sigxcpu_sent = false;
+        return Ok(RLimitUpdate {
+            previous,
+            notice: RLimitNotice::None,
+        });
+    }
+
+    if matches!(
+        resource,
         Resource::DATA
-        | Resource::RSS
-        | Resource::AS
-        | Resource::LOCKS
-        | Resource::MSGQUEUE
-        | Resource::RTTIME => unlimited,
-        Resource::NOFILE | Resource::NLIMITS | Resource::ILLEAGAL => return Err(EINVAL),
+            | Resource::RSS
+            | Resource::AS
+            | Resource::LOCKS
+            | Resource::MSGQUEUE
+            | Resource::RTTIME
+    ) {
+        return Ok(RLimitUpdate {
+            previous: RLimit {
+                rlim_cur: usize::MAX,
+                rlim_max: usize::MAX,
+            },
+            notice: RLimitNotice::Ignored,
+        });
+    }
+    if matches!(
+        resource,
+        Resource::NOFILE | Resource::NLIMITS | Resource::ILLEAGAL
+    ) {
+        // NOFILE 已在函数入口提交；非法资源通常由 syscall 层过滤。这里保留
+        // fail-closed 边界，避免未来新增内部调用者落入下方 unreachable 分支。
+        return Err(EINVAL);
+    }
+
+    let mut limits = task.process.rlimits();
+    let slot = match resource {
+        Resource::FSIZE => &mut limits.fsize,
+        Resource::STACK => &mut limits.stack,
+        Resource::CORE => &mut limits.core,
+        Resource::NPROC => &mut limits.nproc,
+        Resource::MEMLOCK => &mut limits.memlock,
+        Resource::SIGPENDING => &mut limits.sigpending,
+        Resource::NICE => &mut limits.nice,
+        Resource::RTPRIO => &mut limits.rtprio,
+        _ => unreachable!(),
     };
+    let previous = RLimit::from(*slot);
     if requested.rlim_max > previous.rlim_max && !can_raise_hard_limit {
         return Err(EPERM);
     }
-
-    let notice = match resource {
-        Resource::CPU => {
-            inner.cpu_limit_cur = requested.rlim_cur;
-            inner.cpu_limit_max = requested.rlim_max;
-            inner.cpu_limit_sigxcpu_sent = false;
-            RLimitNotice::None
-        }
-        Resource::FSIZE => {
-            inner.fsize_limit_cur = requested.rlim_cur;
-            inner.fsize_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::STACK => {
-            inner.stack_limit_cur = requested.rlim_cur;
-            inner.stack_limit_max = requested.rlim_max;
-            RLimitNotice::StoredOnly
-        }
-        Resource::CORE => {
-            inner.core_limit_cur = requested.rlim_cur;
-            inner.core_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::NPROC => {
-            inner.nproc_limit_cur = requested.rlim_cur;
-            inner.nproc_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::MEMLOCK => {
-            inner.memlock_limit_cur = requested.rlim_cur;
-            inner.memlock_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::SIGPENDING => {
-            inner.sigpending_limit_cur = requested.rlim_cur;
-            inner.sigpending_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::NICE => {
-            inner.nice_limit_cur = requested.rlim_cur;
-            inner.nice_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::RTPRIO => {
-            inner.rtprio_limit_cur = requested.rlim_cur;
-            inner.rtprio_limit_max = requested.rlim_max;
-            RLimitNotice::None
-        }
-        Resource::DATA
-        | Resource::RSS
-        | Resource::AS
-        | Resource::LOCKS
-        | Resource::MSGQUEUE
-        | Resource::RTTIME => RLimitNotice::Ignored,
-        Resource::NOFILE | Resource::NLIMITS | Resource::ILLEAGAL => unreachable!(),
+    *slot = LimitPair::new(requested.rlim_cur, requested.rlim_max);
+    let notice = if resource == Resource::STACK {
+        RLimitNotice::StoredOnly
+    } else {
+        RLimitNotice::None
     };
     Ok(RLimitUpdate { previous, notice })
 }
@@ -2332,7 +2263,7 @@ const SCHED_FLAG_RESET_ON_FORK: u64 = 0x01;
 struct SchedAccess {
     euid: u32,
     has_sys_nice: bool,
-    rtprio_limit_cur: usize,
+    rtprio_limit: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -2438,11 +2369,13 @@ fn valid_sched_priority(policy: usize, priority: i32) -> bool {
 
 fn current_sched_access() -> SchedAccess {
     let task = current_task().unwrap();
+    // RLIMIT_RTPRIO 属于 PCB；先快照再读取线程 credentials，不形成锁嵌套。
+    let rtprio_limit = task.process.rtprio_limit();
     let inner = task.acquire_inner_lock();
     SchedAccess {
         euid: inner.euid,
         has_sys_nice: inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_NICE)) != 0,
-        rtprio_limit_cur: inner.rtprio_limit_cur,
+        rtprio_limit,
     }
 }
 
@@ -2470,11 +2403,11 @@ fn can_apply_sched_change(
     }
 
     if matches!(new_base_policy, SCHED_FIFO | SCHED_RR) {
-        if new_base_policy != old_policy && access.rtprio_limit_cur == 0 {
+        if new_base_policy != old_policy && access.rtprio_limit == 0 {
             return false;
         }
         if new_priority > old_priority
-            && (new_priority < 0 || new_priority as usize > access.rtprio_limit_cur)
+            && (new_priority < 0 || new_priority as usize > access.rtprio_limit)
         {
             return false;
         }

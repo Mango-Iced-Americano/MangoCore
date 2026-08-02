@@ -951,9 +951,13 @@
   擅自回滚，也不要因 copyout 失败重锁覆盖并发更新。
 - **查询不能污染权威状态**: remaining/deadline 等派生值应在栈上快照中计算。若只为回复
   用户而改写 owner 内保存值，后续刷新路径可能再次应用同一时间差。
+- **先证明共享域，再选择 owner**: 进程属性不能因为调用入口拿到的是 TCB 就放在线程私有锁里。
+  对 rlimit 这类线程组状态，应明确验证 thread clone 共享、fork 得到锁内一致快照、exec 保留；
+  消费路径只复制所需标量并释放 owner 锁，再进入 task、VM、signal 或 FS 的下一层锁。若某项
+  限制还依赖尚未实现的组级计数或特殊共享对象，应明确保留为例外，而不是只迁字段伪造语义。
 - **相关文件**: `os/src/syscall/process/lifecycle.rs`,
   `os/src/syscall/process/time.rs`, `os/src/syscall/process/ids.rs`,
-  `docs/01_architecture/lock-order.md`
+  `os/src/task/process.rs`, `docs/01_architecture/lock-order.md`
 
 ## WaitQueue 条件只领取内核状态，faultable 回复延后
 

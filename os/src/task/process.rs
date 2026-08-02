@@ -7,9 +7,9 @@
 //! # Locking
 //!
 //! `ProcessControlBlock::inner` 保护进程结构性状态，`signal` 单独保护进程共享
-//! pending signal，`thread_group` 则把线程成员关系与 group-exit 发布门禁放在
-//! 同一锁域。涉及调度队列、父子关系和资源析构时，遵循“锁内移动 Arc/记录状态，
-//! 锁外执行唤醒或析构”的顺序。
+//! pending signal，`rlimits` 保护完整的资源限制 pair，`thread_group` 则把线程
+//! 成员关系与 group-exit 发布门禁放在同一锁域。涉及调度队列、父子关系和资源
+//! 析构时，遵循“锁内移动 Arc/记录状态，锁外执行唤醒或析构”的顺序。
 
 use super::{
     pid::{RecycleAllocator, TidHandle},
@@ -20,6 +20,7 @@ use super::{
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
     TaskControlBlock, UtsNamespace, WaitQueue, WaitResult, INITPROC,
 };
+use crate::config::{SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
 use crate::signal_type;
@@ -44,6 +45,62 @@ pub enum ProcessState {
     Zombie,
 }
 
+/// 一项资源限制的软、硬上限。
+///
+/// 两个字段始终由 `ProcessControlBlock::rlimits` 的同一个锁保护，调用方不得
+/// 拆成两个临界区读取或发布。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LimitPair {
+    pub(crate) soft: usize,
+    pub(crate) hard: usize,
+}
+
+impl LimitPair {
+    pub(crate) const fn new(soft: usize, hard: usize) -> Self {
+        Self { soft, hard }
+    }
+}
+
+/// 线程组共享的资源限制。
+///
+/// Linux 把 rlimit 放在线程组共享状态中；MangoCore 对应放在 PCB，使同一
+/// 进程的所有 TCB 观察同一个 owner。CPU 和 NOFILE 暂不在本结构内：前者
+/// 仍依赖 per-thread accounting，后者仍与 fd table 耦合，分别留给后续节点。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProcessLimits {
+    /// 普通文件可增长到的最大字节数。
+    pub(crate) fsize: LimitPair,
+    /// 用户栈限制；当前只保存 ABI 状态。
+    pub(crate) stack: LimitPair,
+    /// core dump 限制；当前用于 wait status 的 WCOREDUMP 位。
+    pub(crate) core: LimitPair,
+    /// 进程数限制；当前只保存 ABI 状态。
+    pub(crate) nproc: LimitPair,
+    /// 可锁定内存字节数。
+    pub(crate) memlock: LimitPair,
+    /// 实时 pending signal 数量上限。
+    pub(crate) sigpending: LimitPair,
+    /// 非特权 nice 调整上限；当前只保存 ABI 状态。
+    pub(crate) nice: LimitPair,
+    /// 非特权实时调度优先级上限。
+    pub(crate) rtprio: LimitPair,
+}
+
+impl Default for ProcessLimits {
+    fn default() -> Self {
+        Self {
+            fsize: LimitPair::new(usize::MAX, usize::MAX),
+            stack: LimitPair::new(USER_STACK_SIZE, USER_STACK_SIZE),
+            core: LimitPair::new(0, usize::MAX),
+            nproc: LimitPair::new(SYSTEM_TASK_LIMIT, SYSTEM_TASK_LIMIT),
+            memlock: LimitPair::new(usize::MAX, usize::MAX),
+            sigpending: LimitPair::new(usize::MAX, usize::MAX),
+            nice: LimitPair::new(usize::MAX, usize::MAX),
+            rtprio: LimitPair::new(0, 0),
+        }
+    }
+}
+
 /// 进程控制块。
 pub struct ProcessControlBlock {
     /// 用户可见进程 ID，即 getpid() 返回值。
@@ -54,6 +111,8 @@ pub struct ProcessControlBlock {
     /// wait_child / auto-reap / orphan-zombie-reap 时调用 release_process_quota_once()
     /// 立即释放；PCB Drop 作为兜底。
     process_quota: Mutex<Option<TaskQuotaGuard>>,
+    /// rlimit 的线程组共享 owner；消费者只复制所需标量，不跨其他锁持有。
+    rlimits: Mutex<ProcessLimits>,
     /// 线程成员关系与首次发布门禁。
     thread_group: Mutex<ThreadGroupState>,
     /// 统一 group-exit 退出码的无锁快照。
@@ -309,6 +368,41 @@ impl ProcessControlBlock {
         }
     }
 
+    /// 取得 rlimit owner guard，供 `prlimit()` 在一次临界区内提交完整 pair。
+    pub(crate) fn rlimits(&self) -> MutexGuard<'_, ProcessLimits> {
+        self.rlimits.lock()
+    }
+
+    /// fork 使用的原子快照；返回后不再持有父进程的任何锁。
+    pub(crate) fn rlimits_snapshot(&self) -> ProcessLimits {
+        *self.rlimits.lock()
+    }
+
+    /// 返回 RLIMIT_FSIZE 的 soft limit，锁不会跨入文件系统路径。
+    pub(crate) fn fsize_limit(&self) -> usize {
+        self.rlimits.lock().fsize.soft
+    }
+
+    /// 返回 RLIMIT_MEMLOCK 的 soft limit，锁不会跨入 VM 修改路径。
+    pub(crate) fn memlock_limit(&self) -> usize {
+        self.rlimits.lock().memlock.soft
+    }
+
+    /// 返回 RLIMIT_SIGPENDING 的 soft limit，锁不会跨入线程 signal queue。
+    pub(crate) fn sigpending_limit(&self) -> usize {
+        self.rlimits.lock().sigpending.soft
+    }
+
+    /// 返回 RLIMIT_CORE 的 soft limit，锁不会跨入线程 dumpable 状态。
+    pub(crate) fn core_limit(&self) -> usize {
+        self.rlimits.lock().core.soft
+    }
+
+    /// 返回 RLIMIT_RTPRIO 的 soft limit，锁不会跨入线程调度状态。
+    pub(crate) fn rtprio_limit(&self) -> usize {
+        self.rlimits.lock().rtprio.soft
+    }
+
     /// 创建新的进程控制块。
     ///
     /// # Semantics
@@ -319,7 +413,7 @@ impl ProcessControlBlock {
     /// # Locking
     ///
     /// 只短暂读取 `exe` 和 `vm` 锁，不会进入等待点。
-    pub fn new(
+    pub(crate) fn new(
         pid: usize,
         pid_handle: Arc<TidHandle>,
         process_quota: TaskQuotaGuard,
@@ -338,6 +432,7 @@ impl ProcessControlBlock {
         sighand: Arc<Mutex<Sighand>>,
         futex: Arc<Mutex<FutexTable>>,
         user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
+        rlimits: ProcessLimits,
     ) -> Self {
         let exec_key = {
             let lock = exe.lock();
@@ -359,6 +454,7 @@ impl ProcessControlBlock {
             pid,
             pid_handle,
             process_quota: Mutex::new(Some(process_quota)),
+            rlimits: Mutex::new(rlimits),
             thread_group: Mutex::new(ThreadGroupState {
                 members: Vec::new(),
                 exec: None,

@@ -28,7 +28,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         return 0;
     }
 
-    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let fsize_limit = task.process.fsize_limit();
     let allowed = match apply_fsize_limit(
         &file,
         total_len,

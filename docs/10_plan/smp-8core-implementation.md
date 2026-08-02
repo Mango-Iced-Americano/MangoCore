@@ -674,6 +674,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   合并到同一个 fd-table 临界区。双架构 8 核 build 与 musl/glibc 各 9/9 focused LTP 均通过，
   `online_mask=0xff` 且源码指纹一致。精确 NOFILE 双线程交错仍为 NOT RUN；进程级 rlimit owner、
   group CPU accounting 和 `CLONE_FILES` 跨进程语义留待后续节点；
+- B73 将 FSIZE、STACK、CORE、NPROC、MEMLOCK、SIGPENDING、NICE 和 RTPRIO 的 owner 从
+  TCB 迁入 PCB：线程 clone 共享、普通 fork 锁内快照后独立、exec 保留。消费者只复制所需 soft
+  limit 后进入 VM、signal、scheduler 或文件路径，不新增嵌套锁边。双架构 8 核 build 与
+  musl/glibc focused rlimit 回归均通过；CPU 的线程组计时和 NOFILE 与 `CLONE_FILES` 的解耦仍
+  属于后续节点，精确多线程即时共享交错为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

@@ -147,8 +147,10 @@ fn send_thread_signal_info(
     if signal.contains(Signals::SIGCONT) {
         task.process.mark_continued();
     }
+    // rlimit 属于 PCB，先复制 soft limit 再进入线程 signal queue，避免锁嵌套。
+    let sigpending_limit = task.process.sigpending_limit();
     let mut inner = task.acquire_inner_lock();
-    if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {
+    if is_realtime_signal(signal) && inner.sigpending.queued_count() >= sigpending_limit {
         return Err(EAGAIN);
     }
     if let Some(siginfo) = siginfo {

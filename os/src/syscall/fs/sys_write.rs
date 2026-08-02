@@ -17,7 +17,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     if file.is_dev_null() || file.is_dev_zero() {
         return count as isize;
     }
-    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let fsize_limit = task.process.fsize_limit();
     count = match apply_fsize_limit(&file, count, write_start_offset(&file), fsize_limit) {
         Ok(count) => count,
         Err(errno) => return errno,

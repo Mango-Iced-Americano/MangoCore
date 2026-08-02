@@ -21,7 +21,7 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     if file.writable().is_err() {
         return EBADF;
     }
-    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let fsize_limit = task.process.fsize_limit();
     count = match apply_fsize_limit(&file, count, pwrite_start_offset(&file, offset), fsize_limit) {
         Ok(count) => count,
         Err(errno) => return errno,
