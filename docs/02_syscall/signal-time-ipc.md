@@ -164,6 +164,12 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
 
 这些入口都使用 `UserPtr`/`UserPtrMut` 或 `copy_from_user` 访问用户结构。
 
+`rt_sigtimedwait` 先把用户 `set/timeout` 复制到内核栈，再设置当前 TCB 的
+`signal_wait_mask`。条件检查从线程私有或进程共享 pending 队列中唯一领取一条
+`PendingSignal`，但不在条件闭包内写用户地址；等待路径退出并清除 wait mask 后，才把
+`SigInfo` 写回用户态。这样即使条件检查发生在 WaitQueue 锁内，缺页、CoW 和远端 TLB
+shootdown 也不会跨越等待队列锁。若 `info` 无效，返回 `EFAULT`，已领取信号仍保持消费。
+
 ## 7. nanosleep 与 itimer
 
 ### 7.1 nanosleep

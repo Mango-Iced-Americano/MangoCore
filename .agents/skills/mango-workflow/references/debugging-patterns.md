@@ -950,3 +950,18 @@
   用户而改写 owner 内保存值，后续刷新路径可能再次应用同一时间差。
 - **相关文件**: `os/src/syscall/process/lifecycle.rs`,
   `os/src/syscall/process/time.rs`, `docs/01_architecture/lock-order.md`
+
+## WaitQueue 条件只领取内核状态，faultable 回复延后
+
+- **危险模式**: 条件闭包不一定只在无锁 fast path 执行。通用 WaitQueue 通常会在 waiter
+  登记后、仍持有队列锁时再次调用条件，用来闭合 lost-wakeup 窗口；若闭包直接执行
+  `UserPtrMut`/copyout，用户缺页、CoW 或 TLB shootdown 就会跨越等待队列锁。
+- **固定协议**: 条件闭包只在底层 owner 锁内检查并唯一领取内核对象，把拥有所有权的结果
+  保存到 syscall 栈；WaitQueue 返回并完成 waiter 清理后，再执行 faultable reply。不要把
+  owner guard、内部引用或只靠序号定位的结果带出锁。
+- **错误语义**: 领取成功后的 copyout `EFAULT` 是否回滚必须对照官方 ABI。Linux
+  `rt_sigtimedwait` 先 dequeue signal，再 `copy_siginfo_to_user()`；写回失败不会重新发布信号。
+- **测试边界**: 普通功能用例能验证领取、siginfo、timeout 和 EFAULT，不能证明“第二次条件
+  检查→调度器睡眠登记”之间的精确信号到达窗口；这类 interleaving 必须单独建模或测试。
+- **相关文件**: `os/src/task/signal/wait.rs`, `os/src/task/manager.rs`,
+  `docs/01_architecture/lock-order.md`

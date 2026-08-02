@@ -247,6 +247,9 @@ B69 进一步规定 task reply 的锁序：`get_robust_list` 只在 `task.inner`
 len→head 写回；`setitimer`/`timer_settime` 必须先 copyin，再在同一临界区快照旧值并提交
 新状态，锁外注册 timer 和 copyout。旧值写回 `EFAULT` 不回滚已提交配置，real timer 查询
 不得为输出改写任务内保存值。任何 faultable reply 都不能跨越 `task.inner`。
+B70 进一步规定 WaitQueue 条件闭包不得访问用户地址：`sigtimedwait` 只在 signal owner 锁内
+唯一领取 `PendingSignal` 并移交 syscall 栈，完全退出等待路径、清除 `signal_wait_mask` 后才
+写回 `SigInfo`。copyout `EFAULT` 不重新入队已经消费的信号。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

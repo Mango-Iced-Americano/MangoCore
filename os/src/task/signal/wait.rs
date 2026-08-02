@@ -147,8 +147,9 @@ pub fn sigsuspend(set: *const Signals) -> isize {
 ///
 /// # Locking
 ///
-/// 条件闭包只短暂获取 `task.inner` 和进程共享 signal lock；写用户态 `info`
-/// 前不持有进程级锁。
+/// 条件闭包只短暂获取 `task.inner` 和进程共享 signal lock，并且可能由
+/// `WaitQueue` 在自己的锁内调用，因此闭包不得访问用户内存。成功领取的信号先
+/// 保存在 syscall 栈上，等待路径完全退出后才写用户态 `info`。
 pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
     let token = current_user_token();
     let set = match read_user_sigset(token, set) {
@@ -168,24 +169,19 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
     let deadline = timeout.map(|timeout| start + timeout);
 
     let wait_queue = spin::Mutex::new(WaitQueue::new());
+    let task = current_task().unwrap();
     {
-        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.signal_wait_mask = set;
     }
+    let mut received = None;
     let mut wait_condition = || -> Option<isize> {
-        let task = current_task().unwrap();
         if let Some(pending) = take_pending_signal_matching(&task, set) {
-            if !info.is_null() {
-                if UserPtrMut::new(info)
-                    .write(token, &pending.siginfo)
-                    .is_err()
-                {
-                    log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
-                    return Some(EFAULT);
-                };
-            }
-            return Some(pending.signum() as isize);
+            let signum = pending.signum() as isize;
+            // dequeue 已在 signal owner 锁内完成；这里只把唯一领取结果交给
+            // syscall 栈，不能在 WaitQueue 条件锁内触发用户缺页。
+            received = Some(pending);
+            return Some(signum);
         }
         if take_sigtimedwait_interrupt(&task, set) {
             return Some(ERESTART);
@@ -199,12 +195,23 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
         WaitQueue::wait_event_interruptible(&wait_queue, &mut wait_condition)
     };
     {
-        let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.signal_wait_mask = Signals::empty();
     }
     match wait_result {
-        WaitResult::Ready(value) => value,
+        WaitResult::Ready(value) => {
+            if let Some(pending) = received {
+                if !info.is_null()
+                    && UserPtrMut::new(info)
+                        .write(token, &pending.siginfo)
+                        .is_err()
+                {
+                    log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
+                    return EFAULT;
+                }
+            }
+            value
+        }
         WaitResult::Interrupted => ERESTART,
         WaitResult::TimedOut => EAGAIN,
     }

@@ -659,6 +659,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `task.inner` 外：锁内只快照旧值并提交新状态，锁外注册 timer、按 ABI 写回。real timer
   查询不再为输出而改写保存值。双架构 8 核 build 与每套 libc 6/6 focused LTP 通过，初赛
   保持 RV64 312/314、LA64 308/314；精确并发交错仍按静态锁证明记录，不冒充动态覆盖；
+- B70 将 `sigtimedwait()` 的用户 `SigInfo` 写回移出 WaitQueue 条件闭包：signal owner 锁内
+  只做唯一 dequeue，完整 `PendingSignal` 由 syscall 栈持有，退出等待路径并清除 wait mask
+  后才 copyout。双架构 8 核 glibc `sigtimedwait01` 均为 11 TPASS、0 FAIL/BROK/CONF；musl
+  既有排除和 `rt_sigtimedwait01` 均明确记为 NOT RUN。普通 LTP 未制造登记窗口内的精确跨核
+  signal 交错，该窗口作为后续独立 WaitQueue 生产节点继续收口；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

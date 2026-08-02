@@ -90,6 +90,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP shared futex pin 与匿名页回收 | 2026-08-02 | GPT/Codex, DeepSeek | backing 所有权、OOM 强制路径与候选队列审查、双架构 MM ktest | 删除绕过引用计数的 force swap；临时 pin 页有界重排并可再次回收，文件 truncate 保留后续 |
 | SMP futex compare/requeue 原子化 | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 requeue/private-key 对照、锁内线性化与冻结双架构 8 核门禁 | CMP source compare 与 wake/requeue 共用 table 锁；shared 两端锁内 nofault 重验，每架构 LTP 20 PASS + 6 版本 SKIP，初赛失败集合不变 |
 | SMP task reply 锁外用户访存 | 2026-08-02 | GPT/Codex, DeepSeek | Linux robust-list/itimer/POSIX timer 对照、task-inner 锁序审查与双架构 8 核门禁 | robust-list 与 timer old-value 先锁内快照/提交、再锁外 copyout；每套 libc focused 6/6，初赛失败集合不变 |
+| SMP sigtimedwait 锁外回复 | 2026-08-02 | GPT/Codex, DeepSeek | Linux signal dequeue/copyout 对照、WaitQueue 条件锁审查与双架构 8 核定向 LTP | pending signal 锁内唯一领取、syscall 栈持有、等待退出后 copyout；双架构 glibc 各 11 TPASS，登记窗口竞态拆为后续节点 |
 
 ## 4. 详细使用场景
 
@@ -1280,6 +1281,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b67-futex-reclaim-summary.md` | SMP shared futex pin 与 OOM 回收 | 记录 force-swap backing 分裂、临时 pin 候选重排、DeepSeek 审查遗漏补充、mutation 失败披露及双架构 8 核 MM ktest |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b68-futex-requeue-atomicity-summary.md` | SMP futex compare/requeue 原子化 | 记录锁外 compare 窗口、table 锁内 nofault compare+mutation、private/shared 差异、模型纠错、双架构 focused/初赛冻结证据与动态竞态 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b69-task-uaccess-summary.md` | SMP task reply 锁外用户访存 | 记录 robust-list ABI 顺序、timer 锁内快照/提交、查询不污染状态、DeepSeek 首轮配方纠错及双架构 8 核冻结证据 |
+| `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b70-sigtimedwait-summary.md` | SMP sigtimedwait 锁外回复 | 记录 WaitQueue 条件锁边界、pending 所有权、Linux EFAULT 语义、两轮本地配方纠错及双架构各 11 TPASS 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

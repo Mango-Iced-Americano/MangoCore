@@ -798,6 +798,23 @@ UserPtr 读取并校验完整新值
 保存的 `it_value`；否则 `refresh_real_timer()` 会再次扣减同一时间区间。旧值 copyout 若
 返回 `EFAULT`，新配置仍保持生效，不得重锁回滚并覆盖另一 CPU 已观察到的状态。
 
+### 3.15 B70 sigtimedwait 的领取与回复边界
+
+`WaitQueue` 条件闭包会在无锁快速路径执行，也会在持有等待队列锁、完成 waiter 登记后再次
+执行。因此 `sigtimedwait()` 的条件闭包只允许在 signal owner 锁内领取一条 pending signal，
+再把完整 `PendingSignal` 移交给 syscall 栈：
+
+```text
+task.inner 或 process signal lock：唯一 dequeue
+  -> syscall 栈持有 PendingSignal
+  -> 完全退出 WaitQueue，清除 signal_wait_mask
+  -> UserPtrMut 写回 SigInfo
+```
+
+用户地址写入可能缺页、触发 CoW 或等待 TLB shootdown，不能位于 WaitQueue、`task.inner` 或
+进程 signal lock 内。copyout 返回 `EFAULT` 时信号已经消费，这与 Linux 6.6 先 dequeue、后
+`copy_siginfo_to_user()` 的顺序一致；不得为“回滚”把信号重新入队。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；
