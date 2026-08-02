@@ -934,3 +934,19 @@
   lock contention 或比较后 remap 的精确交错。没有专项并发 harness 时应记为 NOT RUN。
 - **相关文件**: `os/src/mm/address_space.rs`, `os/src/task/threads.rs`,
   `os/src/syscall/process/futex.rs`, `docs/01_architecture/lock-order.md`
+
+## 带旧值输出的状态 syscall：锁内提交，锁外回复
+
+- **危险模式**: syscall 在 owner 锁内向用户写旧值，会把缺页、CoW 和 TLB shootdown 带进
+  普通业务锁；若为了避锁先写旧值、再读取或提交新值，又会破坏 Linux 的副作用顺序，并让
+  两个 CPU 的权限检查、旧值快照和新值提交彼此穿插。
+- **固定协议**: 先把新值完整 copyin 并完成无锁校验；随后在唯一 owner 锁内快照旧状态、
+  复核权限并一次提交新状态；释放锁后执行外部注册，再 copyout 旧值。只读 reply 也先在锁内
+  复制为内核所有快照，不能把 guard 或内部引用带进 uaccess。
+- **错误语义必须查官方 ABI**: Linux 的 `setitimer`、`timer_settime`、`prlimit` 等路径在新
+  状态提交后才写旧值；old pointer 的 `EFAULT` 不回滚已经生效的修改。不要凭“事务直觉”
+  擅自回滚，也不要因 copyout 失败重锁覆盖并发更新。
+- **查询不能污染权威状态**: remaining/deadline 等派生值应在栈上快照中计算。若只为回复
+  用户而改写 owner 内保存值，后续刷新路径可能再次应用同一时间差。
+- **相关文件**: `os/src/syscall/process/lifecycle.rs`,
+  `os/src/syscall/process/time.rs`, `docs/01_architecture/lock-order.md`

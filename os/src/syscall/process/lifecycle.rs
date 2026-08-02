@@ -277,47 +277,46 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
 pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) -> isize {
     let current = current_task().unwrap();
     let token = current_user_token();
-    if pid == 0 {
-        let inner = current.acquire_inner_lock();
-        if copy_to_user(token, &inner.robust_list.head, head_ptr).is_err() {
-            log::error!("[sys_get_robust_list] Failed to copy to {:?}", head_ptr);
-            return EFAULT;
+    let target = if pid == 0 {
+        current.clone()
+    } else {
+        let task = match ProcessManager::find_task(pid as usize) {
+            Some(task) => task,
+            None => return ESRCH,
         };
-        if copy_to_user(token, &inner.robust_list.len, len_ptr).is_err() {
-            log::error!("[sys_get_robust_list] Failed to copy to {:?}", len_ptr);
-            return EFAULT;
-        };
-        return SUCCESS;
-    }
-
-    let task = match ProcessManager::find_task(pid as usize) {
-        Some(task) => task,
-        None => return ESRCH,
-    };
-    if current.gettid() != task.gettid() {
-        let uid = current.uid();
-        let euid = current.euid();
-        let gid = current.gid();
-        let egid = current.egid();
-        let cap_effective = current.acquire_inner_lock().cap_effective;
-        let target_uid = task.uid();
-        let target_euid = task.euid();
-        let target_gid = task.gid();
-        let target_egid = task.egid();
-        let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
-        let same_creds =
-            uid == target_uid && euid == target_euid && gid == target_gid && egid == target_egid;
-        if !privileged && !same_creds {
-            return EPERM;
+        if current.gettid() != task.gettid() {
+            let uid = current.uid();
+            let euid = current.euid();
+            let gid = current.gid();
+            let egid = current.egid();
+            let cap_effective = current.acquire_inner_lock().cap_effective;
+            let target_uid = task.uid();
+            let target_euid = task.euid();
+            let target_gid = task.gid();
+            let target_egid = task.egid();
+            let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
+            let same_creds = uid == target_uid
+                && euid == target_euid
+                && gid == target_gid
+                && egid == target_egid;
+            if !privileged && !same_creds {
+                return EPERM;
+            }
         }
-    }
-    let inner = task.acquire_inner_lock();
-    if copy_to_user(token, &inner.robust_list.head, head_ptr).is_err() {
-        log::error!("[sys_get_robust_list] Failed to copy to {:?}", head_ptr);
+        task
+    };
+
+    // 目标 Arc 固定 TCB 生命周期；只在 task.inner 内快照两个标量，用户页缺失、
+    // CoW 或 TLB shootdown 都必须发生在普通任务锁之外。
+    let robust_list = target.acquire_inner_lock().robust_list;
+    // Linux 先写长度再写 head；长度是 64 位 robust_list_head 的结构体大小 24，
+    // 不是 usize 指针大小。
+    if copy_to_user(token, &robust_list.len, len_ptr).is_err() {
+        log::error!("[sys_get_robust_list] Failed to copy to {:?}", len_ptr);
         return EFAULT;
     };
-    if copy_to_user(token, &inner.robust_list.len, len_ptr).is_err() {
-        log::error!("[sys_get_robust_list] Failed to copy to {:?}", len_ptr);
+    if copy_to_user(token, &robust_list.head, head_ptr).is_err() {
+        log::error!("[sys_get_robust_list] Failed to copy to {:?}", head_ptr);
         return EFAULT;
     };
     SUCCESS

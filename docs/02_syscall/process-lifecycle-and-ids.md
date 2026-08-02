@@ -393,6 +393,11 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 | `set_robust_list(head, len)` | len 必须等于 `RobustList::HEAD_SIZE` |
 | `get_robust_list(pid, head_ptr, len_ptr)` | pid=0 查询当前任务；非 0 路径按目标任务权限处理 |
 
+`get_robust_list()` 在目标 `task.inner` 内只快照 `head` 与 `len`，释放锁后先写 `len_ptr`、
+再写 `head_ptr`。64 位 ABI 的长度固定为 `RobustList::HEAD_SIZE == 24`，不是指针大小。
+目标任务由 `Arc` 固定生命周期，因此用户页 fault、CoW 或 TLB shootdown 不会发生在
+`task.inner` 临界区内。
+
 退出路径会在 clear child tid 地址写 0 并唤醒对应 futex。
 
 ## 7. UID/GID 与进程组

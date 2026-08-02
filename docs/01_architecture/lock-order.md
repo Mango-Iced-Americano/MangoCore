@@ -778,6 +778,26 @@ UserPtr 读取可选新值
 `EFAULT`，已提交状态保持不变。输入、输出指针别名时必须保持“先完整读、后写旧值”的
 顺序。
 
+### 3.14 B69 task reply 的快照与提交顺序
+
+`get_robust_list()` 只在目标 `task.inner` 内复制两个标量，随后按 Linux ABI 先向用户写
+24 字节的 `robust_list_head` 长度，再写 head 地址。目标 TCB 由锁外持有的 `Arc` 固定生命
+周期，两个 copyout 都不得跨越 `task.inner`。
+
+同时带“新配置”和“旧值输出”的 timer syscall 使用固定顺序：
+
+```text
+UserPtr 读取并校验完整新值
+  -> task.inner：快照旧值并一次提交新状态
+  -> 解锁
+  -> 注册锁外 KernelTimer（若需要）
+  -> UserPtrMut 写回旧值
+```
+
+`setitimer()` 查询 real timer 的 remaining 时只修改栈上快照，不能为了输出而改写任务内
+保存的 `it_value`；否则 `refresh_real_timer()` 会再次扣减同一时间区间。旧值 copyout 若
+返回 `EFAULT`，新配置仍保持生效，不得重锁回滚并覆盖另一 CPU 已观察到的状态。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

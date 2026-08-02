@@ -655,6 +655,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   REQUEUE 保留 VA-key 语义，不额外要求 source PTE。双架构 8 核 build、focused futex LTP
   与 `mask=0x003` 初赛均通过；每架构 LTP 为 20 PASS + 6 版本 SKIP，初赛保持 RV64
   312/314、LA64 308/314。精确多核 compare/write/requeue 交错仍为 NOT RUN；
+- B69 将 `get_robust_list()`、`setitimer()` 和 `timer_settime()` 的 faultable reply 移到
+  `task.inner` 外：锁内只快照旧值并提交新状态，锁外注册 timer、按 ABI 写回。real timer
+  查询不再为输出而改写保存值。双架构 8 核 build 与每套 libc 6/6 focused LTP 通过，初赛
+  保持 RV64 312/314、LA64 308/314；精确并发交错仍按静态锁证明记录，不冒充动态覆盖；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

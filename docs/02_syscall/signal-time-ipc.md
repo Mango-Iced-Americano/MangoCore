@@ -220,6 +220,11 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
 代码维护 `real_timer_generation`，避免旧 timer 触发新一代 timer 的 SIGALRM。
 
+若同时提供 `new` 与 `old`，内核先完整读取新值，再在同一个 `task.inner` 临界区快照旧
+timer 并提交新配置；锁外完成 `KernelTimer` 注册后才写回旧值。old copyout 返回
+`EFAULT` 时不回滚已经生效的新配置。real timer 的 remaining 只在栈上快照中按
+`deadline - now` 计算，不能改写保存值后再让刷新路径重复扣减。
+
 ## 8. POSIX timer
 
 ### 8.1 timer_create
@@ -318,6 +323,8 @@ pub fn sys_timer_create(
 | `timer_delete` | 删除 timer slot |
 
 POSIX timer 投递信号使用 task timer 队列。
+`timer_settime()` 同样采用“copyin → 锁内快照并提交 → 锁外注册 → copyout”的顺序；旧值
+写回失败不撤销已经发布的 generation、deadline 或立即到期信号。
 
 ## 9. clock 与 timeval
 
