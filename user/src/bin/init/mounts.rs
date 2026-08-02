@@ -1,5 +1,5 @@
 use alloc::format;
-use user_lib::syscall::{sys_mkdirat, sys_mount};
+use user_lib::syscall::{sys_faccessat2, sys_mkdirat, sys_mount};
 use user_lib::{chmod, mount, println};
 
 const AT_FDCWD: isize = -100;
@@ -48,15 +48,55 @@ pub(super) fn mount_tmpfs(target: &'static str) {
     let _ = try_mount("none\0", target, "tmpfs\0");
 }
 
-fn try_bind_mount(source: &str, target: &str) {
+fn try_bind_mount(source: &str, target: &str) -> bool {
     let src = format!("{}\0", source);
     let tgt = format!("{}\0", target);
     let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
     if ret == 0 {
         println!("[init] bind mount {} -> {}", source, target);
+        true
     } else {
         println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+        false
     }
+}
+
+pub(super) fn sdcard_root_ready() -> bool {
+    let has_bin = sys_faccessat2(AT_FDCWD, "/sdcard/bin\0", 0, 0) == 0;
+    let has_etc = sys_faccessat2(AT_FDCWD, "/sdcard/etc\0", 0, 0) == 0;
+    if has_bin || has_etc {
+        println!("[init] VF2 /sdcard root check passed");
+        true
+    } else {
+        println!("[init] VF2 /sdcard root check failed: missing /bin and /etc");
+        false
+    }
+}
+
+pub(super) fn bind_pseudo_filesystems_in_sdcard() -> bool {
+    for path in [
+        "/sdcard/proc\0",
+        "/sdcard/sys\0",
+        "/sdcard/dev\0",
+        "/sdcard/dev/shm\0",
+        "/sdcard/run\0",
+        "/sdcard/tmp\0",
+    ] {
+        let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
+    }
+
+    let mut mounted = true;
+    for (source, target) in [
+        ("/proc", "/sdcard/proc"),
+        ("/sys", "/sdcard/sys"),
+        ("/dev", "/sdcard/dev"),
+        ("/dev/shm", "/sdcard/dev/shm"),
+        ("/run", "/sdcard/run"),
+        ("/tmp", "/sdcard/tmp"),
+    ] {
+        mounted &= try_bind_mount(source, target);
+    }
+    mounted
 }
 
 /// Bind persistent directories after the kernel has mounted its boot devices.
@@ -99,6 +139,6 @@ pub(super) fn setup_persistent_mounts() {
     ] {
         let tgt_path = format!("{}\0", target);
         let _ = sys_mkdirat(AT_FDCWD, &tgt_path, 0o755);
-        try_bind_mount(source, target);
+        let _ = try_bind_mount(source, target);
     }
 }

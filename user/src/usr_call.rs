@@ -60,6 +60,10 @@ pub fn chdir(path: &str) -> isize {
     sys_chdir(path)
 }
 
+pub fn chroot(path: &str) -> isize {
+    sys_chroot(path)
+}
+
 pub fn wait(exit_code: &mut i32) -> isize {
     sys_waitpid(-1, exit_code as *mut _)
 }
@@ -193,4 +197,3 @@ pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
 pub fn chmod(path: &str, mode: u32) -> isize {
     sys_fchmodat(crate::syscall::AT_FDCWD, path.as_ptr() as *const u8, mode)
 }
-

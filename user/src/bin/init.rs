@@ -10,6 +10,8 @@ use user_lib::{
 
 #[path = "init/mounts.rs"]
 mod mounts;
+#[path = "init/vf2.rs"]
+mod vf2;
 
 const PID1: isize = 1;
 const RUNNER: &str = "/test-runner\0";
@@ -131,6 +133,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     mounts::prepare_pseudo_fs_framework();
     mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
+    vf2::try_boot();
     if profile != "regression" {
         // mount_boot_block_devices() already owns the x0 → /sdcard and x1 →
         // /tools mount policy. PID1 must not mount them again: a second mount

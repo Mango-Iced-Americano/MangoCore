@@ -19,6 +19,7 @@ const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_FACCESSAT2: usize = 439;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE: usize = 59;
@@ -295,6 +296,10 @@ pub fn sys_exec(path: &str, args: &[*const u8], envp: &[*const u8]) -> isize {
 
 pub fn sys_chdir(path: &str) -> isize {
     syscall(SYSCALL_CHDIR, [path.as_ptr() as usize, 0, 0])
+}
+
+pub fn sys_chroot(path: &str) -> isize {
+    syscall(SYSCALL_CHROOT, [path.as_ptr() as usize, 0, 0])
 }
 
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
