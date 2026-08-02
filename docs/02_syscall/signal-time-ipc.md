@@ -170,6 +170,12 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
 `SigInfo` 写回用户态。这样即使条件检查发生在 WaitQueue 锁内，缺页、CoW 和远端 TLB
 shootdown 也不会跨越等待队列锁。若 `info` 无效，返回 `EFAULT`，已领取信号仍保持消费。
 
+为关闭“第二次条件检查完成、任务尚未登记为 Blocking”的丢唤醒窗口，调度器在登记睡眠意图
+后还会检查 waited pending；发送方在窗口内即使看到任务仍为 Running，接收方也不会随后睡下。
+WaitQueue 以 Interrupted 或 TimedOut 返回时，syscall 在清除 wait mask 前再领取一次：若目标
+signal 已经 pending，则返回该 signal；否则才分别返回 `EINTR` 或 `EAGAIN`。通用 ignored-signal
+清理必须跳过 wait mask 中的 signal，避免在这个窗口抢先消费它。
+
 ## 7. nanosleep 与 itimer
 
 ### 7.1 nanosleep

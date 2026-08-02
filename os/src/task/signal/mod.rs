@@ -514,6 +514,22 @@ fn pending_signals(task: &TaskControlBlock) -> Signals {
     inner.sigpending.pending() | task.process.shared_pending_hint()
 }
 
+/// 判断 `sigtimedwait` 正在等待的集合中是否已有 pending signal。
+///
+/// 线程队列与进程共享队列分别在各自 owner 锁下读取，避免嵌套锁。该谓词只用于
+/// 关闭“条件复查完成、调度器登记睡眠意图之前”的丢唤醒窗口，不领取信号。
+pub(crate) fn has_waited_signal(task: &TaskControlBlock) -> bool {
+    let (thread_pending, wait_mask) = {
+        let inner = task.acquire_inner_lock();
+        (inner.sigpending.pending(), inner.signal_wait_mask)
+    };
+    if wait_mask.is_empty() {
+        return false;
+    }
+    !(thread_pending & wait_mask).is_empty()
+        || !(task.process.shared_pending() & wait_mask).is_empty()
+}
+
 fn has_pending_stop_release_signal(task: &TaskControlBlock) -> bool {
     // SIGCONT resumes a stopped task even if the signal is currently masked;
     // SIGKILL must also break a stopped wait so the task can terminate.
@@ -547,14 +563,25 @@ fn take_next_pending_signal(
 }
 
 pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
-    let (thread_pending, sigmask) = {
+    let (thread_pending, sigmask, wait_mask) = {
         let inner = task.acquire_inner_lock();
         (
-            inner.sigpending.pending().difference(inner.sigmask),
+            inner
+                .sigpending
+                .pending()
+                .difference(inner.sigmask)
+                .difference(inner.signal_wait_mask),
             inner.sigmask,
+            inner.signal_wait_mask,
         )
     };
-    let shared_pending = task.process.shared_pending_hint().difference(sigmask);
+    // disposition 为 ignore 的信号通常可直接清理，但正在被 sigtimedwait 领取的
+    // 集合必须保留；否则未屏蔽的 waited signal 会在登记窗口中被通用清理器吞掉。
+    let shared_pending = task
+        .process
+        .shared_pending_hint()
+        .difference(sigmask)
+        .difference(wait_mask);
     let mut discard_thread = Signals::empty();
     let mut discard_shared = Signals::empty();
     let sighand_ref = task.process.sighand();

@@ -26,7 +26,7 @@ use crate::timer::{TimeSpec, TimeVal};
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     discard_non_actionable_unblocked_signals, has_actionable_signal,
-    signal::{SigInfo, Signals},
+    signal::{has_waited_signal, SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
 use super::task::{RemoteAffinityRequest, RemoteAffinityState};
@@ -1221,8 +1221,9 @@ impl WaitQueue {
             }
             if signal_check {
                 // 必须在不持有 task.inner 的情况下检查 actionable signal；
-                // 这里仅持有等待队列锁，`has_actionable_signal` 自行短暂取任务锁。
-                if has_actionable_signal(&task) {
+                // waited signal 即使被 sigmask 屏蔽也必须取消睡眠，随后由
+                // sigtimedwait 在 WaitQueue 外重新领取。
+                if has_waited_signal(&task) || has_actionable_signal(&task) {
                     guard.finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
                 }
@@ -1266,7 +1267,10 @@ impl WaitQueue {
             drop(task);
 
             block_current_and_run_next_with_lock_checked(guard, |task| {
-                let no_signal = !signal_check || !has_actionable_signal(task);
+                // Running -> Blocking 登记后再检查 waited signal，关闭发送方在
+                // Running 状态看到 AlreadyWaken、而接收方随后真正睡下的窗口。
+                let no_signal =
+                    !signal_check || (!has_waited_signal(task) && !has_actionable_signal(task));
                 let not_timed_out = deadline
                     .map(|deadline| TimeSpec::now() < deadline)
                     .unwrap_or(true);

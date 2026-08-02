@@ -1282,6 +1282,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b68-futex-requeue-atomicity-summary.md` | SMP futex compare/requeue 原子化 | 记录锁外 compare 窗口、table 锁内 nofault compare+mutation、private/shared 差异、模型纠错、双架构 focused/初赛冻结证据与动态竞态 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b69-task-uaccess-summary.md` | SMP task reply 锁外用户访存 | 记录 robust-list ABI 顺序、timer 锁内快照/提交、查询不污染状态、DeepSeek 首轮配方纠错及双架构 8 核冻结证据 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b70-sigtimedwait-summary.md` | SMP sigtimedwait 锁外回复 | 记录 WaitQueue 条件锁边界、pending 所有权、Linux EFAULT 语义、两轮本地配方纠错及双架构各 11 TPASS 冻结证据 |
+| `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b71-sigtimedwait-wakeup-summary.md` | SMP sigtimedwait 登记窗口闭合 | 记录 Running/Blocking 丢唤醒窗口、waited-signal 最终谓词、ignored 清理边界、DeepSeek 结论校准及双架构 8 核冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

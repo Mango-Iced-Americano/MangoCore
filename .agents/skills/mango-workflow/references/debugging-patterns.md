@@ -965,3 +965,21 @@
   检查→调度器睡眠登记”之间的精确信号到达窗口；这类 interleaving 必须单独建模或测试。
 - **相关文件**: `os/src/task/signal/wait.rs`, `os/src/task/manager.rs`,
   `docs/01_architecture/lock-order.md`
+
+## WaitQueue lost-wake：睡眠意图登记后复查持久条件
+
+- **危险窗口**: 第二次 condition 返回 false 后，任务仍可能是 `Running`。事件生产者此时发布
+  状态并调用 wake，可能得到“任务尚未睡眠”；若消费者随后无条件登记并切走，这次 wake 不会
+  自动保存到未来。仅仅“在 queue 锁内多检查一次”不能覆盖 condition 与调度状态转换之间的边。
+- **固定协议**: 把事件发布为 owner 锁保护的持久状态；消费者完成 `Blocking` 登记后，在真正
+  切换前用无副作用谓词复查该状态。发现事件就撤销 waiter，不进入睡眠。不要为此增加一次通用
+  condition 调用，因为 condition 可能领取对象或产生其他副作用。
+- **返回结果不拥有事件**: Interrupted/timeout 只说明等待循环为何停止，不等于消费者已经取得
+  事件。退出等待后应在 owner 锁内最后 claim 一次，再决定返回事件、`EINTR` 或 timeout；claim
+  成功后才能把所有权带到锁外。
+- **清理路径也要尊重声明**: 若消费者用 wait mask 声明正在领取某类 pending 对象，通用
+  ignore/discard 清理必须排除该集合，否则最终复查只能看到已被旁路删除的状态。
+- **测试边界**: 普通 8 核功能回归只能证明现实路径未退化，不能证明纳秒级窗口一定被命中。
+  无精确注入 harness 时，应把状态转换与锁序证明写入证据，并明确动态交错为 NOT RUN。
+- **相关文件**: `os/src/task/manager.rs`, `os/src/task/signal/mod.rs`,
+  `os/src/task/signal/wait.rs`, `docs/01_architecture/lock-order.md`

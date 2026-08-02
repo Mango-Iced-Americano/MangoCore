@@ -664,6 +664,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   后才 copyout。双架构 8 核 glibc `sigtimedwait01` 均为 11 TPASS、0 FAIL/BROK/CONF；musl
   既有排除和 `rt_sigtimedwait01` 均明确记为 NOT RUN。普通 LTP 未制造登记窗口内的精确跨核
   signal 交错，该窗口作为后续独立 WaitQueue 生产节点继续收口；
+- B71 关闭上述登记窗口：任务进入 `Blocking` 后，最终睡眠谓词同时检查 waited pending 与
+  普通 actionable signal；任何非 Ready 返回在清除 wait mask 前重新 dequeue，ignored-signal
+  清理不再吞掉 wait mask 中的目标。没有增加调度状态或改变通用 condition 调用次数。双架构
+  8 核 build 与 glibc `sigtimedwait01` 均通过，每架构 11 TPASS、0 FAIL/BROK/CONF，源码冻结
+  指纹一致；精确注入“第二次检查→Blocking”跨核交错仍为 NOT RUN，正确性主要由状态/锁证明；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

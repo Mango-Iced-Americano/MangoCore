@@ -189,11 +189,22 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
         None
     };
 
-    let wait_result = if let Some(deadline) = deadline {
+    let mut wait_result = if let Some(deadline) = deadline {
         WaitQueue::wait_event_interruptible_timeout(&wait_queue, &mut wait_condition, deadline)
     } else {
         WaitQueue::wait_event_interruptible(&wait_queue, &mut wait_condition)
     };
+    // WaitQueue 的 Interrupted 只说明“不应继续睡眠”，不拥有 signal。Linux
+    // do_sigtimedwait 同样会在每次睡眠结束后重新 dequeue，使已经 pending 的
+    // waited signal 优先于 EINTR/EAGAIN。先销毁闭包，释放它对 received 的借用。
+    drop(wait_condition);
+    if !matches!(wait_result, WaitResult::Ready(_)) {
+        if let Some(pending) = take_pending_signal_matching(&task, set) {
+            let signum = pending.signum() as isize;
+            received = Some(pending);
+            wait_result = WaitResult::Ready(signum);
+        }
+    }
     {
         let mut inner = task.acquire_inner_lock();
         inner.signal_wait_mask = Signals::empty();

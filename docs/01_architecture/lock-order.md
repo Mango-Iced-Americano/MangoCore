@@ -815,6 +815,31 @@ task.inner 或 process signal lock：唯一 dequeue
 进程 signal lock 内。copyout 返回 `EFAULT` 时信号已经消费，这与 Linux 6.6 先 dequeue、后
 `copy_siginfo_to_user()` 的顺序一致；不得为“回滚”把信号重新入队。
 
+### 3.16 B71 sigtimedwait 的睡眠登记窗口
+
+WaitQueue 的第二次条件检查结束后，当前任务尚未完成 `Running -> Blocking` 登记。若远端 CPU
+恰在这个窗口发布 waited signal，发送方看到任务仍是 `Running`，不会替接收方保存一次“未来
+wake”；因此接收方不能只依赖发送方唤醒。pending signal 本身才是持久事件，固定协议为：
+
+```text
+发布 signal_wait_mask
+  -> WaitQueue 条件在 owner 锁内尝试 dequeue
+  -> 调度器登记 Blocking
+  -> 最终睡眠谓词检查 waited pending 或普通 actionable signal
+  -> 不满足睡眠条件时撤销 waiter
+  -> 任意非 Ready 返回都在 owner 锁内再 dequeue 一次
+  -> 清除 signal_wait_mask，再决定 signal / EINTR / EAGAIN
+```
+
+`has_waited_signal()` 只观察 `signal_wait_mask` 与线程/进程 pending 集合，不领取信号；线程队列
+与进程共享队列分别在各自 owner 锁下读取，禁止嵌套。它只接入目前唯一发布非空 wait mask 的
+非 locked WaitQueue 路径，不改变通用 condition 的调用次数或调度状态机。
+
+普通 ignored-signal 清理同样必须排除 `signal_wait_mask`：disposition 为 ignore 并不代表
+`sigtimedwait` 放弃领取。最后一次 dequeue 同时处理 `Interrupted` 和 `TimedOut`，让在 timeout
+边界已经 pending 的 waited signal 优先于 `EINTR`/`EAGAIN`；领取动作仍只发生在 signal owner
+锁内，因此不会重复消费。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

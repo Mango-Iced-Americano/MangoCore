@@ -250,6 +250,10 @@ len→head 写回；`setitimer`/`timer_settime` 必须先 copyin，再在同一�
 B70 进一步规定 WaitQueue 条件闭包不得访问用户地址：`sigtimedwait` 只在 signal owner 锁内
 唯一领取 `PendingSignal` 并移交 syscall 栈，完全退出等待路径、清除 `signal_wait_mask` 后才
 写回 `SigInfo`。copyout `EFAULT` 不重新入队已经消费的信号。
+B71 进一步关闭 `sigtimedwait` 的睡眠登记窗口：waited signal 是独立于普通 actionable signal
+的持久条件，任务进入 `Blocking` 后必须再次精确检查；任何非 Ready 唤醒返回都要在 signal
+owner 锁下重新领取一次，再决定返回 `EINTR`/`EAGAIN`。通用 ignored-signal 清理不得删除
+`signal_wait_mask` 中的 pending signal。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
