@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-02
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -35,6 +35,7 @@ os/src/hal/
 │   │   ├── mod.rs
 │   │   ├── config.rs
 │   │   ├── kern_stack.rs
+│   │   ├── plic.rs
 │   │   ├── reset.rs
 │   │   ├── sbi.rs
 │   │   ├── sv39.rs
@@ -218,6 +219,7 @@ RV64 PCI 不依赖固定的 QEMU 地址布局。预堆阶段的 `parse_node_reso
 |------|------|
 | `config.rs` | 地址布局、页大小、内核堆、内核栈、平台常量 |
 | `kern_stack.rs` | 内核栈分配和 trap context 地址计算 |
+| `plic.rs` | FDT/平台信息驱动的 PLIC 初始化、IRQ callback 注册、claim/complete 和外部中断分发 |
 | `reset.rs` | 实板 watchdog 重启路由与非实板 SBI reboot fallback |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表实现和 `sfence.vma` TLB 刷新 |
@@ -245,13 +247,26 @@ QEMU 的 `is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走
 ```rust
 pub fn machine_init() {
     trap::init();
+    plic::init();
     trap::enable_timer_interrupt();
+    trap::enable_external_interrupt();
 }
 
 pub fn bootstrap_init() {}
 ```
 
-rv64 的 `machine_init()` 只安装 trap 并打开 supervisor timer interrupt。第一次 timer deadline 由 `task::timer_subsystem_init()` 之后的 timer 编程路径设置。
+rv64 的 `machine_init()` 安装 trap、初始化 PLIC、打开 supervisor timer 与 external interrupt。第一次 timer deadline 由 `task::timer_subsystem_init()` 之后的 timer 编程路径设置。
+
+### 6.4 PLIC 外部中断
+
+`plic.rs` 将 RV64 的网卡外部 IRQ 集中在一个最小的 S-mode PLIC 后端中。初始化阶段从
+`PlatformInfo` 的 FDT 设备快照取得 PLIC MMIO 基址；当前 supervisor context 按 QEMU virt
+或 JH7110 的已知 hart 拓扑计算。没有有效 FDT PLIC 范围时不发布 PLIC。网络设备发布时将
+`Arc<dyn NetDevice>` 返回的短回调注册到对应 source ID。
+
+外部中断路径是：PLIC claim → 查找回调 → 驱动 acknowledge → PLIC complete。回调只允许
+写入无锁 pending 通知；不允许获取 `NET_INTERFACE`、运行 smoltcp 或输出日志。未注册的
+source 经过 rate limit 后记录诊断，始终完成 PLIC source，避免同一 IRQ 持续触发。
 
 ### 6.3 Trap 路径
 
@@ -263,6 +278,7 @@ RISC-V trap 后端负责：
 | instruction/load/store fault 或 page fault | 调用当前进程 `AddressSpace::do_page_fault(addr, access)` |
 | `IllegalInstruction` / `InstructionMisaligned` | 向当前任务注入 `SIGILL` |
 | `SupervisorTimer` | 记录调度统计并调用 `task::timer_interrupt_handler()` |
+| `SupervisorExternal` | PLIC claim/dispatch/complete；网卡回调只置 RX pending 位 |
 | 其他 trap | panic，输出 scause/stval 信息 |
 
 `trap_return()` 调用 `do_signal()` 后设置用户 trap entry 为 trampoline，跳转到 `__restore`，传入 trap context 虚拟地址和用户页表 token，并执行 `fence.i`。
@@ -363,6 +379,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | syscall 参数错误 | `hal/arch/*/trap/mod.rs` | `trap_handler()` 中读取 `a7/a0..a5` 的块 |
 | 缺页信号不对 | `hal/arch/*/trap/mod.rs` | `MemoryError` 到信号的映射分支 |
 | timer 不进调度 | `hal/arch/*/time.rs`, `trap/mod.rs` | `program_timer_delta()`、timer interrupt 分支 |
+| rv64 网卡 IRQ 不到任务 | `hal/arch/riscv/plic.rs`, `drivers/net/` | PLIC source/context、callback 注册、驱动 acknowledge、RX pending 位 |
 | la64 dirty bit 问题 | `hal/arch/loongarch64/trap/mod.rs`, `laflex.rs` | page modify 成功后的 `set_dirty_bit()` |
 | TLB 陈旧 | `hal/arch/riscv/sv39.rs`, `hal/arch/loongarch64/tlb.rs` | invalidate 调用点 |
 
@@ -384,6 +401,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | `os/src/hal/platform/{mod.rs,info.rs}` | post-heap owned `PlatformInfo`、设备分类、`PciHost` 固件资源和静态回退构造器 |
 | `os/src/hal/arch/mod.rs` | feature 选择和后端 re-export |
 | `os/src/hal/arch/riscv/mod.rs` | rv64 后端模块、类型别名、初始化 |
+| `os/src/hal/arch/riscv/plic.rs` | rv64 PLIC 初始化、callback 表、外部 IRQ 分发 |
 | `os/src/hal/arch/riscv/sv39.rs` | SV39 页表和 `sfence.vma` |
 | `os/src/hal/arch/riscv/trap/mod.rs` | rv64 trap/syscall/page fault/timer |
 | `os/src/hal/arch/loongarch64/mod.rs` | la64 bootstrap、machine init、类型别名 |

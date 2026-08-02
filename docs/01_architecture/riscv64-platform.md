@@ -3,7 +3,7 @@ title: "RISC-V 64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-02
 tags: [architecture, riscv64, hal]
 ---
 
@@ -33,6 +33,7 @@ os/src/hal/arch/riscv/
 ├── config.rs
 ├── entry.asm
 ├── kern_stack.rs
+├── plic.rs
 ├── linker.ld / linker-rvqemu.ld
 ├── sbi.rs
 ├── sv39.rs
@@ -50,6 +51,7 @@ os/src/hal/arch/riscv/
 | `entry.asm` | 架构入口汇编，由 `main.rs` 在 `riscv` feature 下引入 |
 | `config.rs` | 地址空间、页大小、内核堆、内核栈、物理内存和平台常量 |
 | `kern_stack.rs` | 内核栈分配、trap context/user stack 地址计算 |
+| `plic.rs` | S-mode PLIC 初始化、网卡 IRQ callback 注册和 claim/complete 分发 |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表、PTE flag、TLB 刷新 |
 | `switch.S` | 任务上下文切换汇编 |
@@ -64,7 +66,9 @@ RISC-V 后端在 `mod.rs` 中定义：
 ```rust
 pub fn machine_init() {
     trap::init();
+    plic::init();
     trap::enable_timer_interrupt();
+    trap::enable_external_interrupt();
     // First timer deadline is set by timer_subsystem_init() after boot.
 }
 
@@ -82,7 +86,9 @@ rv64 的 `bootstrap_init()` 是空实现。该事实说明 `rust_main()` 进入�
 | 调用 | 文件 | 行为 |
 |------|------|------|
 | `trap::init()` | `trap/mod.rs` | 调用 `set_kernel_trap_entry()`，设置 `stvec` 为 kernel trap |
+| `plic::init()` | `plic.rs` | 从 FDT 平台快照初始化 supervisor PLIC context |
 | `trap::enable_timer_interrupt()` | `trap/mod.rs` | `sie::set_stimer()` 打开 supervisor timer interrupt |
+| `trap::enable_external_interrupt()` | `trap/mod.rs` | 打开 supervisor external interrupt，使 PLIC source 可进入 trap |
 
 第一次 timer deadline 没有在 `machine_init()` 中设置。注释说明它由启动后的 `timer_subsystem_init()` 和 timer 编程路径负责。
 
@@ -211,7 +217,18 @@ task::timer_interrupt_handler()
 
 该分支不直接调用 `set_next_trigger` 形式的接口；下一次 timer 触发由 task/timer 路径通过 HAL time 接口编程。
 
-## 8. 返回用户态
+## 8. PLIC 外部中断与网络接收
+
+RV64 使用 `plic.rs` 接收 `SupervisorExternal`。设备发布时，网络层以 source ID 注册
+`NetDevice::interrupt()` 回调；外部 IRQ 到来时 PLIC 后端执行 claim → callback → complete。
+virtio-net 回调读取并确认 MMIO ISR 状态，JH7110 GMAC 回调确认 DMA RX 状态；两者仅设置
+`NET_RX_INTERRUPT_PENDING`，不能运行 smoltcp 或持有网络/任务锁。
+
+`task::processor` 在普通任务上下文消耗该 pending 位后调用 `NET_INTERFACE.poll()`，由
+smoltcp 拉取并处理收包。该拆分保持 ISR 有界并规避单核 `NET_INTERFACE` 重入；定时器
+与 syscall 路径的轮询仍保留为 PLIC 缺席或通知丢失时的 fallback。
+
+## 9. 返回用户态
 
 RISC-V `trap_return()`：
 
@@ -241,7 +258,7 @@ asm!(
 | `fence.i` | 保证指令流一致性 |
 | `options(noreturn)` | 恢复汇编不返回 Rust 调用点 |
 
-## 9. SV39 与 TLB
+## 10. SV39 与 TLB
 
 `sv39.rs` 提供 SV39 页表实现。TLB 刷新入口包括：
 
@@ -253,7 +270,7 @@ asm!(
 
 所有修改 PTE 的路径必须通过页表实现触发相应刷新。用户态 fork/CoW、mprotect、munmap、缺页修复都依赖这一契约。
 
-## 10. OpenSBI 接口
+## 11. OpenSBI 接口
 
 `sbi.rs` 封装底层服务：
 
@@ -270,7 +287,7 @@ RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建�
 
 和 la64 相比，rv64 没有 ASID 管理和用户非对齐访存模拟路径；这意味着未对齐用户访问如果要兼容，需要在 syscall/uaccess 或测试适配层显式处理，不能指望 trap 后端像 la64 一样解码并模拟 load/store。
 
-## 11. 调试入口
+## 12. 调试入口
 
 | 症状 | 文件 | 检查点 |
 |------|------|--------|
@@ -278,9 +295,10 @@ RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建�
 | syscall 编号错误 | `trap_handler()` syscall 分支 | `a7` 和 `a0..a5` 保存位置 |
 | 用户缺页反复触发 | `sv39.rs`, `page_fault.rs` | PTE 权限和 `sfence.vma` |
 | timer 不抢占 | `trap::enable_timer_interrupt()`、`time.rs` | `sie::set_stimer()` 和 timer delta |
+| 网卡 IRQ 未唤醒 poll | `plic.rs`、`drivers/net/`、`task/processor.rs` | source/context、驱动 acknowledge、RX pending 消费 |
 | 返回用户态失败 | `trap_return()`、`trap.S` | trampoline、satp、trap context VA |
 
-## 12. 测试映射
+## 13. 测试映射
 
 | 测试目标 | 覆盖代码 | 命令/用例 |
 |----------|----------|-----------|
@@ -289,8 +307,9 @@ RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建�
 | syscall ABI | trap + syscall | basic、busybox、LTP syscall |
 | 页表/TLB | SV39 + MM | mmap、fork、exec、mprotect、munmap |
 | timer | time + trap + task | nanosleep、futex timeout、timer syscall |
+| 网卡 RX IRQ | PLIC + net driver + scheduler | RV64 编译；实际 NIC IRQ 待 normal QEMU/VF2 |
 
-## 13. 源文件索引
+## 14. 源文件索引
 
 | 路径 | 内容 |
 |------|------|
@@ -298,6 +317,7 @@ RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建�
 | `os/src/hal/arch/riscv/entry.asm` | 架构入口 |
 | `os/src/hal/arch/riscv/config.rs` | 地址和平台常量 |
 | `os/src/hal/arch/riscv/kern_stack.rs` | 内核栈和上下文地址 |
+| `os/src/hal/arch/riscv/plic.rs` | PLIC IRQ callback 注册、claim、complete 和 dispatch |
 | `os/src/hal/arch/riscv/sbi.rs` | OpenSBI 服务 |
 | `os/src/hal/arch/riscv/sv39.rs` | SV39 页表和 TLB flush |
 | `os/src/hal/arch/riscv/switch.S` | 上下文切换 |

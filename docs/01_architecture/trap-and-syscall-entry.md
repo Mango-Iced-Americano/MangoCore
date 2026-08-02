@@ -3,7 +3,7 @@ title: "陷阱与 syscall 入口 (Trap and Syscall Entry)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-02
 tags: [architecture, trap, syscall, interrupt]
 ---
 
@@ -190,6 +190,9 @@ pub fn trap_handler() -> ! {
             crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
             crate::task::timer_interrupt_handler();
         }
+        Trap::Interrupt(Interrupt::SupervisorExternal) => {
+            crate::hal::arch::riscv::plic::handle_external_interrupt();
+        }
         _ => {
             panic!(
                 "Unsupported trap {:?}, stval = {:#x}!",
@@ -208,7 +211,7 @@ pub fn trap_handler() -> ! {
 }
 ```
 
-这个入口先把 `stvec` 切回内核 trap，再区分 syscall 和普通 trap。syscall 分支在释放 `task.inner` 后调用分发函数，返回后重新取 trap context；这对应 `execve` 可能替换地址空间和 trap context、`rt_sigreturn` 可能恢复完整用户上下文的事实。缺页分支在进入 MM 前调用 `frame_reserve(3)`，并把硬件异常类型映射成 `FaultAccess`；timer 分支不直接调度，而是交给 task 层的 `timer_interrupt_handler()`。
+这个入口先把 `stvec` 切回内核 trap，再区分 syscall 和普通 trap。syscall 分支在释放 `task.inner` 后调用分发函数，返回后重新取 trap context；这对应 `execve` 可能替换地址空间和 trap context、`rt_sigreturn` 可能恢复完整用户上下文的事实。缺页分支在进入 MM 前调用 `frame_reserve(3)`，并把硬件异常类型映射成 `FaultAccess`；timer 分支不直接调度，而是交给 task 层的 `timer_interrupt_handler()`；external 分支只委托 PLIC，不接触任务或 smoltcp 锁。
 
 ## 4. LoongArch64 syscall 路径
 
@@ -534,7 +537,17 @@ task::timer_interrupt_handler()
 
 la64 显式清除 timer 中断状态，随后交给 task 层 timer handler。
 
-## 8. 返回用户态
+## 8. RV64 外部中断
+
+RV64 的 `SupervisorExternal` 分支调用 `plic::handle_external_interrupt()`。该函数对 PLIC
+source 做 claim，调用已注册的驱动回调，然后无条件 complete。virtio-net 和 JH7110
+GMAC 回调各自确认设备状态后，仅设置网络接收 pending 原子位。
+
+smoltcp 的 `NET_INTERFACE.poll()` 必须在 `task::processor` 消费该 pending 位后于普通
+任务上下文执行。ISR 不获取 `NET_INTERFACE` 或 `task.inner` 锁、不执行 poll、不调度，
+从而避免中断重入 `spin::Mutex` 和锁序反转。周期性 poll 继续是跨架构 fallback。
+
+## 9. 返回用户态
 
 ### 8.1 RISC-V `trap_return()`
 
@@ -625,7 +638,7 @@ LA64 将普通 `TRAMPOLINE`、`TRAP_CONTEXT_BASE` 与用户可执行的
 `SIGNAL_TRAMPOLINE` 分为连续三页：普通恢复页仅映射 `R|X`，信号页映射
 `R|X|U`。因此切换用户 PGDL 后，`__restore` 从普通别名执行而不会复用信号别名。
 
-## 9. 与 syscall 分发层的边界
+## 10. 与 syscall 分发层的边界
 
 trap 后端只做 ABI 和异常入口工作。具体 syscall 语义位于：
 
@@ -639,7 +652,7 @@ trap 后端只做 ABI 和异常入口工作。具体 syscall 语义位于：
 
 `syscall::syscall()` 成功返回非负值，失败返回负 errno。trap 后端不重新解释 errno，只把 `isize` 结果放回 `a0`。
 
-## 10. 调试入口
+## 11. 调试入口
 
 | 症状 | 检查点 |
 |------|--------|
@@ -648,9 +661,10 @@ trap 后端只做 ABI 和异常入口工作。具体 syscall 语义位于：
 | 用户缺页后信号不对 | `MemoryError` 到信号映射 |
 | la64 写缺页反复触发 | `set_dirty_bit()` 是否成功 |
 | 非阻塞 sleep/timeout 不醒 | timer interrupt 是否进入 `task::timer_interrupt_handler()` |
+| RV64 网络收包不醒 | PLIC source 是否 claim/complete，驱动是否 acknowledge 并设置 RX pending |
 | 用户态无法返回 | `trap_return()` 的 trampoline 地址、token、ASID |
 
-### 10.1 阅读 trap 代码的顺序
+### 11.1 阅读 trap 代码的顺序
 
 读 trap 后端时，建议按“入口保存现场 -> 分派原因 -> 修正上下文 -> 返回用户态”的顺序走：
 
@@ -660,12 +674,13 @@ trap 后端只做 ABI 和异常入口工作。具体 syscall 语义位于：
 | syscall 分支 | 是否先推进用户 PC，再读取 `a7/a0..a5`，`rt_sigreturn` 是否走特殊返回。 |
 | page fault 分支 | fault address、访问类型和 `MemoryError` 如何传给 MM 以及如何映射成信号。 |
 | timer 分支 | 中断是否清除/重置，下游是否调用 task timer handler。 |
+| external 分支（RV64） | PLIC 是否 claim/complete；ISR 是否只通知任务上下文。 |
 | 普通异常 | 非 syscall/fault 的异常如何注入 `SIGILL/SIGSEGV` 或进入诊断。 |
 | `trap_return()` | 返回前是否执行 signal delivery，最终 token/ASID/trampoline 参数是否正确。 |
 
 这条顺序能帮助区分“架构入口错误”和“领域子系统错误”。例如 `read()` 返回 `EFAULT` 通常要追 uaccess/MM；而 `read()` 参数整体错位则应先检查 trap 后端收集寄存器的位置。
 
-## 11. 测试映射
+## 12. 测试映射
 
 | 测试类别 | 覆盖路径 |
 |----------|----------|
@@ -673,14 +688,16 @@ trap 后端只做 ABI 和异常入口工作。具体 syscall 语义位于：
 | mmap/fork/exec | 缺页、CoW、ELF 映射、trap signal |
 | signal | `do_signal()`、`rt_sigreturn` 特殊返回 |
 | nanosleep/futex timeout | timer interrupt 与 task timer |
+| RV64 网络 IRQ 编译/启动 | PLIC external IRQ、驱动 acknowledge、任务上下文网络 poll；实际 NIC IRQ 待 normal QEMU/VF2 |
 | la64 非对齐访存用例 | `AddressNotAligned` 模拟路径 |
 | QEMU 启动 | trap entry、timer interrupt、返回用户态 |
 
-## 12. 源文件索引
+## 13. 源文件索引
 
 | 路径 | 内容 |
 |------|------|
 | `os/src/hal/arch/riscv/trap/mod.rs` | rv64 trap 分派、syscall、缺页、timer、返回用户态 |
+| `os/src/hal/arch/riscv/plic.rs` | rv64 PLIC claim/complete 与 driver callback 分发 |
 | `os/src/hal/arch/riscv/trap/trap.S` | rv64 trap 保存/恢复汇编 |
 | `os/src/hal/arch/riscv/trap/context.rs` | rv64 trap context |
 | `os/src/hal/arch/loongarch64/trap/mod.rs` | la64 trap 分派、syscall、缺页、timer、非对齐访存 |
