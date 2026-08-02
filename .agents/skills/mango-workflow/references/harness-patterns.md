@@ -1159,3 +1159,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**: 掩码改为 `& 0x3f`；ktest 中同一 bug 的硬编码期望值（`command_word(41, R3) != 9 | ...` 里的 `9` 就是 `41 & 0x1f`）也要一并修正，否则断言在修复后失败。
 - **教训**: 写硬件寄存器字段时以寄存器数据手册（或参考固件如 U-Boot）的位宽为准，不要想当然用"够用"的窄掩码。验证时如果测试把 bug 的截断结果当作"正确编码"硬编码进断言，修复生产代码后测试会先于硬件暴露错误——先检查测试断言是否复制了同一个 bug（此处 `41`→`9` 与 `0x3f`→`0x1f` 都是 5-bit 截断的痕迹）。
 - **相关文件**: `os/src/drivers/block/dw_mshc/sd.rs`、`os/src/drivers/block/dw_mshc/ktest.rs`
+
+### 分区表解析：GPT 保护性 MBR 被误当成真实 MBR 分区
+
+- **现象**: GPT 盘 LBA0 的保护性 MBR（0x55AA 签名 + type 0xEE 条目）被 MBR 解析器当成真实分区表；解析出"分区1" start_lba=1 指向 GPT 头本身，`/dev/mmcblk0p1` 读出来是 "EFI PART"，mount 报 EINVAL（无文件系统）。
+- **根因**: 分区表解析器只支持 MBR，未识别 GPT 的 protective MBR 约定——type 0xEE 条目是"整盘占位"不是真分区。Linux `block/partitions/core.c` 会依次尝试 msdos→efi 解析器。
+- **修复**: 检测到 type 0xEE 后读 LBA1 验证 "EFI PART" 签名；有效则解析 GPT 头（分区数组 LBA @72、条目数 @80、条目大小 @84）并发布真实分区（first_lba @32、last_lba @40，last-lba 含末扇区）；无效则回退 MBR 且永不发布 0xEE 条目。
+- **教训**: 磁盘格式探测不能只看 0x55AA 签名——GPT 盘必然有保护性 MBR，必须检查分区类型字节 0xEE 并升级到 GPT 解析；否则会把 GPT 头当成分区发布。诊断技巧：dd 读"分区1"若以 "EFI PART" 开头即命中此 bug。
+- **相关文件**: `os/src/drivers/block/partition.rs`、`os/src/kernel_tests/block_device.rs`

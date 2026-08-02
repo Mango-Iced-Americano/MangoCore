@@ -583,3 +583,5 @@
 - **修复**: `initialize_card()` 在 CMD0 前 `wait_ms(1)`、CMD0 后 `wait_ms(2)`，并在 CMD8 成功后、首次 CMD55 前 `wait_ms(1)`；新增 `wait_ms(ms)` 帮助函数（`crate::timer::get_time_ms()` 截止时间自旋循环），`wait_10ms()` 委托之。
 - **教训**: 硬件初始化命令序列（reset/if-cond/op-cond）之间必须保留电源/复位稳定窗口，不能依赖命令本身往返耗时。参考 U-Boot/Linux 的 `mmc_go_idle`/`mmc_send_op_cond` 时序。另注意本项目 `crate::timer::get_time_ms()` 返回 **`usize`** 而非 `u64`，`saturating_add` 传 `usize` 即可，传 `as u64` 会 E0308。
 - **相关文件**: `os/src/drivers/block/dw_mshc/sd.rs`
+
+### GPT 盘分区误判排查：dd if=/dev/mmcblk0p1 头部 'EFI PART' → probe_mbr 误把保护性 MBR 当分区；检查 type 0xEE 与 LBA1 签名
