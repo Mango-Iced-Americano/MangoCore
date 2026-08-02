@@ -451,6 +451,12 @@ pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留�
 
 `getrlimit/setrlimit/prlimit` 读写当前或目标进程资源限制。`RLIMIT_NOFILE_MAX = 1024 * 1024`。
 
+B72 固定了 `prlimit` 的事务顺序：先把完整新值从用户态复制到内核，再在当前资源 owner 锁内
+一次完成旧 pair 快照、hard-limit 权限复核和新 pair 提交，释放锁后才向用户写回旧值。因此
+`new_limit == old_limit` 的别名用法仍返回提交前状态，旧值写回 `EFAULT` 也不会回滚已经发布的
+新限制。当前 NOFILE 仍由 fd table 持有，其他已实现限制仍由 TCB 持有；这两个 owner 只是迁移
+前的事实边界，尚不能外推为完整的线程组共享 rlimit 语义。
+
 ### 8.4 scheduler ABI
 
 注册的调度 syscall：

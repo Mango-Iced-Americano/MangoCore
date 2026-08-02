@@ -254,6 +254,10 @@ B71 进一步关闭 `sigtimedwait` 的睡眠登记窗口：waited signal 是独�
 的持久条件，任务进入 `Blocking` 后必须再次精确检查；任何非 Ready 唤醒返回都要在 signal
 owner 锁下重新领取一次，再决定返回 `EINTR`/`EAGAIN`。通用 ignored-signal 清理不得删除
 `signal_wait_mask` 中的 pending signal。
+B72 进一步规定 `prlimit` 的事务边界：先 copyin 完整新值，再在资源唯一 owner 锁内完成旧
+soft/hard pair 快照、hard-limit 权限复核和新 pair 提交，释放锁后才 copyout 旧值；reply
+`EFAULT` 不回滚。NOFILE 的两个字段必须在同一次 fd-table 临界区更新。当前 TCB/FdTable
+owner 只是迁移中状态，不得据此声称线程组 rlimit 语义已经完成。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

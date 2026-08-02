@@ -669,6 +669,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   清理不再吞掉 wait mask 中的目标。没有增加调度状态或改变通用 condition 调用次数。双架构
   8 核 build 与 glibc `sigtimedwait01` 均通过，每架构 11 TPASS、0 FAIL/BROK/CONF，源码冻结
   指纹一致；精确注入“第二次检查→Blocking”跨核交错仍为 NOT RUN，正确性主要由状态/锁证明；
+- B72 将 `prlimit()` 改为单 owner 事务：先 copyin 新值，再在当前 owner 锁内一次完成旧 pair
+  快照、hard-limit 权限复核和新 pair 提交，锁外 copyout 旧值；NOFILE 的 soft/hard setter
+  合并到同一个 fd-table 临界区。双架构 8 核 build 与 musl/glibc 各 9/9 focused LTP 均通过，
+  `online_mask=0xff` 且源码指纹一致。精确 NOFILE 双线程交错仍为 NOT RUN；进程级 rlimit owner、
+  group CPU accounting 和 `CLONE_FILES` 跨进程语义留待后续节点；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

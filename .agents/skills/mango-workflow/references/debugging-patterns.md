@@ -943,13 +943,17 @@
 - **固定协议**: 先把新值完整 copyin 并完成无锁校验；随后在唯一 owner 锁内快照旧状态、
   复核权限并一次提交新状态；释放锁后执行外部注册，再 copyout 旧值。只读 reply 也先在锁内
   复制为内核所有快照，不能把 guard 或内部引用带进 uaccess。
+- **成对字段必须一起发布**: soft/hard、value/interval 这类由一个 ABI 对象表达的字段不能拆成
+  两次 owner 锁周期。即使底层只有两个 setter，也要在同一 guard 下完成，让所有合法读者只能
+  观察某次完整提交。copyin 与目标查找的先后若影响 errno，还要直接对照官方 syscall 实现。
 - **错误语义必须查官方 ABI**: Linux 的 `setitimer`、`timer_settime`、`prlimit` 等路径在新
   状态提交后才写旧值；old pointer 的 `EFAULT` 不回滚已经生效的修改。不要凭“事务直觉”
   擅自回滚，也不要因 copyout 失败重锁覆盖并发更新。
 - **查询不能污染权威状态**: remaining/deadline 等派生值应在栈上快照中计算。若只为回复
   用户而改写 owner 内保存值，后续刷新路径可能再次应用同一时间差。
 - **相关文件**: `os/src/syscall/process/lifecycle.rs`,
-  `os/src/syscall/process/time.rs`, `docs/01_architecture/lock-order.md`
+  `os/src/syscall/process/time.rs`, `os/src/syscall/process/ids.rs`,
+  `docs/01_architecture/lock-order.md`
 
 ## WaitQueue 条件只领取内核状态，faultable 回复延后
 

@@ -840,6 +840,28 @@ wake”；因此接收方不能只依赖发送方唤醒。pending signal 本身�
 边界已经 pending 的 waited signal 优先于 `EINTR`/`EAGAIN`；领取动作仍只发生在 signal owner
 锁内，因此不会重复消费。
 
+### 3.17 B72 prlimit 的成对提交与用户回复边界
+
+`prlimit()` 同时承担“设置新值”和“返回旧值”。新值必须先完整 copyin；随后在资源当前的
+owner 锁内完成旧 soft/hard pair 快照、hard-limit 提权复核和新 pair 提交，最后释放锁再
+copyout 旧值：
+
+```text
+copyin new limit
+  -> owner lock：snapshot previous + validate hard raise + commit pair
+  -> unlock
+  -> copyout previous limit
+```
+
+NOFILE 当前由 fd table 持有，两个 setter 必须位于同一次 `files.lock()` 内；其余已实现限制
+暂由 `task.inner` 持有。任何合法读者都必须使用同一 owner 锁，因此不能观察到一半来自旧提交、
+一半来自新提交的 pair。日志和 uaccess 都不得跨越 owner 锁；old pointer 返回 `EFAULT` 时新值
+已经发布，不能回滚覆盖并发更新。
+
+这只是提交协议收口，不代表 owner 已经符合 Linux 的线程组语义。进程级 rlimit owner、组级
+CPU accounting，以及 `CLONE_FILES` 跨进程共享时 NOFILE 与 fd table 生命周期的分离仍须后续
+节点处理。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；
