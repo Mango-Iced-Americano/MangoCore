@@ -90,7 +90,7 @@ related_docs:
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53 又用 CPU1 持续用户 load + CPU0 真实 CoW PPN 替换证明精准 handler 生效，并让软件 handler 在 ack 前发布 observed，避免 trap-return 重复全刷；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | `mprotect/munmap` 权限/有效位压力与通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
-| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收 | 文件 truncate 后的 futex backing false-negative、精确 compare/enqueue 动态竞态和 Retry/内存压力仍需验证；其它共享子系统的 unsafe/static 状态由对应负责人处理 |
+| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验 | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；其它共享子系统的 unsafe/static 状态由对应负责人处理 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端和真实 CoW stale-translation 已有 focused 证据；仍需权限/有效位与高并发压力 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
@@ -649,6 +649,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   压缩/换出统一尊重 backing `Arc`。`do_oom()` 每轮只扫描入口时的候选数；`SharedPage`
   放回队尾，使 futex queue pin 解除后仍可在下一轮回收，同时避免同轮死循环。新增 MM ktest
   覆盖低地址匿名 shared 页的 pin、再次回收和 fault-in；文件 truncate 仍属 FS 边界；
+- B68 将 `FUTEX_CMP_REQUEUE` 的 source nofault load/compare 与 wake/move 串行化在同一个
+  `FutexTable` 临界区；shared 普通 REQUEUE 也在锁内复核两端 backing/PTE。VM 锁忙或映射
+  变化只能在队列修改前返回内部 Retry，锁外重新 fault-in 并重算两端 key；普通 private
+  REQUEUE 保留 VA-key 语义，不额外要求 source PTE。双架构 8 核 build、focused futex LTP
+  与 `mask=0x003` 初赛均通过；每架构 LTP 为 20 PASS + 6 版本 SKIP，初赛保持 RV64
+  312/314、LA64 308/314。精确多核 compare/write/requeue 交错仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

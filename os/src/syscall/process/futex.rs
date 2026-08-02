@@ -2,8 +2,8 @@ use crate::mm::{UserPtr, VirtAddr};
 use crate::syscall::errno::*;
 use crate::task::threads::{
     do_futex_wait, do_futex_wait_shared, do_futex_waitv, do_futex_waitv_shared,
-    futex_requeue_shared, futex_wait_deadline, futex_wake_shared, FutexCmd, FutexWaitOutcome,
-    FutexWaitSpec, SharedFutexKey,
+    futex_requeue_private, futex_requeue_shared, futex_wait_deadline, futex_wake_shared, FutexCmd,
+    FutexOpOutcome, FutexWaitSpec, SharedFutexKey,
 };
 use crate::task::{current_task, current_user_token, threads, TaskControlBlock};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
@@ -93,8 +93,8 @@ fn futex_wait(
             Err(errno) => return errno,
         };
         match outcome {
-            FutexWaitOutcome::Complete(result) => return result,
-            FutexWaitOutcome::Retry => continue,
+            FutexOpOutcome::Complete(result) => return result,
+            FutexOpOutcome::Retry => continue,
         }
     }
 }
@@ -234,44 +234,66 @@ pub fn sys_futex(
             if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
                 return EINVAL;
             }
-            match UserPtr::new(uaddr2 as *const u32).read(token) {
-                Ok(_) => {}
-                Err(errno) => return errno,
-            };
-            if cmd == FutexCmd::CmpRequeue {
-                match futex_word.read(token) {
-                    Ok(value) if value == val3 => {}
-                    Ok(_) => return EAGAIN,
-                    Err(errno) => return errno,
-                }
-            } else if !is_private {
-                if let Err(errno) = futex_word.read(token) {
+            let target_word = UserPtr::new(uaddr2 as *const u32);
+            let expected = (cmd == FutexCmd::CmpRequeue).then_some(val3);
+            let val2 = timeout as usize;
+            loop {
+                if let Err(errno) = target_word.read(token) {
                     return errno;
                 }
-            }
-            let val2 = timeout as usize;
-            if val > i32::MAX as u32 || val2 > i32::MAX as usize {
-                return EINVAL;
-            }
-            let key = match current_futex_key(private_key, is_private) {
-                Ok(key) => key,
-                Err(errno) => return errno,
-            };
-            let key2 = match current_futex_key(uaddr2 as usize, is_private) {
-                Ok(key) => key,
-                Err(errno) => return errno,
-            };
-            match (key, key2) {
-                (FutexKey::Private(key), FutexKey::Private(key2)) => current_task()
-                    .unwrap()
-                    .process
-                    .futex()
-                    .lock()
-                    .requeue(key, key2, val, val2),
-                (FutexKey::Shared(key), FutexKey::Shared(key2)) => {
-                    futex_requeue_shared(key, key2, val, val2)
+                if let Some(expected) = expected {
+                    match futex_word.read(token) {
+                        Ok(value) if value != expected => return EAGAIN,
+                        Ok(_) => {}
+                        Err(errno) => return errno,
+                    }
+                } else if !is_private {
+                    // shared key 解析需要 resident backing，先在 table 锁外完成 fault-in。
+                    // 显式 private REQUEUE 的 source key 只由 mm + VA 构成，不应额外要求
+                    // 地址当前已有 PTE；这与 Linux private futex 的 key 语义保持一致。
+                    if let Err(errno) = futex_word.read(token) {
+                        return errno;
+                    }
                 }
-                _ => EINVAL,
+                if val > i32::MAX as u32 || val2 > i32::MAX as usize {
+                    return EINVAL;
+                }
+
+                let source_key = match current_futex_key(private_key, is_private) {
+                    Ok(key) => key,
+                    Err(errno) => return errno,
+                };
+                let target_key = match current_futex_key(uaddr2 as usize, is_private) {
+                    Ok(key) => key,
+                    Err(errno) => return errno,
+                };
+                let outcome = match (source_key, target_key) {
+                    (FutexKey::Private(source), FutexKey::Private(target)) => {
+                        futex_requeue_private(
+                            futex_word,
+                            source,
+                            target_word,
+                            target,
+                            expected,
+                            val,
+                            val2,
+                        )
+                    }
+                    (FutexKey::Shared(source), FutexKey::Shared(target)) => futex_requeue_shared(
+                        futex_word,
+                        source,
+                        target_word,
+                        target,
+                        expected,
+                        val,
+                        val2,
+                    ),
+                    _ => return EINVAL,
+                };
+                match outcome {
+                    FutexOpOutcome::Complete(result) => break result,
+                    FutexOpOutcome::Retry => continue,
+                }
             }
         }
         FutexCmd::Invalid => EINVAL,
@@ -382,8 +404,8 @@ pub fn sys_futex_waitv(
             do_futex_waitv_shared(&entries, deadline)
         };
         match outcome {
-            FutexWaitOutcome::Complete(result) => return result,
-            FutexWaitOutcome::Retry => continue,
+            FutexOpOutcome::Complete(result) => return result,
+            FutexOpOutcome::Retry => continue,
         }
     }
 }

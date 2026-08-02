@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{
     hal::PageTableImpl,
-    mm::{AddressSpace, FaultAccess, FrameTracker, UserPtr, VirtAddr},
+    mm::{AddressSpace, AddressSpaceInner, FaultAccess, FrameTracker, PhysAddr, UserPtr, VirtAddr},
     syscall::errno::*,
     task::{
         block_current_and_run_next_with_lock_checked, current_task,
@@ -324,11 +324,11 @@ pub struct FutexWaitSpec {
     val: u32,
 }
 
-/// 一次 wait 注册尝试的结果。
+/// 一次可重试 futex table 操作的结果。
 ///
-/// `Retry` 只在 waiter 尚未发布时返回，syscall 层必须先在锁外重新读取
-/// 用户 word 并重算 shared key，不能把它直接暴露成用户可见 errno。
-pub enum FutexWaitOutcome {
+/// `Retry` 只在等待项尚未发布、队列尚未迁移时返回。syscall 层必须先在锁外
+/// 重新 fault-in 并重算 shared key，不能把它直接暴露成用户可见 errno。
+pub enum FutexOpOutcome {
     Complete(isize),
     Retry,
 }
@@ -388,6 +388,30 @@ enum FutexWordCheck {
     Retry,
 }
 
+/// 在已经持有 VM read guard 时解析一个 futex word，不触发缺页或 PTE 修改。
+///
+/// shared futex 还要复核调用方锁外取得的 backing。失败统一交给外层重试，
+/// 不能在持有 futex table 锁时等待 VM 锁或进入 fault-in。
+fn resolve_futex_word_nofault(
+    address_space: &AddressSpaceInner<PageTableImpl>,
+    futex_word: UserPtr<u32>,
+    expected_backing: Option<&Arc<FrameTracker>>,
+) -> Option<PhysAddr> {
+    if let Some(expected) = expected_backing {
+        let current = address_space
+            .futex_shared_backing(VirtAddr::from(futex_word.addr()))
+            .ok()
+            .flatten()?;
+        if !Arc::ptr_eq(expected, &current) {
+            return None;
+        }
+    }
+
+    address_space
+        .resolve_user_va(VirtAddr::from(futex_word.addr()), FaultAccess::Load)
+        .ok()
+}
+
 /// 在 futex table 锁内对所有 word 做无缺页复查。
 ///
 /// VM 锁只能 try-lock：锁忙、PTE 变化或 shared backing 已改变都返回
@@ -398,28 +422,63 @@ fn check_words_nofault(
 ) -> FutexWordCheck {
     vm.try_read(|address_space| {
         for entry in entries {
-            if let Some(expected) = entry.shared_backing.as_ref() {
-                let current = match address_space
-                    .futex_shared_backing(VirtAddr::from(entry.futex_word.addr()))
-                {
-                    Ok(Some(backing)) => backing,
-                    _ => return FutexWordCheck::Retry,
-                };
-                if !Arc::ptr_eq(expected, &current) {
-                    return FutexWordCheck::Retry;
-                }
-            }
-
-            let pa = match address_space
-                .resolve_user_va(VirtAddr::from(entry.futex_word.addr()), FaultAccess::Load)
-            {
-                Ok(pa) => pa,
-                Err(_) => return FutexWordCheck::Retry,
+            let Some(pa) = resolve_futex_word_nofault(
+                address_space,
+                entry.futex_word,
+                entry.shared_backing.as_ref(),
+            ) else {
+                return FutexWordCheck::Retry;
             };
             // Safety: syscall 层已验证 u32 对齐；VM try-read guard 保证
             // PTE 与 frame 在这次硬件宽度读取期间不会被并发撤销。
             let value = unsafe { pa.direct_map_ptr().cast::<u32>().read_volatile() };
             if value != entry.val {
+                return FutexWordCheck::Mismatch;
+            }
+        }
+        FutexWordCheck::Matches
+    })
+    .unwrap_or(FutexWordCheck::Retry)
+}
+
+/// 在 futex table 锁内复核 requeue 的两端映射，并可选比较 source word。
+///
+/// `expected == None` 对应 FUTEX_REQUEUE：shared source 复核 backing/PTE，private
+/// source 保留 VA-key 语义，target 均复核当前映射；`Some` 对应 FUTEX_CMP_REQUEUE，
+/// source load、比较和后续 requeue 共享同一个 table 临界区。
+fn check_requeue_nofault(
+    vm: &AddressSpace<PageTableImpl>,
+    source_word: UserPtr<u32>,
+    source_backing: Option<&Arc<FrameTracker>>,
+    target_word: UserPtr<u32>,
+    target_backing: Option<&Arc<FrameTracker>>,
+    expected: Option<u32>,
+) -> FutexWordCheck {
+    vm.try_read(|address_space| {
+        let source_pa = if expected.is_some() || source_backing.is_some() {
+            let Some(source_pa) =
+                resolve_futex_word_nofault(address_space, source_word, source_backing)
+            else {
+                return FutexWordCheck::Retry;
+            };
+            Some(source_pa)
+        } else {
+            // 普通 private REQUEUE 不读取 source word；它的 key 是进程内 VA，
+            // 与 PTE/backing 无关。额外解析 PTE 会错误收紧既有 ABI。
+            None
+        };
+        if resolve_futex_word_nofault(address_space, target_word, target_backing).is_none() {
+            return FutexWordCheck::Retry;
+        }
+
+        if let Some(expected) = expected {
+            let Some(source_pa) = source_pa else {
+                return FutexWordCheck::Retry;
+            };
+            // Safety: 两个地址已在 syscall 层验证 u32 对齐，VM guard 在读取期间
+            // 冻结 PTE；对齐的硬件 u32 load 是本次 compare 的线性化点。
+            let value = unsafe { source_pa.direct_map_ptr().cast::<u32>().read_volatile() };
+            if value != expected {
                 return FutexWordCheck::Mismatch;
             }
         }
@@ -630,12 +689,12 @@ pub fn do_futex_wait(
     futex_key: usize,
     val: u32,
     deadline: Option<TimeSpec>,
-) -> FutexWaitOutcome {
+) -> FutexOpOutcome {
     super::perf::record_futex_wait(false, deadline.is_some());
 
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
         super::perf::record_futex_wait_result(wait_result);
-        return FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result));
+        return FutexOpOutcome::Complete(futex_wait_result_to_errno(wait_result));
     }
 
     let task = current_task().unwrap();
@@ -646,14 +705,14 @@ pub fn do_futex_wait(
     let wait_result =
         match futex_wait_event_interruptible_timeout_locked(&futex_table, &vm, &entry, deadline) {
             Ok(result) => result,
-            Err(()) => return FutexWaitOutcome::Retry,
+            Err(()) => return FutexOpOutcome::Retry,
         };
     super::perf::record_futex_wait_result(wait_result);
 
-    FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result))
+    FutexOpOutcome::Complete(futex_wait_result_to_errno(wait_result))
 }
 
-pub fn do_futex_waitv(entries: &[FutexWaitSpec], deadline: Option<TimeSpec>) -> FutexWaitOutcome {
+pub fn do_futex_waitv(entries: &[FutexWaitSpec], deadline: Option<TimeSpec>) -> FutexOpOutcome {
     let task = current_task().unwrap();
     let futex_table = task.process.futex().clone();
     let vm = task.process.vm();
@@ -682,12 +741,12 @@ fn futex_waitv_locked(
     vm: &AddressSpace<PageTableImpl>,
     entries: &[FutexWaitSpec],
     deadline: Option<TimeSpec>,
-) -> FutexWaitOutcome {
+) -> FutexOpOutcome {
     let task = current_task().unwrap();
     let task_weak = Arc::downgrade(&task);
     let mut waiters = Vec::new();
     if waiters.try_reserve(entries.len()).is_err() {
-        return FutexWaitOutcome::Complete(ENOMEM);
+        return FutexOpOutcome::Complete(ENOMEM);
     }
     for entry in entries {
         waiters.push(Arc::new(FutexWaiter::new(
@@ -698,15 +757,15 @@ fn futex_waitv_locked(
 
     let mut table = lock.lock();
     if deadline_expired(deadline) {
-        return FutexWaitOutcome::Complete(ETIMEDOUT);
+        return FutexOpOutcome::Complete(ETIMEDOUT);
     }
     match check_words_nofault(vm, entries) {
         FutexWordCheck::Matches => {}
-        FutexWordCheck::Mismatch => return FutexWaitOutcome::Complete(EAGAIN),
-        FutexWordCheck::Retry => return FutexWaitOutcome::Retry,
+        FutexWordCheck::Mismatch => return FutexOpOutcome::Complete(EAGAIN),
+        FutexWordCheck::Retry => return FutexOpOutcome::Retry,
     }
     if has_actionable_signal(&task) {
-        return FutexWaitOutcome::Complete(EINTR);
+        return FutexOpOutcome::Complete(EINTR);
     }
     for (entry, waiter) in entries.iter().zip(waiters.iter()) {
         table.enqueue(
@@ -726,15 +785,15 @@ fn futex_waitv_locked(
         let mut table = lock.lock();
         if let Some(index) = last_woken_index(&waiters) {
             remove_waitv(&mut table, &waiters);
-            return FutexWaitOutcome::Complete(index as isize);
+            return FutexOpOutcome::Complete(index as isize);
         }
         if deadline_expired(deadline) {
             remove_waitv(&mut table, &waiters);
-            return FutexWaitOutcome::Complete(ETIMEDOUT);
+            return FutexOpOutcome::Complete(ETIMEDOUT);
         }
         if has_actionable_signal(&task) {
             remove_waitv(&mut table, &waiters);
-            return FutexWaitOutcome::Complete(EINTR);
+            return FutexOpOutcome::Complete(EINTR);
         }
         discard_non_actionable_unblocked_signals(&task);
 
@@ -761,28 +820,108 @@ pub fn futex_wake_shared(key: SharedFutexKey, val: u32) -> isize {
     woke
 }
 
+/// 在调用方持有的 table 临界区内复核映射，并执行一次 requeue。
+///
+/// `expected` 为 `Some` 时，source 值比较也位于这个临界区；`Retry`
+/// 只表示尚未修改任何队列，调用方必须在锁外重新 fault-in 和解析 key。
+fn requeue_checked(
+    table: &mut FutexTable,
+    vm: &AddressSpace<PageTableImpl>,
+    source_word: UserPtr<u32>,
+    source_key: QueueKey,
+    source_backing: Option<&Arc<FrameTracker>>,
+    target_word: UserPtr<u32>,
+    target_key: QueueKey,
+    target_backing: Option<&Arc<FrameTracker>>,
+    expected: Option<u32>,
+    wake: u32,
+    move_count: usize,
+) -> FutexOpOutcome {
+    match check_requeue_nofault(
+        vm,
+        source_word,
+        source_backing,
+        target_word,
+        target_backing,
+        expected,
+    ) {
+        FutexWordCheck::Matches => FutexOpOutcome::Complete(table.requeue_waiters(
+            source_key,
+            target_key,
+            target_backing,
+            wake,
+            move_count,
+        )),
+        FutexWordCheck::Mismatch => FutexOpOutcome::Complete(EAGAIN),
+        FutexWordCheck::Retry => FutexOpOutcome::Retry,
+    }
+}
+
+/// 对进程私有 futex 执行带锁内 nofault 复查的 requeue。
+pub fn futex_requeue_private(
+    source_word: UserPtr<u32>,
+    source_key: usize,
+    target_word: UserPtr<u32>,
+    target_key: usize,
+    expected: Option<u32>,
+    wake: u32,
+    move_count: usize,
+) -> FutexOpOutcome {
+    let task = current_task().unwrap();
+    let table = task.process.futex();
+    let vm = task.process.vm();
+    drop(task);
+    let mut table = table.lock();
+    requeue_checked(
+        &mut table,
+        &vm,
+        source_word,
+        QueueKey::private(source_key),
+        None,
+        target_word,
+        QueueKey::private(target_key),
+        None,
+        expected,
+        wake,
+        move_count,
+    )
+}
+
+/// 对 process-shared futex 执行带 backing 复查的 requeue。
 pub fn futex_requeue_shared(
+    source_word: UserPtr<u32>,
     source: SharedFutexKey,
+    target_word: UserPtr<u32>,
     target: SharedFutexKey,
-    val: u32,
-    val2: usize,
-) -> isize {
-    let mut shared = PROCESS_SHARED_FUTEX.lock();
-    let ret = shared.requeue_waiters(
+    expected: Option<u32>,
+    wake: u32,
+    move_count: usize,
+) -> FutexOpOutcome {
+    let task = current_task().unwrap();
+    let vm = task.process.vm();
+    drop(task);
+    let mut table = PROCESS_SHARED_FUTEX.lock();
+    let result = requeue_checked(
+        &mut table,
+        &vm,
+        source_word,
         source.queue_key(),
+        Some(&source.backing),
+        target_word,
         target.queue_key(),
         Some(&target.backing),
-        val,
-        val2,
+        expected,
+        wake,
+        move_count,
     );
-    refresh_shared_futex_nonempty(&shared);
-    ret
+    refresh_shared_futex_nonempty(&table);
+    result
 }
 
 pub fn do_futex_waitv_shared(
     entries: &[FutexWaitSpec],
     deadline: Option<TimeSpec>,
-) -> FutexWaitOutcome {
+) -> FutexOpOutcome {
     let task = current_task().unwrap();
     let vm = task.process.vm();
     drop(task);
@@ -800,11 +939,11 @@ pub fn do_futex_wait_shared(
     val: u32,
     deadline: Option<TimeSpec>,
     key: SharedFutexKey,
-) -> FutexWaitOutcome {
+) -> FutexOpOutcome {
     super::perf::record_futex_wait(true, deadline.is_some());
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
         super::perf::record_futex_wait_result(wait_result);
-        return FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result));
+        return FutexOpOutcome::Complete(futex_wait_result_to_errno(wait_result));
     }
 
     let task = current_task().unwrap();
@@ -822,7 +961,7 @@ pub fn do_futex_wait_shared(
         Err(()) => {
             let shared = PROCESS_SHARED_FUTEX.lock();
             refresh_shared_futex_nonempty(&shared);
-            return FutexWaitOutcome::Retry;
+            return FutexOpOutcome::Retry;
         }
     };
     let shared = PROCESS_SHARED_FUTEX.lock();
@@ -830,7 +969,7 @@ pub fn do_futex_wait_shared(
     drop(shared);
     super::perf::record_futex_wait_result(wait_result);
 
-    FutexWaitOutcome::Complete(futex_wait_result_to_errno(wait_result))
+    FutexOpOutcome::Complete(futex_wait_result_to_errno(wait_result))
 }
 
 impl FutexTable {
@@ -945,22 +1084,5 @@ impl FutexTable {
         let woke = self.wake_waiters(QueueKey::private(futex_key), val);
         super::perf::record_futex_wake(false, woke);
         woke
-    }
-
-    /// 先唤醒 `val` 个等待项，再把最多 `val2` 个其余项搬到目标 key。
-    pub fn requeue(
-        &mut self,
-        futex_key: usize,
-        futex_key_2: usize,
-        val: u32,
-        val2: usize,
-    ) -> isize {
-        self.requeue_waiters(
-            QueueKey::private(futex_key),
-            QueueKey::private(futex_key_2),
-            None,
-            val,
-            val2,
-        )
     }
 }

@@ -351,6 +351,31 @@ futex 的最后一次值比较必须和 waiter 发布共用 table 锁，才能�
 发生的并发 unmap/remap、文件 truncate backing 替换，以及 VM 锁长期繁忙时的重试公平性
 仍是独立边界，不能写成 B66/B67 已动态证明。
 
+#### B68 futex compare 与 requeue 原子性
+
+`FUTEX_CMP_REQUEUE` 不仅要稳定两个 key，还必须让 source word 的比较与队列修改构成同一
+线性化操作。若在 table 锁外比较，另一 CPU 可在比较后改写 source，而旧请求仍会错误地
+wake/move waiter。B68 复用 B66 的条件式锁边：
+
+```text
+锁外 fault-in source/target，并解析两个 key
+  -> FutexTable 锁
+       -> AddressSpace VM try_lock
+       -> shared 两端复核 backing + PTE；private CMP 复核 source PTE
+       -> nofault 读取并比较 source word
+       -> 同一 table 临界区 wake/requeue
+  -> 解锁
+```
+
+- `FutexTable -> AddressSpace` 仍只允许 `try_lock()`；锁忙或映射变化必须在队列尚未修改时
+  返回内部 `Retry`，释放 table 后完整重算两端 key；
+- 普通 private REQUEUE 不读取 source，其 key 是当前 MM 内的 VA，因此不新增 source PTE
+  前置条件；CMP private 必须读取 source，不能跳过 nofault 复查；
+- shared 的 source/target 都要复核 backing 对象身份和 PTE，不能只比较 PPN；
+- compare 成功后不得释放 table 再调用 requeue，也不得在部分 wake/move 后返回 `Retry`；
+- 该锁协议提供静态线性化证明；focused LTP 不会精确制造多核 compare/write/requeue 交错，
+  因而专项动态竞态仍标记为 NOT RUN。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护

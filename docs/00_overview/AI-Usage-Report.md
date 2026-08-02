@@ -87,6 +87,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP futex requeue waiter 身份 | 2026-08-02 | GPT/Codex, DeepSeek | Linux `futex_q`/requeue/waitv 对照、Arc 身份与锁序审查、双架构 8 核 futex LTP | 专用 waiter 跟随 requeue 更新 current key，真实 wake 独立发布；每架构 20 PASS + 6 版本 SKIP，shared key ABA 保留后续 |
 | SMP shared futex 稳定 backing key | 2026-08-02 | GPT/Codex, DeepSeek | Linux futex key 生命周期、三类 shared mapping 的 Arc 所有权、锁序与双架构 8 核 futex LTP | backing identity + 队列级 pin 排除 raw PPN 错误命中；每架构 20 PASS + 6 版本 SKIP，强制换出 false-negative 与锁内 uaccess 保留后续 |
 | SMP futex nofault 原子注册 | 2026-08-02 | GPT/Codex, DeepSeek | Linux `futex_wait_setup` 对照、table/VM 条件式锁边审查、冻结源码的双架构 8 核构建与 futex LTP | 锁外 fault-in/key 解析，table 锁内 VM try-read 完成最终比较与 waiter 发布；每架构 20 PASS + 6 版本 SKIP，精确竞态保留 NOT RUN |
+| SMP shared futex pin 与匿名页回收 | 2026-08-02 | GPT/Codex, DeepSeek | backing 所有权、OOM 强制路径与候选队列审查、双架构 MM ktest | 删除绕过引用计数的 force swap；临时 pin 页有界重排并可再次回收，文件 truncate 保留后续 |
+| SMP futex compare/requeue 原子化 | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 requeue/private-key 对照、锁内线性化与冻结双架构 8 核门禁 | CMP source compare 与 wake/requeue 共用 table 锁；shared 两端锁内 nofault 重验，每架构 LTP 20 PASS + 6 版本 SKIP，初赛失败集合不变 |
 
 ## 4. 详细使用场景
 
@@ -1275,6 +1277,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b65-shared-futex-key-summary.md` | SMP shared futex 稳定 backing key | 记录 raw PPN ABA 根因、三类 shared mapping 身份证明、队列级 pin、DeepSeek 推断纠错与双架构 8 核 focused 证据 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b66-futex-nofault-summary.md` | SMP futex nofault 原子注册 | 记录锁外 fault-in、table 锁内 VM try-read、内部 Retry/固定 deadline、DeepSeek 事实纠错及双架构 8 核 focused 证据 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b67-futex-reclaim-summary.md` | SMP shared futex pin 与 OOM 回收 | 记录 force-swap backing 分裂、临时 pin 候选重排、DeepSeek 审查遗漏补充、mutation 失败披露及双架构 8 核 MM ktest |
+| `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b68-futex-requeue-atomicity-summary.md` | SMP futex compare/requeue 原子化 | 记录锁外 compare 窗口、table 锁内 nofault compare+mutation、private/shared 差异、模型纠错、双架构 focused/初赛冻结证据与动态竞态 NOT RUN 边界 |
 
 ## 9. 交互记录与留痕方式
 

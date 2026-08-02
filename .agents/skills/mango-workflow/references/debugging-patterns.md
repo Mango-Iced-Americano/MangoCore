@@ -917,6 +917,10 @@
 - **固定协议**: 先在锁外做 faultable 用户读取和 key 解析，提前分配 waiter、clone VM owner；
   再取得 queue/table 锁，只用 VM `try_lock` 解析现有 PTE、校验权限并做一个硬件宽度的
   nofault 读取。值匹配时在同一 table 临界区发布 waiter；不匹配返回 `EAGAIN`。
+- **条件修改也要共用线性化锁**: `CMP_REQUEUE` 一类操作不能只把队列搬运加锁，而把用户
+  条件比较留在锁外。应先在锁外 fault-in/解析 key，再在 table 锁内 nofault 比较，并在
+  同一临界区完成 wake/move。`Retry` 只能在零队列副作用时返回；一旦开始修改就不能重放。
+  对不读取 source 的 private REQUEUE，不要为了统一流程擅自增加 PTE 前置条件。
 - **nofault 不只是不调用 fault handler**: 若 helper 在外层自旋锁内阻塞等待 VM 锁，它仍然
   不是可接受的 nofault 路径。该边只能是条件式非阻塞 `table -> VM try_lock`；锁忙、PTE
   变化或 shared backing 身份不一致都在 waiter 发布前返回内部 Retry，释放 table 后完整
