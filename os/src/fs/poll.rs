@@ -118,13 +118,16 @@ fn apply_temporary_sigmask(sigmask: *const Signals) -> Result<Option<Signals>, i
     let mut inner = task.acquire_inner_lock();
     let old_mask = inner.sigmask;
     inner.sigmask = new_mask;
+    task.recalculate_signal_pending_with_inner(&inner);
     Ok(Some(old_mask))
 }
 
 fn restore_sigmask(old_mask: Option<Signals>) {
     if let Some(old_mask) = old_mask {
         if let Some(task) = current_task() {
-            task.acquire_inner_lock().sigmask = old_mask;
+            let mut inner = task.acquire_inner_lock();
+            inner.sigmask = old_mask;
+            task.recalculate_signal_pending_with_inner(&inner);
         }
     }
 }
