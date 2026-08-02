@@ -29,7 +29,7 @@ use core::sync::atomic::Ordering;
 /// # Errors
 ///
 /// - `-EAGAIN`：非阻塞模式下无可用连接。
-/// - `-ERESTART`：阻塞等待期间被信号中断。
+/// - `-EINTR`：阻塞等待期间被信号中断，或由 SA_RESTART 自动重启。
 /// - `-EMFILE`：fd 表已满。
 /// - `-EINVAL`：非监听 socket。
 ///
@@ -67,7 +67,9 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
                     }
                 }) {
                     WaitResult::Ready(val) => break val,
-                    WaitResult::Interrupted => break -(SyscallErr::ERESTART as isize),
+                    WaitResult::Interrupted => {
+                        break crate::task::RestartKind::RestartSys.syscall_result()
+                    }
                     WaitResult::TimedOut => continue,
                 }
             };

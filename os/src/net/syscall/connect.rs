@@ -17,7 +17,7 @@ use alloc::format;
 ///
 /// **阻塞模式**：若 `socket.connect()` 返回 `EAGAIN` 且有 `connect_wait_queue`，
 /// 进入 `WaitQueue::wait_until_interruptible` 循环，条件闭包调用 `socket.try_connect()`
-/// 检查握手状态。信号中断返回 `-ERESTART`。
+/// 检查握手状态。信号中断使用内部 restart class。
 ///
 /// **非阻塞模式**：`connect()` 返回 `EAGAIN` 时立即返回 `-EINPROGRESS`
 /// （与 Linux 语义一致，应用通过 `poll(EPOLLOUT)` 等待完成）。
@@ -27,7 +27,7 @@ use alloc::format;
 ///
 /// - `-EINVAL`：`addrlen` 超限。
 /// - `-EINPROGRESS`：非阻塞连接尚未完成（正常，非错误）。
-/// - `-ERESTART`：阻塞等待期间被信号中断。
+/// - `-EINTR`：阻塞等待期间被信号中断，或由 SA_RESTART 自动重启。
 /// - 其他错误由 `socket.connect()`/`try_connect()` 产生。
 ///
 /// # Linux Compatibility
@@ -95,14 +95,19 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             return -(SyscallErr::EINPROGRESS as isize);
         } else {
             NET_INTERFACE.poll();
-            WaitQueue::wait_until_interruptible(wait_queue, || {
+            match WaitQueue::wait_until_interruptible(wait_queue, || {
                 match socket.try_connect_without_poll() {
                     Ok(n) => Some(n as isize),
                     Err(SyscallErr::EAGAIN) => None,
                     Err(e) => Some(-(e as isize)),
                 }
-            })
-            .unwrap_or_else(|e| e)
+            }) {
+                crate::task::WaitResult::Ready(value) => value,
+                crate::task::WaitResult::Interrupted => {
+                    crate::task::RestartKind::RestartSys.syscall_result()
+                }
+                crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+            }
         }
     } else {
         wait_io(|| socket.try_connect(), is_nonblock)
