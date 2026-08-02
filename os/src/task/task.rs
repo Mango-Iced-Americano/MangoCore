@@ -153,6 +153,13 @@ pub struct TaskControlBlock {
     /// 防止在 log=off 的高频 loopback accept/connect 循环中 KERNEL_TIMER_QUEUE 无限增长。
     /// 定时器触发后，run_timer 会无条件清回 false（Option A）。
     pub wait_io_timer_pending: AtomicBool,
+    /// Lockless equivalent of Linux's TIF_SIGPENDING for the exit-to-user path.
+    ///
+    /// The bit is set whenever a signal is queued and recalculated whenever a
+    /// pending queue or signal mask changes.  A clear bit proves that this
+    /// thread has no unblocked thread- or process-pending signal, allowing
+    /// `trap_return()` to skip `do_signal()` entirely.
+    signal_pending: AtomicBool,
     /// Generation for timeout wake timers.  Each newly armed wake timer bumps
     /// this value so older stale timers can expire without waking the task.
     pub wait_timer_generation: AtomicUsize,
@@ -642,6 +649,34 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    /// Returns whether exit-to-user must enter the signal slow path.
+    #[inline(always)]
+    pub fn signal_pending_fast(&self) -> bool {
+        self.signal_pending.load(Ordering::Acquire)
+    }
+
+    /// Conservatively publish a newly queued signal without taking `inner`.
+    #[inline(always)]
+    pub(crate) fn set_signal_pending(&self) {
+        self.signal_pending.store(true, Ordering::Release);
+    }
+
+    /// Recalculate the exit-to-user signal bit while the caller holds `inner`.
+    #[inline(always)]
+    pub(crate) fn recalculate_signal_pending_with_inner(&self, inner: &TaskControlBlockInner) {
+        let pending = inner.sigpending.pending() | self.process.shared_pending_hint();
+        self.signal_pending.store(
+            !pending.difference(inner.sigmask).is_empty(),
+            Ordering::Release,
+        );
+    }
+
+    /// Recalculate the exit-to-user signal bit after a mask or queue mutation.
+    pub(crate) fn recalculate_signal_pending(&self) {
+        let inner = self.acquire_inner_lock();
+        self.recalculate_signal_pending_with_inner(&inner);
+    }
+
     fn write_clear_child_tid_word(
         &self,
         addr: usize,
@@ -917,6 +952,7 @@ impl TaskControlBlock {
             exit_signal: Signals::empty(),
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
+            signal_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
@@ -1051,6 +1087,7 @@ impl TaskControlBlock {
             exit_signal: Signals::empty(),
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
+            signal_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
@@ -1265,6 +1302,7 @@ impl TaskControlBlock {
         self.process.replace_vm(memory_set);
         // 清空信号处理函数表
         self.process.sighand().lock().reset();
+        self.process.refresh_signal_pending_for_threads();
         // 清空futex
         self.process.futex().lock().clear();
         Ok(())
@@ -1368,6 +1406,7 @@ impl TaskControlBlock {
         }
         self.process.replace_vm(memory_set);
         self.process.sighand().lock().reset();
+        self.process.refresh_signal_pending_for_threads();
         self.process.futex().lock().clear();
         Ok(())
     }
@@ -1611,6 +1650,7 @@ impl TaskControlBlock {
             exit_signal,
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
+            signal_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
             asid: core::sync::atomic::AtomicU16::new(0),

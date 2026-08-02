@@ -172,6 +172,7 @@ fn send_thread_signal_info(
             || (inner.task_status == TaskStatus::Interruptible
                 && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake))
     };
+    task.set_signal_pending();
     task.process.notify_signal_waiters();
     if should_wake {
         wake_task_if_interruptible(task.clone());

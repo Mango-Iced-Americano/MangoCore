@@ -940,6 +940,7 @@ impl ProcessControlBlock {
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
+        self.refresh_signal_pending_for_threads();
         self.notify_signal_waiters();
     }
 
@@ -964,6 +965,7 @@ impl ProcessControlBlock {
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
+        self.refresh_signal_pending_for_threads();
         removed
     }
 
@@ -976,7 +978,16 @@ impl ProcessControlBlock {
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
+        self.refresh_signal_pending_for_threads();
         pending
+    }
+
+    /// Refresh every thread's exit-to-user signal bit after a shared-pending
+    /// queue mutation or an action-table change.
+    pub(crate) fn refresh_signal_pending_for_threads(&self) {
+        for task in self.threads() {
+            task.recalculate_signal_pending();
+        }
     }
 
     /// 请求线程组退出。
@@ -1227,6 +1238,7 @@ impl ProcessControlBlock {
                                 false
                             }
                         };
+                        parent_task.set_signal_pending();
                         parent_task.process.notify_signal_waiters();
                         if should_wake {
                             wake_interruptible(parent_task);

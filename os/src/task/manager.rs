@@ -23,7 +23,7 @@ use crate::timer::{TimeSpec, TimeVal};
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     current_task_ref, discard_non_actionable_unblocked_signals, has_actionable_signal,
-    signal::{SigInfo, Signals},
+    signal::{RestartKind, SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
@@ -779,18 +779,26 @@ pub fn send_signal_to_interruptible(signal: Signals) -> bool {
         return false;
     }
     let mut sent = false;
+    let mut tasks_to_wake = Vec::new();
     for task in &tasks {
-        {
+        let should_wake = {
             let mut inner = task.acquire_inner_lock();
             inner.add_signal(signal);
-            if inner.task_status == TaskStatus::Interruptible {
+            let should_wake = inner.task_status == TaskStatus::Interruptible
+                && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true);
+            if should_wake {
                 inner.task_status = TaskStatus::Ready;
             }
-        }
+            should_wake
+        };
+        task.set_signal_pending();
         task.process.notify_signal_waiters();
+        if should_wake {
+            tasks_to_wake.push(task.clone());
+        }
         sent = true;
     }
-    enqueue_ready_batch(tasks);
+    enqueue_ready_batch(tasks_to_wake);
     sent
 }
 
@@ -818,7 +826,7 @@ impl WaitResult {
     pub fn unwrap_or_else(self, f: impl FnOnce(isize) -> isize) -> isize {
         match self {
             WaitResult::Ready(value) => value,
-            WaitResult::Interrupted => f(-(SyscallErr::ERESTART as isize)),
+            WaitResult::Interrupted => f(RestartKind::RestartSys.syscall_result()),
             WaitResult::TimedOut => f(-(SyscallErr::EAGAIN as isize)),
         }
     }
@@ -1406,7 +1414,7 @@ impl WaitQueue {
     {
         match Self::wait_event_impl(wq, &mut cond, false, None) {
             WaitResult::Ready(value) => value,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::Interrupted => RestartKind::RestartSys.syscall_result(),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     }
@@ -1435,7 +1443,7 @@ impl WaitQueue {
     {
         match Self::wait_event_impl(wq, &mut cond, false, None) {
             WaitResult::Ready(value) => value,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::Interrupted => RestartKind::RestartSys.syscall_result(),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     }
@@ -1833,6 +1841,7 @@ impl KernelTimerQueue {
                         should_wake = true;
                     }
                 }
+                task.set_signal_pending();
                 task.process.notify_signal_waiters();
                 if should_wake {
                     wake_interruptible(task.clone());
@@ -1913,6 +1922,9 @@ impl KernelTimerQueue {
                             should_wake = true;
                         }
                     }
+                }
+                if !signal.is_empty() {
+                    task.set_signal_pending();
                 }
                 if !signal.is_empty() {
                     task.process.notify_signal_waiters();
