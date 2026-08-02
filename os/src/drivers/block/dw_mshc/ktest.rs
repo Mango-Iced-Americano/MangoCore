@@ -6,7 +6,9 @@ use crate::kernel_tests::runner::KernelTest;
 use crate::hal::device::DeviceManager;
 
 use super::jh7110::discover_v1;
-use super::mmio::{card_clock_divider, data_error, Response};
+use super::mmio::{
+    card_clock_divider, data_error, idmac_control, transfer_command, transfer_needs_stop, Response,
+};
 use super::sd::{command_word, csd_capacity_sectors};
 use super::{block_first_sector, DwMshcError};
 
@@ -36,7 +38,28 @@ fn encodes_commands() -> Result<(), &'static str> {
     if command_word(2, Response::R2, false, false) & ((1 << 6) | (1 << 7) | (1 << 8)) != (1 << 6) | (1 << 7) | (1 << 8) { return Err("R2 encoding changed"); }
     if command_word(41, Response::R3, false, false) != 41 | (1 << 6) { return Err("R3 encoding changed"); }
     if command_word(24, Response::R1, true, false) & (1 << 10) != 0 { return Err("command_word must not set DAT_WR; write path ORs it explicitly"); }
-    if data_error(1 << 7) != Some(DwMshcError::DataCrc) || data_error(1 << 11) != Some(DwMshcError::FifoRun) { return Err("data error mapping changed"); }
+    if transfer_command(1, false) != 17
+        || transfer_command(8, false) != 18
+        || transfer_command(1, true) != 24
+        || transfer_command(8, true) != 25
+        || transfer_needs_stop(1)
+        || !transfer_needs_stop(8)
+    {
+        return Err("single and multi-block command selection changed");
+    }
+    if data_error(25, 1 << 8) != Some(DwMshcError::CommandTimeout(25))
+        || data_error(18, 1 << 6) != Some(DwMshcError::ResponseCrc(18))
+        || data_error(18, 1 << 7) != Some(DwMshcError::DataCrc)
+        || data_error(18, 1 << 11) != Some(DwMshcError::FifoRun)
+    {
+        return Err("data error mapping changed");
+    }
+    if idmac_control(0, 2) != 0x8000_001a
+        || idmac_control(1, 2) != 0x8000_0004
+        || idmac_control(0, 1) != 0x8000_000c
+    {
+        return Err("IDMAC descriptor control flags changed");
+    }
     Ok(())
 }
 

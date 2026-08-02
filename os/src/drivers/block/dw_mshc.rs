@@ -36,6 +36,7 @@ pub(crate) enum DwMshcError {
     StartBit,
     EndBit,
     HardwareLocked,
+    DmaFault,
     ShortTransfer,
     UnsupportedCard,
     OutOfRange,
@@ -157,13 +158,10 @@ impl BlockDevice for DwMshc {
             return Err(BlockDeviceError::OutOfBounds);
         }
         let card = inner.card;
-        for (offset, sector) in (first_sector..end_sector).enumerate() {
-            inner
-                .host
-                .read_sector(&card, sector as u64, &mut buf[offset * 512..(offset + 1) * 512])
-                .map_err(|_| BlockDeviceError::DeviceError)?;
-        }
-        Ok(())
+        inner
+            .host
+            .read_blocks(&card, first_sector as u64, buf)
+            .map_err(|_| BlockDeviceError::DeviceError)
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
@@ -176,13 +174,10 @@ impl BlockDevice for DwMshc {
             return Err(BlockDeviceError::OutOfBounds);
         }
         let card = inner.card;
-        for (offset, sector) in (first_sector..end_sector).enumerate() {
-            inner
-                .host
-                .write_sector(&card, sector as u64, &buf[offset * 512..(offset + 1) * 512])
-                .map_err(|_| BlockDeviceError::DeviceError)?;
-        }
-        Ok(())
+        inner
+            .host
+            .write_blocks(&card, first_sector as u64, buf)
+            .map_err(|_| BlockDeviceError::DeviceError)
     }
 
     fn size_bytes(&self) -> Option<u64> {
