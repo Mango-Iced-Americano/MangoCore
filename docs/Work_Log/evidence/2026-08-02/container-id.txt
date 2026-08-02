@@ -1,0 +1,4 @@
+79040401ef8ae6676c80bef92fd8e455180bf79ee55348a8dd8a7893fe790815
+/root/projects/MangoCore -> /app
+/etc/localtime -> /etc/localtime
+
