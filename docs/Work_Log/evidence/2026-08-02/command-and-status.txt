@@ -1,0 +1,5 @@
+command=docker exec mangocore-os-dev-1 bash -lc 'cd /app && make test ARCH=rv64 PROFILE=regression'
+qemu_result=[L4 REGRESSION RESULT: PASS]; === REGRESSION PASS ===
+docker_exec_exit_status=not captured: the archival wrapper assigned zsh's reserved `status` name after the command completed and then exited nonzero.
+archival_wrapper_exit_status=1
+verification_basis=the complete QEMU log records 22 passed, 0 failed, 1 known skip and the regression PASS markers; no rerun was performed.

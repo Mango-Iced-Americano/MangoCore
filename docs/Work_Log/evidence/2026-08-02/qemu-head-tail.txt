@@ -1,0 +1,81 @@
+Rust toolchain preflight passed: nightly-2026-05-10
+make -C os "ARCH=rv64" "MODE=release" "PROFILE=regression" "BUILD_ROOT=/app/build" test
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=rv64 -f make/rv64.mk regression-run MODE=release PRODUCT_ROOT="/app/build/rv64/release/regression" KERNEL_OUTPUT_ROOT="/app/build/rv64/release/regression/kernel"
+make[2]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+[regression] Building kernel with regression initramfs...
+make[3]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make[4]: Entering directory '/app/user'
+Rust toolchain preflight passed: nightly-2026-05-10
+CARGO_TARGET_DIR="/app/build/rv64/release/regression/user" cargo build --target=riscv64gc-unknown-none-elf --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+  |
+  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: the feature `panic_info_message` has been stable since 1.81.0 and no longer requires an attribute to enable
+ --> src/lib.rs:4:12
+  |
+4 | #![feature(panic_info_message)]
+  |            ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: creating a shared reference to mutable static
+  --> src/lib.rs:85:19
+   |
+85 |             .init(HEAP_SPACE.as_ptr() as usize, USER_HEAP_SIZE);
+   |                   ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+   |
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+[regression_net_unix_pair] invalid_inputs=true
+ok 10 net_unix_pair
+ok 11 net_tcp_accept
+ok 12 net_unix_connect
+ok 13 net_udp
+[regression_eventfd] start
+[regression_eventfd] PASS
+ok 14 eventfd
+[regression_epoll] start
+[regression_epoll] PASS
+ok 15 epoll
+[regression_futex] start
+[regression_futex] PASS
+ok 16 futex
+[regression_timerfd] start
+[regression_timerfd] PASS: blocked 47ms
+ok 17 timerfd
+[regression_ipc_sem] start
+[regression_ipc_sem] PASS: blocked 101ms
+ok 18 ipc_sem
+[regression_nanosleep] start
+[regression_nanosleep] PASS: blocked 51ms, remaining 149962200ns
+ok 19 nanosleep
+[regression_futex_requeue] start
+[regression_futex_requeue] PASS
+ok 20 futex_requeue
+[regression_ipc_msg] start
+[regression_ipc_msg] PASS
+ok 21 ipc_msg
+[regression_child_wait] start
+[regression_child_wait] PASS
+ok 22 child_wait
+[regression_pipe_resize] skip # kernel bug: resize wakeup path
+ok 23 pipe_resize # SKIP known kernel bug: resize wakeup
+# results: 22 passed, 0 failed, 1 skipped, 23 total
+[L4 REGRESSION RESULT: PASS]
+[exit] shutting down (emulator or unknown platform)
+=== REGRESSION PASS ===
+make[2]: Leaving directory '/app/os'
+make[1]: Leaving directory '/app/os'
