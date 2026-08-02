@@ -330,48 +330,14 @@ pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *con
 | `pid == 0` | 等待同进程组子进程 |
 | `pid < -1` | 等待 pgid 为 `|pid|` 的子进程 |
 
-`pid == i32::MIN` 返回 `ESRCH`。option 必须由 `WaitOption` 支持的位组成，否则 `EINVAL`。status 非 NULL 时写回用户地址。
-
-`sys_wait4()` 的源码包装如下：
-
-```rust
-pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) -> isize {
-    if pid == i32::MIN as isize {
-        return ESRCH;
-    }
-    let option = match WaitOption::from_bits(option) {
-        Some(option) => option,
-        None => return EINVAL,
-    };
-    let task = current_task().unwrap();
-    let token = current_user_token();
-    let process = task.process.clone();
-    match ProcessManager::wait_child(
-        &process,
-        pid,
-        option.contains(WaitOption::WNOHANG),
-        true,
-        option.contains(WaitOption::WSTOPPED),
-        option.contains(WaitOption::WCONTINUED),
-        option.contains(WaitOption::WNOWAIT),
-    ) {
-        Ok(Some(child)) => {
-            if !status.is_null() {
-                if let Err(errno) = UserPtrMut::new(status).write(token, &child.status) {
-                    return errno;
-                }
-            }
-            child.pid as isize
-        }
-        Ok(None) => SUCCESS,
-        Err(errno) => errno,
-    }
-}
-```
+`pid == i32::MIN` 返回 `ESRCH`。option 必须由 `WaitOption` 支持的位组成，否则 `EINVAL`。
+匹配事件先在内核中快照 PID/status/RUSAGE_BOTH；释放 parent/child 锁后，按 status→rusage
+顺序写回。写回 `EFAULT` 不回滚已经发生的 reap 或事件消费。
 
 ### 5.3 waitid
 
-`waitid` 要求 options 至少包含 `WEXITED | WSTOPPED | WCONTINUED` 之一，否则 `EINVAL`。`WSTOPPED/WCONTINUED` 会被解析接受；完整 stopped/continued 子进程状态上报尚未接入，主路径仍以 exited/zombie child 为准。支持 idtype：
+`waitid` 要求 options 至少包含 `WEXITED | WSTOPPED | WCONTINUED` 之一，否则 `EINVAL`。
+exited、stopped 和 continued 均返回对应 wait status。支持 idtype：
 
 | idtype | 语义 |
 |--------|------|
@@ -383,6 +349,8 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
 pidfd 为 nonblock 且目标未 zombie 时返回 `EAGAIN`。`WNOWAIT` 会保留子进程等待状态。
 
 `waitid_siginfo()` 根据 wait status 生成 `SIGCHLD` siginfo，覆盖 exited、killed、dumped、stopped、continued。
+Linux raw `waitid` 的第五个参数可返回 rusage；MangoCore 在事件快照完成、全部进程锁释放后按
+rusage→siginfo 顺序写回。WNOHANG 没有事件时只清零 siginfo，不改写 rusage。
 
 ## 6. robust list 与 clear child tid
 
@@ -469,9 +437,9 @@ soft limit 命中后推进一秒，hard limit 优先。线程 clone 共享限制
 B75 在同一 PCB 记账中增加 user/system 分项，并保留独立 total 作为 CPU limit 的权威阈值源。
 `getrusage(RUSAGE_SELF)`、`times()` 和 process CPU clock 现在返回线程组累计；thread CPU
 clock 与 `RUSAGE_THREAD` 仍只读取指定 TCB。退出前强制冲刷本地尾数，最后线程保存组级 zombie
-快照，因而已退出 sibling 的时间不会丢失。内部 wait/reap 已持有这份组级数据；`wait4` 和 raw
-`waitid` 向用户写回 child rusage 仍由 B76 补齐。POSIX CPU timer 仍沿用旧的 wall-time owner，
-不能从查询修正外推为 timer 语义已完成。
+快照，因而已退出 sibling 的时间不会丢失。B76 又让内部 wait/reap 只生成一次 RUSAGE_BOTH
+快照，并由 `wait4`/raw `waitid` 在锁外写回；同一值同时累加到 parent，避免 PID 回收后重查。
+POSIX CPU timer 仍沿用旧的 wall-time owner，不能从查询修正外推为 timer 语义已完成。
 
 NOFILE 仍由 fd table 持有，等待与 `CLONE_FILES` 的跨进程生命周期分离。因此当前只剩这一项
 rlimit owner 例外，不能把 fd-table 限制外推为完整进程属性。

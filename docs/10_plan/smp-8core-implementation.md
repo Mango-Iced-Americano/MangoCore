@@ -691,6 +691,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   双架构 8 核 build、每套 libc 9/9 CPU-time focused 和初赛非回归均通过，初赛保持 RV64
   312/314、LA64 308/314。跨 CPU 精确合计/并发快照仍为 NOT RUN；child rusage 用户 copyout、
   POSIX CPU timer 和 NOFILE 生命周期留待后续；
+- B76 将 wait 可见的 PID/status/RUSAGE_BOTH 组成一个内核值快照：zombie 回复与 parent 累计
+  复用同一份数据，PID/registry 回收后不再重查；stop/continue 使用活进程 PCB 账户，zombie
+  使用最终退出快照。`wait4` 和 raw `waitid` 按 Linux 顺序在全部进程锁外 copyout，EFAULT
+  不回滚事件。双架构 8 核 build 与每套 libc 12/12 focused wait LTP 通过；raw waitid 第五
+  参数内容、非零 rusage 与 EFAULT 后消费语义的专项探针仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

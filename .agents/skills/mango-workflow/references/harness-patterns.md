@@ -517,6 +517,17 @@ diag=1
   冻结。验收前必须同时检查生产源码指纹、runner 输入指纹、原始退出码和真实用例集合。
 - **相关文件**: `cc-codex/bin/cc-agent-test.py`, `cc-codex/protocol/test-recipes.json`
 
+## libc waitid 用例不覆盖 raw 第五参数
+
+- **根因**: POSIX libc `waitid()` 公开四参数接口，Linux raw syscall 才有第五个 rusage 指针；
+  LTP `waitid01..11` 主要验证 PID 过滤、WNOHANG/WNOWAIT、stop/continue 和 siginfo。`wait401`
+  虽传 `struct rusage`，但只检查 wait 返回值与 status，不断言资源字段内容。
+- **判定**: 这些用例全部通过只能证明 wait 生命周期没有退化，不能证明 raw waitid rusage、
+  非零 user/system 值或 copyout EFAULT 后的消费语义。没有专用用户探针时必须标记 NOT RUN。
+- **效率**: focused recipe 可排除依赖 `/proc/sys/kernel/pid_max` 的 `wait402` 和 core-pattern 环境的
+  `waitid10`，保留 `wait401/403`、`waitid01..09/11` 覆盖直接相关状态路径。
+- **相关文件**: `os/src/syscall/process/lifecycle.rs`, `os/src/task/process_manager.rs`
+
 ## SysV IPC STAT_ANY 的 full id 与 index 兼容
 
 - **根因**: Linux `SHM_STAT/SHM_STAT_ANY`、`SEM_STAT_ANY`、`MSG_STAT_ANY` 的实现会用 `ipc_obtain_object_idr()` 按 full id 映射到底层 idr 槽位；LTP 可能先用真实 shmid/semid/msqid 探测支持情况。若内核只把入参解释成“当前表的第 n 个元素”，在 id 单调递增或删除后有空洞时会返回 `EINVAL`，表现为 `kernel doesn't support *_STAT_ANY`。

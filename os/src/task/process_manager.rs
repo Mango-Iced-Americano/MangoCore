@@ -12,7 +12,7 @@ use crate::syscall::{errno::*, CloneFlags};
 use super::signal::Signals;
 use super::{
     current_task, quota, registry, signal::send_process_signal, try_publish_task,
-    ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
+    ProcessControlBlock, ProcessState, Rusage, TaskControlBlock, WaitQueue, WaitResult,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +22,8 @@ pub(crate) struct WaitChildResult {
     pub pid: usize,
     /// Linux wait status 编码。
     pub status: u32,
+    /// 该状态事件对应的 RUSAGE_BOTH 快照。
+    pub rusage: Rusage,
 }
 
 /// clone 完成首次发布后的调用方状态。
@@ -145,6 +147,7 @@ impl ProcessManager {
         }
 
         let wait_status = Cell::new(0);
+        let wait_rusage = Cell::new(Rusage::new());
         let try_wait_attached_tracee = || -> Option<isize> {
             if pid <= 0 {
                 return None;
@@ -156,6 +159,7 @@ impl ProcessManager {
             if report_stopped || report_exited {
                 if let Some(status) = tracee.take_stopped_status(nowait) {
                     wait_status.set(status);
+                    wait_rusage.set(tracee.wait_rusage());
                     return Some(tracee.pid as isize);
                 }
             }
@@ -179,12 +183,14 @@ impl ProcessManager {
                 if report_stopped || (report_exited && child_is_ptraced(child)) {
                     if let Some(status) = child.take_stopped_status(nowait) {
                         wait_status.set(status);
+                        wait_rusage.set(child.wait_rusage());
                         return Some(child.pid as isize);
                     }
                 }
                 if report_continued {
                     if let Some(status) = child.take_continued_status(nowait) {
                         wait_status.set(status);
+                        wait_rusage.set(child.wait_rusage());
                         return Some(child.pid as isize);
                     }
                 }
@@ -210,9 +216,13 @@ impl ProcessManager {
                 };
                 let found_pid = child.pid;
                 wait_status.set(child.exit_code());
+                // 只取一次快照：返回用户态与父进程累计必须观察同一份数据，
+                // 且 child 从 registry 移除后不能再按 PID 重新查询。
+                let rusage = child.wait_rusage();
+                wait_rusage.set(rusage);
                 if !nowait {
                     child.release_pid();
-                    process_inner.child_rusage.add_child(child.wait_rusage());
+                    process_inner.child_rusage.add_child(rusage);
                     child.set_parent(None);
                     registry::unregister_process(child.pid);
                     // 立即释放 clone quota —— 不等 zombie TCB 被调度器清理
@@ -236,6 +246,7 @@ impl ProcessManager {
                 Ok(Some(WaitChildResult {
                     pid: value as usize,
                     status: wait_status.get(),
+                    rusage: wait_rusage.get(),
                 }))
             }
         };

@@ -966,6 +966,12 @@
 - **退出发布顺序决定组快照完整性**: 每个线程必须先把本地尾数发布到进程累计，再以 release
   语义递减 live token；最后线程通过 acquire/release chain 保存进程级 zombie 快照。不能把
   最后退出 TCB 的私有用量误当成整个线程组，也不能在发布 live token 后再补记账。
+- **终态事件必须携带完整值快照**: wait/reap 一类路径不能只把 PID/status 带出锁后再查
+  registry；PID 可能已释放或复用。应在 child 仍被父列表固定时一次取得 status 与资源值，
+  syscall 回复和 parent 累计复用同一份 Copy 快照，再执行 PID/registry/quota 回收。
+- **终态 copyout 失败通常不回滚**: status/rusage/siginfo 等 faultable 回复必须位于所有生命周期
+  锁外，但 EFAULT 不代表把已消费事件重新入队。具体字段顺序要对照官方实现；WNOWAIT 只观察，
+  不能误做 parent 累计或资源回收。
 - **相关文件**: `os/src/syscall/process/lifecycle.rs`,
   `os/src/syscall/process/time.rs`, `os/src/syscall/process/ids.rs`,
   `os/src/task/process.rs`, `docs/01_architecture/lock-order.md`

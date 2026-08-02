@@ -935,6 +935,29 @@ chain 观察所有 sibling 的先前冲刷，并把 PCB 线程组快照保存到
 TCB 冲刷后访问 PCB。精确的跨 CPU 同时查询仍是近似快照，不能为追求瞬时一致而停核或同时获取
 多个 TCB 锁。
 
+### 3.21 B76 wait 事件快照与锁外回复
+
+一次 wait 可见事件必须在 child 仍由父进程列表持有时生成完整值快照，不能只返回 PID 后再查
+registry。zombie 的 PID 可能紧接着释放；重新查询既可能失败，也可能命中后来复用的对象：
+
+```text
+parent process.inner
+  -> child process.inner：领取 status，快照 state / exit-rusage / child-rusage
+  -> child inner unlock：按 live/zombie owner 组成 RUSAGE_BOTH
+  -> 同一快照写入 WaitChildResult，并在 reap 时累加 parent child_rusage
+  -> PID / registry / quota 回收
+  -> parent inner unlock
+  -> syscall copyout
+```
+
+`parent process.inner -> child process.inner` 是既有 children 扫描和 reap 顺序，本批没有增加反向
+边。`WaitChildResult` 只保存 Copy 值，不把 child 引用或 guard 带到用户访问。`WNOWAIT` 生成同样
+的快照但不移除 child、不累加 parent；WNOHANG 无事件时不写 rusage。
+
+`wait4` 在 reap 后按 status→rusage 写回，raw `waitid` 按 rusage→siginfo 写回。任一 copyout
+触发缺页、CoW、TLB shootdown 或 EFAULT 时，所有 parent/child/WaitQueue 锁都已释放；Linux
+也不会因 EFAULT 把已经消费的 stop/continue 或 zombie 事件重新发布。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

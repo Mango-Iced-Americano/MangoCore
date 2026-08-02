@@ -37,7 +37,7 @@ bitflags! {
 ///   pid == -1 → wait for any child
 ///   pid == 0  → wait for any child in the same process group (pgid)
 ///   pid < -1 → wait for any child whose pgid == |pid|
-pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) -> isize {
+pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, ru: *mut Rusage) -> isize {
     if pid == i32::MIN as isize {
         return ESRCH;
     }
@@ -63,6 +63,13 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
                     return errno;
                 }
             }
+            // Linux 在 child 已被领取后依次写 status、rusage；任一 EFAULT 都
+            // 不回滚 reap，也不能重新发布同一个退出事件。
+            if !ru.is_null() {
+                if let Err(errno) = UserPtrMut::new(ru).write(token, &child.rusage) {
+                    return errno;
+                }
+            }
             child.pid as isize
         }
         Ok(None) => SUCCESS,
@@ -70,7 +77,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
     }
 }
 
-pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: u32, _ru: *mut Rusage) -> isize {
+pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: u32, ru: *mut Rusage) -> isize {
     const P_PIDFD: usize = 3;
 
     let option = match WaitOption::from_bits(options) {
@@ -89,7 +96,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: u32, _ru: *mu
             Ok(pid) => pid,
             Err(errno) => return errno,
         };
-        return waitid_wait_child(&process, wait_pid, infop, option, token);
+        return waitid_wait_child(&process, wait_pid, infop, ru, option, token);
     }
 
     let (target_pid, nonblock) = {
@@ -124,6 +131,13 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: u32, _ru: *mu
         option.contains(WaitOption::WNOWAIT),
     ) {
         Ok(Some(child)) => {
+            // raw waitid 的第五个参数是 rusage；Linux 先写 rusage，再写
+            // siginfo。child 已领取，copyout 失败不撤销状态变化。
+            if !ru.is_null() {
+                if let Err(errno) = UserPtrMut::new(ru).write(token, &child.rusage) {
+                    return errno;
+                }
+            }
             if infop != 0 {
                 let siginfo = waitid_siginfo(child.pid, child.status);
                 if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo) {
@@ -184,6 +198,7 @@ fn waitid_wait_child(
     process: &Arc<ProcessControlBlock>,
     pid: isize,
     infop: usize,
+    ru: *mut Rusage,
     option: WaitOption,
     token: usize,
 ) -> isize {
@@ -197,6 +212,11 @@ fn waitid_wait_child(
         option.contains(WaitOption::WNOWAIT),
     ) {
         Ok(Some(child)) => {
+            if !ru.is_null() {
+                if let Err(errno) = UserPtrMut::new(ru).write(token, &child.rusage) {
+                    return errno;
+                }
+            }
             if infop != 0 {
                 let siginfo = waitid_siginfo(child.pid, child.status);
                 if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo) {

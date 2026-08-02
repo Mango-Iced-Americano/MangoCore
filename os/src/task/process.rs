@@ -1295,9 +1295,20 @@ impl ProcessControlBlock {
     }
 
     pub fn wait_rusage(&self) -> Rusage {
-        let inner = self.inner.lock();
-        let mut rusage = inner.rusage;
-        rusage.add_child(inner.child_rusage);
+        let (state, exit_rusage, child_rusage) = {
+            let inner = self.inner.lock();
+            (inner.state, inner.rusage, inner.child_rusage)
+        };
+        // zombie 的 rusage 是最后线程退出时保存的稳定快照；stop/continue
+        // 事件发生在活进程上，只能读取仍在增长的 PCB CPU 账户。
+        let mut rusage = if state == ProcessState::Zombie {
+            exit_rusage
+        } else {
+            self.cpu_rusage()
+        };
+        // wait4/waitid 返回 RUSAGE_BOTH：不仅包含直接 child，也包含它已经
+        // 回收的后代。这里先释放 child.inner，再做纯值合并。
+        rusage.add_child(child_rusage);
         rusage
     }
 
