@@ -142,12 +142,17 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             }
         } else {
             NET_INTERFACE.poll();
-            WaitQueue::wait_until_interruptible(wq, || match try_recv() {
+            match WaitQueue::wait_until_interruptible(wq, || match try_recv() {
                 Ok((n, _)) => Some(n as isize),
                 Err(SyscallErr::EAGAIN) => None,
                 Err(e) => Some(-(e as isize)),
-            })
-            .unwrap_or_else(|e| e)
+            }) {
+                crate::task::WaitResult::Ready(value) => value,
+                crate::task::WaitResult::Interrupted => {
+                    crate::task::RestartKind::RestartSys.syscall_result()
+                }
+                crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+            }
         }
     } else {
         wait_io(|| try_recv().map(|(n, _)| n), is_nonblock)

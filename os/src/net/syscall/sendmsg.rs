@@ -278,7 +278,7 @@ fn send_stream_chunked(
                     return if done > 0 {
                         done as isize
                     } else {
-                        -(SyscallErr::ERESTART as isize)
+                        crate::task::RestartKind::RestartSys.syscall_result()
                     };
                 }
                 WaitResult::TimedOut => {

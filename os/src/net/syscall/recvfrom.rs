@@ -151,15 +151,20 @@ pub fn sys_recvfrom(
                 (n, kernel_buf)
             } else {
                 NET_INTERFACE.poll();
-                let n = WaitQueue::wait_until_interruptible(wait_queue, || match recv() {
+                let n = match WaitQueue::wait_until_interruptible(wait_queue, || match recv() {
                     Ok(n) => Some(n as isize),
                     Err(SyscallErr::EAGAIN) => {
                         log::debug!("[sys_recvfrom] EAGAIN, will sleep");
                         None
                     }
                     Err(e) => Some(-(e as isize)),
-                })
-                .unwrap_or_else(|e| e);
+                }) {
+                    crate::task::WaitResult::Ready(value) => value,
+                    crate::task::WaitResult::Interrupted => {
+                        crate::task::RestartKind::RestartSys.syscall_result()
+                    }
+                    crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+                };
                 (n, kernel_buf)
             }
         } else {

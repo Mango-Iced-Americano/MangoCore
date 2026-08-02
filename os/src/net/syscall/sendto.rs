@@ -133,7 +133,7 @@ pub fn sys_sendto(
                         return -(SyscallErr::EFAULT as isize);
                     }
                     NET_INTERFACE.poll();
-                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
+                    let ret = match WaitQueue::wait_until_interruptible(wait_queue, || {
                         match socket.try_sendmsg_without_poll(
                             &kernel_buf,
                             dest_endpoint.clone(),
@@ -143,8 +143,13 @@ pub fn sys_sendto(
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
                         }
-                    })
-                    .unwrap_or_else(|e| e);
+                    }) {
+                        crate::task::WaitResult::Ready(value) => value,
+                        crate::task::WaitResult::Interrupted => {
+                            crate::task::RestartKind::RestartSys.syscall_result()
+                        }
+                        crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+                    };
                     NET_INTERFACE.try_poll();
                     ret
                 }
@@ -184,14 +189,19 @@ pub fn sys_sendto(
                         return -(SyscallErr::EFAULT as isize);
                     }
                     NET_INTERFACE.poll();
-                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
+                    let ret = match WaitQueue::wait_until_interruptible(wait_queue, || {
                         match socket.try_send_without_poll(&kernel_buf, msg_flags) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
                         }
-                    })
-                    .unwrap_or_else(|e| e);
+                    }) {
+                        crate::task::WaitResult::Ready(value) => value,
+                        crate::task::WaitResult::Interrupted => {
+                            crate::task::RestartKind::RestartSys.syscall_result()
+                        }
+                        crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+                    };
                     NET_INTERFACE.try_poll();
                     ret
                 }
@@ -232,7 +242,7 @@ pub fn sys_sendto(
                     ret
                 } else {
                     NET_INTERFACE.poll();
-                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
+                    let ret = match WaitQueue::wait_until_interruptible(wait_queue, || {
                         match socket.try_sendmsg_without_poll(
                             &kernel_buf,
                             dest_endpoint.clone(),
@@ -242,8 +252,13 @@ pub fn sys_sendto(
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
                         }
-                    })
-                    .unwrap_or_else(|e| e);
+                    }) {
+                        crate::task::WaitResult::Ready(value) => value,
+                        crate::task::WaitResult::Interrupted => {
+                            crate::task::RestartKind::RestartSys.syscall_result()
+                        }
+                        crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+                    };
                     NET_INTERFACE.try_poll();
                     ret
                 }
