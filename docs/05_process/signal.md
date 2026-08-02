@@ -72,6 +72,16 @@ fork/clone 未设置 `CLONE_SIGHAND` 时会创建新的 `Sighand` 与事件队�
 
 读 signal 代码时要分清三张表：`sighand` 保存 handler/action，属于进程共享资源；`sigmask` 属于 TCB，决定当前线程屏蔽哪些信号；pending 队列保存已经投递但尚未交付的信号。`rt_sigreturn` 则是从用户信号帧恢复 trap context 和 mask 的返回路径。
 
+### 2.1 fast pending、投递时机与 syscall restart
+
+每个 TCB 另有原子 `signal_pending` 提示位。它是“当前线程或其进程 shared pending 中可能存在未被当前 `sigmask` 屏蔽的信号”的快速提示，不替代 pending 队列或 action 表。线程/进程 pending 的入队和取走、mask/action 修改以及丢弃路径都会重算该位，避免 stale hint 使返回用户态路径无谓扫描队列。
+
+两个架构的 `trap_return()` 都在释放 `task.inner` 后检查该位：为 false 时直接恢复用户态；为 true 时才调用 `do_signal()` 构造 signal frame 或执行默认动作。signal frame 投递仍只发生在返回用户态的安全点，不移入调度器或 waitqueue。
+
+可被信号打断的阻塞 syscall 在内核内部以 typed `RestartKind` 表达 restart 结果，用户态不会收到 Linux 内部的 `-ERESTART*` 数值。`RestartSys` 仅在 handler 使用 `SA_RESTART` 时回退 syscall PC/参数；不满足 restart 条件及明确不可重启的 wait/signal/time/poll 路径都返回 `EINTR`。被忽略的信号不应把可重启调用错误地暴露为 `EINTR`。
+
+向 interruptible waiter 投递信号时，唤醒判断同时考虑线程 `sigmask` 与 sigwait mask；被屏蔽信号仍入队，但不抢先唤醒等待者。
+
 ## 3. 信号权限
 
 `can_signal_process(target)`：

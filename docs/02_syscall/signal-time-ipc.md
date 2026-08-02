@@ -164,6 +164,12 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
 
 这些入口都使用 `UserPtr`/`UserPtrMut` 或 `copy_from_user` 访问用户结构。
 
+### 6.1 信号中断与 restart
+
+阻塞 read/write、accept/connect、recv/send、splice/tee/vmsplice 与 futex wait 以内部 `RestartKind::RestartSys` 请求重启；`do_signal()` 只在已安装 handler 带 `SA_RESTART` 时回退 syscall PC 与初始参数。不能重启的 signal wait、poll/epoll 与时间等待保留用户可见 `EINTR`。内部 restart 编码绝不直接作为 syscall 返回值泄露给用户态。
+
+waitqueue 只因当前线程真正可操作的 pending signal 而唤醒：`sigmask` 屏蔽的信号仍会排队，不能让阻塞调用错误提前返回 `EINTR`。
+
 ## 7. nanosleep 与 itimer
 
 ### 7.1 nanosleep

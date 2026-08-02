@@ -51,11 +51,13 @@ syscall::syscall(id, args)
       |
       v
 trap_return()
-  do_signal()
+  signal_pending_fast() ? do_signal() : skip
   跳转恢复汇编
 ```
 
 `rt_sigreturn` 的 syscall id 为 139。两套后端都在 syscall 返回后重新获取 trap context，并且在 id 为 139 时不把普通返回值写入 `a0`，因为该路径已经恢复完整用户上下文。
+
+`trap_return()` 是唯一的 signal frame 投递安全点：它先读取 TCB 的原子 fast-pending 提示位，再决定是否进入 `do_signal()`；该提示位为 false 时不获取 pending/action 锁。`do_signal()` 根据内部 typed restart 结果和 `SA_RESTART` 决定恢复 syscall 还是向用户态返回 `EINTR`，而不是泄露 Linux 内部 `ERESTART*` 编码。
 
 ## 3. RISC-V syscall 路径
 
