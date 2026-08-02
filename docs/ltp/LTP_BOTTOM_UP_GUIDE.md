@@ -326,13 +326,13 @@
 
 - `os/src/net/syscall/sendmsg.rs:38` 把 iov 全量聚合到一个 `Vec`，上限可达 64MB。
 - `os/src/net/syscall/recvmsg.rs:109` 固定清空 `msg_controllen` 和 `msg_flags`。
-- `os/src/net/socket/unix/mod.rs:145` 对不支持的 `socketpair` 类型 panic。
+- `os/src/net/socket/unix/mod.rs` 对不支持的 `socketpair` 类型返回 `ESOCKTNOSUPPORT`；`SOCK_SEQPACKET` 暂复用 stream 字节流，尚无记录边界。
 - `os/src/net/socket/unix/datagram/mod.rs:168` 的 datagram `try_send` 仍为 `todo!()`。
 
 具体风险：
 
 - message 类测试会触发内存压力、control message 缺失、flag 不匹配。
-- Unix datagram/socketpair 非支持类型可能 panic。
+- Unix `SOCK_SEQPACKET` 尚缺少记录边界、`MSG_EOR` 等深语义。
 
 影响 LTP 家族：
 
