@@ -958,7 +958,7 @@ parent process.inner
 触发缺页、CoW、TLB shootdown 或 EFAULT 时，所有 parent/child/WaitQueue 锁都已释放；Linux
 也不会因 EFAULT 把已经消费的 stop/continue 或 zombie 事件重新发布。
 
-### 3.22 B77-B79 进程级 timer owner 与 CPU clock
+### 3.22 B77-B80 进程级 timer owner、CPU clock 与事件交付
 
 POSIX timer 表由 PCB 的独立 mutex 保护，不再嵌入任一 TCB。允许的局部锁边只有：
 
@@ -982,6 +982,27 @@ CPU timer 安全点先在锁外采样当前 TCB/PCB 的单调 CPU 累计，再�
 `Active`；任何用户 copyin/copyout 都不得跨 timer 表锁。delete、exec、最后线程退出与回调
 使用同一 owner 锁决定先后：回调若先取得锁，则信号已在线性化点生成；清理若先取得锁，旧
 action 会因 slot/`arm_seq`/deadline 不匹配而失效。
+
+B80 为每个 timer 对象增加全表单调的 `instance_seq`，并把 pending 身份定义为
+`timer ID + instance_seq`。`arm_seq` 只拒绝旧 heap 装载，`instance_seq` 只拒绝删除重建后的
+旧 signal 事件，不能混为一个序号。同一 timer 最多一个 pending 事件；不同 timer 即使使用
+相同 signal number，也不得被非实时 signal 的普通合并规则折叠。
+
+事件交付和清理固定使用两阶段锁序：
+
+```text
+process.signal：dequeue 精确事件并更新 pending hint
+  -> unlock
+PosixTimerTable：核对 instance_seq，固化 SigInfo/last_overrun
+
+PosixTimerTable：clear/delete 收集精确事件身份
+  -> unlock
+process.signal：删除对应队列项并更新 pending hint
+```
+
+两条路径都不同时持有 signal lock 和 timer owner。`timer_settime()` 若遇到旧事件仍 pending，
+保留该队列项但使其旧设置失效；只有新设置再次到期后，交付该项才允许更新
+`timer_getoverrun()` 的最近交付值。
 
 B79 的 legacy `IntervalTimerTable` 遵循同一“owner 锁内提交、锁外投递”规则，但不与
 `PosixTimerTable` 嵌套：

@@ -95,8 +95,11 @@ pub(crate) fn queue_process_signal_info(
     if signal.is_empty() {
         return true;
     }
-    process.enqueue_process_signal(PendingSignal { signal, siginfo });
-    true
+    process.enqueue_process_signal(PendingSignal {
+        signal,
+        siginfo,
+        timer_event: None,
+    })
 }
 
 /// 唤醒可能消费进程共享信号的线程，不修改 pending 队列。
@@ -191,9 +194,11 @@ fn send_thread_signal_info(
         return Err(EAGAIN);
     }
     if let Some(siginfo) = siginfo {
-        inner
-            .sigpending
-            .enqueue(PendingSignal { signal, siginfo })?;
+        inner.sigpending.enqueue(PendingSignal {
+            signal,
+            siginfo,
+            timer_event: None,
+        })?;
     } else {
         inner.sigpending.enqueue_signal_with_sender(
             signal,

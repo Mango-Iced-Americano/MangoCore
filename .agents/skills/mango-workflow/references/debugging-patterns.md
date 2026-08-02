@@ -1051,3 +1051,27 @@
   NOT RUN。
 - **相关文件**: `os/src/task/process.rs`, `os/src/task/task.rs`,
   `os/src/task/manager.rs`, `os/src/task/processor.rs`, `os/src/syscall/process/time.rs`
+
+## POSIX timer pending：对象身份、装载身份与交付身份必须分离
+
+- **signal bitmap 不是对象身份**: 两个 timer 可以投递同一个非实时 signal。bitmap 只能回答
+  “某 signal 是否存在”，不能判断“某 timer 是否已经有事件排队”；用它累计 overrun 会把两个
+  timer 相互污染，并让其中一个事件被普通非实时合并吞掉。
+- **三个生命期不要混用**: timer 对象从 create 到 delete 用全表单调 `instance_seq`；每次
+  `timer_settime()` 的 heap 节点用 `arm_seq`；队列项用 `timer ID + instance_seq`。前者防
+  delete/recreate ABA，中者防 stale rearm，后者把 overrun 绑定到实际可交付对象。
+- **每对象一项，不是每 signal 一项**: 同一 timer 的周期到期在已有事件上累加 overrun；不同
+  timer 即使 signal number 相同，也各自占一个 timer 事件。timer 事件应使用对象预留资格，
+  不能被普通 queued-signal 全局配额随机拒绝后永久留下 owner-side pending 标志。
+- **交付跨 owner 时拆锁**: signal queue 锁内只 dequeue 精确事件，释放后再取得 timer owner
+  核对 instance 并固化 `SigInfo`/last-overrun。delete/exec/exit 反向先在 timer owner 收集事件
+  身份，释放后再精确删除 signal queue 项。不要为了“原子”同时持有两把锁；对象序号就是
+  跨临界区的重验凭证。
+- **重设与旧 pending**: `timer_settime()` 不应为同一 timer 创建第二个队列项。旧项可保留，
+  但在新设置真正再次到期前不得更新新一轮 `timer_getoverrun()`；用一个明确布尔状态表达这条
+  语义，比复用 heap arm sequence 推断交付归属更清楚。
+- **验收边界**: 普通 `timer_settime01/02` 只能证明基础 ABI。两个 timer 共用 signal、周期
+  overrun→dequeue→getoverrun 回环、delete/recreate pending ABA 和 signalfd timer 字段需要
+  专项探针；未运行时必须登记为 NOT RUN。
+- **相关文件**: `os/src/task/process.rs`, `os/src/task/signal/pending.rs`,
+  `os/src/task/signal/mod.rs`, `os/src/syscall/process/{time,signal}.rs`

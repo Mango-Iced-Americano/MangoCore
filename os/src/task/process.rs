@@ -16,8 +16,8 @@ use super::{
     quota::TaskQuotaGuard,
     registry,
     signal::{
-        queue_process_signal_info, sigchld_requests_auto_reap, wake_process_signal_waiter,
-        PendingSignal, SigInfo, Sighand, SignalQueue, Signals,
+        sigchld_requests_auto_reap, wake_process_signal_waiter, PendingSignal, PosixTimerEventId,
+        Sighand, SignalQueue, Signals,
     },
     threads::FutexTable,
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
@@ -250,13 +250,8 @@ impl IntervalTimerTable {
     }
 
     fn cpu_timer_active(&self) -> bool {
-        self.timer(IntervalTimerKind::Virtual)
-            .deadline_us
-            .is_some()
-            || self
-                .timer(IntervalTimerKind::Prof)
-                .deadline_us
-                .is_some()
+        self.timer(IntervalTimerKind::Virtual).deadline_us.is_some()
+            || self.timer(IntervalTimerKind::Prof).deadline_us.is_some()
     }
 
     fn clear(&mut self) {
@@ -268,9 +263,9 @@ impl IntervalTimerTable {
 
 /// 单个 POSIX timer 的进程级状态。
 ///
-/// `arm_seq` 标识最近一次装载；内核 timer 节点必须同时匹配 timer ID、
-/// `arm_seq` 和 deadline，才能修改本对象。这样删除并复用相同 ID 后，旧节点
-/// 也不能误命中新 timer。
+/// `arm_seq` 只标识最近一次装载；内核 heap 节点必须同时匹配
+/// timer ID、`arm_seq` 和 deadline。`instance_seq` 则标识 timer 对象的
+/// 整个生命期，使删除前的 pending 信号不能修改复用同 ID 的新对象。
 #[derive(Clone)]
 pub struct PosixTimer {
     pub clock_id: usize,
@@ -285,9 +280,18 @@ pub struct PosixTimer {
     /// CPU clock 域内的绝对到期时间；wall timer 必须保持为 None。
     pub cpu_deadline_us: Option<u64>,
     pub arm_seq: u64,
+    /// 删除后复用 timer ID 时仍然唯一的对象序号。
+    instance_seq: u64,
     /// None 表示 wall clock；thread timer 保存对象身份而不是可复用 TID。
     cpu_clock: Option<PosixCpuClock>,
-    overrun: usize,
+    /// 当前已排队事件的唯一身份。
+    pending_event: Option<PosixTimerEventId>,
+    /// pending 事件是否已在当前 `timer_settime()` 设置下再次到期。
+    pending_from_current_setting: bool,
+    /// 当前 pending 事件尚未交付时累积的 overrun。
+    current_overrun: usize,
+    /// 最近一次交付给用户的 overrun，供 `timer_getoverrun()` 读取。
+    last_overrun: usize,
 }
 
 #[derive(Clone)]
@@ -317,8 +321,12 @@ impl PosixTimer {
             realtime_abs_deadline: None,
             cpu_deadline_us: None,
             arm_seq: 0,
+            instance_seq: 0,
             cpu_clock,
-            overrun: 0,
+            pending_event: None,
+            pending_from_current_setting: false,
+            current_overrun: 0,
+            last_overrun: 0,
         }
     }
 
@@ -377,32 +385,89 @@ impl PosixTimer {
         }
     }
 
-    pub(crate) fn pending_signal(&self) -> Option<PendingSignal> {
+    /// 记录一批到期，仅在该 timer 尚无 pending 事件时返回新信号。
+    ///
+    /// 已有事件时，所有新到期都属于该事件的 overrun；新事件
+    /// 的首次到期是本体，只有其余 `expirations - 1` 计为 overrun。
+    pub(crate) fn record_expiry(
+        &mut self,
+        timer_id: usize,
+        expirations: usize,
+    ) -> Option<PendingSignal> {
         if self.signal.is_empty() {
             return None;
         }
-        Some(PendingSignal {
-            signal: self.signal,
-            siginfo: SigInfo::new_with_sender_value(
-                self.signal.to_signum().unwrap(),
-                0,
-                SigInfo::SI_TIMER as usize,
-                0,
-                self.signal_value,
-            ),
-        })
+        let expirations = expirations.max(1);
+        if self.pending_event.is_some() {
+            self.current_overrun = self
+                .current_overrun
+                .saturating_add(expirations)
+                .min(Self::OVERRUN_MAX);
+            // settime 可能在旧事件 pending 时更换设置。只有新设置
+            // 真正到期后，该队列项才能更新新一轮 last_overrun。
+            self.pending_from_current_setting = true;
+            return None;
+        }
+
+        let event_id = PosixTimerEventId {
+            timer_id,
+            instance_seq: self.instance_seq,
+        };
+        let overrun = expirations.saturating_sub(1).min(Self::OVERRUN_MAX);
+        let event =
+            PendingSignal::from_posix_timer(self.signal, event_id, overrun, self.signal_value)
+                .ok()?;
+        self.pending_event = Some(event_id);
+        self.pending_from_current_setting = true;
+        self.current_overrun = overrun;
+        Some(event)
     }
 
-    pub fn reset_overrun(&mut self) {
-        self.overrun = 0;
+    /// 开始一次新装载。已排队事件仍属于同一 timer 对象，
+    /// 不能因 `timer_settime()` 而生成第二个队列项。
+    pub(crate) fn begin_arm(&mut self, arm_seq: u64) {
+        self.arm_seq = arm_seq;
+        self.last_overrun = 0;
+        if self.pending_event.is_some() {
+            // 旧队列项仍保留，但在新设置再次到期前不得回写
+            // timer_getoverrun()；这对应 Linux 通过 requeue sequence 失效旧事件。
+            self.pending_from_current_setting = false;
+        } else {
+            self.current_overrun = 0;
+        }
     }
 
-    pub fn add_overrun(&mut self, count: usize) {
-        self.overrun = self.overrun.saturating_add(count).min(Self::OVERRUN_MAX);
+    fn finalize_delivery(
+        &mut self,
+        event_id: PosixTimerEventId,
+        siginfo: &mut super::signal::SigInfo,
+    ) {
+        if self.pending_event != Some(event_id) {
+            return;
+        }
+        if self.pending_from_current_setting {
+            siginfo.set_timer_overrun(self.current_overrun);
+            self.last_overrun = self.current_overrun;
+        }
+        self.pending_event = None;
+        self.pending_from_current_setting = false;
+        self.current_overrun = 0;
     }
 
-    pub fn overrun(&self) -> usize {
-        self.overrun
+    fn discard_pending(&mut self, event_id: PosixTimerEventId) {
+        if self.pending_event == Some(event_id) {
+            self.pending_event = None;
+            self.pending_from_current_setting = false;
+            self.current_overrun = 0;
+        }
+    }
+
+    pub fn last_overrun(&self) -> usize {
+        self.last_overrun
+    }
+
+    pub(crate) fn pending_event(&self) -> Option<PosixTimerEventId> {
+        self.pending_event
     }
 }
 
@@ -416,10 +481,12 @@ enum PosixTimerSlot {
 /// 同一线程组共享的 POSIX timer 表。
 ///
 /// slot 预留使 `timer_create()` 无需跨 faultable copyout 持锁，同时避免另一个
-/// CPU 抢占同一 ID。`next_arm_seq` 是整个表共享的单调序列，不能按 slot 重置。
+/// CPU 抢占同一 ID。arm 和 instance 两个序列都由整张表单调分配，
+/// 不能按 slot 重置。
 pub(crate) struct PosixTimerTable {
     slots: Vec<PosixTimerSlot>,
     next_arm_seq: u64,
+    next_instance_seq: u64,
 }
 
 impl PosixTimerTable {
@@ -427,6 +494,7 @@ impl PosixTimerTable {
         Self {
             slots: Vec::new(),
             next_arm_seq: 1,
+            next_instance_seq: 1,
         }
     }
 
@@ -448,14 +516,13 @@ impl PosixTimerTable {
         Ok(self.slots.len() - 1)
     }
 
-    pub(crate) fn publish_reserved(&mut self, id: usize, timer: PosixTimer) -> bool {
-        match self.slots.get_mut(id) {
-            Some(slot @ PosixTimerSlot::Reserved) => {
-                *slot = PosixTimerSlot::Active(timer);
-                true
-            }
-            _ => false,
+    pub(crate) fn publish_reserved(&mut self, id: usize, mut timer: PosixTimer) -> bool {
+        if !matches!(self.slots.get(id), Some(PosixTimerSlot::Reserved)) {
+            return false;
         }
+        timer.instance_seq = self.alloc_instance_seq();
+        self.slots[id] = PosixTimerSlot::Active(timer);
+        true
     }
 
     pub(crate) fn cancel_reservation(&mut self, id: usize) {
@@ -501,6 +568,12 @@ impl PosixTimerTable {
         seq
     }
 
+    fn alloc_instance_seq(&mut self) -> u64 {
+        let seq = self.next_instance_seq;
+        self.next_instance_seq = self.next_instance_seq.wrapping_add(1).max(1);
+        seq
+    }
+
     fn has_live_cpu_timer(&self) -> bool {
         self.slots.iter().any(|slot| match slot {
             PosixTimerSlot::Active(timer) if timer.cpu_deadline_us.is_some() => {
@@ -518,8 +591,8 @@ impl PosixTimerTable {
     }
 
     fn clear(&mut self) {
-        // exec 后仍复用同一个 PCB；不能重置 next_arm_seq，否则 exec 前遗留的
-        // heap 节点可能与新映像复用的 timer ID/序号形成 ABA。
+        // exec 后仍复用同一个 PCB；两个序列都不能重置，否则 exec 前
+        // 遗留的 heap 节点或 pending 事件可能与新映像复用的 timer ID 形成 ABA。
         self.slots.clear();
     }
 }
@@ -868,11 +941,7 @@ impl ProcessControlBlock {
     }
 
     /// 判断 REAL heap 节点是否仍对应当前装载。
-    pub(crate) fn real_interval_timer_is_live(
-        &self,
-        generation: u64,
-        deadline: TimeSpec,
-    ) -> bool {
+    pub(crate) fn real_interval_timer_is_live(&self, generation: u64, deadline: TimeSpec) -> bool {
         let timers = self.interval_timers.lock();
         timers.real_generation == generation
             && timers.timer(IntervalTimerKind::Real).deadline_us
@@ -922,10 +991,7 @@ impl ProcessControlBlock {
 
     /// 在返回用户态或 schedule-out 安全点推进 VIRTUAL/PROF timer。
     pub(crate) fn check_interval_cpu_timers(&self) {
-        if !self
-            .interval_cpu_timers_active
-            .load(Ordering::Acquire)
-        {
+        if !self.interval_cpu_timers_active.load(Ordering::Acquire) {
             return;
         }
 
@@ -952,8 +1018,7 @@ impl ProcessControlBlock {
                         .unwrap_or(0)
                         .saturating_add(1);
                     timer.deadline_us = Some(
-                        deadline_us
-                            .saturating_add(expirations.saturating_mul(timer.interval_us)),
+                        deadline_us.saturating_add(expirations.saturating_mul(timer.interval_us)),
                     );
                 }
                 expired[expired_count] = kind.signal();
@@ -991,9 +1056,70 @@ impl ProcessControlBlock {
     }
 
     fn clear_posix_timers(&self) {
-        let mut timers = self.posix_timers.lock();
-        timers.clear();
-        self.posix_cpu_timers_active.store(false, Ordering::Release);
+        let mut pending = [None; PosixTimer::MAX_COUNT];
+        let mut pending_count = 0usize;
+        {
+            let mut timers = self.posix_timers.lock();
+            for slot in &timers.slots {
+                if let PosixTimerSlot::Active(timer) = slot {
+                    if let Some(event_id) = timer.pending_event() {
+                        pending[pending_count] = Some(event_id);
+                        pending_count += 1;
+                    }
+                }
+            }
+            timers.clear();
+            self.posix_cpu_timers_active.store(false, Ordering::Release);
+        }
+        // 锁序固定为 timer owner -> unlock -> signal queue，不与交付路径形成环。
+        for event_id in pending.iter().take(pending_count).flatten().copied() {
+            self.remove_queued_posix_timer_signal(event_id);
+        }
+    }
+
+    /// 在 POSIX timer owner 锁外发布一个已领取的到期事件。
+    ///
+    /// pending 队列满时必须撤销该事件的 pending 标记；否则后续
+    /// 到期只会累加 overrun，却永远没有可交付的队列项。
+    pub(crate) fn publish_posix_timer_signal(&self, event: PendingSignal) -> bool {
+        let signal = event.signal;
+        let Some(event_id) = event.timer_event else {
+            return false;
+        };
+        if self.enqueue_process_signal(event) {
+            wake_process_signal_waiter(self, signal)
+        } else {
+            self.discard_posix_timer_pending(event_id);
+            false
+        }
+    }
+
+    /// 完成用户实际领取的 timer 事件，并固化 `timer_getoverrun()` 快照。
+    fn finalize_posix_timer_delivery(&self, pending: &mut PendingSignal) {
+        let Some(event_id) = pending.timer_event else {
+            return;
+        };
+        if let Some(timer) = self.posix_timers.lock().get_mut(event_id.timer_id) {
+            timer.finalize_delivery(event_id, &mut pending.siginfo);
+        }
+    }
+
+    /// 丢弃未交付的 timer 事件，不得把 overrun 误报为“上次交付”。
+    fn discard_posix_timer_pending(&self, event_id: PosixTimerEventId) {
+        if let Some(timer) = self.posix_timers.lock().get_mut(event_id.timer_id) {
+            timer.discard_pending(event_id);
+        }
+    }
+
+    /// 从 signal queue 精确移除一个 timer 事件；调用方不得持有 timer 锁。
+    pub(crate) fn remove_queued_posix_timer_signal(&self, event_id: PosixTimerEventId) {
+        let pending_bits = {
+            let mut state = self.signal.lock();
+            state.shared_pending.remove_timer_event(event_id);
+            state.shared_pending.pending().bits() as u64
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Relaxed);
     }
 
     /// 在任务安全点推进由 CPU 消耗驱动的 POSIX timer。
@@ -1011,7 +1137,7 @@ impl ProcessControlBlock {
         let mut event_count = 0usize;
         {
             let mut timers = self.posix_timers.lock();
-            for slot in &mut timers.slots {
+            for (timer_id, slot) in timers.slots.iter_mut().enumerate() {
                 let PosixTimerSlot::Active(timer) = slot else {
                     continue;
                 };
@@ -1030,23 +1156,21 @@ impl ProcessControlBlock {
                     continue;
                 }
 
-                if timer.interval.is_zero() {
+                let expirations = if timer.interval.is_zero() {
                     timer.value = TimeSpec::new();
                     timer.cpu_deadline_us = None;
+                    1
                 } else {
                     let interval_us = PosixTimer::cpu_duration_us(timer.interval);
                     let missed = now_us.saturating_sub(deadline_us) / interval_us;
                     let expirations = missed.saturating_add(1);
-                    let signal_pending = !timer.signal.is_empty()
-                        && self.shared_pending_hint().contains(timer.signal);
-                    let overruns = missed.saturating_add(signal_pending as u64);
-                    timer.add_overrun(overruns.min(usize::MAX as u64) as usize);
                     timer.value = timer.interval;
                     timer.cpu_deadline_us =
                         Some(deadline_us.saturating_add(expirations.saturating_mul(interval_us)));
-                }
+                    expirations.min(usize::MAX as u64) as usize
+                };
 
-                if let Some(event) = timer.pending_signal() {
+                if let Some(event) = timer.record_expiry(timer_id, expirations) {
                     events[event_count] = Some(event);
                     event_count += 1;
                 }
@@ -1055,8 +1179,7 @@ impl ProcessControlBlock {
         }
 
         for event in events.iter().take(event_count).flatten().copied() {
-            let _ = queue_process_signal_info(self, event.signal, event.siginfo);
-            let _ = wake_process_signal_waiter(self, event.signal);
+            let _ = self.publish_posix_timer_signal(event);
         }
     }
 
@@ -1957,14 +2080,15 @@ impl ProcessControlBlock {
     ///
     /// 只持有 `signal` 锁，不持有任何任务锁。`shared_pending_hint` 在锁释放前更新，
     /// 供等待路径无锁快速判断。
-    pub fn enqueue_process_signal(&self, pending: PendingSignal) {
-        let pending_bits = {
+    pub fn enqueue_process_signal(&self, pending: PendingSignal) -> bool {
+        let (queued, pending_bits) = {
             let mut state = self.signal.lock();
-            let _ = state.shared_pending.enqueue(pending);
-            state.shared_pending.pending().bits() as u64
+            let queued = state.shared_pending.enqueue(pending).is_ok();
+            (queued, state.shared_pending.pending().bits() as u64)
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
+        queued
     }
 
     /// 返回进程共享 pending signal 位图。
@@ -1981,25 +2105,35 @@ impl ProcessControlBlock {
 
     /// 从进程共享 pending 队列移除一个信号。
     pub fn take_shared_signal(&self, signal: Signals) -> bool {
-        let (removed, pending_bits) = {
+        let (pending, pending_bits) = {
             let mut state = self.signal.lock();
-            let removed = state.shared_pending.remove_signal(signal);
-            (removed, state.shared_pending.pending().bits() as u64)
+            let pending = state.shared_pending.dequeue_matching(signal);
+            (pending, state.shared_pending.pending().bits() as u64)
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
-        removed
+        if let Some(pending) = pending {
+            if let Some(event_id) = pending.timer_event {
+                self.discard_posix_timer_pending(event_id);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// 从进程共享 pending 队列取出第一个属于 `set` 的信号。
     pub fn take_shared_matching(&self, set: Signals) -> Option<PendingSignal> {
-        let (pending, pending_bits) = {
+        let (mut pending, pending_bits) = {
             let mut state = self.signal.lock();
             let pending = state.shared_pending.dequeue_matching(set);
             (pending, state.shared_pending.pending().bits() as u64)
         };
         self.shared_pending_hint
             .store(pending_bits, Ordering::Relaxed);
+        if let Some(pending) = pending.as_mut() {
+            self.finalize_posix_timer_delivery(pending);
+        }
         pending
     }
 

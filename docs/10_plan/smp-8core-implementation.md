@@ -699,22 +699,29 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B77 将 POSIX timer 从创建线程 TCB 迁入 PCB 独立表：thread clone 共享，fork 新建空表，
   exec 和最后线程退出清空；`Reserved` slot 隔离 timerid copyout，表级唯一 `arm_seq` 与
   deadline 共同拒绝 delete/recreate/rearm 的 stale action。到期 `SI_TIMER` 进入进程共享
-  pending，timer owner 锁内只生成信号、锁外唤醒和重装。双架构 8 核 build 与每套 libc
+  pending，timer owner 锁内只领取值事件、锁外入队、唤醒和重装。双架构 8 核 build 与每套 libc
   `timer_settime01/02` focused 均通过；sibling/creator-exit/fork/exec/delete 精确交错、
-  per-timer overrun 身份及 CPU 消耗驱动的 POSIX CPU timer 到期仍为 NOT RUN；
+  per-timer overrun 身份及 CPU 消耗驱动的 POSIX CPU timer 到期在后续节点补齐；
 - B78 将 process/thread POSIX CPU timer 从 wall-time heap 分离：process timer 读取 PCB 的
   线程组累计，thread timer 用创建者 `Weak<TCB>` 固定对象身份；trap return 与 schedule-out
   安全点在 PCB timer 表锁内唯一领取到期，固定栈批次把 `PendingSignal` 带到锁外投递。
   wall deadline 明确命名为 `wall_deadline`，CPU deadline 使用微秒域；已到期但尚未领取的
   `timer_gettime()` 返回 1ns。双架构 8 核 build 和每套 libc `timer_settime01/02` 均通过，
   两种 CPU clock 的相对、old-value、周期、绝对装载全部 TPASS；跨 sibling 精确领取、owner
-  退出、sleep 不推进 clock 与 per-timer pending/overrun 身份仍为 NOT RUN；
+  退出、sleep 不推进 clock 仍为 NOT RUN；per-timer pending/overrun 身份由 B80 补齐；
 - B79 将 legacy `ITIMER_REAL/VIRTUAL/PROF` 从线程 TCB 迁入 PCB 独立表：thread clone 共享，
   普通 fork 新建空表，exec 保留，最后线程退出清空。REAL 使用 monotonic heap generation；
   VIRTUAL/PROF 分别读取线程组 user 与 user+system CPU 累计，并在 trap-return、schedule-out
   安全点由表锁唯一领取。锁外才投递进程 shared pending 或重装 heap。双架构 8 核 build、
   两套 libc 的 `setitimer01/02` 和 `mask=0x003` 初赛均通过，基线保持 RV64 312/314、LA64
   308/314；多 sibling 精确到期交错仍为 NOT RUN；
+- B80 将 POSIX timer pending 从“signal number 提示”升级为精确的
+  `timer ID + instance_seq` 对象事件：同一 timer 最多一个队列项并累计 overrun，不同 timer
+  即使共用非实时 signal 也分别排队；`arm_seq` 继续只负责 heap 装载身份。signal dequeue 后
+  先释放 signal 锁，再在 timer owner 中固化 `SigInfo` 和最近交付 overrun；delete/exec/exit
+  反向以精确身份锁外清理。signalfd 返回真实 timer ID/overrun。双架构 8 核 build 与每套 libc
+  `timer_settime01/02` 共 80/80 通过；双 timer 同信号、getoverrun 精确回环及 signalfd 布局
+  专项仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

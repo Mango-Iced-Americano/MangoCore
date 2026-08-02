@@ -180,8 +180,9 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
 `PosixTimerTable` 是 PCB 的唯一 owner：线程 clone 共享该表，普通 fork 创建空表，exec 和
 最后线程退出清空。表内 slot 使用 `Vacant/Reserved/Active` 三态，避免 `timer_create()`
-在用户 copyout 窗口暴露半初始化对象。每次 arm 从全表分配唯一 `arm_seq`；删除后复用相同
-ID 时，旧 kernel timer action 也因序号不匹配而失效。
+在用户 copyout 窗口暴露半初始化对象。表级单调序号承担不同职责：`instance_seq` 标识一次
+timer 对象生命期，防止 delete/recreate 后旧 pending 事件命中新对象；`arm_seq` 标识一次
+`timer_settime()` 装载，防止旧 kernel timer heap 节点修改新设置。两者都不能按 slot 重置。
 
 ## 7. POSIX timer 到期
 
@@ -189,11 +190,21 @@ wall clock 到期由 `TimerAction::PosixTimerSignal` 处理：
 
 1. 升级 PCB `Weak`，校验 timer ID、`arm_seq` 和 deadline。
 2. 一次性 timer 清空 value/deadline。
-3. 周期 timer 计算 missed overruns。
+3. 周期 timer 计算本轮总到期次数。
 4. 对 realtime absolute timer 维护 `realtime_abs_deadline`。
-5. 在 timer 表锁内构造带 `sigev_value` 的 `SI_TIMER` 值事件。
-6. 释放 owner 锁后加入进程共享 pending，再选择一个可接收 sibling 并唤醒。
+5. 在 timer 表锁内按 `timer ID + instance_seq` 记录事件身份；每个 timer 最多保留一个
+   pending 事件，后续到期只累计该事件的 overrun。
+6. 释放 owner 锁后把新事件加入进程共享 pending，再选择一个可接收 sibling 并唤醒。
 7. 周期 timer 重新加入 kernel timer queue。
+
+普通非实时信号仍按 signal number 合并，但 POSIX timer 事件按对象身份合并：两个 timer 即使
+投递同一个 signal，也各自保留一个队列项。timer 事件使用每个 timer 预留的队列资格，不与
+普通 64 项 queued-signal 配额混用；timer delete、exec 和最后线程退出会按事件身份精确清理。
+
+用户实际 dequeue 一个 `SI_TIMER` 后，signal 锁先释放，再取得 timer 表锁完成事件：将最新
+overrun 写入本次 `SigInfo`，同时保存为 `timer_getoverrun()` 的“最近一次已交付值”。如果旧事件
+跨越了新的 `timer_settime()`，只有新设置再次到期后它才能更新该值；单纯交付旧设置遗留事件
+不会污染新设置的 overrun 结果。这样 signal queue 与 timer owner 始终不嵌套持锁。
 
 `KernelTimerQueue::compact()` 也检查同一组 owner/arm/deadline 条件，可提前清理 rearm、
 delete、exec 和退出产生的 stale 节点。compact 在队列锁下只读 timer 表，因此装载路径必须

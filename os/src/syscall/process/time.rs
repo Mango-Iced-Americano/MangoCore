@@ -4,11 +4,9 @@ use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     add_kernel_timer, all_processes, current_task, current_user_token, find_process_by_pid,
-    find_task_by_tid,
-    signal::{queue_process_signal_info, wake_process_signal_waiter, Signals},
-    sleep_relative_interruptible, sleep_until_realtime_interruptible,
-    wake_realtime_abstime_sleepers_after_clock_set, IntervalTimerKind, PosixTimer, Rusage,
-    TimerAction,
+    find_task_by_tid, signal::Signals, sleep_relative_interruptible,
+    sleep_until_realtime_interruptible, wake_realtime_abstime_sleepers_after_clock_set,
+    IntervalTimerKind, PosixTimer, Rusage, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
@@ -235,8 +233,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
 
 fn valid_itimerval(value: ITimerVal) -> bool {
     fn valid_timeval(value: TimeVal) -> bool {
-        value.tv_usec < USEC_PER_SEC
-            && value.tv_sec <= (usize::MAX - value.tv_usec) / USEC_PER_SEC
+        value.tv_usec < USEC_PER_SEC && value.tv_sec <= (usize::MAX - value.tv_usec) / USEC_PER_SEC
     }
 
     valid_timeval(value.it_interval) && valid_timeval(value.it_value)
@@ -348,8 +345,8 @@ pub fn sys_timer_settime(
 
         timer.interval = new_spec.it_interval;
         timer.value = new_spec.it_value;
-        timer.arm_seq = timers.alloc_arm_seq();
-        timer.reset_overrun();
+        let arm_seq = timers.alloc_arm_seq();
+        timer.begin_arm(arm_seq);
         timer.wall_deadline = None;
         timer.realtime_abs_deadline = None;
         timer.cpu_deadline_us = None;
@@ -363,17 +360,18 @@ pub fn sys_timer_settime(
                 now_us.saturating_add(value_us)
             };
             if flags & TIMER_ABSTIME != 0 && deadline_us <= now_us {
-                generated_event = timer.pending_signal();
                 if timer.interval.is_zero() {
                     timer.value = TimeSpec::new();
+                    generated_event = timer.record_expiry(timer_id, 1);
                 } else {
                     let interval_us = PosixTimer::cpu_duration_us(timer.interval);
                     let missed = now_us.saturating_sub(deadline_us) / interval_us;
                     let expirations = missed.saturating_add(1);
-                    timer.add_overrun(missed.min(usize::MAX as u64) as usize);
                     timer.value = timer.interval;
                     timer.cpu_deadline_us =
                         Some(deadline_us.saturating_add(expirations.saturating_mul(interval_us)));
+                    generated_event =
+                        timer.record_expiry(timer_id, expirations.min(usize::MAX as u64) as usize);
                 }
             } else {
                 timer.cpu_deadline_us = Some(deadline_us);
@@ -382,9 +380,9 @@ pub fn sys_timer_settime(
             let clock_now = posix_wall_clock_now(timer.clock_id);
             let now_monotonic = TimeSpec::now();
             if flags & TIMER_ABSTIME != 0 && timer.value <= clock_now {
-                generated_event = timer.pending_signal();
                 if timer.interval.is_zero() {
                     timer.value = TimeSpec::new();
+                    generated_event = timer.record_expiry(timer_id, 1);
                 } else {
                     let (deadline, overrun, next_abs_deadline) =
                         posix_timer_deadline_after_absolute_overrun(
@@ -393,12 +391,12 @@ pub fn sys_timer_settime(
                             clock_now,
                             now_monotonic,
                         );
-                    timer.add_overrun(overrun);
                     if is_realtime_posix_timer_clock(timer.clock_id) {
                         timer.realtime_abs_deadline = Some(next_abs_deadline);
                     }
                     timer.wall_deadline = Some(deadline);
                     register_timer = Some((deadline, timer.arm_seq));
+                    generated_event = timer.record_expiry(timer_id, overrun.saturating_add(1));
                 }
             } else {
                 let deadline = posix_timer_deadline(
@@ -421,8 +419,7 @@ pub fn sys_timer_settime(
 
     // SignalQueue 可能扩容，唤醒还会进入调度器；二者都必须位于 timer 表锁外。
     if let Some(event) = generated_event {
-        let _ = queue_process_signal_info(&process, event.signal, event.siginfo);
-        let _ = wake_process_signal_waiter(&process, event.signal);
+        let _ = process.publish_posix_timer_signal(event);
     }
     if let Some((deadline, arm_seq)) = register_timer {
         add_kernel_timer(
@@ -467,7 +464,7 @@ pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
     let process = current_task().unwrap().process.clone();
     let timers = process.posix_timers();
     match timers.get(timer_id) {
-        Some(timer) => timer.overrun() as isize,
+        Some(timer) => timer.last_overrun() as isize,
         _ => EINVAL,
     }
 }
@@ -476,15 +473,18 @@ pub fn sys_timer_delete(timer_id: usize) -> isize {
     let process = current_task().unwrap().process.clone();
     let removed = {
         let mut timers = process.posix_timers();
+        let pending_event = timers.get(timer_id).and_then(PosixTimer::pending_event);
         let removed = timers.remove(timer_id);
         process.sync_posix_cpu_timer_hint(&timers);
-        removed
+        removed.then_some(pending_event)
     };
-    if removed {
-        SUCCESS
-    } else {
-        EINVAL
+    let Some(pending_event) = removed else {
+        return EINVAL;
+    };
+    if let Some(event_id) = pending_event {
+        process.remove_queued_posix_timer_signal(event_id);
     }
+    SUCCESS
 }
 
 fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
@@ -645,13 +645,18 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                                 now_realtime,
                                 now_monotonic,
                             );
-                        timer.add_overrun(overrun);
                         timer.value = timer.interval;
                         timer.wall_deadline = Some(deadline);
                         timer.realtime_abs_deadline = Some(next_abs_deadline);
                         registrations[process_registration_count] =
                             Some((timer_id, timer.arm_seq, deadline));
                         process_registration_count += 1;
+                        if let Some(event) =
+                            timer.record_expiry(timer_id, overrun.saturating_add(1))
+                        {
+                            events[event_count] = Some(event);
+                            event_count += 1;
+                        }
                     }
                 } else {
                     let deadline =
@@ -662,8 +667,8 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                     process_registration_count += 1;
                 }
 
-                if generated {
-                    if let Some(event) = timer.pending_signal() {
+                if generated && timer.interval.is_zero() {
+                    if let Some(event) = timer.record_expiry(timer_id, 1) {
                         events[event_count] = Some(event);
                         event_count += 1;
                     }
@@ -672,8 +677,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
             }
         }
         for event in events.iter().take(event_count).flatten().copied() {
-            let _ = queue_process_signal_info(&process, event.signal, event.siginfo);
-            let _ = wake_process_signal_waiter(&process, event.signal);
+            let _ = process.publish_posix_timer_signal(event);
         }
         for (timer_id, arm_seq, deadline) in registrations
             .iter()

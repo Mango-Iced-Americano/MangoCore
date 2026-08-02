@@ -27,10 +27,7 @@ use super::task::{RemoteAffinityRequest, RemoteAffinityState};
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     discard_non_actionable_unblocked_signals, has_actionable_signal,
-    signal::{
-        has_waited_signal, queue_kernel_process_signal, queue_process_signal_info,
-        wake_process_signal_waiter, Signals,
-    },
+    signal::{has_waited_signal, queue_kernel_process_signal, wake_process_signal_waiter, Signals},
     ProcessControlBlock, TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
@@ -1667,9 +1664,7 @@ impl KernelTimer {
                 generation,
             } => process
                 .upgrade()
-                .map(|process| {
-                    process.real_interval_timer_is_live(*generation, self.deadline)
-                })
+                .map(|process| process.real_interval_timer_is_live(*generation, self.deadline))
                 .unwrap_or(false),
             TimerAction::PosixTimerSignal {
                 process,
@@ -1970,25 +1965,17 @@ impl KernelTimerQueue {
                     {
                         return false;
                     }
-                    let signal = timer_state.signal;
-                    let signal_pending =
-                        !signal.is_empty() && process.shared_pending_hint().contains(signal);
-                    if timer_state.interval.is_zero() {
+                    let expirations = if timer_state.interval.is_zero() {
                         timer_state.value = TimeSpec::new();
                         timer_state.wall_deadline = None;
                         timer_state.realtime_abs_deadline = None;
+                        1
                     } else {
                         let interval_ns = timer_state.interval.to_ns_saturating().max(1) as usize;
                         let deadline_ns = timer.deadline.to_ns_saturating() as usize;
                         let elapsed_ns =
                             (now.to_ns_saturating() as usize).saturating_sub(deadline_ns);
                         let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
-                        let missed = if signal_pending {
-                            expirations
-                        } else {
-                            expirations.saturating_sub(1)
-                        };
-                        timer_state.add_overrun(missed);
                         let next_ns =
                             deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
                         let deadline = TimeSpec::from_ns(next_ns);
@@ -2003,18 +1990,16 @@ impl KernelTimerQueue {
                         timer_state.value = timer_state.interval;
                         timer_state.wall_deadline = Some(deadline);
                         next_timer = Some((deadline, timer_state.arm_seq));
-                    }
+                        expirations
+                    };
                     // 只在表锁内领取 timer 事件；SignalQueue 可能扩容，不能在
                     // IRQ-off 的 deferred timer 路径中嵌套进入 allocator。
-                    let event = timer_state.pending_signal();
+                    let event = timer_state.record_expiry(timer_id, expirations);
                     *timers.get_mut(timer_id).unwrap() = timer_state;
                     event
                 };
                 let woke = generated_event
-                    .map(|event| {
-                        let _ = queue_process_signal_info(&process, event.signal, event.siginfo);
-                        wake_process_signal_waiter(&process, event.signal)
-                    })
+                    .map(|event| process.publish_posix_timer_signal(event))
                     .unwrap_or(false);
                 if let Some((deadline, next_arm_seq)) = next_timer {
                     add_kernel_timer(

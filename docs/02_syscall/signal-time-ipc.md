@@ -68,6 +68,9 @@ struct SignalFd {
 
 `sys_signalfd4(fd, mask, sigsetsize, flags)` 支持 `SFD_NONBLOCK` 和 `SFD_CLOEXEC`。flags 含其他位返回 `EINVAL`。fd 为已有 signalfd 时更新 mask；fd 为新建时创建文件对象并分配 fd。
 
+读取 `SI_TIMER` 时，`signalfd_siginfo.ssi_tid` 返回 timer ID，`ssi_overrun` 返回本次实际领取
+时固化的 overrun；timer 的联合字段不再同时伪装成 sender pid/uid，因此这两项固定为 0。
+
 源码主路径如下：
 
 ```rust
@@ -269,21 +272,25 @@ timer 表由 PCB 独占并由同一线程组共享，普通 fork 得到空表，
 |---------|------|
 | `timer_settime` | flags 只能包含 `TIMER_ABSTIME`；new_value 不能为 NULL；校验 interval/value timespec |
 | `timer_gettime` | 写出当前 timer spec |
-| `timer_getoverrun` | 返回 overrun 计数 |
+| `timer_getoverrun` | 返回最近一次已交付 timer 事件的 overrun |
 | `timer_delete` | 删除 timer slot |
 
 `timer_settime()` 同样采用“copyin → 锁内快照并提交 → 锁外注册 → copyout”的顺序；旧值
 写回失败不撤销已经发布的新配置或立即到期信号。
 
 墙钟类 timer 通过全局 `KernelTimerQueue` 驱动，action 只持 PCB `Weak`、timer ID 和
-`arm_seq`。回调必须同时匹配 ID、装载序号和 deadline 才能提交到期结果，因此
-delete/recreate、rearm、exec 和退出遗留的旧节点都不能命中新对象。回调在 timer 表锁内
-更新状态并向进程共享 pending 队列生成 `SI_TIMER`，释放表锁后才唤醒目标线程或重装周期
-节点；这使“删除 timer”与“生成信号”有明确的线性化顺序，又不把调度器操作放进 owner 锁。
+`arm_seq`。回调必须同时匹配 ID、装载序号和 deadline 才能提交到期结果，因此 rearm、exec
+和退出遗留的旧 heap 节点不能修改当前设置。timer 对象另有 `instance_seq`，用于阻止
+delete/recreate 后旧 pending 事件命中复用相同 ID 的新对象。
 
-`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID` 的创建和参数 ABI 已接受，但本节
-所述 wall-time 队列尚不能证明 CPU 消耗驱动的到期语义；该部分必须由独立 CPU timer 节点
-完成，不能由 `timer_settime01/02` 通过外推。
+回调在 timer 表锁内更新状态并构造至多一个精确 timer 事件，释放表锁后才进入进程 shared
+pending、唤醒目标线程或重装周期节点。同一 timer 在事件尚未领取时重复到期只累计 overrun；
+不同 timer 即使使用同一个非实时 signal，也保留各自队列项。signal dequeue 后先释放 signal
+锁，再回到 timer owner 固化本次 `SigInfo` 和 `timer_getoverrun()` 快照，不形成双锁嵌套。
+
+`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID` 不进入 wall-time heap：前者按 PCB
+线程组累计推进，后者按创建线程的稳定 TCB 身份推进；trap-return 和 schedule-out 安全点
+在 timer 表锁内唯一领取到期，再锁外投递上述同一类精确事件。
 
 ## 9. clock 与 timeval
 

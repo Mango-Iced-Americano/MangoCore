@@ -35,14 +35,15 @@ mod pending;
 mod wait;
 
 pub use action::Sighand;
+pub(crate) use delivery::{
+    queue_kernel_process_signal, queue_process_signal_info, wake_process_signal_waiter,
+};
 pub use delivery::{
     send_process_signal, send_process_signal_info, send_process_signal_to_current_task,
     send_thread_signal, send_thread_signal_info_deferred,
 };
-pub(crate) use delivery::{
-    queue_kernel_process_signal, queue_process_signal_info, wake_process_signal_waiter,
-};
 use frame::signal_frame_layout;
+pub(crate) use pending::PosixTimerEventId;
 pub use pending::{is_realtime_signal, PendingSignal, SignalQueue};
 pub use wait::{sigsuspend, sigtimedwait};
 
@@ -1059,6 +1060,34 @@ impl SigInfo {
             si_value,
             __pad: [0; 128 - 6 * core::mem::size_of::<u32>() - core::mem::size_of::<usize>()],
         }
+    }
+
+    /// 构造 Linux `SI_TIMER` 联合布局。
+    ///
+    /// `siginfo_t` 的 timer 分支与通用 sender 分支复用同一段内存：
+    /// `si_pid/si_uid/si_value` 对应 `si_tid/si_overrun/si_value`。
+    pub(crate) fn new_timer(
+        si_signo: usize,
+        timer_id: usize,
+        overrun: usize,
+        si_value: usize,
+    ) -> Self {
+        let mut info =
+            Self::new_with_sender_value(si_signo, 0, Self::SI_TIMER as usize, timer_id, si_value);
+        info.si_uid = overrun.min(i32::MAX as usize) as u32;
+        info
+    }
+
+    pub(crate) fn set_timer_overrun(&mut self, overrun: usize) {
+        self.si_uid = overrun.min(i32::MAX as usize) as u32;
+    }
+
+    pub fn timer_id(&self) -> u32 {
+        self.si_pid
+    }
+
+    pub fn timer_overrun(&self) -> u32 {
+        self.si_uid
     }
 
     pub fn with_signal_sender(mut self, si_signo: usize, si_pid: usize) -> Self {

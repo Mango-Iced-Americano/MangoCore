@@ -16,6 +16,17 @@ use super::{SigInfo, Signals};
 
 const MAX_QUEUED_SIGNALS: usize = 64;
 
+/// POSIX timer pending 事件的稳定身份。
+///
+/// `timer_id` 是用户可见 ID，`instance_seq` 区分删除后复用同一 ID
+/// 的新 timer。它不使用 arm 序号：`timer_settime()` 不会把已 pending
+/// 的同一 timer 事件变成另一个对象。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PosixTimerEventId {
+    pub(crate) timer_id: usize,
+    pub(crate) instance_seq: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 /// 一个带 `siginfo_t` 的 pending signal。
 pub struct PendingSignal {
@@ -23,6 +34,8 @@ pub struct PendingSignal {
     pub signal: Signals,
     /// 投递给用户或等待接口的 `siginfo_t` 负载。
     pub siginfo: SigInfo,
+    /// 仅 POSIX timer 设置；用于按 timer 对象而非信号精确合并。
+    pub(crate) timer_event: Option<PosixTimerEventId>,
 }
 
 impl PendingSignal {
@@ -45,6 +58,22 @@ impl PendingSignal {
         Ok(Self {
             signal,
             siginfo: SigInfo::new_with_sender(signum, si_errno, si_code, si_pid),
+            timer_event: None,
+        })
+    }
+
+    /// 为一个 POSIX timer 实例构造可精确识别的 pending 事件。
+    pub(crate) fn from_posix_timer(
+        signal: Signals,
+        timer_event: PosixTimerEventId,
+        overrun: usize,
+        value: usize,
+    ) -> Result<Self, isize> {
+        let signum = signal.to_signum().map_err(|_| EINVAL)?;
+        Ok(Self {
+            signal,
+            siginfo: SigInfo::new_timer(signum, timer_event.timer_id, overrun, value),
+            timer_event: Some(timer_event),
         })
     }
 
@@ -131,10 +160,23 @@ impl SignalQueue {
         if pending.signal.is_empty() {
             return Ok(());
         }
-        if !is_realtime_signal(pending.signal) && self.bitmap.contains(pending.signal) {
+        if let Some(timer_event) = pending.timer_event {
+            // Linux 为每个 POSIX timer 预留独立 sigqueue：不同 timer 即使
+            // 使用同一非实时信号也各有一项，同一 timer 则只保留一项。
+            if self
+                .queue
+                .iter()
+                .any(|queued| queued.timer_event == Some(timer_event))
+            {
+                return Ok(());
+            }
+        } else if !is_realtime_signal(pending.signal) && self.bitmap.contains(pending.signal) {
             return Ok(());
         }
-        if self.queue.len() >= MAX_QUEUED_SIGNALS {
+        // POSIX timer 事件对应创建 timer 时已预留的资源，不能被
+        // 普通/RT 信号占满的通用额度拒绝。每个 timer 最多一项，
+        // delete/exec/exit 会按精确身份清理，因而额外项受 timer 上限约束。
+        if pending.timer_event.is_none() && self.queue.len() >= MAX_QUEUED_SIGNALS {
             return Err(EAGAIN);
         }
         self.bitmap.insert(pending.signal);
@@ -166,6 +208,21 @@ impl SignalQueue {
         } else {
             false
         }
+    }
+
+    /// 删除指定 timer 实例的 pending 事件，不影响同信号的其它 timer。
+    pub(crate) fn remove_timer_event(&mut self, event_id: PosixTimerEventId) -> bool {
+        let Some(index) = self
+            .queue
+            .iter()
+            .position(|pending| pending.timer_event == Some(event_id))
+        else {
+            return false;
+        };
+        let signal = self.queue[index].signal;
+        self.queue.remove(index);
+        self.refresh_bitmap_for(signal);
+        true
     }
 
     /// 删除 `signals` 集合中的所有 pending signal。

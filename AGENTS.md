@@ -273,8 +273,8 @@ B76 要求 wait 事件在 PID 回收前一次性快照 PID/status/RUSAGE_BOTH；
 copyout EFAULT 不得回滚已经消费的事件；WNOWAIT 不得累加 parent。
 B77 要求 POSIX timer 的唯一 owner 是 PCB 表，而不是创建线程 TCB：thread clone 共享、fork
 空表、exec/最后线程退出清空。timerid copyout 使用 Reserved slot，wall-time action 必须匹配
-PCB Weak + timer ID + arm_seq + deadline；timer 表锁内只允许向进程 shared pending 生成信号，
-调度器唤醒和 kernel timer 重装必须在锁外。CPU clock timer 的参数 ABI 通过不代表其到期语义完成。
+PCB Weak + timer ID + arm_seq + deadline；timer 表锁内只允许领取完整值事件，shared pending
+入队、调度器唤醒和 kernel timer 重装必须在锁外。
 B78 已让 process/thread POSIX CPU timer 按真实 CPU 累计推进：process timer 读取 PCB 总量，
 thread timer 用创建者 `Weak<TCB>` 固定对象身份；wall/CPU 到期都只在 timer 表锁内领取值事件，
 signal queue、sibling 唤醒和 wall heap 重装必须在锁外。CPU timer 不得塞入 wall-time heap，
@@ -283,6 +283,10 @@ B79 又将 legacy `ITIMER_REAL/VIRTUAL/PROF` 从 TCB 迁入 PCB 独立表：thre
 新建空表、exec 保留、最后线程退出清空。REAL 使用 monotonic heap generation；VIRTUAL/PROF
 分别读取线程组 user 与 user+system CPU 累计，并只在 trap-return/schedule-out 安全点领取。
 三类到期都必须先释放 interval timer 锁，再进入 shared signal queue、runqueue 或 timer heap。
+B80 要求 POSIX timer pending 使用 `timer ID + instance_seq` 标识对象生命期；`arm_seq` 只标识
+heap 装载。每个 timer 最多一个 pending 事件并独立累计 overrun，不得按 signal number 合并
+不同 timer。signal dequeue 与 timer finalize、timer clear 与 signal cleanup 都必须在中间释放
+第一把锁；`timer_getoverrun()` 只返回最近一次实际交付固化的值。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

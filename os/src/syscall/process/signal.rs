@@ -116,16 +116,19 @@ struct SignalfdSiginfo {
 
 impl SignalfdSiginfo {
     fn from_siginfo(info: SigInfo) -> Self {
+        let is_timer = info.code() == SigInfo::SI_TIMER as i32;
         Self {
             ssi_signo: info.signo() as u32,
             ssi_errno: info.errno(),
             ssi_code: info.code(),
-            ssi_pid: info.sender_pid(),
-            ssi_uid: info.sender_uid(),
+            // SI_TIMER 的联合分支把这两个位置解释为 tid/overrun，
+            // 不能同时把它们暴露为伪造的 sender pid/uid。
+            ssi_pid: if is_timer { 0 } else { info.sender_pid() },
+            ssi_uid: if is_timer { 0 } else { info.sender_uid() },
             ssi_fd: 0,
-            ssi_tid: 0,
+            ssi_tid: if is_timer { info.timer_id() } else { 0 },
             ssi_band: 0,
-            ssi_overrun: 0,
+            ssi_overrun: if is_timer { info.timer_overrun() } else { 0 },
             ssi_trapno: 0,
             ssi_status: 0,
             ssi_int: info.value() as i32,
@@ -814,8 +817,11 @@ pub fn sys_sigreturn() -> isize {
     #[cfg(feature = "loongarch64")]
     let restored_lsx = match ucontext_addr
         .checked_add(crate::hal::UserContext::LSX_OFFSET)
-        .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
-    {
+        .and_then(|addr| {
+            UserPtr::<crate::hal::LsxRegs>::from_addr(addr)
+                .read(token)
+                .ok()
+        }) {
         Some(lsx) => lsx,
         None => reject_sigreturn_frame(task, "bad LSX context in signal frame"),
     };
