@@ -1,5 +1,5 @@
 use alloc::format;
-use user_lib::syscall::{sys_faccessat2, sys_mkdirat, sys_mount};
+use user_lib::syscall::{sys_faccessat2, sys_mkdirat, sys_mount, sys_umount2};
 use user_lib::{chmod, mount, println};
 
 const AT_FDCWD: isize = -100;
@@ -19,7 +19,7 @@ pub(super) fn prepare_pseudo_fs_framework() {
     println!("[init] pseudo-fs mount framework ready");
 }
 
-fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
+fn try_mount(source: &str, target: &str, fstype: &str) -> bool {
     let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
     if result < 0 {
         println!(
@@ -50,6 +50,7 @@ pub(super) fn mount_tmpfs(target: &'static str) {
 
 fn try_bind_mount(source: &str, target: &str) -> bool {
     let src = format!("{}\0", source);
+    let target = target.trim_end_matches('\0');
     let tgt = format!("{}\0", target);
     let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
     if ret == 0 {
@@ -61,40 +62,67 @@ fn try_bind_mount(source: &str, target: &str) -> bool {
     }
 }
 
-pub(super) fn sdcard_root_ready() -> bool {
-    let has_bin = sys_faccessat2(AT_FDCWD, "/sdcard/bin\0", 0, 0) == 0;
-    let has_etc = sys_faccessat2(AT_FDCWD, "/sdcard/etc\0", 0, 0) == 0;
-    if has_bin || has_etc {
-        println!("[init] VF2 /sdcard root check passed");
-        true
-    } else {
-        println!("[init] VF2 /sdcard root check failed: missing /bin and /etc");
-        false
+pub(super) fn mount_root_filesystem(source: &str, root: &str) -> bool {
+    let _ = sys_mkdirat(AT_FDCWD, root, 0o755);
+    for fstype in ["ext4\0", "vfat\0", "fat32\0"] {
+        if !try_mount(source, root, fstype) {
+            continue;
+        }
+        if root_looks_ready(root) {
+            println!(
+                "[init] VF2 root {} mounted as {}",
+                source.trim_end_matches('\0'),
+                fstype.trim_end_matches('\0')
+            );
+            return true;
+        }
+
+        println!(
+            "[init] VF2 {} is not a root filesystem; unmounting {}",
+            source.trim_end_matches('\0'),
+            root.trim_end_matches('\0')
+        );
+        let unmount = sys_umount2(root.as_ptr(), 0);
+        if unmount < 0 {
+            println!(
+                "[init] VF2 unmount {} failed: {}",
+                root.trim_end_matches('\0'),
+                unmount
+            );
+            return false;
+        }
     }
+    false
 }
 
-pub(super) fn bind_pseudo_filesystems_in_sdcard() -> bool {
-    for path in [
-        "/sdcard/proc\0",
-        "/sdcard/sys\0",
-        "/sdcard/dev\0",
-        "/sdcard/dev/shm\0",
-        "/sdcard/run\0",
-        "/sdcard/tmp\0",
-    ] {
-        let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
+fn root_looks_ready(root: &str) -> bool {
+    let bin = root_path(root, "/bin");
+    let etc = root_path(root, "/etc");
+    sys_faccessat2(AT_FDCWD, &bin, 0, 0) == 0
+        || sys_faccessat2(AT_FDCWD, &etc, 0, 0) == 0
+}
+
+fn root_path(root: &str, suffix: &str) -> alloc::string::String {
+    format!("{}{}\0", root.trim_end_matches('\0'), suffix)
+}
+
+pub(super) fn bind_pseudo_filesystems_in(root: &str) -> bool {
+    for suffix in ["/proc", "/sys", "/dev", "/dev/shm", "/run", "/tmp"] {
+        let target = root_path(root, suffix);
+        let _ = sys_mkdirat(AT_FDCWD, &target, 0o755);
     }
 
     let mut mounted = true;
-    for (source, target) in [
-        ("/proc", "/sdcard/proc"),
-        ("/sys", "/sdcard/sys"),
-        ("/dev", "/sdcard/dev"),
-        ("/dev/shm", "/sdcard/dev/shm"),
-        ("/run", "/sdcard/run"),
-        ("/tmp", "/sdcard/tmp"),
+    for (source, suffix) in [
+        ("/proc", "/proc"),
+        ("/sys", "/sys"),
+        ("/dev", "/dev"),
+        ("/dev/shm", "/dev/shm"),
+        ("/run", "/run"),
+        ("/tmp", "/tmp"),
     ] {
-        mounted &= try_bind_mount(source, target);
+        let target = root_path(root, suffix);
+        mounted &= try_bind_mount(source, &target);
     }
     mounted
 }
