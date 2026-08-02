@@ -3,41 +3,38 @@ title: "futex 与线程退出协作"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
-tags: [process, futex, waitqueue]
+last_update: 2026-08-02
+tags: [process, futex, smp, requeue]
 ---
 
 # futex 与线程退出协作
 
-## 1. 源码位置
+## 1. 源码与职责
 
 | 文件 | 内容 |
 |------|------|
-| `os/src/syscall/process/futex.rs` | futex syscall 参数解析、key 选择、waitv |
-| `os/src/task/threads.rs` | futex table、wait/wake/requeue 实现 |
-| `os/src/task/manager.rs` | WaitQueue 和等待模板 |
+| `os/src/syscall/process/futex.rs` | syscall 参数校验、private/shared key 选择、waitv 解析 |
+| `os/src/task/threads.rs` | `FutexTable`、wait/wake/requeue、timeout 与 waitv |
 | `os/src/task/task.rs` | `clear_child_tid` 退出唤醒 |
+| `os/src/mm/address_space.rs` | 判断 VMA 是否需要 shared key、地址翻译 |
 
-## 2. 支持的命令
+futex 不再复用通用 `WaitQueue`。通用队列只记录任务，无法表示一次等待在
+`FUTEX_REQUEUE` 后的当前位置，也无法区分同一任务的多个 `futex_waitv` 注册项。
 
-`FutexCmd` 当前处理：
+## 2. 支持范围
 
-| 命令 | syscall 分支 |
-|------|--------------|
-| `FUTEX_WAIT` | 支持 |
-| `FUTEX_WAKE` | 支持 |
-| `FUTEX_REQUEUE` | 支持 |
-| `FUTEX_CMP_REQUEUE` | 支持 |
-| `FUTEX_WAIT_BITSET` | 支持 |
-| `FUTEX_WAKE_BITSET` | 支持 |
-| `FUTEX_WAITV` | 单独 syscall 支持 |
-| PI futex / wake op / fd | 返回 `EINVAL` 或未支持 |
+| 命令 | 状态 |
+|------|------|
+| `FUTEX_WAIT` / `FUTEX_WAKE` | 支持 |
+| `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET` | 支持；wake 暂未按 bitset 筛选 |
+| `FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE` | 支持 |
+| `futex_waitv` | 支持 32-bit futex 子集，最多 128 项 |
+| PI futex、`FUTEX_WAKE_OP`、`FUTEX_FD` | 未支持 |
 
-`FUTEX_PRIVATE_FLAG` 和 `FUTEX_CLOCK_REALTIME` 作为 option 解析。
+`FUTEX_PRIVATE_FLAG` 和 `FUTEX_CLOCK_REALTIME` 在 syscall 层解析。普通 wait 的 timeout
+是相对时间；wait-bitset 和 waitv 使用绝对 deadline。
 
-## 3. futex key
-
-futex key 分两类：
+## 3. key 与等待表
 
 ```rust
 enum FutexKey {
@@ -46,463 +43,200 @@ enum FutexKey {
 }
 ```
 
-| key | 来源 |
-|-----|------|
-| private | 用户虚拟地址 |
-| shared | 物理地址加页内偏移 |
+| 类型 | 当前 key | 等待表 |
+|------|----------|--------|
+| private | 当前进程内的用户虚拟地址 | `ProcessControlBlock::futex()` |
+| shared | 物理页号与页内偏移组合 | 全局 `PROCESS_SHARED_FUTEX` |
 
-非 private futex 并不总是 shared key。`futex_key_for()` 会询问当前 VM：
+清除 `FUTEX_PRIVATE_FLAG` 不会无条件选择全局表。内核先调用
+`AddressSpace::futex_uses_shared_key()`；只有真实 `MAP_SHARED` VMA 才翻译为 shared key，
+其余映射仍使用当前进程的 private 表。
+
+shared 表旁的 `PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY` 只是调度循环的快速提示。
+`compact_shared_futex()` 每 64 次调用清理失效 waiter 和空 key；它不参与正确性裁决。
+
+> 当前 shared key 仍是 raw PPN + offset。物理页释放后复用可能造成 ABA；B65 将把它替换
+> 为由 backing 生命周期约束的稳定身份。本节只描述 B64 已实现的 requeue 正确性。
+
+## 4. 专用数据模型
 
 ```rust
-vm.futex_uses_shared_key(VirtAddr::from(uaddr))?
-```
-
-只有 VMA 真实为 shared mapping 时，才翻译到物理地址 key；否则仍使用 private key。
-
-源码中 key 选择包含一次 VMA 语义判断和一次页表翻译：
-
-```rust
-fn va_to_phys_key(
-    vm: &crate::mm::AddressSpace<crate::mm::KernelPageTableImpl>,
-    va: usize,
-) -> Option<usize> {
-    let va = VirtAddr::from(va);
-    let vpn = va.floor();
-    let offset = va.page_offset();
-    vm.translate(vpn).map(|ppn| (ppn.0 << 12) + offset)
+pub struct FutexTable {
+    queues: BTreeMap<usize, FutexQueue>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FutexKey {
-    Private(usize),
-    Shared(usize),
+struct FutexQueue {
+    waiters: VecDeque<Arc<FutexWaiter>>,
 }
 
-fn futex_key_for(
-    task: &TaskControlBlock,
-    uaddr: usize,
-    is_private: bool,
-) -> Result<FutexKey, isize> {
-    if is_private {
-        return Ok(FutexKey::Private(uaddr));
-    }
-
-    let vm_ref = task.process.vm();
-    let vm = vm_ref.lock();
-    if vm.futex_uses_shared_key(VirtAddr::from(uaddr))? {
-        va_to_phys_key(&vm, uaddr)
-            .map(FutexKey::Shared)
-            .ok_or(EFAULT)
-    } else {
-        Ok(FutexKey::Private(uaddr))
-    }
+struct FutexWaiter {
+    task: Weak<TaskControlBlock>,
+    key: AtomicUsize,
+    woken: AtomicBool,
 }
 ```
 
-key 的选择决定不同进程能否在同一个 futex 上相遇。private futex 使用用户虚拟地址作为 key，因此只在同一进程地址空间内有意义；shared futex 使用物理地址加页内偏移作为 key，使两个进程通过 `MAP_SHARED` 映射同一页时能够命中同一个等待队列。单纯清除 `FUTEX_PRIVATE_FLAG` 不足以生成 shared key，内核还要确认 VMA 本身确实是 shared mapping。
+三个层次各自只有一个职责：
 
-## 4. private 与 shared 表
+- `FutexTable`：在一把外层锁下串行化注册、wake、requeue 和撤销。
+- `FutexQueue`：维护某个 key 的 FIFO 成员关系。
+- `FutexWaiter`：表示一次稳定的等待注册，而不是一个任务。
 
-| 类型 | 表 |
-|------|----|
-| private | `ProcessControlBlock::futex(): Arc<Mutex<Futex>>` |
-| shared | 全局 `PROCESS_SHARED_FUTEX: BTreeMap<usize, WaitQueue>` |
+队列持有 `Arc<FutexWaiter>`，syscall 栈也持有同一个 `Arc`；撤销使用
+`Arc::ptr_eq()` 精确匹配。waiter 到 TCB 使用 `Weak`，因此不会形成引用环，也不会仅因
+等待队列残留而延长任务寿命。
 
-`PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY` 用作快速判断，调度循环降频调用 `compact_shared_futex()` 清理空 WaitQueue key。
+`futex_waitv` 的每个数组元素都有独立 waiter。即使同一个 TCB 用同一 key 注册多次，wake
+也只消费实际命中的注册项，清理不会误删兄弟项。
 
-表结构保存在 `task/threads.rs`：
+## 5. WAIT 的注册协议
+
+wait 必须同时避免“值已变化却睡下”和“wake 发生后仍返回 timeout”。当前顺序为：
+
+```text
+快速检查用户 word
+  -> 分配 FutexWaiter
+  -> 获取 FutexTable 锁
+  -> 检查 deadline / word / signal
+  -> enqueue(waiter)
+  -> 最后一次检查用户 word
+  -> 释放锁并阻塞
+```
+
+入队后的最后一次 word 检查覆盖检查与发布之间的窗口。注册完成后不再读取原 futex word：
+waiter 可能已被 requeue 到另一个 key，此时原地址的值不再能证明本次等待是否被唤醒。
+
+恢复后，等待方在同一 table 锁下按以下优先级裁决：
+
+1. `waiter.woken == true`：正常返回 0；
+2. deadline 到期：按 waiter 当前 key 精确撤销并返回 `ETIMEDOUT`；
+3. 有可处理信号：精确撤销并返回 `EINTR`；
+4. 否则重新进入阻塞。
+
+短 timeout 的单线程自旋和尾部 spin guard 仍保留，用来控制 QEMU 下的定时误差；它们不
+绕过上述 waiter 身份协议。尾部自旋同样取得 table 锁后裁决 wake/timeout 的胜者。
+
+## 6. WAKE 的发布顺序
+
+`wake_at_most(limit)` 在 table 锁内扫描调用时已有的队列长度：
+
+```text
+从队首取 waiter
+  -> 丢弃失效 Weak / 非法 New、Zombie 项
+  -> waiter.woken = true (Release)
+  -> 使旧 timer generation 失效
+  -> 若任务已 Blocking/Blocked，调用 wake_interruptible()
+```
+
+先发布 `woken`，再让任务 runnable。等待 CPU 用 Acquire 读取，所以不会出现任务已经运行、
+却仍把真实 wake 误判成 timeout 或 signal 的窗口。
+
+尚未达到 wake 数量的 waiter 被推回原队列；只扫描原长度，因此不在自旋锁内创建临时
+`Vec`，也保持未消费项的 FIFO 顺序。`Queued/Running` 仍可能是“入队后、正式阻塞前”的
+合法窗口，此时只标记真实 wake，不重复发布任务。
+
+锁顺序固定为：
+
+```text
+FutexTable -> TASK_MANAGER -> 单个 RunQueue
+```
+
+阻塞 helper 会在切换前释放 `FutexTable` guard；任何路径都不得跨 context switch 持锁。
+
+## 7. REQUEUE 的成员关系
+
+`FUTEX_REQUEUE` 先从 source 唤醒最多 `val` 项，再移动最多 `val2` 项。source 与 target
+属于同一张表，所以整个操作只持一把 table 锁，不需要双队列锁顺序。
+
+每个被移动 waiter 的顺序固定为：
+
+```text
+从 source 弹出
+  -> waiter.key = target (Release)
+  -> 发布到 target 队列
+```
+
+目标队列可见前先更新 current key。这样 timeout、signal 和 waitv 清理总能找到 waiter 的
+真实位置。不能再通过“是否仍在最初 source 队列”推断正常 wake：requeue 和 wake 都会让
+source membership 消失，但二者的返回语义完全不同。
+
+`FUTEX_CMP_REQUEUE` 还要求 `*uaddr == val3`，否则返回 `EAGAIN`。两个 key 必须同为 private
+或同为 shared，混合类型返回 `EINVAL`。
+
+## 8. futex_waitv
+
+syscall 层先把用户数组解析成内核拥有的 `FutexWaitSpec`：
 
 ```rust
-pub struct Futex {
-    inner: BTreeMap<usize, WaitQueue>,
-}
-
-#[derive(Clone, Copy)]
-pub struct FutexWaitEntry {
+pub struct FutexWaitSpec {
     pub futex_word: UserPtr<u32>,
     pub futex_key: usize,
     pub val: u32,
 }
-
-fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
-    map.entry(key).or_insert_with(WaitQueue::new)
-}
-
-fn wake_waiters(map: &mut BTreeMap<usize, WaitQueue>, key: usize, val: u32) -> isize {
-    if let Some(mut wait_queue) = map.remove(&key) {
-        let ret = wait_queue.wake_at_most(val as usize);
-        if !wait_queue.is_empty() {
-            map.insert(key, wait_queue);
-        }
-        ret as isize
-    } else {
-        0
-    }
-}
 ```
 
-## 5. FUTEX_WAIT
+所有条目在同一张 table 锁下注册。任一 waiter 被 wake 后，内核按数组顺序撤销全部注册，
+并返回最后一个已经被唤醒的下标。使用“最后一个”是当前 Linux
+`futex_unqueue_multiple()` 的明确语义；并发唤醒多个 key 时不能擅自改成第一个。
 
-`sys_futex()` 对 `FUTEX_WAIT`：
+timeout 返回 `ETIMEDOUT`，信号返回 `EINTR`，任一初始值不匹配返回 `EAGAIN`。private 与
+shared 条目不能混在同一次 waitv 中。
 
-1. `uaddr` 非空且 4 字节对齐。
-2. 读取 timeout，可为 null。
-3. 非 private 路径先读取 futex word，确保地址可读。
-4. 计算 private/shared key。
-5. 调用 `do_futex_wait()` 或 `do_futex_wait_shared()`。
+## 9. clear_child_tid
 
-wait 逻辑：
+线程退出时：
 
-| 用户 word | 返回 |
-|-----------|------|
-| 等于 val | 入队睡眠 |
-| 不等于 val | `EAGAIN` |
-| 读取失败 | 对应 errno |
+1. 向 `clear_child_tid` 用户地址写 0；
+2. 唤醒进程 private key；
+3. 若地址属于 shared VMA，同时唤醒全局 shared key；
+4. 若 fault 前后物理 key 改变，同时尝试旧 key 与新 key。
 
-相对 timeout 会转换为 monotonic deadline。
+这条路径供 pthread join 使用，与 syscall wake 共用 `FutexTable::wake()`，不再经过通用
+`WaitQueue`。
 
-`sys_futex()` 的分发主干如下，所有 wait/wake/requeue 都先完成用户地址和 option 校验：
+## 10. 错误与不变量
 
-```rust
-pub fn sys_futex(
-    uaddr: *mut u32,
-    futex_op: u32,
-    val: u32,
-    timeout: *const TimeSpec,
-    uaddr2: *mut u32,
-    val3: u32,
-) -> isize {
-    let token = current_user_token();
-    if uaddr.is_null() || uaddr.align_offset(4) != 0 {
-        return EINVAL;
-    }
-    let futex_word = UserPtr::new(uaddr as *const u32);
-    let cmd = threads::FutexCmd::from_primitive(futex_op & 0x7fu32);
-    let option = FutexOption::from_bits_truncate(futex_op);
-    let is_private = option.contains(FutexOption::PRIVATE);
-    let private_key = uaddr as usize;
-    match cmd {
-        FutexCmd::Wait => {
-            let timeout = match read_timeout(timeout, token) {
-                Ok(timeout) => timeout,
-                Err(errno) => return errno,
-            };
-            if !is_private {
-                if let Err(errno) = futex_word.read(token) {
-                    return errno;
-                }
-            }
-            match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Shared(phys_key)) => {
-                    do_futex_wait_shared(futex_word, token, val, timeout, phys_key)
-                }
-                Ok(FutexKey::Private(key)) => do_futex_wait(futex_word, token, key, val, timeout),
-                Err(errno) => errno,
-            }
-        }
-        FutexCmd::WaitBitset => {
-            if val3 == 0 {
-                return EINVAL;
-            }
-            let deadline = match futex_bitset_deadline(timeout, token, option) {
-                Ok(deadline) => deadline,
-                Err(errno) => return errno,
-            };
-            if !is_private {
-                if let Err(errno) = futex_word.read(token) {
-                    return errno;
-                }
-            }
-            match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Shared(phys_key)) => {
-                    do_futex_wait_bitset_shared(futex_word, token, val, deadline, phys_key)
-                }
-                Ok(FutexKey::Private(key)) => {
-                    do_futex_wait_bitset(futex_word, token, key, val, deadline)
-                }
-                Err(errno) => errno,
-            }
-        }
-        FutexCmd::Wake | FutexCmd::WakeBitset => {
-            if val > i32::MAX as u32 {
-                return EINVAL;
-            }
-            if cmd == FutexCmd::WakeBitset && val3 == 0 {
-                return EINVAL;
-            }
-            if !is_private {
-                if let Err(errno) = futex_word.read(token) {
-                    return errno;
-                }
-            }
-            match current_futex_key(private_key, is_private) {
-                Ok(FutexKey::Private(key)) => {
-                    current_task().unwrap().process.futex().lock().wake(key, val)
-                }
-                Ok(FutexKey::Shared(phys_key)) => futex_wake_shared(phys_key, val),
-                Err(errno) => errno,
-            }
-        }
-        FutexCmd::Requeue | FutexCmd::CmpRequeue => {
-            if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
-                return EINVAL;
-            }
-            match UserPtr::new(uaddr2 as *const u32).read(token) {
-                Ok(_) => {}
-                Err(errno) => return errno,
-            };
-            if cmd == FutexCmd::CmpRequeue {
-                match futex_word.read(token) {
-                    Ok(value) if value == val3 => {}
-                    Ok(_) => return EAGAIN,
-                    Err(errno) => return errno,
-                }
-            } else if !is_private {
-                if let Err(errno) = futex_word.read(token) {
-                    return errno;
-                }
-            }
-            let val2 = timeout as usize;
-            if val > i32::MAX as u32 || val2 > i32::MAX as usize {
-                return EINVAL;
-            }
-            let key = match current_futex_key(private_key, is_private) {
-                Ok(key) => key,
-                Err(errno) => return errno,
-            };
-            let key2 = match current_futex_key(uaddr2 as usize, is_private) {
-                Ok(key) => key,
-                Err(errno) => return errno,
-            };
-            match (key, key2) {
-                (FutexKey::Private(key), FutexKey::Private(key2)) => {
-                    current_task()
-                        .unwrap()
-                        .process
-                        .futex()
-                        .lock()
-                        .requeue(key, key2, val, val2)
-                }
-                (FutexKey::Shared(key), FutexKey::Shared(key2)) => {
-                    futex_requeue_shared(key, key2, val, val2)
-                }
-                _ => EINVAL,
-            }
-        }
-        FutexCmd::Invalid => EINVAL,
-        _ => EINVAL,
-    }
-}
-```
-
-## 6. FUTEX_WAIT_BITSET
-
-差异：
-
-| 条件 | 行为 |
+| 条件 | 返回 |
 |------|------|
-| `val3 == 0` | `EINVAL` |
-| timeout | 按绝对 deadline 处理 |
-| `FUTEX_CLOCK_REALTIME` | realtime deadline 转 monotonic deadline |
+| wait 时 word 不等于期望值 | `EAGAIN` |
+| 用户地址不可读 | 对应 uaccess errno |
+| 可处理信号 | `EINTR` |
+| deadline 到期 | `ETIMEDOUT` |
+| 正常 wake | 0；waitv 返回数组下标 |
 
-当前 wake bitset 分支只校验 `val3 != 0`，唤醒仍按 key 和数量处理。
+必须保持以下不变量：
 
-## 7. FUTEX_WAKE
+1. 每次注册最多属于一个 futex queue。
+2. requeue 在目标发布前更新 waiter 当前 key。
+3. wake 在任务 runnable 前发布 waiter 的 `woken`。
+4. timeout/signal 按当前 key 和准确 Arc 身份撤销。
+5. 注册后的恢复路径不重读最初 futex word。
+6. table 锁是 wait/wake/requeue/cleanup 的唯一线性化点。
 
-wake 分支：
+## 11. 已验证与剩余边界
 
-| 条件 | 错误 |
-|------|------|
-| val > `i32::MAX` | `EINVAL` |
-| `FUTEX_WAKE_BITSET` 且 val3 == 0 | `EINVAL` |
+B64 的双架构 8 核 focused LTP 每架构执行 musl、glibc 各 13 次：20 PASS、6 SKIP。
+六个 SKIP 是 `futex_waitv01/02/03` 在两套 libc 下因内核报告 Linux 5.10、用例要求 5.16
+而跳过，不代表 waitv 动态通过。
 
-private wake 调用当前进程 futex table；shared wake 调用全局 shared table。
+以下场景仍是 **NOT RUN**：
 
-返回唤醒数量。
+- requeue 后 timeout / signal 的精确竞态；
+- waitv 与 requeue 组合、多个 key 同时 wake；
+- shared raw PPN key 的释放复用 ABA；
+- table 自旋锁内 faultable 用户读取的锁序与时延。
 
-## 8. requeue/cmp_requeue
+设计对照：Linux 当前的
+[`futex_q`](https://github.com/torvalds/linux/blob/master/kernel/futex/futex.h)、
+[`futex_requeue`](https://github.com/torvalds/linux/blob/master/kernel/futex/requeue.c) 和
+[`futex_unqueue_multiple`](https://github.com/torvalds/linux/blob/master/kernel/futex/waitwake.c)。
 
-`FUTEX_REQUEUE` 和 `FUTEX_CMP_REQUEUE`：
+## 12. 调试核对点
 
-1. `uaddr2` 非空且 4 字节对齐。
-2. 读取 `uaddr2` 验证可读。
-3. `CMP_REQUEUE` 需要 `*uaddr == val3`，否则 `EAGAIN`。
-4. `val` 和 `val2` 不能超过 `i32::MAX`。
-5. key1/key2 必须同为 private 或同为 shared。
-6. 先 wake 最多 `val` 个，再把最多 `val2` 个 waiter 移到 key2。
-
-private/shared 混合返回 `EINVAL`。
-
-## 9. waitv
-
-`sys_futex_waitv()` 支持 futex2 waitv 子集：
-
-| 限制 | 错误 |
-|------|------|
-| flags 非 0 | `EINVAL` |
-| nr_futexes == 0 或 > 128 | `EINVAL` |
-| waiters null | `EFAULT` |
-| waiter reserved 非 0 | `EINVAL` |
-| flags 含不支持位 | `EINVAL` |
-| futex size 不是 32-bit | `EINVAL` |
-| val > u32::MAX | `EINVAL` |
-| uaddr 为 0 | `EFAULT` |
-| uaddr 未 4 字节对齐 | `EINVAL` |
-| waiters 混用 private/shared option | `EINVAL` |
-| 实际 key 表混用 private/shared | `EINVAL` |
-
-返回值为被唤醒的 waiter index；timeout 返回 `ETIMEDOUT`，信号返回 `EINTR`。
-
-## 10. 精确 timeout 优化
-
-`threads.rs` 对短 timeout 有优化：
-
-| 情况 | 行为 |
-|------|------|
-| 单线程进程 |
-| ready queue 无其他任务 |
-| timeout <= 150ms |
-
-满足时 `try_single_thread_short_timeout()` 通过短自旋精确等待，避免调度/定时器尾部误差。
-
-对于一般等待，`futex_wait_block_deadline()` 会保留尾部 spin guard：
-
-| 架构 | guard |
-|------|-------|
-| loongarch64 | 12 ms |
-| 其他 | 1.25 ms |
-
-la64 相对 timeout 还带 180 us exit bias。
-
-## 11. 等待模板
-
-futex 使用 `futex_wait_event_interruptible_timeout_locked()`，它在持 futex table 锁下：
-
-1. 检查条件。
-2. 加入 WaitQueue。
-3. 再检查条件、timeout、signal。
-4. 挂 timeout timer。
-5. 调用 `block_current_and_run_next_with_lock_checked()`。
-6. 醒来后 `finish_wait()`。
-7. 如果 waiter 已被 wake 移除，返回正常 wake 结果。
-
-这保证 futex value 检查与入队之间不会丢失 wake。
-
-等待模板的核心实现如下：
-
-```rust
-fn futex_wait_event_interruptible_timeout_locked<T, Q, F>(
-    lock: &spin::Mutex<T>,
-    mut queue_of: Q,
-    mut cond: F,
-    deadline: Option<TimeSpec>,
-    normal_wake_result: isize,
-) -> WaitResult
-where
-    Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
-    F: FnMut(&mut T) -> Option<isize>,
-{
-    {
-        let mut guard = lock.lock();
-        if let Some(res) = cond(&mut guard) {
-            return WaitResult::Ready(res);
-        }
-    }
-
-    loop {
-        let mut guard = lock.lock();
-        if deadline_expired(deadline) {
-            return WaitResult::TimedOut;
-        }
-
-        let task = current_task().unwrap();
-        queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
-
-        if let Some(res) = cond(&mut guard) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
-            return WaitResult::Ready(res);
-        }
-        if deadline_expired(deadline) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
-            return WaitResult::TimedOut;
-        }
-        if has_actionable_signal(&task) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
-            return WaitResult::Interrupted;
-        }
-        discard_non_actionable_unblocked_signals(&task);
-
-        let block_deadline = futex_wait_block_deadline(deadline);
-        if let Some(real_deadline) = deadline {
-            if block_deadline == Some(real_deadline) {
-                drop(guard);
-                return futex_wait_tail_spin(
-                    lock,
-                    queue_of,
-                    &mut cond,
-                    &task,
-                    real_deadline,
-                    normal_wake_result,
-                );
-            }
-        }
-        if let Some(block_deadline) = block_deadline {
-            wait_with_timeout(Arc::downgrade(&task), block_deadline);
-        }
-        drop(task);
-
-        block_current_and_run_next_with_lock_checked(guard, |task| {
-            let no_signal = !has_actionable_signal(task);
-            let not_timed_out = block_deadline
-                .map(|deadline| TimeSpec::now() < deadline)
-                .unwrap_or(true);
-            no_signal && not_timed_out
-        });
-
-        let task = current_task().unwrap();
-        let mut guard = lock.lock();
-        let removed = queue_of(&mut guard).finish_wait(task);
-        drop(guard);
-        task.acquire_inner_lock().refresh_real_timer();
-
-        if !removed {
-            return WaitResult::Ready(normal_wake_result);
-        }
-    }
-}
-```
-
-唤醒方会把 waiter 从队列中移除；等待方醒来后如果 `finish_wait()` 发现自己已经不在队列中，就返回 `normal_wake_result`。这就是 futex wake 不需要额外传递事件对象的原因。
-
-## 12. clear_child_tid
-
-线程退出时，TCB 会：
-
-1. 向 `clear_child_tid` 用户地址写 0。
-2. 唤醒 private futex key `clear_child_tid`。
-3. 如果该地址所在 VMA 使用 shared key，也唤醒物理 key。
-4. 若 fault 前后物理 key 变化，同时唤醒旧 key 和新 key。
-
-该行为用于 pthread join 类路径。
-
-## 13. 错误转换
-
-futex wait 内部 `WaitResult` 转换：
-
-| WaitResult | futex errno |
-|------------|-------------|
-| `Ready(value)` | value |
-| `Interrupted` | `EINTR` |
-| `TimedOut` | `ETIMEDOUT` |
-
-这与普通 WaitQueue 的 `-ERESTART/-EAGAIN` 默认转换不同。
-
-## 14. 调试核对点
-
-| 现象 | 检查 |
-|------|------|
-| process-shared futex 不能跨进程唤醒 | VMA 是否真正 shared，phys key 是否一致 |
-| futex_wait 立即 EAGAIN | 用户 word 是否等于 val |
-| waitv 返回 EINVAL | waiter flags、32-bit size、private/shared 混用 |
-| timeout 偏差大 | short timeout spin guard 与 arch bias |
-| pthread join 卡住 | clear_child_tid 写 0 和 futex wake |
+| 现象 | 优先检查 |
+|------|----------|
+| requeue 后错误超时或目标队列残留 | waiter current key、`Arc::ptr_eq` 清理 |
+| wake 后仍返回 `EINTR/ETIMEDOUT` | `woken` 是否先于 runnable 发布 |
+| waitv 返回错误下标 | 每项独立 waiter、最后 woken index |
+| shared futex 跨进程不醒 | VMA 是否 `MAP_SHARED`、shared key 是否一致 |
+| pthread join 卡住 | clear_child_tid 写 0 与 private/shared wake |

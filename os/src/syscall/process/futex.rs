@@ -3,7 +3,7 @@ use crate::syscall::errno::*;
 use crate::task::threads::{
     do_futex_wait, do_futex_wait_bitset, do_futex_wait_bitset_shared, do_futex_wait_shared,
     do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
-    FutexWaitEntry,
+    FutexWaitSpec,
 };
 use crate::task::{current_task, current_user_token, threads, TaskControlBlock};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
@@ -353,7 +353,7 @@ pub fn sys_futex_waitv(
             _ => {}
         };
 
-        entries.push(FutexWaitEntry {
+        entries.push(FutexWaitSpec {
             futex_word,
             futex_key,
             val: waiter.val as u32,

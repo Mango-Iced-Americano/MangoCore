@@ -1287,7 +1287,6 @@ impl WaitQueue {
         cond: &mut F,
         signal_check: bool,
         deadline: Option<TimeSpec>,
-        normal_wake_result: Option<isize>,
     ) -> WaitResult
     where
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
@@ -1350,15 +1349,9 @@ impl WaitQueue {
 
             let task = current_task().unwrap();
             let mut guard = lock.lock();
-            let removed = queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(&task);
             drop(guard);
             task.acquire_inner_lock().refresh_real_timer();
-
-            if !removed {
-                if let Some(res) = normal_wake_result {
-                    return WaitResult::Ready(res);
-                }
-            }
         }
     }
 
@@ -1571,7 +1564,7 @@ impl WaitQueue {
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
         F: FnMut(&mut T) -> Option<isize>,
     {
-        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None)
     }
 
     /// 在调用方对象锁下检查条件并注册不可中断等待。
@@ -1580,7 +1573,7 @@ impl WaitQueue {
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
         F: FnMut(&mut T) -> Option<isize>,
     {
-        Self::wait_event_locked_impl(lock, queue_of, &mut cond, false, None, None)
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, false, None)
     }
 
     /// 在调用方对象锁下等待条件、信号或绝对 deadline。
@@ -1594,34 +1587,7 @@ impl WaitQueue {
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
         F: FnMut(&mut T) -> Option<isize>,
     {
-        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, Some(deadline), None)
-    }
-
-    /// 带正常唤醒返回值的 locked wait。
-    ///
-    /// # Semantics
-    ///
-    /// 如果任务从等待队列中被正常唤醒而 `cond` 尚未返回值，则返回
-    /// `WaitResult::Ready(normal_wake_result)`。
-    pub fn wait_event_interruptible_timeout_locked_with_wake_result<T, Q, F>(
-        lock: &Mutex<T>,
-        queue_of: Q,
-        mut cond: F,
-        deadline: Option<TimeSpec>,
-        normal_wake_result: isize,
-    ) -> WaitResult
-    where
-        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
-        F: FnMut(&mut T) -> Option<isize>,
-    {
-        Self::wait_event_locked_impl(
-            lock,
-            queue_of,
-            &mut cond,
-            true,
-            deadline,
-            Some(normal_wake_result),
-        )
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, Some(deadline))
     }
 }
 

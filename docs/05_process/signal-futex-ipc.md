@@ -3,7 +3,7 @@ title: "信号、futex 与 IPC 的阻塞/唤醒协作"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-02
 tags: [process, signal, futex, ipc, waitqueue]
 ---
 
@@ -23,19 +23,28 @@ tags: [process, signal, futex, ipc, waitqueue]
 
 ## 2. 协作模型
 
-信号、futex 和 IPC 看似是不同子系统，但阻塞路径都归约到任务等待与唤醒：
+信号、futex 和 IPC 看似是不同子系统，但最终都要把业务等待转换成任务阻塞与唤醒。
+它们共享调度器入口，不再共享同一种队列成员模型：
 
 ```
 业务对象状态
-  ├── futex word / IPC queue / signal pending
-  └── WaitQueue
+  ├── futex word + FutexTable/FutexQueue/FutexWaiter
+  ├── IPC queue + WaitQueue
+  └── signal pending
+        ↓
+任务阻塞/唤醒
+  ├── block_current_and_run_next_with_lock_checked()
+  └── wake_interruptible()
+
+通用 WaitQueue
         ├── prepare_to_wait()
-        ├── block_current_and_run_next_with_lock_checked()
         ├── wake_at_most()/wake_all()
         └── finish_wait()
 ```
 
 信号决定可中断等待是否提前返回；futex 和 IPC 提供业务条件；TaskManager 执行真正调度。
+futex 需要跟踪 requeue 后的 current key 和 waitv 单项身份，因此使用专用 waiter；IPC 等
+普通条件队列继续使用 `WaitQueue`。
 
 统一等待结果由 `WaitResult` 表达：
 
@@ -124,19 +133,19 @@ futex wait 使用可中断等待：
 
 `discard_non_actionable_unblocked_signals()` 用于丢弃不会打断当前等待的信号，避免 pending 队列中无效信号造成重复唤醒。
 
-futex 专用等待模板在被 wake 移除队列后返回正常结果；被 signal 打断返回 `WaitResult::Interrupted`：
+每次 futex 注册都由独立 `Arc<FutexWaiter>` 表示。wake 在 table 锁下先发布
+`waiter.woken`，再让任务 runnable；signal 和 timeout 则按 waiter 的 current key 与
+准确 Arc 身份撤销：
 
-```rust
-let removed = queue_of(&mut guard).finish_wait(task);
-drop(guard);
-task.acquire_inner_lock().refresh_real_timer();
-
-if !removed {
-    return WaitResult::Ready(normal_wake_result);
-}
+```text
+wake:    woken = true -> wake_interruptible(task)
+requeue: waiter.key = target -> publish into target queue
+signal:  remove(current key, exact waiter) -> EINTR
+timeout: remove(current key, exact waiter) -> ETIMEDOUT
 ```
 
-这就是 futex wait 能区分“条件仍不满足但被 wake”与“醒来后继续等待”的依据。
+因此 requeue 导致 source membership 消失时不会被误判为正常 wake；只有 `woken == true`
+才能产生 futex 成功返回。注册完成后也不再重读最初 futex word。
 
 ## 6. IPC 与 WaitQueue
 
@@ -214,7 +223,7 @@ non-private futex
 2. 唤醒进程 private futex table。
 3. 如果地址属于 shared VMA，唤醒全局 shared futex table。
 
-这条路径不经过 syscall futex wait 的参数解析，但使用相同 WaitQueue 唤醒机制。
+这条路径不经过 syscall futex wait 的参数解析，但使用相同 `FutexTable::wake()` 机制。
 
 ## 10. signalfd 与 pending 队列
 
@@ -277,7 +286,10 @@ POSIX MQ notify 会向注册进程投递信号，使用 signal 模块的 `send_p
 
 不能在持业务锁时直接长时间循环或直接睡眠而不释放锁。
 
-这三类机制都把“事件”和“等待”拆开：signal 是 pending 队列加 trap return delivery，futex 是用户 word 校验加 WaitQueue，IPC 是 registry 状态加 WaitQueue。共同的调试方法是先确认事件是否进入内核状态，再确认等待者是否在正确队列上，最后确认唤醒后是否重新检查条件。
+这三类机制都把“事件”和“等待”拆开：signal 是 pending 队列加 trap return delivery，
+futex 是用户 word 校验加专用 waiter，IPC 是 registry 状态加通用 WaitQueue。共同的调试
+方法是先确认事件是否进入内核状态，再确认等待者是否在正确容器上，最后确认唤醒结果是否
+由权威业务状态裁决。
 
 它们也共享同一个锁约束：业务状态可以在锁内检查和修改，但真正可能睡眠、复制大块用户数据或触发文件/网络操作的路径必须释放锁后执行。否则 signal 打断、futex wake 或 IPC 删除都可能被持锁睡眠阻塞。
 

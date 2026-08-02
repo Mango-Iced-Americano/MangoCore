@@ -402,7 +402,7 @@ fn new_ktest_process(
             AddressSpaceInner::<PageTableImpl>::new_bare(),
         )),
         Arc::new(spin::Mutex::new(Sighand::new())),
-        Arc::new(spin::Mutex::new(threads::Futex::new())),
+        Arc::new(spin::Mutex::new(threads::FutexTable::new())),
         Arc::new(spin::Mutex::new(pid::RecycleAllocator::new())),
     ))
 }

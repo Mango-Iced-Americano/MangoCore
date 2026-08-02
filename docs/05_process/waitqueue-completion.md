@@ -3,7 +3,7 @@ title: "WaitQueue、KernelTimerQueue 与 Completion"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-08-02
 tags: [process, waitqueue, completion, timer]
 ---
 
@@ -20,7 +20,8 @@ tags: [process, waitqueue, completion, timer]
 | `os/src/task/mod.rs` | block/schedule 基础入口 |
 | `os/src/task/sleep.rs` | sleep syscall 使用的等待封装 |
 
-WaitQueue 被 futex、eventfd、epoll、socket/file I/O、child wait、timer 等路径复用。
+WaitQueue 被 eventfd、epoll、IPC、socket/file I/O、child wait、timer 等路径复用。futex
+从 B64 起使用能跟随 requeue 的专用 `FutexWaiter`，不再复用本结构。
 
 ## 2. WaitQueue 数据结构
 
@@ -124,7 +125,7 @@ pub enum WaitResult {
 
 ## 5. wake_one 与 wake_at_most
 
-`wake_one()` 是 futex/event 等热路径：
+`wake_one()` 是 event/IPC 等热路径：
 
 1. 从队头开始弹出 weak entry。
 2. 跳过失效 weak。
@@ -296,7 +297,6 @@ fn wait_event_locked_impl<T, Q, F>(
     cond: &mut F,
     signal_check: bool,
     deadline: Option<TimeSpec>,
-    normal_wake_result: Option<isize>,
 ) -> WaitResult
 where
     Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
@@ -346,20 +346,16 @@ where
 
         let task = current_task().unwrap();
         let mut guard = lock.lock();
-        let removed = queue_of(&mut guard).finish_wait(task);
+        queue_of(&mut guard).finish_wait(task);
         drop(guard);
         task.acquire_inner_lock().refresh_real_timer();
-
-        if !removed {
-            if let Some(res) = normal_wake_result {
-                return WaitResult::Ready(res);
-            }
-        }
     }
 }
 ```
 
-`normal_wake_result` 用于 futex：被 wake 方从队列中移除后，等待模板用这个值区分“条件满足返回”和“被 wake 返回”。
+通用模板只在业务条件返回值时产生 `Ready`，不会再把“已经不在原队列”解释成正常 wake。
+这种成员关系推断对可迁移 waiter 不成立：futex requeue 也会移除 source 成员，却不应返回
+成功。因此 futex 使用独立的 current-key 与 `woken` 状态机。
 
 ## 9. 多队列等待
 
@@ -520,14 +516,15 @@ syscall 栈上的 `Arc` 并进入任务安全点。
 
 | 使用者 | 等待对象 |
 |--------|----------|
-| futex | private futex table / shared futex table 中的 WaitQueue |
+| futex | 专用 `FutexTable -> FutexQueue -> Arc<FutexWaiter>` |
 | wait4/waitid | `ProcessControlBlock.child_exit_wait` |
 | eventfd/epoll/timerfd | 文件系统事件队列 |
 | socket/file I/O | 各自 wait queue 或通用 wait wrapper |
 | nanosleep/clock_nanosleep | kernel timer + sleep helper |
 | vfork / 多线程 exec | Completion |
 
-WaitQueue 的正确使用模式是“检查条件、入队、释放相关锁、切换、被唤醒后复查条件”。只在入队前检查一次条件会丢唤醒；持业务锁睡眠会阻塞唤醒方；唤醒后不复查条件会把虚假唤醒当成成功。`*_locked` 变体就是为了解决条件检查和业务锁释放之间的竞态。
+WaitQueue 的正确使用模式是“检查条件、入队、释放相关锁、切换、被唤醒后复查条件”。只在入队前检查一次条件会丢唤醒；持业务锁睡眠会阻塞唤醒方；唤醒后不复查条件会把虚假唤醒当成成功。`*_locked` 变体就是为了解决条件检查和业务锁释放之间的竞态。需要
+requeue 或一次任务多项注册时，应使用带独立身份和当前位置的专用等待对象。
 
 Completion 比 WaitQueue 更窄：它只表达一次性事件已经发生，典型场景是 vfork 子进程
 exec/exit 后释放父线程，或多线程 exec 的 sibling live count 收缩为 1。Completion 不承载

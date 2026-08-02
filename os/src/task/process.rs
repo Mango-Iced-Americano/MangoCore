@@ -16,7 +16,7 @@ use super::{
     quota::TaskQuotaGuard,
     registry,
     signal::{sigchld_requests_auto_reap, PendingSignal, Sighand, SignalQueue, Signals},
-    threads::Futex,
+    threads::FutexTable,
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
     TaskControlBlock, UtsNamespace, WaitQueue, WaitResult, INITPROC,
 };
@@ -113,7 +113,7 @@ pub struct ProcessInner {
     /// 信号处理函数表。
     sighand: Arc<Mutex<Sighand>>,
     /// private futex 等待表。
-    futex: Arc<Mutex<Futex>>,
+    futex: Arc<Mutex<FutexTable>>,
     /// 同一地址空间内的用户资源槽位分配器。
     user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     /// 进程组 ID。
@@ -336,7 +336,7 @@ impl ProcessControlBlock {
         ipc: Arc<IpcNamespace>,
         vm: Arc<AddressSpace<PageTableImpl>>,
         sighand: Arc<Mutex<Sighand>>,
-        futex: Arc<Mutex<Futex>>,
+        futex: Arc<Mutex<FutexTable>>,
         user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     ) -> Self {
         let exec_key = {
@@ -586,7 +586,7 @@ impl ProcessControlBlock {
         self.inner.lock().sighand.clone()
     }
 
-    pub fn futex(&self) -> Arc<Mutex<Futex>> {
+    pub fn futex(&self) -> Arc<Mutex<FutexTable>> {
         self.inner.lock().futex.clone()
     }
 
@@ -634,9 +634,10 @@ impl ProcessControlBlock {
         inner.sighand = sighand;
         // private futex key 属于旧地址空间；新映像不能继承或清空共享 PCB 的等待表。
         let old_futex =
-            core::mem::replace(&mut inner.futex, Arc::new(Mutex::new(Futex::new())));
+            core::mem::replace(&mut inner.futex, Arc::new(Mutex::new(FutexTable::new())));
         drop(inner);
-        // WaitQueue 的析构可能释放任务引用，不能把这条析构链放在 process.inner 锁内。
+        // FutexTable 析构会释放 waiter、Weak 和容器存储，可能进入 allocator；
+        // 不能把这条析构链放在 process.inner 锁内。
         drop(old_futex);
         Ok(())
     }

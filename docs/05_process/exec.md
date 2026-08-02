@@ -3,7 +3,7 @@ title: "execve 与 execveat"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-02
 tags: [process, exec, elf, shebang]
 ---
 
@@ -230,7 +230,7 @@ exec 成功后：
 | clear_child_tid | 清 0 |
 
 `Arc::strong_count()` 必须在取得临时 `Arc` 副本之前读取，否则辅助函数自己的 clone
-会把唯一对象误判为共享对象。旧 futex 的析构可能沿 WaitQueue 释放任务引用，因此代码
+会把唯一对象误判为共享对象。旧 futex table 的析构会释放 waiter、Weak 与容器存储，因此代码
 先把它移出 `ProcessInner`，释放 `process.inner` 锁后再 drop，避免析构链回入进程锁。
 
 ## 12. vfork 完成

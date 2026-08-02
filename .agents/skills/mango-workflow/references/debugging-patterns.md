@@ -862,3 +862,22 @@
   证明“唯一入口、初次错误仍为 `EINVAL`、单调 ID”三项，不能仅凭 helper 私有就推断。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
   `os/src/syscall/process/ipc.rs`, `docs/01_architecture/lock-order.md`
+
+## 可迁移等待项：不能用最初队列 membership 推断 wake
+
+- **危险模式**: 通用等待队列只保存 task，正常 wake 通过“恢复后已不在 source 队列”识别。
+  一旦业务支持 requeue，同一个现象也可能表示 waiter 只是搬到了 target。timeout/signal
+  若仍清理 source，就会把迁移误报为成功，并在 target 留下活动成员。
+- **稳定身份**: 每次注册需要独立 identity，并记录 current location 与 actual-wake 状态。
+  同一任务可以有多个 waitv/poll 注册，清理必须匹配注册对象而不是只匹配 TCB；队列到任务
+  使用 Weak 可以避免生命周期环，但不能替代 registration identity。
+- **唯一线性化锁**: enqueue、wake、requeue 和 cancel 应由同一对象锁裁决。requeue 先更新
+  current location 再发布到 target；wake 先发布实际结果再让任务 runnable；timeout/signal
+  在同锁下按 current location 精确撤销。若拆成多个 bucket 锁，必须另外证明锁序和迁移协议。
+- **恢复语义**: 注册完成后的唤醒判定只能读取 registration 的权威结果，不能重读最初业务
+  word，也不能把 source 缺席当事件。多等待 API 返回哪个 index 要逐字核对上游实现；Linux
+  当前 `futex_unqueue_multiple()` 保留最后一个已 wake 下标，而不是直觉上的第一个。
+- **验证账本**: 普通 wait/wake LTP 不能证明 requeue→timeout、requeue→signal 或 waitv 多 key
+  同时 wake。未构造精确交错时标为 NOT RUN，用锁内时序做静态证明但不冒充动态覆盖。
+- **相关文件**: `os/src/task/threads.rs`, `os/src/task/manager.rs`,
+  `docs/05_process/futex.md`, `docs/01_architecture/lock-order.md`

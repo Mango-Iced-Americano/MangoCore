@@ -175,7 +175,7 @@ switch or idle
 
 ### 4.5 shared futex compact
 
-每轮调用 `threads::compact_shared_futex()`，降低 `PROCESS_SHARED_FUTEX` 中空 WaitQueue key 长期残留的概率。
+每轮调用 `threads::compact_shared_futex()`，降低 `PROCESS_SHARED_FUTEX` 中空 futex queue key 长期残留的概率。
 
 ## 5. Per-CPU 当前任务状态
 

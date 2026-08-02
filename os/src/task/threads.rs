@@ -1,8 +1,8 @@
 //! Futex 等待、唤醒和重排。
 //!
-//! 私有 futex 等待队列存放在进程内 `Futex` 表中；process-shared futex 使用物理地址
-//! 作为全局 key。等待路径先验证用户 futex word，再在对应 `WaitQueue` 上注册，
-//! 被信号打断时返回 Linux futex 语义的 `-EINTR`。
+//! 私有 futex 等待队列存放在进程内 `FutexTable` 中；process-shared futex
+//! 使用全局表。每次等待都有可跟随 requeue 迁移的独立 waiter，因此超时、
+//! 信号和 `waitv` 能区分真实 wake 与普通调度唤醒。
 //!
 //! # Locking
 //!
@@ -10,7 +10,7 @@
 //! `block_current_and_run_next_with_lock_checked` 释放该锁，唤醒路径不跨等待点持锁。
 
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{
     mm::UserPtr,
@@ -18,15 +18,19 @@ use crate::{
     task::{
         block_current_and_run_next_with_lock_checked, current_task,
         discard_non_actionable_unblocked_signals, has_actionable_signal, task_manager_counts,
-        wait_with_timeout, TaskControlBlock,
+        wait_with_timeout, wake_interruptible, TaskControlBlock, TaskStatus,
     },
     timer::{get_time, timespec_to_ticks_ceil, TimeSpec},
 };
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use lazy_static::lazy_static;
 use num_enum::FromPrimitive;
 
-use super::manager::{WaitQueue, WaitResult};
+use super::manager::WaitResult;
 
 #[cfg(target_arch = "loongarch64")]
 const PRECISE_FUTEX_SPIN_NS: usize = 12_000_000;
@@ -85,44 +89,165 @@ pub enum FutexCmd {
 }
 
 lazy_static! {
-    /// 进程间共享 futex 的全局等待表，key = 物理地址
-    pub static ref PROCESS_SHARED_FUTEX: spin::Mutex<BTreeMap<usize, WaitQueue>> =
-        spin::Mutex::new(BTreeMap::new());
+    /// 进程间共享 futex 的全局等待表，key = 物理地址。
+    pub static ref PROCESS_SHARED_FUTEX: spin::Mutex<FutexTable> =
+        spin::Mutex::new(FutexTable::new());
 }
 static PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY: AtomicBool = AtomicBool::new(false);
 
-/// Fast Userspace Mutex
-/// 快速用户空间互斥锁
-/// # 作用
-/// + 用于存储等待队列
-/// # 参数
-/// + key：usize
-/// + value：WaitQueue
-pub struct Futex {
-    inner: BTreeMap<usize, WaitQueue>,
+/// 一次 futex 等待的稳定注册项。
+///
+/// Linux 的 `futex_q` 会跟随 requeue 更新 key 和 bucket 归属。MangoCore
+/// 用一个安全的 `Arc` 对象表达同一语义，避免把 syscall 栈上指针
+/// 发布给其它 CPU。所有 key 变更和队列增删都由所属 `FutexTable`
+/// 锁串行化；原子只用于在等待任务和唤醒 CPU 之间发布结果。
+///
+/// 同一任务在 `futex_waitv` 中可以同时有多个注册项，因此每个 waiter
+/// 都有独立身份，不能只依赖 TCB 指针判断究竟是哪一项被唤醒。
+struct FutexWaiter {
+    task: Weak<TaskControlBlock>,
+    key: AtomicUsize,
+    woken: AtomicBool,
 }
 
+impl FutexWaiter {
+    fn new(task: Weak<TaskControlBlock>, key: usize) -> Self {
+        Self {
+            task,
+            key: AtomicUsize::new(key),
+            woken: AtomicBool::new(false),
+        }
+    }
+
+    fn key(&self) -> usize {
+        self.key.load(Ordering::Acquire)
+    }
+
+    fn move_to(&self, key: usize) {
+        self.key.store(key, Ordering::Release);
+    }
+
+    fn mark_woken(&self) {
+        self.woken.store(true, Ordering::Release);
+    }
+
+    fn was_woken(&self) -> bool {
+        self.woken.load(Ordering::Acquire)
+    }
+}
+
+struct FutexQueue {
+    waiters: VecDeque<Arc<FutexWaiter>>,
+}
+
+impl FutexQueue {
+    fn new() -> Self {
+        Self {
+            waiters: VecDeque::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.waiters.is_empty()
+    }
+
+    fn compact_stale(&mut self) {
+        self.waiters.retain(|waiter| waiter.task.strong_count() > 0);
+    }
+
+    fn enqueue(&mut self, waiter: Arc<FutexWaiter>) {
+        self.waiters.push_back(waiter);
+    }
+
+    /// 只删除这一次等待，不会误删同一 TCB 的其它 waitv 注册项。
+    fn remove(&mut self, waiter: &Arc<FutexWaiter>) -> bool {
+        let old_len = self.waiters.len();
+        self.waiters.retain(|queued| !Arc::ptr_eq(queued, waiter));
+        self.waiters.len() != old_len
+    }
+
+    /// 在任务可被调度前先发布真实 futex wake，使 timeout/wake 竞争
+    /// 由 futex table 锁决定唯一胜者。
+    fn wake_at_most(&mut self, limit: usize) -> usize {
+        let mut wake_count = 0usize;
+        let scan_count = self.waiters.len();
+
+        // 只扫描调用时已经存在的条目；未被消费的条目推回同一个
+        // VecDeque，避免在 futex table 自旋锁内额外分配临时 Vec。
+        for _ in 0..scan_count {
+            let waiter = self.waiters.pop_front().unwrap();
+            let Some(task) = waiter.task.upgrade() else {
+                continue;
+            };
+            let status = task.task_status();
+            let wakeable = matches!(
+                status,
+                TaskStatus::Blocking(_)
+                    | TaskStatus::Blocked
+                    | TaskStatus::Queued(_)
+                    | TaskStatus::Migrating
+                    | TaskStatus::Running(_)
+            );
+            // New/Zombie 不可能是合法 futex waiter，直接丢弃这个坏条目。
+            if !wakeable {
+                continue;
+            }
+            if wake_count >= limit {
+                self.waiters.push_back(waiter);
+                continue;
+            }
+
+            waiter.mark_woken();
+            task.wait_timer_generation.fetch_add(1, Ordering::Relaxed);
+            if matches!(status, TaskStatus::Blocking(_) | TaskStatus::Blocked) {
+                // FutexTable 的外层锁仍由调用者持有；先移除 waiter 并发布
+                // woken，再进入既有 table -> TASK_MANAGER 单向唤醒顺序。
+                let _ = wake_interruptible(task);
+            }
+            wake_count += 1;
+        }
+        wake_count
+    }
+
+    /// 搬运完整注册项，并在目标队列可见前更新 waiter 的归属 key。
+    fn requeue_to(&mut self, target: &mut Self, target_key: usize, limit: usize) -> usize {
+        let mut moved = 0usize;
+        while moved < limit {
+            let Some(waiter) = self.waiters.pop_front() else {
+                break;
+            };
+            if waiter.task.strong_count() == 0 {
+                continue;
+            }
+            waiter.move_to(target_key);
+            target.waiters.push_back(waiter);
+            moved += 1;
+        }
+        moved
+    }
+}
+
+/// 一个进程或全局 shared futex 共用的等待表。
+///
+/// 表锁同时是 wait 注册、wake 移除、requeue 搬运和 timeout/signal
+/// 撤销的唯一线性化点。
+pub struct FutexTable {
+    queues: BTreeMap<usize, FutexQueue>,
+}
+
+/// 从一个用户 `futex_waitv` 条目解析出的内核等待条件。
 #[derive(Clone, Copy)]
-pub struct FutexWaitEntry {
+pub struct FutexWaitSpec {
     pub futex_word: UserPtr<u32>,
     pub futex_key: usize,
     pub val: u32,
 }
 
-fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
-    map.entry(key).or_insert_with(WaitQueue::new)
+fn refresh_shared_futex_nonempty(table: &FutexTable) {
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(!table.is_empty(), Ordering::Relaxed);
 }
 
-fn shared_wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
-    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
-    wait_queue_for_key(map, key)
-}
-
-fn refresh_shared_futex_nonempty(map: &BTreeMap<usize, WaitQueue>) {
-    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(!map.is_empty(), Ordering::Relaxed);
-}
-
-/// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。
+/// 清理 PROCESS_SHARED_FUTEX 中所有空队列条目。
 /// 降频至每 64 个 tick 执行一次，避免频繁扫描 BTreeMap。
 pub fn compact_shared_futex() {
     if !PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.load(Ordering::Relaxed) {
@@ -133,73 +258,9 @@ pub fn compact_shared_futex() {
     if t % 64 != 0 {
         return;
     }
-    let mut map = PROCESS_SHARED_FUTEX.lock();
-    map.retain(|_, wq| {
-        wq.compact_stale();
-        !wq.is_empty()
-    });
-    refresh_shared_futex_nonempty(&map);
-}
-
-fn remove_empty_wait_queue(map: &mut BTreeMap<usize, WaitQueue>, key: usize) {
-    if let Some(wq) = map.get_mut(&key) {
-        wq.compact_stale();
-        if wq.is_empty() {
-            map.remove(&key);
-        }
-    }
-}
-
-fn wake_waiters(map: &mut BTreeMap<usize, WaitQueue>, key: usize, val: u32) -> isize {
-    if let Some(mut wait_queue) = map.remove(&key) {
-        let ret = wait_queue.wake_at_most(val as usize);
-        if !wait_queue.is_empty() {
-            map.insert(key, wait_queue);
-        }
-        ret as isize
-    } else {
-        0
-    }
-}
-
-fn requeue_waiters(
-    map: &mut BTreeMap<usize, WaitQueue>,
-    key: usize,
-    key_2: usize,
-    val: u32,
-    val2: usize,
-) -> isize {
-    let wake_cnt = if val != 0 {
-        wake_waiters(map, key, val)
-    } else {
-        0
-    };
-
-    if key == key_2 {
-        return wake_cnt;
-    }
-
-    if let Some(mut wait_queue) = map.remove(&key) {
-        let mut wait_queue_2 = map.remove(&key_2).unwrap_or_else(WaitQueue::new);
-        let mut requeue_cnt = 0;
-        while requeue_cnt < val2 {
-            if let Some(task) = wait_queue.pop_task() {
-                wait_queue_2.add_task(task);
-                requeue_cnt += 1;
-            } else {
-                break;
-            }
-        }
-        if !wait_queue.is_empty() {
-            map.insert(key, wait_queue);
-        }
-        if !wait_queue_2.is_empty() {
-            map.insert(key_2, wait_queue_2);
-        }
-        wake_cnt + requeue_cnt as isize
-    } else {
-        wake_cnt
-    }
+    let mut table = PROCESS_SHARED_FUTEX.lock();
+    table.compact_stale();
+    refresh_shared_futex_nonempty(&table);
 }
 
 fn futex_wait_result_to_errno(wait_result: WaitResult) -> isize {
@@ -210,7 +271,7 @@ fn futex_wait_result_to_errno(wait_result: WaitResult) -> isize {
     }
 }
 
-fn check_waitv_values(entries: &[FutexWaitEntry], token: usize) -> Option<isize> {
+fn check_waitv_values(entries: &[FutexWaitSpec], token: usize) -> Option<isize> {
     for entry in entries {
         match entry.futex_word.read(token) {
             Ok(value) if value == entry.val => {}
@@ -225,61 +286,6 @@ fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
     deadline
         .map(|deadline| TimeSpec::now() >= deadline)
         .unwrap_or(false)
-}
-
-fn finish_waitv_private(
-    futex: &mut Futex,
-    entries: &[FutexWaitEntry],
-    task: &TaskControlBlock,
-) -> Option<usize> {
-    let mut woken_key = None;
-
-    for (index, entry) in entries.iter().enumerate() {
-        if entries[..index]
-            .iter()
-            .any(|finished| finished.futex_key == entry.futex_key)
-        {
-            continue;
-        }
-        let removed = {
-            let wait_queue = futex.wait_queue_mut(entry.futex_key);
-            wait_queue.finish_wait(task)
-        };
-        if !removed && woken_key.is_none() {
-            woken_key = Some(entry.futex_key);
-        }
-        futex.remove_empty(entry.futex_key);
-    }
-
-    woken_key.and_then(|key| entries.iter().position(|entry| entry.futex_key == key))
-}
-
-fn finish_waitv_shared(
-    futex: &mut BTreeMap<usize, WaitQueue>,
-    entries: &[FutexWaitEntry],
-    task: &TaskControlBlock,
-) -> Option<usize> {
-    let mut woken_key = None;
-
-    for (index, entry) in entries.iter().enumerate() {
-        if entries[..index]
-            .iter()
-            .any(|finished| finished.futex_key == entry.futex_key)
-        {
-            continue;
-        }
-        let removed = {
-            let wait_queue = wait_queue_for_key(futex, entry.futex_key);
-            wait_queue.finish_wait(task)
-        };
-        if !removed && woken_key.is_none() {
-            woken_key = Some(entry.futex_key);
-        }
-        remove_empty_wait_queue(futex, entry.futex_key);
-    }
-
-    refresh_shared_futex_nonempty(futex);
-    woken_key.and_then(|key| entries.iter().position(|entry| entry.futex_key == key))
 }
 
 fn try_single_thread_short_timeout(
@@ -359,86 +365,90 @@ fn futex_relative_deadline(timeout: TimeSpec) -> TimeSpec {
     deadline
 }
 
-fn futex_wait_tail_spin<T, Q, F>(
-    lock: &spin::Mutex<T>,
-    mut queue_of: Q,
-    cond: &mut F,
+fn futex_wait_tail_spin(
+    lock: &spin::Mutex<FutexTable>,
+    waiter: &Arc<FutexWaiter>,
     task: &Arc<TaskControlBlock>,
     deadline: TimeSpec,
-    normal_wake_result: isize,
-) -> WaitResult
-where
-    Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
-    F: FnMut(&mut T) -> Option<isize>,
-{
-    let task_weak = Arc::downgrade(task);
+) -> WaitResult {
     let deadline_ticks = timespec_to_ticks_ceil(deadline);
 
     loop {
+        let mut table = lock.lock();
+        // wake 在同一把锁下先移除 waiter 再发布 woken，因此
+        // 与 deadline 同时到达时，谁先取得 table 锁就是唯一胜者。
+        if waiter.was_woken() {
+            return WaitResult::Ready(SUCCESS);
+        }
         if get_time() >= deadline_ticks {
-            let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(task.as_ref());
+            table.remove_wait(waiter);
             return WaitResult::TimedOut;
         }
-
-        {
-            let mut guard = lock.lock();
-            if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(task.as_ref());
-                return WaitResult::Ready(res);
-            }
-            if !queue_of(&mut guard).contains(&task_weak) {
-                return WaitResult::Ready(normal_wake_result);
-            }
-        }
-
         if has_actionable_signal(task) {
-            let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(task.as_ref());
+            table.remove_wait(waiter);
             return WaitResult::Interrupted;
         }
         discard_non_actionable_unblocked_signals(task);
+        drop(table);
         spin_loop();
     }
 }
 
-fn futex_wait_event_interruptible_timeout_locked<T, Q, F>(
-    lock: &spin::Mutex<T>,
-    mut queue_of: Q,
-    mut cond: F,
+fn futex_wait_event_interruptible_timeout_locked<F>(
+    lock: &spin::Mutex<FutexTable>,
+    futex_key: usize,
+    mut check_word: F,
     deadline: Option<TimeSpec>,
-    normal_wake_result: isize,
 ) -> WaitResult
 where
-    Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
-    F: FnMut(&mut T) -> Option<isize>,
+    F: FnMut() -> Option<isize>,
 {
+    // 先做一次无分配快速检查；随后会在 table 锁内再检查并入队。
     {
-        let mut guard = lock.lock();
-        if let Some(res) = cond(&mut guard) {
+        let _table = lock.lock();
+        if let Some(res) = check_word() {
             return WaitResult::Ready(res);
         }
     }
 
+    let task = current_task().unwrap();
+    let waiter = Arc::new(FutexWaiter::new(Arc::downgrade(&task), futex_key));
+    let mut table = lock.lock();
+
+    if deadline_expired(deadline) {
+        return WaitResult::TimedOut;
+    }
+    if let Some(res) = check_word() {
+        return WaitResult::Ready(res);
+    }
+    if has_actionable_signal(&task) {
+        return WaitResult::Interrupted;
+    }
+
+    table.enqueue(futex_key, waiter.clone());
+    // 再检查一次覆盖“快速检查 -> 注册”窗口。从此以后不再
+    // 读原 futex word；requeue 后真实 wake 只由 waiter 判定。
+    if let Some(res) = check_word() {
+        table.remove_wait(&waiter);
+        return WaitResult::Ready(res);
+    }
+    discard_non_actionable_unblocked_signals(&task);
+    drop(table);
+    drop(task);
+
     loop {
-        let mut guard = lock.lock();
-        if deadline_expired(deadline) {
-            return WaitResult::TimedOut;
-        }
-
         let task = current_task().unwrap();
-        queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+        let mut table = lock.lock();
 
-        if let Some(res) = cond(&mut guard) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
-            return WaitResult::Ready(res);
+        if waiter.was_woken() {
+            return WaitResult::Ready(SUCCESS);
         }
         if deadline_expired(deadline) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
+            table.remove_wait(&waiter);
             return WaitResult::TimedOut;
         }
         if has_actionable_signal(&task) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
+            table.remove_wait(&waiter);
             return WaitResult::Interrupted;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -446,15 +456,8 @@ where
         let block_deadline = futex_wait_block_deadline(deadline);
         if let Some(real_deadline) = deadline {
             if block_deadline == Some(real_deadline) {
-                drop(guard);
-                return futex_wait_tail_spin(
-                    lock,
-                    queue_of,
-                    &mut cond,
-                    &task,
-                    real_deadline,
-                    normal_wake_result,
-                );
+                drop(table);
+                return futex_wait_tail_spin(lock, &waiter, &task, real_deadline);
             }
         }
         if let Some(block_deadline) = block_deadline {
@@ -462,7 +465,7 @@ where
         }
         drop(task);
 
-        block_current_and_run_next_with_lock_checked(guard, |task| {
+        block_current_and_run_next_with_lock_checked(table, |task| {
             let no_signal = !has_actionable_signal(task);
             let not_timed_out = block_deadline
                 .map(|deadline| TimeSpec::now() < deadline)
@@ -471,14 +474,7 @@ where
         });
 
         let task = current_task().unwrap();
-        let mut guard = lock.lock();
-        let removed = queue_of(&mut guard).finish_wait(&task);
-        drop(guard);
         task.acquire_inner_lock().refresh_real_timer();
-
-        if !removed {
-            return WaitResult::Ready(normal_wake_result);
-        }
     }
 }
 
@@ -500,16 +496,14 @@ fn do_futex_wait_until(
 
     let wait_result = futex_wait_event_interruptible_timeout_locked(
         &futex_table,
-        |futex| futex.wait_queue_mut(futex_key),
-        |_: &mut Futex| match futex_word.read(token) {
+        futex_key,
+        || match futex_word.read(token) {
             Ok(value) if value == val => None,
-            Ok(value) => Some(EAGAIN),
+            Ok(_) => Some(EAGAIN),
             Err(errno) => Some(errno),
         },
         deadline,
-        SUCCESS,
     );
-    futex_table.lock().remove_empty(futex_key);
     super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
@@ -544,39 +538,89 @@ pub fn do_futex_wait_bitset(
 }
 
 pub fn do_futex_waitv(
-    entries: &[FutexWaitEntry],
+    entries: &[FutexWaitSpec],
     token: usize,
     deadline: Option<TimeSpec>,
 ) -> isize {
-    if let Some(result) = check_waitv_values(entries, token) {
+    let futex_table = current_task().unwrap().process.futex().clone();
+    futex_waitv_locked(&futex_table, entries, token, deadline)
+}
+
+fn last_woken_index(waiters: &[Arc<FutexWaiter>]) -> Option<usize> {
+    // Linux futex_unqueue_multiple() 同样按数组顺序清理并保留最后一个
+    // 已被 wake 的下标；多个 key 并发命中时不能擅自改成第一个。
+    waiters.iter().rposition(|waiter| waiter.was_woken())
+}
+
+fn remove_waitv(table: &mut FutexTable, waiters: &[Arc<FutexWaiter>]) {
+    for waiter in waiters {
+        table.remove_wait(waiter);
+    }
+}
+
+/// 在同一张 futex table 中原子注册多个等待项。
+///
+/// 每个用户 waitv 条目都有独立 waiter；即使两个条目使用同一 key，
+/// wake 也只消费真正被移除的那个注册项，返回值仍是原始数组下标。
+fn futex_waitv_locked(
+    lock: &spin::Mutex<FutexTable>,
+    entries: &[FutexWaitSpec],
+    user_token: usize,
+    deadline: Option<TimeSpec>,
+) -> isize {
+    if let Some(result) = check_waitv_values(entries, user_token) {
         return result;
     }
 
-    let futex_table = current_task().unwrap().process.futex().clone();
+    let task = current_task().unwrap();
+    let task_weak = Arc::downgrade(&task);
+    let mut waiters = Vec::new();
+    if waiters.try_reserve(entries.len()).is_err() {
+        return ENOMEM;
+    }
+    for entry in entries {
+        waiters.push(Arc::new(FutexWaiter::new(
+            task_weak.clone(),
+            entry.futex_key,
+        )));
+    }
+
+    let mut table = lock.lock();
+    if deadline_expired(deadline) {
+        return ETIMEDOUT;
+    }
+    if let Some(result) = check_waitv_values(entries, user_token) {
+        return result;
+    }
+    if has_actionable_signal(&task) {
+        return EINTR;
+    }
+    for (entry, waiter) in entries.iter().zip(waiters.iter()) {
+        table.enqueue(entry.futex_key, waiter.clone());
+    }
+    // 与单 futex wait 一样，注册后只再检查一次用户 word。
+    // 后续 requeue 可能改变 key，因此恢复时只信任 waiter.woken。
+    if let Some(result) = check_waitv_values(entries, user_token) {
+        remove_waitv(&mut table, &waiters);
+        return result;
+    }
+    discard_non_actionable_unblocked_signals(&task);
+    drop(table);
+    drop(task);
 
     loop {
-        if deadline_expired(deadline) {
-            return ETIMEDOUT;
-        }
-
         let task = current_task().unwrap();
-        let mut guard = futex_table.lock();
-        for entry in entries {
-            guard
-                .wait_queue_mut(entry.futex_key)
-                .prepare_to_wait(Arc::downgrade(&task));
-        }
-
-        if let Some(result) = check_waitv_values(entries, token) {
-            finish_waitv_private(&mut guard, entries, task.as_ref());
-            return result;
+        let mut table = lock.lock();
+        if let Some(index) = last_woken_index(&waiters) {
+            remove_waitv(&mut table, &waiters);
+            return index as isize;
         }
         if deadline_expired(deadline) {
-            finish_waitv_private(&mut guard, entries, task.as_ref());
+            remove_waitv(&mut table, &waiters);
             return ETIMEDOUT;
         }
         if has_actionable_signal(&task) {
-            finish_waitv_private(&mut guard, entries, task.as_ref());
+            remove_waitv(&mut table, &waiters);
             return EINTR;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -586,19 +630,11 @@ pub fn do_futex_waitv(
         }
         drop(task);
 
-        block_current_and_run_next_with_lock_checked(guard, |task| {
-            !has_actionable_signal(task)
-                && !deadline_expired(deadline)
-                && check_waitv_values(entries, token).is_none()
+        block_current_and_run_next_with_lock_checked(table, |task| {
+            !has_actionable_signal(task) && !deadline_expired(deadline)
         });
 
         let task = current_task().unwrap();
-        let mut guard = futex_table.lock();
-        if let Some(index) = finish_waitv_private(&mut guard, entries, &task) {
-            task.acquire_inner_lock().refresh_real_timer();
-            return index as isize;
-        }
-        drop(guard);
         task.acquire_inner_lock().refresh_real_timer();
     }
 }
@@ -606,7 +642,7 @@ pub fn do_futex_waitv(
 /// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
 pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    let woke = wake_waiters(&mut shared, phys_key, val);
+    let woke = shared.wake_waiters(phys_key, val);
     refresh_shared_futex_nonempty(&shared);
     super::perf::record_futex_wake(true, woke);
     woke
@@ -614,66 +650,21 @@ pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
 
 pub fn futex_requeue_shared(phys_key: usize, phys_key_2: usize, val: u32, val2: usize) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    let ret = requeue_waiters(&mut shared, phys_key, phys_key_2, val, val2);
+    let ret = shared.requeue_waiters(phys_key, phys_key_2, val, val2);
     refresh_shared_futex_nonempty(&shared);
     ret
 }
 
 pub fn do_futex_waitv_shared(
-    entries: &[FutexWaitEntry],
+    entries: &[FutexWaitSpec],
     token: usize,
     deadline: Option<TimeSpec>,
 ) -> isize {
-    if let Some(result) = check_waitv_values(entries, token) {
-        return result;
-    }
-
-    loop {
-        if deadline_expired(deadline) {
-            return ETIMEDOUT;
-        }
-
-        let task = current_task().unwrap();
-        let mut guard = PROCESS_SHARED_FUTEX.lock();
-        for entry in entries {
-            shared_wait_queue_for_key(&mut guard, entry.futex_key)
-                .prepare_to_wait(Arc::downgrade(&task));
-        }
-
-        if let Some(result) = check_waitv_values(entries, token) {
-            finish_waitv_shared(&mut guard, entries, task.as_ref());
-            return result;
-        }
-        if deadline_expired(deadline) {
-            finish_waitv_shared(&mut guard, entries, task.as_ref());
-            return ETIMEDOUT;
-        }
-        if has_actionable_signal(&task) {
-            finish_waitv_shared(&mut guard, entries, task.as_ref());
-            return EINTR;
-        }
-        discard_non_actionable_unblocked_signals(&task);
-
-        if let Some(deadline) = deadline {
-            wait_with_timeout(Arc::downgrade(&task), deadline);
-        }
-        drop(task);
-
-        block_current_and_run_next_with_lock_checked(guard, |task| {
-            !has_actionable_signal(task)
-                && !deadline_expired(deadline)
-                && check_waitv_values(entries, token).is_none()
-        });
-
-        let task = current_task().unwrap();
-        let mut guard = PROCESS_SHARED_FUTEX.lock();
-        if let Some(index) = finish_waitv_shared(&mut guard, entries, &task) {
-            task.acquire_inner_lock().refresh_real_timer();
-            return index as isize;
-        }
-        drop(guard);
-        task.acquire_inner_lock().refresh_real_timer();
-    }
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
+    let result = futex_waitv_locked(&PROCESS_SHARED_FUTEX, entries, token, deadline);
+    let shared = PROCESS_SHARED_FUTEX.lock();
+    refresh_shared_futex_nonempty(&shared);
+    result
 }
 
 /// Process-shared futex wait — 使用全局物理地址表
@@ -690,22 +681,20 @@ fn do_futex_wait_shared_until(
         return futex_wait_result_to_errno(wait_result);
     }
 
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
     let wait_result = futex_wait_event_interruptible_timeout_locked(
         &PROCESS_SHARED_FUTEX,
-        |shared| shared_wait_queue_for_key(shared, phys_key),
-        |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
+        phys_key,
+        || match futex_word.read(token) {
             Ok(value) if value == val => None,
-            Ok(value) => Some(EAGAIN),
+            Ok(_) => Some(EAGAIN),
             Err(errno) => Some(errno),
         },
         deadline,
-        SUCCESS,
     );
-    {
-        let mut shared = PROCESS_SHARED_FUTEX.lock();
-        remove_empty_wait_queue(&mut shared, phys_key);
-        refresh_shared_futex_nonempty(&shared);
-    }
+    let shared = PROCESS_SHARED_FUTEX.lock();
+    refresh_shared_futex_nonempty(&shared);
+    drop(shared);
     super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
@@ -737,31 +726,106 @@ pub fn do_futex_wait_bitset_shared(
     do_futex_wait_shared_until(futex_word, token, val, deadline, phys_key)
 }
 
-// Futex的方法实现
-impl Futex {
-    /// 创建一个新的Futex
+impl FutexTable {
+    /// 创建空 futex 等待表。
     pub fn new() -> Self {
         Self {
-            inner: BTreeMap::new(),
+            queues: BTreeMap::new(),
         }
     }
 
-    /// 唤醒等待在指定 Futex 地址上的最多 val 个任务
+    fn is_empty(&self) -> bool {
+        self.queues.is_empty()
+    }
+
+    fn queue(&mut self, key: usize) -> &mut FutexQueue {
+        self.queues.entry(key).or_insert_with(FutexQueue::new)
+    }
+
+    fn enqueue(&mut self, key: usize, waiter: Arc<FutexWaiter>) {
+        debug_assert_eq!(waiter.key(), key);
+        self.queue(key).enqueue(waiter);
+    }
+
+    /// 按等待身份的当前 key 精确撤销，requeue 后也不会回到原队列。
+    fn remove_wait(&mut self, waiter: &Arc<FutexWaiter>) -> bool {
+        let key = waiter.key();
+        let removed = self
+            .queues
+            .get_mut(&key)
+            .map(|queue| queue.remove(waiter))
+            .unwrap_or(false);
+        self.remove_empty(key);
+        removed
+    }
+
+    fn remove_empty(&mut self, key: usize) {
+        if self
+            .queues
+            .get(&key)
+            .map(FutexQueue::is_empty)
+            .unwrap_or(false)
+        {
+            self.queues.remove(&key);
+        }
+    }
+
+    fn compact_stale(&mut self) {
+        self.queues.retain(|_, queue| {
+            queue.compact_stale();
+            !queue.is_empty()
+        });
+    }
+
+    fn wake_waiters(&mut self, key: usize, val: u32) -> isize {
+        let Some(mut queue) = self.queues.remove(&key) else {
+            return 0;
+        };
+        let wake_count = queue.wake_at_most(val as usize);
+        if !queue.is_empty() {
+            self.queues.insert(key, queue);
+        }
+        wake_count as isize
+    }
+
+    fn requeue_waiters(
+        &mut self,
+        source: usize,
+        target: usize,
+        wake: u32,
+        move_count: usize,
+    ) -> isize {
+        let wake_count = if wake == 0 {
+            0
+        } else {
+            self.wake_waiters(source, wake)
+        };
+        if source == target {
+            return wake_count;
+        }
+
+        let Some(mut source_queue) = self.queues.remove(&source) else {
+            return wake_count;
+        };
+        let mut target_queue = self.queues.remove(&target).unwrap_or_else(FutexQueue::new);
+        let moved = source_queue.requeue_to(&mut target_queue, target, move_count);
+        if !source_queue.is_empty() {
+            self.queues.insert(source, source_queue);
+        }
+        if !target_queue.is_empty() {
+            self.queues.insert(target, target_queue);
+        }
+        wake_count + moved as isize
+    }
+
+    /// 唤醒指定 key 上的最多 `val` 个等待项。
     pub fn wake(&mut self, futex_key: usize, val: u32) -> isize {
-        let woke = wake_waiters(&mut self.inner, futex_key, val);
+        let woke = self.wake_waiters(futex_key, val);
         super::perf::record_futex_wake(false, woke);
         woke
     }
 
-    fn wait_queue_mut(&mut self, futex_key: usize) -> &mut WaitQueue {
-        wait_queue_for_key(&mut self.inner, futex_key)
-    }
-
-    fn remove_empty(&mut self, futex_key: usize) {
-        remove_empty_wait_queue(&mut self.inner, futex_key);
-    }
-
-    /// 重新排列
+    /// 先唤醒 `val` 个等待项，再把最多 `val2` 个其余项搬到目标 key。
     pub fn requeue(
         &mut self,
         futex_key: usize,
@@ -769,11 +833,6 @@ impl Futex {
         val: u32,
         val2: usize,
     ) -> isize {
-        requeue_waiters(&mut self.inner, futex_key, futex_key_2, val, val2)
-    }
-
-    /// 清空队列
-    pub fn clear(&mut self) {
-        self.inner.clear();
+        self.requeue_waiters(futex_key, futex_key_2, val, val2)
     }
 }

@@ -266,6 +266,33 @@ shared-memory 没有同类 waiter，但 `shmat` 会跨越 registry 解锁建立 
 `Arc` 负责物理页寿命，attachment 重验失败后的 `munmap`/TLB shootdown 必须位于 registry
 解锁后。
 
+#### B64 futex waiter 身份与 requeue 线性化
+
+通用 `WaitQueue` 只保存任务，无法表达一个注册项被 requeue 后的当前位置。futex 因此使用
+专用的 `FutexTable -> FutexQueue -> Arc<FutexWaiter>`；同一个 Arc 同时由 syscall 和队列
+持有，撤销必须用 Arc 身份精确匹配，不能只匹配 TCB。
+
+`FutexTable` 外层锁是 enqueue、wake、requeue、timeout/signal cleanup 的唯一线性化点：
+
+```text
+requeue: source.remove -> waiter.key = target -> target.publish
+wake:    queue.remove -> waiter.woken = true -> wake_interruptible(task)
+cleanup: waiter.key -> exact Arc remove
+```
+
+- target 队列可见前必须先更新 waiter 的 current key；
+- 任务 runnable 前必须先发布 `woken`，等待方以 Acquire 读取；
+- source membership 消失不能表示正常 wake，因为 requeue 也会产生相同现象；
+- waitv 每个数组项拥有独立 waiter，多个项被唤醒时返回 Linux 定义的最后一个下标；
+- 注册后的恢复路径不能重读最初 futex word 判定 wake，requeue 后该 word 已不是权威状态；
+- 锁顺序固定为 `FutexTable -> TASK_MANAGER -> 单个 RunQueue`，反向获取禁止；
+- `block_current_and_run_next_with_lock_checked()` 只在提交阻塞状态时接管并释放 table guard，
+  任何路径都不得跨 context switch 持有该锁。
+
+B64 仍保留两个明确边界：shared key 使用 raw PPN + offset，存在释放复用 ABA；用户 word
+读取仍可能在 futex table 自旋锁内触发 faultable uaccess。两项都不能因本节 requeue 证明
+而视为已解决。
+
 ### 3.3 B18 Per-CPU RunQueue 约束
 
 B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`，其锁只保护
@@ -480,7 +507,7 @@ exec 的临时门禁固定采用：
   fd table/sighand 的共享状态和快照，释放锁后再复制、关闭 CLOEXEC 与重置信号；
   重新取得锁只用于安装最终对象；
 - 被替换的 futex table 必须先移出 `ProcessInner`，释放 `process.inner` 后再析构。
-  WaitQueue 析构可能释放任务引用，禁止让这条析构链在进程锁内执行。
+  `FutexTable` 析构会释放 waiter、Weak 和容器存储，禁止让这条 allocator/drop 链在进程锁内执行。
 
 永久 group exit 可以在 exec owner 等待期间发布。安全点优先消费永久退出码；owner
 醒来后放弃新映像并清除临时会话，但永久发布门仍保持关闭。

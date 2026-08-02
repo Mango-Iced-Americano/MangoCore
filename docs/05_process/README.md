@@ -3,7 +3,7 @@ title: "进程与任务子系统 (Process and Task Subsystem)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-02
 tags: [process, task, scheduler, signal, futex]
 ---
 
@@ -67,7 +67,7 @@ B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；�
 | `RunQueue` | 每 CPU | `Queued(cpu)` 成员关系、FIFO/nice-aware fetch |
 | `TaskManager` | 全局 registry | interruptible/timer 管理和唤醒协调 |
 | `Processor` | 每 CPU | 当前任务、idle task context、本地 zombie 回收和调度主循环 |
-| `WaitQueue` | 阻塞原语 | futex、epoll、eventfd、timer 等等待路径复用 |
+| `WaitQueue` | 通用阻塞原语 | epoll、eventfd、IPC、timer 等路径复用；futex 使用专用 waiter |
 | `Completion` | 单次完成通知 | `CLONE_VFORK` 等一次性等待场景 |
 
 ## 状态

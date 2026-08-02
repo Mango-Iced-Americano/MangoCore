@@ -15,7 +15,7 @@ use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
 use super::perf;
-use super::threads::{futex_wake_shared, Futex};
+use super::threads::{futex_wake_shared, FutexTable};
 use super::TaskContext;
 use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, IpcNamespace, MountNamespace,
@@ -1331,7 +1331,7 @@ impl TaskControlBlock {
             INIT_IPC_NAMESPACE.clone(),
             Arc::new(AddressSpace::new(memory_set)),
             Arc::new(Mutex::new(Sighand::new())),
-            Arc::new(Mutex::new(Futex::new())),
+            Arc::new(Mutex::new(FutexTable::new())),
             user_res_slot_allocator,
         ));
         init_task_trace!("09 process control block created");
@@ -1989,7 +1989,7 @@ impl TaskControlBlock {
             let futex = if share_vm {
                 self.process.futex()
             } else {
-                Arc::new(Mutex::new(Futex::new()))
+                Arc::new(Mutex::new(FutexTable::new()))
             };
             (
                 Arc::new(ProcessControlBlock::new(

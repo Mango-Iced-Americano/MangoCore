@@ -225,8 +225,12 @@ tombstone。旧 waiter 醒来后必须通过历史得到 `EIDRM`，不能命中�
 message queue 的 requested/auto ID。B63 对 semaphore 采用更小的不变量：等待 helper 只能
 在同锁已证明对象存在后进入，ID 单调不复用，所以后续缺失直接表示 `IPC_RMID/EIDRM`，删除
 路径不得分配 tombstone。shared-memory ID 同样使用 checked 单调游标，耗尽返回 `ENOSPC`，
-避免两阶段 `shmat` 在回绕后把 attachment 归到新对象。FS/Net/Driver 的完整共享状态审计仍
-由对应负责人继续。
+避免两阶段 `shmat` 在回绕后把 attachment 归到新对象。B64 又把 futex 从通用 WaitQueue
+拆为专用 waiter：requeue 必须先更新 current key 再发布到目标队列，wake 必须先发布
+`woken` 再让任务 runnable，timeout/signal/waitv 按 current key 与 Arc 身份精确撤销；不得
+再用“已离开 source 队列”推断正常 wake，也不得在注册后重读原 futex word 判定结果。
+shared futex 的 raw PPN key ABA 与 table 锁内 faultable uaccess 仍待后续处理。FS/Net/Driver
+的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下
@@ -236,7 +240,7 @@ RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不�
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）
 - **信号**：`task/signal/` 子模块（action/delivery/frame/pending/wait）
-- **WaitQueue** — 支持 futex、epoll、eventfd 等阻塞原语
+- **WaitQueue** — 支持 epoll、eventfd、IPC 等通用阻塞原语；futex 使用专用 waiter
 - **Completion** — 单次通知原语
 
 ### 文件系统（VFS）
@@ -277,7 +281,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | 机制 | 文件 | 说明 |
 |------|------|------|
 | SysV IPC | `syscall/process/ipc.rs` | msgget/semget/shmget 全套（msg/sem/shm） |
-| futex | `task/futex.rs` | 快速用户空间互斥 |
+| futex | `task/threads.rs` | 专用 table/queue/waiter、wait/wake/requeue |
 | epoll | `fs/eventpoll.rs` | 可扩展 I/O 事件通知 |
 | eventfd | `fs/eventfd.rs` | 事件计数 fd |
 | signalfd | `syscall/process/signal.rs` | fd 方式接收信号 |

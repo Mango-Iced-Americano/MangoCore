@@ -3,7 +3,7 @@ title: "进程与任务调试与测试映射"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-02
 tags: [process, debug, scheduler, signal, futex, test]
 ---
 
@@ -66,7 +66,7 @@ WaitQueue 的使用模式是：检查条件、入队、释放锁、切换、唤�
 |--------|----------|----------|
 | signal | TCB pending/mask、PCB shared pending、sighand | 投递是否入队，mask 是否屏蔽，trap return 是否 delivery |
 | pidfd/signalfd | fd 对象、target process、mask | fd 类型、target 状态、buffer 大小、nonblock |
-| futex | private/shared key、WaitQueue、用户 word | VMA 是否 shared、物理 key 是否一致、word 是否等于 val |
+| futex | private/shared key、FutexWaiter、用户 word | VMA/shared key、current key、woken 与准确 waiter 身份 |
 | IPC | `IpcNamespace` registry、WaitQueue、用户结构体 | key/id/权限、NOWAIT、对象删除唤醒 |
 | timer/rlimit | task rusage、KernelTimerQueue、deadline | 时间是否推进，到期 action 是否投递/唤醒 |
 

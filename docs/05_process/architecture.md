@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-02
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -26,7 +26,7 @@ exit/wait、signal、futex、IPC、time、ids、rlimit 和 sched 兼容路径。
 | 线程/进程分层 | TCB 管调度，PCB 管资源和进程关系 |
 | Linux clone 语义 | `CLONE_VM/FILES/FS/SIGHAND/THREAD` 控制资源共享 |
 | SMP 过渡调度 | Per-CPU RunQueue/current/idle/zombie + 全局等待 registry |
-| 阻塞原语统一 | `WaitQueue` 支撑 futex、epoll、eventfd、socket、timer |
+| 阻塞原语分层 | `WaitQueue` 支撑通用条件等待；futex 用专用 waiter 跟踪 requeue |
 | 进程生命周期可 wait | PCB 维护 children、exit_code、stopped/continued 状态和 wait queue |
 | signal 交付 | trap return 前 `do_signal()` 构造/恢复用户信号帧 |
 | futex shared/private | private 表按进程，shared 表按物理地址 key |
