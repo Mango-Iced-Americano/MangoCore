@@ -40,7 +40,8 @@ pub fn sys_pselect(
         Ok(fds) => fds,
         Err(errno) => return errno,
     };
-    let mut kexception_fds = match UserPtr::new(exception_fds as *const FdSet).read_optional(token) {
+    let mut kexception_fds = match UserPtr::new(exception_fds as *const FdSet).read_optional(token)
+    {
         Ok(fds) => fds,
         Err(errno) => return errno,
     };

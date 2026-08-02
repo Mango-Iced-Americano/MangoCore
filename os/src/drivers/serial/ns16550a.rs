@@ -35,8 +35,7 @@ impl Read<u8> for Ns16550a {
 
 impl Write<u8> for Ns16550a {
     fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        let ready =
-            unsafe { read_volatile((self.base + offsets::LSR) as *const u8) } & masks::THRE;
+        let ready = unsafe { read_volatile((self.base + offsets::LSR) as *const u8) } & masks::THRE;
         if ready == 0 {
             return Err(nb::Error::WouldBlock);
         }

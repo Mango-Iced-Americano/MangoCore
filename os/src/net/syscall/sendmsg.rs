@@ -249,7 +249,11 @@ fn send_stream_chunked(
         let copied = ubuf.read(&mut kbuf[..accessible]);
 
         let send_fn = || {
-            socket.try_sendmsg_without_poll(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags)
+            socket.try_sendmsg_without_poll(
+                &kbuf[..copied.min(accessible)],
+                dest.clone(),
+                msg_flags,
+            )
         };
 
         // Locking: `socket.send_wait_queue()` 由 socket 发送路径唤醒（发送缓冲区

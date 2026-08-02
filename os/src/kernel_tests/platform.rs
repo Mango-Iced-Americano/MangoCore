@@ -31,10 +31,7 @@ pub fn tests() -> Vec<KernelTest> {
             "platform::device_manager_mmio",
             test_device_manager_find_mmio,
         ),
-        KernelTest::new(
-            "platform::policy_selection",
-            test_platform_policy_selection,
-        ),
+        KernelTest::new("platform::policy_selection", test_platform_policy_selection),
     ]
 }
 
@@ -97,7 +94,11 @@ fn test_device_info_kind_matching() -> Result<(), &'static str> {
     if serial.kind != DeviceKind::Serial {
         return Err("serial device has wrong kind");
     }
-    if !block.compatible.iter().any(|compatible| compatible == "virtio,mmio") {
+    if !block
+        .compatible
+        .iter()
+        .any(|compatible| compatible == "virtio,mmio")
+    {
         return Err("virtio block device is missing its compatible string");
     }
 

@@ -340,7 +340,11 @@ impl IndexNode for Pipe {
             // one writer when the newly available space is smaller than
             // PIPE_BUF can select an ineligible writer and strand another
             // eligible waiter indefinitely.
-            (Ok(read_bytes), write_end, read_bytes > 0 && free_size < PAGE_SIZE)
+            (
+                Ok(read_bytes),
+                write_end,
+                read_bytes > 0 && free_size < PAGE_SIZE,
+            )
         };
         if let Ok(_n) = &result {
             if let Some(write_end) = write_end {
@@ -755,9 +759,7 @@ impl Pipe {
         };
 
         if let Some(write_end) = write_end {
-            write_end
-                .write_wait
-                .notify_events_all(EPollEvent::EPOLLOUT);
+            write_end.write_wait.notify_events_all(EPollEvent::EPOLLOUT);
         }
         result
     }

@@ -73,7 +73,10 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         let start = if path.starts_with('/') {
             crate::fs::current_root_inode()
         } else {
-            match resolve_start_inode(dirfd) { Ok(s) => s, Err(e) => return e, }
+            match resolve_start_inode(dirfd) {
+                Ok(s) => s,
+                Err(e) => return e,
+            }
         };
 
         let (uid, fsgid, groups) = caller_ids_and_groups();
@@ -96,7 +99,10 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
                 md
             }
             Err(e) => {
-                warn!("[sys_readlinkat] metadata() failed: path={}, err={:?}", path, e);
+                warn!(
+                    "[sys_readlinkat] metadata() failed: path={}, err={:?}",
+                    path, e
+                );
                 return EINVAL;
             }
         };

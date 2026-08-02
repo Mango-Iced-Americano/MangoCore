@@ -49,8 +49,7 @@ pub const FIRMWARE_END: usize = 0x4020_0000;
 /// This range must never enter the frame allocator or the optional bulk-zero
 /// path: overwriting it makes an early SATP switch re-enter the
 /// firmware/kernel bootstrap loop.
-pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] =
-    &[(MEMORY_START, FIRMWARE_END)];
+pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] = &[(MEMORY_START, FIRMWARE_END)];
 /// RAM currently exposed by the selected RISC-V board configuration.
 ///
 /// `MEMORY_SIZE` is a historical common capacity constant, while fu740 and

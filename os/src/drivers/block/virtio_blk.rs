@@ -208,8 +208,7 @@ pub fn probe_from_device_manager(dm: &DeviceManager) -> [Option<Arc<dyn BlockDev
         .into_iter()
         .filter(|device| device.mmio.is_some())
         .collect();
-    virtio_devices
-        .sort_by_key(|device| device.mmio.map(|(base, _)| base).unwrap_or(usize::MAX));
+    virtio_devices.sort_by_key(|device| device.mmio.map(|(base, _)| base).unwrap_or(usize::MAX));
 
     for dev_info in virtio_devices {
         if device_index == devices.len() {

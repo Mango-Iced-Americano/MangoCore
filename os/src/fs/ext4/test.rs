@@ -56,7 +56,11 @@ unsafe impl Send for FakeBlockDevice {}
 unsafe impl Sync for FakeBlockDevice {}
 
 impl BlockDevice for FakeBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> crate::drivers::block::BlockDeviceResult {
+    fn read_block(
+        &self,
+        block_id: usize,
+        buf: &mut [u8],
+    ) -> crate::drivers::block::BlockDeviceResult {
         let data = self.data.lock();
         if block_id < data.len() {
             let copy_len = buf.len().min(BLOCK_SZ);

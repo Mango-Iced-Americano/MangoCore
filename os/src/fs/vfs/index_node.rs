@@ -620,7 +620,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 #[macro_export]
 macro_rules! impl_index_node_as_any {
     ($t:ty) => {
-        fn as_any_ref(&self) -> &dyn::core::any::Any {
+        fn as_any_ref(&self) -> &dyn ::core::any::Any {
             self
         }
     };

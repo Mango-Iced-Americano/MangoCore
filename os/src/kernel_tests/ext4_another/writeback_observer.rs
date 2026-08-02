@@ -7,8 +7,13 @@ use crate::utils::error::SyscallErr;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WritebackCall {
-    Pages { start_index: usize, page_count: usize },
-    Page { index: usize },
+    Pages {
+        start_index: usize,
+        page_count: usize,
+    },
+    Page {
+        index: usize,
+    },
 }
 
 struct ObservedPageCacheBackend {

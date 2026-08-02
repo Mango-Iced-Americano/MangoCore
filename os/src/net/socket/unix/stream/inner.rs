@@ -15,9 +15,9 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
 
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::unix::ring_buffer::RingBuffer;
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
-use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::Endpoint;
 
 /// 默认收发缓冲区大小（字节数）

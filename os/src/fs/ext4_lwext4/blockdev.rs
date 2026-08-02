@@ -67,10 +67,7 @@ pub(crate) fn read_bytes_for_block_size<const PLATFORM_BLOCK_SIZE: usize>(
 
     if done < buf.len() {
         let mut bounce = [0u8; PLATFORM_BLOCK_SIZE];
-        device.read_block(
-            (start_pos + done) / PLATFORM_BLOCK_SIZE,
-            &mut bounce,
-        );
+        device.read_block((start_pos + done) / PLATFORM_BLOCK_SIZE, &mut bounce);
         let tail_len = buf.len() - done;
         buf[done..].copy_from_slice(&bounce[..tail_len]);
     }
@@ -117,13 +114,13 @@ impl KernelDevOp for MangoKernelDevOp {
 
     fn seek(dev: &mut MangoBlockDev, off: i64, whence: i32) -> Result<i64, i32> {
         let new_pos: i64 = match whence {
-            0 => off,                                 // SEEK_SET
-            1 => dev.pos as i64 + off,                // SEEK_CUR
-            2 => dev.size as i64 + off,               // SEEK_END
-            _ => return Err(-22),                     // EINVAL
+            0 => off,                   // SEEK_SET
+            1 => dev.pos as i64 + off,  // SEEK_CUR
+            2 => dev.size as i64 + off, // SEEK_END
+            _ => return Err(-22),       // EINVAL
         };
         if new_pos < 0 {
-            return Err(-22);                          // EINVAL
+            return Err(-22); // EINVAL
         }
         dev.pos = new_pos as usize;
         Ok(new_pos)

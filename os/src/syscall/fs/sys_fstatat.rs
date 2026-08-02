@@ -35,7 +35,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             Ok(meta) => metadata_to_stat(&meta),
             Err(e) => return -(e as isize),
         };
-        if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
+        if UserPtrMut::new(buf as *mut Stat)
+            .write(token, &stat)
+            .is_err()
+        {
             return EFAULT;
         }
         return SUCCESS;
@@ -76,7 +79,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             "[sys_fstatat] dirfd: {}, path: {:?}, flags: {:?}, st_ino: {}",
             dirfd as isize, path, flags, stat.st_ino,
         );
-        if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
+        if UserPtrMut::new(buf as *mut Stat)
+            .write(token, &stat)
+            .is_err()
+        {
             return EFAULT;
         }
         SUCCESS
@@ -93,7 +99,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             "[sys_fstatat] dirfd: {}, path: {:?}, flags: {:?}, st_ino: {}",
             dirfd as isize, path, flags, stat.st_ino,
         );
-        if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
+        if UserPtrMut::new(buf as *mut Stat)
+            .write(token, &stat)
+            .is_err()
+        {
             log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
             return EFAULT;
         };

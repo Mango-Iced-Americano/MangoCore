@@ -52,7 +52,10 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
             Ok(meta) => metadata_to_statx(&meta, mask),
             Err(e) => return -(e as isize),
         };
-        if UserPtrMut::new(buf as *mut Statx).write(token, &statx).is_err() {
+        if UserPtrMut::new(buf as *mut Statx)
+            .write(token, &statx)
+            .is_err()
+        {
             return EFAULT;
         }
         return SUCCESS;
@@ -87,7 +90,10 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
             Ok(meta) => metadata_to_statx(&meta, mask),
             Err(e) => return -(e as isize),
         };
-        if UserPtrMut::new(buf as *mut Statx).write(token, &statx).is_err() {
+        if UserPtrMut::new(buf as *mut Statx)
+            .write(token, &statx)
+            .is_err()
+        {
             return EFAULT;
         }
         SUCCESS
@@ -100,7 +106,10 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
             Ok(meta) => metadata_to_statx(&meta, mask),
             Err(e) => return -(e as isize),
         };
-        if UserPtrMut::new(buf as *mut Statx).write(token, &statx).is_err() {
+        if UserPtrMut::new(buf as *mut Statx)
+            .write(token, &statx)
+            .is_err()
+        {
             log::error!("[sys_statx] Failed to copy to {:?}", buf);
             return EFAULT;
         };

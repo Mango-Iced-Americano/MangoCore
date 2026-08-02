@@ -56,7 +56,9 @@ pub fn sys_copy_file_range(
 
     while copied < len {
         let chunk = (len - copied).min(BUFFER_SIZE);
-        unsafe { buffer.set_len(chunk); }
+        unsafe {
+            buffer.set_len(chunk);
+        }
 
         let read_size = if let Some(offset) = in_offset {
             match in_file.pread(offset, buffer.as_mut_slice()) {
@@ -82,7 +84,9 @@ pub fn sys_copy_file_range(
         if read_size == 0 {
             break;
         }
-        unsafe { buffer.set_len(read_size); }
+        unsafe {
+            buffer.set_len(read_size);
+        }
 
         let write_size = if let Some(offset) = out_offset {
             match out_file.pwrite(offset, buffer.as_slice()) {

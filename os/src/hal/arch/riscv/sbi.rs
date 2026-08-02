@@ -79,9 +79,9 @@ pub fn console_write_bytes(data: &[u8]) {
     {
         // NS16550A UART at fixed QEMU virt MMIO base
         const UART_BASE: usize = 0x1000_0000;
-        const THR: usize = 0x0;   // Transmit Holding Register
-        const LSR: usize = 0x5;   // Line Status Register
-        const THRE: u8 = 1 << 5;  // Transmitter Holding Register Empty
+        const THR: usize = 0x0; // Transmit Holding Register
+        const LSR: usize = 0x5; // Line Status Register
+        const THRE: u8 = 1 << 5; // Transmitter Holding Register Empty
 
         for chunk in data.chunks(16) {
             for &byte in chunk {

@@ -6,8 +6,8 @@
 
 use core::cell::UnsafeCell;
 
-pub mod info;
 mod fallback;
+pub mod info;
 pub use info::{DeviceInfo, DeviceKind, FirmwareKind, PlatformInfo};
 
 /// Global platform information singleton.
@@ -72,9 +72,9 @@ pub fn platform_cmdline() -> Option<&'static str> {
     // single-threaded initialization. `PLATFORM_INFO` is static, so a borrow
     // of the contained `String` remains valid for the returned `'static` view.
     unsafe {
-        (*PLATFORM_INFO.0.get())
-            .as_ref()
-            .and_then(|platform_info| (!platform_info.cmdline.is_empty()).then_some(platform_info.cmdline.as_str()))
+        (*PLATFORM_INFO.0.get()).as_ref().and_then(|platform_info| {
+            (!platform_info.cmdline.is_empty()).then_some(platform_info.cmdline.as_str())
+        })
     }
 }
 
@@ -135,11 +135,11 @@ pub fn select_policy() -> &'static dyn PlatformPolicy {
 }
 
 // Sub-modules for each platform policy.
-#[cfg(feature = "board_rvqemu")]
-mod qemu_riscv;
-#[cfg(feature = "board_vf2")]
-mod vf2;
 #[cfg(feature = "board_laqemu")]
 mod qemu_la;
 #[cfg(feature = "board_2k1000")]
 mod qemu_la;
+#[cfg(feature = "board_rvqemu")]
+mod qemu_riscv;
+#[cfg(feature = "board_vf2")]
+mod vf2;

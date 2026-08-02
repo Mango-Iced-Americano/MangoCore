@@ -134,7 +134,11 @@ pub fn sys_sendto(
                     }
                     NET_INTERFACE.poll();
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
-                        match socket.try_sendmsg_without_poll(&kernel_buf, dest_endpoint.clone(), msg_flags) {
+                        match socket.try_sendmsg_without_poll(
+                            &kernel_buf,
+                            dest_endpoint.clone(),
+                            msg_flags,
+                        ) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
@@ -229,7 +233,11 @@ pub fn sys_sendto(
                 } else {
                     NET_INTERFACE.poll();
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
-                        match socket.try_sendmsg_without_poll(&kernel_buf, dest_endpoint.clone(), msg_flags) {
+                        match socket.try_sendmsg_without_poll(
+                            &kernel_buf,
+                            dest_endpoint.clone(),
+                            msg_flags,
+                        ) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),

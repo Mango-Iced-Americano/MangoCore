@@ -32,7 +32,10 @@ pub fn sys_syncfs(fd: usize) -> isize {
         log::error!("sys_syncfs: flush_all_page_caches failed: {:?}", error);
         return -(error as isize);
     }
-    if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
+    if let Some(ext4) = fs
+        .as_any_ref()
+        .downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>()
+    {
         ext4.flush_metadata_cache();
     }
 

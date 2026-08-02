@@ -154,10 +154,9 @@ pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] = &[
 #[cfg(feature = "board_laqemu")]
 pub const USABLE_MEMORY_SIZE: usize = MEMORY_SIZE;
 #[cfg(feature = "board_2k1000")]
-pub const USABLE_MEMORY_SIZE: usize =
-    MEMORY_SIZE
-        - (FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 - FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0)
-        - PAGE_SIZE;
+pub const USABLE_MEMORY_SIZE: usize = MEMORY_SIZE
+    - (FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 - FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0)
+    - PAGE_SIZE;
 
 pub const SV39_SPACE: usize = 1 << 39;
 pub const USR_SPACE_LEN: usize = SV39_SPACE >> 2;

@@ -11,10 +11,9 @@
 
 pub mod arch;
 pub mod boot;
+pub mod device;
 pub mod firmware;
 pub mod platform;
-pub mod device;
-pub use boot::{boot_info, save_boot_info, BootProtocol, RawBootInfo};
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
@@ -36,6 +35,7 @@ pub use arch::{
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};
+pub use boot::{boot_info, save_boot_info, BootProtocol, RawBootInfo};
 
 /// Per-chunk bounce buffer size for I/O operations.
 /// Computed as KERNEL_HEAP_SIZE / 128, bounded to [64KiB, 256KiB].

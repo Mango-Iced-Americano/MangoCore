@@ -1,12 +1,6 @@
 use super::common::*;
 
-pub fn sys_fchownat(
-    dirfd: usize,
-    path: *const u8,
-    owner: u32,
-    group: u32,
-    flags: u32,
-) -> isize {
+pub fn sys_fchownat(dirfd: usize, path: *const u8, owner: u32, group: u32, flags: u32) -> isize {
     let token = current_user_token();
     let path = match user_cstring(token, path) {
         Ok(path) => path,

@@ -29,19 +29,20 @@ macro_rules! writable_data_inode_mutations {
                 .load(core::sync::atomic::Ordering::Acquire);
             let cache = self.regular_page_cache()?;
             let t1 = crate::task::perf::perf_memory_io_time_now();
-            let written = cache.write_with_after_copy(offset, &buffer[..actual], Some(old_size), |_| {
-                let post_start = crate::task::perf::perf_memory_io_time_now();
-                self.lifetime
-                    .logical_size
-                    .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
-                self.lifetime
-                    .size_generation
-                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-                self.lifetime.retain_dirty_page_cache(cache);
-                crate::task::perf::record_pwrite_ext4_post(
-                    crate::task::perf::perf_memory_io_time_now().wrapping_sub(post_start),
-                );
-            })?;
+            let written =
+                cache.write_with_after_copy(offset, &buffer[..actual], Some(old_size), |_| {
+                    let post_start = crate::task::perf::perf_memory_io_time_now();
+                    self.lifetime
+                        .logical_size
+                        .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
+                    self.lifetime
+                        .size_generation
+                        .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                    self.lifetime.retain_dirty_page_cache(cache);
+                    crate::task::perf::record_pwrite_ext4_post(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(post_start),
+                    );
+                })?;
             crate::task::perf::record_pwrite_ext4_setup(t1.wrapping_sub(t0));
             Ok(written)
         }
@@ -107,9 +108,12 @@ macro_rules! writable_data_inode_mutations {
             if actual == 0 {
                 return Ok(0);
             }
-            self.write_at(offset, actual, &buffer[..actual], spin::Mutex::new(
-                crate::fs::vfs::FilePrivateData::Unused,
-            ).lock())
+            self.write_at(
+                offset,
+                actual,
+                &buffer[..actual],
+                spin::Mutex::new(crate::fs::vfs::FilePrivateData::Unused).lock(),
+            )
         }
 
         fn write_sync(

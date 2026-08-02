@@ -13,7 +13,8 @@ use spin::Mutex;
 
 /// Global boot-block device registry.
 /// Maps device names (e.g. "vda", "mmcblk0") to block devices.
-static BOOT_BLOCK_REGISTRY: Mutex<Option<BTreeMap<String, Arc<dyn BlockDevice>>>> = Mutex::new(None);
+static BOOT_BLOCK_REGISTRY: Mutex<Option<BTreeMap<String, Arc<dyn BlockDevice>>>> =
+    Mutex::new(None);
 
 /// Initialize the boot-block registry (called once during boot-block mount).
 fn ensure_registry() -> &'static Mutex<Option<BTreeMap<String, Arc<dyn BlockDevice>>>> {

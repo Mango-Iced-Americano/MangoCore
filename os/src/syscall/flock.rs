@@ -1,7 +1,7 @@
-use crate::fs::vfs::posix_lock::LockKey;
-use crate::task::current_task;
 use super::errno::*;
 use super::fs::{FlockLock, FLOCK_LOCKS};
+use crate::fs::vfs::posix_lock::LockKey;
+use crate::task::current_task;
 
 const LOCK_SH: u32 = 1;
 const LOCK_EX: u32 = 2;
@@ -79,9 +79,9 @@ pub fn sys_flock(fd: usize, operation: u32) -> isize {
 
     // Conflict check: another description holds an exclusive lock,
     // OR we want an exclusive lock and another description holds a shared lock.
-    let conflict = locks.iter().any(|l| {
-        l.key == key && l.owner_description != owner && (l.exclusive || want_ex)
-    });
+    let conflict = locks
+        .iter()
+        .any(|l| l.key == key && l.owner_description != owner && (l.exclusive || want_ex));
 
     if conflict {
         if nonblock {

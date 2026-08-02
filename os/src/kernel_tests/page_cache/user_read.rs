@@ -139,7 +139,9 @@ pub(super) fn test_read_user_multi_page_unaligned_segments() -> Result<(), &'sta
     let mut actual = vec![0; copied];
     read_user_buffer(&dst, &mut actual)?;
     if actual != expected_read_pattern(offset, len) {
-        return Err("unaligned multi-page read_user crossed a source or segment boundary incorrectly");
+        return Err(
+            "unaligned multi-page read_user crossed a source or segment boundary incorrectly",
+        );
     }
     Ok(())
 }
@@ -190,7 +192,8 @@ pub(super) fn test_read_user_fills_partial_valid_page() -> Result<(), &'static s
     let expected_page_byte = PAGE_BASE.wrapping_add(page_index);
     if actual[..VALID_OFFSET] != vec![expected_page_byte; VALID_OFFSET]
         || actual[VALID_OFFSET..VALID_OFFSET + VALID_LEN] != vec![WRITE_BYTE; VALID_LEN]
-        || actual[VALID_OFFSET + VALID_LEN..] != vec![expected_page_byte; PAGE_SIZE - VALID_OFFSET - VALID_LEN]
+        || actual[VALID_OFFSET + VALID_LEN..]
+            != vec![expected_page_byte; PAGE_SIZE - VALID_OFFSET - VALID_LEN]
     {
         return Err("partial-valid read_user did not merge backend and dirty bytes");
     }

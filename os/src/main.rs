@@ -142,7 +142,8 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
     if boot_config.mode == crate::bootargs::BootMode::Ktest {
         crate::println!(
             "[kernel] Entering kernel test mode (ktest) — tests: {:?}, repeat: {}",
-            boot_config.tests, boot_config.repeat,
+            boot_config.tests,
+            boot_config.repeat,
         );
         *crate::kernel_tests::KTEST_BOOT_CONFIG.lock() = Some(boot_config);
         crate::task::spawn_ktest_task(crate::kernel_tests::run_ktest_entry);

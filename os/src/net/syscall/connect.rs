@@ -95,10 +95,12 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             return -(SyscallErr::EINPROGRESS as isize);
         } else {
             NET_INTERFACE.poll();
-            WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_connect_without_poll() {
-                Ok(n) => Some(n as isize),
-                Err(SyscallErr::EAGAIN) => None,
-                Err(e) => Some(-(e as isize)),
+            WaitQueue::wait_until_interruptible(wait_queue, || {
+                match socket.try_connect_without_poll() {
+                    Ok(n) => Some(n as isize),
+                    Err(SyscallErr::EAGAIN) => None,
+                    Err(e) => Some(-(e as isize)),
+                }
             })
             .unwrap_or_else(|e| e)
         }

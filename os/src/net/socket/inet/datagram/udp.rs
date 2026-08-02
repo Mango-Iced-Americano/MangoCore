@@ -609,10 +609,8 @@ impl UdpSocket {
     /// transmit buffer is observable as writable.
     pub fn wake_send_if_ready(&self) {
         if self.send_ready() {
-            self.send_waiters.notify_events_at_most(
-                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
-                1,
-            );
+            self.send_waiters
+                .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
         }
     }
 

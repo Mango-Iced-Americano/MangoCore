@@ -36,7 +36,10 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
                     Err(error) => return -(error as isize),
                 };
                 let mut flags = 0u32;
-                if metadata.flags.contains(crate::fs::vfs::InodeFlags::S_APPEND) {
+                if metadata
+                    .flags
+                    .contains(crate::fs::vfs::InodeFlags::S_APPEND)
+                {
                     flags |= FS_APPEND_FL;
                 }
                 if metadata

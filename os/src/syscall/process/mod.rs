@@ -47,20 +47,19 @@ pub use lifecycle::{
     sys_wait4, sys_waitid,
 };
 pub use misc::{sys_delete_module, sys_reboot, sys_shutdown, sys_syslog, sys_yield};
-pub use mm::{
-    sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2,
-    sys_mlockall, sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall,
-    sys_munmap, sys_pkey_alloc, sys_pkey_free, sys_pkey_mprotect, sys_remap_file_pages,
-    sys_sbrk,
-};
 #[cfg(feature = "riscv")]
 pub use mm::sys_riscv_flush_icache;
+pub use mm::{
+    sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2, sys_mlockall,
+    sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_pkey_alloc,
+    sys_pkey_free, sys_pkey_mprotect, sys_remap_file_pages, sys_sbrk,
+};
+pub(crate) use signal::SignalFd;
 pub use signal::{
     sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
     sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_signalfd4,
     sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
-pub(crate) use signal::SignalFd;
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,
     sys_clock_settime, sys_get_time, sys_getitimer, sys_getrusage, sys_gettimeofday, sys_nanosleep,

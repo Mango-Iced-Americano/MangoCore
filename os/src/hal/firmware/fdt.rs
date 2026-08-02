@@ -63,7 +63,11 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
         Ok(fdt) => fdt,
         Err(_) => return false,
     };
-    let memory = match fdt.root().and_then(|root| root.memory()).and_then(|memory| memory.reg()) {
+    let memory = match fdt
+        .root()
+        .and_then(|root| root.memory())
+        .and_then(|memory| memory.reg())
+    {
         Ok(memory) => memory,
         Err(_) => return false,
     };
@@ -121,7 +125,10 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
 
 type FallibleFdt<'a> = fdt::Fdt<
     'a,
-    (fdt::parsing::unaligned::UnalignedParser<'a>, fdt::parsing::NoPanic),
+    (
+        fdt::parsing::unaligned::UnalignedParser<'a>,
+        fdt::parsing::NoPanic,
+    ),
 >;
 
 /// Walk the FDT and collect nodes with a `compatible` property as devices.

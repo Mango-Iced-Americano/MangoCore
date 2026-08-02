@@ -5,8 +5,7 @@ use crate::fs::{
     pidfd::{new_pidfd_file_with_flags, PidFd},
     procfs::LockedProcInode,
     vfs::{
-        event::EPollEvent, File, FileFlags, FilePrivateData, FileSystem,
-        FileType, IndexNode,
+        event::EPollEvent, File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode,
         InodeMode, Metadata, MountFSInode,
     },
 };
@@ -822,8 +821,11 @@ pub fn sys_sigreturn() -> isize {
     #[cfg(feature = "loongarch64")]
     let restored_lsx = match ucontext_addr
         .checked_add(crate::hal::UserContext::LSX_OFFSET)
-        .and_then(|addr| UserPtr::<crate::hal::LsxRegs>::from_addr(addr).read(token).ok())
-    {
+        .and_then(|addr| {
+            UserPtr::<crate::hal::LsxRegs>::from_addr(addr)
+                .read(token)
+                .ok()
+        }) {
         Some(lsx) => lsx,
         None => {
             error!("[sys_sigreturn] bad LSX context in signal frame, send SIGSEGV");

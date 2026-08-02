@@ -18,8 +18,8 @@
 //! 1. Add a test function returning `Result<(), &'static str>` in the appropriate module
 //! 2. Register it in `all_tests()` in this file
 
-pub mod runner;
 pub mod platform;
+pub mod runner;
 
 #[path = "block_device.rs"]
 mod kt_block_device;

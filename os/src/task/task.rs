@@ -9,12 +9,12 @@
 //! `has_actionable_signal()` 前必须释放 `task.inner`，避免信号处理和调度唤醒路径
 //! 形成锁顺序反转。
 
+use super::perf;
 use super::pid::RecycleAllocator;
 use super::process::ProcessControlBlock;
 use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
-use super::perf;
 use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
 use super::{

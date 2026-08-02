@@ -47,7 +47,9 @@ pub(super) fn test_clean_media_supports_metadata_lookup_and_page_reads() -> Resu
     root.sync().map_err(|_| "post-create sync failed")?;
     drop(file);
     // Re-open and verify
-    let file = root.find(test_name).map_err(|_| "re-open of test file failed")?;
+    let file = root
+        .find(test_name)
+        .map_err(|_| "re-open of test file failed")?;
     let size = usize::try_from(file.metadata().map_err(|_| "file metadata failed")?.size)
         .map_err(|_| "file size does not fit usize")?;
     let cache = file

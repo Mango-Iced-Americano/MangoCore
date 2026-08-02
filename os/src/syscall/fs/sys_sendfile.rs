@@ -4,7 +4,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
     let count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
     let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
+    let fd_table = files_ref.lock();
     let in_file = match fd_table.get_file(in_fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -86,14 +86,12 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
 
         let read_size = write_buffer.len();
 
-        let mut fallback = |redundant_bytes: usize| {
-            match offset_val.as_mut() {
-                Some(offset) => *offset -= redundant_bytes,
-                None => match in_file.lseek(SeekFrom::SeekCurrent(-(redundant_bytes as i64))) {
-                    Ok(_) => {}
-                    Err(errno) => log::error!("splice fallback lseek failed: errno {:?}", errno),
-                },
-            }
+        let mut fallback = |redundant_bytes: usize| match offset_val.as_mut() {
+            Some(offset) => *offset -= redundant_bytes,
+            None => match in_file.lseek(SeekFrom::SeekCurrent(-(redundant_bytes as i64))) {
+                Ok(_) => {}
+                Err(errno) => log::error!("splice fallback lseek failed: errno {:?}", errno),
+            },
         };
 
         let write_size = match out_file.write(write_buffer) {

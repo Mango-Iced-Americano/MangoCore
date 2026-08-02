@@ -196,9 +196,7 @@ impl IndexNode for Ext4Inode {
             FileType::File => {
                 let logical_size_start = crate::task::perf::perf_memory_io_time_now();
                 let logical_size = self.lifetime.logical_size.load(Ordering::Acquire);
-                let actual = len
-                    .min(dst.len())
-                    .min(logical_size.saturating_sub(offset));
+                let actual = len.min(dst.len()).min(logical_size.saturating_sub(offset));
                 if actual == 0 {
                     return Ok(0);
                 }
@@ -247,10 +245,9 @@ impl IndexNode for Ext4Inode {
         _data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         match file_type {
-            FileType::Pipe
-            | FileType::CharDevice
-            | FileType::BlockDevice
-            | FileType::Socket => self.mknod(name, mode, _data as u64),
+            FileType::Pipe | FileType::CharDevice | FileType::BlockDevice | FileType::Socket => {
+                self.mknod(name, mode, _data as u64)
+            }
             _ => self.create(name, file_type, mode),
         }
     }
@@ -342,15 +339,15 @@ impl IndexNode for Ext4Inode {
             atime: TimeSpec::from_s(usize::try_from(attr.atime).map_err(|_| SyscallErr::EFBIG)?),
             mtime: match self.lifetime.cached_mtime() {
                 Some(mtime) => mtime,
-                None => TimeSpec::from_s(
-                    usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?,
-                ),
+                None => {
+                    TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?)
+                }
             },
             ctime: match self.lifetime.cached_ctime() {
                 Some(ctime) => ctime,
-                None => TimeSpec::from_s(
-                    usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?,
-                ),
+                None => {
+                    TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?)
+                }
             },
             file_type,
             mode: InodeMode::from(file_type) | permissions,

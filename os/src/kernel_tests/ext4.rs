@@ -31,7 +31,10 @@ pub fn tests() -> Vec<KernelTest> {
     ];
     #[cfg(feature = "ext4_lwext4_backend")]
     tests.extend([
-        KernelTest::new("ext4::open_unformatted_returns_err", block_device::test_open_unformatted_returns_err),
+        KernelTest::new(
+            "ext4::open_unformatted_returns_err",
+            block_device::test_open_unformatted_returns_err,
+        ),
         KernelTest::new(
             "ext4::lw_path_isolation",
             mounted_filesystem::test_lw_path_isolation,

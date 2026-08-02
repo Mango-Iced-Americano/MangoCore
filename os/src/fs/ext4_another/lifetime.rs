@@ -119,9 +119,7 @@ impl InodeLifetime {
     }
 
     pub(crate) fn dirty_timestamps(&self) -> Option<CachedTimestamps> {
-        if !self.mtime_dirty.load(Ordering::Acquire)
-            && !self.ctime_dirty.load(Ordering::Acquire)
-        {
+        if !self.mtime_dirty.load(Ordering::Acquire) && !self.ctime_dirty.load(Ordering::Acquire) {
             return None;
         }
         Some(CachedTimestamps {
@@ -304,9 +302,7 @@ impl Ext4FileSystem {
             .lifetimes
             .lock()
             .iter()
-            .map(|(key, lifetime)| {
-                (lifetime.page_cache(), *key, lifetime.clone())
-            })
+            .map(|(key, lifetime)| (lifetime.page_cache(), *key, lifetime.clone()))
             .collect();
         let mut committed_generations = Vec::new();
         let mut committed_timestamps = Vec::new();
@@ -357,12 +353,11 @@ impl Ext4FileSystem {
         );
         if flush_succeeded {
             for (lifetime, generation) in committed_generations {
-                if lifetime.size_generation.compare_exchange(
-                    generation,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ).is_ok() {
+                if lifetime
+                    .size_generation
+                    .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     lifetime.release_dirty_page_cache();
                 }
             }
@@ -472,5 +467,4 @@ mod tests {
         assert_eq!(lifetime.cached_mtime(), None);
         assert_eq!(lifetime.cached_ctime(), None);
     }
-
 }

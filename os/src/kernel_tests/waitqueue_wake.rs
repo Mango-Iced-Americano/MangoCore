@@ -28,7 +28,9 @@ static FIFO_ORDER: AtomicUsize = AtomicUsize::new(0);
 
 fn fifo_worker() {
     let slot = FIFO_REGISTERED.fetch_add(1, Ordering::AcqRel);
-    let _ = WaitQueue::wait_until(&FIFO_WQ, || FIFO_RELEASE.load(Ordering::Acquire).then_some(0));
+    let _ = WaitQueue::wait_until(&FIFO_WQ, || {
+        FIFO_RELEASE.load(Ordering::Acquire).then_some(0)
+    });
     let order = FIFO_FINISHED.fetch_add(1, Ordering::AcqRel);
     FIFO_ORDER.fetch_or((slot + 1) << (order * 4), Ordering::AcqRel);
 }

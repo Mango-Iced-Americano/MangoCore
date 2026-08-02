@@ -16,8 +16,8 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::fs::vfs::{self, FileFlags};
 use crate::fs::vfs::event::EventWaitQueue;
+use crate::fs::vfs::{self, FileFlags};
 use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;

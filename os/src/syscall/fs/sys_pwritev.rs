@@ -53,11 +53,20 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
             let want = (allowed - done).min(chunk_cap);
             let file_off = match offset.checked_add(done) {
                 Some(v) => v,
-                None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+                None => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(SyscallErr::EINVAL as isize)
+                    }
+                }
             };
-            let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+            let mut accessible =
+                user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
             if accessible == 0 {
-                if done > 0 { return done as isize; }
+                if done > 0 {
+                    return done as isize;
+                }
                 accessible = want.min(crate::config::PAGE_SIZE);
             }
 
@@ -68,14 +77,24 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
 
             let n = match file.pwrite_user(file_off, &ubuf) {
                 Ok(n) => n,
-                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+                Err(e) => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(e as isize)
+                    }
+                }
             };
 
             done += n;
-            if n == 0 || n < accessible { break; }
+            if n == 0 || n < accessible {
+                break;
+            }
 
             if let Some(task) = current_task() {
-                if crate::task::has_actionable_signal(&task) { break; }
+                if crate::task::has_actionable_signal(&task) {
+                    break;
+                }
             }
         }
         return done as isize;
@@ -86,14 +105,22 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
     if kbuf.try_reserve(chunk_cap).is_err() {
         return -(SyscallErr::ENOMEM as isize);
     }
-    unsafe { kbuf.set_len(chunk_cap); }
+    unsafe {
+        kbuf.set_len(chunk_cap);
+    }
 
-    let mut done = 0usize;  // ← re-declare for kbuf path
+    let mut done = 0usize; // ← re-declare for kbuf path
     while done < allowed {
         let want = (allowed - done).min(chunk_cap);
         let file_off = match offset.checked_add(done) {
             Some(v) => v,
-            None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+            None => {
+                return if done > 0 {
+                    done as isize
+                } else {
+                    -(SyscallErr::EINVAL as isize)
+                }
+            }
         };
         let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
         if accessible == 0 {

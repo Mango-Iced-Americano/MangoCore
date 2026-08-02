@@ -26,7 +26,9 @@ pub(super) fn test_before_copy_reentry_keeps_payload_unpublished() -> Result<(),
         .write_with_before_copy(PAGE_INDEX * PAGE_SIZE, &payload, Some(0), move |_| {
             match callback_cache.frame_for_read(PAGE_INDEX) {
                 Err(SyscallErr::EAGAIN) => callback_read_blocked.store(true, Ordering::SeqCst),
-                Ok(frame) => callback_read_byte.store(frame.ppn.get_bytes_array()[0], Ordering::SeqCst),
+                Ok(frame) => {
+                    callback_read_byte.store(frame.ppn.get_bytes_array()[0], Ordering::SeqCst)
+                }
                 Err(_) => return Err(SyscallErr::EIO),
             }
             callback_cache.writeback_page(PAGE_INDEX)

@@ -4,10 +4,10 @@
 //! the known MMIO device list. Used as fallback when no FDT or ACPI firmware
 //! description is available.
 
+use crate::hal::platform::info::{DeviceInfo, DeviceKind};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::hal::platform::info::{DeviceInfo, DeviceKind};
 
 /// QEMU RISC-V virt machine static devices.
 #[cfg(feature = "board_rvqemu")]

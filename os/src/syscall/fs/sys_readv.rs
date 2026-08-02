@@ -46,13 +46,25 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
 
             let n = match file.read_user(&mut ubuf) {
                 Ok(n) => n,
-                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+                Err(e) => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(e as isize)
+                    }
+                }
             };
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             done += n;
-            if n < accessible { break; }
+            if n < accessible {
+                break;
+            }
             if let Some(task) = current_task() {
-                if crate::task::has_actionable_signal(&task) { break; }
+                if crate::task::has_actionable_signal(&task) {
+                    break;
+                }
             }
         }
         return done as isize;
@@ -63,7 +75,9 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     if kbuf.try_reserve(chunk_cap).is_err() {
         return -(SyscallErr::ENOMEM as isize);
     }
-    unsafe { kbuf.set_len(chunk_cap); }
+    unsafe {
+        kbuf.set_len(chunk_cap);
+    }
 
     let mut done = 0usize;
     while done < total_len {
@@ -91,13 +105,17 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
             let mut ubuf = match user_iov.writer_buffer_at(done + copied, chunk) {
                 Ok(b) => b,
                 Err(errno) => {
-                    if copied > 0 { done += copied; }
+                    if copied > 0 {
+                        done += copied;
+                    }
                     return if done > 0 { done as isize } else { errno };
                 }
             };
             let c = ubuf.write_at(0, &kbuf[copied..copied + chunk]);
             copied += c;
-            if c < chunk { break; }
+            if c < chunk {
+                break;
+            }
         }
 
         done += copied;

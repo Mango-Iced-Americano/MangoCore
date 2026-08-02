@@ -42,7 +42,8 @@ pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) 
             Err(errno) => return errno,
         }
     };
-    let (uid, gid, groups) = access_subject_ids_and_groups(flags.contains(FaccessatFlags::AT_EACCESS));
+    let (uid, gid, groups) =
+        access_subject_ids_and_groups(flags.contains(FaccessatFlags::AT_EACCESS));
     let parent_result = check_parent_search_access(&start_inode, &pathname, uid, gid, &groups);
     if parent_result != SUCCESS {
         return parent_result;
