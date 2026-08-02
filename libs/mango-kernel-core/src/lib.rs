@@ -6,6 +6,7 @@ pub mod bootargs;
 pub mod time;
 pub mod page_cache;
 pub mod ring_buffer;
+pub mod uart_rx_ring;
 pub mod path;
 pub mod wait_result;
 pub mod recycle_alloc;
