@@ -3,7 +3,7 @@ use core::convert::TryFrom;
 use log::info;
 
 use crate::fs::vfs::{self, FileFlags};
-use crate::mm::UserSlice;
+use crate::mm::UserBufferWriter;
 use crate::net::posix::PosixArgsSocketType;
 use crate::net::{make_unix_socket_pair, SocketFile, AF_UNIX, AF_UNSPEC, PSOCK};
 use crate::task::current_task;
@@ -13,16 +13,15 @@ use crate::utils::error::SyscallErr;
 ///
 /// # Semantics
 ///
-/// 通过 `make_unix_socket_pair()` 分配一对匿名 `UnixStreamSocket` 或
-/// `UnixDatagramSocket`（取决于 `psock` 类型），分配两个新的 fd，
+/// 通过 `make_unix_socket_pair()` 分配一对匿名 Unix socket，分配两个新的 fd，
 /// 并将 `[fd1, fd2]` 写入用户空间的 `sv` 数组。
 ///
 /// # Errors
 ///
-/// - `-EINVAL`：`socket_type` 的纯类型位无效。
+/// - `-EINVAL`：`socket_type` 包含无效类型或控制标志位。
 /// - `-EPROTONOSUPPORT`：`domain` 不是 `AF_UNIX`/`AF_LOCAL`/`AF_UNSPEC`
 ///   （Linux `socketpair()` 仅支持 AF_UNIX，非 AF_UNIX → `EPROTONOSUPPORT`，非 `EAFNOSUPPORT`）。
-/// - `-ESOCKTNOSUPPORT`：`psock` 不是 `Stream` 或 `Datagram`。
+/// - `-ESOCKTNOSUPPORT`：`psock` 不是 `Stream`、`Datagram` 或 `SeqPacket`。
 /// - `-EFAULT`：`sv` 地址写入失败。
 ///
 /// # Linux Compatibility
@@ -35,8 +34,12 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         domain, socket_type, protocol, sv
     );
 
-    // 在 syscall 入口处解析 raw u32 → PSOCK + bool flags
-    let type_arg = PosixArgsSocketType::from_bits_truncate(socket_type);
+    // Parse all bits strictly: only the low four type bits and the two
+    // socketpair control flags are accepted.
+    let type_arg = match PosixArgsSocketType::from_bits(socket_type) {
+        Some(type_arg) => type_arg,
+        None => return -(SyscallErr::EINVAL as isize),
+    };
     let psock = match PSOCK::try_from(type_arg) {
         Ok(s) => s,
         Err(e) => return -(e as isize),
@@ -58,17 +61,31 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         }
     }
 
-    // 仅支持 SOCK_STREAM 和 SOCK_DGRAM 的 socketpair
-    let (socket1, socket2): (Arc<dyn crate::net::Socket>, Arc<dyn crate::net::Socket>) = match psock
-    {
-        PSOCK::Stream | PSOCK::Datagram => {
-            let (s1, s2) = make_unix_socket_pair(is_nonblock, psock);
-            (s1, s2)
-        }
-        _ => {
-            return -(SyscallErr::ESOCKTNOSUPPORT as isize);
-        }
+    let task = match current_task() {
+        Some(task) => task,
+        None => return -(SyscallErr::ESRCH as isize),
     };
+    let token = task.get_user_token();
+    if sv == 0 {
+        return -(SyscallErr::EFAULT as isize);
+    }
+
+    // Fault in the entire output array before acquiring resources, so a user
+    // copy failure cannot leave half of the fd transaction visible.
+    let mut sv_writer = match UserBufferWriter::new(
+        token,
+        sv as *mut u8,
+        core::mem::size_of::<[u32; 2]>(),
+    ) {
+        Ok(writer) => writer,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+
+    let (socket1, socket2): (Arc<dyn crate::net::Socket>, Arc<dyn crate::net::Socket>) =
+        match make_unix_socket_pair(is_nonblock, psock) {
+            Ok(sockets) => sockets,
+            Err(err) => return -(err as isize),
+        };
 
     let socket_file1 = Arc::new(SocketFile::new(socket1));
     let socket_file2 = Arc::new(SocketFile::new(socket2));
@@ -78,29 +95,41 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         vfs_flags.insert(FileFlags::O_NONBLOCK);
     }
 
-    let task = current_task().unwrap();
     let vf1 = vfs::File::new_without_open(socket_file1, vfs_flags, vfs::FileType::Socket);
     let vf2 = vfs::File::new_without_open(socket_file2, vfs_flags, vfs::FileType::Socket);
 
     let files_ref = task.process.files();
-    let fd1 = files_ref
-        .lock()
-        .alloc_fd(vf1, is_cloexec)
-        .map_err(|e| -(e as isize))
-        .unwrap();
-    let fd2 = files_ref
-        .lock()
-        .alloc_fd(vf2, is_cloexec)
-        .map_err(|e| -(e as isize))
-        .unwrap();
+    let (fd1, fd2) = {
+        let mut fd_table = files_ref.lock();
+        let fd1 = match fd_table.alloc_fd(vf1, is_cloexec) {
+            Ok(fd) => fd,
+            Err(err) => return -(err as isize),
+        };
+        let fd2 = match fd_table.alloc_fd(vf2, is_cloexec) {
+            Ok(fd) => fd,
+            Err(err) => {
+                let removed_fd = fd_table.drop_fd(fd1);
+                drop(fd_table);
+                drop(removed_fd);
+                return -(err as isize);
+            }
+        };
+        (fd1, fd2)
+    };
 
-    // 将两个 fd 写入用户空间的 sv 数组（sv[0] = fd1, sv[1] = fd2）
-    let token = task.get_user_token();
-    let fds = [fd1 as u32, fd2 as u32];
-    if UserSlice::new(sv as *const u32, 2)
-        .write_array_from(token, &fds)
-        .is_err()
-    {
+    // Write the two native-endian u32 file descriptors only after both fd
+    // allocations have succeeded.  UserBufferWriter was fully faulted in above.
+    let fd1_bytes = (fd1 as u32).to_ne_bytes();
+    let fd2_bytes = (fd2 as u32).to_ne_bytes();
+    let mut fd_bytes = [0_u8; core::mem::size_of::<[u32; 2]>()];
+    fd_bytes[..core::mem::size_of::<u32>()].copy_from_slice(&fd1_bytes);
+    fd_bytes[core::mem::size_of::<u32>()..].copy_from_slice(&fd2_bytes);
+    if !matches!(sv_writer.write_from(&fd_bytes), Ok(copied) if copied == fd_bytes.len()) {
+        let removed_fds = {
+            let mut fd_table = files_ref.lock();
+            (fd_table.drop_fd(fd1), fd_table.drop_fd(fd2))
+        };
+        drop(removed_fds);
         return -(SyscallErr::EFAULT as isize);
     }
 

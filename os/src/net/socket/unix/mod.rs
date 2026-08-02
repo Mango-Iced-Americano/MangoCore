@@ -110,11 +110,13 @@ pub fn create_unix_socket(
             Ok(socket)
         }
         PSOCK::SeqPacket => {
-            // SOCK_SEQPACKET 映射到 stream（带消息边界）
+            // The Unix stream implementation has the byte-pipe semantics Rust
+            // uses for its process error channel; MSG_EOR/message boundaries are
+            // not implemented yet.
             let socket: Arc<dyn Socket> = Arc::new(stream::UnixStreamSocket::new(is_nonblock));
             Ok(socket)
         }
-        _ => Err(SyscallErr::ESOCKTNOSUPPORT),
+        PSOCK::RDM | PSOCK::DCCP | PSOCK::Packet => Err(SyscallErr::ESOCKTNOSUPPORT),
     }
 }
 
@@ -124,9 +126,11 @@ pub fn create_unix_socket(
 pub fn make_unix_socket_pair(
     is_nonblock: bool,
     socket_type: PSOCK,
-) -> (Arc<dyn Socket>, Arc<dyn Socket>) {
+) -> Result<(Arc<dyn Socket>, Arc<dyn Socket>), SyscallErr> {
     match socket_type {
-        PSOCK::Stream => {
+        // Match create_unix_socket(): SeqPacket currently reuses the connected
+        // stream byte-pipe until Unix message-boundary support is available.
+        PSOCK::Stream | PSOCK::SeqPacket => {
             let (inner_a, inner_b) = stream::inner::Connected::new_pair(
                 stream::inner::UNIX_STREAM_DEFAULT_BUF_SIZE,
                 Arc::new(EventWaitQueue::new()),
@@ -142,16 +146,13 @@ pub fn make_unix_socket_pair(
                 inner_b,
                 is_nonblock,
             ));
-            (socket_a, socket_b)
+            Ok((socket_a, socket_b))
         }
         PSOCK::Datagram => {
             let (socket_a, socket_b) = datagram::UnixDatagramSocket::new_pair(is_nonblock);
-            (socket_a as Arc<dyn Socket>, socket_b as Arc<dyn Socket>)
+            Ok((socket_a as Arc<dyn Socket>, socket_b as Arc<dyn Socket>))
         }
-        _ => {
-            // 目前仅支持 SOCK_STREAM 的 socketpair，其他类型返回错误
-            panic!("Unsupported socket type for socketpair: {:?}", socket_type);
-        }
+        PSOCK::Raw | PSOCK::RDM | PSOCK::DCCP | PSOCK::Packet => Err(SyscallErr::ESOCKTNOSUPPORT),
     }
 }
 
