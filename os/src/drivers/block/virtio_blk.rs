@@ -13,7 +13,10 @@ use core::ptr::NonNull;
 use lazy_static::*;
 use spin::Mutex;
 use virtio_drivers::device::blk::VirtIOBlk;
-use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
+use virtio_drivers::transport::{
+    mmio::{MmioTransport, VirtIOHeader},
+    DeviceType, Transport,
+};
 use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
 use super::virtio_dma_pool;
@@ -154,6 +157,9 @@ impl VirtIOBlock {
         let transport = unsafe {
             MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?
         };
+        if transport.device_type() != DeviceType::Block {
+            return None;
+        }
         let blk = VirtIOBlk::<VirtioHal, MmioTransport<'static>>::new(transport).ok()?;
         Some(Self(Mutex::new(blk)))
     }
@@ -167,8 +173,12 @@ pub fn probe_from_device_manager(dm: &DeviceManager) -> Vec<Arc<dyn BlockDevice>
         .into_iter()
         .filter(|device| device.mmio_range(0).is_some())
         .collect();
-    virtio_devices
-        .sort_by_key(|device| device.mmio_range(0).map(|range| range.base).unwrap_or(usize::MAX));
+    virtio_devices.sort_by_key(|device| {
+        device
+            .mmio_range(0)
+            .map(|range| range.base)
+            .unwrap_or(usize::MAX)
+    });
 
     for dev_info in virtio_devices {
         let Some(range) = dev_info.mmio_range(0) else {
@@ -182,7 +192,10 @@ pub fn probe_from_device_manager(dm: &DeviceManager) -> Vec<Arc<dyn BlockDevice>
         if devices.is_empty() {
             virtio_dma_pool::dma_pool_init_once();
         }
-        println!("[kernel] discovered VirtIO block device (MMIO {:#x})", base_addr);
+        println!(
+            "[kernel] discovered VirtIO block device (MMIO {:#x})",
+            base_addr
+        );
         devices.push(Arc::new(device) as Arc<dyn BlockDevice>);
     }
 

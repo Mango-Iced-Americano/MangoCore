@@ -1,7 +1,12 @@
 use super::BlockDevice;
 use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
 use crate::drivers::block::{BlockDeviceDescriptor, BlockDeviceNode, BlockDeviceNumber};
-use alloc::{collections::{BTreeMap, BTreeSet}, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use lazy_static::*;
 use spin::Mutex;
 
@@ -33,7 +38,6 @@ impl BootBlockRegistry {
             numbers: BTreeSet::new(),
         }
     }
-
     pub fn validate_all(
         &self,
         descriptors: &[BlockDeviceDescriptor],
@@ -79,7 +83,6 @@ impl BootBlockRegistry {
     pub fn resolve(&self, name: &str) -> Option<Arc<dyn BlockDevice>> {
         self.devices.get(name).map(|device| device.device.clone())
     }
-
 }
 
 lazy_static! {
@@ -155,13 +158,13 @@ fn boot_descriptors() -> Vec<BlockDeviceDescriptor> {
         };
         for part in parts {
             let Some(number) = allocator.allocate(raw_device.node().number().major()) else {
-                println!("[mbr] no free minor for {}", raw_device.node().name().as_str());
+                println!(
+                    "[mbr] no free minor for {}",
+                    raw_device.node().name().as_str()
+                );
                 break;
             };
-            let name = partition_name(
-                raw_device.node().name().as_str(),
-                u32::from(part.partno),
-            );
+            let name = partition_name(raw_device.node().name().as_str(), u32::from(part.partno));
             let node = match BlockDeviceNode::new(&name, number) {
                 Ok(node) => node,
                 Err(_) => {
@@ -200,7 +203,10 @@ pub fn mount_boot_block_devices(config: &crate::bootargs::BootConfig) {
             match resolve_block_device(&config.root) {
                 Some(device) => {
                     if super::mount_block_fs(&root, &device, "sdcard", "root device").is_none() {
-                        println!("[initramfs] root device '{}' has no mountable filesystem", config.root);
+                        println!(
+                            "[initramfs] root device '{}' has no mountable filesystem",
+                            config.root
+                        );
                     }
                 }
                 None => println!("[initramfs] root device '{}' not found", config.root),
@@ -215,6 +221,12 @@ pub fn mount_boot_block_devices(config: &crate::bootargs::BootConfig) {
             }
             None => println!("[initramfs] no raw block device found"),
         }
+        let tools_device =
+            resolve_block_device("vdb1").or_else(|| crate::drivers::block::get_block_device(1));
+        if let Some(device) = tools_device {
+            if super::mount_block_fs(&root, &device, "tools", "tools disk").is_none() {
+                println!("[initramfs] tools disk mount failed");
+            }
+        }
     }
-
 }
