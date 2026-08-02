@@ -41,7 +41,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             }
         }) {
             WaitResult::Ready(n) => n,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else if let Some(wq) = file.inode.read_wait_queue() {
@@ -54,7 +54,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             }
         }) {
             WaitResult::Ready(n) => n,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {

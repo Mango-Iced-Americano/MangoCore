@@ -1227,6 +1227,7 @@ pub(crate) fn raise_sigxfsz() {
         {
             task.acquire_inner_lock().add_signal(Signals::SIGXFSZ);
         }
+        task.set_signal_pending();
         task.process.notify_signal_waiters();
     }
 }
@@ -1275,7 +1276,7 @@ pub(crate) fn splice_read_stream(
             }
             WaitResult::Interrupted => {
                 pass_pipe_reader_baton(file);
-                -(SyscallErr::ERESTART as isize)
+                crate::task::RestartKind::RestartSys.syscall_result()
             }
             WaitResult::TimedOut => {
                 pass_pipe_reader_baton(file);
@@ -1320,7 +1321,7 @@ pub(crate) fn splice_write_stream(
             }
             WaitResult::Interrupted => {
                 pass_pipe_writer_baton(file);
-                -(SyscallErr::ERESTART as isize)
+                crate::task::RestartKind::RestartSys.syscall_result()
             }
             WaitResult::TimedOut => {
                 pass_pipe_writer_baton(file);

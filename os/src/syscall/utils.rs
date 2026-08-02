@@ -22,7 +22,7 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                 suspend_current_and_run_next();
                 let task = current_task_ref().unwrap();
                 if has_actionable_signal(task) {
-                    return -(SyscallErr::ERESTART as isize);
+                    return crate::task::RestartKind::RestartSys.syscall_result();
                 } else {
                     discard_non_actionable_unblocked_signals(task);
                 }
@@ -48,11 +48,14 @@ pub fn wait_io_core_with_queue(
     if nonblock {
         return f();
     }
-    WaitQueue::wait_until_interruptible(wait_queue, || match f() {
+    match WaitQueue::wait_until_interruptible(wait_queue, || match f() {
         v if v == -(SyscallErr::EAGAIN as isize) => None,
         v => Some(v),
-    })
-    .unwrap_or_else(|e| e)
+    }) {
+        crate::task::WaitResult::Ready(value) => value,
+        crate::task::WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
+        crate::task::WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+    }
 }
 
 /// 网络 I/O 等待循环，EAGAIN 时挂入指定等待队列。
