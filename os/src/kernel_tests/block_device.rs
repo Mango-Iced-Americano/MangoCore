@@ -45,6 +45,59 @@ impl BlockDevice for MbrBlockDevice {
     }
 }
 
+struct GptBlockDevice {
+    blocks: [[u8; BLOCK_SZ]; 5],
+    size_bytes: u64,
+}
+
+impl BlockDevice for GptBlockDevice {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
+        let block = self.blocks.get(block_id).ok_or(BlockDeviceError::OutOfBounds)?;
+        if buf.len() != BLOCK_SZ {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
+        buf.copy_from_slice(block);
+        Ok(())
+    }
+
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> Result<(), BlockDeviceError> {
+        Ok(())
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        Some(self.size_bytes)
+    }
+}
+
+fn protective_mbr_gpt_device(header_signature: [u8; 8]) -> Arc<dyn BlockDevice> {
+    let mut blocks = [[0u8; BLOCK_SZ]; 5];
+    let block0 = &mut blocks[0];
+    block0[510] = 0x55;
+    block0[511] = 0xAA;
+    block0[446 + 4] = 0xEE;
+    block0[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+    block0[446 + 12..446 + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+
+    let header = &mut blocks[0][512..1024];
+    header[..8].copy_from_slice(&header_signature);
+    header[72..80].copy_from_slice(&2u64.to_le_bytes());
+    header[80..84].copy_from_slice(&128u32.to_le_bytes());
+    header[84..88].copy_from_slice(&128u32.to_le_bytes());
+
+    let entry = &mut blocks[0][1024..1024 + 128];
+    entry[..16].copy_from_slice(&[
+        0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47,
+        0x7d, 0xe4,
+    ]);
+    entry[32..40].copy_from_slice(&2048u64.to_le_bytes());
+    entry[40..48].copy_from_slice(&4095u64.to_le_bytes());
+
+    Arc::new(GptBlockDevice {
+        blocks,
+        size_bytes: (u64::from(u32::MAX) + 1) * 512,
+    })
+}
+
 struct SectorPatternBlockDevice;
 
 impl BlockDevice for SectorPatternBlockDevice {
@@ -122,6 +175,14 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "block_device::probe_mbr_rejects_out_of_range_partition",
             test_probe_mbr_rejects_out_of_range_partition,
+        ),
+        KernelTest::new(
+            "block_device::probe_mbr_uses_gpt_partitions",
+            test_probe_mbr_uses_gpt_partitions,
+        ),
+        KernelTest::new(
+            "block_device::probe_mbr_skips_protective_entry_without_gpt",
+            test_probe_mbr_skips_protective_entry_without_gpt,
         ),
         KernelTest::new(
             "block_device::partition_unaligned_start_reads_correct_offset",
@@ -224,6 +285,31 @@ fn test_probe_mbr_rejects_out_of_range_partition() -> Result<(), &'static str> {
     match probe_mbr(&device) {
         Ok(MbrProbe::Unsupported) => Ok(()),
         _ => Err("probe_mbr accepted a partition past the end of its disk"),
+    }
+}
+
+fn test_probe_mbr_uses_gpt_partitions() -> Result<(), &'static str> {
+    let device = protective_mbr_gpt_device(*b"EFI PART");
+
+    match probe_mbr(&device) {
+        Ok(MbrProbe::Partitions(parts)) if parts.len() == 1 => {
+            let partition = &parts[0];
+            if partition.partno == 1 && partition.start_lba == 2048 && partition.sectors == 2048 {
+                Ok(())
+            } else {
+                Err("probe_mbr did not publish the GPT partition bounds")
+            }
+        }
+        _ => Err("probe_mbr published the protective MBR instead of the GPT partition"),
+    }
+}
+
+fn test_probe_mbr_skips_protective_entry_without_gpt() -> Result<(), &'static str> {
+    let device = protective_mbr_gpt_device(*b"BAD PART");
+
+    match probe_mbr(&device) {
+        Ok(MbrProbe::Unsupported) => Ok(()),
+        _ => Err("probe_mbr published a protective MBR entry without a valid GPT header"),
     }
 }
 

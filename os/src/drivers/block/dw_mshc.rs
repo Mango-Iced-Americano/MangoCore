@@ -189,6 +189,14 @@ impl BlockDevice for DwMshc {
         let sectors = self.0.lock().card.capacity_sectors;
         sectors.checked_mul(512).map(|bytes| bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
     }
+
+    fn flush(&self) -> BlockDeviceResult {
+        Ok(())
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        true
+    }
 }
 
 pub(crate) fn ktests() -> Vec<crate::kernel_tests::runner::KernelTest> {

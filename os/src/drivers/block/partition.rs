@@ -1,6 +1,8 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use core::convert::{TryFrom, TryInto};
+
 use super::{validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult};
 use crate::hal::BLOCK_SZ;
 
@@ -10,6 +12,18 @@ const MBR_SIGNATURE_OFF: usize = 510;
 const MBR_PART_TABLE_OFF: usize = 446;
 const MBR_PART_ENTRY_SIZE: usize = 16;
 const MBR_MAX_PRIMARY: usize = 4;
+const GPT_HEADER_LBA: u64 = 1;
+const GPT_HEADER_SIZE: usize = SECTOR_SIZE as usize;
+const GPT_SIGNATURE: [u8; 8] = *b"EFI PART";
+const GPT_PARTITION_ARRAY_LBA_OFF: usize = 72;
+const GPT_ENTRY_COUNT_OFF: usize = 80;
+const GPT_ENTRY_SIZE_OFF: usize = 84;
+const GPT_ENTRY_TYPE_GUID_SIZE: usize = 16;
+const GPT_ENTRY_FIRST_LBA_OFF: usize = 32;
+const GPT_ENTRY_LAST_LBA_OFF: usize = 40;
+const GPT_MIN_ENTRY_SIZE: usize = 128;
+const GPT_MAX_ENTRY_SIZE: usize = 512;
+const GPT_MAX_ENTRIES: u32 = u8::MAX as u32;
 
 /// 从 MBR 分区表解析出的分区信息
 #[derive(Debug, Clone)]
@@ -27,6 +41,122 @@ pub enum MbrProbe {
     Partitions(Vec<MbrPartition>),
 }
 
+fn read_device_bytes(
+    dev: &Arc<dyn BlockDevice>,
+    offset: u64,
+    len: usize,
+) -> BlockDeviceResult<Vec<u8>> {
+    let len_u64 = u64::try_from(len).map_err(|_| BlockDeviceError::OutOfBounds)?;
+    let end = offset
+        .checked_add(len_u64)
+        .ok_or(BlockDeviceError::OutOfBounds)?;
+    let mut bytes = alloc::vec![0u8; len];
+    let mut block = alloc::vec![0u8; BLOCK_SZ];
+    let mut copied = 0usize;
+    let mut current_offset = offset;
+
+    while current_offset < end {
+        let block_id = usize::try_from(current_offset / BLOCK_SZ as u64)
+            .map_err(|_| BlockDeviceError::OutOfBounds)?;
+        let block_offset = usize::try_from(current_offset % BLOCK_SZ as u64)
+            .map_err(|_| BlockDeviceError::OutOfBounds)?;
+        dev.read_block(block_id, &mut block)?;
+
+        let available = BLOCK_SZ - block_offset;
+        let remaining = len - copied;
+        let copy_len = available.min(remaining);
+        bytes[copied..copied + copy_len]
+            .copy_from_slice(&block[block_offset..block_offset + copy_len]);
+        copied += copy_len;
+        current_offset = current_offset
+            .checked_add(u64::try_from(copy_len).map_err(|_| BlockDeviceError::OutOfBounds)?)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
+    }
+
+    Ok(bytes)
+}
+
+fn parse_gpt_partitions(
+    dev: &Arc<dyn BlockDevice>,
+    disk_sectors: Option<u64>,
+) -> BlockDeviceResult<Option<Vec<MbrPartition>>> {
+    let header_offset = GPT_HEADER_LBA * SECTOR_SIZE;
+    let header = read_device_bytes(dev, header_offset, GPT_HEADER_SIZE)?;
+    if header[..GPT_SIGNATURE.len()] != GPT_SIGNATURE {
+        return Ok(None);
+    }
+
+    let array_lba = u64::from_le_bytes(
+        header[GPT_PARTITION_ARRAY_LBA_OFF..GPT_PARTITION_ARRAY_LBA_OFF + 8]
+            .try_into()
+            .map_err(|_| BlockDeviceError::DeviceError)?,
+    );
+    let entry_count = u32::from_le_bytes(
+        header[GPT_ENTRY_COUNT_OFF..GPT_ENTRY_COUNT_OFF + 4]
+            .try_into()
+            .map_err(|_| BlockDeviceError::DeviceError)?,
+    );
+    let entry_size = u32::from_le_bytes(
+        header[GPT_ENTRY_SIZE_OFF..GPT_ENTRY_SIZE_OFF + 4]
+            .try_into()
+            .map_err(|_| BlockDeviceError::DeviceError)?,
+    );
+    let entry_size = usize::try_from(entry_size).map_err(|_| BlockDeviceError::OutOfBounds)?;
+    if entry_count == 0
+        || entry_count > GPT_MAX_ENTRIES
+        || !(GPT_MIN_ENTRY_SIZE..=GPT_MAX_ENTRY_SIZE).contains(&entry_size)
+    {
+        return Ok(Some(Vec::new()));
+    }
+
+    let array_offset = array_lba
+        .checked_mul(SECTOR_SIZE)
+        .ok_or(BlockDeviceError::OutOfBounds)?;
+    let array_len = usize::try_from(entry_count)
+        .ok()
+        .and_then(|count| count.checked_mul(entry_size))
+        .ok_or(BlockDeviceError::OutOfBounds)?;
+    let entries = read_device_bytes(dev, array_offset, array_len)?;
+    let mut parts = Vec::new();
+
+    for index in 0..usize::try_from(entry_count).map_err(|_| BlockDeviceError::OutOfBounds)? {
+        let entry_offset = index * entry_size;
+        let entry = &entries[entry_offset..entry_offset + entry_size];
+        if entry[..GPT_ENTRY_TYPE_GUID_SIZE].iter().all(|byte| *byte == 0) {
+            continue;
+        }
+
+        let first_lba = u64::from_le_bytes(
+            entry[GPT_ENTRY_FIRST_LBA_OFF..GPT_ENTRY_FIRST_LBA_OFF + 8]
+                .try_into()
+                .map_err(|_| BlockDeviceError::DeviceError)?,
+        );
+        let last_lba = u64::from_le_bytes(
+            entry[GPT_ENTRY_LAST_LBA_OFF..GPT_ENTRY_LAST_LBA_OFF + 8]
+                .try_into()
+                .map_err(|_| BlockDeviceError::DeviceError)?,
+        );
+        let Some(sectors) = last_lba
+            .checked_sub(first_lba)
+            .and_then(|length| length.checked_add(1))
+        else {
+            continue;
+        };
+        if disk_sectors.is_some_and(|total| last_lba >= total) {
+            continue;
+        }
+
+        parts.push(MbrPartition {
+            partno: u8::try_from(index + 1).map_err(|_| BlockDeviceError::OutOfBounds)?,
+            type_code: 0xEE,
+            start_lba: first_lba,
+            sectors,
+        });
+    }
+
+    Ok(Some(parts))
+}
+
 /// 解析 MBR 分区表。
 /// 读取父设备的 block 0，检查 0x55AA 签名，解析 4 个主分区条目。
 pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
@@ -38,6 +168,15 @@ pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
     }
 
     let disk_sectors = dev.size_bytes().map(|b| b / SECTOR_SIZE);
+    let has_protective_mbr = (0..MBR_MAX_PRIMARY).any(|i| {
+        buf[MBR_PART_TABLE_OFF + i * MBR_PART_ENTRY_SIZE + 4] == 0xEE
+    });
+    if has_protective_mbr {
+        if let Some(parts) = parse_gpt_partitions(dev, disk_sectors)? {
+            return Ok(MbrProbe::Partitions(parts));
+        }
+    }
+
     let mut saw_nonempty = false;
     let mut parts = Vec::new();
 
@@ -56,7 +195,7 @@ pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
         saw_nonempty = true;
 
         // 跳过扩展分区
-        if type_code == 0x05 || type_code == 0x0F || type_code == 0x85 {
+        if type_code == 0x05 || type_code == 0x0F || type_code == 0x85 || type_code == 0xEE {
             println!(
                 "[mbr] skip partition {}: extended type {:#x} (unsupported)",
                 i + 1,
