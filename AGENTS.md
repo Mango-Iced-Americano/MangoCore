@@ -261,6 +261,10 @@ owner 只是迁移中状态，不得据此声称线程组 rlimit 语义已经完
 B73 将普通 rlimit 的唯一 owner 迁入 PCB：线程 clone 共享，fork 在 owner 锁内复制完整快照，
 exec 保留；消费者必须先复制标量并释放 rlimit 锁，再进入 task、VM、signal 或 FS 路径。CPU
 和 NOFILE 分别等待组级计时与 `CLONE_FILES` 生命周期解耦，不得把这两个例外伪装成已完成。
+B74 将 CPU limit 与线程组累计一起迁入 PCB：TCB 只保留最多 1ms 的本地记账尾数，释放
+`task.inner` 后才原子冲刷；trap/schedule-out 热路径只发布到期提示，真正的 rlimit 判定和
+进程共享信号投递必须在用户返回安全点完成。重设限额不得清除并发发布的 pending，更新下一
+阈值后必须复查累计值；NOFILE 仍是唯一待解耦的 owner 例外。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

@@ -33,7 +33,7 @@ use crate::mm::{
 };
 use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
-use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
+use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -45,6 +45,9 @@ use spin::{Mutex, MutexGuard};
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
 static ACTIVE_SECCOMP_TASKS: AtomicUsize = AtomicUsize::new(0);
+/// 线程本地累计到该粒度后才冲刷 PCB，避免 syscall 密集型多线程在同一
+/// `runtime_us` cache line 上进行每次 trap 的原子争用。
+const GROUP_CPU_ACCOUNT_BATCH_US: usize = 1_000;
 
 #[inline(always)]
 pub fn any_seccomp_enabled() -> bool {
@@ -69,14 +72,6 @@ fn default_groups() -> Arc<Vec<u32>> {
     let mut groups = Vec::new();
     groups.push(0);
     Arc::new(groups)
-}
-
-fn cpu_limit_to_us(limit_secs: usize) -> Option<usize> {
-    if limit_secs == usize::MAX {
-        None
-    } else {
-        Some(limit_secs.saturating_mul(USEC_PER_SEC))
-    }
 }
 
 #[derive(Clone)]
@@ -300,10 +295,8 @@ pub struct TaskControlBlockInner {
     /// ABI-visible only; it does not affect actual I/O scheduling.
     pub ioprio_class: usize,
     pub ioprio_prio: usize,
-    /// RLIMIT_CPU 兼容字段。单位为秒，usize::MAX 表示 unlimited。
-    pub cpu_limit_cur: usize,
-    pub cpu_limit_max: usize,
-    pub cpu_limit_sigxcpu_sent: bool,
+    /// 尚未批量冲刷到 PCB 的本线程 CPU 微秒数；只在 `task.inner` 下访问。
+    group_cpu_unflushed_us: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
@@ -589,6 +582,9 @@ impl TaskControlBlockInner {
         }
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
+        self.group_cpu_unflushed_us = self
+            .group_cpu_unflushed_us
+            .saturating_add(diff.to_us());
         self.sched_vruntime = self
             .sched_vruntime
             .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
@@ -596,18 +592,20 @@ impl TaskControlBlockInner {
         self.update_itimer_virtual_if_exists(diff);
         // 更新性能分析定时器
         self.update_itimer_prof_if_exists(diff);
-        self.enforce_cpu_rlimit();
     }
     /// 在离开陷阱时更新进程时间
-    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) {
+    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) -> usize {
         let now = TimeVal::now();
         self.account_system_time_until(now);
         self.clock.last_enter_u_mode = now;
+        self.take_group_cpu_delta(false)
     }
 
     /// 任务在内核态主动让出 CPU 前，先结算本次内核态运行时间。
-    pub fn update_process_times_schedule_out(&mut self) {
+    pub fn update_process_times_schedule_out(&mut self) -> usize {
         self.account_system_time_until(TimeVal::now());
+        // block/exit 后可能很久不再返回用户态，必须在切走前冲刷全部尾数。
+        self.take_group_cpu_delta(true)
     }
 
     /// 任务被重新调度进来后，重置内核态计时起点，避免把离 CPU 时间算入 stime。
@@ -621,40 +619,19 @@ impl TaskControlBlockInner {
             return;
         }
         self.rusage.ru_stime = self.rusage.ru_stime + diff;
+        self.group_cpu_unflushed_us = self
+            .group_cpu_unflushed_us
+            .saturating_add(diff.to_us());
         self.update_itimer_prof_if_exists(diff);
-        self.enforce_cpu_rlimit();
         self.clock.last_enter_s_mode = now;
     }
 
-    fn enforce_cpu_rlimit(&mut self) {
-        if self.cpu_limit_cur == usize::MAX && self.cpu_limit_max == usize::MAX {
-            return;
+    /// 领取准备冲刷到线程组计数器的 CPU 时间。
+    fn take_group_cpu_delta(&mut self, force: bool) -> usize {
+        if !force && self.group_cpu_unflushed_us < GROUP_CPU_ACCOUNT_BATCH_US {
+            return 0;
         }
-        let cpu_us = self
-            .rusage
-            .ru_utime
-            .to_us()
-            .saturating_add(self.rusage.ru_stime.to_us());
-        if let Some(hard_us) = cpu_limit_to_us(self.cpu_limit_max) {
-            if cpu_us >= hard_us {
-                log::warn!(
-                    "[sigkill_diag] cpu rlimit exceeded cpu_us={} hard_us={}",
-                    cpu_us,
-                    hard_us
-                );
-                self.add_signal(Signals::SIGKILL);
-                return;
-            }
-        }
-        if self.cpu_limit_sigxcpu_sent {
-            return;
-        }
-        if let Some(soft_us) = cpu_limit_to_us(self.cpu_limit_cur) {
-            if cpu_us >= soft_us {
-                self.cpu_limit_sigxcpu_sent = true;
-                self.add_signal(Signals::SIGXCPU);
-            }
-        }
+        core::mem::take(&mut self.group_cpu_unflushed_us)
     }
     /// 更新实时定时器
     pub fn update_itimer_real_if_exists(&mut self, diff: TimeVal) {
@@ -1133,20 +1110,23 @@ impl TaskControlBlock {
     /// 那些属于 ProcessControlBlock 的退出收尾。返回 true 仅表示本线程在
     /// 完成全部清理后消费了最后一个 live token，应由调用者执行进程级收尾。
     pub(crate) fn exit_thread_resources(&self, exit_code: u32) -> bool {
-        let clear_child_tid = {
+        let (clear_child_tid, cpu_delta) = {
             let mut inner = self.acquire_inner_lock();
             if self.is_zombie() {
                 return false;
             }
-            inner.update_process_times_schedule_out();
+            let cpu_delta = inner.update_process_times_schedule_out();
             if !self.mark_zombie("exit") {
                 return false;
             }
             let clear_child_tid = inner.clear_child_tid;
             inner.clear_child_tid = 0;
             inner.robust_list = RobustList::default();
-            clear_child_tid
+            (clear_child_tid, cpu_delta)
         };
+        // 退出会永久离开该 TCB，强制冲刷最后一段 CPU 时间；这里只触碰
+        // PCB 原子计数器，不把 task.inner 带入进程信号或 rlimit 锁。
+        self.process.account_cpu_runtime(cpu_delta);
 
         if clear_child_tid != 0 {
             match self.write_clear_child_tid_word(clear_child_tid) {
@@ -1371,9 +1351,7 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
-                cpu_limit_cur: usize::MAX,
-                cpu_limit_max: usize::MAX,
-                cpu_limit_sigxcpu_sent: false,
+                group_cpu_unflushed_us: 0,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1501,9 +1479,7 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
-                cpu_limit_cur: usize::MAX,
-                cpu_limit_max: usize::MAX,
-                cpu_limit_sigxcpu_sent: false,
+                group_cpu_unflushed_us: 0,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -2093,9 +2069,7 @@ impl TaskControlBlock {
                 sched_period: child_sched_period,
                 ioprio_class: parent_inner.ioprio_class,
                 ioprio_prio: parent_inner.ioprio_prio,
-                cpu_limit_cur: parent_inner.cpu_limit_cur,
-                cpu_limit_max: parent_inner.cpu_limit_max,
-                cpu_limit_sigxcpu_sent: false,
+                group_cpu_unflushed_us: 0,
                 personality: parent_inner.personality,
                 pdeath_signal: 0,
                 dumpable: parent_inner.dumpable,

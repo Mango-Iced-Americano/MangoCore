@@ -883,6 +883,34 @@ CPU 暂时仍由 TCB 持有，因为将字段移入 PCB 而不同时实现线程
 组限额语义；NOFILE 暂时仍由 fd table 持有，因为它必须先与 `CLONE_FILES` 的跨进程共享生命
 周期解耦。这两个例外必须在独立节点中处理，不能把 B73 外推成全部 rlimit 已完成。
 
+### 3.19 B74 线程组 CPU 限额的热路径与安全点
+
+`RLIMIT_CPU` 现在和其它进程限制一样由 PCB 的 rlimit owner 持有，但运行时间不能在每次
+trap 进出时获取这个 mutex。每个 TCB 先在 `task.inner` 下累计最多 1ms 的本地尾数，离开
+trap、切出或退出时领取增量；调用方释放 `task.inner` 后，才以原子加法冲刷到 PCB：
+
+```text
+task.inner：结算 user/system 时间 + 领取本地批次
+  -> unlock task.inner
+  -> PCB 原子 runtime 累加 + 比较已发布阈值
+  -> 到期时只发布 expiry_pending
+  -> 用户返回安全点领取 pending
+  -> rlimits lock：hard/soft 判定 + soft 推进 1 秒 + 发布下一阈值
+  -> unlock rlimits
+  -> signal lock：加入进程共享 SIGKILL/SIGXCPU
+```
+
+热路径不获取 rlimit/signal 锁，也不直接投递信号；慢路径只在 trap frame 完整且业务锁已释放的
+用户返回安全点执行。hard limit 优先于 soft limit；soft 命中后按 Linux 语义增加一秒，使持续
+超限的进程每秒再次收到 `SIGXCPU`。线程 clone 共享 PCB 计数，普通 fork 复制限制但建立从零
+开始的新计数，exec 复用并保留原 PCB。
+
+并发修改限额时，`rearm_cpu_limit()` 只能把到期标志从 false 发布为 true，不能无条件清零；
+否则会覆盖另一 CPU 在运行时间越线后刚发布的事件。安全点更新下一阈值后还要复查累计值，闭合
+“处理旧阈值期间另一 CPU 已跨过新阈值”的窗口。由于本地批量策略，动态触发最多可能滞后约
+1ms × live-thread 数；退出和 schedule-out 会强制冲刷尾数。这个上界和精确多线程越限交错
+尚未由专项用例动态证明，不能把普通 8 核运行外推为该证明。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

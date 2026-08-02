@@ -1806,13 +1806,6 @@ fn current_rlimit_for(task: &TaskControlBlock, resource: Resource) -> Option<RLi
     };
 
     let limit = match resource {
-        Resource::CPU => {
-            let inner = task.acquire_inner_lock();
-            RLimit {
-                rlim_cur: inner.cpu_limit_cur,
-                rlim_max: inner.cpu_limit_max,
-            }
-        }
         Resource::NOFILE => {
             let files_ref = task.process.files();
             let files = files_ref.lock();
@@ -1827,7 +1820,8 @@ fn current_rlimit_for(task: &TaskControlBlock, resource: Resource) -> Option<RLi
         | Resource::LOCKS
         | Resource::MSGQUEUE
         | Resource::RTTIME => unlimited,
-        Resource::FSIZE
+        Resource::CPU
+        | Resource::FSIZE
         | Resource::STACK
         | Resource::CORE
         | Resource::NPROC
@@ -1837,6 +1831,7 @@ fn current_rlimit_for(task: &TaskControlBlock, resource: Resource) -> Option<RLi
         | Resource::RTPRIO => {
             let limits = task.process.rlimits();
             let pair = match resource {
+                Resource::CPU => limits.cpu,
                 Resource::FSIZE => limits.fsize,
                 Resource::STACK => limits.stack,
                 Resource::CORE => limits.core,
@@ -1873,8 +1868,8 @@ enum RLimitNotice {
 
 /// 在资源的当前 owner 锁内完成旧值快照、权限复核和新值提交。
 ///
-/// 普通限制属于 PCB；CPU 和 NOFILE 仍是明确的迁移例外。三个 owner 互不嵌套，
-/// 且任何路径都不得退回“读旧值和写新值分成两个锁周期”的形式。
+/// 普通限制与 CPU 限额属于 PCB；NOFILE 仍是 fd table 迁移例外。两个 owner
+/// 互不嵌套，且任何路径都不得退回“读旧值和写新值分成两个锁周期”的形式。
 fn update_rlimit(
     task: &TaskControlBlock,
     resource: Resource,
@@ -1894,24 +1889,6 @@ fn update_rlimit(
         // soft/hard 必须在同一个 fd-table 临界区发布，读者才能看到完整 pair。
         files.set_soft_limit(requested.rlim_cur);
         files.set_hard_limit(requested.rlim_max);
-        return Ok(RLimitUpdate {
-            previous,
-            notice: RLimitNotice::None,
-        });
-    }
-
-    if resource == Resource::CPU {
-        let mut inner = task.acquire_inner_lock();
-        let previous = RLimit {
-            rlim_cur: inner.cpu_limit_cur,
-            rlim_max: inner.cpu_limit_max,
-        };
-        if requested.rlim_max > previous.rlim_max && !can_raise_hard_limit {
-            return Err(EPERM);
-        }
-        inner.cpu_limit_cur = requested.rlim_cur;
-        inner.cpu_limit_max = requested.rlim_max;
-        inner.cpu_limit_sigxcpu_sent = false;
         return Ok(RLimitUpdate {
             previous,
             notice: RLimitNotice::None,
@@ -1946,6 +1923,7 @@ fn update_rlimit(
 
     let mut limits = task.process.rlimits();
     let slot = match resource {
+        Resource::CPU => &mut limits.cpu,
         Resource::FSIZE => &mut limits.fsize,
         Resource::STACK => &mut limits.stack,
         Resource::CORE => &mut limits.core,
@@ -1961,6 +1939,11 @@ fn update_rlimit(
         return Err(EPERM);
     }
     *slot = LimitPair::new(requested.rlim_cur, requested.rlim_max);
+    if resource == Resource::CPU {
+        // pair 仍在 owner 锁内时发布新的无锁阈值；运行时间并发增加时，
+        // rearm 与记账两侧的复查保证降低限额不会漏掉已经发生的到期。
+        task.process.rearm_cpu_limit(*slot);
+    }
     let notice = if resource == Resource::STACK {
         RLimitNotice::StoredOnly
     } else {

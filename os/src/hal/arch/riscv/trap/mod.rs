@@ -139,7 +139,7 @@ pub fn trap_handler() -> ! {
         // The trap context may be replaced by execve or restored by sigreturn,
         // so fetch it again after syscall returns.
         let task = current_trap_task();
-        {
+        let cpu_delta = {
             let mut inner = task.acquire_inner_lock();
             let cx = inner.trap_context_mut();
             // sigreturn(139) already restored the full trap context (including a0).
@@ -147,8 +147,9 @@ pub fn trap_handler() -> ! {
                 cx.gp.a0 = result as usize;
             }
             inner.refresh_real_timer();
-            inner.update_process_times_leave_trap(scause.cause());
-        }
+            inner.update_process_times_leave_trap(scause.cause())
+        };
+        task.process.account_cpu_runtime(cpu_delta);
         if _trap_start != 0 {
             let _trap_ticks = crate::task::perf::perf_time_now().wrapping_sub(_trap_start);
             crate::task::perf::record_trap_cost_ticks(_trap_ticks);
@@ -245,7 +246,9 @@ pub fn trap_handler() -> ! {
         let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.refresh_real_timer();
-        inner.update_process_times_leave_trap(scause.cause());
+        let cpu_delta = inner.update_process_times_leave_trap(scause.cause());
+        drop(inner);
+        task.process.account_cpu_runtime(cpu_delta);
     }
     trap_return();
 }

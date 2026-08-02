@@ -93,6 +93,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP sigtimedwait 锁外回复 | 2026-08-02 | GPT/Codex, DeepSeek | Linux signal dequeue/copyout 对照、WaitQueue 条件锁审查与双架构 8 核定向 LTP | pending signal 锁内唯一领取、syscall 栈持有、等待退出后 copyout；双架构 glibc 各 11 TPASS，登记窗口竞态拆为后续节点 |
 | SMP prlimit 成对事务 | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 `prlimit64` 顺序对照、owner 锁审查与双架构 8 核 rlimit LTP | copyin→锁内旧值快照/权限复核/pair 提交→锁外 copyout；musl/glibc 各 9/9，进程级 owner 留待后续 |
 | SMP 进程级 rlimit owner | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 `signal_struct::rlim`/fork/prlimit 对照、共享域与锁序审查、双架构 8 核 rlimit LTP | 八项普通限制迁入 PCB，thread clone 共享、fork 快照、exec 保留；CPU/NOFILE 明确保留后续 |
+| SMP 线程组 CPU 限额 | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 process CPU timer 对照、热/慢路径竞态证明、双架构 8 核 rlimit LTP 与初赛 | PCB 原子组累计 + 1ms TCB 批次，安全点产生共享 SIGXCPU/SIGKILL；focused 各 9/9，初赛基线不退化 |
 
 ## 4. 详细使用场景
 
@@ -1287,6 +1288,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b71-sigtimedwait-wakeup-summary.md` | SMP sigtimedwait 登记窗口闭合 | 记录 Running/Blocking 丢唤醒窗口、waited-signal 最终谓词、ignored 清理边界、DeepSeek 结论校准及双架构 8 核冻结证据 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b72-prlimit-summary.md` | SMP prlimit 成对事务 | 记录 Linux 式 copyin/commit/copyout 顺序、soft/hard 单临界区发布、DeepSeek 原始日志复核及 owner 迁移边界 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b73-process-rlimit-summary.md` | SMP 进程级 rlimit owner | 记录 PCB 共享域、thread/fork/exec 生命周期、锁序边界、双架构 8 核冻结验证及 CPU/NOFILE 未完成项 |
+| `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b74-group-cpu-limit-summary.md` | SMP 线程组 CPU 限额 | 记录原子累计/安全点协议、阈值并发窗口、双架构 8 核 focused 与初赛冻结证据及专项交错 NOT RUN 边界 |
 
 ## 9. 交互记录与留痕方式
 

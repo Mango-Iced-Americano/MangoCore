@@ -112,6 +112,24 @@ pub fn try_yield() {
         suspend_current_and_run_next()
     }
 }
+
+/// 结算当前任务的内核态时间，并返回切换上下文。
+///
+/// 线程组 CPU 增量在释放 `task.inner` 后才冲刷到 PCB；当前实现只触碰原子
+/// 计数器，但保持这个顺序可防止未来慢路径意外形成 `task -> process` 锁边。
+fn prepare_current_switch(task: &Arc<TaskControlBlock>) -> *mut TaskContext {
+    let mut inner = task.acquire_inner_lock();
+    let task_cx_ptr = &mut inner.task_cx as *mut TaskContext;
+    let cpu_delta = inner.update_process_times_schedule_out();
+    task.sched_vruntime_hint.store(
+        inner.sched_vruntime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    drop(inner);
+    task.process.account_cpu_runtime(cpu_delta);
+    task_cx_ptr
+}
+
 /// 将当前任务切回 idle，由 idle 在切栈完成后交还 ready queue。
 ///
 /// # Locking
@@ -122,16 +140,7 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = current_task().unwrap();
 
-    // ---- hold current PCB lock
-    let mut task_inner = task.acquire_inner_lock();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.update_process_times_schedule_out();
-    task.sched_vruntime_hint.store(
-        task_inner.sched_vruntime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    drop(task_inner);
-    // ---- release current PCB lock
+    let task_cx_ptr = prepare_current_switch(&task);
 
     // jump to scheduling cycle
     schedule(task_cx_ptr);
@@ -147,16 +156,7 @@ pub(crate) fn block_current_and_run_next() {
     // There must be an application running.
     let task = current_task().unwrap();
 
-    // ---- hold current PCB lock
-    let mut task_inner = task.acquire_inner_lock();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.update_process_times_schedule_out();
-    task.sched_vruntime_hint.store(
-        task_inner.sched_vruntime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    drop(task_inner);
-    // ---- release current PCB lock
+    let task_cx_ptr = prepare_current_switch(&task);
 
     // push to interruptible queue of scheduler, so that it won't be scheduled.
     sleep_interruptible(task);
@@ -177,14 +177,7 @@ pub(crate) fn block_current_and_run_next_checked(
 ) {
     let task = current_task().unwrap();
 
-    let mut task_inner = task.acquire_inner_lock();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.update_process_times_schedule_out();
-    task.sched_vruntime_hint.store(
-        task_inner.sched_vruntime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    drop(task_inner);
+    let task_cx_ptr = prepare_current_switch(&task);
 
     sleep_interruptible(task.clone());
     if !should_block(&task) {
@@ -203,18 +196,7 @@ pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     // There must be an application running.
     let task = current_task().unwrap();
 
-    // ---- hold current PCB lock
-    let mut task_inner = task.acquire_inner_lock();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-
-    task_inner.update_process_times_schedule_out();
-    task.sched_vruntime_hint.store(
-        task_inner.sched_vruntime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-
-    drop(task_inner);
-    // ---- release current PCB lock
+    let task_cx_ptr = prepare_current_switch(&task);
 
     // push to interruptible queue of scheduler, so that it won't be scheduled.
     sleep_interruptible(task);
@@ -235,14 +217,7 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 ) {
     let task = current_task().unwrap();
 
-    let mut task_inner = task.acquire_inner_lock();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.update_process_times_schedule_out();
-    task.sched_vruntime_hint.store(
-        task_inner.sched_vruntime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    drop(task_inner);
+    let task_cx_ptr = prepare_current_switch(&task);
 
     sleep_interruptible(task.clone());
     if !should_block(&task) {

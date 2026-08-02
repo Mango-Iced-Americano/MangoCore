@@ -679,6 +679,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   limit 后进入 VM、signal、scheduler 或文件路径，不新增嵌套锁边。双架构 8 核 build 与
   musl/glibc focused rlimit 回归均通过；CPU 的线程组计时和 NOFILE 与 `CLONE_FILES` 的解耦仍
   属于后续节点，精确多线程即时共享交错为 NOT RUN；
+- B74 将 `RLIMIT_CPU` 迁入同一个 PCB owner，并以每线程 1ms 本地批次向 PCB 原子运行时间
+  累计。trap/schedule-out 热路径只发布到期提示，用户返回安全点再判定 hard/soft、推进 soft
+  一秒并加入进程共享信号；fork 新建计数，thread clone/exec 共享或保留原计数。双架构 8 核
+  build、每套 libc 9/9 rlimit focused 和初赛非回归均通过，初赛保持 RV64 312/314、LA64
+  308/314；精确双线程合计越限、批量尾数上界和信号交错仍为 NOT RUN，进程 CPU 时间查询分项
+  及 NOFILE 生命周期留待后续；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

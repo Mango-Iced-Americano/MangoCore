@@ -955,6 +955,11 @@
   对 rlimit 这类线程组状态，应明确验证 thread clone 共享、fork 得到锁内一致快照、exec 保留；
   消费路径只复制所需标量并释放 owner 锁，再进入 task、VM、signal 或 FS 的下一层锁。若某项
   限制还依赖尚未实现的组级计数或特殊共享对象，应明确保留为例外，而不是只迁字段伪造语义。
+- **高频计数与低频策略分层**: trap/调度热路径使用线程本地批次和 PCB 原子累计，只发布
+  monotonic pending；修改 soft/hard pair、推进阈值和生成信号放到安全点慢路径。writer 重设
+  阈值时不能无条件清 pending，否则会覆盖并发越线事件；慢路径发布下一阈值后还要复查累计值，
+  闭合“处理旧阈值期间跨过新阈值”的窗口。批量降低争用的同时必须明确最大观测滞后，并在
+  schedule-out/exit 强制冲刷尾数。
 - **相关文件**: `os/src/syscall/process/lifecycle.rs`,
   `os/src/syscall/process/time.rs`, `os/src/syscall/process/ids.rs`,
   `os/src/task/process.rs`, `docs/01_architecture/lock-order.md`

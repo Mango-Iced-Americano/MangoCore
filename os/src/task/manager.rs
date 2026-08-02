@@ -26,7 +26,7 @@ use crate::timer::{TimeSpec, TimeVal};
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     discard_non_actionable_unblocked_signals, has_actionable_signal,
-    signal::{has_waited_signal, SigInfo, Signals},
+    signal::{has_waited_signal, queue_kernel_process_signal, SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
 use super::task::{RemoteAffinityRequest, RemoteAffinityState};
@@ -2357,7 +2357,8 @@ pub fn run_deferred_timer_work() -> bool {
 /// IRQ-off，因而消费后到真正切换前不会有本地 handler 插入并丢失新请求。
 pub fn run_task_safe_point() {
     let irq_was_enabled = crate::hal::local_irq_save();
-    let stop = current_task().map(|task| {
+    let task = current_task();
+    let stop = task.as_ref().map(|task| {
         (
             task.process.group_exit_code(),
             task.process.thread_must_exit(task.gettid()),
@@ -2371,6 +2372,13 @@ pub fn run_task_safe_point() {
     if matches!(stop, Some((None, true))) {
         super::exit_current_and_run_next(Signals::SIGKILL.to_signum().unwrap() as u32);
     }
+    if let Some(task) = task.as_ref() {
+        if let Some(signal) = task.process.take_cpu_limit_signal() {
+            let _ = queue_kernel_process_signal(&task.process, signal);
+        }
+    }
+    // 后续可能 context switch；不能把 current 的 Arc 带过 schedule。
+    drop(task);
     let timer_resched = run_deferred_timer_work();
     let ipi_resched = crate::smp::take_reschedule_request();
     if timer_resched || ipi_resched {

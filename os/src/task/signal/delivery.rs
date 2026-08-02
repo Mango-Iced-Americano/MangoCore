@@ -114,6 +114,21 @@ pub fn send_process_signal_to_current_task(process: &ProcessControlBlock, signal
     true
 }
 
+/// 把内核生成的信号加入进程共享 pending 队列。
+///
+/// 调用方必须确认当前线程即将执行 signal safe point，因此这里不扫描线程组、
+/// 不触发远程唤醒；RLIMIT_CPU 使用该路径避免把内核事件伪装成 SI_USER。
+pub(crate) fn queue_kernel_process_signal(
+    process: &ProcessControlBlock,
+    signal: Signals,
+) -> bool {
+    let Ok(pending) = PendingSignal::from_signal(signal, SigInfo::SI_KERNEL as usize) else {
+        return false;
+    };
+    process.enqueue_process_signal(pending);
+    true
+}
+
 /// 向指定线程投递 `tgkill` 风格的线程私有信号。
 pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> Result<(), isize> {
     if signal.is_empty() {

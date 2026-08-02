@@ -24,6 +24,7 @@ use crate::config::{SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
 use crate::signal_type;
+use crate::timer::USEC_PER_SEC;
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -64,10 +65,12 @@ impl LimitPair {
 /// 线程组共享的资源限制。
 ///
 /// Linux 把 rlimit 放在线程组共享状态中；MangoCore 对应放在 PCB，使同一
-/// 进程的所有 TCB 观察同一个 owner。CPU 和 NOFILE 暂不在本结构内：前者
-/// 仍依赖 per-thread accounting，后者仍与 fd table 耦合，分别留给后续节点。
+/// 进程的所有 TCB 观察同一个 owner。NOFILE 暂不在本结构内，因为它仍与
+/// fd table 及 `CLONE_FILES` 的生命周期耦合。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProcessLimits {
+    /// 整个线程组可消耗的 CPU 秒数。
+    pub(crate) cpu: LimitPair,
     /// 普通文件可增长到的最大字节数。
     pub(crate) fsize: LimitPair,
     /// 用户栈限制；当前只保存 ABI 状态。
@@ -89,6 +92,7 @@ pub(crate) struct ProcessLimits {
 impl Default for ProcessLimits {
     fn default() -> Self {
         Self {
+            cpu: LimitPair::new(usize::MAX, usize::MAX),
             fsize: LimitPair::new(usize::MAX, usize::MAX),
             stack: LimitPair::new(USER_STACK_SIZE, USER_STACK_SIZE),
             core: LimitPair::new(0, usize::MAX),
@@ -97,6 +101,41 @@ impl Default for ProcessLimits {
             sigpending: LimitPair::new(usize::MAX, usize::MAX),
             nice: LimitPair::new(usize::MAX, usize::MAX),
             rtprio: LimitPair::new(0, 0),
+        }
+    }
+}
+
+/// 线程组 CPU 限额的无锁热路径状态。
+///
+/// `runtime_us` 只接收各线程批量冲刷的增量；`next_expiry_us` 是 rlimit
+/// owner 发布的最近阈值。真正修改 soft limit 和生成信号只在用户返回
+/// 安全点完成，trap 记账路径不获取 PCB mutex，也不做 seqlock 自旋。
+struct ProcessCpuAccount {
+    runtime_us: AtomicU64,
+    next_expiry_us: AtomicU64,
+    expiry_pending: AtomicBool,
+}
+
+impl ProcessCpuAccount {
+    fn limit_us(limit_secs: usize) -> u64 {
+        if limit_secs == usize::MAX {
+            u64::MAX
+        } else {
+            (limit_secs as u64)
+                .saturating_mul(USEC_PER_SEC as u64)
+                .min(u64::MAX - 1)
+        }
+    }
+
+    fn next_expiry(limit: LimitPair) -> u64 {
+        Self::limit_us(limit.soft).min(Self::limit_us(limit.hard))
+    }
+
+    fn new(limit: LimitPair) -> Self {
+        Self {
+            runtime_us: AtomicU64::new(0),
+            next_expiry_us: AtomicU64::new(Self::next_expiry(limit)),
+            expiry_pending: AtomicBool::new(false),
         }
     }
 }
@@ -113,6 +152,8 @@ pub struct ProcessControlBlock {
     process_quota: Mutex<Option<TaskQuotaGuard>>,
     /// rlimit 的线程组共享 owner；消费者只复制所需标量，不跨其他锁持有。
     rlimits: Mutex<ProcessLimits>,
+    /// RLIMIT_CPU 的线程组累计和到期提示；热路径只访问原子字段。
+    cpu_account: ProcessCpuAccount,
     /// 线程成员关系与首次发布门禁。
     thread_group: Mutex<ThreadGroupState>,
     /// 统一 group-exit 退出码的无锁快照。
@@ -378,6 +419,94 @@ impl ProcessControlBlock {
         *self.rlimits.lock()
     }
 
+    /// 把一个线程的已结算 CPU 时间批量计入线程组。
+    ///
+    /// 调用点可能仍持有当前线程的 inner 锁，因此这里只能做原子操作，不能
+    /// 获取 rlimit/signal 锁或直接投递信号。
+    pub(crate) fn account_cpu_runtime(&self, delta_us: usize) {
+        if delta_us == 0 {
+            return;
+        }
+        let delta_us = delta_us as u64;
+        let previous = self
+            .cpu_account
+            .runtime_us
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |runtime| {
+                Some(runtime.saturating_add(delta_us))
+            })
+            .unwrap();
+        let runtime = previous.saturating_add(delta_us);
+        let next = self.cpu_account.next_expiry_us.load(Ordering::Acquire);
+        if next != u64::MAX && runtime >= next {
+            self.cpu_account
+                .expiry_pending
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// 在 rlimit owner 已更新 CPU pair 后发布新的无锁到期阈值。
+    pub(crate) fn rearm_cpu_limit(&self, limit: LimitPair) {
+        let next = ProcessCpuAccount::next_expiry(limit);
+        self.cpu_account
+            .next_expiry_us
+            .store(next, Ordering::Release);
+        let expired = next != u64::MAX
+            && self.cpu_account.runtime_us.load(Ordering::Acquire) >= next;
+        if expired {
+            self.cpu_account
+                .expiry_pending
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// 在返回用户态的安全点领取一次线程组 CPU 限额信号。
+    ///
+    /// soft limit 命中后按 Linux 语义推进一秒，因此持续超限会每秒再次产生
+    /// SIGXCPU；hard limit 优先并停止后续检查。返回后已经释放 rlimit 锁。
+    pub(crate) fn take_cpu_limit_signal(&self) -> Option<Signals> {
+        if !self
+            .cpu_account
+            .expiry_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            return None;
+        }
+
+        let runtime = self.cpu_account.runtime_us.load(Ordering::Acquire);
+        let mut limits = self.rlimits.lock();
+        let hard_us = ProcessCpuAccount::limit_us(limits.cpu.hard);
+        let hard_expired = limits.cpu.hard != usize::MAX && runtime >= hard_us;
+        let signal = if hard_expired {
+            Some(Signals::SIGKILL)
+        } else {
+            let soft_us = ProcessCpuAccount::limit_us(limits.cpu.soft);
+            if limits.cpu.soft != usize::MAX && runtime >= soft_us {
+                limits.cpu.soft = limits.cpu.soft.saturating_add(1);
+                Some(Signals::SIGXCPU)
+            } else {
+                None
+            }
+        };
+        let next = if hard_expired {
+            u64::MAX
+        } else {
+            ProcessCpuAccount::next_expiry(limits.cpu)
+        };
+        self.cpu_account
+            .next_expiry_us
+            .store(next, Ordering::Release);
+        drop(limits);
+
+        // 覆盖“检查期间其它 CPU 又跨过下一阈值”的窗口；并发记账者若在
+        // 此后发生，也会读取新阈值并自行重新发布 pending。
+        if next != u64::MAX && self.cpu_account.runtime_us.load(Ordering::Acquire) >= next {
+            self.cpu_account
+                .expiry_pending
+                .store(true, Ordering::Release);
+        }
+        signal
+    }
+
     /// 返回 RLIMIT_FSIZE 的 soft limit，锁不会跨入文件系统路径。
     pub(crate) fn fsize_limit(&self) -> usize {
         self.rlimits.lock().fsize.soft
@@ -434,6 +563,7 @@ impl ProcessControlBlock {
         user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
         rlimits: ProcessLimits,
     ) -> Self {
+        let cpu_account = ProcessCpuAccount::new(rlimits.cpu);
         let exec_key = {
             let lock = exe.lock();
             exec_key_from_file(&lock)
@@ -455,6 +585,7 @@ impl ProcessControlBlock {
             pid_handle,
             process_quota: Mutex::new(Some(process_quota)),
             rlimits: Mutex::new(rlimits),
+            cpu_account,
             thread_group: Mutex::new(ThreadGroupState {
                 members: Vec::new(),
                 exec: None,

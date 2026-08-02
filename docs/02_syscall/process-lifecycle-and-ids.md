@@ -461,9 +461,14 @@ B73 将 FSIZE、STACK、CORE、NPROC、MEMLOCK、SIGPENDING、NICE 和 RTPRIO �
 进程建立独立 owner；exec 复用 PCB，因此保留限制。文件、VM、signal 和 scheduler 消费者都
 只在 rlimit 锁内复制一个 soft limit，释放后才进入各自子系统。
 
-CPU 仍保留在 TCB，等待线程组 CPU 时间核算一并迁移；NOFILE 仍由 fd table 持有，等待与
-`CLONE_FILES` 的跨进程生命周期分离。因而 B73 已完成普通限制的线程组共享，但不宣称这两项
-例外已经具备完整 Linux 语义。
+B74 将 CPU pair 也迁入 PCB，并以线程本地 1ms 批次向 PCB 原子累计运行时间。trap 与
+schedule-out 热路径只发布到期提示，`SIGXCPU`/`SIGKILL` 在用户返回安全点加入进程共享 pending；
+soft limit 命中后推进一秒，hard limit 优先。线程 clone 共享限制和累计，普通 fork 只继承
+限制并从零计时，exec 保留原 PCB。`getrusage(RUSAGE_SELF)`、`times()` 和 process CPU clock
+对 user/system 分项的线程组查询仍由后续节点补齐。
+
+NOFILE 仍由 fd table 持有，等待与 `CLONE_FILES` 的跨进程生命周期分离。因此当前只剩这一项
+rlimit owner 例外，不能把 fd-table 限制外推为完整进程属性。
 
 ### 8.4 scheduler ABI
 
