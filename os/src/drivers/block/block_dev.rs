@@ -14,6 +14,13 @@ pub enum BlockDeviceError {
 
 pub type BlockDeviceResult<T = ()> = Result<T, BlockDeviceError>;
 
+/// Driver-announced disk naming convention.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BlockDeviceNameStyle {
+    Alphabetic(&'static str),
+    Decimal(&'static str),
+}
+
 pub(crate) fn validate_block_buffer_length(buf_len: usize) -> BlockDeviceResult {
     if buf_len == 0 || buf_len % BLOCK_SZ != 0 {
         return Err(BlockDeviceError::InvalidBufferLength);
@@ -22,6 +29,11 @@ pub(crate) fn validate_block_buffer_length(buf_len: usize) -> BlockDeviceResult 
 }
 
 pub trait BlockDevice: Send + Sync + Any {
+    /// Returns the driver-specific convention for naming its raw disks.
+    fn name_style(&self) -> BlockDeviceNameStyle {
+        BlockDeviceNameStyle::Decimal("blk")
+    }
+
     /// Read one or more complete blocks starting at `block_id`.
     ///
     /// Returns [`BlockDeviceError::InvalidBufferLength`] unless `buf` is a

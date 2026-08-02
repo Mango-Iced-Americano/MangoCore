@@ -123,11 +123,7 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
         Err(e) => println!("[kernel] PRNG init warning: {:?}", e),
     }
 
-    let mut boot_config = crate::bootargs::load();
-    let cmdline = crate::bootargs::Cmdline::parse(crate::bootargs::get_cmdline());
-    if cmdline.get("root").is_none() && cmdline.get("mango.root").is_none() {
-        boot_config.root = crate::hal::platform::platform_info().default_root().into();
-    }
+    let boot_config = crate::bootargs::load();
 
     #[cfg(feature = "initramfs")]
     {

@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-29
+last_updated: 2026-08-02
 code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/fs/boot_block.rs"
@@ -58,9 +58,8 @@ rust_main()
   |     |-- drivers::init_net_device()
   |     |-- net::config::init()
    |     |-- fs::mount_boot_block_devices(&BootConfig)
-   |     |     |-- 发布驱动描述符对应的启动注册表和 /dev 节点
-   |     |     |-- root=/dev/<name> → /sdcard（未命中回退 Root 角色）
-   |     |     |-- Tools 角色设备的 MBR P1 → /tools
+    |     |     |-- 发布驱动描述符对应的启动注册表和 /dev 节点
+     |     |     |-- Step 3：root= / mango.root= 选择 /sdcard；未显式选择时回退首原始盘
   |
    |-- task::add_initproc()            加载 init 进程（fd 0/1/2 使用 /dev/tty）
    |-- task::run_tasks()               进入调度
@@ -74,7 +73,7 @@ rust_main()
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 仅挂载 devfs，并注册 `/dev/tty` 以建立 PID1 的 fd 0/1/2；其余挂载点只是目录。
-4. 调用 `mount_boot_block_devices(&BootConfig)`：`boot_block` 子模块先验证驱动提供的 `BlockDeviceDescriptor`，再将名称与主次设备号发布到 DevFS 和启动注册表。内核将 `root=/dev/<name>` 解析为注册表键并挂载到 `/sdcard`，未命中时回退 Root 角色；Tools 角色设备若有 MBR，则将 P1 挂载到 `/tools`。当前 QEMU 描述符仍为 `vda`（Root）和 `vdb`（Tools），但挂载层不依赖它们的 slot 或设备类型。
+4. 调用 `mount_boot_block_devices(&BootConfig)`：`boot_block` 子模块先验证驱动提供的 `BlockDeviceDescriptor`，再将所有原始块设备及其发现的 MBR 分区名称和主次设备号发布到 DevFS 和启动注册表。`root=` 优先于 `mango.root=`，仅选择挂载到 `/sdcard` 的卷：显式 `root=initramfs` 保留 initramfs，其他非空值按已注册的原始盘或 MBR 分区节点名解析（可带一个 `/dev/` 前缀）；未显式提供 root 选择器时才回退首个原始设备。内核不解析 `mango.tools=`，也不挂载 `/tools`；该挂载由 initramfs 用户态按需执行。磁盘名由驱动声明：virtio 为 `vd*`，MMC 为 `mmcblk*`，其他设备默认 `blk*`。
 5. `/sbin/init` 挂载 procfs、sysfs、`/run` 和 `/dev/shm`。
 6. `/tmp` 优先 bind `/sdcard/tmp`；x0 或 bind 失败时挂载 tmpfs。块设备故障只打印 warning，不 panic。
 
@@ -97,7 +96,7 @@ lazy_static! {
 }
 ```
 
-初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 创建挂载点 → 挂载 devfs。块设备在此阶段不参与，后续仅由 `register_boot_block_devices()` 注册为设备节点。
+初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 创建挂载点 → 挂载 devfs。块设备在此阶段不参与，后续由 `register_boot_block_devices()` 注册为设备节点，并仅按 root 选择器决定是否挂载 `/sdcard`。
 
 `detect_fs()` 读取块 0 的一个完整块（BLOCK_SIZE）：首先检查偏移 510 处 MBR 签名 `0x55AA`，若无 MBR 则检查偏移 1024 + 56 = 1080 处 ext4 超级块魔数 `0xEF53`。
 
@@ -165,7 +164,7 @@ pub fn vfs_root() -> Arc<MountFS> {
 ## 8. 关键设计点
 
 - **VFS_ROOT 初始化顺序**：必须发生在 `mm::init()` 之后（需要堆分配器），且在 `task::add_initproc()` 之前（init 进程需要根文件系统）。
-- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA；initramfs 路径在网络初始化后只发现/注册（`register_boot_block_devices`），由驱动描述符定义节点和角色，启动挂载不依赖 x0/x1 槽位。
+- **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA；initramfs 路径在网络初始化后发布所有原始盘和 MBR 分区（`register_boot_block_devices`），由驱动描述符定义节点；内核仅按 root 选择器或无选择器的首原始盘回退决定 `/sdcard`，不依赖 x0/x1 槽位。
 - **不可递归触发 VFS_ROOT**：initramfs 解包期间（`unpack_newc`）严禁调用 `vfs_root()`，必须使用传入的 `root` 参数，否则引发递归 lazy_static 初始化死锁。
-- **块设备故障不 panic**：无论是根文件系统未识别还是 tools 盘缺失，均 fallback 到 ramfs 或打印 warning 继续执行。这对调试和 CI 环境至关重要。
+- **块设备故障不 panic**：显式 root 选择器解析不到设备、或设备上没有可挂载文件系统时，只打印 warning 并保留 initramfs；不会回退到另一块设备。这对调试和 CI 环境至关重要。
 - **MountFS 包装统一入口**：无论底层是磁盘文件系统（ext4/FAT32）还是伪文件系统（ramfs），全部包装为 `MountFS`，使路径解析、子挂载管理、挂载传播通过统一的 MountFS 层处理。

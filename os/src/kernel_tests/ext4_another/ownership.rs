@@ -4,10 +4,8 @@ use crate::fs::vfs::FileSystem;
 
 pub(super) fn test_root_inode_is_canonical_and_does_not_retain_filesystem(
 ) -> Result<(), &'static str> {
-    let device = crate::drivers::block::block_device_by_role(
-        crate::drivers::block::BlockDeviceRole::Root,
-    )
-    .ok_or("ktest requires a clean ext4 root block device")?;
+    let device = crate::drivers::block::get_block_device(0)
+        .ok_or("ktest requires a clean ext4 root block device")?;
     let fs = crate::fs::ext4_another::Ext4FileSystem::open(device)
         .map_err(|_| "another_ext4 root ownership fixture did not mount")?;
     let first_root = fs.root_inode();

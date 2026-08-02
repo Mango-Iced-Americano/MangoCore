@@ -37,7 +37,7 @@ mod timestamp;
 pub mod vfs;
 
 pub use self::dev::pipe::*;
-pub use boot_block::{mount_boot_block_devices, mount_tools_disk};
+pub use boot_block::mount_boot_block_devices;
 
 pub use self::layout::*;
 

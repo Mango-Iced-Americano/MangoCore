@@ -1,4 +1,7 @@
-use super::{validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult};
+use super::{
+    validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceNameStyle,
+    BlockDeviceResult,
+};
 use crate::hal::device::DeviceManager;
 use crate::mm::{
     frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
@@ -39,6 +42,10 @@ lazy_static! {
 static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 impl BlockDevice for VirtIOBlock {
+    fn name_style(&self) -> BlockDeviceNameStyle {
+        BlockDeviceNameStyle::Alphabetic("vd")
+    }
+
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);

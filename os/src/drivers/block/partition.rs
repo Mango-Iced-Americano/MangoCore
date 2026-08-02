@@ -29,7 +29,6 @@ pub enum MbrProbe {
 
 /// 解析 MBR 分区表。
 /// 读取父设备的 block 0，检查 0x55AA 签名，解析 4 个主分区条目。
-/// 只接受 4096 字节对齐的分区（start_lba % 8 == 0 && sectors % 8 == 0）。
 pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
     let mut buf = alloc::vec![0u8; BLOCK_SZ];
     dev.read_block(0, &mut buf)?;
@@ -62,17 +61,6 @@ pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
                 "[mbr] skip partition {}: extended type {:#x} (unsupported)",
                 i + 1,
                 type_code
-            );
-            continue;
-        }
-
-        // 4096 字节对齐检查
-        if start_lba % LBA_PER_BLOCK != 0 || sectors % LBA_PER_BLOCK != 0 {
-            println!(
-                "[mbr] skip partition {}: not 4096-aligned (start_lba={}, sectors={})",
-                i + 1,
-                start_lba,
-                sectors
             );
             continue;
         }
@@ -116,6 +104,7 @@ pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> BlockDeviceResult<MbrProbe> {
 pub struct PartitionBlockDevice {
     parent: Arc<dyn BlockDevice>,
     start_block: usize, // 父设备中的 4096 字节块偏移
+    start_offset: usize, // start_block 内的 512 字节扇区偏移
     block_count: usize, // 分区包含的 4096 字节块数
     size_bytes: u64,    // 分区精确字节大小，按 MBR 扇区数 * 512 计算
 }
@@ -123,11 +112,13 @@ pub struct PartitionBlockDevice {
 impl PartitionBlockDevice {
     pub fn new(parent: Arc<dyn BlockDevice>, start_lba: u64, sectors: u64) -> Self {
         let start_block = (start_lba / LBA_PER_BLOCK) as usize;
+        let start_offset = ((start_lba % LBA_PER_BLOCK) * SECTOR_SIZE) as usize;
         let block_count = (sectors / LBA_PER_BLOCK) as usize;
         let size_bytes = sectors.saturating_mul(SECTOR_SIZE);
         Self {
             parent,
             start_block,
+            start_offset,
             block_count,
             size_bytes,
         }
@@ -153,6 +144,24 @@ impl PartitionBlockDevice {
         self.start_block
             .checked_add(block_id)
             .ok_or(BlockDeviceError::OutOfBounds)
+    }
+
+    fn read_unaligned(&self, parent_block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        let parent_blocks = buf.len() / BLOCK_SZ + 1;
+        let mut bounce = alloc::vec![0u8; parent_blocks * BLOCK_SZ];
+        self.parent.read_block(parent_block_id, &mut bounce)?;
+        let end = self.start_offset + buf.len();
+        buf.copy_from_slice(&bounce[self.start_offset..end]);
+        Ok(())
+    }
+
+    fn write_unaligned(&self, parent_block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        let parent_blocks = buf.len() / BLOCK_SZ + 1;
+        let mut bounce = alloc::vec![0u8; parent_blocks * BLOCK_SZ];
+        self.parent.read_block(parent_block_id, &mut bounce)?;
+        let end = self.start_offset + buf.len();
+        bounce[self.start_offset..end].copy_from_slice(buf);
+        self.parent.write_block(parent_block_id, &bounce)
     }
 }
 
@@ -269,12 +278,20 @@ impl BlockDevice for ReadOnlyBlockDevice {
 impl BlockDevice for PartitionBlockDevice {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         let parent_block_id = self.parent_block_id(block_id, buf.len())?;
-        self.parent.read_block(parent_block_id, buf)
+        if self.start_offset == 0 {
+            self.parent.read_block(parent_block_id, buf)
+        } else {
+            self.read_unaligned(parent_block_id, buf)
+        }
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let parent_block_id = self.parent_block_id(block_id, buf.len())?;
-        self.parent.write_block(parent_block_id, buf)
+        if self.start_offset == 0 {
+            self.parent.write_block(parent_block_id, buf)
+        } else {
+            self.write_unaligned(parent_block_id, buf)
+        }
     }
 
     fn flush(&self) -> BlockDeviceResult {

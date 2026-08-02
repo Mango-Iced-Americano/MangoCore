@@ -74,17 +74,9 @@ impl BlockDeviceNode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum BlockDeviceRole {
-    Root,
-    Tools,
-    Data,
-}
-
 pub struct BlockDeviceDescriptor {
     node: BlockDeviceNode,
     device: Arc<dyn BlockDevice>,
-    role: BlockDeviceRole,
 }
 
 impl Clone for BlockDeviceDescriptor {
@@ -92,14 +84,13 @@ impl Clone for BlockDeviceDescriptor {
         Self {
             node: self.node.clone(),
             device: self.device.clone(),
-            role: self.role,
         }
     }
 }
 
 impl BlockDeviceDescriptor {
-    pub fn new(node: BlockDeviceNode, device: Arc<dyn BlockDevice>, role: BlockDeviceRole) -> Self {
-        Self { node, device, role }
+    pub fn new(node: BlockDeviceNode, device: Arc<dyn BlockDevice>) -> Self {
+        Self { node, device }
     }
 
     pub fn node(&self) -> &BlockDeviceNode {
@@ -108,9 +99,5 @@ impl BlockDeviceDescriptor {
 
     pub fn device(&self) -> &Arc<dyn BlockDevice> {
         &self.device
-    }
-
-    pub const fn role(&self) -> BlockDeviceRole {
-        self.role
     }
 }

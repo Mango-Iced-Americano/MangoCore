@@ -1,8 +1,6 @@
 use super::BlockDevice;
 use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
-use crate::drivers::block::{
-    BlockDeviceDescriptor, BlockDeviceNode, BlockDeviceNumber, BlockDeviceRole,
-};
+use crate::drivers::block::{BlockDeviceDescriptor, BlockDeviceNode, BlockDeviceNumber};
 use alloc::{collections::{BTreeMap, BTreeSet}, string::String, sync::Arc, vec::Vec};
 use lazy_static::*;
 use spin::Mutex;
@@ -11,7 +9,6 @@ use spin::Mutex;
 pub enum BootBlockRegistryError {
     DuplicateName,
     DuplicateDeviceNumber,
-    DuplicateRole,
 }
 
 #[derive(Debug)]
@@ -27,7 +24,6 @@ struct RegisteredBlockDevice {
 pub struct BootBlockRegistry {
     devices: BTreeMap<String, RegisteredBlockDevice>,
     numbers: BTreeSet<BlockDeviceNumber>,
-    roles: BTreeMap<BlockDeviceRole, Arc<dyn BlockDevice>>,
 }
 
 impl BootBlockRegistry {
@@ -35,12 +31,7 @@ impl BootBlockRegistry {
         Self {
             devices: BTreeMap::new(),
             numbers: BTreeSet::new(),
-            roles: BTreeMap::new(),
         }
-    }
-
-    fn role_is_unique(role: BlockDeviceRole) -> bool {
-        matches!(role, BlockDeviceRole::Root | BlockDeviceRole::Tools)
     }
 
     pub fn validate_all(
@@ -55,18 +46,12 @@ impl BootBlockRegistry {
             if self.numbers.contains(&node.number()) {
                 return Err(BootBlockRegistryError::DuplicateDeviceNumber);
             }
-            if Self::role_is_unique(descriptor.role()) && self.roles.contains_key(&descriptor.role()) {
-                return Err(BootBlockRegistryError::DuplicateRole);
-            }
             for prior in &descriptors[..index] {
                 if prior.node().name() == node.name() {
                     return Err(BootBlockRegistryError::DuplicateName);
                 }
                 if prior.node().number() == node.number() {
                     return Err(BootBlockRegistryError::DuplicateDeviceNumber);
-                }
-                if Self::role_is_unique(descriptor.role()) && prior.role() == descriptor.role() {
-                    return Err(BootBlockRegistryError::DuplicateRole);
                 }
             }
         }
@@ -87,9 +72,6 @@ impl BootBlockRegistry {
                     device: descriptor.device().clone(),
                 },
             );
-            if Self::role_is_unique(descriptor.role()) {
-                self.roles.insert(descriptor.role(), descriptor.device().clone());
-            }
         }
         Ok(())
     }
@@ -98,13 +80,6 @@ impl BootBlockRegistry {
         self.devices.get(name).map(|device| device.device.clone())
     }
 
-    pub fn resolve_role(&self, role: BlockDeviceRole) -> Option<Arc<dyn BlockDevice>> {
-        self.roles.get(&role).cloned()
-    }
-
-    fn replace_role_device(&mut self, role: BlockDeviceRole, device: Arc<dyn BlockDevice>) {
-        self.roles.insert(role, device);
-    }
 }
 
 lazy_static! {
@@ -112,11 +87,11 @@ lazy_static! {
 }
 
 pub fn resolve_block_device(name: &str) -> Option<Arc<dyn BlockDevice>> {
+    let name = name.strip_prefix("/dev/").unwrap_or(name);
+    if name.is_empty() || matches!(name, "." | "..") || name.contains('/') {
+        return None;
+    }
     BOOT_BLOCK_REGISTRY.lock().resolve(name)
-}
-
-pub fn resolve_role_block_device(role: BlockDeviceRole) -> Option<Arc<dyn BlockDevice>> {
-    BOOT_BLOCK_REGISTRY.lock().resolve_role(role)
 }
 
 pub fn publish_block_descriptors(
@@ -135,7 +110,7 @@ pub fn publish_block_descriptors(
         .map_err(BootBlockPublishError::Registry)
 }
 
-fn partition_name(name: &str, partno: u32) -> String {
+pub(crate) fn partition_name(name: &str, partno: u32) -> String {
     match name.as_bytes().last() {
         Some(byte) if byte.is_ascii_digit() => alloc::format!("{}p{}", name, partno),
         _ => alloc::format!("{}{}", name, partno),
@@ -168,16 +143,12 @@ impl BlockMinorAllocator {
     }
 }
 
-fn boot_descriptors() -> (Vec<BlockDeviceDescriptor>, Option<Arc<dyn BlockDevice>>) {
+fn boot_descriptors() -> Vec<BlockDeviceDescriptor> {
     let mut descriptors = crate::drivers::block::block_devices().to_vec();
     let mut allocator = BlockMinorAllocator::from_descriptors(&descriptors);
-    let mut tools_mount = None;
     let raw_devices = descriptors.clone();
 
     for raw_device in raw_devices {
-        if raw_device.role() != BlockDeviceRole::Tools {
-            continue;
-        }
         let parts = match probe_mbr(raw_device.device()) {
             Ok(MbrProbe::Partitions(parts)) => parts,
             Ok(MbrProbe::NoMbr | MbrProbe::Unsupported) | Err(_) => continue,
@@ -203,61 +174,47 @@ fn boot_descriptors() -> (Vec<BlockDeviceDescriptor>, Option<Arc<dyn BlockDevice
                 part.start_lba,
                 part.sectors,
             )) as Arc<dyn BlockDevice>;
-            if part.partno == 1 {
-                tools_mount = Some(device.clone());
-            }
-            descriptors.push(BlockDeviceDescriptor::new(node, device, BlockDeviceRole::Data));
+            descriptors.push(BlockDeviceDescriptor::new(node, device));
         }
     }
-    (descriptors, tools_mount)
+    descriptors
 }
 
 pub(crate) fn register_boot_block_devices() -> Result<(), BootBlockPublishError> {
-    let (descriptors, tools_mount) = boot_descriptors();
-    publish_block_descriptors(&descriptors)?;
-    if let Some(tools_mount) = tools_mount {
-        BOOT_BLOCK_REGISTRY
-            .lock()
-            .replace_role_device(BlockDeviceRole::Tools, tools_mount);
-    }
-    Ok(())
-}
-
-pub fn mount_tools_disk() {
-    let Some(tools_device) = resolve_role_block_device(BlockDeviceRole::Tools) else {
-        println!("[kernel] no tools disk found, skipping /tools mount");
-        return;
-    };
-    let root = super::vfs_root();
-    let _ = super::mount_block_fs(&root, &tools_device, "tools", "tools disk");
+    let descriptors = boot_descriptors();
+    publish_block_descriptors(&descriptors)
 }
 
 pub fn mount_boot_block_devices(config: &crate::bootargs::BootConfig) {
-    if let Err(error) = register_boot_block_devices() {
-        println!("[kernel] block publication failed: {:?}", error);
-        return;
-    }
-
-    if config.root == "initramfs" {
-        mount_tools_disk();
-        return;
+    match register_boot_block_devices() {
+        Ok(()) => {}
+        Err(error) => {
+            println!("[kernel] block publication failed: {:?}", error);
+            return;
+        }
     }
 
     let root = super::vfs_root();
-    let root_name = config.root.strip_prefix("/dev/").unwrap_or(&config.root);
-    let root_device = resolve_block_device(root_name);
-    match root_device {
-        Some(device) => {
-            if super::mount_block_fs(&root, &device, "sdcard", "root device").is_none() {
-                println!("[initramfs] root device '{}' mount failed", config.root);
+    if config.root_from_cmdline {
+        if config.root != "initramfs" && !config.root.is_empty() {
+            match resolve_block_device(&config.root) {
+                Some(device) => {
+                    if super::mount_block_fs(&root, &device, "sdcard", "root device").is_none() {
+                        println!("[initramfs] root device '{}' has no mountable filesystem", config.root);
+                    }
+                }
+                None => println!("[initramfs] root device '{}' not found", config.root),
             }
         }
-        None => println!("[initramfs] root device '{}' not found", config.root),
-    }
-
-    if let Some(tools_device) = resolve_role_block_device(BlockDeviceRole::Tools) {
-        if super::mount_block_fs(&root, &tools_device, "tools", "tools disk").is_none() {
-            println!("[initramfs] tools disk mount failed");
+    } else {
+        match crate::drivers::block::get_block_device(0) {
+            Some(device) => {
+                if super::mount_block_fs(&root, &device, "sdcard", "root device").is_none() {
+                    println!("[initramfs] first raw block device mount failed");
+                }
+            }
+            None => println!("[initramfs] no raw block device found"),
         }
     }
+
 }

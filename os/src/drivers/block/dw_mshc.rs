@@ -11,7 +11,8 @@ use core::convert::TryFrom;
 use spin::Mutex;
 
 use crate::drivers::block::{
-    validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceResult,
+    validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceNameStyle,
+    BlockDeviceResult,
 };
 use crate::hal::device::DeviceManager;
 use crate::hal::BLOCK_SZ;
@@ -142,6 +143,10 @@ pub(crate) fn probe_from_device_manager(manager: &DeviceManager) -> Vec<Arc<dyn 
 }
 
 impl BlockDevice for DwMshc {
+    fn name_style(&self) -> BlockDeviceNameStyle {
+        BlockDeviceNameStyle::Decimal("mmcblk")
+    }
+
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
         let first_sector = block_first_sector(block_id).ok_or(BlockDeviceError::OutOfBounds)?;

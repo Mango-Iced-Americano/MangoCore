@@ -21,7 +21,7 @@
 | DeviceInfo 数据模型 | `os/src/hal/platform/info.rs` | `DeviceInfo`、`DeviceKind`、`MmioRange`、`DeviceStatus`、`ResourceValidity` |
 | DeviceManager 查询层 | `os/src/hal/device/manager.rs` | 按 compatible、kind、MMIO 索引查询的只读视图 |
 | PlatformPolicy trait | `os/src/hal/platform/mod.rs` | 板级默认 root 设备、init 路径、平台名称 |
-| BlockDeviceDescriptor | `os/src/drivers/block/descriptor.rs` | 命名的动态描述符，含 major/minor/role/device |
+| BlockDeviceDescriptor | `os/src/drivers/block/descriptor.rs` | 命名的动态描述符，含 major/minor/device；命名风格由驱动通过 `BlockDevice` 声明 |
 | Boot block registry | `os/src/fs/boot_block.rs` | `BTreeMap<String, BlockDevice>` 启动注册表 + MBR 分区发布 |
 | devfs 批量发布 | `os/src/fs/dev/block.rs` | 原子 devfs 设备节点注册 |
 | VF2 PlatformPolicy | `os/src/hal/platform/vf2.rs` | `default_root_device = "/dev/mmcblk0"` |
@@ -250,18 +250,11 @@ fn classify_device(compatible: &[String]) -> DeviceKind {
 
 **决策:** 本阶段不增加 `DeviceKind::Mmc` 或 `DeviceKind::DwMmc`，也不在 HAL 中识别 `snps,dw-mshc`。未来驱动以 exact compatible 查询取得节点后，自行解析其 binding-owned raw properties。
 
-### 3.3 `describe_block_devices` 仅生成 `vd*` 名称
+### 3.3 驱动声明块设备名称风格
 
-```rust
-// os/src/drivers/block/mod.rs:76
-fn virtio_block_name(index: usize) -> Option<String> {
-    // 生成 vda, vdb, vdc, ...
-}
-```
+`BlockDevice::name_style()` 使驱动在探测时声明名称前缀及编号形式。`describe_block_devices()` 以 `BTreeMap<BlockDeviceNameStyle, usize>` 分别计数：virtio 使用 `Alphabetic("vd")`（`vda`、`vdb`），DesignWare MMC 使用 `Decimal("mmcblk")`（`mmcblk0`、`mmcblk1`），未声明的测试或未知驱动默认 `Decimal("blk")`。主次设备号仍按全局探测顺序分配，未迁移到 Linux MMC major 179。
 
-**影响:** VF2 的 dw_mmc 设备应生成 `mmcblk0`，而非 `vda`。
-
-**决策:** 在 MMC 驱动侧生成 `BlockDeviceDescriptor` 时直接指定名称 `mmcblk0`，major = `179`（Linux MMC block major），并跳过 `describe_block_devices` 名称生成函数。该函数仅用于 QEMU virtio 设备。
+MBR 分区名沿用 Linux 分隔规则：以数字结尾的基名使用 `p`（`mmcblk0p1`），其他基名直接追加分区号（`vda1`）。
 
 ---
 

@@ -10,16 +10,16 @@ pub mod virtio_blk;
 pub mod virtio_blk_pci;
 pub mod virtio_dma_pool;
 pub(crate) use block_dev::validate_block_buffer_length;
-pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceResult};
+pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceNameStyle, BlockDeviceResult};
 pub use descriptor::{
     BlockDeviceDescriptor, BlockDeviceName, BlockDeviceNameError, BlockDeviceNode,
-    BlockDeviceNumber, BlockDeviceRole,
+    BlockDeviceNumber,
 };
 
 use crate::hal::BLOCK_SZ;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -69,39 +69,48 @@ fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
     devices
 }
 
-fn block_device_name(index: usize) -> Option<String> {
-    let mut remainder = index;
-    let mut suffix = Vec::new();
-    loop {
-        let letter = u8::try_from(remainder % 26).ok()?.checked_add(b'a')?;
-        suffix.push(letter);
-        let next = remainder.checked_div(26)?.checked_sub(1);
-        match next {
-            Some(next) => remainder = next,
-            None => break,
-        }
-    }
-    suffix.reverse();
-    let suffix = core::str::from_utf8(&suffix).ok()?;
-    Some(alloc::format!("vd{}", suffix))
-}
+pub(crate) fn block_device_name(style: BlockDeviceNameStyle, index: usize) -> String {
+    match style {
+        BlockDeviceNameStyle::Alphabetic(prefix) => {
+            const ALPHABET: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
 
-fn block_device_role(index: usize) -> BlockDeviceRole {
-    match index {
-        0 => BlockDeviceRole::Root,
-        1 => BlockDeviceRole::Tools,
-        _ => BlockDeviceRole::Data,
+            let mut remainder = index;
+            let mut suffix = Vec::new();
+            loop {
+                suffix.push(ALPHABET[remainder % ALPHABET.len()]);
+                let Some(next) = remainder
+                    .checked_div(ALPHABET.len())
+                    .and_then(|value| value.checked_sub(1))
+                else {
+                    break;
+                };
+                remainder = next;
+            }
+            suffix.reverse();
+
+            let mut name = String::from(prefix);
+            for letter in suffix {
+                name.push(char::from(letter));
+            }
+            name
+        }
+        BlockDeviceNameStyle::Decimal(prefix) => alloc::format!("{}{}", prefix, index),
     }
 }
 
 fn describe_block_devices(devices: Vec<Arc<dyn BlockDevice>>) -> Vec<BlockDeviceDescriptor> {
     let mut descriptors = Vec::new();
+    let mut name_counters: BTreeMap<BlockDeviceNameStyle, usize> = BTreeMap::new();
     for (index, device) in devices.into_iter().enumerate() {
-        let Some(name) = block_device_name(index) else {
-            println!("[kernel] block device {}: name generation failed, skipping", index);
+        let style = device.name_style();
+        let style_index = name_counters.get(&style).copied().unwrap_or(0);
+        let Some(next_style_index) = style_index.checked_add(1) else {
+            println!("[kernel] block device {}: name counter exhausted, skipping", index);
             continue;
         };
-        let Ok(minor) = u64::try_from(index) else {
+        name_counters.insert(style, next_style_index);
+        let name = block_device_name(style, style_index);
+        let Some(minor) = u64::try_from(index).ok() else {
             println!("[kernel] block device {}: minor conversion failed, skipping", name);
             continue;
         };
@@ -112,9 +121,8 @@ fn describe_block_devices(devices: Vec<Arc<dyn BlockDevice>>) -> Vec<BlockDevice
                 continue;
             }
         };
-        let role = block_device_role(index);
-        println!("[kernel] block device {}: {:?}", name, role);
-        descriptors.push(BlockDeviceDescriptor::new(node, device, role));
+        println!("[kernel] block device {}", name);
+        descriptors.push(BlockDeviceDescriptor::new(node, device));
     }
     descriptors
 }
@@ -134,8 +142,10 @@ lazy_static! {
             println!("[kernel] block device skipped (ramfs-only mode)");
             Arc::new(DummyBlockDevice)
         } else {
-            block_device_by_role(BlockDeviceRole::Root)
-                .unwrap_or_else(|| panic!("[kernel] FATAL: no root block device found"))
+            get_block_device(0).unwrap_or_else(|| {
+                println!("[kernel] no block device found; using dummy block device");
+                Arc::new(DummyBlockDevice)
+            })
         }
     };
 }
@@ -146,13 +156,6 @@ pub fn block_devices() -> &'static [BlockDeviceDescriptor] {
 
 pub fn get_block_device(index: usize) -> Option<Arc<dyn BlockDevice>> {
     BLOCK_DEVICES.get(index).map(|descriptor| descriptor.device().clone())
-}
-
-pub fn block_device_by_role(role: BlockDeviceRole) -> Option<Arc<dyn BlockDevice>> {
-    BLOCK_DEVICES
-        .iter()
-        .find(|descriptor| descriptor.role() == role)
-        .map(|descriptor| descriptor.device().clone())
 }
 
 #[allow(unused)]
