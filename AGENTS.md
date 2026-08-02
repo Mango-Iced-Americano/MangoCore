@@ -271,6 +271,10 @@ B75 将 PCB CPU 记账拆为 user/system 分项，同时保留 total 作为限�
 B76 要求 wait 事件在 PID 回收前一次性快照 PID/status/RUSAGE_BOTH；zombie 回复和 parent 累计
 必须复用同一值。`wait4`/raw `waitid` 的所有用户写回只能在 parent/child/WaitQueue 锁外执行，
 copyout EFAULT 不得回滚已经消费的事件；WNOWAIT 不得累加 parent。
+B77 要求 POSIX timer 的唯一 owner 是 PCB 表，而不是创建线程 TCB：thread clone 共享、fork
+空表、exec/最后线程退出清空。timerid copyout 使用 Reserved slot，wall-time action 必须匹配
+PCB Weak + timer ID + arm_seq + deadline；timer 表锁内只允许向进程 shared pending 生成信号，
+调度器唤醒和 kernel timer 重装必须在锁外。CPU clock timer 的参数 ABI 通过不代表其到期语义完成。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

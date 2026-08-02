@@ -94,6 +94,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP prlimit 成对事务 | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 `prlimit64` 顺序对照、owner 锁审查与双架构 8 核 rlimit LTP | copyin→锁内旧值快照/权限复核/pair 提交→锁外 copyout；musl/glibc 各 9/9，进程级 owner 留待后续 |
 | SMP 进程级 rlimit owner | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 `signal_struct::rlim`/fork/prlimit 对照、共享域与锁序审查、双架构 8 核 rlimit LTP | 八项普通限制迁入 PCB，thread clone 共享、fork 快照、exec 保留；CPU/NOFILE 明确保留后续 |
 | SMP 线程组 CPU 限额 | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 process CPU timer 对照、热/慢路径竞态证明、双架构 8 核 rlimit LTP 与初赛 | PCB 原子组累计 + 1ms TCB 批次，安全点产生共享 SIGXCPU/SIGKILL；focused 各 9/9，初赛基线不退化 |
+| SMP 进程级 POSIX timer | 2026-08-02 | GPT/Codex, DeepSeek | POSIX/Linux timer 生命周期对照、PCB owner/锁序/ABA 审查、双架构 8 核 focused LTP | timer 表迁入 PCB，Reserved 发布和表级 arm sequence 拒绝 stale action；双架构每套 libc `timer_settime01/02` 全过，CPU timer 到期留待后续 |
 
 ## 4. 详细使用场景
 

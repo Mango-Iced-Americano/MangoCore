@@ -24,7 +24,7 @@ use crate::config::{SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
 use crate::signal_type;
-use crate::timer::USEC_PER_SEC;
+use crate::timer::{TimeSpec, USEC_PER_SEC};
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -157,6 +157,159 @@ impl ProcessCpuAccount {
     }
 }
 
+/// 单个 POSIX timer 的进程级状态。
+///
+/// `arm_seq` 标识最近一次装载；内核 timer 节点必须同时匹配 timer ID、
+/// `arm_seq` 和 deadline，才能修改本对象。这样删除并复用相同 ID 后，旧节点
+/// 也不能误命中新 timer。
+#[derive(Clone, Copy, Debug)]
+pub struct PosixTimer {
+    pub clock_id: usize,
+    pub signal: Signals,
+    pub signal_value: usize,
+    pub interval: TimeSpec,
+    pub value: TimeSpec,
+    pub deadline: Option<TimeSpec>,
+    /// CLOCK_REALTIME 类绝对 timer 的原始墙钟目标。
+    pub realtime_abs_deadline: Option<TimeSpec>,
+    pub arm_seq: u64,
+    overrun: usize,
+}
+
+impl PosixTimer {
+    const OVERRUN_MAX: usize = i32::MAX as usize;
+
+    pub fn new(clock_id: usize, signal: Signals, signal_value: usize) -> Self {
+        Self {
+            clock_id,
+            signal,
+            signal_value,
+            interval: TimeSpec::new(),
+            value: TimeSpec::new(),
+            deadline: None,
+            realtime_abs_deadline: None,
+            arm_seq: 0,
+            overrun: 0,
+        }
+    }
+
+    pub fn reset_overrun(&mut self) {
+        self.overrun = 0;
+    }
+
+    pub fn add_overrun(&mut self, count: usize) {
+        self.overrun = self.overrun.saturating_add(count).min(Self::OVERRUN_MAX);
+    }
+
+    pub fn overrun(&self) -> usize {
+        self.overrun
+    }
+}
+
+enum PosixTimerSlot {
+    Vacant,
+    /// timer_create 已保留 ID，但 timerid 尚未成功写回用户态。
+    Reserved,
+    Active(PosixTimer),
+}
+
+/// 同一线程组共享的 POSIX timer 表。
+///
+/// slot 预留使 `timer_create()` 无需跨 faultable copyout 持锁，同时避免另一个
+/// CPU 抢占同一 ID。`next_arm_seq` 是整个表共享的单调序列，不能按 slot 重置。
+pub(crate) struct PosixTimerTable {
+    slots: Vec<PosixTimerSlot>,
+    next_arm_seq: u64,
+}
+
+impl PosixTimerTable {
+    const MAX_TIMERS: usize = 32;
+
+    fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            next_arm_seq: 1,
+        }
+    }
+
+    pub(crate) fn reserve_id(&mut self) -> Result<usize, SyscallErr> {
+        if let Some((id, slot)) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| matches!(slot, PosixTimerSlot::Vacant))
+        {
+            *slot = PosixTimerSlot::Reserved;
+            return Ok(id);
+        }
+        if self.slots.len() >= Self::MAX_TIMERS {
+            return Err(SyscallErr::EAGAIN);
+        }
+        self.slots.try_reserve(1).map_err(|_| SyscallErr::ENOMEM)?;
+        self.slots.push(PosixTimerSlot::Reserved);
+        Ok(self.slots.len() - 1)
+    }
+
+    pub(crate) fn publish_reserved(&mut self, id: usize, timer: PosixTimer) -> bool {
+        match self.slots.get_mut(id) {
+            Some(slot @ PosixTimerSlot::Reserved) => {
+                *slot = PosixTimerSlot::Active(timer);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn cancel_reservation(&mut self, id: usize) {
+        if let Some(slot @ PosixTimerSlot::Reserved) = self.slots.get_mut(id) {
+            *slot = PosixTimerSlot::Vacant;
+        }
+    }
+
+    pub(crate) fn get(&self, id: usize) -> Option<&PosixTimer> {
+        match self.slots.get(id) {
+            Some(PosixTimerSlot::Active(timer)) => Some(timer),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn get_mut(&mut self, id: usize) -> Option<&mut PosixTimer> {
+        match self.slots.get_mut(id) {
+            Some(PosixTimerSlot::Active(timer)) => Some(timer),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn remove(&mut self, id: usize) -> bool {
+        match self.slots.get_mut(id) {
+            Some(slot @ PosixTimerSlot::Active(_)) => {
+                *slot = PosixTimerSlot::Vacant;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub(crate) fn alloc_arm_seq(&mut self) -> u64 {
+        let seq = self.next_arm_seq;
+        self.next_arm_seq = self.next_arm_seq.wrapping_add(1);
+        if self.next_arm_seq == 0 {
+            self.next_arm_seq = 1;
+        }
+        seq
+    }
+
+    fn clear(&mut self) {
+        // exec 后仍复用同一个 PCB；不能重置 next_arm_seq，否则 exec 前遗留的
+        // heap 节点可能与新映像复用的 timer ID/序号形成 ABA。
+        self.slots.clear();
+    }
+}
+
 /// 进程控制块。
 pub struct ProcessControlBlock {
     /// 用户可见进程 ID，即 getpid() 返回值。
@@ -171,6 +324,8 @@ pub struct ProcessControlBlock {
     rlimits: Mutex<ProcessLimits>,
     /// RLIMIT_CPU 的线程组累计和到期提示；热路径只访问原子字段。
     cpu_account: ProcessCpuAccount,
+    /// POSIX timer 是线程组共享对象，独立锁避免 timer callback 争用 process.inner。
+    posix_timers: Mutex<PosixTimerTable>,
     /// 线程成员关系与首次发布门禁。
     thread_group: Mutex<ThreadGroupState>,
     /// 统一 group-exit 退出码的无锁快照。
@@ -436,6 +591,17 @@ impl ProcessControlBlock {
         *self.rlimits.lock()
     }
 
+    /// 获取当前进程的 POSIX timer 表。
+    ///
+    /// guard 不得跨用户访存、timer queue 插入、信号唤醒或其它等待点。
+    pub(crate) fn posix_timers(&self) -> MutexGuard<'_, PosixTimerTable> {
+        self.posix_timers.lock()
+    }
+
+    fn clear_posix_timers(&self) {
+        self.posix_timers.lock().clear();
+    }
+
     /// 把一个线程的已结算 CPU 时间批量计入线程组。
     ///
     /// 调用方先在 `task.inner` 下领取批次并释放锁；本方法仍严格只做原子操作，
@@ -617,6 +783,7 @@ impl ProcessControlBlock {
             process_quota: Mutex::new(Some(process_quota)),
             rlimits: Mutex::new(rlimits),
             cpu_account,
+            posix_timers: Mutex::new(PosixTimerTable::new()),
             thread_group: Mutex::new(ThreadGroupState {
                 members: Vec::new(),
                 exec: None,
@@ -886,6 +1053,10 @@ impl ProcessControlBlock {
             old_sighand
         };
         sighand.lock().reset_for_exec();
+
+        // POSIX timer 不跨 exec 保留。旧 KernelTimer 节点只持 PCB Weak，之后
+        // 取得 timer 表锁时会看到空表并自行失效。
+        self.clear_posix_timers();
 
         let mut inner = self.inner.lock();
         inner.files = files;
@@ -1661,6 +1832,8 @@ impl ProcessControlBlock {
         if !self.mark_zombie(exit_code, rusage) {
             return;
         }
+        // PCB 会作为 zombie 保留到 wait；必须现在删除 timer，而不能等 PCB Drop。
+        self.clear_posix_timers();
         // 在 mark_zombie 之后重新获取 parent：其它 CPU 可能同时完成 reparent，
         // 因此不能沿用进入 finish_exit() 前取得的父进程快照。
         let parent_process = self.parent();

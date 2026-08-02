@@ -26,8 +26,11 @@ use crate::timer::{TimeSpec, TimeVal};
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     discard_non_actionable_unblocked_signals, has_actionable_signal,
-    signal::{has_waited_signal, queue_kernel_process_signal, SigInfo, Signals},
-    TaskControlBlock, TaskStatus,
+    signal::{
+        has_waited_signal, queue_kernel_process_signal, queue_process_signal_info,
+        wake_process_signal_waiter, SigInfo, Signals,
+    },
+    ProcessControlBlock, TaskControlBlock, TaskStatus,
 };
 use super::task::{RemoteAffinityRequest, RemoteAffinityState};
 use crate::utils::error::SyscallErr;
@@ -1620,12 +1623,11 @@ pub enum TimerAction {
         signal: Signals,
         generation: usize,
     },
-    // POSIX timer 到期后向创建线程投递信号。
+    /// POSIX timer 到期后向所属进程投递信号。
     PosixTimerSignal {
-        task: Weak<TaskControlBlock>,
+        process: Weak<ProcessControlBlock>,
         timer_id: usize,
-        signal: Signals,
-        generation: usize,
+        arm_seq: u64,
     },
     // Global timerfd sweep. Individual timerfds are kept in fs::timerfd's
     // registry; this action exists only to drive high-resolution wakeups.
@@ -1675,9 +1677,21 @@ impl KernelTimer {
                 }
                 None => false,
             },
-            TimerAction::SendSignal { task, .. } | TimerAction::PosixTimerSignal { task, .. } => {
-                task.strong_count() > 0
-            }
+            TimerAction::SendSignal { task, .. } => task.strong_count() > 0,
+            TimerAction::PosixTimerSignal {
+                process,
+                timer_id,
+                arm_seq,
+            } => match process.upgrade() {
+                Some(process) => process
+                    .posix_timers()
+                    .get(*timer_id)
+                    .map(|timer| {
+                        timer.arm_seq == *arm_seq && timer.deadline == Some(self.deadline)
+                    })
+                    .unwrap_or(false),
+                None => false,
+            },
             TimerAction::TimerFdSweep { generation } => {
                 crate::fs::timerfd::timerfd_sweep_is_current(*generation)
             }
@@ -1770,7 +1784,10 @@ impl KernelTimerQueue {
         crate::task::perf::record_timer_pop_cost(_pop_start, nodes);
         expired
     }
-    /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
+    /// 清理失效的 Weak、wait generation 和 POSIX timer arm 节点，释放堆槽位。
+    ///
+    /// 本函数在 `KERNEL_TIMER_QUEUE` 锁下读取 POSIX timer 表；反方向严格禁止，
+    /// 所有装载路径都必须先释放 timer 表锁再调用 `add_kernel_timer()`。
     pub fn compact(&mut self) {
         if self.inner.is_empty() {
             self.refresh_deadline_state();
@@ -1972,27 +1989,28 @@ impl KernelTimerQueue {
                 should_wake
             }
             TimerAction::PosixTimerSignal {
-                task,
+                process,
                 timer_id,
-                signal,
-                generation,
+                arm_seq,
             } => {
-                let Some(task) = task.upgrade() else {
+                let Some(process) = process.upgrade() else {
                     return false;
                 };
-                let mut should_wake = false;
                 let mut next_timer = None;
+                let mut generated_signal = None;
                 {
-                    let mut inner = task.acquire_inner_lock();
-                    let signal_pending = !signal.is_empty() && inner.sigpending.contains(signal);
-                    let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
+                    let mut timers = process.posix_timers();
+                    let Some(mut timer_state) = timers.get(timer_id).copied() else {
                         return false;
                     };
-                    if timer_state.generation != generation
+                    if timer_state.arm_seq != arm_seq
                         || timer_state.deadline != Some(timer.deadline)
                     {
                         return false;
                     }
+                    let signal = timer_state.signal;
+                    let signal_pending =
+                        !signal.is_empty() && process.shared_pending_hint().contains(signal);
                     if timer_state.interval.is_zero() {
                         timer_state.value = TimeSpec::new();
                         timer_state.deadline = None;
@@ -2019,35 +2037,40 @@ impl KernelTimerQueue {
                             timer_state.realtime_abs_deadline =
                                 Some(TimeSpec::from_ns(abs_ns as usize));
                         }
-                        timer_state.generation = timer_state.generation.wrapping_add(1);
+                        timer_state.arm_seq = timers.alloc_arm_seq();
                         timer_state.value = timer_state.interval;
                         timer_state.deadline = Some(deadline);
-                        next_timer = Some((deadline, timer_state.generation));
+                        next_timer = Some((deadline, timer_state.arm_seq));
                     }
+                    *timers.get_mut(timer_id).unwrap() = timer_state;
                     if !signal.is_empty() {
-                        let _ = inner
-                            .sigpending
-                            .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
-                            should_wake = true;
-                        }
+                        let siginfo = SigInfo::new_with_sender_value(
+                            signal.to_signum().unwrap(),
+                            0,
+                            SigInfo::SI_TIMER as usize,
+                            0,
+                            timer_state.signal_value,
+                        );
+                        // 信号生成必须与 delete/exec/exit 的 timer 失效串行；真正的
+                        // 调度器唤醒放到 timer 锁外执行。
+                        let _ = queue_process_signal_info(&process, signal, siginfo);
+                        generated_signal = Some(signal);
                     }
                 }
-                if should_wake {
-                    wake_interruptible(task.clone());
-                }
-                if let Some((deadline, next_generation)) = next_timer {
+                let woke = generated_signal
+                    .map(|signal| wake_process_signal_waiter(&process, signal))
+                    .unwrap_or(false);
+                if let Some((deadline, next_arm_seq)) = next_timer {
                     add_kernel_timer(
                         TimerAction::PosixTimerSignal {
-                            task: Arc::downgrade(&task),
+                            process: Arc::downgrade(&process),
                             timer_id,
-                            signal,
-                            generation: next_generation,
+                            arm_seq: next_arm_seq,
                         },
                         deadline,
                     );
                 }
-                should_wake
+                woke
             }
             TimerAction::TimerFdSweep { generation } => {
                 if !crate::fs::timerfd::timerfd_sweep_is_current(generation) {

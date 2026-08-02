@@ -1008,3 +1008,22 @@
   无精确注入 harness 时，应把状态转换与锁序证明写入证据，并明确动态交错为 NOT RUN。
 - **相关文件**: `os/src/task/manager.rs`, `os/src/task/signal/mod.rs`,
   `os/src/task/signal/wait.rs`, `docs/01_architecture/lock-order.md`
+
+## 进程级异步对象：预留发布、唯一装载序号与锁外唤醒
+
+- **先定共享域**: timer、异步通知等对象若由整个线程组通过整数 ID 访问，owner 应放在 PCB，
+  而不是创建者 TCB。thread clone 共享 owner，fork/exec/exit 的继承和清理规则必须显式编码。
+- **faultable ID 发布**: “分配 ID 后写回用户指针”不能跨 owner 锁。slot 使用
+  `Vacant -> Reserved -> Active`，先保留身份、锁外 copyout、成功后再发布；查询和删除只接受
+  Active，copyout 失败撤销 Reserved。这样既不持锁 fault，也不暴露半初始化对象。
+- **拒绝 slot ABA**: 只比较可复用 ID 或 slot-local 重置 generation 不够。每次 arm 从 owner
+  范围分配不重复的序号，异步 action 同时匹配 owner、ID、arm sequence 和事件 deadline。
+  delete/recreate、rearm、exec 和 exit 的旧节点才能稳定失效。
+- **生成事件与唤醒分层**: callback 在 owner 锁内验证身份、提交对象状态并向受保护 pending
+  队列生成事件，使 delete/clear 与事件生成有单一线性化顺序；释放 owner 锁后再扫描线程、
+  操作 runqueue 或重新注册异步节点。为此可把 signal API 拆成“只入队”和“只唤醒”两个语义
+  清楚的 helper，但不能让只入队 helper 隐式进入调度器。
+- **compact 也属于锁图**: 队列清理若在 queue 锁内读取 owner 表，所有注册路径都必须先释放
+  owner 锁再进入 queue，明确形成单向 `queue -> owner`，禁止反向嵌套。
+- **相关文件**: `os/src/task/process.rs`, `os/src/task/manager.rs`,
+  `os/src/task/signal/delivery.rs`, `os/src/syscall/process/time.rs`

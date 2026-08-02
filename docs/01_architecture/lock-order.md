@@ -958,6 +958,24 @@ parent process.inner
 触发缺页、CoW、TLB shootdown 或 EFAULT 时，所有 parent/child/WaitQueue 锁都已释放；Linux
 也不会因 EFAULT 把已经消费的 stop/continue 或 zombie 事件重新发布。
 
+### 3.22 B77 进程级 POSIX timer owner
+
+POSIX timer 表由 PCB 的独立 mutex 保护，不再嵌入任一 TCB。允许的局部锁边只有：
+
+```text
+KERNEL_TIMER_QUEUE -> PosixTimerTable     # compact 只读 stale action 身份
+PosixTimerTable -> process.signal         # callback 原子生成 shared pending
+```
+
+第一条没有反向边：`timer_settime()`、周期 callback 和 realtime rearm 都必须先释放 timer 表，
+再调用 `add_kernel_timer()`。第二条只允许调用不进入调度器的 `queue_process_signal_info()`；
+真正扫描 sibling、修改 stop/continue 状态和唤醒 runqueue 必须在释放 timer 表后完成。
+
+`timer_create()` 在表锁内把 slot 置为 `Reserved`，锁外写回用户 timer ID，之后再发布
+`Active`；任何用户 copyin/copyout 都不得跨 timer 表锁。delete、exec、最后线程退出与回调
+使用同一 owner 锁决定先后：回调若先取得锁，则信号已在线性化点生成；清理若先取得锁，旧
+action 会因 slot/`arm_seq`/deadline 不匹配而失效。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

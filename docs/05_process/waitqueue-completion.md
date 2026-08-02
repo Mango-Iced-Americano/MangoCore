@@ -410,10 +410,9 @@ pub enum TimerAction {
         generation: usize,
     },
     PosixTimerSignal {
-        task: Weak<TaskControlBlock>,
+        process: Weak<ProcessControlBlock>,
         timer_id: usize,
-        signal: Signals,
-        generation: usize,
+        arm_seq: u64,
     },
     TimerFdSweep {
         generation: usize,
@@ -444,6 +443,10 @@ impl KernelTimerQueue {
     }
 }
 ```
+
+`PosixTimerSignal` 不缓存 signal；回调必须在 PCB timer 表锁内重新读取当前对象并同时匹配
+`timer_id + arm_seq + deadline`。这样 rearm、delete/recreate、exec 或退出产生的 stale
+heap 节点不能投递旧配置的信号。周期重装和调度器唤醒都在释放 timer 表锁后完成。
 
 `KernelTimer` 的 `Ord` 以 deadline 反序比较，使 `BinaryHeap` 顶部成为最早 deadline。`MAX_TIMERS` 防止 timer storm 耗尽内存。
 

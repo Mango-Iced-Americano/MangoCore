@@ -39,7 +39,9 @@ pub use delivery::{
     send_process_signal, send_process_signal_info, send_process_signal_to_current_task,
     send_thread_signal, send_thread_signal_info_deferred,
 };
-pub(crate) use delivery::queue_kernel_process_signal;
+pub(crate) use delivery::{
+    queue_kernel_process_signal, queue_process_signal_info, wake_process_signal_waiter,
+};
 use frame::signal_frame_layout;
 pub use pending::{is_realtime_signal, PendingSignal, SignalQueue};
 pub use wait::{sigsuspend, sigtimedwait};

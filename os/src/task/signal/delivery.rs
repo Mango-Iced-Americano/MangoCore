@@ -77,20 +77,49 @@ pub fn send_process_signal_info(
     signal: Signals,
     siginfo: SigInfo,
 ) -> bool {
+    if !queue_process_signal_info(process, signal, siginfo) {
+        return false;
+    }
+    let _ = wake_process_signal_waiter(process, signal);
+    true
+}
+
+/// 只把带 `SigInfo` 的信号发布到进程共享 pending 队列，不进入调度器。
+///
+/// POSIX timer callback 用它把“timer 仍有效”和“信号已生成”串行化在 timer
+/// owner 锁内；调用方释放自己的锁后必须再调用 [`wake_process_signal_waiter`]。
+pub(crate) fn queue_process_signal_info(
+    process: &ProcessControlBlock,
+    signal: Signals,
+    siginfo: SigInfo,
+) -> bool {
     if signal.is_empty() {
         return true;
     }
-    if signal.contains(Signals::SIGCONT) {
-        process.mark_continued();
-        process.enqueue_process_signal(PendingSignal { signal, siginfo });
-        wake_process_interruptible_threads(process);
-        return true;
-    }
     process.enqueue_process_signal(PendingSignal { signal, siginfo });
-    if let Some(task) = process_signal_target(process, signal) {
-        wake_task_if_interruptible(task);
-    }
     true
+}
+
+/// 唤醒可能消费进程共享信号的线程，不修改 pending 队列。
+pub(crate) fn wake_process_signal_waiter(
+    process: &ProcessControlBlock,
+    signal: Signals,
+) -> bool {
+    if signal.is_empty() {
+        return false;
+    }
+    if signal.contains(Signals::SIGCONT) {
+        // 状态变更和 WaitQueue 唤醒可能进入其它锁域，不能放在仅入队的
+        // queue helper 中；POSIX timer 会在自己的 owner 锁内调用该 helper。
+        process.mark_continued();
+        wake_process_interruptible_threads(process);
+        true
+    } else if let Some(task) = process_signal_target(process, signal) {
+        wake_task_if_interruptible(task);
+        true
+    } else {
+        false
+    }
 }
 
 /// 向进程共享 pending 队列投递信号，但不主动唤醒其它线程。

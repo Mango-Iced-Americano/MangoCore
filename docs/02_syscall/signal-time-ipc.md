@@ -252,78 +252,13 @@ timer 并提交新配置；锁外完成 `KernelTimer` 注册后才写回旧值�
 | timer 槽达到上限 | `EAGAIN` |
 | `Vec::try_reserve` 失败 | `ENOMEM` |
 
-`sevp` 为 NULL 时默认 `SIGALRM`。写回 timerid 失败时，会回滚刚分配的 timer slot。
+timer 表由 PCB 独占并由同一线程组共享，普通 fork 得到空表，exec 和最后线程退出时
+清空。`sevp` 为 NULL 时默认投递 `SIGALRM`，默认 `si_value` 是 timer ID；显式
+`sigev_value` 会原样进入 `SI_TIMER` 的 `SigInfo`。
 
-`timer_create()` 源码如下：
-
-```rust
-pub fn sys_timer_create(
-    clock_id: usize,
-    sevp: *const SigeventHeader,
-    timerid: *mut i32,
-) -> isize {
-    if timerid.is_null() {
-        return EFAULT;
-    }
-    if !valid_posix_timer_clock(clock_id) {
-        return EINVAL;
-    }
-
-    let token = current_user_token();
-    let signal = if sevp.is_null() {
-        Signals::SIGALRM
-    } else {
-        let event = match UserPtr::new(sevp).read(token) {
-            Ok(event) => event,
-            Err(errno) => return errno,
-        };
-        match event.sigev_notify {
-            SIGEV_SIGNAL => match Signals::from_signum(event.sigev_signo as usize) {
-                Ok(signal) => signal,
-                Err(_) => return EINVAL,
-            },
-            SIGEV_NONE => Signals::empty(),
-            _ => return EINVAL,
-        }
-    };
-
-    let task = current_task().unwrap();
-    let id = {
-        let mut inner = task.acquire_inner_lock();
-        if let Some((id, slot)) = inner
-            .posix_timers
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-        {
-            *slot = Some(PosixTimer::new(clock_id, signal));
-            id
-        } else {
-            if inner.posix_timers.len() >= MAX_POSIX_TIMERS {
-                return EAGAIN;
-            }
-            if inner.posix_timers.try_reserve(1).is_err() {
-                return ENOMEM;
-            }
-            inner
-                .posix_timers
-                .push(Some(PosixTimer::new(clock_id, signal)));
-            inner.posix_timers.len() - 1
-        }
-    };
-
-    match UserPtrMut::new(timerid).write(token, &(id as i32)) {
-        Ok(()) => SUCCESS,
-        Err(errno) => {
-            let mut inner = task.acquire_inner_lock();
-            if let Some(slot) = inner.posix_timers.get_mut(id) {
-                *slot = None;
-            }
-            errno
-        }
-    }
-}
-```
+创建采用 `Vacant -> Reserved -> Active` 三态发布：先在表锁内保留 ID，释放锁后写回
+用户 `timerid`，写回成功才重新持锁发布对象；copyout 失败则撤销预留。并发线程既不会
+抢到同一 ID，也不能查询到半初始化 timer，且用户访存不会发生在 timer 表锁内。
 
 ### 8.2 set/get/delete
 
@@ -334,9 +269,18 @@ pub fn sys_timer_create(
 | `timer_getoverrun` | 返回 overrun 计数 |
 | `timer_delete` | 删除 timer slot |
 
-POSIX timer 投递信号使用 task timer 队列。
 `timer_settime()` 同样采用“copyin → 锁内快照并提交 → 锁外注册 → copyout”的顺序；旧值
-写回失败不撤销已经发布的 generation、deadline 或立即到期信号。
+写回失败不撤销已经发布的新配置或立即到期信号。
+
+墙钟类 timer 通过全局 `KernelTimerQueue` 驱动，action 只持 PCB `Weak`、timer ID 和
+`arm_seq`。回调必须同时匹配 ID、装载序号和 deadline 才能提交到期结果，因此
+delete/recreate、rearm、exec 和退出遗留的旧节点都不能命中新对象。回调在 timer 表锁内
+更新状态并向进程共享 pending 队列生成 `SI_TIMER`，释放表锁后才唤醒目标线程或重装周期
+节点；这使“删除 timer”与“生成信号”有明确的线性化顺序，又不把调度器操作放进 owner 锁。
+
+`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID` 的创建和参数 ABI 已接受，但本节
+所述 wall-time 队列尚不能证明 CPU 消耗驱动的到期语义；该部分必须由独立 CPU timer 节点
+完成，不能由 `timer_settime01/02` 通过外推。
 
 ## 9. clock 与 timeval
 

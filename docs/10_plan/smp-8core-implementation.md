@@ -696,6 +696,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   使用最终退出快照。`wait4` 和 raw `waitid` 按 Linux 顺序在全部进程锁外 copyout，EFAULT
   不回滚事件。双架构 8 核 build 与每套 libc 12/12 focused wait LTP 通过；raw waitid 第五
   参数内容、非零 rusage 与 EFAULT 后消费语义的专项探针仍为 NOT RUN；
+- B77 将 POSIX timer 从创建线程 TCB 迁入 PCB 独立表：thread clone 共享，fork 新建空表，
+  exec 和最后线程退出清空；`Reserved` slot 隔离 timerid copyout，表级唯一 `arm_seq` 与
+  deadline 共同拒绝 delete/recreate/rearm 的 stale action。到期 `SI_TIMER` 进入进程共享
+  pending，timer owner 锁内只生成信号、锁外唤醒和重装。双架构 8 核 build 与每套 libc
+  `timer_settime01/02` focused 均通过；sibling/creator-exit/fork/exec/delete 精确交错、
+  per-timer overrun 身份及 CPU 消耗驱动的 POSIX CPU timer 到期仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

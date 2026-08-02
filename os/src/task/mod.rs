@@ -73,7 +73,7 @@ pub use pid::{
 };
 pub use process::{
     is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
-    unregister_writable_inode, ProcessControlBlock, ProcessState,
+    unregister_writable_inode, PosixTimer, ProcessControlBlock, ProcessState,
 };
 pub(crate) use process::{LimitPair, ProcessLimits};
 pub(crate) use process_manager::CloneScheduleOutcome;
@@ -95,8 +95,8 @@ pub use sleep::{
     wake_realtime_abstime_sleepers_after_clock_set,
 };
 pub use task::{
-    any_seccomp_enabled, FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn,
-    TaskControlBlock, TaskStatus, UtsNamespace,
+    any_seccomp_enabled, FsStatus, RobustList, Rusage, SeccompFilterInsn, TaskControlBlock,
+    TaskStatus, UtsNamespace,
 };
 
 /// 返回指定 CPU 的精确 runqueue 长度，供诊断和 SMP focused test 使用。

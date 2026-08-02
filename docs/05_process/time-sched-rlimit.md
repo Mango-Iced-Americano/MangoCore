@@ -43,7 +43,8 @@ TCB inner 中：
 
 `ru_maxrss` 在进程退出时根据 resident user bytes 更新；其他 rusage 字段多数保持 0。
 
-计时状态实际保存在 TCB inner 的 `rusage`、`clock`、itimer 和 POSIX timer 字段中：
+计时状态按共享域拆分。TCB inner 保留线程 CPU 记账、采样锚点和当前仍属线程级的
+legacy itimer；线程组累计和 POSIX timer 表由 PCB 持有：
 
 ```rust
 pub clear_child_tid: usize,
@@ -53,9 +54,12 @@ pub clock: ProcClock,
 pub timer: [ITimerVal; 3],
 pub real_timer_deadline: Option<TimeSpec>,
 pub real_timer_generation: usize,
-pub posix_timers: Vec<Option<PosixTimer>>,
 pub pending_oom_kill: bool,
 ```
+
+PCB 的 `cpu_account` 汇总所有线程的 user/system 时间，`posix_timers` 独立 mutex 则保护
+进程级 timer ID、装载代次和到期状态。两者都不能塞回某个“创建线程”的 TCB，否则 sibling
+无法按 POSIX 语义访问对象，创建线程退出也会错误删除整个进程的 timer。
 
 `ProcClock` 保存进入用户态/内核态的时间戳，CPU 时间统计函数据此累加 `Rusage`：
 
@@ -152,11 +156,11 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
 | clock | 支持情况 |
 |-------|----------|
-| `CLOCK_REALTIME` | 支持 |
-| `CLOCK_MONOTONIC` | 支持 |
+| `CLOCK_REALTIME`/`CLOCK_MONOTONIC` | wall-time 到期路径支持 |
 | `CLOCK_BOOTTIME` 等部分 clock | 根据 `valid_posix_timer_clock()` |
+| process/thread CPU clock | 创建、设置和查询 ABI 已接入；CPU 消耗驱动到期仍待独立实现 |
 
-每任务最多 `MAX_POSIX_TIMERS = 32`。`timer_create()`：
+每进程最多 32 个 POSIX timer。`timer_create()`：
 
 | 条件 | 错误 |
 |------|------|
@@ -168,182 +172,27 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
 `timer_settime()` 只接受 `TIMER_ABSTIME` 作为 flag；`new_value` null 返回 `EINVAL`。
 
-POSIX timer 对象直接挂在创建线程的 TCB 上：
-
-```rust
-#[derive(Clone, Copy, Debug)]
-pub struct PosixTimer {
-    pub clock_id: usize,
-    pub signal: Signals,
-    pub interval: TimeSpec,
-    pub value: TimeSpec,
-    pub deadline: Option<TimeSpec>,
-    pub realtime_abs_deadline: Option<TimeSpec>,
-    pub generation: usize,
-    overrun: usize,
-}
-
-impl PosixTimer {
-    const OVERRUN_MAX: usize = i32::MAX as usize;
-
-    pub fn new(clock_id: usize, signal: Signals) -> Self {
-        Self {
-            clock_id,
-            signal,
-            interval: TimeSpec::new(),
-            value: TimeSpec::new(),
-            deadline: None,
-            realtime_abs_deadline: None,
-            generation: 0,
-            overrun: 0,
-        }
-    }
-}
-```
-
-`timer_create()` 负责选择空 slot 或追加 slot，并在写回 timerid 失败时撤销刚创建的 timer：
-
-```rust
-pub fn sys_timer_create(
-    clock_id: usize,
-    sevp: *const SigeventHeader,
-    timerid: *mut i32,
-) -> isize {
-    if timerid.is_null() {
-        return EFAULT;
-    }
-    if !valid_posix_timer_clock(clock_id) {
-        return EINVAL;
-    }
-
-    let token = current_user_token();
-    let signal = if sevp.is_null() {
-        Signals::SIGALRM
-    } else {
-        let event = match UserPtr::new(sevp).read(token) {
-            Ok(event) => event,
-            Err(errno) => return errno,
-        };
-        match event.sigev_notify {
-            SIGEV_SIGNAL => match Signals::from_signum(event.sigev_signo as usize) {
-                Ok(signal) => signal,
-                Err(_) => return EINVAL,
-            },
-            SIGEV_NONE => Signals::empty(),
-            _ => return EINVAL,
-        }
-    };
-
-    let task = current_task().unwrap();
-    let id = {
-        let mut inner = task.acquire_inner_lock();
-        if let Some((id, slot)) = inner
-            .posix_timers
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-        {
-            *slot = Some(PosixTimer::new(clock_id, signal));
-            id
-        } else {
-            if inner.posix_timers.len() >= MAX_POSIX_TIMERS {
-                return EAGAIN;
-            }
-            if inner.posix_timers.try_reserve(1).is_err() {
-                return ENOMEM;
-            }
-            inner
-                .posix_timers
-                .push(Some(PosixTimer::new(clock_id, signal)));
-            inner.posix_timers.len() - 1
-        }
-    };
-
-    match UserPtrMut::new(timerid).write(token, &(id as i32)) {
-        Ok(()) => SUCCESS,
-        Err(errno) => {
-            let mut inner = task.acquire_inner_lock();
-            if let Some(slot) = inner.posix_timers.get_mut(id) {
-                *slot = None;
-            }
-            errno
-        }
-    }
-}
-```
+`PosixTimerTable` 是 PCB 的唯一 owner：线程 clone 共享该表，普通 fork 创建空表，exec 和
+最后线程退出清空。表内 slot 使用 `Vacant/Reserved/Active` 三态，避免 `timer_create()`
+在用户 copyout 窗口暴露半初始化对象。每次 arm 从全表分配唯一 `arm_seq`；删除后复用相同
+ID 时，旧 kernel timer action 也因序号不匹配而失效。
 
 ## 7. POSIX timer 到期
 
 到期由 `TimerAction::PosixTimerSignal` 处理：
 
-1. 校验 timer id、generation、deadline。
+1. 升级 PCB `Weak`，校验 timer ID、`arm_seq` 和 deadline。
 2. 一次性 timer 清空 value/deadline。
 3. 周期 timer 计算 missed overruns。
 4. 对 realtime absolute timer 维护 `realtime_abs_deadline`。
-5. 如果 signal 非空，向线程 pending 队列投递 `SI_TIMER`。
-6. 如果信号可唤醒 Interruptible 任务，转 Ready 并唤醒。
+5. 在 timer 表锁内向进程共享 pending 队列生成带 `sigev_value` 的 `SI_TIMER`。
+6. 释放 owner 锁后选择一个可接收 sibling 并唤醒。
 7. 周期 timer 重新加入 kernel timer queue。
 
-到期处理在 `KernelTimerQueue::run_timer()` 中根据 `TimerAction` 分支执行。`WakeTask` 分支体现了 generation 过滤和 fallback timer 重挂逻辑：
-
-```rust
-pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
-    match timer.action {
-        TimerAction::WakeTask { task, generation, fallback_ms } => {
-            let Some(task) = task.upgrade() else { return false };
-            task.wait_io_timer_pending
-                .store(false, AtomicOrdering::Relaxed);
-
-            if let Some(ms) = fallback_ms {
-                let active = task
-                    .wait_io_fallback_active_generation
-                    .load(AtomicOrdering::Acquire);
-                if active == 0 {
-                    return false;
-                }
-                if active != generation {
-                    let current =
-                        task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                    if active == current {
-                        if !task.wait_io_timer_pending.swap(true, AtomicOrdering::Relaxed) {
-                            let new_gen = task
-                                .wait_timer_generation
-                                .fetch_add(1, AtomicOrdering::Relaxed)
-                                + 1;
-                            add_kernel_timer(
-                                TimerAction::WakeTask {
-                                    task: Arc::downgrade(&task),
-                                    generation: new_gen,
-                                    fallback_ms: Some(ms),
-                                },
-                                TimeSpec::now() + TimeSpec::from_ms(ms),
-                            );
-                            task.wait_io_fallback_active_generation
-                                .store(new_gen, AtomicOrdering::Release);
-                        }
-                    }
-                    return false;
-                }
-            }
-
-            if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
-                crate::task::perf::record_ktimer_stale_waketask();
-                return false;
-            }
-
-            let should_wake = matches!(
-                task.task_status(),
-                super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked
-            );
-            if should_wake && wake_interruptible(task) {
-                crate::task::perf::record_ktimer_real_wake();
-                return true;
-            }
-            false
-        }
-```
-
-这段代码只展示 `WakeTask` 分支；`SendSignal`、`PosixTimerSignal` 和 `TimerFdSweep` 在同一个 match 中处理。
+`KernelTimerQueue::compact()` 也检查同一组 owner/arm/deadline 条件，可提前清理 rearm、
+delete、exec 和退出产生的 stale 节点。compact 在队列锁下只读 timer 表，因此装载路径必须
+先释放表锁再调用 `add_kernel_timer()`，禁止形成反向锁边。CPU clock timer 不能使用
+wall-time heap 驱动；其到期检查是后续独立实现边界。
 
 ## 8. realtime clock 调整
 

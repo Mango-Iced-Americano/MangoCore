@@ -410,7 +410,21 @@ diag=1
 - **根因**: LTP `timer_settime03` 覆盖 Linux CVE-2018-12896 场景：极小周期 timer 会产生超过 `i32::MAX` 的 overrun。`timer_getoverrun()` 固定返回 0，或每次内核 tick 只加 1，都会被该用例打穿。
 - **修复**: 在 POSIX timer 状态中保存 overrun；`TIMER_ABSTIME` 初始时间已过期时按绝对 clock 差值计算初始 overrun；周期重装时用 `(now - deadline) / interval` 批量追赶遗漏到期次数，返回用户态前饱和到 `i32::MAX`。
 - **教训**: timerfd/POSIX timer 的周期语义不能依赖调度 tick 频率逐次补偿；所有短 interval/长阻塞场景都应按真实时间差一次计算，否则既慢又不符合 Linux 边界行为。
-- **相关文件**: `os/src/task/task.rs`, `os/src/task/manager.rs`, `os/src/syscall/process/time.rs`
+- **相关文件**: `os/src/task/process.rs`, `os/src/task/manager.rs`, `os/src/syscall/process/time.rs`
+
+## POSIX timer 参数 LTP 不能替代 SMP 生命周期交错
+
+- **覆盖边界**: `timer_settime01/02` 能验证多种 clock 的 set/get、periodic/absolute 参数和
+  EFAULT/EINVAL 顺序，但其单线程流程不证明 timer ID 在线程组内共享，也不证明创建线程退出、
+  fork 空表、exec 删除、delete/recreate 与正在到期 callback 的并发顺序。
+- **证据写法**: 双架构 8 核启动和双 libc 通过只能记为功能非回归；上述交错必须列为 NOT RUN，
+  直到有 pthread barrier/精确 hook 控制线性化窗口的 focused probe。不能以“共用同一份 Rust
+  代码”代替另一架构运行，也不能以 clock ID 参数被接受外推 CPU-time 到期由 CPU 消耗驱动。
+- **环境故障归因**: recipe 因脚本无执行位返回 126 时，先保留失败日志并修正调用方式为显式
+  `bash script`，只补跑缺失 case；无需重复已经在同一冻结 diff 上通过的双架构构建和另一架构
+  focused gate。
+- **相关文件**: `cc-codex/protocol/test-recipes.json`,
+  `os/src/syscall/process/time.rs`, `docs/Work_Log/evidence/`
 
 ## 默认致命信号日志区分同步 fault 与用户投递
 
