@@ -722,6 +722,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   反向以精确身份锁外清理。signalfd 返回真实 timer ID/overrun。双架构 8 核 build 与每套 libc
   `timer_settime01/02` 共 80/80 通过；双 timer 同信号、getoverrun 精确回环及 signalfd 布局
   专项仍为 NOT RUN；
+- B81 关闭 process shared signal hint 的锁外旧值覆盖窗口：enqueue、dequeue 和精确 timer
+  清理都在同一个 signal 临界区内重新计算完整位图并 Release 发布，fast path 使用 Acquire
+  读取。mutex 提供 writer 全序，内存序负责无锁发布；只改成 Release 而保留锁外 store 不算
+  修复。POSIX timer discard/finalize 仍在 signal 解锁后执行。双架构 8 核 build 与 glibc
+  `sigtimedwait01` 各 11/11 通过，`online_mask=0xff`；三 CPU stale-store 精确注入仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

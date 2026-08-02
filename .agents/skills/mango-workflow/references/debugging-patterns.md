@@ -1009,6 +1009,24 @@
 - **相关文件**: `os/src/task/manager.rs`, `os/src/task/signal/mod.rs`,
   `os/src/task/signal/wait.rs`, `docs/01_architecture/lock-order.md`
 
+## 派生原子 hint：必须与权威队列在同一 writer 临界区发布
+
+- **危险窗口**: 在 mutex 内修改队列并计算 hint，解锁后才 atomic store。旧消费者可携带空
+  快照暂停；新生产者随后完整入队并写非空；旧消费者恢复后再写空，最终形成“队列非空、hint
+  为空”的永久 false-negative。每个局部操作都持锁和原子，并不代表组合协议正确。
+- **根因不是 Relaxed 本身**: mutex 只串行临界区内的 mutation，锁外 store 已逃出 writer
+  全序。把 Relaxed 换成 Release 不能阻止旧 store 在新 store 后执行。
+- **固定协议**: 在同一个 owner mutex 内完成 mutation、重新计算完整派生值、Release store，
+  然后才 unlock；无锁 fast path 用 Acquire load。mutex 决定 writer 顺序，Release/Acquire
+  表达发布/消费。真正领取对象仍要回到 owner 锁内重验，hint 不得升级为权威状态。
+- **审计方法**: 不只搜索 hint store，还要搜索底层 queue 的所有 enqueue/dequeue/remove/clear
+  写点，确保没有旁路 mutation。若 dequeue 后还要进入另一个 owner，先把值对象带出并释放
+  第一把锁，不能为了同步 hint 新增双锁嵌套。
+- **验收边界**: 普通并发功能回归能发现明显丢信号，但不保证命中“旧 writer 暂停、新 writer
+  完整通过、旧 writer 恢复”的精确三方交错。没有注入点时，登记 NOT RUN 并保留完整锁序证明。
+- **相关文件**: `os/src/task/process.rs`, `os/src/task/signal/mod.rs`,
+  `docs/01_architecture/lock-order.md`
+
 ## 进程级异步对象：预留发布、唯一装载序号与锁外唤醒
 
 - **先定共享域**: timer、异步通知等对象若由整个线程组通过整数 ID 访问，owner 应放在 PCB，

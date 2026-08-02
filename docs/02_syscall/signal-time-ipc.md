@@ -130,6 +130,11 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
 
 无效 signal number、权限不足、目标不存在会按对应分支返回 `EINVAL`、`EPERM` 或 `ESRCH`。实际 pending 队列和投递由 `task/signal/` 子模块处理。
 
+进程 shared pending 另有 `shared_pending_hint` 供高频路径无锁判断，但 hint 不是第二份状态：
+signal queue 仍是权威 owner。所有 enqueue/dequeue/精确 timer 清理都必须在同一个 process
+signal 临界区内更新队列并以 Release 发布最新位图，读端以 Acquire 取得。不能先解锁再写
+hint；否则旧消费者可能在新生产者之后写回过期的空位图，使队列非空而 fast path 长期跳过它。
+
 ## 5. pidfd 与 kcmp
 
 ### 5.1 pidfd target

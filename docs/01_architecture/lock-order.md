@@ -1017,6 +1017,31 @@ REAL callback 在表锁内核对 PCB generation/deadline 并推进周期；VIRTU
 锁外采样 PCB CPU 累计，再在表锁内唯一领取。`task.inner` 只负责把当前线程记账尾数取出，
 释放后才原子冲刷 PCB；不能形成 `task.inner -> IntervalTimerTable` 的嵌套边。
 
+### 3.23 B81 shared signal hint 与权威队列同临界区发布
+
+`shared_pending_hint` 只是 process signal queue 的无锁快照，不拥有 signal。所有 queue writer
+必须遵守：
+
+```text
+process.signal lock
+  -> enqueue / dequeue / remove exact timer event
+  -> 重新计算完整 pending bits
+  -> Release store shared_pending_hint
+process.signal unlock
+```
+
+若 store 位于 unlock 之后，旧消费者可先算出 0 并暂停，新生产者完整入队并写入非零，旧消费者
+随后再写回 0；mutex 只串行了 queue mutation，没有串行这两个 store。把 store 放回临界区后，
+mutex 决定 writer 的唯一全序，最后离开临界区的 writer 一定发布对应的最新队列快照。
+
+无锁读端用 Acquire load。Release/Acquire 表达 hint 的发布与消费，但不能替代上述 writer
+互斥；单纯把锁外 Relaxed 改成 Release 仍然保留旧值覆盖窗口。读到 hint 后需要领取对象时，
+仍必须取得对应 signal owner 锁重新检查权威队列。
+
+`take_shared_signal()`/`take_shared_matching()` 只在 signal 临界区内 dequeue 和更新 hint；随后
+先解锁，再进入 POSIX timer owner 执行 discard/finalize，因此 B80 的 signal/timer 无嵌套锁序
+保持不变。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

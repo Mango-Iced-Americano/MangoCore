@@ -1113,13 +1113,15 @@ impl ProcessControlBlock {
 
     /// 从 signal queue 精确移除一个 timer 事件；调用方不得持有 timer 锁。
     pub(crate) fn remove_queued_posix_timer_signal(&self, event_id: PosixTimerEventId) {
-        let pending_bits = {
+        {
             let mut state = self.signal.lock();
             state.shared_pending.remove_timer_event(event_id);
-            state.shared_pending.pending().bits() as u64
-        };
-        self.shared_pending_hint
-            .store(pending_bits, Ordering::Relaxed);
+            let pending_bits = state.shared_pending.pending().bits() as u64;
+            // 队列变更和 hint 发布必须属于同一个 signal 临界区。
+            // 否则较早解锁的消费者可能在新生产者之后写回旧的空位图。
+            self.shared_pending_hint
+                .store(pending_bits, Ordering::Release);
+        }
     }
 
     /// 在任务安全点推进由 CPU 消耗驱动的 POSIX timer。
@@ -2081,13 +2083,14 @@ impl ProcessControlBlock {
     /// 只持有 `signal` 锁，不持有任何任务锁。`shared_pending_hint` 在锁释放前更新，
     /// 供等待路径无锁快速判断。
     pub fn enqueue_process_signal(&self, pending: PendingSignal) -> bool {
-        let (queued, pending_bits) = {
+        let queued = {
             let mut state = self.signal.lock();
             let queued = state.shared_pending.enqueue(pending).is_ok();
-            (queued, state.shared_pending.pending().bits() as u64)
+            let pending_bits = state.shared_pending.pending().bits() as u64;
+            self.shared_pending_hint
+                .store(pending_bits, Ordering::Release);
+            queued
         };
-        self.shared_pending_hint
-            .store(pending_bits, Ordering::Relaxed);
         queued
     }
 
@@ -2099,19 +2102,20 @@ impl ProcessControlBlock {
     /// 返回进程共享 pending signal 的无锁 hint。
     pub fn shared_pending_hint(&self) -> Signals {
         Signals::from_bits_truncate(
-            self.shared_pending_hint.load(Ordering::Relaxed) as signal_type!()
+            self.shared_pending_hint.load(Ordering::Acquire) as signal_type!()
         )
     }
 
     /// 从进程共享 pending 队列移除一个信号。
     pub fn take_shared_signal(&self, signal: Signals) -> bool {
-        let (pending, pending_bits) = {
+        let pending = {
             let mut state = self.signal.lock();
             let pending = state.shared_pending.dequeue_matching(signal);
-            (pending, state.shared_pending.pending().bits() as u64)
+            let pending_bits = state.shared_pending.pending().bits() as u64;
+            self.shared_pending_hint
+                .store(pending_bits, Ordering::Release);
+            pending
         };
-        self.shared_pending_hint
-            .store(pending_bits, Ordering::Relaxed);
         if let Some(pending) = pending {
             if let Some(event_id) = pending.timer_event {
                 self.discard_posix_timer_pending(event_id);
@@ -2124,13 +2128,14 @@ impl ProcessControlBlock {
 
     /// 从进程共享 pending 队列取出第一个属于 `set` 的信号。
     pub fn take_shared_matching(&self, set: Signals) -> Option<PendingSignal> {
-        let (mut pending, pending_bits) = {
+        let mut pending = {
             let mut state = self.signal.lock();
             let pending = state.shared_pending.dequeue_matching(set);
-            (pending, state.shared_pending.pending().bits() as u64)
+            let pending_bits = state.shared_pending.pending().bits() as u64;
+            self.shared_pending_hint
+                .store(pending_bits, Ordering::Release);
+            pending
         };
-        self.shared_pending_hint
-            .store(pending_bits, Ordering::Relaxed);
         if let Some(pending) = pending.as_mut() {
             self.finalize_posix_timer_delivery(pending);
         }

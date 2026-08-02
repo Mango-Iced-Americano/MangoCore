@@ -98,6 +98,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP POSIX CPU-time timer | 2026-08-02 | GPT/Codex, DeepSeek | Linux 6.6 POSIX CPU timer 对照、并发领取/锁序审查、双架构 8 核 CPU-clock LTP | process/thread timer 按 PCB/TCB CPU 累计在安全点到期，固定栈事件锁外投递；两架构两套 libc 的相对、周期和绝对模式全过 |
 | SMP 进程级 legacy interval timer | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 itimer/fork 生命周期对照、共享域与锁序审查、双架构 8 核 setitimer LTP 和初赛门禁 | REAL/VIRTUAL/PROF 迁入 PCB，按 monotonic/线程组 CPU 时钟推进；双架构两套 libc 三种 signal 全过，初赛失败集合未扩大 |
 | SMP POSIX timer 精确 pending | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 预分配 sigqueue/overrun 语义对照、对象身份与双锁路径审查、双架构 8 核 focused LTP | instance/arm/event 身份分离，同 timer 合并 overrun、不同 timer 独立排队；两架构每套 libc `timer_settime01/02` 共 80/80 通过 |
+| SMP shared signal hint 原子发布 | 2026-08-03 | GPT/Codex, DeepSeek | 三 writer 交错建模、全部 queue mutation 审查、双架构 8 核 sigtimedwait gate | queue mutation 与 hint store 合入同一 signal 临界区，关闭旧值覆盖；两架构 glibc 各 11/11 通过 |
 
 ## 4. 详细使用场景
 
@@ -1298,6 +1299,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b78-posix-cpu-timer-summary.md` | SMP POSIX CPU-time timer | 记录 wall/CPU 时钟域分离、PCB/TCB 对象计时、锁内唯一领取和锁外信号投递、双架构 8 核 focused 证据及交错 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b79-interval-timer-summary.md` | SMP 进程级 legacy interval timer | 记录 TCB→PCB owner 迁移、三类时钟域、fork/exec/exit 生命周期、模型结论纠错及双架构 8 核 focused/初赛冻结证据 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b80-posix-timer-pending-summary.md` | SMP POSIX timer 精确 pending | 记录对象/装载/事件三类身份、per-timer overrun、双锁拆分、signalfd 映射、双架构 8 核 focused 冻结证据与专项 NOT RUN 边界 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b81-shared-signal-hint-summary.md` | SMP shared signal hint 原子发布 | 记录锁外 stale store 交错、writer mutex 全序与 Release/Acquire 分工、双架构 8 核构建/focused 冻结证据及精确注入 NOT RUN |
 
 ## 9. 交互记录与留痕方式
 

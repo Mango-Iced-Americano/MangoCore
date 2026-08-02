@@ -287,6 +287,10 @@ B80 要求 POSIX timer pending 使用 `timer ID + instance_seq` 标识对象生�
 heap 装载。每个 timer 最多一个 pending 事件并独立累计 overrun，不得按 signal number 合并
 不同 timer。signal dequeue 与 timer finalize、timer clear 与 signal cleanup 都必须在中间释放
 第一把锁；`timer_getoverrun()` 只返回最近一次实际交付固化的值。
+B81 要求 process shared signal queue 的每次 mutation 与 `shared_pending_hint` 发布位于同一个
+signal 临界区：锁内重新计算完整位图并 Release store，读端 Acquire load。禁止解锁后再写
+hint，因为旧 writer 会覆盖新 writer；只升级原子内存序不能修复这个顺序窗口。hint 只是
+fast path，领取信号时仍须在 owner 锁内重验权威队列。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
