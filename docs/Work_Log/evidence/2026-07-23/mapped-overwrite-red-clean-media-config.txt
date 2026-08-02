@@ -1,4 +1,0 @@
-5d78edc2d7733352046cad727983238de167c597ee6a223afbc980346aa6be22  os_test.conf
-95973543db6b84a9a5e70f30da466ce292867aff5b689fb14c88dc9406e378b8  sdcard-rv.img
-MANGO_CMDLINE=mango.mode=ktest mango.test=ext4_another
-KTEST_QEMU_TIMEOUT=120

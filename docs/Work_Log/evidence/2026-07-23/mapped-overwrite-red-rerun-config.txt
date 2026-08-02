@@ -1,3 +1,0 @@
-5d78edc2d7733352046cad727983238de167c597ee6a223afbc980346aa6be22  os_test.conf
-KTEST_CMDLINE=mango.mode=ktest ktest.filter=ext4_another::
-KTEST_QEMU_TIMEOUT=120

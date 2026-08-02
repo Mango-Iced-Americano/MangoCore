@@ -1,2 +1,0 @@
-KTEST_EXIT_STATUS=0
-KTEST_COMMAND=docker compose exec -T os-dev bash -c cd /app/os && make rv64-kernel-build-only EXTRA_FEATURES=perf_diag LOG=error && make -f make/rv64.mk ktest-run KTEST_QEMU_TIMEOUT=120 KTEST_CMDLINE=mango.mode=ktest\ mango.test=ext4_another\ mango.test.failfast=1

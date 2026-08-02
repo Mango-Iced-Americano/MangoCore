@@ -1,5 +1,0 @@
-mode=run
-mask=0x110
-skip_apk=true
-ltp_runner=suite
-ltp_libc=glibc

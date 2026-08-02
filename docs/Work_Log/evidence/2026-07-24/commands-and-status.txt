@@ -1,5 +1,0 @@
-ktest: PASS; 12 `ok` entries
-iozone: musl exit_code=0; glibc exit_code=0; `global sync failed.*EIO` count=0; `Input/output error` count=0
-second boot: `official fs (x0) mounted at sdcard` count=1; EIO count=0
-e2fsck: 5 passes; no filesystem errors
-note: iozone required a 600-second timeout because both groups take approximately 341 seconds; the 300-second command cuts off the glibc group. The post-iozone image was snapshotted before the deliberately timeout-limited second-boot mount probe, then restored for e2fsck so the check examines the completed iozone image rather than an interrupted second iozone run.

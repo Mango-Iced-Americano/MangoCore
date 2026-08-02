@@ -1,7 +1,0 @@
-mode=run
-mask=0x800
-skip_apk=true
-ltp_runner=suite
-ltp_libc=glibc
-ltp_suites=fs,fs_perms_simple,fs_readonly,syscalls,fcntl-locktests
-ltp_include=open03,open04,close01,close02,read01,read02,write01,write02,write06,lseek01,stat02,fstat02,lstat02,statx02,access01,getcwd01,chdir04,getdents01,dup01,dup02,dup03,dup04,dup05,dup06,dup07,dup201,dup202,dup3_01,fcntl01,fcntl02,fcntl03,fcntl04,fcntl05,fcntl08,fcntl13,fcntl14,creat01,creat03,creat05,unlink05,unlink07,unlink08,link02,link04,link05,readlink01,readlink03,ftruncate01,chown01,rmdir01,symlink01,pipe13

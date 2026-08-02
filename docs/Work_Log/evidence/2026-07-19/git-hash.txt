@@ -1,7 +1,0 @@
-migration_baseline=01ae0e7bc9c8ee2e824833dbfac10722b2a47fb2
-uart_fix_build_tree=01ae0e7b-dirty
-dirty_scope=os/src/drivers/serial/ns16550a.rs,os/src/hal/arch/loongarch64/sbi.rs,worklog metadata
-uart_fix_commit=2eae776c9af94760a9904a9f2d28952b618eb2ea
-sata_probe_postfix_build=2eae776c9af94760a9904a9f2d28952b618eb2ea
-sata_mount_ro_postfix_build=2eae776c9af94760a9904a9f2d28952b618eb2ea
-sata_ro_shell_postfix_build=2eae776c9af94760a9904a9f2d28952b618eb2ea

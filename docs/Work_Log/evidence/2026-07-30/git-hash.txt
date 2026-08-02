@@ -1,2 +1,0 @@
-VF2 regression: aa46a09b-dirty
-Performance validation: 75f98034-dirty

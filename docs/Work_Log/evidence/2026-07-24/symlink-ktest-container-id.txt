@@ -1,4 +1,0 @@
-container=ed8056878dffad3be20338fe84b8885fc5ebe5d8f0b4cde99c5b04b45b2c6176
-/home/pxy/projects/MangoCore -> /app
-/etc/localtime -> /etc/localtime
-

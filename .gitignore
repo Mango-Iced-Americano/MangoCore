@@ -92,3 +92,6 @@ os.bin
 /user/fs/var/tmp/*
 
 *code-workspace
+
+# Test evidence archives — not source, keep out of repo
+docs/Work_Log/evidence/

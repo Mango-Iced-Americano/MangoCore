@@ -1,2 +1,0 @@
-command=timeout --foreground 1200 docker compose exec -T -e HOME=/root -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -w /app/os os-dev make ARCH=rv64 -f make/rv64.mk derived-comp
-exit_status=0

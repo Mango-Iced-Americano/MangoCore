@@ -1,3 +1,0 @@
-Boot1: QEMU killed during iozone (SIGTERM, 45s) — SUCCESS (poweroff-boot1-v2.log)
-e2fsck recovery: e2fsck -fy + e2fsck -fn clean — SUCCESS (poweroff-e2fsck-recovered.log)
-Boot2: mount OK, basic tests PASS, clean shutdown — SUCCESS (poweroff-boot2-clean.log)

@@ -1,5 +1,0 @@
-make kernel ARCH=rv64 PROFILE=normal EXTRA_FEATURES=perf_diag
-make kernel ARCH=la64 PROFILE=normal EXTRA_FEATURES=perf_diag
-make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.conf
-make -C os ARCH=rv64 -f make/rv64.mk derived-comp RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo
-exit_status=0

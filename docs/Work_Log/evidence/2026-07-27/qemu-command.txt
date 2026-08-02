@@ -1,6 +1,0 @@
-make run ARCH=rv64 PROFILE=normal QEMU_OPTS="-m 2G -smp 1"
-exit_status=0
-make toolchain-preflight && make build ARCH=rv64 PROFILE=normal (exit_status=0)
-make testsuits-download (exit_status=0)
-xz -dkc fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img (exit_status=0)
-make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.conf (exit_status=0)

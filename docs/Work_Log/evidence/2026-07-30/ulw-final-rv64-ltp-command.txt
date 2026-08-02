@@ -1,2 +1,0 @@
-command: RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo make -C os -f make/rv64.mk derived-comp
-exit_status=0
