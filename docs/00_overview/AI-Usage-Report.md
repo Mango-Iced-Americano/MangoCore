@@ -1274,6 +1274,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b64-futex-requeue-summary.md` | SMP futex requeue waiter 身份 | 记录 source membership 误判、专用 Arc waiter/current key、Linux waitv 最后下标语义、DeepSeek 计数纠错与双架构 8 核 focused 证据 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b65-shared-futex-key-summary.md` | SMP shared futex 稳定 backing key | 记录 raw PPN ABA 根因、三类 shared mapping 身份证明、队列级 pin、DeepSeek 推断纠错与双架构 8 核 focused 证据 |
 | `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b66-futex-nofault-summary.md` | SMP futex nofault 原子注册 | 记录锁外 fault-in、table 锁内 VM try-read、内部 Retry/固定 deadline、DeepSeek 事实纠错及双架构 8 核 focused 证据 |
+| `docs/Work_Log/2026-08-02.md`、`docs/Work_Log/evidence/2026-08-02/smp-b67-futex-reclaim-summary.md` | SMP shared futex pin 与 OOM 回收 | 记录 force-swap backing 分裂、临时 pin 候选重排、DeepSeek 审查遗漏补充、mutation 失败披露及双架构 8 核 MM ktest |
 
 ## 9. 交互记录与留痕方式
 

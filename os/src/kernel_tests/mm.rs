@@ -3,9 +3,10 @@
 use crate::config::PAGE_SIZE;
 use crate::kernel_tests::runner::KernelTest;
 use crate::mm::{
-    self, AddressSpace, AddressSpaceInner, FaultAccess, MapPermission, PageTable, PageTableImpl,
-    VirtAddr,
+    self, AddressSpace, AddressSpaceInner, FaultAccess, MapFlags, MapPermission, PageTable,
+    PageTableImpl, VirtAddr,
 };
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -22,7 +23,82 @@ pub fn tests() -> Vec<KernelTest> {
             "mm::local_mmu_gather_map_protect_unmap",
             test_local_mmu_gather_map_protect_unmap,
         ),
+        KernelTest::new(
+            "mm::shared_futex_pin_blocks_reclaim",
+            test_shared_futex_pin_blocks_reclaim,
+        ),
     ]
+}
+
+/// 共享 futex 的 resident-frame key 依赖队列 pin 保持身份稳定。
+///
+/// 第一次深度回收必须跳过被 pin 的页并保留候选；pin 解除后第二次回收应能压缩
+/// 同一页。固定到 mmap 区以下，确保覆盖过去会进入 `force_swap` 的分支。
+fn test_shared_futex_pin_blocks_reclaim() -> Result<(), &'static str> {
+    const TEST_BASE: usize = crate::config::ELF_PIE_BASE + 0x20_0000;
+    let test_vpn = VirtAddr::from(TEST_BASE).floor();
+
+    let space = AddressSpace::new(AddressSpaceInner::<PageTableImpl>::new_bare());
+    let frame = mm::frame_alloc().ok_or("failed to allocate shared futex frame")?;
+    let original_ppn = frame.ppn;
+    space.write(|inner| {
+        let mapped = inner.shm_mmap(
+            TEST_BASE,
+            PAGE_SIZE,
+            MapPermission::R | MapPermission::W | MapPermission::U,
+            MapFlags::MAP_SHARED | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED_NOREPLACE,
+            core::slice::from_ref(&frame),
+            true,
+        );
+        if mapped != TEST_BASE as isize {
+            return Err("failed to create fixed shared futex mapping");
+        }
+        inner
+            .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Store)
+            .map(|_| ())
+            .map_err(|_| "failed to install shared futex PTE")
+    })?;
+    drop(frame);
+
+    let pin = space
+        .read(|inner| {
+            inner
+                .futex_shared_backing(VirtAddr::from(TEST_BASE))
+                .ok()
+                .flatten()
+        })
+        .ok_or("failed to resolve shared futex backing")?;
+    if space.write(|inner| inner.do_deep_clean()) != 0 {
+        return Err("deep reclaim replaced a pinned shared futex page");
+    }
+    space.read(|inner| {
+        let current = inner
+            .futex_shared_backing(VirtAddr::from(TEST_BASE))
+            .ok()
+            .flatten()
+            .ok_or("pinned shared futex backing disappeared")?;
+        if !Arc::ptr_eq(&pin, &current)
+            || inner.translate(test_vpn).map(|ppn| ppn.0) != Some(original_ppn.0)
+        {
+            return Err("pinned shared futex backing identity changed");
+        }
+        Ok(())
+    })?;
+
+    drop(pin);
+    if space.write(|inner| inner.do_deep_clean()) != 1 {
+        return Err("unpinned shared futex page was not reconsidered for reclaim");
+    }
+    if space.read(|inner| inner.translate(test_vpn).is_some()) {
+        return Err("compressed shared futex page kept a stale PTE");
+    }
+    space.write(|inner| {
+        inner
+            .fault_in_user_va(VirtAddr::from(TEST_BASE), FaultAccess::Load)
+            .map(|_| ())
+            .map_err(|_| "failed to restore reclaimed shared futex page")
+    })?;
+    Ok(())
 }
 
 /// Allocate a single frame, verify PPN is valid, then drop (free) it.

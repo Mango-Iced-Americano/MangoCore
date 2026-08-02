@@ -3,7 +3,7 @@ title: "OOM、overcommit 与 locked pages"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-08-02
 tags: [mm, oom, overcommit, mlock]
 ---
 
@@ -18,7 +18,7 @@ MM 中与 OOM 和内存限制相关的实现分布在多个文件：
 | `os/src/mm/heap_allocator.rs` | 内核堆分配失败 recovery、fatal handler、堆统计 |
 | `os/src/mm/frame_allocator.rs` | 物理页分配失败 recovery、`frame_reserve()` |
 | `os/src/mm/frame_store.rs` | 页面压缩/换出状态 |
-| `os/src/mm/vma.rs` | VMA 级 `do_oom()`、`force_swap()` |
+| `os/src/mm/vma.rs` | VMA 级压缩/换出候选扫描 `do_oom()` |
 | `os/src/mm/address_space.rs` | 地址空间级 shallow/deep clean、locked pages |
 | `os/src/mm/sysctl.rs` | overcommit、max_map_count、min_free_kbytes 等 sysctl 状态 |
 | `os/src/mm/mmap.rs` | mmap/brk overcommit 检查 |
@@ -34,7 +34,7 @@ OOM 行为受 feature 控制。未启用 `oom_handler` 时，部分回收路径�
 | overcommit | `sysctl.rs` 提供 overcommit_memory/ratio 与 commit limit |
 | locked pages | `AddressSpace` 维护 locked page 标记，`mlock`/`mlock2` 按 rlimit 校验 |
 | 压缩/换出 | `oom_handler` feature 下通过 `Frame::zip()`/`swap_out()` 和 VMA clean 路径启用 |
-| shared page 回收 | 普通 zip/swap 拒绝 shared frame，deep clean 可走 force path |
+| shared page 回收 | 所有 shallow/deep 路径都尊重 backing `Arc`；有外部共享或 pin 时延后回收 |
 
 ## 3. 内核堆 OOM
 
@@ -82,14 +82,14 @@ frame_alloc()
 
 ```rust
 #[cfg(feature = "oom_handler")]
-pub fn swap_out(&mut self) -> Result<usize, MemoryError> {
+pub fn swap_out(&mut self) -> Result<Arc<FrameTracker>, MemoryError> {
     match self {
         Frame::InMemory(frame_ref) => {
             if Arc::strong_count(frame_ref) == 1 {
-                let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
-                let swap_id = swap_tracker.0;
-                *self = Frame::SwappedOut(swap_tracker);
-                Ok(swap_id)
+                let tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
+                let old = core::mem::replace(self, Frame::SwappedOut(tracker));
+                let Frame::InMemory(frame) = old else { unreachable!() };
+                Ok(frame)
             } else {
                 Err(MemoryError::SharedPage)
             }
@@ -99,19 +99,17 @@ pub fn swap_out(&mut self) -> Result<usize, MemoryError> {
 }
 
 #[cfg(feature = "oom_handler")]
-pub fn zip(&mut self) -> Result<usize, MemoryError> {
+pub fn zip(&mut self) -> Result<Arc<FrameTracker>, MemoryError> {
     match self {
         Frame::InMemory(frame_ref) => {
             if Arc::strong_count(frame_ref) == 1 {
-                if let Ok(zram_tracker) =
-                    ZRAM_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())
-                {
-                    let zram_id = zram_tracker.0;
-                    *self = Frame::Compressed(zram_tracker);
-                    Ok(zram_id)
-                } else {
-                    Err(MemoryError::ZramIsFull)
-                }
+                let tracker = ZRAM_DEVICE
+                    .lock()
+                    .write(frame_ref.ppn.get_bytes_array())
+                    .map_err(|_| MemoryError::ZramIsFull)?;
+                let old = core::mem::replace(self, Frame::Compressed(tracker));
+                let Frame::InMemory(frame) = old else { unreachable!() };
+                Ok(frame)
             } else {
                 Err(MemoryError::SharedPage)
             }
@@ -120,6 +118,9 @@ pub fn zip(&mut self) -> Result<usize, MemoryError> {
     }
 }
 ```
+
+返回旧 `FrameTracker` 是为了让调用者先撤销 PTE、提交 TLB 失效，再在 `MmuGather` 退休队列中
+释放物理页；它不是 swap/zram slot ID。
 
 这就是 shared anonymous、COW 共享页和 PageCache 共享页不会被普通 `do_oom()` 直接压缩/换出的依据。
 
@@ -163,15 +164,18 @@ active 队列只记录可回收候选；能否真正回收还要看 frame 当前
 
 ## 6. VMA 级回收
 
-`Vma::do_oom()` 先尝试压缩，再尝试 swap：
+`Vma::do_oom()` 先尝试压缩，再尝试 swap。每轮只处理函数入口时已有的候选数：
 
 ```text
-while let Some(vpn) = active.pop_front()
+repeat initial_active_len times
+  └── vpn = active.pop_front()
   ├── frame.zip()
   │     ├── 成功: unmap PTE, compressed += 1
+  │     ├── SharedPage: 放回 active 队尾
   │     └── ZramIsFull -> 尝试 swap
   └── frame.swap_out()
         ├── 成功: unmap PTE, swapped += 1
+        ├── SharedPage: 放回 active 队尾
         └── swap 不可用/满 -> stop
 ```
 
@@ -179,7 +183,14 @@ while let Some(vpn) = active.pop_front()
 
 `Frame::zip()` 和 `Frame::swap_out()` 只在 `Arc::strong_count(frame_ref) == 1` 时继续执行；引用计数大于 1 时返回 `MemoryError::SharedPage`。
 
-`force_swap()` 不检查引用计数，用于 deep clean 中对部分区域强制换出。
+B67 删除了绕过引用计数的 `force_swap()`/`force_swap_out()`。这类路径会把单个 VMA 的
+resident backing 替换为 swap 状态，却让 futex 队列、SysV SHM 或 fork 的其它持有者继续
+引用旧 frame；换入产生新 frame 后，共享对象会分裂。deep clean 现在只扩大候选 VMA 范围，
+不再改变单页回收的所有权规则。
+
+`SharedPage` 必须放回队尾而不是永久丢弃。futex queue 的 backing pin 是临时引用；waiter
+离开空队列后 pin 会释放，后续 OOM 扫描应能重新考虑该页。扫描次数固定为入口队列长度，
+避免同一轮反复取出仍被 pin 的页而死循环。
 
 ## 7. 地址空间级回收
 
@@ -190,14 +201,14 @@ rv64：
 | 方法 | 范围 |
 |------|------|
 | shallow | `MMAP_BASE..TASK_SIZE` 且非文件映射 |
-| deep | `TASK_SIZE` 以下非文件映射；`MMAP_BASE` 以下用 `force_swap()` |
+| deep | `TASK_SIZE` 以下全部非文件映射，统一使用 `do_oom()` |
 
 la64：
 
 | 方法 | 范围 |
 |------|------|
 | shallow | `USR_MMAP_BASE..USR_MMAP_END` 且非文件映射 |
-| deep | `USER_VA_END` 以下非文件映射；`USR_MMAP_BASE` 以下用 `force_swap()` |
+| deep | `USER_VA_END` 以下全部非文件映射，统一使用 `do_oom()` |
 
 文件映射不走这些匿名页回收路径。
 

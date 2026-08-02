@@ -896,10 +896,16 @@
 - **VM/table 两阶段**: 在同一 VM 锁内定位 VMA、clone resident backing 并校验 PTE 指向同一
   PPN；随后释放 VM 锁，再进入全局等待表。跨阶段传递拥有所有权的 Arc，而不是裸指针或
   PA；不得建立 `AddressSpace -> wait table` 的嵌套锁序。
-- **准确描述剩余风险**: pin 能排除回收复用造成的 false-positive，但强制 swap/truncate 若
-  绕过 pin 或换成新 backing，可能形成旧 waiter 不再命中的 false-negative。普通 swap/zram/
-  page-cache 回收还会因 pin 延迟而增加内存压力。没有构造精确复用交错时应标为 NOT RUN，
-  不把静态生命周期证明或普通 LTP 通过冒充动态竞态覆盖。
+- **所有回收入口都必须尊重 pin**: 普通 swap/zram 检查引用计数还不够；deep reclaim、OOM
+  fallback 或显式 invalidate 若能绕过该检查，仍会把 VMA backing 换成新对象，形成旧 waiter
+  不再命中的 false-negative。不能把“强制回收”理解成允许破坏共享对象身份；简单内核应统一
+  走所有权安全的回收入口，直到存在像 Linux inode/page-index 那样独立于 resident frame 的键。
+- **临时 pin 不应永久移出回收候选**: `SharedPage` 表示本轮不能回收，不表示永远不能回收。
+  把候选放回队尾，并把单轮扫描限制为入口时的队列长度；否则直接丢弃会在 waiter 离开后仍
+  无法回收，立即重试又会在同一页上死循环。这个模式也适用于 DMA pin、异步 I/O pin 等临时引用。
+- **准确描述剩余风险**: backing pin 与统一匿名页回收能排除物理页复用和强制 swap 风险，
+  但文件 truncate/page-cache invalidate 若换成新 backing，仍可能形成 false-negative；pin 也会
+  临时增加内存压力。没有构造精确交错时应标为 NOT RUN，不把静态证明或普通 LTP 冒充动态覆盖。
 - **相关文件**: `os/src/mm/address_space.rs`, `os/src/task/threads.rs`,
   `os/src/syscall/process/futex.rs`, `docs/05_process/futex.md`
 

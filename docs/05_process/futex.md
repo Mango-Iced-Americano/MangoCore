@@ -259,9 +259,13 @@ B66 的双架构 8 核 focused LTP 每架构执行 musl、glibc 各 13 次：20 
 - waitv 与 requeue 组合、多个 key 同时 wake；
 - 旧 shared 队列存活期间物理页反复释放复用的专项动态竞态；B65 已用 backing pin 静态排除
   raw PPN 的错误命中，但 focused LTP 不能替代该竞态压力证明；
-- `force_swap_out()` 或 truncate 绕过/替换原 backing 后，旧 waiter 与新 backing 可能不再
-  命中。这是 false-negative 边界，不是 B65 已消除的 PPN false-positive；
-- 普通 swap/zram/page-cache 回收会因 pin 延后回收，尚未做内存压力量化；
+- B67 已删除匿名页回收中绕过 backing 引用的 `force_swap_out()`；deep clean 与 shallow
+  clean 现在都尊重 queue pin，并在 pin 解除后保留该页的后续回收机会。双架构 MM ktest
+  覆盖“被 pin 时保持 identity、解除后重新压缩并 fault-in”；
+- 文件 truncate/page-cache invalidate 仍可能替换 file-backed shared futex 的 backing，
+  该跨 FS 边界尚未收口；
+- 普通 swap/zram/page-cache 回收会因 pin 临时延后，单页生命周期已验证，但长时间、多 waiter
+  内存压力量化仍未执行；
 - 精确的“最后比较与并发 wake”动态竞态尚未用专门 ktest 放大；当前结论来自锁协议静态证明
   和 focused LTP；
 - VM 锁长期繁忙时的连续 `Retry` 尚未做 livelock/性能压力；

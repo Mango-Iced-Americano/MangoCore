@@ -744,8 +744,14 @@ impl Vma {
     pub fn do_oom<T: PageTable>(&mut self, mapper: &mut UserMapper<'_, T>) -> usize {
         let compressed_before = self.inner.compressed_count();
         let swapped_before = self.inner.swapped_count();
-        warn!("[do_oom] active pages: {}", self.inner.active_len());
-        while let Some(vpn) = self.inner.pop_active() {
+        let candidate_count = self.inner.active_len();
+        warn!("[do_oom] active pages: {}", candidate_count);
+        // 只扫描进入函数时已有的候选。共享页会放回队尾；若继续使用
+        // `while let`，一个被 futex pin 的页会在同一轮中被反复取出而死循环。
+        for _ in 0..candidate_count {
+            let Some(vpn) = self.inner.pop_active() else {
+                break;
+            };
             if !self.inner.contains_vpn(vpn) {
                 log::warn!("[do_oom] Defensive skip: vpn {:?} out of range", vpn);
                 continue;
@@ -771,7 +777,10 @@ impl Vma {
                     self.inner.inc_compressed();
                     continue;
                 }
-                Err(MemoryError::SharedPage) => continue,
+                Err(MemoryError::SharedPage) => {
+                    self.inner.requeue_active(vpn);
+                    continue;
+                }
                 Err(MemoryError::ZramIsFull) => {}
                 Err(MemoryError::NotInMemory) => continue,
                 Err(e) => {
@@ -800,11 +809,15 @@ impl Vma {
                     self.inner.inc_swapped();
                     continue;
                 }
-                Err(MemoryError::SharedPage) => continue,
+                Err(MemoryError::SharedPage) => {
+                    self.inner.requeue_active(vpn);
+                    continue;
+                }
                 Err(MemoryError::NotInMemory) => continue,
                 Err(MemoryError::OutOfMemory)
                 | Err(MemoryError::SwapIsFull)
                 | Err(MemoryError::BackingStoreFailure) => {
+                    self.inner.requeue_active(vpn);
                     log::warn!(
                         "[do_oom] swap unavailable/full, stop reclaim: vpn={:?}",
                         vpn
@@ -820,59 +833,6 @@ impl Vma {
         self.inner.compressed_count() + self.inner.swapped_count()
             - compressed_before
             - swapped_before
-    }
-    #[cfg(feature = "oom_handler")]
-    pub fn force_swap<T: PageTable>(&mut self, mapper: &mut UserMapper<'_, T>) -> usize {
-        let swapped_before = self.inner.swapped_count();
-        warn!("[force_swap] active pages: {}", self.inner.active_len());
-        while let Some(vpn) = self.inner.pop_active() {
-            if !self.inner.contains_vpn(vpn) {
-                log::warn!("[force_swap] Defensive skip: vpn {:?} out of range", vpn);
-                continue;
-            }
-
-            let swap_result = {
-                let Ok(frame) = self.inner.frame_mut_if_present(vpn) else {
-                    continue;
-                };
-                if !matches!(frame, Frame::InMemory(_)) {
-                    continue;
-                }
-                frame.force_swap_out()
-            };
-
-            match swap_result {
-                Ok(frame) => {
-                    if mapper.unmap_user_page(vpn).is_ok() {
-                        mapper.retire_frame(frame);
-                    } else {
-                        log::warn!(
-                            "[force_swap] swapped frame has no mapped pte: vpn={:?}",
-                            vpn
-                        );
-                    }
-                    self.inner.inc_swapped();
-                    continue;
-                }
-                Err(MemoryError::OutOfMemory)
-                | Err(MemoryError::SwapIsFull)
-                | Err(MemoryError::BackingStoreFailure) => {
-                    log::warn!(
-                        "[force_swap] swap unavailable/full, stop reclaim: vpn={:?}",
-                        vpn
-                    );
-                    break;
-                }
-                Err(MemoryError::SharedPage)
-                | Err(MemoryError::NotInMemory)
-                | Err(MemoryError::NotSwappedOut) => continue,
-                Err(e) => {
-                    log::warn!("[force_swap] unexpected swap error {:?}, vpn={:?}", e, vpn);
-                    break;
-                }
-            }
-        }
-        self.inner.swapped_count() - swapped_before
     }
 }
 

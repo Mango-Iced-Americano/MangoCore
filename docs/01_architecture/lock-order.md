@@ -315,9 +315,9 @@ shared futex 不能用 raw PPN 充当长期 key。旧页被释放后，分配器
 - `clear_child_tid` 在 VM 锁内取得 fault 前后稳定 key，退出 VM 临界区后才依次执行 wake；
 - `AddressSpace` 与 `FutexTable` 没有嵌套锁序；`Arc` 是跨阶段的稳定所有权载体。
 
-该协议排除了 raw PPN 复用造成的 false-positive。`force_swap_out()`、truncate 或其它强制
-替换 backing 的路径仍可能让旧 waiter 与换入后的新对象形成 false-negative；普通回收则会
-被 pin 延后。该身份生命周期结论不能外推为强制换出已经正确。
+该协议排除了 raw PPN 复用造成的 false-positive。B67 又删除匿名页回收中绕过引用计数的
+`force_swap_out()`：deep clean 统一尊重 backing pin，`SharedPage` 候选放回队尾，pin 解除后
+仍可回收。文件 truncate/page-cache invalidate 仍是独立的跨 FS backing 生命周期边界。
 
 #### B66 futex 锁内 nofault 注册
 
@@ -348,8 +348,8 @@ futex 的最后一次值比较必须和 waiter 发布共用 table 锁，才能�
   比较并发布，wake 取得同一 table 锁后会找到 waiter。
 
 这条例外只解决“最后比较 + enqueue”的原子性与 faultable-uaccess 锁序。nofault 比较之后
-发生的并发 unmap/remap、`force_swap_out()`/truncate backing 替换，以及 VM 锁长期繁忙时的
-重试公平性仍是独立边界，不能写成 B66 已动态证明。
+发生的并发 unmap/remap、文件 truncate backing 替换，以及 VM 锁长期繁忙时的重试公平性
+仍是独立边界，不能写成 B66/B67 已动态证明。
 
 ### 3.3 B18 Per-CPU RunQueue 约束
 

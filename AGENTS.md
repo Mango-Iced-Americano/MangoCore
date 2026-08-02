@@ -236,8 +236,10 @@ B65 又把 shared futex key 改为 backing `Arc` 身份与页内偏移：`Addres
 值比较只能在 table 锁内通过 VM `try_read` 完成，成功后在同一临界区发布 waiter。VM 锁忙、
 PTE/权限或 shared backing 变化只能在发布前返回内部 Retry，释放 table 后重做锁外读取和
 完整 key 解析；不得把 Retry 暴露成 errno，也不得恢复入队后的第三次用户读取。相对 timeout
-必须先固定为绝对 deadline，waitv Retry 必须重建全部条目。`force_swap_out`/truncate 后的
-新 backing 漏匹配及精确并发压力仍待处理。FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
+必须先固定为绝对 deadline，waitv Retry 必须重建全部条目。B67 删除匿名页回收中绕过引用
+计数的 `force_swap_out`，deep/shallow clean 都尊重 backing pin；遇到 `SharedPage` 必须在
+有界扫描中放回 active 队尾，不能永久丢弃或在同一轮死循环。文件 truncate 后的新 backing
+漏匹配及精确并发压力仍待处理。FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

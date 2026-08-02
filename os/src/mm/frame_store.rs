@@ -68,22 +68,6 @@ impl Frame {
         }
     }
 
-    /// 强制写入 swap，不检查共享引用数；返回的原驻留 frame 同样必须延迟释放。
-    #[cfg(feature = "oom_handler")]
-    pub fn force_swap_out(&mut self) -> Result<Arc<FrameTracker>, MemoryError> {
-        match self {
-            Frame::InMemory(frame_ref) => {
-                let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
-                let old = core::mem::replace(self, Frame::SwappedOut(swap_tracker));
-                let Frame::InMemory(frame) = old else {
-                    unreachable!("force_swap_out source changed while exclusively borrowed")
-                };
-                Ok(frame)
-            }
-            _ => Err(MemoryError::NotInMemory),
-        }
-    }
-
     #[cfg(feature = "oom_handler")]
     pub fn swap_in(&mut self) -> Result<PhysPageNum, MemoryError> {
         match self {
@@ -471,6 +455,15 @@ impl VmPageStore {
 
     pub(super) fn pop_active(&mut self) -> Option<VirtPageNum> {
         self.active.pop_front()
+    }
+
+    /// 把本轮因外部引用而不能回收的页放回候选队尾。
+    ///
+    /// 调用方刚从同一个 `VecDeque` 弹出一项，因此这里不会扩容。保留该项很重要：
+    /// futex waiter 解除 backing pin 后，后续 OOM 扫描仍应有机会回收该页。
+    pub(super) fn requeue_active(&mut self, vpn: VirtPageNum) {
+        debug_assert!(self.contains_vpn(vpn));
+        self.active.push_back(vpn);
     }
 
     pub(super) fn compressed_count(&self) -> usize {

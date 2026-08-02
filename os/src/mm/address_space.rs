@@ -1037,13 +1037,9 @@ impl<T: PageTable> AddressSpaceInner<T> {
             .filter(|area| {
                 area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
-            .map(|area| {
-                if area.get_start::<T>().0 < USR_MMAP_BASE >> PAGE_SIZE_BITS {
-                    area.force_swap(&mut mapper)
-                } else {
-                    area.do_oom(&mut mapper)
-                }
-            })
+            // 深度回收扩大 VMA 扫描范围，但不能绕过 frame 的共享引用。
+            // futex 队列、SysV SHM 和 fork CoW 都通过同一个 Arc 所有权表达共享。
+            .map(|area| area.do_oom(&mut mapper))
             .sum();
         released
     }
@@ -1057,13 +1053,8 @@ impl<T: PageTable> AddressSpaceInner<T> {
             .filter(|area| {
                 area.get_start::<T>().0 < (TASK_SIZE >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
-            .map(|area| {
-                if area.get_start::<T>().0 < MMAP_BASE >> PAGE_SIZE_BITS {
-                    area.force_swap(&mut mapper)
-                } else {
-                    area.do_oom(&mut mapper)
-                }
-            })
+            // 深度回收只扩大候选范围；实际换出仍必须尊重共享 backing 的 pin。
+            .map(|area| area.do_oom(&mut mapper))
             .sum();
         released
     }
