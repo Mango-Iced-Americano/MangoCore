@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-08-01
+last_updated: 2026-08-02
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -244,6 +244,27 @@ IPC_RMID：从 queues 删除 -> wake_all；删除路径不分配
 发布且当前不存在”定义，因此旧 waiter 只能观察 `EIDRM`。v1 采用线性 `Vec` 历史换取简单
 的可失败预留；若以后改为 index+generation allocator，仍必须保持“先登记身份、后发布
 对象”和“删除不分配”两个不变量。
+
+#### B63 SysV semaphore 与 shared-memory 对象身份
+
+semaphore 不需要复制 message queue 的发布历史。`sem_wait_condition()` 是私有 helper，
+唯一调用者已经在同一把 `SEM_REGISTRY` 锁下证明 `semid` 存在且操作需要阻塞；ID 又只按
+`checked_add()` 单调前进。因此后续锁内查找失败只能是 `IPC_RMID`，可直接返回 `EIDRM`：
+
+```text
+首次查找缺失 -> EINVAL
+首次查找存在且必须等待 -> 注册 WaitQueue
+等待期间再次查找缺失 -> IPC_RMID -> EIDRM
+```
+
+删除路径只移除 set 并 `wake_all`，不得为 tombstone 临时分配内存。否则 OOM 会让删除历史
+记录失败，使旧 waiter 错误返回 `EINVAL`。
+
+shared-memory 没有同类 waiter，但 `shmat` 会跨越 registry 解锁建立 VMA，再重锁按 `shmid`
+登记 attachment。`ShmRegistry` 因此也必须以 `Option<i32> + checked_add()` 保证 ID 不回绕；
+耗尽返回 `ENOSPC`，不能用饱和加法重复返回最后一个 ID 并覆盖活段。VMA clone 的 frame
+`Arc` 负责物理页寿命，attachment 重验失败后的 `munmap`/TLB shootdown 必须位于 registry
+解锁后。
 
 ### 3.3 B18 Per-CPU RunQueue 约束
 

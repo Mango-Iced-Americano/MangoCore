@@ -221,9 +221,12 @@ sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解�
 的两阶段领取方式，否则两个 CPU 可能成功返回同一条消息。B62 又把 message queue 的一次性
 requested ID 与自动 cursor 分离，并在对象插入 registry 前登记发布历史；本次内核运行中
 发布过的 ID 不再复用，`IPC_RMID` 只删除对象并唤醒 waiter，不能在删除路径临时分配
-tombstone。旧 waiter 醒来后必须通过历史得到 `EIDRM`，不能命中同号新对象。该规则目前只
-覆盖 message queue，不能直接外推到 semaphore/shared memory。FS/Net/Driver 的完整共享
-状态审计仍由对应负责人继续。
+tombstone。旧 waiter 醒来后必须通过历史得到 `EIDRM`，不能命中同号新对象。该规则只覆盖
+message queue 的 requested/auto ID。B63 对 semaphore 采用更小的不变量：等待 helper 只能
+在同锁已证明对象存在后进入，ID 单调不复用，所以后续缺失直接表示 `IPC_RMID/EIDRM`，删除
+路径不得分配 tombstone。shared-memory ID 同样使用 checked 单调游标，耗尽返回 `ENOSPC`，
+避免两阶段 `shmat` 在回绕后把 attachment 归到新对象。FS/Net/Driver 的完整共享状态审计仍
+由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

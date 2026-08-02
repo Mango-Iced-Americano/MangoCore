@@ -3,7 +3,7 @@ title: "信号、时间与 IPC syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-02
 tags: [syscall, signal, time, ipc]
 ---
 
@@ -376,7 +376,13 @@ message queue 的 `/proc/sys/kernel/msg_next_id` 是一次性 requested ID，不
 cursor。自动 ID 另用单调 cursor，并跳过所有已发布历史；requested ID 即使已经删除也不能
 再次发布。发布前先为历史预留容量并登记，之后才把队列插入 registry；`IPC_RMID` 只删除和
 唤醒，不创建 tombstone。这样跨 WaitQueue 等待的旧 `msqid` 不会发生数值 ABA：醒来时对象
-不存在返回 `EIDRM`，不会误操作删除后创建的同号队列。该 v1 约束只覆盖 message queue。
+不存在返回 `EIDRM`，不会误操作删除后创建的同号队列。
+
+semaphore 使用更小的证明：初次查找失败返回 `EINVAL`；只有同一 registry 锁下已确认对象
+存在且需要阻塞后，等待条件才有资格把后续缺失解释为 `IPC_RMID` 并返回 `EIDRM`。其 ID
+同样单调不复用，所以不维护可能在删除路径分配失败的 tombstone。shared-memory ID 也改为
+checked 单调游标；耗尽返回 `ENOSPC`，避免 `shmat` 的“锁外建 VMA、锁内登记 attachment”
+两阶段路径在 ID 回绕后命中新段。message queue 仍单独维护 requested ID 发布历史。
 
 ## 12. POSIX message queue
 

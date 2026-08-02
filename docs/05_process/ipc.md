@@ -3,7 +3,7 @@ title: "SysV IPC、POSIX MQ 与 IPC Namespace"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-02
 tags: [process, ipc, sysv, mq]
 ---
 
@@ -138,7 +138,9 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
-    let id = registry.alloc_id();
+    let Some(id) = registry.alloc_id() else {
+        return ENOSPC;
+    };
     registry.segments.insert(
         id,
         ShmSegment::new(ns_id, key, size, shmflg & 0o777, uid, gid),
@@ -146,6 +148,12 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
     id as isize
 }
 ```
+
+shared-memory ID 使用 `Option<i32>` 单调游标，`checked_add()` 溢出后永久耗尽并由
+`shmget` 返回 `ENOSPC`，不会饱和后重复返回 `i32::MAX`。这是对象身份约束，不只是容量
+检查：`shmat` 会先解锁建立 VMA，再按 `shmid` 重锁登记 attachment；若 ID 回绕，新段可能
+替换旧段并让这次 attachment 归到错误对象。VMA 持有 frame 的独立 `Arc`，因此删除 registry
+元数据不会在映射仍存活时提前释放物理页。
 
 `sys_shmat()` 在第一次 attach 时为段分配物理页，然后调用 MM 的 `shm_mmap()` 把这些 frame 映射进当前地址空间：
 
@@ -423,9 +431,13 @@ struct SemRegistry {
     next_id: Option<i32>,
     sets: BTreeMap<i32, SemSet>,
     wait_queue: WaitQueue,
-    removed_ids: Vec<i32>,
 }
 ```
+
+初次进入 `sys_semtimedop()` 时，不存在的 `semid` 仍返回 `EINVAL`。只有在同一把 registry
+锁内确认集合存在、操作确实需要阻塞后，才会进入私有的 `sem_wait_condition()`；此后再次
+查找失败只能来自并发 `IPC_RMID`，直接返回 `EIDRM`。semaphore ID 单调且不复用，因此删除
+路径无需分配 `removed_ids` tombstone，也不会因 OOM 丢失“已删除”语义。
 
 `sys_semtimedop()` 先尝试一次原子应用；不满足时进入带锁等待模板：
 

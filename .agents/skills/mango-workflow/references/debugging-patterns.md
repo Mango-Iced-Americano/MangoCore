@@ -857,6 +857,8 @@
   requested ID 与自动 cursor 要分离，自动路径也必须跳过 requested 留下的稀疏历史。历史
   容量必须在对象插入前预留并登记，避免对象已发布而身份记录失败；删除路径只移除并唤醒，
   不得临时分配 tombstone。长期高 churn 再迁移 index+generation，但不能只扩大整数或依赖
-  当前对象表查重。
+  当前对象表查重。若私有等待 helper 的唯一入口已经在同一把锁下证明对象存在，并且 ID 从不
+  复用，则无需另存发布历史：后续缺失只能来自删除，可直接返回 `EIDRM`。这个简化必须同时
+  证明“唯一入口、初次错误仍为 `EINVAL`、单调 ID”三项，不能仅凭 helper 私有就推断。
 - **相关文件**: `os/src/mm/uaccess.rs`, `os/src/mm/address_space.rs`,
   `os/src/syscall/process/ipc.rs`, `docs/01_architecture/lock-order.md`

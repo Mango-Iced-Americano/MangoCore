@@ -507,7 +507,6 @@ struct SemRegistry {
     next_id: Option<i32>,
     sets: BTreeMap<i32, SemSet>,
     wait_queue: WaitQueue,
-    removed_ids: Vec<i32>,
 }
 
 impl SemRegistry {
@@ -516,13 +515,12 @@ impl SemRegistry {
             next_id: Some(1),
             sets: BTreeMap::new(),
             wait_queue: WaitQueue::new(),
-            removed_ids: Vec::new(),
         }
     }
 
     fn alloc_id(&mut self) -> Option<i32> {
         let id = self.next_id?;
-        // 不复用已发布的 ID；耗尽时明确失败，避免饱和加法覆盖仍在表中的对象。
+        // 游标只向前推进；耗尽后明确失败，保证两阶段操作不会按旧 ID 命中新对象。
         self.next_id = id.checked_add(1);
         Some(id)
     }
@@ -551,18 +549,6 @@ impl SemRegistry {
 
     fn total_semaphores(&self) -> usize {
         self.sets.values().map(|set| set.semaphores.len()).sum()
-    }
-
-    fn mark_removed(&mut self, id: i32) {
-        if !self.removed_ids.contains(&id) {
-            if self.removed_ids.try_reserve(1).is_ok() {
-                self.removed_ids.push(id);
-            }
-        }
-    }
-
-    fn was_removed(&self, id: i32) -> bool {
-        self.removed_ids.contains(&id)
     }
 }
 
@@ -642,22 +628,23 @@ impl ShmSegment {
 }
 
 struct ShmRegistry {
-    next_id: i32,
+    next_id: Option<i32>,
     segments: BTreeMap<i32, ShmSegment>,
 }
 
 impl ShmRegistry {
     fn new() -> Self {
         Self {
-            next_id: 1,
+            next_id: Some(1),
             segments: BTreeMap::new(),
         }
     }
 
-    fn alloc_id(&mut self) -> i32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1).max(1);
-        id
+    fn alloc_id(&mut self) -> Option<i32> {
+        let id = self.next_id?;
+        // `shmat` 会跨锁建立 VMA 后按 ID 重验，任何 ID 回绕都会把 attachment 记到错误对象。
+        self.next_id = id.checked_add(1);
+        Some(id)
     }
 
     fn find_by_key(&self, ns_id: u64, key: isize) -> Option<(i32, &ShmSegment)> {
@@ -763,7 +750,9 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
-    let id = registry.alloc_id();
+    let Some(id) = registry.alloc_id() else {
+        return ENOSPC;
+    };
     registry.segments.insert(
         id,
         ShmSegment::new(ns_id, key, size, shmflg & 0o777, uid, gid),
@@ -1692,7 +1681,6 @@ pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
                 return EPERM;
             }
             registry.sets.remove(&semid);
-            registry.mark_removed(semid);
             registry.wait_queue.wake_all();
             return SUCCESS;
         }
@@ -1898,11 +1886,9 @@ fn sem_wait_condition(
     let mut wake_waiters = false;
     let result = {
         let Some(set) = registry.sets.get_mut(&semid) else {
-            return Some(if registry.was_removed(semid) {
-                EIDRM
-            } else {
-                EINVAL
-            });
+            // 唯一调用者已在同一把锁下确认集合存在并需要等待；此后缺失只能来自 IPC_RMID。
+            // ID 单调且不复用，因此这里不需要可能在删除路径 OOM 的 tombstone。
+            return Some(EIDRM);
         };
         match try_apply_sem_ops(set, ops) {
             Ok(SemApplyResult::Applied) => {
