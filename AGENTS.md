@@ -279,6 +279,10 @@ B78 已让 process/thread POSIX CPU timer 按真实 CPU 累计推进：process t
 thread timer 用创建者 `Weak<TCB>` 固定对象身份；wall/CPU 到期都只在 timer 表锁内领取值事件，
 signal queue、sibling 唤醒和 wall heap 重装必须在锁外。CPU timer 不得塞入 wall-time heap，
 并发锁外采样只允许延迟到下一安全点，不能产生重复到期。
+B79 又将 legacy `ITIMER_REAL/VIRTUAL/PROF` 从 TCB 迁入 PCB 独立表：thread clone 共享、fork
+新建空表、exec 保留、最后线程退出清空。REAL 使用 monotonic heap generation；VIRTUAL/PROF
+分别读取线程组 user 与 user+system CPU 累计，并只在 trap-return/schedule-out 安全点领取。
+三类到期都必须先释放 interval timer 锁，再进入 shared signal queue、runqueue 或 timer heap。
 FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回

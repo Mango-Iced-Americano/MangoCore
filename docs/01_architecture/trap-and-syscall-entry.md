@@ -71,10 +71,11 @@ RISC-V syscall 由 `Trap::Exception(Exception::UserEnvCall)` 分支处理：
 | 收集 ABI | `a7` 为 id，`a0..a5` 为参数 |
 | 调用分发 | `syscall(syscall_id, args)` |
 | 写回返回值 | 非 139 时 `cx.gp.a0 = result as usize` |
-| 退出统计 | `refresh_real_timer()`、`update_process_times_leave_trap()`、`record_trap_cost_ticks()` |
+| 退出统计 | `update_process_times_leave_trap()`、`account_cpu_time()`、`record_trap_cost_ticks()` |
 | 返回用户态 | `trap_return()` |
 
-RISC-V 在 syscall 路径和普通 trap 路径都维护任务时间统计。普通 trap 处理完成后也会刷新 real timer。
+RISC-V 在 syscall 路径和普通 trap 路径都维护任务时间统计。退出 trap
+时把本次 user/system 增量汇总到 PCB，安全点再据此领取 VIRTUAL/PROF timer。
 
 ### 3.1 RISC-V `trap_handler()` 核心代码
 
@@ -111,9 +112,10 @@ pub fn trap_handler() -> ! {
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
             }
-            inner.refresh_real_timer();
-            inner.update_process_times_leave_trap(scause.cause());
+            let (user_us, system_us) =
+                inner.update_process_times_leave_trap(scause.cause());
         }
+        task.process.account_cpu_time(user_us, system_us);
         let _trap_ticks = crate::task::perf::perf_time_now() - _trap_start;
         crate::task::perf::record_trap_cost_ticks(_trap_ticks);
         trap_return();
@@ -201,9 +203,9 @@ pub fn trap_handler() -> ! {
     {
         let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
-        inner.refresh_real_timer();
-        inner.update_process_times_leave_trap(scause.cause());
+        let (user_us, system_us) = inner.update_process_times_leave_trap(scause.cause());
     }
+    task.process.account_cpu_time(user_us, system_us);
     trap_return();
 }
 ```

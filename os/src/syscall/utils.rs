@@ -26,7 +26,6 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                 } else {
                     discard_non_actionable_unblocked_signals(&task);
                 }
-                task.acquire_inner_lock().refresh_real_timer();
             }
             v => return v,
         }

@@ -1030,6 +1030,12 @@
 
 ## CPU-clock timer：时钟域分离、锁外采样与锁内唯一领取
 
+- **legacy interval timer 也是线程组对象**: `ITIMER_REAL/VIRTUAL/PROF` 由 Linux
+  `signal_struct` 持有；thread clone 共享、普通 fork 不继承、exec 保留、最后线程退出清空。
+  不要因为 syscall 从 current TCB 进入就把 timer 放回线程私有状态。
+- **REAL 不是可调墙钟 timer**: `ITIMER_REAL` 统计 elapsed monotonic 时间；
+  `settimeofday/clock_settime` 不应重定位它。VIRTUAL 读取线程组 user CPU，PROF 读取线程组
+  user+system CPU，三者不能共享一套“每次 trap 扣 remaining”的实现。
 - **不要借 wall heap 冒充 CPU clock**: wall timer 的 deadline 随 monotonic/realtime 推进；CPU
   timer 只随目标线程或线程组实际消耗推进。把后者换算成 `TimeSpec::now()` 会让 sleep/阻塞时间
   错误触发，也无法表达多线程 process clock 的累计。

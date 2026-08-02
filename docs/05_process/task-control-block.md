@@ -92,7 +92,7 @@ LA64 ASID 不属于线程字段：它由 `AddressSpace` 的 `TlbContext` 持有�
 | ptrace/seccomp | `ptrace_traceme`, `seccomp_mode`, `seccomp_filter` |
 | credentials/capability | uid/gid/fsuid/fsgid/groups/cap sets/securebits/ambient |
 | futex 退出协作 | `clear_child_tid`, `robust_list` |
-| 计时 | `rusage`, `clock`, `timer`, `real_timer_deadline`, `real_timer_generation` |
+| 计时 | `rusage`, `clock` |
 | OOM | `pending_oom_kill` |
 
 其中一部分字段用于 syscall 回读、权限分支或 fork 继承规则；真实参与调度、权限检查和 ptrace 行为的路径在对应章节单独列出。
@@ -109,7 +109,7 @@ PRIVATE_EXPEDITED membarrier 注册不再属于 TCB inner；B44 将它放入共�
 | `sched_*` | `task/run_queue.rs`, `syscall/process/ids.rs` | runqueue 选择、`sched_get*`/`sched_set*` 回读。 |
 | `rlimit` 字段 | `syscall/process/ids.rs`, `syscall/fs.rs`, `syscall/process/time.rs` | 文件大小、CPU 时间、memlock、nice/rtprio 等限制。 |
 | `clear_child_tid/robust_list` | `task/task.rs::exit_thread_resources()`, `syscall/process/lifecycle.rs` | pthread join/futex robust list 退出协作。 |
-| `rusage/clock/timer` | trap enter/leave、schedule in/out、time syscall | 线程 CPU 记账与 legacy itimer。 |
+| `rusage/clock` | trap enter/leave、schedule in/out、time syscall | 线程 CPU 记账；legacy itimer 由 PCB 汇总账户驱动。 |
 | `pending_oom_kill` | MM 分配失败和 trap return 安全点 | OOM 后在可安全返回点杀任务。 |
 
 读 TCB 代码时要关注锁边界：`task.inner` 保护线程可变状态，但很多 syscall 需要在释放 inner 锁后访问 fd、VM 或 WaitQueue。跨等待点持有 inner 锁会阻塞 signal、exit 和调度状态更新。
@@ -265,17 +265,11 @@ vruntime += runtime_us * 1024 / nice_weight
 
 ## 9. itimer 与 POSIX timer
 
-TCB inner 保存：
-
-| 字段 | 语义 |
-|------|------|
-| `timer[0]` | `ITIMER_REAL` |
-| `timer[1]` | `ITIMER_VIRTUAL` |
-| `timer[2]` | `ITIMER_PROF` |
-| `real_timer_deadline` | REAL timer 在 kernel timer queue 中的绝对截止 |
-| `real_timer_generation` | 过滤旧 REAL timer |
-
-`ITIMER_VIRTUAL` 在用户时间推进时投递 `SIGVTALRM`；`ITIMER_PROF` 在用户/系统时间推进时投递 `SIGPROF`；`ITIMER_REAL` 由 kernel timer queue 投递 `SIGALRM`。
+legacy interval timer 也不再属于 TCB。PCB 的 `IntervalTimerTable` 是线程组唯一 owner：
+thread clone 共享，普通 fork 新建空表，exec 保留，最后线程退出清空。REAL 使用 monotonic
+heap deadline；VIRTUAL/PROF 分别读取 PCB 的线程组 user 与 user+system CPU 累计，并在
+trap-return、schedule-out 安全点唯一领取到期。三类信号都进入进程共享 pending，不绑定
+调用 `setitimer()` 的线程。
 
 POSIX timer 不属于 TCB。PCB 的独立 `PosixTimerTable` 是线程组共享 owner：thread clone
 共享，fork 新建空表，exec 和最后线程退出清空。创建线程退出不会单独删除 timer；到期信号

@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use crate::hal::{local_irq_restore, local_irq_save};
 use crate::syscall::errno::EAGAIN;
-use crate::timer::{TimeSpec, TimeVal};
+use crate::timer::TimeSpec;
 
 use super::task::{RemoteAffinityRequest, RemoteAffinityState};
 use super::{
@@ -1273,7 +1273,6 @@ impl WaitQueue {
             wq.lock().finish_wait(&task);
             task.wait_io_fallback_active_generation
                 .store(0, AtomicOrdering::Release);
-            task.acquire_inner_lock().refresh_real_timer();
         }
     }
 
@@ -1347,7 +1346,6 @@ impl WaitQueue {
             let mut guard = lock.lock();
             queue_of(&mut guard).finish_wait(&task);
             drop(guard);
-            task.acquire_inner_lock().refresh_real_timer();
         }
     }
 
@@ -1452,7 +1450,6 @@ impl WaitQueue {
 
             let task = current_task().unwrap();
             Self::finish_wait_on_queues(queues, &task);
-            task.acquire_inner_lock().refresh_real_timer();
         }
     }
 
@@ -1606,11 +1603,10 @@ pub enum TimerAction {
         /// re-armed with the current generation instead of spurious-waking.
         fallback_ms: Option<usize>,
     },
-    /// 向指定任务投递信号。
-    SendSignal {
-        task: Weak<TaskControlBlock>,
-        signal: Signals,
-        generation: usize,
+    /// legacy ITIMER_REAL 到期后向所属进程投递 SIGALRM。
+    IntervalTimerSignal {
+        process: Weak<ProcessControlBlock>,
+        generation: u64,
     },
     /// POSIX timer 到期后向所属进程投递信号。
     PosixTimerSignal {
@@ -1666,7 +1662,15 @@ impl KernelTimer {
                 }
                 None => false,
             },
-            TimerAction::SendSignal { task, .. } => task.strong_count() > 0,
+            TimerAction::IntervalTimerSignal {
+                process,
+                generation,
+            } => process
+                .upgrade()
+                .map(|process| {
+                    process.real_interval_timer_is_live(*generation, self.deadline)
+                })
+                .unwrap_or(false),
             TimerAction::PosixTimerSignal {
                 process,
                 timer_id,
@@ -1920,62 +1924,32 @@ impl KernelTimerQueue {
                 }
                 false
             }
-            TimerAction::SendSignal {
-                task,
-                signal,
+            TimerAction::IntervalTimerSignal {
+                process,
                 generation,
             } => {
-                if signal.is_empty() {
-                    return false;
-                }
-                let Some(task) = task.upgrade() else {
+                let Some(process) = process.upgrade() else {
                     return false;
                 };
-                let mut should_wake = false;
-                let mut next_real_timer = None;
-                {
-                    let mut inner = task.acquire_inner_lock();
-                    if signal == Signals::SIGALRM {
-                        if inner.real_timer_generation != generation
-                            || inner.real_timer_deadline != Some(timer.deadline)
-                        {
-                            return false;
-                        }
-                    }
-                    inner.add_signal(signal);
-                    if signal == Signals::SIGALRM {
-                        if inner.timer[0].it_interval.is_zero() {
-                            inner.real_timer_deadline = None;
-                            inner.timer[0].it_value = TimeVal::new();
-                        } else {
-                            let interval = TimeSpec::from_us(inner.timer[0].it_interval.to_us());
-                            let deadline = now + interval;
-                            inner.real_timer_generation =
-                                inner.real_timer_generation.wrapping_add(1);
-                            let next_generation = inner.real_timer_generation;
-                            inner.real_timer_deadline = Some(deadline);
-                            inner.timer[0].it_value = inner.timer[0].it_interval;
-                            next_real_timer = Some((deadline, next_generation));
-                        }
-                    }
-                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
-                        should_wake = true;
-                    }
+                let (fired, next) =
+                    process.expire_real_interval_timer(generation, timer.deadline, now);
+                if !fired {
+                    return false;
                 }
-                if should_wake {
-                    wake_interruptible(task.clone());
-                }
-                if let Some((deadline, next_generation)) = next_real_timer {
+                // interval timer 锁已经释放；SignalQueue 可能扩容，唤醒还会进入
+                // 调度器，因此两者都不能放回 timer owner 临界区。
+                let _ = queue_kernel_process_signal(&process, Signals::SIGALRM);
+                let woke = wake_process_signal_waiter(&process, Signals::SIGALRM);
+                if let Some((deadline, next_generation)) = next {
                     add_kernel_timer(
-                        TimerAction::SendSignal {
-                            task: Arc::downgrade(&task),
-                            signal,
+                        TimerAction::IntervalTimerSignal {
+                            process: Arc::downgrade(&process),
                             generation: next_generation,
                         },
                         deadline,
                     );
                 }
-                should_wake
+                woke
             }
             TimerAction::PosixTimerSignal {
                 process,
@@ -2382,7 +2356,8 @@ pub fn run_task_safe_point() {
             let _ = queue_kernel_process_signal(&task.process, signal);
         }
         // trap 出口已经把本次 user/system 时间结算到 TCB/PCB；在同一个
-        // 安全点领取 CPU timer，保证到期信号能紧接着由 do_signal() 处理。
+        // 安全点领取两类 CPU timer，保证到期信号能紧接着由 do_signal() 处理。
+        task.process.check_interval_cpu_timers();
         task.process.check_posix_cpu_timers(task);
     }
     // 后续可能 context switch；不能把 current 的 Arc 带过 schedule。

@@ -7,7 +7,8 @@ use crate::task::{
     find_task_by_tid,
     signal::{queue_process_signal_info, wake_process_signal_waiter, Signals},
     sleep_relative_interruptible, sleep_until_realtime_interruptible,
-    wake_realtime_abstime_sleepers_after_clock_set, PosixTimer, Rusage, TimerAction,
+    wake_realtime_abstime_sleepers_after_clock_set, IntervalTimerKind, PosixTimer, Rusage,
+    TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
@@ -172,123 +173,73 @@ pub fn sys_setitimer(
     new_value: *const ITimerVal,
     old_value: *mut ITimerVal,
 ) -> isize {
-    if which > 2 {
+    let Some(kind) = IntervalTimerKind::from_which(which) else {
         return EINVAL;
-    }
+    };
     let task = current_task().unwrap();
     let token = current_user_token();
-    let new_timer = match UserPtr::new(new_value).read_optional(token) {
-        Ok(value) => value,
-        Err(e) => {
-            return e;
+    // Linux 保留了 `new_value == NULL` 即停表的历史行为；不能把 optional
+    // copyin 的 None 误解释为“不修改当前 timer”。
+    let new_timer = if new_value.is_null() {
+        ITimerVal::new()
+    } else {
+        match UserPtr::new(new_value).read(token) {
+            Ok(value) => value,
+            Err(errno) => return errno,
         }
     };
-    match which {
-        // 实时时钟由 KernelTimer 驱动。
-        0 => {
-            let now = TimeSpec::now();
-            let mut register_timer = None;
-            let old_timer = {
-                let mut inner = task.acquire_inner_lock();
-                let old_timer = if old_value.is_null() {
-                    None
-                } else {
-                    let mut old_timer = inner.timer[0];
-                    old_timer.it_value = match inner.real_timer_deadline {
-                        Some(deadline) => timespec_to_timeval(deadline - now),
-                        None => TimeVal::new(),
-                    };
-                    Some(old_timer)
-                };
-                if let Some(value) = new_timer {
-                    // generation 让队列中的旧节点在新配置发布后自动失效。
-                    inner.real_timer_generation = inner.real_timer_generation.wrapping_add(1);
-                    if value.it_value.is_zero() {
-                        inner.timer[0] = ITimerVal::new();
-                        inner.real_timer_deadline = None;
-                    } else {
-                        let deadline = now + timeval_to_timespec(value.it_value);
-                        inner.timer[0] = value;
-                        inner.real_timer_deadline = Some(deadline);
-                        register_timer = Some((deadline, inner.real_timer_generation));
-                    }
-                    // 更新锚点，防止 refresh_real_timer() 用陈旧锚点误触发 SIGALRM
-                    inner.clock.last_real_timer_update = TimeVal::now();
-                }
-                old_timer
-            };
-            if let Some((deadline, generation)) = register_timer {
-                add_kernel_timer(
-                    TimerAction::SendSignal {
-                        // 队列节点不能延长任务生命周期。
-                        task: Arc::downgrade(&task),
-                        signal: Signals::SIGALRM,
-                        generation,
-                    },
-                    deadline,
-                );
-            }
-            // Linux 先提交并重编程新 timer，再向用户写旧值。这里若 EFAULT，
-            // 新配置仍然生效；回滚会覆盖其它 CPU 已观察到的 timer 状态。
-            if let Some(old_timer) = old_timer {
-                if let Err(errno) = UserPtrMut::new(old_value).write(token, &old_timer) {
-                    return errno;
-                }
-            }
-            SUCCESS
-        }
-        1 | 2 => {
-            let old_timer = {
-                let mut inner = task.acquire_inner_lock();
-                let old_timer = if old_value.is_null() {
-                    None
-                } else {
-                    Some(inner.timer[which])
-                };
-                if let Some(value) = new_timer {
-                    inner.timer[which] = value;
-                    inner.clock.last_real_timer_update = TimeVal::now();
-                }
-                old_timer
-            };
-            if let Some(old_timer) = old_timer {
-                if let Err(errno) = UserPtrMut::new(old_value).write(token, &old_timer) {
-                    return errno;
-                }
-            }
-            SUCCESS
-        }
-        _ => EINVAL,
+    if !valid_itimerval(new_timer) {
+        return EINVAL;
     }
+
+    // 当前线程在 trap 入口结算的用户时间可能仍停留在 TCB；先冲刷再读取
+    // VIRTUAL/PROF 时钟，避免新 deadline 少算本次已消耗的 CPU 时间。
+    task.flush_cpu_time();
+    let (old_timer, register_real) = task.process.set_interval_timer(kind, new_timer);
+    if let Some((deadline, generation)) = register_real {
+        add_kernel_timer(
+            TimerAction::IntervalTimerSignal {
+                process: Arc::downgrade(&task.process),
+                generation,
+            },
+            deadline,
+        );
+    }
+    // Linux 先提交新 timer，再向用户写旧值；copyout EFAULT 不回滚已发布状态。
+    if !old_value.is_null() {
+        if let Err(errno) = UserPtrMut::new(old_value).write(token, &old_timer) {
+            return errno;
+        }
+    }
+    SUCCESS
 }
 
 pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
-    if which > 2 {
+    let Some(kind) = IntervalTimerKind::from_which(which) else {
         return EINVAL;
-    }
+    };
     if curr_value.is_null() {
         return EFAULT;
     }
 
     let task = current_task().unwrap();
     let token = current_user_token();
-    let now = TimeSpec::now();
-    let value = {
-        let inner = task.acquire_inner_lock();
-        let mut value = inner.timer[which];
-        if which == 0 {
-            value.it_value = match inner.real_timer_deadline {
-                Some(deadline) => timespec_to_timeval(deadline - now),
-                None => TimeVal::new(),
-            };
-        }
-        value
-    };
+    task.flush_cpu_time();
+    let value = task.process.interval_timer(kind);
 
     match UserPtrMut::new(curr_value).write(token, &value) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
+}
+
+fn valid_itimerval(value: ITimerVal) -> bool {
+    fn valid_timeval(value: TimeVal) -> bool {
+        value.tv_usec < USEC_PER_SEC
+            && value.tv_sec <= (usize::MAX - value.tv_usec) / USEC_PER_SEC
+    }
+
+    valid_timeval(value.it_interval) && valid_timeval(value.it_value)
 }
 
 pub fn sys_timer_create(clock_id: usize, sevp: *const SigeventHeader, timerid: *mut i32) -> isize {

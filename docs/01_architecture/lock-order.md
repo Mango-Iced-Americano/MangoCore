@@ -794,8 +794,8 @@ UserPtr 读取并校验完整新值
   -> UserPtrMut 写回旧值
 ```
 
-`setitimer()` 查询 real timer 的 remaining 时只修改栈上快照，不能为了输出而改写任务内
-保存的 `it_value`；否则 `refresh_real_timer()` 会再次扣减同一时间区间。旧值 copyout 若
+`setitimer()` 查询 timer 的 remaining 时只修改栈上快照，不能为了输出而改写
+PCB 内保存的 deadline。旧值 copyout 若
 返回 `EFAULT`，新配置仍保持生效，不得重锁回滚并覆盖另一 CPU 已观察到的状态。
 
 ### 3.15 B70 sigtimedwait 的领取与回复边界
@@ -958,7 +958,7 @@ parent process.inner
 触发缺页、CoW、TLB shootdown 或 EFAULT 时，所有 parent/child/WaitQueue 锁都已释放；Linux
 也不会因 EFAULT 把已经消费的 stop/continue 或 zombie 事件重新发布。
 
-### 3.22 B77/B78 进程级 POSIX timer owner 与 CPU clock
+### 3.22 B77-B79 进程级 timer owner 与 CPU clock
 
 POSIX timer 表由 PCB 的独立 mutex 保护，不再嵌入任一 TCB。允许的局部锁边只有：
 
@@ -982,6 +982,19 @@ CPU timer 安全点先在锁外采样当前 TCB/PCB 的单调 CPU 累计，再�
 `Active`；任何用户 copyin/copyout 都不得跨 timer 表锁。delete、exec、最后线程退出与回调
 使用同一 owner 锁决定先后：回调若先取得锁，则信号已在线性化点生成；清理若先取得锁，旧
 action 会因 slot/`arm_seq`/deadline 不匹配而失效。
+
+B79 的 legacy `IntervalTimerTable` 遵循同一“owner 锁内提交、锁外投递”规则，但不与
+`PosixTimerTable` 嵌套：
+
+```text
+IntervalTimerTable unlock
+  -> KERNEL_TIMER_QUEUE              # REAL 注册/重装
+  -> process.signal -> scheduler     # REAL/VIRTUAL/PROF 到期投递
+```
+
+REAL callback 在表锁内核对 PCB generation/deadline 并推进周期；VIRTUAL/PROF 安全点先在
+锁外采样 PCB CPU 累计，再在表锁内唯一领取。`task.inner` 只负责把当前线程记账尾数取出，
+释放后才原子冲刷 PCB；不能形成 `task.inner -> IntervalTimerTable` 的嵌套边。
 
 ## 4. 永久禁止的组合
 

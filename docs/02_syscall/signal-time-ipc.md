@@ -221,21 +221,24 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
 ### 7.2 setitimer/getitimer
 
-`setitimer(which, new, old)` 支持 `which <= 2`。`which == 0` 的 real timer 使用 `KernelTimer`：
+`setitimer(which, new, old)` 支持 `which <= 2`。三个 timer 由线程组共享的 PCB 表持有：
 
 | 行为 | 说明 |
 |------|------|
 | old 非 NULL | 写回旧 timer；real timer 的 remaining 按 deadline - now 计算 |
-| new 为 NULL | 只读取旧值 |
+| new 为 NULL | 按 Linux 历史兼容语义停表 |
 | new.it_value 为 0 | 清除 real timer deadline |
-| new.it_value 非 0 | 设置 deadline，注册 `TimerAction::SendSignal(SIGALRM)` |
+| new.it_value 非 0 | 设置 deadline；REAL 注册 `TimerAction::IntervalTimerSignal` |
 
-代码维护 `real_timer_generation`，避免旧 timer 触发新一代 timer 的 SIGALRM。
+REAL action 保存 PCB `Weak` 和 generation，避免旧 heap 节点触发新一代 timer；其时钟是
+monotonic elapsed time，不受 `settimeofday/clock_settime` 的墙钟跳变影响。VIRTUAL/PROF
+分别读取线程组 user CPU 与 user+system CPU 累计，并在 trap-return、schedule-out 安全点
+领取到期。
 
-若同时提供 `new` 与 `old`，内核先完整读取新值，再在同一个 `task.inner` 临界区快照旧
-timer 并提交新配置；锁外完成 `KernelTimer` 注册后才写回旧值。old copyout 返回
-`EFAULT` 时不回滚已经生效的新配置。real timer 的 remaining 只在栈上快照中按
-`deadline - now` 计算，不能改写保存值后再让刷新路径重复扣减。
+内核先完整读取新值并冲刷本线程 CPU 记账尾数，再在同一个 `IntervalTimerTable` 临界区
+快照旧 timer 并提交新配置；锁外完成 `KernelTimer` 注册后才写回旧值。old copyout 返回
+`EFAULT` 时不回滚已经生效的新配置。remaining 只按绝对 deadline 与当前时钟采样计算，
+不再由 syscall、trap 和等待路径分别扣减。
 
 ## 8. POSIX timer
 

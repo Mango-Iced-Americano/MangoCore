@@ -156,8 +156,7 @@ wait_event_impl(wq, cond, signal_check, deadline, fallback_ms)
         ├── 挂 deadline timer 或 fallback timer
         ├── block_current_and_run_next_with_lock_checked()
         ├── finish_wait()
-        ├── 清 fallback active generation
-        └── refresh_real_timer()
+        └── 清 fallback active generation
 ```
 
 条件在入队前后各检查一次，避免条件刚满足却已经睡眠导致丢失唤醒。
@@ -249,7 +248,6 @@ where
         wq.lock().finish_wait(task);
         task.wait_io_fallback_active_generation
             .store(0, AtomicOrdering::Release);
-        task.acquire_inner_lock().refresh_real_timer();
     }
 }
 ```
@@ -348,7 +346,6 @@ where
         let mut guard = lock.lock();
         queue_of(&mut guard).finish_wait(task);
         drop(guard);
-        task.acquire_inner_lock().refresh_real_timer();
     }
 }
 ```
@@ -389,7 +386,7 @@ where
 | Action | 用途 |
 |--------|------|
 | `WakeTask` | deadline/fallback wait 唤醒任务 |
-| `SendSignal` | `ITIMER_REAL` 等向任务投递信号 |
+| `IntervalTimerSignal` | `ITIMER_REAL` 向所属进程投递 `SIGALRM` |
 | `PosixTimerSignal` | POSIX timer 到期投递信号 |
 | `TimerFdSweep` | 驱动 timerfd registry 唤醒 |
 
@@ -404,10 +401,9 @@ pub enum TimerAction {
         generation: usize,
         fallback_ms: Option<usize>,
     },
-    SendSignal {
-        task: Weak<TaskControlBlock>,
-        signal: Signals,
-        generation: usize,
+    IntervalTimerSignal {
+        process: Weak<ProcessControlBlock>,
+        generation: u64,
     },
     PosixTimerSignal {
         process: Weak<ProcessControlBlock>,

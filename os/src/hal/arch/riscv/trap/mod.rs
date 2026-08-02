@@ -11,7 +11,6 @@ use crate::config::TRAMPOLINE;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::syscall::syscall;
 use crate::task::{current_task, current_trap_task, do_signal, signal::SigInfo, Signals};
-use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
 pub use context::{UserContext, UserSignalMask};
 use riscv::register::{
@@ -146,7 +145,6 @@ pub fn trap_handler() -> ! {
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
             }
-            inner.refresh_real_timer();
             inner.update_process_times_leave_trap(scause.cause())
         };
         task.process.account_cpu_time(user_us, system_us);
@@ -245,7 +243,6 @@ pub fn trap_handler() -> ! {
     {
         let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
-        inner.refresh_real_timer();
         let (user_us, system_us) = inner.update_process_times_leave_trap(scause.cause());
         drop(inner);
         task.process.account_cpu_time(user_us, system_us);

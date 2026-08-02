@@ -873,6 +873,7 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // 在进入 signal queue/runqueue 前释放 timer 锁，并且临时 Arc 在真正
     // context switch 前释放。
     if let Some(task) = current_task() {
+        task.process.check_interval_cpu_timers();
         task.process.check_posix_cpu_timers(&task);
     }
     // idle 上下文必须来自正在执行该任务的同一 CPU；任务迁移只能

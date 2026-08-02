@@ -34,7 +34,7 @@ use crate::mm::{
 };
 use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
-use crate::timer::{ITimerVal, TimeSpec, TimeVal};
+use crate::timer::{TimeSpec, TimeVal};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -346,12 +346,6 @@ pub struct TaskControlBlockInner {
     pub rusage: Rusage,
     /// 任务的时钟信息
     pub clock: ProcClock,
-    /// 定时器
-    pub timer: [ITimerVal; 3],
-    /// ITIMER_REAL 的真实时间到期点
-    pub real_timer_deadline: Option<TimeSpec>,
-    /// ITIMER_REAL 的版本号，用于让旧TimerQueue节点失效
-    pub real_timer_generation: usize,
     /// OOM killer pending 标志：分配器已耗尽，本进程将在 trap_return 时被杀死
     pub pending_oom_kill: bool,
 }
@@ -392,8 +386,6 @@ pub struct ProcClock {
     last_enter_u_mode: TimeVal,
     /// 上次进入内核态的时间
     last_enter_s_mode: TimeVal,
-    //  上次更新real计时器的时间
-    pub last_real_timer_update: TimeVal,
 }
 
 impl ProcClock {
@@ -404,7 +396,6 @@ impl ProcClock {
         Self {
             last_enter_u_mode: now,
             last_enter_s_mode: now,
-            last_real_timer_update: now,
         }
     }
 }
@@ -553,10 +544,6 @@ impl TaskControlBlockInner {
         self.sched_vruntime = self
             .sched_vruntime
             .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
-        // 更新虚拟定时器
-        self.update_itimer_virtual_if_exists(diff);
-        // 更新性能分析定时器
-        self.update_itimer_prof_if_exists(diff);
     }
     /// 在离开陷阱时更新进程时间
     pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) -> (usize, usize) {
@@ -586,7 +573,6 @@ impl TaskControlBlockInner {
         self.rusage.ru_stime = self.rusage.ru_stime + diff;
         self.group_system_unflushed_us =
             self.group_system_unflushed_us.saturating_add(diff.to_us());
-        self.update_itimer_prof_if_exists(diff);
         self.clock.last_enter_s_mode = now;
     }
 
@@ -602,56 +588,6 @@ impl TaskControlBlockInner {
             core::mem::take(&mut self.group_user_unflushed_us),
             core::mem::take(&mut self.group_system_unflushed_us),
         )
-    }
-    /// 更新实时定时器
-    pub fn update_itimer_real_if_exists(&mut self, diff: TimeVal) {
-        // 如果当前定时器不为0
-        if !self.timer[0].it_value.is_zero() {
-            // 更新定时器
-            self.timer[0].it_value = self.timer[0].it_value - diff;
-            // 如果定时器为0
-            if self.timer[0].it_value.is_zero() {
-                // 添加信号
-                self.add_signal(Signals::SIGALRM);
-                // 重置定时器
-                self.timer[0].it_value = self.timer[0].it_interval;
-            }
-        }
-    }
-    /// 更新虚拟定时器
-    /// 与上面的更新实时定时器类似
-    /// 但是发送的信号是SIGVTALRM
-    pub fn update_itimer_virtual_if_exists(&mut self, diff: TimeVal) {
-        if !self.timer[1].it_value.is_zero() {
-            self.timer[1].it_value = self.timer[1].it_value - diff;
-            if self.timer[1].it_value.is_zero() {
-                self.add_signal(Signals::SIGVTALRM);
-                self.timer[1].it_value = self.timer[1].it_interval;
-            }
-        }
-    }
-    /// 更新性能分析定时器
-    /// 与上面的更新实时定时器类似
-    /// 但是发送的信号是SIGPROF
-    pub fn update_itimer_prof_if_exists(&mut self, diff: TimeVal) {
-        if !self.timer[2].it_value.is_zero() {
-            self.timer[2].it_value = self.timer[2].it_value - diff;
-            if self.timer[2].it_value.is_zero() {
-                self.add_signal(Signals::SIGPROF);
-                self.timer[2].it_value = self.timer[2].it_interval;
-            }
-        }
-    }
-
-    pub fn refresh_real_timer(&mut self) {
-        if self.real_timer_deadline.is_none() {
-            return;
-        }
-        let now = TimeVal::now();
-        let diff = now - self.clock.last_real_timer_update;
-        self.update_itimer_real_if_exists(diff);
-        // 更新锚点，防止重复计算
-        self.clock.last_real_timer_update = now;
     }
 }
 
@@ -1372,9 +1308,6 @@ impl TaskControlBlock {
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
-                timer: [ITimerVal::new(); 3],
-                real_timer_deadline: None,
-                real_timer_generation: 0,
                 pending_oom_kill: false,
             }),
         });
@@ -1500,9 +1433,6 @@ impl TaskControlBlock {
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
-                timer: [ITimerVal::new(); 3],
-                real_timer_deadline: None,
-                real_timer_generation: 0,
                 pending_oom_kill: false,
             }),
         });
@@ -2037,9 +1967,6 @@ impl TaskControlBlock {
                 clock: ProcClock::new(),
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
-                timer: [ITimerVal::new(); 3],
-                real_timer_deadline: None,
-                real_timer_generation: 0,
                 sigmask: parent_inner.sigmask,
                 sigmask_to_restore: None,
                 // compute

@@ -669,8 +669,6 @@ fn futex_wait_event_interruptible_timeout_locked(
             no_signal && not_timed_out
         });
 
-        let task = current_task().unwrap();
-        task.acquire_inner_lock().refresh_real_timer();
     }
 }
 
@@ -806,8 +804,6 @@ fn futex_waitv_locked(
             !has_actionable_signal(task) && !deadline_expired(deadline)
         });
 
-        let task = current_task().unwrap();
-        task.acquire_inner_lock().refresh_real_timer();
     }
 }
 

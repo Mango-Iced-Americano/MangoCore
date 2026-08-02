@@ -709,6 +709,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `timer_gettime()` 返回 1ns。双架构 8 核 build 和每套 libc `timer_settime01/02` 均通过，
   两种 CPU clock 的相对、old-value、周期、绝对装载全部 TPASS；跨 sibling 精确领取、owner
   退出、sleep 不推进 clock 与 per-timer pending/overrun 身份仍为 NOT RUN；
+- B79 将 legacy `ITIMER_REAL/VIRTUAL/PROF` 从线程 TCB 迁入 PCB 独立表：thread clone 共享，
+  普通 fork 新建空表，exec 保留，最后线程退出清空。REAL 使用 monotonic heap generation；
+  VIRTUAL/PROF 分别读取线程组 user 与 user+system CPU 累计，并在 trap-return、schedule-out
+  安全点由表锁唯一领取。锁外才投递进程 shared pending 或重装 heap。双架构 8 核 build、
+  两套 libc 的 `setitimer01/02` 和 `mask=0x003` 初赛均通过，基线保持 RV64 312/314、LA64
+  308/314；多 sibling 精确到期交错仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

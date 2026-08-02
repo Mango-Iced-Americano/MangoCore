@@ -148,9 +148,9 @@ if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
         if syscall_id != 139 {
             cx.gp.a0 = result as usize;
         }
-        inner.refresh_real_timer();
-        inner.update_process_times_leave_trap(scause.cause());
+        let (user_us, system_us) = inner.update_process_times_leave_trap(scause.cause());
     }
+    task.process.account_cpu_time(user_us, system_us);
     let _trap_ticks = crate::task::perf::perf_time_now() - _trap_start;
     crate::task::perf::record_trap_cost_ticks(_trap_ticks);
     trap_return();
@@ -170,7 +170,7 @@ if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
 | 分发 | `syscall(syscall_id, args)` |
 | 重新取 trap context | 防止 execve/sigreturn 替换上下文 |
 | 写回返回值 | syscall id 非 139 时写回 `a0` |
-| 退出统计 | `refresh_real_timer()`、`update_process_times_leave_trap()` |
+| 退出统计 | `update_process_times_leave_trap()`、`account_cpu_time()` |
 
 这一分支直接结束于 `trap_return()`，不会继续进入普通异常 `match`。
 

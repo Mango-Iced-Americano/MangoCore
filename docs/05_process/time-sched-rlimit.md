@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-30
+last_update: 2026-08-03
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -15,7 +15,8 @@ tags: [process, time, sched, rlimit, prctl]
 |------|------|
 | `os/src/syscall/process/time.rs` | nanosleep、itimer、POSIX timer、clock/timex |
 | `os/src/syscall/process/ids.rs` | get/set id、sched、rlimit、prctl、capability、ptrace、process_vm |
-| `os/src/task/task.rs` | rusage、ProcClock、timer state、rlimit 字段 |
+| `os/src/task/task.rs` | 线程 rusage、ProcClock 与调度字段 |
+| `os/src/task/process.rs` | 线程组 CPU 账户、legacy/POSIX timer owner |
 | `os/src/task/manager.rs` | KernelTimerQueue |
 | `os/src/task/sleep.rs` | sleep helper |
 
@@ -43,23 +44,20 @@ TCB inner 中：
 
 `ru_maxrss` 在进程退出时根据 resident user bytes 更新；其他 rusage 字段多数保持 0。
 
-计时状态按共享域拆分。TCB inner 保留线程 CPU 记账、采样锚点和当前仍属线程级的
-legacy itimer；线程组累计和 POSIX timer 表由 PCB 持有：
+计时状态按共享域拆分。TCB inner 只保留线程 CPU 记账与采样锚点：
 
 ```rust
 pub clear_child_tid: usize,
 pub robust_list: RobustList,
 pub rusage: Rusage,
 pub clock: ProcClock,
-pub timer: [ITimerVal; 3],
-pub real_timer_deadline: Option<TimeSpec>,
-pub real_timer_generation: usize,
 pub pending_oom_kill: bool,
 ```
 
-PCB 的 `cpu_account` 汇总所有线程的 user/system 时间，`posix_timers` 独立 mutex 则保护
-进程级 timer ID、装载代次和到期状态。两者都不能塞回某个“创建线程”的 TCB，否则 sibling
-无法按 POSIX 语义访问对象，创建线程退出也会错误删除整个进程的 timer。
+PCB 的 `cpu_account` 汇总所有线程的 user/system 时间；`interval_timers` 和
+`posix_timers` 分别保护 legacy interval timer 与 POSIX timer。三者都不能塞回某个
+“创建线程”的 TCB，否则 sibling 无法观察同一线程组时钟，创建线程退出还会错误删除
+整个进程的 timer。
 
 `ProcClock` 保存进入用户态/内核态的时间戳，CPU 时间统计函数据此累加 `Rusage`：
 
@@ -68,7 +66,6 @@ PCB 的 `cpu_account` 汇总所有线程的 user/system 时间，`posix_timers` 
 pub struct ProcClock {
     last_enter_u_mode: TimeVal,
     last_enter_s_mode: TimeVal,
-    pub last_real_timer_update: TimeVal,
 }
 
 impl ProcClock {
@@ -77,7 +74,6 @@ impl ProcClock {
         Self {
             last_enter_u_mode: now,
             last_enter_s_mode: now,
-            last_real_timer_update: now,
         }
     }
 }
@@ -105,9 +101,19 @@ limit 单位为秒，内部转换为微秒。
 | 1 | `ITIMER_VIRTUAL` | `SIGVTALRM` |
 | 2 | `ITIMER_PROF` | `SIGPROF` |
 
-REAL timer 使用 `KernelTimerQueue::TimerAction::SendSignal`，并用 `real_timer_generation` 过滤旧 timer。VIRTUAL/PROF 在 CPU 时间统计更新时递减。
+三个 timer 都属于 PCB 的 `IntervalTimerTable`：thread clone 共享，普通 fork 创建空表，
+exec 保留，最后线程退出清空。表内保存所属时钟域的绝对 deadline，而不是在各 TCB 中递减
+remaining，因此 sibling 在不同 CPU 上消耗 CPU 时间时不会覆盖彼此状态。
 
-`getitimer(ITIMER_REAL)` 会根据 `real_timer_deadline - now` 计算剩余时间。
+- `ITIMER_REAL` 使用 monotonic elapsed time 和 `TimerAction::IntervalTimerSignal`；action
+  携带 PCB `Weak` 与 generation，旧节点不能命中新装载。墙钟调整不改变 REAL timer。
+- `ITIMER_VIRTUAL` 读取线程组 user CPU 累计；`ITIMER_PROF` 读取线程组 user+system 累计。
+  trap-return 与 schedule-out 安全点在表锁内唯一领取到期，锁外投递进程共享信号。
+- `getitimer()` 以当前时钟采样计算 remaining；active 但已经到期、尚待安全点领取时返回
+  最小非零值。`setitimer(new=NULL)` 按 Linux 历史兼容语义停表。
+
+系统调用先冲刷当前线程的 CPU 记账尾数，再在一个 timer 表临界区快照旧值并提交新值；
+锁外注册 REAL heap 节点和 copyout 旧值。old copyout 的 `EFAULT` 不回滚已发布配置。
 
 ## 5. nanosleep
 
@@ -431,7 +437,7 @@ timer 类接口的共同路径是：syscall 读取用户 timespec/sigevent，转
 | 现象 | 检查 |
 |------|------|
 | CPU limit 不触发 | enter/leave trap 是否更新 rusage |
-| ITIMER_REAL 重复或丢失 | `real_timer_generation` 与 deadline |
+| legacy itimer 重复或丢失 | PCB timer kind、generation 与 clock domain |
 | POSIX timer overrun 错误 | periodic deadline 与 pending signal |
 | sched_getattr 回读不符 | TCB/PCB sched_state 同步 |
 | prctl 字段跨 exec/fork 异常 | 哪些字段 clone 复制、哪些 exec 保留或 reset |

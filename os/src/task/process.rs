@@ -27,7 +27,7 @@ use crate::config::{SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
 use crate::signal_type;
-use crate::timer::{TimeSpec, USEC_PER_SEC};
+use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -157,6 +157,112 @@ impl ProcessCpuAccount {
             })
             .unwrap();
         previous.saturating_add(delta)
+    }
+}
+
+/// legacy `getitimer/setitimer` 的三种进程级时钟。
+///
+/// 下标与 Linux UAPI 的 `ITIMER_REAL/VIRTUAL/PROF` 保持一致，避免 syscall、
+/// timer callback 和 CPU 安全点各自维护一套数字映射。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntervalTimerKind {
+    Real = 0,
+    Virtual = 1,
+    Prof = 2,
+}
+
+impl IntervalTimerKind {
+    pub(crate) fn from_which(which: usize) -> Option<Self> {
+        match which {
+            0 => Some(Self::Real),
+            1 => Some(Self::Virtual),
+            2 => Some(Self::Prof),
+            _ => None,
+        }
+    }
+
+    fn signal(self) -> Signals {
+        match self {
+            Self::Real => Signals::SIGALRM,
+            Self::Virtual => Signals::SIGVTALRM,
+            Self::Prof => Signals::SIGPROF,
+        }
+    }
+}
+
+/// 一个 interval timer 在其时钟域中的权威状态。
+///
+/// `deadline_us` 对 REAL 表示 monotonic 时间，对 VIRTUAL/PROF 分别表示
+/// 线程组 user CPU 与 user+system CPU。字段不混存“剩余时间”，读取时统一
+/// 用当前时钟采样计算，因此 sibling 在不同 CPU 上消费时间时不会互相覆盖。
+#[derive(Clone, Copy)]
+struct IntervalTimer {
+    interval_us: u64,
+    deadline_us: Option<u64>,
+}
+
+impl IntervalTimer {
+    const fn new() -> Self {
+        Self {
+            interval_us: 0,
+            deadline_us: None,
+        }
+    }
+
+    fn snapshot(self, now_us: u64) -> ITimerVal {
+        let remaining_us = self
+            .deadline_us
+            .map(|deadline| deadline.saturating_sub(now_us).max(1))
+            .unwrap_or(0);
+        ITimerVal {
+            it_interval: TimeVal::from_us(self.interval_us.min(usize::MAX as u64) as usize),
+            it_value: TimeVal::from_us(remaining_us.min(usize::MAX as u64) as usize),
+        }
+    }
+}
+
+/// 同一线程组共享的三个 legacy interval timer。
+struct IntervalTimerTable {
+    timers: [IntervalTimer; 3],
+    /// REAL heap 节点的 ABA 防护；0 保留为无效序号。
+    real_generation: u64,
+}
+
+impl IntervalTimerTable {
+    const fn new() -> Self {
+        Self {
+            timers: [IntervalTimer::new(); 3],
+            real_generation: 0,
+        }
+    }
+
+    fn timer(&self, kind: IntervalTimerKind) -> &IntervalTimer {
+        &self.timers[kind as usize]
+    }
+
+    fn timer_mut(&mut self, kind: IntervalTimerKind) -> &mut IntervalTimer {
+        &mut self.timers[kind as usize]
+    }
+
+    fn next_real_generation(&mut self) -> u64 {
+        self.real_generation = self.real_generation.wrapping_add(1).max(1);
+        self.real_generation
+    }
+
+    fn cpu_timer_active(&self) -> bool {
+        self.timer(IntervalTimerKind::Virtual)
+            .deadline_us
+            .is_some()
+            || self
+                .timer(IntervalTimerKind::Prof)
+                .deadline_us
+                .is_some()
+    }
+
+    fn clear(&mut self) {
+        self.timers = [IntervalTimer::new(); 3];
+        // 保留并推进序号，令退出前遗留的 REAL heap 节点永久失效。
+        self.next_real_generation();
     }
 }
 
@@ -432,6 +538,10 @@ pub struct ProcessControlBlock {
     rlimits: Mutex<ProcessLimits>,
     /// RLIMIT_CPU 的线程组累计和到期提示；热路径只访问原子字段。
     cpu_account: ProcessCpuAccount,
+    /// legacy interval timer 与 Linux `signal_struct` 一样由线程组共享。
+    interval_timers: Mutex<IntervalTimerTable>,
+    /// VIRTUAL/PROF 安全点扫描的无锁提示；权威 deadline 仍受上面的锁保护。
+    interval_cpu_timers_active: AtomicBool,
     /// POSIX timer 是线程组共享对象，独立锁避免 timer callback 争用 process.inner。
     posix_timers: Mutex<PosixTimerTable>,
     /// CPU timer 安全点的无锁 fast hint；权威状态仍在 posix_timers 锁内。
@@ -701,6 +811,170 @@ impl ProcessControlBlock {
         *self.rlimits.lock()
     }
 
+    fn interval_clock_us(&self, kind: IntervalTimerKind) -> u64 {
+        match kind {
+            IntervalTimerKind::Real => TimeVal::now().to_us() as u64,
+            IntervalTimerKind::Virtual => self.cpu_user_us(),
+            IntervalTimerKind::Prof => self.cpu_runtime_us(),
+        }
+    }
+
+    /// 读取一个 legacy interval timer 的剩余时间。
+    pub(crate) fn interval_timer(&self, kind: IntervalTimerKind) -> ITimerVal {
+        let now_us = self.interval_clock_us(kind);
+        self.interval_timers.lock().timer(kind).snapshot(now_us)
+    }
+
+    /// 原子替换一个 legacy interval timer，并返回旧值和可选 REAL heap 节点。
+    ///
+    /// 调用方必须在进入本函数前冲刷当前线程的 CPU 记账尾数。返回后 timer 锁
+    /// 已释放，才允许向全局 heap 插入节点或向用户写旧值。
+    pub(crate) fn set_interval_timer(
+        self: &Arc<Self>,
+        kind: IntervalTimerKind,
+        value: ITimerVal,
+    ) -> (ITimerVal, Option<(TimeSpec, u64)>) {
+        let now_us = self.interval_clock_us(kind);
+        let value_us = value.it_value.to_us() as u64;
+        let interval_us = value.it_interval.to_us() as u64;
+        let mut timers = self.interval_timers.lock();
+        let old = timers.timer(kind).snapshot(now_us);
+
+        let deadline_us = (value_us != 0).then(|| now_us.saturating_add(value_us));
+        let timer = timers.timer_mut(kind);
+        timer.deadline_us = deadline_us;
+        // Linux 的 REAL disarm 会同时清 interval；CPU timer 则保留用户设置的
+        // reload 值。保持这一旧 ABI 差异，不把三类 timer 强行抽象成同一行为。
+        timer.interval_us = if kind == IntervalTimerKind::Real && deadline_us.is_none() {
+            0
+        } else {
+            interval_us
+        };
+
+        self.interval_cpu_timers_active
+            .store(timers.cpu_timer_active(), Ordering::Release);
+        let registration = if kind == IntervalTimerKind::Real {
+            let generation = timers.next_real_generation();
+            deadline_us.map(|deadline| {
+                (
+                    TimeSpec::from_us(deadline.min(usize::MAX as u64) as usize),
+                    generation,
+                )
+            })
+        } else {
+            None
+        };
+        (old, registration)
+    }
+
+    /// 判断 REAL heap 节点是否仍对应当前装载。
+    pub(crate) fn real_interval_timer_is_live(
+        &self,
+        generation: u64,
+        deadline: TimeSpec,
+    ) -> bool {
+        let timers = self.interval_timers.lock();
+        timers.real_generation == generation
+            && timers.timer(IntervalTimerKind::Real).deadline_us
+                == Some(deadline.to_ns_saturating() / 1_000)
+    }
+
+    /// 在 REAL callback 中唯一领取一次到期，并按原 deadline 追赶周期。
+    ///
+    /// 返回 `(fired, next)`；信号投递和 heap 重装必须在本锁外完成。
+    pub(crate) fn expire_real_interval_timer(
+        &self,
+        generation: u64,
+        deadline: TimeSpec,
+        now: TimeSpec,
+    ) -> (bool, Option<(TimeSpec, u64)>) {
+        let deadline_us = deadline.to_ns_saturating() / 1_000;
+        let now_us = now.to_ns_saturating() / 1_000;
+        let mut timers = self.interval_timers.lock();
+        if timers.real_generation != generation
+            || timers.timer(IntervalTimerKind::Real).deadline_us != Some(deadline_us)
+        {
+            return (false, None);
+        }
+
+        let interval_us = timers.timer(IntervalTimerKind::Real).interval_us;
+        if interval_us == 0 {
+            timers.timer_mut(IntervalTimerKind::Real).deadline_us = None;
+            return (true, None);
+        }
+
+        let expirations = now_us
+            .saturating_sub(deadline_us)
+            .checked_div(interval_us)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let next_us = deadline_us.saturating_add(expirations.saturating_mul(interval_us));
+        timers.timer_mut(IntervalTimerKind::Real).deadline_us = Some(next_us);
+        let next_generation = timers.next_real_generation();
+        (
+            true,
+            Some((
+                TimeSpec::from_us(next_us.min(usize::MAX as u64) as usize),
+                next_generation,
+            )),
+        )
+    }
+
+    /// 在返回用户态或 schedule-out 安全点推进 VIRTUAL/PROF timer。
+    pub(crate) fn check_interval_cpu_timers(&self) {
+        if !self
+            .interval_cpu_timers_active
+            .load(Ordering::Acquire)
+        {
+            return;
+        }
+
+        let now = [self.cpu_user_us(), self.cpu_runtime_us()];
+        let kinds = [IntervalTimerKind::Virtual, IntervalTimerKind::Prof];
+        let mut expired = [Signals::empty(); 2];
+        let mut expired_count = 0usize;
+        {
+            let mut timers = self.interval_timers.lock();
+            for (kind, now_us) in kinds.iter().copied().zip(now.iter().copied()) {
+                let timer = timers.timer_mut(kind);
+                let Some(deadline_us) = timer.deadline_us else {
+                    continue;
+                };
+                if now_us < deadline_us {
+                    continue;
+                }
+                if timer.interval_us == 0 {
+                    timer.deadline_us = None;
+                } else {
+                    let expirations = now_us
+                        .saturating_sub(deadline_us)
+                        .checked_div(timer.interval_us)
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    timer.deadline_us = Some(
+                        deadline_us
+                            .saturating_add(expirations.saturating_mul(timer.interval_us)),
+                    );
+                }
+                expired[expired_count] = kind.signal();
+                expired_count += 1;
+            }
+            self.interval_cpu_timers_active
+                .store(timers.cpu_timer_active(), Ordering::Release);
+        }
+
+        for signal in expired.iter().take(expired_count).copied() {
+            let _ = super::signal::queue_kernel_process_signal(self, signal);
+            let _ = wake_process_signal_waiter(self, signal);
+        }
+    }
+
+    fn clear_interval_timers(&self) {
+        self.interval_timers.lock().clear();
+        self.interval_cpu_timers_active
+            .store(false, Ordering::Release);
+    }
+
     /// 获取当前进程的 POSIX timer 表。
     ///
     /// guard 不得跨用户访存、timer queue 插入、信号唤醒或其它等待点。
@@ -815,6 +1089,11 @@ impl ProcessControlBlock {
     /// 返回线程组 user+system CPU 时间的单调权威总量。
     pub(crate) fn cpu_runtime_us(&self) -> u64 {
         self.cpu_account.runtime_us.load(Ordering::Acquire)
+    }
+
+    /// 返回线程组已冲刷的用户态 CPU 时间，供 ITIMER_VIRTUAL 使用。
+    pub(crate) fn cpu_user_us(&self) -> u64 {
+        self.cpu_account.user_us.load(Ordering::Acquire)
     }
 
     /// 返回已冲刷的线程组 user/system CPU 时间。
@@ -972,6 +1251,8 @@ impl ProcessControlBlock {
             process_quota: Mutex::new(Some(process_quota)),
             rlimits: Mutex::new(rlimits),
             cpu_account,
+            interval_timers: Mutex::new(IntervalTimerTable::new()),
+            interval_cpu_timers_active: AtomicBool::new(false),
             posix_timers: Mutex::new(PosixTimerTable::new()),
             posix_cpu_timers_active: AtomicBool::new(false),
             thread_group: Mutex::new(ThreadGroupState {
@@ -2019,7 +2300,9 @@ impl ProcessControlBlock {
         if !self.mark_zombie(exit_code, rusage) {
             return;
         }
-        // PCB 会作为 zombie 保留到 wait；必须现在删除 timer，而不能等 PCB Drop。
+        // PCB 会作为 zombie 保留到 wait；必须现在删除 interval/POSIX timer，
+        // 不能等 PCB Drop。exec 只清 POSIX timer，legacy interval timer 则保留。
+        self.clear_interval_timers();
         self.clear_posix_timers();
         // 在 mark_zombie 之后重新获取 parent：其它 CPU 可能同时完成 reparent，
         // 因此不能沿用进入 finish_exit() 前取得的父进程快照。
