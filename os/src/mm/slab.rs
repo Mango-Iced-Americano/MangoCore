@@ -9,7 +9,7 @@ use core::{
     ptr::NonNull,
 };
 
-use buddy_system_allocator::{MetadataHeap, PageOrder, PageRun, AllocError as PageAllocError};
+use buddy_system_allocator::{AllocError as PageAllocError, MetadataHeap, PageOrder, PageRun};
 
 const HEAP_ORDER: usize = 32;
 const HEAP_MIN_ORDER: usize = 12;
@@ -20,8 +20,7 @@ const SLAB_MIN: usize = 8;
 const SLAB_MAX: usize = 2048;
 const SLAB_CLASS_COUNT: usize = 9;
 
-const SLAB_CLASSES: [usize; SLAB_CLASS_COUNT] =
-    [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+const SLAB_CLASSES: [usize; SLAB_CLASS_COUNT] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 const SLAB_MAGIC: u32 = 0x51AB_5A6B;
 const FREE_END: u16 = u16::MAX;
@@ -411,7 +410,10 @@ impl SlabCache {
         // Compute object index
         let obj_offset = ptr.as_ptr() as usize - p.page_base();
         let index = (obj_offset / self.size_class) as u16;
-        debug_assert!(index < p.max_objects, "slab dealloc: object index out of range");
+        debug_assert!(
+            index < p.max_objects,
+            "slab dealloc: object index out of range"
+        );
         debug_assert!(p.bitmap_test(index), "slab dealloc: double-free detected");
 
         p.bitmap_clear(index);

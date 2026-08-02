@@ -269,7 +269,7 @@ impl IndexNode for Ext4Inode {
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
         drop(_data);
-        self.sync()
+        Ok(())
     }
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {

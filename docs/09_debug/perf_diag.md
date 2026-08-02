@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-02
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -74,7 +74,7 @@ cat /sys/kernel/stats/features
 | `taskq` | ro | 调度队列指标（15 项） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
-| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时，以及 UserBuffer `pwrite` 边界和 PageCache 写入阶段周期 |
+| `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时，以及 UserBuffer `pwrite`/`write` 前台边界和 PageCache 写入阶段周期 |
 | `anon_unmap` | ro | private anonymous VMA 释放次数、页数、精确 retain 扫描步数和耗时 |
 | `net` | ro | poll、RX/TX/drop 与 exec/openat/read/mmap 运行时归因 |
 | `resource` | ro | 资源 gauge（内存/Task/Socket/Pipe/PageCache/Dentry 等） |
@@ -182,8 +182,8 @@ echo 1 > /sys/kernel/tracing/clear
 |--------|------|------|
 | `syscall_total` | counter | 系统调用总次数 |
 | `syscall_getppid_total` | counter | getppid（syscall 173）调用次数 |
-| `syscall_cost_max_ticks` | max | 单次 syscall 最大耗时（rdcycle） |
-| `trap_enter_cost_max_ticks` | max | 单次 trap 最大耗时（rdcycle） |
+| `syscall_cost_max_ticks` | max | 单次 syscall 最大耗时（timer timebase tick） |
+| `trap_enter_cost_max_ticks` | max | 单次 trap 最大耗时（timer timebase tick） |
 | `user_unaligned_traps` | counter | 用户态非对齐访存异常总数（LoongArch） |
 | `user_unaligned_ticks_total/max` | counter/max | 非对齐 Rust handler 的累计/最大耗时；不含汇编 trap entry/restore |
 | `user_unaligned_load_{2,4,8}` | counter | 按访问宽度分类的非对齐 load |
@@ -196,8 +196,8 @@ echo 1 > /sys/kernel/tracing/clear
 
 | 计数器 | 类型 | 含义 |
 |--------|------|------|
-| `page_faults` / `pagefault_ticks_total` | counter | 缺页次数与 handler 累计 ticks |
-| `frame_alloc_hits` / `frame_alloc_ticks_total` | counter | frame 分配次数与累计 ticks |
+| `page_faults` / `pagefault_ticks_total` | counter | 缺页次数与 `do_page_fault()` 累计 timer timebase ticks；完整 lmbench wall time 还包含该边界外的 trap 和用户态部分 |
+| `frame_alloc_hits` / `frame_alloc_ticks_total` | counter | frame 分配次数与累计 timer timebase ticks |
 | `frame_free_hits` | counter | frame 释放次数 |
 | `tlb_{full,page,activate,global}` | counter | 各类 TLB 操作；`activate` 不是实际地址空间切换数 |
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
@@ -209,6 +209,17 @@ echo 1 > /sys/kernel/tracing/clear
 | `virtio_read_requests` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的读请求数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 | `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
+| `wb_tx_data_write_{calls,bytes,ticks}` | counter | another_ext4 journal-backed data write 的次数、字节数与累计 ticks |
+| `wb_tx_alloc_extent_{calls,pages,ticks}` | counter | data write 路径中 alloc/extent 准备的次数、页数与累计 ticks |
+| `wb_tx_journal_{commit_ticks,staged_blocks,tx_first,tx_last}` | counter/gauge | 已提交 journal transaction 的累计 ticks、staged block 数及本窗口 transaction id 范围 |
+| `wb_tx_journal_flush_{count,ticks}` | counter | `ActiveLog`、`CommitRecord`、`Checkpoint`、`TailUpdate` 四个 journal phase 的设备 flush 次数与累计 ticks |
+| `wb_tx_boundary_flush_{count,ticks}` | counter | journal 外明确 durability boundary 的设备 flush 次数与累计 ticks |
+
+`clock_freq_hz` 是上述 perf timer tick 的唯一换算分母：`µs = ticks × 1_000_000 / clock_freq_hz`。不要将它与 RV64 `rdcycle` 或跨架构 CPU cycle 数混用。
+
+`/sys/kernel/stats/pagefault` 同时导出互斥的 `action_*` 分类（例如 `FileBackedRead`）和嵌套的 `stage_*` 计时（例如 `pte_map`、`tlb_flush`、`filemap_frame`）。action 可按 count 合计；stage 可能相互包含，不能相加后当作总 handler 时间。`trap_entry` 与 `trap_return` 当前只覆盖 Rust 侧边界，不覆盖 trampoline 汇编保存、恢复或 `sret`。
+
+another_ext4 的 transaction 诊断会在串口输出 `[wb_txn]` 事件：`commit` 带 transaction id、reason 和 staged blocks，`flush` 带四个 journal phase，`boundary_flush` 单独标记 `DurabilityBoundary`。因此分析时必须先按 reason 与 phase 分类：一个 `commit_journal` 当前固定会产生四个 phase flush，且 durability-boundary flush 不是额外 journal commit。`staged_blocks=0` 仅说明该 deferred journal 的 staging 数量，不能推断直接 metadata 操作没有 I/O。
 
 #### anonymous private VMA release
 

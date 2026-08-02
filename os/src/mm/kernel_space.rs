@@ -238,11 +238,7 @@ impl<T: PageTable> KernelSpace<T> {
             if stext as usize <= base && end <= ekernel as usize {
                 continue;
             }
-            kernel_identical_map!(
-                base,
-                end,
-                MapPermission::R | MapPermission::G
-            );
+            kernel_identical_map!(base, end, MapPermission::R | MapPermission::G);
         }
         kernel_space
     }

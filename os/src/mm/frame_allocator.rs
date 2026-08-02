@@ -33,6 +33,7 @@ pub struct FrameTracker {
 impl FrameTracker {
     /// 分配跟踪器并把整页清零。
     pub fn new(ppn: PhysPageNum) -> Self {
+        let zero_start = crate::task::perf::perf_memory_io_time_now();
         let ptr = ppn.get_dwords_array().as_mut_ptr();
         const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
         const UNROLL: usize = 8;
@@ -57,6 +58,10 @@ impl FrameTracker {
             unsafe { ptr.add(i).write(0) };
             i += 1;
         }
+        crate::task::perf::record_pagefault_stage(
+            4,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(zero_start),
+        );
         Self { ppn }
     }
 
@@ -709,6 +714,10 @@ impl FrameAllocator for StackFrameAllocator {
         crate::task::perf::record_frame_alloc_time_us(
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                 .saturating_sub(_start),
+        );
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(_start),
         );
         result
     }

@@ -6,7 +6,6 @@ use spin::Mutex;
 
 use crate::config::PAGE_SIZE;
 use crate::fs::page_cache::PageCacheBackend;
-use crate::task::perf;
 use crate::utils::error::SyscallErr;
 
 use super::errno::{from_another, from_another_op};
@@ -65,11 +64,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         Ok(PAGE_SIZE)
     }
 
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         crate::task::perf::record_ext4_pc_readpages_calls();
         crate::task::perf::record_ext4_pc_readpages_pages(pages.len());
         for page in pages.iter() {
@@ -82,7 +77,10 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         }
 
         let start_offset = Self::page_offset(start_index)?;
-        let total_bytes = pages.len().checked_mul(PAGE_SIZE).ok_or(SyscallErr::EFBIG)?;
+        let total_bytes = pages
+            .len()
+            .checked_mul(PAGE_SIZE)
+            .ok_or(SyscallErr::EFBIG)?;
         let size = self.logical_size.load(Ordering::Acquire);
         let mut staging = alloc::vec![0u8; total_bytes];
         if start_offset < size {
@@ -144,7 +142,6 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             let batch_end = start_offset
                 .checked_add(total_bytes)
                 .ok_or(SyscallErr::EFBIG)?;
-            let _t0 = perf::perf_time_now();
             let data_written = self
                 .fs
                 .inner()
@@ -157,27 +154,18 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                     Some(&staging[..total_bytes]),
                 )
                 .map_err(|error| from_another(error.code()))?;
-            let _t1 = perf::perf_time_now();
-            perf::record_ext4_alloc_ensure(
-                (total_bytes / crate::config::PAGE_SIZE) as usize,
-                0,
-                _t1.wrapping_sub(_t0),
-            );
             if !data_written {
                 self.fs
                     .inner()
                     .write_data_only(inode_id, start_offset, &staging[..total_bytes])
                     .map_err(|error| from_another_op(&error, "write_data_only"))?;
             }
-            let _t2 = perf::perf_time_now();
             #[cfg(feature = "perf_diag")]
             crate::println!(
-                "[ext4_another] write_pages ino={} pages={} total_bytes={} prepare_cycles={} commit_cycles={} direct={}",
+                "[wb_txn] backend_write ino={} pages={} bytes={} prepared_data={}",
                 inode_id,
                 pages.len(),
                 total_bytes,
-                _t1.wrapping_sub(_t0),
-                _t2.wrapping_sub(_t1),
                 data_written,
             );
             Ok(total_bytes)
@@ -187,7 +175,8 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     }
 
     fn npages(&self) -> usize {
-        self.logical_size.load(Ordering::Acquire)
+        self.logical_size
+            .load(Ordering::Acquire)
             .div_ceil(PAGE_SIZE)
     }
 }

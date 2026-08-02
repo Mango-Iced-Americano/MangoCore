@@ -122,6 +122,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
+            let pagefault_entry_start = crate::task::perf::perf_memory_io_time_now();
             let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
@@ -136,6 +137,10 @@ pub fn trap_handler() -> ! {
             };
             let _pf_start =
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
+            crate::task::perf::record_pagefault_stage(
+                0,
+                crate::task::perf::perf_memory_io_time_now().wrapping_sub(pagefault_entry_start),
+            );
             crate::task::perf::record_page_fault();
             let pf_result = task.process.vm().lock().do_page_fault(addr, access);
             crate::task::perf::record_pagefault_time_us(
@@ -170,6 +175,7 @@ pub fn trap_handler() -> ! {
             };
             drop(inner);
             task.process.notify_signal_waiters();
+            crate::task::perf::arm_pagefault_return();
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
@@ -210,10 +216,21 @@ pub fn trap_handler() -> ! {
 #[no_mangle]
 pub fn trap_return() -> ! {
     let task = do_signal();
+    let pagefault_return_start = if crate::task::perf::take_pagefault_return_pending() {
+        crate::task::perf::perf_memory_io_time_now()
+    } else {
+        0
+    };
     set_user_trap_entry();
     let trap_cx_ptr = task.trap_cx_user_va();
     let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    if pagefault_return_start != 0 {
+        crate::task::perf::record_pagefault_stage(
+            6,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(pagefault_return_start),
+        );
+    }
     unsafe {
         asm!(
             "fence.i",

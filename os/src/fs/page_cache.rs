@@ -1728,8 +1728,8 @@ impl PageCache {
                 for item in &plan.copies {
                     let src = item.entry.as_slice();
                     let _t_copy = perf::perf_memory_io_time_now();
-                    let copied = cursor
-                        .write_from(&src[item.page_offset..item.page_offset + item.len]);
+                    let copied =
+                        cursor.write_from(&src[item.page_offset..item.page_offset + item.len]);
                     let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
                     perf::record_pc_read_copy_cycles(copy_cycles);
                     if copied != item.len {
@@ -1779,8 +1779,8 @@ impl PageCache {
                 for item in &copies {
                     let src = item.entry.as_slice();
                     let _t_copy = perf::perf_memory_io_time_now();
-                    let copied = cursor
-                        .write_from(&src[item.page_offset..item.page_offset + item.sub_len]);
+                    let copied =
+                        cursor.write_from(&src[item.page_offset..item.page_offset + item.sub_len]);
                     let copy_cycles = perf::perf_memory_io_time_now().wrapping_sub(_t_copy);
                     perf::record_pc_read_copy_cycles(copy_cycles);
                     if copied != item.sub_len {
@@ -2298,9 +2298,17 @@ impl PageCache {
             Ok(())
         };
 
-        perf::record_pc_writeback(slices.len(), perf::perf_time_now().wrapping_sub(_t0));
+        let writeback_cycles = perf::perf_time_now().wrapping_sub(_t0);
+        perf::record_pc_writeback(slices.len(), writeback_cycles);
         if result.is_ok() {
             perf::record_writeback_batch(slices.len());
+            #[cfg(feature = "perf_diag")]
+            crate::println!(
+                "[wb_txn] writeback_run start_page={} pages={} ticks={}",
+                actual_start,
+                slices.len(),
+                writeback_cycles,
+            );
         }
         result
     }

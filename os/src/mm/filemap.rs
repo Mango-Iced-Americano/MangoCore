@@ -140,12 +140,22 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         .ensure_page_cache()
         .ok_or(MemoryError::BackingStoreFailure)?;
     let page_index = file_offset >> PAGE_SIZE_BITS;
+    let frame_start = crate::task::perf::perf_memory_io_time_now();
     let cache_frame = pc.frame_for_read(page_index).map_err(map_pc_error)?;
+    crate::task::perf::record_pagefault_stage(
+        7,
+        crate::task::perf::perf_memory_io_time_now().wrapping_sub(frame_start),
+    );
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // EOF 之后的页尾对用户必须读出 0；这里修改的是共享 page cache 帧。
+    let zero_start = crate::task::perf::perf_memory_io_time_now();
     zero_tail(file_size, file_offset, cache_ppn.get_bytes_array());
+    crate::task::perf::record_pagefault_stage(
+        4,
+        crate::task::perf::perf_memory_io_time_now().wrapping_sub(zero_start),
+    );
 
     // 可写文件映射首次只给只读 PTE：私有映射写入时触发 CoW，共享映射写入时
     // 触发 page cache dirty 标记后再恢复 W。
@@ -160,10 +170,15 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         .map_err(|_| MemoryError::AlreadyAllocated)?;
 
     let _map_start = crate::task::perf::perf_time_now();
+    let pte_start = crate::task::perf::perf_memory_io_time_now();
     if let Err(err) = UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, map_perm) {
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);
     }
+    crate::task::perf::record_pagefault_stage(
+        2,
+        crate::task::perf::perf_memory_io_time_now().wrapping_sub(pte_start),
+    );
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
     crate::task::perf::FILEMAP_MAP_USER_TICKS
         .fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);

@@ -203,7 +203,13 @@ impl Vma {
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
         let ppn = frame.ppn;
         self.inner.alloc_in_memory(vpn, frame)?;
-        if let Err(err) = self.map_page_with_perm(page_table, vpn, ppn, self.map_perm) {
+        let pte_start = crate::task::perf::perf_memory_io_time_now();
+        let map_result = self.map_page_with_perm(page_table, vpn, ppn, self.map_perm);
+        crate::task::perf::record_pagefault_stage(
+            2,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(pte_start),
+        );
+        if let Err(err) = map_result {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
         }
@@ -395,13 +401,13 @@ impl Vma {
         page_table: &mut T,
         reason: VmaUnmapReason,
     ) -> Result<(), MemoryError> {
-        let record_anon_private = crate::task::perf::stats_enabled_for(
-            crate::task::perf::STATS_PROFILE_MEMORY_IO,
-        ) && self.map_file.is_none()
-            && self
-                .flags
-                .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
-            && !self.flags.contains(MapFlags::MAP_SHARED);
+        let record_anon_private =
+            crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                && self.map_file.is_none()
+                && self
+                    .flags
+                    .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+                && !self.flags.contains(MapFlags::MAP_SHARED);
         let requested_pages = self.vm_end().0.saturating_sub(self.vm_start().0);
         let start_ticks = if record_anon_private {
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
@@ -563,9 +569,14 @@ impl Vma {
             let new_frame = unsafe { frame_alloc_uninit().ok_or(MemoryError::OutOfMemory)? };
             let new_ppn = new_frame.ppn;
             // copy data
+            let copy_start = crate::task::perf::perf_memory_io_time_now();
             new_ppn
                 .get_bytes_array()
                 .copy_from_slice(old_ppn.get_bytes_array());
+            crate::task::perf::record_pagefault_stage(
+                4,
+                crate::task::perf::perf_memory_io_time_now().wrapping_sub(copy_start),
+            );
             let old_frame = self
                 .inner
                 .remove_in_memory(&vpn)

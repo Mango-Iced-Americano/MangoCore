@@ -24,7 +24,9 @@ use super::event::EventWaitQueue;
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::config::SYSTEM_FD_LIMIT;
 use crate::mm::UserBuffer;
-use crate::task::{current_task_ref, register_writable_inode, unregister_writable_inode, WaitQueue};
+use crate::task::{
+    current_task_ref, register_writable_inode, unregister_writable_inode, WaitQueue,
+};
 
 // ── Globally-unique open file id counter ────────────────────────────────
 
@@ -1303,6 +1305,11 @@ impl File {
 
     /// 从 UserBuffer 写入文件当前位置（直连版本，省去 kbuf 中转）。
     pub fn write_user(&self, src: &UserBuffer) -> Result<usize, SyscallErr> {
+        // Foreground split buckets inside the VFS wrapper: (c) mode/seals
+        // checks, (e) offset/timestamp finish. The PageCache foreground bucket
+        // (d) stays on the existing PC_WRITE_* counters inside the inode.
+        // perf_diag diagnostic only, mirrors pwrite_user.
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         self.writable()?;
         let flags = self.flags();
         let len = src.len();
@@ -1319,11 +1326,15 @@ impl File {
         } else {
             self.offset.load(Ordering::SeqCst)
         };
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
+        let seals_start = crate::task::perf::perf_memory_io_time_now();
         self.check_memfd_write_seals(offset, len)?;
+        let seals_end = crate::task::perf::perf_memory_io_time_now();
 
         match self.write_user_with_flags(offset, src, flags) {
             Ok(n) => {
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     if !is_stream {
                         if flags.contains(FileFlags::O_APPEND) {
                             self.offset.store(offset + n, Ordering::SeqCst);
@@ -1332,7 +1343,12 @@ impl File {
                         }
                     }
                     self.touch_modified();
+                    crate::task::perf::record_write_offset(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_write_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_write_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(SyscallErr::ENOSYS) => {
@@ -1351,6 +1367,7 @@ impl File {
                     self.private_data.lock(),
                 )?;
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     if !is_stream {
                         if flags.contains(FileFlags::O_APPEND) {
                             self.offset.store(offset + n, Ordering::SeqCst);
@@ -1359,7 +1376,12 @@ impl File {
                         }
                     }
                     self.touch_modified();
+                    crate::task::perf::record_write_offset(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_write_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_write_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(e) => Err(e),
@@ -1723,12 +1745,10 @@ impl File {
                 buffer,
                 self.private_data.lock(),
             ) {
-                Err(SyscallErr::ENOSYS) => self.inode.write_at(
-                    offset,
-                    buffer.len(),
-                    buffer,
-                    self.private_data.lock(),
-                ),
+                Err(SyscallErr::ENOSYS) => {
+                    self.inode
+                        .write_at(offset, buffer.len(), buffer, self.private_data.lock())
+                }
                 result => result,
             };
         }

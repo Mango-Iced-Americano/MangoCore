@@ -391,6 +391,17 @@ impl UserBufferWriter {
             return Err(crate::syscall::errno::EFAULT);
         }
 
+        if let Some(slice) =
+            translate_single_page_user_bytes(token, ptr as *const u8, len, UserAccess::Write)?
+        {
+            return Ok((
+                Self {
+                    buffer: UserBuffer::single(slice),
+                },
+                len,
+            ));
+        }
+
         let start = ptr as usize;
         let end = check_user_range(start, len)?;
         let vm = current_user_vm(token)?;
@@ -416,9 +427,7 @@ impl UserBufferWriter {
                 let page_offset = va.page_offset();
                 let page_len = page_end - current;
                 let ppn = pa.floor();
-                buffers.push(
-                    &mut ppn.get_bytes_array()[page_offset..page_offset + page_len],
-                );
+                buffers.push(&mut ppn.get_bytes_array()[page_offset..page_offset + page_len]);
                 current = page_end;
             }
 
