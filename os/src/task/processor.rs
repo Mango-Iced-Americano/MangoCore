@@ -30,7 +30,6 @@ use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
-const RV64_CONSOLE_POLL_INTERVAL: usize = 1;
 
 #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
@@ -137,7 +136,7 @@ pub fn run_tasks() {
         //    production path owns both task and epoll readiness notification.
         //
         #[cfg(target_arch = "riscv64")]
-        let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
+        let should_poll_console = true;
         #[cfg(not(target_arch = "riscv64"))]
         let should_poll_console = true;
         if should_poll_console {
