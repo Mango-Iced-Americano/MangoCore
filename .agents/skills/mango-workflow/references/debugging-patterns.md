@@ -585,3 +585,11 @@
 - **相关文件**: `os/src/drivers/block/dw_mshc/sd.rs`
 
 ### GPT 盘分区误判排查：dd if=/dev/mmcblk0p1 头部 'EFI PART' → probe_mbr 误把保护性 MBR 当分区；检查 type 0xEE 与 LBA1 签名
+
+## 按编号/键限流内核日志（首次打印、重复静默）
+
+- **现象**: 实板（VF2）上用户态频繁调用未实现的 syscall（如 `rseq(293)`、`fsopen(430)`），catch-all 分支每次调用都 `println!`+`error!` 打印全部参数，控制台被刷屏、串口吞吐被拖慢，且掩盖真正的错误输出。
+- **根因**: 未知 syscall 的 catch-all `_` 分支无状态地去打印每个调用；没有区分"首次见到这个编号"与"重复命中"。
+- **修复**: 模块级 `static REPORTED_UNSUPPORTED: spin::Mutex<alloc::collections::BTreeSet<usize>> = Mutex::new(BTreeSet::new());`，在 catch-all 中 `if REPORTED_UNSUPPORTED.lock().insert(syscall_id) { /* 打印一次 */ }`。`BTreeSet::insert` 返回 `true` 表示此前不存在（首次），重复时返回 `false` 静默跳过；始终返回 `ENOSYS`。
+- **教训**: no_std 内核里 `spin::Mutex::new` 与 `BTreeSet::new` 都是 const fn，可直接用于 `static` 初始化（无需 lazy_static），已有先例 `os/src/mm/heap_trace.rs`、`os/src/trace.rs`。该模式可复用于任何"每 id/键只报一次"的噪音日志限流，避免在实板上对高频路径无条件打印。
+- **相关文件**: `os/src/syscall/mod.rs`

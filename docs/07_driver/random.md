@@ -3,10 +3,11 @@ title: "随机数与平台熵源"
 module: "drivers/rng"
 category: driver
 status: experimental
-last_updated: 2026-07-13
+last_updated: 2026-08-02
 code_paths:
   - "os/src/random.rs"
   - "os/src/drivers/rng/mod.rs"
+  - "os/src/drivers/rng/jh7110_trng.rs"
   - "os/src/fs/dev/urandom.rs"
   - "os/src/syscall/mod.rs"
   - "os/src/hal/platform/riscv/qemu.rs"
@@ -33,6 +34,7 @@ MangoCore 将“平台熵输入”和“用户可见随机流”分开：
 rvqemu:  virtio-rng-mmio bus.2 (0x10003000) --+
 laqemu:  virtio-rng-pci ----------------------+-> 64-byte boot sample
 2K1000:  APB RNG (DMW2 0x800000001fe2b000) --+       |
+VF2:     JH7110 TRNG (0x1600c000) ------------+       |
                                                        v
                                               boot health check
                                                        |
@@ -55,6 +57,7 @@ laqemu:  virtio-rng-pci ----------------------+-> 64-byte boot sample
 | 平台 | 熵设备 | 接入方式 |
 |---|---|---|
 | RISC-V QEMU virt | VirtIO entropy device，device id 4 | MMIO bus.2，`0x10003000` |
+| VisionFive 2 | JH7110 security TRNG | FDT `starfive,trng` node；轮询 reseed / RAND0..7 |
 | LoongArch QEMU virt | VirtIO entropy device，device id 4 | PCI 枚举 `DeviceType::EntropySource` |
 | 2K1000LA 星云板 | APB Device 2 RNG | DMW2 非缓存别名 `0x800000001fe2b000` |
 
@@ -65,6 +68,16 @@ laqemu:  virtio-rng-pci ----------------------+-> 64-byte boot sample
 RISC-V 的 RNG 设备页必须同时出现在平台 `MMIO` 表中，否则启用分页后的首次
 寄存器访问会触发 `LoadPageFault`。QEMU 启动参数固定占用 virtio-mmio bus.2，
 避免与 bus.0/bus.1 块设备和 bus.7 网卡冲突。
+
+VisionFive 2 vendor DTB 将存在的 `starfive,trng` 节点标为 `status = "disabled"`。驱动
+因此忽略该节点的 status，但仍在首次 MMIO 前严格校验兼容字符串（同时兼容上游
+`starfive,jh7110-trng`）、基址 `0x1600c000`、至少 `0x4000` 的大小、clocks `205/206`
+和 reset `131`；QEMU 没有匹配节点，故仍不触碰板级地址并回退到 virtio-rng。clock IDs
+`205/206` 属于从 ID `190` 开始的 STG register range，驱动在 STG CRG 的
+`0x1023003c/40` 写 bit31 门控两路时钟；同一 STG CRG 的 `0x10230074` bit3 释放
+reset，并轮询 `0x10230078`。随后以 256-bit 模式执行 reseed，轮询 ISTAT 的
+`SEED_DONE` / `RAND_RDY`，从 RAND0..RAND7 读取每批 32 字节。LFSR lockup 会触发
+重播种，超时或失配永不提升 secure-ready。
 
 ## 启动与健康检查
 
@@ -125,6 +138,9 @@ make -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
 ```bash
 /bin/rng_test
 ```
+
+VisionFive 2 的下一次启动应打印 `random: initialized from jh7110-trng`，不再出现
+`PRNG init warning: Entropy(DeviceUnavailable)`；QEMU 则仍打印 `virtio-rng`。
 
 ## 已知边界
 

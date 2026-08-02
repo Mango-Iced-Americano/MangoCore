@@ -15,8 +15,10 @@ use crate::fs::timerfd::{
     sys_timerfd_create, sys_timerfd_gettime, sys_timerfd_settime, TimerFdSpec,
 };
 use crate::net::syscall::*;
+use alloc::collections::BTreeSet;
 use core::convert::TryFrom;
 use flock::*;
+use spin::Mutex;
 use fs::*;
 use log::{error, info};
 use process::*;
@@ -305,6 +307,9 @@ use crate::{
     task::{current_user_token, exit_current_and_run_next, exit_group_and_run_next, Rusage},
     timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
+
+/// Log each unknown syscall id exactly once (first hit) to stop rseq/fsopen spam.
+static REPORTED_UNSUPPORTED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
@@ -967,19 +972,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
                     );
                 }
             }
-            println!(
-                "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
-                syscall_name(syscall_id),
-                syscall_id,
-                args
-            );
-            error!(
-                "Unsupported syscall:{} ({}), calling over arguments:",
-                syscall_name(syscall_id),
-                syscall_id
-            );
-            for i in 0..args.len() {
-                error!("args[{}]: {:X}", i, args[i]);
+            if REPORTED_UNSUPPORTED.lock().insert(syscall_id) {
+                println!(
+                    "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
+                    syscall_name(syscall_id),
+                    syscall_id,
+                    args
+                );
+                error!(
+                    "Unsupported syscall:{} ({}), calling over arguments:",
+                    syscall_name(syscall_id),
+                    syscall_id
+                );
+                for i in 0..args.len() {
+                    error!("args[{}]: {:X}", i, args[i]);
+                }
             }
             /*
             crate::task::current_task()

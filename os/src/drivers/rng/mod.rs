@@ -4,10 +4,14 @@
 //! reads its integrated APB RNG register. This layer only transfers entropy;
 //! conditioning and user-visible random streams belong to `crate::random`.
 
+#[cfg(target_arch = "riscv64")]
+mod jh7110_trng;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntropySource {
     Virtio,
     Loongson2k1000,
+    Jh7110Trng,
 }
 
 impl EntropySource {
@@ -15,6 +19,7 @@ impl EntropySource {
         match self {
             Self::Virtio => "virtio-rng",
             Self::Loongson2k1000 => "2k1000-rng",
+            Self::Jh7110Trng => "jh7110-trng",
         }
     }
 }
@@ -80,6 +85,10 @@ pub fn fill_entropy(dst: &mut [u8]) -> Result<EntropySource, EntropyError> {
     use virtio_drivers::device::rng::VirtIORng;
     use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
     use virtio_drivers::transport::{DeviceType, Transport};
+
+    if jh7110_trng::fill_entropy(dst).is_ok() {
+        return Ok(EntropySource::Jh7110Trng);
+    }
 
     let platform = crate::hal::platform::platform_info();
     let manager = DeviceManager::new(platform.devices.clone());

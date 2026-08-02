@@ -46,10 +46,12 @@ pub const ENOPROTOOPT: isize = -92;
 
 | 行为 | 实现 |
 |------|------|
-| 控制台输出 | `println!("[syscall] Unsupported syscall: ...")` |
-| error log | 输出名称、编号和每个参数 |
+| 控制台输出 | 每个编号首次命中时 `println!("[syscall] Unsupported syscall: ...")`；重复命中静默 |
+| error log | 首次命中输出名称、编号和每个参数 |
 | 返回值 | `errno::ENOSYS` |
 | 信号 | 保留 `SIGSYS` 注释块，运行路径未启用 |
+
+通过 `static REPORTED_UNSUPPORTED: Mutex<BTreeSet<usize>>` 按编号去重：每个未知 syscall 只打印一次（首次），后续调用直接静默返回 `ENOSYS`，避免实板控制台刷屏（如 `rseq(293)`、`fsopen(430)`）。
 
 名称表返回 `"unknown"` 不影响返回值；即使 `syscall_name()` 有名称，只要 `match syscall_id` 没有分支，仍返回 `ENOSYS`。
 
