@@ -702,6 +702,13 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   pending，timer owner 锁内只生成信号、锁外唤醒和重装。双架构 8 核 build 与每套 libc
   `timer_settime01/02` focused 均通过；sibling/creator-exit/fork/exec/delete 精确交错、
   per-timer overrun 身份及 CPU 消耗驱动的 POSIX CPU timer 到期仍为 NOT RUN；
+- B78 将 process/thread POSIX CPU timer 从 wall-time heap 分离：process timer 读取 PCB 的
+  线程组累计，thread timer 用创建者 `Weak<TCB>` 固定对象身份；trap return 与 schedule-out
+  安全点在 PCB timer 表锁内唯一领取到期，固定栈批次把 `PendingSignal` 带到锁外投递。
+  wall deadline 明确命名为 `wall_deadline`，CPU deadline 使用微秒域；已到期但尚未领取的
+  `timer_gettime()` 返回 1ns。双架构 8 核 build 和每套 libc `timer_settime01/02` 均通过，
+  两种 CPU clock 的相对、old-value、周期、绝对装载全部 TPASS；跨 sibling 精确领取、owner
+  退出、sleep 不推进 clock 与 per-timer pending/overrun 身份仍为 NOT RUN；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

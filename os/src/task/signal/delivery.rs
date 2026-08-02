@@ -7,9 +7,7 @@
 use alloc::sync::Arc;
 
 use crate::syscall::errno::EAGAIN;
-use crate::task::{
-    current_task, wake_interruptible, ProcessControlBlock, TaskControlBlock,
-};
+use crate::task::{current_task, wake_interruptible, ProcessControlBlock, TaskControlBlock};
 
 use super::{is_realtime_signal, PendingSignal, SigInfo, Signals};
 
@@ -86,8 +84,9 @@ pub fn send_process_signal_info(
 
 /// 只把带 `SigInfo` 的信号发布到进程共享 pending 队列，不进入调度器。
 ///
-/// POSIX timer callback 用它把“timer 仍有效”和“信号已生成”串行化在 timer
-/// owner 锁内；调用方释放自己的锁后必须再调用 [`wake_process_signal_waiter`]。
+/// POSIX timer 先在 timer owner 锁内领取事件，再在锁外调用本函数。这里可能
+/// 扩容 pending 队列，因此调用方不得持有 IRQ-off 临界区中的普通 owner 锁；
+/// 成功入队后还应调用 [`wake_process_signal_waiter`]。
 pub(crate) fn queue_process_signal_info(
     process: &ProcessControlBlock,
     signal: Signals,
@@ -101,10 +100,7 @@ pub(crate) fn queue_process_signal_info(
 }
 
 /// 唤醒可能消费进程共享信号的线程，不修改 pending 队列。
-pub(crate) fn wake_process_signal_waiter(
-    process: &ProcessControlBlock,
-    signal: Signals,
-) -> bool {
+pub(crate) fn wake_process_signal_waiter(process: &ProcessControlBlock, signal: Signals) -> bool {
     if signal.is_empty() {
         return false;
     }
@@ -147,10 +143,7 @@ pub fn send_process_signal_to_current_task(process: &ProcessControlBlock, signal
 ///
 /// 调用方必须确认当前线程即将执行 signal safe point，因此这里不扫描线程组、
 /// 不触发远程唤醒；RLIMIT_CPU 使用该路径避免把内核事件伪装成 SI_USER。
-pub(crate) fn queue_kernel_process_signal(
-    process: &ProcessControlBlock,
-    signal: Signals,
-) -> bool {
+pub(crate) fn queue_kernel_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {
     let Ok(pending) = PendingSignal::from_signal(signal, SigInfo::SI_KERNEL as usize) else {
         return false;
     };

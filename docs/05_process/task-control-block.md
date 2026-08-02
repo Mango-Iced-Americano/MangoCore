@@ -282,6 +282,11 @@ POSIX timer 不属于 TCB。PCB 的独立 `PosixTimerTable` 是线程组共享 o
 进入进程共享 pending，由任一未屏蔽的 sibling 接收。wall-time action 只持 PCB `Weak`，
 不会为保留 timer 而延长 zombie 生命周期。
 
+`CLOCK_THREAD_CPUTIME_ID` 是唯一仍引用某个 TCB 的 POSIX timer，但只保存创建者
+`Weak<TaskControlBlock>`：它读取该线程累计 user+system 时间，不拥有线程，也不会被 TID
+复用误命中。`CLOCK_PROCESS_CPUTIME_ID` 直接读取 PCB 的线程组累计。两者都不进入 wall-time
+kernel timer heap，而在 trap return 与 schedule-out 安全点由 PCB 表锁唯一领取到期。
+
 ## 10. 线程级退出资源
 
 `exit_thread_resources(exit_code)` 只处理线程级资源：

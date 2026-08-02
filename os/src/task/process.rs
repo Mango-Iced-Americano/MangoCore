@@ -15,7 +15,10 @@ use super::{
     pid::{RecycleAllocator, TidHandle},
     quota::TaskQuotaGuard,
     registry,
-    signal::{sigchld_requests_auto_reap, PendingSignal, Sighand, SignalQueue, Signals},
+    signal::{
+        queue_process_signal_info, sigchld_requests_auto_reap, wake_process_signal_waiter,
+        PendingSignal, SigInfo, Sighand, SignalQueue, Signals,
+    },
     threads::FutexTable,
     wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
     TaskControlBlock, UtsNamespace, WaitQueue, WaitResult, INITPROC,
@@ -162,35 +165,126 @@ impl ProcessCpuAccount {
 /// `arm_seq` 标识最近一次装载；内核 timer 节点必须同时匹配 timer ID、
 /// `arm_seq` 和 deadline，才能修改本对象。这样删除并复用相同 ID 后，旧节点
 /// 也不能误命中新 timer。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct PosixTimer {
     pub clock_id: usize,
     pub signal: Signals,
     pub signal_value: usize,
     pub interval: TimeSpec,
     pub value: TimeSpec,
-    pub deadline: Option<TimeSpec>,
+    /// 转换到内核 monotonic 域的 wall timer 到期点。
+    pub wall_deadline: Option<TimeSpec>,
     /// CLOCK_REALTIME 类绝对 timer 的原始墙钟目标。
     pub realtime_abs_deadline: Option<TimeSpec>,
+    /// CPU clock 域内的绝对到期时间；wall timer 必须保持为 None。
+    pub cpu_deadline_us: Option<u64>,
     pub arm_seq: u64,
+    /// None 表示 wall clock；thread timer 保存对象身份而不是可复用 TID。
+    cpu_clock: Option<PosixCpuClock>,
     overrun: usize,
 }
 
+#[derive(Clone)]
+enum PosixCpuClock {
+    Process,
+    Thread(Weak<TaskControlBlock>),
+}
+
 impl PosixTimer {
+    /// 单个进程可同时持有的 POSIX timer 数量，也限定安全点栈上事件批次。
+    pub(crate) const MAX_COUNT: usize = 32;
     const OVERRUN_MAX: usize = i32::MAX as usize;
 
-    pub fn new(clock_id: usize, signal: Signals, signal_value: usize) -> Self {
+    fn new(
+        clock_id: usize,
+        signal: Signals,
+        signal_value: usize,
+        cpu_clock: Option<PosixCpuClock>,
+    ) -> Self {
         Self {
             clock_id,
             signal,
             signal_value,
             interval: TimeSpec::new(),
             value: TimeSpec::new(),
-            deadline: None,
+            wall_deadline: None,
             realtime_abs_deadline: None,
+            cpu_deadline_us: None,
             arm_seq: 0,
+            cpu_clock,
             overrun: 0,
         }
+    }
+
+    pub(crate) fn new_wall(clock_id: usize, signal: Signals, signal_value: usize) -> Self {
+        Self::new(clock_id, signal, signal_value, None)
+    }
+
+    pub(crate) fn new_process_cpu(clock_id: usize, signal: Signals, signal_value: usize) -> Self {
+        Self::new(clock_id, signal, signal_value, Some(PosixCpuClock::Process))
+    }
+
+    pub(crate) fn new_thread_cpu(
+        clock_id: usize,
+        signal: Signals,
+        signal_value: usize,
+        creator: &Arc<TaskControlBlock>,
+    ) -> Self {
+        Self::new(
+            clock_id,
+            signal,
+            signal_value,
+            Some(PosixCpuClock::Thread(Arc::downgrade(creator))),
+        )
+    }
+
+    pub(crate) fn is_cpu_clock(&self) -> bool {
+        self.cpu_clock.is_some()
+    }
+
+    /// 把用户 timespec 上取整到 MangoCore CPU 记账的微秒域，非零值不会变成 0。
+    pub(crate) fn cpu_duration_us(value: TimeSpec) -> u64 {
+        let ns = value.to_ns_saturating();
+        ns / 1_000 + u64::from(ns % 1_000 != 0)
+    }
+
+    /// 采样本 timer 的 CPU clock；thread owner 已退出时返回 None。
+    pub(crate) fn cpu_time_us(&self, process: &ProcessControlBlock) -> Option<u64> {
+        match self.cpu_clock.as_ref()? {
+            PosixCpuClock::Process => Some(process.cpu_runtime_us()),
+            PosixCpuClock::Thread(target) => target
+                .upgrade()
+                .filter(|task| !task.is_zombie())
+                .map(|task| task.cpu_time_us()),
+        }
+    }
+
+    fn targets_current_thread(&self, current: &Arc<TaskControlBlock>) -> bool {
+        match self.cpu_clock.as_ref() {
+            Some(PosixCpuClock::Process) => true,
+            Some(PosixCpuClock::Thread(target)) => target
+                .upgrade()
+                .filter(|task| !task.is_zombie())
+                .map(|task| Arc::ptr_eq(&task, current))
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    pub(crate) fn pending_signal(&self) -> Option<PendingSignal> {
+        if self.signal.is_empty() {
+            return None;
+        }
+        Some(PendingSignal {
+            signal: self.signal,
+            siginfo: SigInfo::new_with_sender_value(
+                self.signal.to_signum().unwrap(),
+                0,
+                SigInfo::SI_TIMER as usize,
+                0,
+                self.signal_value,
+            ),
+        })
     }
 
     pub fn reset_overrun(&mut self) {
@@ -223,8 +317,6 @@ pub(crate) struct PosixTimerTable {
 }
 
 impl PosixTimerTable {
-    const MAX_TIMERS: usize = 32;
-
     fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -242,7 +334,7 @@ impl PosixTimerTable {
             *slot = PosixTimerSlot::Reserved;
             return Ok(id);
         }
-        if self.slots.len() >= Self::MAX_TIMERS {
+        if self.slots.len() >= PosixTimer::MAX_COUNT {
             return Err(SyscallErr::EAGAIN);
         }
         self.slots.try_reserve(1).map_err(|_| SyscallErr::ENOMEM)?;
@@ -303,6 +395,22 @@ impl PosixTimerTable {
         seq
     }
 
+    fn has_live_cpu_timer(&self) -> bool {
+        self.slots.iter().any(|slot| match slot {
+            PosixTimerSlot::Active(timer) if timer.cpu_deadline_us.is_some() => {
+                match timer.cpu_clock.as_ref() {
+                    Some(PosixCpuClock::Process) => true,
+                    Some(PosixCpuClock::Thread(target)) => target
+                        .upgrade()
+                        .map(|task| !task.is_zombie())
+                        .unwrap_or(false),
+                    None => false,
+                }
+            }
+            _ => false,
+        })
+    }
+
     fn clear(&mut self) {
         // exec 后仍复用同一个 PCB；不能重置 next_arm_seq，否则 exec 前遗留的
         // heap 节点可能与新映像复用的 timer ID/序号形成 ABA。
@@ -326,6 +434,8 @@ pub struct ProcessControlBlock {
     cpu_account: ProcessCpuAccount,
     /// POSIX timer 是线程组共享对象，独立锁避免 timer callback 争用 process.inner。
     posix_timers: Mutex<PosixTimerTable>,
+    /// CPU timer 安全点的无锁 fast hint；权威状态仍在 posix_timers 锁内。
+    posix_cpu_timers_active: AtomicBool,
     /// 线程成员关系与首次发布门禁。
     thread_group: Mutex<ThreadGroupState>,
     /// 统一 group-exit 退出码的无锁快照。
@@ -598,8 +708,82 @@ impl ProcessControlBlock {
         self.posix_timers.lock()
     }
 
+    /// 调用方持有 timer 表锁时同步 CPU timer fast hint。
+    ///
+    /// hint 与权威 slot 状态在同一临界区发布，arm/clear/scanner 不会互相覆盖。
+    pub(crate) fn sync_posix_cpu_timer_hint(&self, timers: &PosixTimerTable) {
+        self.posix_cpu_timers_active
+            .store(timers.has_live_cpu_timer(), Ordering::Release);
+    }
+
     fn clear_posix_timers(&self) {
-        self.posix_timers.lock().clear();
+        let mut timers = self.posix_timers.lock();
+        timers.clear();
+        self.posix_cpu_timers_active.store(false, Ordering::Release);
+    }
+
+    /// 在任务安全点推进由 CPU 消耗驱动的 POSIX timer。
+    ///
+    /// 当前线程和进程累计先在锁外采样；表锁只负责唯一领取到期状态。到期事件
+    /// 使用固定栈数组带出锁，再进入可能扩容的 signal queue 和调度器。
+    pub(crate) fn check_posix_cpu_timers(self: &Arc<Self>, current: &Arc<TaskControlBlock>) {
+        if !self.posix_cpu_timers_active.load(Ordering::Acquire) {
+            return;
+        }
+
+        let process_now_us = self.cpu_runtime_us();
+        let thread_now_us = current.cpu_time_us();
+        let mut events = [None; PosixTimer::MAX_COUNT];
+        let mut event_count = 0usize;
+        {
+            let mut timers = self.posix_timers.lock();
+            for slot in &mut timers.slots {
+                let PosixTimerSlot::Active(timer) = slot else {
+                    continue;
+                };
+                let Some(deadline_us) = timer.cpu_deadline_us else {
+                    continue;
+                };
+                if !timer.targets_current_thread(current) {
+                    continue;
+                }
+                let now_us = match timer.cpu_clock.as_ref() {
+                    Some(PosixCpuClock::Process) => process_now_us,
+                    Some(PosixCpuClock::Thread(_)) => thread_now_us,
+                    None => continue,
+                };
+                if now_us < deadline_us {
+                    continue;
+                }
+
+                if timer.interval.is_zero() {
+                    timer.value = TimeSpec::new();
+                    timer.cpu_deadline_us = None;
+                } else {
+                    let interval_us = PosixTimer::cpu_duration_us(timer.interval);
+                    let missed = now_us.saturating_sub(deadline_us) / interval_us;
+                    let expirations = missed.saturating_add(1);
+                    let signal_pending = !timer.signal.is_empty()
+                        && self.shared_pending_hint().contains(timer.signal);
+                    let overruns = missed.saturating_add(signal_pending as u64);
+                    timer.add_overrun(overruns.min(usize::MAX as u64) as usize);
+                    timer.value = timer.interval;
+                    timer.cpu_deadline_us =
+                        Some(deadline_us.saturating_add(expirations.saturating_mul(interval_us)));
+                }
+
+                if let Some(event) = timer.pending_signal() {
+                    events[event_count] = Some(event);
+                    event_count += 1;
+                }
+            }
+            self.sync_posix_cpu_timer_hint(&timers);
+        }
+
+        for event in events.iter().take(event_count).flatten().copied() {
+            let _ = queue_process_signal_info(self, event.signal, event.siginfo);
+            let _ = wake_process_signal_waiter(self, event.signal);
+        }
     }
 
     /// 把一个线程的已结算 CPU 时间批量计入线程组。
@@ -628,6 +812,11 @@ impl ProcessControlBlock {
         }
     }
 
+    /// 返回线程组 user+system CPU 时间的单调权威总量。
+    pub(crate) fn cpu_runtime_us(&self) -> u64 {
+        self.cpu_account.runtime_us.load(Ordering::Acquire)
+    }
+
     /// 返回已冲刷的线程组 user/system CPU 时间。
     ///
     /// 活进程快照允许分别观察到并发批次的新值或旧值，和 Linux 的 SMP
@@ -647,8 +836,8 @@ impl ProcessControlBlock {
         self.cpu_account
             .next_expiry_us
             .store(next, Ordering::Release);
-        let expired = next != u64::MAX
-            && self.cpu_account.runtime_us.load(Ordering::Acquire) >= next;
+        let expired =
+            next != u64::MAX && self.cpu_account.runtime_us.load(Ordering::Acquire) >= next;
         if expired {
             self.cpu_account
                 .expiry_pending
@@ -784,6 +973,7 @@ impl ProcessControlBlock {
             rlimits: Mutex::new(rlimits),
             cpu_account,
             posix_timers: Mutex::new(PosixTimerTable::new()),
+            posix_cpu_timers_active: AtomicBool::new(false),
             thread_group: Mutex::new(ThreadGroupState {
                 members: Vec::new(),
                 exec: None,
@@ -1042,10 +1232,7 @@ impl ProcessControlBlock {
         } else {
             old_files
         };
-        crate::syscall::fs::close_cloexec_and_release_fcntl_locks(
-            self.pid,
-            &mut files.lock(),
-        );
+        crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid, &mut files.lock());
 
         let sighand = if sighand_shared {
             Arc::new(Mutex::new(Sighand::from_existing(&old_sighand.lock())))

@@ -129,10 +129,7 @@ impl CpuTaskState {
     /// `active_user_vm` 只做一次 `try_lock()`，失败即把 MM 标记为未知。
     pub(crate) fn read_diagnostics(&self) -> CpuTaskDiagnostics {
         let (active_mm_id, active_mm_lock_busy) = match self.active_user_vm.try_lock() {
-            Some(active) => (
-                active.as_ref().map(|vm| vm.mm_id()).unwrap_or(0),
-                false,
-            ),
+            Some(active) => (active.as_ref().map(|vm| vm.mm_id()).unwrap_or(0), false),
             None => (0, true),
         };
         CpuTaskDiagnostics {
@@ -871,6 +868,13 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // 并从 `schedule()` 返回时，才通过 `local_irq_restore` 还原之前的
     // 中断状态。
     let irq_was_enabled = crate::hal::local_irq_save();
+    // block/yield/exit 可能在再次返回用户态前切走。prepare_current_switch()
+    // 已结算并冲刷 CPU 时间，因此这里补做一次 CPU timer 检查。检查函数会
+    // 在进入 signal queue/runqueue 前释放 timer 锁，并且临时 Arc 在真正
+    // context switch 前释放。
+    if let Some(task) = current_task() {
+        task.process.check_posix_cpu_timers(&task);
+    }
     // idle 上下文必须来自正在执行该任务的同一 CPU；任务迁移只能
     // 发生在下次 dispatch 之前，不能在一次 context switch 中途更换归属。
     let idle_task_cx_ptr = crate::smp::local_task_state()

@@ -23,16 +23,16 @@ use crate::hal::{local_irq_restore, local_irq_save};
 use crate::syscall::errno::EAGAIN;
 use crate::timer::{TimeSpec, TimeVal};
 
+use super::task::{RemoteAffinityRequest, RemoteAffinityState};
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     discard_non_actionable_unblocked_signals, has_actionable_signal,
     signal::{
         has_waited_signal, queue_kernel_process_signal, queue_process_signal_info,
-        wake_process_signal_waiter, SigInfo, Signals,
+        wake_process_signal_waiter, Signals,
     },
     ProcessControlBlock, TaskControlBlock, TaskStatus,
 };
-use super::task::{RemoteAffinityRequest, RemoteAffinityState};
 use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -395,10 +395,7 @@ lazy_static! {
 /// 内核栈映射必须在 runqueue 可见之前同步到目标 CPU；
 /// 线程组成员登记与 `New -> Queued(cpu)` 在同一个 group-exit 门禁内提交，
 /// 远程 doorbell 则必须在门禁和 runqueue 锁都释放后发送。
-pub(crate) fn try_publish_task_on(
-    task: Arc<TaskControlBlock>,
-    cpu: usize,
-) -> Result<(), isize> {
+pub(crate) fn try_publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) -> Result<(), isize> {
     assert!(cpu < crate::smp::configured_cpu_count());
     let process = task.process.clone();
     // 这是避免无意义远端内核栈同步的快速拒绝；真正关闭 group-exit/exec
@@ -424,9 +421,7 @@ pub(crate) fn try_publish_task_on(
             panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
         });
     }
-    let published = process.publish_thread(&task, || {
-        super::run_queue::publish(task.clone(), cpu)
-    });
+    let published = process.publish_thread(&task, || super::run_queue::publish(task.clone(), cpu));
     if !published {
         return Err(EAGAIN);
     }
@@ -459,10 +454,8 @@ pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize>
     if super::processor::current_task().is_none() {
         return try_publish_task_on(task, crate::smp::BOOT_CPU_ID);
     }
-    let target = super::run_queue::select_runnable_cpu(
-        task.cpus_allowed(),
-        Some(crate::smp::cpu_id()),
-    );
+    let target =
+        super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(crate::smp::cpu_id()));
     try_publish_task_on(task, target)
 }
 
@@ -680,9 +673,7 @@ pub fn do_oom() {}
 /// `Running(cpu) -> Blocking(cpu)` 与加入 interruptible registry 在同一个
 /// `TASK_MANAGER` 临界区完成；真正的 `Blocked` 由 idle 侧在切栈后提交。
 pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER
-        .lock()
-        .begin_interruptible_sleep(task.clone());
+    TASK_MANAGER.lock().begin_interruptible_sleep(task.clone());
     // group exit/exec 可能恰好在停止方看到 Running 之后、这里登记 Blocking
     // 之前发布。登记完成后复查无锁门禁，保证目标线程不会永久睡下。
     if task.process.thread_must_exit(task.gettid()) {
@@ -926,9 +917,7 @@ pub fn zombie_count() -> u16 {
     for cpu in 0..crate::smp::configured_cpu_count() {
         count = count.saturating_add(super::run_queue::stats(cpu).1 as u16);
     }
-    count.saturating_add(
-        super::processor::zombie_queue_count_fast().min(u16::MAX as usize) as u16,
-    )
+    count.saturating_add(super::processor::zombie_queue_count_fast().min(u16::MAX as usize) as u16)
 }
 
 /// 向除 initproc 以外的所有 interruptible 任务投递信号。
@@ -1687,7 +1676,7 @@ impl KernelTimer {
                     .posix_timers()
                     .get(*timer_id)
                     .map(|timer| {
-                        timer.arm_seq == *arm_seq && timer.deadline == Some(self.deadline)
+                        timer.arm_seq == *arm_seq && timer.wall_deadline == Some(self.deadline)
                     })
                     .unwrap_or(false),
                 None => false,
@@ -1997,14 +1986,13 @@ impl KernelTimerQueue {
                     return false;
                 };
                 let mut next_timer = None;
-                let mut generated_signal = None;
-                {
+                let generated_event = {
                     let mut timers = process.posix_timers();
-                    let Some(mut timer_state) = timers.get(timer_id).copied() else {
+                    let Some(mut timer_state) = timers.get(timer_id).cloned() else {
                         return false;
                     };
                     if timer_state.arm_seq != arm_seq
-                        || timer_state.deadline != Some(timer.deadline)
+                        || timer_state.wall_deadline != Some(timer.deadline)
                     {
                         return false;
                     }
@@ -2013,7 +2001,7 @@ impl KernelTimerQueue {
                         !signal.is_empty() && process.shared_pending_hint().contains(signal);
                     if timer_state.interval.is_zero() {
                         timer_state.value = TimeSpec::new();
-                        timer_state.deadline = None;
+                        timer_state.wall_deadline = None;
                         timer_state.realtime_abs_deadline = None;
                     } else {
                         let interval_ns = timer_state.interval.to_ns_saturating().max(1) as usize;
@@ -2039,26 +2027,20 @@ impl KernelTimerQueue {
                         }
                         timer_state.arm_seq = timers.alloc_arm_seq();
                         timer_state.value = timer_state.interval;
-                        timer_state.deadline = Some(deadline);
+                        timer_state.wall_deadline = Some(deadline);
                         next_timer = Some((deadline, timer_state.arm_seq));
                     }
+                    // 只在表锁内领取 timer 事件；SignalQueue 可能扩容，不能在
+                    // IRQ-off 的 deferred timer 路径中嵌套进入 allocator。
+                    let event = timer_state.pending_signal();
                     *timers.get_mut(timer_id).unwrap() = timer_state;
-                    if !signal.is_empty() {
-                        let siginfo = SigInfo::new_with_sender_value(
-                            signal.to_signum().unwrap(),
-                            0,
-                            SigInfo::SI_TIMER as usize,
-                            0,
-                            timer_state.signal_value,
-                        );
-                        // 信号生成必须与 delete/exec/exit 的 timer 失效串行；真正的
-                        // 调度器唤醒放到 timer 锁外执行。
-                        let _ = queue_process_signal_info(&process, signal, siginfo);
-                        generated_signal = Some(signal);
-                    }
-                }
-                let woke = generated_signal
-                    .map(|signal| wake_process_signal_waiter(&process, signal))
+                    event
+                };
+                let woke = generated_event
+                    .map(|event| {
+                        let _ = queue_process_signal_info(&process, event.signal, event.siginfo);
+                        wake_process_signal_waiter(&process, event.signal)
+                    })
                     .unwrap_or(false);
                 if let Some((deadline, next_arm_seq)) = next_timer {
                     add_kernel_timer(
@@ -2399,6 +2381,9 @@ pub fn run_task_safe_point() {
         if let Some(signal) = task.process.take_cpu_limit_signal() {
             let _ = queue_kernel_process_signal(&task.process, signal);
         }
+        // trap 出口已经把本次 user/system 时间结算到 TCB/PCB；在同一个
+        // 安全点领取 CPU timer，保证到期信号能紧接着由 do_signal() 处理。
+        task.process.check_posix_cpu_timers(task);
     }
     // 后续可能 context switch；不能把 current 的 Arc 带过 schedule。
     drop(task);

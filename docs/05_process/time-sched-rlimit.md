@@ -158,7 +158,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 |-------|----------|
 | `CLOCK_REALTIME`/`CLOCK_MONOTONIC` | wall-time 到期路径支持 |
 | `CLOCK_BOOTTIME` 等部分 clock | 根据 `valid_posix_timer_clock()` |
-| process/thread CPU clock | 创建、设置和查询 ABI 已接入；CPU 消耗驱动到期仍待独立实现 |
+| process/thread CPU clock | 按线程组累计或创建线程累计的真实 CPU 消耗到期 |
 
 每进程最多 32 个 POSIX timer。`timer_create()`：
 
@@ -179,20 +179,33 @@ ID 时，旧 kernel timer action 也因序号不匹配而失效。
 
 ## 7. POSIX timer 到期
 
-到期由 `TimerAction::PosixTimerSignal` 处理：
+wall clock 到期由 `TimerAction::PosixTimerSignal` 处理：
 
 1. 升级 PCB `Weak`，校验 timer ID、`arm_seq` 和 deadline。
 2. 一次性 timer 清空 value/deadline。
 3. 周期 timer 计算 missed overruns。
 4. 对 realtime absolute timer 维护 `realtime_abs_deadline`。
-5. 在 timer 表锁内向进程共享 pending 队列生成带 `sigev_value` 的 `SI_TIMER`。
-6. 释放 owner 锁后选择一个可接收 sibling 并唤醒。
+5. 在 timer 表锁内构造带 `sigev_value` 的 `SI_TIMER` 值事件。
+6. 释放 owner 锁后加入进程共享 pending，再选择一个可接收 sibling 并唤醒。
 7. 周期 timer 重新加入 kernel timer queue。
 
 `KernelTimerQueue::compact()` 也检查同一组 owner/arm/deadline 条件，可提前清理 rearm、
 delete、exec 和退出产生的 stale 节点。compact 在队列锁下只读 timer 表，因此装载路径必须
 先释放表锁再调用 `add_kernel_timer()`，禁止形成反向锁边。CPU clock timer 不能使用
-wall-time heap 驱动；其到期检查是后续独立实现边界。
+wall-time heap 驱动。
+
+CPU clock timer 使用另一条路径：
+
+1. `CLOCK_PROCESS_CPUTIME_ID` 采样 PCB 的线程组 user+system 累计；
+   `CLOCK_THREAD_CPUTIME_ID` 通过创建者 `Weak<TCB>` 采样该线程累计。
+2. trap return 和 schedule-out 安全点先在表锁外采样，再在表锁内比较 `cpu_deadline_us`；
+   多个 CPU 同时扫描同一 PCB 时，只有持锁者能清除 one-shot 或推进 periodic deadline。
+3. 到期事件写入最多 32 项的固定栈批次，释放表锁后才进入 signal queue 和调度器。
+4. `posix_cpu_timers_active` 只是 Release/Acquire fast hint；slot/deadline 始终是权威状态。
+5. 微秒记账会把非零纳秒 duration 上取整；已过期但尚未被安全点领取时，gettime 返回 1ns。
+
+当前内核采用安全点抢占，所以长期不经过 trap return、block/yield/exit 的内核循环可能延迟
+CPU timer 投递；并发 CPU 记账也只会让锁外样本偏旧、延迟到下一安全点，不会提前或重复触发。
 
 ## 8. realtime clock 调整
 

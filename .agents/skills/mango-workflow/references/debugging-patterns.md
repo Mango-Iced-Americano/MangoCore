@@ -1019,11 +1019,29 @@
 - **拒绝 slot ABA**: 只比较可复用 ID 或 slot-local 重置 generation 不够。每次 arm 从 owner
   范围分配不重复的序号，异步 action 同时匹配 owner、ID、arm sequence 和事件 deadline。
   delete/recreate、rearm、exec 和 exit 的旧节点才能稳定失效。
-- **生成事件与唤醒分层**: callback 在 owner 锁内验证身份、提交对象状态并向受保护 pending
-  队列生成事件，使 delete/clear 与事件生成有单一线性化顺序；释放 owner 锁后再扫描线程、
-  操作 runqueue 或重新注册异步节点。为此可把 signal API 拆成“只入队”和“只唤醒”两个语义
-  清楚的 helper，但不能让只入队 helper 隐式进入调度器。
+- **生成事件与投递分层**: callback 在 owner 锁内验证身份、提交对象状态，并把完整值事件写入
+  预分配或固定栈批次，使 delete/clear 与“本次到期已被领取”有单一线性化顺序；释放 owner
+  锁后再进入可能扩容的 pending 队列、扫描线程、操作 runqueue 或重新注册异步节点。为此可把
+  signal API 拆成“只入队”和“只唤醒”两个语义清楚的 helper，但两者都不能偷偷跨回 owner 锁。
 - **compact 也属于锁图**: 队列清理若在 queue 锁内读取 owner 表，所有注册路径都必须先释放
   owner 锁再进入 queue，明确形成单向 `queue -> owner`，禁止反向嵌套。
 - **相关文件**: `os/src/task/process.rs`, `os/src/task/manager.rs`,
   `os/src/task/signal/delivery.rs`, `os/src/syscall/process/time.rs`
+
+## CPU-clock timer：时钟域分离、锁外采样与锁内唯一领取
+
+- **不要借 wall heap 冒充 CPU clock**: wall timer 的 deadline 随 monotonic/realtime 推进；CPU
+  timer 只随目标线程或线程组实际消耗推进。把后者换算成 `TimeSpec::now()` 会让 sleep/阻塞时间
+  错误触发，也无法表达多线程 process clock 的累计。
+- **对象身份而非可复用 ID**: thread CPU timer 应保存目标 TCB 的 `Weak`/稳定对象身份；只保存
+  TID 会在退出和复用后误命中新线程。process CPU timer 的 owner/clock 都属于 PCB。
+- **采样与领取分层**: 先在 owner 锁外采样单调 CPU 计数，再在 timer 表锁内比较 deadline 并
+  清除 one-shot 或批量推进 periodic。多 CPU 扫描同一表时，表锁只允许一个 CPU 领取同一到期；
+  并发记账造成的旧样本只会把投递延迟到下一安全点，不会提前触发。
+- **热路径只用 hint**: 可用 Release/Acquire 原子 hint 跳过没有 armed CPU timer 的进程，但 hint
+  不能取代表内 slot/deadline。arm/disarm/delete/clear/scanner 必须在同一 owner 临界区同步 hint。
+- **验收边界**: 参数和 busy-loop LTP 能证明相对/绝对/周期基础语义；跨 sibling 唯一领取、owner
+  退出、sleep 不推进 clock 和 per-timer pending/overrun 身份必须有专门交错探针，否则记为
+  NOT RUN。
+- **相关文件**: `os/src/task/process.rs`, `os/src/task/task.rs`,
+  `os/src/task/manager.rs`, `os/src/task/processor.rs`, `os/src/syscall/process/time.rs`

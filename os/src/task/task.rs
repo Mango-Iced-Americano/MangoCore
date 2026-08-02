@@ -468,6 +468,10 @@ impl Rusage {
         usage
     }
 
+    pub(crate) fn cpu_time_us(&self) -> u64 {
+        (self.ru_utime.to_us() as u64).saturating_add(self.ru_stime.to_us() as u64)
+    }
+
     pub fn add_cpu(&mut self, other: Rusage) {
         self.ru_utime = self.ru_utime + other.ru_utime;
         self.ru_stime = self.ru_stime + other.ru_stime;
@@ -656,6 +660,11 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    /// 返回本线程已结算的 user+system CPU 时间。
+    pub(crate) fn cpu_time_us(&self) -> u64 {
+        self.acquire_inner_lock().rusage.cpu_time_us()
+    }
+
     /// 把本线程已经结算的 CPU 时间尾数立即并入进程账户。
     ///
     /// 进程级 CPU 时间查询不能等到下一次 trap 返回或调度切出，否则当前

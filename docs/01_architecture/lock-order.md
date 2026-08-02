@@ -958,18 +958,25 @@ parent process.inner
 触发缺页、CoW、TLB shootdown 或 EFAULT 时，所有 parent/child/WaitQueue 锁都已释放；Linux
 也不会因 EFAULT 把已经消费的 stop/continue 或 zombie 事件重新发布。
 
-### 3.22 B77 进程级 POSIX timer owner
+### 3.22 B77/B78 进程级 POSIX timer owner 与 CPU clock
 
 POSIX timer 表由 PCB 的独立 mutex 保护，不再嵌入任一 TCB。允许的局部锁边只有：
 
 ```text
 KERNEL_TIMER_QUEUE -> PosixTimerTable     # compact 只读 stale action 身份
-PosixTimerTable -> process.signal         # callback 原子生成 shared pending
+PosixTimerTable -> task.inner             # CPU timer set/get 只读目标线程计时
 ```
 
-第一条没有反向边：`timer_settime()`、周期 callback 和 realtime rearm 都必须先释放 timer 表，
-再调用 `add_kernel_timer()`。第二条只允许调用不进入调度器的 `queue_process_signal_info()`；
-真正扫描 sibling、修改 stop/continue 状态和唤醒 runqueue 必须在释放 timer 表后完成。
+这两条都没有反向边：`timer_settime()`、周期 callback 和 realtime rearm 都必须先释放 timer 表，
+再调用 `add_kernel_timer()`。B78 进一步删除 `PosixTimerTable -> process.signal`：wall/CPU callback
+都只在表锁内验证身份、推进 deadline 并把完整事件写入固定栈批次；释放表锁后才进入可能扩容的
+signal queue、扫描 sibling 或唤醒 runqueue。
+
+CPU timer 安全点先在锁外采样当前 TCB/PCB 的单调 CPU 累计，再取得 timer 表锁唯一领取到期。
+采样与表锁不组成嵌套边；并发记账最多让本轮采样偏旧、把投递延迟到下一个安全点，不会提前
+触发或重复领取。`timer_settime/gettime` 若需采样 thread clock，当前只存在
+`PosixTimerTable -> task.inner` 的单向读取边；任务记账路径释放 `task.inner` 后才访问 PCB 状态，
+不得新增反向嵌套。
 
 `timer_create()` 在表锁内把 slot 置为 `Reserved`，锁外写回用户 timer ID，之后再发布
 `Active`；任何用户 copyin/copyout 都不得跨 timer 表锁。delete、exec、最后线程退出与回调

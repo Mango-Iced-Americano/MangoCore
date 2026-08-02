@@ -1,13 +1,11 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     add_kernel_timer, all_processes, current_task, current_user_token, find_process_by_pid,
     find_task_by_tid,
-    signal::{
-        queue_process_signal_info, wake_process_signal_waiter, SigInfo, Signals,
-    },
+    signal::{queue_process_signal_info, wake_process_signal_waiter, Signals},
     sleep_relative_interruptible, sleep_until_realtime_interruptible,
     wake_realtime_abstime_sleepers_after_clock_set, PosixTimer, Rusage, TimerAction,
 };
@@ -320,7 +318,8 @@ pub fn sys_timer_create(clock_id: usize, sevp: *const SigeventHeader, timerid: *
         (signal, Some(event.sigev_value))
     };
 
-    let process = current_task().unwrap().process.clone();
+    let task = current_task().unwrap();
+    let process = task.process.clone();
     let id = match process.posix_timers().reserve_id() {
         Ok(id) => id,
         Err(error) => return -(error as isize),
@@ -331,7 +330,14 @@ pub fn sys_timer_create(clock_id: usize, sevp: *const SigeventHeader, timerid: *
         return errno;
     }
 
-    let timer = PosixTimer::new(clock_id, signal, signal_value.unwrap_or(id));
+    let signal_value = signal_value.unwrap_or(id);
+    let timer = match clock_id {
+        CLOCK_PROCESS_CPUTIME_ID => PosixTimer::new_process_cpu(clock_id, signal, signal_value),
+        CLOCK_THREAD_CPUTIME_ID => {
+            PosixTimer::new_thread_cpu(clock_id, signal, signal_value, &task)
+        }
+        _ => PosixTimer::new_wall(clock_id, signal, signal_value),
+    };
     if !process.posix_timers().publish_reserved(id, timer) {
         // exec/group-exit 会先停止本线程，正常路径不会撤销仍在执行 syscall 的预留。
         process.posix_timers().cancel_reservation(id);
@@ -362,35 +368,72 @@ pub fn sys_timer_settime(
         return EINVAL;
     }
 
-    let process = current_task().unwrap().process.clone();
+    let task = current_task().unwrap();
+    // 当前线程在本次 syscall 之前消耗的 CPU 时间可能还留在 TCB 批次中。
+    // 先冲刷再装载 process CPU timer，避免相对 deadline 从过旧基准起算。
+    task.flush_cpu_time();
+    let process = task.process.clone();
     let mut register_timer = None;
     let mut old_spec = None;
-    let mut generated_signal = None;
+    let mut generated_event = None;
     {
         let mut timers = process.posix_timers();
-        let Some(mut timer) = timers.get(timer_id).copied() else {
+        let Some(mut timer) = timers.get(timer_id).cloned() else {
             return EINVAL;
         };
+        // CPU timer 的 owner 线程退出后，对象仍留在进程表中供 delete/gettime
+        // 使用，但不能重新装载到已经消失的 CPU clock 上。
+        let cpu_now_us = if timer.is_cpu_clock() {
+            match timer.cpu_time_us(&process) {
+                Some(now) => Some(now),
+                None => return ESRCH,
+            }
+        } else {
+            None
+        };
         if !old_value.is_null() {
-            old_spec = Some(current_posix_itimerspec(&timer));
+            old_spec = Some(current_posix_itimerspec(&timer, &process));
         }
 
         timer.interval = new_spec.it_interval;
         timer.value = new_spec.it_value;
         timer.arm_seq = timers.alloc_arm_seq();
         timer.reset_overrun();
+        timer.wall_deadline = None;
         timer.realtime_abs_deadline = None;
+        timer.cpu_deadline_us = None;
         if timer.value.is_zero() {
-            timer.deadline = None;
-        } else {
-            let clock_now = posix_timer_clock_now(timer.clock_id);
-            let now_monotonic = TimeSpec::now();
-            if flags & TIMER_ABSTIME != 0 && timer.value <= clock_now {
-                generated_signal = Some(timer.signal);
+            // deadline 已同时在 wall/CPU 两个时钟域中清除。
+        } else if let Some(now_us) = cpu_now_us {
+            let value_us = PosixTimer::cpu_duration_us(timer.value);
+            let deadline_us = if flags & TIMER_ABSTIME != 0 {
+                value_us
+            } else {
+                now_us.saturating_add(value_us)
+            };
+            if flags & TIMER_ABSTIME != 0 && deadline_us <= now_us {
+                generated_event = timer.pending_signal();
                 if timer.interval.is_zero() {
                     timer.value = TimeSpec::new();
-                    timer.deadline = None;
-                    timer.realtime_abs_deadline = None;
+                } else {
+                    let interval_us = PosixTimer::cpu_duration_us(timer.interval);
+                    let missed = now_us.saturating_sub(deadline_us) / interval_us;
+                    let expirations = missed.saturating_add(1);
+                    timer.add_overrun(missed.min(usize::MAX as u64) as usize);
+                    timer.value = timer.interval;
+                    timer.cpu_deadline_us =
+                        Some(deadline_us.saturating_add(expirations.saturating_mul(interval_us)));
+                }
+            } else {
+                timer.cpu_deadline_us = Some(deadline_us);
+            }
+        } else {
+            let clock_now = posix_wall_clock_now(timer.clock_id);
+            let now_monotonic = TimeSpec::now();
+            if flags & TIMER_ABSTIME != 0 && timer.value <= clock_now {
+                generated_event = timer.pending_signal();
+                if timer.interval.is_zero() {
+                    timer.value = TimeSpec::new();
                 } else {
                     let (deadline, overrun, next_abs_deadline) =
                         posix_timer_deadline_after_absolute_overrun(
@@ -403,7 +446,7 @@ pub fn sys_timer_settime(
                     if is_realtime_posix_timer_clock(timer.clock_id) {
                         timer.realtime_abs_deadline = Some(next_abs_deadline);
                     }
-                    timer.deadline = Some(deadline);
+                    timer.wall_deadline = Some(deadline);
                     register_timer = Some((deadline, timer.arm_seq));
                 }
             } else {
@@ -417,19 +460,18 @@ pub fn sys_timer_settime(
                 if flags & TIMER_ABSTIME != 0 && is_realtime_posix_timer_clock(timer.clock_id) {
                     timer.realtime_abs_deadline = Some(timer.value);
                 }
-                timer.deadline = Some(deadline);
+                timer.wall_deadline = Some(deadline);
                 register_timer = Some((deadline, timer.arm_seq));
             }
         }
         *timers.get_mut(timer_id).unwrap() = timer;
-        if let Some(signal) = generated_signal.filter(|signal| !signal.is_empty()) {
-            let siginfo = posix_timer_siginfo(signal, timer.signal_value);
-            let _ = queue_process_signal_info(&process, signal, siginfo);
-        }
+        process.sync_posix_cpu_timer_hint(&timers);
     }
 
-    if let Some(signal) = generated_signal {
-        let _ = wake_process_signal_waiter(&process, signal);
+    // SignalQueue 可能扩容，唤醒还会进入调度器；二者都必须位于 timer 表锁外。
+    if let Some(event) = generated_event {
+        let _ = queue_process_signal_info(&process, event.signal, event.siginfo);
+        let _ = wake_process_signal_waiter(&process, event.signal);
     }
     if let Some((deadline, arm_seq)) = register_timer {
         add_kernel_timer(
@@ -454,13 +496,15 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
     if curr_value.is_null() {
         return EFAULT;
     }
-    let process = current_task().unwrap().process.clone();
+    let task = current_task().unwrap();
+    task.flush_cpu_time();
+    let process = task.process.clone();
     let value = {
         let timers = process.posix_timers();
         let Some(timer) = timers.get(timer_id) else {
             return EINVAL;
         };
-        current_posix_itimerspec(timer)
+        current_posix_itimerspec(timer, &process)
     };
     match UserPtrMut::new(curr_value).write(current_user_token(), &value) {
         Ok(()) => SUCCESS,
@@ -479,21 +523,17 @@ pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
 
 pub fn sys_timer_delete(timer_id: usize) -> isize {
     let process = current_task().unwrap().process.clone();
-    if process.posix_timers().remove(timer_id) {
+    let removed = {
+        let mut timers = process.posix_timers();
+        let removed = timers.remove(timer_id);
+        process.sync_posix_cpu_timer_hint(&timers);
+        removed
+    };
+    if removed {
         SUCCESS
     } else {
         EINVAL
     }
-}
-
-fn posix_timer_siginfo(signal: Signals, value: usize) -> SigInfo {
-    SigInfo::new_with_sender_value(
-        signal.to_signum().unwrap(),
-        0,
-        SigInfo::SI_TIMER as usize,
-        0,
-        value,
-    )
 }
 
 fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
@@ -518,14 +558,10 @@ fn valid_posix_timer_clock(clock_id: usize) -> bool {
     )
 }
 
-fn posix_timer_clock_now(clock_id: usize) -> TimeSpec {
+fn posix_wall_clock_now(clock_id: usize) -> TimeSpec {
     match clock_id {
         CLOCK_REALTIME | CLOCK_REALTIME_ALARM | CLOCK_TAI => current_timespec(),
-        CLOCK_MONOTONIC
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID
-        | CLOCK_BOOTTIME
-        | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
+        CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
         _ => TimeSpec::new(),
     }
 }
@@ -582,10 +618,29 @@ fn posix_timer_deadline_after_absolute_overrun(
     (deadline, expirations.saturating_sub(1), next_abs_deadline)
 }
 
-fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
-    let value = match timer.deadline {
-        Some(deadline) => timespec_saturating_sub(deadline, TimeSpec::now()),
-        None => TimeSpec::new(),
+fn current_posix_itimerspec(
+    timer: &PosixTimer,
+    process: &crate::task::ProcessControlBlock,
+) -> ITimerSpec {
+    let value = if let Some(deadline_us) = timer.cpu_deadline_us {
+        match timer.cpu_time_us(process) {
+            Some(now_us) if now_us < deadline_us => {
+                TimeSpec::from_us((deadline_us - now_us).min(usize::MAX as u64) as usize)
+            }
+            // Linux 对已经到期、但尚未被安全点领取的 CPU timer 返回 1ns，
+            // 避免把“仍处于 armed 状态”误报成 disarmed。
+            Some(_) => TimeSpec {
+                tv_sec: 0,
+                tv_nsec: 1,
+            },
+            // thread owner 已退出后，该 CPU clock 不再推进。
+            None => TimeSpec::new(),
+        }
+    } else {
+        match timer.wall_deadline {
+            Some(deadline) => timespec_saturating_sub(deadline, TimeSpec::now()),
+            None => TimeSpec::new(),
+        }
     };
     ITimerSpec {
         it_interval: timer.interval,
@@ -596,14 +651,19 @@ fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
 fn rearm_posix_realtime_timers_after_clock_set() -> usize {
     let now_realtime = current_timespec();
     let now_monotonic = TimeSpec::now();
-    let mut registrations = Vec::new();
+    let mut registration_count = 0usize;
 
     for process in all_processes() {
-        let mut wake_signals = Vec::new();
+        // clock_settime 可能同时使多个绝对 timer 到期。固定批次保证 timer
+        // owner 锁内只更新状态，不进入 allocator、signal lock 或 timer heap。
+        let mut events = [None; PosixTimer::MAX_COUNT];
+        let mut event_count = 0usize;
+        let mut registrations = [None; PosixTimer::MAX_COUNT];
+        let mut process_registration_count = 0usize;
         {
             let mut timers = process.posix_timers();
             for timer_id in 0..timers.slot_count() {
-                let Some(mut timer) = timers.get(timer_id).copied() else {
+                let Some(mut timer) = timers.get(timer_id).cloned() else {
                     continue;
                 };
                 if !is_realtime_posix_timer_clock(timer.clock_id) {
@@ -612,7 +672,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                 let Some(abs_deadline) = timer.realtime_abs_deadline else {
                     continue;
                 };
-                if timer.deadline.is_none() {
+                if timer.wall_deadline.is_none() {
                     timer.realtime_abs_deadline = None;
                     *timers.get_mut(timer_id).unwrap() = timer;
                     continue;
@@ -624,7 +684,7 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                     generated = true;
                     if timer.interval.is_zero() {
                         timer.value = TimeSpec::new();
-                        timer.deadline = None;
+                        timer.wall_deadline = None;
                         timer.realtime_abs_deadline = None;
                     } else {
                         let (deadline, overrun, next_abs_deadline) =
@@ -636,50 +696,52 @@ fn rearm_posix_realtime_timers_after_clock_set() -> usize {
                             );
                         timer.add_overrun(overrun);
                         timer.value = timer.interval;
-                        timer.deadline = Some(deadline);
+                        timer.wall_deadline = Some(deadline);
                         timer.realtime_abs_deadline = Some(next_abs_deadline);
-                        registrations.push((
-                            process.clone(),
-                            timer_id,
-                            timer.arm_seq,
-                            deadline,
-                        ));
+                        registrations[process_registration_count] =
+                            Some((timer_id, timer.arm_seq, deadline));
+                        process_registration_count += 1;
                     }
                 } else {
-                    let deadline = realtime_deadline_to_monotonic(
-                        abs_deadline,
-                        now_realtime,
-                        now_monotonic,
-                    );
-                    timer.deadline = Some(deadline);
-                    registrations.push((process.clone(), timer_id, timer.arm_seq, deadline));
+                    let deadline =
+                        realtime_deadline_to_monotonic(abs_deadline, now_realtime, now_monotonic);
+                    timer.wall_deadline = Some(deadline);
+                    registrations[process_registration_count] =
+                        Some((timer_id, timer.arm_seq, deadline));
+                    process_registration_count += 1;
                 }
 
-                *timers.get_mut(timer_id).unwrap() = timer;
-                if generated && !timer.signal.is_empty() {
-                    let siginfo = posix_timer_siginfo(timer.signal, timer.signal_value);
-                    let _ = queue_process_signal_info(&process, timer.signal, siginfo);
-                    wake_signals.push(timer.signal);
+                if generated {
+                    if let Some(event) = timer.pending_signal() {
+                        events[event_count] = Some(event);
+                        event_count += 1;
+                    }
                 }
+                *timers.get_mut(timer_id).unwrap() = timer;
             }
         }
-        for signal in wake_signals {
-            let _ = wake_process_signal_waiter(&process, signal);
+        for event in events.iter().take(event_count).flatten().copied() {
+            let _ = queue_process_signal_info(&process, event.signal, event.siginfo);
+            let _ = wake_process_signal_waiter(&process, event.signal);
+        }
+        for (timer_id, arm_seq, deadline) in registrations
+            .iter()
+            .take(process_registration_count)
+            .flatten()
+            .copied()
+        {
+            add_kernel_timer(
+                TimerAction::PosixTimerSignal {
+                    process: Arc::downgrade(&process),
+                    timer_id,
+                    arm_seq,
+                },
+                deadline,
+            );
+            registration_count += 1;
         }
     }
-
-    let count = registrations.len();
-    for (process, timer_id, arm_seq, deadline) in registrations {
-        add_kernel_timer(
-            TimerAction::PosixTimerSignal {
-                process: Arc::downgrade(&process),
-                timer_id,
-                arm_seq,
-            },
-            deadline,
-        );
-    }
-    count
+    registration_count
 }
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> isize {
