@@ -112,6 +112,8 @@ else
     INITD_SRC="$INIT_DIR/init"
     RUNNER_SRC="$INIT_DIR/test_runner"
     LTPRUNNER_SRC="$INIT_DIR/ltprunner"
+    IOZONE_RUNNER_SRC="$INIT_DIR/iozone_runner"
+    LMBENCH_RUNNER_SRC="$INIT_DIR/lmbench_runner"
     if [ -f "$INITD_SRC" ] && [ -f "$RUNNER_SRC" ]; then
         mkdir -p "$STAGE/sbin"
         install -m 0755 "$INITD_SRC" "$STAGE/sbin/init"
@@ -119,6 +121,14 @@ else
         if [ -f "$LTPRUNNER_SRC" ]; then
             install -m 0755 "$LTPRUNNER_SRC" "$STAGE/ltprunner"
             echo "[initramfs] installed /ltprunner from $LTPRUNNER_SRC"
+        fi
+        if [ -f "$IOZONE_RUNNER_SRC" ]; then
+            install -m 0755 "$IOZONE_RUNNER_SRC" "$STAGE/iozone_runner"
+            echo "[initramfs] installed /iozone_runner from $IOZONE_RUNNER_SRC"
+        fi
+        if [ -f "$LMBENCH_RUNNER_SRC" ]; then
+            install -m 0755 "$LMBENCH_RUNNER_SRC" "$STAGE/lmbench_runner"
+            echo "[initramfs] installed /lmbench_runner from $LMBENCH_RUNNER_SRC"
         fi
         echo "[initramfs] installed /sbin/init and test runner"
     else
