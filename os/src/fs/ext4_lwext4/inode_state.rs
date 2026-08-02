@@ -222,9 +222,7 @@ impl Ext4InodeState {
                 return Err(from_lwext4(error.abs()));
             }
         };
-        if file.inode_id() as usize != self.inode_id
-            || actual_generation != self.generation
-        {
+        if file.inode_id() as usize != self.inode_id || actual_generation != self.generation {
             file.file_close().ok();
             self.open_count.fetch_sub(1, Ordering::AcqRel);
             return Err(SyscallErr::EIO);
@@ -264,9 +262,7 @@ impl Ext4InodeState {
                 return Err(from_lwext4(error.abs()));
             }
         };
-        if temporary.inode_id() as usize != self.inode_id
-            || actual_generation != self.generation
-        {
+        if temporary.inode_id() as usize != self.inode_id || actual_generation != self.generation {
             temporary.file_close().ok();
             return Err(SyscallErr::EIO);
         }
@@ -290,12 +286,7 @@ impl Ext4InodeState {
             }
             if self
                 .open_count
-                .compare_exchange_weak(
-                    count,
-                    count - 1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange_weak(count, count - 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 return Ok(false);
@@ -306,22 +297,17 @@ impl Ext4InodeState {
     /// Close the persistent descriptor and, for a zero-link inode, finish
     /// truncation/bitmap release only after dirty pages have been written.
     /// Returns whether the inode was finally deleted.
-    pub(crate) fn finish_last_close(
-        &self,
-        fs: &Ext4FileSystem,
-    ) -> Result<bool, SyscallErr> {
+    pub(crate) fn finish_last_close(&self, fs: &Ext4FileSystem) -> Result<bool, SyscallErr> {
         let _lw = fs.lw.lock();
         let mut handle = self.handle.lock();
 
         // A new open may have arrived while the prospective final closer was
         // writing dirty pages.  In that case this close is no longer final;
         // release only its own reference and leave the shared handle pinned.
-        match self.open_count.compare_exchange(
-            1,
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .open_count
+            .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => {}
             Err(count) if count > 1 => {
                 self.open_count.fetch_sub(1, Ordering::AcqRel);
@@ -337,8 +323,8 @@ impl Ext4InodeState {
                 return Err(SyscallErr::EIO);
             }
         };
-        let deleted = self.pending_delete.load(Ordering::Acquire)
-            && self.nlinks.load(Ordering::Acquire) == 0;
+        let deleted =
+            self.pending_delete.load(Ordering::Acquire) && self.nlinks.load(Ordering::Acquire) == 0;
         if deleted {
             if let Err(error) = file.file_finalize_unlinked() {
                 self.open_count.fetch_add(1, Ordering::AcqRel);

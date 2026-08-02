@@ -57,12 +57,17 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         }
     } else {
         let parent_comps = &components[..components.len() - 1];
-        let joined = parent_comps.iter()
+        let joined = parent_comps
+            .iter()
             .map(|s| s.as_str())
             .collect::<Vec<&str>>()
             .join("/");
         let parent_path = if linkpath_str.starts_with('/') {
-            if joined.is_empty() { String::from("/") } else { alloc::format!("/{}", joined) }
+            if joined.is_empty() {
+                String::from("/")
+            } else {
+                alloc::format!("/{}", joined)
+            }
         } else {
             joined
         };

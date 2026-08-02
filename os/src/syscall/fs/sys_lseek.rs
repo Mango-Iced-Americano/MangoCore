@@ -54,11 +54,13 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
             return ENXIO;
         }
         match whence {
-            3 => { // SEEK_DATA: return current offset (entire file is data)
+            3 => {
+                // SEEK_DATA: return current offset (entire file is data)
                 file.set_offset(off as usize);
                 return off as isize;
             }
-            4 => { // SEEK_HOLE: return file_size (hole at EOF)
+            4 => {
+                // SEEK_HOLE: return file_size (hole at EOF)
                 file.set_offset(file_size as usize);
                 return file_size as isize;
             }

@@ -1,0 +1,101 @@
+make: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make -f make/rv64.mk derived-comp
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+
+OpenSBI v1.5.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 327 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 71 KB
+Firmware Heap Offset      : 0x49000
+Firmware Heap Size        : 35 KB (total), 2 KB (reserved), 11 KB (used), 21 KB (free)
+Firmware Scratch Size     : 4096 B (total), 416 B (used), 3680 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+... snip ...
+[ext4-write-timing] setup=7134 pc_write=1027184 post=1050
+[pc-write-timing] lookup=4416 lease=4568 copy=10122 valid=934 commit=928 balance=2704
+[ext4-write-timing] setup=7308 pc_write=1102468 post=900
+[pc-write-timing] lookup=4378 lease=4550 copy=8670 valid=900 commit=884 balance=2752
+[ext4-write-timing] setup=7184 pc_write=1035212 post=896
+[pc-write-timing] lookup=4302 lease=4312 copy=9034 valid=848 commit=840 balance=2672
+[ext4-write-timing] setup=7046 pc_write=1018086 post=808
+[pc-write-timing] lookup=4106 lease=4360 copy=8898 valid=816 commit=940 balance=2720
+[ext4-write-timing] setup=6828 pc_write=1128684 post=1324
+[pc-write-timing] lookup=4424 lease=4794 copy=9016 valid=924 commit=908 balance=2784
+[ext4-write-timing] setup=7212 pc_write=1113676 post=1808
+[pc-write-timing] lookup=4258 lease=4802 copy=10038 valid=948 commit=970 balance=2758
+[ext4-write-timing] setup=7746 pc_write=1194850 post=1960
+[pc-write-timing] lookup=4464 lease=4710 copy=9406 valid=938 commit=1018 balance=2686
+[ext4-write-timing] setup=7326 pc_write=1202786 post=1252
+[pc-write-timing] lookup=4392 lease=4514 copy=8714 valid=824 commit=892 balance=2800
+[ext4-write-timing] setup=7414 pc_write=1154602 post=1826
+[pc-write-timing] lookup=4394 lease=4696 copy=8540 valid=836 commit=886 balance=2722
+[ext4-write-timing] setup=7370 pc_write=1135664 post=1360
+[pc-write-timing] lookup=4370 lease=4634 copy=8754 valid=932 commit=902 balance=2716
+[ext4-write-timing] setup=7348 pc_write=1094504 post=1258
+
+	Children see throughput for  4 rewriters 	=     800.67 kB/sec
+	Parent sees throughput for  4 rewriters 	=     743.35 kB/sec
+	Min throughput per process 			=     194.88 kB/sec 
+	Max throughput per process 			=     206.12 kB/sec
+	Avg throughput per process 			=     200.17 kB/sec
+	Min xfer 					=     991.00 kB
+
+
+
+iozone test complete.
+#### OS COMP TEST GROUP END iozone-glibc ####
+/bin/sh: line 1: /sys/kernel/stats/stats_on: No such file or directory
+[initproc] [diag] === stats iozone-glibc ===
+cat: can't open '/sys/kernel/stats/blockio': No such file or directory
+[initproc] [diag] === stats iozone-glibc end ===
+#### OS COMP TEST GROUP END iozone-glibc ####
+[initproc] done iozone_testcode.sh in /glibc exit_code=0
+[initproc] skip libcbench (mask bit7 not set)
+[initproc] skip netperf (mask bit9 not set)
+[initproc] skip iperf (mask bit6 not set)
+[initproc] skip libctest (mask bit3 not set)
+[initproc] skip cyclictest (mask bit10 not set)
+[initproc] skip ltp (mask bit11 not set)
+[initproc] skip cpython (mask bit12 not set)
+[initproc] skip unixbench (mask bit5 not set)
+[initproc] run_selected_groups done
+make[1]: Leaving directory '/app/os'
+make: Leaving directory '/app/os'

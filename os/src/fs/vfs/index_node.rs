@@ -390,6 +390,17 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
+    /// Update data modification and inode change timestamps after a successful write.
+    fn touch_modified(&self) {
+        let Ok(mut metadata) = self.metadata() else {
+            return;
+        };
+        let now = crate::timer::TimeSpec::now();
+        metadata.mtime = now;
+        metadata.ctime = now;
+        let _ = self.set_metadata(&metadata);
+    }
+
     /// 根据 inode 号获取子项的名称
     fn get_entry_name(&self, _ino: InodeId) -> Result<String, SyscallErr> {
         Err(SyscallErr::ENOSYS)
@@ -609,7 +620,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 #[macro_export]
 macro_rules! impl_index_node_as_any {
     ($t:ty) => {
-        fn as_any_ref(&self) -> &dyn::core::any::Any {
+        fn as_any_ref(&self) -> &dyn ::core::any::Any {
             self
         }
     };

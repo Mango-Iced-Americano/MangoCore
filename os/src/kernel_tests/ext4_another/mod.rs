@@ -15,11 +15,13 @@ mod ownership;
 #[cfg(feature = "ext4_another_backend")]
 mod persistence;
 #[cfg(feature = "ext4_another_backend")]
+mod power_cut;
+#[cfg(feature = "ext4_another_backend")]
 mod recording_device;
 #[cfg(feature = "ext4_another_backend")]
-mod sync;
-#[cfg(feature = "ext4_another_backend")]
 mod symlink;
+#[cfg(feature = "ext4_another_backend")]
+mod sync;
 #[cfg(feature = "ext4_another_backend")]
 mod writeback_observer;
 
@@ -83,6 +85,18 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
             KernelTest::new(
                 "ext4_another::global_sys_sync_persists_across_unwrapped_device_view",
                 sync::test_global_sys_sync_persists_across_unwrapped_device_view,
+            ),
+            KernelTest::new(
+                "ext4_another::close_does_not_trigger_durability_and_later_fsync_persists",
+                sync::test_close_does_not_trigger_durability_and_later_fsync_persists,
+            ),
+            KernelTest::new(
+                "ext4_another::unsynced_close_power_cut_replays_consistently",
+                power_cut::test_unsynced_close_power_cut_replays_consistently,
+            ),
+            KernelTest::new(
+                "ext4_another::close_then_clean_unmount_persists_and_clears_recover",
+                power_cut::test_close_then_clean_unmount_persists_and_clears_recover,
             ),
             KernelTest::new(
                 "ext4_another::root_inode_is_canonical_and_does_not_retain_filesystem",

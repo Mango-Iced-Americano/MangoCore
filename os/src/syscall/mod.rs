@@ -21,6 +21,7 @@ use flock::*;
 use spin::Mutex;
 use fs::*;
 use log::{error, info};
+pub(crate) use process::SignalFd;
 use process::*;
 pub use process::{
     posix_mq_msg_default, posix_mq_msg_max, posix_mq_msgsize_default, posix_mq_msgsize_max,
@@ -31,7 +32,6 @@ pub use process::{
     sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits, sysv_sem_proc_snapshot,
     sysv_shm_proc_snapshot, sysv_shmall, sysv_shmmax, sysv_shmmni, CloneFlags,
 };
-pub(crate) use process::SignalFd;
 use syscall_id::*;
 
 #[cfg(feature = "riscv")]
@@ -535,12 +535,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4],
             args[5] as u32,
         ),
-        SYSCALL_TEE => sys_tee(
-            args[0],
-            args[1],
-            args[2],
-            args[3] as u32,
-        ),
+        SYSCALL_TEE => sys_tee(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_READLINKAT => {
             sys_readlinkat(args[0], args[1] as *const u8, args[2] as *mut u8, args[3])
@@ -864,7 +859,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MUNLOCKALL => sys_munlockall(),
         SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2]),
         #[cfg(feature = "riscv")]
-        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *const u8, args[1], args[2], args[3], args[4]),
+        SYSCALL_RISCV_HWPROBE => {
+            sys_riscv_hwprobe(args[0] as *const u8, args[1], args[2], args[3], args[4])
+        }
         #[cfg(feature = "riscv")]
         SYSCALL_RISCV_FLUSH_ICACHE => sys_riscv_flush_icache(args[0], args[1], args[2]),
         SYSCALL_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
@@ -1091,6 +1088,12 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
 }
 
 #[cfg(feature = "riscv")]
-pub fn sys_riscv_hwprobe(_pairs: *const u8, _count: usize, _cpusetsize: usize, _cpuset: usize, _flags: usize) -> isize {
+pub fn sys_riscv_hwprobe(
+    _pairs: *const u8,
+    _count: usize,
+    _cpusetsize: usize,
+    _cpuset: usize,
+    _flags: usize,
+) -> isize {
     errno::ENOSYS
 }

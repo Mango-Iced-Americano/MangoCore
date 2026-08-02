@@ -1,0 +1,4 @@
+make: Entering directory '/app/os'
+RUSTUP_HOME must be set and non-empty; this read-only command does not provision; run 'make toolchain-setup' inside the Docker development container to provision the pinned toolchain
+make: *** [make/la64.mk:77: toolchain-preflight] Error 1
+make: Leaving directory '/app/os'

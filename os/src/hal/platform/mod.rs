@@ -75,9 +75,9 @@ pub fn platform_cmdline() -> Option<&'static str> {
     // single-threaded initialization. `PLATFORM_INFO` is static, so a borrow
     // of the contained `String` remains valid for the returned `'static` view.
     unsafe {
-        (*PLATFORM_INFO.0.get())
-            .as_ref()
-            .and_then(|platform_info| (!platform_info.cmdline.is_empty()).then_some(platform_info.cmdline.as_str()))
+        (*PLATFORM_INFO.0.get()).as_ref().and_then(|platform_info| {
+            (!platform_info.cmdline.is_empty()).then_some(platform_info.cmdline.as_str())
+        })
     }
 }
 

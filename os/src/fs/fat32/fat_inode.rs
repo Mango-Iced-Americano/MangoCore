@@ -186,10 +186,7 @@ impl Drop for FatInode {
 /// 等），调用 `init_self_weak()` 建立内部弱引用链，对目录类型自动设置
 /// `set_hint()`。`fst_clus: 0` 表示尚未分配数据簇（写入时按需分配）。
 impl FatInode {
-    fn cache_key_for(
-        fst_clus: u32,
-        parent_dir: &Option<(Arc<Self>, u32)>,
-    ) -> Option<FatInodeKey> {
+    fn cache_key_for(fst_clus: u32, parent_dir: &Option<(Arc<Self>, u32)>) -> Option<FatInodeKey> {
         if fst_clus >= 2 {
             return Some(FatInodeKey::Cluster(fst_clus));
         }
@@ -1513,7 +1510,9 @@ impl IndexNode for FatInode {
                 return Err(SyscallErr::EIO);
             }
             drop(parent_lock);
-            self_arc.writeback_page_cache().map_err(|_| SyscallErr::EIO)?;
+            self_arc
+                .writeback_page_cache()
+                .map_err(|_| SyscallErr::EIO)?;
 
             // The source keeps its inode/page cache identity at the target
             // name. The replaced inode is detached from the directory now,
@@ -1547,7 +1546,9 @@ impl IndexNode for FatInode {
             return Err(SyscallErr::EIO);
         }
         drop(parent_lock);
-        self_arc.writeback_page_cache().map_err(|_| SyscallErr::EIO)?;
+        self_arc
+            .writeback_page_cache()
+            .map_err(|_| SyscallErr::EIO)?;
         source_inode.relocate_parent(self_arc.clone(), new_offset);
         Ok(())
     }

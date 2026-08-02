@@ -16,10 +16,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::drivers::block::BlockDevice;
-use crate::fs::vfs::{
-    FileSystem, FsInfo, FileType, IndexNode, InodeMode, SuperBlock,
-};
 use crate::fs::vfs::file_system::FsPermissionPolicy;
+use crate::fs::vfs::{FileSystem, FileType, FsInfo, IndexNode, InodeMode, SuperBlock};
 use crate::utils::error::SyscallErr;
 
 use super::blockdev::{MangoBlockDev, MangoKernelDevOp};
@@ -79,8 +77,7 @@ pub struct Ext4FileSystem {
     /// Strong Arc registry — keeps dirty PageCache alive after last
     /// inode reference is dropped (dentry eviction).  Without this,
     /// dirty pages are lost when dentry cache pressure evicts inodes.
-    pub(crate) page_caches:
-        Mutex<BTreeMap<(usize, u32), Arc<crate::fs::page_cache::PageCache>>>,
+    pub(crate) page_caches: Mutex<BTreeMap<(usize, u32), Arc<crate::fs::page_cache::PageCache>>>,
     /// Weak runtime-state registry keyed by ext4 inode number + generation.
     /// All path aliases and independently-created VFS inode objects share
     /// the same open handle, pathname updates, link count, and logical EOF.
@@ -112,9 +109,8 @@ impl Ext4FileSystem {
     pub(crate) fn arm_journal_power_cut_for_test(&self) -> Result<(), SyscallErr> {
         let _lock = self.lw.lock();
         let path = CString::new(self.lw_path("/")).map_err(|_| SyscallErr::EINVAL)?;
-        let result = unsafe {
-            lwext4_rust::bindings::ext4_test_arm_journal_power_cut(path.as_ptr())
-        };
+        let result =
+            unsafe { lwext4_rust::bindings::ext4_test_arm_journal_power_cut(path.as_ptr()) };
         if result == 0 {
             Ok(())
         } else {
@@ -142,9 +138,7 @@ impl Ext4FileSystem {
         if read_only {
             if let Some(identity) = crate::fs::filesystem::ext4_identity(&block_device) {
                 if identity.incompatible_features & EXT4_FEATURE_INCOMPAT_RECOVER != 0 {
-                    log::error!(
-                        "[lwext4][ro] refusing filesystem that requires journal recovery"
-                    );
+                    log::error!("[lwext4][ro] refusing filesystem that requires journal recovery");
                     return Err(SyscallErr::EROFS);
                 }
             }
@@ -221,7 +215,10 @@ impl Ext4FileSystem {
         );
         *fs.root.lock() = Some(root);
 
-        log::info!("[lwext4] filesystem ready (id={}), root inode created", fs_id);
+        log::info!(
+            "[lwext4] filesystem ready (id={}), root inode created",
+            fs_id
+        );
         Ok(fs)
     }
 
@@ -261,13 +258,7 @@ impl Ext4FileSystem {
             state.observe_path(path, size, nlinks);
             return state;
         }
-        let state = Ext4InodeState::new(
-            inode_id,
-            generation,
-            String::from(path),
-            size,
-            nlinks,
-        );
+        let state = Ext4InodeState::new(inode_id, generation, String::from(path), size, nlinks);
         states.insert(key, Arc::downgrade(&state));
         state
     }
@@ -314,17 +305,22 @@ impl Ext4FileSystem {
         let c_path = c_path.into_raw();
         let mut ino: u32 = 0;
         let mut raw_inode: lwext4_rust::bindings::ext4_inode = unsafe { core::mem::zeroed() };
-        let r = unsafe {
-            lwext4_rust::bindings::ext4_raw_inode_fill(c_path, &mut ino, &mut raw_inode)
-        };
-        unsafe { let _ = CString::from_raw(c_path); }
+        let r =
+            unsafe { lwext4_rust::bindings::ext4_raw_inode_fill(c_path, &mut ino, &mut raw_inode) };
+        unsafe {
+            let _ = CString::from_raw(c_path);
+        }
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
         super::counters::LWEXT4_GET_INODE_ID_CALLS.fetch_add(1, Ordering::Relaxed);
         super::counters::LWEXT4_GET_INODE_ID_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
         if r != 0 {
             // Only log at debug level — ENOENT is expected during create/mkdir
             // pre-checks and would spam serial at warn/error.
-            log::debug!("[lwext4] get_inode_id failed for '{}': errno={}", full_path, r);
+            log::debug!(
+                "[lwext4] get_inode_id failed for '{}': errno={}",
+                full_path,
+                r
+            );
             super::counters::LWEXT4_GET_INODE_ID_ENOENT.fetch_add(1, Ordering::Relaxed);
             return Err(from_lwext4(r.abs()));
         }
@@ -361,7 +357,10 @@ impl Ext4FileSystem {
     /// Returns `Ok(MappedType)` if it exists, `Err(SyscallErr)` otherwise.
     /// Uses `fmode_get()` which works for all inode types (files, dirs,
     /// symlinks, devices).
-    pub(crate) fn probe_type(&self, full_path: &str) -> Result<super::layout::MappedType, SyscallErr> {
+    pub(crate) fn probe_type(
+        &self,
+        full_path: &str,
+    ) -> Result<super::layout::MappedType, SyscallErr> {
         let _start = crate::task::perf::perf_time_now();
         let _lock = self.lw.lock();
         let lw_path = self.lw_path(full_path);
@@ -375,10 +374,7 @@ impl Ext4FileSystem {
 
     /// Single lwext4 FFI: fill raw inode, extract ALL metadata, cache result.
     /// Uses `ext4_raw_inode_fill(path, &ret_ino, &raw_inode)` — ONE call.
-    pub(crate) fn probe_inode_meta(
-        &self,
-        path: &str,
-    ) -> Result<LookupCacheEntry, SyscallErr> {
+    pub(crate) fn probe_inode_meta(&self, path: &str) -> Result<LookupCacheEntry, SyscallErr> {
         let _lock = self.lw.lock();
         self.probe_inode_meta_locked(path)
     }
@@ -390,18 +386,12 @@ impl Ext4FileSystem {
         path: &str,
     ) -> Result<LookupCacheEntry, SyscallErr> {
         let lw_path = self.lw_path(path);
-        let c_path =
-            CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = CString::new(lw_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut ret_ino: u32 = 0;
-        let mut raw_inode: lwext4_rust::bindings::ext4_inode =
-            unsafe { core::mem::zeroed() };
+        let mut raw_inode: lwext4_rust::bindings::ext4_inode = unsafe { core::mem::zeroed() };
         let r = unsafe {
-            lwext4_rust::bindings::ext4_raw_inode_fill(
-                c_path,
-                &mut ret_ino,
-                &mut raw_inode,
-            )
+            lwext4_rust::bindings::ext4_raw_inode_fill(c_path, &mut ret_ino, &mut raw_inode)
         };
         unsafe {
             let _ = CString::from_raw(c_path);
@@ -411,12 +401,9 @@ impl Ext4FileSystem {
         }
         let mode_raw = raw_inode.mode as u32;
         let mapped = super::layout::map_lwext4_mode(mode_raw);
-        let size = (raw_inode.size_lo as usize)
-            | ((raw_inode.size_hi as usize) << 32);
-        let uid = raw_inode.uid as u32
-            | unsafe { ((raw_inode.osd2.linux2.uid_high as u32) << 16) };
-        let gid = raw_inode.gid as u32
-            | unsafe { ((raw_inode.osd2.linux2.gid_high as u32) << 16) };
+        let size = (raw_inode.size_lo as usize) | ((raw_inode.size_hi as usize) << 32);
+        let uid = raw_inode.uid as u32 | unsafe { ((raw_inode.osd2.linux2.uid_high as u32) << 16) };
+        let gid = raw_inode.gid as u32 | unsafe { ((raw_inode.osd2.linux2.gid_high as u32) << 16) };
         let entry = LookupCacheEntry {
             inode_id: ret_ino as usize,
             generation: raw_inode.generation,
@@ -455,14 +442,15 @@ impl FileSystem for Ext4FileSystem {
     fn super_block(&self) -> SuperBlock {
         // Read actual filesystem stats from lwext4 via ext4_mount_point_stats.
         let _lock = self.lw.lock();
-        let mut stats: lwext4_rust::bindings::ext4_mount_stats =
-            unsafe { core::mem::zeroed() };
+        let mut stats: lwext4_rust::bindings::ext4_mount_stats = unsafe { core::mem::zeroed() };
         let c_mp = CString::new(self.lw_mount_point.as_str()).unwrap();
         let c_mp = c_mp.into_raw();
         unsafe {
             lwext4_rust::bindings::ext4_mount_point_stats(c_mp, &mut stats);
         }
-        unsafe { let _ = CString::from_raw(c_mp); }
+        unsafe {
+            let _ = CString::from_raw(c_mp);
+        }
 
         SuperBlock {
             f_type: 0xEF53,
@@ -497,8 +485,7 @@ impl FileSystem for Ext4FileSystem {
         // The registry intentionally holds dirty PageCaches after dentry/file
         // eviction.  Drain this filesystem's caches before stopping lwext4;
         // never hold the registry lock across block I/O.
-        let caches: alloc::vec::Vec<_> =
-            self.page_caches.lock().values().cloned().collect();
+        let caches: alloc::vec::Vec<_> = self.page_caches.lock().values().cloned().collect();
         for cache in caches {
             if let Err(error) = cache.writeback_all() {
                 log::error!(

@@ -52,7 +52,10 @@ pub fn sys_mount(
     let target_inode = match vfs_lookup(&lookup_inode, &lookup_path, false) {
         Ok(inode) => inode,
         Err(errno) => {
-            error!("[sys_mount] vfs_lookup failed for '{}': errno={}", lookup_path, errno);
+            error!(
+                "[sys_mount] vfs_lookup failed for '{}': errno={}",
+                lookup_path, errno
+            );
             return errno;
         }
     };
@@ -68,29 +71,32 @@ pub fn sys_mount(
     // ── Flag routing — must happen BEFORE any RamFS creation ──
 
     let propagation_type_flags = MountFlags::MS_SHARED
-        | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE;
+        | MountFlags::MS_PRIVATE
+        | MountFlags::MS_SLAVE
+        | MountFlags::MS_UNBINDABLE;
     let prop_type_flag = mountflags & propagation_type_flags;
 
     // Propagation-type-change commands (e.g., mount --make-shared /mnt)
     // MS_REC is allowed as modifier, but only when there is exactly one
     // propagation-type flag AND no MS_MOVE/MS_REMOUNT.
     // MS_BIND + single propagation flag is allowed (bind, then override).
-    let bind_prop_override: Option<vfs::propagation::PropagationType> = if mountflags.intersects(MountFlags::MS_BIND) && !prop_type_flag.is_empty() {
-        if prop_type_flag.bits().count_ones() != 1 {
-            return EINVAL;
-        }
-        if prop_type_flag.contains(MountFlags::MS_SHARED) {
-            Some(vfs::propagation::PropagationType::Shared)
-        } else if prop_type_flag.contains(MountFlags::MS_PRIVATE) {
-            Some(vfs::propagation::PropagationType::Private)
-        } else if prop_type_flag.contains(MountFlags::MS_SLAVE) {
-            Some(vfs::propagation::PropagationType::Slave)
+    let bind_prop_override: Option<vfs::propagation::PropagationType> =
+        if mountflags.intersects(MountFlags::MS_BIND) && !prop_type_flag.is_empty() {
+            if prop_type_flag.bits().count_ones() != 1 {
+                return EINVAL;
+            }
+            if prop_type_flag.contains(MountFlags::MS_SHARED) {
+                Some(vfs::propagation::PropagationType::Shared)
+            } else if prop_type_flag.contains(MountFlags::MS_PRIVATE) {
+                Some(vfs::propagation::PropagationType::Private)
+            } else if prop_type_flag.contains(MountFlags::MS_SLAVE) {
+                Some(vfs::propagation::PropagationType::Slave)
+            } else {
+                Some(vfs::propagation::PropagationType::Unbindable)
+            }
         } else {
-            Some(vfs::propagation::PropagationType::Unbindable)
-        }
-    } else {
-        None
-    };
+            None
+        };
     let bind_prop_override_recursive = if bind_prop_override.is_some() {
         mountflags.contains(MountFlags::MS_REC)
     } else {
@@ -106,7 +112,10 @@ pub fn sys_mount(
         // Pure propagation-type-change (no BIND): apply to existing mount
         if bind_prop_override.is_none() {
             let is_recursive = mountflags.contains(MountFlags::MS_REC);
-            let target_mnt_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            let target_mnt_inode = match target_inode
+                .as_any_ref()
+                .downcast_ref::<vfs::MountFSInode>()
+            {
                 Some(m) => m,
                 None => return EINVAL,
             };
@@ -135,7 +144,14 @@ pub fn sys_mount(
     }
 
     if mountflags.intersects(MountFlags::MS_BIND) {
-        let mnt_fs = match do_bind_mount(source, token, &lookup_inode, &lookup_path, target_inode, mountflags) {
+        let mnt_fs = match do_bind_mount(
+            source,
+            token,
+            &lookup_inode,
+            &lookup_path,
+            target_inode,
+            mountflags,
+        ) {
             Ok(fs) => fs,
             Err(errno) => return errno,
         };
@@ -248,7 +264,8 @@ pub fn sys_mount(
             // Rollback: restore old parent (best-effort, must never panic)
             log::error!(
                 "[sys_mount] MS_MOVE add_mount to '{}' failed (errno={}); restoring old parent",
-                lookup_path, e as isize,
+                lookup_path,
+                e as isize,
             );
             if let Err(rollback_err) = old_parent_mnt.add_mount(old_mp_id, src_mnt.clone()) {
                 log::error!(
@@ -257,7 +274,11 @@ pub fn sys_mount(
                 );
             } else {
                 if let Some(ref old_path) = old_path {
-                    vfs::mount::MOUNT_LIST.insert(old_path.as_str(), src_mnt.clone(), Some(old_mp_id));
+                    vfs::mount::MOUNT_LIST.insert(
+                        old_path.as_str(),
+                        src_mnt.clone(),
+                        Some(old_mp_id),
+                    );
                 }
                 src_mnt.set_self_mountpoint(Some(old_backref));
                 src_mnt.set_mount_path(old_path);
@@ -302,7 +323,9 @@ pub fn sys_mount(
                             };
                             vfs::mount::MOUNT_LIST.remove(cur_path.as_str());
                             vfs::mount::MOUNT_LIST.insert(
-                                new_child_path.as_str(), child.clone(), None,
+                                new_child_path.as_str(),
+                                child.clone(),
+                                None,
                             );
                             child.set_mount_path(Some(new_child_path));
                         }
@@ -329,14 +352,9 @@ pub fn sys_mount(
                     vfs::propagation::PropagationType::Shared,
                 );
             }
-            let snapshot = collect_rbind_snapshot(
-                src_mnt.clone(),
-                src_mnt.mountpoint_root_inode(),
-            );
+            let snapshot = collect_rbind_snapshot(src_mnt.clone(), src_mnt.mountpoint_root_inode());
             let child_name = new_prefix.rsplit('/').next().unwrap_or("");
-            vfs::propagation::propagate_mount(
-                &new_parent_mnt, inode_id, &src_mnt, child_name,
-            );
+            vfs::propagation::propagate_mount(&new_parent_mnt, inode_id, &src_mnt, child_name);
             if !snapshot.is_empty() {
                 for peer in vfs::propagation::get_peers(&new_parent_mnt) {
                     let peer_clone = {
@@ -344,9 +362,8 @@ pub fn sys_mount(
                         mps.get(&inode_id).cloned()
                     };
                     if let Some(clone) = peer_clone {
-                        let _ = apply_rbind_snapshot(
-                            &snapshot, src_mnt.clone(), clone, &new_prefix,
-                        );
+                        let _ =
+                            apply_rbind_snapshot(&snapshot, src_mnt.clone(), clone, &new_prefix);
                     }
                 }
             }
@@ -409,8 +426,7 @@ pub fn sys_mount(
             // No atime policy requested: only old canonical atime bits are
             // preserved; non-atime bits (e.g. NOSYMFOLLOW) come from user's
             // explicit request or are cleared — matching Linux remount semantics.
-            new_flags = (new_flags & !atime_all)
-                | (vfs::canonicalize_state(old_flags) & atime_all);
+            new_flags = (new_flags & !atime_all) | (vfs::canonicalize_state(old_flags) & atime_all);
         }
 
         mnt_inode.mount_fs.set_mount_flags(new_flags);
@@ -433,7 +449,10 @@ pub fn sys_mount(
     // Reject mounting over an already-mounted target (Linux: EBUSY)
     // Must be checked after all special-case routing (MS_BIND/MS_MOVE/MS_REMOUNT/propagation)
     // so that those paths are unaffected.
-    if let Some(mnt_inode) = target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+    if let Some(mnt_inode) = target_inode
+        .as_any_ref()
+        .downcast_ref::<vfs::MountFSInode>()
+    {
         // If the target inode is itself a mount root (vfs_lookup followed an overlay),
         // this path is already a mountpoint.
         if mnt_inode.is_mountpoint_root() {
@@ -488,7 +507,10 @@ pub fn sys_mount(
     // Use mount_subtree_inner to go through the shared-parent propagation
     // path. The raw MountFS::new() + add_mount() path would bypass child
     // peer group allocation and mount event propagation.
-    let target_mfs_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+    let target_mfs_inode = match target_inode
+        .as_any_ref()
+        .downcast_ref::<vfs::MountFSInode>()
+    {
         Some(m) => m,
         None => return EINVAL,
     };
@@ -517,14 +539,13 @@ pub fn sys_mount(
                         Err(errno) => return errno,
                     };
                     // Unwrap through MountFS if the inode is a mount-point wrapper
-                    let dev_inode = match dev_inode
-                        .as_any_ref()
-                        .downcast_ref::<vfs::MountFSInode>()
+                    let dev_inode = match dev_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>()
                     {
                         Some(mfsi) => mfsi.inner_inode.clone(),
                         None => dev_inode,
                     };
-                    let bdi = match dev_inode.as_any_ref()
+                    let bdi = match dev_inode
+                        .as_any_ref()
                         .downcast_ref::<crate::fs::dev::block::BlockDevInode>()
                     {
                         Some(b) => b,
@@ -567,12 +588,16 @@ pub fn sys_mount(
 
                     // 5. Insert into mount tree
                     let root_inode = new_fs.root_inode();
-                    let mnt_flags = vfs::normalize_request(
-                        vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32),
-                    );
+                    let mnt_flags = vfs::normalize_request(vfs::MountFlags::from_bits_truncate(
+                        mountflags.bits() as u32,
+                    ));
                     let lifecycle = vfs::BackendLifecycle::new(new_fs);
                     let mnt = match target_mfs_inode.mount_subtree_inner(
-                        lifecycle, root_inode, mnt_flags, Some(lookup_path.clone()), true,
+                        lifecycle,
+                        root_inode,
+                        mnt_flags,
+                        Some(lookup_path.clone()),
+                        true,
                     ) {
                         Ok(m) => m,
                         Err(e) => return -(e as isize),
@@ -580,21 +605,22 @@ pub fn sys_mount(
                     let _ = mnt;
                     return SUCCESS;
                 }
-                "exfat" | "btrfs" | "xfs" | "ntfs" => {
-                    return -(SyscallErr::ENODEV as isize)
-                }
+                "exfat" | "btrfs" | "xfs" | "ntfs" => return -(SyscallErr::ENODEV as isize),
                 _ => return -(SyscallErr::ENODEV as isize),
             }
         }
     };
     let root_inode = new_fs.root_inode();
-    let mnt_flags = vfs::normalize_request(
-        vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32),
-    );
+    let mnt_flags =
+        vfs::normalize_request(vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32));
 
     let lifecycle = vfs::BackendLifecycle::new(new_fs);
     let mnt = match target_mfs_inode.mount_subtree_inner(
-        lifecycle, root_inode, mnt_flags, Some(lookup_path.clone()), true,
+        lifecycle,
+        root_inode,
+        mnt_flags,
+        Some(lookup_path.clone()),
+        true,
     ) {
         Ok(m) => m,
         Err(e) => return -(e as isize),
@@ -602,7 +628,9 @@ pub fn sys_mount(
 
     // Dynamic pseudo-fs need dentry cache disabled so hooks fire on every access
     match filesystemtype.as_str() {
-        "sysfs" | "proc" => mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed),
+        "sysfs" | "proc" => mnt
+            .no_dentry_cache
+            .store(true, core::sync::atomic::Ordering::Relaxed),
         _ => {}
     }
 

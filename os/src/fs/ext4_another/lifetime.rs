@@ -1,10 +1,11 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::fs::{page_cache::PageCache, vfs::InodeFlags};
+use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 use super::errno::from_another;
@@ -33,11 +34,23 @@ impl InodeKey {
 
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
+    /// Timestamp updates are published by the write path and persisted only at
+    /// a filesystem durability boundary.
+    pub(crate) cached_mtime: AtomicU64,
+    pub(crate) cached_ctime: AtomicU64,
+    pub(crate) mtime_dirty: AtomicBool,
+    pub(crate) ctime_dirty: AtomicBool,
+    timestamp_generation: AtomicUsize,
     inode_flags: Mutex<InodeFlags>,
     page_cache: Mutex<Option<Weak<PageCache>>>,
     /// Keeps dirty data reachable across independently constructed VFS inodes
     /// until the inode size and data have reached a sync boundary.
     dirty_page_cache: Mutex<Option<Arc<PageCache>>>,
+    /// Fast-path publication for repeated writes to an already retained cache.
+    dirty_cache_pinned: AtomicBool,
+    /// The generation observed after the successful release transaction reset.
+    /// A concurrent writer advances `size_generation`, preventing unpinning.
+    last_release_generation: AtomicUsize,
     reclaim: Mutex<Option<another_ext4::InodeReclaimHandle>>,
     reclaim_error: Mutex<Option<SyscallErr>>,
     pins: AtomicUsize,
@@ -46,17 +59,83 @@ pub(crate) struct InodeLifetime {
     pub(crate) size_generation: AtomicUsize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CachedTimestamps {
+    mtime: u64,
+    ctime: u64,
+    generation: usize,
+}
+
+impl CachedTimestamps {
+    pub(crate) fn mtime(self) -> TimeSpec {
+        unpack_timestamp(self.mtime)
+    }
+
+    pub(crate) fn ctime(self) -> TimeSpec {
+        unpack_timestamp(self.ctime)
+    }
+}
+
 impl InodeLifetime {
-    fn new(size: usize) -> Self {
+    fn new(size: usize, mtime: TimeSpec, ctime: TimeSpec) -> Self {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
+            cached_mtime: AtomicU64::new(pack_timestamp(mtime)),
+            cached_ctime: AtomicU64::new(pack_timestamp(ctime)),
+            mtime_dirty: AtomicBool::new(false),
+            ctime_dirty: AtomicBool::new(false),
+            timestamp_generation: AtomicUsize::new(0),
             inode_flags: Mutex::new(InodeFlags::empty()),
             page_cache: Mutex::new(None),
             dirty_page_cache: Mutex::new(None),
+            dirty_cache_pinned: AtomicBool::new(false),
+            last_release_generation: AtomicUsize::new(0),
             reclaim: Mutex::new(None),
             reclaim_error: Mutex::new(None),
             pins: AtomicUsize::new(0),
             size_generation: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn cache_modified_time(&self, time: TimeSpec) {
+        let cached = pack_timestamp(time);
+        self.cached_ctime.store(cached, Ordering::Relaxed);
+        self.cached_mtime.store(cached, Ordering::Relaxed);
+        self.timestamp_generation.fetch_add(1, Ordering::Release);
+        self.ctime_dirty.store(true, Ordering::Release);
+        self.mtime_dirty.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn cached_mtime(&self) -> Option<TimeSpec> {
+        self.mtime_dirty
+            .load(Ordering::Acquire)
+            .then(|| unpack_timestamp(self.cached_mtime.load(Ordering::Relaxed)))
+    }
+
+    pub(crate) fn cached_ctime(&self) -> Option<TimeSpec> {
+        self.ctime_dirty
+            .load(Ordering::Acquire)
+            .then(|| unpack_timestamp(self.cached_ctime.load(Ordering::Relaxed)))
+    }
+
+    pub(crate) fn dirty_timestamps(&self) -> Option<CachedTimestamps> {
+        if !self.mtime_dirty.load(Ordering::Acquire) && !self.ctime_dirty.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(CachedTimestamps {
+            mtime: self.cached_mtime.load(Ordering::Relaxed),
+            ctime: self.cached_ctime.load(Ordering::Relaxed),
+            generation: self.timestamp_generation.load(Ordering::Acquire),
+        })
+    }
+
+    /// Mark a timestamp snapshot durable only when no write superseded it.
+    pub(crate) fn finish_timestamp_commit(&self, snapshot: CachedTimestamps) {
+        self.mtime_dirty.swap(false, Ordering::AcqRel);
+        self.ctime_dirty.swap(false, Ordering::AcqRel);
+        if self.timestamp_generation.load(Ordering::Acquire) != snapshot.generation {
+            self.mtime_dirty.store(true, Ordering::Release);
+            self.ctime_dirty.store(true, Ordering::Release);
         }
     }
 
@@ -91,17 +170,27 @@ impl InodeLifetime {
     /// This closes the write → reopen window in which a new VFS inode would
     /// otherwise allocate a cache and read the old EOF from another_ext4.
     pub(crate) fn retain_dirty_page_cache(&self, cache: &Arc<PageCache>) {
+        if self.dirty_cache_pinned.load(Ordering::Acquire) {
+            return;
+        }
         let mut dirty_page_cache = self.dirty_page_cache.lock();
         if dirty_page_cache.is_none() {
             self.pin();
             *dirty_page_cache = Some(cache.clone());
+            self.dirty_cache_pinned.store(true, Ordering::Release);
         }
     }
 
     /// Release the temporary dirty-cache pin after a successful data and size
     /// sync. The weak cache reference still permits live VFS inodes to reuse it.
     pub(crate) fn release_dirty_page_cache(&self) {
-        if self.dirty_page_cache.lock().take().is_some() {
+        let mut dirty_page_cache = self.dirty_page_cache.lock();
+        let generation = self.size_generation.load(Ordering::Acquire);
+        if dirty_page_cache.is_some()
+            && generation == self.last_release_generation.load(Ordering::Relaxed)
+        {
+            *dirty_page_cache = None;
+            self.dirty_cache_pinned.store(false, Ordering::Release);
             self.unpin();
         }
     }
@@ -131,6 +220,36 @@ impl InodeLifetime {
     }
 }
 
+fn pack_timestamp(time: TimeSpec) -> u64 {
+    let seconds = match u32::try_from(time.tv_sec) {
+        Ok(seconds) => seconds,
+        Err(_) => u32::MAX,
+    };
+    let nanoseconds = match u32::try_from(time.tv_nsec) {
+        Ok(nanoseconds) => nanoseconds,
+        Err(_) => u32::MAX,
+    };
+    (u64::from(seconds) << 32) | u64::from(nanoseconds)
+}
+
+fn unpack_timestamp(timestamp: u64) -> TimeSpec {
+    let seconds = match usize::try_from(timestamp >> 32) {
+        Ok(seconds) => seconds,
+        Err(_) => usize::MAX,
+    };
+    let nanoseconds = match u32::try_from(timestamp & u64::from(u32::MAX)) {
+        Ok(nanoseconds) => nanoseconds,
+        Err(_) => u32::MAX,
+    };
+    TimeSpec {
+        tv_sec: seconds,
+        tv_nsec: match usize::try_from(nanoseconds) {
+            Ok(nanoseconds) => nanoseconds,
+            Err(_) => usize::MAX,
+        },
+    }
+}
+
 impl Ext4FileSystem {
     pub(crate) fn inode_key(&self, inode_id: u32) -> Result<InodeKey, SyscallErr> {
         let attr = self
@@ -141,11 +260,17 @@ impl Ext4FileSystem {
         Ok(InodeKey::new(self.fs_id(), inode_id, attr.generation))
     }
 
-    pub(crate) fn lifetime(&self, key: InodeKey, size: usize) -> Arc<InodeLifetime> {
+    pub(crate) fn lifetime(
+        &self,
+        key: InodeKey,
+        size: usize,
+        mtime: TimeSpec,
+        ctime: TimeSpec,
+    ) -> Arc<InodeLifetime> {
         let mut lifetimes = self.lifetimes.lock();
         let lifetime = lifetimes
             .entry(key)
-            .or_insert_with(|| Arc::new(InodeLifetime::new(size)))
+            .or_insert_with(|| Arc::new(InodeLifetime::new(size, mtime, ctime)))
             .clone();
         lifetime.pin();
         lifetime
@@ -164,7 +289,7 @@ impl Ext4FileSystem {
             .lifetimes
             .lock()
             .entry(key)
-            .or_insert_with(|| Arc::new(InodeLifetime::new(0)))
+            .or_insert_with(|| Arc::new(InodeLifetime::new(0, TimeSpec::new(), TimeSpec::new())))
             .clone();
         *lifetime.reclaim.lock() = Some(handle);
         Ok(())
@@ -177,11 +302,10 @@ impl Ext4FileSystem {
             .lifetimes
             .lock()
             .iter()
-            .map(|(key, lifetime)| {
-                (lifetime.page_cache(), *key, lifetime.clone())
-            })
+            .map(|(key, lifetime)| (lifetime.page_cache(), *key, lifetime.clone()))
             .collect();
         let mut committed_generations = Vec::new();
+        let mut committed_timestamps = Vec::new();
         let mut flush_succeeded = false;
         let result = Self::complete_lifetime_sync(
             || {
@@ -194,26 +318,28 @@ impl Ext4FileSystem {
                         .as_ref()
                         .cloned()
                         .or_else(|| lifetime.page_cache());
-                    let mut commit_size = || {
+                    let inode_id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
+                    let mut commit_inode = || {
                         let generation = lifetime.size_generation.load(Ordering::Acquire);
-                        if generation == 0 {
-                            return Ok(());
+                        if generation != 0 {
+                            let size = lifetime.logical_size.load(Ordering::Acquire);
+                            self.inner()
+                                .commit_inode_size(inode_id, size as u64, None)
+                                .map_err(|error| from_another(error.code()))?;
+                            committed_generations.push((lifetime.clone(), generation));
                         }
-                        let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
-                        let size = lifetime.logical_size.load(Ordering::Acquire);
-                        self.inner()
-                            .commit_inode_size(id, size as u64, None)
-                            .map_err(|error| from_another(error.code()))?;
-                        committed_generations.push((lifetime.clone(), generation));
+                        if let Some(timestamps) =
+                            self.commit_lifetime_timestamps(inode_id, lifetime)?
+                        {
+                            committed_timestamps.push((lifetime.clone(), timestamps));
+                        }
                         Ok(())
                     };
                     if let Some(cache) = cache {
-                        cache.with_io_gate(|| {
-                            cache.writeback_all_with_io_gate_held()?;
-                            commit_size()
-                        })?;
+                        cache.writeback_all()?;
+                        commit_inode()?;
                     } else {
-                        commit_size()?;
+                        commit_inode()?;
                     }
                 }
                 Ok(())
@@ -227,14 +353,16 @@ impl Ext4FileSystem {
         );
         if flush_succeeded {
             for (lifetime, generation) in committed_generations {
-                if lifetime.size_generation.compare_exchange(
-                    generation,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ).is_ok() {
+                if lifetime
+                    .size_generation
+                    .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     lifetime.release_dirty_page_cache();
                 }
+            }
+            for (lifetime, timestamps) in committed_timestamps {
+                lifetime.finish_timestamp_commit(timestamps);
             }
         }
         result
@@ -309,5 +437,34 @@ impl Ext4FileSystem {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InodeLifetime;
+    use crate::timer::TimeSpec;
+
+    #[test]
+    fn cached_timestamps_remain_visible_until_a_successful_flush() {
+        // Given: a clean inode lifetime and a completed write timestamp update.
+        let lifetime = InodeLifetime::new(0, TimeSpec::new(), TimeSpec::new());
+        let modified = TimeSpec {
+            tv_sec: 123,
+            tv_nsec: 456,
+        };
+        lifetime.cache_modified_time(modified);
+
+        // When: sync snapshots the timestamp update but the device flush has not completed.
+        let snapshot = lifetime
+            .dirty_timestamps()
+            .expect("a write must mark timestamps dirty");
+
+        // Then: stat-facing cache remains current until the persistence barrier succeeds.
+        assert_eq!(lifetime.cached_mtime(), Some(modified));
+        assert_eq!(lifetime.cached_ctime(), Some(modified));
+        lifetime.finish_timestamp_commit(snapshot);
+        assert_eq!(lifetime.cached_mtime(), None);
+        assert_eq!(lifetime.cached_ctime(), None);
     }
 }

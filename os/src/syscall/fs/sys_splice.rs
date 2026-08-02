@@ -110,12 +110,10 @@ pub fn sys_splice(
             let chunk = &buffer[buf_off..buf_len];
             let wrote = match off_out_val.as_mut() {
                 Some(off) => {
-                    match out_file.inode.write_at(
-                        *off,
-                        chunk.len(),
-                        chunk,
-                        out_file.private_data(),
-                    ) {
+                    match out_file
+                        .inode
+                        .write_at(*off, chunk.len(), chunk, out_file.private_data())
+                    {
                         Ok(n) => {
                             *off += n;
                             n
@@ -155,7 +153,9 @@ pub fn sys_splice(
         let remaining = len - total_sent;
         let read_limit = core::cmp::min(remaining, BUF_CAP);
 
-        unsafe { buffer.set_len(read_limit); }
+        unsafe {
+            buffer.set_len(read_limit);
+        }
 
         let n = {
             if let Some(ref off) = off_in_val {
@@ -190,7 +190,9 @@ pub fn sys_splice(
             break;
         }
 
-        unsafe { buffer.set_len(n); }
+        unsafe {
+            buffer.set_len(n);
+        }
         buf_len = n;
         buf_off = 0;
     }
@@ -337,7 +339,7 @@ fn splice_pipe_to_pipe(p1: &Pipe, p2: &Pipe, len: usize, nonblock: bool) -> isiz
                     Ok(0) => Some(0),          // EOF
                     Ok(n) => Some(n as isize), // progress
                     Err(EPIPE) => Some(EPIPE),
-                    Err(EAGAIN) => None,       // non-terminal — keep waiting
+                    Err(EAGAIN) => None, // non-terminal — keep waiting
                     Err(e) => Some(e),
                 }
             }) {

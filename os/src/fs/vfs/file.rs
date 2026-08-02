@@ -24,7 +24,9 @@ use super::event::EventWaitQueue;
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use crate::config::SYSTEM_FD_LIMIT;
 use crate::mm::UserBuffer;
-use crate::task::{current_task_ref, register_writable_inode, unregister_writable_inode, WaitQueue};
+use crate::task::{
+    current_task_ref, register_writable_inode, unregister_writable_inode, WaitQueue,
+};
 
 // ── Globally-unique open file id counter ────────────────────────────────
 
@@ -1171,9 +1173,7 @@ impl File {
         };
         self.check_memfd_write_seals(offset, len)?;
 
-        let n = self
-            .inode
-            .write_at(offset, len, buf, self.private_data.lock())?;
+        let n = self.write_with_flags(offset, buf, flags)?;
 
         if n > 0 {
             if !is_stream {
@@ -1204,9 +1204,7 @@ impl File {
             offset
         };
         self.check_memfd_write_seals(offset, buf.len())?;
-        let n = self
-            .inode
-            .write_at(offset, buf.len(), buf, self.private_data.lock())?;
+        let n = self.write_with_flags(offset, buf, flags)?;
         if n > 0 {
             self.touch_modified();
         }
@@ -1217,6 +1215,7 @@ impl File {
 
     /// 从文件当前位置读取到 UserBuffer（直连版本，省去 kbuf 中转）。
     pub fn read_user(&self, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         self.readable()?;
         let len = dst.len();
         if len == 0 {
@@ -1229,12 +1228,14 @@ impl File {
         } else {
             self.offset.load(Ordering::SeqCst)
         };
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
 
         match self.inode.read_at_user(offset, len, dst) {
             Ok(n) => {
                 if n > 0 && !is_stream {
                     self.offset.fetch_add(n, Ordering::SeqCst);
                 }
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
                 Ok(n)
             }
             Err(SyscallErr::ENOSYS) => {
@@ -1254,6 +1255,7 @@ impl File {
                         self.offset.fetch_add(n, Ordering::SeqCst);
                     }
                 }
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
                 Ok(n)
             }
             Err(e) => Err(e),
@@ -1262,6 +1264,7 @@ impl File {
 
     /// 从指定位置读取到 UserBuffer（不推进 offset）。
     pub fn pread_user(&self, offset: usize, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         if self.mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
@@ -1272,9 +1275,13 @@ impl File {
         if len == 0 {
             return Ok(0);
         }
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
 
         match self.inode.read_at_user(offset, len, dst) {
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
+                Ok(n)
+            }
             Err(SyscallErr::ENOSYS) => {
                 let mut kbuf = Vec::new();
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
@@ -1289,6 +1296,7 @@ impl File {
                 if n > 0 {
                     dst.write_at(0, &kbuf[..n]);
                 }
+                crate::task::perf::record_pread_vfs_mode(mode_end.wrapping_sub(mode_start));
                 Ok(n)
             }
             Err(e) => Err(e),
@@ -1297,6 +1305,11 @@ impl File {
 
     /// 从 UserBuffer 写入文件当前位置（直连版本，省去 kbuf 中转）。
     pub fn write_user(&self, src: &UserBuffer) -> Result<usize, SyscallErr> {
+        // Foreground split buckets inside the VFS wrapper: (c) mode/seals
+        // checks, (e) offset/timestamp finish. The PageCache foreground bucket
+        // (d) stays on the existing PC_WRITE_* counters inside the inode.
+        // perf_diag diagnostic only, mirrors pwrite_user.
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         self.writable()?;
         let flags = self.flags();
         let len = src.len();
@@ -1313,11 +1326,15 @@ impl File {
         } else {
             self.offset.load(Ordering::SeqCst)
         };
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
+        let seals_start = crate::task::perf::perf_memory_io_time_now();
         self.check_memfd_write_seals(offset, len)?;
+        let seals_end = crate::task::perf::perf_memory_io_time_now();
 
-        match self.inode.write_at_user(offset, len, src) {
+        match self.write_user_with_flags(offset, src, flags) {
             Ok(n) => {
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     if !is_stream {
                         if flags.contains(FileFlags::O_APPEND) {
                             self.offset.store(offset + n, Ordering::SeqCst);
@@ -1326,7 +1343,12 @@ impl File {
                         }
                     }
                     self.touch_modified();
+                    crate::task::perf::record_write_offset(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_write_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_write_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(SyscallErr::ENOSYS) => {
@@ -1345,6 +1367,7 @@ impl File {
                     self.private_data.lock(),
                 )?;
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     if !is_stream {
                         if flags.contains(FileFlags::O_APPEND) {
                             self.offset.store(offset + n, Ordering::SeqCst);
@@ -1353,7 +1376,12 @@ impl File {
                         }
                     }
                     self.touch_modified();
+                    crate::task::perf::record_write_offset(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_write_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_write_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(e) => Err(e),
@@ -1362,6 +1390,7 @@ impl File {
 
     /// 从 UserBuffer 写入文件指定位置（不推进 offset）。
     pub fn pwrite_user(&self, offset: usize, src: &UserBuffer) -> Result<usize, SyscallErr> {
+        let mode_start = crate::task::perf::perf_memory_io_time_now();
         if self.mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
@@ -1369,6 +1398,7 @@ impl File {
             return Err(SyscallErr::ESPIPE);
         }
         let flags = self.flags();
+        let mode_end = crate::task::perf::perf_memory_io_time_now();
         let len = src.len();
         if len == 0 {
             return Ok(0);
@@ -1380,13 +1410,21 @@ impl File {
         } else {
             offset
         };
+        let seals_start = crate::task::perf::perf_memory_io_time_now();
         self.check_memfd_write_seals(offset, len)?;
+        let seals_end = crate::task::perf::perf_memory_io_time_now();
 
-        match self.inode.write_at_user(offset, len, src) {
+        match self.write_user_with_flags(offset, src, flags) {
             Ok(n) => {
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     self.touch_modified();
+                    crate::task::perf::record_pwrite_vfs_touch(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_pwrite_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_pwrite_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(SyscallErr::ENOSYS) => {
@@ -1405,8 +1443,14 @@ impl File {
                     self.private_data.lock(),
                 )?;
                 if n > 0 {
+                    let touch_start = crate::task::perf::perf_memory_io_time_now();
                     self.touch_modified();
+                    crate::task::perf::record_pwrite_vfs_touch(
+                        crate::task::perf::perf_memory_io_time_now().wrapping_sub(touch_start),
+                    );
                 }
+                crate::task::perf::record_pwrite_vfs_mode(mode_end.wrapping_sub(mode_start));
+                crate::task::perf::record_pwrite_vfs_seals(seals_end.wrapping_sub(seals_start));
                 Ok(n)
             }
             Err(e) => Err(e),
@@ -1670,13 +1714,67 @@ impl File {
     }
 
     fn touch_modified(&self) {
-        let Ok(mut metadata) = self.inode.metadata() else {
-            return;
-        };
-        let now = crate::timer::TimeSpec::now();
-        metadata.mtime = now;
-        metadata.ctime = now;
-        let _ = self.inode.set_metadata(&metadata);
+        self.inode.touch_modified();
+    }
+
+    fn write_with_flags(
+        &self,
+        offset: usize,
+        buffer: &[u8],
+        flags: FileFlags,
+    ) -> Result<usize, SyscallErr> {
+        if flags.intersects(FileFlags::O_SYNC | FileFlags::O_DSYNC) {
+            return match self.inode.write_sync(offset, buffer) {
+                Err(SyscallErr::ENOSYS) => {
+                    let written = self.inode.write_at(
+                        offset,
+                        buffer.len(),
+                        buffer,
+                        self.private_data.lock(),
+                    )?;
+                    self.inode.sync()?;
+                    Ok(written)
+                }
+                result => result,
+            };
+        }
+        if flags.contains(FileFlags::O_DIRECT) {
+            return match self.inode.write_direct(
+                offset,
+                buffer.len(),
+                buffer,
+                self.private_data.lock(),
+            ) {
+                Err(SyscallErr::ENOSYS) => {
+                    self.inode
+                        .write_at(offset, buffer.len(), buffer, self.private_data.lock())
+                }
+                result => result,
+            };
+        }
+        self.inode
+            .write_at(offset, buffer.len(), buffer, self.private_data.lock())
+    }
+
+    fn write_user_with_flags(
+        &self,
+        offset: usize,
+        source: &UserBuffer,
+        flags: FileFlags,
+    ) -> Result<usize, SyscallErr> {
+        if !flags.intersects(FileFlags::O_SYNC | FileFlags::O_DSYNC | FileFlags::O_DIRECT) {
+            return self.inode.write_at_user(offset, source.len(), source);
+        }
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve(source.len())
+            .map_err(|_| SyscallErr::ENOMEM)?;
+        // Safety: the successful reservation guarantees capacity for the source.
+        unsafe {
+            buffer.set_len(source.len());
+        }
+        let copied = source.read_at(0, &mut buffer);
+        self.write_with_flags(offset, &buffer[..copied], flags)
     }
 
     pub fn offset(&self) -> usize {

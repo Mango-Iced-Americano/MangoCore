@@ -85,20 +85,13 @@ fn fill_dirty_pages(cache: &Arc<PageCache>) -> Result<(), &'static str> {
 }
 
 fn entry(cache: &PageCache, index: usize) -> Result<Arc<PageEntry>, &'static str> {
-    let entries = cache.entries.lock();
-    entries
-        .get(index)
-        .and_then(|entry| entry.as_ref().cloned())
-        .ok_or("PageCache entry missing")
+    cache.entries.get(index).ok_or("PageCache entry missing")
 }
 
 fn claim_without_clearing_dirty(cache: &PageCache, index: usize) -> Result<(), &'static str> {
     let entry = entry(cache, index)?;
-    {
-        let _entries = cache.entries.lock();
-        entry
-            .compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8)
-            .map_err(|_| "PageCache competing claim did not acquire Dirty page")?;
+    if !entry.claim_writeback() {
+        return Err("PageCache competing claim did not acquire Dirty page");
     }
     GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
     GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -107,12 +100,9 @@ fn claim_without_clearing_dirty(cache: &PageCache, index: usize) -> Result<(), &
 
 fn complete_competing_claim(cache: &PageCache, index: usize) -> Result<(), &'static str> {
     let entry = entry(cache, index)?;
-    {
-        let _entries = cache.entries.lock();
-        entry.set_state(PageState::UpToDate);
-    }
+    entry.complete_writeback();
     GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-    cache.inner.lock().clear_dirty(index);
+    cache.mark_page_writeback(index);
     Ok(())
 }
 
@@ -121,13 +111,9 @@ fn restore_claim(cache: &PageCache, index: usize) -> Result<(), &'static str> {
     if entry.state() != PageState::Writeback {
         return Ok(());
     }
-    {
-        let _entries = cache.entries.lock();
-        entry.set_state(PageState::Dirty);
-    }
+    entry.restore_dirty_after_writeback();
     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
     GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-    cache.inner.lock().mark_dirty(index);
     Ok(())
 }
 

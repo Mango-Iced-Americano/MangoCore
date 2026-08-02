@@ -114,6 +114,43 @@
 
 ## 性能问题
 
+### 新增诊断计数器必须进入 reset 窗口
+
+- **现象**：相邻诊断组的同一计数器看似精确翻倍，但其调用计数已被正确清零，导致按当前组调用次数计算的平均值失真。
+- **根因**：新增 `AtomicUsize` 只接入 recorder 与 sysfs 导出，遗漏 `perf::reset_all_counters()`，所以 initproc 的每组 reset 不会清空该原子值。
+- **修复**：同一个改动中同时完成“声明 → recorder/no-op → sysfs 导出 → reset”；用连续两个诊断窗口确认第二个窗口不含第一个窗口的累计值。
+- **相关文件**：`os/src/task/perf.rs`、`os/src/fs/sysfs/files/diag.rs`
+
+### deferred journal 被 direct metadata barrier 提前提交
+
+- **根因**：另一个 ext4 的普通数据回写若进入 `lock_direct_metadata_mutation()`，该 guard 为了让 direct writer 看到稳定元数据会先 `flush_deferred_journal()`。小 append 或已映射覆盖若落入该路径，会把原本可合并的 deferred JBD2 transaction 在每个 writeback run 提前提交。
+- **修复**：将单页 append 也纳入 journal append path；对所有块已映射的覆盖写，在 transactional/inode mutation guards 持有期间写数据块，并复用已映射数据写核心，不进入 direct metadata domain。保留 hole/allocation 路径的 direct barrier，以及 fsync/sync 时的明确 journal commit。
+- **教训**：优化 deferred transaction 时不要只检查 `defer_or_commit()` 阈值；还要沿所有 fallback/数据写路径检查是否跨入会强制 flush 的一致性域。数据块在 metadata 提交前必须已完成写入，且 fsync 仍必须显式提交 deferred journal。
+- **相关文件**：`dependency/another_ext4/src/ext4/{low_level,data_write,mod}.rs`
+
+### 空 deferred batch 会伪造 DirectMetadataBarrier journal commit
+
+- **根因**：`Transaction::defer_or_commit()` 若没有任何 staged home image，仍会留下一个空 `deferred_transaction`。后续 direct metadata guard 只按 `Some` 判断 pending，于是对零 image 执行完整的四阶段 JBD2 commit。
+- **修复**：总 staged image 数为零时直接释放 writer token，不保存 deferred batch；只有非空 batch 才允许 size/timestamp inode image 通过 transactional path 合并。无 pending 的 metadata 保持既有 direct path。
+- **验证**：用诊断按 `JournalCommitReason` 和 phase 计数确认 `DirectMetadataBarrier` transaction 归零、每个保留 transaction 仍恰有四个 phase；结合 data-before-metadata 单元测试与 fsync/sync QEMU 回归。
+- **相关文件**：`dependency/another_ext4/src/ext4/{journal_transaction,journal,low_level}.rs`
+
+### journal flush 数必须按 commit reason 与 flush phase 分离
+
+- **现象**：随机写诊断看到大量 device flush，若只统计总数会误判为同数量的 journal commit，进而把 cleanup 或 durability I/O 错归因给 PageCache writeback。
+- **根因**：一个 `commit_journal` 包含 ActiveLog、CommitRecord、Checkpoint、TailUpdate 四个设备 flush；此外 direct metadata、`fsync`/`sync` 等一致性边界可独立执行 device flush。旧的混合计时无法区分它们。
+- **修复**：诊断插桩同时记录 transaction id/reason、四个 phase 和独立 boundary flush；报告先验证 `journal_flush_count = transaction_count × 4`，再将余数归为明确的 boundary flush。`staged_blocks=0` 只表示 deferred journal staging，不能用于否定周边 direct metadata I/O。
+- **教训**：聚合优化只能减少可合并 transaction 的数量，不能删除四阶段的 journal 顺序或绕过 `fsync`/`sync` durability boundary。先按 reason 切分写回 commit 与 cleanup commit，再决定优化范围。
+- **相关文件**：`dependency/another_ext4/src/ext4/{journal_transaction,journal,mod,low_level}.rs`、`os/src/{task/perf.rs,fs/ext4_another/blockdev.rs,fs/sysfs/files/diag.rs}`
+
+### write syscall 前台成本要按 syscall→uaccess→VFS→PageCache 边界拆分，不能只拆 PageCache
+
+- **现象**：随机 writers 的 `write(2)` 总 ticks 中 PageCache 前台只占 ~24%，剩下 ~76% 在 PageCache 之外；若继续微调 lookup/lease/copy/commit，收益 <1%。
+- **根因**：`write` 与 `pwrite` 走不同 syscall 包装，但 `write_from_user`（非定位写）原先没有任何边界计时——只有 `pwrite_from_user`/`pwrite_user` 有 `PWRITE_*` 计数器，且 `mutations.rs` 的 `write_at_user` setup/post 是无条件记录的（两种路径都计）。误以为写路径已被 PWRITE_* 覆盖是常见陷阱。
+- **修复**：给 `write` 路径镜像一套 `WRITE_*` 边界计数器（fd prep、uaccess、VFS mode/seals、offset/touch 收尾），PageCache 前台继续用既有 `pc_write_cycles`；在 `sys_write` 分发前记 fd/fsize 准备，在 `write_from_user` 内把 UserBufferReader 构造与 `file.write_user` 分开计时，`File::write_user` 内镜像 `pwrite_user` 的 mode/seals/offset 三段。用 `write_total_count == pc_write_calls == write(2) count` 做路径覆盖自检，并确认 pwrite 窗口的 `WRITE_*` 全零（两条路径不串扰）。
+- **教训**：有界拆分一轮后若没有任何子桶稳定达到总成本 ~25%（本案例最大两个为 PageCache ~21–22% 和通用 syscall 残留 ~23%），即按止损门槛停止该方向深挖，转向差距更大的基准（lat-pagefault ~25x 对 random-writers ~3x）。新增计数器必须同步声明 → recorder/no-op stub → sysfs 导出 → reset 四件套，且要用 `pc_read_user_calls` 类已覆盖路径的比值验证 workload 真的命中目标代码段。
+- **相关文件**：`os/src/{task/perf.rs,syscall/fs/sys_write.rs,syscall/fs/common.rs,fs/vfs/file.rs,fs/sysfs/files/diag.rs}`
+
 ### la64 大量 page fault 慢
 - 检查陷阱入口是否有不必要的 `invtlb`
 - 检查页帧清零是否用了高效的 64-bit store 而非 byte-wise
@@ -593,3 +630,13 @@
 - **修复**: 模块级 `static REPORTED_UNSUPPORTED: spin::Mutex<alloc::collections::BTreeSet<usize>> = Mutex::new(BTreeSet::new());`，在 catch-all 中 `if REPORTED_UNSUPPORTED.lock().insert(syscall_id) { /* 打印一次 */ }`。`BTreeSet::insert` 返回 `true` 表示此前不存在（首次），重复时返回 `false` 静默跳过；始终返回 `ENOSYS`。
 - **教训**: no_std 内核里 `spin::Mutex::new` 与 `BTreeSet::new` 都是 const fn，可直接用于 `static` 初始化（无需 lazy_static），已有先例 `os/src/mm/heap_trace.rs`、`os/src/trace.rs`。该模式可复用于任何"每 id/键只报一次"的噪音日志限流，避免在实板上对高频路径无条件打印。
 - **相关文件**: `os/src/syscall/mod.rs`
+
+## 性能计时单位
+
+### `rdcycle` 不能用 timer frequency 换算为微秒
+
+- **现象**: `/sys/kernel/stats` 导出 `clock_freq_hz` 并把 `rdcycle` 累计值当作 tick 除以该频率，得到的 handler 平均耗时会比同一 workload 的 lmbench wall time 大一个数量级，或与真实时间完全矛盾。
+- **根因**: RV64 的 `cycle` CSR 是 CPU cycle 计数，不保证与 OpenSBI/QEMU 的 timer timebase 同频；而 `clock_freq_hz` 描述的是 `time` CSR / 内核 timer 的频率。两种计数域不能直接相除。
+- **修复**: 对外暴露且需要以 `clock_freq_hz` 换算的诊断计时，统一从 `timer::raw_ticks()`（RV64 `time` CSR）取样；保留 `rdcycle` 的计数器必须单独标注为 CPU cycle，不能混用单位。
+- **教训**: 首次分析任何 tick 指标前，先用独立 wall-time benchmark 做量纲 sanity check。若 `ticks / clock_freq_hz` 与 workload wall time 矛盾，先验证时钟源，再讨论热点占比；否则所有 µs、百分比和优化优先级都不可信。
+- **相关文件**: `os/src/task/perf.rs`, `os/src/timer.rs`, `os/src/hal/arch/riscv/time.rs`

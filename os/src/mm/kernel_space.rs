@@ -276,11 +276,7 @@ impl<T: PageTable> KernelSpace<T> {
             if kernel_start <= base && end <= kernel_end {
                 continue;
             }
-            kernel_identical_map!(
-                base,
-                end,
-                MapPermission::R | MapPermission::G
-            );
+            kernel_identical_map!(base, end, MapPermission::R | MapPermission::G);
         }
         kernel_space
     }

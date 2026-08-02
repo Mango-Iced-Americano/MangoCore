@@ -801,11 +801,9 @@ pub fn do_signal() -> &'static TaskControlBlock {
                             }
                         }
 
-                        if UserPtrMut::from_addr(
-                            ucontext_addr + UserContext::MCONTEXT_OFFSET,
-                        )
-                        .write(token, &mcontext) // push MachineContext into user stack
-                        .is_err()
+                        if UserPtrMut::from_addr(ucontext_addr + UserContext::MCONTEXT_OFFSET)
+                            .write(token, &mcontext) // push MachineContext into user stack
+                            .is_err()
                         {
                             error!(
                             "[do_signal] Failed to write MachineContext to user stack. Send SIGSEGV."

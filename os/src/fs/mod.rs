@@ -47,6 +47,7 @@ pub use crate::drivers::block::BlockDevice;
 
 use self::vfs::FileSystem as _;
 use self::vfs::IndexNode;
+use crate::bootargs::BootConfig;
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
 pub use dirent::Dirent;
@@ -186,34 +187,64 @@ fn prepare_common_filesystem_state(mfs: &Arc<self::vfs::MountFS>) {
 fn register_common_device_nodes() {
     let devfs = crate::fs::dev::DEV_FS.clone();
     devfs
-        .add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "tty",
+            crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/tty");
     devfs
-        .add_dev("null", Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "null",
+            Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/null");
     devfs
-        .add_dev("zero", Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "zero",
+            Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/zero");
     devfs
-        .add_dev("urandom", Arc::new(crate::fs::dev::urandom::URANDOM) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "urandom",
+            Arc::new(crate::fs::dev::urandom::URANDOM) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/urandom");
     devfs
-        .add_dev("full", Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "full",
+            Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/full");
     devfs
-        .add_dev("random", Arc::new(crate::fs::dev::urandom::RANDOM) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "random",
+            Arc::new(crate::fs::dev::urandom::RANDOM) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/random");
     devfs
-        .add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "console",
+            crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/console");
     devfs
-        .add_dev("ptmx", Arc::new(crate::fs::dev::pty::PtmxMasterInode) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "ptmx",
+            Arc::new(crate::fs::dev::pty::PtmxMasterInode) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/ptmx");
     devfs
-        .add_dev("pts", Arc::new(crate::fs::dev::pty::PtsDirInode) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "pts",
+            Arc::new(crate::fs::dev::pty::PtsDirInode) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/pts");
     devfs
-        .add_dev("rtc", Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "rtc",
+            Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/rtc");
     devfs
         .add_dev(
@@ -228,7 +259,10 @@ fn register_common_device_nodes() {
         .add_dir("misc", self::vfs::InodeMode::from_bits_truncate(0o755))
         .expect("devfs: failed to register /dev/misc");
     misc_dir
-        .add_dev("rtc", Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+        .add_dev(
+            "rtc",
+            Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>,
+        )
         .expect("devfs: failed to register /dev/misc/rtc");
 }
 

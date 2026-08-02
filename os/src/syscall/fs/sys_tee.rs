@@ -92,9 +92,7 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: u32) -> isize {
                     if n == 0 {
                         return 0;
                     }
-                    return tee_write_out(
-                        &out_file, &mut kbuf[..n], nonblock,
-                    );
+                    return tee_write_out(&out_file, &mut kbuf[..n], nonblock);
                 }
                 WaitResult::Interrupted => return -(SyscallErr::ERESTART as isize),
                 WaitResult::TimedOut => return -(SyscallErr::EAGAIN as isize),
@@ -109,11 +107,7 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: u32) -> isize {
 
 /// Write kernel buffer to destination pipe.  Handles blocking/nonblocking
 /// and ERESTART conversion.
-fn tee_write_out(
-    out_file: &crate::fs::vfs::File,
-    data: &mut [u8],
-    nonblock: bool,
-) -> isize {
+fn tee_write_out(out_file: &crate::fs::vfs::File, data: &mut [u8], nonblock: bool) -> isize {
     let mut try_write = || -> Result<usize, SyscallErr> { out_file.write(data) };
     if nonblock {
         return match try_write() {
@@ -123,17 +117,15 @@ fn tee_write_out(
     }
     if let Some(wq) = out_file.inode.write_wait_queue() {
         let mut found: Option<isize> = None;
-        let wait_ret = WaitQueue::wait_until_interruptible(wq, || {
-            match try_write() {
-                Ok(n) => {
-                    found = Some(n as isize);
-                    Some(0)
-                }
-                Err(SyscallErr::EAGAIN) => None,
-                Err(e) => {
-                    found = Some(-(e as isize));
-                    Some(0)
-                }
+        let wait_ret = WaitQueue::wait_until_interruptible(wq, || match try_write() {
+            Ok(n) => {
+                found = Some(n as isize);
+                Some(0)
+            }
+            Err(SyscallErr::EAGAIN) => None,
+            Err(e) => {
+                found = Some(-(e as isize));
+                Some(0)
             }
         });
         match wait_ret {

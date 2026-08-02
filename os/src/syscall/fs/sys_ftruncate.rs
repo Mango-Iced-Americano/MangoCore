@@ -18,7 +18,10 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         if file.is_dir() {
             return EISDIR;
         }
-        if matches!(file.file_type(), vfs::FileType::Pipe | vfs::FileType::Socket) {
+        if matches!(
+            file.file_type(),
+            vfs::FileType::Pipe | vfs::FileType::Socket
+        ) {
             return EINVAL;
         }
         if !file.flags().is_writable() {

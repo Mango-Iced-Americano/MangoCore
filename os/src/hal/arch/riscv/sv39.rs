@@ -37,6 +37,7 @@ pub fn tlb_invalidate() {
 #[inline(always)]
 pub fn tlb_invalidate_addr(vaddr: usize) {
     let start = crate::task::perf::perf_time_now();
+    let pagefault_start = crate::task::perf::perf_memory_io_time_now();
     // Safety: the instruction only uses `vaddr` as the architectural fence
     // operand; it does not dereference the address.
     unsafe {
@@ -45,6 +46,10 @@ pub fn tlb_invalidate_addr(vaddr: usize) {
     let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
     crate::task::perf::record_tlb_page_flush_cycles(elapsed);
     crate::task::perf::record_tlb_page();
+    crate::task::perf::record_pagefault_stage(
+        5,
+        crate::task::perf::perf_memory_io_time_now().wrapping_sub(pagefault_start),
+    );
 }
 bitflags! {
     /// Page Table Entry flags

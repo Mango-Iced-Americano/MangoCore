@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::{any::Any, convert::TryFrom, fmt, sync::atomic::Ordering};
-use spin::{Mutex, MutexGuard};
+use spin::{Mutex, MutexGuard, Once};
 
 use crate::fs::{
     page_cache::PageCache,
@@ -26,7 +26,9 @@ pub(crate) struct Ext4Inode {
     file_type: FileType,
     self_ref: Mutex<Weak<Ext4Inode>>,
     lifetime: Arc<InodeLifetime>,
-    page_cache: Mutex<Option<Arc<PageCache>>>,
+    /// Retains the cache for this inode wrapper. `Once` drops its `Arc` when
+    /// the inode is dropped, while its completed fast path is lock-free.
+    page_cache: Once<Result<Arc<PageCache>, SyscallErr>>,
 }
 
 /// Filesystem ownership for an inode.
@@ -85,14 +87,16 @@ impl Ext4Inode {
         let file_type = map_file_type(attr.ftype);
         let size = usize::try_from(attr.size).map_err(|_| SyscallErr::EFBIG)?;
         let key = InodeKey::new(fs.fs_id(), inode_id, attr.generation);
-        let lifetime = fs.lifetime(key, size);
+        let mtime = TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?);
+        let ctime = TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?);
+        let lifetime = fs.lifetime(key, size, mtime, ctime);
         Ok(Arc::new_cyclic(|self_ref| Self {
             owner,
             key,
             file_type,
             self_ref: Mutex::new(self_ref.clone()),
             lifetime,
-            page_cache: Mutex::new(None),
+            page_cache: Once::new(),
         }))
     }
 
@@ -114,28 +118,27 @@ impl Ext4Inode {
             .ok_or(SyscallErr::EIO)
     }
 
-    fn regular_page_cache(&self, fs: &Arc<Ext4FileSystem>) -> Arc<PageCache> {
-        if let Some(cache) = self.page_cache.lock().clone() {
-            return cache;
+    fn regular_page_cache(&self) -> Result<&Arc<PageCache>, SyscallErr> {
+        match self.page_cache.call_once(|| {
+            if let Some(cache) = self.lifetime.page_cache() {
+                return Ok(cache);
+            }
+            let fs = self.fs_arc()?;
+            let cache = PageCache::new();
+            cache.set_backend(Arc::new(AnotherExt4PageCacheBackend::new(
+                fs,
+                self.key,
+                self.lifetime.clone(),
+            )));
+            Ok(self.lifetime.install_page_cache(cache))
+        }) {
+            Ok(cache) => Ok(cache),
+            Err(error) => Err(*error),
         }
-        if let Some(cache) = self.lifetime.page_cache() {
-            let mut page_cache = self.page_cache.lock();
-            return page_cache.get_or_insert(cache).clone();
-        }
-        let cache = PageCache::new();
-        cache.set_backend(Arc::new(AnotherExt4PageCacheBackend::new(
-            fs.clone(),
-            self.key,
-            self.lifetime.clone(),
-        )));
-        let cache = self.lifetime.install_page_cache(cache);
-        let mut page_cache = self.page_cache.lock();
-        page_cache.get_or_insert(cache).clone()
     }
 
     fn read_regular(
         &self,
-        fs: &Arc<Ext4FileSystem>,
         offset: usize,
         len: usize,
         buffer: &mut [u8],
@@ -145,7 +148,7 @@ impl Ext4Inode {
         if actual == 0 {
             return Ok(0);
         }
-        self.regular_page_cache(fs)
+        self.regular_page_cache()?
             .read(offset, &mut buffer[..actual])
             .map_err(|_| SyscallErr::EIO)
     }
@@ -160,10 +163,10 @@ impl IndexNode for Ext4Inode {
         data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
         drop(data);
-        let fs = self.fs_arc()?;
         match self.file_type {
-            FileType::File => self.read_regular(&fs, offset, len, buffer),
+            FileType::File => self.read_regular(offset, len, buffer),
             FileType::SymLink => {
+                let fs = self.fs_arc()?;
                 let actual = len.min(buffer.len());
                 fs.inner()
                     .readlink(
@@ -173,6 +176,54 @@ impl IndexNode for Ext4Inode {
                     )
                     .map_err(|error| from_another(error.code()))
             }
+            FileType::Dir => Err(SyscallErr::EISDIR),
+            FileType::CharDevice
+            | FileType::BlockDevice
+            | FileType::Socket
+            | FileType::Pipe
+            | FileType::FramebufferDevice
+            | FileType::KvmDevice => Err(SyscallErr::EINVAL),
+        }
+    }
+
+    fn read_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        match self.file_type {
+            FileType::File => {
+                let logical_size_start = crate::task::perf::perf_memory_io_time_now();
+                let logical_size = self.lifetime.logical_size.load(Ordering::Acquire);
+                let actual = len.min(dst.len()).min(logical_size.saturating_sub(offset));
+                if actual == 0 {
+                    return Ok(0);
+                }
+                let logical_size_end = crate::task::perf::perf_memory_io_time_now();
+                let page_cache_start = logical_size_end;
+                let end = offset.checked_add(actual).ok_or(SyscallErr::EFBIG)?;
+                if offset >> crate::config::PAGE_SIZE_BITS
+                    != (end - 1) >> crate::config::PAGE_SIZE_BITS
+                {
+                    return Err(SyscallErr::ENOSYS);
+                }
+                let page_cache = self.regular_page_cache()?;
+                let page_cache_end = crate::task::perf::perf_memory_io_time_now();
+                let result = page_cache
+                    .read_user(offset, actual, dst)
+                    .map_err(|_| SyscallErr::EIO);
+                if result.is_ok() {
+                    crate::task::perf::record_pread_ext4_logical_size(
+                        logical_size_end.wrapping_sub(logical_size_start),
+                    );
+                    crate::task::perf::record_pread_ext4_page_cache(
+                        page_cache_end.wrapping_sub(page_cache_start),
+                    );
+                }
+                result
+            }
+            FileType::SymLink => Err(SyscallErr::ENOSYS),
             FileType::Dir => Err(SyscallErr::EISDIR),
             FileType::CharDevice
             | FileType::BlockDevice
@@ -194,10 +245,9 @@ impl IndexNode for Ext4Inode {
         _data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         match file_type {
-            FileType::Pipe
-            | FileType::CharDevice
-            | FileType::BlockDevice
-            | FileType::Socket => self.mknod(name, mode, _data as u64),
+            FileType::Pipe | FileType::CharDevice | FileType::BlockDevice | FileType::Socket => {
+                self.mknod(name, mode, _data as u64)
+            }
             _ => self.create(name, file_type, mode),
         }
     }
@@ -216,7 +266,7 @@ impl IndexNode for Ext4Inode {
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
         drop(_data);
-        self.sync()
+        Ok(())
     }
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
@@ -287,8 +337,18 @@ impl IndexNode for Ext4Inode {
             blk_size: another_ext4::BLOCK_SIZE,
             blocks: usize::try_from(attr.blocks).map_err(|_| SyscallErr::EFBIG)?,
             atime: TimeSpec::from_s(usize::try_from(attr.atime).map_err(|_| SyscallErr::EFBIG)?),
-            mtime: TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?),
-            ctime: TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?),
+            mtime: match self.lifetime.cached_mtime() {
+                Some(mtime) => mtime,
+                None => {
+                    TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?)
+                }
+            },
+            ctime: match self.lifetime.cached_ctime() {
+                Some(ctime) => ctime,
+                None => {
+                    TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?)
+                }
+            },
             file_type,
             mode: InodeMode::from(file_type) | permissions,
             flags: self.lifetime.inode_flags(),
@@ -327,6 +387,10 @@ impl IndexNode for Ext4Inode {
             .map_err(|error| from_another(error.code()))
     }
 
+    fn touch_modified(&self) {
+        self.lifetime.cache_modified_time(TimeSpec::now());
+    }
+
     fn fs(&self) -> Arc<dyn FileSystem> {
         match self.fs_arc() {
             Ok(fs) => fs,
@@ -335,14 +399,21 @@ impl IndexNode for Ext4Inode {
     }
 
     fn page_cache(&self) -> Option<Arc<PageCache>> {
-        self.lifetime.page_cache()
+        self.page_cache
+            .get()
+            .and_then(|cache| cache.as_ref().ok().cloned())
+            .or_else(|| self.lifetime.page_cache())
     }
 
     fn ensure_page_cache(&self) -> Option<Arc<PageCache>> {
         if self.file_type != FileType::File {
             return None;
         }
-        self.fs_arc().ok().map(|fs| self.regular_page_cache(&fs))
+        self.regular_page_cache().ok().cloned()
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        self.file_type == FileType::File
     }
 
     fn as_any_ref(&self) -> &dyn Any {

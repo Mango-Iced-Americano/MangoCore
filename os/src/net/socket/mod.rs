@@ -1051,7 +1051,9 @@ pub fn wake_udp_waiters() {
     for socket in &sockets {
         socket.wake_send_if_ready();
     }
-    UDP_SOCKETS.lock().retain(|socket| socket.strong_count() > 0);
+    UDP_SOCKETS
+        .lock()
+        .retain(|socket| socket.strong_count() > 0);
 }
 
 /// Unconditional listener-only accept scan. Called after every poll cycle,
@@ -1104,18 +1106,12 @@ pub fn wake_raw_waiters() {
         // query the socket and cover every handler rather than only lo.
         if socket.recv_ready() {
             if let Some(wq) = socket.recv_event_queue() {
-                wq.notify_events_at_most(
-                    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
-                    1,
-                );
+                wq.notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
             }
         }
         if socket.send_ready() {
             if let Some(wq) = socket.send_event_queue() {
-                wq.notify_events_at_most(
-                    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
-                    1,
-                );
+                wq.notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
             }
         }
     }

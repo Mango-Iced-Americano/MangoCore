@@ -97,8 +97,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MANGO_CMDLINE");
 
     // Forward the command line to rustc so option_env! picks it up
-    let cmdline = std::env::var("MANGO_CMDLINE")
-        .unwrap_or_else(|_| String::from("mango.mode=normal"));
+    let cmdline =
+        std::env::var("MANGO_CMDLINE").unwrap_or_else(|_| String::from("mango.mode=normal"));
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
         .expect("Cargo must provide the target architecture to the build script");

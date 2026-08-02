@@ -557,7 +557,11 @@ impl Ext4FileSystem {
             let blocks = self.balloc_alloc_contiguous_blocks(inode_ref, goal, run_len);
             if blocks.is_empty() {
                 let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
-                crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
+                crate::task::perf::record_ext4_alloc_ensure(
+                    total_lblocks,
+                    total_new_blocks,
+                    elapsed,
+                );
                 return Err(Errno::ENOSPC as isize);
             }
 
@@ -1763,12 +1767,17 @@ impl IndexNode for layout::Ext4OSInode {
             }
             // Safety: target is a non-empty directory → ENOTEMPTY
             if target_is_dir {
-                let entries = self.ext4fs.dir_get_entries(old_target_num)
+                let entries = self
+                    .ext4fs
+                    .dir_get_entries(old_target_num)
                     .map_err(|_| SyscallErr::EIO)?;
-                let non_dot = entries.iter().filter(|e| {
-                    let n = e.get_name();
-                    n != "." && n != ".."
-                }).count();
+                let non_dot = entries
+                    .iter()
+                    .filter(|e| {
+                        let n = e.get_name();
+                        n != "." && n != ".."
+                    })
+                    .count();
                 if non_dot > 0 {
                     return Err(SyscallErr::ENOTEMPTY);
                 }
@@ -1808,7 +1817,11 @@ impl IndexNode for layout::Ext4OSInode {
                     return Err(SyscallErr::EINVAL);
                 }
                 let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-                if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
+                if self
+                    .ext4fs
+                    .dir_find_entry(cur, "..", &mut dotdot_result)
+                    .is_err()
+                {
                     break;
                 }
                 let parent_ino = dotdot_result.dentry.inode;
@@ -3533,7 +3546,7 @@ impl NewFileSystem for Ext4FileSystem {
     }
 
     fn on_umount(&self) -> Result<(), SyscallErr> {
-        crate::fs::page_cache::flush_all_page_caches();
+        crate::fs::page_cache::flush_all_page_caches()?;
         self.flush_metadata_cache();
         // Evict stale dentry/Weak caches to release table entries, name strings,
         // and stale Weak allocations. children are Weak — clearing them does NOT

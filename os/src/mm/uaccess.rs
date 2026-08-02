@@ -359,6 +359,89 @@ impl UserBufferWriter {
         Ok(Self { buffer })
     }
 
+    /// Build the writable prefix of a user range with one address-space lock.
+    ///
+    /// Already writable pages are collected without faulting.  At the first
+    /// unavailable page, an empty prefix may fault it in; a nonempty prefix is
+    /// returned immediately so callers can complete a POSIX partial read
+    /// before retrying the next chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns a negative errno when the first requested page cannot become a
+    /// writable user mapping.
+    pub fn new_writable_prefix(
+        token: usize,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<(Self, usize), isize> {
+        if len == 0 {
+            return Ok((
+                Self {
+                    buffer: UserBuffer::new(Vec::new()),
+                },
+                0,
+            ));
+        }
+        if len > MAX_BUFFER_SIZE {
+            log::warn!("[kernel] UserBufferWriter::new_writable_prefix: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        if ptr.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+
+        if let Some(slice) =
+            translate_single_page_user_bytes(token, ptr as *const u8, len, UserAccess::Write)?
+        {
+            return Ok((
+                Self {
+                    buffer: UserBuffer::single(slice),
+                },
+                len,
+            ));
+        }
+
+        let start = ptr as usize;
+        let end = check_user_range(start, len)?;
+        let vm = current_user_vm(token)?;
+        let (buffers, accessible) = {
+            let mut vm = vm.lock();
+            let mut buffers = Vec::with_capacity(32);
+            let mut current = start;
+
+            while current < end {
+                let va = VirtAddr::from(current);
+                let pa = match vm.mapped_user_va(va, UserAccess::Write)? {
+                    Some(pa) => pa,
+                    None if !buffers.is_empty() => break,
+                    None => vm.fault_in_user_va(va, FaultAccess::Store)?,
+                };
+                let page_end = va
+                    .floor()
+                    .start_addr()
+                    .0
+                    .checked_add(crate::config::PAGE_SIZE)
+                    .ok_or(crate::syscall::errno::EFAULT)?
+                    .min(end);
+                let page_offset = va.page_offset();
+                let page_len = page_end - current;
+                let ppn = pa.floor();
+                buffers.push(&mut ppn.get_bytes_array()[page_offset..page_offset + page_len]);
+                current = page_end;
+            }
+
+            (buffers, current - start)
+        };
+
+        Ok((
+            Self {
+                buffer: UserBuffer::new(buffers),
+            },
+            accessible,
+        ))
+    }
+
     pub fn into_user_buffer(self) -> UserBuffer {
         self.buffer
     }
@@ -863,6 +946,16 @@ pub struct UserBuffer {
     pub len: usize,
 }
 
+/// Stateful writer for consecutively produced UserBuffer chunks.
+///
+/// PageCache reads yield pages in logical order, so this cursor retains the
+/// current segment and offset instead of restarting a segment scan per page.
+pub struct UserBufferWriteCursor<'a> {
+    buffer: &'a mut UserBuffer,
+    segment_index: usize,
+    segment_offset: usize,
+}
+
 impl UserBuffer {
     pub fn new(buffers: Vec<&'static mut [u8]>) -> Self {
         let len = buffers.iter().map(|buffer| buffer.len()).sum();
@@ -895,6 +988,15 @@ impl UserBuffer {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Returns a writer positioned at the beginning of this buffer.
+    pub fn write_cursor(&mut self) -> UserBufferWriteCursor<'_> {
+        UserBufferWriteCursor {
+            buffer: self,
+            segment_index: 0,
+            segment_offset: 0,
+        }
     }
 
     pub fn read(&self, dst: &mut [u8]) -> usize {
@@ -1121,6 +1223,50 @@ impl UserBuffer {
                 filled
             }
         }
+    }
+}
+
+impl<'a> UserBufferWriteCursor<'a> {
+    /// Copies a consecutively produced source chunk into the next buffer range.
+    pub fn write_from(&mut self, src: &[u8]) -> usize {
+        let mut segment_index = self.segment_index;
+        let mut segment_offset = self.segment_offset;
+        let mut written = 0usize;
+
+        match &mut self.buffer.segments {
+            UserBufferSegments::Empty => {}
+            UserBufferSegments::Single(buffer) => {
+                let copied = buffer.len().saturating_sub(segment_offset).min(src.len());
+                buffer[segment_offset..segment_offset + copied].copy_from_slice(&src[..copied]);
+                segment_offset += copied;
+                written = copied;
+            }
+            UserBufferSegments::Multi(buffers) => {
+                while segment_index < buffers.len() && written < src.len() {
+                    let buffer = &mut buffers[segment_index];
+                    if segment_offset == buffer.len() {
+                        segment_index += 1;
+                        segment_offset = 0;
+                        continue;
+                    }
+
+                    let copied = (buffer.len() - segment_offset).min(src.len() - written);
+                    buffer[segment_offset..segment_offset + copied]
+                        .copy_from_slice(&src[written..written + copied]);
+                    written += copied;
+                    segment_offset += copied;
+
+                    if segment_offset == buffer.len() {
+                        segment_index += 1;
+                        segment_offset = 0;
+                    }
+                }
+            }
+        }
+
+        self.segment_index = segment_index;
+        self.segment_offset = segment_offset;
+        written
     }
 }
 

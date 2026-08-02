@@ -84,8 +84,9 @@ pub(super) fn handle_page_fault<T: PageTable>(
     area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
+    classify_start: usize,
 ) -> Result<PhysAddr, MemoryError> {
-    PageFaultHandler::handle(area, page_table, ctx)
+    PageFaultHandler::handle(area, page_table, ctx, classify_start)
 }
 
 impl PageFaultHandler {
@@ -93,10 +94,15 @@ impl PageFaultHandler {
         area: &mut Vma,
         page_table: &mut T,
         ctx: FaultContext,
+        classify_start: usize,
     ) -> Result<PhysAddr, MemoryError> {
         check_area_permission(area, ctx)?;
 
         let action = Self::classify(area, page_table, ctx)?;
+        crate::task::perf::record_pagefault_stage(
+            1,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(classify_start),
+        );
         let action_tag = match action {
             FaultAction::LazyAlloc => 0usize,
             FaultAction::FileBackedRead => 1,
@@ -106,7 +112,7 @@ impl PageFaultHandler {
             FaultAction::Cow => 5,
             _ => 6,
         };
-        let _pf_start = crate::task::perf::perf_time_now();
+        let _pf_start = crate::task::perf::perf_memory_io_time_now();
         let result = match action {
             // 匿名页首次访问：分配清零物理页并安装用户 PTE。
             FaultAction::LazyAlloc => {
@@ -142,7 +148,7 @@ impl PageFaultHandler {
                 map_existing_resident_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
         };
-        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_pf_start);
+        let elapsed = crate::task::perf::perf_memory_io_time_now().wrapping_sub(_pf_start);
         crate::task::perf::record_pagefault_action(action_tag, elapsed);
         result
     }

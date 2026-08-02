@@ -1,11 +1,6 @@
 use super::common::*;
 
-pub fn sys_lgetxattr(
-    path: *const u8,
-    name: *const u8,
-    value: *mut u8,
-    size: usize,
-) -> isize {
+pub fn sys_lgetxattr(path: *const u8, name: *const u8, value: *mut u8, size: usize) -> isize {
     let token = current_user_token();
     let path_str = match user_cstring(token, path) {
         Ok(s) => s,

@@ -125,9 +125,11 @@ static MULTI_RESULT: AtomicIsize = AtomicIsize::new(-1);
 fn multi_queue_worker() {
     MULTI_ENTERED.store(true, Ordering::Release);
     let queues = [&*MULTI_LEFT, &*MULTI_RIGHT];
-    let result = WaitQueue::wait_on_queues_interruptible_timeout(&queues, || {
-        MULTI_CONDITION.load(Ordering::Acquire).then_some(99)
-    }, None);
+    let result = WaitQueue::wait_on_queues_interruptible_timeout(
+        &queues,
+        || MULTI_CONDITION.load(Ordering::Acquire).then_some(99),
+        None,
+    );
     let code = match result {
         WaitResult::Ready(99) => 99,
         WaitResult::Ready(_) => -2,

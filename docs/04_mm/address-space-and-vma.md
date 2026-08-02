@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-19
+last_update: 2026-08-01
 tags: [mm, address-space, vma, elf, maps]
 ---
 
@@ -44,7 +44,8 @@ pub struct AddressSpace<T: PageTable> {
 | `from_elf()` | `address_space.rs:969` | 从 ELF 构造用户地址空间，映射 trampoline、signal trampoline、LOAD 段和 heap 起点。 |
 | `from_existing_user()` | `address_space.rs:991` | fork/非 `CLONE_VM` clone 复制地址空间，配合 VMA CoW。 |
 | `do_page_fault()` | `address_space.rs:631` | trap/uaccess 共用缺页入口。 |
-| `fault_in_user_va()` | `address_space.rs:659` | syscall 用户指针 fault-in 入口，缺页后做权限复核。 |
+| `fault_in_user_va()` | `address_space.rs:659` | syscall 用户指针入口：先检查已映射的 `U+R/W` PTE，未命中才 fault-in 并做权限复核。 |
+| `mapped_user_va()` | `address_space.rs` | 无副作用地验证当前 PTE 与 RAM 物理地址；只供 `fault_in_user_va()` 快路径使用。 |
 | `sbrk()` | `address_space.rs:1090` | 转入 `mmap.rs::do_sbrk()` 调整 program break。 |
 | `mmap()` | `address_space.rs:1094` | 转入 `mmap.rs::do_mmap()` 创建映射。 |
 | `munmap()` | `address_space.rs:1130` | 释放映射范围，并同步清理 locked page 标记。 |
@@ -117,6 +118,10 @@ pub fn from_existing_user(
 ```
 
 该函数只复制用户 VMA，跳过 `dont_fork`，对 `wipe_on_fork` 只复制元数据不复制页内容。当前线程的 trap context 单独根据 `trap_cx_slot` 定位，不依赖最后一个非用户 VMA，避免 clone/exit 之后 slot 号不连续导致复制错误。
+
+### 1.2 uaccess 已映射页快路径
+
+syscall 的 `fault_in_user_va()` 不会为已满足访问权限的 PTE 重新进入缺页处理。其 `mapped_user_va()` 检查用户位、按 Load/Store 区分的 `R/W` 位和可分配 RAM 物理地址；任一条件不成立时仍交给既有缺页、COW 或 VMA 扩展路径。快路径不写 PTE，因此不改变现有 TLB invalidate 约束。
 
 ## 2. VMA 数据结构
 

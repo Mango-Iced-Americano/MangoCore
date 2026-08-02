@@ -952,8 +952,7 @@ impl WaitQueue {
     /// 清理所有失效 `Weak` 条目，返回清理数量。
     pub fn compact_stale(&mut self) -> usize {
         let before = self.inner.len();
-        self.inner
-            .retain(|waiter| waiter.task.strong_count() > 0);
+        self.inner.retain(|waiter| waiter.task.strong_count() > 0);
         before - self.inner.len()
     }
     /// 唤醒队列中的所有可唤醒任务。
@@ -1298,20 +1297,16 @@ impl WaitQueue {
             // with optional deadline.
             let wait_queue = Mutex::new(WaitQueue::new());
             match deadline {
-                Some(deadline) => {
-                    loop {
-                        match Self::wait_event_interruptible_timeout(
-                            &wait_queue, &mut cond, deadline,
-                        ) {
-                            ret @ (WaitResult::Ready(_) | WaitResult::Interrupted) => return ret,
-                            WaitResult::TimedOut => {
-                                if TimeSpec::now() >= deadline {
-                                    return WaitResult::TimedOut;
-                                }
+                Some(deadline) => loop {
+                    match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, deadline) {
+                        ret @ (WaitResult::Ready(_) | WaitResult::Interrupted) => return ret,
+                        WaitResult::TimedOut => {
+                            if TimeSpec::now() >= deadline {
+                                return WaitResult::TimedOut;
                             }
                         }
                     }
-                }
+                },
                 None => loop {
                     match Self::wait_event_interruptible(&wait_queue, &mut cond) {
                         ret @ (WaitResult::Ready(_) | WaitResult::Interrupted) => return ret,
@@ -1769,10 +1764,7 @@ impl KernelTimerQueue {
     /// 调度器锁或重新插入新的 kernel timer。
     pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
-            TimerAction::WakeTask {
-                task,
-                generation,
-            } => {
+            TimerAction::WakeTask { task, generation } => {
                 let Some(task) = task.upgrade() else {
                     return false;
                 };

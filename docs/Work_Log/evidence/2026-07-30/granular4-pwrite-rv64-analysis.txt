@@ -1,0 +1,19 @@
+## Zero-output perf_diag pwrite attribution
+
+### Scope
+- RV64 QEMU Docker `4abf1ec06ea7764ad07610e69830a5a0c6377de993bec12f739bc7823a82b944`.
+- `mask=0x110`, `diag=1`; iozone musl and glibc each produced 4,096 successful 1 KiB `pwrite` calls.
+- The source is the two `/sys/kernel/stats/blockio` snapshots in `granular4-pwrite-rv64-qemu-output.log`; no timing path writes to the serial console.
+
+### Per-call cycles
+| Boundary | musl | glibc | combined (8,192 calls) |
+| --- | ---: | ---: | ---: |
+| UserBuffer construction/copy | 35,655.29 | 36,435.13 | 36,045.21 |
+| File/VFS through inode write | 1,014,757.48 | 892,750.86 | 953,754.17 |
+| ext4 setup before PageCache | 202,478.89 | 200,075.28 | 201,277.09 |
+| ext4 size/retention post-work | 18,990.62 | 19,526.24 | 19,258.43 |
+
+### Attribution
+- Explicit non-PageCache boundaries total **256,580.73 cycles/call**: UserBuffer 36,045.21 + ext4 setup 201,277.09 + ext4 post-work 19,258.43.
+- The remaining interval inside `File::pwrite` is **733,218.65 cycles/call** (`953,754.17 - 201,277.09 - 19,258.43`), covering `PageCache::write_with_after_copy` and VFS wrapper work not separately timed here.
+- The prior approximately 595K-cycle outside-PageCache estimate was not portable: it used nested serial `println!` timing and the direct `write_at_user` path. The production iozone path took the fallback `write_at` path; the first zero-counter run confirmed that the new counters initially used the disabled core profile. Sampling with the memory-I/O profile yields the values above.

@@ -1,15 +1,15 @@
 use super::NetDevice;
 #[cfg(feature = "block_virt")]
-use crate::hal::device::DeviceManager;
-#[cfg(feature = "block_virt")]
-use alloc::{sync::Arc, vec::Vec};
-#[cfg(not(feature = "block_virt"))]
-use alloc::sync::Arc;
-#[cfg(feature = "block_virt")]
 // 借用 block 里的 VirtioHal！
 use crate::drivers::block::virtio_blk::VirtioHal;
 #[cfg(feature = "block_virt_pci")]
 use crate::drivers::block::virtio_blk_pci::{enumerate_virtio_pci, VirtioHal};
+#[cfg(feature = "block_virt")]
+use crate::hal::device::DeviceManager;
+#[cfg(not(feature = "block_virt"))]
+use alloc::sync::Arc;
+#[cfg(feature = "block_virt")]
+use alloc::{sync::Arc, vec::Vec};
 
 #[cfg(feature = "block_virt")]
 use core::ptr::NonNull;
@@ -38,11 +38,8 @@ impl VirtIONetWrapper {
         // Platform device discovery supplies a mapped, page-aligned VirtIO MMIO
         // region that remains valid for the kernel lifetime.
         unsafe {
-            let transport = MmioTransport::new(
-                NonNull::new(base_addr as *mut VirtIOHeader)?,
-                0x1000,
-            )
-            .ok()?;
+            let transport =
+                MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?;
 
             // 创建网卡设备，注意这里直接把 VirtioHal 传进去了
             let net = VirtIONet::<VirtioHal, MmioTransport<'static>, QUEUE_SIZE>::new(

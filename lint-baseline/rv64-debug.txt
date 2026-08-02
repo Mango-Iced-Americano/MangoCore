@@ -41,7 +41,6 @@ first-party:unknown:src/fs/ext4/smoke.rs
 first-party:unknown:src/fs/ext4/superblock.rs
 first-party:unknown:src/fs/ext4/test.rs
 first-party:unknown:src/fs/ext4_another/inode.rs
-first-party:unknown:src/fs/ext4_another/mutations.rs
 first-party:unknown:src/fs/fat32/bitmap.rs
 first-party:unknown:src/fs/fat32/fat_inode.rs
 first-party:unknown:src/fs/filesystem.rs

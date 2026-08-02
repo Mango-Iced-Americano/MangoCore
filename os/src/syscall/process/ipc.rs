@@ -7,8 +7,8 @@ use crate::fs::{
     },
 };
 use crate::mm::{
-    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, translated_str,
-    frames_alloc_any, FrameTracker, MapFlags, MapPermission,
+    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, frames_alloc_any,
+    translated_str, FrameTracker, MapFlags, MapPermission,
 };
 use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;

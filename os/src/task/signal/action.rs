@@ -10,8 +10,8 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use crate::fs::vfs::event::EventWaitQueue;
 use super::SigAction;
+use crate::fs::vfs::event::EventWaitQueue;
 
 /// 进程共享的信号动作表。
 pub struct Sighand {

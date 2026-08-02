@@ -1,6 +1,12 @@
 use super::common::*;
 
-pub fn sys_fsetxattr(fd: usize, name: *const u8, value: *const u8, size: usize, flags: u32) -> isize {
+pub fn sys_fsetxattr(
+    fd: usize,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: u32,
+) -> isize {
     let token = current_user_token();
     let name_str = match user_cstring(token, name) {
         Ok(s) => s,

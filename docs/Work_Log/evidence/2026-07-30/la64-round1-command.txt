@@ -1,0 +1,2 @@
+make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test.conf && make ARCH=la64 -C os -f make/la64.mk derived-comp
+exit_status=0

@@ -1,6 +1,6 @@
 use super::common::*;
-use super::sys_writev::sys_writev;
 use super::sys_pwritev::sys_pwritev;
+use super::sys_writev::sys_writev;
 
 pub fn sys_pwritev2(
     fd: usize,

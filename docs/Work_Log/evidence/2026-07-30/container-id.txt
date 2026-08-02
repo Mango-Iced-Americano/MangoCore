@@ -1,3 +1,11 @@
+VF2 regression container:
 container: 79040401ef8a
 mount: /root/projects/MangoCore -> /app
 mount: /etc/localtime -> /etc/localtime
+
+Performance validation container:
+Container: 4abf1ec06ea7764ad07610e69830a5a0c6377de993bec12f739bc7823a82b944
+Service: os-dev
+Mounts:
+/home/pxy/projects/MangoCore -> /app
+/etc/localtime -> /etc/localtime

@@ -10,10 +10,10 @@ tools-user-rv:
 tools-user-la:
 	@$(MAKE) --no-print-directory ARCH=la64 PROFILE=normal USER_OUTPUT_ROOT="$(abspath ../user/target)" user
 
-tools-disk-rv: tools-user-rv maybe-tools-cpython-rv
+tools-disk-rv: tools-user-rv tools-alpine-rv maybe-tools-cpython-rv
 	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
 
-tools-disk-la: tools-user-la maybe-tools-cpython-la
+tools-disk-la: tools-user-la tools-alpine-la maybe-tools-cpython-la
 	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
 
 tools-disk: tools-disk-rv tools-disk-la
@@ -29,7 +29,15 @@ tools-alpine-rv:
 		"libcrypto3:usr/lib/libcrypto.so.3:libcrypto.so.3:lib" \
 		"libcap2:usr/lib/libcap.so.2:libcap.so.2:lib" \
 		"libmnl:usr/lib/libmnl.so.0:libmnl.so.0:lib" \
-		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib"; do \
+		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib" \
+		"e2fsprogs:sbin/mke2fs:mke2fs:sbin" \
+		"e2fsprogs:sbin/mkfs.ext4:mkfs.ext4:sbin" \
+		"e2fsprogs-libs:usr/lib/libe2p.so.2:libe2p.so.2:lib" \
+		"e2fsprogs-libs:usr/lib/libext2fs.so.2:libext2fs.so.2:lib" \
+		"libblkid:usr/lib/libblkid.so.1:libblkid.so.1:lib" \
+		"libcom_err:usr/lib/libcom_err.so.2:libcom_err.so.2:lib" \
+		"libuuid:usr/lib/libuuid.so.1:libuuid.so.1:lib" \
+		"libeconf:usr/lib/libeconf.so.0:libeconf.so.0:lib"; do \
 		pkg=$${pkg_info%%:*}; rest1=$${pkg_info#*:}; apath=$${rest1%%:*}; rest2=$${rest1#*:}; oname=$${rest2%%:*}; subdir=$${pkg_info##*:}; \
 		dest=$(CURDIR)/../user/tools/riscv64/$$subdir/$$oname; \
 		if [ -f "$$dest" ]; then \
@@ -43,6 +51,15 @@ tools-alpine-rv:
 		fi; \
 		tar -xzf "/tmp/alpine-rv/$$apk" -C /tmp/alpine-rv 2>/dev/null; \
 		cp /tmp/alpine-rv/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
+	done
+	@apk=$$(curl -sL "$(ALPINE_MIRROR)/riscv64/" | grep -oP '"musl-[0-9][^"]*\.apk"' | tr -d '"' | sort -V | tail -1); \
+		test -n "$$apk"; \
+		curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o "/tmp/alpine-rv/$$apk"; \
+		tar -xzf "/tmp/alpine-rv/$$apk" -C /tmp/alpine-rv 2>/dev/null; \
+		cp /tmp/alpine-rv/lib/ld-musl-riscv64.so.1 $(CURDIR)/../user/tools/riscv64/lib/libc.so; \
+		cp /tmp/alpine-rv/lib/libc.musl-riscv64.so.1 $(CURDIR)/../user/tools/riscv64/lib/libc.musl-riscv64.so.1
+	@for binary in $(CURDIR)/../user/tools/riscv64/sbin/mke2fs $(CURDIR)/../user/tools/riscv64/sbin/mkfs.ext4; do \
+		patchelf --set-interpreter /tools/lib/ld-musl-riscv64.so.1 --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
 	done
 	@rm -rf /tmp/alpine-rv
 	@echo "[alpine] riscv64 done."
@@ -58,7 +75,15 @@ tools-alpine-la:
 		"libcrypto3:usr/lib/libcrypto.so.3:libcrypto.so.3:lib" \
 		"libcap2:usr/lib/libcap.so.2:libcap.so.2:lib" \
 		"libmnl:usr/lib/libmnl.so.0:libmnl.so.0:lib" \
-		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib"; do \
+		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib" \
+		"e2fsprogs:sbin/mke2fs:mke2fs:sbin" \
+		"e2fsprogs:sbin/mkfs.ext4:mkfs.ext4:sbin" \
+		"e2fsprogs-libs:usr/lib/libe2p.so.2:libe2p.so.2:lib" \
+		"e2fsprogs-libs:usr/lib/libext2fs.so.2:libext2fs.so.2:lib" \
+		"libblkid:usr/lib/libblkid.so.1:libblkid.so.1:lib" \
+		"libcom_err:usr/lib/libcom_err.so.2:libcom_err.so.2:lib" \
+		"libuuid:usr/lib/libuuid.so.1:libuuid.so.1:lib" \
+		"libeconf:usr/lib/libeconf.so.0:libeconf.so.0:lib"; do \
 		pkg=$${pkg_info%%:*}; rest1=$${pkg_info#*:}; apath=$${rest1%%:*}; rest2=$${rest1#*:}; oname=$${rest2%%:*}; subdir=$${pkg_info##*:}; \
 		dest=$(CURDIR)/../user/tools/loongarch64/$$subdir/$$oname; \
 		if [ -f "$$dest" ]; then \
@@ -72,6 +97,15 @@ tools-alpine-la:
 		fi; \
 		tar -xzf "/tmp/alpine-la/$$apk" -C /tmp/alpine-la 2>/dev/null; \
 		cp /tmp/alpine-la/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
+	done
+	@apk=$$(curl -sL "$(ALPINE_MIRROR)/loongarch64/" | grep -oP '"musl-[0-9][^"]*\.apk"' | tr -d '"' | sort -V | tail -1); \
+		test -n "$$apk"; \
+		curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o "/tmp/alpine-la/$$apk"; \
+		tar -xzf "/tmp/alpine-la/$$apk" -C /tmp/alpine-la 2>/dev/null; \
+		cp /tmp/alpine-la/lib/ld-musl-loongarch-lp64d.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.so; \
+		cp /tmp/alpine-la/lib/libc.musl-loongarch-lp64d.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.musl-loongarch64.so.1
+	@for binary in $(CURDIR)/../user/tools/loongarch64/sbin/mke2fs $(CURDIR)/../user/tools/loongarch64/sbin/mkfs.ext4; do \
+		patchelf --set-interpreter /tools/lib/ld-musl-loongarch-lp64d.so.1 --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
 	done
 	@rm -rf /tmp/alpine-la
 	@echo "[alpine] loongarch64 done."

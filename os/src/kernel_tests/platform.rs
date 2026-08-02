@@ -1,6 +1,6 @@
 //! L3 tests for the platform information model.
 
-use crate::hal::device::{DeviceManager, DeviceQueryError};
+use crate::hal::device::DeviceManager;
 use crate::hal::platform::info::{DeviceInfo, DeviceKind, FirmwareKind, MmioRange, PlatformInfo};
 use crate::kernel_tests::runner::KernelTest;
 use alloc::vec;
@@ -53,7 +53,11 @@ fn test_device_info_kind_matching() -> Result<(), &'static str> {
     if serial.kind != DeviceKind::Serial {
         return Err("serial device has wrong kind");
     }
-    if !block.compatible.iter().any(|compatible| compatible == "virtio,mmio") {
+    if !block
+        .compatible
+        .iter()
+        .any(|compatible| compatible == "virtio,mmio")
+    {
         return Err("virtio block device is missing its compatible string");
     }
 

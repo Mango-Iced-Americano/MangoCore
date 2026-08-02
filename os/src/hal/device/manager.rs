@@ -38,7 +38,12 @@ impl DeviceManager {
     pub fn find_by_compatible(&self, compatible: &str) -> Vec<&DeviceInfo> {
         self.devices
             .iter()
-            .filter(|device| device.compatible.iter().any(|candidate| candidate == compatible))
+            .filter(|device| {
+                device
+                    .compatible
+                    .iter()
+                    .any(|candidate| candidate == compatible)
+            })
             .collect()
     }
 

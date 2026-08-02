@@ -124,7 +124,11 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
         Ok(fdt) => fdt,
         Err(_) => return false,
     };
-    let memory = match fdt.root().and_then(|root| root.memory()).and_then(|memory| memory.reg()) {
+    let memory = match fdt
+        .root()
+        .and_then(|root| root.memory())
+        .and_then(|memory| memory.reg())
+    {
         Ok(memory) => memory,
         Err(_) => return false,
     };
@@ -390,7 +394,10 @@ fn parse_pci_mmio_ranges(
 
 type FallibleFdt<'a> = fdt::Fdt<
     'a,
-    (fdt::parsing::unaligned::UnalignedParser<'a>, fdt::parsing::NoPanic),
+    (
+        fdt::parsing::unaligned::UnalignedParser<'a>,
+        fdt::parsing::NoPanic,
+    ),
 >;
 
 fn enumerate_devices(fdt: &FallibleFdt<'_>) -> Vec<DeviceInfo> {

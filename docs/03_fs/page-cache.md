@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-27"
+last_updated: "2026-08-01"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -41,7 +41,7 @@ PageCache 不感知具体文件系统格式，通过 `PageCacheBackend` trait �
 
 ## PageState 状态机
 
-每个缓存页面由 `PageEntry` 管理，其 `state` 字段为 `AtomicU8`，取值如下：
+每个缓存页面由 `PageEntry` 管理。对外的 `PageState` 仍是诊断视图，但内部以一个 `AtomicU32` 保存正交的 `PG_*` 位：锁、最新、脏、写回、错误、引用和写回期间重脏。RV64 可将该字级原子操作映射为原生 AMO。
 
 ```text
 Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpToDate
@@ -57,31 +57,34 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 | Writeback | 正在写回 I/O | writeback_page / writeback_pages_run CAS Dirty → Writeback |
 | Error | I/O 错误 | 后端读写失败 |
 
-状态转换通过 `compare_exchange_state`（原子 CAS）实现，避免并发竞态。关键的红色路径处理：如果写回期间页面被再次写入，`PG_REDIRTIED` 标志被设置，写回完成后状态恢复为 Dirty 而非 UpToDate。
+写入通过 CAS 添加 `PG_LOCKED | PG_REFERENCED`，复制完成后以一次原子更新发布 `PG_UPTODATE | PG_DIRTY` 并清除锁；不会再把既有脏页往返转换为 `Loading`。写回只认领 `PG_DIRTY && !PG_LOCKED` 的页，认领时清除脏位并设置 `PG_WRITEBACK | PG_LOCKED`。如果写回期间页面被再次写入，`PG_REDIRTIED` 会使完成路径恢复 `PG_DIRTY`，而不是错误地发布为 UpToDate。
+
+启用 `perf_diag` 的 `memory_io` profile 时，`write_user` 额外将 PageEntries 查找、写 lease、用户缓冲复制和 Dirty 发布的累计周期导出到 `/sys/kernel/stats/blockio`。这些是诊断计数，不参与状态转换或锁定协议。
 
 ## PageEntry 与 partial-write 跟踪
 
-`PageEntry` 将每页按 512B segment 划分为 8 个扇区（`VALID_SEG_COUNT = 8`），通过 `valid_mask: AtomicU8` 位掩码跟踪哪些 segment 已写入有效数据：
+`PageEntry` 将每页按 512B segment 划分为 8 个扇区（`VALID_SEG_COUNT = 8`），通过 `valid_mask: AtomicU32` 的低 8 位掩码跟踪哪些 segment 已写入有效数据：
 
 - 页面刚 populate 时，`valid_mask = VALID_ALL`（全部有效）
 - 整页覆写时，写路径直接标记所有 segment 有效
-- 部分写入时，`mark_valid_and_check_full` 逐步累积 `valid_mask`
+- 部分写入时，`mark_valid_and_check_full` 逐步累积 `valid_mask`；目标位已全置位时先以 Relaxed load 返回，不执行冗余的原子 OR
 - `ensure_fully_valid` 读取后端数据填充无效 segment（快速路径：已满则直接返回）
 
-这一设计解决了稀疏文件（sparse file）中超出旧 EOF 页面的零填充问题：当写入位置超出旧 EOF 时，`get_or_create_entry` 不触发后端 read_page，而是 `frame_alloc` 零填充页并设置 `valid_mask = VALID_ALL`。
+这一设计解决了稀疏文件（sparse file）中超出旧 EOF 页面的零填充问题：当写入位置超出旧 EOF 时，`get_or_create_entry` 不触发后端 read_page，而是 `frame_alloc` 零填充页并设置 `valid_mask = VALID_ALL`。新建页若对应一次完整 4KB 覆写，写路径改用 `frame_alloc_uninit()`；该页保持 `Loading`，直至完整拷贝完成并提交，因此不会将未初始化内容暴露给读取者。其余部分覆盖和零填充场景继续使用清零分配。
 
-`io_gate` 串行化 PageCache 的写入、单页/批量回写和截断，避免正在复制或回写的页面被截断操作丢弃。公开回写入口负责获取 gate；已在写入 gate 内执行的回调必须调用对应的持锁辅助函数（如 `writeback_page_locked`），不能再次调用公开入口。`truncate(new_size)` 在 I/O gate 内移除完整超出 EOF 的页面；若新 EOF 落在保留页中间，则会将该页从 EOF 到页尾清零并标记为 Dirty。
+写入、回写和截断不再使用文件级 `io_gate`。写入者通过每个 `PageEntry` 的 `PG_LOCKED` 位独占目标页；回写以 `PG_DIRTY && !PG_LOCKED` 的 CAS 认领页，竞争者不会重复提交同一页。`truncate(new_size)` 移除完整超出 EOF 的页面；若新 EOF 落在保留页中间，会获取同一页锁，清零 EOF 到页尾后发布脏位，避免与同页写入并发复制。
 
-another_ext4 的 `truncate_inode()` 会在缩容时按 extent 尾部释放新 EOF 之后的数据块和空的 extent-tree 元数据块。bridge 在同一 I/O gate 内先回写已有脏页，截断缓存并回写保留末页的零尾，再调用该后端 API；因此不会再对将被释放的范围执行逐页零填充。
+`PageEntries` 使用 `RwLock<Vec<Option<Arc<PageEntry>>>>` 保存连续的页索引目录。查找、快照、统计和 clock 扫描共享读锁；发布、删除及扩容使用写锁。调用方取得 `Arc<PageEntry>` 后立即释放目录锁，后续页面状态转换、数据复制和后端 I/O 不持有目录锁。该实现避免了原子 radix 目录、永久节点分配和不安全指针发布的复杂生命周期约束。
+
+another_ext4 的 `truncate_inode()` 会在缩容时按 extent 尾部释放新 EOF 之后的数据块和空的 extent-tree 元数据块。bridge 先回写已有脏页、截断缓存并回写保留末页的零尾，再调用该后端 API；因此不会再对将被释放的范围执行逐页零填充。
 
 ### PageEntry 内核对象引用
 
 ```rust
 struct PageEntry {
     page: Arc<FrameTracker>,     // 物理页面
-    state: AtomicU8,             // PageState 编码
-    valid_mask: AtomicU8,        // 512B segment 有效性位图
-    flags: AtomicU8,             // PG_REFERENCED, PG_REDIRTIED
+    flags: AtomicU32,            // PG_LOCKED/UPTODATE/DIRTY/WRITEBACK/... 
+    valid_mask: AtomicU32,       // 低 8 位：512B segment 有效性位图
 }
 ```
 
@@ -101,26 +104,28 @@ pub trait PageCacheBackend: Send + Sync {
 
 ## 二阶段读写模式
 
-所有读写路径采用两阶段模式，核心约束为**不在持有锁时执行用户态拷贝**：
+所有读写路径采用两阶段模式，核心约束为**不在持有页面目录锁时执行用户态拷贝**：
 
 ### 读路径（read / read_user）
 
 ```
-Phase 1（持锁）: 收集
+Phase 1（按页目录查找）: 收集
   for each page in [start_page, end_page]:
     entry = get_page_for_read(page_index)   // 获取或分配页，从后端加载
     ensure_fully_valid(page_index)          // 填充无效 segment
     copies.push(CopyItem { entry, offset, len })
 
 Phase 2（无锁）: 拷贝
-  for each item in copies:
-    copy_from_slice(src, dst)   // 或 UserBuffer::write_at
+   for each item in copies:
+     copy_from_slice(src, dst)   // 多页 UserBuffer 使用一次顺序 cursor
 ```
+
+`read_user()` 的多页分支在 Phase 2 前创建一次 `UserBufferWriteCursor`，按 `ReadCopy` 的页序依次调用 `write_from()`。因此跨页数据和用户 buffer segment 都只单调前进一次；它不为每个源页重新从第一个目标 segment 扫描。单页分支仍使用直接 `write_at(0, ...)` 快路径。
 
 ### 写路径（write / write_user）
 
 ```
-Phase 1（持锁）: 收集
+Phase 1（按页目录查找）: 收集
   for each page in [start_page, end_page]:
     entry = get_page_for_write_populate(page_index, old_file_size, full_overwrite)
     // populate 条件: !full_overwrite && !beyond_eof
@@ -133,7 +138,7 @@ Phase 2（无锁）: 拷贝
     mark_valid_and_check_full()
 ```
 
-单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()`，但正常写入只保留 Dirty 页并立即返回；该函数只在紧急内存压力下才启动批量写回。
+单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。`write_user()` 直接从已经校验的 `UserBuffer` 拷贝到缓存页，供支持该接口的 regular inode 避免 syscall 临时 `Vec` 中转。整页及以上写入在完成后检查 dirty pressure；小于一页的写入每 16 次检查一次，避免在远低于 32 MiB 背景水位时为每个小写入重复执行全局检查。
 
 ## 脏页追踪与回写
 
@@ -148,26 +153,33 @@ static GLOBAL_DIRTY_PAGES: AtomicUsize;    // 脏页总数
 static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 ```
 
-每个 `PageCache` 实例维护 `inner.dirty_pages: BTreeSet<usize>` 记录其脏页索引。脏页计数在 CAS UpToDate → Dirty 成功时递增，在写回完成后递减。
+每个 `PageEntry` 在同一个 flags 字节中维护 `PG_DIRTY`。写入提交仅在 clean→dirty 转换时递增全局计数；写回认领时递减，失败或 redirty 时恢复。写回从 `PageEntries` 的有序快照收集带 `PG_DIRTY` 的页。
 
 ### 紧急写回水位
 
 | 常量 | 值 | 含义 | 动作 |
 |------|-----|------|------|
-| DIRTY_EMERGENCY_MIN_PAGES | 65536 | 最低脏页量（256 MiB） | 低于该值时不从 write 路径写回 |
-| DIRTY_EMERGENCY_FREE_RATIO | dirty ≥ free × 3/4 | 物理帧紧急压力线 | `maybe_background_writeback` 批量写回最多 256 页 |
+| DIRTY_BACKGROUND_PAGES | 8192 | 后台水位（32 MiB） | 满足空闲帧比例时请求后台写回 |
+| DIRTY_THROTTLE_PAGES | 16384 | 节流水位（64 MiB） | 写入者帮助完成一批写回 |
+| DIRTY_EMERGENCY_PAGES | 32768 | 紧急水位（128 MiB） | 物理帧压力下强制合作写回 |
+| dirty/free ratio | dirty ≥ free × 3/4 | 紧急物理帧压力线 | `maybe_background_writeback` 批量写回最多 256 页 |
 
 `fsync()`、`fdatasync()`、最后一次 `close()` 和系统关闭仍使用 `writeback_all()` 保证持久化。正常 `write()` 不再因固定脏页阈值进入同步后端 I/O。
 
 ### 写回层级
 
-1. **单页写回** `writeback_page`: CAS Dirty → Writeback，调 `backend.write_page`，完成后检查 PG_REDIRTIED
-2. **批量写回** `writeback_pages_run`: 连续脏页组收集 → 统一 CAS → 调 `backend.write_pages`
-3. **全量写回** `writeback_all`: 扫描所有脏页，分组为连续 run 依次提交
+1. **单页写回** `writeback_page`: CAS 认领 dirty/unlocked 页并置 `PG_WRITEBACK|PG_LOCKED`，调 `backend.write_page`，完成后检查 PG_REDIRTIED
+2. **批量写回** `writeback_pages_run`: 连续脏页组收集 → 统一 flags CAS → 调 `backend.write_pages`
+3. **全量写回** `writeback_all`: 扫描所有脏页，分组为连续 run 依次提交；遇到短暂的 `Loading`、`Writeback` 或后端 `EAGAIN` 时，最多重试 100 次且每次让出调度器，而非忙等自旋
 4. **合作写回** `maybe_background_writeback`: 仅在紧急脏页/空闲帧比率达到水位时遍历 registry 并写回
-5. **紧急检查** `balance_dirty_pages`: 每次 write 后只检查内存压力；未达紧急水位时不执行写回
+5. **压力检查** `balance_dirty_pages`: 整页写入后、或每 16 次小写入后检查内存压力；未达背景/节流水位时不执行写回
 
-写回失败的处理：页面恢复为 Dirty 状态，全局计数回退，等待下次写回重试。
+写回失败的处理：无论后端 `write_pages` 失败，还是写回前
+`ensure_fully_valid` 补全 partial page 失败，页面都会恢复为 Dirty、重新加入
+`PG_DIRTY` 并回退全局计数，等待下次写回重试，不会遗留在 Writeback 或 Locked 状态。
+`flush_all_page_caches()` 汇总所有 cache 的写回，记录每个失败并返回首个
+`SyscallErr`；`syncfs` 和卸载路径将该错误返回给调用者，`sync(2)`、电源循环
+和后台回写则记录错误并继续各自必须完成的后续步骤。
 
 ## 回收机制
 
@@ -178,7 +190,7 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 `evict_clean_pages_clock` 实现时钟算法回收干净页：
 
 ```text
-hand 指针循环扫描 entries[]
+hand 指针循环扫描有序 PageEntries 快照
   ├─ 跳过非 UpToDate 页
   ├─ 跳过引用计数 >1 的页（被 mmap 持有）
   ├─ 跳过引用计数 >1 的 FrameTracker
@@ -186,7 +198,7 @@ hand 指针循环扫描 entries[]
   └─ 否则 → 移除 entry，回收页帧
 ```
 
-Sweep 扫描上限为 `min(len*2, target*16 + 64)`，防止失控。收回的页在 `inner.pages` 中同步移除，entries 数组末尾的 `None` 槽被截断。
+Sweep 扫描上限为 `min(len*2, target*16 + 64)`，防止失控。回收时以目标 `Arc<PageEntry>` 为条件移除页槽，避免删除快照后已被并发替换的条目。
 
 注意：以下回收水位线与脏页紧急水位是两个独立的机制。紧急水位只在脏页占用大量可用帧时触发后端写回；回收水位线触发 LRU/Clock 淘汰干净页。两者互不依赖。
 
@@ -216,7 +228,7 @@ maybe_reclaim_fs_caches:
 
 **不可在持有 inode 锁时调用 page cache invalidate**。因为 `invalidate_range` 需要获取 `entries` 和 `inner` 锁，如果调用者已经持有 inode 的内部锁，且 PageCache 的 writeback 路径需要 inode 锁（如 ext4 后端写入需要获取 inode 信息），就可能产生死锁。规范做法：在调用任何 PageCache 方法前释放 inode 锁。
 
-PageCache 自身的 `inner` 和 `entries` 使用 `spin::Mutex`，不依赖调度器，因此即使在中断上下文中也安全。但不可重入：在持有 PageCache 锁时不得再次锁同一个 PageCache 实例。
+PageCache 的元数据锁不依赖调度器；`entries` 使用 `spin::RwLock`，读取路径可并发查找/快照，写者仅在发布、删除或扩容时排他。不可重入：在持有同一 PageCache 的写锁时不得再次锁该实例。
 
 ### unevictable 页
 

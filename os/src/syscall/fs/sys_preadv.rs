@@ -39,7 +39,13 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
             let want = (total_len - done).min(chunk_cap);
             let file_off = match offset.checked_add(done) {
                 Some(v) => v,
-                None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+                None => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(SyscallErr::EINVAL as isize)
+                    }
+                }
             };
             let accessible = match iov_writable_len_for_read(&user_iov, done, want) {
                 Ok(n) => n,
@@ -53,13 +59,25 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
 
             let n = match file.pread_user(file_off, &mut ubuf) {
                 Ok(n) => n,
-                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+                Err(e) => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(e as isize)
+                    }
+                }
             };
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             done += n;
-            if n < accessible { break; }
+            if n < accessible {
+                break;
+            }
             if let Some(task) = current_task() {
-                if crate::task::has_actionable_signal(&task) { break; }
+                if crate::task::has_actionable_signal(&task) {
+                    break;
+                }
             }
         }
         return done as isize;
@@ -70,14 +88,22 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
     if kbuf.try_reserve(chunk_cap).is_err() {
         return -(SyscallErr::ENOMEM as isize);
     }
-    unsafe { kbuf.set_len(chunk_cap); }
+    unsafe {
+        kbuf.set_len(chunk_cap);
+    }
 
-    let mut done = 0usize;  // ← re-declare for kbuf path
+    let mut done = 0usize; // ← re-declare for kbuf path
     while done < total_len {
         let want = (total_len - done).min(chunk_cap);
         let file_off = match offset.checked_add(done) {
             Some(v) => v,
-            None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+            None => {
+                return if done > 0 {
+                    done as isize
+                } else {
+                    -(SyscallErr::EINVAL as isize)
+                }
+            }
         };
         let accessible = match iov_writable_len_for_read(&user_iov, done, want) {
             Ok(n) => n,
@@ -102,13 +128,17 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
             let mut ubuf = match user_iov.writer_buffer_at(done + copied, chunk) {
                 Ok(b) => b,
                 Err(errno) => {
-                    if copied > 0 { done += copied; }
+                    if copied > 0 {
+                        done += copied;
+                    }
                     return if done > 0 { done as isize } else { errno };
                 }
             };
             let c = ubuf.write_at(0, &kbuf[copied..copied + chunk]);
             copied += c;
-            if c < chunk { break; }
+            if c < chunk {
+                break;
+            }
         }
 
         done += copied;

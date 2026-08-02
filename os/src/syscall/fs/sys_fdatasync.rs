@@ -14,7 +14,10 @@ pub fn sys_fdatasync(fd: usize) -> isize {
     }
     drop(fd_table);
 
-    if !matches!(file.file_type(), FileType::File | FileType::Dir | FileType::BlockDevice) {
+    if !matches!(
+        file.file_type(),
+        FileType::File | FileType::Dir | FileType::BlockDevice
+    ) {
         return EINVAL;
     }
 

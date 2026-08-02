@@ -1,6 +1,6 @@
-use alloc::sync::Arc;
 use crate::fs::vfs::{FileFlags, FilePrivateData, FileType, IndexNode, InodeMode};
 use crate::utils::error::SyscallErr;
+use alloc::sync::Arc;
 
 use super::fixtures::open_clean_media;
 
@@ -22,9 +22,7 @@ pub(super) fn test_reopen_before_sync_reads_fresh_pagecache_data() -> Result<(),
     }
 
     drop(file);
-    let reopened = root
-        .find(NAME)
-        .map_err(|_| "reopen before sync failed")?;
+    let reopened = root.find(NAME).map_err(|_| "reopen before sync failed")?;
     let mut header = [0u8; HEADER.len()];
     let private = spin::Mutex::new(FilePrivateData::Unused);
     let read = reopened
@@ -33,10 +31,13 @@ pub(super) fn test_reopen_before_sync_reads_fresh_pagecache_data() -> Result<(),
     if read != HEADER.len() || header != *HEADER {
         return Err("reopen before sync did not preserve the executable header");
     }
-    reopened.sync().map_err(|_| "sync after reopen test failed")?;
+    reopened
+        .sync()
+        .map_err(|_| "sync after reopen test failed")?;
     root.unlink(NAME)
         .map_err(|_| "cleanup unlink after reopen test failed")?;
-    root.sync().map_err(|_| "sync after reopen test cleanup failed")
+    root.sync()
+        .map_err(|_| "sync after reopen test cleanup failed")
 }
 
 pub(super) fn test_writes_and_truncates_persist_across_independent_mounts(
@@ -113,7 +114,8 @@ pub(super) fn test_depth_one_leading_hole_writes() -> Result<(), &'static str> {
     if written != 1 {
         return Err("leading-hole write was short");
     }
-    file.sync().map_err(|_| "sync after leading-hole write failed")?;
+    file.sync()
+        .map_err(|_| "sync after leading-hole write failed")?;
     root.unlink(NAME)
         .map_err(|_| "cleanup unlink after leading-hole write failed")?;
     root.sync()

@@ -139,6 +139,13 @@ diag=1
 - **教训**: 单核 QEMU TCG 对 `spin::Mutex<T>` 中的 T 大小非常敏感。大结构改变 inline layout → 影响锁操作的内存足迹 → 宏观性能回退。永远不要扩大全局热路径 struct。
 - **相关文件**: `os/src/net/config.rs` (NetInterfaceInner), `os/src/net/socket/inet/stream/mod.rs`
 
+### RV64 热路径位图应避免字节原子 RMW
+
+- **根因**: RV64 缺少原生 byte AMO；`AtomicU8::fetch_or` 在 QEMU TCG 中会退化为掩码 LR/SC。对只增不减的页 valid-mask，每次 1KiB pwrite 都执行该 RMW 会累积为明显开销。
+- **修复**: 将独立的热路径状态位图升级为 `AtomicU32`，仍只使用低位掩码；先用 Relaxed load 检查目标位是否已全置位，若是直接返回，只有可能改变状态时才执行 word `fetch_or`。升级相邻字段时用 `size_of` 断言锁定热对象布局。
+- **教训**: 优化 QEMU TCG 下的高频原子位图时，先确认目标架构的原子指令宽度；无论数据逻辑只需一个字节，也不应让实现回退为字节 LR/SC。快路径仅可用于单调状态（只置位、从不清位），否则必须保留 RMW/CAS。
+- **相关文件**: `os/src/fs/page_cache.rs`
+
 ### 单核无抢占环境 lock splitting 无并发收益（perf/net 教训）
 
 - **根因**: perf/net 分支引入 per-stack locks + WaitQueue 重构 + cooperative poll → -50% netperf RR。单核环境下没有真正的并发，锁拆分的额外 atomic 操作是纯 overhead。
@@ -318,6 +325,20 @@ diag=1
 - **修复**: 在读路径检测 `PC_READ_MISS` 计数器的前后变化来判断本次 read 是否有 miss，然后分别计入 hit/miss 周期桶；同时拆分 Phase1(lookup) / Phase2(copy) 子周期
 - **教训**: 带 miss 的 I/O 路径不能只看均值；必须同时有 miss_rate 和 hit/miss 各自耗时才能判断瓶颈是"快路径太慢"还是"慢路径太多"
 - **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
+
+### 计时 API 必须匹配诊断 profile
+
+- **根因**: PageCache 读路径的 recorder 由 `memory_io` profile 启用，但采样边界调用 `perf_time_now()`，后者只在 core profile 激活时读取时钟。于是 calls/pages 增长而 read total/lookup/copy 周期全为零；写路径使用 memory-I/O API 所以不受影响。
+- **修复**: 同一诊断域的“采样起点”和“采样终点”必须都调用对应 profile 的时间 API；`memory_io` 域使用 `perf_memory_io_time_now()`，不能混用 core-only `perf_time_now()`。
+- **验证**: 选择目标 sysfs profile 跑真实 workload，并同时确认调用计数与阶段周期非零；若 read-user 专属桶仍为零，先按实际调用路径区分 `read()` kbuf 与 `read_user()`，不要把未覆盖路径误诊为 profile 失败。
+- **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
+
+### 性能 A/B 前必须验证 workload 真正覆盖目标路径（pages/call 比值）
+
+- **根因**: 用 `-r 1k`（1 KiB 记录）跑 PageCache 读路径优化验证时，`pc_read_pages / pc_read_calls ≈ 1.0`，实际走的全是单页 fast path；多页 batch-lookup 优化代码根本没被执行。据此宣称的"多页 lookup 降 50%"是建立在未覆盖路径上的错误结论。
+- **修复**: 基准前先读计数器确认路径覆盖：`pc_read_pages/pc_read_calls > 1`（如 ≥1 MiB record / 16 MiB 文件得到 ~61 pages/call）才真正命中多页路径。A/B 结果按窗口归一（cycles/page、cycles/call），并配对比较（lookup 5/5 对全变差、区间不重叠才算"变差"）。
+- **教训**: 任何路径级优化（batch-lock、scan_range、reference_and_load_flags）都必须先证明 workload 遍历了目标代码段；单页 fast path 的优化收益不能外推为多页路径结论。iozone `-i 0 -i 1 -r 1k` 是热读回归探针，不用于验证多页路径本身。
+- **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`, `iozone-AB-testcode.sh`
 
 ## 网络栈
 
@@ -678,6 +699,14 @@ diag=1
 - **教训**: A/B 构建不能只比较命令行和退出码。应把“构建变量 → 最终 cargo feature → 目标运行时接口”串成三段证据链，否则探针税结论没有意义。
 - **相关文件**: `os/Makefile`, `scripts/diag_smoke_test.sh`
 
+## A/B rerun 前必须核对两侧内核构建指纹一致（后续构建会静默覆盖内核）
+
+- **现象**: 首次 5+5 验收双侧公平（各日志均含 `perf_diag features: perf_stats=true perf_diag=true`），但随后补跑的 rerun 数据出现不对称：rerun-baseline 从 `/tmp/read-batch-baseline/os` 运行（内核含 perf_stats），rerun-candidate 却从 `/app/os` 运行（内核被 12:02 未带 `EXTRA_FEATURES` 的 counter 构建覆盖，已无 perf_stats）。用不对称 rerun 推导 candidate 对比结论会失真。
+- **根因**: `/app` 与工作树是同一份产物目录；后续任意一次不带 `EXTRA_FEATURES` 的内核构建都会覆盖 `kernel-rv`，而 rerun 脚本从 `/app/os` 直接启动，拿到的是被覆盖后的内核。
+- **修复**: 每次 rerun/补测前，`md5sum $(PRODUCT_ROOT)/kernel/kernel-rv` + `strings kernel-rv | grep -c "perf_diag features"` 核对两侧指纹与首次验收一致（基线 `2e2632af`=7 匹配，无 feature 内核=0，`perf_stats` 单 feature 内核=0，`perf_diag` 内核=1）。`EXTRA_FEATURES=perf_stats` 单独不足，`/sys/kernel/stats` 由 `#[cfg(feature="perf_diag")]` 门控（`os/src/fs/sysfs/files/mod.rs`），需传 `EXTRA_FEATURES=perf_diag`（`Cargo.toml` 中 `perf_diag=["perf_stats"]`）。
+- **教训**: 跨时段补测不是同一实验。验收数据与 rerun 数据必须各自校验构建指纹，不能混用；"有 perf_diag 字符串"比"能构建成功"更接近真实运行特征。
+- **相关文件**: `os/src/fs/sysfs/files/mod.rs`, `os/make/rv64.mk`
+
 ## 诊断开关税低不等于诊断构建与生产构建结构等价
 
 - **现象**: 同一诊断二进制内 `stats_on=0/1` 差异低于 1%--2%，但相邻 production/diag-off 在高频陷阱 workload 上仍可能相差数十个百分点；普通用户态负对照却保持稳定。
@@ -938,6 +967,62 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 | `perf_diag` feature 需显式开启 | `EXTRA_FEATURES=perf_diag` 传给 kernel build；`make rv64-run` 不认 |
 | drift_window 输出被自身 write() 污染 | `drift_snapshot()` 的 `write(1, ...)` 被计入 post-snapshot 计数器 |
 
+## 打点→拆分→抓大头性能优化循环（2026-08-02 全周期经验）
+
+> 一轮完整的多轮性能优化循环（iozone 写/读 + lmbench），沉淀可复用方法论。
+
+### 1. 可信基线必须先于一切优化
+
+- **现象**：早期所有性能数据都带 `EXTRA_FEATURES=perf_diag` 探针，探针原子 RMW 污染热路径 5-20%。基于污染数据的优化决策可能完全错误。
+- **修复**：建立 Wave 1 可信基线——无 `perf_diag` 干净构建 + 5 对交替 A/B + 中位数 + min/max + 方差。所有后续优化只对比这个基线。
+- **教训**：`diag=0` + 无 perf_diag 是唯一可信测量；探针只用于诊断归因，绝不用于吞吐验收。诊断构建与生产构建必须分开。
+
+### 2. 固定成本微优化几乎必然失败（Wave 2 三个优化全回退）
+
+- **现象**：三个"理论上省一次 Arc clone / 一次锁 / 一次信号检查"的微优化（SEEK_SET fast path、PageCache entry 复用 + 条件 mark_referenced、跳过冗余信号检查）全部未达 ≥5% 门槛，且触发 −6.49% 无关回归。
+- **根因**：这些优化移除的是总路径中的固定小成本。profile 显示 lookup 只占读路径 4-12%、lseek 单次 13k ticks 而 write 是 89k——省掉的部分占总成本 <5%，低于测量方差。
+- **修复**：动手优化前用 perf_diag 量化"可移除成本占总成本比例"。若 <5-10%，不做。
+- **教训**：**凭理论推断"省一次操作"就能提升吞吐是陷阱**。必须是算法级优化（改变复杂度）或主要阶段开销（>25% 的桶）才值得做。
+
+### 3. 止损纪律：成本分散就换目标
+
+- **现象**：random writers 3x 差距，拆完 write 前台发现无单一子桶 ≥25%——最大是 generic syscall residual ~23% + PageCache ~21%，其余都 ≤16%。
+- **裁决**：Oracle 止损规则——"若某子桶稳定占 ~25% 以上且与吞吐相关再优化；若成本分散则停止该路径深挖"。成本分散证明该路径没有"大头"可抓。
+- **修复**：止损转向更大的目标（lat-pagefault 25x > random writers 3x）。
+- **教训**：**不是每个差距都能归因到单一热点**。拆分后成本分散 = 该路径的差距是许多小成本的叠加，逐个优化不划算，应转向余量更大的目标。
+
+### 4. 结构性改善 ≠ 吞吐优化，需要重新定性
+
+- **现象**：metadata 事务合并减少 journal transactions 14→12、flushes 76→68（10.5% 降幅），但 random writers 吞吐只 +0.3~1.5%。
+- **根因**：flush 减少对前台吞吐影响小——4MiB 工作集低于 dirty 水位，前台 writer 不等待 writeback 压力；且"flush 次数 ≠ flush 时间"，删掉的 barrier 可能本来就便宜。
+- **裁决**：保留但重新定性为"持久化路径效率优化"（减少 barrier/journal 放大，保持 crash-consistency），不宣称吞吐优化。
+- **教训**：**优化可能有结构性价值（更少 flush、更小掉电窗口的间接影响）即使吞吐不移动**。区分"吞吐优化"与"结构性/持久化改善"，分别定性，不强行宣称吞吐达标。
+
+### 5. JBD2 flush 拓扑：每 commit 固定 4 phase flush
+
+- **现象**：random writers 诊断显示 76 次 device flush，初看以为是 76 次 commit。
+- **修复**：拆分定位——14 transactions × 4 phase flushes（ActiveLog/CommitRecord/Checkpoint/TailUpdate）= 56 + 20 DurabilityBoundary = 76。
+- **教训**：**减少 flush 的唯一安全路径是减少 transaction 数量**（JBD2 4-phase barrier 是设计，不能删）。聚合元数据事务（DirectMetadataBarrier → deferred）是可行方向，但需保留 data-before-metadata 顺序 + fsync/sync 语义。
+
+### 6. "flush 更少 = 掉电窗口更小"不成立
+
+- **现象**：合并事务后想宣称"减少持久化窗口"。
+- **裁决**：Oracle 纠正——合并可能延后 commit 开始，只能声称减少 barrier/journal 放大并保持 crash-consistency，不能声称缩短 durability window。
+- **教训**：**持久化语义的声称必须精确**。crash-consistency 保持 ≠ 窗口缩短。
+
+### 7. 并行优化 agent 改共享文件会互相踩脚
+
+- **现象**：两个 agent 并行实施（一个改 sys_lseek.rs、一个改 page_cache.rs）本应独立，但在 kernel_tests/mod.rs 注册处冲突，导致编译失败和验收缺失。
+- **修复**：后续并行优化必须明确**测试文件注册区域（kernel_tests/mod.rs 等）的归属**；PageCache 相关优化合并串行实施（蓝图已预见）。
+- **教训**：**并行度受共享文件约束**。改不同源文件可以并行，但共享的测试注册/模块入口必须串行或明确分工。
+
+### 8. 相关文件
+
+- `os/src/syscall/fs/sys_lseek.rs`、`os/src/fs/page_cache.rs`、`os/src/syscall/fs/common.rs`（Wave 2 微优化）
+- `dependency/another_ext4/src/ext4/journal_transaction.rs`、`os/src/fs/ext4_another/`（metadata 合并）
+- `docs/Work_Log/evidence/2026-08-02/clean-baseline-final-rv64/`（可信基线）
+- `docs/Work_Log/evidence/2026-08-02/write-foreground-split-20260802T094340Z/`（止损拆分）
+
 ## 测试证据纪律
 
 ### 子任务交付的证据完整性
@@ -1167,3 +1252,25 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**: 检测到 type 0xEE 后读 LBA1 验证 "EFI PART" 签名；有效则解析 GPT 头（分区数组 LBA @72、条目数 @80、条目大小 @84）并发布真实分区（first_lba @32、last_lba @40，last-lba 含末扇区）；无效则回退 MBR 且永不发布 0xEE 条目。
 - **教训**: 磁盘格式探测不能只看 0x55AA 签名——GPT 盘必然有保护性 MBR，必须检查分区类型字节 0xEE 并升级到 GPT 解析；否则会把 GPT 头当成分区发布。诊断技巧：dd 读"分区1"若以 "EFI PART" 开头即命中此 bug。
 - **相关文件**: `os/src/drivers/block/partition.rs`、`os/src/kernel_tests/block_device.rs`
+## 顺序生产者不能重复从分段目标起点扫描
+
+- **根因**：PageCache 按文件页升序产出连续数据，但每一页调用带逻辑 offset 的 `UserBuffer::write_at()` 时，Multi 分支都会从第一个 segment 重新寻找目标位置。页数与用户 segment 数同阶时，复制阶段退化为 O(pages × segments)。
+- **修复**：保留随机访问 `write_at()` 的语义；为严格顺序的生产者提供独立 cursor，保存 segment index 和 segment 内偏移，每个 chunk 只向前推进。调用方在整次多页请求前创建 cursor，整次请求只扫描目标 segments 一次。
+- **验收**：同时覆盖首尾非页对齐、源页边界与用户 segment 边界错位、空/短 segment、短目标和单 segment；性能 A/B 必须将每日志的 hot pass 聚合后做同编号配对，且 baseline/candidate 除被测开关外使用相同源码与构建输入。
+- **相关文件**：`os/src/mm/uaccess.rs`、`os/src/fs/page_cache.rs`、`os/src/fs/ext4_another/inode.rs`、`os/src/kernel_tests/page_cache/user_read.rs`
+
+## 无诊断生产基线的 benchmark runner 可执行性门禁
+
+- **现象**: `diag=0`、不含 `perf_diag` 的生产镜像中，runner 看似完成全部 case，但每项可能是 `exit_code=127` 或因 `/sys/kernel/stats/*` 缺失而被标记失败；QEMU 本身仍可正常退出。
+- **根因**: runner 不能把诊断快照当作 workload 的必需前置条件；此外直接调用 raw `exec()` 时，相对程序路径可能缺少 payload 所需的 shell 解析。即使 runner 已改为 shell，测试镜像仍可能缺少 lmbench 二进制，必须与 runner bug 分开归因。
+- **修复**: 建立干净 A/B 前先以 payload 中的实际 libc 目录启动一个 runner smoke：确认每个 subtest 的 child exit 为 0、输出可解析、stats 在 clean mode 只是可选元数据。runner 使用 `/bin/sh -c` 执行静态 payload 命令，并把 stats feature 缺失记为 `unavailable` 而非 workload failure；若 shell 报目标文件不存在，先修复测试镜像内容再统计。
+- **教训**: QEMU exit 0 或 runner 外层完成都不能证明性能样本有效；只要任一 child 为 127，就必须停止统计，不能把脚本直跑的一次结果混入 runner 基线。诊断 profile 的 runner 验收和无诊断生产 runner 验收必须分开。
+- **相关文件**: `user/src/bin/bench_runner/mod.rs`, `user/src/bin/iozone_runner.rs`, `user/src/bin/lmbench_runner.rs`, `docs/Work_Log/evidence/2026-08-02/clean-baseline-20260802T000000Z/`.
+
+## syscall 级微优化对基准吞吐的归因必须先量 syscall 调用次数与单次成本占比
+
+- **现象**: 按 Oracle 建议实现 `sys_lseek` SEEK_SET fast path（fd-table 锁内 `get_file_ref` 借用、去掉 File Arc clone + SeekFrom/`File::lseek` 分发、单次 offset store）后，iozone random writers 五次全新启动 A/B 中位数 musl +0.18%、glibc -1.56%，未达预期 ≥5%，且在基线 ±10% 波动内不可分辨。
+- **根因**: perf_diag `syscall_top` 显示 SEEK_SET 确实被调用（`lseek count:8054`），但 `write count:12234 avg:89441 ticks` vs `lseek avg:13283 ticks`——write syscall 成本约为 lseek 的 7 倍；且每个 syscall 的固定脚手架（trap 入口、`task.process.files()` 进程内锁 + fd-table Arc clone、fd-table 自旋锁）都未被 fast path 触及。fast path 只移除了 lseek 中最廉价的部分（≈13k ticks 中的百级 ticks），吞吐影响 <1%。
+- **修复**: 对"X syscall 开销是基准差距根因"的假设，动手优化前先用 `perf_diag`（仅看 count 列，不用于吞吐）验证：① 该 syscall 在目标 workload 中确实被调用；② 其单次成本在每记录总成本中的占比；③ 每次调用的固定脚手架成本（进程内锁/表锁/trap）是否已被其他路径覆盖。微优化若只移除廉价部分，吞吐基准不会移动。
+- **教训**: 基准归因必须以"每记录成本构成"而非"syscall 次数"为准；微优化验收前先估算可移除成本占总成本的比例。优化方向应从最贵项开始（此处为 `process.files()` 进程内锁与 fd-table 锁），而非 Arc clone。
+- **相关文件**: `os/src/syscall/fs/sys_lseek.rs`, `os/src/task/process.rs` (`files()`), `docs/Work_Log/evidence/2026-08-02/lseek-fastpath-rv64/`

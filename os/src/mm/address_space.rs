@@ -25,8 +25,8 @@ use super::{
 use crate::config::*;
 use crate::fs::PageCache;
 use crate::fs::vfs;
-use crate::fs::vfs_lookup_absolute;
 use crate::fs::vfs::IndexNode;
+use crate::fs::vfs_lookup_absolute;
 use crate::hal::boot::kernel_linked_to_phys;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -657,6 +657,7 @@ impl<T: PageTable> AddressSpace<T> {
         addr: VirtAddr,
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
+        let classify_start = crate::task::perf::perf_memory_io_time_now();
         let vpn = addr.floor();
         let area_start = match self.vmas.find_user_vma_key(vpn) {
             Some(start) => Some(start),
@@ -666,7 +667,7 @@ impl<T: PageTable> AddressSpace<T> {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();
-            let pa = super::page_fault::handle_page_fault(area, page_table, ctx)?;
+            let pa = super::page_fault::handle_page_fault(area, page_table, ctx, classify_start)?;
             self.validate_fault_phys_addr(addr, pa)
         } else {
             // In all segments, nothing matches the requirements. Throws.
@@ -685,10 +686,46 @@ impl<T: PageTable> AddressSpace<T> {
         addr: VirtAddr,
         access: FaultAccess,
     ) -> Result<PhysAddr, isize> {
+        if let Some(user_access) = match access {
+            FaultAccess::Load => Some(UserAccess::Read),
+            FaultAccess::Store => Some(UserAccess::Write),
+            FaultAccess::Execute => None,
+        } {
+            if let Some(pa) = self.mapped_user_va(addr, user_access)? {
+                return Ok(pa);
+            }
+        }
+
         super::frame_reserve(3);
         self.do_page_fault(addr, access)
             .and_then(|_| self.validate_user_fault_result(addr, access))
             .map_err(memory_error_to_errno)
+    }
+
+    /// Return an already-mapped user physical address without faulting it in.
+    ///
+    /// The PTE must already satisfy every requested user permission.  A miss
+    /// deliberately falls through to the fault path so lazy mappings, CoW,
+    /// shared-write permission restoration, and guard pages retain their
+    /// existing semantics.
+    pub(crate) fn mapped_user_va(
+        &self,
+        addr: VirtAddr,
+        access: UserAccess,
+    ) -> Result<Option<PhysAddr>, isize> {
+        let vpn = addr.floor();
+        if !self.page_table.user_access_ok(vpn, access).unwrap_or(false) {
+            return Ok(None);
+        }
+
+        let pa = self
+            .page_table
+            .translate_va(addr)
+            .ok_or(crate::syscall::errno::EFAULT)?;
+        if !super::is_allocatable_ram_phys_addr(pa.0) {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        Ok(Some(pa))
     }
 
     pub fn fault_in_trap_va(
@@ -919,7 +956,8 @@ impl<T: PageTable> AddressSpace<T> {
                     let interp = xmas_elf::ElfFile::new(interp_data).map_err(|_| ENOEXEC)?;
                     let (_, interp_info) = self.map_elf(&interp)?;
                     let _interp_ticks = crate::task::perf::perf_time_now().wrapping_sub(_t_interp);
-                    crate::task::perf::EXECVE_INTERP_TICKS.fetch_add(_interp_ticks, core::sync::atomic::Ordering::Relaxed);
+                    crate::task::perf::EXECVE_INTERP_TICKS
+                        .fetch_add(_interp_ticks, core::sync::atomic::Ordering::Relaxed);
                     interp_entry = Some(interp_info.entry);
                     interp_base = Some(interp_info.base);
                     KERNEL_SPACE
@@ -1611,13 +1649,15 @@ impl<T: PageTable> AddressSpace<T> {
                         ph.filesz,
                         map_permission_from_raw_flags(ph.flags),
                         bias,
-                    )? else {
+                    )?
+                    else {
                         continue;
                     };
                     let file_end = ph.offset.checked_add(ph.filesz).ok_or(ENOEXEC)?;
                     if ph.offset <= eh.phoff && phdr_end <= file_end {
                         let phdr_offset = eh.phoff.checked_sub(ph.offset).ok_or(ENOEXEC)?;
-                        phdr_user_addr = Some(segment.start.checked_add(phdr_offset).ok_or(ENOEXEC)?);
+                        phdr_user_addr =
+                            Some(segment.start.checked_add(phdr_offset).ok_or(ENOEXEC)?);
                     }
                 }
                 PT_INTERP => {
@@ -1685,22 +1725,14 @@ impl<T: PageTable> AddressSpace<T> {
             let map_perm = pages[run_start].map_perm;
             let mut run_end = run_start + 1;
             while run_end < pages.len() {
-                let expected_vpn = pages[run_end - 1]
-                    .vpn
-                    .0
-                    .checked_add(1)
-                    .ok_or(ENOEXEC)?;
+                let expected_vpn = pages[run_end - 1].vpn.0.checked_add(1).ok_or(ENOEXEC)?;
                 if pages[run_end].vpn.0 != expected_vpn || pages[run_end].map_perm != map_perm {
                     break;
                 }
                 run_end += 1;
             }
 
-            let end_vpn = pages[run_end - 1]
-                .vpn
-                .0
-                .checked_add(1)
-                .ok_or(ENOEXEC)?;
+            let end_vpn = pages[run_end - 1].vpn.0.checked_add(1).ok_or(ENOEXEC)?;
             let mut vma = Vma::try_new(
                 VirtAddr::from(pages[run_start].vpn),
                 VirtAddr::from(VirtPageNum(end_vpn)),
@@ -1749,7 +1781,10 @@ impl<T: PageTable> AddressSpace<T> {
             let copy_len = remaining.min(PAGE_SIZE - page_offset);
             let page_end = page_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             let ppn = translate_page(&self.page_table, vpn).ok_or(ENOEXEC)?;
-            copy_file(file_offset, &mut ppn.get_bytes_array()[page_offset..page_end])?;
+            copy_file(
+                file_offset,
+                &mut ppn.get_bytes_array()[page_offset..page_end],
+            )?;
             virtual_address = virtual_address.checked_add(copy_len).ok_or(ENOEXEC)?;
             file_offset = file_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             remaining -= copy_len;
@@ -1758,11 +1793,7 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     /// Overlay one PT_LOAD file range from PageCache onto mapped load pages.
-    fn map_load_segment(
-        &mut self,
-        pc: &PageCache,
-        segment: &ElfLoadSegment,
-    ) -> Result<(), isize> {
+    fn map_load_segment(&mut self, pc: &PageCache, segment: &ElfLoadSegment) -> Result<(), isize> {
         self.copy_load_segment(segment, |file_offset, dst| {
             copy_from_page_cache(pc, file_offset, dst)
         })
@@ -1998,10 +2029,7 @@ fn map_permission_from_raw_flags(flags: u32) -> MapPermission {
     map_perm
 }
 
-fn collect_raw_load_segments(
-    phdrs: &[RawPhdr],
-    bias: usize,
-) -> Result<Vec<ElfLoadSegment>, isize> {
+fn collect_raw_load_segments(phdrs: &[RawPhdr], bias: usize) -> Result<Vec<ElfLoadSegment>, isize> {
     let mut segments = Vec::new();
     segments.try_reserve(phdrs.len()).map_err(|_| ENOMEM)?;
     for ph in phdrs {
@@ -2043,11 +2071,7 @@ fn validate_load_segment_file_bounds(
 
 fn elf_load_page_range(segment: &ElfLoadSegment) -> Result<(VirtPageNum, VirtPageNum), isize> {
     let page_start = segment.start & !(PAGE_SIZE - 1);
-    let page_end = segment
-        .end
-        .checked_add(PAGE_SIZE - 1)
-        .ok_or(ENOEXEC)?
-        & !(PAGE_SIZE - 1);
+    let page_end = segment.end.checked_add(PAGE_SIZE - 1).ok_or(ENOEXEC)? & !(PAGE_SIZE - 1);
     if page_start >= page_end {
         return Err(ENOEXEC);
     }
@@ -2126,10 +2150,7 @@ fn prefetch_load_pages(pc: &PageCache, segments: &[ElfLoadSegment]) -> Result<()
             .file_offset
             .checked_add(segment.filesz)
             .ok_or(ENOEXEC)?;
-        let end_page = file_end
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or(ENOEXEC)?
-            >> PAGE_SIZE_BITS;
+        let end_page = file_end.checked_add(PAGE_SIZE - 1).ok_or(ENOEXEC)? >> PAGE_SIZE_BITS;
         if end_page > start_page {
             pc.sync_batch_read_pages(start_page, end_page - start_page)
                 .map_err(|_| EIO)?;

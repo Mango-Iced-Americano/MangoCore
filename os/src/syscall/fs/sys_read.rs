@@ -34,7 +34,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         let event_queue = task.process.signal_event_queue();
         match WaitQueue::wait_until_interruptible(event_queue.wait_queue(), || {
             let ret = read_into_user(&file, token, buf, count);
-            if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
         }) {
             WaitResult::Ready(n) => n,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
@@ -43,7 +47,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     } else if let Some(wq) = file.inode.read_wait_queue() {
         match WaitQueue::wait_until_interruptible(wq, || {
             let ret = read_into_user(&file, token, buf, count);
-            if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
         }) {
             WaitResult::Ready(n) => n,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),

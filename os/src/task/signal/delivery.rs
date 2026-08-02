@@ -152,7 +152,9 @@ fn send_thread_signal_info(
     }
     let should_wake = {
         let mut inner = task.acquire_inner_lock();
-        if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {
+        if is_realtime_signal(signal)
+            && inner.sigpending.queued_count() >= inner.sigpending_limit_cur
+        {
             return Err(EAGAIN);
         }
         if let Some(siginfo) = siginfo {

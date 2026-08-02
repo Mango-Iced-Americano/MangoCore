@@ -1,0 +1,31 @@
+## Granular pwrite timing (averages)
+
+### Scope
+- iozone-musl: 4,096 paired 1 KiB pwrite samples
+- iozone-glibc: 4,096 paired 1 KiB pwrite samples
+- Aggregate below: 8,192 paired samples (the two ABI-equivalent 4,096-call runs).
+- Full raw timing lines: `docs/Work_Log/evidence/2026-07-30/granular-pwrite-rv64-qemu-output.log`.
+
+### pwrite_from_user level
+- UserBuffer::new: 32470.51 cycles (1.12%)
+- File::pwrite_user: 2856896.62 cycles (98.88%)
+- Total: 2889367.14 cycles
+
+### PageCache::write_user level
+- PageEntries::get: 3524.84 cycles (12.07%)
+- acquire_write_lease: 12689.05 cycles (43.44%)
+- UserBuffer::read_at (1KB copy): 8473.35 cycles (29.01%)
+- mark_valid + commit: 1773.31 cycles (6.07%)
+- balance_dirty: 2748.21 cycles (9.41%)
+- Measured stage total: 29208.76 cycles
+
+### ext4 write_at_user level
+- fs_arc + page_cache setup: 7483.91 cycles (0.70%)
+- cache.write_user: 1060337.93 cycles (99.21%)
+- logical_size + retain: 973.53 cycles (0.09%)
+- Measured stage total: 1068795.37 cycles
+
+### Interpretation
+- `cache.write_user` dominates the ext4-level interval. This includes the mandatory nested `[pc-write-timing]` console line, so its absolute value is intentionally console-contaminated.
+- The PageCache sub-stage split excludes that final console line: the 1 KiB UserBuffer copy is the largest measured data-path component, followed by lookup/lease; valid+commit and dirty balancing are small.
+- The pwrite-level `File::pwrite_user` interval likewise contains nested ext4/PageCache diagnostic output. Use it as a call-chain attribution boundary, not a production-cost estimate.

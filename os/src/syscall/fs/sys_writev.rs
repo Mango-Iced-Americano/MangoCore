@@ -29,12 +29,8 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     }
 
     let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
-    let allowed = match apply_fsize_limit(
-        &file,
-        total_len,
-        write_start_offset(&file),
-        fsize_limit,
-    ) {
+    let allowed = match apply_fsize_limit(&file, total_len, write_start_offset(&file), fsize_limit)
+    {
         Ok(count) => count,
         Err(errno) => return errno,
     };
@@ -53,9 +49,12 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         let mut done = 0usize;
         while done < allowed {
             let want = (allowed - done).min(chunk_cap);
-            let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+            let mut accessible =
+                user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
             if accessible == 0 {
-                if done > 0 { return done as isize; }
+                if done > 0 {
+                    return done as isize;
+                }
                 accessible = want.min(crate::config::PAGE_SIZE);
             }
 
@@ -66,14 +65,24 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
 
             let n = match file.write_user(&ubuf) {
                 Ok(n) => n,
-                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+                Err(e) => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(e as isize)
+                    }
+                }
             };
 
             done += n;
-            if n == 0 || n < accessible { break; }
+            if n == 0 || n < accessible {
+                break;
+            }
 
             if let Some(task) = current_task() {
-                if crate::task::has_actionable_signal(&task) { break; }
+                if crate::task::has_actionable_signal(&task) {
+                    break;
+                }
             }
         }
         return done as isize;
@@ -84,7 +93,9 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     if kbuf.try_reserve(chunk_cap).is_err() {
         return -(SyscallErr::ENOMEM as isize);
     }
-    unsafe { kbuf.set_len(chunk_cap); }
+    unsafe {
+        kbuf.set_len(chunk_cap);
+    }
 
     let mut done = 0usize;
     while done < allowed {

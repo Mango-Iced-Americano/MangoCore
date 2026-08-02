@@ -75,6 +75,8 @@ impl BlockDevice for VirtIOBlock {
                 .checked_add(offset / BLOCK_SZ)
                 .and_then(|current_block| current_block.checked_mul(BLOCK_RATIO))
                 .ok_or(BlockDeviceError::OutOfBounds)?;
+            // One record per submitted VirtIO request, after any DMA fallback split.
+            perf::record_virtio_read();
             let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
@@ -112,6 +114,8 @@ impl BlockDevice for VirtIOBlock {
                 .checked_add(offset / BLOCK_SZ)
                 .and_then(|current_block| current_block.checked_mul(BLOCK_RATIO))
                 .ok_or(BlockDeviceError::OutOfBounds)?;
+            // One record per submitted VirtIO request, after any DMA fallback split.
+            perf::record_virtio_write(chunk_len);
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
@@ -130,6 +134,7 @@ impl BlockDevice for VirtIOBlock {
         if !dev.supports_flush() {
             return Err(BlockDeviceError::FlushUnsupported);
         }
+        perf::record_device_flush();
         dev.flush().map_err(|_| BlockDeviceError::DeviceError)
     }
 

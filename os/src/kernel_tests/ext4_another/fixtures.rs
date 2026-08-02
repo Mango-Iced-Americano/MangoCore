@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::drivers::block::{
@@ -26,6 +26,65 @@ impl BlockDevice for ZeroBlockDevice {
 pub(super) struct FlushFailsAfterMountDevice {
     inner: Arc<dyn BlockDevice>,
     flush_count: AtomicUsize,
+}
+
+/// Fails flushes only while explicitly armed by a test.
+///
+/// Place this outside `BarrierBlockDevice` so a failure rejects the persistence
+/// barrier before the barrier can commit its pending blocks to stable media.
+pub(super) struct ArmableFlushDevice {
+    inner: Arc<dyn BlockDevice>,
+    failure_armed: AtomicBool,
+    flush_count: AtomicUsize,
+}
+
+impl ArmableFlushDevice {
+    pub(super) fn new(inner: Arc<dyn BlockDevice>) -> Self {
+        Self {
+            inner,
+            failure_armed: AtomicBool::new(false),
+            flush_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub(super) fn arm_failure(&self) {
+        self.failure_armed.store(true, Ordering::Release);
+    }
+
+    pub(super) fn disarm_failure(&self) {
+        self.failure_armed.store(false, Ordering::Release);
+    }
+
+    pub(super) fn flush_count(&self) -> usize {
+        self.flush_count.load(Ordering::Acquire)
+    }
+}
+
+impl BlockDevice for ArmableFlushDevice {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        self.inner.read_block(block_id, buf)
+    }
+
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
+        self.inner.write_block(block_id, buf)
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        self.flush_count.fetch_add(1, Ordering::AcqRel);
+        if self.failure_armed.load(Ordering::Acquire) {
+            Err(BlockDeviceError::DeviceError)
+        } else {
+            self.inner.flush()
+        }
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.inner.supports_reliable_flush()
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        self.inner.size_bytes()
+    }
 }
 
 impl FlushFailsAfterMountDevice {
@@ -67,6 +126,8 @@ impl BlockDevice for FlushFailsAfterMountDevice {
 pub(super) struct BarrierBlockDevice {
     inner: Arc<dyn BlockDevice>,
     pending: Mutex<BTreeMap<usize, [u8; BLOCK_SZ]>>,
+    write_count: AtomicUsize,
+    flush_count: AtomicUsize,
 }
 
 impl BarrierBlockDevice {
@@ -74,7 +135,17 @@ impl BarrierBlockDevice {
         Self {
             inner,
             pending: Mutex::new(BTreeMap::new()),
+            write_count: AtomicUsize::new(0),
+            flush_count: AtomicUsize::new(0),
         }
+    }
+
+    pub(super) fn write_count(&self) -> usize {
+        self.write_count.load(Ordering::Acquire)
+    }
+
+    pub(super) fn flush_count(&self) -> usize {
+        self.flush_count.load(Ordering::Acquire)
     }
 }
 
@@ -95,6 +166,7 @@ impl BlockDevice for BarrierBlockDevice {
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
+        self.write_count.fetch_add(1, Ordering::AcqRel);
         let mut pending = self.pending.lock();
         for (offset, chunk) in buf.chunks_exact(BLOCK_SZ).enumerate() {
             let current_block = block_id
@@ -108,6 +180,7 @@ impl BlockDevice for BarrierBlockDevice {
     }
 
     fn flush(&self) -> BlockDeviceResult {
+        self.flush_count.fetch_add(1, Ordering::AcqRel);
         let pending = core::mem::take(&mut *self.pending.lock());
         for (block_id, block) in pending {
             self.inner.write_block(block_id, &block)?;
