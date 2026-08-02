@@ -132,16 +132,34 @@ pub fn run_tasks() {
         schedule_tick = schedule_tick.wrapping_add(1);
         #[cfg(target_arch = "riscv64")]
         crate::hal::arch::riscv::plic::report_unhandled_irq();
-        // Read one character from UART per iteration. Handle in priority order:
-        // 1. Magic key (Ctrl+T) → trace dump + shutdown
-        // 2. Other input → stash, then feed the TTY line discipline.  The
-        //    production path owns both task and epoll readiness notification.
-        //
         #[cfg(target_arch = "riscv64")]
-        let should_poll_console = true;
+        {
+            let stage_t0 = sched_profile_start(sched_profile);
+            let irq_pending = crate::hal::arch::riscv::sbi::take_runtime_console_rx_interrupt();
+            let polled = crate::hal::arch::riscv::sbi::poll_runtime_console_rx();
+            if irq_pending || polled {
+                crate::hal::arch::riscv::sbi::drain_runtime_console_rx(|ch| {
+                    if crate::trace::check_magic_key(ch, "schedule") {
+                        true
+                    } else {
+                        crate::fs::dev::tty::Teletype::receive_console_char(ch)
+                    }
+                });
+            }
+            crate::hal::arch::riscv::sbi::resume_runtime_console_rx(
+                crate::fs::dev::tty::Teletype::input_has_space(),
+            );
+            crate::hal::arch::riscv::sbi::report_runtime_console_rx_overruns();
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_CONSOLE_CALLS,
+                &SCHED_STAGE_CONSOLE_CYCLES_TOTAL,
+                &SCHED_STAGE_CONSOLE_CYCLES_MAX,
+                stage_t0,
+            );
+        }
         #[cfg(not(target_arch = "riscv64"))]
-        let should_poll_console = true;
-        if should_poll_console {
+        {
             let stage_t0 = sched_profile_start(sched_profile);
             let ch = crate::hal::console_getchar() as u8;
             if ch != 0xFF {

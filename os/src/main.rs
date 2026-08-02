@@ -117,6 +117,8 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
     crate::hal::configure_runtime_console();
 
     machine_init();
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::init_runtime_console_rx();
     crate::task::timer_subsystem_init();
     match random::init() {
         Ok(()) => println!("[kernel] PRNG initialized."),

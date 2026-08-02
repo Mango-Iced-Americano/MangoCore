@@ -136,6 +136,10 @@ impl TtyInputBuffer {
         true
     }
 
+    fn has_space(&self) -> bool {
+        self.len < self.bytes.len()
+    }
+
     fn pop(&mut self) -> Option<u8> {
         if self.len == 0 {
             return None;
@@ -370,15 +374,28 @@ impl Teletype {
     /// the character has actually made input readable.
     pub fn receive_stashed() {
         while let Some(byte) = crate::trace::pop_stashed() {
-            Self::receive_char(byte);
+            let _ = Self::receive_char(byte);
         }
     }
 
-    fn receive_char(byte: u8) {
-        let (notify_readable, vintr_event) = {
+    /// Deliver one console transport byte in task context.
+    ///
+    /// Returns false only when the TTY input ring rejected the byte, so the
+    /// UART producer can apply transport-level backpressure.
+    pub fn receive_console_char(byte: u8) -> bool {
+        Self::receive_char(byte)
+    }
+
+    /// Return whether the TTY input ring can accept another transport byte.
+    pub fn input_has_space() -> bool {
+        TTY.inner.lock().input.has_space()
+    }
+
+    fn receive_char(byte: u8) -> bool {
+        let (notify_readable, vintr_event, input_overflow) = {
             let mut inner = TTY.inner.lock();
             let Some(byte) = inner.map_input(byte) else {
-                return;
+                return true;
             };
             if is_vintr(&inner, byte) {
                 let event = VintrEvent {
@@ -390,9 +407,9 @@ impl Teletype {
                     inner.input.clear();
                     inner.reset_noncanonical_read();
                 }
-                (false, Some(event))
+                (false, Some(event), false)
             } else {
-                let input_changed = if inner.is_canonical() {
+                let (input_changed, input_overflow) = if inner.is_canonical() {
                     if inner.termios.cc[VERASE] != VDISABLE && byte == inner.termios.cc[VERASE] {
                         if inner.input.erase_pending()
                             && inner.termios.lflag & LocalModes::ECHO.bits() != 0
@@ -403,7 +420,7 @@ impl Teletype {
                                 print!("{}", byte as char);
                             }
                         }
-                        false
+                        (false, false)
                     } else if inner.termios.cc[VKILL] != VDISABLE && byte == inner.termios.cc[VKILL]
                     {
                         let removed = inner.input.kill_pending();
@@ -416,11 +433,12 @@ impl Teletype {
                                 print!("\n");
                             }
                         }
-                        false
+                        (false, false)
                     } else if inner.termios.cc[VEOF] != VDISABLE && byte == inner.termios.cc[VEOF] {
                         inner.input.finish_eof();
-                        true
+                        (true, false)
                     } else if inner.is_delimiter(byte) {
+                        let input_was_full = !inner.input.has_space();
                         let accepted = inner.input.finish_line(byte);
                         if inner.termios.lflag & (LocalModes::ECHO | LocalModes::ECHONL).bits() != 0
                         {
@@ -430,13 +448,13 @@ impl Teletype {
                                 print!("{}", byte as char);
                             }
                         }
-                        accepted
+                        (accepted, input_was_full)
                     } else {
                         let accepted = inner.input.push_pending(byte);
                         if accepted && inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
                             print!("{}", byte as char);
                         }
-                        false
+                        (false, !accepted)
                     }
                 } else {
                     let accepted = inner.input.push(byte);
@@ -455,11 +473,16 @@ impl Teletype {
                             );
                         }
                     }
-                    accepted
+                    (accepted, !accepted)
                 };
-                (input_changed, None)
+                (input_changed, None, input_overflow)
             }
         };
+
+        if input_overflow {
+            #[cfg(target_arch = "riscv64")]
+            crate::hal::arch::riscv::sbi::note_tty_input_overrun();
+        }
 
         if let Some(event) = vintr_event {
             let sent = send_vintr_sigint(event.foreground_pgid);
@@ -473,12 +496,13 @@ impl Teletype {
                 event.foreground_pgid,
                 sent,
             );
-            return;
+            return true;
         }
         if notify_readable {
             TTY.read_waiters
                 .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
         }
+        !input_overflow
     }
 
     /// Read foreground_pgid for debugging.
