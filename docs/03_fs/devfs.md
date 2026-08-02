@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-29"
+last_updated: "2026-08-02"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -136,11 +136,13 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 控制台终端。`/dev/console` 是 TTY 的别名。
 
-**输入生产与通知**：调度器从物理 UART 取字符，先经过 magic-key 识别，再放入 trace
-stash；`Teletype::receive_stashed()` 将字符送入 line discipline。只有生产侧在字符真正使
-TTY 可读后才通知普通 read waiter 和 epoll listener；`read_at()` 只消费数据，`poll()` 只
-查询状态，两者都不会反向通知自己的读等待队列。这个约束避免 `WaitQueue` 在持锁重查
-read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形成单核自锁。
+**输入生产与通知**：RV64 运行时控制台通过 PLIC UART RX 中断有界地清空硬件 FIFO，并将
+字节写入原子 SPSC 接收环；调度器在任务上下文取出这些字节，执行 magic-key 识别后调用
+TTY line discipline。环或 TTY 输入空间耗尽时会计数并暂时屏蔽 UART RX 中断，待调度器恢复
+空间后重新打开，避免 ISR 获取 TTY 锁或静默覆盖字节。LA64 保持既有轮询输入路径。只有生产
+侧在字符真正使 TTY 可读后才通知普通 read waiter 和 epoll listener；`read_at()` 只消费数据，
+`poll()` 只查询状态，两者都不会反向通知自己的读等待队列。这个约束避免 `WaitQueue` 在持锁
+重查 read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形成单核自锁。
 
 **输入变换与规范模式**：输入先应用 `IGNCR` / `ICRNL` / `INLCR`。默认 `ICRNL` 因而会
 把串口 Enter 的 `CR` 转为用户态 `NL`。`ICANON` 下使用固定 1024 字节环形队列保存完整
