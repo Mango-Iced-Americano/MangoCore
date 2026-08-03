@@ -730,6 +730,21 @@ impl IndexNode for Teletype {
             },
             // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
             TeletypeCommand::TCXONC => Ok(0),
+            TeletypeCommand::TIOCSCTTY => {
+                let Some(task) = crate::task::current_task() else {
+                    return Err(SyscallErr::EPERM);
+                };
+                let caller_sid = task.process.getsid();
+                if task.process.pid != caller_sid {
+                    return Err(SyscallErr::EPERM);
+                }
+                if inner.controlling_sid != 0 && inner.controlling_sid != caller_sid {
+                    return Err(SyscallErr::EPERM);
+                }
+                inner.controlling_sid = caller_sid;
+                inner.foreground_pgid = task.process.getpgid() as u32;
+                Ok(0)
+            }
             TeletypeCommand::TIOCGPGRP => {
                 let caller_sid = crate::task::current_task()
                     .map(|task| task.process.getsid())
@@ -834,6 +849,9 @@ pub enum TeletypeCommand {
 
     /// Software flow control (tcflow).
     TCXONC = 0x540A,
+
+    /// Set this terminal as the calling session leader's controlling terminal.
+    TIOCSCTTY = 0x540E,
 
     /// Get the process group ID of the foreground process group on this terminal.
     TIOCGPGRP = 0x540F,

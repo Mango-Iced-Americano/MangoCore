@@ -159,7 +159,7 @@ TTY line discipline。环或 TTY 输入空间耗尽时会计数并暂时屏蔽 U
 
 **写**：将 UTF-8 字符串直接输出到串口（`print!`）。
 
-**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCSPGRP` 拒绝 0、不存在的 pgrp、跨 session 的 pgrp，且要求调用者处于 controlling session；`TIOCGPGRP` 只报告已设置的 foreground pgrp，不再伪造调用者 pgid。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
+**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCSCTTY`（session leader 将此 TTY 设为 controlling terminal，并以调用者的 session/pgrp 初始化终端状态）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCSCTTY` 拒绝非 session leader 或已归属其他 session 的 TTY；`TIOCSPGRP` 拒绝 0、不存在的 pgrp、跨 session 的 pgrp，且要求调用者处于 controlling session；`TIOCGPGRP` 只报告已设置的 foreground pgrp，不再伪造调用者 pgid。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
 
 ### Pipe（匿名管道）
 
