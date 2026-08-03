@@ -1,3 +1,0 @@
-container=4abf1ec06ea7764ad07610e69830a5a0c6377de993bec12f739bc7823a82b944\n/home/pxy/projects/MangoCore -> /app
-/etc/localtime -> /etc/localtime
-
