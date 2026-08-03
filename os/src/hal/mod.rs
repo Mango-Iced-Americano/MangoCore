@@ -17,6 +17,7 @@ pub mod platform;
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::enable_local_timer_interrupt;
+pub use arch::init_kernel_mapping_metadata;
 pub use arch::kernel_tlb_invalidate;
 pub use arch::kstack_alloc;
 pub use arch::program_timer_delta;

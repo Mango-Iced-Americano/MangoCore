@@ -174,9 +174,10 @@ LA64 QEMU 将 FDT 作为必需启动合同：缺失或非法时明确失败；2K
 FDT 原始字节位于 `.bss.boot`，每个双架构 linker script 都显式把该输入节放在 `sbss`
 之前；它既不会被 `mem_clear()` 覆盖，也不会以 2 MiB 零填充扩大 objcopy 二进制。
 
-当前批次只建立 HAL 数据源和只读模型。frame allocator、动态 early-MMIO 页表以及
-FS/Net/Driver 消费者分别留给后续 MM 与队友负责的共享子系统批次；在这些消费者迁移前，
-旧静态配置仍是实际资源分配/设备访问来源。
+MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame allocator、
+内核 RAM 映射、LA64 identity dirty 元数据以及用户可见内存统计。QEMU 的运行期 FDT
+因此是内存容量权威来源；2K1000 无合法 FDT 时仍通过同一接口读取静态 fallback。
+动态 early-MMIO 映射以及 FS/Net/Driver 的设备资源迁移仍属于后续共享子系统批次。
 
 ## 5. 架构选择
 

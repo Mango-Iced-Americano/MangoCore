@@ -8,8 +8,8 @@ use crate::mm::{
 use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sgid, current_sid, current_suid, current_task, current_tid,
-    current_uid, current_user_token, suspend_current_and_run_next, update_ready_nice, LimitPair,
+    current_sgid, current_sid, current_suid, current_task, current_tid, current_uid,
+    current_user_token, suspend_current_and_run_next, update_ready_nice, LimitPair,
     ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
@@ -642,9 +642,7 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
 pub fn sys_setfsuid(fsuid: usize) -> isize {
     let fsuid = match parse_optional_id(fsuid) {
         Ok(Some(fsuid)) => fsuid,
-        Ok(None) | Err(_) => {
-            return current_task().unwrap().acquire_inner_lock().fsuid as isize
-        }
+        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsuid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -658,9 +656,7 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
 pub fn sys_setfsgid(fsgid: usize) -> isize {
     let fsgid = match parse_optional_id(fsgid) {
         Ok(Some(fsgid)) => fsgid,
-        Ok(None) | Err(_) => {
-            return current_task().unwrap().acquire_inner_lock().fsgid as isize
-        }
+        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsgid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -709,9 +705,11 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
             Some(len) => len,
             None => return EFAULT,
         };
-        if !task.process.vm().read(|vm| {
-            vm.contains_valid_buffer(list as usize, byte_len, MapPermission::R)
-        }) {
+        if !task
+            .process
+            .vm()
+            .read(|vm| vm.contains_valid_buffer(list as usize, byte_len, MapPermission::R))
+        {
             return EFAULT;
         }
         if size > LEGACY_NGROUPS_MAX {
@@ -1736,7 +1734,7 @@ pub fn sys_sysinfo(info: *mut Sysinfo) -> isize {
                 procs as usize * LINUX_SYSINFO_LOADS_SCALE / SEC_5_MIN,
                 procs as usize * LINUX_SYSINFO_LOADS_SCALE / SEC_15_MIN,
             ],
-            totalram: crate::config::USABLE_MEMORY_SIZE,
+            totalram: crate::mm::total_memory_kbytes().saturating_mul(1024),
             freeram: crate::mm::unallocated_frames() * PAGE_SIZE,
             sharedram: UNIMPLEMENT,
             bufferram: UNIMPLEMENT,
@@ -2206,9 +2204,7 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> is
     // 先取得 Arc 和原子 mask，再访问调用者地址空间；这里不持 registry、
     // task 或 runqueue 锁，也不会把锁跨越可能缺页的用户拷贝。
     let allowed = task.cpus_allowed();
-    match UserPtrMut::<usize>::from_addr(mask as usize)
-        .write(current_user_token(), &allowed)
-    {
+    match UserPtrMut::<usize>::from_addr(mask as usize).write(current_user_token(), &allowed) {
         Ok(()) => mask_bytes as isize,
         Err(errno) => errno,
     }

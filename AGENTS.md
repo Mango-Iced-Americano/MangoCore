@@ -358,7 +358,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 RV64 从 `a1` 直接取得 FDT；LA64 从 `a2` 的 EFI system table 按 `EFI_FDT_GUID` 查找
 FDT，QEMU 缺失时失败，2K1000 缺失时允许静态板级回退。RV64 timer 频率来自 FDT
 `/cpus/timebase-frequency`，LA64 保持 CPUCFG 探测；两者不能用调度 `TICKS_PER_SEC`
-互相替代。MM/Driver 切换到运行期资源前必须保留静态路径，避免半迁移状态。
+互相替代。MM 已以运行期固件 region 作为 QEMU 的内存拓扑来源，并让 2K1000 静态
+fallback 填入同一接口；Driver 切换动态资源前仍须保留现有板级路径，避免半迁移状态。
 早期顺序固定为“冻结入口参数 → 架构 bootstrap → 固件资源发现 → 清 BSS”；LA64
 不得在建立 DMW、异常入口和页表寄存器基线前进入资源解析。
 

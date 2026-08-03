@@ -1093,3 +1093,19 @@
   专项探针；未运行时必须登记为 NOT RUN。
 - **相关文件**: `os/src/task/process.rs`, `os/src/task/signal/pending.rs`,
   `os/src/task/signal/mod.rs`, `os/src/syscall/process/{time,signal}.rs`
+
+## 物理页合法性：静态地址范围不能替代动态 allocator 所有权
+
+- **危险模式**: 初始化时用 `[skernel, ekernel)` 排除内核镜像是正确的，但把同一条件永久
+  用作“物理页能否映射给用户”的判定会漏掉后续所有权转交。linker 内嵌 initramfs 等载荷的
+  完整页复制完成后仍位于原地址，却已经登记为可复用回收页。
+- **固定协议**: 启动区间生成负责排除当时仍有 owner 的内核/固件范围；fault/uaccess 的
+  后验检查只验证整页属于固件可用 DRAM，实时所有权由页表、VMA 和 `FrameTracker` 保证。
+  若确实需要回答 allocator owner，再使用专门接口；不要把 allocator 锁塞进每页用户复制，
+  也不要把“仍位于链接范围”误当作“所有权从未转交”。
+- **定位技巧**: 当 alloc/free 测试通过，而 user fault 的 PTE 后验校验在双架构同点失败时，
+  先记录实际 PPN 并对照 recycled/reclaimed 来源；不要因为测试涉及 MMU 就先归因于 TLB。
+- **验收**: 保留修改前 RED，修正后用同一双架构映射、权限和回收用例转 GREEN；另外探测
+  运行期最后一个 usable 页，防止动态大内存仍被旧编译期上界截断。
+- **相关文件**: `os/src/mm/frame_allocator.rs`, `os/src/mm/address_space.rs`,
+  `os/src/kernel_tests/mm.rs`

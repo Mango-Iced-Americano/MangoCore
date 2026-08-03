@@ -3,10 +3,11 @@ title: "物理页分配器与 FrameTracker"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-13
+last_update: 2026-08-03
 tags: [mm, frame, allocator, oom]
 code_paths:
   - "os/src/mm/frame_allocator.rs"
+  - "os/src/hal/firmware/"
   - "os/src/hal/arch/loongarch64/config.rs"
   - "os/src/hal/arch/riscv/config.rs"
 ---
@@ -72,9 +73,12 @@ pub struct StackFrameAllocator {
 
 ## 3. 初始化范围
 
-平台用 `MEMORY_REGIONS` 描述真实 DRAM bank，用
-`FIRMWARE_RESERVED_REGIONS` 描述启动后仍由固件、其他 CPU 或设备持有的 DRAM。
-2K1000LA 当前布局为：
+QEMU 的权威内存拓扑来自 BSP 在清 BSS 前冻结的 FDT：
+`hal::firmware::memory_regions()` 描述 DRAM bank，
+`firmware_reserved_regions()` 合并板级必需 carveout、FDT memreserve、
+`/reserved-memory` 与原始 DTB 页面。帧分配器不再使用 QEMU 的编译期容量常量。
+2K1000LA 在 U-Boot 没有提供合法 EFI/FDT 时，仍把经过实板验证的静态双 bank
+填入同一固件资源表，因此下游 MM 不维护第二套分配路径：
 
 | 类型 | 物理范围 | 处理 |
 |------|----------|------|
@@ -83,16 +87,23 @@ pub struct StackFrameAllocator {
 | DRAM bank 1 | `[0x90000000, 0x100000000)` | 从 `ekernel` 后开始分配 |
 | 临时 carveout | `[0x0cbf4000, 0x10000000)` | U-Boot、DVO framebuffer、CPU1 park loop、BPI/SMBIOS；完成所有权交接前保留 |
 
-`MEMORY_SIZE=2 GiB` 表示板载 DRAM 总量，`MEMORY_END=4 GiB` 是最高物理地址上界，
-二者都不能代替 region 表。当前 `USABLE_MEMORY_SIZE=0x7cbf3000`，即
-`2043852 KiB`；`/proc/meminfo`、`sysinfo(2)` 和 RamFS `statfs` 使用该值，避免把
-尚未完成所有权交接的 carveout 报告为可用内存。初始化会对 DRAM region 逐一减去：
+`MEMORY_SIZE=2 GiB` 表示实板安装容量，`MEMORY_END=4 GiB` 是静态 fallback 的最高
+物理地址；二者都不能代替运行期 region 表。`/proc/meminfo`、`sysinfo(2)` 和 RamFS
+`statfs` 使用 `firmware::usable_memory_size()`，避免把固件 carveout 报告为可用内存。
+初始化会对每个 DRAM bank 逐一减去：
 
 1. 物理第 0 页，避免空指针与 LA64 页表 token 语义冲突。
 2. `[skernel, ekernel)` 内核镜像。
 3. `FIRMWARE_RESERVED_REGIONS` 中仍有外部所有者的区间。
 
-RISC-V OpenSBI 平台另外固定保留 `[0x80000000, 0x80200000)`。内核链接与入口位于 `0x80200000`；低端 2 MiB 既不进入 frame allocator，也不参与启动期批量清零。否则首次 SATP 切换可能覆盖仍在执行的固件页，表现为 OpenSBI 与内核入口反复重启。`USABLE_MEMORY_SIZE` 同步扣除该区间。
+RISC-V OpenSBI 平台另外固定保留 `[0x80000000, 0x80200000)`。该板级所有权不会
+因为 QEMU FDT 未列出 reserved-memory 而丢失，而是先加入固件资源表，再和动态保留区
+统一合并。内核链接与入口位于 `0x80200000`；低端 2 MiB 既不进入 frame allocator，
+也不参与启动期批量清零。
+
+固件保留区和内核镜像允许重叠且不要求预先排序。`for_each_usable_ram_range()` 对
+memory 起止向内取整页、对 exclusion 向外取整页，并以无堆算法计算区间并集；这样既能
+处理 DTB 落入 kernel BSS 的情况，也不会在 LA64 不连续内存的 MMIO hole 上做清零或分配。
 
 ## 4. FrameTracker 生命周期
 
@@ -157,7 +168,9 @@ frame_alloc()
   └── Arc::new(FrameTracker)
 ```
 
-若启用 `zero_init` 特性，fresh 页可能走 `new_uninit` 优化；这属于编译特性控制，不改变 `frame_alloc()` 对调用者暴露的所有权模型。
+若启用 `zero_init` 特性，BSP 会在建堆前沿同一个动态 usable-region 迭代器清零所有
+未来 fresh 页，并跳过内核、固件 carveout 和内存洞；fresh 页随后可走 `new_uninit`
+快路径。这属于编译特性控制，不改变 `frame_alloc()` 对调用者暴露的所有权模型。
 
 ## 7. 释放路径与重复释放防御
 
@@ -168,6 +181,13 @@ frame_alloc()
 3. 若合法，则压入 `recycled` 并设置 `recycled_flags`。
 
 重复释放是严重内存破坏，分配器用 `recycled_flags` 做 O(1) 检测，而不是遍历 `recycled` 向量。这一点对高频页释放路径更稳定。
+
+`is_allocatable_ram_phys_addr()` 是 fault/uaccess 使用的无锁物理拓扑后验检查：它确认整页
+落在一个固件 DRAM bank 中、不属于第 0 页，也不和固件保留区重叠；当前页究竟由哪个 VMA
+或 `FrameTracker` 持有，仍由上层生命周期保证。它不能永久排除 `[skernel, ekernel)`，因为
+linker payload 的完整页在复制后仍保留原物理地址，却已由
+`frame_reclaim_linker_range()` 正式转交。把 allocator 的 `RwLock` 引入每页 uaccess 也不可取，
+会让用户复制热路径与帧分配产生无谓竞争。
 
 ## 8. 与 VmPageStore 的关系
 

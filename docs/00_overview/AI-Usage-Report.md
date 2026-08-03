@@ -1188,6 +1188,29 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   exit 0、无 mutation、panic、fatal 或 timeout。并发 fork/unmap 与活跃 copy 的定向动态
   竞态为 NOT RUN；当前证据由 VM 锁域静态证明与覆盖主要调用点的初赛回归共同组成。
 
+### Case 49: 双架构运行期内存拓扑与 8 GiB 适配
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/dynamic-memory-8g-summary.md`；DeepSeek 的 task、manifest、
+  分析和完整 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责固件 usable-range、allocator ownership、LA64 dirty 元数据和 ABI
+  统计设计，并复核源码与原始日志；DeepSeek 先做设计/锁路径只读审查，再通过受限网关串行
+  执行 normal/2K1000 build 与双架构 8 核 8 GiB focused 门禁，不修改、提交或上传源码。
+- Problem: QEMU frame allocator、启动清零、LA64 dirty 位图和内存统计仍受编译期
+  `MEMORY_END` 限制，无法可靠消费比赛的 8 GiB；LA64 多 bank 间还有 MMIO hole，不能简单按
+  最高地址线性清零。
+- Implemented change: FDT/固件 region 与保留区贯穿无堆 usable-range 迭代器、multi-region
+  allocator、内核映射元数据和用户 ABI；LA64 dirty bitmap 按运行期最高 DRAM 建立，QEMU
+  统一支持 `QEMU_MEMORY=8G`，永久 ktest 探测旧静态上界之外的最高可用页。
+- AI adjudication: 首轮新增门禁通过但两个既有 fault-in 用例失败。DeepSeek 推测为 8 核 TLB
+  时序问题，GPT/Codex 从 `ReclaimedRegion` 生命周期证明真实根因是“永久排除整个 linker
+  内核范围”误拒绝已转交页，恢复无锁固件拓扑检查后同一双架构用例由 RED 转为 GREEN；
+  同时拒绝把 allocator 读锁留在每页 uaccess 热路径。
+- Verification: 最终受测 tracked diff SHA-256 为
+  `3bd1913ba72b0622781a59bb0bb4f6098a3ed385fc0c64184c3aa5d283ff1859`；RV64/LA64
+  `CORE_NUM=8 QEMU_MEMORY=8G KTEST=mm` 均 6/6、`dynamic_above_static=true`，分别报告
+  8189/8190 MiB。双架构 normal 与 2K1000 build 均通过；实板、DMA 与全容量压力为 NOT RUN。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1300,6 +1323,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b79-interval-timer-summary.md` | SMP 进程级 legacy interval timer | 记录 TCB→PCB owner 迁移、三类时钟域、fork/exec/exit 生命周期、模型结论纠错及双架构 8 核 focused/初赛冻结证据 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b80-posix-timer-pending-summary.md` | SMP POSIX timer 精确 pending | 记录对象/装载/事件三类身份、per-timer overrun、双锁拆分、signalfd 映射、双架构 8 核 focused 冻结证据与专项 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b81-shared-signal-hint-summary.md` | SMP shared signal hint 原子发布 | 记录锁外 stale store 交错、writer mutex 全序与 Release/Acquire 分工、双架构 8 核构建/focused 冻结证据及精确注入 NOT RUN |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/dynamic-memory-8g-summary.md` | 双架构运行期内存拓扑与 8 GiB 适配 | 记录固件 region→allocator/映射/ABI 链路、linker 回收页 RED→GREEN、DeepSeek 初步误归因裁决及双架构 8 核 8 GiB 6/6 门禁 |
 
 ## 9. 交互记录与留痕方式
 

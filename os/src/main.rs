@@ -69,21 +69,28 @@ core::arch::global_asm!(include_str!(concat!(env!("OUT_DIR"), "/initramfs.S")));
 
 fn mem_clear() {
     extern "C" {
+        #[cfg(feature = "zero_init")]
+        fn skernel();
+        #[cfg(feature = "zero_init")]
+        fn ekernel();
         fn sbss();
         fn ebss();
     }
-    #[cfg(feature = "zero_init")]
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            sbss as usize as *mut u8,
-            crate::config::MEMORY_END - sbss as usize,
-        )
-        .fill(0);
-    }
-    #[cfg(not(feature = "zero_init"))]
     unsafe {
         core::slice::from_raw_parts_mut(sbss as usize as *mut u8, ebss as usize - sbss as usize)
             .fill(0);
+    }
+
+    #[cfg(feature = "zero_init")]
+    {
+        // `zero_init` 的 fresh-frame 快路径要求所有未来可分配页已经清零。不能再
+        // 按编译期 MEMORY_END 清一段连续地址：LA64 有内存洞，QEMU 的 `-m`
+        // 也会改变 RAM 末端。复用固件 region 迭代器，并排除整个内核镜像，既
+        // 保护 boot stack/FDT 快照，也与随后 frame allocator 的所有权边界一致。
+        let kernel_image = [(skernel as usize, ekernel as usize)];
+        hal::firmware::for_each_usable_ram_range(&kernel_image, |start, end| unsafe {
+            core::slice::from_raw_parts_mut(start as *mut u8, end - start).fill(0);
+        });
     }
 }
 

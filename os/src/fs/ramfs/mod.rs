@@ -166,7 +166,7 @@ impl FileSystem for RamFS {
             (self.max_pages, self.max_pages.saturating_sub(used_pages))
         } else {
             (
-                crate::config::USABLE_MEMORY_SIZE / PAGE_SIZE,
+                crate::mm::total_memory_kbytes().saturating_mul(1024) / PAGE_SIZE,
                 crate::mm::unallocated_frames(),
             )
         };
@@ -747,7 +747,9 @@ impl IndexNode for LockedRamFSInode {
             if is_dir {
                 new_locked.metadata.nlinks += 1;
             }
-            new_locked.children.insert(String::from(new_name), child.clone());
+            new_locked
+                .children
+                .insert(String::from(new_name), child.clone());
             if is_dir {
                 let parent_weak = new_locked.self_ref.clone();
                 drop(new_locked);

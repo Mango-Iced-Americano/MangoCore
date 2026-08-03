@@ -155,6 +155,15 @@ pub(super) fn parse_early_resources() -> bool {
         buf.timebase_frequency = 0;
     }
 
+    // FDT 是运行期拓扑来源，但板级静态 carveout 仍表达固件所有权。例如
+    // RV64 的 OpenSBI 区域通常不会出现在 QEMU 自动生成的 reserved-memory 中。
+    // 先加入这些必需保留区，再与 DTB/memreserve/reserved-memory 统一合并。
+    for &range in crate::config::FIRMWARE_RESERVED_REGIONS {
+        if !push_range(&mut buf.reserved, &mut buf.reserved_count, range) {
+            return false;
+        }
+    }
+
     // Keep the DTB blob out of the frame allocator as well.
     // SAFETY: metadata 与快照由同一个 BSP-only 提交点一次性发布。
     let dtb_paddr = unsafe { (*core::ptr::addr_of!(FDT_SNAPSHOT_META)).source_paddr };
@@ -177,6 +186,7 @@ pub(super) fn parse_early_resources() -> bool {
     if !parse_memreserve(blob, buf) || !parse_node_resources(&fdt, buf) {
         return false;
     }
+    buf.reserved[..buf.reserved_count].sort_unstable_by_key(|range| range.0);
     #[cfg(target_arch = "riscv64")]
     {
         return buf.timebase_frequency != 0;

@@ -5,37 +5,66 @@
 
 use super::{tlb::tlb_invalidate, tlb_global_invalidate};
 use crate::{
-    config::{
-        MEMORY_END, MEMORY_HIGH_BASE_VPN, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK, VPN_SEG_MASK,
-    },
+    config::{MEMORY_HIGH_BASE_VPN, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK, VPN_SEG_MASK},
     mm::{
         address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess,
     },
 };
 use _core::convert::TryFrom;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use bitflags::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Once;
 
 // 恒等映射没有普通叶子 PTE，因此用物理页号索引的软件位图保存 dirty 状态。
-// 位图按最高 DRAM 末端定长，既覆盖 2K1000LA 的 4 GiB 物理地址上限，也不会
-// 把中间 MMIO hole 误认为可分配内存。原子 word 允许不同 CPU 修改不同或相同页，
-// 同时避免 `static mut [bool]` 在并发读写时产生 Rust 数据竞争。
-const IDENTITY_DIRTY_BITS: usize = MEMORY_END / PAGE_SIZE;
-const IDENTITY_DIRTY_WORDS: usize = IDENTITY_DIRTY_BITS.div_ceil(usize::BITS as usize);
-static IDENTITY_DIRTY: [AtomicUsize; IDENTITY_DIRTY_WORDS] =
-    [const { AtomicUsize::new(0) }; IDENTITY_DIRTY_WORDS];
+// 位图上界来自固件发布的最高 DRAM 地址，而不是编译期 MEMORY_END。即使 LA64
+// QEMU 把 8 GiB 拆成低 256 MiB 和高 7.75 GiB，物理地址跨度对应的位图也只有
+// 数百 KiB；保留稠密索引比在缺页/回写路径引入 region 查找和锁更简单可靠。
+// 原子 word 允许不同 CPU 修改同一 word 而不丢位。
+struct IdentityDirtyMap {
+    page_count: usize,
+    words: Box<[AtomicUsize]>,
+}
+
+static IDENTITY_DIRTY: Once<IdentityDirtyMap> = Once::new();
+
+pub(super) fn init_identity_dirty_tracking() {
+    let highest_end = crate::hal::firmware::memory_regions()
+        .iter()
+        .map(|range| range.1)
+        .max()
+        .expect("LA64 firmware did not publish a DRAM region");
+    assert!(
+        highest_end <= (1usize << PALEN),
+        "LA64 firmware DRAM exceeds PALEN"
+    );
+    let page_count = highest_end.div_ceil(PAGE_SIZE);
+    let word_count = page_count.div_ceil(usize::BITS as usize);
+    let mut words = Vec::new();
+    words
+        .try_reserve_exact(word_count)
+        .expect("cannot allocate LA64 identity dirty bitmap");
+    words.resize_with(word_count, || AtomicUsize::new(0));
+    IDENTITY_DIRTY.call_once(|| IdentityDirtyMap {
+        page_count,
+        words: words.into_boxed_slice(),
+    });
+}
 use super::register::MemoryAccessType;
 
-fn identity_dirty_bit(vpn: VirtPageNum) -> Option<(usize, usize)> {
+fn identity_dirty_bit(vpn: VirtPageNum) -> Option<(&'static AtomicUsize, usize)> {
     // vpn.0 已经移除了 PAGE_SIZE_BITS。若在这里使用 VA_MASK，会多保留 VPN 中
     // 不存在的 12 位，并破坏高地址折叠结果。
     let idx = vpn.0 & VPN_MASK;
-    (idx < IDENTITY_DIRTY_BITS).then(|| {
-        let word = idx / usize::BITS as usize;
-        let mask = 1usize << (idx % usize::BITS as usize);
-        (word, mask)
-    })
+    let dirty = IDENTITY_DIRTY
+        .get()
+        .expect("LA64 identity dirty tracking was not initialized");
+    if idx >= dirty.page_count {
+        return None;
+    }
+    let word = &dirty.words[idx / usize::BITS as usize];
+    let mask = 1usize << (idx % usize::BITS as usize);
+    Some((word, mask))
 }
 
 bitflags! {
@@ -540,7 +569,7 @@ impl PageTable for LAFlexPageTable {
             if let Some((word, mask)) = identity_dirty_bit(vpn) {
                 // dirty 位不发布其它数据；映射生命周期仍由 KERNEL_SPACE 锁管理，
                 // 因此这里只需要保证同一 word 的并发 read-modify-write 不丢位。
-                IDENTITY_DIRTY[word].fetch_or(mask, Ordering::Relaxed);
+                word.fetch_or(mask, Ordering::Relaxed);
                 return Ok(());
             }
             return Err(());
@@ -564,7 +593,7 @@ impl PageTable for LAFlexPageTable {
     fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if self.is_ident_map(vpn) {
             if let Some((word, mask)) = identity_dirty_bit(vpn) {
-                IDENTITY_DIRTY[word].fetch_and(!mask, Ordering::Relaxed);
+                word.fetch_and(!mask, Ordering::Relaxed);
                 self.invalidate_page(vpn);
                 return Ok(());
             }
@@ -603,8 +632,7 @@ impl PageTable for LAFlexPageTable {
     }
     fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
         if self.is_ident_map(vpn) {
-            identity_dirty_bit(vpn)
-                .map(|(word, mask)| IDENTITY_DIRTY[word].load(Ordering::Relaxed) & mask != 0)
+            identity_dirty_bit(vpn).map(|(word, mask)| word.load(Ordering::Relaxed) & mask != 0)
         } else {
             self.find_pte(vpn).map(|pte| pte.is_dirty())
         }

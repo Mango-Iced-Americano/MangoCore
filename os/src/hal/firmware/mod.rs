@@ -16,7 +16,7 @@ use core::mem::MaybeUninit;
 use static_provider::{FIRMWARE_RESERVED_REGIONS_FALLBACK, MEMORY_REGIONS_FALLBACK};
 
 pub const MAX_MEMORY_REGIONS: usize = 8;
-pub const MAX_FIRMWARE_RESERVED: usize = 8;
+pub const MAX_FIRMWARE_RESERVED: usize = 16;
 pub const MAX_EARLY_MMIO_RANGES: usize = 128;
 pub const MAX_FDT_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024;
 
@@ -153,6 +153,80 @@ pub fn firmware_reserved_regions() -> &'static [(usize, usize)] {
     &buffer.reserved[..buffer.reserved_count]
 }
 
+/// 遍历固件声明的可用整页 RAM，并额外排除调用者仍持有的物理区间。
+///
+/// 固件保留区可能未按页对齐，也可能与内核镜像等调用者排除区重叠。本函数在
+/// 逐个 DRAM bank 内按页向外扩展排除区，并通过反复寻找下一个边界计算区间并集，
+/// 因此不要求调用者预先排序或合并，也不需要在早期启动阶段分配临时 `Vec`。
+pub fn for_each_usable_ram_range(
+    additional_exclusions: &[(usize, usize)],
+    mut visit: impl FnMut(usize, usize),
+) {
+    let page_size = crate::config::PAGE_SIZE;
+    let page_mask = page_size - 1;
+    let reserved = firmware_reserved_regions();
+    let mut previous_region_end = 0usize;
+
+    for &(raw_start, raw_end) in memory_regions() {
+        assert!(raw_start < raw_end, "empty firmware memory region");
+        assert!(
+            raw_start >= previous_region_end,
+            "firmware memory regions overlap or are unsorted"
+        );
+        previous_region_end = raw_end;
+
+        let start = raw_start
+            .checked_add(page_mask)
+            .expect("firmware memory start alignment overflow")
+            & !page_mask;
+        let end = raw_end & !page_mask;
+        let mut cursor = start.max(page_size);
+
+        while cursor < end {
+            let mut covering_end = cursor;
+            let mut next_start = end;
+            let mut next_end = end;
+
+            for &(excluded_start, excluded_end) in
+                reserved.iter().chain(additional_exclusions.iter())
+            {
+                assert!(
+                    excluded_start < excluded_end,
+                    "empty physical memory exclusion"
+                );
+                let excluded_start = excluded_start & !page_mask;
+                let excluded_end = excluded_end
+                    .checked_add(page_mask)
+                    .expect("physical memory exclusion alignment overflow")
+                    & !page_mask;
+                if excluded_end <= cursor || excluded_start >= end {
+                    continue;
+                }
+                if excluded_start <= cursor {
+                    covering_end = covering_end.max(excluded_end.min(end));
+                } else if excluded_start < next_start {
+                    next_start = excluded_start;
+                    next_end = excluded_end;
+                } else if excluded_start == next_start {
+                    next_end = next_end.max(excluded_end);
+                }
+            }
+
+            if covering_end > cursor {
+                cursor = covering_end;
+                continue;
+            }
+            if cursor < next_start {
+                visit(cursor, next_start.min(end));
+            }
+            if next_start >= end {
+                break;
+            }
+            cursor = next_end.min(end);
+        }
+    }
+}
+
 pub fn early_mmio_ranges() -> &'static [(usize, usize)] {
     // Safety: 页表构造者只读取 BSP 已冻结的早期表。
     let buffer = unsafe { &*core::ptr::addr_of!(MEMORY_BUF) };
@@ -170,9 +244,11 @@ pub fn timebase_frequency() -> usize {
 }
 
 pub fn usable_memory_size() -> usize {
-    memory_regions().iter().fold(0usize, |total, (start, end)| {
-        total.saturating_add(end.saturating_sub(*start))
-    })
+    let mut total = 0usize;
+    for_each_usable_ram_range(&[], |start, end| {
+        total = total.saturating_add(end - start);
+    });
+    total
 }
 
 #[cfg(all(target_arch = "loongarch64", feature = "board_2k1000"))]
