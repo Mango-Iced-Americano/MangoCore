@@ -31,6 +31,10 @@ syscall 层负责参数和权限校验；task/signal 层负责具体投递、取
 
 `signalfd` 和 `sigtimedwait` 取 pending 时会先看线程队列，再看进程 shared pending。
 
+signalfd 的等待通知域放在 `Sighand` 中，而不是 `SignalFd` inode 中。普通 fork 复制 action
+并创建新通知域；`CLONE_SIGHAND` 共享 action 与通知域。共享 open file 只保存 mask，read/poll
+每次都按当前任务动态取得通知域，因此 fd 继承不会改变 pending 的所有权。
+
 B40 后 group-exit 状态不再放在 `ProcessSignalState` 内。fatal signal 的默认动作进入
 `exit_group_and_run_next()`，由进程级原子退出码通知所有 sibling；私有 SIGKILL 负责
 打断睡眠，真正的线程资源清理仍由各 CPU 的任务安全点执行。
@@ -296,6 +300,16 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
 | 无 matching pending | `EAGAIN` |
 
 poll 在有 matching pending 时返回 `EPOLLIN | EPOLLRDNORM`。
+
+阻塞 read、poll 和 epoll 通过 VFS 的 `ReadWaitSource::CurrentSighand` 取得等待队列。信号投递
+遵循固定顺序：在 `task.inner` 或 `process.signal` 锁内提交 pending，释放 owner 锁，再调用
+`ProcessControlBlock::notify_signalfd()`。等待队列只传递“需要重查”的事件，不复制 pending，
+所以多个等待者最终仍由 pending dequeue 唯一决定谁消费信号。
+
+普通 fork 后 child 虽继承同一个 signalfd `File`，但第一次 read/poll 会绑定 child 自己的
+sighand 队列。`CLONE_SIGHAND` 线程共享同一队列。Linux 对继承 epoll 注册有一个明确边界：
+fork 前建立的 epoll 项仍订阅父 sighand，child 需要重新 `epoll_ctl()` 才能监听自己的信号；
+MangoCore 保持同样语义。
 
 `SignalFd::read_at()` 每次读取一个或多个 `SignalfdSiginfo`，没有 matching pending 时直接返回 `EAGAIN`：
 

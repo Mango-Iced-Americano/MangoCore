@@ -741,6 +741,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - develop 融合 Batch 4.1 将工具 ELF 准备改为幂等操作：仅当 interpreter、RPATH 值或
   `DT_RPATH` 类型不符合合同时才执行 `patchelf`。双架构 8 核初赛均 exit 0、marker 完整且
   `mutation_detected=false`，关闭了 Batch 4 的测试证据污染；
+- develop 融合 Batch 5 将 signalfd 的等待 owner 从共享 inode 改为当前 sighand：普通 fork
+  创建独立事件队列，`CLONE_SIGHAND` 共享，VFS read/poll 按当前任务动态解析；线程 private
+  和进程 shared pending 都在 owner 锁外通知，fork 继承的 File 不再睡在父队列。同步修复用户态
+  `waitpid` 对四参数 `wait4` 的错误三参数封装，显式将 rusage 置零。双架构 8 核 L4 regression
+  均 7/7，signalfd 延迟阻塞 read、child 继承 fd 和 RV64 `clone_vm_second_slot` 全部通过，
+  `online_mask=0xff` 且源码指纹稳定；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

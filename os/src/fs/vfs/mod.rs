@@ -50,7 +50,7 @@ pub use file::{
     FileOwnerTarget, PollWaitQueue, SeekFrom, STATUS_MASK,
 };
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
-pub use index_node::{CreateAttrs, IndexNode};
+pub use index_node::{CreateAttrs, IndexNode, ReadWaitSource};
 pub use mount::{
     canonicalize_state, drain_one_dying_lifecycle, normalize_request, BackendLifecycle, MountFS,
     MountFSInode, MountFlags, MountList, MountPath,

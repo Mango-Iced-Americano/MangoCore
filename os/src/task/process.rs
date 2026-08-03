@@ -1607,6 +1607,20 @@ impl ProcessControlBlock {
         self.inner.lock().sighand.clone()
     }
 
+    /// 在释放 PCB inner 后取得当前 sighand 的 signalfd 通知域。
+    pub fn signalfd_events(&self) -> Arc<vfs::event::EventWaitQueue> {
+        let sighand = self.sighand();
+        let events = sighand.lock().signalfd_events();
+        events
+    }
+
+    /// 信号已经发布到权威 pending 队列后，锁外通知 signalfd 等待者重查。
+    pub fn notify_signalfd(&self) {
+        self.signalfd_events().notify_events_all(
+            vfs::event::EPollEvent::EPOLLIN | vfs::event::EPollEvent::EPOLLRDNORM,
+        );
+    }
+
     pub fn futex(&self) -> Arc<Mutex<FutexTable>> {
         self.inner.lock().futex.clone()
     }
@@ -2091,6 +2105,9 @@ impl ProcessControlBlock {
                 .store(pending_bits, Ordering::Release);
             queued
         };
+        if queued {
+            self.notify_signalfd();
+        }
         queued
     }
 
@@ -2489,6 +2506,7 @@ impl ProcessControlBlock {
                         let mut parent_inner = parent_task.acquire_inner_lock();
                         parent_inner.add_signal(exit_signal);
                         drop(parent_inner);
+                        parent_process.notify_signalfd();
                         let _ = wake_interruptible(parent_task);
                     }
                 }

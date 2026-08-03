@@ -100,6 +100,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP POSIX timer 精确 pending | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 预分配 sigqueue/overrun 语义对照、对象身份与双锁路径审查、双架构 8 核 focused LTP | instance/arm/event 身份分离，同 timer 合并 overrun、不同 timer 独立排队；两架构每套 libc `timer_settime01/02` 共 80/80 通过 |
 | SMP shared signal hint 原子发布 | 2026-08-03 | GPT/Codex, DeepSeek | 三 writer 交错建模、全部 queue mutation 审查、双架构 8 核 sigtimedwait gate | queue mutation 与 hint store 合入同一 signal 临界区，关闭旧值覆盖；两架构 glibc 各 11/11 通过 |
 | develop Batch 3 WaitQueue 通知 token | 2026-08-03 | GPT/Codex, DeepSeek | develop 方案迁移审查、lost-wake 线性化建模、双架构 8 核 Docker/QEMU 归纳 | 以登记级 `WaitEntry` 保存提前 wake，不扩张调度状态机；双架构 WaitQueue 5/5，初赛失败集合未扩大 |
+| develop Batch 5 signalfd 动态等待域 | 2026-08-03 | GPT/Codex, DeepSeek | Linux signalfd owner 对照、fork/锁序/原始指针审查、双架构 8 核 L4 回归与 RV64 ABI 溯源 | read/poll 动态绑定 current sighand，pending 锁外通知；修复 wait4 rusage 漏参，两架构 regression 7/7 |
 
 ## 4. 详细使用场景
 
@@ -1237,6 +1238,27 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   kernel build 通过，WaitQueue ktest 各 5/5；初赛 RV64 312/314，LA64 semantic 308/314。
   两 CPU 同时竞争同一多队列 entry 与 deadline 跨轮误唤醒的专项动态交错仍为 NOT RUN。
 
+### Case 51: develop Batch 5 signalfd 动态 sighand 等待域
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md`；DeepSeek 任务与完整
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 Linux 语义裁决、owner/锁序设计、实现、RV64 漏参根因定位和提交；
+  DeepSeek 只读审查 fork/CLONE_SIGHAND、VFS 等待路径及 raw pointer lifetime，并通过受限网关
+  串行执行双架构 8 核回归，不修改源码、不 commit 或 push。
+- Problem: fork 共享 signalfd open file，但 pending 与通知域属于当前线程/进程；若队列固化在
+  inode，child 会继续睡在父队列。首轮 RV64 又出现 signalfd/clone wait `EFAULT`，LA64 正常。
+- Implemented change: `Sighand` 持有 EventWaitQueue，File 根据 `ReadWaitSource` 在等待时动态
+  解析 current sighand；生产者提交 pending 并解锁后通知。用户库将 waitpid 改接四参数 wrapper，
+  显式传 `rusage=0`，不再让 RV64 未约束 a3 冒充用户指针。
+- AI adjudication: DeepSeek 提出的“exec 清空 signalfd mask”和“无条件通知偏离 Linux”不成立；
+  GPT/Codex 对照 Linux 6.6 源码确认 mask 属于 open file，signal enqueue 本来就无条件通知
+  sighand。其 `PollWaitQueue` 非 Send 文档建议被采纳。RV64 故障依据寄存器 ABI 和详细串口字段
+  定位，未误判为 TLB/vfork 竞态。
+- Verification: Docker `CORE_NUM=8` regression 严格串行，RV64 143.427s、LA64 142.620s；
+  均 7/7、`online_mask=0xff`、signalfd 两个子场景与 clone probe PASS，退出码 0，无 panic、
+  timeout、forbidden marker 或源码变异。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1353,6 +1375,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch3-waitqueue-core-summary.md` | develop Batch 3 WaitQueue 通知 token | 记录登记级 token 与 TaskStatus 分工、multi-queue 唯一领取、模型建议纠正、双架构 8 核 focused/初赛证据和 producer fallback 边界 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-waitqueue-lossless-summary.md` | develop Batch 4 WaitQueue 无损通知 | 记录队列锁临界区收窄、EventWaitQueue 有损接口删除、DeepSeek 双架构构建/focused/初赛执行，以及 patchelf mutation 导致 runner partial 的人工裁决 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-patchelf-idempotence-summary.md` | develop Batch 4.1 工具 ELF 幂等化 | 记录 Make 转义和 ELF 动态段审查、DeepSeek 双架构 8 核初赛，以及 before/after 指纹一致的确定性验收 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md` | develop Batch 5 signalfd 动态等待域 | 记录 current-sighand owner、fork/CLONE_SIGHAND、锁外通知、RV64 wait4 漏参溯源与双架构 8 核 L4 7/7 证据 |
 
 ## 9. 交互记录与留痕方式
 

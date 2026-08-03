@@ -1100,8 +1100,8 @@ pub(crate) fn splice_read_stream(
     };
     let ret = if nonblock {
         read_once()
-    } else if let Some(wq) = file.inode.read_wait_queue() {
-        match WaitQueue::wait_until_interruptible(wq, || {
+    } else if let Some(wq) = file.read_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq.queue(), || {
             let ret = read_once();
             if ret == -(SyscallErr::EAGAIN as isize) {
                 None
@@ -1130,8 +1130,8 @@ pub(crate) fn splice_write_stream(file: &vfs::File, buf: &[u8], nonblock: bool) 
     };
     let ret = if nonblock {
         write_once()
-    } else if let Some(wq) = file.inode.write_wait_queue() {
-        match WaitQueue::wait_until_interruptible(wq, || {
+    } else if let Some(wq) = file.write_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq.queue(), || {
             let ret = write_once();
             if ret == -(SyscallErr::EAGAIN as isize) {
                 None

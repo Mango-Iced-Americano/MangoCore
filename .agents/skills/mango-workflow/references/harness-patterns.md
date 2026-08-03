@@ -1161,3 +1161,16 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   应保持 O(n)，orphan chain 的 n 是同时存在的 zero-link open inode 数，不是全盘 inode 数。
 - **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、
   `dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、`dependency/lwext4_rust/src/blockdev.rs`
+
+## 阻塞回归应隔离结果通道，并把破坏性探针放在最后
+
+- **问题**: signalfd 阻塞测试若只依赖 child exit status，会把信号唤醒、wait4 状态编码和用户
+  copyout 混成一个结论；前置 vfork/CLONE_VM 探针还可能共享调用者地址空间，失败后污染后续
+  用例，使根因判断失真。
+- **做法**: 用专用 result pipe 传递 child 的业务结果，`wait4` 只负责生命周期回收；不需要状态
+  内容时传 NULL。用 ready pipe + 有意延迟证明 consumer 已进入阻塞窗口，再由 watchdog 提供
+  有界失败。可能破坏父地址空间的探针固定为 suite 最后一项。
+- **判定**: 同时记录 read count、事件字段、elapsed、send 结果、result byte 和 reap 结果。
+  不能用“QEMU 没挂”或 child 已退出代替业务 marker。
+- **相关文件**: `user/src/bin/regression/regression_signalfd.rs`,
+  `user/src/bin/regression/main.rs`

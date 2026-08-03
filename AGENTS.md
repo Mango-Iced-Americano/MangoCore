@@ -351,6 +351,9 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | signalfd | `syscall/process/signal.rs` | fd 方式接收信号 |
 | pidfd | `fs/pidfd.rs` | 进程 fd（open/send_signal/getfd） |
 
+signalfd 的 open file 只保存共享 mask；阻塞 read/poll 的事件队列属于当前 sighand，并由 VFS
+在每次等待时动态解析。信号生产者必须先释放 pending owner 锁，再通知该事件队列。
+
 ### HAL
 
 `hal/` 目录提供硬件抽象层，将架构相关代码（陷阱处理、页表操作、TLB 管理、控制寄存器）从架构无关代码中分离。支持多平台（rv64: QEMU/K210/fu740、la64: QEMU/2k1000）。

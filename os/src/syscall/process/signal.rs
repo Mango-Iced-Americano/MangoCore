@@ -6,7 +6,7 @@ use crate::fs::{
     procfs::LockedProcInode,
     vfs::{
         event::EPollEvent, File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode,
-        InodeMode, Metadata, MountFSInode,
+        InodeMode, Metadata, MountFSInode, ReadWaitSource,
     },
 };
 use crate::hal::{MachineContext, UserSignalMask};
@@ -253,6 +253,10 @@ impl IndexNode for SignalFd {
         true
     }
 
+    fn read_wait_source(&self) -> ReadWaitSource {
+        ReadWaitSource::CurrentSighand
+    }
+
     fn as_any_ref(&self) -> &dyn Any {
         self
     }
@@ -266,7 +270,10 @@ fn read_signalfd_mask(token: usize, mask: usize, sigsetsize: usize) -> Result<Si
         return Err(EFAULT);
     }
     let bits = UserPtr::<u64>::from_addr(mask).read(token)?;
-    Ok(Signals::from_bits_truncate(bits as signal_type!()))
+    let mut signals = Signals::from_bits_truncate(bits as signal_type!());
+    // Linux 静默忽略无法由 signalfd 消费的 SIGKILL/SIGSTOP。
+    signals.remove(Signals::CAN_NOT_BE_MASKED);
+    Ok(signals)
 }
 
 fn take_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> Option<PendingSignal> {
@@ -325,14 +332,15 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
         return EBADF;
     }
 
-    let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
+    let file = match files_ref.lock().get_file(fd) {
         Ok(file) => file,
         Err(err) => return -(err as isize),
     };
     let inode = MountFSInode::unwrap_inode(&file.inode);
     if let Some(signalfd) = inode.as_any_ref().downcast_ref::<SignalFd>() {
         signalfd.set_mask(sigmask);
+        // 修改共享 open-file mask 后，已阻塞的 read/poll 必须立即重查。
+        current_task().unwrap().process.notify_signalfd();
         fd as isize
     } else {
         EINVAL

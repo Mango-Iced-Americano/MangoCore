@@ -177,6 +177,22 @@ B59 删除 `translated_byte_buffer()`、`translate_user_buffer_checked()` 和物
 - `fault_in_user_va()` 必须先解析已经满足权限的 PTE，避免正常 copy 重复进入
   CoW/SharedWrite 并提交无效 TLB 刷新。
 
+### signalfd pending 与通知域
+
+signalfd 的 pending 队列是权威状态，`Sighand::signalfd_events` 只负责通知等待者重查。生产者
+固定采用以下单向顺序：
+
+```text
+task.inner 或 process.signal 锁内提交 pending
+  -> 释放 pending owner 锁
+  -> 短暂取得 sighand，克隆 EventWaitQueue Arc
+  -> EventWaitQueue::notify_events_all
+```
+
+禁止持有 `task.inner` 或 `process.signal` 进入 `notify_signalfd()`；也禁止让 EventWaitQueue
+回调反向获取 pending owner 锁。普通 fork 创建新 sighand 通知域，`CLONE_SIGHAND` 才共享，
+共享的 signalfd File 不能缓存某个进程的队列地址。
+
 B59 只适配完成重构所必需的 FS/Net 调用点，不代表这些共享子系统已通过完整 SMP 并发审计。
 Driver 未在本批改动；其余 FS/Net/Driver 审计由对应负责人后续完成。
 

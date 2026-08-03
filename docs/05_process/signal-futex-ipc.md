@@ -276,6 +276,19 @@ if has_pending_signal_matching(task, self.pending_mask()) {
 
 read 消费 pending；poll 只观察是否有 matching pending。
 
+等待队列的 owner 不是 `SignalFd` inode，而是当前 `Sighand`：
+
+```text
+SignalFd File（fork 可共享，只保存 mask）
+  -> File::read_wait_queue/read_event_queue
+  -> 当前任务 ProcessControlBlock::sighand
+  -> Sighand::signalfd_events
+```
+
+线程/进程信号生产者在 pending owner 锁内完成入队，解锁后才通知该事件队列。普通 fork 为
+child 创建新队列，`CLONE_SIGHAND` 共享原队列。这既避免把父队列固化进共享 File，也避免形成
+`task.inner/process.signal -> sighand -> EventWaitQueue` 的嵌套锁链。
+
 ## 11. pidfd 与 wait
 
 pidfd 同时参与 signal 和 wait：

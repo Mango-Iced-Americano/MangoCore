@@ -70,9 +70,9 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: u32) -> isize {
             return -(SyscallErr::EAGAIN as isize);
         }
         // Blocking path: wait for data on source pipe read_wait_queue
-        if let Some(wq) = in_file.inode.read_wait_queue() {
+        if let Some(wq) = in_file.read_wait_queue() {
             let mut found: Option<usize> = None;
-            let wait_ret = WaitQueue::wait_until_interruptible(wq, || {
+            let wait_ret = WaitQueue::wait_until_interruptible(wq.queue(), || {
                 let n = in_pipe.peek_at(&mut kbuf);
                 let a = len.min(n).min(kbuf.len());
                 if a > 0 {

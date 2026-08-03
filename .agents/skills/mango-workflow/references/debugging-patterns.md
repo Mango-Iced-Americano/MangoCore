@@ -1117,3 +1117,31 @@
   运行期最后一个 usable 页，防止动态大内存仍被旧编译期上界截断。
 - **相关文件**: `os/src/mm/frame_allocator.rs`, `os/src/mm/address_space.rs`,
   `os/src/kernel_tests/mm.rs`
+
+## 双架构 syscall 差异：先核对遗漏参数是否被显式初始化
+
+- **现象**: 同一用户程序在 LA64 正常，RV64 的 `wait4` 在 child 已被领取后返回 `EFAULT`，甚至
+  改写相邻用户栈数据；表面上很像 fork、调度或用户 copy 的架构竞态。
+- **根因**: 用户库把四参数 `wait4(pid, status, options, rusage)` 错接到三参数 wrapper。LA64
+  汇编桥会把缺省参数清零，RV64 inline asm 没有约束 `a3`，内核因而把残留寄存器当成 rusage
+  用户指针。两架构差异来自 wrapper，不来自内核 wait 语义。
+- **定位方法**: 先打印 syscall 返回值和各 copyout 目标；对照内核 dispatch 实际读取的参数数，
+  再逐架构检查 inline asm/汇编桥对未传参数的处理。不要因为故障只在 SMP RV64 出现就先归因
+  于 TLB 或调度竞态。
+- **修复**: 调用者使用与真实 ABI 参数数一致的 wrapper，并显式传零给不用的可选指针。不要
+  依赖调用约定、寄存器偶然值或另一架构桥接代码代为清零。
+- **相关文件**: `user/src/syscall.rs`, `os/src/syscall/mod.rs`,
+  `os/src/syscall/process/lifecycle.rs`
+
+## 共享 fd 的等待 owner 必须在使用点解析
+
+- **危险模式**: fork 共享 open file，但把 signalfd 的 waitqueue 存入 inode。child 的 pending
+  已属于新 sighand，却仍睡在父队列；信号正确入队也无法唤醒 child。
+- **固定协议**: open file 只保存真正共享的 mask；read/poll 在每次等待时从 current task 动态
+  解析 sighand-owned EventWaitQueue。普通 fork 新建队列，`CLONE_SIGHAND` 才共享。
+- **锁序**: pending 在 `task.inner`/`process.signal` 中提交，释放 owner 锁后通知事件队列。
+  waitqueue 只表示“需要重查”，不能复制或取代 pending 权威状态。
+- **审计边界**: 检查 blocking read、poll、epoll 和通用 splice 路径是否都经 File helper；同时
+  记录 Linux 的 epoll/fork 限制，继承的 epoll registration 不会自动改绑 child sighand。
+- **相关文件**: `os/src/fs/vfs/file.rs`, `os/src/task/signal/action.rs`,
+  `os/src/task/process.rs`, `os/src/syscall/process/signal.rs`

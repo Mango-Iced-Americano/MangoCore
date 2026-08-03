@@ -486,7 +486,17 @@ make la64-regression   # la64 架构
 3. `/regression` 输出 TAP 格式结果（`ok N name` / `not ok N name`）、累加 pass/fail 计数，exit 0=全部通过 / 非零=有失败
 4. initproc 通过 `exit_code_from_waitpid_status()` 获取子进程退出码，打印 `[L4 REGRESSION PASSED]` 或 `[L4 REGRESSION FAILED]`，然后 `shutdown()`
 
-### 当前覆盖 (4 个用例)
+### 当前覆盖（7 个用例）
+
+| 用例 | 主要覆盖 |
+|------|----------|
+| `usercopy_pipe` | pipe 与用户内存复制边界 |
+| `mmap_edge_cases` | mmap 边界语义 |
+| `timer_realtime_jump` | realtime timer 与时钟跳变 |
+| `rename_long_name` | rename 长名称 |
+| `lwext4_truncate_hole` | ext4 稀疏文件截断 |
+| `signalfd` | 阻塞 read 唤醒、fork 继承 fd 后的 sighand 动态绑定 |
+| `clone_vm_second_slot` | CLONE_VM/vfork 的第二用户资源槽；破坏性探针固定最后执行 |
 
 ---
 
