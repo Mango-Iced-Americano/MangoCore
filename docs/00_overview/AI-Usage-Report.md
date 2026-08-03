@@ -1418,6 +1418,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md` | develop Batch 5 signalfd 动态等待域 | 记录 current-sighand owner、fork/CLONE_SIGHAND、锁外通知、RV64 wait4 漏参溯源与双架构 8 核 L4 7/7 证据 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch6-uaccess-prefix-summary.md` | develop Batch 6 read/pread 可写前缀 | 记录 develop 表示差异、VA-backed 前缀协议、首轮 RV64 编译失败和双架构 8 核 L4 7/7 冻结证据 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch7-proc-cpu-summary.md` | develop Batch 7 procfs CPU 拓扑 | 记录 configured/online 门禁、Linux stat 格式、首轮缺少 procfs 环境失败和双架构 8 核 L4 8/8 证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b82-user-remap-tlb-summary.md` | SMP 真实用户 CoW + 同 VPN remap TLB 证明 | 记录 DeepSeek 并发审查与 Docker 执行、GPT 对 remap-frame UAF 遗漏的纠正、官方 TCFG/TICLR 语义溯源、LA64 RED→GREEN 及既有 exec 超时的 partial 披露 |
 
 ## 9. 交互记录与留痕方式
 

@@ -304,8 +304,8 @@ __smp_timer_probe_end:
 );
 
 // 用户探针只做普通访存，不通过 syscall/yield 重新进入内核。a0/a1 分别是
-// 待换页与进度页，a2/a3 是 old/new canary；因此完成标记能证明 CPU1 的
-// 第二次 load 已经越过真实 PPN 替换，而不是内核代替用户读取页表。
+// 待换页与进度页，a2/a3/a4 是原页、CoW 页和重映射页的 canary。两个完成
+// 标记分别证明 CPU1 的 load 越过了真实 CoW 与 munmap/remap PTE 修改。
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
     r#"
@@ -326,11 +326,18 @@ __smp_stale_tlb_probe_start:
     fence rw, rw
     addi t1, zero, 2
     sd t1, 0(a1)
+.Lstale_tlb_remap_wait:
+    ld t0, 0(a0)
+    beq t0, a3, .Lstale_tlb_remap_wait
+    bne t0, a4, .Lstale_tlb_fail
+    fence rw, rw
+    addi t1, zero, 3
+    sd t1, 0(a1)
     addi a0, zero, 0
     j .Lstale_tlb_exit
 .Lstale_tlb_fail:
     fence rw, rw
-    addi t1, zero, 3
+    addi t1, zero, 4
     sd t1, 0(a1)
     addi a0, zero, 1
 .Lstale_tlb_exit:
@@ -364,11 +371,18 @@ __smp_stale_tlb_probe_start:
     dbar 0
     addi.d $t1, $zero, 2
     st.d $t1, $a1, 0
+.Lstale_tlb_remap_wait:
+    ld.d $t0, $a0, 0
+    beq $t0, $a3, .Lstale_tlb_remap_wait
+    bne $t0, $a4, .Lstale_tlb_fail
+    dbar 0
+    addi.d $t1, $zero, 3
+    st.d $t1, $a1, 0
     move $a0, $zero
     b .Lstale_tlb_exit
 .Lstale_tlb_fail:
     dbar 0
-    addi.d $t1, $zero, 3
+    addi.d $t1, $zero, 4
     st.d $t1, $a1, 0
     addi.d $a0, $zero, 1
 .Lstale_tlb_exit:
@@ -578,8 +592,8 @@ pub fn tests() -> Vec<KernelTest> {
             user_tlb_range_sync_uses_arch_backend,
         ),
         KernelTest::new(
-            "smp::remote_user_load_observes_cow_after_range_shootdown",
-            remote_user_load_observes_cow_after_range_shootdown,
+            "smp::remote_user_load_observes_cow_and_remap",
+            remote_user_load_observes_cow_and_remap,
         ),
         KernelTest::new(
             "smp::concurrent_range_shootdowns_keep_payloads_separate",
@@ -3053,6 +3067,7 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
 
 const STALE_TLB_OLD_VALUE: u64 = 0x1357_2468_89ab_cdef;
 const STALE_TLB_NEW_VALUE: u64 = 0xfedc_ba98_7654_3210;
+const STALE_TLB_REMAP_VALUE: u64 = 0xa55a_33cc_f00d_9696;
 
 /// 返回物理页首字的内核直映地址，不构造会和用户访存重叠的 Rust 引用。
 fn stale_tlb_word_ptr(ppn: crate::mm::PhysPageNum) -> *mut u64 {
@@ -3105,9 +3120,9 @@ fn restore_stale_tlb_probe_timer() {
         STALE_TLB_ERRORS.fetch_or(4, Ordering::Release);
     }
     let progress = STALE_TLB_PROGRESS_PTR.load(Ordering::Acquire);
-    if progress == 0 || !matches!(read_stale_tlb_word(progress), 2 | 3) {
-        // 成功路径若在结果发布前运行到这里，说明发生了意外调度，全刷可能
-        // 污染 stale-TLB 证据。失败清理路径也保留该位用于诊断。
+    if progress == 0 || !matches!(read_stale_tlb_word(progress), 3 | 4) {
+        // 这是防御性检查：正常 FIFO 顺序下 restore 只能在探针退出后运行。
+        // 若结果尚未发布，说明发生了意外调度，全刷可能污染 stale-TLB 证据。
         STALE_TLB_ERRORS.fetch_or(8, Ordering::Release);
     }
 
@@ -3119,9 +3134,10 @@ fn restore_stale_tlb_probe_timer() {
     crate::hal::local_irq_restore(irq_flags);
 }
 
-/// CPU1 先以用户 load 填充旧翻译，CPU0 再通过真实 CoW 更新同一 PTE。
-/// 探针只有在精确 shootdown 后读到新物理页的 canary 才能正常退出。
-fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static str> {
+/// CPU1 先以用户 load 填充旧翻译；CPU0 依次通过真实 CoW 和
+/// munmap/MAP_FIXED_NOREPLACE 更新同一 PTE。探针必须先后读到两个新物理页，
+/// 因而同时验证权限修改和解除映射都触发了远端精确 shootdown。
+fn remote_user_load_observes_cow_and_remap() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
         return Err("stale-TLB user probe did not run on CPU0");
     }
@@ -3136,11 +3152,17 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
 
     let old_frame = crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB old frame")?;
+    let remap_frame =
+        crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB remap frame")?;
     let progress_frame =
         crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB progress frame")?;
     let old_word = stale_tlb_word_ptr(old_frame.ppn) as usize;
     let progress_word = stale_tlb_word_ptr(progress_frame.ppn) as usize;
     write_stale_tlb_word(old_word, STALE_TLB_OLD_VALUE);
+    write_stale_tlb_word(
+        stale_tlb_word_ptr(remap_frame.ppn) as usize,
+        STALE_TLB_REMAP_VALUE,
+    );
     write_stale_tlb_word(progress_word, 0);
 
     let (task, _) = build_user_task(stale_tlb_probe_program())?;
@@ -3194,6 +3216,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         cx.gp.a1 = progress_addr;
         cx.gp.a2 = STALE_TLB_OLD_VALUE as usize;
         cx.gp.a3 = STALE_TLB_NEW_VALUE as usize;
+        cx.gp.a4 = STALE_TLB_REMAP_VALUE as usize;
     }
     task.set_initial_cpus_allowed(1usize << 1);
     STALE_TLB_PROGRESS_PTR.store(progress_word, Ordering::Release);
@@ -3210,7 +3233,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         || holder.task_status() != crate::task::TaskStatus::Running(1)
     {
         if crate::hal::get_time() >= holder_deadline {
-            write_stale_tlb_word(progress_word, 3);
+            write_stale_tlb_word(progress_word, 4);
             let restore =
                 crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
             STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
@@ -3237,7 +3260,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     }
 
     if parent.add_child(process.clone()).is_err() {
-        write_stale_tlb_word(progress_word, 3);
+        write_stale_tlb_word(progress_word, 4);
         let restore = crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
         STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
         let cleanup_deadline = crate::hal::get_time()
@@ -3272,12 +3295,12 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     loop {
         let progress = read_stale_tlb_word(progress_word);
         if progress == 1 {
-            // 与用户 probe 在 ready store 前的架构 fence 配对：看到 1 后，
-            // CPU0 才允许发布 PTE 修改和 shootdown。
+            // 看到 1 后再执行全屏障，保证用户 probe 在发布 ready 前完成的
+            // 旧页 load 已经发生；此后 CPU0 才允许修改 PTE 并发起 shootdown。
             fence(Ordering::SeqCst);
             break;
         }
-        if progress == 3 || process.is_zombie() {
+        if progress == 4 || process.is_zombie() {
             validation_error = Some("user probe rejected the initial stale-TLB canary");
             break;
         }
@@ -3326,7 +3349,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         loop {
             match read_stale_tlb_word(progress_word) {
                 2 => break,
-                3 => {
+                4 => {
                     validation_error = Some("user probe read an unexpected post-COW canary");
                     break;
                 }
@@ -3338,11 +3361,56 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
             }
         }
     }
-    if crate::smp::user_tlb_request(1) != full_request_before {
-        validation_error.get_or_insert("one-page COW degraded to a full user-TLB flush");
-    }
     if new_ppn.is_some() && !vm.cpu_tlb_is_current(1) {
         validation_error.get_or_insert("range handler did not publish the observed MM generation");
+    }
+
+    if validation_error.is_none() {
+        let remapped = vm.write(|space| {
+            space
+                .munmap(target_addr, crate::config::PAGE_SIZE)
+                .map_err(|_| "production munmap rejected the target page")?;
+            let mapped = space.shm_mmap(
+                target_addr,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R
+                    | crate::mm::MapPermission::W
+                    | crate::mm::MapPermission::U,
+                crate::mm::MapFlags::MAP_PRIVATE
+                    | crate::mm::MapFlags::MAP_ANONYMOUS
+                    | crate::mm::MapFlags::MAP_FIXED_NOREPLACE,
+                &[remap_frame.clone()],
+                true,
+            );
+            (mapped == target_addr as isize)
+                .then_some(())
+                .ok_or("fixed remap did not reuse the target VPN")
+        });
+        if let Err(error) = remapped {
+            validation_error = Some(error);
+        }
+    }
+
+    if validation_error.is_none() {
+        let remap_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        loop {
+            match read_stale_tlb_word(progress_word) {
+                3 => break,
+                4 => {
+                    validation_error = Some("user probe read a stale PPN after munmap/remap");
+                    break;
+                }
+                _ if crate::hal::get_time() >= remap_deadline => {
+                    validation_error = Some("CPU1 user load did not observe the remapped page");
+                    break;
+                }
+                _ => core::hint::spin_loop(),
+            }
+        }
+    }
+    if crate::smp::user_tlb_request(1) != full_request_before {
+        validation_error.get_or_insert("single-page updates degraded to a full user-TLB flush");
     }
 
     if validation_error.is_none() && !process.is_zombie() {
@@ -3367,9 +3435,11 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         || crate::task::run_queue_count(1) != 0
     {
         if crate::hal::get_time() >= cleanup_deadline {
-            // 用户任务若仍在执行，可能继续通过旧 TLB 访问 source/progress。
-            // 测试已经失败，此处保留外部 owner，禁止返回后复用这两页。
+            // 用户任务若仍在执行，可能继续通过旧 TLB 访问 source、remap 或
+            // progress。测试已经失败，只能永久保留外部 owner，禁止分配器
+            // 在后续用例中复用这三页造成 UAF。
             core::mem::forget(old_frame);
+            core::mem::forget(remap_frame);
             core::mem::forget(progress_frame);
             return Err("stale-TLB probe cleanup did not quiesce CPU1");
         }

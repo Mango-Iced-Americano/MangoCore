@@ -37,12 +37,14 @@ pub fn program_timer_delta(delta_ticks: u64) {
     crate::task::processor::record_sched_program_timer_cycles(profile_start);
 }
 
-/// 清除当前 CPU 的 level-triggered timer，并保持 one-shot 停止状态。
+/// 停止当前 CPU 的 timer 计数，并清除 level-triggered 中断信号。
 ///
-/// 非周期 TCFG 到零后已经停止计数；这里只对 TICLR 执行 W1C。安全点处理完
-/// 软件 timer 队列后再由 `program_timer_delta()` 写入下一个真实 deadline。
+/// `TICLR` 只清 pending，不能取消尚未到期的倒计时。先清除 `TCFG.En` 才能
+/// 保证调用返回后 timer 保持静默；安全点处理完软件队列后，再由
+/// `program_timer_delta()` 写入下一个真实 deadline 并重新启用计数。
 pub fn quiesce_local_timer_interrupt() {
-    use super::register::TIClr;
+    use super::register::{TCfg, TIClr};
+    TCfg::read().set_enable(false).write();
     TIClr::read().clear_timer().write();
 }
 

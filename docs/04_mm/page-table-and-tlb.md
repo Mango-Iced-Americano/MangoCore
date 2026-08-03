@@ -322,8 +322,10 @@ cached CPU 集合替换为调度器维护的 active mask，并用零目标 gener
 detach。B52 将 `FlushRange::Page` 泛化为最多 64 页的半开 `Range`，RV64 直接把
 start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 slot。B53 让 CPU1
 用户探针先填充旧 PPN 翻译，再由 CPU0 通过真实私有 CoW 替换 PTE；timer 静默窗口内只有
-精准 handler 能使后续普通用户 load 读到新页 canary，双架构 8 核两轮均通过。默认亲和性、
-通用用户迁移以及 `mprotect/munmap` 权限/有效位的扩展压力仍未完成。
+精准 handler 能使后续普通用户 load 读到新页 canary。B82 在同一窗口继续通过正式
+`munmap + MAP_FIXED_NOREPLACE` 替换同一 VPN，要求用户 load 再读到第三个物理页 canary，
+并确认两次单页修改都未退化为全用户刷新。默认亲和性、通用用户迁移、`mprotect` 降权后的
+远端 store fault 与更高并发压力仍未完成。
 
 ## 13. 调试核对点
 

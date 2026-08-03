@@ -225,7 +225,8 @@ LA64 通过固定 per-CPU slot 传递 ASID/range 并执行 `invtlb 0x5`。B51 �
 CPU detach；B52 已把双架构精准后端扩展到最多 64 页的连续区间，更大跨度仍全刷。
 B53 规定软件 range handler 在硬件失效后、slot ack 前推进目标 CPU 的 observed
 generation，避免本次 IPI 返回用户态时再由激活路径全刷。真实用户 CoW 探针在静默 timer
-窗口内验证了这一顺序，而不只观察 request/ack 计数器。
+窗口内验证了这一顺序，而不只观察 request/ack 计数器。B82 在同一窗口继续执行正式
+`munmap + MAP_FIXED_NOREPLACE`，证明远端用户 load 不会在同一 VPN 重映射后继续读取旧 PPN。
 
 B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
 再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入
@@ -305,8 +306,8 @@ RISC-V 的 `stvec` 指向独立的 `__kern_trap`。入口在当前内核栈上�
 LoongArch 复用现有内核 trap frame，但把 IPI fast path 放在 BADV 和 console
 诊断之前。handler 先向 IOCSR `CORE_CLEAR` 写 1 清除 level-triggered
 vector 1，再消费 mailbox，避免陈旧 BADV 产生误诊，也避免在尚未多核安全的
-console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 TICLR、
-发布当前 CPU 的 deferred 状态。
+console 路径中打印。timer fast path 同样先于 BADV 诊断；它先清 `TCFG.En` 停止倒计时，
+再写 TICLR 清除 level-triggered pending，最后只发布当前 CPU 的 deferred 状态。
 
 两个架构的 IPI handler 只执行原子操作和有界的本地 TLB 失效：不分配内存、不获取
 普通锁、不打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
@@ -369,8 +370,8 @@ pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打
 
 每个在线 CPU 的用户/内核 timer trap 共用同一 hard-IRQ fast path：
 
-1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 清除 level-triggered
-   TICLR，非周期 TCFG 保持停止；
+1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 先清 `TCFG.En` 停止计数，
+   再写 TICLR 清除 level-triggered pending；
 2. 当前 `PerCpu.timer_irq_count` 只做无锁诊断计数；
 3. 以 Release 发布 `timer_pending=true` 后立即返回被中断现场。
 
