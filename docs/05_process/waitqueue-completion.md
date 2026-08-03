@@ -3,7 +3,7 @@ title: "WaitQueue、KernelTimerQueue 与 Completion"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-02
+last_update: 2026-08-03
 tags: [process, waitqueue, completion, timer]
 ---
 
@@ -26,66 +26,28 @@ WaitQueue 被 eventfd、epoll、IPC、socket/file I/O、child wait、timer 等�
 ## 2. WaitQueue 数据结构
 
 ```rust
-pub struct WaitQueue {
-    inner: VecDeque<Weak<TaskControlBlock>>,
-}
-```
-
-完整结构和基础操作位于 `task/manager.rs`：
-
-```rust
-pub enum WaitResult {
-    Ready(isize),
-    Interrupted,
-    TimedOut,
-}
-
-impl WaitResult {
-    pub fn unwrap_or_else(self, f: impl FnOnce(isize) -> isize) -> isize {
-        match self {
-            WaitResult::Ready(value) => value,
-            WaitResult::Interrupted => f(-(SyscallErr::ERESTART as isize)),
-            WaitResult::TimedOut => f(-(SyscallErr::EAGAIN as isize)),
-        }
-    }
+pub struct WaitEntry {
+    task: Weak<TaskControlBlock>,
+    state: AtomicUsize, // Waiting -> Notified | Closed
 }
 
 pub struct WaitQueue {
-    inner: VecDeque<Weak<TaskControlBlock>>,
-}
-
-impl WaitQueue {
-    pub fn new() -> Self {
-        Self {
-            inner: VecDeque::new(),
-        }
-    }
-
-    pub fn add_task(&mut self, task: Weak<TaskControlBlock>) {
-        self.inner.push_back(task);
-    }
-
-    pub fn pop_task(&mut self) -> Option<Weak<TaskControlBlock>> {
-        self.inner.pop_front()
-    }
-
-    pub fn compact_stale(&mut self) -> usize {
-        let before = self.inner.len();
-        self.inner.retain(|task| task.strong_count() > 0);
-        before - self.inner.len()
-    }
+    inner: VecDeque<Arc<WaitEntry>>,
 }
 ```
 
-WaitQueue 保存 `Weak<TaskControlBlock>`，因此等待队列本身不会阻止 task 生命周期结束。唤醒时需要 `upgrade()`，失效项可由 `compact_stale()` 清除。
+`WaitEntry` 是一次性通知 token；队列强持有 entry，entry 只弱引用 TCB。
+因此队列能在任务还是 `Running` 时留下早到 wake，同时不会延长任务生命周期。
 
-它保存弱引用，而不是强引用：
+WaitEntry 和 TaskStatus 有意分层：
 
 | 设计点 | 作用 |
 |--------|------|
-| `Weak<TaskControlBlock>` | 等待队列不延长任务生命周期 |
-| `VecDeque` | FIFO 风格唤醒 |
-| `compact_stale()` | 清理已经 drop 的任务 weak entry |
+| `WaitEntry::Waiting/Notified/Closed` | 只表示本轮通知是否已被领取 |
+| `TaskStatus` | 唯一表示 CPU/current/runqueue ownership |
+| entry 内的 `Weak<TaskControlBlock>` | 队列不延长任务生命周期 |
+| `VecDeque<Arc<WaitEntry>>` | FIFO 唤醒，并让多队列共享同一 token |
+| `compact_stale()` | 清理已经 drop 的 TCB entry |
 
 等待队列本身不持有外部锁；不同使用者通常把它放进自己的 `Mutex` 中。
 
@@ -111,15 +73,15 @@ pub enum WaitResult {
 
 | 方法 | 行为 |
 |------|------|
-| `add_task()` | 加入 weak task，不改变状态 |
-| `pop_task()` | 弹出 weak task，不唤醒 |
+| `add_task()` | 为 weak task 创建 entry，不改变调度状态 |
+| `pop_task()` | 弹出 entry 并返回 weak task，不唤醒 |
 | `contains()` | 按 weak 指针比较 |
 | `is_empty()` | 是否为空 |
 | `compact_stale()` | 删除 strong_count 为 0 的 entry |
-| `prepare_to_wait()` | 只加入 weak task，不改变调度状态 |
-| `finish_wait()` | 只从 WaitQueue 移除当前任务，不改变调度状态 |
+| `prepare_to_wait()` | 注册并返回本轮 `Arc<WaitEntry>` |
+| `finish_entry()` | 关闭并精确移除本轮 entry，不改变调度状态 |
 
-`prepare_to_wait()` 只把任务放入 WaitQueue；真正的
+`prepare_to_wait()` 只登记条件等待和一次性 token；真正的
 `Running(cpu) -> Blocking(cpu)` 与加入 interruptible registry 由
 `block_current_and_run_next_*()` 在 `TASK_MANAGER` 临界区完成。
 
@@ -127,17 +89,18 @@ pub enum WaitResult {
 
 `wake_one()` 是 event/IPC 等热路径：
 
-1. 从队头开始弹出 weak entry。
-2. 跳过失效 weak。
-3. 若任务状态为 `Blocking/Blocked`，递增 `wait_timer_generation` 并选为唤醒候选。
+1. 从队头开始弹出 entry，跳过失效 TCB 或已关闭 token。
+2. CAS `Waiting -> Notified`；同一 entry 在多个队列中只有一个唤醒源能成功。
+3. 递增 `wait_timer_generation`，使本轮旧 deadline/fallback timer 失效。
 4. 调用 `TASK_MANAGER.try_wake_interruptible(task)`，由调度器在锁内 CAS
    `Blocking(cpu) -> Running(cpu)` 取消早到阻塞，或 CAS
-   `Blocked -> Queued(CPU0)` 并移动容器。
+   `Blocked -> Queued(target)` 并移动容器。
 5. 返回唤醒数量 1。
 
 `wake_at_most(limit)` 会遍历所有 entry，以便顺手 compact stale entry；唤醒超过 limit 后保留剩余可等待任务。
-已经处于 `Queued/Running` 的旧 WaitQueue 条目只按“事件已经到达”计数并丢弃，
-不会重复入队。`New/Zombie` 条目同样丢弃。
+`Running/Queued` 不再被当成“已唤醒”的依据：Running 可能正位于注册与
+`Blocking` 之间，必须先固化 token；调度器会独立抑制重复入队。
+`New/Zombie` 是不可等待的终端/stale entry，直接丢弃。
 
 ## 6. wait_event_impl
 
@@ -149,17 +112,19 @@ wait_event_impl(wq, cond, signal_check, deadline, fallback_ms)
   └── loop:
         ├── deadline 检查
         ├── current_task()
-        ├── wq.prepare_to_wait(task)
+        ├── entry = wq.prepare_to_wait(task)
         ├── 再次 cond 检查
         ├── deadline 再检查
         ├── signal 检查
         ├── 挂 deadline timer 或 fallback timer
-        ├── block_current_and_run_next_with_lock_checked()
-        ├── finish_wait()
+        ├── checked block 复查 entry/signal/deadline
+        ├── finish_entry(entry)
         └── 清 fallback active generation
 ```
 
-条件在入队前后各检查一次，避免条件刚满足却已经睡眠导致丢失唤醒。
+条件在入队前后各检查一次。此外，checked block 在任务已发布
+`Blocking(cpu)` 后再读取 entry token。因此生产者不论在注册后、Blocking 前，
+还是真正 Blocked 后通知，都不会被瞬时 TaskStatus 吞掉。
 
 源码主干如下：
 
@@ -189,22 +154,22 @@ where
         let task = current_task().unwrap();
 
         let mut guard = wq.lock();
-        guard.prepare_to_wait(Arc::downgrade(&task));
+        let entry = guard.prepare_to_wait(Arc::downgrade(&task));
 
         if let Some(res) = cond() {
-            guard.finish_wait(task.as_ref());
+            guard.finish_entry(&entry);
             return WaitResult::Ready(res);
         }
         if deadline
             .map(|deadline| TimeSpec::now() >= deadline)
             .unwrap_or(false)
         {
-            guard.finish_wait(task.as_ref());
+            guard.finish_entry(&entry);
             return WaitResult::TimedOut;
         }
         if signal_check {
             if has_actionable_signal(&task) {
-                guard.finish_wait(task.as_ref());
+                guard.finish_entry(&entry);
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -241,22 +206,27 @@ where
             let not_timed_out = deadline
                 .map(|deadline| TimeSpec::now() < deadline)
                 .unwrap_or(true);
-            no_signal && not_timed_out
+            entry.is_waiting() && no_signal && not_timed_out
         });
 
         let task = current_task().unwrap();
-        wq.lock().finish_wait(task);
+        wq.lock().finish_entry(&entry);
+        if deadline.is_some() {
+            task.wait_timer_generation.fetch_add(1, Relaxed);
+        }
         task.wait_io_fallback_active_generation
             .store(0, AtomicOrdering::Release);
     }
 }
 ```
 
-这里的 `fallback_ms` 只用于 I/O fallback timer；普通 deadline 直接注册 `wait_with_timeout()`。
+这里的 `fallback_ms` 只用于尚未完成生产者迁移的 I/O 路径；普通 deadline
+直接注册 `wait_with_timeout()`。有 deadline 的一轮等待结束后会再推进
+generation，避免旧 timer 在下一轮无超时等待中造成假唤醒。
 
 ## 7. fallback timer
 
-无 deadline 的 I/O wait 使用 fallback timer：
+无 deadline 的通用 I/O wait 目前仍使用过渡 fallback timer：
 
 ```rust
 const WAIT_IO_FALLBACK_MS: usize = 10;
@@ -270,7 +240,10 @@ const WAIT_IO_FALLBACK_MS: usize = 10;
 | `wait_timer_generation` | 新 wait 递增，旧 timer 失效 |
 | `wait_io_fallback_active_generation` | 标记当前 fallback wait 的 generation |
 
-fallback timer 触发时，如果发现 generation 过期或任务尚未真正进入 Interruptible，会重新挂 timer 而不是错误唤醒或丢弃。
+fallback timer 触发时，如果发现 generation 过期或任务尚未真正登记
+`Blocking/Blocked`，会重新挂 timer 而不是错误唤醒或丢弃。它不再用于弥补
+WaitQueue 核心的注册竞争；只有在 FS/Net 生产者漏通知修复全部融合并验证后，
+才能删除这个过渡层。
 
 ## 8. locked wait 模板
 
@@ -282,7 +255,7 @@ fallback timer 触发时，如果发现 generation 过期或任务尚未真正�
 2. 入队后再次检查条件。
 3. 需要睡眠时调用 `block_current_and_run_next_with_lock_checked(guard, ...)`。
 4. 该函数保证任务进入 interruptible queue 后再释放业务锁。
-5. 醒来后重新持业务锁 `finish_wait()`。
+5. 醒来后重新持业务锁，精确 `finish_entry()` 本轮 token。
 
 这防止“释放业务锁”和“进入睡眠队列”之间丢失唤醒。
 
@@ -317,14 +290,14 @@ where
         }
 
         let task = current_task().unwrap();
-        queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+        let entry = queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
         if let Some(res) = cond(&mut guard) {
-            queue_of(&mut guard).finish_wait(task.as_ref());
+            queue_of(&mut guard).finish_entry(&entry);
             return WaitResult::Ready(res);
         }
         if signal_check {
             if has_actionable_signal(&task) {
-                queue_of(&mut guard).finish_wait(task.as_ref());
+                queue_of(&mut guard).finish_entry(&entry);
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -339,12 +312,12 @@ where
             let not_timed_out = deadline
                 .map(|deadline| TimeSpec::now() < deadline)
                 .unwrap_or(true);
-            no_signal && not_timed_out
+            entry.is_waiting() && no_signal && not_timed_out
         });
 
         let task = current_task().unwrap();
         let mut guard = lock.lock();
-        queue_of(&mut guard).finish_wait(task);
+        queue_of(&mut guard).finish_entry(&entry);
         drop(guard);
     }
 }
@@ -360,12 +333,13 @@ where
 
 流程：
 
-1. 若 queues 为空，构造临时 WaitQueue 并用 fallback 轮询。
-2. 非空时，将当前任务加入所有队列。
-3. 条件满足、超时或信号到达时，从所有队列 `finish_wait()`。
+1. 若 queues 为空，只等待 signal 或真实 deadline，不再构造 10 ms 周期唤醒。
+2. 非空时，创建一个共享 entry，并把它加入所有队列。
+3. 条件满足、超时或信号到达时，先 close token，再从所有队列精确移除。
 4. 阻塞期间使用 `block_current_and_run_next_checked()`。
 
-该函数要求 `cond` 不依赖 `current_task()`，因为它可能在当前任务暂时离开 CPU 时被评估。
+该函数要求 `cond` 不依赖 `current_task()`，因为它可能在当前任务暂时离开
+CPU 时被评估。共享 token 使多个源并发 wake 时仍只有一个通知能被领取。
 
 ## 10. KernelTimerQueue
 
@@ -455,7 +429,8 @@ heap 节点不能投递旧配置的信号。周期重装和调度器唤醒都在
 | deadline timer | 直接丢弃 |
 | fallback timer | 如果任务仍在新一轮 fallback wait，可重新挂当前 generation timer |
 
-这避免旧 timeout 唤醒新等待，也避免 fallback timer 在任务还没进入 Interruptible 时被消费。
+这避免旧 timeout 唤醒新等待，也避免 fallback timer 在任务还没完成
+`Running -> Blocking/Blocked` 登记时被提前消费。
 
 ## 13. Completion
 

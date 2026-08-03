@@ -147,15 +147,15 @@ TCB/PCB 权威 hint，避免 setter 漏刷影子缓存。返回的 `Arc` 不能�
 
 阻塞等待通过 WaitQueue 模板：
 
-1. 当前任务加入业务 WaitQueue。
+1. 当前任务以一次性 `WaitEntry` 加入业务 WaitQueue。
 2. TaskManager 锁内完成 `Running(cpu) -> Blocking(cpu)` CAS。
 3. 同一临界区加入 interruptible registry。
 4. 释放业务锁。
 5. `schedule()` 切回 idle。
 6. idle 在真实切栈后提交 `Blocking(cpu) -> Blocked`。
-7. 早到唤醒执行 `Blocking(cpu) -> Running(cpu)`，晚到唤醒执行
-   `Blocked -> Queued(CPU0)`；两者都由同一个 TaskManager 入口裁决，晚到唤醒按
-   `TASK_MANAGER -> CPU0 RunQueue` 的固定锁序完成容器交接。
+7. entry 先固化通知；若任务已在 `Blocking`，唤醒执行
+   `Blocking(cpu) -> Running(cpu)`；若已是 `Blocked`，则执行
+   `Blocked -> Queued(target)`。两者都由同一个 TaskManager 入口裁决。
 
 带锁版本必须先入队、复查条件、再释放锁，避免丢失唤醒。
 
@@ -186,7 +186,7 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 这个函数先把 task 原子迁移为 `Blocking(cpu)` 并加入 interruptible registry，
 再复查是否仍应阻塞，然后释放业务锁并切换。复查失败时 wake 只取消阻塞，
 不会把仍使用当前内核栈的任务提前加入 runqueue。
-WaitQueue 自身只登记 `Weak<TaskControlBlock>`，不会提前写调度状态。
+WaitQueue 自身只登记“通知是否已到达”的 entry，不会提前写调度状态。
 
 ## 8. 定时器与等待
 

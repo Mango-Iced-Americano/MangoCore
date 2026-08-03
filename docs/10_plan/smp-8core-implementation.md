@@ -727,6 +727,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   读取。mutex 提供 writer 全序，内存序负责无锁发布；只改成 Release 而保留锁外 store 不算
   修复。POSIX timer discard/finalize 仍在 signal 解锁后执行。双架构 8 核 build 与 glibc
   `sigtimedwait01` 各 11/11 通过，`online_mask=0xff`；三 CPU stale-store 精确注入仍为 NOT RUN；
+- develop 融合 Batch 3 在集成工作树引入每轮等待独立的 `WaitEntry` 通知 token：wake 不再因
+  任务尚处于 Running 而丢弃边沿通知，checked block 在 `Blocking` 登记后复查 token 并可撤销
+  睡眠；poll/epoll 多队列共享同一 entry，以 CAS 唯一领取且逐队列清理，不扩张 `TaskStatus`
+  状态机。双架构 8 核 build 与 WaitQueue ktest 均 5/5；初赛保持 RV64 312/314、LA64
+  semantic 308/314。FS/Net/Driver producer 全面通知尚未由本负责人验收，generic 10ms I/O
+  fallback 因此继续作为过渡保护，不能在本批提前删除；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

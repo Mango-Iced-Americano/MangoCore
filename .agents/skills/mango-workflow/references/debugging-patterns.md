@@ -999,6 +999,13 @@
 - **固定协议**: 把事件发布为 owner 锁保护的持久状态；消费者完成 `Blocking` 登记后，在真正
   切换前用无副作用谓词复查该状态。发现事件就撤销 waiter，不进入睡眠。不要为此增加一次通用
   condition 调用，因为 condition 可能领取对象或产生其他副作用。
+- **边沿通知需要登记级 token**: 并非所有 wake 都有可复查的 owner 状态。通用 WaitQueue 应为
+  每轮登记建立独立 token，由第一个生产者 CAS `Waiting -> Notified`；checked block 同时复查
+  owner 条件与 token。token 只保存本轮通知，`TaskStatus` 仍独占 CPU/runqueue 所有权，不能
+  为修 lost-wake 给调度状态机增加 `WakePending` 一类重复状态。
+- **多队列共享同一登记**: poll/epoll 一轮等待挂到多个 queue 时应共享一个 token，不能每个
+  queue 各建一份通知状态。清理先关闭 token，再逐队列分别摘除同一登记；这样既让多个 wake
+  源只能有一个赢家，也避免同时持有两把 queue 锁。
 - **返回结果不拥有事件**: Interrupted/timeout 只说明等待循环为何停止，不等于消费者已经取得
   事件。退出等待后应在 owner 锁内最后 claim 一次，再决定返回事件、`EINTR` 或 timeout；claim
   成功后才能把所有权带到锁外。

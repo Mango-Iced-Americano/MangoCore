@@ -301,7 +301,10 @@ RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不�
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）
 - **信号**：`task/signal/` 子模块（action/delivery/frame/pending/wait）
-- **WaitQueue** — 支持 epoll、eventfd、IPC 等通用阻塞原语；futex 使用专用 waiter
+- **WaitQueue** — 每轮等待使用一次性 `WaitEntry` 固化早到 wake，
+  `TaskStatus` 仍是 CPU/runqueue ownership 的唯一权威；支持 epoll、eventfd、IPC
+  等通用阻塞原语，futex 使用专用 waiter。通用 I/O fallback 在 FS/Net 生产者
+  通知补齐前保留，不得仅因核心 token 完成就提前删除
 - **Completion** — 单次通知原语
 
 ### 文件系统（VFS）

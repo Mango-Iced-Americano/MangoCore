@@ -3,13 +3,13 @@
 //! Multi-task tests (wake_one) require the scheduler to be active
 //! (mango.mode=ktest with the new multi-task harness).
 
+use crate::kernel_tests::runner::KernelTest;
+use crate::task::WaitQueue;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
-use crate::kernel_tests::runner::KernelTest;
-use crate::task::WaitQueue;
 
 /// Returns all waitqueue-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
@@ -18,10 +18,43 @@ pub fn tests() -> Vec<KernelTest> {
             "waitqueue::wake_before_wait_should_not_sleep",
             test_wake_before_wait_should_not_sleep,
         ),
+        KernelTest::new(
+            "waitqueue::early_wake_cancels_block",
+            test_early_wake_cancels_block,
+        ),
         KernelTest::new("waitqueue::basic_queue_ops", test_basic_queue_ops),
         KernelTest::new("waitqueue::wake_all_on_empty", test_wake_all_on_empty),
         KernelTest::new("waitqueue::wake_one", test_wake_one),
     ]
+}
+
+/// 精确构造“条件队列已注册，但任务尚未进入 Blocking”的窗口。
+///
+/// 旧实现会因当前任务仍是 Running 而丢掉 wake；新 entry token 必须
+/// 保留该通知，并让 checked block 撤销随后登记的 Blocking。
+fn test_early_wake_cancels_block() -> Result<(), &'static str> {
+    let queue = Mutex::new(WaitQueue::new());
+    let task = crate::task::current_task().ok_or("waitqueue test has no current task")?;
+    let cpu = crate::smp::cpu_id();
+
+    let entry = queue
+        .lock()
+        .prepare_to_wait(alloc::sync::Arc::downgrade(&task));
+    if queue.lock().wake_at_most(1) != 1 {
+        return Err("early wake did not claim the registered wait entry");
+    }
+    if entry.is_waiting() {
+        return Err("early wake was not persisted in the wait entry");
+    }
+
+    crate::task::block_current_and_run_next_checked(|_| entry.is_waiting());
+    if task.task_status() != crate::task::TaskStatus::Running(cpu) {
+        return Err("early wake did not cancel Blocking ownership");
+    }
+    if !queue.lock().is_empty() {
+        return Err("claimed wait entry remained in the queue");
+    }
+    Ok(())
 }
 
 /// Condition already satisfied: wait_until must return immediately.

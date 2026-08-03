@@ -184,7 +184,9 @@ interruptible 与 timer 全局 registry。远程 enqueue/wake/affinity 已开放
 
 ### 4.6 WaitQueue
 
-`WaitQueue` 内部保存 `Weak<TaskControlBlock>`，避免等待队列强持有任务。
+`WaitQueue` 内部保存一次性 `Arc<WaitEntry>`，entry 只弱引用 TCB。
+entry 固化早于 `Blocking` 到达的 wake，`TaskStatus` 仍是 CPU/runqueue ownership
+的唯一权威。
 
 | 方法 | 说明 |
 |------|------|
@@ -424,7 +426,7 @@ private futex 表在 PCB 中；shared futex 表是全局 `PROCESS_SHARED_FUTEX`�
 | 问题 | 所属对象 | 原因 |
 |------|----------|------|
 | 当前运行到哪个 trap context | TCB | 每个线程有独立寄存器上下文和内核栈。 |
-| 当前线程是否 Ready/Running/Interruptible/Zombie | TCB | 调度器调度的是线程。 |
+| 当前线程是否 New/Queued/Running/Blocking/Blocked/Migrating/Zombie | TCB | 调度器调度的是线程，状态同时表达 runqueue/current 的唯一归属。 |
 | `gettid()` 返回什么 | TCB | TID 是线程级 ID。 |
 | fd table、cwd/root、umask | PCB | 同一进程内线程可以通过 `CLONE_FILES/CLONE_FS` 共享这些资源。 |
 | 地址空间 | PCB | `CLONE_VM` 决定线程共享 VM，fork 子进程复制或 CoW 继承 VM。 |

@@ -387,7 +387,8 @@ copyout。
 | `sigtimedwait` | 等待 set 中信号，支持 timeout |
 | `rt_sigsuspend` | 临时替换 sigmask 并等待信号 |
 
-等待路径使用 WaitQueue/调度器的可中断睡眠，信号到达会唤醒 Interruptible 任务。
+等待路径使用 WaitQueue/调度器的可中断睡眠；信号到达时，登记级通知 token 会保存提前 wake，
+调度器再按 `Blocking/Blocked` 的实际所有权完成撤销阻塞或重新入队。
 
 ## 12. 用户 handler frame 与 sigreturn
 

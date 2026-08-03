@@ -551,7 +551,9 @@ idle: clear current -> Blocking(cpu) -> Blocked
 4. 单个 wake 返回目标 CPU，批量 wake 聚合目标 mask；外层释放 `TASK_MANAGER` 和
    runqueue 后才发送 `RESCHEDULE`。本地目标不发 IPI，远端 AP 由 doorbell 退出 idle。
 
-`WaitQueue::wake_*()` 只筛选原子状态并把候选交给调度器，不能在外部先写状态。
+`WaitQueue::wake_*()` 先以 CAS 领取一次性 entry token，再把 TCB 交给调度器。
+它不能在外部改写 TaskStatus；早到 wake 的 token 会在 checked block 中撤销
+随后登记的 `Blocking`。
 `TASK_MANAGER -> 单个 RunQueue` 是唯一允许的嵌套顺序；任何路径都不得反向取锁或
 同时持有两个 runqueue。
 

@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-08-02
+> Coverage: 2026-04-01 to 2026-08-03
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -99,6 +99,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP 进程级 legacy interval timer | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 itimer/fork 生命周期对照、共享域与锁序审查、双架构 8 核 setitimer LTP 和初赛门禁 | REAL/VIRTUAL/PROF 迁入 PCB，按 monotonic/线程组 CPU 时钟推进；双架构两套 libc 三种 signal 全过，初赛失败集合未扩大 |
 | SMP POSIX timer 精确 pending | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 预分配 sigqueue/overrun 语义对照、对象身份与双锁路径审查、双架构 8 核 focused LTP | instance/arm/event 身份分离，同 timer 合并 overrun、不同 timer 独立排队；两架构每套 libc `timer_settime01/02` 共 80/80 通过 |
 | SMP shared signal hint 原子发布 | 2026-08-03 | GPT/Codex, DeepSeek | 三 writer 交错建模、全部 queue mutation 审查、双架构 8 核 sigtimedwait gate | queue mutation 与 hint store 合入同一 signal 临界区，关闭旧值覆盖；两架构 glibc 各 11/11 通过 |
+| develop Batch 3 WaitQueue 通知 token | 2026-08-03 | GPT/Codex, DeepSeek | develop 方案迁移审查、lost-wake 线性化建模、双架构 8 核 Docker/QEMU 归纳 | 以登记级 `WaitEntry` 保存提前 wake，不扩张调度状态机；双架构 WaitQueue 5/5，初赛失败集合未扩大 |
 
 ## 4. 详细使用场景
 
@@ -1211,6 +1212,31 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   `CORE_NUM=8 QEMU_MEMORY=8G KTEST=mm` 均 6/6、`dynamic_above_static=true`，分别报告
   8189/8190 MiB。双架构 normal 与 2K1000 build 均通过；实板、DMA 与全容量压力为 NOT RUN。
 
+### Case 50: develop Batch 3 WaitQueue 通知 token 融合
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch3-waitqueue-core-summary.md`；模型任务和原始
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责核对当前 SMP 调度状态机、设计登记级 token、实现与最终证据裁决；
+  DeepSeek 只读审查 lost-wake 交错，并通过受限网关串行执行双架构 build、focused ktest 和
+  初赛回归，不拥有修改、commit 或 push 权限。
+- Problem: 旧 WaitQueue 在 wake 时若观察到任务仍为 Running，会把通知当作“无需唤醒”直接
+  消耗；任务随后完成 `Running -> Blocking` 并切走，边沿通知没有持久 owner 状态可供复查，
+  形成永久睡眠。develop 的总体方向正确，但不能直接套用旧单核 TaskStatus 假设。
+- Implemented change: 每轮等待注册一个 `WaitEntry`，第一个 producer 以 CAS 保存通知；
+  checked block 在登记 Blocking 后同时复查业务条件和 token。poll/epoll 多队列共享同一 entry，
+  清理时先关闭 token 再逐队列摘除。TaskStatus 不增加 WakePending 等重复状态，generic 10ms I/O
+  fallback 在 FS/Net producer 审计完成前继续保留。
+- AI adjudication: DeepSeek 首轮建议为测试公开私有 `wake_one()`，GPT/Codex 拒绝扩大生产 API，
+  改用已有公开 `wake_at_most(1)`。初赛 runner 因构建重写四个已跟踪 mke2fs 二进制报告
+  mutation；这些文件测试前干净且测试后精确恢复，功能结果与指纹告警分账记录。LA64 raw
+  305/314 的 3 分差异来自已知 `cpid` 串口交织，pipe 数据和结束标记正常，按既有口径为
+  semantic 308/314。
+- Verification: 受测代码冻结 diff SHA-256 为
+  `cfad6e72757ebc42c1a834ca7a5db9b08cfc888d4341a6cf0687aefa0300ab28`；双架构 8 核
+  kernel build 通过，WaitQueue ktest 各 5/5；初赛 RV64 312/314，LA64 semantic 308/314。
+  两 CPU 同时竞争同一多队列 entry 与 deadline 跨轮误唤醒的专项动态交错仍为 NOT RUN。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1324,6 +1350,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b80-posix-timer-pending-summary.md` | SMP POSIX timer 精确 pending | 记录对象/装载/事件三类身份、per-timer overrun、双锁拆分、signalfd 映射、双架构 8 核 focused 冻结证据与专项 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b81-shared-signal-hint-summary.md` | SMP shared signal hint 原子发布 | 记录锁外 stale store 交错、writer mutex 全序与 Release/Acquire 分工、双架构 8 核构建/focused 冻结证据及精确注入 NOT RUN |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/dynamic-memory-8g-summary.md` | 双架构运行期内存拓扑与 8 GiB 适配 | 记录固件 region→allocator/映射/ABI 链路、linker 回收页 RED→GREEN、DeepSeek 初步误归因裁决及双架构 8 核 8 GiB 6/6 门禁 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch3-waitqueue-core-summary.md` | develop Batch 3 WaitQueue 通知 token | 记录登记级 token 与 TaskStatus 分工、multi-queue 唯一领取、模型建议纠正、双架构 8 核 focused/初赛证据和 producer fallback 边界 |
 
 ## 9. 交互记录与留痕方式
 
