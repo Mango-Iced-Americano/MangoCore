@@ -320,6 +320,14 @@ console 路径中打印。timer fast path 同样先于 BADV 诊断；它先清 `
 普通锁、不打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
 用户态和内核态 trap 共用同一 fast path；B39 后 AP 同时打开 IPI 与本地 timer，
 external interrupt 继续关闭。AP 的 timer 只发布本地调度工作，不执行全局 callback。
+
+B92 为这条生产路径增加了逐 CPU 诊断：发送端在 mailbox 发布后按目标 CPU 数累计各类
+reason，接收端分别累计 hard handler 进入次数和实际从 mailbox 消费的 reason bit，硬件
+doorbell 失败则统一在 `send_ipi_mask()` 记到发起 CPU。计数全部使用 `Relaxed`，不参与
+mailbox/ack 的正确性同步。由于同一个 reason 在接收前可合并为一个 bit，`published` 大于
+`consumed` 是允许的，不能把两者差值直接解释成“丢 IPI”；应结合 request/ack、失败计数和
+目标 CPU 状态判断。
+
 AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
 `RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle，或

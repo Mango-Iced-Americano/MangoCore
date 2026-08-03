@@ -75,6 +75,7 @@ fn print_task_info() {
 
 fn print_cpu_states() {
     println!("--- PER-CPU (best effort; active_mm=0 means none unless busy=1) ---");
+    println!("IPI reason order: {:?}", crate::smp::IPI_REASON_NAMES);
     for cpu_id in 0..crate::smp::configured_cpu_count() {
         let state = crate::smp::cpu_diagnostics(cpu_id);
         println!(
@@ -121,6 +122,14 @@ fn print_cpu_states() {
             state.user_tlb_ack,
             state.memory_barrier_request,
             state.memory_barrier_ack
+        );
+        println!(
+            "cpu{} ipi: interrupts={} send_failures={} published={:?} consumed={:?}",
+            state.cpu_id,
+            state.ipi_interrupts,
+            state.ipi_send_failures,
+            state.ipi_reasons_published,
+            state.ipi_reasons_consumed
         );
     }
 }

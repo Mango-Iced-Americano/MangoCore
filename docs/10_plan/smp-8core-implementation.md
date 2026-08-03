@@ -84,7 +84,7 @@ related_docs:
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
 | console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
-| panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照；B91 再加入每 CPU switch、实际 migration、成功 steal 与 runqueue peak | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入 |
+| panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照；B91 再加入每 CPU switch、实际 migration、成功 steal 与 runqueue peak；B92 补齐 IPI handler、doorbell 失败及逐 reason 发布/消费计数 | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入；同类 mailbox bit 可合并，IPI 发布/消费差值不是丢中断判据 |
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用，B87 又删除安全物理地址 API 返回 `'static` 引用的通道，让 trap frame 可变引用只在持 `task.inner` guard 时建立；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB；B91 为每核 owner 补齐 switch/migration/steal/rq-peak 生产诊断 | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
@@ -1261,7 +1261,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 - 增加 per-CPU 诊断计数：
   - B91 已完成 context switch、实际 migration、成功 steal 和 runqueue 长度峰值；
-  - 各类 IPI 收发与 ack；
+  - B92 已完成 IPI handler、硬件 doorbell 失败和各 reason 的发布/消费次数；既有 request/ack
+    继续表达协议完成状态，不用可合并的 mailbox 消费次数代替；
   - TLB shootdown 数量、范围和等待时间；
   - timer interrupt、reschedule；
 - Phase 2.5/3 已用于正确性门禁的无效状态转换和重复入队断言继续保留；Phase 6 只补充

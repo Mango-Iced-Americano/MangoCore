@@ -56,8 +56,14 @@ struct PerCpu {
     round_trip_reply_pending: AtomicBool,
     /// CPU0 已在本地 trap 中处理的 round-trip 回复序号。
     round_trip_reply_ack: AtomicUsize,
-    /// 本 CPU 在 idle deferred 路径发送 IPI 失败的次数。
+    /// 本 CPU 提交硬件 doorbell 失败的累计次数。
     ipi_send_failures: AtomicUsize,
+    /// 本 CPU 进入 IPI hard handler 的次数；冗余 doorbell 也会计入。
+    ipi_interrupts: AtomicUsize,
+    /// 本 CPU 向目标 mailbox 发布各 reason 的次数，广播按目标数累计。
+    ipi_reasons_published: [AtomicUsize; IPI_REASON_COUNT],
+    /// 本 CPU 从 mailbox 实际消费各 reason bit 的次数；同类发布可被合并。
+    ipi_reasons_consumed: [AtomicUsize; IPI_REASON_COUNT],
     /// hard IRQ 已收到 STOP；真正停止必须延后到 AP 独立 idle stack。
     stop_requested: AtomicBool,
     /// 本 CPU 已承诺不再访问共享内核状态，供 CPU0 等待停机完成。
@@ -95,6 +101,9 @@ impl PerCpu {
             round_trip_reply_pending: AtomicBool::new(false),
             round_trip_reply_ack: AtomicUsize::new(0),
             ipi_send_failures: AtomicUsize::new(0),
+            ipi_interrupts: AtomicUsize::new(0),
+            ipi_reasons_published: [const { AtomicUsize::new(0) }; IPI_REASON_COUNT],
+            ipi_reasons_consumed: [const { AtomicUsize::new(0) }; IPI_REASON_COUNT],
             stop_requested: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             timer_pending: AtomicBool::new(false),
@@ -126,6 +135,10 @@ pub(crate) struct CpuDiagnostics {
     pub(crate) user_tlb_ack: usize,
     pub(crate) memory_barrier_request: usize,
     pub(crate) memory_barrier_ack: usize,
+    pub(crate) ipi_interrupts: usize,
+    pub(crate) ipi_send_failures: usize,
+    pub(crate) ipi_reasons_published: [usize; IPI_REASON_COUNT],
+    pub(crate) ipi_reasons_consumed: [usize; IPI_REASON_COUNT],
     pub(crate) task: crate::task::processor::CpuTaskDiagnostics,
 }
 
@@ -262,6 +275,33 @@ impl IpiReason {
 
     const fn bits(self) -> u32 {
         self.0
+    }
+}
+
+const IPI_REASON_COUNT: usize = IpiReason::MEMORY_BARRIER.bits().trailing_zeros() as usize + 1;
+
+pub(crate) const IPI_REASON_NAMES: [&str; IPI_REASON_COUNT] = [
+    "ping",
+    "round-request",
+    "round-reply",
+    "stop",
+    "reschedule",
+    "kernel-tlb",
+    "user-tlb",
+    "user-tlb-range",
+    "timer-reprogram",
+    "membarrier",
+];
+
+/// 记录一份 mailbox 位图中的已知 reason；诊断不能因异常位破坏 IPI 处理。
+fn record_ipi_reasons(counters: &[AtomicUsize; IPI_REASON_COUNT], reasons: u32, count: usize) {
+    // 只扫描已有名字的低位，既保持 hard IRQ 工作量固定，也让未来新增 reason
+    // 即使漏补诊断映射也只少计一次，而不会把生产 IPI 路径变成 panic 点。
+    let mut reasons = reasons & ((1u32 << IPI_REASON_COUNT) - 1);
+    while reasons != 0 {
+        let index = reasons.trailing_zeros() as usize;
+        counters[index].fetch_add(count, Ordering::Relaxed);
+        reasons &= reasons - 1;
     }
 }
 
@@ -450,6 +490,14 @@ pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
         user_tlb_ack: cpu.user_tlb_ack.load(Ordering::Acquire),
         memory_barrier_request: cpu.memory_barrier_request.load(Ordering::Acquire),
         memory_barrier_ack: cpu.memory_barrier_ack.load(Ordering::Acquire),
+        ipi_interrupts: cpu.ipi_interrupts.load(Ordering::Relaxed),
+        ipi_send_failures: cpu.ipi_send_failures.load(Ordering::Relaxed),
+        ipi_reasons_published: core::array::from_fn(|index| {
+            cpu.ipi_reasons_published[index].load(Ordering::Relaxed)
+        }),
+        ipi_reasons_consumed: core::array::from_fn(|index| {
+            cpu.ipi_reasons_consumed[index].load(Ordering::Relaxed)
+        }),
         task: cpu.task_state.read_diagnostics(),
     }
 }
@@ -460,10 +508,11 @@ pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
 /// doorbell 失败，已经发布的 reason 保留到后续 IPI 消费，不能回滚原子状态。
 pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
     let configured = expected_online_mask();
+    let sender = self::cpu_id();
     if reason.bits() == 0 || targets & !configured != 0 {
         return Err(-3);
     }
-    if targets & (1usize << self::cpu_id()) != 0 {
+    if targets & (1usize << sender) != 0 {
         return Err(-3);
     }
     if targets & !online_cpu_mask() != 0 {
@@ -480,6 +529,15 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
                 .fetch_or(reason.bits(), Ordering::Release);
         }
     }
+    // IpiReason 的公开构造只有单 bit 常量。publication 按目标数计数；
+    // 同类 reason 若在接收前重复发布，mailbox 会合并，所以不能用
+    // published-consumed 的差值直接判断丢中断。
+    debug_assert_eq!(reason.bits().count_ones(), 1);
+    record_ipi_reasons(
+        &PER_CPUS[sender].ipi_reasons_published,
+        reason.bits(),
+        targets.count_ones() as usize,
+    );
 
     let boot_hardware_id = BOOT_HARDWARE_ID.load(Ordering::Acquire);
     let mut first_error = None;
@@ -489,6 +547,10 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
             // 一个 doorbell 失败不能阻止其余已发布 mailbox 的目标被唤醒；
             // 完成整轮发送后再返回首个错误，失败目标的 reason 留待后续 IPI。
             if let Err(error) = crate::hal::send_ipi(hardware_id) {
+                // 该计数只用于事后诊断，不承载 mailbox 或 ack 的同步关系。
+                PER_CPUS[sender]
+                    .ipi_send_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -577,11 +639,11 @@ pub fn round_trip_reply_ack() -> usize {
         .load(Ordering::Acquire)
 }
 
-/// 查询目标 CPU 在 deferred idle 路径发送 IPI 的失败次数。
+/// 查询目标 CPU 提交硬件 doorbell 失败的累计次数。
 pub fn ipi_send_failures(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id]
         .ipi_send_failures
-        .load(Ordering::Acquire)
+        .load(Ordering::Relaxed)
 }
 
 /// 让所有 online AP 停止，并等待它们承诺不再访问共享状态。
@@ -626,9 +688,11 @@ pub fn stop_secondary_cpus() -> Result<(), StopError> {
 /// handler 只做原子操作，不分配、不打印、不获取普通锁，也不直接调度。
 pub fn handle_ipi() {
     let local = &PER_CPUS[self::cpu_id()];
+    local.ipi_interrupts.fetch_add(1, Ordering::Relaxed);
     // Acquire 获取发送端在 Release fetch_or 前发布的数据；swap(0) 使原因只被
     // 当前 CPU 消费一次。doorbell 合并或重复到达都不会重复生成 ack。
     let reasons = local.pending_ipi.swap(0, Ordering::Acquire);
+    record_ipi_reasons(&local.ipi_reasons_consumed, reasons, 1);
     if reasons & IpiReason::PING.bits() != 0 {
         // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
         local.ipi_ping_ack.fetch_add(1, Ordering::Release);
@@ -721,9 +785,7 @@ pub(crate) fn service_secondary_ipi_work() -> bool {
         return did_work;
     }
 
-    if send_ipi(BOOT_CPU_ID, IpiReason::ROUND_TRIP_REPLY).is_err() {
-        local.ipi_send_failures.fetch_add(1, Ordering::Release);
-    }
+    let _ = send_ipi(BOOT_CPU_ID, IpiReason::ROUND_TRIP_REPLY);
     did_work = true;
     did_work
 }
@@ -1196,11 +1258,7 @@ pub(crate) fn request_timer_reprogram() {
     PER_CPUS[BOOT_CPU_ID]
         .timer_reprogram_requested
         .store(true, Ordering::Release);
-    if send_ipi(BOOT_CPU_ID, IpiReason::TIMER_REPROGRAM).is_err() {
-        PER_CPUS[sender]
-            .ipi_send_failures
-            .fetch_add(1, Ordering::Relaxed);
-    }
+    let _ = send_ipi(BOOT_CPU_ID, IpiReason::TIMER_REPROGRAM);
 }
 
 /// CPU0 在关中断安全点消费一次可合并的 timer 重编程请求。

@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-08-03
+> Coverage: 2026-04-01 to 2026-08-04
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -1436,6 +1436,24 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: RV64/LA64 normal build 均 exit 0，两项冻结 diff 一致；QEMU NOT RUN
   是明确的风险自适应决策，不是漏报通过。
 
+### Case 62: SMP Per-CPU IPI 生产诊断
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md`；DeepSeek 原始任务、
+  审查和执行日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责计数语义、内存序和生产路径裁决；DeepSeek 独立审查并通过受限
+  gateway 串行执行双架构 Docker build 与 8 核 focused ktest。
+- Problem: 既有 panic 快照只能看到 pending 和 request/ack，无法判断 IPI 负载、同类 bit
+  合并程度或硬件 doorbell 失败来自哪个发起 CPU；失败计数还分散在两个调用点。
+- Implemented change: 发送端按目标数记录逐 reason publication，接收端记录 handler 和
+  consumed bit；失败统一在 `send_ipi_mask()` 记录。全部诊断使用 Relaxed 原子，不参与
+  mailbox/ack 同步，未知诊断位不会让 hard IRQ panic。
+- AI adjudication: 拒绝新增重复的 doorbell failure 字段，也拒绝用
+  `published-consumed` 判断丢中断，因为 mailbox 的同类 reason 本来允许合并。首轮验证因
+  GPT 并行文档写入被 runner 判定 mutation 后废弃，冻结后完整重跑。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；四项采纳证据
+  `mutation_detected=false`，无 panic、timeout、fatal 或 IPI/TLB failure。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1565,6 +1583,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md` | SMP 单页帧分配锁外清零 | 记录 reservation 中间 owner、allocator 锁边界、双重回收建议纠正与 DeepSeek 双架构 8 核冻结门禁 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md` | SMP 时间源全局可变状态 | 记录无读者 registry 删除、统一 HAL 数据流、自适应 T1 门禁和 DeepSeek 双架构冻结构建 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b91-scheduler-diagnostics-summary.md` | SMP Per-CPU 调度生产诊断 | 记录真实运行迁移口径、switch/steal/rq-peak 原子快照、只读 profile 误派披露及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md` | SMP Per-CPU IPI 生产诊断 | 记录逐 reason 发布/消费口径、doorbell 失败收口、首轮 mutation 证据废弃及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 
