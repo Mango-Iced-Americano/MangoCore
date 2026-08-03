@@ -357,6 +357,10 @@ full-user request 不增长和 handler observed 共同排除其它 trap 全刷�
 `TlbFlush` 都能和其它发起者交叉处理 IPI/ack。用例最终要求 active mask 为零、所有 CPU
 追上最后 generation、full-user request 不变；其后的用例继续通过才能排除残留状态污染。
 
+B86 没有为借用收口增加人工 hook：编译器负责拒绝从共享 `PageTable` 借用修改 PTE；运行期
+语义继续由 B84 的真实权限降级、B85 的并发生产 writer，以及完整 34 项 SMP focused 门禁
+覆盖。验证时必须保证 tracked diff 指纹冻结，避免把验证期间的注释或格式变化误算进结果。
+
 ### TAP 输出格式
 
 ```

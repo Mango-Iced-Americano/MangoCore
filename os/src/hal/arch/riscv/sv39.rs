@@ -364,7 +364,9 @@ impl Sv39PageTable {
         let idxs: [usize; 3] = vpn.indexes();
         let mut ppn = self.root_ppn;
         for i in 0..3 {
-            let pte = &mut ppn.get_pte_array()[idxs[i]];
+            // Safety: 可变 self 独占本页表；PPN 只来自根或有效非叶子 PTE，
+            // 新建的中间页也由当前对象的 frame 列表保持存活。
+            let pte = &mut unsafe { ppn.get_pte_array_mut() }[idxs[i]];
             if i == 2 {
                 // this condition is used to make sure the
                 //returning predication is put before validity to quit before creating the terminal page entry.
@@ -389,7 +391,8 @@ impl Sv39PageTable {
         let mut ppn = self.root_ppn;
         let mut result: Option<&Sv39PageTableEntry> = None;
         for i in 0..3 {
-            let pte = &ppn.get_pte_array::<Sv39PageTableEntry>()[idxs[i]];
+            // Safety: 页表对象保持中间页存活；共享借用只建立只读 PTE 视图。
+            let pte = &unsafe { ppn.get_pte_array::<Sv39PageTableEntry>() }[idxs[i]];
             if !pte.is_valid() {
                 return None;
             }
@@ -402,12 +405,14 @@ impl Sv39PageTable {
         result
     }
     /// Find and return reference the page table entry denoted by `vpn`, `None` if not found.
-    fn find_pte_refmut(&self, vpn: VirtPageNum) -> Option<&mut Sv39PageTableEntry> {
+    fn find_pte_refmut(&mut self, vpn: VirtPageNum) -> Option<&mut Sv39PageTableEntry> {
         let idxs: [usize; 3] = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut Sv39PageTableEntry> = None;
         for i in 0..3 {
-            let pte = &mut ppn.get_pte_array::<Sv39PageTableEntry>()[idxs[i]];
+            // Safety: 可变 self 将返回 PTE 的生命周期绑定到页表独占借用；
+            // 遍历到的 PPN 只来自当前对象管理的有效页表链。
+            let pte = &mut unsafe { ppn.get_pte_array_mut::<Sv39PageTableEntry>() }[idxs[i]];
             if !pte.is_valid() {
                 return None;
             }
@@ -534,7 +539,7 @@ impl PageTable for Sv39PageTable {
             (aligned_pa_usize + offset).into()
         })
     }
-    fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+    fn block_and_ret_mut(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
             tlb_invalidate_vpn!(vpn);
@@ -543,7 +548,7 @@ impl PageTable for Sv39PageTable {
             None
         }
     }
-    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+    fn block_and_ret_mut_no_flush(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
             Some(pte.ppn())

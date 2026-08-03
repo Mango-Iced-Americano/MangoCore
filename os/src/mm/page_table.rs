@@ -122,10 +122,10 @@ pub trait PageTable {
     /// # TLB
     ///
     /// 成功修改 PTE 后必须立即刷新该 VPN，保证后续写访问重新缺页。
-    fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+    fn block_and_ret_mut(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>;
 
     /// 撤销写权限并返回 PPN，但不刷新 TLB；仅供 `UserMapper` 使用。
-    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+    fn block_and_ret_mut_no_flush(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>;
 
     /// 刷新当前 CPU 上一个虚拟页对应的 TLB 条目。
     ///

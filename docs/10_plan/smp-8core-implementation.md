@@ -89,7 +89,7 @@ related_docs:
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53/B82 用 CPU1 真实用户 load 证明 CoW 与同 VPN remap 精准失效；B84 再用远端 store fault 证明 `mprotect(RW -> R)`，并修正 LA64 撤销写权限必须同步清 W/D；B85 由全部 8 CPU 经真实 mprotect 交错执行锁外 flush，验证多代 generation、固定槽和 active mask 收尾；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | 通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53/B82 用 CPU1 真实用户 load 证明 CoW 与同 VPN remap 精准失效；B84 再用远端 store fault 证明 `mprotect(RW -> R)`，并修正 LA64 撤销写权限必须同步清 W/D；B85 由全部 8 CPU 经真实 mprotect 交错执行锁外 flush，验证多代 generation、固定槽和 active mask 收尾；B86 删除 `&PageTable -> &mut PTE` 通道，raw PTE 视图按读写拆分且 writer 必须持可变页表借用；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | 通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
 | MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验 | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；其它共享子系统的 unsafe/static 状态由对应负责人处理 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端、真实 CoW、同 VPN unmap/remap、mprotect 降权与 8 发起者并发 PTE 写均有 focused 证据 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
@@ -597,6 +597,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `TlbFlush` 解锁后交错发送不同 VPN payload；writer 在全员完成前保持 active，并在开中断
   barrier 后本地 deactivate。双架构 8 核均 34/34，最终 generation、active mask、精准请求
   和后续用例无污染检查均通过；
+- B86 把物理页 PTE 视图收窄为 crate-private unsafe 读/写接口：只读 walk 不再借道可变
+  walker，写侧和 `block_and_ret_mut*()` 必须取得 `&mut PageTable`。外层 VM 锁继续提供
+  跨 CPU 线性化，Rust 借用在更低层阻止共享页表引用制造可变 PTE；PTE 位与 TLB 协议未变；
 - B54 开始 Phase 5 的 MM/HAL 共享状态审计：LoongArch 恒等映射 dirty side table 改用
   原子 bitset，防止同 word 的并发置位/清位丢更新；slab 删除内部 page/list/cache 和顶层
   allocator 的过宽 `Sync`，只保留全局堆 `Mutex` 类型边界真正要求的

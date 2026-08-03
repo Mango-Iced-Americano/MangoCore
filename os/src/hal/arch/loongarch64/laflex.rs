@@ -283,7 +283,9 @@ impl LAFlexPageTable {
         let idxs = vpn.indexes::<3>();
         //log::trace!("[find_pte_create] idxs:{:?}", idxs);
         let mut ppn = self.get_root_ppn();
-        let mut pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[0]];
+        // Safety: 可变 self 独占本页表；根和后续非叶子 PPN 均由当前
+        // 对象持有或引用，遍历期间不会释放对应页表页。
+        let mut pte = &mut unsafe { ppn.get_pte_array_mut::<LAFlexPageTableEntry>() }[idxs[0]];
 
         if !pte.is_valid() {
             self.frames
@@ -294,7 +296,7 @@ impl LAFlexPageTable {
             self.frames.push(frame);
         }
         ppn = pte.ppn();
-        pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[1]];
+        pte = &mut unsafe { ppn.get_pte_array_mut::<LAFlexPageTableEntry>() }[idxs[1]];
         if !pte.is_valid() {
             self.frames
                 .try_reserve(1)
@@ -304,25 +306,27 @@ impl LAFlexPageTable {
             self.frames.push(frame);
         }
         ppn = pte.ppn();
-        pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[2]];
+        pte = &mut unsafe { ppn.get_pte_array_mut::<LAFlexPageTableEntry>() }[idxs[2]];
         Ok(pte)
     }
     /// Find and return reference the page table entry denoted by `vpn`, `None` if not found or invalid.
-    fn find_pte_refmut(&self, vpn: VirtPageNum) -> Option<&mut LAFlexPageTableEntry> {
+    fn find_pte_refmut(&mut self, vpn: VirtPageNum) -> Option<&mut LAFlexPageTableEntry> {
         //trace!("[find_pte_refmut] {:?}", vpn);
         let idxs = vpn.indexes::<3>();
         let mut ppn = self.get_root_ppn();
-        let mut pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[0]];
+        // Safety: 可变 self 把可变 PTE 生命周期绑定到页表独占借用；
+        // PPN 只沿当前对象管理的有效页表链向下遍历。
+        let mut pte = &mut unsafe { ppn.get_pte_array_mut::<LAFlexPageTableEntry>() }[idxs[0]];
         if !pte.is_valid() {
             return None;
         }
         ppn = pte.ppn();
-        pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[1]];
+        pte = &mut unsafe { ppn.get_pte_array_mut::<LAFlexPageTableEntry>() }[idxs[1]];
         if !pte.is_valid() {
             return None;
         }
         ppn = pte.ppn();
-        pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[2]];
+        pte = &mut unsafe { ppn.get_pte_array_mut::<LAFlexPageTableEntry>() }[idxs[2]];
         if pte.is_valid() {
             Some(pte)
         } else {
@@ -332,8 +336,22 @@ impl LAFlexPageTable {
     /// Find the page table entry denoted by vpn, returning Some(&_) if found or None if not.
     #[inline(always)]
     fn find_pte(&self, vpn: VirtPageNum) -> Option<&LAFlexPageTableEntry> {
-        //trace!("[find_pte(as refmut)] {:?}", vpn);
-        self.find_pte_refmut(vpn).map(|i| &*i)
+        let idxs = vpn.indexes::<3>();
+        let mut ppn = self.get_root_ppn();
+        for level in 0..3 {
+            let index = idxs[level];
+            // Safety: 页表对象保持遍历所需页表页存活；共享借用只建立
+            // 只读视图，写侧必须先取得同一对象的可变借用。
+            let pte = &unsafe { ppn.get_pte_array::<LAFlexPageTableEntry>() }[index];
+            if !pte.is_valid() {
+                return None;
+            }
+            if level == 2 {
+                return Some(pte);
+            }
+            ppn = pte.ppn();
+        }
+        None
     }
 }
 /// Assume that it won't encounter oom when creating/mapping.
@@ -473,16 +491,19 @@ impl PageTable for LAFlexPageTable {
             (aligned_pa_usize + offset).into()
         })
     }
-    fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+    fn block_and_ret_mut(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
+            // 先复制结果，让 PTE 的可变借用在 TLB 操作前结束；失效本身只需要
+            // 页表身份和 VPN，不应为了返回 PPN 延长底层条目的独占借用。
+            let ppn = pte.ppn();
             self.invalidate_page(vpn);
-            Some(pte.ppn())
+            Some(ppn)
         } else {
             None
         }
     }
-    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+    fn block_and_ret_mut_no_flush(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
             Some(pte.ppn())

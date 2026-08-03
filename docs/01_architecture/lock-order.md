@@ -684,6 +684,12 @@ B22 的 trap-return 激活登记、B23 的 PTE 修改侧和 B51 的切离登记�
 `MmuGather::seal()` 取得 `TlbFlush`，再由块作用域析构 guard。这个接口不暴露可变
 guard，是“先解锁再等 ack”的类型级门禁，不依赖每个调用点人工记住 `drop()`。
 
+B86 把同一边界继续下推到架构页表实现：物理页的原始 PTE 视图分为只读
+`get_pte_array()` 和可写 `get_pte_array_mut()`，两者均为 crate-private `unsafe`；只读 walk
+不得再先制造 `&mut PTE` 后降级为共享引用，写 walk 则必须持有 `&mut PageTable`。这里
+`unsafe` 只证明物理页类型和存活期，`&mut PageTable` 与外层 VM 锁才共同证明独占修改权。
+因此禁止恢复任何 `&PageTable -> &mut PTE` 的辅助函数，即使当前调用点“碰巧持锁”。
+
 禁止在 VM 锁内等待 user-TLB ack。目标 CPU 可能已经关闭本地 IRQ并在 page fault 中等待
 同一 VM 锁；发起者若持锁等它处理 IPI，会形成 `VM lock -> ack -> target VM lock` 环。
 等待者临时开放 IRQ只能解决“两个无锁等待者互相成为 IPI 目标”，不能修复持普通锁等待。

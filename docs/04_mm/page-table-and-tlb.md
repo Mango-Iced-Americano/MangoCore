@@ -49,6 +49,12 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 
 trait 的存在把 VMA 管理、缺页策略和具体 PTE 编码解耦。
 
+B86 又把 trait 下方的借用边界收紧：`PhysPageNum` 的原始 PTE 视图仅在 crate 内以
+`unsafe` 暴露，并明确拆成只读 `get_pte_array()` 与可写 `get_pte_array_mut()`。架构页表的
+只读 walk 只能得到 `&PTE`；所有 PTE writer，包括 `block_and_ret_mut*()`，都必须先取得
+`&mut PageTable`。`AddressSpace` 的 VM 锁仍负责跨 CPU 动态同步，而 Rust 独占借用负责阻止
+同一个页表对象从共享引用制造可变 PTE；两层约束缺一不可。
+
 ## 3. 访问类型
 
 页表层区分两组访问类型。
@@ -329,7 +335,9 @@ store，要求它以 SIGSEGV 结束。该门禁发现 LA64 只清页表遍历使
 TLB 的 D 位；底层 `revoke_write()` 改为同步清 W/D 后双架构通过。默认亲和性、通用用户
 迁移仍受共享子系统门禁约束。B85 把原先直接调用同步原语的并发用例替换为 8 CPU
 真实 `AddressSpace::write(mprotect)`：VM 锁内 PTE 写串行，解锁后的多代 `TlbFlush`
-交错执行，并验证全部 CPU observed、active mask 清零和无全刷退化。
+交错执行，并验证全部 CPU observed、active mask 清零和无全刷退化。B86 不改变 PTE 位或
+失效协议，只把页表底层的“共享 `PageTable` 借用可产生可变 PTE”收口为只读/可写 raw view
+分离，并让双架构所有 writer 通过 `&mut PageTable` 表达独占权。
 
 ## 13. 调试核对点
 

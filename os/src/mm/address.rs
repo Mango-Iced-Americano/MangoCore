@@ -291,17 +291,34 @@ impl PhysPageNum {
     pub fn offset(&self, offset: usize) -> PhysAddr {
         PhysAddr::from((self.0 << PAGE_SIZE_BITS) + offset)
     }
-    /// 将整页解释为页表项数组。
+    /// 将整页解释为只读页表项数组。
     ///
     /// # Safety
     ///
-    /// 调用方必须保证该物理页确实保存 `T` 类型页表项，且当前路径独占该页表页。
-    pub fn get_pte_array<T>(&self) -> &'static mut [T] {
+    /// 调用方必须保证该物理页确实保存 `T` 类型页表项，并在返回引用存活
+    /// 期间保持页表页有效。普通 MM 代码应经过架构页表对象访问。
+    pub(crate) unsafe fn get_pte_array<T>(&self) -> &'static [T] {
         let pa: PhysAddr = self.clone().into();
         let entry_size = core::mem::size_of::<T>();
         assert!(entry_size != 0, "page table entry must not be zero-sized");
-        // Safety: callers guarantee this physical page stores page-table entries
-        // of type `T`; the length is derived from page size and entry size.
+        // Safety: 由本函数的调用方保证页表页类型、有效期和同步约束。
+        unsafe {
+            core::slice::from_raw_parts(pa.direct_map_addr() as *const T, PAGE_SIZE / entry_size)
+        }
+    }
+
+    /// 将整页解释为可写页表项数组。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证物理页保存 T 类型页表项，并独占页表对象的修改权。
+    /// 该约束应由可变 PageTable 借用或外层地址空间锁提供，不能从共享借用
+    /// 制造可变 PTE。
+    pub(crate) unsafe fn get_pte_array_mut<T>(&self) -> &'static mut [T] {
+        let pa: PhysAddr = self.clone().into();
+        let entry_size = core::mem::size_of::<T>();
+        assert!(entry_size != 0, "page table entry must not be zero-sized");
+        // Safety: 由本函数的调用方额外保证对整个页表页的独占修改权。
         unsafe {
             core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut T, PAGE_SIZE / entry_size)
         }

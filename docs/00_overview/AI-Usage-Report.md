@@ -1352,6 +1352,25 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34，目标用例均为
   `ok 25`，无 panic、timeout、fatal trap、active-MM 泄漏、generation 落后或全刷退化。
 
+### Case 57: SMP 页表可变借用边界收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b86-pte-borrow-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 审计 raw PTE 引用来源、设计双层独占边界、修复编译 RED 并裁决；
+  DeepSeek 在冻结 diff 上串行执行 Docker 构建和双架构 8 核 SMP 回归，并复核 PTE/TLB
+  语义没有变化。
+- Problem: `PhysPageNum::get_pte_array()` 是安全函数却返回 `'static mut`，双架构
+  `find_pte_refmut(&self)` 因而能从共享页表借用制造可变 PTE；当前 VM 锁虽覆盖主要调用点，
+  类型系统没有表达独占约束。
+- Implemented change: raw PTE view 改为 crate-private unsafe 只读/可写接口；只读 walker
+  独立遍历，所有 writer 与 `block_and_ret_mut*()` 改为要求 `&mut PageTable`。LA64 先复制
+  PPN 再做本地失效，使可变 PTE 借用不跨越 `self` 调用。
+- AI adjudication: 首轮因 GPT 在任务提交后删除重复注释导致冻结指纹变化，按流程判失败；
+  第二轮 LA64 编译暴露 Rust 2018 数组迭代和借用跨度问题，修复后第三轮冻结门禁通过。
+- Verification: 最终 LA64 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34，无
+  panic/timeout/fatal trap，tracked diff SHA-256 前后一致且无源码 mutation。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1475,6 +1494,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b83-exec-inactive-summary.md` | SMP 非 leader exec inactive ack | 记录 live/inactive 双 ack、noreturn Arc 根因、Linux `de_thread()` 对照、DeepSeek 报告纠错与双架构 8 核 34/34 证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b84-mprotect-summary.md` | SMP 真实 mprotect 降权与 LA64 W/D 权限 | 记录真实远端 store RED、官方页表/TLB 与 Linux 对照、模型归因纠正、LA64 W/D 修复、双架构 focused 和初赛非回归证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b85-concurrent-pte-summary.md` | SMP 真实并发 PTE writer | 记录生产 mprotect 交错、VM 锁与锁外 shootdown 边界、DeepSeek 双架构 8 核冻结门禁和无状态残留证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b86-pte-borrow-summary.md` | SMP 页表可变借用边界收口 | 记录 raw PTE 读写拆分、`&mut PageTable` 独占合同、LA64 编译 RED→GREEN、DeepSeek 双架构 8 核冻结门禁与流程 mutation 披露 |
 
 ## 9. 交互记录与留痕方式
 
