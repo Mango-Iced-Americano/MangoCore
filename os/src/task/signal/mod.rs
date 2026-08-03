@@ -558,6 +558,7 @@ fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bo
 }
 
 fn take_next_pending_signal(task: &TaskControlBlock) -> Option<PendingSignal> {
+    let fast_before = task.signal_pending_fast();
     let thread_pending = {
         let mut inner = task.acquire_inner_lock();
         let pending = inner.sigpending.pending().difference(inner.sigmask);
@@ -565,7 +566,14 @@ fn take_next_pending_signal(task: &TaskControlBlock) -> Option<PendingSignal> {
         task.recalculate_signal_pending_with_inner(&inner);
         next
     };
-    if thread_pending.is_some() {
+    if let Some(pending) = thread_pending.as_ref() {
+        log::info!(
+            "[do_signal] tid {} thread dequeue signum={} fast_before={} fast_after={}",
+            task.tid.0,
+            pending.signum(),
+            fast_before,
+            task.signal_pending_fast(),
+        );
         return thread_pending;
     }
 
@@ -574,9 +582,24 @@ fn take_next_pending_signal(task: &TaskControlBlock) -> Option<PendingSignal> {
         task.process.shared_pending_hint().difference(inner.sigmask)
     };
     if shared_pending.is_empty() {
+        log::info!(
+            "[do_signal] tid {} shared dequeue skipped fast_before={} fast_after={}",
+            task.tid.0,
+            fast_before,
+            task.signal_pending_fast(),
+        );
         return None;
     }
-    task.process.take_shared_matching(shared_pending)
+    let pending = task.process.take_shared_matching(shared_pending);
+    log::info!(
+        "[do_signal] tid {} shared dequeue matching={:?} signum={} fast_before={} fast_after={}",
+        task.tid.0,
+        shared_pending,
+        pending.as_ref().map(PendingSignal::signum).unwrap_or(0),
+        fast_before,
+        task.signal_pending_fast(),
+    );
+    pending
 }
 
 pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
@@ -693,6 +716,8 @@ fn signal_should_ptrace_stop(inner: &super::task::TaskControlBlockInner, signal:
 /// 执行信号处理
 /// 在从内核返回到用户空间前调用
 pub fn do_signal() -> &'static TaskControlBlock {
+    const MAX_DELIVERY_ITERATIONS: usize = 1024;
+
     let task = current_task_ref().unwrap();
     {
         let mut inner = task.acquire_inner_lock();
@@ -707,10 +732,24 @@ pub fn do_signal() -> &'static TaskControlBlock {
             );
         }
     }
+    let mut delivery_iterations = 0;
     while let Some(pending) = take_next_pending_signal(task) {
+        delivery_iterations += 1;
+        if delivery_iterations > MAX_DELIVERY_ITERATIONS {
+            warn!(
+                "[do_signal] tid {} exceeded {} delivery iterations; stopping this pass",
+                task.tid.0,
+                MAX_DELIVERY_ITERATIONS,
+            );
+            break;
+        }
         let mut inner = task.acquire_inner_lock();
         let signum = pending.signum();
         let signal = pending.signal;
+        log::info!(
+            "[do_signal] tid {} delivery_iteration={} signum={}",
+            task.tid.0, delivery_iterations, signum
+        );
         let sighand_ref = task.process.sighand();
         let mut sighand = sighand_ref.lock();
         if signal_should_ptrace_stop(&inner, signal) {
@@ -723,9 +762,21 @@ pub fn do_signal() -> &'static TaskControlBlock {
         if let Some(act) = sighand.get(signum).copied() {
             // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)
             if act.handler == SigHandler::SIG_IGN {
+                log::info!(
+                    "[do_signal] tid {} signum={} disposition=SIG_IGN",
+                    task.tid.0, signum
+                );
+                drop(sighand);
+                drop(inner);
                 continue;
             }
             if act.handler != SigHandler::SIG_DFL {
+                log::info!(
+                    "[do_signal] tid {} signum={} disposition=handler:{:#x}",
+                    task.tid.0,
+                    signum,
+                    act.handler.addr().unwrap_or(0),
+                );
                 let trap_cx = inner.get_trap_cx();
                 let a0_isize = trap_cx.gp.a0 as isize;
                 if let Some(restart) = RestartKind::from_syscall_result(a0_isize) {
@@ -895,6 +946,10 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 return task;
             }
         }
+        log::info!(
+            "[do_signal] tid {} signum={} disposition=SIG_DFL",
+            task.tid.0, signum
+        );
         // user program doesn't register a handler for this signal, use our default handler
         match signal {
             // caused by a specific instruction in user program, print log here before exit
@@ -927,6 +982,8 @@ pub fn do_signal() -> &'static TaskControlBlock {
             // the current process we are handing is sure to be in RUNNING status, so just ignore SIGCONT
             // where we really wake up this process is where we sent SIGCONT, such as `sys_kill()`
             Signals::SIGCHLD | Signals::SIGCONT | Signals::SIGURG | Signals::SIGWINCH => {
+                drop(sighand);
+                drop(inner);
                 continue;
             }
             // stop (or we should say block) current process
