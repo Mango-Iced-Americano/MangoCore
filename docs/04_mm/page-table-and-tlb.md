@@ -324,8 +324,10 @@ start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 
 用户探针先填充旧 PPN 翻译，再由 CPU0 通过真实私有 CoW 替换 PTE；timer 静默窗口内只有
 精准 handler 能使后续普通用户 load 读到新页 canary。B82 在同一窗口继续通过正式
 `munmap + MAP_FIXED_NOREPLACE` 替换同一 VPN，要求用户 load 再读到第三个物理页 canary，
-并确认两次单页修改都未退化为全用户刷新。默认亲和性、通用用户迁移、`mprotect` 降权后的
-远端 store fault 与更高并发压力仍未完成。
+并确认两次单页修改都未退化为全用户刷新。B84 又在 mprotect 返回并收齐 ack 后放行远端
+store，要求它以 SIGSEGV 结束。该门禁发现 LA64 只清页表遍历使用的 W 位、未清真正进入
+TLB 的 D 位；底层 `revoke_write()` 改为同步清 W/D 后双架构通过。默认亲和性、通用用户
+迁移与更高并发 PTE 写压力仍未完成。
 
 ## 13. 调试核对点
 

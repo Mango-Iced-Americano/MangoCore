@@ -191,7 +191,9 @@ impl LAFlexPageTableEntry {
     }
     #[inline(always)]
     pub fn revoke_write(&mut self) {
-        self.bits &= !(LAPTEFlagBits::W.bits() as usize);
+        // W 是页表遍历使用的软件权限位，D 才是填入 TLB 后真正约束 store 的位。
+        // 两者必须一起清除，否则 INVTLB 后重新 page walk 仍会得到可写翻译。
+        self.bits &= !((LAPTEFlagBits::W | LAPTEFlagBits::D).bits() as usize);
     }
     #[inline(always)]
     pub fn revoke_read(&mut self) {
@@ -473,7 +475,6 @@ impl PageTable for LAFlexPageTable {
     }
     fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
-            pte.clear_dirty();
             pte.revoke_write();
             self.invalidate_page(vpn);
             Some(pte.ppn())
@@ -483,7 +484,6 @@ impl PageTable for LAFlexPageTable {
     }
     fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
-            pte.clear_dirty();
             pte.revoke_write();
             Some(pte.ppn())
         } else {

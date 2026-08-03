@@ -344,12 +344,12 @@ Completion/WaitQueue，CPU0 在确认所有任务均为 `Blocked` 且离开 curr
 因此不能用于声称 generation race、stale translation、ack 前 frame 不复用或用户迁移
 已经完成；frame retirement 由 B23 后续用例覆盖。
 
-B82 的 `remote_user_load_observes_cow_and_remap` 是 stale PPN 的直接证据：CPU1 用户探针
-先持续 load 旧页，CPU0 通过生产 CoW 修改 PTE，随后再用正式 `munmap` 与
-`MAP_FIXED_NOREPLACE` 替换同一 VPN；用户 load 必须依次读到两个新 frame canary。用例会
-静默 CPU1 timer，并把 restore helper 排在 probe 后；helper 若在最终结果前运行、
-full-user request 增长或 handler 未推进 observed，均判失败。它覆盖 PPN 替换和 unmap
-有效位失效，但不应外推到尚未覆盖的 `mprotect` 降权 store fault。
+B84 的 `remote_user_pte_updates_take_effect` 是 stale PPN 与 stale permission 的直接证据：
+CPU1 用户探针先持续 load 旧页，CPU0 依次通过生产 CoW 和正式
+`munmap + MAP_FIXED_NOREPLACE` 修改同一 VPN；用户 load 必须读到两个新 frame canary。
+随后探针先在旧 RW 权限下完成真实 store，CPU0 执行 `mprotect(RW -> R)` 并收齐远端 ack
+后才放行第二次 store；后者必须触发 SIGSEGV，且只读 frame 内容不变。timer 静默、
+full-user request 不增长和 handler observed 共同排除其它 trap 全刷造成的假通过。
 
 ### TAP 输出格式
 

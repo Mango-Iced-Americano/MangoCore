@@ -1317,6 +1317,24 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: RV64 8 核 SMP 34/34；LA64 normal build exit 0，8 核 SMP 34/34。
   两架构均无 panic/timeout/fatal trap/stale-TLB marker，源码指纹稳定。
 
+### Case 55: SMP 真实 mprotect 降权与 LA64 W/D 权限
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b84-mprotect-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计真实用户 stale-permission 反例，对照 LoongArch 官方页表/TLB
+  语义与 Linux `pte_wrprotect()` 定位根因、实现和裁决；DeepSeek 在冻结 diff 上执行
+  Docker 串行门禁并归纳 RED/GREEN 日志。
+- Problem: LA64 `mprotect(RW -> R)` 只清 page-walk W 位，仍把 D=1 装入远端 TLB；
+  一个本应 SIGSEGV 的用户 store 因而继续修改只读映射。
+- Implemented change: 底层 `revoke_write()` 统一清 W/D；永久探针先证明旧映射真实可写，
+  再在 mprotect ack 后要求远端 store 以 SIGSEGV 结束，并验证 frame canary 和精准刷新。
+- AI adjudication: DeepSeek 首轮把 33/34 RED 初步归因于 `INVTLB` 不刷新权限；GPT/Codex
+  根据官方 `INVTLB 0x5` 删除完整 ASID+VA 项的合同拒绝该推断，进一步定位到重填 PTE 的
+  D 位，并用 Linux 同架构实现交叉确认。
+- Verification: RV64 8 核 SMP 34/34；LA64 修复前 33/34 且唯一失败为写保护绕过，修复后
+  双架构 build exit 0、LA64 8 核 SMP 34/34；LA64 初赛保持 308/314 精确基线，无 mutation。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1438,6 +1456,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch7-proc-cpu-summary.md` | develop Batch 7 procfs CPU 拓扑 | 记录 configured/online 门禁、Linux stat 格式、首轮缺少 procfs 环境失败和双架构 8 核 L4 8/8 证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b82-user-remap-tlb-summary.md` | SMP 真实用户 CoW + 同 VPN remap TLB 证明 | 记录 DeepSeek 并发审查与 Docker 执行、GPT 对 remap-frame UAF 遗漏的纠正、官方 TCFG/TICLR 语义溯源、LA64 RED→GREEN 及既有 exec 超时的 partial 披露 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b83-exec-inactive-summary.md` | SMP 非 leader exec inactive ack | 记录 live/inactive 双 ack、noreturn Arc 根因、Linux `de_thread()` 对照、DeepSeek 报告纠错与双架构 8 核 34/34 证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b84-mprotect-summary.md` | SMP 真实 mprotect 降权与 LA64 W/D 权限 | 记录真实远端 store RED、官方页表/TLB 与 Linux 对照、模型归因纠正、LA64 W/D 修复、双架构 focused 和初赛非回归证据 |
 
 ## 9. 交互记录与留痕方式
 

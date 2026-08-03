@@ -304,8 +304,9 @@ __smp_timer_probe_end:
 );
 
 // 用户探针只做普通访存，不通过 syscall/yield 重新进入内核。a0/a1 分别是
-// 待换页与进度页，a2/a3/a4 是原页、CoW 页和重映射页的 canary。两个完成
-// 标记分别证明 CPU1 的 load 越过了真实 CoW 与 munmap/remap PTE 修改。
+// 待换页与进度页，a2/a3/a4 是原页、CoW 页和重映射页的 canary。前三个标记
+// 证明 CPU1 的 load 越过 CoW 与 munmap/remap；标记 5 由 CPU0 在 mprotect 返回后
+// 发布，此后的 store 必须触发 SIGSEGV，不得执行到失败标记 4。
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
     r#"
@@ -330,10 +331,21 @@ __smp_stale_tlb_probe_start:
     ld t0, 0(a0)
     beq t0, a3, .Lstale_tlb_remap_wait
     bne t0, a4, .Lstale_tlb_fail
+    # 先在旧 RW 权限下执行一次 store，排除只验证过可读 TLB 的假阳性。
+    sd a4, 0(a0)
     fence rw, rw
     addi t1, zero, 3
     sd t1, 0(a1)
-    addi a0, zero, 0
+.Lstale_tlb_protect_wait:
+    ld t1, 0(a1)
+    addi t2, zero, 5
+    bne t1, t2, .Lstale_tlb_protect_wait
+    # 正确的远程降权应在这条 store 触发 SIGSEGV，后续代码不应执行。
+    sd a2, 0(a0)
+    fence rw, rw
+    addi t1, zero, 4
+    sd t1, 0(a1)
+    addi a0, zero, 1
     j .Lstale_tlb_exit
 .Lstale_tlb_fail:
     fence rw, rw
@@ -375,10 +387,21 @@ __smp_stale_tlb_probe_start:
     ld.d $t0, $a0, 0
     beq $t0, $a3, .Lstale_tlb_remap_wait
     bne $t0, $a4, .Lstale_tlb_fail
+    # 先在旧 RW 权限下执行一次 store，排除只验证过可读 TLB 的假阳性。
+    st.d $a4, $a0, 0
     dbar 0
     addi.d $t1, $zero, 3
     st.d $t1, $a1, 0
-    move $a0, $zero
+.Lstale_tlb_protect_wait:
+    ld.d $t1, $a1, 0
+    addi.d $t2, $zero, 5
+    bne $t1, $t2, .Lstale_tlb_protect_wait
+    # 正确的远程降权应在这条 store 触发 SIGSEGV，后续代码不应执行。
+    st.d $a2, $a0, 0
+    dbar 0
+    addi.d $t1, $zero, 4
+    st.d $t1, $a1, 0
+    addi.d $a0, $zero, 1
     b .Lstale_tlb_exit
 .Lstale_tlb_fail:
     dbar 0
@@ -592,8 +615,8 @@ pub fn tests() -> Vec<KernelTest> {
             user_tlb_range_sync_uses_arch_backend,
         ),
         KernelTest::new(
-            "smp::remote_user_load_observes_cow_and_remap",
-            remote_user_load_observes_cow_and_remap,
+            "smp::remote_user_pte_updates_take_effect",
+            remote_user_pte_updates_take_effect,
         ),
         KernelTest::new(
             "smp::concurrent_range_shootdowns_keep_payloads_separate",
@@ -3133,7 +3156,7 @@ fn restore_stale_tlb_probe_timer() {
         STALE_TLB_ERRORS.fetch_or(4, Ordering::Release);
     }
     let progress = STALE_TLB_PROGRESS_PTR.load(Ordering::Acquire);
-    if progress == 0 || !matches!(read_stale_tlb_word(progress), 3 | 4) {
+    if progress == 0 || !matches!(read_stale_tlb_word(progress), 3 | 4 | 5) {
         // 这是防御性检查：正常 FIFO 顺序下 restore 只能在探针退出后运行。
         // 若结果尚未发布，说明发生了意外调度，全刷可能污染 stale-TLB 证据。
         STALE_TLB_ERRORS.fetch_or(8, Ordering::Release);
@@ -3147,10 +3170,10 @@ fn restore_stale_tlb_probe_timer() {
     crate::hal::local_irq_restore(irq_flags);
 }
 
-/// CPU1 先以用户 load 填充旧翻译；CPU0 依次通过真实 CoW 和
-/// munmap/MAP_FIXED_NOREPLACE 更新同一 PTE。探针必须先后读到两个新物理页，
-/// 因而同时验证权限修改和解除映射都触发了远端精确 shootdown。
-fn remote_user_load_observes_cow_and_remap() -> Result<(), &'static str> {
+/// CPU1 先以用户访存填充旧翻译；CPU0 依次执行真实 CoW、
+/// munmap/remap 和 RW->R mprotect。前两次必须读到新物理页，最后一次
+/// 必须让远端 store 产生 SIGSEGV，从硬件行为证明三类 PTE 更新都已生效。
+fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
         return Err("stale-TLB user probe did not run on CPU0");
     }
@@ -3422,6 +3445,40 @@ fn remote_user_load_observes_cow_and_remap() -> Result<(), &'static str> {
             }
         }
     }
+
+    if validation_error.is_none() {
+        // marker 3 在用户态的旧 RW 映射上完成一次 store 后才发布。
+        // 只有这个前置条件成立，后续写保护异常才能排除“PTE 原本就不可写”。
+        let protected = vm.write(|space| {
+            space.mprotect(
+                target_addr,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R | crate::mm::MapPermission::U,
+            )
+        });
+        if protected.is_err() {
+            validation_error = Some("production mprotect rejected the target page");
+        }
+    }
+
+    if validation_error.is_none() {
+        // AddressSpace::write() 已在返回前收齐远程 shootdown ack；此后
+        // 才放行 CPU1 的 store，因而成功写入只能说明它仍使用旧 W 权限。
+        write_stale_tlb_word(progress_word, 5);
+        let protect_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while !process.is_zombie() {
+            if read_stale_tlb_word(progress_word) == 4 {
+                validation_error = Some("CPU1 store bypassed the mprotect downgrade");
+                break;
+            }
+            if crate::hal::get_time() >= protect_deadline {
+                validation_error = Some("CPU1 store did not fault after mprotect");
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
     if crate::smp::user_tlb_request(1) != full_request_before {
         validation_error.get_or_insert("single-page updates degraded to a full user-TLB flush");
     }
@@ -3474,8 +3531,11 @@ fn remote_user_load_observes_cow_and_remap() -> Result<(), &'static str> {
     if reaped.pid != pid {
         validation_error.get_or_insert("stale-TLB probe reaped the wrong child");
     }
-    if validation_error.is_none() && reaped.status != 0 {
-        validation_error = Some("stale-TLB user probe exited with failure");
+    if validation_error.is_none() {
+        let sigsegv = crate::task::Signals::SIGSEGV.to_signum().unwrap() as u32;
+        if reaped.status & 0x7f != sigsegv {
+            validation_error = Some("mprotect violation did not terminate the probe with SIGSEGV");
+        }
     }
     if STALE_TLB_ERRORS.load(Ordering::Acquire) != 0
         || STALE_TLB_TIMER_RESTORED.load(Ordering::Acquire) != 1
@@ -3484,6 +3544,11 @@ fn remote_user_load_observes_cow_and_remap() -> Result<(), &'static str> {
     }
     if read_stale_tlb_word(old_word) != STALE_TLB_OLD_VALUE {
         validation_error.get_or_insert("COW modified the retained source frame");
+    }
+    if read_stale_tlb_word(stale_tlb_word_ptr(remap_frame.ppn) as usize)
+        != STALE_TLB_REMAP_VALUE
+    {
+        validation_error.get_or_insert("mprotect violation modified the read-only frame");
     }
 
     drop(crate::task::take_zombie_tasks(usize::MAX));
