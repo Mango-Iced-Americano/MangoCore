@@ -3,7 +3,7 @@ title: "MM 初始化与内核地址空间"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-03
+last_update: 2026-08-04
 tags: [mm, init, kernel-space, mapping, smp]
 code_paths:
   - "os/src/mm/mod.rs"
@@ -109,6 +109,12 @@ SMP 下仍只有一个全局堆，但并发访问由 `KernelAllocator.inner` 的
 `SlabPage`、`SlabList`、`SlabCache` 和分配器本身均不声明 `Sync`，避免把“运行期有锁”
 错误扩大成“任意共享引用都可跨 CPU 并发访问”的类型授权。`HEAP_SPACE` 则只在单次启动
 初始化时以裸地址交给该分配器，之后不再通过静态数组名称访问。
+
+可选的 `heap_trace` 也只使用一个全局锁，但它不再让锁中状态通过裸指针指向两张
+`static mut` 表。`TRACE: Mutex<TraceState>` 直接拥有 active/site 定长表，因此可变
+引用的生命期被 mutex guard 约束，`TraceState` 的 `Send` 也由字段类型自动推导。
+约 25.6 MiB 的全零表显式放在 `.bss.heap_trace`；它位于 `sbss..ebss` BSP 清零区，
+不占用 raw kernel image 的文件负载。
 
 ### 4.1 分配失败路径
 

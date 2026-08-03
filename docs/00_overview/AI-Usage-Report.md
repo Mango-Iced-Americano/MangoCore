@@ -1471,6 +1471,24 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；四项冻结证据
   mutation false，无 panic、timeout、stale TLB 或 frame 生命周期异常。
 
+### Case 64: SMP heap_trace 缓冲所有权收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b94-heap-trace-owner-summary.md`；DeepSeek 原始任务
+  和 Docker 日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责所有权重构、类型/BSS 不变量和最终 ELF 裁决；
+  DeepSeek 冻结只读审查并执行双架构 feature-on 8 核 Docker/QEMU。
+- Problem: 锁内 `TraceState` 只保存指向两个 `static mut` 大表的裸指针，
+  还需手写 `unsafe impl Send`；类型系统无法表达“数组只能经 guard 变更”。
+- Implemented change: `Mutex<TraceState>` 直接拥有 active/site 数组，safe indexing
+  取代 raw access，`Send` 由字段自动推导；大对象显式放入 `.bss.heap_trace`。
+- AI adjudication: DeepSeek 正确确认锁序与 const/BSS 方向，但将 LA64
+  宽泛 grep 命中的 1-byte `TRACE_ENABLED` 误判为架构差异。GPT 用精确符号、
+  fail-fast 和数值转换拒绝该结论，保留 runner 失败记录而不刷绿。
+- Verification: RV64/LA64 `EXTRA_FEATURES=heap_trace CORE_NUM=8 KTEST=smp` 均 34/34；
+  精确 ELF 复核显示两架构 `TRACE` 均为 26,869,832 bytes 且位于
+  `NOBITS .bss`；两个真实 QEMU runner 均无 mutation/panic/timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1602,6 +1620,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b91-scheduler-diagnostics-summary.md` | SMP Per-CPU 调度生产诊断 | 记录真实运行迁移口径、switch/steal/rq-peak 原子快照、只读 profile 误派披露及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md` | SMP Per-CPU IPI 生产诊断 | 记录逐 reason 发布/消费口径、doorbell 失败收口、首轮 mutation 证据废弃及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b93-tlb-diagnostics-summary.md` | SMP Per-CPU TLB shootdown 生产诊断 | 记录互斥后端、精准页数/fanout/ticks、frame 所有权边界、模型建议裁决及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b94-heap-trace-owner-summary.md` | SMP heap_trace 缓冲所有权 | 记录 Mutex-owned BSS 表、自动 Send、模板/marker 失败披露、模型误判纠正及双架构 feature-on 8 核 34/34 证据 |
 
 ## 9. 交互记录与留痕方式
 

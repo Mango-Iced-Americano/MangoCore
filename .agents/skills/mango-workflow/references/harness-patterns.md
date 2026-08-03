@@ -538,6 +538,20 @@ diag=1
   冻结。验收前必须同时检查生产源码指纹、runner 输入指纹、原始退出码和真实用例集合。
 - **相关文件**: `cc-codex/bin/cc-agent-test.py`, `cc-codex/protocol/test-recipes.json`
 
+## ELF/产物门禁必须精确命中并 fail-fast
+
+- **现象**: QEMU 本身通过，产物脚本也打印 PASS marker，但数值明显不合理，
+  例如要求 25 MiB 大符号却报告 `size=1`。
+- **根因**: 宽泛 grep 命中了同前缀的另一符号；中间 `test` 失败后脚本没有
+  `set -e`，后续无条件 `echo PASS` 又将整体退出码覆盖为 0。`readelf` 的 size
+  还可能是 `0x...`，直接交给 `test -ge` 会解析失败。
+- **修复**: 使用能排除同前缀符号的精确模式；脚本从入口开启
+  `set -euo pipefail`；对十六进制 size 先用 Bash arithmetic `$((value))` 转为整数；
+  PASS marker 必须是所有断言之后的最后一步。
+- **教训**: marker 存在不等于它之前的断言真的执行成功。模型对“架构差异”的
+  自然语言解释不能覆盖显然违反数量级的原始数据。
+- **相关文件**: `cc-codex/protocol/test-recipes.json`, ELF/readelf 产物验收脚本
+
 ## libc waitid 用例不覆盖 raw 第五参数
 
 - **根因**: POSIX libc `waitid()` 公开四参数接口，Linux raw syscall 才有第五个 rusage 指针；

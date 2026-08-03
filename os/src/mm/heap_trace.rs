@@ -1,6 +1,6 @@
 //! Heap allocation tracing — track every alloc/dealloc by call site.
 //!
-//! Enabled by `heap_trace` feature. Uses static arrays + spin::Mutex only.
+//! Enabled by `heap_trace` feature. The global mutex directly owns both fixed tables.
 //! Post-processing: `rust-addr2line -e os -f -p 0x8020XXXX` maps PC to source.
 
 use core::alloc::Layout;
@@ -42,10 +42,10 @@ struct SiteEntry {
 // ── global state ────────────────────────────────────────────────────────────
 
 struct TraceState {
-    active: *mut ActiveEntry,
+    active: [ActiveEntry; ACTIVE_CAP],
     active_count: usize,
     active_dropped: usize,
-    sites: *mut SiteEntry,
+    sites: [SiteEntry; SITES_CAP],
     site_count: usize,
     site_dropped: usize,
     unknown_free: usize,
@@ -53,18 +53,14 @@ struct TraceState {
     tracked_req: usize,
 }
 
-// Safety: `TraceState` 的 raw pointers 只指向本模块静态缓冲区，所有访问都受
-// `TRACE: Mutex<TraceState>` 串行化。
-unsafe impl Send for TraceState {}
-
-static mut ACTIVE_BUF: [ActiveEntry; ACTIVE_CAP] = [ActiveEntry {
+const EMPTY_ACTIVE_ENTRY: ActiveEntry = ActiveEntry {
     ptr: 0,
     req_size: 0,
     actual_size: 0,
     site_idx: 0,
-}; ACTIVE_CAP];
+};
 
-static mut SITES_BUF: [SiteEntry; SITES_CAP] = [SiteEntry {
+const EMPTY_SITE_ENTRY: SiteEntry = SiteEntry {
     hash: 0,
     pcs: [0; STACK_DEPTH],
     live_req: 0,
@@ -74,18 +70,22 @@ static mut SITES_BUF: [SiteEntry; SITES_CAP] = [SiteEntry {
     frees: 0,
     max_req: 0,
     _pad: 0,
-}; SITES_CAP];
+};
 
+// 缓冲区与其唯一可变 owner 放在同一对象中；只有取得 TRACE guard
+// 才能得到数组的 `&mut`。显式放入 BSS，避免约 25 MiB 的全零诊断表
+// 膨胀内核镜像；双架构 linker script 会将 `.bss.*` 纳入 `sbss..ebss` 清零区。
+#[link_section = ".bss.heap_trace"]
 static TRACE: Mutex<TraceState> = Mutex::new(TraceState::new());
 static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 impl TraceState {
     const fn new() -> Self {
         Self {
-            active: core::ptr::null_mut(),
+            active: [EMPTY_ACTIVE_ENTRY; ACTIVE_CAP],
             active_count: 0,
             active_dropped: 0,
-            sites: core::ptr::null_mut(),
+            sites: [EMPTY_SITE_ENTRY; SITES_CAP],
             site_count: 0,
             site_dropped: 0,
             unknown_free: 0,
@@ -98,7 +98,6 @@ impl TraceState {
 // ── public API ──────────────────────────────────────────────────────────────
 
 pub fn enable() {
-    TRACE.lock().init_buffers();
     TRACE_ENABLED.store(true, Ordering::Relaxed);
 }
 
@@ -111,7 +110,6 @@ pub fn record_alloc(ptr: *mut u8, layout: Layout, actual_size: usize) {
         return;
     }
     let mut trace = TRACE.lock();
-    trace.init_buffers();
     trace.record_alloc_inner(ptr as usize, layout.size(), actual_size, layout.align());
 }
 
@@ -120,7 +118,6 @@ pub fn record_dealloc(ptr: *mut u8) {
         return;
     }
     let mut trace = TRACE.lock();
-    trace.init_buffers();
     trace.record_dealloc_inner(ptr as usize);
 }
 
@@ -129,7 +126,6 @@ pub fn dump_oom(failing_layout: Layout) {
         return;
     }
     let mut trace = TRACE.lock();
-    trace.init_buffers();
     trace.dump_oom_inner(failing_layout);
 }
 
@@ -138,7 +134,6 @@ pub fn print_summary() -> bool {
         return false;
     }
     let mut trace = TRACE.lock();
-    trace.init_buffers();
     trace.print_summary_inner()
 }
 
@@ -212,45 +207,24 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
 // ── table operations ────────────────────────────────────────────────────────
 
 impl TraceState {
-    fn init_buffers(&mut self) {
-        if self.active.is_null() {
-            // Safety: `ACTIVE_BUF` 是本模块静态缓冲区；写入 raw pointer 只发生在
-            // `TRACE` 锁保护下的初始化路径。
-            self.active = unsafe { core::ptr::addr_of_mut!(ACTIVE_BUF).cast::<ActiveEntry>() };
-        }
-        if self.sites.is_null() {
-            // Safety: `SITES_BUF` 是本模块静态缓冲区；写入 raw pointer 只发生在
-            // `TRACE` 锁保护下的初始化路径。
-            self.sites = unsafe { core::ptr::addr_of_mut!(SITES_BUF).cast::<SiteEntry>() };
-        }
-    }
-
     fn active_entry(&self, idx: usize) -> ActiveEntry {
-        debug_assert!(!self.active.is_null());
         debug_assert!(idx < ACTIVE_CAP);
-        // Safety: 调用方在 `TRACE` 锁保护下访问，debug assertion 保证索引在静态表内。
-        unsafe { *self.active.add(idx) }
+        self.active[idx]
     }
 
     fn active_entry_mut(&mut self, idx: usize) -> &mut ActiveEntry {
-        debug_assert!(!self.active.is_null());
         debug_assert!(idx < ACTIVE_CAP);
-        // Safety: `&mut self` 来自 `TRACE` 锁保护下的独占访问，索引在静态表内。
-        unsafe { &mut *self.active.add(idx) }
+        &mut self.active[idx]
     }
 
     fn site_entry(&self, idx: usize) -> &SiteEntry {
-        debug_assert!(!self.sites.is_null());
         debug_assert!(idx < SITES_CAP);
-        // Safety: 调用方在 `TRACE` 锁保护下访问，debug assertion 保证索引在静态表内。
-        unsafe { &*self.sites.add(idx) }
+        &self.sites[idx]
     }
 
     fn site_entry_mut(&mut self, idx: usize) -> &mut SiteEntry {
-        debug_assert!(!self.sites.is_null());
         debug_assert!(idx < SITES_CAP);
-        // Safety: `&mut self` 来自 `TRACE` 锁保护下的独占访问，索引在静态表内。
-        unsafe { &mut *self.sites.add(idx) }
+        &mut self.sites[idx]
     }
 
     fn active_probe(&self, ptr: usize) -> usize {
