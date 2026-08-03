@@ -689,9 +689,14 @@ impl TaskControlBlock {
     pub(crate) fn last_cpu(&self) -> usize {
         self.last_cpu.load(Ordering::Acquire)
     }
-    /// 在任务成为本 CPU current 前记录运行位置。
-    pub(crate) fn note_running_cpu(&self, cpu: usize) {
-        self.last_cpu.store(cpu, Ordering::Release);
+    /// 在任务成为本 CPU current 前记录运行位置，并报告是否真的跨核运行。
+    ///
+    /// 只在 `Queued/Migrating -> Running(cpu)` 的唯一 owner 路径调用，所以交换
+    /// 本身不负责争抢所有权。首次运行的 `usize::MAX` 不算迁移；queued 搬运
+    /// 也不提前计数，避免任务在真正执行前再次改 affinity 时虚增统计。
+    pub(crate) fn note_running_cpu(&self, cpu: usize) -> bool {
+        let previous = self.last_cpu.swap(cpu, Ordering::AcqRel);
+        previous != usize::MAX && previous != cpu
     }
     /// 返回任务当前允许运行的逻辑 CPU 位图。
     pub(crate) fn cpus_allowed(&self) -> usize {

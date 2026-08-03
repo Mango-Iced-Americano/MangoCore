@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-04
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -84,6 +84,11 @@ Release 更新；B37 用两者之和估算放置负载。它们都不参与 owne
 最多造成次优选点。`nr_zombies` 只用于空队列快路径和诊断，真实
 Arc 归属由对应 CPU 的 `local_zombies` 锁保护。
 
+B91 另在同一 per-CPU owner 中维护 `context_switches`、`migrations`、`steals` 和
+`run_queue_peak`。它们只用于 panic/稳定化诊断，不参与负载选择和状态交接：migration
+必须等任务相对 `last_cpu` 真正在另一 CPU 进入 `Running` 才计数，queued 搬运不提前计；
+steal 只在窃取方完成 `Migrating -> Running` 后计数；队列峰值不包含 current。
+
 TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的运行位置。
 它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current
 归属始终由 `sched_state` 和对应 CPU 的容器共同决定。
@@ -110,7 +115,9 @@ B36 对稳定 Queued 使用 owner runqueue 作为 placement 锁。只有新 mask
 `Migrating`；该状态表示 TCB 已离开源队列、尚未进入目标队列，唯一 owner 是同步迁移调用方，
 不是某个 CPU。mask 在这段无容器窗口发布，再由目标 runqueue 接管。
 B38 的 Running 路径不借用 `Migrating`：任务切回 idle 前仍是 `Running(source)`，
-切栈后直接由目标 runqueue 提交为 `Queued(target)`。
+切栈后直接由目标 runqueue 提交为 `Queued(target)`。B49 又让空闲 CPU 在本地队列为空时
+从一个 victim 窃取一个 affinity 允许的任务；目标栈 TLB 同步在 victim 队列锁外完成，
+真正摘取仍由 victim 锁内 `Queued -> Migrating` 唯一交接。
 
 ## 3. RunQueue 选择策略
 
@@ -136,7 +143,8 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
 稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；B37 已统一
 新任务与 wake 的 locality/负载选择，B38 已让远程 Running/Blocking 走 owner
-安全点交接。默认全核 mask 和 work stealing 仍未开放。
+安全点交接。work stealing 已可用于 affinity 允许的任务，但普通用户任务默认 mask 仍为
+CPU0-only，因此这不等于已经解除共享子系统门禁。
 
 ### 3.1 首次发布与精确目标入口
 
@@ -348,7 +356,8 @@ panic 诊断不能等待普通锁，也可能发生在 CPU-local 寄存器安装
 `try_current_task()`：先验证寄存器值确实落在 `PER_CPUS` 数组中，再 `try_lock()`。
 CPU-local 不可用或锁正被持有时返回不可用状态，不触发二次 panic。
 
-B56 的 `CpuTaskDiagnostics` 另外读取 current PID/TID、排队数和 zombie 数的原子 hint；
+B56/B91 的 `CpuTaskDiagnostics` 另外读取 current PID/TID、排队数、zombie 数和每 CPU
+switch/migration/steal/runqueue peak 原子 hint；
 `active_user_vm` 只做一次 `try_lock()` 并复制稳定 MM ID。它和外层 `CpuDiagnostics` 都是
 best-effort 输出，不能替代 processor/runqueue 锁或调度状态机的 owner 判定。
 
@@ -603,6 +612,10 @@ idle: clear current -> Blocking(cpu) -> Blocked
 | timer | timer trap、handler、program timer |
 
 这些用于诊断调度退化，不改变调度决策。
+
+profile 计数受运行期开关控制，适合性能窗口；B91 的四个 per-CPU 计数始终开启，专门保证
+panic 时仍能看到各核调度历史。两套计数用途不同，均只用 relaxed atomic，不提供跨字段
+一致快照。
 
 ## 15. 调试核对点
 

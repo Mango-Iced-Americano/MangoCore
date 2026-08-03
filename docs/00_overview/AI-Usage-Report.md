@@ -1564,6 +1564,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b88-frame-zero-summary.md` | SMP 帧清零 raw pointer 边界 | 记录 allocator 唯一领取窗口、局部 raw pointer、手工展开性能语义保留与 DeepSeek 双架构四项冻结门禁 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md` | SMP 单页帧分配锁外清零 | 记录 reservation 中间 owner、allocator 锁边界、双重回收建议纠正与 DeepSeek 双架构 8 核冻结门禁 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md` | SMP 时间源全局可变状态 | 记录无读者 registry 删除、统一 HAL 数据流、自适应 T1 门禁和 DeepSeek 双架构冻结构建 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b91-scheduler-diagnostics-summary.md` | SMP Per-CPU 调度生产诊断 | 记录真实运行迁移口径、switch/steal/rq-peak 原子快照、只读 profile 误派披露及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

@@ -1202,3 +1202,17 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
 - **门禁**：先保留首轮 `ENOENT` 作为环境 RED；修复后日志必须同时出现 mount success、目标
   ABI 业务字段、suite PASS 和稳定源码指纹。挂载失败不能由“其余用例通过”掩盖。
 - **相关文件**：`user/src/bin/regression_init.rs`、`user/src/bin/regression/`
+
+## Agent 验证能力由执行 profile 决定，不能由自然语言任务扩权
+
+- **问题**：把“请运行 Docker 构建/QEMU”写进只读审查任务，不会让模型获得测试能力；
+  `read-only-review` 仍只有 Read/Glob/Grep。模型即使静态判断补丁可提交，也必须把真实命令
+  标为 NOT RUN，不能用文字结论替代退出码。
+- **做法**：源码审查使用 `cc-job.py`；需要模型自主选择并归纳 Docker 测试时使用
+  `cc-agent-test.py` 的 `agent-docker-validation`，只开放受限 gateway。里程碑矩阵把每个必跑
+  recipe 显式列为 `--require-recipe`，并令 `min-runs == max-runs == 必跑项数`。
+- **门禁**：最终 PASS 必须核对父 job 状态、每个 child job ID、recipe、真实 exit、suite
+  计数、forbidden marker 和 before/after 源码指纹。误派的只读结果保留为 NOT RUN 流程证据，
+  不能覆盖后续正确 profile 的实测结果。
+- **相关文件**：`cc-codex/bin/cc-job.py`、`cc-codex/bin/cc-agent-test.py`、
+  `cc-codex/bin/cc-agent-tool.py`、`cc-codex/protocol/test-recipes.json`

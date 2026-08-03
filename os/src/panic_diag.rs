@@ -99,6 +99,14 @@ fn print_cpu_states() {
             state.task.active_mm_lock_busy
         );
         println!(
+            "cpu{} sched: switches={} migrations={} steals={} rq_peak={}",
+            state.cpu_id,
+            state.task.context_switches,
+            state.task.migrations,
+            state.task.steals,
+            state.task.run_queue_peak
+        );
+        println!(
             "cpu{} work: ipi={:#x} resched={}/{} timer={}/{}/{} ktlb={}/{} utlb={}/{} barrier={}/{}",
             state.cpu_id,
             state.pending_ipi,

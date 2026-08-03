@@ -3,7 +3,7 @@ title: "运行期服务 (Runtime Services)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-04
 tags: [architecture, runtime, trace, timer]
 ---
 
@@ -193,7 +193,8 @@ panic 路径使用不阻塞的 `try_current_task()`；CPU-local 尚未安装或 
 `noreturn` 返回路径前显式释放，因为 context switch 不会展开旧 Rust 栈帧。
 
 B56 的 `CpuDiagnostics` 逐核汇总 online/scheduler/STOP、current PID/TID、runqueue 与
-zombie 计数、active MM ID、pending IPI、timer 和 TLB/barrier request/ack。任务侧字段是
+zombie 计数、active MM ID、pending IPI、timer 和 TLB/barrier request/ack。B91 又补充
+每 CPU context switch、实际 migration、成功 steal 和 runqueue peak。任务侧字段是
 原子 hint；active MM 只尝试取得 `active_user_vm` 槽锁，锁忙时输出 `busy=1`。这些值来自
 不同时间点，只用于事后诊断，不能替代 current/runqueue/MM 锁内的所有权判断。
 

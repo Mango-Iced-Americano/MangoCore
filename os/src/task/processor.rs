@@ -92,6 +92,14 @@ pub(crate) struct CpuTaskState {
     current_tid: AtomicUsize,
     /// 0 表示无记录，实际 syscall id 存为 id + 1。
     current_syscall_id: AtomicUsize,
+    /// 本 CPU 完成的底层上下文切换次数，task->idle 与 idle->task 分别计一次。
+    context_switches: AtomicUsize,
+    /// 任务上一次实际运行在其它 CPU、本次在本 CPU 开始运行的次数。
+    migrations: AtomicUsize,
+    /// 本 CPU 从其它 runqueue 成功取得任务并直接接管为 current 的次数。
+    steals: AtomicUsize,
+    /// 本 CPU runqueue 曾达到的最大排队任务数，不包含 current。
+    run_queue_peak: AtomicUsize,
 }
 
 /// panic/STOP 等不可等待上下文可读取的任务侧诊断快照。
@@ -107,6 +115,10 @@ pub(crate) struct CpuTaskDiagnostics {
     pub(crate) nr_zombies: usize,
     pub(crate) active_mm_id: usize,
     pub(crate) active_mm_lock_busy: bool,
+    pub(crate) context_switches: usize,
+    pub(crate) migrations: usize,
+    pub(crate) steals: usize,
+    pub(crate) run_queue_peak: usize,
 }
 
 impl CpuTaskState {
@@ -122,7 +134,27 @@ impl CpuTaskState {
             current_pid: AtomicUsize::new(0),
             current_tid: AtomicUsize::new(0),
             current_syscall_id: AtomicUsize::new(0),
+            context_switches: AtomicUsize::new(0),
+            migrations: AtomicUsize::new(0),
+            steals: AtomicUsize::new(0),
+            run_queue_peak: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn record_migration(&self) {
+        self.migrations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_steal(&self) {
+        self.steals.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_run_queue_len(&self, len: usize) {
+        self.run_queue_peak.fetch_max(len, Ordering::Relaxed);
+    }
+
+    fn record_context_switch(&self) {
+        self.context_switches.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 不等待 processor、runqueue 或地址空间锁地读取诊断信息。
@@ -146,6 +178,10 @@ impl CpuTaskState {
             nr_zombies: self.nr_zombies.load(Ordering::Acquire),
             active_mm_id,
             active_mm_lock_busy,
+            context_switches: self.context_switches.load(Ordering::Relaxed),
+            migrations: self.migrations.load(Ordering::Relaxed),
+            steals: self.steals.load(Ordering::Relaxed),
+            run_queue_peak: self.run_queue_peak.load(Ordering::Relaxed),
         }
     }
 }
@@ -619,6 +655,7 @@ fn dispatch_task(
     }
     // 两个上下文都由 current/idle 槽保持存活，且 processor 锁已经释放。
     unsafe {
+        task_state.record_context_switch();
         crate::task::perf::record_context_switch();
         __switch(idle_task_cx_ptr, next_task_cx_ptr);
     }
@@ -889,6 +926,7 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // and `idle_task_cx_ptr` points into this CPU's idle context. The local
     // processor lock is not held across the assembly context switch.
     unsafe {
+        crate::smp::local_task_state().record_context_switch();
         crate::task::perf::record_context_switch();
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
