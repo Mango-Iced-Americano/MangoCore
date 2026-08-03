@@ -1216,3 +1216,18 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   不能覆盖后续正确 profile 的实测结果。
 - **相关文件**：`cc-codex/bin/cc-job.py`、`cc-codex/bin/cc-agent-test.py`、
   `cc-codex/bin/cc-agent-tool.py`、`cc-codex/protocol/test-recipes.json`
+
+## 并发诊断必须记录实际后端，且不能反向参与正确性协议
+
+- **问题**：只在上层记录“请求精准刷新”会把 firmware/slot/full fallback 混成一个值；把
+  mailbox publication 与 consumed bit 强求相等，又会把合法的同类位合并误判成丢中断。
+  更危险的是，为了读取诊断而增加 Acquire/Release、handler 计时、普通锁或 panic，使观察
+  设施本身改变被观察的 IPI/TLB 时序。
+- **做法**：在真正做出 backend 选择、且已经脱离业务锁的发起侧记录互斥分类；目标侧复用
+  既有 request/ack 判断完成度。计数器统一 Relaxed，只累计操作数、范围/fanout 和 raw timer
+  delta，不持有资源引用。失败诊断必须发生在原有 fail-stop 之前，但不得改变资源泄漏/退休
+  顺序；同类 mailbox 位可合并时明确说明 publication-consumption 差值不是正确性断言。
+- **门禁**：逐个审计成功、固件错误、doorbell 错误、timeout、stopped、local-only 和无目标
+  退出路径，证明每个真实远端操作恰好记一次且本地操作不冒充 shootdown。动态回归复用真实
+  并发路径，不为计数器加入会改变生产状态的测试 hook；冻结指纹与协议 marker 仍是验收事实。
+- **相关文件**：`os/src/smp.rs`、`os/src/mm/tlb.rs`、`os/src/panic_diag.rs`

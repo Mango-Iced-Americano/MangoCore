@@ -3,7 +3,7 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-04
 tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp, membarrier]
 ---
 
@@ -212,6 +212,14 @@ observed generation，最后才 ack。否则 IPI 返回用户态时的 generatio
 远端 IPI、同一 VM 写操作的重复 generation/IPI，以及无 PTE 修改时的空 flush。连续
 区间内的稀疏修改会多失效中间少量页面；跨度超过 64 页仍全刷，以限制 hard-IRQ handler
 的最坏工作量。
+
+B93 在发起 CPU 增加始终可用的远端 shootdown 诊断，但不改变上述提交链。每轮跨核同步
+只归入一种后端：kernel-global 全刷、原生 user 全刷、RV64 firmware 精准区间、软件
+slot/IPI 精准区间，或 slot 被占用后的 range→full fallback。另累计真正进入精准后端的
+区间页数、尝试覆盖的远端 CPU 数，以及从后端选择到同步结束的总/最大 raw timer ticks。
+本地-only flush、无 live target 和参数校验失败不算 shootdown；doorbell 单点失败由 IPI
+诊断统计，只有最终同步返回错误才增加 TLB failure。全部计数属于 Relaxed best-effort
+快照，不参与 request/ack、generation、ASID 或 frame 退休同步，也不在 hard IRQ 中计时。
 
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。

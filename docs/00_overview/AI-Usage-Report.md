@@ -1454,6 +1454,23 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；四项采纳证据
   `mutation_detected=false`，无 panic、timeout、fatal 或 IPI/TLB failure。
 
+### Case 63: SMP Per-CPU TLB shootdown 生产诊断
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b93-tlb-diagnostics-summary.md`；DeepSeek 原始设计、
+  审查和执行日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责统计口径、路径控制流、frame 生命周期和最终实现；DeepSeek
+  从另一视角逐退出路径审查，并串行执行双架构 Docker/QEMU 门禁。
+- Problem: request/ack 能证明完成协议，却不能解释哪个 CPU 制造 TLB 压力、实际选择精准
+  firmware/slot 还是 full fallback、区间大小、fanout 和同步尾延迟。
+- Implemented change: 五种互斥后端按发起 CPU 计数，并累计精准页数、尝试目标数、总/最大
+  raw ticks 与错误；local-only 不计，panic 快照按类型/成本分行输出。
+- AI adjudication: 拒绝 per-target handler 字段、ASID rollover 重复计数、trace buffer 和
+  测试 hook；保留页数和 RFENCE 端到端计时，纠正模型“可以省略”的建议。所有计数为
+  Relaxed 观察值，不进入 MMU 所有权和同步协议。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；四项冻结证据
+  mutation false，无 panic、timeout、stale TLB 或 frame 生命周期异常。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1584,6 +1601,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md` | SMP 时间源全局可变状态 | 记录无读者 registry 删除、统一 HAL 数据流、自适应 T1 门禁和 DeepSeek 双架构冻结构建 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b91-scheduler-diagnostics-summary.md` | SMP Per-CPU 调度生产诊断 | 记录真实运行迁移口径、switch/steal/rq-peak 原子快照、只读 profile 误派披露及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md` | SMP Per-CPU IPI 生产诊断 | 记录逐 reason 发布/消费口径、doorbell 失败收口、首轮 mutation 证据废弃及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b93-tlb-diagnostics-summary.md` | SMP Per-CPU TLB shootdown 生产诊断 | 记录互斥后端、精准页数/fanout/ticks、frame 所有权边界、模型建议裁决及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

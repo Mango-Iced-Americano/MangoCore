@@ -131,6 +131,24 @@ fn print_cpu_states() {
             state.ipi_reasons_published,
             state.ipi_reasons_consumed
         );
+        println!(
+            "cpu{} tlb kinds: kernel_full={} user_full={} range_fw={} range_ipi={} range_fallback={}",
+            state.cpu_id,
+            state.tlb_kernel_full,
+            state.tlb_user_full,
+            state.tlb_user_range_firmware,
+            state.tlb_user_range_ipi,
+            state.tlb_user_range_fallback
+        );
+        println!(
+            "cpu{} tlb cost: range_pages={} remote_targets={} sync_ticks={}/{} failures={}",
+            state.cpu_id,
+            state.tlb_user_range_pages,
+            state.tlb_remote_targets,
+            state.tlb_sync_ticks_total,
+            state.tlb_sync_ticks_max,
+            state.tlb_sync_failures
+        );
     }
 }
 
