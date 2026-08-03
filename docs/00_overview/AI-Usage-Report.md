@@ -1420,6 +1420,22 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；
   四项冻结 diff 一致，无 panic/timeout/fatal/double-free 标记。
 
+### Case 61: SMP 时间源全局可变状态收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md`；DeepSeek 任务与日志只保留
+  在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 审计时间读取数据流、删除不可达旧抽象并选择自适应门禁；
+  DeepSeek 只读检查全仓可达性并执行双架构 Docker build。
+- Problem: `TIME_SOURCE static mut` 只有无调用者的写入入口，没有读者；其唯一
+  `MTime` 实现又硬编码 RISC-V virt 地址，构成无同步且绕过 HAL 的潜在入口。
+- Implemented change: 直接删除 registry、trait、init 和 MTime；不为死状态新增锁。
+  单调时间统一经 HAL，realtime 使用原有 `AtomicU64` offset。
+- AI adjudication: 通过全仓零读者证据选择删除而非 `Once/Mutex` 替换；因运行时
+  数据流未变，采用双架构 build + 指纹的 T1 门禁，不机械重复 QEMU 长测。
+- Verification: RV64/LA64 normal build 均 exit 0，两项冻结 diff 一致；QEMU NOT RUN
+  是明确的风险自适应决策，不是漏报通过。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1547,6 +1563,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b87-trap-context-summary.md` | SMP trap context 直映射借用收口 | 记录通用 `'static` helper 删除、TCB owner 局部 unsafe、trap-return 汇编窗口审查与 DeepSeek 双架构四项冻结门禁 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b88-frame-zero-summary.md` | SMP 帧清零 raw pointer 边界 | 记录 allocator 唯一领取窗口、局部 raw pointer、手工展开性能语义保留与 DeepSeek 双架构四项冻结门禁 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md` | SMP 单页帧分配锁外清零 | 记录 reservation 中间 owner、allocator 锁边界、双重回收建议纠正与 DeepSeek 双架构 8 核冻结门禁 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md` | SMP 时间源全局可变状态 | 记录无读者 registry 删除、统一 HAL 数据流、自适应 T1 门禁和 DeepSeek 双架构冻结构建 |
 
 ## 9. 交互记录与留痕方式
 

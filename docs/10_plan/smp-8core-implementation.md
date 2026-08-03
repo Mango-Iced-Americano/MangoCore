@@ -88,7 +88,7 @@ related_docs:
 | current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用，B87 又删除安全物理地址 API 返回 `'static` 引用的通道，让 trap frame 可变引用只在持 `task.inner` guard 时建立；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
-| timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
+| timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程；B90 删除无读者的 `TIME_SOURCE static mut` 和硬编码 MTIME 旁路，单调时钟统一经 HAL，realtime offset 为原子状态 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53/B82 用 CPU1 真实用户 load 证明 CoW 与同 VPN remap 精准失效；B84 再用远端 store fault 证明 `mprotect(RW -> R)`，并修正 LA64 撤销写权限必须同步清 W/D；B85 由全部 8 CPU 经真实 mprotect 交错执行锁外 flush，验证多代 generation、固定槽和 active mask 收尾；B86 删除 `&PageTable -> &mut PTE` 通道，raw PTE 视图按读写拆分且 writer 必须持可变页表借用；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | 通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
 | MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验；B86—B88 依次收口 PTE、trap context 与 frame-zero 的安全 `'static mut` 通道；B89 再用短命 `FrameReservation` 把单页 PPN 元数据领取与 4 KiB 清零拆分，全局 allocator 写锁不再覆盖普通单页清零和 `Arc` 构造 | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；整页 byte view 与其它共享子系统的 unsafe/static 状态由对应负责人处理 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端、真实 CoW、同 VPN unmap/remap、mprotect 降权与 8 发起者并发 PTE 写均有 focused 证据 |
@@ -1197,8 +1197,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 - B55 已补齐 Phase 0.5 当时只写入文档、未真正跨 CPU 串行化的 console irq-safe 锁和
   panic raw fallback；后续共享子系统只能复用该边界，不能再直接写 UART；
-- TIME_SOURCE、CLOCK_FREQ、timer 计数、LoongArch DIRTY、UART 和诊断缓冲改为原子、
-  受锁对象或 per-CPU 状态；
+- B90 删除无读者且无同步的 `TIME_SOURCE`、trait 注册入口和 RISC-V
+  MTIME 旁路；生产时间读取统一经 HAL，`BOOT_TIME_OFFSET_NS` 保持原子；
+- CLOCK_FREQ、timer 计数、LoongArch DIRTY、UART 和诊断缓冲改为原子、受锁对象
+  或 per-CPU 状态；
 - VirtIO 队列在 v1 中继续单队列串行化；DMA reservation 改为 per-CPU，
   防止不同 CPU 的同步请求互相覆盖；
 - smoltcp 保持单实例：

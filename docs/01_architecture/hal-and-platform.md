@@ -142,6 +142,12 @@ pub const MAX_RW_COUNT: usize =
 
 这组导出构成 HAL 对上层的稳定命名面。MM 层通过 `PageTableImpl` 和 `tlb_invalidate` 操作页表；task 层通过 `KernelStack`、`TrapContext`、`__switch`、`trap_return` 完成调度与返回用户态；syscall/trap 层通过 `get_bad_addr()`、`get_exception_cause()`、`program_timer_delta()` 接入异常和时钟。`IO_CHUNK_SIZE` 用于限制 I/O bounce buffer 的单块大小；`MAX_RW_COUNT` 对齐 Linux 可见的单次读写上限。
 
+时间子系统不再维护第二套可变时钟源注册表。B90 删除了从未有读者的
+`TIME_SOURCE static mut`、`TimeSource/init_time_source()` 和硬编码 RISC-V MTIME 实现。
+架构无关层现在唯一从 HAL `get_time()/get_clock_freq()` 取得单调计数和频率；
+realtime 只在 `timer.rs` 保存原子 `BOOT_TIME_OFFSET_NS`。RV64 的频率来自已冻结
+FDT，LA64 来自 CPUCFG/原子 `CLOCK_FREQ`，不存在 AP 并发覆盖 trait object 指针的路径。
+
 ## 4. 固件与平台的两阶段初始化
 
 平台发现被明确拆成两个生命周期，不把可分配对象带进清 BSS 之前的脆弱阶段：

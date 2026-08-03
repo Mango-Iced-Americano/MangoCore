@@ -375,6 +375,11 @@ owner。验收固定为双架构 normal build，以及 RV64/LA64 `CORE_NUM=8`
 标记和冻结 diff 指纹；第 24 项的 RV64 StorePageFault/LA64 PageModifyFault 是
 `mprotect` 降权门禁的预期用户异常，不能误报为 allocator panic。
 
+B90 只删除全仓无读者的旧 `TIME_SOURCE` 注册表和它的 `MTime` 旁路，
+生产计时在修改前后均调用 HAL。该类不可达代码收口使用 T1：先全仓确认符号
+无调用，再串行完成双架构 normal build 和冻结 diff 检查。不因“时间”两字
+机械重跑刚在 B89 通过的双架构 8 核长测。
+
 ### TAP 输出格式
 
 ```
