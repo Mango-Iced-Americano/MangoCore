@@ -203,6 +203,16 @@
 
 ## QEMU / 测试
 
+### syscall trap 中不能同步 poll 会等待 VirtIO completion 的网络栈
+
+- **现象**：network-enabled RV64 QEMU 在用户态第一次创建 UDP socket 后停在启动同步逻辑；GDB 显示 CPU 在 `VirtQueue::add_notify_wait_pop()` 的 `while !can_pop()` 自旋。
+- **根因**：`UdpSocket::new()` 在 `sys_socket` trap 路径内调用完整 `NET_INTERFACE.poll()`。smoltcp 的 DHCP egress 进入 `VirtIONetRaw::send()`，该路径等待 VirtIO used-ring completion；而 trap 上下文的 `sstatus.SIE` 已关闭，completion interrupt 无法运行，因此同一 hart 永远等不到 `can_pop()`。
+- **根治**：发送路径必须感知中断状态。`NetTxToken::consume()` 检查 `hal::irq_enabled()`（riscv `sstatus.sie()` / la64 `CrMd.is_interrupt_enabled()`）：SIE=1 走原阻塞发送；SIE=0（syscall 上下文）把包放入**独立的全局延迟队列**（`static DEFERRED_TX_QUEUE: Mutex<Vec>`），由下次调度器 poll（中断开启）在 `poll_once` 中 drain 真正发送。同时删除 socket 构造函数里多余的 `poll()`。
+- **⚠️ 锁重入陷阱**：延迟队列**不能**放进 `NetInterfaceInner`——`push_deferred_tx` 被 smoltcp poll 的 `inner_handler` 内调用，此时 `NET_INTERFACE.inner` 已被持有，二次 `inner.lock()` 造成 `spin::Mutex` 重入死锁。必须用独立于 `inner` 锁的全局队列。
+- **正确性**：DHCP/ARP/TCP 有协议级重传计时器兜底，延迟发送不破坏语义（smoltcp 认为 consume 成功即推进状态机）。
+- **定位**：GDB 确认 `sstatus.SIE=0`、`sie` 缺少 external interrupt 位，调用链 `sys_socket → UdpSocket::new → NetInterface::poll_once → VirtIONetRaw::send`。
+- **相关文件**：`os/src/net/adapter.rs`、`os/src/net/config.rs`、`os/src/net/socket/inet/datagram/udp.rs`、`os/src/hal/{mod.rs,arch/riscv/sbi.rs,arch/loongarch64/sbi.rs}`
+
 ### LA64 首次用户态恢复跳入 kernel trap stub
 
 - **现象**: competition 启动在 PID1 已入 ready queue、`trap_return()` 已执行后静默空转，始终没有 `[initd]` 首行。

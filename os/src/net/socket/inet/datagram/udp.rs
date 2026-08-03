@@ -628,7 +628,11 @@ impl UdpSocket {
             .add_routed_socket(InetProtocol::Udp, socket)
             .unwrap();
         log::info!("[UdpSocket::new] new {}", socket_handler);
-        NET_INTERFACE.poll();
+        // NOTE: no NET_INTERFACE.poll() here. Polling from syscall context
+        // (interrupts disabled, SIE=0) can trigger DHCP egress which busy-waits
+        // for a VirtIO completion that can never be serviced on a single core,
+        // deadlocking the kernel. Polls happen naturally on subsequent
+        // sendto/recvfrom/ppoll and from the scheduler tick context.
         Self {
             inner: Mutex::new(UdpSocketInner {
                 remote_endpoint: None,

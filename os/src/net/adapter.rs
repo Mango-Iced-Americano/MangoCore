@@ -432,7 +432,15 @@ impl TxToken for NetTxToken {
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
         crate::task::perf::record_net_tx_submit(len);
-        self.inner.transmit(&buf);
+
+        // 中断关闭（syscall/trap 上下文）时，VirtIO 发送会忙等 completion
+        // 中断——而该中断在当前 hart 上被禁，单核下永远不会到达，导致内核
+        // 死锁。此时把包推迟到下次调度器 poll（中断开启）真正发送。
+        if crate::hal::irq_enabled() {
+            self.inner.transmit(&buf);
+        } else {
+            crate::net::config::NET_INTERFACE.push_deferred_tx(buf);
+        }
         result
     }
 }

@@ -450,6 +450,7 @@ mod enabled {
     pub static NET_TX_SUBMIT_PACKETS: AtomicUsize = AtomicUsize::new(0);
     pub static NET_TX_SUBMIT_BYTES: AtomicUsize = AtomicUsize::new(0);
     pub static NET_TX_DROPS: AtomicUsize = AtomicUsize::new(0);
+    pub static NET_TX_DEFERRED_DROPS: AtomicUsize = AtomicUsize::new(0);
     pub static RUNTIME_EXEC_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static RUNTIME_EXEC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static RUNTIME_OPENAT_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -1468,6 +1469,13 @@ mod enabled {
         }
     }
 
+    #[inline(always)]
+    pub fn record_net_tx_deferred_dropped() {
+        if network_runtime_stats_enabled() {
+            NET_TX_DEFERRED_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     // ── Ext4 Block Mapping recorders ──
 
     #[inline(always)]
@@ -1878,6 +1886,7 @@ mod enabled {
         NET_TX_SUBMIT_PACKETS.store(0, Ordering::Relaxed);
         NET_TX_SUBMIT_BYTES.store(0, Ordering::Relaxed);
         NET_TX_DROPS.store(0, Ordering::Relaxed);
+        NET_TX_DEFERRED_DROPS.store(0, Ordering::Relaxed);
         RUNTIME_EXEC_CALLS.store(0, Ordering::Relaxed);
         RUNTIME_EXEC_TICKS_TOTAL.store(0, Ordering::Relaxed);
         RUNTIME_OPENAT_CALLS.store(0, Ordering::Relaxed);
@@ -3119,6 +3128,9 @@ pub fn record_net_tx_submit(_bytes: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_net_tx_drop() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_net_tx_deferred_dropped() {}
 
 // ── Ext4/P0 recorders (no-op when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
@@ -3744,6 +3756,9 @@ pub static NET_TX_SUBMIT_BYTES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static NET_TX_DROPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static NET_TX_DEFERRED_DROPS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static RUNTIME_EXEC_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
