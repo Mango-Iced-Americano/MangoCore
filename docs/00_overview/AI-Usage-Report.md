@@ -102,6 +102,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | develop Batch 3 WaitQueue 通知 token | 2026-08-03 | GPT/Codex, DeepSeek | develop 方案迁移审查、lost-wake 线性化建模、双架构 8 核 Docker/QEMU 归纳 | 以登记级 `WaitEntry` 保存提前 wake，不扩张调度状态机；双架构 WaitQueue 5/5，初赛失败集合未扩大 |
 | develop Batch 5 signalfd 动态等待域 | 2026-08-03 | GPT/Codex, DeepSeek | Linux signalfd owner 对照、fork/锁序/原始指针审查、双架构 8 核 L4 回归与 RV64 ABI 溯源 | read/poll 动态绑定 current sighand，pending 锁外通知；修复 wait4 rusage 漏参，两架构 regression 7/7 |
 | develop Batch 6 read/pread 可写前缀 | 2026-08-03 | GPT/Codex, DeepSeek | develop 性能意图迁移、VA-backed 生命周期审查、双架构 8 核 L4 回归 | 单 VM 临界区确定可写前缀，只 fault-in 首页；实际 copy 逐页重验，两架构 regression 7/7 |
+| develop Batch 7 procfs CPU 拓扑 | 2026-08-03 | GPT/Codex, DeepSeek | Linux procfs ABI 对照、启动门禁/平台模型审查、双架构 8 核 L4 回归 | cpuinfo/stat 输出 8 个逻辑 CPU；修复 regression PID1 缺少 procfs，双架构 8/8 |
 
 ## 4. 详细使用场景
 
@@ -1280,6 +1281,24 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   7/7、`online_mask=0xff`、退出码 0、源码指纹稳定。两架构跨页用例均返回 first=8、second=8，
   且 prefix/tail 内容正确；原 NULL EFAULT 后 pipe 数据保留场景继续 PASS。
 
+### Case 53: develop Batch 7 procfs CPU 拓扑
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch7-proc-cpu-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 Linux 官方合同核对、实现、测试环境 RED 溯源和提交；DeepSeek 只读
+  审查 configured/online、PlatformInfo 时序、格式与测试过滤，并串行执行双架构 8 核回归。
+- Problem: 内核的 getcpu/affinity 已采用真实逻辑 CPU，但 `/proc/cpuinfo` 和 `/proc/stat` 仍
+  硬编码 cpu0；首轮永久回归又发现 regression 专用 PID1 没有挂载 normal PID1 已挂载的 procfs。
+- Implemented change: cpuinfo 按 configured CPU 生成 processor block 并读取固件 model；stat
+  按 Linux 顺序生成 aggregate + cpuN。USER_HZ 时间未实现时继续写 0，不用诊断计数伪造。
+  regression PID1 显式挂载 procfs，用户用例交叉检查两文件拓扑。
+- AI adjudication: 采纳 configured 选择，因为 AP 缺失会在用户态前 fail-stop；不把 DeepSeek
+  发现的既有动态 btime 混入本批。首轮 RV64 `ENOENT` 原样保留，LA64 未跑不记为通过，修复后
+  使用新 job 冻结重跑。
+- Verification: Docker `CORE_NUM=8` regression 严格串行，RV64 139.452s、LA64 141.699s；
+  均 8/8、`online_mask=0xff`、`processors=8 stat_cpu_rows=8`、退出码 0、源码指纹稳定。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1398,6 +1417,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-patchelf-idempotence-summary.md` | develop Batch 4.1 工具 ELF 幂等化 | 记录 Make 转义和 ELF 动态段审查、DeepSeek 双架构 8 核初赛，以及 before/after 指纹一致的确定性验收 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md` | develop Batch 5 signalfd 动态等待域 | 记录 current-sighand owner、fork/CLONE_SIGHAND、锁外通知、RV64 wait4 漏参溯源与双架构 8 核 L4 7/7 证据 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch6-uaccess-prefix-summary.md` | develop Batch 6 read/pread 可写前缀 | 记录 develop 表示差异、VA-backed 前缀协议、首轮 RV64 编译失败和双架构 8 核 L4 7/7 冻结证据 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch7-proc-cpu-summary.md` | develop Batch 7 procfs CPU 拓扑 | 记录 configured/online 门禁、Linux stat 格式、首轮缺少 procfs 环境失败和双架构 8 核 L4 8/8 证据 |
 
 ## 9. 交互记录与留痕方式
 

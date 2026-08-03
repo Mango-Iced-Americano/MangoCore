@@ -94,7 +94,7 @@ related_docs:
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端和真实 CoW stale-translation 已有 focused 证据；仍需权限/有效位与高并发压力 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier；develop Batch 7 已让 `/proc/cpuinfo` 与 `/proc/stat` 输出完整 configured CPU 拓扑 | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0；`/proc/stat` 的 per-CPU USER_HZ 时间记账仍未实现 |
 
 ### 2.2 总体结构
 
@@ -752,6 +752,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   前缀为空时 fault-in 首页，随后以 VA-backed writer 限定 read/pread 本轮可消费长度；实际
   copy 继续逐页重验。双架构 8 核 L4 regression 均 7/7，跨页只读边界场景两次 read 分别返回
   8/8 字节，证明后半 pipe 数据未被提前消费，`online_mask=0xff` 且源码指纹稳定；
+- develop 融合 Batch 7 让 procfs 与逻辑 CPU 命名空间一致：`/proc/cpuinfo` 为每个 configured
+  CPU 输出 processor block 并使用固件 model，`/proc/stat` 依次输出 aggregate 与
+  `cpu0..cpuN`。时间字段继续诚实为 0，不用异量纲诊断计数冒充 USER_HZ。regression 专用 PID1
+  补挂 procfs，永久用户用例从两个文件交叉核对拓扑；双架构 8 核 L4 均 8/8，processor 与
+  cpuN 行数均为 8，`online_mask=0xff` 且源码指纹稳定；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

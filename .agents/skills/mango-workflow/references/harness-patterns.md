@@ -1190,3 +1190,15 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   迁移“减少副作用”的意图，而不是照搬与当前 SMP 地址空间生命周期冲突的数据表示。
 - **相关文件**：`os/src/mm/uaccess.rs`、`os/src/syscall/fs/common.rs`、
   `user/src/bin/regression/regression_usercopy_pipe.rs`
+
+## 用户态 pseudo-fs 回归必须由专用 PID1 显式挂载
+
+- **问题**：normal PID1 会挂载 `/proc`、`/sys` 等 pseudo-fs，但精简 regression initramfs
+  往往使用另一套 PID1。直接加入 `/proc` 用户回归会得到 `ENOENT`，容易被误判成 proc 节点或
+  open syscall 故障。
+- **做法**：在 regression PID1 启动被测进程前创建 mountpoint 并挂载测试依赖的 pseudo-fs，
+  输出 mount 结果。不要让单个用例通过内核私有函数绕过 VFS，也不要默认 normal init 的副作用
+  自动存在于测试 profile。
+- **门禁**：先保留首轮 `ENOENT` 作为环境 RED；修复后日志必须同时出现 mount success、目标
+  ABI 业务字段、suite PASS 和稳定源码指纹。挂载失败不能由“其余用例通过”掩盖。
+- **相关文件**：`user/src/bin/regression_init.rs`、`user/src/bin/regression/`

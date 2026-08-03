@@ -319,7 +319,7 @@ RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不�
 | FAT32 | `fs/fat32/` | 引导/EFI 分区支持 |
 | tmpfs | `fs/tmpfs/` | 无大小限制的临时内存 FS |
 | ramfs | `fs/ramfs/` | 物理页支持的内存 FS（`/dev/shm` 等） |
-| procfs | `fs/procfs/` | `/proc` 伪文件系统（含 `/proc/[pid]/status/maps/fd`） |
+| procfs | `fs/procfs/` | `/proc` 伪文件系统；CPU 拓扑按 configured 逻辑 CPU 输出 |
 | devfs | `fs/dev/` | 设备文件（null/zero/urandom/tty/pipe/pty/rtc） |
 
 **PageCache**：状态机（Loading→UpToDate↔Dirty→Writeback）；后台写回阈值约 32MB、节流阈值约 64MB，批量 256 页。`reclaim.rs` 周期性后台回收。

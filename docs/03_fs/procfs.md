@@ -4,7 +4,7 @@ module: "fs/procfs"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-08-03"
 code_paths:
   - "os/src/fs/procfs/"
 entry_points:
@@ -59,9 +59,9 @@ pub type ListHookFn = fn(inode: &LockedProcInode) -> Vec<String>;
 |------|----------|------|
 | `cmdline` | ProcContentFn | 内核启动参数，返回 `"BOOT_IMAGE=kernel\n"` |
 | `version` | ProcTextFn（缓存） | 内核版本号 + 架构标识 |
-| `cpuinfo` | ProcTextFn（缓存） | CPU 信息，含架构、ISA、MMU 类型 |
+| `cpuinfo` | ProcTextFn（缓存） | 每个 configured 逻辑 CPU 一段，含架构、ISA、MMU 与固件 model |
 | `meminfo` | ProcContentFn | 物理内存总量/空闲/可用、内核堆统计、Committed_AS |
-| `stat` | ProcContentFn | CPU 统计（简化版）、btime、进程数、运行/阻塞数 |
+| `stat` | ProcContentFn | aggregate + `cpu0..cpuN` 拓扑、btime、进程数、运行/阻塞数 |
 | `uptime` | ProcContentFn | 系统运行时间 |
 | `filesystems` | ProcTextFn（缓存） | 注册的文件系统列表（proc、devfs、ramfs、tmpfs、ext4、vfat） |
 | `mounts` | ProcContentFn | 当前挂载点列表（委托给 mounts 模块） |
@@ -171,13 +171,17 @@ procfs 在 `mount_common_filesystems()` 流程中挂载到 `/proc`，通过 `Mou
 | OSComp basic | /proc/version 等基础文件读取 | 通过 |
 | busybox ps | 通过 /proc/[pid]/status 获取进程信息 | 通过 |
 | busybox top | 通过 /proc/stat 和 /proc/[pid]/stat 获取统计 | 通过 |
+| L4 proc_cpu | 双架构 8 核核对 cpuinfo processor block 与 stat cpuN 行 | 通过（8/8） |
 | netstat -an | 读取 /proc/net/tcp、udp、unix 等 | 通过 |
 | ip neighbor / route | 读取 /proc/net/arp、route | 通过 |
 
 ## 已知问题
 
 1. **`/proc/loadavg` 未实现**。当前缺失 `/proc/loadavg` 节点，一些依赖负载统计的工具（如 `uptime`、某些 busybox 变体）可能无法获取信息。需在 `register_all()` 中新增对应文件。
-2. **`/proc/stat` CPU 时间简化**。`/proc/stat` 的 cpu 行全为 0（user/nice/system/idle 等字段），仅 btime、processes、procs_running、procs_blocked 字段反映实际值。不影响 LTP 基础测试，但性能分析工具可能得到不准确的 CPU 使用率。
+2. **`/proc/stat` CPU 时间简化**。aggregate 与 `cpu0..cpuN` 行数已经反映 configured SMP
+   拓扑，但 user/nice/system/idle 等十个 USER_HZ 字段仍全为 0；当前没有用 timer IRQ、调度
+   次数等不同量纲计数冒充 CPU 时间。btime、processes、procs_running、procs_blocked 字段仍按
+   现有实现生成。性能分析工具可看到真实 CPU 数量，但 CPU 使用率仍不准确。
 3. **`/proc/meminfo` 部分字段占位**。Buffers、Cached、SwapTotal、SwapFree、Dirty、Writeback、Shmem 等字段固定为 0。当前内核未实现 swap 和块缓存统计。
 4. **`/proc/[pid]/io` 简化版**。I/O 统计仅计数读写的字节数，未区分 block I/O 和字符设备 I/O。不影响进程管理工具，但依赖于精细化 I/O 监控的场景可能受限。
 5. **`/proc/[pid]/smaps` 使用 ProcTextFn 缓存**。快照在首次 read 时生成，后续读取返回相同内容。对于跟踪内存变化的应用，需要在两次读取间隔中重新打开文件。
