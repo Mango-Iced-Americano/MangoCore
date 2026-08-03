@@ -137,10 +137,10 @@ fn create_pid_dir(
         pid,
     )?;
 
-    dir.add_cached_text_file(
+    dir.add_cursor_file(
         "smaps",
         InodeMode::from_bits_truncate(0o444),
-        smaps::pid_smaps_snapshot,
+        smaps::pid_smaps_cursor,
         pid,
     )?;
 

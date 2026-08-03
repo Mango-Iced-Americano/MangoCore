@@ -20,7 +20,7 @@ use crate::utils::error::SyscallErr;
 
 use super::vfs::{
     generate_inode_id, FileFlags, FilePrivateData, FileSystem, FileType, FsInfo, IndexNode,
-    InodeFlags, InodeId, InodeMode, Metadata, SuperBlock,
+    InodeFlags, InodeId, InodeMode, Metadata, SmapsCursor, SuperBlock,
 };
 
 pub mod files;
@@ -38,7 +38,15 @@ const PROCFS_SYMLINK_MAX: usize = 64;
 pub type ProcContentFn =
     fn(extra_data: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr>;
 
-pub type ProcTextFn = fn(extra_data: usize) -> Result<String, SyscallErr>;
+/// seq_file-style generator: emits the next chunk of a procfs file into `buf`
+/// while maintaining a per-open bounded cursor (e.g. /proc/<pid>/smaps).
+pub type ProcCursorFn = fn(
+    extra_data: usize,
+    cursor: &mut SmapsCursor,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr>;
 
 pub type ProcWriteFn =
     fn(extra_data: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr>;
@@ -81,7 +89,7 @@ pub struct ProcInodeData {
     pub metadata: Metadata,
     pub children: BTreeMap<String, Arc<dyn IndexNode>>,
     pub content_fn: Option<ProcContentFn>,
-    pub text_fn: Option<ProcTextFn>,
+    pub cursor_fn: Option<ProcCursorFn>,
     pub write_fn: Option<ProcWriteFn>,
     pub extra_data: usize,
     pub process_ref: Option<Weak<ProcessControlBlock>>,
@@ -121,7 +129,7 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: None,
-            text_fn: None,
+            cursor_fn: None,
             write_fn: None,
             extra_data: 0,
             process_ref: None,
@@ -156,7 +164,7 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: Some(content_fn),
-            text_fn: None,
+            cursor_fn: None,
             write_fn: None,
             extra_data: 0,
             process_ref: None,
@@ -192,7 +200,7 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: None,
-            text_fn: None,
+            cursor_fn: None,
             write_fn: None,
             extra_data: 0,
             process_ref: None,
@@ -247,18 +255,18 @@ impl LockedProcInode {
         })
     }
 
-    pub(crate) fn new_cached_text_file_wired(
+    pub(crate) fn new_cursor_file_wired(
         parent: Weak<LockedProcInode>,
         fs: Weak<ProcFS>,
         mode: InodeMode,
-        text_fn: ProcTextFn,
+        cursor_fn: ProcCursorFn,
         extra_data: usize,
     ) -> Arc<Self> {
         let mut data = ProcInodeData::new_file(mode, empty_content);
         data.parent = parent;
         data.fs = fs;
         data.content_fn = None;
-        data.text_fn = Some(text_fn);
+        data.cursor_fn = Some(cursor_fn);
         data.extra_data = extra_data;
         Arc::new_cyclic(|weak| {
             data.self_ref = weak.clone();
@@ -382,11 +390,11 @@ impl LockedProcInode {
         Ok(child)
     }
 
-    pub fn add_cached_text_file(
+    pub fn add_cursor_file(
         self: &Arc<Self>,
         name: &str,
         mode: InodeMode,
-        text_fn: ProcTextFn,
+        cursor_fn: ProcCursorFn,
         extra_data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         let mut this = self.0.lock();
@@ -399,11 +407,11 @@ impl LockedProcInode {
         if name.len() > PROCFS_MAX_NAMELEN as usize {
             return Err(SyscallErr::ENAMETOOLONG);
         }
-        let child = LockedProcInode::new_cached_text_file_wired(
+        let child = LockedProcInode::new_cursor_file_wired(
             this.self_ref.clone(),
             this.fs.clone(),
             mode,
-            text_fn,
+            cursor_fn,
             extra_data,
         );
         this.children.insert(String::from(name), child.clone());
@@ -634,11 +642,11 @@ impl IndexNode for LockedProcInode {
 
         // Extract data without holding lock (prevents deadlock if content_fn
         // needs to access other kernel state)
-        let (content_fn, text_fn, extra_data, file_type, symlink_target) = {
+        let (content_fn, cursor_fn, extra_data, file_type, symlink_target) = {
             let data = self.0.lock();
             (
                 data.content_fn,
-                data.text_fn,
+                data.cursor_fn,
                 data.extra_data,
                 data.metadata.file_type,
                 data.symlink_target.clone(),
@@ -661,18 +669,22 @@ impl IndexNode for LockedProcInode {
                 }
             }
             _ => {
-                if let Some(f) = text_fn {
-                    let content = match &*private_data {
-                        FilePrivateData::ProcText { content } => content.clone(),
+                if let Some(f) = cursor_fn {
+                    let inner = match &mut *private_data {
+                        FilePrivateData::ProcSmapsCursor { inner } => inner.clone(),
                         _ => {
-                            let content = Arc::new(f(extra_data)?);
-                            *private_data = FilePrivateData::ProcText {
-                                content: content.clone(),
-                            };
-                            content
+                            let inner = Arc::new(Mutex::new(SmapsCursor::new()));
+                            *private_data =
+                                FilePrivateData::ProcSmapsCursor { inner: inner.clone() };
+                            inner
                         }
                     };
-                    proc_read_str(offset, len, buf, content.as_str())
+                    let mut cursor = inner.lock();
+                    let n = f(extra_data, &mut cursor, offset, len, buf)?;
+                    if n > len || n > buf.len() {
+                        return Err(SyscallErr::EIO);
+                    }
+                    Ok(n)
                 } else {
                     match content_fn {
                         Some(f) => {

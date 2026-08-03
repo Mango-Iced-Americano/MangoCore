@@ -250,6 +250,47 @@ pub fn generate_inode_id() -> InodeId {
 
 // ── FilePrivateData ─────────────────────────────────────────────────────
 
+/// Per-open streaming cursor for procfs files generated segment-by-segment
+/// (seq_file-style). Keeps kernel-heap usage bounded to one segment: only the
+/// current VMA block is cached, so reading a multi-MiB smaps file across many
+/// read(2) calls is O(N) total instead of materialising one full snapshot.
+#[derive(Debug)]
+pub struct SmapsCursor {
+    /// logical byte offset where the cached `segment` begins; `usize::MAX` = none cached
+    pub seg_start: usize,
+    /// cached content of the current segment (bounded to one VMA block)
+    pub segment: String,
+    /// index (among user VMAs) of the next segment to generate after `segment`
+    pub next_vma: usize,
+    /// within-VMA run counter for the locked-pages sub-segment case
+    pub next_sub: usize,
+}
+
+impl SmapsCursor {
+    pub fn new() -> Self {
+        Self {
+            seg_start: usize::MAX,
+            segment: String::new(),
+            next_vma: 0,
+            next_sub: 0,
+        }
+    }
+
+    /// Rewind to the beginning of the stream.
+    pub fn reset(&mut self) {
+        self.seg_start = usize::MAX;
+        self.segment.clear();
+        self.next_vma = 0;
+        self.next_sub = 0;
+    }
+}
+
+impl Default for SmapsCursor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 文件私有数据枚举
 /// 对标 DragonOS 的 `FilePrivateData`，用于文件系统特定的私有数据
 #[derive(Debug)]
@@ -270,8 +311,11 @@ pub enum FilePrivateData {
     PtyMaster {
         inner: alloc::sync::Arc<crate::fs::dev::pty::PtyInner>,
     },
-    /// Per-open procfs text snapshot.
-    ProcText { content: Arc<String> },
+    /// Per-open procfs smaps streaming cursor (shared across duplicated
+    /// file descriptions, mirroring how Linux shares the file offset).
+    ProcSmapsCursor {
+        inner: alloc::sync::Arc<spin::Mutex<SmapsCursor>>,
+    },
     /// Sequential read-ahead state (per-open-file description).
     /// Used by PageCache to detect sequential reads and batch-prefetch pages.
     Readahead {
@@ -291,8 +335,8 @@ impl Clone for FilePrivateData {
             Self::PtyMaster { inner } => Self::PtyMaster {
                 inner: inner.clone(),
             },
-            Self::ProcText { content } => Self::ProcText {
-                content: content.clone(),
+            Self::ProcSmapsCursor { inner } => Self::ProcSmapsCursor {
+                inner: inner.clone(),
             },
             Self::Readahead { ra_state } => Self::Readahead {
                 ra_state: ra_state.clone(),
