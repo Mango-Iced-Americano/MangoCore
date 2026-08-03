@@ -287,22 +287,6 @@ impl PhysPageNum {
         unsafe { core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE) }
     }
 
-    /// 将整页解释为 `u64` 数组。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须保证该页按 `u64` 对齐并独占访问。
-    pub fn get_dwords_array(&self) -> &'static mut [u64] {
-        let pa: PhysAddr = self.clone().into();
-        // Safety: callers guarantee the page is valid, u64-aligned, and
-        // exclusively accessed for the returned lifetime.
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                pa.direct_map_addr() as *mut u64,
-                PAGE_SIZE / core::mem::size_of::<u64>(),
-            )
-        }
-    }
 }
 
 /// 范围迭代器

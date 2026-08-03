@@ -131,13 +131,16 @@ pub struct FrameTracker {
 普通 `FrameTracker::new(ppn)` 会清零整页：
 
 ```rust
-let bytes = ppn.get_bytes_array();
-for chunk in bytes.chunks_exact_mut(core::mem::size_of::<u64>()) {
-    chunk.copy_from_slice(&0u64.to_ne_bytes());
+let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
+for word in 0..PAGE_SIZE / core::mem::size_of::<u64>() {
+    unsafe { ptr.add(word).write(0) };
 }
 ```
 
 这对用户匿名页、内核动态页和安全隔离都很关键。新分配给用户空间的页面不能包含旧进程或内核路径残留的数据。
+实际实现继续按 8 个 `u64` 手工展开，不改变既有清零吞吐。B88 删除了只为该调用点服务、
+却能返回 `'static mut [u64]` 的通用 helper；raw pointer 只在页已从 fresh/recycled 集合摘除、
+尚未发布 `FrameTracker` 的独占窗口内存在。
 
 未初始化路径只在明确安全的场景使用：
 
@@ -272,6 +275,8 @@ charge，不能为了取得一个更精确数字再次等待可能永不释放�
 7. DRAM 总量、物理地址上界与可分配区间是三个不同概念；有地址空洞的平台必须遍历 `MEMORY_REGIONS`。
 8. DMA 连续页必须由 `frames_alloc()` 分配，不能假设多次单页分配所得 PPN 连续。
 9. 固件 carveout 只有在设备 DMA 停止、其他 CPU 重停放、启动参数复制完成后才能显式释放。
+10. 物理页 raw pointer 只能在能证明 allocator/owner 独占的局部作用域解引用，不能重新包装为
+    可从安全函数取得的 `'static mut` 引用。
 
 ## 13. 2K1000LA 实板验收
 

@@ -33,13 +33,13 @@ pub struct FrameTracker {
 impl FrameTracker {
     /// 分配跟踪器并把整页清零。
     pub fn new(ppn: PhysPageNum) -> Self {
-        let ptr = ppn.get_dwords_array().as_mut_ptr();
+        let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
         const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
         const UNROLL: usize = 8;
         let mut i = 0;
         while i + UNROLL <= WORDS_PER_PAGE {
-            // Safety: `ppn` 来自帧分配器的可用物理页，`get_dwords_array`
-            // 暴露的页大小正好是 `WORDS_PER_PAGE` 个 u64；循环边界保证写入不越界。
+            // Safety: `ppn` 刚从帧分配器取出，尚未发布给任何 owner；页首按
+            // PAGE_SIZE 对齐，`WORDS_PER_PAGE` 和循环边界保证写入不越界。
             unsafe {
                 ptr.add(i).write(0);
                 ptr.add(i + 1).write(0);

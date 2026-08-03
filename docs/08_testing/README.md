@@ -365,6 +365,10 @@ B87 同样不增加测试专用路径。双架构 normal build 负责证明所�
 双架构 8 核完整 SMP ktest 负责覆盖任务创建、exec/clone、signal、用户 trap 往返和跨 CPU
 调度时的真实 trap context 读写。四项必须在同一冻结指纹上串行执行。
 
+B88 保留原有 8×u64 帧清零循环，仅把 raw pointer 建立收回 `FrameTracker::new()`；因此不为
+它增加人工清零测试。双架构完整 SMP ktest 会反复经过页表页、用户页、任务和内核栈的
+分配/回收，门禁同时要求 34/34、无 fatal marker 和测试前后源码指纹一致。
+
 ### TAP 输出格式
 
 ```
