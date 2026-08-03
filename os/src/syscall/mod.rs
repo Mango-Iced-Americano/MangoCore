@@ -995,7 +995,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         }
     };
 
-    if syscall_info_log_enabled && show_info {
+    // DEBUG-BISECT: always log kill's return value even when show_info is
+    // false, so `kill(0, SIGTERM)` (129) visibility is guaranteed on the
+    // real-board hang. Revert once diagnosis completes.
+    if syscall_info_log_enabled && (show_info || syscall_id == SYSCALL_KILL) {
         match Errno::try_from(ret) {
             Ok(errno) => info!(
                 "[syscall] {}({}) -> {:?}",
