@@ -771,14 +771,16 @@ diag=1
   pip build isolation 会直接 `execve` Python ELF。动态可执行文件的 `PT_INTERP` 必须固化到
   稳定的 P4 `current` loader，并由 artifact manifest、安装器和板端激活前全 ELF 复核共同门禁。
   `patchelf --set-interpreter` 对已绑定 ELF 未必字节幂等；打包脚本必须先读现值、仅在不同时
-  改写，否则仅重复打包就可能改变 ELF 布局和 artifact hash。
+  改写，否则仅重复打包就可能改变 ELF 布局和 artifact hash。测试准备若操作 tracked ELF，
+  还要同时核对 interpreter、RPATH 内容和 `DT_RPATH`/`DT_RUNPATH` 类型；确定性 runner 应把
+  source-before/source-after 不一致视为失败，不能因 QEMU 功能用例通过而忽略污染。
 - **环境与 console 闭包**: 除 PATH/库路径外还应清除 `PYTHONPATH/PYTHONHOME/PYTHONSTARTUP`、
   `LD_PRELOAD/LD_AUDIT` 等继承注入。console entry 要解析最终路径并限制在新状态树内；若历史
   安装产生 shell shim + `.real`，应由统一 wrapper 直接解释 `.real`，不可重新信任旧 shebang。
 - **完整性成本分层**: 每次启动只检查 manifest/activation/artifact 身份，发布新 release 前用
   新 runtime 对 manifest 中全部 native ELF 做一次实物重哈希。这样可写 P4 release 既不会在
   每个 Python 进程上支付 94 ELF 哈希成本，也不能把被替换的 ELF 原子激活为 canonical runtime。
-- **相关文件**: `user/tools/cpython/python3-wrapper-persist.sh`, `user/tools/cpython/python-entry-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/deploy_cpython_runtime.py`, `scripts/board/verify_persist_python.sh`
+- **相关文件**: `user/tools/cpython/python3-wrapper-persist.sh`, `user/tools/cpython/python-entry-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/deploy_cpython_runtime.py`, `scripts/board/verify_persist_python.sh`, `os/make/tools.mk`
 
 ## 复杂度缺陷用“实际遍历步数”闭环，不只拟合 wall 曲线
 

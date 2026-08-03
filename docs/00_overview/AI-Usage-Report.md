@@ -1352,6 +1352,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/dynamic-memory-8g-summary.md` | 双架构运行期内存拓扑与 8 GiB 适配 | 记录固件 region→allocator/映射/ABI 链路、linker 回收页 RED→GREEN、DeepSeek 初步误归因裁决及双架构 8 核 8 GiB 6/6 门禁 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch3-waitqueue-core-summary.md` | develop Batch 3 WaitQueue 通知 token | 记录登记级 token 与 TaskStatus 分工、multi-queue 唯一领取、模型建议纠正、双架构 8 核 focused/初赛证据和 producer fallback 边界 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-waitqueue-lossless-summary.md` | develop Batch 4 WaitQueue 无损通知 | 记录队列锁临界区收窄、EventWaitQueue 有损接口删除、DeepSeek 双架构构建/focused/初赛执行，以及 patchelf mutation 导致 runner partial 的人工裁决 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-patchelf-idempotence-summary.md` | develop Batch 4.1 工具 ELF 幂等化 | 记录 Make 转义和 ELF 动态段审查、DeepSeek 双架构 8 核初赛，以及 before/after 指纹一致的确定性验收 |
 
 ## 9. 交互记录与留痕方式
 

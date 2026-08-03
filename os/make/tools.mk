@@ -2,6 +2,21 @@ include make/tools-disk.mk
 
 .PHONY: tools-user-rv tools-user-la tools-disk-rv tools-disk-la tools-disk
 
+# 已缓存的工具也是源码树的一部分。只有 ELF 装载合同确实不匹配时才改写，
+# 避免每次测试都让 patchelf 重排动态段并污染受版本控制的二进制。
+define ensure_alpine_tool_elf
+for binary in $(CURDIR)/../user/tools/$(1)/sbin/mke2fs $(CURDIR)/../user/tools/$(1)/sbin/mkfs.ext4; do \
+	interpreter=$$(patchelf --print-interpreter "$$binary" 2>/dev/null || true); \
+	rpath=$$(patchelf --print-rpath "$$binary" 2>/dev/null || true); \
+	if [ "$$interpreter" != "$(2)" ] || [ "$$rpath" != '$$ORIGIN/../lib' ] || \
+		! readelf -d "$$binary" 2>/dev/null | grep -F '(RPATH)' | grep -Fq '[$$ORIGIN/../lib]'; then \
+		patchelf --set-interpreter "$(2)" --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
+	else \
+		echo "  [cache] $$(basename "$$binary") ELF metadata"; \
+	fi; \
+done
+endef
+
 # The tools payload copies test binaries from user/target, independent of the
 # architecture product's USER_OUTPUT_ROOT.  Build that cargo target first.
 tools-user-rv:
@@ -58,9 +73,7 @@ tools-alpine-rv:
 		tar -xzf "/tmp/alpine-rv/$$apk" -C /tmp/alpine-rv 2>/dev/null; \
 		cp /tmp/alpine-rv/lib/ld-musl-riscv64.so.1 $(CURDIR)/../user/tools/riscv64/lib/libc.so; \
 		cp /tmp/alpine-rv/lib/libc.musl-riscv64.so.1 $(CURDIR)/../user/tools/riscv64/lib/libc.musl-riscv64.so.1
-	@for binary in $(CURDIR)/../user/tools/riscv64/sbin/mke2fs $(CURDIR)/../user/tools/riscv64/sbin/mkfs.ext4; do \
-		patchelf --set-interpreter /tools/lib/ld-musl-riscv64.so.1 --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
-	done
+	@$(call ensure_alpine_tool_elf,riscv64,/tools/lib/ld-musl-riscv64.so.1)
 	@rm -rf /tmp/alpine-rv
 	@echo "[alpine] riscv64 done."
 
@@ -105,9 +118,7 @@ tools-alpine-la:
 		cp /tmp/alpine-la/lib/ld-musl-loongarch64.so.1 $(CURDIR)/../user/tools/loongarch64/lib/ld-musl-loongarch64.so.1; \
 		cp /tmp/alpine-la/lib/ld-musl-loongarch64.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.so; \
 		cp /tmp/alpine-la/lib/libc.musl-loongarch64.so.1 $(CURDIR)/../user/tools/loongarch64/lib/libc.musl-loongarch64.so.1
-	@for binary in $(CURDIR)/../user/tools/loongarch64/sbin/mke2fs $(CURDIR)/../user/tools/loongarch64/sbin/mkfs.ext4; do \
-		patchelf --set-interpreter /tools/lib/ld-musl-loongarch64.so.1 --force-rpath --set-rpath '$$ORIGIN/../lib' "$$binary"; \
-	done
+	@$(call ensure_alpine_tool_elf,loongarch64,/tools/lib/ld-musl-loongarch64.so.1)
 	@rm -rf /tmp/alpine-la
 	@echo "[alpine] loongarch64 done."
 

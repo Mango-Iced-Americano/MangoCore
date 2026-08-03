@@ -738,6 +738,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   packet 与 PTY 生产者切换为可靠通知。双架构 8 核 `KTEST=waitqueue KREPEAT=20` 均为
   120/120；初赛四组功能标记完整且无 panic，但测试工具对受版本控制二进制的非幂等
   `patchelf` 仍需独立修复。generic fallback 暂时保留，待 splice 等剩余生产者完成迁移后删除；
+- develop 融合 Batch 4.1 将工具 ELF 准备改为幂等操作：仅当 interpreter、RPATH 值或
+  `DT_RPATH` 类型不符合合同时才执行 `patchelf`。双架构 8 核初赛均 exit 0、marker 完整且
+  `mutation_detected=false`，关闭了 Batch 4 的测试证据污染；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
