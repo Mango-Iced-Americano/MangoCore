@@ -361,6 +361,10 @@ B86 没有为借用收口增加人工 hook：编译器负责拒绝从共享 `Pag
 语义继续由 B84 的真实权限降级、B85 的并发生产 writer，以及完整 34 项 SMP focused 门禁
 覆盖。验证时必须保证 tracked diff 指纹冻结，避免把验证期间的注释或格式变化误算进结果。
 
+B87 同样不增加测试专用路径。双架构 normal build 负责证明所有旧直映 helper 调用已经清除；
+双架构 8 核完整 SMP ktest 负责覆盖任务创建、exec/clone、signal、用户 trap 往返和跨 CPU
+调度时的真实 trap context 读写。四项必须在同一冻结指纹上串行执行。
+
 ### TAP 输出格式
 
 ```

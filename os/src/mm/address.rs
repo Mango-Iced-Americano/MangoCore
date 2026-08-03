@@ -231,55 +231,6 @@ impl PhysAddr {
         self.direct_map_addr() as *mut u8
     }
 
-    /// 通过内核直映区获取 `T` 的共享引用。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须保证物理地址有效、满足 `T` 的对齐要求，且该内存区域在返回
-    /// 引用存活期间不会被释放或以可变方式别名访问。
-    pub fn get_ref<T>(&self) -> &'static T {
-        // Safety: the caller-side contract above ensures the direct-map address
-        // is a valid, aligned `T` reference.
-        unsafe { (self.direct_map_addr() as *const T).as_ref().unwrap() }
-    }
-
-    /// 通过内核直映区获取 `T` 的可变引用。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须独占对应物理内存，并保证地址有效且满足 `T` 的对齐要求。
-    pub fn get_mut<T>(&self) -> &'static mut T {
-        // Safety: the caller-side contract above ensures exclusive access to a
-        // valid, aligned `T` at the direct-map address.
-        unsafe { (self.direct_map_addr() as *mut T).as_mut().unwrap() }
-    }
-
-    /// 以字节数组形式读取从该物理地址开始的 `size_of::<T>()` 字节。
-    pub fn get_bytes_ref<T>(&self) -> &'static [u8] {
-        // Safety: bytes have alignment 1; callers guarantee the physical range
-        // is valid for `size_of::<T>()` bytes.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.direct_map_addr() as *const u8,
-                core::mem::size_of::<T>(),
-            )
-        }
-    }
-    /// 以字节数组形式写入从该物理地址开始的 `size_of::<T>()` 字节。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须独占对应物理字节范围。
-    pub fn get_bytes_mut<T>(&self) -> &'static mut [u8] {
-        // Safety: bytes have alignment 1; callers guarantee exclusive access to
-        // a valid physical range for `size_of::<T>()` bytes.
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.direct_map_addr() as *mut u8,
-                core::mem::size_of::<T>(),
-            )
-        }
-    }
 }
 
 impl PhysPageNum {
@@ -351,11 +302,6 @@ impl PhysPageNum {
                 PAGE_SIZE / core::mem::size_of::<u64>(),
             )
         }
-    }
-    /// 获取指定类型的可变引用
-    pub fn get_mut<T>(&self) -> &'static mut T {
-        let pa: PhysAddr = self.clone().into();
-        pa.get_mut()
     }
 }
 

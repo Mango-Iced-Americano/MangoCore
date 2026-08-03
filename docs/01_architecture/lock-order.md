@@ -724,6 +724,12 @@ trap context 页由对应 TCB 拥有，Rust 可变访问只能通过
 `task.inner` guard；禁止把直映区指针包装成 `'static mut`，也禁止 current-task helper
 从临时 guard 中返回引用。
 
+B87 删除了 `PhysAddr::{get_ref,get_mut,get_bytes_ref,get_bytes_mut}` 和
+`PhysPageNum::get_mut`：这些安全函数无法证明任意物理内存的类型、存活期或独占权，却能
+返回可逃逸的 `'static` 引用。trap context 的 raw pointer 解引用改为只存在于上述 TCB
+owner 方法，unsafe 注释分别证明 frame 存活、页首对齐和 `&mut self` 独占。整页 byte view
+仍涉及 MM/PageCache/FS 的共享所有权，必须作为独立审计处理，不能借本节点顺带修改。
+
 LoongArch 用户未对齐访存固定分为：
 
 ```text

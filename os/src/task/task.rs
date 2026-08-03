@@ -522,7 +522,16 @@ impl TaskControlBlockInner {
     /// trap context 物理页由当前 TCB 独占；返回生命周期必须绑定到 `&mut self`，
     /// 不能把底层直映区产生的引用伪装成可越过 inner guard 的 `'static mut`。
     pub fn trap_context_mut(&mut self) -> &mut TrapContext {
-        self.trap_cx_ppn.get_mut()
+        let trap_cx = self
+            .trap_cx_ppn
+            .start_addr()
+            .direct_map_ptr()
+            .cast::<TrapContext>();
+        // Safety: trap context 页跟随当前 TCB 存活，页首天然满足 TrapContext
+        // 对齐；调用者必须先取得 task.inner guard，因而这里的 `&mut self`
+        // 在返回引用存活期间独占同一 TCB 的 Rust 访问。返回生命周期由函数
+        // 签名绑定到 `&mut self`，不能像旧的通用直映射接口那样逃逸为 `'static`。
+        unsafe { &mut *trap_cx }
     }
     /// 添加信号
     pub fn add_signal(&mut self, signal: Signals) {

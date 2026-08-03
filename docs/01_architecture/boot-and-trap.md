@@ -235,6 +235,13 @@ Rust 后由 `current_trap_task()` 克隆本 CPU current，并在锁外校验状�
 每次返回用户态仍由执行返回的 CPU 重写 trap context 中的 `tp/$r21` 锚点并激活该
 MM 的页表根与 ASID。
 
+B45 将 Rust 可变访问统一收口到
+`TaskControlBlockInner::trap_context_mut(&mut self)`；B87 进一步删除物理地址层能从安全
+函数返回 `'static` 引用的五个通用 helper。现在只有 TCB owner 在持有 `task.inner` guard
+时，才会从 trap frame 物理页的直映 raw pointer 建立 `&mut TrapContext`，其生命周期绑定
+到 `&mut self`。trap return 释放 guard 后只把既有 frame 地址交给不返回的恢复汇编；
+frame 地址、布局和双架构 ABI 均未改变。
+
 AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
 
 1. AP hard-IRQ handler 只以 Release 发布 `round_trip_reply_pending`；

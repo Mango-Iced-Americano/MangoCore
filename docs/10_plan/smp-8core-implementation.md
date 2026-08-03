@@ -85,7 +85,7 @@ related_docs:
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
 | console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
 | panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照 | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用，B87 又删除安全物理地址 API 返回 `'static` 引用的通道，让 trap frame 可变引用只在持 `task.inner` guard 时建立；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
@@ -942,6 +942,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   返回 `&'static mut TrapContext` 的 current helper。clone/init 显式缩短 guard，
   LA64 未对齐模拟改为锁内快照、锁外用户访存、锁内校验提交，不新增 wrapper 或状态机。
   双架构 8 核 focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
+- B87 删除 `PhysAddr` 上四个无人使用却可安全返回 `'static` 引用的通用 helper，以及只为
+  trap context 服务的 `PhysPageNum::get_mut()`。raw pointer 解引用下沉到
+  `trap_context_mut(&mut self)`，由 frame 存活、页首对齐和 `task.inner` guard 独占共同
+  证明安全；双架构 normal build 与 8 核 SMP 34/34 均通过，frame 地址和恢复 ABI 未改变。
 - B46 把 `sys_sigreturn()` 改为锁内快照 SP、锁外读取完整用户 frame、锁内一次提交，
   用户缺页和 MM/TLB 同步不再跨 `task.inner`。双架构 `TrapContext` 用
   `machine_context()`/`set_machine_context()` 字段复制替代前缀布局强转；LA64 仍保持
