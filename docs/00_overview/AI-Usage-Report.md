@@ -101,6 +101,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP shared signal hint 原子发布 | 2026-08-03 | GPT/Codex, DeepSeek | 三 writer 交错建模、全部 queue mutation 审查、双架构 8 核 sigtimedwait gate | queue mutation 与 hint store 合入同一 signal 临界区，关闭旧值覆盖；两架构 glibc 各 11/11 通过 |
 | develop Batch 3 WaitQueue 通知 token | 2026-08-03 | GPT/Codex, DeepSeek | develop 方案迁移审查、lost-wake 线性化建模、双架构 8 核 Docker/QEMU 归纳 | 以登记级 `WaitEntry` 保存提前 wake，不扩张调度状态机；双架构 WaitQueue 5/5，初赛失败集合未扩大 |
 | develop Batch 5 signalfd 动态等待域 | 2026-08-03 | GPT/Codex, DeepSeek | Linux signalfd owner 对照、fork/锁序/原始指针审查、双架构 8 核 L4 回归与 RV64 ABI 溯源 | read/poll 动态绑定 current sighand，pending 锁外通知；修复 wait4 rusage 漏参，两架构 regression 7/7 |
+| develop Batch 6 read/pread 可写前缀 | 2026-08-03 | GPT/Codex, DeepSeek | develop 性能意图迁移、VA-backed 生命周期审查、双架构 8 核 L4 回归 | 单 VM 临界区确定可写前缀，只 fault-in 首页；实际 copy 逐页重验，两架构 regression 7/7 |
 
 ## 4. 详细使用场景
 
@@ -1259,6 +1260,26 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   均 7/7、`online_mask=0xff`、signalfd 两个子场景与 clone probe PASS，退出码 0，无 panic、
   timeout、forbidden marker 或源码变异。
 
+### Case 52: develop Batch 6 read/pread 可写前缀
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch6-uaccess-prefix-summary.md`；DeepSeek 任务与完整
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 develop 差异裁决、SMP 生命周期设计、实现、首次构建失败修正和提交；
+  DeepSeek 只读审查前缀边界、锁序与 PTE 重验，并经受限网关串行执行双架构 8 核回归。
+- Problem: develop 的旧优化能减少完整 buffer 预 fault 造成的假 CoW/TLB flush，但保存物理页
+  slice，违反集成分支 B57—B59 的 VA-backed uaccess 不变量；旧两轮 nofault 探测还会重复取得
+  VM 锁和重复构造 writer。
+- Implemented change: `new_writable_prefix()` 在一次 VM 临界区内扫描已有可写 PTE，只在尚无
+  前缀时 fault-in 首页；read/pread/zero 以返回 writer 限制生产者本轮消费。writer 只保存 VA，
+  实际 copy 仍逐页重验，不跨文件 I/O 持 VM 锁。
+- AI adjudication: 采纳 DeepSeek 的页推进防御检查；不采纳其把单字段 newtype 称为 ZST 的表述，
+  也不以“并发修改 buffer 未定义”替代内核映射同步证明。首轮 RV64 因回归错误引用 LA64 条件
+  模块而编译失败，修正后以新 job 重跑，旧失败原样留档。
+- Verification: Docker `CORE_NUM=8` regression 严格串行，RV64 142.744s、LA64 138.651s；均
+  7/7、`online_mask=0xff`、退出码 0、源码指纹稳定。两架构跨页用例均返回 first=8、second=8，
+  且 prefix/tail 内容正确；原 NULL EFAULT 后 pipe 数据保留场景继续 PASS。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1376,6 +1397,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-waitqueue-lossless-summary.md` | develop Batch 4 WaitQueue 无损通知 | 记录队列锁临界区收窄、EventWaitQueue 有损接口删除、DeepSeek 双架构构建/focused/初赛执行，以及 patchelf mutation 导致 runner partial 的人工裁决 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-patchelf-idempotence-summary.md` | develop Batch 4.1 工具 ELF 幂等化 | 记录 Make 转义和 ELF 动态段审查、DeepSeek 双架构 8 核初赛，以及 before/after 指纹一致的确定性验收 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md` | develop Batch 5 signalfd 动态等待域 | 记录 current-sighand owner、fork/CLONE_SIGHAND、锁外通知、RV64 wait4 漏参溯源与双架构 8 核 L4 7/7 证据 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch6-uaccess-prefix-summary.md` | develop Batch 6 read/pread 可写前缀 | 记录 develop 表示差异、VA-backed 前缀协议、首轮 RV64 编译失败和双架构 8 核 L4 7/7 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

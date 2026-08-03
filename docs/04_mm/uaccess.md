@@ -3,7 +3,7 @@ title: "用户地址访问与 UserBuffer"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-03
 tags: [mm, uaccess, user-pointer, iovec, smp]
 ---
 
@@ -44,6 +44,7 @@ PA、direct-map pointer、`&'static T` 或 `&'static mut [u8]`。
 | `copy_from_user` / `copy_to_user` | 固定对象的 exact copy |
 | `fault_in_user_range()` | 外部副作用前的预 fault，不替代实际 copy |
 | `user_accessible_len()` | 不触发 fault 的已有映射前缀探测 |
+| `UserBufferWriter::new_writable_prefix()` | 为 read/pread 构造当前可写的连续前缀 |
 
 旧 `translated_byte_buffer()`、`translate_user_buffer_checked()`、单页 slice fast path 和
 `Vec<&'static mut [u8]>` 已删除。
@@ -131,9 +132,14 @@ UserAccess
 按非空 iovec 保存一个逻辑 VA 区间。两种表示都不会保存 PA、frame、direct-map pointer
 或 Rust slice。
 
-构造过程会预 fault 整个描述区间，用于保持既有 ABI 的“先验证用户输出，再执行外部
-副作用”排序，但这不是 pin。另一 CPU 可在构造后立即改变映射，所以每次 `read_into()`、
-`write_from()`、`fill_at()` 或 `clear()` 仍逐页重新获取 VM 锁并解析当前 PTE。
+普通 reader/writer 与 iovec 构造过程会预 fault 整个描述区间，用于保持既有 ABI 的
+“先验证用户输出，再执行外部副作用”排序，但这不是 pin。read/pread 生产数据前改用
+`new_writable_prefix()`：它在一次 VM 临界区内扫描已有可写 PTE；若首页尚不可写，只 fault-in
+首页，若后续页不可写则返回此前缀。这样不会为了文件稍后可能根本不返回的页面提前触发
+lazy allocation、CoW 或 TLB shootdown。
+
+两种构造方式都只产生 VA 描述符。另一 CPU 可在构造后立即改变映射，所以每次
+`read_into()`、`write_from()`、`fill_at()` 或 `clear()` 仍逐页重新获取 VM 锁并解析当前 PTE。
 
 ## 7. partial 与 exact 语义
 
@@ -228,6 +234,10 @@ nofault 不是普通 I/O 的优化开关。新增调用点必须同时证明：
 
 该接口适合非阻塞/分段 I/O 的可访问前缀估算，但结果同样是瞬时快照，实际 copy 仍需重验。
 
+read/pread 不再用“nofault 探测一次、前缀为空时 fault 一字节、再探测一次”的组合。专用的
+`new_writable_prefix()` 在同一 VM 临界区内完成扫描和必要的首页 fault-in，减少重复锁操作，
+并将 writer 的长度固定为本轮允许文件对象消费的字节数。文件 I/O 期间不持有 VM 锁。
+
 ## 12. 审查清单
 
 - [ ] 用户地址只由 uaccess helper 访问，没有直接解引用；
@@ -237,4 +247,5 @@ nofault 不是普通 I/O 的优化开关。新增调用点必须同时证明：
 - [ ] faultable copy 前已释放普通业务锁；
 - [ ] 必须锁内复制的路径使用受限 nofault helper，并接受映射变化失败；
 - [ ] 预 fault 后的实际 copy 仍重新验证；
+- [ ] read/pread 只按本轮可写前缀消费生产者数据，后续不可写页不会被提前 fault-in；
 - [ ] PTE 修改产生的 flush/ack 位于 VM 锁外。

@@ -213,7 +213,9 @@ sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解�
 `translated_byte_buffer` 及锁外物理页 slice：`UserBuffer`/`UserIoVec` 只保存 token 与
 逻辑 VA 区间，实际 copy 每页重新取得 VM 锁并验证 PTE。流式 I/O 返回已完成前缀，固定
 格式用 `read_exact`/`write_all`；pipe 在 ring 自旋锁内只能使用已预 fault 的 nofault copy。
-预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。B60 已让 SysV semaphore
+预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。develop Batch 6 又为
+read/pread 增加可写前缀构造：只在前缀为空时 fault-in 首页，后续不可写页截断本轮生产者
+消费长度；返回对象仍只保存 VA，实际 copy 继续逐页重验。B60 已让 SysV semaphore
 `GETALL/SETVAL/SETALL` 和 POSIX `mq_open(O_CREAT)` 采用“锁内验证 → 锁外 copy → 锁内
 重验/提交”；任何 IPC registry 或队列锁内都不得进入 faultable uaccess。B61 又将普通
 `msgrcv` 的消息选择、摘取和统计更新合并到同一个 `MSG_REGISTRY` 临界区，摘取后再锁外

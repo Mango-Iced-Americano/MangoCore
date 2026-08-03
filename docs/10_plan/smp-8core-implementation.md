@@ -747,6 +747,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   `waitpid` 对四参数 `wait4` 的错误三参数封装，显式将 rusage 置零。双架构 8 核 L4 regression
   均 7/7，signalfd 延迟阻塞 read、child 继承 fd 和 RV64 `clone_vm_second_slot` 全部通过，
   `online_mask=0xff` 且源码指纹稳定；
+- develop 融合 Batch 6 迁移 writable-prefix uaccess 的性能意图，但没有照搬 develop 中保存
+  物理页 slice 的旧表示。`new_writable_prefix()` 在一次 VM 临界区内扫描已有可写 PTE，仅在
+  前缀为空时 fault-in 首页，随后以 VA-backed writer 限定 read/pread 本轮可消费长度；实际
+  copy 继续逐页重验。双架构 8 核 L4 regression 均 7/7，跨页只读边界场景两次 read 分别返回
+  8/8 字节，证明后半 pipe 数据未被提前消费，`online_mask=0xff` 且源码指纹稳定；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

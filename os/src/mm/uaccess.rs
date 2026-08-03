@@ -356,6 +356,79 @@ impl UserBufferWriter {
         Ok(Self { buffer })
     }
 
+    /// 构造从 `ptr` 开始、当前可以写入的最大连续前缀。
+    ///
+    /// 已可写页只在同一次 VM 临界区内检查 PTE；遇到第一个不可写页时，若
+    /// 前缀为空则 fault-in 该页，否则立即返回已有前缀。这样 read/pread 可以
+    /// 先完成 POSIX partial-read，而不是为了后续页提前触发 CoW 或 TLB flush。
+    /// 返回的 `UserBuffer` 仍只保存 VA，真正写入时会逐页重新校验映射。
+    pub fn new_writable_prefix(
+        token: usize,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<(Self, usize), isize> {
+        if len == 0 {
+            return Ok((
+                Self {
+                    buffer: UserBuffer::from_range_without_fault(
+                        token,
+                        ptr as usize,
+                        0,
+                        UserAccess::Write,
+                    ),
+                },
+                0,
+            ));
+        }
+        if len > MAX_BUFFER_SIZE || ptr.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+
+        let start = ptr as usize;
+        let end = check_user_range(start, len)?;
+        let vm = current_user_vm(token)?;
+        let accessible = vm.write(|address_space| -> Result<usize, isize> {
+            let mut current = start;
+            while current < end {
+                let va = VirtAddr::from(current);
+                if address_space
+                    .resolve_user_va(va, FaultAccess::Store)
+                    .is_err()
+                {
+                    if current != start {
+                        break;
+                    }
+                    address_space.fault_in_user_va(va, FaultAccess::Store)?;
+                }
+
+                let page_end = va
+                    .floor()
+                    .start_addr()
+                    .0
+                    .checked_add(crate::config::PAGE_SIZE)
+                    .ok_or(crate::syscall::errno::EFAULT)?;
+                let next = page_end.min(end);
+                if next <= current {
+                    return Err(crate::syscall::errno::EFAULT);
+                }
+                current = next;
+            }
+            Ok(current - start)
+        })?;
+
+        Ok((
+            Self {
+                buffer: UserBuffer::from_range_without_fault(
+                    token,
+                    start,
+                    accessible,
+                    UserAccess::Write,
+                ),
+            },
+            accessible,
+        ))
+    }
+
     pub fn into_user_buffer(self) -> UserBuffer {
         self.buffer
     }
@@ -886,6 +959,24 @@ pub struct UserBuffer {
 }
 
 impl UserBuffer {
+    /// 只登记虚拟地址范围，不在构造阶段再次 fault-in。
+    ///
+    /// 调用方可在一次 VM 临界区内先验证或 fault-in 前缀；后续实际复制仍会
+    /// 逐页重新取得 VM 锁并校验 PTE，因此该对象不保存可失效的物理页视图。
+    fn from_range_without_fault(
+        token: usize,
+        start: usize,
+        len: usize,
+        access: UserAccess,
+    ) -> Self {
+        Self {
+            token,
+            ranges: UserRanges::Contiguous(UserRange { start, len }),
+            len,
+            access,
+        }
+    }
+
     fn from_range(
         token: usize,
         start: usize,

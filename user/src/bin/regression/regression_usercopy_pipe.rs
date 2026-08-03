@@ -11,6 +11,70 @@ use user_lib::syscall::*;
 use user_lib::println;
 
 const EFAULT: isize = -14;
+// 两个竞赛架构都使用 4 KiB 基础页；回归程序不依赖 LA64 专用的用户布局模块。
+const PAGE_SIZE: usize = 0x1000;
+const PROT_READ: usize = 1;
+const PROT_READ_WRITE: usize = 3;
+const MAP_PRIVATE: usize = 2;
+const MAP_ANONYMOUS: usize = 0x20;
+
+/// 验证跨页 read 只消费当前可写前缀，不能为了后一页提前丢失 pipe 数据。
+fn partial_cross_page_read() -> bool {
+    let mut pipefd = [-1i32; 2];
+    if sys_pipe(&mut pipefd) < 0 {
+        return false;
+    }
+    let (rfd, wfd) = (pipefd[0] as usize, pipefd[1] as usize);
+    let mapping = sys_mmap(
+        0,
+        PAGE_SIZE * 2,
+        PROT_READ_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        0,
+        0,
+    );
+    if mapping < 0 {
+        let _ = sys_close(rfd);
+        let _ = sys_close(wfd);
+        return false;
+    }
+
+    let base = mapping as usize;
+    let prefix = base + PAGE_SIZE - 8;
+    // 先触页，确保前一页已有可写 PTE；后一页降为只读，形成精确前缀边界。
+    unsafe { (prefix as *mut u8).write_volatile(0); }
+    let protected = sys_mprotect(base + PAGE_SIZE, PAGE_SIZE, PROT_READ) == 0;
+    let payload = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+    ];
+    let written = protected && sys_write(wfd, &payload) == payload.len() as isize;
+    // 关闭生产端，使“错误地多消费数据”表现为 EOF，而不是让回归永久阻塞。
+    let _ = sys_close(wfd);
+    let first = if written {
+        sys_read_raw(rfd, prefix as *mut u8, payload.len())
+    } else {
+        EFAULT
+    };
+    let prefix_ok = first == 8
+        && unsafe { core::slice::from_raw_parts(prefix as *const u8, 8) } == &payload[..8];
+
+    let mut tail = [0u8; 8];
+    let second = if prefix_ok {
+        sys_read(rfd, &mut tail)
+    } else {
+        EFAULT
+    };
+    let tail_ok = second == 8 && tail == payload[8..];
+    println!(
+        "  cross-page detail: protected={} first={} prefix_ok={} second={} tail_ok={}",
+        protected, first, prefix_ok, second, tail_ok
+    );
+
+    let _ = sys_munmap(base, PAGE_SIZE * 2);
+    let _ = sys_close(rfd);
+    protected && written && prefix_ok && tail_ok
+}
 
 pub fn run() -> i32 {
     println!("[regression_usercopy_pipe] start");
@@ -62,6 +126,11 @@ pub fn run() -> i32 {
 
     let _ = sys_close(rfd);
     let _ = sys_close(wfd);
+
+    if !partial_cross_page_read() {
+        println!("FAIL: cross-page read consumed beyond writable prefix");
+        return 1;
+    }
 
     println!("[regression_usercopy_pipe] PASS");
     0

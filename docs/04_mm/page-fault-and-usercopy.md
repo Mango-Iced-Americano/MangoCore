@@ -3,7 +3,7 @@ title: "缺页处理与用户内存 fault-in"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-03
 tags: [mm, page-fault, cow, uaccess, mmu-gather]
 ---
 
@@ -416,9 +416,12 @@ TLB shootdown。
   -> 锁外完成 TLB flush/ack
 ```
 
-`UserBuffer` 构造时只保存 VA 区间并预 fault，不保存 PA、frame 或 Rust slice。预 fault
-不能 pin 映射，所以每次实际 copy 都重新走上述流程。跨页或 scatter copy 的后续页失败时，
-流式接口返回已完成的前缀；固定格式对象由 exact wrapper 将短 copy 转为 `EFAULT`。
+`UserBuffer` 构造时只保存 VA 区间，不保存 PA、frame 或 Rust slice。普通构造器预 fault
+完整范围；read/pread 的 `new_writable_prefix()` 只 fault-in 尚不可写的首页，后续页只解析
+已有 PTE，并在第一个不可写页前截断本轮 I/O。该优化避免为 EOF 或短读之后的页面制造
+lazy allocation、CoW 和 TLB shootdown。任何构造期检查都不能 pin 映射，所以每次实际 copy
+仍重新走上述流程。跨页或 scatter copy 的后续页失败时，流式接口返回已完成的前缀；固定
+格式对象由 exact wrapper 将短 copy 转为 `EFAULT`。
 
 pipe 是受限例外：ring 自旋锁内不能进入 fault handler，因此它在锁外预 fault，锁内只通过
 `resolve_user_va()` 接受仍有效的 PTE。映射变化会立即失败或部分完成，不会在自旋锁内等待。

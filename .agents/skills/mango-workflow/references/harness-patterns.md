@@ -1174,3 +1174,19 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   不能用“QEMU 没挂”或 child 已退出代替业务 marker。
 - **相关文件**: `user/src/bin/regression/regression_signalfd.rs`,
   `user/src/bin/regression/main.rs`
+
+## 生产者 I/O 的可写前缀证明不能变成物理页缓存
+
+- **问题**：read/pread 若在文件对象产生数据后才发现后续用户页不可写，会让文件偏移、pipe
+  head 等生产者状态超前；若为避免该问题而预 fault 完整输出区间，又会为 EOF/短读之后的页面
+  制造无意义 lazy allocation、CoW 和 TLB shootdown。
+- **做法**：在同一 VM 临界区扫描当前已有可写 PTE；只有前缀为空时 fault-in 首页，后续首个
+  不可写页截断本轮生产者最大消费长度。锁外执行文件 I/O，实际 copy 时逐页重新验证映射。
+  临界区只能带出 VA 描述符和长度，不能带出 PTE、PA、direct-map pointer 或用户页 slice。
+- **门禁**：永久跨页用例把第一页末尾设为可写、第二页设为只读，向 pipe 写入跨边界 payload
+  后关闭 writer。第一次 read 必须只返回可写前缀，第二次必须读到未消费尾部；关闭 writer 可把
+  过量消费确定性转化为 EOF，避免失败用例挂死。
+- **教训**：构造期 proof 是瞬时容量上界，不是 pin，也不能替代使用点校验。性能优化迁移时应
+  迁移“减少副作用”的意图，而不是照搬与当前 SMP 地址空间生命周期冲突的数据表示。
+- **相关文件**：`os/src/mm/uaccess.rs`、`os/src/syscall/fs/common.rs`、
+  `user/src/bin/regression/regression_usercopy_pipe.rs`
