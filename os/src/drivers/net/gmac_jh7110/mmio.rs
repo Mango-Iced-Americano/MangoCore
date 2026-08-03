@@ -1,12 +1,13 @@
 use super::ring::DMA_BUFFER_SIZE;
 
+pub(super) use crate::hal::platform::jh7110_cache::{
+    jh7110_dma_barrier as dma_barrier, jh7110_l2cc_flush_range as clean_dma_range,
+};
+
 pub(super) const GMAC0_BASE: usize = 0x1603_0000;
 pub(super) const SYS_CRG_BASE: usize = 0x1302_0000;
 pub(super) const AON_CRG_BASE: usize = 0x1700_0000;
 pub(super) const AON_SYSCON_BASE: usize = 0x1701_0000;
-const JH7110_L2CC_BASE: usize = 0x0201_0000;
-const JH7110_L2CC_FLUSH64: usize = 0x0200;
-const JH7110_L2_CACHE_LINE_SIZE: usize = 64;
 
 pub(super) const GMAC_CONFIG: usize = 0x0000;
 pub(super) const GMAC_FRAME_FILTER: usize = 0x0008;
@@ -118,22 +119,4 @@ pub(super) fn read_reg(offset: usize) -> u32 {
 #[inline(always)]
 pub(super) fn write_reg(offset: usize, value: u32) {
     write_mmio(GMAC0_BASE, offset, value)
-}
-
-#[inline(always)]
-pub(super) fn clean_dma_range(physical_address: usize, length: usize) {
-    let mut line = physical_address & !(JH7110_L2_CACHE_LINE_SIZE - 1);
-    let end_line = (physical_address + length - 1) & !(JH7110_L2_CACHE_LINE_SIZE - 1);
-    while line <= end_line {
-        write_mmio(JH7110_L2CC_BASE, JH7110_L2CC_FLUSH64, line as u32);
-        line += JH7110_L2_CACHE_LINE_SIZE;
-    }
-    dma_barrier();
-}
-
-#[inline(always)]
-pub(super) fn dma_barrier() {
-    // SAFETY: `fence iorw, iorw` is a RISC-V ordering instruction with no
-    // memory operands; this module is compiled only for the RISC-V VF2 driver.
-    unsafe { core::arch::asm!("fence iorw, iorw", options(nostack, preserves_flags)) }
 }
