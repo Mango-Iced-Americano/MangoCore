@@ -1223,24 +1223,26 @@ impl WaitQueue {
 
             let task = current_task().unwrap();
 
-            let mut guard = wq.lock();
-            let entry = guard.prepare_to_wait(Arc::downgrade(&task));
+            // 等待队列锁只保护 entry 的登记和摘除，不能覆盖条件检查。
+            // `WaitEntry` 会持久化登记后的早到通知，因此这里释放锁不会
+            // 重新打开 lost-wakeup 窗口，反而允许条件检查同步推进生产者。
+            let entry = wq.lock().prepare_to_wait(Arc::downgrade(&task));
 
             if let Some(res) = cond() {
-                guard.finish_entry(&entry);
+                wq.lock().finish_entry(&entry);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                guard.finish_entry(&entry);
+                wq.lock().finish_entry(&entry);
                 return WaitResult::TimedOut;
             }
             // 普通“不可中断”等待仍忽略用户信号，但不能阻止线程组生命周期
             // 前进。返回 Interrupted 让上层先正常析构 syscall 栈上的 Arc。
             if task.process.thread_must_exit(task.gettid()) {
-                guard.finish_entry(&entry);
+                wq.lock().finish_entry(&entry);
                 return WaitResult::Interrupted;
             }
             if signal_check {
@@ -1248,10 +1250,17 @@ impl WaitQueue {
                 // waited signal 即使被 sigmask 屏蔽也必须取消睡眠，随后由
                 // sigtimedwait 在 WaitQueue 外重新领取。
                 if has_waited_signal(&task) || has_actionable_signal(&task) {
-                    guard.finish_entry(&entry);
+                    wq.lock().finish_entry(&entry);
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
+            }
+
+            // 通知若在第二次条件检查期间到达，直接重新检查业务条件，
+            // 不必登记 Blocking，也避免为已结束的一轮等待挂兜底 timer。
+            if !entry.is_waiting() {
+                wq.lock().finish_entry(&entry);
+                continue;
             }
 
             if let Some(deadline) = deadline {
@@ -1290,7 +1299,7 @@ impl WaitQueue {
             }
             drop(task);
 
-            block_current_and_run_next_with_lock_checked(guard, |task| {
+            block_current_and_run_next_checked(|task| {
                 // Running -> Blocking 登记后再检查 waited signal，关闭发送方在
                 // Running 状态看到 AlreadyWaken、而接收方随后真正睡下的窗口。
                 // WaitEntry 额外覆盖普通队列 wake 的同类窗口：早到通知
@@ -1300,7 +1309,8 @@ impl WaitQueue {
                 let not_timed_out = deadline
                     .map(|deadline| TimeSpec::now() < deadline)
                     .unwrap_or(true);
-                entry.is_waiting() && no_signal && not_timed_out
+                let process_alive = !task.process.thread_must_exit(task.gettid());
+                entry.is_waiting() && no_signal && not_timed_out && process_alive
             });
 
             let task = current_task().unwrap();
@@ -1377,7 +1387,8 @@ impl WaitQueue {
                 let not_timed_out = deadline
                     .map(|deadline| TimeSpec::now() < deadline)
                     .unwrap_or(true);
-                entry.is_waiting() && no_signal && not_timed_out
+                let process_alive = !task.process.thread_must_exit(task.gettid());
+                entry.is_waiting() && no_signal && not_timed_out && process_alive
             });
 
             let task = current_task().unwrap();
@@ -1495,9 +1506,9 @@ impl WaitQueue {
     ///
     /// # Locking
     ///
-    /// `cond` 会先在无锁快速路径执行一次，并在 `prepare_to_wait` 后持有该
-    /// 等待队列锁再检查一次以闭合 lost-wakeup 窗口。因此条件闭包只能查询或
-    /// 消费底层状态，禁止通知或再次获取同一个等待队列锁。
+    /// `cond` 会先在无锁快速路径执行一次，并在 `prepare_to_wait` 后再次执行。
+    /// 第二次检查也不持有等待队列锁；登记后的早到通知由 `WaitEntry` token
+    /// 持久化，并由 checked block 在提交 Blocking 后作最终复查。
     pub fn wait_until<F>(wq: &Mutex<Self>, mut cond: F) -> isize
     where
         F: FnMut() -> Option<isize>,

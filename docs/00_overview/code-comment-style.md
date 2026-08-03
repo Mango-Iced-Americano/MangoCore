@@ -101,7 +101,8 @@ MangoCore 中的注释分为五类：
 /// # Locking
 ///
 /// 调用者不得在持有 inode 内部锁、PageCache entries 锁或 scheduler 全局锁时
-/// 调用该函数。条件闭包内部不得再次获取同一个 `WaitQueue` 的锁。
+/// 调用该函数。普通 WaitQueue 的条件闭包在队列锁外执行；如果改用
+/// locked wait 变体，必须另外说明调用方业务锁的持有范围。
 ///
 /// # Errors
 ///

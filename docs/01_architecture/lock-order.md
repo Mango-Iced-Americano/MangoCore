@@ -582,7 +582,7 @@ exec 的临时门禁固定采用：
   `complete()`，因为唤醒会进入 WaitQueue/RunQueue；
 - exec owner 的等待、IPI/TLB ack 和 context switch 都不持有 `thread_group`、
   `TASK_MANAGER`、task.inner 或 runqueue；
-- WaitQueue 在自身条件锁内识别生命周期停止请求，先摘除 waiter 再返回
+- WaitQueue 协议在提交 Blocking 前后都复查生命周期停止请求，先摘除 waiter 再返回
   `Interrupted`；调用层释放 syscall 栈上的 `Arc` 后才进入安全点；
 - vfork child 已经 publish 后，父线程被生命周期请求中止只能返回 `StopCaller`，
   不能调用 unpublished cleanup。
@@ -800,9 +800,10 @@ PCB 内保存的 deadline。旧值 copyout 若
 
 ### 3.15 B70 sigtimedwait 的领取与回复边界
 
-`WaitQueue` 条件闭包会在无锁快速路径执行，也会在持有等待队列锁、完成 waiter 登记后再次
-执行。因此 `sigtimedwait()` 的条件闭包只允许在 signal owner 锁内领取一条 pending signal，
-再把完整 `PendingSignal` 移交给 syscall 栈：
+`WaitQueue` 条件闭包会在无锁快速路径执行，也会在完成 waiter 登记后于等待队列锁外再次
+执行。登记后的早到 wake 由 `WaitEntry` token 保存，不再要求用队列锁包住第二次检查。
+`sigtimedwait()` 的条件闭包仍只允许在 signal owner 锁内领取一条 pending signal，再把完整
+`PendingSignal` 移交给 syscall 栈：
 
 ```text
 task.inner 或 process signal lock：唯一 dequeue
@@ -811,8 +812,8 @@ task.inner 或 process signal lock：唯一 dequeue
   -> UserPtrMut 写回 SigInfo
 ```
 
-用户地址写入可能缺页、触发 CoW 或等待 TLB shootdown，不能位于 WaitQueue、`task.inner` 或
-进程 signal lock 内。copyout 返回 `EFAULT` 时信号已经消费，这与 Linux 6.6 先 dequeue、后
+用户地址写入可能缺页、触发 CoW 或等待 TLB shootdown，不能位于 `task.inner` 或进程 signal
+lock 内，也应放在整个等待协议退出之后。copyout 返回 `EFAULT` 时信号已经消费，这与 Linux 6.6 先 dequeue、后
 `copy_siginfo_to_user()` 的顺序一致；不得为“回滚”把信号重新入队。
 
 ### 3.16 B71 sigtimedwait 的睡眠登记窗口

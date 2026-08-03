@@ -299,9 +299,12 @@ pub fn deliver_frame_to_packet_sockets(frame: &[u8], ifindex: u32) {
     for socket in &live_sockets {
         let mut inner = socket.inner.lock();
         inner.rx_queue.push_back(frame.to_vec());
-        if let Some(wq) = socket.recv_event_queue() {
-            wq.notify_events_at_most_if_unlocked(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
-        }
+        // 先发布数据并释放 socket 状态锁，再通知等待者；消费者被唤醒后
+        // 可以直接获取 inner，生产者也不会形成 inner -> waitqueue 嵌套锁。
+        drop(inner);
+        socket
+            .recv_waiters
+            .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
     }
 
     if !dead_indices.is_empty() {

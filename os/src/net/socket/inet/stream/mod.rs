@@ -283,8 +283,7 @@ impl TcpSocket {
             became_ready & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
         );
         if !accept_events.is_empty() {
-            self.accept_waiters
-                .notify_events_all_if_unlocked(accept_events);
+            self.accept_waiters.notify_events_all(accept_events);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
@@ -293,8 +292,7 @@ impl TcpSocket {
                 & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits(),
         );
         if !connect_events.is_empty() {
-            self.connect_waiters
-                .notify_events_all_if_unlocked(connect_events);
+            self.connect_waiters.notify_events_all(connect_events);
         }
 
         // recv 等待者：有数据可读、对端关闭或 socket 出错。通知载荷只能
@@ -310,8 +308,7 @@ impl TcpSocket {
                     .bits(),
         );
         if !recv_events.is_empty() {
-            self.recv_waiters
-                .notify_events_at_most_if_unlocked(recv_events, 1);
+            self.recv_waiters.notify_events_at_most(recv_events, 1);
         }
 
         // send 等待者：发送缓冲从不可写转为可写，或 socket 关闭/出错。
@@ -324,8 +321,7 @@ impl TcpSocket {
                     .bits(),
         );
         if !send_events.is_empty() {
-            self.send_waiters
-                .notify_events_at_most_if_unlocked(send_events, 1);
+            self.send_waiters.notify_events_at_most(send_events, 1);
         }
     }
 
@@ -588,20 +584,20 @@ impl Socket for TcpSocket {
         }
     }
 
-    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠、不 poll（上层已 poll 过）。
+    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠。
     ///
     /// # Semantics
     ///
-    /// `sys_connect` 的 `WaitQueue` 条件闭包和 `try_connect` 路径调用此方法。
-    /// 先调用 `NET_INTERFACE.try_poll()` 推进 smoltcp 状态，然后查询底层 TCP
+    /// `sys_connect` 的 `WaitQueue` 条件闭包和非阻塞路径都调用此方法。方法先
+    /// 调用 `NET_INTERFACE.try_poll()` 推进 smoltcp 状态，然后查询底层 TCP
     /// state。若状态已是 `Established`/`CloseWait` 但 `Inner::Connecting` 的
     /// `result` 字段未更新，强制修正为 `ConnectResult::Connected`。
     ///
     /// 成功后调用 `finish_connecting()` 做状态转换并发布 fast path 键。
     /// `Closed` 状态（对端 RST）映射为 `ECONNREFUSED`。
     ///
-    /// **重要**：调用前必须由上层 `NET_INTERFACE.poll()` 或 `try_poll()`。
-    /// 条件闭包内不要再 poll（会导致 smoltcp 锁重入死锁）。
+    /// 普通 WaitQueue 在登记 entry 后会释放队列锁，再执行条件检查；因此
+    /// `try_poll()` 触发本 socket 的可靠通知时不会重入同一队列锁。
     ///
     /// # Errors
     ///

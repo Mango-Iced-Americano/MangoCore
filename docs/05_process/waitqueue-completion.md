@@ -122,9 +122,10 @@ wait_event_impl(wq, cond, signal_check, deadline, fallback_ms)
         └── 清 fallback active generation
 ```
 
-条件在入队前后各检查一次。此外，checked block 在任务已发布
-`Blocking(cpu)` 后再读取 entry token。因此生产者不论在注册后、Blocking 前，
-还是真正 Blocked 后通知，都不会被瞬时 TaskStatus 吞掉。
+条件在入队前后各检查一次。登记 entry 后立即释放等待队列锁，第二次条件检查
+可以同步推进生产者并通知同一个队列；该通知由 token 持久化，不依赖瞬时
+`TaskStatus`。最后，checked block 在任务已发布 `Blocking(cpu)` 后再读取 token，
+因此生产者不论在注册后、Blocking 前，还是真正 Blocked 后通知都不会丢失。
 
 源码主干如下：
 
@@ -153,23 +154,26 @@ where
 
         let task = current_task().unwrap();
 
-        let mut guard = wq.lock();
-        let entry = guard.prepare_to_wait(Arc::downgrade(&task));
+        let entry = wq.lock().prepare_to_wait(Arc::downgrade(&task));
 
         if let Some(res) = cond() {
-            guard.finish_entry(&entry);
+            wq.lock().finish_entry(&entry);
             return WaitResult::Ready(res);
         }
         if deadline
             .map(|deadline| TimeSpec::now() >= deadline)
             .unwrap_or(false)
         {
-            guard.finish_entry(&entry);
+            wq.lock().finish_entry(&entry);
             return WaitResult::TimedOut;
+        }
+        if !entry.is_waiting() {
+            wq.lock().finish_entry(&entry);
+            continue;
         }
         if signal_check {
             if has_actionable_signal(&task) {
-                guard.finish_entry(&entry);
+                wq.lock().finish_entry(&entry);
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -201,12 +205,13 @@ where
         }
         drop(task);
 
-        block_current_and_run_next_with_lock_checked(guard, |task| {
+        block_current_and_run_next_checked(|task| {
             let no_signal = !signal_check || !has_actionable_signal(task);
             let not_timed_out = deadline
                 .map(|deadline| TimeSpec::now() < deadline)
                 .unwrap_or(true);
-            entry.is_waiting() && no_signal && not_timed_out
+            let process_alive = !task.process.thread_must_exit(task.gettid());
+            entry.is_waiting() && no_signal && not_timed_out && process_alive
         });
 
         let task = current_task().unwrap();
@@ -219,6 +224,10 @@ where
     }
 }
 ```
+
+普通 wait 与 locked wait 的锁域不同：普通 wait 的队列锁只保护 entry 容器；
+`wait_event_locked_impl()` 则显式持有调用方传入的业务锁检查条件，并通过
+`block_current_and_run_next_with_lock_checked()` 原子衔接业务锁释放与睡眠。
 
 这里的 `fallback_ms` 只用于尚未完成生产者迁移的 I/O 路径；普通 deadline
 直接注册 `wait_with_timeout()`。有 deadline 的一轮等待结束后会再推进
@@ -312,7 +321,8 @@ where
             let not_timed_out = deadline
                 .map(|deadline| TimeSpec::now() < deadline)
                 .unwrap_or(true);
-            entry.is_waiting() && no_signal && not_timed_out
+            let process_alive = !task.process.thread_must_exit(task.gettid());
+            entry.is_waiting() && no_signal && not_timed_out && process_alive
         });
 
         let task = current_task().unwrap();

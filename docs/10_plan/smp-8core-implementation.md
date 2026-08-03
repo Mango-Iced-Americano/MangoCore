@@ -733,6 +733,11 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   状态机。双架构 8 核 build 与 WaitQueue ktest 均 5/5；初赛保持 RV64 312/314、LA64
   semantic 308/314。FS/Net/Driver producer 全面通知尚未由本负责人验收，generic 10ms I/O
   fallback 因此继续作为过渡保护，不能在本批提前删除；
+- develop 融合 Batch 4 将普通 WaitQueue 的队列锁临界区收窄为“登记/摘除 waiter”，登记后的
+  条件检查在锁外执行；EventWaitQueue 删除会静默丢 wake 的 `*_if_unlocked` 接口，TCP、RAW、
+  packet 与 PTY 生产者切换为可靠通知。双架构 8 核 `KTEST=waitqueue KREPEAT=20` 均为
+  120/120；初赛四组功能标记完整且无 panic，但测试工具对受版本控制二进制的非幂等
+  `patchelf` 仍需独立修复。generic fallback 暂时保留，待 splice 等剩余生产者完成迁移后删除；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时

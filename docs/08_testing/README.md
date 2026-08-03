@@ -375,7 +375,7 @@ not ok 5 sched::ready_queue_has_init
 
 TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elapsed_ms`。
 
-### 当前测试清单 (15 个)
+### 当前测试清单 (19 个)
 
 | 测试 | 文件 | 说明 |
 |------|------|------|
@@ -389,15 +389,17 @@ TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elap
 | `timer::time_spec_ops` | `timer.rs` | TimeSpec 构造精度、进位加法、减法钳位、跨单位等价、偏序、is_zero |
 | `timer::now_monotonic` | `timer.rs` | 两次 `now()` 验证单调不倒退 |
 | `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回正确值 |
+| `waitqueue::early_wake_cancels_block` | `waitqueue.rs` | waiter 已登记但尚未 Blocking 时，通知 token 可撤销阻塞 |
+| `waitqueue::condition_can_notify_same_queue` | `waitqueue.rs` | 登记后条件检查可可靠通知同一队列，无自锁或丢 wake |
 | `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale → is_empty |
 | `waitqueue::wake_all_on_empty` | `waitqueue.rs` | 空队列 `wake_all()` 返回 0 |
+| `waitqueue::wake_one` | `waitqueue.rs` | 真实调度下阻塞 waiter 被另一个内核任务唤醒 |
 | `ext4::memblk_read_write` | `ext4.rs` | `TestMemBlock` BlockDevice 读写正确性 |
 | `ext4::memblk_isolation` | `ext4.rs` | 两个独立 `TestMemBlock` 实例的数据不互泄露 |
 | `ext4::open_unformatted_returns_err` | `ext4.rs` | 未格式化设备上 `open_ext4rs` 返回错误（不 panic） |
 | `ext4::lw_path_isolation` | `ext4.rs` | lwext4 `lw_path()` 路径翻译的实例隔离语义 |
 
 **规划中**（需要内核线程 spawn API 或格式化块设备）：
-- `waitqueue::wake_once`, `wake_all` — 多任务唤醒
 - `sched::spawn_and_yield` — 创建线程 → yield → 验证运行
 - `timer::sleep_returns` — 真正阻塞等待 deadline
 - `fs::tmpfs_create_write_read_unlink` — VFS 基础路径

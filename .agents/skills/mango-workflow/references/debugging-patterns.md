@@ -729,7 +729,7 @@
   `Arc::strong_count()` 不能证明独占旧地址空间。只有位于用户映射/TLB 清理之后的权威
   live count 降为 1，才能唤醒 exec owner 替换 MM。
 - **等待点必须响应生命周期停止**: 普通“不可中断”等待可忽略用户信号，但不能永远阻塞
-  group exit/exec。WaitQueue 应在条件锁内识别生命周期请求，先摘除 waiter，再返回调用层
+  group exit/exec。WaitQueue 应在等待协议内识别生命周期请求，先摘除 waiter，再返回调用层
   释放 syscall 栈上的 `Arc` 并进入安全点。vfork child 已 publish 后，父线程被中止不能走
   unpublished cleanup，应返回显式 `StopCaller`。
 - **最终退出码要在 live-zero 后复读**: 普通 exit 在线程清理前读取的 group-exit 码仍可能
@@ -978,9 +978,9 @@
 
 ## WaitQueue 条件只领取内核状态，faultable 回复延后
 
-- **危险模式**: 条件闭包不一定只在无锁 fast path 执行。通用 WaitQueue 通常会在 waiter
-  登记后、仍持有队列锁时再次调用条件，用来闭合 lost-wakeup 窗口；若闭包直接执行
-  `UserPtrMut`/copyout，用户缺页、CoW 或 TLB shootdown 就会跨越等待队列锁。
+- **危险模式**: 条件闭包会在 waiter 登记前后重复执行。当前普通 WaitQueue 已在登记后释放
+  队列锁再调用 condition，但若闭包直接执行 `UserPtrMut`/copyout，重试仍可能重复消费对象，
+  用户缺页、CoW 或 TLB shootdown 也会污染底层同步路径。
 - **固定协议**: 条件闭包只在底层 owner 锁内检查并唯一领取内核对象，把拥有所有权的结果
   保存到 syscall 栈；WaitQueue 返回并完成 waiter 清理后，再执行 faultable reply。不要把
   owner guard、内部引用或只靠序号定位的结果带出锁。
@@ -996,12 +996,13 @@
 - **危险窗口**: 第二次 condition 返回 false 后，任务仍可能是 `Running`。事件生产者此时发布
   状态并调用 wake，可能得到“任务尚未睡眠”；若消费者随后无条件登记并切走，这次 wake 不会
   自动保存到未来。仅仅“在 queue 锁内多检查一次”不能覆盖 condition 与调度状态转换之间的边。
-- **固定协议**: 把事件发布为 owner 锁保护的持久状态；消费者完成 `Blocking` 登记后，在真正
-  切换前用无副作用谓词复查该状态。发现事件就撤销 waiter，不进入睡眠。不要为此增加一次通用
-  condition 调用，因为 condition 可能领取对象或产生其他副作用。
+- **固定协议**: 把事件发布为 owner 锁保护的持久状态，并用可靠的 `WaitEntry` 通知记录本轮
+  wake。普通 wait 的 condition 在队列锁外运行；checked block 只复查 token、信号、超时和
+  生命周期，不再次调用可能领取对象的通用 condition。locked wait 则在同一业务锁下完成
+  条件检查和 waiter 登记，并在 `Running -> Blocking` 桥接处释放该业务锁。
 - **边沿通知需要登记级 token**: 并非所有 wake 都有可复查的 owner 状态。通用 WaitQueue 应为
-  每轮登记建立独立 token，由第一个生产者 CAS `Waiting -> Notified`；checked block 同时复查
-  owner 条件与 token。token 只保存本轮通知，`TaskStatus` 仍独占 CPU/runqueue 所有权，不能
+  每轮登记建立独立 token，由第一个生产者 CAS `Waiting -> Notified`；checked block 只需复查
+  token 和通用退出原因。token 只保存本轮通知，`TaskStatus` 仍独占 CPU/runqueue 所有权，不能
   为修 lost-wake 给调度状态机增加 `WakePending` 一类重复状态。
 - **多队列共享同一登记**: poll/epoll 一轮等待挂到多个 queue 时应共享一个 token，不能每个
   queue 各建一份通知状态。清理先关闭 token，再逐队列分别摘除同一登记；这样既让多个 wake

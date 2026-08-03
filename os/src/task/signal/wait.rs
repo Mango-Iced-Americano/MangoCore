@@ -147,9 +147,9 @@ pub fn sigsuspend(set: *const Signals) -> isize {
 ///
 /// # Locking
 ///
-/// 条件闭包只短暂获取 `task.inner` 和进程共享 signal lock，并且可能由
-/// `WaitQueue` 在自己的锁内调用，因此闭包不得访问用户内存。成功领取的信号先
-/// 保存在 syscall 栈上，等待路径完全退出后才写用户态 `info`。
+/// 条件闭包只短暂获取 `task.inner` 和进程共享 signal lock。用户内存访问可能
+/// 缺页、触发 CoW 或等待 TLB shootdown，因此成功领取的信号先保存在 syscall
+/// 栈上，等待路径和 signal owner 锁完全退出后才写用户态 `info`。
 pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
     let token = current_user_token();
     let set = match read_user_sigset(token, set) {
@@ -179,7 +179,7 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
         if let Some(pending) = take_pending_signal_matching(&task, set) {
             let signum = pending.signum() as isize;
             // dequeue 已在 signal owner 锁内完成；这里只把唯一领取结果交给
-            // syscall 栈，不能在 WaitQueue 条件锁内触发用户缺页。
+            // syscall 栈，不能在 signal owner 锁内触发用户缺页。
             received = Some(pending);
             return Some(signum);
         }

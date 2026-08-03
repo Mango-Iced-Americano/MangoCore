@@ -4,7 +4,10 @@
 //! (mango.mode=ktest with the new multi-task harness).
 
 use crate::kernel_tests::runner::KernelTest;
-use crate::task::WaitQueue;
+use crate::{
+    fs::vfs::event::{EPollEvent, EventWaitQueue},
+    task::WaitQueue,
+};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -22,10 +25,41 @@ pub fn tests() -> Vec<KernelTest> {
             "waitqueue::early_wake_cancels_block",
             test_early_wake_cancels_block,
         ),
+        KernelTest::new(
+            "waitqueue::condition_can_notify_same_queue",
+            test_condition_can_notify_same_queue,
+        ),
         KernelTest::new("waitqueue::basic_queue_ops", test_basic_queue_ops),
         KernelTest::new("waitqueue::wake_all_on_empty", test_wake_all_on_empty),
         KernelTest::new("waitqueue::wake_one", test_wake_one),
     ]
+}
+
+/// 条件检查可能同步推进生产者，例如 socket 检查会调用网络 poll。
+/// 生产者通知同一个 EventWaitQueue 时必须无死锁且不能丢失本轮 token。
+fn test_condition_can_notify_same_queue() -> Result<(), &'static str> {
+    let event_queue = EventWaitQueue::new();
+    let mut checks = 0usize;
+
+    let result = WaitQueue::wait_until(event_queue.wait_queue(), || {
+        checks += 1;
+        match checks {
+            1 => None,
+            2 => {
+                if event_queue.notify_events_all(EPollEvent::EPOLLIN) != 1 {
+                    return Some(-1);
+                }
+                None
+            }
+            _ => Some(7),
+        }
+    });
+
+    if result == 7 {
+        Ok(())
+    } else {
+        Err("same-queue notification was lost or returned an invalid result")
+    }
 }
 
 /// 精确构造“条件队列已注册，但任务尚未进入 Blocking”的窗口。

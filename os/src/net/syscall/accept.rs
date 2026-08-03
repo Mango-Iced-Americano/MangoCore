@@ -15,16 +15,16 @@ use core::sync::atomic::Ordering;
 /// `TCP_SOCKETS` 表。若 `addr != 0`，将 peer 地址写入用户空间。
 ///
 /// **阻塞模式**：在 `WaitQueue::wait_until_interruptible` 中循环，每次迭代
-/// 调用 `socket.accept()`。遵循 harness-patterns 规则：`NET_INTERFACE.try_poll()`
-/// 在循环外调用，永不放入 `WaitQueue` 条件闭包内。
+/// 调用 `socket.accept()`。进入等待前先用 `NET_INTERFACE.try_poll()` 推进一次
+/// 当前网络状态；后续进展由生产侧 poll 发布，并通过可靠 WaitQueue 通知唤醒。
 /// 计数器 `ACCEPT_WAITER_COUNT` 防止无阻塞任务时的昂贵监听器扫描。
 ///
 /// **非阻塞模式**：单次 `socket.accept()` 尝试。
 ///
 /// # Locking
 ///
-/// `WaitQueue` 条件闭包内不得调用 `NET_INTERFACE.poll()` —— 这在 smoltcp
-/// 内部持锁时会导致死锁或活锁。
+/// 普通 `WaitQueue` 条件闭包不持有队列锁。这里仍只做 `accept()`，避免每次
+/// 条件复查都主动扫描全局网络栈，把事件驱动等待退化为忙轮询。
 ///
 /// # Errors
 ///
