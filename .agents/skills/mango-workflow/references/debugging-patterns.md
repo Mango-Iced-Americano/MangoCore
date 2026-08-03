@@ -667,3 +667,13 @@
 - **修复**: 共享 `jh7110_l2cc_flush_range()` 并精确复用 GMAC 的 L2CC `FLUSH64` 协议：CPU→DMA 在 doorbell 前 flush bounce 与 descriptor ring；DMA→CPU 在完成后、复制 bounce 前 flush 目标范围。Flush 后保留 I/O fence，保证 cache-maintenance MMIO 与 DMA ownership transition 的顺序。
 - **教训**: 设备可以共享物理地址并不意味着共享 CPU cache。新增 JH7110 DMA 设备时必须复用共享 helper，不能只补普通 fence 或在驱动内复制 L2CC 寄存器写序列；完成中断也要按 DMA 方向检查 RI/TI，避免错误方向伪完成掩盖故障。
 - **相关文件**: `os/src/hal/platform/jh7110_cache.rs`、`os/src/drivers/block/dw_mshc/mmio/dma.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
+## execve 信号处置语义
+
+### execve 不得将显式 SIG_IGN 复位为 SIG_DFL
+
+- **现象**: 子程序在 `execve` 前从父进程继承了 SIGTERM 的 `SIG_IGN`，却在自身 `kill(0, SIGTERM)` 后进入默认终止路径；若它是会话/进程组 leader，表面现象会是最后一条 syscall 成功后系统失去前台用户态活动。
+- **根因**: `Sighand::reset()` 无差别清空动作表。Linux/POSIX 仅在 exec 时重置用户安装的捕获 handler；显式 `SIG_IGN` 是必须跨 exec 保留的处置。
+- **修复**: 复位动作表时只移除 handler 非 `SIG_IGN` 的 slot；未设置动作仍表示 `SIG_DFL`，不必物化为完整 64 槽表。
+- **教训**: 排查“exec 后首次 kill/signal 静默停滞”时，先按 `SIG_DFL`、`SIG_IGN`、用户 handler 三种 disposition 核对 exec 前后状态；不能把“handler reset”误实现为“所有 disposition reset”。
+- **相关文件**: `os/src/task/signal/action.rs`
