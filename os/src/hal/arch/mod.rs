@@ -13,7 +13,8 @@ pub use loongarch64::{
     config::BUFFER_CACHE_NUM,
     config::KERNEL_HEAP_SIZE,
     config::MEMORY_END,
-    console_flush, console_getchar, console_putchar, console_write_bytes, kstack_alloc,
+    console_flush, console_getchar, console_putchar, console_write_bytes, irq_enabled,
+    kstack_alloc,
     local_irq_restore, local_irq_save, machine_init, reboot, shutdown, syscall_id,
     time::{get_clock_freq, get_time, program_timer_delta, TICKS_PER_SEC},
     tlb_invalidate,
@@ -38,7 +39,7 @@ pub use riscv::{
     reset::reboot,
     sbi::{
         configure_runtime_console, console_flush, console_getchar, console_putchar,
-        console_write_bytes, local_irq_restore, local_irq_save, set_timer, shutdown,
+        console_write_bytes, irq_enabled, local_irq_restore, local_irq_save, set_timer, shutdown,
         init_runtime_console_rx,
     },
     sv39::tlb_invalidate,

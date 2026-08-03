@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
-    phy::{Device, Loopback, Medium},
+    phy::{Device, Loopback, Medium, TxToken},
     socket::{dhcpv4, raw, tcp, udp, AnySocket},
     time::{Duration, Instant},
     wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
@@ -308,6 +308,19 @@ pub struct NetInterfaceInner<'a> {
     pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,
     pub next_socket_id: usize,
 }
+
+/// 延迟发送队列（全局，独立于 `NET_INTERFACE.inner` 锁）。
+///
+/// `NetTxToken::consume` 在 smoltcp poll 的 `inner_handler` 内执行（已持有
+/// `NET_INTERFACE.inner` 锁），此时中断关闭、VirtIO 发送会忙等 completion
+/// 而永远等不到（单核 SIE=0），导致内核死锁。此类数据包放入本队列，由
+/// 下次调度器上下文（中断开启）的 `poll_once` 在真正持有 device 访问权时
+/// 取出发送。队列独立锁避免与 `inner` 锁形成重入死锁。
+static DEFERRED_TX_QUEUE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// 延迟发送队列的最大积压包数。超过后丢弃最老包并计数，
+/// 防止 syscall 上下文持续 egress 导致无限增长。
+const DEFERRED_TX_MAX_PACKETS: usize = 64;
 
 impl<'a> NetInterfaceInner<'a> {
     pub(crate) fn stack_mut(&mut self, ifindex: u32) -> Option<&mut DeviceStack<'a>> {
@@ -703,6 +716,19 @@ impl<'a> NetInterface<'a> {
         );
     }
 
+    /// 将数据包加入延迟发送队列（在中断关闭的 syscall 上下文中调用）。
+    ///
+    /// 队列有界（`DEFERRED_TX_MAX_PACKETS`）；超限时丢弃最老包并计数，
+    /// 防止 syscall 上下文持续 egress 时无界增长。
+    pub(crate) fn push_deferred_tx(&self, packet: Vec<u8>) {
+        let mut queue = DEFERRED_TX_QUEUE.lock();
+        if queue.len() >= DEFERRED_TX_MAX_PACKETS {
+            queue.remove(0);
+            crate::task::perf::record_net_tx_deferred_dropped();
+        }
+        queue.push(packet);
+    }
+
     /// Non-blocking task-context poll: skip if the inner lock is already held.
     /// Lease events are committed after the interface lock is released.
     pub fn try_poll(&self) -> bool {
@@ -853,6 +879,26 @@ impl<'a> NetInterface<'a> {
                 // Set the current poll ifindex so ARP interceptors
                 // can tag neighbour entries with the correct interface.
                 *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
+
+                // 0. Drain packets deferred from interrupt-disabled syscall
+                // contexts. We are now in scheduler/task context with
+                // interrupts enabled, so the blocking VirtIO transmit can
+                // wait for (and receive) completion interrupts.
+                if !DEFERRED_TX_QUEUE.lock().is_empty() {
+                    let drain_now = Instant::from_millis(current_time_duration().as_millis() as i64);
+                    let packets = core::mem::take(&mut *DEFERRED_TX_QUEUE.lock());
+                    for packet in packets {
+                        if let Some(token) = stack.device.transmit(drain_now) {
+                            token.consume(packet.len(), |buf| {
+                                buf.copy_from_slice(&packet);
+                            });
+                        } else {
+                            // Device not ready; keep the packet for a later poll.
+                            DEFERRED_TX_QUEUE.lock().push(packet);
+                        }
+                    }
+                    progressed = true;
+                }
 
                 // 1. Clean up UDP sockets belonging to this stack
                 for (resolved, ifindex, rh) in &udp_removes {
