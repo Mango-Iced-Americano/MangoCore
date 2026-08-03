@@ -84,11 +84,54 @@ impl Drop for FrameTracker {
     }
 }
 
+/// 已从全局分配器元数据中摘除、尚未发布给调用者的单页所有权。
+///
+/// reservation 离开 allocator 锁后再完成整页清零，避免把内存带宽操作
+/// 放在全局写锁内。若未来在完成发布前增加失败路径，Drop 会把页归还。
+struct FrameReservation {
+    ppn: Option<PhysPageNum>,
+    needs_zero: bool,
+    started_ticks: usize,
+}
+
+impl FrameReservation {
+    /// 在 allocator 锁外完成初始化，并把页的回收责任转交给 FrameTracker。
+    fn into_tracker(mut self) -> FrameTracker {
+        // 先从 reservation 中取走 PPN，再构造 tracker。这样即使清零
+        // 或后续统计路径意外 panic，reservation 的 Drop 也不会与
+        // 已构造的 tracker 重复归还同一 PPN。
+        let ppn = self
+            .ppn
+            .take()
+            .expect("frame reservation was already consumed");
+        let tracker = if self.needs_zero {
+            FrameTracker::new(ppn)
+        } else {
+            // Safety: 只有 zero_init 启用时首次领取的 fresh 页会跳过清零；
+            // BSP 已在 frame allocator 发布前清零全部可分配 fresh region。
+            unsafe { FrameTracker::new_uninit(ppn) }
+        };
+        crate::task::perf::record_frame_alloc_time_us(
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .saturating_sub(self.started_ticks),
+        );
+        tracker
+    }
+}
+
+impl Drop for FrameReservation {
+    fn drop(&mut self) {
+        if let Some(ppn) = self.ppn.take() {
+            frame_dealloc(ppn);
+        }
+    }
+}
+
 /// 帧分配器接口。
 trait FrameAllocator {
     fn new() -> Self;
-    /// 分配并返回一页已清零物理页。
-    fn alloc(&mut self) -> Option<FrameTracker>;
+    /// 锁内唯一领取一页；清零由返回的 reservation 在锁外完成。
+    fn reserve_one(&mut self) -> Option<FrameReservation>;
     /// 分配并返回一页未清零物理页。
     ///
     /// # Safety
@@ -632,30 +675,36 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
 
-    /// 分配一个已清零物理页。
-    fn alloc(&mut self) -> Option<FrameTracker> {
-        let _start =
+    /// 从共享元数据中领取一个单页 reservation。
+    fn reserve_one(&mut self) -> Option<FrameReservation> {
+        let started_ticks =
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         crate::task::perf::record_frame_alloc();
-        // 优先使用回收的帧
         let result = if let Some(ppn) = self.take_recycled_ppn() {
-            Some(FrameTracker::new(ppn.into()))
+            // recycled 也包含显式释放的 linker payload 页，必须重新清零。
+            Some((PhysPageNum::from(ppn), true))
         } else if let Some(ppn) = self.take_fresh_ppn() {
-            #[cfg(not(feature = "zero_init"))]
-            let ft = FrameTracker::new(ppn.into());
-            #[cfg(feature = "zero_init")]
-            // Safety: `ppn` 是本分配器刚取出的 fresh 帧，`zero_init`
-            // 配置下调用方承诺后续路径负责初始化。
-            let ft = unsafe { FrameTracker::new_uninit(ppn.into()) };
-            Some(ft)
+            Some((PhysPageNum::from(ppn), !cfg!(feature = "zero_init")))
         } else {
             None
         };
-        crate::task::perf::record_frame_alloc_time_us(
-            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
-                .saturating_sub(_start),
-        );
-        result
+        match result {
+            Some((ppn, needs_zero)) => Some(FrameReservation {
+                ppn: Some(ppn),
+                needs_zero,
+                started_ticks,
+            }),
+            None => {
+                // 保持既有统计口径：失败的领取尝试也计数并记录耗时。
+                crate::task::perf::record_frame_alloc_time_us(
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .saturating_sub(started_ticks),
+                );
+                None
+            }
+        }
     }
 
     /// 分配一个未清零物理页。
@@ -863,9 +912,9 @@ pub fn frame_reserve(_num: usize) {}
 #[cfg(feature = "oom_handler")]
 /// 分配一页物理页，失败时先尝试 OOM 回收。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    let result = FRAME_ALLOCATOR.write().alloc();
-    match result {
-        Some(frame_tracker) => Some(Arc::new(frame_tracker)),
+    let reservation = FRAME_ALLOCATOR.write().reserve_one();
+    match reservation {
+        Some(reservation) => Some(Arc::new(reservation.into_tracker())),
         None => {
             let before = unallocated_frames();
             if oom_handler(1).is_err() {
@@ -873,10 +922,8 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
                 return None;
             }
             crate::show_frame_consumption!("GC", before);
-            FRAME_ALLOCATOR
-                .write()
-                .alloc()
-                .map(|frame_tracker| Arc::new(frame_tracker))
+            let reservation = FRAME_ALLOCATOR.write().reserve_one();
+            reservation.map(|reservation| Arc::new(reservation.into_tracker()))
         }
     }
 }
@@ -941,10 +988,8 @@ pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>
 #[cfg(not(feature = "oom_handler"))]
 /// 分配一页物理页。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    FRAME_ALLOCATOR
-        .write()
-        .alloc()
-        .map(|frame_tracker| Arc::new(frame_tracker))
+    let reservation = FRAME_ALLOCATOR.write().reserve_one();
+    reservation.map(|reservation| Arc::new(reservation.into_tracker()))
 }
 
 #[cfg(feature = "oom_handler")]

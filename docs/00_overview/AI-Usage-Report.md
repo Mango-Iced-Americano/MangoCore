@@ -1403,6 +1403,23 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；无新增 warning、
   panic/timeout/fatal trap，四项 `mutation_detected=false`。
 
+### Case 60: SMP 单页帧分配锁外清零
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md`；DeepSeek 任务与日志只保留
+  在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 定义两阶段所有权与锁边界、实现并核对基线统计口径；
+  DeepSeek 执行设计/补丁只读审查和双架构 Docker 冻结门禁。
+- Problem: 普通单页分配在全局 frame allocator 写锁内清零 4 KiB，8 核并发缺页
+  会把不同 PPN 的内存带宽操作串行化。
+- Implemented change: 私有 `FrameReservation` 在锁内领取 PPN，锁外清零并发布
+  `FrameTracker`；`Option::take()` 一次移交回收责任，Drop 只回滚未消费 reservation。
+- AI adjudication: 拒绝 DeepSeek 首份会重复回收 PPN 的 Drop 示例；随后采纳其
+  `expect()` Copy 副本风险意见并改为 `take()`。perf 失败计数和计时结束点均以
+  旧源码为准，未接受无根据的口径改动。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；
+  四项冻结 diff 一致，无 panic/timeout/fatal/double-free 标记。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1529,6 +1546,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b86-pte-borrow-summary.md` | SMP 页表可变借用边界收口 | 记录 raw PTE 读写拆分、`&mut PageTable` 独占合同、LA64 编译 RED→GREEN、DeepSeek 双架构 8 核冻结门禁与流程 mutation 披露 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b87-trap-context-summary.md` | SMP trap context 直映射借用收口 | 记录通用 `'static` helper 删除、TCB owner 局部 unsafe、trap-return 汇编窗口审查与 DeepSeek 双架构四项冻结门禁 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b88-frame-zero-summary.md` | SMP 帧清零 raw pointer 边界 | 记录 allocator 唯一领取窗口、局部 raw pointer、手工展开性能语义保留与 DeepSeek 双架构四项冻结门禁 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md` | SMP 单页帧分配锁外清零 | 记录 reservation 中间 owner、allocator 锁边界、双重回收建议纠正与 DeepSeek 双架构 8 核冻结门禁 |
 
 ## 9. 交互记录与留痕方式
 

@@ -1078,6 +1078,28 @@ mutex 决定 writer 的唯一全序，最后离开临界区的 writer 一定发�
 先解锁，再进入 POSIX timer owner 执行 discard/finalize，因此 B80 的 signal/timer 无嵌套锁序
 保持不变。
 
+### 3.24 B89 单页帧领取与锁外清零
+
+`FRAME_ALLOCATOR` 写锁只保护 fresh region 游标、recycled 栈和 owner bit。普通
+`frame_alloc()` 的固定顺序为：
+
+```text
+FRAME_ALLOCATOR write lock
+  -> reserve_one(): 唯一领取 PPN 并生成 FrameReservation
+FRAME_ALLOCATOR unlock
+  -> FrameReservation::into_tracker(): 按需清零 4 KiB
+  -> Arc::new(FrameTracker)
+```
+
+返回 reservation 后必须先结束包含 `write()` 临时 guard 的语句，才能消费或
+drop reservation；否则异常回滚会通过 `frame_dealloc()` 重入同一把锁。当前
+OOM/非 OOM 调用点都使用独立 `let reservation = ...;` 语句表达该边界。
+
+reservation 用 `Option::take()` 完成 PPN 所有权移交；消费后它的 `Drop` 是 no-op，
+未消费则将 PPN 归还。recycled 页始终在锁外重新清零；只有启用
+`zero_init` 且首次领取的 fresh 页可依赖 BSP 预清零而跳过。连续帧与
+unsafe uninit 路径未经过此 reservation，不应把两类所有权协议混用。
+
 ## 4. 永久禁止的组合
 
 - 两个不同 CPU 的 runqueue 锁同时持有；

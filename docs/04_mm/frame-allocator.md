@@ -126,6 +126,12 @@ pub struct FrameTracker {
 
 当最后一个 `Arc<FrameTracker>` 被释放时，物理页回到全局分配器。
 
+普通单页分配在发布 `FrameTracker` 前会经过短命的
+`FrameReservation`：它表示 PPN 已从 fresh/recycled 元数据中唯一领取，
+但页还没有交给上层。`into_tracker()` 使用 `Option::take()` 先完成回收
+责任移交，再返回 `FrameTracker`；未消费的 reservation 则由 `Drop` 归还 PPN。
+这个中间 owner 只用于分开全局锁与页初始化，不会暴露到 MM 公开 API。
+
 ## 5. 清零与未初始化分配
 
 普通 `FrameTracker::new(ppn)` 会清零整页：
@@ -164,12 +170,24 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>>
 ```text
 frame_alloc()
   ├── lock FRAME_ALLOCATOR
-  ├── alloc()
+  ├── reserve_one()
   │     ├── recycled.pop()
   │     └── regions[fresh_region].current += 1
-  ├── FrameTracker::new(ppn)
+  ├── unlock FRAME_ALLOCATOR
+  ├── FrameReservation::into_tracker()
+  │     └── zero 4 KiB when required
   └── Arc::new(FrameTracker)
 ```
+
+B89 之前，单页的 4 KiB 清零位于 `FRAME_ALLOCATOR` 全局写锁内；8 核同时
+缺页时，不相关 PPN 的初始化也被该锁完全串行化。现在锁内只修改
+free-list/region cursor 和 owner bit，之后的页写入与 `Arc` 构造都在锁外完成。
+OOM 首次尝试和重试也都显式用局部变量接住 reservation，依赖语句结束
+释放 guard，不依赖链式临时值的延长规则。
+
+`frames_alloc()`、`frames_alloc_fresh_contiguous()` 和显式 `frame_alloc_uninit()` 仍保持
+原有路径：连续区间的选择/回滚需作为独立所有权协议设计，不为了扩大
+B89 而把它们混入单页 reservation。
 
 若启用 `zero_init` 特性，BSP 会在建堆前沿同一个动态 usable-region 迭代器清零所有
 未来 fresh 页，并跳过内核、固件 carveout 和内存洞；fresh 页随后可走 `new_uninit`

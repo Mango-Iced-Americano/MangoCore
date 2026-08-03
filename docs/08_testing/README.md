@@ -369,6 +369,12 @@ B88 保留原有 8×u64 帧清零循环，仅把 raw pointer 建立收回 `Frame
 它增加人工清零测试。双架构完整 SMP ktest 会反复经过页表页、用户页、任务和内核栈的
 分配/回收，门禁同时要求 34/34、无 fatal marker 和测试前后源码指纹一致。
 
+B89 不增加 allocator 调试开关或临时计数；它改变的是锁临界区和 PPN 中间
+owner。验收固定为双架构 normal build，以及 RV64/LA64 `CORE_NUM=8`
+完整 SMP 34 项。除 TAP 通过外，必须检查 double free/重复回收/panic/timeout
+标记和冻结 diff 指纹；第 24 项的 RV64 StorePageFault/LA64 PageModifyFault 是
+`mprotect` 降权门禁的预期用户异常，不能误报为 allocator panic。
+
 ### TAP 输出格式
 
 ```
