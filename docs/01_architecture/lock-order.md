@@ -583,7 +583,7 @@ exec 的临时门禁固定采用：
   -> 解锁
   -> 逐 sibling 投递 SIGKILL/wake/RESCHEDULE
   -> 释放快照 Arc
-  -> Completion 等待（不持任何内核锁）
+  -> Completion 等待 sibling 清理资源并离开 current 槽（不持任何内核锁）
   -> owner 独占旧 MM 后安装新映像
   -> thread_group：清除 ExecSession 并重新开放 clone
 ```
@@ -593,13 +593,19 @@ exec 的临时门禁固定采用：
 - `publish_thread()` 只在持有 `thread_group` 时同时检查永久 group exit 和临时 exec，
   因此成员登记、`New -> Queued` 与关门操作具有单一线性化顺序；
 - `remove_thread()` 在用户资源撤销和 TLB flush/ack 完成后才以 AcqRel 递减 live
-  count；只有权威计数变为 1 才完成 exec Completion，不能用成员快照为空代替；
-- `remove_thread()` 可在 `thread_group` 内克隆 Completion，但必须解锁后
-  `complete()`，因为唤醒会进入 WaitQueue/RunQueue；
+  count。该 ack 只证明线程不再使用用户资源，不证明它已离开自身内核栈和 CPU current 槽；
+- idle 收尾先撤销 current 槽，再由 `publish_exit_inactive()` 递减
+  `ExecState.pending_inactive`。计数到零时只在 `thread_group` 内克隆
+  Completion，解锁后才 `complete()`；
+- exec owner 必须同时观察到 `live_threads == 1` 和 `pending_inactive == 0`。
+  前者保护 MM/资源生命期，后者保证非 leader exec 不会在旧 leader 仍使用
+  内核栈时交换 TID；
 - exec owner 的等待、IPI/TLB ack 和 context switch 都不持有 `thread_group`、
   `TASK_MANAGER`、task.inner 或 runqueue；
 - WaitQueue 协议在提交 Blocking 前后都复查生命周期停止请求，先摘除 waiter 再返回
   `Interrupted`；调用层释放 syscall 栈上的 `Arc` 后才进入安全点；
+- 任何 noreturn 退出调用都必须在 context switch 前显式释放当前内核栈上的
+  TCB `Arc`；调度切换不会展开已废弃的 Rust 栈帧；
 - vfork child 已经 publish 后，父线程被生命周期请求中止只能返回 `StopCaller`，
   不能调用 unpublished cleanup。
 - `reset_exec_resources()` 只在 live count 为 1 后运行。它在 `process.inner` 内读取
@@ -627,7 +633,8 @@ exec.finish()：释放 thread_group 锁并重新开放 clone
 
 关键约束：
 
-- live count 已在安装新映像前收缩为 1，因此 `exec.finish()` 后不再存在可与身份接管并发
+- live count 已在安装新映像前收缩为 1，且所有 sibling 均已发布 inactive ack，
+  因此 `exec.finish()` 后不再存在可与身份接管并发
   发布的同 PCB sibling；身份交换不需要嵌套 `thread_group` 和 task registry；
 - registry 锁内可以短持单个 TCB 的 `tid_handle` 锁，但不得析构 TCB、`TidHandle`，
   也不得取得 processor、`TASK_MANAGER` 或 runqueue 锁；

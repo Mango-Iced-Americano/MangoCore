@@ -511,7 +511,8 @@ WaitQueue 的正确使用模式是“检查条件、入队、释放相关锁、�
 requeue 或一次任务多项注册时，应使用带独立身份和当前位置的专用等待对象。
 
 Completion 比 WaitQueue 更窄：它只表达一次性事件已经发生，典型场景是 vfork 子进程
-exec/exit 后释放父线程，或多线程 exec 的 sibling live count 收缩为 1。Completion 不承载
+exec/exit 后释放父线程，或多线程 exec 的 sibling 全部离开 CPU current 槽。
+live count 另行证明资源清理完成，不能代替这个 inactive 条件。Completion 不承载
 复杂条件，也不区分多个资源状态；如果等待条件依赖队列长度、fd readiness 或 signal mask，
 应使用 WaitQueue。
 

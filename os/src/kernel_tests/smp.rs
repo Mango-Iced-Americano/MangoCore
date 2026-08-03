@@ -1122,58 +1122,71 @@ fn exec_owner_becomes_group_leader() -> Result<(), &'static str> {
     crate::task::try_publish_task_on(owner.clone(), 0)
         .map_err(|_| "failed to publish non-leader exec owner")?;
 
-    let mut timed_out = false;
+    let mut failure = None;
     crate::hal::with_local_interrupts_enabled(|| {
         let deadline =
             crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
         while EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 1 {
-            if EXEC_IDENTITY_PHASE.load(Ordering::Acquire) == 2
-                || crate::hal::get_time() >= deadline
-            {
-                timed_out = true;
+            if EXEC_IDENTITY_PHASE.load(Ordering::Acquire) == 2 {
+                failure = Some("non-leader exec owner failed before identity exchange");
+                return;
+            }
+            if crate::hal::get_time() >= deadline {
+                failure = Some("non-leader exec owner did not publish exchanged identity");
                 return;
             }
             crate::task::run_task_safe_point();
         }
 
-        if owner.gettid() != process.pid || leader.gettid() != old_owner_tid {
+        if owner.gettid() != process.pid
+            || leader.gettid() != old_owner_tid
+            || !leader.exit_inactive.load(Ordering::Acquire)
+        {
             EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
         }
         drop(leader);
         // 等到旧 leader 的最后一个强引用真正消失，证明后续 registry 检查
         // 覆盖的是迟到 Drop，而不只是“可能已经回收”的时序猜测。
-        while leader_weak.upgrade().is_some() {
+        while leader_weak.strong_count() != 0 {
             drop(crate::task::take_zombie_tasks(64));
+            // 回收动作本身可能刚好释放最后一个调度 Arc；先确认结果再判断
+            // deadline，且不要用 Weak::upgrade() 给被观察对象续一轮强引用。
+            if leader_weak.strong_count() == 0 {
+                break;
+            }
             if crate::hal::get_time() >= deadline {
-                timed_out = true;
+                failure = Some("former exec leader TCB was not reclaimed");
                 break;
             }
             crate::task::run_task_safe_point();
         }
-        let pid_still_points_to_owner = crate::task::find_task_by_tid(process.pid)
-            .map(|registered| Arc::ptr_eq(&registered, &owner))
-            .unwrap_or(false);
-        if !pid_still_points_to_owner
-            || crate::task::find_task_by_tid(old_owner_tid).is_some()
-        {
-            EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+        if failure.is_none() {
+            let pid_still_points_to_owner = crate::task::find_task_by_tid(process.pid)
+                .map(|registered| Arc::ptr_eq(&registered, &owner))
+                .unwrap_or(false);
+            if !pid_still_points_to_owner
+                || crate::task::find_task_by_tid(old_owner_tid).is_some()
+            {
+                EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+            }
         }
 
         EXEC_IDENTITY_CHECKED.store(1, Ordering::Release);
-        while EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 2
-            || owner.task_status() != crate::task::TaskStatus::Zombie
+        while failure.is_none()
+            && (EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 2
+                || owner.task_status() != crate::task::TaskStatus::Zombie)
         {
             if crate::hal::get_time() >= deadline {
-                timed_out = true;
+                failure = Some("new exec leader did not reach zombie state");
                 break;
             }
             crate::task::run_task_safe_point();
         }
     });
 
-    if timed_out {
+    if let Some(failure) = failure {
         EXEC_IDENTITY_CHECKED.store(1, Ordering::Release);
-        return Err("non-leader exec identity exchange timed out");
+        return Err(failure);
     }
     if EXEC_IDENTITY_ERRORS.load(Ordering::Acquire) != 0 {
         return Err("non-leader exec identity exchange broke a TID invariant");

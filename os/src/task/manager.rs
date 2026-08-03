@@ -526,6 +526,9 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
             TaskStatus::Zombie => {
                 // 终态任务不会再次 yield，不能把一次性请求带入回收路径。
                 let _ = task.take_migration_target();
+                // processor 已在 idle 栈撤销 current 槽；到这里才能允许
+                // 非 leader exec 交换旧 leader 的 TID。
+                task.process.publish_exit_inactive(&task);
                 // 当前代码已运行在退出 CPU 的 idle 栈；把最后一个调度 owner
                 // 交给本 CPU 回收队列，不再跨核竞争全局 TaskManager。
                 super::processor::enqueue_zombie(cpu, task);
@@ -2376,13 +2379,17 @@ pub fn run_task_safe_point() {
             task.process.thread_must_exit(task.gettid()),
         )
     });
-    if let Some((Some(exit_code), _)) = stop {
+    let exit_code = match stop {
+        Some((Some(exit_code), _)) => Some(exit_code),
+        Some((None, true)) => Some(Signals::SIGKILL.to_signum().unwrap() as u32),
+        _ => None,
+    };
+    if let Some(exit_code) = exit_code {
         // exit 入口统一负责建立可响应 IPI 的清理窗口；安全点不再复制一套
-        // “入口 IRQ 是否开启”的分支。
+        // “入口 IRQ 是否开启”的分支。noreturn 调度不会展开当前内核栈，
+        // 因此必须先释放安全点刚克隆的 current Arc。
+        drop(task);
         super::exit_current_and_run_next(exit_code);
-    }
-    if matches!(stop, Some((None, true))) {
-        super::exit_current_and_run_next(Signals::SIGKILL.to_signum().unwrap() as u32);
     }
     if let Some(task) = task.as_ref() {
         if let Some(signal) = task.process.take_cpu_limit_signal() {

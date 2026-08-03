@@ -222,15 +222,18 @@ exec 成功后：
 |------|------|
 | TCB | 新 trap context、清 clear_child_tid、重置 robust list、禁用 alt signal stack |
 | PCB | replace exe、replace VM、mark execed、set exe path |
-| ExecSession | 临时关闭 clone，等待 sibling 在 owner CPU 清理并发布 live ack |
+| ExecSession | 临时关闭 clone，等待 sibling 发布资源清理 ack 与 idle inactive ack |
 | TID/registry | 非 leader owner 接管 PID，registry 与本 CPU current hint 同步重键 |
 | fd table | 跨 PCB 共享时先复制，再关闭当前 PCB 副本的 CLOEXEC fd |
 | sighand/futex | sighand 按需复制并保留 `SIG_IGN`；private futex table 换新 |
 | Completion | complete vfork |
 
 当前任务继续运行，其他线程在各自任务安全点完成线程级退出。exec owner 不远程摘除
-runqueue 节点或释放 TCB；只有 live count 降为 1 后才安装新 MM。身份重键发生在
+runqueue 节点或释放 TCB；只有 live count 降为 1，且其它线程都已撤销
+current 槽后才安装新 MM。身份重键发生在
 `ExecSession::finish()` 之后，不跨 context switch，也不在 registry 锁内析构旧 TCB。
+安全点进入 noreturn 退出前必须显式 drop 它刚克隆的 current `Arc`，因为
+context switch 不会自动展开原线程的 Rust 栈帧。
 
 ## 11. exit 路径中的协作
 

@@ -740,18 +740,19 @@ struct ThreadGroupState {
 
 struct ExecState {
     owner_tid: usize,
-    siblings_done: Arc<Completion>,
+    pending_inactive: usize,
+    siblings_inactive: Arc<Completion>,
 }
 
 /// 多线程 exec 的临时停止会话。
 ///
-/// owner 等待所有 sibling 在各自 CPU 完成线程级清理后，才能安装新地址空间；
-/// `finish()` 只有在 live 计数收缩为 owner 一人时才重新开放 clone。
+/// owner 等待所有 sibling 完成线程级清理并离开各自 CPU 的 current 槽，
+/// 才能安装新地址空间；`finish()` 只在 owner 成为唯一 live 线程后开放 clone。
 #[must_use = "exec session must wait for siblings and be finished"]
 pub(crate) struct ExecSession {
     process: Arc<ProcessControlBlock>,
     owner_tid: usize,
-    siblings_done: Arc<Completion>,
+    siblings_inactive: Arc<Completion>,
 }
 
 type InodeBusyKey = (usize, vfs::InodeId);
@@ -762,21 +763,23 @@ impl ExecSession {
     pub(crate) fn wait(&self) {
         // 普通信号不能取消 exec；永久 group exit 可以让 owner 提前结束等待，
         // install_exec_image() 会在提交新映像前识别并放弃本次 exec。
-        let _ = self.siblings_done.wait_killable();
+        let _ = self.siblings_inactive.wait_killable();
     }
 
     pub(crate) fn finish(self) {
         let mut group = self.process.thread_group.lock();
         let live = self.process.live_thread_count();
+        let group_exiting = self.process.is_group_exiting();
         assert!(
-            live == 1 || self.process.is_group_exiting(),
+            live == 1 || group_exiting,
             "exec gate reopened before sibling cleanup completed: live={}",
             live
         );
         let state = group.exec.as_ref().expect("missing active exec session");
         assert!(
             state.owner_tid == self.owner_tid
-                && Arc::ptr_eq(&state.siblings_done, &self.siblings_done),
+                && (state.pending_inactive == 0 || group_exiting)
+                && Arc::ptr_eq(&state.siblings_inactive, &self.siblings_inactive),
             "stale exec session tried to reopen the thread group"
         );
         group.exec = None;
@@ -1749,7 +1752,7 @@ impl ProcessControlBlock {
         true
     }
 
-    /// 在线程完成全部线程级清理后发布退出 ack。
+    /// 在线程完成全部线程级清理后消费 live token。
     ///
     /// # Semantics
     ///
@@ -1763,27 +1766,49 @@ impl ProcessControlBlock {
         let previous = self.live_threads.fetch_sub(1, Ordering::AcqRel);
         assert_ne!(previous, 0, "live-thread count underflow");
         let remaining = previous - 1;
-        let siblings_done = {
+        {
             let mut group = self.thread_group.lock();
             let compact_threshold = remaining.saturating_mul(4).saturating_add(128);
             if group.members.len() > compact_threshold {
                 group.members.retain(|thread| {
                     thread
                         .upgrade()
-                        .map(|task| task.thread_live_counted.load(Ordering::Acquire))
+                        .map(|task| {
+                            task.thread_live_counted.load(Ordering::Acquire)
+                                || !task.exit_inactive.load(Ordering::Acquire)
+                        })
                         .unwrap_or(false)
                 });
             }
-            // live token 在全部用户资源和 TLB 清理后才递减。计数到 1 表示只剩
-            // exec owner，可在释放线程组锁后唤醒它安装新地址空间。
-            (remaining == 1)
-                .then(|| group.exec.as_ref().map(|state| state.siblings_done.clone()))
-                .flatten()
-        };
-        if let Some(siblings_done) = siblings_done {
-            siblings_done.complete();
         }
         Some(remaining)
+    }
+
+    /// 在退出线程已经切回 idle 后发布 exec 所需的 inactive ack。
+    ///
+    /// current 槽必须先被撤销；completion 在释放线程组锁后触发，避免把
+    /// WaitQueue 唤醒路径嵌入线程组临界区。
+    pub(crate) fn publish_exit_inactive(&self, task: &TaskControlBlock) {
+        let completion = {
+            let mut group = self.thread_group.lock();
+            assert!(
+                !task.exit_inactive.swap(true, Ordering::AcqRel),
+                "thread published exit-inactive twice: tid={}",
+                task.gettid()
+            );
+            let Some(exec) = group.exec.as_mut() else {
+                return;
+            };
+            if exec.owner_tid == task.gettid() {
+                return;
+            }
+            assert_ne!(exec.pending_inactive, 0, "exec inactive ack underflow");
+            exec.pending_inactive -= 1;
+            (exec.pending_inactive == 0).then(|| exec.siblings_inactive.clone())
+        };
+        if let Some(completion) = completion {
+            completion.complete();
+        }
     }
 
     /// 返回当前仍计为 live 的线程列表，并清理失效弱引用。
@@ -1792,12 +1817,12 @@ impl ProcessControlBlock {
         let mut live_threads = Vec::new();
         group.members.retain(|thread| {
             if let Some(task) = thread.upgrade() {
-                if task.thread_live_counted.load(Ordering::Acquire) {
+                let live = task.thread_live_counted.load(Ordering::Acquire);
+                let inactive = task.exit_inactive.load(Ordering::Acquire);
+                if live {
                     live_threads.push(task);
-                    true
-                } else {
-                    false
                 }
+                live || !inactive
             } else {
                 false
             }
@@ -2167,8 +2192,9 @@ impl ProcessControlBlock {
         self: &Arc<Self>,
         owner_tid: usize,
     ) -> Result<(ExecSession, Vec<Arc<TaskControlBlock>>), isize> {
-        let siblings_done = Arc::new(Completion::new());
+        let siblings_inactive = Arc::new(Completion::new());
         let mut siblings = Vec::new();
+        let mut pending_inactive = 0usize;
         let mut group = self.thread_group.lock();
         if self.group_exit_code.load(Ordering::Relaxed) != 0 || group.exec.is_some() {
             return Err(crate::syscall::errno::EAGAIN);
@@ -2180,14 +2206,20 @@ impl ProcessControlBlock {
         let mut owner_is_live = false;
         group.members.retain(|thread| {
             if let Some(task) = thread.upgrade() {
-                if task.thread_live_counted.load(Ordering::Acquire) {
-                    if task.gettid() == owner_tid {
-                        owner_is_live = true;
-                    } else {
+                let live = task.thread_live_counted.load(Ordering::Acquire);
+                let inactive = task.exit_inactive.load(Ordering::Acquire);
+                if task.gettid() == owner_tid {
+                    owner_is_live = live;
+                } else {
+                    if live {
                         siblings.push(task);
                     }
-                    return true;
+                    if !inactive {
+                        pending_inactive += 1;
+                    }
                 }
+                // 已清理资源但仍占有 current 槽的线程必须保留到 idle ack。
+                return live || !inactive;
             }
             false
         });
@@ -2198,23 +2230,23 @@ impl ProcessControlBlock {
 
         group.exec = Some(ExecState {
             owner_tid,
-            siblings_done: siblings_done.clone(),
+            pending_inactive,
+            siblings_inactive: siblings_inactive.clone(),
         });
         // 权威会话已经在成员锁内建立，再用 Release 发布安全点快照。
         self.exec_owner_tid.store(owner_tid, Ordering::Release);
         drop(group);
 
-        // 不能只凭快照为空判定完成：退出线程可能已经清除自己的 live token，
-        // 但尚未递减进程计数。只有权威计数为 1 才能确认 owner 独占旧地址空间；
-        // 否则退出线程会在 remove_thread() 把计数降到 1 后完成该事件。
-        if self.live_thread_count() == 1 {
-            siblings_done.complete();
+        // completion 表示 sibling 已经离开 current，而不只是清除了 live token。
+        // 这与 Linux de_thread() 等待旧 leader inactive 后再交换 TID 的顺序一致。
+        if pending_inactive == 0 {
+            siblings_inactive.complete();
         }
         Ok((
             ExecSession {
                 process: self.clone(),
                 owner_tid,
-                siblings_done,
+                siblings_inactive,
             },
             siblings,
         ))

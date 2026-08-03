@@ -96,6 +96,9 @@ related_docs:
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
 | ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier；develop Batch 7 已让 `/proc/cpuinfo` 与 `/proc/stat` 输出完整 configured CPU 拓扑 | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0；`/proc/stat` 的 per-CPU USER_HZ 时间记账仍未实现 |
 
+B83 补充了表中 exec 收尾的关键边界：用户资源清理的 live ack 与撤销
+CPU current 槽的 inactive ack 已分离，旧 leader 真正切回 idle 后才允许身份交换。
+
 ### 2.2 总体结构
 
 ~~~mermaid
@@ -893,8 +896,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B41 在同一线程组锁内增加可恢复的 `ExecSession`，临时拒绝 concurrent exec 和
   late `CLONE_THREAD` 发布；owner 只请求 sibling 在各自 CPU 安全点退出，不再从
   远端 runqueue 摘除或代清资源。`remove_thread()` 在用户映射撤销和 TLB ack 后
-  递减 live count，计数降为 1 才完成 Completion，owner 随后安装新 trap context/MM
-  并重新开门。永久 group exit 可覆盖临时 exec；WaitQueue/Completion/vfork 等待
+  递减 live count。B83 后 Completion 还需等待每个 sibling 在 idle 收尾发布 inactive ack，
+  owner 随后安装新 trap context/MM 并重新开门。永久 group exit 可覆盖临时
+  exec；WaitQueue/Completion/vfork 等待
   会因生命周期停止请求安全退栈。双架构 8 核 focused 均为 27/27；初赛保持
   RV64 312/314、LA64 308/314，clone/fork/exec/exit/wait 项均满分。
 - B42 在 live count 收缩为 1 后统一调用 `reset_exec_resources()`。fd table 与
@@ -909,6 +913,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   hint、OOM active tracker、`exit_signal` 与 thread quota 随后更新。旧 leader 的迟到
   Drop 只能条件删除仍指向自身的条目，不会误删新 leader。双架构 8 核 focused 均为
   29/29；初赛保持 RV64 312/314、LA64 308/314。
+- B83 对 B41/B43 的 exec 收尾进行生命周期收口：live token 仅表示
+  clear-child-tid、用户映射和 TLB 清理已完成；每个 sibling 只在切回 idle、
+  撤销 current 槽后发布独立 inactive ack。`ExecSession` 等待后者全部收齐，
+  再安装新 MM 和交换非 leader TID。同时修复安全点进入 noreturn 退出前
+  遗留 current `Arc` 的强引用泄漏。该顺序与 Linux v6.6 `de_thread()` 等待旧
+  leader inactive 后再交换 PID 的原则一致。双架构 8 核 focused 均为 34/34。
 - B44 删除 TCB 上的兼容注册字段，把 PRIVATE_EXPEDITED 注册状态放入共享
   `AddressSpace`。GLOBAL 面向全部 online CPU；PRIVATE 当时在 VM 锁内冻结历史
   cached CPU mask，解锁后执行独立的 full-fence IPI/request/ack。B51 已将目标改为
@@ -1194,8 +1204,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
     sibling 投递 SIGKILL、wake 与 reschedule，并由各 owner 在安全点退出；
   - live token 在用户资源/TLB 清理后发布 ack，最后一个 ack 释放进程共享资源；
   - 永久退出无需发起者同步等待；B41 已为多线程 exec 建立临时
-    `ExecSession + Completion`，发起者等 live count 收缩为 1 后才替换 MM，
-    完成后重新开放 clone；
+    `ExecSession + Completion`；B83 要求发起者等 live count 收缩为 1，并收齐
+    sibling idle inactive ack 后才替换 MM，完成后重新开放 clone；
   - B42 已在上述 ack 后隔离仍跨 PCB 共享的 fd table/sighand，并换新 private
     futex table；exec 不再通过原地 close/reset/clear 污染其它 PCB；
   - B43 已让非 leader exec owner 接管进程 PID/TGID，并同步 task registry、

@@ -196,6 +196,11 @@ pub struct TaskControlBlock {
     pub user_stack_allocated: AtomicBool,
     /// Whether this task is counted in its process live-thread counter.
     pub(crate) thread_live_counted: AtomicBool,
+    /// Zombie 线程是否已经离开原 CPU 的 current 槽。
+    ///
+    /// 线程级资源可以在自身内核栈上先完成清理，但非 leader exec 必须等到
+    /// 旧 leader 真正切回 idle 后才能交换 TID。该位只由 idle 收尾路径发布。
+    pub(crate) exit_inactive: AtomicBool,
     /// Whether this task contributes to ACTIVE_SECCOMP_TASKS.
     seccomp_counted: AtomicBool,
     uid_hint: AtomicUsize,
@@ -1238,6 +1243,7 @@ impl TaskControlBlock {
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             user_stack_allocated: AtomicBool::new(true),
             thread_live_counted: AtomicBool::new(false),
+            exit_inactive: AtomicBool::new(false),
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(0),
             euid_hint: AtomicUsize::new(0),
@@ -1363,6 +1369,7 @@ impl TaskControlBlock {
             ustack_base: 0,
             user_stack_allocated: AtomicBool::new(false),
             thread_live_counted: AtomicBool::new(false),
+            exit_inactive: AtomicBool::new(false),
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(0),
             euid_hint: AtomicUsize::new(0),
@@ -1932,6 +1939,7 @@ impl TaskControlBlock {
             },
             user_stack_allocated: AtomicBool::new(user_stack_allocated),
             thread_live_counted: AtomicBool::new(false),
+            exit_inactive: AtomicBool::new(false),
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(parent_inner.uid as usize),
             euid_hint: AtomicUsize::new(parent_inner.euid as usize),

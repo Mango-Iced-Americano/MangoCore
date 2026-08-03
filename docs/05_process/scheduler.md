@@ -46,8 +46,9 @@ B40 在同一安全点增加永久 group-exit 检查：只读取进程级原子�
 当前 owner 在本 CPU 清理并发布 live-token ack；请求 CPU 不再摘除或销毁远端
 Running TCB。首次 clone 发布也与线程成员登记共用 group-exit 门禁。
 B41 继续让多线程 exec 复用这个 owner 自清理安全点，但使用可恢复的临时 exec
-会话和 Completion：owner 等到 sibling 清理完旧用户映射并把 live count 降为 1
-后才替换 MM，随后重新开放线程创建。
+会话和 Completion。B83 又将资源清理的 live ack 与 idle 撤销 current 槽的
+inactive ack 分开：owner 同时等到 live count 降为 1 且全部 sibling inactive 后
+才替换 MM，随后重新开放线程创建。
 B51 在每个 `CpuTaskState` 中增加当前活跃用户 MM 的 Arc。用户 trap-return 通过
 `switch_user_vm()` 安装它；任务真正切回 idle 栈后，调度器在改变 current owner 前
 调用 `leave_user_vm()`，让 MM 的 active CPU mask 精确反映仍可直接返回用户态的 CPU。
