@@ -3,14 +3,17 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-01
+last_updated: 2026-08-03
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
   - "os/src/smp.rs"
+  - "os/src/hal/boot/mod.rs"
+  - "os/src/hal/firmware/mod.rs"
   - "os/src/hal/arch/riscv/entry.asm"
   - "os/src/hal/arch/loongarch64/boot.rs"
 code_paths:
+  - "os/src/hal/platform/"
   - "os/src/hal/arch/riscv/trap/"
   - "os/src/hal/arch/loongarch64/trap/"
 ---
@@ -29,7 +32,9 @@ firmware / QEMU
   → rust_main(hardware_id, boot_arg)
   → register_cpu_entry() + install_cpu_local()
      ├─ logical CPU0 → bsp_main()
-     │  → BSS / MM / machine / random 全局初始化
+     │  → 冻结 BootInfo → CPU-local bootstrap
+     │  → 冻结 FDT / 早期资源（.data.boot + .bss.boot）
+     │  → BSS → MM → PlatformInfo → machine / random 全局初始化
      │  → bring_up_secondary_cpus()
      │  → initramfs → /init → /sbin/init (PID1) → test-runner
      │  → scheduler
@@ -69,6 +74,26 @@ sibling 在自己的 CPU 完成旧用户映射/TLB 清理后 ack；只有 live c
 owner 一人时才替换地址空间。
 
 ## 启动栈与 BSS 边界
+
+BSP 在 `mem_clear()` 前完成两项不能延期的工作：`boot::init_bsp()` 用
+`spin::Once<RawBootInfo>` 冻结固件寄存器，`firmware::discover_early_resources()`
+把固定容量资源表写入 `.data.boot`，并把双架构 FDT 字节复制到 `sbss` 前的
+`.bss.boot`。FDT 原地址可能被后续内存初始化覆盖或回收，因此只保存指针并在
+`mm::init()` 后解析是不成立的。
+
+两项操作之间必须先执行 `bootstrap_init()`：入口参数冻结不依赖架构状态，必须最早
+完成；固件资源解析涉及更复杂的 Rust 内存访问，LA64 必须先建立 DMW、异常入口和页表
+寄存器基线。该顺序同时保证 RV64 直接复制 `a1` 中的 FDT，也允许 LA64 从 `a2`
+的 EFI system table 解析 FDT 后再复制。
+
+LA64 QEMU 和 2K1000 U-Boot 的入口都把 EFI system table 放在 `a2`。QEMU 入口保留
+该寄存器；2K1000 在退出 U-Boot DMW 环境后把其低 40 位物理地址交给 Rust。EFI 表内
+的嵌套指针仍由 Rust 逐项去除 DMW 段号。QEMU 必须提供 `EFI_FDT_GUID`；2K1000 可在
+合法 FDT 缺失时退回静态板级内存描述。
+
+堆就绪后，`platform::init_platform()` 才把早期快照转换为含 `String/Vec` 的 owned
+`PlatformInfo`。该对象在启动 AP 前通过 `spin::Once` 完整发布；AP 不解析固件数据、
+不写平台状态，只读取 BSP 已发布的快照。
 
 RISC-V 和 LoongArch 都为最多 8 个硬件 CPU 预留独立 boot stack。入口在
 使用栈之前验证 CPU ID，并按 `base + (cpu_id + 1) * BOOT_STACK_SIZE`

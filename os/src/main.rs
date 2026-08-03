@@ -89,30 +89,58 @@ fn mem_clear() {
 
 /// 双架构共用的固件入口。
 ///
-/// RV64 由 OpenSBI 在 `a0/a1` 传入 hart ID 与 DTB/opaque；LA64 的入口
-/// 代码把 CPUID 和空启动参数整理为相同 ABI。这里必须先登记逻辑 CPU，
+/// RV64 由 OpenSBI 在 `a0/a1` 传入 hart ID 与 FDT；LA64 入口将 CPUID 和
+/// 固件 `a2` 中的 EFI system table 整理为相同 ABI。这里必须先登记逻辑 CPU，
 /// 随后才能决定当前 CPU 是否拥有全局初始化权。
 #[no_mangle]
 pub extern "C" fn rust_main(cpu_id: usize, boot_arg: usize) -> ! {
     let logical_cpu_id = smp::register_cpu_entry(cpu_id);
     if logical_cpu_id == smp::BOOT_CPU_ID {
-        bsp_main(logical_cpu_id, boot_arg)
+        bsp_main(logical_cpu_id, cpu_id, boot_arg)
     } else {
         smp::secondary_main(logical_cpu_id)
     }
 }
 
 /// 只有逻辑 CPU0 可以进入原有的 MangoCore 全局初始化路径。
-fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
+fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     task::perf::record_boot_stage(task::perf::BOOT_STAGE_ENTRY);
+    // 入口参数必须在任何架构初始化之前冻结，避免固件寄存器语义丢失；
+    // AP 不得重复覆盖这份 `.data.boot` 快照。
+    hal::boot::init_bsp(hardware_id, boot_arg);
     // Phase 1 中 AP 只执行 CPU-local 初始化并 park，因此 BSS、堆、驱动、
     // 文件系统和旧全局调度器仍由 CPU0 单独拥有。
     bootstrap_init(cpu_id);
+    // LA64 必须先建立 DMW、异常入口和页表寄存器基线；RV64 的 FDT 又必须
+    // 在清 BSS 前复制，所以固件资源发现固定在这两个启动边界之间。
+    hal::firmware::discover_early_resources();
     mem_clear();
     console::log_init();
     trace::init();
     println!("[kernel] Console initialized.");
     mm::init();
+    // PlatformInfo 内含 String/Vec，只能在堆可用后构造；bring_up AP 之前
+    // 完成 Once 发布，保证 AP 后续只能看到完整的不可变对象。
+    hal::platform::init_platform();
+    let boot_info = hal::boot::boot_info();
+    println!(
+        "[kernel] Boot protocol: {:?}, hardware_id={}, firmware_arg={:#x}",
+        boot_info.protocol, boot_info.hardware_id, boot_info.firmware_arg_paddr
+    );
+    let platform_info = hal::platform::platform_info();
+    println!(
+        "[kernel] Firmware resources: ram_regions={}, reserved={}, early_mmio={}, usable={} MiB",
+        hal::firmware::memory_regions().len(),
+        hal::firmware::firmware_reserved_regions().len(),
+        hal::firmware::early_mmio_ranges().len(),
+        hal::firmware::usable_memory_size() / (1024 * 1024),
+    );
+    println!(
+        "[kernel] Platform: firmware={:?}, model={}, devices={}",
+        platform_info.firmware,
+        platform_info.model.as_deref().unwrap_or("unspecified"),
+        platform_info.devices.len(),
+    );
     println!("[kernel] Hello, world!");
     // note that remap_test is currently NOT supported by LA64, for the whole kernel space is RW!
     // #[cfg(feature = "riscv")]
