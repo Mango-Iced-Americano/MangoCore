@@ -1335,6 +1335,23 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Verification: RV64 8 核 SMP 34/34；LA64 修复前 33/34 且唯一失败为写保护绕过，修复后
   双架构 build exit 0、LA64 8 核 SMP 34/34；LA64 初赛保持 308/314 精确基线，无 mutation。
 
+### Case 56: SMP 真实并发 PTE writer
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b85-concurrent-pte-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责区分“同步原语自测”和“生产 PTE writer”覆盖范围、设计并发屏障、
+  实现与裁决；DeepSeek 严格串行执行双架构 Docker build/8 核 ktest 并检查状态残留。
+- Problem: 旧用例从 `UserTlbCommit` 起步，没有覆盖 VM 锁内 PTE 线性化、锁外 flush 交错，
+  因而不能作为多 CPU 同时修改同一 MM 不串 generation/range payload 的最终证据。
+- Implemented change: 全部 CPU 激活同一 `AddressSpace`，每核经生产 `mprotect()` 路径在独立
+  `MAP_SHARED` 页上完成 8 轮权限切换；共同完成前保持 active，并在收尾核对 generation、
+  active mask 和 full-user fallback 计数。
+- AI adjudication: 不采用模型建议的额外 repeat，因为本节点只改永久 ktest，双架构 8 核已覆盖
+  生产调用链和后续状态洁净性；一次无输出的只读审查被终止且明确排除在证据之外。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34，目标用例均为
+  `ok 25`，无 panic、timeout、fatal trap、active-MM 泄漏、generation 落后或全刷退化。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1457,6 +1474,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b82-user-remap-tlb-summary.md` | SMP 真实用户 CoW + 同 VPN remap TLB 证明 | 记录 DeepSeek 并发审查与 Docker 执行、GPT 对 remap-frame UAF 遗漏的纠正、官方 TCFG/TICLR 语义溯源、LA64 RED→GREEN 及既有 exec 超时的 partial 披露 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b83-exec-inactive-summary.md` | SMP 非 leader exec inactive ack | 记录 live/inactive 双 ack、noreturn Arc 根因、Linux `de_thread()` 对照、DeepSeek 报告纠错与双架构 8 核 34/34 证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b84-mprotect-summary.md` | SMP 真实 mprotect 降权与 LA64 W/D 权限 | 记录真实远端 store RED、官方页表/TLB 与 Linux 对照、模型归因纠正、LA64 W/D 修复、双架构 focused 和初赛非回归证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b85-concurrent-pte-summary.md` | SMP 真实并发 PTE writer | 记录生产 mprotect 交错、VM 锁与锁外 shootdown 边界、DeepSeek 双架构 8 核冻结门禁和无状态残留证据 |
 
 ## 9. 交互记录与留痕方式
 

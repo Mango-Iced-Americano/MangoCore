@@ -351,6 +351,12 @@ CPU1 用户探针先持续 load 旧页，CPU0 依次通过生产 CoW 和正式
 后才放行第二次 store；后者必须触发 SIGSEGV，且只读 frame 内容不变。timer 静默、
 full-user request 不增长和 handler observed 共同排除其它 trap 全刷造成的假通过。
 
+`concurrent_pte_updates_keep_shootdowns_separate` 不再直接伪造 range payload。每个在线 CPU
+激活同一个 MM，在各自的常驻匿名共享页上交替执行 8 轮生产 `mprotect`。所有 writer 在
+最后一轮提交完成前保持 active，且 barrier 等待时开放本地中断，因此每代锁外
+`TlbFlush` 都能和其它发起者交叉处理 IPI/ack。用例最终要求 active mask 为零、所有 CPU
+追上最后 generation、full-user request 不变；其后的用例继续通过才能排除残留状态污染。
+
 ### TAP 输出格式
 
 ```

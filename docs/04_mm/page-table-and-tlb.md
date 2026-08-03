@@ -327,7 +327,9 @@ start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 
 并确认两次单页修改都未退化为全用户刷新。B84 又在 mprotect 返回并收齐 ack 后放行远端
 store，要求它以 SIGSEGV 结束。该门禁发现 LA64 只清页表遍历使用的 W 位、未清真正进入
 TLB 的 D 位；底层 `revoke_write()` 改为同步清 W/D 后双架构通过。默认亲和性、通用用户
-迁移与更高并发 PTE 写压力仍未完成。
+迁移仍受共享子系统门禁约束。B85 把原先直接调用同步原语的并发用例替换为 8 CPU
+真实 `AddressSpace::write(mprotect)`：VM 锁内 PTE 写串行，解锁后的多代 `TlbFlush`
+交错执行，并验证全部 CPU observed、active mask 清零和无全刷退化。
 
 ## 13. 调试核对点
 

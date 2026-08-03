@@ -465,10 +465,10 @@ static AP_USER_TLB_FREE_DURING_WAIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static AP_USER_TLB_REQUEST_BEFORE: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID_READY: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_START: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_READY: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_DONE: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_START: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_PHASE: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_ERRORS: AtomicUsize = AtomicUsize::new(0);
@@ -619,8 +619,8 @@ pub fn tests() -> Vec<KernelTest> {
             remote_user_pte_updates_take_effect,
         ),
         KernelTest::new(
-            "smp::concurrent_range_shootdowns_keep_payloads_separate",
-            concurrent_range_shootdowns_keep_payloads_separate,
+            "smp::concurrent_pte_updates_keep_shootdowns_separate",
+            concurrent_pte_updates_keep_shootdowns_separate,
         ),
         KernelTest::new(
             "smp::user_tlb_retirement_waits_for_ack",
@@ -3599,44 +3599,85 @@ fn user_tlb_range_sync_uses_arch_backend() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn run_concurrent_range_shootdown() {
+const CONCURRENT_PTE_BASE: usize = crate::config::ELF_PIE_BASE + 0x40_0000;
+const CONCURRENT_PTE_STRIDE: usize = 4 * crate::config::PAGE_SIZE;
+const CONCURRENT_PTE_ROUNDS: usize = 8;
+
+fn run_concurrent_pte_updates() {
     let cpu_id = crate::smp::cpu_id();
     let vm = SHARED_TLB_VM
         .lock()
         .as_ref()
-        .expect("concurrent range-shootdown VM missing")
+        .expect("concurrent PTE-update VM missing")
         .clone();
-    let asid = vm.activate_on(cpu_id).asid;
-    RANGE_SYNC_READY.fetch_add(1, Ordering::Release);
-    while RANGE_SYNC_START.load(Ordering::Acquire) == 0 {
+    vm.activate_on(cpu_id);
+    PTE_UPDATE_READY.fetch_add(1, Ordering::Release);
+    while PTE_UPDATE_START.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
 
-    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
-    // 每个发起者使用独立的三页区间，让并发槽同时承载不同 payload。
-    let start = crate::mm::VirtAddr::from(
-        0x54_0000 + cpu_id * 4 * crate::config::PAGE_SIZE,
-    )
-    .floor();
-    let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
-    if crate::smp::synchronize_user_tlb(targets, asid, Some(range), None).is_err() {
-        RANGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
+    let address = CONCURRENT_PTE_BASE + cpu_id * CONCURRENT_PTE_STRIDE;
+    for round in 0..CONCURRENT_PTE_ROUNDS {
+        let mut permission = crate::mm::MapPermission::R | crate::mm::MapPermission::U;
+        if round & 1 != 0 {
+            permission |= crate::mm::MapPermission::W;
+        }
+        if vm
+            .write(|space| space.mprotect(address, crate::config::PAGE_SIZE, permission))
+            .is_err()
+        {
+            PTE_UPDATE_ERRORS.fetch_add(1, Ordering::Release);
+            break;
+        }
     }
-    RANGE_SYNC_DONE.fetch_add(1, Ordering::Release);
+
+    // 所有 writer 完成前保持 MM active，保证每轮 PTE 修改都必须向全部 CPU
+    // 发送真实 shootdown。等待时开放本地中断，避免形成互等 ack 的环。
+    PTE_UPDATE_DONE.fetch_add(1, Ordering::Release);
+    crate::hal::with_local_interrupts_enabled(|| {
+        while PTE_UPDATE_DONE.load(Ordering::Acquire) != crate::smp::configured_cpu_count() {
+            core::hint::spin_loop();
+        }
+    });
+    vm.deactivate_on(cpu_id);
 }
 
-/// 所有 CPU 同时发布不同 ASID/区间 payload，证明固定槽不会被 reason 合并覆盖。
-fn concurrent_range_shootdowns_keep_payloads_separate() -> Result<(), &'static str> {
-    RANGE_SYNC_START.store(0, Ordering::Release);
-    RANGE_SYNC_READY.store(0, Ordering::Release);
-    RANGE_SYNC_DONE.store(0, Ordering::Release);
-    RANGE_SYNC_ERRORS.store(0, Ordering::Release);
+/// 所有 CPU 经真实 `AddressSpace::write()` 修改不同 PTE。VM 锁内写入虽串行，
+/// 解锁后的 `TlbFlush` 可以重叠，从而验证多代 generation 与固定槽 payload 不会串线。
+fn concurrent_pte_updates_keep_shootdowns_separate() -> Result<(), &'static str> {
+    PTE_UPDATE_START.store(0, Ordering::Release);
+    PTE_UPDATE_READY.store(0, Ordering::Release);
+    PTE_UPDATE_DONE.store(0, Ordering::Release);
+    PTE_UPDATE_ERRORS.store(0, Ordering::Release);
 
     let vm = Arc::new(crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
     ));
-    let local_asid = vm.activate_on(crate::smp::BOOT_CPU_ID).asid;
-    *SHARED_TLB_VM.lock() = Some(vm);
+    let mut frames = Vec::new();
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        let frame = crate::mm::frame_alloc().ok_or("concurrent PTE frame allocation failed")?;
+        let address = CONCURRENT_PTE_BASE + cpu_id * CONCURRENT_PTE_STRIDE;
+        let mapped = vm.write(|space| {
+            space.shm_mmap(
+                address,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R
+                    | crate::mm::MapPermission::W
+                    | crate::mm::MapPermission::U,
+                crate::mm::MapFlags::MAP_SHARED
+                    | crate::mm::MapFlags::MAP_ANONYMOUS
+                    | crate::mm::MapFlags::MAP_FIXED_NOREPLACE,
+                core::slice::from_ref(&frame),
+                true,
+            )
+        });
+        if mapped != address as isize {
+            return Err("concurrent PTE test could not map its fixed page");
+        }
+        frames.push(frame);
+    }
+    vm.activate_on(crate::smp::BOOT_CPU_ID);
+    *SHARED_TLB_VM.lock() = Some(vm.clone());
 
     let mut full_requests = [0usize; crate::smp::MAX_CPUS];
     for cpu_id in 0..crate::smp::configured_cpu_count() {
@@ -3646,49 +3687,50 @@ fn concurrent_range_shootdowns_keep_payloads_separate() -> Result<(), &'static s
     for cpu_id in 1..crate::smp::configured_cpu_count() {
         tasks.push(crate::task::spawn_ktest_task_on(
             cpu_id,
-            run_concurrent_range_shootdown,
+            run_concurrent_pte_updates,
         ));
     }
 
     let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while RANGE_SYNC_READY.load(Ordering::Acquire) != tasks.len() {
+    while PTE_UPDATE_READY.load(Ordering::Acquire) != tasks.len() {
         if crate::hal::get_time() >= deadline {
-            return Err("APs did not enter the concurrent range-shootdown barrier");
+            return Err("APs did not enter the concurrent PTE-update barrier");
         }
         core::hint::spin_loop();
     }
 
-    RANGE_SYNC_START.store(1, Ordering::Release);
-    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
-    let local_start = crate::mm::VirtAddr::from(0x53_0000).floor();
-    let local_range = crate::mm::VPNRange::new(
-        local_start,
-        crate::mm::VirtPageNum(local_start.0 + 3),
-    );
-    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_range), None)
-        .map_err(|_| "CPU0 concurrent range shootdown failed")?;
+    PTE_UPDATE_START.store(1, Ordering::Release);
+    run_concurrent_pte_updates();
 
     let completion_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while RANGE_SYNC_DONE.load(Ordering::Acquire) != tasks.len()
-        || tasks
-            .iter()
-            .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
+    while tasks
+        .iter()
+        .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
     {
         if crate::hal::get_time() >= completion_deadline {
-            return Err("concurrent range shootdowns did not finish before timeout");
+            return Err("concurrent PTE updates did not finish before timeout");
         }
         core::hint::spin_loop();
     }
     *SHARED_TLB_VM.lock() = None;
 
-    if RANGE_SYNC_ERRORS.load(Ordering::Acquire) != 0 {
-        return Err("an AP range shootdown returned an error");
+    if PTE_UPDATE_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("a concurrent production mprotect failed");
+    }
+    if vm.active_cpu_mask() != 0 {
+        return Err("a concurrent PTE writer retained an active-MM bit");
+    }
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        if !vm.cpu_tlb_is_current(cpu_id) {
+            return Err("a concurrent PTE writer missed the final MM generation");
+        }
     }
     for cpu_id in 0..crate::smp::configured_cpu_count() {
         if crate::smp::user_tlb_request(cpu_id) != full_requests[cpu_id] {
-            return Err("concurrent range shootdown degraded to full user-TLB flush");
+            return Err("concurrent PTE updates degraded to full user-TLB flush");
         }
     }
+    drop(frames);
     crate::task::run_task_safe_point();
     Ok(())
 }
