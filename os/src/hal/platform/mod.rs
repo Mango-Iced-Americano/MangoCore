@@ -7,6 +7,7 @@
 use core::cell::UnsafeCell;
 
 pub mod info;
+pub mod jh7110_cache;
 pub use info::{ConsoleInfo, DeviceInfo, DeviceKind, FirmwareKind, PlatformInfo};
 
 /// Global platform information singleton.
