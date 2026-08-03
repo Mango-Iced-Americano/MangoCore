@@ -10,7 +10,7 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use super::SigAction;
+use super::{SigAction, SigHandler};
 use crate::fs::vfs::event::EventWaitQueue;
 
 /// 进程共享的信号动作表。
@@ -77,10 +77,16 @@ impl Sighand {
 
     /// 将所有显式动作恢复为默认动作。
     ///
-    /// `execve` 使用该接口实现 Linux 语义：用户自定义 handler 不跨 exec 保留。
+    /// `execve` 使用该接口实现 Linux 语义：用户自定义 handler 不跨 exec 保留，
+    /// 但显式的 `SIG_IGN` disposition 会跨 exec 保留。
     pub fn reset(&mut self) {
         for action in self.actions.iter_mut() {
-            *action = None;
+            if action
+                .as_ref()
+                .is_some_and(|action| action.handler != SigHandler::SIG_IGN)
+            {
+                *action = None;
+            }
         }
     }
 }
