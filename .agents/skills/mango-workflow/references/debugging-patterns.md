@@ -658,3 +658,12 @@
 - **修复**: 对外暴露且需要以 `clock_freq_hz` 换算的诊断计时，统一从 `timer::raw_ticks()`（RV64 `time` CSR）取样；保留 `rdcycle` 的计数器必须单独标注为 CPU cycle，不能混用单位。
 - **教训**: 首次分析任何 tick 指标前，先用独立 wall-time benchmark 做量纲 sanity check。若 `ticks / clock_freq_hz` 与 workload wall time 矛盾，先验证时钟源，再讨论热点占比；否则所有 µs、百分比和优化优先级都不可信。
 - **相关文件**: `os/src/task/perf.rs`, `os/src/timer.rs`, `os/src/hal/arch/riscv/time.rs`
+
+## JH7110 DMA 缓存一致性
+
+### IDMAC 读到陈旧 bounce 数据导致用户态随机故障
+
+- **根因**: JH7110 的 direct map 不可假设为 DMA cache-coherent。仅执行 `fence iorw, iorw` 不会 clean CPU 写入的 bounce/descriptor cache line，也不会 invalidate DMA 写回后的 CPU 陈旧 line；SD DMA 读到的 ELF/动态链接器页可能损坏。
+- **修复**: 共享 `jh7110_l2cc_flush_range()` 并精确复用 GMAC 的 L2CC `FLUSH64` 协议：CPU→DMA 在 doorbell 前 flush bounce 与 descriptor ring；DMA→CPU 在完成后、复制 bounce 前 flush 目标范围。Flush 后保留 I/O fence，保证 cache-maintenance MMIO 与 DMA ownership transition 的顺序。
+- **教训**: 设备可以共享物理地址并不意味着共享 CPU cache。新增 JH7110 DMA 设备时必须复用共享 helper，不能只补普通 fence 或在驱动内复制 L2CC 寄存器写序列；完成中断也要按 DMA 方向检查 RI/TI，避免错误方向伪完成掩盖故障。
+- **相关文件**: `os/src/hal/platform/jh7110_cache.rs`、`os/src/drivers/block/dw_mshc/mmio/dma.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
