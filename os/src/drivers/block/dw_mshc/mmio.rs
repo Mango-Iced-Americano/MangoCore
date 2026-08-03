@@ -8,7 +8,31 @@ use super::DwMshcError;
 mod dma;
 mod transfer;
 
+pub(crate) const IDMAC_BOUNCE_BYTES: usize = 64 * 1024;
+
 pub(crate) use transfer::{transfer_command, transfer_needs_stop};
+pub(crate) use dma::idmac_completion_matches;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IdmacDirection {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DwMshcTransferRegisters {
+    pub(crate) idsts: u32,
+    pub(crate) rintsts: u32,
+    pub(crate) status: u32,
+}
+
+pub(crate) const fn idmac_chunk_bytes(bytes: usize) -> usize {
+    if bytes > IDMAC_BOUNCE_BYTES {
+        IDMAC_BOUNCE_BYTES
+    } else {
+        bytes
+    }
+}
 
 const CTRL: usize = 0x00;
 const PWREN: usize = 0x04;
@@ -88,6 +112,7 @@ pub(crate) struct DwMshcHost {
     fifo_depth: u32,
     input_clock_hz: u32,
     dma: Option<dma::DmaResources>,
+    last_transfer_failure: Option<DwMshcTransferRegisters>,
 }
 
 impl DwMshcHost {
@@ -98,6 +123,7 @@ impl DwMshcHost {
             fifo_depth: config.fifo_depth,
             input_clock_hz: config.input_clock_hz,
             dma: None,
+            last_transfer_failure: None,
         }
     }
 
@@ -173,6 +199,31 @@ impl DwMshcHost {
             "[dw_mshc] registers: CLKDIV={:#010x} CLKSRC={:#010x} FIFOTH={:#010x} VERID={:#010x}",
             self.read(CLKDIV), self.read(CLKSRC), self.read(FIFOTH), self.read(VERID),
         );
+    }
+
+    pub(crate) fn transfer_failure_registers(&self) -> DwMshcTransferRegisters {
+        self.last_transfer_failure
+            .unwrap_or_else(|| self.current_transfer_registers())
+    }
+
+    fn clear_transfer_failure(&mut self) { self.last_transfer_failure = None; }
+
+    fn capture_transfer_failure(&mut self) {
+        self.last_transfer_failure = Some(self.current_transfer_registers());
+    }
+
+    fn capture_transfer_failure_if_empty(&mut self) {
+        if self.last_transfer_failure.is_none() {
+            self.capture_transfer_failure();
+        }
+    }
+
+    fn current_transfer_registers(&self) -> DwMshcTransferRegisters {
+        DwMshcTransferRegisters {
+            idsts: self.read(IDSTS),
+            rintsts: self.read(RINTSTS),
+            status: self.read(STATUS),
+        }
     }
 
     fn recover_data_path(&mut self) { self.stop_idmac(); let _ = self.command(12, 0, Response::R1b, false, true); self.write(CTRL, self.read(CTRL) | (1 << 1)); self.write(RINTSTS, ALL_INTERRUPTS); }

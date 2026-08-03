@@ -54,10 +54,17 @@ impl DwMshcHost {
     ) -> Result<(), DwMshcError> {
         let (argument, sectors) = transfer_parameters(card, sector, out.len())?;
         for attempt in 0..=2 {
+            self.clear_transfer_failure();
             match self.read_blocks_once(argument, sectors, out) {
                 Ok(()) => return Ok(()),
-                Err(error) if attempt < 2 && retryable(error) => self.recover_data_path(),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.capture_transfer_failure_if_empty();
+                    if attempt < 2 && retryable(error) {
+                        self.recover_data_path();
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
         Err(DwMshcError::ShortTransfer)
@@ -69,12 +76,29 @@ impl DwMshcHost {
         sector: u64,
         data: &[u8],
     ) -> Result<(), DwMshcError> {
+        self.write_blocks_no_ready(card, sector, data)?;
+        self.wait_card_ready(card)
+    }
+
+    pub(crate) fn write_blocks_no_ready(
+        &mut self,
+        card: &SdCardInfo,
+        sector: u64,
+        data: &[u8],
+    ) -> Result<(), DwMshcError> {
         let (argument, sectors) = transfer_parameters(card, sector, data.len())?;
         for attempt in 0..=2 {
+            self.clear_transfer_failure();
             match self.write_blocks_once(argument, sectors, data) {
-                Ok(()) => return self.wait_card_ready(card),
-                Err(error) if attempt < 2 && retryable(error) => self.recover_data_path(),
-                Err(error) => return Err(error),
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    self.capture_transfer_failure_if_empty();
+                    if attempt < 2 && retryable(error) {
+                        self.recover_data_path();
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
         Err(DwMshcError::ShortTransfer)
@@ -121,11 +145,13 @@ impl DwMshcHost {
             if status & INT_DATA_OVER != 0 {
                 self.write(RINTSTS, INT_DATA_OVER);
                 if copied != out.len() {
+                    self.capture_transfer_failure();
                     return Err(DwMshcError::ShortTransfer);
                 }
                 return self.finish_data_transfer(sectors);
             }
             if timer::get_time_ms() >= deadline {
+                self.capture_transfer_failure();
                 return Err(DwMshcError::DataTimeout);
             }
             core::hint::spin_loop();
@@ -175,11 +201,13 @@ impl DwMshcHost {
             if status & INT_DATA_OVER != 0 {
                 self.write(RINTSTS, INT_DATA_OVER);
                 if pushed != data.len() {
+                    self.capture_transfer_failure();
                     return Err(DwMshcError::ShortTransfer);
                 }
                 return self.finish_data_transfer(sectors);
             }
             if timer::get_time_ms() >= deadline {
+                self.capture_transfer_failure();
                 return Err(DwMshcError::DataTimeout);
             }
             core::hint::spin_loop();
@@ -218,11 +246,15 @@ impl DwMshcHost {
         status: u32,
     ) -> Result<(), DwMshcError> {
         if let Some(error) = data_error(command, status) {
+            self.capture_transfer_failure();
             self.write(RINTSTS, status);
             return Err(error);
         }
         if status & INT_CMD_DONE != 0 {
-            check_card_status(command, self.read(RESP0))?;
+            if let Err(error) = check_card_status(command, self.read(RESP0)) {
+                self.capture_transfer_failure();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -241,14 +273,21 @@ impl DwMshcHost {
         Ok(())
     }
 
-    fn wait_card_ready(&mut self, card: &SdCardInfo) -> Result<(), DwMshcError> {
+    pub(crate) fn wait_card_ready(&mut self, card: &SdCardInfo) -> Result<(), DwMshcError> {
         let deadline = timer::get_time_ms().saturating_add(500);
         loop {
-            let response = self.command(13, (card.rca as u32) << 16, Response::R1, false, false)?;
+            let response = match self.command(13, (card.rca as u32) << 16, Response::R1, false, false) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.capture_transfer_failure();
+                    return Err(error);
+                }
+            };
             if response[0] & (1 << 8) != 0 {
                 return Ok(());
             }
             if timer::get_time_ms() >= deadline {
+                self.capture_transfer_failure();
                 return Err(DwMshcError::DataTimeout);
             }
             core::hint::spin_loop();

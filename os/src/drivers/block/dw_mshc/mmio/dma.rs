@@ -3,20 +3,24 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 
 use crate::config::PAGE_SIZE;
+use crate::hal::platform::jh7110_cache::jh7110_l2cc_flush_range;
 use crate::mm::{frames_alloc_fresh_contiguous, FrameTracker};
 use crate::timer;
 
 use super::super::DwMshcError;
 use super::transfer::transfer_command;
 use super::{
-    idmac_control, io_fence, DwMshcHost, BMOD, BMOD_RESET, CTRL, DBADDR, IDINTEN, IDSTS, PLDMND, RINTSTS,
+    idmac_control, DwMshcHost, IdmacDirection, BMOD, BMOD_RESET, CTRL, DBADDR, IDINTEN,
+    IDMAC_BOUNCE_BYTES, IDSTS, PLDMND, RINTSTS,
 };
 
+// allow: SIZE_OK — descriptor ownership, cache maintenance, and completion
+// form one indivisible IDMAC transfer state machine.
 const IDMAC_DESCRIPTOR_BYTES: usize = 16;
 const IDMAC_DESCRIPTOR_COUNT: usize = PAGE_SIZE / IDMAC_DESCRIPTOR_BYTES;
 const IDMAC_BUFFER_BYTES: usize = PAGE_SIZE;
 const IDMAC_BOUNCE_PAGES: usize = 16;
-const IDMAC_BOUNCE_BYTES: usize = IDMAC_BOUNCE_PAGES * PAGE_SIZE;
+const _: [(); IDMAC_BOUNCE_PAGES * PAGE_SIZE] = [(); IDMAC_BOUNCE_BYTES];
 
 const IDMAC_DES0_ER: u32 = 1 << 5;
 const IDMAC_DES1_BS1_MASK: u32 = 0x1fff;
@@ -152,7 +156,7 @@ impl DwMshcHost {
         Ok(())
     }
 
-    pub(super) fn dma_supported(&self, bytes: usize) -> bool {
+    pub(crate) fn dma_supported(&self, bytes: usize) -> bool {
         self.dma.is_some() && bytes != 0 && bytes <= IDMAC_BOUNCE_BYTES
     }
 
@@ -167,12 +171,19 @@ impl DwMshcHost {
             self.prepare_data_transfer(out.len())?;
             self.start_idmac(out.len())?;
             self.start_data_command(command, argument, false)?;
-            self.wait_idmac_complete(command)?;
+            self.wait_idmac_complete(command, IdmacDirection::Read)?;
             Ok(())
         })();
+        if result.is_err() {
+            self.capture_transfer_failure_if_empty();
+        }
         self.stop_idmac();
         result?;
-        self.dma.as_ref().ok_or(DwMshcError::DmaFault)?.copy_from_bounce(out)?;
+        let dma = self.dma.as_ref().ok_or(DwMshcError::DmaFault)?;
+        // Device-to-CPU DMA can leave stale bounce lines in the CPU cache.
+        // FLUSH64 invalidates them before the CPU copies the card data out.
+        jh7110_l2cc_flush_range(dma.bounce_pa as usize, out.len());
+        dma.copy_from_bounce(out)?;
         self.finish_data_transfer(sectors)
     }
 
@@ -182,14 +193,21 @@ impl DwMshcHost {
         sectors: usize,
         data: &[u8],
     ) -> Result<(), DwMshcError> {
-        self.dma.as_ref().ok_or(DwMshcError::DmaFault)?.copy_to_bounce(data)?;
+        let dma = self.dma.as_ref().ok_or(DwMshcError::DmaFault)?;
+        dma.copy_to_bounce(data)?;
+        // CPU-to-device DMA must observe the freshly copied bounce payload
+        // before ownership transfers to IDMAC.
+        jh7110_l2cc_flush_range(dma.bounce_pa as usize, data.len());
         let command = transfer_command(sectors, true);
         let result = (|| {
             self.prepare_data_transfer(data.len())?;
             self.start_idmac(data.len())?;
             self.start_data_command(command, argument, true)?;
-            self.wait_idmac_complete(command)
+            self.wait_idmac_complete(command, IdmacDirection::Write)
         })();
+        if result.is_err() {
+            self.capture_transfer_failure_if_empty();
+        }
         self.stop_idmac();
         result?;
         self.finish_data_transfer(sectors)
@@ -198,10 +216,9 @@ impl DwMshcHost {
     fn start_idmac(&mut self, bytes: usize) -> Result<(), DwMshcError> {
         let dma = self.dma.as_ref().ok_or(DwMshcError::DmaFault)?;
         dma.prepare(bytes)?;
-        // The direct map is cache-coherent for the supported JH7110 mapping. A
-        // non-coherent board port must clean these descriptor/bounce writes before
-        // PLDMND and invalidate the read bounce range before copy_from_bounce.
-        io_fence();
+        // Descriptor ownership and addresses are CPU writes. Flush the complete
+        // ring before PLDMND so IDMAC cannot consume stale descriptor words.
+        jh7110_l2cc_flush_range(dma.descriptor_pa as usize, PAGE_SIZE);
         self.write(CTRL, self.read(CTRL) | CTRL_DMA_RESET);
         self.wait_clear(CTRL, CTRL_DMA_RESET, 500, DwMshcError::CoreResetTimeout)?;
         self.write(BMOD, BMOD_RESET);
@@ -226,19 +243,32 @@ impl DwMshcHost {
         self.write(IDSTS, IDSTS_ALL);
     }
 
-    fn wait_idmac_complete(&mut self, command: u8) -> Result<(), DwMshcError> {
+    fn wait_idmac_complete(
+        &mut self,
+        command: u8,
+        direction: IdmacDirection,
+    ) -> Result<(), DwMshcError> {
         let deadline = timer::get_time_ms().saturating_add(500);
         let mut dma_done = false;
         let mut data_done = false;
         loop {
             let idsts = self.read(IDSTS);
             if idsts & IDSTS_ERRORS != 0 {
+                self.capture_transfer_failure();
                 self.write(IDSTS, idsts);
                 return Err(DwMshcError::DmaFault);
             }
-            if idsts & IDSTS_COMPLETED != 0 {
-                self.write(IDSTS, idsts & (IDSTS_COMPLETED | IDSTS_NI));
-                dma_done = true;
+            match idmac_completion_matches(direction, idsts) {
+                Ok(true) => {
+                    self.write(IDSTS, idsts & (IDSTS_COMPLETED | IDSTS_NI));
+                    dma_done = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.capture_transfer_failure();
+                    self.write(IDSTS, idsts & (IDSTS_COMPLETED | IDSTS_NI));
+                    return Err(error);
+                }
             }
 
             let status = self.read(RINTSTS);
@@ -252,10 +282,26 @@ impl DwMshcHost {
                 return Ok(());
             }
             if timer::get_time_ms() >= deadline {
+                self.capture_transfer_failure();
                 return Err(DwMshcError::DataTimeout);
             }
             core::hint::spin_loop();
         }
+    }
+}
+
+pub(crate) const fn idmac_completion_matches(
+    direction: IdmacDirection,
+    idsts: u32,
+) -> Result<bool, DwMshcError> {
+    let (expected, opposite) = match direction {
+        IdmacDirection::Read => (IDSTS_RI, IDSTS_TI),
+        IdmacDirection::Write => (IDSTS_TI, IDSTS_RI),
+    };
+    if idsts & opposite != 0 {
+        Err(DwMshcError::DmaDirectionMismatch)
+    } else {
+        Ok(idsts & expected != 0)
     }
 }
 
