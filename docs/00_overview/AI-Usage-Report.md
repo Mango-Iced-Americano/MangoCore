@@ -1621,6 +1621,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md` | SMP Per-CPU IPI 生产诊断 | 记录逐 reason 发布/消费口径、doorbell 失败收口、首轮 mutation 证据废弃及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b93-tlb-diagnostics-summary.md` | SMP Per-CPU TLB shootdown 生产诊断 | 记录互斥后端、精准页数/fanout/ticks、frame 所有权边界、模型建议裁决及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b94-heap-trace-owner-summary.md` | SMP heap_trace 缓冲所有权 | 记录 Mutex-owned BSS 表、自动 Send、模板/marker 失败披露、模型误判纠正及双架构 feature-on 8 核 34/34 证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b95-production-ipi-summary.md` | SMP 生产 IPI 协议收口 | 记录测试专用 PING/ROUND_TRIP 状态删除、正式 membarrier sequence/ack 三方向验证、helper kernel-stack 生命周期及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

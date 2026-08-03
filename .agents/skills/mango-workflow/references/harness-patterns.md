@@ -1245,3 +1245,16 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   退出路径，证明每个真实远端操作恰好记一次且本地操作不冒充 shootdown。动态回归复用真实
   并发路径，不为计数器加入会改变生产状态的测试 hook；冻结指纹与协议 marker 仍是验收事实。
 - **相关文件**：`os/src/smp.rs`、`os/src/mm/tlb.rs`、`os/src/panic_diag.rs`
+
+## 并发测试优先复用生产 sequence/ack，避免为测试扩张生产状态
+
+- **问题**：bring-up 阶段常用 PING、回包 pending 或测试 ack 快速证明 doorbell；如果功能
+  协议已经具备正式 request/ack，这些字段继续留在 `PerCpu` 和 hard handler 中，就会形成
+  第二套生命周期、增加 reason 编号与 idle 分支，并且测试只证明探针而没有证明生产路径。
+- **做法**：在生产协议稳定后，把 focused test 迁移到真实的 mailbox、sequence、ack 和超时
+  入口；测试所需的轮数、结果和 helper 状态只放在 test module。跨 CPU helper 发布结果后，
+  还要等待其离开 current 槽再释放 TCB，不能把 `Zombie` 发布误当成已经切离 kernel stack。
+- **门禁**：删除测试 reason 前先全仓证明没有生产调用方和汇编/硬件 ABI 依赖；动态测试至少
+  覆盖 BSP→AP 单播、BSP→AP 广播和 AP→BSP，并从日志确认目标用例实际执行。验证通过后删除
+  旧 handler/idle 分支和 Per-CPU 字段，不保留“以后可能调试”的双轨协议。
+- **相关文件**：`os/src/smp.rs`、`os/src/kernel_tests/smp.rs`

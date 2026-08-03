@@ -301,7 +301,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   <code>pull_policy: missing</code> 不会自动刷新已存在的同名 tag，必须以 digest
   和重建后的容器为准；
 - 建立 <code>KTEST=smp</code> RED 用例：在线 CPU 数、独立栈、per-CPU 隔离、
-  IPI ping-pong、任务唯一运行和 TLB 失效；
+  生产 IPI sequence/ack、任务唯一运行和 TLB 失效；
 - 冻结实施基线：记录 commit、分支、dirty status、双架构 1 核日志和成绩；从该 commit
   创建专用 SMP branch/worktree，后续批次不得直接堆叠在持续变化的 develop 上；
 - 默认开发核数为 CORE_NUM=2；是否补 CORE_NUM=1 由本工作包是否可能破坏单核退化路径决定。
@@ -441,14 +441,14 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 
 #### 退出条件
 
-- 双架构 IPI 单播、广播、交叉发送和 10,000 次 ping-pong 无丢失；
+- 双架构生产 IPI 单播、广播、交叉发送和 10,000 次 sequence/ack 无丢失；
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09/B10/B11/B12/B13/B14）
+#### 当前进度（SMP-P2-B09/B10/B11/B12/B13/B14/B95）
 
-- `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
-  表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
+- `PerCpu` 已增加原子的 `pending_ipi`。`IpiReason` 明确表示可合并的幂等
+  reason bit，而不是事件计数；发送方以 Release 发布，
   接收方以 Acquire `swap(0)` 消费；handler 不分配、不打印、不持普通锁，
   也不调度；
 - 通用 `send_ipi_mask()` 已支持一次向多个 online AP 发布同一个 reason。
@@ -480,13 +480,11 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B12 已在 CPU0 启用 RV64 SSIE，以及 LA64 QEMU 的 IOCSR/ECFG IPI line；
   用户态和内核态 trap 共用同一个无锁 fast path，AP→BSP 不再依赖只存在
   于 BSP→AP 方向的假设；
-- AP 收到往返请求时，hard IRQ 只原子发布 reply pending；真正的回复
-  doorbell 延后到 AP idle stack。idle loop 在全局中断关闭后先重查
-  deferred work，再执行一次 `wfi`/`idle 0`，本地 IPI line 保持 enabled，
-  从协议上消除 check→wait 窗口中的 lost wakeup；
-- B12 的双架构 `CORE_NUM=4 KTEST=smp` 均通过 7/7。每个架构的三个 AP
-  各完成 64 轮顺序请求/回复，共覆盖 192 次 AP→BSP doorbell；源码验证
-  前后指纹一致；
+- B12 曾通过测试专用往返 reason 验证 AP→BSP doorbell 和 idle lost-wakeup
+  窗口：hard IRQ 只发布 deferred reply，AP 返回 idle stack 后再发送回复；
+  双架构 `CORE_NUM=4 KTEST=smp` 均通过 7/7，每个架构的三个 AP 各完成
+  64 轮顺序请求/回复。B95 已用正式 `MEMORY_BARRIER` sequence/ack 协议
+  取代该临时协议，生产代码不再保留测试专用 reply 状态；
 - B13 已实现 CPU0 发起的终态 STOP/ack：hard IRQ 只发布 stop request，
   AP 返回独立 idle stack 后先关闭全局中断和本地 IPI source，再发布
   stopped ack 并永久执行 `wfi`/`idle 0`。CPU0 有界等待全部目标，重复调用
@@ -506,13 +504,19 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   panic 入口也在任何诊断前立即关中断；
 - B14 的双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 17/17 PASS。
   新测试在窗口内 yield，证明 idle→新任务为 IRQ-off、原任务恢复
-  为 IRQ-on，然后完成真实 AP→BSP IPI reply；
+  为 IRQ-on，然后完成真实 AP→BSP `MEMORY_BARRIER` 请求与 ack；
+- B95 已删除 `PING`、`ROUND_TRIP_REQUEST/REPLY` 及其 PerCpu ack/pending
+  字段和 AP idle 回复分支。focused ktest 现在直接覆盖生产
+  `MEMORY_BARRIER` 的 BSP→AP 单播、BSP→全部 AP 广播和 AP→BSP 方向；
+  AP→BSP 仍为每个 AP 64 轮，并在回收测试任务前同时确认任务进入
+  `Zombie` 且目标 CPU 已清空 current 槽。双架构 8 核均为 34/34 PASS，
+  三个方向的正式用例均在日志中实际执行；
 - B33 已让运行中用户任务在 trap-return 安全点消费 RESCHEDULE；handler 仍只置位，
-  与 timer 请求合并后最多调度一次。通用交叉发送、并发 reason 和 10,000 次 ping-pong
+  与 timer 请求合并后最多调度一次。通用交叉发送、并发 reason 和 10,000 次生产 sequence/ack
   仍未完成，Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
-timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。
+timer 均有双架构证据，才进入调度状态迁移；“能完成请求/应答”不能替代内核中断安全证明。
 
 ### Phase 2.5：单核状态迁移 API 与本地 TLB batch
 
@@ -1305,7 +1309,7 @@ focused test，也不因纯文档收尾重复运行。
 | 类别 | 场景 |
 |---|---|
 | 启动 | online mask、独立 boot/idle stack、per-CPU register |
-| IPI | 单播、广播、ping-pong、并发 reason、STOP |
+| IPI | 单播、广播、生产 sequence/ack、并发 reason、STOP |
 | 调度 | 唯一运行、重复 wake、远程 enqueue、steal、affinity、迁移 |
 | 同步 | futex、WaitQueue、Completion、eventfd、signal |
 | MM | unmap、mprotect、CoW、MAP_SHARED、exec、kernel mapping |

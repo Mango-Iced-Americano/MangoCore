@@ -149,16 +149,18 @@ online 只证明 CPU-local 启动完成，不等于可以访问调度器。B19 �
 早期 IPI 能工作只说明恒等映射的 text/data/idle stack 可访问，不能证明高虚拟地址
 kernel stack 已可用。
 
-运行期 PING IPI 使用另一组 Release/Acquire 关系：
+运行期 IPI mailbox 使用另一组 Release/Acquire 关系：
 
 1. 发送方用 Release 把 reason 合并进目标 `PerCpu.pending_ipi`；
 2. 广播时先发布全部目标 mailbox，再开始逐个触发 SBI 或 IOCSR doorbell；
 3. 接收方先清硬件电平源，再用 Acquire `swap(0)` 消费 mailbox；
-4. handler 完成后以 Release 增加 ack，等待方用 Acquire 观察完成。
+4. 需要完成语义的生产协议通过独立 sequence/ack 或 fixed slot 确认，
+   `RESCHEDULE` 等提示类 reason 只保留幂等状态。
 
-mailbox 表示“待处理原因集合”，不是可累计的事件队列。当前 PING 测试由
-CPU0 串行发送，同一目标收到 ack 后才复用 PING bit；后续需要累计语义的
-shootdown/STOP 会使用独立 sequence 或 slot，不能把事件次数塞进 reason bit。
+mailbox 表示“待处理原因集合”，不是可累计的事件队列。B95 删除早期启动阶段
+只供 ktest 使用的 PING/ROUND_TRIP reason 和 Per-CPU ack 字段；focused test
+改为直接验证生产 `MEMORY_BARRIER` 的 request/ack。TLB shootdown、membarrier
+和 STOP 各自使用独立 sequence、slot 或终态 ack，不能把事件次数塞进 reason bit。
 发送某个 doorbell 失败时，发送方仍继续通知本轮其余目标，并保留失败目标
 已经发布的 reason；原子 mailbox 不能安全“回滚”，后续中断仍可消费它。
 
@@ -242,18 +244,16 @@ B45 将 Rust 可变访问统一收口到
 到 `&mut self`。trap return 释放 guard 后只把既有 frame 地址交给不返回的恢复汇编；
 frame 地址、布局和双架构 ABI 均未改变。
 
-AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
-
-1. AP hard-IRQ handler 只以 Release 发布 `round_trip_reply_pending`；
-2. AP 返回 idle stack，在全局中断关闭时以 Acquire 消费 deferred work；
-3. idle 路径调用普通 `send_ipi()`，向 CPU0 发布回复并触发 doorbell；
-4. CPU0 共用用户/内核 trap 的 IPI fast path，以 Release 增加 reply ack；
-5. 发起方以 Acquire 观察 ack 后，才复用同一 reason bit 发起下一轮。
+AP→BSP 方向由绑定 AP 的 kernel-only helper 调用生产
+`synchronize_memory(bit(CPU0))` 覆盖。AP 先发布 CPU0 的 request，再触发
+doorbell，并在不持普通锁时等待 ack；CPU0 在受控 IRQ-on 窗口进入共用的
+用户/内核 IPI fast path，执行完整屏障后 Release 发布 ack。该链路直接证明
+正式 membarrier mailbox，而不再维护“请求 AP 回送测试 IPI”的第二套协议。
 
 AP 的等待协议是“关闭全局中断—重查 deferred work—执行一次架构
 `wfi`/`idle 0`—恢复原中断状态”。本地 IPI line 始终保持 enabled，因此
 doorbell 在重查之后到达时会保持 pending 并唤醒 CPU；不会出现检查为空后
-永久睡眠的 lost wakeup。发送回复可能失败的诊断也只更新 per-CPU 原子
+永久睡眠的 lost wakeup。doorbell 失败诊断只更新 per-CPU 原子
 计数，不把日志、锁或分配带回 hard IRQ。
 
 STOP 复用 reason mailbox 传递终态请求，但使用独立的 `stopped` ack 表达
@@ -435,9 +435,9 @@ make ktest ARCH=la64 PROFILE=normal CORE_NUM=2 KTEST=smp
 
 双架构构建必须串行。focused SMP 测试不仅检查 QEMU 退出码，还要检查
 configured CPU 数、online/idle mask、独立 CPU-local 指针、测试 PASS 和无
-panic。Phase 2 的 IPI 用例要求 CPU0 既能单播 PING，也能在统一的一秒期限
-内向全部 online AP 广播并逐项观察对应 ack；四核 AP→BSP 用例还要让三个
-AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。RISC-V
+panic。Phase 2 的 IPI 用例通过生产 `MEMORY_BARRIER` sequence/ack 验证
+CPU0→单个 AP、CPU0→全部 AP 和 AP→CPU0 三个方向；多核 AP→BSP 用例让每个
+AP 各完成 64 轮正式同步，并在每轮 ack 后才推进下一序号。RISC-V
 应保留一次物理启动 hart 不等于 0 的映射证据。deferred timer 用例连续
 执行两轮真实内核 timer IRQ，分别断言 hard IRQ 不推进 deferred 计数、
 不切换当前任务，以及安全点恰好消费一批并成功重编程下一轮。STOP 属于
@@ -445,7 +445,7 @@ AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。
 以及生产 shutdown 再次调用协议时走幂等快路径。
 B14 还必须在窗口内真实 yield：新任务首次从 idle 切入时观测
 IRQ-off，原任务恢复后观测 IRQ-on，并在恢复后完成一次真实
-AP→BSP IPI reply。
+AP→BSP membarrier IPI/ack。
 B29 要求双架构 8 核日志实际出现 `smp::user_task_migrates_on_yield`，并验证
 CPU0 起跑、yield 后 CPU1 续跑、CPU0 wait/reap、退出后的 current/runqueue/zombie 与
 TCB 强引用都已收口；

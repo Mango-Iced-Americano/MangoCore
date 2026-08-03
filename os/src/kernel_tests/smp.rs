@@ -508,6 +508,12 @@ static EXEC_IDENTITY_CHECKED: AtomicUsize = AtomicUsize::new(0);
 static EXEC_IDENTITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static MEMBARRIER_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
 static MEMBARRIER_REMOTE_RELEASE: AtomicUsize = AtomicUsize::new(0);
+const AP_BARRIER_WAITING: usize = 0;
+const AP_BARRIER_PASSED: usize = 1;
+const AP_BARRIER_FAILED: usize = 2;
+static AP_BARRIER_ROUNDS: AtomicUsize = AtomicUsize::new(0);
+static AP_BARRIER_RESULT: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(AP_BARRIER_WAITING) }; crate::smp::MAX_CPUS];
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -550,10 +556,13 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::secondary_cpus_enter_idle_context",
             secondary_cpus_enter_idle_context,
         ),
-        KernelTest::new("smp::bsp_to_ap_ipi_ping", bsp_to_ap_ipi_ping),
         KernelTest::new(
-            "smp::bsp_broadcasts_ipi_to_all_aps",
-            bsp_broadcasts_ipi_to_all_aps,
+            "smp::bsp_to_ap_memory_barrier",
+            bsp_to_ap_memory_barrier,
+        ),
+        KernelTest::new(
+            "smp::bsp_broadcasts_memory_barrier_to_all_aps",
+            bsp_broadcasts_memory_barrier_to_all_aps,
         ),
         KernelTest::new(
             "smp::kernel_timer_irq_is_deferred",
@@ -563,7 +572,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::user_timer_preempts_on_secondary_cpu",
             user_timer_preempts_on_secondary_cpu,
         ),
-        KernelTest::new("smp::ap_to_bsp_ipi_round_trip", ap_to_bsp_ipi_round_trip),
+        KernelTest::new(
+            "smp::ap_to_bsp_memory_barrier",
+            ap_to_bsp_memory_barrier,
+        ),
         KernelTest::new(
             "smp::syscall_irq_window_survives_schedule",
             syscall_irq_window_survives_schedule,
@@ -1781,66 +1793,43 @@ fn configured_cpus_are_online() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// CPU0 逐个唤醒 AP，并等待目标 CPU 在硬中断上下文发布 ack。
-fn bsp_to_ap_ipi_ping() -> Result<(), &'static str> {
-    let timeout_ticks = crate::hal::get_clock_freq();
+/// CPU0 逐个要求 AP 执行正式的 membarrier fence，并核对 request/ack。
+fn bsp_to_ap_memory_barrier() -> Result<(), &'static str> {
     for cpu_id in 1..crate::smp::configured_cpu_count() {
-        let expected = match crate::smp::send_ipi_ping(cpu_id) {
-            Ok(expected) => expected,
-            Err(error) => {
-                crate::println!("# SMP IPI send failed: cpu={} error={}", cpu_id, error);
-                return Err("failed to send BSP-to-AP IPI");
-            }
-        };
-        let deadline = crate::hal::get_time().saturating_add(timeout_ticks);
-        while crate::smp::ipi_ping_ack(cpu_id) != expected {
-            if crate::hal::get_time() >= deadline {
-                crate::println!(
-                    "# SMP IPI ack timeout: cpu={} expected={} observed={}",
-                    cpu_id,
-                    expected,
-                    crate::smp::ipi_ping_ack(cpu_id)
-                );
-                return Err("AP did not acknowledge IPI");
-            }
-            core::hint::spin_loop();
+        let before = crate::smp::memory_barrier_request(cpu_id);
+        crate::smp::synchronize_memory(1usize << cpu_id)
+            .map_err(|_| "failed to synchronize BSP-to-AP membarrier")?;
+        let request = crate::smp::memory_barrier_request(cpu_id);
+        if request != before.wrapping_add(1)
+            || crate::smp::memory_barrier_ack(cpu_id) < request
+        {
+            return Err("AP did not acknowledge the production membarrier request");
         }
     }
+    // 同步等待窗口可能接收本地 timer IRQ；在退出用例前消费正式 deferred work。
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
-/// CPU0 先发布全部 AP 的 mailbox，再连续敲响 doorbell，最后逐项等待 ack。
-fn bsp_broadcasts_ipi_to_all_aps() -> Result<(), &'static str> {
-    let targets = crate::smp::online_cpu_mask() & !(1usize << crate::smp::BOOT_CPU_ID);
-    let mut expected = [0usize; crate::smp::MAX_CPUS];
+/// CPU0 用一次正式 membarrier 广播覆盖全部在线 AP。
+fn bsp_broadcasts_memory_barrier_to_all_aps() -> Result<(), &'static str> {
+    let targets = crate::smp::online_cpu_mask();
+    let mut before = [0usize; crate::smp::MAX_CPUS];
     for cpu_id in 1..crate::smp::configured_cpu_count() {
-        expected[cpu_id] = crate::smp::ipi_ping_ack(cpu_id).wrapping_add(1);
+        before[cpu_id] = crate::smp::memory_barrier_request(cpu_id);
     }
 
-    if let Err(error) = crate::smp::send_ipi_mask(targets, crate::smp::IpiReason::PING) {
-        crate::println!(
-            "# SMP IPI broadcast failed: targets={:#x} error={}",
-            targets,
-            error
-        );
-        return Err("failed to broadcast BSP-to-AP IPI");
-    }
-
-    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    crate::smp::synchronize_memory(targets)
+        .map_err(|_| "failed to broadcast the production membarrier")?;
     for cpu_id in 1..crate::smp::configured_cpu_count() {
-        while crate::smp::ipi_ping_ack(cpu_id) != expected[cpu_id] {
-            if crate::hal::get_time() >= deadline {
-                crate::println!(
-                    "# SMP IPI broadcast ack timeout: cpu={} expected={} observed={}",
-                    cpu_id,
-                    expected[cpu_id],
-                    crate::smp::ipi_ping_ack(cpu_id)
-                );
-                return Err("AP did not acknowledge broadcast IPI");
-            }
-            core::hint::spin_loop();
+        let request = crate::smp::memory_barrier_request(cpu_id);
+        if request != before[cpu_id].wrapping_add(1)
+            || crate::smp::memory_barrier_ack(cpu_id) < request
+        {
+            return Err("AP did not acknowledge the broadcast membarrier request");
         }
     }
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
@@ -2036,72 +2025,83 @@ fn deferred_timer_round(expected_tid: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 反复验证 AP hard IRQ → idle deferred reply → CPU0 kernel trap 的完整闭环。
-fn ap_to_bsp_ipi_round_trip() -> Result<(), &'static str> {
+/// AP kernel task 使用正式 membarrier 协议向 CPU0 发起同步。
+fn ap_to_bsp_memory_barrier_helper() {
+    let cpu_id = crate::smp::cpu_id();
+    let rounds = AP_BARRIER_ROUNDS.load(Ordering::Acquire);
+    let mut result = AP_BARRIER_PASSED;
+    if cpu_id == crate::smp::BOOT_CPU_ID || rounds == 0 {
+        result = AP_BARRIER_FAILED;
+    } else {
+        for _ in 0..rounds {
+            if crate::smp::synchronize_memory(1usize << crate::smp::BOOT_CPU_ID).is_err() {
+                result = AP_BARRIER_FAILED;
+                break;
+            }
+        }
+    }
+    AP_BARRIER_RESULT[cpu_id].store(result, Ordering::Release);
+}
+
+/// 在 CPU0 开中断窗口内运行一个 AP→BSP 正式同步批次，并收回 helper。
+fn run_ap_to_bsp_memory_barriers(cpu_id: usize, rounds: usize) -> Result<(), &'static str> {
+    AP_BARRIER_ROUNDS.store(rounds, Ordering::Release);
+    AP_BARRIER_RESULT[cpu_id].store(AP_BARRIER_WAITING, Ordering::Release);
+    let task = crate::task::spawn_ktest_task_on(cpu_id, ap_to_bsp_memory_barrier_helper);
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+
+    while AP_BARRIER_RESULT[cpu_id].load(Ordering::Acquire) == AP_BARRIER_WAITING {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP-to-BSP production membarrier timed out");
+        }
+        core::hint::spin_loop();
+    }
+    if AP_BARRIER_RESULT[cpu_id].load(Ordering::Acquire) != AP_BARRIER_PASSED {
+        return Err("AP-to-BSP production membarrier failed");
+    }
+
+    // helper 先发布结果再从 trampoline 进入退出路径。Zombie 状态早于实际
+    // context switch，必须继续等 AP current 槽清空，才能释放本地 Arc。
+    while task.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(cpu_id)
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP membarrier helper did not leave its current slot");
+        }
+        core::hint::spin_loop();
+    }
+    drop(task);
+    drop(crate::task::take_zombie_tasks(64));
+    Ok(())
+}
+
+/// 反复验证 AP→BSP 的生产 mailbox、doorbell、kernel trap 与 ack 闭环。
+fn ap_to_bsp_memory_barrier() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
-        return Err("round-trip test ran on an AP");
+        return Err("AP-to-BSP membarrier test ran on an AP");
     }
     if crate::smp::configured_cpu_count() == 1 {
         return Ok(());
     }
 
-    // CPU0 的 kernel task 默认关中断。请求先送到 AP，随后只在受控窗口打开
-    // 本地全局中断接收 reply；每轮结束仍保持关中断。
+    const ROUNDS_PER_AP: usize = 64;
+    // AP 在正式同步入口等待 CPU0 ack，因此 CPU0 必须在整个批次保持 IRQ-on。
     let original_irq_state = crate::hal::local_irq_save();
-    let result = round_trip_all_aps();
+    crate::hal::local_irq_restore(true);
+    let mut result = Ok(());
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        if let Err(error) = run_ap_to_bsp_memory_barriers(cpu_id, ROUNDS_PER_AP) {
+            result = Err(error);
+            break;
+        }
+    }
+    let _ = crate::hal::local_irq_save();
     // 受控窗口内可能同时收到 timer hard IRQ；用 B11 的生产安全点收尾，
     // 避免把 quiesced one-shot 留给后续测试或 shutdown。
     crate::task::run_task_safe_point();
     crate::hal::local_irq_restore(original_irq_state);
     result
-}
-
-fn round_trip_all_aps() -> Result<(), &'static str> {
-    const ROUNDS_PER_AP: usize = 64;
-
-    for cpu_id in 1..crate::smp::configured_cpu_count() {
-        let failures_before = crate::smp::ipi_send_failures(cpu_id);
-        for round in 0..ROUNDS_PER_AP {
-            let expected = match crate::smp::send_ipi_round_trip(cpu_id) {
-                Ok(expected) => expected,
-                Err(error) => {
-                    crate::println!(
-                        "# SMP round-trip request failed: cpu={} round={} error={}",
-                        cpu_id,
-                        round,
-                        error
-                    );
-                    return Err("failed to send round-trip request");
-                }
-            };
-
-            crate::hal::local_irq_restore(true);
-            let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-            while crate::smp::round_trip_reply_ack() != expected {
-                if crate::hal::get_time() >= deadline {
-                    let _ = crate::hal::local_irq_save();
-                    crate::println!(
-                        "# SMP round-trip timeout: cpu={} round={} expected={} observed={} send_failures={}",
-                        cpu_id,
-                        round,
-                        expected,
-                        crate::smp::round_trip_reply_ack(),
-                        crate::smp::ipi_send_failures(cpu_id)
-                    );
-                    return Err("AP-to-BSP IPI reply timed out");
-                }
-                core::hint::spin_loop();
-            }
-            if !crate::hal::local_irq_save() {
-                return Err("round-trip test lost its controlled interrupt window");
-            }
-        }
-
-        if crate::smp::ipi_send_failures(cpu_id) != failures_before {
-            return Err("AP failed to send a deferred IPI reply");
-        }
-    }
-    Ok(())
 }
 
 /// 读取并原样恢复本 CPU 的全局中断状态。
@@ -2152,9 +2152,9 @@ fn syscall_irq_window_survives_schedule() -> Result<(), &'static str> {
             return Err("resumed task did not recover its IRQ window");
         }
 
-        // 窗口恢复后再接收一次真实 AP reply，证明不只是 CSR 位看起来
-        // 开启，而是 kernel trap 确实能在该任务上下文中往返。
-        receive_one_ap_reply_while_irqs_enabled()
+        // 窗口恢复后再接收一次 AP 发起的生产 membarrier，证明不只是 CSR
+        // 位看起来开启，而是 kernel IPI trap 确实能在该任务上下文中往返。
+        receive_ap_memory_barrier_while_irqs_enabled()
     });
 
     // helper 正常返回后必须恢复入口快照。先关中断再消费窗口内
@@ -2170,19 +2170,12 @@ fn syscall_irq_window_survives_schedule() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn receive_one_ap_reply_while_irqs_enabled() -> Result<(), &'static str> {
+fn receive_ap_memory_barrier_while_irqs_enabled() -> Result<(), &'static str> {
     if crate::smp::configured_cpu_count() == 1 {
         return Ok(());
     }
-    let expected = crate::smp::send_ipi_round_trip(1)
-        .map_err(|_| "failed to request AP reply inside syscall IRQ window")?;
-    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while crate::smp::round_trip_reply_ack() != expected {
-        if crate::hal::get_time() >= deadline {
-            return Err("AP reply did not interrupt the syscall IRQ window");
-        }
-        core::hint::spin_loop();
-    }
+    run_ap_to_bsp_memory_barriers(1, 1)
+        .map_err(|_| "AP membarrier did not interrupt the syscall IRQ window")?;
     if !local_interrupts_enabled() {
         return Err("kernel IPI trap returned with syscall IRQ window closed");
     }

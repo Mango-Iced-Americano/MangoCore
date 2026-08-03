@@ -70,12 +70,6 @@ struct PerCpu {
     memory_barrier_ack: AtomicUsize,
     /// 尚未处理的 IPI 原因位图；发送方 Release 合并，目标 CPU Acquire 消费。
     pending_ipi: AtomicU32,
-    /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
-    ipi_ping_ack: AtomicUsize,
-    /// 收到 round-trip 请求后，由 AP idle 上下文发送回复；IRQ handler 不发门铃。
-    round_trip_reply_pending: AtomicBool,
-    /// CPU0 已在本地 trap 中处理的 round-trip 回复序号。
-    round_trip_reply_ack: AtomicUsize,
     /// 本 CPU 提交硬件 doorbell 失败的累计次数。
     ipi_send_failures: AtomicUsize,
     /// 本 CPU 进入 IPI hard handler 的次数；冗余 doorbell 也会计入。
@@ -127,9 +121,6 @@ impl PerCpu {
             memory_barrier_request: AtomicUsize::new(0),
             memory_barrier_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
-            ipi_ping_ack: AtomicUsize::new(0),
-            round_trip_reply_pending: AtomicBool::new(false),
-            round_trip_reply_ack: AtomicUsize::new(0),
             ipi_send_failures: AtomicUsize::new(0),
             ipi_interrupts: AtomicUsize::new(0),
             ipi_reasons_published: [const { AtomicUsize::new(0) }; IPI_REASON_COUNT],
@@ -292,26 +283,20 @@ static USER_TLB_RANGE_SLOTS: [UserTlbRangeSlot; MAX_CPUS] =
 pub struct IpiReason(u32);
 
 impl IpiReason {
-    /// 只用于证明 mailbox、doorbell、trap 和 ack 闭环。
-    pub const PING: Self = Self(1 << 0);
-    /// CPU0 请求 AP 在退出 hard IRQ 后回送一个真实 IPI。
-    const ROUND_TRIP_REQUEST: Self = Self(1 << 1);
-    /// AP idle 上下文向 CPU0 发布的 round-trip 回复。
-    const ROUND_TRIP_REPLY: Self = Self(1 << 2);
     /// 请求 AP 在退出 hard IRQ 后停止，不再访问任何共享内核状态。
-    const STOP: Self = Self(1 << 3);
+    const STOP: Self = Self(1 << 0);
     /// 目标 runqueue 已加入任务；handler 只发布 need-resched。
-    const RESCHEDULE: Self = Self(1 << 4);
+    const RESCHEDULE: Self = Self(1 << 1);
     /// BSP 已修改共享内核页表；目标必须刷新本地 TLB 后发布 ack。
-    const KERNEL_TLB_SYNC: Self = Self(1 << 5);
+    const KERNEL_TLB_SYNC: Self = Self(1 << 2);
     /// 某个用户 MM 的 PTE 已修改；目标必须清除本核全部用户翻译后 ack。
-    const USER_TLB_SYNC: Self = Self(1 << 6);
+    const USER_TLB_SYNC: Self = Self(1 << 3);
     /// 固定槽中已发布目标 MM 的 ASID/VPN 区间；目标精确失效后 ack。
-    const USER_TLB_RANGE_SYNC: Self = Self(1 << 7);
+    const USER_TLB_RANGE_SYNC: Self = Self(1 << 4);
     /// 全局 timer 队列出现更早 deadline；CPU0 在安全点重编程本地 timer。
-    const TIMER_REPROGRAM: Self = Self(1 << 8);
+    const TIMER_REPROGRAM: Self = Self(1 << 5);
     /// 目标 CPU 必须执行完整内存屏障后发布 ack。
-    const MEMORY_BARRIER: Self = Self(1 << 9);
+    const MEMORY_BARRIER: Self = Self(1 << 6);
 
     const fn bits(self) -> u32 {
         self.0
@@ -321,9 +306,6 @@ impl IpiReason {
 const IPI_REASON_COUNT: usize = IpiReason::MEMORY_BARRIER.bits().trailing_zeros() as usize + 1;
 
 pub(crate) const IPI_REASON_NAMES: [&str; IPI_REASON_COUNT] = [
-    "ping",
-    "round-request",
-    "round-reply",
     "stop",
     "reschedule",
     "kernel-tlb",
@@ -675,37 +657,6 @@ pub fn send_ipi(cpu_id: usize, reason: IpiReason) -> Result<(), isize> {
     send_ipi_mask(1usize << cpu_id, reason)
 }
 
-/// 发布测试 PING，并返回发送方应等待的 ack 序号。
-///
-/// 当前只有 CPU0 发送 PING；调用方必须等前一次 ack 后再对同一 CPU 调用，
-/// 否则 bit 合并只承诺处理一次，不能生成两个 ack。
-pub fn send_ipi_ping(cpu_id: usize) -> Result<usize, isize> {
-    if cpu_id >= CONFIGURED_CPU_COUNT {
-        return Err(-3);
-    }
-    let expected_ack = ipi_ping_ack(cpu_id).wrapping_add(1);
-    send_ipi(cpu_id, IpiReason::PING)?;
-    Ok(expected_ack)
-}
-
-/// 从 CPU0 发起一次 AP→BSP 硬件 IPI round-trip。
-///
-/// 请求 reason 仍由 AP hard IRQ 原子消费；AP 返回独立 idle 上下文后才发送
-/// reply doorbell。调用方必须等待返回的 ack 后才能向同一目标复用 reason。
-pub fn send_ipi_round_trip(cpu_id: usize) -> Result<usize, isize> {
-    if self::cpu_id() != BOOT_CPU_ID || cpu_id == BOOT_CPU_ID || cpu_id >= CONFIGURED_CPU_COUNT {
-        return Err(-3);
-    }
-    let expected = round_trip_reply_ack().wrapping_add(1);
-    send_ipi(cpu_id, IpiReason::ROUND_TRIP_REQUEST)?;
-    Ok(expected)
-}
-
-/// 查询目标 CPU 已处理的 PING 序号。
-pub fn ipi_ping_ack(cpu_id: usize) -> usize {
-    PER_CPUS[cpu_id].ipi_ping_ack.load(Ordering::Acquire)
-}
-
 /// 查询目标 CPU 已完成的 kernel-global TLB 同步序号。
 ///
 /// 该值只用于诊断和 focused test；资源生命周期必须由同步入口的等待结果
@@ -736,13 +687,6 @@ pub(crate) fn memory_barrier_ack(cpu_id: usize) -> usize {
 pub(crate) fn memory_barrier_request(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id]
         .memory_barrier_request
-        .load(Ordering::Acquire)
-}
-
-/// 查询 CPU0 已处理的 round-trip 回复序号。
-pub fn round_trip_reply_ack() -> usize {
-    PER_CPUS[BOOT_CPU_ID]
-        .round_trip_reply_ack
         .load(Ordering::Acquire)
 }
 
@@ -800,19 +744,6 @@ pub fn handle_ipi() {
     // 当前 CPU 消费一次。doorbell 合并或重复到达都不会重复生成 ack。
     let reasons = local.pending_ipi.swap(0, Ordering::Acquire);
     record_ipi_reasons(&local.ipi_reasons_consumed, reasons, 1);
-    if reasons & IpiReason::PING.bits() != 0 {
-        // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
-        local.ipi_ping_ack.fetch_add(1, Ordering::Release);
-    }
-    if reasons & IpiReason::ROUND_TRIP_REQUEST.bits() != 0 {
-        // hard IRQ 只发布 deferred work；SBI/MMIO doorbell 由 idle 栈发送。
-        local
-            .round_trip_reply_pending
-            .store(true, Ordering::Release);
-    }
-    if reasons & IpiReason::ROUND_TRIP_REPLY.bits() != 0 {
-        local.round_trip_reply_ack.fetch_add(1, Ordering::Release);
-    }
     if reasons & IpiReason::STOP.bits() != 0 {
         // 不可返回的 stop 不能发生在 trap frame 上；只向 idle 栈发布请求。
         local.stop_requested.store(true, Ordering::Release);
@@ -884,17 +815,7 @@ pub(crate) fn service_secondary_ipi_work() -> bool {
         crate::hal::secondary_cpu_stop();
     }
 
-    let mut did_work = take_reschedule_request();
-    if !local
-        .round_trip_reply_pending
-        .swap(false, Ordering::Acquire)
-    {
-        return did_work;
-    }
-
-    let _ = send_ipi(BOOT_CPU_ID, IpiReason::ROUND_TRIP_REPLY);
-    did_work = true;
-    did_work
+    take_reschedule_request()
 }
 
 /// 在当前 CPU 的关中断安全点取走一次可合并的调度请求。
