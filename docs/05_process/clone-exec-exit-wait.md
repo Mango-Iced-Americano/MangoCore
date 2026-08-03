@@ -19,7 +19,8 @@ tags: [process, lifecycle, clone, exec, wait]
 | `os/src/task/task.rs` | `TaskControlBlock::sys_clone()`、`load_elf()`、线程退出 |
 | `os/src/task/process.rs` | PCB 资源、children、`finish_exit()` |
 | `os/src/task/process_manager.rs` | pid registry、process lookup、wait 选择 |
-| `os/src/task/manager.rs` | ready/zombie queue、调度发布和回收 |
+| `os/src/task/manager.rs` | interruptible/timer registry、唤醒和任务发布入口 |
+| `os/src/task/processor.rs` | Per-CPU current、调度切换和 local zombie 回收 |
 
 ## 2. 总览
 

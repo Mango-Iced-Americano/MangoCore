@@ -224,8 +224,8 @@ Queued(source)
 7. current_task() 返回克隆的 Arc，删除 current-task 裸指针和伪造的 static 引用；
 8. pid/tid 等不可变 per-CPU hint 可作为快路径；parent pid、pgid/sid、credentials、
    user token 等可变 hint 必须有集中更新/失效协议，否则读取权威对象；
-9. interruptible_queue 不得成为第二套 runnable queue；其信号枚举、OOM、zombie 清理和
-   统计职责迁入任务 registry、WaitQueue 或专用 registry 后，才能退役或降为非运行实体索引。
+9. interruptible_queue 不得成为第二套 runnable 或 zombie queue；它只登记
+   `Blocking/Blocked` 等待者，终态 TCB 只能进入 owner CPU 的 `local_zombies`。
 
 ### 2.6 MM/TLB 协议
 
@@ -544,7 +544,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B59）
+#### 当前进度（SMP-P2.5-B15 至 B96）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -552,16 +552,22 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
 - publish、fetch、yield、block、wake、timeout、signal 和 exit 已统一经 CAS
   迁移。B18 后 runnable 成员关系由 owner CPU 的 RunQueue 持有，
   B50 后 zombie Arc 也改由 owner CPU 的本地回收队列持有；`TASK_MANAGER`
-  只保留 interruptible/timer registry，重复 wake 不会重复入队；
+  只保留 interruptible/timer registry，重复 wake 不会重复入队；B96 又删除
+  interruptible zombie 扫描和按 pid 兜底，终态不再有第二个候选容器；
 - `Processor.current` 保留到真实 context switch 返回 idle 后才清空；idle 的
   `finish_switch_out()` 统一提交 yield、阻塞和本地 zombie 交接。`Blocking(cpu)` 只表达
   “已经登记睡眠但尚未切离 CPU”的必要窗口，早到 wake 恢复 `Running(cpu)` 且不入队；
-- `Queued` 任务退出前必须先从运行队列移除并转为 `Blocked`。可能造成任务丢失、
-  双重 owner 或悬挂队列节点的错误在所有构建中 fail-stop；只有重复 wake 属于
-  可恢复竞争；
+- 退出只允许 owner CPU 提交 `Running(cpu) -> Zombie`。Blocked sibling 必须先 wake，
+  Queued sibling 必须先 fetch；任何 `New/Queued/Blocking/Blocked/Migrating -> Zombie`
+  都可能造成任务丢失、双重 owner 或悬挂节点，因此在所有构建中 fail-stop；
 - `scheduler_state_has_unique_owner` 只通过生产 API 覆盖提前取消阻塞、完整
   Completion 睡眠/唤醒、publish/fetch/yield/zombie 和重复 wake；冻结只读审查
   未发现并发缺陷；
+- B96 的调用图审查证明 TCB `mark_zombie()` 只有 current exit 和 ktest trampoline
+  两个入口，均处于本 CPU `Running`。实现据此删除 interruptible registry 的 zombie
+  摘取、计数和周期扫描，并显式拒绝错误 CPU 或非 Running 状态进入终态；双架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=1` 均为 34/34 PASS，group-exit、exec sibling stop
+  和 owner-local 回收均实际执行；
 - 双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS，且
   `scheduler_state_has_unique_owner` 两轮通过、terminal STOP 仅最后执行；双架构
   normal build 退出 0，RV64 WaitQueue 为 4/4 PASS。详细命令、用时和证据边界见
@@ -990,6 +996,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
   B49 在本地 fetch 失败后启用 work stealing，复用现有 `Migrating` owner 窗口，不增加
   调度状态；B50 删除 `TASK_MANAGER` 中的全局 zombie 队列，让退出 CPU 在切回
   idle 栈后把最后调度 Arc 交给本地队列，并由同一 CPU 在下轮 dispatch 前析构；
+  B96 删除残留的 interruptible zombie 兼容扫描，并把相应 profile 阶段改名为
+  `taskq_stats`，CPU0 不再每 64 tick 为不存在的终态 owner 获取 `TASK_MANAGER`；
 - 每 CPU 使用本地 Processor、RunQueue、idle context 和 zombie 回收队列。B21 的固定
   内核栈退休队列继续只处理映射/slot 生命周期：TCB Drop 只登记退休，CPU0
   idle 安全点再做全核 kernel-TLB shootdown 和 frame/slot 归还；
@@ -1032,7 +1040,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
   双架构 8 核均为 25/25，初赛失败集合没有扩大；
 - B50 已落实 zombie TCB 在退出 CPU 的 idle 栈上回收；任务仍使用自身
   内核栈时不会释放最后一个调度 Arc。按 pid 的 reap 跨 CPU 逐队扫描，不同时
-  持有两个队列锁，Arc 析构发生在所有容器锁之外；
+  持有两个队列锁，Arc 析构发生在所有容器锁之外；B96 进一步要求只有本 CPU
+  current 能标记终态，未发布 New task 直接 drop，阻塞 sibling 则先唤醒再自退出；
 - B51 让 `CpuTaskState.active_user_vm` 固定当前 CPU 的精确旧 MM。idle 栈在改变
   current owner 前执行 `leave_user_vm()`，trap-return 通过 `switch_user_vm()` 重新进入；
   槽锁不跨 VM 锁、ASID rollover 或 IPI 等待。该边界同时服务 TLB target 与

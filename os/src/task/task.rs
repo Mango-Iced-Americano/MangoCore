@@ -1003,23 +1003,23 @@ impl TaskControlBlock {
     pub fn is_zombie(&self) -> bool {
         self.task_status() == TaskStatus::Zombie
     }
-    /// 把未排队的任务推进到终态。
+    /// 把本 CPU 的 current task 推进到终态。
     ///
-    /// `Queued` 必须先由运行队列移除并变成 `Blocked`；直接从 Queued 结束会让
-    /// 队列中残留一个终态 TCB，因此这里将其视为所有权错误。
+    /// 退出只能由任务自己在安全点完成。阻塞 sibling 必须先被唤醒并重新取得
+    /// current owner；未发布的 New task 则直接释放，不经过调度终态。
     pub(crate) fn mark_zombie(&self, operation: &'static str) -> bool {
         // 终态与远程 Running affinity 必须在同一请求槽上串行化：
         // 一旦 Zombie 先发布，远程写侧只能收到 Retry，不能再安装迁移请求。
         let mut request_slot = self.remote_affinity_request.lock();
         let current = self.task_status();
+        let expected = TaskStatus::Running(crate::smp::cpu_id());
         let changed = match current {
-            TaskStatus::New | TaskStatus::Blocked | TaskStatus::Running(_) => {
-                self.require_sched_transition(current, TaskStatus::Zombie, operation);
+            status if status == expected => {
+                self.require_sched_transition(expected, TaskStatus::Zombie, operation);
                 true
             }
             TaskStatus::Zombie => false,
-            TaskStatus::Queued(_) | TaskStatus::Migrating | TaskStatus::Blocking(_) => self
-                .fail_sched_invariant(operation, TaskStatus::Blocked, current, TaskStatus::Zombie),
+            _ => self.fail_sched_invariant(operation, expected, current, TaskStatus::Zombie),
         };
         let canceled = request_slot.take();
         drop(request_slot);

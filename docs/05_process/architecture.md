@@ -111,13 +111,13 @@ exit/wait、signal、futex、IPC、time、ids、rlimit 和 sched 兼容路径。
 
 ```
 New --publish--> Queued(cpu) --fetch--> Running(cpu)
+Queued(cpu) --move--> Migrating --publish--> Queued(other_cpu)
 Running(cpu) --yield + switch complete--> Queued(cpu)
 Running(cpu) --begin sleep--> Blocking(cpu)
 Blocking(cpu) --early wake--> Running(cpu)
 Blocking(cpu) --switch complete--> Blocked
 Blocked --wake--> Queued(cpu)
 Running(cpu) --exit--> Zombie --switch complete--> local_zombies(cpu)
-New / Blocked --external cleanup--> Zombie
 ```
 
 | 状态 | 含义 |
@@ -127,6 +127,7 @@ New / Blocked --external cleanup--> Zombie
 | `Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有 |
 | `Blocking(cpu)` | 已登记阻塞意图但尚未切离 CPU；早到 wake 恢复为 `Running(cpu)` |
 | `Blocked` | 已切离 CPU并留在 interruptible registry |
+| `Migrating` | queued task 已离开源队列、尚未进入目标队列的单-owner 窗口 |
 | `Zombie` | 线程退出，等待回收 |
 
 状态存放在 TCB 外层 `AtomicUsize`，状态 tag 与 CPU owner 一次 CAS 更新；
@@ -224,7 +225,7 @@ run_tasks()
     NET_INTERFACE.try_poll() periodically
     fs::reclaim::maybe_reclaim_fs_caches()
     drain local zombies
-    cleanup stale zombies
+    sample task queue stats
     compact shared futex
     fetch ready task
         set Running
@@ -447,7 +448,7 @@ loop {
     NET_INTERFACE.try_poll() periodically;
     fs::reclaim::maybe_reclaim_fs_caches();
     drain local zombies;
-    cleanup stale zombies;
+    sample task queue stats;
     compact shared futex;
     if let Some(task) = fetch_task() {
         mark Running;

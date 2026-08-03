@@ -79,6 +79,7 @@ B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；�
 | 任务运行 | `TaskStatus::Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有；受控 kernel-only 任务可在 AP 运行 |
 | 任务准备阻塞 | `TaskStatus::Blocking(cpu)` | 已登记到 interruptible registry，但仍由 CPU `cpu` 执行；早到 wake 可取消阻塞 |
 | 任务阻塞 | `TaskStatus::Blocked` | 已切离 CPU，位于 interruptible registry，可被唤醒或信号打断 |
+| 任务迁移 | `TaskStatus::Migrating` | queued task 在源、目标 runqueue 之间的单-owner 交接窗口 |
 | 任务僵尸 | `TaskStatus::Zombie` | 线程退出后的回收状态 |
 | 进程运行 | `ProcessState::Running` | 进程仍可调度或拥有活动线程 |
 | 进程停止 | `ProcessState::Stopped` | signal/ptrace 相关停止状态 |

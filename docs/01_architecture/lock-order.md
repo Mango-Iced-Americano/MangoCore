@@ -422,8 +422,8 @@ B19 只为 focused ktest 的 kernel-only 任务开放显式目标 CPU，不改�
 AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 scheduler-ready
 屏障等待且不持锁。AP dispatch 前只锁自己的 runqueue；`dispatch_task()` 先后取得
 `task.inner` 和本地 processor，但两把锁不嵌套，也不跨 `__switch`。任务切回 idle
-后先释放 processor 锁，再把 Zombie 加入受锁的全局 `TASK_MANAGER`，因此没有
-`processor -> TASK_MANAGER` 嵌套。
+后先释放 processor 锁，再把 Zombie 加入 owner CPU 的 `local_zombies`，因此不需要
+获取全局 `TASK_MANAGER`。
 
 这个批次没有两个 runqueue 的同时持有、迁移或 work stealing。AP 任务入口也不得
 访问尚未审计的 console、FS、NET、设备和用户 MM；这些能力约束不能用锁本身替代。
@@ -451,9 +451,10 @@ kernel-only AP 任务完成验证。初始 affinity 已作为入队硬约束，B
 
 B35 复用同一 `TASK_MANAGER` 锁串行化稳定 Blocked 线程的 affinity 与 wake：写侧必须在锁内
 同时确认精确 `Blocked` 状态和同一 TCB 指针仍在 registry，随后 Release 发布 mask；wake 取得
-同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为线程退出清理摘除 registry 后、
-标记 Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
-Running/Blocking 修改在 B35 当时尚未实现，后续由 B38 的请求槽协议闭合。
+同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为 wake 会在同一锁域把任务移出
+registry 并发布新 owner。退出不会直接执行 `Blocked -> Zombie`：group-exit、exec 和 fatal
+signal 必须先唤醒目标，再由目标在自己的 `Running(cpu)` 安全点退出。该路径不获取 runqueue，
+也不搬 owner；远程 Running/Blocking 修改在 B35 当时尚未实现，后续由 B38 的请求槽协议闭合。
 
 ### 3.6 B36 稳定 Queued affinity 搬队约束
 

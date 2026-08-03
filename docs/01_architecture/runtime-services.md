@@ -144,7 +144,7 @@ do_wake_expired()
 NET_INTERFACE.try_poll()           [每 64 tick]
 fs::reclaim::maybe_reclaim_fs_caches()
 zombie queue drain
-stale zombie cleanup + queue stats [每 64 tick]
+task queue stats [每 64 tick]
 threads::compact_shared_futex()
 fetch_task()
 switch or idle
@@ -171,7 +171,9 @@ switch or idle
 
 退出任务先进入专用 zombie 队列。调度循环发现 `has_zombie_queue_tasks_fast()` 后，批量取出最多 64 个 zombie 并 drop，避免不可运行的 TCB 留在 ready queue。
 
-每 64 tick 还会执行兜底清理：从 ready 和 interruptible 队列各尝试取出 zombie，并记录 ready/interruptible/zombie/nonzero nice 统计。
+每 64 tick 记录 ready/interruptible 长度、runqueue zombie 不变量诊断和 nonzero nice
+统计，不再获取全局 `TaskManager` 锁扫描 interruptible zombie。终态 TCB 只有
+Per-CPU `local_zombies` 一种容器 owner。
 
 ### 4.5 shared futex compact
 
@@ -271,7 +273,7 @@ CPU 状态只读原子字段和一次 active-MM `try_lock()`；整条诊断链�
 | TTY 丢字符 | `trace::stash_char()`、`CharStash` 容量和 TTY reader |
 | 网络不进展 | `BACKGROUND_NET_POLL_INTERVAL`、idle `NET_INTERFACE.poll()` |
 | timeout 不醒 | `do_wake_expired()`、timer interrupt handler |
-| zombie 堆积 | zombie queue drain、stale zombie cleanup |
+| zombie 堆积 | zombie queue drain、Per-CPU zombie 计数 |
 | perf 无计数 | `perf_stats` feature 和 `STATS_ON` |
 
 运行期服务大多没有独立内核线程，而是挂在调度循环、trap 返回或 syscall 公共路径上。trace 事件在 syscall 入口记录，timer 到期在调度循环和中断路径推进，网络 poll 在调度循环降频执行，PageCache reclaim 也通过调度循环合作式调用。调试运行期服务时要先确认触发点是否被执行，再看服务内部状态。

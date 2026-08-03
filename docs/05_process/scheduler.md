@@ -376,7 +376,7 @@ schedule_tick += 1
   ├── NET_INTERFACE.try_poll()        每 64 tick
   ├── fs::reclaim::maybe_reclaim_fs_caches()
   ├── drain 本 CPU local_zombies
-  ├── 每 64 tick 清理 interruptible zombie 并记录本地/全局队列统计
+  ├── 每 64 tick 记录 runqueue/interruptible 长度和本地队列统计
   ├── compact_shared_futex()
   ├── fetch_task()
   ├── queue sample / perf
@@ -468,10 +468,11 @@ exit_current_and_run_next()
 `local_zombies`。CPU0 和 AP 都在自己的 idle 循环、
 下一次 dispatch 之前取出并 drop，因此 AP 退出不再竞争全局 `TASK_MANAGER`。
 
-父进程 wait/auto-reap 需要按 pid 同步清理时，先单独摘取 interruptible zombie，
-再按 CPU 依次扫描本地回收队列；任一时刻只持有一把容器锁，承接 Vec
-的扩容和 TCB 析构都在锁外。PCB 的 wait-visible zombie 状态与这个 TCB
-对象寿命队列仍是两层独立语义。
+父进程 wait/auto-reap 需要按 pid 同步清理时，只按 CPU 依次扫描本地回收
+队列；任一时刻只持有一把容器锁，承接 Vec 的扩容和 TCB 析构都在锁外。
+最后退出的 current 此时可能尚未切回 idle，因此由随后
+`finish_switch_out()` 入队并回收。PCB 的 wait-visible zombie 状态与这个
+TCB 对象寿命队列仍是两层独立语义。
 
 B21 后，TCB 析构只把缓存溢出的内核栈 slot 登记到固定退休队列；
 CPU0 下一次 idle 安全点在无普通锁状态下撤销映射、等待全核 TLB

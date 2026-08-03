@@ -57,9 +57,9 @@ pub(crate) use processor::zombie_queue_count_fast;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
     kernel_timer_queue_len, procs_count, publish_task, remove_zombie_tasks_by_pid,
-    run_deferred_timer_work, run_task_safe_point,
-    send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
-    task_manager_counts, timer_interrupt_handler, timer_cpu_init, update_ready_nice,
+    run_deferred_timer_work, run_task_safe_point, send_signal_to_interruptible,
+    sleep_interruptible, task_manager_counts, timer_interrupt_handler, timer_cpu_init,
+    update_ready_nice,
     wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 use manager::{fetch_task, finish_switch_out};
@@ -254,6 +254,9 @@ fn finish_current_exit(task: Arc<TaskControlBlock>, exit_code: u32) -> ! {
                 .unwrap_or(thread_exit_code);
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
+            // auto-reap 在 current 切回 idle 前运行：这里只会提前摘取已经
+            // 位于 local_zombies 的 sibling；current TCB 随后由 owner CPU
+            // 的 finish_switch_out() 入队并在 idle 栈上回收。
             task.process.finish_exit(&task, process_exit_code);
         }
         // noreturn schedule 不会析构当前 Rust 栈；本地 clone 必须提前释放。

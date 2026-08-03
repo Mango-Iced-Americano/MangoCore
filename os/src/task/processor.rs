@@ -11,7 +11,7 @@
 //! 否则切回调度器时会形成自锁。
 
 use super::run_queue::RunQueue;
-use super::{__switch, do_wake_expired, take_one_interruptible_zombie};
+use super::{__switch, do_wake_expired};
 use super::{fetch_task, finish_switch_out};
 use super::{TaskContext, TaskControlBlock, TaskStatus};
 use crate::hal::PageTableImpl;
@@ -451,40 +451,23 @@ pub fn run_tasks() -> ! {
             &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
             stage_t0,
         );
-        // 兜底清理旧队列中的 zombie，避免异常路径留下不可运行任务。
-        // Also do full queue scan for stats zombie/nice counters every 64 ticks.
+        // 每 64 tick 扫描本地 runqueue 的诊断状态；interruptible registry
+        // 只允许 Blocking/Blocked，不再承担第二套 zombie owner。
         if schedule_tick % 64 == 0 {
             let stage_t0 = sched_profile_start(sched_profile);
-            for _ in 0..8 {
-                let zombie = take_one_interruptible_zombie();
-                if zombie.is_none() {
-                    break;
-                }
-                drop(zombie);
-            }
-            let int_z = {
-                let manager = crate::task::manager::TASK_MANAGER.lock();
-                let mut int_zombie = 0usize;
-                for t in &manager.interruptible_queue {
-                    if t.is_zombie() {
-                        int_zombie += 1;
-                    }
-                }
-                int_zombie
-            };
             let (_, ready_z, nnice) = super::run_queue::stats(cpu);
             crate::task::perf::record_taskq_queue_lens(
                 crate::task::manager::ready_count_fast() as usize,
                 crate::task::manager::interruptible_count_fast() as usize,
                 ready_z,
-                int_z,
+                0,
                 nnice,
             );
             sched_record_stage(
                 sched_profile,
-                &SCHED_STAGE_STALE_ZOMBIE_CALLS,
-                &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL,
-                &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX,
+                &SCHED_STAGE_TASKQ_STATS_CALLS,
+                &SCHED_STAGE_TASKQ_STATS_CYCLES_TOTAL,
+                &SCHED_STAGE_TASKQ_STATS_CYCLES_MAX,
                 stage_t0,
             );
         } else {
@@ -969,9 +952,9 @@ static SCHED_STAGE_RECLAIM_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
 static SCHED_STAGE_ZOMBIE_QUEUE_CALLS: AtomicU64 = AtomicU64::new(0);
 static SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
-static SCHED_STAGE_STALE_ZOMBIE_CALLS: AtomicU64 = AtomicU64::new(0);
-static SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
-static SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_TASKQ_STATS_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_TASKQ_STATS_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_TASKQ_STATS_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
 static SCHED_STAGE_FUTEX_COMPACT_CALLS: AtomicU64 = AtomicU64::new(0);
 static SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
@@ -1209,9 +1192,9 @@ pub fn reset_sched_profile() {
         &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
     );
     reset_stage(
-        &SCHED_STAGE_STALE_ZOMBIE_CALLS,
-        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL,
-        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX,
+        &SCHED_STAGE_TASKQ_STATS_CALLS,
+        &SCHED_STAGE_TASKQ_STATS_CYCLES_TOTAL,
+        &SCHED_STAGE_TASKQ_STATS_CYCLES_MAX,
     );
     reset_stage(
         &SCHED_STAGE_FUTEX_COMPACT_CALLS,
@@ -1336,10 +1319,10 @@ pub fn dump_sched_profile(label: &str) {
         &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
     );
     dump_stage(
-        "stale_zombie",
-        &SCHED_STAGE_STALE_ZOMBIE_CALLS,
-        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL,
-        &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX,
+        "taskq_stats",
+        &SCHED_STAGE_TASKQ_STATS_CALLS,
+        &SCHED_STAGE_TASKQ_STATS_CYCLES_TOTAL,
+        &SCHED_STAGE_TASKQ_STATS_CYCLES_MAX,
     );
     dump_stage(
         "futex_compact",

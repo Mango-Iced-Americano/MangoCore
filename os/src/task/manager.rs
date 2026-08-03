@@ -159,33 +159,6 @@ impl TaskManager {
             interruptible_queue: VecDeque::new(),
         }
     }
-    /// 从可中断队列中逐出一个僵尸任务（零堆分配）。
-    fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
-        for i in 0..self.interruptible_queue.len() {
-            if self.interruptible_queue[i].is_zombie() {
-                let zombie = self.interruptible_queue.remove(i);
-                if zombie.is_some() {
-                    sub_interruptible_count(1);
-                }
-                return zombie;
-            }
-        }
-        None
-    }
-    /// 从全局等待 registry 摘取一个属于指定 pid 的 zombie TCB。
-    /// 返回的 Arc 在 `TASK_MANAGER` 锁外收集和析构。
-    fn take_interruptible_zombie_by_pid(&mut self, pid: usize) -> Option<Arc<TaskControlBlock>> {
-        let index = self
-            .interruptible_queue
-            .iter()
-            .position(|task| task.is_zombie() && task.process.pid == pid)?;
-        let zombie = self.interruptible_queue.remove(index);
-        if zombie.is_some() {
-            sub_interruptible_count(1);
-        }
-        zombie
-    }
-
     /// 添加一个任务到可中断队列。
     pub fn begin_interruptible_sleep(&mut self, task: Arc<TaskControlBlock>) {
         // 固定锁序：TASK_MANAGER -> remote_affinity_request。请求槽与
@@ -270,14 +243,6 @@ impl TaskManager {
     /// 可中断队列中任务数量
     pub fn interruptible_count(&self) -> u16 {
         self.interruptible_queue.len() as u16
-    }
-    /// 可中断 registry 中尚未清理的僵尸任务数量。
-    pub fn interruptible_zombie_count(&self) -> u16 {
-        self.interruptible_queue
-            .iter()
-            .filter(|task| task.is_zombie())
-            .count()
-            .min(u16::MAX as usize) as u16
     }
     /// 尝试将任务从 interruptible registry 移动到目标 CPU 的 runqueue。
     ///
@@ -567,27 +532,10 @@ pub(crate) fn rekey_active_tid(old_tid: usize, new_tid: usize) {
     let _ = (old_tid, new_tid);
 }
 
-/// 从可中断队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
-pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().take_one_interruptible_zombie()
-}
-
-/// 从 interruptible registry 和全部 Per-CPU 回收队列移除指定 pid 的 zombie TCB，
-/// 在锁外 drop，避免 TCB::drop() 在持有任何容器锁时执行析构链。
+/// 从全部 Per-CPU 回收队列移除指定 pid 的 zombie TCB。
+/// 返回的 Arc 在所有容器锁外 drop，避免析构链反向进入任务子系统。
 pub fn remove_zombie_tasks_by_pid(pid: usize) {
-    let mut zombies = Vec::new();
-    // interruptible registry 与 CPU-local 回收队列是两类互斥的终态
-    // owner：zombie TCB 不会从前者搬到后者。因此可以分两阶段
-    // 扫描，无需为了一个不存在的搬运窗口同时持有两类锁。
-    loop {
-        let Some(zombie) = TASK_MANAGER.lock().take_interruptible_zombie_by_pid(pid) else {
-            break;
-        };
-        zombies.push(zombie);
-    }
-    // 不嵌套持有 TASK_MANAGER 与任一 CPU-local zombie 锁；收集到的 Arc
-    // 及 Vec 扩容都在所有容器锁释放后发生。
-    zombies.extend(super::processor::remove_zombie_tasks_by_pid(pid));
+    let zombies = super::processor::remove_zombie_tasks_by_pid(pid);
     drop(zombies);
 }
 
@@ -909,11 +857,9 @@ pub fn has_ready_task() -> bool {
     super::run_queue::total_count_fast() != 0
 }
 
-/// 返回 interruptible、runqueue 与 Per-CPU 回收队列中的 zombie 任务数量。
+/// 返回 runqueue 诊断残留与 Per-CPU 回收队列中的 zombie 任务数量。
 pub fn zombie_count() -> u16 {
-    let manager = TASK_MANAGER.lock();
-    let mut count = manager.interruptible_zombie_count();
-    drop(manager);
+    let mut count = 0u16;
     for cpu in 0..crate::smp::configured_cpu_count() {
         count = count.saturating_add(super::run_queue::stats(cpu).1 as u16);
     }
