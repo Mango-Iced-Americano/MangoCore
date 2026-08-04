@@ -114,8 +114,10 @@ pub struct Ext4OSInode {
     logical_size: Arc<AtomicUsize>,
 }
 
-// Safety: MangoCore is single-core; the circular Weak<Self> reference is
-// proven safe at runtime (self_ref is only upgraded while the Arc is alive).
+// SAFETY: [Category 9 — Send/Sync] lwext4 C entry points are serialized by the
+// process-wide `LWEXT4_GLOBAL` gate; per-instance `fs.lw` and inode
+// handle/state locks protect the remaining mutable Rust state. `self_ref` is
+// only upgraded while the owning Arc is alive.
 unsafe impl Send for Ext4OSInode {}
 unsafe impl Sync for Ext4OSInode {}
 

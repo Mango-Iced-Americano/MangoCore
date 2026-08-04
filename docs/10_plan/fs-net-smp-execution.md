@@ -237,19 +237,42 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 - 每批：双架构 build + 相关 ktest + 视情况 §8.2
 
 ### 状态
-- [ ] A1 lwext4 全局门
-- [ ] A2 测试真实性（SKIP 机制 + AP 违规修复 + 真实交错）
-- [ ] B MAP_SHARED
-- [~] C poll 契约 — 实现完成，等待协调器串行构建/ktest；零超时 ticket ktest 归入下一测试批次
-- [ ] D auto-bind
-- [ ] E ext4 事务
-- [ ] F affinity + 门禁
+- [x] A1 lwext4 全局门
+- [x] A2 测试真实性（SKIP 机制 + AP 违规修复 + 真实交错）
+- [x] B MAP_SHARED
+- [x] C poll 契约（包含协调器的串行 build/ktest/§8.2 验证）
+- [x] D auto-bind
+- [x] E ext4 事务
+- [ ] F affinity + 门禁（用户决策取消，见下节）
 
 ## 用户决策（2026-08-04）：item 4 降级
 - **用户任务跨核（item 4）不做**——非主要工作；验收标准 = basic+busybox（§8.2 mask=0x003）跑通
 - 批次 F（affinity 开放）取消，改为"每个生产批次后跑 §8.2 门禁确认 basic+busybox 不回归"
 - 剩余批次：C（poll 契约）→ D（auto-bind）→ E（native ext4 事务）→ 最终门禁
 
-## 当前批次：批次 A+B 后门禁（basic+busybox）
-- 目的：确认 MAP_SHARED/FaultOutcome/lwext4 门的生产改动未破坏用户路径
-- 状态：[ ] 运行中（gate agent）
+## 审计改进完成（Oracle close-out，2026-08-04）
+
+### Batch A–E §8.2 结果
+
+| 批次 | 状态 | RV64 | LA64 | 说明 |
+|---|---|---:|---:|---|
+| A | 完成 | 312/314 PASS | 308/314 PASS | lwext4 全局门与 ktest 真实性 |
+| B | 完成 | 312/314 PASS | 308/314 PASS | MAP_SHARED；Batch A+B 最终结论见 `fs-net-smp-batchAB-consolidated-verdict.md` |
+| C | 完成 | 312/314 PASS | 308/314 PASS | async-poll 契约 |
+| D | 完成 | 312/314 PASS | 308/314 PASS | auto-bind reservation |
+| E | 完成 | 312/314 PASS | 308/314 PASS | canonical ext4 inode transaction |
+
+所有表列 §8.2 结果均运行于 `CORE_NUM=8`、`mask=0x003`，两 libc 的
+`test_mount`/`test_umount` 均为 `5/5`。当前 HEAD `5793b44c` 的 close-out 零盘 ktest
+亦已在两架构 `CORE_NUM=4` 复验：`mm` 5P/0S，`fs_smp` 6P/2S，`net_smp` 7P/3S，
+`ext4` 7P/0S；原始日志为 `fs-net-smp-audit-closeout-{rv64,la64}-ktest-*.log`。
+
+### 范围与分支状态
+
+- 审计 item 4（开放普通用户多核 affinity）按用户决定降级，不作为本轮验收项；item 8
+  为 N/A（当前非问题），未产生独立实现批次。
+- 分支为 `smp-fs-net`，HEAD 为 `5793b44cc568e001438c3f84767a5ecf021be080`；相对
+  `origin/smp` 实际领先 **18 个提交**：`952dddcc..87507f0e` 为 8 个，
+  `87507f0e..5793b44c` 为 10 个。不是 14 个提交。
+- close-out 时工作树保留未提交修改；最终 `git status --short` 见本次 Work Log，协调者
+  负责后续暂存与提交。
