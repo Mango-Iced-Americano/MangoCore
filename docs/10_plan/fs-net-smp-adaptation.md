@@ -49,7 +49,7 @@ ext4 正在直接调用该路径，并在数据复制前发布请求长度对应
 | FS-F1 | parent directory gate | ancestor-first；无祖先关系时按 `inode_id` |
 | FS-F2 | child/victim inode metadata | 目录优先于非目录，同类按 `inode_id` |
 | FS-F3 | children/negative-dentry/lookup cache | 只能在对应 parent gate 后获取 |
-| IO-I0 | per-inode `io_txn` | ext4 extent、EOF、truncate 的事务锁 |
+| IO-I0 | canonical per-inode `inode_txn` | 由 `Ext4FileSystem::inode_txns` 以 inode 号 Weak registry canonicalize；保护 ext4 extent、EOF、truncate、mode/uid/gid/times 与 nlink 的完整快照提交 |
 | IO-I1 | PageCache `op_gate` | read/write/writeback 共享；truncate/invalidate/evict 独占 |
 | IO-I2 | `entries` → `inner` | 保留当前顺序；二者释放后才获取 page data lock |
 | IO-I3 | `PageEntry.data` | 只保护该页 frame bytes 和页内有效范围 |
@@ -213,8 +213,8 @@ fn write_at_user(
 struct Ext4OSInode {
     inode: Arc<Mutex<Ext4InodeRef>>,
 
-    // 普通文件 extent、EOF、truncate 的唯一事务边界。
-    io_txn: Mutex<()>,
+    // 同一 inode 的多个 wrapper 共享，由文件系统 registry 取得。
+    inode_txn: Arc<Mutex<()>>,
 
     dir_gate: Arc<RwLock<()>>,
     page_cache: Mutex<Option<Arc<PageCache>>>,
@@ -226,14 +226,14 @@ fn write_at_bounced(
     offset: usize,
     bytes: &[u8],
 ) -> Result<usize, SyscallErr> {
-    let _txn = self.io_txn.lock();
+    let _txn = self.inode_txn.lock();
 
     let before = self.snapshot_inode();
     let old_size = before.size();
     let end = offset.checked_add(bytes.len())
         .ok_or(SyscallErr::EINVAL)?;
 
-    // io_txn -> PageCache op_gate，truncate 必须使用相同方向。
+    // inode_txn -> PageCache op_gate，truncate 必须使用相同方向。
     self.ensure_blocks_allocated(offset, bytes.len())?;
 
     let page_cache = self.get_new_page_cache()
@@ -254,7 +254,7 @@ fn write_at_bounced(
 }
 
 fn truncate(&self, new_size: usize) -> Result<(), SyscallErr> {
-    let _txn = self.io_txn.lock();
+    let _txn = self.inode_txn.lock();
     let page_cache = self.get_new_page_cache()
         .ok_or(SyscallErr::EIO)?;
 
@@ -266,7 +266,7 @@ fn truncate(&self, new_size: usize) -> Result<(), SyscallErr> {
 }
 ```
 
-第一阶段允许同一 ext4 inode 的数据写串行，PageCache 本身仍支持不同页并行。只有 extent allocator 和 EOF 被独立证明可并行后，才考虑缩窄 `io_txn`；本设计不预先增加该复杂度。
+Batch E 将事务从 wrapper 局部状态提升为文件系统按 inode 号 canonicalize 的共享 Arc，因此 metadata、link/nlink 和 data 路径不能再以完整旧快照相互覆盖。多 inode 操作先收集全部 transaction Arc、释放 registry，再按 inode 号升序锁定并去重；PageCache 本身仍支持不同页并行。只有 extent allocator 和 EOF 被独立证明可并行后，才考虑缩窄 `inode_txn`；本设计不预先增加该复杂度。
 
 ## 3.5 writeback 与 truncate
 

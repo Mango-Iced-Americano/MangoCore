@@ -413,7 +413,7 @@ impl Ext4InodeRef {
 //
 // 当前策略:
 //   - 缓存 inode 数据 + inode table 位置，支持原地修改后写回
-//   - write_back_inode 不再绕过缓存直接写盘
+    //   - commit_inode_snapshot 不再绕过缓存直接写盘
 
 /// 带缓存的 ext4 inode，记录其在 inode table 中的位置，支持原地写回
 #[derive(Debug, Clone)]
@@ -752,11 +752,11 @@ impl Ext4FileSystem {
         Arc::new(self.get_inode_snapshot(inode_num))
     }
 
-    /// 带校验和回写 inode 信息
+    /// 提交已由 canonical inode transaction 保护的完整 inode 快照。
     ///
-    /// Phase 4: 先更新 inode_cache，再 mark dirty 并 flush。
-    /// 不再直接写盘绕过 cache。
-    pub fn write_back_inode(&self, inode_ref: &mut Ext4InodeRef) {
+    /// 只能在 `Ext4FileSystem::with_inode_txns()` 闭包内调用：cache lock 只负责
+    /// cache 条目本身，不能代替“读快照 → 修改 → 提交”的跨 wrapper 串行化。
+    pub(super) fn commit_inode_snapshot(&self, inode_ref: &mut Ext4InodeRef) {
         let ino = inode_ref.inode_num;
         {
             let mut cache = self.inode_cache.lock();
@@ -783,10 +783,10 @@ impl Ext4FileSystem {
         let _ = self.flush_inode(ino);
     }
 
-    /// 不带校验和回写 inode 信息
+    /// 提交已由 canonical inode transaction 保护的 inode 快照，不更新校验和。
     ///
-    /// Phase 4: 先更新 inode_cache 再 flush（跳过 checksum）。
-    pub fn write_back_inode_without_csum(&self, inode_ref: &Ext4InodeRef) {
+    /// 仅保留给同一 transaction 内需要合并后续 inode 修改的 legacy 路径。
+    pub(super) fn commit_inode_snapshot_without_csum(&self, inode_ref: &Ext4InodeRef) {
         let ino = inode_ref.inode_num;
         {
             let mut cache = self.inode_cache.lock();
@@ -952,7 +952,7 @@ impl Ext4FileSystem {
         let mut inode_size = inode_ref.inode.size();
         inode_size += self.block_size as u64;
         inode_ref.inode.set_size(inode_size);
-        self.write_back_inode(inode_ref);
+        self.commit_inode_snapshot(inode_ref);
 
         Ok(new_block)
     }
@@ -987,7 +987,7 @@ impl Ext4FileSystem {
         let mut inode_size = inode_ref.inode.size();
         inode_size += self.block_size as u64;
         inode_ref.inode.set_size(inode_size);
-        self.write_back_inode(inode_ref);
+        self.commit_inode_snapshot(inode_ref);
 
         Ok(new_block)
     }
@@ -1011,7 +1011,7 @@ impl Ext4FileSystem {
         if required_size > inode_size {
             inode_ref.inode.set_size(required_size);
         }
-        self.write_back_inode(inode_ref);
+        self.commit_inode_snapshot(inode_ref);
         log::info!(
             "[insert_inode_pblk] inode={}, iblock={}, pblock={}, new_size={}",
             inode_ref.inode_num,
@@ -1022,7 +1022,7 @@ impl Ext4FileSystem {
         Ok(new_block)
     }
 
-    /// Deferred variant of insert_inode_pblk: skips the final write_back_inode.
+    /// Deferred variant of insert_inode_pblk: skips the final inode snapshot commit.
     /// Caller MUST flush the inode later (e.g. write_at's final flush after all
     /// blocks are allocated). Used only by ensure_blocks_allocated → write_at.
     pub fn insert_inode_pblk_deferred(
@@ -1042,7 +1042,7 @@ impl Ext4FileSystem {
         if required_size > inode_size {
             inode_ref.inode.set_size(required_size);
         }
-        // defer: no write_back_inode — caller flushes once at end
+        // defer: no snapshot commit — caller commits once at the end
         Ok(new_block)
     }
 
@@ -1053,7 +1053,7 @@ impl Ext4FileSystem {
     /// the inode's block count.  This method only inserts the extent tree
     /// entry and adjusts the inode size if the new range extends it.
     ///
-    /// No write_back_inode — caller (ensure_blocks_allocated → write_at)
+    /// No snapshot commit — caller (ensure_blocks_allocated → write_at)
     /// flushes the inode once after all extents are inserted.
     pub fn insert_inode_pblk_deferred_batch(
         &self,
@@ -1095,7 +1095,7 @@ impl Ext4FileSystem {
         if required_size > inode_size {
             inode_ref.inode.set_size(required_size);
         }
-        self.write_back_inode(inode_ref);
+        self.commit_inode_snapshot(inode_ref);
         log::info!(
             "[insert_inode_pblk_from] inode={}, iblock={}, pblock={}, new_size={}",
             inode_ref.inode_num,

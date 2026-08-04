@@ -877,7 +877,7 @@ impl Ext4FileSystem {
                 *inode_ref.inode.root_extent_mut_at(node.position) = *new_extent;
                 inode_ref.inode.root_extent_header_mut().entries_count += 1;
 
-                self.write_back_inode(inode_ref);
+                self.commit_inode_snapshot(inode_ref);
                 return Ok(());
             }
             // Not empty, insert at search result pos + 1
@@ -988,7 +988,7 @@ impl Ext4FileSystem {
 
         self.store_metadata_block_dirty(new_block as usize, &new_ext4block.data);
         super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
-        self.write_back_inode(inode_ref);
+        self.commit_inode_snapshot(inode_ref);
 
         Ok(())
     }
@@ -1379,7 +1379,7 @@ impl Ext4FileSystem {
                 *ptr
             };
             inode_ref.inode.block = new_block_data;
-            self.write_back_inode(inode_ref);
+            self.commit_inode_snapshot(inode_ref);
         } else {
             self.store_metadata_block_dirty(node_disk_pos / self.block_size, &ext4block.data);
         }
@@ -1499,7 +1499,7 @@ impl Ext4FileSystem {
             })?;
 
             parent_index.first_block = current_index.first_block;
-            self.write_back_inode(inode_ref);
+            self.commit_inode_snapshot(inode_ref);
 
             i -= 1;
         }

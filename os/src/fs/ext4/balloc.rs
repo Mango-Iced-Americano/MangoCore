@@ -618,7 +618,7 @@ impl Ext4FileSystem {
                 .blocks_count()
                 .saturating_sub((freed_total * sectors_per_block) as u64);
             inode_ref.inode.set_blocks_count(inode_blocks);
-            self.write_back_inode(inode_ref);
+            self.commit_inode_snapshot(inode_ref);
         }
     }
 }

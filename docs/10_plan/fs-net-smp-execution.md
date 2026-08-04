@@ -64,9 +64,9 @@ WP1 测试框架+RED → WP2 PageCache → WP3 目录锁 → WP4 端口 → WP5 
 - dirty 标记移出 inner 锁（mark_dirty_after_copy）
 
 **B: os/src/fs/ext4/*（agent B 独占）**
-- `Ext4OSInode` 增加 `io_txn: Mutex<()>`；写路径：io_txn → snapshot → ensure_blocks → page_cache.write_kernel → commit 实际 size/times（非请求 len）；失败回滚
-- truncate：io_txn → page_cache.truncate_with_backend
-- 用户写走 bounce（write_at_user）；锁序固定 io_txn → op_gate（禁止反向）
+- WP2 初始版本在 `Ext4OSInode` 放置 `io_txn`；Batch E 已升级为 `Ext4FileSystem::inode_txns` 的 inode-number keyed Weak registry，wrapper 只持 canonical `Arc<Mutex<()>>`。
+- 写路径：canonical `inode_txn` → snapshot → ensure_blocks → page_cache.write_kernel → commit 实际 size/times（非请求 len）；失败回滚。truncate 同样走 `inode_txn → page_cache.truncate_with_backend`。
+- 用户写走 bounce（write_at_user）；锁序固定 `inode_txn → op_gate`（禁止反向）。多 inode link/unlink/rename 先取全部 transaction Arc，释放 registry 后按 inode 号升序锁定。
 - ext4 调用方适配 A 的新 API
 
 ### 依赖
@@ -81,7 +81,7 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 
 ### 状态
 - [ ] agent A: page_cache.rs 重构
-- [ ] agent B: ext4 io_txn + API 适配
+- [x] agent B: ext4 canonical inode_txn + API 适配（Batch E；待协调者串行构建）
 - [ ] 双架构 build + fs_smp GREEN 验证
 - [ ] ext4/tmpfs ktest 回归
 - [ ] §8.2 门禁 + evidence + Work Log
@@ -110,7 +110,7 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 
 ## 已完成批次
 - WP1（ktest RED 基线）✅ 2026-08-04
-- WP2（PageCache op_gate + PageEntry.data + bounce + ext4 io_txn）✅ §8.2 PASS（RV64 312/314、LA64 308/314）
+- WP2（PageCache op_gate + PageEntry.data + bounce + ext4 初始 io_txn）✅ §8.2 PASS（RV64 312/314、LA64 308/314）；Batch E 将其升级为跨 wrapper 的 canonical inode transaction，验证待协调者执行。
 
 ## 批次 4 = WP4（per-netns PortRegistry，L3/T3，完成后停审 + §8.2 门禁）
 

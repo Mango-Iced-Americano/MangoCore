@@ -78,8 +78,8 @@ FS、网络与调度不是可任意嵌套的全局锁链；跨域动作固定为
 
 | 层级 | 锁域 | 当前契约 |
 |---|---|---|
-| FS-F0..F3 | `rename_gate` → directory gate → victim metadata → directory caches | 跨目录先 `rename_gate`；parent 为祖先优先、否则 inode ID；cache 只能在 parent gate 后 |
-| IO-I0..I3 | `io_txn` → `op_gate` → `entries -> inner` → `PageEntry.data` | 元数据锁只定位/clone；释放后才访问单页 bytes |
+| FS-F0..F3 | `rename_gate` → parent directory gate → victim directory gate → canonical `inode_txn` → directory caches | 跨目录先 `rename_gate`；parent 为祖先优先、否则 inode ID；victim 目录优先、同类 inode ID；事务内不得反向取得 directory gate |
+| IO-I0..I3 | canonical `inode_txn` → `op_gate` → `entries -> inner` → `PageEntry.data` | 按 inode 号升序一次取得所有 transaction；完整 inode 快照只在该事务内读取、修改和提交；释放后才访问单页 bytes |
 | Net-N0..N3 | ports/route directory → socket lifecycle → one DeviceStack → event/epoll/WaitQueue | N0 短提交；N2 只持一个 stack，释放 N1/N2 后才通知 |
 | Leaf | `OUTPUT_LOCK` | 所有业务锁释放且格式参数已快照后才能取得 |
 
