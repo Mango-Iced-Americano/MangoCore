@@ -26,8 +26,10 @@ use smoltcp::{
 };
 
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
-use crate::net::config::NetInterfaceInner;
-use crate::net::socket::inet::common::{BoundInner, PortManager};
+use crate::net::socket::inet::common::port::{
+    AddressFamily, BindIntent, PortManager, PortReservation, TransportProtocol,
+};
+use crate::net::socket::inet::common::BoundInner;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
 use crate::task::WaitQueue;
 use alloc::sync::Weak;
@@ -38,6 +40,7 @@ pub struct UdpSocket {
     socket_handler: RouteSocketHandle,
     bound: Mutex<BoundInner>,
     bound_ifindex: Mutex<Option<u32>>,
+    port_reservation: Mutex<Option<PortReservation>>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
     pub ip_version: IpVersion,
@@ -97,20 +100,15 @@ impl Socket for UdpSocket {
             }
         };
         log::info!("[Udp::bind] bind to {:?}", addr);
-        // 处理 port=0：分配临时端口，与 TCP Inner::bind 语义一致
-        let bind_addr = if addr.port == 0 {
-            let port = PortManager::alloc_ephemeral_port();
-            IpListenEndpoint { port, ..addr }
-        } else {
-            addr
-        };
-        self.inner.lock().local_endpoint = Some(bind_addr);
+        // PortRegistry 已在 N0 为 port=0 选择并保留端口；这里绝不能重新分配。
+        let bind_addr = addr;
         NET_INTERFACE.poll();
         NET_INTERFACE
             .udp_routed_socket(self.socket_handler, |socket| {
                 socket.bind(bind_addr).ok().ok_or(SyscallErr::EINVAL)
             })
             .ok_or(SyscallErr::EAGAIN)??;
+        self.inner.lock().local_endpoint = Some(bind_addr);
         NET_INTERFACE.poll();
         let ifindex = crate::net::net_core::ifindex_for_local_addr(bind_addr.addr);
         self.bound
@@ -123,6 +121,39 @@ impl Socket for UdpSocket {
             ifindex
         );
         Ok(0)
+    }
+
+    fn snapshot_bind_intent(&self, endpoint: &Endpoint) -> Result<BindIntent, SyscallErr> {
+        let Endpoint::Ip(endpoint) = endpoint else {
+            return Err(SyscallErr::EINVAL);
+        };
+        let inner = self.inner.lock();
+        if inner.local_endpoint.is_some() {
+            return Err(SyscallErr::EINVAL);
+        }
+        let reuse_addr = inner.reuse_addr;
+        drop(inner);
+        let address = self.normalize_ipv4_mapped(endpoint.addr);
+        if !address.is_unspecified() && !self.addr_family_matches(address) {
+            return Err(SyscallErr::EAFNOSUPPORT);
+        }
+        let family = match self.ip_version {
+            IpVersion::Ipv4 => AddressFamily::Ipv4,
+            IpVersion::Ipv6 => AddressFamily::Ipv6,
+        };
+        Ok(BindIntent::inet(
+            TransportProtocol::Udp,
+            family,
+            (!address.is_unspecified()).then_some(address),
+            endpoint.port,
+            *self.bound_ifindex.lock(),
+            reuse_addr,
+            self.ipv6_v6only.load(Ordering::Acquire),
+        ))
+    }
+
+    fn install_port_reservation(&self, reservation: PortReservation) {
+        *self.port_reservation.lock() = Some(reservation);
     }
 
     fn listen(&self) -> SyscallRet {
@@ -557,8 +588,10 @@ impl Socket for UdpSocket {
     }
 
     fn socket_r_ready(&self) -> bool {
-        NET_INTERFACE.poll();
-        !self.inner.lock().rx_queue.is_empty()
+        // epoll/poll 的 state scan 只能读取已发布队列状态；poll worker 会在锁外
+        // 分发 UDP 包并通知 recv_waiters，不能从这里重入 smoltcp。
+        NET_INTERFACE.kick_from_task();
+        self.recv_ready()
     }
 
     fn socket_w_ready(&self) -> bool {
@@ -637,6 +670,7 @@ impl UdpSocket {
             socket_handler,
             bound: Mutex::new(BoundInner::new()),
             bound_ifindex: Mutex::new(None),
+            port_reservation: Mutex::new(None),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             ip_version: ver,
@@ -721,6 +755,11 @@ impl UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
+        let reservation = self.port_reservation.lock().take();
+        if let Some(reservation) = reservation {
+            // 释放与本 socket Weak 身份相同的一个 owner；reuse peer 不受影响。
+            reservation.release();
+        }
         // log::info!(
         //     "[UdpSocket::drop] drop socket {}, remoteep {:?}, localep {:?}",
         //     self.socket_handler,
@@ -757,19 +796,16 @@ impl UdpSocket {
     }
 }
 
-// 新的分发函数：直接接收 NetInterfaceInner，避免重复获取锁导致死锁！
-pub fn dispatch_udp_packets(sockets: &mut SocketSet) {
-    let mut os_socks = UDP_SOCKETS.lock();
+/// 在 DeviceStack 锁内从 smoltcp 接收队列转移出的内核所有数据包。
+pub(crate) struct UdpPacketDelivery {
+    local: IpListenEndpoint,
+    remote: IpEndpoint,
+    payload: Vec<u8>,
+}
 
-    // 顺便清理一下已经被 drop 掉的 socket
-    os_socks.retain(|w| w.strong_count() > 0);
-
-    log::debug!(
-        "[dispatch_udp_packets] scanning {} os socks, {} smoltcp sockets",
-        os_socks.len(),
-        sockets.iter().count()
-    );
-
+/// 只接触 `SocketSet`，因此可以安全地在 DeviceStack 临界区内调用。
+pub(crate) fn drain_udp_packets(sockets: &mut SocketSet) -> Vec<UdpPacketDelivery> {
+    let mut deliveries = Vec::new();
     for (handle, socket) in sockets.iter_mut() {
         // 尝试把这个 socket 识别为 UDP 类型
         if let Some(udp_sock) = smoltcp::socket::udp::Socket::downcast_mut(socket) {
@@ -786,23 +822,11 @@ pub fn dispatch_udp_packets(sockets: &mut SocketSet) {
                             remote,
                             handle
                         );
-                        // 找到最匹配的 OS UdpSocket，放入它的 rx_queue
-                        if let Some(os_sock) =
-                            find_best_match(&os_socks, udp_sock.endpoint(), remote)
-                        {
-                            let mut inner = os_sock.inner.lock();
-                            inner.rx_queue.push_back((buf, remote));
-                            // 唤醒等待这个 socket 的任务
-                            os_sock
-                                .recv_waiters
-                                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
-                        } else {
-                            log::warn!(
-                                "[dispatch_udp_packets] no match for {:?}, local={:?}",
-                                remote,
-                                udp_sock.endpoint()
-                            );
-                        }
+                        deliveries.push(UdpPacketDelivery {
+                            local: udp_sock.endpoint(),
+                            remote,
+                            payload: buf,
+                        });
                     }
                     Err(e) => {
                         log::error!(
@@ -815,6 +839,34 @@ pub fn dispatch_udp_packets(sockets: &mut SocketSet) {
                 }
             }
         }
+    }
+    deliveries
+}
+
+/// 在 DeviceStack 释放后分发到 OS socket；不能在 smoltcp 锁内取得 socket lifecycle
+/// 或 EventWaitQueue 锁，否则会形成 N2 -> N1/N3 反向嵌套。
+pub(crate) fn dispatch_udp_packets(deliveries: Vec<UdpPacketDelivery>) {
+    let sockets: Vec<Arc<UdpSocket>> = {
+        let mut registered = UDP_SOCKETS.lock();
+        registered.retain(|socket| socket.strong_count() > 0);
+        registered.iter().filter_map(Weak::upgrade).collect()
+    };
+    for delivery in deliveries {
+        let Some(socket) = find_best_match(&sockets, delivery.local, delivery.remote) else {
+            log::warn!(
+                "[dispatch_udp_packets] no match for {:?}, local={:?}",
+                delivery.remote,
+                delivery.local
+            );
+            continue;
+        };
+        {
+            let mut inner = socket.inner.lock();
+            inner.rx_queue.push_back((delivery.payload, delivery.remote));
+        }
+        socket
+            .recv_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
     }
 }
 
@@ -855,15 +907,14 @@ fn find_local_udp_recipient(remote: IpEndpoint, src: IpEndpoint) -> Option<Arc<U
 }
 
 fn find_best_match(
-    sockets: &[Weak<UdpSocket>],
+    sockets: &[Arc<UdpSocket>],
     local: IpListenEndpoint,
     remote: IpEndpoint,
 ) -> Option<Arc<UdpSocket>> {
     let mut best_match = None;
     let mut best_score = 0;
 
-    for weak_sock in sockets {
-        if let Some(sock) = weak_sock.upgrade() {
+    for sock in sockets {
             let inner = sock.inner.lock();
             let local_match = inner.local_endpoint.map(|l| l.port).unwrap_or(0) == local.port;
 
@@ -888,10 +939,9 @@ fn find_best_match(
                 );
                 if score > best_score {
                     best_score = score;
-                    best_match = Some(sock.clone());
+                    best_match = Some(Arc::clone(sock));
                 }
             }
-        }
     }
     best_match
 }

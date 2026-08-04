@@ -6,6 +6,7 @@
 use crate::net::iface::{DeviceKind, Iface};
 use crate::net::net_core::{NetDeviceEntry, IFF_LOOPBACK, IFF_RUNNING, IFF_UP, IF_OPER_UP};
 use crate::net::routing::Router;
+use crate::net::socket::inet::common::port::PortRegistry;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -20,6 +21,8 @@ pub struct NetNamespace {
     pub id: u64,
     pub device_list: Mutex<BTreeMap<usize, Arc<dyn Iface>>>,
     pub router: Mutex<Router>,
+    /// N0：仅保护端口 reservation 的短提交，绝不跨越 DeviceStack/socket 操作。
+    pub ports: Mutex<PortRegistry>,
 }
 
 impl core::fmt::Debug for NetNamespace {
@@ -38,6 +41,7 @@ lazy_static! {
         id: 0,
         device_list: Mutex::new(BTreeMap::new()),
         router: Mutex::new(Router::new()),
+        ports: Mutex::new(PortRegistry::new()),
     });
 }
 
@@ -50,6 +54,7 @@ impl NetNamespace {
             id,
             device_list: Mutex::new(BTreeMap::new()),
             router: Mutex::new(Router::new()),
+            ports: Mutex::new(PortRegistry::new()),
         })
     }
 

@@ -1,7 +1,6 @@
 use alloc::fmt;
 use alloc::vec::Vec;
 use log::debug;
-use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 
 use super::Mutex;
@@ -21,13 +20,6 @@ pub(crate) enum InetProtocol {
     Tcp,
     Udp,
     Raw,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SocketBinding {
-    pub ifindex: u32,
-    pub handle: SocketHandle,
-    pub proto: InetProtocol,
 }
 
 #[derive(Clone, Debug)]

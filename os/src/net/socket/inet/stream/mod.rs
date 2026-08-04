@@ -40,7 +40,10 @@ use self::inner::{
     with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
-use crate::net::socket::inet::common::{BoundInner, PortManager};
+use crate::net::socket::inet::common::port::{
+    AddressFamily, BindIntent, PortManager, PortReservation, TransportProtocol,
+};
+use crate::net::socket::inet::common::BoundInner;
 use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
 
@@ -132,6 +135,7 @@ pub struct TcpSocket {
     multicast_group_joined: AtomicBool,
     pub bound: Mutex<BoundInner>,
     pub bound_ifindex: Mutex<Option<u32>>,
+    port_reservation: Mutex<Option<PortReservation>>,
     pub recv_waiters: EventWaitQueue,
     pub send_waiters: EventWaitQueue,
     pub connect_waiters: EventWaitQueue,
@@ -154,6 +158,7 @@ impl TcpSocket {
             multicast_group_joined: AtomicBool::new(false),
             bound: Mutex::new(BoundInner::new()),
             bound_ifindex: Mutex::new(None),
+            port_reservation: Mutex::new(None),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
@@ -456,6 +461,38 @@ impl Socket for TcpSocket {
         }
     }
 
+    fn snapshot_bind_intent(&self, endpoint: &Endpoint) -> Result<BindIntent, SyscallErr> {
+        let Endpoint::Ip(endpoint) = endpoint else {
+            return Err(SyscallErr::EINVAL);
+        };
+        let inner = self.inner.lock();
+        if !matches!(&*inner, Inner::Init(Init::Unbound(_, _))) {
+            return Err(SyscallErr::EINVAL);
+        }
+        drop(inner);
+        let address = self.normalize_ipv4_mapped(endpoint.addr);
+        if !address.is_unspecified() && !self.addr_family_matches(address) {
+            return Err(SyscallErr::EAFNOSUPPORT);
+        }
+        let family = match self.ip_version {
+            IpVersion::Ipv4 => AddressFamily::Ipv4,
+            IpVersion::Ipv6 => AddressFamily::Ipv6,
+        };
+        Ok(BindIntent::inet(
+            TransportProtocol::Tcp,
+            family,
+            (!address.is_unspecified()).then_some(address),
+            endpoint.port,
+            *self.bound_ifindex.lock(),
+            self.reuse_addr.load(Ordering::Acquire),
+            self.ipv6_v6only.load(Ordering::Acquire),
+        ))
+    }
+
+    fn install_port_reservation(&self, reservation: PortReservation) {
+        *self.port_reservation.lock() = Some(reservation);
+    }
+
     /// 将 TCP socket 标记为监听状态。
     ///
     /// # Semantics
@@ -557,8 +594,8 @@ impl Socket for TcpSocket {
                 );
                 *inner = Inner::Connecting(connecting);
                 drop(inner);
-                // 做一次非阻塞状态检查
-                NET_INTERFACE.poll();
+                // 握手推进由 poll worker 异步完成；不得在 socket 路径内重入 smoltcp。
+                NET_INTERFACE.kick_from_task();
                 let inner = self.inner.lock();
                 match &*inner {
                     Inner::Connecting(c) => {
@@ -588,20 +625,20 @@ impl Socket for TcpSocket {
         }
     }
 
-    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠、不 poll（上层已 poll 过）。
+    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠、不 poll。
     ///
     /// # Semantics
     ///
     /// `sys_connect` 的 `WaitQueue` 条件闭包和 `try_connect` 路径调用此方法。
-    /// 先调用 `NET_INTERFACE.try_poll()` 推进 smoltcp 状态，然后查询底层 TCP
-    /// state。若状态已是 `Established`/`CloseWait` 但 `Inner::Connecting` 的
+    /// 请求 poll worker 推进 smoltcp 状态，然后查询现有底层 TCP state。若状态已是
+    /// `Established`/`CloseWait` 但 `Inner::Connecting` 的
     /// `result` 字段未更新，强制修正为 `ConnectResult::Connected`。
     ///
     /// 成功后调用 `finish_connecting()` 做状态转换并发布 fast path 键。
     /// `Closed` 状态（对端 RST）映射为 `ECONNREFUSED`。
     ///
-    /// **重要**：调用前必须由上层 `NET_INTERFACE.poll()` 或 `try_poll()`。
-    /// 条件闭包内不要再 poll（会导致 smoltcp 锁重入死锁）。
+    /// **重要**：本函数可位于 WaitQueue 条件闭包，但只发布 kick；条件闭包绝不
+    /// 直接 poll 或取得 DeviceStack 锁。
     ///
     /// # Errors
     ///
@@ -609,7 +646,7 @@ impl Socket for TcpSocket {
     /// - `ECONNREFUSED`：对端 RST
     /// - `EAGAIN`：仍在握手中
     fn try_connect(&self) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
+        NET_INTERFACE.kick_from_task();
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
@@ -655,7 +692,7 @@ impl Socket for TcpSocket {
     }
 
     fn take_error(&self) -> Option<SyscallErr> {
-        NET_INTERFACE.try_poll();
+        NET_INTERFACE.kick_from_task();
         let mut inner = self.inner.lock();
         match &mut *inner {
             Inner::Init(Init::Bound { pending_error, .. }) => pending_error.take(),
@@ -701,12 +738,9 @@ impl Socket for TcpSocket {
         let mut fast_ifindex: u32 = 0;
 
         let accepted_bound = if let Inner::Established(ref est) = connected_inner {
-            if let Some(binding) = NET_INTERFACE
-                .inner_handler(|inner_ref| inner_ref.bindings.get(&est.handle).copied())
-                .flatten()
-            {
+            if let Some(ifindex) = NET_INTERFACE.routed_ifindex(est.handle) {
                 fast_route = Some(est.handle);
-                fast_ifindex = binding.ifindex;
+                fast_ifindex = ifindex;
             }
             let ifindex = fast_ifindex;
             let mut b = BoundInner::new();
@@ -725,6 +759,7 @@ impl Socket for TcpSocket {
             multicast_group_joined: AtomicBool::new(false),
             bound: Mutex::new(accepted_bound),
             bound_ifindex: Mutex::new(None),
+            port_reservation: Mutex::new(None),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
@@ -931,11 +966,9 @@ impl Socket for TcpSocket {
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
-            if let Some((_route, ifindex)) = fast {
-                NET_INTERFACE.try_poll_stack(ifindex);
-            } else {
-                NET_INTERFACE.try_poll();
-            }
+            // route/ifindex 仍由后续 target-stack access 重验；此处仅请求 worker，
+            // 不在 syscall/WaitQueue 路径同步推进任何 DeviceStack。
+            NET_INTERFACE.kick_from_task();
         }
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
@@ -1025,11 +1058,7 @@ impl Socket for TcpSocket {
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
-            if let Some((_route, ifindex)) = fast {
-                NET_INTERFACE.try_poll_stack(ifindex);
-            } else {
-                NET_INTERFACE.try_poll();
-            }
+            NET_INTERFACE.kick_from_task();
         }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
@@ -1085,9 +1114,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
-            NET_INTERFACE.try_poll();
-        }
+        NET_INTERFACE.kick_from_task();
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
             #[cfg(feature = "net_perf_diag")]
@@ -1121,9 +1148,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_send_user(&self, buf: &UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
-            NET_INTERFACE.try_poll();
-        }
+        NET_INTERFACE.kick_from_task();
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
@@ -1235,6 +1260,11 @@ unsafe impl Sync for TcpSocket {}
 impl Drop for TcpSocket {
     fn drop(&mut self) {
         self.invalidate_fast();
+        let reservation = self.port_reservation.lock().take();
+        if let Some(reservation) = reservation {
+            // socket 已不再可被新 bind 使用；只按 key+token+Weak 身份移除自己的 owner。
+            reservation.release();
+        }
         {
             let inner = self.inner.lock();
             let state_name = match &*inner {

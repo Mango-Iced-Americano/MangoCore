@@ -395,6 +395,19 @@ impl Endpoint {
 
 pub trait Socket: Send + Sync {
     fn bind(&self, endpoint: &Endpoint) -> SyscallRet;
+    /// 在 socket 生命周期锁内把 bind 参数复制为内核所有的 PortRegistry 意图。
+    fn snapshot_bind_intent(
+        &self,
+        _endpoint: &Endpoint,
+    ) -> Result<crate::net::socket::inet::common::port::BindIntent, SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    /// reservation 已在 N0 提交后才安装到 socket；不得在 N0 内调用此方法。
+    fn install_port_reservation(
+        &self,
+        _reservation: crate::net::socket::inet::common::port::PortReservation,
+    ) {
+    }
     fn listen(&self) -> SyscallRet;
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet;
     /// 尝试建立连接一次（不阻塞），检查一次握手状态。

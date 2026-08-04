@@ -4,38 +4,38 @@ use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{IfaceDevice, NullNetDevice, SmoltcpDeviceAdapter};
 use crate::net::iface::Iface;
 use crate::net::net_core::{self, NetDeviceEntry};
-use crate::net::routing::{InetProtocol, RouteSocketHandle, SocketBinding};
-use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
+use crate::net::routing::{InetProtocol, RouteSocketHandle};
+use crate::net::socket::inet::datagram::udp::{dispatch_udp_packets, drain_udp_packets};
 use crate::net::socket::inet::stream::inner::tcp_state_code;
 use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
 use crate::trace_event;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 #[cfg(feature = "net_perf_diag")]
-use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use core::sync::atomic::Ordering as AtomicOrdering;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
-    phy::{Device, Loopback, Medium},
+    phy::{Device, Loopback, Medium, TxToken},
     socket::{dhcpv4, raw, tcp, udp, AnySocket},
     time::{Duration, Instant},
     wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
 };
 
-/// 全局网络接口单例，管理所有 `DeviceStack`、socket 绑定表和 smoltcp 轮询。
+/// 全局网络接口单例，管理短持 route 目录和逐设备 smoltcp 栈。
 ///
 /// # Locking
 ///
-/// 内部使用 `Mutex<Option<NetInterfaceInner>>` 保护。`init()` 完成后 `inner` 始终为
-/// `Some(…)`。`try_poll_irq()` 通过 `try_lock()` 实现无 spin 的中断路径，
-/// 并把需要其他子系统锁的 DHCP 租约提交延迟到任务上下文。
+/// `directory` 只保护 stack 生命周期和 route 发布；`init()` 完成后其值始终为
+/// `Some(…)`。smoltcp `Interface + SocketSet` 仅由每个 `DeviceStackCell::inner` 保护。
 ///
 /// # Ownership
 ///
-/// `DeviceStack` 仅存储在 `NetInterfaceInner::stacks` 中。`add_veth_stack()`
+/// `DeviceStackCell` 仅存储在 `NetDirectory::stacks` 中。`add_veth_stack()`
 /// / `remove_veth_stack()` 管理 veth 设备的全局注册，调用者负责传入正确的 `Arc<dyn Iface>`。
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
@@ -145,7 +145,7 @@ fn record_poll_perf(stack_only: bool, progressed: bool, lock_busy: bool, elapsed
 /// 如果 `NET_DEVICE` 中无网卡，仅启用 loopback。
 pub fn init() {
     // Initialize net_core first (registers lo and eth0 into the netns device list).
-    // Must happen before NET_INTERFACE.init() so that NetInterfaceInner::new()
+    // Must happen before NET_INTERFACE.init() so that NetDirectory::new()
     // can read IP addresses from the netns device list.
     let has_nic = NET_DEVICE.lock().is_some();
     net_core::init();
@@ -164,39 +164,123 @@ pub fn init() {
     }
 }
 
-/// smoltcp 网络栈包装器，通过 `DeviceStack` 将每个网卡与一个 `smoltcp::Interface`
-/// 和一个 `SocketSet` 关联。
+/// 网络轮询测试钩子触发点（ktest-only，生产 boot 恒为 None）。
 ///
-/// # Locking
-///
-/// 所有公开方法获取 `self.inner` 锁。`try_poll_irq()` 使用 `try_lock()` 避免在
-/// 中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，不能从持锁路径中重入。
-///
-/// # Ownership
-///
-/// 全局单例 `NET_INTERFACE` 拥有所有 `DeviceStack`。socket 通过 `RouteSocketHandle`
-/// 在 `bindings` 表中索引到具体的 `SocketHandle`。
-pub struct NetInterface<'a> {
-    inner: Mutex<Option<NetInterfaceInner<'a>>>,
+/// 这些钩子只服务于 net_smp ktest 对竞态窗口的确定性探测，生产路径不得安装；
+/// 每次 ktest 结束后必须通过 `set_test_poll_hook(None)` 清除。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NetPollTestHookPoint {
+    /// WP1 的历史窗口标记；为既有 ktest ABI 保留，但 WP6 不再触发它。
+    IrqAfterTryLockBeforeDrop,
+    /// IRQ 路径发布 poll generation 前触发。此时尚未修改任意 poll 原子状态。
+    IrqBeforePublish,
 }
 
-/// 一个网卡设备对应的完整 smoltcp 栈上下文。
+/// 网络轮询测试钩子函数类型（ktest 专用）。
 ///
-/// 包含设备适配器（`IfaceDevice`）、`smoltcp::Interface` 和附带的 `SocketSet`，
-/// 以及对应的 `net_core` 设备元数据（`nic: Arc<dyn Iface>`）。
+/// 回调运行在 IRQ 路径，禁止加锁、睡眠、分配或打印。
+pub(crate) type NetPollTestHook = fn(NetPollTestHookPoint);
+
+/// 网络轮询 worker 的单调请求序列。
 ///
-/// `sockets` 中的 `SocketHandle` 通过 `NetInterfaceInner::bindings` 表映射到
-/// 内核级 `RouteSocketHandle`。
-pub struct DeviceStack<'a> {
-    /// 来自 `net_core` 的设备元数据（名称、ifindex、flags 等）。
-    pub nic: Arc<dyn Iface>,
-    pub device: IfaceDevice,
-    pub iface: Interface,
-    pub sockets: SocketSet<'a>,
-    /// Persistent DHCP socket for interfaces that require lease renewal.
-    pub dhcp_handle: Option<SocketHandle>,
-    /// Latest lease event awaiting commit outside interrupt context.
+/// `requested` 与 `completed` 只表达“至少有一次 poll 请求尚未处理”，不记录包数。
+/// IRQ 只能发布 generation 和 deferred 标志；WaitQueue 唤醒必须由任务/idle 安全点完成。
+struct NetPollControl {
+    requested: AtomicU64,
+    completed: AtomicU64,
+    deferred_wake: AtomicBool,
+    wait_queue: Mutex<Option<crate::task::WaitQueue>>,
+}
+
+impl NetPollControl {
+    const fn new() -> Self {
+        Self {
+            requested: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            deferred_wake: AtomicBool::new(false),
+            wait_queue: Mutex::new(None),
+        }
+    }
+}
+
+/// smoltcp 网络栈目录。
+///
+/// 目录只保存设备栈和 route ID 到设备栈的弱引用；绝不在目录锁内执行 smoltcp
+/// 操作。这样 loopback、eth 和 veth 可以分别持有各自的 `DeviceStackCell` 锁推进。
+pub struct NetInterface<'a> {
+    directory: Mutex<Option<NetDirectory<'a>>>,
+    /// route ID 永不复用，即使 smoltcp 的 SocketHandle slot 已被回收也不能让旧 route
+    /// 指向新 socket。
+    next_route_id: AtomicUsize,
+    poll: NetPollControl,
+    /// ktest 专用轮询钩子（原子编码：0 = None，否则为 `NetPollTestHook` 函数指针地址）。
+    ///
+    /// 生产 boot 恒为 0（None）；`set_test_poll_hook` 可随时安装或清除。
+    /// 使用 `AtomicUsize` 而非普通字段：`set_test_poll_hook(&self)` 需要跨 CPU
+    /// 安全的内驻可变性，且 IRQ 路径读取不得引入新锁。
+    test_poll_hook: AtomicUsize,
+}
+
+impl<'a> NetInterface<'a> {
+    /// 设置/清除 ktest 专用轮询钩子。
+    ///
+    /// 传入 `None` 可清除已安装的钩子。生产 boot 不调用本方法，字段保持 `None`。
+    /// 函数指针以单字原子编码（0 = None），读取端在 IRQ 路径，不引入新锁；
+    /// 回调约束见 `NetPollTestHook`。
+    pub(crate) fn set_test_poll_hook(&self, hook: Option<NetPollTestHook>) {
+        let v = match hook {
+            Some(h) => h as usize,
+            None => 0,
+        };
+        self.test_poll_hook.store(v, Ordering::SeqCst);
+    }
+}
+
+/// 路由目录在 N0 锁域内提供短生命周期查询/发布；不能在该锁下取得 DeviceStack。
+pub(crate) struct NetDirectory<'a> {
+    stacks: BTreeMap<u32, Arc<DeviceStackCell<'a>>>,
+    routes: BTreeMap<RouteSocketHandle, RouteDirectoryEntry<'a>>,
+}
+
+struct RouteDirectoryEntry<'a> {
+    stack: Weak<DeviceStackCell<'a>>,
+    protocol: InetProtocol,
+    state: RouteState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteState {
+    Active,
+    Migrating,
+    Draining,
+}
+
+const STACK_ACTIVE: u8 = 0;
+const STACK_DRAINING: u8 = 1;
+const STACK_DEAD: u8 = 2;
+
+/// 每个物理/虚拟设备一个 smoltcp 串行域；同一时刻只允许持有一把该锁。
+struct DeviceStackCell<'a> {
+    ifindex: u32,
+    state: AtomicU8,
+    inner: Mutex<DeviceStackInner<'a>>,
+}
+
+struct DeviceStackInner<'a> {
+    nic: Arc<dyn Iface>,
+    device: IfaceDevice,
+    iface: Interface,
+    sockets: SocketSet<'a>,
+    /// 与 SocketSet 同锁域，route 在此重验才能阻止重用 slot 的旧 route 误访问。
+    bindings: BTreeMap<RouteSocketHandle, LocalSocketBinding>,
+    dhcp_handle: Option<SocketHandle>,
     pending_dhcp_event: Option<DhcpLeaseEvent>,
+}
+
+#[derive(Clone, Copy)]
+struct LocalSocketBinding {
+    handle: SocketHandle,
+    protocol: InetProtocol,
 }
 
 enum DhcpLeaseEvent {
@@ -208,7 +292,7 @@ enum DhcpLeaseEvent {
     Deconfigured,
 }
 
-fn take_dhcp_event(stack: &mut DeviceStack<'_>) -> Option<DhcpLeaseEvent> {
+fn take_dhcp_event(stack: &mut DeviceStackInner<'_>) -> Option<DhcpLeaseEvent> {
     let handle = stack.dhcp_handle?;
     let event = match stack.sockets.get_mut::<dhcpv4::Socket>(handle).poll()? {
         dhcpv4::Event::Configured(config) => DhcpLeaseEvent::Configured {
@@ -249,7 +333,7 @@ fn take_dhcp_event(stack: &mut DeviceStack<'_>) -> Option<DhcpLeaseEvent> {
     Some(event)
 }
 
-fn capture_dhcp_event(stack: &mut DeviceStack<'_>) -> bool {
+fn capture_dhcp_event(stack: &mut DeviceStackInner<'_>) -> bool {
     match take_dhcp_event(stack) {
         Some(event) => {
             // Only the newest state matters: Configured followed by
@@ -294,33 +378,13 @@ fn commit_dhcp_event(ifindex: u32, event: DhcpLeaseEvent) {
     }
 }
 
-/// `NetInterfaceInner` 持有所有 `DeviceStack`、socket 路由绑定表和 socket ID 计数器。
-///
-/// # Fields
-///
-/// - `stacks`: 每个已注册网卡一个 `DeviceStack`（顺序固定：lo=0, eth=1, veth…）
-/// - `bindings`: 将内核级 `RouteSocketHandle` 映射到 smoltcp `SocketHandle` + ifindex
-/// - `next_socket_id`: 单调递增的 socket ID 分配器
-pub struct NetInterfaceInner<'a> {
-    pub stacks: Vec<DeviceStack<'a>>,
-    pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,
-    pub next_socket_id: usize,
-}
-
-impl<'a> NetInterfaceInner<'a> {
-    pub(crate) fn stack_mut(&mut self, ifindex: u32) -> Option<&mut DeviceStack<'a>> {
-        self.stacks
-            .iter_mut()
-            .find(|s| s.nic.nic_id() as u32 == ifindex)
-    }
-
-    fn resolve(&self, rh: RouteSocketHandle) -> Option<SocketHandle> {
-        self.bindings.get(&rh).map(|b| b.handle)
-    }
-
+impl<'a> NetDirectory<'a> {
     fn new() -> Self {
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let mut stacks = Vec::new();
+        let mut directory = Self {
+            stacks: BTreeMap::new(),
+            routes: BTreeMap::new(),
+        };
 
         // Stack 0: loopback (ifindex=1)
         let lo_nic: Arc<dyn Iface> = net_core::find_by_name("lo")
@@ -357,14 +421,22 @@ impl<'a> NetInterfaceInner<'a> {
                     .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
                     .unwrap();
             });
-            stacks.push(DeviceStack {
-                nic: lo_nic,
-                device: lo_device,
-                iface: lo_iface,
-                sockets: lo_sockets,
-                dhcp_handle: None,
-                pending_dhcp_event: None,
-            });
+            directory.stacks.insert(
+                1,
+                Arc::new(DeviceStackCell {
+                    ifindex: 1,
+                    state: AtomicU8::new(STACK_ACTIVE),
+                    inner: Mutex::new(DeviceStackInner {
+                        nic: lo_nic,
+                        device: lo_device,
+                        iface: lo_iface,
+                        sockets: lo_sockets,
+                        bindings: BTreeMap::new(),
+                        dhcp_handle: None,
+                        pending_dhcp_event: None,
+                    }),
+                }),
+            );
         }
 
         // Stack 1: ethernet (ifindex=2)
@@ -509,22 +581,26 @@ impl<'a> NetInterfaceInner<'a> {
                 eth_iface.routes_mut().add_default_ipv4_route(gw).unwrap();
             }
 
-            stacks.push(DeviceStack {
-                nic: eth_nic,
-                device: eth_device,
-                iface: eth_iface,
-                sockets: eth_sockets,
-                dhcp_handle: runtime_dhcp_handle,
-                pending_dhcp_event: None,
-            });
+            directory.stacks.insert(
+                2,
+                Arc::new(DeviceStackCell {
+                    ifindex: 2,
+                    state: AtomicU8::new(STACK_ACTIVE),
+                    inner: Mutex::new(DeviceStackInner {
+                        nic: eth_nic,
+                        device: eth_device,
+                        iface: eth_iface,
+                        sockets: eth_sockets,
+                        bindings: BTreeMap::new(),
+                        dhcp_handle: runtime_dhcp_handle,
+                        pending_dhcp_event: None,
+                    }),
+                }),
+            );
         }
 
-        log::info!("[net::config] initialized {} stacks", stacks.len());
-        Self {
-            stacks,
-            bindings: BTreeMap::new(),
-            next_socket_id: 1,
-        }
+        log::info!("[net::config] initialized {} stacks", directory.stacks.len());
+        directory
     }
 }
 
@@ -541,26 +617,105 @@ impl<'a> NetInterface<'a> {
     }
 
     pub fn _init(&self) {
-        *self.inner.lock() = Some(NetInterfaceInner::new());
+        *self.directory.lock() = Some(NetDirectory::new());
     }
     pub const fn new() -> Self {
         Self {
-            inner: Mutex::new(None),
+            directory: Mutex::new(None),
+            next_route_id: AtomicUsize::new(1),
+            poll: NetPollControl::new(),
+            test_poll_hook: AtomicUsize::new(0),
         }
+    }
+
+    /// 从普通任务上下文请求一次网络推进。Release 使 worker 在 Acquire 后观察到
+    /// 请求前已提交的 socket 状态；唤醒不持有 DeviceStack/socket 锁。
+    pub fn kick_from_task(&self) {
+        self.poll.requested.fetch_add(1, Ordering::Release);
+        if let Some(wait_queue) = self.poll.wait_queue.lock().as_mut() {
+            wait_queue.wake_all();
+        }
+    }
+
+    /// 从 hard IRQ 发布一次网络推进请求。
+    ///
+    /// 此路径不得轮询、拿 WaitQueue、分配或输出；安全点随后把 deferred 标志转换为唤醒。
+    fn kick_from_irq(&self) {
+        self.poll.requested.fetch_add(1, Ordering::Release);
+        self.poll.deferred_wake.store(true, Ordering::Release);
+    }
+
+    /// 供 ktest 观察 publish 与 worker consume 的 generation，不改变 poll 状态。
+    pub(crate) fn poll_generation_snapshot(&self) -> (u64, u64) {
+        (
+            self.poll.requested.load(Ordering::Acquire),
+            self.poll.completed.load(Ordering::Acquire),
+        )
+    }
+
+    /// 在任务或 idle 安全点把 IRQ 的发布转换为 worker 唤醒。
+    pub fn run_deferred_net_wake(&self) {
+        if self.poll.deferred_wake.swap(false, Ordering::AcqRel) {
+            if let Some(wait_queue) = self.poll.wait_queue.lock().as_mut() {
+                wait_queue.wake_all();
+            }
+        }
+    }
+
+    fn run_test_poll_hook(&self, point: NetPollTestHookPoint) {
+        let hook_v = self.test_poll_hook.load(Ordering::SeqCst);
+        if hook_v == 0 {
+            return;
+        }
+        // SAFETY: [Category 5 — Invalid Values] `set_test_poll_hook` 仅写入非空
+        // `NetPollTestHook` 的函数指针位模式，0 单独表示 None；本函数排除了 0，
+        // 因而恢复出的函数指针有效且与写入类型一致。
+        let hook: NetPollTestHook = unsafe { core::mem::transmute(hook_v) };
+        hook(point);
+    }
+
+    /// 在目录锁内只克隆目标栈 Arc；调用者必须在释放目录后才取得栈锁。
+    fn stack_arc(&self, ifindex: u32) -> Option<Arc<DeviceStackCell<'a>>> {
+        self.directory
+            .lock()
+            .as_ref()?
+            .stacks
+            .get(&ifindex)
+            .cloned()
+    }
+
+    fn active_route_stack(
+        &self,
+        route: RouteSocketHandle,
+        protocol: InetProtocol,
+    ) -> Option<Arc<DeviceStackCell<'a>>> {
+        let directory = self.directory.lock();
+        let entry = directory.as_ref()?.routes.get(&route)?;
+        if entry.state != RouteState::Active || entry.protocol != protocol {
+            return None;
+        }
+        entry.stack.upgrade()
+    }
+
+    pub(crate) fn routed_ifindex(&self, route: RouteSocketHandle) -> Option<u32> {
+        let directory = self.directory.lock();
+        let entry = directory.as_ref()?.routes.get(&route)?;
+        if entry.state != RouteState::Active {
+            return None;
+        }
+        entry.stack.upgrade().map(|stack| stack.ifindex)
     }
 
     pub fn _add_socket<T>(&self, ifindex: u32, socket: T) -> Option<SocketHandle>
     where
         T: AnySocket<'a>,
     {
-        Some(
-            self.inner
-                .lock()
-                .as_mut()?
-                .stack_mut(ifindex)?
-                .sockets
-                .add(socket),
-        )
+        let stack = self.stack_arc(ifindex)?;
+        if stack.state.load(Ordering::Acquire) != STACK_ACTIVE {
+            return None;
+        }
+        let mut stack_guard = stack.inner.lock();
+        Some(stack_guard.sockets.add(socket))
     }
 
     /// Add a veth device as a DeviceStack into NET_INTERFACE.
@@ -573,50 +728,94 @@ impl<'a> NetInterface<'a> {
         let mut veth_iface = Interface::new(veth_config, &mut veth_device, now);
         let veth_sockets = SocketSet::new(vec![]);
 
-        let mut inner = self.inner.lock();
-        if let Some(ref mut inner_ref) = *inner {
-            inner_ref.stacks.push(DeviceStack {
+        let ifindex = nic.nic_id() as u32;
+        let stack = Arc::new(DeviceStackCell {
+            ifindex,
+            state: AtomicU8::new(STACK_ACTIVE),
+            inner: Mutex::new(DeviceStackInner {
                 nic,
                 device: veth_device,
                 iface: veth_iface,
                 sockets: veth_sockets,
+                bindings: BTreeMap::new(),
                 dhcp_handle: None,
                 pending_dhcp_event: None,
-            });
+            }),
+        });
+        if let Some(directory) = self.directory.lock().as_mut() {
+            directory.stacks.insert(ifindex, stack);
         }
     }
 
     /// Remove a veth DeviceStack identified by its nic_id.
     /// Silently returns if no matching stack exists.
     pub fn remove_veth_stack(&self, nic_id: u32) {
-        let mut inner = self.inner.lock();
-        if let Some(ref mut inner_ref) = *inner {
-            inner_ref.stacks.retain(|s| s.nic.nic_id() as u32 != nic_id);
-        }
+        let stack = {
+            let mut directory = self.directory.lock();
+            let Some(directory) = directory.as_mut() else {
+                return;
+            };
+            let Some(stack) = directory.stacks.remove(&nic_id) else {
+                return;
+            };
+            stack.state.store(STACK_DRAINING, Ordering::Release);
+            directory.routes.retain(|_, entry| !entry.stack.ptr_eq(&Arc::downgrade(&stack)));
+            stack
+        };
+        // 目录已先撤销全部 route；已取得 stack Arc 的访问者只能在栈锁内看到旧绑定并
+        // 线性化于本次移除之前，后续访问会在目录阶段失败。
+        stack.state.store(STACK_DEAD, Ordering::Release);
     }
 
     /// Sync an IP address into the smoltcp Interface of a DeviceStack.
     pub fn add_ip_to_stack(&self, ifindex: u32, cidr: IpCidr) {
-        let mut inner = self.inner.lock();
-        if let Some(ref mut inner_ref) = *inner {
-            if let Some(stack) = inner_ref.stack_mut(ifindex) {
-                stack.iface.update_ip_addrs(|addrs| {
-                    let _ = addrs.push(cidr);
-                });
-            }
-        }
+        let Some(stack) = self.stack_arc(ifindex) else {
+            return;
+        };
+        stack.inner.lock().iface.update_ip_addrs(|addrs| {
+            let _ = addrs.push(cidr);
+        });
     }
 
     /// Remove an IP address from the smoltcp Interface of a DeviceStack.
     pub fn remove_ip_from_stack(&self, ifindex: u32, cidr: IpCidr) {
-        let mut inner = self.inner.lock();
-        if let Some(ref mut inner_ref) = *inner {
-            if let Some(stack) = inner_ref.stack_mut(ifindex) {
-                stack.iface.update_ip_addrs(|addrs| {
-                    addrs.retain(|a| *a != cidr);
-                });
-            }
-        }
+        let Some(stack) = self.stack_arc(ifindex) else {
+            return;
+        };
+        stack.inner.lock().iface.update_ip_addrs(|addrs| {
+            addrs.retain(|a| *a != cidr);
+        });
+    }
+
+    pub fn replace_ip_addrs_on_stack(&self, ifindex: u32, cidr: IpCidr) {
+        let Some(stack) = self.stack_arc(ifindex) else {
+            return;
+        };
+        stack.inner.lock().iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+            let _ = addrs.push(cidr);
+        });
+    }
+
+    pub fn set_stack_mtu(&self, ifindex: u32, mtu: usize) {
+        let Some(stack) = self.stack_arc(ifindex) else {
+            return;
+        };
+        stack.inner.lock().iface.set_mtu(mtu);
+    }
+
+    pub fn transmit_on_stack(&self, ifindex: u32, bytes: &[u8]) -> Result<isize, crate::utils::error::SyscallErr> {
+        let stack = self
+            .stack_arc(ifindex)
+            .ok_or(crate::utils::error::SyscallErr::ENETDOWN)?;
+        let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+        let mut inner = stack.inner.lock();
+        let token = inner
+            .device
+            .transmit(timestamp)
+            .ok_or(crate::utils::error::SyscallErr::ENETDOWN)?;
+        token.consume(bytes.len(), |buffer| buffer.copy_from_slice(bytes));
+        Ok(bytes.len() as isize)
     }
 
     pub fn tcp_socket<T>(
@@ -625,9 +824,8 @@ impl<'a> NetInterface<'a> {
         ifindex: u32,
         f: impl FnOnce(&mut tcp::Socket) -> T,
     ) -> Option<T> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let stack = inner_ref.stack_mut(ifindex)?;
+        let stack = self.stack_arc(ifindex)?;
+        let mut stack = stack.inner.lock();
         let socket = stack.sockets.get_mut::<tcp::Socket>(handler);
         Some(f(socket))
     }
@@ -638,9 +836,8 @@ impl<'a> NetInterface<'a> {
         ifindex: u32,
         f: impl FnOnce(&mut udp::Socket) -> T,
     ) -> Option<T> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let stack = inner_ref.stack_mut(ifindex)?;
+        let stack = self.stack_arc(ifindex)?;
+        let mut stack = stack.inner.lock();
         let socket = stack.sockets.get_mut::<udp::Socket>(handler);
         Some(f(socket))
     }
@@ -651,20 +848,23 @@ impl<'a> NetInterface<'a> {
         ifindex: u32,
         f: impl FnOnce(&mut raw::Socket) -> T,
     ) -> Option<T> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let stack = inner_ref.stack_mut(ifindex)?;
+        let stack = self.stack_arc(ifindex)?;
+        let mut stack = stack.inner.lock();
         let socket = stack.sockets.get_mut::<raw::Socket>(handler);
         Some(f(socket))
     }
 
-    pub fn inner_handler<T>(&self, f: impl FnOnce(&mut NetInterfaceInner<'a>) -> T) -> Option<T> {
-        Some(f(self.inner.lock().as_mut()?))
+    /// 兼容旧 ktest 的目录临界区入口；禁止从闭包进入 smoltcp 或取得 DeviceStack 锁。
+    pub(crate) fn inner_handler<T>(&self, f: impl FnOnce(&mut NetDirectory<'a>) -> T) -> Option<T> {
+        Some(f(self.directory.lock().as_mut()?))
     }
 
     /// Return the ifindex of every currently-registered DeviceStack.
     pub fn stack_ifindexes(&self) -> Vec<u32> {
-        self.inner_handler(|inner| inner.stacks.iter().map(|s| s.nic.nic_id() as u32).collect())
+        self.directory
+            .lock()
+            .as_ref()
+            .map(|directory| directory.stacks.keys().copied().collect())
             .unwrap_or_default()
     }
 
@@ -673,126 +873,186 @@ impl<'a> NetInterface<'a> {
         let tcp = crate::net::TCP_SOCKETS.lock().len();
         let raw = crate::net::RAW_SOCKETS.lock().len();
         let pending = TCP_SOCKETS_TO_REMOVE.lock().len() + UDP_SOCKETS_TO_REMOVE.lock().len();
-        // UDP: count via inner sockets (only if initialized)
-        let udp = match self.inner.lock().as_ref() {
-            Some(inner) => {
-                let tcp_count = inner
-                    .stacks
+        let stacks: Vec<_> = self
+            .directory
+            .lock()
+            .as_ref()
+            .map(|directory| directory.stacks.values().cloned().collect())
+            .unwrap_or_default();
+        let udp = stacks
+            .iter()
+            .map(|stack| {
+                stack
+                    .inner
+                    .lock()
+                    .sockets
                     .iter()
-                    .flat_map(|s| s.sockets.iter())
-                    .filter(|(_h, sock)| matches!(sock, smoltcp::socket::Socket::Tcp(_)))
-                    .count();
-                let raw_count = inner
-                    .stacks
-                    .iter()
-                    .flat_map(|s| s.sockets.iter())
-                    .filter(|(_h, sock)| matches!(sock, smoltcp::socket::Socket::Raw(_)))
-                    .count();
-                inner
-                    .stacks
-                    .iter()
-                    .flat_map(|s| s.sockets.iter())
+                    .filter(|(_, socket)| matches!(socket, smoltcp::socket::Socket::Udp(_)))
                     .count()
-                    .saturating_sub(tcp_count)
-                    .saturating_sub(raw_count)
-            }
-            None => 0,
-        };
+            })
+            .sum();
         (tcp, udp, raw, pending)
     }
 
     pub fn poll(&self) {
-        if self.inner.lock().is_none() {
-            crate::task::perf::record_net_poll(false, false);
-            #[cfg(feature = "net_perf_diag")]
-            record_poll_perf(false, false, false, 0);
-            return;
-        }
+        self.kick_from_task();
+    }
+
+    /// 兼容旧调用方的 task-context kick。真实 smoltcp 推进只由 poll worker 完成。
+    pub fn try_poll(&self) -> bool {
+        self.kick_from_task();
+        true
+    }
+
+    /// Hard-IRQ publish-only network kick。
+    ///
+    /// 此函数的上界仅为两个原子 store 与可选 ktest hook；不得触碰目录、
+    /// DeviceStack、WaitQueue 或 smoltcp 锁。
+    pub fn try_poll_irq(&self) -> bool {
+        self.run_test_poll_hook(NetPollTestHookPoint::IrqBeforePublish);
+        self.kick_from_irq();
+        true
+    }
+    /// 只尝试目标 DeviceStack；目录锁只用于取得 Arc，因此持有 stack A 不会阻塞 stack B。
+    pub fn try_poll_stack(&self, ifindex: u32) -> bool {
+        let Some(stack) = self.stack_arc(ifindex) else {
+            return false;
+        };
+        *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = stack.ifindex;
+        let mut stack_guard = match stack.inner.try_lock() {
+            Some(guard) => guard,
+            None => {
+                // 某个 DeviceStack 忙时不能阻塞 worker；重新发布 generation，使本轮
+                // 已完成的其它 stack 不受影响，且该 stack 在锁释放后必定获得重试。
+                self.kick_from_task();
+                crate::task::perf::record_net_poll(false, true);
+                #[cfg(feature = "net_perf_diag")]
+                record_poll_perf(true, false, true, 0);
+                return false;
+            }
+        };
         #[cfg(feature = "net_perf_diag")]
         let poll_start = crate::hal::get_time();
-        let progressed = self.poll_once(true);
+        let packet_frames = match &stack_guard.device {
+            IfaceDevice::Veth(veth) => veth.inner.rx_queue.lock().iter().cloned().collect(),
+            IfaceDevice::Lo(_) | IfaceDevice::Eth(_) => Vec::new(),
+        };
+        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+        let DeviceStackInner {
+            iface,
+            device,
+            sockets,
+            ..
+        } = &mut *stack_guard;
+        let mut progressed = iface.poll(now, device, sockets);
+        progressed |= capture_dhcp_event(&mut stack_guard);
+        let dhcp_event = stack_guard
+            .pending_dhcp_event
+            .take()
+            .map(|event| (stack.ifindex, event));
+        let packets = drain_udp_packets(&mut stack_guard.sockets);
+        drop(stack_guard);
+        crate::net::socket::packet::deliver_veth_frame_snapshot(stack.ifindex, packet_frames);
+        dispatch_udp_packets(packets);
+        if let Some((ifindex, event)) = dhcp_event {
+            commit_dhcp_event(ifindex, event);
+        }
+        // smoltcp 的 `poll()` 返回值不涵盖全部 socket readiness 状态转换；在 N2
+        // 释放后统一刷新 pollee 并通知，避免把 event/epoll 唤醒带进 DeviceStack。
+        crate::net::wake_tcp_waiters();
+        crate::net::wake_raw_waiters();
+        crate::net::wake_tcp_accept_waiters();
         crate::task::perf::record_net_poll(progressed, false);
         #[cfg(feature = "net_perf_diag")]
         record_poll_perf(
-            false,
+            true,
             progressed,
             false,
             crate::hal::get_time().wrapping_sub(poll_start),
         );
+        progressed
     }
 
-    /// Non-blocking task-context poll: skip if the inner lock is already held.
-    /// Lease events are committed after the interface lock is released.
-    pub fn try_poll(&self) -> bool {
-        let guard = self.inner.try_lock();
-        match guard {
-            Some(inner) if inner.is_some() => {
-                drop(inner);
-                #[cfg(feature = "net_perf_diag")]
-                let poll_start = crate::hal::get_time();
-                let progressed = self.poll_once(true);
-                crate::task::perf::record_net_poll(progressed, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(
-                    false,
-                    progressed,
-                    false,
-                    crate::hal::get_time().wrapping_sub(poll_start),
-                );
-                true
-            }
-            Some(_) => {
-                crate::task::perf::record_net_poll(false, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(false, false, false, 0);
-                false
-            }
-            None => {
-                crate::task::perf::record_net_poll(false, true);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(false, false, true, 0);
-                false
+    /// 目录锁只用于克隆稳定的栈 Arc；真正的 smoltcp poll 从不持有目录锁。
+    fn snapshot_stack_arcs(&self) -> Vec<Arc<DeviceStackCell<'a>>> {
+        self.directory
+            .lock()
+            .as_ref()
+            .map(|directory| directory.stacks.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// 在 worker 的 task context 收集待删除 route。该步骤不持有任何 DeviceStack 锁。
+    fn drain_pending_socket_removals(&self) {
+        let udp_removes: Vec<_> = UDP_SOCKETS_TO_REMOVE.lock().drain(..).collect();
+        for route in udp_removes {
+            self.remove_routed(route);
+        }
+
+        let tcp_removes: Vec<_> = TCP_SOCKETS_TO_REMOVE.lock().drain(..).collect();
+        for route in tcp_removes {
+            let closed = self
+                .tcp_routed_socket(route, |socket| socket.state() == tcp::State::Closed)
+                .unwrap_or(true);
+            if closed {
+                self.remove_routed(route);
+            } else {
+                TCP_SOCKETS_TO_REMOVE.lock().push(route);
             }
         }
     }
 
-    /// Interrupt-safe non-blocking poll.
+    /// 一轮 worker poll：每个 stack 只试拿一次锁；每次通知均由 `try_poll_stack()`
+    /// 在释放 DeviceStack 后完成，严格保持 N2 -> N3 不反向嵌套。
+    fn poll_each_stack_bounded(&self) {
+        self.drain_pending_socket_removals();
+        for stack in self.snapshot_stack_arcs() {
+            if stack.state.load(Ordering::Acquire) == STACK_ACTIVE {
+                let _ = self.try_poll_stack(stack.ifindex);
+            }
+        }
+    }
+
+    /// CPU0 专属的网络轮询 worker。
     ///
-    /// smoltcp may consume a DHCP event here, but publishing that lease needs
-    /// device-list and router locks. The event is retained in DeviceStack and
-    /// committed by the next task-context poll.
-    pub fn try_poll_irq(&self) -> bool {
-        let guard = self.inner.try_lock();
-        match guard {
-            Some(inner) if inner.is_some() => {
-                drop(inner);
-                #[cfg(feature = "net_perf_diag")]
-                let poll_start = crate::hal::get_time();
-                let progressed = self.poll_once(false);
-                crate::task::perf::record_net_poll(progressed, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(
-                    false,
-                    progressed,
-                    false,
-                    crate::hal::get_time().wrapping_sub(poll_start),
-                );
-                true
+    /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；这里不再修改
+    /// 运行期 affinity。`completed` 只写入本轮开始取得的 target，防止 poll 中的新
+    /// 请求被旧轮次吞掉。
+    pub fn net_poll_worker(&self) {
+        let mut observed = self.poll.completed.load(Ordering::Acquire);
+        loop {
+            match crate::task::WaitQueue::wait_event_interruptible_lazy(&self.poll.wait_queue, || {
+                (self.poll.requested.load(Ordering::Acquire) != observed).then_some(0isize)
+            }) {
+                crate::task::WaitResult::Ready(_) => {}
+                crate::task::WaitResult::Interrupted => {
+                    let stopping = crate::task::current_task()
+                        .map(|task| task.process.thread_must_exit(task.gettid()))
+                        .unwrap_or(true);
+                    if stopping {
+                        crate::task::zombify_current_and_run_next();
+                    }
+                }
+                crate::task::WaitResult::TimedOut => {}
             }
-            Some(_) => {
-                crate::task::perf::record_net_poll(false, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(false, false, false, 0);
-                false
-            }
-            None => {
-                crate::task::perf::record_net_poll(false, true);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(false, false, true, 0);
-                false
+
+            loop {
+                let target = self.poll.requested.load(Ordering::Acquire);
+                self.poll_each_stack_bounded();
+                self.poll.completed.store(target, Ordering::Release);
+                observed = target;
+                if self.poll.requested.load(Ordering::Acquire) == target {
+                    break;
+                }
             }
         }
     }
+
+    pub fn _poll(&self) {
+        self.kick_from_task();
+    }
+
+    #[cfg(any())]
     /// Non-blocking poll ONLY the specified stack (by ifindex).
     /// Skips remove-list draining and accept scanning — those are handled by
     /// the periodic full poll in the idle loop.
@@ -863,7 +1123,8 @@ impl<'a> NetInterface<'a> {
         progressed
     }
 
-    fn poll_once(&self, commit_dhcp: bool) -> bool {
+    #[cfg(any())]
+    fn old_poll_once(&self, commit_dhcp: bool) -> bool {
         let mut progressed = false;
         let mut dhcp_events = Vec::new();
         self.inner_handler(|inner| {
@@ -991,7 +1252,8 @@ impl<'a> NetInterface<'a> {
             crate::task::try_yield(); // 可选：避免占着 CPU 不放
         }
     }
-    pub fn _poll(&self) {
+    #[cfg(any())]
+    pub fn old_poll(&self) {
         log::trace!("[NetInterface::poll] poll...");
         self.inner_handler(|inner| {
             let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
@@ -1096,10 +1358,271 @@ impl<'a> NetInterface<'a> {
         crate::net::wake_tcp_waiters();
         crate::net::wake_raw_waiters();
     }
+    /// 旧的直接 SocketHandle API 只服务于未路由内部 socket；公开 Inet socket 必须
+    /// 使用 route ID，从而在 DeviceStack 内重验绑定。
     pub fn remove(&self, handler: SocketHandle, ifindex: u32) {
+        let Some(stack) = self.stack_arc(ifindex) else {
+            return;
+        };
+        let mut stack_guard = stack.inner.lock();
+        let removed = stack_guard.sockets.remove(handler);
+        drop(stack_guard);
+        drop(removed);
+    }
+
+    pub fn _remove(&self, handler: SocketHandle, ifindex: u32) {
+        self.remove(handler, ifindex);
+    }
+
+    fn add_routed_socket_on_stack<T>(
+        &self,
+        proto: InetProtocol,
+        socket: T,
+        ifindex: u32,
+    ) -> Option<RouteSocketHandle>
+    where
+        T: AnySocket<'a>,
+    {
+        let stack = self.stack_arc(ifindex)?;
+        let route = RouteSocketHandle(
+            self.next_route_id
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .ok()?,
+        );
+        let handle = {
+            let mut inner = stack.inner.lock();
+            if stack.state.load(Ordering::Acquire) != STACK_ACTIVE {
+                return None;
+            }
+            let handle = inner.sockets.add(socket);
+            inner.bindings.insert(route, LocalSocketBinding { handle, protocol: proto });
+            handle
+        };
+        let published = {
+            let mut directory = self.directory.lock();
+            let directory = directory.as_mut()?;
+            let current = directory.stacks.get(&ifindex)?;
+            if !Arc::ptr_eq(current, &stack) || stack.state.load(Ordering::Acquire) != STACK_ACTIVE {
+                false
+            } else {
+                directory.routes.insert(
+                    route,
+                    RouteDirectoryEntry {
+                        stack: Arc::downgrade(&stack),
+                        protocol: proto,
+                        state: RouteState::Active,
+                    },
+                );
+                true
+            }
+        };
+        if published {
+            return Some(route);
+        }
+        // 设备在 local binding 建立后被撤销时，读者尚未看到该 route；撤销只在栈锁内
+        // 完成，析构在锁外执行。
+        let removed = {
+            let mut inner = stack.inner.lock();
+            inner
+                .bindings
+                .remove(&route)
+                .map(|binding| inner.sockets.remove(binding.handle))
+        };
+        drop(removed);
+        let _ = handle;
+        None
+    }
+
+    pub fn add_routed_socket<T>(&self, proto: InetProtocol, socket: T) -> Option<RouteSocketHandle>
+    where
+        T: AnySocket<'a>,
+    {
+        let ifindex = net_core::default_iface().map(|iface| iface.ifindex).unwrap_or(1);
+        self.add_routed_socket_on_stack(proto, socket, ifindex)
+    }
+
+    pub fn add_routed_socket_on<T>(
+        &self,
+        proto: InetProtocol,
+        socket: T,
+        ifindex: u32,
+    ) -> Option<RouteSocketHandle>
+    where
+        T: AnySocket<'a>,
+    {
+        self.add_routed_socket_on_stack(proto, socket, ifindex)
+    }
+
+    pub fn tcp_routed_socket<T>(
+        &self,
+        route: RouteSocketHandle,
+        f: impl FnOnce(&mut tcp::Socket) -> T,
+    ) -> Option<T> {
+        let stack = self.active_route_stack(route, InetProtocol::Tcp)?;
+        let mut inner = stack.inner.lock();
+        let binding = *inner.bindings.get(&route)?;
+        if binding.protocol != InetProtocol::Tcp {
+            return None;
+        }
+        Some(f(inner.sockets.get_mut::<tcp::Socket>(binding.handle)))
+    }
+
+    pub fn udp_routed_socket<T>(
+        &self,
+        route: RouteSocketHandle,
+        f: impl FnOnce(&mut udp::Socket) -> T,
+    ) -> Option<T> {
+        let stack = self.active_route_stack(route, InetProtocol::Udp)?;
+        let mut inner = stack.inner.lock();
+        let binding = *inner.bindings.get(&route)?;
+        if binding.protocol != InetProtocol::Udp {
+            return None;
+        }
+        Some(f(inner.sockets.get_mut::<udp::Socket>(binding.handle)))
+    }
+
+    pub fn raw_routed_socket<T>(
+        &self,
+        route: RouteSocketHandle,
+        f: impl FnOnce(&mut raw::Socket) -> T,
+    ) -> Option<T> {
+        let stack = self.active_route_stack(route, InetProtocol::Raw)?;
+        let mut inner = stack.inner.lock();
+        let binding = *inner.bindings.get(&route)?;
+        if binding.protocol != InetProtocol::Raw {
+            return None;
+        }
+        Some(f(inner.sockets.get_mut::<raw::Socket>(binding.handle)))
+    }
+
+    pub fn tcp_connect(
+        &self,
+        route: RouteSocketHandle,
+        remote: smoltcp::wire::IpEndpoint,
+        local: smoltcp::wire::IpEndpoint,
+    ) -> Option<Result<(), smoltcp::socket::tcp::ConnectError>> {
+        let stack = self.active_route_stack(route, InetProtocol::Tcp)?;
+        let mut inner = stack.inner.lock();
+        let binding = *inner.bindings.get(&route)?;
+        if binding.protocol != InetProtocol::Tcp {
+            return None;
+        }
+        let DeviceStackInner { iface, sockets, .. } = &mut *inner;
+        let context = iface.context();
+        Some(sockets.get_mut::<tcp::Socket>(binding.handle).connect(context, remote, local))
+    }
+
+    pub fn remove_routed(&self, route: RouteSocketHandle) {
+        let entry = self.directory.lock().as_mut().and_then(|directory| {
+            let entry = directory.routes.get_mut(&route)?;
+            entry.state = RouteState::Draining;
+            directory.routes.remove(&route)
+        });
+        let Some(stack) = entry.and_then(|entry| entry.stack.upgrade()) else {
+            return;
+        };
+        let removed = {
+            let mut inner = stack.inner.lock();
+            inner
+                .bindings
+                .remove(&route)
+                .map(|binding| inner.sockets.remove(binding.handle))
+        };
+        drop(removed);
+    }
+
+    pub fn rebind_routed_udp(
+        &self,
+        route: RouteSocketHandle,
+        new_ifindex: u32,
+    ) -> Option<RouteSocketHandle> {
+        let source = {
+            let mut directory = self.directory.lock();
+            let entry = directory.as_mut()?.routes.get_mut(&route)?;
+            if entry.state != RouteState::Active || entry.protocol != InetProtocol::Udp {
+                return None;
+            }
+            let source = entry.stack.upgrade()?;
+            if source.ifindex == new_ifindex {
+                return Some(route);
+            }
+            entry.state = RouteState::Migrating;
+            source
+        };
+        let Some(target) = self.stack_arc(new_ifindex) else {
+            if let Some(entry) = self
+                .directory
+                .lock()
+                .as_mut()
+                .and_then(|directory| directory.routes.get_mut(&route))
+            {
+                entry.stack = Arc::downgrade(&source);
+                entry.state = RouteState::Active;
+            }
+            return None;
+        };
+        if target.state.load(Ordering::Acquire) != STACK_ACTIVE {
+            if let Some(entry) = self
+                .directory
+                .lock()
+                .as_mut()
+                .and_then(|directory| directory.routes.get_mut(&route))
+            {
+                entry.stack = Arc::downgrade(&source);
+                entry.state = RouteState::Active;
+            }
+            return None;
+        }
+        let rx_buf = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 1024],
+            vec![0u8; crate::net::MAX_BUFFER_SIZE],
+        );
+        let tx_buf = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 1024],
+            vec![0u8; crate::net::MAX_BUFFER_SIZE],
+        );
+        let replacement = udp::Socket::new(rx_buf, tx_buf);
+        let removed = {
+            let mut inner = source.inner.lock();
+            let binding = inner.bindings.remove(&route)?;
+            if binding.protocol != InetProtocol::Udp {
+                return None;
+            }
+            inner.sockets.remove(binding.handle)
+        };
+        drop(removed);
+        let target_handle = {
+            let mut inner = target.inner.lock();
+            if target.state.load(Ordering::Acquire) != STACK_ACTIVE {
+                return None;
+            }
+            let handle = inner.sockets.add(replacement);
+            inner.bindings.insert(
+                route,
+                LocalSocketBinding {
+                    handle,
+                    protocol: InetProtocol::Udp,
+                },
+            );
+            handle
+        };
+        let mut directory = self.directory.lock();
+        let entry = directory.as_mut()?.routes.get_mut(&route)?;
+        if entry.state != RouteState::Migrating {
+            return None;
+        }
+        entry.stack = Arc::downgrade(&target);
+        entry.state = RouteState::Active;
+        let _ = target_handle;
+        Some(route)
+    }
+
+    #[cfg(any())]
+    pub fn old_remove(&self, handler: SocketHandle, ifindex: u32) {
         self._remove(handler, ifindex)
     }
-    pub fn _remove(&self, handler: SocketHandle, ifindex: u32) {
+    #[cfg(any())]
+    pub fn old_remove_inner_legacy(&self, handler: SocketHandle, ifindex: u32) {
         if let Some(inner) = self.inner.lock().as_mut() {
             if let Some(stack) = inner.stack_mut(ifindex) {
                 stack.sockets.remove(handler);
@@ -1107,7 +1630,8 @@ impl<'a> NetInterface<'a> {
         }
     }
 
-    pub fn add_routed_socket<T>(&self, proto: InetProtocol, socket: T) -> Option<RouteSocketHandle>
+    #[cfg(any())]
+    pub fn old_add_routed_socket_legacy<T>(&self, proto: InetProtocol, socket: T) -> Option<RouteSocketHandle>
     where
         T: AnySocket<'a>,
     {
@@ -1130,7 +1654,8 @@ impl<'a> NetInterface<'a> {
         Some(route_handle)
     }
 
-    pub fn add_routed_socket_on<T>(
+    #[cfg(any())]
+    pub fn old_add_routed_socket_on_legacy<T>(
         &self,
         proto: InetProtocol,
         socket: T,
@@ -1157,7 +1682,8 @@ impl<'a> NetInterface<'a> {
         Some(route_handle)
     }
 
-    pub fn tcp_routed_socket<T>(
+    #[cfg(any())]
+    pub fn old_tcp_routed_socket_legacy<T>(
         &self,
         rh: RouteSocketHandle,
         f: impl FnOnce(&mut tcp::Socket) -> T,
@@ -1170,7 +1696,8 @@ impl<'a> NetInterface<'a> {
         Some(f(socket))
     }
 
-    pub fn udp_routed_socket<T>(
+    #[cfg(any())]
+    pub fn old_udp_routed_socket_legacy<T>(
         &self,
         rh: RouteSocketHandle,
         f: impl FnOnce(&mut udp::Socket) -> T,
@@ -1183,7 +1710,8 @@ impl<'a> NetInterface<'a> {
         Some(f(socket))
     }
 
-    pub fn tcp_connect(
+    #[cfg(any())]
+    pub fn old_tcp_connect_legacy(
         &self,
         rh: RouteSocketHandle,
         remote: smoltcp::wire::IpEndpoint,
@@ -1197,7 +1725,8 @@ impl<'a> NetInterface<'a> {
         Some(socket.connect(stack.iface.context(), remote, local))
     }
 
-    pub fn remove_routed(&self, rh: RouteSocketHandle) {
+    #[cfg(any())]
+    pub fn old_remove_routed(&self, rh: RouteSocketHandle) {
         let mut inner = self.inner.lock();
         if let Some(inner_ref) = inner.as_mut() {
             let binding = inner_ref.bindings.remove(&rh);
@@ -1209,7 +1738,8 @@ impl<'a> NetInterface<'a> {
         }
     }
 
-    pub fn rebind_routed_udp(
+    #[cfg(any())]
+    pub fn old_rebind_routed_udp(
         &self,
         rh: RouteSocketHandle,
         new_ifindex: u32,
@@ -1247,7 +1777,8 @@ impl<'a> NetInterface<'a> {
         Some(rh)
     }
 
-    pub fn raw_routed_socket<T>(
+    #[cfg(any())]
+    pub fn old_raw_routed_socket<T>(
         &self,
         rh: RouteSocketHandle,
         f: impl FnOnce(&mut raw::Socket) -> T,
@@ -1259,6 +1790,11 @@ impl<'a> NetInterface<'a> {
         let socket = stack.sockets.get_mut::<raw::Socket>(binding.handle);
         Some(f(socket))
     }
+}
+
+/// 内核任务入口：由 boot 在创建期固定到 CPU0，随后永久消费 poll generation。
+pub fn net_poll_worker() {
+    NET_INTERFACE.net_poll_worker()
 }
 
 pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {

@@ -480,10 +480,7 @@ impl Listening {
         // Look up the ifindex of the accepted handle BEFORE taking the mutable
         // borrow, so the replacement listen socket goes on the same interface stack.
         let accepted_handle = self.handles[connected_idx];
-        let binding_ifindex = NET_INTERFACE
-            .inner_handler(|inner_ref| inner_ref.bindings.get(&accepted_handle).map(|b| b.ifindex))
-            .flatten()
-            .unwrap_or(1);
+        let binding_ifindex = NET_INTERFACE.routed_ifindex(accepted_handle).unwrap_or(1);
 
         let connected = &mut self.handles[connected_idx];
         let remote_endpoint = with_tcp_mut(*connected, |socket| {
