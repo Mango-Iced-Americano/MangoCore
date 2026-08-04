@@ -221,3 +221,26 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 - **验收门禁（§8.2 0x003 = basic+busybox）：双架构 PASS** — RV64 312/314、LA64 308/314（tools-disk 工件修复后复验）
 - mask 矩阵（0x010/0x020/0x040/0x200/0x800/0xA70）：**按用户决定取消**，非验收标准；0xA70 尝试在 LTP 段 40 分钟超时。覆盖由各 WP §8.2 门禁 + 零盘 ktest（fs_smp 8/8、net_smp 10/10、ext4 7/7 双架构）替代
 - 已知限制：矩阵未完整执行；不声称的性能结论（iperf/netperf/iozone 基线）未产出
+
+## 批次 8 = 8 项审计改进（Oracle 审查后，2026-08-04）
+
+### Oracle 裁决
+1(REAL潜伏/S2→6) 2(REAL/S1→5) 3(REAL/S1→1) 4(REAL刻意/S0→7) 5(**S0数据丢失**→3,含M1 msync空操作+M2 filemap逃逸) 6(REAL/S1→4) 7(REAL/S1→2 quick) 8(当前NOT-AN-ISSUE；develop分批导入)
+
+### 批次结构（Oracle 顺序）
+- **A（本批并行）**: A1 lwext4 全局门（quick，ext4_lwext4/*）; A2 测试真实性（deep，kernel_tests/*）
+- **B**: MAP_SHARED 工作包（mm/filemap + page_cache + mprotect + msync，关键路径）
+- **C**: poll 契约（net/config + sockets + eventpoll + syscall）
+- **D**: auto-bind reservation（port.rs + stream/udp + syscall）
+- **E**: native ext4 canonical inode txn（ext4fs/layout）
+- **F**: 开放普通用户多核 affinity + 全量门禁
+- 每批：双架构 build + 相关 ktest + 视情况 §8.2
+
+### 状态
+- [ ] A1 lwext4 全局门
+- [ ] A2 测试真实性（SKIP 机制 + AP 违规修复 + 真实交错）
+- [ ] B MAP_SHARED
+- [ ] C poll 契约
+- [ ] D auto-bind
+- [ ] E ext4 事务
+- [ ] F affinity + 门禁
