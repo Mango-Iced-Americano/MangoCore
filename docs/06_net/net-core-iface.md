@@ -2,7 +2,7 @@
 title: "网络接口抽象与设备注册中心"
 module: "net_core + iface"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
 last_updated: "2026-06-29"
 code_paths:
@@ -37,6 +37,8 @@ related_docs:
 网络接口抽象层和设备注册中心是 MangoCore 网络子系统的底层基础设施。`os/src/net/iface.rs` 定义了 `Iface` trait（所有网络设备的统一接口）、`IfaceCommon`（共享 per-interface 状态）和 `SmoltcpDeviceAccess`（&self 设备抽象）。`os/src/net/net_core.rs` 提供设备注册中心、全局 ifindex 计数器、DHCP 网关状态和 `NetDeviceEntry`（`Iface` 的基准实现）。`os/src/net/ioctl.rs` 实现 SIOCGIF\* 系列 ioctl，通过设备注册中心查询接口元数据。
 
 本文将 iface trait 定义层和设备注册管理层合并描述，涵盖从接口元数据操作到设备生命周期管理的完整路径。轮询、路由和 DHCP 探针细节不在本文范围内，相关文档见 [device-stack-and-poll.md](device-stack-and-poll.md)、[routing.md](routing.md) 和 [dhcp.md](dhcp.md)。
+
+设备元数据/路由查询不持有 DeviceStack；变更先在短目录域提交，再由目标栈重验。任何 `SIOCSIF*` 用户访问先完成内核快照/复制，不能在 device、route 或 DeviceStack 锁内 fault。
 
 ## 设计目标
 

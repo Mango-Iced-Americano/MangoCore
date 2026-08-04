@@ -2,7 +2,7 @@
 title: "网络子系统 (Network Subsystem)"
 module: "net"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
 last_updated: 2026-06-29
 code_paths:
@@ -37,6 +37,8 @@ related_docs:
 MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈。它通过统一的 Socket trait，支持 TCP、UDP、RAW、Unix、Netlink 和 Packet（AF_PACKET）等多种套接字类型。协议栈运行在 virtio-net 设备之上，借助 MangoCore 的等待队列基础设施提供阻塞 I/O 语义。
 
 该子系统通过标准系统调用接口（socket、bind、connect、sendto、recvfrom 等）为用户进程提供服务，并与 epoll、signalfd 以及 /proc/net 集成，支持事件驱动 I/O 和网络状态监控。
+
+当前 SMP 边界为 per-netns `PortRegistry`、短持 route directory、单 `DeviceStack` 与 generation poll worker。其余 socket/epoll wake 和用户 copy 发生在相应业务锁释放后；同一 smoltcp stack 的 per-socket 并行、eventpoll/fd-table 深路径及 netlink/RAW edge cases 不在本阶段承诺内。
 
 ## 架构
 

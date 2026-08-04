@@ -2,9 +2,9 @@
 title: "Ext4 文件系统"
 module: "fs/ext4"
 category: fs
-status: draft
+status: current
 owner: "MangoCore Team"
-last_updated: "2026-07-18"
+last_updated: "2026-08-04"
 code_paths:
   - "os/src/fs/ext4/"
   - "os/src/fs/filesystem.rs"
@@ -56,7 +56,9 @@ related_docs:
 
 Ext4 是 MangoCore 的主力持久化文件系统。它直接运行在块设备之上（virtio-blk），实现了 Linux ext4 格式的核心子集，包括 extent 树、稀疏文件、符号链接、硬链接、目录项缓存和元数据块缓存。所有 I/O 路径在 VFS 层通过 PageCache 缓存，写操作在 PageCache 回写时同步到块设备。
 
-ext4 是项目中最复杂的文件系统模块。代码位于 `os/src/fs/ext4/`。
+ext4 是项目中最复杂的文件系统模块。代码位于 `os/src/fs/ext4/`。本页目录 gate、per-FS
+`rename_gate` 与 `io_txn -> PageCache::op_gate` 是当前 SMP 契约；它不把 MountFS 表、fd-table
+或 eventpoll 深路径写成已经完成的全 FS 审计。
 
 ## Ext4FileSystem
 
@@ -78,6 +80,15 @@ incompat feature 字段；只有固定 `MANGO_STATE` 身份且没有 `HAS_JOURNA
 ### 目录查找缓存
 
 `Ext4DirectoryLookupCache` 基于 LRU 淘汰策略加速 `find()` 操作。每个目录维护一个 `name -> ino` 的 BTreeMap，通过版本号（`bump_version`）检测目录变更。默认最多 128 个目录缓存，每个目录最多 1024 个条目。`rename`、`unlink`、`rmdir`、`create` 等操作自动使关联缓存失效。
+
+SMP 下 `Ext4FileSystem` 以 inode number canonicalize `dir_gate`：多个
+`Ext4OSInode` wrapper 共享一个 `Arc<RwLock<()>>`。`find`/readdir 取 parent
+read gate，创建、链接、删除和 rmdir 取 parent write gate；children、negative
+dentry 与 lookup cache 只能在该 gate 后访问。跨目录 rename 依次取得 per-FS
+`rename_gate`、ancestor-first（否则 inode id 升序）的 parent gates、目录 victim
+及普通 victim gates；锁后重新解析源/目标，所有 namespace gate 释放后才回收被
+覆盖的零链接 inode。reclaim 只对已由 Weak 获取的 inode 尝试 `try_write`，不会
+反向等待 parent gate。
 
 目录修改还必须保持 VFS inode 快照与底层 inode table 一致。`create`、`symlink`、
 `link` 和 `rename` 由低层辅助函数写回父 inode 后，`Ext4OSInode` 会重新读取父 inode，

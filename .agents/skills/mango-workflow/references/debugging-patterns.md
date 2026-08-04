@@ -1093,3 +1093,11 @@
   专项探针；未运行时必须登记为 NOT RUN。
 - **相关文件**: `os/src/task/process.rs`, `os/src/task/signal/pending.rs`,
   `os/src/task/signal/mod.rs`, `os/src/syscall/process/{time,signal}.rs`
+
+## 启动期常驻 worker 不能先于 PID1 走首次 Blocking
+
+- **现象**: normal 双盘启动在块设备 MBR 分区注册后停滞，zero-drive ktest 仍全部通过；最后一行容易误导为 root-fs mount 或 virtio-block 问题。
+- **根因**: CPU0 FIFO runqueue 在 PID1 前先发布一个常驻 worker。worker 的首轮无待处理 generation，立即进入 `wait_event_interruptible_lazy()` 的 `Running -> Blocking` 路径；启动时序因此在 PID1 首次 dispatch 前卡住。
+- **修复**: normal boot 先 `add_initproc()`，再发布 worker。这样 PID1 首次 dispatch 先完成 normal 启动；worker 的 generation 条件仍在等待登记前及登记后重查，producer 在任一窗口发布都不会丢 wake。
+- **教训**: 含外盘的 normal boot 与 zero-drive ktest 的任务发布顺序不同；ktest 全绿不能证明 early Blocking 对 PID1 启动安全。看到 MBR 后静默时，沿下一条 task publication/首次 dispatch 排查，而不是先假设块 I/O 未完成。
+- **相关文件**: `os/src/main.rs`, `os/src/task/run_queue.rs`, `os/src/net/config.rs`, `os/src/task/manager.rs`

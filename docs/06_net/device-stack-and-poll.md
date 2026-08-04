@@ -2,9 +2,9 @@
 title: "DeviceStack 与 Polling 基础设施"
 module: "config.rs"
 category: net
-status: draft
+status: current
 owner: "MangoCore Team"
-last_updated: "2026-07-15"
+last_updated: "2026-08-04"
 code_paths:
   - "os/src/net/config.rs"
   - "os/src/net/socket/inet/stream/mod.rs"
@@ -45,8 +45,14 @@ related_docs:
 整个模块围绕三个设计目标展开：
 
 - **每设备独立协议栈**：每个网络设备（lo、eth0、veth）拥有独立的 smoltcp `Interface` 和 `SocketSet`，互不干扰。
-- **单核友好轮询**：在单核环境下通过定时器中断和系统调用路径驱动协议栈，使用 `try_lock` 防止重入死锁。
+- **generation poll worker**：hard IRQ 只发布请求；CPU0 task-context worker 有界轮询每个栈。
 - **双层 socket 句柄**：`RouteSocketHandle` 将用户态 socket 与底层 smoltcp `SocketHandle` 解耦，支持跨设备栈迁移。
+
+## Phase-5 当前锁模型
+
+`NetDirectory` 是 N0 短提交域：读取 route 后升级 `Weak<DeviceStackCell>` 并立即释放目录锁；进入 N2 后必须以 route ID、protocol 与 local binding 重验。add 先建立栈内 binding 再发布 route；remove 先撤 route 再摘 binding/socket；rebind 经 `Migrating`，从不同时持有两把栈锁。N1 socket lifecycle 只能以 N1→N2 方向快照，N2 不得反向取 N1、EventPoll 或 WaitQueue。
+
+`NetPollControl` 用单调 `requested/completed` generation 关闭 clear/set ABA：task kick 增加 generation 后唤醒，IRQ 只增加 generation 并置 deferred wake；worker 在 task context 逐栈 `try_lock`，busy 栈重新发布 request，DHCP、socket readiness 与 epoll/WaitQueue 通知均在 N2 释放后处理。WaitQueue 条件闭包只检查已发布状态，不能 inline poll；同一 `SocketSet` 仍不是 per-socket 并行数据平面。
 
 ---
 

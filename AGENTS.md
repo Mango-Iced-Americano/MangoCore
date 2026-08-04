@@ -291,7 +291,7 @@ B81 要求 process shared signal queue 的每次 mutation 与 `shared_pending_hi
 signal 临界区：锁内重新计算完整位图并 Release store，读端 Acquire load。禁止解锁后再写
 hint，因为旧 writer 会覆盖新 writer；只升级原子内存序不能修复这个顺序窗口。hint 只是
 fast path，领取信号时仍须在 owner 锁内重验权威队列。
-FS/Net/Driver 的完整共享状态审计仍由对应负责人继续。
+FS/Net SMP 适配已完成的边界是：ext4/tmpfs 的 per-inode directory gate 与 per-FS `rename_gate`，PageCache `op_gate` + `PageEntry.data` + 锁外 bounded-bounce uaccess，per-netns `PortRegistry` 的 reserve→bind→commit/abort，route revalidation 的 per-device `DeviceStack`，以及 generation poll worker。仍**不得**外推为 per-socket parallel data path within one smoltcp stack、lock-free mount table、default all-core user scheduling，或完整 FS/Net cross-subsystem audit（特别是 eventpoll/fd-table 深路径、netlink/RAW socket edge cases）。
 不要把 B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40/B41 的受控迁移、真实 CPU/affinity 查询、
 current/远程 affinity、Blocked/Queued 写侧、affinity-aware 首次放置和用户返回
 RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不得外推为以下

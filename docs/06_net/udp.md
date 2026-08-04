@@ -2,9 +2,9 @@
 title: "UDP 协议实现"
 module: net/socket/udp
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-04
 code_paths:
   - "os/src/net/socket/inet/datagram/"
 entry_points:
@@ -28,6 +28,8 @@ related_docs:
 ## 概述
 
 UDP 子系统基于 smoltcp 的 `udp::Socket` 实现，通过 `Socket` trait 对外暴露无连接数据报服务。设计以单次非阻塞尝试为基础，通过 `rx_queue` 解耦 smoltcp 接收与用户态消费，通过 `try_deliver_local` 实现本地回环快速路径。所有 I/O 操作遵循 `try_xxx` 约定，不做轮询或内部重试。
+
+bind 先在 N1 快照 `BindIntent`，再在所属 `NetNamespace::ports` 完成 reserve→socket.bind→commit/abort；N0 不跨 socket/DeviceStack。N2 内 UDP drain 只形成内核所有数据，释放 N2 才写 OS queue、通知 waiter 或 copyout。readiness miss 只 kick generation worker 后进入纯条件等待，不在锁或条件闭包中 poll。
 
 ## UdpSocket 结构体
 

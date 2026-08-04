@@ -2,9 +2,9 @@
 title: "路由子系统 (Routing / FIB Layer)"
 module: "os/src/net/routing.rs + config.rs (route_check, lookup_source_ip)"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: "2026-07-13"
+last_updated: "2026-08-04"
 code_paths:
   - "os/src/net/routing.rs"
   - "os/src/net/config.rs"
@@ -41,6 +41,8 @@ related_docs:
 路由子系统实现 MangoCore 内核的转发信息库（FIB），负责将目标 IP 地址映射到出接口（ifindex）、下一跳网关和源 IP 地址。它是网络协议栈中 socket 层与设备层之间的桥梁，为 TCP/UDP/RAW 套接字的收发路径提供路由决策。
 
 整个子系统分布在两个文件中：`routing.rs` 定义核心数据结构和主路由函数，`config.rs` 提供两个便利包装供 syscall 层使用。
+
+路由目录属于 N0：只快照 `Active` route、protocol 与 `Weak<DeviceStackCell>`，随后释放 N0；N2 内再按 route ID/protocol/local binding 重验。旧 `SocketHandle` slot 复用不会被旧 route 访问，且目录不与 `NetNamespace.ports` 或 DeviceStack 嵌套。
 
 ## 核心数据结构
 

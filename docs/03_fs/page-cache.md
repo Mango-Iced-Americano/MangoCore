@@ -2,9 +2,9 @@
 title: "PageCache 页面缓存"
 module: "fs/page_cache"
 category: fs
-status: draft
+status: current
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-08-04"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -38,6 +38,10 @@ related_docs:
 PageCache 是 MangoCore VFS 层的页面级数据缓存，位于 IndexNode trait 与块设备后端之间。它以 4KB 页为粒度缓存文件数据，通过 PageState 状态机管理脏页追踪、回写和回收。设计参考 DragonOS 的 `kernel/src/filesystem/page_cache.rs`，实现基于 Linux 回写机制的简化模型。
 
 PageCache 不感知具体文件系统格式，通过 `PageCacheBackend` trait 桥接到 ext4、tmpfs、ramfs 等不同后端。
+
+2026-08-04 FS/Net SMP 适配已使本页 `op_gate`、逐页 `data` 与 bounded-bounce 描述成为当前实现：
+不同页可在各自 I3 data lock 下推进，但用户页访问一定在 inode/PageCache 锁释放后发生。本页不
+声明 MountFS 为 lock-free。
 
 ## PageState 状态机
 
@@ -75,6 +79,7 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 ```rust
 struct PageEntry {
     page: Arc<FrameTracker>,     // 物理页面
+    data: RwLock<()>,            // 只在 with_bytes{,_mut} closure 内保护 frame bytes
     state: AtomicU8,             // PageState 编码
     valid_mask: AtomicU8,        // 512B segment 有效性位图
     flags: AtomicU8,             // PG_REFERENCED, PG_REDIRTIED
@@ -95,11 +100,33 @@ pub trait PageCacheBackend: Send + Sync {
 
 默认 `write_pages` / `read_pages` 回退为逐页调用。支持合并 I/O 的后端（如 ext4）可覆盖实现批量读写。`BlockPageCacheBackend` 是块设备后端的默认实现，将页索引转换为块偏移后通过 `BlockDevice` trait 驱动。
 
+## SMP 锁与内核 I/O API
+
+`PageCache` 用 `op_gate: RwLock<()>` 建立操作级边界：普通 `read_kernel`、
+`write_kernel` 与 writeback 持读锁；truncate、invalidate、clean-page eviction 及
+I/O 后的 entry 发布持写锁。元数据固定按 `entries → inner` 获取；两者释放后才能
+取得单页 `PageEntry.data`。不能反向持有 page data 后进入 entries/inner，也不能在
+任何 PageCache 或 inode 锁内执行 faultable uaccess。
+
+Page字节只通过不会泄露 slice 的内部 closure 访问。crate 内文件路径使用以下 API：
+
+```rust
+read_kernel(offset, &mut kernel_dst)
+write_kernel(offset, kernel_src, old_size)
+read_at_user(offset, len, &mut user)
+write_at_user(offset, len, &user, old_size)
+```
+
+后两者使用不大于 `IO_CHUNK_SIZE` 的 kernel bounce：user copy 发生在 PageCache 和
+inode 锁外，随后才进入内核缓冲区读写。写入在每页 data-write copy 结束后发布 Dirty；
+写回持 data-read 直到 backend I/O 完成，因此写回期间的新写入以 `PG_REDIRTIED` 保留
+Dirty，不会遗失或永久停在 Writeback。
+
 ## 二阶段读写模式
 
 所有读写路径采用两阶段模式，核心约束为**不在持有锁时执行用户态拷贝**：
 
-### 读路径（read / read_user）
+### 读路径（read_kernel / read_at_user）
 
 ```
 Phase 1（持锁）: 收集
@@ -108,12 +135,14 @@ Phase 1（持锁）: 收集
     ensure_fully_valid(page_index)          // 填充无效 segment
     copies.push(CopyItem { entry, offset, len })
 
-Phase 2（无锁）: 拷贝
+Phase 2（逐页 data 锁）: 拷贝到 kernel buffer
   for each item in copies:
-    copy_from_slice(src, dst)   // 或 UserBuffer::write_at
+    entry.with_bytes(|src| copy_to_kernel_bounce(src))
 ```
 
-### 写路径（write / write_user）
+`read_at_user` 在 Phase 2 完成并释放全部 PageCache 锁后才将 bounce 写入 UserBuffer。
+
+### 写路径（write_kernel / write_at_user）
 
 ```
 Phase 1（持锁）: 收集
@@ -123,10 +152,11 @@ Phase 1（持锁）: 收集
     // 页超出 EOF → 跳过后端读取，使用零填充
     copies.push(CopyItem { entry, offset, len, full_overwrite })
 
-Phase 2（无锁）: 拷贝
+Phase 2（逐页 data 写锁）: 拷贝并发布 Dirty
   for each item in copies:
-    copy data from user buffer to entry.as_slice_mut()
+    entry.with_bytes_mut(|dst| copy_from_kernel_bounce(dst))
     mark_valid_and_check_full()
+    mark_dirty_after_copy()
 ```
 
 单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()` 触发节流检测。
@@ -208,7 +238,7 @@ maybe_reclaim_fs_caches:
 
 ### 锁约束
 
-**不可在持有 inode 锁时调用 page cache invalidate**。因为 `invalidate_range` 需要获取 `entries` 和 `inner` 锁，如果调用者已经持有 inode 的内部锁，且 PageCache 的 writeback 路径需要 inode 锁（如 ext4 后端写入需要获取 inode 信息），就可能产生死锁。规范做法：在调用任何 PageCache 方法前释放 inode 锁。
+**不可在持有 inode 锁时调用 page cache invalidate**。因为 `invalidate_range` 需要独占 `op_gate` 后获取 `entries` 和 `inner` 锁，如果调用者已经持有 inode 的内部锁，且 PageCache 的 writeback 路径需要 inode 锁（如 ext4 后端写入需要获取 inode 信息），就可能产生死锁。规范做法：在调用任何 PageCache 方法前释放 inode 锁。
 
 PageCache 自身的 `inner` 和 `entries` 使用 `spin::Mutex`，不依赖调度器，因此即使在中断上下文中也安全。但不可重入：在持有 PageCache 锁时不得再次锁同一个 PageCache 实例。
 
@@ -231,6 +261,7 @@ struct InnerPageCache {
 
 ```rust
 pub struct PageCache {
+    op_gate: RwLock<()>,
     inner: Mutex<InnerPageCache>,
     backend: Mutex<Option<Arc<dyn PageCacheBackend>>>,
     inode: Mutex<Option<Weak<dyn IndexNode>>>,

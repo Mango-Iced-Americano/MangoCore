@@ -2,9 +2,9 @@
 title: "网络子系统架构设计"
 module: "net"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-04
 code_paths:
   - "os/src/net/mod.rs"
   - "os/src/net/config.rs"
@@ -63,6 +63,10 @@ related_docs:
 3. **可扩展设备模型**：支持 lo（环回）、eth0（virtio-net）、veth（虚拟以太网对）等多种设备类型，每种设备拥有独立的 smoltcp 栈。
 4. **响应式轮询**：单核环境下通过计时器中断驱动轮询，非阻塞 I/O 路径确保系统不被网络卡死。
 5. **分离的数据平面与控制平面**：Socket handle 与 RouteSocketHandle 双层抽象，将用户态 socket fd 与底层 smoltcp socket 解耦。
+
+### SMP 已完成边界
+
+网络适配已完成 `NetNamespace::ports` 的 reserve→bind→commit/abort、N0 route directory 的 route-ID 重验、单 N2 `DeviceStack` 和 generation poll worker。端口 registry、route directory 与 DeviceStack 不嵌套；socket/epoll 通知与用户 copy 都在业务锁外。这不承诺单个 smoltcp `SocketSet` 的 per-socket 并行，也不代表 eventpoll/fd-table、netlink 或 RAW edge cases 已完成跨子系统 SMP 审计。
 
 ---
 

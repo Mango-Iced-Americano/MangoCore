@@ -1,9 +1,9 @@
 ---
 title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
-status: proposed
+status: current
 owner: MangoCore Team
-last_updated: 2026-08-02
+last_updated: 2026-08-04
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -14,8 +14,7 @@ related_docs:
 
 # MangoCore SMP 锁序与中断上下文约束
 
-本文定义 SMP 改造期间的目标锁契约。`status: proposed` 表示这些规则是实施门禁，
-不表示当前单核代码已经满足。每个引入或改变锁关系的批次都必须同步本文，并用实际调用链验证。
+本文定义 SMP 改造期间的锁契约。已完成的 FS/Net SMP 边界在下文明确列出；每个引入或改变锁关系的批次都必须同步本文，并用实际调用链验证。
 
 ## 1. 基础原语前置条件
 
@@ -72,6 +71,50 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
    不存在 RunQueue 反向获取 thread-group 锁的路径。
 
 ### 3.1 B15 历史过渡约束
+
+### 3.1.1 FS/Net Phase-5 已实现锁域
+
+FS、网络与调度不是可任意嵌套的全局锁链；跨域动作固定为“快照/提交—解锁—进入下一域”。
+
+| 层级 | 锁域 | 当前契约 |
+|---|---|---|
+| FS-F0..F3 | `rename_gate` → directory gate → victim metadata → directory caches | 跨目录先 `rename_gate`；parent 为祖先优先、否则 inode ID；cache 只能在 parent gate 后 |
+| IO-I0..I3 | `io_txn` → `op_gate` → `entries -> inner` → `PageEntry.data` | 元数据锁只定位/clone；释放后才访问单页 bytes |
+| Net-N0..N3 | ports/route directory → socket lifecycle → one DeviceStack → event/epoll/WaitQueue | N0 短提交；N2 只持一个 stack，释放 N1/N2 后才通知 |
+| Leaf | `OUTPUT_LOCK` | 所有业务锁释放且格式参数已快照后才能取得 |
+
+FS/Net 锁不得获取 `task.inner`、runqueue 或跨 context switch/IPC wait；不得在业务锁内
+faultable uaccess。`DeviceStack` 不得反向取得 socket lifecycle、EventPoll 或 WaitQueue；
+`PageEntry.data` 不得反向取得 `entries`/`inner`。IRQ 只发布 poll generation，worker 在 task
+context 取得单个 DeviceStack，并在释放后发布 socket/epoll wake。设计依据见
+`docs/10_plan/fs-net-smp-adaptation.md` §2、§4.5。
+
+### 3.1.1 FS/Net WP5 DeviceStack 路由目录
+
+WP5 将旧的单一 `NET_INTERFACE` 锁拆为短持的 `NetDirectory` 与每设备一个
+`DeviceStackCell::inner`。固定协议如下：
+
+```text
+PortRegistry / NetDirectory：只快照或提交 route、不得进入 smoltcp
+  -> （释放目录锁）
+  -> 可选 socket lifecycle 锁：只快照内核状态，禁止从 DeviceStack 反向取得
+  -> 单个 DeviceStack：Interface + device + SocketSet + local bindings
+  -> （释放全部上述锁）
+  -> EventWaitQueue / epoll / WaitQueue 唤醒
+```
+
+- `RouteSocketHandle` 单调且不复用。读者先在目录确认 `Active + protocol` 并升级
+  `Weak<DeviceStackCell>`，释放目录后才锁该栈；栈内必须按同一 route ID 和 protocol
+  重验 `LocalSocketBinding`，失败即拒绝，不能访问已复用的 smoltcp slot。
+- add 先在栈内插入 socket/binding，后在目录发布 `Active`；remove 先从目录撤 route，
+  后在单栈内删除 binding/socket，并在栈锁外析构。rebind 经过 `Migrating`，任一时刻
+  至多持有 source 或 target 其中一把 `DeviceStack` 锁。
+- `DeviceStack -> NetDirectory`、`DeviceStack -> socket lifecycle`、
+  `DeviceStack -> EventWaitQueue/WaitQueue` 均禁止。UDP poll 仅在栈锁内提取内核所有
+  packet，释放栈锁后才取得 OS socket/事件队列锁。
+- `NetNamespace.ports` 与 route directory 都是 N0 短提交域，二者不嵌套；port reserve
+  完成后才进入 socket lifecycle/DeviceStack。目录或栈锁不得跨 faultable uaccess、
+  context switch、IPI/TLB 等待或 console 输出。
 
 B15 尚未拆分 per-CPU runqueue 时，ready/interruptible 容器曾由单一
 `TASK_MANAGER` 保护。该实现只用于说明状态机的演进背景，已由 B18 的 3.3 节取代，
