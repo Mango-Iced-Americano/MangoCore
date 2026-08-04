@@ -7,6 +7,9 @@ pub mod blockdev;
 pub mod counters;
 pub mod errno;
 pub mod ext4fs;
+pub(crate) mod global;
 pub(crate) mod inode_state;
 pub mod layout;
 pub mod page_cache;
+
+pub(crate) use global::with_lwext4_global;

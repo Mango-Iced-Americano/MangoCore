@@ -18,6 +18,7 @@ use lwext4_rust::{Ext4File, InodeTypes};
 use super::errno::from_lwext4;
 use super::ext4fs::Ext4FileSystem;
 use super::page_cache::LWEXT4_SIZE_UNKNOWN;
+use super::with_lwext4_global;
 
 /// Metadata shared by every VFS alias of one on-disk inode.
 ///
@@ -191,8 +192,8 @@ impl Ext4InodeState {
     /// with O_RDWR does not mutate the file and lets later writable opens
     /// share the same descriptor; read-only mounts still reject actual writes.
     pub(crate) fn open(&self, fs: &Ext4FileSystem) -> Result<(), SyscallErr> {
-        // Publish the in-progress reference before waiting for the mount lock
-        // so namespace removal will defer reclaim.  The handle mutex then
+        // Publish the in-progress reference before waiting for the gate/mount
+        // lock so namespace removal will defer reclaim.  The handle mutex then
         // makes concurrent first-open attempts share the descriptor that
         // whichever opener initializes successfully.
         self.open_count.fetch_add(1, Ordering::AcqRel);
@@ -204,39 +205,47 @@ impl Ext4InodeState {
             }
         };
         let lw_path = fs.lw_path(&path);
-        let _lw = fs.lw.lock();
-        let mut handle = self.handle.lock();
-        if handle.is_some() {
-            return Ok(());
-        }
-        let mut file = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        if let Err(error) = file.file_open(&lw_path, 0x2) {
-            self.open_count.fetch_sub(1, Ordering::AcqRel);
-            return Err(from_lwext4(error.abs()));
-        }
-        let actual_generation = match file.inode_generation() {
-            Ok(generation) => generation,
-            Err(error) => {
-                file.file_close().ok();
+        // C entry point: serialized by the process-wide lwext4 gate, then the
+        // per-instance mount lock, then the state handle lock.
+        with_lwext4_global(|| {
+            let _lw = fs.lw.lock();
+            let mut handle = self.handle.lock();
+            if handle.is_some() {
+                return Ok(());
+            }
+            let mut file = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
+            if let Err(error) = file.file_open(&lw_path, 0x2) {
                 self.open_count.fetch_sub(1, Ordering::AcqRel);
                 return Err(from_lwext4(error.abs()));
             }
-        };
-        if file.inode_id() as usize != self.inode_id
-            || actual_generation != self.generation
-        {
-            file.file_close().ok();
-            self.open_count.fetch_sub(1, Ordering::AcqRel);
-            return Err(SyscallErr::EIO);
-        }
-        *handle = Some(file);
-        Ok(())
+            let actual_generation = match file.inode_generation() {
+                Ok(generation) => generation,
+                Err(error) => {
+                    file.file_close().ok();
+                    self.open_count.fetch_sub(1, Ordering::AcqRel);
+                    return Err(from_lwext4(error.abs()));
+                }
+            };
+            if file.inode_id() as usize != self.inode_id
+                || actual_generation != self.generation
+            {
+                file.file_close().ok();
+                self.open_count.fetch_sub(1, Ordering::AcqRel);
+                return Err(SyscallErr::EIO);
+            }
+            *handle = Some(file);
+            Ok(())
+        })
     }
 
     /// Run one file operation against the persistent open handle when
     /// available, otherwise open a temporary descriptor through a known live
     /// alias.  No create fallback is allowed: stale paths must never recreate
     /// a renamed or unlinked file.
+    ///
+    /// This is the shared C entry used by the PageCache backends and the
+    /// layout inode helpers; it acquires the process-wide lwext4 gate
+    /// internally so those callers need no changes.
     pub(crate) fn with_file<T>(
         &self,
         fs: &Ext4FileSystem,
@@ -244,35 +253,37 @@ impl Ext4InodeState {
         operation: impl FnOnce(&mut Ext4File) -> Result<T, SyscallErr>,
     ) -> Result<T, SyscallErr> {
         let path = self.current_path();
-        let _lw = fs.lw.lock();
-        let mut handle = self.handle.lock();
-        if let Some(file) = handle.as_mut() {
-            return operation(file);
-        }
-
-        let path = path.ok_or(SyscallErr::ENOENT)?;
-        let lw_path = fs.lw_path(&path);
-        let mut temporary = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
-        let flags = if writable { 0x2 } else { 0x0 };
-        temporary
-            .file_open(&lw_path, flags)
-            .map_err(|error| from_lwext4(error.abs()))?;
-        let actual_generation = match temporary.inode_generation() {
-            Ok(generation) => generation,
-            Err(error) => {
-                temporary.file_close().ok();
-                return Err(from_lwext4(error.abs()));
+        with_lwext4_global(|| {
+            let _lw = fs.lw.lock();
+            let mut handle = self.handle.lock();
+            if let Some(file) = handle.as_mut() {
+                return operation(file);
             }
-        };
-        if temporary.inode_id() as usize != self.inode_id
-            || actual_generation != self.generation
-        {
+
+            let path = path.ok_or(SyscallErr::ENOENT)?;
+            let lw_path = fs.lw_path(&path);
+            let mut temporary = Ext4File::new(&lw_path, InodeTypes::EXT4_DE_REG_FILE);
+            let flags = if writable { 0x2 } else { 0x0 };
+            temporary
+                .file_open(&lw_path, flags)
+                .map_err(|error| from_lwext4(error.abs()))?;
+            let actual_generation = match temporary.inode_generation() {
+                Ok(generation) => generation,
+                Err(error) => {
+                    temporary.file_close().ok();
+                    return Err(from_lwext4(error.abs()));
+                }
+            };
+            if temporary.inode_id() as usize != self.inode_id
+                || actual_generation != self.generation
+            {
+                temporary.file_close().ok();
+                return Err(SyscallErr::EIO);
+            }
+            let result = operation(&mut temporary);
             temporary.file_close().ok();
-            return Err(SyscallErr::EIO);
-        }
-        let result = operation(&mut temporary);
-        temporary.file_close().ok();
-        result
+            result
+        })
     }
 
     /// Drop one non-final VFS open reference.  A final reference remains
@@ -310,46 +321,50 @@ impl Ext4InodeState {
         &self,
         fs: &Ext4FileSystem,
     ) -> Result<bool, SyscallErr> {
-        let _lw = fs.lw.lock();
-        let mut handle = self.handle.lock();
+        // C entry point: finalize/close go through the process-wide gate, the
+        // per-instance mount lock, then the state handle lock.
+        with_lwext4_global(|| {
+            let _lw = fs.lw.lock();
+            let mut handle = self.handle.lock();
 
-        // A new open may have arrived while the prospective final closer was
-        // writing dirty pages.  In that case this close is no longer final;
-        // release only its own reference and leave the shared handle pinned.
-        match self.open_count.compare_exchange(
-            1,
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => {}
-            Err(count) if count > 1 => {
-                self.open_count.fetch_sub(1, Ordering::AcqRel);
-                return Ok(false);
+            // A new open may have arrived while the prospective final closer was
+            // writing dirty pages.  In that case this close is no longer final;
+            // release only its own reference and leave the shared handle pinned.
+            match self.open_count.compare_exchange(
+                1,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {}
+                Err(count) if count > 1 => {
+                    self.open_count.fetch_sub(1, Ordering::AcqRel);
+                    return Ok(false);
+                }
+                Err(_) => return Err(SyscallErr::EIO),
             }
-            Err(_) => return Err(SyscallErr::EIO),
-        }
 
-        let file = match handle.as_mut() {
-            Some(file) => file,
-            None => {
-                self.open_count.fetch_add(1, Ordering::AcqRel);
-                return Err(SyscallErr::EIO);
+            let file = match handle.as_mut() {
+                Some(file) => file,
+                None => {
+                    self.open_count.fetch_add(1, Ordering::AcqRel);
+                    return Err(SyscallErr::EIO);
+                }
+            };
+            let deleted = self.pending_delete.load(Ordering::Acquire)
+                && self.nlinks.load(Ordering::Acquire) == 0;
+            if deleted {
+                if let Err(error) = file.file_finalize_unlinked() {
+                    self.open_count.fetch_add(1, Ordering::AcqRel);
+                    return Err(from_lwext4(error.abs()));
+                }
             }
-        };
-        let deleted = self.pending_delete.load(Ordering::Acquire)
-            && self.nlinks.load(Ordering::Acquire) == 0;
-        if deleted {
-            if let Err(error) = file.file_finalize_unlinked() {
+            if let Err(error) = file.file_close() {
                 self.open_count.fetch_add(1, Ordering::AcqRel);
                 return Err(from_lwext4(error.abs()));
             }
-        }
-        if let Err(error) = file.file_close() {
-            self.open_count.fetch_add(1, Ordering::AcqRel);
-            return Err(from_lwext4(error.abs()));
-        }
-        *handle = None;
-        Ok(deleted)
+            *handle = None;
+            Ok(deleted)
+        })
     }
 }
