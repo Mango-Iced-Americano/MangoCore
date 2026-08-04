@@ -17,12 +17,12 @@ use super::user_mapper::UserMapper;
 use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
-use super::{FaultAccess, MemoryError};
+use super::{AddressSpace, FaultAccess, MemoryError, PageTableImpl};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
 use crate::fs::vfs::IndexNode;
 use crate::mm::frame_allocator::frame_alloc_uninit;
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::{error, warn};
 impl Debug for Vma {
@@ -62,6 +62,23 @@ pub struct Vma {
     /// Anonymous VMAs copied by fork must not be merged with a later child-only
     /// mmap, matching Linux anon_vma merge constraints.
     pub fork_inherited: bool,
+    /// 所属地址空间的非拥有回指。它只在 VMA 进入 `VmaSet` 时由外层
+    /// `AddressSpace` 安装，PageCache rmap 通过它找到需要修改的页表；Weak
+    /// 不会让已经 exec/munmap 的地址空间因缓存注册表而泄漏。
+    pub(crate) user_address_space: Option<Weak<AddressSpace<PageTableImpl>>>,
+}
+
+/// PageCache rmap walker 使用的不可变 VMA 快照。
+///
+/// walker 在释放 `Arc<Vma>` 后才获取 VM 锁，避免 PageCache 的 i_mmap 读侧与
+/// VMA 写侧形成额外锁序；进入 VM 锁后会按 `vma_id` 重新确认该 VMA 仍存在。
+#[derive(Clone)]
+pub(crate) struct FileVmaSnapshot {
+    pub(crate) vma_id: usize,
+    pub(crate) start: VirtPageNum,
+    pub(crate) end: VirtPageNum,
+    pub(crate) file_offset: usize,
+    pub(crate) owner: Weak<AddressSpace<PageTableImpl>>,
 }
 
 #[derive(Clone, Copy)]
@@ -71,6 +88,20 @@ pub(super) enum VmaUnmapReason {
 }
 
 impl Vma {
+    /// 从 PageCache 的 Weak 升级后提取 rmap 所需标量，并立即允许调用者丢弃该 Arc。
+    pub(crate) fn file_rmap_snapshot(this: &Arc<Self>) -> Option<FileVmaSnapshot> {
+        if !this.flags.contains(MapFlags::MAP_SHARED) || this.map_file.is_none() {
+            return None;
+        }
+        Some(FileVmaSnapshot {
+            vma_id: Arc::as_ptr(this) as usize,
+            start: this.inner.vpn_range.get_start(),
+            end: this.inner.vpn_range.get_end(),
+            file_offset: this.map_file_offset,
+            owner: this.user_address_space.clone()?,
+        })
+    }
+
     pub fn try_clone(&self) -> Result<Self, isize> {
         let inner = self.inner.try_clone()?;
         Ok(Self {
@@ -84,6 +115,7 @@ impl Vma {
             wipe_on_fork: self.wipe_on_fork,
             dont_fork: self.dont_fork,
             fork_inherited: self.fork_inherited,
+            user_address_space: self.user_address_space.clone(),
         })
     }
     /// Construct a new segment without without allocating memory
@@ -117,6 +149,7 @@ impl Vma {
             wipe_on_fork: false,
             dont_fork: false,
             fork_inherited: false,
+            user_address_space: None,
         })
     }
     /// Copier, but the physical pages are not allocated,
@@ -136,6 +169,7 @@ impl Vma {
             wipe_on_fork: another.wipe_on_fork,
             dont_fork: another.dont_fork,
             fork_inherited: another.fork_inherited,
+            user_address_space: another.user_address_space.clone(),
         }
     }
     pub fn mark_fork_inherited(&mut self) {
@@ -251,6 +285,7 @@ impl Vma {
             return Err(MemoryError::NotMapped);
         }
         mapper.unmap_user_page(vpn)?;
+        self.note_file_pte_unmapped(vpn);
         if let Some(frame) = self.inner.remove_in_memory(&vpn) {
             mapper.retire_frame(frame);
         }
@@ -269,6 +304,9 @@ impl Vma {
         let mut cursor = start_vpn;
         while let Some(vpn) = self.inner.first_in_memory_vpn_in_range(cursor, end_vpn) {
             let unmapped = mapper.unmap_user_page_if_mapped(vpn)?;
+            if unmapped {
+                self.note_file_pte_unmapped(vpn);
+            }
             if let Some(frame) = self.inner.remove_in_memory(&vpn) {
                 if unmapped {
                     mapper.retire_frame(frame);
@@ -314,6 +352,7 @@ impl Vma {
                         first_error = Some(err);
                         break;
                     }
+                    self.note_file_pte_mapped(vpn);
                     mapped_end = VirtPageNum(vpn.0 + 1);
                 } else {
                     first_error = Some(MemoryError::AlreadyMapped);
@@ -441,6 +480,9 @@ impl Vma {
                     return Err(error);
                 }
             };
+            if unmapped {
+                self.note_file_pte_unmapped(vpn);
+            }
             if record_anon_private {
                 #[cfg(feature = "oom_handler")]
                 {
@@ -721,6 +763,7 @@ impl Vma {
             wipe_on_fork: self.wipe_on_fork,
             dont_fork: self.dont_fork,
             fork_inherited: self.fork_inherited,
+            user_address_space: self.user_address_space.clone(),
         })
     }
     pub fn into_three(
@@ -953,6 +996,34 @@ impl Vma {
         self.map_file_offset
             .checked_add(VirtAddr::from(vpn).0 - VirtAddr::from(self.vm_start()).0)
             .ok_or(MemoryError::BeyondEOF)
+    }
+
+    /// PTE 已撤销后才减少 PageCache 的映射计数。这里不持 PageCache 条目锁；
+    /// VMA/页表状态由调用方的 VM 锁保护，而 PageCache 的计数只是 rmap 快速路径。
+    pub(super) fn note_file_pte_unmapped(&self, vpn: VirtPageNum) {
+        let Some(inode) = self.vm_file() else {
+            return;
+        };
+        let Ok(file_offset) = self.vm_file_offset(vpn) else {
+            return;
+        };
+        if let Some(cache) = inode.page_cache() {
+            cache.unmap_page(file_offset >> crate::config::PAGE_SIZE_BITS);
+        }
+    }
+
+    /// fork 已把 file-backed resident PTE 装入子页表后递增 PageCache map_count。
+    /// 这与 fault 安装路径相同，计数只在 PTE 真正可见后更新。
+    fn note_file_pte_mapped(&self, vpn: VirtPageNum) {
+        let Some(inode) = self.vm_file() else {
+            return;
+        };
+        let Ok(file_offset) = self.vm_file_offset(vpn) else {
+            return;
+        };
+        if let Some(cache) = inode.page_cache() {
+            cache.map_page(file_offset >> crate::config::PAGE_SIZE_BITS);
+        }
     }
 
     #[cfg(feature = "oom_handler")]

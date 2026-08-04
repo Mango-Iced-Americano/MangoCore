@@ -693,13 +693,15 @@ fn copy_user_bytes_progress(
     while copied < len {
         let va = VirtAddr::from(user_addr + copied);
         let chunk_len = (crate::config::PAGE_SIZE - va.page_offset()).min(end - va.0);
+        if matches!(mode, UserCopyMode::FaultIn) {
+            vm.fault_in_user_va_retry(va, direction.fault_access())
+                .map_err(|errno| UserCopyFault { copied, errno })?;
+        }
         let result = vm.write(|address_space| -> Result<(), isize> {
             // 两种模式最终都在同一 VM 锁内核对 U/R/W 权限和物理范围；区别只是
             // `NoFault` 发现 PTE 已变化时立即失败，不在外层 spin lock 内等待。
             let pa = match mode {
-                UserCopyMode::FaultIn => {
-                    address_space.fault_in_user_va(va, direction.fault_access())?
-                }
+                UserCopyMode::FaultIn => address_space.resolve_user_va(va, direction.fault_access())?,
                 UserCopyMode::NoFault => {
                     address_space.resolve_user_va(va, direction.fault_access())?
                 }
@@ -726,15 +728,13 @@ fn fault_user_access_with_vm(
     access: UserAccess,
 ) -> Result<(), isize> {
     check_user_range(va.0, 1)?;
-    vm.write(|address_space| {
-        if access.needs_read() {
-            address_space.fault_in_user_va(va, FaultAccess::Load)?;
-        }
-        if access.needs_write() {
-            address_space.fault_in_user_va(va, FaultAccess::Store)?;
-        }
-        Ok(())
-    })
+    if access.needs_read() {
+        vm.fault_in_user_va_retry(va, FaultAccess::Load)?;
+    }
+    if access.needs_write() {
+        vm.fault_in_user_va_retry(va, FaultAccess::Store)?;
+    }
+    Ok(())
 }
 
 /// Fault-in 并验证一段当前任务用户地址，但不返回物理页视图。

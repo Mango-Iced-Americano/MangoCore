@@ -381,9 +381,7 @@ fn new_kernel_process(
         INIT_NET_NAMESPACE.clone(),
         INIT_MOUNT_NAMESPACE.clone(),
         INIT_IPC_NAMESPACE.clone(),
-        Arc::new(AddressSpace::new(
-            AddressSpaceInner::<PageTableImpl>::new_bare(),
-        )),
+        AddressSpace::new(AddressSpaceInner::<PageTableImpl>::new_bare()),
         Arc::new(spin::Mutex::new(Sighand::new())),
         Arc::new(spin::Mutex::new(threads::FutexTable::new())),
         Arc::new(spin::Mutex::new(pid::RecycleAllocator::new())),

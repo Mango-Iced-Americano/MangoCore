@@ -43,7 +43,7 @@ pub use address::PPNRange;
 pub(crate) use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub(crate) use address_space::UserVmContext;
-pub use address_space::{AddressSpace, AddressSpaceInner, MemoryError};
+pub use address_space::{AddressSpace, AddressSpaceInner, FaultOutcome, MemoryError, RetryWait};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
     frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
@@ -67,6 +67,7 @@ pub use sysctl::{
 };
 pub(crate) use tlb::{TlbContext, TlbFlush};
 pub use vma::{MapFlags, MapPermission};
+pub(crate) use vma::{FileVmaSnapshot, Vma};
 type MmResult<T> = Result<T, MemoryError>;
 
 /// Stack alignment required whenever the kernel enters userspace.

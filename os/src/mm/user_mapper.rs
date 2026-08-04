@@ -140,6 +140,16 @@ impl<'a, T: PageTable> UserMapper<'a, T> {
         Ok(())
     }
 
+    /// 清除硬件/软件 dirty 位并记录 TLB 失效；mkclean 必须和写保护在同一
+    /// VM 锁持有期提交，不能让旧 dirty 翻译跨越下一轮 writeback。
+    pub(super) fn clear_dirty(&mut self, vpn: VirtPageNum) -> MmResult<()> {
+        self.page_table
+            .clear_dirty_bit(vpn)
+            .map_err(|_| MemoryError::NotMapped)?;
+        self.gather.record_change(vpn);
+        Ok(())
+    }
+
     /// 保留旧 frame 到锁外 TLB 同步结束。
     pub(super) fn retire_frame(&mut self, frame: Arc<FrameTracker>) {
         self.gather.retire_frame(self.page_table, frame);

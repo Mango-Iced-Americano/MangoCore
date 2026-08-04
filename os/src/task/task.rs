@@ -620,6 +620,12 @@ impl TaskControlBlock {
     ) -> Result<(Option<SharedFutexKey>, Option<SharedFutexKey>), isize> {
         let bytes = 0u32.to_ne_bytes();
         let vm = self.process.vm();
+        // 先在 VM 锁外完成 fault retry；随后每次实际写入重新取得 VM 锁并只做
+        // nofault resolve，避免清理路径与 PageCache writeback 锁序反转。
+        for offset in 0..bytes.len() {
+            let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
+            vm.fault_in_user_va_retry(va, FaultAccess::Store)?;
+        }
         vm.write(|vm| {
             let base_va = VirtAddr::from(addr);
             let uses_shared_key = vm.futex_mapping_is_shared(base_va)?;
@@ -635,7 +641,7 @@ impl TaskControlBlock {
             };
 
             if base_va.page_offset() + bytes.len() <= PAGE_SIZE {
-                let pa = vm.fault_in_user_va(base_va, FaultAccess::Store)?;
+                let pa = vm.resolve_user_va(base_va, FaultAccess::Store)?;
                 let page_offset = pa.page_offset();
                 let page = pa.floor().get_bytes_array();
                 page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
@@ -650,7 +656,7 @@ impl TaskControlBlock {
 
             for (offset, byte) in bytes.iter().enumerate() {
                 let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
-                let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
+                let pa = vm.resolve_user_va(va, FaultAccess::Store)?;
                 pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
             }
             let after_key = if uses_shared_key {
@@ -1218,7 +1224,7 @@ impl TaskControlBlock {
             INIT_NET_NAMESPACE.clone(),
             INIT_MOUNT_NAMESPACE.clone(),
             INIT_IPC_NAMESPACE.clone(),
-            Arc::new(AddressSpace::new(memory_set)),
+            AddressSpace::new(memory_set),
             Arc::new(Mutex::new(Sighand::new())),
             Arc::new(Mutex::new(FutexTable::new())),
             user_res_slot_allocator,
@@ -1755,7 +1761,7 @@ impl TaskControlBlock {
             let copied = parent_vm.write(|vm| {
                 AddressSpaceInner::from_existing_user(vm, self.user_res_slot, &parent_trap_cx)
             })?;
-            Arc::new(AddressSpace::new(copied))
+            AddressSpace::new(copied)
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个用户资源槽位分配器。

@@ -134,22 +134,28 @@ fn write_u32_to_task_user(
 
     let bytes = value.to_ne_bytes();
     let vm = task.process.vm();
-    vm.write(|vm| {
-        let base = ptr as usize;
-        let page_offset = base & (PAGE_SIZE - 1);
-        if page_offset <= PAGE_SIZE - bytes.len() {
-            let pa = vm.fault_in_user_va(VirtAddr::from(base), FaultAccess::Store)?;
+    let base = ptr as usize;
+    let page_offset = base & (PAGE_SIZE - 1);
+    if page_offset <= PAGE_SIZE - bytes.len() {
+        vm.fault_in_user_va_retry(VirtAddr::from(base), FaultAccess::Store)?;
+        return vm.write(|inner| -> Result<(), isize> {
+            let pa = inner.resolve_user_va(VirtAddr::from(base), FaultAccess::Store)?;
             let page = pa.floor().get_bytes_array();
             let offset = pa.page_offset();
             page[offset..offset + bytes.len()].copy_from_slice(&bytes);
-            return Ok(());
-        }
-        for (offset, byte) in bytes.iter().enumerate() {
-            let pa = vm.fault_in_user_va(VirtAddr::from(base + offset), FaultAccess::Store)?;
+            Ok(())
+        });
+    }
+    for (offset, byte) in bytes.iter().enumerate() {
+        let va = VirtAddr::from(base + offset);
+        vm.fault_in_user_va_retry(va, FaultAccess::Store)?;
+        vm.write(|inner| -> Result<(), isize> {
+            let pa = inner.resolve_user_va(va, FaultAccess::Store)?;
             pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
-        }
-        Ok(())
-    })
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 fn drop_parent_fd(parent: &Arc<TaskControlBlock>, fd: usize) {

@@ -16,6 +16,8 @@ use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
 use crate::utils::error::SyscallErr;
+use crate::fs::PageCacheFault;
+use crate::mm::FaultOutcome;
 
 fn round_up_page(size: usize) -> usize {
     size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
@@ -148,6 +150,7 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);
     }
+    pc.map_page(page_index);
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
     crate::task::perf::FILEMAP_MAP_USER_TICKS
         .fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);
@@ -168,29 +171,33 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
     area: &mut Vma,
     mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
-) -> Result<PhysAddr, MemoryError> {
+) -> FaultOutcome {
     let _pf_start = crate::task::perf::perf_time_now();
-    let inode = area.vm_file().ok_or(MemoryError::NotMapped)?;
-    let file_offset = area.vm_file_offset(ctx.vpn)?;
-    let _file_size = check_within_file(inode.as_ref(), file_offset)?;
+    let inode = match area.vm_file() { Some(inode) => inode, None => return FaultOutcome::Error(MemoryError::NotMapped) };
+    let file_offset = match area.vm_file_offset(ctx.vpn) { Ok(offset) => offset, Err(error) => return FaultOutcome::Error(error) };
+    if let Err(error) = check_within_file(inode.as_ref(), file_offset) { return FaultOutcome::Error(error); }
 
-    let pc = inode
-        .ensure_page_cache()
-        .ok_or(MemoryError::BackingStoreFailure)?;
+    let pc = match inode.ensure_page_cache() {
+        Some(pc) => pc,
+        None => return FaultOutcome::Error(MemoryError::BackingStoreFailure),
+    };
     let page_index = file_offset >> PAGE_SIZE_BITS;
-    let cache_frame = pc.frame_for_write(page_index).map_err(map_pc_error)?;
+    let cache_frame = match pc.try_frame_for_write(page_index) {
+        Ok(frame) => frame,
+        Err(PageCacheFault::Retry(wait)) => return FaultOutcome::Retry(wait),
+        Err(PageCacheFault::Error(error)) => return FaultOutcome::Error(map_pc_error(error)),
+    };
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    area.inner
-        .alloc_in_memory(ctx.vpn, cache_frame)
-        .map_err(|_| MemoryError::AlreadyAllocated)?;
+    if let Err(error) = area.inner.alloc_in_memory(ctx.vpn, cache_frame) { return FaultOutcome::Error(error); }
 
     let _map_start = crate::task::perf::perf_time_now();
     if let Err(err) = mapper.map_user_page(ctx.vpn, cache_ppn, area.vm_perm()) {
         area.inner.remove_in_memory(&ctx.vpn);
-        return Err(err);
+        return FaultOutcome::Error(err);
     }
+    pc.map_page(page_index);
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
     crate::task::perf::FILEMAP_MAP_USER_TICKS
         .fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);
@@ -199,5 +206,8 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
     );
-    verify_filemap_fault(area, mapper, ctx, cache_ppn)
+    match verify_filemap_fault(area, mapper, ctx, cache_ppn) {
+        Ok(pa) => FaultOutcome::Completed(pa),
+        Err(error) => FaultOutcome::Error(error),
+    }
 }

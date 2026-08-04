@@ -186,7 +186,19 @@ pub fn trap_handler() -> ! {
             crate::task::perf::record_page_fault();
             // VM update 会在解锁后等待远端 TLB ack；task.inner 只能在结果
             // 返回后获取，否则会把普通锁带过 shootdown 等待点。
-            let pf_result = task.process.vm().write(|vm| vm.do_page_fault(addr, access));
+            let vm = task.process.vm();
+            let pf_result = loop {
+                let outcome = vm.write(|inner| inner.do_page_fault(addr, access));
+                match outcome {
+                    crate::mm::FaultOutcome::Completed(_) => break Ok(()),
+                    crate::mm::FaultOutcome::Retry(wait) => {
+                        // Retry token 离开 `AddressSpace::write` 后才等待；此时 VM
+                        // 锁与本轮 TLB gather 都已经释放，writeback 可继续 mkclean。
+                        wait.wait();
+                    }
+                    crate::mm::FaultOutcome::Error(error) => break Err(error),
+                }
+            };
             crate::task::perf::record_pagefault_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(_pf_start),
