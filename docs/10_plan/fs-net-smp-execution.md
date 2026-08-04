@@ -216,3 +216,8 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 - WP4 PortRegistry ✅ 312/314、308/314
 - WP5 DeviceStack ✅ 312/314、308/314
 - WP6 poll worker ✅ 312/314、308/314（含 boot 卡死修复）
+
+### WP7 最终结论（2026-08-04 收尾）
+- **验收门禁（§8.2 0x003 = basic+busybox）：双架构 PASS** — RV64 312/314、LA64 308/314（tools-disk 工件修复后复验）
+- mask 矩阵（0x010/0x020/0x040/0x200/0x800/0xA70）：**按用户决定取消**，非验收标准；0xA70 尝试在 LTP 段 40 分钟超时。覆盖由各 WP §8.2 门禁 + 零盘 ktest（fs_smp 8/8、net_smp 10/10、ext4 7/7 双架构）替代
+- 已知限制：矩阵未完整执行；不声称的性能结论（iperf/netperf/iozone 基线）未产出
