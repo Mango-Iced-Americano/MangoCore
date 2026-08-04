@@ -510,7 +510,7 @@ impl IndexNode for Ext4OSInode {
                     let mut ra = ra_state.lock();
                     pc.maybe_readahead(start_page, &mut ra, req_pages);
                 }
-                pc.read(offset, &mut buf[..read_len])
+                pc.read_kernel(offset, &mut buf[..read_len])
                     .map_err(|_| SyscallErr::EIO)
             }
             _ => Err(SyscallErr::EINVAL),
@@ -843,8 +843,9 @@ impl IndexNode for Ext4OSInode {
                 if offset >= read_end {
                     return Ok(0);
                 }
-                // Direct PageCache → UserBuffer: ONE copy, no intermediate kbuf
-                pc.read_user(offset, read_end - offset, dst)
+                // PageCache 使用有界 kernel bounce；faultable copy_to_user 不持有
+                // PageCache 或 inode 状态锁。
+                pc.read_at_user(offset, read_end - offset, dst)
                     .map_err(|_| SyscallErr::EIO)
             }
             _ => Err(SyscallErr::EINVAL),
@@ -938,20 +939,18 @@ impl IndexNode for Ext4OSInode {
         // Regular files: always use PageCache (lazily created on first I/O)
         if self.file_type == FileType::File {
             let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
-            let result = pc.with_io_gate(|| {
+            let result = (|| {
                 let old_size = self.logical_size_or_refresh()?;
-                // Publish EOF in the same PageCache serialization interval as
-                // the data copy.  Background writeback therefore cannot see
-                // a new page with an old EOF, and truncate cannot interleave
-                // between EOF publication and dirty-page creation.
+                // PageCache 自身以 op_gate 排序数据写/截断；逻辑 EOF 仍由此
+                // inode 的 shared logical_size 维护。
                 let requested_end =
                     offset.checked_add(actual).ok_or(SyscallErr::EFBIG)?;
                 let expected_new_end = requested_end.max(old_size);
                 self.note_logical_size(expected_new_end);
-                let n = match pc.write_without_balance(
+                let n = match pc.write_kernel(
                     offset,
                     &buf[..actual],
-                    Some(old_size),
+                    old_size,
                 ) {
                     Ok(n) => n,
                     Err(error) => {
@@ -992,10 +991,9 @@ impl IndexNode for Ext4OSInode {
                     self.note_logical_size(committed_end);
                 }
                 Ok(n)
-            });
+            })();
             if result.is_ok() {
-                // Never run global writeback while holding this PageCache's
-                // io_gate: it may select the same cache and would deadlock.
+                // PageCache 锁已在 write_kernel 返回时释放，允许全局回写选择本 cache。
                 crate::fs::page_cache::balance_dirty_pages();
             }
             return result;
@@ -1003,7 +1001,8 @@ impl IndexNode for Ext4OSInode {
 
         // Non-File types: keep existing behavior (PageCache or direct I/O)
         if let Some(pc) = self.page_cache() {
-            return pc.write(offset, &buf[..actual], None)
+            let old_size = self.logical_size_or_refresh()?;
+            return pc.write_kernel(offset, &buf[..actual], old_size)
                 .map_err(|_| SyscallErr::EIO);
         }
 
@@ -1559,11 +1558,8 @@ impl IndexNode for Ext4OSInode {
         if self.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
-        // All aliases share this registry PageCache.  Its io_gate covers the
-        // complete backend truncate + cache prune + EOF publication, while
-        // writeback holds the same gate across Dirty -> Writeback -> I/O.
-        // This prevents an old dirty page from extending the file again and
-        // prevents a concurrent writer from being discarded after truncate.
+        // 所有 alias 共享同一 PageCache；truncate 通过 op_gate.write 排空普通
+        // 读写/回写，再完成后端截断与 cache prune，避免旧脏页重新扩展文件。
         let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
         pc.truncate_with_backend(len, || {
             // VFS logical_size may exceed lwext4 on-disk size after extension;

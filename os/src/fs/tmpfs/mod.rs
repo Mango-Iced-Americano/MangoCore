@@ -18,7 +18,7 @@ use alloc::{
 };
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Mutex, MutexGuard};
+use spin::{Mutex, MutexGuard, RwLock};
 
 use crate::config::PAGE_SIZE;
 use crate::fs::page_cache::{PageCache, PageCacheBackend};
@@ -69,7 +69,7 @@ impl PageCacheBackend for TmpfsPageCacheBackend {
 
 /// 带锁的 TmpFS inode 包装器
 #[derive(Debug)]
-pub struct LockedTmpFSInode(pub Mutex<TmpFSInode>);
+pub struct LockedTmpFSInode(pub RwLock<TmpFSInode>);
 
 // ── TmpFS ────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,9 @@ pub struct LockedTmpFSInode(pub Mutex<TmpFSInode>);
 #[derive(Debug)]
 pub struct TmpFS {
     root_inode: Arc<LockedTmpFSInode>,
+    /// 跨目录 rename 先取得此门，再按固定顺序取得目录和受影响 inode。
+    /// 它只冻结目录祖先关系；同目录 rename 不经过此门。
+    rename_gate: Mutex<()>,
     self_ref: Mutex<Weak<TmpFS>>,
     /// 文件系统大小上限（字节），None = 无限制
     size_limit: Mutex<Option<u64>>,
@@ -169,16 +172,16 @@ impl TmpFSInode {
 /// Walks the parent chain UPWARD from `inode`, locking ONE inode at a time.
 /// This is safe to call when no directory locks are held — no deadlock risk.
 fn is_ancestor_of(inode: &LockedTmpFSInode, target_id: InodeId) -> bool {
-    let mut current_id = inode.0.lock().metadata.inode_id;
+    let mut current_id = inode.0.read().metadata.inode_id;
     if current_id == target_id {
         return true;
     }
     let mut current_arc = {
-        let guard = inode.0.lock();
+        let guard = inode.0.read();
         guard.parent.upgrade()
     };
     while let Some(p) = current_arc {
-        let p_guard = p.0.lock();
+        let p_guard = p.0.read();
         let p_id = p_guard.metadata.inode_id;
         if p_id == target_id {
             return true;
@@ -193,6 +196,157 @@ fn is_ancestor_of(inode: &LockedTmpFSInode, target_id: InodeId) -> bool {
         current_arc = p_parent;
     }
     false
+}
+
+/// 两把 parent directory gate 之后的稳定 victim 顺序：目录优先，同类按 inode_id。
+fn rename_victim_key(inode: &LockedTmpFSInode) -> (u8, InodeId) {
+    let inode = inode.0.read();
+    (
+        if inode.metadata.file_type == FileType::Dir {
+            0
+        } else {
+            1
+        },
+        inode.metadata.inode_id,
+    )
+}
+
+/// 按“目录优先、同类 inode_id 升序”持有 rename victim。
+///
+/// 调用方已持有 parent directory write gate；闭包内不得等待、uaccess 或反向获取 parent gate。
+fn with_rename_victims<R>(
+    source: &Arc<LockedTmpFSInode>,
+    target: Option<&Arc<LockedTmpFSInode>>,
+    f: impl FnOnce(&mut TmpFSInode, Option<&mut TmpFSInode>) -> R,
+) -> R {
+    let Some(target) = target else {
+        let mut source = source.0.write();
+        return f(&mut source, None);
+    };
+
+    if rename_victim_key(source) <= rename_victim_key(target) {
+        let mut source = source.0.write();
+        let mut target = target.0.write();
+        f(&mut source, Some(&mut target))
+    } else {
+        let mut target = target.0.write();
+        let mut source = source.0.write();
+        f(&mut source, Some(&mut target))
+    }
+}
+
+/// 两个 victim 均锁定后验证覆盖条件，并消耗 target 的一个链接。
+fn prepare_rename_victims(
+    source: &TmpFSInode,
+    target: Option<&mut TmpFSInode>,
+) -> Result<(bool, bool, i64), SyscallErr> {
+    let source_is_dir = source.metadata.file_type == FileType::Dir;
+    let Some(target) = target else {
+        return Ok((source_is_dir, false, 0));
+    };
+    let target_is_dir = target.metadata.file_type == FileType::Dir;
+
+    if !source_is_dir && target_is_dir {
+        return Err(SyscallErr::EISDIR);
+    }
+    if source_is_dir && !target_is_dir {
+        return Err(SyscallErr::ENOTDIR);
+    }
+    if target_is_dir && !target.children.is_empty() {
+        return Err(SyscallErr::ENOTEMPTY);
+    }
+
+    target.metadata.nlinks -= 1;
+    let released_size = if target.metadata.nlinks == 0 {
+        target.file_size as i64
+    } else {
+        0
+    };
+    Ok((source_is_dir, target_is_dir, released_size))
+}
+
+fn rename_same_parent_locked(
+    parent: &mut TmpFSInode,
+    old_name: &str,
+    new_name: &str,
+    flags: u32,
+) -> Result<i64, SyscallErr> {
+    use crate::fs::vfs::RENAME_NOREPLACE;
+
+    if parent.metadata.file_type != FileType::Dir {
+        return Err(SyscallErr::ENOTDIR);
+    }
+    let source = parent.children.get(old_name).cloned().ok_or(SyscallErr::ENOENT)?;
+    if old_name == new_name {
+        return Ok(0);
+    }
+    let target = parent.children.get(new_name).cloned();
+    if flags & RENAME_NOREPLACE != 0 && target.is_some() {
+        return Err(SyscallErr::EEXIST);
+    }
+    if target.as_ref().is_some_and(|target| Arc::ptr_eq(&source, target)) {
+        return Ok(0);
+    }
+
+    with_rename_victims(&source, target.as_ref(), |source, target| {
+        let (_, target_is_dir, released_size) = prepare_rename_victims(source, target)?;
+        parent.children.remove(old_name);
+        if target_is_dir {
+            parent.metadata.nlinks -= 1;
+        }
+        parent.children.remove(new_name);
+        let source = source.self_ref.upgrade().ok_or(SyscallErr::ENOENT)?;
+        parent.children.insert(String::from(new_name), source);
+        Ok(released_size)
+    })
+}
+
+fn rename_across_parents_locked(
+    old_parent: &mut TmpFSInode,
+    new_parent: &mut TmpFSInode,
+    old_name: &str,
+    new_name: &str,
+    flags: u32,
+) -> Result<i64, SyscallErr> {
+    use crate::fs::vfs::RENAME_NOREPLACE;
+
+    if old_parent.metadata.file_type != FileType::Dir
+        || new_parent.metadata.file_type != FileType::Dir
+    {
+        return Err(SyscallErr::ENOTDIR);
+    }
+    let source = old_parent
+        .children
+        .get(old_name)
+        .cloned()
+        .ok_or(SyscallErr::ENOENT)?;
+    let target = new_parent.children.get(new_name).cloned();
+    if flags & RENAME_NOREPLACE != 0 && target.is_some() {
+        return Err(SyscallErr::EEXIST);
+    }
+    if target.as_ref().is_some_and(|target| Arc::ptr_eq(&source, target)) {
+        return Ok(0);
+    }
+
+    with_rename_victims(&source, target.as_ref(), |source, target| {
+        let (source_is_dir, target_is_dir, released_size) =
+            prepare_rename_victims(source, target)?;
+        old_parent.children.remove(old_name);
+        new_parent.children.remove(new_name);
+        if target_is_dir {
+            new_parent.metadata.nlinks -= 1;
+        }
+        if source_is_dir {
+            old_parent.metadata.nlinks -= 1;
+            new_parent.metadata.nlinks += 1;
+            source.parent = new_parent.self_ref.clone();
+        }
+        new_parent.children.insert(
+            String::from(new_name),
+            source.self_ref.upgrade().ok_or(SyscallErr::ENOENT)?,
+        );
+        Ok(released_size)
+    })
 }
 
 // ── FileSystem impl for TmpFS ────────────────────────────────────────────
@@ -287,10 +441,11 @@ impl TmpFS {
     }
 
     fn new_inner(size_limit: Option<u64>) -> Arc<Self> {
-        let root: Arc<LockedTmpFSInode> = Arc::new(LockedTmpFSInode(Mutex::new(TmpFSInode::new())));
+        let root: Arc<LockedTmpFSInode> = Arc::new(LockedTmpFSInode(RwLock::new(TmpFSInode::new())));
 
         let result: Arc<TmpFS> = Arc::new(TmpFS {
             root_inode: root,
+            rename_gate: Mutex::new(()),
             self_ref: Mutex::new(Weak::new()),
             size_limit: Mutex::new(size_limit),
             current_size: AtomicU64::new(0),
@@ -300,7 +455,7 @@ impl TmpFS {
         *result.self_ref.lock() = Arc::downgrade(&result);
 
         // 初始化 root inode 的 parent / self_ref / fs
-        let mut root_guard: MutexGuard<TmpFSInode> = result.root_inode.0.lock();
+        let mut root_guard = result.root_inode.0.write();
         root_guard.parent = Arc::downgrade(&result.root_inode);
         root_guard.self_ref = Arc::downgrade(&result.root_inode);
         root_guard.fs = Arc::downgrade(&result);
@@ -364,7 +519,7 @@ impl IndexNode for LockedTmpFSInode {
         if buf.len() < len {
             return Err(SyscallErr::EINVAL);
         }
-        let inode: MutexGuard<TmpFSInode> = self.0.lock();
+        let inode = self.0.read();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
@@ -381,7 +536,7 @@ impl IndexNode for LockedTmpFSInode {
         let read_buf = &mut buf[..effective_len];
         // Pre-fill with zeros so holes (sparse regions) return zero
         read_buf.fill(0);
-        pc.read(offset, read_buf)
+        pc.read_kernel(offset, read_buf)
     }
 
     fn read_at_user(
@@ -390,7 +545,7 @@ impl IndexNode for LockedTmpFSInode {
         len: usize,
         dst: &mut crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        let inode: MutexGuard<TmpFSInode> = self.0.lock();
+        let inode = self.0.read();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
@@ -402,16 +557,8 @@ impl IndexNode for LockedTmpFSInode {
         // Clone Arc to release inode lock before PageCache accesses
         let pc = pc.clone();
         drop(inode);
-        // Pre-fill with zeros so holes return zero
-        let zeroed = dst
-            .fill_at(0, read_len, 0)
-            .map_err(|_| SyscallErr::EFAULT)?;
-        if zeroed == 0 {
-            return Ok(0);
-        }
-        // hole 先置零、已有页再覆盖。若并发映射变化只允许复制前缀，仍必须让
-        // page cache 覆盖该前缀中的真实文件数据，不能把临时零值当作读取结果。
-        pc.read_user(offset, zeroed, dst)
+        // PageCache 先复制到有界 kernel bounce，全部 FS 锁释放后才写用户页。
+        pc.read_at_user(offset, read_len, dst)
     }
 
     fn write_at(
@@ -428,7 +575,7 @@ impl IndexNode for LockedTmpFSInode {
             return Ok(0);
         }
 
-        let mut inode: MutexGuard<TmpFSInode> = self.0.lock();
+        let mut inode = self.0.write();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
@@ -444,7 +591,7 @@ impl IndexNode for LockedTmpFSInode {
 
         // Keep the inode locked across data and size updates, matching the
         // direct UserBuffer path and serialization with truncate/resize.
-        let n = pc.write(offset, &buf[..len], Some(inode.file_size))?;
+        let n = pc.write_kernel(offset, &buf[..len], inode.file_size)?;
 
         if new_size > inode.file_size {
             let delta = (new_size - inode.file_size) as u64;
@@ -469,7 +616,7 @@ impl IndexNode for LockedTmpFSInode {
         }
 
         // 保留 EISDIR 在用户数据复制之前的错误优先级；file type 在 inode 生命周期内不变。
-        if self.0.lock().metadata.file_type == FileType::Dir {
+        if self.0.read().metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
 
@@ -485,7 +632,7 @@ impl IndexNode for LockedTmpFSInode {
             return Ok(0);
         }
 
-        let mut inode: MutexGuard<TmpFSInode> = self.0.lock();
+        let mut inode = self.0.write();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
@@ -503,7 +650,7 @@ impl IndexNode for LockedTmpFSInode {
         }
 
         // inode 锁仍覆盖数据写入和 size 更新，保持与 truncate/resize 的串行语义。
-        let n = pc.write(offset, &kbuf[..copied], Some(inode.file_size))?;
+        let n = pc.write_kernel(offset, &kbuf[..copied], inode.file_size)?;
         let new_size = offset.checked_add(n).ok_or(SyscallErr::EINVAL)?;
 
         // 更新文件大小
@@ -520,13 +667,13 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn supports_user_buffer_io(&self) -> bool {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         let ft = inode.metadata.file_type;
         ft == FileType::File || ft == FileType::SymLink
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         let mut meta = inode.metadata.clone();
         meta.size = inode.file_size as i64;
         // 按 512 字节块数计算 st_blocks
@@ -540,7 +687,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         inode.metadata.atime = metadata.atime;
         inode.metadata.mtime = metadata.mtime;
         inode.metadata.ctime = metadata.ctime;
@@ -551,7 +698,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -576,7 +723,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn list(&self) -> Result<Vec<String>, SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -617,7 +764,7 @@ impl IndexNode for LockedTmpFSInode {
         mode: InodeMode,
         data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -659,10 +806,10 @@ impl IndexNode for LockedTmpFSInode {
             child_inner.init_page_cache();
         }
 
-        let child: Arc<LockedTmpFSInode> = Arc::new(LockedTmpFSInode(Mutex::new(child_inner)));
+        let child: Arc<LockedTmpFSInode> = Arc::new(LockedTmpFSInode(RwLock::new(child_inner)));
 
         // 初始化自引用
-        child.0.lock().self_ref = Arc::downgrade(&child);
+        child.0.write().self_ref = Arc::downgrade(&child);
 
         inode.children.insert(String::from(name), child.clone());
         if file_type == FileType::Dir {
@@ -681,7 +828,7 @@ impl IndexNode for LockedTmpFSInode {
         // fix up uid/gid on the child (NOT self/parent).
         let inode = self.create_with_data(name, file_type, attrs.mode, 0)?;
         if let Some(child) = inode.as_any_ref().downcast_ref::<LockedTmpFSInode>() {
-            let mut child_inner = child.0.lock();
+            let mut child_inner = child.0.write();
             child_inner.metadata.uid = attrs.uid;
             child_inner.metadata.gid = attrs.gid;
         }
@@ -694,14 +841,14 @@ impl IndexNode for LockedTmpFSInode {
             .downcast_ref::<LockedTmpFSInode>()
             .ok_or(SyscallErr::EXDEV)?;
 
-        let self_fs = self.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
-        let other_fs = other_inode.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let self_fs = self.0.read().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let other_fs = other_inode.0.read().fs.upgrade().ok_or(SyscallErr::EIO)?;
         if !Arc::ptr_eq(&self_fs, &other_fs) {
             return Err(SyscallErr::EXDEV);
         }
 
-        let mut inode = self.0.lock();
-        let mut other_locked = other_inode.0.lock();
+        let mut inode = self.0.write();
+        let mut other_locked = other_inode.0.write();
 
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
@@ -722,7 +869,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn unlink(&self, name: &str) -> Result<(), SyscallErr> {
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -732,7 +879,7 @@ impl IndexNode for LockedTmpFSInode {
             .downcast_ref::<LockedTmpFSInode>()
             .ok_or(SyscallErr::EINVAL)?;
 
-        let mut child_locked = child_inode.0.lock();
+        let mut child_locked = child_inode.0.write();
 
         // unlink 不可用于目录 — 必须返回 EISDIR
         if child_locked.metadata.file_type == FileType::Dir {
@@ -767,17 +914,15 @@ impl IndexNode for LockedTmpFSInode {
         new_name: &str,
         flags: u32,
     ) -> Result<(), SyscallErr> {
-        use crate::fs::vfs::RENAME_NOREPLACE;
-
         let new_parent_inode: &LockedTmpFSInode = new_parent
             .as_any_ref()
             .downcast_ref::<LockedTmpFSInode>()
             .ok_or(SyscallErr::EXDEV)?;
 
-        let self_fs = self.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let self_fs = self.0.read().fs.upgrade().ok_or(SyscallErr::EIO)?;
         let new_fs = new_parent_inode
             .0
-            .lock()
+            .read()
             .fs
             .upgrade()
             .ok_or(SyscallErr::EIO)?;
@@ -785,95 +930,17 @@ impl IndexNode for LockedTmpFSInode {
             return Err(SyscallErr::EXDEV);
         }
 
-        if new_parent_inode.0.lock().metadata.file_type != FileType::Dir {
+        if new_parent_inode.0.read().metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
 
-        let id_self = self.0.lock().metadata.inode_id;
-        let id_new = new_parent_inode.0.lock().metadata.inode_id;
-
-        let (child_is_dir, child_id) = {
-            let old_locked = self.0.lock();
-            let child = old_locked
-                .children
-                .get(old_name)
-                .ok_or(SyscallErr::ENOENT)?
-                .clone();
-            let cl = child.0.lock();
-            let is_dir = cl.metadata.file_type == FileType::Dir;
-            let ino = cl.metadata.inode_id;
-            (is_dir, ino)
-        };
-
-        if child_is_dir && id_self != id_new {
-            if is_ancestor_of(new_parent_inode, child_id) {
-                return Err(SyscallErr::EINVAL);
-            }
-        }
+        let id_self = self.0.read().metadata.inode_id;
+        let id_new = new_parent_inode.0.read().metadata.inode_id;
 
         if id_self == id_new {
-            let mut locked = self.0.lock();
-            let child = locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
-
-            if old_name == new_name {
-                locked.children.insert(String::from(old_name), child);
-                return Ok(());
-            }
-
-            let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
-            let mut release_sz: i64 = 0;
-            if flags & RENAME_NOREPLACE != 0 && locked.children.contains_key(new_name) {
-                // target exists but caller requested no overwrite — restore source
-                locked.children.insert(String::from(old_name), child);
-                return Err(SyscallErr::EEXIST);
-            }
-
-            if let Some(existing) = locked.children.remove(new_name) {
-                if Arc::ptr_eq(&child, &existing) {
-                    locked.children.insert(String::from(new_name), existing);
-                    locked.children.insert(String::from(old_name), child);
-                    return Ok(());
-                }
-
-                let existing_is_dir = {
-                    let el = existing.0.lock();
-                    el.metadata.file_type == FileType::Dir
-                };
-
-                if !child_is_dir && existing_is_dir {
-                    locked.children.insert(String::from(new_name), existing);
-                    locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::EISDIR);
-                }
-                if child_is_dir && !existing_is_dir {
-                    locked.children.insert(String::from(new_name), existing);
-                    locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::ENOTDIR);
-                }
-
-                if existing_is_dir {
-                    let not_empty = {
-                        let el = existing.0.lock();
-                        !el.children.is_empty()
-                    };
-                    if not_empty {
-                        locked.children.insert(String::from(new_name), existing);
-                        locked.children.insert(String::from(old_name), child);
-                        return Err(SyscallErr::ENOTEMPTY);
-                    }
-                    locked.metadata.nlinks -= 1;
-                }
-
-                {
-                    let mut el = existing.0.lock();
-                    el.metadata.nlinks -= 1;
-                    if el.metadata.nlinks == 0 {
-                        release_sz = el.file_size as i64;
-                    }
-                }
-            }
-
-            locked.children.insert(String::from(new_name), child);
+            // 同目录只持有一次父目录写门；无需全局 rename_gate。
+            let mut locked = self.0.write();
+            let release_sz = rename_same_parent_locked(&mut locked, old_name, new_name, flags)?;
             let fs = locked.fs.upgrade();
             drop(locked);
             if release_sz > 0 {
@@ -884,170 +951,62 @@ impl IndexNode for LockedTmpFSInode {
             return Ok(());
         }
 
-        if id_self < id_new {
-            let mut old_locked = self.0.lock();
-            let mut new_locked = new_parent_inode.0.lock();
+        let _rename = self_fs.rename_gate.lock();
+        let (source_is_dir, source_id) = {
+            let old_parent = self.0.read();
+            let source = old_parent.children.get(old_name).ok_or(SyscallErr::ENOENT)?;
+            let source = source.0.read();
+            (source.metadata.file_type == FileType::Dir, source.metadata.inode_id)
+        };
+        if source_is_dir && is_ancestor_of(new_parent_inode, source_id) {
+            return Err(SyscallErr::EINVAL);
+        }
 
-            let child = old_locked
-                .children
-                .remove(old_name)
-                .ok_or(SyscallErr::ENOENT)?;
-            let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
-
-            let mut release_sz: i64 = 0;
-            if flags & RENAME_NOREPLACE != 0 && new_locked.children.contains_key(new_name) {
-                old_locked.children.insert(String::from(old_name), child);
-                return Err(SyscallErr::EEXIST);
-            }
-            if let Some(existing) = new_locked.children.remove(new_name) {
-                if Arc::ptr_eq(&child, &existing) {
-                    new_locked.children.insert(String::from(new_name), existing);
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Ok(());
-                }
-
-                let existing_is_dir = {
-                    let el = existing.0.lock();
-                    el.metadata.file_type == FileType::Dir
-                };
-
-                if !child_is_dir && existing_is_dir {
-                    new_locked.children.insert(String::from(new_name), existing);
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::EISDIR);
-                }
-                if child_is_dir && !existing_is_dir {
-                    new_locked.children.insert(String::from(new_name), existing);
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::ENOTDIR);
-                }
-
-                if existing_is_dir {
-                    let not_empty = {
-                        let el = existing.0.lock();
-                        !el.children.is_empty()
-                    };
-                    if not_empty {
-                        new_locked.children.insert(String::from(new_name), existing);
-                        old_locked.children.insert(String::from(old_name), child);
-                        return Err(SyscallErr::ENOTEMPTY);
-                    }
-                    new_locked.metadata.nlinks -= 1;
-                }
-
-                {
-                    let mut el = existing.0.lock();
-                    el.metadata.nlinks -= 1;
-                    if el.metadata.nlinks == 0 {
-                        release_sz = el.file_size as i64;
-                    }
-                }
-            }
-
-            if child_is_dir {
-                old_locked.metadata.nlinks -= 1;
-                new_locked.metadata.nlinks += 1;
-                let parent_weak = new_locked.self_ref.clone();
-                drop(old_locked);
-                child.0.lock().parent = parent_weak;
-            } else {
-                drop(old_locked);
-            }
-
-            new_locked.children.insert(String::from(new_name), child);
-            drop(new_locked);
-
-            if release_sz > 0 {
-                self_fs.add_size(-release_sz);
-            }
+        // rename_gate 冻结跨目录 parent 变更。锁前 source 快照只用于 cycle
+        // 拒绝；两个 parent write gate 后仍由 helper 重新查找 source/target。
+        let old_first = if is_ancestor_of(new_parent_inode, id_self) {
+            true
+        } else if is_ancestor_of(self, id_new) {
+            false
         } else {
-            let mut new_locked = new_parent_inode.0.lock();
-            let mut old_locked = self.0.lock();
-
-            let child = old_locked
-                .children
-                .remove(old_name)
-                .ok_or(SyscallErr::ENOENT)?;
-            let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
-
-            let mut release_sz: i64 = 0;
-            if flags & RENAME_NOREPLACE != 0 && new_locked.children.contains_key(new_name) {
-                old_locked.children.insert(String::from(old_name), child);
-                return Err(SyscallErr::EEXIST);
-            }
-            if let Some(existing) = new_locked.children.remove(new_name) {
-                if Arc::ptr_eq(&child, &existing) {
-                    new_locked.children.insert(String::from(new_name), existing);
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Ok(());
-                }
-
-                let existing_is_dir = {
-                    let el = existing.0.lock();
-                    el.metadata.file_type == FileType::Dir
-                };
-
-                if !child_is_dir && existing_is_dir {
-                    new_locked.children.insert(String::from(new_name), existing);
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::EISDIR);
-                }
-                if child_is_dir && !existing_is_dir {
-                    new_locked.children.insert(String::from(new_name), existing);
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::ENOTDIR);
-                }
-
-                if existing_is_dir {
-                    let not_empty = {
-                        let el = existing.0.lock();
-                        !el.children.is_empty()
-                    };
-                    if not_empty {
-                        new_locked.children.insert(String::from(new_name), existing);
-                        old_locked.children.insert(String::from(old_name), child);
-                        return Err(SyscallErr::ENOTEMPTY);
-                    }
-                    new_locked.metadata.nlinks -= 1;
-                }
-
-                {
-                    let mut el = existing.0.lock();
-                    el.metadata.nlinks -= 1;
-                    if el.metadata.nlinks == 0 {
-                        release_sz = el.file_size as i64;
-                    }
-                }
-            }
-
-            if child_is_dir {
-                old_locked.metadata.nlinks -= 1;
-                new_locked.metadata.nlinks += 1;
-                let parent_weak = new_locked.self_ref.clone();
-                drop(old_locked);
-                child.0.lock().parent = parent_weak;
-            } else {
-                drop(old_locked);
-            }
-
-            new_locked.children.insert(String::from(new_name), child);
-            drop(new_locked);
-
-            if release_sz > 0 {
-                self_fs.add_size(-release_sz);
-            }
+            id_self < id_new
+        };
+        let release_sz = if old_first {
+            let mut old_parent = self.0.write();
+            let mut new_parent = new_parent_inode.0.write();
+            rename_across_parents_locked(
+                &mut old_parent,
+                &mut new_parent,
+                old_name,
+                new_name,
+                flags,
+            )?
+        } else {
+            let mut new_parent = new_parent_inode.0.write();
+            let mut old_parent = self.0.write();
+            rename_across_parents_locked(
+                &mut old_parent,
+                &mut new_parent,
+                old_name,
+                new_name,
+                flags,
+            )?
+        };
+        drop(_rename);
+        if release_sz > 0 {
+            self_fs.add_size(-release_sz);
         }
 
         Ok(())
     }
 
     fn rmdir(&self, name: &str) -> Result<(), SyscallErr> {
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
         let to_delete = inode.children.get(name).ok_or(SyscallErr::ENOENT)?;
-        let mut child_locked = to_delete.0.lock();
+        let mut child_locked = to_delete.0.write();
         if child_locked.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -1062,7 +1021,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn resize(&self, len: usize) -> Result<(), SyscallErr> {
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         if inode.metadata.file_type != FileType::File
             && inode.metadata.file_type != FileType::SymLink
         {
@@ -1092,14 +1051,6 @@ impl IndexNode for LockedTmpFSInode {
         if let Some(pc) = pc {
             // 使用 PageCache 截断
             pc.truncate(len)?;
-
-            // Zero-fill the tail of the last retained page to prevent data leaks
-            let page_end = ((len + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-            let tail_start = len;
-            if tail_start < page_end {
-                let zero_buf = alloc::vec![0u8; page_end - tail_start];
-                let _ = pc.write(tail_start, &zero_buf, None);
-            }
         }
 
         inode.file_size = len;
@@ -1114,7 +1065,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn truncate(&self, len: usize) -> Result<(), SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EINVAL);
         }
@@ -1126,7 +1077,7 @@ impl IndexNode for LockedTmpFSInode {
                 let fs = inode.fs.upgrade().ok_or(SyscallErr::EIO)?;
                 drop(inode);
                 fs.check_space(delta)?;
-                let mut inode2 = self.0.lock();
+                let mut inode2 = self.0.write();
                 if len > inode2.file_size {
                     inode2.file_size = len;
                     fs.add_size(delta as i64);
@@ -1141,7 +1092,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn get_entry_name(&self, ino: InodeId) -> Result<String, SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
@@ -1149,7 +1100,7 @@ impl IndexNode for LockedTmpFSInode {
             .children
             .iter()
             .filter_map(|(k, v)| {
-                if v.0.lock().metadata.inode_id == ino {
+                if v.0.read().metadata.inode_id == ino {
                     Some(k.clone())
                 } else {
                     None
@@ -1164,7 +1115,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn getxattr(&self, name: &str, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         let value = inode.xattrs.get(name).ok_or(SyscallErr::ENODATA)?;
         let len = value.len();
         if buf.is_empty() {
@@ -1180,7 +1131,7 @@ impl IndexNode for LockedTmpFSInode {
     fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> Result<usize, SyscallErr> {
         const XATTR_CREATE: u32 = 1;
         const XATTR_REPLACE: u32 = 2;
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         let exists = inode.xattrs.contains_key(name);
         if flags & XATTR_CREATE != 0 {
             if exists {
@@ -1197,7 +1148,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn listxattr(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        let inode = self.0.lock();
+        let inode = self.0.read();
         let names: Vec<&String> = inode.xattrs.keys().collect();
         let mut total = 0usize;
         for name in &names {
@@ -1224,7 +1175,7 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
-        let mut inode = self.0.lock();
+        let mut inode = self.0.write();
         match inode.xattrs.remove(name) {
             Some(_) => Ok(0),
             None => Err(SyscallErr::ENODATA),
@@ -1232,13 +1183,13 @@ impl IndexNode for LockedTmpFSInode {
     }
 
     fn page_cache(&self) -> Option<Arc<PageCache>> {
-        let inner = self.0.lock();
+        let inner = self.0.read();
         inner.page_cache.clone()
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
         self.0
-            .lock()
+            .read()
             .fs
             .upgrade()
             .expect("TmpFS inode: fs has been dropped")
