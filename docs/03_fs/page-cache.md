@@ -43,6 +43,13 @@ PageCache 不感知具体文件系统格式，通过 `PageCacheBackend` trait �
 不同页可在各自 I3 data lock 下推进，但用户页访问一定在 inode/PageCache 锁释放后发生。本页不
 声明 MountFS 为 lock-free。
 
+文件 `MAP_SHARED` 的反向映射使用独立、不可变的 `FileVmaRmap` 记录：`i_mmap` 只保存
+`Weak<FileVmaRmap>`，记录包含 inode、VMA 区间、文件偏移与所属 `AddressSpace` 的弱回指。
+它**不**保存 `Weak<Vma>`；后者会使 `VmaSet` 失去 `Arc::get_mut` 所需的无 Weak 独占条件。
+rmap walker 先在 PageCache 锁域内升级并复制标量，再释放 rmap 后取得 VM 锁，按 rmap 身份重验
+当前 VMA；munmap/exec 在移除 VMA 前注销记录。该顺序既避免 VMA 可变访问 panic，也不在 VM
+锁内等待 PageCache 或 TLB ack。
+
 ## PageState 状态机
 
 每个缓存页面由 `PageEntry` 管理，其 `state` 字段为 `AtomicU8`，取值如下：

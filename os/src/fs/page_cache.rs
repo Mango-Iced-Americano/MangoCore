@@ -24,7 +24,7 @@ use spin::{Mutex, RwLock, RwLockReadGuard};
 use super::vfs::IndexNode;
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::mm::{frame_alloc, FrameTracker};
-use crate::mm::{FileVmaSnapshot, RetryWait, Vma};
+use crate::mm::{FileVmaRmap, FileVmaSnapshot, RetryWait};
 use crate::task::perf;
 
 // ── Global dirty page accounting ──────────────────────────────────────
@@ -528,7 +528,7 @@ pub struct PageCache {
     ///
     /// `BTreeMap` 是 no_std 当前可用的有序映射；键仍是 VMA 地址身份，语义等同
     /// blueprint 的 HashMap，读侧通过 `i_mmap_seq` 重新验证并不依赖遍历顺序。
-    i_mmap: Mutex<BTreeMap<usize, Weak<Vma>>>,
+    i_mmap: Mutex<BTreeMap<usize, Weak<FileVmaRmap>>>,
     /// VMA 注册表代际；rmap walker 在无锁 VM 遍历后必须重验。
     i_mmap_seq: AtomicU64,
     /// 内部状态
@@ -615,9 +615,9 @@ impl PageCache {
     }
 
     /// 在 VMA 已绑定所属 AddressSpace 后建立 file rmap 条目。
-    pub(crate) fn register_file_vma(&self, vma: &Arc<Vma>) {
-        let id = Arc::as_ptr(vma) as usize;
-        self.i_mmap.lock().insert(id, Arc::downgrade(vma));
+    pub(crate) fn register_file_vma(&self, rmap: &Arc<FileVmaRmap>) {
+        let id = Arc::as_ptr(rmap) as usize;
+        self.i_mmap.lock().insert(id, Arc::downgrade(rmap));
         // Release 发布新索引；walker 的 Acquire 重验保证不会把摘除后的 VMA
         // 当成权威映射使用。
         self.i_mmap_seq.fetch_add(1, Ordering::Release);
@@ -641,13 +641,12 @@ impl PageCache {
             {
                 let index = self.i_mmap.lock();
                 for weak in index.values() {
-                    if let Some(vma) = weak.upgrade() {
-                        if let Some(snapshot) = Vma::file_rmap_snapshot(&vma) {
-                            let first = snapshot.file_offset >> PAGE_SIZE_BITS;
-                            let pages = snapshot.end.0.saturating_sub(snapshot.start.0);
-                            if page_index >= first && page_index < first.saturating_add(pages) {
-                                snapshots.push(snapshot);
-                            }
+                    if let Some(rmap) = weak.upgrade() {
+                        let snapshot = FileVmaRmap::snapshot(&rmap);
+                        let first = snapshot.file_offset >> PAGE_SIZE_BITS;
+                        let pages = snapshot.end.0.saturating_sub(snapshot.start.0);
+                        if page_index >= first && page_index < first.saturating_add(pages) {
+                            snapshots.push(snapshot);
                         }
                     }
                 }

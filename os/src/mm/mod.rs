@@ -67,7 +67,7 @@ pub use sysctl::{
 };
 pub(crate) use tlb::{TlbContext, TlbFlush};
 pub use vma::{MapFlags, MapPermission};
-pub(crate) use vma::{FileVmaSnapshot, Vma};
+pub(crate) use vma::{FileVmaRmap, FileVmaSnapshot, Vma};
 type MmResult<T> = Result<T, MemoryError>;
 
 /// Stack alignment required whenever the kernel enters userspace.

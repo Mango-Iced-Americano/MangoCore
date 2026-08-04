@@ -81,6 +81,56 @@ pub(crate) struct FileVmaSnapshot {
     pub(crate) owner: Weak<AddressSpace<PageTableImpl>>,
 }
 
+/// PageCache i_mmap 中保存的不可变反向映射记录。
+///
+/// 它与 VMA 本体分离：PageCache 只能弱持有此记录，不能为 `Arc<Vma>` 增加
+/// Weak 计数。这样 VmaSet 在持有 VM 锁时仍是 VMA 的唯一 Arc owner，可以安全地
+/// 取得 `&mut Vma`；rmap walker 只消费这里的标量和所属地址空间，不会并发借用 VMA。
+pub(crate) struct FileVmaRmap {
+    inode: Arc<dyn IndexNode>,
+    start: VirtPageNum,
+    end: VirtPageNum,
+    file_offset: usize,
+    owner: Weak<AddressSpace<PageTableImpl>>,
+}
+
+impl FileVmaRmap {
+    pub(crate) fn from_vma(area: &Vma) -> Option<Self> {
+        if !area.flags.contains(MapFlags::MAP_SHARED) {
+            return None;
+        }
+        Some(Self {
+            inode: area.vm_file()?,
+            start: area.vm_start(),
+            end: area.vm_end(),
+            file_offset: area.map_file_offset,
+            owner: area.user_address_space.clone()?,
+        })
+    }
+
+    pub(crate) fn register(this: &Arc<Self>) {
+        if let Some(cache) = this.inode.ensure_page_cache() {
+            cache.register_file_vma(this);
+        }
+    }
+
+    pub(crate) fn unregister(this: &Arc<Self>) {
+        if let Some(cache) = this.inode.page_cache() {
+            cache.unregister_file_vma(Arc::as_ptr(this) as usize);
+        }
+    }
+
+    pub(crate) fn snapshot(this: &Arc<Self>) -> FileVmaSnapshot {
+        FileVmaSnapshot {
+            vma_id: Arc::as_ptr(this) as usize,
+            start: this.start,
+            end: this.end,
+            file_offset: this.file_offset,
+            owner: this.owner.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum VmaUnmapReason {
     RemoveArea,
@@ -88,20 +138,6 @@ pub(super) enum VmaUnmapReason {
 }
 
 impl Vma {
-    /// 从 PageCache 的 Weak 升级后提取 rmap 所需标量，并立即允许调用者丢弃该 Arc。
-    pub(crate) fn file_rmap_snapshot(this: &Arc<Self>) -> Option<FileVmaSnapshot> {
-        if !this.flags.contains(MapFlags::MAP_SHARED) || this.map_file.is_none() {
-            return None;
-        }
-        Some(FileVmaSnapshot {
-            vma_id: Arc::as_ptr(this) as usize,
-            start: this.inner.vpn_range.get_start(),
-            end: this.inner.vpn_range.get_end(),
-            file_offset: this.map_file_offset,
-            owner: this.user_address_space.clone()?,
-        })
-    }
-
     pub fn try_clone(&self) -> Result<Self, isize> {
         let inner = self.inner.try_clone()?;
         Ok(Self {

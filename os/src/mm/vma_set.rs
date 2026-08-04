@@ -9,7 +9,7 @@
 //! `user_area_count`/`user_page_count` 必须只统计用户 VMA。
 
 use super::user_mapper::UserMapper;
-use super::vma::{MapFlags, MapPermission, Vma, VmaUnmapReason};
+use super::vma::{FileVmaRmap, MapFlags, MapPermission, Vma, VmaUnmapReason};
 use super::{AddressSpace, MemoryError, PageTable, PageTableImpl, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
@@ -26,6 +26,9 @@ pub(super) struct VmaSet {
     /// VMA 的唯一强引用。PageCache 的 i_mmap 仅保存对应的 Weak，因此注册表
     /// 不会延长 munmap/exec 后 VMA 的生命周期。
     vmas: BTreeMap<VirtPageNum, Arc<Vma>>,
+    /// 与 VMA 本体分离的 PageCache rmap 身份记录。PageCache 只弱持有该记录，
+    /// 绝不能弱持有 `Arc<Vma>`，否则 `Arc::get_mut` 无法证明 VmaSet 独占 VMA。
+    file_rmaps: BTreeMap<VirtPageNum, Arc<FileVmaRmap>>,
     owner: Option<Weak<AddressSpace<PageTableImpl>>>,
     mmap_holes: BTreeMap<VirtPageNum, VirtPageNum>,
     user_area_count: usize,
@@ -99,8 +102,13 @@ impl VmaSet {
                 area.user_address_space = Some(owner.clone());
             }
         }
-        for area in self.vmas.values() {
-            Self::register_file_vma(area);
+        let file_rmaps: Vec<_> = self
+            .vmas
+            .iter()
+            .filter_map(|(start, area)| FileVmaRmap::from_vma(area).map(|rmap| (*start, Arc::new(rmap))))
+            .collect();
+        for (start, rmap) in file_rmaps {
+            self.insert_file_rmap(start, rmap);
         }
     }
 
@@ -108,7 +116,7 @@ impl VmaSet {
     /// 锁前已经丢弃临时 Arc，因此这里的强引用不唯一表示内部不变量被破坏。
     fn take_vma(&mut self, start: VirtPageNum) -> Result<Vma, isize> {
         let area = self.vmas.remove(&start).ok_or(EINVAL)?;
-        Self::unregister_file_vma(&area);
+        self.remove_file_rmap(start);
         match Arc::try_unwrap(area) {
             Ok(area) => Ok(area),
             Err(_) => panic!("VmaSet VMA escaped its VM-lock lifetime"),
@@ -120,28 +128,22 @@ impl VmaSet {
             area.user_address_space = Some(owner.clone());
         }
         let area = Arc::new(area);
-        Self::register_file_vma(&area);
-        self.vmas.insert(area.vm_start(), area);
-    }
-
-    fn register_file_vma(area: &Arc<Vma>) {
-        if !area.flags.contains(MapFlags::MAP_SHARED) {
-            return;
-        }
-        let Some(inode) = area.vm_file() else {
-            return;
-        };
-        if let Some(cache) = inode.ensure_page_cache() {
-            cache.register_file_vma(area);
+        let start = area.vm_start();
+        let file_rmap = FileVmaRmap::from_vma(&area).map(Arc::new);
+        self.vmas.insert(start, area);
+        if let Some(rmap) = file_rmap {
+            self.insert_file_rmap(start, rmap);
         }
     }
 
-    fn unregister_file_vma(area: &Arc<Vma>) {
-        let Some(inode) = area.vm_file() else {
-            return;
-        };
-        if let Some(cache) = inode.page_cache() {
-            cache.unregister_file_vma(Arc::as_ptr(area) as usize);
+    fn insert_file_rmap(&mut self, start: VirtPageNum, rmap: Arc<FileVmaRmap>) {
+        FileVmaRmap::register(&rmap);
+        self.file_rmaps.insert(start, rmap);
+    }
+
+    fn remove_file_rmap(&mut self, start: VirtPageNum) {
+        if let Some(rmap) = self.file_rmaps.remove(&start) {
+            FileVmaRmap::unregister(&rmap);
         }
     }
     pub(super) fn new() -> Self {
@@ -154,6 +156,7 @@ impl VmaSet {
         mmap_holes.insert(mmap_start, mmap_end);
         let set = Self {
             vmas: BTreeMap::new(),
+            file_rmaps: BTreeMap::new(),
             owner: None,
             mmap_holes,
             user_area_count: 0,
@@ -206,9 +209,10 @@ impl VmaSet {
     }
 
     pub(super) fn clear(&mut self) {
-        for area in self.vmas.values() {
-            Self::unregister_file_vma(area);
+        for rmap in self.file_rmaps.values() {
+            FileVmaRmap::unregister(rmap);
         }
+        self.file_rmaps.clear();
         self.vmas.clear();
         self.mmap_holes.clear();
         self.user_area_count = 0;
@@ -509,9 +513,9 @@ impl VmaSet {
         unmap: bool,
     ) {
         let start = self
-            .vmas
+            .file_rmaps
             .iter()
-            .find_map(|(start, area)| ((Arc::as_ptr(area) as usize == vma_id)).then_some(*start));
+            .find_map(|(start, rmap)| ((Arc::as_ptr(rmap) as usize == vma_id)).then_some(*start));
         let Some(start) = start else {
             return;
         };
@@ -895,7 +899,6 @@ impl VmaSet {
         self.clear();
         let mut first_error = None;
         for (_, area) in old_vmas {
-            Self::unregister_file_vma(&area);
             let mut area = match Arc::try_unwrap(area) {
                 Ok(area) => area,
                 Err(_) => panic!("VmaSet VMA escaped its VM-lock lifetime"),
