@@ -244,3 +244,12 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 - [ ] D auto-bind
 - [ ] E ext4 事务
 - [ ] F affinity + 门禁
+
+## 用户决策（2026-08-04）：item 4 降级
+- **用户任务跨核（item 4）不做**——非主要工作；验收标准 = basic+busybox（§8.2 mask=0x003）跑通
+- 批次 F（affinity 开放）取消，改为"每个生产批次后跑 §8.2 门禁确认 basic+busybox 不回归"
+- 剩余批次：C（poll 契约）→ D（auto-bind）→ E（native ext4 事务）→ 最终门禁
+
+## 当前批次：批次 A+B 后门禁（basic+busybox）
+- 目的：确认 MAP_SHARED/FaultOutcome/lwext4 门的生产改动未破坏用户路径
+- 状态：[ ] 运行中（gate agent）
